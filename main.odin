@@ -1,8 +1,8 @@
 package main
 
 import "core:fmt"
-import w "core"
-import csv "io"
+import w "./wotan/core"
+import csv "./wotan/importer"
 
 main :: proc() {
     df := w.dataframe_new()
@@ -36,8 +36,13 @@ main :: proc() {
 
 
     types := []w.ColumnType{ .Int, .String }
-    df2 := csv.csv_load("..//people.csv", types)
+    df2 := csv.csv_load("people.csv", types)
 
     w.dataframe_print(&df2)
     w.df_head(&df2, 5)
+
+    df3 := csv.csv_load_auto("people_dates.csv")
+    w.dataframe_print(&df3)
+    w.df_head(&df3, 10)
+
 }

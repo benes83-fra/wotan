@@ -1,10 +1,12 @@
-package io
+package importer
 
 import "core:fmt"
 import "core:strings"
 import "core:os"
 import "core:strconv"
 import w "../core"
+import infer "../importer"   // or whatever path matches your layout
+
 
 
 csv_load :: proc(path: string, types: []w.ColumnType) -> w.DataFrame {
@@ -96,4 +98,53 @@ csv_load :: proc(path: string, types: []w.ColumnType) -> w.DataFrame {
     }
 
     return df
+}
+csv_load_auto :: proc(path: string) -> w.DataFrame {
+    // Read file
+    file, err := os.open(path)
+    if err != nil {
+        panic(fmt.tprintf("csv_load_auto: cannot open '%s'", path))
+    }
+    defer os.close(file)
+
+    contents, ok := os.read_entire_file(file)
+    if !ok {
+        panic("csv_load_auto: failed to read file")
+    }
+
+    text := string(contents)
+    lines := strings.split(text, "\n")
+    if len(lines) == 0 {
+        panic("csv_load_auto: empty file")
+    }
+
+    header := strings.split(strings.trim(lines[0], "\r"), ",")
+    col_count := len(header)
+
+    // Collect samples
+    sample_limit := min(100, len(lines)-1)
+    samples := make([][dynamic]string, col_count)
+    defer delete(samples)
+    for i in 0..<col_count {
+        samples[i] = make([dynamic]string)
+    }
+
+    for row_i in 1..=sample_limit {
+        fields := strings.split(strings.trim(lines[row_i], "\r"), ",")
+        if len(fields) != col_count {
+            continue
+        }
+        for col_i in 0..<col_count {
+             _ = append(&samples[col_i], fields[col_i])
+        }
+    }
+
+    // Infer types
+    types := make([]w.ColumnType, col_count)
+    for i in 0..<col_count {
+        types[i] = infer.infer_column_type(samples[i][:])
+    }
+
+    // Delegate to typed loader
+    return csv_load(path, types)
 }
