@@ -2,14 +2,13 @@ package importer
 
 import "core:fmt"
 import "core:strings"
-import "core:os"
 import "core:strconv"
 import w "../core"
 import infer "../importer"   // or whatever path matches your layout
 
+DEFAULT_NULL_TOKEN::[]string{"NA","null","None",""}
 
-
-csv_load :: proc(path: string, types: []w.ColumnType) -> w.DataFrame {
+csv_load :: proc(path: string, types: []w.ColumnType, null_tokens: [] string =DEFAULT_NULL_TOKEN) -> w.DataFrame {
    
     
     contents, err2 := read_file(path)
@@ -45,12 +44,18 @@ csv_load :: proc(path: string, types: []w.ColumnType) -> w.DataFrame {
         
 
         fields := records[row_i]
+        
         if len(fields) != len(types) {
             panic(fmt.tprintf("csv_load: row %d has wrong number of fields", row_i))
         }
 
         for col_i in 0..<len(types) {
-            field := unquote_and_trim(fields[col_i])
+            field_raw := unquote_and_trim(fields[col_i])
+            if is_null_field (field_raw,null_tokens){
+                w.append_null(&cols[col_i])
+                continue
+            }
+            field := unquote_and_trim(strings.trim(field_raw,"\t"))
 
             #partial switch types[col_i] {
             case .Int:
@@ -94,9 +99,8 @@ csv_load :: proc(path: string, types: []w.ColumnType) -> w.DataFrame {
 
     return df
 }
-csv_load_auto :: proc(path: string) -> w.DataFrame {
+csv_load_auto :: proc(path: string, null_tokens: [] string =[]string{"NA","null","None"}) -> w.DataFrame {
     // Read file
-   
 
     contents, err := read_file(path)
     if err!=nil {
@@ -108,7 +112,6 @@ csv_load_auto :: proc(path: string) -> w.DataFrame {
     if len(records) <=1{
         panic ("csv_auto_load: no data rows")
     }
-    
 
     header :=records[0]
     col_count := len(header)
@@ -127,7 +130,11 @@ csv_load_auto :: proc(path: string) -> w.DataFrame {
             continue
         }
         for col_i in 0..<col_count {
+            if is_null_field(fields[col_i],null_tokens){
+                _ =append(&samples[col_i],"")
+            }else {
              _ = append(&samples[col_i], fields[col_i])
+            }
         }
     }
 
@@ -265,4 +272,36 @@ unquote_and_trim :: proc(str: string) -> string {
         return string(out_bytes[:])
     }
     return s
+}
+
+
+is_token_equal :: proc(a: string, b: string) -> bool {
+    // exact match; you can add case-insensitive variant if desired
+    return a == b
+}
+
+
+
+is_null_field :: proc(field: string, null_tokens: []string) -> bool {
+    // Trim whitespace first
+    trimmed := strings.trim(field, " \t")
+    // If quoted, unquote and treat inner value as the field content
+    if len(trimmed) >= 2 && trimmed[0] == '"' && trimmed[len(trimmed)-1] == '"' {
+        inner := unquote_and_trim(trimmed)
+        // If you want quoted empty string to be considered empty string (not null),
+        // remove "" from default null_tokens. Current behavior: compare inner to tokens.
+        for t in null_tokens {
+            if is_token_equal(inner, t) {
+                return true
+            }
+        }
+        return false
+    }
+    // Unquoted: compare trimmed value to tokens
+    for t in null_tokens {
+        if is_token_equal(trimmed, t) {
+            return true
+        }
+    }
+    return false
 }

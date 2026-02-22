@@ -42,6 +42,9 @@ infer_column_type :: proc(samples: []string) -> w.ColumnType {
     has_date   := false
 
     for s in samples {
+        if s=="" {
+            continue
+        }
         if is_null(s) {
             continue
         }
