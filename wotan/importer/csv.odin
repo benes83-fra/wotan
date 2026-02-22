@@ -3,7 +3,6 @@ package importer
 import "core:fmt"
 import "core:strings"
 import "core:os"
-import  os2 "core:os/os2"
 import "core:strconv"
 import w "../core"
 import infer "../importer"   // or whatever path matches your layout
@@ -11,14 +10,10 @@ import infer "../importer"   // or whatever path matches your layout
 
 
 csv_load :: proc(path: string, types: []w.ColumnType) -> w.DataFrame {
-    file, err := os.open(path)
-    if err != nil {
-        panic(fmt.tprintf("csv_load: cannot open file '%s'", path))
-    }
-    defer os.close(file)
-
-    contents, ok := os.read_entire_file(file,context.allocator)
-    if !ok{
+   
+    
+    contents, err2 := read_file(path)
+    if err2 !=nil{
         panic("csv_load: failed to read file")
     }
     defer delete(contents)
@@ -101,14 +96,10 @@ csv_load :: proc(path: string, types: []w.ColumnType) -> w.DataFrame {
 }
 csv_load_auto :: proc(path: string) -> w.DataFrame {
     // Read file
-    file, err := os.open(path)
-    if err != nil {
-        panic(fmt.tprintf("csv_load_auto: cannot open '%s'", path))
-    }
-    defer os.close(file)
+   
 
-    contents, ok := os.read_entire_file(file)
-    if !ok {
+    contents, err := read_file(path)
+    if err!=nil {
         panic("csv_load_auto: failed to read file")
     }
 
