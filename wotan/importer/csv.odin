@@ -22,40 +22,38 @@ csv_load :: proc(path: string, types: []w.ColumnType) -> w.DataFrame {
     }
 
     text := string(contents)
+    records := parse_csv_records(text)
+    if len(records)== 0 {
+        panic ("csv_load: empty file")
+
+    }
     lines := strings.split(text, "\n")
 
-    if len(lines) == 0 {
-        panic("csv_load: empty file")
+    header := records[0]
+    if len(header) != len (types){
+        panic ("csv_load: header/type count missmatch")
     }
-
-    // Parse header
-    header := strings.split(strings.trim(lines[0], "\r"), ",")
-    if len(header) != len(types) {
-        panic("csv_load: header/type count mismatch")
-    }
+    
 
     df := w.dataframe_new()
 
     // Create columns
     cols := make([]w.Column, len(types))
     for i in 0..<len(types) {
-        cols[i] = w.column_new(header[i], types[i], len(lines))
+        cols[i] = w.column_new(header[i], types[i], len(records))
     }
     
     // Parse rows
-    for row_i in 1..<len(lines) {
-        line := strings.trim(lines[row_i], "\r")
-        if line == "" {
-            continue
-        }
+    for row_i in 1..<len(records) {
+        
 
-        fields := strings.split(line, ",")
+        fields := records[row_i]
         if len(fields) != len(types) {
             panic(fmt.tprintf("csv_load: row %d has wrong number of fields", row_i))
         }
 
         for col_i in 0..<len(types) {
-            field := fields[col_i]
+            field := unquote_and_trim(fields[col_i])
 
             #partial switch types[col_i] {
             case .Int:
@@ -113,16 +111,17 @@ csv_load_auto :: proc(path: string) -> w.DataFrame {
     }
 
     text := string(contents)
-    lines := strings.split(text, "\n")
-    if len(lines) == 0 {
-        panic("csv_load_auto: empty file")
+    records := parse_csv_records(text)
+    if len(records) <=1{
+        panic ("csv_auto_load: no data rows")
     }
+    
 
-    header := strings.split(strings.trim(lines[0], "\r"), ",")
+    header :=records[0]
     col_count := len(header)
 
     // Collect samples
-    sample_limit := min(100, len(lines)-1)
+    sample_limit := min(100, len(records)-1)
     samples := make([][dynamic]string, col_count)
     defer delete(samples)
     for i in 0..<col_count {
@@ -130,7 +129,7 @@ csv_load_auto :: proc(path: string) -> w.DataFrame {
     }
 
     for row_i in 1..=sample_limit {
-        fields := strings.split(strings.trim(lines[row_i], "\r"), ",")
+        fields := records [row_i]
         if len(fields) != col_count {
             continue
         }
@@ -147,4 +146,129 @@ csv_load_auto :: proc(path: string) -> w.DataFrame {
 
     // Delegate to typed loader
     return csv_load(path, types)
+}
+
+
+
+// Parse the entire CSV text into records, honoring quoted fields and newlines inside quotes.
+// Returns an array of records, each record is an array of fields.
+parse_csv_records :: proc(text: string) -> [][]string {
+    records := make([dynamic][]string)
+    cur_fields := make([dynamic]string)
+    cur_field_bytes := make([dynamic]u8)
+
+    in_quote := false
+    i := 0
+    n := len(text)
+
+    for i < n {
+        b := text[i]
+
+        // CRLF normalization: treat '\r' as part of newline handling
+        if b == '"' {
+            // Quote handling
+            if !in_quote {
+                in_quote = true
+                i += 1
+                continue
+            } else {
+                // If next char is also a quote, it's an escaped quote -> append one quote
+                if i+1 < n && text[i+1] == '"' {
+                    _, _ = append(&cur_field_bytes, u8('"'))
+                    i += 2
+                    continue
+                } else {
+                    // Closing quote
+                    in_quote = false
+                    i += 1
+                    continue
+                }
+            }
+        }
+
+        if !in_quote {
+            if b == ',' {
+                // end of field
+                field := string(cur_field_bytes[:])
+                _, _ = append(&cur_fields, field)
+                // reset field buffer
+                cur_field_bytes = make([dynamic]u8)
+                i += 1
+                continue
+            }
+
+            if b == '\n' {
+                // end of record
+                field := string(cur_field_bytes[:])
+                _, _ = append(&cur_fields, field)
+                _, _ = append(&records, cur_fields[:])
+                // reset for next record
+                cur_fields = make([dynamic]string)
+                cur_field_bytes = make([dynamic]u8)
+                i += 1
+                continue
+            }
+
+            if b == '\r' {
+                // handle CRLF or lone CR
+                // if next is '\n', skip both; otherwise treat CR as newline
+                if i+1 < n && text[i+1] == '\n' {
+                    field := string(cur_field_bytes[:])
+                    _, _ = append(&cur_fields, field)
+                    _, _ = append(&records, cur_fields[:])
+                    cur_fields = make([dynamic]string)
+                    cur_field_bytes = make([dynamic]u8)
+                    i += 2
+                    continue
+                } else {
+                    field := string(cur_field_bytes[:])
+                    _, _ = append(&cur_fields, field)
+                    _, _ = append(&records, cur_fields[:])
+                    cur_fields = make([dynamic]string)
+                    cur_field_bytes = make([dynamic]u8)
+                    i += 1
+                    continue
+                }
+            }
+        }
+
+        // default: append byte to current field
+        _, _ = append(&cur_field_bytes, u8(b))
+        i += 1
+    }
+
+    // End of file: flush remaining field/record if any
+    // If we are still in a quote at EOF, we treat it as closed (lenient)
+    if len(cur_field_bytes) > 0 || len(cur_fields) > 0 {
+        field := string(cur_field_bytes[:])
+        _, _ = append(&cur_fields, field)
+        _, _ = append(&records, cur_fields[:])
+    }
+
+    return records[:]
+}
+
+// Helper to trim optional surrounding whitespace and quotes, and unescape double quotes.
+// Use this when you want to treat quoted empty string as empty string and remove outer quotes.
+unquote_and_trim :: proc(str: string) -> string {
+    s:= strings.trim(str, " \t")
+    if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+        // remove surrounding quotes and unescape double quotes
+        inner := s[1:len(s)-1]
+        // replace "" with "
+        // simple implementation: scan and build
+        out_bytes := make([dynamic]u8)
+        i := 0
+        for i < len(inner) {
+            if inner[i] == '"' && i+1 < len(inner) && inner[i+1] == '"' {
+                _, _ = append(&out_bytes, u8('"'))
+                i += 2
+            } else {
+                _, _ = append(&out_bytes, u8(inner[i]))
+                i += 1
+            }
+        }
+        return string(out_bytes[:])
+    }
+    return s
 }
