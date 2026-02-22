@@ -3,6 +3,7 @@ package importer
 import "core:fmt"
 import "core:strings"
 import "core:os"
+import  os2 "core:os/os2"
 import "core:strconv"
 import w "../core"
 import infer "../importer"   // or whatever path matches your layout
@@ -16,10 +17,11 @@ csv_load :: proc(path: string, types: []w.ColumnType) -> w.DataFrame {
     }
     defer os.close(file)
 
-    contents, ok := os.read_entire_file(file)
+    contents, ok := os.read_entire_file(file,context.allocator)
     if !ok{
         panic("csv_load: failed to read file")
     }
+    defer delete(contents)
 
     text := string(contents)
     records := parse_csv_records(text)
@@ -258,6 +260,7 @@ unquote_and_trim :: proc(str: string) -> string {
         // replace "" with "
         // simple implementation: scan and build
         out_bytes := make([dynamic]u8)
+        defer delete(out_bytes)
         i := 0
         for i < len(inner) {
             if inner[i] == '"' && i+1 < len(inner) && inner[i+1] == '"' {
