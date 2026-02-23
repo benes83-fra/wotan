@@ -9,7 +9,11 @@ Column :: struct {
     capacity: int,
     data:     rawptr,
     nulls:    []bool,
+    orig:     ^Column,   // pointer to original column if this is a view
+    offset:   int,     // start offset in original
+    is_view:  bool,
 }
+
 
 column_new :: proc(name: string, type: ColumnType, capacity: int) -> Column {
     size := capacity * type_size(type)
@@ -142,4 +146,78 @@ append_null :: proc(c: ^Column) {
         c.nulls = make([]bool, c.capacity)
     }
     c.nulls[idx] = true
+}
+
+
+
+// Column read helpers (safe, copy-based readers)
+column_at_int :: proc(col: ^Column, i: int) -> (int, bool) {
+    if i < 0 || i >= col.len {
+        panic("column_at_int: index out of range")
+    }
+    if col.nulls != nil && col.nulls[i] {
+        return 0, true
+    }
+    base := uintptr(col.data) + uintptr(i * type_size(col.type))
+    return (cast(^int) base)^, false
+}
+
+column_at_float :: proc(col: ^Column, i: int) -> (f64, bool) {
+    if i < 0 || i >= col.len {
+        panic("column_at_float: index out of range")
+    }
+    if col.nulls != nil && col.nulls[i] {
+        return 0.0, true
+    }
+    base := uintptr(col.data) + uintptr(i * type_size(col.type))
+    return (cast(^f64) base)^, false
+}
+
+column_at_bool :: proc(col: ^Column, i: int) -> (bool, bool) {
+    if i < 0 || i >= col.len {
+        panic("column_at_bool: index out of range")
+    }
+    if col.nulls != nil && col.nulls[i] {
+        return false, true
+    }
+    base := uintptr(col.data) + uintptr(i * type_size(col.type))
+    return (cast(^bool) base)^, false
+}
+
+column_at_string :: proc(col: ^Column, i: int) -> (string, bool) {
+    if i < 0 || i >= col.len {
+        panic("column_at_string: index out of range")
+    }
+    if col.nulls != nil && col.nulls[i] {
+        return "", true
+    }
+    base := uintptr(col.data) + uintptr(i * type_size(col.type))
+    return (cast(^string) base)^, false
+}
+
+column_at_date :: proc(col: ^Column, i: int) -> (Date, bool) {
+    if i < 0 || i >= col.len {
+        panic("column_at_date: index out of range")
+    }
+    if col.nulls != nil && col.nulls[i] {
+        return Date{0,0,0}, true
+    }
+    base := uintptr(col.data) + uintptr(i * type_size(col.type))
+    return (cast(^Date) base)^, false
+}
+
+
+column_slice_view :: proc(orig: ^Column, start: int, end: int) -> Column {
+    if start < 0 || end < start || end > orig.len {
+        panic("column_slice_view: invalid range")
+    }
+    c := column_new(orig.name, orig.type, end - start)
+    c.orig = orig
+    c.offset = start
+    c.len = end - start
+    c.is_view = true
+    // do not allocate data/nulls for view
+    c.data = nil
+    c.nulls = nil
+    return c
 }

@@ -50,7 +50,7 @@ csv_load :: proc(path: string, types: []w.ColumnType, null_tokens: [] string =DE
         }
 
         for col_i in 0..<len(types) {
-            field_raw := unquote_and_trim(fields[col_i])
+            field_raw := fields[col_i]
             if is_null_field (field_raw,null_tokens){
                 w.append_null(&cols[col_i])
                 continue
@@ -99,7 +99,7 @@ csv_load :: proc(path: string, types: []w.ColumnType, null_tokens: [] string =DE
 
     return df
 }
-csv_load_auto :: proc(path: string, null_tokens: [] string =[]string{"NA","null","None"}) -> w.DataFrame {
+csv_load_auto :: proc(path: string, null_tokens: [] string =DEFAULT_NULL_TOKEN) -> w.DataFrame {
     // Read file
 
     contents, err := read_file(path)
@@ -131,7 +131,7 @@ csv_load_auto :: proc(path: string, null_tokens: [] string =[]string{"NA","null"
         }
         for col_i in 0..<col_count {
             if is_null_field(fields[col_i],null_tokens){
-                _ =append(&samples[col_i],"")
+                continue
             }else {
              _ = append(&samples[col_i], fields[col_i])
             }

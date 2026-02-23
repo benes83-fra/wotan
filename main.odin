@@ -45,4 +45,16 @@ main :: proc() {
     w.dataframe_print(&df3)
     w.df_head(&df3, 10)
 
+
+    df4 := w.dataframe_new()
+    c1 := w.column_new("age", .Int, 4)
+    w.append_int(&c1, 10)
+    w.append_int(&c1, 20)
+    w.append_int(&c1, 30) 
+    w.append_int(&c1, 40)
+    w.add_column(&df4, c1)
+
+    slice := w.dataframe_slice_rows_copy(&df4, 1, 3)
+    w.df_head(&slice, 10) // should print rows 1 and 2 (20, 30)
+
 }
