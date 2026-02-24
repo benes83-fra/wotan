@@ -32,3 +32,8 @@ dataframe_column_ptr :: proc(df: ^DataFrame, idx: int) -> ^Column {
     }
     return &df.columns[idx]
 }
+
+
+dataframe_column_ptr_by_name :: proc(df: ^DataFrame, name: string) -> ^Column {
+    return column(df, name)
+}

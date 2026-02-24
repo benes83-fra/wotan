@@ -57,4 +57,13 @@ main :: proc() {
     slice := w.dataframe_slice_rows_copy(&df4, 1, 3)
     w.df_head(&slice, 10) // should print rows 1 and 2 (20, 30)
 
+    df5 := w.dataframe_slice_rows(&df4, 1, 2, false)
+    w.df_head(&df5, 5)
+
+
+    df_age := w.dataframe_select_columns(&df3, []string{"age"}, false)
+    w.df_head(&df_age, 5)
+
+
+
 }

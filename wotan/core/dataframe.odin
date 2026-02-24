@@ -95,7 +95,16 @@ df_head :: proc(df: ^DataFrame, n: int) {
     for i in 0..<en {
         fmt.printf("%3d ", i)
 
-        for col in df.columns {
+        for &col in df.columns {
+            if col.is_view {
+                v, is_null := column_at_int(&col, i)
+                if is_null {
+                    fmt.print("NULL\t")
+                } else {
+                    fmt.printf("%v\t", v)
+                }
+                continue
+            }
             base := uintptr(col.data) + uintptr(i * type_size(col.type))
 
             if col.nulls != nil && col.nulls[i] {
@@ -120,4 +129,27 @@ df_head :: proc(df: ^DataFrame, n: int) {
 
         fmt.println()
     }
+}
+
+
+
+dataframe_select_columns :: proc(df: ^DataFrame, names: []string, copy: bool) -> DataFrame {
+    out := dataframe_new()
+
+    for name in names {
+        col := column(df, name) // existing lookup
+
+        new_col: Column
+        if copy {
+            // deep copy using your existing copy slice
+            new_col = column_slice_copy(col, 0, col.len)
+        } else {
+            // view of entire column
+            new_col = column_slice_view(col, 0, col.len)
+        }
+
+        add_column(&out, new_col)
+    }
+
+    return out
 }
