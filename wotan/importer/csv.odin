@@ -20,6 +20,7 @@ csv_load :: proc(path: string, types: []w.ColumnType, null_tokens: [] string =DE
 
     text := string(contents)
     records := parse_csv_records(text)
+    defer delete (records)
     if len(records)== 0 {
         panic ("csv_load: empty file")
 
@@ -39,6 +40,7 @@ csv_load :: proc(path: string, types: []w.ColumnType, null_tokens: [] string =DE
     for i in 0..<len(types) {
         cols[i] = w.column_new(header[i], types[i], len(records))
     }
+    defer delete(cols)
     
     // Parse rows
     for row_i in 1..<len(records) {
@@ -89,27 +91,28 @@ csv_load :: proc(path: string, types: []w.ColumnType, null_tokens: [] string =DE
                 month, _ := strconv.parse_int((parts[1]))
                 day, _ := strconv.parse_int(parts[2])
                 w.append_date(&cols[col_i], w.Date{i32(year), i32(month), i32(day)})
+                delete (parts)
             }
         }
     }
-
     // Add columns to DataFrame
     for col in cols {
         w.add_column(&df, col)
     }
-
     return df
 }
 csv_load_auto :: proc(path: string, null_tokens: [] string =DEFAULT_NULL_TOKEN) -> w.DataFrame {
     // Read file
 
     contents, err := read_file(path)
+    defer delete(contents)
     if err!=nil {
         panic("csv_load_auto: failed to read file")
     }
 
     text := string(contents)
     records := parse_csv_records(text)
+    defer delete(records)
     if len(records) <=1{
         panic ("csv_auto_load: no data rows")
     }
@@ -120,13 +123,10 @@ csv_load_auto :: proc(path: string, null_tokens: [] string =DEFAULT_NULL_TOKEN) 
     // Collect samples
     sample_limit := min(100, len(records)-1)
     samples := make([][dynamic]string, col_count)
-    defer delete(samples)
-    for i in 0..<col_count {
-        samples[i] = make([dynamic]string)
-    }
 
     for row_i in 1..=sample_limit {
         fields := records [row_i]
+        defer delete (fields)
         if len(fields) != col_count {
             continue
         }
@@ -144,7 +144,8 @@ csv_load_auto :: proc(path: string, null_tokens: [] string =DEFAULT_NULL_TOKEN) 
     for i in 0..<col_count {
         types[i] = infer.infer_column_type(samples[i][:])
     }
-
+    delete (samples)
+    defer delete(types)
     // Delegate to typed loader
     return csv_load(path, types)
 }
@@ -157,7 +158,8 @@ parse_csv_records :: proc(text: string) -> [][]string {
     records := make([dynamic][]string)
     cur_fields := make([dynamic]string)
     cur_field_bytes := make([dynamic]u8)
-
+    defer delete (cur_field_bytes)
+    defer delete (cur_fields)
     in_quote := false
     i := 0
     n := len(text)
@@ -202,6 +204,7 @@ parse_csv_records :: proc(text: string) -> [][]string {
                 // end of record
                 field := string(cur_field_bytes[:])
                 _, _ = append(&cur_fields, field)
+      
                 _, _ = append(&records, cur_fields[:])
                 // reset for next record
                 cur_fields = make([dynamic]string)
@@ -217,6 +220,7 @@ parse_csv_records :: proc(text: string) -> [][]string {
                     field := string(cur_field_bytes[:])
                     _, _ = append(&cur_fields, field)
                     _, _ = append(&records, cur_fields[:])
+                   
                     cur_fields = make([dynamic]string)
                     cur_field_bytes = make([dynamic]u8)
                     i += 2
@@ -225,6 +229,7 @@ parse_csv_records :: proc(text: string) -> [][]string {
                     field := string(cur_field_bytes[:])
                     _, _ = append(&cur_fields, field)
                     _, _ = append(&records, cur_fields[:])
+                    
                     cur_fields = make([dynamic]string)
                     cur_field_bytes = make([dynamic]u8)
                     i += 1
@@ -238,9 +243,6 @@ parse_csv_records :: proc(text: string) -> [][]string {
         
         i += 1
     }
-    defer delete (cur_field_bytes)
-    defer delete (cur_fields)
-   // defer delete (records)
     // End of file: flush remaining field/record if any
     // If we are still in a quote at EOF, we treat it as closed (lenient)
     if len(cur_field_bytes) > 0 || len(cur_fields) > 0 {
@@ -248,9 +250,9 @@ parse_csv_records :: proc(text: string) -> [][]string {
         _, _ = append(&cur_fields, field)
         _, _ = append(&records, cur_fields[:])
     }
-    ret := records[:]
+    
 
-    return ret
+    return records[:]
 }
 
 // Helper to trim optional surrounding whitespace and quotes, and unescape double quotes.

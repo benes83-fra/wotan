@@ -19,6 +19,15 @@ dataframe_new :: proc() -> DataFrame {
         rows          = 0,
     }
 }
+//DataFrame destructor for cleanup
+destroy_dataframe :: proc (df :^DataFrame){
+  delete (df.columns)
+  delete (df.name_to_index)
+  
+  df.columns =nil
+  df.name_to_index =nil
+  df.rows =0
+}
 
 //
 // --- Column management ---

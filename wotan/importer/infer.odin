@@ -31,6 +31,7 @@ is_date :: proc(s: string) -> bool {
     _, err1 := strconv.parse_int(parts[0])
     _, err2 := strconv.parse_int(parts[1])
     _, err3 := strconv.parse_int(parts[2])
+    delete (parts)
     return err1 && err2  && err3 
 }
 

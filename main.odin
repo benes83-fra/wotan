@@ -54,16 +54,18 @@ main :: proc() {
     v, null := w.series_at_int(&s, 3)
     fmt.printf("age[2] = %d (null=%v)\n", v, null)
 
-
+    w.destroy_dataframe(&df)
     types := []w.ColumnType{ .Int, .String }
     df2 := csv.csv_load("people.csv", types)
 
     w.dataframe_print(&df2)
     w.df_head(&df2, 5)
+    w.destroy_dataframe(&df2)
 
     df3 := csv.csv_load_auto("people_dates.csv")
     w.dataframe_print(&df3)
     w.df_head(&df3, 10)
+    
 
 
     df4 := w.dataframe_new()
@@ -79,11 +81,11 @@ main :: proc() {
 
     df5 := w.dataframe_slice_rows(&df4, 1, 2, false)
     w.df_head(&df5, 5)
-
-
+    w.destroy_dataframe(&df4)
+    w.destroy_dataframe(&df5)
     df_age := w.dataframe_select_columns(&df3, []string{"age"}, false)
     w.df_head(&df_age, 5)
 
-
+    w.destroy_dataframe(&df3)
 
 }
