@@ -78,6 +78,7 @@ main :: proc() {
 
     slice := w.dataframe_slice_rows_copy(&df4, 1, 3)
     w.df_head(&slice, 10) // should print rows 1 and 2 (20, 30)
+    w.destroy_dataframe(&slice)
 
     df5 := w.dataframe_slice_rows(&df4, 1, 2, false)
     w.df_head(&df5, 5)
@@ -87,5 +88,5 @@ main :: proc() {
     w.df_head(&df_age, 5)
 
     w.destroy_dataframe(&df3)
-
+    w.destroy_dataframe(&df_age)
 }

@@ -18,6 +18,7 @@ Column :: struct {
 column_new :: proc(name: string, type: ColumnType, capacity: int) -> Column {
     size := capacity * type_size(type)
     data, err := mem.alloc(size)
+    
     if err != nil {
         panic("Column: allocation failed")
     }
@@ -31,6 +32,24 @@ column_new :: proc(name: string, type: ColumnType, capacity: int) -> Column {
         nulls    = nil,
     }
 }
+
+destroy_columns:: proc (col : ^Column){
+  if col.is_view{
+    return
+  }
+  if col.data != nil {
+    
+    mem.free(col.data)
+    col.data = nil
+  }
+  if col.nulls != nil {
+    delete (col.nulls)
+    col.nulls = nil
+  }
+  col.len=0.0
+  col.capacity=0.0
+}
+
 
 append_int :: proc(c: ^Column, v: int) {
     if c.is_view{

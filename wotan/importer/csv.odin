@@ -20,7 +20,7 @@ csv_load :: proc(path: string, types: []w.ColumnType, null_tokens: [] string =DE
 
     text := string(contents)
     records := parse_csv_records(text)
-    defer delete (records)
+    defer csv_free_records(records)
     if len(records)== 0 {
         panic ("csv_load: empty file")
 
@@ -112,7 +112,7 @@ csv_load_auto :: proc(path: string, null_tokens: [] string =DEFAULT_NULL_TOKEN) 
 
     text := string(contents)
     records := parse_csv_records(text)
-    defer delete(records)
+    defer csv_free_records(records)
     if len(records) <=1{
         panic ("csv_auto_load: no data rows")
     }
@@ -144,6 +144,11 @@ csv_load_auto :: proc(path: string, null_tokens: [] string =DEFAULT_NULL_TOKEN) 
     for i in 0..<col_count {
         types[i] = infer.infer_column_type(samples[i][:])
     }
+    for i in 0..<col_count {
+        if samples[i] != nil {
+            delete(samples[i])
+        }
+    }
     delete (samples)
     defer delete(types)
     // Delegate to typed loader
@@ -158,8 +163,8 @@ parse_csv_records :: proc(text: string) -> [][]string {
     records := make([dynamic][]string)
     cur_fields := make([dynamic]string)
     cur_field_bytes := make([dynamic]u8)
-    defer delete (cur_field_bytes)
-    defer delete (cur_fields)
+    // defer delete (cur_field_bytes)
+    // defer delete (cur_fields)
     in_quote := false
     i := 0
     n := len(text)
@@ -254,6 +259,15 @@ parse_csv_records :: proc(text: string) -> [][]string {
 
     return records[:]
 }
+
+
+csv_free_records :: proc ( records : [][] string){
+  if records != nil {
+    delete (records)
+  }
+
+}
+
 
 // Helper to trim optional surrounding whitespace and quotes, and unescape double quotes.
 // Use this when you want to treat quoted empty string as empty string and remove outer quotes.

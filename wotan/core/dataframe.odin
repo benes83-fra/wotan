@@ -21,9 +21,16 @@ dataframe_new :: proc() -> DataFrame {
 }
 //DataFrame destructor for cleanup
 destroy_dataframe :: proc (df :^DataFrame){
-  delete (df.columns)
-  delete (df.name_to_index)
-  
+  for &col in df.columns {
+    destroy_columns(&col)
+
+  }
+  if df.columns != nil {
+    delete(df.columns)
+  }
+  if df.name_to_index != nil {
+    delete (df.name_to_index)
+  }
   df.columns =nil
   df.name_to_index =nil
   df.rows =0
@@ -146,18 +153,36 @@ dataframe_select_columns :: proc(df: ^DataFrame, names: []string, copy: bool) ->
     out := dataframe_new()
 
     for name in names {
-        col := column(df, name) // existing lookup
+        col := column(df, name) // existing lookup by name
 
-        new_col: Column
         if copy {
-            // deep copy using your existing copy slice
-            new_col = column_slice_copy(col, 0, col.len)
+            // deep copy column
+            new_col := column_new(col.name, col.type, col.len)
+            for i in 0..<col.len {
+                #partial switch col.type {
+                case .Int:
+                    v, is_null := column_at_int(col, i)
+                    if is_null { append_null(&new_col) } else { append_int(&new_col, v) }
+                case .Float:
+                    v, is_null := column_at_float(col, i)
+                    if is_null { append_null(&new_col) } else { append_float(&new_col, v) }
+                case .Bool:
+                    v, is_null := column_at_bool(col, i)
+                    if is_null { append_null(&new_col) } else { append_bool(&new_col, v) }
+                case .String:
+                    v, is_null := column_at_string(col, i)
+                    if is_null { append_null(&new_col) } else { append_string(&new_col, v) }
+                case .Date:
+                    v, is_null := column_at_date(col, i)
+                    if is_null { append_null(&new_col) } else { append_date(&new_col, v) }
+                }
+            }
+            add_column(&out, new_col)
         } else {
-            // view of entire column
-            new_col = column_slice_view(col, 0, col.len)
+            // view: full-row slice of this column
+            view_col := column_slice_view(col, 0, col.len)
+            add_column(&out, view_col)
         }
-
-        add_column(&out, new_col)
     }
 
     return out
