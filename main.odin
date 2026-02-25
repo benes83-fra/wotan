@@ -3,8 +3,28 @@ package main
 import "core:fmt"
 import w "./wotan/core"
 import csv "./wotan/importer"
+import "core:mem"
 
 main :: proc() {
+    when ODIN_DEBUG{
+        default_allocator :=context.allocator
+        tracking_allocator :mem.Tracking_Allocator
+        mem.tracking_allocator_init(&tracking_allocator, default_allocator)
+        context.allocator = mem.tracking_allocator(&tracking_allocator)
+
+        defer{
+            if len(tracking_allocator.allocation_map) > 0{
+                for _, entry in tracking_allocator.allocation_map{
+                    fmt.eprintf ("%v leaked %v bytes\n", entry.location, entry.size)
+
+                }
+            }
+            mem.tracking_allocator_destroy(&tracking_allocator)
+        }
+
+    }
+
+
     df := w.dataframe_new()
 
     col_age  := w.column_new("age", .Int, 4)

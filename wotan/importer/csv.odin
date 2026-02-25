@@ -3,6 +3,7 @@ package importer
 import "core:fmt"
 import "core:strings"
 import "core:strconv"
+
 import w "../core"
 import infer "../importer"   // or whatever path matches your layout
 
@@ -234,9 +235,12 @@ parse_csv_records :: proc(text: string) -> [][]string {
 
         // default: append byte to current field
         _, _ = append(&cur_field_bytes, u8(b))
+        
         i += 1
     }
-
+    defer delete (cur_field_bytes)
+    defer delete (cur_fields)
+   // defer delete (records)
     // End of file: flush remaining field/record if any
     // If we are still in a quote at EOF, we treat it as closed (lenient)
     if len(cur_field_bytes) > 0 || len(cur_fields) > 0 {
@@ -244,8 +248,9 @@ parse_csv_records :: proc(text: string) -> [][]string {
         _, _ = append(&cur_fields, field)
         _, _ = append(&records, cur_fields[:])
     }
+    ret := records[:]
 
-    return records[:]
+    return ret
 }
 
 // Helper to trim optional surrounding whitespace and quotes, and unescape double quotes.
