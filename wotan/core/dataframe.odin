@@ -1,6 +1,7 @@
 package wotan
 
 import "core:fmt"
+import "core:strings"
 
 DataFrame :: struct {
     columns:       [dynamic]Column,
@@ -186,4 +187,103 @@ dataframe_select_columns :: proc(df: ^DataFrame, names: []string, copy: bool) ->
     }
 
     return out
+}
+
+
+
+
+
+dataframe_pretty_print :: proc(df: ^DataFrame, max_rows: int = 20) {
+    if df.rows == 0 || len(df.columns) == 0 {
+        fmt.println("Empty DataFrame")
+        return
+    }
+
+    // 1) Determine row range
+    en := df.rows
+    if max_rows > 0 && en > max_rows {
+        en = max_rows
+    }
+
+    // 2) Compute column widths: max(len(name), len(value))
+    col_widths := make([]int, len(df.columns))
+    defer delete(col_widths)
+
+    for &col, i in df.columns {
+        w := len(col.name)
+        // sample all printed rows for width
+        for r in 0..<en {
+            val_str := column_value_string(&col, r)
+            if len(val_str) > w {
+                w = len(val_str)
+            }
+        }
+        col_widths[i] = w
+    }
+
+    // 3) Print header
+    fmt.print("    ") // row index column
+    for col, i in df.columns {
+        name_padded := pad_right(col.name, col_widths[i])
+        fmt.printf("%s  ", name_padded)
+    }
+    fmt.println()
+
+    // 4) Print rows
+    for r in 0..<en {
+        fmt.printf("%3d ", r)
+        for &col, i in df.columns {
+            val_str := column_value_string(&col, r)
+            val_padded := pad_right(val_str, col_widths[i])
+            fmt.printf("%s  ", val_padded)
+        }
+        fmt.println()
+    }
+
+    if en < df.rows {
+        fmt.printf("... (%d more rows)\n", df.rows - en)
+    }
+}
+
+// Helper: convert a cell to string, view-aware via column_* readers
+column_value_string :: proc(col: ^Column, row: int) -> string {
+    #partial switch col.type {
+    case .Int:
+        v, is_null := column_at_int(col, row)
+        if is_null { return "NULL" }
+        return fmt.tprintf("%v", v)
+
+    case .Float:
+        v, is_null := column_at_float(col, row)
+        if is_null { return "NULL" }
+        return fmt.tprintf("%v", v)
+
+    case .Bool:
+        v, is_null := column_at_bool(col, row)
+        if is_null { return "NULL" }
+        return fmt.tprintf("%v", v)
+
+    case .String:
+        v, is_null := column_at_string(col, row)
+        if is_null { return "NULL" }
+        return v
+
+    case .Date:
+        v, is_null := column_at_date(col, row)
+        if is_null { return "NULL" }
+        return fmt.tprintf("%04d-%02d-%02d", v.year, v.month, v.day)
+    }
+
+    return "<?>"
+}
+
+// Simple right-padding helper
+pad_right :: proc(s: string, width: int) -> string {
+    if len(s) >= width {
+        return s
+    }
+    rep :=strings.repeat(" ", width - len(s))
+    defer delete (rep)
+    ret:= fmt.tprintf("%s%s", s, rep)  
+    return ret
 }

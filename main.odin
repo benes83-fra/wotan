@@ -65,6 +65,7 @@ main :: proc() {
     df3 := csv.csv_load_auto("people_dates.csv")
     w.dataframe_print(&df3)
     w.df_head(&df3, 10)
+    w.dataframe_pretty_print(&df3)
     
 
 
