@@ -26,7 +26,7 @@ csv_load :: proc(path: string, types: []w.ColumnType, null_tokens: [] string =DE
 
     }
     lines := strings.split(text, "\n")
-
+    defer delete (lines)
     header := records[0]
     if len(header) != len (types){
         panic ("csv_load: header/type count missmatch")
@@ -112,8 +112,9 @@ csv_load_auto :: proc(path: string, null_tokens: [] string =DEFAULT_NULL_TOKEN) 
 
     text := string(contents)
     records := parse_csv_records(text)
-    defer csv_free_records(records)
+    // defer csv_free_records(records)
     if len(records) <=1{
+        csv_free_records(records)
         panic ("csv_auto_load: no data rows")
     }
 
@@ -134,7 +135,7 @@ csv_load_auto :: proc(path: string, null_tokens: [] string =DEFAULT_NULL_TOKEN) 
             if is_null_field(fields[col_i],null_tokens){
                 continue
             }else {
-             _ = append(&samples[col_i], fields[col_i])
+               append(&samples[col_i], fields[col_i])
             }
         }
     }
@@ -163,15 +164,14 @@ parse_csv_records :: proc(text: string) -> [][]string {
     records := make([dynamic][]string)
     cur_fields := make([dynamic]string)
     cur_field_bytes := make([dynamic]u8)
-    // defer delete (cur_field_bytes)
+    defer delete (cur_field_bytes)
     // defer delete (cur_fields)
     in_quote := false
     i := 0
     n := len(text)
-
     for i < n {
         b := text[i]
-
+        field := string (cur_field_bytes[:])
         // CRLF normalization: treat '\r' as part of newline handling
         if b == '"' {
             // Quote handling
@@ -182,7 +182,7 @@ parse_csv_records :: proc(text: string) -> [][]string {
             } else {
                 // If next char is also a quote, it's an escaped quote -> append one quote
                 if i+1 < n && text[i+1] == '"' {
-                    _, _ = append(&cur_field_bytes, u8('"'))
+                    append(&cur_field_bytes, u8('"'))
                     i += 2
                     continue
                 } else {
@@ -197,8 +197,8 @@ parse_csv_records :: proc(text: string) -> [][]string {
         if !in_quote {
             if b == ',' {
                 // end of field
-                field := string(cur_field_bytes[:])
-                _, _ = append(&cur_fields, field)
+                // field := string(cur_field_bytes[:])
+                append(&cur_fields, field)
                 // reset field buffer
                 cur_field_bytes = make([dynamic]u8)
                 i += 1
@@ -207,10 +207,10 @@ parse_csv_records :: proc(text: string) -> [][]string {
 
             if b == '\n' {
                 // end of record
-                field := string(cur_field_bytes[:])
-                _, _ = append(&cur_fields, field)
+                // field := string(cur_field_bytes[:])
+                append(&cur_fields, field)
       
-                _, _ = append(&records, cur_fields[:])
+                append(&records, cur_fields[:])
                 // reset for next record
                 cur_fields = make([dynamic]string)
                 cur_field_bytes = make([dynamic]u8)
@@ -222,18 +222,18 @@ parse_csv_records :: proc(text: string) -> [][]string {
                 // handle CRLF or lone CR
                 // if next is '\n', skip both; otherwise treat CR as newline
                 if i+1 < n && text[i+1] == '\n' {
-                    field := string(cur_field_bytes[:])
-                    _, _ = append(&cur_fields, field)
-                    _, _ = append(&records, cur_fields[:])
+                    // field := string(cur_field_bytes[:])
+                    append(&cur_fields, field)
+                    append(&records, cur_fields[:])
                    
                     cur_fields = make([dynamic]string)
                     cur_field_bytes = make([dynamic]u8)
                     i += 2
                     continue
                 } else {
-                    field := string(cur_field_bytes[:])
-                    _, _ = append(&cur_fields, field)
-                    _, _ = append(&records, cur_fields[:])
+                    // field := string(cur_field_bytes[:])
+                    append(&cur_fields, field)
+                    append(&records, cur_fields[:])
                     
                     cur_fields = make([dynamic]string)
                     cur_field_bytes = make([dynamic]u8)
@@ -244,7 +244,7 @@ parse_csv_records :: proc(text: string) -> [][]string {
         }
 
         // default: append byte to current field
-        _, _ = append(&cur_field_bytes, u8(b))
+        append(&cur_field_bytes, u8(b))
         
         i += 1
     }
@@ -252,8 +252,8 @@ parse_csv_records :: proc(text: string) -> [][]string {
     // If we are still in a quote at EOF, we treat it as closed (lenient)
     if len(cur_field_bytes) > 0 || len(cur_fields) > 0 {
         field := string(cur_field_bytes[:])
-        _, _ = append(&cur_fields, field)
-        _, _ = append(&records, cur_fields[:])
+        append(&cur_fields, field)
+        append(&records, cur_fields[:])
     }
     
 
@@ -262,6 +262,12 @@ parse_csv_records :: proc(text: string) -> [][]string {
 
 
 csv_free_records :: proc ( records : [][] string){
+  for record in records {
+    if record != nil {
+      fmt.println(record)
+      delete (record)
+    }
+  }
   if records != nil {
     delete (records)
   }
@@ -283,10 +289,10 @@ unquote_and_trim :: proc(str: string) -> string {
         i := 0
         for i < len(inner) {
             if inner[i] == '"' && i+1 < len(inner) && inner[i+1] == '"' {
-                _, _ = append(&out_bytes, u8('"'))
+                append(&out_bytes, u8('"'))
                 i += 2
             } else {
-                _, _ = append(&out_bytes, u8(inner[i]))
+                append(&out_bytes, u8(inner[i]))
                 i += 1
             }
         }
