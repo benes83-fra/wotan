@@ -22,7 +22,7 @@ dataframe_new :: proc() -> DataFrame {
 //DataFrame destructor for cleanup
 destroy_dataframe :: proc (df :^DataFrame){
   for &col in df.columns {
-    destroy_columns(&col)
+    destroy_column(&col)
 
   }
   if df.columns != nil {

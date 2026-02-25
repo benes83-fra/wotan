@@ -25,6 +25,7 @@ is_bool :: proc(s: string) -> bool {
 
 is_date :: proc(s: string) -> bool {
     parts := strings.split(s, "-")
+    defer delete (parts)
     if len(parts) != 3 {
         return false
     }
@@ -32,7 +33,7 @@ is_date :: proc(s: string) -> bool {
     _, err2 := strconv.parse_int(parts[1])
     _, err3 := strconv.parse_int(parts[2])
 
-    delete (parts)
+    
     return err1 && err2  && err3 
 }
 

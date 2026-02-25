@@ -26,7 +26,7 @@ csv_load :: proc(path: string, types: []w.ColumnType, null_tokens: [] string =DE
 
     }
     lines := strings.split(text, "\n")
-    defer delete (lines)
+    defer delete(lines)
     header := records[0]
     if len(header) != len (types){
         panic ("csv_load: header/type count missmatch")
@@ -112,9 +112,9 @@ csv_load_auto :: proc(path: string, null_tokens: [] string =DEFAULT_NULL_TOKEN) 
 
     text := string(contents)
     records := parse_csv_records(text)
-    // defer csv_free_records(records)
+    defer csv_free_records(records)
     if len(records) <=1{
-        csv_free_records(records)
+        //csv_free_records(records)
         panic ("csv_auto_load: no data rows")
     }
 
@@ -127,7 +127,7 @@ csv_load_auto :: proc(path: string, null_tokens: [] string =DEFAULT_NULL_TOKEN) 
 
     for row_i in 1..=sample_limit {
         fields := records [row_i]
-        defer delete (fields)
+     
         if len(fields) != col_count {
             continue
         }
@@ -261,18 +261,23 @@ parse_csv_records :: proc(text: string) -> [][]string {
 }
 
 
-csv_free_records :: proc ( records : [][] string){
-  for record in records {
-    if record != nil {
-      fmt.println(record)
-      delete (record)
+csv_free_records :: proc(records: [][]string) {
+    for record in records {
+        if record != nil {
+            for s in record {
+                if s != "" {
+                    delete(s)
+                }
+            }
+            delete(record)
+        }
     }
-  }
-  if records != nil {
-    delete (records)
-  }
-
+    if records != nil {
+        delete(records)
+    }
 }
+
+
 
 
 // Helper to trim optional surrounding whitespace and quotes, and unescape double quotes.

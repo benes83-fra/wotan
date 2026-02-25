@@ -33,7 +33,7 @@ column_new :: proc(name: string, type: ColumnType, capacity: int) -> Column {
     }
 }
 
-destroy_columns:: proc (col : ^Column){
+destroy_column :: proc (col : ^Column){
   if col.is_view{
     return
   }
@@ -264,16 +264,22 @@ column_slice_view :: proc(orig: ^Column, start: int, end: int) -> Column {
     if start < 0 || end < start || end > orig.len {
         panic("column_slice_view: invalid range")
     }
-    c := column_new(orig.name, orig.type, end - start)
-    c.orig = orig
-    c.offset = start
-    c.len = end - start
-    c.is_view = true
-    // do not allocate data/nulls for view
-    c.data = nil
-    c.nulls = nil
-    return c
+
+    n := end - start
+
+    return Column{
+        name     = orig.name,   // shared, not owned
+        type     = orig.type,
+        len      = n,
+        capacity = n,           // logical capacity for the view
+        data     = nil,         // no storage
+        nulls    = nil,         // no bitmap; delegate to orig
+        orig     = orig,
+        offset   = start,
+        is_view  = true,
+    }
 }
+
 
 
 column_slice_copy :: proc(orig: ^Column, start: int, end: int) -> Column {
