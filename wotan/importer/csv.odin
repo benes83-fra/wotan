@@ -163,7 +163,7 @@ parse_csv_records :: proc(text: string) -> [][]string {
 	cur_fields := make([dynamic]string)
 	cur_field_bytes := make([dynamic]u8,context.temp_allocator)
 	defer delete(cur_field_bytes)
-  defer delete (cur_fields)
+  // defer delete (cur_fields)
 	in_quote := false
 	i := 0
 	n := len(text)
@@ -198,7 +198,7 @@ parse_csv_records :: proc(text: string) -> [][]string {
 				// field := string(cur_field_bytes[:])
 				append(&cur_fields, field)
 				// reset field buffer
-				cur_field_bytes = make([dynamic]u8)
+				cur_field_bytes = make([dynamic]u8,context.temp_allocator)
 				i += 1
 				continue
 			}
@@ -211,7 +211,7 @@ parse_csv_records :: proc(text: string) -> [][]string {
 				append(&records, cur_fields[:])
 				// reset for next record
 				cur_fields = make([dynamic]string)
-				cur_field_bytes = make([dynamic]u8)
+				cur_field_bytes = make([dynamic]u8, context.temp_allocator)
 				i += 1
 				continue
 			}
@@ -225,7 +225,7 @@ parse_csv_records :: proc(text: string) -> [][]string {
 					append(&records, cur_fields[:])
 
 					cur_fields = make([dynamic]string)
-					cur_field_bytes = make([dynamic]u8)
+					cur_field_bytes = make([dynamic]u8, context.temp_allocator)
 					i += 2
 					continue
 				} else {
@@ -234,7 +234,7 @@ parse_csv_records :: proc(text: string) -> [][]string {
 					append(&records, cur_fields[:])
 
 					cur_fields = make([dynamic]string)
-					cur_field_bytes = make([dynamic]u8)
+					cur_field_bytes = make([dynamic]u8,context.temp_allocator)
 					i += 1
 					continue
 				}
@@ -266,8 +266,8 @@ csv_free :: proc(records: [][]string) {
 			for &s in record {
 				if s != "" {
 					// fmt.printf("(debug) to be freed: %s\r\n", s)
-				  
-				}
+				delete (s, context.temp_allocator)
+        }
 			}
 			delete(record)
 		}
