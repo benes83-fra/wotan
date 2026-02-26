@@ -54,14 +54,15 @@ infer_col_types :: proc(
 csv_load :: proc(
 	path: string,
 	types: []w.ColumnType = nil,
-	auto: bool = true,
 	null_tokens: []string = DEFAULT_NULL_TOKEN,
 ) -> w.DataFrame {
 
-	auto := auto
+	auto :bool
 	types := types
 	if types != nil {
 		auto = false
+	}else {
+		auto = true
 	}
 	contents, err := read_file(path)
 	if err != nil {
