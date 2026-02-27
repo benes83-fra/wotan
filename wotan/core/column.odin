@@ -307,3 +307,189 @@ column_slice_copy :: proc(orig: ^Column, start: int, end: int) -> Column {
 
 	return c
 }
+
+column_new_bool_mask :: proc (len :int ) -> Column {
+  c := column_new ("mask", .Bool, len)
+  return c
+}
+
+column_gt_int :: proc ( col: ^Column, value: int) -> Column{
+  if col.type != .Int {
+    panic("column_gt_int: wrong column type")
+  }
+
+  out := column_new_bool_mask(col.len)
+  for i in 0..<col.len {
+    v , is_null :=column_at_int(col,i)
+    if is_null{
+      append_null(&out)
+    }else {
+      append_bool(&out, v > value)
+    }
+  }
+  return out
+
+}
+
+
+
+column_lt_int :: proc ( col: ^Column, value: int) -> Column{
+  if col.type != .Int {
+    panic("column_lt_int: wrong column type")
+  }
+
+  out := column_new_bool_mask(col.len)
+  for i in 0..<col.len {
+    v , is_null :=column_at_int(col,i)
+    if is_null{
+      append_null(&out)
+    }else {
+      append_bool(&out, v < value)
+    }
+  }
+  return out
+
+}
+
+
+column_eq_int :: proc ( col: ^Column, value: int) -> Column{
+  if col.type != .Int {
+    panic("column_eq_int: wrong column type")
+  }
+
+  out := column_new_bool_mask(col.len)
+  for i in 0..<col.len {
+    v , is_null :=column_at_int(col,i)
+    if is_null{
+      append_null(&out)
+    }else {
+      append_bool(&out, v == value)
+    }
+  }
+  return out
+
+}
+
+
+
+column_gt_float :: proc ( col: ^Column, value: f64) -> Column{
+  if col.type != .Float {
+    panic("column_gt_float: wrong column type")
+  }
+
+  out := column_new_bool_mask(col.len)
+  for i in 0..<col.len {
+    v , is_null :=column_at_float(col,i)
+    if is_null{
+      append_null(&out)
+    }else {
+      append_bool(&out, v > value)
+    }
+  }
+  return out
+
+}
+
+
+
+column_lt_float :: proc ( col: ^Column, value: f64) -> Column{
+  if col.type != .Float {
+        panic("column_lt_float: wrong column type")
+  }
+
+  out := column_new_bool_mask(col.len)
+  for i in 0..<col.len {
+    v , is_null :=column_at_float(col,i)
+    if is_null{
+      append_null(&out)
+    }else {
+      append_bool(&out, v < value)
+    }
+  }
+  return out
+
+}
+
+
+column_eq_float :: proc ( col: ^Column, value: f64) -> Column{
+  if col.type != .Float {
+    panic("column_eq_float: wrong column type")
+  }
+
+  out := column_new_bool_mask(col.len)
+  for i in 0..<col.len {
+    v , is_null :=column_at_float(col,i)
+    if is_null{
+      append_null(&out)
+    }else {
+      append_bool(&out, v == value)
+    }
+  }
+  return out
+
+}
+
+column_eq_string :: proc (col: ^Column, value : string) -> Column {
+  if col.type != .String{
+    panic("column_eq_string: wrong column type")
+  }
+  out := column_new_bool_mask (col.len)
+  for i in 0..<col.len {
+    v, is_null := column_at_string(col,i)
+    if is_null{
+      append_null(&out)
+    }else {
+      append_bool (&out, v == value)
+    }
+  }
+  return out
+}
+
+column_gt_date :: proc (col: ^Column, value : Date) -> Column {
+  if col.type != .Date{
+    panic("column_gt_date: wrong column type")
+  }
+  out := column_new_bool_mask (col.len)
+  for i in 0..<col.len {
+    v, is_null := column_at_date(col,i)
+    if is_null{
+      append_null(&out)
+    }else {
+      append_bool (&out, date_compare(v,value)>0)
+    }
+  }
+  return out
+}
+
+column_lt_date :: proc (col: ^Column, value : Date) -> Column {
+  if col.type != .Date{
+    panic("column_lt_date: wrong column type")
+  }
+  out := column_new_bool_mask (col.len)
+  for i in 0..<col.len {
+    v, is_null := column_at_date(col,i)
+    if is_null{
+      append_null(&out)
+    }else {
+      append_bool (&out, date_compare(v,value)<0)
+    }
+  }
+  return out
+}
+
+column_eq_date :: proc (col: ^Column, value : Date) -> Column {
+  if col.type != .Date{
+    panic("column_eq_date: wrong column type")
+  }
+  out := column_new_bool_mask (col.len)
+  for i in 0..<col.len {
+    v, is_null := column_at_date(col,i)
+    if is_null{
+      append_null(&out)
+    }else {
+      append_bool (&out, date_compare(v,value)==0)
+    }
+  }
+  return out
+}
+
