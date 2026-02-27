@@ -1,6 +1,7 @@
 package wotan
 
 import "core:mem"
+import "core:strings"
 
 Column :: struct {
 	name:     string,
@@ -88,6 +89,16 @@ grow :: proc(c: ^Column, new_capacity: int) {
 		c.nulls = new_nulls
 	}
 }
+
+append_colum :: proc {
+	append_bool,
+	append_int,
+	append_null,
+	append_float,
+	append_date,
+	append_string,
+}
+
 
 append_float :: proc(c: ^Column, v: f64) {
 	if c.is_view {
@@ -177,7 +188,6 @@ append_null :: proc(c: ^Column) {
 	}
 	c.nulls[idx] = true
 }
-
 
 // Column read helpers (safe, copy-based readers)
 column_at_int :: proc(col: ^Column, i: int) -> (int, bool) {
@@ -308,188 +318,219 @@ column_slice_copy :: proc(orig: ^Column, start: int, end: int) -> Column {
 	return c
 }
 
-column_new_bool_mask :: proc (len :int ) -> Column {
-  c := column_new ("mask", .Bool, len)
-  return c
+column_new_bool_mask :: proc(len: int) -> Column {
+	c := column_new("mask", .Bool, len)
+	return c
 }
 
-column_gt_int :: proc ( col: ^Column, value: int) -> Column{
-  if col.type != .Int {
-    panic("column_gt_int: wrong column type")
-  }
-
-  out := column_new_bool_mask(col.len)
-  for i in 0..<col.len {
-    v , is_null :=column_at_int(col,i)
-    if is_null{
-      append_null(&out)
-    }else {
-      append_bool(&out, v > value)
-    }
-  }
-  return out
-
+column_gt :: proc {
+	column_gt_int,
+	column_gt_float,
+	column_gt_date,
 }
 
+column_lt :: proc {
+	column_lt_int,
+	column_lt_float,
+	column_lt_date,
+}
 
-
-column_lt_int :: proc ( col: ^Column, value: int) -> Column{
-  if col.type != .Int {
-    panic("column_lt_int: wrong column type")
-  }
-
-  out := column_new_bool_mask(col.len)
-  for i in 0..<col.len {
-    v , is_null :=column_at_int(col,i)
-    if is_null{
-      append_null(&out)
-    }else {
-      append_bool(&out, v < value)
-    }
-  }
-  return out
-
+column_eq :: proc {
+	column_eq_int,
+	column_eq_float,
+	column_eq_date,
+	column_eq_string,
 }
 
 
-column_eq_int :: proc ( col: ^Column, value: int) -> Column{
-  if col.type != .Int {
-    panic("column_eq_int: wrong column type")
-  }
+column_gt_int :: proc(col: ^Column, value: int) -> Column {
+	if col.type != .Int {
+		panic("column_gt_int: wrong column type")
+	}
 
-  out := column_new_bool_mask(col.len)
-  for i in 0..<col.len {
-    v , is_null :=column_at_int(col,i)
-    if is_null{
-      append_null(&out)
-    }else {
-      append_bool(&out, v == value)
-    }
-  }
-  return out
+	out := column_new_bool_mask(col.len)
+	for i in 0 ..< col.len {
+		v, is_null := column_at_int(col, i)
+		if is_null {
+			append_null(&out)
+		} else {
+			append_bool(&out, v > value)
+		}
+	}
+	return out
 
 }
 
 
+column_lt_int :: proc(col: ^Column, value: int) -> Column {
+	if col.type != .Int {
+		panic("column_lt_int: wrong column type")
+	}
 
-column_gt_float :: proc ( col: ^Column, value: f64) -> Column{
-  if col.type != .Float {
-    panic("column_gt_float: wrong column type")
-  }
-
-  out := column_new_bool_mask(col.len)
-  for i in 0..<col.len {
-    v , is_null :=column_at_float(col,i)
-    if is_null{
-      append_null(&out)
-    }else {
-      append_bool(&out, v > value)
-    }
-  }
-  return out
-
-}
-
-
-
-column_lt_float :: proc ( col: ^Column, value: f64) -> Column{
-  if col.type != .Float {
-        panic("column_lt_float: wrong column type")
-  }
-
-  out := column_new_bool_mask(col.len)
-  for i in 0..<col.len {
-    v , is_null :=column_at_float(col,i)
-    if is_null{
-      append_null(&out)
-    }else {
-      append_bool(&out, v < value)
-    }
-  }
-  return out
+	out := column_new_bool_mask(col.len)
+	for i in 0 ..< col.len {
+		v, is_null := column_at_int(col, i)
+		if is_null {
+			append_null(&out)
+		} else {
+			append_bool(&out, v < value)
+		}
+	}
+	return out
 
 }
 
 
-column_eq_float :: proc ( col: ^Column, value: f64) -> Column{
-  if col.type != .Float {
-    panic("column_eq_float: wrong column type")
-  }
+column_eq_int :: proc(col: ^Column, value: int) -> Column {
+	if col.type != .Int {
+		panic("column_eq_int: wrong column type")
+	}
 
-  out := column_new_bool_mask(col.len)
-  for i in 0..<col.len {
-    v , is_null :=column_at_float(col,i)
-    if is_null{
-      append_null(&out)
-    }else {
-      append_bool(&out, v == value)
-    }
-  }
-  return out
+	out := column_new_bool_mask(col.len)
+	for i in 0 ..< col.len {
+		v, is_null := column_at_int(col, i)
+		if is_null {
+			append_null(&out)
+		} else {
+			append_bool(&out, v == value)
+		}
+	}
+	return out
 
 }
 
-column_eq_string :: proc (col: ^Column, value : string) -> Column {
-  if col.type != .String{
-    panic("column_eq_string: wrong column type")
-  }
-  out := column_new_bool_mask (col.len)
-  for i in 0..<col.len {
-    v, is_null := column_at_string(col,i)
-    if is_null{
-      append_null(&out)
-    }else {
-      append_bool (&out, v == value)
-    }
-  }
-  return out
+
+column_gt_float :: proc(col: ^Column, value: f64) -> Column {
+	if col.type != .Float {
+		panic("column_gt_float: wrong column type")
+	}
+
+	out := column_new_bool_mask(col.len)
+	for i in 0 ..< col.len {
+		v, is_null := column_at_float(col, i)
+		if is_null {
+			append_null(&out)
+		} else {
+			append_bool(&out, v > value)
+		}
+	}
+	return out
+
 }
 
-column_gt_date :: proc (col: ^Column, value : Date) -> Column {
-  if col.type != .Date{
-    panic("column_gt_date: wrong column type")
-  }
-  out := column_new_bool_mask (col.len)
-  for i in 0..<col.len {
-    v, is_null := column_at_date(col,i)
-    if is_null{
-      append_null(&out)
-    }else {
-      append_bool (&out, date_compare(v,value)>0)
-    }
-  }
-  return out
+
+column_lt_float :: proc(col: ^Column, value: f64) -> Column {
+	if col.type != .Float {
+		panic("column_lt_float: wrong column type")
+	}
+
+	out := column_new_bool_mask(col.len)
+	for i in 0 ..< col.len {
+		v, is_null := column_at_float(col, i)
+		if is_null {
+			append_null(&out)
+		} else {
+			append_bool(&out, v < value)
+		}
+	}
+	return out
+
 }
 
-column_lt_date :: proc (col: ^Column, value : Date) -> Column {
-  if col.type != .Date{
-    panic("column_lt_date: wrong column type")
-  }
-  out := column_new_bool_mask (col.len)
-  for i in 0..<col.len {
-    v, is_null := column_at_date(col,i)
-    if is_null{
-      append_null(&out)
-    }else {
-      append_bool (&out, date_compare(v,value)<0)
-    }
-  }
-  return out
+
+column_eq_float :: proc(col: ^Column, value: f64) -> Column {
+	if col.type != .Float {
+		panic("column_eq_float: wrong column type")
+	}
+
+	out := column_new_bool_mask(col.len)
+	for i in 0 ..< col.len {
+		v, is_null := column_at_float(col, i)
+		if is_null {
+			append_null(&out)
+		} else {
+			append_bool(&out, v == value)
+		}
+	}
+	return out
+
 }
 
-column_eq_date :: proc (col: ^Column, value : Date) -> Column {
-  if col.type != .Date{
-    panic("column_eq_date: wrong column type")
-  }
-  out := column_new_bool_mask (col.len)
-  for i in 0..<col.len {
-    v, is_null := column_at_date(col,i)
-    if is_null{
-      append_null(&out)
-    }else {
-      append_bool (&out, date_compare(v,value)==0)
-    }
-  }
-  return out
+column_eq_string :: proc(col: ^Column, value: string) -> Column {
+	if col.type != .String {
+		panic("column_eq_string: wrong column type")
+	}
+	out := column_new_bool_mask(col.len)
+	for i in 0 ..< col.len {
+		v, is_null := column_at_string(col, i)
+		if is_null {
+			append_null(&out)
+		} else {
+			append_bool(&out, v == value)
+		}
+	}
+	return out
+}
+column_contains_string :: proc(col: ^Column, value: string) -> Column {
+	if col.type != .String {
+		panic("column_eq_string: wrong column type")
+	}
+	out := column_new_bool_mask(col.len)
+	for i in 0 ..< col.len {
+		v, is_null := column_at_string(col, i)
+		if is_null {
+			append_null(&out)
+		} else {
+			append_bool(&out, strings.contains(v, value))
+		}
+	}
+	return out
 }
 
+column_gt_date :: proc(col: ^Column, value: Date) -> Column {
+	if col.type != .Date {
+		panic("column_gt_date: wrong column type")
+	}
+	out := column_new_bool_mask(col.len)
+	for i in 0 ..< col.len {
+		v, is_null := column_at_date(col, i)
+		if is_null {
+			append_null(&out)
+		} else {
+			append_bool(&out, date_compare(v, value) > 0)
+		}
+	}
+	return out
+}
+
+column_lt_date :: proc(col: ^Column, value: Date) -> Column {
+	if col.type != .Date {
+		panic("column_lt_date: wrong column type")
+	}
+	out := column_new_bool_mask(col.len)
+	for i in 0 ..< col.len {
+		v, is_null := column_at_date(col, i)
+		if is_null {
+			append_null(&out)
+		} else {
+			append_bool(&out, date_compare(v, value) < 0)
+		}
+	}
+	return out
+}
+
+column_eq_date :: proc(col: ^Column, value: Date) -> Column {
+	if col.type != .Date {
+		panic("column_eq_date: wrong column type")
+	}
+	out := column_new_bool_mask(col.len)
+	for i in 0 ..< col.len {
+		v, is_null := column_at_date(col, i)
+		if is_null {
+			append_null(&out)
+		} else {
+			append_bool(&out, date_compare(v, value) == 0)
+		}
+	}
+	return out
+}

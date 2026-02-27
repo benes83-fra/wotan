@@ -101,24 +101,25 @@ main :: proc() {
 	// assume "active" is Bool
 	df_active := w.dataframe_filter_bool_column(&df6, "active")
 	w.dataframe_pretty_print(&df_active, 20)
-  
+
 	w.destroy_dataframe(&df6)
 	w.destroy_dataframe(&df_active)
 	fmt.println("Showing column filtering:")
 	df7 := csv.csv_load("people_dates.csv")
 
-	df_active2 := w.dataframe_filter_column_by_col_name(&df7, "active")
+	df_active2 := w.filter(&df7, "active")
 	w.dataframe_pretty_print(&df_active2, 20)
 
 	w.destroy_dataframe(&df7)
 	w.destroy_dataframe(&df_active2)
 
-  fmt.println ("Filtering more complex booleans")
-  df8 := csv.csv_load("people_dates.csv")
-  mask := w.column_gt_int (w.column(&df8,"age"),20)
-  df_active3 := w.dataframe_filter_column(&df8,mask) 
-  w.dataframe_pretty_print(&df_active3,20)
+	fmt.println("Filtering more complex booleans")
+	df8 := csv.csv_load("people_dates.csv")
+	mask := w.column_gt(w.column(&df8, "age"), 20)
 
-  w.destroy_dataframe(&df8)
-  w.destroy_dataframe(&df_active3)
+	df_active3 := w.filter(&df8, mask)
+	w.dataframe_pretty_print(&df_active3, 20)
+
+	w.destroy_dataframe(&df8)
+	w.destroy_dataframe(&df_active3)
 }

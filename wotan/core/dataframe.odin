@@ -338,9 +338,13 @@ dataframe_filter_bool_column :: proc(df: ^DataFrame, mask_col_name: string) -> D
 	delete(idxs)
 	return out
 }
+filter :: proc {
+  dataframe_filter_by_bool_mask,
+  dataframe_filter_column_by_col_name,
+  dataframe_filter_column,
+}
 
-
-dataframe_filter :: proc(df: ^DataFrame, mask: []bool) -> DataFrame {
+dataframe_filter_by_bool_mask :: proc(df: ^DataFrame, mask: []bool) -> DataFrame {
 	if len(mask) != df.rows {
 		panic("dataframe_filter: mask length mismatch")
 	}
@@ -403,13 +407,14 @@ dataframe_filter_column_by_col_name :: proc(df: ^DataFrame, col_name: string) ->
 		v, is_null := column_at_bool(col, i)
 		mask[i] = (!is_null && v)
 	}
-	out := dataframe_filter(df, mask)
+	out := dataframe_filter_by_bool_mask(df, mask)
 	delete(mask)
 	return out
 }
 
 dataframe_filter_column :: proc(df: ^DataFrame, mask_col: Column) -> DataFrame {
 	col := mask_col
+  defer destroy_column(&col)
 	if col.type != .Bool {
 		panic("dataframe_filter_column: column must be Bool")
 	}
@@ -419,7 +424,7 @@ dataframe_filter_column :: proc(df: ^DataFrame, mask_col: Column) -> DataFrame {
 		v, is_null := column_at_bool(&col, i)
 		mask[i] = (!is_null && v)
 	}
-	out := dataframe_filter(df, mask)
+	out := dataframe_filter_by_bool_mask(df, mask)
 	delete(mask)
 	return out
 }
@@ -437,7 +442,7 @@ dataframe_filter_series :: proc(df: ^DataFrame, s: Series) -> DataFrame {
 		mask[i] = (!is_null && v)
 	}
 
-	out := dataframe_filter(df, mask)
+	out := filter(df, mask)
 	delete(mask)
 	return out
 }
