@@ -534,3 +534,21 @@ column_eq_date :: proc(col: ^Column, value: Date) -> Column {
 	}
 	return out
 }
+
+
+column_mask :: proc (col: ^Column) -> []bool {
+	if col.type != .Bool {
+		panic ("column_mask: wrong column type")
+	}
+	barr := make ([] bool, col.len)
+	for i in 0 ..< col.len {
+		v, is_null := column_at_bool (col, i)
+		if (is_null) {
+			barr[i] = false		
+		} else {
+			barr[i] = v
+		}
+	}
+
+	return barr
+}

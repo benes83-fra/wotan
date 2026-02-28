@@ -115,11 +115,17 @@ main :: proc() {
 
 	fmt.println("Filtering more complex booleans")
 	df8 := csv.csv_load("people_dates.csv")
-	mask := w.column_gt(w.column(&df8, "age"), 20)
-
+	c_mask := (w.column_lt(w.column(&df8, "age"), 31))
+	bmask := w.column_mask(&c_mask)
+	mask2 := w.column_mask(w.column(&df8, "active"))
+	mask := w.mask_and(mask2,bmask)
 	df_active3 := w.filter(&df8, mask)
 	w.dataframe_pretty_print(&df_active3, 20)
+	delete (mask)
+	delete (mask2)
+	delete (bmask)
+	defer w.destroy_column(&c_mask)
 
-	w.destroy_dataframe(&df8)
 	w.destroy_dataframe(&df_active3)
+	w.destroy_dataframe(&df8)
 }
