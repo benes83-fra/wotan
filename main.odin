@@ -4,7 +4,7 @@ import w "./wotan/core"
 import csv "./wotan/importer"
 import "core:fmt"
 import "core:mem"
-import "core:text/match"
+import "core:strings"
 
 main :: proc() {
 	when ODIN_DEBUG {
@@ -118,40 +118,58 @@ main :: proc() {
 	c_mask := (w.column_lt(w.column(&df8, "age"), 31))
 	bmask := w.column_mask(&c_mask)
 	mask2 := w.column_mask(w.column(&df8, "active"))
-	mask := w.mask_and(mask2,bmask)
+	mask := w.mask_and(mask2, bmask)
 	df_active3 := w.filter(&df8, mask)
 	w.dataframe_pretty_print(&df_active3, 20)
-	delete (mask)
+	delete(mask)
 
-	fmt.println ("Using wobei/where with masks")
+	fmt.println("Using wobei/where with masks")
 	//memory safe implementation. The syntax is more flexible otherwise, but there is some risk of leaks
 	m1 := w.mask_lt(w.column(&df8, "age"), 31)
 	m2 := w.column_mask(w.column(&df8, "active"))
-	mask = w.and(m1,m2)
-	delete (m1)
+	mask = w.and(m1, m2)
+	delete(m1)
 	delete(m2)
-	
+
 	df9 := w.wobei(&df8, mask)
 	w.dataframe_pretty_print(&df9, 20)
-	delete (mask)
-	delete (mask2)
-	delete (bmask)
+	delete(mask)
+	delete(mask2)
+	delete(bmask)
 	defer w.destroy_column(&c_mask)
 
-	fmt.println ("A simple select example")
-	exprs := []w.Select_Expr{
+	fmt.println("A simple select example")
+	exprs := []w.Select_Expr {
 		w.col_expr("age", w.column(&df8, "age")),
-		w.add_int_expr("age_plus_10", w.column(&df8, "age"), 10),
+		w.add_expr("age_plus_10", w.column(&df8, "age"), 10),
 		w.mask_expr("is_young", w.mask_lt(w.column(&df8, "age"), 30)),
 	}
 
 	df10 := w.select(&df8, exprs)
 	w.dataframe_pretty_print(&df10, 20)
 
-
+	fmt.println("Apply expressions on select:")
+	exprs2 := []w.Select_Expr {
+		w.col_expr("age", w.column(&df8, "age")),
+		w.apply_expr("age_plus_5", w.column(&df8, "age"), proc(x: int) -> int {
+			return x + 5
+		}),
+		w.apply_expr("upper_name", w.column(&df8, "name"), proc(s: string) -> string {
+			return strings.to_upper(s, context.temp_allocator)
+		}),
+		w.apply_expr("is_even", w.column(&df8, "age"), proc(x: bool) -> bool {
+			return x
+		}),
+	}
+	df11 := w.select(&df8, exprs2)
+	w.dataframe_pretty_print(&df11, 20)
 
 	w.destroy_dataframe(&df_active3)
 	w.destroy_dataframe(&df8)
 	w.destroy_dataframe(&df9)
 	w.destroy_dataframe(&df10)
+	w.destroy_dataframe(&df11)
+	defer w.free_select_exprs(exprs)
+	defer w.free_select_exprs(exprs2)
+
 }

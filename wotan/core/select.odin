@@ -5,23 +5,30 @@ package wotan
 //
 
 Select_Kind :: enum {
-    Column,        // copy an existing column
-    Mask,          // convert []bool mask to Bool column
-    IntAdd,        // col + int
-    IntSub,        // col - int
-    FloatAdd,      // col + float
-    FloatSub,      // col - float
-    // extend later (String ops, Date ops, etc.)
+	Column, // copy an existing column
+	Mask, // convert []bool mask to Bool column
+	IntAdd, // col + int
+	IntSub, // col - int
+	FloatAdd, // col + float
+	FloatSub, // col - float
+	ApplyInt,
+	ApplyFloat,
+	ApplyString,
+	ApplyBool,
 }
 
 Select_Expr :: struct {
-    name:         string,
-    kind:         Select_Kind,
-    col:          ^Column,   // for column-based expressions
-    mask:         []bool,    // for mask-based expressions
-    int_value:    int,
-    float_value:  f64,
-    string_value: string,
+	name:         string,
+	kind:         Select_Kind,
+	col:          ^Column, // for column-based expressions
+	mask:         []bool, // for mask-based expressions
+	int_value:    int,
+	float_value:  f64,
+	string_value: string,
+	fn_int:       proc(x: int) -> int,
+	fn_float:     proc(x: f64) -> f64,
+	fn_string:    proc(x: string) -> string,
+	fn_bool:      proc(x: bool) -> bool,
 }
 
 //
@@ -29,55 +36,64 @@ Select_Expr :: struct {
 //
 
 col_expr :: proc(name: string, col: ^Column) -> Select_Expr {
-    return Select_Expr{
-        name = name,
-        kind = .Column,
-        col  = col,
-    }
+	return Select_Expr{name = name, kind = .Column, col = col}
 }
 
 mask_expr :: proc(name: string, mask: []bool) -> Select_Expr {
-    return Select_Expr{
-        name = name,
-        kind = .Mask,
-        mask = mask,
-    }
+	return Select_Expr{name = name, kind = .Mask, mask = mask}
+}
+
+add_expr :: proc {
+	add_int_expr,
+	add_float_expr,
+}
+
+sub_expr :: proc {
+	sub_int_expr,
+	sub_float_expr,
 }
 
 add_int_expr :: proc(name: string, col: ^Column, v: int) -> Select_Expr {
-    return Select_Expr{
-        name      = name,
-        kind      = .IntAdd,
-        col       = col,
-        int_value = v,
-    }
+	return Select_Expr{name = name, kind = .IntAdd, col = col, int_value = v}
 }
 
 sub_int_expr :: proc(name: string, col: ^Column, v: int) -> Select_Expr {
-    return Select_Expr{
-        name      = name,
-        kind      = .IntSub,
-        col       = col,
-        int_value = v,
-    }
+	return Select_Expr{name = name, kind = .IntSub, col = col, int_value = v}
 }
 
 add_float_expr :: proc(name: string, col: ^Column, v: f64) -> Select_Expr {
-    return Select_Expr{
-        name        = name,
-        kind        = .FloatAdd,
-        col         = col,
-        float_value = v,
-    }
+	return Select_Expr{name = name, kind = .FloatAdd, col = col, float_value = v}
 }
 
 sub_float_expr :: proc(name: string, col: ^Column, v: f64) -> Select_Expr {
-    return Select_Expr{
-        name        = name,
-        kind        = .FloatSub,
-        col         = col,
-        float_value = v,
-    }
+	return Select_Expr{name = name, kind = .FloatSub, col = col, float_value = v}
+}
+
+apply_expr :: proc {
+	apply_int_expr,
+	apply_float_expr,
+	apply_string_expr,
+	apply_bool_expr,
+}
+
+apply_int_expr :: proc(name: string, col: ^Column, fn: proc(x: int) -> int) -> Select_Expr {
+	return Select_Expr{name = name, kind = .ApplyInt, col = col, fn_int = fn}
+}
+
+apply_float_expr :: proc(name: string, col: ^Column, fn: proc(x: f64) -> f64) -> Select_Expr {
+	return Select_Expr{name = name, kind = .ApplyFloat, col = col, fn_float = fn}
+}
+
+apply_string_expr :: proc(
+	name: string,
+	col: ^Column,
+	fn: proc(x: string) -> string,
+) -> Select_Expr {
+	return Select_Expr{name = name, kind = .ApplyString, col = col, fn_string = fn}
+}
+
+apply_bool_expr :: proc(name: string, col: ^Column, fn: proc(x: bool) -> bool) -> Select_Expr {
+	return Select_Expr{name = name, kind = .ApplyBool, col = col, fn_bool = fn}
 }
 
 //
@@ -85,8 +101,8 @@ sub_float_expr :: proc(name: string, col: ^Column, v: f64) -> Select_Expr {
 //
 
 select :: proc {
-    select_columns,
-    select_exprs,
+	select_columns,
+	select_exprs,
 }
 
 //
@@ -94,7 +110,7 @@ select :: proc {
 //
 
 select_columns :: proc(df: ^DataFrame, names: []string) -> DataFrame {
-    return dataframe_select_columns(df, names, false)
+	return dataframe_select_columns(df, names, false)
 }
 
 //
@@ -102,102 +118,164 @@ select_columns :: proc(df: ^DataFrame, names: []string) -> DataFrame {
 //
 
 select_exprs :: proc(df: ^DataFrame, exprs: []Select_Expr) -> DataFrame {
-    out := dataframe_new()
+	out := dataframe_new()
 
-    for expr in exprs {
-        #partial switch expr.kind {
+	for expr in exprs {
+		#partial switch expr.kind {
 
-        // ---------------------------------------------------------------------
-        case .Column:
-            orig := expr.col
-            new_col := column_new(expr.name, orig.type, orig.len)
+		// ---------------------------------------------------------------------
+		case .Column:
+			orig := expr.col
+			new_col := column_new(expr.name, orig.type, orig.len)
 
-            for i in 0..<orig.len {
-                #partial switch orig.type {
-                case .Int:
-                    v, n := column_at_int(orig, i)
-                    if n { append_null(&new_col) } else { append_int(&new_col, v) }
+			for i in 0 ..< orig.len {
+				#partial switch orig.type {
+				case .Int:
+					v, n := column_at_int(orig, i)
+					if n {append_null(&new_col)} else {append_int(&new_col, v)}
 
-                case .Float:
-                    v, n := column_at_float(orig, i)
-                    if n { append_null(&new_col) } else { append_float(&new_col, v) }
+				case .Float:
+					v, n := column_at_float(orig, i)
+					if n {append_null(&new_col)} else {append_float(&new_col, v)}
 
-                case .Bool:
-                    v, n := column_at_bool(orig, i)
-                    if n { append_null(&new_col) } else { append_bool(&new_col, v) }
+				case .Bool:
+					v, n := column_at_bool(orig, i)
+					if n {append_null(&new_col)} else {append_bool(&new_col, v)}
 
-                case .String:
-                    v, n := column_at_string(orig, i)
-                    if n { append_null(&new_col) } else { append_string(&new_col, v) }
+				case .String:
+					v, n := column_at_string(orig, i)
+					if n {append_null(&new_col)} else {append_string(&new_col, v)}
 
-                case .Date:
-                    v, n := column_at_date(orig, i)
-                    if n { append_null(&new_col) } else { append_date(&new_col, v) }
-                }
-            }
+				case .Date:
+					v, n := column_at_date(orig, i)
+					if n {append_null(&new_col)} else {append_date(&new_col, v)}
+				}
+			}
 
-            add_column(&out, new_col)
+			add_column(&out, new_col)
 
-        // ---------------------------------------------------------------------
-        case .Mask:
-            m := expr.mask
-            new_col := column_new(expr.name, .Bool, len(m))
+		// ---------------------------------------------------------------------
+		case .Mask:
+			m := expr.mask
+			new_col := column_new(expr.name, .Bool, len(m))
 
-            for i in 0..<len(m) {
-                append_bool(&new_col, m[i])
-            }
+			for i in 0 ..< len(m) {
+				append_bool(&new_col, m[i])
+			}
 
-            add_column(&out, new_col)
+			add_column(&out, new_col)
 
-        // ---------------------------------------------------------------------
-        case .IntAdd:
-            orig := expr.col
-            new_col := column_new(expr.name, .Int, orig.len)
+		// ---------------------------------------------------------------------
+		case .IntAdd:
+			orig := expr.col
+			new_col := column_new(expr.name, .Int, orig.len)
 
-            for i in 0..<orig.len {
-                v, n := column_at_int(orig, i)
-                if n { append_null(&new_col) } else { append_int(&new_col, v + expr.int_value) }
-            }
+			for i in 0 ..< orig.len {
+				v, n := column_at_int(orig, i)
+				if n {append_null(&new_col)} else {append_int(&new_col, v + expr.int_value)}
+			}
 
-            add_column(&out, new_col)
+			add_column(&out, new_col)
 
-        // ---------------------------------------------------------------------
-        case .IntSub:
-            orig := expr.col
-            new_col := column_new(expr.name, .Int, orig.len)
+		// ---------------------------------------------------------------------
+		case .IntSub:
+			orig := expr.col
+			new_col := column_new(expr.name, .Int, orig.len)
 
-            for i in 0..<orig.len {
-                v, n := column_at_int(orig, i)
-                if n { append_null(&new_col) } else { append_int(&new_col, v - expr.int_value) }
-            }
+			for i in 0 ..< orig.len {
+				v, n := column_at_int(orig, i)
+				if n {append_null(&new_col)} else {append_int(&new_col, v - expr.int_value)}
+			}
 
-            add_column(&out, new_col)
+			add_column(&out, new_col)
 
-        // ---------------------------------------------------------------------
-        case .FloatAdd:
-            orig := expr.col
-            new_col := column_new(expr.name, .Float, orig.len)
+		// ---------------------------------------------------------------------
+		case .FloatAdd:
+			orig := expr.col
+			new_col := column_new(expr.name, .Float, orig.len)
 
-            for i in 0..<orig.len {
-                v, n := column_at_float(orig, i)
-                if n { append_null(&new_col) } else { append_float(&new_col, v + expr.float_value) }
-            }
+			for i in 0 ..< orig.len {
+				v, n := column_at_float(orig, i)
+				if n {append_null(&new_col)} else {append_float(&new_col, v + expr.float_value)}
+			}
 
-            add_column(&out, new_col)
+			add_column(&out, new_col)
 
-        // ---------------------------------------------------------------------
-        case .FloatSub:
-            orig := expr.col
-            new_col := column_new(expr.name, .Float, orig.len)
+		// ---------------------------------------------------------------------
+		case .FloatSub:
+			orig := expr.col
+			new_col := column_new(expr.name, .Float, orig.len)
 
-            for i in 0..<orig.len {
-                v, n := column_at_float(orig, i)
-                if n { append_null(&new_col) } else { append_float(&new_col, v - expr.float_value) }
-            }
+			for i in 0 ..< orig.len {
+				v, n := column_at_float(orig, i)
+				if n {append_null(&new_col)} else {append_float(&new_col, v - expr.float_value)}
+			}
 
-            add_column(&out, new_col)
-        }
-    }
+			add_column(&out, new_col)
+		case .ApplyInt:
+			orig := expr.col
+			new_col := column_new(expr.name, .Int, orig.len)
+			for i in 0 ..< orig.len {
+				v, n := column_at_int(orig, i)
+				if n {
+					append_null(&new_col)
+				} else {
+					append_int(&new_col, expr.fn_int(v))
+				}
+			}
+			add_column(&out, new_col)
 
-    return out
+		case .ApplyFloat:
+			orig := expr.col
+			new_col := column_new(expr.name, .Float, orig.len)
+			for i in 0 ..< orig.len {
+				v, n := column_at_float(orig, i)
+				if n {
+					append_null(&new_col)
+				} else {
+					append_float(&new_col, expr.fn_float(v))
+				}
+			}
+			add_column(&out, new_col)
+
+		case .ApplyString:
+			orig := expr.col
+			new_col := column_new(expr.name, .String, orig.len)
+			for i in 0 ..< orig.len {
+				v, n := column_at_string(orig, i)
+				if n {
+					append_null(&new_col)
+				} else {
+					append_string(&new_col, expr.fn_string(v))
+				}
+			}
+			add_column(&out, new_col)
+
+		case .ApplyBool:
+			orig := expr.col
+			new_col := column_new(expr.name, .Bool, orig.len)
+			for i in 0 ..< orig.len {
+				v, n := column_at_bool(orig, i)
+				if n {
+					append_null(&new_col)
+				} else {
+					append_bool(&new_col, expr.fn_bool(v))
+				}
+			}
+			add_column(&out, new_col)
+
+		}
+
+	}
+
+	return out
+}
+
+
+free_select_exprs :: proc(exprs: []Select_Expr) {
+	for expr in exprs {
+		if expr.kind == .Mask {
+			delete(expr.mask)
+		}
+	}
 }
