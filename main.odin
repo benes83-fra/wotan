@@ -122,10 +122,36 @@ main :: proc() {
 	df_active3 := w.filter(&df8, mask)
 	w.dataframe_pretty_print(&df_active3, 20)
 	delete (mask)
+
+	fmt.println ("Using wobei/where with masks")
+	//memory safe implementation. The syntax is more flexible otherwise, but there is some risk of leaks
+	m1 := w.mask_lt(w.column(&df8, "age"), 31)
+	m2 := w.column_mask(w.column(&df8, "active"))
+	mask = w.and(m1,m2)
+	delete (m1)
+	delete(m2)
+	
+	df9 := w.wobei(&df8, mask)
+	w.dataframe_pretty_print(&df9, 20)
+	delete (mask)
 	delete (mask2)
 	delete (bmask)
 	defer w.destroy_column(&c_mask)
 
+	fmt.println ("A simple select example")
+	exprs := []w.Select_Expr{
+		w.col_expr("age", w.column(&df8, "age")),
+		w.add_int_expr("age_plus_10", w.column(&df8, "age"), 10),
+		w.mask_expr("is_young", w.mask_lt(w.column(&df8, "age"), 30)),
+	}
+
+	df10 := w.select(&df8, exprs)
+	w.dataframe_pretty_print(&df10, 20)
+
+
+
 	w.destroy_dataframe(&df_active3)
 	w.destroy_dataframe(&df8)
+	w.destroy_dataframe(&df9)
+	w.destroy_dataframe(&df10)
 }

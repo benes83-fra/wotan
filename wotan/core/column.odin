@@ -473,7 +473,7 @@ column_eq_string :: proc(col: ^Column, value: string) -> Column {
 }
 column_contains_string :: proc(col: ^Column, value: string) -> Column {
 	if col.type != .String {
-		panic("column_eq_string: wrong column type")
+		panic("column_contains_string: wrong column type")
 	}
 	out := column_new_bool_mask(col.len)
 	for i in 0 ..< col.len {
@@ -535,7 +535,7 @@ column_eq_date :: proc(col: ^Column, value: Date) -> Column {
 	return out
 }
 
-
+//converts bool column into a bool array mask, treating nulls as false
 column_mask :: proc (col: ^Column) -> []bool {
 	if col.type != .Bool {
 		panic ("column_mask: wrong column type")
