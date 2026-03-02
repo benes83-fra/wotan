@@ -160,6 +160,9 @@ main :: proc() {
 		w.apply_expr("is_even", w.column(&df8, "age"), proc(x: bool) -> bool {
 			return x
 		}),
+    w.div_expr("Breaking Salaries", w.column(&df8,"salary"),10),
+    w.conv_int_to_f64_expr("Floating Salaries",w.column(&df8,"salary")),
+    
 	}
 	df11 := w.select(&df8, exprs2)
 	w.dataframe_pretty_print(&df11, 20)

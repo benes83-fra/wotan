@@ -1,5 +1,6 @@
 package wotan
 
+import "core:sys/windows"
 // --- Select Expression Types ------------------------------------------------
 //
 
@@ -8,12 +9,19 @@ Select_Kind :: enum {
 	Mask, // convert []bool mask to Bool column
 	IntAdd, // col + int
 	IntSub, // col - int
+	IntMult,
+	IntDiv,
 	FloatAdd, // col + float
 	FloatSub, // col - float
+	FloatMult,
+	FloatDiv,
 	ApplyInt,
 	ApplyFloat,
 	ApplyString,
 	ApplyBool,
+	ConvIntFloat,
+	ConvFloatInt,
+	Conv,
 }
 
 Select_Expr :: struct {
@@ -24,6 +32,7 @@ Select_Expr :: struct {
 	int_value:    int,
 	float_value:  f64,
 	string_value: string,
+	conv:         typeid,
 	fn_int:       proc(x: int) -> int,
 	fn_float:     proc(x: f64) -> f64,
 	fn_string:    proc(x: string) -> string,
@@ -52,6 +61,17 @@ sub_expr :: proc {
 	sub_float_expr,
 }
 
+
+mult_expr :: proc {
+	mult_int_expr,
+	mult_float_expr,
+}
+
+div_expr :: proc {
+	div_int_expr,
+	div_float_expr,
+}
+
 add_int_expr :: proc(name: string, col: ^Column, v: int) -> Select_Expr {
 	return Select_Expr{name = name, kind = .IntAdd, col = col, int_value = v}
 }
@@ -67,6 +87,24 @@ add_float_expr :: proc(name: string, col: ^Column, v: f64) -> Select_Expr {
 sub_float_expr :: proc(name: string, col: ^Column, v: f64) -> Select_Expr {
 	return Select_Expr{name = name, kind = .FloatSub, col = col, float_value = v}
 }
+
+
+mult_int_expr :: proc(name: string, col: ^Column, v: int) -> Select_Expr {
+	return Select_Expr{name = name, kind = .IntMult, col = col, int_value = v}
+}
+
+div_int_expr :: proc(name: string, col: ^Column, v: int) -> Select_Expr {
+	return Select_Expr{name = name, kind = .IntDiv, col = col, int_value = v}
+
+}
+
+mult_float_expr :: proc(name: string, col: ^Column, v: f64) -> Select_Expr {
+	return Select_Expr{name = name, kind = .FloatMult, col = col, float_value = v}
+}
+div_float_expr :: proc(name: string, col: ^Column, v: f64) -> Select_Expr {
+	return Select_Expr{name = name, kind = .FloatDiv, col = col, float_value = v}
+}
+
 
 apply_expr :: proc {
 	apply_int_expr,
@@ -96,6 +134,18 @@ apply_bool_expr :: proc(name: string, col: ^Column, fn: proc(x: bool) -> bool) -
 	return Select_Expr{name = name, kind = .ApplyBool, col = col, fn_bool = fn}
 }
 
+
+conv_int_to_f64_expr :: proc(name: string, col: ^Column) -> Select_Expr {
+	return Select_Expr{name = name, kind = .ConvIntFloat, col = col}
+}
+
+conv_f64_to_int_expr :: proc(name: string, col: ^Column) -> Select_Expr {
+	return Select_Expr{name = name, kind = .ConvFloatInt, col = col}
+}
+
+conv_expr :: proc(name: string, col: ^Column, $T: typeid) -> Select_Expr {
+	return Select_Expr{name = name, kind = .Conv, conv = T}
+}
 //
 // --- Select Overload Group --------------------------------------------------
 //
@@ -212,6 +262,56 @@ select_exprs :: proc(df: ^DataFrame, exprs: []Select_Expr) -> DataFrame {
 			}
 
 			add_column(&out, new_col)
+		case .IntMult:
+			orig := expr.col
+			new_col := column_new(expr.name, .Int, orig.len)
+			for i in 0 ..< orig.len {
+				v, n := column_at_int(orig, i)
+				if n {append_null(&new_col)} else {append_int(&new_col, v * expr.int_value)}
+
+			}
+			add_column(&out, new_col)
+		case .IntDiv:
+			orig := expr.col
+			new_col := column_new(expr.name, .Int, orig.len)
+			for i in 0 ..< orig.len {
+				v, n := column_at_int(orig, i)
+				if n {append_null(&new_col)} else {
+					div := expr.int_value
+					if div != 0 {
+						append_int(&new_col, v / div)
+					} else {
+						panic("select: Division by zero")
+					}
+				}
+
+			}
+			add_column(&out, new_col)
+		case .FloatMult:
+			orig := expr.col
+			new_col := column_new(expr.name, .Int, orig.len)
+			for i in 0 ..< orig.len {
+				v, n := column_at_float(orig, i)
+				if n {append_null(&new_col)} else {append_float(&new_col, v * expr.float_value)}
+
+			}
+			add_column(&out, new_col)
+		case .FloatDiv:
+			orig := expr.col
+			new_col := column_new(expr.name, .Int, orig.len)
+			for i in 0 ..< orig.len {
+				v, n := column_at_float(orig, i)
+				if n {append_null(&new_col)} else {
+					div := expr.float_value
+					if div != 0 {
+						append_float(&new_col, v / div)
+					} else {
+						panic("select: Division by zero")
+					}
+				}
+
+			}
+			add_column(&out, new_col)
 		case .ApplyInt:
 			orig := expr.col
 			new_col := column_new(expr.name, .Int, orig.len)
@@ -264,7 +364,39 @@ select_exprs :: proc(df: ^DataFrame, exprs: []Select_Expr) -> DataFrame {
 			}
 			add_column(&out, new_col)
 
+		case .ConvFloatInt:
+			orig := expr.col
+			new_col := column_new(expr.name, .Int, orig.len)
+			for i in 0 ..< orig.len {
+				v, n := column_at_float(orig, i)
+				if n {
+					append_null(&new_col)
+				} else {
+					w: int = int(v)
+					append_int(&new_col, w)
+				}
+			}
+			add_column(&out, new_col)
+		case .ConvIntFloat:
+			orig := expr.col
+			new_col := column_new(expr.name, .Float, orig.len)
+			for i in 0 ..< orig.len {
+				v, n := column_at_int(orig, i)
+				if n {
+					append_null(&new_col)
+				} else {
+					w: f64 = f64(v)
+					append_float(&new_col, w)
+				}
+			}
+			add_column(&out, new_col)
+		//   case .Conv:
+		//     orig := expr.col
+		//     col_type := get_column_type(expr.conv)
+		//     new_col := column_new (expr.name, col_type, orig.len)
+		//
 		}
+
 
 	}
 

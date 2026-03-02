@@ -32,3 +32,24 @@ type_size :: proc(t: ColumnType) -> int {
 	}
 	return 0
 }
+
+
+get_column_type :: proc($T: typeid) -> ColumnType {
+	col: ColumnType
+	when T ==
+		int || T == u16 || T == u32 || T == u64 || T == u126 || T == i16 || T == i32 || T == i64 || T == i128 {
+		col = .Int
+	}
+	when T == f64 || T == f32 {
+		col = .Float
+	}
+	when T == bool {
+		col = .Bool
+	}
+	when T == string {
+		col = .String
+	}
+
+
+	return col
+}

@@ -6,7 +6,7 @@ import "core:strings"
 
 is_null :: proc(s: string) -> bool {
 	ret := strings.trim(s, " ")
-	return ret == "" || ret == "NA" || ret == "null" || ret == "None"
+	return ret == "" || ret == "NA" || ret == "null" || ret == "None" || ret == "NaN"
 }
 
 is_int :: proc(s: string) -> bool {
