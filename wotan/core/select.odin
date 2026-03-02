@@ -1,6 +1,5 @@
 package wotan
 
-//
 // --- Select Expression Types ------------------------------------------------
 //
 
@@ -89,6 +88,7 @@ apply_string_expr :: proc(
 	col: ^Column,
 	fn: proc(x: string) -> string,
 ) -> Select_Expr {
+
 	return Select_Expr{name = name, kind = .ApplyString, col = col, fn_string = fn}
 }
 
@@ -277,5 +277,6 @@ free_select_exprs :: proc(exprs: []Select_Expr) {
 		if expr.kind == .Mask {
 			delete(expr.mask)
 		}
+
 	}
 }

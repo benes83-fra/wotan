@@ -34,7 +34,7 @@ infer_col_types :: proc(
 			}
 		}
 	}
-	types := make([]w.ColumnType, col_count,context.temp_allocator)
+	types := make([]w.ColumnType, col_count, context.temp_allocator)
 	for i in 0 ..< col_count {
 		types[i] = infer.infer_column_type(samples[i][:])
 	}
@@ -54,14 +54,15 @@ infer_col_types :: proc(
 csv_load :: proc(
 	path: string,
 	types: []w.ColumnType = nil,
+	sep: u8 = ',',
 	null_tokens: []string = DEFAULT_NULL_TOKEN,
 ) -> w.DataFrame {
 
-	auto :bool
+	auto: bool
 	types := types
 	if types != nil {
 		auto = false
-	}else {
+	} else {
 		auto = true
 	}
 	contents, err := read_file(path)
@@ -71,7 +72,7 @@ csv_load :: proc(
 	defer delete(contents)
 
 	text := string(contents)
-	records := parse_csv_records(text)
+	records := parse_csv_records(text, sep)
 	defer csv_free(records)
 	if len(records) == 0 {
 		panic("csv_load: empty file")
@@ -159,12 +160,12 @@ csv_load :: proc(
 
 // Parse the entire CSV text into records, honoring quoted fields and newlines inside quotes.
 // Returns an array of records, each record is an array of fields.
-parse_csv_records :: proc(text: string) -> [][]string {
+parse_csv_records :: proc(text: string, seperator: u8 = ',') -> [][]string {
 	records := make([dynamic][]string)
 	cur_fields := make([dynamic]string)
-	cur_field_bytes := make([dynamic]u8,context.temp_allocator)
+	cur_field_bytes := make([dynamic]u8, context.temp_allocator)
 	defer delete(cur_field_bytes)
-  // defer delete (cur_fields)
+	// defer delete (cur_fields)
 	in_quote := false
 	i := 0
 	n := len(text)
@@ -199,7 +200,7 @@ parse_csv_records :: proc(text: string) -> [][]string {
 				// field := string(cur_field_bytes[:])
 				append(&cur_fields, field)
 				// reset field buffer
-				cur_field_bytes = make([dynamic]u8,context.temp_allocator)
+				cur_field_bytes = make([dynamic]u8, context.temp_allocator)
 				i += 1
 				continue
 			}
@@ -235,7 +236,7 @@ parse_csv_records :: proc(text: string) -> [][]string {
 					append(&records, cur_fields[:])
 
 					cur_fields = make([dynamic]string)
-					cur_field_bytes = make([dynamic]u8,context.temp_allocator)
+					cur_field_bytes = make([dynamic]u8, context.temp_allocator)
 					i += 1
 					continue
 				}
@@ -260,15 +261,14 @@ parse_csv_records :: proc(text: string) -> [][]string {
 }
 
 
-
 csv_free :: proc(records: [][]string) {
 	for record in records {
 		if record != nil {
 			for &s in record {
 				if s != "" {
 					// fmt.printf("(debug) to be freed: %s\r\n", s)
-				delete (s, context.temp_allocator)
-        }
+					delete(s, context.temp_allocator)
+				}
 			}
 			delete(record)
 		}
