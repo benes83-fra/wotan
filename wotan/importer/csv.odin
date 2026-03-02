@@ -195,7 +195,7 @@ parse_csv_records :: proc(text: string, seperator: u8 = ',') -> [][]string {
 		}
 
 		if !in_quote {
-			if b == ',' {
+			if b == seperator {
 				// end of field
 				// field := string(cur_field_bytes[:])
 				append(&cur_fields, field)
