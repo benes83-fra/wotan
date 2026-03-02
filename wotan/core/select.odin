@@ -390,11 +390,11 @@ select_exprs :: proc(df: ^DataFrame, exprs: []Select_Expr) -> DataFrame {
 				}
 			}
 			add_column(&out, new_col)
-		//   case .Conv:
-		//     orig := expr.col
-		//     col_type := get_column_type(expr.conv)
-		//     new_col := column_new (expr.name, col_type, orig.len)
-		//
+		case .Conv:
+			orig := expr.col
+			col_type := get_column_type(type_of(expr.conv))
+			new_col := column_new(expr.name, col_type, orig.len)
+
 		}
 
 
