@@ -2,7 +2,7 @@ package wotan
 
 import "core:mem"
 import "core:strings"
-
+import "core:fmt"
 Column :: struct {
 	name:     string,
 	type:     ColumnType,
@@ -18,12 +18,10 @@ Column :: struct {
 
 column_new :: proc(name: string, type: ColumnType, capacity: int) -> Column {
 	size := capacity * type_size(type)
-	data, err := mem.alloc(size)
-
+  data, err := mem.alloc(size)
 	if err != nil {
 		panic("Column: allocation failed")
 	}
-
 	return Column{name = name, type = type, len = 0, capacity = capacity, data = data, nulls = nil}
 }
 
@@ -188,6 +186,27 @@ append_null :: proc(c: ^Column) {
 	}
 	c.nulls[idx] = true
 }
+
+column_at_ptr :: proc(col: ^Column, i: int) -> (uintptr, bool){
+
+	if i < 0 || i >= col.len {
+		panic("column_at_int: index out of range")
+	}
+  
+	if col.is_view {
+		return column_at_ptr(col.orig, col.offset + i)
+	}
+
+	if col.nulls != nil && col.nulls[i] {
+		return 0, true
+	}
+	base := uintptr(col.data) + uintptr(i * type_size(col.type))
+
+  return base, false
+
+}
+
+
 
 // Column read helpers (safe, copy-based readers)
 column_at_int :: proc(col: ^Column, i: int) -> (int, bool) {

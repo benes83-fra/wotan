@@ -1,5 +1,7 @@
 package wotan
 
+
+import "core:strings"
 ColumnType :: enum {
 	Invalid,
 	Int,
@@ -34,10 +36,34 @@ type_size :: proc(t: ColumnType) -> int {
 }
 
 
+get_column_type_by_type :: proc(type: string) -> ColumnType {
+	col: ColumnType
+	ltype := strings.to_lower(type)
+
+	defer delete (ltype)
+	switch ltype {
+	case "int":
+		col = .Int
+	case "float":
+		col = .Float
+	case "string":
+		col = .String
+	case "bool":
+		col = .Bool
+	case "date":
+		col = .Date
+
+
+	}
+
+	return col
+}
+
 get_column_type :: proc($T: typeid) -> ColumnType {
 	col: ColumnType
-	when T == int || T == u16 || T == u32 || T == u64 || T == u128 || T == i16 || T == i32 || T == i64 || T == i128 {
-    col = .Int
+	when T ==
+		int || T == u16 || T == u32 || T == u64 || T == u128 || T == i16 || T == i32 || T == i64 || T == i128 {
+		col = .Int
 	}
 	when T == f64 || T == f32 {
 		col = .Float

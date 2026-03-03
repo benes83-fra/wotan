@@ -1,6 +1,6 @@
 package wotan
 
-import "core:sys/windows"
+import "core:fmt"
 // --- Select Expression Types ------------------------------------------------
 //
 
@@ -32,7 +32,7 @@ Select_Expr :: struct {
 	int_value:    int,
 	float_value:  f64,
 	string_value: string,
-	conv:         typeid,
+	conv:         string,
 	fn_int:       proc(x: int) -> int,
 	fn_float:     proc(x: f64) -> f64,
 	fn_string:    proc(x: string) -> string,
@@ -143,8 +143,8 @@ conv_f64_to_int_expr :: proc(name: string, col: ^Column) -> Select_Expr {
 	return Select_Expr{name = name, kind = .ConvFloatInt, col = col}
 }
 
-conv_expr :: proc(name: string, col: ^Column, $T: typeid) -> Select_Expr {
-	return Select_Expr{name = name, kind = .Conv, conv = T}
+conv_expr :: proc(name: string, col: ^Column, conv: string) -> Select_Expr {
+	return Select_Expr{name = name, kind = .Conv, conv = conv}
 }
 //
 // --- Select Overload Group --------------------------------------------------
@@ -391,10 +391,39 @@ select_exprs :: proc(df: ^DataFrame, exprs: []Select_Expr) -> DataFrame {
 			}
 			add_column(&out, new_col)
 		case .Conv:
+			//
 			orig := expr.col
-			col_type := get_column_type(type_of(expr.conv))
-			new_col := column_new(expr.name, col_type, orig.len)
+			new_col: Column
+			col_type := get_column_type_by_type(expr.conv)
+			fmt.println(col_type)
+			conv := expr.conv
+      new_col = column_new(expr.name, col_type, orig.len)
+			fmt.println("Survived Col creation")
+			for i in 0 ..< orig.len {
+				v, n := column_at_ptr(orig, i)
+				fmt.println(v)
+				if n {
+					append_null(&new_col)
+				} else {
+					append_null(&new_col)
 
+					if conv == "int" {
+						append_int(&new_col, (cast(^int)v)^)
+					} else if conv == "float" {
+						append_float(&new_col, (cast(^f64)v)^)
+					} else if conv == "string" {
+						append_string(&new_col, (cast(^string)v)^)
+					} else if conv == "date" {
+						append_date(&new_col, (cast(^Date)v)^)
+					} else if conv == "bool" {
+						append_bool(&new_col, (cast(^bool)v)^)
+					} else {
+						append_null(&new_col)
+					}
+				}
+				add_column(&out, new_col)
+
+			}
 		}
 
 
