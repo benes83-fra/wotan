@@ -1,9 +1,120 @@
 package wotan
 
 
+import "core:fmt"
+import "core:math"
+import "core:strconv"
+import "core:strings"
+
 date_compare :: proc(a, b: Date) -> i32 {
 	if a.year != b.year {return a.year - b.year}
 	if a.month != b.month {return a.month - b.month}
 	return a.day - b.day
 
+}
+
+
+parse_date :: proc(date_str: string) -> (Date, bool) {
+	parts := strings.split(date_str, "-")
+	if len(parts) != 3 {
+		return Date{}, false // Invalid format
+	}
+
+	year, ok1 := strconv.parse_int(parts[0])
+	month, ok2 := strconv.parse_int(parts[1])
+	day, ok3 := strconv.parse_int(parts[2])
+
+	if !ok1 || !ok2 || !ok3 {
+		return Date{}, false // Non-numeric values
+	}
+
+	// Basic validation
+	if month < 1 || month > 12 || day < 1 || day > 31 {
+		return Date{}, false
+	}
+
+	return Date{i32(year), i32(month), i32(day)}, true
+}
+
+
+date_to_string :: proc(d: Date) -> string {
+	// Use a string builder for efficiency
+	sb := strings.builder_make()
+	defer strings.builder_destroy(&sb)
+
+	// Format with zero-padding for month/day
+	fmt.sbprintf(&sb, "%04d-%02d-%02d", d.year, d.month, d.day)
+
+	return strings.to_string(sb) // Convert builder to string
+}
+
+
+date_to_int :: proc(d: Date) -> i32 {
+	// Validate ranges
+	if d.month < 1 || d.month > 12 {
+		fmt.println("Error: month out of range (1-12)")
+		return -1
+	}
+	if d.day < 1 || d.day > 31 {
+		fmt.println("Error: day out of range (1-31)")
+		return -1
+	}
+	// Combine into YYYYMMDD
+	return d.year * 10000 + d.month * 100 + d.day
+}
+
+int_to_date :: proc(date_int: i32) -> Date {
+	year := date_int / 10000
+	month := (date_int / 100) % 100
+	day := date_int % 100
+	return Date{year, month, day}
+}
+
+
+// Convert Date → f64 (Julian Day Number)
+date_to_f64 :: proc(d: Date) -> f64 {
+	// Adjust months so that March is month 1
+	y := d.year
+	m := d.month
+	if m <= 2 {
+		y -= 1
+		m += 12
+	}
+
+	// Julian Day Number calculation (Gregorian calendar)
+	a := y / 100
+	b := 2 - a + a / 4
+	jd :=
+		math.floor_f64(365.2500000 * cast(f64)(y + 4716)) +
+		math.floor_f64(30.60010000 * cast(f64)(m + 1)) +
+		cast(f64)d.day +
+		cast(f64)b -
+		1524.5
+
+	return jd
+}
+
+// Convert f64 (Julian Day Number) → Date
+f64_to_date :: proc(jd: f64) -> Date {
+	jd := jd
+	jd += 0.5
+	z := math.floor_f64(jd)
+	f := jd - z
+
+	a := z
+	if z >= 2299161 {
+		alpha := f64((z - 1867216.25) / 36524.25)
+		a += 1 + alpha - alpha / 4
+	}
+
+	b: f64 = a + f64(1524)
+	c := cast(i64)((f64(b) - f64(122.1)) / f64(365.25))
+	d := cast(f64)(365.25 * cast(f64)c)
+	e := cast(i64)(f64(b - d) / 30.6001)
+
+	day := f64(b - d - (f64(30.6001) * f64(e)) + f)
+	month := e < 14 ? e - 1 : e - 13
+	year := month > 2 ? c - 4716 : c - 4715
+
+	return Date{year = cast(i32)year, month = cast(i32)month, day = cast(i32)math.floor_f64(day)}
 }

@@ -1,6 +1,7 @@
 package wotan
 
-import "core:fmt"
+import "core:strconv"
+import "core:strings"
 // --- Select Expression Types ------------------------------------------------
 //
 
@@ -144,7 +145,7 @@ conv_f64_to_int_expr :: proc(name: string, col: ^Column) -> Select_Expr {
 }
 
 conv_expr :: proc(name: string, col: ^Column, conv: string) -> Select_Expr {
-	return Select_Expr{name = name, kind = .Conv, conv = conv}
+	return Select_Expr{name = name, kind = .Conv, col = col, conv = conv}
 }
 //
 // --- Select Overload Group --------------------------------------------------
@@ -391,39 +392,129 @@ select_exprs :: proc(df: ^DataFrame, exprs: []Select_Expr) -> DataFrame {
 			}
 			add_column(&out, new_col)
 		case .Conv:
-			//
-			orig := expr.col
-			new_col: Column
-			col_type := get_column_type_by_type(expr.conv)
-			fmt.println(col_type)
-			conv := expr.conv
-      new_col = column_new(expr.name, col_type, orig.len)
-			fmt.println("Survived Col creation")
-			for i in 0 ..< orig.len {
-				v, n := column_at_ptr(orig, i)
-				fmt.println(v)
-				if n {
-					append_null(&new_col)
-				} else {
-					append_null(&new_col)
-
-					if conv == "int" {
-						append_int(&new_col, (cast(^int)v)^)
-					} else if conv == "float" {
-						append_float(&new_col, (cast(^f64)v)^)
-					} else if conv == "string" {
-						append_string(&new_col, (cast(^string)v)^)
-					} else if conv == "date" {
-						append_date(&new_col, (cast(^Date)v)^)
-					} else if conv == "bool" {
-						append_bool(&new_col, (cast(^bool)v)^)
-					} else {
-						append_null(&new_col)
-					}
-				}
-				add_column(&out, new_col)
-
+			if expr.col == nil {
+				panic("Conv: expr.col is nil for")
 			}
+
+			orig := expr.col
+			target_type := get_column_type_by_type(expr.conv)
+			new_col := column_new(expr.name, target_type, orig.len)
+
+			for i in 0 ..< orig.len {
+				// read value based on *source* type
+				#partial switch orig.type {
+				case .Int:
+					v, n := column_at_int(orig, i)
+					if n {
+						append_null(&new_col)
+					} else {
+						#partial switch target_type {
+						case .Int:
+							append_int(&new_col, v)
+						case .Float:
+							append_float(&new_col, f64(v))
+						case .String:
+							buf: [8]u8
+							res := strconv.write_int(buf[:], i64(v), 10)
+							append_string(&new_col, res)
+						case .Bool:
+							append_bool(&new_col, v != 0)
+						case .Date:
+							date := int_to_date(i32(v))
+							append_date(&new_col, date)
+						}
+					}
+
+				case .Float:
+					v, n := column_at_float(orig, i)
+					if n {
+						append_null(&new_col)
+					} else {
+						#partial switch target_type {
+						case .Int:
+							append_int(&new_col, int(v))
+						case .Float:
+							append_float(&new_col, v)
+						case .String:
+							buf: [8]u8
+							res := strconv.write_float(buf[:], v, 'f', 4, 64)
+							append_string(&new_col, res)
+						case .Bool:
+							append_bool(&new_col, v != 0.0)
+						case .Date:
+							date := f64_to_date(v)
+							append_date(&new_col, date)
+						}
+					}
+				case .String:
+					v, n := column_at_string(orig, i)
+					if n {
+						append_null(&new_col)
+					} else {
+						#partial switch target_type {
+						case .Int:
+							integer, ok := strconv.parse_int(v)
+							if !ok {
+								panic("parse int: could not parse Integer")
+							}
+							append_int(&new_col, integer)
+						case .Float:
+							float, ok := strconv.parse_f64(v)
+							if !ok {
+								panic("parse float: could not parse Float")
+							}
+							append_float(&new_col, float)
+						case .String:
+							append_string(&new_col, v)
+						case .Bool:
+							b: bool = false
+							if strings.to_upper(v) == "TRUE" {
+								b = true
+							}
+							append_bool(&new_col, b)
+						case .Date:
+							date, ok := parse_date(v)
+							if !ok {
+								panic(
+									"parse date: could not parse Date, string formated incorrectly",
+								)
+							}
+							append_date(&new_col, date)
+						}
+					}
+				case .Date:
+					v, n := column_at_date(orig, i)
+					if n {
+						append_null(&new_col)
+					} else {
+						#partial switch target_type {
+						case .Int:
+							integer := date_to_int(v)
+
+							append_int(&new_col, int(integer))
+						case .Float:
+							float := date_to_f64(v)
+
+							append_float(&new_col, float)
+						case .String:
+							str := date_to_string(v)
+							append_string(&new_col, str)
+						case .Bool:
+							b: bool = false
+
+							append_bool(&new_col, b)
+						case .Date:
+							append_date(&new_col, v)
+						}
+					}
+
+				// add .String, .Bool, .Date similarly
+				}
+			}
+
+			add_column(&out, new_col)
+
+
 		}
 
 

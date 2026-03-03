@@ -160,9 +160,10 @@ main :: proc() {
 		w.apply_expr("is_even", w.column(&df8, "age"), proc(x: bool) -> bool {
 			return x
 		}),
-    w.div_expr("Breaking Salaries", w.column(&df8,"salary"),10),
-    w.conv_int_to_f64_expr("Floating Salaries",w.column(&df8,"salary")),
-    w.conv_expr("Conv Age", w.column(&df8,"age"),"int"),    
+		w.div_expr("Breaking Salaries", w.column(&df8, "salary"), 10),
+		w.conv_int_to_f64_expr("Floating Salaries", w.column(&df8, "salary")),
+		w.conv_expr("Conv Age", w.column(&df8, "age"), "float"),
+		w.conv_expr("Birthday madness", w.column(&df8, "birthday"), "string"),
 	}
 	df11 := w.select(&df8, exprs2)
 	w.dataframe_pretty_print(&df11, 20)
