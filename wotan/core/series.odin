@@ -31,6 +31,18 @@ series_empty :: proc(name: string, type: ColumnType, capacity: int) -> Series {
 //
 // --- Typed Accessors ---
 //
+//
+// series_at :: proc {
+//   series_at_datetime,
+//   series_at_int,
+//   series_at_bool,
+//   series_at_float,
+//   series_at_time,
+//   series_at_date,
+//   series_at_string,
+// }
+//
+
 
 series_at_int :: proc(s: ^Series, i: int) -> (int, bool) {
 	if s.type != .Int {
@@ -100,4 +112,30 @@ series_at_date :: proc(s: ^Series, i: int) -> (Date, bool) {
 	}
 	base := uintptr(s.data) + uintptr(i * size_of(Date))
 	return (cast(^Date)base)^, false
+}
+series_at_time :: proc(s: ^Series, i: int) -> (Time, bool) {
+	if s.type != .Date {
+		panic("series_at_date: wrong type")
+	}
+	if i < 0 || i >= s.len {
+		panic("series_at_date: index out of bounds")
+	}
+	if s.nulls != nil && s.nulls[i] {
+		return Time{}, true
+	}
+	base := uintptr(s.data) + uintptr(i * size_of(Date))
+	return (cast(^Time)base)^, false
+}
+series_at_datetime :: proc(s: ^Series, i: int) -> (Datetime, bool) {
+	if s.type != .Date {
+		panic("series_at_date: wrong type")
+	}
+	if i < 0 || i >= s.len {
+		panic("series_at_date: index out of bounds")
+	}
+	if s.nulls != nil && s.nulls[i] {
+		return Datetime{}, true
+	}
+	base := uintptr(s.data) + uintptr(i * size_of(Date))
+	return (cast(^Datetime)base)^, false
 }

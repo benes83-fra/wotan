@@ -9,6 +9,8 @@ ColumnType :: enum {
 	Bool,
 	String,
 	Date,
+	Time,
+	Datetime,
 }
 
 Date :: struct {
@@ -16,6 +18,18 @@ Date :: struct {
 	month: i32,
 	day:   i32,
 }
+
+Time :: struct {
+	hour:   i32,
+	minute: i32,
+	second: i32,
+}
+
+Datetime :: struct {
+	date: Date,
+	time: Time,
+}
+
 
 type_size :: proc(t: ColumnType) -> int {
 	switch t {
@@ -29,9 +43,14 @@ type_size :: proc(t: ColumnType) -> int {
 		return size_of(string)
 	case .Date:
 		return size_of(Date)
+	case .Time:
+		return size_of(Time)
+	case .Datetime:
+		return  size_of(Datetime)
 	case .Invalid:
 		return 0
 	}
+
 	return 0
 }
 
@@ -40,7 +59,7 @@ get_column_type_by_type :: proc(type: string) -> ColumnType {
 	col: ColumnType
 	ltype := strings.to_lower(type)
 
-	defer delete (ltype)
+	defer delete(ltype)
 	switch ltype {
 	case "int":
 		col = .Int
@@ -52,6 +71,10 @@ get_column_type_by_type :: proc(type: string) -> ColumnType {
 		col = .Bool
 	case "date":
 		col = .Date
+  case "time":
+    col = .Time
+  case "datetime":
+    col = .Datetime
 
 
 	}

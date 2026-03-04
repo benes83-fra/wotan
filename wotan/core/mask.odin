@@ -155,17 +155,23 @@ mask_gt :: proc{
     mask_gt_int,
     mask_gt_float,
     mask_gt_date,
+    mask_gt_time,
+    mask_gt_datetime,
 }
 
 mask_lt :: proc{
     mask_lt_int,
     mask_lt_float,
     mask_lt_date,
+    mask_lt_datetime,
+    mask_lt_time,
 }
 mask_eq :: proc{
     mask_eq_int,
     mask_eq_float,
     mask_eq_date,
+    mask_eq_time,
+    mask_eq_datetime,
     mask_eq_string,
 }
 
@@ -290,7 +296,83 @@ mask_eq_date :: proc(col: ^Column, value: Date) -> []bool {
 }
 
 
+mask_gt_time :: proc(col: ^Column, value: Time) -> []bool {
+    if col.type != .Time {
+        panic("mask_gt_time: wrong column type")
+    }
 
+    mask := make([]bool, col.len)
+    for i in 0..<col.len {
+        v, is_null := column_at_time(col, i)
+        mask[i] = (!is_null && time_compare(v,value) > 0)
+    }
+    return mask
+}
+
+mask_lt_time :: proc(col: ^Column, value: Time) -> []bool {
+    if col.type != .Time {
+        panic("mask_lt_time: wrong column type")
+    }
+
+    mask := make([]bool, col.len)
+    for i in 0..<col.len {
+        v, is_null := column_at_time(col, i)
+        mask[i] = (!is_null && time_compare(v,value) < 0)
+    }
+    return mask
+}
+
+mask_eq_time :: proc(col: ^Column, value: Time) -> []bool {
+    if col.type != .Time {
+        panic("mask_eq_time: wrong column type")
+    }
+
+    mask := make([]bool, col.len)
+    for i in 0..<col.len {
+        v, is_null := column_at_time(col, i)
+        mask[i] = (!is_null && time_compare(v,value) == 0)
+    }
+    return mask
+}
+
+mask_gt_datetime :: proc(col: ^Column, value: Datetime) -> []bool {
+    if col.type != .Datetime {
+        panic("mask_gt_datetime: wrong column type")
+    }
+
+    mask := make([]bool, col.len)
+    for i in 0..<col.len {
+        v, is_null := column_at_datetime(col, i)
+        mask[i] = (!is_null && datetime_compare(v,value) > 0)
+    }
+    return mask
+}
+
+mask_lt_datetime :: proc(col: ^Column, value: Datetime) -> []bool {
+    if col.type != .Datetime {
+        panic("mask_lt_datetime: wrong column type")
+    }
+
+    mask := make([]bool, col.len)
+    for i in 0..<col.len {
+        v, is_null := column_at_datetime(col, i)
+        mask[i] = (!is_null && datetime_compare(v,value) < 0)
+    }
+    return mask
+}
+
+mask_eq_datetime :: proc(col: ^Column, value: Datetime) -> []bool {
+    if col.type != .Datetime {
+        panic("mask_eq_datetime: wrong column type")
+    }
+
+    mask := make([]bool, col.len)
+    for i in 0..<col.len {
+        v, is_null := column_at_datetime(col, i)
+        mask[i] = (!is_null && datetime_compare(v,value) == 0)
+    }
+    return mask
+}
 mask_eq_string :: proc(col: ^Column, value: string) -> []bool {
 	if col.type != .String {
 		panic("mask_eq_string: wrong column type")

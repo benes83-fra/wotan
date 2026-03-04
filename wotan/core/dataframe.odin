@@ -140,6 +140,20 @@ df_head :: proc(df: ^DataFrame, n: int) {
 			case .Date:
 				d := (cast(^Date)base)^
 				fmt.printf("%04d-%02d-%02d\t", d.year, d.month, d.day)
+			case .Time:
+				d := (cast(^Time)base)^
+				fmt.printf("%02d:%02d:%02d\t", d.hour, d.minute, d.second)
+			case .Datetime:
+				d := (cast(^Datetime)base)^
+				fmt.printf(
+					"%04d-%02d-%02d\t%02d:%02d:%02d\t",
+					d.date.year,
+					d.date.month,
+					d.date.day,
+					d.time.hour,
+					d.time.minute,
+					d.time.second,
+				)
 			}
 		}
 
@@ -174,6 +188,12 @@ dataframe_select_columns :: proc(df: ^DataFrame, names: []string, copy: bool) ->
 				case .Date:
 					v, is_null := column_at_date(col, i)
 					if is_null {append_null(&new_col)} else {append_date(&new_col, v)}
+				case .Time:
+					v, is_null := column_at_time(col, i)
+					if is_null {append_null(&new_col)} else {append_time(&new_col, v)}
+				case .Datetime:
+					v, is_null := column_at_datetime(col, i)
+					if is_null {append_null(&new_col)} else {append_datetime(&new_col, v)}
 				}
 			}
 			add_column(&out, new_col)
@@ -267,6 +287,14 @@ column_value_string :: proc(col: ^Column, row: int) -> string {
 		v, is_null := column_at_date(col, row)
 		if is_null {return "NULL"}
 		return fmt.tprintf("%04d-%02d-%02d", v.year, v.month, v.day)
+	case .Time:
+		v, is_null := column_at_time(col, row)
+		if is_null {return "NULL"}
+		return fmt.tprintf("%02d:%02d:%02d", v.hour, v.minute, v.second)
+	case .Datetime:
+		v, is_null := column_at_datetime(col, row)
+		if is_null {return "NULL"}
+		return fmt.tprintf("%04d-%02d-%02d\t%02d:%02d:%02d", v.date.year, v.date.month, v.date.day, v.time.hour, v.time.minute, v.time.second)
 	}
 
 	return "<?>"
@@ -329,6 +357,12 @@ dataframe_filter_bool_column :: proc(df: ^DataFrame, mask_col_name: string) -> D
 			case .Date:
 				v, is_null := column_at_date(&col, idx)
 				if is_null {append_null(&new_col)} else {append_date(&new_col, v)}
+			case .Time:
+				v, is_null := column_at_time(&col, idx)
+				if is_null {append_null(&new_col)} else {append_time(&new_col, v)}
+			case .Datetime:
+				v, is_null := column_at_datetime(&col, idx)
+				if is_null {append_null(&new_col)} else {append_datetime(&new_col, v)}
 			}
 		}
 
@@ -339,9 +373,9 @@ dataframe_filter_bool_column :: proc(df: ^DataFrame, mask_col_name: string) -> D
 	return out
 }
 filter :: proc {
-  dataframe_filter_by_bool_mask,
-  dataframe_filter_column_by_col_name,
-  dataframe_filter_column,
+	dataframe_filter_by_bool_mask,
+	dataframe_filter_column_by_col_name,
+	dataframe_filter_column,
 }
 
 dataframe_filter_by_bool_mask :: proc(df: ^DataFrame, mask: []bool) -> DataFrame {
@@ -386,6 +420,12 @@ dataframe_filter_by_bool_mask :: proc(df: ^DataFrame, mask: []bool) -> DataFrame
 			case .Date:
 				v, is_null := column_at_date(&col, idx)
 				if is_null {append_null(&new_col)} else {append_date(&new_col, v)}
+			case .Time:
+				v, is_null := column_at_time(&col, idx)
+				if is_null {append_null(&new_col)} else {append_time(&new_col, v)}
+			case .Datetime:
+				v, is_null := column_at_datetime(&col, idx)
+				if is_null {append_null(&new_col)} else {append_datetime(&new_col, v)}
 			}
 		}
 
@@ -414,7 +454,7 @@ dataframe_filter_column_by_col_name :: proc(df: ^DataFrame, col_name: string) ->
 
 dataframe_filter_column :: proc(df: ^DataFrame, mask_col: Column) -> DataFrame {
 	col := mask_col
-  defer destroy_column(&col)
+	defer destroy_column(&col)
 	if col.type != .Bool {
 		panic("dataframe_filter_column: column must be Bool")
 	}

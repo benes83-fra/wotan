@@ -37,12 +37,40 @@ is_date :: proc(s: string) -> bool {
 	return err1 && err2 && err3
 }
 
+
+is_time :: proc(s: string) -> bool {
+	parts := strings.split(s, ":")
+	defer delete(parts)
+	if len(parts) != 3 {
+		return false
+	}
+	_, err1 := strconv.parse_int(parts[0])
+	_, err2 := strconv.parse_int(parts[1])
+	_, err3 := strconv.parse_int(parts[2])
+
+
+	return err1 && err2 && err3
+}
+is_datetime :: proc(s: string) -> bool {
+	parts := strings.split(s, "\t")
+	defer delete(parts)
+	if len(parts) != 2 {
+		return false
+	}
+	date := is_date(parts[0])
+	time := is_time(parts[1])
+	return date && time
+
+}
+
 infer_column_type :: proc(samples: []string) -> w.ColumnType {
 	has_string := false
 	has_float := false
 	has_int := false
 	has_bool := false
 	has_date := false
+	has_time := false
+	has_datetime := false
 
 	for s in samples {
 		if s == "" {
@@ -63,8 +91,17 @@ infer_column_type :: proc(samples: []string) -> w.ColumnType {
 			has_bool = true
 			continue
 		}
+		if is_datetime(s) {
+			has_datetime = true
+			continue
+		}
 		if is_date(s) {
 			has_date = true
+			continue
+
+		}
+		if is_time(s) {
+			has_time = true
 			continue
 		}
 		has_string = true
@@ -74,7 +111,9 @@ infer_column_type :: proc(samples: []string) -> w.ColumnType {
 	if has_float {return .Float}
 	if has_int {return .Int}
 	if has_bool {return .Bool}
-	if has_date {return .Date}
+	if has_datetime {return .Datetime}
+  if has_date {return .Date}
+  if has_time {return .Time}
 
 	return .String
 }

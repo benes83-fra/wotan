@@ -95,6 +95,8 @@ append_colum :: proc {
 	append_float,
 	append_date,
 	append_string,
+  append_time,
+  append_datetime,
 }
 
 
@@ -170,6 +172,43 @@ append_date :: proc(c: ^Column, v: Date) {
 	(cast(^Date)base)^ = v
 }
 
+
+
+append_time :: proc(c: ^Column, v: Time) {
+	if c.is_view {
+		panic("append_date: cannot append to view column")
+	}
+	if c.type != .Date {
+		panic("append_date: wrong column type")
+	}
+	if c.len >= c.capacity {
+		grow(c, max(8, c.capacity * 2))
+	}
+
+	idx := c.len
+	c.len += 1
+
+	base := uintptr(c.data) + uintptr(idx * size_of(Date))
+	(cast(^Time)base)^ = v
+}
+
+append_datetime :: proc(c: ^Column, v: Datetime) {
+	if c.is_view {
+		panic("append_date: cannot append to view column")
+	}
+	if c.type != .Date {
+		panic("append_date: wrong column type")
+	}
+	if c.len >= c.capacity {
+		grow(c, max(8, c.capacity * 2))
+	}
+
+	idx := c.len
+	c.len += 1
+
+	base := uintptr(c.data) + uintptr(idx * size_of(Date))
+	(cast(^Datetime)base)^ = v
+}
 append_null :: proc(c: ^Column) {
 	if c.is_view {
 		panic("append_null: cannot append to view column")
@@ -280,7 +319,33 @@ column_at_date :: proc(col: ^Column, i: int) -> (Date, bool) {
 	return (cast(^Date)base)^, false
 }
 
+column_at_time :: proc(col: ^Column, i: int) -> (Time, bool) {
+	if i < 0 || i >= col.len {
+		panic("column_at_date: index out of range")
+	}
+	if col.is_view {
+		return column_at_time(col.orig, col.offset + i)
+	}
+	if col.nulls != nil && col.nulls[i] {
+		return Time{0, 0, 0}, true
+	}
+	base := uintptr(col.data) + uintptr(i * type_size(col.type))
+	return (cast(^Time)base)^, false
+}
 
+column_at_datetime :: proc(col: ^Column, i: int) -> (Datetime, bool) {
+	if i < 0 || i >= col.len {
+		panic("column_at_date: index out of range")
+	}
+	if col.is_view {
+		return column_at_datetime(col.orig, col.offset + i)
+	}
+	if col.nulls != nil && col.nulls[i] {
+		return Datetime{{0, 0, 0},{0,0,0}}, true
+	}
+	base := uintptr(col.data) + uintptr(i * type_size(col.type))
+	return (cast(^Datetime)base)^, false
+}
 column_slice_view :: proc(orig: ^Column, start: int, end: int) -> Column {
 	if start < 0 || end < start || end > orig.len {
 		panic("column_slice_view: invalid range")
@@ -331,7 +396,14 @@ column_slice_copy :: proc(orig: ^Column, start: int, end: int) -> Column {
 		case .Date:
 			v, is_null := column_at_date(orig, i)
 			if is_null {append_null(&c)} else {append_date(&c, v)}
-		}
+		case .Time:
+			v, is_null := column_at_time(orig, i)
+			if is_null {append_null(&c)} else {append_time(&c, v)}
+		
+		case .Datetime:
+			v, is_null := column_at_datetime(orig, i)
+			if is_null {append_null(&c)} else {append_datetime(&c, v)}
+    }
 	}
 
 	return c
@@ -346,12 +418,17 @@ column_gt :: proc {
 	column_gt_int,
 	column_gt_float,
 	column_gt_date,
+  column_gt_time,
+  column_gt_datetime,
+
 }
 
 column_lt :: proc {
 	column_lt_int,
 	column_lt_float,
 	column_lt_date,
+  column_lt_time,
+  column_lt_datetime,
 }
 
 column_eq :: proc {
@@ -359,6 +436,8 @@ column_eq :: proc {
 	column_eq_float,
 	column_eq_date,
 	column_eq_string,
+  column_eq_time,
+  column_eq_datetime,
 }
 
 
@@ -554,6 +633,101 @@ column_eq_date :: proc(col: ^Column, value: Date) -> Column {
 	return out
 }
 
+column_gt_time :: proc(col: ^Column, value: Time) -> Column {
+	if col.type != .Time {
+		panic("column_gt_time: wrong column type")
+	}
+	out := column_new_bool_mask(col.len)
+	for i in 0 ..< col.len {
+		v, is_null := column_at_time(col, i)
+		if is_null {
+			append_null(&out)
+		} else {
+			append_bool(&out, time_compare(v, value) > 0)
+		}
+	}
+	return out
+}
+
+column_lt_time :: proc(col: ^Column, value: Time) -> Column {
+	if col.type != .Time {
+		panic("column_lt_time: wrong column type")
+	}
+	out := column_new_bool_mask(col.len)
+	for i in 0 ..< col.len {
+		v, is_null := column_at_time(col, i)
+		if is_null {
+			append_null(&out)
+		} else {
+			append_bool(&out, time_compare(v, value) < 0)
+		}
+	}
+	return out
+}
+
+column_eq_time :: proc(col: ^Column, value: Time) -> Column {
+	if col.type != .Time {
+		panic("column_eq_time: wrong column type")
+	}
+	out := column_new_bool_mask(col.len)
+	for i in 0 ..< col.len {
+		v, is_null := column_at_time(col, i)
+		if is_null {
+			append_null(&out)
+		} else {
+			append_bool(&out, time_compare(v, value) == 0)
+		}
+	}
+	return out
+}
+
+column_gt_datetime :: proc(col: ^Column, value: Datetime) -> Column {
+	if col.type != .Datetime {
+		panic("column_gt_datetime: wrong column type")
+	}
+	out := column_new_bool_mask(col.len)
+	for i in 0 ..< col.len {
+		v, is_null := column_at_datetime(col, i)
+		if is_null {
+			append_null(&out)
+		} else {
+			append_bool(&out, datetime_compare(v, value) > 0)
+		}
+	}
+	return out
+}
+
+column_lt_datetime :: proc(col: ^Column, value: Datetime) -> Column {
+	if col.type != .Datetime {
+		panic("column_lt_datetime: wrong column type")
+	}
+	out := column_new_bool_mask(col.len)
+	for i in 0 ..< col.len {
+		v, is_null := column_at_datetime(col, i)
+		if is_null {
+			append_null(&out)
+		} else {
+			append_bool(&out, datetime_compare(v, value) < 0)
+		}
+	}
+	return out
+}
+
+column_eq_datetime :: proc(col: ^Column, value: Datetime) -> Column {
+	if col.type != .Date {
+		panic("column_eq_datetime: wrong column type")
+	}
+	out := column_new_bool_mask(col.len)
+	for i in 0 ..< col.len {
+		v, is_null := column_at_datetime(col, i)
+		if is_null {
+			append_null(&out)
+		} else {
+			append_bool(&out, datetime_compare(v, value) == 0)
+		}
+	}
+	return out
+}
 //converts bool column into a bool array mask, treating nulls as false
 column_mask :: proc (col: ^Column) -> []bool {
 	if col.type != .Bool {
