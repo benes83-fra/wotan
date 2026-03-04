@@ -144,10 +144,49 @@ csv_load :: proc(
 					panic(fmt.tprintf("csv_load: invalid date '%s'", field))
 				}
 				year, _ := strconv.parse_int(parts[0])
-				month, _ := strconv.parse_int((parts[1]))
+				month, _ := strconv.parse_int(parts[1])
 				day, _ := strconv.parse_int(parts[2])
 				w.append_date(&cols[col_i], w.Date{i32(year), i32(month), i32(day)})
-			}
+      case .Time:
+              
+        parts := strings.split(field, ":")
+				defer delete(parts)
+				if len(parts) != 3 {
+					panic(fmt.tprintf("csv_load: invalid time '%s'", field))
+				}
+				hour, _ := strconv.parse_int(parts[0])
+				minute, _ := strconv.parse_int(parts[1])
+				second, _ := strconv.parse_int(parts[2])
+				w.append_time(&cols[col_i], w.Time{i32(hour), i32(minute), i32(second)})
+ 
+      case .Datetime:
+              
+        parts := strings.split(field, "\t")
+				defer delete(parts)
+				if len(parts) != 2 {
+					panic(fmt.tprintf("csv_load: invalid datetime '%s'", field))
+				}
+        dparts := strings.split(field, "-")
+				defer delete(dparts)
+        if len(dparts) != 3 {
+					panic(fmt.tprintf("csv_load: invalid date '%s'", field))
+				}
+				year, _ := strconv.parse_int(dparts[0])
+				month, _ := strconv.parse_int(dparts[1])
+				day, _ := strconv.parse_int(dparts[2])
+
+        tparts := strings.split(field, ":")
+				defer delete(tparts)
+				if len(parts) != 3 {
+					panic(fmt.tprintf("csv_load: invalid time '%s'", field))
+				}
+				hour, _ := strconv.parse_int(tparts[0])
+				minute, _ := strconv.parse_int(tparts[1])
+				second, _ := strconv.parse_int(tparts[2])
+        w.append_datetime(&cols[col_i], w.Datetime{{i32(hour), i32(minute), i32(second)},{i32(hour),i32(minute),i32(second)}})
+
+      }
+
 		}
 	}
 	// Add columns to DataFrame
