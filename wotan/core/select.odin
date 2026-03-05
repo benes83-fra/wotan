@@ -20,6 +20,9 @@ Select_Kind :: enum {
 	ApplyFloat,
 	ApplyString,
 	ApplyBool,
+  ApplyDate,
+  ApplyTime,
+  ApplyDatetime,
 	ConvIntFloat,
 	ConvFloatInt,
 	Conv,
@@ -38,6 +41,9 @@ Select_Expr :: struct {
 	fn_float:     proc(x: f64) -> f64,
 	fn_string:    proc(x: string) -> string,
 	fn_bool:      proc(x: bool) -> bool,
+  fn_date:      proc(x: Date) -> Date,
+  fn_time:      proc(x: Time) ->Time,
+  fn_datetime:  proc(x: Datetime) -> Datetime,
 }
 
 //
@@ -112,6 +118,9 @@ apply_expr :: proc {
 	apply_float_expr,
 	apply_string_expr,
 	apply_bool_expr,
+  apply_date_expr,
+  apply_time_expr,
+  apply_datetime_expr,
 }
 
 apply_int_expr :: proc(name: string, col: ^Column, fn: proc(x: int) -> int) -> Select_Expr {
@@ -135,6 +144,17 @@ apply_bool_expr :: proc(name: string, col: ^Column, fn: proc(x: bool) -> bool) -
 	return Select_Expr{name = name, kind = .ApplyBool, col = col, fn_bool = fn}
 }
 
+apply_date_expr :: proc(name: string, col: ^Column, fn: proc(x: Date) -> Date) -> Select_Expr {
+	return Select_Expr{name = name, kind = .ApplyDate, col = col, fn_date = fn}
+}
+
+apply_time_expr :: proc(name: string, col: ^Column, fn: proc(x: Time) -> Time) -> Select_Expr {
+	return Select_Expr{name = name, kind = .ApplyTime, col = col, fn_time = fn}
+}
+
+apply_datetime_expr :: proc(name: string, col: ^Column, fn: proc(x: Datetime) -> Datetime) -> Select_Expr {
+	return Select_Expr{name = name, kind = .ApplyDatetime, col = col, fn_datetime = fn}
+}
 
 conv_int_to_f64_expr :: proc(name: string, col: ^Column) -> Select_Expr {
 	return Select_Expr{name = name, kind = .ConvIntFloat, col = col}
@@ -371,6 +391,42 @@ select_exprs :: proc(df: ^DataFrame, exprs: []Select_Expr) -> DataFrame {
 			}
 			add_column(&out, new_col)
 
+		case .ApplyDate:
+			orig := expr.col
+			new_col := column_new(expr.name, .Date, orig.len)
+			for i in 0 ..< orig.len {
+				v, n := column_at_date(orig, i)
+				if n {
+					append_null(&new_col)
+				} else {
+					append_date(&new_col, expr.fn_date(v))
+				}
+			}
+			add_column(&out, new_col)
+		case .ApplyTime:
+			orig := expr.col
+			new_col := column_new(expr.name, .Time, orig.len)
+			for i in 0 ..< orig.len {
+				v, n := column_at_time(orig, i)
+				if n {
+					append_null(&new_col)
+				} else {
+					append_time(&new_col, expr.fn_time(v))
+				}
+			}
+			add_column(&out, new_col)
+		case .ApplyDatetime:
+			orig := expr.col
+			new_col := column_new(expr.name, .Datetime, orig.len)
+			for i in 0 ..< orig.len {
+				v, n := column_at_datetime(orig, i)
+				if n {
+					append_null(&new_col)
+				} else {
+					append_datetime(&new_col, expr.fn_datetime(v))
+				}
+			}
+			add_column(&out, new_col)
 		case .ConvFloatInt:
 			orig := expr.col
 			new_col := column_new(expr.name, .Int, orig.len)

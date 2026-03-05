@@ -26,6 +26,21 @@ datetime_compare :: proc(a, b: Datetime) -> i32 {
 	return a.second - b.second
 }
 
+validate_date :: proc(year: i32, month: i32, day: i32) -> bool {
+
+	if month < 1 || month > 12 || day < 1 || day > 31 {
+		return false
+	}
+	return true
+}
+validate_time :: proc(hour: i32, minute: i32, second: i32) -> bool {
+
+	if hour < 1 || hour > 24 || minute < 1 || minute > 60 || second < 1 || second > 60 {
+		return false
+	}
+	return true
+}
+
 parse_date :: proc(date_str: string) -> (Date, bool) {
 	parts := strings.split(date_str, "-")
 	if len(parts) != 3 {
@@ -41,11 +56,59 @@ parse_date :: proc(date_str: string) -> (Date, bool) {
 	}
 
 	// Basic validation
-	if month < 1 || month > 12 || day < 1 || day > 31 {
+	if !validate_date(i32(year), i32(month), i32(day)) {
 		return Date{}, false
 	}
 
 	return Date{i32(year), i32(month), i32(day)}, true
+}
+parse_time :: proc(time_str: string) -> (Time, bool) {
+	parts := strings.split(time_str, ":")
+	if len(parts) != 3 {
+		return Time{}, false
+	}
+	hour, ok1 := strconv.parse_int(parts[0])
+	minute, ok2 := strconv.parse_int(parts[1])
+	second, ok3 := strconv.parse_int(parts[2])
+	if !ok1 || !ok2 || !ok3 {
+		return Time{}, false
+	}
+	if !validate_time(i32(hour), i32(minute), i32(second)) {
+		return Time{}, false
+	}
+	return Time{i32(hour), i32(minute), i32(second)}, true
+
+}
+
+parse_datetime :: proc(datetime_str: string) -> (Datetime, bool) {
+	parts := strings.split(datetime_str, " ")
+	if len(parts) != 2 {
+		return Datetime{}, false
+	}
+	dparts := strings.split(parts[0], "-")
+
+	year, ok1 := strconv.parse_int(dparts[0])
+	month, ok2 := strconv.parse_int(dparts[1])
+	day, ok3 := strconv.parse_int(dparts[2])
+	if !ok1 || !ok2 || !ok3 {
+		return Datetime{}, false
+	}
+	if !validate_date(i32(year), i32(month), i32(day)) {
+		return Datetime{}, false
+	}
+	tparts := strings.split(parts[1], ":")
+
+	hour, ok4 := strconv.parse_int(tparts[0])
+	minute, ok5 := strconv.parse_int(tparts[1])
+	second, ok6 := strconv.parse_int(tparts[2])
+	if !ok4 || !ok5 || !ok6 {
+		return Datetime{}, false
+	}
+	if !validate_time(i32(hour), i32(minute), i32(second)) {
+		return Datetime{}, false
+	}
+	dt := Datetime{i32(year), i32(month), i32(day), i32(hour), i32(minute), i32(second)}
+	return dt, true
 }
 
 
@@ -59,8 +122,34 @@ date_to_string :: proc(d: Date) -> string {
 
 	return strings.to_string(sb) // Convert builder to string
 }
+time_to_string :: proc(t: Time) -> string {
+	sb := strings.builder_make()
+	defer strings.builder_destroy(&sb)
 
+	fmt.sbprintf(&sb, "%02d:%02s%02d", t.hour, t.minute, t.second)
 
+	return strings.to_string(sb)
+
+}
+
+datetime_to_string :: proc(dt: Datetime) -> string {
+	sb := strings.builder_make()
+	defer strings.builder_destroy(&sb)
+
+	fmt.sbprintf(
+		&sb,
+		"%%04d-%02d-%02d 02d:%02s%02d",
+		dt.year,
+		dt.month,
+		dt.day,
+		dt.hour,
+		dt.minute,
+		dt.second,
+	)
+
+	return strings.to_string(sb)
+
+}
 date_to_int :: proc(d: Date) -> i32 {
 	// Validate ranges
 	if d.month < 1 || d.month > 12 {

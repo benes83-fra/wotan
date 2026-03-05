@@ -84,7 +84,6 @@ csv_load :: proc(
 	if auto {
 		types = infer_col_types(records, null_tokens)
 	}
-	fmt.println(types)
 	if len(header) != len(types) {
 		panic("csv_load: header/type count missmatch")
 	}
@@ -146,6 +145,9 @@ csv_load :: proc(
 				year, _ := strconv.parse_int(parts[0])
 				month, _ := strconv.parse_int(parts[1])
 				day, _ := strconv.parse_int(parts[2])
+        if !w.validate_date (i32(year),i32(month),i32(day)){
+          panic (fmt.tprintf ("csv_load: invalid date format '%s'",field))
+        }
 				w.append_date(&cols[col_i], w.Date{i32(year), i32(month), i32(day)})
 			case .Time:
 				parts := strings.split(field, ":")
@@ -156,6 +158,9 @@ csv_load :: proc(
 				hour, _ := strconv.parse_int(parts[0])
 				minute, _ := strconv.parse_int(parts[1])
 				second, _ := strconv.parse_int(parts[2])
+        if !w.validate_time (i32(hour),i32(minute),i32(second)){
+          panic(fmt.tprintf ("csv_load: invalid time formart '%s'",field))
+        }
 				w.append_time(&cols[col_i], w.Time{i32(hour), i32(minute), i32(second)})
 
 			case .Datetime:
@@ -172,7 +177,10 @@ csv_load :: proc(
 				year, _ := strconv.parse_int(dparts[0])
 				month, _ := strconv.parse_int(dparts[1])
 				day, _ := strconv.parse_int(dparts[2])
-
+  
+        if !w.validate_date (i32(year),i32(month),i32(day)){
+          panic (fmt.tprintf ("csv_load: invalid date format '%s'",field))
+        }
 				tparts := strings.split(parts[1], ":")
 				defer delete(tparts)
 				if len(tparts) != 3 {
@@ -181,7 +189,9 @@ csv_load :: proc(
 				hour, _ := strconv.parse_int(tparts[0])
 				minute, _ := strconv.parse_int(tparts[1])
 				second, _ := strconv.parse_int(tparts[2])
-				fmt.println(year, month, day, hour, minute, second)
+        if !w.validate_time (i32(hour),i32(minute),i32(second)){
+          panic(fmt.tprintf ("csv_load: invalid time formart '%s'",field))
+        }
 				dt: w.Datetime
 				dt.year = i32(year)
 				dt.month = i32(month)
