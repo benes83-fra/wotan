@@ -137,69 +137,28 @@ csv_load :: proc(
 
 			case .Date:
 				// Very simple YYYY-MM-DD parser
-				parts := strings.split(field, "-")
-				defer delete(parts)
-				if len(parts) != 3 {
-					panic(fmt.tprintf("csv_load: invalid date '%s'", field))
-				}
-				year, _ := strconv.parse_int(parts[0])
-				month, _ := strconv.parse_int(parts[1])
-				day, _ := strconv.parse_int(parts[2])
-        if !w.validate_date (i32(year),i32(month),i32(day)){
-          panic (fmt.tprintf ("csv_load: invalid date format '%s'",field))
+        date , ok := w.parse_date(field)
+        if !ok {
+          panic (fmt.tprintf ("csv_load: invalid date '%s", field))
         }
-				w.append_date(&cols[col_i], w.Date{i32(year), i32(month), i32(day)})
+
+				w.append_date(&cols[col_i], date)
 			case .Time:
-				parts := strings.split(field, ":")
-				defer delete(parts)
-				if len(parts) != 3 {
-					panic(fmt.tprintf("csv_load: invalid time '%s'", field))
-				}
-				hour, _ := strconv.parse_int(parts[0])
-				minute, _ := strconv.parse_int(parts[1])
-				second, _ := strconv.parse_int(parts[2])
-        if !w.validate_time (i32(hour),i32(minute),i32(second)){
+        time , ok := w.parse_time(field)
+        if !ok {
+
           panic(fmt.tprintf ("csv_load: invalid time formart '%s'",field))
+
         }
-				w.append_time(&cols[col_i], w.Time{i32(hour), i32(minute), i32(second)})
+				w.append_time(&cols[col_i], time)
 
 			case .Datetime:
-				parts := strings.split(field, " ")
-				defer delete(parts)
-				if len(parts) != 2 {
-					panic(fmt.tprintf("csv_load: invalid datetime '%s'", field))
-				}
-				dparts := strings.split(parts[0], "-")
-				defer delete(dparts)
-				if len(dparts) != 3 {
-					panic(fmt.tprintf("csv_load: invalid date '%s'", field))
-				}
-				year, _ := strconv.parse_int(dparts[0])
-				month, _ := strconv.parse_int(dparts[1])
-				day, _ := strconv.parse_int(dparts[2])
-  
-        if !w.validate_date (i32(year),i32(month),i32(day)){
-          panic (fmt.tprintf ("csv_load: invalid date format '%s'",field))
+        datetime , ok:= w.parse_datetime(field)
+			  if !ok{
+
+          panic(fmt.tprintf ("csv_load: invalid datetime formart '%s'",field))
         }
-				tparts := strings.split(parts[1], ":")
-				defer delete(tparts)
-				if len(tparts) != 3 {
-					panic(fmt.tprintf("csv_load: invalid time '%s'", field))
-				}
-				hour, _ := strconv.parse_int(tparts[0])
-				minute, _ := strconv.parse_int(tparts[1])
-				second, _ := strconv.parse_int(tparts[2])
-        if !w.validate_time (i32(hour),i32(minute),i32(second)){
-          panic(fmt.tprintf ("csv_load: invalid time formart '%s'",field))
-        }
-				dt: w.Datetime
-				dt.year = i32(year)
-				dt.month = i32(month)
-				dt.day = i32(day)
-				dt.hour = i32(hour)
-				dt.minute = i32(minute)
-				dt.second = i32(second)
-				w.append_datetime(&cols[col_i], dt)
+        w.append_datetime(&cols[col_i], datetime)
 
 			}
 

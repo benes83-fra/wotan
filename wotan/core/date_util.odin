@@ -43,6 +43,7 @@ validate_time :: proc(hour: i32, minute: i32, second: i32) -> bool {
 
 parse_date :: proc(date_str: string) -> (Date, bool) {
 	parts := strings.split(date_str, "-")
+	defer delete(parts)
 	if len(parts) != 3 {
 		return Date{}, false // Invalid format
 	}
@@ -64,6 +65,7 @@ parse_date :: proc(date_str: string) -> (Date, bool) {
 }
 parse_time :: proc(time_str: string) -> (Time, bool) {
 	parts := strings.split(time_str, ":")
+	defer delete(parts)
 	if len(parts) != 3 {
 		return Time{}, false
 	}
@@ -82,11 +84,12 @@ parse_time :: proc(time_str: string) -> (Time, bool) {
 
 parse_datetime :: proc(datetime_str: string) -> (Datetime, bool) {
 	parts := strings.split(datetime_str, " ")
+	defer delete(parts)
 	if len(parts) != 2 {
 		return Datetime{}, false
 	}
 	dparts := strings.split(parts[0], "-")
-
+	defer delete(dparts)
 	year, ok1 := strconv.parse_int(dparts[0])
 	month, ok2 := strconv.parse_int(dparts[1])
 	day, ok3 := strconv.parse_int(dparts[2])
@@ -97,7 +100,7 @@ parse_datetime :: proc(datetime_str: string) -> (Datetime, bool) {
 		return Datetime{}, false
 	}
 	tparts := strings.split(parts[1], ":")
-
+	defer delete(tparts)
 	hour, ok4 := strconv.parse_int(tparts[0])
 	minute, ok5 := strconv.parse_int(tparts[1])
 	second, ok6 := strconv.parse_int(tparts[2])
