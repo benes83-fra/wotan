@@ -52,7 +52,7 @@ is_time :: proc(s: string) -> bool {
 	return err1 && err2 && err3
 }
 is_datetime :: proc(s: string) -> bool {
-	parts := strings.split(s, "\t")
+	parts := strings.split(s, " ")
 	defer delete(parts)
 	if len(parts) != 2 {
 		return false
@@ -112,8 +112,8 @@ infer_column_type :: proc(samples: []string) -> w.ColumnType {
 	if has_int {return .Int}
 	if has_bool {return .Bool}
 	if has_datetime {return .Datetime}
-  if has_date {return .Date}
-  if has_time {return .Time}
+	if has_date {return .Date}
+	if has_time {return .Time}
 
 	return .String
 }

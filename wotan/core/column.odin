@@ -1,8 +1,8 @@
 package wotan
 
+import "core:fmt"
 import "core:mem"
 import "core:strings"
-import "core:fmt"
 Column :: struct {
 	name:     string,
 	type:     ColumnType,
@@ -18,7 +18,7 @@ Column :: struct {
 
 column_new :: proc(name: string, type: ColumnType, capacity: int) -> Column {
 	size := capacity * type_size(type)
-  data, err := mem.alloc(size)
+	data, err := mem.alloc(size)
 	if err != nil {
 		panic("Column: allocation failed")
 	}
@@ -95,8 +95,8 @@ append_colum :: proc {
 	append_float,
 	append_date,
 	append_string,
-  append_time,
-  append_datetime,
+	append_time,
+	append_datetime,
 }
 
 
@@ -173,13 +173,12 @@ append_date :: proc(c: ^Column, v: Date) {
 }
 
 
-
 append_time :: proc(c: ^Column, v: Time) {
 	if c.is_view {
-		panic("append_date: cannot append to view column")
+		panic("append_time: cannot append to view column")
 	}
-	if c.type != .Date {
-		panic("append_date: wrong column type")
+	if c.type != .Time {
+		panic("append_time: wrong column type")
 	}
 	if c.len >= c.capacity {
 		grow(c, max(8, c.capacity * 2))
@@ -194,10 +193,10 @@ append_time :: proc(c: ^Column, v: Time) {
 
 append_datetime :: proc(c: ^Column, v: Datetime) {
 	if c.is_view {
-		panic("append_date: cannot append to view column")
+		panic("append_datetime: cannot append to view column")
 	}
-	if c.type != .Date {
-		panic("append_date: wrong column type")
+	if c.type != .Datetime {
+		panic("append_datetime: wrong column type")
 	}
 	if c.len >= c.capacity {
 		grow(c, max(8, c.capacity * 2))
@@ -206,7 +205,7 @@ append_datetime :: proc(c: ^Column, v: Datetime) {
 	idx := c.len
 	c.len += 1
 
-	base := uintptr(c.data) + uintptr(idx * size_of(Date))
+	base := uintptr(c.data) + uintptr(idx * size_of(Datetime))
 	(cast(^Datetime)base)^ = v
 }
 append_null :: proc(c: ^Column) {
@@ -226,12 +225,12 @@ append_null :: proc(c: ^Column) {
 	c.nulls[idx] = true
 }
 
-column_at_ptr :: proc(col: ^Column, i: int) -> (uintptr, bool){
+column_at_ptr :: proc(col: ^Column, i: int) -> (uintptr, bool) {
 
 	if i < 0 || i >= col.len {
 		panic("column_at_int: index out of range")
 	}
-  
+
 	if col.is_view {
 		return column_at_ptr(col.orig, col.offset + i)
 	}
@@ -241,10 +240,9 @@ column_at_ptr :: proc(col: ^Column, i: int) -> (uintptr, bool){
 	}
 	base := uintptr(col.data) + uintptr(i * type_size(col.type))
 
-  return base, false
+	return base, false
 
 }
-
 
 
 // Column read helpers (safe, copy-based readers)
@@ -335,13 +333,13 @@ column_at_time :: proc(col: ^Column, i: int) -> (Time, bool) {
 
 column_at_datetime :: proc(col: ^Column, i: int) -> (Datetime, bool) {
 	if i < 0 || i >= col.len {
-		panic("column_at_date: index out of range")
+		panic("column_at_datetime: index out of range")
 	}
 	if col.is_view {
 		return column_at_datetime(col.orig, col.offset + i)
 	}
 	if col.nulls != nil && col.nulls[i] {
-		return Datetime{{0, 0, 0},{0,0,0}}, true
+		return Datetime{0, 0, 0, 0, 0, 0}, true
 	}
 	base := uintptr(col.data) + uintptr(i * type_size(col.type))
 	return (cast(^Datetime)base)^, false
@@ -399,11 +397,11 @@ column_slice_copy :: proc(orig: ^Column, start: int, end: int) -> Column {
 		case .Time:
 			v, is_null := column_at_time(orig, i)
 			if is_null {append_null(&c)} else {append_time(&c, v)}
-		
+
 		case .Datetime:
 			v, is_null := column_at_datetime(orig, i)
 			if is_null {append_null(&c)} else {append_datetime(&c, v)}
-    }
+		}
 	}
 
 	return c
@@ -418,17 +416,16 @@ column_gt :: proc {
 	column_gt_int,
 	column_gt_float,
 	column_gt_date,
-  column_gt_time,
-  column_gt_datetime,
-
+	column_gt_time,
+	column_gt_datetime,
 }
 
 column_lt :: proc {
 	column_lt_int,
 	column_lt_float,
 	column_lt_date,
-  column_lt_time,
-  column_lt_datetime,
+	column_lt_time,
+	column_lt_datetime,
 }
 
 column_eq :: proc {
@@ -436,8 +433,8 @@ column_eq :: proc {
 	column_eq_float,
 	column_eq_date,
 	column_eq_string,
-  column_eq_time,
-  column_eq_datetime,
+	column_eq_time,
+	column_eq_datetime,
 }
 
 
@@ -729,15 +726,15 @@ column_eq_datetime :: proc(col: ^Column, value: Datetime) -> Column {
 	return out
 }
 //converts bool column into a bool array mask, treating nulls as false
-column_mask :: proc (col: ^Column) -> []bool {
+column_mask :: proc(col: ^Column) -> []bool {
 	if col.type != .Bool {
-		panic ("column_mask: wrong column type")
+		panic("column_mask: wrong column type")
 	}
-	barr := make ([] bool, col.len)
+	barr := make([]bool, col.len)
 	for i in 0 ..< col.len {
-		v, is_null := column_at_bool (col, i)
+		v, is_null := column_at_bool(col, i)
 		if (is_null) {
-			barr[i] = false		
+			barr[i] = false
 		} else {
 			barr[i] = v
 		}

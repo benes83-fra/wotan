@@ -2,6 +2,8 @@ package wotan
 
 
 import "core:strings"
+
+import "core:time/datetime"
 ColumnType :: enum {
 	Invalid,
 	Int,
@@ -26,8 +28,12 @@ Time :: struct {
 }
 
 Datetime :: struct {
-	date: Date,
-	time: Time,
+	year:   i32,
+	month:  i32,
+	day:    i32,
+	hour:   i32,
+	minute: i32,
+	second: i32,
 }
 
 
@@ -46,7 +52,7 @@ type_size :: proc(t: ColumnType) -> int {
 	case .Time:
 		return size_of(Time)
 	case .Datetime:
-		return  size_of(Datetime)
+		return size_of(Datetime)
 	case .Invalid:
 		return 0
 	}
@@ -71,10 +77,10 @@ get_column_type_by_type :: proc(type: string) -> ColumnType {
 		col = .Bool
 	case "date":
 		col = .Date
-  case "time":
-    col = .Time
-  case "datetime":
-    col = .Datetime
+	case "time":
+		col = .Time
+	case "datetime":
+		col = .Datetime
 
 
 	}

@@ -200,6 +200,12 @@ select_exprs :: proc(df: ^DataFrame, exprs: []Select_Expr) -> DataFrame {
 				case .Date:
 					v, n := column_at_date(orig, i)
 					if n {append_null(&new_col)} else {append_date(&new_col, v)}
+				case .Time:
+					v, n := column_at_time(orig, i)
+					if n {append_null(&new_col)} else {append_time(&new_col, v)}
+				case .Datetime:
+					v, n := column_at_datetime(orig, i)
+					if n {append_null(&new_col)} else {append_datetime(&new_col, v)}
 				}
 			}
 

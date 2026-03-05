@@ -18,12 +18,12 @@ time_compare :: proc(a, b: Time) -> i32 {
 	return a.second - b.second
 }
 datetime_compare :: proc(a, b: Datetime) -> i32 {
-	if a.date.year != b.date.year {return a.date.year - b.date.year}
-	if a.date.month != b.date.month {return a.date.month - b.date.month}
-	if a.date.day != b.date.day {return a.date.day - b.date.day}
-	if a.time.hour != b.time.hour {return a.time.hour - b.time.hour}
-	if a.time.minute != b.time.minute {return a.time.minute - b.time.minute}
-	return a.time.second - b.time.second
+	if a.year != b.year {return a.year - b.year}
+	if a.month != b.month {return a.month - b.month}
+	if a.day != b.day {return a.day - b.day}
+	if a.hour != b.hour {return a.hour - b.hour}
+	if a.minute != b.minute {return a.minute - b.minute}
+	return a.second - b.second
 }
 
 parse_date :: proc(date_str: string) -> (Date, bool) {

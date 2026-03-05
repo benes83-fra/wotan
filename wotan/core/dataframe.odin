@@ -147,12 +147,12 @@ df_head :: proc(df: ^DataFrame, n: int) {
 				d := (cast(^Datetime)base)^
 				fmt.printf(
 					"%04d-%02d-%02d\t%02d:%02d:%02d\t",
-					d.date.year,
-					d.date.month,
-					d.date.day,
-					d.time.hour,
-					d.time.minute,
-					d.time.second,
+					d.year,
+					d.month,
+					d.day,
+					d.hour,
+					d.minute,
+					d.second,
 				)
 			}
 		}
@@ -294,7 +294,16 @@ column_value_string :: proc(col: ^Column, row: int) -> string {
 	case .Datetime:
 		v, is_null := column_at_datetime(col, row)
 		if is_null {return "NULL"}
-		return fmt.tprintf("%04d-%02d-%02d\t%02d:%02d:%02d", v.date.year, v.date.month, v.date.day, v.time.hour, v.time.minute, v.time.second)
+
+		return fmt.tprintf(
+			"%04d-%02d-%02d\t%02d:%02d:%02d",
+			v.year,
+			v.month,
+			v.day,
+			v.hour,
+			v.minute,
+			v.second,
+		)
 	}
 
 	return "<?>"
