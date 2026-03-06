@@ -20,9 +20,9 @@ Select_Kind :: enum {
 	ApplyFloat,
 	ApplyString,
 	ApplyBool,
-  ApplyDate,
-  ApplyTime,
-  ApplyDatetime,
+	ApplyDate,
+	ApplyTime,
+	ApplyDatetime,
 	ConvIntFloat,
 	ConvFloatInt,
 	Conv,
@@ -41,9 +41,9 @@ Select_Expr :: struct {
 	fn_float:     proc(x: f64) -> f64,
 	fn_string:    proc(x: string) -> string,
 	fn_bool:      proc(x: bool) -> bool,
-  fn_date:      proc(x: Date) -> Date,
-  fn_time:      proc(x: Time) ->Time,
-  fn_datetime:  proc(x: Datetime) -> Datetime,
+	fn_date:      proc(x: Date) -> Date,
+	fn_time:      proc(x: Time) -> Time,
+	fn_datetime:  proc(x: Datetime) -> Datetime,
 }
 
 //
@@ -118,9 +118,9 @@ apply_expr :: proc {
 	apply_float_expr,
 	apply_string_expr,
 	apply_bool_expr,
-  apply_date_expr,
-  apply_time_expr,
-  apply_datetime_expr,
+	apply_date_expr,
+	apply_time_expr,
+	apply_datetime_expr,
 }
 
 apply_int_expr :: proc(name: string, col: ^Column, fn: proc(x: int) -> int) -> Select_Expr {
@@ -152,7 +152,11 @@ apply_time_expr :: proc(name: string, col: ^Column, fn: proc(x: Time) -> Time) -
 	return Select_Expr{name = name, kind = .ApplyTime, col = col, fn_time = fn}
 }
 
-apply_datetime_expr :: proc(name: string, col: ^Column, fn: proc(x: Datetime) -> Datetime) -> Select_Expr {
+apply_datetime_expr :: proc(
+	name: string,
+	col: ^Column,
+	fn: proc(x: Datetime) -> Datetime,
+) -> Select_Expr {
 	return Select_Expr{name = name, kind = .ApplyDatetime, col = col, fn_datetime = fn}
 }
 
@@ -542,6 +546,22 @@ select_exprs :: proc(df: ^DataFrame, exprs: []Select_Expr) -> DataFrame {
 								)
 							}
 							append_date(&new_col, date)
+						case .Time:
+							time, ok := parse_time(v)
+							if !ok {
+								panic(
+									"parse time: could not parse Time, string formated incorrectly",
+								)
+							}
+							append_time(&new_col, time)
+						case .Datetime:
+							datetime, ok := parse_datetime(v)
+							if !ok {
+								panic(
+									"parse_datetime: could parse Datetime, string formated incorrectly",
+								)
+							}
+							append_datetime(&new_col, datetime)
 						}
 					}
 				case .Date:
@@ -570,8 +590,31 @@ select_exprs :: proc(df: ^DataFrame, exprs: []Select_Expr) -> DataFrame {
 						}
 					}
 
-				// add .String, .Bool, .Date similarly
+				case .Time:
+					v, n := column_at_time(orig, i)
+					if n {
+						append_null(&new_col)
+					} else {
+						#partial switch target_type {
+						case .String:
+							str := time_to_string(v)
+							append_string(&new_col, str)
+						}
+					}
+
+				case .Datetime:
+					v, n := column_at_datetime(orig, i)
+					if n {
+						append_null(&new_col)
+					} else {
+						#partial switch target_type {
+						case .String:
+							str := datetime_to_string(v)
+							append_string(&new_col, str)
+						}
+					}
 				}
+
 			}
 
 			add_column(&out, new_col)
