@@ -27,8 +27,9 @@ datetime_compare :: proc(a, b: Datetime) -> i32 {
 }
 
 validate_date :: proc(year: i32, month: i32, day: i32) -> bool {
+	days_in_month := get_days_in_month(year, Months(month))
 
-	if month < 1 || month > 12 || day < 1 || day > 31 {
+	if month < 1 || month > 12 || day < 1 || day > days_in_month {
 		return false
 	}
 	return true

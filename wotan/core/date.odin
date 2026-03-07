@@ -1,6 +1,7 @@
 package wotan
 
 import "core:fmt"
+import "core:math"
 
 Days :: enum {
 	Monday,
@@ -27,8 +28,16 @@ Months :: enum {
 	December  = 12,
 }
 
+DAY :: 24 * 60 * 60
+HOUR :: 60 * 60
+MINUTE :: 60
+
 new_Datetime_from_Date_and_Time :: proc(date: Date, time: Time) -> Datetime {
-	return Datetime{date.year, date.month, date.day, time.hour, time.minute, time.second}
+	dt := Datetime{date.year, date.month, date.day, time.hour, time.minute, time.second}
+	if !validate_datetime(dt) {
+		panic("datetime: datetime not valid")
+	}
+	return dt
 }
 
 get_Date_from_Datetime :: proc(dt: Datetime) -> Date {
@@ -37,6 +46,19 @@ get_Date_from_Datetime :: proc(dt: Datetime) -> Date {
 
 get_Time_from_Datetime :: proc(dt: Datetime) -> Time {
 	return Time{dt.hour, dt.minute, dt.second}
+}
+
+validate_datetime :: proc(dt: Datetime) -> bool {
+	year := dt.year
+	month := dt.month
+	day := dt.day
+	hour := dt.hour
+	minute := dt.minute
+	second := dt.second
+	valid_d := validate_date(year, month, day)
+	valid_t := validate_time(hour, minute, second)
+	return valid_d && valid_t
+
 }
 
 get_days_in_month :: proc(year: i32, month: Months) -> i32 {
@@ -85,52 +107,146 @@ get_days_of_the_year :: proc(year: i32) -> i32 {
 	}
 	return 365
 }
-add_day_date :: proc(date: Date) -> Date {
-
+add_day_date :: proc(date: Date, n: i32) -> Date {
+	n := n
 	year := date.year
 	month := date.month
 	day := date.day
-	days_in_month := get_days_in_month(year, Months(month))
-	if day < days_in_month {
-		day = day + 1
-		return Date{year, month, day}
-	} else {
-		if Months(month) != .December {
-			month = month + 1
-			day = 1
-		} else {
-			year = year + 1
-			month = 1
-			day = 1
+	days_left_in_month: i32
+
+	if n > 0 {
+		for n > 0 {
+			days_left_in_month = get_days_in_month(year, Months(month)) - day
+			if (n > days_left_in_month) {
+				n -= (days_left_in_month + 1)
+				day = 1
+				month += 1
+				if (month > 12) {
+					month = i32(Months.January)
+					year += 1
+				}
+			} else {
+				day += n
+				n = 0
+			}
 		}
-	}
-	return Date{year, month, day}
-}
+		return Date{year, month, day}
+	} else if n < 0 {
+		n = -n
+		for n > 0 {
+			if n >= day {
+				n -= day
+				month -= 1
+				if month < 1 {
+					month = i32(Months.December)
+					year -= 1
+				}
+				day = get_days_in_month(year, Months(month))
 
-
-add_month_date :: proc(date: Date) -> Date {
-	year := date.year
-	month := date.month
-	day := date.day
-
-	if Months(month) != .December {
-		month = month + 1
+			} else {
+				day -= n
+				n = 0
+			}
+		}
 		return Date{year, month, day}
 
 
 	}
-	year = year + 1
-	month = 1
-	day = 1
 	return Date{year, month, day}
 }
+add_day_datetime :: proc(dt: Datetime, n: i32) -> Datetime {
+	year := dt.year
+	month := dt.month
+	day := dt.day
+	hour := dt.hour
+	minute := dt.minute
+	second := dt.second
+	new_date := add_day_date(Date{year, month, day}, n)
+	return Datetime{new_date.year, new_date.month, new_date.day, hour, minute, second}
+}
 
-add_year_date :: proc(date: Date) -> Date {
+
+add_month_date :: proc(date: Date, n: i32) -> Date {
 	year := date.year
 	month := date.month
 	day := date.day
-	year = year + 1
+
+	total_months := year * 12 + month - 1 + n
+	new_year := math.floor_div(total_months, 12)
+	new_month := (total_months % 12) + 1
+	days_in_month := get_days_in_month(new_year, Months(new_month))
+	if day > days_in_month {
+		new_month += 1
+		day = day - days_in_month
+	}
+	return Date{new_year, new_month, day}
+
+
+}
+add_month_datetime :: proc(dt: Datetime, n: i32) -> Datetime {
+	year := dt.year
+	month := dt.month
+	day := dt.day
+	hour := dt.hour
+	minute := dt.minute
+	second := dt.second
+	new_date := add_month_date(Date{year, month, day}, n)
+	return Datetime{new_date.year, new_date.month, new_date.day, hour, minute, second}
+}
+
+add_year_date :: proc(date: Date, n: i32) -> Date {
+	year := date.year
+	month := date.month
+	day := date.day
+	year = year + n
 	return Date{year, month, day}
+
+}
+
+add_year_datetime :: proc(dt: Datetime, n: i32) -> Datetime {
+	year := dt.year
+	month := dt.month
+	day := dt.day
+	hour := dt.hour
+	minute := dt.minute
+	second := dt.second
+	new_date := add_year_date(Date{year, month, day}, n)
+	return Datetime{new_date.year, new_date.month, new_date.day, hour, minute, second}
+}
+
+add_seconds_time :: proc(time: Time, n: i32) -> Time {
+	hour := time.hour
+	minute := time.minute
+	second := time.second
+	new_second := second + n
+	if new_second >= MINUTE {
+		new_minute := minute + new_second / MINUTE
+
+		new_second = new_second % MINUTE
+		if new_minute >= HOUR / MINUTE {
+			new_hour := hour + new_minute * MINUTE / HOUR
+			new_minute = new_minute * MINUTE % HOUR
+			return Time{new_hour, new_minute, new_second}
+		}
+		return Time{hour, new_minute, new_second}
+
+	} else if new_second < MINUTE && new_second >= 0 {
+		return Time{hour, minute, new_second}
+	} else {
+
+		new_minute := minute + new_second / MINUTE - 1
+		new_second = MINUTE + new_second % MINUTE
+		if math.abs(new_minute) <= math.abs(HOUR / MINUTE) {
+			fmt.println("We are at negative hours -", new_minute)
+			new_hour := hour - math.abs((1 + new_minute * MINUTE) / HOUR) - 1
+			new_minute = HOUR / MINUTE + new_minute * HOUR % MINUTE - 1
+			return Time{new_hour, new_minute, new_second}
+		}
+		return Time{hour, new_minute, new_second}
+
+
+	}
+
 
 }
 
@@ -200,7 +316,7 @@ add_hour_datetime :: proc(datetime: Datetime) -> Datetime {
 		return Datetime{year, month, day, hour, minute, second}
 	} else {
 		hour = 0
-		date = add_day_date(date)
+		date = add_day_date(date, 1)
 		return Datetime{date.year, date.month, date.day, hour, minute, second}
 	}
 }
@@ -225,7 +341,7 @@ add_minute_datetime :: proc(datetime: Datetime) -> Datetime {
 		return Datetime{year, month, day, time.hour, time.minute, time.second}
 	} else {
 
-		date = add_day_date(date)
+		date = add_day_date(date, 1)
 		hour = 0
 		minute = 0
 		return Datetime{date.year, date.month, date.day, hour, minute, second}
@@ -254,7 +370,7 @@ add_second_datetime :: proc(datetime: Datetime) -> Datetime {
 			second = 0
 		} else {
 			date := Date{year, month, day}
-			date = add_day_date(date)
+			date = add_day_date(date, 1)
 			year = date.year
 			month = date.month
 			day = date.day

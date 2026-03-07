@@ -169,15 +169,28 @@ main :: proc() {
 	df11 := w.select(&df8, exprs2)
 	w.dataframe_pretty_print(&df11, 20)
 
-  fmt.println ("Some test with Dates")
-  date1 := w.Date{i32(2020),i32(3),i32(7)}
-  date2 := w.Date{i32(2025),i32(3),i32(6)}
-  days := w.get_date_day_diffs(date1,date2)
-  fmt.println ("A lot of days:",days)
-  for i in 0..=32 {
-    date1 = w.add_day_date(date1)
-    fmt.printf ("Date incremeneted to %v\n",date1)
-  }
+	fmt.println("Some test with Dates")
+	date1 := w.Date{2020, 2, 7}
+	date2 := w.Date{2024, 2, 6}
+	days := w.get_date_day_diffs(date1, date2)
+	fmt.println("A lot of days:", days)
+	for i in 0 ..= 5 {
+		date1 = w.add_month_date(date1, -7)
+		fmt.printf("Date incremeneted to %v\n", date1)
+	}
+
+	for i in 0 ..= 100 {
+		date2 = w.add_day_date(date2, -100)
+		fmt.printf("Date incremeneted to %v\n", date2)
+	}
+	fmt.println("Now we test some times")
+	time1 := w.Time{16, 1, 10}
+
+	for i in 0 ..= 20 {
+		time1 = w.add_seconds_time(time1, -10)
+		fmt.printf("Time increased to %v\n", time1)
+	}
+
 	w.destroy_dataframe(&df_active3)
 	w.destroy_dataframe(&df8)
 	w.destroy_dataframe(&df9)
