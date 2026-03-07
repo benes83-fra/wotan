@@ -219,35 +219,36 @@ add_seconds_time :: proc(time: Time, n: i32) -> Time {
 	minute := time.minute
 	second := time.second
 	new_second := second + n
+	fmt.println("New Second : ", new_second)
+	minute_in_seconds := minute * MINUTE
+	hour_in_seconds := hour * HOUR
 	if new_second >= MINUTE {
 		new_minute := minute + new_second / MINUTE
 
 		new_second = new_second % MINUTE
 		if new_minute >= HOUR / MINUTE {
 			new_hour := hour + new_minute * MINUTE / HOUR
-			new_minute = new_minute * MINUTE % HOUR
+			new_minute = new_minute % 60
 			return Time{new_hour, new_minute, new_second}
 		}
 		return Time{hour, new_minute, new_second}
 
 	} else if new_second < MINUTE && new_second >= 0 {
-		return Time{hour, minute, new_second}
-	} else {
 
+		return Time{hour, minute, new_second}
+	}
+	if new_second < 0 && minute > 0 {
 		new_minute := minute + new_second / MINUTE - 1
+		fmt.println("new_minute", new_minute)
 		new_second = MINUTE + new_second % MINUTE
-		if math.abs(new_minute) <= math.abs(HOUR / MINUTE) {
-			fmt.println("We are at negative hours -", new_minute)
-			new_hour := hour - math.abs((1 + new_minute * MINUTE) / HOUR) - 1
-			new_minute = HOUR / MINUTE + new_minute * HOUR % MINUTE - 1
+		if new_minute <= 0 {
+			new_hour := hour - 1 + new_minute / (60)
+			new_minute = 60 + new_minute % 60
 			return Time{new_hour, new_minute, new_second}
 		}
 		return Time{hour, new_minute, new_second}
-
-
 	}
-
-
+	return Time{hour, minute, second}
 }
 
 
@@ -278,6 +279,15 @@ add_second_time :: proc(time: Time) -> Time {
 
 	}
 	return Time{hour, minute, second}
+}
+
+add_minutes_time :: proc(time: Time, n: i32) -> Time {
+
+	return add_seconds_time(time, n * MINUTE)
+}
+
+add_hour_time :: proc(time: Time, n: i32) -> Time {
+	return add_seconds_time(time, n * MINUTE * HOUR)
 }
 
 add_minute_time :: proc(time: Time) -> Time {
@@ -348,6 +358,44 @@ add_minute_datetime :: proc(datetime: Datetime) -> Datetime {
 	}
 }
 
+add_seconds_datetime :: proc(datetime: Datetime, n: i32) -> Datetime {
+
+	year := datetime.year
+	month := datetime.month
+	day := datetime.day
+	hour := datetime.hour
+	minute := datetime.minute
+	second := datetime.second
+
+	time := Time{hour, minute, second}
+	time = add_seconds_time(time, n)
+
+	if time.hour > 24 {
+
+		days := time.hour / 24
+		date := Date{year, month, day}
+		date = add_day_date(date, days)
+		return Datetime{date.year, date.month,date.day, time.hour, time.minute, time.second}
+	} else if time.hour < 0 {
+		days := -time.hour / 24
+		date := Date{year, month, day}
+		date = add_day_date(date, days)
+		return Datetime{date.year, date.month,date.day, time.hour, time.minute, time.second}
+	} else {
+		return Datetime{year, month, day, time.hour, time.minute, time.second}
+	}
+}
+
+add_minutes_datetime :: proc(datetime: Datetime, n: i32 )-> Datetime {
+
+  return add_seconds_datetime(datetime,n*MINUTE)
+
+}
+add_hours_datetime :: proc (datetime: Datetime, n: i32) -> Datetime {
+  return add_seconds_datetime(datetime, n* MINUTE*HOUR)
+}
+
+ 
 add_second_datetime :: proc(datetime: Datetime) -> Datetime {
 	year := datetime.year
 	month := datetime.month

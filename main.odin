@@ -184,10 +184,10 @@ main :: proc() {
 		fmt.printf("Date incremeneted to %v\n", date2)
 	}
 	fmt.println("Now we test some times")
-	time1 := w.Time{16, 1, 10}
+	time1 := w.Time{16, 2, 58}
 
 	for i in 0 ..= 20 {
-		time1 = w.add_seconds_time(time1, -10)
+		time1 = w.add_seconds_time(time1,-600)
 		fmt.printf("Time increased to %v\n", time1)
 	}
 
