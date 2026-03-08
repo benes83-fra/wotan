@@ -1,5 +1,6 @@
 package wotan
 
+import "core:fmt"
 import "core:strconv"
 import "core:strings"
 // --- Select Expression Types ------------------------------------------------
@@ -124,6 +125,7 @@ apply_expr :: proc {
 }
 
 apply_int_expr :: proc(name: string, col: ^Column, fn: proc(x: int) -> int) -> Select_Expr {
+
 	return Select_Expr{name = name, kind = .ApplyInt, col = col, fn_int = fn}
 }
 
@@ -320,7 +322,7 @@ select_exprs :: proc(df: ^DataFrame, exprs: []Select_Expr) -> DataFrame {
 			add_column(&out, new_col)
 		case .FloatMult:
 			orig := expr.col
-			new_col := column_new(expr.name, .Int, orig.len)
+			new_col := column_new(expr.name, .Float, orig.len)
 			for i in 0 ..< orig.len {
 				v, n := column_at_float(orig, i)
 				if n {append_null(&new_col)} else {append_float(&new_col, v * expr.float_value)}
@@ -329,7 +331,7 @@ select_exprs :: proc(df: ^DataFrame, exprs: []Select_Expr) -> DataFrame {
 			add_column(&out, new_col)
 		case .FloatDiv:
 			orig := expr.col
-			new_col := column_new(expr.name, .Int, orig.len)
+			new_col := column_new(expr.name, .Float, orig.len)
 			for i in 0 ..< orig.len {
 				v, n := column_at_float(orig, i)
 				if n {append_null(&new_col)} else {
@@ -459,7 +461,7 @@ select_exprs :: proc(df: ^DataFrame, exprs: []Select_Expr) -> DataFrame {
 			add_column(&out, new_col)
 		case .Conv:
 			if expr.col == nil {
-				panic("Conv: expr.col is nil for")
+				panic(fmt.tprintf("Conv: expr.col is nil for %s", expr.name))
 			}
 
 			orig := expr.col
@@ -480,7 +482,7 @@ select_exprs :: proc(df: ^DataFrame, exprs: []Select_Expr) -> DataFrame {
 						case .Float:
 							append_float(&new_col, f64(v))
 						case .String:
-							buf: [8]u8
+							buf: [32]u8
 							res := strconv.write_int(buf[:], i64(v), 10)
 							append_string(&new_col, res)
 						case .Bool:
@@ -488,6 +490,9 @@ select_exprs :: proc(df: ^DataFrame, exprs: []Select_Expr) -> DataFrame {
 						case .Date:
 							date := int_to_date(i32(v))
 							append_date(&new_col, date)
+						case .Time:
+							time := int_to_time(i32(v))
+							append_time(&new_col, time)
 						}
 					}
 
@@ -502,7 +507,7 @@ select_exprs :: proc(df: ^DataFrame, exprs: []Select_Expr) -> DataFrame {
 						case .Float:
 							append_float(&new_col, v)
 						case .String:
-							buf: [8]u8
+							buf: [32]u8
 							res := strconv.write_float(buf[:], v, 'f', 4, 64)
 							append_string(&new_col, res)
 						case .Bool:
@@ -599,6 +604,9 @@ select_exprs :: proc(df: ^DataFrame, exprs: []Select_Expr) -> DataFrame {
 						case .String:
 							str := time_to_string(v)
 							append_string(&new_col, str)
+						case .Int:
+							integer := time_to_int(v)
+							append_int(&new_col, int(integer))
 						}
 					}
 

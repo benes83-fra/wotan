@@ -131,7 +131,7 @@ time_to_string :: proc(t: Time) -> string {
 	sb := strings.builder_make()
 	defer strings.builder_destroy(&sb)
 
-	fmt.sbprintf(&sb, "%02d:%02s%02d", t.hour, t.minute, t.second)
+	fmt.sbprintf(&sb, "%02d:%02d%02d", t.hour, t.minute, t.second)
 
 	return strings.to_string(sb)
 
@@ -143,7 +143,7 @@ datetime_to_string :: proc(dt: Datetime) -> string {
 
 	fmt.sbprintf(
 		&sb,
-		"%%04d-%02d-%02d 02d:%02s%02d",
+		"%%04d-%02d-%02d 02d:%02d%02d",
 		dt.year,
 		dt.month,
 		dt.day,
@@ -223,4 +223,21 @@ f64_to_date :: proc(jd: f64) -> Date {
 	year := month > 2 ? c - 4716 : c - 4715
 
 	return Date{year = cast(i32)year, month = cast(i32)month, day = cast(i32)math.floor_f64(day)}
+}
+
+
+time_to_int :: proc(t: Time) -> i32 {
+	return t.hour * HOUR + t.minute * MINUTE + t.second
+}
+
+int_to_time :: proc(s: i32) -> Time {
+	s := s
+	if s < 0 {
+		s = 0
+	}
+	s = s % DAY
+	hour := s / HOUR
+	minute := (s % HOUR) / MINUTE
+	second := s % MINUTE
+	return Time{hour, minute, second}
 }
