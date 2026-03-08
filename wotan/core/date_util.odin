@@ -29,14 +29,14 @@ datetime_compare :: proc(a, b: Datetime) -> i32 {
 validate_date :: proc(year: i32, month: i32, day: i32) -> bool {
 	days_in_month := get_days_in_month(year, Months(month))
 
-	if month < 1 || month > 12 || day < 1 || day > days_in_month {
+	if month < 1 || month > 12 || day < 0 || day > days_in_month {
 		return false
 	}
 	return true
 }
 validate_time :: proc(hour: i32, minute: i32, second: i32) -> bool {
 
-	if hour < 1 || hour > 24 || minute < 1 || minute > 60 || second < 1 || second > 60 {
+	if hour < 0 || hour > 24 || minute < 0 || minute > 60 || second < 0 || second > 60 {
 		return false
 	}
 	return true
@@ -77,6 +77,7 @@ parse_time :: proc(time_str: string) -> (Time, bool) {
 		return Time{}, false
 	}
 	if !validate_time(i32(hour), i32(minute), i32(second)) {
+
 		return Time{}, false
 	}
 	return Time{i32(hour), i32(minute), i32(second)}, true

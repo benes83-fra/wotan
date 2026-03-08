@@ -2,6 +2,7 @@ package wotan
 
 import "core:fmt"
 import "core:math"
+import t "core:time"
 
 Days :: enum {
 	Monday,
@@ -219,7 +220,6 @@ add_seconds_time :: proc(time: Time, n: i32) -> Time {
 	minute := time.minute
 	second := time.second
 	new_second := second + n
-	fmt.println("New Second : ", new_second)
 	minute_in_seconds := minute * MINUTE
 	hour_in_seconds := hour * HOUR
 	if new_second >= MINUTE {
@@ -239,7 +239,6 @@ add_seconds_time :: proc(time: Time, n: i32) -> Time {
 	}
 	if new_second < 0 && minute > 0 {
 		new_minute := minute + new_second / MINUTE - 1
-		fmt.println("new_minute", new_minute)
 		new_second = MINUTE + new_second % MINUTE
 		if new_minute <= 0 {
 			new_hour := hour - 1 + new_minute / (60)
@@ -287,7 +286,7 @@ add_minutes_time :: proc(time: Time, n: i32) -> Time {
 }
 
 add_hour_time :: proc(time: Time, n: i32) -> Time {
-	return add_seconds_time(time, n * MINUTE * HOUR)
+	return add_seconds_time(time, n * HOUR)
 }
 
 add_minute_time :: proc(time: Time) -> Time {
@@ -322,7 +321,7 @@ add_hour_datetime :: proc(datetime: Datetime) -> Datetime {
 	time := Time{hour, minute, second}
 	date := Date{year, month, day}
 	if hour < 23 {
-		hour = hour + 100
+		hour = hour + 1
 		return Datetime{year, month, day, hour, minute, second}
 	} else {
 		hour = 0
@@ -375,27 +374,30 @@ add_seconds_datetime :: proc(datetime: Datetime, n: i32) -> Datetime {
 		days := time.hour / 24
 		date := Date{year, month, day}
 		date = add_day_date(date, days)
-		return Datetime{date.year, date.month,date.day, time.hour, time.minute, time.second}
+		time.hour = time.hour % 24
+		return Datetime{date.year, date.month, date.day, time.hour, time.minute, time.second}
 	} else if time.hour < 0 {
-		days := -time.hour / 24
+		days := -(1 - time.hour / 24)
+		fmt.println(days, n)
 		date := Date{year, month, day}
 		date = add_day_date(date, days)
-		return Datetime{date.year, date.month,date.day, time.hour, time.minute, time.second}
+		time.hour = time.hour % 24 + 24
+		return Datetime{date.year, date.month, date.day, time.hour, time.minute, time.second}
 	} else {
 		return Datetime{year, month, day, time.hour, time.minute, time.second}
 	}
 }
 
-add_minutes_datetime :: proc(datetime: Datetime, n: i32 )-> Datetime {
+add_minutes_datetime :: proc(datetime: Datetime, n: i32) -> Datetime {
 
-  return add_seconds_datetime(datetime,n*MINUTE)
+	return add_seconds_datetime(datetime, n * MINUTE)
 
 }
-add_hours_datetime :: proc (datetime: Datetime, n: i32) -> Datetime {
-  return add_seconds_datetime(datetime, n* MINUTE*HOUR)
+add_hours_datetime :: proc(datetime: Datetime, n: i32) -> Datetime {
+	return add_seconds_datetime(datetime, n * HOUR)
 }
 
- 
+
 add_second_datetime :: proc(datetime: Datetime) -> Datetime {
 	year := datetime.year
 	month := datetime.month
@@ -510,4 +512,26 @@ get_date_day_diffs :: proc(a, b: Date) -> i32 {
 		return get_day_diff_between_years(b, a)
 	}
 
+}
+
+
+now :: proc() -> Datetime {
+
+	now := t.now()
+	buf: [20]u8
+	res := t.to_string_yyyy_mm_dd(now, buf[:])
+	buf2: [20]u8
+	res2 := t.to_string_hms(now, buf2[:])
+	fmt.println(res2)
+
+	date, ok := parse_date(res)
+	if !ok {
+		panic("Cannot parse Date string")
+	}
+
+	time, ok2 := parse_time(res2)
+	if !ok2 {
+		panic("Cannot parese Time string")
+	}
+	return Datetime{date.year, date.month, date.day, time.hour, time.minute, time.second}
 }

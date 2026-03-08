@@ -179,7 +179,7 @@ main :: proc() {
 		fmt.printf("Date incremeneted to %v\n", date1)
 	}
 
-	for i in 0 ..= 100 {
+	for i in 0 ..= 20 {
 		date2 = w.add_day_date(date2, -100)
 		fmt.printf("Date incremeneted to %v\n", date2)
 	}
@@ -187,10 +187,15 @@ main :: proc() {
 	time1 := w.Time{16, 2, 58}
 
 	for i in 0 ..= 20 {
-		time1 = w.add_seconds_time(time1,-600)
+		time1 = w.add_seconds_time(time1, -600)
 		fmt.printf("Time increased to %v\n", time1)
 	}
-
+	dt := w.Datetime{1983, 7, 20, 13, 13, 13}
+	for i in 0 ..= 20 {
+		dt = w.add_hours_datetime(dt, -49)
+		fmt.printf("Time elapsed %v \n", dt)
+	}
+	fmt.println(w.now())
 	w.destroy_dataframe(&df_active3)
 	w.destroy_dataframe(&df8)
 	w.destroy_dataframe(&df9)
