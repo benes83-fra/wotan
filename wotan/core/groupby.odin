@@ -114,3 +114,12 @@ groupby_debug_print :: proc(gdf: ^GroupedDataFrame) {
 		fmt.printf("Group %d: keys=%v rows=%v\n", i, g.key_values, g.row_indices)
 	}
 }
+destroy_grouped_dataframe :: proc(gdf: ^GroupedDataFrame) {
+	for g in gdf.groups {
+		// key_values holds string slices; do NOT delete each string
+		delete(g.key_values)
+		delete(g.row_indices)
+	}
+
+	delete(gdf.groups)
+}

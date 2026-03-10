@@ -196,6 +196,26 @@ main :: proc() {
 		fmt.printf("Time elapsed %v \n", dt)
 	}
 	fmt.println(w.now())
+	gdf := w.groupby(&df8, []string{"age"})
+	exprs3 := []w.Agg_Expr {
+		w.count("n"),
+		w.avg_agg("avg_salary", w.column(&df8, "salary")),
+		w.sum_agg("total_salary", w.column(&df8, "salary")),
+	}
+	out := w.agg(&gdf, exprs3)
+	fmt.println("=== GROUPBY + AGG TEST ===")
+
+
+	w.dataframe_pretty_print(&out, 20)
+
+	// cleanup
+	w.destroy_grouped_dataframe(&gdf)
+	w.destroy_dataframe(&out)
+
+
+	w.destroy_grouped_dataframe(&gdf)
+	w.destroy_dataframe(&out)
+
 	w.destroy_dataframe(&df_active3)
 	w.destroy_dataframe(&df8)
 	w.destroy_dataframe(&df9)

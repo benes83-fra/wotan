@@ -1,0 +1,252 @@
+package wotan
+
+// --- Aggregation kinds -------------------------------------------------------
+
+Agg_Kind :: enum {
+	Count,
+	Sum,
+	Avg,
+	Min,
+	Max,
+}
+
+Agg_Expr :: struct {
+	name: string,
+	kind: Agg_Kind,
+	col:  ^Column, // nil for COUNT(*)
+}
+
+// --- Constructors ------------------------------------------------------------
+
+count :: proc(name: string) -> Agg_Expr {
+	return Agg_Expr{name = name, kind = .Count}
+}
+
+sum_agg :: proc(name: string, col: ^Column) -> Agg_Expr {
+	return Agg_Expr{name = name, kind = .Sum, col = col}
+}
+
+avg_agg :: proc(name: string, col: ^Column) -> Agg_Expr {
+	return Agg_Expr{name = name, kind = .Avg, col = col}
+}
+
+min_agg :: proc(name: string, col: ^Column) -> Agg_Expr {
+	return Agg_Expr{name = name, kind = .Min, col = col}
+}
+
+max_agg :: proc(name: string, col: ^Column) -> Agg_Expr {
+	return Agg_Expr{name = name, kind = .Max, col = col}
+}
+
+// --- Type inference ----------------------------------------------------------
+
+infer_agg_type :: proc(expr: Agg_Expr) -> ColumnType {
+	switch expr.kind {
+	case .Count:
+		return .Int
+	case .Sum, .Min, .Max:
+		return expr.col.type
+	case .Avg:
+		return .Float // <-- FIXED
+	}
+
+	return .Int
+}
+
+// --- Helper: copy single value ----------------------------------------------
+
+copy_value :: proc(dst: ^Column, src: ^Column, row: int) {
+	#partial switch src.type {
+	case .Int:
+		v, n := column_at_int(src, row)
+		if n {append_null(dst)} else {append_int(dst, v)}
+
+	case .Float:
+		v, n := column_at_float(src, row)
+		if n {append_null(dst)} else {append_float(dst, v)}
+
+	case .String:
+		v, n := column_at_string(src, row)
+		if n {append_null(dst)} else {append_string(dst, v)}
+
+	case .Bool:
+		v, n := column_at_bool(src, row)
+		if n {append_null(dst)} else {append_bool(dst, v)}
+
+	case .Date:
+		v, n := column_at_date(src, row)
+		if n {append_null(dst)} else {append_date(dst, v)}
+
+	case .Time:
+		v, n := column_at_time(src, row)
+		if n {append_null(dst)} else {append_time(dst, v)}
+
+	case .Datetime:
+		v, n := column_at_datetime(src, row)
+		if n {append_null(dst)} else {append_datetime(dst, v)}
+	}
+}
+
+// --- Aggregation implementations ---------------------------------------------
+
+sum_value :: proc(expr: Agg_Expr, g: Group, outcol: ^Column) {
+	col := expr.col
+
+	#partial switch col.type {
+	case .Int:
+		total := 0
+		for row in g.row_indices {
+			v, n := column_at_int(col, row)
+			if !n {total += v}
+		}
+		append_int(outcol, total)
+
+	case .Float:
+		total := 0.0
+		for row in g.row_indices {
+			v, n := column_at_float(col, row)
+			if !n {total += v}
+		}
+		append_float(outcol, total)
+	}
+}
+
+avg_value :: proc(expr: Agg_Expr, g: Group, outcol: ^Column) {
+	col := expr.col
+
+	#partial switch col.type {
+	case .Int:
+		total := 0
+		count := 0
+		for row in g.row_indices {
+			v, n := column_at_int(col, row)
+			if !n {total += v; count += 1}
+		}
+		if count == 0 {
+			append_null(outcol)
+		} else {
+			append_float(outcol, f64(total) / f64(count))
+		}
+
+	case .Float:
+		total := 0.0
+		count := 0
+		for row in g.row_indices {
+			v, n := column_at_float(col, row)
+			if !n {total += v; count += 1}
+		}
+		if count == 0 {
+			append_null(outcol)
+		} else {
+			append_float(outcol, total / f64(count))
+		}
+	}
+}
+
+min_value :: proc(expr: Agg_Expr, g: Group, outcol: ^Column) {
+	col := expr.col
+
+	#partial switch col.type {
+	case .Int:
+		first := true
+		minv := 0
+		for row in g.row_indices {
+			v, n := column_at_int(col, row)
+			if n {continue}
+			if first || v < minv {minv = v; first = false}
+		}
+		if first {append_null(outcol)} else {append_int(outcol, minv)}
+
+	case .Float:
+		first := true
+		minv := 0.0
+		for row in g.row_indices {
+			v, n := column_at_float(col, row)
+			if n {continue}
+			if first || v < minv {minv = v; first = false}
+		}
+		if first {append_null(outcol)} else {append_float(outcol, minv)}
+	}
+}
+
+max_value :: proc(expr: Agg_Expr, g: Group, outcol: ^Column) {
+	col := expr.col
+
+	#partial switch col.type {
+	case .Int:
+		first := true
+		maxv := 0
+		for row in g.row_indices {
+			v, n := column_at_int(col, row)
+			if n {continue}
+			if first || v > maxv {maxv = v; first = false}
+		}
+		if first {append_null(outcol)} else {append_int(outcol, maxv)}
+
+	case .Float:
+		first := true
+		maxv := 0.0
+		for row in g.row_indices {
+			v, n := column_at_float(col, row)
+			if n {continue}
+			if first || v > maxv {maxv = v; first = false}
+		}
+		if first {append_null(outcol)} else {append_float(outcol, maxv)}
+	}
+}
+
+// --- Aggregation driver ------------------------------------------------------
+
+agg :: proc(gdf: ^GroupedDataFrame, exprs: []Agg_Expr) -> DataFrame {
+	out := dataframe_new()
+
+	// 1. key columns
+	for key, _ in gdf.keys {
+		col := column(gdf.df, key)
+		new_col := column_new(key, col.type, len(gdf.groups))
+		add_column(&out, new_col)
+	}
+
+	// 2. aggregation columns
+	for expr, _ in exprs {
+		t := infer_agg_type(expr)
+		new_col := column_new(expr.name, t, len(gdf.groups))
+		add_column(&out, new_col)
+	}
+
+	// 3. fill rows
+	for g, gi in gdf.groups {
+		// write key columns
+		for key, ki in gdf.keys {
+			col := column(gdf.df, key)
+			outcol := &out.columns[ki]
+
+			row := g.row_indices[0]
+			copy_value(outcol, col, row)
+		}
+
+		// write aggregation columns
+		for expr, ei in exprs {
+			outcol := &out.columns[len(gdf.keys) + ei]
+
+			switch expr.kind {
+			case .Count:
+				append_int(outcol, len(g.row_indices))
+
+			case .Sum:
+				sum_value(expr, g, outcol)
+
+			case .Avg:
+				avg_value(expr, g, outcol)
+
+			case .Min:
+				min_value(expr, g, outcol)
+
+			case .Max:
+				max_value(expr, g, outcol)
+			}
+		}
+	}
+
+	return out
+}
