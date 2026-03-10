@@ -100,6 +100,23 @@ append_colum :: proc {
 }
 
 
+append_fake_float :: proc(c: ^Column, v: f64) {
+	if c.is_view {
+		panic("append_float: cannot append to view column")
+	}
+
+	if c.len >= c.capacity {
+		grow(c, max(8, c.capacity * 2))
+	}
+
+	idx := c.len
+	c.len += 1
+
+	base := uintptr(c.data) + uintptr(idx * size_of(f64))
+	(cast(^f64)base)^ = v
+}
+
+
 append_float :: proc(c: ^Column, v: f64) {
 	if c.is_view {
 		panic("append_float: cannot append to view column")
@@ -247,11 +264,13 @@ column_at_ptr :: proc(col: ^Column, i: int) -> (uintptr, bool) {
 
 // Column read helpers (safe, copy-based readers)
 column_at_int :: proc(col: ^Column, i: int) -> (int, bool) {
-	if i < 0 || i >= col.len {
-		panic("column_at_int: index out of range")
-	}
 	if col.is_view {
 		return column_at_int(col.orig, col.offset + i)
+	}
+
+	if i < 0 || i >= col.len {
+		fmt.println(" Index is :", i)
+		panic("column_at_int: index out of range")
 	}
 
 	if col.nulls != nil && col.nulls[i] {
@@ -260,6 +279,7 @@ column_at_int :: proc(col: ^Column, i: int) -> (int, bool) {
 	base := uintptr(col.data) + uintptr(i * type_size(col.type))
 	return (cast(^int)base)^, false
 }
+
 
 column_at_float :: proc(col: ^Column, i: int) -> (f64, bool) {
 	if i < 0 || i >= col.len {

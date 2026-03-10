@@ -75,6 +75,7 @@ groupby :: proc(df: ^DataFrame, keys: []string) -> GroupedDataFrame {
 	}
 
 	groups_map := make(map[string]int)
+	defer delete(groups_map)
 
 	for row in 0 ..< df.rows {
 		key := make_group_key(df, row, keys)
@@ -82,7 +83,7 @@ groupby :: proc(df: ^DataFrame, keys: []string) -> GroupedDataFrame {
 		idx, exists := groups_map[key]
 		if !exists {
 			parts := strings.split(key, "|")
-
+			defer delete(parts)
 			dyn_parts := make([dynamic]string, 0, len(parts))
 			for p in parts { 	// <-- FIXED ORDER
 				append(&dyn_parts, p)
