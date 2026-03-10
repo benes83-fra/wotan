@@ -143,7 +143,7 @@ datetime_to_string :: proc(dt: Datetime) -> string {
 
 	fmt.sbprintf(
 		&sb,
-		"%%04d-%02d-%02d 02d:%02d%02d",
+		"%04d-%02d-%02d 02d:%02d%02d",
 		dt.year,
 		dt.month,
 		dt.day,

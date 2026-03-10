@@ -203,14 +203,10 @@ main :: proc() {
 		w.sum_agg("total_salary", w.column(&df8, "salary")),
 	}
 	out := w.agg(&gdf, exprs3)
-	fmt.println("=== GROUPBY + AGG TEST ===")
-
-
 	w.dataframe_pretty_print(&out, 20)
 
-	// cleanup
-	w.destroy_grouped_dataframe(&gdf)
-	w.destroy_dataframe(&out)
+
+	// --- Insert this right before calling groupby(&df8, ...) ---
 
 
 	w.destroy_grouped_dataframe(&gdf)

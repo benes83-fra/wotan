@@ -13,7 +13,7 @@ Agg_Kind :: enum {
 Agg_Expr :: struct {
 	name: string,
 	kind: Agg_Kind,
-	col:  ^Column, // nil for COUNT(*)
+	col:  ^Column, //
 }
 
 // --- Constructors ------------------------------------------------------------
@@ -200,52 +200,92 @@ max_value :: proc(expr: Agg_Expr, g: Group, outcol: ^Column) {
 agg :: proc(gdf: ^GroupedDataFrame, exprs: []Agg_Expr) -> DataFrame {
 	out := dataframe_new()
 
-	// 1. key columns
-	for key, _ in gdf.keys {
-		col := column(gdf.df, key)
-		new_col := column_new(key, col.type, len(gdf.groups))
-		add_column(&out, new_col)
+	// 1) key columns in output
+	for ki in 0 ..< len(gdf.keys) {
+		key_name := gdf.keys[ki]
+		src_col := column(gdf.df, key_name)
+		out_col := column_new(key_name, src_col.type, len(gdf.groups))
+		add_column(&out, out_col)
 	}
 
-	// 2. aggregation columns
-	for expr, _ in exprs {
-		t := infer_agg_type(expr)
-		new_col := column_new(expr.name, t, len(gdf.groups))
-		add_column(&out, new_col)
-	}
+	// 2) agg columns in output
+	for ei in 0 ..< len(exprs) {
+		expr := exprs[ei]
 
-	// 3. fill rows
-	for g, gi in gdf.groups {
-		// write key columns
-		for key, ki in gdf.keys {
-			col := column(gdf.df, key)
-			outcol := &out.columns[ki]
-
-			row := g.row_indices[0]
-			copy_value(outcol, col, row)
+		// decide output type
+		t := ColumnType.Int
+		#partial switch expr.kind {
+		case .Count:
+			t = .Int
+		case .Sum, .Avg:
+			// for now: always Float
+			t = .Float
 		}
 
-		// write aggregation columns
-		for expr, ei in exprs {
-			outcol := &out.columns[len(gdf.keys) + ei]
+		out_col := column_new(expr.name, t, len(gdf.groups))
+		add_column(&out, out_col)
+	}
 
-			switch expr.kind {
+	// 3) fill rows: one per group
+	for gi in 0 ..< len(gdf.groups) {
+		g := gdf.groups[gi]
+
+		// 3a) write key columns: take first row of each group
+		first_row := g.row_indices[0]
+		for ki in 0 ..< len(gdf.keys) {
+			key_name := gdf.keys[ki]
+			src_col := column(gdf.df, key_name)
+			out_col := &out.columns[ki]
+
+			copy_value(out_col, src_col, first_row) // your existing helper
+		}
+
+		// 3b) write agg columns
+		for ei in 0 ..< len(exprs) {
+			expr := exprs[ei]
+			out_col := &out.columns[len(gdf.keys) + ei]
+
+			#partial switch expr.kind {
 			case .Count:
-				append_int(outcol, len(g.row_indices))
+				append_int(out_col, len(g.row_indices))
 
 			case .Sum:
-				sum_value(expr, g, outcol)
+				src := expr.col // however you store the source column
+				total := 0.0
+				for ri in 0 ..< len(g.row_indices) {
+					row := g.row_indices[ri]
+					v, is_null := column_at_float(src, row) // or int→float cast
+					if !is_null {
+						total += v
+					}
+				}
+				append_float(out_col, total)
 
 			case .Avg:
-				avg_value(expr, g, outcol)
-
-			case .Min:
-				min_value(expr, g, outcol)
-
-			case .Max:
-				max_value(expr, g, outcol)
+				src := expr.col
+				total := 0.0
+				count := 0
+				for ri in 0 ..< len(g.row_indices) {
+					row := g.row_indices[ri]
+					v, is_null := column_at_float(src, row)
+					if !is_null {
+						total += v
+						count += 1
+					}
+				}
+				if count == 0 {
+					append_null(out_col)
+				} else {
+					append_float(out_col, total / f64(count))
+				}
 			}
 		}
+	}
+	// set DataFrame row count so printers see the rows we appended
+	if len(out.columns) > 0 {
+		out.rows = out.columns[0].len
+	} else {
+		out.rows = 0
 	}
 
 	return out
