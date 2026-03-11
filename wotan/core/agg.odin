@@ -1,5 +1,7 @@
 package wotan
 
+
+import "core:fmt"
 // --- Aggregation kinds -------------------------------------------------------
 
 Agg_Kind :: enum {
@@ -167,7 +169,9 @@ min_value :: proc(expr: Agg_Expr, g: Group, outcol: ^Column) {
 		first := true
 		minv := 0
 		for row in g.row_indices {
+			fmt.println(row)
 			v, n := column_at_int(col, row)
+			fmt.println(v)
 			if n {continue}
 			if first || v < minv {minv = v; first = false}
 		}
@@ -177,7 +181,9 @@ min_value :: proc(expr: Agg_Expr, g: Group, outcol: ^Column) {
 		first := true
 		minv := 0.0
 		for row in g.row_indices {
+			fmt.println(row)
 			v, n := column_at_float(col, row)
+			fmt.println(v)
 			if n {continue}
 			if first || v < minv {minv = v; first = false}
 		}
@@ -225,22 +231,14 @@ agg :: proc(gdf: ^GroupedDataFrame, exprs: []Agg_Expr) -> DataFrame {
 	}
 
 	// 2) agg columns in output
+	// 2) agg columns in output
 	for ei in 0 ..< len(exprs) {
 		expr := exprs[ei]
-
-		// decide output type
-		t := ColumnType.Int
-		#partial switch expr.kind {
-		case .Count:
-			t = .Int
-		case .Sum, .Avg:
-			// for now: always Float
-			t = .Float
-		}
-
+		t := infer_agg_type(expr)
 		out_col := column_new(expr.name, t, len(gdf.groups))
 		add_column(&out, out_col)
 	}
+
 
 	// 3) fill rows: one per group
 	for gi in 0 ..< len(gdf.groups) {
@@ -256,6 +254,7 @@ agg :: proc(gdf: ^GroupedDataFrame, exprs: []Agg_Expr) -> DataFrame {
 			copy_value_safe(out_col, src_col, first_row) // your existing helper
 		}
 
+
 		// 3b) write agg columns
 		for ei in 0 ..< len(exprs) {
 			expr := exprs[ei]
@@ -266,36 +265,19 @@ agg :: proc(gdf: ^GroupedDataFrame, exprs: []Agg_Expr) -> DataFrame {
 				append_int(out_col, len(g.row_indices))
 
 			case .Sum:
-				src := expr.col // however you store the source column
-				total := 0.0
-				for ri in 0 ..< len(g.row_indices) {
-					row := g.row_indices[ri]
-					v, is_null := column_at_float(src, row) // or int→float cast
-					if !is_null {
-						total += v
-					}
-				}
-				append_float(out_col, total)
+				sum_value(expr, g, out_col)
 
 			case .Avg:
-				src := expr.col
-				total := 0.0
-				count := 0
-				for ri in 0 ..< len(g.row_indices) {
-					row := g.row_indices[ri]
-					v, is_null := column_at_float(src, row)
-					if !is_null {
-						total += v
-						count += 1
-					}
-				}
-				if count == 0 {
-					append_null(out_col)
-				} else {
-					append_float(out_col, total / f64(count))
-				}
+				avg_value(expr, g, out_col)
+
+			case .Min:
+				min_value(expr, g, out_col)
+
+			case .Max:
+				max_value(expr, g, out_col)
 			}
 		}
+
 	}
 	// set DataFrame row count so printers see the rows we appended
 	if len(out.columns) > 0 {

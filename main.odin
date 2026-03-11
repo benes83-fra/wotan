@@ -199,7 +199,7 @@ main :: proc() {
 	gdf := w.groupby(&df8, []string{"age"})
 	exprs3 := []w.Agg_Expr {
 		w.count("n"),
-		w.avg_agg("avg_salary", w.column(&df8, "salary")),
+		w.min_agg("avg_salary", w.column(&df8, "salary")),
 		w.sum_agg("total_salary", w.column(&df8, "salary")),
 	}
 	out := w.agg(&gdf, exprs3)
