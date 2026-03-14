@@ -24,7 +24,7 @@ main :: proc() {
 		}
 
 	}
-
+	defer free_all(context.temp_allocator)
 	df := w.dataframe_new()
 
 	col_age := w.column_new("age", .Int, 4)
@@ -199,7 +199,7 @@ main :: proc() {
 	gdf := w.groupby(&df8, []string{"age"})
 	exprs3 := []w.Agg_Expr {
 		w.count("n"),
-		w.avg_agg("avg_age", w.column(&df8, "salary")),
+		w.avg_agg("avg_age", w.column(&df8, "age")),
 		w.sum_agg("total_salary", w.column(&df8, "salary")),
 	}
 	out := w.agg(&gdf, exprs3)

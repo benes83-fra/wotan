@@ -2,6 +2,7 @@ package wotan
 
 
 import "core:fmt"
+import "core:mem"
 // --- Aggregation kinds -------------------------------------------------------
 
 Agg_Kind :: enum {
@@ -222,8 +223,12 @@ max_value :: proc(expr: Agg_Expr, g: Group, outcol: ^Column) {
 
 // --- Aggregation driver ------------------------------------------------------
 
-agg :: proc(gdf: ^GroupedDataFrame, exprs: []Agg_Expr) -> DataFrame {
-	out := dataframe_new()
+agg :: proc(
+	gdf: ^GroupedDataFrame,
+	exprs: []Agg_Expr,
+	allocator: mem.Allocator = context.allocator,
+) -> DataFrame {
+	out := dataframe_new(allocator)
 
 	// 1) key columns in output
 	for ki in 0 ..< len(gdf.keys) {

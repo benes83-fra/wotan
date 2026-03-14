@@ -1,6 +1,7 @@
 package importer
 
 import "core:fmt"
+import vmem "core:mem/virtual"
 import "core:strconv"
 import "core:strings"
 
@@ -137,28 +138,28 @@ csv_load :: proc(
 
 			case .Date:
 				// Very simple YYYY-MM-DD parser
-        date , ok := w.parse_date(field)
-        if !ok {
-          panic (fmt.tprintf ("csv_load: invalid date '%s", field))
-        }
+				date, ok := w.parse_date(field)
+				if !ok {
+					panic(fmt.tprintf("csv_load: invalid date '%s", field))
+				}
 
 				w.append_date(&cols[col_i], date)
 			case .Time:
-        time , ok := w.parse_time(field)
-        if !ok {
+				time, ok := w.parse_time(field)
+				if !ok {
 
-          panic(fmt.tprintf ("csv_load: invalid time formart '%s'",field))
+					panic(fmt.tprintf("csv_load: invalid time formart '%s'", field))
 
-        }
+				}
 				w.append_time(&cols[col_i], time)
 
 			case .Datetime:
-        datetime , ok:= w.parse_datetime(field)
-			  if !ok{
+				datetime, ok := w.parse_datetime(field)
+				if !ok {
 
-          panic(fmt.tprintf ("csv_load: invalid datetime formart '%s'",field))
-        }
-        w.append_datetime(&cols[col_i], datetime)
+					panic(fmt.tprintf("csv_load: invalid datetime formart '%s'", field))
+				}
+				w.append_datetime(&cols[col_i], datetime)
 
 			}
 

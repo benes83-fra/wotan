@@ -3,6 +3,8 @@ package wotan
 import "core:fmt"
 import "core:mem"
 import "core:strings"
+
+import vmem "core:mem/virtual"
 Column :: struct {
 	name:     string,
 	type:     ColumnType,
@@ -13,10 +15,16 @@ Column :: struct {
 	orig:     ^Column, // pointer to original column if this is a view
 	offset:   int, // start offset in original
 	is_view:  bool,
+	arena:    vmem.Arena,
 }
 
 
-column_new :: proc(name: string, type: ColumnType, capacity: int) -> Column {
+column_new :: proc(
+	name: string,
+	type: ColumnType,
+	capacity: int,
+	allocator: mem.Allocator = context.allocator,
+) -> Column {
 	size := capacity * type_size(type)
 	data, err := mem.alloc(size)
 	if err != nil {
@@ -37,6 +45,9 @@ destroy_column :: proc(col: ^Column) {
 	if col.nulls != nil {
 		delete(col.nulls)
 		col.nulls = nil
+	}
+	if col.arena.kind != nil {
+		vmem.arena_destroy(&col.arena)
 	}
 	col.len = 0.0
 	col.capacity = 0.0
@@ -153,7 +164,7 @@ append_bool :: proc(c: ^Column, v: bool) {
 	(cast(^bool)base)^ = v
 }
 
-append_string :: proc(c: ^Column, v: string) {
+append_string :: proc(c: ^Column, v: string, should_clone: bool = true) {
 	if c.is_view {
 		panic("append_string: cannot append to view column")
 	}
@@ -163,12 +174,23 @@ append_string :: proc(c: ^Column, v: string) {
 	if c.len >= c.capacity {
 		grow(c, max(8, c.capacity * 2))
 	}
-
+	final_str := v
+	if should_clone {
+		// Initialize arena on first use if needed
+		if c.arena.kind == nil {
+			err := vmem.arena_init_growing(&c.arena)
+			if err != nil {
+				panic("column_append_string: Cannot allocate Arena")
+			}
+		}
+		allocator := vmem.arena_allocator(&c.arena)
+		final_str = strings.clone(v, allocator)
+	}
 	idx := c.len
 	c.len += 1
 
 	base := uintptr(c.data) + uintptr(idx * size_of(string))
-	(cast(^string)base)^ = v
+	(cast(^string)base)^ = final_str
 }
 
 append_date :: proc(c: ^Column, v: Date) {

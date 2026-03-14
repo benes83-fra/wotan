@@ -1,6 +1,7 @@
 package wotan
 
 import "core:fmt"
+import "core:mem"
 import "core:strings"
 
 DataFrame :: struct {
@@ -13,9 +14,9 @@ DataFrame :: struct {
 // --- Constructors ---
 //
 
-dataframe_new :: proc() -> DataFrame {
+dataframe_new :: proc(allocator: mem.Allocator = context.allocator) -> DataFrame {
 	return DataFrame {
-		columns = make([dynamic]Column),
+		columns = make([dynamic]Column, allocator),
 		name_to_index = make(map[string]int),
 		rows = 0,
 	}

@@ -76,7 +76,7 @@ groupby :: proc(df: ^DataFrame, keys: []string) -> GroupedDataFrame {
 
 	for row in 0 ..< df.rows {
 		// Temporary key for map lookup
-		temp_key := make_group_key_in_arena(df, row, keys, context.temp_allocator)
+		temp_key := make_group_key_in_arena(df, row, keys, allocator)
 
 		idx, exists := groups_map[temp_key]
 		if !exists {

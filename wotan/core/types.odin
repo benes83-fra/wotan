@@ -3,7 +3,6 @@ package wotan
 
 import "core:strings"
 
-import "core:time/datetime"
 ColumnType :: enum {
 	Invalid,
 	Int,
