@@ -110,6 +110,7 @@ mult_float_expr :: proc(name: string, col: ^Column, v: f64) -> Select_Expr {
 	return Select_Expr{name = name, kind = .FloatMult, col = col, float_value = v}
 }
 div_float_expr :: proc(name: string, col: ^Column, v: f64) -> Select_Expr {
+	assert(col.type == .Float)
 	return Select_Expr{name = name, kind = .FloatDiv, col = col, float_value = v}
 }
 
@@ -163,6 +164,7 @@ apply_datetime_expr :: proc(
 }
 
 conv_int_to_f64_expr :: proc(name: string, col: ^Column) -> Select_Expr {
+	assert(col.type == .Float)
 	return Select_Expr{name = name, kind = .ConvIntFloat, col = col}
 }
 

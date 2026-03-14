@@ -49,6 +49,9 @@ infer_agg_type :: proc(expr: Agg_Expr) -> ColumnType {
 	case .Sum, .Min, .Max:
 		return expr.col.type
 	case .Avg:
+		if expr.col.type == .Int {
+			return .Float
+		}
 		return expr.col.type // <-- FIXED
 
 	}
@@ -143,7 +146,7 @@ avg_value :: proc(expr: Agg_Expr, g: Group, outcol: ^Column) {
 		if count == 0 {
 			append_null(outcol)
 		} else {
-			append_fake_float(outcol, f64(total) / f64(count))
+			append_fake_float(outcol, f64(total / count))
 		}
 
 	case .Float:
@@ -280,11 +283,22 @@ agg :: proc(gdf: ^GroupedDataFrame, exprs: []Agg_Expr) -> DataFrame {
 
 	}
 	// set DataFrame row count so printers see the rows we appended
-	if len(out.columns) > 0 {
-		out.rows = out.columns[0].len
-	} else {
-		out.rows = 0
+	// after filling all groups
+	expected := len(gdf.groups)
+	for c in out.columns {
+		if c.len != expected {
+			fmt.printf(
+				"agg invariant violated: column %s len=%d, expected=%d\n",
+				c.name,
+				c.len,
+				expected,
+			)
+			panic("agg: inconsistent column lengths")
+		}
 	}
+
+	out.rows = expected
+
 
 	return out
 }
