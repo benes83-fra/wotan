@@ -229,7 +229,9 @@ main :: proc() {
 
 	w.dataframe_pretty_print(&joined, 20)
 
-
+	w.destroy_dataframe(&joined)
+	w.destroy_dataframe(&salary)
+	w.destroy_dataframe(&people)
 	w.destroy_dataframe(&df_active3)
 	w.destroy_dataframe(&df8)
 	w.destroy_dataframe(&df9)
