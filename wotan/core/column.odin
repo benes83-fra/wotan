@@ -30,7 +30,15 @@ column_new :: proc(
 	if err != nil {
 		panic("Column: allocation failed")
 	}
-	return Column{name = name, type = type, len = 0, capacity = capacity, data = data, nulls = nil, arena = vmem.Arena{}}
+	return Column {
+		name = name,
+		type = type,
+		len = 0,
+		capacity = capacity,
+		data = data,
+		nulls = nil,
+		arena = vmem.Arena{},
+	}
 }
 
 destroy_column :: proc(col: ^Column) {
@@ -46,9 +54,9 @@ destroy_column :: proc(col: ^Column) {
 		delete(col.nulls)
 		col.nulls = nil
 	}
-  vmem.arena_free_all(&col.arena)
+
 	// if col.arena.curr_block != nil {
-		// vmem.arena_destroy(&col.arena)
+	// vmem.arena_destroy(&col.arena)
 	// }
 	col.len = 0.0
 	col.capacity = 0.0
@@ -178,7 +186,7 @@ append_string :: proc(c: ^Column, v: string, should_clone: bool = true) {
 	final_str := v
 	if should_clone {
 		// Initialize arena on first use if needed
-    if c.arena.kind == nil {
+		if c.arena.kind == nil {
 
 			err := vmem.arena_init_growing(&c.arena)
 			if err != nil {

@@ -230,13 +230,13 @@ agg_with_allocator :: proc(
 	exprs: []Agg_Expr,
 	allocator: mem.Allocator = context.allocator,
 ) -> DataFrame {
-	out := dataframe_new(allocator)
+	out := dataframe_new()
 
 	// 1) key columns in output
 	for ki in 0 ..< len(gdf.keys) {
 		key_name := gdf.keys[ki]
 		src_col := column(gdf.df, key_name)
-		out_col := column_new(key_name, src_col.type, len(gdf.groups),allocator)
+		out_col := column_new(key_name, src_col.type, len(gdf.groups))
 		add_column(&out, out_col)
 	}
 
@@ -244,7 +244,7 @@ agg_with_allocator :: proc(
 	for ei in 0 ..< len(exprs) {
 		expr := exprs[ei]
 		t := infer_agg_type(expr)
-		out_col := column_new(expr.name, t, len(gdf.groups),allocator)
+		out_col := column_new(expr.name, t, len(gdf.groups))
 		add_column(&out, out_col)
 	}
 
