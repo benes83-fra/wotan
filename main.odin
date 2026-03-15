@@ -206,11 +206,29 @@ main :: proc() {
 	w.dataframe_pretty_print(&out, 20)
 
 
+	w.destroy_grouped_dataframe(&gdf)
+	w.destroy_dataframe(&out)
+
 	// --- Insert this right before calling groupby(&df8, ...) ---
 
+	people := w.dataframe_new()
+	w.add_column(&people, w.column_from_ints("id", []int{1, 2, 3}))
+	w.add_column(&people, w.column_from_strings("name", []string{"Alice", "Bob", "Charlie"}))
+	w.add_column(&people, w.column_from_ints("age", []int{30, 20, 40}))
+	people.rows = 3
+	w.dataframe_pretty_print(&people, 20)
+	salary := w.dataframe_new()
+	w.add_column(&salary, w.column_from_ints("id", []int{1, 2, 4}))
+	w.add_column(&salary, w.column_from_floats("salary", []f64{50000.00, 42000.00, 90000.00}))
+	salary.rows = 3
+	w.dataframe_pretty_print(&salary, 20)
 
-	w.destroy_grouped_dataframe(&gdf)
-  w.destroy_dataframe(&out)
+	joined := w.join(int, &people, &salary, "id", .Inner)
+
+	fmt.println("Joined DF:")
+
+	w.dataframe_pretty_print(&joined, 20)
+
 
 	w.destroy_dataframe(&df_active3)
 	w.destroy_dataframe(&df8)

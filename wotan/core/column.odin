@@ -794,3 +794,33 @@ column_mask :: proc(col: ^Column) -> []bool {
 
 	return barr
 }
+column_from_ints :: proc(name: string, values: []int) -> Column {
+	col := column_new(name, .Int, len(values))
+	for v in values {
+		append_int(&col, v)
+	}
+	return col
+}
+column_from_strings :: proc(name: string, values: []string) -> Column {
+	col := column_new(name, .String, len(values))
+	for v in values {
+		append_string(&col, v)
+	}
+	return col
+}
+column_from_bools :: proc(name: string, values: []bool) -> Column {
+	col := column_new(name, .Bool, len(values))
+	for v in values {
+		append_bool(&col, v)
+	}
+	return col
+}
+
+
+column_from_floats :: proc(name: string, values: []f64) -> Column {
+	col := column_new(name, .Float, len(values))
+	for v in values {
+		append_float(&col, v)
+	}
+	return col
+}

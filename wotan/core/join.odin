@@ -44,24 +44,31 @@ get_bool :: proc(c: ^Column, row: int) -> bool {
 }
 
 
-JoinIndex :: struct {
+get_key :: proc($T: typeid, c: ^Column, row: int) -> T {
+	base := uintptr(c.data) + uintptr(row * size_of(T))
+	return (cast(^T)base)^
+}
+
+
+JoinIndex :: struct($T: typeid) {
 	key:   string,
 	col:   ^Column,
-	table: map[string]int, // key → row indices in right DF
+	table: map[T]int, // key → row indices in right DF
 }
 
 build_join_index :: proc(
+	$T: typeid,
 	right: ^DataFrame,
 	key: string,
 	allocator: mem.Allocator = context.allocator,
-) -> JoinIndex {
-	idx: JoinIndex
+) -> JoinIndex(T) {
+	idx: JoinIndex(T)
 	idx.key = key
 	idx.col = column(right, key)
-	idx.table = make(map[string]int, allocator) // if you later want arena-backed, change allocator here
+	idx.table = make(map[T]int, allocator) // if you later want arena-backed, change allocator here
 
 	for r in 0 ..< right.rows {
-		k := get_string(idx.col, r)
+		k := get_key(T, idx.col, r)
 		idx.table[k] = r
 	}
 
@@ -69,6 +76,7 @@ build_join_index :: proc(
 }
 
 join_inner :: proc(
+	$T: typeid,
 	left: ^DataFrame,
 	right: ^DataFrame,
 	key: string,
@@ -94,11 +102,11 @@ join_inner :: proc(
 	}
 
 	// 3) perform the join
-	idx := build_join_index(right, key)
+	idx := build_join_index(T, right, key)
 	left_key_col := column(left, key)
 
 	for li in 0 ..< left.rows {
-		k := get_string(left_key_col, li)
+		k := get_key(T, left_key_col, li)
 
 		ri, ok := idx.table[k]
 		if !ok {
@@ -168,6 +176,7 @@ copy_value :: proc(dst, src: ^Column, row: int) {
 }
 
 join :: proc(
+	$T: typeid,
 	left: ^DataFrame,
 	right: ^DataFrame,
 	key: string,
@@ -176,7 +185,8 @@ join :: proc(
 ) -> DataFrame {
 	switch kind {
 	case .Inner:
-		return join_inner(left, right, key)
+		fmt.println("Joining")
+		return join_inner(T, left, right, key)
 	case .Left:
 	// TODO
 	case .Right:
