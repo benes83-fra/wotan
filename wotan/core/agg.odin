@@ -3,6 +3,8 @@ package wotan
 
 import "core:fmt"
 import "core:mem"
+
+import vmem "core:mem/virtual"
 // --- Aggregation kinds -------------------------------------------------------
 
 Agg_Kind :: enum {
@@ -223,7 +225,7 @@ max_value :: proc(expr: Agg_Expr, g: Group, outcol: ^Column) {
 
 // --- Aggregation driver ------------------------------------------------------
 
-agg :: proc(
+agg_with_allocator :: proc(
 	gdf: ^GroupedDataFrame,
 	exprs: []Agg_Expr,
 	allocator: mem.Allocator = context.allocator,
@@ -234,16 +236,15 @@ agg :: proc(
 	for ki in 0 ..< len(gdf.keys) {
 		key_name := gdf.keys[ki]
 		src_col := column(gdf.df, key_name)
-		out_col := column_new(key_name, src_col.type, len(gdf.groups))
+		out_col := column_new(key_name, src_col.type, len(gdf.groups),allocator)
 		add_column(&out, out_col)
 	}
 
 	// 2) agg columns in output
-	// 2) agg columns in output
 	for ei in 0 ..< len(exprs) {
 		expr := exprs[ei]
 		t := infer_agg_type(expr)
-		out_col := column_new(expr.name, t, len(gdf.groups))
+		out_col := column_new(expr.name, t, len(gdf.groups),allocator)
 		add_column(&out, out_col)
 	}
 
@@ -287,6 +288,8 @@ agg :: proc(
 		}
 
 	}
+
+
 	// set DataFrame row count so printers see the rows we appended
 	// after filling all groups
 	expected := len(gdf.groups)
@@ -306,4 +309,9 @@ agg :: proc(
 
 
 	return out
+}
+
+agg :: proc(gdf: ^GroupedDataFrame, exprs: []Agg_Expr) -> DataFrame {
+	allocator := vmem.arena_allocator(&gdf.arena)
+	return agg_with_allocator(gdf, exprs, allocator)
 }

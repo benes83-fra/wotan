@@ -199,8 +199,8 @@ main :: proc() {
 	gdf := w.groupby(&df8, []string{"age"})
 	exprs3 := []w.Agg_Expr {
 		w.count("n"),
-		w.avg_agg("avg_age", w.column(&df8, "age")),
-		w.sum_agg("total_salary", w.column(&df8, "salary")),
+		w.sum_agg("avg_age", w.column(&df8, "age")),
+		w.avg_agg("total_salary", w.column(&df8, "salary")),
 	}
 	out := w.agg(&gdf, exprs3)
 	w.dataframe_pretty_print(&out, 20)
@@ -210,7 +210,7 @@ main :: proc() {
 
 
 	w.destroy_grouped_dataframe(&gdf)
-	w.destroy_dataframe(&out)
+  w.destroy_dataframe(&out)
 
 	w.destroy_dataframe(&df_active3)
 	w.destroy_dataframe(&df8)

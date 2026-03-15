@@ -3,7 +3,7 @@ package wotan
 import "core:fmt"
 import "core:mem"
 import "core:strings"
-
+import vmem "core:mem/virtual"
 DataFrame :: struct {
 	columns:       [dynamic]Column,
 	name_to_index: map[string]int,
@@ -17,16 +17,18 @@ DataFrame :: struct {
 dataframe_new :: proc(allocator: mem.Allocator = context.allocator) -> DataFrame {
 	return DataFrame {
 		columns = make([dynamic]Column, allocator),
-		name_to_index = make(map[string]int),
+		name_to_index = make(map[string]int,allocator),
 		rows = 0,
 	}
 }
 //DataFrame destructor for cleanup
 destroy_dataframe :: proc(df: ^DataFrame) {
 	for &col in df.columns {
-		destroy_column(&col)
+		 destroy_column(&col)
 
 	}
+
+
 	if df.columns != nil {
 		delete(df.columns)
 	}

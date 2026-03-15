@@ -104,7 +104,7 @@ destroy_grouped_dataframe :: proc(gdf: ^GroupedDataFrame) {
 	// 1. Delete the top-level dynamic array
 	delete(gdf.groups)
 	// 2. Free everything else (strings, row_indices, etc.) in one go
-	vmem.arena_destroy(&gdf.arena)
+	vmem.arena_free_all (&gdf.arena)
 }
 
 
