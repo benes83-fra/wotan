@@ -223,7 +223,7 @@ main :: proc() {
 	salary.rows = 3
 	w.dataframe_pretty_print(&salary, 20)
 
-	joined := w.join(int, &people, &salary, "id", .Inner)
+	joined := w.join(int, &people, &salary, "id", .Inner, context.temp_allocator)
 
 	fmt.println("Joined DF:")
 

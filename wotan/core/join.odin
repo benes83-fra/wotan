@@ -102,9 +102,8 @@ join_inner :: proc(
 	}
 
 	// 3) perform the join
-	idx := build_join_index(T, right, key)
-	left_key_col := column(left, key)
-
+	idx := build_join_index(T, right, key, allocator)
+  left_key_col := column(left, key)
 	for li in 0 ..< left.rows {
 		k := get_key(T, left_key_col, li)
 
@@ -186,7 +185,7 @@ join :: proc(
 	switch kind {
 	case .Inner:
 		fmt.println("Joining")
-		return join_inner(T, left, right, key)
+		return join_inner(T, left, right, key, allocator)
 	case .Left:
 	// TODO
 	case .Right:
