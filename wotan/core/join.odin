@@ -105,30 +105,32 @@ join_generic :: proc(
 
 	// 3) perform the join
 	idx := build_join_index(T, right, key, allocator)
+	matched_right := make([]bool, right.rows, allocator)
 	left_key_col := column(left, key)
 	for li in 0 ..< left.rows {
 		k := get_key(T, left_key_col, li)
 
 		ri, ok := idx.table[k]
 		if ok {
+			matched_right[ri] = true
 			emit_joined_row(&result, left, right, li, ri, key)
 		} else {
-			#partial switch kind {
-			case .Inner:
+			if kind == .Inner {
 				continue
-			case .Left:
-				emit_left_only_row(&result, left, li, right, key, allocator)
-			case .Right:
-				emit_left_only_row(&result, right, ri, left, key, allocator)
-
 			}
-
+			if kind == .Left || kind == .Outer {
+				emit_left_only_row(&result, left, li, right,key, allocator)
+			}
 		}
-
-
 	}
 
-
+	if kind == .Right || kind == .Outer {
+		for ri in 0 ..< right.rows {
+			if !matched_right[ri] {
+				emit_right_only_row(&result, right, ri, left,key, allocator)
+			}
+		}
+	}
 	if len(result.columns) > 0 {
 		result.rows = result.columns[0].len
 	} else {
@@ -199,6 +201,35 @@ emit_left_only_row :: proc(
 }
 
 
+emit_right_only_row :: proc(
+	out: ^DataFrame,
+	right: ^DataFrame,
+	ri: int,
+	left: ^DataFrame,
+  key : string,
+	allocator: mem.Allocator = context.allocator,
+) {
+	// 1. nulls for left columns
+	for ci in 0 ..< len(left.columns) {
+		dst := &out.columns[ci]
+		append_null(dst)
+	}
+
+	// 2. copy right columns (skipping key)
+	out_offset := len(left.columns)
+	out_idx := out_offset
+	for ci in 0 ..< len(right.columns) {
+		src := &right.columns[ci]
+		if src.name == key {
+			continue
+		}
+		dst := &out.columns[out_idx]
+		copy_value(dst, src, ri)
+		out_idx += 1
+	}
+}
+
+
 copy_value :: proc(dst, src: ^Column, row: int) {
 	#partial switch src.type {
 	case .Int:
@@ -226,18 +257,5 @@ join :: proc(
 	kind: JoinKind = .Inner,
 	allocator: mem.Allocator = context.allocator,
 ) -> DataFrame {
-	switch kind {
-	case .Inner:
-		fmt.println("Joining")
-		return join_generic(T, left, right, key, .Inner, allocator)
-	case .Left:
-		//relying on the fallback to join left
-		return join_generic(T, left, right, key, .Left, allocator)
-	case .Right:
-		//inverting the calling order
-		return join_generic(T, left, right, key, .Right, allocator)
-	case .Outer:
-	// TODO
-	}
-	return dataframe_new()
+	return join_generic(T, left, right, key, kind, allocator)
 }
