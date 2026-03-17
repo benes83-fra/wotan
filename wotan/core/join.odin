@@ -10,6 +10,7 @@ JoinKind :: enum {
 	Outer,
 }
 
+
 get_string :: proc(c: ^Column, row: int) -> string {
 	base := uintptr(c.data) + uintptr(row * size_of(string))
 	return (cast(^string)base)^
@@ -75,11 +76,12 @@ build_join_index :: proc(
 	return idx
 }
 
-join_inner :: proc(
+join_generic :: proc(
 	$T: typeid,
 	left: ^DataFrame,
 	right: ^DataFrame,
 	key: string,
+	kind: JoinKind,
 	allocator: mem.Allocator = context.allocator,
 ) -> DataFrame {
 	result := dataframe_new()
@@ -103,16 +105,27 @@ join_inner :: proc(
 
 	// 3) perform the join
 	idx := build_join_index(T, right, key, allocator)
-  left_key_col := column(left, key)
+	left_key_col := column(left, key)
 	for li in 0 ..< left.rows {
 		k := get_key(T, left_key_col, li)
 
 		ri, ok := idx.table[k]
-		if !ok {
-			continue // inner join: skip non-matches
+		if ok {
+			emit_joined_row(&result, left, right, li, ri, key)
+		} else {
+			#partial switch kind {
+			case .Inner:
+				continue
+			case .Left:
+				emit_left_only_row(&result, left, li, right, key, allocator)
+			case .Right:
+				emit_left_only_row(&result, right, ri, left, key, allocator)
+
+			}
+
 		}
 
-		emit_joined_row(&result, left, right, li, ri, key)
+
 	}
 
 
@@ -155,6 +168,37 @@ emit_joined_row :: proc(
 	}
 }
 
+
+emit_left_only_row :: proc(
+	out: ^DataFrame,
+	left: ^DataFrame,
+	li: int,
+	right: ^DataFrame,
+	key: string,
+	allocator: mem.Allocator = context.allocator,
+) {
+	// copy left columns
+	for ci in 0 ..< len(left.columns) {
+		src := &left.columns[ci]
+		dst := &out.columns[ci]
+		copy_value(dst, src, li)
+	}
+
+	// append nulls for right columns (skipping key)
+	out_offset := len(left.columns)
+	out_idx := out_offset
+	for ci in 0 ..< len(right.columns) {
+		src := &right.columns[ci]
+		if src.name == key {
+			continue
+		}
+		dst := &out.columns[out_idx]
+		append_null(dst) // whatever your null API is
+		out_idx += 1
+	}
+}
+
+
 copy_value :: proc(dst, src: ^Column, row: int) {
 	#partial switch src.type {
 	case .Int:
@@ -185,11 +229,13 @@ join :: proc(
 	switch kind {
 	case .Inner:
 		fmt.println("Joining")
-		return join_inner(T, left, right, key, allocator)
+		return join_generic(T, left, right, key, .Inner, allocator)
 	case .Left:
-	// TODO
+		//relying on the fallback to join left
+		return join_generic(T, left, right, key, .Left, allocator)
 	case .Right:
-	// TODO
+		//inverting the calling order
+		return join_generic(T, left, right, key, .Right, allocator)
 	case .Outer:
 	// TODO
 	}
