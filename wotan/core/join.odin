@@ -11,6 +11,12 @@ JoinKind :: enum {
 }
 
 
+JoinRowKind :: enum {
+	LeftOnly,
+	RightOnly,
+}
+
+
 get_string :: proc(c: ^Column, row: int) -> string {
 	base := uintptr(c.data) + uintptr(row * size_of(string))
 	return (cast(^string)base)^
@@ -119,7 +125,8 @@ join_generic :: proc(
 				continue
 			}
 			if kind == .Left || kind == .Outer {
-				emit_left_only_row(&result, left, li, right,key, allocator)
+				emit_unmatched_row(&result, left, right, li, .LeftOnly, key, allocator)
+
 			}
 		}
 	}
@@ -127,7 +134,8 @@ join_generic :: proc(
 	if kind == .Right || kind == .Outer {
 		for ri in 0 ..< right.rows {
 			if !matched_right[ri] {
-				emit_right_only_row(&result, right, ri, left,key, allocator)
+				emit_unmatched_row(&result, left, right, ri, .RightOnly, key, allocator)
+
 			}
 		}
 	}
@@ -139,6 +147,55 @@ join_generic :: proc(
 
 	return result
 }
+
+
+emit_unmatched_row :: proc(
+	out: ^DataFrame,
+	left: ^DataFrame,
+	right: ^DataFrame,
+	row: int, // row index in whichever side is real
+	kind: JoinRowKind,
+	key: string,
+	allocator: mem.Allocator = context.allocator,
+) {
+	// 1. LEFT side
+	for ci in 0 ..< len(left.columns) {
+		dst := &out.columns[ci]
+
+		if kind == .LeftOnly {
+			// real left row
+			src := &left.columns[ci]
+			copy_value(dst, src, row)
+		} else {
+			// right-only row → left side is NULL
+			append_null(dst)
+		}
+	}
+
+	// 2. RIGHT side
+	out_offset := len(left.columns)
+	out_idx := out_offset
+
+	for ci in 0 ..< len(right.columns) {
+		src := &right.columns[ci]
+		if src.name == key {
+			continue
+		}
+
+		dst := &out.columns[out_idx]
+
+		if kind == .RightOnly {
+			// real right row
+			copy_value(dst, src, row)
+		} else {
+			// left-only row → right side is NULL
+			append_null(dst)
+		}
+
+		out_idx += 1
+	}
+}
+
 
 emit_joined_row :: proc(
 	out: ^DataFrame,
@@ -157,65 +214,6 @@ emit_joined_row :: proc(
 	}
 
 	// right columns (skipping key)
-	out_offset := len(left.columns)
-	out_idx := out_offset
-	for ci in 0 ..< len(right.columns) {
-		src := &right.columns[ci]
-		if src.name == key {
-			continue
-		}
-		dst := &out.columns[out_idx]
-		copy_value(dst, src, ri)
-		out_idx += 1
-	}
-}
-
-
-emit_left_only_row :: proc(
-	out: ^DataFrame,
-	left: ^DataFrame,
-	li: int,
-	right: ^DataFrame,
-	key: string,
-	allocator: mem.Allocator = context.allocator,
-) {
-	// copy left columns
-	for ci in 0 ..< len(left.columns) {
-		src := &left.columns[ci]
-		dst := &out.columns[ci]
-		copy_value(dst, src, li)
-	}
-
-	// append nulls for right columns (skipping key)
-	out_offset := len(left.columns)
-	out_idx := out_offset
-	for ci in 0 ..< len(right.columns) {
-		src := &right.columns[ci]
-		if src.name == key {
-			continue
-		}
-		dst := &out.columns[out_idx]
-		append_null(dst) // whatever your null API is
-		out_idx += 1
-	}
-}
-
-
-emit_right_only_row :: proc(
-	out: ^DataFrame,
-	right: ^DataFrame,
-	ri: int,
-	left: ^DataFrame,
-  key : string,
-	allocator: mem.Allocator = context.allocator,
-) {
-	// 1. nulls for left columns
-	for ci in 0 ..< len(left.columns) {
-		dst := &out.columns[ci]
-		append_null(dst)
-	}
-
-	// 2. copy right columns (skipping key)
 	out_offset := len(left.columns)
 	out_idx := out_offset
 	for ci in 0 ..< len(right.columns) {
