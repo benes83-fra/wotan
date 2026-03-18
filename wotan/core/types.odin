@@ -1,4 +1,4 @@
-package wotan
+package core
 
 
 import "core:strings"

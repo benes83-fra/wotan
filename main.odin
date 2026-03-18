@@ -228,6 +228,38 @@ main :: proc() {
 	fmt.println("Joined DF:")
 
 	w.dataframe_pretty_print(&joined, 20)
+	KeyType :: struct {
+		id:   int,
+		dept: int,
+	}
+
+	left := w.dataframe_new()
+	w.add_column(&left, w.column_from_ints("id", []int{1, 1, 2}))
+	w.add_column(&left, w.column_from_ints("dept", []int{10, 20, 10}))
+	w.add_column(&left, w.column_from_strings("name", []string{"Alice", "Bob", "Carol"}))
+	left.rows = 3
+
+	right := w.dataframe_new()
+	w.add_column(&right, w.column_from_ints("id", []int{1, 2, 1}))
+	w.add_column(&right, w.column_from_ints("dept", []int{10, 10, 30}))
+	w.add_column(&right, w.column_from_floats("salary", []f64{50000, 60000, 70000}))
+	right.rows = 3
+
+	joined2 := w.join(
+		KeyType,
+		&left,
+		&right,
+		[]string{"id", "dept"},
+		.Inner,
+		context.temp_allocator,
+	)
+
+	fmt.println("Joined DF:")
+	w.dataframe_pretty_print(&joined2, 20)
+
+	w.destroy_dataframe(&left)
+	w.destroy_dataframe(&right)
+	w.destroy_dataframe(&joined2)
 
 	w.destroy_dataframe(&joined)
 	w.destroy_dataframe(&salary)

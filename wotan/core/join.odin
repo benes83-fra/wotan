@@ -1,4 +1,4 @@
-package wotan
+package core
 
 import "core:fmt"
 import "core:mem"
@@ -247,7 +247,7 @@ copy_value :: proc(dst, src: ^Column, row: int) {
 	}
 }
 
-join :: proc(
+join_single :: proc(
 	$T: typeid,
 	left: ^DataFrame,
 	right: ^DataFrame,
@@ -256,4 +256,238 @@ join :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> DataFrame {
 	return join_generic(T, left, right, key, kind, allocator)
+}
+
+
+join :: proc {
+	join_single,
+	join_multi,
+}
+
+
+join_multi :: proc(
+	$T: typeid,
+	left: ^DataFrame,
+	right: ^DataFrame,
+	key: []string,
+	kind: JoinKind = .Inner,
+	allocator: mem.Allocator = context.allocator,
+) -> DataFrame {
+	return join_generic_multi(T, left, right, key, kind, allocator)
+}
+
+copy_single_field :: proc(dst: rawptr, col: ^Column, row: int) {
+	#partial switch col.type {
+	case .Int:
+		(cast(^int)dst)^ = get_int(col, row)
+	case .Float:
+		(cast(^f64)dst)^ = get_float(col, row)
+	case .String:
+		(cast(^string)dst)^ = get_string(col, row)
+	case .Date:
+		(cast(^Date)dst)^ = get_date(col, row)
+	case .Time:
+		(cast(^Time)dst)^ = get_time(col, row)
+	case .Datetime:
+		(cast(^Datetime)dst)^ = get_datetime(col, row)
+	case .Bool:
+		(cast(^bool)dst)^ = get_bool(col, row)
+	}
+}
+
+
+get_composite_key :: proc($T: typeid, cols: []^Column, row: int) -> T {
+	return T{get_int(cols[0], row), get_int(cols[1], row)}
+}
+
+
+build_join_index_multi :: proc(
+	$T: typeid,
+	right: ^DataFrame,
+	cols: []^Column,
+	allocator: mem.Allocator = context.allocator,
+) -> JoinIndex(T) {
+	idx: JoinIndex(T)
+	idx.table = make(map[T]int, allocator)
+
+	for r in 0 ..< right.rows {
+		k := get_composite_key(T, cols, r)
+		idx.table[k] = r
+	}
+
+	return idx
+}
+join_generic_multi :: proc(
+	$T: typeid,
+	left: ^DataFrame,
+	right: ^DataFrame,
+	keys: []string,
+	kind: JoinKind,
+	allocator: mem.Allocator = context.allocator,
+) -> DataFrame {
+	result := dataframe_new()
+
+	// 1) left columns
+	for i in 0 ..< len(left.columns) {
+		src := &left.columns[i]
+		dst := column_new(src.name, src.type, 0) // capacity will grow as we append
+		add_column(&result, dst)
+	}
+
+	// 2) right columns except key
+	for i in 0 ..< len(right.columns) {
+		src := &right.columns[i]
+		skip := false
+		for k in keys {
+			if src.name == k {
+				skip = true
+				break
+			}
+		}
+		if skip {
+			continue
+		}
+
+		dst := column_new(src.name, src.type, 0)
+		add_column(&result, dst)
+	}
+
+	// 3) perform the join
+
+	matched_right := make([]bool, right.rows, allocator)
+	left_key_cols := make([]^Column, len(keys), allocator)
+	right_key_cols := make([]^Column, len(keys), allocator)
+
+	for i in 0 ..< len(keys) {
+		left_key_cols[i] = column(left, keys[i])
+		right_key_cols[i] = column(right, keys[i])
+	}
+	idx := build_join_index_multi(T, right, right_key_cols, allocator)
+
+	for li in 0 ..< left.rows {
+		k := get_composite_key(T, left_key_cols, li)
+
+
+		ri, ok := idx.table[k]
+		if ok {
+			matched_right[ri] = true
+			emit_joined_row_multi(&result, left, right, li, ri, keys)
+		} else {
+			if kind == .Inner {
+				continue
+			}
+			if kind == .Left || kind == .Outer {
+				emit_unmatched_row_multi(&result, left, right, li, .LeftOnly, keys, allocator)
+
+			}
+		}
+	}
+
+	if kind == .Right || kind == .Outer {
+		for ri in 0 ..< right.rows {
+			if !matched_right[ri] {
+				emit_unmatched_row_multi(&result, left, right, ri, .RightOnly, keys, allocator)
+
+			}
+		}
+	}
+	if len(result.columns) > 0 {
+		result.rows = result.columns[0].len
+	} else {
+		result.rows = 0
+	}
+
+	return result
+}
+
+
+emit_joined_row_multi :: proc(
+	out: ^DataFrame,
+	left: ^DataFrame,
+	right: ^DataFrame,
+	li: int,
+	ri: int,
+	key: []string,
+	allocator: mem.Allocator = context.allocator,
+) {
+	// left columns first
+	for ci in 0 ..< len(left.columns) {
+		src := &left.columns[ci]
+		dst := &out.columns[ci]
+		copy_value(dst, src, li)
+	}
+
+	// right columns (skipping key)
+	out_offset := len(left.columns)
+	out_idx := out_offset
+	for ci in 0 ..< len(right.columns) {
+		src := &right.columns[ci]
+		skip := false
+		for k in key {
+			if src.name == k {
+				skip = true
+				break
+			}
+		}
+		if skip {
+			continue
+		}
+		dst := &out.columns[out_idx]
+		copy_value(dst, src, ri)
+		out_idx += 1
+	}
+}
+
+
+emit_unmatched_row_multi :: proc(
+	out: ^DataFrame,
+	left: ^DataFrame,
+	right: ^DataFrame,
+	row: int, // row index in whichever side is real
+	kind: JoinRowKind,
+	keys: []string,
+	allocator: mem.Allocator = context.allocator,
+) {
+	// 1. LEFT side
+	for ci in 0 ..< len(left.columns) {
+		dst := &out.columns[ci]
+
+		if kind == .LeftOnly {
+			// real left row
+			src := &left.columns[ci]
+			copy_value(dst, src, row)
+		} else {
+			// right-only row → left side is NULL
+			append_null(dst)
+		}
+	}
+
+	// 2. RIGHT side
+	out_offset := len(left.columns)
+	out_idx := out_offset
+
+	for ci in 0 ..< len(right.columns) {
+		src := &right.columns[ci]
+		skip := false
+		for k in keys {
+			if src.name == k {
+				skip = true
+				break
+			}
+		}
+		if skip {
+			continue
+		}
+		dst := &out.columns[out_idx]
+
+		if kind == .RightOnly {
+			// real right row
+			copy_value(dst, src, row)
+		} else {
+			// left-only row → right side is NULL
+			append_null(dst)
+		}
+
+		out_idx += 1
+	}
 }
