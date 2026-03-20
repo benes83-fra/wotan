@@ -225,13 +225,10 @@ main :: proc() {
 
 	joined := w.join(int, &people, &salary, "id", .Outer, context.temp_allocator)
 
-	fmt.println("Joined DF:")
+	fmt.println("Joined DF1:")
 
 	w.dataframe_pretty_print(&joined, 20)
-	KeyType :: struct {
-		id:   int,
-		dept: int,
-	}
+
 
 	left := w.dataframe_new()
 	w.add_column(&left, w.column_from_ints("id", []int{1, 1, 2}))
@@ -245,18 +242,39 @@ main :: proc() {
 	w.add_column(&right, w.column_from_floats("salary", []f64{50000, 60000, 70000}))
 	right.rows = 3
 
-	joined2 := w.join(
-		KeyType,
-		&left,
-		&right,
-		[]string{"id", "dept"},
-		.Inner,
-		context.temp_allocator,
-	)
+	joined2 := w.join_multi(&left, &right, []string{"id", "dept"}, .Inner, context.temp_allocator)
 
-	fmt.println("Joined DF:")
+	fmt.println("Joined DF2:")
 	w.dataframe_pretty_print(&joined2, 20)
 
+	left2 := w.dataframe_new()
+	w.add_column(&left2, w.column_from_ints("id", []int{1, 1, 2}))
+	w.add_column(&left2, w.column_from_strings("country", []string{"DE", "US", "DE"}))
+	w.add_column(&left2, w.column_from_strings("name", []string{"Alice", "Bob", "Carol"}))
+	left2.rows = 3
+
+	right2 := w.dataframe_new()
+	w.add_column(&right2, w.column_from_ints("id", []int{1, 2, 1}))
+	w.add_column(&right2, w.column_from_strings("country", []string{"DE", "DE", "FR"}))
+	w.add_column(&right2, w.column_from_floats("salary", []f64{50000, 60000, 70000}))
+	right2.rows = 3
+	w.dataframe_pretty_print(&left2, 20)
+	w.dataframe_pretty_print(&right2, 20)
+
+	joined3 := w.join_multi(
+		&left2,
+		&right2,
+		[]string{"id", "country"},
+		.Inner,
+		allocator = context.temp_allocator,
+	)
+
+
+	w.dataframe_pretty_print(&joined3, 20)
+
+	w.destroy_dataframe(&left2)
+	w.destroy_dataframe(&right2)
+	w.destroy_dataframe(&joined3)
 	w.destroy_dataframe(&left)
 	w.destroy_dataframe(&right)
 	w.destroy_dataframe(&joined2)

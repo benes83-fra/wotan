@@ -2,6 +2,7 @@ package core
 
 import "core:fmt"
 import "core:mem"
+import "core:strings"
 
 JoinKind :: enum {
 	Inner,
@@ -266,14 +267,13 @@ join :: proc {
 
 
 join_multi :: proc(
-	$T: typeid,
 	left: ^DataFrame,
 	right: ^DataFrame,
 	key: []string,
 	kind: JoinKind = .Inner,
 	allocator: mem.Allocator = context.allocator,
 ) -> DataFrame {
-	return join_generic_multi(T, left, right, key, kind, allocator)
+	return join_generic_multi(left, right, key, kind, allocator)
 }
 
 copy_single_field :: proc(dst: rawptr, col: ^Column, row: int) {
@@ -296,29 +296,23 @@ copy_single_field :: proc(dst: rawptr, col: ^Column, row: int) {
 }
 
 
-get_composite_key :: proc($T: typeid, cols: []^Column, row: int) -> T {
-	return T{get_int(cols[0], row), get_int(cols[1], row)}
-}
-
-
 build_join_index_multi :: proc(
-	$T: typeid,
 	right: ^DataFrame,
 	cols: []^Column,
 	allocator: mem.Allocator = context.allocator,
-) -> JoinIndex(T) {
-	idx: JoinIndex(T)
-	idx.table = make(map[T]int, allocator)
+) -> map[string]int {
+	table := make(map[string]int, allocator)
 
 	for r in 0 ..< right.rows {
-		k := get_composite_key(T, cols, r)
-		idx.table[k] = r
+		k := make_composite_key_string(cols, r, allocator)
+		table[k] = r
 	}
 
-	return idx
+	return table
 }
+
+
 join_generic_multi :: proc(
-	$T: typeid,
 	left: ^DataFrame,
 	right: ^DataFrame,
 	keys: []string,
@@ -327,16 +321,17 @@ join_generic_multi :: proc(
 ) -> DataFrame {
 	result := dataframe_new()
 
-	// 1) left columns
+	// 1) left columns (all of them)
 	for i in 0 ..< len(left.columns) {
 		src := &left.columns[i]
-		dst := column_new(src.name, src.type, 0) // capacity will grow as we append
+		dst := column_new(src.name, src.type, 0)
 		add_column(&result, dst)
 	}
 
-	// 2) right columns except key
+	// 2) right columns, skipping ALL key columns
 	for i in 0 ..< len(right.columns) {
 		src := &right.columns[i]
+
 		skip := false
 		for k in keys {
 			if src.name == k {
@@ -352,23 +347,23 @@ join_generic_multi :: proc(
 		add_column(&result, dst)
 	}
 
-	// 3) perform the join
-
-	matched_right := make([]bool, right.rows, allocator)
+	// 3) prepare key columns
 	left_key_cols := make([]^Column, len(keys), allocator)
 	right_key_cols := make([]^Column, len(keys), allocator)
-
 	for i in 0 ..< len(keys) {
 		left_key_cols[i] = column(left, keys[i])
 		right_key_cols[i] = column(right, keys[i])
 	}
-	idx := build_join_index_multi(T, right, right_key_cols, allocator)
 
+	// 4) build index (string composite key)
+	idx := build_join_index_multi(right, right_key_cols, allocator)
+	matched_right := make([]bool, right.rows, allocator)
+
+	// 5) scan left
 	for li in 0 ..< left.rows {
-		k := get_composite_key(T, left_key_cols, li)
+		k := make_composite_key_string(left_key_cols, li, allocator)
 
-
-		ri, ok := idx.table[k]
+		ri, ok := idx[k]
 		if ok {
 			matched_right[ri] = true
 			emit_joined_row_multi(&result, left, right, li, ri, keys)
@@ -377,24 +372,22 @@ join_generic_multi :: proc(
 				continue
 			}
 			if kind == .Left || kind == .Outer {
-				emit_unmatched_row_multi(&result, left, right, li, .LeftOnly, keys, allocator)
-
+				emit_unmatched_row_multi(&result, left, right, li, .LeftOnly, keys)
 			}
 		}
 	}
 
+	// 6) right-only
 	if kind == .Right || kind == .Outer {
 		for ri in 0 ..< right.rows {
 			if !matched_right[ri] {
-				emit_unmatched_row_multi(&result, left, right, ri, .RightOnly, keys, allocator)
-
+				emit_unmatched_row_multi(&result, left, right, ri, .RightOnly, keys)
 			}
 		}
 	}
+
 	if len(result.columns) > 0 {
 		result.rows = result.columns[0].len
-	} else {
-		result.rows = 0
 	}
 
 	return result
@@ -407,23 +400,24 @@ emit_joined_row_multi :: proc(
 	right: ^DataFrame,
 	li: int,
 	ri: int,
-	key: []string,
-	allocator: mem.Allocator = context.allocator,
+	keys: []string,
 ) {
-	// left columns first
+	// left columns
 	for ci in 0 ..< len(left.columns) {
 		src := &left.columns[ci]
 		dst := &out.columns[ci]
 		copy_value(dst, src, li)
 	}
 
-	// right columns (skipping key)
+	// right columns, skipping all key columns
 	out_offset := len(left.columns)
 	out_idx := out_offset
+
 	for ci in 0 ..< len(right.columns) {
 		src := &right.columns[ci]
+
 		skip := false
-		for k in key {
+		for k in keys {
 			if src.name == k {
 				skip = true
 				break
@@ -432,6 +426,7 @@ emit_joined_row_multi :: proc(
 		if skip {
 			continue
 		}
+
 		dst := &out.columns[out_idx]
 		copy_value(dst, src, ri)
 		out_idx += 1
@@ -490,4 +485,49 @@ emit_unmatched_row_multi :: proc(
 
 		out_idx += 1
 	}
+}
+
+
+make_composite_key_string :: proc(cols: []^Column, row: int, allocator: mem.Allocator) -> string {
+	b := strings.builder_make(allocator)
+	defer strings.builder_destroy(&b)
+
+	for i in 0 ..< len(cols) {
+		col := cols[i]
+
+		if i > 0 {
+			fmt.sbprint(&b, '|')
+		}
+
+		#partial switch col.type {
+		case .Int:
+			fmt.sbprintf(&b, "i:%v", get_int(col, row))
+		case .Float:
+			fmt.sbprintf(&b, "i:%v", get_float(col, row))
+		case .String:
+			fmt.sbprintf(&b, "i:%v", get_string(col, row))
+		case .Date:
+			d := get_date(col, row)
+			fmt.sbprintf(&b, "D:%04d-%02d-%02d", d.year, d.month, d.day)
+		case .Time:
+			t := get_time(col, row)
+			fmt.sbprintf(&b, "T:%02d:%02d:%02d", t.hour, t.minute, t.second)
+		case .Datetime:
+			dt := get_datetime(col, row)
+			fmt.sbprintf(
+				&b,
+				"DT:%04d-%02d-%02d %02d:%02d:%02d",
+				dt.year,
+				dt.month,
+				dt.day,
+				dt.hour,
+				dt.minute,
+				dt.second,
+			)
+		case .Bool:
+			fmt.sbprintf(&b, "b:%v", get_bool(col, row))
+		}
+	}
+
+	return strings.to_string(b)
 }
