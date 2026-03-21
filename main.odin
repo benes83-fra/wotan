@@ -223,7 +223,7 @@ main :: proc() {
 	salary.rows = 3
 	w.dataframe_pretty_print(&salary, 20)
 
-	joined := w.join(int, &people, &salary, "id", .Outer, context.temp_allocator)
+	joined := w.join_single(int, &people, &salary, "id", .Outer, context.temp_allocator)
 
 	fmt.println("Joined DF1:")
 
@@ -242,7 +242,7 @@ main :: proc() {
 	w.add_column(&right, w.column_from_floats("salary", []f64{50000, 60000, 70000}))
 	right.rows = 3
 
-	joined2 := w.join_multi(&left, &right, []string{"id", "dept"}, .Inner, context.temp_allocator)
+	joined2 := w.join(&left, &right, []string{"id", "dept"}, .Inner, context.temp_allocator)
 
 	fmt.println("Joined DF2:")
 	w.dataframe_pretty_print(&joined2, 20)
@@ -261,7 +261,7 @@ main :: proc() {
 	w.dataframe_pretty_print(&left2, 20)
 	w.dataframe_pretty_print(&right2, 20)
 
-	joined3 := w.join_multi(
+	joined3 := w.join(
 		&left2,
 		&right2,
 		[]string{"id", "country"},

@@ -260,13 +260,7 @@ join_single :: proc(
 }
 
 
-join :: proc {
-	join_single,
-	join_multi,
-}
-
-
-join_multi :: proc(
+join :: proc(
 	left: ^DataFrame,
 	right: ^DataFrame,
 	key: []string,
@@ -295,20 +289,44 @@ copy_single_field :: proc(dst: rawptr, col: ^Column, row: int) {
 	}
 }
 
+Join_Multi_Index :: struct {
+	bucket_head: map[string]int, // key → head node index, or -1
+	rows:        [dynamic]int, // right row index per node
+	next:        [dynamic]int, // next node index, or -1
+}
 
-build_join_index_multi :: proc(
+join_multi_index_make :: proc(allocator: mem.Allocator) -> Join_Multi_Index {
+	return Join_Multi_Index {
+		bucket_head = make(map[string]int, allocator),
+		rows = make([dynamic]int, 0, allocator),
+		next = make([dynamic]int, 0, allocator),
+	}
+}
+
+build_join_multi_index :: proc(
 	right: ^DataFrame,
-	cols: []^Column,
+	key_cols: []^Column,
 	allocator: mem.Allocator = context.allocator,
-) -> map[string]int {
-	table := make(map[string]int, allocator)
+) -> Join_Multi_Index {
+	idx := join_multi_index_make(allocator)
 
 	for r in 0 ..< right.rows {
-		k := make_composite_key_string(cols, r, allocator)
-		table[k] = r
+		k := make_composite_key_string(key_cols, r, allocator)
+
+		// new node
+		node_index := len(idx.rows)
+		append(&idx.rows, r)
+		append(&idx.next, -1)
+
+		// link into bucket
+		head, ok := idx.bucket_head[k]
+		if ok {
+			idx.next[node_index] = head
+		}
+		idx.bucket_head[k] = node_index
 	}
 
-	return table
+	return idx
 }
 
 
@@ -316,19 +334,19 @@ join_generic_multi :: proc(
 	left: ^DataFrame,
 	right: ^DataFrame,
 	keys: []string,
-	kind: JoinKind,
+	kind: JoinKind = .Inner,
 	allocator: mem.Allocator = context.allocator,
 ) -> DataFrame {
 	result := dataframe_new()
 
-	// 1) left columns (all of them)
+	// 1) left columns
 	for i in 0 ..< len(left.columns) {
 		src := &left.columns[i]
 		dst := column_new(src.name, src.type, 0)
 		add_column(&result, dst)
 	}
 
-	// 2) right columns, skipping ALL key columns
+	// 2) right columns, skipping all key columns
 	for i in 0 ..< len(right.columns) {
 		src := &right.columns[i]
 
@@ -347,7 +365,7 @@ join_generic_multi :: proc(
 		add_column(&result, dst)
 	}
 
-	// 3) prepare key columns
+	// 3) key columns
 	left_key_cols := make([]^Column, len(keys), allocator)
 	right_key_cols := make([]^Column, len(keys), allocator)
 	for i in 0 ..< len(keys) {
@@ -355,19 +373,28 @@ join_generic_multi :: proc(
 		right_key_cols[i] = column(right, keys[i])
 	}
 
-	// 4) build index (string composite key)
-	idx := build_join_index_multi(right, right_key_cols, allocator)
+	// 4) build multi index on right
+	idx := build_join_multi_index(right, right_key_cols, allocator)
 	matched_right := make([]bool, right.rows, allocator)
 
-	// 5) scan left
 	for li in 0 ..< left.rows {
 		k := make_composite_key_string(left_key_cols, li, allocator)
 
-		ri, ok := idx[k]
+		head, ok := idx.bucket_head[k]
+		found := false
+
 		if ok {
-			matched_right[ri] = true
-			emit_joined_row_multi(&result, left, right, li, ri, keys)
-		} else {
+			i := head
+			for i != -1 {
+				ri := idx.rows[i]
+				matched_right[ri] = true
+				emit_joined_row_multi(&result, left, right, li, ri, keys)
+				found = true
+				i = idx.next[i]
+			}
+		}
+
+		if !found {
 			if kind == .Inner {
 				continue
 			}
@@ -377,7 +404,7 @@ join_generic_multi :: proc(
 		}
 	}
 
-	// 6) right-only
+	// right‑only for Right/Outer
 	if kind == .Right || kind == .Outer {
 		for ri in 0 ..< right.rows {
 			if !matched_right[ri] {
@@ -385,6 +412,7 @@ join_generic_multi :: proc(
 			}
 		}
 	}
+
 
 	if len(result.columns) > 0 {
 		result.rows = result.columns[0].len
@@ -530,4 +558,19 @@ make_composite_key_string :: proc(cols: []^Column, row: int, allocator: mem.Allo
 	}
 
 	return strings.to_string(b)
+}
+
+
+join_multi_index_matches :: proc(idx: ^Join_Multi_Index, key: string, proc_row: proc(ri: int)) {
+	head, ok := idx.bucket_head[key]
+	if !ok {
+		return
+	}
+
+	i := head
+	for i != -1 {
+		ri := idx.rows[i]
+		proc_row(ri)
+		i = idx.next[i]
+	}
 }
