@@ -7,7 +7,7 @@ import "core:fmt"
 
 join_test :: proc() {
 
-	fmt.println("TEST 1: Inner Join — Perfect Match")
+	fmt.println("TEST 1: Inner Join - Perfect Match")
 
 	left3 := w.dataframe_new()
 	w.add_column(&left3, w.column_from_ints("id", []int{1, 2, 3}))
@@ -25,7 +25,7 @@ join_test :: proc() {
 	w.dataframe_pretty_print(&out2, 20)
 
 
-	fmt.println("TEST 2: Inner Join — No Matches")
+	fmt.println("TEST 2: Inner Join - No Matches")
 
 	left4 := w.dataframe_new()
 	w.add_column(&left4, w.column_from_ints("id", []int{1, 2}))
@@ -39,7 +39,7 @@ join_test :: proc() {
 	w.dataframe_pretty_print(&out3, 20)
 
 
-	fmt.println("TEST 3: Left Join — Missing Right Rows")
+	fmt.println("TEST 3: Left Join - Missing Right Rows")
 
 	left5 := w.dataframe_new()
 	w.add_column(&left5, w.column_from_ints("id", []int{1, 2, 3}))
@@ -54,7 +54,7 @@ join_test :: proc() {
 	w.dataframe_pretty_print(&out4, 20)
 
 
-	fmt.println("TEST 4: Right Join — Missing Left Rows")
+	fmt.println("TEST 4: Right Join - Missing Left Rows")
 
 	left6 := w.dataframe_new()
 	w.add_column(&left6, w.column_from_ints("id", []int{1, 3}))
@@ -69,7 +69,7 @@ join_test :: proc() {
 	w.dataframe_pretty_print(&out5, 20)
 
 
-	fmt.println("TEST 5: Outer Join — Symmetric Missing Rows")
+	fmt.println("TEST 5: Outer Join - Symmetric Missing Rows")
 
 	left7 := w.dataframe_new()
 	w.add_column(&left7, w.column_from_ints("id", []int{1, 2}))
@@ -83,7 +83,7 @@ join_test :: proc() {
 	w.dataframe_pretty_print(&out6, 20)
 
 
-	fmt.println("TEST 6: Multi‑Key Strictness")
+	fmt.println("TEST 6: Multi - Key Strictness")
 
 	left8 := w.dataframe_new()
 	w.add_column(&left8, w.column_from_ints("id", []int{1}))
@@ -98,7 +98,7 @@ join_test :: proc() {
 	out7 := w.join(&left8, &right8, []string{"id", "dept"}, .Inner, context.temp_allocator)
 	w.dataframe_pretty_print(&out7, 20)
 
-	fmt.println("TEST 7: 1‑to‑Many (Right duplicates)")
+	fmt.println("TEST 7: 1-to-Many (Right duplicates)")
 
 	left9 := w.dataframe_new()
 	w.add_column(&left9, w.column_from_ints("id", []int{1}))
@@ -112,7 +112,7 @@ join_test :: proc() {
 	out8 := w.join(&left9, &right9, []string{"id"}, .Inner, context.temp_allocator)
 	w.dataframe_pretty_print(&out8, 20)
 
-	fmt.println("TEST 8: 1‑to‑Many (Left duplicates)")
+	fmt.println("TEST 8: 1-to-Many (Left duplicates)")
 
 	left10 := w.dataframe_new()
 	w.add_column(&left10, w.column_from_ints("id", []int{1, 1}))
@@ -126,7 +126,7 @@ join_test :: proc() {
 	out9 := w.join(&left10, &right10, []string{"id"}, .Inner, context.temp_allocator)
 	w.dataframe_pretty_print(&out9, 20)
 
-	fmt.println("TEST 9: Many‑to‑Many")
+	fmt.println("TEST 9: Many-to-Many")
 
 	left11 := w.dataframe_new()
 	w.add_column(&left11, w.column_from_ints("id", []int{1, 1}))
@@ -140,7 +140,7 @@ join_test :: proc() {
 	out10 := w.join(&left11, &right11, []string{"id"}, .Inner, context.temp_allocator)
 	w.dataframe_pretty_print(&out10, 20)
 
-	fmt.println("TEST 10: Multi‑Key Many‑to‑Many")
+	fmt.println("TEST 10: Multi-Key Many-to-Many")
 
 	left12 := w.dataframe_new()
 	w.add_column(&left12, w.column_from_ints("id", []int{1, 1}))
@@ -157,7 +157,7 @@ join_test :: proc() {
 	w.dataframe_pretty_print(&out11, 20)
 
 
-	fmt.println("TEST 11: Mixed‑Type Composite Keys")
+	fmt.println("TEST 11: Mixed-Type Composite Keys")
 
 	left13 := w.dataframe_new()
 	w.add_column(&left13, w.column_from_ints("id", []int{1, 1}))
@@ -174,7 +174,7 @@ join_test :: proc() {
 	w.dataframe_pretty_print(&out12, 20)
 
 
-	fmt.println("TEST 12: Outer Join — NULL Propagation")
+	fmt.println("TEST 12: Outer Join - NULL Propagation")
 
 	left14 := w.dataframe_new()
 	w.add_column(&left14, w.column_from_ints("id", []int{1, 2}))
@@ -195,7 +195,7 @@ join_test :: proc() {
 
 	w.destroy_dataframe(&left13)
 	w.destroy_dataframe(&right13)
-	w.destroy_dataframe(&out13)
+	w.destroy_dataframe(&out12)
 
 
 	w.destroy_dataframe(&left12)
@@ -218,7 +218,7 @@ join_test :: proc() {
 
 
 	w.destroy_dataframe(&left8)
-	w.destroy_dataframe(&right7)
+	w.destroy_dataframe(&right8)
 	w.destroy_dataframe(&out7)
 
 	w.destroy_dataframe(&left7)

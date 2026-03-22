@@ -290,18 +290,22 @@ copy_single_field :: proc(dst: rawptr, col: ^Column, row: int) {
 }
 
 Join_Multi_Index :: struct {
-	bucket_head: map[string]int, // key → head node index, or -1
-	rows:        [dynamic]int, // right row index per node
-	next:        [dynamic]int, // next node index, or -1
+	bucket_head: map[string]int, // key → first node index
+	bucket_tail: map[string]int, // key → last node index
+	rows:        [dynamic]int,
+	next:        [dynamic]int,
 }
+
 
 join_multi_index_make :: proc(allocator: mem.Allocator) -> Join_Multi_Index {
 	return Join_Multi_Index {
 		bucket_head = make(map[string]int, allocator),
+		bucket_tail = make(map[string]int, allocator),
 		rows = make([dynamic]int, 0, allocator),
 		next = make([dynamic]int, 0, allocator),
 	}
 }
+
 
 build_join_multi_index :: proc(
 	right: ^DataFrame,
@@ -313,17 +317,19 @@ build_join_multi_index :: proc(
 	for r in 0 ..< right.rows {
 		k := make_composite_key_string(key_cols, r, allocator)
 
-		// new node
 		node_index := len(idx.rows)
 		append(&idx.rows, r)
 		append(&idx.next, -1)
 
-		// link into bucket
 		head, ok := idx.bucket_head[k]
-		if ok {
-			idx.next[node_index] = head
+		if !ok {
+			idx.bucket_head[k] = node_index
+			idx.bucket_tail[k] = node_index
+		} else {
+			tail := idx.bucket_tail[k]
+			idx.next[tail] = node_index
+			idx.bucket_tail[k] = node_index
 		}
-		idx.bucket_head[k] = node_index
 	}
 
 	return idx
@@ -340,8 +346,10 @@ join_generic_multi :: proc(
 	result := dataframe_new()
 
 	// 1) left columns
+	left_names := make(map[string]bool, allocator)
 	for i in 0 ..< len(left.columns) {
 		src := &left.columns[i]
+		left_names[src.name] = true
 		dst := column_new(src.name, src.type, 0)
 		add_column(&result, dst)
 	}
@@ -360,8 +368,12 @@ join_generic_multi :: proc(
 		if skip {
 			continue
 		}
-
-		dst := column_new(src.name, src.type, 0)
+		new_name := src.name
+		_, exists := left_names[src.name]
+		if exists {
+			new_name = fmt.tprintf("&´%s_right", src.type, allocator)
+		}
+		dst := column_new(new_name, src.type, 0)
 		add_column(&result, dst)
 	}
 
