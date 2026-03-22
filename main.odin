@@ -268,7 +268,7 @@ main :: proc() {
 		.Inner,
 		allocator = context.temp_allocator,
 	)
-
+	join_test()
 
 	w.dataframe_pretty_print(&joined3, 20)
 
