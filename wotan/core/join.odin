@@ -586,3 +586,118 @@ join_multi_index_matches :: proc(idx: ^Join_Multi_Index, key: string, proc_row: 
 		i = idx.next[i]
 	}
 }
+
+join_on :: proc(
+	left: ^DataFrame,
+	right: ^DataFrame,
+	left_keys: []string,
+	right_keys: []string,
+	kind: JoinKind = .Inner,
+	allocator: mem.Allocator = context.allocator,
+) -> DataFrame {
+	assert(len(left_keys) == len(right_keys), "left_keys and right_keys must match in length")
+
+	return join_generic_multi_on(left, right, left_keys, right_keys, kind, allocator)
+}
+
+
+join_generic_multi_on :: proc(
+	left: ^DataFrame,
+	right: ^DataFrame,
+	left_keys: []string,
+	right_keys: []string,
+	kind: JoinKind = .Inner,
+	allocator: mem.Allocator = context.allocator,
+) -> DataFrame {
+
+
+	result := dataframe_new()
+
+	// 1) left columns
+	left_names := make(map[string]bool, allocator)
+	for i in 0 ..< len(left.columns) {
+		src := &left.columns[i]
+		left_names[src.name] = true
+		dst := column_new(src.name, src.type, 0)
+		add_column(&result, dst)
+	}
+
+	// 2) right columns, skipping all *right* key columns
+	for i in 0 ..< len(right.columns) {
+		src := &right.columns[i]
+
+		skip := false
+		for rk in right_keys {
+			if src.name == rk {
+				skip = true
+				break
+			}
+		}
+		if skip {
+			continue
+		}
+
+		new_name := src.name
+		_, exists := left_names[src.name]
+		if exists {
+			new_name = fmt.tprintf("%s_right", src.name, allocator)
+		}
+
+		dst := column_new(new_name, src.type, 0)
+		add_column(&result, dst)
+	}
+
+	// 3) key columns
+	left_key_cols := make([]^Column, len(left_keys), allocator)
+	right_key_cols := make([]^Column, len(right_keys), allocator)
+	for i in 0 ..< len(left_keys) {
+		left_key_cols[i] = column(left, left_keys[i])
+		right_key_cols[i] = column(right, right_keys[i])
+	}
+
+	// 4) build multi index on right
+	idx := build_join_multi_index(right, right_key_cols, allocator)
+	matched_right := make([]bool, right.rows, allocator)
+
+	for li in 0 ..< left.rows {
+		k := make_composite_key_string(left_key_cols, li, allocator)
+
+		head, ok := idx.bucket_head[k]
+		found := false
+
+		if ok {
+			i := head
+			for i != -1 {
+				ri := idx.rows[i]
+				matched_right[ri] = true
+				emit_joined_row_multi(&result, left, right, li, ri, right_keys)
+				found = true
+				i = idx.next[i]
+			}
+		}
+
+		if !found {
+			if kind == .Inner {
+				continue
+			}
+			if kind == .Left || kind == .Outer {
+				emit_unmatched_row_multi(&result, left, right, li, .LeftOnly, right_keys)
+			}
+		}
+	}
+
+	// right-only for Right/Outer
+	if kind == .Right || kind == .Outer {
+		for ri in 0 ..< right.rows {
+			if !matched_right[ri] {
+				emit_unmatched_row_multi(&result, left, right, ri, .RightOnly, right_keys)
+			}
+		}
+	}
+
+	if len(result.columns) > 0 {
+		result.rows = result.columns[0].len
+	}
+
+	return result
+}
