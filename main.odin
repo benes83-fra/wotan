@@ -270,8 +270,17 @@ main :: proc() {
 	)
 	join_test()
 
-	w.dataframe_pretty_print(&joined3, 20)
 
+	w.dataframe_pretty_print(&joined3, 20)
+	dfx := w.df_from(
+		w.column_from_ints("id", []int{1, 2, 3}),
+		w.column_from_strings("name", []string{"A", "B", "C"}),
+		w.column_from_floats("salary", []f64{10, 20, 30}),
+	)
+	w.dataframe_pretty_print(&dfx, 20)
+
+
+	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
 	w.destroy_dataframe(&right2)
 	w.destroy_dataframe(&joined3)

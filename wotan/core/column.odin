@@ -824,3 +824,26 @@ column_from_floats :: proc(name: string, values: []f64) -> Column {
 	}
 	return col
 }
+
+column_from_dates :: proc(name: string, values: []Date) -> Column {
+	col := column_new(name, .Date, len(values))
+	for v in values {
+		append_date(&col, v)
+	}
+	return col
+}
+column_from_times :: proc(name: string, values: []Time) -> Column {
+	col := column_new(name, .Date, len(values))
+	for v in values {
+		append_time(&col, v)
+	}
+	return col
+}
+
+column_from_datetimes :: proc(name: string, values: []Datetime) -> Column {
+	col := column_new(name, .Date, len(values))
+	for v in values {
+		append_datetime(&col, v)
+	}
+	return col
+}

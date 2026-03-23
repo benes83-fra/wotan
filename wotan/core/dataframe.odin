@@ -498,3 +498,28 @@ dataframe_filter_series :: proc(df: ^DataFrame, s: Series) -> DataFrame {
 	delete(mask)
 	return out
 }
+
+
+df_from :: proc(cols: ..Column, allocator: mem.Allocator = context.allocator) -> DataFrame {
+	df := dataframe_new()
+	rows := -1
+
+	for col in cols {
+
+		// Determine row count
+		if rows == -1 {
+			rows = col.len
+		} else {
+			assert(col.len == rows, "All columns must have same length")
+		}
+
+
+		add_column(&df, col)
+	}
+
+	if rows >= 0 {
+		df.rows = rows
+	}
+
+	return df
+}
