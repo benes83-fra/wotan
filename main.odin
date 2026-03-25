@@ -280,6 +280,35 @@ main :: proc() {
 	w.dataframe_pretty_print(&dfx, 20)
 
 
+	fmt.println("=== Testing GroupBy2 ===")
+
+	df_gb := w.dataframe_new()
+	w.add_column(&df_gb, w.column_from_strings("key", []string{"A", "A", "B", "B", "B"}))
+	w.add_column(&df_gb, w.column_from_ints("value", []int{1, 2, 3, 4, 5}))
+	df_gb.rows = 5
+
+	fmt.println("Input DF for GroupBy2:")
+	w.dataframe_pretty_print(&df_gb, 20)
+
+	gb2 := w.groupby2(&df_gb, []string{"key"})
+
+	aggs2 := []w.Aggregator {
+		{name = "sum_value", column = "value", kind = w.AggregationKind.Sum},
+		{name = "count_value", column = "value", kind = w.AggregationKind.Count},
+		{name = "min_value", column = "value", kind = w.AggregationKind.Min},
+		{name = "max_value", column = "value", kind = w.AggregationKind.Max},
+		{name = "mean_value", column = "value", kind = w.AggregationKind.Mean},
+	}
+
+	out2 := w.groupby2_agg(&gb2, aggs2)
+
+	fmt.println("GroupBy2 Output:")
+	w.dataframe_pretty_print(&out2, 20)
+
+	w.destroy_dataframe(&df_gb)
+	w.destroy_dataframe(&out2)
+
+
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
 	w.destroy_dataframe(&right2)
