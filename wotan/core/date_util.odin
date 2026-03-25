@@ -240,3 +240,14 @@ int_to_time :: proc(s: i32) -> Time {
 	second := s % MINUTE
 	return Time{hour, minute, second}
 }
+date_less :: proc(a, b: Date) -> bool {
+	return date_compare(a, b) < 0
+}
+
+time_less :: proc(a, b: Time) -> bool {
+	return time_compare(a, b) < 0
+}
+
+datetime_less :: proc(a, b: Datetime) -> bool {
+	return datetime_compare(a, b) < 0
+}
