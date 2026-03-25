@@ -155,7 +155,8 @@ groupby2_agg :: proc(
 	out := build_groupby2_schema(gb, aggs, allocator)
 
 	// Iterate groups in stable order
-	for key, head in gb.index.bucket_head {
+	for key in gb.index.ordered_keys {
+		head := gb.index.bucket_head[key]
 		emit_groupby2_row(&out, gb, head, aggs, allocator)
 	}
 

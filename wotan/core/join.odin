@@ -291,10 +291,11 @@ copy_single_field :: proc(dst: rawptr, col: ^Column, row: int) {
 }
 
 Join_Multi_Index :: struct {
-	bucket_head: map[string]int, // key → first node index
-	bucket_tail: map[string]int, // key → last node index
-	rows:        [dynamic]int,
-	next:        [dynamic]int,
+	bucket_head:  map[string]int, // key → first node index
+	bucket_tail:  map[string]int, // key → last node index
+	rows:         [dynamic]int,
+	next:         [dynamic]int,
+	ordered_keys: [dynamic]string,
 }
 
 
@@ -304,6 +305,7 @@ join_multi_index_make :: proc(allocator: mem.Allocator) -> Join_Multi_Index {
 		bucket_tail = make(map[string]int, allocator),
 		rows = make([dynamic]int, 0, allocator),
 		next = make([dynamic]int, 0, allocator),
+		ordered_keys = make([dynamic]string, 0, allocator),
 	}
 }
 
@@ -324,6 +326,7 @@ build_join_multi_index :: proc(
 
 		head, ok := idx.bucket_head[k]
 		if !ok {
+			append(&idx.ordered_keys, k)
 			idx.bucket_head[k] = node_index
 			idx.bucket_tail[k] = node_index
 		} else {

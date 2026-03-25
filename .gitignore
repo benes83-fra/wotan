@@ -1,5 +1,6 @@
 /all_odin.txt
 /collect_odin.py
 /*.lib
+/*.dll
 /*.exe
 /src/
