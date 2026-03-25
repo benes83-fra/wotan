@@ -111,9 +111,15 @@ agg_compute_into :: proc(out_col: ^Column, src_col: ^Column, rows: []int, kind: 
 }
 
 
-emit_groupby2_row :: proc(out: ^DataFrame, gb: ^GroupBy2, group_head: int, aggs: []Aggregator) {
+emit_groupby2_row :: proc(
+	out: ^DataFrame,
+	gb: ^GroupBy2,
+	group_head: int,
+	aggs: []Aggregator,
+	allocator: mem.Allocator = context.allocator,
+) {
 	// 1. Collect row indices for this group
-	rows := make([dynamic]int, 0, 16)
+	rows := make([dynamic]int, 0, 16, allocator)
 	i := group_head
 	for i != -1 {
 		append(&rows, gb.index.rows[i])
@@ -150,7 +156,7 @@ groupby2_agg :: proc(
 
 	// Iterate groups in stable order
 	for key, head in gb.index.bucket_head {
-		emit_groupby2_row(&out, gb, head, aggs)
+		emit_groupby2_row(&out, gb, head, aggs, allocator)
 	}
 
 	out.rows = out.columns[0].len

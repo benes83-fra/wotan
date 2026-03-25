@@ -290,7 +290,7 @@ main :: proc() {
 	fmt.println("Input DF for GroupBy2:")
 	w.dataframe_pretty_print(&df_gb, 20)
 
-	gb2 := w.groupby2(&df_gb, []string{"key"})
+	gb2 := w.groupby2(&df_gb, []string{"key"}, allocator = context.temp_allocator)
 
 	aggs2 := []w.Aggregator {
 		{name = "sum_value", column = "value", kind = w.AggregationKind.Sum},
@@ -300,7 +300,7 @@ main :: proc() {
 		{name = "mean_value", column = "value", kind = w.AggregationKind.Mean},
 	}
 
-	out2 := w.groupby2_agg(&gb2, aggs2)
+	out2 := w.groupby2_agg(&gb2, aggs2, allocator = context.temp_allocator)
 
 	fmt.println("GroupBy2 Output:")
 	w.dataframe_pretty_print(&out2, 20)
