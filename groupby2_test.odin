@@ -23,7 +23,7 @@ groupby2_test :: proc() {
 		{name = "count_value", column = "value", kind = w.AggregationKind.Count},
 		{name = "min_value", column = "value", kind = w.AggregationKind.Min},
 		{name = "max_value", column = "value", kind = w.AggregationKind.Max},
-		{name = "mean_value", column = "value", kind = w.AggregationKind.Mean},
+		{name = "median_value", column = "value", kind = w.AggregationKind.Median, quantile = 0.2},
 	}
 
 	out2 := w.groupby2_agg(&gb2, aggs2, allocator = context.temp_allocator)

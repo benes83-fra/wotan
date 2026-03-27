@@ -3,6 +3,7 @@ package core
 import "core:fmt"
 import "core:math"
 import "core:mem"
+import "core:sort"
 
 
 GroupBy2 :: struct {
@@ -17,12 +18,15 @@ AggregationKind :: enum {
 	Min,
 	Max,
 	Count,
+	Median,
+	Quantile,
 }
 
 Aggregator :: struct {
-	name:   string,
-	column: string,
-	kind:   AggregationKind,
+	name:     string,
+	column:   string,
+	kind:     AggregationKind,
+	quantile: f64,
 }
 
 
@@ -91,22 +95,22 @@ build_groupby2_schema :: proc(
 }
 
 
-agg_compute_into :: proc(out_col: ^Column, src_col: ^Column, rows: []int, kind: AggregationKind) {
+agg_compute_into :: proc(out_col: ^Column, src_col: ^Column, rows: []int, agg: Aggregator) {
 	#partial switch src_col.type {
 	case .Int:
-		agg_int_into(out_col, src_col, rows, kind)
+		agg_int_into(out_col, src_col, rows, agg)
 	case .Float:
-		agg_float_into(out_col, src_col, rows, kind)
+		agg_float_into(out_col, src_col, rows, agg)
 	case .Bool:
-		agg_bool_into(out_col, src_col, rows, kind)
+		agg_bool_into(out_col, src_col, rows, agg)
 	case .String:
-		agg_string_into(out_col, src_col, rows, kind)
+		agg_string_into(out_col, src_col, rows, agg)
 	case .Date:
-		agg_date_into(out_col, src_col, rows, kind)
+		agg_date_into(out_col, src_col, rows, agg)
 	case .Time:
-		agg_time_into(out_col, src_col, rows, kind)
+		agg_time_into(out_col, src_col, rows, agg)
 	case .Datetime:
-		agg_datetime_into(out_col, src_col, rows, kind)
+		agg_datetime_into(out_col, src_col, rows, agg)
 	}
 }
 
@@ -141,7 +145,7 @@ emit_groupby2_row :: proc(
 	for agg, ai in aggs {
 		src := column(gb.df, agg.column)
 		out_col := &out.columns[key_count + ai]
-		agg_compute_into(out_col, src, rows[:], agg.kind)
+		agg_compute_into(out_col, src, rows[:], agg)
 	}
 
 }
@@ -164,7 +168,8 @@ groupby2_agg :: proc(
 	return out
 }
 
-agg_int_into :: proc(out: ^Column, src: ^Column, rows: []int, kind: AggregationKind) {
+agg_int_into :: proc(out: ^Column, src: ^Column, rows: []int, agg: Aggregator) {
+	kind := agg.kind
 	sum := 0
 	count := 0
 	min := int(1 << 62)
@@ -196,11 +201,30 @@ agg_int_into :: proc(out: ^Column, src: ^Column, rows: []int, kind: AggregationK
 		append_int(out, max)
 	case .Count:
 		append_int(out, count)
+	case .Median, .Quantile:
+		values := make([dynamic]int, 0, len(rows))
+		defer delete(values)
+		for r in rows {
+			v, is_null := column_at_int(src, r)
+			if !is_null do append(&values, v)
+		}
+
+		if len(values) == 0 {
+			append_null(out)
+			return
+		}
+
+
+		sort.quick_sort(values[:])
+		idx := int(agg.quantile * f64(len(values) - 1))
+		append_int(out, values[idx])
 	}
 }
 
 
-agg_float_into :: proc(out: ^Column, src: ^Column, rows: []int, kind: AggregationKind) {
+agg_float_into :: proc(out: ^Column, src: ^Column, rows: []int, agg: Aggregator) {
+	kind := agg.kind
+
 	sum := 0.0
 	count := 0
 	min := math.INF_F64
@@ -232,11 +256,29 @@ agg_float_into :: proc(out: ^Column, src: ^Column, rows: []int, kind: Aggregatio
 		append_float(out, max)
 	case .Count:
 		append_float(out, f64(count))
+	case .Median, .Quantile:
+		values := make([dynamic]f64, 0, len(rows))
+		defer delete(values)
+		for r in rows {
+			v, is_null := column_at_float(src, r)
+			if !is_null do append(&values, v)
+		}
+
+		if len(values) == 0 {
+			append_null(out)
+			return
+		}
+
+
+		sort.quick_sort(values[:])
+		idx := int(agg.quantile * f64(len(values) - 1))
+		append_float(out, values[idx])
 	}
 }
 
 
-agg_bool_into :: proc(out: ^Column, src: ^Column, rows: []int, kind: AggregationKind) {
+agg_bool_into :: proc(out: ^Column, src: ^Column, rows: []int, agg: Aggregator) {
+	kind := agg.kind
 	count_true := 0
 	count := 0
 	min := true
@@ -268,11 +310,15 @@ agg_bool_into :: proc(out: ^Column, src: ^Column, rows: []int, kind: Aggregation
 		append_bool(out, max)
 	case .Count:
 		append_int(out, count)
+	case .Median, .Quantile:
+		append_null(out)
+
 	}
 }
 
 
-agg_string_into :: proc(out: ^Column, src: ^Column, rows: []int, kind: AggregationKind) {
+agg_string_into :: proc(out: ^Column, src: ^Column, rows: []int, agg: Aggregator) {
+	kind := agg.kind
 	count := 0
 	min := ""
 	max := ""
@@ -309,11 +355,14 @@ agg_string_into :: proc(out: ^Column, src: ^Column, rows: []int, kind: Aggregati
 		append_int(out, count)
 	case .Sum, .Mean:
 		append_null(out)
+	case .Median, .Quantile:
+		append_null(out)
 	}
 }
 
 
-agg_date_into :: proc(out: ^Column, src: ^Column, rows: []int, kind: AggregationKind) {
+agg_date_into :: proc(out: ^Column, src: ^Column, rows: []int, agg: Aggregator) {
+	kind := agg.kind
 	count := 0
 	min := Date {
 		year  = 9999,
@@ -349,11 +398,15 @@ agg_date_into :: proc(out: ^Column, src: ^Column, rows: []int, kind: Aggregation
 		append_int(out, count)
 	case .Sum, .Mean:
 		append_null(out)
+	case .Median, .Quantile:
+		append_null(out)
+
 	}
 }
 
 
-agg_time_into :: proc(out: ^Column, src: ^Column, rows: []int, kind: AggregationKind) {
+agg_time_into :: proc(out: ^Column, src: ^Column, rows: []int, agg: Aggregator) {
+	kind := agg.kind
 	count := 0
 	min := Time {
 		hour   = 23,
@@ -389,11 +442,14 @@ agg_time_into :: proc(out: ^Column, src: ^Column, rows: []int, kind: Aggregation
 		append_int(out, count)
 	case .Sum, .Mean:
 		append_null(out)
+	case .Median, .Quantile:
+		append_null(out)
 	}
 }
 
 
-agg_datetime_into :: proc(out: ^Column, src: ^Column, rows: []int, kind: AggregationKind) {
+agg_datetime_into :: proc(out: ^Column, src: ^Column, rows: []int, agg: Aggregator) {
+	kind := agg.kind
 	count := 0
 	min := Datetime {
 		year  = 9999,
@@ -428,6 +484,8 @@ agg_datetime_into :: proc(out: ^Column, src: ^Column, rows: []int, kind: Aggrega
 	case .Count:
 		append_int(out, count)
 	case .Sum, .Mean:
+		append_null(out)
+	case .Median, .Quantile:
 		append_null(out)
 	}
 }
