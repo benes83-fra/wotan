@@ -3,7 +3,7 @@ package core
 import "core:fmt"
 import "core:math"
 import "core:mem"
-import "core:sort"
+import "core:slice"
 
 
 GroupBy2 :: struct {
@@ -220,7 +220,7 @@ agg_int_into :: proc(out: ^Column, src: ^Column, rows: []int, agg: Aggregator) {
 			q = agg.quantile
 		}
 
-		sort.quick_sort(values[:])
+		slice.sort(values[:])
 		idx := int(q * f64(len(values) - 1))
 		append_int(out, values[idx])
 	}
@@ -280,7 +280,7 @@ agg_float_into :: proc(out: ^Column, src: ^Column, rows: []int, agg: Aggregator)
 			q = agg.quantile
 		}
 
-		sort.quick_sort(values[:])
+		slice.sort(values[:])
 		idx := int(q * f64(len(values) - 1))
 		append_float(out, values[idx])
 	}
