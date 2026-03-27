@@ -213,10 +213,15 @@ agg_int_into :: proc(out: ^Column, src: ^Column, rows: []int, agg: Aggregator) {
 			append_null(out)
 			return
 		}
-
+		q: f64
+		if kind == .Median {
+			q = 0.5
+		} else {
+			q = agg.quantile
+		}
 
 		sort.quick_sort(values[:])
-		idx := int(agg.quantile * f64(len(values) - 1))
+		idx := int(q * f64(len(values) - 1))
 		append_int(out, values[idx])
 	}
 }
@@ -268,10 +273,15 @@ agg_float_into :: proc(out: ^Column, src: ^Column, rows: []int, agg: Aggregator)
 			append_null(out)
 			return
 		}
-
+		q: f64
+		if kind == .Median {
+			q = 0.5
+		} else {
+			q = agg.quantile
+		}
 
 		sort.quick_sort(values[:])
-		idx := int(agg.quantile * f64(len(values) - 1))
+		idx := int(q * f64(len(values) - 1))
 		append_float(out, values[idx])
 	}
 }
