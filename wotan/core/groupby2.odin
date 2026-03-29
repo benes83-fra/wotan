@@ -30,12 +30,6 @@ Aggregator :: struct {
 	quantile: f64,
 }
 
-RollingWindow :: struct {
-	df:     ^DataFrame,
-	column: string,
-	window: int,
-}
-
 
 make_median_agg :: proc(name, column: string) -> Aggregator {
 	return Aggregator{name = name, column = column, kind = .Median, quantile = 0.5}
@@ -128,55 +122,6 @@ agg_compute_into :: proc(out_col: ^Column, src_col: ^Column, rows: []int, agg: A
 	case .Datetime:
 		agg_datetime_into(out_col, src_col, rows, agg)
 	}
-}
-
-
-rolling_window :: proc(df: ^DataFrame, column: string, window: int) -> RollingWindow {
-	return RollingWindow{df = df, column = column, window = window}
-}
-
-
-rolling_apply :: proc(
-	r: RollingWindow,
-	agg: Aggregator,
-	allocator: mem.Allocator = context.allocator,
-) -> Column {
-	src := column(r.df, r.column)
-	out := column_new(agg.name, src.type, 0)
-
-	values := make([dynamic]int, 0, r.window, allocator)
-	defer delete(values)
-
-	for i in 0 ..< r.df.rows {
-		// Expand window
-		v, is_null := column_at_int(src, i)
-		if !is_null do append(&values, v)
-
-		// Shrink window if too large
-		if len(values) > r.window {
-			ordered_remove(&values, 0)
-		}
-		// Compute aggregation
-		agg_int_into(&out, src, values[:], agg)
-	}
-
-	return out
-}
-
-rolling_apply_many :: proc(
-	r: RollingWindow,
-	aggs: []Aggregator,
-	allocator: mem.Allocator = context.allocator,
-) -> DataFrame {
-	out := dataframe_new()
-
-	for agg in aggs {
-		col := rolling_apply(r, agg, allocator)
-		add_column(&out, col)
-	}
-
-	out.rows = out.columns[0].len
-	return out
 }
 
 
