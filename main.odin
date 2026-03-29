@@ -281,6 +281,8 @@ main :: proc() {
 
 	groupby2_test()
 
+	rolling_test()
+
 
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)

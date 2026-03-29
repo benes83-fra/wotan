@@ -90,7 +90,7 @@ rolling_apply_float :: proc(
 		if !is_null do append(&values, v)
 
 		// Shrink window if too large
-		if len(values) > r.min_periods {
+		if len(values) > r.window {
 			ordered_remove(&values, 0)
 		}
 		// Compute aggregation
