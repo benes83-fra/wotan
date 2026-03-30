@@ -70,6 +70,9 @@ rolling_apply_int :: proc(r: RollingWindow, agg: Aggregator, allocator: mem.Allo
 		// Compute aggregation
 		rolling_agg_int_into(&out, values[:], agg)
 	}
+	if agg.kind == .EWM_Mean {
+		return rolling_apply_int_ewm(r, agg, allocator)
+	}
 	return out
 }
 
@@ -95,6 +98,9 @@ rolling_apply_float :: proc(
 		}
 		// Compute aggregation
 		rolling_agg_float_into(&out, values[:], agg)
+	}
+	if agg.kind == .EWM_Mean {
+		return rolling_apply_float_ewm(r, agg, allocator)
 	}
 	return out
 }
@@ -276,6 +282,8 @@ rolling_agg_int_into :: proc(out: ^Column, values: []int, agg: Aggregator) {
 		idx := int(q * f64(len(tmp) - 1))
 		append_int(out, tmp[idx])
 		delete(tmp)
+	case .EWM_Mean, .EWM_Var:
+	// Does not apply to in
 	}
 }
 
@@ -323,6 +331,8 @@ rolling_agg_float_into :: proc(out: ^Column, values: []f64, agg: Aggregator) {
 		idx := int(q * f64(len(tmp) - 1))
 		append_float(out, tmp[idx])
 		delete(tmp)
+	case .EWM_Mean, .EWM_Var:
+	//Handled by rolling_apply_float_ewn
 	}
 }
 
@@ -362,7 +372,7 @@ rolling_agg_bool_into :: proc(out: ^Column, values: []bool, agg: Aggregator) {
 	case .Count:
 		append_int(out, len(values))
 
-	case .Median, .Quantile:
+	case .Median, .Quantile, .EWM_Mean, .EWM_Var:
 		append_null(out)
 	}
 }
@@ -389,7 +399,7 @@ rolling_agg_string_into :: proc(out: ^Column, values: []string, agg: Aggregator)
 	case .Count:
 		append_int(out, len(values))
 
-	case .Sum, .Mean, .Median, .Quantile:
+	case .Sum, .Mean, .Median, .Quantile, .EWM_Mean, .EWM_Var:
 		append_null(out)
 	}
 }
@@ -416,7 +426,7 @@ rolling_agg_date_into :: proc(out: ^Column, values: []Date, agg: Aggregator) {
 	case .Count:
 		append_int(out, len(values))
 
-	case .Sum, .Mean, .Median, .Quantile:
+	case .Sum, .Mean, .Median, .Quantile, .EWM_Mean, .EWM_Var:
 		append_null(out)
 	}
 }
@@ -443,7 +453,7 @@ rolling_agg_time_into :: proc(out: ^Column, values: []Time, agg: Aggregator) {
 	case .Count:
 		append_int(out, len(values))
 
-	case .Sum, .Mean, .Median, .Quantile:
+	case .Sum, .Mean, .Median, .Quantile, .EWM_Mean, .EWM_Var:
 		append_null(out)
 	}
 }
@@ -470,7 +480,86 @@ rolling_agg_datetime_into :: proc(out: ^Column, values: []Datetime, agg: Aggrega
 	case .Count:
 		append_int(out, len(values))
 
-	case .Sum, .Mean, .Median, .Quantile:
+	case .Sum, .Mean, .Median, .Quantile, .EWM_Mean, .EWM_Var:
 		append_null(out)
 	}
+}
+
+
+make_ewm_mean :: proc(name, column: string, alpha: f64) -> Aggregator {
+	return Aggregator{name = name, column = column, kind = .EWM_Mean, alpha = alpha}
+}
+
+rolling_apply_float_ewm :: proc(
+	r: RollingWindow,
+	agg: Aggregator,
+	allocator: mem.Allocator,
+) -> Column {
+	src := column(r.df, r.column)
+	out := column_new(agg.name, .Float, 0)
+
+	alpha := agg.alpha
+	if alpha <= 0 || alpha > 1 {
+		panic("EWMA alpha must be in (0,1]")
+	}
+
+	prev: f64
+	has_prev := false
+
+	for i in 0 ..< r.df.rows {
+		v, is_null := column_at_float(src, i)
+		if is_null {
+			append_null(&out)
+			continue
+		}
+
+		if !has_prev {
+			prev = v
+			has_prev = true
+		} else {
+			prev = alpha * v + (1 - alpha) * prev
+		}
+
+		append_float(&out, prev)
+	}
+
+	return out
+}
+
+rolling_apply_int_ewm :: proc(
+	r: RollingWindow,
+	agg: Aggregator,
+	allocator: mem.Allocator,
+) -> Column {
+	src := column(r.df, r.column)
+	out := column_new(agg.name, .Float, 0)
+
+	alpha := agg.alpha
+	if alpha <= 0 || alpha > 1 {
+		panic("EWMA alpha must be in (0,1]")
+	}
+
+	prev: f64
+	has_prev := false
+
+	for i in 0 ..< r.df.rows {
+		v, is_null := column_at_int(src, i)
+		if is_null {
+			append_null(&out)
+			continue
+		}
+
+		fv := f64(v)
+
+		if !has_prev {
+			prev = fv
+			has_prev = true
+		} else {
+			prev = alpha * fv + (1 - alpha) * prev
+		}
+
+		append_float(&out, prev)
+	}
+
+	return out
 }

@@ -20,6 +20,8 @@ AggregationKind :: enum {
 	Count,
 	Median,
 	Quantile,
+	EWM_Mean, // new
+	EWM_Var,
 }
 
 
@@ -28,6 +30,7 @@ Aggregator :: struct {
 	column:   string,
 	kind:     AggregationKind,
 	quantile: f64,
+	alpha:    f64,
 }
 
 
@@ -200,7 +203,7 @@ agg_int_into :: proc(out: ^Column, src: ^Column, rows: []int, agg: Aggregator) {
 		return
 	}
 
-	switch kind {
+	#partial switch kind {
 	case .Sum:
 		append_int(out, sum)
 	case .Mean:
@@ -260,7 +263,7 @@ agg_float_into :: proc(out: ^Column, src: ^Column, rows: []int, agg: Aggregator)
 		return
 	}
 
-	switch kind {
+	#partial switch kind {
 	case .Sum:
 		append_float(out, sum)
 	case .Mean:
@@ -318,7 +321,6 @@ agg_bool_into :: proc(out: ^Column, src: ^Column, rows: []int, agg: Aggregator) 
 		append_null(out)
 		return
 	}
-
 	switch kind {
 	case .Sum:
 		append_bool(out, count_true > 0)
@@ -330,7 +332,7 @@ agg_bool_into :: proc(out: ^Column, src: ^Column, rows: []int, agg: Aggregator) 
 		append_bool(out, max)
 	case .Count:
 		append_int(out, count)
-	case .Median, .Quantile:
+	case .Median, .Quantile, .EWM_Mean, .EWM_Var:
 		append_null(out)
 
 	}
@@ -375,7 +377,7 @@ agg_string_into :: proc(out: ^Column, src: ^Column, rows: []int, agg: Aggregator
 		append_int(out, count)
 	case .Sum, .Mean:
 		append_null(out)
-	case .Median, .Quantile:
+	case .Median, .Quantile, .EWM_Mean, .EWM_Var:
 		append_null(out)
 	}
 }
@@ -418,7 +420,7 @@ agg_date_into :: proc(out: ^Column, src: ^Column, rows: []int, agg: Aggregator) 
 		append_int(out, count)
 	case .Sum, .Mean:
 		append_null(out)
-	case .Median, .Quantile:
+	case .Median, .Quantile, .EWM_Mean, .EWM_Var:
 		append_null(out)
 
 	}
@@ -462,7 +464,7 @@ agg_time_into :: proc(out: ^Column, src: ^Column, rows: []int, agg: Aggregator) 
 		append_int(out, count)
 	case .Sum, .Mean:
 		append_null(out)
-	case .Median, .Quantile:
+	case .Median, .Quantile, .EWM_Mean, .EWM_Var:
 		append_null(out)
 	}
 }
@@ -505,7 +507,7 @@ agg_datetime_into :: proc(out: ^Column, src: ^Column, rows: []int, agg: Aggregat
 		append_int(out, count)
 	case .Sum, .Mean:
 		append_null(out)
-	case .Median, .Quantile:
+	case .Median, .Quantile, .EWM_Mean, .EWM_Var:
 		append_null(out)
 	}
 }

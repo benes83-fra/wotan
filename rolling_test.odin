@@ -51,10 +51,11 @@ rolling_test :: proc() {
 
 
 	print_result_float(&resultq)
-
+	rwe := w.rolling_window(&df, "value_f", 3, 1)
+	resulte := w.rolling_apply(rwe, w.make_ewm_mean("ewm", "value_f", 0.5))
+	print_result_float(&resulte)
+	defer w.destroy_column(&resulte)
 	w.destroy_dataframe(&df)
-	//w.destroy_column(&col)
-	//w.destroy_column(&colf)
 }
 
 
