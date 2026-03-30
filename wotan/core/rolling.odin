@@ -73,6 +73,9 @@ rolling_apply_int :: proc(r: RollingWindow, agg: Aggregator, allocator: mem.Allo
 	if agg.kind == .EWM_Mean {
 		return rolling_apply_int_ewm(r, agg, allocator)
 	}
+	if agg.kind == .EWM_Var {
+		return rolling_apply_int_ewm_var(r, agg, allocator)
+	}
 	return out
 }
 
@@ -101,6 +104,9 @@ rolling_apply_float :: proc(
 	}
 	if agg.kind == .EWM_Mean {
 		return rolling_apply_float_ewm(r, agg, allocator)
+	}
+	if agg.kind == .EWM_Var {
+		return rolling_apply_float_ewm_var(r, agg, allocator)
 	}
 	return out
 }
@@ -489,6 +495,10 @@ rolling_agg_datetime_into :: proc(out: ^Column, values: []Datetime, agg: Aggrega
 make_ewm_mean :: proc(name, column: string, alpha: f64) -> Aggregator {
 	return Aggregator{name = name, column = column, kind = .EWM_Mean, alpha = alpha}
 }
+make_ewm_var :: proc(name, column: string, alpha: f64) -> Aggregator {
+	return Aggregator{name = name, column = column, kind = .EWM_Var, alpha = alpha}
+}
+
 
 rolling_apply_float_ewm :: proc(
 	r: RollingWindow,
@@ -559,6 +569,97 @@ rolling_apply_int_ewm :: proc(
 		}
 
 		append_float(&out, prev)
+	}
+
+	return out
+}
+
+
+rolling_apply_float_ewm_var :: proc(
+	r: RollingWindow,
+	agg: Aggregator,
+	allocator: mem.Allocator,
+) -> Column {
+	src := column(r.df, r.column)
+	out := column_new(agg.name, .Float, 0)
+
+	alpha := agg.alpha
+	if alpha <= 0 || alpha > 1 {
+		panic("EWMA alpha must be in (0,1]")
+	}
+
+	mean: f64
+	variance: f64
+	has_prev := false
+
+	for i in 0 ..< r.df.rows {
+		v, is_null := column_at_float(src, i)
+		if is_null {
+			append_null(&out)
+			continue
+		}
+
+		if !has_prev {
+			mean = v
+			variance = 0
+			has_prev = true
+		} else {
+			old_mean := mean
+			delta := v - old_mean
+
+			// update mean
+			mean = old_mean + alpha * delta
+
+			// update variance using OLD mean
+			variance = (1 - alpha) * (variance + alpha * delta * delta)
+		}
+
+		append_float(&out, variance)
+	}
+
+	return out
+}
+
+
+rolling_apply_int_ewm_var :: proc(
+	r: RollingWindow,
+	agg: Aggregator,
+	allocator: mem.Allocator,
+) -> Column {
+	src := column(r.df, r.column)
+	out := column_new(agg.name, .Float, 0)
+
+	alpha := agg.alpha
+	if alpha <= 0 || alpha > 1 {
+		panic("EWMA alpha must be in (0,1]")
+	}
+
+	mean: f64
+	variance: f64
+	has_prev := false
+
+	for i in 0 ..< r.df.rows {
+		v, is_null := column_at_int(src, i)
+		if is_null {
+			append_null(&out)
+			continue
+		}
+
+		fv := f64(v)
+
+		if !has_prev {
+			mean = fv
+			variance = 0
+			has_prev = true
+		} else {
+			old_mean := mean
+			delta := fv - old_mean
+
+			mean = old_mean + alpha * delta
+			variance = (1 - alpha) * (variance + alpha * delta * delta)
+		}
+
+		append_float(&out, variance)
 	}
 
 	return out
