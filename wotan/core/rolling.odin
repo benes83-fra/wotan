@@ -1,6 +1,7 @@
 package core
 
 
+import "core:math"
 import "core:mem"
 import "core:slice"
 
@@ -588,9 +589,21 @@ rolling_apply_float_ewm_var :: proc(
 		panic("EWMA alpha must be in (0,1]")
 	}
 
+	old_wt_factor := 1.0 - alpha
+	new_wt := alpha // adjust = False
+	minp := r.min_periods
+	if minp < 1 {
+		minp = 1
+	}
+
 	mean: f64
-	variance: f64
-	has_prev := false
+	cov: f64
+	sum_wt: f64
+	sum_wt2: f64
+	old_wt: f64
+	nobs: int
+
+	initialized := false
 
 	for i in 0 ..< r.df.rows {
 		v, is_null := column_at_float(src, i)
@@ -599,22 +612,67 @@ rolling_apply_float_ewm_var :: proc(
 			continue
 		}
 
-		if !has_prev {
+		if !initialized {
+			// first observation
 			mean = v
-			variance = 0
-			has_prev = true
-		} else {
-			old_mean := mean
-			delta := v - old_mean
+			cov = 0.0
+			sum_wt = 1.0
+			sum_wt2 = 1.0
+			old_wt = 1.0
+			nobs = 1
+			initialized = true
 
-			// update mean
-			mean = old_mean + alpha * delta
-
-			// update variance using OLD mean
-			variance = (1 - alpha) * (variance + alpha * delta * delta)
+			// pandas: first var is NaN for bias=False
+			if nobs >= minp {
+				append_null(&out)
+			} else {
+				append_null(&out)
+			}
+			continue
 		}
 
-		append_float(&out, variance)
+		nobs += 1
+
+		// decay previous weights
+		sum_wt *= old_wt_factor
+		sum_wt2 *= (old_wt_factor * old_wt_factor)
+		old_wt *= old_wt_factor
+
+		old_mean := mean
+
+		// avoid numerical errors on constant series
+		if mean != v {
+			mean = (old_wt * old_mean + new_wt * v) / (old_wt + new_wt)
+		}
+
+		// update covariance (here: variance, x == y)
+		cov =
+			(old_wt * (cov + (old_mean - mean) * (old_mean - mean)) +
+				new_wt * (v - mean) * (v - mean)) /
+			(old_wt + new_wt)
+
+		// update weights with new observation
+		sum_wt += new_wt
+		sum_wt2 += new_wt * new_wt
+		old_wt += new_wt
+
+		// adjust = False branch: renormalize
+		sum_wt /= old_wt
+		sum_wt2 /= (old_wt * old_wt)
+		old_wt = 1.0
+
+		if nobs >= minp {
+			// bias = False: apply debiasing factor
+			num := sum_wt * sum_wt
+			den := num - sum_wt2
+			if den > 0 {
+				append_float(&out, (num / den) * cov)
+			} else {
+				append_null(&out)
+			}
+		} else {
+			append_null(&out)
+		}
 	}
 
 	return out
@@ -634,9 +692,21 @@ rolling_apply_int_ewm_var :: proc(
 		panic("EWMA alpha must be in (0,1]")
 	}
 
+	old_wt_factor := 1.0 - alpha
+	new_wt := alpha // adjust = False
+	minp := r.min_periods
+	if minp < 1 {
+		minp = 1
+	}
+
 	mean: f64
-	variance: f64
-	has_prev := false
+	cov: f64
+	sum_wt: f64
+	sum_wt2: f64
+	old_wt: f64
+	nobs: int
+
+	initialized := false
 
 	for i in 0 ..< r.df.rows {
 		v, is_null := column_at_int(src, i)
@@ -644,22 +714,61 @@ rolling_apply_int_ewm_var :: proc(
 			append_null(&out)
 			continue
 		}
-
 		fv := f64(v)
 
-		if !has_prev {
+		if !initialized {
 			mean = fv
-			variance = 0
-			has_prev = true
-		} else {
-			old_mean := mean
-			delta := fv - old_mean
+			cov = 0.0
+			sum_wt = 1.0
+			sum_wt2 = 1.0
+			old_wt = 1.0
+			nobs = 1
+			initialized = true
 
-			mean = old_mean + alpha * delta
-			variance = (1 - alpha) * (variance + alpha * delta * delta)
+			if nobs >= minp {
+				append_null(&out)
+			} else {
+				append_null(&out)
+			}
+			continue
 		}
 
-		append_float(&out, variance)
+		nobs += 1
+
+		sum_wt *= old_wt_factor
+		sum_wt2 *= (old_wt_factor * old_wt_factor)
+		old_wt *= old_wt_factor
+
+		old_mean := mean
+
+		if mean != fv {
+			mean = (old_wt * old_mean + new_wt * fv) / (old_wt + new_wt)
+		}
+
+		cov =
+			(old_wt * (cov + (old_mean - mean) * (old_mean - mean)) +
+				new_wt * (fv - mean) * (fv - mean)) /
+			(old_wt + new_wt)
+
+		sum_wt += new_wt
+		sum_wt2 += new_wt * new_wt
+		old_wt += new_wt
+
+		sum_wt /= old_wt
+		sum_wt2 /= (old_wt * old_wt)
+		old_wt = 1.0
+
+		if nobs >= minp {
+			num := sum_wt * sum_wt
+			den := num - sum_wt2
+			if den > 0 {
+				append_float(&out, (num / den) * cov)
+			} else {
+				append_null(&out)
+			}
+		} else {
+			append_null(&out)
+		}
 	}
 
 	return out
