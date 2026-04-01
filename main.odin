@@ -281,7 +281,7 @@ main :: proc() {
 
 	groupby2_test()
 
-	rolling_test()
+	rolling_test(context.temp_allocator)
 
 
 	w.destroy_dataframe(&dfx)
