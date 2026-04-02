@@ -496,8 +496,11 @@ rolling_agg_datetime_into :: proc(out: ^Column, values: []Datetime, agg: Aggrega
 make_ewm_mean :: proc(name, column: string, alpha: f64) -> Aggregator {
 	return Aggregator{name = name, column = column, kind = .EWM_Mean, alpha = alpha}
 }
-make_ewm_var :: proc(name, column: string, alpha: f64) -> Aggregator {
-	return Aggregator{name = name, column = column, kind = .EWM_Var, alpha = alpha}
+make_ewm_var :: proc(name, column: string, alpha: f64, bias: bool = false) -> Aggregator {
+	return Aggregator{name = name, column = column, kind = .EWM_Var, alpha = alpha, bias = bias}
+}
+make_ewm_cov :: proc(name, column: string, alpha: f64, bias := false) -> Aggregator {
+	return Aggregator{name = name, column = column, kind = .EWM_Cov, alpha = alpha, bias = bias}
 }
 
 
@@ -662,13 +665,17 @@ rolling_apply_float_ewm_var :: proc(
 		old_wt = 1.0
 
 		if nobs >= minp {
-			// bias = False: apply debiasing factor
-			num := sum_wt * sum_wt
-			den := num - sum_wt2
-			if den > 0 {
-				append_float(&out, (num / den) * cov)
+			if agg.bias {
+				append_float(&out, cov)
 			} else {
-				append_null(&out)
+				// bias = False: apply debiasing factor
+				num := sum_wt * sum_wt
+				den := num - sum_wt2
+				if den > 0 {
+					append_float(&out, (num / den) * cov)
+				} else {
+					append_null(&out)
+				}
 			}
 		} else {
 			append_null(&out)
@@ -759,12 +766,17 @@ rolling_apply_int_ewm_var :: proc(
 		old_wt = 1.0
 
 		if nobs >= minp {
-			num := sum_wt * sum_wt
-			den := num - sum_wt2
-			if den > 0 {
-				append_float(&out, (num / den) * cov)
+			if agg.bias {
+				append_float(&out, cov)
 			} else {
-				append_null(&out)
+				// bias = False: apply debiasing factor
+				num := sum_wt * sum_wt
+				den := num - sum_wt2
+				if den > 0 {
+					append_float(&out, (num / den) * cov)
+				} else {
+					append_null(&out)
+				}
 			}
 		} else {
 			append_null(&out)
@@ -900,12 +912,17 @@ rolling_apply_float_ewm_cov :: proc(
 		old_wt = 1
 
 		if nobs >= minp {
-			num := sum_wt * sum_wt
-			den := num - sum_wt2
-			if den > 0 {
-				append_float(&out, cov * (num / den))
+			if agg.bias {
+				append_float(&out, cov)
 			} else {
-				append_null(&out)
+				// bias = False: apply debiasing factor
+				num := sum_wt * sum_wt
+				den := num - sum_wt2
+				if den > 0 {
+					append_float(&out, (num / den) * cov)
+				} else {
+					append_null(&out)
+				}
 			}
 		} else {
 			append_null(&out)
@@ -1007,12 +1024,17 @@ rolling_apply_int_ewm_cov :: proc(
 		old_wt = 1
 
 		if nobs >= minp {
-			num := sum_wt * sum_wt
-			den := num - sum_wt2
-			if den > 0 {
-				append_float(&out, cov * (num / den))
+			if agg.bias {
+				append_float(&out, cov)
 			} else {
-				append_null(&out)
+				// bias = False: apply debiasing factor
+				num := sum_wt * sum_wt
+				den := num - sum_wt2
+				if den > 0 {
+					append_float(&out, (num / den) * cov)
+				} else {
+					append_null(&out)
+				}
 			}
 		} else {
 			append_null(&out)
@@ -1097,12 +1119,17 @@ rolling_apply_float_ewm_var_adjust_true :: proc(
 		old_wt += new_wt
 
 		if nobs >= minp {
-			num := sum_wt * sum_wt
-			den := num - sum_wt2
-			if den > 0 {
-				append_float(&out, cov * (num / den))
+			if agg.bias {
+				append_float(&out, cov)
 			} else {
-				append_null(&out)
+				// bias = False: apply debiasing factor
+				num := sum_wt * sum_wt
+				den := num - sum_wt2
+				if den > 0 {
+					append_float(&out, (num / den) * cov)
+				} else {
+					append_null(&out)
+				}
 			}
 		} else {
 			append_null(&out)
@@ -1187,12 +1214,17 @@ rolling_apply_int_ewm_var_adjust_true :: proc(
 		old_wt += new_wt
 
 		if nobs >= minp {
-			num := sum_wt * sum_wt
-			den := num - sum_wt2
-			if den > 0 {
-				append_float(&out, cov * (num / den))
+			if agg.bias {
+				append_float(&out, cov)
 			} else {
-				append_null(&out)
+				// bias = False: apply debiasing factor
+				num := sum_wt * sum_wt
+				den := num - sum_wt2
+				if den > 0 {
+					append_float(&out, (num / den) * cov)
+				} else {
+					append_null(&out)
+				}
 			}
 		} else {
 			append_null(&out)

@@ -163,6 +163,143 @@ rolling_test :: proc(allocator: mem.Allocator) {
 		allocator,
 	)
 	print_result_float(&resultcoviat)
+
+
+	fmt.println("CONST SERIES - VAR/COV (bias=false/true)")
+
+	constf := w.column_new("const_f", .Float, 0)
+	for _ in 0 ..< 5 do w.append_float(&constf, 7.0)
+	w.add_column(&df, constf)
+	df.rows = 5
+
+	rw_const := w.rolling_window(&df, "const_f", 5, 1)
+
+	res_const_unbiased := w.rolling_apply(
+		rw_const,
+		w.make_ewm_var("const_var_unbiased", "const_f", 0.5, false),
+	)
+	print_result_float(&res_const_unbiased)
+	w.destroy_column(&res_const_unbiased)
+
+	res_const_biased := w.rolling_apply(
+		rw_const,
+		w.make_ewm_var("const_var_biased", "const_f", 0.5, true),
+	)
+	print_result_float(&res_const_biased)
+
+	fmt.println("ALTERNATING SERIES -  VAR (bias=false/true)")
+
+	alt := w.column_new("alt", .Float, 0)
+	rangeu := []f64{1, -1, 1, -1, 1}
+	for v in rangeu do w.append_float(&alt, v)
+	w.add_column(&df, alt)
+	df.rows = 5
+
+	rw_alt := w.rolling_window(&df, "alt", 5, 1)
+
+	res_alt_unbiased := w.rolling_apply(
+		rw_alt,
+		w.make_ewm_var("alt_var_unbiased", "alt", 0.5, false),
+	)
+	print_result_float(&res_alt_unbiased)
+	w.destroy_column(&res_alt_unbiased)
+
+	res_alt_biased := w.rolling_apply(rw_alt, w.make_ewm_var("alt_var_biased", "alt", 0.5, true))
+	print_result_float(&res_alt_biased)
+	w.destroy_column(&res_alt_biased)
+	fmt.println("INDEPENDENT SERIES -  COV (bias=false/true)")
+
+	cov_x := w.column_new("cov_x", .Float, 0)
+	cov_y := w.column_new("cov_y", .Float, 0)
+	range_in := []f64{1, 2, 3, 4, 5}
+	range_y := []f64{10, 20, 30, 40, 50}
+	for v in range_in do w.append_float(&cov_x, v)
+	for v in range_y do w.append_float(&cov_y, v)
+
+	w.add_column(&df, cov_x)
+	w.add_column(&df, cov_y)
+	df.rows = 5
+
+	rw_cov := w.rolling_window(&df, "cov_x", 5, 1)
+
+	res_cov_unbiased := w.rolling_apply_float_ewm_cov(
+		rw_cov,
+		&cov_y,
+		w.make_ewm_cov("cov_unbiased", "cov_x", 0.5, false),
+		allocator,
+	)
+	print_result_float(&res_cov_unbiased)
+	w.destroy_column(&res_cov_unbiased)
+
+	res_cov_biased := w.rolling_apply_float_ewm_cov(
+		rw_cov,
+		&cov_y,
+		w.make_ewm_cov("cov_biased", "cov_x", 0.5, true),
+		allocator,
+	)
+	print_result_float(&res_cov_biased)
+
+	fmt.println("PERFECT CORRELATION - COV (bias=false/true)")
+
+	pc_x := w.column_new("pc_x", .Float, 0)
+	pc_y := w.column_new("pc_y", .Float, 0)
+	range_pc := []f64{1, 2, 3, 4, 5}
+	for v in range_pc {
+		w.append_float(&pc_x, v)
+		w.append_float(&pc_y, v * 2.0)
+	}
+
+	w.add_column(&df, pc_x)
+	w.add_column(&df, pc_y)
+	df.rows = 5
+
+	rw_pc := w.rolling_window(&df, "pc_x", 5, 1)
+
+	res_pc_unbiased := w.rolling_apply_float_ewm_cov(
+		rw_pc,
+		&pc_y,
+		w.make_ewm_cov("pc_unbiased", "pc_x", 0.5, false),
+		allocator,
+	)
+	print_result_float(&res_pc_unbiased)
+
+	res_pc_biased := w.rolling_apply_float_ewm_cov(
+		rw_pc,
+		&pc_y,
+		w.make_ewm_cov("pc_biased", "pc_x", 0.5, true),
+		allocator,
+	)
+	print_result_float(&res_pc_biased)
+
+	// Reset DF for short-series test
+	w.destroy_dataframe(&df)
+	df = w.dataframe_new()
+
+	fmt.println("SHORT SERIES - VAR/COV min_periods test")
+
+	short := w.column_new("short", .Float, 0)
+	range_short := []f64{1, 2}
+	for v in range_short do w.append_float(&short, v)
+	w.add_column(&df, short)
+	df.rows = 2
+
+	rw_short := w.rolling_window(&df, "short", 5, 3)
+
+	res_short := w.rolling_apply(rw_short, w.make_ewm_var("short_var", "short", 0.5, false))
+	print_result_float(&res_short)
+	w.destroy_column(&res_short)
+
+
+	w.destroy_column(&res_pc_biased)
+
+	w.destroy_column(&res_pc_unbiased)
+
+	w.destroy_column(&res_cov_biased)
+
+
+	w.destroy_column(&res_const_biased)
+
+
 	w.destroy_column(&resultcoviat)
 
 

@@ -33,6 +33,7 @@ Aggregator :: struct {
 	kind:     AggregationKind,
 	quantile: f64,
 	alpha:    f64,
+	bias:     bool,
 }
 
 
@@ -41,7 +42,7 @@ make_median_agg :: proc(name, column: string) -> Aggregator {
 }
 
 make_quantile_agg :: proc(name, column: string, q: f64) -> Aggregator {
-	return Aggregator{name = name, column = column, kind = .Quantile, quantile = q}
+	return Aggregator{name = name, column = column, kind = .Quantile, quantile = q, bias = false}
 }
 
 
