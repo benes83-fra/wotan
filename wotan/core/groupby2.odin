@@ -24,12 +24,14 @@ AggregationKind :: enum {
 	EWM_Var,
 	EWM_Std,
 	EWM_Cov,
+	EWM_Corr,
 }
 
 
 Aggregator :: struct {
 	name:     string,
 	column:   string,
+	other:    string, // ← ADD THIS
 	kind:     AggregationKind,
 	quantile: f64,
 	alpha:    f64,
@@ -335,7 +337,7 @@ agg_bool_into :: proc(out: ^Column, src: ^Column, rows: []int, agg: Aggregator) 
 		append_bool(out, max)
 	case .Count:
 		append_int(out, count)
-	case .Median, .Quantile, .EWM_Mean, .EWM_Var, .EWM_Std, .EWM_Cov:
+	case .Median, .Quantile, .EWM_Mean, .EWM_Var, .EWM_Std, .EWM_Cov, .EWM_Corr:
 		append_null(out)
 
 	}
@@ -380,7 +382,7 @@ agg_string_into :: proc(out: ^Column, src: ^Column, rows: []int, agg: Aggregator
 		append_int(out, count)
 	case .Sum, .Mean:
 		append_null(out)
-	case .Median, .Quantile, .EWM_Mean, .EWM_Var, .EWM_Std, .EWM_Cov:
+	case .Median, .Quantile, .EWM_Mean, .EWM_Var, .EWM_Std, .EWM_Cov, .EWM_Corr:
 		append_null(out)
 	}
 }
@@ -423,7 +425,7 @@ agg_date_into :: proc(out: ^Column, src: ^Column, rows: []int, agg: Aggregator) 
 		append_int(out, count)
 	case .Sum, .Mean:
 		append_null(out)
-	case .Median, .Quantile, .EWM_Mean, .EWM_Var, .EWM_Std, .EWM_Cov:
+	case .Median, .Quantile, .EWM_Mean, .EWM_Var, .EWM_Std, .EWM_Cov, .EWM_Corr:
 		append_null(out)
 
 	}
@@ -467,7 +469,7 @@ agg_time_into :: proc(out: ^Column, src: ^Column, rows: []int, agg: Aggregator) 
 		append_int(out, count)
 	case .Sum, .Mean:
 		append_null(out)
-	case .Median, .Quantile, .EWM_Mean, .EWM_Var, .EWM_Std, .EWM_Cov:
+	case .Median, .Quantile, .EWM_Mean, .EWM_Var, .EWM_Std, .EWM_Cov, .EWM_Corr:
 		append_null(out)
 	}
 }
@@ -510,7 +512,7 @@ agg_datetime_into :: proc(out: ^Column, src: ^Column, rows: []int, agg: Aggregat
 		append_int(out, count)
 	case .Sum, .Mean:
 		append_null(out)
-	case .Median, .Quantile, .EWM_Mean, .EWM_Var, .EWM_Std, .EWM_Cov:
+	case .Median, .Quantile, .EWM_Mean, .EWM_Var, .EWM_Std, .EWM_Cov, .EWM_Corr:
 		append_null(out)
 	}
 }

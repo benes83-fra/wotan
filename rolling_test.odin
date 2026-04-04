@@ -287,6 +287,63 @@ rolling_test :: proc(allocator: mem.Allocator) {
 
 	res_short := w.rolling_apply(rw_short, w.make_ewm_var("short_var", "short", 0.5, false))
 	print_result_float(&res_short)
+
+	// --- EWM CORRELATION TESTS ---
+	fmt.println("=== EWM CORRELATION TESTS ===")
+	w.destroy_dataframe(&df)
+	// Build DF fresh
+	df = w.dataframe_new()
+	range_corr_a_i := []int{1, 2, 3, 4, 5}
+	range_corr_b_i := []int{2, 4, 6, 8, 10}
+	range_corr_a_f := []f64{1, 2, 3, 4, 5}
+	range_corr_b_f := []f64{2, 4, 6, 8, 10}
+	// FLOAT columns: perfect correlation
+	cov_a := w.column_new("cov_a", .Float, 0)
+	cov_b := w.column_new("cov_b", .Float, 0)
+	for v in range_corr_a_f do w.append_float(&cov_a, v)
+	for v in range_corr_b_f do w.append_float(&cov_b, v)
+
+	w.add_column(&df, cov_a)
+	w.add_column(&df, cov_b)
+	df.rows = 5
+
+	fmt.println("EWM CORR float - float (alpha=0.5)")
+	rw_corr_f := w.rolling_window(&df, "cov_a", 3, 1)
+	res_corr_f := w.rolling_apply(
+		rw_corr_f,
+		w.make_ewm_corr("ewm_corr_f", "cov_a", "cov_b", 0.5, false),
+		allocator,
+	)
+	print_result_float(&res_corr_f)
+	w.destroy_column(&res_corr_f)
+	w.destroy_dataframe(&df)
+
+	// INT columns: perfect correlation
+	df = w.dataframe_new()
+
+	cov_i_a := w.column_new("cov_i_a", .Int, 0)
+	cov_i_b := w.column_new("cov_i_b", .Int, 0)
+	for v in range_corr_a_i do w.append_int(&cov_i_a, v)
+	for v in range_corr_b_i do w.append_int(&cov_i_b, v)
+
+	w.add_column(&df, cov_i_a)
+	w.add_column(&df, cov_i_b)
+	df.rows = 5
+
+	fmt.println("EWM CORR int - int (alpha=0.5)")
+	rw_corr_i := w.rolling_window(&df, "cov_i_a", 3, 1)
+	res_corr_i := w.rolling_apply(
+		rw_corr_i,
+		w.make_ewm_corr("ewm_corr_i", "cov_i_a", "cov_i_b", 0.5, false),
+		allocator,
+	)
+	print_result_float(&res_corr_i)
+	w.destroy_column(&res_corr_i)
+
+
+	w.destroy_dataframe(&df)
+
+
 	w.destroy_column(&res_short)
 
 

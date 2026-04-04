@@ -77,6 +77,10 @@ rolling_apply_int :: proc(r: RollingWindow, agg: Aggregator, allocator: mem.Allo
 	if agg.kind == .EWM_Var {
 		return rolling_apply_int_ewm_var(r, agg, allocator)
 	}
+	if agg.kind == .EWM_Corr {
+		return rolling_apply_int_ewm_corr(r, agg, allocator)
+	}
+
 	return out
 }
 
@@ -109,6 +113,10 @@ rolling_apply_float :: proc(
 	if agg.kind == .EWM_Var {
 		return rolling_apply_float_ewm_var(r, agg, allocator)
 	}
+	if agg.kind == .EWM_Corr {
+		return rolling_apply_float_ewm_corr(r, agg, allocator)
+	}
+
 	return out
 }
 
@@ -289,7 +297,7 @@ rolling_agg_int_into :: proc(out: ^Column, values: []int, agg: Aggregator) {
 		idx := int(q * f64(len(tmp) - 1))
 		append_int(out, tmp[idx])
 		delete(tmp)
-	case .EWM_Mean, .EWM_Var, .EWM_Std, .EWM_Cov:
+	case .EWM_Mean, .EWM_Var, .EWM_Std, .EWM_Cov, .EWM_Corr:
 	// Does not apply to in
 	}
 }
@@ -338,7 +346,7 @@ rolling_agg_float_into :: proc(out: ^Column, values: []f64, agg: Aggregator) {
 		idx := int(q * f64(len(tmp) - 1))
 		append_float(out, tmp[idx])
 		delete(tmp)
-	case .EWM_Mean, .EWM_Var, .EWM_Std, .EWM_Cov:
+	case .EWM_Mean, .EWM_Var, .EWM_Std, .EWM_Cov, .EWM_Corr:
 	//Handled by rolling_apply_float_ewn
 	}
 }
@@ -379,7 +387,7 @@ rolling_agg_bool_into :: proc(out: ^Column, values: []bool, agg: Aggregator) {
 	case .Count:
 		append_int(out, len(values))
 
-	case .Median, .Quantile, .EWM_Mean, .EWM_Var, .EWM_Std, .EWM_Cov:
+	case .Median, .Quantile, .EWM_Mean, .EWM_Var, .EWM_Std, .EWM_Cov, .EWM_Corr:
 		append_null(out)
 	}
 }
@@ -406,7 +414,7 @@ rolling_agg_string_into :: proc(out: ^Column, values: []string, agg: Aggregator)
 	case .Count:
 		append_int(out, len(values))
 
-	case .Sum, .Mean, .Median, .Quantile, .EWM_Mean, .EWM_Var, .EWM_Std, .EWM_Cov:
+	case .Sum, .Mean, .Median, .Quantile, .EWM_Mean, .EWM_Var, .EWM_Std, .EWM_Cov, .EWM_Corr:
 		append_null(out)
 	}
 }
@@ -433,7 +441,7 @@ rolling_agg_date_into :: proc(out: ^Column, values: []Date, agg: Aggregator) {
 	case .Count:
 		append_int(out, len(values))
 
-	case .Sum, .Mean, .Median, .Quantile, .EWM_Mean, .EWM_Var, .EWM_Std, .EWM_Cov:
+	case .Sum, .Mean, .Median, .Quantile, .EWM_Mean, .EWM_Var, .EWM_Std, .EWM_Cov, .EWM_Corr:
 		append_null(out)
 	}
 }
@@ -460,7 +468,7 @@ rolling_agg_time_into :: proc(out: ^Column, values: []Time, agg: Aggregator) {
 	case .Count:
 		append_int(out, len(values))
 
-	case .Sum, .Mean, .Median, .Quantile, .EWM_Mean, .EWM_Var, .EWM_Std, .EWM_Cov:
+	case .Sum, .Mean, .Median, .Quantile, .EWM_Mean, .EWM_Var, .EWM_Std, .EWM_Cov, .EWM_Corr:
 		append_null(out)
 	}
 }
@@ -487,7 +495,7 @@ rolling_agg_datetime_into :: proc(out: ^Column, values: []Datetime, agg: Aggrega
 	case .Count:
 		append_int(out, len(values))
 
-	case .Sum, .Mean, .Median, .Quantile, .EWM_Mean, .EWM_Var, .EWM_Std, .EWM_Cov:
+	case .Sum, .Mean, .Median, .Quantile, .EWM_Mean, .EWM_Var, .EWM_Std, .EWM_Cov, .EWM_Corr:
 		append_null(out)
 	}
 }
@@ -501,6 +509,17 @@ make_ewm_var :: proc(name, column: string, alpha: f64, bias: bool = false) -> Ag
 }
 make_ewm_cov :: proc(name, column: string, alpha: f64, bias := false) -> Aggregator {
 	return Aggregator{name = name, column = column, kind = .EWM_Cov, alpha = alpha, bias = bias}
+}
+
+make_ewm_corr :: proc(name, col, other: string, alpha: f64, bias := false) -> Aggregator {
+	return Aggregator {
+		name = name,
+		column = col,
+		other = other,
+		kind = .EWM_Corr,
+		alpha = alpha,
+		bias = bias,
+	}
 }
 
 
@@ -1439,6 +1458,92 @@ rolling_apply_int_ewm_cov_adjust_false :: proc(
 			append_null(&out)
 		}
 	}
+
+	return out
+}
+rolling_apply_float_ewm_corr :: proc(
+	r: RollingWindow,
+	agg: Aggregator,
+	allocator: mem.Allocator,
+) -> Column {
+	src_y := column(r.df, agg.other)
+
+	// cov(x, y)
+	cov_col := rolling_apply_float_ewm_cov(r, src_y, agg, allocator)
+
+	// var(x)
+	var_x := rolling_apply_float_ewm_var(r, agg, allocator)
+
+	// var(y)
+	rw_y := RollingWindow {
+		df          = r.df,
+		column      = agg.other,
+		window      = r.window,
+		min_periods = r.min_periods,
+		centered    = r.centered,
+	}
+	var_y := rolling_apply_float_ewm_var(rw_y, agg, allocator)
+
+	out := column_new(agg.name, .Float, 0)
+
+	for i in 0 ..< cov_col.len {
+		cv, n1 := column_at_float(&cov_col, i)
+		vx, n2 := column_at_float(&var_x, i)
+		vy, n3 := column_at_float(&var_y, i)
+
+		if n1 || n2 || n3 || vx <= 0 || vy <= 0 {
+			append_null(&out)
+		} else {
+			append_float(&out, cv / math.sqrt(vx * vy))
+		}
+	}
+
+	destroy_column(&cov_col)
+	destroy_column(&var_x)
+	destroy_column(&var_y)
+
+	return out
+}
+rolling_apply_int_ewm_corr :: proc(
+	r: RollingWindow,
+	agg: Aggregator,
+	allocator: mem.Allocator,
+) -> Column {
+	src_y := column(r.df, agg.other)
+
+	// cov(x, y)
+	cov_col := rolling_apply_int_ewm_cov(r, src_y, agg, allocator)
+
+	// var(x)
+	var_x := rolling_apply_int_ewm_var(r, agg, allocator)
+
+	// var(y)
+	rw_y := RollingWindow {
+		df          = r.df,
+		column      = agg.other,
+		window      = r.window,
+		min_periods = r.min_periods,
+		centered    = r.centered,
+	}
+	var_y := rolling_apply_int_ewm_var(rw_y, agg, allocator)
+
+	out := column_new(agg.name, .Float, 0)
+
+	for i in 0 ..< cov_col.len {
+		cv, n1 := column_at_float(&cov_col, i)
+		vx, n2 := column_at_float(&var_x, i)
+		vy, n3 := column_at_float(&var_y, i)
+
+		if n1 || n2 || n3 || vx <= 0 || vy <= 0 {
+			append_null(&out)
+		} else {
+			append_float(&out, cv / math.sqrt(vx * vy))
+		}
+	}
+
+	destroy_column(&cov_col)
+	destroy_column(&var_x)
+	destroy_column(&var_y)
 
 	return out
 }
