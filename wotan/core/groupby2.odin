@@ -20,7 +20,10 @@ AggregationKind :: enum {
 	Count,
 	Median,
 	Quantile,
-	EWM_Mean, // new
+	Corr,
+	Var,
+	Cov,
+	EWM_Mean,
 	EWM_Var,
 	EWM_Std,
 	EWM_Cov,
@@ -45,6 +48,16 @@ make_median_agg :: proc(name, column: string) -> Aggregator {
 
 make_quantile_agg :: proc(name, column: string, q: f64) -> Aggregator {
 	return Aggregator{name = name, column = column, kind = .Quantile, quantile = q, bias = false}
+}
+make_corr :: proc(name, col, other: string) -> Aggregator {
+	return Aggregator{name = name, column = col, other = other, kind = .Corr}
+}
+make_var :: proc(name, col: string) -> Aggregator {
+	return Aggregator{name = name, column = col, kind = .Var}
+}
+
+make_cov :: proc(name, col, other: string) -> Aggregator {
+	return Aggregator{name = name, column = col, other = other, kind = .Cov}
 }
 
 
@@ -337,7 +350,7 @@ agg_bool_into :: proc(out: ^Column, src: ^Column, rows: []int, agg: Aggregator) 
 		append_bool(out, max)
 	case .Count:
 		append_int(out, count)
-	case .Median, .Quantile, .EWM_Mean, .EWM_Var, .EWM_Std, .EWM_Cov, .EWM_Corr:
+	case .Median, .Quantile, .EWM_Mean, .EWM_Var, .EWM_Std, .EWM_Cov, .EWM_Corr, .Corr, .Var, .Cov:
 		append_null(out)
 
 	}
@@ -382,7 +395,7 @@ agg_string_into :: proc(out: ^Column, src: ^Column, rows: []int, agg: Aggregator
 		append_int(out, count)
 	case .Sum, .Mean:
 		append_null(out)
-	case .Median, .Quantile, .EWM_Mean, .EWM_Var, .EWM_Std, .EWM_Cov, .EWM_Corr:
+	case .Median, .Quantile, .EWM_Mean, .EWM_Var, .EWM_Std, .EWM_Cov, .EWM_Corr, .Corr, .Var, .Cov:
 		append_null(out)
 	}
 }
@@ -425,7 +438,7 @@ agg_date_into :: proc(out: ^Column, src: ^Column, rows: []int, agg: Aggregator) 
 		append_int(out, count)
 	case .Sum, .Mean:
 		append_null(out)
-	case .Median, .Quantile, .EWM_Mean, .EWM_Var, .EWM_Std, .EWM_Cov, .EWM_Corr:
+	case .Median, .Quantile, .EWM_Mean, .EWM_Var, .EWM_Std, .EWM_Cov, .EWM_Corr, .Corr, .Var, .Cov:
 		append_null(out)
 
 	}
@@ -469,7 +482,7 @@ agg_time_into :: proc(out: ^Column, src: ^Column, rows: []int, agg: Aggregator) 
 		append_int(out, count)
 	case .Sum, .Mean:
 		append_null(out)
-	case .Median, .Quantile, .EWM_Mean, .EWM_Var, .EWM_Std, .EWM_Cov, .EWM_Corr:
+	case .Median, .Quantile, .EWM_Mean, .EWM_Var, .EWM_Std, .EWM_Cov, .EWM_Corr, .Corr, .Var, .Cov:
 		append_null(out)
 	}
 }
@@ -512,7 +525,7 @@ agg_datetime_into :: proc(out: ^Column, src: ^Column, rows: []int, agg: Aggregat
 		append_int(out, count)
 	case .Sum, .Mean:
 		append_null(out)
-	case .Median, .Quantile, .EWM_Mean, .EWM_Var, .EWM_Std, .EWM_Cov, .EWM_Corr:
+	case .Median, .Quantile, .EWM_Mean, .EWM_Var, .EWM_Std, .EWM_Cov, .EWM_Corr, .Corr, .Var, .Cov:
 		append_null(out)
 	}
 }
