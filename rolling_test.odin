@@ -8,7 +8,7 @@ import "core:mem"
 
 rolling_test :: proc(allocator: mem.Allocator) {
 	df := w.dataframe_new()
-
+	defer w.destroy_dataframe(&df)
 	col := w.column_new("value", .Int, 0)
 	w.append_int(&col, 1)
 	w.append_int(&col, 2)
@@ -338,11 +338,138 @@ rolling_test :: proc(allocator: mem.Allocator) {
 		allocator,
 	)
 	print_result_float(&res_corr_i)
-	w.destroy_column(&res_corr_i)
+	// --- ROLLING CORRELATION TESTS ---
+	fmt.println("=== ROLLING CORRELATION TESTS ===")
 
+	// FLOAT perfect correlation
+	df = w.dataframe_new()
+	cov_a2 := w.column_new("cov_a", .Float, 0)
+	cov_b2 := w.column_new("cov_b", .Float, 0)
+	range_f_a := []f64{1, 2, 3, 4, 5}
+	range_f_b := []f64{2, 4, 6, 8, 10}
+	for v in range_f_a do w.append_float(&cov_a2, v)
+	for v in range_f_b do w.append_float(&cov_b2, v)
+	w.add_column(&df, cov_a2)
+	w.add_column(&df, cov_b2)
+	df.rows = 5
 
+	fmt.println("ROLLING CORR float - float (perfect corr)")
+	rw_corr_f2 := w.rolling_window(&df, "cov_a", 3, 1)
+	res_corr_f2 := w.rolling_apply(
+		rw_corr_f2,
+		w.make_corr("roll_corr_f", "cov_a", "cov_b"),
+		allocator,
+	)
+	print_result_float(&res_corr_f2)
+	w.destroy_column(&res_corr_f2)
 	w.destroy_dataframe(&df)
 
+
+	// INT perfect correlation
+	df = w.dataframe_new()
+	cov_i_a2 := w.column_new("cov_i_a", .Int, 0)
+	cov_i_b2 := w.column_new("cov_i_b", .Int, 0)
+	range_i_a := []int{1, 2, 3, 4, 5}
+	range_i_b := []int{2, 4, 6, 8, 10}
+	for v in range_i_a do w.append_int(&cov_i_a2, v)
+	for v in range_i_b do w.append_int(&cov_i_b2, v)
+	w.add_column(&df, cov_i_a2)
+	w.add_column(&df, cov_i_b2)
+	df.rows = 5
+
+	fmt.println("ROLLING CORR int - int (perfect corr)")
+	rw_corr_i2 := w.rolling_window(&df, "cov_i_a", 3, 1)
+	res_corr_i2 := w.rolling_apply(
+		rw_corr_i2,
+		w.make_corr("roll_corr_i", "cov_i_a", "cov_i_b"),
+		allocator,
+	)
+	print_result_float(&res_corr_i2)
+	w.destroy_column(&res_corr_i2)
+	w.destroy_dataframe(&df)
+
+
+	// FLOAT negative correlation
+	df = w.dataframe_new()
+	neg_a := w.column_new("neg_a", .Float, 0)
+	neg_b := w.column_new("neg_b", .Float, 0)
+	range_neg_a := []f64{1, 2, 3, 4, 5}
+	range_neg_b := []f64{10, 8, 6, 4, 2}
+	for v in range_neg_a do w.append_float(&neg_a, v)
+	for v in range_neg_b do w.append_float(&neg_b, v)
+	w.add_column(&df, neg_a)
+	w.add_column(&df, neg_b)
+	df.rows = 5
+
+	fmt.println("ROLLING CORR float - float (negative corr)")
+	rw_corr_neg := w.rolling_window(&df, "neg_a", 3, 1)
+	res_corr_neg := w.rolling_apply(
+		rw_corr_neg,
+		w.make_corr("roll_corr_neg", "neg_a", "neg_b"),
+		allocator,
+	)
+	print_result_float(&res_corr_neg)
+	w.destroy_column(&res_corr_neg)
+	w.destroy_dataframe(&df)
+
+
+	// FLOAT zero correlation
+	df = w.dataframe_new()
+	zero_a := w.column_new("zero_a", .Float, 0)
+	zero_b := w.column_new("zero_b", .Float, 0)
+	range_zero_a := []f64{1, 2, 3, 4, 5}
+	range_zero_b := []f64{5, 1, 5, 1, 5}
+	for v in range_zero_a do w.append_float(&zero_a, v)
+	for v in range_zero_b do w.append_float(&zero_b, v)
+	w.add_column(&df, zero_a)
+	w.add_column(&df, zero_b)
+	df.rows = 5
+
+	fmt.println("ROLLING CORR float - float (zero corr)")
+	rw_corr_zero := w.rolling_window(&df, "zero_a", 3, 1)
+	res_corr_zero := w.rolling_apply(
+		rw_corr_zero,
+		w.make_corr("roll_corr_zero", "zero_a", "zero_b"),
+		allocator,
+	)
+	print_result_float(&res_corr_zero)
+	w.destroy_column(&res_corr_zero)
+	w.destroy_dataframe(&df)
+
+
+	// SHORT SERIES (min_periods test)
+	df = w.dataframe_new()
+	short_a := w.column_new("short_a", .Float, 0)
+	short_b := w.column_new("short_b", .Float, 0)
+	range_short_a := []f64{1, 2}
+	range_short_b := []f64{2, 4}
+	for v in range_short_a do w.append_float(&short_a, v)
+	for v in range_short_b do w.append_float(&short_b, v)
+	w.add_column(&df, short_a)
+	w.add_column(&df, short_b)
+	df.rows = 2
+
+	fmt.println("ROLLING CORR short series (min_periods=3)")
+	rw_corr_short := w.rolling_window(&df, "short_a", 5, 3)
+	res_corr_short := w.rolling_apply(
+		rw_corr_short,
+		w.make_corr("roll_corr_short", "short_a", "short_b"),
+		allocator,
+	)
+	print_result_float(&res_corr_short)
+	defer w.destroy_column(&res_corr_i2)
+	defer w.destroy_column(&res_corr_f2)
+	defer w.destroy_column(&res_corr_neg)
+	defer w.destroy_column(&res_corr_zero)
+	defer w.destroy_column(&res_corr_short)
+	w.destroy_column(&res_corr_short)
+	w.destroy_dataframe(&df)
+
+	w.destroy_column(&res_corr_i)
+	w.destroy_column(&res_corr_i2)
+
+	w.destroy_dataframe(&df)
+	w.destroy_column(&res_corr_short)
 
 	w.destroy_column(&res_short)
 
