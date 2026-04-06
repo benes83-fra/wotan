@@ -338,6 +338,8 @@ rolling_test :: proc(allocator: mem.Allocator) {
 		allocator,
 	)
 	print_result_float(&res_corr_i)
+	defer w.destroy_column(&res_corr_i)
+	w.destroy_dataframe(&df)
 	// --- ROLLING CORRELATION TESTS ---
 	fmt.println("=== ROLLING CORRELATION TESTS ===")
 
@@ -361,7 +363,7 @@ rolling_test :: proc(allocator: mem.Allocator) {
 		allocator,
 	)
 	print_result_float(&res_corr_f2)
-	w.destroy_column(&res_corr_f2)
+	defer w.destroy_column(&res_corr_f2)
 	w.destroy_dataframe(&df)
 
 
@@ -385,7 +387,7 @@ rolling_test :: proc(allocator: mem.Allocator) {
 		allocator,
 	)
 	print_result_float(&res_corr_i2)
-	w.destroy_column(&res_corr_i2)
+	defer w.destroy_column(&res_corr_i2)
 	w.destroy_dataframe(&df)
 
 
@@ -409,7 +411,7 @@ rolling_test :: proc(allocator: mem.Allocator) {
 		allocator,
 	)
 	print_result_float(&res_corr_neg)
-	w.destroy_column(&res_corr_neg)
+	defer w.destroy_column(&res_corr_neg)
 	w.destroy_dataframe(&df)
 
 
@@ -433,7 +435,7 @@ rolling_test :: proc(allocator: mem.Allocator) {
 		allocator,
 	)
 	print_result_float(&res_corr_zero)
-	w.destroy_column(&res_corr_zero)
+	defer w.destroy_column(&res_corr_zero)
 	w.destroy_dataframe(&df)
 
 
@@ -457,12 +459,6 @@ rolling_test :: proc(allocator: mem.Allocator) {
 		allocator,
 	)
 	print_result_float(&res_corr_short)
-	defer w.destroy_column(&res_corr_i2)
-	defer w.destroy_column(&res_corr_f2)
-	defer w.destroy_column(&res_corr_neg)
-	defer w.destroy_column(&res_corr_zero)
-	defer w.destroy_column(&res_corr_short)
-	w.destroy_column(&res_corr_short)
 	w.destroy_dataframe(&df)
 
 	w.destroy_column(&res_corr_i)
@@ -488,7 +484,7 @@ rolling_test :: proc(allocator: mem.Allocator) {
 
 
 	defer w.destroy_column(&resultv)
-	w.destroy_dataframe(&df)
+	// w.destroy_dataframe(&df)
 }
 
 
