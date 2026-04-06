@@ -83,6 +83,13 @@ rolling_apply_int :: proc(r: RollingWindow, agg: Aggregator, allocator: mem.Allo
 	if agg.kind == .Corr {
 		return rolling_apply_int_corr(r, agg, allocator)
 	}
+	if agg.kind == .Var {
+		return rolling_apply_int_var(r, agg, allocator)
+	}
+	if agg.kind == .Cov {
+		other := column(r.df, agg.other)
+		return rolling_apply_int_cov(r, other, agg, allocator)
+	}
 
 
 	return out
@@ -122,6 +129,13 @@ rolling_apply_float :: proc(
 	}
 	if agg.kind == .Corr {
 		return rolling_apply_float_corr(r, agg, allocator)
+	}
+	if agg.kind == .Var {
+		return rolling_apply_float_var(r, agg, allocator)
+	}
+	if agg.kind == .Cov {
+		other := column(r.df, agg.other)
+		return rolling_apply_float_cov(r, other, agg, allocator)
 	}
 
 	return out
