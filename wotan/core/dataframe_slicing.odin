@@ -20,7 +20,7 @@ dataframe_slice_rows_copy :: proc(df: ^DataFrame, start: int, end: int) -> DataF
 		orig := dataframe_column_ptr(df, ci)
 
 		for i in start ..< end {
-			#partial switch col_type {
+			switch col_type {
 			case .Int:
 				v, is_null := column_at_int(orig, i)
 				if is_null {append_null(&new_col)} else {append_int(&new_col, v)}
@@ -36,6 +36,13 @@ dataframe_slice_rows_copy :: proc(df: ^DataFrame, start: int, end: int) -> DataF
 			case .Date:
 				v, is_null := column_at_date(orig, i)
 				if is_null {append_null(&new_col)} else {append_date(&new_col, v)}
+			case .Time:
+				v, is_null := column_at_time(orig, i)
+				if is_null {append_null(&new_col)} else {append_time(&new_col, v)}
+			case .Datetime:
+				v, is_null := column_at_datetime(orig, i)
+				if is_null {append_null(&new_col)} else {append_datetime(&new_col, v)}
+			case .Invalid:
 			}
 		}
 
