@@ -54,10 +54,9 @@ destroy_column :: proc(col: ^Column) {
 		delete(col.nulls)
 		col.nulls = nil
 	}
-
-	// if col.arena.curr_block != nil {
-	// vmem.arena_destroy(&col.arena)
-	// }
+	if col.type == .String && col.arena.kind != nil {
+		vmem.arena_destroy(&col.arena)
+	}
 	col.len = 0.0
 	col.capacity = 0.0
 }
@@ -104,7 +103,8 @@ grow :: proc(c: ^Column, new_capacity: int) {
 	if c.nulls != nil {
 		new_nulls := make([]bool, new_capacity)
 		copy(new_nulls, c.nulls)
-		c.nulls = new_nulls
+		delete (c.nulls)
+    c.nulls = new_nulls
 	}
 }
 

@@ -28,7 +28,6 @@ rolling_matrix_test :: proc(allocator: mem.Allocator) {
 	corr_mat := w.rolling_corr_matrix(&df, []string{"a", "b"}, 3, 1, allocator)
 	w.dataframe_pretty_print(&corr_mat)
 	w.destroy_dataframe(&corr_mat)
-
 	// ------------------------------------------------------------
 	// 2. NEGATIVE CORRELATION
 	// ------------------------------------------------------------
