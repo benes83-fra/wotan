@@ -283,7 +283,7 @@ main :: proc() {
 
 	rolling_test(context.temp_allocator)
 	rolling_matrix_test(context.temp_allocator)
-
+	pca_test(context.temp_allocator)
 
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)

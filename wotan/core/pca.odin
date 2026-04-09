@@ -1,8 +1,7 @@
 package core
 
+import "core:fmt"
 import "core:math"
-import "core:math/linalg"
-import "core:slice"
 
 
 PCAResult :: struct {
@@ -214,27 +213,105 @@ extract_cov_matrix_row :: proc(cov_df: ^DataFrame, cols: []string, r: int) -> []
 		out[i] = make([]f64, n)
 	}
 
-	col_i_col := column(cov_df, "col_i")
-	col_j_col := column(cov_df, "col_j")
-	cov_col := column(cov_df, "cov")
+	col_row := column(cov_df, "row")
+	col_i := column(cov_df, "col_i")
+	col_j := column(cov_df, "col_j")
+	col_cov := column(cov_df, "cov")
 
-	// cov_df is structured so that all rows for a given r appear in order
-	// i.e. block of size n*n per r
-	base := r * (n * n)
+	for idx in 0 ..< cov_df.rows {
+		row_val, _ := column_at_int(col_row, idx)
+		if row_val != r {
+			continue
+		}
 
-	for i_idx in 0 ..< n {
-		for j_idx in 0 ..< n {
-			idx := base + i_idx * n + j_idx
+		i_name, _ := column_at_string(col_i, idx)
+		j_name, _ := column_at_string(col_j, idx)
 
-			// read cov value
-			v, is_null := column_at_float(cov_col, idx)
-			if is_null {
-				out[i_idx][j_idx] = 0
-			} else {
-				out[i_idx][j_idx] = v
-			}
+		// find indices
+		i_idx := index_of_string(cols, i_name)
+		j_idx := index_of_string(cols, j_name)
+
+		v, is_null := column_at_float(col_cov, idx)
+		if is_null {
+			out[i_idx][j_idx] = 0
+		} else {
+			out[i_idx][j_idx] = v
 		}
 	}
 
 	return out
+}
+
+pca_explained_variance_ratio :: proc(pca: PCAResult) -> []f64 {
+	total := 0.0
+	for v in pca.eigenvalues do total += v
+
+	out := make([]f64, len(pca.eigenvalues))
+	for v, i in pca.eigenvalues {
+		out[i] = v / total
+	}
+	return out
+}
+pca_transform :: proc(data: [][]f64, pca: PCAResult) -> [][]f64 {
+	rows := len(data)
+	comps := len(pca.eigenvectors)
+
+	out := make([][]f64, rows)
+	for r in 0 ..< rows {
+		out[r] = make([]f64, comps)
+		for c in 0 ..< comps {
+			sum := 0.0
+			for k in 0 ..< len(data[r]) {
+				sum += data[r][k] * pca.eigenvectors[c][k]
+			}
+			out[r][c] = sum
+		}
+	}
+	return out
+}
+pca_inverse_transform :: proc(scores: [][]f64, pca: PCAResult) -> [][]f64 {
+	rows := len(scores)
+	dims := len(pca.eigenvectors[0])
+
+	out := make([][]f64, rows)
+	for r in 0 ..< rows {
+		out[r] = make([]f64, dims)
+		for d in 0 ..< dims {
+			sum := 0.0
+			for c in 0 ..< len(scores[r]) {
+				sum += scores[r][c] * pca.eigenvectors[c][d]
+			}
+			out[r][d] = sum
+		}
+	}
+	return out
+}
+
+
+//a little convience helper
+
+print_matrix :: proc(mat: [][]f64) {
+	rows := len(mat)
+	if rows == 0 {
+		fmt.println("[]")
+		return
+	}
+
+	cols := len(mat[0])
+
+	for r in 0 ..< rows {
+		fmt.print("[ ")
+		for c in 0 ..< cols {
+			fmt.printf("%8.4f ", mat[r][c])
+		}
+		fmt.println("]")
+	}
+}
+index_of_string :: proc(list: []string, s: string) -> int {
+	for v, i in list {
+		if v == s {
+			return i
+		}
+	}
+	return -1
 }

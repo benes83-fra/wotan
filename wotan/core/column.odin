@@ -103,8 +103,8 @@ grow :: proc(c: ^Column, new_capacity: int) {
 	if c.nulls != nil {
 		new_nulls := make([]bool, new_capacity)
 		copy(new_nulls, c.nulls)
-		delete (c.nulls)
-    c.nulls = new_nulls
+		delete(c.nulls)
+		c.nulls = new_nulls
 	}
 }
 
@@ -845,5 +845,29 @@ column_from_datetimes :: proc(name: string, values: []Datetime) -> Column {
 	for v in values {
 		append_datetime(&col, v)
 	}
+	return col
+}
+
+
+column_from_f64 :: proc(name: string, values: []f64) -> Column {
+	col := column_new(name, .Float, len(values))
+
+	for v in values {
+		append_float(&col, v)
+	}
+
+	return col
+}
+column_from_f64_nullable :: proc(name: string, values: []f64, nulls: []bool) -> Column {
+	col := column_new(name, .Float, len(values))
+
+	for v, i in values {
+		if nulls[i] {
+			append_null(&col)
+		} else {
+			append_float(&col, v)
+		}
+	}
+
 	return col
 }
