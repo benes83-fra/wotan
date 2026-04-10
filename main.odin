@@ -280,11 +280,11 @@ main :: proc() {
 	w.dataframe_pretty_print(&dfx, 20)
 
 	groupby2_test()
-
 	rolling_test(context.temp_allocator)
 	rolling_matrix_test(context.temp_allocator)
 	pca_test(context.temp_allocator)
 	ewm_cov_test(context.temp_allocator)
+	ewm_pca_test(context.temp_allocator)
 
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)

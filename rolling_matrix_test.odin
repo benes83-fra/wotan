@@ -158,3 +158,51 @@ ewm_cov_test :: proc(allocator: mem.Allocator) {
 	w.dataframe_pretty_print(&ewm_cov_df) // or your own printer
 	w.destroy_dataframe(&ewm_cov_df)
 }
+
+
+ewm_pca_test :: proc(allocator: mem.Allocator) {
+	fmt.println("=== EWM PCA Test ===")
+
+	// Build a tiny test DataFrame
+	df := w.dataframe_new()
+	defer w.destroy_dataframe(&df)
+
+	x := w.column_from_f64("x", []f64{1, 2, 3, 4})
+	y := w.column_from_f64("y", []f64{2, 4, 6, 8})
+	z := w.column_from_f64("z", []f64{1, 0, 1, 0})
+
+	w.add_column(&df, x)
+	w.add_column(&df, y)
+	w.add_column(&df, z)
+	df.rows = 4
+
+	alpha := 0.5
+	minp := 1
+	bias := false
+	adjust := false
+
+	// --- EWM Covariance Matrix ---
+	fmt.println("\nEWM Covariance Matrix:")
+	cov_df := w.ewm_cov_matrix(&df, []string{"x", "y", "z"}, alpha, minp, bias, adjust, allocator)
+	defer w.destroy_dataframe(&cov_df)
+	w.dataframe_pretty_print(&cov_df)
+
+	// --- EWM PCA (full time series) ---
+	fmt.println("\nEWM PCA (all rows):")
+	pca_series := w.ewm_pca(&df, []string{"x", "y", "z"}, alpha, minp, bias, adjust, allocator)
+	for i in 0 ..< len(pca_series) {
+		fmt.printf("Row %d:\n", i)
+		fmt.println("  Eigenvalues:  ", pca_series[i].eigenvalues)
+		fmt.println("  Eigenvectors: ", pca_series[i].eigenvectors)
+		w.destroy_pca_result(pca_series[i])
+	}
+
+	// --- EWM PCA (last row only) ---
+	fmt.println("\nEWM PCA (last row):")
+	last := w.ewm_pca_last(&df, []string{"x", "y", "z"}, alpha, minp, bias, adjust, allocator)
+	fmt.println("Eigenvalues:", last.eigenvalues)
+	fmt.println("Eigenvectors:", last.eigenvectors)
+	w.destroy_pca_result(last)
+
+	fmt.println("\n=== END EWM PCA TEST ===")
+}
