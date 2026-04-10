@@ -217,7 +217,8 @@ rolling_pca :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> []PCAResult {
 
-	cov_df := rolling_cov_matrix(df, cols, window, min_periods)
+	cov_df := rolling_cov_matrix(df, cols, window, min_periods, allocator)
+	defer destroy_dataframe(&cov_df)
 	results := make([]PCAResult, cov_df.rows, allocator)
 
 	for r in 0 ..< cov_df.rows {
@@ -229,9 +230,9 @@ rolling_pca :: proc(
 }
 
 
-argsort_descending :: proc(values: []f64) -> []int {
+argsort_descending :: proc(values: []f64, allocator: mem.Allocator = context.allocator) -> []int {
 	n := len(values)
-	idx := make([]int, n)
+	idx := make([]int, n, allocator)
 	for i in 0 ..< n do idx[i] = i
 
 	// simple selection sort (n is small for PCA)
@@ -430,26 +431,47 @@ index_of_string :: proc(list: []string, s: string) -> int {
 	return -1
 }
 
+// pca_from_cov :: proc(cov: [][]f64, allocator: mem.Allocator = context.allocator) -> PCAResult {
+// 	jr := jacobi_eigen_symmetric(cov, allocator)
+// 	// defer destroy_matrix(jr.eigenvectors)
+// 	// defer delete(jr.eigenvalues)
+// 	idx := argsort_descending(jr.eigenvalues)
+// 	n := len(idx)
+// 	defer delete(idx)
+// 	sorted_vals := make([]f64, n)
+// 	sorted_vecs := make([][]f64, n)
+
+// 	for i, j in idx {
+// 		sorted_vals[i] = jr.eigenvalues[j]
+// 		// sorted_vecs[i] = jr.eigenvectors[j][:]
+// 		sorted_vecs[i] = make([]f64, len(jr.eigenvectors[j]))
+// 		copy(sorted_vecs[i], jr.eigenvectors[j])
+// 	}
+
+// 	return PCAResult{eigenvalues = sorted_vals, eigenvectors = sorted_vecs}
+// }
 pca_from_cov :: proc(cov: [][]f64, allocator: mem.Allocator = context.allocator) -> PCAResult {
 	jr := jacobi_eigen_symmetric(cov, allocator)
-	// defer destroy_matrix(jr.eigenvectors)
-	// defer delete(jr.eigenvalues)
-	idx := argsort_descending(jr.eigenvalues)
-	n := len(idx)
-	defer delete(idx)
-	sorted_vals := make([]f64, n)
-	sorted_vecs := make([][]f64, n)
 
-	for i, j in idx {
-		sorted_vals[i] = jr.eigenvalues[j]
-		// sorted_vecs[i] = jr.eigenvectors[j][:]
-		sorted_vecs[i] = make([]f64, len(jr.eigenvectors[j]))
-		copy_slice(sorted_vecs[i], jr.eigenvectors[j])
+	idx := argsort_descending(jr.eigenvalues, allocator) // Use temp for sorting indices
+
+
+	n := len(idx)
+	sorted_vals := make([]f64, n, allocator)
+	sorted_vecs := make([][]f64, n, allocator)
+
+	for new_i, old_i in idx {
+		sorted_vals[new_i] = jr.eigenvalues[old_i]
+		// Transfer ownership of the row instead of 'make' + 'copy'
+		sorted_vecs[new_i] = jr.eigenvectors[old_i]
+		// Null out the old reference so we don't accidentally use it
+		jr.eigenvectors[old_i] = nil
 	}
+
+	// Now free the intermediate slices/containers from Jacobi
 
 	return PCAResult{eigenvalues = sorted_vals, eigenvectors = sorted_vecs}
 }
-
 // Example of how to properly delete your [][]f64 "matrices"
 destroy_matrix :: proc(mat: [][]f64) {
 	for row in mat {
