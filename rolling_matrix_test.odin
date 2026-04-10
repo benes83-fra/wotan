@@ -125,3 +125,36 @@ rolling_matrix_test :: proc(allocator: mem.Allocator) {
 	w.destroy_dataframe(&df4)
 	w.destroy_dataframe(&df5)
 }
+
+
+ewm_cov_test :: proc(allocator: mem.Allocator) {
+	df := w.dataframe_new()
+	defer w.destroy_dataframe(&df)
+
+	x := w.column_from_f64("x", []f64{1, 2, 3, 4})
+	y := w.column_from_f64("y", []f64{2, 4, 6, 8})
+	z := w.column_from_f64("z", []f64{1, 0, 1, 0})
+
+	w.add_column(&df, x)
+	w.add_column(&df, y)
+	w.add_column(&df, z)
+	df.rows = 4
+
+	alpha := 0.5
+	minp := 1
+	bias := false
+	adjust := false
+
+	ewm_cov_df := w.ewm_cov_matrix(
+		&df,
+		[]string{"x", "y", "z"},
+		alpha,
+		minp,
+		bias,
+		adjust,
+		allocator,
+	)
+	fmt.println("EWM Cov Matrix:")
+	w.dataframe_pretty_print(&ewm_cov_df) // or your own printer
+	w.destroy_dataframe(&ewm_cov_df)
+}
