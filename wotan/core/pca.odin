@@ -2,13 +2,135 @@ package core
 
 import "core:fmt"
 import "core:math"
-
+import "core:mem"
 
 PCAResult :: struct {
 	eigenvalues:  []f64,
 	eigenvectors: [][]f64,
 }
+JacobiResult :: struct {
+	eigenvalues:  []f64,
+	eigenvectors: [][]f64, // columns are eigenvectors
+}
 
+// Jacobi eigenvalue algorithm for real symmetric A (n x n)
+// Returns eigenvalues (length n) and eigenvectors (n x n, column-major in V)
+jacobi_eigen_symmetric :: proc(
+	A_in: [][]f64,
+	allocator: mem.Allocator = context.allocator,
+) -> JacobiResult {
+	n := len(A_in)
+	if n == 0 {
+		return JacobiResult{}
+	}
+
+	// Copy A_in into working matrix A
+	A := make([][]f64, n, allocator)
+	for i in 0 ..< n {
+		A[i] = make([]f64, n, allocator)
+		for j in 0 ..< n {
+			A[i][j] = A_in[i][j]
+		}
+	}
+
+	// Initialize V as identity
+	V := make([][]f64, n, allocator)
+	for i in 0 ..< n {
+		V[i] = make([]f64, n, allocator)
+		for j in 0 ..< n {
+			V[i][j] = 0.0
+		}
+		V[i][i] = 1.0
+	}
+
+	max_iter := 50
+	eps := 1e-12
+
+	for iter in 0 ..< max_iter {
+		// Find largest off-diagonal element
+		max_val := 0.0
+		p := 0
+		q := 1
+		for i in 0 ..< n {
+			for j in i + 1 ..< n {
+				aij := math.abs(A[i][j])
+				if aij > max_val {
+					max_val = aij
+					p = i
+					q = j
+				}
+			}
+		}
+
+		if max_val < eps {
+			break // converged
+		}
+
+		app := A[p][p]
+		aqq := A[q][q]
+		apq := A[p][q]
+
+		// Compute rotation angle
+		tau := (aqq - app) / (2.0 * apq)
+		t := 0.0
+		if tau >= 0 {
+			t = 1.0 / (tau + math.sqrt(1.0 + tau * tau))
+		} else {
+			t = -1.0 / (-tau + math.sqrt(1.0 + tau * tau))
+		}
+		c := 1.0 / math.sqrt(1.0 + t * t)
+		s := t * c
+
+		// Update A
+		// Diagonal entries
+		app_new := app - t * apq
+		aqq_new := aqq + t * apq
+		A[p][p] = app_new
+		A[q][q] = aqq_new
+		A[p][q] = 0.0
+		A[q][p] = 0.0
+
+		// Off-diagonal rows/cols
+		for k in 0 ..< n {
+			if k == p || k == q {
+				continue
+			}
+			akp := A[k][p]
+			akq := A[k][q]
+			A[k][p] = c * akp - s * akq
+			A[p][k] = A[k][p]
+			A[k][q] = s * akp + c * akq
+			A[q][k] = A[k][q]
+		}
+
+		// Update eigenvector matrix V
+		for k in 0 ..< n {
+			vkp := V[k][p]
+			vkq := V[k][q]
+			V[k][p] = c * vkp - s * vkq
+			V[k][q] = s * vkp + c * vkq
+		}
+	}
+
+	// Extract eigenvalues from diagonal of A
+	eigenvalues := make([]f64, n, allocator)
+	for i in 0 ..< n {
+		eigenvalues[i] = A[i][i]
+	}
+
+	// We currently have eigenvectors as columns of V.
+	// Your PCA code expects eigenvectors as rows (each component = one row).
+	// So we’ll transpose into that layout.
+	eigenvectors := make([][]f64, n, allocator)
+	for i in 0 ..< n {
+		eigenvectors[i] = make([]f64, n, allocator)
+		for j in 0 ..< n {
+			eigenvectors[i][j] = V[j][i]
+		}
+	}
+
+	return JacobiResult{eigenvalues = eigenvalues, eigenvectors = eigenvectors}
+}
 // Computes SVD of a symmetric matrix A (NxN)
 // A = V * diag(S) * Vᵀ
 svd_symmetric :: proc(A: [][]f64) -> (S: []f64, V: [][]f64) {
@@ -80,44 +202,27 @@ svd_symmetric :: proc(A: [][]f64) -> (S: []f64, V: [][]f64) {
 }
 
 
-pca_from_cov :: proc(cov: [][]f64) -> PCAResult {
-	S, V := svd_symmetric(cov)
+pca_dataframe :: proc(df: ^DataFrame, cols: []string, allocator: mem.Allocator) -> PCAResult {
 
-	// eigenvalues = S²
-	n := len(S)
-	eigenvalues := make([]f64, n)
-	for i in 0 ..< n {
-		eigenvalues[i] = S[i] * S[i]
-	}
-
-	// Sort descending
-	idx := argsort_descending(eigenvalues)
-
-	sorted_vals := make([]f64, n)
-	sorted_vecs := make([][]f64, n)
-
-	for i, j in idx {
-		sorted_vals[i] = eigenvalues[j]
-		sorted_vecs[i] = V[j][:]
-	}
-
-	return PCAResult{eigenvalues = sorted_vals, eigenvectors = sorted_vecs}
+	data := extract_numeric_matrix(df, cols, allocator)
+	cov := covariance_matrix(data, allocator)
+	return pca_from_cov(cov, allocator)
 }
 
-pca_dataframe :: proc(df: ^DataFrame, cols: []string) -> PCAResult {
-	data := extract_numeric_matrix(df, cols)
-	cov := covariance_matrix(data)
-	return pca_from_cov(cov)
-}
-
-rolling_pca :: proc(df: ^DataFrame, cols: []string, window: int, min_periods: int) -> []PCAResult {
+rolling_pca :: proc(
+	df: ^DataFrame,
+	cols: []string,
+	window: int,
+	min_periods: int,
+	allocator: mem.Allocator = context.allocator,
+) -> []PCAResult {
 
 	cov_df := rolling_cov_matrix(df, cols, window, min_periods)
-	results := make([]PCAResult, cov_df.rows)
+	results := make([]PCAResult, cov_df.rows, allocator)
 
 	for r in 0 ..< cov_df.rows {
-		cov := extract_cov_matrix_row(&cov_df, cols, r)
-		results[r] = pca_from_cov(cov)
+		cov := extract_cov_matrix_row(&cov_df, cols, r, allocator)
+		results[r] = pca_from_cov(cov, allocator)
 	}
 
 	return results
@@ -143,13 +248,17 @@ argsort_descending :: proc(values: []f64) -> []int {
 	return idx
 }
 
-extract_numeric_matrix :: proc(df: ^DataFrame, cols: []string) -> [][]f64 {
+extract_numeric_matrix :: proc(
+	df: ^DataFrame,
+	cols: []string,
+	allocator: mem.Allocator = context.allocator,
+) -> [][]f64 {
 	rows := df.rows
 	cols_n := len(cols)
 
-	out := make([][]f64, rows)
+	out := make([][]f64, rows, allocator)
 	for r in 0 ..< rows {
-		out[r] = make([]f64, cols_n)
+		out[r] = make([]f64, cols_n, allocator)
 	}
 
 	for col_name, c_idx in cols {
@@ -167,20 +276,20 @@ extract_numeric_matrix :: proc(df: ^DataFrame, cols: []string) -> [][]f64 {
 
 	return out
 }
-covariance_matrix :: proc(data: [][]f64) -> [][]f64 {
+covariance_matrix :: proc(data: [][]f64, allocator: mem.Allocator) -> [][]f64 {
 	rows := len(data)
 	if rows == 0 {
 		return [][]f64{}
 	}
 
 	cols := len(data[0])
-	cov := make([][]f64, cols)
+	cov := make([][]f64, cols, allocator)
 	for i in 0 ..< cols {
-		cov[i] = make([]f64, cols)
+		cov[i] = make([]f64, cols, allocator)
 	}
 
 	// compute means
-	means := make([]f64, cols)
+	means := make([]f64, cols, allocator)
 	for r in 0 ..< rows {
 		for c in 0 ..< cols {
 			means[c] += data[r][c]
@@ -205,12 +314,17 @@ covariance_matrix :: proc(data: [][]f64) -> [][]f64 {
 
 	return cov
 }
-extract_cov_matrix_row :: proc(cov_df: ^DataFrame, cols: []string, r: int) -> [][]f64 {
+extract_cov_matrix_row :: proc(
+	cov_df: ^DataFrame,
+	cols: []string,
+	r: int,
+	allocator: mem.Allocator = context.allocator,
+) -> [][]f64 {
 
 	n := len(cols)
-	out := make([][]f64, n)
+	out := make([][]f64, n, allocator)
 	for i in 0 ..< n {
-		out[i] = make([]f64, n)
+		out[i] = make([]f64, n, allocator)
 	}
 
 	col_row := column(cov_df, "row")
@@ -314,4 +428,44 @@ index_of_string :: proc(list: []string, s: string) -> int {
 		}
 	}
 	return -1
+}
+
+pca_from_cov :: proc(cov: [][]f64, allocator: mem.Allocator = context.allocator) -> PCAResult {
+	jr := jacobi_eigen_symmetric(cov, allocator)
+	// defer destroy_matrix(jr.eigenvectors)
+	// defer delete(jr.eigenvalues)
+	idx := argsort_descending(jr.eigenvalues)
+	n := len(idx)
+	defer delete(idx)
+	sorted_vals := make([]f64, n)
+	sorted_vecs := make([][]f64, n)
+
+	for i, j in idx {
+		sorted_vals[i] = jr.eigenvalues[j]
+		// sorted_vecs[i] = jr.eigenvectors[j][:]
+		sorted_vecs[i] = make([]f64, len(jr.eigenvectors[j]))
+		copy_slice(sorted_vecs[i], jr.eigenvectors[j])
+	}
+
+	return PCAResult{eigenvalues = sorted_vals, eigenvectors = sorted_vecs}
+}
+
+// Example of how to properly delete your [][]f64 "matrices"
+destroy_matrix :: proc(mat: [][]f64) {
+	for row in mat {
+		delete(row)
+	}
+	delete(mat)
+}
+destroy_pca_result :: proc(res: PCAResult) {
+	// 1. Delete each individual eigenvector row
+	for vec in res.eigenvectors {
+		delete(vec)
+	}
+
+	// 2. Delete the outer slice holding the eigenvector pointers
+	delete(res.eigenvectors)
+
+	// 3. Delete the eigenvalue slice
+	delete(res.eigenvalues)
 }
