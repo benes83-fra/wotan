@@ -194,7 +194,7 @@ ewm_pca_test :: proc(allocator: mem.Allocator) {
 		fmt.printf("Row %d:\n", i)
 		fmt.println("  Eigenvalues:  ", pca_series[i].eigenvalues)
 		fmt.println("  Eigenvectors: ", pca_series[i].eigenvectors)
-		w.destroy_pca_result(pca_series[i])
+
 	}
 
 	// --- EWM PCA (last row only) ---
@@ -202,7 +202,7 @@ ewm_pca_test :: proc(allocator: mem.Allocator) {
 	last := w.ewm_pca_last(&df, []string{"x", "y", "z"}, alpha, minp, bias, adjust, allocator)
 	fmt.println("Eigenvalues:", last.eigenvalues)
 	fmt.println("Eigenvectors:", last.eigenvectors)
-	w.destroy_pca_result(last)
+
 
 	fmt.println("\n=== END EWM PCA TEST ===")
 }
