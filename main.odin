@@ -285,7 +285,7 @@ main :: proc() {
 	pca_test(context.temp_allocator)
 	ewm_cov_test(context.temp_allocator)
 	ewm_pca_test(context.temp_allocator)
-
+	kalman_test(context.temp_allocator)
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
 	w.destroy_dataframe(&right2)

@@ -239,15 +239,13 @@ ewm_pca :: proc(
 	cov_df := ewm_cov_matrix(df, cols, alpha, min_periods, bias, adjust, allocator)
 	defer destroy_dataframe(&cov_df)
 
-	// We have one covariance matrix per *row index* in the original df,
-	// not per long-form row in cov_df.
 	n_rows := df.rows
 	results := make([]PCAResult, n_rows, allocator)
 
 	for r in 0 ..< n_rows {
 		cov := extract_cov_matrix_row(&cov_df, cols, r, allocator)
 		results[r] = pca_from_cov(cov, allocator)
-		destroy_matrix(cov)
+
 	}
 
 	return results
@@ -269,7 +267,7 @@ ewm_pca_last :: proc(
 
 	last_row := df.rows - 1
 	cov := extract_cov_matrix_row(&cov_df, cols, last_row, allocator)
-	defer destroy_matrix(cov)
+
 
 	return pca_from_cov(cov, allocator)
 }
