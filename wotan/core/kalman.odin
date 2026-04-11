@@ -11,6 +11,10 @@ KalmanFilter :: struct($N: int, $M: int) {
 	R: matrix[M, M]f64,
 }
 
+KalmanState :: struct($N: int) {
+	x: [N]f64,
+	P: matrix[N, N]f64,
+}
 kalman_init :: proc(
 	x0: [$N]f64,
 	P0: matrix[N, N]f64,
@@ -54,4 +58,39 @@ kalman_update :: proc(kf: ^KalmanFilter($N, $M), z: [M]f64) {
 	// 6. Update covariance: P = (I - K*H) * P
 	I := linalg.identity(matrix[N, N]f64)
 	kf.P = (I - (K * kf.H)) * kf.P
+}
+rts_smooth :: proc(
+	F: matrix[$N, N]f64,
+	xf: []KalmanState(N), // filtered
+	xp: []KalmanState(N), // predicted
+) -> []KalmanState(N) {
+	assert(len(xf) == len(xp))
+	T := len(xf)
+
+	smoothed := make([]KalmanState(N), T)
+	if T == 0 {
+		return smoothed
+	}
+
+	smoothed[T - 1] = xf[T - 1]
+
+	Ft := linalg.transpose(F)
+
+	for k := T - 2; k >= 0; k -= 1 {
+		Pf_k := xf[k].P
+		Pp_k1 := xp[k + 1].P
+
+		Pp_inv := linalg.inverse(Pp_k1)
+		Ck := Pf_k * Ft * Pp_inv
+
+		diff_x := smoothed[k + 1].x - xp[k + 1].x
+		corr_x := linalg.mul(Ck, diff_x)
+		smoothed[k].x = xf[k].x + corr_x
+
+		diff_P := smoothed[k + 1].P - Pp_k1
+		Ck_t := linalg.transpose(Ck)
+		smoothed[k].P = Pf_k + Ck * diff_P * Ck_t
+	}
+
+	return smoothed
 }

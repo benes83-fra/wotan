@@ -56,5 +56,42 @@ kalman_test :: proc(allocator: mem.Allocator) {
 		fmt.println("Updated state:", kf.x)
 	}
 
+
+	T := len(measurements)
+
+	xf := make([]w.KalmanState(2), T, allocator)
+	xp := make([]w.KalmanState(2), T, allocator)
+
+	// forward pass
+	for t in 0 ..< T {
+		xp[t].x = kf.x
+		xp[t].P = kf.P
+
+		w.kalman_predict(&kf)
+
+		z: [1]f64 = {measurements[t]}
+		w.kalman_update(&kf, z)
+
+		xf[t].x = kf.x
+		xf[t].P = kf.P
+	}
+
+
+	// smoothing
+	smoothed := w.rts_smooth(F, xf[:], xp[:])
+	fmt.println("\n--- FILTERED vs SMOOTHED ---")
+	for i in 0 ..< T {
+		fmt.printf(
+			"t=%d  filtered=[%f, %f]  smoothed=[%f, %f]\n",
+			i,
+			xf[i].x[0],
+			xf[i].x[1],
+			smoothed[i].x[0],
+			smoothed[i].x[1],
+		)
+	}
+	defer delete(smoothed)
+
+
 	fmt.println("\n=== END KALMAN FILTER TEST ===")
 }
