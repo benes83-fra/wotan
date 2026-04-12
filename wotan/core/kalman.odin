@@ -1,6 +1,7 @@
 package core
 
 import linalg "core:math/linalg"
+import "core:mem"
 
 KalmanFilter :: struct($N: int, $M: int) {
 	x: [N]f64,
@@ -141,6 +142,130 @@ rts_smooth_control :: proc(
 		Ck := Pf_k * Ft * Pp_inv
 
 		// Compute controlled prediction: x_pred = F * xf[k] + B * u[k]
+		xk_mat := transmute(matrix[N, 1]f64)xf[k].x
+		uk_mat := transmute(matrix[U, 1]f64)u[k]
+
+		x_pred := F * xk_mat + B * uk_mat
+		x_pred_vec := transmute([N]f64)x_pred
+
+		// x_s[k] = x_f[k] + Ck * (x_s[k+1] - x_pred)
+		diff_x := smoothed[k + 1].x - x_pred_vec
+		corr_x := linalg.mul(Ck, diff_x)
+		smoothed[k].x = xf[k].x + corr_x
+
+		// P_s[k] = P_f[k] + Ck * (P_s[k+1] - P_p[k+1]) * Ckᵀ
+		diff_P := smoothed[k + 1].P - Pp_k1
+		Ck_t := linalg.transpose(Ck)
+		smoothed[k].P = Pf_k + Ck * diff_P * Ck_t
+	}
+
+	return smoothed
+}
+kalman_forward_tv_control :: proc(
+	x0: [$N]f64,
+	P0: matrix[N, N]f64,
+	F_seq: []matrix[N, N]f64,
+	H_seq: []matrix[$M, N]f64,
+	B_seq: []matrix[N, $U]f64,
+	Q_seq: []matrix[N, N]f64,
+	R_seq: []matrix[M, M]f64,
+	u_seq: []([U]f64),
+	z_seq: []([M]f64),
+	allocator: mem.Allocator,
+) -> (
+	xf: []KalmanState(N),
+	xp: []KalmanState(N),
+) {
+	T := len(z_seq)
+	assert(T == len(F_seq))
+	assert(T == len(H_seq))
+	assert(T == len(B_seq))
+	assert(T == len(Q_seq))
+	assert(T == len(R_seq))
+	assert(T == len(u_seq))
+
+	xf = make([]KalmanState(N), T, allocator)
+	xp = make([]KalmanState(N), T, allocator)
+
+	x := x0
+	P := P0
+
+	for t in 0 ..< T {
+		xp[t].x = x
+		xp[t].P = P
+
+		F := F_seq[t]
+		B := B_seq[t]
+		Q := Q_seq[t]
+
+		x_mat := transmute(matrix[N, 1]f64)x
+		u_mat := transmute(matrix[U, 1]f64)u_seq[t]
+
+		x_pred := F * x_mat + B * u_mat
+		x = transmute([N]f64)x_pred
+
+		P = (F * P * linalg.transpose(F)) + Q
+
+		H := H_seq[t]
+		R := R_seq[t]
+
+		x_mat = transmute(matrix[N, 1]f64)x
+		z_mat := transmute(matrix[M, 1]f64)z_seq[t]
+
+		y := z_mat - (H * x_mat)
+
+		Ht := linalg.transpose(H)
+		S := (H * P * Ht) + R
+		S_inv := linalg.inverse(S)
+
+		K := (P * Ht) * S_inv
+
+		x_new := x_mat + (K * y)
+		x = transmute([N]f64)x_new
+
+		I := linalg.identity(matrix[N, N]f64)
+		P = (I - (K * H)) * P
+
+		xf[t].x = x
+		xf[t].P = P
+	}
+
+	return
+}
+rts_smooth_tv_control :: proc(
+	F_seq: []matrix[$N, N]f64,
+	B_seq: []matrix[N, $U]f64,
+	u: []([U]f64), // control inputs per step
+	xf: []KalmanState(N), // filtered states
+	xp: []KalmanState(N), // predicted states (with control)
+) -> []KalmanState(N) {
+	assert(len(xf) == len(xp))
+	assert(len(F_seq) == len(xf))
+	assert(len(B_seq) == len(xf))
+	assert(len(u) == len(xf))
+
+	T := len(xf)
+	smoothed := make([]KalmanState(N), T)
+	if T == 0 {
+		return smoothed
+	}
+
+	// last smoothed = last filtered
+	smoothed[T - 1] = xf[T - 1]
+
+	for k := T - 2; k >= 0; k -= 1 {
+		F := F_seq[k]
+		B := B_seq[k]
+		Ft := linalg.transpose(F)
+
+		Pf_k := xf[k].P
+		Pp_k1 := xp[k + 1].P
+
+		// Ck = Pf_k * Fᵀ * inv(Pp_{k+1})
+		Pp_inv := linalg.inverse(Pp_k1)
+		Ck := Pf_k * Ft * Pp_inv
+
+		// controlled prediction: x_pred = F * xf[k] + B * u[k]
 		xk_mat := transmute(matrix[N, 1]f64)xf[k].x
 		uk_mat := transmute(matrix[U, 1]f64)u[k]
 
