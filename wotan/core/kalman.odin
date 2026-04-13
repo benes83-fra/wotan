@@ -409,3 +409,48 @@ ekf_update_control :: proc(
 
 	return
 }
+
+
+// EKF RTS smoother (time-varying, no explicit control)
+// Uses the linearized F_k (Jacobians) from the EKF forward pass.
+ekf_rts_smooth :: proc(
+	F_seq: []matrix[$N, N]f64, // Jacobians F_k at each step
+	xf: []KalmanState(N), // filtered states
+	xp: []KalmanState(N), // predicted states
+) -> []KalmanState(N) {
+	assert(len(xf) == len(xp))
+	assert(len(F_seq) == len(xf))
+
+	T := len(xf)
+	smoothed := make([]KalmanState(N), T)
+	if T == 0 {
+		return smoothed
+	}
+
+	// last smoothed = last filtered
+	smoothed[T - 1] = xf[T - 1]
+
+	for k := T - 2; k >= 0; k -= 1 {
+		F := F_seq[k]
+		Ft := linalg.transpose(F)
+
+		Pf_k := xf[k].P
+		Pp_k1 := xp[k + 1].P
+
+		// Ck = Pf_k * Fᵀ * inv(Pp_{k+1})
+		Pp_inv := linalg.inverse(Pp_k1)
+		Ck := Pf_k * Ft * Pp_inv
+
+		// x_s[k] = x_f[k] + Ck * (x_s[k+1] - x_p[k+1])
+		diff_x := smoothed[k + 1].x - xp[k + 1].x
+		corr_x := linalg.mul(Ck, diff_x)
+		smoothed[k].x = xf[k].x + corr_x
+
+		// P_s[k] = P_f[k] + Ck * (P_s[k+1] - P_p[k+1]) * Ckᵀ
+		diff_P := smoothed[k + 1].P - Pp_k1
+		Ck_t := linalg.transpose(Ck)
+		smoothed[k].P = Pf_k + Ck * diff_P * Ck_t
+	}
+
+	return smoothed
+}

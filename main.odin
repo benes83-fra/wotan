@@ -289,6 +289,7 @@ main :: proc() {
 	kalman_control_test(context.temp_allocator)
 	kalman_tv_control_test(context.temp_allocator)
 	ekf_tiny_test(context.temp_allocator)
+	ekf_tiny_rts_test(context.temp_allocator)
 
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)

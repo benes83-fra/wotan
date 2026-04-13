@@ -377,3 +377,99 @@ ekf_tiny_test :: proc(allocator: mem.Allocator) {
 
 	fmt.println("\n=== END EKF TINY NONLINEAR TEST ===")
 }
+
+
+ekf_tiny_rts_test :: proc(allocator: mem.Allocator) {
+	fmt.println("=== EKF TINY NONLINEAR + RTS TEST ===")
+
+	x: [2]f64 = {0.1, 1.0}
+	P := matrix[2, 2]f64{
+		0.1, 0.0,
+		0.0, 0.1,
+	}
+
+	Q := matrix[2, 2]f64{
+		0.001, 0.0,
+		0.0, 0.001,
+	}
+
+	R := matrix[1, 1]f64{
+		0.05,
+	}
+
+	f := proc(x: [2]f64) -> [2]f64 {
+		pos := x[0]
+		vel := x[1]
+		return [2]f64{pos + vel * vel, vel}
+	}
+
+	F_jac := proc(x: [2]f64) -> matrix[2, 2]f64 {
+		vel := x[1]
+		return matrix[2, 2]f64{
+			1.0, 0.0,
+			2.0 * vel, 1.0,
+		}
+	}
+
+	h := proc(x: [2]f64) -> [1]f64 {
+		return [1]f64{math.sin_f64(x[0])}
+	}
+
+	H_jac := proc(x: [2]f64) -> matrix[1, 2]f64 {
+		return matrix[1, 2]f64{
+			math.cos_f64(x[0]), 0.0,
+		}
+	}
+
+	z_seq := [5]f64 {
+		math.sin_f64(0.1),
+		math.sin_f64(1.1),
+		math.sin_f64(2.1),
+		math.sin_f64(3.1),
+		math.sin_f64(4.1),
+	}
+
+	T := len(z_seq)
+
+	xf := make([]w.KalmanState(2), T, allocator)
+	xp := make([]w.KalmanState(2), T, allocator)
+	F_seq := make([]matrix[2, 2]f64, T, allocator)
+
+	for t in 0 ..< T {
+		// store predicted state
+		xp[t].x = x
+		xp[t].P = P
+
+		// EKF predict
+		x_pred, P_pred := w.ekf_predict(x, P, f, F_jac, Q)
+		F_seq[t] = F_jac(x) // Jacobian at previous state (or at x_pred if you prefer)
+
+		// EKF update
+		z: [1]f64 = {z_seq[t]}
+		x_upd, P_upd := w.ekf_update(x_pred, P_pred, z, h, H_jac, R)
+
+		xf[t].x = x_upd
+		xf[t].P = P_upd
+
+		x = x_upd
+		P = P_upd
+	}
+
+	smoothed := w.ekf_rts_smooth(F_seq, xf, xp)
+
+	fmt.println("\n--- FILTERED vs SMOOTHED (EKF) ---")
+	for t in 0 ..< T {
+		fmt.printf(
+			"t=%d  z=%f  filtered=[%f, %f]  smoothed=[%f, %f]\n",
+			t,
+			z_seq[t],
+			xf[t].x[0],
+			xf[t].x[1],
+			smoothed[t].x[0],
+			smoothed[t].x[1],
+		)
+	}
+
+	defer delete(smoothed)
+	fmt.println("\n=== END EKF TINY NONLINEAR + RTS TEST ===")
+}
