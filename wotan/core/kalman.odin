@@ -285,3 +285,127 @@ rts_smooth_tv_control :: proc(
 
 	return smoothed
 }
+// =========================
+// Extended Kalman Filter
+// =========================
+
+// Nonlinear predict: x' = f(x), P' = F(x) P F(x)ᵀ + Q
+ekf_predict :: proc(
+	x: [$N]f64,
+	P: matrix[N, N]f64,
+	f: proc(x: [N]f64) -> [N]f64,
+	F_jac: proc(x: [N]f64) -> matrix[N, N]f64,
+	Q: matrix[N, N]f64,
+) -> (
+	x_pred: [N]f64,
+	P_pred: matrix[N, N]f64,
+) {
+	// propagate state nonlinearly
+	x_pred = f(x)
+
+	// Jacobian at current state
+	F := F_jac(x)
+
+	// propagate covariance
+	P_pred = (F * P * linalg.transpose(F)) + Q
+
+	return
+}
+
+// Nonlinear predict with control: x' = f(x, u), P' = F(x,u) P F(x,u)ᵀ + Q
+ekf_predict_control :: proc(
+	x: [$N]f64,
+	P: matrix[N, N]f64,
+	u: [$U]f64,
+	f: proc(x: [N]f64, u: [U]f64) -> [N]f64,
+	F_jac: proc(x: [N]f64, u: [U]f64) -> matrix[N, N]f64,
+	Q: matrix[N, N]f64,
+) -> (
+	x_pred: [N]f64,
+	P_pred: matrix[N, N]f64,
+) {
+	x_pred = f(x, u)
+	F := F_jac(x, u)
+	P_pred = (F * P * linalg.transpose(F)) + Q
+	return
+}
+
+// Nonlinear update: z = h(x), with Jacobian H(x)
+ekf_update :: proc(
+	x: [$N]f64,
+	P: matrix[N, N]f64,
+	z: [$M]f64,
+	h: proc(x: [N]f64) -> [M]f64,
+	H_jac: proc(x: [N]f64) -> matrix[M, N]f64,
+	R: matrix[M, M]f64,
+) -> (
+	x_upd: [N]f64,
+	P_upd: matrix[N, N]f64,
+) {
+	// predicted measurement
+	z_pred := h(x)
+
+	// innovation: y = z - z_pred
+	z_mat := transmute(matrix[M, 1]f64)z
+	zp_mat := transmute(matrix[M, 1]f64)z_pred
+	y_mat := z_mat - zp_mat
+
+	// Jacobian at current state
+	H := H_jac(x)
+	Ht := linalg.transpose(H)
+
+	// S = H P Hᵀ + R
+	S := (H * P * Ht) + R
+	S_inv := linalg.inverse(S)
+
+	// K = P Hᵀ S⁻¹
+	K := (P * Ht) * S_inv
+
+	// x_new = x + K y
+	x_mat := transmute(matrix[N, 1]f64)x
+	x_new_mat := x_mat + (K * y_mat)
+	x_upd = transmute([N]f64)x_new_mat
+
+	// P_new = (I - K H) P
+	I := linalg.identity(matrix[N, N]f64)
+	P_upd = (I - (K * H)) * P
+
+	return
+}
+
+// Nonlinear update with control-dependent measurement: z = h(x, u)
+ekf_update_control :: proc(
+	x: [$N]f64,
+	P: matrix[N, N]f64,
+	z: [$M]f64,
+	u: [$U]f64,
+	h: proc(x: [N]f64, u: [U]f64) -> [M]f64,
+	H_jac: proc(x: [N]f64, u: [U]f64) -> matrix[M, N]f64,
+	R: matrix[M, M]f64,
+) -> (
+	x_upd: [N]f64,
+	P_upd: matrix[N, N]f64,
+) {
+	z_pred := h(x, u)
+
+	z_mat := transmute(matrix[M, 1]f64)z
+	zp_mat := transmute(matrix[M, 1]f64)z_pred
+	y_mat := z_mat - zp_mat
+
+	H := H_jac(x, u)
+	Ht := linalg.transpose(H)
+
+	S := (H * P * Ht) + R
+	S_inv := linalg.inverse(S)
+
+	K := (P * Ht) * S_inv
+
+	x_mat := transmute(matrix[N, 1]f64)x
+	x_new_mat := x_mat + (K * y_mat)
+	x_upd = transmute([N]f64)x_new_mat
+
+	I := linalg.identity(matrix[N, N]f64)
+	P_upd = (I - (K * H)) * P
+
+	return
+}

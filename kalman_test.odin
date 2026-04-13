@@ -2,6 +2,7 @@ package main
 
 import w "./wotan/core"
 import "core:fmt"
+import "core:math"
 import "core:mem"
 
 kalman_test :: proc(allocator: mem.Allocator) {
@@ -200,4 +201,179 @@ kalman_control_test :: proc(allocator: mem.Allocator) {
 
 
 	fmt.println("\n=== END Control KALMAN FILTER TEST ===")
+}
+kalman_tv_control_test :: proc(allocator: mem.Allocator) {
+	fmt.println("=== KALMAN TV CONTROL FILTER + SMOOTHER TEST ===")
+
+	// State: [position, velocity]
+	x0: [2]f64 = {0.0, 0.0}
+	P0 := matrix[2, 2]f64{
+		1.0, 0.0,
+		0.0, 1.0,
+	}
+
+	T := 6
+
+	// Time-varying F (here: constant, but as a sequence)
+	F_seq := make([]matrix[2, 2]f64, T, allocator)
+	for i in 0 ..< T {
+		F_seq[i] = matrix[2, 2]f64{
+			1.0, 0.0,
+			1.0, 1.0,
+		}
+	}
+
+	// Time-varying H (measure position only)
+	H_seq := make([]matrix[1, 2]f64, T, allocator)
+	for i in 0 ..< T {
+		H_seq[i] = matrix[1, 2]f64{
+			1.0, 0.0,
+		}
+	}
+
+	// Time-varying B (control affects acceleration -> velocity & position)
+	B_seq := make([]matrix[2, 1]f64, T, allocator)
+	for i in 0 ..< T {
+		B_seq[i] = matrix[2, 1]f64{
+			0.5,
+			1.0,
+		}
+	}
+
+	// Time-varying Q, R (kept constant but as sequences)
+	Q_seq := make([]matrix[2, 2]f64, T, allocator)
+	R_seq := make([]matrix[1, 1]f64, T, allocator)
+	for i in 0 ..< T {
+		Q_seq[i] = matrix[2, 2]f64{
+			0.01, 0.0,
+			0.0, 0.01,
+		}
+		R_seq[i] = matrix[1, 1]f64{
+			1.0,
+		}
+	}
+
+	// Controls: constant acceleration u_t = 1.0
+	u_seq := make([]([1]f64), T, allocator)
+	for i in 0 ..< T {
+		u_seq[i] = [1]f64{1.0}
+	}
+
+	// Measurements: noisy positions along roughly quadratic path
+	z_seq := make([]([1]f64), T, allocator)
+	measurements := [6]f64{0.2, 1.1, 2.9, 5.8, 9.9, 15.2}
+	for i in 0 ..< T {
+		z_seq[i] = [1]f64{measurements[i]}
+	}
+
+	xf, xp := w.kalman_forward_tv_control(
+		x0,
+		P0,
+		F_seq,
+		H_seq,
+		B_seq,
+		Q_seq,
+		R_seq,
+		u_seq,
+		z_seq,
+		allocator,
+	)
+
+	smoothed := w.rts_smooth_tv_control(F_seq, B_seq, u_seq, xf, xp)
+
+	fmt.println("\n--- FILTERED vs SMOOTHED (TV + CONTROL) ---")
+	for t in 0 ..< T {
+		fmt.printf(
+			"t=%d  z=%f  filtered=[%f, %f]  smoothed=[%f, %f]\n",
+			t,
+			measurements[t],
+			xf[t].x[0],
+			xf[t].x[1],
+			smoothed[t].x[0],
+			smoothed[t].x[1],
+		)
+	}
+
+
+	defer delete(smoothed)
+
+	fmt.println("\n=== END KALMAN TV CONTROL FILTER + SMOOTHER TEST ===")
+}
+
+
+ekf_tiny_test :: proc(allocator: mem.Allocator) {
+	fmt.println("=== EKF TINY NONLINEAR TEST ===")
+
+	// Initial state
+	x: [2]f64 = {0.1, 1.0} // pos=0.1, vel=1.0
+	P := matrix[2, 2]f64{
+		0.1, 0.0,
+		0.0, 0.1,
+	}
+
+	Q := matrix[2, 2]f64{
+		0.001, 0.0,
+		0.0, 0.001,
+	}
+
+	R := matrix[1, 1]f64{
+		0.05,
+	}
+
+	// Nonlinear state transition
+	f := proc(x: [2]f64) -> [2]f64 {
+		pos := x[0]
+		vel := x[1]
+		return [2]f64{pos + vel * vel, vel}
+	}
+
+	// Jacobian of f
+	F_jac := proc(x: [2]f64) -> matrix[2, 2]f64 {
+		vel := x[1]
+		return matrix[2, 2]f64{
+			1.0, 0.0,
+			2.0 * vel, 1.0,
+		}
+	}
+
+	// Nonlinear measurement
+	h := proc(x: [2]f64) -> [1]f64 {
+		return [1]f64{math.sin_f64(x[0])}
+	}
+
+	// Jacobian of h
+	H_jac := proc(x: [2]f64) -> matrix[1, 2]f64 {
+		return matrix[1, 2]f64{
+			math.cos(x[0]), 0.0,
+		}
+	}
+
+	// Fake measurements: sin_f64()(true_position)
+	z_seq := [5]f64 {
+		math.sin_f64(0.1),
+		math.sin_f64(1.1),
+		math.sin_f64(2.1),
+		math.sin_f64(3.1),
+		math.sin_f64(4.1),
+	}
+
+	for t in 0 ..< len(z_seq) {
+		fmt.printf("\n--- Step %d ---\n", t)
+
+		// Predict
+		x_pred, P_pred := w.ekf_predict(x, P, f, F_jac, Q)
+
+		fmt.println("Predicted x:", x_pred)
+
+		// Update
+		z: [1]f64 = {z_seq[t]}
+		x_upd, P_upd := w.ekf_update(x_pred, P_pred, z, h, H_jac, R)
+
+		fmt.println("Updated x:", x_upd)
+
+		x = x_upd
+		P = P_upd
+	}
+
+	fmt.println("\n=== END EKF TINY NONLINEAR TEST ===")
 }
