@@ -708,3 +708,103 @@ ukf_tiny_control_test :: proc(allocator: mem.Allocator) {
 
 	fmt.println("\n=== END UKF TINY NONLINEAR + CONTROL TEST ===")
 }
+ukf_tiny_control_rts_test :: proc(allocator: mem.Allocator) {
+	fmt.println("=== UKF TINY NONLINEAR + CONTROL + RTS TEST ===")
+
+	// Initial state
+	x: [2]f64 = {0.1, 1.0}
+	P := matrix[2, 2]f64{
+		0.1, 0.0,
+		0.0, 0.1,
+	}
+
+	Q := matrix[2, 2]f64{
+		0.001, 0.0,
+		0.0, 0.001,
+	}
+
+	R := matrix[1, 1]f64{
+		0.05,
+	}
+
+	// UKF parameters
+	params := w.UKF_Params {
+		alpha = 1e-3,
+		beta  = 2.0,
+		kappa = 0.0,
+	}
+
+	// Nonlinear state transition with control
+	f := proc(x: [2]f64, u: [1]f64) -> [2]f64 {
+		pos := x[0]
+		vel := x[1]
+		acc := u[0]
+		return [2]f64{pos + vel * vel + 0.5 * acc, vel + acc}
+	}
+
+	// Nonlinear measurement
+	h := proc(x: [2]f64, u: [1]f64) -> [1]f64 {
+		return [1]f64{math.sin_f64(x[0])}
+	}
+
+	// Fake measurements
+	z_seq := [5]f64 {
+		math.sin_f64(0.1),
+		math.sin_f64(1.1),
+		math.sin_f64(2.1),
+		math.sin_f64(3.1),
+		math.sin_f64(4.1),
+	}
+
+	// Constant control input u = 1.0
+	u: [1]f64 = {1.0}
+
+	T := len(z_seq)
+
+	xf := make([]w.KalmanState(2), T, allocator)
+	xp := make([]w.KalmanState(2), T, allocator)
+
+	Xi_pred := make([]([]([2]f64)), T, allocator)
+	Xi_filt := make([]([]([2]f64)), T, allocator)
+	Wc_seq := make([]([]f64), T, allocator)
+
+	for t in 0 ..< T {
+		// Store predicted state BEFORE update
+		xp[t].x = x
+		xp[t].P = P
+
+		// UKF predict with control
+		x_pred, P_pred := w.ukf_predict_control(x, P, u, f, Q, params, allocator)
+		Xi_pred[t], _, Wc_seq[t] = w.ukf_sigma_points(x, P, params, allocator)
+
+		// UKF update with control
+		z: [1]f64 = {z_seq[t]}
+		x_upd, P_upd := w.ukf_update_control(x_pred, P_pred, z, u, h, R, params, allocator)
+		Xi_filt[t], _, _ = w.ukf_sigma_points(x_upd, P_upd, params, allocator)
+
+		xf[t].x = x_upd
+		xf[t].P = P_upd
+
+		x = x_upd
+		P = P_upd
+	}
+
+	// RTS smoothing
+	smoothed := w.ukf_rts_smooth_control(Xi_pred, Xi_filt, Wc_seq, xf, xp)
+
+	fmt.println("\n--- FILTERED vs SMOOTHED (UKF + CONTROL) ---")
+	for t in 0 ..< T {
+		fmt.printf(
+			"t=%d  z=%f  filtered=[%f, %f]  smoothed=[%f, %f]\n",
+			t,
+			z_seq[t],
+			xf[t].x[0],
+			xf[t].x[1],
+			smoothed[t].x[0],
+			smoothed[t].x[1],
+		)
+	}
+
+	delete(smoothed)
+	fmt.println("\n=== END UKF TINY NONLINEAR + CONTROL + RTS TEST ===")
+}

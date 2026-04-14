@@ -897,3 +897,72 @@ ukf_update_control :: proc(
 
 	return
 }
+
+ukf_rts_smooth_control :: proc(
+	Xi_pred: []([]([$N]f64)), // sigma points BEFORE update (prediction, with control)
+	Xi_filt: []([]([N]f64)), // sigma points AFTER update (filtered)
+	Wc_seq: []([]f64), // covariance weights per step
+	xf: []KalmanState(N), // filtered states
+	xp: []KalmanState(N), // predicted states (from ukf_predict_control)
+) -> []KalmanState(N) {
+
+	T := len(xf)
+	assert(T == len(xp))
+	assert(T == len(Xi_pred))
+	assert(T == len(Xi_filt))
+	assert(T == len(Wc_seq))
+
+	smoothed := make([]KalmanState(N), T)
+	if T == 0 {
+		return smoothed
+	}
+
+	// last smoothed = last filtered
+	smoothed[T - 1] = xf[T - 1]
+
+	for k := T - 2; k >= 0; k -= 1 {
+		Xi_p := Xi_pred[k]
+		Xi_f := Xi_filt[k]
+		Wc := Wc_seq[k]
+
+		x_pred := xp[k].x
+		P_pred := xp[k].P
+
+		x_filt := xf[k].x
+		P_filt := xf[k].P
+
+		Pxf := matrix[N, N]f64{}
+
+		L := len(Xi_p)
+		for i in 0 ..< L {
+			dx_p := [N]f64{}
+			dx_f := [N]f64{}
+
+			for j in 0 ..< N {
+				dx_p[j] = Xi_p[i][j] - x_pred[j]
+				dx_f[j] = Xi_f[i][j] - x_filt[j]
+			}
+
+			dxp_mat := transmute(matrix[N, 1]f64)dx_p
+			dxf_t := linalg.transpose(transmute(matrix[N, 1]f64)dx_f)
+
+			Pxf += Wc[i] * (dxp_mat * dxf_t)
+		}
+
+		// smoother gain
+		P_filt_inv := linalg.inverse(P_filt)
+		Gk := Pxf * P_filt_inv
+
+		// smoothed state
+		diff_x := smoothed[k + 1].x - x_filt
+		dx_mat := transmute(matrix[N, 1]f64)diff_x
+		corr := Gk * dx_mat
+		smoothed[k].x = x_pred + transmute([N]f64)corr
+
+		// smoothed covariance
+		diff_P := smoothed[k + 1].P - P_filt
+		smoothed[k].P = P_pred + Gk * diff_P * linalg.transpose(Gk)
+	}
+
+	return smoothed
+}
