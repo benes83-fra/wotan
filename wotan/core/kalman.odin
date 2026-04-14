@@ -1,5 +1,7 @@
 package core
 
+import "base:intrinsics"
+import "core:math"
 import linalg "core:math/linalg"
 import "core:mem"
 
@@ -16,6 +18,13 @@ KalmanState :: struct($N: int) {
 	x: [N]f64,
 	P: matrix[N, N]f64,
 }
+
+UKF_Params :: struct {
+	alpha: f64,
+	beta:  f64,
+	kappa: f64,
+}
+
 kalman_init :: proc(
 	x0: [$N]f64,
 	P0: matrix[N, N]f64,
@@ -453,4 +462,245 @@ ekf_rts_smooth :: proc(
 	}
 
 	return smoothed
+}
+
+
+// Generate sigma points and weights for UKF
+ukf_sigma_points :: proc(
+	x: [$N]f64,
+	P: matrix[N, N]f64,
+	params: UKF_Params,
+	allocator: mem.Allocator,
+) -> (
+	Xi: []([N]f64),
+	Wm: []f64,
+	Wc: []f64, // sigma points// mean weights// covariance weights
+) {
+	n := N
+	lambda := params.alpha * params.alpha * (f64(n) + params.kappa) - f64(n)
+	c := f64(n) + lambda
+
+	L := 2 * n + 1
+	Xi = make([]([N]f64), L, allocator)
+	Wm = make([]f64, L, allocator)
+	Wc = make([]f64, L, allocator)
+
+	// Weights
+	Wm[0] = lambda / c
+	Wc[0] = lambda / c + (1.0 - params.alpha * params.alpha + params.beta)
+	for i in 1 ..< L {
+		w := 0.5 / c
+		Wm[i] = w
+		Wc[i] = w
+	}
+
+	// Cholesky of scaled covariance
+	P_scaled := matrix_scalar_mul(P, c)
+	S := cholesky(P_scaled) // assumes linalg.cholesky returns upper or lower; we just use columns
+
+	// Center sigma point
+	Xi[0] = x
+
+	// +/- columns of S
+	for i in 0 ..< n {
+		col_i := [N]f64{}
+		for r in 0 ..< n {
+			col_i[r] = S[r, i]
+		}
+
+		// x + col_i
+		x_plus := [N]f64{}
+		x_minus := [N]f64{}
+		for r in 0 ..< n {
+			x_plus[r] = x[r] + col_i[r]
+			x_minus[r] = x[r] - col_i[r]
+		}
+
+		Xi[1 + i] = x_plus
+		Xi[1 + i + n] = x_minus
+	}
+
+	return
+}
+
+// UKF predict: x' = f(x), P' = cov(f(Xi)) + Q
+ukf_predict :: proc(
+	x: [$N]f64,
+	P: matrix[N, N]f64,
+	f: proc(x: [N]f64) -> [N]f64,
+	Q: matrix[N, N]f64,
+	params: UKF_Params,
+	allocator: mem.Allocator,
+) -> (
+	x_pred: [N]f64,
+	P_pred: matrix[N, N]f64,
+) {
+	Xi, Wm, Wc := ukf_sigma_points(x, P, params, allocator)
+
+	L := len(Xi)
+
+	// propagate sigma points through f
+	Y := make([]([N]f64), L, allocator)
+	for i in 0 ..< L {
+		Y[i] = f(Xi[i])
+	}
+
+	// mean
+	for j in 0 ..< N {
+		sum := 0.0
+		for i in 0 ..< L {
+			sum += Wm[i] * Y[i][j]
+		}
+		x_pred[j] = sum
+	}
+
+	// covariance
+	P_pred = Q
+	for i in 0 ..< L {
+		dx := [N]f64{}
+		for j in 0 ..< N {
+			dx[j] = Y[i][j] - x_pred[j]
+		}
+		dx_mat := transmute(matrix[N, 1]f64)dx
+		dx_t := linalg.transpose(dx_mat)
+		P_pred += Wc[i] * (dx_mat * dx_t)
+	}
+
+	return
+}
+
+// UKF update: z = h(x)
+ukf_update :: proc(
+	x: [$N]f64,
+	P: matrix[N, N]f64,
+	z: [$M]f64,
+	h: proc(x: [N]f64) -> [M]f64,
+	R: matrix[M, M]f64,
+	params: UKF_Params,
+	allocator: mem.Allocator,
+) -> (
+	x_upd: [N]f64,
+	P_upd: matrix[N, N]f64,
+) {
+	// sigma points from prior
+	Xi, Wm, Wc := ukf_sigma_points(x, P, params, allocator)
+	L := len(Xi)
+
+	// propagate to measurement space
+	Zi := make([]([M]f64), L, allocator)
+	for i in 0 ..< L {
+		Zi[i] = h(Xi[i])
+	}
+
+	// predicted measurement mean
+	z_pred := [M]f64{}
+	for j in 0 ..< M {
+		sum := 0.0
+		for i in 0 ..< L {
+			sum += Wm[i] * Zi[i][j]
+		}
+		z_pred[j] = sum
+	}
+
+	// innovation covariance S and cross-covariance Pxz
+	S := R
+	Pxz := matrix[N, M]f64{} // initialized to zero
+
+	for i in 0 ..< L {
+		// state deviation
+		dx := [N]f64{}
+		for j in 0 ..< N {
+			dx[j] = Xi[i][j] - x[j]
+		}
+		dx_mat := transmute(matrix[N, 1]f64)dx
+
+		// measurement deviation
+		dz := [M]f64{}
+		for j in 0 ..< M {
+			dz[j] = Zi[i][j] - z_pred[j]
+		}
+		dz_mat := transmute(matrix[M, 1]f64)dz
+		dz_t := linalg.transpose(dz_mat)
+
+		S += Wc[i] * (dz_mat * dz_t)
+		Pxz += Wc[i] * (dx_mat * dz_t)
+	}
+
+	// Kalman gain K = Pxz * S⁻¹
+	S_inv := linalg.inverse(S)
+	K := Pxz * S_inv
+
+	// update state
+	z_mat := transmute(matrix[M, 1]f64)z
+	zp_mat := transmute(matrix[M, 1]f64)z_pred
+	y_mat := z_mat - zp_mat
+	x_mat := transmute(matrix[N, 1]f64)x
+	x_new := x_mat + K * y_mat
+	x_upd = transmute([N]f64)x_new
+
+	// update covariance
+	K_t := linalg.transpose(K)
+	P_upd = P - K * S * K_t
+
+	return
+}
+
+
+@(require_results)
+matrix_scalar_mul :: proc "contextless" (
+	a: $A/matrix[$N, $M]$T,
+	s: T,
+) -> (
+	c: A,
+) where intrinsics.type_is_numeric(T) #no_bounds_check {
+	for j in 0 ..< M {
+		for i in 0 ..< N {
+			c[i, j] = a[i, j] * s
+		}
+	}
+	return
+}
+
+
+mul :: proc {
+	linalg.matrix_mul,
+	linalg.matrix_mul_differ,
+	linalg.matrix_mul_vector,
+	linalg.quaternion64_mul_vector3,
+	linalg.quaternion128_mul_vector3,
+	linalg.quaternion256_mul_vector3,
+	linalg.quaternion_mul_quaternion,
+	matrix_scalar_mul, // ← ADD THIS
+}
+
+
+@(require_results)
+cholesky :: proc "contextless" (A: $M/matrix[$N, N]$T) -> (L: M) where intrinsics.type_is_float(T),
+	N > 0 #no_bounds_check {
+	// Zero initialize
+	for j in 0 ..< N {
+		for i in 0 ..< N {
+			L[i, j] = 0
+		}
+	}
+
+	for j in 0 ..< N {
+		// diagonal
+		sum := A[j, j]
+		for k in 0 ..< j {
+			sum -= L[j, k] * L[j, k]
+		}
+		L[j, j] = math.sqrt_f64(sum)
+
+		// off-diagonal
+		for i in j + 1 ..< N {
+			sum = A[i, j]
+			for k in 0 ..< j {
+				sum -= L[i, k] * L[j, k]
+			}
+			L[i, j] = sum / L[j, j]
+		}
+	}
+
+	return
 }
