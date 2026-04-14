@@ -704,3 +704,196 @@ cholesky :: proc "contextless" (A: $M/matrix[$N, N]$T) -> (L: M) where intrinsic
 
 	return
 }
+ukf_rts_smooth :: proc(
+	Xi_pred: []([]([$N]f64)), // sigma points BEFORE update (prediction)
+	Xi_filt: []([]([N]f64)), // sigma points AFTER update (filtered)
+	Wc_seq: []([]f64), // covariance weights per step
+	xf: []KalmanState(N), // filtered states
+	xp: []KalmanState(N), // predicted states
+) -> []KalmanState(N) {
+
+	T := len(xf)
+	assert(T == len(xp))
+	assert(T == len(Xi_pred))
+	assert(T == len(Xi_filt))
+	assert(T == len(Wc_seq))
+
+	smoothed := make([]KalmanState(N), T)
+	if T == 0 {
+		return smoothed
+	}
+
+	// last smoothed = last filtered
+	smoothed[T - 1] = xf[T - 1]
+
+	for k := T - 2; k >= 0; k -= 1 {
+		// predicted and filtered sigma points
+		Xi_p := Xi_pred[k]
+		Xi_f := Xi_filt[k]
+
+		Wc := Wc_seq[k]
+
+		// predicted mean and covariance
+		x_pred := xp[k].x
+		P_pred := xp[k].P
+
+		// filtered mean and covariance
+		x_filt := xf[k].x
+		P_filt := xf[k].P
+
+		// cross-covariance Pxf
+		Pxf := matrix[N, N]f64{}
+
+		L := len(Xi_p)
+		for i in 0 ..< L {
+			dx_p := [N]f64{}
+			dx_f := [N]f64{}
+
+			for j in 0 ..< N {
+				dx_p[j] = Xi_p[i][j] - x_pred[j]
+				dx_f[j] = Xi_f[i][j] - x_filt[j]
+			}
+
+			dxp_mat := transmute(matrix[N, 1]f64)dx_p
+			dxf_t := linalg.transpose(transmute(matrix[N, 1]f64)dx_f)
+
+			Pxf += Wc[i] * (dxp_mat * dxf_t)
+		}
+
+		// smoother gain Gk = Pxf * inv(P_filt)
+		P_filt_inv := linalg.inverse(P_filt)
+		Gk := Pxf * P_filt_inv
+
+		// smoothed state
+		diff_x := smoothed[k + 1].x - x_filt
+		dx_mat := transmute(matrix[N, 1]f64)diff_x
+		corr := Gk * dx_mat
+		smoothed[k].x = x_pred + transmute([N]f64)corr
+
+		// smoothed covariance
+		diff_P := smoothed[k + 1].P - P_filt
+		smoothed[k].P = P_pred + Gk * diff_P * linalg.transpose(Gk)
+	}
+
+	return smoothed
+}
+// UKF predict with control: x' = f(x, u)
+ukf_predict_control :: proc(
+	x: [$N]f64,
+	P: matrix[N, N]f64,
+	u: [$U]f64,
+	f: proc(x: [N]f64, u: [U]f64) -> [N]f64,
+	Q: matrix[N, N]f64,
+	params: UKF_Params,
+	allocator: mem.Allocator,
+) -> (
+	x_pred: [N]f64,
+	P_pred: matrix[N, N]f64,
+) {
+	Xi, Wm, Wc := ukf_sigma_points(x, P, params, allocator)
+	L := len(Xi)
+
+	// propagate sigma points through f(x,u)
+	Y := make([]([N]f64), L, allocator)
+	for i in 0 ..< L {
+		Y[i] = f(Xi[i], u)
+	}
+
+	// mean
+	for j in 0 ..< N {
+		sum := 0.0
+		for i in 0 ..< L {
+			sum += Wm[i] * Y[i][j]
+		}
+		x_pred[j] = sum
+	}
+
+	// covariance
+	P_pred = Q
+	for i in 0 ..< L {
+		dx := [N]f64{}
+		for j in 0 ..< N {
+			dx[j] = Y[i][j] - x_pred[j]
+		}
+		dx_mat := transmute(matrix[N, 1]f64)dx
+		dx_t := linalg.transpose(dx_mat)
+		P_pred += Wc[i] * (dx_mat * dx_t)
+	}
+
+	return
+}
+
+// UKF update with control-dependent measurement: z = h(x, u)
+ukf_update_control :: proc(
+	x: [$N]f64,
+	P: matrix[N, N]f64,
+	z: [$M]f64,
+	u: [$U]f64,
+	h: proc(x: [N]f64, u: [U]f64) -> [M]f64,
+	R: matrix[M, M]f64,
+	params: UKF_Params,
+	allocator: mem.Allocator,
+) -> (
+	x_upd: [N]f64,
+	P_upd: matrix[N, N]f64,
+) {
+	// sigma points from prior
+	Xi, Wm, Wc := ukf_sigma_points(x, P, params, allocator)
+	L := len(Xi)
+
+	// propagate to measurement space: h(x,u)
+	Zi := make([]([M]f64), L, allocator)
+	for i in 0 ..< L {
+		Zi[i] = h(Xi[i], u)
+	}
+
+	// predicted measurement mean
+	z_pred := [M]f64{}
+	for j in 0 ..< M {
+		sum := 0.0
+		for i in 0 ..< L {
+			sum += Wm[i] * Zi[i][j]
+		}
+		z_pred[j] = sum
+	}
+
+	// innovation covariance S and cross-covariance Pxz
+	S := R
+	Pxz := matrix[N, M]f64{} // zero
+
+	for i in 0 ..< L {
+		dx := [N]f64{}
+		for j in 0 ..< N {
+			dx[j] = Xi[i][j] - x[j]
+		}
+		dx_mat := transmute(matrix[N, 1]f64)dx
+
+		dz := [M]f64{}
+		for j in 0 ..< M {
+			dz[j] = Zi[i][j] - z_pred[j]
+		}
+		dz_mat := transmute(matrix[M, 1]f64)dz
+		dz_t := linalg.transpose(dz_mat)
+
+		S += Wc[i] * (dz_mat * dz_t)
+		Pxz += Wc[i] * (dx_mat * dz_t)
+	}
+
+	// Kalman gain
+	S_inv := linalg.inverse(S)
+	K := Pxz * S_inv
+
+	// update state
+	z_mat := transmute(matrix[M, 1]f64)z
+	zp_mat := transmute(matrix[M, 1]f64)z_pred
+	y_mat := z_mat - zp_mat
+	x_mat := transmute(matrix[N, 1]f64)x
+	x_new := x_mat + K * y_mat
+	x_upd = transmute([N]f64)x_new
+
+	// update covariance
+	K_t := linalg.transpose(K)
+	P_upd = P - K * S * K_t
+
+	return
+}

@@ -538,3 +538,173 @@ ukf_tiny_test :: proc(allocator: mem.Allocator) {
 
 	fmt.println("\n=== END UKF TINY NONLINEAR TEST ===")
 }
+ukf_tiny_rts_test :: proc(allocator: mem.Allocator) {
+	fmt.println("=== UKF TINY NONLINEAR + RTS TEST ===")
+
+	// Initial state
+	x: [2]f64 = {0.1, 1.0}
+	P := matrix[2, 2]f64{
+		0.1, 0.0,
+		0.0, 0.1,
+	}
+
+	Q := matrix[2, 2]f64{
+		0.001, 0.0,
+		0.0, 0.001,
+	}
+
+	R := matrix[1, 1]f64{
+		0.05,
+	}
+
+	params := w.UKF_Params {
+		alpha = 1e-3,
+		beta  = 2.0,
+		kappa = 0.0,
+	}
+
+	// Nonlinear state transition
+	f := proc(x: [2]f64) -> [2]f64 {
+		pos := x[0]
+		vel := x[1]
+		return [2]f64{pos + vel * vel, vel}
+	}
+
+	// Nonlinear measurement
+	h := proc(x: [2]f64) -> [1]f64 {
+		return [1]f64{math.sin_f64(x[0])}
+	}
+
+	// Fake measurements
+	z_seq := [5]f64 {
+		math.sin_f64(0.1),
+		math.sin_f64(1.1),
+		math.sin_f64(2.1),
+		math.sin_f64(3.1),
+		math.sin_f64(4.1),
+	}
+
+	T := len(z_seq)
+
+	// Storage for forward pass
+	xf := make([]w.KalmanState(2), T, allocator)
+	xp := make([]w.KalmanState(2), T, allocator)
+
+	Xi_pred := make([]([]([2]f64)), T, allocator)
+	Xi_filt := make([]([]([2]f64)), T, allocator)
+	Wc_seq := make([]([]f64), T, allocator)
+
+	for t in 0 ..< T {
+		// Store predicted state BEFORE prediction
+		xp[t].x = x
+		xp[t].P = P
+
+		// Generate sigma points BEFORE prediction
+		Xi_p, Wm, Wc := w.ukf_sigma_points(x, P, params, allocator)
+		Xi_pred[t] = Xi_p
+		Wc_seq[t] = Wc
+
+		// Predict
+		x_pred, P_pred := w.ukf_predict(x, P, f, Q, params, allocator)
+
+		// Generate sigma points AFTER prediction (for smoothing)
+		Xi_f, _, _ := w.ukf_sigma_points(x_pred, P_pred, params, allocator)
+		Xi_filt[t] = Xi_f
+
+		// Update
+		z: [1]f64 = {z_seq[t]}
+		x_upd, P_upd := w.ukf_update(x_pred, P_pred, z, h, R, params, allocator)
+
+		xf[t].x = x_upd
+		xf[t].P = P_upd
+
+		x = x_upd
+		P = P_upd
+	}
+
+	// RTS smoothing
+	smoothed := w.ukf_rts_smooth(Xi_pred, Xi_filt, Wc_seq, xf, xp)
+
+	fmt.println("\n--- FILTERED vs SMOOTHED (UKF) ---")
+	for t in 0 ..< T {
+		fmt.printf(
+			"t=%d  z=%f  filtered=[%f, %f]  smoothed=[%f, %f]\n",
+			t,
+			z_seq[t],
+			xf[t].x[0],
+			xf[t].x[1],
+			smoothed[t].x[0],
+			smoothed[t].x[1],
+		)
+	}
+
+	defer delete(smoothed)
+	fmt.println("\n=== END UKF TINY NONLINEAR + RTS TEST ===")
+}
+ukf_tiny_control_test :: proc(allocator: mem.Allocator) {
+	fmt.println("=== UKF TINY NONLINEAR + CONTROL TEST ===")
+
+	// Initial state
+	x: [2]f64 = {0.1, 1.0}
+	P := matrix[2, 2]f64{
+		0.1, 0.0,
+		0.0, 0.1,
+	}
+
+	Q := matrix[2, 2]f64{
+		0.001, 0.0,
+		0.0, 0.001,
+	}
+
+	R := matrix[1, 1]f64{
+		0.05,
+	}
+
+	params := w.UKF_Params {
+		alpha = 1e-3,
+		beta  = 2.0,
+		kappa = 0.0,
+	}
+
+	// control: scalar acceleration
+	u: [1]f64 = {1.0}
+
+	// Nonlinear state transition with control, e.g. pos += vel^2 + u[0]
+	f := proc(x: [2]f64, u: [1]f64) -> [2]f64 {
+		pos := x[0]
+		vel := x[1]
+		return [2]f64{pos + vel * vel + u[0], vel}
+	}
+
+	// Measurement independent of control (reuse h from UKF tiny test)
+	h := proc(x: [2]f64) -> [1]f64 {
+		return [1]f64{math.sin_f64(x[0])}
+	}
+
+	// Fake measurements: sin(true_position) as before
+	z_seq := [5]f64 {
+		math.sin_f64(0.1),
+		math.sin_f64(1.1),
+		math.sin_f64(2.1),
+		math.sin_f64(3.1),
+		math.sin_f64(4.1),
+	}
+
+	for t in 0 ..< len(z_seq) {
+		fmt.printf("\n--- UKF+CTRL Step %d ---\n", t)
+
+		// Predict with control
+		x_pred, P_pred := w.ukf_predict_control(x, P, u, f, Q, params, allocator)
+		fmt.println("Predicted x:", x_pred)
+
+		// Update (no control in measurement here)
+		z: [1]f64 = {z_seq[t]}
+		x_upd, P_upd := w.ukf_update(x_pred, P_pred, z, h, R, params, allocator)
+		fmt.println("Updated x:", x_upd)
+
+		x = x_upd
+		P = P_upd
+	}
+
+	fmt.println("\n=== END UKF TINY NONLINEAR + CONTROL TEST ===")
+}
