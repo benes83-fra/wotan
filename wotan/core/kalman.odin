@@ -966,3 +966,114 @@ ukf_rts_smooth_control :: proc(
 
 	return smoothed
 }
+kalman_loglik_scalar :: proc(
+    y: []f64,          // observations
+    F, Q, P0: []f64,   // N×N, flat, row-major: [row*N + col]
+    H: []f64,          // 1×N, flat
+    R: []f64,          // 1×1
+    x0: []f64,         // N
+    N: int,
+) -> f64 {
+    T := len(y)
+    if T == 0 {
+        return 0.0
+    }
+
+    // State mean and covariance
+    x := make([]f64, N)
+    P := make([]f64, N * N)
+
+    // init
+    for i in 0 ..< N {
+        x[i] = x0[i]
+    }
+    for i in 0 ..< N * N {
+        P[i] = P0[i]
+    }
+
+    loglik := 0.0
+    two_pi := 2.0 * math.PI
+
+    for t in 0 ..< T {
+        // --- Predict ---
+        // x_pred = F * x
+        x_pred := make([]f64, N)
+        for i in 0 ..< N {
+            sum := 0.0
+            for j in 0 ..< N {
+                sum += F[i*N + j] * x[j]
+            }
+            x_pred[i] = sum
+        }
+
+        // P_pred = F P Fᵀ + Q
+        P_pred := make([]f64, N * N)
+        // temp = F * P
+        temp := make([]f64, N * N)
+        for i in 0 ..< N {
+            for j in 0 ..< N {
+                s := 0.0
+                for k in 0 ..< N {
+                    s += F[i*N + k] * P[k*N + j]
+                }
+                temp[i*N + j] = s
+            }
+        }
+        // P_pred = temp * Fᵀ + Q
+        for i in 0 ..< N {
+            for j in 0 ..< N {
+                s := 0.0
+                for k in 0 ..< N {
+                    s += temp[i*N + k] * F[j*N + k] // Fᵀ
+                }
+                P_pred[i*N + j] = s + Q[i*N + j]
+            }
+        }
+
+        // --- Innovation ---
+        // y_pred = H * x_pred (scalar)
+        y_pred := 0.0
+        for j in 0 ..< N {
+            y_pred += H[j] * x_pred[j]
+        }
+
+        v := y[t] - y_pred
+
+        // S = H P_pred Hᵀ + R (scalar)
+        S := 0.0
+        for i in 0 ..< N {
+            for j in 0 ..< N {
+                S += H[i] * P_pred[i*N + j] * H[j]
+            }
+        }
+        S += R[0]
+
+        // log-likelihood contribution
+        loglik += -0.5 * (math.ln(two_pi) + math.ln(S) + (v * v) / S)
+
+        // --- Update ---
+        // K = P_pred Hᵀ / S  (N×1)
+        K := make([]f64, N)
+        for i in 0 ..< N {
+            s := 0.0
+            for j in 0 ..< N {
+                s += P_pred[i*N + j] * H[j]
+            }
+            K[i] = s / S
+        }
+
+        // x = x_pred + K * v
+        for i in 0 ..< N {
+            x[i] = x_pred[i] + K[i] * v
+        }
+
+        // P = P_pred - K S Kᵀ
+        for i in 0 ..< N {
+            for j in 0 ..< N {
+                P[i*N + j] = P_pred[i*N + j] - K[i] * S * K[j]
+            }
+        }
+    }
+
+    return loglik
+}

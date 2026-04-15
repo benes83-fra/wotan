@@ -1,7 +1,7 @@
 package core
 
 import "core:mem"
-
+import "core:math"
 arima_state_space :: proc(
     phi, theta: []f64,
     d: int,
@@ -147,4 +147,102 @@ inverse_difference :: proc(
     }
 
     return out
+}
+arima_loglik :: proc(
+    y: []f64,
+    phi, theta: []f64,
+    d: int,
+    sigma2: f64,
+    allocator := context.allocator,
+) -> f64 {
+    // TODO: apply differencing if d > 0 before calling this
+    F, Q, P0, H, R, x0, N := arima_state_space(phi, theta, d, sigma2, allocator)
+    return kalman_loglik_scalar(y, F, Q, P0, H, R, x0, N)
+}
+ArimaObjectiveCtx :: struct {
+    y: []f64,
+    d: int,
+    allocator: mem.Allocator,
+}
+
+arima_neg_loglik_obj :: proc(params: []f64, ctx: rawptr) -> f64 {
+    data := (^ArimaObjectiveCtx)(ctx)
+
+    phi_val   := params[0]
+    theta_val := params[1]
+    log_sig2  := params[2]
+
+    // enforce some crude stability / bounds
+    if math.abs(phi_val) > 0.99 {
+        return 1e9
+    }
+    if math.abs(theta_val) > 0.99 {
+        return 1e9
+    }
+
+    sigma2 := math.exp(log_sig2)
+    if sigma2 <= 0.0 || sigma2 > 1000.0 {
+        return 1e9
+    }
+
+    phi   := []f64{phi_val}
+    theta := []f64{theta_val}
+
+    // differencing if needed
+    y_eff := data.y
+    if data.d > 0 {
+        y_eff = difference(data.y, data.d, data.allocator)
+        if len(y_eff) < 5 {
+            return 1e9
+        }
+    }
+
+    ll := arima_loglik(y_eff, phi, theta, data.d, sigma2, data.allocator)
+
+    // Nelder–Mead minimizes, so return negative log-likelihood
+    return -ll
+}
+
+ArimaFitResult :: struct {
+    phi: f64,
+    theta: f64,
+    sigma2: f64,
+    loglik: f64,
+    converged: bool,
+}
+
+arima_fit_arma11 :: proc(
+    y: []f64,
+    d: int,
+    allocator := context.allocator,
+) -> ArimaFitResult {
+    ctx := ArimaObjectiveCtx{
+        y = y,
+        d = d,
+        allocator = allocator,
+    }
+
+    // initial guess
+    x0 := []f64{0.5, 0.2, math.ln_f64(0.1)}
+
+    max_iter := 500
+    tol := 1e-6
+
+    best_x, best_f := nelder_mead(
+        arima_neg_loglik_obj,
+        rawptr(&ctx),
+        x0,
+        max_iter,
+        tol,
+        allocator,
+    )
+
+    res: ArimaFitResult
+    res.phi = best_x[0]
+    res.theta = best_x[1]
+    res.sigma2 = math.exp_f64(best_x[2])
+    res.loglik = -best_f
+    res.converged = true // crude; you can refine with iteration checks
+
+    return res
 }
