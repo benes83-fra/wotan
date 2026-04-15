@@ -978,7 +978,10 @@ kalman_loglik_scalar :: proc(
 	if T == 0 {
 		return 0.0
 	}
-
+	burn_in := 20
+	if burn_in >= T {
+		burn_in = 0
+	}
 	// State mean and covariance
 	x := make([]f64, N)
 	P := make([]f64, N * N)
@@ -1053,8 +1056,9 @@ kalman_loglik_scalar :: proc(
 		S += R[0]
 
 		// log-likelihood contribution
-		loglik += -0.5 * (math.ln(two_pi) + math.ln(S) + (v * v) / S)
-
+		if t >= burn_in {
+			loglik += -0.5 * (math.ln(two_pi) + math.ln(S) + (v * v) / S)
+		}
 		// --- Update ---
 		// K = P_pred Hᵀ / S  (N×1)
 		K := make([]f64, N)
@@ -1081,4 +1085,124 @@ kalman_loglik_scalar :: proc(
 	}
 
 	return loglik
+}
+kalman_filter_last_scalar :: proc(
+	y: []f64,
+	F, Q, P0: []f64,
+	H: []f64,
+	R: []f64,
+	x0: []f64,
+	N: int,
+) -> (
+	xT: []f64,
+	PT: []f64,
+) {
+	T := len(y)
+	xT = make([]f64, N)
+	defer delete(xT)
+	PT = make([]f64, N * N)
+	defer delete(PT)
+
+	if T == 0 {
+		// just return initial
+		for i in 0 ..< N {
+			xT[i] = x0[i]
+		}
+		for i in 0 ..< N * N {
+			PT[i] = P0[i]
+		}
+		return
+	}
+
+	x := make([]f64, N)
+	defer delete(x)
+	P := make([]f64, N * N)
+	defer delete(P)
+	for i in 0 ..< N {
+		x[i] = x0[i]
+	}
+	for i in 0 ..< N * N {
+		P[i] = P0[i]
+	}
+
+	for t in 0 ..< T {
+		// predict
+		x_pred := make([]f64, N)
+		defer delete(x_pred)
+		for i in 0 ..< N {
+			s := 0.0
+			for j in 0 ..< N {
+				s += F[i * N + j] * x[j]
+			}
+			x_pred[i] = s
+		}
+
+		P_pred := make([]f64, N * N)
+		defer delete(P_pred)
+		temp := make([]f64, N * N)
+		defer delete(temp)
+		for i in 0 ..< N {
+			for j in 0 ..< N {
+				s := 0.0
+				for k in 0 ..< N {
+					s += F[i * N + k] * P[k * N + j]
+				}
+				temp[i * N + j] = s
+			}
+		}
+		for i in 0 ..< N {
+			for j in 0 ..< N {
+				s := 0.0
+				for k in 0 ..< N {
+					s += temp[i * N + k] * F[j * N + k] // Fᵀ
+				}
+				P_pred[i * N + j] = s + Q[i * N + j]
+			}
+		}
+
+		// innovation
+		y_pred := 0.0
+		for j in 0 ..< N {
+			y_pred += H[j] * x_pred[j]
+		}
+		v := y[t] - y_pred
+
+		S := 0.0
+		for i in 0 ..< N {
+			for j in 0 ..< N {
+				S += H[i] * P_pred[i * N + j] * H[j]
+			}
+		}
+		S += R[0]
+
+		// gain
+		K := make([]f64, N)
+		defer delete(K)
+		for i in 0 ..< N {
+			s := 0.0
+			for j in 0 ..< N {
+				s += P_pred[i * N + j] * H[j]
+			}
+			K[i] = s / S
+		}
+
+		// update
+		for i in 0 ..< N {
+			x[i] = x_pred[i] + K[i] * v
+		}
+		for i in 0 ..< N {
+			for j in 0 ..< N {
+				P[i * N + j] = P_pred[i * N + j] - K[i] * S * K[j]
+			}
+		}
+	}
+
+	// return last
+	for i in 0 ..< N {
+		xT[i] = x[i]
+	}
+	for i in 0 ..< N * N {
+		PT[i] = P[i]
+	}
+	return
 }

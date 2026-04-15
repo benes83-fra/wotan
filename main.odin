@@ -294,8 +294,10 @@ main :: proc() {
 	ukf_tiny_rts_test(context.temp_allocator)
 	ukf_tiny_control_test(context.temp_allocator)
 	ukf_tiny_control_rts_test(context.temp_allocator)
-  arima_test(context.temp_allocator)
-  arima_fit_test(context.temp_allocator)
+	arima_test(context.temp_allocator)
+	arima_fit_test(context.temp_allocator)
+	arima_dataframe_test(context.temp_allocator)
+
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
 	w.destroy_dataframe(&right2)
