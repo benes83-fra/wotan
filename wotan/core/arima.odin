@@ -18,9 +18,10 @@ arima_state_space :: proc(
 ) {
 	p := len(phi)
 	q := len(theta)
-	N = max(p, q + 1)
 
-	// Allocate flat arrays
+	// ARIMA: we handle differencing outside; here it's ARMA(p,q)
+	N = max(p, q + 1) // state = [y_t, y_{t-1},..., e_t, e_{t-1},...]
+
 	F = make([]f64, N * N, allocator)
 	Q = make([]f64, N * N, allocator)
 	P0 = make([]f64, N * N, allocator)
@@ -28,22 +29,25 @@ arima_state_space :: proc(
 	R = make([]f64, 1, allocator)
 	x0 = make([]f64, N, allocator)
 
-	// --- Build F ---
-	// Access F[row, col] as F[row * N + col]
+	// --- Transition matrix F ---
+	// First row: AR part on y-lags
 	for i in 0 ..< p {
 		F[0 * N + i] = phi[i]
 	}
+	// First row: MA part on epsilon-lags (starting at index p)
 	for j in 0 ..< q {
-		// Corrected indexing: first row, columns starting after p
-		F[0 * N + (p + j)] = theta[j]
+		idx := p + j
+		if idx < N {
+			F[0 * N + idx] = theta[j]
+		}
 	}
 
-	// Shift AR lags
+	// Shift AR lags: y_{t-1} <- y_t, y_{t-2} <- y_{t-1}, ...
 	for i in 1 ..< p {
 		F[i * N + (i - 1)] = 1.0
 	}
 
-	// Shift MA lags
+	// Shift MA lags: e_{t-1} <- e_t, e_{t-2} <- e_{t-1}, ...
 	for j in 1 ..< q + 1 {
 		row := p + j - 1
 		col := p + j - 2
@@ -52,20 +56,43 @@ arima_state_space :: proc(
 		}
 	}
 
-	// --- Observation matrix ---
-	H[0] = 1.0 // H is 1xN, so it's just a vector
+	// --- Observation matrix H ---
+	// y_t = [1, 0, 0, ...] * state_t
+	for i in 0 ..< N {
+		H[i] = 0.0
+	}
+	H[0] = 1.0
 
-	// --- Noise matrices ---
-	Q[0 * N + 0] = sigma2
+	// --- Innovations noise: ε_t enters y_t and e_t ---
+	// G is length-N, then Q = σ² * G Gᵀ
+	G := make([]f64, N, allocator)
+	for i in 0 ..< N {
+		G[i] = 0.0
+	}
+	// ε_t affects y_t
+	G[0] = 1.0
+	// and the first epsilon state e_t, if it exists
+	if q >= 0 && p < N {
+		G[p] = 1.0
+	}
+
+	for i in 0 ..< N {
+		for j in 0 ..< N {
+			Q[i * N + j] = sigma2 * G[i] * G[j]
+		}
+	}
+
+	// No measurement noise
 	R[0] = 0.0
 
-	// --- Initial covariance ---
+	// Diffuse initial covariance
 	for i in 0 ..< N {
 		P0[i * N + i] = 1e6
 	}
 
 	return
 }
+
 // difference(series, d) -> differenced series
 difference :: proc(series: []f64, d: int, allocator := context.allocator) -> []f64 {
 	if d <= 0 {
@@ -166,10 +193,17 @@ arima_loglik :: proc(
 	sigma2: f64,
 	allocator := context.allocator,
 ) -> f64 {
-	// TODO: apply differencing if d > 0 before calling this
+	// differencing is handled outside the SS form
+	if d == 0 && len(phi) == 1 && len(theta) == 1 {
+		F, Q, P0, H, R, x0, N := arma11_state_space(phi[0], theta[0], sigma2, allocator)
+		return kalman_loglik_scalar(y, F, Q, P0, H, R, x0, N)
+	}
+
 	F, Q, P0, H, R, x0, N := arima_state_space(phi, theta, d, sigma2, allocator)
 	return kalman_loglik_scalar(y, F, Q, P0, H, R, x0, N)
 }
+
+
 ArimaObjectiveCtx :: struct {
 	y:         []f64,
 	p, q:      int,
@@ -379,4 +413,53 @@ arima_forecast :: proc(
 	}
 
 	return ArimaForecastResult{mean = mean, lower = lower, upper = upper}
+}
+arma11_state_space :: proc(
+	phi: f64,
+	theta: f64,
+	sigma2: f64,
+	allocator := context.allocator,
+) -> (
+	F, Q, P0: []f64,
+	H: []f64,
+	R: []f64,
+	x0: []f64,
+	N: int,
+) {
+
+	N = 2 // state = [y_t, e_t]
+
+	F = make([]f64, N * N, allocator)
+	Q = make([]f64, N * N, allocator)
+	P0 = make([]f64, N * N, allocator)
+	H = make([]f64, N, allocator)
+	R = make([]f64, 1, allocator)
+	x0 = make([]f64, N, allocator)
+
+	// Transition matrix
+	// [ φ   θ ]
+	// [ 0   0 ]
+	F[0] = phi
+	F[1] = theta
+	F[2] = 0.0
+	F[3] = 0.0
+
+	// Noise covariance Q = σ² * [[1,1],[1,1]]
+	Q[0] = sigma2
+	Q[1] = sigma2
+	Q[2] = sigma2
+	Q[3] = sigma2
+
+	// Observation y_t = [1 0] α_t
+	H[0] = 1.0
+	H[1] = 0.0
+
+	// No measurement noise
+	R[0] = 0.0
+
+	// Diffuse initial state
+	P0[0] = 1e6
+	P0[3] = 1e6
+
+	return
 }
