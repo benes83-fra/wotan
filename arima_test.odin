@@ -235,3 +235,35 @@ mc_arima_arma11 :: proc(allocator: mem.Allocator, n_sims: int, T: int) {
 	)
 	fmt.println("=== END ARIMA(1,0,1) Monte Carlo ===")
 }
+arima_fit_arma22_test :: proc(allocator: mem.Allocator) {
+	fmt.println("=== ARIMA(p,d,q) FIT TEST ARMA(2,2) ===")
+
+	phi_true := []f64{0.5, -0.2}
+	theta_true := []f64{0.4, 0.3}
+	sigma2_true := 0.1
+	p, d, q := 2, 0, 2
+
+	T := 600
+	y := w.arma22_simulate(phi_true, theta_true, sigma2_true, T, allocator)
+
+	fit := w.arima_fit(y, p, d, q, allocator)
+
+	fmt.printf(
+		"True phi=[%.3f, %.3f], theta=[%.3f, %.3f], sigma2=%.3f\n",
+		phi_true[0],
+		phi_true[1],
+		theta_true[0],
+		theta_true[1],
+		sigma2_true,
+	)
+	fmt.printf(
+		"Fit  phi=[%.3f, %.3f], theta=[%.3f, %.3f], sigma2=%.3f, loglik=%.3f\n",
+		fit.phi[0],
+		fit.phi[1],
+		fit.theta[0],
+		fit.theta[1],
+		fit.sigma2,
+		fit.loglik,
+	)
+	fmt.println("=== END ARMA(2,2) FIT TEST ===")
+}

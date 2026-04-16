@@ -16,82 +16,10 @@ arima_state_space :: proc(
 	x0: []f64,
 	N: int,
 ) {
-	p := len(phi)
-	q := len(theta)
-
-	// ARIMA: we handle differencing outside; here it's ARMA(p,q)
-	N = max(p, q + 1) // state = [y_t, y_{t-1},..., e_t, e_{t-1},...]
-
-	F = make([]f64, N * N, allocator)
-	Q = make([]f64, N * N, allocator)
-	P0 = make([]f64, N * N, allocator)
-	H = make([]f64, N, allocator)
-	R = make([]f64, 1, allocator)
-	x0 = make([]f64, N, allocator)
-
-	// --- Transition matrix F ---
-	// First row: AR part on y-lags
-	for i in 0 ..< p {
-		F[0 * N + i] = phi[i]
-	}
-	// First row: MA part on epsilon-lags (starting at index p)
-	for j in 0 ..< q {
-		idx := p + j
-		if idx < N {
-			F[0 * N + idx] = theta[j]
-		}
-	}
-
-	// Shift AR lags: y_{t-1} <- y_t, y_{t-2} <- y_{t-1}, ...
-	for i in 1 ..< p {
-		F[i * N + (i - 1)] = 1.0
-	}
-
-	// Shift MA lags: e_{t-1} <- e_t, e_{t-2} <- e_{t-1}, ...
-	for j in 1 ..< q + 1 {
-		row := p + j - 1
-		col := p + j - 2
-		if row < N && col < N {
-			F[row * N + col] = 1.0
-		}
-	}
-
-	// --- Observation matrix H ---
-	// y_t = [1, 0, 0, ...] * state_t
-	for i in 0 ..< N {
-		H[i] = 0.0
-	}
-	H[0] = 1.0
-
-	// --- Innovations noise: ε_t enters y_t and e_t ---
-	// G is length-N, then Q = σ² * G Gᵀ
-	G := make([]f64, N, allocator)
-	for i in 0 ..< N {
-		G[i] = 0.0
-	}
-	// ε_t affects y_t
-	G[0] = 1.0
-	// and the first epsilon state e_t, if it exists
-	if q >= 0 && p < N {
-		G[p] = 1.0
-	}
-
-	for i in 0 ..< N {
-		for j in 0 ..< N {
-			Q[i * N + j] = sigma2 * G[i] * G[j]
-		}
-	}
-
-	// No measurement noise
-	R[0] = 0.0
-
-	// Diffuse initial covariance
-	for i in 0 ..< N {
-		P0[i * N + i] = 1e6
-	}
-
-	return
+	// Differencing is handled outside; here we are purely ARMA(p,q)
+	return arma_pq_fundamental_state_space(phi, theta, sigma2, allocator)
 }
+
 
 // difference(series, d) -> differenced series
 difference :: proc(series: []f64, d: int, allocator := context.allocator) -> []f64 {
@@ -462,4 +390,220 @@ arma11_state_space :: proc(
 	P0[3] = 1e6
 
 	return
+}
+
+arma_pq_fundamental_state_space :: proc(
+	phi, theta: []f64,
+	sigma2: f64,
+	allocator := context.allocator,
+) -> (
+	F, Q, P0: []f64,
+	H: []f64,
+	R: []f64,
+	x0: []f64,
+	N: int,
+) {
+	p := len(phi)
+	q := len(theta)
+
+	// --- Special cases: pure AR or pure MA ---
+
+	if q == 0 {
+		// Pure AR(p): standard companion form, noise directly in y_t
+		N = max(p, 1)
+
+		F = make([]f64, N * N, allocator)
+		Q = make([]f64, N * N, allocator)
+		P0 = make([]f64, N * N, allocator)
+		H = make([]f64, N, allocator)
+		R = make([]f64, 1, allocator)
+		x0 = make([]f64, N, allocator)
+
+		// First row: AR coeffs
+		for i in 0 ..< p {
+			F[0 * N + i] = phi[i]
+		}
+		// Shift y-lags
+		for i in 1 ..< p {
+			F[i * N + (i - 1)] = 1.0
+		}
+
+		// Observation: y_t = state[0]
+		H[0] = 1.0
+
+		// Noise: innovation enters y_t directly
+		G := make([]f64, N, allocator)
+		G[0] = 1.0
+		for i in 0 ..< N {
+			for j in 0 ..< N {
+				Q[i * N + j] = sigma2 * G[i] * G[j]
+			}
+		}
+
+		R[0] = 0.0
+		for i in 0 ..< N {
+			P0[i * N + i] = 1e6
+		}
+		return
+	}
+
+	if p == 0 {
+		// Pure MA(q): state = [ε_t, ε_{t-1}, ..., ε_{t-q+1}]
+		N = q
+
+		F = make([]f64, N * N, allocator)
+		Q = make([]f64, N * N, allocator)
+		P0 = make([]f64, N * N, allocator)
+		H = make([]f64, N, allocator)
+		R = make([]f64, 1, allocator)
+		x0 = make([]f64, N, allocator)
+
+		// ε_{t+1} = η_{t+1}
+		// shift ε-lags
+		for j in 1 ..< q {
+			F[j * N + (j - 1)] = 1.0
+		}
+
+		// Observation: y_t = ε_t + θ_1 ε_{t-1} + ... + θ_q ε_{t-q}
+		// state[0] = ε_t, state[1] = ε_{t-1}, ...
+		H[0] = 1.0
+		for j in 0 ..< q {
+			// θ_j corresponds to ε_{t-j-1} in state index j+1
+			if j + 1 < N {
+				H[j + 1] += theta[j]
+			}
+		}
+
+		// Noise: innovation only in ε_{t+1} (next state[0])
+		G := make([]f64, N, allocator)
+		G[0] = 1.0
+		for i in 0 ..< N {
+			for j in 0 ..< N {
+				Q[i * N + j] = sigma2 * G[i] * G[j]
+			}
+		}
+
+		R[0] = 0.0
+		for i in 0 ..< N {
+			P0[i * N + i] = 1e6
+		}
+		return
+	}
+
+	// --- General ARMA(p,q) ---
+
+	N = p + q
+
+	F = make([]f64, N * N, allocator)
+	Q = make([]f64, N * N, allocator)
+	P0 = make([]f64, N * N, allocator)
+	H = make([]f64, N, allocator)
+	R = make([]f64, 1, allocator)
+	x0 = make([]f64, N, allocator)
+
+	// State layout:
+	// [ y_t, y_{t-1}, ..., y_{t-p+1}, ε_t, ε_{t-1}, ..., ε_{t-q+1} ]
+	// indices: 0 .. p-1 for y-lags, p .. p+q-1 for ε-lags
+
+	// --- Transition for y_{t+1} (row 0) ---
+
+	// AR part on y-lags
+	for i in 0 ..< p {
+		F[0 * N + i] = phi[i]
+	}
+
+	// MA part on ε-lags: θ_1 ε_t + ... + θ_q ε_{t-q+1}
+	// ε_t is state[p + 0], ε_{t-1} is state[p + 1], ...
+	for j in 0 ..< q {
+		F[0 * N + (p + j)] = theta[j]
+	}
+	// The current innovation ε_{t+1} = η_{t+1} will enter via G[0] = 1.0
+
+	// --- Shift y-lags ---
+	// y_{t} -> y_{t+1-1}, y_{t-1} -> y_{t+1-2}, ...
+	for i in 1 ..< p {
+		F[i * N + (i - 1)] = 1.0
+	}
+
+	// --- ε_{t+1} dynamics and shifts ---
+	// ε_{t+1} = η_{t+1}  (no dependence on previous state)
+	// so row p is all zeros; noise will enter via G[p] = 1.0
+
+	// shift ε-lags: ε_t -> ε_{t+1-1}, ε_{t-1} -> ε_{t+1-2}, ...
+	for j in 1 ..< q {
+		row := p + j
+		col := p + j - 1
+		F[row * N + col] = 1.0
+	}
+
+	// --- Observation matrix ---
+	// y_t = state[0]
+	H[0] = 1.0
+
+	// --- Process noise: η_{t+1} = ε_{t+1} ---
+	// enters ε_{t+1} (state index p) and y_{t+1} with coefficient 1
+	G := make([]f64, N, allocator)
+	G[0] = 1.0 // innovation contributes directly to y_{t+1}
+	G[p] = 1.0 // and defines ε_{t+1}
+
+	for i in 0 ..< N {
+		for j in 0 ..< N {
+			Q[i * N + j] = sigma2 * G[i] * G[j]
+		}
+	}
+
+	// No measurement noise
+	R[0] = 0.0
+
+	// Diffuse initial covariance
+	for i in 0 ..< N {
+		P0[i * N + i] = 1e6
+	}
+
+	return
+}
+
+arma22_simulate :: proc(
+	phi: []f64,
+	theta: []f64,
+	sigma2: f64,
+	T: int,
+	allocator: mem.Allocator,
+) -> []f64 {
+	y := make([]f64, T, allocator)
+	e_prev := make([]f64, len(theta) + 1, allocator) // e_t, e_{t-1}, ...
+	y_prev := make([]f64, len(phi) + 1, allocator) // y_t, y_{t-1}, ...
+
+	sigma := math.sqrt_f64(sigma2)
+
+	for t in 0 ..< T {
+		e := rand.float64_normal(0.0, sigma)
+
+		// AR part
+		ar := 0.0
+		for i in 0 ..< len(phi) {
+			ar += phi[i] * y_prev[i]
+		}
+
+		// MA part
+		ma := e
+		for j in 0 ..< len(theta) {
+			ma += theta[j] * e_prev[j]
+		}
+
+		y[t] = ar + ma
+
+		// shift histories
+		for i := len(y_prev) - 1; i > 0; i -= 1 {
+			y_prev[i] = y_prev[i - 1]
+		}
+		y_prev[0] = y[t]
+
+		for j := len(e_prev) - 1; j > 0; j -= 1 {
+			e_prev[j] = e_prev[j - 1]
+		}
+		e_prev[0] = e
+	}
+
+	return y
 }
