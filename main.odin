@@ -299,6 +299,7 @@ main :: proc() {
 	arima_dataframe_test(context.temp_allocator)
 	//mc_arima_arma11(context.temp_allocator, 200, 300)
 	arima_fit_arma22_test(context.temp_allocator)
+	mc_arima_arma22(context.temp_allocator, 200, 300)
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
 	w.destroy_dataframe(&right2)

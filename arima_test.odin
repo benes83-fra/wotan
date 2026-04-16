@@ -267,3 +267,99 @@ arima_fit_arma22_test :: proc(allocator: mem.Allocator) {
 	)
 	fmt.println("=== END ARMA(2,2) FIT TEST ===")
 }
+
+
+mc_arima_arma22 :: proc(allocator: mem.Allocator, n_sims: int, T: int) {
+	fmt.printf("=== ARIMA(2,0,2) Monte Carlo: n_sims=%v, T=%v ===\n", n_sims, T)
+
+	phi_true := []f64{0.5, -0.2}
+	theta_true := []f64{0.4, 0.3}
+	sigma2_true := 0.1
+
+	sum_phi := make([]f64, 2, allocator)
+	sum_theta := make([]f64, 2, allocator)
+	sum_sig2 := 0.0
+
+	sum_phi2 := make([]f64, 2, allocator)
+	sum_theta2 := make([]f64, 2, allocator)
+	sum_sig22 := 0.0
+
+	n_converged := 0
+
+	for s in 0 ..< n_sims {
+		y := w.arma22_simulate(phi_true, theta_true, sigma2_true, T, allocator)
+		fit := w.arima_fit(y, 2, 0, 2, allocator)
+		if !fit.converged {
+			continue
+		}
+		n_converged += 1
+
+		for i in 0 ..< 2 {
+			sum_phi[i] += fit.phi[i]
+			sum_phi2[i] += fit.phi[i] * fit.phi[i]
+			sum_theta[i] += fit.theta[i]
+			sum_theta2[i] += fit.theta[i] * fit.theta[i]
+		}
+		sum_sig2 += fit.sigma2
+		sum_sig22 += fit.sigma2 * fit.sigma2
+	}
+
+	if n_converged == 0 {
+		fmt.println("No converged fits.")
+		return
+	}
+
+	n := f64(n_converged)
+
+	mean_phi := make([]f64, 2, allocator)
+	mean_theta := make([]f64, 2, allocator)
+	sd_phi := make([]f64, 2, allocator)
+	sd_theta := make([]f64, 2, allocator)
+
+	for i in 0 ..< 2 {
+		mean_phi[i] = sum_phi[i] / n
+		mean_theta[i] = sum_theta[i] / n
+		var_phi := sum_phi2[i] / n - mean_phi[i] * mean_phi[i]
+		var_theta := sum_theta2[i] / n - mean_theta[i] * mean_theta[i]
+		sd_phi[i] = math.sqrt_f64(max(var_phi, 0.0))
+		sd_theta[i] = math.sqrt_f64(max(var_theta, 0.0))
+	}
+
+	mean_sig2 := sum_sig2 / n
+	var_sig2 := sum_sig22 / n - mean_sig2 * mean_sig2
+	sd_sig2 := math.sqrt_f64(max(var_sig2, 0.0))
+
+	fmt.printf("Converged: %v / %v\n", n_converged, n_sims)
+	fmt.printf(
+		"True   phi=[%.3f, %.3f], theta=[%.3f, %.3f], sigma2=%.3f\n",
+		phi_true[0],
+		phi_true[1],
+		theta_true[0],
+		theta_true[1],
+		sigma2_true,
+	)
+	fmt.printf(
+		"Mean   phi=[%.3f (sd=%.3f), %.3f (sd=%.3f)]\n",
+		mean_phi[0],
+		sd_phi[0],
+		mean_phi[1],
+		sd_phi[1],
+	)
+	fmt.printf(
+		"Mean theta=[%.3f (sd=%.3f), %.3f (sd=%.3f)]\n",
+		mean_theta[0],
+		sd_theta[0],
+		mean_theta[1],
+		sd_theta[1],
+	)
+	fmt.printf("Mean sigma2=%.3f (sd=%.3f)\n", mean_sig2, sd_sig2)
+	fmt.printf(
+		"Bias   phi=[%.3f, %.3f], theta=[%.3f, %.3f], sigma2=%.3f\n",
+		mean_phi[0] - phi_true[0],
+		mean_phi[1] - phi_true[1],
+		mean_theta[0] - theta_true[0],
+		mean_theta[1] - theta_true[1],
+		mean_sig2 - sigma2_true,
+	)
+	fmt.println("=== END ARIMA(2,0,2) Monte Carlo ===")
+}
