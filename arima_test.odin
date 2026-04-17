@@ -495,3 +495,155 @@ mc_arima_arma_pq :: proc(
 
 	fmt.println("=== END ARIMA Monte Carlo ===")
 }
+
+
+mc_arima_pdq :: proc(
+	n_sims: int,
+	T: int,
+	phi_true: []f64,
+	d: int,
+	theta_true: []f64,
+	sigma2_true: f64,
+	allocator: mem.Allocator,
+) {
+	p := len(phi_true)
+	q := len(theta_true)
+
+	fmt.printf("=== ARIMA(%v,%v,%v) Monte Carlo: n_sims=%v, T=%v ===\n", p, d, q, n_sims, T)
+
+	// accumulators
+	sum_phi := make([]f64, p, allocator)
+	sum_theta := make([]f64, q, allocator)
+	sum_phi2 := make([]f64, p, allocator)
+	sum_theta2 := make([]f64, q, allocator)
+
+	sum_sig2 := 0.0
+	sum_sig22 := 0.0
+
+	n_converged := 0
+
+	for s in 0 ..< n_sims {
+		// simulate ARIMA(p,d,q)
+		y := w.simulate_arima_pdq(phi_true, d, theta_true, sigma2_true, T, allocator)
+
+		fit := w.arima_fit(y, p, d, q, allocator)
+		if !fit.converged {
+			continue
+		}
+
+		n_converged += 1
+
+		for i in 0 ..< p {
+			sum_phi[i] += fit.phi[i]
+			sum_phi2[i] += fit.phi[i] * fit.phi[i]
+		}
+		for j in 0 ..< q {
+			sum_theta[j] += fit.theta[j]
+			sum_theta2[j] += fit.theta[j] * fit.theta[j]
+		}
+
+		sum_sig2 += fit.sigma2
+		sum_sig22 += fit.sigma2 * fit.sigma2
+	}
+
+	if n_converged == 0 {
+		fmt.println("No converged fits.")
+		return
+	}
+
+	n := f64(n_converged)
+
+	// compute means and SDs
+	mean_phi := make([]f64, p, allocator)
+	mean_theta := make([]f64, q, allocator)
+	sd_phi := make([]f64, p, allocator)
+	sd_theta := make([]f64, q, allocator)
+
+	for i in 0 ..< p {
+		mean_phi[i] = sum_phi[i] / n
+		var_phi := sum_phi2[i] / n - mean_phi[i] * mean_phi[i]
+		sd_phi[i] = math.sqrt_f64(max(var_phi, 0.0))
+	}
+	for j in 0 ..< q {
+		mean_theta[j] = sum_theta[j] / n
+		var_theta := sum_theta2[j] / n - mean_theta[j] * mean_theta[j]
+		sd_theta[j] = math.sqrt_f64(max(var_theta, 0.0))
+	}
+
+	mean_sig2 := sum_sig2 / n
+	var_sig2 := sum_sig22 / n - mean_sig2 * mean_sig2
+	sd_sig2 := math.sqrt_f64(max(var_sig2, 0.0))
+
+	// print results
+	fmt.printf("Converged: %v / %v\n", n_converged, n_sims)
+
+	fmt.printf("True phi = [")
+	for i in 0 ..< p {
+		fmt.printf("%.3f", phi_true[i])
+		if i < p - 1 {fmt.printf(", ")}
+	}
+	fmt.printf("]\n")
+
+	fmt.printf("True theta = [")
+	for j in 0 ..< q {
+		fmt.printf("%.3f", theta_true[j])
+		if j < q - 1 {fmt.printf(", ")}
+	}
+	fmt.printf("]\n")
+
+	fmt.printf("True sigma2 = %.3f\n", sigma2_true)
+
+	fmt.printf("Mean phi = [")
+	for i in 0 ..< p {
+		fmt.printf("%.3f (sd=%.3f)", mean_phi[i], sd_phi[i])
+		if i < p - 1 {fmt.printf(", ")}
+	}
+	fmt.printf("]\n")
+
+	fmt.printf("Mean theta = [")
+	for j in 0 ..< q {
+		fmt.printf("%.3f (sd=%.3f)", mean_theta[j], sd_theta[j])
+		if j < q - 1 {fmt.printf(", ")}
+	}
+	fmt.printf("]\n")
+
+	fmt.printf("Mean sigma2 = %.3f (sd=%.3f)\n", mean_sig2, sd_sig2)
+
+	fmt.printf("Bias phi = [")
+	for i in 0 ..< p {
+		fmt.printf("%.3f", mean_phi[i] - phi_true[i])
+		if i < p - 1 {fmt.printf(", ")}
+	}
+	fmt.printf("]\n")
+
+	fmt.printf("Bias theta = [")
+	for j in 0 ..< q {
+		fmt.printf("%.3f", mean_theta[j] - theta_true[j])
+		if j < q - 1 {fmt.printf(", ")}
+	}
+	fmt.printf("]\n")
+
+	fmt.printf("Bias sigma2 = %.3f\n", mean_sig2 - sigma2_true)
+
+	fmt.println("=== END ARIMA Monte Carlo ===")
+}
+
+
+mc_arima_pdq_test :: proc(allocator: mem.Allocator) {
+	fmt.println("=== ARIMA(p,d,q) Monte Carlo Test ===")
+
+	// Choose a nice example model
+	phi_true := []f64{0.5, -0.2} // AR(2)
+	theta_true := []f64{0.4, 0.3} // MA(2)
+	d := 1 // one differencing
+	sigma2_true := 0.1
+
+	// Simulation settings
+	n_sims := 200
+	T := 300
+
+	// Call the general MC engine
+	mc_arima_pdq(n_sims, T, phi_true, d, theta_true, sigma2_true, allocator)
+
+	fmt.println("=== END ARIMA(p,d,q) Monte Carlo Test ===")
+}

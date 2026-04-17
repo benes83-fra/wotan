@@ -185,6 +185,8 @@ ArimaFitResult :: struct {
 	theta:     []f64,
 	sigma2:    f64,
 	loglik:    f64,
+	aic:       f64,
+	bic:       f64,
 	converged: bool,
 }
 arima_fit :: proc(y: []f64, p, d, q: int, allocator := context.allocator) -> ArimaFitResult {
@@ -230,6 +232,16 @@ arima_fit :: proc(y: []f64, p, d, q: int, allocator := context.allocator) -> Ari
 	res.sigma2 = math.exp_f64(best_params[p + q])
 	res.loglik = -current_best_f
 	res.converged = true
+	// compute AIC and BIC
+	k := p + q + 1
+	n := len(y)
+	if d > 0 {
+		n = len(difference(y, d, allocator))
+	}
+
+	res.aic = -2.0 * res.loglik + 2.0 * f64(k)
+	res.bic = -2.0 * res.loglik + f64(k) * math.ln(f64(n))
+
 	return res
 }
 ArimaForecastResult :: struct {
@@ -340,7 +352,20 @@ arima_forecast :: proc(
 		}
 	}
 
+	// If d > 0, integrate forecasts back to original scale
+	if d > 0 {
+		history := make([]f64, d, allocator)
+		for i in 0 ..< d {
+			history[i] = y[len(y) - d + i]
+		}
+
+		mean = inverse_difference(mean, history, d, allocator)
+		lower = inverse_difference(lower, history, d, allocator)
+		upper = inverse_difference(upper, history, d, allocator)
+	}
+
 	return ArimaForecastResult{mean = mean, lower = lower, upper = upper}
+
 }
 arma11_state_space :: proc(
 	phi: f64,
@@ -606,4 +631,27 @@ arma22_simulate :: proc(
 	}
 
 	return y
+}
+simulate_arima_pdq :: proc(
+	phi: []f64,
+	d: int,
+	theta: []f64,
+	sigma2: f64,
+	T: int,
+	allocator: mem.Allocator,
+) -> []f64 {
+	// simulate ARMA(p,q) on differenced series z_t
+	z := arma22_simulate(phi, theta, sigma2, T + d, allocator) // reuse general ARMA sim
+	// integrate d times to get y_t
+	history := make([]f64, d, allocator)
+	for i in 0 ..< d {
+		history[i] = 0.0
+	}
+	y := inverse_difference(z, history, d, allocator)
+	// drop initial d to get length T
+	out := make([]f64, T, allocator)
+	for t in 0 ..< T {
+		out[t] = y[d + t]
+	}
+	return out
 }
