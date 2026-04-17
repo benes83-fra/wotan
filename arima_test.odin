@@ -647,3 +647,22 @@ mc_arima_pdq_test :: proc(allocator: mem.Allocator) {
 
 	fmt.println("=== END ARIMA(p,d,q) Monte Carlo Test ===")
 }
+arima_auto_test :: proc(allocator: mem.Allocator) {
+	fmt.println("=== Automatic ARIMA Selection Test ===")
+
+	// simulate ARIMA(2,1,2)
+	phi := []f64{0.5, -0.2}
+	theta := []f64{0.4, 0.3}
+	d := 1
+	sigma2 := 0.1
+	T := 300
+
+	y := w.simulate_arima_pdq(phi, d, theta, sigma2, T, allocator)
+
+	result := w.arima_auto(y, 3, 2, 3, "aic", allocator)
+
+	fmt.printf("Selected model: ARIMA(%v,%v,%v)\n", result.p, result.d, result.q)
+	fmt.printf("AIC = %.3f, BIC = %.3f\n", result.fit.aic, result.fit.bic)
+
+	fmt.println("=== END Automatic ARIMA Selection Test ===")
+}

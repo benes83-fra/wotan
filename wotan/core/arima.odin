@@ -655,3 +655,56 @@ simulate_arima_pdq :: proc(
 	}
 	return out
 }
+
+ArimaAutoResult :: struct {
+	p, d, q: int,
+	fit:     ArimaFitResult,
+}
+
+arima_auto :: proc(
+	y: []f64,
+	max_p: int,
+	max_d: int,
+	max_q: int,
+	criterion: string, // "aic" or "bic"
+	allocator := context.allocator,
+) -> ArimaAutoResult {
+
+	best: ArimaAutoResult
+	best_score := math.INF_F64
+
+	for p in 0 ..= max_p {
+		for d in 0 ..= max_d {
+			for q in 0 ..= max_q {
+
+				// skip the trivial (0,0,0)
+				if p == 0 && d == 0 && q == 0 {
+					continue
+				}
+
+				fit := arima_fit(y, p, d, q, allocator)
+				if !fit.converged {
+					continue
+				}
+				score: f64
+				if criterion == "bic" {
+					score = fit.bic
+				} else {
+					score = fit.aic
+				}
+
+				if score < best_score {
+					best_score = score
+					best = ArimaAutoResult {
+						p   = p,
+						d   = d,
+						q   = q,
+						fit = fit,
+					}
+				}
+			}
+		}
+	}
+
+	return best
+}
