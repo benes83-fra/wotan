@@ -666,3 +666,24 @@ arima_auto_test :: proc(allocator: mem.Allocator) {
 
 	fmt.println("=== END Automatic ARIMA Selection Test ===")
 }
+
+
+autocorrelation_test :: proc(allocator: mem.Allocator) {
+	ddf := w.dataframe_new()
+	defer w.destroy_dataframe(&ddf)
+	col := w.column_from_floats("y", []f64{1, 2, 3, 4, 5, 4, 3, 2, 1})
+	//defer w.destroy_column(&col)
+	w.add_column(&ddf, col)
+	ddf.rows = 9
+
+	ac := w.df_acf(&ddf, "y", 10, allocator)
+	pc := w.df_pacf(&ddf, "y", 10, allocator)
+	dac := w.dataframe_new(allocator)
+	dpc := w.dataframe_new(allocator)
+	defer w.destroy_column(&ac)
+	defer w.destroy_column(&pc)
+	w.add_column(&dac, ac)
+	w.add_column(&dpc, pc)
+	w.dataframe_pretty_print(&dac, 10)
+	w.dataframe_pretty_print(&dpc, 20)
+}
