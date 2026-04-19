@@ -1206,3 +1206,115 @@ kalman_filter_last_scalar :: proc(
 	}
 	return
 }
+
+kalman_filter_residuals :: proc(
+	y: []f64, // observations
+	F, Q, P0: []f64, // N×N, flat, row-major
+	H: []f64, // 1×N
+	R: []f64, // 1×1
+	x0: []f64, // N
+	N: int,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	v: []f64,
+	S: []f64, // innovations / residuals// innovation variances
+) {
+	T := len(y)
+	v = make([]f64, T, allocator)
+	S = make([]f64, T, allocator)
+
+	if T == 0 {
+		return
+	}
+
+	// state mean and covariance
+	x := make([]f64, N, allocator)
+	P := make([]f64, N * N, allocator)
+	defer delete(x)
+	defer delete(P)
+
+	for i in 0 ..< N {
+		x[i] = x0[i]
+	}
+	for i in 0 ..< N * N {
+		P[i] = P0[i]
+	}
+
+	for t in 0 ..< T {
+		// --- Predict ---
+		x_pred := make([]f64, N, allocator)
+		defer delete(x_pred)
+		for i in 0 ..< N {
+			s := 0.0
+			for j in 0 ..< N {
+				s += F[i * N + j] * x[j]
+			}
+			x_pred[i] = s
+		}
+
+		P_pred := make([]f64, N * N, allocator)
+		temp := make([]f64, N * N, allocator)
+		defer delete(P_pred)
+		defer delete(temp)
+
+		for i in 0 ..< N {
+			for j in 0 ..< N {
+				s := 0.0
+				for k in 0 ..< N {
+					s += F[i * N + k] * P[k * N + j]
+				}
+				temp[i * N + j] = s
+			}
+		}
+		for i in 0 ..< N {
+			for j in 0 ..< N {
+				s := 0.0
+				for k in 0 ..< N {
+					s += temp[i * N + k] * F[j * N + k] // Fᵀ
+				}
+				P_pred[i * N + j] = s + Q[i * N + j]
+			}
+		}
+
+		// --- Innovation ---
+		y_pred := 0.0
+		for j in 0 ..< N {
+			y_pred += H[j] * x_pred[j]
+		}
+
+		vt := y[t] - y_pred
+
+		St := 0.0
+		for i in 0 ..< N {
+			for j in 0 ..< N {
+				St += H[i] * P_pred[i * N + j] * H[j]
+			}
+		}
+		St += R[0]
+
+		v[t] = vt
+		S[t] = St
+
+		// --- Update ---
+		K := make([]f64, N, allocator)
+		defer delete(K)
+		for i in 0 ..< N {
+			s := 0.0
+			for j in 0 ..< N {
+				s += P_pred[i * N + j] * H[j]
+			}
+			K[i] = s / St
+		}
+
+		for i in 0 ..< N {
+			x[i] = x_pred[i] + K[i] * vt
+		}
+		for i in 0 ..< N {
+			for j in 0 ..< N {
+				P[i * N + j] = P_pred[i * N + j] - K[i] * St * K[j]
+			}
+		}
+	}
+
+	return
+}

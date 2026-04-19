@@ -687,3 +687,38 @@ autocorrelation_test :: proc(allocator: mem.Allocator) {
 	w.dataframe_pretty_print(&dac, 10)
 	w.dataframe_pretty_print(&dpc, 20)
 }
+ljung_box_test :: proc(allocator: mem.Allocator) {
+	fmt.println("=== LJUNG-BOX TEST ===")
+
+	// ------------------------------------------------------------
+	// 1) White noise residuals (should NOT reject)
+	// ------------------------------------------------------------
+	T := 300
+	sigma := 1.0
+
+	wn := make([]f64, T, allocator)
+	for i in 0 ..< T {
+		wn[i] = rand.float64_normal(0.0, sigma)
+	}
+
+	Q1, df1, p1 := w.ljung_box(wn, 10, 0, allocator)
+	fmt.printf("White noise test:\n")
+	fmt.printf("  Q = %.4f, df = %v, p = %.4f\n", Q1, df1, p1)
+
+	// ------------------------------------------------------------
+	// 2) Autocorrelated residuals (AR(1) with phi=0.7)
+	// ------------------------------------------------------------
+	ac := make([]f64, T, allocator)
+	ac_prev := 0.0
+	for i in 0 ..< T {
+		e := rand.float64_normal(0.0, sigma)
+		ac[i] = 0.7 * ac_prev + e
+		ac_prev = ac[i]
+	}
+
+	Q2, df2, p2 := w.ljung_box(ac, 10, 0, allocator)
+	fmt.printf("Autocorrelated test:\n")
+	fmt.printf("  Q = %.4f, df = %v, p = %.4f\n", Q2, df2, p2)
+
+	fmt.println("=== END LJUNG-BOX TEST ===")
+}
