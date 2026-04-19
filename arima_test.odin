@@ -722,3 +722,27 @@ ljung_box_test :: proc(allocator: mem.Allocator) {
 
 	fmt.println("=== END LJUNG-BOX TEST ===")
 }
+jarque_bera_test :: proc(allocator: mem.Allocator) {
+	fmt.println("=== JARQUE-BERA TEST ===")
+
+	T := 500
+
+	// 1) Normal data (should NOT reject)
+	normal := make([]f64, T, allocator)
+	for i in 0 ..< T {
+		normal[i] = rand.float64_normal(0.0, 1.0)
+	}
+	JB1, p1 := w.jarque_bera(normal, allocator)
+	fmt.printf("Normal data: JB=%.4f, p=%.4f\n", JB1, p1)
+
+	// 2) Heavy-tailed data (should reject)
+	heavy := make([]f64, T, allocator)
+	for i in 0 ..< T {
+		// t-distribution with df=3 (very heavy tails)
+		heavy[i] = rand.float64_normal(0.0, 1.0) / math.sqrt_f64(rand.float64())
+	}
+	JB2, p2 := w.jarque_bera(heavy, allocator)
+	fmt.printf("Heavy-tailed data: JB=%.4f, p=%.4f\n", JB2, p2)
+
+	fmt.println("=== END JARQUE-BERA TEST ===")
+}
