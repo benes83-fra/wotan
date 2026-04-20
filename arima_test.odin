@@ -746,3 +746,54 @@ jarque_bera_test :: proc(allocator: mem.Allocator) {
 
 	fmt.println("=== END JARQUE-BERA TEST ===")
 }
+residual_diagnostics_test :: proc(allocator: mem.Allocator) {
+	fmt.println("=== RESIDUAL DIAGNOSTICS TEST ===")
+
+	// --- 1) Simulate ARMA(1,1) data ---
+	phi_true := []f64{0.7}
+	theta_true := []f64{0.4}
+	sigma2_true := 0.1
+	T := 400
+
+	y := make([]f64, T, allocator)
+	e_prev := 0.0
+	y_prev := 0.0
+
+	for t in 0 ..< T {
+		e := rand.float64_normal(0.0, math.sqrt_f64(sigma2_true))
+		y[t] = phi_true[0] * y_prev + e + theta_true[0] * e_prev
+		y_prev = y[t]
+		e_prev = e
+	}
+
+	// --- 2) Fit ARIMA(1,0,1) ---
+	fit := w.arima_fit(y, 1, 0, 1, allocator)
+	fmt.printf(
+		"Fitted ARIMA(1,0,1): phi=%.3f theta=%.3f sigma2=%.3f\n",
+		fit.phi[0],
+		fit.theta[0],
+		fit.sigma2,
+	)
+
+	// --- 3) Compute residuals via Kalman filter ---
+	F, Q, P0, H, R, x0, N := w.arima_state_space(fit.phi, fit.theta, 0, fit.sigma2, allocator)
+	v, S := w.kalman_filter_residuals(y, F, Q, P0, H, R, x0, N, allocator)
+	_ = S // not used here, but available
+
+	// --- 4) Diagnostics ---
+	diag := w.df_residual_diagnostics(v, 20, 1 + 1, allocator) // dof_adj = p+q = 2
+	fmt.println("Residual diagnostics:")
+	w.dataframe_pretty_print(&diag, 20)
+
+	// --- 5) ACF and PACF ---
+	acf_df := w.df_residual_acf(v, 20, allocator)
+	pacf_df := w.df_residual_pacf(v, 20, allocator)
+
+	fmt.println("\nResidual ACF:")
+	w.dataframe_pretty_print(&acf_df, 20)
+
+	fmt.println("\nResidual PACF:")
+	w.dataframe_pretty_print(&pacf_df, 20)
+
+	fmt.println("=== END RESIDUAL DIAGNOSTICS TEST ===")
+}

@@ -1230,8 +1230,8 @@ kalman_filter_residuals :: proc(
 	// state mean and covariance
 	x := make([]f64, N, allocator)
 	P := make([]f64, N * N, allocator)
-	defer delete(x)
-	defer delete(P)
+	// defer delete(x)
+	// defer delete(P)
 
 	for i in 0 ..< N {
 		x[i] = x0[i]
@@ -1243,7 +1243,7 @@ kalman_filter_residuals :: proc(
 	for t in 0 ..< T {
 		// --- Predict ---
 		x_pred := make([]f64, N, allocator)
-		defer delete(x_pred)
+		//defer delete(x_pred)
 		for i in 0 ..< N {
 			s := 0.0
 			for j in 0 ..< N {
@@ -1254,8 +1254,8 @@ kalman_filter_residuals :: proc(
 
 		P_pred := make([]f64, N * N, allocator)
 		temp := make([]f64, N * N, allocator)
-		defer delete(P_pred)
-		defer delete(temp)
+		//defer delete(P_pred)
+		//defer delete(temp)
 
 		for i in 0 ..< N {
 			for j in 0 ..< N {
@@ -1297,7 +1297,7 @@ kalman_filter_residuals :: proc(
 
 		// --- Update ---
 		K := make([]f64, N, allocator)
-		defer delete(K)
+		//defer delete(K)
 		for i in 0 ..< N {
 			s := 0.0
 			for j in 0 ..< N {
