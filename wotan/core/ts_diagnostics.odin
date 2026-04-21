@@ -117,3 +117,31 @@ df_residual_pacf :: proc(
 	out.rows = max_lag + 1
 	return out
 }
+df_residuals :: proc(
+	y: []f64,
+	fit: ArimaFitResult,
+	p, d, q: int,
+	allocator: mem.Allocator = context.allocator,
+) -> DataFrame {
+
+	// 1) Differencing if needed
+	y_eff := y
+	if d > 0 {
+		y_eff = difference(y, d, allocator)
+	}
+
+	// 2) Build state-space from fitted parameters
+	F, Q, P0, H, R, x0, N := arima_state_space(fit.phi, fit.theta, d, fit.sigma2, allocator)
+
+	// 3) Run Kalman filter to get residuals + innovation variances
+	v, S := kalman_filter_residuals(y_eff, F, Q, P0, H, R, x0, N, allocator)
+
+	// 4) Build DataFrame
+	out := dataframe_new()
+
+	add_column(&out, column_from_floats("residual", v))
+	add_column(&out, column_from_floats("innovation_var", S))
+
+	out.rows = len(v)
+	return out
+}

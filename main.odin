@@ -307,6 +307,7 @@ main :: proc() {
 	ljung_box_test(context.temp_allocator)
 	jarque_bera_test(context.temp_allocator)
 	residual_diagnostics_test(context.temp_allocator)
+	residuals_test(context.temp_allocator)
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
 	w.destroy_dataframe(&right2)

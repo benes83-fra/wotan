@@ -784,12 +784,12 @@ residual_diagnostics_test :: proc(allocator: mem.Allocator) {
 	diag := w.df_residual_diagnostics(v, 20, 1 + 1, allocator) // dof_adj = p+q = 2
 	fmt.println("Residual diagnostics:")
 	w.dataframe_pretty_print(&diag, 20)
-  defer w.destroy_dataframe(&diag)
+	defer w.destroy_dataframe(&diag)
 	// --- 5) ACF and PACF ---
 	acf_df := w.df_residual_acf(v, 20, allocator)
-  defer w.destroy_dataframe(&acf_df)
+	defer w.destroy_dataframe(&acf_df)
 	pacf_df := w.df_residual_pacf(v, 20, allocator)
-  defer w.destroy_dataframe(&pacf_df)
+	defer w.destroy_dataframe(&pacf_df)
 	fmt.println("\nResidual ACF:")
 	w.dataframe_pretty_print(&acf_df, 20)
 
@@ -797,4 +797,56 @@ residual_diagnostics_test :: proc(allocator: mem.Allocator) {
 	w.dataframe_pretty_print(&pacf_df, 20)
 
 	fmt.println("=== END RESIDUAL DIAGNOSTICS TEST ===")
+}
+residuals_test :: proc(allocator: mem.Allocator) {
+	fmt.println("=== RESIDUALS TEST ===")
+
+	// Simulate ARMA(1,1)
+	phi := []f64{0.7}
+	theta := []f64{0.4}
+	sigma2 := 0.1
+	T := 300
+
+	y := make([]f64, T, allocator)
+	e_prev := 0.0
+	y_prev := 0.0
+
+	for t in 0 ..< T {
+		e := rand.float64_normal(0.0, math.sqrt_f64(sigma2))
+		y[t] = phi[0] * y_prev + e + theta[0] * e_prev
+		y_prev = y[t]
+		e_prev = e
+	}
+
+	// Fit ARIMA(1,0,1)
+	fit := w.arima_fit(y, 1, 0, 1, allocator)
+
+	// Extract residuals
+	df_res := w.df_residuals(y, fit, 1, 0, 1, allocator)
+	defer w.destroy_dataframe(&df_res)
+	fmt.println("Residuals head:")
+	w.df_head(&df_res, 10)
+
+	// Convert residual column to []f64 without adding new helper functions
+	col_res := w.column(&df_res, "residual")
+	residuals := make([dynamic]f64, 0, col_res.len, allocator)
+	for i in 0 ..< col_res.len {
+		v, is_null := w.column_at_float(col_res, i)
+		if !is_null {
+			append(&residuals, v)
+		}
+	}
+
+	// Diagnostics
+	diag := w.df_residual_diagnostics(
+		residuals[:],
+		10,
+		1 + 1, // p+q
+		allocator,
+	)
+	defer w.destroy_dataframe(&diag)
+	fmt.println("Diagnostics:")
+	w.dataframe_pretty_print(&diag, 20)
+
+	fmt.println("=== END RESIDUALS TEST ===")
 }
