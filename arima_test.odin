@@ -784,11 +784,12 @@ residual_diagnostics_test :: proc(allocator: mem.Allocator) {
 	diag := w.df_residual_diagnostics(v, 20, 1 + 1, allocator) // dof_adj = p+q = 2
 	fmt.println("Residual diagnostics:")
 	w.dataframe_pretty_print(&diag, 20)
-
+  defer w.destroy_dataframe(&diag)
 	// --- 5) ACF and PACF ---
 	acf_df := w.df_residual_acf(v, 20, allocator)
+  defer w.destroy_dataframe(&acf_df)
 	pacf_df := w.df_residual_pacf(v, 20, allocator)
-
+  defer w.destroy_dataframe(&pacf_df)
 	fmt.println("\nResidual ACF:")
 	w.dataframe_pretty_print(&acf_df, 20)
 
