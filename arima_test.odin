@@ -850,3 +850,28 @@ residuals_test :: proc(allocator: mem.Allocator) {
 
 	fmt.println("=== END RESIDUALS TEST ===")
 }
+
+
+adf_test_block :: proc(allocator: mem.Allocator) {
+	fmt.println("=== ADF TEST BLOCK ===")
+
+	// Simulate AR(1) with phi = 0.7 (stationary)
+	T := 300
+	phi := 0.7
+	sigma := 1.0
+
+	y := make([]f64, T, allocator)
+	y_prev := 0.0
+
+	for t in 0 ..< T {
+		e := rand.float64_normal(0.0, sigma)
+		y[t] = phi * y_prev + e
+		y_prev = y[t]
+	}
+
+	df := w.df_adf(y, 5, allocator)
+	w.dataframe_pretty_print(&df, 20)
+	defer w.destroy_dataframe(&df)
+
+	fmt.println("=== END ADF TEST BLOCK ===")
+}
