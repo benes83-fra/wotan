@@ -851,7 +851,6 @@ residuals_test :: proc(allocator: mem.Allocator) {
 	fmt.println("=== END RESIDUALS TEST ===")
 }
 
-
 adf_test_block :: proc(allocator: mem.Allocator) {
 	fmt.println("=== ADF TEST BLOCK ===")
 
@@ -869,7 +868,16 @@ adf_test_block :: proc(allocator: mem.Allocator) {
 		y_prev = y[t]
 	}
 
-	df := w.df_adf(y, 5, allocator)
+	// NEW SIGNATURE:
+	// df_adf(y, max_lags, reg_type, lag_sel, allocator)
+	df := w.df_adf(
+		y,
+		5, // max lags
+		.Constant, // regression type
+		.Fixed, // lag selection
+		allocator,
+	)
+
 	w.dataframe_pretty_print(&df, 20)
 	defer w.destroy_dataframe(&df)
 
