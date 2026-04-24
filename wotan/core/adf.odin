@@ -6,7 +6,7 @@ import "core:mem"
 RegressionType :: enum {
 	None, // Δy_t = γ y_{t-1} + ...
 	Constant, // Δy_t = α + γ y_{t-1} + ...
-	Trend, // Δy_t = β t + γ y_{t-1} + ...
+	Trend, // Δy_t = β t + γ y_{t-1} + ...   (nonstandard; we map to trend-type criticals)
 	ConstantTrend, // Δy_t = α + β t + γ y_{t-1} + ...
 }
 
@@ -14,6 +14,16 @@ LagSelection :: enum {
 	Fixed, // use max_lags as given
 	AIC,
 	BIC,
+}
+
+// If you don't already have this in your core:
+@(require_results)
+inf_f64 :: proc "contextless" (sign: int) -> f64 {
+	if sign >= 0 {
+		return 0h7ff00000_00000000
+	} else {
+		return 0hfff00000_00000000
+	}
 }
 
 // ------------------------------------------------------------
@@ -74,6 +84,93 @@ matrix_inverse :: proc(A: []f64, k: int, allocator: mem.Allocator = context.allo
 }
 
 // ------------------------------------------------------------
+// MacKinnon-style asymptotic critical values (T → ∞) per regression type
+// Values are standard ADF tau criticals (approx):
+//   None          : no constant, no trend
+//   Constant      : constant only
+//   ConstantTrend : constant + trend
+//   Trend         : mapped to trend-type criticals (same as ConstantTrend here)
+// ------------------------------------------------------------
+adf_critical_values :: proc(
+	reg_type: RegressionType,
+) -> (
+	crit_1pct: f64,
+	crit_5pct: f64,
+	crit_10pct: f64,
+) {
+	// Defaults (constant only)
+	crit_1pct = -3.43
+	crit_5pct = -2.86
+	crit_10pct = -2.57
+
+	switch reg_type {
+	case .None:
+		// no constant, no trend
+		crit_1pct = -2.565
+		crit_5pct = -1.941
+		crit_10pct = -1.616
+	case .Constant:
+	// already set above
+	case .ConstantTrend, .Trend:
+		// constant + trend
+		crit_1pct = -3.96
+		crit_5pct = -3.41
+		crit_10pct = -3.12
+	}
+
+	return
+}
+
+// ------------------------------------------------------------
+// Simple MacKinnon-style p-value interpolation using the
+// regression-type-specific critical values.
+// Monotone piecewise-linear interpolation in (stat, log p)-space.
+// This gives continuous p-values instead of a step function.
+// ------------------------------------------------------------
+adf_pvalue_interp :: proc(stat: f64, reg_type: RegressionType) -> f64 {
+	c1, c5, c10 := adf_critical_values(reg_type)
+
+	// anchor points: (stat, p)
+	// left tail, 1%, 5%, 10%, "no rejection" at 0
+	xs := [5]f64{c1 - 2.0, c1, c5, c10, 0.0}
+	ps := [5]f64{0.001, 0.01, 0.05, 0.10, 0.90}
+
+	// clamp extreme right tail
+	if stat >= xs[4] {
+		return 0.99
+	}
+	// clamp extreme left tail
+	if stat <= xs[0] {
+		return ps[0]
+	}
+
+	// piecewise-linear in log p
+	log_ps := [5]f64{}
+	for i in 0 ..< 5 {
+		log_ps[i] = math.ln(ps[i])
+	}
+
+	for i in 0 ..< 4 {
+		if stat >= xs[i] && stat <= xs[i + 1] {
+			w := (stat - xs[i]) / (xs[i + 1] - xs[i])
+			log_p := log_ps[i] + w * (log_ps[i + 1] - log_ps[i])
+			p := math.exp(log_p)
+			// safety clamp
+			if p < 0.0 {
+				p = 0.0
+			}
+			if p > 1.0 {
+				p = 1.0
+			}
+			return p
+		}
+	}
+
+	// fallback (should not hit)
+	return 0.5
+}
+
+// ------------------------------------------------------------
 // Core ADF regression for given lag order p and regression type
 // ------------------------------------------------------------
 adf_core :: proc(
@@ -91,7 +188,7 @@ adf_core :: proc(
 ) {
 	n := len(y)
 	if n < 10 {
-		return 0.0, math.inf_f64(1), math.inf_f64(1), p, 0, 0.0
+		return 0.0, inf_f64(1), inf_f64(1), p, 0, 0.0
 	}
 
 	// Δy
@@ -109,7 +206,7 @@ adf_core :: proc(
 	// effective sample
 	T := (n - 1) - p
 	if T <= 5 {
-		return 0.0, math.inf_f64(1), math.inf_f64(1), p, T, 0.0
+		return 0.0, inf_f64(1), inf_f64(1), p, T, 0.0
 	}
 	n_obs = T
 	lags_used = p
@@ -136,7 +233,7 @@ adf_core :: proc(
 	k := base_cols + p // total regressors
 
 	if T <= k {
-		return 0.0, math.inf_f64(1), math.inf_f64(1), p, T, 0.0
+		return 0.0, inf_f64(1), inf_f64(1), p, T, 0.0
 	}
 
 	X := make([]f64, T * k, allocator)
@@ -212,7 +309,7 @@ adf_core :: proc(
 
 	sigma2 = rss / f64(T - k)
 	if sigma2 <= 0.0 {
-		return 0.0, math.inf_f64(1), math.inf_f64(1), p, T, sigma2
+		return 0.0, inf_f64(1), inf_f64(1), p, T, sigma2
 	}
 
 	// standard errors
@@ -239,7 +336,6 @@ adf_core :: proc(
 	adf_stat = gamma_hat / gamma_se
 
 	// log-likelihood (Gaussian)
-	// ℓ = -0.5 * T * (log(2π) + 1 + log(σ²))
 	log_sigma2 := math.ln(sigma2)
 	loglik := -0.5 * f64(T) * (math.ln_f64(2.0 * math.PI) + 1.0 + log_sigma2)
 
@@ -273,8 +369,8 @@ adf_test :: proc(
 	}
 
 	best_adf := 0.0
-	best_aic := math.inf_f64(1)
-	best_bic := math.inf_f64(1)
+	best_aic := inf_f64(1)
+	best_bic := inf_f64(1)
 	best_p := 0
 	best_T := 0
 	best_sigma2 := 0.0
@@ -321,20 +417,8 @@ adf_test :: proc(
 	lags_used = best_p
 	n_obs = best_T
 
-	// simple critical values (for constant case; you can refine per reg_type later)
-	crit_1pct = -3.43
-	crit_5pct = -2.86
-	crit_10pct = -2.57
-
-	if adf_stat < crit_1pct {
-		p_value = 0.01
-	} else if adf_stat < crit_5pct {
-		p_value = 0.05
-	} else if adf_stat < crit_10pct {
-		p_value = 0.10
-	} else {
-		p_value = 0.50
-	}
+	crit_1pct, crit_5pct, crit_10pct = adf_critical_values(reg_type)
+	p_value = adf_pvalue_interp(adf_stat, reg_type)
 
 	return
 }

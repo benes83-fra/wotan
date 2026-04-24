@@ -850,7 +850,6 @@ residuals_test :: proc(allocator: mem.Allocator) {
 
 	fmt.println("=== END RESIDUALS TEST ===")
 }
-
 adf_test_block :: proc(allocator: mem.Allocator) {
 	fmt.println("=== ADF TEST BLOCK ===")
 
@@ -868,18 +867,52 @@ adf_test_block :: proc(allocator: mem.Allocator) {
 		y_prev = y[t]
 	}
 
-	// NEW SIGNATURE:
-	// df_adf(y, max_lags, reg_type, lag_sel, allocator)
-	df := w.df_adf(
-		y,
-		5, // max lags
-		.Constant, // regression type
-		.Fixed, // lag selection
-		allocator,
-	)
-
+	// updated signature: (y, max_lags, reg_type, lag_sel, allocator)
+	df := w.df_adf(y, 5, .Constant, .Fixed, allocator)
 	w.dataframe_pretty_print(&df, 20)
 	defer w.destroy_dataframe(&df)
 
 	fmt.println("=== END ADF TEST BLOCK ===")
+}
+kpss_test_block :: proc(allocator: mem.Allocator) {
+	fmt.println("=== KPSS TEST BLOCK ===")
+
+	T := 300
+
+	// -------------------------------
+	// Case A: Stationary AR(1), phi=0.7
+	// -------------------------------
+	y1 := make([]f64, T, allocator)
+	phi := 0.7
+	y_prev := 0.0
+
+	for t in 0 ..< T {
+		e := rand.float64_normal(0.0, 1.0)
+		y1[t] = phi * y_prev + e
+		y_prev = y1[t]
+	}
+
+	df1 := w.df_kpss(y1, .Level, -1, allocator)
+	fmt.println("Stationary AR(1) KPSS (should NOT reject):")
+	w.dataframe_pretty_print(&df1, 20)
+	defer w.destroy_dataframe(&df1)
+
+	// -------------------------------
+	// Case B: Random Walk (unit root)
+	// -------------------------------
+	y2 := make([]f64, T, allocator)
+	y_prev = 0.0
+
+	for t in 0 ..< T {
+		e := rand.float64_normal(0.0, 1.0)
+		y2[t] = y_prev + e
+		y_prev = y2[t]
+	}
+
+	df2 := w.df_kpss(y2, .Level, -1, allocator)
+	fmt.println("\nRandom Walk KPSS (should REJECT):")
+	w.dataframe_pretty_print(&df2, 20)
+	defer w.destroy_dataframe(&df2)
+
+	fmt.println("=== END KPSS TEST BLOCK ===")
 }

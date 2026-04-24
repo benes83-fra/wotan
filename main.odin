@@ -309,6 +309,7 @@ main :: proc() {
 	residual_diagnostics_test(context.temp_allocator)
 	residuals_test(context.temp_allocator)
 	adf_test_block(context.temp_allocator)
+	kpss_test_block(context.temp_allocator)
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
 	w.destroy_dataframe(&right2)
