@@ -916,3 +916,61 @@ kpss_test_block :: proc(allocator: mem.Allocator) {
 
 	fmt.println("=== END KPSS TEST BLOCK ===")
 }
+
+stationarity_test_block :: proc(allocator: mem.Allocator) {
+	fmt.println("=== STATIONARITY TEST BLOCK ===")
+
+	T := 300
+
+	// ------------------------------------------------------------
+	// Case A: Stationary AR(1), phi = 0.7
+	// ------------------------------------------------------------
+	y1 := make([]f64, T, allocator)
+	phi := 0.7
+	y_prev := 0.0
+
+	for t in 0 ..< T {
+		e := rand.float64_normal(0.0, 1.0)
+		y1[t] = phi * y_prev + e
+		y_prev = y1[t]
+	}
+
+	df1 := w.df_stationarity(y1, 10, .Constant, .AIC, .Level, allocator)
+	fmt.println("Stationary AR(1):")
+	w.dataframe_pretty_print(&df1, 20)
+	defer w.destroy_dataframe(&df1)
+
+	// ------------------------------------------------------------
+	// Case B: Random Walk (unit root)
+	// ------------------------------------------------------------
+	y2 := make([]f64, T, allocator)
+	y_prev = 0.0
+
+	for t in 0 ..< T {
+		e := rand.float64_normal(0.0, 1.0)
+		y2[t] = y_prev + e
+		y_prev = y2[t]
+	}
+
+	df2 := w.df_stationarity(y2, 10, .Constant, .AIC, .Level, allocator)
+	fmt.println("\nRandom Walk:")
+	w.dataframe_pretty_print(&df2, 20)
+	defer w.destroy_dataframe(&df2)
+
+	// ------------------------------------------------------------
+	// Case C: Trend-Stationary (deterministic trend + noise)
+	// ------------------------------------------------------------
+	y3 := make([]f64, T, allocator)
+	for t in 0 ..< T {
+		trend := 0.05 * f64(t)
+		noise := rand.float64_normal(0.0, 1.0)
+		y3[t] = trend + noise
+	}
+
+	df3 := w.df_stationarity(y3, 10, .ConstantTrend, .AIC, .Trend, allocator)
+	fmt.println("\nTrend-Stationary Series:")
+	w.dataframe_pretty_print(&df3, 20)
+	defer w.destroy_dataframe(&df3)
+
+	fmt.println("=== END STATIONARITY TEST BLOCK ===")
+}

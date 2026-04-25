@@ -203,7 +203,139 @@ adf_core :: proc(
 		y_lag[i - 1] = y[i - 1]
 	}
 
-	// effective sample
+	// ---------- SPECIAL CASE p = 0 ----------
+	if p == 0 {
+		T := n - 1
+		if T <= 5 {
+			return 0.0, inf_f64(1), inf_f64(1), 0, T, 0.0
+		}
+
+		n_obs = T
+		lags_used = 0
+
+		// time trend
+		t_vals := make([]f64, T, allocator)
+		for t in 0 ..< T {
+			t_vals[t] = f64(t + 1)
+		}
+
+		// base regressors: constant? trend? y_{t-1}
+		base_cols := 0
+		if reg_type == .Constant || reg_type == .ConstantTrend {
+			base_cols += 1
+		}
+		if reg_type == .Trend || reg_type == .ConstantTrend {
+			base_cols += 1
+		}
+		base_cols += 1 // y_{t-1}
+
+		k := base_cols
+		if T <= k {
+			return 0.0, inf_f64(1), inf_f64(1), 0, T, 0.0
+		}
+
+		X := make([]f64, T * k, allocator)
+		Y := make([]f64, T, allocator)
+
+		for t in 0 ..< T {
+			row := t * k
+			col := 0
+
+			if reg_type == .Constant || reg_type == .ConstantTrend {
+				X[row + col] = 1.0
+				col += 1
+			}
+			if reg_type == .Trend || reg_type == .ConstantTrend {
+				X[row + col] = t_vals[t]
+				col += 1
+			}
+
+			// y_{t-1}
+			X[row + col] = y_lag[t]
+			col += 1
+
+			// dependent variable
+			Y[t] = dy[t]
+		}
+
+		// X'X and X'Y
+		XtX := make([]f64, k * k, allocator)
+		XtY := make([]f64, k, allocator)
+		for t in 0 ..< T {
+			row := t * k
+			for i in 0 ..< k {
+				xi := X[row + i]
+				XtY[i] += xi * Y[t]
+				for j in 0 ..< k {
+					XtX[i * k + j] += xi * X[row + j]
+				}
+			}
+		}
+
+		XtX_inv := matrix_inverse(XtX, k, allocator)
+
+		// β = (X'X)^(-1) X'Y
+		beta := make([]f64, k, allocator)
+		for i in 0 ..< k {
+			s := 0.0
+			for j in 0 ..< k {
+				s += XtX_inv[i * k + j] * XtY[j]
+			}
+			beta[i] = s
+		}
+
+		// residual variance
+		rss := 0.0
+		for t in 0 ..< T {
+			row := t * k
+			pred := 0.0
+			for j in 0 ..< k {
+				pred += X[row + j] * beta[j]
+			}
+			e := Y[t] - pred
+			rss += e * e
+		}
+
+		sigma2 = rss / f64(T - k)
+		if sigma2 <= 0.0 {
+			return 0.0, inf_f64(1), inf_f64(1), 0, T, sigma2
+		}
+
+		// standard errors
+		se := make([]f64, k, allocator)
+		for i in 0 ..< k {
+			se[i] = math.sqrt_f64(sigma2 * XtX_inv[i * k + i])
+		}
+
+		// locate γ (coefficient on y_{t-1})
+		gamma_col := 0
+		switch reg_type {
+		case .None:
+			gamma_col = 0
+		case .Constant:
+			gamma_col = 1
+		case .Trend:
+			gamma_col = 1
+		case .ConstantTrend:
+			gamma_col = 2
+		}
+
+		gamma_hat := beta[gamma_col]
+		gamma_se := se[gamma_col]
+		adf_stat = gamma_hat / gamma_se
+
+		// log-likelihood (Gaussian)
+		log_sigma2 := math.ln(sigma2)
+		loglik := -0.5 * f64(T) * (math.ln_f64(2.0 * math.PI) + 1.0 + log_sigma2)
+
+		aic = -2.0 * loglik + 2.0 * f64(k)
+		bic = -2.0 * loglik + f64(k) * math.ln(f64(T))
+
+		return
+	}
+	// ---------- END SPECIAL CASE p = 0 ----------
+
+	// generic p >= 1 branch
 	T := (n - 1) - p
 	if T <= 5 {
 		return 0.0, inf_f64(1), inf_f64(1), p, T, 0.0
@@ -211,27 +343,21 @@ adf_core :: proc(
 	n_obs = T
 	lags_used = p
 
-	// time trend
 	t_vals := make([]f64, T, allocator)
 	for t in 0 ..< T {
 		t_vals[t] = f64(t + 1)
 	}
 
-	// number of base regressors (excluding lagged Δy)
 	base_cols := 0
-	// constant
 	if reg_type == .Constant || reg_type == .ConstantTrend {
 		base_cols += 1
 	}
-	// trend
 	if reg_type == .Trend || reg_type == .ConstantTrend {
 		base_cols += 1
 	}
-	// y_{t-1}
-	base_cols += 1
+	base_cols += 1 // y_{t-1}
 
-	k := base_cols + p // total regressors
-
+	k := base_cols + p
 	if T <= k {
 		return 0.0, inf_f64(1), inf_f64(1), p, T, 0.0
 	}
@@ -243,13 +369,10 @@ adf_core :: proc(
 		row := t * k
 		col := 0
 
-		// constant
 		if reg_type == .Constant || reg_type == .ConstantTrend {
 			X[row + col] = 1.0
 			col += 1
 		}
-
-		// trend
 		if reg_type == .Trend || reg_type == .ConstantTrend {
 			X[row + col] = t_vals[t]
 			col += 1
@@ -268,10 +391,8 @@ adf_core :: proc(
 		Y[t] = dy[t + p]
 	}
 
-	// X'X and X'Y
 	XtX := make([]f64, k * k, allocator)
 	XtY := make([]f64, k, allocator)
-
 	for t in 0 ..< T {
 		row := t * k
 		for i in 0 ..< k {
@@ -285,7 +406,6 @@ adf_core :: proc(
 
 	XtX_inv := matrix_inverse(XtX, k, allocator)
 
-	// β = (X'X)^(-1) X'Y
 	beta := make([]f64, k, allocator)
 	for i in 0 ..< k {
 		s := 0.0
@@ -295,7 +415,6 @@ adf_core :: proc(
 		beta[i] = s
 	}
 
-	// residual variance
 	rss := 0.0
 	for t in 0 ..< T {
 		row := t * k
@@ -312,13 +431,11 @@ adf_core :: proc(
 		return 0.0, inf_f64(1), inf_f64(1), p, T, sigma2
 	}
 
-	// standard errors
 	se := make([]f64, k, allocator)
 	for i in 0 ..< k {
 		se[i] = math.sqrt_f64(sigma2 * XtX_inv[i * k + i])
 	}
 
-	// locate γ (coefficient on y_{t-1})
 	gamma_col := 0
 	switch reg_type {
 	case .None:
@@ -335,7 +452,6 @@ adf_core :: proc(
 	gamma_se := se[gamma_col]
 	adf_stat = gamma_hat / gamma_se
 
-	// log-likelihood (Gaussian)
 	log_sigma2 := math.ln(sigma2)
 	loglik := -0.5 * f64(T) * (math.ln_f64(2.0 * math.PI) + 1.0 + log_sigma2)
 
@@ -344,6 +460,7 @@ adf_core :: proc(
 
 	return
 }
+
 
 // ------------------------------------------------------------
 // High-level ADF test with lag selection
@@ -386,7 +503,8 @@ adf_test :: proc(
 		for p in 0 ..= max_lags {
 			adf_p, aic_p, bic_p, p_used, T, sigma2 := adf_core(y, p, reg_type, allocator)
 
-			if T <= 0 || sigma2 <= 0.0 {
+			// Skip invalid models
+			if T <= 5 || sigma2 <= 0.0 {
 				continue
 			}
 
@@ -411,6 +529,7 @@ adf_test :: proc(
 				}
 			}
 		}
+
 	}
 
 	adf_stat = best_adf
