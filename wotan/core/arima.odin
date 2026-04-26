@@ -803,3 +803,261 @@ df_arima_auto_with_tests :: proc(
 	df.rows = 1
 	return df
 }
+// Expand multiplicative SARIMA(p,d,q)(P,D,Q)_s into equivalent ARMA(P*,Q*)
+// using your convention: y_t = sum(phi[i] * y_{t-i}) + e_t + sum(theta[j] * e_{t-j})
+sarima_expand_to_arma :: proc(
+	phi: []f64, // non-seasonal AR (length p)
+	Phi: []f64, // seasonal AR (length P)
+	theta: []f64, // non-seasonal MA (length q)
+	Theta: []f64, // seasonal MA (length Q)
+	s: int, // season length
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	ar: []f64,
+	ma: []f64,
+) {
+	p := len(phi)
+	P := len(Phi)
+	q := len(theta)
+	Q := len(Theta)
+
+	// --- AR polynomial: (1 - φ(L)) (1 - Φ(L^s)) ---
+	// poly_ar(k) corresponds to coefficient of L^k
+	max_ar_deg := max(p, 0) + max(P, 0) * s
+	poly_ar := make([]f64, max_ar_deg + 1, allocator)
+	poly_ar[0] = 1.0
+
+	// non-seasonal AR: (1 - φ_1 L - ... - φ_p L^p)
+	for i in 0 ..< p {
+		poly_ar[i + 1] += -phi[i]
+	}
+
+	// seasonal AR: (1 - Φ_1 L^s - ... - Φ_P L^{Ps})
+	poly_sar := make([]f64, max_ar_deg + 1, allocator)
+	poly_sar[0] = 1.0
+	for i in 0 ..< P {
+		k := (i + 1) * s
+		if k <= max_ar_deg {
+			poly_sar[k] += -Phi[i]
+		}
+	}
+
+	// convolve poly_ar * poly_sar
+	poly_ar_full := make([]f64, max_ar_deg + 1, allocator)
+	for i in 0 ..< len(poly_ar) {
+		for j in 0 ..< len(poly_sar) {
+			k := i + j
+			if k > max_ar_deg {
+				break
+			}
+			poly_ar_full[k] += poly_ar[i] * poly_sar[j]
+		}
+	}
+
+	// convert back to AR coefficients in your convention:
+	// y_t = sum(ar[k-1] * y_{t-k}) + ...
+	ar_deg := max_ar_deg
+	if ar_deg <= 0 {
+		ar = make([]f64, 0, allocator)
+	} else {
+		ar = make([]f64, ar_deg, allocator)
+		for k in 1 ..= ar_deg {
+			ar[k - 1] = -poly_ar_full[k]
+		}
+	}
+
+	// --- MA polynomial: (1 + θ(L)) (1 + Θ(L^s)) ---
+	max_ma_deg := max(q, 0) + max(Q, 0) * s
+	poly_ma := make([]f64, max_ma_deg + 1, allocator)
+	poly_ma[0] = 1.0
+
+	// non-seasonal MA: (1 + θ_1 L + ... + θ_q L^q)
+	for i in 0 ..< q {
+		poly_ma[i + 1] += theta[i]
+	}
+
+	// seasonal MA: (1 + Θ_1 L^s + ... + Θ_Q L^{Qs})
+	poly_sma := make([]f64, max_ma_deg + 1, allocator)
+	poly_sma[0] = 1.0
+	for i in 0 ..< Q {
+		k := (i + 1) * s
+		if k <= max_ma_deg {
+			poly_sma[k] += Theta[i]
+		}
+	}
+
+	// convolve poly_ma * poly_sma
+	poly_ma_full := make([]f64, max_ma_deg + 1, allocator)
+	for i in 0 ..< len(poly_ma) {
+		for j in 0 ..< len(poly_sma) {
+			k := i + j
+			if k > max_ma_deg {
+				break
+			}
+			poly_ma_full[k] += poly_ma[i] * poly_sma[j]
+		}
+	}
+
+	// convert back to MA coefficients in your convention:
+	// ... + e_t + sum(ma[k-1] * e_{t-k})
+	ma_deg := max_ma_deg
+	if ma_deg <= 0 {
+		ma = make([]f64, 0, allocator)
+	} else {
+		ma = make([]f64, ma_deg, allocator)
+		for k in 1 ..= ma_deg {
+			ma[k - 1] = poly_ma_full[k]
+		}
+	}
+
+	return
+}
+
+// SARIMA state-space: differencing (d,D,s) is handled outside;
+// here we only encode the ARMA part implied by (p,q)(P,Q)_s.
+sarima_state_space :: proc(
+	phi: []f64, // non-seasonal AR
+	theta: []f64, // non-seasonal MA
+	Phi: []f64, // seasonal AR
+	Theta: []f64, // seasonal MA
+	s: int, // season length
+	sigma2: f64,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	F, Q, P0: []f64,
+	H: []f64,
+	R: []f64,
+	x0: []f64,
+	N: int,
+) {
+	ar, ma := sarima_expand_to_arma(phi, Phi, theta, Theta, s, allocator)
+	return arma_pq_fundamental_state_space(ar, ma, sigma2, allocator)
+}
+seasonal_difference :: proc(
+	series: []f64,
+	D: int,
+	s: int,
+	allocator: mem.Allocator = context.allocator,
+) -> []f64 {
+
+	if D <= 0 {
+		out := make([]f64, len(series), allocator)
+		for i in 0 ..< len(series) {
+			out[i] = series[i]
+		}
+		return out
+	}
+
+	diff := series
+
+	for d in 0 ..< D {
+		if len(diff) <= s {
+			break
+		}
+
+		next := make([]f64, len(diff) - s, allocator)
+		for i in s ..< len(diff) {
+			next[i - s] = diff[i] - diff[i - s]
+		}
+		diff = next
+	}
+
+	return diff
+}
+
+seasonal_difference_with_history :: proc(
+	series: []f64,
+	D: int,
+	s: int,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	diff: []f64,
+	history: []f64,
+) {
+
+	if D <= 0 {
+		diff = make([]f64, len(series), allocator)
+		for i in 0 ..< len(series) {
+			diff[i] = series[i]
+		}
+		history = make([]f64, 0, allocator)
+		return
+	}
+
+	// store last D*s values
+	hist_len := D * s
+	if hist_len > len(series) {
+		hist_len = len(series)
+	}
+
+	history = make([]f64, hist_len, allocator)
+	for i in 0 ..< hist_len {
+		history[i] = series[i]
+	}
+
+	diff = seasonal_difference(series, D, s, allocator)
+	return
+}
+
+seasonal_inverse_difference :: proc(
+	diff: []f64,
+	history: []f64,
+	D: int,
+	s: int,
+	allocator: mem.Allocator = context.allocator,
+) -> []f64 {
+
+	if D <= 0 {
+		out := make([]f64, len(diff), allocator)
+		for i in 0 ..< len(diff) {
+			out[i] = diff[i]
+		}
+		return out
+	}
+
+	// Start with stored history
+	out := make([]f64, len(diff) + len(history), allocator)
+	for i in 0 ..< len(history) {
+		out[i] = history[i]
+	}
+
+	// First seasonal integration
+	for i in 0 ..< len(diff) {
+		out[len(history) + i] = diff[i] + out[len(history) + i - s]
+	}
+
+	// Higher-order seasonal integration
+	for d in 1 ..< D {
+		for i in len(history) ..< len(out) {
+			out[i] = out[i] + out[i - s]
+		}
+	}
+
+	return out
+}
+sarima_difference :: proc(
+	y: []f64,
+	d: int,
+	D: int,
+	s: int,
+	allocator: mem.Allocator = context.allocator,
+) -> []f64 {
+
+	y1 := difference(y, d, allocator)
+	y2 := seasonal_difference(y1, D, s, allocator)
+	return y2
+}
+sarima_inverse_difference :: proc(
+	diff: []f64,
+	hist_ns: []f64, // non-seasonal history
+	hist_s: []f64, // seasonal history
+	d: int,
+	D: int,
+	s: int,
+	allocator: mem.Allocator = context.allocator,
+) -> []f64 {
+
+	y1 := inverse_difference(diff, hist_ns, d, allocator)
+	y2 := seasonal_inverse_difference(y1, hist_s, D, s, allocator)
+	return y2
+}
