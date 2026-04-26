@@ -708,3 +708,98 @@ arima_auto :: proc(
 
 	return best
 }
+
+
+auto_arima_d_from_tests :: proc(y: []f64, allocator: mem.Allocator = context.allocator) -> int {
+	decision, _, _, _, _ := stationarity_test(
+		y,
+		10, // ADF max lags
+		.Constant, // ADF regression type
+		.AIC, // ADF lag selection
+		.Level, // KPSS type
+		allocator,
+	)
+
+	switch decision {
+	case .Stationary:
+		return 0
+	case .TrendStationary:
+		return 0
+	case .DifferenceStationary:
+		return 1
+	case .Inconclusive:
+		return 1
+	}
+
+	return 1
+}
+
+arima_auto_with_tests :: proc(
+	y: []f64,
+	max_p: int,
+	max_q: int,
+	criterion: string = "aic",
+	allocator: mem.Allocator = context.allocator,
+) -> ArimaAutoResult {
+
+	// --- 1) Determine differencing order using ADF + KPSS ---
+	d := auto_arima_d_from_tests(y, allocator)
+
+	// --- 2) Run ARIMA auto-selection with fixed d ---
+	best: ArimaAutoResult
+	best_score := math.INF_F64
+
+	for p in 0 ..= max_p {
+		for q in 0 ..= max_q {
+
+			// skip trivial ARIMA(0,d,0)
+			if p == 0 && q == 0 {
+				continue
+			}
+
+			fit := arima_fit(y, p, d, q, allocator)
+			if !fit.converged {
+				continue
+			}
+
+			score: f64
+			if criterion == "bic" {
+				score = fit.bic
+			} else {
+				score = fit.aic
+			}
+
+			if score < best_score {
+				best_score = score
+				best = ArimaAutoResult {
+					p   = p,
+					d   = d,
+					q   = q,
+					fit = fit,
+				}
+			}
+		}
+	}
+
+	return best
+}
+df_arima_auto_with_tests :: proc(
+	y: []f64,
+	max_p: int,
+	max_q: int,
+	criterion: string = "aic",
+	allocator: mem.Allocator = context.allocator,
+) -> DataFrame {
+
+	result := arima_auto_with_tests(y, max_p, max_q, criterion, allocator)
+
+	df := dataframe_new()
+	add_column(&df, column_from_ints("p", []int{result.p}))
+	add_column(&df, column_from_ints("d", []int{result.d}))
+	add_column(&df, column_from_ints("q", []int{result.q}))
+	add_column(&df, column_from_floats("aic", []f64{result.fit.aic}))
+	add_column(&df, column_from_floats("bic", []f64{result.fit.bic}))
+	add_column(&df, column_from_floats("loglik", []f64{result.fit.loglik}))
+	df.rows = 1
+	return df
+}

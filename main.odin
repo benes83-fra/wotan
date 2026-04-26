@@ -311,6 +311,7 @@ main :: proc() {
 	adf_test_block(context.temp_allocator)
 	kpss_test_block(context.temp_allocator)
 	stationarity_test_block(context.temp_allocator)
+	auto_arima_stationarity_test(context.temp_allocator)
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
 	w.destroy_dataframe(&right2)

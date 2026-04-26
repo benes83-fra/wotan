@@ -974,3 +974,86 @@ stationarity_test_block :: proc(allocator: mem.Allocator) {
 
 	fmt.println("=== END STATIONARITY TEST BLOCK ===")
 }
+auto_arima_stationarity_test :: proc(allocator: mem.Allocator) {
+	fmt.println("=== AUTO-ARIMA WITH STATIONARITY TEST ===")
+
+	T := 400
+
+	// ------------------------------------------------------------
+	// Case A: Stationary ARMA(1,1)
+	// ------------------------------------------------------------
+	phi := []f64{0.7}
+	theta := []f64{0.4}
+	sigma2 := 0.1
+
+	y1 := make([]f64, T, allocator)
+	e_prev := 0.0
+	y_prev := 0.0
+	for t in 0 ..< T {
+		e := rand.float64_normal(0.0, math.sqrt_f64(sigma2))
+		y1[t] = phi[0] * y_prev + e + theta[0] * e_prev
+		y_prev = y1[t]
+		e_prev = e
+	}
+
+	d1 := w.auto_arima_d_from_tests(y1, allocator)
+	fmt.printf("Case A (Stationary ARMA(1,1)): suggested d = %v\n", d1)
+
+	result1 := w.arima_auto(y1, 3, 2, 3, "aic", allocator)
+	fmt.printf(
+		"Selected ARIMA(%v,%v,%v), AIC=%.3f\n",
+		result1.p,
+		result1.d,
+		result1.q,
+		result1.fit.aic,
+	)
+
+
+	// ------------------------------------------------------------
+	// Case B: Random Walk (unit root)
+	// ------------------------------------------------------------
+	y2 := make([]f64, T, allocator)
+	y_prev = 0.0
+	for t in 0 ..< T {
+		e := rand.float64_normal(0.0, 1.0)
+		y2[t] = y_prev + e
+		y_prev = y2[t]
+	}
+
+	d2 := w.auto_arima_d_from_tests(y2, allocator)
+	fmt.printf("\nCase B (Random Walk): suggested d = %v\n", d2)
+
+	result2 := w.arima_auto(y2, 3, 2, 3, "aic", allocator)
+	fmt.printf(
+		"Selected ARIMA(%v,%v,%v), AIC=%.3f\n",
+		result2.p,
+		result2.d,
+		result2.q,
+		result2.fit.aic,
+	)
+
+
+	// ------------------------------------------------------------
+	// Case C: Trend-Stationary
+	// ------------------------------------------------------------
+	y3 := make([]f64, T, allocator)
+	for t in 0 ..< T {
+		trend := 0.05 * f64(t)
+		noise := rand.float64_normal(0.0, 1.0)
+		y3[t] = trend + noise
+	}
+
+	d3 := w.auto_arima_d_from_tests(y3, allocator)
+	fmt.printf("\nCase C (Trend-Stationary): suggested d = %v\n", d3)
+
+	result3 := w.arima_auto(y3, 3, 2, 3, "aic", allocator)
+	fmt.printf(
+		"Selected ARIMA(%v,%v,%v), AIC=%.3f\n",
+		result3.p,
+		result3.d,
+		result3.q,
+		result3.fit.aic,
+	)
+
+	fmt.println("=== END AUTO-ARIMA WITH STATIONARITY TEST ===")
+}
