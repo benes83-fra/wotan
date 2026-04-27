@@ -312,7 +312,21 @@ main :: proc() {
 	kpss_test_block(context.temp_allocator)
 	stationarity_test_block(context.temp_allocator)
 	auto_arima_stationarity_test(context.temp_allocator)
-	mc_arima_pdq_test(context.temp_allocator)
+	//mc_arima_pdq_test(context.temp_allocator)
+	sarima_mc_test(
+		200,
+		300,
+		[]f64{0.5},
+		1,
+		[]f64{0.4},
+		[]f64{0.3},
+		1,
+		[]f64{0.2},
+		12,
+		0.1,
+		context.temp_allocator,
+	)
+
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
 	w.destroy_dataframe(&right2)

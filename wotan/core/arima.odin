@@ -1272,3 +1272,277 @@ simulate_sarima_pdqPDQ :: proc(
 
 	return out
 }
+SarimaAutoResult :: struct {
+	p, d, q: int,
+	P, D, Q: int,
+	s:       int,
+	fit:     ArimaFitResult,
+}
+
+sarima_auto_with_tests :: proc(
+	y: []f64,
+	max_p: int,
+	max_d: int,
+	max_q: int,
+	max_P: int,
+	max_D: int,
+	max_Q: int,
+	s: int,
+	criterion: string = "aic",
+	allocator: mem.Allocator = context.allocator,
+) -> SarimaAutoResult {
+
+	// --- 1) Determine non-seasonal differencing d ---
+	d := auto_arima_d_from_tests(y, allocator)
+
+	// --- 2) Determine seasonal differencing D ---
+	// Simple rule: if KPSS rejects on seasonal lag s, set D=1
+	D := 0
+	if len(y) > 2 * s {
+		y_lag := make([]f64, len(y) - s, allocator)
+		for i in s ..< len(y) {
+			y_lag[i - s] = y[i] - y[i - s]
+		}
+		dec, _, _, _, _ := stationarity_test(y_lag, 10, .Constant, .AIC, .Level, allocator)
+		if dec == .DifferenceStationary {
+			D = 1
+		}
+	}
+
+	best: SarimaAutoResult
+	best_score := math.INF_F64
+
+	// --- 3) Full grid search ---
+	for p in 0 ..= max_p {
+		for q in 0 ..= max_q {
+			for P in 0 ..= max_P {
+				for Q in 0 ..= max_Q {
+					for D_try in 0 ..= max_D {
+
+						// skip trivial model
+						if p == 0 && q == 0 && P == 0 && Q == 0 {
+							continue
+						}
+
+						// 3a) difference the data
+						y_d := sarima_difference(y, d, D_try, s, allocator)
+
+						if len(y_d) < (p + q + P + Q + 5) {
+							continue
+						}
+
+						// 3b) expand SARIMA to ARMA
+						ar, ma := sarima_expand_to_arma(
+							make([]f64, p, allocator),
+							make([]f64, P, allocator),
+							make([]f64, q, allocator),
+							make([]f64, Q, allocator),
+							s,
+							allocator,
+						)
+
+						// 3c) fit ARMA on differenced data
+						fit := arima_fit(y_d, len(ar), 0, len(ma), allocator)
+						if !fit.converged {
+							continue
+						}
+
+						// 3d) compute score
+						score := fit.aic
+						if criterion == "bic" {
+							score = fit.bic
+						}
+
+						if score < best_score {
+							best_score = score
+							best = SarimaAutoResult {
+								p   = p,
+								d   = d,
+								q   = q,
+								P   = P,
+								D   = D_try,
+								Q   = Q,
+								s   = s,
+								fit = fit,
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return best
+}
+SarimaObjectiveCtx :: struct {
+	y:         []f64,
+	p, d, q:   int,
+	P, D, Q:   int,
+	s:         int,
+	allocator: mem.Allocator,
+}
+sarima_neg_loglik_obj :: proc(params: []f64, ctx: rawptr) -> f64 {
+	data := (^SarimaObjectiveCtx)(ctx)
+
+	p := data.p
+	q := data.q
+	P := data.P
+	Q := data.Q
+
+	// total parameters = p + q + P + Q + 1 (log_sigma2)
+	if len(params) != p + q + P + Q + 1 {
+		return 1e12
+	}
+
+	allocator := data.allocator
+
+	// unpack parameters
+	phi := make([]f64, p, allocator)
+	theta := make([]f64, q, allocator)
+	Phi := make([]f64, P, allocator)
+	Theta := make([]f64, Q, allocator)
+
+	idx := 0
+	for i in 0 ..< p {
+		phi[i] = 0.95 * math.tanh(params[idx])
+		idx += 1
+	}
+	for i in 0 ..< q {
+		theta[i] = 0.95 * math.tanh(params[idx])
+		idx += 1
+	}
+	for i in 0 ..< P {
+		Phi[i] = 0.95 * math.tanh(params[idx])
+		idx += 1
+	}
+	for i in 0 ..< Q {
+		Theta[i] = 0.95 * math.tanh(params[idx])
+		idx += 1
+	}
+
+	log_sig2 := params[idx]
+	sigma2 := math.exp_f64(log_sig2)
+	if sigma2 <= 0.0 || sigma2 > 1e3 {
+		return 1e9
+	}
+
+	// differencing
+	y1 := difference(data.y, data.d, allocator)
+	y2 := seasonal_difference(y1, data.D, data.s, allocator)
+
+	if len(y2) < (p + q + P + Q + 5) {
+		return 1e9
+	}
+
+	// state-space
+	F, Qm, P0, H, R, x0, N := sarima_state_space(phi, theta, Phi, Theta, data.s, sigma2, allocator)
+
+	ll := kalman_loglik_scalar(y2, F, Qm, P0, H, R, x0, N)
+
+	return -ll
+}
+SarimaFitResult :: struct {
+	phi, theta: []f64,
+	Phi, Theta: []f64,
+	sigma2:     f64,
+	loglik:     f64,
+	aic:        f64,
+	bic:        f64,
+	converged:  bool,
+}
+sarima_fit :: proc(
+	y: []f64,
+	p, d, q: int,
+	P, D, Q: int,
+	s: int,
+	allocator: mem.Allocator = context.allocator,
+) -> SarimaFitResult {
+
+	ctx := SarimaObjectiveCtx {
+		y         = y,
+		p         = p,
+		d         = d,
+		q         = q,
+		P         = P,
+		D         = D,
+		Q         = Q,
+		s         = s,
+		allocator = allocator,
+	}
+
+	n_params := p + q + P + Q + 1
+	best_params := make([]f64, n_params, allocator)
+	best_f := math.INF_F64
+
+	max_iter := 800
+	tol := 1e-6
+	n_starts := 5
+
+	for s_i in 0 ..< n_starts {
+		x0 := make([]f64, n_params, allocator)
+		// random init
+		for i in 0 ..< n_params {
+			x0[i] = rand.float64_normal(0.0, 0.3)
+		}
+
+		x_opt, f_opt := nelder_mead(sarima_neg_loglik_obj, &ctx, x0, max_iter, tol, allocator)
+
+		if f_opt < best_f {
+			best_f = f_opt
+			copy(best_params, x_opt)
+		}
+	}
+
+	// unpack best parameters
+	idx := 0
+	phi := make([]f64, p, allocator)
+	theta := make([]f64, q, allocator)
+	Phi := make([]f64, P, allocator)
+	Theta := make([]f64, Q, allocator)
+
+	for i in 0 ..< p {
+		phi[i] = 0.95 * math.tanh(best_params[idx])
+		idx += 1
+	}
+	for i in 0 ..< q {
+		theta[i] = 0.95 * math.tanh(best_params[idx])
+		idx += 1
+	}
+	for i in 0 ..< P {
+		Phi[i] = 0.95 * math.tanh(best_params[idx])
+		idx += 1
+	}
+	for i in 0 ..< Q {
+		Theta[i] = 0.95 * math.tanh(best_params[idx])
+		idx += 1
+	}
+
+	sigma2 := math.exp_f64(best_params[idx])
+
+	// compute loglik
+	y1 := difference(y, d, allocator)
+	y2 := seasonal_difference(y1, D, s, allocator)
+
+	F, Qm, P0, H, R, x0, N := sarima_state_space(phi, theta, Phi, Theta, s, sigma2, allocator)
+
+	ll := kalman_loglik_scalar(y2, F, Qm, P0, H, R, x0, N)
+
+	// AIC/BIC
+	k := n_params
+	n := len(y2)
+
+	aic := -2.0 * ll + 2.0 * f64(k)
+	bic := -2.0 * ll + f64(k) * math.ln(f64(n))
+
+	return SarimaFitResult {
+		phi = phi,
+		theta = theta,
+		Phi = Phi,
+		Theta = Theta,
+		sigma2 = sigma2,
+		loglik = ll,
+		aic = aic,
+		bic = bic,
+		converged = true,
+	}
+}

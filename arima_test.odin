@@ -1131,3 +1131,175 @@ mc_sarima_forecast :: proc(allocator: mem.Allocator, n_sims: int) {
 	fmt.printf("Empirical 95%% PI coverage:  %.3f\n", coverage)
 	fmt.println("=== END SARIMA Monte Carlo forecast test ===")
 }
+
+
+sarima_mc_test :: proc(
+	n_sims: int,
+	T: int,
+	phi_true: []f64,
+	d: int,
+	theta_true: []f64,
+	Phi_true: []f64,
+	D: int,
+	Theta_true: []f64,
+	s: int,
+	sigma2_true: f64,
+	allocator: mem.Allocator,
+) {
+	p := len(phi_true)
+	q := len(theta_true)
+	P := len(Phi_true)
+	Q := len(Theta_true)
+
+	fmt.printf(
+		"=== SARIMA(%v,%v,%v)(%v,%v,%v)_%v Monte Carlo: n_sims=%v, T=%v ===\n",
+		p,
+		d,
+		q,
+		P,
+		D,
+		Q,
+		s,
+		n_sims,
+		T,
+	)
+
+	// accumulators
+	sum_phi := make([]f64, p, allocator)
+	sum_theta := make([]f64, q, allocator)
+	sum_Phi := make([]f64, P, allocator)
+	sum_Theta := make([]f64, Q, allocator)
+	sum_sig2 := 0.0
+
+	sum_phi2 := make([]f64, p, allocator)
+	sum_theta2 := make([]f64, q, allocator)
+	sum_Phi2 := make([]f64, P, allocator)
+	sum_Theta2 := make([]f64, Q, allocator)
+	sum_sig22 := 0.0
+
+	n_converged := 0
+
+	for sim in 0 ..< n_sims {
+		// --- simulate SARIMA ---
+		y := w.simulate_sarima_pdqPDQ(
+			phi_true,
+			d,
+			theta_true,
+			Phi_true,
+			D,
+			Theta_true,
+			s,
+			sigma2_true,
+			T,
+			allocator,
+		)
+
+		// --- fit SARIMA ---
+		fit := w.sarima_fit(y, p, d, q, P, D, Q, s, allocator)
+		if !fit.converged {
+			continue
+		}
+
+		n_converged += 1
+
+		// accumulate
+		for i in 0 ..< p {
+			sum_phi[i] += fit.phi[i]
+			sum_phi2[i] += fit.phi[i] * fit.phi[i]
+		}
+		for i in 0 ..< q {
+			sum_theta[i] += fit.theta[i]
+			sum_theta2[i] += fit.theta[i] * fit.theta[i]
+		}
+		for i in 0 ..< P {
+			sum_Phi[i] += fit.Phi[i]
+			sum_Phi2[i] += fit.Phi[i] * fit.Phi[i]
+		}
+		for i in 0 ..< Q {
+			sum_Theta[i] += fit.Theta[i]
+			sum_Theta2[i] += fit.Theta[i] * fit.Theta[i]
+		}
+
+		sum_sig2 += fit.sigma2
+		sum_sig22 += fit.sigma2 * fit.sigma2
+	}
+
+	if n_converged == 0 {
+		fmt.println("No converged fits.")
+		return
+	}
+
+	n := f64(n_converged)
+
+	// compute means + SDs
+	mean_phi := make([]f64, p, allocator)
+	mean_theta := make([]f64, q, allocator)
+	mean_Phi := make([]f64, P, allocator)
+	mean_Theta := make([]f64, Q, allocator)
+
+	sd_phi := make([]f64, p, allocator)
+	sd_theta := make([]f64, q, allocator)
+	sd_Phi := make([]f64, P, allocator)
+	sd_Theta := make([]f64, Q, allocator)
+
+	for i in 0 ..< p {
+		mean_phi[i] = sum_phi[i] / n
+		var := sum_phi2[i] / n - mean_phi[i] * mean_phi[i]
+		sd_phi[i] = math.sqrt_f64(max(var, 0.0))
+	}
+	for i in 0 ..< q {
+		mean_theta[i] = sum_theta[i] / n
+		var := sum_theta2[i] / n - mean_theta[i] * mean_theta[i]
+		sd_theta[i] = math.sqrt_f64(max(var, 0.0))
+	}
+	for i in 0 ..< P {
+		mean_Phi[i] = sum_Phi[i] / n
+		var := sum_Phi2[i] / n - mean_Phi[i] * mean_Phi[i]
+		sd_Phi[i] = math.sqrt_f64(max(var, 0.0))
+	}
+	for i in 0 ..< Q {
+		mean_Theta[i] = sum_Theta[i] / n
+		var := sum_Theta2[i] / n - mean_Theta[i] * mean_Theta[i]
+		sd_Theta[i] = math.sqrt_f64(max(var, 0.0))
+	}
+
+	mean_sig2 := sum_sig2 / n
+	var_sig2 := sum_sig22 / n - mean_sig2 * mean_sig2
+	sd_sig2 := math.sqrt_f64(max(var_sig2, 0.0))
+
+	// --- print results ---
+	fmt.printf("Converged: %v / %v\n", n_converged, n_sims)
+
+	fmt.printf("True phi   = %v\n", phi_true)
+	fmt.printf("True theta = %v\n", theta_true)
+	fmt.printf("True Phi   = %v\n", Phi_true)
+	fmt.printf("True Theta = %v\n", Theta_true)
+	fmt.printf("True sigma2 = %.4f\n", sigma2_true)
+
+	fmt.printf("Mean phi   = %v\n", mean_phi)
+	fmt.printf("Mean theta = %v\n", mean_theta)
+	fmt.printf("Mean Phi   = %v\n", mean_Phi)
+	fmt.printf("Mean Theta = %v\n", mean_Theta)
+	fmt.printf("Mean sigma2 = %.4f\n", mean_sig2)
+
+	fmt.printf("SD phi     = %v\n", sd_phi)
+	fmt.printf("SD theta   = %v\n", sd_theta)
+	fmt.printf("SD Phi     = %v\n", sd_Phi)
+	fmt.printf("SD Theta   = %v\n", sd_Theta)
+	fmt.printf("SD sigma2  = %.4f\n", sd_sig2)
+
+	fmt.printf("Bias phi   = %v\n", vec_sub(mean_phi, phi_true, allocator))
+	fmt.printf("Bias theta = %v\n", vec_sub(mean_theta, theta_true, allocator))
+	fmt.printf("Bias Phi   = %v\n", vec_sub(mean_Phi, Phi_true, allocator))
+	fmt.printf("Bias Theta = %v\n", vec_sub(mean_Theta, Theta_true, allocator))
+	fmt.printf("Bias sigma2 = %.4f\n", mean_sig2 - sigma2_true)
+
+	fmt.println("=== END SARIMA Monte Carlo ===")
+}
+vec_sub :: proc(a, b: []f64, allocator: mem.Allocator) -> []f64 {
+	out := make([]f64, len(a), allocator)
+	for i in 0 ..< len(a) {
+		out[i] = a[i] - b[i]
+	}
+	return out
+}
