@@ -1049,15 +1049,226 @@ sarima_difference :: proc(
 }
 sarima_inverse_difference :: proc(
 	diff: []f64,
-	hist_ns: []f64, // non-seasonal history
-	hist_s: []f64, // seasonal history
+	hist_ns: []f64, // non-seasonal history (for d)
+	hist_s: []f64, // seasonal history (for D,s)
 	d: int,
 	D: int,
 	s: int,
 	allocator: mem.Allocator = context.allocator,
 ) -> []f64 {
 
-	y1 := inverse_difference(diff, hist_ns, d, allocator)
-	y2 := seasonal_inverse_difference(y1, hist_s, D, s, allocator)
-	return y2
+	// 1) undo seasonal differencing
+	y_seasonal := seasonal_inverse_difference(diff, hist_s, D, s, allocator)
+
+	// 2) undo non-seasonal differencing
+	y_full := inverse_difference(y_seasonal, hist_ns, d, allocator)
+
+	return y_full
+}
+SarimaForecastResult :: struct {
+	mean:  []f64,
+	lower: []f64,
+	upper: []f64,
+}
+
+sarima_forecast :: proc(
+	y: []f64,
+	phi: []f64, // non-seasonal AR
+	theta: []f64, // non-seasonal MA
+	Phi: []f64, // seasonal AR
+	Theta: []f64, // seasonal MA
+	d: int,
+	D: int,
+	s: int,
+	h: int,
+	sigma2: f64,
+	alpha: f64 = 0.05,
+	allocator: mem.Allocator = context.allocator,
+) -> SarimaForecastResult {
+
+	// 1) build differenced series z_t
+	y_ns := difference(y, d, allocator)
+	z := seasonal_difference(y_ns, D, s, allocator)
+
+	// 2) state-space for SARIMA ARMA part
+	F, Q, P0, H, R, x0, N := sarima_state_space(phi, theta, Phi, Theta, s, sigma2, allocator)
+
+	// 3) filter to get last state
+	xT, PT := kalman_filter_last_scalar(z, F, Q, P0, H, R, x0, N)
+
+	// 4) forecasting on differenced scale
+	mean_d := make([]f64, h, allocator)
+	lower_d := make([]f64, h, allocator)
+	upper_d := make([]f64, h, allocator)
+
+	z_state := make([]f64, N, allocator)
+	P := make([]f64, N * N, allocator)
+	for i in 0 ..< N {
+		z_state[i] = xT[i]
+	}
+	for i in 0 ..< N * N {
+		P[i] = PT[i]
+	}
+
+	// crude z for alpha (same as arima_forecast)
+	z_alpha := 1.96
+	_ = alpha // keep signature; you can plug proper quantile later
+
+	for step in 0 ..< h {
+		// predict one step ahead
+		x_pred := make([]f64, N, allocator)
+		for i in 0 ..< N {
+			sv := 0.0
+			for j in 0 ..< N {
+				sv += F[i * N + j] * z_state[j]
+			}
+			x_pred[i] = sv
+		}
+
+		P_pred := make([]f64, N * N, allocator)
+		temp := make([]f64, N * N, allocator)
+		for i in 0 ..< N {
+			for j in 0 ..< N {
+				sv := 0.0
+				for k in 0 ..< N {
+					sv += F[i * N + k] * P[k * N + j]
+				}
+				temp[i * N + j] = sv
+			}
+		}
+		for i in 0 ..< N {
+			for j in 0 ..< N {
+				sv := 0.0
+				for k in 0 ..< N {
+					sv += temp[i * N + k] * F[j * N + k]
+				}
+				P_pred[i * N + j] = sv + Q[i * N + j]
+			}
+		}
+
+		// observation mean/variance on differenced scale
+		mu := 0.0
+		for j in 0 ..< N {
+			mu += H[j] * x_pred[j]
+		}
+
+		Sv := 0.0
+		for i in 0 ..< N {
+			for j in 0 ..< N {
+				Sv += H[i] * P_pred[i * N + j] * H[j]
+			}
+		}
+		Sv += R[0]
+
+		sd := math.sqrt_f64(Sv)
+
+		mean_d[step] = mu
+		lower_d[step] = mu - z_alpha * sd
+		upper_d[step] = mu + z_alpha * sd
+
+		// roll forward
+		for i in 0 ..< N {
+			z_state[i] = x_pred[i]
+		}
+		for i in 0 ..< N * N {
+			P[i] = P_pred[i]
+		}
+	}
+
+	// 5) build histories for inverse differencing
+
+	// non-seasonal history: last d values of original y
+	hist_ns := make([]f64, d, allocator)
+	for i in 0 ..< d {
+		if d == 0 {
+			break
+		}
+		hist_ns[i] = y[len(y) - d + i]
+	}
+
+	// seasonal history: last min(D*s, len(y_ns)) values of non-seasonally differenced series
+	hist_s_len := D * s
+	if hist_s_len > len(y_ns) {
+		hist_s_len = len(y_ns)
+	}
+	hist_s := make([]f64, hist_s_len, allocator)
+	for i in 0 ..< hist_s_len {
+		hist_s[i] = y_ns[len(y_ns) - hist_s_len + i]
+	}
+
+	// 6) invert differencing back to original scale
+	mean_full := sarima_inverse_difference(mean_d, hist_ns, hist_s, d, D, s, allocator)
+	lower_full := sarima_inverse_difference(lower_d, hist_ns, hist_s, d, D, s, allocator)
+	upper_full := sarima_inverse_difference(upper_d, hist_ns, hist_s, d, D, s, allocator)
+
+	// keep only the forecast horizon (drop the history prefix)
+	start_idx := len(hist_ns) + len(hist_s) // prefix length in reconstruction
+	if start_idx > len(mean_full) {
+		start_idx = len(mean_full)
+	}
+
+	out_mean := make([]f64, h, allocator)
+	out_lower := make([]f64, h, allocator)
+	out_upper := make([]f64, h, allocator)
+
+	for i in 0 ..< h {
+		idx := start_idx + i
+		if idx >= len(mean_full) {
+			break
+		}
+		out_mean[i] = mean_full[idx]
+		out_lower[i] = lower_full[idx]
+		out_upper[i] = upper_full[idx]
+	}
+
+	return SarimaForecastResult{mean = out_mean, lower = out_lower, upper = out_upper}
+}
+
+simulate_sarima_pdqPDQ :: proc(
+	phi: []f64, // non-seasonal AR
+	d: int,
+	theta: []f64, // non-seasonal MA
+	Phi: []f64, // seasonal AR
+	D: int,
+	Theta: []f64, // seasonal MA
+	s: int,
+	sigma2: f64,
+	T: int,
+	allocator: mem.Allocator,
+) -> []f64 {
+	// 1) expand to ARMA on differenced scale
+	ar, ma := sarima_expand_to_arma(phi, Phi, theta, Theta, s, allocator)
+
+	// 2) simulate ARMA on z_t = (1-L)^d (1-L^s)^D y_t
+	extra := d + D * s
+	if extra < 0 {
+		extra = 0
+	}
+	z_len := T + extra
+	z := arma22_simulate(ar, ma, sigma2, z_len, allocator)
+
+	// 3) invert differencing to get y_t
+	hist_ns := make([]f64, d, allocator)
+	hist_s := make([]f64, D * s, allocator)
+	// histories are zero-initialized
+
+	y_full := sarima_inverse_difference(z, hist_ns, hist_s, d, D, s, allocator)
+
+	// 4) drop warmup prefix
+	drop := extra
+	if drop > len(y_full) {
+		drop = len(y_full)
+	}
+
+	out_len := T
+	if drop + out_len > len(y_full) {
+		out_len = len(y_full) - drop
+	}
+
+	out := make([]f64, out_len, allocator)
+	for t in 0 ..< out_len {
+		out[t] = y_full[drop + t]
+	}
+
+	return out
 }

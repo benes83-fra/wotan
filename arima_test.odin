@@ -1057,3 +1057,77 @@ auto_arima_stationarity_test :: proc(allocator: mem.Allocator) {
 
 	fmt.println("=== END AUTO-ARIMA WITH STATIONARITY TEST ===")
 }
+
+
+mc_sarima_forecast :: proc(allocator: mem.Allocator, n_sims: int) {
+	fmt.printf("=== SARIMA Monte Carlo forecast test: n_sims=%v ===\n", n_sims)
+
+	// True model: SARIMA(1,1,1)(1,1,1)_12 for example
+	phi := []f64{0.5}
+	theta := []f64{0.4}
+	Phi := []f64{0.3}
+	Theta := []f64{0.2}
+	d := 1
+	D := 1
+	s := 12
+	sigma2 := 0.1
+
+	T := 200 // history length
+	h := 12 // forecast horizon
+
+	sum_mse := 0.0
+	sum_cov := 0.0 // coverage count over all horizons
+
+	total_points := n_sims * h
+
+	for sim in 0 ..< n_sims {
+		// simulate T + h observations
+		y_full := w.simulate_sarima_pdqPDQ(
+			phi,
+			d,
+			theta,
+			Phi,
+			D,
+			Theta,
+			s,
+			sigma2,
+			T + h,
+			allocator,
+		)
+
+		y_hist := y_full[0:T]
+		y_future := y_full[T:T + h]
+
+		fc := w.sarima_forecast(
+			y_hist,
+			phi,
+			theta,
+			Phi,
+			Theta,
+			d,
+			D,
+			s,
+			h,
+			sigma2,
+			0.05,
+			allocator,
+		)
+
+		// MSE and interval coverage
+		for k in 0 ..< h {
+			err := fc.mean[k] - y_future[k]
+			sum_mse += err * err
+
+			if y_future[k] >= fc.lower[k] && y_future[k] <= fc.upper[k] {
+				sum_cov += 1.0
+			}
+		}
+	}
+
+	mse := sum_mse / f64(total_points)
+	coverage := sum_cov / f64(total_points)
+
+	fmt.printf("Forecast MSE (all horizons): %.6f\n", mse)
+	fmt.printf("Empirical 95%% PI coverage:  %.3f\n", coverage)
+	fmt.println("=== END SARIMA Monte Carlo forecast test ===")
+}
