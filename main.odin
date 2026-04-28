@@ -313,20 +313,51 @@ main :: proc() {
 	stationarity_test_block(context.temp_allocator)
 	auto_arima_stationarity_test(context.temp_allocator)
 	//mc_arima_pdq_test(context.temp_allocator)
-	sarima_mc_test(
-		200,
-		300,
-		[]f64{0.5},
-		1,
-		[]f64{0.4},
-		[]f64{0.3},
-		1,
-		[]f64{0.2},
-		12,
-		0.1,
+	// sarima_mc_test(
+	// 	200,
+	// 	300,
+	// 	[]f64{0.5},
+	// 	1,
+	// 	[]f64{0.4},
+	// 	[]f64{0.3},
+	// 	1,
+	// 	[]f64{0.2},
+	// 	12,
+	// 	0.1,
+	// 	context.temp_allocator,
+	// )
+	sarima_light_demo(context.temp_allocator)
+	fmt.println("=== SARIMA residual diagnostics quick test ===")
+
+	y_test := w.simulate_sarima_pdqPDQ(
+		[]f64{0.5}, // phi
+		1, // d
+		[]f64{0.4}, // theta
+		[]f64{0.3}, // Phi
+		1, // D
+		[]f64{0.2}, // Theta
+		12, // s
+		0.1, // sigma2
+		200, // T (short, fast)
 		context.temp_allocator,
 	)
 
+	// call your diagnostics
+	sarima_resid_diagnostics_demo(
+		y_test,
+		[]f64{0.5}, // phi
+		[]f64{0.4}, // theta
+		[]f64{0.3}, // Phi
+		[]f64{0.2}, // Theta
+		1, // d
+		1, // D
+		12, // s
+		0.1, // sigma2
+		20, // max_lag
+		context.temp_allocator,
+	)
+
+	fmt.println("=== END SARIMA residual diagnostics quick test ===")
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
 	w.destroy_dataframe(&right2)

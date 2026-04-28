@@ -1376,11 +1376,13 @@ sarima_auto_with_tests :: proc(
 }
 SarimaObjectiveCtx :: struct {
 	y:         []f64,
+	y_diff:    []f64, // precomputed (1-L)^d (1-L^s)^D y_t
 	p, d, q:   int,
 	P, D, Q:   int,
 	s:         int,
 	allocator: mem.Allocator,
 }
+
 sarima_neg_loglik_obj :: proc(params: []f64, ctx: rawptr) -> f64 {
 	data := (^SarimaObjectiveCtx)(ctx)
 
@@ -1428,11 +1430,11 @@ sarima_neg_loglik_obj :: proc(params: []f64, ctx: rawptr) -> f64 {
 
 	// differencing
 	y1 := difference(data.y, data.d, allocator)
-	y2 := seasonal_difference(y1, data.D, data.s, allocator)
-
+	y2 := data.y_diff
 	if len(y2) < (p + q + P + Q + 5) {
 		return 1e9
 	}
+
 
 	// state-space
 	F, Qm, P0, H, R, x0, N := sarima_state_space(phi, theta, Phi, Theta, data.s, sigma2, allocator)
@@ -1458,8 +1460,12 @@ sarima_fit :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> SarimaFitResult {
 
+	y1 := difference(y, d, allocator)
+	y2 := seasonal_difference(y1, D, s, allocator)
+
 	ctx := SarimaObjectiveCtx {
 		y         = y,
+		y_diff    = y2,
 		p         = p,
 		d         = d,
 		q         = q,
@@ -1520,8 +1526,8 @@ sarima_fit :: proc(
 	sigma2 := math.exp_f64(best_params[idx])
 
 	// compute loglik
-	y1 := difference(y, d, allocator)
-	y2 := seasonal_difference(y1, D, s, allocator)
+	// y1 := difference(y, d, allocator)
+	// y2 := seasonal_difference(y1, D, s, allocator)
 
 	F, Qm, P0, H, R, x0, N := sarima_state_space(phi, theta, Phi, Theta, s, sigma2, allocator)
 
@@ -1545,4 +1551,326 @@ sarima_fit :: proc(
 		bic = bic,
 		converged = true,
 	}
+}
+
+
+sarima_innovations :: proc(
+	y: []f64,
+	phi: []f64,
+	theta: []f64,
+	Phi: []f64,
+	Theta: []f64,
+	d: int,
+	D: int,
+	s: int,
+	sigma2: f64,
+	allocator: mem.Allocator = context.allocator,
+) -> []f64 {
+	// 1) differenced series
+	y1 := difference(y, d, allocator)
+	z := seasonal_difference(y1, D, s, allocator)
+
+	// 2) state-space
+	F, Q, P0, H, R, x0, N := sarima_state_space(phi, theta, Phi, Theta, s, sigma2, allocator)
+
+	T := len(z)
+	if T == 0 {
+		return make([]f64, 0, allocator)
+	}
+
+	burn_in := 20
+	if burn_in >= T {
+		burn_in = 0
+	}
+
+	// state
+	x := make([]f64, N, allocator)
+	P := make([]f64, N * N, allocator)
+	for i in 0 ..< N {
+		x[i] = x0[i]
+	}
+	for i in 0 ..< N * N {
+		P[i] = P0[i]
+	}
+
+	// store innovations after burn-in
+	out_len := T - burn_in
+	if out_len < 0 {
+		out_len = 0
+	}
+	v_out := make([]f64, out_len, allocator)
+	idx := 0
+
+	for t in 0 ..< T {
+		// --- Predict ---
+		x_pred := make([]f64, N, allocator)
+		for i in 0 ..< N {
+			ssum := 0.0
+			for j in 0 ..< N {
+				ssum += F[i * N + j] * x[j]
+			}
+			x_pred[i] = ssum
+		}
+
+		P_pred := make([]f64, N * N, allocator)
+		temp := make([]f64, N * N, allocator)
+		for i in 0 ..< N {
+			for j in 0 ..< N {
+				ssum := 0.0
+				for k in 0 ..< N {
+					ssum += F[i * N + k] * P[k * N + j]
+				}
+				temp[i * N + j] = ssum
+			}
+		}
+		for i in 0 ..< N {
+			for j in 0 ..< N {
+				ssum := 0.0
+				for k in 0 ..< N {
+					ssum += temp[i * N + k] * F[j * N + k]
+				}
+				P_pred[i * N + j] = ssum + Q[i * N + j]
+			}
+		}
+
+		// --- Innovation ---
+		y_pred := 0.0
+		for j in 0 ..< N {
+			y_pred += H[j] * x_pred[j]
+		}
+		v := z[t] - y_pred
+
+		// S = H P_pred Hᵀ + R
+		S := 0.0
+		for i in 0 ..< N {
+			for j in 0 ..< N {
+				S += H[i] * P_pred[i * N + j] * H[j]
+			}
+		}
+		S += R[0]
+
+		// store innovation (raw, not standardized) after burn-in
+		if t >= burn_in && idx < out_len {
+			v_out[idx] = v
+			idx += 1
+		}
+
+		// --- Update ---
+		K := make([]f64, N, allocator)
+		for i in 0 ..< N {
+			ssum := 0.0
+			for j in 0 ..< N {
+				ssum += P_pred[i * N + j] * H[j]
+			}
+			K[i] = ssum / S
+		}
+
+		for i in 0 ..< N {
+			x[i] = x_pred[i] + K[i] * v
+		}
+
+		for i in 0 ..< N {
+			for j in 0 ..< N {
+				P[i * N + j] = P_pred[i * N + j] - K[i] * S * K[j]
+			}
+		}
+	}
+
+	return v_out[:idx]
+}
+
+SarimaDiagResult :: struct {
+	acf_vals:  []f64,
+	pacf_vals: []f64,
+	Q:         f64,
+	df:        int,
+	p_lb:      f64,
+	JB:        f64,
+	p_jb:      f64,
+}
+
+sarima_residual_diagnostics :: proc(
+	y: []f64,
+	phi: []f64,
+	theta: []f64,
+	Phi: []f64,
+	Theta: []f64,
+	d: int,
+	D: int,
+	s: int,
+	sigma2: f64,
+	max_lag: int,
+	allocator: mem.Allocator = context.allocator,
+) -> SarimaDiagResult {
+
+	v := sarima_innovations(y, phi, theta, Phi, Theta, d, D, s, sigma2, allocator)
+
+	ac := acf(v, max_lag, allocator)
+	pc := pacf(v, max_lag, allocator)
+
+	dof_adj := len(phi) + len(theta) + len(Phi) + len(Theta)
+	Q, df, p_lb := ljung_box(v, max_lag, dof_adj, allocator)
+	JB, p_jb := jarque_bera(v, allocator)
+
+	return SarimaDiagResult {
+		acf_vals = ac,
+		pacf_vals = pc,
+		Q = Q,
+		df = df,
+		p_lb = p_lb,
+		JB = JB,
+		p_jb = p_jb,
+	}
+}
+
+
+df_sarima_residual_diagnostics :: proc(
+	y: []f64,
+	phi: []f64,
+	theta: []f64,
+	Phi: []f64,
+	Theta: []f64,
+	d: int,
+	D: int,
+	s: int,
+	sigma2: f64,
+	max_lag: int,
+	allocator: mem.Allocator = context.allocator,
+) -> DataFrame {
+
+	v := sarima_innovations(y, phi, theta, Phi, Theta, d, D, s, sigma2, allocator)
+
+	Q, df, p_lb := ljung_box(v, max_lag, len(phi) + len(theta) + len(Phi) + len(Theta), allocator)
+	JB, p_jb := jarque_bera(v, allocator)
+
+	df_out := dataframe_new()
+	add_column(&df_out, column_from_floats("Q", []f64{Q}))
+	add_column(&df_out, column_from_ints("df", []int{df}))
+	add_column(&df_out, column_from_floats("p_lb", []f64{p_lb}))
+	add_column(&df_out, column_from_floats("JB", []f64{JB}))
+	add_column(&df_out, column_from_floats("p_jb", []f64{p_jb}))
+	df_out.rows = 1
+	return df_out
+}
+sarima_residuals :: proc(
+	y: []f64,
+	phi: []f64,
+	theta: []f64,
+	Phi: []f64,
+	Theta: []f64,
+	d: int,
+	D: int,
+	s: int,
+	sigma2: f64,
+	allocator: mem.Allocator = context.allocator,
+) -> []f64 {
+	// 1) differenced series
+	y1 := difference(y, d, allocator)
+	y2 := seasonal_difference(y1, D, s, allocator)
+
+	if len(y2) == 0 {
+		return make([]f64, 0, allocator)
+	}
+
+	// 2) state-space
+	F, Q, P0, H, R, x0, N := sarima_state_space(phi, theta, Phi, Theta, s, sigma2, allocator)
+
+	T := len(y2)
+	burn_in := 20
+	if burn_in >= T {
+		burn_in = 0
+	}
+
+	// state
+	x := make([]f64, N, allocator)
+	P := make([]f64, N * N, allocator)
+	for i in 0 ..< N {
+		x[i] = x0[i]
+	}
+	for i in 0 ..< N * N {
+		P[i] = P0[i]
+	}
+
+	// residuals after burn-in
+	out_len := T - burn_in
+	if out_len < 0 {
+		out_len = 0
+	}
+	res := make([]f64, out_len, allocator)
+	idx := 0
+
+	for t in 0 ..< T {
+		// --- Predict ---
+		x_pred := make([]f64, N, allocator)
+		for i in 0 ..< N {
+			ssum := 0.0
+			for j in 0 ..< N {
+				ssum += F[i * N + j] * x[j]
+			}
+			x_pred[i] = ssum
+		}
+
+		P_pred := make([]f64, N * N, allocator)
+		temp := make([]f64, N * N, allocator)
+		for i in 0 ..< N {
+			for j in 0 ..< N {
+				ssum := 0.0
+				for k in 0 ..< N {
+					ssum += F[i * N + k] * P[k * N + j]
+				}
+				temp[i * N + j] = ssum
+			}
+		}
+		for i in 0 ..< N {
+			for j in 0 ..< N {
+				ssum := 0.0
+				for k in 0 ..< N {
+					ssum += temp[i * N + k] * F[j * N + k]
+				}
+				P_pred[i * N + j] = ssum + Q[i * N + j]
+			}
+		}
+
+		// --- Innovation ---
+		y_pred := 0.0
+		for j in 0 ..< N {
+			y_pred += H[j] * x_pred[j]
+		}
+		v := y2[t] - y_pred
+
+		if t >= burn_in && idx < out_len {
+			res[idx] = v
+			idx += 1
+		}
+
+		// S and Kalman gain
+		S := 0.0
+		for i in 0 ..< N {
+			for j in 0 ..< N {
+				S += H[i] * P_pred[i * N + j] * H[j]
+			}
+		}
+		S += R[0]
+
+		K := make([]f64, N, allocator)
+		for i in 0 ..< N {
+			ssum := 0.0
+			for j in 0 ..< N {
+				ssum += P_pred[i * N + j] * H[j]
+			}
+			K[i] = ssum / S
+		}
+
+		// update
+		for i in 0 ..< N {
+			x[i] = x_pred[i] + K[i] * v
+		}
+		for i in 0 ..< N {
+			for j in 0 ..< N {
+				P[i * N + j] = P_pred[i * N + j] - K[i] * S * K[j]
+			}
+		}
+	}
+
+	return res
 }

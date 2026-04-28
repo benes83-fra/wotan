@@ -1303,3 +1303,119 @@ vec_sub :: proc(a, b: []f64, allocator: mem.Allocator) -> []f64 {
 	}
 	return out
 }
+
+
+sarima_light_demo :: proc(allocator: mem.Allocator = context.allocator) {
+	// --- 1) Fixed SARIMA(1,1,1)(1,1,1)_12 parameters ---
+	phi_true := []f64{0.5} // non-seasonal AR(1)
+	theta_true := []f64{0.4} // non-seasonal MA(1)
+	Phi_true := []f64{0.3} // seasonal AR(1)
+	Theta_true := []f64{0.2} // seasonal MA(1)
+	d := 1
+	D := 1
+	s := 12
+	sigma2_true := 0.1
+	T := 300
+	h := 24 // forecast horizon
+
+	// --- 2) Simulate a single SARIMA path ---
+	y := w.simulate_sarima_pdqPDQ(
+		phi_true,
+		d,
+		theta_true,
+		Phi_true,
+		D,
+		Theta_true,
+		s,
+		sigma2_true,
+		T,
+		allocator,
+	)
+
+	// --- 3) Build differenced series and state-space (no MLE) ---
+	y_ns := w.difference(y, d, allocator)
+	z := w.seasonal_difference(y_ns, D, s, allocator)
+
+	F, Q, P0, H, R, x0, N := w.sarima_state_space(
+		phi_true,
+		theta_true,
+		Phi_true,
+		Theta_true,
+		s,
+		sigma2_true,
+		allocator,
+	)
+
+	// --- 4) Filter once to get last state ---
+	xT, PT := w.kalman_filter_last_scalar(z, F, Q, P0, H, R, x0, N)
+
+	// --- 5) Forecast using the existing SARIMA forecast helper ---
+	fc := w.sarima_forecast(
+		y,
+		phi_true,
+		theta_true,
+		Phi_true,
+		Theta_true,
+		d,
+		D,
+		s,
+		h,
+		sigma2_true,
+		0.05,
+		allocator,
+	)
+
+	// --- 6) Print a tiny summary so you see something “seasonal” ---
+	fmt.println("=== SARIMA light demo ===")
+	fmt.printf("Last observed y_T = %.4f\n", y[len(y) - 1])
+	fmt.printf("First 5 forecasts:\n")
+	for i in 0 ..< min(h, 5) {
+		fmt.printf(
+			"  y_{T +%v} = %.4f  (%.4f, %.4f)\n",
+			i + 1,
+			fc.mean[i],
+			fc.lower[i],
+			fc.upper[i],
+		)
+	}
+	fmt.println("=== END SARIMA light demo ===")
+}
+
+
+sarima_resid_diagnostics_demo :: proc(
+	y: []f64,
+	phi: []f64,
+	theta: []f64,
+	Phi: []f64,
+	Theta: []f64,
+	d: int,
+	D: int,
+	s: int,
+	sigma2: f64,
+	max_lag: int,
+	allocator: mem.Allocator = context.allocator,
+) {
+	// 1) residuals from fixed SARIMA
+	res := w.sarima_residuals(y, phi, theta, Phi, Theta, d, D, s, sigma2, allocator)
+
+	// 2) Ljung–Box with dof_adj = p+q+P+Q
+	p := len(phi)
+	q := len(theta)
+	P := len(Phi)
+	Q := len(Theta)
+	Qstat, df, p_lb := w.ljung_box(res, max_lag, p + q + P + Q, allocator)
+
+	// 3) Jarque–Bera
+	JB, p_jb := w.jarque_bera(res, allocator)
+
+	// 4) maybe ACF/PACF for plotting / inspection
+	ac := w.acf(res, max_lag, allocator)
+	pc := w.pacf(res, max_lag, allocator)
+
+	fmt.println("=== SARIMA residual diagnostics ===")
+	fmt.printf("Ljung-Box: Q=%.4f, df=%v, p=%.4f\n", Qstat, df, p_lb)
+	fmt.printf("Jarque-Bera: JB=%.4f, p=%.4f\n", JB, p_jb)
+	fmt.printf("ACF[1..%v] = %v\n", max_lag, ac[1:])
+	fmt.printf("PACF[1..%v] = %v\n", max_lag, pc[1:])
+	fmt.println("=== END SARIMA residual diagnostics ===")
+}

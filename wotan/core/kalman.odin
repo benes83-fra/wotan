@@ -967,27 +967,38 @@ ukf_rts_smooth_control :: proc(
 	return smoothed
 }
 kalman_loglik_scalar :: proc(
-	y: []f64, // observations
-	F, Q, P0: []f64, // N×N, flat, row-major: [row*N + col]
-	H: []f64, // 1×N, flat
-	R: []f64, // 1×1
-	x0: []f64, // N
+	y: []f64,
+	F, Q, P0: []f64,
+	H: []f64,
+	R: []f64,
+	x0: []f64,
 	N: int,
 ) -> f64 {
 	T := len(y)
 	if T == 0 {
 		return 0.0
 	}
+
 	burn_in := 20
 	if burn_in >= T {
 		burn_in = 0
 	}
-	// State mean and covariance
+
 	x := make([]f64, N)
 	P := make([]f64, N * N)
-	defer delete(x)
-	defer delete(P)
-	// init
+	x_pred := make([]f64, N)
+	P_pred := make([]f64, N * N)
+	temp := make([]f64, N * N)
+	K := make([]f64, N)
+	defer {
+		delete(x)
+		delete(P)
+		delete(x_pred)
+		delete(P_pred)
+		delete(temp)
+		delete(K)
+	}
+
 	for i in 0 ..< N {
 		x[i] = x0[i]
 	}
@@ -999,10 +1010,7 @@ kalman_loglik_scalar :: proc(
 	two_pi := 2.0 * math.PI
 
 	for t in 0 ..< T {
-		// --- Predict ---
-		// x_pred = F * x
-		x_pred := make([]f64, N)
-		defer delete(x_pred)
+		// Predict: x_pred = F * x
 		for i in 0 ..< N {
 			sum := 0.0
 			for j in 0 ..< N {
@@ -1011,12 +1019,7 @@ kalman_loglik_scalar :: proc(
 			x_pred[i] = sum
 		}
 
-		// P_pred = F P Fᵀ + Q
-		P_pred := make([]f64, N * N)
-		defer delete(P_pred)
 		// temp = F * P
-		temp := make([]f64, N * N)
-		defer delete(temp)
 		for i in 0 ..< N {
 			for j in 0 ..< N {
 				s := 0.0
@@ -1031,22 +1034,19 @@ kalman_loglik_scalar :: proc(
 			for j in 0 ..< N {
 				s := 0.0
 				for k in 0 ..< N {
-					s += temp[i * N + k] * F[j * N + k] // Fᵀ
+					s += temp[i * N + k] * F[j * N + k]
 				}
 				P_pred[i * N + j] = s + Q[i * N + j]
 			}
 		}
 
-		// --- Innovation ---
-		// y_pred = H * x_pred (scalar)
+		// Innovation
 		y_pred := 0.0
 		for j in 0 ..< N {
 			y_pred += H[j] * x_pred[j]
 		}
-
 		v := y[t] - y_pred
 
-		// S = H P_pred Hᵀ + R (scalar)
 		S := 0.0
 		for i in 0 ..< N {
 			for j in 0 ..< N {
@@ -1055,14 +1055,11 @@ kalman_loglik_scalar :: proc(
 		}
 		S += R[0]
 
-		// log-likelihood contribution
 		if t >= burn_in {
 			loglik += -0.5 * (math.ln(two_pi) + math.ln(S) + (v * v) / S)
 		}
-		// --- Update ---
-		// K = P_pred Hᵀ / S  (N×1)
-		K := make([]f64, N)
-		defer delete(K)
+
+		// K = P_pred Hᵀ / S
 		for i in 0 ..< N {
 			s := 0.0
 			for j in 0 ..< N {
@@ -1071,12 +1068,10 @@ kalman_loglik_scalar :: proc(
 			K[i] = s / S
 		}
 
-		// x = x_pred + K * v
+		// Update
 		for i in 0 ..< N {
 			x[i] = x_pred[i] + K[i] * v
 		}
-
-		// P = P_pred - K S Kᵀ
 		for i in 0 ..< N {
 			for j in 0 ..< N {
 				P[i * N + j] = P_pred[i * N + j] - K[i] * S * K[j]
@@ -1086,6 +1081,7 @@ kalman_loglik_scalar :: proc(
 
 	return loglik
 }
+
 kalman_filter_last_scalar :: proc(
 	y: []f64,
 	F, Q, P0: []f64,
