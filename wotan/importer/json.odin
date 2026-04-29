@@ -27,7 +27,12 @@ json_load :: proc(
 
 	text := string(contents)
 
-	root, err2 := json.parse_string(text, json.DEFAULT_SPECIFICATION, parse_integers = true)
+	root, err2 := json.parse_string(
+		text,
+		json.DEFAULT_SPECIFICATION,
+		parse_integers = true,
+		allocator = allocator,
+	)
 	if err2 != .None {
 		panic("json_load: invalid JSON")
 	}
