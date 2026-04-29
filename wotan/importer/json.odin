@@ -63,7 +63,7 @@ json_load :: proc(
 		keys[i] = key
 		i += 1
 	}
-	samples := make([][dynamic]string, col_count, allocator)
+	samples := make([][dynamic]string, col_count)
 
 	sample_limit := min(100, len(arr))
 	for i in 0 ..< sample_limit {
