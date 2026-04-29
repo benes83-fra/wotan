@@ -327,37 +327,8 @@ main :: proc() {
 	// 	context.temp_allocator,
 	// )
 	sarima_light_demo(context.temp_allocator)
-	fmt.println("=== SARIMA residual diagnostics quick test ===")
-
-	y_test := w.simulate_sarima_pdqPDQ(
-		[]f64{0.5}, // phi
-		1, // d
-		[]f64{0.4}, // theta
-		[]f64{0.3}, // Phi
-		1, // D
-		[]f64{0.2}, // Theta
-		12, // s
-		0.1, // sigma2
-		200, // T (short, fast)
-		context.temp_allocator,
-	)
-
-	// call your diagnostics
-	sarima_resid_diagnostics_demo(
-		y_test,
-		[]f64{0.5}, // phi
-		[]f64{0.4}, // theta
-		[]f64{0.3}, // Phi
-		[]f64{0.2}, // Theta
-		1, // d
-		1, // D
-		12, // s
-		0.1, // sigma2
-		20, // max_lag
-		context.temp_allocator,
-	)
-
-	fmt.println("=== END SARIMA residual diagnostics quick test ===")
+	sarima_resid_diagnostics_quick_test(context.temp_allocator)
+	json_basic_test(context.temp_allocator)
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
 	w.destroy_dataframe(&right2)

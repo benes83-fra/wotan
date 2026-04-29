@@ -1419,3 +1419,38 @@ sarima_resid_diagnostics_demo :: proc(
 	fmt.printf("PACF[1..%v] = %v\n", max_lag, pc[1:])
 	fmt.println("=== END SARIMA residual diagnostics ===")
 }
+
+sarima_resid_diagnostics_quick_test :: proc(allocator: mem.Allocator = context.allocator) {
+
+	fmt.println("=== SARIMA residual diagnostics quick test ===")
+
+	y_test := w.simulate_sarima_pdqPDQ(
+		[]f64{0.5}, // phi
+		1, // d
+		[]f64{0.4}, // theta
+		[]f64{0.3}, // Phi
+		1, // D
+		[]f64{0.2}, // Theta
+		12, // s
+		0.1, // sigma2
+		200, // T (short, fast)
+		context.temp_allocator,
+	)
+
+	// call your diagnostics
+	sarima_resid_diagnostics_demo(
+		y_test,
+		[]f64{0.5}, // phi
+		[]f64{0.4}, // theta
+		[]f64{0.3}, // Phi
+		[]f64{0.2}, // Theta
+		1, // d
+		1, // D
+		12, // s
+		0.1, // sigma2
+		20, // max_lag
+		context.temp_allocator,
+	)
+
+	fmt.println("=== END SARIMA residual diagnostics quick test ===")
+}
