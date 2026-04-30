@@ -194,3 +194,182 @@ json_value_to_string :: proc(v: json.Value) -> string {
 	}
 	return ""
 }
+jsonl_load :: proc(
+	path: string,
+	null_tokens: []string = DEFAULT_NULL_TOKEN,
+	allocator: mem.Allocator,
+) -> w.DataFrame {
+
+	contents, err := read_file(path)
+	if err != nil {
+		panic("jsonl_load: failed to read file")
+	}
+	defer delete(contents)
+
+	text := string(contents)
+	lines := strings.split(text, "\n")
+	defer delete(lines)
+
+	// --------------------------------------------------------
+	// First pass: collect sample objects for schema inference
+	// --------------------------------------------------------
+	sample_objects := make([dynamic]json.Object, 0, allocator)
+
+	for i in 0 ..< len(lines) {
+		line := strings.trim(lines[i], " \t\r")
+		if len(line) == 0 {
+			continue
+		}
+
+		root, err2 := json.parse_string(line, json.DEFAULT_SPECIFICATION, true, allocator)
+		if err2 != .None {
+			panic(fmt.tprintf("jsonl_load: invalid JSON on line %d", i + 1))
+		}
+
+		obj, ok := root.(json.Object)
+		if !ok {
+			panic(fmt.tprintf("jsonl_load: line %d is not a JSON object", i + 1))
+		}
+
+		append(&sample_objects, obj)
+		if len(sample_objects) >= 100 {
+			break
+		}
+	}
+
+	if len(sample_objects) == 0 {
+		panic("jsonl_load: no valid JSON objects found")
+	}
+
+	// --------------------------------------------------------
+	// Determine schema from first object
+	// --------------------------------------------------------
+	first_obj := sample_objects[0]
+	col_count := len(first_obj)
+	keys := make([]string, col_count, allocator)
+
+	idx := 0
+	for key in first_obj {
+		keys[idx] = key
+		idx += 1
+	}
+
+	samples := make([][dynamic]string, col_count)
+
+	// Collect sample values for type inference
+	for &obj in sample_objects {
+		for col_i in 0 ..< col_count {
+			key := keys[col_i]
+			val := obj[key]
+
+			if _, is_null := val.(json.Null); is_null {
+				continue
+			}
+
+			s := json_value_to_string(val)
+			if is_null_field(s, null_tokens) {
+				continue
+			}
+
+			append(&samples[col_i], s)
+		}
+	}
+
+	// Infer column types
+	types := make([]w.ColumnType, col_count, allocator)
+	for i in 0 ..< col_count {
+		types[i] = infer.infer_column_type(samples[i][:])
+	}
+
+	// Cleanup sample buffers
+	for i in 0 ..< col_count {
+		delete(samples[i])
+	}
+	delete(samples)
+
+	// --------------------------------------------------------
+	// Create DataFrame + columns
+	// --------------------------------------------------------
+	df := w.dataframe_new()
+	cols := make([]w.Column, col_count, allocator)
+
+	for i in 0 ..< col_count {
+		cols[i] = w.column_new(keys[i], types[i], len(lines))
+	}
+
+	// --------------------------------------------------------
+	// Second pass: parse all lines and append rows
+	// --------------------------------------------------------
+	for line_i in 0 ..< len(lines) {
+		line := strings.trim(lines[line_i], " \t\r")
+		if len(line) == 0 {
+			continue
+		}
+
+		root, err2 := json.parse_string(line, json.DEFAULT_SPECIFICATION, true, allocator)
+		if err2 != .None {
+			panic(fmt.tprintf("jsonl_load: invalid JSON on line %d", line_i + 1))
+		}
+
+		obj, ok := root.(json.Object)
+		if !ok {
+			panic(fmt.tprintf("jsonl_load: line %d is not a JSON object", line_i + 1))
+		}
+
+		for col_i in 0 ..< col_count {
+			key := keys[col_i]
+			val := obj[key]
+
+			if _, is_null := val.(json.Null); is_null {
+				w.append_null(&cols[col_i])
+				continue
+			}
+
+			s := json_value_to_string(val)
+			if is_null_field(s, null_tokens) {
+				w.append_null(&cols[col_i])
+				continue
+			}
+
+			#partial switch types[col_i] {
+			case .Int:
+				v, ok := strconv.parse_int(s)
+				if !ok {panic(fmt.tprintf("jsonl_load: invalid int '%s'", s))}
+				w.append_int(&cols[col_i], v)
+
+			case .Float:
+				v, ok := strconv.parse_f64(s)
+				if !ok {panic(fmt.tprintf("jsonl_load: invalid float '%s'", s))}
+				w.append_float(&cols[col_i], v)
+
+			case .Bool:
+				w.append_bool(&cols[col_i], s == "true")
+
+			case .String:
+				w.append_string(&cols[col_i], s)
+
+			case .Date:
+				d, ok := w.parse_date(s)
+				if !ok {panic(fmt.tprintf("jsonl_load: invalid date '%s'", s))}
+				w.append_date(&cols[col_i], d)
+
+			case .Time:
+				t, ok := w.parse_time(s)
+				if !ok {panic(fmt.tprintf("jsonl_load: invalid time '%s'", s))}
+				w.append_time(&cols[col_i], t)
+
+			case .Datetime:
+				dt, ok := w.parse_datetime(s)
+				if !ok {panic(fmt.tprintf("jsonl_load: invalid datetime '%s'", s))}
+				w.append_datetime(&cols[col_i], dt)
+			}
+		}
+	}
+
+	// Add columns to DataFrame
+	for col in cols {
+		w.add_column(&df, col)
+	}
+
+	return df
+}

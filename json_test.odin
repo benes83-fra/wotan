@@ -16,3 +16,16 @@ json_basic_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
 
 	fmt.println("=== END JSON load test ===")
 }
+
+
+jsonl_basic_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
+	fmt.println("=== JSONL load test ===")
+
+	df_jsonl := importer.jsonl_load("example_data2.jsonl", importer.DEFAULT_NULL_TOKEN, allocator)
+	w.dataframe_pretty_print(&df_jsonl, 20)
+	w.df_head(&df_jsonl, 5)
+
+	w.destroy_dataframe(&df_jsonl)
+
+	fmt.println("=== END JSONL load test ===")
+}

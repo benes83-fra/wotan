@@ -329,6 +329,7 @@ main :: proc() {
 	sarima_light_demo(context.temp_allocator)
 	sarima_resid_diagnostics_quick_test(context.temp_allocator)
 	json_basic_test(context.temp_allocator)
+	jsonl_basic_test(context.temp_allocator)
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
 	w.destroy_dataframe(&right2)
