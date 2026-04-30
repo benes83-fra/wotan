@@ -27,12 +27,7 @@ json_load :: proc(
 
 	text := string(contents)
 
-	root, err2 := json.parse_string(
-		text,
-		json.DEFAULT_SPECIFICATION,
-		parse_integers = true,
-		allocator = allocator,
-	)
+	root, err2 := json.parse_string(text, json.DEFAULT_SPECIFICATION, true, allocator)
 	if err2 != .None {
 		panic("json_load: invalid JSON")
 	}
@@ -92,7 +87,7 @@ json_load :: proc(
 		}
 	}
 
-	types := make([]w.ColumnType, col_count)
+	types := make([]w.ColumnType, col_count, allocator)
 	for i in 0 ..< col_count {
 		types[i] = infer.infer_column_type(samples[i][:])
 	}
@@ -103,7 +98,7 @@ json_load :: proc(
 	delete(samples)
 
 	df := w.dataframe_new()
-	cols := make([]w.Column, col_count)
+	cols := make([]w.Column, col_count, allocator)
 
 	for i in 0 ..< col_count {
 		cols[i] = w.column_new(keys[i], types[i], len(arr))
