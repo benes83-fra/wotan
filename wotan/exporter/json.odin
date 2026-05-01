@@ -11,11 +11,15 @@ import w "../core"
 // JSON Writer (DataFrame → JSON array of objects)
 // ------------------------------------------------------------
 json_write :: proc(df: ^w.DataFrame, path: string, allocator: mem.Allocator) {
-	arr := json.Array{}
-	defer delete(arr)
+	builder := strings.Builder{}
+	strings.builder_init(&builder, allocator)
+	defer strings.builder_destroy(&builder)
+
+	// opening bracket
+	strings.write_byte(&builder, '[')
+
 	for row in 0 ..< df.rows {
 		obj := json.Object{}
-		defer delete(obj)
 
 		for &col in df.columns {
 			#partial switch col.type {
@@ -84,20 +88,28 @@ json_write :: proc(df: ^w.DataFrame, path: string, allocator: mem.Allocator) {
 			}
 		}
 
-		append(&arr, obj)
+		bytes, err := json.marshal(obj, allocator = allocator)
+		if err != nil {
+			panic("json_write: marshal failed")
+		}
 
+		if row > 0 {
+			strings.write_byte(&builder, ',')
+		}
+		strings.write_string(&builder, string(bytes))
+
+
+		delete(obj) // now safe: no array holds it
 	}
 
-	bytes, err := json.marshal(arr, allocator = allocator)
-	if err != nil {
-		panic("json_write: marshal failed")
-	}
+	// closing bracket
+	strings.write_byte(&builder, ']')
 
-	err2 := os.write_entire_file(path, bytes)
+	final := strings.to_string(builder)
+	err2 := os.write_entire_file(path, transmute([]u8)final)
 	if err2 != nil {
 		panic("json_write: failed to write file")
 	}
-
 }
 
 // ------------------------------------------------------------
