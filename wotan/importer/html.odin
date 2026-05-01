@@ -354,7 +354,6 @@ html_load_table_id :: proc(path: string, id: string, allocator: mem.Allocator) -
 
 	html := string(contents)
 	tables := extract_tables(html)
-	id := "123"
 	needle := fmt.aprintf("id=\"%s\"", id)
 	defer delete(needle)
 

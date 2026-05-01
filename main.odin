@@ -332,6 +332,7 @@ main :: proc() {
 	jsonl_basic_test(context.temp_allocator)
 	json_export_test(context.temp_allocator)
 	html_basic_test(context.temp_allocator)
+	html_extended_test(context.temp_allocator)
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
 	w.destroy_dataframe(&right2)
