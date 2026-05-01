@@ -311,7 +311,7 @@ main :: proc() {
 	adf_test_block(context.temp_allocator)
 	kpss_test_block(context.temp_allocator)
 	stationarity_test_block(context.temp_allocator)
-	auto_arima_stationarity_test(context.temp_allocator)
+	//auto_arima_stationarity_test(context.temp_allocator)
 	//mc_arima_pdq_test(context.temp_allocator)
 	// sarima_mc_test(
 	// 	200,

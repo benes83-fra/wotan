@@ -12,45 +12,80 @@ import w "../core"
 // ------------------------------------------------------------
 json_write :: proc(df: ^w.DataFrame, path: string, allocator: mem.Allocator) {
 	arr := json.Array{}
-
+	defer delete(arr)
 	for row in 0 ..< df.rows {
 		obj := json.Object{}
+		defer delete(obj)
 
 		for &col in df.columns {
-			s := cast(^w.Series)&col // <-- THIS is the correct bridge
-
 			#partial switch col.type {
 			case .Int:
-				v, is_null := w.series_at_int(s, row)
-				obj[col.name] = is_null ? json.Null{} : json.Integer(v)
+				if col.nulls != nil && col.nulls[row] {
+					obj[col.name] = json.Null{}
+				} else {
+					base := uintptr(col.data) + uintptr(row * size_of(int))
+					v := (cast(^int)base)^
+					obj[col.name] = json.Integer(v)
+				}
 
 			case .Float:
-				v, is_null := w.series_at_float(s, row)
-				obj[col.name] = is_null ? json.Null{} : json.Float(v)
+				if col.nulls != nil && col.nulls[row] {
+					obj[col.name] = json.Null{}
+				} else {
+					base := uintptr(col.data) + uintptr(row * size_of(f64))
+					v := (cast(^f64)base)^
+					obj[col.name] = json.Float(v)
+				}
 
 			case .Bool:
-				v, is_null := w.series_at_bool(s, row)
-				obj[col.name] = is_null ? json.Null{} : json.Boolean(v)
+				if col.nulls != nil && col.nulls[row] {
+					obj[col.name] = json.Null{}
+				} else {
+					base := uintptr(col.data) + uintptr(row * size_of(bool))
+					v := (cast(^bool)base)^
+					obj[col.name] = json.Boolean(v)
+				}
 
 			case .String:
-				v, is_null := w.series_at_string(s, row)
-				obj[col.name] = is_null ? json.Null{} : json.String(v)
+				if col.nulls != nil && col.nulls[row] {
+					obj[col.name] = json.Null{}
+				} else {
+					base := uintptr(col.data) + uintptr(row * size_of(string))
+					v := (cast(^string)base)^
+					obj[col.name] = json.String(v)
+				}
 
 			case .Date:
-				v, is_null := w.series_at_date(s, row)
-				obj[col.name] = is_null ? json.Null{} : json.String(w.date_to_string(v))
+				if col.nulls != nil && col.nulls[row] {
+					obj[col.name] = json.Null{}
+				} else {
+					base := uintptr(col.data) + uintptr(row * size_of(w.Date))
+					v := (cast(^w.Date)base)^
+					obj[col.name] = json.String(w.date_to_string(v))
+				}
 
 			case .Time:
-				v, is_null := w.series_at_time(s, row)
-				obj[col.name] = is_null ? json.Null{} : json.String(w.time_to_string(v))
+				if col.nulls != nil && col.nulls[row] {
+					obj[col.name] = json.Null{}
+				} else {
+					base := uintptr(col.data) + uintptr(row * size_of(w.Time))
+					v := (cast(^w.Time)base)^
+					obj[col.name] = json.String(w.time_to_string(v))
+				}
 
 			case .Datetime:
-				v, is_null := w.series_at_datetime(s, row)
-				obj[col.name] = is_null ? json.Null{} : json.String(w.datetime_to_string(v))
+				if col.nulls != nil && col.nulls[row] {
+					obj[col.name] = json.Null{}
+				} else {
+					base := uintptr(col.data) + uintptr(row * size_of(w.Datetime))
+					v := (cast(^w.Datetime)base)^
+					obj[col.name] = json.String(w.datetime_to_string(v))
+				}
 			}
 		}
 
 		append(&arr, obj)
+
 	}
 
 	bytes, err := json.marshal(arr, allocator = allocator)
@@ -62,6 +97,7 @@ json_write :: proc(df: ^w.DataFrame, path: string, allocator: mem.Allocator) {
 	if err2 != nil {
 		panic("json_write: failed to write file")
 	}
+
 }
 
 // ------------------------------------------------------------
@@ -73,38 +109,72 @@ jsonl_write :: proc(df: ^w.DataFrame, path: string, allocator: mem.Allocator) {
 
 	for row in 0 ..< df.rows {
 		obj := json.Object{}
+		defer delete(obj)
 
 		for &col in df.columns {
-			s := cast(^w.Series)&col
-
 			#partial switch col.type {
 			case .Int:
-				v, is_null := w.series_at_int(s, row)
-				obj[col.name] = is_null ? json.Null{} : json.Integer(v)
+				if col.nulls != nil && col.nulls[row] {
+					obj[col.name] = json.Null{}
+				} else {
+					base := uintptr(col.data) + uintptr(row * size_of(int))
+					v := (cast(^int)base)^
+					obj[col.name] = json.Integer(v)
+				}
 
 			case .Float:
-				v, is_null := w.series_at_float(s, row)
-				obj[col.name] = is_null ? json.Null{} : json.Float(v)
+				if col.nulls != nil && col.nulls[row] {
+					obj[col.name] = json.Null{}
+				} else {
+					base := uintptr(col.data) + uintptr(row * size_of(f64))
+					v := (cast(^f64)base)^
+					obj[col.name] = json.Float(v)
+				}
 
 			case .Bool:
-				v, is_null := w.series_at_bool(s, row)
-				obj[col.name] = is_null ? json.Null{} : json.Boolean(v)
+				if col.nulls != nil && col.nulls[row] {
+					obj[col.name] = json.Null{}
+				} else {
+					base := uintptr(col.data) + uintptr(row * size_of(bool))
+					v := (cast(^bool)base)^
+					obj[col.name] = json.Boolean(v)
+				}
 
 			case .String:
-				v, is_null := w.series_at_string(s, row)
-				obj[col.name] = is_null ? json.Null{} : json.String(v)
+				if col.nulls != nil && col.nulls[row] {
+					obj[col.name] = json.Null{}
+				} else {
+					base := uintptr(col.data) + uintptr(row * size_of(string))
+					v := (cast(^string)base)^
+					obj[col.name] = json.String(v)
+				}
 
 			case .Date:
-				v, is_null := w.series_at_date(s, row)
-				obj[col.name] = is_null ? json.Null{} : json.String(w.date_to_string(v))
+				if col.nulls != nil && col.nulls[row] {
+					obj[col.name] = json.Null{}
+				} else {
+					base := uintptr(col.data) + uintptr(row * size_of(w.Date))
+					v := (cast(^w.Date)base)^
+					obj[col.name] = json.String(w.date_to_string(v))
+				}
 
 			case .Time:
-				v, is_null := w.series_at_time(s, row)
-				obj[col.name] = is_null ? json.Null{} : json.String(w.time_to_string(v))
+				if col.nulls != nil && col.nulls[row] {
+					obj[col.name] = json.Null{}
+				} else {
+					base := uintptr(col.data) + uintptr(row * size_of(w.Time))
+					v := (cast(^w.Time)base)^
+					obj[col.name] = json.String(w.time_to_string(v))
+				}
 
 			case .Datetime:
-				v, is_null := w.series_at_datetime(s, row)
-				obj[col.name] = is_null ? json.Null{} : json.String(w.datetime_to_string(v))
+				if col.nulls != nil && col.nulls[row] {
+					obj[col.name] = json.Null{}
+				} else {
+					base := uintptr(col.data) + uintptr(row * size_of(w.Datetime))
+					v := (cast(^w.Datetime)base)^
+					obj[col.name] = json.String(w.datetime_to_string(v))
+				}
 			}
 		}
 

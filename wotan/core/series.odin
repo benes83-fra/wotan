@@ -24,8 +24,9 @@ series_empty :: proc(name: string, type: ColumnType, capacity: int) -> Series {
 	if err != nil {
 		panic("Series: allocation failed")
 	}
+	nulls := make([]bool, capacity)
 
-	return Series{name = name, type = type, len = 0, data = data, nulls = nil}
+	return Series{name = name, type = type, len = 0, data = data, nulls = nulls}
 }
 
 //

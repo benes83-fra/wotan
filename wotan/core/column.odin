@@ -30,14 +30,16 @@ column_new :: proc(
 	if err != nil {
 		panic("Column: allocation failed")
 	}
+	nulls := make([]bool, capacity)
 	return Column {
 		name = name,
 		type = type,
 		len = 0,
 		capacity = capacity,
 		data = data,
-		nulls = nil,
+		nulls = nulls,
 		arena = vmem.Arena{},
+		is_view = false,
 	}
 }
 

@@ -37,7 +37,7 @@ json_export_test :: proc(allocator: mem.Allocator) {
 
 	// Create a DataFrame
 	df := w.dataframe_new()
-
+	defer w.destroy_dataframe(&df)
 	// Create columns
 	col_name := w.column_new("name", .String, 4)
 	col_age := w.column_new("age", .Int, 4)
@@ -76,7 +76,8 @@ json_export_test :: proc(allocator: mem.Allocator) {
 	// Read back and print for verification
 	contents_json, _ := importer.read_file("out.json")
 	contents_jsonl, _ := importer.read_file("out.jsonl")
-
+	defer delete(contents_json)
+	defer delete(contents_jsonl)
 	fmt.println("--- out.json ---")
 	fmt.println(string(contents_json))
 
