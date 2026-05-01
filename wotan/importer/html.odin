@@ -218,28 +218,49 @@ infer_column_types :: proc(tmp: [][]string) -> []w.ColumnType {
 		all_int := true
 		all_float := true
 		all_bool := true
+		all_date := true
+		all_time := true
+		all_datetime := true
 
 		for r in 1 ..< len(tmp) {
 			v := strings.trim_space(tmp[r][c])
+			if v == "" {continue}
 
-			if v == "" {
-				continue
-			}
-
+			// int
 			if _, ok := strconv.parse_int(v); !ok {
 				all_int = false
 			}
 
+			// float
 			if _, ok := strconv.parse_f64(v); !ok {
 				all_float = false
 			}
 
+			// bool
 			if !(v == "true" || v == "false" || v == "TRUE" || v == "FALSE") {
 				all_bool = false
 			}
+
+			// date/time/datetime
+			if !is_date(v) {
+				all_date = false
+			}
+			if !is_time(v) {
+				all_time = false
+			}
+			if !is_datetime(v) {
+				all_datetime = false
+			}
 		}
 
-		if all_int {
+		// precedence: datetime > date > time > int > float > bool > string
+		if all_datetime {
+			types[c] = .Datetime
+		} else if all_date {
+			types[c] = .Date
+		} else if all_time {
+			types[c] = .Time
+		} else if all_int {
 			types[c] = .Int
 		} else if all_float {
 			types[c] = .Float
@@ -252,6 +273,7 @@ infer_column_types :: proc(tmp: [][]string) -> []w.ColumnType {
 
 	return types[:]
 }
+
 append_value :: proc(col: ^w.Column, s: string) {
 	trimmed := strings.trim_space(s)
 
@@ -274,5 +296,127 @@ append_value :: proc(col: ^w.Column, s: string) {
 
 	case .String:
 		w.append_string(col, trimmed)
+	case .Date:
+		date, _ := w.parse_date(trimmed)
+		w.append_date(col, date)
+
+	case .Time:
+		time, _ := w.parse_time(trimmed)
+		w.append_time(col, time)
+
+	case .Datetime:
+		datetime, _ := w.parse_datetime(trimmed)
+		w.append_datetime(col, datetime)
+
 	}
+
+}
+extract_tables :: proc(html: string) -> []string {
+	tables := make([dynamic]string, 0, context.temp_allocator)
+
+	start := 0
+	for {
+		i := strings.index(html[start:], "<table")
+		if i < 0 {break}
+		i += start
+
+		j := strings.index(html[i:], "</table>")
+		if j < 0 {break}
+		j += i + len("</table>")
+
+		table := html[i:j]
+		append(&tables, table)
+
+		start = j
+	}
+
+	return tables[:]
+}
+
+html_load_table_index :: proc(path: string, index: int, allocator: mem.Allocator) -> w.DataFrame {
+	contents, err := read_file(path)
+	if err != nil {panic("html_load: cannot read file")}
+	defer delete(contents)
+
+	html := string(contents)
+	tables := extract_tables(html)
+
+	if index < 0 || index >= len(tables) {
+		return w.dataframe_new()
+	}
+
+	return html_parse_table(tables[index], allocator)
+}
+html_load_table_id :: proc(path: string, id: string, allocator: mem.Allocator) -> w.DataFrame {
+	contents, err := read_file(path)
+	if err != nil {panic("html_load: cannot read file")}
+	defer delete(contents)
+
+	html := string(contents)
+	tables := extract_tables(html)
+	id := "123"
+	needle := fmt.aprintf("id=\"%s\"", id)
+	defer delete(needle)
+
+	for t in tables {
+		if strings.index(t, needle) >= 0 {
+			return html_parse_table(t, allocator)
+		}
+	}
+
+	return w.dataframe_new()
+}
+html_load_all :: proc(path: string, allocator: mem.Allocator) -> []w.DataFrame {
+	contents, err := read_file(path)
+	if err != nil {panic("html_load: cannot read file")}
+	defer delete(contents)
+
+	html := string(contents)
+	tables := extract_tables(html)
+
+	dfs := make([]w.DataFrame, len(tables), allocator)
+
+	for t, i in tables {
+		dfs[i] = html_parse_table(t, allocator)
+	}
+
+	return dfs[:]
+}
+html_parse_table :: proc(table: string, allocator: mem.Allocator) -> w.DataFrame {
+	df := w.dataframe_new()
+
+	rows := extract_rows(table)
+	if len(rows) == 0 {return df}
+
+	tmp := make([][]string, len(rows), allocator)
+
+	for r, r_i in rows {
+		cells := extract_cells(r)
+		tmp[r_i] = make([]string, len(cells), allocator)
+
+		for cell, c_i in cells {
+			clean := strip_html(cell)
+			tmp[r_i][c_i] = clean
+		}
+	}
+
+	header := tmp[0]
+	row_count := len(tmp) - 1
+
+	inferred := infer_column_types(tmp)
+
+	for name, i in header {
+		col := w.column_new(name, inferred[i], row_count)
+		w.add_column(&df, col)
+	}
+
+	for r_i in 1 ..< len(tmp) {
+		row := tmp[r_i]
+		for value, c_i in row {
+			append_value(&df.columns[c_i], value)
+		}
+	}
+
+	df.rows = row_count
+	return df
 }
