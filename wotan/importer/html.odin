@@ -384,9 +384,38 @@ html_load_all :: proc(path: string, allocator: mem.Allocator) -> []w.DataFrame {
 html_parse_table :: proc(table: string, allocator: mem.Allocator) -> w.DataFrame {
 	df := w.dataframe_new()
 
-	rows := extract_rows(table)
-	if len(rows) == 0 {return df}
+	// Collect rows in logical order: thead (header) + tbody (data)
+	rows_dyn := make([dynamic]string, 0, allocator)
 
+	thead := extract_section(table, "thead", allocator)
+	tbody := extract_section(table, "tbody", allocator)
+
+	if thead != "" {
+		rs := extract_rows(thead)
+		for r in rs {
+			append(&rows_dyn, r)
+		}
+	}
+
+	if tbody != "" {
+		rs := extract_rows(tbody)
+		for r in rs {
+			append(&rows_dyn, r)
+		}
+	} else {
+		// Fallback: no <tbody>, use all rows in table
+		rs := extract_rows(table)
+		for r in rs {
+			append(&rows_dyn, r)
+		}
+	}
+
+	rows := rows_dyn[:]
+	if len(rows) == 0 {
+		return df
+	}
+
+	// PASS 1: parse all cells as strings
 	tmp := make([][]string, len(rows), allocator)
 
 	for r, r_i in rows {
@@ -402,13 +431,16 @@ html_parse_table :: proc(table: string, allocator: mem.Allocator) -> w.DataFrame
 	header := tmp[0]
 	row_count := len(tmp) - 1
 
+	// PASS 2: infer column types
 	inferred := infer_column_types(tmp)
 
+	// PASS 3: create columns
 	for name, i in header {
 		col := w.column_new(name, inferred[i], row_count)
 		w.add_column(&df, col)
 	}
 
+	// PASS 4: append values
 	for r_i in 1 ..< len(tmp) {
 		row := tmp[r_i]
 		for value, c_i in row {
@@ -418,4 +450,27 @@ html_parse_table :: proc(table: string, allocator: mem.Allocator) -> w.DataFrame
 
 	df.rows = row_count
 	return df
+}
+
+
+extract_section :: proc(
+	table: string,
+	tag: string,
+	allocator: mem.Allocator = context.temp_allocator,
+) -> string {
+	open_tag := fmt.aprintf("<%s", tag)
+	close_tag := fmt.aprintf("</%s>", tag)
+	defer {
+		delete(open_tag)
+		delete(close_tag)
+	}
+
+	start := strings.index(table, open_tag)
+	if start < 0 {return ""}
+
+	end := strings.index(table[start:], close_tag)
+	if end < 0 {return ""}
+
+	end += start + len(close_tag)
+	return table[start:end]
 }

@@ -69,10 +69,17 @@ test_all :: proc(allocator: mem.Allocator) {
 	}
 }
 
-
 html_extended_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
 	test_extract_tables()
 	test_id(allocator)
 	test_index(allocator)
 	test_all(allocator)
+}
+
+html_tags_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
+	df := importer.html_load_table_id("tag_table.html", "test", allocator)
+	defer w.destroy_dataframe(&df)
+	w.dataframe_pretty_print(&df, 20)
+
+
 }
