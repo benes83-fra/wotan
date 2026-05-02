@@ -1,11 +1,11 @@
-package main
+package tests
 
+import w "../wotan/core"
+import exporter "../wotan/exporter"
+import importer "../wotan/importer"
 import "core:fmt"
 import "core:mem"
 import "core:os"
-import w "wotan/core"
-import exporter "wotan/exporter"
-import importer "wotan/importer"
 
 json_basic_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
 	fmt.println("=== JSON load test ===")

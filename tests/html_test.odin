@@ -1,7 +1,7 @@
-package main
-import w "./wotan/core"
-import exporter "./wotan/exporter"
-import importer "./wotan/importer"
+package tests
+import w "../wotan/core"
+import exporter "../wotan/exporter"
+import importer "../wotan/importer"
 import "core:fmt"
 import "core:mem"
 

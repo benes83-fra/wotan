@@ -1,6 +1,6 @@
-package main
+package tests
 
-import w "./wotan/core"
+import w "../wotan/core"
 import "core:fmt"
 import "core:math"
 import "core:mem"

@@ -1,8 +1,8 @@
-package main
+package tests
 
 import "core:fmt"
 
-import w "./wotan/core"
+import w "../wotan/core"
 
 
 groupby2_test :: proc() {

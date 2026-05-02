@@ -1,9 +1,9 @@
-package main
+package tests
 
 import "core:fmt"
 import "core:mem"
 
-import w "./wotan/core"
+import w "../wotan/core"
 
 pca_test :: proc(allocator: mem.Allocator) {
 	fmt.println("PCA Test...........")
