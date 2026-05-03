@@ -344,15 +344,7 @@ cell_value :: proc(cell_xml: string, shared: []string, styles_is_date: []bool) -
 				if ok2 {
 					dt := excel_serial_to_datetime(f)
 					// return ISO string
-					return fmt.aprintf(
-						"%04d-%02d-%02d %02d:%02d:%02d",
-						dt.year,
-						dt.month,
-						dt.day,
-						dt.hour,
-						dt.minute,
-						dt.second,
-					)
+					return w.datetime_to_string(dt)
 				}
 			}
 		}
@@ -695,7 +687,7 @@ parse_styles_date_formats :: proc(xml: string, allocator: mem.Allocator) -> []bo
 }
 looks_like_date_format :: proc(code: string) -> bool {
 	lower := strings.to_lower(code)
-
+	defer delete(lower)
 	// detect date formats (must contain day + month)
 	if strings.contains(lower, "d") && strings.contains(lower, "m") {
 		return true

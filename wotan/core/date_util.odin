@@ -130,7 +130,7 @@ time_to_string :: proc(t: Time) -> string {
 	sb := strings.builder_make()
 	defer strings.builder_destroy(&sb)
 
-	fmt.sbprintf(&sb, "%02d:%02d%02d", t.hour, t.minute, t.second)
+	fmt.sbprintf(&sb, "%02d:%02d:%02d", t.hour, t.minute, t.second)
 
 	return strings.to_string(sb)
 
@@ -142,7 +142,7 @@ datetime_to_string :: proc(dt: Datetime) -> string {
 
 	fmt.sbprintf(
 		&sb,
-		"%04d-%02d-%02d 02d:%02d%02d",
+		"%04d-%02d-%02d %02d:%02d:%02d",
 		dt.year,
 		dt.month,
 		dt.day,
