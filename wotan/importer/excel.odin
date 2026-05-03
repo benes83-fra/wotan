@@ -28,7 +28,7 @@ RelInfo :: struct {
 xlsx_load :: proc(path: string, allocator: mem.Allocator) -> w.DataFrame {
 	df := w.dataframe_new()
 
-
+	fmt.println(path)
 	sheets := discover_sheets(path, allocator)
 	if len(sheets) == 0 {
 		fmt.println("No sheets found.")
@@ -51,10 +51,17 @@ xlsx_load :: proc(path: string, allocator: mem.Allocator) -> w.DataFrame {
 		return df
 	}
 
-	rows := parse_sheet_to_grid(string(sheet_bytes), shared, allocator)
+	styles_bytes, ok_styles := zm.zip_read_file(path, "xl/styles.xml", allocator)
+	styles_is_date := []bool{}
+	if ok_styles {
+		styles_is_date = parse_styles_date_formats(string(styles_bytes), allocator)
+	}
+	rows := parse_sheet_to_grid(string(sheet_bytes), shared, styles_is_date, allocator)
+
 	if len(rows) == 0 {
 		return df
 	}
+
 
 	header := rows[0]
 	row_count := len(rows) - 1
@@ -154,6 +161,7 @@ parse_shared_strings :: proc(xml: string, allocator: mem.Allocator) -> []string 
 parse_sheet_to_grid :: proc(
 	xml: string,
 	shared: []string,
+	styles_is_date: []bool,
 	allocator: mem.Allocator,
 ) -> [][]string {
 	rows_dyn := make([dynamic][]string, 0, allocator)
@@ -173,7 +181,8 @@ parse_sheet_to_grid :: proc(
 		j += i + len("</row>")
 
 		row_xml := xml[i:j]
-		row := parse_row(row_xml, shared, allocator)
+		row := parse_row(row_xml, shared, styles_is_date, allocator)
+
 		append(&rows_dyn, row)
 
 		start = j
@@ -182,7 +191,12 @@ parse_sheet_to_grid :: proc(
 	return rows_dyn[:]
 }
 
-parse_row :: proc(row_xml: string, shared: []string, allocator: mem.Allocator) -> []string {
+parse_row :: proc(
+	row_xml: string,
+	shared: []string,
+	styles_is_date: []bool,
+	allocator: mem.Allocator,
+) -> []string {
 	row := make([dynamic]string, 0, allocator)
 
 	start := 0
@@ -202,7 +216,8 @@ parse_row :: proc(row_xml: string, shared: []string, allocator: mem.Allocator) -
 		cell_xml := row_xml[i:j]
 
 		col_idx := cell_ref_to_col(cell_xml)
-		val := cell_value(cell_xml, shared)
+		val := cell_value(cell_xml, shared, styles_is_date)
+
 
 		// ensure capacity
 		if col_idx >= len(row) {
@@ -246,23 +261,59 @@ cell_ref_to_col :: proc(cell_xml: string) -> int {
 	}
 	return col - 1 // zero-based
 }
-
-cell_value :: proc(cell_xml: string, shared: []string) -> string {
-	// type attribute: t="s" => shared string
-	is_shared := false
+cell_value :: proc(cell_xml: string, shared: []string, styles_is_date: []bool) -> string {
+	// detect type attribute
 	t_pos := strings.index(cell_xml, " t=\"")
+	cell_type := ""
 	if t_pos >= 0 {
 		t_pos += len(" t=\"")
 		end := t_pos
 		for end < len(cell_xml) && cell_xml[end] != '"' {
 			end += 1
 		}
-		tval := cell_xml[t_pos:end]
-		if tval == "s" {
-			is_shared = true
-		}
+		cell_type = cell_xml[t_pos:end]
 	}
 
+	// --- inline string: <c t="inlineStr"><is><t>TEXT</t></is></c> ---
+	if cell_type == "inlineStr" {
+		t_start := strings.index(cell_xml, "<t")
+		if t_start >= 0 {
+			gt := strings.index(cell_xml[t_start:], ">")
+			if gt >= 0 {
+				gt += t_start + 1
+				t_end := strings.index(cell_xml[gt:], "</t>")
+				if t_end >= 0 {
+					t_end += gt
+					return cell_xml[gt:t_end]
+				}
+			}
+		}
+		return ""
+	}
+
+	// --- shared string: <c t="s"><v>index</v></c> ---
+	if cell_type == "s" {
+		v_start := strings.index(cell_xml, "<v>")
+		if v_start < 0 {
+			return ""
+		}
+		v_start += len("<v>")
+		v_end := strings.index(cell_xml[v_start:], "</v>")
+		if v_end < 0 {
+			return ""
+		}
+		v_end += v_start
+
+		raw := cell_xml[v_start:v_end]
+		idx, ok := strconv.parse_int(raw)
+		if ok && idx >= 0 && idx < len(shared) {
+			return shared[idx]
+		}
+		return ""
+	}
+
+	// --- normal numeric / boolean / text ---
+	// --- normal numeric / boolean / text ---
 	v_start := strings.index(cell_xml, "<v>")
 	if v_start < 0 {
 		return ""
@@ -276,16 +327,42 @@ cell_value :: proc(cell_xml: string, shared: []string) -> string {
 
 	raw := cell_xml[v_start:v_end]
 
-	if is_shared {
-		idx, ok := strconv.parse_int(raw)
-		if ok && idx >= 0 && idx < len(shared) {
-			return shared[idx]
+	// --- DATE DETECTION ---
+	s_pos := strings.index(cell_xml, " s=\"")
+	if s_pos >= 0 {
+		s_pos += len(" s=\"")
+		end := s_pos
+		for end < len(cell_xml) && cell_xml[end] != '"' {
+			end += 1
 		}
-		return ""
+		s_idx_str := cell_xml[s_pos:end]
+		s_idx, ok := strconv.parse_int(s_idx_str)
+		if ok && s_idx >= 0 && s_idx < len(styles_is_date) {
+			if styles_is_date[s_idx] {
+				// convert Excel serial → your Datetime
+				f, ok2 := strconv.parse_f64(raw)
+				if ok2 {
+					dt := excel_serial_to_datetime(f)
+					// return ISO string
+					return fmt.aprintf(
+						"%04d-%02d-%02d %02d:%02d:%02d",
+						dt.year,
+						dt.month,
+						dt.day,
+						dt.hour,
+						dt.minute,
+						dt.second,
+					)
+				}
+			}
+		}
 	}
 
+	// fallback: numeric or text
 	return raw
+
 }
+
 
 // ------------------------------------------------------------
 // Type inference + append (reuse pattern from HTML importer)
@@ -532,4 +609,133 @@ discover_sheets :: proc(path: string, allocator: mem.Allocator) -> []SheetInfo {
 	}
 
 	return sheets[:]
+}
+parse_styles_date_formats :: proc(xml: string, allocator: mem.Allocator) -> []bool {
+	// result: for each style index, true if it's a date/time format
+	is_date := make([dynamic]bool, 0, allocator)
+
+	// 1) extract <numFmt> custom formats
+	custom := make(map[int]string, allocator)
+	start := 0
+	for {
+		i := strings.index(xml[start:], "<numFmt ")
+		if i < 0 {break}
+		i += start
+		j := strings.index(xml[i:], ">")
+		if j < 0 {break}
+		j += i + 1
+
+		tag := xml[i:j]
+		attrs := parse_attrs(tag, allocator)
+
+		if id_str, ok := attrs["numFmtId"]; ok {
+			if code, ok2 := attrs["formatCode"]; ok2 {
+				id, ok3 := strconv.parse_int(id_str)
+				if ok3 {
+					custom[id] = code
+				}
+			}
+		}
+		start = j
+	}
+
+	// 2) extract <xf> entries (cell formats)
+	start = 0
+	for {
+		i := strings.index(xml[start:], "<xf ")
+		if i < 0 {break}
+		i += start
+		j := strings.index(xml[i:], ">")
+		if j < 0 {break}
+		j += i + 1
+
+		tag := xml[i:j]
+		attrs := parse_attrs(tag, allocator)
+
+		is_date_format := false
+
+		if numFmtId_str, ok := attrs["numFmtId"]; ok {
+			numFmtId, ok2 := strconv.parse_int(numFmtId_str)
+			if ok2 {
+				// built-in date formats
+				// built-in DATE formats
+				if numFmtId == 14 ||
+				   numFmtId == 15 ||
+				   numFmtId == 16 ||
+				   numFmtId == 17 ||
+				   numFmtId == 22 {
+					is_date_format = true
+				}
+
+				// built-in TIME formats
+				if numFmtId == 18 ||
+				   numFmtId == 19 ||
+				   numFmtId == 20 ||
+				   numFmtId == 21 ||
+				   numFmtId == 45 ||
+				   numFmtId == 46 ||
+				   numFmtId == 47 {
+					is_date_format = true
+				}
+
+				// custom date formats
+				if code, ok3 := custom[numFmtId]; ok3 {
+					if looks_like_date_format(code) {
+						is_date_format = true
+					}
+				}
+			}
+		}
+
+		append(&is_date, is_date_format)
+		start = j
+	}
+
+	return is_date[:]
+}
+looks_like_date_format :: proc(code: string) -> bool {
+	lower := strings.to_lower(code)
+
+	// detect date formats (must contain day + month)
+	if strings.contains(lower, "d") && strings.contains(lower, "m") {
+		return true
+	}
+
+	// detect time formats (must contain hour or second)
+	if strings.contains(lower, "h") || strings.contains(lower, "s") {
+		return true
+	}
+
+	return false
+}
+
+
+excel_serial_to_datetime :: proc(n: f64) -> w.Datetime {
+	// Excel epoch: 1899-12-31
+	base := w.Date {
+		year  = 1899,
+		month = 12,
+		day   = 31,
+	}
+
+	days := i32(n)
+	frac := n - f64(days)
+
+	// Excel's fake leap day: serial 60 = 1900-02-29
+	if days >= 60 {
+		days -= 1
+	}
+
+	// add days
+	date := w.add_day_date(base, days)
+
+	// time of day
+	total_seconds := int(frac * 86400.0)
+	hour := i32(total_seconds / 3600)
+	minute := i32((total_seconds % 3600) / 60)
+	second := i32(total_seconds % 60)
+
+	time := w.Time{hour, minute, second}
+
+	return w.new_Datetime_from_Date_and_Time(date, time)
 }

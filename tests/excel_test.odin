@@ -32,3 +32,16 @@ zip_smoke_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
 	}
 	fmt.println("=== END ZIP SMOKE TEST ===")
 }
+
+excel_date_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
+	fmt.println("=== EXCEL DATE TEST ===")
+
+	df := importer.xlsx_load("datetime.xlsx", allocator)
+
+	w.dataframe_pretty_print(&df, 20)
+	w.df_head(&df, 10)
+
+	w.destroy_dataframe(&df)
+
+	fmt.println("=== END EXCEL DATE TEST ===")
+}
