@@ -3,9 +3,23 @@ package importer
 import w "../core"
 import zm "../zip_min"
 
+import "core:fmt"
 import "core:mem"
 import "core:strconv"
 import "core:strings"
+
+
+SheetInfo :: struct {
+	name: string,
+	rid:  string,
+	path: string, // resolved "xl/worksheets/....xml"
+}
+
+RelInfo :: struct {
+	id:     string,
+	target: string,
+}
+
 
 // ------------------------------------------------------------
 // Public API
@@ -14,18 +28,25 @@ import "core:strings"
 xlsx_load :: proc(path: string, allocator: mem.Allocator) -> w.DataFrame {
 	df := w.dataframe_new()
 
+
+	sheets := discover_sheets(path, allocator)
+	if len(sheets) == 0 {
+		fmt.println("No sheets found.")
+		return df
+	}
+	first_sheet := sheets[0]
+
 	// 1) sharedStrings (optional)
 	shared_bytes, ok_shared := zm.zip_read_file(path, "xl/sharedStrings.xml", allocator)
 	defer if ok_shared {delete(shared_bytes)}
-
 
 	shared := []string{}
 	if ok_shared {
 		shared = parse_shared_strings(string(shared_bytes), allocator)
 	}
 
-	// 2) first worksheet: sheet1.xml
-	sheet_bytes, ok_sheet := zm.zip_read_file(path, "xl/worksheets/sheet1.xml", allocator)
+	// 2) load first worksheet by resolved path
+	sheet_bytes, ok_sheet := zm.zip_read_file(path, first_sheet.path, allocator)
 	if !ok_sheet {
 		return df
 	}
@@ -36,27 +57,44 @@ xlsx_load :: proc(path: string, allocator: mem.Allocator) -> w.DataFrame {
 		return df
 	}
 
-	// 3) Build DataFrame (same pattern as HTML importer)
 	header := rows[0]
 	row_count := len(rows) - 1
 
 	inferred := infer_column_types_excel(rows)
 
 	for name, i in header {
-		col := w.column_new(name, inferred[i], row_count)
+		safe_name := name
+
+		// Optional: avoid empty names
+		if strings.trim_space(safe_name) == "" {
+			safe_name = fmt.aprintf("col_%d", i) // allocates a fresh string
+		} else {
+			// Force a copy so we don't keep a pointer into the XML buffer arena
+			safe_name = fmt.aprintf("%s", safe_name)
+		}
+
+		col := w.column_new(safe_name, inferred[i], row_count)
 		w.add_column(&df, col)
 	}
 
 	for r_i in 1 ..< len(rows) {
 		row := rows[r_i]
-		for value, c_i in row {
-			append_value_excel(&df.columns[c_i], value)
+
+		// iterate over all columns defined by the header
+		for c_i in 0 ..< len(header) {
+			val := ""
+			if c_i < len(row) {
+				val = row[c_i]
+			}
+			append_value_excel(&df.columns[c_i], val)
 		}
 	}
+
 
 	df.rows = row_count
 	return df
 }
+
 
 // ------------------------------------------------------------
 // Shared strings
@@ -318,4 +356,180 @@ append_value_excel :: proc(col: ^w.Column, s: string) {
 	case .String:
 		w.append_string(col, trimmed)
 	}
+}
+parse_attrs :: proc(tag: string, allocator: mem.Allocator) -> map[string]string {
+	attrs := make(map[string]string, allocator)
+	i := 0
+	// skip until first space or end
+	for i < len(tag) &&
+	    tag[i] != ' ' &&
+	    tag[i] != '\t' &&
+	    tag[i] != '\r' &&
+	    tag[i] != '\n' &&
+	    tag[i] != '>' &&
+	    tag[i] != '/' {
+		i += 1
+	}
+	for i < len(tag) {
+		// skip whitespace
+		for i < len(tag) && (tag[i] == ' ' || tag[i] == '\t' || tag[i] == '\r' || tag[i] == '\n') {
+			i += 1
+		}
+		if i >= len(tag) || tag[i] == '>' || tag[i] == '/' {
+			break
+		}
+		// parse key
+		key_start := i
+		for i < len(tag) &&
+		    tag[i] != '=' &&
+		    tag[i] != ' ' &&
+		    tag[i] != '\t' &&
+		    tag[i] != '\r' &&
+		    tag[i] != '\n' &&
+		    tag[i] != '>' {
+			i += 1
+		}
+		key_end := i
+		// skip whitespace
+		for i < len(tag) && (tag[i] == ' ' || tag[i] == '\t' || tag[i] == '\r' || tag[i] == '\n') {
+			i += 1
+		}
+		if i >= len(tag) || tag[i] != '=' {
+			break
+		}
+		i += 1 // skip '='
+		// skip whitespace
+		for i < len(tag) && (tag[i] == ' ' || tag[i] == '\t' || tag[i] == '\r' || tag[i] == '\n') {
+			i += 1
+		}
+		if i >= len(tag) || tag[i] != '"' {
+			break
+		}
+		i += 1 // skip opening quote
+		val_start := i
+		for i < len(tag) && tag[i] != '"' {
+			i += 1
+		}
+		val_end := i
+		if i < len(tag) && tag[i] == '"' {
+			i += 1
+		}
+
+		key := tag[key_start:key_end]
+		val := tag[val_start:val_end]
+		attrs[key] = val
+	}
+	return attrs
+}
+parse_workbook_sheets :: proc(xml: string, allocator: mem.Allocator) -> []SheetInfo {
+	sheets := make([dynamic]SheetInfo, 0, allocator)
+
+	start := 0
+	for {
+		// match <sheet or <x:sheet
+		i := strings.index(xml[start:], "<sheet")
+		if i < 0 {
+			i = strings.index(xml[start:], "<x:sheet")
+			if i < 0 {
+				break
+			}
+		}
+		i += start
+		j := strings.index(xml[i:], ">")
+		if j < 0 {
+			break
+		}
+		j += i + 1
+		tag := xml[i:j]
+		attrs := parse_attrs(tag, allocator)
+
+		si := SheetInfo{}
+		if name, ok := attrs["name"]; ok {
+			si.name = name
+		}
+		if rid, ok := attrs["r:id"]; ok {
+			si.rid = rid
+		}
+		append(&sheets, si)
+		start = j
+	}
+
+	return sheets[:]
+}
+
+
+parse_rels :: proc(xml: string, allocator: mem.Allocator) -> []RelInfo {
+	rels := make([dynamic]RelInfo, 0, allocator)
+
+	start := 0
+	for {
+		i := strings.index(xml[start:], "<Relationship ")
+		if i < 0 {
+			break
+		}
+		i += start
+
+		j := strings.index(xml[i:], ">")
+		if j < 0 {
+			break
+		}
+		j += i + 1
+
+		tag := xml[i:j]
+		attrs := parse_attrs(tag, allocator)
+
+		r := RelInfo{}
+		if id, ok := attrs["Id"]; ok {
+			r.id = id
+		}
+		if target, ok := attrs["Target"]; ok {
+			r.target = target
+		}
+
+		append(&rels, r)
+		start = j
+	}
+
+	return rels[:]
+}
+discover_sheets :: proc(path: string, allocator: mem.Allocator) -> []SheetInfo {
+	sheets := make([dynamic]SheetInfo, 0, allocator)
+	wb_bytes, ok_wb := zm.zip_read_file(path, "xl/workbook.xml", allocator)
+	if !ok_wb {
+		return sheets[:]
+	}
+	//defer delete(wb_bytes)
+	rel_bytes, ok_rels := zm.zip_read_file(path, "xl/_rels/workbook.xml.rels", allocator)
+	if !ok_rels {
+		rel_bytes, ok_rels = zm.zip_read_file(path, "xl/rels/workbook.xml.rels", allocator)
+	}
+	if !ok_rels {
+		fmt.println("Warning: workbook.xml.rels not found in either location")
+		return sheets[:]
+	}
+
+	//defer delete(rel_bytes)
+	fmt.println("Read workbook.xml and rels, sizes:", len(wb_bytes), len(rel_bytes))
+	wb_xml := string(wb_bytes)
+	rel_xml := string(rel_bytes)
+
+	wb_sheets := parse_workbook_sheets(wb_xml, allocator)
+	fmt.println("Found sheet in workbook.xml:", wb_sheets)
+	rels := parse_rels(rel_xml, allocator)
+
+	for &s in wb_sheets {
+		for r in rels {
+			if s.rid == r.id {
+				// only take worksheet targets
+				if strings.index(r.target, "worksheets/") >= 0 {
+					pth := fmt.aprintf("xl/%s", r.target)
+					s.path = pth
+					append(&sheets, s)
+				}
+				break
+			}
+		}
+	}
+
+	return sheets[:]
 }

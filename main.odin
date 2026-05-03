@@ -337,6 +337,7 @@ main :: proc() {
 	test.html_tags_test(context.temp_allocator)
 	test.html_export_test(context.temp_allocator)
 	test.excel_basic_test(context.temp_allocator)
+	test.zip_smoke_test(context.temp_allocator)
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
 	w.destroy_dataframe(&right2)

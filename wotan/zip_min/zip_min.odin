@@ -3,6 +3,7 @@ package zip_min
 import "core:bytes"
 import "core:compress"
 import "core:compress/zlib"
+import "core:fmt"
 import "core:mem"
 import "core:os"
 
@@ -142,7 +143,6 @@ read_local_and_inflate :: proc(
 	} else if lfh.compression_method == 8 {
 		buf := bytes.Buffer{}
 
-		// backing storage for the buffer
 		capacity := int(lfh.uncompressed_size)
 		if capacity <= 0 {
 			capacity = 0
@@ -161,9 +161,10 @@ read_local_and_inflate :: proc(
 		}
 
 		out := bytes.buffer_to_bytes(&buf)
-		bytes.buffer_destroy(&buf)
+		// DO NOT destroy buf here – its backing is now logically owned by `out`
 		return out, true
 	}
+
 
 	return nil, false
 }
@@ -175,20 +176,20 @@ zip_read_file :: proc(path: string, filename: string, allocator: mem.Allocator) 
 	}
 	// caller must delete(data) after use if needed
 	// but we’ll copy out the payload into its own buffer
-
 	eocd, ok := find_eocd(data)
 	if !ok {
-		delete(data)
+
 		return nil, false
 	}
 
 	cdh, ok2 := find_central_entry(data, eocd, filename)
 	if !ok2 {
-		delete(data)
+
 		return nil, false
 	}
 
 	out, ok3 := read_local_and_inflate(data, cdh, allocator)
+
 
 	return out, ok3
 }
@@ -198,11 +199,10 @@ zip_list :: proc(path: string, allocator: mem.Allocator) -> ([]string, bool) {
 	if err != nil {
 		return nil, false
 	}
-	defer delete(data)
 
 	eocd, ok := find_eocd(data)
 	if !ok {
-		delete(data)
+
 		return nil, false
 	}
 
