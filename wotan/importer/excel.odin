@@ -38,7 +38,7 @@ xlsx_load :: proc(path: string, allocator: mem.Allocator) -> w.DataFrame {
 
 	// 1) sharedStrings (optional)
 	shared_bytes, ok_shared := zm.zip_read_file(path, "xl/sharedStrings.xml", allocator)
-	defer if ok_shared {delete(shared_bytes)}
+	// defer if ok_shared {delete(shared_bytes)}
 
 	shared := []string{}
 	if ok_shared {
@@ -50,7 +50,6 @@ xlsx_load :: proc(path: string, allocator: mem.Allocator) -> w.DataFrame {
 	if !ok_sheet {
 		return df
 	}
-	defer delete(sheet_bytes)
 
 	rows := parse_sheet_to_grid(string(sheet_bytes), shared, allocator)
 	if len(rows) == 0 {
@@ -68,9 +67,11 @@ xlsx_load :: proc(path: string, allocator: mem.Allocator) -> w.DataFrame {
 		// Optional: avoid empty names
 		if strings.trim_space(safe_name) == "" {
 			safe_name = fmt.aprintf("col_%d", i) // allocates a fresh string
+			defer delete(safe_name)
 		} else {
 			// Force a copy so we don't keep a pointer into the XML buffer arena
 			safe_name = fmt.aprintf("%s", safe_name)
+			defer delete(safe_name)
 		}
 
 		col := w.column_new(safe_name, inferred[i], row_count)
@@ -509,12 +510,10 @@ discover_sheets :: proc(path: string, allocator: mem.Allocator) -> []SheetInfo {
 	}
 
 	//defer delete(rel_bytes)
-	fmt.println("Read workbook.xml and rels, sizes:", len(wb_bytes), len(rel_bytes))
 	wb_xml := string(wb_bytes)
 	rel_xml := string(rel_bytes)
 
 	wb_sheets := parse_workbook_sheets(wb_xml, allocator)
-	fmt.println("Found sheet in workbook.xml:", wb_sheets)
 	rels := parse_rels(rel_xml, allocator)
 
 	for &s in wb_sheets {
@@ -523,6 +522,7 @@ discover_sheets :: proc(path: string, allocator: mem.Allocator) -> []SheetInfo {
 				// only take worksheet targets
 				if strings.index(r.target, "worksheets/") >= 0 {
 					pth := fmt.aprintf("xl/%s", r.target)
+					defer delete(pth)
 					s.path = pth
 					append(&sheets, s)
 				}

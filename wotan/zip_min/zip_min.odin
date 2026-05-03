@@ -154,7 +154,11 @@ read_local_and_inflate :: proc(
 			input_data = comp,
 			output     = &buf,
 		}
-		err := zlib.inflate_raw(&ctx, expected_output_size = int(lfh.uncompressed_size))
+		err := zlib.inflate_raw(
+			&ctx,
+			expected_output_size = int(lfh.uncompressed_size),
+			allocator = allocator,
+		)
 		if err != nil {
 			bytes.buffer_destroy(&buf)
 			return nil, false
