@@ -1,10 +1,10 @@
 package tests
 
 
+import analytic "../wotan/analytics"
 import w "../wotan/core"
 import "core:fmt"
 import "core:mem"
-
 
 rolling_test :: proc(allocator: mem.Allocator) {
 	df := w.dataframe_new()
@@ -18,8 +18,8 @@ rolling_test :: proc(allocator: mem.Allocator) {
 
 	w.add_column(&df, col)
 	df.rows = 5
-	rw := w.rolling_window(&df, "value", 3, 1)
-	result := w.rolling_apply(
+	rw := analytic.rolling_window(&df, "value", 3, 1)
+	result := analytic.rolling_apply(
 		rw,
 		w.Aggregator{name = "rolling_mean", column = "value", kind = .Mean},
 	)
@@ -34,38 +34,38 @@ rolling_test :: proc(allocator: mem.Allocator) {
 	w.append_float(&colf, 5.0)
 	w.add_column(&df, colf)
 	df.rows = 5
-	rwf := w.rolling_window(&df, "value_f", 3, 1)
-	resultf := w.rolling_apply(
+	rwf := analytic.rolling_window(&df, "value_f", 3, 1)
+	resultf := analytic.rolling_apply(
 		rwf,
 		w.Aggregator{name = "rolling_mean", column = "value_f", kind = .Mean},
 	)
 	defer w.destroy_column(&resultf)
 	print_result_float(&resultf)
 
-	rwm := w.rolling_window(&df, "value_f", 3, 1)
-	resultm := w.rolling_apply(rwm, w.make_median_agg("rolling_median", "value_f"))
+	rwm := analytic.rolling_window(&df, "value_f", 3, 1)
+	resultm := analytic.rolling_apply(rwm, w.make_median_agg("rolling_median", "value_f"))
 	defer w.destroy_column(&resultm)
 	print_result_float(&resultm)
-	rwq := w.rolling_window(&df, "value_f", 3, 1)
-	resultq := w.rolling_apply(rwq, w.make_quantile_agg("q25", "value_f", 0.25))
+	rwq := analytic.rolling_window(&df, "value_f", 3, 1)
+	resultq := analytic.rolling_apply(rwq, w.make_quantile_agg("q25", "value_f", 0.25))
 	defer w.destroy_column(&resultq)
 
 
 	print_result_float(&resultq)
-	rwe := w.rolling_window(&df, "value_f", 3, 1)
-	resulte := w.rolling_apply(rwe, w.make_ewm_mean("ewm", "value_f", 0.5))
+	rwe := analytic.rolling_window(&df, "value_f", 3, 1)
+	resulte := analytic.rolling_apply(rwe, analytic.make_ewm_mean("ewm", "value_f", 0.5))
 	print_result_float(&resulte)
 	defer w.destroy_column(&resulte)
-	rwev := w.rolling_window(&df, "value_f", 3, 1)
-	resultv := w.rolling_apply(rwev, w.make_ewm_var("ewm_var", "value_f", 0.5))
+	rwev := analytic.rolling_window(&df, "value_f", 3, 1)
+	resultv := analytic.rolling_apply(rwev, analytic.make_ewm_var("ewm_var", "value_f", 0.5))
 
 
 	print_result_float(&resultv)
 
 	// --- EWM STD (adjust=False) ---
 	fmt.println("EWM STD (alpha=0.5, adjust=False)")
-	rws := w.rolling_window(&df, "value_f", 3, 1)
-	results := w.rolling_apply(
+	rws := analytic.rolling_window(&df, "value_f", 3, 1)
+	results := analytic.rolling_apply(
 	rws,
 	w.Aggregator {
 		name   = "ewm_std",
@@ -79,8 +79,8 @@ rolling_test :: proc(allocator: mem.Allocator) {
 
 	// --- EWM VAR (adjust=True) ---
 	fmt.println("EWM VAR (alpha=0.5, adjust=True)")
-	rwvat := w.rolling_window(&df, "value_f", 3, 1)
-	resultvat := w.rolling_apply_float_ewm_var_adjust_true(
+	rwvat := analytic.rolling_window(&df, "value_f", 3, 1)
+	resultvat := analytic.rolling_apply_float_ewm_var_adjust_true(
 		rwvat,
 		w.Aggregator{name = "ewm_var_adj", column = "value_f", kind = .EWM_Var, alpha = 0.5},
 		allocator,
@@ -90,8 +90,8 @@ rolling_test :: proc(allocator: mem.Allocator) {
 
 	// --- EWM STD (adjust=True) ---
 	fmt.println("EWM STD (alpha=0.5, adjust=True)")
-	rwstat := w.rolling_window(&df, "value_f", 3, 1)
-	resultstat := w.rolling_apply_float_ewm_std(
+	rwstat := analytic.rolling_window(&df, "value_f", 3, 1)
+	resultstat := analytic.rolling_apply_float_ewm_std(
 		rwstat,
 		w.Aggregator{name = "ewm_std_adj", column = "value_f", kind = .EWM_Std, alpha = 0.5},
 		allocator,
@@ -110,8 +110,8 @@ rolling_test :: proc(allocator: mem.Allocator) {
 	w.add_column(&df, covf2)
 	df.rows = 5
 
-	rwcovf := w.rolling_window(&df, "cov_a", 3, 1)
-	resultcovf := w.rolling_apply_float_ewm_cov_adjust_false(
+	rwcovf := analytic.rolling_window(&df, "cov_a", 3, 1)
+	resultcovf := analytic.rolling_apply_float_ewm_cov_adjust_false(
 		rwcovf,
 		&covf2,
 		w.Aggregator{name = "ewm_cov_f", column = "cov_a", kind = .EWM_Cov, alpha = 0.5},
@@ -131,8 +131,8 @@ rolling_test :: proc(allocator: mem.Allocator) {
 	w.add_column(&df, covi2)
 	df.rows = 5
 
-	rwcovi := w.rolling_window(&df, "cov_i_a", 3, 1)
-	resultcovi := w.rolling_apply_int_ewm_cov_adjust_false(
+	rwcovi := analytic.rolling_window(&df, "cov_i_a", 3, 1)
+	resultcovi := analytic.rolling_apply_int_ewm_cov_adjust_false(
 		rwcovi,
 		&covi2,
 		w.Aggregator{name = "ewm_cov_i", column = "cov_i_a", kind = .EWM_Cov, alpha = 0.5},
@@ -143,8 +143,8 @@ rolling_test :: proc(allocator: mem.Allocator) {
 
 	// --- EWM COV float–float (adjust=True) ---
 	fmt.println("EWM COV float - float (alpha=0.5, adjust=True)")
-	rwcovfat := w.rolling_window(&df, "cov_a", 3, 1)
-	resultcovfat := w.rolling_apply_float_ewm_cov(
+	rwcovfat := analytic.rolling_window(&df, "cov_a", 3, 1)
+	resultcovfat := analytic.rolling_apply_float_ewm_cov(
 		rwcovfat,
 		&covf2,
 		w.Aggregator{name = "ewm_cov_f_adj", column = "cov_a", kind = .EWM_Cov, alpha = 0.5},
@@ -155,8 +155,8 @@ rolling_test :: proc(allocator: mem.Allocator) {
 
 	// --- EWM COV int–int (adjust=True) ---
 	fmt.println("EWM COV int - int (alpha=0.5, adjust=True)")
-	rwcoviat := w.rolling_window(&df, "cov_i_a", 3, 1)
-	resultcoviat := w.rolling_apply_int_ewm_cov(
+	rwcoviat := analytic.rolling_window(&df, "cov_i_a", 3, 1)
+	resultcoviat := analytic.rolling_apply_int_ewm_cov(
 		rwcoviat,
 		&covi2,
 		w.Aggregator{name = "ewm_cov_i_adj", column = "cov_i_a", kind = .EWM_Cov, alpha = 0.5},
@@ -172,18 +172,18 @@ rolling_test :: proc(allocator: mem.Allocator) {
 	w.add_column(&df, constf)
 	df.rows = 5
 
-	rw_const := w.rolling_window(&df, "const_f", 5, 1)
+	rw_const := analytic.rolling_window(&df, "const_f", 5, 1)
 
-	res_const_unbiased := w.rolling_apply(
+	res_const_unbiased := analytic.rolling_apply(
 		rw_const,
-		w.make_ewm_var("const_var_unbiased", "const_f", 0.5, false),
+		analytic.make_ewm_var("const_var_unbiased", "const_f", 0.5, false),
 	)
 	print_result_float(&res_const_unbiased)
 	w.destroy_column(&res_const_unbiased)
 
-	res_const_biased := w.rolling_apply(
+	res_const_biased := analytic.rolling_apply(
 		rw_const,
-		w.make_ewm_var("const_var_biased", "const_f", 0.5, true),
+		analytic.make_ewm_var("const_var_biased", "const_f", 0.5, true),
 	)
 	print_result_float(&res_const_biased)
 
@@ -195,16 +195,19 @@ rolling_test :: proc(allocator: mem.Allocator) {
 	w.add_column(&df, alt)
 	df.rows = 5
 
-	rw_alt := w.rolling_window(&df, "alt", 5, 1)
+	rw_alt := analytic.rolling_window(&df, "alt", 5, 1)
 
-	res_alt_unbiased := w.rolling_apply(
+	res_alt_unbiased := analytic.rolling_apply(
 		rw_alt,
-		w.make_ewm_var("alt_var_unbiased", "alt", 0.5, false),
+		analytic.make_ewm_var("alt_var_unbiased", "alt", 0.5, false),
 	)
 	print_result_float(&res_alt_unbiased)
 	w.destroy_column(&res_alt_unbiased)
 
-	res_alt_biased := w.rolling_apply(rw_alt, w.make_ewm_var("alt_var_biased", "alt", 0.5, true))
+	res_alt_biased := analytic.rolling_apply(
+		rw_alt,
+		analytic.make_ewm_var("alt_var_biased", "alt", 0.5, true),
+	)
 	print_result_float(&res_alt_biased)
 	w.destroy_column(&res_alt_biased)
 	fmt.println("INDEPENDENT SERIES -  COV (bias=false/true)")
@@ -220,21 +223,21 @@ rolling_test :: proc(allocator: mem.Allocator) {
 	w.add_column(&df, cov_y)
 	df.rows = 5
 
-	rw_cov := w.rolling_window(&df, "cov_x", 5, 1)
+	rw_cov := analytic.rolling_window(&df, "cov_x", 5, 1)
 
-	res_cov_unbiased := w.rolling_apply_float_ewm_cov(
+	res_cov_unbiased := analytic.rolling_apply_float_ewm_cov(
 		rw_cov,
 		&cov_y,
-		w.make_ewm_cov("cov_unbiased", "cov_x", 0.5, false),
+		analytic.make_ewm_cov("cov_unbiased", "cov_x", 0.5, false),
 		allocator,
 	)
 	print_result_float(&res_cov_unbiased)
 	w.destroy_column(&res_cov_unbiased)
 
-	res_cov_biased := w.rolling_apply_float_ewm_cov(
+	res_cov_biased := analytic.rolling_apply_float_ewm_cov(
 		rw_cov,
 		&cov_y,
-		w.make_ewm_cov("cov_biased", "cov_x", 0.5, true),
+		analytic.make_ewm_cov("cov_biased", "cov_x", 0.5, true),
 		allocator,
 	)
 	print_result_float(&res_cov_biased)
@@ -253,20 +256,20 @@ rolling_test :: proc(allocator: mem.Allocator) {
 	w.add_column(&df, pc_y)
 	df.rows = 5
 
-	rw_pc := w.rolling_window(&df, "pc_x", 5, 1)
+	rw_pc := analytic.rolling_window(&df, "pc_x", 5, 1)
 
-	res_pc_unbiased := w.rolling_apply_float_ewm_cov(
+	res_pc_unbiased := analytic.rolling_apply_float_ewm_cov(
 		rw_pc,
 		&pc_y,
-		w.make_ewm_cov("pc_unbiased", "pc_x", 0.5, false),
+		analytic.make_ewm_cov("pc_unbiased", "pc_x", 0.5, false),
 		allocator,
 	)
 	print_result_float(&res_pc_unbiased)
 
-	res_pc_biased := w.rolling_apply_float_ewm_cov(
+	res_pc_biased := analytic.rolling_apply_float_ewm_cov(
 		rw_pc,
 		&pc_y,
-		w.make_ewm_cov("pc_biased", "pc_x", 0.5, true),
+		analytic.make_ewm_cov("pc_biased", "pc_x", 0.5, true),
 		allocator,
 	)
 	print_result_float(&res_pc_biased)
@@ -283,9 +286,12 @@ rolling_test :: proc(allocator: mem.Allocator) {
 	w.add_column(&df, short)
 	df.rows = 2
 
-	rw_short := w.rolling_window(&df, "short", 5, 3)
+	rw_short := analytic.rolling_window(&df, "short", 5, 3)
 
-	res_short := w.rolling_apply(rw_short, w.make_ewm_var("short_var", "short", 0.5, false))
+	res_short := analytic.rolling_apply(
+		rw_short,
+		analytic.make_ewm_var("short_var", "short", 0.5, false),
+	)
 	print_result_float(&res_short)
 
 	// --- EWM CORRELATION TESTS ---
@@ -308,10 +314,10 @@ rolling_test :: proc(allocator: mem.Allocator) {
 	df.rows = 5
 
 	fmt.println("EWM CORR float - float (alpha=0.5)")
-	rw_corr_f := w.rolling_window(&df, "cov_a", 3, 1)
-	res_corr_f := w.rolling_apply(
+	rw_corr_f := analytic.rolling_window(&df, "cov_a", 3, 1)
+	res_corr_f := analytic.rolling_apply(
 		rw_corr_f,
-		w.make_ewm_corr("ewm_corr_f", "cov_a", "cov_b", 0.5, false),
+		analytic.make_ewm_corr("ewm_corr_f", "cov_a", "cov_b", 0.5, false),
 		allocator,
 	)
 	print_result_float(&res_corr_f)
@@ -331,10 +337,10 @@ rolling_test :: proc(allocator: mem.Allocator) {
 	df.rows = 5
 
 	fmt.println("EWM CORR int - int (alpha=0.5)")
-	rw_corr_i := w.rolling_window(&df, "cov_i_a", 3, 1)
-	res_corr_i := w.rolling_apply(
+	rw_corr_i := analytic.rolling_window(&df, "cov_i_a", 3, 1)
+	res_corr_i := analytic.rolling_apply(
 		rw_corr_i,
-		w.make_ewm_corr("ewm_corr_i", "cov_i_a", "cov_i_b", 0.5, false),
+		analytic.make_ewm_corr("ewm_corr_i", "cov_i_a", "cov_i_b", 0.5, false),
 		allocator,
 	)
 	print_result_float(&res_corr_i)
@@ -356,8 +362,8 @@ rolling_test :: proc(allocator: mem.Allocator) {
 	df.rows = 5
 
 	fmt.println("ROLLING CORR float - float (perfect corr)")
-	rw_corr_f2 := w.rolling_window(&df, "cov_a", 3, 1)
-	res_corr_f2 := w.rolling_apply(
+	rw_corr_f2 := analytic.rolling_window(&df, "cov_a", 3, 1)
+	res_corr_f2 := analytic.rolling_apply(
 		rw_corr_f2,
 		w.make_corr("roll_corr_f", "cov_a", "cov_b"),
 		allocator,
@@ -380,8 +386,8 @@ rolling_test :: proc(allocator: mem.Allocator) {
 	df.rows = 5
 
 	fmt.println("ROLLING CORR int - int (perfect corr)")
-	rw_corr_i2 := w.rolling_window(&df, "cov_i_a", 3, 1)
-	res_corr_i2 := w.rolling_apply(
+	rw_corr_i2 := analytic.rolling_window(&df, "cov_i_a", 3, 1)
+	res_corr_i2 := analytic.rolling_apply(
 		rw_corr_i2,
 		w.make_corr("roll_corr_i", "cov_i_a", "cov_i_b"),
 		allocator,
@@ -404,8 +410,8 @@ rolling_test :: proc(allocator: mem.Allocator) {
 	df.rows = 5
 
 	fmt.println("ROLLING CORR float - float (negative corr)")
-	rw_corr_neg := w.rolling_window(&df, "neg_a", 3, 1)
-	res_corr_neg := w.rolling_apply(
+	rw_corr_neg := analytic.rolling_window(&df, "neg_a", 3, 1)
+	res_corr_neg := analytic.rolling_apply(
 		rw_corr_neg,
 		w.make_corr("roll_corr_neg", "neg_a", "neg_b"),
 		allocator,
@@ -428,8 +434,8 @@ rolling_test :: proc(allocator: mem.Allocator) {
 	df.rows = 5
 
 	fmt.println("ROLLING CORR float - float (zero corr)")
-	rw_corr_zero := w.rolling_window(&df, "zero_a", 3, 1)
-	res_corr_zero := w.rolling_apply(
+	rw_corr_zero := analytic.rolling_window(&df, "zero_a", 3, 1)
+	res_corr_zero := analytic.rolling_apply(
 		rw_corr_zero,
 		w.make_corr("roll_corr_zero", "zero_a", "zero_b"),
 		allocator,
@@ -452,8 +458,8 @@ rolling_test :: proc(allocator: mem.Allocator) {
 	df.rows = 2
 
 	fmt.println("ROLLING CORR short series (min_periods=3)")
-	rw_corr_short := w.rolling_window(&df, "short_a", 5, 3)
-	res_corr_short := w.rolling_apply(
+	rw_corr_short := analytic.rolling_window(&df, "short_a", 5, 3)
+	res_corr_short := analytic.rolling_apply(
 		rw_corr_short,
 		w.make_corr("roll_corr_short", "short_a", "short_b"),
 		allocator,

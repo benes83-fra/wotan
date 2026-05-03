@@ -1,8 +1,8 @@
-package core
+package analytics
 
+import w "../core"
 import "core:math"
 import "core:mem"
-
 acf :: proc(y: []f64, max_lag: int, allocator := context.allocator) -> []f64 {
 
 	n := len(y)
@@ -82,18 +82,18 @@ pacf :: proc(y: []f64, max_lag: int, allocator := context.allocator) -> []f64 {
 	return pac
 }
 df_acf :: proc(
-	df: ^DataFrame,
+	df: ^w.DataFrame,
 	col: string,
 	max_lag: int,
 	allocator: mem.Allocator = context.allocator,
-) -> Column {
+) -> w.Column {
 
-	c := column(df, col)
+	c := w.column(df, col)
 
 	// Extract float slice (ignoring NULLs)
 	y := make([dynamic]f64, 0, allocator)
 	for i in 0 ..< c.len {
-		v, is_null := column_at_float(c, i)
+		v, is_null := w.column_at_float(c, i)
 		if !is_null {
 			append(&y, v)
 		}
@@ -103,27 +103,27 @@ df_acf :: proc(
 	ac := acf(y[:], max_lag, allocator)
 
 	// Return as a Column
-	out := column_new("acf", .Float, max_lag + 1)
+	out := w.column_new("acf", .Float, max_lag + 1)
 	for i in 0 ..= max_lag {
-		append_float(&out, ac[i])
+		w.append_float(&out, ac[i])
 	}
 
 	return out
 }
 
 df_pacf :: proc(
-	df: ^DataFrame,
+	df: ^w.DataFrame,
 	col: string,
 	max_lag: int,
 	allocator: mem.Allocator = context.allocator,
-) -> Column {
+) -> w.Column {
 
-	c := column(df, col)
+	c := w.column(df, col)
 
 	// Extract float slice (ignoring NULLs)
 	y := make([dynamic]f64, 0, allocator)
 	for i in 0 ..< c.len {
-		v, is_null := column_at_float(c, i)
+		v, is_null := w.column_at_float(c, i)
 		if !is_null {
 			append(&y, v)
 		}
@@ -133,9 +133,9 @@ df_pacf :: proc(
 	pc := pacf(y[:], max_lag, allocator)
 
 	// Return as a Column
-	out := column_new("pacf", .Float, max_lag + 1)
+	out := w.column_new("pacf", .Float, max_lag + 1)
 	for i in 0 ..= max_lag {
-		append_float(&out, pc[i])
+		w.append_float(&out, pc[i])
 	}
 
 	return out

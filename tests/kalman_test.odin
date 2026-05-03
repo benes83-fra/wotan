@@ -1,5 +1,6 @@
 package tests
 
+import analytic "../wotan/analytics"
 import w "../wotan/core"
 import "core:fmt"
 import "core:math"
@@ -37,7 +38,7 @@ kalman_test :: proc(allocator: mem.Allocator) {
 	}
 
 	// REMOVED "2, 1". The compiler infers N and M from the arguments.
-	kf := w.kalman_init(x0, P0, F, H, Q, R)
+	kf := analytic.kalman_init(x0, P0, F, H, Q, R)
 
 	measurements := [6]f64{1.2, 2.1, 2.9, 4.2, 5.1, 6.05}
 
@@ -48,30 +49,30 @@ kalman_test :: proc(allocator: mem.Allocator) {
 
 		fmt.println("Predicting...")
 		// REMOVED "2, 1"
-		w.kalman_predict(&kf)
+		analytic.kalman_predict(&kf)
 		fmt.println("Predicted state:", kf.x)
 
 		fmt.println("Updating with measurement:", z)
 		// REMOVED "2, 1"
-		w.kalman_update(&kf, z)
+		analytic.kalman_update(&kf, z)
 		fmt.println("Updated state:", kf.x)
 	}
 
 
 	T := len(measurements)
 
-	xf := make([]w.KalmanState(2), T, allocator)
-	xp := make([]w.KalmanState(2), T, allocator)
+	xf := make([]analytic.KalmanState(2), T, allocator)
+	xp := make([]analytic.KalmanState(2), T, allocator)
 
 	// forward pass
 	for t in 0 ..< T {
 		xp[t].x = kf.x
 		xp[t].P = kf.P
 
-		w.kalman_predict(&kf)
+		analytic.kalman_predict(&kf)
 
 		z: [1]f64 = {measurements[t]}
-		w.kalman_update(&kf, z)
+		analytic.kalman_update(&kf, z)
 
 		xf[t].x = kf.x
 		xf[t].P = kf.P
@@ -79,7 +80,7 @@ kalman_test :: proc(allocator: mem.Allocator) {
 
 
 	// smoothing
-	smoothed := w.rts_smooth(F, xf[:], xp[:])
+	smoothed := analytic.rts_smooth(F, xf[:], xp[:])
 	fmt.println("\n--- FILTERED vs SMOOTHED ---")
 	for i in 0 ..< T {
 		fmt.printf(
@@ -132,7 +133,7 @@ kalman_control_test :: proc(allocator: mem.Allocator) {
 	}
 
 	// REMOVED "2, 1". The compiler infers N and M from the arguments.
-	kf := w.kalman_init(x0, P0, F, H, Q, R)
+	kf := analytic.kalman_init(x0, P0, F, H, Q, R)
 
 	measurements := [6]f64{1.2, 2.1, 2.9, 4.2, 5.1, 6.05}
 
@@ -150,8 +151,8 @@ kalman_control_test :: proc(allocator: mem.Allocator) {
 		u[i] = [1]f64{1.0}
 	}
 
-	xf := make([]w.KalmanState(2), T, allocator)
-	xp := make([]w.KalmanState(2), T, allocator)
+	xf := make([]analytic.KalmanState(2), T, allocator)
+	xp := make([]analytic.KalmanState(2), T, allocator)
 
 	for i in 0 ..< len(measurements) {
 		fmt.printf("\n--- Step %d ---\n", i)
@@ -160,12 +161,12 @@ kalman_control_test :: proc(allocator: mem.Allocator) {
 
 		fmt.println("Predicting...")
 		// REMOVED "2, 1"
-		w.kalman_predict(&kf)
+		analytic.kalman_predict(&kf)
 		fmt.println("Predicted state:", kf.x)
 
 		fmt.println("Updating with measurement:", z)
 		// REMOVED "2, 1"
-		w.kalman_update(&kf, z)
+		analytic.kalman_update(&kf, z)
 		fmt.println("Updated state:", kf.x)
 	}
 	// forward pass
@@ -173,11 +174,11 @@ kalman_control_test :: proc(allocator: mem.Allocator) {
 		xp[t].x = kf.x
 		xp[t].P = kf.P
 
-		w.kalman_predict_control(&kf, B, u[t])
+		analytic.kalman_predict_control(&kf, B, u[t])
 
 
 		z: [1]f64 = {measurements[t]}
-		w.kalman_update(&kf, z)
+		analytic.kalman_update(&kf, z)
 
 		xf[t].x = kf.x
 		xf[t].P = kf.P
@@ -185,7 +186,7 @@ kalman_control_test :: proc(allocator: mem.Allocator) {
 
 
 	// smoothing
-	smoothed := w.rts_smooth_control(F, B, u[:], xf[:], xp[:])
+	smoothed := analytic.rts_smooth_control(F, B, u[:], xf[:], xp[:])
 	fmt.println("\n--- FILTERED vs SMOOTHED ---")
 	for i in 0 ..< T {
 		fmt.printf(
@@ -266,7 +267,7 @@ kalman_tv_control_test :: proc(allocator: mem.Allocator) {
 		z_seq[i] = [1]f64{measurements[i]}
 	}
 
-	xf, xp := w.kalman_forward_tv_control(
+	xf, xp := analytic.kalman_forward_tv_control(
 		x0,
 		P0,
 		F_seq,
@@ -279,7 +280,7 @@ kalman_tv_control_test :: proc(allocator: mem.Allocator) {
 		allocator,
 	)
 
-	smoothed := w.rts_smooth_tv_control(F_seq, B_seq, u_seq, xf, xp)
+	smoothed := analytic.rts_smooth_tv_control(F_seq, B_seq, u_seq, xf, xp)
 
 	fmt.println("\n--- FILTERED vs SMOOTHED (TV + CONTROL) ---")
 	for t in 0 ..< T {
@@ -361,13 +362,13 @@ ekf_tiny_test :: proc(allocator: mem.Allocator) {
 		fmt.printf("\n--- Step %d ---\n", t)
 
 		// Predict
-		x_pred, P_pred := w.ekf_predict(x, P, f, F_jac, Q)
+		x_pred, P_pred := analytic.ekf_predict(x, P, f, F_jac, Q)
 
 		fmt.println("Predicted x:", x_pred)
 
 		// Update
 		z: [1]f64 = {z_seq[t]}
-		x_upd, P_upd := w.ekf_update(x_pred, P_pred, z, h, H_jac, R)
+		x_upd, P_upd := analytic.ekf_update(x_pred, P_pred, z, h, H_jac, R)
 
 		fmt.println("Updated x:", x_upd)
 
@@ -431,8 +432,8 @@ ekf_tiny_rts_test :: proc(allocator: mem.Allocator) {
 
 	T := len(z_seq)
 
-	xf := make([]w.KalmanState(2), T, allocator)
-	xp := make([]w.KalmanState(2), T, allocator)
+	xf := make([]analytic.KalmanState(2), T, allocator)
+	xp := make([]analytic.KalmanState(2), T, allocator)
 	F_seq := make([]matrix[2, 2]f64, T, allocator)
 
 	for t in 0 ..< T {
@@ -441,12 +442,12 @@ ekf_tiny_rts_test :: proc(allocator: mem.Allocator) {
 		xp[t].P = P
 
 		// EKF predict
-		x_pred, P_pred := w.ekf_predict(x, P, f, F_jac, Q)
+		x_pred, P_pred := analytic.ekf_predict(x, P, f, F_jac, Q)
 		F_seq[t] = F_jac(x) // Jacobian at previous state (or at x_pred if you prefer)
 
 		// EKF update
 		z: [1]f64 = {z_seq[t]}
-		x_upd, P_upd := w.ekf_update(x_pred, P_pred, z, h, H_jac, R)
+		x_upd, P_upd := analytic.ekf_update(x_pred, P_pred, z, h, H_jac, R)
 
 		xf[t].x = x_upd
 		xf[t].P = P_upd
@@ -455,7 +456,7 @@ ekf_tiny_rts_test :: proc(allocator: mem.Allocator) {
 		P = P_upd
 	}
 
-	smoothed := w.ekf_rts_smooth(F_seq, xf, xp)
+	smoothed := analytic.ekf_rts_smooth(F_seq, xf, xp)
 
 	fmt.println("\n--- FILTERED vs SMOOTHED (EKF) ---")
 	for t in 0 ..< T {
@@ -493,7 +494,7 @@ ukf_tiny_test :: proc(allocator: mem.Allocator) {
 	}
 
 	// UKF parameters (standard choice)
-	params := w.UKF_Params {
+	params := analytic.UKF_Params {
 		alpha = 1e-3,
 		beta  = 2.0,
 		kappa = 0.0,
@@ -524,12 +525,12 @@ ukf_tiny_test :: proc(allocator: mem.Allocator) {
 		fmt.printf("\n--- UKF Step %d ---\n", t)
 
 		// Predict
-		x_pred, P_pred := w.ukf_predict(x, P, f, Q, params, allocator)
+		x_pred, P_pred := analytic.ukf_predict(x, P, f, Q, params, allocator)
 		fmt.println("Predicted x:", x_pred)
 
 		// Update
 		z: [1]f64 = {z_seq[t]}
-		x_upd, P_upd := w.ukf_update(x_pred, P_pred, z, h, R, params, allocator)
+		x_upd, P_upd := analytic.ukf_update(x_pred, P_pred, z, h, R, params, allocator)
 		fmt.println("Updated x:", x_upd)
 
 		x = x_upd
@@ -557,7 +558,7 @@ ukf_tiny_rts_test :: proc(allocator: mem.Allocator) {
 		0.05,
 	}
 
-	params := w.UKF_Params {
+	params := analytic.UKF_Params {
 		alpha = 1e-3,
 		beta  = 2.0,
 		kappa = 0.0,
@@ -587,8 +588,8 @@ ukf_tiny_rts_test :: proc(allocator: mem.Allocator) {
 	T := len(z_seq)
 
 	// Storage for forward pass
-	xf := make([]w.KalmanState(2), T, allocator)
-	xp := make([]w.KalmanState(2), T, allocator)
+	xf := make([]analytic.KalmanState(2), T, allocator)
+	xp := make([]analytic.KalmanState(2), T, allocator)
 
 	Xi_pred := make([]([]([2]f64)), T, allocator)
 	Xi_filt := make([]([]([2]f64)), T, allocator)
@@ -600,20 +601,20 @@ ukf_tiny_rts_test :: proc(allocator: mem.Allocator) {
 		xp[t].P = P
 
 		// Generate sigma points BEFORE prediction
-		Xi_p, Wm, Wc := w.ukf_sigma_points(x, P, params, allocator)
+		Xi_p, Wm, Wc := analytic.ukf_sigma_points(x, P, params, allocator)
 		Xi_pred[t] = Xi_p
 		Wc_seq[t] = Wc
 
 		// Predict
-		x_pred, P_pred := w.ukf_predict(x, P, f, Q, params, allocator)
+		x_pred, P_pred := analytic.ukf_predict(x, P, f, Q, params, allocator)
 
 		// Generate sigma points AFTER prediction (for smoothing)
-		Xi_f, _, _ := w.ukf_sigma_points(x_pred, P_pred, params, allocator)
+		Xi_f, _, _ := analytic.ukf_sigma_points(x_pred, P_pred, params, allocator)
 		Xi_filt[t] = Xi_f
 
 		// Update
 		z: [1]f64 = {z_seq[t]}
-		x_upd, P_upd := w.ukf_update(x_pred, P_pred, z, h, R, params, allocator)
+		x_upd, P_upd := analytic.ukf_update(x_pred, P_pred, z, h, R, params, allocator)
 
 		xf[t].x = x_upd
 		xf[t].P = P_upd
@@ -623,7 +624,7 @@ ukf_tiny_rts_test :: proc(allocator: mem.Allocator) {
 	}
 
 	// RTS smoothing
-	smoothed := w.ukf_rts_smooth(Xi_pred, Xi_filt, Wc_seq, xf, xp)
+	smoothed := analytic.ukf_rts_smooth(Xi_pred, Xi_filt, Wc_seq, xf, xp)
 
 	fmt.println("\n--- FILTERED vs SMOOTHED (UKF) ---")
 	for t in 0 ..< T {
@@ -660,7 +661,7 @@ ukf_tiny_control_test :: proc(allocator: mem.Allocator) {
 		0.05,
 	}
 
-	params := w.UKF_Params {
+	params := analytic.UKF_Params {
 		alpha = 1e-3,
 		beta  = 2.0,
 		kappa = 0.0,
@@ -694,12 +695,12 @@ ukf_tiny_control_test :: proc(allocator: mem.Allocator) {
 		fmt.printf("\n--- UKF+CTRL Step %d ---\n", t)
 
 		// Predict with control
-		x_pred, P_pred := w.ukf_predict_control(x, P, u, f, Q, params, allocator)
+		x_pred, P_pred := analytic.ukf_predict_control(x, P, u, f, Q, params, allocator)
 		fmt.println("Predicted x:", x_pred)
 
 		// Update (no control in measurement here)
 		z: [1]f64 = {z_seq[t]}
-		x_upd, P_upd := w.ukf_update(x_pred, P_pred, z, h, R, params, allocator)
+		x_upd, P_upd := analytic.ukf_update(x_pred, P_pred, z, h, R, params, allocator)
 		fmt.println("Updated x:", x_upd)
 
 		x = x_upd
@@ -728,7 +729,7 @@ ukf_tiny_control_rts_test :: proc(allocator: mem.Allocator) {
 	}
 
 	// UKF parameters
-	params := w.UKF_Params {
+	params := analytic.UKF_Params {
 		alpha = 1e-3,
 		beta  = 2.0,
 		kappa = 0.0,
@@ -761,8 +762,8 @@ ukf_tiny_control_rts_test :: proc(allocator: mem.Allocator) {
 
 	T := len(z_seq)
 
-	xf := make([]w.KalmanState(2), T, allocator)
-	xp := make([]w.KalmanState(2), T, allocator)
+	xf := make([]analytic.KalmanState(2), T, allocator)
+	xp := make([]analytic.KalmanState(2), T, allocator)
 
 	Xi_pred := make([]([]([2]f64)), T, allocator)
 	Xi_filt := make([]([]([2]f64)), T, allocator)
@@ -774,13 +775,13 @@ ukf_tiny_control_rts_test :: proc(allocator: mem.Allocator) {
 		xp[t].P = P
 
 		// UKF predict with control
-		x_pred, P_pred := w.ukf_predict_control(x, P, u, f, Q, params, allocator)
-		Xi_pred[t], _, Wc_seq[t] = w.ukf_sigma_points(x, P, params, allocator)
+		x_pred, P_pred := analytic.ukf_predict_control(x, P, u, f, Q, params, allocator)
+		Xi_pred[t], _, Wc_seq[t] = analytic.ukf_sigma_points(x, P, params, allocator)
 
 		// UKF update with control
 		z: [1]f64 = {z_seq[t]}
-		x_upd, P_upd := w.ukf_update_control(x_pred, P_pred, z, u, h, R, params, allocator)
-		Xi_filt[t], _, _ = w.ukf_sigma_points(x_upd, P_upd, params, allocator)
+		x_upd, P_upd := analytic.ukf_update_control(x_pred, P_pred, z, u, h, R, params, allocator)
+		Xi_filt[t], _, _ = analytic.ukf_sigma_points(x_upd, P_upd, params, allocator)
 
 		xf[t].x = x_upd
 		xf[t].P = P_upd
@@ -790,7 +791,7 @@ ukf_tiny_control_rts_test :: proc(allocator: mem.Allocator) {
 	}
 
 	// RTS smoothing
-	smoothed := w.ukf_rts_smooth_control(Xi_pred, Xi_filt, Wc_seq, xf, xp)
+	smoothed := analytic.ukf_rts_smooth_control(Xi_pred, Xi_filt, Wc_seq, xf, xp)
 
 	fmt.println("\n--- FILTERED vs SMOOTHED (UKF + CONTROL) ---")
 	for t in 0 ..< T {

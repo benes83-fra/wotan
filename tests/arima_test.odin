@@ -1,6 +1,7 @@
 package tests
 
 
+import analytic "../wotan/analytics"
 import w "../wotan/core"
 import "core:fmt"
 import "core:math"
@@ -30,7 +31,7 @@ arima_test :: proc(allocator: mem.Allocator) {
 	}
 
 	// Compute log-likelihood
-	ll := w.arima_loglik(y, phi, theta, d, sigma2, allocator)
+	ll := analytic.arima_loglik(y, phi, theta, d, sigma2, allocator)
 
 	fmt.printf("Log-likelihood = %f\n", ll)
 	fmt.println("=== END ARIMA TEST ===")
@@ -55,7 +56,7 @@ arima_fit_test :: proc(allocator: mem.Allocator) {
 		e_prev = e
 	}
 
-	fit := w.arima_fit(y, p, d, q, allocator)
+	fit := analytic.arima_fit(y, p, d, q, allocator)
 
 	fmt.printf("True phi=%.3f, theta=%.3f, sigma2=%.3f\n", phi_true[0], theta_true[0], sigma2_true)
 	fmt.printf(
@@ -97,7 +98,7 @@ arima_dataframe_test :: proc(allocator: mem.Allocator) {
 	w.df_head(&df, 10)
 
 	// --- 3. Fit ARIMA(1,0,1) ---
-	fit := w.arima_fit(y, 1, 0, 1, allocator)
+	fit := analytic.arima_fit(y, 1, 0, 1, allocator)
 	fmt.printf(
 		"Fitted ARIMA(1,0,1): phi=%.3f theta=%.3f sigma2=%.3f loglik=%.3f\n",
 		fit.phi[0],
@@ -108,7 +109,7 @@ arima_dataframe_test :: proc(allocator: mem.Allocator) {
 
 	// --- 4. Forecast 20 steps ahead ---
 	h := 20
-	fc := w.arima_forecast(y, fit, 1, 0, 1, h, 0.05, allocator)
+	fc := analytic.arima_forecast(y, fit, 1, 0, 1, h, 0.05, allocator)
 
 	// --- 5. Add forecast results to DataFrame ---
 	// w.add_column(&df, w.column_from_floats("forecast_mean", fc.mean))
@@ -182,7 +183,7 @@ mc_arima_arma11 :: proc(allocator: mem.Allocator, n_sims: int, T: int) {
 			e_prev = e
 		}
 
-		fit := w.arima_fit(y, 1, 0, 1, allocator)
+		fit := analytic.arima_fit(y, 1, 0, 1, allocator)
 
 		if !fit.converged {
 			continue
@@ -244,9 +245,9 @@ arima_fit_arma22_test :: proc(allocator: mem.Allocator) {
 	p, d, q := 2, 0, 2
 
 	T := 600
-	y := w.arma22_simulate(phi_true, theta_true, sigma2_true, T, allocator)
+	y := analytic.arma22_simulate(phi_true, theta_true, sigma2_true, T, allocator)
 
-	fit := w.arima_fit(y, p, d, q, allocator)
+	fit := analytic.arima_fit(y, p, d, q, allocator)
 
 	fmt.printf(
 		"True phi=[%.3f, %.3f], theta=[%.3f, %.3f], sigma2=%.3f\n",
@@ -287,8 +288,8 @@ mc_arima_arma22 :: proc(allocator: mem.Allocator, n_sims: int, T: int) {
 	n_converged := 0
 
 	for s in 0 ..< n_sims {
-		y := w.arma22_simulate(phi_true, theta_true, sigma2_true, T, allocator)
-		fit := w.arima_fit(y, 2, 0, 2, allocator)
+		y := analytic.arma22_simulate(phi_true, theta_true, sigma2_true, T, allocator)
+		fit := analytic.arima_fit(y, 2, 0, 2, allocator)
 		if !fit.converged {
 			continue
 		}
@@ -391,9 +392,9 @@ mc_arima_arma_pq :: proc(
 
 	for s in 0 ..< n_sims {
 		// simulate ARMA(p,q)
-		y := w.arma22_simulate(phi_true, theta_true, sigma2_true, T, allocator)
+		y := analytic.arma22_simulate(phi_true, theta_true, sigma2_true, T, allocator)
 
-		fit := w.arima_fit(y, p, 0, q, allocator)
+		fit := analytic.arima_fit(y, p, 0, q, allocator)
 		if !fit.converged {
 			continue
 		}
@@ -524,9 +525,9 @@ mc_arima_pdq :: proc(
 
 	for s in 0 ..< n_sims {
 		// simulate ARIMA(p,d,q)
-		y := w.simulate_arima_pdq(phi_true, d, theta_true, sigma2_true, T, allocator)
+		y := analytic.simulate_arima_pdq(phi_true, d, theta_true, sigma2_true, T, allocator)
 
-		fit := w.arima_fit(y, p, d, q, allocator)
+		fit := analytic.arima_fit(y, p, d, q, allocator)
 		if !fit.converged {
 			continue
 		}
@@ -657,9 +658,9 @@ arima_auto_test :: proc(allocator: mem.Allocator) {
 	sigma2 := 0.1
 	T := 300
 
-	y := w.simulate_arima_pdq(phi, d, theta, sigma2, T, allocator)
+	y := analytic.simulate_arima_pdq(phi, d, theta, sigma2, T, allocator)
 
-	result := w.arima_auto(y, 3, 2, 3, "aic", allocator)
+	result := analytic.arima_auto(y, 3, 2, 3, "aic", allocator)
 
 	fmt.printf("Selected model: ARIMA(%v,%v,%v)\n", result.p, result.d, result.q)
 	fmt.printf("AIC = %.3f, BIC = %.3f\n", result.fit.aic, result.fit.bic)
@@ -676,8 +677,8 @@ autocorrelation_test :: proc(allocator: mem.Allocator) {
 	w.add_column(&ddf, col)
 	ddf.rows = 9
 
-	ac := w.df_acf(&ddf, "y", 10, allocator)
-	pc := w.df_pacf(&ddf, "y", 10, allocator)
+	ac := analytic.df_acf(&ddf, "y", 10, allocator)
+	pc := analytic.df_pacf(&ddf, "y", 10, allocator)
 	dac := w.dataframe_new(allocator)
 	dpc := w.dataframe_new(allocator)
 	defer w.destroy_column(&ac)
@@ -701,7 +702,7 @@ ljung_box_test :: proc(allocator: mem.Allocator) {
 		wn[i] = rand.float64_normal(0.0, sigma)
 	}
 
-	Q1, df1, p1 := w.ljung_box(wn, 10, 0, allocator)
+	Q1, df1, p1 := analytic.ljung_box(wn, 10, 0, allocator)
 	fmt.printf("White noise test:\n")
 	fmt.printf("  Q = %.4f, df = %v, p = %.4f\n", Q1, df1, p1)
 
@@ -716,7 +717,7 @@ ljung_box_test :: proc(allocator: mem.Allocator) {
 		ac_prev = ac[i]
 	}
 
-	Q2, df2, p2 := w.ljung_box(ac, 10, 0, allocator)
+	Q2, df2, p2 := analytic.ljung_box(ac, 10, 0, allocator)
 	fmt.printf("Autocorrelated test:\n")
 	fmt.printf("  Q = %.4f, df = %v, p = %.4f\n", Q2, df2, p2)
 
@@ -732,7 +733,7 @@ jarque_bera_test :: proc(allocator: mem.Allocator) {
 	for i in 0 ..< T {
 		normal[i] = rand.float64_normal(0.0, 1.0)
 	}
-	JB1, p1 := w.jarque_bera(normal, allocator)
+	JB1, p1 := analytic.jarque_bera(normal, allocator)
 	fmt.printf("Normal data: JB=%.4f, p=%.4f\n", JB1, p1)
 
 	// 2) Heavy-tailed data (should reject)
@@ -741,7 +742,7 @@ jarque_bera_test :: proc(allocator: mem.Allocator) {
 		// t-distribution with df=3 (very heavy tails)
 		heavy[i] = rand.float64_normal(0.0, 1.0) / math.sqrt_f64(rand.float64())
 	}
-	JB2, p2 := w.jarque_bera(heavy, allocator)
+	JB2, p2 := analytic.jarque_bera(heavy, allocator)
 	fmt.printf("Heavy-tailed data: JB=%.4f, p=%.4f\n", JB2, p2)
 
 	fmt.println("=== END JARQUE-BERA TEST ===")
@@ -767,7 +768,7 @@ residual_diagnostics_test :: proc(allocator: mem.Allocator) {
 	}
 
 	// --- 2) Fit ARIMA(1,0,1) ---
-	fit := w.arima_fit(y, 1, 0, 1, allocator)
+	fit := analytic.arima_fit(y, 1, 0, 1, allocator)
 	fmt.printf(
 		"Fitted ARIMA(1,0,1): phi=%.3f theta=%.3f sigma2=%.3f\n",
 		fit.phi[0],
@@ -776,19 +777,25 @@ residual_diagnostics_test :: proc(allocator: mem.Allocator) {
 	)
 
 	// --- 3) Compute residuals via Kalman filter ---
-	F, Q, P0, H, R, x0, N := w.arima_state_space(fit.phi, fit.theta, 0, fit.sigma2, allocator)
-	v, S := w.kalman_filter_residuals(y, F, Q, P0, H, R, x0, N, allocator)
+	F, Q, P0, H, R, x0, N := analytic.arima_state_space(
+		fit.phi,
+		fit.theta,
+		0,
+		fit.sigma2,
+		allocator,
+	)
+	v, S := analytic.kalman_filter_residuals(y, F, Q, P0, H, R, x0, N, allocator)
 	_ = S // not used here, but available
 
 	// --- 4) Diagnostics ---
-	diag := w.df_residual_diagnostics(v, 20, 1 + 1, allocator) // dof_adj = p+q = 2
+	diag := analytic.df_residual_diagnostics(v, 20, 1 + 1, allocator) // dof_adj = p+q = 2
 	fmt.println("Residual diagnostics:")
 	w.dataframe_pretty_print(&diag, 20)
 	defer w.destroy_dataframe(&diag)
 	// --- 5) ACF and PACF ---
-	acf_df := w.df_residual_acf(v, 20, allocator)
+	acf_df := analytic.df_residual_acf(v, 20, allocator)
 	defer w.destroy_dataframe(&acf_df)
-	pacf_df := w.df_residual_pacf(v, 20, allocator)
+	pacf_df := analytic.df_residual_pacf(v, 20, allocator)
 	defer w.destroy_dataframe(&pacf_df)
 	fmt.println("\nResidual ACF:")
 	w.dataframe_pretty_print(&acf_df, 20)
@@ -819,10 +826,10 @@ residuals_test :: proc(allocator: mem.Allocator) {
 	}
 
 	// Fit ARIMA(1,0,1)
-	fit := w.arima_fit(y, 1, 0, 1, allocator)
+	fit := analytic.arima_fit(y, 1, 0, 1, allocator)
 
 	// Extract residuals
-	df_res := w.df_residuals(y, fit, 1, 0, 1, allocator)
+	df_res := analytic.df_residuals(y, fit, 1, 0, 1, allocator)
 	defer w.destroy_dataframe(&df_res)
 	fmt.println("Residuals head:")
 	w.df_head(&df_res, 10)
@@ -838,7 +845,7 @@ residuals_test :: proc(allocator: mem.Allocator) {
 	}
 
 	// Diagnostics
-	diag := w.df_residual_diagnostics(
+	diag := analytic.df_residual_diagnostics(
 		residuals[:],
 		10,
 		1 + 1, // p+q
@@ -868,7 +875,7 @@ adf_test_block :: proc(allocator: mem.Allocator) {
 	}
 
 	// updated signature: (y, max_lags, reg_type, lag_sel, allocator)
-	df := w.df_adf(y, 5, .Constant, .Fixed, allocator)
+	df := analytic.df_adf(y, 5, .Constant, .Fixed, allocator)
 	w.dataframe_pretty_print(&df, 20)
 	defer w.destroy_dataframe(&df)
 
@@ -892,7 +899,7 @@ kpss_test_block :: proc(allocator: mem.Allocator) {
 		y_prev = y1[t]
 	}
 
-	df1 := w.df_kpss(y1, .Level, -1, allocator)
+	df1 := analytic.df_kpss(y1, .Level, -1, allocator)
 	fmt.println("Stationary AR(1) KPSS (should NOT reject):")
 	w.dataframe_pretty_print(&df1, 20)
 	defer w.destroy_dataframe(&df1)
@@ -909,7 +916,7 @@ kpss_test_block :: proc(allocator: mem.Allocator) {
 		y_prev = y2[t]
 	}
 
-	df2 := w.df_kpss(y2, .Level, -1, allocator)
+	df2 := analytic.df_kpss(y2, .Level, -1, allocator)
 	fmt.println("\nRandom Walk KPSS (should REJECT):")
 	w.dataframe_pretty_print(&df2, 20)
 	defer w.destroy_dataframe(&df2)
@@ -935,7 +942,7 @@ stationarity_test_block :: proc(allocator: mem.Allocator) {
 		y_prev = y1[t]
 	}
 
-	df1 := w.df_stationarity(y1, 10, .Constant, .AIC, .Level, allocator)
+	df1 := analytic.df_stationarity(y1, 10, .Constant, .AIC, .Level, allocator)
 	fmt.println("Stationary AR(1):")
 	w.dataframe_pretty_print(&df1, 20)
 	defer w.destroy_dataframe(&df1)
@@ -952,7 +959,7 @@ stationarity_test_block :: proc(allocator: mem.Allocator) {
 		y_prev = y2[t]
 	}
 
-	df2 := w.df_stationarity(y2, 10, .Constant, .AIC, .Level, allocator)
+	df2 := analytic.df_stationarity(y2, 10, .Constant, .AIC, .Level, allocator)
 	fmt.println("\nRandom Walk:")
 	w.dataframe_pretty_print(&df2, 20)
 	defer w.destroy_dataframe(&df2)
@@ -967,7 +974,7 @@ stationarity_test_block :: proc(allocator: mem.Allocator) {
 		y3[t] = trend + noise
 	}
 
-	df3 := w.df_stationarity(y3, 10, .ConstantTrend, .AIC, .Trend, allocator)
+	df3 := analytic.df_stationarity(y3, 10, .ConstantTrend, .AIC, .Trend, allocator)
 	fmt.println("\nTrend-Stationary Series:")
 	w.dataframe_pretty_print(&df3, 20)
 	defer w.destroy_dataframe(&df3)
@@ -996,10 +1003,10 @@ auto_arima_stationarity_test :: proc(allocator: mem.Allocator) {
 		e_prev = e
 	}
 
-	d1 := w.auto_arima_d_from_tests(y1, allocator)
+	d1 := analytic.auto_arima_d_from_tests(y1, allocator)
 	fmt.printf("Case A (Stationary ARMA(1,1)): suggested d = %v\n", d1)
 
-	result1 := w.arima_auto(y1, 3, 2, 3, "aic", allocator)
+	result1 := analytic.arima_auto(y1, 3, 2, 3, "aic", allocator)
 	fmt.printf(
 		"Selected ARIMA(%v,%v,%v), AIC=%.3f\n",
 		result1.p,
@@ -1020,10 +1027,10 @@ auto_arima_stationarity_test :: proc(allocator: mem.Allocator) {
 		y_prev = y2[t]
 	}
 
-	d2 := w.auto_arima_d_from_tests(y2, allocator)
+	d2 := analytic.auto_arima_d_from_tests(y2, allocator)
 	fmt.printf("\nCase B (Random Walk): suggested d = %v\n", d2)
 
-	result2 := w.arima_auto(y2, 3, 2, 3, "aic", allocator)
+	result2 := analytic.arima_auto(y2, 3, 2, 3, "aic", allocator)
 	fmt.printf(
 		"Selected ARIMA(%v,%v,%v), AIC=%.3f\n",
 		result2.p,
@@ -1043,10 +1050,10 @@ auto_arima_stationarity_test :: proc(allocator: mem.Allocator) {
 		y3[t] = trend + noise
 	}
 
-	d3 := w.auto_arima_d_from_tests(y3, allocator)
+	d3 := analytic.auto_arima_d_from_tests(y3, allocator)
 	fmt.printf("\nCase C (Trend-Stationary): suggested d = %v\n", d3)
 
-	result3 := w.arima_auto(y3, 3, 2, 3, "aic", allocator)
+	result3 := analytic.arima_auto(y3, 3, 2, 3, "aic", allocator)
 	fmt.printf(
 		"Selected ARIMA(%v,%v,%v), AIC=%.3f\n",
 		result3.p,
@@ -1082,7 +1089,7 @@ mc_sarima_forecast :: proc(allocator: mem.Allocator, n_sims: int) {
 
 	for sim in 0 ..< n_sims {
 		// simulate T + h observations
-		y_full := w.simulate_sarima_pdqPDQ(
+		y_full := analytic.simulate_sarima_pdqPDQ(
 			phi,
 			d,
 			theta,
@@ -1098,7 +1105,7 @@ mc_sarima_forecast :: proc(allocator: mem.Allocator, n_sims: int) {
 		y_hist := y_full[0:T]
 		y_future := y_full[T:T + h]
 
-		fc := w.sarima_forecast(
+		fc := analytic.sarima_forecast(
 			y_hist,
 			phi,
 			theta,
@@ -1181,7 +1188,7 @@ sarima_mc_test :: proc(
 
 	for sim in 0 ..< n_sims {
 		// --- simulate SARIMA ---
-		y := w.simulate_sarima_pdqPDQ(
+		y := analytic.simulate_sarima_pdqPDQ(
 			phi_true,
 			d,
 			theta_true,
@@ -1195,7 +1202,7 @@ sarima_mc_test :: proc(
 		)
 
 		// --- fit SARIMA ---
-		fit := w.sarima_fit(y, p, d, q, P, D, Q, s, allocator)
+		fit := analytic.sarima_fit(y, p, d, q, P, D, Q, s, allocator)
 		if !fit.converged {
 			continue
 		}
@@ -1319,7 +1326,7 @@ sarima_light_demo :: proc(allocator: mem.Allocator = context.allocator) {
 	h := 24 // forecast horizon
 
 	// --- 2) Simulate a single SARIMA path ---
-	y := w.simulate_sarima_pdqPDQ(
+	y := analytic.simulate_sarima_pdqPDQ(
 		phi_true,
 		d,
 		theta_true,
@@ -1333,10 +1340,10 @@ sarima_light_demo :: proc(allocator: mem.Allocator = context.allocator) {
 	)
 
 	// --- 3) Build differenced series and state-space (no MLE) ---
-	y_ns := w.difference(y, d, allocator)
-	z := w.seasonal_difference(y_ns, D, s, allocator)
+	y_ns := analytic.difference(y, d, allocator)
+	z := analytic.seasonal_difference(y_ns, D, s, allocator)
 
-	F, Q, P0, H, R, x0, N := w.sarima_state_space(
+	F, Q, P0, H, R, x0, N := analytic.sarima_state_space(
 		phi_true,
 		theta_true,
 		Phi_true,
@@ -1347,10 +1354,10 @@ sarima_light_demo :: proc(allocator: mem.Allocator = context.allocator) {
 	)
 
 	// --- 4) Filter once to get last state ---
-	xT, PT := w.kalman_filter_last_scalar(z, F, Q, P0, H, R, x0, N)
+	xT, PT := analytic.kalman_filter_last_scalar(z, F, Q, P0, H, R, x0, N)
 
 	// --- 5) Forecast using the existing SARIMA forecast helper ---
-	fc := w.sarima_forecast(
+	fc := analytic.sarima_forecast(
 		y,
 		phi_true,
 		theta_true,
@@ -1396,21 +1403,21 @@ sarima_resid_diagnostics_demo :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) {
 	// 1) residuals from fixed SARIMA
-	res := w.sarima_residuals(y, phi, theta, Phi, Theta, d, D, s, sigma2, allocator)
+	res := analytic.sarima_residuals(y, phi, theta, Phi, Theta, d, D, s, sigma2, allocator)
 
 	// 2) Ljung–Box with dof_adj = p+q+P+Q
 	p := len(phi)
 	q := len(theta)
 	P := len(Phi)
 	Q := len(Theta)
-	Qstat, df, p_lb := w.ljung_box(res, max_lag, p + q + P + Q, allocator)
+	Qstat, df, p_lb := analytic.ljung_box(res, max_lag, p + q + P + Q, allocator)
 
 	// 3) Jarque–Bera
-	JB, p_jb := w.jarque_bera(res, allocator)
+	JB, p_jb := analytic.jarque_bera(res, allocator)
 
 	// 4) maybe ACF/PACF for plotting / inspection
-	ac := w.acf(res, max_lag, allocator)
-	pc := w.pacf(res, max_lag, allocator)
+	ac := analytic.acf(res, max_lag, allocator)
+	pc := analytic.pacf(res, max_lag, allocator)
 
 	fmt.println("=== SARIMA residual diagnostics ===")
 	fmt.printf("Ljung-Box: Q=%.4f, df=%v, p=%.4f\n", Qstat, df, p_lb)
@@ -1424,7 +1431,7 @@ sarima_resid_diagnostics_quick_test :: proc(allocator: mem.Allocator = context.a
 
 	fmt.println("=== SARIMA residual diagnostics quick test ===")
 
-	y_test := w.simulate_sarima_pdqPDQ(
+	y_test := analytic.simulate_sarima_pdqPDQ(
 		[]f64{0.5}, // phi
 		1, // d
 		[]f64{0.4}, // theta

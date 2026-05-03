@@ -1,5 +1,5 @@
 
-package core
+package analytics
 
 import "core:math"
 import "core:mem"

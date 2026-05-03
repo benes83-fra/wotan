@@ -1,18 +1,18 @@
-package core
+package analytics
 
+import w "../core"
 import "core:math"
 import "core:mem"
-
 df_residual_diagnostics :: proc(
 	residuals: []f64,
 	max_lag: int,
 	dof_adj: int,
 	allocator: mem.Allocator = context.allocator,
-) -> DataFrame {
+) -> w.DataFrame {
 
 	n := len(residuals)
 	if n == 0 {
-		return dataframe_new()
+		return w.dataframe_new()
 	}
 
 	// --- Basic statistics ---
@@ -52,19 +52,19 @@ df_residual_diagnostics :: proc(
 	Q, df, LB_p := ljung_box(residuals, max_lag, dof_adj, allocator)
 
 	// --- Build DataFrame ---
-	out := dataframe_new()
+	out := w.dataframe_new()
 
-	add_column(&out, column_from_floats("mean", []f64{mean}))
-	add_column(&out, column_from_floats("variance", []f64{var}))
-	add_column(&out, column_from_floats("skewness", []f64{skew}))
-	add_column(&out, column_from_floats("kurtosis", []f64{kurt}))
+	w.add_column(&out, w.column_from_floats("mean", []f64{mean}))
+	w.add_column(&out, w.column_from_floats("variance", []f64{var}))
+	w.add_column(&out, w.column_from_floats("skewness", []f64{skew}))
+	w.add_column(&out, w.column_from_floats("kurtosis", []f64{kurt}))
 
-	add_column(&out, column_from_floats("JB", []f64{JB}))
-	add_column(&out, column_from_floats("JB_p", []f64{JB_p}))
+	w.add_column(&out, w.column_from_floats("JB", []f64{JB}))
+	w.add_column(&out, w.column_from_floats("JB_p", []f64{JB_p}))
 
-	add_column(&out, column_from_floats("LB_Q", []f64{Q}))
-	add_column(&out, column_from_ints("LB_df", []int{df}))
-	add_column(&out, column_from_floats("LB_p", []f64{LB_p}))
+	w.add_column(&out, w.column_from_floats("LB_Q", []f64{Q}))
+	w.add_column(&out, w.column_from_ints("LB_df", []int{df}))
+	w.add_column(&out, w.column_from_floats("LB_p", []f64{LB_p}))
 
 	out.rows = 1
 	return out
@@ -78,18 +78,18 @@ df_residual_acf :: proc(
 	residuals: []f64,
 	max_lag: int,
 	allocator: mem.Allocator = context.allocator,
-) -> DataFrame {
+) -> w.DataFrame {
 
 	ac := acf(residuals, max_lag, allocator)
 
-	out := dataframe_new()
-	col := column_new("residual_acf", .Float, max_lag + 1)
+	out := w.dataframe_new()
+	col := w.column_new("residual_acf", .Float, max_lag + 1)
 
 	for i in 0 ..= max_lag {
-		append_float(&col, ac[i])
+		w.append_float(&col, ac[i])
 	}
 
-	add_column(&out, col)
+	w.add_column(&out, col)
 	out.rows = max_lag + 1
 	return out
 }
@@ -102,18 +102,18 @@ df_residual_pacf :: proc(
 	residuals: []f64,
 	max_lag: int,
 	allocator: mem.Allocator = context.allocator,
-) -> DataFrame {
+) -> w.DataFrame {
 
 	pc := pacf(residuals, max_lag, allocator)
 
-	out := dataframe_new()
-	col := column_new("residual_pacf", .Float, max_lag + 1)
+	out := w.dataframe_new()
+	col := w.column_new("residual_pacf", .Float, max_lag + 1)
 
 	for i in 0 ..= max_lag {
-		append_float(&col, pc[i])
+		w.append_float(&col, pc[i])
 	}
 
-	add_column(&out, col)
+	w.add_column(&out, col)
 	out.rows = max_lag + 1
 	return out
 }
@@ -122,7 +122,7 @@ df_residuals :: proc(
 	fit: ArimaFitResult,
 	p, d, q: int,
 	allocator: mem.Allocator = context.allocator,
-) -> DataFrame {
+) -> w.DataFrame {
 
 	// 1) Differencing if needed
 	y_eff := y
@@ -137,10 +137,10 @@ df_residuals :: proc(
 	v, S := kalman_filter_residuals(y_eff, F, Q, P0, H, R, x0, N, allocator)
 
 	// 4) Build DataFrame
-	out := dataframe_new()
+	out := w.dataframe_new()
 
-	add_column(&out, column_from_floats("residual", v))
-	add_column(&out, column_from_floats("innovation_var", S))
+	w.add_column(&out, w.column_from_floats("residual", v))
+	w.add_column(&out, w.column_from_floats("innovation_var", S))
 
 	out.rows = len(v)
 	return out

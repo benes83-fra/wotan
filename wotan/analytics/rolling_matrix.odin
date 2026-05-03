@@ -1,23 +1,24 @@
-package core
+package analytics
 
+import w "../core"
 import "core:fmt"
 import "core:mem"
 
 rolling_corr_matrix :: proc(
-	df: ^DataFrame,
+	df: ^w.DataFrame,
 	cols: []string,
 	window: int,
 	min_periods: int,
 	allocator: mem.Allocator = context.allocator,
-) -> DataFrame {
+) -> w.DataFrame {
 
-	out := dataframe_new()
+	out := w.dataframe_new()
 
 	// output schema
-	add_column(&out, column_new("row", .Int, 0))
-	add_column(&out, column_new("col_i", .String, 0))
-	add_column(&out, column_new("col_j", .String, 0))
-	add_column(&out, column_new("corr", .Float, 0))
+	w.add_column(&out, w.column_new("row", .Int, 0))
+	w.add_column(&out, w.column_new("col_i", .String, 0))
+	w.add_column(&out, w.column_new("col_j", .String, 0))
+	w.add_column(&out, w.column_new("corr", .Float, 0))
 
 	for i_idx in 0 ..< len(cols) {
 		for j_idx in 0 ..< len(cols) {
@@ -29,21 +30,21 @@ rolling_corr_matrix :: proc(
 			rw := rolling_window(df, col_i, window, min_periods)
 
 			// compute corr(col_i, col_j)
-			agg := make_corr("corr_tmp", col_i, col_j)
+			agg := w.make_corr("corr_tmp", col_i, col_j)
 			corr_col := rolling_apply(rw, agg, allocator)
-			defer destroy_column(&corr_col)
+			defer w.destroy_column(&corr_col)
 
 			// append results
 			for r in 0 ..< corr_col.len {
-				append_int(&out.columns[0], r)
-				append_string(&out.columns[1], col_i)
-				append_string(&out.columns[2], col_j)
+				w.append_int(&out.columns[0], r)
+				w.append_string(&out.columns[1], col_i)
+				w.append_string(&out.columns[2], col_j)
 
-				v, is_null := column_at_float(&corr_col, r)
+				v, is_null := w.column_at_float(&corr_col, r)
 				if is_null {
-					append_null(&out.columns[3])
+					w.append_null(&out.columns[3])
 				} else {
-					append_float(&out.columns[3], v)
+					w.append_float(&out.columns[3], v)
 				}
 			}
 		}
@@ -54,34 +55,34 @@ rolling_corr_matrix :: proc(
 }
 
 rolling_var_matrix :: proc(
-	df: ^DataFrame,
+	df: ^w.DataFrame,
 	cols: []string,
 	window: int,
 	min_periods: int,
 	allocator: mem.Allocator = context.allocator,
-) -> DataFrame {
+) -> w.DataFrame {
 
-	out := dataframe_new()
+	out := w.dataframe_new()
 
-	add_column(&out, column_new("row", .Int, 0))
-	add_column(&out, column_new("col", .String, 0))
-	add_column(&out, column_new("var", .Float, 0))
+	w.add_column(&out, w.column_new("row", .Int, 0))
+	w.add_column(&out, w.column_new("col", .String, 0))
+	w.add_column(&out, w.column_new("var", .Float, 0))
 
 	for col_name in cols {
 		rw := rolling_window(df, col_name, window, min_periods)
-		agg := make_var("tmp_var", col_name)
+		agg := w.make_var("tmp_var", col_name)
 		var_col := rolling_apply(rw, agg, allocator)
-		defer destroy_column(&var_col)
+		defer w.destroy_column(&var_col)
 
 		for r in 0 ..< var_col.len {
-			append_int(&out.columns[0], r)
-			append_string(&out.columns[1], col_name)
+			w.append_int(&out.columns[0], r)
+			w.append_string(&out.columns[1], col_name)
 
-			v, is_null := column_at_float(&var_col, r)
+			v, is_null := w.column_at_float(&var_col, r)
 			if is_null {
-				append_null(&out.columns[2])
+				w.append_null(&out.columns[2])
 			} else {
-				append_float(&out.columns[2], v)
+				w.append_float(&out.columns[2], v)
 			}
 		}
 	}
@@ -90,19 +91,19 @@ rolling_var_matrix :: proc(
 	return out
 }
 rolling_cov_matrix :: proc(
-	df: ^DataFrame,
+	df: ^w.DataFrame,
 	cols: []string,
 	window: int,
 	min_periods: int,
 	allocator: mem.Allocator = context.allocator,
-) -> DataFrame {
+) -> w.DataFrame {
 
-	out := dataframe_new()
+	out := w.dataframe_new()
 
-	add_column(&out, column_new("row", .Int, 0))
-	add_column(&out, column_new("col_i", .String, 0))
-	add_column(&out, column_new("col_j", .String, 0))
-	add_column(&out, column_new("cov", .Float, 0))
+	w.add_column(&out, w.column_new("row", .Int, 0))
+	w.add_column(&out, w.column_new("col_i", .String, 0))
+	w.add_column(&out, w.column_new("col_j", .String, 0))
+	w.add_column(&out, w.column_new("cov", .Float, 0))
 
 	for i_idx in 0 ..< len(cols) {
 		for j_idx in 0 ..< len(cols) {
@@ -111,20 +112,20 @@ rolling_cov_matrix :: proc(
 			col_j := cols[j_idx]
 
 			rw := rolling_window(df, col_i, window, min_periods)
-			agg := make_cov("tmp_cov", col_i, col_j)
+			agg := w.make_cov("tmp_cov", col_i, col_j)
 			cov_col := rolling_apply(rw, agg, allocator)
-			defer destroy_column(&cov_col)
+			defer w.destroy_column(&cov_col)
 
 			for r in 0 ..< cov_col.len {
-				append_int(&out.columns[0], r)
-				append_string(&out.columns[1], col_i)
-				append_string(&out.columns[2], col_j)
+				w.append_int(&out.columns[0], r)
+				w.append_string(&out.columns[1], col_i)
+				w.append_string(&out.columns[2], col_j)
 
-				v, is_null := column_at_float(&cov_col, r)
+				v, is_null := w.column_at_float(&cov_col, r)
 				if is_null {
-					append_null(&out.columns[3])
+					w.append_null(&out.columns[3])
 				} else {
-					append_float(&out.columns[3], v)
+					w.append_float(&out.columns[3], v)
 				}
 			}
 		}
@@ -136,26 +137,26 @@ rolling_cov_matrix :: proc(
 
 
 ewm_cov_matrix :: proc(
-	df: ^DataFrame,
+	df: ^w.DataFrame,
 	cols: []string,
 	alpha: f64,
 	min_periods: int,
 	bias: bool,
 	adjust: bool,
 	allocator: mem.Allocator = context.allocator,
-) -> DataFrame {
-	out := dataframe_new()
+) -> w.DataFrame {
+	out := w.dataframe_new()
 
 	// schema: row, col_i, col_j, cov
-	col_row := column_new("row", .Int, 0)
-	col_i := column_new("col_i", .String, 0)
-	col_j := column_new("col_j", .String, 0)
-	col_cov := column_new("cov", .Float, 0)
+	col_row := w.column_new("row", .Int, 0)
+	col_i := w.column_new("col_i", .String, 0)
+	col_j := w.column_new("col_j", .String, 0)
+	col_cov := w.column_new("cov", .Float, 0)
 
-	add_column(&out, col_row)
-	add_column(&out, col_i)
-	add_column(&out, col_j)
-	add_column(&out, col_cov)
+	w.add_column(&out, col_row)
+	w.add_column(&out, col_i)
+	w.add_column(&out, col_j)
+	w.add_column(&out, col_cov)
 
 	n_cols := len(cols)
 	if n_cols == 0 {
@@ -166,11 +167,11 @@ ewm_cov_matrix :: proc(
 	// For each pair (i, j) with i <= j
 	for i in 0 ..< n_cols {
 		name_i := cols[i]
-		col_x := column(df, name_i)
+		col_x := w.column(df, name_i)
 
 		for j in i ..< n_cols {
 			name_j := cols[j]
-			col_y := column(df, name_j)
+			col_y := w.column(df, name_j)
 
 			// Build a RollingWindow on X; EWM ignores window size
 			rw := rolling_window(df, name_i, 0, min_periods)
@@ -178,7 +179,7 @@ ewm_cov_matrix :: proc(
 			agg := make_ewm_cov("ewm_cov_tmp", name_i, alpha, bias)
 
 			// Choose implementation based on type + adjust flag
-			cov_series: Column
+			cov_series: w.Column
 			switch col_x.type {
 			case .Float:
 				if adjust {
@@ -204,20 +205,20 @@ ewm_cov_matrix :: proc(
 
 			// Emit long-form rows
 			for r in 0 ..< cov_series.len {
-				v, is_null := column_at_float(&cov_series, r)
+				v, is_null := w.column_at_float(&cov_series, r)
 
-				append_int(&out.columns[0], r) // "row"
-				append_string(&out.columns[1], name_i) // "col_i"
-				append_string(&out.columns[2], name_j) // "col_j"
+				w.append_int(&out.columns[0], r) // "row"
+				w.append_string(&out.columns[1], name_i) // "col_i"
+				w.append_string(&out.columns[2], name_j) // "col_j"
 
 				if is_null {
-					append_null(&out.columns[3])
+					w.append_null(&out.columns[3])
 				} else {
-					append_float(&out.columns[3], v)
+					w.append_float(&out.columns[3], v)
 				}
 			}
 
-			destroy_column(&cov_series)
+			w.destroy_column(&cov_series)
 		}
 	}
 
@@ -227,7 +228,7 @@ ewm_cov_matrix :: proc(
 
 
 ewm_pca :: proc(
-	df: ^DataFrame,
+	df: ^w.DataFrame,
 	cols: []string,
 	alpha: f64,
 	min_periods: int,
@@ -237,7 +238,7 @@ ewm_pca :: proc(
 ) -> []PCAResult {
 
 	cov_df := ewm_cov_matrix(df, cols, alpha, min_periods, bias, adjust, allocator)
-	defer destroy_dataframe(&cov_df)
+	defer w.destroy_dataframe(&cov_df)
 
 	n_rows := df.rows
 	results := make([]PCAResult, n_rows, allocator)
@@ -253,7 +254,7 @@ ewm_pca :: proc(
 
 
 ewm_pca_last :: proc(
-	df: ^DataFrame,
+	df: ^w.DataFrame,
 	cols: []string,
 	alpha: f64,
 	min_periods: int,
@@ -263,7 +264,7 @@ ewm_pca_last :: proc(
 ) -> PCAResult {
 
 	cov_df := ewm_cov_matrix(df, cols, alpha, min_periods, bias, adjust, allocator)
-	defer destroy_dataframe(&cov_df)
+	defer w.destroy_dataframe(&cov_df)
 
 	last_row := df.rows - 1
 	cov := extract_cov_matrix_row(&cov_df, cols, last_row, allocator)

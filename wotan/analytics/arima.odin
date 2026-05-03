@@ -1,5 +1,6 @@
-package core
+package analytics
 
+import w "../core"
 import "core:math"
 import "core:math/rand"
 import "core:mem"
@@ -789,17 +790,17 @@ df_arima_auto_with_tests :: proc(
 	max_q: int,
 	criterion: string = "aic",
 	allocator: mem.Allocator = context.allocator,
-) -> DataFrame {
+) -> w.DataFrame {
 
 	result := arima_auto_with_tests(y, max_p, max_q, criterion, allocator)
 
-	df := dataframe_new()
-	add_column(&df, column_from_ints("p", []int{result.p}))
-	add_column(&df, column_from_ints("d", []int{result.d}))
-	add_column(&df, column_from_ints("q", []int{result.q}))
-	add_column(&df, column_from_floats("aic", []f64{result.fit.aic}))
-	add_column(&df, column_from_floats("bic", []f64{result.fit.bic}))
-	add_column(&df, column_from_floats("loglik", []f64{result.fit.loglik}))
+	df := w.dataframe_new()
+	w.add_column(&df, w.column_from_ints("p", []int{result.p}))
+	w.add_column(&df, w.column_from_ints("d", []int{result.d}))
+	w.add_column(&df, w.column_from_ints("q", []int{result.q}))
+	w.add_column(&df, w.column_from_floats("aic", []f64{result.fit.aic}))
+	w.add_column(&df, w.column_from_floats("bic", []f64{result.fit.bic}))
+	w.add_column(&df, w.column_from_floats("loglik", []f64{result.fit.loglik}))
 	df.rows = 1
 	return df
 }
@@ -1736,19 +1737,19 @@ df_sarima_residual_diagnostics :: proc(
 	sigma2: f64,
 	max_lag: int,
 	allocator: mem.Allocator = context.allocator,
-) -> DataFrame {
+) -> w.DataFrame {
 
 	v := sarima_innovations(y, phi, theta, Phi, Theta, d, D, s, sigma2, allocator)
 
 	Q, df, p_lb := ljung_box(v, max_lag, len(phi) + len(theta) + len(Phi) + len(Theta), allocator)
 	JB, p_jb := jarque_bera(v, allocator)
 
-	df_out := dataframe_new()
-	add_column(&df_out, column_from_floats("Q", []f64{Q}))
-	add_column(&df_out, column_from_ints("df", []int{df}))
-	add_column(&df_out, column_from_floats("p_lb", []f64{p_lb}))
-	add_column(&df_out, column_from_floats("JB", []f64{JB}))
-	add_column(&df_out, column_from_floats("p_jb", []f64{p_jb}))
+	df_out := w.dataframe_new()
+	w.add_column(&df_out, w.column_from_floats("Q", []f64{Q}))
+	w.add_column(&df_out, w.column_from_ints("df", []int{df}))
+	w.add_column(&df_out, w.column_from_floats("p_lb", []f64{p_lb}))
+	w.add_column(&df_out, w.column_from_floats("JB", []f64{JB}))
+	w.add_column(&df_out, w.column_from_floats("p_jb", []f64{p_jb}))
 	df_out.rows = 1
 	return df_out
 }

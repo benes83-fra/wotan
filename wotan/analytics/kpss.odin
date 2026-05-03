@@ -1,5 +1,6 @@
-package core
+package analytics
 
+import w "../core"
 import "core:math"
 import "core:mem"
 
@@ -150,17 +151,17 @@ df_kpss :: proc(
 	kind: KPSS_Type = .Level,
 	nw_lags: int = -1,
 	allocator: mem.Allocator = context.allocator,
-) -> DataFrame {
+) -> w.DataFrame {
 
 	stat, p, c10, c5, c25, c1 := kpss_test(y, kind, nw_lags, allocator)
 
-	df := dataframe_new()
-	add_column(&df, column_from_floats("kpss_stat", []f64{stat}))
-	add_column(&df, column_from_floats("p_value", []f64{p}))
-	add_column(&df, column_from_floats("crit_10pct", []f64{c10}))
-	add_column(&df, column_from_floats("crit_5pct", []f64{c5}))
-	add_column(&df, column_from_floats("crit_2.5pct", []f64{c25}))
-	add_column(&df, column_from_floats("crit_1pct", []f64{c1}))
+	df := w.dataframe_new()
+	w.add_column(&df, w.column_from_floats("kpss_stat", []f64{stat}))
+	w.add_column(&df, w.column_from_floats("p_value", []f64{p}))
+	w.add_column(&df, w.column_from_floats("crit_10pct", []f64{c10}))
+	w.add_column(&df, w.column_from_floats("crit_5pct", []f64{c5}))
+	w.add_column(&df, w.column_from_floats("crit_2.5pct", []f64{c25}))
+	w.add_column(&df, w.column_from_floats("crit_1pct", []f64{c1}))
 	df.rows = 1
 	return df
 }

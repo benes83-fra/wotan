@@ -1,5 +1,6 @@
-package core
+package analytics
 
+import w "../core"
 import "core:math"
 import "core:mem"
 
@@ -65,14 +66,14 @@ df_ljung_box :: proc(
 	max_lag: int,
 	dof_adj: int,
 	allocator: mem.Allocator = context.allocator,
-) -> DataFrame {
+) -> w.DataFrame {
 
 	Q, df, p := ljung_box(v, max_lag, dof_adj, allocator)
 
-	out := dataframe_new()
-	add_column(&out, column_from_floats("Q", []f64{Q}))
-	add_column(&out, column_from_ints("df", []int{df}))
-	add_column(&out, column_from_floats("p_value", []f64{p}))
+	out := w.dataframe_new()
+	w.add_column(&out, w.column_from_floats("Q", []f64{Q}))
+	w.add_column(&out, w.column_from_ints("df", []int{df}))
+	w.add_column(&out, w.column_from_floats("p_value", []f64{p}))
 	out.rows = 1
 	return out
 }

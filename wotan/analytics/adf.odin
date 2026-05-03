@@ -1,8 +1,8 @@
-package core
+package analytics
 
+import w "../core"
 import "core:math"
 import "core:mem"
-
 RegressionType :: enum {
 	None, // Δy_t = γ y_{t-1} + ...
 	Constant, // Δy_t = α + γ y_{t-1} + ...
@@ -551,17 +551,17 @@ df_adf :: proc(
 	reg_type: RegressionType = .Constant,
 	lag_sel: LagSelection = .Fixed,
 	allocator: mem.Allocator = context.allocator,
-) -> DataFrame {
+) -> w.DataFrame {
 	stat, p, lags, n_obs, c1, c5, c10 := adf_test(y, max_lags, reg_type, lag_sel, allocator)
 
-	out := dataframe_new()
-	add_column(&out, column_from_floats("adf_stat", []f64{stat}))
-	add_column(&out, column_from_floats("p_value", []f64{p}))
-	add_column(&out, column_from_ints("lags_used", []int{lags}))
-	add_column(&out, column_from_ints("n_obs", []int{n_obs}))
-	add_column(&out, column_from_floats("crit_1pct", []f64{c1}))
-	add_column(&out, column_from_floats("crit_5pct", []f64{c5}))
-	add_column(&out, column_from_floats("crit_10pct", []f64{c10}))
+	out := w.dataframe_new()
+	w.add_column(&out, w.column_from_floats("adf_stat", []f64{stat}))
+	w.add_column(&out, w.column_from_floats("p_value", []f64{p}))
+	w.add_column(&out, w.column_from_ints("lags_used", []int{lags}))
+	w.add_column(&out, w.column_from_ints("n_obs", []int{n_obs}))
+	w.add_column(&out, w.column_from_floats("crit_1pct", []f64{c1}))
+	w.add_column(&out, w.column_from_floats("crit_5pct", []f64{c5}))
+	w.add_column(&out, w.column_from_floats("crit_10pct", []f64{c10}))
 	out.rows = 1
 	return out
 }

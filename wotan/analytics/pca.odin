@@ -1,5 +1,6 @@
-package core
+package analytics
 
+import w "../core"
 import "core:fmt"
 import "core:math"
 import "core:mem"
@@ -202,7 +203,7 @@ svd_symmetric :: proc(A: [][]f64) -> (S: []f64, V: [][]f64) {
 }
 
 
-pca_dataframe :: proc(df: ^DataFrame, cols: []string, allocator: mem.Allocator) -> PCAResult {
+pca_dataframe :: proc(df: ^w.DataFrame, cols: []string, allocator: mem.Allocator) -> PCAResult {
 
 	data := extract_numeric_matrix(df, cols, allocator)
 	cov := covariance_matrix(data, allocator)
@@ -210,7 +211,7 @@ pca_dataframe :: proc(df: ^DataFrame, cols: []string, allocator: mem.Allocator) 
 }
 
 rolling_pca :: proc(
-	df: ^DataFrame,
+	df: ^w.DataFrame,
 	cols: []string,
 	window: int,
 	min_periods: int,
@@ -218,7 +219,7 @@ rolling_pca :: proc(
 ) -> []PCAResult {
 
 	cov_df := rolling_cov_matrix(df, cols, window, min_periods, allocator)
-	defer destroy_dataframe(&cov_df)
+	defer w.destroy_dataframe(&cov_df)
 	results := make([]PCAResult, cov_df.rows, allocator)
 
 	for r in 0 ..< cov_df.rows {
@@ -250,7 +251,7 @@ argsort_descending :: proc(values: []f64, allocator: mem.Allocator = context.all
 }
 
 extract_numeric_matrix :: proc(
-	df: ^DataFrame,
+	df: ^w.DataFrame,
 	cols: []string,
 	allocator: mem.Allocator = context.allocator,
 ) -> [][]f64 {
@@ -263,10 +264,10 @@ extract_numeric_matrix :: proc(
 	}
 
 	for col_name, c_idx in cols {
-		col := column(df, col_name)
+		col := w.column(df, col_name)
 
 		for r in 0 ..< rows {
-			v, is_null := column_at_float(col, r)
+			v, is_null := w.column_at_float(col, r)
 			if is_null {
 				out[r][c_idx] = 0 // or NaN, but 0 is fine for covariance
 			} else {
@@ -316,7 +317,7 @@ covariance_matrix :: proc(data: [][]f64, allocator: mem.Allocator) -> [][]f64 {
 	return cov
 }
 extract_cov_matrix_row :: proc(
-	cov_df: ^DataFrame,
+	cov_df: ^w.DataFrame,
 	cols: []string,
 	r: int,
 	allocator: mem.Allocator = context.allocator,
@@ -328,25 +329,25 @@ extract_cov_matrix_row :: proc(
 		out[i] = make([]f64, n, allocator)
 	}
 
-	col_row := column(cov_df, "row")
-	col_i := column(cov_df, "col_i")
-	col_j := column(cov_df, "col_j")
-	col_cov := column(cov_df, "cov")
+	col_row := w.column(cov_df, "row")
+	col_i := w.column(cov_df, "col_i")
+	col_j := w.column(cov_df, "col_j")
+	col_cov := w.column(cov_df, "cov")
 
 	for idx in 0 ..< cov_df.rows {
-		row_val, _ := column_at_int(col_row, idx)
+		row_val, _ := w.column_at_int(col_row, idx)
 		if row_val != r {
 			continue
 		}
 
-		i_name, _ := column_at_string(col_i, idx)
-		j_name, _ := column_at_string(col_j, idx)
+		i_name, _ := w.column_at_string(col_i, idx)
+		j_name, _ := w.column_at_string(col_j, idx)
 
 		// find indices
 		i_idx := index_of_string(cols, i_name)
 		j_idx := index_of_string(cols, j_name)
 
-		v, is_null := column_at_float(col_cov, idx)
+		v, is_null := w.column_at_float(col_cov, idx)
 		if is_null {
 			out[i_idx][j_idx] = 0
 		} else {

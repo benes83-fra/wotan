@@ -1,12 +1,13 @@
-package core
+package analytics
 
 
+import w "../core"
 import "core:math"
 import "core:mem"
 import "core:slice"
 
 RollingWindow :: struct {
-	df:          ^DataFrame,
+	df:          ^w.DataFrame,
 	column:      string,
 	window:      int,
 	min_periods: int,
@@ -15,7 +16,7 @@ RollingWindow :: struct {
 
 
 rolling_window :: proc(
-	df: ^DataFrame,
+	df: ^w.DataFrame,
 	column: string,
 	window: int,
 	min_periods: int,
@@ -26,10 +27,10 @@ rolling_window :: proc(
 
 rolling_apply :: proc(
 	r: RollingWindow,
-	agg: Aggregator,
+	agg: w.Aggregator,
 	allocator: mem.Allocator = context.allocator,
-) -> Column {
-	src := column(r.df, r.column)
+) -> w.Column {
+	src := w.column(r.df, r.column)
 	switch src.type {
 	case .Int:
 		return rolling_apply_int(r, agg, allocator)
@@ -48,20 +49,24 @@ rolling_apply :: proc(
 	case .Invalid:
 		panic("Invalid column type for rolling apply")
 	}
-	return column_new("invalid", .Invalid, 0)
+	return w.column_new("invalid", .Invalid, 0)
 }
 
 
-rolling_apply_int :: proc(r: RollingWindow, agg: Aggregator, allocator: mem.Allocator) -> Column {
-	src := column(r.df, r.column)
-	out := column_new(agg.name, src.type, 0)
+rolling_apply_int :: proc(
+	r: RollingWindow,
+	agg: w.Aggregator,
+	allocator: mem.Allocator,
+) -> w.Column {
+	src := w.column(r.df, r.column)
+	out := w.column_new(agg.name, src.type, 0)
 
 	values := make([dynamic]int, 0, r.window, allocator)
 	defer delete(values)
 
 	for i in 0 ..< r.df.rows {
 		// Expand window
-		v, is_null := column_at_int(src, i)
+		v, is_null := w.column_at_int(src, i)
 		if !is_null do append(&values, v)
 
 		// Shrink window if too large
@@ -87,7 +92,7 @@ rolling_apply_int :: proc(r: RollingWindow, agg: Aggregator, allocator: mem.Allo
 		return rolling_apply_int_var(r, agg, allocator)
 	}
 	if agg.kind == .Cov {
-		other := column(r.df, agg.other)
+		other := w.column(r.df, agg.other)
 		return rolling_apply_int_cov(r, other, agg, allocator)
 	}
 
@@ -97,18 +102,18 @@ rolling_apply_int :: proc(r: RollingWindow, agg: Aggregator, allocator: mem.Allo
 
 rolling_apply_float :: proc(
 	r: RollingWindow,
-	agg: Aggregator,
+	agg: w.Aggregator,
 	allocator: mem.Allocator,
-) -> Column {
-	src := column(r.df, r.column)
-	out := column_new(agg.name, src.type, 0)
+) -> w.Column {
+	src := w.column(r.df, r.column)
+	out := w.column_new(agg.name, src.type, 0)
 
 	values := make([dynamic]f64, 0, r.window, allocator)
 	defer delete(values)
 
 	for i in 0 ..< r.df.rows {
 		// Expand window
-		v, is_null := column_at_float(src, i)
+		v, is_null := w.column_at_float(src, i)
 		if !is_null do append(&values, v)
 
 		// Shrink window if too large
@@ -134,7 +139,7 @@ rolling_apply_float :: proc(
 		return rolling_apply_float_var(r, agg, allocator)
 	}
 	if agg.kind == .Cov {
-		other := column(r.df, agg.other)
+		other := w.column(r.df, agg.other)
 		return rolling_apply_float_cov(r, other, agg, allocator)
 	}
 
@@ -142,16 +147,20 @@ rolling_apply_float :: proc(
 }
 
 
-rolling_apply_bool :: proc(r: RollingWindow, agg: Aggregator, allocator: mem.Allocator) -> Column {
-	src := column(r.df, r.column)
-	out := column_new(agg.name, src.type, 0)
+rolling_apply_bool :: proc(
+	r: RollingWindow,
+	agg: w.Aggregator,
+	allocator: mem.Allocator,
+) -> w.Column {
+	src := w.column(r.df, r.column)
+	out := w.column_new(agg.name, src.type, 0)
 
 	values := make([dynamic]bool, 0, r.window, allocator)
 	defer delete(values)
 
 	for i in 0 ..< r.df.rows {
 		// Expand window
-		v, is_null := column_at_bool(src, i)
+		v, is_null := w.column_at_bool(src, i)
 		if !is_null do append(&values, v)
 
 		// Shrink window if too large
@@ -164,16 +173,20 @@ rolling_apply_bool :: proc(r: RollingWindow, agg: Aggregator, allocator: mem.All
 	return out
 }
 
-rolling_apply_date :: proc(r: RollingWindow, agg: Aggregator, allocator: mem.Allocator) -> Column {
-	src := column(r.df, r.column)
-	out := column_new(agg.name, src.type, 0)
+rolling_apply_date :: proc(
+	r: RollingWindow,
+	agg: w.Aggregator,
+	allocator: mem.Allocator,
+) -> w.Column {
+	src := w.column(r.df, r.column)
+	out := w.column_new(agg.name, src.type, 0)
 
-	values := make([dynamic]Date, 0, r.window, allocator)
+	values := make([dynamic]w.Date, 0, r.window, allocator)
 	defer delete(values)
 
 	for i in 0 ..< r.df.rows {
 		// Expand window
-		v, is_null := column_at_date(src, i)
+		v, is_null := w.column_at_date(src, i)
 		if !is_null do append(&values, v)
 
 		// Shrink window if too large
@@ -186,16 +199,20 @@ rolling_apply_date :: proc(r: RollingWindow, agg: Aggregator, allocator: mem.All
 	return out
 }
 
-rolling_apply_time :: proc(r: RollingWindow, agg: Aggregator, allocator: mem.Allocator) -> Column {
-	src := column(r.df, r.column)
-	out := column_new(agg.name, src.type, 0)
+rolling_apply_time :: proc(
+	r: RollingWindow,
+	agg: w.Aggregator,
+	allocator: mem.Allocator,
+) -> w.Column {
+	src := w.column(r.df, r.column)
+	out := w.column_new(agg.name, src.type, 0)
 
-	values := make([dynamic]Time, 0, r.window, allocator)
+	values := make([dynamic]w.Time, 0, r.window, allocator)
 	defer delete(values)
 
 	for i in 0 ..< r.df.rows {
 		// Expand window
-		v, is_null := column_at_time(src, i)
+		v, is_null := w.column_at_time(src, i)
 		if !is_null do append(&values, v)
 
 		// Shrink window if too large
@@ -209,18 +226,18 @@ rolling_apply_time :: proc(r: RollingWindow, agg: Aggregator, allocator: mem.All
 }
 rolling_apply_datetime :: proc(
 	r: RollingWindow,
-	agg: Aggregator,
+	agg: w.Aggregator,
 	allocator: mem.Allocator,
-) -> Column {
-	src := column(r.df, r.column)
-	out := column_new(agg.name, src.type, 0)
+) -> w.Column {
+	src := w.column(r.df, r.column)
+	out := w.column_new(agg.name, src.type, 0)
 
-	values := make([dynamic]Datetime, 0, r.window, allocator)
+	values := make([dynamic]w.Datetime, 0, r.window, allocator)
 	defer delete(values)
 
 	for i in 0 ..< r.df.rows {
 		// Expand window
-		v, is_null := column_at_datetime(src, i)
+		v, is_null := w.column_at_datetime(src, i)
 		if !is_null do append(&values, v)
 
 		// Shrink window if too large
@@ -234,18 +251,18 @@ rolling_apply_datetime :: proc(
 }
 rolling_apply_string :: proc(
 	r: RollingWindow,
-	agg: Aggregator,
+	agg: w.Aggregator,
 	allocator: mem.Allocator,
-) -> Column {
-	src := column(r.df, r.column)
-	out := column_new(agg.name, src.type, 0)
+) -> w.Column {
+	src := w.column(r.df, r.column)
+	out := w.column_new(agg.name, src.type, 0)
 
 	values := make([dynamic]string, 0, r.window, allocator)
 	defer delete(values)
 
 	for i in 0 ..< r.df.rows {
 		// Expand window
-		v, is_null := column_at_string(src, i)
+		v, is_null := w.column_at_string(src, i)
 		if !is_null do append(&values, v)
 
 		// Shrink window if too large
@@ -261,23 +278,23 @@ rolling_apply_string :: proc(
 
 rolling_apply_many :: proc(
 	r: RollingWindow,
-	aggs: []Aggregator,
+	aggs: []w.Aggregator,
 	allocator: mem.Allocator = context.allocator,
-) -> DataFrame {
-	out := dataframe_new()
+) -> w.DataFrame {
+	out := w.dataframe_new()
 
 	for agg in aggs {
 		col := rolling_apply(r, agg, allocator)
-		add_column(&out, col)
+		w.add_column(&out, col)
 	}
 
 	out.rows = out.columns[0].len
 	return out
 }
 
-rolling_agg_int_into :: proc(out: ^Column, values: []int, agg: Aggregator) {
+rolling_agg_int_into :: proc(out: ^w.Column, values: []int, agg: w.Aggregator) {
 	if len(values) == 0 {
-		append_null(out)
+		w.append_null(out)
 		return
 	}
 
@@ -287,25 +304,25 @@ rolling_agg_int_into :: proc(out: ^Column, values: []int, agg: Aggregator) {
 	case .Sum:
 		total := 0
 		for v in values do total += v
-		append_int(out, total)
+		w.append_int(out, total)
 
 	case .Mean:
 		total := 0
 		for v in values do total += v
-		append_int(out, total / len(values))
+		w.append_int(out, total / len(values))
 
 	case .Min:
 		m := values[0]
 		for v in values[1:] do if v < m do m = v
-		append_int(out, m)
+		w.append_int(out, m)
 
 	case .Max:
 		m := values[0]
 		for v in values[1:] do if v > m do m = v
-		append_int(out, m)
+		w.append_int(out, m)
 
 	case .Count:
-		append_int(out, len(values))
+		w.append_int(out, len(values))
 
 	case .Median, .Quantile:
 		tmp := make([dynamic]int, len(values))
@@ -316,7 +333,7 @@ rolling_agg_int_into :: proc(out: ^Column, values: []int, agg: Aggregator) {
 		if kind == .Median do q = 0.5
 
 		idx := int(q * f64(len(tmp) - 1))
-		append_int(out, tmp[idx])
+		w.append_int(out, tmp[idx])
 		delete(tmp)
 	case .EWM_Mean, .EWM_Var, .EWM_Std, .EWM_Cov, .EWM_Corr, .Corr, .Var, .Cov:
 	// Does not apply to in
@@ -324,9 +341,9 @@ rolling_agg_int_into :: proc(out: ^Column, values: []int, agg: Aggregator) {
 }
 
 
-rolling_agg_float_into :: proc(out: ^Column, values: []f64, agg: Aggregator) {
+rolling_agg_float_into :: proc(out: ^w.Column, values: []f64, agg: w.Aggregator) {
 	if len(values) == 0 {
-		append_null(out)
+		w.append_null(out)
 		return
 	}
 
@@ -336,25 +353,25 @@ rolling_agg_float_into :: proc(out: ^Column, values: []f64, agg: Aggregator) {
 	case .Sum:
 		total: f64 = 0
 		for v in values do total += v
-		append_float(out, total)
+		w.append_float(out, total)
 
 	case .Mean:
 		total: f64 = 0
 		for v in values do total += v
-		append_float(out, total / f64(len(values)))
+		w.append_float(out, total / f64(len(values)))
 
 	case .Min:
 		m := values[0]
 		for v in values[1:] do if v < m do m = v
-		append_float(out, m)
+		w.append_float(out, m)
 
 	case .Max:
 		m := values[0]
 		for v in values[1:] do if v > m do m = v
-		append_float(out, m)
+		w.append_float(out, m)
 
 	case .Count:
-		append_float(out, f64(len(values)))
+		w.append_float(out, f64(len(values)))
 
 	case .Median, .Quantile:
 		tmp := make([dynamic]f64, len(values))
@@ -365,7 +382,7 @@ rolling_agg_float_into :: proc(out: ^Column, values: []f64, agg: Aggregator) {
 		if kind == .Median do q = 0.5
 
 		idx := int(q * f64(len(tmp) - 1))
-		append_float(out, tmp[idx])
+		w.append_float(out, tmp[idx])
 		delete(tmp)
 	case .EWM_Mean, .EWM_Var, .EWM_Std, .EWM_Cov, .EWM_Corr, .Corr, .Var, .Cov:
 	//Handled by rolling_apply_float_ewn
@@ -373,9 +390,9 @@ rolling_agg_float_into :: proc(out: ^Column, values: []f64, agg: Aggregator) {
 }
 
 
-rolling_agg_bool_into :: proc(out: ^Column, values: []bool, agg: Aggregator) {
+rolling_agg_bool_into :: proc(out: ^w.Column, values: []bool, agg: w.Aggregator) {
 	if len(values) == 0 {
-		append_null(out)
+		w.append_null(out)
 		return
 	}
 
@@ -387,35 +404,35 @@ rolling_agg_bool_into :: proc(out: ^Column, values: []bool, agg: Aggregator) {
 	switch kind {
 	case .Sum:
 		// Sum = any true?
-		append_bool(out, count_true > 0)
+		w.append_bool(out, count_true > 0)
 
 	case .Mean:
 		// Mean = ratio of true
-		append_float(out, f64(count_true) / f64(len(values)))
+		w.append_float(out, f64(count_true) / f64(len(values)))
 
 	case .Min:
 		// Min = false if any false exists
 		m := true
 		for v in values do if !v do m = false
-		append_bool(out, m)
+		w.append_bool(out, m)
 
 	case .Max:
 		// Max = true if any true exists
 		m := false
 		for v in values do if v do m = true
-		append_bool(out, m)
+		w.append_bool(out, m)
 
 	case .Count:
-		append_int(out, len(values))
+		w.append_int(out, len(values))
 
 	case .Median, .Quantile, .EWM_Mean, .EWM_Var, .EWM_Std, .EWM_Cov, .EWM_Corr, .Corr, .Var, .Cov:
-		append_null(out)
+		w.append_null(out)
 	}
 }
 
-rolling_agg_string_into :: proc(out: ^Column, values: []string, agg: Aggregator) {
+rolling_agg_string_into :: proc(out: ^w.Column, values: []string, agg: w.Aggregator) {
 	if len(values) == 0 {
-		append_null(out)
+		w.append_null(out)
 		return
 	}
 
@@ -425,15 +442,15 @@ rolling_agg_string_into :: proc(out: ^Column, values: []string, agg: Aggregator)
 	case .Min:
 		m := values[0]
 		for v in values[1:] do if v < m do m = v
-		append_string(out, m)
+		w.append_string(out, m)
 
 	case .Max:
 		m := values[0]
 		for v in values[1:] do if v > m do m = v
-		append_string(out, m)
+		w.append_string(out, m)
 
 	case .Count:
-		append_int(out, len(values))
+		w.append_int(out, len(values))
 
 	case .Sum,
 	     .Mean,
@@ -447,13 +464,13 @@ rolling_agg_string_into :: proc(out: ^Column, values: []string, agg: Aggregator)
 	     .Corr,
 	     .Var,
 	     .Cov:
-		append_null(out)
+		w.append_null(out)
 	}
 }
 
-rolling_agg_date_into :: proc(out: ^Column, values: []Date, agg: Aggregator) {
+rolling_agg_date_into :: proc(out: ^w.Column, values: []w.Date, agg: w.Aggregator) {
 	if len(values) == 0 {
-		append_null(out)
+		w.append_null(out)
 		return
 	}
 
@@ -462,16 +479,16 @@ rolling_agg_date_into :: proc(out: ^Column, values: []Date, agg: Aggregator) {
 	switch kind {
 	case .Min:
 		m := values[0]
-		for v in values[1:] do if date_less(v, m) do m = v
-		append_date(out, m)
+		for v in values[1:] do if w.date_less(v, m) do m = v
+		w.append_date(out, m)
 
 	case .Max:
 		m := values[0]
-		for v in values[1:] do if date_less(m, v) do m = v
-		append_date(out, m)
+		for v in values[1:] do if w.date_less(m, v) do m = v
+		w.append_date(out, m)
 
 	case .Count:
-		append_int(out, len(values))
+		w.append_int(out, len(values))
 
 	case .Sum,
 	     .Mean,
@@ -485,13 +502,13 @@ rolling_agg_date_into :: proc(out: ^Column, values: []Date, agg: Aggregator) {
 	     .Corr,
 	     .Var,
 	     .Cov:
-		append_null(out)
+		w.append_null(out)
 	}
 }
 
-rolling_agg_time_into :: proc(out: ^Column, values: []Time, agg: Aggregator) {
+rolling_agg_time_into :: proc(out: ^w.Column, values: []w.Time, agg: w.Aggregator) {
 	if len(values) == 0 {
-		append_null(out)
+		w.append_null(out)
 		return
 	}
 
@@ -500,16 +517,16 @@ rolling_agg_time_into :: proc(out: ^Column, values: []Time, agg: Aggregator) {
 	switch kind {
 	case .Min:
 		m := values[0]
-		for v in values[1:] do if time_less(v, m) do m = v
-		append_time(out, m)
+		for v in values[1:] do if w.time_less(v, m) do m = v
+		w.append_time(out, m)
 
 	case .Max:
 		m := values[0]
-		for v in values[1:] do if time_less(m, v) do m = v
-		append_time(out, m)
+		for v in values[1:] do if w.time_less(m, v) do m = v
+		w.append_time(out, m)
 
 	case .Count:
-		append_int(out, len(values))
+		w.append_int(out, len(values))
 
 	case .Sum,
 	     .Mean,
@@ -523,13 +540,13 @@ rolling_agg_time_into :: proc(out: ^Column, values: []Time, agg: Aggregator) {
 	     .Corr,
 	     .Var,
 	     .Cov:
-		append_null(out)
+		w.append_null(out)
 	}
 }
 
-rolling_agg_datetime_into :: proc(out: ^Column, values: []Datetime, agg: Aggregator) {
+rolling_agg_datetime_into :: proc(out: ^w.Column, values: []w.Datetime, agg: w.Aggregator) {
 	if len(values) == 0 {
-		append_null(out)
+		w.append_null(out)
 		return
 	}
 
@@ -538,16 +555,16 @@ rolling_agg_datetime_into :: proc(out: ^Column, values: []Datetime, agg: Aggrega
 	switch kind {
 	case .Min:
 		m := values[0]
-		for v in values[1:] do if datetime_less(v, m) do m = v
-		append_datetime(out, m)
+		for v in values[1:] do if w.datetime_less(v, m) do m = v
+		w.append_datetime(out, m)
 
 	case .Max:
 		m := values[0]
-		for v in values[1:] do if datetime_less(m, v) do m = v
-		append_datetime(out, m)
+		for v in values[1:] do if w.datetime_less(m, v) do m = v
+		w.append_datetime(out, m)
 
 	case .Count:
-		append_int(out, len(values))
+		w.append_int(out, len(values))
 
 	case .Sum,
 	     .Mean,
@@ -561,23 +578,23 @@ rolling_agg_datetime_into :: proc(out: ^Column, values: []Datetime, agg: Aggrega
 	     .Corr,
 	     .Var,
 	     .Cov:
-		append_null(out)
+		w.append_null(out)
 	}
 }
 
 
-make_ewm_mean :: proc(name, column: string, alpha: f64) -> Aggregator {
-	return Aggregator{name = name, column = column, kind = .EWM_Mean, alpha = alpha}
+make_ewm_mean :: proc(name, column: string, alpha: f64) -> w.Aggregator {
+	return w.Aggregator{name = name, column = column, kind = .EWM_Mean, alpha = alpha}
 }
-make_ewm_var :: proc(name, column: string, alpha: f64, bias: bool = false) -> Aggregator {
-	return Aggregator{name = name, column = column, kind = .EWM_Var, alpha = alpha, bias = bias}
+make_ewm_var :: proc(name, column: string, alpha: f64, bias: bool = false) -> w.Aggregator {
+	return w.Aggregator{name = name, column = column, kind = .EWM_Var, alpha = alpha, bias = bias}
 }
-make_ewm_cov :: proc(name, column: string, alpha: f64, bias := false) -> Aggregator {
-	return Aggregator{name = name, column = column, kind = .EWM_Cov, alpha = alpha, bias = bias}
+make_ewm_cov :: proc(name, column: string, alpha: f64, bias := false) -> w.Aggregator {
+	return w.Aggregator{name = name, column = column, kind = .EWM_Cov, alpha = alpha, bias = bias}
 }
 
-make_ewm_corr :: proc(name, col, other: string, alpha: f64, bias := false) -> Aggregator {
-	return Aggregator {
+make_ewm_corr :: proc(name, col, other: string, alpha: f64, bias := false) -> w.Aggregator {
+	return w.Aggregator {
 		name = name,
 		column = col,
 		other = other,
@@ -590,11 +607,11 @@ make_ewm_corr :: proc(name, col, other: string, alpha: f64, bias := false) -> Ag
 
 rolling_apply_float_ewm :: proc(
 	r: RollingWindow,
-	agg: Aggregator,
+	agg: w.Aggregator,
 	allocator: mem.Allocator,
-) -> Column {
-	src := column(r.df, r.column)
-	out := column_new(agg.name, .Float, 0)
+) -> w.Column {
+	src := w.column(r.df, r.column)
+	out := w.column_new(agg.name, .Float, 0)
 
 	alpha := agg.alpha
 	if alpha <= 0 || alpha > 1 {
@@ -605,9 +622,9 @@ rolling_apply_float_ewm :: proc(
 	has_prev := false
 
 	for i in 0 ..< r.df.rows {
-		v, is_null := column_at_float(src, i)
+		v, is_null := w.column_at_float(src, i)
 		if is_null {
-			append_null(&out)
+			w.append_null(&out)
 			continue
 		}
 
@@ -618,7 +635,7 @@ rolling_apply_float_ewm :: proc(
 			prev = alpha * v + (1 - alpha) * prev
 		}
 
-		append_float(&out, prev)
+		w.append_float(&out, prev)
 	}
 
 	return out
@@ -626,11 +643,11 @@ rolling_apply_float_ewm :: proc(
 
 rolling_apply_int_ewm :: proc(
 	r: RollingWindow,
-	agg: Aggregator,
+	agg: w.Aggregator,
 	allocator: mem.Allocator,
-) -> Column {
-	src := column(r.df, r.column)
-	out := column_new(agg.name, .Float, 0)
+) -> w.Column {
+	src := w.column(r.df, r.column)
+	out := w.column_new(agg.name, .Float, 0)
 
 	alpha := agg.alpha
 	if alpha <= 0 || alpha > 1 {
@@ -641,9 +658,9 @@ rolling_apply_int_ewm :: proc(
 	has_prev := false
 
 	for i in 0 ..< r.df.rows {
-		v, is_null := column_at_int(src, i)
+		v, is_null := w.column_at_int(src, i)
 		if is_null {
-			append_null(&out)
+			w.append_null(&out)
 			continue
 		}
 
@@ -656,7 +673,7 @@ rolling_apply_int_ewm :: proc(
 			prev = alpha * fv + (1 - alpha) * prev
 		}
 
-		append_float(&out, prev)
+		w.append_float(&out, prev)
 	}
 
 	return out
@@ -665,11 +682,11 @@ rolling_apply_int_ewm :: proc(
 
 rolling_apply_float_ewm_var :: proc(
 	r: RollingWindow,
-	agg: Aggregator,
+	agg: w.Aggregator,
 	allocator: mem.Allocator,
-) -> Column {
-	src := column(r.df, r.column)
-	out := column_new(agg.name, .Float, 0)
+) -> w.Column {
+	src := w.column(r.df, r.column)
+	out := w.column_new(agg.name, .Float, 0)
 
 	alpha := agg.alpha
 	if alpha <= 0 || alpha > 1 {
@@ -693,9 +710,9 @@ rolling_apply_float_ewm_var :: proc(
 	initialized := false
 
 	for i in 0 ..< r.df.rows {
-		v, is_null := column_at_float(src, i)
+		v, is_null := w.column_at_float(src, i)
 		if is_null {
-			append_null(&out)
+			w.append_null(&out)
 			continue
 		}
 
@@ -711,9 +728,9 @@ rolling_apply_float_ewm_var :: proc(
 
 			// pandas: first var is NaN for bias=False
 			if nobs >= minp {
-				append_null(&out)
+				w.append_null(&out)
 			} else {
-				append_null(&out)
+				w.append_null(&out)
 			}
 			continue
 		}
@@ -750,19 +767,19 @@ rolling_apply_float_ewm_var :: proc(
 
 		if nobs >= minp {
 			if agg.bias {
-				append_float(&out, cov)
+				w.append_float(&out, cov)
 			} else {
 				// bias = False: apply debiasing factor
 				num := sum_wt * sum_wt
 				den := num - sum_wt2
 				if den > 0 {
-					append_float(&out, (num / den) * cov)
+					w.append_float(&out, (num / den) * cov)
 				} else {
-					append_null(&out)
+					w.append_null(&out)
 				}
 			}
 		} else {
-			append_null(&out)
+			w.append_null(&out)
 		}
 	}
 
@@ -772,11 +789,11 @@ rolling_apply_float_ewm_var :: proc(
 
 rolling_apply_int_ewm_var :: proc(
 	r: RollingWindow,
-	agg: Aggregator,
+	agg: w.Aggregator,
 	allocator: mem.Allocator,
-) -> Column {
-	src := column(r.df, r.column)
-	out := column_new(agg.name, .Float, 0)
+) -> w.Column {
+	src := w.column(r.df, r.column)
+	out := w.column_new(agg.name, .Float, 0)
 
 	alpha := agg.alpha
 	if alpha <= 0 || alpha > 1 {
@@ -800,9 +817,9 @@ rolling_apply_int_ewm_var :: proc(
 	initialized := false
 
 	for i in 0 ..< r.df.rows {
-		v, is_null := column_at_int(src, i)
+		v, is_null := w.column_at_int(src, i)
 		if is_null {
-			append_null(&out)
+			w.append_null(&out)
 			continue
 		}
 		fv := f64(v)
@@ -817,9 +834,9 @@ rolling_apply_int_ewm_var :: proc(
 			initialized = true
 
 			if nobs >= minp {
-				append_null(&out)
+				w.append_null(&out)
 			} else {
-				append_null(&out)
+				w.append_null(&out)
 			}
 			continue
 		}
@@ -851,19 +868,19 @@ rolling_apply_int_ewm_var :: proc(
 
 		if nobs >= minp {
 			if agg.bias {
-				append_float(&out, cov)
+				w.append_float(&out, cov)
 			} else {
 				// bias = False: apply debiasing factor
 				num := sum_wt * sum_wt
 				den := num - sum_wt2
 				if den > 0 {
-					append_float(&out, (num / den) * cov)
+					w.append_float(&out, (num / den) * cov)
 				} else {
-					append_null(&out)
+					w.append_null(&out)
 				}
 			}
 		} else {
-			append_null(&out)
+			w.append_null(&out)
 		}
 	}
 
@@ -872,55 +889,55 @@ rolling_apply_int_ewm_var :: proc(
 
 rolling_apply_float_ewm_std :: proc(
 	r: RollingWindow,
-	agg: Aggregator,
+	agg: w.Aggregator,
 	allocator: mem.Allocator,
-) -> Column {
+) -> w.Column {
 	// compute variance first
 	var_col := rolling_apply_float_ewm_var(r, agg, allocator)
-	out := column_new(agg.name, .Float, 0)
+	out := w.column_new(agg.name, .Float, 0)
 
 	for i in 0 ..< var_col.len {
-		v, is_null := column_at_float(&var_col, i)
+		v, is_null := w.column_at_float(&var_col, i)
 		if is_null {
-			append_null(&out)
+			w.append_null(&out)
 		} else {
-			append_float(&out, math.sqrt(v))
+			w.append_float(&out, math.sqrt(v))
 		}
 	}
 
-	destroy_column(&var_col)
+	w.destroy_column(&var_col)
 	return out
 }
 
 rolling_apply_int_ewm_std :: proc(
 	r: RollingWindow,
-	agg: Aggregator,
+	agg: w.Aggregator,
 	allocator: mem.Allocator,
-) -> Column {
+) -> w.Column {
 	var_col := rolling_apply_int_ewm_var(r, agg, allocator)
-	out := column_new(agg.name, .Float, 0)
+	out := w.column_new(agg.name, .Float, 0)
 
 	for i in 0 ..< var_col.len {
-		v, is_null := column_at_float(&var_col, i)
+		v, is_null := w.column_at_float(&var_col, i)
 		if is_null {
-			append_null(&out)
+			w.append_null(&out)
 		} else {
-			append_float(&out, math.sqrt(v))
+			w.append_float(&out, math.sqrt(v))
 		}
 	}
 
-	destroy_column(&var_col)
+	w.destroy_column(&var_col)
 	return out
 }
 
 rolling_apply_float_ewm_cov :: proc(
 	r: RollingWindow,
-	other: ^Column,
-	agg: Aggregator,
+	other: ^w.Column,
+	agg: w.Aggregator,
 	allocator: mem.Allocator,
-) -> Column {
-	src := column(r.df, r.column)
-	out := column_new(agg.name, .Float, 0)
+) -> w.Column {
+	src := w.column(r.df, r.column)
+	out := w.column_new(agg.name, .Float, 0)
 
 	alpha := agg.alpha
 	if alpha <= 0 || alpha > 1 {
@@ -944,11 +961,11 @@ rolling_apply_float_ewm_cov :: proc(
 	initialized := false
 
 	for i in 0 ..< r.df.rows {
-		x, nx := column_at_float(src, i)
-		y, ny := column_at_float(other, i)
+		x, nx := w.column_at_float(src, i)
+		y, ny := w.column_at_float(other, i)
 
 		if nx || ny {
-			append_null(&out)
+			w.append_null(&out)
 			continue
 		}
 
@@ -962,7 +979,7 @@ rolling_apply_float_ewm_cov :: proc(
 			nobs = 1
 			initialized = true
 
-			append_null(&out)
+			w.append_null(&out)
 			continue
 		}
 
@@ -997,19 +1014,19 @@ rolling_apply_float_ewm_cov :: proc(
 
 		if nobs >= minp {
 			if agg.bias {
-				append_float(&out, cov)
+				w.append_float(&out, cov)
 			} else {
 				// bias = False: apply debiasing factor
 				num := sum_wt * sum_wt
 				den := num - sum_wt2
 				if den > 0 {
-					append_float(&out, (num / den) * cov)
+					w.append_float(&out, (num / den) * cov)
 				} else {
-					append_null(&out)
+					w.append_null(&out)
 				}
 			}
 		} else {
-			append_null(&out)
+			w.append_null(&out)
 		}
 	}
 
@@ -1019,12 +1036,12 @@ rolling_apply_float_ewm_cov :: proc(
 
 rolling_apply_int_ewm_cov :: proc(
 	r: RollingWindow,
-	other: ^Column,
-	agg: Aggregator,
+	other: ^w.Column,
+	agg: w.Aggregator,
 	allocator: mem.Allocator,
-) -> Column {
-	src := column(r.df, r.column)
-	out := column_new(agg.name, .Float, 0)
+) -> w.Column {
+	src := w.column(r.df, r.column)
+	out := w.column_new(agg.name, .Float, 0)
 
 	alpha := agg.alpha
 	if alpha <= 0 || alpha > 1 {
@@ -1048,11 +1065,11 @@ rolling_apply_int_ewm_cov :: proc(
 	initialized := false
 
 	for i in 0 ..< r.df.rows {
-		xi, nx := column_at_int(src, i)
-		yi, ny := column_at_int(other, i)
+		xi, nx := w.column_at_int(src, i)
+		yi, ny := w.column_at_int(other, i)
 
 		if nx || ny {
-			append_null(&out)
+			w.append_null(&out)
 			continue
 		}
 
@@ -1069,7 +1086,7 @@ rolling_apply_int_ewm_cov :: proc(
 			nobs = 1
 			initialized = true
 
-			append_null(&out)
+			w.append_null(&out)
 			continue
 		}
 
@@ -1109,19 +1126,19 @@ rolling_apply_int_ewm_cov :: proc(
 
 		if nobs >= minp {
 			if agg.bias {
-				append_float(&out, cov)
+				w.append_float(&out, cov)
 			} else {
 				// bias = False: apply debiasing factor
 				num := sum_wt * sum_wt
 				den := num - sum_wt2
 				if den > 0 {
-					append_float(&out, (num / den) * cov)
+					w.append_float(&out, (num / den) * cov)
 				} else {
-					append_null(&out)
+					w.append_null(&out)
 				}
 			}
 		} else {
-			append_null(&out)
+			w.append_null(&out)
 		}
 	}
 
@@ -1131,11 +1148,11 @@ rolling_apply_int_ewm_cov :: proc(
 
 rolling_apply_float_ewm_var_adjust_true :: proc(
 	r: RollingWindow,
-	agg: Aggregator,
+	agg: w.Aggregator,
 	allocator: mem.Allocator,
-) -> Column {
-	src := column(r.df, r.column)
-	out := column_new(agg.name, .Float, 0)
+) -> w.Column {
+	src := w.column(r.df, r.column)
+	out := w.column_new(agg.name, .Float, 0)
 
 	alpha := agg.alpha
 	if alpha <= 0 || alpha > 1 {
@@ -1158,9 +1175,9 @@ rolling_apply_float_ewm_var_adjust_true :: proc(
 	initialized := false
 
 	for i in 0 ..< r.df.rows {
-		v, is_null := column_at_float(src, i)
+		v, is_null := w.column_at_float(src, i)
 		if is_null {
-			append_null(&out)
+			w.append_null(&out)
 			continue
 		}
 
@@ -1173,7 +1190,7 @@ rolling_apply_float_ewm_var_adjust_true :: proc(
 			nobs = 1
 			initialized = true
 
-			append_null(&out)
+			w.append_null(&out)
 			continue
 		}
 
@@ -1204,19 +1221,19 @@ rolling_apply_float_ewm_var_adjust_true :: proc(
 
 		if nobs >= minp {
 			if agg.bias {
-				append_float(&out, cov)
+				w.append_float(&out, cov)
 			} else {
 				// bias = False: apply debiasing factor
 				num := sum_wt * sum_wt
 				den := num - sum_wt2
 				if den > 0 {
-					append_float(&out, (num / den) * cov)
+					w.append_float(&out, (num / den) * cov)
 				} else {
-					append_null(&out)
+					w.append_null(&out)
 				}
 			}
 		} else {
-			append_null(&out)
+			w.append_null(&out)
 		}
 	}
 
@@ -1225,11 +1242,11 @@ rolling_apply_float_ewm_var_adjust_true :: proc(
 
 rolling_apply_int_ewm_var_adjust_true :: proc(
 	r: RollingWindow,
-	agg: Aggregator,
+	agg: w.Aggregator,
 	allocator: mem.Allocator,
-) -> Column {
-	src := column(r.df, r.column)
-	out := column_new(agg.name, .Float, 0)
+) -> w.Column {
+	src := w.column(r.df, r.column)
+	out := w.column_new(agg.name, .Float, 0)
 
 	alpha := agg.alpha
 	if alpha <= 0 || alpha > 1 {
@@ -1252,9 +1269,9 @@ rolling_apply_int_ewm_var_adjust_true :: proc(
 	initialized := false
 
 	for i in 0 ..< r.df.rows {
-		vi, is_null := column_at_int(src, i)
+		vi, is_null := w.column_at_int(src, i)
 		if is_null {
-			append_null(&out)
+			w.append_null(&out)
 			continue
 		}
 		v := f64(vi)
@@ -1268,7 +1285,7 @@ rolling_apply_int_ewm_var_adjust_true :: proc(
 			nobs = 1
 			initialized = true
 
-			append_null(&out)
+			w.append_null(&out)
 			continue
 		}
 
@@ -1299,19 +1316,19 @@ rolling_apply_int_ewm_var_adjust_true :: proc(
 
 		if nobs >= minp {
 			if agg.bias {
-				append_float(&out, cov)
+				w.append_float(&out, cov)
 			} else {
 				// bias = False: apply debiasing factor
 				num := sum_wt * sum_wt
 				den := num - sum_wt2
 				if den > 0 {
-					append_float(&out, (num / den) * cov)
+					w.append_float(&out, (num / den) * cov)
 				} else {
-					append_null(&out)
+					w.append_null(&out)
 				}
 			}
 		} else {
-			append_null(&out)
+			w.append_null(&out)
 		}
 	}
 
@@ -1321,12 +1338,12 @@ rolling_apply_int_ewm_var_adjust_true :: proc(
 
 rolling_apply_float_ewm_cov_adjust_false :: proc(
 	r: RollingWindow,
-	other: ^Column,
-	agg: Aggregator,
+	other: ^w.Column,
+	agg: w.Aggregator,
 	allocator: mem.Allocator,
-) -> Column {
-	src := column(r.df, r.column)
-	out := column_new(agg.name, .Float, 0)
+) -> w.Column {
+	src := w.column(r.df, r.column)
+	out := w.column_new(agg.name, .Float, 0)
 
 	alpha := agg.alpha
 	if alpha <= 0 || alpha > 1 {
@@ -1350,11 +1367,11 @@ rolling_apply_float_ewm_cov_adjust_false :: proc(
 	initialized := false
 
 	for i in 0 ..< r.df.rows {
-		x, nx := column_at_float(src, i)
-		y, ny := column_at_float(other, i)
+		x, nx := w.column_at_float(src, i)
+		y, ny := w.column_at_float(other, i)
 
 		if nx || ny {
-			append_null(&out)
+			w.append_null(&out)
 			continue
 		}
 
@@ -1368,7 +1385,7 @@ rolling_apply_float_ewm_cov_adjust_false :: proc(
 			nobs = 1
 			initialized = true
 
-			append_null(&out)
+			w.append_null(&out)
 			continue
 		}
 
@@ -1410,12 +1427,12 @@ rolling_apply_float_ewm_cov_adjust_false :: proc(
 			num := sum_wt * sum_wt
 			den := num - sum_wt2
 			if den > 0 {
-				append_float(&out, cov * (num / den))
+				w.append_float(&out, cov * (num / den))
 			} else {
-				append_null(&out)
+				w.append_null(&out)
 			}
 		} else {
-			append_null(&out)
+			w.append_null(&out)
 		}
 	}
 
@@ -1423,12 +1440,12 @@ rolling_apply_float_ewm_cov_adjust_false :: proc(
 }
 rolling_apply_int_ewm_cov_adjust_false :: proc(
 	r: RollingWindow,
-	other: ^Column,
-	agg: Aggregator,
+	other: ^w.Column,
+	agg: w.Aggregator,
 	allocator: mem.Allocator,
-) -> Column {
-	src := column(r.df, r.column)
-	out := column_new(agg.name, .Float, 0)
+) -> w.Column {
+	src := w.column(r.df, r.column)
+	out := w.column_new(agg.name, .Float, 0)
 
 	alpha := agg.alpha
 	if alpha <= 0 || alpha > 1 {
@@ -1452,11 +1469,11 @@ rolling_apply_int_ewm_cov_adjust_false :: proc(
 	initialized := false
 
 	for i in 0 ..< r.df.rows {
-		xi, nx := column_at_int(src, i)
-		yi, ny := column_at_int(other, i)
+		xi, nx := w.column_at_int(src, i)
+		yi, ny := w.column_at_int(other, i)
 
 		if nx || ny {
-			append_null(&out)
+			w.append_null(&out)
 			continue
 		}
 
@@ -1473,7 +1490,7 @@ rolling_apply_int_ewm_cov_adjust_false :: proc(
 			nobs = 1
 			initialized = true
 
-			append_null(&out)
+			w.append_null(&out)
 			continue
 		}
 
@@ -1515,12 +1532,12 @@ rolling_apply_int_ewm_cov_adjust_false :: proc(
 			num := sum_wt * sum_wt
 			den := num - sum_wt2
 			if den > 0 {
-				append_float(&out, cov * (num / den))
+				w.append_float(&out, cov * (num / den))
 			} else {
-				append_null(&out)
+				w.append_null(&out)
 			}
 		} else {
-			append_null(&out)
+			w.append_null(&out)
 		}
 	}
 
@@ -1528,10 +1545,10 @@ rolling_apply_int_ewm_cov_adjust_false :: proc(
 }
 rolling_apply_float_ewm_corr :: proc(
 	r: RollingWindow,
-	agg: Aggregator,
+	agg: w.Aggregator,
 	allocator: mem.Allocator,
-) -> Column {
-	src_y := column(r.df, agg.other)
+) -> w.Column {
+	src_y := w.column(r.df, agg.other)
 
 	// cov(x, y)
 	cov_col := rolling_apply_float_ewm_cov(r, src_y, agg, allocator)
@@ -1549,32 +1566,32 @@ rolling_apply_float_ewm_corr :: proc(
 	}
 	var_y := rolling_apply_float_ewm_var(rw_y, agg, allocator)
 
-	out := column_new(agg.name, .Float, 0)
+	out := w.column_new(agg.name, .Float, 0)
 
 	for i in 0 ..< cov_col.len {
-		cv, n1 := column_at_float(&cov_col, i)
-		vx, n2 := column_at_float(&var_x, i)
-		vy, n3 := column_at_float(&var_y, i)
+		cv, n1 := w.column_at_float(&cov_col, i)
+		vx, n2 := w.column_at_float(&var_x, i)
+		vy, n3 := w.column_at_float(&var_y, i)
 
 		if n1 || n2 || n3 || vx <= 0 || vy <= 0 {
-			append_null(&out)
+			w.append_null(&out)
 		} else {
-			append_float(&out, cv / math.sqrt(vx * vy))
+			w.append_float(&out, cv / math.sqrt(vx * vy))
 		}
 	}
 
-	destroy_column(&cov_col)
-	destroy_column(&var_x)
-	destroy_column(&var_y)
+	w.destroy_column(&cov_col)
+	w.destroy_column(&var_x)
+	w.destroy_column(&var_y)
 
 	return out
 }
 rolling_apply_int_ewm_corr :: proc(
 	r: RollingWindow,
-	agg: Aggregator,
+	agg: w.Aggregator,
 	allocator: mem.Allocator,
-) -> Column {
-	src_y := column(r.df, agg.other)
+) -> w.Column {
+	src_y := w.column(r.df, agg.other)
 
 	// cov(x, y)
 	cov_col := rolling_apply_int_ewm_cov(r, src_y, agg, allocator)
@@ -1592,23 +1609,23 @@ rolling_apply_int_ewm_corr :: proc(
 	}
 	var_y := rolling_apply_int_ewm_var(rw_y, agg, allocator)
 
-	out := column_new(agg.name, .Float, 0)
+	out := w.column_new(agg.name, .Float, 0)
 
 	for i in 0 ..< cov_col.len {
-		cv, n1 := column_at_float(&cov_col, i)
-		vx, n2 := column_at_float(&var_x, i)
-		vy, n3 := column_at_float(&var_y, i)
+		cv, n1 := w.column_at_float(&cov_col, i)
+		vx, n2 := w.column_at_float(&var_x, i)
+		vy, n3 := w.column_at_float(&var_y, i)
 
 		if n1 || n2 || n3 || vx <= 0 || vy <= 0 {
-			append_null(&out)
+			w.append_null(&out)
 		} else {
-			append_float(&out, cv / math.sqrt(vx * vy))
+			w.append_float(&out, cv / math.sqrt(vx * vy))
 		}
 	}
 
-	destroy_column(&cov_col)
-	destroy_column(&var_x)
-	destroy_column(&var_y)
+	w.destroy_column(&cov_col)
+	w.destroy_column(&var_x)
+	w.destroy_column(&var_y)
 
 	return out
 }
@@ -1616,10 +1633,10 @@ rolling_apply_int_ewm_corr :: proc(
 
 rolling_apply_float_corr :: proc(
 	r: RollingWindow,
-	agg: Aggregator,
+	agg: w.Aggregator,
 	allocator: mem.Allocator,
-) -> Column {
-	src_y := column(r.df, agg.other)
+) -> w.Column {
+	src_y := w.column(r.df, agg.other)
 
 	cov_col := rolling_apply_float_cov(r, src_y, agg, allocator)
 	var_x := rolling_apply_float_var(r, agg, allocator)
@@ -1633,23 +1650,23 @@ rolling_apply_float_corr :: proc(
 	}
 	var_y := rolling_apply_float_var(rw_y, agg, allocator)
 
-	out := column_new(agg.name, .Float, 0)
+	out := w.column_new(agg.name, .Float, 0)
 
 	for i in 0 ..< cov_col.len {
-		cv, n1 := column_at_float(&cov_col, i)
-		vx, n2 := column_at_float(&var_x, i)
-		vy, n3 := column_at_float(&var_y, i)
+		cv, n1 := w.column_at_float(&cov_col, i)
+		vx, n2 := w.column_at_float(&var_x, i)
+		vy, n3 := w.column_at_float(&var_y, i)
 
 		if n1 || n2 || n3 || vx <= 0 || vy <= 0 {
-			append_null(&out)
+			w.append_null(&out)
 		} else {
-			append_float(&out, cv / math.sqrt(vx * vy))
+			w.append_float(&out, cv / math.sqrt(vx * vy))
 		}
 	}
 
-	destroy_column(&cov_col)
-	destroy_column(&var_x)
-	destroy_column(&var_y)
+	w.destroy_column(&cov_col)
+	w.destroy_column(&var_x)
+	w.destroy_column(&var_y)
 
 	return out
 }
@@ -1657,10 +1674,10 @@ rolling_apply_float_corr :: proc(
 
 rolling_apply_int_corr :: proc(
 	r: RollingWindow,
-	agg: Aggregator,
+	agg: w.Aggregator,
 	allocator: mem.Allocator,
-) -> Column {
-	src_y := column(r.df, agg.other)
+) -> w.Column {
+	src_y := w.column(r.df, agg.other)
 
 	cov_col := rolling_apply_int_cov(r, src_y, agg, allocator)
 	var_x := rolling_apply_int_var(r, agg, allocator)
@@ -1674,39 +1691,39 @@ rolling_apply_int_corr :: proc(
 	}
 	var_y := rolling_apply_int_var(rw_y, agg, allocator)
 
-	out := column_new(agg.name, .Float, 0)
+	out := w.column_new(agg.name, .Float, 0)
 
 	for i in 0 ..< cov_col.len {
-		cv, n1 := column_at_float(&cov_col, i)
-		vx, n2 := column_at_float(&var_x, i)
-		vy, n3 := column_at_float(&var_y, i)
+		cv, n1 := w.column_at_float(&cov_col, i)
+		vx, n2 := w.column_at_float(&var_x, i)
+		vy, n3 := w.column_at_float(&var_y, i)
 
 		if n1 || n2 || n3 || vx <= 0 || vy <= 0 {
-			append_null(&out)
+			w.append_null(&out)
 		} else {
-			append_float(&out, cv / math.sqrt(vx * vy))
+			w.append_float(&out, cv / math.sqrt(vx * vy))
 		}
 	}
 
-	destroy_column(&cov_col)
-	destroy_column(&var_x)
-	destroy_column(&var_y)
+	w.destroy_column(&cov_col)
+	w.destroy_column(&var_x)
+	w.destroy_column(&var_y)
 
 	return out
 }
 rolling_apply_float_var :: proc(
 	r: RollingWindow,
-	agg: Aggregator,
+	agg: w.Aggregator,
 	allocator: mem.Allocator,
-) -> Column {
-	src := column(r.df, r.column)
-	out := column_new(agg.name, .Float, 0)
+) -> w.Column {
+	src := w.column(r.df, r.column)
+	out := w.column_new(agg.name, .Float, 0)
 
 	values := make([dynamic]f64, 0, r.window, allocator)
 	defer delete(values)
 
 	for i in 0 ..< r.df.rows {
-		v, is_null := column_at_float(src, i)
+		v, is_null := w.column_at_float(src, i)
 		if !is_null do append(&values, v)
 
 		if len(values) > r.window {
@@ -1714,7 +1731,7 @@ rolling_apply_float_var :: proc(
 		}
 
 		if len(values) < r.min_periods {
-			append_null(&out)
+			w.append_null(&out)
 			continue
 		}
 
@@ -1727,7 +1744,7 @@ rolling_apply_float_var :: proc(
 		for x in values do var += (x - mean) * (x - mean)
 		var /= f64(len(values))
 
-		append_float(&out, var)
+		w.append_float(&out, var)
 	}
 
 	return out
@@ -1736,17 +1753,17 @@ rolling_apply_float_var :: proc(
 
 rolling_apply_int_var :: proc(
 	r: RollingWindow,
-	agg: Aggregator,
+	agg: w.Aggregator,
 	allocator: mem.Allocator,
-) -> Column {
-	src := column(r.df, r.column)
-	out := column_new(agg.name, .Float, 0)
+) -> w.Column {
+	src := w.column(r.df, r.column)
+	out := w.column_new(agg.name, .Float, 0)
 
 	values := make([dynamic]f64, 0, r.window, allocator)
 	defer delete(values)
 
 	for i in 0 ..< r.df.rows {
-		v, is_null := column_at_int(src, i)
+		v, is_null := w.column_at_int(src, i)
 		if !is_null do append(&values, f64(v))
 
 		if len(values) > r.window {
@@ -1754,7 +1771,7 @@ rolling_apply_int_var :: proc(
 		}
 
 		if len(values) < r.min_periods {
-			append_null(&out)
+			w.append_null(&out)
 			continue
 		}
 
@@ -1766,19 +1783,19 @@ rolling_apply_int_var :: proc(
 		for x in values do var += (x - mean) * (x - mean)
 		var /= f64(len(values))
 
-		append_float(&out, var)
+		w.append_float(&out, var)
 	}
 
 	return out
 }
 rolling_apply_float_cov :: proc(
 	r: RollingWindow,
-	other: ^Column,
-	agg: Aggregator,
+	other: ^w.Column,
+	agg: w.Aggregator,
 	allocator: mem.Allocator,
-) -> Column {
-	src := column(r.df, r.column)
-	out := column_new(agg.name, .Float, 0)
+) -> w.Column {
+	src := w.column(r.df, r.column)
+	out := w.column_new(agg.name, .Float, 0)
 
 	xs := make([dynamic]f64, 0, r.window, allocator)
 	ys := make([dynamic]f64, 0, r.window, allocator)
@@ -1786,8 +1803,8 @@ rolling_apply_float_cov :: proc(
 	defer delete(ys)
 
 	for i in 0 ..< r.df.rows {
-		x, nx := column_at_float(src, i)
-		y, ny := column_at_float(other, i)
+		x, nx := w.column_at_float(src, i)
+		y, ny := w.column_at_float(other, i)
 
 		if !nx && !ny {
 			append(&xs, x)
@@ -1800,7 +1817,7 @@ rolling_apply_float_cov :: proc(
 		}
 
 		if len(xs) < r.min_periods {
-			append_null(&out)
+			w.append_null(&out)
 			continue
 		}
 
@@ -1817,19 +1834,19 @@ rolling_apply_float_cov :: proc(
 		}
 		cov /= f64(len(xs))
 
-		append_float(&out, cov)
+		w.append_float(&out, cov)
 	}
 
 	return out
 }
 rolling_apply_int_cov :: proc(
 	r: RollingWindow,
-	other: ^Column,
-	agg: Aggregator,
+	other: ^w.Column,
+	agg: w.Aggregator,
 	allocator: mem.Allocator,
-) -> Column {
-	src := column(r.df, r.column)
-	out := column_new(agg.name, .Float, 0)
+) -> w.Column {
+	src := w.column(r.df, r.column)
+	out := w.column_new(agg.name, .Float, 0)
 
 	xs := make([dynamic]f64, 0, r.window, allocator)
 	ys := make([dynamic]f64, 0, r.window, allocator)
@@ -1837,8 +1854,8 @@ rolling_apply_int_cov :: proc(
 	defer delete(ys)
 
 	for i in 0 ..< r.df.rows {
-		xi, nx := column_at_int(src, i)
-		yi, ny := column_at_int(other, i)
+		xi, nx := w.column_at_int(src, i)
+		yi, ny := w.column_at_int(other, i)
 
 		if !nx && !ny {
 			append(&xs, f64(xi))
@@ -1851,7 +1868,7 @@ rolling_apply_int_cov :: proc(
 		}
 
 		if len(xs) < r.min_periods {
-			append_null(&out)
+			w.append_null(&out)
 			continue
 		}
 
@@ -1868,7 +1885,7 @@ rolling_apply_int_cov :: proc(
 		}
 		cov /= f64(len(xs))
 
-		append_float(&out, cov)
+		w.append_float(&out, cov)
 	}
 
 	return out

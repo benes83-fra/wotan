@@ -1,6 +1,7 @@
-package core
+package analytics
 
 
+import w "../core"
 import "core:mem"
 
 StationarityDecision :: enum {
@@ -56,7 +57,7 @@ df_stationarity :: proc(
 	adf_lag_sel: LagSelection = .AIC,
 	kpss_type: KPSS_Type = .Level,
 	allocator: mem.Allocator = context.allocator,
-) -> DataFrame {
+) -> w.DataFrame {
 
 	decision, adf_stat, adf_p, kpss_stat, kpss_p := stationarity_test(
 		y,
@@ -67,7 +68,7 @@ df_stationarity :: proc(
 		allocator,
 	)
 
-	df := dataframe_new()
+	df := w.dataframe_new()
 
 	// Compute decision string BEFORE array literal
 	decision_str := ""
@@ -82,11 +83,11 @@ df_stationarity :: proc(
 		decision_str = "Inconclusive"
 	}
 
-	add_column(&df, column_from_strings("decision", []string{decision_str}))
-	add_column(&df, column_from_floats("adf_stat", []f64{adf_stat}))
-	add_column(&df, column_from_floats("adf_p", []f64{adf_p}))
-	add_column(&df, column_from_floats("kpss_stat", []f64{kpss_stat}))
-	add_column(&df, column_from_floats("kpss_p", []f64{kpss_p}))
+	w.add_column(&df, w.column_from_strings("decision", []string{decision_str}))
+	w.add_column(&df, w.column_from_floats("adf_stat", []f64{adf_stat}))
+	w.add_column(&df, w.column_from_floats("adf_p", []f64{adf_p}))
+	w.add_column(&df, w.column_from_floats("kpss_stat", []f64{kpss_stat}))
+	w.add_column(&df, w.column_from_floats("kpss_p", []f64{kpss_p}))
 
 	df.rows = 1
 	return df

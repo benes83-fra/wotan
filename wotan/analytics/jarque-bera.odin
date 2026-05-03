@@ -1,5 +1,6 @@
-package core
+package analytics
 
+import w "../core"
 import "core:math"
 import "core:mem"
 
@@ -69,13 +70,13 @@ jarque_bera :: proc(
 
 	return
 }
-df_jarque_bera :: proc(v: []f64, allocator: mem.Allocator = context.allocator) -> DataFrame {
+df_jarque_bera :: proc(v: []f64, allocator: mem.Allocator = context.allocator) -> w.DataFrame {
 
 	JB, p := jarque_bera(v, allocator)
 
-	out := dataframe_new()
-	add_column(&out, column_from_floats("JB", []f64{JB}))
-	add_column(&out, column_from_floats("p_value", []f64{p}))
+	out := w.dataframe_new()
+	w.add_column(&out, w.column_from_floats("JB", []f64{JB}))
+	w.add_column(&out, w.column_from_floats("p_value", []f64{p}))
 	out.rows = 1
 	return out
 }

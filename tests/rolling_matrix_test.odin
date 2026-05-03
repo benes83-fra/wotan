@@ -1,5 +1,6 @@
 package tests
 
+import analytic "../wotan/analytics"
 import w "../wotan/core"
 import "core:fmt"
 import "core:mem"
@@ -25,7 +26,7 @@ rolling_matrix_test :: proc(allocator: mem.Allocator) {
 	df.rows = 5
 
 	fmt.println("Rolling CORR matrix (perfect corr)")
-	corr_mat := w.rolling_corr_matrix(&df, []string{"a", "b"}, 3, 1, allocator)
+	corr_mat := analytic.rolling_corr_matrix(&df, []string{"a", "b"}, 3, 1, allocator)
 	w.dataframe_pretty_print(&corr_mat)
 	w.destroy_dataframe(&corr_mat)
 	// ------------------------------------------------------------
@@ -44,7 +45,7 @@ rolling_matrix_test :: proc(allocator: mem.Allocator) {
 	df2.rows = 5
 
 	fmt.println("Rolling CORR matrix (negative corr)")
-	corr_neg := w.rolling_corr_matrix(&df2, []string{"na", "nb"}, 3, 1, allocator)
+	corr_neg := analytic.rolling_corr_matrix(&df2, []string{"na", "nb"}, 3, 1, allocator)
 	w.dataframe_pretty_print(&corr_neg)
 	w.destroy_dataframe(&corr_neg)
 
@@ -64,7 +65,7 @@ rolling_matrix_test :: proc(allocator: mem.Allocator) {
 	df3.rows = 5
 
 	fmt.println("Rolling CORR matrix (zero corr)")
-	corr_zero := w.rolling_corr_matrix(&df3, []string{"za", "zb"}, 3, 1, allocator)
+	corr_zero := analytic.rolling_corr_matrix(&df3, []string{"za", "zb"}, 3, 1, allocator)
 	w.dataframe_pretty_print(&corr_zero)
 	w.destroy_dataframe(&corr_zero)
 
@@ -85,7 +86,7 @@ rolling_matrix_test :: proc(allocator: mem.Allocator) {
 	df4.rows = 2
 
 	fmt.println("Rolling CORR matrix (short series, min_periods=3)")
-	corr_short := w.rolling_corr_matrix(&df4, []string{"sa", "sb"}, 5, 3, allocator)
+	corr_short := analytic.rolling_corr_matrix(&df4, []string{"sa", "sb"}, 5, 3, allocator)
 	w.dataframe_pretty_print(&corr_short)
 	w.destroy_dataframe(&corr_short)
 
@@ -105,7 +106,7 @@ rolling_matrix_test :: proc(allocator: mem.Allocator) {
 	w.add_column(&df5, vb)
 	df5.rows = 5
 
-	var_mat := w.rolling_var_matrix(&df5, []string{"va", "vb"}, 3, 1, allocator)
+	var_mat := analytic.rolling_var_matrix(&df5, []string{"va", "vb"}, 3, 1, allocator)
 	w.dataframe_pretty_print(&var_mat)
 	w.destroy_dataframe(&var_mat)
 
@@ -114,7 +115,7 @@ rolling_matrix_test :: proc(allocator: mem.Allocator) {
 	// ------------------------------------------------------------
 	fmt.println("Rolling COV matrix")
 
-	cov_mat := w.rolling_cov_matrix(&df5, []string{"va", "vb"}, 3, 1, allocator)
+	cov_mat := analytic.rolling_cov_matrix(&df5, []string{"va", "vb"}, 3, 1, allocator)
 	w.dataframe_pretty_print(&cov_mat)
 	w.destroy_dataframe(&cov_mat)
 
@@ -145,7 +146,7 @@ ewm_cov_test :: proc(allocator: mem.Allocator) {
 	bias := false
 	adjust := false
 
-	ewm_cov_df := w.ewm_cov_matrix(
+	ewm_cov_df := analytic.ewm_cov_matrix(
 		&df,
 		[]string{"x", "y", "z"},
 		alpha,
@@ -183,13 +184,29 @@ ewm_pca_test :: proc(allocator: mem.Allocator) {
 
 	// --- EWM Covariance Matrix ---
 	fmt.println("\nEWM Covariance Matrix:")
-	cov_df := w.ewm_cov_matrix(&df, []string{"x", "y", "z"}, alpha, minp, bias, adjust, allocator)
+	cov_df := analytic.ewm_cov_matrix(
+		&df,
+		[]string{"x", "y", "z"},
+		alpha,
+		minp,
+		bias,
+		adjust,
+		allocator,
+	)
 	defer w.destroy_dataframe(&cov_df)
 	w.dataframe_pretty_print(&cov_df)
 
 	// --- EWM PCA (full time series) ---
 	fmt.println("\nEWM PCA (all rows):")
-	pca_series := w.ewm_pca(&df, []string{"x", "y", "z"}, alpha, minp, bias, adjust, allocator)
+	pca_series := analytic.ewm_pca(
+		&df,
+		[]string{"x", "y", "z"},
+		alpha,
+		minp,
+		bias,
+		adjust,
+		allocator,
+	)
 	for i in 0 ..< len(pca_series) {
 		fmt.printf("Row %d:\n", i)
 		fmt.println("  Eigenvalues:  ", pca_series[i].eigenvalues)
@@ -199,7 +216,15 @@ ewm_pca_test :: proc(allocator: mem.Allocator) {
 
 	// --- EWM PCA (last row only) ---
 	fmt.println("\nEWM PCA (last row):")
-	last := w.ewm_pca_last(&df, []string{"x", "y", "z"}, alpha, minp, bias, adjust, allocator)
+	last := analytic.ewm_pca_last(
+		&df,
+		[]string{"x", "y", "z"},
+		alpha,
+		minp,
+		bias,
+		adjust,
+		allocator,
+	)
 	fmt.println("Eigenvalues:", last.eigenvalues)
 	fmt.println("Eigenvectors:", last.eigenvectors)
 
