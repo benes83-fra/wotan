@@ -344,7 +344,7 @@ cell_value :: proc(cell_xml: string, shared: []string, styles_is_date: []bool) -
 				if ok2 {
 					dt := excel_serial_to_datetime(f)
 					// return ISO string
-					return w.datetime_to_string(dt)
+					return w.datetime_to_string_na(dt)
 				}
 			}
 		}

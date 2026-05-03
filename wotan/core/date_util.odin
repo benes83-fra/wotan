@@ -135,6 +135,22 @@ time_to_string :: proc(t: Time) -> string {
 	return strings.to_string(sb)
 
 }
+datetime_to_string_na :: proc(dt: Datetime) -> string {
+	// 19 chars for "YYYY-MM-DD HH:MM:SS" + 1 for safety if needed
+	buf: [19]byte
+
+	// bprintf formats directly into the slice and returns the string
+	return fmt.bprintf(
+		buf[:],
+		"%04d-%02d-%02d %02d:%02d:%02d",
+		dt.year,
+		dt.month,
+		dt.day,
+		dt.hour,
+		dt.minute,
+		dt.second,
+	)
+}
 
 datetime_to_string :: proc(dt: Datetime) -> string {
 	sb := strings.builder_make()
