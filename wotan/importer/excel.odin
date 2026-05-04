@@ -216,8 +216,18 @@ parse_row :: proc(
 		cell_xml := row_xml[i:j]
 
 		col_idx := cell_ref_to_col(cell_xml)
-		val := cell_value(cell_xml, shared, styles_is_date)
 
+		// --- NEW SPLIT LOGIC ---
+		raw, is_dt := cell_value_raw(cell_xml, shared, styles_is_date)
+
+		val := ""
+		if is_dt {
+			// allocate datetime string using the DataFrame allocator
+			val = cell_value_datetime(raw, allocator)
+		} else {
+			// raw is a view into XML/shared strings → safe to store as-is
+			val = raw
+		}
 
 		// ensure capacity
 		if col_idx >= len(row) {
@@ -233,6 +243,7 @@ parse_row :: proc(
 
 	return row[:]
 }
+
 
 // Extract column index from r="A1", r="BC12", etc.
 cell_ref_to_col :: proc(cell_xml: string) -> int {
@@ -260,99 +271,6 @@ cell_ref_to_col :: proc(cell_xml: string) -> int {
 		}
 	}
 	return col - 1 // zero-based
-}
-cell_value :: proc(cell_xml: string, shared: []string, styles_is_date: []bool) -> string {
-	// detect type attribute
-	t_pos := strings.index(cell_xml, " t=\"")
-	cell_type := ""
-	if t_pos >= 0 {
-		t_pos += len(" t=\"")
-		end := t_pos
-		for end < len(cell_xml) && cell_xml[end] != '"' {
-			end += 1
-		}
-		cell_type = cell_xml[t_pos:end]
-	}
-
-	// --- inline string: <c t="inlineStr"><is><t>TEXT</t></is></c> ---
-	if cell_type == "inlineStr" {
-		t_start := strings.index(cell_xml, "<t")
-		if t_start >= 0 {
-			gt := strings.index(cell_xml[t_start:], ">")
-			if gt >= 0 {
-				gt += t_start + 1
-				t_end := strings.index(cell_xml[gt:], "</t>")
-				if t_end >= 0 {
-					t_end += gt
-					return cell_xml[gt:t_end]
-				}
-			}
-		}
-		return ""
-	}
-
-	// --- shared string: <c t="s"><v>index</v></c> ---
-	if cell_type == "s" {
-		v_start := strings.index(cell_xml, "<v>")
-		if v_start < 0 {
-			return ""
-		}
-		v_start += len("<v>")
-		v_end := strings.index(cell_xml[v_start:], "</v>")
-		if v_end < 0 {
-			return ""
-		}
-		v_end += v_start
-
-		raw := cell_xml[v_start:v_end]
-		idx, ok := strconv.parse_int(raw)
-		if ok && idx >= 0 && idx < len(shared) {
-			return shared[idx]
-		}
-		return ""
-	}
-
-	// --- normal numeric / boolean / text ---
-	// --- normal numeric / boolean / text ---
-	v_start := strings.index(cell_xml, "<v>")
-	if v_start < 0 {
-		return ""
-	}
-	v_start += len("<v>")
-	v_end := strings.index(cell_xml[v_start:], "</v>")
-	if v_end < 0 {
-		return ""
-	}
-	v_end += v_start
-
-	raw := cell_xml[v_start:v_end]
-
-	// --- DATE DETECTION ---
-	s_pos := strings.index(cell_xml, " s=\"")
-	if s_pos >= 0 {
-		s_pos += len(" s=\"")
-		end := s_pos
-		for end < len(cell_xml) && cell_xml[end] != '"' {
-			end += 1
-		}
-		s_idx_str := cell_xml[s_pos:end]
-		s_idx, ok := strconv.parse_int(s_idx_str)
-		if ok && s_idx >= 0 && s_idx < len(styles_is_date) {
-			if styles_is_date[s_idx] {
-				// convert Excel serial → your Datetime
-				f, ok2 := strconv.parse_f64(raw)
-				if ok2 {
-					dt := excel_serial_to_datetime(f)
-					// return ISO string
-					return w.datetime_to_string_na(dt)
-				}
-			}
-		}
-	}
-
-	// fallback: numeric or text
-	return raw
-
 }
 
 
@@ -730,4 +648,107 @@ excel_serial_to_datetime :: proc(n: f64) -> w.Datetime {
 	time := w.Time{hour, minute, second}
 
 	return w.new_Datetime_from_Date_and_Time(date, time)
+}
+
+cell_value_raw :: proc(
+	cell_xml: string,
+	shared: []string,
+	styles_is_date: []bool,
+) -> (
+	string,
+	bool,
+) {
+	// detect type attribute
+	t_pos := strings.index(cell_xml, " t=\"")
+	cell_type := ""
+	if t_pos >= 0 {
+		t_pos += len(" t=\"")
+		end := t_pos
+		for end < len(cell_xml) && cell_xml[end] != '"' {
+			end += 1
+		}
+		cell_type = cell_xml[t_pos:end]
+	}
+
+	// --- inline string ---
+	if cell_type == "inlineStr" {
+		t_start := strings.index(cell_xml, "<t")
+		if t_start >= 0 {
+			gt := strings.index(cell_xml[t_start:], ">")
+			if gt >= 0 {
+				gt += t_start + 1
+				t_end := strings.index(cell_xml[gt:], "</t>")
+				if t_end >= 0 {
+					t_end += gt
+					return cell_xml[gt:t_end], false
+				}
+			}
+		}
+		return "", false
+	}
+
+	// --- shared string ---
+	if cell_type == "s" {
+		v_start := strings.index(cell_xml, "<v>")
+		if v_start < 0 {return "", false}
+		v_start += len("<v>")
+		v_end := strings.index(cell_xml[v_start:], "</v>")
+		if v_end < 0 {return "", false}
+		v_end += v_start
+
+		raw := cell_xml[v_start:v_end]
+		idx, ok := strconv.parse_int(raw)
+		if ok && idx >= 0 && idx < len(shared) {
+			return shared[idx], false
+		}
+		return "", false
+	}
+
+	// --- normal numeric / boolean / text ---
+	v_start := strings.index(cell_xml, "<v>")
+	if v_start < 0 {return "", false}
+	v_start += len("<v>")
+	v_end := strings.index(cell_xml[v_start:], "</v>")
+	if v_end < 0 {return "", false}
+	v_end += v_start
+
+	raw := cell_xml[v_start:v_end]
+
+	// --- DATE DETECTION ---
+	s_pos := strings.index(cell_xml, " s=\"")
+	if s_pos >= 0 {
+		s_pos += len(" s=\"")
+		end := s_pos
+		for end < len(cell_xml) && cell_xml[end] != '"' {
+			end += 1
+		}
+		s_idx_str := cell_xml[s_pos:end]
+		s_idx, ok := strconv.parse_int(s_idx_str)
+		if ok && s_idx >= 0 && s_idx < len(styles_is_date) {
+			if styles_is_date[s_idx] {
+				// Only treat as datetime if the raw value parses as float
+				if _, ok2 := strconv.parse_f64(raw); ok2 {
+					return raw, true
+				}
+			}
+		}
+	}
+
+	// fallback: raw view
+	return raw, false
+}
+
+cell_value_datetime :: proc(raw: string, allocator: mem.Allocator) -> string {
+	f, ok := strconv.parse_f64(raw)
+	if !ok {
+		// keep original numeric if it wasn't a valid float after all
+		return raw
+	}
+
+	dt := excel_serial_to_datetime(f)
+
+	// allocate backing storage with the *same* allocator as the DataFrame
+	buf := make([]u8, 19, allocator) // "YYYY-MM-DD HH:MM:SS" = 19 bytes
+	s := w.datetime_format_iso_into(dt, buf[:])
+	return s
 }

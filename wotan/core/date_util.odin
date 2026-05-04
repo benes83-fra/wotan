@@ -137,7 +137,7 @@ time_to_string :: proc(t: Time) -> string {
 }
 datetime_to_string_na :: proc(dt: Datetime) -> string {
 	// 19 chars for "YYYY-MM-DD HH:MM:SS" + 1 for safety if needed
-	buf: [19]byte
+	buf: [24]byte
 
 	// bprintf formats directly into the slice and returns the string
 	return fmt.bprintf(
@@ -150,7 +150,54 @@ datetime_to_string_na :: proc(dt: Datetime) -> string {
 		dt.minute,
 		dt.second,
 	)
+
 }
+datetime_format_iso_into :: proc(dt: Datetime, buf: []u8) -> string {
+	// Require at least 19 bytes: "YYYY-MM-DD HH:MM:SS"
+	assert(len(buf) >= 19)
+
+	i := 0
+
+	// Year
+	buf[i] = u8('0' + dt.year / 1000); i += 1
+	buf[i] = u8('0' + (dt.year / 100) % 10); i += 1
+	buf[i] = u8('0' + (dt.year / 10) % 10); i += 1
+	buf[i] = u8('0' + dt.year % 10); i += 1
+
+	buf[i] = '-'; i += 1
+
+	// Month
+	buf[i] = u8('0' + dt.month / 10); i += 1
+	buf[i] = u8('0' + dt.month % 10); i += 1
+
+	buf[i] = '-'; i += 1
+
+	// Day
+	buf[i] = u8('0' + dt.day / 10); i += 1
+	buf[i] = u8('0' + dt.day % 10); i += 1
+
+	buf[i] = ' '; i += 1
+
+	// Hour
+	buf[i] = u8('0' + dt.hour / 10); i += 1
+	buf[i] = u8('0' + dt.hour % 10); i += 1
+
+	buf[i] = ':'; i += 1
+
+	// Minute
+	buf[i] = u8('0' + dt.minute / 10); i += 1
+	buf[i] = u8('0' + dt.minute % 10); i += 1
+
+	buf[i] = ':'; i += 1
+
+	// Second
+	buf[i] = u8('0' + dt.second / 10); i += 1
+	buf[i] = u8('0' + dt.second % 10); i += 1
+
+	// No allocation here: just a view into caller's buffer
+	return string(buf[:i])
+}
+
 
 datetime_to_string :: proc(dt: Datetime) -> string {
 	sb := strings.builder_make()
