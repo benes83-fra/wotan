@@ -73,12 +73,11 @@ xlsx_load :: proc(path: string, allocator: mem.Allocator) -> w.DataFrame {
 
 		// Optional: avoid empty names
 		if strings.trim_space(safe_name) == "" {
-			safe_name = fmt.aprintf("col_%d", i) // allocates a fresh string
-			defer delete(safe_name)
+			safe_name = fmt.aprintf("col_%d", i, allocator = allocator) // allocates a fresh string
+
 		} else {
 			// Force a copy so we don't keep a pointer into the XML buffer arena
-			safe_name = fmt.aprintf("%s", safe_name)
-			defer delete(safe_name)
+			safe_name = fmt.aprintf("%s", safe_name, allocator = allocator)
 		}
 
 		col := w.column_new(safe_name, inferred[i], row_count)
@@ -498,8 +497,7 @@ discover_sheets :: proc(path: string, allocator: mem.Allocator) -> []SheetInfo {
 			if s.rid == r.id {
 				// only take worksheet targets
 				if strings.index(r.target, "worksheets/") >= 0 {
-					pth := fmt.aprintf("xl/%s", r.target)
-					defer delete(pth)
+					pth := fmt.aprintf("xl/%s", r.target, allocator = allocator)
 					s.path = pth
 					append(&sheets, s)
 				}
