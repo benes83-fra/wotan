@@ -7,146 +7,171 @@ import "core:fmt"
 import "core:mem"
 import "core:os"
 
-Local_File_Header :: struct #packed {
-	signature:          u32le, // 0x04034b50
-	version_needed:     u16le,
-	flags:              u16le,
-	compression_method: u16le,
-	mod_time:           u16le,
-	mod_date:           u16le,
-	crc32:              u32le,
-	compressed_size:    u32le,
-	uncompressed_size:  u32le,
-	file_name_length:   u16le,
-	extra_field_length: u16le,
+// ------------------------------------------------------------
+// Helpers: little-endian decoding from []u8 (ARM-safe)
+// ------------------------------------------------------------
+
+read_u16_le :: proc(b: []u8, off: int) -> u16 {
+	return u16(b[off + 0]) | u16(b[off + 1]) << 8
 }
 
-Central_Dir_Header :: struct #packed {
-	signature:           u32le, // 0x02014b50
-	version_made_by:     u16le,
-	version_needed:      u16le,
-	flags:               u16le,
-	compression_method:  u16le,
-	mod_time:            u16le,
-	mod_date:            u16le,
-	crc32:               u32le,
-	compressed_size:     u32le,
-	uncompressed_size:   u32le,
-	file_name_length:    u16le,
-	extra_field_length:  u16le,
-	file_comment_length: u16le,
-	disk_number_start:   u16le,
-	internal_attrs:      u16le,
-	external_attrs:      u32le,
-	local_header_offset: u32le,
+read_u32_le :: proc(b: []u8, off: int) -> u32 {
+	return u32(b[off + 0]) | u32(b[off + 1]) << 8 | u32(b[off + 2]) << 16 | u32(b[off + 3]) << 24
 }
 
-End_Of_Central_Dir :: struct #packed {
-	signature:              u32le, // 0x06054b50
-	disk_number:            u16le,
-	central_dir_start_disk: u16le,
-	num_entries_this_disk:  u16le,
-	num_entries_total:      u16le,
-	central_dir_size:       u32le,
-	central_dir_offset:     u32le,
-	comment_length:         u16le,
-}
-find_eocd :: proc(data: []u8) -> (eocd: ^End_Of_Central_Dir, ok: bool) {
-	sig: u32le = 0x06054b50
-	// scan last 64KB (spec limit)
+// ------------------------------------------------------------
+// Struct sizes (for bounds checks) – match ZIP spec
+// ------------------------------------------------------------
+
+LOCAL_FILE_HEADER_SIZE :: 30 // fixed part
+CENTRAL_DIR_HEADER_SIZE :: 46 // fixed part
+END_OF_CENTRAL_DIR_SIZE :: 22 // fixed part
+
+// ------------------------------------------------------------
+// EOCD parsing
+// ------------------------------------------------------------
+
+find_eocd :: proc(data: []u8) -> (off: int, ok: bool) {
+	// EOCD signature: 0x06054b50 (little endian: 50 4b 05 06)
+	sig0: u8 = 0x50
+	sig1: u8 = 0x4b
+	sig2: u8 = 0x05
+	sig3: u8 = 0x06
+
+	if len(data) < END_OF_CENTRAL_DIR_SIZE {
+		return -1, false
+	}
+
 	start := max(0, len(data) - 65536)
-	for i := len(data) - 22; i >= start; i -= 1 {
-		if len(data) - i < size_of(End_Of_Central_Dir) {
-			continue
-		}
-		cand := (^End_Of_Central_Dir)(&data[i])
-		if cand.signature == sig {
-			return cand, true
+	for i := len(data) - END_OF_CENTRAL_DIR_SIZE; i >= start; i -= 1 {
+		if data[i + 0] == sig0 &&
+		   data[i + 1] == sig1 &&
+		   data[i + 2] == sig2 &&
+		   data[i + 3] == sig3 {
+			return i, true
 		}
 	}
-	return nil, false
+
+	return -1, false
 }
 
-find_central_entry :: proc(
-	data: []u8,
-	eocd: ^End_Of_Central_Dir,
-	name: string,
-) -> (
-	^Central_Dir_Header,
-	bool,
-) {
-	sig: u32le = 0x02014b50
-	off := int(eocd.central_dir_offset)
-	for i in 0 ..< int(eocd.num_entries_total) {
-		if off + size_of(Central_Dir_Header) > len(data) {
-			return nil, false
-		}
-		hdr := (^Central_Dir_Header)(&data[off])
-		if hdr.signature != sig {
-			return nil, false
+// ------------------------------------------------------------
+// Central directory entry parsing
+// ------------------------------------------------------------
+
+find_central_entry :: proc(data: []u8, eocd_off: int, name: string) -> (hdr_off: int, ok: bool) {
+	if eocd_off + END_OF_CENTRAL_DIR_SIZE > len(data) {
+		return -1, false
+	}
+
+	// EOCD layout (little endian):
+	//  0: signature (4)
+	//  4: disk_number (2)
+	//  6: central_dir_start_disk (2)
+	//  8: num_entries_this_disk (2)
+	// 10: num_entries_total (2)
+	// 12: central_dir_size (4)
+	// 16: central_dir_offset (4)
+	// 20: comment_length (2)
+
+	num_entries_total := int(read_u16_le(data, eocd_off + 10))
+	central_dir_offset := int(read_u32_le(data, eocd_off + 16))
+
+	off := central_dir_offset
+	for i := 0; i < num_entries_total; i += 1 {
+		if off + CENTRAL_DIR_HEADER_SIZE > len(data) {
+			return -1, false
 		}
 
-		name_len := int(hdr.file_name_length)
-		extra_len := int(hdr.extra_field_length)
-		comment_len := int(hdr.file_comment_length)
+		// Central dir header signature: 0x02014b50
+		if read_u32_le(data, off + 0) != u32(0x02014b50) {
+			return -1, false
+		}
 
-		name_start := off + size_of(Central_Dir_Header)
-		name_end := name_start + name_len
+		file_name_length := int(read_u16_le(data, off + 28))
+		extra_field_length := int(read_u16_le(data, off + 30))
+		file_comment_length := int(read_u16_le(data, off + 32))
+
+		name_start := off + CENTRAL_DIR_HEADER_SIZE
+		name_end := name_start + file_name_length
 		if name_end > len(data) {
-			return nil, false
+			return -1, false
 		}
 
 		entry_name := string(data[name_start:name_end])
 		if entry_name == name {
-			return hdr, true
+			return off, true
 		}
 
-		off = name_end + extra_len + comment_len
+		off = name_end + extra_field_length + file_comment_length
 	}
-	return nil, false
+
+	return -1, false
 }
+
+// ------------------------------------------------------------
+// Local header + payload
+// ------------------------------------------------------------
 
 read_local_and_inflate :: proc(
 	data: []u8,
-	hdr: ^Central_Dir_Header,
+	cdh_off: int,
 	allocator: mem.Allocator,
 ) -> (
 	[]u8,
 	bool,
 ) {
-	local_off := int(hdr.local_header_offset)
-	if local_off + size_of(Local_File_Header) > len(data) {
+	if cdh_off + CENTRAL_DIR_HEADER_SIZE > len(data) {
 		return nil, false
 	}
 
-	lfh := (^Local_File_Header)(&data[local_off])
-	if lfh.signature != 0x04034b50 {
+	// From central dir header:
+	compression_method := read_u16_le(data, cdh_off + 10)
+	compressed_size := int(read_u32_le(data, cdh_off + 20))
+	uncompressed_size := int(read_u32_le(data, cdh_off + 24))
+	local_header_off := int(read_u32_le(data, cdh_off + 42))
+
+	// Local file header layout:
+	//  0: signature (4) = 0x04034b50
+	//  4: version_needed (2)
+	//  6: flags (2)
+	//  8: compression_method (2)
+	// 10: mod_time (2)
+	// 12: mod_date (2)
+	// 14: crc32 (4)
+	// 18: compressed_size (4)
+	// 22: uncompressed_size (4)
+	// 26: file_name_length (2)
+	// 28: extra_field_length (2)
+
+	if local_header_off + LOCAL_FILE_HEADER_SIZE > len(data) {
+		return nil, false
+	}
+	if read_u32_le(data, local_header_off + 0) != u32(0x04034b50) {
 		return nil, false
 	}
 
-	name_len := int(lfh.file_name_length)
-	extra_len := int(lfh.extra_field_length)
+	file_name_length := int(read_u16_le(data, local_header_off + 26))
+	extra_field_len := int(read_u16_le(data, local_header_off + 28))
 
-	comp_start := local_off + size_of(Local_File_Header) + name_len + extra_len
-	comp_end := comp_start + int(lfh.compressed_size)
+	comp_start := local_header_off + LOCAL_FILE_HEADER_SIZE + file_name_length + extra_field_len
+	comp_end := comp_start + compressed_size
 	if comp_end > len(data) {
 		return nil, false
 	}
 
 	comp := data[comp_start:comp_end]
 
-	// Only support stored (0) and deflate (8)
-	if lfh.compression_method == 0 {
+	// stored
+	if compression_method == 0 {
 		out := make([]u8, len(comp), allocator)
 		copy(out, comp)
 		return out, true
-	} else if lfh.compression_method == 8 {
-		buf := bytes.Buffer{}
+	}
 
-		capacity := int(lfh.uncompressed_size)
-		if capacity <= 0 {
-			capacity = 0
-		}
+	// deflate
+	if compression_method == 8 {
+		buf := bytes.Buffer{}
 		backing := make_slice([]u8, 0, allocator)
 		bytes.buffer_init(&buf, backing)
 
@@ -156,7 +181,7 @@ read_local_and_inflate :: proc(
 		}
 		err := zlib.inflate_raw(
 			&ctx,
-			expected_output_size = int(lfh.uncompressed_size),
+			expected_output_size = uncompressed_size,
 			allocator = allocator,
 		)
 		if err != nil {
@@ -165,36 +190,38 @@ read_local_and_inflate :: proc(
 		}
 
 		out := bytes.buffer_to_bytes(&buf)
-		// DO NOT destroy buf here – its backing is now logically owned by `out`
+		// do not destroy buf – backing is now owned by `out`
 		return out, true
 	}
 
-
+	// unsupported compression
 	return nil, false
 }
+
+// ------------------------------------------------------------
+// Public API
+// ------------------------------------------------------------
 
 zip_read_file :: proc(path: string, filename: string, allocator: mem.Allocator) -> ([]u8, bool) {
 	data, err := os.read_entire_file(path, allocator)
 	if err != nil {
 		return nil, false
 	}
-	// caller must delete(data) after use if needed
-	// but we’ll copy out the payload into its own buffer
-	eocd, ok := find_eocd(data)
+	// NOTE: we never cast data to header structs; everything is parsed manually.
+
+	eocd_off, ok := find_eocd(data)
 	if !ok {
-
+		fmt.println("zip_read_file: EOCD not found")
 		return nil, false
 	}
 
-	cdh, ok2 := find_central_entry(data, eocd, filename)
+	cdh_off, ok2 := find_central_entry(data, eocd_off, filename)
 	if !ok2 {
-
+		fmt.println("zip_read_file: central entry not found for", filename)
 		return nil, false
 	}
 
-	out, ok3 := read_local_and_inflate(data, cdh, allocator)
-
-
+	out, ok3 := read_local_and_inflate(data, cdh_off, allocator)
 	return out, ok3
 }
 
@@ -204,35 +231,39 @@ zip_list :: proc(path: string, allocator: mem.Allocator) -> ([]string, bool) {
 		return nil, false
 	}
 
-	eocd, ok := find_eocd(data)
+	eocd_off, ok := find_eocd(data)
 	if !ok {
-
 		return nil, false
 	}
 
+	num_entries_total := int(read_u16_le(data, eocd_off + 10))
+	central_dir_offset := int(read_u32_le(data, eocd_off + 16))
+
 	out := make([dynamic]string, 0, allocator)
-	off := int(eocd.central_dir_offset)
+	off := central_dir_offset
 
-	for i in 0 ..< int(eocd.num_entries_total) {
-		if off + size_of(Central_Dir_Header) > len(data) {
+	for i := 0; i < num_entries_total; i += 1 {
+		if off + CENTRAL_DIR_HEADER_SIZE > len(data) {
 			break
 		}
-		hdr := (^Central_Dir_Header)(&data[off])
-		if hdr.signature != 0x02014b50 {
+		if read_u32_le(data, off + 0) != u32(0x02014b50) {
 			break
 		}
 
-		name_len := int(hdr.file_name_length)
-		extra_len := int(hdr.extra_field_length)
-		comment_len := int(hdr.file_comment_length)
+		file_name_length := int(read_u16_le(data, off + 28))
+		extra_field_length := int(read_u16_le(data, off + 30))
+		file_comment_length := int(read_u16_le(data, off + 32))
 
-		name_start := off + size_of(Central_Dir_Header)
-		name_end := name_start + name_len
+		name_start := off + CENTRAL_DIR_HEADER_SIZE
+		name_end := name_start + file_name_length
+		if name_end > len(data) {
+			break
+		}
 
 		entry_name := string(data[name_start:name_end])
 		append(&out, entry_name)
 
-		off = name_end + extra_len + comment_len
+		off = name_end + extra_field_length + file_comment_length
 	}
 
 	return out[:], true
