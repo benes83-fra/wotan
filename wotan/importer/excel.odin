@@ -726,21 +726,44 @@ cell_value_datetime :: proc(raw: string, allocator: mem.Allocator) -> string {
 	buf := make([]u8, 19, allocator) // "YYYY-MM-DD HH:MM:SS" = 19 bytes
 	s := w.datetime_format_iso_into(dt, buf[:])
 	return s
+} // Helper: find "<tag_name" or "<x:tag_name" where the tag name is *exactly* tag_name
+// i.e. the next character after the name must be a terminator: space, '>', '/', or whitespace.
+find_exact_tag_start :: proc(xml: string, from: int, pattern: string) -> int {
+	from := from
+	i := strings.index(xml[from:], pattern)
+	for i >= 0 {
+		i += from
+		next_idx := i + len(pattern)
+		if next_idx >= len(xml) {
+			return -1
+		}
+
+		ch := xml[next_idx]
+		if ch == ' ' || ch == '>' || ch == '/' || ch == '\t' || ch == '\r' || ch == '\n' {
+			return i
+		}
+
+		// false positive (e.g. "<sheets"), continue searching after this position
+		from = next_idx
+		i = strings.index(xml[from:], pattern)
+	}
+
+	return -1
 }
+
 extract_xml_tag :: proc(xml: string, start: int, tag_name: string) -> (string, int) {
-	// Find "<tag_name" or "<x:tag_name"
 	bigger := fmt.aprintf("<%s", tag_name)
 	bigger_x := fmt.aprintf("<x:%s", tag_name)
 	defer delete(bigger)
 	defer delete(bigger_x)
-	i := strings.index(xml[start:], bigger)
+
+	i := find_exact_tag_start(xml, start, bigger)
 	if i < 0 {
-		i = strings.index(xml[start:], bigger_x)
+		i = find_exact_tag_start(xml, start, bigger_x)
 		if i < 0 {
 			return "", -1
 		}
 	}
-	i += start
 
 	// Find the closing '>'
 	j := strings.index(xml[i:], ">")
@@ -748,11 +771,6 @@ extract_xml_tag :: proc(xml: string, start: int, tag_name: string) -> (string, i
 		return "", -1
 	}
 	j += i + 1
-
-	// Include "/>" if present
-	if j > 1 && xml[j - 2:j] == "/>" {
-		return xml[i:j], j
-	}
 
 	return xml[i:j], j
 }
