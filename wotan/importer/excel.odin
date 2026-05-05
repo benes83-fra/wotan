@@ -363,7 +363,7 @@ parse_attrs :: proc(tag: string, allocator: mem.Allocator) -> map[string]string 
 		for i < len(tag) && (tag[i] == ' ' || tag[i] == '\t' || tag[i] == '\r' || tag[i] == '\n') {
 			i += 1
 		}
-		if i >= len(tag) || tag[i] == '>' || tag[i] == '/' {
+		if i >= len(tag) || tag[i] == '>' {
 			break
 		}
 		// parse key
@@ -428,7 +428,11 @@ parse_workbook_sheets :: proc(xml: string, allocator: mem.Allocator) -> []SheetI
 			si.rid = rid
 		}
 
-		append(&sheets, si)
+		// only keep real sheets
+		if si.name != "" && si.rid != "" {
+			append(&sheets, si)
+		}
+
 		start = next
 	}
 
@@ -455,12 +459,16 @@ parse_rels :: proc(xml: string, allocator: mem.Allocator) -> []RelInfo {
 			r.target = target
 		}
 
-		append(&rels, r)
+		if r.id != "" && r.target != "" {
+			append(&rels, r)
+		}
+
 		start = next
 	}
 
 	return rels[:]
 }
+
 
 discover_sheets :: proc(path: string, allocator: mem.Allocator) -> []SheetInfo {
 	sheets := make([dynamic]SheetInfo, 0, allocator)
