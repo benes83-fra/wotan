@@ -414,21 +414,10 @@ parse_workbook_sheets :: proc(xml: string, allocator: mem.Allocator) -> []SheetI
 
 	start := 0
 	for {
-		// match <sheet or <x:sheet
-		i := strings.index(xml[start:], "<sheet")
-		if i < 0 {
-			i = strings.index(xml[start:], "<x:sheet")
-			if i < 0 {
-				break
-			}
-		}
-		i += start
-		j := strings.index(xml[i:], ">")
-		if j < 0 {
+		tag, next := extract_xml_tag(xml, start, "sheet")
+		if next < 0 {
 			break
 		}
-		j += i + 1
-		tag := xml[i:j]
 		attrs := parse_attrs(tag, allocator)
 
 		si := SheetInfo{}
@@ -438,8 +427,9 @@ parse_workbook_sheets :: proc(xml: string, allocator: mem.Allocator) -> []SheetI
 		if rid, ok := attrs["r:id"]; ok {
 			si.rid = rid
 		}
+
 		append(&sheets, si)
-		start = j
+		start = next
 	}
 
 	return sheets[:]
@@ -451,19 +441,10 @@ parse_rels :: proc(xml: string, allocator: mem.Allocator) -> []RelInfo {
 
 	start := 0
 	for {
-		i := strings.index(xml[start:], "<Relationship ")
-		if i < 0 {
+		tag, next := extract_xml_tag(xml, start, "Relationship")
+		if next < 0 {
 			break
 		}
-		i += start
-
-		j := strings.index(xml[i:], ">")
-		if j < 0 {
-			break
-		}
-		j += i + 1
-
-		tag := xml[i:j]
 		attrs := parse_attrs(tag, allocator)
 
 		r := RelInfo{}
@@ -475,11 +456,12 @@ parse_rels :: proc(xml: string, allocator: mem.Allocator) -> []RelInfo {
 		}
 
 		append(&rels, r)
-		start = j
+		start = next
 	}
 
 	return rels[:]
 }
+
 discover_sheets :: proc(path: string, allocator: mem.Allocator) -> []SheetInfo {
 	sheets := make([dynamic]SheetInfo, 0, allocator)
 	wb_bytes, ok_wb := zm.zip_read_file(path, "xl/workbook.xml", allocator)
@@ -521,22 +503,18 @@ discover_sheets :: proc(path: string, allocator: mem.Allocator) -> []SheetInfo {
 	return sheets[:]
 }
 parse_styles_date_formats :: proc(xml: string, allocator: mem.Allocator) -> []bool {
-	// result: for each style index, true if it's a date/time format
 	is_date := make([dynamic]bool, 0, allocator)
 
-	// 1) extract <numFmt> custom formats
+	// 1) custom formats
 	custom := make(map[int]string, allocator)
 	start := 0
 	for {
-		i := strings.index(xml[start:], "<numFmt ")
-		if i < 0 {break}
-		i += start
-		j := strings.index(xml[i:], ">")
-		if j < 0 {break}
-		j += i + 1
-
-		tag := xml[i:j]
+		tag, next := extract_xml_tag(xml, start, "numFmt")
+		if next < 0 {
+			break
+		}
 		attrs := parse_attrs(tag, allocator)
+		start = next
 
 		if id_str, ok := attrs["numFmtId"]; ok {
 			if code, ok2 := attrs["formatCode"]; ok2 {
@@ -546,39 +524,29 @@ parse_styles_date_formats :: proc(xml: string, allocator: mem.Allocator) -> []bo
 				}
 			}
 		}
-		start = j
 	}
 
-	// 2) extract <xf> entries (cell formats)
+	// 2) xf entries
 	start = 0
 	for {
-		i := strings.index(xml[start:], "<xf ")
-		if i < 0 {break}
-		i += start
-		j := strings.index(xml[i:], ">")
-		if j < 0 {break}
-		j += i + 1
-
-		tag := xml[i:j]
+		tag, next := extract_xml_tag(xml, start, "xf")
+		if next < 0 {
+			break
+		}
 		attrs := parse_attrs(tag, allocator)
+		start = next
 
 		is_date_format := false
 
 		if numFmtId_str, ok := attrs["numFmtId"]; ok {
 			numFmtId, ok2 := strconv.parse_int(numFmtId_str)
 			if ok2 {
-				// built-in date formats
-				// built-in DATE formats
 				if numFmtId == 14 ||
 				   numFmtId == 15 ||
 				   numFmtId == 16 ||
 				   numFmtId == 17 ||
-				   numFmtId == 22 {
-					is_date_format = true
-				}
-
-				// built-in TIME formats
-				if numFmtId == 18 ||
+				   numFmtId == 22 ||
+				   numFmtId == 18 ||
 				   numFmtId == 19 ||
 				   numFmtId == 20 ||
 				   numFmtId == 21 ||
@@ -588,7 +556,6 @@ parse_styles_date_formats :: proc(xml: string, allocator: mem.Allocator) -> []bo
 					is_date_format = true
 				}
 
-				// custom date formats
 				if code, ok3 := custom[numFmtId]; ok3 {
 					if looks_like_date_format(code) {
 						is_date_format = true
@@ -598,11 +565,11 @@ parse_styles_date_formats :: proc(xml: string, allocator: mem.Allocator) -> []bo
 		}
 
 		append(&is_date, is_date_format)
-		start = j
 	}
 
 	return is_date[:]
 }
+
 looks_like_date_format :: proc(code: string) -> bool {
 	lower := strings.to_lower(code)
 	defer delete(lower)
@@ -751,4 +718,33 @@ cell_value_datetime :: proc(raw: string, allocator: mem.Allocator) -> string {
 	buf := make([]u8, 19, allocator) // "YYYY-MM-DD HH:MM:SS" = 19 bytes
 	s := w.datetime_format_iso_into(dt, buf[:])
 	return s
+}
+extract_xml_tag :: proc(xml: string, start: int, tag_name: string) -> (string, int) {
+	// Find "<tag_name" or "<x:tag_name"
+	bigger := fmt.aprintf("<%s", tag_name)
+	bigger_x := fmt.aprintf("<x:%s", tag_name)
+	defer delete(bigger)
+	defer delete(bigger_x)
+	i := strings.index(xml[start:], bigger)
+	if i < 0 {
+		i = strings.index(xml[start:], bigger_x)
+		if i < 0 {
+			return "", -1
+		}
+	}
+	i += start
+
+	// Find the closing '>'
+	j := strings.index(xml[i:], ">")
+	if j < 0 {
+		return "", -1
+	}
+	j += i + 1
+
+	// Include "/>" if present
+	if j > 1 && xml[j - 2:j] == "/>" {
+		return xml[i:j], j
+	}
+
+	return xml[i:j], j
 }
