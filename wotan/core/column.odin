@@ -27,11 +27,11 @@ column_new :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> Column {
 	size := capacity * type_size(type)
-	data, err := mem.alloc(size)
+	data, err := mem.alloc(size, allocator = allocator)
 	if err != nil {
 		panic("Column: allocation failed")
 	}
-	nulls := make([]bool, capacity)
+	nulls := make([]bool, capacity, allocator = allocator)
 	return Column {
 		name = name,
 		type = type,
