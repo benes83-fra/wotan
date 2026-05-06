@@ -206,29 +206,40 @@ parse_row :: proc(
 		}
 		i += start
 
-		j := strings.index(row_xml[i:], "</c>")
-		if j < 0 {
+		// find end of the <c ...> tag
+		tag_end := strings.index(row_xml[i:], ">")
+		if tag_end < 0 {
 			break
 		}
-		j += i + len("</c>")
+		tag_end += i + 1
 
-		cell_xml := row_xml[i:j]
+		// check if self-closing: .../>
+		self_closing := tag_end >= 2 && row_xml[tag_end - 2] == '/'
+
+		cell_end := tag_end
+		if !self_closing {
+			// normal cell: find </c>
+			j := strings.index(row_xml[tag_end:], "</c>")
+			if j < 0 {
+				break
+			}
+			cell_end = tag_end + j + len("</c>")
+		}
+
+		cell_xml := row_xml[i:cell_end]
 
 		col_idx := cell_ref_to_col(cell_xml)
 
-		// --- NEW SPLIT LOGIC ---
-		raw, is_dt := cell_value_raw(cell_xml, shared, styles_is_date)
-
 		val := ""
-		if is_dt {
-			// allocate datetime string using the DataFrame allocator
-			val = cell_value_datetime(raw, allocator)
-		} else {
-			// raw is a view into XML/shared strings → safe to store as-is
-			val = raw
+		if !self_closing {
+			raw, is_dt := cell_value_raw(cell_xml, shared, styles_is_date)
+			if is_dt {
+				val = cell_value_datetime(raw, allocator)
+			} else {
+				val = raw
+			}
 		}
 
-		// ensure capacity
 		if col_idx >= len(row) {
 			needed := col_idx + 1 - len(row)
 			for k in 0 ..< needed {
@@ -237,7 +248,7 @@ parse_row :: proc(
 		}
 		row[col_idx] = val
 
-		start = j
+		start = cell_end
 	}
 
 	return row[:]

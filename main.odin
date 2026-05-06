@@ -340,6 +340,7 @@ main :: proc() {
 	test.excel_basic_test(context.temp_allocator)
 	test.excel_date_test(context.temp_allocator)
 	test.excel_export_test(context.temp_allocator)
+	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
 	w.destroy_dataframe(&right2)
 	w.destroy_dataframe(&joined3)

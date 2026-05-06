@@ -6,16 +6,17 @@ import "core:strings"
 
 import vmem "core:mem/virtual"
 Column :: struct {
-	name:     string,
-	type:     ColumnType,
-	len:      int,
-	capacity: int,
-	data:     rawptr,
-	nulls:    []bool,
-	orig:     ^Column, // pointer to original column if this is a view
-	offset:   int, // start offset in original
-	is_view:  bool,
-	arena:    vmem.Arena,
+	name:      string,
+	type:      ColumnType,
+	len:       int,
+	capacity:  int,
+	data:      rawptr,
+	nulls:     []bool,
+	orig:      ^Column, // pointer to original column if this is a view
+	offset:    int, // start offset in original
+	is_view:   bool,
+	arena:     vmem.Arena,
+	allocator: mem.Allocator,
 }
 
 
@@ -40,6 +41,7 @@ column_new :: proc(
 		nulls = nulls,
 		arena = vmem.Arena{},
 		is_view = false,
+		allocator = allocator,
 	}
 }
 
@@ -49,11 +51,11 @@ destroy_column :: proc(col: ^Column) {
 	}
 	if col.data != nil {
 
-		mem.free(col.data)
+		mem.free(col.data, col.allocator)
 		col.data = nil
 	}
 	if col.nulls != nil {
-		delete(col.nulls)
+		delete(col.nulls, col.allocator)
 		col.nulls = nil
 	}
 	if col.type == .String && col.arena.kind != nil {
