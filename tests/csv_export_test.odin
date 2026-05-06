@@ -33,11 +33,11 @@ csv_export_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
 	df.rows = 3
 
 	// 2) Save to CSV
-	ok := exporter.csv_save(&df, "export_test.csv", allocator)
+	ok := exporter.csv_save(&df, "export_test.csv", sep = ';', allocator = allocator)
 	fmt.println("csv_save ok:", ok)
 
 	// 3) Load back
-	df2 := importer.csv_load("export_test.csv")
+	df2 := importer.csv_load("export_test.csv", sep = ';')
 
 	// 4) Print both
 	fmt.println("--- Original DF ---")

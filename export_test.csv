@@ -1,4 +1,4 @@
-Name,Age,Score
-Alice,30,88.5
-Bob,20,91
-Charlie,,77.25
+Name;Age;Score
+Alice;30;88.5
+Bob;20;91
+Charlie;;77.25
