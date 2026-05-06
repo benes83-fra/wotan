@@ -1,6 +1,7 @@
 package importer
 
 import "core:fmt"
+import "core:mem"
 import vmem "core:mem/virtual"
 import "core:strconv"
 import "core:strings"
@@ -349,4 +350,103 @@ is_null_field :: proc(field: string, null_tokens: []string) -> bool {
 		}
 	}
 	return false
+}
+csv_load_from_string :: proc(
+	text: string,
+	allocator: mem.Allocator = context.allocator,
+	types: []w.ColumnType = nil,
+	sep: u8 = ',',
+	null_tokens: []string = DEFAULT_NULL_TOKEN,
+) -> w.DataFrame {
+
+	types := types
+	auto := (types == nil)
+
+	// Parse CSV text into records
+	records := parse_csv_records(text, sep)
+	defer csv_free(records)
+
+	if len(records) == 0 {
+		panic("csv_load_from_string: empty input")
+	}
+
+	header := records[0]
+
+	// Infer types if needed
+	if auto {
+		types = infer_col_types(records, null_tokens)
+	}
+
+	if len(header) != len(types) {
+		panic("csv_load_from_string: header/type count mismatch")
+	}
+
+	df := w.dataframe_new(allocator)
+
+	// Create columns
+	cols := make([]w.Column, len(types))
+	for i in 0 ..< len(types) {
+		cols[i] = w.column_new(header[i], types[i], len(records), allocator)
+	}
+	defer delete(cols)
+
+	// Parse rows
+	for row_i in 1 ..< len(records) {
+		fields := records[row_i]
+
+		if len(fields) != len(types) {
+			panic(fmt.tprintf("csv_load_from_string: row %d has wrong number of fields", row_i))
+		}
+
+		for col_i in 0 ..< len(types) {
+			raw := fields[col_i]
+
+			if is_null_field(raw, null_tokens) {
+				w.append_null(&cols[col_i])
+				continue
+			}
+
+			field := unquote_and_trim(strings.trim(raw, "\t"))
+
+			#partial switch types[col_i] {
+			case .Int:
+				v, ok := strconv.parse_int(field)
+				if !ok {panic(fmt.tprintf("csv_load_from_string: invalid int '%s'", field))}
+				w.append_int(&cols[col_i], v)
+
+			case .Float:
+				v, ok := strconv.parse_f64(field)
+				if !ok {panic(fmt.tprintf("csv_load_from_string: invalid float '%s'", field))}
+				w.append_float(&cols[col_i], v)
+
+			case .Bool:
+				w.append_bool(&cols[col_i], field == "true")
+
+			case .String:
+				w.append_string(&cols[col_i], field)
+
+			case .Date:
+				d, ok := w.parse_date(field)
+				if !ok {panic(fmt.tprintf("csv_load_from_string: invalid date '%s'", field))}
+				w.append_date(&cols[col_i], d)
+
+			case .Time:
+				t, ok := w.parse_time(field)
+				if !ok {panic(fmt.tprintf("csv_load_from_string: invalid time '%s'", field))}
+				w.append_time(&cols[col_i], t)
+
+			case .Datetime:
+				dt, ok := w.parse_datetime(field)
+				if !ok {panic(fmt.tprintf("csv_load_from_string: invalid datetime '%s'", field))}
+				w.append_datetime(&cols[col_i], dt)
+			}
+		}
+	}
+
+	// Add columns to DataFrame
+	for col in cols {
+		w.add_column(&df, col)
+	}
+
+	return df
 }

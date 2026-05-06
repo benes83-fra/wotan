@@ -1,0 +1,71 @@
+package net
+
+import w "../core"
+import "../importer"
+import "base:runtime"
+import "core:c"
+import "core:fmt"
+import "core:mem"
+import "core:strings"
+import curl "vendor:curl"
+
+ResponseBuffer :: struct {
+	data: [dynamic]u8,
+}
+
+// Callback must use c_size_t and match the C signature exactly
+write_cb :: proc "c" (ptr: [^]u8, size: uint, nmemb: uint, userdata: rawptr) -> uint {
+	context = runtime.default_context()
+	total := int(size * nmemb)
+	buf := cast(^ResponseBuffer)userdata
+
+	// Efficiently append the entire chunk
+	append_elems(&buf.data, ..ptr[:total])
+
+	return c.size_t(total)
+}
+
+http_get :: proc(url: string, allocator: mem.Allocator = context.allocator) -> (string, bool) {
+	curl_handle := curl.easy_init()
+	if curl_handle == nil {
+		return "", false
+	}
+	defer curl.easy_cleanup(curl_handle)
+
+	rb := ResponseBuffer {
+		data = make([dynamic]u8, allocator),
+	}
+	// Note: We don't delete rb.data here because we return its content as a string
+
+	// libcurl needs a null-terminated C string
+	c_url := strings.clone_to_cstring(url, context.temp_allocator)
+
+	curl.easy_setopt(curl_handle, .URL, c_url)
+	curl.easy_setopt(curl_handle, .WRITEFUNCTION, write_cb)
+	curl.easy_setopt(curl_handle, .WRITEDATA, &rb)
+
+	// Follow redirects (common for URLs)
+	curl.easy_setopt(curl_handle, .FOLLOWLOCATION, i64(1))
+
+	res := curl.easy_perform(curl_handle)
+	if res != .E_OK {
+		delete(rb.data)
+		return "", false
+	}
+
+	return string(rb.data[:]), true
+}
+
+read_csv_from_url :: proc(
+	url: string,
+	allocator: mem.Allocator = context.allocator,
+) -> w.DataFrame {
+	// Use temp_allocator for the raw response text to avoid leaks
+	text, ok := http_get(url, context.temp_allocator)
+	if !ok {
+		panic(fmt.tprintf("Failed to GET %s", url))
+	}
+
+	// Now we pass the string to the importer
+	return importer.csv_load_from_string(text, allocator)
+}
