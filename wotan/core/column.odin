@@ -873,3 +873,76 @@ column_from_f64_nullable :: proc(name: string, values: []f64, nulls: []bool) -> 
 
 	return col
 }
+
+// Returns true if the cell at (col, row) is null, respecting views and bounds.
+is_null :: proc(col: ^Column, row: int) -> bool {
+	if col.is_view {
+		return is_null(col.orig, col.offset + row)
+	}
+
+	if row < 0 || row >= col.len {
+		panic("is_null: index out of range")
+	}
+
+	if col.nulls == nil {
+		return false
+	}
+
+	return col.nulls[row]
+}
+
+// Returns the value at (col, row) as a string, using your typed accessors.
+// Null -> "" (caller decides what to do with that).
+value_as_string :: proc(col: ^Column, row: int, allocator: mem.Allocator) -> string {
+	if col.is_view {
+		return value_as_string(col.orig, col.offset + row, allocator)
+	}
+
+	if row < 0 || row >= col.len {
+		panic("value_as_string: index out of range")
+	}
+
+	// Adjust the cases to your actual ColumnType enum names.
+	#partial switch col.type {
+	case .Int:
+		v, is_null := column_at_int(col, row)
+		if is_null {
+			return ""
+		}
+		return fmt.aprintf("%v", v, allocator = allocator)
+
+	case .Float:
+		v, is_null := column_at_float(col, row)
+		if is_null {
+			return ""
+		}
+		return fmt.aprintf("%v", v, allocator = allocator)
+
+	case .Bool:
+		v, is_null := column_at_bool(col, row)
+		if is_null {
+			return ""
+		}
+		if v {
+			return "1"
+		}
+		return "0"
+
+	case .String:
+		v, is_null := column_at_string(col, row)
+		if is_null {
+			return ""
+		}
+		return v
+
+	case .Datetime:
+		v, is_null := column_at_datetime(col, row)
+		if is_null {
+			return ""
+		}
+		return fmt.aprintf("%v", v, allocator = allocator)
+	}
+
+	// Fallback for unsupported types (Date, Time, etc. if you want to add them later)
+	panic("value_as_string: unsupported column type")
+}
