@@ -7,6 +7,58 @@ import "core:fmt"
 import "core:mem"
 import "core:strings"
 import curl "vendor:curl"
+interval :: enum {
+	Daily, // 1d
+	Weekly, // 1wk
+	Monthly, // 1mo
+}
+
+range :: enum {
+	OneMonth, // 1mo
+	ThreeMonths, // 3mo
+	SixMonths, // 6mo
+	OneYear, // 1y
+	TwoYears, // 2y
+	FiveYears, // 5y
+	TenYears, // 10y
+	YTD, // ytd
+	Max, // max
+}
+interval_to_string :: proc(i: interval) -> string {
+	#partial switch i {
+	case .Daily:
+		return "1d"
+	case .Weekly:
+		return "1wk"
+	case .Monthly:
+		return "1mo"
+	}
+	return ""
+}
+
+range_to_string :: proc(r: range) -> string {
+	#partial switch r {
+	case .OneMonth:
+		return "1mo"
+	case .ThreeMonths:
+		return "3mo"
+	case .SixMonths:
+		return "6mo"
+	case .OneYear:
+		return "1y"
+	case .TwoYears:
+		return "2y"
+	case .FiveYears:
+		return "5y"
+	case .TenYears:
+		return "10y"
+	case .YTD:
+		return "ytd"
+	case .Max:
+		return "max"
+	}
+	return ""
+}
 
 // ------------------------------
 // 1) Fetch crumb + cookie
@@ -43,14 +95,7 @@ yahoo_download_csv :: proc(symbol: string, allocator: mem.Allocator) -> (string,
 // ------------------------------
 // 3) Convert CSV → DataFrame
 // ------------------------------
-read_yahoo :: proc(symbol: string, allocator: mem.Allocator = context.allocator) -> w.DataFrame {
-	text, ok := yahoo_download_csv(symbol, context.temp_allocator)
-	if !ok {
-		panic(fmt.tprintf("Yahoo Finance download failed for %s", symbol))
-	}
 
-	return importer.csv_load_from_string(text, allocator)
-}
 read_yahoo_json :: proc(
 	symbol: string,
 	allocator: mem.Allocator = context.allocator,
@@ -129,4 +174,37 @@ yahoo_json_to_dataframe :: proc(
 
 	df.rows = count
 	return df
+}
+
+build_yahoo_url :: proc(
+	symbol: string,
+	i: interval,
+	r: range,
+	allocator: mem.Allocator,
+) -> string {
+	return fmt.aprintf(
+		"https://query1.finance.yahoo.com/v8/finance/chart/%s?interval=%s&range=%s",
+		symbol,
+		interval_to_string(i),
+		range_to_string(r),
+		allocator = allocator,
+	)
+}
+
+
+read_yahoo :: proc(
+	symbol: string,
+	i: interval = .Daily,
+	r: range = .Max,
+	allocator: mem.Allocator = context.allocator,
+) -> w.DataFrame {
+
+	url := build_yahoo_url(symbol, i, r, context.temp_allocator)
+
+	text, ok := http_get(url, context.temp_allocator)
+	if !ok {
+		panic(fmt.tprintf("Failed to GET Yahoo JSON for %s", symbol))
+	}
+
+	return yahoo_json_to_dataframe(text, allocator)
 }

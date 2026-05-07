@@ -57,13 +57,11 @@ yahoo_finance_csv_test :: proc(allocator: mem.Allocator = context.temp_allocator
 yahoo_finance_json_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
 	fmt.println("=== YAHOO FINANCE JSON TEST ===")
 
-	df := net.read_yahoo_json("MSFT", allocator)
+	df := net.read_yahoo("MSFT", .Daily, .FiveYears, allocator)
 	defer w.destroy_dataframe(&df)
 
 	fmt.println("Rows:", df.rows)
 	fmt.println("Columns:", len(df.columns))
-
-	fmt.println("--- Yahoo Finance MSFT (head) ---")
 	w.df_head(&df, 10)
 
 	fmt.println("=== END YAHOO FINANCE JSON TEST ===")
