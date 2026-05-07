@@ -373,3 +373,48 @@ jsonl_load :: proc(
 
 	return df
 }
+extract_json_array_i64 :: proc(json: string, key: string) -> []i64 {
+	start := strings.index(json, key)
+	if start < 0 {return []i64{}}
+
+	start = strings.index(json[start:], "[")
+	if start < 0 {return []i64{}}
+	start += strings.index(json, key) + 1
+
+	end := strings.index(json[start:], "]")
+	if end < 0 {return []i64{}}
+	end += start
+
+	slice := json[start:end]
+	parts := strings.split(slice, ",", context.temp_allocator)
+
+	out := make([]i64, len(parts), context.temp_allocator)
+	for p, i in parts {
+		v, _ := strconv.parse_i64(strings.trim_space(p))
+		out[i] = v
+	}
+	return out[:]
+}
+
+extract_json_array_f64 :: proc(json: string, key: string) -> []f64 {
+	start := strings.index(json, key)
+	if start < 0 {return []f64{}}
+
+	start = strings.index(json[start:], "[")
+	if start < 0 {return []f64{}}
+	start += strings.index(json, key) + 1
+
+	end := strings.index(json[start:], "]")
+	if end < 0 {return []f64{}}
+	end += start
+
+	slice := json[start:end]
+	parts := strings.split(slice, ",", context.temp_allocator)
+
+	out := make([]f64, len(parts), context.temp_allocator)
+	for p, i in parts {
+		v, _ := strconv.parse_f64(strings.trim_space(p))
+		out[i] = v
+	}
+	return out[:]
+}

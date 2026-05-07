@@ -31,12 +31,15 @@ http_get_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
 yahoo_finance_csv_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
 	fmt.println("=== YAHOO FINANCE CSV TEST ===")
 
-	text, ok := yahoo_download_csv("MSFT", allocator)
+	// TEMP: bypass crumb/cookie and just see what the endpoint does
+	url := "https://query1.finance.yahoo.com/v7/finance/download/MSFT?period1=0&period2=9999999999&interval=1d&events=history"
+	text, ok := net.http_get(url, allocator)
 	if !ok {
-		panic("Yahoo CSV download failed")
+		panic("Yahoo CSV download failed (raw)")
 	}
 
 	fmt.println("Downloaded", len(text), "bytes")
+	fmt.println("RAW RESPONSE:\n", text)
 
 	if !strings.contains(text, "Date,Open,High,Low,Close,Adj Close,Volume") {
 		panic("Yahoo CSV header missing or unexpected")
@@ -51,30 +54,17 @@ yahoo_finance_csv_test :: proc(allocator: mem.Allocator = context.temp_allocator
 	fmt.println("=== END YAHOO FINANCE CSV TEST ===")
 }
 
-yahoo_download_csv :: proc(symbol: string, allocator: mem.Allocator) -> (string, bool) {
-	crumb, ok := yahoo_get_crumb(allocator)
-	if !ok {
-		return "", false
-	}
+yahoo_finance_json_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
+	fmt.println("=== YAHOO FINANCE JSON TEST ===")
 
-	url := fmt.aprintf(
-		"https://query1.finance.yahoo.com/v7/finance/download/%s?period1=0&period2=9999999999&interval=1d&events=history&crumb=%s",
-		symbol,
-		crumb,
-		allocator = allocator,
-	)
+	df := net.read_yahoo_json("MSFT", allocator)
+	defer w.destroy_dataframe(&df)
 
-	text, ok2 := net.http_get(url, allocator)
-	return text, ok2
-}
-yahoo_get_crumb :: proc(allocator: mem.Allocator) -> (string, bool) {
-	url := "https://query1.finance.yahoo.com/v1/test/getcrumb"
+	fmt.println("Rows:", df.rows)
+	fmt.println("Columns:", len(df.columns))
 
-	text, ok := net.http_get(url, allocator)
-	if !ok {
-		return "", false
-	}
+	fmt.println("--- Yahoo Finance MSFT (head) ---")
+	w.df_head(&df, 10)
 
-	crumb := strings.trim_space(text)
-	return crumb, true
+	fmt.println("=== END YAHOO FINANCE JSON TEST ===")
 }

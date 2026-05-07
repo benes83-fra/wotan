@@ -314,3 +314,28 @@ time_less :: proc(a, b: Time) -> bool {
 datetime_less :: proc(a, b: Datetime) -> bool {
 	return datetime_compare(a, b) < 0
 }
+date_from_unix :: proc(ts: i64) -> Date {
+	// Convert UNIX seconds → days since epoch
+	days := ts / 86400
+
+	// Unix epoch: 1970-01-01
+	year := 1970
+	month := 1
+	day := 1
+
+	// Add days one by one (simple, robust, no DST issues)
+	for days > 0 {
+		day += 1
+		if day > int(get_days_in_month(i32(year), Months(month))) {
+			day = 1
+			month += 1
+			if month > 12 {
+				month = 1
+				year += 1
+			}
+		}
+		days -= 1
+	}
+
+	return Date{i32(year), i32(month), i32(day)}
+}

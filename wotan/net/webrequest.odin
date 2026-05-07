@@ -86,3 +86,70 @@ read_html_from_url :: proc(
 	// Pass HTML to your importer
 	return importer.html_load_from_string(text, allocator)
 }
+read_table_from_url :: proc(
+	url: string,
+	allocator: mem.Allocator = context.allocator,
+) -> w.DataFrame {
+	text, ok := http_get(url, context.temp_allocator)
+	if !ok {
+		panic(fmt.tprintf("Failed to GET %s", url))
+	}
+
+	if strings.contains(text, "<table") {
+		return importer.html_load_from_string(text, allocator)
+	}
+
+	return importer.csv_load_from_string(text, allocator)
+}
+
+
+http_get_with_cookie :: proc(
+	url: string,
+	cookie: string,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	string,
+	bool,
+) {
+
+	curl_handle := curl.easy_init()
+	if curl_handle == nil {
+		return "", false
+	}
+	defer curl.easy_cleanup(curl_handle)
+
+	rb := ResponseBuffer {
+		data = make([dynamic]u8, allocator),
+	}
+
+	// URL
+	c_url := strings.clone_to_cstring(url, context.temp_allocator)
+	curl.easy_setopt(curl_handle, curl.option.URL, c_url)
+
+	// Write callback
+	curl.easy_setopt(curl_handle, curl.option.WRITEFUNCTION, write_cb)
+	curl.easy_setopt(curl_handle, curl.option.WRITEDATA, &rb)
+
+	// Follow redirects
+	curl.easy_setopt(curl_handle, curl.option.FOLLOWLOCATION, i64(1))
+
+	// Browser-like headers
+	curl.easy_setopt(curl_handle, curl.option.USERAGENT, "Mozilla/5.0")
+
+	// Enable cookie engine
+	curl.easy_setopt(curl_handle, curl.option.COOKIEFILE, "")
+	curl.easy_setopt(curl_handle, curl.option.COOKIEJAR, "")
+
+	// Attach cookie
+	c_cookie := strings.clone_to_cstring(cookie, context.temp_allocator)
+	curl.easy_setopt(curl_handle, curl.option.COOKIE, c_cookie)
+
+	// Perform request
+	res := curl.easy_perform(curl_handle)
+	if res != .E_OK {
+		delete(rb.data)
+		return "", false
+	}
+
+	return string(rb.data[:]), true
+}

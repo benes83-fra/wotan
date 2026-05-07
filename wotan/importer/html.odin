@@ -488,3 +488,16 @@ html_load_from_string :: proc(
 
 	return html_parse_table(tables[0], allocator)
 }
+html_load_all_from_string :: proc(
+	html: string,
+	allocator: mem.Allocator = context.allocator,
+) -> []w.DataFrame {
+	tables := extract_tables(html)
+	dfs := make([]w.DataFrame, len(tables), allocator)
+
+	for t, i in tables {
+		dfs[i] = html_parse_table(t, allocator)
+	}
+
+	return dfs[:]
+}
