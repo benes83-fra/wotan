@@ -46,6 +46,10 @@ http_get :: proc(url: string, allocator: mem.Allocator = context.allocator) -> (
 
 	// Follow redirects (common for URLs)
 	curl.easy_setopt(curl_handle, .FOLLOWLOCATION, i64(1))
+	curl.easy_setopt(curl_handle, curl.option.USERAGENT, "Mozilla/5.0")
+	curl.easy_setopt(curl_handle, curl.option.COOKIEFILE, "")
+	curl.easy_setopt(curl_handle, curl.option.COOKIEJAR, "")
+
 
 	res := curl.easy_perform(curl_handle)
 	if res != .E_OK {
@@ -68,4 +72,17 @@ read_csv_from_url :: proc(
 
 	// Now we pass the string to the importer
 	return importer.csv_load_from_string(text, allocator)
+}
+read_html_from_url :: proc(
+	url: string,
+	allocator: mem.Allocator = context.allocator,
+) -> w.DataFrame {
+	// Fetch HTML text using your existing HTTP client
+	text, ok := http_get(url, context.temp_allocator)
+	if !ok {
+		panic(fmt.tprintf("Failed to GET %s", url))
+	}
+
+	// Pass HTML to your importer
+	return importer.html_load_from_string(text, allocator)
 }

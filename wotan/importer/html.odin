@@ -474,3 +474,17 @@ extract_section :: proc(
 	end += start + len(close_tag)
 	return table[start:end]
 }
+html_load_from_string :: proc(
+	html: string,
+	allocator: mem.Allocator = context.allocator,
+) -> w.DataFrame {
+	df := w.dataframe_new()
+
+	// Extract the first table in the HTML
+	tables := extract_tables(html)
+	if len(tables) == 0 {
+		return df
+	}
+
+	return html_parse_table(tables[0], allocator)
+}
