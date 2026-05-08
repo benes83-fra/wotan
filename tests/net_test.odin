@@ -57,12 +57,82 @@ yahoo_finance_csv_test :: proc(allocator: mem.Allocator = context.temp_allocator
 yahoo_finance_json_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
 	fmt.println("=== YAHOO FINANCE JSON TEST ===")
 
-	df := net.read_yahoo("MSFT", .Daily, .FiveYears, allocator)
+	df := net.read_yahoo("GOOG", .Daily, .OneMonth, allocator)
 	defer w.destroy_dataframe(&df)
 
 	fmt.println("Rows:", df.rows)
 	fmt.println("Columns:", len(df.columns))
-	w.df_head(&df, 10)
+	w.df_head(&df, 20)
 
 	fmt.println("=== END YAHOO FINANCE JSON TEST ===")
+}
+
+yahoo_finance_events_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
+	fmt.println("=== YAHOO FINANCE DIVIDENDS & SPLITS TEST ===")
+
+	df := net.read_yahoo("AAPL", .Daily, .TenYears, allocator)
+	defer w.destroy_dataframe(&df)
+
+	fmt.println("Rows:", df.rows)
+	fmt.println("Columns:", len(df.columns))
+	w.df_head(&df, 50)
+
+	// ------------------------------------------------------------
+	// Locate Dividend and Split columns by name
+	// ------------------------------------------------------------
+	div_col_idx := -1
+	split_col_idx := -1
+
+	for i in 0 ..< len(df.columns) {
+		if df.columns[i].name == "Dividend" {
+			div_col_idx = i
+		}
+		if df.columns[i].name == "Split" {
+			split_col_idx = i
+		}
+	}
+
+	if div_col_idx < 0 {
+		panic("Dividend column missing")
+	}
+	if split_col_idx < 0 {
+		panic("Split column missing")
+	}
+
+	div_col := &df.columns[div_col_idx]
+	split_col := &df.columns[split_col_idx]
+
+	// ------------------------------------------------------------
+	// Scan for actual dividend and split events
+	// ------------------------------------------------------------
+	div_count := 0
+	split_count := 0
+	div_data := cast([^]f64)div_col.data
+	spl_data := cast([^]f64)split_col.data
+	for i in 0 ..< df.rows {
+		div := div_data[i]
+		spl := spl_data[i]
+
+		if div != 0.0 {
+			fmt.println("Dividend event at row", i, "=", div)
+			div_count += 1
+		}
+		if spl != 0.0 {
+			fmt.println("Split event at row", i, "=", spl)
+			split_count += 1
+		}
+	}
+
+	fmt.println("Total dividends found:", div_count)
+	fmt.println("Total splits found:", split_count)
+
+	if div_count == 0 {
+		panic("No dividends detected - expected at least one for AAPL")
+	}
+
+	if split_count == 0 {
+		fmt.println("Warning: No splits detected in last 5 years (this may be correct)")
+	}
+
+	fmt.println("=== END YAHOO FINANCE DIVIDENDS & SPLITS TEST ===")
 }

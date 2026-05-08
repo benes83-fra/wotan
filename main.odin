@@ -343,6 +343,7 @@ main :: proc() {
 	test.csv_export_test(context.temp_allocator)
 	test.http_get_test(context.temp_allocator)
 	test.yahoo_finance_json_test(context.temp_allocator)
+	test.yahoo_finance_events_test(context.temp_allocator)
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
 	w.destroy_dataframe(&right2)
