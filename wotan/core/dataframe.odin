@@ -7,6 +7,7 @@ import "core:strings"
 DataFrame :: struct {
 	columns:       [dynamic]Column,
 	name_to_index: map[string]int,
+	index:         []int,
 	rows:          int,
 }
 

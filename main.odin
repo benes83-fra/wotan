@@ -344,6 +344,7 @@ main :: proc() {
 	test.http_get_test(context.temp_allocator)
 	test.yahoo_finance_json_test(context.temp_allocator)
 	test.yahoo_finance_events_test(context.temp_allocator)
+	test.sort_test()
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
 	w.destroy_dataframe(&right2)
