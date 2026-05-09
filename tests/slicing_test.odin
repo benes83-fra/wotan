@@ -94,3 +94,115 @@ loc_many_test :: proc(allocator: mem.Allocator = context.allocator) {
 
 	fmt.println("=== END LOC_MANY TEST ===")
 }
+
+loc_from_test :: proc(allocator: mem.Allocator = context.allocator) {
+	fmt.println("=== LOC_FROM TEST ===")
+
+	df := w.dataframe_new()
+	defer w.destroy_dataframe(&df)
+
+	col_date := w.column_new("Date", .Date, 5)
+	w.append_date(&col_date, w.Date{2024, 1, 1})
+	w.append_date(&col_date, w.Date{2024, 1, 2})
+	w.append_date(&col_date, w.Date{2024, 1, 3})
+	w.append_date(&col_date, w.Date{2024, 1, 4})
+	w.append_date(&col_date, w.Date{2024, 1, 5})
+
+	col_val := w.column_new("Value", .Int, 5)
+	w.append_int(&col_val, 10)
+	w.append_int(&col_val, 20)
+	w.append_int(&col_val, 30)
+	w.append_int(&col_val, 40)
+	w.append_int(&col_val, 50)
+
+	w.add_column(&df, col_date)
+	w.add_column(&df, col_val)
+
+	w.set_index(&df, "Date")
+
+	fmt.println("Original DataFrame:")
+	w.dataframe_pretty_print(&df)
+
+	out := w.loc_from(&df, w.Date{2024, 1, 3})
+	defer w.destroy_dataframe(&out)
+
+	fmt.println("\nloc_from(Date{2024,1,3}):")
+	w.dataframe_pretty_print(&out)
+
+	fmt.println("=== END LOC_FROM TEST ===")
+}
+loc_until_test :: proc(allocator: mem.Allocator = context.allocator) {
+	fmt.println("=== LOC_UNTIL TEST ===")
+
+	df := w.dataframe_new()
+	defer w.destroy_dataframe(&df)
+
+	col_date := w.column_new("Date", .Date, 5)
+	w.append_date(&col_date, w.Date{2024, 1, 1})
+	w.append_date(&col_date, w.Date{2024, 1, 2})
+	w.append_date(&col_date, w.Date{2024, 1, 3})
+	w.append_date(&col_date, w.Date{2024, 1, 4})
+	w.append_date(&col_date, w.Date{2024, 1, 5})
+
+	col_val := w.column_new("Value", .Int, 5)
+	w.append_int(&col_val, 10)
+	w.append_int(&col_val, 20)
+	w.append_int(&col_val, 30)
+	w.append_int(&col_val, 40)
+	w.append_int(&col_val, 50)
+
+	w.add_column(&df, col_date)
+	w.add_column(&df, col_val)
+
+	w.set_index(&df, "Date")
+
+	fmt.println("Original DataFrame:")
+	w.dataframe_pretty_print(&df)
+
+	out := w.loc_until(&df, w.Date{2024, 1, 3})
+	defer w.destroy_dataframe(&out)
+
+	fmt.println("\nloc_until(Date{2024,1,3}):")
+	w.dataframe_pretty_print(&out)
+
+	fmt.println("=== END LOC_UNTIL TEST ===")
+}
+loc_mask_test :: proc(allocator: mem.Allocator = context.allocator) {
+	fmt.println("=== LOC_MASK TEST ===")
+
+	df := w.dataframe_new()
+	defer w.destroy_dataframe(&df)
+
+	col_date := w.column_new("Date", .Date, 5)
+	w.append_date(&col_date, w.Date{2024, 1, 1})
+	w.append_date(&col_date, w.Date{2024, 1, 2})
+	w.append_date(&col_date, w.Date{2024, 1, 3})
+	w.append_date(&col_date, w.Date{2024, 1, 4})
+	w.append_date(&col_date, w.Date{2024, 1, 5})
+
+	col_val := w.column_new("Value", .Int, 5)
+	w.append_int(&col_val, 10)
+	w.append_int(&col_val, 20)
+	w.append_int(&col_val, 30)
+	w.append_int(&col_val, 40)
+	w.append_int(&col_val, 50)
+
+	w.add_column(&df, col_date)
+	w.add_column(&df, col_val)
+
+	w.set_index(&df, "Date")
+
+	fmt.println("Original DataFrame:")
+	w.dataframe_pretty_print(&df)
+
+	// Mask: select rows where Value >= 30
+	mask := []bool{false, false, true, true, true}
+
+	out := w.loc_mask(&df, mask)
+	defer w.destroy_dataframe(&out)
+
+	fmt.println("\nloc_mask(Value >= 30):")
+	w.dataframe_pretty_print(&out)
+
+	fmt.println("=== END LOC_MASK TEST ===")
+}

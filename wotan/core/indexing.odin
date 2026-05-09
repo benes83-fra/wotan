@@ -397,3 +397,112 @@ loc_many :: proc(df: ^DataFrame, keys: []$T) -> DataFrame {
 
 	return out
 }
+// ------------------------------------------------------------
+// LOC_FROM (open-ended slice from a start label)
+// ------------------------------------------------------------
+
+loc_from :: proc(df: ^DataFrame, start: $T) -> DataFrame {
+	if !df.has_index {
+		panic("loc_from: DataFrame has no index")
+	}
+
+	col := column(df, df.index_column)
+	data := mem.slice_ptr(cast(^T)col.data, df.rows)
+
+	// left boundary
+	i0 := lower_bound(data, start)
+
+	// open-ended: until end
+	i1 := df.rows
+
+	return df_slice(df, i0, i1)
+}
+// ------------------------------------------------------------
+// LOC_UNTIL (open-ended slice until a stop label)
+// ------------------------------------------------------------
+
+loc_until :: proc(df: ^DataFrame, stop: $T) -> DataFrame {
+	if !df.has_index {
+		panic("loc_until: DataFrame has no index")
+	}
+
+	col := column(df, df.index_column)
+	data := mem.slice_ptr(cast(^T)col.data, df.rows)
+
+	// open-ended: from beginning
+	i0 := 0
+
+	// right boundary
+	i1 := upper_bound(data, stop)
+
+	return df_slice(df, i0, i1)
+}
+// ------------------------------------------------------------
+// LOC_MASK (boolean mask selection)
+// ------------------------------------------------------------
+
+loc_mask :: proc(df: ^DataFrame, mask: []bool) -> DataFrame {
+	if len(mask) != df.rows {
+		panic("loc_mask: mask length does not match DataFrame rows")
+	}
+
+	// 1) Collect indices where mask[i] == true
+	indices := make([dynamic]int, 0, df.rows, context.allocator)
+	defer delete(indices)
+
+	for i in 0 ..< df.rows {
+		if mask[i] {
+			append(&indices, i)
+		}
+	}
+
+	// No matches → empty DataFrame
+	if len(indices) == 0 {
+		return dataframe_new(context.allocator)
+	}
+
+	// 2) Build output DataFrame
+	out := dataframe_new(context.allocator)
+	out.rows = len(indices)
+
+	for &col in df.columns {
+		dst := column_new(col.name, col.type, out.rows, context.allocator)
+
+		#partial switch col.type {
+		case .Int:
+			src := cast([^]int)col.data
+			dst_data := cast([^]int)dst.data
+			for j in 0 ..< out.rows do dst_data[j] = src[indices[j]]
+
+		case .Float:
+			src := cast([^]f64)col.data
+			dst_data := cast([^]f64)dst.data
+			for j in 0 ..< out.rows do dst_data[j] = src[indices[j]]
+
+		case .String:
+			src := cast([^]string)col.data
+			dst_data := cast([^]string)dst.data
+			for j in 0 ..< out.rows do dst_data[j] = src[indices[j]]
+
+		case .Bool:
+			src := cast([^]bool)col.data
+			dst_data := cast([^]bool)dst.data
+			for j in 0 ..< out.rows do dst_data[j] = src[indices[j]]
+
+		case .Date:
+			src := cast([^]Date)col.data
+			dst_data := cast([^]Date)dst.data
+			for j in 0 ..< out.rows do dst_data[j] = src[indices[j]]
+
+		case .Datetime:
+			src := cast([^]Datetime)col.data
+			dst_data := cast([^]Datetime)dst.data
+			for j in 0 ..< out.rows do dst_data[j] = src[indices[j]]
+		}
+
+		dst.len = out.rows
+		add_column(&out, dst)
+	}
+
+	return out
+}
