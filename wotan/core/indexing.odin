@@ -152,11 +152,21 @@ upper_bound :: proc(data: []$T, key: T) -> int {
 	return lo
 }
 
+
+loc :: proc {
+	loc_single,
+	loc_range,
+	loc_many,
+	loc_mask,
+}
+
+
 // ------------------------------------------------------------
 // LOC (scalar)
 // ------------------------------------------------------------
 
-loc :: proc(df: ^DataFrame, key: $T) -> DataFrame {
+
+loc_single :: proc(df: ^DataFrame, key: $T) -> DataFrame {
 	if !df.has_index {
 		panic("loc: DataFrame has no index")
 	}
@@ -498,6 +508,93 @@ loc_mask :: proc(df: ^DataFrame, mask: []bool) -> DataFrame {
 			src := cast([^]Datetime)col.data
 			dst_data := cast([^]Datetime)dst.data
 			for j in 0 ..< out.rows do dst_data[j] = src[indices[j]]
+		}
+
+		dst.len = out.rows
+		add_column(&out, dst)
+	}
+
+	return out
+}
+// ------------------------------------------------------------
+// ILOC (scalar integer indexing)
+// ------------------------------------------------------------
+
+iloc :: proc {
+	iloc_single,
+	iloc_range,
+	iloc_many,
+}
+
+
+iloc_single :: proc(df: ^DataFrame, i: int) -> DataFrame {
+	if i < 0 || i >= df.rows {
+		panic("iloc: index out of bounds")
+	}
+	return df_row(df, i)
+}
+// ------------------------------------------------------------
+// ILOC_RANGE (integer slice [i0, i1))
+// ------------------------------------------------------------
+
+iloc_range :: proc(df: ^DataFrame, i0: int, i1: int) -> DataFrame {
+	i0 := i0
+	i1 := i1
+	if i0 < 0 do i0 = 0
+	if i1 > df.rows do i1 = df.rows
+	if i1 <= i0 do return dataframe_new(context.allocator)
+
+	return df_slice(df, i0, i1)
+}
+// ------------------------------------------------------------
+// ILOC_MANY (list of integer indices)
+// ------------------------------------------------------------
+
+iloc_many :: proc(df: ^DataFrame, idxs: []int) -> DataFrame {
+	// Validate indices
+	for i in idxs {
+		if i < 0 || i >= df.rows {
+			panic("iloc_many: index out of bounds")
+		}
+	}
+
+	// Build output
+	out := dataframe_new(context.allocator)
+	out.rows = len(idxs)
+
+	for &col in df.columns {
+		dst := column_new(col.name, col.type, out.rows, context.allocator)
+
+		#partial switch col.type {
+		case .Int:
+			src := cast([^]int)col.data
+			dst_data := cast([^]int)dst.data
+			for j in 0 ..< out.rows do dst_data[j] = src[idxs[j]]
+
+		case .Float:
+			src := cast([^]f64)col.data
+			dst_data := cast([^]f64)dst.data
+			for j in 0 ..< out.rows do dst_data[j] = src[idxs[j]]
+
+		case .String:
+			src := cast([^]string)col.data
+			dst_data := cast([^]string)dst.data
+			for j in 0 ..< out.rows do dst_data[j] = src[idxs[j]]
+
+		case .Bool:
+			src := cast([^]bool)col.data
+			dst_data := cast([^]bool)dst.data
+			for j in 0 ..< out.rows do dst_data[j] = src[idxs[j]]
+
+		case .Date:
+			src := cast([^]Date)col.data
+			dst_data := cast([^]Date)dst.data
+			for j in 0 ..< out.rows do dst_data[j] = src[idxs[j]]
+
+		case .Datetime:
+			src := cast([^]Datetime)col.data
+			dst_data := cast([^]Datetime)dst.data
+			for j in 0 ..< out.rows do dst_data[j] = src[idxs[j]]
 		}
 
 		dst.len = out.rows

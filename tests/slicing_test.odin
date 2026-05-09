@@ -40,7 +40,7 @@ loc_slice_test :: proc(allocator: mem.Allocator = context.allocator) {
 	w.dataframe_pretty_print(&row, max_rows = 20)
 
 	// Range loc
-	slice := w.loc_range(&df, w.Date{2024, 1, 2}, w.Date{2024, 1, 4})
+	slice := w.loc(&df, w.Date{2024, 1, 2}, w.Date{2024, 1, 4})
 	fmt.println("\nloc_range(Date{2024-01-02}, Date{2024-01-04}):")
 	w.dataframe_pretty_print(&slice, max_rows = 20)
 
@@ -205,4 +205,53 @@ loc_mask_test :: proc(allocator: mem.Allocator = context.allocator) {
 	w.dataframe_pretty_print(&out)
 
 	fmt.println("=== END LOC_MASK TEST ===")
+}
+
+
+iloc_test :: proc(allocator: mem.Allocator = context.allocator) {
+	fmt.println("=== ILOC TEST ===")
+
+	df := w.dataframe_new()
+	defer w.destroy_dataframe(&df)
+
+	col_date := w.column_new("Date", .Date, 5)
+	w.append_date(&col_date, w.Date{2024, 1, 1})
+	w.append_date(&col_date, w.Date{2024, 1, 2})
+	w.append_date(&col_date, w.Date{2024, 1, 3})
+	w.append_date(&col_date, w.Date{2024, 1, 4})
+	w.append_date(&col_date, w.Date{2024, 1, 5})
+
+	col_val := w.column_new("Value", .Int, 5)
+	w.append_int(&col_val, 10)
+	w.append_int(&col_val, 20)
+	w.append_int(&col_val, 30)
+	w.append_int(&col_val, 40)
+	w.append_int(&col_val, 50)
+
+	w.add_column(&df, col_date)
+	w.add_column(&df, col_val)
+
+	fmt.println("Original DataFrame:")
+	w.dataframe_pretty_print(&df)
+
+	// Scalar iloc
+	row := w.iloc(&df, 2)
+	defer w.destroy_dataframe(&row)
+	fmt.println("\niloc(2):")
+	w.dataframe_pretty_print(&row)
+
+	// Range iloc
+	slice := w.iloc(&df, 1, 4)
+	defer w.destroy_dataframe(&slice)
+	fmt.println("\niloc_range(1,4):")
+	w.dataframe_pretty_print(&slice)
+
+	// Many iloc
+	idxs := []int{4, 0, 3}
+	many := w.iloc(&df, idxs)
+	defer w.destroy_dataframe(&many)
+	fmt.println("\niloc_many([4,0,3]):")
+	w.dataframe_pretty_print(&many)
+
+	fmt.println("=== END ILOC TEST ===")
 }
