@@ -4,11 +4,14 @@ import "core:fmt"
 import "core:mem"
 import vmem "core:mem/virtual"
 import "core:strings"
+
 DataFrame :: struct {
 	columns:       [dynamic]Column,
 	name_to_index: map[string]int,
 	index:         []int,
 	rows:          int,
+	index_column:  string, // name of the index column
+	has_index:     bool,
 }
 
 //

@@ -131,7 +131,7 @@ odin run . -debug
 
 ```
 
-## Build - Excuteable and Libraries
+## Build - Executeable and Libraries
 ```sh
 odin build . 
 
