@@ -60,6 +60,7 @@ dataframe_sort :: proc(
 
 	// 1. Build index array
 	idx := make([]int, df.rows, allocator)
+	defer delete(idx)
 	for i in 0 ..< df.rows {
 		idx[i] = i
 	}
