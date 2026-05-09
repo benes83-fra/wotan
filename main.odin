@@ -346,6 +346,7 @@ main :: proc() {
 	test.yahoo_finance_events_test(context.temp_allocator)
 	test.sort_test()
 	test.loc_slice_test(context.temp_allocator)
+	test.loc_many_test(context.temp_allocator)
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
 	w.destroy_dataframe(&right2)

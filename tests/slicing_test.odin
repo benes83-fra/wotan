@@ -50,3 +50,47 @@ loc_slice_test :: proc(allocator: mem.Allocator = context.allocator) {
 
 	fmt.println("=== END LOC / LOC_RANGE TEST ===")
 }
+
+
+loc_many_test :: proc(allocator: mem.Allocator = context.allocator) {
+	fmt.println("=== LOC_MANY TEST ===")
+
+	df := w.dataframe_new()
+	defer w.destroy_dataframe(&df)
+
+	col_date := w.column_new("Date", .Date, 5)
+	w.append_date(&col_date, w.Date{2024, 1, 1})
+	w.append_date(&col_date, w.Date{2024, 1, 2})
+	w.append_date(&col_date, w.Date{2024, 1, 3})
+	w.append_date(&col_date, w.Date{2024, 1, 4})
+	w.append_date(&col_date, w.Date{2024, 1, 5})
+
+	col_val := w.column_new("Value", .Int, 5)
+	w.append_int(&col_val, 10)
+	w.append_int(&col_val, 20)
+	w.append_int(&col_val, 30)
+	w.append_int(&col_val, 40)
+	w.append_int(&col_val, 50)
+
+	w.add_column(&df, col_date)
+	w.add_column(&df, col_val)
+
+	w.set_index(&df, "Date")
+
+	fmt.println("Original DataFrame:")
+	w.dataframe_pretty_print(&df)
+
+	keys := []w.Date {
+		{2024, 1, 4},
+		{2024, 1, 2},
+		{2024, 1, 4}, // duplicate
+		{2024, 1, 1},
+	}
+
+	out := w.loc_many(&df, keys)
+	defer w.destroy_dataframe(&out)
+	fmt.println("\nloc_many result:")
+	w.dataframe_pretty_print(&out)
+
+	fmt.println("=== END LOC_MANY TEST ===")
+}

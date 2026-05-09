@@ -299,3 +299,101 @@ df_slice :: proc(df: ^DataFrame, i0, i1: int) -> DataFrame {
 
 	return out
 }
+// ------------------------------------------------------------
+// LOC MANY (list of keys)
+// ------------------------------------------------------------
+// ------------------------------------------------------------
+// LOC MANY (list of keys)
+// ------------------------------------------------------------
+
+loc_many :: proc(df: ^DataFrame, keys: []$T) -> DataFrame {
+	if !df.has_index {
+		panic("loc_many: DataFrame has no index")
+	}
+
+	col := column(df, df.index_column)
+	data := mem.slice_ptr(cast(^T)col.data, df.rows)
+
+	// 1) Collect matching row indices
+	indices := make([dynamic]int, 0, len(keys), context.allocator)
+	defer delete(indices)
+
+	for key in keys {
+		// Try binary search first
+		idx := binary_search(data, key)
+
+		if idx >= 0 {
+			append(&indices, idx)
+			continue
+		}
+
+		// Fallback: linear scan (for unsorted index)
+		for i in 0 ..< df.rows {
+			if equals(data[i], key) {
+				append(&indices, i)
+			}
+		}
+	}
+
+	// No matches → empty DataFrame
+	if len(indices) == 0 {
+		return dataframe_new(context.allocator)
+	}
+
+	// 2) Build result DataFrame by copying rows at collected indices
+	out := dataframe_new(context.allocator)
+	out.rows = len(indices)
+
+	for &col in df.columns {
+		dst := column_new(col.name, col.type, out.rows, context.allocator)
+
+		#partial switch col.type {
+		case .Int:
+			src := cast([^]int)col.data
+			dst_data := cast([^]int)dst.data
+			for i in 0 ..< out.rows {
+				dst_data[i] = src[indices[i]]
+			}
+
+		case .Float:
+			src := cast([^]f64)col.data
+			dst_data := cast([^]f64)dst.data
+			for i in 0 ..< out.rows {
+				dst_data[i] = src[indices[i]]
+			}
+
+		case .String:
+			src := cast([^]string)col.data
+			dst_data := cast([^]string)dst.data
+			for i in 0 ..< out.rows {
+				dst_data[i] = src[indices[i]]
+			}
+
+		case .Bool:
+			src := cast([^]bool)col.data
+			dst_data := cast([^]bool)dst.data
+			for i in 0 ..< out.rows {
+				dst_data[i] = src[indices[i]]
+			}
+
+		case .Date:
+			src := cast([^]Date)col.data
+			dst_data := cast([^]Date)dst.data
+			for i in 0 ..< out.rows {
+				dst_data[i] = src[indices[i]]
+			}
+
+		case .Datetime:
+			src := cast([^]Datetime)col.data
+			dst_data := cast([^]Datetime)dst.data
+			for i in 0 ..< out.rows {
+				dst_data[i] = src[indices[i]]
+			}
+		}
+
+		dst.len = out.rows
+		add_column(&out, dst)
+	}
+
+	return out
+}
