@@ -26,7 +26,7 @@ sort_test :: proc() {
 	w.add_column(&df, col_name)
 
 	fmt.println("Original:")
-	w.dataframe_print(&df)
+	w.dataframe_pretty_print(&df)
 
 	// Ascending sort
 	df_sorted := w.dataframe_sort(&df, "age", false)

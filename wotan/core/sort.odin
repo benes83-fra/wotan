@@ -7,41 +7,41 @@ import "core:strings"
 
 IntSorter :: struct {
 	idx:        ^[]int,
-	data:       ^[]int,
+	data:       [^]int,
 	descending: bool,
 }
 
 FloatSorter :: struct {
 	idx:        ^[]int,
-	data:       ^[]f64,
+	data:       [^]f64,
 	descending: bool,
 }
 
 StringSorter :: struct {
 	idx:        ^[]int,
-	data:       ^[]string,
+	data:       [^]string,
 	descending: bool,
 }
 
 BoolSorter :: struct {
 	idx:        ^[]int,
-	data:       ^[]bool,
+	data:       [^]bool,
 	descending: bool,
 }
 
 DateSorter :: struct {
 	idx:        ^[]int,
-	data:       ^[]Date,
+	data:       [^]Date,
 	descending: bool,
 }
 TimeSorter :: struct {
 	idx:        ^[]int,
-	data:       ^[]Date,
+	data:       [^]Time,
 	descending: bool,
 }
 DatetimeSorter :: struct {
 	idx:        ^[]int,
-	data:       ^[]Datetime,
+	data:       [^]Datetime,
 	descending: bool,
 }
 
@@ -70,7 +70,7 @@ dataframe_sort :: proc(
 	case .Int:
 		sorter := IntSorter {
 			idx        = &idx,
-			data       = cast(^[]int)col.data,
+			data       = ([^]int)(col.data),
 			descending = descending,
 		}
 		sort.sort(make_sorter(&sorter))
@@ -78,7 +78,7 @@ dataframe_sort :: proc(
 	case .Float:
 		sorter := FloatSorter {
 			idx        = &idx,
-			data       = cast(^[]f64)col.data,
+			data       = ([^]f64)(col.data),
 			descending = descending,
 		}
 		sort.sort(make_sorter(&sorter))
@@ -86,7 +86,7 @@ dataframe_sort :: proc(
 	case .String:
 		sorter := StringSorter {
 			idx        = &idx,
-			data       = cast(^[]string)col.data,
+			data       = ([^]string)(col.data),
 			descending = descending,
 		}
 		sort.sort(make_sorter(&sorter))
@@ -94,7 +94,7 @@ dataframe_sort :: proc(
 	case .Bool:
 		sorter := BoolSorter {
 			idx        = &idx,
-			data       = cast(^[]bool)col.data,
+			data       = ([^]bool)(col.data),
 			descending = descending,
 		}
 		sort.sort(make_sorter(&sorter))
@@ -102,14 +102,14 @@ dataframe_sort :: proc(
 	case .Date:
 		sorter := DateSorter {
 			idx        = &idx,
-			data       = cast(^[]Date)col.data,
+			data       = ([^]Date)(col.data),
 			descending = descending,
 		}
 		sort.sort(make_sorter(&sorter))
 	case .Time:
 		sorter := TimeSorter {
 			idx        = &idx,
-			data       = cast(^[]Date)col.data,
+			data       = ([^]Time)(col.data),
 			descending = descending,
 		}
 		sort.sort(make_sorter(&sorter))
@@ -118,7 +118,7 @@ dataframe_sort :: proc(
 	case .Datetime:
 		sorter := DatetimeSorter {
 			idx        = &idx,
-			data       = cast(^[]Datetime)col.data,
+			data       = ([^]Datetime)(col.data),
 			descending = descending,
 		}
 		sort.sort(make_sorter(&sorter))
@@ -166,7 +166,7 @@ dataframe_sort :: proc(
 			dst := cast([^]Datetime)dst_col.data
 			for i in 0 ..< df.rows do dst[i] = src[idx[i]]
 		}
-
+		dst_col.len = df.rows
 		add_column(&out, dst_col)
 	}
 
@@ -184,6 +184,24 @@ make_sorter :: proc {
 	make_datetime_sorter,
 }
 
+make_generic_sorter :: proc(t: ^$T) -> sort.Interface {
+	return sort.Interface{collection = rawptr(t), len = proc(it: sort.Interface) -> int {
+			s := (^T)(it.collection)
+			return len(s.idx^)
+		}, less = proc(it: sort.Interface, i, j: int) -> bool {
+			s := (^T)(it.collection)
+			ai := s.idx^[i]
+			aj := s.idx^[j]
+			if s.descending {
+				s.data[ai] > s.data^[aj]
+			}
+			return s.data^[ai] > s.data^[aj]
+		}, swap = proc(it: sort.Interface, i, j: int) {
+			s := (^T)(it.collection)
+			s.idx^[i], s.idx^[j] = s.idx^[j], s.idx^[i]
+		}}
+}
+
 make_int_sorter :: proc(s: ^IntSorter) -> sort.Interface {
 	return sort.Interface{collection = rawptr(s), len = proc(it: sort.Interface) -> int {
 			s := (^IntSorter)(it.collection)
@@ -193,9 +211,9 @@ make_int_sorter :: proc(s: ^IntSorter) -> sort.Interface {
 			ai := s.idx^[i]
 			aj := s.idx^[j]
 			if s.descending {
-				return s.data^[ai] > s.data^[aj]
+				return s.data[ai] > s.data[aj]
 			}
-			return s.data^[ai] < s.data^[aj]
+			return s.data[ai] < s.data[aj]
 		}, swap = proc(it: sort.Interface, i, j: int) {
 			s := (^IntSorter)(it.collection)
 			s.idx^[i], s.idx^[j] = s.idx^[j], s.idx^[i]
@@ -203,104 +221,138 @@ make_int_sorter :: proc(s: ^IntSorter) -> sort.Interface {
 }
 make_float_sorter :: proc(s: ^FloatSorter) -> sort.Interface {
 	return sort.Interface{collection = rawptr(s), len = proc(it: sort.Interface) -> int {
-			s := (^IntSorter)(it.collection)
+			s := (^FloatSorter)(it.collection)
 			return len(s.idx^)
 		}, less = proc(it: sort.Interface, i, j: int) -> bool {
-			s := (^IntSorter)(it.collection)
+			s := (^FloatSorter)(it.collection)
 			ai := s.idx^[i]
 			aj := s.idx^[j]
 			if s.descending {
-				return s.data^[ai] > s.data^[aj]
+				return s.data[ai] > s.data[aj]
 			}
-			return s.data^[ai] < s.data^[aj]
+			return s.data[ai] < s.data[aj]
 		}, swap = proc(it: sort.Interface, i, j: int) {
-			s := (^IntSorter)(it.collection)
+			s := (^FloatSorter)(it.collection)
 			s.idx^[i], s.idx^[j] = s.idx^[j], s.idx^[i]
 		}}
 }
 
+
 make_string_sorter :: proc(s: ^StringSorter) -> sort.Interface {
 	return sort.Interface{collection = rawptr(s), len = proc(it: sort.Interface) -> int {
-			s := (^IntSorter)(it.collection)
+			s := (^StringSorter)(it.collection)
 			return len(s.idx^)
 		}, less = proc(it: sort.Interface, i, j: int) -> bool {
-			s := (^IntSorter)(it.collection)
+			s := (^StringSorter)(it.collection)
 			ai := s.idx^[i]
 			aj := s.idx^[j]
+			a := s.data[ai]
+			b := s.data[aj]
+			cmp := strings.compare(a, b)
 			if s.descending {
-				return s.data^[ai] > s.data^[aj]
+				return cmp > 0
 			}
-			return s.data^[ai] < s.data^[aj]
+			return cmp < 0
 		}, swap = proc(it: sort.Interface, i, j: int) {
-			s := (^IntSorter)(it.collection)
+			s := (^StringSorter)(it.collection)
 			s.idx^[i], s.idx^[j] = s.idx^[j], s.idx^[i]
 		}}
 }
+
+// --- Bool ---
+
 make_bool_sorter :: proc(s: ^BoolSorter) -> sort.Interface {
-	return sort.Interface{collection = rawptr(s), len = proc(it: sort.Interface) -> int {
-			s := (^IntSorter)(it.collection)
+	return sort.Interface {
+		collection = rawptr(s),
+		len = proc(it: sort.Interface) -> int {
+			s := (^BoolSorter)(it.collection)
 			return len(s.idx^)
-		}, less = proc(it: sort.Interface, i, j: int) -> bool {
-			s := (^IntSorter)(it.collection)
+		},
+		less = proc(it: sort.Interface, i, j: int) -> bool {
+			s := (^BoolSorter)(it.collection)
 			ai := s.idx^[i]
 			aj := s.idx^[j]
+			a := s.data[ai]
+			b := s.data[aj]
 			if s.descending {
-				return s.data^[ai] > s.data^[aj]
+				// true > false
+				return a && !b
 			}
-			return s.data^[ai] < s.data^[aj]
-		}, swap = proc(it: sort.Interface, i, j: int) {
-			s := (^IntSorter)(it.collection)
+			// false < true
+			return !a && b
+		},
+		swap = proc(it: sort.Interface, i, j: int) {
+			s := (^BoolSorter)(it.collection)
 			s.idx^[i], s.idx^[j] = s.idx^[j], s.idx^[i]
-		}}
+		},
+	}
 }
+
+// --- Date ---
+
 make_date_sorter :: proc(s: ^DateSorter) -> sort.Interface {
 	return sort.Interface{collection = rawptr(s), len = proc(it: sort.Interface) -> int {
-			s := (^IntSorter)(it.collection)
+			s := (^DateSorter)(it.collection)
 			return len(s.idx^)
 		}, less = proc(it: sort.Interface, i, j: int) -> bool {
-			s := (^IntSorter)(it.collection)
+			s := (^DateSorter)(it.collection)
 			ai := s.idx^[i]
 			aj := s.idx^[j]
+			a := s.data[ai]
+			b := s.data[aj]
+			cmp := date_compare(a, b)
 			if s.descending {
-				return s.data^[ai] > s.data^[aj]
+				return cmp > 0
 			}
-			return s.data^[ai] < s.data^[aj]
+			return cmp < 0
 		}, swap = proc(it: sort.Interface, i, j: int) {
-			s := (^IntSorter)(it.collection)
+			s := (^DateSorter)(it.collection)
 			s.idx^[i], s.idx^[j] = s.idx^[j], s.idx^[i]
 		}}
 }
+
+// --- Time ---
+
 make_time_sorter :: proc(s: ^TimeSorter) -> sort.Interface {
 	return sort.Interface{collection = rawptr(s), len = proc(it: sort.Interface) -> int {
-			s := (^IntSorter)(it.collection)
+			s := (^TimeSorter)(it.collection)
 			return len(s.idx^)
 		}, less = proc(it: sort.Interface, i, j: int) -> bool {
-			s := (^IntSorter)(it.collection)
+			s := (^TimeSorter)(it.collection)
 			ai := s.idx^[i]
 			aj := s.idx^[j]
+			a := s.data[ai]
+			b := s.data[aj]
+			cmp := time_compare(a, b)
 			if s.descending {
-				return s.data^[ai] > s.data^[aj]
+				return cmp > 0
 			}
-			return s.data^[ai] < s.data^[aj]
+			return cmp < 0
 		}, swap = proc(it: sort.Interface, i, j: int) {
-			s := (^IntSorter)(it.collection)
+			s := (^TimeSorter)(it.collection)
 			s.idx^[i], s.idx^[j] = s.idx^[j], s.idx^[i]
 		}}
 }
+
+// --- Datetime ---
+
 make_datetime_sorter :: proc(s: ^DatetimeSorter) -> sort.Interface {
 	return sort.Interface{collection = rawptr(s), len = proc(it: sort.Interface) -> int {
-			s := (^IntSorter)(it.collection)
+			s := (^DatetimeSorter)(it.collection)
 			return len(s.idx^)
 		}, less = proc(it: sort.Interface, i, j: int) -> bool {
-			s := (^IntSorter)(it.collection)
+			s := (^DatetimeSorter)(it.collection)
 			ai := s.idx^[i]
 			aj := s.idx^[j]
+			a := s.data[ai]
+			b := s.data[aj]
+			cmp := datetime_compare(a, b)
 			if s.descending {
-				return s.data^[ai] > s.data^[aj]
+				return cmp > 0
 			}
-			return s.data^[ai] < s.data^[aj]
+			return cmp < 0
 		}, swap = proc(it: sort.Interface, i, j: int) {
-			s := (^IntSorter)(it.collection)
+			s := (^DatetimeSorter)(it.collection)
 			s.idx^[i], s.idx^[j] = s.idx^[j], s.idx^[i]
 		}}
 }
