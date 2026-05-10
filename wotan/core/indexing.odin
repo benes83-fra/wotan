@@ -245,6 +245,11 @@ df_row :: proc(df: ^DataFrame, i: int) -> DataFrame {
 			dst_data := cast([^]Date)dst.data
 			dst_data[0] = src[i]
 
+    case .Time:
+      src := cast ([^]Time)col.data
+      dst_data := cast ([^]Time) dst.data
+      dst_data[0] = src[i]
+
 		case .Datetime:
 			src := cast([^]Datetime)col.data
 			dst_data := cast([^]Datetime)dst.data
@@ -258,7 +263,59 @@ df_row :: proc(df: ^DataFrame, i: int) -> DataFrame {
 	return out
 }
 
+// df_slice :: proc(df: ^DataFrame, i0, i1: int) -> DataFrame {
+// 	i0 := i0
+// 	i1 := i1
+// 	if i0 < 0 do i0 = 0
+// 	if i1 > df.rows do i1 = df.rows
+// 	if i1 <= i0 do return dataframe_new(context.allocator)
+//
+// 	out := dataframe_new(context.allocator)
+// 	out.rows = i1 - i0
+//
+// 	for &col in df.columns {
+// 		dst := column_new(col.name, col.type, out.rows, context.allocator)
+//
+// 		#partial switch col.type {
+// 		case .Int:
+// 			src := cast([^]int)col.data
+// 			dst_data := cast([^]int)dst.data
+// 			for i in 0 ..< out.rows do dst_data[i] = src[i0 + i]
+//
+// 		case .Float:
+// 			src := cast([^]f64)col.data
+// 			dst_data := cast([^]f64)dst.data
+// 			for i in 0 ..< out.rows do dst_data[i] = src[i0 + i]
+//
+// 		case .String:
+// 			src := cast([^]string)col.data
+// 			dst_data := cast([^]string)dst.data
+// 			for i in 0 ..< out.rows do dst_data[i] = src[i0 + i]
+//
+// 		case .Bool:
+// 			src := cast([^]bool)col.data
+// 			dst_data := cast([^]bool)dst.data
+// 			for i in 0 ..< out.rows do dst_data[i] = src[i0 + i]
+//
+// 		case .Date:
+// 			src := cast([^]Date)col.data
+// 			dst_data := cast([^]Date)dst.data
+// 			for i in 0 ..< out.rows do dst_data[i] = src[i0 + i]
+//
+// 		case .Datetime:
+// 			src := cast([^]Datetime)col.data
+// 			dst_data := cast([^]Datetime)dst.data
+// 			for i in 0 ..< out.rows do dst_data[i] = src[i0 + i]
+// 		}
+//
+// 		dst.len = out.rows
+// 		add_column(&out, dst)
+// 	}
+//
+// 	return out
+// }
 df_slice :: proc(df: ^DataFrame, i0, i1: int) -> DataFrame {
+	// normalize bounds
 	i0 := i0
 	i1 := i1
 	if i0 < 0 do i0 = 0
@@ -267,44 +324,28 @@ df_slice :: proc(df: ^DataFrame, i0, i1: int) -> DataFrame {
 
 	out := dataframe_new(context.allocator)
 	out.rows = i1 - i0
+	out.index_column = df.index_column
+	out.has_index = df.has_index
 
 	for &col in df.columns {
-		dst := column_new(col.name, col.type, out.rows, context.allocator)
+		view_col := col
 
-		#partial switch col.type {
-		case .Int:
-			src := cast([^]int)col.data
-			dst_data := cast([^]int)dst.data
-			for i in 0 ..< out.rows do dst_data[i] = src[i0 + i]
+		view_col.is_view = true
+		view_col.orig = &col
 
-		case .Float:
-			src := cast([^]f64)col.data
-			dst_data := cast([^]f64)dst.data
-			for i in 0 ..< out.rows do dst_data[i] = src[i0 + i]
+		view_col.offset = col.offset + i0 if col.is_view else i0
+		view_col.len = out.rows
+		view_col.capacity = view_col.len
 
-		case .String:
-			src := cast([^]string)col.data
-			dst_data := cast([^]string)dst.data
-			for i in 0 ..< out.rows do dst_data[i] = src[i0 + i]
-
-		case .Bool:
-			src := cast([^]bool)col.data
-			dst_data := cast([^]bool)dst.data
-			for i in 0 ..< out.rows do dst_data[i] = src[i0 + i]
-
-		case .Date:
-			src := cast([^]Date)col.data
-			dst_data := cast([^]Date)dst.data
-			for i in 0 ..< out.rows do dst_data[i] = src[i0 + i]
-
-		case .Datetime:
-			src := cast([^]Datetime)col.data
-			dst_data := cast([^]Datetime)dst.data
-			for i in 0 ..< out.rows do dst_data[i] = src[i0 + i]
+		// data + nulls are shared; arena/allocator unchanged
+		// data stays pointing to the original buffer
+		if len(col.nulls) > 0 {
+			start := view_col.offset
+			stop := view_col.offset + view_col.len
+			view_col.nulls = col.nulls[start:stop]
 		}
 
-		dst.len = out.rows
-		add_column(&out, dst)
+		add_column(&out, view_col)
 	}
 
 	return out
@@ -392,7 +433,12 @@ loc_many :: proc(df: ^DataFrame, keys: []$T) -> DataFrame {
 			for i in 0 ..< out.rows {
 				dst_data[i] = src[indices[i]]
 			}
-
+		case .Time:
+			src := cast([^]Time)col.data
+			dst_data := cast([^]Time)dst.data
+			for i in 0 ..< out.rows {
+				dst_data[i] = src[indices[i]]
+			}
 		case .Datetime:
 			src := cast([^]Datetime)col.data
 			dst_data := cast([^]Datetime)dst.data
@@ -504,7 +550,12 @@ loc_mask :: proc(df: ^DataFrame, mask: []bool) -> DataFrame {
 			dst_data := cast([^]Date)dst.data
 			for j in 0 ..< out.rows do dst_data[j] = src[indices[j]]
 
-		case .Datetime:
+    case .Time:
+			src := cast([^]Time)col.data
+			dst_data := cast([^]Time)dst.data
+			for j in 0 ..< out.rows do dst_data[j] = src[indices[j]]
+		
+    case .Datetime:
 			src := cast([^]Datetime)col.data
 			dst_data := cast([^]Datetime)dst.data
 			for j in 0 ..< out.rows do dst_data[j] = src[indices[j]]
@@ -591,6 +642,11 @@ iloc_many :: proc(df: ^DataFrame, idxs: []int) -> DataFrame {
 			dst_data := cast([^]Date)dst.data
 			for j in 0 ..< out.rows do dst_data[j] = src[idxs[j]]
 
+		case .Time:
+			src := cast([^]Time)col.data
+			dst_data := cast([^]Time)dst.data
+			for j in 0 ..< out.rows do dst_data[j] = src[idxs[j]]
+
 		case .Datetime:
 			src := cast([^]Datetime)col.data
 			dst_data := cast([^]Datetime)dst.data
@@ -602,4 +658,16 @@ iloc_many :: proc(df: ^DataFrame, idxs: []int) -> DataFrame {
 	}
 
 	return out
+}
+
+col_get :: proc(col: ^Column, i: int, $T: typeid) -> T {
+	src := cast([^]T)col.data
+	row: int
+	if col.is_view {
+		row = col.offset + i
+	} else {
+		row = i
+	}
+
+	return src[row]
 }
