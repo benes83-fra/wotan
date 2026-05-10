@@ -31,7 +31,9 @@ destroy_dataframe :: proc(df: ^DataFrame) {
 		destroy_column(&col)
 
 	}
-
+	if df.index != nil {
+		delete(df.index)
+	}
 
 	if df.columns != nil {
 		delete(df.columns)

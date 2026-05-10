@@ -216,11 +216,39 @@ df_row :: proc(df: ^DataFrame, i: int) -> DataFrame {
 	out := dataframe_new(context.allocator)
 	out.rows = 1
 
-	idx := []int{i} // single index
-
 	for &col in df.columns {
 		dst := column_new(col.name, col.type, 1, context.allocator)
-		copy_column_values(&col, &dst, idx)
+
+		#partial switch col.type {
+		case .Int:
+			dst_data := cast([^]int)dst.data
+			dst_data[0] = col_get_df(df, &col, i, int)
+
+		case .Float:
+			dst_data := cast([^]f64)dst.data
+			dst_data[0] = col_get_df(df, &col, i, f64)
+
+		case .String:
+			dst_data := cast([^]string)dst.data
+			dst_data[0] = col_get_df(df, &col, i, string)
+
+		case .Bool:
+			dst_data := cast([^]bool)dst.data
+			dst_data[0] = col_get_df(df, &col, i, bool)
+
+		case .Date:
+			dst_data := cast([^]Date)dst.data
+			dst_data[0] = col_get_df(df, &col, i, Date)
+
+		case .Time:
+			dst_data := cast([^]Time)dst.data
+			dst_data[0] = col_get_df(df, &col, i, Time)
+
+		case .Datetime:
+			dst_data := cast([^]Datetime)dst.data
+			dst_data[0] = col_get_df(df, &col, i, Datetime)
+		}
+
 		dst.len = 1
 		add_column(&out, dst)
 	}
@@ -280,20 +308,14 @@ loc_many :: proc(df: ^DataFrame, keys: []$T) -> DataFrame {
 	col := column(df, df.index_column)
 	data := mem.slice_ptr(cast(^T)col.data, df.rows)
 
-	// 1) Collect matching row indices
 	indices := make([dynamic]int, 0, len(keys), context.allocator)
-	defer delete(indices)
 
 	for key in keys {
-		// Try binary search first
 		idx := binary_search(data, key)
-
 		if idx >= 0 {
 			append(&indices, idx)
 			continue
 		}
-
-		// Fallback: linear scan (for unsorted index)
 		for i in 0 ..< df.rows {
 			if equals(data[i], key) {
 				append(&indices, i)
@@ -301,25 +323,13 @@ loc_many :: proc(df: ^DataFrame, keys: []$T) -> DataFrame {
 		}
 	}
 
-	// No matches → empty DataFrame
 	if len(indices) == 0 {
 		return dataframe_new(context.allocator)
 	}
 
-	// 2) Build result DataFrame by copying rows at collected indices
-	out := dataframe_new(context.allocator)
-	out.rows = len(indices)
-
-	for &col in df.columns {
-		dst := column_new(col.name, col.type, out.rows, context.allocator)
-		copy_column_values(&col, &dst, indices[:])
-		dst.len = out.rows
-		add_column(&out, dst)
-	}
-
-	return out
-
+	return dataframe_view_indices(df, indices[:])
 }
+
 // ------------------------------------------------------------
 // LOC_FROM (open-ended slice from a start label)
 // ------------------------------------------------------------
@@ -369,9 +379,8 @@ loc_mask :: proc(df: ^DataFrame, mask: []bool) -> DataFrame {
 		panic("loc_mask: mask length does not match DataFrame rows")
 	}
 
-	// 1) Collect indices where mask[i] == true
 	indices := make([dynamic]int, 0, df.rows, context.allocator)
-	defer delete(indices)
+	// DO NOT delete(indices) — ownership moves to the view
 
 	for i in 0 ..< df.rows {
 		if mask[i] {
@@ -379,25 +388,13 @@ loc_mask :: proc(df: ^DataFrame, mask: []bool) -> DataFrame {
 		}
 	}
 
-	// No matches → empty DataFrame
 	if len(indices) == 0 {
 		return dataframe_new(context.allocator)
 	}
 
-	// 2) Build output DataFrame
-	out := dataframe_new(context.allocator)
-	out.rows = len(indices)
-
-	for &col in df.columns {
-		dst := column_new(col.name, col.type, out.rows, context.allocator)
-		copy_column_values(&col, &dst, indices[:])
-		dst.len = out.rows
-		add_column(&out, dst)
-	}
-
-	return out
-
+	return dataframe_view_indices(df, indices[:])
 }
+
 // ------------------------------------------------------------
 // ILOC (scalar integer indexing)
 // ------------------------------------------------------------
@@ -440,20 +437,19 @@ iloc_many :: proc(df: ^DataFrame, idxs: []int) -> DataFrame {
 		}
 	}
 
-	// Build output
-	out := dataframe_new(context.allocator)
-	out.rows = len(idxs)
-
-	for &col in df.columns {
-		dst := column_new(col.name, col.type, out.rows, context.allocator)
-		copy_column_values(&col, &dst, idxs)
-		dst.len = out.rows
-		add_column(&out, dst)
+	if len(idxs) == 0 {
+		return dataframe_new(context.allocator)
 	}
 
-	return out
+	// Own a heap-allocated index vector
+	indices := make([dynamic]int, len(idxs), len(idxs), context.allocator)
+	for i in 0 ..< len(idxs) {
+		indices[i] = idxs[i]
+	}
 
+	return dataframe_view_indices(df, indices[:])
 }
+
 
 col_get :: proc(col: ^Column, i: int, $T: typeid) -> T {
 	src := cast([^]T)col.data
@@ -467,48 +463,87 @@ col_get :: proc(col: ^Column, i: int, $T: typeid) -> T {
 	return src[row]
 }
 
-copy_column_values :: proc(col: ^Column, dst: ^Column, indices: []int) {
+copy_column_values :: proc(df: ^DataFrame, col: ^Column, dst: ^Column, indices: []int) {
 	#partial switch col.type {
 	case .Int:
 		dst_data := cast([^]int)dst.data
 		for i in 0 ..< len(indices) {
-			dst_data[i] = col_get(col, indices[i], int)
+			dst_data[i] = col_get_df(df, col, indices[i], int)
 		}
 
 	case .Float:
 		dst_data := cast([^]f64)dst.data
 		for i in 0 ..< len(indices) {
-			dst_data[i] = col_get(col, indices[i], f64)
+			dst_data[i] = col_get_df(df, col, indices[i], f64)
 		}
 
 	case .String:
 		dst_data := cast([^]string)dst.data
 		for i in 0 ..< len(indices) {
-			dst_data[i] = col_get(col, indices[i], string)
+			dst_data[i] = col_get_df(df, col, indices[i], string)
 		}
 
 	case .Bool:
 		dst_data := cast([^]bool)dst.data
 		for i in 0 ..< len(indices) {
-			dst_data[i] = col_get(col, indices[i], bool)
+			dst_data[i] = col_get_df(df, col, indices[i], bool)
 		}
 
 	case .Date:
 		dst_data := cast([^]Date)dst.data
 		for i in 0 ..< len(indices) {
-			dst_data[i] = col_get(col, indices[i], Date)
+			dst_data[i] = col_get_df(df, col, indices[i], Date)
 		}
 
 	case .Time:
 		dst_data := cast([^]Time)dst.data
 		for i in 0 ..< len(indices) {
-			dst_data[i] = col_get(col, indices[i], Time)
+			dst_data[i] = col_get_df(df, col, indices[i], Time)
 		}
 
 	case .Datetime:
 		dst_data := cast([^]Datetime)dst.data
 		for i in 0 ..< len(indices) {
-			dst_data[i] = col_get(col, indices[i], Datetime)
+			dst_data[i] = col_get_df(df, col, indices[i], Datetime)
 		}
 	}
+}
+
+col_get_df :: proc(df: ^DataFrame, col: ^Column, i: int, $T: typeid) -> T {
+	src := cast([^]T)col.data
+
+	// logical row -> physical row
+	row: int
+	if df.index != nil {
+		// index-vector view
+		row = df.index[i]
+	} else if col.is_view {
+		// contiguous column view
+		row = col.offset + i
+	} else {
+		// plain materialized
+		row = i
+	}
+
+	return src[row]
+}
+dataframe_view_indices :: proc(base: ^DataFrame, indices: []int) -> DataFrame {
+	out := dataframe_new(context.allocator)
+	out.rows = len(indices)
+	out.index = indices
+	out.index_column = base.index_column
+	out.has_index = base.has_index
+
+	for i in 0 ..< len(base.columns) {
+		base_col := &base.columns[i]
+		view_col := base_col^
+		view_col.is_view = true
+		view_col.orig = base_col
+		view_col.offset = 0
+		view_col.len = out.rows
+		view_col.capacity = out.rows
+		add_column(&out, view_col)
+	}
+
+	return out
 }
