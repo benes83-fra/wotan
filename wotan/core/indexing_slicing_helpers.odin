@@ -142,66 +142,13 @@ upper_bound :: proc(data: []$T, key: T) -> int {
 
 
 reorder_column_inplace :: proc(col: ^Column, index_vec: []int) {
-	// Allocate a new column with same type and capacity
 	tmp := column_new(col.name, col.type, col.len, col.allocator)
-
-	#partial switch col.type {
-	case .Int:
-		src := cast([^]int)col.data
-		dst := cast([^]int)tmp.data
-		for i in 0 ..< col.len {
-			dst[i] = src[index_vec[i]]
-		}
-
-	case .Float:
-		src := cast([^]f64)col.data
-		dst := cast([^]f64)tmp.data
-		for i in 0 ..< col.len {
-			dst[i] = src[index_vec[i]]
-		}
-
-	case .String:
-		src := cast([^]string)col.data
-		dst := cast([^]string)tmp.data
-		for i in 0 ..< col.len {
-			dst[i] = src[index_vec[i]]
-		}
-
-	case .Bool:
-		src := cast([^]bool)col.data
-		dst := cast([^]bool)tmp.data
-		for i in 0 ..< col.len {
-			dst[i] = src[index_vec[i]]
-		}
-
-	case .Date:
-		src := cast([^]Date)col.data
-		dst := cast([^]Date)tmp.data
-		for i in 0 ..< col.len {
-			dst[i] = src[index_vec[i]]
-		}
-
-	case .Time:
-		src := cast([^]Time)col.data
-		dst := cast([^]Time)tmp.data
-		for i in 0 ..< col.len {
-			dst[i] = src[index_vec[i]]
-		}
-
-	case .Datetime:
-		src := cast([^]Datetime)col.data
-		dst := cast([^]Datetime)tmp.data
-		for i in 0 ..< col.len {
-			dst[i] = src[index_vec[i]]
-		}
-	}
-
+	copy_column_direct(col, &tmp, index_vec)
 	tmp.len = col.len
-
-	// Replace old column
 	destroy_column(col)
 	col^ = tmp
 }
+
 col_get :: proc(col: ^Column, i: int, $T: typeid) -> T {
 	src := cast([^]T)col.data
 	row: int
@@ -277,4 +224,138 @@ col_get_df :: proc(df: ^DataFrame, col: ^Column, i: int, $T: typeid) -> T {
 	}
 
 	return src[row]
+}
+insert_column_front :: proc(df: ^DataFrame, col: Column) {
+	// shift existing columns right
+	append(&df.columns, col)
+	for i := len(df.columns) - 1; i > 0; i -= 1 {
+		df.columns[i] = df.columns[i - 1]
+	}
+	df.columns[0] = col
+
+	// rebuild name_to_index
+	df.name_to_index = make(map[string]int)
+	for c, i in df.columns {
+		df.name_to_index[c.name] = i
+	}
+}
+
+
+copy_column_direct :: proc(src: ^Column, dst: ^Column, mapping: []int) {
+	#partial switch src.type {
+	case .Int:
+		s := cast([^]int)src.data
+		d := cast([^]int)dst.data
+		for i in 0 ..< len(mapping) do d[i] = s[mapping[i]]
+
+	case .Float:
+		s := cast([^]f64)src.data
+		d := cast([^]f64)dst.data
+		for i in 0 ..< len(mapping) do d[i] = s[mapping[i]]
+
+	case .String:
+		s := cast([^]string)src.data
+		d := cast([^]string)dst.data
+		for i in 0 ..< len(mapping) do d[i] = s[mapping[i]]
+
+	case .Bool:
+		s := cast([^]bool)src.data
+		d := cast([^]bool)dst.data
+		for i in 0 ..< len(mapping) do d[i] = s[mapping[i]]
+
+	case .Date:
+		s := cast([^]Date)src.data
+		d := cast([^]Date)dst.data
+		for i in 0 ..< len(mapping) do d[i] = s[mapping[i]]
+
+	case .Time:
+		s := cast([^]Time)src.data
+		d := cast([^]Time)dst.data
+		for i in 0 ..< len(mapping) do d[i] = s[mapping[i]]
+
+	case .Datetime:
+		s := cast([^]Datetime)src.data
+		d := cast([^]Datetime)dst.data
+		for i in 0 ..< len(mapping) do d[i] = s[mapping[i]]
+	}
+}
+copy_column_direct_or_null :: proc(src: ^Column, dst: ^Column, mapping: []int) {
+	#partial switch src.type {
+	case .Int:
+		s := cast([^]int)src.data
+		d := cast([^]int)dst.data
+		for i in 0 ..< len(mapping) {
+			if mapping[i] >= 0 {
+				d[i] = s[mapping[i]]
+			} else {
+				dst.nulls[i] = true
+			}
+		}
+
+	case .Float:
+		s := cast([^]f64)src.data
+		d := cast([^]f64)dst.data
+		for i in 0 ..< len(mapping) {
+			if mapping[i] >= 0 {
+				d[i] = s[mapping[i]]
+			} else {
+				dst.nulls[i] = true
+			}
+		}
+
+	case .String:
+		s := cast([^]string)src.data
+		d := cast([^]string)dst.data
+		for i in 0 ..< len(mapping) {
+			if mapping[i] >= 0 {
+				d[i] = s[mapping[i]]
+			} else {
+				dst.nulls[i] = true
+			}
+		}
+
+	case .Bool:
+		s := cast([^]bool)src.data
+		d := cast([^]bool)dst.data
+		for i in 0 ..< len(mapping) {
+			if mapping[i] >= 0 {
+				d[i] = s[mapping[i]]
+			} else {
+				dst.nulls[i] = true
+			}
+		}
+
+	case .Date:
+		s := cast([^]Date)src.data
+		d := cast([^]Date)dst.data
+		for i in 0 ..< len(mapping) {
+			if mapping[i] >= 0 {
+				d[i] = s[mapping[i]]
+			} else {
+				dst.nulls[i] = true
+			}
+		}
+
+	case .Time:
+		s := cast([^]Time)src.data
+		d := cast([^]Time)dst.data
+		for i in 0 ..< len(mapping) {
+			if mapping[i] >= 0 {
+				d[i] = s[mapping[i]]
+			} else {
+				dst.nulls[i] = true
+			}
+		}
+
+	case .Datetime:
+		s := cast([^]Datetime)src.data
+		d := cast([^]Datetime)dst.data
+		for i in 0 ..< len(mapping) {
+			if mapping[i] >= 0 {
+				d[i] = s[mapping[i]]
+			} else {
+				dst.nulls[i] = true
+			}
+		}
+	}
 }

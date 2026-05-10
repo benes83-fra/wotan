@@ -105,54 +105,15 @@ materialize :: proc(df: ^DataFrame) -> DataFrame {
 	out.index_column = df.index_column
 	out.has_index = df.has_index
 
+	// logical indices 0..rows-1
+	indices := make([]int, out.rows)
+	for i in 0 ..< out.rows do indices[i] = i
+
 	for &col in df.columns {
 		dst := column_new(col.name, col.type, out.rows, context.allocator)
 
-		// no nulls handling for now – column_new already gave us all-false nulls
-
-		#partial switch col.type {
-		case .Int:
-			dst_data := cast([^]int)dst.data
-			for i in 0 ..< out.rows {
-				dst_data[i] = col_get_df(df, &col, i, int)
-			}
-
-		case .Float:
-			dst_data := cast([^]f64)dst.data
-			for i in 0 ..< out.rows {
-				dst_data[i] = col_get_df(df, &col, i, f64)
-			}
-
-		case .String:
-			dst_data := cast([^]string)dst.data
-			for i in 0 ..< out.rows {
-				dst_data[i] = col_get_df(df, &col, i, string)
-			}
-
-		case .Bool:
-			dst_data := cast([^]bool)dst.data
-			for i in 0 ..< out.rows {
-				dst_data[i] = col_get_df(df, &col, i, bool)
-			}
-
-		case .Date:
-			dst_data := cast([^]Date)dst.data
-			for i in 0 ..< out.rows {
-				dst_data[i] = col_get_df(df, &col, i, Date)
-			}
-
-		case .Time:
-			dst_data := cast([^]Time)dst.data
-			for i in 0 ..< out.rows {
-				dst_data[i] = col_get_df(df, &col, i, Time)
-			}
-
-		case .Datetime:
-			dst_data := cast([^]Datetime)dst.data
-			for i in 0 ..< out.rows {
-				dst_data[i] = col_get_df(df, &col, i, Datetime)
-			}
-		}
+		// this internally uses col_get_df(df, col, indices[i], T)
+		copy_column_values(df, &col, &dst, indices)
 
 		dst.is_view = false
 		dst.orig = nil
@@ -163,5 +124,89 @@ materialize :: proc(df: ^DataFrame) -> DataFrame {
 		add_column(&out, dst)
 	}
 
+	delete(indices)
 	return out
+}
+
+
+reset_index :: proc(df: ^DataFrame) {
+	if !df.has_index {
+		return
+	}
+
+	// 1. Extract the index column name
+	name := df.index_column
+	idx := df.name_to_index[name]
+	col := df.columns[idx]
+
+	// 2. Create a new column with the same values
+	new_col := column_new(name, col.type, df.rows, context.allocator)
+	mapping := make([]int, df.rows)
+	defer delete(mapping)
+	for i in 0 ..< df.rows do mapping[i] = i
+	copy_column_direct(&col, &new_col, mapping)
+
+
+	new_col.len = df.rows
+
+	// 3. Insert new column at front
+	insert_column_front(df, new_col)
+
+	// 4. Clear index metadata
+	df.index_column = ""
+	df.has_index = false
+} // Date-specific reindex
+reindex_date :: proc(df: ^DataFrame, new_index: []Date) -> DataFrame {
+	if !df.has_index {
+		panic("reindex: DataFrame has no index")
+	}
+
+	// 1. Ensure index column is Date
+	idx_col := &df.columns[df.name_to_index[df.index_column]]
+	if idx_col.type != .Date {
+		panic("reindex_date: index column is not Date")
+	}
+
+	// 2. Build lookup: Date -> row index
+	lookup := make(map[Date]int)
+	src := cast([^]Date)idx_col.data
+	for i in 0 ..< df.rows {
+		lookup[src[i]] = i
+	}
+
+	// 3. Build mapping: logical position -> physical row (or -1 for missing)
+	mapping := make([]int, len(new_index))
+	for i in 0 ..< len(new_index) {
+		if row, ok := lookup[new_index[i]]; ok {
+			mapping[i] = row
+		} else {
+			mapping[i] = -1
+		}
+	}
+
+	// 4. Create output DataFrame
+	out := dataframe_new(context.allocator)
+	out.rows = len(new_index)
+	out.index_column = df.index_column
+	out.has_index = true
+
+	// 5. For each column, build a new column using mapping
+	for &col in df.columns {
+		dst := column_new(col.name, col.type, out.rows, context.allocator)
+
+		// uses mapping[i] == -1 -> NULL inside
+		copy_column_direct_or_null(&col, &dst, mapping)
+
+		dst.len = out.rows
+		add_column(&out, dst)
+	}
+
+	delete(mapping)
+	delete(lookup)
+	return out
+}
+
+// Overload entry point
+reindex :: proc {
+	reindex_date,
 }

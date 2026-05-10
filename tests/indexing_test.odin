@@ -75,3 +75,92 @@ indexing_test :: proc(allocator: mem.Allocator = context.allocator) {
 
 	fmt.println("=== END INDEXING TEST ===")
 }
+reset_index_test :: proc(allocator: mem.Allocator = context.allocator) {
+	fmt.println("=== RESET INDEX TEST ===")
+
+	df := w.dataframe_new()
+	defer w.destroy_dataframe(&df)
+
+	// Build sorted frame
+	col_date := w.column_new("Date", .Date, 3)
+	w.append_date(&col_date, w.Date{2024, 1, 1})
+	w.append_date(&col_date, w.Date{2024, 1, 2})
+	w.append_date(&col_date, w.Date{2024, 1, 3})
+
+	col_val := w.column_new("Value", .Int, 3)
+	w.append_int(&col_val, 10)
+	w.append_int(&col_val, 20)
+	w.append_int(&col_val, 30)
+
+	w.add_column(&df, col_date)
+	w.add_column(&df, col_val)
+
+	// Set index
+	w.set_index(&df, "Date")
+
+	fmt.println("After set_index(Date):")
+	w.dataframe_pretty_print(&df)
+
+	// Reset index
+	w.reset_index(&df)
+
+	fmt.println("\nAfter reset_index():")
+	w.dataframe_pretty_print(&df)
+
+	// Expected:
+	// New first column "Date" with values 2024-01-01, 2024-01-02, 2024-01-03
+	// df.has_index == false
+	// df.index_column == ""
+	fmt.println("=== END RESET INDEX TEST ===")
+}
+reindex_test :: proc(allocator: mem.Allocator = context.allocator) {
+	fmt.println("=== REINDEX TEST ===")
+
+	df := w.dataframe_new()
+	defer w.destroy_dataframe(&df)
+
+	// Build sorted frame
+	col_date := w.column_new("Date", .Date, 3)
+	w.append_date(&col_date, w.Date{2024, 1, 1})
+	w.append_date(&col_date, w.Date{2024, 1, 2})
+	w.append_date(&col_date, w.Date{2024, 1, 3})
+
+	col_val := w.column_new("Value", .Int, 3)
+	w.append_int(&col_val, 10)
+	w.append_int(&col_val, 20)
+	w.append_int(&col_val, 30)
+
+	w.add_column(&df, col_date)
+	w.add_column(&df, col_val)
+
+	// Set index
+	w.set_index(&df, "Date")
+
+	fmt.println("Original (indexed):")
+	w.dataframe_pretty_print(&df)
+
+	// New index with:
+	// - reordered rows
+	// - missing row (NULL)
+	// - extra row (NULL)
+	new_idx := []w.Date {
+		w.Date{2024, 1, 3}, // existing
+		w.Date{2024, 1, 1}, // existing
+		w.Date{2024, 1, 5}, // missing
+		w.Date{2024, 1, 2}, // existing
+	}
+
+	out := w.reindex(&df, new_idx)
+	defer w.destroy_dataframe(&out)
+
+	fmt.println("\nAfter reindex([...]):")
+	w.dataframe_pretty_print(&out)
+
+	// Expected:
+	// 2024-01-03 → 30
+	// 2024-01-01 → 10
+	// 2024-01-05 → NULL
+	// 2024-01-02 → 20
+
+	fmt.println("=== END REINDEX TEST ===")
+}

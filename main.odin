@@ -353,6 +353,8 @@ main :: proc() {
 	test.iloc_test(context.temp_allocator)
 	test.materialize_test(context.temp_allocator)
 	test.indexing_test(context.temp_allocator)
+	test.reset_index_test(context.temp_allocator)
+	test.reindex_test(context.temp_allocator)
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
 	w.destroy_dataframe(&right2)
