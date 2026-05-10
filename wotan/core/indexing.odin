@@ -216,46 +216,11 @@ df_row :: proc(df: ^DataFrame, i: int) -> DataFrame {
 	out := dataframe_new(context.allocator)
 	out.rows = 1
 
+	idx := []int{i} // single index
+
 	for &col in df.columns {
 		dst := column_new(col.name, col.type, 1, context.allocator)
-
-		#partial switch col.type {
-		case .Int:
-			src := cast([^]int)col.data
-			dst_data := cast([^]int)dst.data
-			dst_data[0] = src[i]
-
-		case .Float:
-			src := cast([^]f64)col.data
-			dst_data := cast([^]f64)dst.data
-			dst_data[0] = src[i]
-
-		case .String:
-			src := cast([^]string)col.data
-			dst_data := cast([^]string)dst.data
-			dst_data[0] = src[i]
-
-		case .Bool:
-			src := cast([^]bool)col.data
-			dst_data := cast([^]bool)dst.data
-			dst_data[0] = src[i]
-
-		case .Date:
-			src := cast([^]Date)col.data
-			dst_data := cast([^]Date)dst.data
-			dst_data[0] = src[i]
-
-    case .Time:
-      src := cast ([^]Time)col.data
-      dst_data := cast ([^]Time) dst.data
-      dst_data[0] = src[i]
-
-		case .Datetime:
-			src := cast([^]Datetime)col.data
-			dst_data := cast([^]Datetime)dst.data
-			dst_data[0] = src[i]
-		}
-
+		copy_column_values(&col, &dst, idx)
 		dst.len = 1
 		add_column(&out, dst)
 	}
@@ -263,57 +228,7 @@ df_row :: proc(df: ^DataFrame, i: int) -> DataFrame {
 	return out
 }
 
-// df_slice :: proc(df: ^DataFrame, i0, i1: int) -> DataFrame {
-// 	i0 := i0
-// 	i1 := i1
-// 	if i0 < 0 do i0 = 0
-// 	if i1 > df.rows do i1 = df.rows
-// 	if i1 <= i0 do return dataframe_new(context.allocator)
-//
-// 	out := dataframe_new(context.allocator)
-// 	out.rows = i1 - i0
-//
-// 	for &col in df.columns {
-// 		dst := column_new(col.name, col.type, out.rows, context.allocator)
-//
-// 		#partial switch col.type {
-// 		case .Int:
-// 			src := cast([^]int)col.data
-// 			dst_data := cast([^]int)dst.data
-// 			for i in 0 ..< out.rows do dst_data[i] = src[i0 + i]
-//
-// 		case .Float:
-// 			src := cast([^]f64)col.data
-// 			dst_data := cast([^]f64)dst.data
-// 			for i in 0 ..< out.rows do dst_data[i] = src[i0 + i]
-//
-// 		case .String:
-// 			src := cast([^]string)col.data
-// 			dst_data := cast([^]string)dst.data
-// 			for i in 0 ..< out.rows do dst_data[i] = src[i0 + i]
-//
-// 		case .Bool:
-// 			src := cast([^]bool)col.data
-// 			dst_data := cast([^]bool)dst.data
-// 			for i in 0 ..< out.rows do dst_data[i] = src[i0 + i]
-//
-// 		case .Date:
-// 			src := cast([^]Date)col.data
-// 			dst_data := cast([^]Date)dst.data
-// 			for i in 0 ..< out.rows do dst_data[i] = src[i0 + i]
-//
-// 		case .Datetime:
-// 			src := cast([^]Datetime)col.data
-// 			dst_data := cast([^]Datetime)dst.data
-// 			for i in 0 ..< out.rows do dst_data[i] = src[i0 + i]
-// 		}
-//
-// 		dst.len = out.rows
-// 		add_column(&out, dst)
-// 	}
-//
-// 	return out
-// }
+
 df_slice :: proc(df: ^DataFrame, i0, i1: int) -> DataFrame {
 	// normalize bounds
 	i0 := i0
@@ -397,61 +312,13 @@ loc_many :: proc(df: ^DataFrame, keys: []$T) -> DataFrame {
 
 	for &col in df.columns {
 		dst := column_new(col.name, col.type, out.rows, context.allocator)
-
-		#partial switch col.type {
-		case .Int:
-			src := cast([^]int)col.data
-			dst_data := cast([^]int)dst.data
-			for i in 0 ..< out.rows {
-				dst_data[i] = src[indices[i]]
-			}
-
-		case .Float:
-			src := cast([^]f64)col.data
-			dst_data := cast([^]f64)dst.data
-			for i in 0 ..< out.rows {
-				dst_data[i] = src[indices[i]]
-			}
-
-		case .String:
-			src := cast([^]string)col.data
-			dst_data := cast([^]string)dst.data
-			for i in 0 ..< out.rows {
-				dst_data[i] = src[indices[i]]
-			}
-
-		case .Bool:
-			src := cast([^]bool)col.data
-			dst_data := cast([^]bool)dst.data
-			for i in 0 ..< out.rows {
-				dst_data[i] = src[indices[i]]
-			}
-
-		case .Date:
-			src := cast([^]Date)col.data
-			dst_data := cast([^]Date)dst.data
-			for i in 0 ..< out.rows {
-				dst_data[i] = src[indices[i]]
-			}
-		case .Time:
-			src := cast([^]Time)col.data
-			dst_data := cast([^]Time)dst.data
-			for i in 0 ..< out.rows {
-				dst_data[i] = src[indices[i]]
-			}
-		case .Datetime:
-			src := cast([^]Datetime)col.data
-			dst_data := cast([^]Datetime)dst.data
-			for i in 0 ..< out.rows {
-				dst_data[i] = src[indices[i]]
-			}
-		}
-
+		copy_column_values(&col, &dst, indices[:])
 		dst.len = out.rows
 		add_column(&out, dst)
 	}
 
 	return out
+
 }
 // ------------------------------------------------------------
 // LOC_FROM (open-ended slice from a start label)
@@ -523,49 +390,13 @@ loc_mask :: proc(df: ^DataFrame, mask: []bool) -> DataFrame {
 
 	for &col in df.columns {
 		dst := column_new(col.name, col.type, out.rows, context.allocator)
-
-		#partial switch col.type {
-		case .Int:
-			src := cast([^]int)col.data
-			dst_data := cast([^]int)dst.data
-			for j in 0 ..< out.rows do dst_data[j] = src[indices[j]]
-
-		case .Float:
-			src := cast([^]f64)col.data
-			dst_data := cast([^]f64)dst.data
-			for j in 0 ..< out.rows do dst_data[j] = src[indices[j]]
-
-		case .String:
-			src := cast([^]string)col.data
-			dst_data := cast([^]string)dst.data
-			for j in 0 ..< out.rows do dst_data[j] = src[indices[j]]
-
-		case .Bool:
-			src := cast([^]bool)col.data
-			dst_data := cast([^]bool)dst.data
-			for j in 0 ..< out.rows do dst_data[j] = src[indices[j]]
-
-		case .Date:
-			src := cast([^]Date)col.data
-			dst_data := cast([^]Date)dst.data
-			for j in 0 ..< out.rows do dst_data[j] = src[indices[j]]
-
-    case .Time:
-			src := cast([^]Time)col.data
-			dst_data := cast([^]Time)dst.data
-			for j in 0 ..< out.rows do dst_data[j] = src[indices[j]]
-		
-    case .Datetime:
-			src := cast([^]Datetime)col.data
-			dst_data := cast([^]Datetime)dst.data
-			for j in 0 ..< out.rows do dst_data[j] = src[indices[j]]
-		}
-
+		copy_column_values(&col, &dst, indices[:])
 		dst.len = out.rows
 		add_column(&out, dst)
 	}
 
 	return out
+
 }
 // ------------------------------------------------------------
 // ILOC (scalar integer indexing)
@@ -615,49 +446,13 @@ iloc_many :: proc(df: ^DataFrame, idxs: []int) -> DataFrame {
 
 	for &col in df.columns {
 		dst := column_new(col.name, col.type, out.rows, context.allocator)
-
-		#partial switch col.type {
-		case .Int:
-			src := cast([^]int)col.data
-			dst_data := cast([^]int)dst.data
-			for j in 0 ..< out.rows do dst_data[j] = src[idxs[j]]
-
-		case .Float:
-			src := cast([^]f64)col.data
-			dst_data := cast([^]f64)dst.data
-			for j in 0 ..< out.rows do dst_data[j] = src[idxs[j]]
-
-		case .String:
-			src := cast([^]string)col.data
-			dst_data := cast([^]string)dst.data
-			for j in 0 ..< out.rows do dst_data[j] = src[idxs[j]]
-
-		case .Bool:
-			src := cast([^]bool)col.data
-			dst_data := cast([^]bool)dst.data
-			for j in 0 ..< out.rows do dst_data[j] = src[idxs[j]]
-
-		case .Date:
-			src := cast([^]Date)col.data
-			dst_data := cast([^]Date)dst.data
-			for j in 0 ..< out.rows do dst_data[j] = src[idxs[j]]
-
-		case .Time:
-			src := cast([^]Time)col.data
-			dst_data := cast([^]Time)dst.data
-			for j in 0 ..< out.rows do dst_data[j] = src[idxs[j]]
-
-		case .Datetime:
-			src := cast([^]Datetime)col.data
-			dst_data := cast([^]Datetime)dst.data
-			for j in 0 ..< out.rows do dst_data[j] = src[idxs[j]]
-		}
-
+		copy_column_values(&col, &dst, idxs)
 		dst.len = out.rows
 		add_column(&out, dst)
 	}
 
 	return out
+
 }
 
 col_get :: proc(col: ^Column, i: int, $T: typeid) -> T {
@@ -670,4 +465,50 @@ col_get :: proc(col: ^Column, i: int, $T: typeid) -> T {
 	}
 
 	return src[row]
+}
+
+copy_column_values :: proc(col: ^Column, dst: ^Column, indices: []int) {
+	#partial switch col.type {
+	case .Int:
+		dst_data := cast([^]int)dst.data
+		for i in 0 ..< len(indices) {
+			dst_data[i] = col_get(col, indices[i], int)
+		}
+
+	case .Float:
+		dst_data := cast([^]f64)dst.data
+		for i in 0 ..< len(indices) {
+			dst_data[i] = col_get(col, indices[i], f64)
+		}
+
+	case .String:
+		dst_data := cast([^]string)dst.data
+		for i in 0 ..< len(indices) {
+			dst_data[i] = col_get(col, indices[i], string)
+		}
+
+	case .Bool:
+		dst_data := cast([^]bool)dst.data
+		for i in 0 ..< len(indices) {
+			dst_data[i] = col_get(col, indices[i], bool)
+		}
+
+	case .Date:
+		dst_data := cast([^]Date)dst.data
+		for i in 0 ..< len(indices) {
+			dst_data[i] = col_get(col, indices[i], Date)
+		}
+
+	case .Time:
+		dst_data := cast([^]Time)dst.data
+		for i in 0 ..< len(indices) {
+			dst_data[i] = col_get(col, indices[i], Time)
+		}
+
+	case .Datetime:
+		dst_data := cast([^]Datetime)dst.data
+		for i in 0 ..< len(indices) {
+			dst_data[i] = col_get(col, indices[i], Datetime)
+		}
+	}
 }
