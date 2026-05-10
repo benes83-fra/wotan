@@ -547,3 +547,72 @@ dataframe_view_indices :: proc(base: ^DataFrame, indices: []int) -> DataFrame {
 
 	return out
 }
+
+
+materialize :: proc(df: ^DataFrame) -> DataFrame {
+	out := dataframe_new(context.allocator)
+	out.rows = df.rows
+	out.index = nil
+	out.index_column = df.index_column
+	out.has_index = df.has_index
+
+	for &col in df.columns {
+		dst := column_new(col.name, col.type, out.rows, context.allocator)
+
+		// no nulls handling for now – column_new already gave us all-false nulls
+
+		#partial switch col.type {
+		case .Int:
+			dst_data := cast([^]int)dst.data
+			for i in 0 ..< out.rows {
+				dst_data[i] = col_get_df(df, &col, i, int)
+			}
+
+		case .Float:
+			dst_data := cast([^]f64)dst.data
+			for i in 0 ..< out.rows {
+				dst_data[i] = col_get_df(df, &col, i, f64)
+			}
+
+		case .String:
+			dst_data := cast([^]string)dst.data
+			for i in 0 ..< out.rows {
+				dst_data[i] = col_get_df(df, &col, i, string)
+			}
+
+		case .Bool:
+			dst_data := cast([^]bool)dst.data
+			for i in 0 ..< out.rows {
+				dst_data[i] = col_get_df(df, &col, i, bool)
+			}
+
+		case .Date:
+			dst_data := cast([^]Date)dst.data
+			for i in 0 ..< out.rows {
+				dst_data[i] = col_get_df(df, &col, i, Date)
+			}
+
+		case .Time:
+			dst_data := cast([^]Time)dst.data
+			for i in 0 ..< out.rows {
+				dst_data[i] = col_get_df(df, &col, i, Time)
+			}
+
+		case .Datetime:
+			dst_data := cast([^]Datetime)dst.data
+			for i in 0 ..< out.rows {
+				dst_data[i] = col_get_df(df, &col, i, Datetime)
+			}
+		}
+
+		dst.is_view = false
+		dst.orig = nil
+		dst.offset = 0
+		dst.len = out.rows
+		dst.capacity = out.rows
+
+		add_column(&out, dst)
+	}
+
+	return out
+}

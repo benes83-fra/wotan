@@ -255,3 +255,86 @@ iloc_test :: proc(allocator: mem.Allocator = context.allocator) {
 
 	fmt.println("=== END ILOC TEST ===")
 }
+
+materialize_test :: proc(allocator: mem.Allocator = context.allocator) {
+	fmt.println("=== MATERIALIZE TEST ===")
+
+	df := w.dataframe_new()
+	defer w.destroy_dataframe(&df)
+
+	col_date := w.column_new("Date", .Date, 5)
+	w.append_date(&col_date, w.Date{2024, 1, 1})
+	w.append_date(&col_date, w.Date{2024, 1, 2})
+	w.append_date(&col_date, w.Date{2024, 1, 3})
+	w.append_date(&col_date, w.Date{2024, 1, 4})
+	w.append_date(&col_date, w.Date{2024, 1, 5})
+
+	col_val := w.column_new("Value", .Int, 5)
+	w.append_int(&col_val, 10)
+	w.append_int(&col_val, 20)
+	w.append_int(&col_val, 30)
+	w.append_int(&col_val, 40)
+	w.append_int(&col_val, 50)
+
+	w.add_column(&df, col_date)
+	w.add_column(&df, col_val)
+
+	w.set_index(&df, "Date")
+
+	fmt.println("Original DataFrame:")
+	w.dataframe_pretty_print(&df)
+
+	// ------------------------------------------------------------
+	// 1) MATERIALIZE A CONTIGUOUS VIEW (loc_range)
+	// ------------------------------------------------------------
+	view1 := w.loc(&df, w.Date{2024, 1, 2}, w.Date{2024, 1, 4})
+	defer w.destroy_dataframe(&view1)
+
+	mat1 := w.materialize(&view1)
+	defer w.destroy_dataframe(&mat1)
+
+	fmt.println("\nMaterialized loc_range(Date{2024,1,2}, Date{2024,1,4}):")
+	w.dataframe_pretty_print(&mat1)
+
+	// ------------------------------------------------------------
+	// 2) MATERIALIZE A NON-CONTIGUOUS VIEW (loc_many)
+	// ------------------------------------------------------------
+	keys := []w.Date{{2024, 1, 5}, {2024, 1, 1}, {2024, 1, 3}}
+
+	view2 := w.loc_many(&df, keys)
+	defer w.destroy_dataframe(&view2)
+
+	mat2 := w.materialize(&view2)
+	defer w.destroy_dataframe(&mat2)
+
+	fmt.println("\nMaterialized loc_many([5,1,3]):")
+	w.dataframe_pretty_print(&mat2)
+
+	// ------------------------------------------------------------
+	// 3) MATERIALIZE A MASK VIEW
+	// ------------------------------------------------------------
+	mask := []bool{false, true, true, false, true}
+	view3 := w.loc_mask(&df, mask)
+	defer w.destroy_dataframe(&view3)
+
+	mat3 := w.materialize(&view3)
+	defer w.destroy_dataframe(&mat3)
+
+	fmt.println("\nMaterialized loc_mask:")
+	w.dataframe_pretty_print(&mat3)
+
+	// ------------------------------------------------------------
+	// 4) MATERIALIZE AN ILOC MANY VIEW
+	// ------------------------------------------------------------
+	idxs := []int{4, 0, 2}
+	view4 := w.iloc(&df, idxs)
+	defer w.destroy_dataframe(&view4)
+
+	mat4 := w.materialize(&view4)
+	defer w.destroy_dataframe(&mat4)
+
+	fmt.println("\nMaterialized iloc_many([4,0,2]):")
+	w.dataframe_pretty_print(&mat4)
+
+	fmt.println("=== END MATERIALIZE TEST ===")
+}
