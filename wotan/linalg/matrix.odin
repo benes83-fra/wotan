@@ -1,8 +1,9 @@
 package wotan_linalg
 
+import w "../core"
 import "base:intrinsics"
 import "core:mem"
-
+import "core:strings"
 // ------------------------------------------------------------
 // Generic dynamic matrix
 // ------------------------------------------------------------
@@ -116,6 +117,57 @@ matmul_dyn :: proc(
 			}
 			out.data[i * out.cols + j] = acc
 		}
+	}
+
+	return out
+}
+matrix_from_df :: proc(
+	df: ^w.DataFrame,
+	cols: []string,
+	allocator: mem.Allocator = context.allocator,
+) -> Matrix(f64) {
+	m := matrix_new(f64, df.rows, len(cols), allocator)
+
+	for name, j in cols {
+		idx, ok := df.name_to_index[name]
+		if !ok {
+			res := strings.concatenate({"matrix_from_df: unknown column name: ", name})
+			panic(res)
+		}
+
+		col := &df.columns[idx]
+		// assume f64 backing for .Float
+		base := cast([^]f64)col.data
+
+		// respect view offset
+		start := col.offset
+		for i in 0 ..< df.rows {
+			m.data[i * m.cols + j] = base[start + i]
+		}
+	}
+
+	return m
+}
+
+vector_from_df :: proc(
+	df: ^w.DataFrame,
+	colname: string,
+	allocator: mem.Allocator = context.allocator,
+) -> []f64 {
+	idx, ok := df.name_to_index[colname]
+	if !ok {
+		res := strings.concatenate({"vector_from_df: unknown column name: ", colname})
+		panic(res)
+	}
+
+	col := &df.columns[idx]
+	base := cast([^]f64)col.data
+
+	out := make([]f64, df.rows, allocator)
+	start := col.offset
+
+	for i in 0 ..< df.rows {
+		out[i] = base[start + i]
 	}
 
 	return out
