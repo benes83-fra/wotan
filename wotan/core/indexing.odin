@@ -8,7 +8,7 @@ import "core:sort"
 // Indexing
 // ------------------------------------------------------------
 
-set_index :: proc(df: ^DataFrame, colname: string) {
+set_index :: proc(df: ^DataFrame, colname: string, drop: bool = false) {
 	if !(colname in df.name_to_index) {
 		panic("set_index: no such column")
 	}
@@ -24,60 +24,52 @@ set_index :: proc(df: ^DataFrame, colname: string) {
 
 	// 2. Sort index_vec using your existing sorter system
 	#partial switch col.type {
-
 	case .Int:
 		sorter := IntSorter {
-			idx        = &index_vec,
-			data       = cast([^]int)col.data,
-			descending = false,
+			idx  = &index_vec,
+			data = cast([^]int)col.data,
 		}
 		sort.sort(make_int_sorter(&sorter))
 
 	case .Float:
 		sorter := FloatSorter {
-			idx        = &index_vec,
-			data       = cast([^]f64)col.data,
-			descending = false,
+			idx  = &index_vec,
+			data = cast([^]f64)col.data,
 		}
 		sort.sort(make_float_sorter(&sorter))
 
 	case .String:
 		sorter := StringSorter {
-			idx        = &index_vec,
-			data       = cast([^]string)col.data,
-			descending = false,
+			idx  = &index_vec,
+			data = cast([^]string)col.data,
 		}
 		sort.sort(make_string_sorter(&sorter))
 
 	case .Bool:
 		sorter := BoolSorter {
-			idx        = &index_vec,
-			data       = cast([^]bool)col.data,
-			descending = false,
+			idx  = &index_vec,
+			data = cast([^]bool)col.data,
 		}
 		sort.sort(make_bool_sorter(&sorter))
 
 	case .Date:
 		sorter := DateSorter {
-			idx        = &index_vec,
-			data       = cast([^]Date)col.data,
-			descending = false,
+			idx  = &index_vec,
+			data = cast([^]Date)col.data,
 		}
 		sort.sort(make_date_sorter(&sorter))
 
 	case .Time:
 		sorter := TimeSorter {
-			idx        = &index_vec,
-			data       = cast([^]Time)col.data,
-			descending = false,
+			idx  = &index_vec,
+			data = cast([^]Time)col.data,
 		}
 		sort.sort(make_time_sorter(&sorter))
 
 	case .Datetime:
 		sorter := DatetimeSorter {
-			idx        = &index_vec,
-			data       = cast([^]Datetime)col.data,
-			descending = false,
+			idx  = &index_vec,
+			data = cast([^]Datetime)col.data,
 		}
 		sort.sort(make_datetime_sorter(&sorter))
 
@@ -85,16 +77,41 @@ set_index :: proc(df: ^DataFrame, colname: string) {
 		panic("set_index: unsupported index type")
 	}
 
-	// 3. Reorder all columns in-place
+	// 3. Reorder all columns in-place BEFORE removing anything
 	for &c in df.columns {
 		reorder_column_inplace(&c, index_vec)
 	}
 
-	// 4. Mark index metadata
+	delete(index_vec)
+
+	// 4. If drop=true, remove the index column entirely
+	if drop {
+		old_cols := df.columns
+		df.columns = make([dynamic]Column, 0, len(old_cols) - 1)
+
+		for i in 0 ..< len(old_cols) {
+			if i == col_idx {
+				destroy_column(&old_cols[i]) // safe: no one references it now
+			} else {
+				append(&df.columns, old_cols[i])
+			}
+		}
+
+		delete(old_cols)
+	}
+
+	// 5. Rebuild name_to_index
+	if df.name_to_index != nil {
+		delete(df.name_to_index)
+	}
+	df.name_to_index = make(map[string]int)
+	for c, i in df.columns {
+		df.name_to_index[c.name] = i
+	}
+
+	// 6. Mark index metadata
 	df.index_column = colname
 	df.has_index = true
-
-	delete(index_vec)
 }
 
 
@@ -129,33 +146,61 @@ materialize :: proc(df: ^DataFrame) -> DataFrame {
 }
 
 
-reset_index :: proc(df: ^DataFrame) {
+reset_index :: proc(df: ^DataFrame, drop: bool = false) {
 	if !df.has_index {
 		return
 	}
 
-	// 1. Extract the index column name
 	name := df.index_column
 	idx := df.name_to_index[name]
-	col := df.columns[idx]
 
-	// 2. Create a new column with the same values
-	new_col := column_new(name, col.type, df.rows, context.allocator)
-	mapping := make([]int, df.rows)
-	defer delete(mapping)
-	for i in 0 ..< df.rows do mapping[i] = i
-	copy_column_direct(&col, &new_col, mapping)
+	// Optionally materialize index as a new column at front
+	if !drop {
+		col := df.columns[idx]
 
+		new_col := column_new(name, col.type, df.rows, context.allocator)
+		mapping := make([]int, df.rows)
+		defer delete(mapping)
+		for i in 0 ..< df.rows do mapping[i] = i
+		copy_column_direct(&col, &new_col, mapping)
 
-	new_col.len = df.rows
+		new_col.len = df.rows
+		insert_column_front(df, new_col)
+	}
 
-	// 3. Insert new column at front
-	insert_column_front(df, new_col)
+	// Rebuild columns without the index column (and only free it if dropped)
+	old_cols := df.columns
+	df.columns = make([dynamic]Column, 0, len(old_cols) - 1)
 
-	// 4. Clear index metadata
+	for i in 0 ..< len(old_cols) {
+		if i == idx {
+			if drop {
+				// index column is *not* appended anywhere, so we own and free it here
+				destroy_column(&old_cols[i])
+			} else {
+				// keep original index column as a normal column
+				append(&df.columns, old_cols[i])
+			}
+		} else {
+			append(&df.columns, old_cols[i])
+		}
+	}
+
+	delete(old_cols)
+
+	// rebuild name_to_index
+	if df.name_to_index != nil {
+		delete(df.name_to_index)
+	}
+	df.name_to_index = make(map[string]int)
+	for c, i in df.columns {
+		df.name_to_index[c.name] = i
+	}
+
 	df.index_column = ""
 	df.has_index = false
-} // Date-specific reindex
+}
+
 reindex_date :: proc(df: ^DataFrame, new_index: []Date) -> DataFrame {
 	if !df.has_index {
 		panic("reindex: DataFrame has no index")
