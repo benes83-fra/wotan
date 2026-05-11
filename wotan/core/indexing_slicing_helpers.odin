@@ -232,7 +232,9 @@ insert_column_front :: proc(df: ^DataFrame, col: Column) {
 		df.columns[i] = df.columns[i - 1]
 	}
 	df.columns[0] = col
-
+  if df.name_to_index != nil {
+    delete (df.name_to_index)
+  }
 	// rebuild name_to_index
 	df.name_to_index = make(map[string]int)
 	for c, i in df.columns {

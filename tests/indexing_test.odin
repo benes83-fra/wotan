@@ -88,7 +88,7 @@ reset_index_test :: proc(allocator: mem.Allocator = context.allocator) {
 	w.append_date(&col_date, w.Date{2024, 1, 3})
 
 	col_val := w.column_new("Value", .Int, 3)
-	w.append_int(&col_val, 10)
+  w.append_int(&col_val, 10)
 	w.append_int(&col_val, 20)
 	w.append_int(&col_val, 30)
 
