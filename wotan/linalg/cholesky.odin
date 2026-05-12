@@ -12,28 +12,30 @@ cholesky_decompose :: proc(A: ^Matrix(f64)) {
 	if A.cols != n do panic("cholesky_decompose: non-square matrix")
 
 	for j := 0; j < n; j += 1 {
-		// Diagonal element
+		// Diagonal
 		sum := A.data[j * n + j]
-		for k := 0; k < j; k += 1 {
-			l_jk := A.data[j * n + k]
-			sum -= l_jk * l_jk
+		if j > 0 {
+			row_j := A.data[j * n:j * n + j]
+			sum -= dot_simd(row_j, row_j)
 		}
 		if sum <= 0 {
 			panic("cholesky_decompose: matrix not positive definite")
 		}
 		A.data[j * n + j] = math.sqrt(sum)
 
-		// Off-diagonal elements in column j (rows i > j)
+		// Off-diagonal
 		for i := j + 1; i < n; i += 1 {
 			sum = A.data[i * n + j]
-			for k := 0; k < j; k += 1 {
-				sum -= A.data[i * n + k] * A.data[j * n + k]
+			if j > 0 {
+				row_i := A.data[i * n:i * n + j]
+				row_j := A.data[j * n:j * n + j]
+				sum -= dot_simd(row_i, row_j)
 			}
 			A.data[i * n + j] = sum / A.data[j * n + j]
 		}
 	}
 
-	// Optionally zero upper triangle for clarity
+	// Optional: zero upper triangle
 	for i := 0; i < n; i += 1 {
 		for j := i + 1; j < n; j += 1 {
 			A.data[i * n + j] = 0.0
@@ -98,4 +100,38 @@ solve_spd_cholesky :: proc(
 	z := forward_substitute(&L, b)
 	x := backward_substitute(&L, z)
 	return x
+}
+
+
+spd_inverse :: proc(A: ^Matrix(f64), allocator: mem.Allocator = context.allocator) -> Matrix(f64) {
+	n := A.rows
+	if A.cols != n do panic("spd_inverse: non-square")
+
+	// Copy A (so we don't destroy it)
+	Acopy := matrix_new(f64, n, n, allocator)
+	for i := 0; i < n * n; i += 1 {
+		Acopy.data[i] = A.data[i]
+	}
+
+	cholesky_decompose(&Acopy)
+
+	inv := matrix_new(f64, n, n, allocator)
+
+	// Solve A x = e_k for each basis vector e_k
+	e := make([]f64, n, context.temp_allocator)
+	for k := 0; k < n; k += 1 {
+		for i := 0; i < n; i += 1 {
+			e[i] = 0.0
+		}
+		e[k] = 1.0
+
+		z := forward_substitute(&Acopy, e)
+		x := backward_substitute(&Acopy, z)
+
+		for i := 0; i < n; i += 1 {
+			inv.data[i * inv.cols + k] = x[i]
+		}
+	}
+
+	return inv
 }

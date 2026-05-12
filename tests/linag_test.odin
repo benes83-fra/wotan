@@ -135,35 +135,23 @@ simd_linalg_test :: proc(allocator: mem.Allocator = context.allocator) {
 	fmt.println("=== ALL SIMD TESTS PASSED ===")
 }
 
-
 ols_test :: proc(allocator: mem.Allocator = context.allocator) {
 	fmt.println("=== OLS TEST ===")
 
-	// ------------------------------------------------------------
 	// Model: y = 3 + 2*x
-	// ------------------------------------------------------------
-	// x: [1, 2, 3]
-	// y: [5, 7, 9]
-	//
-	// True beta = [3, 2]
-	// ------------------------------------------------------------
-
 	X := l.matrix_new(f64, 3, 2, allocator)
 	defer l.matrix_free(&X)
 
-	// First column = intercept
-	// Second column = x
+	// First column = intercept, second = x
 	X.data = {1, 1, 1, 2, 1, 3}
 
 	y := []f64{5, 7, 9}
 
-	beta := ml.ols_fit(&X, y, allocator)
+	res := ml.ols_fit(&X, y, allocator)
+	beta := res.beta
 
 	fmt.printf("OLS beta = %v\n", beta)
 
-	// ------------------------------------------------------------
-	// Assertions
-	// ------------------------------------------------------------
 	assert_close(beta[0], 3.0, 1e-9, "OLS intercept")
 	assert_close(beta[1], 2.0, 1e-9, "OLS slope")
 

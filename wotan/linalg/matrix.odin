@@ -172,3 +172,87 @@ vector_from_df :: proc(
 
 	return out
 }
+
+
+covariance :: proc(X: ^Matrix(f64), allocator: mem.Allocator = context.allocator) -> Matrix(f64) {
+	n := X.rows
+	p := X.cols
+	if n <= 1 do panic("covariance: need at least 2 rows")
+
+	// 1. Compute column means
+	means := make([]f64, p, context.temp_allocator)
+	for j := 0; j < p; j += 1 {
+		sum := 0.0
+		for i := 0; i < n; i += 1 {
+			sum += X.data[i * X.cols + j]
+		}
+		means[j] = sum / f64(n)
+	}
+
+	// 2. Build centered copy (or do it in-place if allowed)
+	Xc := matrix_new(f64, n, p, allocator)
+	for i := 0; i < n; i += 1 {
+		for j := 0; j < p; j += 1 {
+			Xc.data[i * Xc.cols + j] = X.data[i * X.cols + j] - means[j]
+		}
+	}
+
+	// 3. Sigma = (1/(n-1)) * Xcᵀ Xc
+	S := xtx(&Xc, allocator)
+	scale := 1.0 / f64(n - 1)
+	for i := 0; i < S.rows * S.cols; i += 1 {
+		S.data[i] *= scale
+	}
+
+	return S
+}
+
+
+xtx :: proc(X: ^Matrix(f64), allocator: mem.Allocator = context.allocator) -> Matrix(f64) {
+	p := X.cols
+	n := X.rows
+	XtX := matrix_new(f64, p, p, allocator)
+
+	for j := 0; j < p; j += 1 {
+		col_j := make([]f64, n, context.temp_allocator)
+		for i := 0; i < n; i += 1 {
+			col_j[i] = X.data[i * X.cols + j]
+		}
+
+		for k := j; k < p; k += 1 {
+			col_k := make([]f64, n, context.temp_allocator)
+			for i := 0; i < n; i += 1 {
+				col_k[i] = X.data[i * X.cols + k]
+			}
+
+			v := dot_simd(col_j, col_k)
+			XtX.data[j * XtX.cols + k] = v
+			XtX.data[k * XtX.cols + j] = v
+
+			delete(col_k, context.temp_allocator)
+		}
+
+		delete(col_j, context.temp_allocator)
+	}
+
+	return XtX
+}
+
+xty :: proc(X: ^Matrix(f64), y: []f64, allocator: mem.Allocator = context.allocator) -> []f64 {
+	if X.rows != len(y) do panic("xty: dimension mismatch")
+
+	p := X.cols
+	n := X.rows
+	Xty := make([]f64, p, allocator)
+
+	for j := 0; j < p; j += 1 {
+		col_j := make([]f64, n, context.temp_allocator)
+		for i := 0; i < n; i += 1 {
+			col_j[i] = X.data[i * X.cols + j]
+		}
+		Xty[j] = dot_simd(col_j, y)
+		delete(col_j, context.temp_allocator)
+	}
+
+	return Xty
+}
