@@ -41,31 +41,30 @@ matmul_dyn_simd :: proc(
 	a, b: ^Matrix(f64),
 	allocator: mem.Allocator = context.allocator,
 ) -> Matrix(f64) {
-	if a.cols != b.rows {
-		panic("matmul_dyn_simd: dimension mismatch")
-	}
+	if a.cols != b.rows do panic("Dimension mismatch")
 
 	out := matrix_new(f64, a.rows, b.cols, allocator)
+	
+	// 1. Transpose B once so columns are contiguous
+	bt := matrix_new(f64, b.cols, b.rows, context.temp_allocator)
+	for r in 0 ..< b.rows {
+		for c in 0 ..< b.cols {
+			bt.data[c * bt.cols + r] = b.data[r * b.cols + c]
+		}
+	}
 
+	// 2. Perform multiplication
 	for i in 0 ..< a.rows {
+		row_a := a.data[i * a.cols : (i+1) * a.cols]
 		for j in 0 ..< b.cols {
-			// Extract column j of B into a temporary slice
-			// (SIMD requires contiguous memory)
-			col := make([]f64, a.cols, allocator)
-			for k in 0 ..< a.cols {
-				col[k] = b.data[k * b.cols + j]
-			}
-
-			row := a.data[i * a.cols:i * a.cols + a.cols]
-			out.data[i * out.cols + j] = dot_simd(row, col)
-
-			delete(col, allocator)
+			// Now we can slice B directly because it's transposed!
+			row_bt := bt.data[j * bt.cols : (j+1) * bt.cols]
+			out.data[i * out.cols + j] = dot_simd(row_a, row_bt)
 		}
 	}
 
 	return out
 }
-
 
 matvec_dyn_simd :: proc(
 	m: ^Matrix(f64),

@@ -29,29 +29,37 @@ matrix_test :: proc(allocator: mem.Allocator = context.allocator) {
 	w.dataframe_pretty_print(&df)
 
 	// DF → Matrix
-	X := l.matrix_from_df(&df, []string{"X"}, allocator)
+X := l.matrix_from_df(&df, []string{"X", "Y"}, allocator) // 3x2 matrix
 	defer l.matrix_free(&X)
-
-	y := l.vector_from_df(&df, "Y", allocator)
-
-	fmt.println("X:", X.data)
-	fmt.println("y:", y)
-
-	// Dynamic matvec
-	beta := []f64{2.0}
+	
+	beta := []f64{2.0, 0.5}
 	y_hat := l.matvec_dyn_simd(&X, beta, allocator)
-	fmt.println("y_hat:", y_hat)
+	fmt.printf("X (3x2) * beta (2x1) = %v\n", y_hat)
+    // Expected: [1*2 + 10*0.5, 2*2 + 20*0.5, 3*2 + 30*0.5] -> [7, 14, 21]
 
-	// Fixed-size matmul
-	a: matrix[2, 2]f64 = {1, 2, 3, 4}
-	b: matrix[2, 2]f64 = {5, 6, 7, 8}
-	c := l.matmul(a, b)
-	fmt.println("fixed matmul:", c)
+	// 2. Test Dynamic Matrix-Matrix (A * B)
+	// Let's create a 2x3 and a 3x2 to get a 2x2 result
+	A_dyn := l.matrix_new(f64, 2, 3, allocator)
+	defer l.matrix_free(&A_dyn)
+	A_dyn.data = {1, 2, 3,  4, 5, 6}
 
-	// Fixed-size matvec
-	v := [2]f64{1, 2}
-	r := l.matvec(a, v)
-	fmt.println("fixed matvec:", r)
+	B_dyn := l.matrix_new(f64, 3, 2, allocator)
+	defer l.matrix_free(&B_dyn)
+	B_dyn.data = {7, 8,  9, 10,  11, 12}
+
+	C_dyn := l.matmul_dyn_simd(&A_dyn, &B_dyn, allocator)
+	defer l.matrix_free(&C_dyn)
+
+	fmt.println("Dynamic matmul result:")
+	fmt.printf("[%f, %f]\n", C_dyn.data[0], C_dyn.data[1])
+	fmt.printf("[%f, %f]\n", C_dyn.data[2], C_dyn.data[3])
+    // Expected: [58, 64] / [139, 154]
+
+	// 3. Comparison with Fixed-size (Ground Truth)
+	a_fixed: matrix[2, 3]f64 = {1, 2, 3, 4, 5, 6}
+	b_fixed: matrix[3, 2]f64 = {7, 8, 9, 10, 11, 12}
+	c_fixed := a_fixed * b_fixed
+	fmt.println("Fixed-size comparison:", c_fixed)
 
 	fmt.println("=== END LINALG TEST ===")
 }
