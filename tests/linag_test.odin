@@ -183,3 +183,39 @@ ols_full_test :: proc(allocator: mem.Allocator = context.allocator) {
 
 	fmt.println("=== OLS FULL TEST OK ===")
 }
+
+
+correlation_test :: proc(allocator: mem.Allocator = context.allocator) {
+	fmt.println("=== CORRELATION TEST ===")
+
+	// X = [1 2; 2 4; 3 6] → perfect correlation
+	X := l.matrix_new(f64, 3, 2, allocator)
+	X.data = {1, 2, 2, 4, 3, 6}
+
+	R := l.correlation(&X, allocator)
+
+	assert_close(R.data[0], 1.0, 1e-9, "corr(0,0)")
+	assert_close(R.data[3], 1.0, 1e-9, "corr(1,1)")
+	assert_close(R.data[1], 1.0, 1e-9, "corr(0,1)")
+	assert_close(R.data[2], 1.0, 1e-9, "corr(1,0)")
+
+	fmt.println("Correlation test OK")
+}
+
+qr_test :: proc(allocator: mem.Allocator = context.allocator) {
+	fmt.println("=== QR TEST ===")
+
+	A := l.matrix_new(f64, 3, 2, allocator)
+	A.data = {1, 2, 3, 4, 5, 6}
+
+	Q, R := l.qr_decompose(&A, allocator)
+
+	// Check A ≈ Q*R
+	QR := l.matmul_dyn_simd(&Q, &R, allocator)
+
+	for i := 0; i < 6; i += 1 {
+		assert_close(QR.data[i], A.data[i], 1e-9, "QR reconstruction")
+	}
+
+	fmt.println("QR test OK")
+}

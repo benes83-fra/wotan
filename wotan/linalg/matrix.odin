@@ -2,6 +2,7 @@ package wotan_linalg
 
 import w "../core"
 import "base:intrinsics"
+import "core:math"
 import "core:mem"
 import "core:strings"
 // ------------------------------------------------------------
@@ -255,4 +256,32 @@ xty :: proc(X: ^Matrix(f64), y: []f64, allocator: mem.Allocator = context.alloca
 	}
 
 	return Xty
+}
+
+correlation :: proc(X: ^Matrix(f64), allocator: mem.Allocator = context.allocator) -> Matrix(f64) {
+	// 1. Compute covariance matrix
+	C := covariance(X, allocator)
+	p := C.cols
+
+	// 2. Allocate correlation matrix
+	R := matrix_new(f64, p, p, allocator)
+
+	// 3. Precompute standard deviations
+	sd := make([]f64, p, context.temp_allocator)
+	for i := 0; i < p; i += 1 {
+		v := C.data[i * p + i]
+		if v <= 0 {
+			panic("correlation: non-positive variance")
+		}
+		sd[i] = math.sqrt(v)
+	}
+
+	// 4. Compute correlation entries
+	for i := 0; i < p; i += 1 {
+		for j := 0; j < p; j += 1 {
+			R.data[i * p + j] = C.data[i * p + j] / (sd[i] * sd[j])
+		}
+	}
+
+	return R
 }
