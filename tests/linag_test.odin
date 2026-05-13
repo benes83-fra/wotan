@@ -158,3 +158,24 @@ ols_test :: proc(allocator: mem.Allocator = context.allocator) {
 	fmt.println("OLS test OK")
 	fmt.println("=== END OLS TEST ===")
 }
+
+
+ols_full_test :: proc(allocator: mem.Allocator = context.allocator) {
+	fmt.println("=== OLS FULL TEST ===")
+
+	// Model: y = 3 + 2x
+	X := l.matrix_new(f64, 3, 2, allocator)
+	X.data = {1, 1, 1, 2, 1, 3}
+	y := []f64{5, 7, 9}
+
+	res := ml.ols_fit_full(&X, y, allocator)
+
+	assert_close(res.beta[0], 3.0, 1e-9, "intercept")
+	assert_close(res.beta[1], 2.0, 1e-9, "slope")
+	fmt.printf("beta = %v\n", res.beta)
+	fmt.printf("stderr = %v\n", res.stderr)
+	fmt.printf("tvalues = %v\n", res.tvalues)
+	fmt.printf("sigma2 = %f\n", res.sigma2)
+
+	fmt.println("=== OLS FULL TEST OK ===")
+}

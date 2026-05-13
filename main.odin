@@ -359,6 +359,7 @@ main :: proc() {
 	test.matrix_test(context.temp_allocator)
 	test.simd_linalg_test(context.temp_allocator)
 	test.ols_test(context.temp_allocator)
+	test.ols_full_test(context.temp_allocator)
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
 	w.destroy_dataframe(&right2)

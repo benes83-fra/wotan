@@ -3,13 +3,19 @@ package ML
 import w "../core"
 import l "../linalg"
 import "core:fmt"
+import "core:math"
 import "core:mem"
 import "core:simd"
 
 
 OLSResult :: struct {
-	beta: []f64, // coefficients
-	// later: vcov, stderr, t, r2, etc.
+	beta:      []f64,
+	vcov:      l.Matrix(f64),
+	stderr:    []f64,
+	tvalues:   []f64,
+	sigma2:    f64,
+	residuals: []f64,
+	fitted:    []f64,
 }
 
 
@@ -31,17 +37,9 @@ ols_fit :: proc(
 	y: []f64,
 	allocator: mem.Allocator = context.allocator,
 ) -> OLSResult {
-	if X.rows != len(y) do panic("ols_fit: dimension mismatch")
-
-	XtX := ols_xtx(X, allocator)
-	Xty := ols_xty(X, y, allocator)
-
-	beta := l.solve_spd_cholesky(&XtX, Xty, allocator)
-
-	res: OLSResult
-	res.beta = beta
-	return res
+	return ols_fit_full(X, y, allocator)
 }
+
 
 ols_from_df :: proc(
 	df: ^w.DataFrame,
@@ -72,4 +70,66 @@ ols_from_df :: proc(
 	y := l.vector_from_df(df, y_name, allocator)
 
 	return ols_fit(&X, y, allocator)
+}
+ols_fit_full :: proc(
+	X: ^l.Matrix(f64),
+	y: []f64,
+	allocator: mem.Allocator = context.allocator,
+) -> OLSResult {
+	if X.rows != len(y) do panic("ols_fit: dimension mismatch")
+
+	n := X.rows
+	p := X.cols
+
+	// 1. Compute XtX and Xty
+	XtX := l.xtx(X, allocator)
+	Xty := l.xty(X, y, allocator)
+
+	// 2. β = (XtX)⁻¹ Xty  via Cholesky
+	beta := l.solve_spd_cholesky(&XtX, Xty, allocator)
+
+	// 3. Fitted values: y_hat = X β
+	fitted := l.matvec_dyn_simd(X, beta, allocator)
+
+	// 4. Residuals: r = y - y_hat
+	residuals := make([]f64, n, allocator)
+	for i := 0; i < n; i += 1 {
+		residuals[i] = y[i] - fitted[i]
+	}
+
+	// 5. σ² = (rᵀ r) / (n - p)
+	sigma2 := l.dot_simd(residuals, residuals) / f64(n - p)
+
+	// 6. XtX⁻¹
+	XtX_inv := l.spd_inverse(&XtX, allocator)
+
+	// 7. vcov = σ² * XtX⁻¹
+	vcov := l.matrix_new(f64, p, p, allocator)
+	for i := 0; i < p * p; i += 1 {
+		vcov.data[i] = XtX_inv.data[i] * sigma2
+	}
+
+	// 8. Standard errors = sqrt(diagonal(vcov))
+	stderr := make([]f64, p, allocator)
+	for j := 0; j < p; j += 1 {
+		stderr[j] = math.sqrt(vcov.data[j * vcov.cols + j])
+	}
+
+	// 9. t-values = beta / stderr
+	tvalues := make([]f64, p, allocator)
+	for j := 0; j < p; j += 1 {
+		tvalues[j] = beta[j] / stderr[j]
+	}
+
+	// 10. Package result
+	res: OLSResult
+	res.beta = beta
+	res.vcov = vcov
+	res.stderr = stderr
+	res.tvalues = tvalues
+	res.sigma2 = sigma2
+	res.residuals = residuals
+	res.fitted = fitted
+
+	return res
 }

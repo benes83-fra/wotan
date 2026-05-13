@@ -133,8 +133,8 @@ spd_inverse :: proc(A: ^Matrix(f64), allocator: mem.Allocator = context.allocato
 		}
 		e[k] = 1.0
 
-		z := forward_substitute(&Acopy, e)
-		x := backward_substitute(&Acopy, z)
+		z := forward_substitute(&Acopy, e, allocator)
+		x := backward_substitute(&Acopy, z, allocator)
 
 		for i := 0; i < n; i += 1 {
 			inv.data[i * inv.cols + k] = x[i]
