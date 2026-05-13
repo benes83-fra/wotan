@@ -173,9 +173,13 @@ ols_full_test :: proc(allocator: mem.Allocator = context.allocator) {
 	assert_close(res.beta[0], 3.0, 1e-9, "intercept")
 	assert_close(res.beta[1], 2.0, 1e-9, "slope")
 	fmt.printf("beta = %v\n", res.beta)
+	fmt.printf("fitted = %v\n", res.fitted)
 	fmt.printf("stderr = %v\n", res.stderr)
 	fmt.printf("tvalues = %v\n", res.tvalues)
 	fmt.printf("sigma2 = %f\n", res.sigma2)
+	fmt.printf("residuals = %f\n", res.residuals)
+	fmt.printf("r2 = %f\n", res.r2)
+	fmt.printf("fstat = %f\n", res.fstat)
 
 	fmt.println("=== OLS FULL TEST OK ===")
 }

@@ -16,6 +16,11 @@ OLSResult :: struct {
 	sigma2:    f64,
 	residuals: []f64,
 	fitted:    []f64,
+	r2:        f64,
+	r2_adj:    f64,
+	fstat:     f64,
+	ci_low:    []f64,
+	ci_high:   []f64,
 }
 
 
@@ -81,24 +86,25 @@ ols_fit_full :: proc(
 	n := X.rows
 	p := X.cols
 
-	// 1. Compute XtX and Xty
+	// 1. XtX and Xty
 	XtX := l.xtx(X, allocator)
 	Xty := l.xty(X, y, allocator)
 
-	// 2. β = (XtX)⁻¹ Xty  via Cholesky
+	// 2. β
 	beta := l.solve_spd_cholesky(&XtX, Xty, allocator)
 
-	// 3. Fitted values: y_hat = X β
+	// 3. fitted
 	fitted := l.matvec_dyn_simd(X, beta, allocator)
 
-	// 4. Residuals: r = y - y_hat
+	// 4. residuals
 	residuals := make([]f64, n, allocator)
 	for i := 0; i < n; i += 1 {
 		residuals[i] = y[i] - fitted[i]
 	}
 
-	// 5. σ² = (rᵀ r) / (n - p)
-	sigma2 := l.dot_simd(residuals, residuals) / f64(n - p)
+	// 5. σ²
+	rss := l.dot_simd(residuals, residuals)
+	sigma2 := rss / f64(n - p)
 
 	// 6. XtX⁻¹
 	XtX_inv := l.spd_inverse(&XtX, allocator)
@@ -109,19 +115,46 @@ ols_fit_full :: proc(
 		vcov.data[i] = XtX_inv.data[i] * sigma2
 	}
 
-	// 8. Standard errors = sqrt(diagonal(vcov))
+	// 8. stderr
 	stderr := make([]f64, p, allocator)
 	for j := 0; j < p; j += 1 {
 		stderr[j] = math.sqrt(vcov.data[j * vcov.cols + j])
 	}
 
-	// 9. t-values = beta / stderr
+	// 9. t-values
 	tvalues := make([]f64, p, allocator)
 	for j := 0; j < p; j += 1 {
 		tvalues[j] = beta[j] / stderr[j]
 	}
 
-	// 10. Package result
+	// 10. R² and adjusted R²
+	mean_y := 0.0
+	for i := 0; i < n; i += 1 do mean_y += y[i]
+	mean_y /= f64(n)
+
+	tss := 0.0
+	for i := 0; i < n; i += 1 {
+		dy := y[i] - mean_y
+		tss += dy * dy
+	}
+
+	r2 := 1.0 - rss / tss
+	r2_adj := 1.0 - (1.0 - r2) * (f64(n - 1) / f64(n - p))
+
+	// 11. F-statistic
+	fstat := (r2 / f64(p)) / ((1.0 - r2) / f64(n - p))
+
+	// 12. Confidence intervals (95%)
+	tcrit := 1.96
+	ci_low := make([]f64, p, allocator)
+	ci_high := make([]f64, p, allocator)
+	for j := 0; j < p; j += 1 {
+		delta := tcrit * stderr[j]
+		ci_low[j] = beta[j] - delta
+		ci_high[j] = beta[j] + delta
+	}
+
+	// 13. Package result
 	res: OLSResult
 	res.beta = beta
 	res.vcov = vcov
@@ -130,6 +163,11 @@ ols_fit_full :: proc(
 	res.sigma2 = sigma2
 	res.residuals = residuals
 	res.fitted = fitted
+	res.r2 = r2
+	res.r2_adj = r2_adj
+	res.fstat = fstat
+	res.ci_low = ci_low
+	res.ci_high = ci_high
 
 	return res
 }
