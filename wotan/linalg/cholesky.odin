@@ -44,13 +44,17 @@ cholesky_decompose :: proc(A: ^Matrix(f64)) {
 }
 
 // Forward solve: L z = b, L lower-triangular (from Cholesky)
-forward_substitute :: proc(L: ^Matrix(f64), b: []f64) -> []f64 {
+forward_substitute :: proc(
+	L: ^Matrix(f64),
+	b: []f64,
+	allocator: mem.Allocator = context.allocator,
+) -> []f64 {
 	n := L.rows
 	if L.cols != n || len(b) != n {
 		panic("forward_substitute: dimension mismatch")
 	}
 
-	z := make([]f64, n, context.allocator)
+	z := make([]f64, n, allocator)
 	for i := 0; i < n; i += 1 {
 		sum := b[i]
 		for j := 0; j < i; j += 1 {
@@ -63,13 +67,17 @@ forward_substitute :: proc(L: ^Matrix(f64), b: []f64) -> []f64 {
 }
 
 // Backward solve: Lᵀ x = z, L lower-triangular
-backward_substitute :: proc(L: ^Matrix(f64), z: []f64) -> []f64 {
+backward_substitute :: proc(
+	L: ^Matrix(f64),
+	z: []f64,
+	allocator: mem.Allocator = context.allocator,
+) -> []f64 {
 	n := L.rows
 	if L.cols != n || len(z) != n {
 		panic("backward_substitute: dimension mismatch")
 	}
 
-	x := make([]f64, n, context.allocator)
+	x := make([]f64, n, allocator)
 	for i := n - 1; i >= 0; i -= 1 {
 		sum := z[i]
 		for j := i + 1; j < n; j += 1 {
@@ -94,11 +102,11 @@ solve_spd_cholesky :: proc(
 	}
 
 	L := matrix_new(f64, n, n, allocator)
-	L.data = A.data // if you want a deep copy, copy elements instead
-
+	// L.data = A.data // if you want a deep copy, copy elements instead
+	copy(L.data, A.data)
 	cholesky_decompose(&L)
-	z := forward_substitute(&L, b)
-	x := backward_substitute(&L, z)
+	z := forward_substitute(&L, b, context.temp_allocator)
+	x := backward_substitute(&L, z, allocator)
 	return x
 }
 
