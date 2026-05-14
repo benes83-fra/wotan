@@ -216,6 +216,32 @@ qr_test :: proc(allocator: mem.Allocator = context.allocator) {
 	for i := 0; i < 6; i += 1 {
 		assert_close(QR.data[i], A.data[i], 1e-9, "QR reconstruction")
 	}
+	m := 3
+	// Check Qᵀ Q ≈ I
+	QT := l.matrix_new(f64, m, m, allocator)
+	for i := 0; i < m; i += 1 {
+		for j := 0; j < m; j += 1 {
+			QT.data[i * m + j] = Q.data[j * m + i] // transpose
+		}
+	}
+
+	QTQ := l.matmul_dyn_simd(&QT, &Q, allocator)
+
+	// Check identity
+	for i := 0; i < m; i += 1 {
+		for j := 0; j < m; j += 1 {
+			temp: f64
+			if i == j {
+				temp = 1.0
+			} else {
+				temp = 0.0
+			}
+			expected := temp
+			assert_close(QTQ.data[i * m + j], expected, 1e-9, "QᵀQ orthogonality")
+		}
+	}
+
 
 	fmt.println("QR test OK")
+
 }
