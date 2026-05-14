@@ -22,7 +22,10 @@ OLSResult :: struct {
 	ci_low:    []f64,
 	ci_high:   []f64,
 }
-
+OLSMethod :: enum {
+	Cholesky,
+	QR,
+}
 
 // X: n x p (rows = observations, cols = regressors)
 ols_xtx :: proc(X: ^l.Matrix(f64), allocator: mem.Allocator = context.allocator) -> l.Matrix(f64) {
@@ -40,9 +43,10 @@ ols_xty :: proc(
 ols_fit :: proc(
 	X: ^l.Matrix(f64),
 	y: []f64,
+	method: OLSMethod = .Cholesky,
 	allocator: mem.Allocator = context.allocator,
 ) -> OLSResult {
-	return ols_fit_full(X, y, allocator)
+	return ols_fit_full(X, y, method, allocator)
 }
 
 
@@ -51,6 +55,7 @@ ols_from_df :: proc(
 	y_name: string,
 	x_names: []string,
 	add_intercept: bool = true,
+	method: OLSMethod = .Cholesky,
 	allocator: mem.Allocator = context.allocator,
 ) -> OLSResult {
 	// Build X
@@ -74,11 +79,11 @@ ols_from_df :: proc(
 
 	y := l.vector_from_df(df, y_name, allocator)
 
-	return ols_fit(&X, y, allocator)
-}
-ols_fit_full :: proc(
+	return ols_fit(&X, y, method, allocator)
+}; ols_fit_full :: proc(
 	X: ^l.Matrix(f64),
 	y: []f64,
+	method: OLSMethod = .Cholesky,
 	allocator: mem.Allocator = context.allocator,
 ) -> OLSResult {
 	if X.rows != len(y) do panic("ols_fit: dimension mismatch")
@@ -86,12 +91,34 @@ ols_fit_full :: proc(
 	n := X.rows
 	p := X.cols
 
-	// 1. XtX and Xty
+	// 1. XtX and Xty (still needed for vcov etc.)
 	XtX := l.xtx(X, allocator)
 	Xty := l.xty(X, y, allocator)
 
-	// 2. β
-	beta := l.solve_spd_cholesky(&XtX, Xty, allocator)
+	// 2. β: choose solver
+	beta: []f64
+	switch method {
+	case .Cholesky:
+		beta = l.solve_spd_cholesky(&XtX, Xty, allocator)
+
+	case .QR:
+		// QR decomposition of X
+		Q, R := l.qr_decompose(X, allocator)
+		// Q is m x m, R is m x p (we use leading p x p of R and first p columns of Q)
+
+		// Compute b = Q₁ᵀ y, where Q₁ = first p columns of Q
+		b := make([]f64, p, allocator)
+		for j := 0; j < p; j += 1 {
+			sum := 0.0
+			for i := 0; i < n; i += 1 {
+				sum += Q.data[i * Q.cols + j] * y[i]
+			}
+			b[j] = sum
+		}
+
+		// Solve R₁ β = b (upper triangular, leading p x p block)
+		beta = l.upper_tri_solve(&R, b, allocator)
+	}
 
 	// 3. fitted
 	fitted := l.matvec_dyn_simd(X, beta, allocator)

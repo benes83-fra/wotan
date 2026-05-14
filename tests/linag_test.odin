@@ -147,7 +147,7 @@ ols_test :: proc(allocator: mem.Allocator = context.allocator) {
 
 	y := []f64{5, 7, 9}
 
-	res := ml.ols_fit(&X, y, allocator)
+	res := ml.ols_fit(&X, y, .Cholesky, allocator)
 	beta := res.beta
 
 	fmt.printf("OLS beta = %v\n", beta)
@@ -168,7 +168,7 @@ ols_full_test :: proc(allocator: mem.Allocator = context.allocator) {
 	X.data = {1, 1, 1, 2, 1, 3}
 	y := []f64{5, 7, 9}
 
-	res := ml.ols_fit_full(&X, y, allocator)
+	res := ml.ols_fit_full(&X, y, .Cholesky, allocator)
 
 	assert_close(res.beta[0], 3.0, 1e-9, "intercept")
 	assert_close(res.beta[1], 2.0, 1e-9, "slope")

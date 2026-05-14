@@ -115,3 +115,25 @@ qr_decompose :: proc(
 
 	return
 }
+
+
+upper_tri_solve :: proc(
+	R: ^Matrix(f64),
+	b: []f64,
+	allocator: mem.Allocator = context.allocator,
+) -> []f64 {
+	n := len(b)
+	x := make([]f64, n, allocator)
+
+	// R is m x n, but we only use the leading n x n upper triangle
+	for i := n - 1; i >= 0; i -= 1 {
+		sum := b[i]
+		for j := i + 1; j < n; j += 1 {
+			sum -= R.data[i * R.cols + j] * x[j]
+		}
+		sum /= R.data[i * R.cols + i]
+		x[i] = sum
+	}
+
+	return x
+}
