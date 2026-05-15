@@ -168,7 +168,7 @@ ols_full_test :: proc(allocator: mem.Allocator = context.allocator) {
 	X.data = {1, 1, 1, 2, 1, 3}
 	y := []f64{5, 7, 9}
 
-	res := ml.ols_fit_full(&X, y, .Cholesky, allocator)
+	res := ml.ols_fit_full(&X, y, .QR, allocator)
 
 	assert_close(res.beta[0], 3.0, 1e-9, "intercept")
 	assert_close(res.beta[1], 2.0, 1e-9, "slope")
@@ -244,4 +244,90 @@ qr_test :: proc(allocator: mem.Allocator = context.allocator) {
 
 	fmt.println("QR test OK")
 
+}
+
+
+svd_test :: proc(allocator: mem.Allocator = context.allocator) {
+	fmt.println("=== SVD TEST ===")
+
+	// A: 3x2 (tall, non-square)
+	A := l.matrix_new(f64, 3, 2, allocator)
+	A.data = {1, 2, 3, 4, 5, 6}
+
+	U, S, V := l.svd_jacobi(&A, allocator)
+
+	// --- 1) Check singular values are non-negative and sorted descending
+	assert_close(S[0] >= S[1] ? 1 : 0, 1, 1e-9, "S[0] >= S[1]")
+	assert_close(S[0] >= 0 ? 1 : 0, 1, 1e-9, "S[0] >= 0")
+	assert_close(S[1] >= 0 ? 1 : 0, 1, 1e-9, "S[1] >= 0")
+
+	// --- 2) Check Uᵀ U ≈ I (n x n)
+	n := A.cols
+	UT := l.matrix_new(f64, n, U.rows, allocator)
+	for i := 0; i < U.rows; i += 1 {
+		for j := 0; j < n; j += 1 {
+			UT.data[j * UT.cols + i] = U.data[i * U.cols + j]
+		}
+	}
+	UTU := l.matmul_dyn_simd(&UT, &U, allocator)
+	for i := 0; i < n; i += 1 {
+		for j := 0; j < n; j += 1 {
+			expected: f64
+			if i == j {
+				expected = 1.0
+			} else {
+				expected = 0.0
+			}
+			assert_close(UTU.data[i * UTU.cols + j], expected, 1e-6, "UᵀU orthogonality")
+		}
+	}
+
+	// --- 3) Check Vᵀ V ≈ I (n x n)
+	VT := l.matrix_new(f64, n, n, allocator)
+	for i := 0; i < n; i += 1 {
+		for j := 0; j < n; j += 1 {
+			VT.data[j * n + i] = V.data[i * V.cols + j]
+		}
+	}
+	VTV := l.matmul_dyn_simd(&VT, &V, allocator)
+	for i := 0; i < n; i += 1 {
+		for j := 0; j < n; j += 1 {
+			expected: f64
+			if i == j {
+				expected = 1.0
+			} else {
+				expected = 0.0
+			}
+			assert_close(VTV.data[i * VTV.cols + j], expected, 1e-6, "VᵀV orthogonality")
+		}
+	}
+
+	// --- 4) Check reconstruction A ≈ U * diag(S) * Vᵀ
+	// Build Σ as n x n
+	Sigma := l.matrix_new(f64, n, n, allocator)
+	for i := 0; i < n; i += 1 {
+		Sigma.data[i * Sigma.cols + i] = S[i]
+	}
+
+	US := l.matmul_dyn_simd(&U, &Sigma, allocator)
+	VT2 := l.matrix_new(f64, n, n, allocator)
+	for i := 0; i < n; i += 1 {
+		for j := 0; j < n; j += 1 {
+			VT2.data[i * n + j] = V.data[j * V.cols + i]
+		}
+	}
+	USVT := l.matmul_dyn_simd(&US, &VT2, allocator)
+
+	for i := 0; i < A.rows; i += 1 {
+		for j := 0; j < A.cols; j += 1 {
+			assert_close(
+				USVT.data[i * USVT.cols + j],
+				A.data[i * A.cols + j],
+				1e-6,
+				"SVD reconstruction",
+			)
+		}
+	}
+
+	fmt.println("SVD test OK")
 }
