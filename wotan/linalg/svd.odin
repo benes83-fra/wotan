@@ -150,3 +150,216 @@ svd_jacobi :: proc(
 
 	return
 }
+SVDMethod :: enum {
+	Jacobi,
+	GolubReinsch,
+}
+
+// Dispatcher
+svd :: proc(
+	A: ^Matrix(f64),
+	method: SVDMethod = .Jacobi,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	U: Matrix(f64),
+	S: []f64,
+	V: Matrix(f64),
+) {
+	switch method {
+	case .Jacobi:
+		return svd_jacobi(A, allocator)
+	case .GolubReinsch:
+		return svd_golub_reinsch(A, allocator)
+	}
+	return svd_jacobi(A, allocator)
+}
+
+// ------------------------------------------------------------
+// Symmetric Jacobi eigen for dense n×n (A is modified in-place)
+// ------------------------------------------------------------
+jacobi_eigen_symmetric :: proc(
+	A: ^Matrix(f64),
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	eigenvalues: []f64,
+	eigenvectors: Matrix(f64),
+) {
+	n := A.rows
+	if n == 0 || A.cols != n {
+		panic("jacobi_eigen_symmetric: matrix must be square")
+	}
+
+	// V = I
+	eigenvectors = matrix_new(f64, n, n, allocator)
+	for i := 0; i < n; i += 1 {
+		for j := 0; j < n; j += 1 {
+			eigenvectors.data[i * n + j] = (i == j) ? 1.0 : 0.0
+		}
+	}
+
+	max_iter := 100
+	eps := 1e-12
+
+	for iter := 0; iter < max_iter; iter += 1 {
+		// find largest off-diagonal |A[p,q]|
+		p := 0
+		q := 1
+		max_val := 0.0
+		for i := 0; i < n; i += 1 {
+			for j := i + 1; j < n; j += 1 {
+				aij := math.abs(A.data[i * A.cols + j])
+				if aij > max_val {
+					max_val = aij
+					p = i
+					q = j
+				}
+			}
+		}
+
+		if max_val < eps {
+			break
+		}
+
+		app := A.data[p * A.cols + p]
+		aqq := A.data[q * A.cols + q]
+		apq := A.data[p * A.cols + q]
+
+		tau := (aqq - app) / (2.0 * apq)
+		t: f64
+		if tau >= 0 {
+			t = 1.0 / (tau + math.sqrt(1.0 + tau * tau))
+		} else {
+			t = -1.0 / (-tau + math.sqrt(1.0 + tau * tau))
+		}
+		c := 1.0 / math.sqrt(1.0 + t * t)
+		s := c * t
+
+		// rotate A
+		for k := 0; k < n; k += 1 {
+			if k != p && k != q {
+				aik := A.data[p * A.cols + k]
+				akq := A.data[q * A.cols + k]
+				A.data[p * A.cols + k] = c * aik - s * akq
+				A.data[q * A.cols + k] = s * aik + c * akq
+				A.data[k * A.cols + p] = A.data[p * A.cols + k]
+				A.data[k * A.cols + q] = A.data[q * A.cols + k]
+			}
+		}
+
+		app_new := c * c * app - 2.0 * c * s * apq + s * s * aqq
+		aqq_new := s * s * app + 2.0 * c * s * apq + c * c * aqq
+		A.data[p * A.cols + p] = app_new
+		A.data[q * A.cols + q] = aqq_new
+		A.data[p * A.cols + q] = 0.0
+		A.data[q * A.cols + p] = 0.0
+
+		// rotate eigenvectors
+		for k := 0; k < n; k += 1 {
+			vip := eigenvectors.data[k * eigenvectors.cols + p]
+			viq := eigenvectors.data[k * eigenvectors.cols + q]
+			eigenvectors.data[k * eigenvectors.cols + p] = c * vip - s * viq
+			eigenvectors.data[k * eigenvectors.cols + q] = s * vip + c * viq
+		}
+	}
+
+	eigenvalues = make([]f64, n, allocator)
+	for i := 0; i < n; i += 1 {
+		eigenvalues[i] = A.data[i * A.cols + i]
+	}
+
+	return
+}
+
+// ------------------------------------------------------------
+// "Golub–Reinsch style" SVD via AᵀA eigen-decomposition
+// A: m×n, U: m×n, S: n, V: n×n
+// ------------------------------------------------------------
+svd_golub_reinsch :: proc(
+	A: ^Matrix(f64),
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	U: Matrix(f64),
+	S: []f64,
+	V: Matrix(f64),
+) {
+	m := A.rows
+	n := A.cols
+	if m == 0 || n == 0 {
+		return
+	}
+
+	// 1) Build AtA = Aᵀ A (n×n)
+	AtA := xtx(A, allocator) // you already have xtx(X: ^Matrix(f64)) -> Matrix(f64)
+
+	// 2) Eigen-decompose AtA = V Λ Vᵀ
+	evals, evecs := jacobi_eigen_symmetric(&AtA, allocator)
+
+	// 3) Singular values = sqrt(max(λ, 0)), sort descending
+	S = make([]f64, n, allocator)
+	for i := 0; i < n; i += 1 {
+		lam := evals[i]
+		if lam < 0 && lam > -1e-14 {
+			lam = 0.0
+		}
+		if lam < 0 {
+			panic("svd_golub_reinsch: negative eigenvalue in AtA")
+		}
+		S[i] = math.sqrt(lam)
+	}
+
+	// V = evecs (n×n)
+	V = matrix_new(f64, n, n, allocator)
+	for i := 0; i < n; i += 1 {
+		for j := 0; j < n; j += 1 {
+			V.data[i * V.cols + j] = evecs.data[i * evecs.cols + j]
+		}
+	}
+
+	// 4) Sort S descending and permute V accordingly
+	for i := 0; i < n; i += 1 {
+		max_i := i
+		for j := i + 1; j < n; j += 1 {
+			if S[j] > S[max_i] {
+				max_i = j
+			}
+		}
+		if max_i == i {
+			continue
+		}
+		S[i], S[max_i] = S[max_i], S[i]
+		for r := 0; r < n; r += 1 {
+			V.data[r * V.cols + i], V.data[r * V.cols + max_i] =
+				V.data[r * V.cols + max_i], V.data[r * V.cols + i]
+		}
+	}
+
+	// 5) Build U: columns u_j = (1/σ_j) * A * v_j
+	U = matrix_new(f64, m, n, allocator)
+	temp_v := make([]f64, n, context.temp_allocator)
+
+	for j := 0; j < n; j += 1 {
+		sigma := S[j]
+		if sigma == 0 {
+			// zero column
+			for i := 0; i < m; i += 1 {
+				U.data[i * U.cols + j] = 0.0
+			}
+			continue
+		}
+
+		// v_j column
+		for k := 0; k < n; k += 1 {
+			temp_v[k] = V.data[k * V.cols + j]
+		}
+
+		// w = A * v_j  (m×n * n×1 = m×1)
+		w := matvec_dyn_simd(A, temp_v, allocator)
+
+		inv_sigma := 1.0 / sigma
+		for i := 0; i < m; i += 1 {
+			U.data[i * U.cols + j] = w[i] * inv_sigma
+		}
+	}
+
+	return
+}

@@ -363,6 +363,7 @@ main :: proc() {
 	test.correlation_test(context.temp_allocator)
 	test.qr_test(context.temp_allocator)
 	test.svd_test(context.temp_allocator)
+	test.svd_golub_reinsch_test(context.temp_allocator)
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
 	w.destroy_dataframe(&right2)
