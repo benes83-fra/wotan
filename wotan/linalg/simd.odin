@@ -349,3 +349,26 @@ axpy_simd :: proc(alpha: f64, x, y: []f64) {
 		y[i] += alpha * x[i]
 	}
 }
+ger_simd :: proc(alpha: f64, x: []f64, y: []f64, A: ^Matrix(f64)) {
+	m := A.rows
+	n := A.cols
+
+	if len(x) != m {
+		panic("ger_simd: x length mismatch with A.rows")
+	}
+	if len(y) != n {
+		panic("ger_simd: y length mismatch with A.cols")
+	}
+	if alpha == 0.0 {
+		return
+	}
+
+	for i := 0; i < m; i += 1 {
+		scalar := alpha * x[i]
+		if scalar == 0.0 {
+			continue
+		}
+		row := A.data[i * A.cols:i * A.cols + n]
+		axpy_simd(scalar, y, row)
+	}
+}
