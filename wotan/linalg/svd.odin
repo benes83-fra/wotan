@@ -3,6 +3,10 @@ package wotan_linalg
 import "core:math"
 import "core:mem"
 
+SVDMethod :: enum {
+	Jacobi,
+	GolubReinsch,
+}
 // SVD (Jacobi) for general m x n matrix A
 // A ≈ U * diag(S) * Vᵀ
 // U: m x n (columns = left singular vectors)
@@ -149,10 +153,6 @@ svd_jacobi :: proc(
 	}
 
 	return
-}
-SVDMethod :: enum {
-	Jacobi,
-	GolubReinsch,
 }
 
 // Dispatcher
@@ -358,6 +358,76 @@ svd_golub_reinsch :: proc(
 		inv_sigma := 1.0 / sigma
 		for i := 0; i < m; i += 1 {
 			U.data[i * U.cols + j] = w[i] * inv_sigma
+		}
+	}
+
+	return
+}
+// Thin SVD wrapper around svd_golub_reinsch
+// A: m×n, returns U_t: m×r, S_t: r, V_t: n×r, where r = numerical rank
+svd_thin :: proc(
+	A: ^Matrix(f64),
+	method: SVDMethod = .GolubReinsch,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	U_t: Matrix(f64),
+	S_t: []f64,
+	V_t: Matrix(f64),
+) {
+	// Use your existing dispatcher
+	U_full, S_full, V_full := svd(A, method, allocator)
+	m := U_full.rows
+	n := U_full.cols // for Golub–Reinsch: m×n
+
+	// --- 1) Determine numerical rank r
+	// Simple heuristic: tol = max(m,n) * eps * S_max
+	S_max := 0.0
+	for i := 0; i < n; i += 1 {
+		if S_full[i] > S_max {
+			S_max = S_full[i]
+		}
+	}
+	eps := 1e-12
+	tol := f64(max(m, n)) * eps * S_max
+
+	r := 0
+	for i := 0; i < n; i += 1 {
+		if S_full[i] > tol {
+			r += 1
+		} else {
+			break // S is sorted descending
+		}
+	}
+
+	if r == 0 {
+		// Completely rank-deficient: return zeros of minimal shape
+		U_t = matrix_new(f64, m, 0, allocator)
+		S_t = make([]f64, 0, allocator)
+		V_t = matrix_new(f64, n, 0, allocator)
+		return
+	}
+
+	// --- 2) Allocate thin factors
+	U_t = matrix_new(f64, m, r, allocator)
+	V_t = matrix_new(f64, n, r, allocator)
+	S_t = make([]f64, r, allocator)
+
+	// Copy leading r singular values
+	for i := 0; i < r; i += 1 {
+		S_t[i] = S_full[i]
+	}
+
+	// Copy first r columns of U_full into U_t
+	for i := 0; i < m; i += 1 {
+		for j := 0; j < r; j += 1 {
+			U_t.data[i * U_t.cols + j] = U_full.data[i * U_full.cols + j]
+		}
+	}
+
+	// Copy first r columns of V_full into V_t
+	for i := 0; i < n; i += 1 {
+		for j := 0; j < r; j += 1 {
+			V_t.data[i * V_t.cols + j] = V_full.data[i * V_full.cols + j]
 		}
 	}
 

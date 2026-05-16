@@ -332,7 +332,7 @@ svd_test :: proc(allocator: mem.Allocator = context.allocator) {
 	fmt.println("SVD test OK")
 }
 svd_golub_reinsch_test :: proc(allocator: mem.Allocator = context.allocator) {
-	fmt.println("=== SVD GOLUB–REINSCH TEST ===")
+	fmt.println("=== SVD GOLUB - REINSCH TEST ===")
 
 	// A: 3x2 (tall, non-square)
 	A := l.matrix_new(f64, 3, 2, allocator)
@@ -409,8 +409,102 @@ svd_golub_reinsch_test :: proc(allocator: mem.Allocator = context.allocator) {
 	_ = Uj
 	_ = Vj
 	for i := 0; i < n; i += 1 {
-		assert_close(S[i], Sj[i], 1e-6, "S (Golub–Reinsch vs Jacobi)")
+		assert_close(S[i], Sj[i], 1e-6, "S (Golub - Reinsch vs Jacobi)")
 	}
 
-	fmt.println("SVD GOLUB–REINSCH test OK")
+	fmt.println("SVD GOLUB - REINSCH test OK")
+}
+
+thin_svd_test :: proc(allocator: mem.Allocator = context.allocator) {
+	fmt.println("=== THIN SVD TEST ===")
+
+	// A: 3x2 (rank 2)
+	A := l.matrix_new(f64, 3, 2, allocator)
+	A.data = {1, 2, 3, 4, 5, 6}
+
+	U_t, S_t, V_t := l.svd_thin(&A, .GolubReinsch, allocator)
+
+	m := A.rows
+	n := A.cols
+	r := len(S_t)
+
+	// --- 1) Check rank r is correct (should be 2 for this A)
+	assert_close(f64(r), 2.0, 1e-9, "thin rank")
+
+	// --- 2) Check shapes
+	if U_t.rows != m || U_t.cols != r {
+		panic("U_t shape mismatch")
+	}
+	if V_t.rows != n || V_t.cols != r {
+		panic("V_t shape mismatch")
+	}
+	if len(S_t) != r {
+		panic("S_t length mismatch")
+	}
+
+	// --- 3) Check U_tᵀ U_t ≈ I_r
+	UT := l.matrix_new(f64, r, m, allocator)
+	for i := 0; i < m; i += 1 {
+		for j := 0; j < r; j += 1 {
+			UT.data[j * UT.cols + i] = U_t.data[i * U_t.cols + j]
+		}
+	}
+	UTU := l.matmul_dyn_simd(&UT, &U_t, allocator)
+	for i := 0; i < r; i += 1 {
+		for j := 0; j < r; j += 1 {
+			expected: f64 = (i == j) ? 1.0 : 0.0
+			assert_close(UTU.data[i * UTU.cols + j], expected, 1e-6, "U_tᵀ U_t orthogonality")
+		}
+	}
+
+	// --- 4) Check V_tᵀ V_t ≈ I_r
+	VT := l.matrix_new(f64, r, n, allocator)
+	for i := 0; i < n; i += 1 {
+		for j := 0; j < r; j += 1 {
+			VT.data[j * VT.cols + i] = V_t.data[i * V_t.cols + j]
+		}
+	}
+	VTV := l.matmul_dyn_simd(&VT, &V_t, allocator)
+	for i := 0; i < r; i += 1 {
+		for j := 0; j < r; j += 1 {
+			expected: f64 = (i == j) ? 1.0 : 0.0
+			assert_close(VTV.data[i * VTV.cols + j], expected, 1e-6, "V_tᵀ V_t orthogonality")
+		}
+	}
+
+	// --- 5) Reconstruction A ≈ U_t * diag(S_t) * V_tᵀ
+	Sigma := l.matrix_new(f64, r, r, allocator)
+	for i := 0; i < r; i += 1 {
+		Sigma.data[i * Sigma.cols + i] = S_t[i]
+	}
+
+	US := l.matmul_dyn_simd(&U_t, &Sigma, allocator)
+
+	VT2 := l.matrix_new(f64, r, n, allocator)
+	for i := 0; i < n; i += 1 {
+		for j := 0; j < r; j += 1 {
+			VT2.data[j * VT2.cols + i] = V_t.data[i * V_t.cols + j]
+		}
+	}
+
+	USVT := l.matmul_dyn_simd(&US, &VT2, allocator)
+
+	for i := 0; i < m; i += 1 {
+		for j := 0; j < n; j += 1 {
+			assert_close(
+				USVT.data[i * USVT.cols + j],
+				A.data[i * A.cols + j],
+				1e-6,
+				"thin SVD reconstruction",
+			)
+		}
+	}
+
+	// --- 6) Compare thin S with full SVD
+	_, S_full, _ := l.svd_golub_reinsch(&A, allocator)
+	for i := 0; i < r; i += 1 {
+		assert_close(S_t[i], S_full[i], 1e-9, "thin vs full singular values")
+	}
+
+	fmt.println("THIN SVD test OK")
 }
