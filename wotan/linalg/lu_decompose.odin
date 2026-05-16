@@ -233,3 +233,46 @@ lu_extract_LU :: proc(
 
 	return
 }
+mat_inverse_lu :: proc(
+	A: ^Matrix(f64),
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	Ainv: Matrix(f64),
+	ok: bool,
+) {
+	n := A.rows
+	if n == 0 || A.cols != n {
+		panic("mat_inverse_lu: A must be non-empty and square")
+	}
+
+	LU, piv, sign, lok := lu_decompose(A, allocator)
+	_ = sign
+	if !lok {
+		// Singular → return empty matrix, ok = false
+		Ainv = matrix_new(f64, 0, 0, allocator)
+		return
+	}
+
+	Ainv = matrix_new(f64, n, n, allocator)
+
+	// Solve A x_j = e_j for each column j
+	e := make([]f64, n, context.temp_allocator)
+
+	for j := 0; j < n; j += 1 {
+		// e_j
+		for i := 0; i < n; i += 1 {
+			e[i] = 0.0
+		}
+		e[j] = 1.0
+
+		x := lu_solve(&LU, piv, e, context.temp_allocator)
+
+		// Write solution as column j of Ainv
+		for i := 0; i < n; i += 1 {
+			Ainv.data[i * Ainv.cols + j] = x[i]
+		}
+	}
+
+	ok = true
+	return
+}

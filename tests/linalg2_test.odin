@@ -211,3 +211,71 @@ lu_numeric_dump_test :: proc(allocator: mem.Allocator = context.allocator) {
 
 	fmt.println("=== LU NUMERIC DUMP DONE ===")
 }
+
+lu_inverse_basic_test :: proc(allocator: mem.Allocator = context.allocator) {
+	fmt.println("=== LU INVERSE BASIC TEST ===")
+
+	A := l.matrix_new(f64, 3, 3, allocator)
+	A.data = {1, 2, 3, 0, 1, 4, 5, 6, 0}
+
+	Ainv, ok := l.mat_inverse_lu(&A, allocator)
+	if !ok {
+		panic("lu_inverse_basic_test: inversion failed")
+	}
+
+	// Check A * Ainv ≈ I and Ainv * A ≈ I
+	I_left := l.matmul_dyn_simd(&A, &Ainv, allocator)
+	I_right := l.matmul_dyn_simd(&Ainv, &A, allocator)
+
+	n := A.rows
+	for i := 0; i < n; i += 1 {
+		for j := 0; j < n; j += 1 {
+			expected: f64 = (i == j) ? 1.0 : 0.0
+			assert_close(I_left.data[i * I_left.cols + j], expected, 1e-9, "A*Ainv")
+			assert_close(I_right.data[i * I_right.cols + j], expected, 1e-9, "Ainv*A")
+		}
+	}
+
+	fmt.println("LU INVERSE BASIC TEST OK")
+}
+
+lu_inverse_identity_test :: proc(allocator: mem.Allocator = context.allocator) {
+	fmt.println("=== LU INVERSE IDENTITY TEST ===")
+
+	n := 4
+	A := l.matrix_new(f64, n, n, allocator)
+	for i := 0; i < n; i += 1 {
+		for j := 0; j < n; j += 1 {
+			A.data[i * A.cols + j] = (i == j) ? 1.0 : 0.0
+		}
+	}
+
+	Ainv, ok := l.mat_inverse_lu(&A, allocator)
+	if !ok {
+		panic("lu_inverse_identity_test: inversion failed")
+	}
+
+	for i := 0; i < n; i += 1 {
+		for j := 0; j < n; j += 1 {
+			expected: f64 = (i == j) ? 1.0 : 0.0
+			assert_close(Ainv.data[i * Ainv.cols + j], expected, 1e-12, "I inverse")
+		}
+	}
+
+	fmt.println("LU INVERSE IDENTITY TEST OK")
+}
+
+lu_inverse_singular_test :: proc(allocator: mem.Allocator = context.allocator) {
+	fmt.println("=== LU INVERSE SINGULAR TEST ===")
+
+	A := l.matrix_new(f64, 3, 3, allocator)
+	// rank-deficient: row2 = row1
+	A.data = {1, 2, 3, 1, 2, 3, 0, 0, 1}
+
+	_, ok := l.mat_inverse_lu(&A, allocator)
+	if ok {
+		panic("lu_inverse_singular_test: expected failure for singular matrix")
+	}
+
+	fmt.println("LU INVERSE SINGULAR TEST OK")
+}
