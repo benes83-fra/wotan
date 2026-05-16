@@ -4,6 +4,7 @@ import ml "../wotan/ML"
 import w "../wotan/core"
 import l "../wotan/linalg"
 import "core:fmt"
+import "core:math"
 import "core:mem"
 
 matrix_test :: proc(allocator: mem.Allocator = context.allocator) {
@@ -507,4 +508,267 @@ thin_svd_test :: proc(allocator: mem.Allocator = context.allocator) {
 	}
 
 	fmt.println("THIN SVD test OK")
+}
+
+svd_zero_matrix_test :: proc(allocator: mem.Allocator = context.allocator) {
+	fmt.println("=== SVD ZERO MATRIX TEST ===")
+
+	A := l.matrix_new(f64, 3, 2, allocator)
+	// A.data is zero-initialized
+
+	U, S, V := l.svd_golub_reinsch(&A, allocator)
+
+	// All singular values ≈ 0
+	for i := 0; i < len(S); i += 1 {
+		assert_close(S[i], 0.0, 1e-12, "zero matrix singular value")
+	}
+
+	// UᵀU ≈ I_2, VᵀV ≈ I_2
+	n := A.cols
+
+	UT := l.matrix_new(f64, n, U.rows, allocator)
+	for i := 0; i < U.rows; i += 1 {
+		for j := 0; j < n; j += 1 {
+			UT.data[j * UT.cols + i] = U.data[i * U.cols + j]
+		}
+	}
+	UTU := l.matmul_dyn_simd(&UT, &U, allocator)
+	for i := 0; i < n; i += 1 {
+		for j := 0; j < n; j += 1 {
+			expected: f64 = (i == j) ? 1.0 : 0.0
+			assert_close(UTU.data[i * UTU.cols + j], expected, 1e-6, "UᵀU zero matrix")
+		}
+	}
+
+	VT := l.matrix_new(f64, n, n, allocator)
+	for i := 0; i < n; i += 1 {
+		for j := 0; j < n; j += 1 {
+			VT.data[j * n + i] = V.data[i * V.cols + j]
+		}
+	}
+	VTV := l.matmul_dyn_simd(&VT, &V, allocator)
+	for i := 0; i < n; i += 1 {
+		for j := 0; j < n; j += 1 {
+			expected: f64 = (i == j) ? 1.0 : 0.0
+			assert_close(VTV.data[i * VTV.cols + j], expected, 1e-6, "VᵀV zero matrix")
+		}
+	}
+
+	fmt.println("SVD ZERO MATRIX test OK")
+}
+svd_1x1_test :: proc(allocator: mem.Allocator = context.allocator) {
+	fmt.println("=== SVD 1x1 TEST ===")
+
+	A := l.matrix_new(f64, 1, 1, allocator)
+	A.data[0] = -3.0
+
+	U, S, V := l.svd_golub_reinsch(&A, allocator)
+
+	assert_close(S[0], 3.0, 1e-12, "1x1 singular value")
+
+	// U, V are ±1
+	assert_close(math.abs(U.data[0]), 1.0, 1e-12, "1x1 U magnitude")
+	assert_close(math.abs(V.data[0]), 1.0, 1e-12, "1x1 V magnitude")
+
+	// Reconstruction
+	recon := U.data[0] * S[0] * V.data[0]
+	assert_close(recon, A.data[0], 1e-12, "1x1 reconstruction")
+
+	fmt.println("SVD 1x1 test OK")
+}
+svd_rank1_tall_test :: proc(allocator: mem.Allocator = context.allocator) {
+	fmt.println("=== SVD RANK-1 TALL TEST ===")
+
+	// A = u vᵀ with u = [1,2,3]ᵀ, v = [4,5]ᵀ
+	A := l.matrix_new(f64, 3, 2, allocator)
+	A.data = {4, 5, 8, 10, 12, 15} // rows: [4,5], [8,10], [12,15]
+
+	U, S, V := l.svd_golub_reinsch(&A, allocator)
+
+	// Only first singular value significantly > 0
+	assert_close(S[0] > 0 ? 1 : 0, 1, 1e-9, "rank1 σ0 > 0")
+	assert_close(S[1], 0.0, 1e-10, "rank1 σ1 ≈ 0")
+
+	// Thin SVD rank should be 1
+	U_t, S_t, V_t := l.svd_thin(&A, .GolubReinsch, allocator)
+	assert_close(f64(len(S_t)), 1.0, 1e-9, "thin rank1")
+
+	// Reconstruction from thin SVD
+	Sigma := l.matrix_new(f64, 1, 1, allocator)
+	Sigma.data[0] = S_t[0]
+
+	US := l.matmul_dyn_simd(&U_t, &Sigma, allocator)
+
+	VT := l.matrix_new(f64, 1, A.cols, allocator)
+	for j := 0; j < A.cols; j += 1 {
+		VT.data[j] = V_t.data[j * V_t.cols + 0]
+	}
+
+	USVT := l.matmul_dyn_simd(&US, &VT, allocator)
+	for i := 0; i < A.rows; i += 1 {
+		for j := 0; j < A.cols; j += 1 {
+			assert_close(
+				USVT.data[i * USVT.cols + j],
+				A.data[i * A.cols + j],
+				1e-6,
+				"rank1 reconstruction",
+			)
+		}
+	}
+
+	fmt.println("SVD RANK-1 TALL test OK")
+}; svd_wide_matrix_test :: proc(allocator: mem.Allocator = context.allocator) {
+	fmt.println("=== SVD WIDE MATRIX TEST ===")
+
+	A := l.matrix_new(f64, 2, 3, allocator)
+	A.data = {1, 2, 3, 4, 5, 6}
+
+	U, S, V := l.svd_golub_reinsch(&A, allocator)
+
+	m := A.rows
+	n := A.cols
+
+	// Shapes
+	if U.rows != m || U.cols != n {
+		panic("U shape mismatch in wide test")
+	}
+	if V.rows != n || V.cols != n {
+		panic("V shape mismatch in wide test")
+	}
+
+	// VᵀV ≈ Iₙ
+	VT := l.matrix_new(f64, n, n, allocator)
+	for i := 0; i < n; i += 1 {
+		for j := 0; j < n; j += 1 {
+			VT.data[j * n + i] = V.data[i * V.cols + j]
+		}
+	}
+	VTV := l.matmul_dyn_simd(&VT, &V, allocator)
+	for i := 0; i < n; i += 1 {
+		for j := 0; j < n; j += 1 {
+			expected: f64 = (i == j) ? 1.0 : 0.0
+			assert_close(VTV.data[i * VTV.cols + j], expected, 1e-6, "VᵀV wide")
+		}
+	}
+
+	// Reconstruction A ≈ U diag(S) Vᵀ
+	Sigma := l.matrix_new(f64, n, n, allocator)
+	for i := 0; i < n; i += 1 {
+		Sigma.data[i * Sigma.cols + i] = S[i]
+	}
+	US := l.matmul_dyn_simd(&U, &Sigma, allocator)
+
+	VT2 := l.matrix_new(f64, n, n, allocator)
+	for i := 0; i < n; i += 1 {
+		for j := 0; j < n; j += 1 {
+			VT2.data[i * n + j] = V.data[j * V.cols + i]
+		}
+	}
+	USVT := l.matmul_dyn_simd(&US, &VT2, allocator)
+
+	for i := 0; i < m; i += 1 {
+		for j := 0; j < n; j += 1 {
+			assert_close(
+				USVT.data[i * USVT.cols + j],
+				A.data[i * A.cols + j],
+				1e-6,
+				"SVD wide reconstruction",
+			)
+		}
+	}
+
+	fmt.println("SVD WIDE MATRIX test OK")
+}
+
+svd_nearly_rank_deficient_test :: proc(allocator: mem.Allocator = context.allocator) {
+	fmt.println("=== SVD NEARLY RANK-DEFICIENT TEST ===")
+
+	// A = [1 0; 0 1e-8; 0 0] (3x2)
+	A := l.matrix_new(f64, 3, 2, allocator)
+	A.data = {1.0, 0.0, 0.0, 1e-8, 0.0, 0.0}
+
+	U_t, S_t, V_t := l.svd_thin(&A, .GolubReinsch, allocator)
+
+	// With tol = max(m,n)*eps*S_max, second σ should likely be dropped
+	r := len(S_t)
+	fmt.printf("Nearly rank-deficient singular values: %v, r = %d\n", S_t, r)
+
+	// We don't hard-assert r here, but we *do* assert reconstruction quality
+	Sigma := l.matrix_new(f64, r, r, allocator)
+	for i := 0; i < r; i += 1 {
+		Sigma.data[i * Sigma.cols + i] = S_t[i]
+	}
+	US := l.matmul_dyn_simd(&U_t, &Sigma, allocator)
+
+	VT := l.matrix_new(f64, r, A.cols, allocator)
+	for i := 0; i < A.cols; i += 1 {
+		for j := 0; j < r; j += 1 {
+			VT.data[j * VT.cols + i] = V_t.data[i * V_t.cols + j]
+		}
+	}
+	USVT := l.matmul_dyn_simd(&US, &VT, allocator)
+
+	for i := 0; i < A.rows; i += 1 {
+		for j := 0; j < A.cols; j += 1 {
+			assert_close(
+				USVT.data[i * USVT.cols + j],
+				A.data[i * A.cols + j],
+				1e-6,
+				"nearly rank-deficient reconstruction",
+			)
+		}
+	}
+
+	fmt.println("SVD NEARLY RANK-DEFICIENT test OK")
+}
+svd_numeric_dump_test :: proc(allocator: mem.Allocator = context.allocator) {
+	fmt.println("=== SVD NUMERIC DUMP TEST ===")
+
+	A := l.matrix_new(f64, 3, 2, allocator)
+	A.data = {1.0, 0.0, 0.0, 2.0, 0.0, 0.0}
+
+	U, S, V := l.svd_golub_reinsch(&A, allocator)
+
+	fmt.printf("A = %v\n", A.data)
+	fmt.printf("S = %v\n", S)
+	fmt.printf("U (3x2) =\n")
+	for i := 0; i < U.rows; i += 1 {
+		for j := 0; j < U.cols; j += 1 {
+			fmt.printf("% .12f ", U.data[i * U.cols + j])
+		}
+		fmt.println()
+	}
+	fmt.printf("V (2x2) =\n")
+	for i := 0; i < V.rows; i += 1 {
+		for j := 0; j < V.cols; j += 1 {
+			fmt.printf("% .12f ", V.data[i * V.cols + j])
+		}
+		fmt.println()
+	}
+
+	// Also print reconstruction error
+	n := A.cols
+	Sigma := l.matrix_new(f64, n, n, allocator)
+	for i := 0; i < n; i += 1 {
+		Sigma.data[i * Sigma.cols + i] = S[i]
+	}
+	US := l.matmul_dyn_simd(&U, &Sigma, allocator)
+
+	VT := l.matrix_new(f64, n, n, allocator)
+	for i := 0; i < n; i += 1 {
+		for j := 0; j < n; j += 1 {
+			VT.data[i * n + j] = V.data[j * V.cols + i]
+		}
+	}
+	USVT := l.matmul_dyn_simd(&US, &VT, allocator)
+
+	fmt.printf("Reconstruction A_hat = %v\n", USVT.data)
+	for i := 0; i < A.rows; i += 1 {
+		for j := 0; j < A.cols; j += 1 {
+			diff := USVT.data[i * USVT.cols + j] - A.data[i * A.cols + j]
+			fmt.printf("diff[%d,%d] = %.3e\n", i, j, diff)
+		}
+	}
+
+	fmt.println("SVD NUMERIC DUMP test DONE")
 }

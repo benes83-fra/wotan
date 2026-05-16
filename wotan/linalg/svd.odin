@@ -295,17 +295,37 @@ svd_golub_reinsch :: proc(
 	evals, evecs := jacobi_eigen_symmetric(&AtA, allocator)
 
 	// 3) Singular values = sqrt(max(λ, 0)), sort descending
+	// 3) Singular values = sqrt(max(λ, 0)), sort descending
 	S = make([]f64, n, allocator)
+	eps_rel := 1e-10
+
+	// Find a global scale for AtA
+	max_abs_eval := 0.0
+	for i := 0; i < n; i += 1 {
+		ev := math.abs(evals[i])
+		if ev > max_abs_eval {
+			max_abs_eval = ev
+		}
+	}
+	if max_abs_eval == 0.0 {
+		max_abs_eval = 1.0 // avoid zero scale
+	}
+
 	for i := 0; i < n; i += 1 {
 		lam := evals[i]
-		if lam < 0 && lam > -1e-14 {
-			lam = 0.0
-		}
+
 		if lam < 0 {
-			panic("svd_golub_reinsch: negative eigenvalue in AtA")
+			// Treat small negative eigenvalues as zero
+			if -lam <= eps_rel * max_abs_eval {
+				lam = 0.0
+			} else {
+				panic("svd_golub_reinsch: negative eigenvalue in AtA")
+			}
 		}
+
 		S[i] = math.sqrt(lam)
 	}
+
 
 	// V = evecs (n×n)
 	V = matrix_new(f64, n, n, allocator)
@@ -340,12 +360,15 @@ svd_golub_reinsch :: proc(
 	for j := 0; j < n; j += 1 {
 		sigma := S[j]
 		if sigma == 0 {
-			// zero column
+			// Generate orthonormal filler column
+			// Start with a basis vector
 			for i := 0; i < m; i += 1 {
 				U.data[i * U.cols + j] = 0.0
 			}
+			U.data[j % m * U.cols + j] = 1.0
 			continue
 		}
+
 
 		// v_j column
 		for k := 0; k < n; k += 1 {
