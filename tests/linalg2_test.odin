@@ -279,3 +279,167 @@ lu_inverse_singular_test :: proc(allocator: mem.Allocator = context.allocator) {
 
 	fmt.println("LU INVERSE SINGULAR TEST OK")
 }
+
+// -------------------- EIGH TESTS --------------------
+
+eigh_diagonal_test :: proc(allocator: mem.Allocator = context.allocator) {
+	fmt.println("=== EIGH DIAGONAL TEST ===")
+
+	A := l.matrix_new(f64, 3, 3, allocator)
+	A.data = {1.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 3.0}
+
+	W, V := l.eigh(&A, .Ascending, allocator)
+
+	// Eigenvalues should be [1,2,3]
+	assert_close(W[0], 1.0, 1e-12, "λ0")
+	assert_close(W[1], 2.0, 1e-12, "λ1")
+	assert_close(W[2], 3.0, 1e-12, "λ2")
+
+	// V should be identity up to sign
+	for i := 0; i < 3; i += 1 {
+		for j := 0; j < 3; j += 1 {
+			expected := 0.0
+			if i == j {
+				expected = 1.0
+			}
+			// allow sign flips: |v_ij| ≈ expected
+			vij := V.data[i * V.cols + j]
+			if expected == 1.0 {
+				assert_close(math.abs(vij), 1.0, 1e-12, "V diag entry")
+			} else {
+				assert_close(vij, 0.0, 1e-12, "V off-diag entry")
+			}
+		}
+	}
+
+	fmt.println("EIGH DIAGONAL TEST OK")
+}
+
+eigh_symmetric_test :: proc(allocator: mem.Allocator = context.allocator) {
+	fmt.println("=== EIGH SYMMETRIC TEST ===")
+
+	// Simple symmetric 2x2 with known eigenvalues
+	// A = [2 1; 1 2] → eigenvalues 1,3
+	A := l.matrix_new(f64, 2, 2, allocator)
+	A.data = {2.0, 1.0, 1.0, 2.0}
+
+	W, V := l.eigh(&A, .Ascending, allocator)
+
+	assert_close(W[0], 1.0, 1e-12, "λ_min")
+	assert_close(W[1], 3.0, 1e-12, "λ_max")
+
+	// Check A * v_i ≈ λ_i * v_i
+	for j := 0; j < 2; j += 1 {
+		vx := V.data[0 * V.cols + j]
+		vy := V.data[1 * V.cols + j]
+
+		Ax0 := 2.0 * vx + 1.0 * vy
+		Ax1 := 1.0 * vx + 2.0 * vy
+
+		lambda := W[j]
+		assert_close(Ax0, lambda * vx, 1e-12, "A v = λ v (0)")
+		assert_close(Ax1, lambda * vy, 1e-12, "A v = λ v (1)")
+	}
+
+	fmt.println("EIGH SYMMETRIC TEST OK")
+}
+
+// -------------------- COND / RCOND TESTS --------------------
+
+cond2_svd_identity_test :: proc(allocator: mem.Allocator = context.allocator) {
+	fmt.println("=== COND2_SVD IDENTITY TEST ===")
+
+	A := l.matrix_new(f64, 3, 3, allocator)
+	for i := 0; i < 3; i += 1 {
+		for j := 0; j < 3; j += 1 {
+			value: f64
+			if (i == j) {
+				value = 1.0
+			} else {
+				value = 0.0
+			}
+			A.data[i * A.cols + j] = value
+		}
+	}
+
+	c := l.cond2_svd(&A, allocator)
+	rc := l.rcond2_svd(&A, allocator)
+
+	assert_close(c, 1.0, 1e-12, "cond2_svd(I)")
+	assert_close(rc, 1.0, 1e-12, "rcond2_svd(I)")
+
+	fmt.println("COND2_SVD IDENTITY TEST OK")
+}
+
+cond2_sym_identity_test :: proc(allocator: mem.Allocator = context.allocator) {
+	fmt.println("=== COND2_SYM IDENTITY TEST ===")
+
+	A := l.matrix_new(f64, 4, 4, allocator)
+	for i := 0; i < 4; i += 1 {
+		for j := 0; j < 4; j += 1 {
+			value: f64
+			if (i == j) {
+				value = 1.0
+			} else {
+				value = 0.0
+			}
+			A.data[i * A.cols + j] = value
+		}
+	}
+
+	c := l.cond2_sym(&A, allocator)
+	rc := l.rcond2_sym(&A, allocator)
+
+	assert_close(c, 1.0, 1e-12, "cond2_sym(I)")
+	assert_close(rc, 1.0, 1e-12, "rcond2_sym(I)")
+
+	fmt.println("COND2_SYM IDENTITY TEST OK")
+}
+
+cond2_sym_spd_test :: proc(allocator: mem.Allocator = context.allocator) {
+	fmt.println("=== COND2_SYM SPD TEST ===")
+
+	// Diagonal SPD: diag(1, 2, 10) → κ = 10 / 1 = 10
+	A := l.matrix_new(f64, 3, 3, allocator)
+	A.data = {1.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 10.0}
+
+	c := l.cond2_sym(&A, allocator)
+	rc := l.rcond2_sym(&A, allocator)
+
+	assert_close(c, 10.0, 1e-12, "cond2_sym(diag)")
+	assert_close(rc, 0.1, 1e-12, "rcond2_sym(diag)")
+
+	fmt.println("COND2_SYM SPD TEST OK")
+}
+
+cond2_svd_rank_deficient_test :: proc(allocator: mem.Allocator = context.allocator) {
+	fmt.println("=== COND2_SVD RANK-DEFICIENT TEST ===")
+
+	// Rank-1 matrix: [1 2; 2 4]
+	A := l.matrix_new(f64, 2, 2, allocator)
+	A.data = {1.0, 2.0, 2.0, 4.0}
+
+	c := l.cond2_svd(&A, allocator)
+	rc := l.rcond2_svd(&A, allocator)
+
+	if !math.is_inf(c) {
+		panic("cond2_svd(rank-deficient) should be +Inf")
+	}
+	assert_close(rc, 0.0, 0.0, "rcond2_svd(rank-deficient)")
+
+	fmt.println("COND2_SVD RANK-DEFICIENT TEST OK")
+}
+
+eigh_cond_full_test :: proc(allocator: mem.Allocator = context.allocator) {
+	fmt.println("=== EIGH + COND TEST SUITE ===")
+
+	eigh_diagonal_test(allocator)
+	eigh_symmetric_test(allocator)
+
+	cond2_svd_identity_test(allocator)
+	cond2_sym_identity_test(allocator)
+	cond2_sym_spd_test(allocator)
+	cond2_svd_rank_deficient_test(allocator)
+
+	fmt.println("=== EIGH + COND TESTS PASSED ===")
+}
