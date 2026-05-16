@@ -1,6 +1,6 @@
 package tests
 
-import ml "../wotan/ML"
+import ml "../wotan/analytics/ML"
 import w "../wotan/core"
 import l "../wotan/linalg"
 import "core:fmt"

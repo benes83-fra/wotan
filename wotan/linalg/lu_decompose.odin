@@ -152,40 +152,9 @@ lu_solve :: proc(
 	b: []f64,
 	allocator: mem.Allocator = context.allocator,
 ) -> []f64 {
-	n := LU.rows
-	if n == 0 || LU.cols != n {
-		panic("lu_solve: LU must be square")
-	}
-	if len(b) != n {
-		panic("lu_solve: dimension mismatch")
-	}
-
-	// y = P b
-	y := apply_pivots_vec(piv, b)
-
-	// Forward solve L y = P b (L has unit diagonal, stored in lower part of LU)
-	for i := 0; i < n; i += 1 {
-		sum := y[i]
-		for j := 0; j < i; j += 1 {
-			sum -= LU.data[i * LU.cols + j] * y[j]
-		}
-		y[i] = sum
-	}
-
-	// Backward solve U x = y (U is upper part of LU)
-	x := make([]f64, n, allocator)
-	for i := n - 1; i >= 0; i -= 1 {
-		sum := y[i]
-		for j := i + 1; j < n; j += 1 {
-			sum -= LU.data[i * LU.cols + j] * x[j]
-		}
-		piv_ii := LU.data[i * LU.cols + i]
-		if piv_ii == 0.0 {
-			panic("lu_solve: singular U")
-		}
-		x[i] = sum / piv_ii
-	}
-
+	y_perm := apply_pivots_vec(piv, b)
+	y := forward_subst_unit_lower_simd(LU, y_perm, allocator)
+	x := back_subst_upper_simd(LU, y, allocator)
 	return x
 }
 

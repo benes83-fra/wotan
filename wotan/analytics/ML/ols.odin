@@ -1,7 +1,7 @@
 package ML
 
-import w "../core"
-import l "../linalg"
+import w "../../core"
+import l "../../linalg"
 import "core:fmt"
 import "core:math"
 import "core:mem"
