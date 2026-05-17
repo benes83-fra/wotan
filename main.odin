@@ -362,6 +362,7 @@ main :: proc() {
 	test.ols_full_test(context.temp_allocator)
 	test.correlation_test(context.temp_allocator)
 	test.qr_test(context.temp_allocator)
+	test.rotate_simd_test(context.temp_allocator)
 	test.svd_test(context.temp_allocator)
 	test.svd_golub_reinsch_test(context.temp_allocator)
 	test.thin_svd_test(context.temp_allocator)

@@ -10,7 +10,31 @@ QR_Mode :: enum {
 	Unblocked,
 	Blocked,
 }
+// In QR_Mode enum or as separate config:
+qr_decompose_thin :: proc(
+	A: ^Matrix(f64),
+	mode: QR_Mode = .Blocked,
+	allocator: mem.Allocator = context.allocator,
+) -> Matrix(f64) { 	// Returns R only
+	m, n := A.rows, A.cols
+	kmax := min(m, n)
+	nb := tile_for_matmul()
 
+	R := matrix_new(f64, m, n, allocator)
+	copy(R.data, A.data)
+
+	// Workspace (no Q needed)
+	v := make([]f64, m, context.temp_allocator)
+	w := make([]f64, n, context.temp_allocator)
+	col_buf := make([]f64, m, context.temp_allocator)
+
+	// Same Householder loop, but skip Q updates entirely
+	for k in 0 ..< kmax {
+		// ... [same Householder build + R update as unblocked] ...
+		// Just omit the Q application section
+	}
+	return R
+}
 // ============================================================================
 // Main QR entry point - maintains ORIGINAL signature for compatibility
 // ============================================================================

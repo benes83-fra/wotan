@@ -772,3 +772,50 @@ svd_numeric_dump_test :: proc(allocator: mem.Allocator = context.allocator) {
 
 	fmt.println("SVD NUMERIC DUMP test DONE")
 }
+rotate_simd_test :: proc(allocator: mem.Allocator = context.allocator) {
+	fmt.println("=== ROTATE_PAIR_SIMD TEST ===")
+
+	n := 16 // multiple of 8 for AVX
+	col_p := make([]f64, n, allocator)
+	col_q := make([]f64, n, allocator)
+
+	// Initialize: col_p = [1,0,1,0,...], col_q = [0,1,0,1,...] (orthogonal)
+	for i in 0 ..< n {
+		if i % 2 == 0 {
+			col_p[i] = 1.0
+			col_q[i] = 0.0
+		} else {
+			col_p[i] = 0.0
+			col_q[i] = 1.0
+		}
+	}
+
+	// Compute initial dot product (should be 0)
+	initial_dot := l.dot_simd(col_p, col_q)
+	fmt.printf("Initial dot: %.3e\n", initial_dot)
+
+	// Compute expected norm: sqrt(n/2) = sqrt(8) for n=16
+	expected_norm := math.sqrt(f64(n) / 2.0)
+	fmt.printf("Expected norm: %.6f\n", expected_norm)
+
+	// Apply 45-degree rotation: c = s = 1/sqrt(2)
+	c := 1.0 / math.sqrt_f64(2.0)
+	s := c
+	l.rotate_pair_simd(c, s, col_p, col_q)
+
+	// Check orthogonality preserved
+	final_dot := l.dot_simd(col_p, col_q)
+	fmt.printf("Final dot: %.3e\n", final_dot)
+
+	// Check norms preserved
+	norm_p := math.sqrt_f64(l.dot_simd(col_p, col_p))
+	norm_q := math.sqrt_f64(l.dot_simd(col_q, col_q))
+	fmt.printf("Norms after rotation: %.6f, %.6f\n", norm_p, norm_q)
+
+	// ✅ CORRECT assertions:
+	assert_close(final_dot, 0.0, 1e-10, "orthogonality after rotation")
+	assert_close(norm_p, expected_norm, 1e-10, "norm preservation col_p")
+	assert_close(norm_q, expected_norm, 1e-10, "norm preservation col_q")
+
+	fmt.println("ROTATE_PAIR_SIMD TEST OK ✅")
+}
