@@ -71,11 +71,10 @@ svd_jacobi :: proc(
 				s := c * t
 
 				// Rotate columns p,q of U (m rows) - SCALAR for now (safe)
+				rotate_pair_simd(c, s, col_p, col_q, m) // Pass full arrays + explicit len
 				for i in 0 ..< m {
-					up := U.data[i * U.cols + p]
-					uq := U.data[i * U.cols + q]
-					U.data[i * U.cols + p] = c * up - s * uq
-					U.data[i * U.cols + q] = s * up + c * uq
+					U.data[i * U.cols + p] = col_p[i]
+					U.data[i * U.cols + q] = col_q[i]
 				}
 
 				// Rotate columns p,q of V (n rows) - SCALAR for now (safe)

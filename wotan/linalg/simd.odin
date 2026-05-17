@@ -372,15 +372,18 @@ ger_simd :: proc(alpha: f64, x: []f64, y: []f64, A: ^Matrix(f64)) {
 		axpy_simd(scalar, y, row)
 	}
 }
-// Add to simd.odin (or keep local to svd.odin if preferred)
-rotate_pair_simd :: proc(c, s: f64, col_p, col_q: []f64) {
+
+// Replace your existing rotate_pair_simd with this version:
+rotate_pair_simd :: proc(c, s: f64, col_p, col_q: []f64, length: int) {
 	// [new_p; new_q] = [c, -s; s, c] * [old_p; old_q]
-	// Process in SIMD chunks for f64
-	n := len(col_p)
-	if n != len(col_q) {panic("rotate_pair_simd: length mismatch")}
+	// len: explicit number of elements to process (avoids slice aliasing issues)
+
+	if length > len(col_p) || length > len(col_q) {
+		panic("rotate_pair_simd: length exceeds array bounds")
+	}
 
 	if !simd.HAS_HARDWARE_SIMD {
-		for i := 0; i < n; i += 1 {
+		for i := 0; i < length; i += 1 {
 			up := col_p[i]
 			uq := col_q[i]
 			col_p[i] = c * up - s * uq
@@ -394,7 +397,7 @@ rotate_pair_simd :: proc(c, s: f64, col_p, col_q: []f64) {
 		cc := simd.f64x8{c, c, c, c, c, c, c, c}
 		ss := simd.f64x8{s, s, s, s, s, s, s, s}
 		i := 0
-		for ; i + 8 <= n; i += 8 {
+		for ; i + 8 <= length; i += 8 {
 			vp := simd.f64x8 {
 				col_p[i + 0],
 				col_p[i + 1],
@@ -419,7 +422,7 @@ rotate_pair_simd :: proc(c, s: f64, col_p, col_q: []f64) {
 			new_p := intrinsics.simd_sub(intrinsics.simd_mul(cc, vp), intrinsics.simd_mul(ss, vq))
 			// new_q = s*old_p + c*old_q
 			new_q := intrinsics.simd_add(intrinsics.simd_mul(ss, vp), intrinsics.simd_mul(cc, vq))
-			// Store back
+			// Store back via transmute (ensures memory visibility)
 			new_p_arr := transmute([8]f64)new_p
 			new_q_arr := transmute([8]f64)new_q
 			for j := 0; j < 8; j += 1 {
@@ -427,7 +430,8 @@ rotate_pair_simd :: proc(c, s: f64, col_p, col_q: []f64) {
 				col_q[i + j] = new_q_arr[j]
 			}
 		}
-		for ; i < n; i += 1 {
+		// Tail: scalar fallback
+		for ; i < length; i += 1 {
 			up := col_p[i]; uq := col_q[i]
 			col_p[i] = c * up - s * uq
 			col_q[i] = s * up + c * uq
@@ -435,6 +439,11 @@ rotate_pair_simd :: proc(c, s: f64, col_p, col_q: []f64) {
 		return
 	}
 
-	// SSE2: f64x4 (similar pattern, omitted for brevity - can add if needed)
-	// Fallback: f64x2 or scalar handled above
+	// SSE2/fallback: similar pattern (omitted for brevity - add if needed)
+	// For now, scalar fallback handles all non-AVX cases
+	for i := 0; i < length; i += 1 {
+		up := col_p[i]; uq := col_q[i]
+		col_p[i] = c * up - s * uq
+		col_q[i] = s * up + c * uq
+	}
 }

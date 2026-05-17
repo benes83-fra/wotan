@@ -801,7 +801,7 @@ rotate_simd_test :: proc(allocator: mem.Allocator = context.allocator) {
 	// Apply 45-degree rotation: c = s = 1/sqrt(2)
 	c := 1.0 / math.sqrt_f64(2.0)
 	s := c
-	l.rotate_pair_simd(c, s, col_p, col_q)
+	l.rotate_pair_simd(c, s, col_p, col_q, n)
 
 	// Check orthogonality preserved
 	final_dot := l.dot_simd(col_p, col_q)
