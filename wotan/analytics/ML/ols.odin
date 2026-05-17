@@ -103,7 +103,7 @@ ols_from_df :: proc(
 
 	case .QR:
 		// QR decomposition of X
-		Q, R := l.qr_decompose(X, allocator)
+		Q, R := l.qr_decompose(X, .Blocked, allocator)
 		// Q is m x m, R is m x p (we use leading p x p of R and first p columns of Q)
 
 		// Compute b = Q₁ᵀ y, where Q₁ = first p columns of Q

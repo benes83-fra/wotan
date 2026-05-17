@@ -209,7 +209,7 @@ qr_test :: proc(allocator: mem.Allocator = context.allocator) {
 	A := l.matrix_new(f64, 3, 2, allocator)
 	A.data = {1, 2, 3, 4, 5, 6}
 
-	Q, R := l.qr_decompose(&A, allocator)
+	Q, R := l.qr_decompose(&A, .Blocked, allocator)
 
 	// Check A ≈ Q*R
 	QR := l.matmul_dyn_simd(&Q, &R, allocator)
