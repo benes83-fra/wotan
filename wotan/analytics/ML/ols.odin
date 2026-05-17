@@ -99,7 +99,7 @@ ols_from_df :: proc(
 	beta: []f64
 	switch method {
 	case .Cholesky:
-		beta = l.solve_spd_cholesky(&XtX, Xty, allocator)
+		beta = l.solve_spd_cholesky(&XtX, Xty, .Blocked, allocator)
 
 	case .QR:
 		// QR decomposition of X
@@ -134,7 +134,7 @@ ols_from_df :: proc(
 	sigma2 := rss / f64(n - p)
 
 	// 6. XtX⁻¹
-	XtX_inv := l.spd_inverse(&XtX, allocator)
+	XtX_inv := l.spd_inverse(&XtX, .Blocked, allocator)
 
 	// 7. vcov = σ² * XtX⁻¹
 	vcov := l.matrix_new(f64, p, p, allocator)
