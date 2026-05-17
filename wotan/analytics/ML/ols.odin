@@ -29,7 +29,7 @@ OLSMethod :: enum {
 
 // X: n x p (rows = observations, cols = regressors)
 ols_xtx :: proc(X: ^l.Matrix(f64), allocator: mem.Allocator = context.allocator) -> l.Matrix(f64) {
-	return l.xtx(X, allocator)
+	return l.xtx_simd(X, allocator)
 }
 
 ols_xty :: proc(
@@ -92,7 +92,7 @@ ols_from_df :: proc(
 	p := X.cols
 
 	// 1. XtX and Xty (still needed for vcov etc.)
-	XtX := l.xtx(X, allocator)
+	XtX := l.xtx_simd(X, allocator)
 	Xty := l.xty(X, y, allocator)
 
 	// 2. β: choose solver

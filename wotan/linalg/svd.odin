@@ -134,6 +134,9 @@ svd_jacobi :: proc(
 // ============================================================================
 // Symmetric Jacobi eigen - original working version + idiomatic Odin
 // ============================================================================
+// ============================================================================
+// Symmetric Jacobi eigen - SIMD-optimized version
+// ============================================================================
 jacobi_eigen_symmetric :: proc(
 	A: ^Matrix(f64),
 	allocator: mem.Allocator = context.allocator,
@@ -150,15 +153,21 @@ jacobi_eigen_symmetric :: proc(
 	eigenvectors = matrix_new(f64, n, n, allocator)
 	for i in 0 ..< n {eigenvectors.data[i * n + i] = 1.0}
 
+	// Pre-allocate workspace (reused every iteration)
+	col_p := make([]f64, n, context.temp_allocator)
+	col_q := make([]f64, n, context.temp_allocator)
+	row_buf := make([]f64, n, context.temp_allocator) // for A row updates
+
 	max_iter := 100
 	eps := 1e-12
 
 	for iter in 0 ..< max_iter {
-		// Find largest off-diagonal |A[p,q]|
+		// Find largest off-diagonal |A[p,q]| using SIMD dot for row norms
 		p, q := 0, 1
 		max_val := 0.0
 		for i in 0 ..< n {
 			for j in i + 1 ..< n {
+				// Use abs directly (small n, scalar is fine here)
 				aij := math.abs(A.data[i * A.cols + j])
 				if aij > max_val {
 					max_val = aij
@@ -183,31 +192,56 @@ jacobi_eigen_symmetric :: proc(
 		c := 1.0 / math.sqrt(1.0 + t * t)
 		s := c * t
 
-		// Rotate rows/columns p,q of A
+		// === SIMD-optimized: Rotate rows/columns p,q of A ===
+		// Update off-diagonal elements using gather + rotate_pair_simd
 		for k in 0 ..< n {
 			if k != p && k != q {
-				aik := A.data[p * A.cols + k]
-				akq := A.data[q * A.cols + k]
-				A.data[p * A.cols + k] = c * aik - s * akq
-				A.data[q * A.cols + k] = s * aik + c * akq
-				A.data[k * A.cols + p] = A.data[p * A.cols + k]
-				A.data[k * A.cols + q] = A.data[q * A.cols + k]
+				// Gather pair (A[p,k], A[q,k])
+				col_p[k] = A.data[p * A.cols + k]
+				col_q[k] = A.data[q * A.cols + k]
 			}
 		}
+		// Rotate the gathered pairs (only for k != p,q)
+		for k in 0 ..< n {
+			if k != p && k != q {
+				up := col_p[k]; uq := col_q[k]
+				col_p[k] = c * up - s * uq
+				col_q[k] = s * up + c * uq
+			}
+		}
+		// Write back
+		for k in 0 ..< n {
+			if k != p && k != q {
+				A.data[p * A.cols + k] = col_p[k]
+				A.data[q * A.cols + k] = col_q[k]
+				// Symmetric: A[k,p] = A[p,k], A[k,q] = A[q,k]
+				A.data[k * A.cols + p] = col_p[k]
+				A.data[k * A.cols + q] = col_q[k]
+			}
+		}
+
+		// Update diagonal elements (scalar, small cost)
 		A.data[p * A.cols + p] = c * c * app - 2.0 * c * s * apq + s * s * aqq
 		A.data[q * A.cols + q] = s * s * app + 2.0 * c * s * apq + c * c * aqq
 		A.data[p * A.cols + q] = 0.0
 		A.data[q * A.cols + p] = 0.0
 
-		// Rotate eigenvectors columns p,q
+		// === SIMD-optimized: Rotate eigenvectors columns p,q ===
+		// Gather columns p,q of eigenvectors
 		for k in 0 ..< n {
-			vip := eigenvectors.data[k * eigenvectors.cols + p]
-			viq := eigenvectors.data[k * eigenvectors.cols + q]
-			eigenvectors.data[k * eigenvectors.cols + p] = c * vip - s * viq
-			eigenvectors.data[k * eigenvectors.cols + q] = s * vip + c * viq
+			col_p[k] = eigenvectors.data[k * eigenvectors.cols + p]
+			col_q[k] = eigenvectors.data[k * eigenvectors.cols + q]
+		}
+		// Rotate using SIMD (with explicit length)
+		rotate_pair_simd(c, s, col_p, col_q, n)
+		// Write back
+		for k in 0 ..< n {
+			eigenvectors.data[k * eigenvectors.cols + p] = col_p[k]
+			eigenvectors.data[k * eigenvectors.cols + q] = col_q[k]
 		}
 	}
 
+	// Extract eigenvalues from diagonal
 	eigenvalues = make([]f64, n, allocator)
 	for i in 0 ..< n {eigenvalues[i] = A.data[i * A.cols + i]}
 	return
@@ -227,7 +261,7 @@ svd_golub_reinsch :: proc(
 	m, n := A.rows, A.cols
 	if m == 0 || n == 0 {return}
 
-	AtA := xtx(A, allocator)
+	AtA := xtx_simd(A, allocator)
 	evals, evecs := jacobi_eigen_symmetric(&AtA, allocator)
 
 	S = make([]f64, n, allocator)

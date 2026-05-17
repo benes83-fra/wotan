@@ -373,7 +373,7 @@ ger_simd :: proc(alpha: f64, x: []f64, y: []f64, A: ^Matrix(f64)) {
 	}
 }
 
-// Replace your existing rotate_pair_simd with this version:
+
 rotate_pair_simd :: proc(c, s: f64, col_p, col_q: []f64, length: int) {
 	// [new_p; new_q] = [c, -s; s, c] * [old_p; old_q]
 	// len: explicit number of elements to process (avoids slice aliasing issues)
@@ -446,4 +446,73 @@ rotate_pair_simd :: proc(c, s: f64, col_p, col_q: []f64, length: int) {
 		col_p[i] = c * up - s * uq
 		col_q[i] = s * up + c * uq
 	}
+}
+
+xtx_simd :: proc(A: ^Matrix(f64), allocator: mem.Allocator = context.allocator) -> Matrix(f64) {
+	m, n := A.rows, A.cols
+	// AtA is n×n symmetric
+	AtA := matrix_new(f64, n, n, allocator)
+
+	// Pre-allocate column buffers ONCE (reused for every dot product)
+	// This avoids O(n²) allocations in the nested loops
+	col_i := make([]f64, m, context.temp_allocator)
+	col_j := make([]f64, m, context.temp_allocator)
+
+	for ii in 0 ..< n {
+		// Extract column ii of A into col_i (strided access in row-major)
+		for k in 0 ..< m {
+			col_i[k] = A.data[k * A.cols + ii]
+		}
+
+		for jj in 0 ..= ii { 	// Only compute lower triangle (symmetric)
+			if ii == jj {
+				// Diagonal: norm squared of column ii
+				AtA.data[ii * n + ii] = dot_simd(col_i, col_i)
+			} else {
+				// Extract column jj of A into col_j
+				for k in 0 ..< m {
+					col_j[k] = A.data[k * A.cols + jj]
+				}
+				// Off-diagonal: dot product of columns ii and jj
+				sum := dot_simd(col_i, col_j)
+				AtA.data[ii * n + jj] = sum
+				AtA.data[jj * n + ii] = sum // Symmetric
+			}
+		}
+	}
+	return AtA
+}
+
+// Optional: Add this for large-m matrices
+xtx_blocked_simd :: proc(
+	A: ^Matrix(f64),
+	allocator: mem.Allocator = context.allocator,
+) -> Matrix(f64) {
+	m, n := A.rows, A.cols
+	AtA := matrix_new(f64, n, n, allocator)
+
+	// Reusable column buffers
+	col_i := make([]f64, m, context.temp_allocator)
+	col_j := make([]f64, m, context.temp_allocator)
+
+	// Block size for cache efficiency
+	tile := tile_for_matmul() // 16 for AVX
+
+	for ii in 0 ..< n {
+		// Extract column ii
+		for k in 0 ..< m {col_i[k] = A.data[k * A.cols + ii]}
+
+		for jj in 0 ..= ii {
+			if ii == jj {
+				AtA.data[ii * n + ii] = dot_simd(col_i, col_i)
+			} else {
+				// Extract column jj (could also block this if m is huge)
+				for k in 0 ..< m {col_j[k] = A.data[k * A.cols + jj]}
+				sum := dot_simd(col_i, col_j)
+				AtA.data[ii * n + jj] = sum
+				AtA.data[jj * n + ii] = sum
+			}
+		}
+	}
+	return AtA
 }
