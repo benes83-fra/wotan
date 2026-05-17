@@ -3,6 +3,16 @@ package wotan_linalg
 import "core:math"
 import "core:mem"
 
+// ============================================================================
+// QR Configuration (optional, for advanced usage)
+// ============================================================================
+QR_Config :: struct {
+	compute_q: bool, // Compute full Q matrix (default: true)
+}
+
+// ============================================================================
+// Main QR entry point - maintains ORIGINAL signature for full compatibility
+// ============================================================================
 qr_decompose :: proc(
 	A: ^Matrix(f64),
 	allocator: mem.Allocator = context.allocator,
@@ -10,105 +20,113 @@ qr_decompose :: proc(
 	Q: Matrix(f64),
 	R: Matrix(f64),
 ) {
-	m := A.rows
-	n := A.cols
+	return qr_decompose_impl(A, QR_Config{compute_q = true}, allocator)
+}
+
+// Internal implementation with config support
+qr_decompose_impl :: proc(
+	A: ^Matrix(f64),
+	config: QR_Config,
+	allocator: mem.Allocator,
+) -> (
+	Q: Matrix(f64),
+	R: Matrix(f64),
+) {
+	m, n := A.rows, A.cols
 	kmax := min(m, n)
 
-	// R = copy(A)
+	// R = copy of A
 	R = matrix_new(f64, m, n, allocator)
 	copy(R.data, A.data)
 
-	// Q = I_m
-	Q = matrix_new(f64, m, m, allocator)
-	for i := 0; i < m; i += 1 {
-		for j := 0; j < m; j += 1 {
-			if i == j {
-				Q.data[i * m + j] = 1.0
-			} else {
-				Q.data[i * m + j] = 0.0
-			}
+	// Q = identity (if requested)
+	if config.compute_q {
+		Q = matrix_new(f64, m, m, allocator)
+		for i in 0 ..< m {
+			Q.data[i * m + i] = 1.0
 		}
 	}
 
-	v := make([]f64, m, context.temp_allocator)
+	// Pre-allocate workspace ONCE (reused each iteration)
+	v := make([]f64, m, context.temp_allocator) // Householder vector
+	w := make([]f64, n, context.temp_allocator) // for R update
+	u := make([]f64, m, context.temp_allocator) // for Q update
+	col_buf := make([]f64, m, context.temp_allocator) // reusable gather buffer
 
-	for k := 0; k < kmax; k += 1 {
-		xlen := m - k
+	for k in 0 ..< kmax {
+		xlen := m - k // active column length
 
-		// 1. Build Householder vector v for column k
-		x := make([]f64, xlen, context.temp_allocator)
-		for i := 0; i < xlen; i += 1 {
-			x[i] = R.data[(k + i) * n + k]
+		// ================================================================
+		// 1. Build Householder vector v from column k of R
+		// ================================================================
+
+		// Gather column k segment (strided access in row-major)
+		for i in 0 ..< xlen {
+			col_buf[i] = R.data[(k + i) * n + k]
 		}
+		x := col_buf[0:xlen]
 
-		normx := 0.0
-		for i := 0; i < xlen; i += 1 {
-			normx += x[i] * x[i]
-		}
-		normx = math.sqrt(normx)
-		if normx == 0 {
-			continue
-		}
+		normx := math.sqrt(dot_simd(x, x))
+		if normx == 0 {continue}
 
-		// reset v
-		for i := 0; i < m; i += 1 {
-			v[i] = 0.0
-		}
+		// Reset active portion of v
+		for i in k ..< m {v[i] = 0.0}
 
+		// Compute v0 with numerical stability trick
 		sign := 1.0
-		if x[0] < 0 {
-			sign = -1.0
-		}
-		v0 := x[0] + sign * normx
+		if x[0] < 0 {sign = -1.0}
+		v[k] = x[0] + sign * normx
+		for i in 1 ..< xlen {v[k + i] = x[i]}
 
-		v[k] = v0
-		for i := 1; i < xlen; i += 1 {
-			v[k + i] = x[i]
-		}
-
-		// normalize v
-		vnorm := 0.0
-		for i := 0; i < xlen; i += 1 {
-			vi := v[k + i]
-			vnorm += vi * vi
-		}
-		vnorm = math.sqrt(vnorm)
-		if vnorm == 0 {
-			continue
-		}
-		for i := 0; i < xlen; i += 1 {
-			v[k + i] /= vnorm
-		}
-
+		// Normalize v[k:k+xlen]
 		vk := v[k:k + xlen]
+		vnorm := math.sqrt(dot_simd(vk, vk))
+		if vnorm == 0 {continue}
+		inv_vnorm := 1.0 / vnorm
+		for i in 0 ..< xlen {v[k + i] *= inv_vnorm}
 
-		// 2. Apply H_k to R: R = (I - 2 v vᵀ) R
-		for j := k; j < n; j += 1 {
-			col := make([]f64, xlen, context.temp_allocator)
-			for i := 0; i < xlen; i += 1 {
-				col[i] = R.data[(k + i) * n + j]
+		// ================================================================
+		// 2. Apply H_k to R: R = (I - 2*v*vᵀ) * R
+		//    Reformulated as row-wise rank-1 update (row-major friendly)
+		// ================================================================
+
+		w_len := n - k
+		// Compute w = R[k:m, k:n]ᵀ * v[k:m]
+		for j in 0 ..< w_len {
+			for i in 0 ..< xlen {
+				col_buf[i] = R.data[(k + i) * n + (k + j)]
 			}
+			w[j] = dot_simd(vk, col_buf[0:xlen])
+		}
 
-			alpha := 2.0 * dot_simd(vk, col)
-
-			for i := 0; i < xlen; i += 1 {
-				R.data[(k + i) * n + j] -= alpha * v[k + i]
+		// Apply: R[k:m, k:n] -= 2 * outer(v[k:m], w[0:w_len])
+		// KEY: updating ROWS → contiguous memory in row-major!
+		for i in 0 ..< xlen {
+			row_start := (k + i) * n + k
+			row_seg := R.data[row_start:row_start + w_len]
+			scalar := 2.0 * v[k + i]
+			if scalar != 0.0 {
+				axpy_simd(-scalar, w[0:w_len], row_seg)
 			}
 		}
 
-		// 3. Apply H_kᵀ on the RIGHT of Q: Q = Q (I - 2 v vᵀ)
-		//    i.e. operate on rows of Q
-		for i := 0; i < m; i += 1 {
-			// row segment Q[i, k:m]
-			row := make([]f64, xlen, context.temp_allocator)
-			for j := 0; j < xlen; j += 1 {
-				row[j] = Q.data[i * m + (k + j)]
+		// ================================================================
+		// 3. Apply H_kᵀ to Q: Q = Q * (I - 2*v*vᵀ)  (if computing Q)
+		// ================================================================
+
+		if config.compute_q {
+			// Compute u = Q * v[k:m] (only columns k:m matter)
+			for i in 0 ..< m {
+				row_seg := Q.data[i * m + k:i * m + m]
+				u[i] = dot_simd(row_seg[0:xlen], vk)
 			}
-
-			tau := 2.0 * dot_simd(row, vk)
-
-			for j := 0; j < xlen; j += 1 {
-				Q.data[i * m + (k + j)] -= tau * v[k + j]
+			// Apply: Q -= 2 * outer(u, v[k:m])
+			for i in 0 ..< m {
+				row_seg := Q.data[i * m + k:i * m + k + xlen]
+				scalar := 2.0 * u[i]
+				if scalar != 0.0 {
+					axpy_simd(-scalar, vk, row_seg)
+				}
 			}
 		}
 	}
@@ -116,7 +134,9 @@ qr_decompose :: proc(
 	return
 }
 
-
+// ============================================================================
+// Upper triangular solve (unchanged from your original)
+// ============================================================================
 upper_tri_solve :: proc(
 	R: ^Matrix(f64),
 	b: []f64,
@@ -124,8 +144,6 @@ upper_tri_solve :: proc(
 ) -> []f64 {
 	n := len(b)
 	x := make([]f64, n, allocator)
-
-	// R is m x n, but we only use the leading n x n upper triangle
 	for i := n - 1; i >= 0; i -= 1 {
 		sum := b[i]
 		for j := i + 1; j < n; j += 1 {
@@ -134,6 +152,5 @@ upper_tri_solve :: proc(
 		sum /= R.data[i * R.cols + i]
 		x[i] = sum
 	}
-
 	return x
 }

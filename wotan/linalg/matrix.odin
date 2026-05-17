@@ -14,6 +14,7 @@ Matrix :: struct($T: typeid) {
 	cols:      int,
 	data:      []T,
 	allocator: mem.Allocator,
+	stride:    int,
 }
 
 // ------------------------------------------------------------
