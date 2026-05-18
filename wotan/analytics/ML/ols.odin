@@ -80,7 +80,8 @@ ols_from_df :: proc(
 	y := l.vector_from_df(df, y_name, allocator)
 
 	return ols_fit(&X, y, method, allocator)
-}; ols_fit_full :: proc(
+}
+ols_fit_full :: proc(
 	X: ^l.Matrix(f64),
 	y: []f64,
 	method: OLSMethod = .Cholesky,
@@ -91,76 +92,114 @@ ols_from_df :: proc(
 	n := X.rows
 	p := X.cols
 
-	// 1. XtX and Xty (still needed for vcov etc.)
-	XtX := l.xtx_simd(X, allocator)
-	Xty := l.xty(X, y, allocator)
-
-	// 2. β: choose solver
+	// =====================================================================
+	// 1. Solve for beta + residuals
+	// =====================================================================
 	beta: []f64
-	switch method {
-	case .Cholesky:
+	residuals: []f64
+
+	if method == .QR {
+		// Use lstsq for QR path (auto-selects best QR variant)
+		lstsq_res := l.lstsq(X, y, .QR, allocator)
+		// Transfer ownership: OLSResult now owns these slices
+		beta = lstsq_res.beta
+		residuals = lstsq_res.residuals
+	} else {
+		// Use original, proven Cholesky path
+		XtX := l.xtx_simd(X, allocator)
+		Xty := l.xty(X, y, allocator)
 		beta = l.solve_spd_cholesky(&XtX, Xty, .Blocked, allocator)
+		mem.free(transmute(rawptr)&Xty[0], allocator)
 
-	case .QR:
-		// QR decomposition of X
-		Q, R := l.qr_decompose(X, .Blocked, allocator)
-		// Q is m x m, R is m x p (we use leading p x p of R and first p columns of Q)
-
-		// Compute b = Q₁ᵀ y, where Q₁ = first p columns of Q
-		b := make([]f64, p, allocator)
-		for j := 0; j < p; j += 1 {
-			sum := 0.0
-			for i := 0; i < n; i += 1 {
-				sum += Q.data[i * Q.cols + j] * y[i]
-			}
-			b[j] = sum
+		// Compute residuals manually
+		fitted_tmp := l.matvec_dyn_simd(X, beta, allocator)
+		residuals = make([]f64, n, allocator)
+		for i in 0 ..< n {
+			residuals[i] = y[i] - fitted_tmp[i]
 		}
-
-		// Solve R₁ β = b (upper triangular, leading p x p block)
-		beta = l.upper_tri_solve(&R, b, allocator)
+		mem.free(transmute(rawptr)&fitted_tmp[0], allocator)
 	}
 
-	// 3. fitted
-	fitted := l.matvec_dyn_simd(X, beta, allocator)
-
-	// 4. residuals
-	residuals := make([]f64, n, allocator)
-	for i := 0; i < n; i += 1 {
-		residuals[i] = y[i] - fitted[i]
+	// =====================================================================
+	// 2. Fitted values
+	// =====================================================================
+	fitted := make([]f64, n, allocator)
+	for i in 0 ..< n {
+		fitted[i] = y[i] - residuals[i]
 	}
 
-	// 5. σ²
+	// =====================================================================
+	// 3. Compute XtX for vcov (still needed for inference)
+	// =====================================================================
+	XtX := l.xtx_simd(X, allocator)
+	defer l.matrix_free(&XtX)
+
+	// =====================================================================
+	// 4. σ² = RSS / (n - p)
+	// =====================================================================
 	rss := l.dot_simd(residuals, residuals)
 	sigma2 := rss / f64(n - p)
 
-	// 6. XtX⁻¹
-	XtX_inv := l.spd_inverse(&XtX, .Blocked, allocator)
-
-	// 7. vcov = σ² * XtX⁻¹
+	// =====================================================================
+	// 5. vcov = σ² * (XtX)⁻¹ via Cholesky inversion
+	// =====================================================================
 	vcov := l.matrix_new(f64, p, p, allocator)
-	for i := 0; i < p * p; i += 1 {
-		vcov.data[i] = XtX_inv.data[i] * sigma2
+
+	is_spd := true
+	for j in 0 ..< p {
+		if XtX.data[j * XtX.cols + j] <= 0.0 {
+			is_spd = false
+			break
+		}
 	}
 
-	// 8. stderr
+	if is_spd {
+		L := l.matrix_new(f64, p, p, allocator)
+		copy(L.data, XtX.data)
+		l.cholesky_decompose(&L)
+
+		e := make([]f64, p, context.temp_allocator)
+		for k in 0 ..< p {
+			for i in 0 ..< p {e[i] = 0.0}
+			e[k] = 1.0
+
+			z := l.forward_subst_unit_lower_simd(&L, e, context.temp_allocator)
+			x := l.back_subst_upper_simd(&L, z, context.temp_allocator)
+
+			for i in 0 ..< p {
+				vcov.data[i * vcov.cols + k] = x[i] * sigma2
+			}
+			mem.free(transmute(rawptr)&z[0], context.temp_allocator)
+			mem.free(transmute(rawptr)&x[0], context.temp_allocator)
+		}
+		l.matrix_free(&L)
+	} else {
+		for i in 0 ..< p * p {vcov.data[i] = 0.0}
+	}
+
+	// =====================================================================
+	// 6-10. Rest unchanged (stderr, tvalues, R², etc.)
+	// =====================================================================
 	stderr := make([]f64, p, allocator)
-	for j := 0; j < p; j += 1 {
+	for j in 0 ..< p {
 		stderr[j] = math.sqrt(vcov.data[j * vcov.cols + j])
 	}
 
-	// 9. t-values
 	tvalues := make([]f64, p, allocator)
-	for j := 0; j < p; j += 1 {
-		tvalues[j] = beta[j] / stderr[j]
+	for j in 0 ..< p {
+		if stderr[j] > 0.0 {
+			tvalues[j] = beta[j] / stderr[j]
+		} else {
+			tvalues[j] = 0.0
+		}
 	}
 
-	// 10. R² and adjusted R²
 	mean_y := 0.0
-	for i := 0; i < n; i += 1 do mean_y += y[i]
+	for i in 0 ..< n {mean_y += y[i]}
 	mean_y /= f64(n)
 
 	tss := 0.0
-	for i := 0; i < n; i += 1 {
+	for i in 0 ..< n {
 		dy := y[i] - mean_y
 		tss += dy * dy
 	}
@@ -168,21 +207,21 @@ ols_from_df :: proc(
 	r2 := 1.0 - rss / tss
 	r2_adj := 1.0 - (1.0 - r2) * (f64(n - 1) / f64(n - p))
 
-	// 11. F-statistic
-	fstat := (r2 / f64(p)) / ((1.0 - r2) / f64(n - p))
+	fstat := f64(0.0)
+	if r2 < 1.0 && n > p {
+		fstat = (r2 / f64(p)) / ((1.0 - r2) / f64(n - p))
+	}
 
-	// 12. Confidence intervals (95%)
-	tcrit := 1.96
+	tcrit := f64(1.96)
 	ci_low := make([]f64, p, allocator)
 	ci_high := make([]f64, p, allocator)
-	for j := 0; j < p; j += 1 {
+	for j in 0 ..< p {
 		delta := tcrit * stderr[j]
 		ci_low[j] = beta[j] - delta
 		ci_high[j] = beta[j] + delta
 	}
 
-	// 13. Package result
-	res: OLSResult
+	res := OLSResult{}
 	res.beta = beta
 	res.vcov = vcov
 	res.stderr = stderr
