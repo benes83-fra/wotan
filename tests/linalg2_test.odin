@@ -1,10 +1,10 @@
 package tests
 
+import ml "../wotan/analytics/ML"
 import l "../wotan/linalg"
 import "core:fmt"
 import "core:math"
 import "core:mem"
-
 // Utility
 
 
@@ -442,4 +442,28 @@ eigh_cond_full_test :: proc(allocator: mem.Allocator = context.allocator) {
 	cond2_svd_rank_deficient_test(allocator)
 
 	fmt.println("=== EIGH + COND TESTS PASSED ===")
+}
+
+
+wls_test :: proc(allocator: mem.Allocator = context.allocator) {
+	fmt.println("=== WLS TEST ===")
+
+	// Simple weighted regression: y = 3 + 2*x + noise
+	// Give more weight to precise observations
+	X := l.matrix_new(f64, 4, 2, allocator)
+	defer l.matrix_free(&X)
+	X.data = {1, 1, 1, 2, 1, 3, 1, 4} // intercept + x
+
+	y := []f64{5, 7, 9, 11} // perfect fit: y = 3 + 2*x
+	weights := []f64{1, 1, 100, 100} // trust last 2 obs more
+
+	res := ml.wls_fit(&X, y, weights, .Cholesky, allocator)
+	//defer ml._ols_result_free(&res, allocator) // your existing cleanup
+
+	fmt.printf("WLS beta = %v (expected ~[3, 2])\n", res.beta)
+	// With high weights on last 2 points, should still get ~[3, 2]
+
+	assert_close(res.beta[0], 3.0, 1e-6, "WLS intercept")
+	assert_close(res.beta[1], 2.0, 1e-6, "WLS slope")
+	fmt.println("WLS test OK")
 }
