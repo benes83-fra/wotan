@@ -26,7 +26,7 @@ wls_fit :: proc(
 	// Transform: X_w = √W * X, y_w = √W * y
 	X_w := l.matrix_new(f64, n, p, allocator)
 	y_w := make([]f64, n, allocator)
-
+	defer delete(y_w, allocator)
 	for i in 0 ..< n {
 		sqrt_w := math.sqrt(weights[i])
 		for j in 0 ..< p {
@@ -40,7 +40,7 @@ wls_fit :: proc(
 
 	// Cleanup transformed inputs
 	l.matrix_free(&X_w)
-	mem.free(transmute(rawptr)&y_w[0], allocator)
+	//mem.free(transmute(rawptr)&y_w[0], allocator)
 
 	return result
 }

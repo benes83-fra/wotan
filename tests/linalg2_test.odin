@@ -467,3 +467,40 @@ wls_test :: proc(allocator: mem.Allocator = context.allocator) {
 	assert_close(res.beta[1], 2.0, 1e-6, "WLS slope")
 	fmt.println("WLS test OK")
 }
+gls_test :: proc(allocator: mem.Allocator = context.allocator) {
+	fmt.println("=== GLS TEST ===")
+
+	// Simple case: Ω = I (identity) → GLS = OLS
+	// y = 3 + 2*x + ε, ε ~ N(0, I)
+	X := l.matrix_new(f64, 3, 2, allocator)
+	defer l.matrix_free(&X)
+	X.data = {1, 1, 1, 2, 1, 3} // intercept + x
+
+	y := []f64{5, 7, 9} // perfect fit
+
+	// Ω = I (identity covariance)
+	Omega := l.matrix_new(f64, 3, 3, allocator)
+	defer l.matrix_free(&Omega)
+	for i in 0 ..< 3 {Omega.data[i * Omega.cols + i] = 1.0}
+
+	res := ml.gls_fit(&X, y, &Omega, .Cholesky, allocator)
+	// defer _ols_result_free(&res, allocator)
+
+	fmt.printf("GLS beta  (Ω=I) = %v (expected ~[3, 2])\n", res.beta)
+	assert_close(res.beta[0], 3.0, 1e-9, "GLS intercept")
+	assert_close(res.beta[1], 2.0, 1e-9, "GLS slope")
+
+	// Test with non-identity Ω (correlated errors)
+	// Ω = [[2, 1, 0], [1, 2, 1], [0, 1, 2]] (SPD tridiagonal)
+	Omega2 := l.matrix_new(f64, 3, 3, allocator)
+	defer l.matrix_free(&Omega2)
+	Omega2.data = {2, 1, 0, 1, 2, 1, 0, 1, 2}
+
+	res2 := ml.gls_fit(&X, y, &Omega2, .QR, allocator)
+	// defer _ols_result_free(&res2, allocator)
+
+	fmt.printf("GLS beta (correlated Ω) = %v\n", res2.beta)
+	// Should still be close to [3, 2] for this perfect-fit case
+
+	fmt.println("GLS test OK")
+}

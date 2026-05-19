@@ -237,3 +237,39 @@ ols_fit_full :: proc(
 
 	return res
 }
+
+
+// Free OLSResult fields (call when done)
+_ols_result_free :: proc(res: ^OLSResult, allocator: mem.Allocator) {
+	if len(res.beta) > 0 {
+		defer delete(res.beta, allocator)
+		// mem.free(transmute(rawptr) &res.beta[0], allocator)
+	}
+	if len(res.residuals) > 0 {
+		defer delete(res.residuals, allocator)
+		// mem.free(transmute(rawptr) &res.residuals[0], allocator)
+	}
+	if len(res.stderr) > 0 {
+		defer delete(res.stderr, allocator)
+		// mem.free(transmute(rawptr) &res.stderr[0], allocator)
+	}
+	if len(res.tvalues) > 0 {
+		defer delete(res.tvalues, allocator)
+		// mem.free(transmute(rawptr) &res.tvalues[0], allocator)
+	}
+	if len(res.fitted) > 0 {
+		defer delete(res.fitted, allocator)
+		// mem.free(transmute(rawptr) &res.fitted[0], allocator)
+	}
+	if len(res.ci_low) > 0 {
+		defer delete(res.ci_low, allocator)
+		// mem.free(transmute(rawptr) &res.ci_low[0], allocator)
+	}
+	if len(res.ci_high) > 0 {
+		defer delete(res.ci_high, allocator)
+		// mem.free(transmute(rawptr) &res.ci_high[0], allocator)
+	}
+	if res.vcov.data != nil {
+		l.matrix_free(&res.vcov)
+	}
+}
