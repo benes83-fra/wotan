@@ -390,6 +390,8 @@ main :: proc() {
 	test.cond2_sym_spd_test(context.temp_allocator)
 	test.wls_test(context.temp_allocator)
 	test.gls_test(context.temp_allocator)
+	test.ridge_test(context.temp_allocator)
+	test.lasso_test(context.temp_allocator)
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
 	w.destroy_dataframe(&right2)

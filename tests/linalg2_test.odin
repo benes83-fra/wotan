@@ -4,6 +4,7 @@ import ml "../wotan/analytics/ML"
 import l "../wotan/linalg"
 import "core:fmt"
 import "core:math"
+import "core:math/rand"
 import "core:mem"
 // Utility
 
@@ -503,4 +504,83 @@ gls_test :: proc(allocator: mem.Allocator = context.allocator) {
 	// Should still be close to [3, 2] for this perfect-fit case
 
 	fmt.println("GLS test OK")
+}
+ridge_test :: proc(allocator: mem.Allocator = context.allocator) {
+	fmt.println("=== RIDGE TEST ===")
+
+	// Simple case: y = 3 + 2*x, λ = 0 → should match OLS
+	X := l.matrix_new(f64, 3, 2, allocator)
+	defer l.matrix_free(&X)
+	X.data = {1, 1, 1, 2, 1, 3} // intercept + x
+
+	y := []f64{5, 7, 9} // perfect fit
+
+	// λ = 0 → Ridge = OLS
+	res := ml.ridge_fit(&X, y, 0.0, .Cholesky, allocator)
+	// defer _ols_result_free(&res, allocator)
+
+	fmt.printf("Ridge beta ( λ = 0 ) = %v (expected ~[3, 2])\n", res.beta)
+	assert_close(res.beta[0], 3.0, 1e-9, "Ridge intercept  λ = 0")
+	assert_close(res.beta[1], 2.0, 1e-9, "Ridge slope λ = 0")
+
+	// λ > 0 → coefficients shrink toward zero
+	res2 := ml.ridge_fit(&X, y, 1.0, .Cholesky, allocator)
+	// defer _ols_result_free(&res2, allocator)
+
+	fmt.printf("Ridge beta  ( λ = 1) = %v (shrunk toward 0)\n", res2.beta)
+	// With λ=1, expect |β| < |OLS β| (but still close for this perfect-fit case)
+
+	fmt.println("Ridge test OK")
+}
+
+lasso_test :: proc(allocator: mem.Allocator = context.allocator) {
+	fmt.println("=== LASSO TEST ===")
+
+	// Simple case: y = 3 + 2*x, λ = 0 → should match OLS
+	X := l.matrix_new(f64, 3, 2, allocator)
+	defer l.matrix_free(&X)
+	X.data = {1, 1, 1, 2, 1, 3} // intercept + x
+
+	y := []f64{5, 7, 9} // perfect fit
+
+	// λ = 0 → Lasso = OLS (no penalty)
+	res := ml.lasso_fit(&X, y, 0.0, 1000, 1e-4, allocator)
+	// defer _ols_result_free(&res, allocator)
+
+	fmt.printf("Lasso beta (λ=0) = %v (expected ~[3, 2])\n", res.beta)
+	assert_close(res.beta[0], 3.0, 1e-6, "Lasso intercept λ=0")
+	assert_close(res.beta[1], 2.0, 1e-6, "Lasso slope λ=0")
+
+	// λ > 0 → coefficients shrink, some may become exactly 0
+	// For this perfect-fit case with small n, λ=10 should shrink heavily
+	res2 := ml.lasso_fit(&X, y, 10.0, 1000, 1e-4, allocator)
+	// defer _ols_result_free(&res2, allocator)
+
+	fmt.printf("Lasso beta (λ=10) = %v (shrunk, possibly sparse)\n", res2.beta)
+	// With high λ, expect coefficients closer to 0 (may be exactly 0)
+
+	// Test sparsity: with larger λ, some coefficients should be exactly 0
+	X3 := l.matrix_new(f64, 10, 4, allocator) // More features, some irrelevant
+	defer l.matrix_free(&X3)
+	// Fill X3: first 2 cols relevant, last 2 noise
+	for i in 0 ..< 10 {
+		X3.data[i * 4 + 0] = 1.0 // intercept
+		X3.data[i * 4 + 1] = f64(i + 1) // relevant: x
+		X3.data[i * 4 + 2] = rand.float64_uniform(0.0, 1.0) // noise
+		X3.data[i * 4 + 3] = rand.float64_uniform(0.0, 1.0) // noise
+	}
+	y3 := make([]f64, 10, allocator)
+	for i in 0 ..< 10 {
+		y3[i] = 3.0 + 2.0 * f64(i + 1) + 0.1 * rand.float64_uniform(0.0, 1.0) // true model: intercept + x
+	}
+	defer delete(y3)
+
+	res3 := ml.lasso_fit(&X3, y3, 1.0, 1000, 1e-4, allocator)
+	// defer _ols_result_free(&res3, allocator)
+
+	fmt.printf("Lasso beta (sparse test) = %v\n", res3.beta)
+	// Expect beta[2] and/or beta[3] to be exactly 0 (noise features)
+	// beta[0] ≈ 3, beta[1] ≈ 2 (signal features)
+
+	fmt.println("Lasso test OK")
 }
