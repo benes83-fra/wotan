@@ -551,14 +551,14 @@ lasso_test :: proc(allocator: mem.Allocator = context.allocator) {
 	assert_close(res.beta[1], 2.0, 1e-3, "Lasso slope λ=0")
 
 	// Test 2: λ>0 should shrink coefficients (key Lasso property)
-	X2 := l.matrix_new(f64, 10, 2, allocator)  // More samples
+	X2 := l.matrix_new(f64, 10, 2, allocator) // More samples
 	defer l.matrix_free(&X2)
-	for i in 0..<10 {
-		X2.data[i * 2 + 0] = 1.0  // intercept
-		X2.data[i * 2 + 1] = f64(i + 1)  // x = 1,2,...,10
+	for i in 0 ..< 10 {
+		X2.data[i * 2 + 0] = 1.0 // intercept
+		X2.data[i * 2 + 1] = f64(i + 1) // x = 1,2,...,10
 	}
 	y2 := make([]f64, 10, allocator)
-	for i in 0..<10 {
+	for i in 0 ..< 10 {
 		// True model: y = 3 + 2*x + small noise
 		noise := rand.float64_uniform(-0.1, 0.1)
 		y2[i] = 3.0 + 2.0 * f64(i + 1) + noise
@@ -570,7 +570,7 @@ lasso_test :: proc(allocator: mem.Allocator = context.allocator) {
 	// defer _ols_result_free(&res2, allocator)
 
 	fmt.printf("Lasso beta (λ=1, n=10) = %v\n", res2.beta)
-	
+
 	// Check that at least one coefficient shrank (more robust than both)
 	intercept_shrunk := math.abs(res2.beta[0]) < 3.0
 	slope_shrunk := math.abs(res2.beta[1]) < 2.0
@@ -578,18 +578,18 @@ lasso_test :: proc(allocator: mem.Allocator = context.allocator) {
 
 	// Test 3: Sparsity - noise features should be zeroed with sufficient λ
 	// Create dataset with 2 signal + 2 noise features
-	X3 := l.matrix_new(f64, 20, 4, allocator)  // More samples for stability
+	X3 := l.matrix_new(f64, 20, 4, allocator) // More samples for stability
 	defer l.matrix_free(&X3)
-	
-	for i in 0..<20 {
-		X3.data[i * 4 + 0] = 1.0  // intercept
-		X3.data[i * 4 + 1] = f64(i + 1)  // signal feature
-		X3.data[i * 4 + 2] = rand.float64_uniform(-1.0, 1.0)  // noise
-		X3.data[i * 4 + 3] = rand.float64_uniform(-1.0, 1.0)  // noise
+
+	for i in 0 ..< 20 {
+		X3.data[i * 4 + 0] = 1.0 // intercept
+		X3.data[i * 4 + 1] = f64(i + 1) // signal feature
+		X3.data[i * 4 + 2] = rand.float64_uniform(-1.0, 1.0) // noise
+		X3.data[i * 4 + 3] = rand.float64_uniform(-1.0, 1.0) // noise
 	}
-	
+
 	y3 := make([]f64, 20, allocator)
-	for i in 0..<20 {
+	for i in 0 ..< 20 {
 		// True model: only intercept + signal feature matter
 		noise := rand.float64_uniform(-0.05, 0.05)
 		y3[i] = 3.0 + 2.0 * f64(i + 1) + noise
@@ -597,18 +597,165 @@ lasso_test :: proc(allocator: mem.Allocator = context.allocator) {
 	// defer delete(y3)
 
 	// Use moderate λ to induce sparsity
-	res3 := ml.lasso_fit(&X3, y3, 0.5, 2000, 1e-5, allocator)  // More iterations, tighter tol
+	res3 := ml.lasso_fit(&X3, y3, 0.5, 2000, 1e-5, allocator) // More iterations, tighter tol
 	// defer _ols_result_free(&res3, allocator)
 
 	fmt.printf("Lasso beta (sparsity test) = %v\n", res3.beta)
-	
+
 	// Key assertion: noise features (indices 2,3) should be exactly 0 or very small
 	assert(math.abs(res3.beta[2]) < 1e-6 || res3.beta[2] == 0.0, "Lasso sparsity: noise feature 1")
 	assert(math.abs(res3.beta[3]) < 1e-6 || res3.beta[3] == 0.0, "Lasso sparsity: noise feature 2")
-	
+
 	// Signal features should still be non-zero and close to true values
 	assert(math.abs(res3.beta[0] - 3.0) < 0.5, "Lasso signal: intercept")
 	assert(math.abs(res3.beta[1] - 2.0) < 0.5, "Lasso signal: slope")
 
 	fmt.println("Lasso test OK")
+}
+kron_test :: proc(allocator: mem.Allocator = context.allocator) {
+	fmt.println("=== KRONECKER TEST ===")
+
+	// Test 1: Simple 2×2 ⊗ 2×2
+	A := l.matrix_new(f64, 2, 2, allocator)
+	defer l.matrix_free(&A)
+	A.data = {1, 2, 3, 4}
+
+	B := l.matrix_new(f64, 2, 2, allocator)
+	defer l.matrix_free(&B)
+	B.data = {0, 1, 2, 3}
+
+	C := l.kron_simd(&A, &B, allocator)
+	defer l.matrix_free(&C)
+
+	expected := []f64{0, 1, 0, 2, 2, 3, 4, 6, 0, 3, 0, 4, 6, 9, 8, 12}
+	for i in 0 ..< 16 {
+		assert_close(
+			C.data[i],
+			expected[i],
+			1e-10,
+			fmt.aprintf("kron[%d]", i, allocator = allocator),
+		)
+	}
+	fmt.println("Kron 2x2 ⊗ 2x2: OK ✅")
+
+	// Test 2: Identity ⊗ B = block diagonal with B
+	// I is 3×3, B is 2×2 → result D is 6×6 (stride = 6)
+	I := l.matrix_new(f64, 3, 3, allocator)
+	defer l.matrix_free(&I)
+	for i in 0 ..< 3 {I.data[i * 3 + i] = 1.0}
+
+	D := l.kron_simd(&I, &B, allocator)
+	defer l.matrix_free(&D)
+
+	// D is 6×6: index = row * 6 + col
+	// Block structure: [B, 0, 0; 0, B, 0; 0, 0, B]
+
+	// First block (top-left): rows 0-1, cols 0-1
+	// B = [[0,1], [2,3]]
+	assert_close(D.data[0 * 6 + 0], 0.0, 1e-10, "block[0] B[0,0]") // row=0,col=0
+	assert_close(D.data[0 * 6 + 1], 1.0, 1e-10, "block[0] B[0,1]") // row=0,col=1
+	assert_close(D.data[1 * 6 + 0], 2.0, 1e-10, "block[0] B[1,0]") // row=1,col=0 ← THIS WAS THE BUG
+	assert_close(D.data[1 * 6 + 1], 3.0, 1e-10, "block[0] B[1,1]") // row=1,col=1
+
+	// Second block (middle): rows 2-3, cols 2-3
+	assert_close(D.data[2 * 6 + 2], 0.0, 1e-10, "block[1] B[0,0]")
+	assert_close(D.data[2 * 6 + 3], 1.0, 1e-10, "block[1] B[0,1]")
+	assert_close(D.data[3 * 6 + 2], 2.0, 1e-10, "block[1] B[1,0]")
+	assert_close(D.data[3 * 6 + 3], 3.0, 1e-10, "block[1] B[1,1]")
+
+	// Off-diagonal blocks should be zero (e.g., row=0, col=2-3)
+	assert_close(D.data[0 * 6 + 2], 0.0, 1e-10, "off-diag zero")
+	assert_close(D.data[0 * 6 + 3], 0.0, 1e-10, "off-diag zero")
+
+	fmt.println("Kron I₃ ⊗ B: OK ✅")
+
+	// Test 3: Sparsity - zero in A should produce zero block
+	A2 := l.matrix_new(f64, 2, 2, allocator)
+	defer l.matrix_free(&A2)
+	A2.data = {1, 0, 0, 1} // Only diagonal non-zero
+
+	C2 := l.kron_simd(&A2, &B, allocator)
+	defer l.matrix_free(&C2)
+
+	// C2 is 4×4: stride = 4
+	// Structure: [B, 0; 0, B]
+
+	// Top-right block (rows 0-1, cols 2-3) should be zero
+	for ii in 0 ..< 2 {
+		for jj in 0 ..< 2 {
+			row := ii
+			col := 2 + jj
+			idx := row * 4 + col
+			assert_close(
+				C2.data[idx],
+				0.0,
+				1e-10,
+				fmt.aprintf("zero block top-right[%d,%d]", ii, jj, allocator = allocator),
+			)
+		}
+	}
+
+	// Bottom-left block (rows 2-3, cols 0-1) should be zero
+	for ii in 0 ..< 2 {
+		for jj in 0 ..< 2 {
+			row := 2 + ii
+			col := jj
+			idx := row * 4 + col
+			assert_close(
+				C2.data[idx],
+				0.0,
+				1e-10,
+				fmt.aprintf("zero block bottom-left[%d,%d]", ii, jj, allocator = allocator),
+			)
+		}
+	}
+
+	fmt.println("Kron sparsity: OK ✅")
+
+	fmt.println("=== ALL KRONECKER TESTS PASSED ===")
+}
+gls_kron_test :: proc(allocator: mem.Allocator = context.allocator) {
+	fmt.println("=== GLS KRONECKER TEST ===")
+
+	// Simple case: Ω = I₂ ⊗ I₃ = I₆ (identity) → GLS = OLS
+	X := l.matrix_new(f64, 6, 2, allocator)
+	defer l.matrix_free(&X)
+	for i in 0 ..< 6 {
+		X.data[i * 2 + 0] = 1.0 // intercept
+		X.data[i * 2 + 1] = f64(i + 1) // x = 1,2,...,6
+	}
+	y := []f64{5, 7, 9, 11, 13, 15} // y = 3 + 2*x
+
+	// Omega = I₂ ⊗ I₃
+	I2 := l.matrix_new(f64, 2, 2, allocator)
+	defer l.matrix_free(&I2)
+	for i in 0 ..< 2 {I2.data[i * 2 + i] = 1.0}
+
+	I3 := l.matrix_new(f64, 3, 3, allocator)
+	defer l.matrix_free(&I3)
+	for i in 0 ..< 3 {I3.data[i * 3 + i] = 1.0}
+
+	// Call NEW Kronecker GLS function
+	res := ml.gls_fit_kron(&X, y, &I2, &I3, .QR, allocator)
+	// defer _ols_result_free(&res, allocator)
+
+	fmt.printf("GLS-Kron beta (I⊗I) = %v (expected ~[3, 2])\n", res.beta)
+	assert_close(res.beta[0], 3.0, 1e-9, "GLS-Kron intercept")
+	assert_close(res.beta[1], 2.0, 1e-9, "GLS-Kron slope")
+
+	// Test with non-identity separable Omega
+	A := l.matrix_new(f64, 2, 2, allocator)
+	defer l.matrix_free(&A)
+	A.data = {2, 1, 1, 2}
+
+	B := l.matrix_new(f64, 2, 2, allocator)
+	defer l.matrix_free(&B)
+	B.data = {1, 0.5, 0.5, 1}
+
+	res2 := ml.gls_fit_kron(&X, y, &A, &B, .QR, allocator)
+	// defer _ols_result_free(&res2, allocator)
+
+	fmt.printf("GLS-Kron beta (separable Ω) = %v\n", res2.beta)
+
+	fmt.println("GLS Kronecker test OK ✅")
 }

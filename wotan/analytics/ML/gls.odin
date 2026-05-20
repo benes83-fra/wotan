@@ -87,3 +87,128 @@ gls_fit :: proc(
 
 	return result
 }
+// ============================================================================
+// GLS with Kronecker-structured Omega: Omega = A ⊗ B
+// ============================================================================
+gls_fit_kron :: proc(
+	X: ^l.Matrix(f64),
+	y: []f64,
+	Omega_A: ^l.Matrix(f64), // First factor (m×m SPD)
+	Omega_B: ^l.Matrix(f64), // Second factor (n×n SPD)
+	method: OLSMethod = .Cholesky,
+	allocator: mem.Allocator = context.allocator,
+) -> OLSResult {
+	n, p := X.rows, X.cols
+	m := Omega_A.rows
+	k := Omega_B.rows
+
+	if m * k != n do panic("gls_fit_kron: dimensions mismatch (A.rows * B.rows must equal X.rows)")
+	if len(y) != n do panic("gls_fit_kron: y length mismatch")
+
+	// Cholesky decompose factors
+	L_A := l.matrix_new(f64, m, m, allocator)
+	copy(L_A.data, Omega_A.data)
+	l.cholesky_decompose(&L_A)
+	defer l.matrix_free(&L_A)
+
+	L_B := l.matrix_new(f64, k, k, allocator)
+	copy(L_B.data, Omega_B.data)
+	l.cholesky_decompose(&L_B)
+	defer l.matrix_free(&L_B)
+
+	// Transform y: y_star = (L_A ⊗ L_B)⁻¹ y
+	y_star := _kron_solve_lower(&L_A, &L_B, y, allocator)
+	defer delete(y_star, allocator)
+
+	// Transform X: X_star = (L_A ⊗ L_B)⁻¹ X
+	X_star := l.matrix_new(f64, n, p, allocator)
+	for j in 0 ..< p {
+		x_col := make([]f64, n, context.temp_allocator)
+		for i in 0 ..< n {x_col[i] = X.data[i * X.cols + j]}
+
+		x_star_col := _kron_solve_lower(&L_A, &L_B, x_col, context.temp_allocator)
+
+		for i in 0 ..< n {X_star.data[i * X_star.cols + j] = x_star_col[i]}
+		delete(x_col, context.temp_allocator)
+		delete(x_star_col, context.temp_allocator)
+	}
+
+	// Solve OLS on transformed data
+	result := ols_fit_full(&X_star, y_star, method, allocator)
+
+	// Cleanup
+	l.matrix_free(&X_star)
+	return result
+}
+// ============================================================================
+// Solve (L_A ⊗ L_B) x = y for x, where L_A, L_B are lower triangular
+// Uses the identity: vec(L_B⁻¹ * mat(y) * L_A⁻ᵀ) = (L_A ⊗ L_B)⁻¹ vec(mat(y))
+// ============================================================================
+_kron_solve_lower :: proc(
+	L_A: ^l.Matrix(f64), // m×m lower triangular
+	L_B: ^l.Matrix(f64), // n×n lower triangular
+	y: []f64, // length m*n, column-major vectorization
+	allocator: mem.Allocator,
+) -> []f64 {
+	m := L_A.rows
+	n := L_B.rows
+
+	// Reshape y into n×m matrix (column-major: y[i + j*n] = Y[j,i])
+	Y := l.matrix_new(f64, n, m, context.temp_allocator)
+	for j in 0 ..< m {
+		for i in 0 ..< n {
+			Y.data[i * Y.cols + j] = y[j * n + i]
+		}
+	}
+
+	// Step 1: Solve L_B * Z = Y  (forward substitution on rows)
+	Z := l.matrix_new(f64, n, m, context.temp_allocator)
+	for col in 0 ..< m {
+		y_col := make([]f64, n, context.temp_allocator)
+		for i in 0 ..< n {y_col[i] = Y.data[i * Y.cols + col]}
+
+		z_col := l.forward_subst_unit_lower_simd(L_B, y_col, context.temp_allocator)
+
+		for i in 0 ..< n {Z.data[i * Z.cols + col] = z_col[i]}
+		delete(y_col, context.temp_allocator)
+		delete(z_col, context.temp_allocator)
+	}
+
+	// Step 2: Solve Z * L_Aᵀ = X  →  Xᵀ = L_A⁻¹ * Zᵀ
+	// Transpose Z for easier column-wise solve
+	ZT := l.matrix_new(f64, m, n, context.temp_allocator)
+	for i in 0 ..< n {
+		for j in 0 ..< m {
+			ZT.data[i * ZT.cols + j] = Z.data[j * ZT.cols + i]
+		}
+	}
+
+	// Solve L_A * XT = ZT  (forward substitution on columns of ZT)
+	XT := l.matrix_new(f64, m, n, context.temp_allocator)
+	for col in 0 ..< n {
+		z_col := make([]f64, m, context.temp_allocator)
+		for i in 0 ..< m {z_col[i] = ZT.data[i * ZT.cols + col]}
+
+		x_col := l.forward_subst_unit_lower_simd(L_A, z_col, context.temp_allocator)
+
+		for i in 0 ..< m {XT.data[i * XT.cols + col] = x_col[i]}
+		delete(z_col, context.temp_allocator)
+		delete(x_col, context.temp_allocator)
+	}
+
+	// Vectorize result (column-major)
+	x := make([]f64, m * n, allocator)
+	for j in 0 ..< m {
+		for i in 0 ..< n {
+			x[j * n + i] = XT.data[i * XT.cols + j]
+		}
+	}
+
+	// Cleanup
+	l.matrix_free(&Y)
+	l.matrix_free(&Z)
+	l.matrix_free(&ZT)
+	l.matrix_free(&XT)
+
+	return x
+}

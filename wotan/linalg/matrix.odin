@@ -286,3 +286,45 @@ correlation :: proc(X: ^Matrix(f64), allocator: mem.Allocator = context.allocato
 
 	return R
 }
+// ============================================================================
+// Kronecker Product: C = A ⊗ B
+// If A is (m×n) and B is (p×q), then C is (m*p × n*q)
+// C[i*p + ii, j*q + jj] = A[i,j] * B[ii,jj]
+// ============================================================================
+kron :: proc(
+	A: ^Matrix(f64),
+	B: ^Matrix(f64),
+	allocator: mem.Allocator = context.allocator,
+) -> Matrix(f64) {
+	m, n := A.rows, A.cols
+	p, q := B.rows, B.cols
+
+	// Result dimensions: (m*p) × (n*q)
+	C := matrix_new(f64, m * p, n * q, allocator)
+
+	// Compute C block-by-block: C[i,j] block = A[i,j] * B
+	for i in 0 ..< m {
+		for j in 0 ..< n {
+			a_ij := A.data[i * A.cols + j]
+			if a_ij == 0.0 {continue} 	// Skip zero blocks (sparse-friendly)
+
+			// Block position in C
+			row_start := i * p
+			col_start := j * q
+
+			// Fill block: C[row_start:row_start+p, col_start:col_start+q] = a_ij * B
+			for ii in 0 ..< p {
+				row_C := row_start + ii
+				row_B := ii * B.cols
+				row_C_start := row_C * C.cols + col_start
+
+				// SIMD-friendly: scale entire row of B by a_ij
+				for jj in 0 ..< q {
+					C.data[row_C_start + jj] = a_ij * B.data[row_B + jj]
+				}
+			}
+		}
+	}
+
+	return C
+}

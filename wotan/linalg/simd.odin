@@ -516,3 +516,41 @@ xtx_blocked_simd :: proc(
 	}
 	return AtA
 }
+// ============================================================================
+// Kronecker Product (SIMD-optimized version)
+// Uses axpy_simd for scaling B rows by A[i,j]
+// ============================================================================
+kron_simd :: proc(
+	A: ^Matrix(f64),
+	B: ^Matrix(f64),
+	allocator: mem.Allocator = context.allocator,
+) -> Matrix(f64) {
+	m, n := A.rows, A.cols
+	p, q := B.rows, B.cols
+
+	C := matrix_new(f64, m * p, n * q, allocator)
+
+	for i in 0 ..< m {
+		for j in 0 ..< n {
+			a_ij := A.data[i * A.cols + j]
+			if a_ij == 0.0 {continue}
+
+			row_start := i * p
+			col_start := j * q
+
+			// Pre-allocate zero row for axpy_simd (y += alpha*x with y=0)
+			for ii in 0 ..< p {
+				row_C := row_start + ii
+				row_B := ii * B.cols
+				row_C_start := row_C * C.cols + col_start
+
+				// Use axpy_simd: C_row += a_ij * B_row
+				// Note: axpy_simd does y += alpha*x, so we need y=0 first
+				// (already zero from matrix_new, so safe)
+				axpy_simd(a_ij, B.data[row_B:row_B + q], C.data[row_C_start:row_C_start + q])
+			}
+		}
+	}
+
+	return C
+}
