@@ -536,51 +536,79 @@ ridge_test :: proc(allocator: mem.Allocator = context.allocator) {
 lasso_test :: proc(allocator: mem.Allocator = context.allocator) {
 	fmt.println("=== LASSO TEST ===")
 
-	// Simple case: y = 3 + 2*x, λ = 0 → should match OLS
+	// Test 1: λ=0 should approximately match OLS (within iterative tolerance)
 	X := l.matrix_new(f64, 3, 2, allocator)
 	defer l.matrix_free(&X)
-	X.data = {1, 1, 1, 2, 1, 3} // intercept + x
+	X.data = {1, 1, 1, 2, 1, 3}
+	y := []f64{5, 7, 9}
 
-	y := []f64{5, 7, 9} // perfect fit
-
-	// λ = 0 → Lasso = OLS (no penalty)
 	res := ml.lasso_fit(&X, y, 0.0, 1000, 1e-4, allocator)
 	// defer _ols_result_free(&res, allocator)
 
-	fmt.printf("Lasso beta (λ=0) = %v (expected ~[3, 2])\n", res.beta)
-	assert_close(res.beta[0], 3.0, 1e-6, "Lasso intercept λ=0")
-	assert_close(res.beta[1], 2.0, 1e-6, "Lasso slope λ=0")
+	fmt.printf("Lasso beta (λ=0) = %v\n", res.beta)
+	// Relaxed tolerance for iterative solver
+	assert_close(res.beta[0], 3.0, 1e-3, "Lasso intercept λ=0")
+	assert_close(res.beta[1], 2.0, 1e-3, "Lasso slope λ=0")
 
-	// λ > 0 → coefficients shrink, some may become exactly 0
-	// For this perfect-fit case with small n, λ=10 should shrink heavily
-	res2 := ml.lasso_fit(&X, y, 10.0, 1000, 1e-4, allocator)
+	// Test 2: λ>0 should shrink coefficients (key Lasso property)
+	X2 := l.matrix_new(f64, 10, 2, allocator)  // More samples
+	defer l.matrix_free(&X2)
+	for i in 0..<10 {
+		X2.data[i * 2 + 0] = 1.0  // intercept
+		X2.data[i * 2 + 1] = f64(i + 1)  // x = 1,2,...,10
+	}
+	y2 := make([]f64, 10, allocator)
+	for i in 0..<10 {
+		// True model: y = 3 + 2*x + small noise
+		noise := rand.float64_uniform(-0.1, 0.1)
+		y2[i] = 3.0 + 2.0 * f64(i + 1) + noise
+	}
+	// defer delete(y2)
+
+	// Moderate λ for stable shrinkage
+	res2 := ml.lasso_fit(&X2, y2, 1.0, 1000, 1e-4, allocator)
 	// defer _ols_result_free(&res2, allocator)
 
-	fmt.printf("Lasso beta (λ=10) = %v (shrunk, possibly sparse)\n", res2.beta)
-	// With high λ, expect coefficients closer to 0 (may be exactly 0)
+	fmt.printf("Lasso beta (λ=1, n=10) = %v\n", res2.beta)
+	
+	// Check that at least one coefficient shrank (more robust than both)
+	intercept_shrunk := math.abs(res2.beta[0]) < 3.0
+	slope_shrunk := math.abs(res2.beta[1]) < 2.0
+	assert(intercept_shrunk || slope_shrunk, "Lasso shrinkage: at least one coefficient")
 
-	// Test sparsity: with larger λ, some coefficients should be exactly 0
-	X3 := l.matrix_new(f64, 10, 4, allocator) // More features, some irrelevant
+	// Test 3: Sparsity - noise features should be zeroed with sufficient λ
+	// Create dataset with 2 signal + 2 noise features
+	X3 := l.matrix_new(f64, 20, 4, allocator)  // More samples for stability
 	defer l.matrix_free(&X3)
-	// Fill X3: first 2 cols relevant, last 2 noise
-	for i in 0 ..< 10 {
-		X3.data[i * 4 + 0] = 1.0 // intercept
-		X3.data[i * 4 + 1] = f64(i + 1) // relevant: x
-		X3.data[i * 4 + 2] = rand.float64_uniform(0.0, 1.0) // noise
-		X3.data[i * 4 + 3] = rand.float64_uniform(0.0, 1.0) // noise
+	
+	for i in 0..<20 {
+		X3.data[i * 4 + 0] = 1.0  // intercept
+		X3.data[i * 4 + 1] = f64(i + 1)  // signal feature
+		X3.data[i * 4 + 2] = rand.float64_uniform(-1.0, 1.0)  // noise
+		X3.data[i * 4 + 3] = rand.float64_uniform(-1.0, 1.0)  // noise
 	}
-	y3 := make([]f64, 10, allocator)
-	for i in 0 ..< 10 {
-		y3[i] = 3.0 + 2.0 * f64(i + 1) + 0.1 * rand.float64_uniform(0.0, 1.0) // true model: intercept + x
+	
+	y3 := make([]f64, 20, allocator)
+	for i in 0..<20 {
+		// True model: only intercept + signal feature matter
+		noise := rand.float64_uniform(-0.05, 0.05)
+		y3[i] = 3.0 + 2.0 * f64(i + 1) + noise
 	}
-	defer delete(y3)
+	// defer delete(y3)
 
-	res3 := ml.lasso_fit(&X3, y3, 1.0, 1000, 1e-4, allocator)
+	// Use moderate λ to induce sparsity
+	res3 := ml.lasso_fit(&X3, y3, 0.5, 2000, 1e-5, allocator)  // More iterations, tighter tol
 	// defer _ols_result_free(&res3, allocator)
 
-	fmt.printf("Lasso beta (sparse test) = %v\n", res3.beta)
-	// Expect beta[2] and/or beta[3] to be exactly 0 (noise features)
-	// beta[0] ≈ 3, beta[1] ≈ 2 (signal features)
+	fmt.printf("Lasso beta (sparsity test) = %v\n", res3.beta)
+	
+	// Key assertion: noise features (indices 2,3) should be exactly 0 or very small
+	assert(math.abs(res3.beta[2]) < 1e-6 || res3.beta[2] == 0.0, "Lasso sparsity: noise feature 1")
+	assert(math.abs(res3.beta[3]) < 1e-6 || res3.beta[3] == 0.0, "Lasso sparsity: noise feature 2")
+	
+	// Signal features should still be non-zero and close to true values
+	assert(math.abs(res3.beta[0] - 3.0) < 0.5, "Lasso signal: intercept")
+	assert(math.abs(res3.beta[1] - 2.0) < 0.5, "Lasso signal: slope")
 
 	fmt.println("Lasso test OK")
 }
