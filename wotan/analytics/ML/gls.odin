@@ -141,66 +141,75 @@ gls_fit_kron :: proc(
 	return result
 }
 // ============================================================================
-// Solve (L_A ⊗ L_B) x = y for x, where L_A, L_B are lower triangular
-// Uses the identity: vec(L_B⁻¹ * mat(y) * L_A⁻ᵀ) = (L_A ⊗ L_B)⁻¹ vec(mat(y))
+// Solve (L_A ⊗ L_B) x = y for x, where L_A (m×m), L_B (n×n) are lower triangular
+// Identity: vec(L_B⁻¹ * Y * L_A⁻ᵀ) = (L_A ⊗ L_B)⁻¹ vec(Y)
+// y is column-major vectorization of Y (n×m): y[j*n + i] = Y[i,j]
 // ============================================================================
 _kron_solve_lower :: proc(
 	L_A: ^l.Matrix(f64), // m×m lower triangular
 	L_B: ^l.Matrix(f64), // n×n lower triangular
-	y: []f64, // length m*n, column-major vectorization
+	y: []f64, // length m*n
 	allocator: mem.Allocator,
 ) -> []f64 {
 	m := L_A.rows
 	n := L_B.rows
 
-	// Reshape y into n×m matrix (column-major: y[i + j*n] = Y[j,i])
+	// Step 1: Reshape y into Y (n×m), column-major: Y[i,j] = y[j*n + i]
 	Y := l.matrix_new(f64, n, m, context.temp_allocator)
 	for j in 0 ..< m {
 		for i in 0 ..< n {
-			Y.data[i * Y.cols + j] = y[j * n + i]
+			Y.data[i * m + j] = y[j * n + i] // Y.cols = m
 		}
 	}
 
-	// Step 1: Solve L_B * Z = Y  (forward substitution on rows)
+	// Step 2: Solve L_B * Z = Y (forward substitution, column by column)
 	Z := l.matrix_new(f64, n, m, context.temp_allocator)
 	for col in 0 ..< m {
 		y_col := make([]f64, n, context.temp_allocator)
-		for i in 0 ..< n {y_col[i] = Y.data[i * Y.cols + col]}
+		for i in 0 ..< n {y_col[i] = Y.data[i * m + col]}
 
 		z_col := l.forward_subst_unit_lower_simd(L_B, y_col, context.temp_allocator)
 
-		for i in 0 ..< n {Z.data[i * Z.cols + col] = z_col[i]}
+		for i in 0 ..< n {Z.data[i * m + col] = z_col[i]}
 		delete(y_col, context.temp_allocator)
 		delete(z_col, context.temp_allocator)
 	}
 
-	// Step 2: Solve Z * L_Aᵀ = X  →  Xᵀ = L_A⁻¹ * Zᵀ
-	// Transpose Z for easier column-wise solve
+	// Step 3: Solve Z * L_Aᵀ = X  ⇔  L_A * Xᵀ = Zᵀ
+	// Transpose Z (n×m) → ZT (m×n)
 	ZT := l.matrix_new(f64, m, n, context.temp_allocator)
 	for i in 0 ..< n {
 		for j in 0 ..< m {
-			ZT.data[i * ZT.cols + j] = Z.data[j * ZT.cols + i]
+			ZT.data[j * n + i] = Z.data[i * m + j] // ZT.cols = n
 		}
 	}
 
-	// Solve L_A * XT = ZT  (forward substitution on columns of ZT)
-	XT := l.matrix_new(f64, m, n, context.temp_allocator)
+	// Solve L_A * W = ZT for W (m×n), column by column
+	W := l.matrix_new(f64, m, n, context.temp_allocator)
 	for col in 0 ..< n {
-		z_col := make([]f64, m, context.temp_allocator)
-		for i in 0 ..< m {z_col[i] = ZT.data[i * ZT.cols + col]}
+		zt_col := make([]f64, m, context.temp_allocator)
+		for i in 0 ..< m {zt_col[i] = ZT.data[i * n + col]}
 
-		x_col := l.forward_subst_unit_lower_simd(L_A, z_col, context.temp_allocator)
+		w_col := l.forward_subst_unit_lower_simd(L_A, zt_col, context.temp_allocator)
 
-		for i in 0 ..< m {XT.data[i * XT.cols + col] = x_col[i]}
-		delete(z_col, context.temp_allocator)
-		delete(x_col, context.temp_allocator)
+		for i in 0 ..< m {W.data[i * n + col] = w_col[i]}
+		delete(zt_col, context.temp_allocator)
+		delete(w_col, context.temp_allocator)
 	}
 
-	// Vectorize result (column-major)
+	// Transpose W (m×n) → X (n×m)
+	X := l.matrix_new(f64, n, m, context.temp_allocator)
+	for i in 0 ..< m {
+		for j in 0 ..< n {
+			X.data[j * m + i] = W.data[i * n + j] // X.cols = m
+		}
+	}
+
+	// Step 4: Vectorize X (n×m) column-major: x[j*n + i] = X[i,j]
 	x := make([]f64, m * n, allocator)
 	for j in 0 ..< m {
 		for i in 0 ..< n {
-			x[j * n + i] = XT.data[i * XT.cols + j]
+			x[j * n + i] = X.data[i * m + j]
 		}
 	}
 
@@ -208,7 +217,8 @@ _kron_solve_lower :: proc(
 	l.matrix_free(&Y)
 	l.matrix_free(&Z)
 	l.matrix_free(&ZT)
-	l.matrix_free(&XT)
+	l.matrix_free(&W)
+	l.matrix_free(&X)
 
 	return x
 }

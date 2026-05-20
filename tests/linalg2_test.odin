@@ -726,7 +726,7 @@ gls_kron_test :: proc(allocator: mem.Allocator = context.allocator) {
 	}
 	y := []f64{5, 7, 9, 11, 13, 15} // y = 3 + 2*x
 
-	// Omega = I₂ ⊗ I₃
+	// Omega = I₂ ⊗ I₃ (2*3 = 6 ✓)
 	I2 := l.matrix_new(f64, 2, 2, allocator)
 	defer l.matrix_free(&I2)
 	for i in 0 ..< 2 {I2.data[i * 2 + i] = 1.0}
@@ -735,7 +735,7 @@ gls_kron_test :: proc(allocator: mem.Allocator = context.allocator) {
 	defer l.matrix_free(&I3)
 	for i in 0 ..< 3 {I3.data[i * 3 + i] = 1.0}
 
-	// Call NEW Kronecker GLS function
+	// Call Kronecker GLS
 	res := ml.gls_fit_kron(&X, y, &I2, &I3, .QR, allocator)
 	// defer _ols_result_free(&res, allocator)
 
@@ -744,18 +744,22 @@ gls_kron_test :: proc(allocator: mem.Allocator = context.allocator) {
 	assert_close(res.beta[1], 2.0, 1e-9, "GLS-Kron slope")
 
 	// Test with non-identity separable Omega
-	A := l.matrix_new(f64, 2, 2, allocator)
-	defer l.matrix_free(&A)
-	A.data = {2, 1, 1, 2}
+	// Must satisfy: A.rows * B.rows = 6
+	// Option 1: 2×2 ⊗ 3×3
+	A2 := l.matrix_new(f64, 2, 2, allocator)
+	defer l.matrix_free(&A2)
+	A2.data = {2, 1, 1, 2} // SPD
 
-	B := l.matrix_new(f64, 2, 2, allocator)
-	defer l.matrix_free(&B)
-	B.data = {1, 0.5, 0.5, 1}
+	B3 := l.matrix_new(f64, 3, 3, allocator)
+	defer l.matrix_free(&B3)
+	// Simple SPD tridiagonal: [[2,1,0],[1,2,1],[0,1,2]]
+	B3.data = {2, 1, 0, 1, 2, 1, 0, 1, 2}
 
-	res2 := ml.gls_fit_kron(&X, y, &A, &B, .QR, allocator)
+	res2 := ml.gls_fit_kron(&X, y, &A2, &B3, .QR, allocator)
 	// defer _ols_result_free(&res2, allocator)
 
 	fmt.printf("GLS-Kron beta (separable Ω) = %v\n", res2.beta)
+	// Should still recover true coefficients for this perfect-fit case
 
 	fmt.println("GLS Kronecker test OK ✅")
 }
