@@ -180,3 +180,83 @@ ridge_fit :: proc(
 
 	return res
 }
+// ============================================================================
+// Ridge Regression with K-Fold Cross-Validation
+// Returns best lambda and corresponding OLSResult
+// ============================================================================
+ridge_cv :: proc(
+	X: ^l.Matrix(f64),
+	y: []f64,
+	lambdas: []f64, // candidate lambda values to search
+	k: int = 5, // number of folds
+	seed: u64 = 42, // random seed for fold assignment
+	method: OLSMethod = .Cholesky,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	best_lambda: f64,
+	best_result: OLSResult,
+	cv_errors: []f64,
+) {
+	n := X.rows
+
+	// Generate fold assignments
+	folds := cv_folds(n, k, seed, context.temp_allocator)
+	defer delete(folds, context.temp_allocator)
+
+	cv_errors = make([]f64, len(lambdas), allocator)
+	best_mse := math.F64_MAX
+	best_lambda = lambdas[0]
+
+	// Search over lambda values
+	for lambda, li in lambdas {
+		fold_mse := 0.0
+
+		// K-fold loop
+		for fold in 0 ..< k {
+			train_idx, val_idx := cv_split(folds, fold, context.temp_allocator)
+			defer {
+				delete(train_idx, context.temp_allocator)
+				delete(val_idx, context.temp_allocator)
+			}
+
+			// Split data
+			X_train, y_train := cv_subset(X, y, train_idx, context.temp_allocator)
+			X_val, y_val := cv_subset(X, y, val_idx, context.temp_allocator)
+			defer {
+				cv_subset_free(&X_train, y_train, context.temp_allocator)
+				cv_subset_free(&X_val, y_val, context.temp_allocator)
+			}
+
+			// Train Ridge on training set
+			result := ridge_fit(&X_train, y_train, lambda, method, context.temp_allocator)
+			defer _ols_result_free(&result, context.temp_allocator)
+
+			// Evaluate on validation set: MSE = mean((y_val - X_val @ beta)²)
+			pred := l.matvec_dyn_simd(&X_val, result.beta, context.temp_allocator)
+			defer delete(pred, context.temp_allocator)
+
+			mse := 0.0
+			for i in 0 ..< len(val_idx) {
+				err := y_val[i] - pred[i]
+				mse += err * err
+			}
+			mse /= f64(len(val_idx))
+			fold_mse += mse
+		}
+
+		// Average MSE across folds
+		avg_mse := fold_mse / f64(k)
+		cv_errors[li] = avg_mse
+
+		// Track best lambda
+		if avg_mse < best_mse {
+			best_mse = avg_mse
+			best_lambda = lambda
+		}
+	}
+
+	// Fit final model on full data with best lambda
+	best_result = ridge_fit(X, y, best_lambda, method, allocator)
+
+	return best_lambda, best_result, cv_errors
+}
