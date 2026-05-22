@@ -423,20 +423,63 @@ pca_explained_variance_ratio :: proc(pca: PCAResult) -> []f64 {
 }
 pca_transform :: proc(data: [][]f64, pca: PCAResult) -> [][]f64 {
 	rows := len(data)
+	if rows == 0 {
+		return [][]f64{}
+	}
 	comps := len(pca.eigenvectors)
+	if comps == 0 {
+		return [][]f64{}
+	}
+	dims := len(data[0])
+	if dims == 0 {
+		return [][]f64{}
+	}
 
-	out := make([][]f64, rows)
-	for r in 0 ..< rows {
-		out[r] = make([]f64, comps)
-		for c in 0 ..< comps {
-			sum := 0.0
-			for k in 0 ..< len(data[r]) {
-				sum += data[r][k] * pca.eigenvectors[c][k]
-			}
-			out[r][c] = sum
+	// Convert data to linalg format for optimized matvec
+	data_linalg := _to_linalg_matrix(data, context.temp_allocator)
+	defer l.matrix_free(&data_linalg)
+
+	// Convert eigenvectors to linalg format (comps × dims)
+	// Note: pca.eigenvectors is [][]f64 where each row is a component
+	evecs_linalg := l.matrix_new(f64, comps, dims, context.temp_allocator)
+	defer l.matrix_free(&evecs_linalg)
+	for i in 0 ..< comps {
+		for j in 0 ..< dims {
+			evecs_linalg.data[i * dims + j] = pca.eigenvectors[i][j]
 		}
 	}
-	return out
+
+	// Compute scores = data @ eigenvectorsᵀ
+	// Since eigenvectors are rows in pca.eigenvectors, we need to transpose
+	// scores[i,k] = sum_j data[i,j] * evecs[k,j] = (data @ evecsᵀ)[i,k]
+
+	// Option 1: Use matmul_dyn_simd (data: rows×dims) × (evecsᵀ: dims×comps)
+	// But we need to transpose evecs_linalg first
+
+	// Option 2 (simpler): Loop over components and use matvec_dyn_simd
+	scores := make([][]f64, rows, context.allocator)
+	for r in 0 ..< rows {
+		scores[r] = make([]f64, comps, context.allocator)
+	}
+
+	// For each component (row in eigenvectors), compute data @ componentᵀ
+	for c in 0 ..< comps {
+		// Extract component c as a vector (length dims)
+		component := make([]f64, dims, context.temp_allocator)
+		for j in 0 ..< dims {
+			component[j] = pca.eigenvectors[c][j]
+		}
+
+		// Compute scores[:,c] = data @ component
+		// This is a matrix-vector product: (rows×dims) × (dims) → (rows)
+		for r in 0 ..< rows {
+			row := data_linalg.data[r * dims:r * dims + dims]
+			scores[r][c] = l.dot_simd(row, component)
+		}
+		delete(component, context.temp_allocator)
+	}
+
+	return scores
 }
 pca_inverse_transform :: proc(scores: [][]f64, pca: PCAResult) -> [][]f64 {
 	rows := len(scores)
