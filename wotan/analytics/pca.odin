@@ -505,24 +505,52 @@ index_of_string :: proc(list: []string, s: string) -> int {
 // 	return PCAResult{eigenvalues = sorted_vals, eigenvectors = sorted_vecs}
 // }
 pca_from_cov :: proc(cov: [][]f64, allocator: mem.Allocator = context.allocator) -> PCAResult {
-	jr := jacobi_eigen_symmetric(cov, allocator)
+	// Convert covariance to linalg format for optimized eigensolver
+	cov_linalg := _to_linalg_matrix(cov, context.temp_allocator)
+	defer l.matrix_free(&cov_linalg)
 
-	idx := argsort_descending(jr.eigenvalues, allocator) // Use temp for sorting indices
+	// FIX: Symmetrize covariance to ensure exact symmetry for eigh
+	// cov = (cov + covᵀ) / 2
+	cols := cov_linalg.cols
+	for i in 0 ..< cols {
+		for j in i + 1 ..< cols {
+			avg := (cov_linalg.data[i * cols + j] + cov_linalg.data[j * cols + i]) * 0.5
+			cov_linalg.data[i * cols + j] = avg
+			cov_linalg.data[j * cols + i] = avg
+		}
+	}
 
+	// Use optimized symmetric eigensolver (SIMD-accelerated Jacobi)
+	// Returns eigenvalues (sorted ascending by default) and eigenvectors (columns)
+	eigenvalues, eigenvectors_linalg := l.eigh(&cov_linalg, .Ascending, allocator)
+	defer {
+		if len(eigenvalues) > 0 {delete(eigenvalues, allocator)}
+		if eigenvectors_linalg.data != nil {l.matrix_free(&eigenvectors_linalg)}
+	}
 
-	n := len(idx)
+	n := len(eigenvalues)
+	if n == 0 {
+		return PCAResult{}
+	}
+
+	// Sort eigenvalues descending (and reorder eigenvectors accordingly)
+	// Note: l.eigh returns ascending, so we reverse the order
 	sorted_vals := make([]f64, n, allocator)
 	sorted_vecs := make([][]f64, n, allocator)
 
-	for new_i, old_i in idx {
-		sorted_vals[new_i] = jr.eigenvalues[old_i]
-		// Transfer ownership of the row instead of 'make' + 'copy'
-		sorted_vecs[new_i] = jr.eigenvectors[old_i]
-		// Null out the old reference so we don't accidentally use it
-		jr.eigenvectors[old_i] = nil
-	}
+	for i in 0 ..< n {
+		// Reverse index: ascending → descending
+		src_idx := n - 1 - i
+		sorted_vals[i] = eigenvalues[src_idx]
 
-	// Now free the intermediate slices/containers from Jacobi
+		// Extract eigenvector column src_idx from eigenvectors_linalg
+		// and store as row i in sorted_vecs (API compatibility)
+		sorted_vecs[i] = make([]f64, n, allocator)
+		for j in 0 ..< n {
+			// eigenvectors_linalg is column-major: col=src_idx, row=j
+			sorted_vecs[i][j] = eigenvectors_linalg.data[j * n + src_idx]
+		}
+	}
 
 	return PCAResult{eigenvalues = sorted_vals, eigenvectors = sorted_vecs}
 }

@@ -285,7 +285,6 @@ main :: proc() {
 	test.rolling_matrix_test(context.temp_allocator)
 
 	test.ewm_cov_test(context.temp_allocator)
-	test.ewm_pca_test(context.temp_allocator)
 	test.kalman_test(context.temp_allocator)
 	test.kalman_control_test(context.temp_allocator)
 	test.kalman_tv_control_test(context.temp_allocator)
@@ -397,6 +396,7 @@ main :: proc() {
 	test.ridge_cv_test(context.temp_allocator)
 	test.lasso_cv_test(context.temp_allocator)
 	test.pca_test(context.temp_allocator)
+	test.ewm_pca_test(context.temp_allocator)
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
 	w.destroy_dataframe(&right2)
