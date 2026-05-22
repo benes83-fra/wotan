@@ -283,7 +283,7 @@ main :: proc() {
 	test.groupby2_test()
 	test.rolling_test(context.temp_allocator)
 	test.rolling_matrix_test(context.temp_allocator)
-	test.pca_test(context.temp_allocator)
+
 	test.ewm_cov_test(context.temp_allocator)
 	test.ewm_pca_test(context.temp_allocator)
 	test.kalman_test(context.temp_allocator)
@@ -396,6 +396,7 @@ main :: proc() {
 	test.gls_kron_test(context.temp_allocator)
 	test.ridge_cv_test(context.temp_allocator)
 	test.lasso_cv_test(context.temp_allocator)
+	test.pca_test(context.temp_allocator)
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
 	w.destroy_dataframe(&right2)

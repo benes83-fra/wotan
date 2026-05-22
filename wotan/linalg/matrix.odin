@@ -200,7 +200,7 @@ covariance :: proc(X: ^Matrix(f64), allocator: mem.Allocator = context.allocator
 	}
 
 	// 3. Sigma = (1/(n-1)) * Xcᵀ Xc
-	S := xtx(&Xc, allocator)
+	S := xtx_simd(&Xc, allocator)
 	scale := 1.0 / f64(n - 1)
 	for i := 0; i < S.rows * S.cols; i += 1 {
 		S.data[i] *= scale

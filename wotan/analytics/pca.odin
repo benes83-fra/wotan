@@ -1,10 +1,56 @@
 package analytics
 
 import w "../core"
+import l "../linalg"
 import "core:fmt"
 import "core:math"
 import "core:mem"
 
+
+// ============================================================================
+// Helper: Convert [][]f64 (row-major) → l.Matrix(f64) (contiguous, row-major)
+// ============================================================================
+_to_linalg_matrix :: proc(
+	data: [][]f64,
+	allocator: mem.Allocator = context.allocator,
+) -> l.Matrix(f64) {
+	if len(data) == 0 {
+		return l.Matrix(f64){}
+	}
+	rows := len(data)
+	cols := len(data[0])
+
+	m := l.matrix_new(f64, rows, cols, allocator)
+	for i in 0 ..< rows {
+		for j in 0 ..< cols {
+			m.data[i * cols + j] = data[i][j]
+		}
+	}
+	return m
+}
+
+// ============================================================================
+// Helper: Convert l.Matrix(f64) → [][]f64 (row-major, for API compatibility)
+// ============================================================================
+_from_linalg_matrix :: proc(
+	m: ^l.Matrix(f64),
+	allocator: mem.Allocator = context.allocator,
+) -> [][]f64 {
+	if m.rows == 0 || m.cols == 0 {
+		return [][]f64{}
+	}
+	rows := m.rows
+	cols := m.cols
+
+	out := make([][]f64, rows, allocator)
+	for i in 0 ..< rows {
+		out[i] = make([]f64, cols, allocator)
+		for j in 0 ..< cols {
+			out[i][j] = m.data[i * cols + j]
+		}
+	}
+	return out
+}
 PCAResult :: struct {
 	eigenvalues:  []f64,
 	eigenvectors: [][]f64,
@@ -278,43 +324,50 @@ extract_numeric_matrix :: proc(
 
 	return out
 }
-covariance_matrix :: proc(data: [][]f64, allocator: mem.Allocator) -> [][]f64 {
+covariance_matrix :: proc(data: [][]f64, allocator: mem.Allocator = context.allocator) -> [][]f64 {
 	rows := len(data)
 	if rows == 0 {
 		return [][]f64{}
 	}
-
 	cols := len(data[0])
-	cov := make([][]f64, cols, allocator)
-	for i in 0 ..< cols {
-		cov[i] = make([]f64, cols, allocator)
+	if cols == 0 {
+		return [][]f64{}
 	}
 
-	// compute means
-	means := make([]f64, cols, allocator)
-	for r in 0 ..< rows {
-		for c in 0 ..< cols {
-			means[c] += data[r][c]
+	// Step 1: Center the data (subtract column means)
+	// We do this in the new linalg format for efficiency
+	X := _to_linalg_matrix(data, context.temp_allocator)
+	defer l.matrix_free(&X)
+
+	// Compute column means
+	means := make([]f64, cols, context.temp_allocator)
+	for j in 0 ..< cols {
+		sum := 0.0
+		for i in 0 ..< rows {
+			sum += X.data[i * cols + j]
 		}
-	}
-	for c in 0 ..< cols {
-		means[c] /= f64(rows)
+		means[j] = sum / f64(rows)
 	}
 
-	// compute covariance
-	for i in 0 ..< cols {
-		for j in i ..< cols {
-			sum: f64 = 0
-			for r in 0 ..< rows {
-				sum += (data[r][i] - means[i]) * (data[r][j] - means[j])
-			}
-			v := sum / f64(rows - 1)
-			cov[i][j] = v
-			cov[j][i] = v
+	// Center X in-place: X[i,j] -= means[j]
+	for j in 0 ..< cols {
+		for i in 0 ..< rows {
+			X.data[i * cols + j] -= means[j]
 		}
 	}
 
-	return cov
+	// Step 2: Compute covariance = (Xᵀ X) / (n - 1) using optimized xtx_simd
+	cov_linalg := l.xtx_simd(&X, allocator) // This is the SIMD-optimized version!
+	defer l.matrix_free(&cov_linalg)
+
+	// Scale by 1/(n-1)
+	scale := 1.0 / f64(rows - 1)
+	for i in 0 ..< cols * cols {
+		cov_linalg.data[i] *= scale
+	}
+
+	// Step 3: Convert back to [][]f64 for API compatibility
+	return _from_linalg_matrix(&cov_linalg, allocator)
 }
 extract_cov_matrix_row :: proc(
 	cov_df: ^w.DataFrame,
