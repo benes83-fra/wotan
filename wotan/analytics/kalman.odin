@@ -1,10 +1,42 @@
 package analytics
 
+import l "../linalg"
 import "base:intrinsics"
 import "core:math"
 import linalg "core:math/linalg"
 import "core:mem"
 
+
+// ============================================================================
+// Helper: Convert flat row-major []f64 → l.Matrix(f64)
+// ============================================================================
+_matrix_from_flat :: proc(
+	data: []f64,
+	rows, cols: int,
+	allocator: mem.Allocator = context.allocator,
+) -> l.Matrix(f64) {
+	m := l.matrix_new(f64, rows, cols, allocator)
+	for i in 0 ..< rows {
+		for j in 0 ..< cols {
+			m.data[i * cols + j] = data[i * cols + j]
+		}
+	}
+	return m
+}
+
+// ============================================================================
+// Helper: Convert l.Matrix(f64) → flat row-major []f64
+// ============================================================================
+_matrix_to_flat :: proc(m: ^l.Matrix(f64), allocator: mem.Allocator = context.allocator) -> []f64 {
+	rows, cols := m.rows, m.cols
+	out := make([]f64, rows * cols, allocator)
+	for i in 0 ..< rows {
+		for j in 0 ..< cols {
+			out[i * cols + j] = m.data[i * cols + j]
+		}
+	}
+	return out
+}
 KalmanFilter :: struct($N: int, $M: int) {
 	x: [N]f64,
 	P: matrix[N, N]f64,
@@ -968,42 +1000,34 @@ ukf_rts_smooth_control :: proc(
 }
 kalman_loglik_scalar :: proc(
 	y: []f64,
-	F, Q, P0: []f64,
-	H: []f64,
-	R: []f64,
-	x0: []f64,
+	F, Q, P0: []f64, // N×N, flat, row-major
+	H: []f64, // 1×N
+	R: []f64, // 1×1
+	x0: []f64, // N
 	N: int,
 ) -> f64 {
 	T := len(y)
-	if T == 0 {
-		return 0.0
-	}
+	if T == 0 {return 0.0}
 
 	burn_in := 20
-	if burn_in >= T {
-		burn_in = 0
-	}
+	if burn_in >= T {burn_in = 0}
 
-	x := make([]f64, N)
-	P := make([]f64, N * N)
-	x_pred := make([]f64, N)
-	P_pred := make([]f64, N * N)
-	temp := make([]f64, N * N)
-	K := make([]f64, N)
+	// Convert flat arrays to dynamic matrices for optimized linalg
+	F_mat := _matrix_from_flat(F, N, N, context.temp_allocator)
+	Q_mat := _matrix_from_flat(Q, N, N, context.temp_allocator)
+	P_mat := _matrix_from_flat(P0, N, N, context.temp_allocator)
+	H_vec := make([]f64, N, context.temp_allocator)
+	copy(H_vec, H)
+	R_scalar := R[0]
+	x_vec := make([]f64, N, context.temp_allocator)
+	copy(x_vec, x0)
+
 	defer {
-		delete(x)
-		delete(P)
-		delete(x_pred)
-		delete(P_pred)
-		delete(temp)
-		delete(K)
-	}
-
-	for i in 0 ..< N {
-		x[i] = x0[i]
-	}
-	for i in 0 ..< N * N {
-		P[i] = P0[i]
+		l.matrix_free(&F_mat)
+		l.matrix_free(&Q_mat)
+		l.matrix_free(&P_mat)
+		delete(H_vec, context.temp_allocator)
+		delete(x_vec, context.temp_allocator)
 	}
 
 	loglik := 0.0
@@ -1011,72 +1035,66 @@ kalman_loglik_scalar :: proc(
 
 	for t in 0 ..< T {
 		// Predict: x_pred = F * x
-		for i in 0 ..< N {
-			sum := 0.0
-			for j in 0 ..< N {
-				sum += F[i * N + j] * x[j]
-			}
-			x_pred[i] = sum
-		}
+		x_pred := l.matvec_dyn_simd(&F_mat, x_vec, context.temp_allocator)
+		defer delete(x_pred, context.temp_allocator)
 
-		// temp = F * P
-		for i in 0 ..< N {
-			for j in 0 ..< N {
-				s := 0.0
-				for k in 0 ..< N {
-					s += F[i * N + k] * P[k * N + j]
-				}
-				temp[i * N + j] = s
-			}
-		}
-		// P_pred = temp * Fᵀ + Q
-		for i in 0 ..< N {
-			for j in 0 ..< N {
-				s := 0.0
-				for k in 0 ..< N {
-					s += temp[i * N + k] * F[j * N + k]
-				}
-				P_pred[i * N + j] = s + Q[i * N + j]
-			}
-		}
+		// P_pred = F * P * Fᵀ + Q
+		// Step 1: FP = F * P
+		// P_pred = F * P * Fᵀ + Q
+		FP := l.matmul_dyn_simd(&F_mat, &P_mat, context.temp_allocator)
+		defer l.matrix_free(&FP)
 
-		// Innovation
-		y_pred := 0.0
-		for j in 0 ..< N {
-			y_pred += H[j] * x_pred[j]
-		}
+		// Use new transpose helper
+		Ft := l.matrix_transpose(&F_mat, context.temp_allocator)
+		defer l.matrix_free(&Ft)
+
+		P_pred := l.matmul_dyn_simd(&FP, &Ft, context.temp_allocator)
+		defer l.matrix_free(&P_pred)
+
+		// Add Q
+		for i in 0 ..< N * N {P_pred.data[i] += Q_mat.data[i]}
+
+		// Innovation: y_pred = H * x_pred
+		y_pred := l.dot_simd(H_vec, x_pred)
 		v := y[t] - y_pred
 
-		S := 0.0
-		for i in 0 ..< N {
-			for j in 0 ..< N {
-				S += H[i] * P_pred[i * N + j] * H[j]
+		// S = H * P_pred * Hᵀ + R
+		// H is 1×N, P_pred is N×N, Hᵀ is N×1 → result is scalar
+		HP := make([]f64, N, context.temp_allocator)
+		for j in 0 ..< N {
+			sum := 0.0
+			for i in 0 ..< N {
+				sum += H_vec[i] * P_pred.data[i * N + j]
 			}
+			HP[j] = sum
 		}
-		S += R[0]
+		S := l.dot_simd(HP, H_vec) + R_scalar
+		delete(HP, context.temp_allocator)
 
 		if t >= burn_in {
 			loglik += -0.5 * (math.ln(two_pi) + math.ln(S) + (v * v) / S)
 		}
 
-		// K = P_pred Hᵀ / S
+		// K = P_pred * Hᵀ / S
+		K := make([]f64, N, context.temp_allocator)
 		for i in 0 ..< N {
-			s := 0.0
+			sum := 0.0
 			for j in 0 ..< N {
-				s += P_pred[i * N + j] * H[j]
+				sum += P_pred.data[i * N + j] * H_vec[j]
 			}
-			K[i] = s / S
+			K[i] = sum / S
 		}
 
-		// Update
-		for i in 0 ..< N {
-			x[i] = x_pred[i] + K[i] * v
-		}
+		// Update: x = x_pred + K * v
+		for i in 0 ..< N {x_vec[i] = x_pred[i] + K[i] * v}
+
+		// P = P_pred - K * S * Kᵀ
 		for i in 0 ..< N {
 			for j in 0 ..< N {
-				P[i * N + j] = P_pred[i * N + j] - K[i] * S * K[j]
+				P_mat.data[i * N + j] = P_pred.data[i * N + j] - K[i] * S * K[j]
 			}
 		}
+		delete(K, context.temp_allocator)
 	}
 
 	return loglik

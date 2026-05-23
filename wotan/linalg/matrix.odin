@@ -328,3 +328,58 @@ kron :: proc(
 
 	return C
 }
+// ============================================================================
+// Matrix Transpose: out = inᵀ
+// out[i,j] = in[j,i]
+// ============================================================================
+matrix_transpose :: proc(
+	input: ^Matrix(f64),
+	allocator: mem.Allocator = context.allocator,
+) -> Matrix(f64) {
+	if input.rows * input.cols > 4096 {
+		return matrix_transpose_blocked(input, allocator)
+	}
+	rows, cols := input.rows, input.cols
+	out := matrix_new(f64, cols, rows, allocator)
+
+	// Simple transpose: out[j,i] = in[i,j]
+	// For better cache performance on large matrices, consider blocking:
+	for i in 0 ..< rows {
+		for j in 0 ..< cols {
+			out.data[j * rows + i] = input.data[i * cols + j]
+		}
+	}
+
+	return out
+}
+
+
+// ============================================================================
+// Matrix Transpose (blocked version for better cache performance)
+// Uses TILE_BASE/TILE_AVX blocking for cache efficiency
+// ============================================================================
+matrix_transpose_blocked :: proc(
+	input: ^Matrix(f64),
+	allocator: mem.Allocator = context.allocator,
+) -> Matrix(f64) {
+	rows, cols := input.rows, input.cols
+	out := matrix_new(f64, cols, rows, allocator)
+
+	tile := tile_for_matmul() // 8 or 16 depending on AVX
+
+	// Blocked transpose: process tile×tile blocks
+	for ii := 0; ii < rows; ii += tile {
+		for jj := 0; jj < cols; jj += tile {
+			i_end := min(ii + tile, rows)
+			j_end := min(jj + tile, cols)
+
+			for i in ii ..< i_end {
+				for j in jj ..< j_end {
+					out.data[j * rows + i] = input.data[i * cols + j]
+				}
+			}
+		}
+	}
+
+	return out
+}
