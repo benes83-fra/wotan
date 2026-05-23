@@ -60,194 +60,6 @@ JacobiResult :: struct {
 	eigenvectors: [][]f64, // columns are eigenvectors
 }
 
-// Jacobi eigenvalue algorithm for real symmetric A (n x n)
-// Returns eigenvalues (length n) and eigenvectors (n x n, column-major in V)
-jacobi_eigen_symmetric :: proc(
-	A_in: [][]f64,
-	allocator: mem.Allocator = context.allocator,
-) -> JacobiResult {
-	n := len(A_in)
-	if n == 0 {
-		return JacobiResult{}
-	}
-
-	// Copy A_in into working matrix A
-	A := make([][]f64, n, allocator)
-	for i in 0 ..< n {
-		A[i] = make([]f64, n, allocator)
-		for j in 0 ..< n {
-			A[i][j] = A_in[i][j]
-		}
-	}
-
-	// Initialize V as identity
-	V := make([][]f64, n, allocator)
-	for i in 0 ..< n {
-		V[i] = make([]f64, n, allocator)
-		for j in 0 ..< n {
-			V[i][j] = 0.0
-		}
-		V[i][i] = 1.0
-	}
-
-	max_iter := 50
-	eps := 1e-12
-
-	for iter in 0 ..< max_iter {
-		// Find largest off-diagonal element
-		max_val := 0.0
-		p := 0
-		q := 1
-		for i in 0 ..< n {
-			for j in i + 1 ..< n {
-				aij := math.abs(A[i][j])
-				if aij > max_val {
-					max_val = aij
-					p = i
-					q = j
-				}
-			}
-		}
-
-		if max_val < eps {
-			break // converged
-		}
-
-		app := A[p][p]
-		aqq := A[q][q]
-		apq := A[p][q]
-
-		// Compute rotation angle
-		tau := (aqq - app) / (2.0 * apq)
-		t := 0.0
-		if tau >= 0 {
-			t = 1.0 / (tau + math.sqrt(1.0 + tau * tau))
-		} else {
-			t = -1.0 / (-tau + math.sqrt(1.0 + tau * tau))
-		}
-		c := 1.0 / math.sqrt(1.0 + t * t)
-		s := t * c
-
-		// Update A
-		// Diagonal entries
-		app_new := app - t * apq
-		aqq_new := aqq + t * apq
-		A[p][p] = app_new
-		A[q][q] = aqq_new
-		A[p][q] = 0.0
-		A[q][p] = 0.0
-
-		// Off-diagonal rows/cols
-		for k in 0 ..< n {
-			if k == p || k == q {
-				continue
-			}
-			akp := A[k][p]
-			akq := A[k][q]
-			A[k][p] = c * akp - s * akq
-			A[p][k] = A[k][p]
-			A[k][q] = s * akp + c * akq
-			A[q][k] = A[k][q]
-		}
-
-		// Update eigenvector matrix V
-		for k in 0 ..< n {
-			vkp := V[k][p]
-			vkq := V[k][q]
-			V[k][p] = c * vkp - s * vkq
-			V[k][q] = s * vkp + c * vkq
-		}
-	}
-
-	// Extract eigenvalues from diagonal of A
-	eigenvalues := make([]f64, n, allocator)
-	for i in 0 ..< n {
-		eigenvalues[i] = A[i][i]
-	}
-
-	// We currently have eigenvectors as columns of V.
-	// Your PCA code expects eigenvectors as rows (each component = one row).
-	// So we’ll transpose into that layout.
-	eigenvectors := make([][]f64, n, allocator)
-	for i in 0 ..< n {
-		eigenvectors[i] = make([]f64, n, allocator)
-		for j in 0 ..< n {
-			eigenvectors[i][j] = V[j][i]
-		}
-	}
-
-	return JacobiResult{eigenvalues = eigenvalues, eigenvectors = eigenvectors}
-}
-// Computes SVD of a symmetric matrix A (NxN)
-// A = V * diag(S) * Vᵀ
-svd_symmetric :: proc(A: [][]f64) -> (S: []f64, V: [][]f64) {
-	n := len(A)
-	if n == 0 {
-		return {}, {}
-	}
-
-	// Copy A into V (will become eigenvectors)
-	V = make([][]f64, n)
-	for i in 0 ..< n {
-		V[i] = make([]f64, n)
-		for j in 0 ..< n {
-			V[i][j] = A[i][j]
-		}
-	}
-
-	// Initialize S as diagonal of A
-	S = make([]f64, n)
-	for i in 0 ..< n {
-		S[i] = A[i][i]
-	}
-
-	// Jacobi sweeps
-	max_iter := 50
-	for iter in 0 ..< max_iter {
-		changed := false
-
-		for p in 0 ..< n {
-			for q in p + 1 ..< n {
-				if math.abs(V[p][q]) < 1e-12 {
-					continue
-				}
-
-				changed = true
-
-				phi := 0.5 * math.atan2(2 * V[p][q], V[q][q] - V[p][p])
-				c := math.cos(phi)
-				s := math.sin(phi)
-
-				// Rotate rows/cols p and q
-				for k in 0 ..< n {
-					vpk := V[p][k]
-					vqk := V[q][k]
-					V[p][k] = c * vpk - s * vqk
-					V[q][k] = s * vpk + c * vqk
-				}
-
-				for k in 0 ..< n {
-					vkp := V[k][p]
-					vkq := V[k][q]
-					V[k][p] = c * vkp - s * vkq
-					V[k][q] = s * vkp + c * vkq
-				}
-			}
-		}
-
-		if !changed {
-			break
-		}
-	}
-
-	// Extract singular values from diagonal
-	for i in 0 ..< n {
-		S[i] = V[i][i]
-	}
-
-	return S, V
-}
-
 
 pca_dataframe :: proc(df: ^w.DataFrame, cols: []string, allocator: mem.Allocator) -> PCAResult {
 
@@ -483,19 +295,55 @@ pca_transform :: proc(data: [][]f64, pca: PCAResult) -> [][]f64 {
 }
 pca_inverse_transform :: proc(scores: [][]f64, pca: PCAResult) -> [][]f64 {
 	rows := len(scores)
+	if rows == 0 {
+		return [][]f64{}
+	}
+	comps := len(pca.eigenvectors)
+	if comps == 0 {
+		return [][]f64{}
+	}
 	dims := len(pca.eigenvectors[0])
+	if dims == 0 {
+		return [][]f64{}
+	}
 
-	out := make([][]f64, rows)
-	for r in 0 ..< rows {
-		out[r] = make([]f64, dims)
-		for d in 0 ..< dims {
-			sum := 0.0
-			for c in 0 ..< len(scores[r]) {
-				sum += scores[r][c] * pca.eigenvectors[c][d]
-			}
-			out[r][d] = sum
+	// Convert scores to linalg format for optimized matvec
+	scores_linalg := _to_linalg_matrix(scores, context.temp_allocator)
+	defer l.matrix_free(&scores_linalg)
+
+	// Convert eigenvectors to linalg format (comps × dims)
+	evecs_linalg := l.matrix_new(f64, comps, dims, context.temp_allocator)
+	defer l.matrix_free(&evecs_linalg)
+	for i in 0 ..< comps {
+		for j in 0 ..< dims {
+			evecs_linalg.data[i * dims + j] = pca.eigenvectors[i][j]
 		}
 	}
+
+	// Compute reconstruction = scores @ eigenvectors
+	// reconstruction[i,d] = sum_c scores[i,c] * evecs[c,d]
+
+	out := make([][]f64, rows, context.allocator)
+	for r in 0 ..< rows {
+		out[r] = make([]f64, dims, context.allocator)
+	}
+
+	// For each original dimension, compute scores @ eigenvector_column
+	for d in 0 ..< dims {
+		// Extract column d of eigenvectors as a vector (length comps)
+		evec_col := make([]f64, comps, context.temp_allocator)
+		for c in 0 ..< comps {
+			evec_col[c] = pca.eigenvectors[c][d]
+		}
+
+		// Compute out[:,d] = scores @ evec_col
+		for r in 0 ..< rows {
+			row := scores_linalg.data[r * comps:r * comps + comps]
+			out[r][d] = l.dot_simd(row, evec_col)
+		}
+		delete(evec_col, context.temp_allocator)
+	}
+
 	return out
 }
 
