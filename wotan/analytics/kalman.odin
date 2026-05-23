@@ -8,6 +8,15 @@ import "core:mem"
 
 
 // ============================================================================
+// Dispatch helper: choose between built-in and optimized linalg based on size
+// ============================================================================
+_kalman_use_optimized :: proc(N: int) -> bool {
+	// Built-in Odin matrix ops are optimized for N ≤ 8
+	// Use wotan_linalg for larger matrices where blocking helps
+	return N > 8
+}
+
+// ============================================================================
 // Helper: Convert flat row-major []f64 → l.Matrix(f64)
 // ============================================================================
 _matrix_from_flat :: proc(
@@ -68,8 +77,68 @@ kalman_init :: proc(
 	return KalmanFilter(N, M){x = x0, P = P0, F = F, H = H, Q = Q, R = R}
 }
 
+// ============================================================================
+// Optimized predict for large state dimensions (N > 8)
+// Uses wotan_linalg SIMD operations for F * x and F * P * Fᵀ
+// ============================================================================
+kalman_predict_large :: proc(kf: ^KalmanFilter($N, $M)) {
+	// Convert fixed-size arrays to flat arrays, then to slices for dynamic linalg
+	// [N]f64 -> [N]f64 (identity) -> slice
+	x_array := kf.x // Already [N]f64
+	x_slice := x_array[:]
+
+	// matrix[N,N]f64 -> [N*N]f64 -> slice
+	F_array := transmute([N * N]f64)kf.F
+	F_slice := F_array[:]
+
+	P_array := transmute([N * N]f64)kf.P
+	P_slice := P_array[:]
+
+	Q_array := transmute([N * N]f64)kf.Q
+	Q_slice := Q_array[:]
+
+	// Convert to dynamic matrices for optimized linalg
+	x_mat := _matrix_from_flat(x_slice, N, 1, context.temp_allocator)
+	defer l.matrix_free(&x_mat)
+
+	F_mat := _matrix_from_flat(F_slice, N, N, context.temp_allocator)
+	defer l.matrix_free(&F_mat)
+
+	P_mat := _matrix_from_flat(P_slice, N, N, context.temp_allocator)
+	defer l.matrix_free(&P_mat)
+
+	Q_mat := _matrix_from_flat(Q_slice, N, N, context.temp_allocator)
+	defer l.matrix_free(&Q_mat)
+
+	// x_pred = F * x
+	x_pred_vec := l.matvec_dyn_simd(&F_mat, x_slice, context.temp_allocator)
+	defer delete(x_pred_vec, context.temp_allocator)
+
+	// P_pred = F * P * Fᵀ + Q
+	// Since matmul_dyn_simd computes A * Bᵀ:
+	// Step 1: FP = F * P (P is symmetric, so Pᵀ = P)
+	FP := l.matmul_dyn_simd(&F_mat, &P_mat, context.temp_allocator)
+	defer l.matrix_free(&FP)
+
+	// Step 2: P_pred = FP * Fᵀ (matmul_dyn_simd computes FP * Fᵀ directly)
+	P_pred := l.matmul_dyn_simd(&FP, &F_mat, context.temp_allocator)
+	defer l.matrix_free(&P_pred)
+
+	// Add Q
+	for i in 0 ..< N * N {P_pred.data[i] += Q_mat.data[i]}
+
+	// Convert results back to fixed-size arrays
+	for i in 0 ..< N {kf.x[i] = x_pred_vec[i]}
+	for i in 0 ..< N * N {kf.P[i / N, i % N] = P_pred.data[i]} 	// row-major to [N,N] layout
+}
+
 kalman_predict :: proc(kf: ^KalmanFilter($N, $M)) {
-	// Cast x to a column matrix for consistent multiplication
+	if _kalman_use_optimized(N) {
+		kalman_predict_large(kf)
+		return
+	}
+
+	// Built-in Odin ops for small N (≤8)
 	x_mat := transmute(matrix[N, 1]f64)kf.x
 	new_x := kf.F * x_mat
 	kf.x = transmute([N]f64)new_x
