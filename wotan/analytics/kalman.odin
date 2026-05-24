@@ -145,9 +145,83 @@ kalman_predict :: proc(kf: ^KalmanFilter($N, $M)) {
 
 	kf.P = (kf.F * kf.P * linalg.transpose(kf.F)) + kf.Q
 }
+// ============================================================================
+// Optimized predict with control for large state dimensions (N > 8)
+// Uses wotan_linalg SIMD operations for F*x, B*u, and F*P*Fᵀ
+// ============================================================================
+kalman_predict_control_large :: proc(kf: ^KalmanFilter($N, $M), B: matrix[N, $U]f64, u: [U]f64) {
+	// Convert fixed-size arrays to slices for dynamic linalg
+	x_array := kf.x
+	x_slice := x_array[:]
 
+	F_array := transmute([N * N]f64)kf.F
+	F_slice := F_array[:]
+
+	P_array := transmute([N * N]f64)kf.P
+	P_slice := P_array[:]
+
+	Q_array := transmute([N * N]f64)kf.Q
+	Q_slice := Q_array[:]
+
+	B_array := transmute([N * U]f64)B
+	B_slice := B_array[:]
+
+	u_copy := u
+	u_slice := u_copy[:]
+
+	// Convert to dynamic matrices for optimized linalg
+	x_mat := _matrix_from_flat(x_slice, N, 1, context.temp_allocator)
+	defer l.matrix_free(&x_mat)
+
+	F_mat := _matrix_from_flat(F_slice, N, N, context.temp_allocator)
+	defer l.matrix_free(&F_mat)
+
+	P_mat := _matrix_from_flat(P_slice, N, N, context.temp_allocator)
+	defer l.matrix_free(&P_mat)
+
+	Q_mat := _matrix_from_flat(Q_slice, N, N, context.temp_allocator)
+	defer l.matrix_free(&Q_mat)
+
+	B_mat := _matrix_from_flat(B_slice, N, U, context.temp_allocator)
+	defer l.matrix_free(&B_mat)
+
+	// x' = F*x + B*u
+	Fx := l.matmul_dyn_simd(&F_mat, &x_mat, context.temp_allocator)
+	defer l.matrix_free(&Fx)
+
+	u_mat_temp := _matrix_from_flat(u_slice, U, 1, context.temp_allocator)
+	defer l.matrix_free(&u_mat_temp)
+
+	Bu := l.matmul_dyn_simd(&B_mat, &u_mat_temp, context.temp_allocator)
+	defer l.matrix_free(&Bu)
+
+	// Add Fx + Bu
+	for i in 0 ..< N {x_slice[i] = Fx.data[i] + Bu.data[i]}
+
+	// P' = F*P*Fᵀ + Q
+	// Since matmul_dyn_simd computes A * Bᵀ:
+	// Step 1: FP = F * P (P is symmetric, so Pᵀ = P)
+	FP := l.matmul_dyn_simd(&F_mat, &P_mat, context.temp_allocator)
+	defer l.matrix_free(&FP)
+
+	// Step 2: P_pred = FP * Fᵀ (matmul_dyn_simd computes FP * Fᵀ directly)
+	P_pred := l.matmul_dyn_simd(&FP, &F_mat, context.temp_allocator)
+	defer l.matrix_free(&P_pred)
+
+	// Add Q
+	for i in 0 ..< N * N {P_pred.data[i] += Q_mat.data[i]}
+
+	// Convert results back to fixed-size arrays
+	for i in 0 ..< N {kf.P[i / N, i % N] = P_pred.data[i]}
+}
 
 kalman_predict_control :: proc(kf: ^KalmanFilter($N, $M), B: matrix[N, $U]f64, u: [U]f64) {
+	if _kalman_use_optimized(N) {
+		kalman_predict_control_large(kf, B, u)
+		return
+	}
+
+	// Built-in Odin ops for small N (≤8)
 	// x and u as column vectors
 	x_mat := transmute(matrix[N, 1]f64)kf.x
 	u_mat := transmute(matrix[U, 1]f64)u
@@ -159,9 +233,141 @@ kalman_predict_control :: proc(kf: ^KalmanFilter($N, $M), B: matrix[N, $U]f64, u
 	// P' = F P Fᵀ + Q   (control assumed deterministic)
 	kf.P = (kf.F * kf.P * linalg.transpose(kf.F)) + kf.Q
 }
+// ============================================================================
+// Optimized update for large state dimensions (N > 8)
+// Uses wotan_linalg SIMD operations for H*P*Hᵀ, P*Hᵀ, and matrix updates
+// ============================================================================
+kalman_update_large :: proc(kf: ^KalmanFilter($N, $M), z: [M]f64) {
+	// Convert fixed-size arrays to slices for dynamic linalg
+	x_array := kf.x
+	x_slice := x_array[:]
 
+	P_array := transmute([N * N]f64)kf.P
+	P_slice := P_array[:]
+
+	H_array := transmute([M * N]f64)kf.H
+	H_slice := H_array[:]
+
+	R_array := transmute([M * M]f64)kf.R
+	R_slice := R_array[:]
+
+	// z is [M]f64 parameter — copy to slice
+	z_copy := z // Already [M]f64
+	z_slice := z_copy[:]
+
+	// Convert to dynamic matrices for optimized linalg
+	x_mat := _matrix_from_flat(x_slice, N, 1, context.temp_allocator)
+	defer l.matrix_free(&x_mat)
+
+	P_mat := _matrix_from_flat(P_slice, N, N, context.temp_allocator)
+	defer l.matrix_free(&P_mat)
+
+	H_mat := _matrix_from_flat(H_slice, M, N, context.temp_allocator)
+	defer l.matrix_free(&H_mat)
+
+	R_mat := _matrix_from_flat(R_slice, M, M, context.temp_allocator)
+	defer l.matrix_free(&R_mat)
+
+	// 1. Innovation: y = z - H*x
+	Hx := l.matmul_dyn_simd(&H_mat, &x_mat, context.temp_allocator)
+	defer l.matrix_free(&Hx)
+
+	y := make([]f64, M, context.temp_allocator)
+	for i in 0 ..< M {y[i] = z_slice[i] - Hx.data[i]}
+	defer delete(y, context.temp_allocator)
+
+	// 2. S = H*P*Hᵀ + R
+	// Since matmul_dyn_simd computes A * Bᵀ:
+	// Step 1: HP = H * P (P is symmetric, so Pᵀ = P)
+	HP := l.matmul_dyn_simd(&H_mat, &P_mat, context.temp_allocator)
+	defer l.matrix_free(&HP)
+
+	// Step 2: S = HP * Hᵀ + R (matmul_dyn_simd computes HP * Hᵀ directly)
+	S := l.matmul_dyn_simd(&HP, &H_mat, context.temp_allocator)
+	defer l.matrix_free(&S)
+
+	// Add R
+	for i in 0 ..< M * M {S.data[i] += R_mat.data[i]}
+
+	// 3. K = P*Hᵀ * inv(S)
+	// Since matmul_dyn_simd computes A * Bᵀ:
+	// P*Hᵀ = matmul_dyn_simd(&P_mat, &H_mat) (because it computes P * Hᵀ)
+	PHt := l.matmul_dyn_simd(&P_mat, &H_mat, context.temp_allocator)
+	defer l.matrix_free(&PHt)
+
+	// Solve K * S = PHt for K (K = PHt * S⁻¹)
+	// Use LU decomposition since we don't have cholesky_solve
+	K := l.matrix_new(f64, N, M, context.temp_allocator)
+	defer l.matrix_free(&K)
+
+	// Solve column by column: S * k_col = ph_col
+	for j in 0 ..< M {
+		// Extract column j of PHt
+		ph_col := make([]f64, N, context.temp_allocator)
+		for i in 0 ..< N {ph_col[i] = PHt.data[i * M + j]}
+
+		// Solve S * k_col = ph_col using LU decomposition
+		// First, make a copy of S for LU decomposition
+		S_lu := l.matrix_new(f64, M, M, context.temp_allocator)
+		copy(S_lu.data, S.data)
+		defer l.matrix_free(&S_lu)
+
+		// LU decompose S_lu
+		_, piv, _, ok := l.lu_decompose(&S_lu, context.temp_allocator)
+		if !ok {
+			// Fallback: use naive solve (shouldn't happen for SPD S)
+			for i in 0 ..< N {K.data[i * M + j] = 0.0}
+			delete(ph_col, context.temp_allocator)
+			continue
+		}
+
+		// Solve for k_col
+		k_col := l.lu_solve_simd(&S_lu, piv, ph_col, context.temp_allocator)
+		defer delete(k_col, context.temp_allocator)
+
+		// Store in K
+		for i in 0 ..< N {K.data[i * M + j] = k_col[i]}
+		delete(ph_col, context.temp_allocator)
+	}
+
+	// 4. Update state: x = x + K*y
+	y_mat := _matrix_from_flat(y, M, 1, context.temp_allocator)
+	defer l.matrix_free(&y_mat)
+
+	Ky := l.matmul_dyn_simd(&K, &y_mat, context.temp_allocator)
+	defer l.matrix_free(&Ky)
+
+	for i in 0 ..< N {x_slice[i] += Ky.data[i]}
+
+	// 5. Update covariance: P = (I - K*H) * P
+	// Compute KH = K * H
+	KH := l.matmul_dyn_simd(&K, &H_mat, context.temp_allocator)
+	defer l.matrix_free(&KH)
+
+	// Compute I - KH
+	IKH := l.matrix_new(f64, N, N, context.temp_allocator)
+	defer l.matrix_free(&IKH)
+	for i in 0 ..< N * N {
+		IKH.data[i] = -KH.data[i]
+		if i / N == i % N {IKH.data[i] += 1.0} 	// Add identity
+	}
+
+	// P_new = (I - KH) * P
+	P_new := l.matmul_dyn_simd(&IKH, &P_mat, context.temp_allocator)
+	defer l.matrix_free(&P_new)
+
+	// Convert results back to fixed-size arrays
+	for i in 0 ..< N {kf.x[i] = x_slice[i]}
+	for i in 0 ..< N * N {kf.P[i / N, i % N] = P_new.data[i]}
+}
 
 kalman_update :: proc(kf: ^KalmanFilter($N, $M), z: [M]f64) {
+	if _kalman_use_optimized(N) {
+		kalman_update_large(kf, z)
+		return
+	}
+
+	// Built-in Odin ops for small N (≤8)
 	// 1. Cast arrays to matrices to avoid linalg.mul ambiguity
 	x_mat := transmute(matrix[N, 1]f64)kf.x
 	z_mat := transmute(matrix[M, 1]f64)z
