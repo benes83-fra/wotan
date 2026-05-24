@@ -1,6 +1,7 @@
 package analytics
 
 import w "../core"
+import l "../linalg"
 import "core:math"
 import "core:math/rand"
 import "core:mem"
@@ -276,64 +277,96 @@ arima_forecast :: proc(
 	lower := make([]f64, h, allocator)
 	upper := make([]f64, h, allocator)
 
-	// z for two-sided normal interval
-	// crude: z ≈ 1.96 for 95%; if you want, plug in an inverse CDF later
-	z := 1.96
-	if alpha != 0.05 {
-		// leave as 1.96 for now; you can generalize later
-	}
+	z := 1.96 // for 95% PI
 
+	// Current state and covariance as flat arrays
 	x := make([]f64, N, allocator)
 	P := make([]f64, N * N, allocator)
-	for i in 0 ..< N {
-		x[i] = xT[i]
-	}
-	for i in 0 ..< N * N {
-		P[i] = PT[i]
-	}
+	copy(x, xT)
+	copy(P, PT)
 
 	for step in 0 ..< h {
-		// predict one step ahead
-		x_pred := make([]f64, N, allocator)
-		for i in 0 ..< N {
-			s := 0.0
-			for j in 0 ..< N {
-				s += F[i * N + j] * x[j]
+		// --- Optimized Predict Step: x_pred = F*x, P_pred = F*P*Fᵀ + Q ---
+		if _kalman_use_optimized(N) {
+			// Convert flat arrays to dynamic matrices for optimized linalg
+			F_mat := _matrix_from_flat(F, N, N, context.temp_allocator)
+			defer l.matrix_free(&F_mat)
+
+			P_mat := _matrix_from_flat(P, N, N, context.temp_allocator)
+			defer l.matrix_free(&P_mat)
+
+			Q_mat := _matrix_from_flat(Q, N, N, context.temp_allocator)
+			defer l.matrix_free(&Q_mat)
+
+			// x_pred = F * x using SIMD matvec
+			x_pred_vec := l.matvec_dyn_simd(&F_mat, x, context.temp_allocator)
+			defer delete(x_pred_vec, context.temp_allocator)
+
+			// P_pred = F * P * Fᵀ + Q
+			// Step 1: FP = F * P (P is symmetric, so Pᵀ = P)
+			FP := l.matmul_dyn_simd(&F_mat, &P_mat, context.temp_allocator)
+			defer l.matrix_free(&FP)
+
+			// Step 2: P_pred = FP * Fᵀ + Q (matmul_dyn_simd computes FP * Fᵀ directly)
+			P_pred_mat := l.matmul_dyn_simd(&FP, &F_mat, context.temp_allocator)
+			defer l.matrix_free(&P_pred_mat)
+
+			// Add Q
+			for i in 0 ..< N * N {P_pred_mat.data[i] += Q_mat.data[i]}
+
+			// Copy results back to flat arrays for next iteration
+			copy(x, x_pred_vec)
+			for i in 0 ..< N * N {P[i] = P_pred_mat.data[i]}
+		} else {
+			// Built-in Odin ops for small N (≤8) - keep original manual loops
+			// x_pred = F * x
+			x_pred := make([]f64, N, allocator)
+			for i in 0 ..< N {
+				s := 0.0
+				for j in 0 ..< N {
+					s += F[i * N + j] * x[j]
+				}
+				x_pred[i] = s
 			}
-			x_pred[i] = s
+
+			// P_pred = F * P * Fᵀ + Q
+			P_pred := make([]f64, N * N, allocator)
+			temp := make([]f64, N * N, allocator)
+			for i in 0 ..< N {
+				for j in 0 ..< N {
+					s := 0.0
+					for k in 0 ..< N {
+						s += F[i * N + k] * P[k * N + j]
+					}
+					temp[i * N + j] = s
+				}
+			}
+			for i in 0 ..< N {
+				for j in 0 ..< N {
+					s := 0.0
+					for k in 0 ..< N {
+						s += temp[i * N + k] * F[j * N + k]
+					}
+					P_pred[i * N + j] = s + Q[i * N + j]
+				}
+			}
+
+			// Copy results back
+			copy(x, x_pred)
+			copy(P, P_pred)
 		}
 
-		P_pred := make([]f64, N * N, allocator)
-		temp := make([]f64, N * N, allocator)
-		for i in 0 ..< N {
-			for j in 0 ..< N {
-				s := 0.0
-				for k in 0 ..< N {
-					s += F[i * N + k] * P[k * N + j]
-				}
-				temp[i * N + j] = s
-			}
-		}
-		for i in 0 ..< N {
-			for j in 0 ..< N {
-				s := 0.0
-				for k in 0 ..< N {
-					s += temp[i * N + k] * F[j * N + k]
-				}
-				P_pred[i * N + j] = s + Q[i * N + j]
-			}
-		}
-
-		// forecast mean and variance on observation scale
+		// --- Forecast mean and variance on observation scale ---
+		// (unchanged: this is O(N) and not a bottleneck)
 		mu := 0.0
 		for j in 0 ..< N {
-			mu += H[j] * x_pred[j]
+			mu += H[j] * x[j]
 		}
 
 		S := 0.0
 		for i in 0 ..< N {
 			for j in 0 ..< N {
-				S += H[i] * P_pred[i * N + j] * H[j]
+				S += H[i] * P[i * N + j] * H[j]
 			}
 		}
 		S += R[0]
@@ -343,14 +376,6 @@ arima_forecast :: proc(
 		mean[step] = mu
 		lower[step] = mu - z * sd
 		upper[step] = mu + z * sd
-
-		// roll state forward for next step
-		for i in 0 ..< N {
-			x[i] = x_pred[i]
-		}
-		for i in 0 ..< N * N {
-			P[i] = P_pred[i]
-		}
 	}
 
 	// If d > 0, integrate forecasts back to original scale
