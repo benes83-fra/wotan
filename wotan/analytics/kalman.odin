@@ -391,11 +391,150 @@ kalman_update :: proc(kf: ^KalmanFilter($N, $M), z: [M]f64) {
 	I := linalg.identity(matrix[N, N]f64)
 	kf.P = (I - (K * kf.H)) * kf.P
 }
+
+// ============================================================================
+// Optimized RTS smoother for large state dimensions (N > 8)
+// Uses wotan_linalg SIMD operations for matrix inverses and multiplications
+// ============================================================================
+rts_smooth_large :: proc(
+	F: matrix[$N, N]f64,
+	xf: []KalmanState(N), // filtered
+	xp: []KalmanState(N), // predicted
+) -> []KalmanState(N) {
+	assert(len(xf) == len(xp))
+	T := len(xf)
+
+	smoothed := make([]KalmanState(N), T)
+	if T == 0 {
+		return smoothed
+	}
+
+	smoothed[T - 1] = xf[T - 1]
+
+	// Convert F to dynamic matrix for optimized linalg
+	F_array := transmute([N * N]f64)F
+	F_slice := F_array[:]
+	F_mat := _matrix_from_flat(F_slice, N, N, context.temp_allocator)
+	defer l.matrix_free(&F_mat)
+
+	// Precompute Fᵀ once
+	Ft := l.matrix_transpose(&F_mat, context.temp_allocator)
+	defer l.matrix_free(&Ft)
+
+	for k := T - 2; k >= 0; k -= 1 {
+		// Convert Pf_k and Pp_k1 to dynamic matrices
+		Pf_array := transmute([N * N]f64)xf[k].P
+		Pf_slice := Pf_array[:]
+		Pf_mat := _matrix_from_flat(Pf_slice, N, N, context.temp_allocator)
+		defer l.matrix_free(&Pf_mat)
+
+		Pp_array := transmute([N * N]f64)xp[k + 1].P
+		Pp_slice := Pp_array[:]
+		Pp_mat := _matrix_from_flat(Pp_slice, N, N, context.temp_allocator)
+		defer l.matrix_free(&Pp_mat)
+
+		// Pp_inv = inv(Pp_k1) using LU decomposition
+		Pp_inv := l.matrix_new(f64, N, N, context.temp_allocator)
+		defer l.matrix_free(&Pp_inv)
+
+		// Make a copy for LU decomposition
+		Pp_lu := l.matrix_new(f64, N, N, context.temp_allocator)
+		copy(Pp_lu.data, Pp_mat.data)
+		defer l.matrix_free(&Pp_lu)
+
+		_, piv, _, ok := l.lu_decompose(&Pp_lu, context.temp_allocator)
+		if ok {
+			// Solve Pp_inv * Pp = I for Pp_inv (column by column)
+			for j in 0 ..< N {
+				e_col := make([]f64, N, context.temp_allocator)
+				for i in 0 ..< N {e_col[i] = 0.0}
+				e_col[j] = 1.0
+
+				col := l.lu_solve_simd(&Pp_lu, piv, e_col, context.temp_allocator)
+				defer delete(col, context.temp_allocator)
+
+				for i in 0 ..< N {Pp_inv.data[i * N + j] = col[i]}
+				delete(e_col, context.temp_allocator)
+			}
+		} else {
+			// Fallback: use identity (shouldn't happen for valid covariance)
+			for i in 0 ..< N * N {Pp_inv.data[i] = 0.0}
+			for i in 0 ..< N {Pp_inv.data[i * N + i] = 1.0}
+		}
+
+		// Ck = Pf_k * Fᵀ * Pp_inv
+		// Step 1: PfFt = Pf_k * Fᵀ (matmul_dyn_simd computes A * Bᵀ)
+		PfFt := l.matmul_dyn_simd(&Pf_mat, &F_mat, context.temp_allocator)
+		defer l.matrix_free(&PfFt)
+
+		// Step 2: Ck = PfFt * Pp_inv
+		Ck := l.matmul_dyn_simd(&PfFt, &Pp_inv, context.temp_allocator)
+		defer l.matrix_free(&Ck)
+
+		// diff_x = smoothed[k+1].x - xp[k+1].x
+		diff_x := make([]f64, N, context.temp_allocator)
+		for i in 0 ..< N {diff_x[i] = smoothed[k + 1].x[i] - xp[k + 1].x[i]}
+
+		// corr_x = Ck * diff_x
+		diff_x_mat := _matrix_from_flat(diff_x, N, 1, context.temp_allocator)
+		defer l.matrix_free(&diff_x_mat)
+
+		corr_x_mat := l.matmul_dyn_simd(&Ck, &diff_x_mat, context.temp_allocator)
+		defer l.matrix_free(&corr_x_mat)
+
+		// smoothed[k].x = xf[k].x + corr_x
+		for i in 0 ..< N {smoothed[k].x[i] = xf[k].x[i] + corr_x_mat.data[i]}
+		delete(diff_x, context.temp_allocator)
+
+		// diff_P = smoothed[k+1].P - Pp_k1
+		diff_P := make([]f64, N * N, context.temp_allocator)
+
+		// Convert smoothed[k+1].P to flat slice first
+		smoothed_P_array := transmute([N * N]f64)smoothed[k + 1].P
+		smoothed_P_slice := smoothed_P_array[:]
+
+		for i in 0 ..< N * N {
+			diff_P[i] = smoothed_P_slice[i] - Pp_slice[i]
+		}
+
+		// Ck_t = Ckᵀ
+		Ck_t := l.matrix_transpose(&Ck, context.temp_allocator)
+		defer l.matrix_free(&Ck_t)
+
+		// temp = Ck * diff_P
+		diff_P_mat := _matrix_from_flat(diff_P, N, N, context.temp_allocator)
+		defer l.matrix_free(&diff_P_mat)
+
+		temp := l.matmul_dyn_simd(&Ck, &diff_P_mat, context.temp_allocator)
+		defer l.matrix_free(&temp)
+
+		// P_new = Pf_k + temp * Ck_t
+		temp_Ckt := l.matmul_dyn_simd(&temp, &Ck_t, context.temp_allocator)
+		defer l.matrix_free(&temp_Ckt)
+
+		P_new := l.matrix_new(f64, N, N, context.temp_allocator)
+		defer l.matrix_free(&P_new)
+		for i in 0 ..< N * N {P_new.data[i] = Pf_slice[i] + temp_Ckt.data[i]}
+
+		// Convert result back to fixed-size array
+		for i in 0 ..< N * N {smoothed[k].P[i / N, i % N] = P_new.data[i]}
+		delete(diff_P, context.temp_allocator)
+	}
+
+	return smoothed
+}
+
+
 rts_smooth :: proc(
 	F: matrix[$N, N]f64,
 	xf: []KalmanState(N), // filtered
 	xp: []KalmanState(N), // predicted
 ) -> []KalmanState(N) {
+	if _kalman_use_optimized(N) {
+		return rts_smooth_large(F, xf, xp)
+	}
+
+	// Built-in Odin ops for small N (≤8)
 	assert(len(xf) == len(xp))
 	T := len(xf)
 
@@ -427,6 +566,167 @@ rts_smooth :: proc(
 	return smoothed
 }
 
+// ============================================================================
+// Optimized RTS smoother with control for large state dimensions (N > 8)
+// Uses wotan_linalg SIMD operations for matrix inverses and multiplications
+// ============================================================================
+rts_smooth_control_large :: proc(
+	F: matrix[$N, N]f64,
+	B: matrix[N, $U]f64,
+	u: []([U]f64), // control inputs for each step
+	xf: []KalmanState(N), // filtered states
+	xp: []KalmanState(N), // predicted states (must include control)
+) -> []KalmanState(N) {
+	assert(len(xf) == len(xp))
+	assert(len(u) == len(xf)) // one control per step
+
+	T := len(xf)
+	smoothed := make([]KalmanState(N), T)
+
+	if T == 0 {
+		return smoothed
+	}
+
+	smoothed[T - 1] = xf[T - 1]
+
+	// Convert F and B to dynamic matrices for optimized linalg
+	F_array := transmute([N * N]f64)F
+	F_slice := F_array[:]
+	F_mat := _matrix_from_flat(F_slice, N, N, context.temp_allocator)
+	defer l.matrix_free(&F_mat)
+
+	B_array := transmute([N * U]f64)B
+	B_slice := B_array[:]
+	B_mat := _matrix_from_flat(B_slice, N, U, context.temp_allocator)
+	defer l.matrix_free(&B_mat)
+
+	// Precompute Fᵀ once
+	Ft := l.matrix_transpose(&F_mat, context.temp_allocator)
+	defer l.matrix_free(&Ft)
+
+	for k := T - 2; k >= 0; k -= 1 {
+		// Convert Pf_k and Pp_k1 to dynamic matrices
+		Pf_array := transmute([N * N]f64)xf[k].P
+		Pf_slice := Pf_array[:]
+		Pf_mat := _matrix_from_flat(Pf_slice, N, N, context.temp_allocator)
+		defer l.matrix_free(&Pf_mat)
+
+		Pp_array := transmute([N * N]f64)xp[k + 1].P
+		Pp_slice := Pp_array[:]
+		Pp_mat := _matrix_from_flat(Pp_slice, N, N, context.temp_allocator)
+		defer l.matrix_free(&Pp_mat)
+
+		// Pp_inv = inv(Pp_k1) using LU decomposition
+		Pp_inv := l.matrix_new(f64, N, N, context.temp_allocator)
+		defer l.matrix_free(&Pp_inv)
+
+		// Make a copy for LU decomposition
+		Pp_lu := l.matrix_new(f64, N, N, context.temp_allocator)
+		copy(Pp_lu.data, Pp_mat.data)
+		defer l.matrix_free(&Pp_lu)
+
+		_, piv, _, ok := l.lu_decompose(&Pp_lu, context.temp_allocator)
+		if ok {
+			// Solve Pp_inv * Pp = I for Pp_inv (column by column)
+			for j in 0 ..< N {
+				e_col := make([]f64, N, context.temp_allocator)
+				for i in 0 ..< N {e_col[i] = 0.0}
+				e_col[j] = 1.0
+
+				col := l.lu_solve_simd(&Pp_lu, piv, e_col, context.temp_allocator)
+				defer delete(col, context.temp_allocator)
+
+				for i in 0 ..< N {Pp_inv.data[i * N + j] = col[i]}
+				delete(e_col, context.temp_allocator)
+			}
+		} else {
+			// Fallback: use identity (shouldn't happen for valid covariance)
+			for i in 0 ..< N * N {Pp_inv.data[i] = 0.0}
+			for i in 0 ..< N {Pp_inv.data[i * N + i] = 1.0}
+		}
+
+		// Ck = Pf_k * Fᵀ * Pp_inv
+		// Step 1: PfFt = Pf_k * Fᵀ (matmul_dyn_simd computes A * Bᵀ)
+		PfFt := l.matmul_dyn_simd(&Pf_mat, &F_mat, context.temp_allocator)
+		defer l.matrix_free(&PfFt)
+
+		// Step 2: Ck = PfFt * Pp_inv
+		Ck := l.matmul_dyn_simd(&PfFt, &Pp_inv, context.temp_allocator)
+		defer l.matrix_free(&Ck)
+
+		// Compute controlled prediction: x_pred = F * xf[k] + B * u[k]
+		xf_k_array := transmute([N]f64)xf[k].x
+		xf_k_slice := xf_k_array[:]
+		xf_k_mat := _matrix_from_flat(xf_k_slice, N, 1, context.temp_allocator)
+		defer l.matrix_free(&xf_k_mat)
+
+		u_k_copy := u[k]
+		u_k_slice := u_k_copy[:]
+		u_k_mat := _matrix_from_flat(u_k_slice, U, 1, context.temp_allocator)
+		defer l.matrix_free(&u_k_mat)
+
+		Fxf := l.matmul_dyn_simd(&F_mat, &xf_k_mat, context.temp_allocator)
+		defer l.matrix_free(&Fxf)
+
+		Bu := l.matmul_dyn_simd(&B_mat, &u_k_mat, context.temp_allocator)
+		defer l.matrix_free(&Bu)
+
+		x_pred := make([]f64, N, context.temp_allocator)
+		for i in 0 ..< N {x_pred[i] = Fxf.data[i] + Bu.data[i]}
+		defer delete(x_pred, context.temp_allocator)
+
+		// x_s[k] = x_f[k] + Ck * (x_s[k+1] - x_pred)
+		diff_x := make([]f64, N, context.temp_allocator)
+		for i in 0 ..< N {diff_x[i] = smoothed[k + 1].x[i] - x_pred[i]}
+
+		diff_x_mat := _matrix_from_flat(diff_x, N, 1, context.temp_allocator)
+		defer l.matrix_free(&diff_x_mat)
+
+		corr_x_mat := l.matmul_dyn_simd(&Ck, &diff_x_mat, context.temp_allocator)
+		defer l.matrix_free(&corr_x_mat)
+
+		for i in 0 ..< N {smoothed[k].x[i] = xf[k].x[i] + corr_x_mat.data[i]}
+		delete(diff_x, context.temp_allocator)
+
+		// P_s[k] = P_f[k] + Ck * (P_s[k+1] - P_p[k+1]) * Ckᵀ
+		// diff_P = smoothed[k+1].P - Pp_k1
+		diff_P := make([]f64, N * N, context.temp_allocator)
+
+		// Convert smoothed[k+1].P to flat slice first
+		smoothed_P_array := transmute([N * N]f64)smoothed[k + 1].P
+		smoothed_P_slice := smoothed_P_array[:]
+
+		for i in 0 ..< N * N {
+			diff_P[i] = smoothed_P_slice[i] - Pp_slice[i]
+		}
+
+		// Ck_t = Ckᵀ
+		Ck_t := l.matrix_transpose(&Ck, context.temp_allocator)
+		defer l.matrix_free(&Ck_t)
+
+		// temp = Ck * diff_P
+		diff_P_mat := _matrix_from_flat(diff_P, N, N, context.temp_allocator)
+		defer l.matrix_free(&diff_P_mat)
+
+		temp := l.matmul_dyn_simd(&Ck, &diff_P_mat, context.temp_allocator)
+		defer l.matrix_free(&temp)
+
+		// P_new = Pf_k + temp * Ck_t
+		temp_Ckt := l.matmul_dyn_simd(&temp, &Ck_t, context.temp_allocator)
+		defer l.matrix_free(&temp_Ckt)
+
+		P_new := l.matrix_new(f64, N, N, context.temp_allocator)
+		defer l.matrix_free(&P_new)
+		for i in 0 ..< N * N {P_new.data[i] = Pf_slice[i] + temp_Ckt.data[i]}
+
+		// Convert result back to fixed-size array
+		for i in 0 ..< N * N {smoothed[k].P[i / N, i % N] = P_new.data[i]}
+		delete(diff_P, context.temp_allocator)
+	}
+
+	return smoothed
+}
+
 rts_smooth_control :: proc(
 	F: matrix[$N, N]f64,
 	B: matrix[N, $U]f64,
@@ -434,7 +734,11 @@ rts_smooth_control :: proc(
 	xf: []KalmanState(N), // filtered states
 	xp: []KalmanState(N), // predicted states (must include control)
 ) -> []KalmanState(N) {
+	if _kalman_use_optimized(N) {
+		return rts_smooth_control_large(F, B, u, xf, xp)
+	}
 
+	// Built-in Odin ops for small N (≤8)
 	assert(len(xf) == len(xp))
 	assert(len(u) == len(xf)) // one control per step
 
