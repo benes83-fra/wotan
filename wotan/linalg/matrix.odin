@@ -383,3 +383,15 @@ matrix_transpose_blocked :: proc(
 
 	return out
 }
+
+
+// In wotan_linalg/constructors.odin or similar:
+matrix_from_flat :: proc(
+	data: []f64,
+	rows, cols: int,
+	allocator: mem.Allocator = context.allocator,
+) -> Matrix(f64) {
+	m := matrix_new(f64, rows, cols, allocator)
+	copy(m.data, data)
+	return m
+}
