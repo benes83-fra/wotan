@@ -74,59 +74,102 @@ sarima_forecast :: proc(
 
 	z_state := make([]f64, N, allocator)
 	P := make([]f64, N * N, allocator)
-	for i in 0 ..< N {
-		z_state[i] = xT[i]
-	}
-	for i in 0 ..< N * N {
-		P[i] = PT[i]
-	}
+	copy(z_state, xT)
+	copy(P, PT)
 
 	// crude z for alpha (same as arima_forecast)
 	z_alpha := 1.96
 	_ = alpha // keep signature; you can plug proper quantile later
 
 	for step in 0 ..< h {
-		// predict one step ahead
-		x_pred := make([]f64, N, allocator)
-		for i in 0 ..< N {
-			sv := 0.0
-			for j in 0 ..< N {
-				sv += F[i * N + j] * z_state[j]
+		// --- Optimized Predict Step: x_pred = F*x, P_pred = F*P*Fᵀ + Q ---
+		if _kalman_use_optimized(N) {
+			// Convert flat arrays to dynamic matrices for optimized linalg
+			F_mat := _matrix_from_flat(F, N, N, context.temp_allocator)
+
+			P_mat := _matrix_from_flat(P, N, N, context.temp_allocator)
+
+			Q_mat := _matrix_from_flat(Q, N, N, context.temp_allocator)
+
+			// x_pred = F * x using SIMD matvec
+			x_pred_vec := l.matvec_dyn_simd(&F_mat, z_state, context.temp_allocator)
+
+			// P_pred = F * P * Fᵀ + Q
+			// Step 1: FP = F * P (P is symmetric, so Pᵀ = P)
+			FP := l.matmul_dyn_simd(&F_mat, &P_mat, context.temp_allocator)
+
+			// Step 2: P_pred = FP * Fᵀ + Q (matmul_dyn_simd computes FP * Fᵀ directly)
+			P_pred_mat := l.matmul_dyn_simd(&FP, &F_mat, context.temp_allocator)
+
+			// Add Q
+			for i in 0 ..< N * N {P_pred_mat.data[i] += Q_mat.data[i]}
+
+			// Copy results back to flat arrays for next iteration
+			copy(z_state, x_pred_vec)
+			for i in 0 ..< N * N {P[i] = P_pred_mat.data[i]}
+
+			// Clean up temporaries immediately (no defer in loop)
+			l.matrix_free(&F_mat)
+			l.matrix_free(&P_mat)
+			l.matrix_free(&Q_mat)
+			delete(x_pred_vec, context.temp_allocator)
+			l.matrix_free(&FP)
+			l.matrix_free(&P_pred_mat)
+		} else {
+			// Built-in Odin ops for small N (≤8) - keep original manual loops
+			// x_pred = F * x
+			x_pred := make([]f64, N, allocator)
+			for i in 0 ..< N {
+				sv := 0.0
+				for j in 0 ..< N {
+					sv += F[i * N + j] * z_state[j]
+				}
+				x_pred[i] = sv
 			}
-			x_pred[i] = sv
+
+			// P_pred = F * P * Fᵀ + Q
+			P_pred := make([]f64, N * N, allocator)
+			temp := make([]f64, N * N, allocator)
+			for i in 0 ..< N {
+				for j in 0 ..< N {
+					sv := 0.0
+					for k in 0 ..< N {
+						sv += F[i * N + k] * P[k * N + j]
+					}
+					temp[i * N + j] = sv
+				}
+			}
+			for i in 0 ..< N {
+				for j in 0 ..< N {
+					sv := 0.0
+					for k in 0 ..< N {
+						sv += temp[i * N + k] * F[j * N + k]
+					}
+					P_pred[i * N + j] = sv + Q[i * N + j]
+				}
+			}
+
+			// Copy results back
+			copy(z_state, x_pred)
+			copy(P, P_pred)
+
+			// Clean up
+			delete(x_pred, allocator)
+			delete(P_pred, allocator)
+			delete(temp, allocator)
 		}
 
-		P_pred := make([]f64, N * N, allocator)
-		temp := make([]f64, N * N, allocator)
-		for i in 0 ..< N {
-			for j in 0 ..< N {
-				sv := 0.0
-				for k in 0 ..< N {
-					sv += F[i * N + k] * P[k * N + j]
-				}
-				temp[i * N + j] = sv
-			}
-		}
-		for i in 0 ..< N {
-			for j in 0 ..< N {
-				sv := 0.0
-				for k in 0 ..< N {
-					sv += temp[i * N + k] * F[j * N + k]
-				}
-				P_pred[i * N + j] = sv + Q[i * N + j]
-			}
-		}
-
-		// observation mean/variance on differenced scale
+		// --- observation mean/variance on differenced scale ---
+		// (unchanged: this is O(N) and not a bottleneck)
 		mu := 0.0
 		for j in 0 ..< N {
-			mu += H[j] * x_pred[j]
+			mu += H[j] * z_state[j]
 		}
 
 		Sv := 0.0
 		for i in 0 ..< N {
 			for j in 0 ..< N {
-				Sv += H[i] * P_pred[i * N + j] * H[j]
+				Sv += H[i] * P[i * N + j] * H[j]
 			}
 		}
 		Sv += R[0]
@@ -136,14 +179,6 @@ sarima_forecast :: proc(
 		mean_d[step] = mu
 		lower_d[step] = mu - z_alpha * sd
 		upper_d[step] = mu + z_alpha * sd
-
-		// roll forward
-		for i in 0 ..< N {
-			z_state[i] = x_pred[i]
-		}
-		for i in 0 ..< N * N {
-			P[i] = P_pred[i]
-		}
 	}
 
 	// 5) build histories for inverse differencing

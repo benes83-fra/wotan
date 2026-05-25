@@ -1378,7 +1378,7 @@ sarima_light_demo :: proc(allocator: mem.Allocator = context.allocator) {
 	fmt.printf("First 5 forecasts:\n")
 	for i in 0 ..< min(h, 5) {
 		fmt.printf(
-			"  y_{T +%v} = %.4f  (%.4f, %.4f)\n",
+			"  y_{ T + %v } = %.4f  (%.4f, %.4f)\n",
 			i + 1,
 			fc.mean[i],
 			fc.lower[i],

@@ -2150,7 +2150,7 @@ kalman_loglik_scalar :: proc(
 
 
 // ============================================================================
-// Optimized version using wotan_linalg SIMD operations
+// Kalman filter to get last state (safe manual loops + SIMD dot products)
 // ============================================================================
 kalman_filter_last_scalar :: proc(
 	y: []f64,
@@ -2175,67 +2175,72 @@ kalman_filter_last_scalar :: proc(
 		return
 	}
 
-	// Convert flat arrays to dynamic matrices for optimized linalg
-	F_mat := _matrix_from_flat(F, N, N, context.temp_allocator)
-	Q_mat := _matrix_from_flat(Q, N, N, context.temp_allocator)
-	P_mat := _matrix_from_flat(P0, N, N, context.temp_allocator)
-	H_vec := make([]f64, N, context.temp_allocator)
-	copy(H_vec, H)
-	R_scalar := R[0]
-	x_vec := make([]f64, N, context.temp_allocator)
+	// Use manual loops (known working) with SIMD dot products for speed
+	x_vec := make([]f64, N, context.allocator)
+	P_vec := make([]f64, N * N, context.allocator)
 	copy(x_vec, x0)
-
-	defer {
-		l.matrix_free(&F_mat)
-		l.matrix_free(&Q_mat)
-		l.matrix_free(&P_mat)
-		delete(H_vec, context.temp_allocator)
-	}
+	copy(P_vec, P0)
 
 	for t in 0 ..< T {
 		// --- Predict ---
-		// x_pred = F * x
-		x_pred := l.matvec_dyn_simd(&F_mat, x_vec, context.temp_allocator)
-		defer delete(x_pred, context.temp_allocator)
+		// x_pred = F * x (manual loop, but could use matvec_dyn_simd later)
+		x_pred := make([]f64, N, context.allocator)
+		for i in 0 ..< N {
+			s := 0.0
+			for j in 0 ..< N {
+				s += F[i * N + j] * x_vec[j]
+			}
+			x_pred[i] = s
+		}
 
-		// P_pred = F * P * Fᵀ + Q
-		// Since matmul_dyn_simd computes A * Bᵀ:
-		// Step 1: FP = F * P (P is symmetric, so Pᵀ = P)
-		FP := l.matmul_dyn_simd(&F_mat, &P_mat, context.temp_allocator)
-		defer l.matrix_free(&FP)
-
-		// Step 2: P_pred = FP * Fᵀ (matmul_dyn_simd computes FP * Fᵀ directly)
-		P_pred := l.matmul_dyn_simd(&FP, &F_mat, context.temp_allocator)
-		defer l.matrix_free(&P_pred)
-
-		// Add Q
-		for i in 0 ..< N * N {P_pred.data[i] += Q_mat.data[i]}
+		// P_pred = F * P * Fᵀ + Q (manual loops)
+		P_pred := make([]f64, N * N, context.allocator)
+		temp := make([]f64, N * N, context.allocator)
+		for i in 0 ..< N {
+			for j in 0 ..< N {
+				s := 0.0
+				for k in 0 ..< N {
+					s += F[i * N + k] * P_vec[k * N + j]
+				}
+				temp[i * N + j] = s
+			}
+		}
+		for i in 0 ..< N {
+			for j in 0 ..< N {
+				s := 0.0
+				for k in 0 ..< N {
+					s += temp[i * N + k] * F[j * N + k]
+				}
+				P_pred[i * N + j] = s + Q[i * N + j]
+			}
+		}
 
 		// --- Innovation ---
-		y_pred := l.dot_simd(H_vec, x_pred)
+		// y_pred = H * x_pred using SIMD dot product
+		y_pred := l.dot_simd(H, x_pred)
 		v := y[t] - y_pred
 
-		// S = H * P_pred * Hᵀ + R
-		HP := make([]f64, N, context.temp_allocator)
+		// S = H * P_pred * Hᵀ + R using SIMD for the quadratic form
+		HP := make([]f64, N, context.allocator)
 		for j in 0 ..< N {
 			sum := 0.0
 			for i in 0 ..< N {
-				sum += H_vec[i] * P_pred.data[i * N + j]
+				sum += H[i] * P_pred[i * N + j]
 			}
 			HP[j] = sum
 		}
-		St := l.dot_simd(HP, H_vec) + R_scalar
-		delete(HP, context.temp_allocator)
+		S := l.dot_simd(HP, H) + R[0]
+		delete(HP, context.allocator)
 
 		// --- Update ---
 		// K = P_pred * Hᵀ / S
-		K := make([]f64, N, context.temp_allocator)
+		K := make([]f64, N, context.allocator)
 		for i in 0 ..< N {
 			sum := 0.0
 			for j in 0 ..< N {
-				sum += P_pred.data[i * N + j] * H_vec[j]
+				sum += P_pred[i * N + j] * H[j]
 			}
-			K[i] = sum / St
+			K[i] = sum / S
 		}
 
 		// x = x_pred + K * v
@@ -2244,19 +2249,26 @@ kalman_filter_last_scalar :: proc(
 		// P = P_pred - K * S * Kᵀ
 		for i in 0 ..< N {
 			for j in 0 ..< N {
-				P_mat.data[i * N + j] = P_pred.data[i * N + j] - K[i] * St * K[j]
+				P_vec[i * N + j] = P_pred[i * N + j] - K[i] * S * K[j]
 			}
 		}
-		delete(K, context.temp_allocator)
+
+		// Clean up
+		delete(x_pred, context.allocator)
+		delete(P_pred, context.allocator)
+		delete(temp, context.allocator)
+		delete(K, context.allocator)
 	}
 
-	// return last state and covariance as flat arrays
+	// Copy results back to output arrays
 	for i in 0 ..< N {xT[i] = x_vec[i]}
-	for i in 0 ..< N * N {PT[i] = P_mat.data[i]}
+	for i in 0 ..< N * N {PT[i] = P_vec[i]}
+
+	delete(x_vec, context.allocator)
+	delete(P_vec, context.allocator)
 
 	return
 }
-
 // ============================================================================
 // Optimized version using wotan_linalg SIMD operations
 // ============================================================================
