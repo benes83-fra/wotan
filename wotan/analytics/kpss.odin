@@ -1,6 +1,8 @@
 package analytics
 
 import w "../core"
+import l "../linalg"
+import ml "./ML"
 import "core:math"
 import "core:mem"
 
@@ -53,54 +55,24 @@ kpss_test :: proc(
 		X_cols = 2
 	}
 
-	X := make([]f64, T * X_cols, allocator)
+	X := l.matrix_new(f64, T, X_cols, allocator)
 	Y := y
 
 	for t in 0 ..< T {
 		row := t * X_cols
-		X[row + 0] = 1.0
+		X.data[row + 0] = 1.0
 		if kind == .Trend {
-			X[row + 1] = f64(t + 1)
+			X.data[row + 1] = f64(t + 1)
 		}
 	}
 
 	// Compute OLS residuals
 	// X'X
-	XtX := make([]f64, X_cols * X_cols, allocator)
-	XtY := make([]f64, X_cols, allocator)
+	ols_res := ml.ols_fit(&X, y, .Cholesky, allocator)
+	defer ml._ols_result_free(&ols_res, allocator)
 
-	for t in 0 ..< T {
-		row := t * X_cols
-		for i in 0 ..< X_cols {
-			xi := X[row + i]
-			XtY[i] += xi * Y[t]
-			for j in 0 ..< X_cols {
-				XtX[i * X_cols + j] += xi * X[row + j]
-			}
-		}
-	}
-
-	XtX_inv := matrix_inverse(XtX, X_cols, allocator)
-
-	beta := make([]f64, X_cols, allocator)
-	for i in 0 ..< X_cols {
-		s := 0.0
-		for j in 0 ..< X_cols {
-			s += XtX_inv[i * X_cols + j] * XtY[j]
-		}
-		beta[i] = s
-	}
-
-	// residuals u_t
-	u := make([]f64, T, allocator)
-	for t in 0 ..< T {
-		row := t * X_cols
-		pred := 0.0
-		for j in 0 ..< X_cols {
-			pred += X[row + j] * beta[j]
-		}
-		u[t] = Y[t] - pred
-	}
+	// Extract residuals directly
+	u := ols_res.residuals
 
 	// 2) Partial sum process S_t
 	S := make([]f64, T, allocator)
