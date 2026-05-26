@@ -2,6 +2,7 @@ package wotan_linalg
 
 import w "../core"
 import "base:intrinsics"
+import "core:fmt"
 import "core:math"
 import "core:mem"
 import "core:strings"
@@ -385,13 +386,17 @@ matrix_transpose_blocked :: proc(
 }
 
 
-// In wotan_linalg/constructors.odin or similar:
 matrix_from_flat :: proc(
 	data: []f64,
 	rows, cols: int,
 	allocator: mem.Allocator = context.allocator,
 ) -> Matrix(f64) {
 	m := matrix_new(f64, rows, cols, allocator)
-	copy(m.data, data)
+	expected_len := rows * cols
+	if len(data) < expected_len {
+		panic(fmt.aprintf("matrix_from_flat: data too short (%v < %v)", len(data), expected_len))
+	}
+	copy(m.data, data[0:expected_len])
+	m.stride = cols // ← ADD THIS LINE: set stride for contiguous row-major layout
 	return m
 }

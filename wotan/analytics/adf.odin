@@ -2,6 +2,7 @@ package analytics
 
 import w "../core"
 import l "../linalg"
+import "core:fmt"
 import "core:math"
 import "core:mem"
 
@@ -300,7 +301,8 @@ adf_core :: proc(
 
 		// Solve XtX * beta = XtY using Cholesky (XtX is SPD)
 		beta := l.solve_spd_cholesky(&XtX_mat, XtY, .Blocked, allocator)
-
+		XtX_inv_mat := l.spd_inverse(&XtX_mat, .Blocked, allocator)
+		defer l.matrix_free(&XtX_inv_mat)
 		// residual variance
 		rss := 0.0
 		for t in 0 ..< T {
@@ -321,7 +323,7 @@ adf_core :: proc(
 		// standard errors
 		se := make([]f64, k, allocator)
 		for i in 0 ..< k {
-			se[i] = math.sqrt_f64(sigma2 * XtX_mat.data[i * k + i])
+			se[i] = math.sqrt_f64(sigma2 * XtX_inv_mat.data[i * k + i])
 		}
 
 		// locate γ (coefficient on y_{t-1})
@@ -408,30 +410,47 @@ adf_core :: proc(
 		Y[t] = dy[t + p]
 	}
 
-	XtX := make([]f64, k * k, allocator)
+	// In the generic p >= 1 branch of adf_core, replace the manual solve with:
+
+	// Pre-extract columns of X for efficient dot products
+	X_cols := make([][]f64, k, allocator)
+	for j in 0 ..< k {
+		X_cols[j] = make([]f64, T, allocator)
+		for t in 0 ..< T {
+			X_cols[j][t] = X[t * k + j]
+		}
+	}
+
+	// Compute X'Y with SIMD
 	XtY := make([]f64, k, allocator)
-	for t in 0 ..< T {
-		row := t * k
-		for i in 0 ..< k {
-			xi := X[row + i]
-			XtY[i] += xi * Y[t]
-			for j in 0 ..< k {
-				XtX[i * k + j] += xi * X[row + j]
-			}
-		}
+	for j in 0 ..< k {
+		XtY[j] = l.dot_simd(X_cols[j], Y)
 	}
 
-	XtX_inv := matrix_inverse(XtX, k, allocator)
-
-	beta := make([]f64, k, allocator)
+	// Compute X'X with SIMD (exploit symmetry)
+	XtX := make([]f64, k * k, allocator)
 	for i in 0 ..< k {
-		s := 0.0
-		for j in 0 ..< k {
-			s += XtX_inv[i * k + j] * XtY[j]
+		for j in 0 ..= i {
+			sum := l.dot_simd(X_cols[i], X_cols[j])
+			XtX[i * k + j] = sum
+			XtX[j * k + i] = sum
 		}
-		beta[i] = s
 	}
 
+	// Clean up column buffers
+	for j in 0 ..< k {
+		delete(X_cols[j], allocator)
+	}
+	delete(X_cols, allocator)
+
+	// Solve using Cholesky (XtX is SPD)
+	XtX_mat := l.matrix_from_flat(XtX, k, k, allocator)
+	defer l.matrix_free(&XtX_mat)
+	// DEBUG: Print dimensions before solve
+
+	beta := l.solve_spd_cholesky(&XtX_mat, XtY, .Blocked, allocator)
+	XtX_inv_mat := l.spd_inverse(&XtX_mat, .Blocked, allocator)
+	defer l.matrix_free(&XtX_inv_mat)
 	rss := 0.0
 	for t in 0 ..< T {
 		row := t * k
@@ -450,7 +469,7 @@ adf_core :: proc(
 
 	se := make([]f64, k, allocator)
 	for i in 0 ..< k {
-		se[i] = math.sqrt_f64(sigma2 * XtX_inv[i * k + i])
+		se[i] = math.sqrt_f64(sigma2 * XtX_inv_mat.data[i * k + i])
 	}
 
 	gamma_col := 0

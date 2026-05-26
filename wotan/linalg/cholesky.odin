@@ -1,5 +1,6 @@
 package wotan_linalg
 
+import "core:fmt"
 import "core:math"
 import "core:mem"
 
@@ -65,6 +66,7 @@ forward_substitute_simd :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> []f64 {
 	n := L.rows
+
 	if L.cols != n || len(b) != n {
 		panic("forward_substitute_simd: dimension mismatch")
 	}
@@ -216,23 +218,30 @@ cholesky_decompose_blocked :: proc(A: ^Matrix(f64)) {
 		// 2) Compute L21: A21 := A21 * inv(L11ᵀ)
 		//    For rows i = k+b .. n-1, columns j = k .. k+b-1
 		// ----------------------------------------------------
+		// ----------------------------------------------------
+		// 2) Compute L21: Solve L11 * L21ᵀ = A21ᵀ
+		//    A21 has shape (rows_A21) × b
+		//    For each ROW i of A21 (length b), solve L11 * x = row
+		// ----------------------------------------------------
 		rows_A21 := n - (k + b)
 		if rows_A21 > 0 {
-			// L11 view is A11 (b×b, lower-triangular)
-			for j := 0; j < b; j += 1 {
-				// RHS: column (k+j) of A21 (rows k+b..n-1)
-				rhs := make([]f64, rows_A21, context.temp_allocator)
-				for i := 0; i < rows_A21; i += 1 {
-					rhs[i] = A.data[(k + b + i) * A.cols + (k + j)]
+			for i in 0 ..< rows_A21 {
+				// Extract row i of A21 (length b)
+				row := make([]f64, b, context.temp_allocator)
+				for j in 0 ..< b {
+					row[j] = A.data[(k + b + i) * A.cols + (k + j)]
 				}
 
-				// Solve L11 * x = rhs  (forward, lower-triangular)
-				x := forward_substitute_simd(&A11, rhs, context.temp_allocator)
+				// Solve L11 * x = row (forward substitution)
+				x := forward_substitute_simd(&A11, row, context.temp_allocator)
 
-				// Write back into A21 as column j
-				for i := 0; i < rows_A21; i += 1 {
-					A.data[(k + b + i) * A.cols + (k + j)] = x[i]
+				// Store solution as row i of L21 (overwrites A21 in-place)
+				for j in 0 ..< b {
+					A.data[(k + b + i) * A.cols + (k + j)] = x[j]
 				}
+
+				delete(row, context.temp_allocator)
+				delete(x, context.temp_allocator)
 			}
 		}
 
