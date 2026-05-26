@@ -2,6 +2,7 @@ package analytics
 
 
 import w "../core"
+import l "../linalg"
 import "core:math"
 import "core:mem"
 import "core:slice"
@@ -1739,10 +1740,13 @@ rolling_apply_float_var :: proc(
 		mean := 0.0
 		for x in values do mean += x
 		mean /= f64(len(values))
-
-		var := 0.0
-		for x in values do var += (x - mean) * (x - mean)
-		var /= f64(len(values))
+		// Pre-compute centered array
+		dx := make([]f64, len(values), allocator)
+		for i in 0 ..< len(values) {
+			dx[i] = values[i] - mean
+		}
+		var := l.dot_simd(dx, dx) / f64(len(values))
+		delete(dx, allocator)
 
 		w.append_float(&out, var)
 	}
@@ -1779,10 +1783,13 @@ rolling_apply_int_var :: proc(
 		for x in values do mean += x
 		mean /= f64(len(values))
 
-		var := 0.0
-		for x in values do var += (x - mean) * (x - mean)
-		var /= f64(len(values))
-
+		// Pre-compute centered array
+		dx := make([]f64, len(values), allocator)
+		for i in 0 ..< len(values) {
+			dx[i] = values[i] - mean
+		}
+		var := l.dot_simd(dx, dx) / f64(len(values))
+		delete(dx, allocator)
 		w.append_float(&out, var)
 	}
 
@@ -1828,11 +1835,16 @@ rolling_apply_float_cov :: proc(
 		mean_x /= f64(len(xs))
 		mean_y /= f64(len(ys))
 
-		cov := 0.0
-		for idx in 0 ..< len(xs) {
-			cov += (xs[idx] - mean_x) * (ys[idx] - mean_y)
+		// Pre-compute centered arrays
+		dx := make([]f64, len(xs), allocator)
+		dy := make([]f64, len(ys), allocator)
+		for i in 0 ..< len(xs) {
+			dx[i] = xs[i] - mean_x
+			dy[i] = ys[i] - mean_y
 		}
-		cov /= f64(len(xs))
+		cov := l.dot_simd(dx, dy) / f64(len(xs))
+		delete(dx, allocator)
+		delete(dy, allocator)
 
 		w.append_float(&out, cov)
 	}
@@ -1879,11 +1891,16 @@ rolling_apply_int_cov :: proc(
 		mean_x /= f64(len(xs))
 		mean_y /= f64(len(ys))
 
-		cov := 0.0
-		for idx in 0 ..< len(xs) {
-			cov += (xs[idx] - mean_x) * (ys[idx] - mean_y)
+		// Pre-compute centered arrays
+		dx := make([]f64, len(xs), allocator)
+		dy := make([]f64, len(ys), allocator)
+		for i in 0 ..< len(xs) {
+			dx[i] = xs[i] - mean_x
+			dy[i] = ys[i] - mean_y
 		}
-		cov /= f64(len(xs))
+		cov := l.dot_simd(dx, dy) / f64(len(xs))
+		delete(dx, allocator)
+		delete(dy, allocator)
 
 		w.append_float(&out, cov)
 	}

@@ -281,8 +281,8 @@ main :: proc() {
 	w.dataframe_pretty_print(&dfx, 20)
 
 	test.groupby2_test()
-	test.rolling_test(context.temp_allocator)
-	test.rolling_matrix_test(context.temp_allocator)
+
+
 	test.pca_test(context.temp_allocator)
 	test.ewm_pca_test(context.temp_allocator)
 	test.ewm_cov_test(context.temp_allocator)
@@ -295,7 +295,40 @@ main :: proc() {
 	test.ukf_tiny_rts_test(context.temp_allocator)
 	test.ukf_tiny_control_test(context.temp_allocator)
 	test.ukf_tiny_control_rts_test(context.temp_allocator)
-
+	test.arima_test(context.temp_allocator)
+	test.arima_fit_test(context.temp_allocator)
+	test.arima_dataframe_test(context.temp_allocator)
+	//mc_arima_arma11(context.temp_allocator, 200, 300)
+	test.arima_fit_arma22_test(context.temp_allocator)
+	// mc_arima_arma22(context.temp_allocator, 200, 300)
+	// mc_arima_arma_pq([]f64{0.6, -0.1, 0.2}, []f64{0.5}, 0.1, 200, 300, context.temp_allocator)
+	//mc_arima_pdq_test(context.temp_allocator)
+	//arima_auto_test(context.temp_allocator)
+	test.autocorrelation_test(context.temp_allocator)
+	test.ljung_box_test(context.temp_allocator)
+	test.jarque_bera_test(context.temp_allocator)
+	test.residual_diagnostics_test(context.temp_allocator)
+	test.residuals_test(context.temp_allocator)
+	test.adf_test_block(context.temp_allocator)
+	test.kpss_test_block(context.temp_allocator)
+	test.stationarity_test_block(context.temp_allocator)
+	//auto_arima_stationarity_test(context.temp_allocator)
+	//mc_arima_pdq_test(context.temp_allocator)
+	// sarima_mc_test(
+	// 	200,
+	// 	300,
+	// 	[]f64{0.5},
+	// 	1,
+	// 	[]f64{0.4},
+	// 	[]f64{0.3},
+	// 	1,
+	// 	[]f64{0.2},
+	// 	12,
+	// 	0.1,
+	// 	context.temp_allocator,
+	// )
+	test.sarima_light_demo(context.temp_allocator)
+	test.sarima_resid_diagnostics_quick_test(context.temp_allocator)
 
 	test.json_basic_test(context.temp_allocator)
 	test.jsonl_basic_test(context.temp_allocator)
@@ -364,40 +397,8 @@ main :: proc() {
 	test.gls_kron_test(context.temp_allocator)
 	test.ridge_cv_test(context.temp_allocator)
 	test.lasso_cv_test(context.temp_allocator)
-	test.arima_test(context.temp_allocator)
-	test.arima_fit_test(context.temp_allocator)
-	test.arima_dataframe_test(context.temp_allocator)
-	//mc_arima_arma11(context.temp_allocator, 200, 300)
-	test.arima_fit_arma22_test(context.temp_allocator)
-	// mc_arima_arma22(context.temp_allocator, 200, 300)
-	// mc_arima_arma_pq([]f64{0.6, -0.1, 0.2}, []f64{0.5}, 0.1, 200, 300, context.temp_allocator)
-	//mc_arima_pdq_test(context.temp_allocator)
-	//arima_auto_test(context.temp_allocator)
-	test.autocorrelation_test(context.temp_allocator)
-	test.ljung_box_test(context.temp_allocator)
-	test.jarque_bera_test(context.temp_allocator)
-	test.residual_diagnostics_test(context.temp_allocator)
-	test.residuals_test(context.temp_allocator)
-	test.adf_test_block(context.temp_allocator)
-	test.kpss_test_block(context.temp_allocator)
-	test.stationarity_test_block(context.temp_allocator)
-	//auto_arima_stationarity_test(context.temp_allocator)
-	//mc_arima_pdq_test(context.temp_allocator)
-	// sarima_mc_test(
-	// 	200,
-	// 	300,
-	// 	[]f64{0.5},
-	// 	1,
-	// 	[]f64{0.4},
-	// 	[]f64{0.3},
-	// 	1,
-	// 	[]f64{0.2},
-	// 	12,
-	// 	0.1,
-	// 	context.temp_allocator,
-	// )
-	test.sarima_light_demo(context.temp_allocator)
-	test.sarima_resid_diagnostics_quick_test(context.temp_allocator)
+	test.rolling_test(context.temp_allocator)
+	test.rolling_matrix_test(context.temp_allocator)
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
 	w.destroy_dataframe(&right2)
