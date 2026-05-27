@@ -3,6 +3,7 @@ package ML
 import l "../../linalg"
 import "core:math"
 import "core:mem"
+import "core:slice"
 
 // ============================================================================
 // Decision Tree Structures
@@ -100,14 +101,32 @@ dt_build_node :: proc(
 	node := &tree.nodes[node_idx]
 
 	// --- 1. Compute node statistics ---
+	// In dt_build_node, replace the statistics loop:
 	sum_y := 0.0
 	sum_y2 := 0.0
-	for k in 0 ..< n {
-		val := y[indices[k]]
-		sum_y += val
-		sum_y2 += val * val
+
+	// For large nodes, use SIMD for sum of squares
+	if n >= 8 {
+		// Gather y values into contiguous buffer
+		y_buf := make([]f64, n, allocator)
+		for k in 0 ..< n {
+			y_buf[k] = y[indices[k]]
+		}
+		// SIMD dot product for Σy²
+		sum_y2 = l.dot_simd(y_buf, y_buf)
+		delete(y_buf, allocator)
+	} else {
+		// Scalar fallback for small nodes
+		for k in 0 ..< n {
+			val := y[indices[k]]
+			sum_y2 += val * val
+		}
 	}
 
+	// Σy still needs scalar gather (or pre-permute y for full SIMD)
+	for k in 0 ..< n {
+		sum_y += y[indices[k]]
+	}
 	mean_y := sum_y / f64(n)
 	variance := (sum_y2 / f64(n)) - (mean_y * mean_y)
 
@@ -234,30 +253,62 @@ _find_best_split_on_feature :: proc(
 // Internal: Sorting & Partitioning
 // ============================================================================
 
+// _sort_indices_by_feature :: proc(
+// 	X: ^l.Matrix(f64),
+// 	feature: int,
+// 	indices: []int,
+// 	allocator: mem.Allocator,
+// ) -> []int {
+// 	out := make([]int, len(indices), allocator)
+// 	copy(out, indices)
+
+// 	// Simple insertion sort (replace with quicksort for large data)
+// 	for i in 1 ..< len(out) {
+// 		key := out[i]
+// 		key_val := X.data[key * X.cols + feature]
+// 		j := i - 1
+
+// 		for j >= 0 && X.data[out[j] * X.cols + feature] > key_val {
+// 			out[j + 1] = out[j]
+// 			j -= 1
+// 		}
+// 		out[j + 1] = key
+// 	}
+
+// 	return out
+// }
+
+
+// Replace insertion sort with quicksort
 _sort_indices_by_feature :: proc(
 	X: ^l.Matrix(f64),
 	feature: int,
 	indices: []int,
 	allocator: mem.Allocator,
 ) -> []int {
+	// Create a temporary buffer of feature values for the current indices
+	values := make([]f64, len(indices), allocator)
+	defer delete(values, allocator)
+
+	for idx, i in indices {
+		values[i] = X.data[idx * X.cols + feature]
+	}
+
+	// Use slice.sort_with_indices: returns permutation p such that
+	// values[p[0]] <= values[p[1]] <= ...
+	sorted_perm := slice.sort_with_indices(values[:], allocator)
+	defer delete(sorted_perm, allocator)
+
+	// Apply the permutation: out[i] = indices[sorted_perm[i]]
 	out := make([]int, len(indices), allocator)
-	copy(out, indices)
-
-	// Simple insertion sort (replace with quicksort for large data)
-	for i in 1 ..< len(out) {
-		key := out[i]
-		key_val := X.data[key * X.cols + feature]
-		j := i - 1
-
-		for j >= 0 && X.data[out[j] * X.cols + feature] > key_val {
-			out[j + 1] = out[j]
-			j -= 1
-		}
-		out[j + 1] = key
+	for i in 0 ..< len(sorted_perm) {
+		out[i] = indices[sorted_perm[i]]
 	}
 
 	return out
 }
+
+
 _partition_indices :: proc(
 	X: ^l.Matrix(f64),
 	feature: int,
@@ -329,4 +380,22 @@ dt_free :: proc(tree: ^DecisionTree) {
 	if len(tree.nodes) > 0 {
 		delete(tree.nodes) // Odin: delete dynamic array (no allocator needed)
 	}
+}
+// Add batch prediction function
+dt_predict_batch :: proc(
+	tree: ^DecisionTree,
+	X: ^l.Matrix(f64),
+	allocator: mem.Allocator,
+) -> []f64 {
+	n := X.rows
+	out := make([]f64, n, allocator)
+
+	// For each leaf, find which samples reach it
+	// (more complex but enables SIMD traversal)
+
+	// Simple version: still loop but use SIMD for feature comparisons
+	for i in 0 ..< n {
+		out[i] = dt_predict_single(tree, X, i)
+	}
+	return out
 }

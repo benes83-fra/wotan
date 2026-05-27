@@ -28,7 +28,7 @@ dt_test :: proc(allocator: mem.Allocator) {
 	// Predict
 	preds := ml.dt_predict(&tree, &X, allocator)
 	defer delete(preds, allocator)
-
+	fmt.println("Predictions: %v", preds)
 	// Check MSE
 	mse := 0.0
 	for i in 0 ..< 100 {
