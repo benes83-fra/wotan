@@ -399,10 +399,10 @@ main :: proc() {
 	test.gls_kron_test(context.temp_allocator)
 	test.ridge_cv_test(context.temp_allocator)
 	test.lasso_cv_test(context.temp_allocator)
-
 	test.dt_test(context.temp_allocator)
 	test.rf_test(context.temp_allocator)
 	test.gb_test(context.temp_allocator)
+	test.vec_sub_simd_test(context.temp_allocator)
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
 	w.destroy_dataframe(&right2)

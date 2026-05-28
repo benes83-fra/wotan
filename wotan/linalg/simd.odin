@@ -554,3 +554,174 @@ kron_simd :: proc(
 
 	return C
 }
+
+// ============================================================================
+// SIMD Vector Subtraction: out = a - b (element-wise, f64)
+// ============================================================================
+vec_sub_simd :: proc(a, b, out: []f64) {
+	n := len(a)
+	if n != len(b) || n != len(out) do panic("vec_sub_simd: length mismatch")
+
+	if !simd.HAS_HARDWARE_SIMD {
+		for i := 0; i < n; i += 1 {
+			out[i] = a[i] - b[i]
+		}
+		return
+	}
+
+	// ============================================================
+	// 1. Try widest SIMD first (f64x8) — requires AVX/AVX2/AVX512
+	// ============================================================
+	if intrinsics.has_target_feature("avx") {
+		i := 0
+		for ; i + 8 <= n; i += 8 {
+			va := simd.f64x8 {
+				a[i + 0],
+				a[i + 1],
+				a[i + 2],
+				a[i + 3],
+				a[i + 4],
+				a[i + 5],
+				a[i + 6],
+				a[i + 7],
+			}
+			vb := simd.f64x8 {
+				b[i + 0],
+				b[i + 1],
+				b[i + 2],
+				b[i + 3],
+				b[i + 4],
+				b[i + 5],
+				b[i + 6],
+				b[i + 7],
+			}
+			vout := intrinsics.simd_sub(va, vb)
+
+			// Spill SIMD back to scalars
+			out_arr := transmute([8]f64)vout
+			for j := 0; j < 8; j += 1 {
+				out[i + j] = out_arr[j]
+			}
+		}
+		for ; i < n; i += 1 {
+			out[i] = a[i] - b[i]
+		}
+		return
+	}
+
+	// ==========================================
+	// 2. Next: f64x4 (SSE2/SSE4, always available)
+	// ==========================================
+	if intrinsics.has_target_feature("sse2") {
+		i := 0
+		for ; i + 4 <= n; i += 4 {
+			va := simd.f64x4{a[i + 0], a[i + 1], a[i + 2], a[i + 3]}
+			vb := simd.f64x4{b[i + 0], b[i + 1], b[i + 2], b[i + 3]}
+			vout := intrinsics.simd_sub(va, vb)
+
+			out_arr := transmute([4]f64)vout
+			for j := 0; j < 4; j += 1 {
+				out[i + j] = out_arr[j]
+			}
+		}
+		for ; i < n; i += 1 {
+			out[i] = a[i] - b[i]
+		}
+		return
+	}
+
+	// ===========================
+	// 3. Fallback: f64x2 (baseline)
+	// ===========================
+	i := 0
+	for ; i + 2 <= n; i += 2 {
+		va := simd.f64x2{a[i + 0], a[i + 1]}
+		vb := simd.f64x2{b[i + 0], b[i + 1]}
+		vout := intrinsics.simd_sub(va, vb)
+
+		out_arr := transmute([2]f64)vout
+		for j := 0; j < 2; j += 1 {
+			out[i + j] = out_arr[j]
+		}
+	}
+	for ; i < n; i += 1 {
+		out[i] = a[i] - b[i]
+	}
+}
+// ============================================================================
+// SIMD In-Place Vector Subtraction: a -= b (element-wise, f64)
+// ============================================================================
+vec_sub_inplace_simd :: proc(a, b: []f64) {
+	n := len(a)
+	if n != len(b) do panic("vec_sub_inplace_simd: length mismatch")
+
+	if !simd.HAS_HARDWARE_SIMD {
+		for i := 0; i < n; i += 1 {
+			a[i] -= b[i]
+		}
+		return
+	}
+
+	// AVX: f64x8
+	if intrinsics.has_target_feature("avx") {
+		i := 0
+		for ; i + 8 <= n; i += 8 {
+			va := simd.f64x8 {
+				a[i + 0],
+				a[i + 1],
+				a[i + 2],
+				a[i + 3],
+				a[i + 4],
+				a[i + 5],
+				a[i + 6],
+				a[i + 7],
+			}
+			vb := simd.f64x8 {
+				b[i + 0],
+				b[i + 1],
+				b[i + 2],
+				b[i + 3],
+				b[i + 4],
+				b[i + 5],
+				b[i + 6],
+				b[i + 7],
+			}
+			vout := intrinsics.simd_sub(va, vb)
+			out_arr := transmute([8]f64)vout
+			for j := 0; j < 8; j += 1 {
+				a[i + j] = out_arr[j]
+			}
+		}
+		for ; i < n; i += 1 {a[i] -= b[i]}
+		return
+	}
+
+	// SSE2: f64x4
+	if intrinsics.has_target_feature("sse2") {
+		i := 0
+		for ; i + 4 <= n; i += 4 {
+			va := simd.f64x4{a[i + 0], a[i + 1], a[i + 2], a[i + 3]}
+			vb := simd.f64x4{b[i + 0], b[i + 1], b[i + 2], b[i + 3]}
+			vout := intrinsics.simd_sub(va, vb)
+			out_arr := transmute([4]f64)vout
+			for j := 0; j < 4; j += 1 {
+				a[i + j] = out_arr[j]
+			}
+		}
+		for ; i < n; i += 1 {a[i] -= b[i]}
+		return
+	}
+
+	// Baseline: f64x2
+	i := 0
+	for ; i + 2 <= n; i += 2 {
+		va := simd.f64x2{a[i + 0], a[i + 1]}
+		vb := simd.f64x2{b[i + 0], b[i + 1]}
+		vout := intrinsics.simd_sub(va, vb)
+		out_arr := transmute([2]f64)vout
+		for j := 0; j < 2; j += 1 {
+			a[i + j] = out_arr[j]
+		}
+	}
+	for ; i < n; i += 1 {a[i] -= b[i]}
+}

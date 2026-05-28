@@ -3,6 +3,7 @@ package tests
 import ml "../wotan/analytics/ML"
 import l "../wotan/linalg"
 import "core:fmt"
+import "core:math"
 import "core:math/rand"
 import "core:mem"
 
@@ -131,4 +132,36 @@ gb_test :: proc(allocator: mem.Allocator) {
 
 	l.matrix_free(&X)
 	delete(y, allocator)
+}
+
+vec_sub_simd_test :: proc(allocator: mem.Allocator) {
+	n := 100
+	a := make([]f64, n, allocator)
+	b := make([]f64, n, allocator)
+	out := make([]f64, n, allocator)
+	defer {
+		delete(a, allocator)
+		delete(b, allocator)
+		delete(out, allocator)
+	}
+
+	// Fill with random values
+	for i in 0 ..< n {
+		a[i] = rand.float64_normal(0, 10)
+		b[i] = rand.float64_normal(0, 10)
+	}
+
+	// Compute with SIMD
+	l.vec_sub_simd(a, b, out)
+
+	// Verify against scalar version
+	max_err := 0.0
+	for i in 0 ..< n {
+		expected := a[i] - b[i]
+		err := math.abs(out[i] - expected)
+		if err > max_err {max_err = err}
+	}
+
+	fmt.printf("vec_sub_simd max error: %.2e\n", max_err)
+	assert(max_err < 1e-10, "SIMD subtraction failed")
 }

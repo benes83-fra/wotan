@@ -69,9 +69,7 @@ gb_fit :: proc(
 		if n_samples >= 8 {
 			// residuals = y - preds using vectorized subtraction
 			// (Odin doesn't have vec sub, so manual loop with potential SIMD future)
-			for i in 0 ..< n_samples {
-				residuals[i] = y[i] - preds[i]
-			}
+			l.vec_sub_simd(y, preds, residuals) // residuals = y - preds
 		} else {
 			for i in 0 ..< n_samples {
 				residuals[i] = y[i] - preds[i]
