@@ -401,6 +401,7 @@ main :: proc() {
 	test.lasso_cv_test(context.temp_allocator)
 
 	test.dt_test(context.temp_allocator)
+	test.rf_test(context.temp_allocator)
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
 	w.destroy_dataframe(&right2)
