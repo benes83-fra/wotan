@@ -88,3 +88,47 @@ rf_test :: proc(allocator: mem.Allocator) {
 	l.matrix_free(&X)
 	delete(y, allocator)
 }
+
+gb_test :: proc(allocator: mem.Allocator) {
+	// Generate synthetic data: y = 2*x1 + 3*x2 + noise
+	n := 200
+	p := 5
+	X := l.matrix_new(f64, n, p, allocator)
+	y := make([]f64, n, allocator)
+
+	for i in 0 ..< n {
+		for j in 0 ..< p {
+			X.data[i * p + j] = rand.float64_normal(0, 1)
+		}
+		y[i] = 2.0 * X.data[i * p + 0] + 3.0 * X.data[i * p + 1] + 0.1 * rand.float64_normal(0, 1)
+	}
+
+	params := ml.GBParams {
+		n_estimators  = 50,
+		learning_rate = 0.1,
+		max_depth     = 4, // Shallow trees for boosting
+		min_samples   = 5,
+		subsample     = 1.0, // Full data (set <1.0 for stochastic GB)
+	}
+
+	model := ml.gb_fit(&X, y, params, allocator)
+	defer ml.gb_free(&model)
+
+	// Predict on training data
+	preds := ml.gb_predict(&model, &X, allocator)
+	defer delete(preds, allocator)
+	fmt.println("Gradient Boosting Predictions: %v", preds)
+
+	// Compute MSE
+	mse := 0.0
+	for i in 0 ..< n {
+		err := y[i] - preds[i]
+		mse += err * err
+	}
+	mse /= f64(n)
+
+	fmt.printf("Gradient Boosting Test MSE: %.4f\n", mse)
+
+	l.matrix_free(&X)
+	delete(y, allocator)
+}
