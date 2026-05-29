@@ -165,3 +165,42 @@ vec_sub_simd_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("vec_sub_simd max error: %.2e\n", max_err)
 	assert(max_err < 1e-10, "SIMD subtraction failed")
 }
+
+
+tree_stats_test :: proc(allocator: mem.Allocator) {
+	// Generate data
+	n := 100
+	p := 5
+	X := l.matrix_new(f64, n, p, allocator)
+	y := make([]f64, n, allocator)
+
+	for i in 0 ..< n {
+		for j in 0 ..< p {
+			X.data[i * p + j] = rand.float64_normal(0, 1)
+		}
+		y[i] = 3.0 * X.data[i * p + 0] + 2.0 * X.data[i * p + 1] + 0.1 * rand.float64_normal(0, 1)
+	}
+
+	// Train tree
+	tree_params := ml.TreeParams {
+		max_depth   = 5,
+		min_samples = 5,
+	}
+	tree := ml.dt_fit(&X, y, tree_params, allocator)
+	defer ml.dt_free(&tree)
+
+	// ✅ FIXED: Call dt_compute_stats for single tree, not rf_compute_stats
+	stats := ml.dt_compute_stats(&tree, &X, y, allocator)
+	defer {
+		delete(stats.residuals, allocator)
+		delete(stats.fitted, allocator)
+		delete(stats.feature_importance, allocator)
+		delete(stats.splits_per_feature, allocator)
+	}
+
+	// ✅ FIXED: Use ml. prefix for exported function
+	ml.tree_stats_print(&stats)
+
+	l.matrix_free(&X)
+	delete(y, allocator)
+}
