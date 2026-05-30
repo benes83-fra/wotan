@@ -30,7 +30,7 @@ svm_test :: proc(allocator: mem.Allocator) {
 
 	params := ml.SVMParams {
 		C             = 1.0,
-		max_iter      = 1000,
+		max_iter      = 10000,
 		tol           = 1e-3,
 		learning_rate = 0.01,
 		fit_intercept = true,

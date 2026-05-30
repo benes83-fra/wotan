@@ -1,10 +1,10 @@
 package ML
 
 import l "../../linalg"
+import optim "../../optimize"
 import "core:fmt"
 import "core:math"
 import "core:mem"
-
 // ============================================================================
 // Linear SVM Structures (Primal Formulation)
 // ============================================================================
@@ -29,71 +29,75 @@ SVMParams :: struct {
 // ============================================================================
 // Public API: Fit Linear SVM
 // ============================================================================
-
 svm_fit_linear :: proc(
 	X: ^l.Matrix(f64),
-	y: []f64, // Labels: -1 or +1 for classification
+	y: []f64, // Labels: -1 or +1
 	params: SVMParams,
 	allocator: mem.Allocator = context.allocator,
 ) -> LinearSVM {
 	n_samples := X.rows
 	n_features := X.cols
 
-	// Initialize weights to zero
+	// Initialize weights
 	w := make([]f64, n_features, allocator)
 	b := 0.0
+
+	// Setup optimizer & scheduler
+	opt := optim.optimizer_sgd_init(
+		n_features,
+		params.learning_rate,
+		momentum = 0.0,
+		weight_decay = 1.0,
+		allocator = allocator,
+	)
+	defer optim.optimizer_sgd_free(&opt)
+
+	sched := optim.scheduler_linear_decay_init(params.learning_rate, params.max_iter)
 
 	converged := false
 	n_iter := 0
 
 	for iter in 0 ..< params.max_iter {
 		n_iter = iter + 1
-		max_update := 0.0
+		sched.current_lr = sched.initial_lr * f64(1.0 - f64(iter) / f64(params.max_iter))
+		opt.learning_rate = sched.current_lr
 
-		// Gradient descent on primal objective:
-		// L = 0.5 * ||w||^2 + C * sum(max(0, 1 - y_i*(w·x_i + b)))
 		for i in 0 ..< n_samples {
-			// Compute prediction
+			// Compute score = w·x + b
 			score := b
 			for f in 0 ..< n_features {
 				score += w[f] * X.data[i * n_features + f]
 			}
 
-			// Hinge loss gradient
+			// Hinge loss gradient update
 			if y[i] * score < 1.0 {
-				// Misclassified or margin violation: update
-				grad_b := -params.C * y[i]
-				b_update := params.learning_rate * grad_b
-				b += b_update
-
+				// Margin violation: grad_w = w - C*y*x
 				for f in 0 ..< n_features {
-					grad_w := w[f] - params.C * y[i] * X.data[i * n_features + f]
-					w_update := params.learning_rate * grad_w
-					w[f] += w_update
-
-					update_mag := math.abs(w_update)
-					if update_mag > max_update {max_update = update_mag}
+					w_grad_val := w[f] - params.C * y[i] * X.data[i * n_features + f]
+					// ✅ FIX: Create a 1-element stack array, then slice it
+					w_grad_arr := [1]f64{w_grad_val}
+					optim.optimizer_sgd_step(&opt, w[f:1], w_grad_arr[:])
+				}
+				b += opt.learning_rate * params.C * y[i]
+			} else {
+				// No violation: only weight decay (grad_w = w)
+				for f in 0 ..< n_features {
+					w_grad_arr := [1]f64{w[f]}
+					optim.optimizer_sgd_step(&opt, w[f:1], w_grad_arr[:])
 				}
 			}
-		}
-
-		// Check convergence
-		if max_update < params.tol {
-			converged = true
-			break
 		}
 	}
 
 	return LinearSVM {
-		weights         = w,
-		bias            = b,
-		support_vectors = make([]int, 0, allocator), // Empty for primal form
-		n_iter          = n_iter,
-		converged       = converged,
-		allocator       = allocator,
+		weights = w,
+		bias = b,
+		support_vectors = make([]int, 0, allocator),
+		n_iter = n_iter,
+		converged = converged,
+		allocator = allocator,
 	}
 }
-
 // ============================================================================
 // Public API: Predict with Linear SVM
 // ============================================================================
@@ -108,12 +112,10 @@ svm_predict_linear :: proc(
 
 	preds := make([]f64, n, allocator)
 
+	// Use SIMD dot product for fast prediction
 	for i in 0 ..< n {
-		score := model.bias
-		for f in 0 ..< n_features {
-			score += model.weights[f] * X.data[i * n_features + f]
-		}
-		// Return decision function value (sign gives class)
+		x_row := X.data[i * n_features:i * n_features + n_features]
+		score := model.bias + l.dot_simd(model.weights, x_row)
 		preds[i] = score
 	}
 
