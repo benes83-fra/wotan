@@ -28,7 +28,7 @@ km_test :: proc(allocator: mem.Allocator) {
 		max_iter     = 100,
 		tol          = 1e-4,
 		init         = .KMeansPlusPlus,
-		n_init       = 3,
+		n_init       = 50,
 		random_state = 42,
 	}
 

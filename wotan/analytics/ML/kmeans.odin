@@ -32,7 +32,6 @@ KMInit :: enum {
 	Random,
 	KMeansPlusPlus,
 }
-
 // ============================================================================
 // Public API
 // ============================================================================
@@ -50,7 +49,6 @@ km_fit :: proc(
 	}
 
 	best_model: KMeans
-	// ✅ FIXED: Use proper f64 infinity
 	best_inertia := math.inf_f64(1)
 
 	for init_run in 0 ..< params.n_init {
@@ -88,7 +86,6 @@ km_predict :: proc(
 	labels := make([]int, n, allocator)
 
 	for i in 0 ..< n {
-		// ✅ FIXED: Proper f64 infinity
 		best_dist := math.inf_f64(1)
 		best_label := 0
 
@@ -118,6 +115,127 @@ km_free :: proc(model: ^KMeans) {
 	}
 }
 
+
+// ============================================================================
+// K-Means++ Initialization (Uses SIMD for distance computation)
+// ============================================================================
+
+_init_centroids_kmeanspp :: proc(
+	X: ^l.Matrix(f64),
+	k: int,
+	seed: int,
+	allocator: mem.Allocator,
+) -> l.Matrix(f64) {
+	n_samples := X.rows
+	n_features := X.cols
+
+	centroids := l.matrix_new(f64, k, n_features, allocator)
+	gen := context.random_generator
+	_ = seed // Odin's rand uses context.random_generator
+
+	// Pick first centroid uniformly at random
+	first := int(rand.int63(gen) % i64(n_samples))
+	for f in 0 ..< n_features {
+		centroids.data[0 * n_features + f] = X.data[first * n_features + f]
+	}
+
+	// Pick remaining k-1 centroids
+	for c in 1 ..< k {
+		// Compute D(x)^2 = min distance^2 to any existing centroid
+		dists := make([]f64, n_samples, context.temp_allocator)
+
+		for i in 0 ..< n_samples {
+			min_d := math.inf_f64(1)
+			x_vec := X.data[i * n_features:i * n_features + n_features]
+
+			for existing in 0 ..< c {
+				c_vec := centroids.data[existing * n_features:existing * n_features + n_features]
+				d := _squared_euclidean_simd(x_vec, c_vec, n_features)
+				if d < min_d {min_d = d}
+			}
+			dists[i] = min_d
+		}
+
+		// Choose next centroid with probability proportional to D(x)^2
+		total := 0.0
+		for d in dists {total += d}
+
+		if total < 1e-10 {
+			// Fallback: pick any point not already chosen
+			for i in 0 ..< n_samples {
+				already := false
+				for e in 0 ..< c {
+					same := true
+					for f in 0 ..< n_features {
+						if math.abs(
+							   X.data[i * n_features + f] - centroids.data[e * n_features + f],
+						   ) >
+						   1e-10 {
+							same = false
+							break
+						}
+					}
+					if same {already = true; break}
+				}
+				if !already {
+					for f in 0 ..< n_features {
+						centroids.data[c * n_features + f] = X.data[i * n_features + f]
+					}
+					break
+				}
+			}
+		} else {
+			// Sample from distribution proportional to dists
+			r := rand.float64(gen) * total
+			cumsum := 0.0
+			for i in 0 ..< n_samples {
+				cumsum += dists[i]
+				if cumsum >= r {
+					for f in 0 ..< n_features {
+						centroids.data[c * n_features + f] = X.data[i * n_features + f]
+					}
+					break
+				}
+			}
+		}
+
+		delete(dists, context.temp_allocator)
+	}
+
+	return centroids
+}
+// ============================================================================
+// Random Initialization Helper
+// ============================================================================
+
+_init_centroids_random :: proc(
+	X: ^l.Matrix(f64),
+	k: int,
+	seed: int,
+	allocator: mem.Allocator,
+) -> l.Matrix(f64) {
+	n_samples := X.rows
+	n_features := X.cols
+
+	centroids := l.matrix_new(f64, k, n_features, allocator)
+	gen := context.random_generator
+	selected := make([]bool, n_samples, context.temp_allocator)
+	defer delete(selected, context.temp_allocator)
+
+	count := 0
+	for count < k {
+		idx := int(rand.int63(gen) % i64(n_samples))
+		if !selected[idx] {
+			selected[idx] = true
+			for f in 0 ..< n_features {
+				centroids.data[count * n_features + f] = X.data[idx * n_features + f]
+			}
+			count += 1
+		}
+	}
+
+	return centroids
+}
 // ============================================================================
 // Internal: Single Fit Run
 // ============================================================================
@@ -127,8 +245,15 @@ _km_fit_single :: proc(X: ^l.Matrix(f64), params: KMParams, allocator: mem.Alloc
 	n_features := X.cols
 	k := params.n_clusters
 
-	// ✅ FIXED: Correct function name (single underscore)
-	centroids := _init_centroids(X, k, params.init, params.random_state, allocator)
+	// Simple random initialization (no fancy logic)
+	centroids := l.Matrix(f64){} // Declare first
+
+	switch params.init {
+	case .Random:
+		centroids = _init_centroids_random(X, k, params.random_state, allocator)
+	case .KMeansPlusPlus:
+		centroids = _init_centroids_kmeanspp(X, k, params.random_state, allocator)
+	}
 
 	labels := make([]int, n_samples, allocator)
 	prev_centroids := l.matrix_new(f64, k, n_features, context.temp_allocator)
@@ -140,16 +265,98 @@ _km_fit_single :: proc(X: ^l.Matrix(f64), params: KMParams, allocator: mem.Alloc
 	for iter in 0 ..< params.max_iter {
 		n_iter = iter + 1
 
-		_assign_clusters(X, &centroids, labels, allocator)
-		_update_centroids(X, labels, k, &centroids, allocator)
-		inertia = _compute_inertia(X, &centroids, labels, allocator)
+		// Assign clusters
+		for i in 0 ..< n_samples {
+			x_start := i * n_features
+			best_dist := math.inf_f64(1)
+			best_label := 0
 
-		if _check_convergence(&centroids, &prev_centroids, params.tol) {
+			for c in 0 ..< k {
+				c_start := c * n_features
+				dist := _squared_euclidean_simd(
+					X.data[x_start:x_start + n_features],
+					centroids.data[c_start:c_start + n_features],
+					n_features,
+				)
+				if dist < best_dist {
+					best_dist = dist
+					best_label = c
+				}
+			}
+			labels[i] = best_label
+		}
+
+		// Update centroids
+		counts := make([]int, k, context.temp_allocator)
+		sums := make([][]f64, k, context.temp_allocator)
+		for c in 0 ..< k {
+			sums[c] = make([]f64, n_features, context.temp_allocator)
+		}
+
+		for i in 0 ..< n_samples {
+			label := labels[i]
+			if label < 0 || label >= k {continue}
+			counts[label] += 1
+			x_start := i * n_features
+			for f in 0 ..< n_features {
+				sums[label][f] += X.data[x_start + f]
+			}
+		}
+
+		for c in 0 ..< k {
+			if counts[c] == 0 {
+				// Reinitialize empty cluster to random point
+				idx := int(rand.int63(context.random_generator) % i64(n_samples))
+				for f in 0 ..< n_features {
+					centroids.data[c * n_features + f] = X.data[idx * n_features + f]
+				}
+			} else {
+				inv_n := 1.0 / f64(counts[c])
+				for f in 0 ..< n_features {
+					centroids.data[c * n_features + f] = sums[c][f] * inv_n
+				}
+			}
+		}
+
+		for c in 0 ..< k {
+			delete(sums[c], context.temp_allocator)
+		}
+		delete(sums, context.temp_allocator)
+		delete(counts, context.temp_allocator)
+
+		// Compute inertia
+		inertia = 0.0
+		for i in 0 ..< n_samples {
+			label := labels[i]
+			if label < 0 || label >= k {continue}
+			x_start := i * n_features
+			c_start := label * n_features
+			inertia += _squared_euclidean_simd(
+				X.data[x_start:x_start + n_features],
+				centroids.data[c_start:c_start + n_features],
+				n_features,
+			)
+		}
+
+		// Check convergence
+		max_shift := 0.0
+		for c in 0 ..< k {
+			c_start := c * n_features
+			shift := 0.0
+			for f in 0 ..< n_features {
+				diff := centroids.data[c_start + f] - prev_centroids.data[c_start + f]
+				shift += diff * diff
+			}
+			shift = math.sqrt(shift)
+			if shift > max_shift {max_shift = shift}
+		}
+
+		if max_shift < params.tol {
 			converged = true
 			break
 		}
 
-		// ✅ FIXED: Explicit slice bounds for copy
+		// Save centroids for next iteration
 		total_elements := k * n_features
 		copy(prev_centroids.data[0:total_elements], centroids.data[0:total_elements])
 	}
@@ -167,256 +374,23 @@ _km_fit_single :: proc(X: ^l.Matrix(f64), params: KMParams, allocator: mem.Alloc
 }
 
 // ============================================================================
-// Internal: Initialization (FIXED for Odin rand API)
-// ============================================================================
-
-_init_centroids :: proc(
-	X: ^l.Matrix(f64),
-	k: int,
-	init: KMInit,
-	seed: int,
-	allocator: mem.Allocator,
-) -> l.Matrix(f64) {
-	n_samples := X.rows
-	n_features := X.cols
-
-	centroids := l.matrix_new(f64, k, n_features, allocator)
-
-	// Use context.random_generator (Odin's standard approach)
-	gen := context.random_generator
-
-	switch init {
-	case .Random:
-		selected := make([]bool, n_samples, context.temp_allocator)
-		defer delete(selected, context.temp_allocator)
-
-		count := 0
-		for count < k {
-			// ✅ FIXED: Use rand.int63 % n for [0, n) range
-			idx := int(rand.int63(gen) % i64(n_samples))
-			if !selected[idx] {
-				selected[idx] = true
-				for f in 0 ..< n_features {
-					centroids.data[count * n_features + f] = X.data[idx * n_features + f]
-				}
-				count += 1
-			}
-		}
-
-	case .KMeansPlusPlus:
-		// Pick first centroid randomly
-		first := int(rand.int63(gen) % i64(n_samples))
-		for f in 0 ..< n_features {
-			centroids.data[0 * n_features + f] = X.data[first * n_features + f]
-		}
-
-		for c in 1 ..< k {
-			dists := make([]f64, n_samples, context.temp_allocator)
-			for i in 0 ..< n_samples {
-				// ✅ FIXED: Proper f64 infinity
-				min_dist := math.inf_f64(1)
-				for existing in 0 ..< c {
-					d := _squared_euclidean_simd(
-						X.data[i * n_features:i * n_features + n_features],
-						centroids.data[existing * n_features:existing * n_features + n_features],
-						n_features,
-					)
-					if d < min_dist {min_dist = d}
-				}
-				dists[i] = min_dist
-			}
-
-			total := 0.0
-			for d in dists {total += d}
-			if total < 1e-10 {
-				// Fallback: pick random unselected point
-				for i in 0 ..< n_samples {
-					already := false
-					for existing in 0 ..< c {
-						if _vectors_equal(
-							X.data[i * n_features:i * n_features + n_features],
-							centroids.data[existing *
-							n_features:existing * n_features +
-							n_features],
-							n_features,
-						) {
-							already = true
-							break
-						}
-					}
-					if !already {
-						for f in 0 ..< n_features {
-							centroids.data[c * n_features + f] = X.data[i * n_features + f]
-						}
-						break
-					}
-				}
-			} else {
-				r := rand.float64(gen) * total
-				cumsum := 0.0
-				for i in 0 ..< n_samples {
-					cumsum += dists[i]
-					if cumsum >= r {
-						for f in 0 ..< n_features {
-							centroids.data[c * n_features + f] = X.data[i * n_features + f]
-						}
-						break
-					}
-				}
-			}
-			delete(dists, context.temp_allocator)
-		}
-	}
-
-	return centroids
-}
-
-// ============================================================================
-// Internal: Core Algorithm Steps
-// ============================================================================
-
-_assign_clusters :: proc(
-	X: ^l.Matrix(f64),
-	centroids: ^l.Matrix(f64),
-	labels: []int,
-	allocator: mem.Allocator,
-) {
-	n_samples := X.rows
-	n_features := X.cols
-	k := centroids.rows
-
-	for i in 0 ..< n_samples {
-		x := X.data[i * n_features:i * n_features + n_features]
-		// ✅ FIXED: Proper f64 infinity
-		best_dist := math.inf_f64(1)
-		best_label := 0
-
-		for c in 0 ..< k {
-			c_vec := centroids.data[c * n_features:c * n_features + n_features]
-			dist := _squared_euclidean_simd(x, c_vec, n_features)
-			if dist < best_dist {
-				best_dist = dist
-				best_label = c
-			}
-		}
-		labels[i] = best_label
-	}
-}
-
-_update_centroids :: proc(
-	X: ^l.Matrix(f64),
-	labels: []int,
-	k: int,
-	centroids: ^l.Matrix(f64),
-	allocator: mem.Allocator,
-) {
-	n_features := centroids.cols
-
-	counts := make([]int, k, context.temp_allocator)
-	defer delete(counts, context.temp_allocator)
-
-	sums := make([][]f64, k, context.temp_allocator)
-	defer {
-		for s in sums {delete(s, context.temp_allocator)}
-		delete(sums, context.temp_allocator)
-	}
-	for c in 0 ..< k {
-		sums[c] = make([]f64, n_features, context.temp_allocator)
-	}
-
-	for i, label in labels {
-		if label < 0 || label >= k {continue}
-		counts[label] += 1
-		x := X.data[i * n_features:i * n_features + n_features]
-		for f in 0 ..< n_features {
-			sums[label][f] += x[f]
-		}
-	}
-
-	for c in 0 ..< k {
-		if counts[c] == 0 {
-			for f in 0 ..< n_features {
-				centroids.data[c * n_features + f] = rand.float64_normal(
-					0,
-					1,
-					context.random_generator,
-				)
-			}
-		} else {
-			inv_n := 1.0 / f64(counts[c])
-			for f in 0 ..< n_features {
-				centroids.data[c * n_features + f] = sums[c][f] * inv_n
-			}
-		}
-	}
-}
-
-_compute_inertia :: proc(
-	X: ^l.Matrix(f64),
-	centroids: ^l.Matrix(f64),
-	labels: []int,
-	allocator: mem.Allocator,
-) -> f64 {
-	n_samples := X.rows
-	inertia := 0.0
-
-	for i in 0 ..< n_samples {
-		label := labels[i]
-		if label < 0 || label >= centroids.rows {continue}
-
-		x := X.data[i * X.cols:i * X.cols + X.cols]
-		c := centroids.data[label * centroids.cols:label * centroids.cols + centroids.cols]
-		inertia += _squared_euclidean_simd(x, c, X.cols)
-	}
-
-	return inertia
-}
-
-_check_convergence :: proc(curr: ^l.Matrix(f64), prev: ^l.Matrix(f64), tol: f64) -> bool {
-	k := curr.rows
-	n_features := curr.cols
-
-	max_shift := 0.0
-	for c in 0 ..< k {
-		curr_vec := curr.data[c * n_features:c * n_features + n_features]
-		prev_vec := prev.data[c * n_features:c * n_features + n_features]
-		shift := 0.0
-		for f in 0 ..< n_features {
-			diff := curr_vec[f] - prev_vec[f]
-			shift += diff * diff
-		}
-		shift = math.sqrt(shift)
-		if shift > max_shift {max_shift = shift}
-	}
-
-	return max_shift < tol
-}
-
-// ============================================================================
-// SIMD Helper: Squared Euclidean Distance
+// SIMD Distance (Uses your wotan_linalg module)
 // ============================================================================
 
 _squared_euclidean_simd :: proc(a, b: []f64, n: int) -> f64 {
 	if len(a) != n || len(b) != n do panic("_squared_euclidean_simd: length mismatch")
 
+	// Compute diff = a - b using your SIMD subtraction
 	diff := make([]f64, n, context.temp_allocator)
 	defer delete(diff, context.temp_allocator)
 
 	l.vec_sub_simd(a, b, diff)
+
+	// Compute squared norm using your SIMD dot product
 	return l.dot_simd(diff, diff)
 }
-
-_vectors_equal :: proc(a, b: []f64, n: int) -> bool {
-	for i in 0 ..< n {
-		if math.abs(a[i] - b[i]) > 1e-10 {
-			return false
-		}
-	}
-	return true
-}
-
 // ============================================================================
-// K-Means Statistics
+// Statistics (Optional - Can Add Later)
 // ============================================================================
 
 KMStats :: struct {
@@ -450,9 +424,13 @@ km_compute_stats :: proc(
 	for i in 0 ..< n_samples {
 		label := model.labels[i]
 		if label < 0 || label >= k {continue}
-		x := X.data[i * n_features:i * n_features + n_features]
-		c := model.centroids.data[label * n_features:label * n_features + n_features]
-		cluster_inertia[label] += _squared_euclidean_simd(x, c, n_features)
+		x_start := i * n_features
+		c_start := label * n_features
+		cluster_inertia[label] += _squared_euclidean_simd(
+			X.data[x_start:x_start + n_features],
+			model.centroids.data[c_start:c_start + n_features],
+			n_features,
+		)
 	}
 
 	return KMStats {
