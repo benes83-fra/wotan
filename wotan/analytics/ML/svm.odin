@@ -38,56 +38,70 @@ svm_fit_linear :: proc(
 	n_samples := X.rows
 	n_features := X.cols
 
-	// Initialize weights
-	w := make([]f64, n_features, allocator)
-	b := 0.0
+	// Allocate combined params: [w (n_features), b (1)]
+	params_vec := make([]f64, n_features + 1, allocator)
+	defer delete(params_vec, allocator) // Free at end
 
-	// Setup optimizer & scheduler
+	// Initialize weights to zero, bias to zero
+	for i in 0 ..< n_features + 1 {params_vec[i] = 0.0}
+
+	// Setup optimizer for combined params
 	opt := optim.optimizer_sgd_init(
-		n_features,
+		n_features + 1,
 		params.learning_rate,
 		momentum = 0.0,
-		weight_decay = 1.0,
+		weight_decay = 0.0, // We handle regularization manually
 		allocator = allocator,
 	)
 	defer optim.optimizer_sgd_free(&opt)
 
-	sched := optim.scheduler_linear_decay_init(params.learning_rate, params.max_iter)
-
 	converged := false
 	n_iter := 0
+	initial_lr := params.learning_rate
 
 	for iter in 0 ..< params.max_iter {
 		n_iter = iter + 1
-		sched.current_lr = sched.initial_lr * f64(1.0 - f64(iter) / f64(params.max_iter))
-		opt.learning_rate = sched.current_lr
+		// Linear decay with minimum LR to avoid zeroing out
+		lr := math.max(initial_lr * (1.0 - f64(iter) / f64(params.max_iter)), initial_lr * 0.01)
+		opt.learning_rate = lr
 
 		for i in 0 ..< n_samples {
 			// Compute score = w·x + b
-			score := b
+			score := params_vec[n_features] // bias is last element
 			for f in 0 ..< n_features {
-				score += w[f] * X.data[i * n_features + f]
+				score += params_vec[f] * X.data[i * n_features + f]
 			}
 
-			// Hinge loss gradient update
+			// Hinge loss gradient
+			// Hinge loss gradient
 			if y[i] * score < 1.0 {
-				// Margin violation: grad_w = w - C*y*x
+				// Margin violation: grad_w = w - C*y*x, grad_b = -C*y
 				for f in 0 ..< n_features {
-					w_grad_val := w[f] - params.C * y[i] * X.data[i * n_features + f]
-					// ✅ FIX: Create a 1-element stack array, then slice it
-					w_grad_arr := [1]f64{w_grad_val}
-					optim.optimizer_sgd_step(&opt, w[f:1], w_grad_arr[:])
+					grad_val := params_vec[f] - params.C * y[i] * X.data[i * n_features + f]
+					grad_arr := [1]f64{grad_val}
+					// ✅ FIX: Correct slice syntax [start : start+1] for 1-element slice
+					optim.optimizer_sgd_step(&opt, params_vec[f:f + 1], grad_arr[:])
 				}
-				b += opt.learning_rate * params.C * y[i]
+				// Update bias (last element at index n_features)
+				grad_b := -params.C * y[i]
+				grad_arr := [1]f64{grad_b}
+				// ✅ FIX: Bias slice is [n_features : n_features+1]
+				optim.optimizer_sgd_step(&opt, params_vec[n_features:n_features + 1], grad_arr[:])
 			} else {
-				// No violation: only weight decay (grad_w = w)
+				// No violation: grad_w = w (L2 reg), grad_b = 0
 				for f in 0 ..< n_features {
-					w_grad_arr := [1]f64{w[f]}
-					optim.optimizer_sgd_step(&opt, w[f:1], w_grad_arr[:])
+					grad_arr := [1]f64{params_vec[f]}
+					optim.optimizer_sgd_step(&opt, params_vec[f:f + 1], grad_arr[:])
 				}
+				// Bias gradient = 0 (no update needed)
 			}
 		}
 	}
+
+	// Extract final weights and bias
+	w := make([]f64, n_features, allocator)
+	for f in 0 ..< n_features {w[f] = params_vec[f]}
+	b := params_vec[n_features]
 
 	return LinearSVM {
 		weights = w,
