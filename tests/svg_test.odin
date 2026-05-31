@@ -3,6 +3,7 @@ package tests
 
 import ml "../wotan/analytics/ML"
 import l "../wotan/linalg"
+import optim "../wotan/optimize"
 import "core:fmt"
 import "core:math/rand"
 import "core:mem"
