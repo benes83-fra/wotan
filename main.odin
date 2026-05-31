@@ -407,6 +407,7 @@ main :: proc() {
 	test.km_test(context.temp_allocator)
 	test.svm_test(context.temp_allocator)
 	test.kernel_svm_test(context.temp_allocator)
+	test.run_optimizer_tests(context.temp_allocator)
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
 	w.destroy_dataframe(&right2)
