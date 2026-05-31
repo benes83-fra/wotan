@@ -180,12 +180,15 @@ _kernel_poly :: proc(x1, x2: []f64, gamma: f64, degree: int, coef0: f64) -> f64 
 // ============================================================================
 
 KernelSVM :: struct {
-	support_vectors: []int, // Indices of support vectors in training data
-	alpha:           []f64, // Lagrange multipliers for support vectors
-	bias:            f64, // Intercept term
+	support_vectors: []int,
+	alpha:           []f64,
+	sv_labels:       []f64,
+	bias:            f64,
 	kernel_type:     SVMKernelType,
-	gamma:           f64, // RBF kernel parameter
-	C:               f64, // Regularization parameter
+	gamma:           f64,
+	degree:          int, // ✅ ADD: For polynomial kernel
+	coef0:           f64, // ✅ ADD: For polynomial kernel
+	C:               f64,
 	allocator:       mem.Allocator,
 }
 
@@ -367,19 +370,24 @@ kernel_svm_fit :: proc(
 	sv_final := make([]int, len(sv_indices), allocator)
 	copy(sv_final, sv_indices[:])
 	alpha_final := make([]f64, len(sv_indices), allocator)
+	sv_label_final := make([]f64, len(sv_indices), allocator)
 	for idx, i in sv_indices[:] {
 		alpha_final[i] = alpha[idx]
+		sv_label_final[i] = y[idx]
 	}
 	delete(sv_indices)
 
 	return KernelSVM {
 		support_vectors = sv_final,
-		alpha = alpha_final,
-		bias = bias,
-		kernel_type = params.kernel_type,
-		gamma = params.gamma,
-		C = params.C,
-		allocator = allocator,
+		alpha           = alpha_final,
+		bias            = bias,
+		sv_labels       = sv_label_final,
+		kernel_type     = params.kernel_type,
+		gamma           = params.gamma,
+		degree          = params.degree, // ✅ ADD
+		coef0           = params.coef0, // ✅ ADD
+		C               = params.C,
+		allocator       = allocator,
 	}
 }
 
@@ -403,8 +411,15 @@ kernel_svm_predict :: proc(
 		// Sum over support vectors: score = Σ α_j y_j K(x_i, x_sv_j) + b
 		for sv_idx, j in model.support_vectors {
 			x_sv := X.data[sv_idx * n_features:sv_idx * n_features + n_features]
-			k_val := _kernel_eval(x_i, x_sv, model.kernel_type, model.gamma, 0, 0.0)
-			score += model.alpha[j] * 1.0 * k_val // Note: y[sv_idx] should be stored; simplified here
+			k_val := _kernel_eval(
+				x_i,
+				x_sv,
+				model.kernel_type,
+				model.gamma,
+				model.degree,
+				model.coef0,
+			)
+			score += model.alpha[j] * model.sv_labels[j] * k_val // Note: y[sv_idx] should be stored; simplified here
 		}
 		preds[i] = score
 	}
@@ -418,5 +433,8 @@ kernel_svm_free :: proc(model: ^KernelSVM) {
 	}
 	if len(model.alpha) > 0 {
 		delete(model.alpha, model.allocator)
+	}
+	if len(model.sv_labels) > 0 {
+		delete(model.sv_labels, model.allocator)
 	}
 }
