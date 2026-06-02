@@ -205,6 +205,7 @@ _kernel_poly_simd :: proc(x1, x2: []f64, gamma: f64, degree: int, coef0: f64) ->
 }
 
 // Generic kernel dispatcher
+
 _kernel_eval :: proc(
 	x1, x2: []f64,
 	kernel_type: SVMKernelType,
@@ -224,7 +225,7 @@ _kernel_eval :: proc(
 }
 
 // ============================================================================
-// Public API: Fit Kernel SVM (Gradient-Based Dual Optimization)
+// Public API: Fit Kernel SVM (Now using Unified Optimizer - FIXED)
 // ============================================================================
 kernel_svm_fit :: proc(
 	X: ^l.Matrix(f64),
@@ -235,15 +236,14 @@ kernel_svm_fit :: proc(
 	n_samples := X.rows
 	n_features := X.cols
 
-	// Initialize dual variables (alpha) to zero
 	alpha := make([]f64, n_samples, allocator)
+	grad := make([]f64, n_samples, allocator)
+	defer delete(grad, allocator)
 
 	// Precompute kernel matrix K[i,j] = k(x_i, x_j)
 	K := make([][]f64, n_samples, allocator)
 	defer {
-		for row in K {
-			delete(row, allocator)
-		}
+		for row in K {delete(row, allocator)}
 		delete(K, allocator)
 	}
 	for i in 0 ..< n_samples {
@@ -262,34 +262,53 @@ kernel_svm_fit :: proc(
 		}
 	}
 
+	// ✅ Setup unified optimizer
+	opt_config := optim.optimizer_default_config(params.optimizer_type)
+	opt_config.learning_rate = params.learning_rate
+	opt := optim.optimizer_init(opt_config, n_samples, allocator)
+	defer optim.optimizer_free(&opt)
+
 	converged := false
 	n_iter := 0
 	initial_lr := params.learning_rate
 
 	for iter in 0 ..< params.max_iter {
 		n_iter = iter + 1
+
+		// Optional: Learning rate decay
 		lr := math.max(initial_lr * (1.0 - f64(iter) / f64(params.max_iter)), initial_lr * 0.01)
+		optim.optimizer_set_learning_rate(&opt, lr)
 
-		max_update := 0.0
-
-		// Gradient ascent on dual objective:
+		// 1. Compute gradient for all alphas (for ASCENT)
 		for i in 0 ..< n_samples {
-			// Compute gradient: dL/dα_i = 1 - y_i * Σ_j α_j y_j K_ij
 			sum_term := 0.0
 			for j in 0 ..< n_samples {
 				sum_term += alpha[j] * y[j] * K[i][j]
 			}
-			grad := 1.0 - y[i] * sum_term
+			grad[i] = 1.0 - y[i] * sum_term
+		}
 
-			// Projected gradient step with box constraint [0, C]
-			alpha_new := alpha[i] + lr * grad
-			alpha_new = math.clamp(alpha_new, 0.0, params.C)
+		// Save old alphas for convergence check
+		old_alpha := make([]f64, n_samples, context.temp_allocator)
+		copy(old_alpha, alpha)
 
-			update := math.abs(alpha_new - alpha[i])
+		// ✅ FIX: Negate gradient because optimizer does DESCENT, but SVM dual is ASCENT
+		for i in 0 ..< n_samples {
+			grad[i] = -grad[i]
+		}
+
+		// 2. Unified optimizer step (updates alpha in-place)
+		optim.optimizer_step(&opt, alpha, grad)
+
+		// 3. Project onto box constraint [0, C] (Required for SVM dual)
+		// and check convergence based on the projected change
+		max_update := 0.0
+		for i in 0 ..< n_samples {
+			alpha[i] = math.clamp(alpha[i], 0.0, params.C)
+			update := math.abs(alpha[i] - old_alpha[i])
 			if update > max_update {
 				max_update = update
 			}
-			alpha[i] = alpha_new
 		}
 
 		if max_update < params.tol {
@@ -311,7 +330,6 @@ kernel_svm_fit :: proc(
 	bias_count := 0
 	for idx in sv_indices[:] {
 		if alpha[idx] > 1e-5 && alpha[idx] < params.C - 1e-5 {
-			// This SV is on the margin
 			score := 0.0
 			for j in 0 ..< n_samples {
 				if alpha[j] > 1e-5 {
@@ -345,7 +363,6 @@ kernel_svm_fit :: proc(
 		alpha_final[i] = alpha[idx]
 		sv_label_final[i] = y[idx]
 	}
-	// ✅ Correct Odin dynamic array delete (no allocator)
 	delete(sv_indices)
 
 	return KernelSVM {
@@ -361,7 +378,6 @@ kernel_svm_fit :: proc(
 		allocator = allocator,
 	}
 }
-
 // ============================================================================
 // Public API: Predict with Kernel SVM
 // ============================================================================
