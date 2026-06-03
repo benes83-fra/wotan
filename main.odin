@@ -412,6 +412,7 @@ main :: proc() {
 	test.real_world_logistic_test(context.temp_allocator)
 	test.multiclass_test(context.temp_allocator)
 	test.knn_test(context.temp_allocator)
+	test.pcr_test(context.temp_allocator)
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
 	w.destroy_dataframe(&right2)
