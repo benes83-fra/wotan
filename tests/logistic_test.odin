@@ -146,3 +146,63 @@ real_world_logistic_test :: proc(allocator: mem.Allocator) {
 	delete(new_wind_enc, allocator)
 	l.matrix_free(&X_new)
 }
+multiclass_test :: proc(allocator: mem.Allocator) {
+	// Generate 3 distinct clusters (Classes: 0.0, 1.0, 2.0)
+	n := 150
+	X := l.matrix_new(f64, n, 2, allocator)
+	y := make([]f64, n, allocator)
+
+	for i in 0 ..< n {
+		class_idx := i / 50 // 0, 1, or 2
+		y[i] = f64(class_idx)
+
+		// Center the clusters far apart
+		center_x := f64(class_idx) * 5.0
+		center_y := f64(class_idx) * 5.0
+
+		X.data[i * 2 + 0] = center_x + rand.float64_normal(0, 0.5)
+		X.data[i * 2 + 1] = center_y + rand.float64_normal(0, 0.5)
+	}
+
+	// 1. Test OvR Logistic Regression
+	log_params := ml.LogisticParams {
+		C              = 1.0,
+		max_iter       = 100,
+		tol            = 1e-5,
+		learning_rate  = 1.0,
+		fit_intercept  = true,
+		optimizer_type = .LBFGS,
+	}
+	ovr_log_model := ml.ovr_logistic_fit(&X, y, log_params, allocator)
+	defer ml.ovr_free(&ovr_log_model)
+
+	preds_log := ml.ovr_predict(&ovr_log_model, &X, allocator)
+	defer delete(preds_log, allocator)
+
+	correct := 0
+	for i in 0 ..< n {if preds_log[i] == y[i] {correct += 1}}
+	fmt.printf("OvR Logistic Accuracy: %.2f%%\n", f64(correct) / f64(n) * 100)
+
+	// 2. Test OvR Kernel SVM (RBF)
+	ksvm_params := ml.KernelSVMParams {
+		C              = 10.0,
+		gamma          = 0.5,
+		kernel_type    = .RBF,
+		max_iter       = 500,
+		tol            = 1e-3,
+		learning_rate  = 0.01,
+		optimizer_type = .SGD,
+	}
+	ovr_ksvm_model := ml.ovr_kernel_svm_fit(&X, y, ksvm_params, allocator)
+	defer ml.ovr_free(&ovr_ksvm_model)
+
+	preds_ksvm := ml.ovr_predict(&ovr_ksvm_model, &X, allocator)
+	defer delete(preds_ksvm, allocator)
+
+	correct = 0
+	for i in 0 ..< n {if preds_ksvm[i] == y[i] {correct += 1}}
+	fmt.printf("OvR Kernel SVM Accuracy: %.2f%%\n", f64(correct) / f64(n) * 100)
+
+	l.matrix_free(&X)
+	delete(y, allocator)
+}
