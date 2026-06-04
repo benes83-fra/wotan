@@ -407,6 +407,7 @@ main :: proc() {
 	test.km_test(context.temp_allocator)
 	test.svm_test(context.temp_allocator)
 	test.kernel_svm_test(context.temp_allocator)
+	test.svr_test(context.temp_allocator)
 	test.run_optimizer_tests(context.temp_allocator)
 	test.logistic_test(context.temp_allocator)
 	test.real_world_logistic_test(context.temp_allocator)

@@ -5,6 +5,7 @@ import ml "../wotan/analytics/ML"
 import l "../wotan/linalg"
 import optim "../wotan/optimize"
 import "core:fmt"
+import "core:math"
 import "core:math/rand"
 import "core:mem"
 
@@ -128,6 +129,50 @@ kernel_svm_test :: proc(allocator: mem.Allocator) {
 	}
 	accuracy := f64(correct) / f64(n)
 	fmt.printf("Training accuracy (RBF kernel): %.2f%%\n", accuracy * 100)
+
+	l.matrix_free(&X)
+	delete(y, allocator)
+}
+svr_test :: proc(allocator: mem.Allocator) {
+	fmt.println("\n=== Testing Support Vector Regression ===")
+
+	// Generate non-linear regression data: y = sin(x) + noise
+	n := 100
+	X := l.matrix_new(f64, n, 1, allocator)
+	y := make([]f64, n, allocator)
+
+	for i in 0 ..< n {
+		x_val := f64(i) / f64(n) * 4.0 * math.PI // 0 to 4PI
+		X.data[i] = x_val
+		y[i] = math.sin(x_val) + rand.float64_normal(0, 0.1)
+	}
+
+	// Try L-BFGS! It will converge in a fraction of the iterations compared to SGD.
+	params := ml.SVRParams {
+		C              = 10.0,
+		epsilon        = 0.1, // Insensitive tube width
+		kernel_type    = .RBF,
+		gamma          = 1.0,
+		max_iter       = 100, // L-BFGS needs very few iterations
+		tol            = 1e-4,
+		learning_rate  = 1.0, // L-BFGS default step size
+		optimizer_type = .LBFGS,
+	}
+
+	model := ml.svr_fit(&X, y, params, allocator)
+	defer ml.svr_free(&model)
+
+	fmt.printf("SVR converged: %v after %v iterations\n", model.converged, model.n_iter)
+	fmt.printf("SVR Support Vectors: %v / %v\n", len(model.support_vectors), n)
+
+	preds := ml.svr_predict(&model, &X, allocator)
+	defer delete(preds, allocator)
+
+	mse := ml.metrics_mse(y, preds)
+	r2 := ml.metrics_r2(y, preds)
+
+	fmt.printf("SVR Training MSE: %.4f\n", mse)
+	fmt.printf("SVR Training R2:  %.4f\n", r2)
 
 	l.matrix_free(&X)
 	delete(y, allocator)
