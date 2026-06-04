@@ -128,7 +128,7 @@ gnb_predict :: proc(
 		x_row := X.data[i * n_features:i * n_features + n_features]
 
 		best_class := model.classes[0]
-		best_score := math.F64_MIN // Safe lower bound for f64
+		best_score := -math.F64_MAX // Safe lower bound for f64
 
 		for k in 0 ..< n_classes {
 			theta_row := model.theta.data[k * n_features:k * n_features + n_features]
