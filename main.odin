@@ -415,6 +415,7 @@ main :: proc() {
 	test.pcr_test(context.temp_allocator)
 	test.gnb_test(context.temp_allocator)
 	test.metrics_test(context.temp_allocator)
+	test.model_selection_test(context.temp_allocator)
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
 	w.destroy_dataframe(&right2)
