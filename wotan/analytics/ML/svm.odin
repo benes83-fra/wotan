@@ -11,49 +11,47 @@ import "core:mem"
 // ============================================================================
 
 LinearSVM :: struct {
-	weights:         []f64, // w: feature weights
-	bias:            f64, // b: intercept
-	support_vectors: []int, // Indices of support vectors (for dual form later)
+	weights:         []f64,
+	bias:            f64,
+	support_vectors: []int,
 	n_iter:          int,
 	converged:       bool,
 	allocator:       mem.Allocator,
 }
 
 SVMParams :: struct {
-	C:              f64, // Regularization strength (1/C is regularization)
+	C:              f64,
 	max_iter:       int,
-	tol:            f64, // Convergence tolerance
-	learning_rate:  f64, // For gradient descent
+	tol:            f64,
+	learning_rate:  f64,
 	fit_intercept:  bool,
-	optimizer_type: optim.OptimizerType, // ✅ NEW: Pass .SGD, .Adam, or .RMSProp from caller
+	optimizer_type: optim.OptimizerType,
 }
 
 // ============================================================================
-// Public API: Fit Linear SVM
+// Public API: Fit Linear SVM (HEAVILY OPTIMIZED)
 // ============================================================================
 svm_fit_linear :: proc(
 	X: ^l.Matrix(f64),
-	y: []f64, // Labels: -1 or +1
+	y: []f64,
 	params: SVMParams,
 	allocator: mem.Allocator = context.allocator,
 ) -> LinearSVM {
 	n_samples := X.rows
 	n_features := X.cols
 
-	// Allocate combined params: [w (n_features), b (1)]
 	params_vec := make([]f64, n_features + 1, allocator)
-	defer delete(params_vec, allocator) // Free at end
+	defer delete(params_vec, allocator)
 
-	// Initialize weights to zero, bias to zero
-	for i in 0 ..< n_features + 1 {
-		params_vec[i] = 0.0
-	}
-
-	// ✅ Setup unified optimizer for combined params
+	// ✅ Setup unified optimizer
 	opt_config := optim.optimizer_default_config(params.optimizer_type)
 	opt_config.learning_rate = params.learning_rate
 	opt := optim.optimizer_init(opt_config, n_features + 1, allocator)
 	defer optim.optimizer_free(&opt)
+
+	// ✅ Allocate full_grad ONCE outside the loop (Zero allocation in hot path)
+	full_grad := make([]f64, n_features + 1, allocator)
+	defer delete(full_grad, allocator)
 
 	converged := false
 	n_iter := 0
@@ -61,46 +59,43 @@ svm_fit_linear :: proc(
 
 	for iter in 0 ..< params.max_iter {
 		n_iter = iter + 1
-		// Linear decay with minimum LR to avoid zeroing out
-		lr := math.max(initial_lr * (1.0 - f64(iter) / f64(params.max_iter)), initial_lr * 0.01)
-		optim.optimizer_set_learning_rate(&opt, lr)
+
+		// Disable LR decay for L-BFGS so it can take full Newton steps
+		if params.optimizer_type != .LBFGS {
+			lr := math.max(
+				initial_lr * (1.0 - f64(iter) / f64(params.max_iter)),
+				initial_lr * 0.01,
+			)
+			optim.optimizer_set_learning_rate(&opt, lr)
+		}
 
 		for i in 0 ..< n_samples {
-			// Compute score = w·x + b
-			score := params_vec[n_features] // bias is last element
-			for f in 0 ..< n_features {
-				score += params_vec[f] * X.data[i * n_features + f]
+			x_row := X.data[i * n_features:i * n_features + n_features]
+			w := params_vec[0:n_features]
+
+			// ✅ 1. SIMD-accelerated score computation
+			score := params_vec[n_features] + l.dot_simd(w, x_row)
+
+			// ✅ 2. Compute FULL gradient vector
+			if y[i] * score < 1.0 {
+				for f in 0 ..< n_features {
+					full_grad[f] = params_vec[f] - params.C * y[i] * x_row[f]
+				}
+				full_grad[n_features] = -params.C * y[i]
+			} else {
+				for f in 0 ..< n_features {
+					full_grad[f] = params_vec[f]
+				}
+				full_grad[n_features] = 0.0
 			}
 
-			// Hinge loss gradient
-			if y[i] * score < 1.0 {
-				// Margin violation: grad_w = w - C*y*x, grad_b = -C*y
-				for f in 0 ..< n_features {
-					grad_val := params_vec[f] - params.C * y[i] * X.data[i * n_features + f]
-					grad_arr := [1]f64{grad_val}
-					// ✅ Uses unified step (ignores default loss/obj_fn args for SGD)
-					optim.optimizer_step(&opt, params_vec[f:f + 1], grad_arr[:])
-				}
-				// Update bias (last element at index n_features)
-				grad_b := -params.C * y[i]
-				grad_arr := [1]f64{grad_b}
-				optim.optimizer_step(&opt, params_vec[n_features:n_features + 1], grad_arr[:])
-			} else {
-				// No violation: grad_w = w (L2 reg), grad_b = 0
-				for f in 0 ..< n_features {
-					grad_arr := [1]f64{params_vec[f]}
-					optim.optimizer_step(&opt, params_vec[f:f + 1], grad_arr[:])
-				}
-				// Bias gradient = 0 (no update needed)
-			}
+			// ✅ 3. Single optimizer step per sample (Crucial for Adam/L-BFGS!)
+			optim.optimizer_step(&opt, params_vec, full_grad)
 		}
 	}
 
-	// Extract final weights and bias
 	w := make([]f64, n_features, allocator)
-	for f in 0 ..< n_features {
-		w[f] = params_vec[f]
-	}
+	copy(w, params_vec[0:n_features])
 	b := params_vec[n_features]
 
 	return LinearSVM {
@@ -123,30 +118,22 @@ svm_predict_linear :: proc(
 ) -> []f64 {
 	n := X.rows
 	n_features := len(model.weights)
-
 	preds := make([]f64, n, allocator)
 
-	// Use SIMD dot product for fast prediction
 	for i in 0 ..< n {
 		x_row := X.data[i * n_features:i * n_features + n_features]
-		score := model.bias + l.dot_simd(model.weights, x_row)
-		preds[i] = score
+		preds[i] = model.bias + l.dot_simd(model.weights, x_row)
 	}
-
 	return preds
 }
 
 svm_free :: proc(model: ^LinearSVM) {
-	if len(model.weights) > 0 {
-		delete(model.weights, model.allocator)
-	}
-	if len(model.support_vectors) > 0 {
-		delete(model.support_vectors, model.allocator)
-	}
+	if len(model.weights) > 0 {delete(model.weights, model.allocator)}
+	if len(model.support_vectors) > 0 {delete(model.support_vectors, model.allocator)}
 }
 
 // ============================================================================
-// Kernel SVM Structures (Dual Formulation with RBF Kernel)
+// Kernel SVM Structures (Dual Formulation)
 // ============================================================================
 
 KernelSVM :: struct {
@@ -156,8 +143,8 @@ KernelSVM :: struct {
 	bias:            f64,
 	kernel_type:     SVMKernelType,
 	gamma:           f64,
-	degree:          int, // For polynomial kernel
-	coef0:           f64, // For polynomial kernel
+	degree:          int,
+	coef0:           f64,
 	C:               f64,
 	allocator:       mem.Allocator,
 }
@@ -171,13 +158,13 @@ SVMKernelType :: enum {
 KernelSVMParams :: struct {
 	C:              f64,
 	kernel_type:    SVMKernelType,
-	gamma:          f64, // For RBF: 1 / (2 * sigma^2)
-	degree:         int, // For polynomial kernel
-	coef0:          f64, // For polynomial kernel
+	gamma:          f64,
+	degree:         int,
+	coef0:          f64,
 	max_iter:       int,
 	tol:            f64,
-	learning_rate:  f64, // For gradient-based dual optimization
-	optimizer_type: optim.OptimizerType, // ✅ NEW: Pass .SGD, .Adam, or .RMSProp from caller
+	learning_rate:  f64,
+	optimizer_type: optim.OptimizerType,
 }
 
 // ============================================================================
@@ -188,23 +175,15 @@ _kernel_rbf_simd :: proc(x1, x2: []f64, gamma: f64) -> f64 {
 	n := len(x1)
 	diff := make([]f64, n, context.temp_allocator)
 	defer delete(diff, context.temp_allocator)
-
 	l.vec_sub_simd(x1, x2, diff)
-	dist_sq := l.dot_simd(diff, diff)
-
-	return math.exp(-gamma * dist_sq)
+	return math.exp(-gamma * l.dot_simd(diff, diff))
 }
 
-_kernel_linear_simd :: proc(x1, x2: []f64) -> f64 {
-	return l.dot_simd(x1, x2)
-}
+_kernel_linear_simd :: proc(x1, x2: []f64) -> f64 {return l.dot_simd(x1, x2)}
 
 _kernel_poly_simd :: proc(x1, x2: []f64, gamma: f64, degree: int, coef0: f64) -> f64 {
-	dot := l.dot_simd(x1, x2)
-	return math.pow(gamma * dot + coef0, f64(degree))
+	return math.pow(gamma * l.dot_simd(x1, x2) + coef0, f64(degree))
 }
-
-// Generic kernel dispatcher
 
 _kernel_eval :: proc(
 	x1, x2: []f64,
@@ -225,11 +204,11 @@ _kernel_eval :: proc(
 }
 
 // ============================================================================
-// Public API: Fit Kernel SVM (Now using Unified Optimizer - FIXED)
+// Public API: Fit Kernel SVM (HEAVILY OPTIMIZED)
 // ============================================================================
 kernel_svm_fit :: proc(
 	X: ^l.Matrix(f64),
-	y: []f64, // Labels: -1 or +1
+	y: []f64,
 	params: KernelSVMParams,
 	allocator: mem.Allocator = context.allocator,
 ) -> KernelSVM {
@@ -240,7 +219,7 @@ kernel_svm_fit :: proc(
 	grad := make([]f64, n_samples, allocator)
 	defer delete(grad, allocator)
 
-	// Precompute kernel matrix K[i,j] = k(x_i, x_j)
+	// Precompute kernel matrix
 	K := make([][]f64, n_samples, allocator)
 	defer {
 		for row in K {delete(row, allocator)}
@@ -262,11 +241,16 @@ kernel_svm_fit :: proc(
 		}
 	}
 
-	// ✅ Setup unified optimizer
 	opt_config := optim.optimizer_default_config(params.optimizer_type)
 	opt_config.learning_rate = params.learning_rate
 	opt := optim.optimizer_init(opt_config, n_samples, allocator)
 	defer optim.optimizer_free(&opt)
+
+	// ✅ Pre-allocate alpha_y for SIMD dot products
+	alpha_y := make([]f64, n_samples, allocator)
+	defer delete(alpha_y, allocator)
+	old_alpha := make([]f64, n_samples, allocator)
+	defer delete(old_alpha, allocator)
 
 	converged := false
 	n_iter := 0
@@ -275,40 +259,33 @@ kernel_svm_fit :: proc(
 	for iter in 0 ..< params.max_iter {
 		n_iter = iter + 1
 
-		// Optional: Learning rate decay
-		lr := math.max(initial_lr * (1.0 - f64(iter) / f64(params.max_iter)), initial_lr * 0.01)
-		optim.optimizer_set_learning_rate(&opt, lr)
-
-		// 1. Compute gradient for all alphas (for ASCENT)
-		for i in 0 ..< n_samples {
-			sum_term := 0.0
-			for j in 0 ..< n_samples {
-				sum_term += alpha[j] * y[j] * K[i][j]
-			}
-			grad[i] = 1.0 - y[i] * sum_term
+		if params.optimizer_type != .LBFGS {
+			lr := math.max(
+				initial_lr * (1.0 - f64(iter) / f64(params.max_iter)),
+				initial_lr * 0.01,
+			)
+			optim.optimizer_set_learning_rate(&opt, lr)
 		}
 
-		// Save old alphas for convergence check
-		old_alpha := make([]f64, n_samples, context.temp_allocator)
+		// ✅ 1. Precompute alpha_y ONCE per epoch
+		for j in 0 ..< n_samples {alpha_y[j] = alpha[j] * y[j]}
+
+		// 2. Compute gradients using SIMD dot products
+		for i in 0 ..< n_samples {
+			// ✅ Replaces O(N) inner loop with a single SIMD dot product!
+			sum_term := l.dot_simd(alpha_y, K[i])
+			grad[i] = y[i] * sum_term - 1.0 // Negated for descent
+		}
+
 		copy(old_alpha, alpha)
-
-		// ✅ FIX: Negate gradient because optimizer does DESCENT, but SVM dual is ASCENT
-		for i in 0 ..< n_samples {
-			grad[i] = -grad[i]
-		}
-
-		// 2. Unified optimizer step (updates alpha in-place)
 		optim.optimizer_step(&opt, alpha, grad)
 
-		// 3. Project onto box constraint [0, C] (Required for SVM dual)
-		// and check convergence based on the projected change
+		// 3. Project onto box constraint [0, C]
 		max_update := 0.0
 		for i in 0 ..< n_samples {
 			alpha[i] = math.clamp(alpha[i], 0.0, params.C)
 			update := math.abs(alpha[i] - old_alpha[i])
-			if update > max_update {
-				max_update = update
-			}
+			if update > max_update {max_update = update}
 		}
 
 		if max_update < params.tol {
@@ -317,15 +294,10 @@ kernel_svm_fit :: proc(
 		}
 	}
 
-	// Extract support vectors (alpha > tolerance)
+	// Extract support vectors and compute bias (unchanged)
 	sv_indices := make([dynamic]int, 0, allocator)
-	for i in 0 ..< n_samples {
-		if alpha[i] > 1e-5 {
-			append(&sv_indices, i)
-		}
-	}
+	for i in 0 ..< n_samples {if alpha[i] > 1e-5 {append(&sv_indices, i)}}
 
-	// Compute bias from support vectors on margin (0 < alpha < C)
 	bias := 0.0
 	bias_count := 0
 	for idx in sv_indices[:] {
@@ -335,26 +307,25 @@ kernel_svm_fit :: proc(
 				if alpha[j] > 1e-5 {
 					x_idx := X.data[idx * n_features:idx * n_features + n_features]
 					x_j := X.data[j * n_features:j * n_features + n_features]
-					k_val := _kernel_eval(
-						x_idx,
-						x_j,
-						params.kernel_type,
-						params.gamma,
-						params.degree,
-						params.coef0,
-					)
-					score += alpha[j] * y[j] * k_val
+					score +=
+						alpha[j] *
+						y[j] *
+						_kernel_eval(
+							x_idx,
+							x_j,
+							params.kernel_type,
+							params.gamma,
+							params.degree,
+							params.coef0,
+						)
 				}
 			}
 			bias += y[idx] - score
 			bias_count += 1
 		}
 	}
-	if bias_count > 0 {
-		bias /= f64(bias_count)
-	}
+	if bias_count > 0 {bias /= f64(bias_count)}
 
-	// Copy support vector data to output
 	sv_final := make([]int, len(sv_indices), allocator)
 	copy(sv_final, sv_indices[:])
 	alpha_final := make([]f64, len(sv_indices), allocator)
@@ -378,6 +349,7 @@ kernel_svm_fit :: proc(
 		allocator = allocator,
 	}
 }
+
 // ============================================================================
 // Public API: Predict with Kernel SVM
 // ============================================================================
@@ -387,40 +359,26 @@ kernel_svm_predict :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> []f64 {
 	n := X.rows
-	n_features := X.cols // Assume same as training data
+	n_features := X.cols
 	preds := make([]f64, n, allocator)
 
 	for i in 0 ..< n {
 		x_i := X.data[i * n_features:i * n_features + n_features]
 		score := model.bias
-
-		// Sum over support vectors: score = Σ α_j y_j K(x_i, x_sv_j) + b
 		for sv_idx, j in model.support_vectors {
 			x_sv := X.data[sv_idx * n_features:sv_idx * n_features + n_features]
-			k_val := _kernel_eval(
-				x_i,
-				x_sv,
-				model.kernel_type,
-				model.gamma,
-				model.degree,
-				model.coef0,
-			)
-			score += model.alpha[j] * model.sv_labels[j] * k_val
+			score +=
+				model.alpha[j] *
+				model.sv_labels[j] *
+				_kernel_eval(x_i, x_sv, model.kernel_type, model.gamma, model.degree, model.coef0)
 		}
 		preds[i] = score
 	}
-
 	return preds
 }
 
 kernel_svm_free :: proc(model: ^KernelSVM) {
-	if len(model.support_vectors) > 0 {
-		delete(model.support_vectors, model.allocator)
-	}
-	if len(model.alpha) > 0 {
-		delete(model.alpha, model.allocator)
-	}
-	if len(model.sv_labels) > 0 {
-		delete(model.sv_labels, model.allocator)
-	}
+	if len(model.support_vectors) > 0 {delete(model.support_vectors, model.allocator)}
+	if len(model.alpha) > 0 {delete(model.alpha, model.allocator)}
+	if len(model.sv_labels) > 0 {delete(model.sv_labels, model.allocator)}
 }
