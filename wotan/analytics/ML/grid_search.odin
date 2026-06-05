@@ -259,9 +259,14 @@ linear_svm_cv_evaluator :: proc(
 	X_val := subset_matrix(X, val_idx, allocator); defer l.matrix_free(&X_val)
 	y_val := subset_slice(y, val_idx, allocator); defer delete(y_val, allocator)
 
-	model := svm_fit_linear(&X_train, y_train, params^, allocator); defer svm_free(&model)
-	preds := svm_predict_linear(&model, &X_val, allocator); defer delete(preds, allocator)
-	return metrics_accuracy(y_val, preds) // Classification uses Accuracy
+	// ✅ FIX: Use One-vs-Rest for multi-class support!
+	model := ovr_linear_svm_fit(&X_train, y_train, params^, allocator)
+	defer ovr_free(&model)
+
+	preds := ovr_predict(&model, &X_val, allocator)
+	defer delete(preds, allocator)
+
+	return metrics_accuracy(y_val, preds)
 }
 
 kernel_svm_cv_evaluator :: proc(
@@ -278,9 +283,40 @@ kernel_svm_cv_evaluator :: proc(
 	X_val := subset_matrix(X, val_idx, allocator); defer l.matrix_free(&X_val)
 	y_val := subset_slice(y, val_idx, allocator); defer delete(y_val, allocator)
 
-	model := kernel_svm_fit(&X_train, y_train, params^, allocator); defer kernel_svm_free(&model)
-	preds := kernel_svm_predict(&model, &X_val, allocator); defer delete(preds, allocator)
-	return metrics_accuracy(y_val, preds) // Classification uses Accuracy
+	// ✅ FIX: Use One-vs-Rest for multi-class support!
+	model := ovr_kernel_svm_fit(&X_train, y_train, params^, allocator)
+	defer ovr_free(&model)
+
+	preds := ovr_predict(&model, &X_val, allocator)
+	defer delete(preds, allocator)
+
+	return metrics_accuracy(y_val, preds)
+}
+
+gb_cv_evaluator :: proc(
+	X: ^l.Matrix(f64),
+	y: []f64,
+	train_idx: []int,
+	val_idx: []int,
+	user_data: rawptr,
+	allocator: mem.Allocator,
+) -> f64 {
+	params := cast(^GBParams)user_data
+	X_train := subset_matrix(X, train_idx, allocator); defer l.matrix_free(&X_train)
+	y_train := subset_slice(y, train_idx, allocator); defer delete(y_train, allocator)
+	X_val := subset_matrix(X, val_idx, allocator); defer l.matrix_free(&X_val)
+	y_val := subset_slice(y, val_idx, allocator); defer delete(y_val, allocator)
+
+	model := gb_fit(&X_train, y_train, params^, allocator); defer gb_free(&model)
+	preds := gb_predict(&model, &X_val, allocator); defer delete(preds, allocator)
+
+	// ✅ FIX: If GB is a regressor, it outputs continuous values.
+	// Round them to the nearest class label to compute classification accuracy.
+	for i in 0 ..< len(preds) {
+		preds[i] = math.round(preds[i])
+	}
+
+	return metrics_accuracy(y_val, preds)
 }
 
 dt_cv_evaluator :: proc(
@@ -302,27 +338,6 @@ dt_cv_evaluator :: proc(
 	return metrics_accuracy(y_val, preds)
 }
 
-gb_cv_evaluator :: proc(
-	X: ^l.Matrix(f64),
-	y: []f64,
-	train_idx: []int,
-	val_idx: []int,
-	user_data: rawptr,
-	allocator: mem.Allocator,
-) -> f64 {
-	// Note: Ensure your gradient_boosting.odin uses GBParams.
-	// If it uses GradientBoostingParams, change the cast below.
-	params := cast(^GBParams)user_data
-	X_train := subset_matrix(X, train_idx, allocator); defer l.matrix_free(&X_train)
-	y_train := subset_slice(y, train_idx, allocator); defer delete(y_train, allocator)
-	X_val := subset_matrix(X, val_idx, allocator); defer l.matrix_free(&X_val)
-	y_val := subset_slice(y, val_idx, allocator); defer delete(y_val, allocator)
-
-	// Note: Ensure your fit/predict functions are named gb_fit/gb_predict.
-	model := gb_fit(&X_train, y_train, params^, allocator); defer gb_free(&model)
-	preds := gb_predict(&model, &X_val, allocator); defer delete(preds, allocator)
-	return metrics_accuracy(y_val, preds)
-}
 
 // ============================================================================
 // 5. Additional Convenience Wrappers
