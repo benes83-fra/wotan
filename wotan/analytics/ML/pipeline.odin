@@ -20,35 +20,63 @@ PipelineStep :: struct {
 
 PipelineModelType :: enum {
 	None,
+	// Regression
+	OLS,
+	Ridge,
+	Lasso,
+	SVR,
+	// Binary Classification
 	Logistic,
 	LinearSVM,
 	KernelSVM,
 	KNN,
-	Ridge,
-	Lasso,
-	SVR,
+	DecisionTree,
+	GradientBoosting,
+	GaussianNB,
+	// Multi-class Classification (One-vs-Rest)
+	OvR_Logistic,
+	OvR_LinearSVM,
+	OvR_KernelSVM,
+	// Ensembles
+	RandomForest,
 }
 
 PipelineModel :: struct {
-	type:            PipelineModelType,
+	type:                PipelineModelType,
 
 	// Parameters for fitting
-	logistic_params: LogisticParams,
-	lsvm_params:     SVMParams,
-	ksvm_params:     KernelSVMParams,
-	knn_params:      KNNParams,
-	ridge_params:    RidgeParams,
-	lasso_params:    LassoParams,
-	svr_params:      SVRParams,
+	logistic_params:     LogisticParams,
+	lsvm_params:         SVMParams,
+	ksvm_params:         KernelSVMParams,
+	knn_params:          KNNParams,
+	ridge_params:        RidgeParams,
+	lasso_params:        LassoParams,
+	svr_params:          SVRParams,
+	ols_method:          OLSMethod,
+	dt_params:           TreeParams,
+	rf_params:           RFParams,
+	gb_params:           GBParams, // ⚠️ Change to GradientBoostingParams if your struct is named differently
+	gnb_epsilon:         f64,
+	ovr_logistic_params: LogisticParams,
+	ovr_lsvm_params:     SVMParams,
+	ovr_ksvm_params:     KernelSVMParams,
 
 	// Fitted models
-	logistic:        LogisticRegression,
-	linear_svm:      LinearSVM,
-	kernel_svm:      KernelSVM,
-	knn:             KNN,
-	ridge:           OLSResult,
-	lasso:           OLSResult,
-	svr:             SupportVectorRegression,
+	logistic:            LogisticRegression,
+	linear_svm:          LinearSVM,
+	kernel_svm:          KernelSVM,
+	knn:                 KNN,
+	ridge:               OLSResult,
+	lasso:               OLSResult,
+	svr:                 SupportVectorRegression,
+	ols:                 OLSResult,
+	dt:                  DecisionTree,
+	rf:                  RandomForest,
+	gb:                  GradientBoosting, // ⚠️ Change to GBModel if your struct is named differently
+	gnb:                 GaussianNB,
+	ovr_logistic:        OvRClassifier,
+	ovr_linear_svm:      OvRClassifier,
+	ovr_kernel_svm:      OvRClassifier,
 }
 
 Pipeline :: struct {
@@ -86,38 +114,49 @@ pipeline_add_minmax_scaler :: proc(pipe: ^Pipeline) {
 
 // Model setters
 pipeline_set_logistic :: proc(pipe: ^Pipeline, params: LogisticParams) {
-	pipe.model.type = .Logistic
-	pipe.model.logistic_params = params
+	pipe.model.type = .Logistic; pipe.model.logistic_params = params
 }
-
 pipeline_set_linear_svm :: proc(pipe: ^Pipeline, params: SVMParams) {
-	pipe.model.type = .LinearSVM
-	pipe.model.lsvm_params = params
+	pipe.model.type = .LinearSVM; pipe.model.lsvm_params = params
 }
-
 pipeline_set_kernel_svm :: proc(pipe: ^Pipeline, params: KernelSVMParams) {
-	pipe.model.type = .KernelSVM
-	pipe.model.ksvm_params = params
+	pipe.model.type = .KernelSVM; pipe.model.ksvm_params = params
 }
-
 pipeline_set_knn :: proc(pipe: ^Pipeline, params: KNNParams) {
-	pipe.model.type = .KNN
-	pipe.model.knn_params = params
+	pipe.model.type = .KNN; pipe.model.knn_params = params
 }
-
 pipeline_set_ridge :: proc(pipe: ^Pipeline, params: RidgeParams) {
-	pipe.model.type = .Ridge
-	pipe.model.ridge_params = params
+	pipe.model.type = .Ridge; pipe.model.ridge_params = params
 }
-
 pipeline_set_lasso :: proc(pipe: ^Pipeline, params: LassoParams) {
-	pipe.model.type = .Lasso
-	pipe.model.lasso_params = params
+	pipe.model.type = .Lasso; pipe.model.lasso_params = params
 }
-
 pipeline_set_svr :: proc(pipe: ^Pipeline, params: SVRParams) {
-	pipe.model.type = .SVR
-	pipe.model.svr_params = params
+	pipe.model.type = .SVR; pipe.model.svr_params = params
+}
+pipeline_set_ols :: proc(pipe: ^Pipeline, method: OLSMethod = .Cholesky) {
+	pipe.model.type = .OLS; pipe.model.ols_method = method
+}
+pipeline_set_decision_tree :: proc(pipe: ^Pipeline, params: TreeParams) {
+	pipe.model.type = .DecisionTree; pipe.model.dt_params = params
+}
+pipeline_set_random_forest :: proc(pipe: ^Pipeline, params: RFParams) {
+	pipe.model.type = .RandomForest; pipe.model.rf_params = params
+}
+pipeline_set_gradient_boosting :: proc(pipe: ^Pipeline, params: GBParams) {
+	pipe.model.type = .GradientBoosting; pipe.model.gb_params = params
+}
+pipeline_set_gnb :: proc(pipe: ^Pipeline, epsilon: f64 = 1e-9) {
+	pipe.model.type = .GaussianNB; pipe.model.gnb_epsilon = epsilon
+}
+pipeline_set_ovr_logistic :: proc(pipe: ^Pipeline, params: LogisticParams) {
+	pipe.model.type = .OvR_Logistic; pipe.model.ovr_logistic_params = params
+}
+pipeline_set_ovr_linear_svm :: proc(pipe: ^Pipeline, params: SVMParams) {
+	pipe.model.type = .OvR_LinearSVM; pipe.model.ovr_lsvm_params = params
+}
+pipeline_set_ovr_kernel_svm :: proc(pipe: ^Pipeline, params: KernelSVMParams) {
+	pipe.model.type = .OvR_KernelSVM; pipe.model.ovr_ksvm_params = params
 }
 
 // ============================================================================
@@ -196,6 +235,37 @@ pipeline_fit :: proc(pipe: ^Pipeline, X: ^l.Matrix(f64), y: []f64) {
 		)
 	case .SVR:
 		pipe.model.svr = svr_fit(&current_X, y, pipe.model.svr_params, pipe.allocator)
+	case .OLS:
+		pipe.model.ols = ols_fit(&current_X, y, pipe.model.ols_method, pipe.allocator)
+	case .DecisionTree:
+		pipe.model.dt = dt_fit(&current_X, y, pipe.model.dt_params, pipe.allocator)
+	case .RandomForest:
+		pipe.model.rf = rf_fit(&current_X, y, pipe.model.rf_params, pipe.allocator)
+	case .GradientBoosting:
+		pipe.model.gb = gb_fit(&current_X, y, pipe.model.gb_params, pipe.allocator)
+	case .GaussianNB:
+		pipe.model.gnb = gnb_fit(&current_X, y, pipe.model.gnb_epsilon, pipe.allocator)
+	case .OvR_Logistic:
+		pipe.model.ovr_logistic = ovr_logistic_fit(
+			&current_X,
+			y,
+			pipe.model.ovr_logistic_params,
+			pipe.allocator,
+		)
+	case .OvR_LinearSVM:
+		pipe.model.ovr_linear_svm = ovr_linear_svm_fit(
+			&current_X,
+			y,
+			pipe.model.ovr_lsvm_params,
+			pipe.allocator,
+		)
+	case .OvR_KernelSVM:
+		pipe.model.ovr_kernel_svm = ovr_kernel_svm_fit(
+			&current_X,
+			y,
+			pipe.model.ovr_ksvm_params,
+			pipe.allocator,
+		)
 	}
 
 	if owns_X {l.matrix_free(&current_X)}
@@ -251,7 +321,6 @@ pipeline_predict :: proc(
 			} else {
 				tmp = -1.0
 			}
-
 			preds[i] = tmp
 		}
 		delete(raw_preds, pipe.allocator)
@@ -265,9 +334,7 @@ pipeline_predict :: proc(
 			} else {
 				tmp = -1.0
 			}
-
-			preds[i] = tmp
-		}
+			preds[i] = tmp}
 		delete(raw_preds, pipe.allocator)
 	case .KNN:
 		preds = knn_predict(&pipe.model.knn, &current_X, allocator)
@@ -277,6 +344,22 @@ pipeline_predict :: proc(
 		preds = l.matvec_dyn_simd(&current_X, pipe.model.lasso.beta, allocator)
 	case .SVR:
 		preds = svr_predict(&pipe.model.svr, &current_X, allocator)
+	case .OLS:
+		preds = l.matvec_dyn_simd(&current_X, pipe.model.ols.beta, allocator)
+	case .DecisionTree:
+		preds = dt_predict(&pipe.model.dt, &current_X, allocator)
+	case .RandomForest:
+		preds = rf_predict(&pipe.model.rf, &current_X, allocator)
+	case .GradientBoosting:
+		preds = gb_predict(&pipe.model.gb, &current_X, allocator)
+	case .GaussianNB:
+		preds = gnb_predict(&pipe.model.gnb, &current_X, allocator)
+	case .OvR_Logistic:
+		preds = ovr_predict(&pipe.model.ovr_logistic, &current_X, allocator)
+	case .OvR_LinearSVM:
+		preds = ovr_predict(&pipe.model.ovr_linear_svm, &current_X, allocator)
+	case .OvR_KernelSVM:
+		preds = ovr_predict(&pipe.model.ovr_kernel_svm, &current_X, allocator)
 	}
 
 	if owns_X {l.matrix_free(&current_X)}
@@ -316,5 +399,21 @@ pipeline_free :: proc(pipe: ^Pipeline) {
 		_ols_result_free(&pipe.model.lasso, pipe.allocator)
 	case .SVR:
 		svr_free(&pipe.model.svr)
+	case .OLS:
+		_ols_result_free(&pipe.model.ols, pipe.allocator)
+	case .DecisionTree:
+		dt_free(&pipe.model.dt)
+	case .RandomForest:
+		rf_free(&pipe.model.rf)
+	case .GradientBoosting:
+		gb_free(&pipe.model.gb)
+	case .GaussianNB:
+		gnb_free(&pipe.model.gnb)
+	case .OvR_Logistic:
+		ovr_free(&pipe.model.ovr_logistic)
+	case .OvR_LinearSVM:
+		ovr_free(&pipe.model.ovr_linear_svm)
+	case .OvR_KernelSVM:
+		ovr_free(&pipe.model.ovr_kernel_svm)
 	}
 }
