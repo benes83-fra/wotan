@@ -6,13 +6,12 @@ import "core:mem"
 
 // ============================================================================
 // Standard Scaler (Z-score normalization)
-// Centers to mean=0, scales to unit variance.
-// Formula: z = (x - mean) / std
 // ============================================================================
 
 StandardScaler :: struct {
 	mean:       []f64,
 	std:        []f64,
+	inv_std:    []f64, // ✅ Precomputed 1.0 / std to avoid division in hot loops
 	n_features: int,
 	allocator:  mem.Allocator,
 }
@@ -25,29 +24,56 @@ standard_scaler_fit :: proc(
 	n_features := X.cols
 
 	mean := make([]f64, n_features, allocator)
+	sum_sq := make([]f64, n_features, allocator)
 	std := make([]f64, n_features, allocator)
+	inv_std := make([]f64, n_features, allocator)
 
-	// Pass 1: Compute means
+	temp := make([]f64, n_features, context.temp_allocator)
+	defer delete(temp, context.temp_allocator)
+
+	// Initialize mean and sum_sq to 0
 	for j in 0 ..< n_features {
-		sum := 0.0
-		for i in 0 ..< n_samples {
-			sum += X.data[i * n_features + j]
-		}
-		mean[j] = sum / f64(n_samples)
+		mean[j] = 0.0
+		sum_sq[j] = 0.0
 	}
 
-	// Pass 2: Compute standard deviations
+	// ✅ Pass 1: Compute means using SIMD row-wise addition (Cache-friendly!)
+	for i in 0 ..< n_samples {
+		x_row := X.data[i * n_features:i * n_features + n_features]
+		l.vec_add_simd(mean, x_row, mean)
+	}
+	inv_n := 1.0 / f64(n_samples)
 	for j in 0 ..< n_features {
-		sum_sq_diff := 0.0
-		for i in 0 ..< n_samples {
-			diff := X.data[i * n_features + j] - mean[j]
-			sum_sq_diff += diff * diff
-		}
-		// ✅ CRITICAL: Add epsilon to prevent division by zero for constant features
-		std[j] = math.sqrt(sum_sq_diff / f64(n_samples)) + 1e-8
+		mean[j] *= inv_n
 	}
 
-	return StandardScaler{mean = mean, std = std, n_features = n_features, allocator = allocator}
+	// ✅ Pass 2: Compute standard deviations using SIMD
+	for i in 0 ..< n_samples {
+		x_row := X.data[i * n_features:i * n_features + n_features]
+
+		// temp = x - mean
+		l.vec_sub_simd(x_row, mean, temp)
+		// temp = temp^2
+		l.vec_mul_simd(temp, temp, temp)
+		// sum_sq += temp
+		l.vec_add_simd(sum_sq, temp, sum_sq)
+	}
+
+	for j in 0 ..< n_features {
+		variance := sum_sq[j] * inv_n
+		std[j] = math.sqrt(variance) + 1e-8
+		inv_std[j] = 1.0 / std[j] // ✅ Precompute inverse for fast transforms
+	}
+
+	delete(sum_sq, allocator)
+
+	return StandardScaler {
+		mean = mean,
+		std = std,
+		inv_std = inv_std,
+		n_features = n_features,
+		allocator = allocator,
+	}
 }
 
 standard_scaler_transform :: proc(
@@ -57,17 +83,18 @@ standard_scaler_transform :: proc(
 ) -> l.Matrix(f64) {
 	n_samples := X.rows
 	n_features := X.cols
-	if n_features != scaler.n_features {
-		panic("standard_scaler_transform: feature mismatch")
-	}
-
 	out := l.matrix_new(f64, n_samples, n_features, allocator)
 
+	temp := make([]f64, n_features, context.temp_allocator)
+	defer delete(temp, context.temp_allocator)
+
 	for i in 0 ..< n_samples {
-		for j in 0 ..< n_features {
-			idx := i * n_features + j
-			out.data[idx] = (X.data[idx] - scaler.mean[j]) / scaler.std[j]
-		}
+		x_row := X.data[i * n_features:i * n_features + n_features]
+		out_row := out.data[i * n_features:i * n_features + n_features]
+
+		// ✅ SIMD: out = (x - mean) * inv_std
+		l.vec_sub_simd(x_row, scaler.mean, temp)
+		l.vec_mul_simd(temp, scaler.inv_std, out_row)
 	}
 	return out
 }
@@ -81,11 +108,16 @@ standard_scaler_inverse_transform :: proc(
 	n_features := X.cols
 	out := l.matrix_new(f64, n_samples, n_features, allocator)
 
+	temp := make([]f64, n_features, context.temp_allocator)
+	defer delete(temp, context.temp_allocator)
+
 	for i in 0 ..< n_samples {
-		for j in 0 ..< n_features {
-			idx := i * n_features + j
-			out.data[idx] = X.data[idx] * scaler.std[j] + scaler.mean[j]
-		}
+		x_row := X.data[i * n_features:i * n_features + n_features]
+		out_row := out.data[i * n_features:i * n_features + n_features]
+
+		// ✅ SIMD: out = x * std + mean
+		l.vec_mul_simd(x_row, scaler.std, temp)
+		l.vec_add_simd(temp, scaler.mean, out_row)
 	}
 	return out
 }
@@ -93,20 +125,19 @@ standard_scaler_inverse_transform :: proc(
 standard_scaler_free :: proc(scaler: ^StandardScaler) {
 	if len(scaler.mean) > 0 {delete(scaler.mean, scaler.allocator)}
 	if len(scaler.std) > 0 {delete(scaler.std, scaler.allocator)}
+	if len(scaler.inv_std) > 0 {delete(scaler.inv_std, scaler.allocator)}
 }
 
 
 // ============================================================================
 // Min-Max Scaler
-// Scales features to a given range (default [0, 1]).
-// Formula: x_scaled = (x - min) / (max - min) * (range_max - range_min) + range_min
 // ============================================================================
 
 MinMaxScaler :: struct {
 	data_min:   []f64,
 	data_max:   []f64,
-	scale:      []f64, // Precomputed multiplier
-	min_val:    []f64, // Precomputed offset
+	scale:      []f64,
+	min_val:    []f64,
 	n_features: int,
 	allocator:  mem.Allocator,
 }
@@ -124,13 +155,13 @@ minmax_scaler_fit :: proc(
 	scale := make([]f64, n_features, allocator)
 	min_val := make([]f64, n_features, allocator)
 
-	// Initialize min/max bounds
 	for j in 0 ..< n_features {
 		data_min[j] = math.F64_MAX
 		data_max[j] = -math.F64_MAX
 	}
 
-	// Find actual min/max per column
+	// Note: Min/Max is left as scalar because it requires branch/min-max intrinsics
+	// which are highly architecture-specific. It only runs once during fit anyway.
 	for i in 0 ..< n_samples {
 		for j in 0 ..< n_features {
 			val := X.data[i * n_features + j]
@@ -139,16 +170,11 @@ minmax_scaler_fit :: proc(
 		}
 	}
 
-	// Precompute scale and offset for O(1) transformation
 	range_min := feature_range[0]
 	range_max := feature_range[1]
 	for j in 0 ..< n_features {
 		data_range := data_max[j] - data_min[j]
-
-		// ✅ CRITICAL: Prevent div by zero for constant features
-		if data_range == 0.0 {
-			data_range = 1.0
-		}
+		if data_range == 0.0 {data_range = 1.0}
 
 		scale[j] = (range_max - range_min) / data_range
 		min_val[j] = range_min - data_min[j] * scale[j]
@@ -173,12 +199,16 @@ minmax_scaler_transform :: proc(
 	n_features := X.cols
 	out := l.matrix_new(f64, n_samples, n_features, allocator)
 
+	temp := make([]f64, n_features, context.temp_allocator)
+	defer delete(temp, context.temp_allocator)
+
 	for i in 0 ..< n_samples {
-		for j in 0 ..< n_features {
-			idx := i * n_features + j
-			// x * scale + offset is mathematically identical to the full formula, but much faster
-			out.data[idx] = X.data[idx] * scaler.scale[j] + scaler.min_val[j]
-		}
+		x_row := X.data[i * n_features:i * n_features + n_features]
+		out_row := out.data[i * n_features:i * n_features + n_features]
+
+		// ✅ SIMD: out = x * scale + min_val
+		l.vec_mul_simd(x_row, scaler.scale, temp)
+		l.vec_add_simd(temp, scaler.min_val, out_row)
 	}
 	return out
 }
