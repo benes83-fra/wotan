@@ -4,6 +4,12 @@ import l "../../linalg"
 import "core:math"
 import "core:mem"
 
+
+RidgeParams :: struct {
+	lambda: f64,
+	method: OLSMethod,
+}
+
 // ============================================================================
 // Ridge Regression (L2 Regularization)
 // Solves: min ||y - Xβ||² + λ||β||²

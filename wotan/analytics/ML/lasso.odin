@@ -4,6 +4,12 @@ import l "../../linalg"
 import "core:math"
 import "core:mem"
 
+
+LassoParams :: struct {
+	lambda:   f64,
+	max_iter: int,
+	tol:      f64,
+}
 // ============================================================================
 // Soft-thresholding operator for Lasso
 // S(z, γ) = sign(z) * max(|z| - γ, 0)
