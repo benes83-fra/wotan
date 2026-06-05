@@ -138,6 +138,7 @@ svm_free :: proc(model: ^LinearSVM) {
 
 KernelSVM :: struct {
 	support_vectors: []int,
+	sv_data:         l.Matrix(f64),
 	alpha:           []f64,
 	sv_labels:       []f64,
 	bias:            f64,
@@ -326,8 +327,19 @@ kernel_svm_fit :: proc(
 	}
 	if bias_count > 0 {bias /= f64(bias_count)}
 
+	// Copy support vector DATA to output
 	sv_final := make([]int, len(sv_indices), allocator)
 	copy(sv_final, sv_indices[:])
+
+	// ✅ Allocate and copy the actual feature data for the support vectors
+	n_sv := len(sv_indices)
+	sv_data := l.matrix_new(f64, n_sv, n_features, allocator)
+	for idx, i in sv_indices[:] {
+		for j in 0 ..< n_features {
+			sv_data.data[i * n_features + j] = X.data[idx * n_features + j]
+		}
+	}
+
 	alpha_final := make([]f64, len(sv_indices), allocator)
 	sv_label_final := make([]f64, len(sv_indices), allocator)
 	for idx, i in sv_indices[:] {
@@ -338,15 +350,16 @@ kernel_svm_fit :: proc(
 
 	return KernelSVM {
 		support_vectors = sv_final,
-		alpha = alpha_final,
-		bias = bias,
-		sv_labels = sv_label_final,
-		kernel_type = params.kernel_type,
-		gamma = params.gamma,
-		degree = params.degree,
-		coef0 = params.coef0,
-		C = params.C,
-		allocator = allocator,
+		sv_data         = sv_data, // ✅ Assign the new field
+		alpha           = alpha_final,
+		bias            = bias,
+		sv_labels       = sv_label_final,
+		kernel_type     = params.kernel_type,
+		gamma           = params.gamma,
+		degree          = params.degree,
+		coef0           = params.coef0,
+		C               = params.C,
+		allocator       = allocator,
 	}
 }
 
@@ -365,12 +378,19 @@ kernel_svm_predict :: proc(
 	for i in 0 ..< n {
 		x_i := X.data[i * n_features:i * n_features + n_features]
 		score := model.bias
-		for sv_idx, j in model.support_vectors {
-			x_sv := X.data[sv_idx * n_features:sv_idx * n_features + n_features]
-			score +=
-				model.alpha[j] *
-				model.sv_labels[j] *
-				_kernel_eval(x_i, x_sv, model.kernel_type, model.gamma, model.degree, model.coef0)
+
+		// ✅ Iterate over the stored support vector data
+		for j in 0 ..< len(model.support_vectors) {
+			x_sv := model.sv_data.data[j * n_features:j * n_features + n_features]
+			k_val := _kernel_eval(
+				x_i,
+				x_sv,
+				model.kernel_type,
+				model.gamma,
+				model.degree,
+				model.coef0,
+			)
+			score += model.alpha[j] * model.sv_labels[j] * k_val
 		}
 		preds[i] = score
 	}
@@ -379,6 +399,7 @@ kernel_svm_predict :: proc(
 
 kernel_svm_free :: proc(model: ^KernelSVM) {
 	if len(model.support_vectors) > 0 {delete(model.support_vectors, model.allocator)}
+	if model.sv_data.data != nil {l.matrix_free(&model.sv_data)} 	// ✅ Free the matrix
 	if len(model.alpha) > 0 {delete(model.alpha, model.allocator)}
 	if len(model.sv_labels) > 0 {delete(model.sv_labels, model.allocator)}
 }

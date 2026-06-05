@@ -11,6 +11,7 @@ import "core:mem"
 
 SupportVectorRegression :: struct {
 	support_vectors: []int,
+	sv_data:         l.Matrix(f64), // ✅ NEW
 	alpha_diff:      []f64,
 	bias:            f64,
 	kernel_type:     SVMKernelType,
@@ -23,7 +24,6 @@ SupportVectorRegression :: struct {
 	n_iter:          int,
 	allocator:       mem.Allocator,
 }
-
 SVRParams :: struct {
 	C:              f64,
 	epsilon:        f64,
@@ -232,8 +232,19 @@ svr_fit :: proc(
 		if bias_count > 0 {bias /= f64(bias_count)}
 	}
 
+	// Copy to final slices
 	sv_final := make([]int, len(sv_indices), allocator)
 	copy(sv_final, sv_indices[:])
+
+	// ✅ Allocate and copy the actual feature data for the support vectors
+	n_sv := len(sv_indices)
+	sv_data := l.matrix_new(f64, n_sv, n_features, allocator)
+	for idx, i in sv_indices[:] {
+		for j in 0 ..< n_features {
+			sv_data.data[i * n_features + j] = X.data[idx * n_features + j]
+		}
+	}
+
 	alpha_diff_slice := make([]f64, len(alpha_diff_final), allocator)
 	copy(alpha_diff_slice, alpha_diff_final[:])
 
@@ -242,17 +253,18 @@ svr_fit :: proc(
 
 	return SupportVectorRegression {
 		support_vectors = sv_final,
-		alpha_diff = alpha_diff_slice,
-		bias = bias,
-		kernel_type = params.kernel_type,
-		gamma = params.gamma,
-		degree = params.degree,
-		coef0 = params.coef0,
-		C = params.C,
-		epsilon = params.epsilon,
-		converged = converged,
-		n_iter = n_iter,
-		allocator = allocator,
+		sv_data         = sv_data, // ✅ Assign the new field
+		alpha_diff      = alpha_diff_slice,
+		bias            = bias,
+		kernel_type     = params.kernel_type,
+		gamma           = params.gamma,
+		degree          = params.degree,
+		coef0           = params.coef0,
+		C               = params.C,
+		epsilon         = params.epsilon,
+		converged       = converged,
+		n_iter          = n_iter,
+		allocator       = allocator,
 	}
 }
 
@@ -272,8 +284,9 @@ svr_predict :: proc(
 		x_i := X.data[i * n_features:i * n_features + n_features]
 		score := model.bias
 
-		for sv_idx, j in model.support_vectors {
-			x_sv := X.data[sv_idx * n_features:sv_idx * n_features + n_features]
+		// ✅ Iterate over the stored support vector data
+		for j in 0 ..< len(model.support_vectors) {
+			x_sv := model.sv_data.data[j * n_features:j * n_features + n_features]
 			k_val := _kernel_eval(
 				x_i,
 				x_sv,
@@ -295,5 +308,6 @@ svr_predict :: proc(
 // ============================================================================
 svr_free :: proc(model: ^SupportVectorRegression) {
 	if len(model.support_vectors) > 0 {delete(model.support_vectors, model.allocator)}
+	if model.sv_data.data != nil {l.matrix_free(&model.sv_data)} 	// ✅ Free the matrix
 	if len(model.alpha_diff) > 0 {delete(model.alpha_diff, model.allocator)}
 }
