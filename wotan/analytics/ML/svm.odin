@@ -27,9 +27,48 @@ SVMParams :: struct {
 	fit_intercept:  bool,
 	optimizer_type: optim.OptimizerType,
 }
-
 // ============================================================================
-// Public API: Fit Linear SVM (HEAVILY OPTIMIZED)
+// Internal: Context & Objective for Linear SVM L-BFGS Line Search
+// ============================================================================
+
+_LinearSVM_Context :: struct {
+	X:          ^l.Matrix(f64),
+	y:          []f64,
+	C:          f64,
+	n_samples:  int,
+	n_features: int,
+}
+
+// The objective function: 0.5 * ||w||^2 + C * sum(max(0, 1 - y * (w.x + b)))
+// We divide by N to match the averaged gradient!
+_linear_svm_loss :: proc(params_vec: []f64, user_data: rawptr) -> f64 {
+	ctx := cast(^_LinearSVM_Context)(user_data)
+	w := params_vec[0:ctx.n_features]
+	b := params_vec[ctx.n_features]
+
+	// Regularization term: 0.5 * ||w||^2
+	reg := 0.0
+	for f in 0 ..< ctx.n_features {
+		reg += w[f] * w[f]
+	}
+	reg *= 0.5
+
+	// Hinge loss term: C * sum(max(0, 1 - y * (w.x + b)))
+	hinge := 0.0
+	for i in 0 ..< ctx.n_samples {
+		x_row := ctx.X.data[i * ctx.n_features:i * ctx.n_features + ctx.n_features]
+		score := b + l.dot_simd(w, x_row)
+		margin := ctx.y[i] * score
+		if margin < 1.0 {
+			hinge += 1.0 - margin
+		}
+	}
+
+	// Average the loss to perfectly match the averaged gradient!
+	return (reg + ctx.C * hinge) / f64(ctx.n_samples)
+}
+// ============================================================================
+// Public API: Fit Linear SVM (Full-Batch for L-BFGS compatibility)
 // ============================================================================
 svm_fit_linear :: proc(
 	X: ^l.Matrix(f64),
@@ -43,16 +82,22 @@ svm_fit_linear :: proc(
 	params_vec := make([]f64, n_features + 1, allocator)
 	defer delete(params_vec, allocator)
 
-	// ✅ Setup unified optimizer
+	// Setup unified optimizer
 	opt_config := optim.optimizer_default_config(params.optimizer_type)
 	opt_config.learning_rate = params.learning_rate
 	opt := optim.optimizer_init(opt_config, n_features + 1, allocator)
 	defer optim.optimizer_free(&opt)
 
-	// ✅ Allocate full_grad ONCE outside the loop (Zero allocation in hot path)
+	// Allocate full_grad ONCE outside the loop
 	full_grad := make([]f64, n_features + 1, allocator)
 	defer delete(full_grad, allocator)
-
+	ctx := _LinearSVM_Context {
+		X          = X,
+		y          = y,
+		C          = params.C,
+		n_samples  = n_samples,
+		n_features = n_features,
+	}
 	converged := false
 	n_iter := 0
 	initial_lr := params.learning_rate
@@ -60,7 +105,7 @@ svm_fit_linear :: proc(
 	for iter in 0 ..< params.max_iter {
 		n_iter = iter + 1
 
-		// Disable LR decay for L-BFGS so it can take full Newton steps
+		// Disable LR decay for L-BFGS
 		if params.optimizer_type != .LBFGS {
 			lr := math.max(
 				initial_lr * (1.0 - f64(iter) / f64(params.max_iter)),
@@ -69,29 +114,40 @@ svm_fit_linear :: proc(
 			optim.optimizer_set_learning_rate(&opt, lr)
 		}
 
+		// ✅ 1. Zero out the full batch gradient
+		for f in 0 ..< n_features + 1 {
+			full_grad[f] = 0.0
+		}
+
+		// ✅ 2. Accumulate gradients over ALL samples
 		for i in 0 ..< n_samples {
 			x_row := X.data[i * n_features:i * n_features + n_features]
 			w := params_vec[0:n_features]
 
-			// ✅ 1. SIMD-accelerated score computation
 			score := params_vec[n_features] + l.dot_simd(w, x_row)
 
-			// ✅ 2. Compute FULL gradient vector
 			if y[i] * score < 1.0 {
 				for f in 0 ..< n_features {
-					full_grad[f] = params_vec[f] - params.C * y[i] * x_row[f]
+					full_grad[f] += params_vec[f] - params.C * y[i] * x_row[f]
 				}
-				full_grad[n_features] = -params.C * y[i]
+				full_grad[n_features] += -params.C * y[i]
 			} else {
 				for f in 0 ..< n_features {
-					full_grad[f] = params_vec[f]
+					full_grad[f] += params_vec[f]
 				}
-				full_grad[n_features] = 0.0
 			}
-
-			// ✅ 3. Single optimizer step per sample (Crucial for Adam/L-BFGS!)
-			optim.optimizer_step(&opt, params_vec, full_grad)
 		}
+
+		// ✅ 3. Average the gradient (CRITICAL for L-BFGS stability!)
+		inv_n := 1.0 / f64(n_samples)
+		for f in 0 ..< n_features + 1 {
+			full_grad[f] *= inv_n
+		}
+
+		loss := _linear_svm_loss(params_vec, &ctx)
+
+		// ✅ 5. Single optimizer step per epoch WITH line search!
+		optim.optimizer_step(&opt, params_vec, full_grad, loss, _linear_svm_loss, &ctx)
 	}
 
 	w := make([]f64, n_features, allocator)
@@ -107,7 +163,6 @@ svm_fit_linear :: proc(
 		allocator = allocator,
 	}
 }
-
 // ============================================================================
 // Public API: Predict with Linear SVM
 // ============================================================================

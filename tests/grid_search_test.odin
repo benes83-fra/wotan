@@ -139,23 +139,33 @@ extended_grid_search_test :: proc(allocator: mem.Allocator) {
 	// --- Support Vector Regression (SVR) ---
 	svr_grid := []ml.SVRParams {
 		{
-			C = 1.0,
-			epsilon = 0.1,
-			gamma = 0.5,
-			kernel_type = .RBF,
-			max_iter = 50,
-			tol = 1e-3,
-			learning_rate = 0.01,
-			optimizer_type = .LBFGS,
-		},
-		{
 			C = 10.0,
 			epsilon = 0.1,
 			gamma = 1.0,
 			kernel_type = .RBF,
-			max_iter = 50,
-			tol = 1e-3,
-			learning_rate = 0.01,
+			max_iter = 100,
+			tol = 1e-4,
+			learning_rate = 1.0,
+			optimizer_type = .LBFGS,
+		},
+		{
+			C = 100.0,
+			epsilon = 0.1,
+			gamma = 10.0,
+			kernel_type = .RBF,
+			max_iter = 100,
+			tol = 1e-4,
+			learning_rate = 1.0,
+			optimizer_type = .LBFGS,
+		},
+		{
+			C = 100.0,
+			epsilon = 0.1,
+			gamma = 50.0,
+			kernel_type = .RBF,
+			max_iter = 100,
+			tol = 1e-4,
+			learning_rate = 1.0,
 			optimizer_type = .LBFGS,
 		},
 	}
@@ -185,7 +195,7 @@ extended_grid_search_test :: proc(allocator: mem.Allocator) {
 			C = 0.1,
 			max_iter = 100,
 			tol = 1e-3,
-			learning_rate = 0.01,
+			learning_rate = 1.0,
 			fit_intercept = true,
 			optimizer_type = .LBFGS,
 		},
@@ -193,7 +203,7 @@ extended_grid_search_test :: proc(allocator: mem.Allocator) {
 			C = 1.0,
 			max_iter = 100,
 			tol = 1e-3,
-			learning_rate = 0.01,
+			learning_rate = 1.0,
 			fit_intercept = true,
 			optimizer_type = .LBFGS,
 		},
@@ -201,11 +211,12 @@ extended_grid_search_test :: proc(allocator: mem.Allocator) {
 			C = 10.0,
 			max_iter = 100,
 			tol = 1e-3,
-			learning_rate = 0.01,
+			learning_rate = 1.0,
 			fit_intercept = true,
 			optimizer_type = .LBFGS,
 		},
 	}
+
 	best_lsvm, lsvm_score := ml.grid_search_linear_svm(&X_cls, y_cls, 3, lsvm_grid, allocator)
 	fmt.printf("Linear SVM Best CV Acc: %.2f%% (C: %v)\n", lsvm_score * 100, best_lsvm.C)
 
