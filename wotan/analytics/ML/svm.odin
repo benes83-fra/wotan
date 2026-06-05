@@ -115,11 +115,12 @@ svm_fit_linear :: proc(
 		}
 
 		// ✅ 1. Zero out the full batch gradient
+		// ✅ 1. Zero out the full batch gradient
 		for f in 0 ..< n_features + 1 {
 			full_grad[f] = 0.0
 		}
 
-		// ✅ 2. Accumulate gradients over ALL samples
+		// ✅ 2. Accumulate ONLY the hinge loss gradients over ALL samples
 		for i in 0 ..< n_samples {
 			x_row := X.data[i * n_features:i * n_features + n_features]
 			w := params_vec[0:n_features]
@@ -128,25 +129,23 @@ svm_fit_linear :: proc(
 
 			if y[i] * score < 1.0 {
 				for f in 0 ..< n_features {
-					full_grad[f] += params_vec[f] - params.C * y[i] * x_row[f]
+					full_grad[f] -= params.C * y[i] * x_row[f]
 				}
-				full_grad[n_features] += -params.C * y[i]
-			} else {
-				for f in 0 ..< n_features {
-					full_grad[f] += params_vec[f]
-				}
+				full_grad[n_features] -= params.C * y[i]
 			}
 		}
 
-		// ✅ 3. Average the gradient (CRITICAL for L-BFGS stability!)
+		// ✅ 3. Add regularization gradient (w) and average EVERYTHING by 1/N
+		// This perfectly matches the derivative of the averaged loss function!
 		inv_n := 1.0 / f64(n_samples)
-		for f in 0 ..< n_features + 1 {
-			full_grad[f] *= inv_n
+		for f in 0 ..< n_features {
+			full_grad[f] = (params_vec[f] + full_grad[f]) * inv_n
 		}
+		full_grad[n_features] *= inv_n
 
 		loss := _linear_svm_loss(params_vec, &ctx)
 
-		// ✅ 5. Single optimizer step per epoch WITH line search!
+		// ✅ 4. Single optimizer step per epoch WITH line search!
 		optim.optimizer_step(&opt, params_vec, full_grad, loss, _linear_svm_loss, &ctx)
 	}
 
@@ -264,22 +263,28 @@ _kernel_eval :: proc(
 // Internal: Context & Objective for Kernel SVM L-BFGS Line Search
 // ============================================================================
 
+// ✅ FIX: Removed Q_alpha. The loss function must compute it dynamically!
 _KernelSVM_Context :: struct {
 	y:         []f64,
 	K:         [][]f64,
 	n_samples: int,
-	Q_alpha:   []f64, // Precomputed Q * alpha for the current epoch
 }
 
-// The dual objective to minimize: 0.5 * alpha^T Q alpha - sum(alpha)
+// ✅ FIX: Computes Q * alpha dynamically for the trial 'alpha' passed by L-BFGS!
 _kernel_svm_loss :: proc(alpha: []f64, user_data: rawptr) -> f64 {
 	ctx := cast(^_KernelSVM_Context)(user_data)
 	n := ctx.n_samples
 
-	// Quadratic term: 0.5 * sum(alpha_i * Q_alpha_i)
+	// Quadratic term: 0.5 * alpha^T Q alpha
+	// Q_ij = y_i * y_j * K_ij
 	quad_term := 0.0
 	for i in 0 ..< n {
-		quad_term += alpha[i] * ctx.Q_alpha[i]
+		if alpha[i] == 0.0 {continue}
+		sum := 0.0
+		for j in 0 ..< n {
+			sum += alpha[j] * ctx.y[j] * ctx.K[i][j]
+		}
+		quad_term += alpha[i] * ctx.y[i] * sum
 	}
 	quad_term *= 0.5
 
@@ -337,7 +342,6 @@ kernel_svm_fit :: proc(
 		y         = y,
 		K         = K,
 		n_samples = n_samples,
-		Q_alpha   = Q_alpha,
 	}
 	opt_config := optim.optimizer_default_config(params.optimizer_type)
 	opt_config.learning_rate = params.learning_rate
@@ -372,8 +376,7 @@ kernel_svm_fit :: proc(
 		// 2. Compute gradients and Q_alpha using SIMD dot products
 		for i in 0 ..< n_samples {
 			sum_term := l.dot_simd(alpha_y, K[i])
-			Q_alpha[i] = y[i] * sum_term // ✅ Store for loss function
-			grad[i] = Q_alpha[i] - 1.0 // Negated for descent
+			grad[i] = y[i] * sum_term - 1.0 // Gradient of dual objective
 		}
 
 		copy(old_alpha, alpha)
