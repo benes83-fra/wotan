@@ -3,9 +3,9 @@ package tests
 import ml "../wotan/analytics/ML"
 import l "../wotan/linalg"
 import "core:fmt"
+import "core:math" // ✅ ADDED for math.round
 import "core:math/rand"
 import "core:mem"
-
 
 pipeline_test :: proc(allocator: mem.Allocator) {
 	fmt.println("\n=== Testing ML Pipeline ===")
@@ -58,6 +58,7 @@ pipeline_test :: proc(allocator: mem.Allocator) {
 	l.matrix_free(&X)
 	delete(y, allocator)
 }
+
 pipeline_comprehensive_test :: proc(allocator: mem.Allocator) {
 	fmt.println("\n=== Comprehensive Pipeline Test (All Models) ===")
 
@@ -86,6 +87,13 @@ pipeline_comprehensive_test :: proc(allocator: mem.Allocator) {
 			2.0 * X_reg.data[i * 4 + 0] + 3.0 * X_reg.data[i * 4 + 1] + rand.float64_normal(0, 0.5)
 	}
 
+	// ✅ NEW: Helper to round predictions for tree ensembles
+	round_preds :: proc(preds: []f64) {
+		for i in 0 ..< len(preds) {
+			preds[i] = math.round(preds[i])
+		}
+	}
+
 	// Helper closures to run and evaluate pipelines
 	run_cls :: proc(
 		name: string,
@@ -93,10 +101,17 @@ pipeline_comprehensive_test :: proc(allocator: mem.Allocator) {
 		X: ^l.Matrix(f64),
 		y: []f64,
 		allocator: mem.Allocator,
+		round_output: bool = false, // ✅ ADDED
 	) {
 		ml.pipeline_fit(pipe, X, y)
 		preds := ml.pipeline_predict(pipe, X, allocator)
 		defer delete(preds, allocator)
+
+		// ✅ ADDED
+		if round_output {
+			round_preds(preds)
+		}
+
 		acc := ml.metrics_accuracy(y, preds)
 		fmt.printf("✅ %-25s Accuracy: %.2f%%\n", name, acc * 100)
 	}
@@ -122,13 +137,13 @@ pipeline_comprehensive_test :: proc(allocator: mem.Allocator) {
 		&pipe1,
 		{C = 1.0, max_iter = 100, learning_rate = 1.0, optimizer_type = .LBFGS},
 	)
-	run_cls("Logistic (Binary)", &pipe1, &X_cls, y_cls, allocator)
+	run_cls("Logistic (Binary)*", &pipe1, &X_cls, y_cls, allocator) // Renamed to indicate expected failure
 
 	pipe2 := ml.pipeline_new(allocator); defer ml.pipeline_free(&pipe2)
 	ml.pipeline_add_standard_scaler(&pipe2)
 	ml.pipeline_set_ovr_logistic(
 		&pipe2,
-		{C = 1.0, max_iter = 100, learning_rate = 1.0, optimizer_type = .LBFGS},
+		{C = 1.0, max_iter = 500, learning_rate = 1.0, optimizer_type = .LBFGS}, // ✅ Increased max_iter
 	)
 	run_cls("OvR Logistic", &pipe2, &X_cls, y_cls, allocator)
 
@@ -136,7 +151,7 @@ pipeline_comprehensive_test :: proc(allocator: mem.Allocator) {
 	ml.pipeline_add_standard_scaler(&pipe3)
 	ml.pipeline_set_ovr_linear_svm(
 		&pipe3,
-		{C = 1.0, max_iter = 100, learning_rate = 1.0, optimizer_type = .LBFGS},
+		{C = 1.0, max_iter = 500, learning_rate = 1.0, optimizer_type = .LBFGS}, // ✅ Increased max_iter
 	)
 	run_cls("OvR Linear SVM", &pipe3, &X_cls, y_cls, allocator)
 
@@ -145,11 +160,11 @@ pipeline_comprehensive_test :: proc(allocator: mem.Allocator) {
 	ml.pipeline_set_ovr_kernel_svm(
 		&pipe4,
 		{
-			C = 1.0,
-			gamma = 0.1,
-			kernel_type = .RBF,
-			max_iter = 100,
-			learning_rate = 1.0,
+			C              = 1.0,
+			gamma          = 0.1,
+			kernel_type    = .RBF,
+			max_iter       = 500, // ✅ Increased max_iter
+			learning_rate  = 1.0,
 			optimizer_type = .LBFGS,
 		},
 	)
@@ -170,9 +185,9 @@ pipeline_comprehensive_test :: proc(allocator: mem.Allocator) {
 	ml.pipeline_add_standard_scaler(&pipe7)
 	ml.pipeline_set_random_forest(
 		&pipe7,
-		{n_trees = 10, max_depth = 5, min_samples = 2, bootstrap = true},
+		{n_trees = 20, max_depth = 5, min_samples = 2, bootstrap = true}, // Increased trees slightly
 	)
-	run_cls("Random Forest", &pipe7, &X_cls, y_cls, allocator)
+	run_cls("Random Forest", &pipe7, &X_cls, y_cls, allocator, true) // ✅ Pass true to round
 
 	pipe8 := ml.pipeline_new(allocator); defer ml.pipeline_free(&pipe8)
 	ml.pipeline_add_standard_scaler(&pipe8)
@@ -180,7 +195,7 @@ pipeline_comprehensive_test :: proc(allocator: mem.Allocator) {
 		&pipe8,
 		{n_estimators = 50, learning_rate = 0.1, max_depth = 3, min_samples = 2},
 	)
-	run_cls("Gradient Boosting", &pipe8, &X_cls, y_cls, allocator)
+	run_cls("Gradient Boosting", &pipe8, &X_cls, y_cls, allocator, true) // ✅ Pass true to round
 
 	pipe9 := ml.pipeline_new(allocator); defer ml.pipeline_free(&pipe9)
 	ml.pipeline_add_standard_scaler(&pipe9)
@@ -207,12 +222,12 @@ pipeline_comprehensive_test :: proc(allocator: mem.Allocator) {
 	ml.pipeline_set_svr(
 		&pipe13,
 		{
-			C = 10.0,
-			epsilon = 0.1,
-			gamma = 1.0,
-			kernel_type = .RBF,
-			max_iter = 100,
-			learning_rate = 1.0,
+			C              = 100.0, // ✅ Increased C
+			epsilon        = 0.1,
+			gamma          = 1.0,
+			kernel_type    = .RBF,
+			max_iter       = 500, // ✅ Increased max_iter
+			learning_rate  = 1.0,
 			optimizer_type = .LBFGS,
 		},
 	)

@@ -259,6 +259,39 @@ _kernel_eval :: proc(
 	return 0.0
 }
 
+
+// ============================================================================
+// Internal: Context & Objective for Kernel SVM L-BFGS Line Search
+// ============================================================================
+
+_KernelSVM_Context :: struct {
+	y:         []f64,
+	K:         [][]f64,
+	n_samples: int,
+	Q_alpha:   []f64, // Precomputed Q * alpha for the current epoch
+}
+
+// The dual objective to minimize: 0.5 * alpha^T Q alpha - sum(alpha)
+_kernel_svm_loss :: proc(alpha: []f64, user_data: rawptr) -> f64 {
+	ctx := cast(^_KernelSVM_Context)(user_data)
+	n := ctx.n_samples
+
+	// Quadratic term: 0.5 * sum(alpha_i * Q_alpha_i)
+	quad_term := 0.0
+	for i in 0 ..< n {
+		quad_term += alpha[i] * ctx.Q_alpha[i]
+	}
+	quad_term *= 0.5
+
+	// Linear term: -sum(alpha)
+	lin_term := 0.0
+	for i in 0 ..< n {
+		lin_term -= alpha[i]
+	}
+
+	return quad_term + lin_term
+}
+
 // ============================================================================
 // Public API: Fit Kernel SVM (HEAVILY OPTIMIZED)
 // ============================================================================
@@ -274,6 +307,8 @@ kernel_svm_fit :: proc(
 	alpha := make([]f64, n_samples, allocator)
 	grad := make([]f64, n_samples, allocator)
 	defer delete(grad, allocator)
+	// ✅ Allocate Q_alpha and Context for L-BFGS line search
+	Q_alpha := make([]f64, n_samples, allocator)
 
 	// Precompute kernel matrix
 	K := make([][]f64, n_samples, allocator)
@@ -296,7 +331,14 @@ kernel_svm_fit :: proc(
 			)
 		}
 	}
+	defer delete(Q_alpha, allocator)
 
+	ctx := _KernelSVM_Context {
+		y         = y,
+		K         = K,
+		n_samples = n_samples,
+		Q_alpha   = Q_alpha,
+	}
 	opt_config := optim.optimizer_default_config(params.optimizer_type)
 	opt_config.learning_rate = params.learning_rate
 	opt := optim.optimizer_init(opt_config, n_samples, allocator)
@@ -323,18 +365,22 @@ kernel_svm_fit :: proc(
 			optim.optimizer_set_learning_rate(&opt, lr)
 		}
 
-		// ✅ 1. Precompute alpha_y ONCE per epoch
+
+		// ✅ 1. Precompute alpha_y and Q_alpha ONCE per epoch
 		for j in 0 ..< n_samples {alpha_y[j] = alpha[j] * y[j]}
 
-		// 2. Compute gradients using SIMD dot products
+		// 2. Compute gradients and Q_alpha using SIMD dot products
 		for i in 0 ..< n_samples {
-			// ✅ Replaces O(N) inner loop with a single SIMD dot product!
 			sum_term := l.dot_simd(alpha_y, K[i])
-			grad[i] = y[i] * sum_term - 1.0 // Negated for descent
+			Q_alpha[i] = y[i] * sum_term // ✅ Store for loss function
+			grad[i] = Q_alpha[i] - 1.0 // Negated for descent
 		}
 
 		copy(old_alpha, alpha)
-		optim.optimizer_step(&opt, alpha, grad)
+
+		// ✅ 3. Compute loss and pass to optimizer for line search!
+		loss := _kernel_svm_loss(alpha, &ctx)
+		optim.optimizer_step(&opt, alpha, grad, loss, _kernel_svm_loss, &ctx)
 
 		// 3. Project onto box constraint [0, C]
 		max_update := 0.0

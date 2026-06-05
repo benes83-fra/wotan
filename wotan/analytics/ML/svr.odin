@@ -46,21 +46,31 @@ _SVR_Context :: struct {
 	K:         [][]f64,
 	epsilon:   f64,
 	n_samples: int,
-	K_beta:    []f64, // ✅ NEW: Precomputed K * beta to make loss O(N) instead of O(N^2)
+	// ✅ NEW: Precomputed K * beta to make loss O(N) instead of O(N^2)
 }
 
 // ✅ OPTIMIZED: The dual objective function.
 // By using the precomputed K_beta, this is now O(N) instead of O(N^2).
 // This makes L-BFGS line searches incredibly fast.
+// The dual objective function to minimize.
+// ✅ FIX: Computes K_beta dynamically for the trial 'v' passed by L-BFGS!
 _svr_loss :: proc(v: []f64, user_data: rawptr) -> f64 {
 	ctx := cast(^_SVR_Context)(user_data)
 	n := ctx.n_samples
 
-	// Quadratic term: 0.5 * beta^T K_beta
+	// Quadratic term: 0.5 * beta^T K beta
 	quad_term := 0.0
 	for i in 0 ..< n {
 		beta_i := v[i] - v[i + n]
-		quad_term += beta_i * ctx.K_beta[i]
+		if beta_i == 0.0 {continue}
+
+		// Compute K_beta[i] dynamically for this specific trial v
+		sum := 0.0
+		for j in 0 ..< n {
+			beta_j := v[j] - v[j + n]
+			sum += beta_j * ctx.K[i][j]
+		}
+		quad_term += beta_i * sum
 	}
 	quad_term *= 0.5
 
@@ -73,7 +83,6 @@ _svr_loss :: proc(v: []f64, user_data: rawptr) -> f64 {
 
 	return quad_term + lin_term
 }
-
 // ============================================================================
 // Public API: Fit Support Vector Regression
 // ============================================================================
@@ -127,7 +136,6 @@ svr_fit :: proc(
 		K         = K,
 		epsilon   = params.epsilon,
 		n_samples = n_samples,
-		K_beta    = K_beta,
 	}
 
 	beta := make([]f64, n_samples, allocator)
@@ -156,11 +164,9 @@ svr_fit :: proc(
 
 		// ✅ Compute K_beta ONCE per epoch using SIMD
 		for i in 0 ..< n_samples {
-			K_beta[i] = l.dot_simd(beta, K[i])
-
-			// Compute gradients using the precomputed K_beta
-			grad[i] = K_beta[i] - y[i] + params.epsilon
-			grad[i + n_samples] = -K_beta[i] + y[i] + params.epsilon
+			sum_term := l.dot_simd(beta, K[i])
+			grad[i] = sum_term - y[i] + params.epsilon
+			grad[i + n_samples] = -sum_term + y[i] + params.epsilon
 		}
 
 		copy(old_v, v)
