@@ -2,6 +2,7 @@ package tests
 
 import ml "../wotan/analytics/ML"
 import w "../wotan/core"
+import importer "../wotan/importer"
 import l "../wotan/linalg"
 import "core:fmt"
 import "core:mem"
@@ -10,15 +11,14 @@ dataset_test :: proc(allocator: mem.Allocator) {
 	fmt.println("\n=== Testing DataFrame Bridge ===")
 
 	// 1. Load your CSVs into your DataFrames (using your existing CSV reader)
-	// df_train := core.csv_read("train.csv", allocator)
-	// df_test := core.csv_read("test.csv", allocator)
+	df_train := importer.csv_load("train.csv")
+	defer w.destroy_dataframe(&df_train)
+	df_test := importer.csv_load("test.csv")
+	defer w.destroy_dataframe(&df_test)
 
-	// For this example, let's assume you have DataFrames ready.
-	// We will just pass nil and pretend they are loaded.
-	df_train, df_test: w.DataFrame
 
 	// 2. Prepare Training Data (Fits encoders automatically!)
-	train_data, ok := ml.prepare_dataset(&df_train, "target_column", allocator)
+	train_data, ok := ml.prepare_dataset(&df_train, "target", allocator)
 	defer ml.dataset_free(&train_data)
 
 	if !ok {
