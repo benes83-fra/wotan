@@ -423,6 +423,7 @@ main :: proc() {
 	test.pipeline_comprehensive_test(context.temp_allocator)
 	test.serialization_test(context.temp_allocator)
 	test.mlp_test(context.temp_allocator)
+	test.dataset_test(context.temp_allocator)
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
 	w.destroy_dataframe(&right2)
