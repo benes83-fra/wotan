@@ -4,6 +4,7 @@ import l "../../linalg"
 import "core:mem"
 import "core:os"
 
+
 // ============================================================================
 // Binary Writer
 // ============================================================================
@@ -287,6 +288,46 @@ pipeline_save :: proc(pipe: ^Pipeline, path: string) -> bool {
 		write_f64(&w, pipe.model.svr.coef0)
 		write_f64(&w, pipe.model.svr.C)
 		write_f64(&w, pipe.model.svr.epsilon)
+	case .DecisionTree:
+		write_decision_tree(&w, &pipe.model.dt)
+
+	case .RandomForest:
+		write_i64(&w, i64(len(pipe.model.rf.trees)))
+		for &tree in pipe.model.rf.trees {
+			write_decision_tree(&w, &tree)
+		}
+
+	case .GradientBoosting:
+		// ⚠️ ADJUST: If your GB uses a different field name for trees (like 'estimators'), change it here
+		write_i64(&w, i64(len(pipe.model.gb.trees)))
+		for &tree in pipe.model.gb.trees {
+			write_decision_tree(&w, &tree)
+		}
+	case .MLP:
+		write_i64(&w, i64(pipe.model.mlp.n_layers))
+		for i in 0 ..< pipe.model.mlp.n_layers {
+			write_matrix(&w, &pipe.model.mlp.weights[i])
+			write_slice_f64(&w, pipe.model.mlp.biases[i])
+			write_u32(&w, u32(pipe.model.mlp.activations[i]))
+		}
+
+	case .GaussianNB:
+		write_slice_f64(&w, pipe.model.gnb.classes)
+		write_matrix(&w, &pipe.model.gnb.theta)
+		write_matrix(&w, &pipe.model.gnb.inv_sigma)
+		write_slice_f64(&w, pipe.model.gnb.joint_bias)
+
+	case .OvR_Logistic, .OvR_LinearSVM, .OvR_KernelSVM:
+		ovr_ptr: ^OvRClassifier
+		if pipe.model.type ==
+		   .OvR_Logistic {ovr_ptr = &pipe.model.ovr_logistic} else if pipe.model.type == .OvR_LinearSVM {ovr_ptr = &pipe.model.ovr_linear_svm} else {ovr_ptr = &pipe.model.ovr_kernel_svm}
+
+		write_slice_f64(&w, ovr_ptr.classes)
+		write_i64(&w, i64(len(ovr_ptr.models)))
+		for &model in ovr_ptr.models {
+			write_binary_classifier(&w, &model)
+		}
+
 	}
 
 	return !w.err
@@ -388,7 +429,160 @@ pipeline_load :: proc(
 		pipe.model.svr.C = read_f64(&r)
 		pipe.model.svr.epsilon = read_f64(&r)
 		pipe.model.svr.allocator = allocator
+	case .DecisionTree:
+		pipe.model.dt = read_decision_tree(&r, allocator)
+
+	case .RandomForest:
+		n_trees := int(read_i64(&r))
+		pipe.model.rf.trees = make([dynamic]DecisionTree, 0, n_trees, allocator)
+		pipe.model.rf.allocator = allocator
+		for t in 0 ..< n_trees {
+			tree := read_decision_tree(&r, allocator)
+			append(&pipe.model.rf.trees, tree)
+		}
+
+	case .GradientBoosting:
+		n_trees := int(read_i64(&r))
+		// ⚠️ ADJUST: If your GB uses a different field name for trees, change it here
+		pipe.model.gb.trees = make([dynamic]DecisionTree, 0, n_trees, allocator)
+		pipe.model.gb.allocator = allocator
+		for t in 0 ..< n_trees {
+			tree := read_decision_tree(&r, allocator)
+			append(&pipe.model.gb.trees, tree)
+		}
+	case .MLP:
+		n_layers := int(read_i64(&r))
+		pipe.model.mlp.n_layers = n_layers
+		pipe.model.mlp.weights = make([]l.Matrix(f64), n_layers, allocator)
+		pipe.model.mlp.biases = make([][]f64, n_layers, allocator)
+		pipe.model.mlp.activations = make([]Activation, n_layers, allocator)
+		pipe.model.mlp.allocator = allocator
+
+		for i in 0 ..< n_layers {
+			pipe.model.mlp.weights[i] = read_matrix(&r)
+			pipe.model.mlp.biases[i] = read_slice_f64(&r)
+			pipe.model.mlp.activations[i] = cast(Activation)read_u32(&r)
+		}
+
+	case .GaussianNB:
+		pipe.model.gnb.classes = read_slice_f64(&r)
+		pipe.model.gnb.theta = read_matrix(&r)
+		pipe.model.gnb.inv_sigma = read_matrix(&r)
+		pipe.model.gnb.joint_bias = read_slice_f64(&r)
+		pipe.model.gnb.allocator = allocator
+
+	case .OvR_Logistic, .OvR_LinearSVM, .OvR_KernelSVM:
+		ovr_ptr: ^OvRClassifier
+		if pipe.model.type ==
+		   .OvR_Logistic {ovr_ptr = &pipe.model.ovr_logistic} else if pipe.model.type == .OvR_LinearSVM {ovr_ptr = &pipe.model.ovr_linear_svm} else {ovr_ptr = &pipe.model.ovr_kernel_svm}
+
+		ovr_ptr.classes = read_slice_f64(&r)
+		ovr_ptr.allocator = allocator
+		n_models := int(read_i64(&r))
+		ovr_ptr.models = make([]BinaryClassifier, n_models, allocator)
+		for i in 0 ..< n_models {
+			ovr_ptr.models[i] = read_binary_classifier(&r, allocator)
+		}
+
 	}
 
 	return pipe, !r.err
+}
+
+
+// Write a single DecisionTree (which is just a flat array of Nodes and a root index)
+write_decision_tree :: proc(w: ^ModelWriter, tree: ^DecisionTree) {
+	write_i64(w, i64(tree.root_idx))
+	write_i64(w, i64(len(tree.nodes)))
+
+	for node in tree.nodes {
+		write_i64(w, i64(node.feature_idx))
+		write_f64(w, node.threshold)
+		write_f64(w, node.value)
+		write_i64(w, i64(node.left_idx))
+		write_i64(w, i64(node.right_idx))
+		write_f64(w, node.impurity)
+		write_i64(w, i64(node.sample_count))
+	}
+}
+
+// Read a single DecisionTree
+read_decision_tree :: proc(r: ^ModelReader, allocator: mem.Allocator) -> DecisionTree {
+	tree: DecisionTree
+	tree.allocator = allocator
+	tree.root_idx = int(read_i64(r))
+
+	n_nodes := int(read_i64(r))
+	tree.nodes = make([dynamic]Node, 0, n_nodes, allocator)
+
+	for i in 0 ..< n_nodes {
+		node: Node
+		node.feature_idx = int(read_i64(r))
+		node.threshold = read_f64(r)
+		node.value = read_f64(r)
+		node.left_idx = int(read_i64(r))
+		node.right_idx = int(read_i64(r))
+		node.impurity = read_f64(r)
+		node.sample_count = int(read_i64(r))
+		append(&tree.nodes, node)
+	}
+
+	return tree
+}
+
+
+// ============================================================================
+// Binary Classifier Serialization Helpers (for OvR)
+// ============================================================================
+
+write_binary_classifier :: proc(w: ^ModelWriter, clf: ^BinaryClassifier) {
+	write_u32(w, u32(clf.type))
+	switch clf.type {
+	case .Logistic:
+		write_slice_f64(w, clf.logistic.weights)
+		write_f64(w, clf.logistic.bias)
+	case .LinearSVM:
+		write_slice_f64(w, clf.linear_svm.weights)
+		write_f64(w, clf.linear_svm.bias)
+	case .KernelSVM:
+		write_slice_int(w, clf.kernel_svm.support_vectors)
+		write_matrix(w, &clf.kernel_svm.sv_data)
+		write_slice_f64(w, clf.kernel_svm.alpha)
+		write_slice_f64(w, clf.kernel_svm.sv_labels)
+		write_f64(w, clf.kernel_svm.bias)
+		write_u32(w, u32(clf.kernel_svm.kernel_type))
+		write_f64(w, clf.kernel_svm.gamma)
+		write_i64(w, i64(clf.kernel_svm.degree))
+		write_f64(w, clf.kernel_svm.coef0)
+		write_f64(w, clf.kernel_svm.C)
+	}
+}
+
+read_binary_classifier :: proc(r: ^ModelReader, allocator: mem.Allocator) -> BinaryClassifier {
+	clf: BinaryClassifier
+	clf.allocator = allocator
+	clf.type = cast(BinaryClassifierType)read_u32(r)
+	switch clf.type {
+	case .Logistic:
+		clf.logistic.weights = read_slice_f64(r)
+		clf.logistic.bias = read_f64(r)
+		clf.logistic.allocator = allocator
+	case .LinearSVM:
+		clf.linear_svm.weights = read_slice_f64(r)
+		clf.linear_svm.bias = read_f64(r)
+		clf.linear_svm.allocator = allocator
+	case .KernelSVM:
+		clf.kernel_svm.support_vectors = read_slice_int(r)
+		clf.kernel_svm.sv_data = read_matrix(r)
+		clf.kernel_svm.alpha = read_slice_f64(r)
+		clf.kernel_svm.sv_labels = read_slice_f64(r)
+		clf.kernel_svm.bias = read_f64(r)
+		clf.kernel_svm.kernel_type = cast(SVMKernelType)read_u32(r)
+		clf.kernel_svm.gamma = read_f64(r)
+		clf.kernel_svm.degree = int(read_i64(r))
+		clf.kernel_svm.coef0 = read_f64(r)
+		clf.kernel_svm.C = read_f64(r)
+		clf.kernel_svm.allocator = allocator
+	}
+	return clf
 }
