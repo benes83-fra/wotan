@@ -25,6 +25,7 @@ PipelineModelType :: enum {
 	Ridge,
 	Lasso,
 	SVR,
+	MLP,
 	// Binary Classification
 	Logistic,
 	LinearSVM,
@@ -43,6 +44,8 @@ PipelineModelType :: enum {
 
 PipelineModel :: struct {
 	type:                PipelineModelType,
+	mlp_params:          MLPParams,
+	mlp:                 MLP,
 
 	// Parameters for fitting
 	logistic_params:     LogisticParams,
@@ -158,7 +161,9 @@ pipeline_set_ovr_linear_svm :: proc(pipe: ^Pipeline, params: SVMParams) {
 pipeline_set_ovr_kernel_svm :: proc(pipe: ^Pipeline, params: KernelSVMParams) {
 	pipe.model.type = .OvR_KernelSVM; pipe.model.ovr_ksvm_params = params
 }
-
+pipeline_set_mlp :: proc(pipe: ^Pipeline, params: MLPParams) {
+	pipe.model.type = .MLP; pipe.model.mlp_params = params
+}
 // ============================================================================
 // Public API: Fit
 // ============================================================================
@@ -259,6 +264,8 @@ pipeline_fit :: proc(pipe: ^Pipeline, X: ^l.Matrix(f64), y: []f64) {
 			pipe.model.ovr_lsvm_params,
 			pipe.allocator,
 		)
+	case .MLP:
+		pipe.model.mlp = mlp_fit(&current_X, y, pipe.model.mlp_params, pipe.allocator)
 	case .OvR_KernelSVM:
 		pipe.model.ovr_kernel_svm = ovr_kernel_svm_fit(
 			&current_X,
@@ -360,6 +367,8 @@ pipeline_predict :: proc(
 		preds = ovr_predict(&pipe.model.ovr_linear_svm, &current_X, allocator)
 	case .OvR_KernelSVM:
 		preds = ovr_predict(&pipe.model.ovr_kernel_svm, &current_X, allocator)
+	case .MLP:
+		mlp_free(&pipe.model.mlp)
 	}
 
 	if owns_X {l.matrix_free(&current_X)}
@@ -415,5 +424,7 @@ pipeline_free :: proc(pipe: ^Pipeline) {
 		ovr_free(&pipe.model.ovr_linear_svm)
 	case .OvR_KernelSVM:
 		ovr_free(&pipe.model.ovr_kernel_svm)
+	case .MLP:
+		mlp_free(&pipe.model.mlp)
 	}
 }
