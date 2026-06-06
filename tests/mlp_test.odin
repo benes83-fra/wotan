@@ -57,6 +57,13 @@ mlp_test :: proc(allocator: mem.Allocator) {
 		if preds[i] >= 0.5 {preds[i] = 1.0} else {preds[i] = 0.0}
 	}
 
+	// ✅ DEBUG: See exactly what the network is predicting vs the true labels
+	fmt.println("\n--- First 10 Predictions vs Labels ---")
+	for i in 0 ..< 10 {
+		fmt.printf("pred: %.2f | true: %.2f\n", preds[i], y[i])
+	}
+	fmt.println("--------------------------------------")
+
 	acc := ml.metrics_accuracy(y, preds)
 	fmt.printf("MLP (ReLU/Adam) Accuracy: %.2f%%\n", acc * 100)
 

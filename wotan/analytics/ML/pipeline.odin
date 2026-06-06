@@ -368,7 +368,7 @@ pipeline_predict :: proc(
 	case .OvR_KernelSVM:
 		preds = ovr_predict(&pipe.model.ovr_kernel_svm, &current_X, allocator)
 	case .MLP:
-		mlp_free(&pipe.model.mlp)
+		preds = mlp_predict(&pipe.model.mlp, &current_X, allocator)
 	}
 
 	if owns_X {l.matrix_free(&current_X)}

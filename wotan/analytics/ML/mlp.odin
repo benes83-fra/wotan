@@ -2,6 +2,7 @@ package ML
 
 import l "../../linalg"
 import optim "../../optimize"
+import "core:fmt"
 import "core:math"
 import "core:math/rand"
 import "core:mem"
@@ -23,20 +24,20 @@ MLPTask :: enum {
 }
 
 MLPParams :: struct {
-	hidden_layers:     []int, // e.g., [64, 32]
-	activation:        Activation, // Hidden layer activation
-	output_activation: Activation, // Output layer activation
+	hidden_layers:     []int,
+	activation:        Activation,
+	output_activation: Activation,
 	task:              MLPTask,
 	learning_rate:     f64,
 	max_iter:          int,
-	batch_size:        int, // 0 for full-batch
-	optimizer_type:    optim.OptimizerType, // .SGD or .Adam
+	batch_size:        int,
+	optimizer_type:    optim.OptimizerType,
 }
 
 MLP :: struct {
-	weights:     []l.Matrix(f64), // weights[i] connects layer i to i+1
-	biases:      [][]f64, // biases[i] for layer i+1
-	activations: []Activation, // activation for each layer (including output)
+	weights:     []l.Matrix(f64),
+	biases:      [][]f64,
+	activations: []Activation,
 	n_layers:    int,
 	allocator:   mem.Allocator,
 }
@@ -54,7 +55,6 @@ _apply_activation :: proc(x: []f64, act: Activation) {
 	case .Tanh:
 		for i in 0 ..< len(x) {x[i] = math.tanh(x[i])}
 	case .Linear:
-	// Do nothing
 	}
 }
 
@@ -68,7 +68,6 @@ _apply_activation_derivative :: proc(z: []f64, act: Activation, out: []f64) {
 			} else {
 				tmp = 0.0
 			}
-
 			out[i] = tmp
 		}
 	case .Sigmoid:
@@ -98,9 +97,8 @@ mlp_fit :: proc(
 ) -> MLP {
 	n_samples := X.rows
 	n_features := X.cols
-	n_outputs := 1 // Assuming single output for now (Regression/Binary)
+	n_outputs := 1
 
-	// 1. Determine layer sizes
 	layer_sizes := make([]int, len(params.hidden_layers) + 2, allocator)
 	layer_sizes[0] = n_features
 	for h, i in params.hidden_layers {layer_sizes[i + 1] = h}
@@ -108,7 +106,6 @@ mlp_fit :: proc(
 
 	n_layers := len(layer_sizes) - 1
 
-	// 2. Initialize Weights and Biases (Xavier/He Initialization)
 	weights := make([]l.Matrix(f64), n_layers, allocator)
 	biases := make([][]f64, n_layers, allocator)
 	activations := make([]Activation, n_layers, allocator)
@@ -120,7 +117,6 @@ mlp_fit :: proc(
 		weights[i] = l.matrix_new(f64, fan_in, fan_out, allocator)
 		biases[i] = make([]f64, fan_out, allocator)
 
-		// He initialization for ReLU, Xavier for others
 		tmp: Activation
 		if i < n_layers - 1 {
 			tmp = params.activation
@@ -137,25 +133,17 @@ mlp_fit :: proc(
 			scale = math.sqrt(1.0 / f64(fan_in))
 		}
 
-		// Initialize weights
 		for r in 0 ..< fan_in {
 			for c in 0 ..< fan_out {
 				weights[i].data[r * fan_out + c] = rand.float64_normal(0, scale)
 			}
 		}
-		// Initialize biases to 0
 		for c in 0 ..< fan_out {biases[i][c] = 0.0}
 	}
-
-	// 3. Training Loop (Mini-batch Adam/SGD)
-	// For simplicity in this implementation, we use Full-Batch to perfectly integrate
-	// with the existing pipeline structure without complex index shuffling.
-	// (Mini-batch can be added later by shuffling indices and slicing X/y).
 
 	batch_size := params.batch_size
 	if batch_size <= 0 {batch_size = n_samples}
 
-	// Pre-allocate Adam moments if needed
 	m_w := make([]l.Matrix(f64), n_layers, allocator)
 	v_w := make([]l.Matrix(f64), n_layers, allocator)
 	m_b := make([][]f64, n_layers, allocator)
@@ -178,16 +166,12 @@ mlp_fit :: proc(
 		lr := params.learning_rate
 
 		// --- Forward Pass ---
-		// We use temp_allocator for intermediate activations to guarantee zero heap allocs in loop
 		activations_fwd := make([][]f64, n_layers + 1, context.temp_allocator)
 		z_vals := make([][]f64, n_layers, context.temp_allocator)
 
-		activations_fwd[0] = X.data // Input layer
+		activations_fwd[0] = X.data
 
 		for i in 0 ..< n_layers {
-			// Z = A_prev * W + b
-			// We do this row by row to avoid allocating a full matrix for Z if we don't have to,
-			// but for SIMD matmul, we need matrices.
 			A_prev := activations_fwd[i]
 			W := weights[i]
 			b := biases[i]
@@ -196,25 +180,21 @@ mlp_fit :: proc(
 			Z := make([]f64, n_samples * fan_out, context.temp_allocator)
 			z_vals[i] = Z
 
-			// Matrix multiply A_prev (n_samples x fan_in) * W (fan_in x fan_out)
-			// Since we don't have a matmul that outputs to a pre-allocated slice easily without linalg changes,
-			// we will use l.matmul_dyn_simd and copy, OR we can just do it manually for small batches.
-			// Let's use l.matmul_dyn_simd for maximum SIMD performance.
 			A_prev_mat := l.Matrix(f64) {
 				rows = n_samples,
 				cols = layer_sizes[i],
 				data = A_prev,
 			}
 			Z_mat := l.matmul_dyn_simd(&A_prev_mat, &W, context.temp_allocator)
-			defer l.matrix_free(&Z_mat)
 
-			// Add bias and apply activation
+			// ✅ FIX 1: Removed 'defer'. Free explicitly to prevent temp_allocator exhaustion!
 			for r in 0 ..< n_samples {
 				for c in 0 ..< fan_out {
 					idx := r * fan_out + c
 					Z[idx] = Z_mat.data[idx] + b[c]
 				}
 			}
+			l.matrix_free(&Z_mat) // <--- Explicit free here!
 
 			A_curr := make([]f64, len(Z), context.temp_allocator)
 			copy(A_curr, Z)
@@ -225,14 +205,23 @@ mlp_fit :: proc(
 		// --- Backward Pass ---
 		dA := make([]f64, len(activations_fwd[n_layers]), context.temp_allocator)
 
-		// Output layer error
 		A_out := activations_fwd[n_layers]
 		for i in 0 ..< n_samples {
-			if params.task == .Regression || params.output_activation == .Sigmoid {
-				dA[i] = A_out[i] - y[i] // Derivative of MSE or BCE
-			} else {
-				dA[i] = A_out[i] - y[i]
+			dA[i] = A_out[i] - y[i]
+		}
+
+		// ✅ DEBUG PRINTS: See exactly what the network is doing every 100 epochs
+		if iter % 100 == 0 {
+			loss := 0.0
+			out_mean := 0.0
+			for i in 0 ..< n_samples {
+				diff := A_out[i] - y[i]
+				loss += diff * diff
+				out_mean += A_out[i]
 			}
+			loss /= f64(n_samples)
+			out_mean /= f64(n_samples)
+			fmt.printf("[Iter %v] Loss: %.4f | Output Mean: %.4f\n", iter, loss, out_mean)
 		}
 
 		for i := n_layers - 1; i >= 0; i -= 1 {
@@ -243,17 +232,24 @@ mlp_fit :: proc(
 			fan_in := layer_sizes[i]
 			fan_out := layer_sizes[i + 1]
 
-			// dZ = dA * activation'(Z)
 			dZ := make([]f64, len(Z_prev), context.temp_allocator)
-			_apply_activation_derivative(Z_prev, activations[i], dZ)
-			for j in 0 ..< len(dZ) {dZ[j] *= dA[j]} 	// Element-wise multiply
 
-			// Gradients for W and b
-			// dW = A_prev^T * dZ  (fan_in x n_samples) * (n_samples x fan_out) -> (fan_in x fan_out)
+			// ✅ FIX 2: BCE Gradient Shortcut.
+			// If this is the output layer + Sigmoid + Binary Classification,
+			// the derivative of BCE w.r.t Z is simply (A - y).
+			// We SKIP the sigmoid derivative to prevent vanishing gradients!
+			if i == n_layers - 1 &&
+			   params.task == .BinaryClassification &&
+			   params.output_activation == .Sigmoid {
+				copy(dZ, dA)
+			} else {
+				_apply_activation_derivative(Z_prev, activations[i], dZ)
+				for j in 0 ..< len(dZ) {dZ[j] *= dA[j]}
+			}
+
 			dW := make([]f64, fan_in * fan_out, context.temp_allocator)
 			db := make([]f64, fan_out, context.temp_allocator)
 
-			// Compute dW and db manually for simplicity and zero-alloc
 			for r in 0 ..< fan_in {
 				for c in 0 ..< fan_out {
 					sum := 0.0
@@ -271,7 +267,6 @@ mlp_fit :: proc(
 				db[c] = sum / f64(n_samples)
 			}
 
-			// Update Weights and Biases (Adam/SGD)
 			for r in 0 ..< fan_in {
 				for c in 0 ..< fan_out {
 					idx := r * fan_out + c
@@ -305,7 +300,6 @@ mlp_fit :: proc(
 				}
 			}
 
-			// Propagate error to previous layer: dA_prev = dZ * W^T
 			if i > 0 {
 				dA = make([]f64, len(A_prev), context.temp_allocator)
 				for r in 0 ..< fan_in {
@@ -320,6 +314,8 @@ mlp_fit :: proc(
 			}
 		}
 	}
+
+	fmt.println("[Training Complete]")
 
 	return MLP {
 		weights = weights,
@@ -355,23 +351,23 @@ mlp_predict :: proc(
 		}
 		Z_mat := l.matmul_dyn_simd(&A_prev_mat, &model.weights[i], context.temp_allocator)
 		defer l.matrix_free(&Z_mat)
-
+		// ✅ FIX 1: Removed 'defer'. Free explicitly!
 		for r in 0 ..< n_samples {
 			for c in 0 ..< fan_out {
 				idx := r * fan_out + c
 				Z[idx] = Z_mat.data[idx] + model.biases[i][c]
 			}
 		}
+		l.matrix_free(&Z_mat) // <--- Explicit free here!
 
 		current_A = make([]f64, len(Z), context.temp_allocator)
 		copy(current_A, Z)
 		_apply_activation(current_A, model.activations[i])
 	}
 
-	// Extract the single output column
 	out := make([]f64, n_samples, allocator)
 	for i in 0 ..< n_samples {
-		out[i] = current_A[i] // Assuming 1 output neuron
+		out[i] = current_A[i]
 	}
 	return out
 }
