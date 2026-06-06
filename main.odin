@@ -425,6 +425,7 @@ main :: proc() {
 	test.mlp_test(context.temp_allocator)
 	test.dataset_test(context.temp_allocator)
 	test.tree_serialization_test(context.temp_allocator)
+	test.random_search_test(context.temp_allocator)
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
 	w.destroy_dataframe(&right2)

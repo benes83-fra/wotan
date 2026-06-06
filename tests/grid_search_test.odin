@@ -295,3 +295,96 @@ extended_grid_search_test :: proc(allocator: mem.Allocator) {
 	l.matrix_free(&X_cls)
 	delete(y_cls, allocator)
 }
+random_search_test :: proc(allocator: mem.Allocator) {
+	fmt.println("\n=== Testing Random Search ===")
+
+	// ---------------------------------------------------------
+	// 1. Classification Data (for KNN)
+	// ---------------------------------------------------------
+	n_cls := 200
+	X_cls := l.matrix_new(f64, n_cls, 4, allocator)
+	y_cls := make([]f64, n_cls, allocator)
+	for i in 0 ..< n_cls {
+		class_idx := i / 100
+		y_cls[i] = f64(class_idx)
+		for f in 0 ..< 4 {
+			center := f64(class_idx) * 5.0 + f64(f)
+			X_cls.data[i * 4 + f] = center + rand.float64_normal(0, 1.5)
+		}
+	}
+
+	// ---------------------------------------------------------
+	// 2. Regression Data (for Ridge)
+	// ---------------------------------------------------------
+	n_reg := 150
+	X_reg := l.matrix_new(f64, n_reg, 4, allocator)
+	y_reg := make([]f64, n_reg, allocator)
+	for i in 0 ..< n_reg {
+		for f in 0 ..< 4 {
+			X_reg.data[i * 4 + f] = rand.float64_normal(0, 1.0)
+		}
+		y_reg[i] =
+			2.0 * X_reg.data[i * 4 + 0] + 3.0 * X_reg.data[i * 4 + 1] + rand.float64_normal(0, 0.5)
+	}
+
+	// ---------------------------------------------------------
+	// 1. Random Search for KNN (Discrete & Categorical Sampling)
+	// ---------------------------------------------------------
+	sample_knn :: proc(seed: u64) -> ml.KNNParams {
+		// ✅ Inline LCG for 100% reproducible randomness without relying on core:math/rand API
+		s := seed * 6364136223846793005 + 1442695040888963407
+		k := 1 + int(s % 15)
+
+		s2 := s * 6364136223846793005 + 1442695040888963407
+		rand_float := f64(s2 >> 11) / 9007199254740992.0 // 2^53
+
+		weights: ml.KNNWeights
+		if rand_float > 0.5 {
+			weights = .Uniform
+		} else {
+			weights = .Distance
+		}
+
+		return ml.KNNParams{k = k, weights = weights}
+	}
+
+	best_knn, knn_score := ml.random_search_knn(&X_cls, y_cls, 3, 20, sample_knn, 42, allocator)
+	fmt.printf(
+		"KNN Random Search Best Acc: %.2f%% (k=%v, weights=%v)\n",
+		knn_score * 100,
+		best_knn.k,
+		best_knn.weights,
+	)
+
+	// ---------------------------------------------------------
+	// 2. Random Search for Ridge (Log-Uniform Sampling)
+	// ---------------------------------------------------------
+	sample_ridge :: proc(seed: u64) -> ml.RidgeParams {
+		// ✅ Inline LCG
+		s := seed * 6364136223846793005 + 1442695040888963407
+		rand_float := f64(s >> 11) / 9007199254740992.0
+
+		// Sample lambda from 10^-3 to 10^3 (log-uniform)
+		log_lambda := -3.0 + rand_float * 6.0
+		lambda := math.pow(10.0, log_lambda)
+
+		return ml.RidgeParams{lambda = lambda, method = .Cholesky}
+	}
+
+	best_ridge, ridge_score := ml.random_search_ridge(
+		&X_reg,
+		y_reg,
+		3,
+		20,
+		sample_ridge,
+		42,
+		allocator,
+	)
+	fmt.printf("Ridge Random Search Best R2: %.4f (Lambda=%v)\n", ridge_score, best_ridge.lambda)
+
+	// Cleanup
+	l.matrix_free(&X_cls)
+	delete(y_cls, allocator)
+	l.matrix_free(&X_reg)
+	delete(y_reg, allocator)
+}
