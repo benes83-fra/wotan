@@ -427,6 +427,8 @@ main :: proc() {
 	test.tree_serialization_test(context.temp_allocator)
 	test.random_search_test(context.temp_allocator)
 	test.plot_test(context.temp_allocator)
+	test.line_plot_test(context.temp_allocator)
+	test.bar_chart_test(context.temp_allocator)
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
 	w.destroy_dataframe(&right2)

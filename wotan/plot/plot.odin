@@ -6,6 +6,11 @@ import "core:math"
 import "core:mem"
 import "core:os"
 
+LineStyle :: enum {
+	Solid,
+	Dashed,
+	Dotted,
+}
 
 PlotConfig :: struct {
 	width:         int,
@@ -22,6 +27,7 @@ PlotConfig :: struct {
 	title:         string,
 	x_label:       string,
 	y_label:       string,
+	line_style:    LineStyle, // Line style for line plots
 }
 
 DEFAULT_PLOT_CONFIG :: PlotConfig {
@@ -39,6 +45,7 @@ DEFAULT_PLOT_CONFIG :: PlotConfig {
 	title         = "",
 	x_label       = "",
 	y_label       = "",
+	line_style    = .Solid,
 }
 // ============================================================================
 // 1. Software Rasterizer & Image Buffer
@@ -236,6 +243,51 @@ draw_number :: proc(img: ^Image, x, y: int, val: f64, scale: int, c: Color) {
 				}
 			}
 			cx += 4 * scale
+		}
+	}
+}
+
+draw_line_segment :: proc(img: ^Image, x0, y0, x1, y1: int, c: Color, style: LineStyle) {
+	switch style {
+	case .Solid:
+		draw_line(img, x0, y0, x1, y1, c)
+	case .Dashed:
+		// Draw dashed line (6 pixels on, 4 pixels off)
+		dx := math.abs(x1 - x0)
+		dy := math.abs(y1 - y0)
+		steps := dx
+		if dy > dx {steps = dy}
+
+		if steps == 0 {return}
+
+		x_inc := f64(x1 - x0) / f64(steps)
+		y_inc := f64(y1 - y0) / f64(steps)
+
+		for i in 0 ..< steps {
+			if (i % 10) < 6 { 	// 6 on, 4 off
+				x := x0 + int(x_inc * f64(i))
+				y := y0 + int(y_inc * f64(i))
+				draw_pixel(img, x, y, c)
+			}
+		}
+	case .Dotted:
+		// Draw dotted line (2 pixels on, 3 pixels off)
+		dx := math.abs(x1 - x0)
+		dy := math.abs(y1 - y0)
+		steps := dx
+		if dy > dx {steps = dy}
+
+		if steps == 0 {return}
+
+		x_inc := f64(x1 - x0) / f64(steps)
+		y_inc := f64(y1 - y0) / f64(steps)
+
+		for i in 0 ..< steps {
+			if (i % 5) < 2 { 	// 2 on, 3 off
+				x := x0 + int(x_inc * f64(i))
+				y := y0 + int(y_inc * f64(i))
+				draw_pixel(img, x, y, c)
+			}
 		}
 	}
 }
@@ -574,6 +626,186 @@ histogram_png :: proc(
 		x := margin_l + i * bar_w
 		y := H - margin_b - h
 		draw_rect(&img, x, y, bar_w - 1, h, config.point_color)
+	}
+
+	return image_save_png(&img, path)
+}
+line_png :: proc(
+	xs: []f64,
+	ys: []f64,
+	path: string,
+	config: PlotConfig = DEFAULT_PLOT_CONFIG,
+	allocator: mem.Allocator = context.allocator,
+) -> bool {
+	if len(xs) != len(ys) || len(xs) == 0 {return false}
+	n := len(xs)
+
+	min_x, max_x := math.F64_MAX, -math.F64_MAX
+	min_y, max_y := math.F64_MAX, -math.F64_MAX
+
+	for i in 0 ..< n {
+		if xs[i] < min_x {min_x = xs[i]}
+		if xs[i] > max_x {max_x = xs[i]}
+		if ys[i] < min_y {min_y = ys[i]}
+		if ys[i] > max_y {max_y = ys[i]}
+	}
+
+	W, H := config.width, config.height
+	img := image_new(W, H, allocator)
+	defer image_free(&img)
+	image_clear(&img, config.bg_color.r, config.bg_color.g, config.bg_color.b, config.bg_color.a)
+
+	margin_l, margin_r, margin_t, margin_b :=
+		config.margin_left, config.margin_right, config.margin_top, config.margin_bottom
+	plot_w := W - margin_l - margin_r
+	plot_h := H - margin_t - margin_b
+
+	// Draw axes
+	draw_line(&img, margin_l, margin_t, margin_l, H - margin_b, config.axis_color)
+	draw_line(&img, margin_l, H - margin_b, W - margin_r, H - margin_b, config.axis_color)
+
+	// Draw title
+	if config.title != "" {
+		title_x := (W - len(config.title) * 4 * config.font_scale) / 2
+		draw_text(&img, title_x, 10, config.title, config.font_scale, config.axis_color)
+	}
+
+	// Draw axis labels
+	if config.x_label != "" {
+		label_x := margin_l + (plot_w - len(config.x_label) * 4 * config.font_scale) / 2
+		draw_text(
+			&img,
+			label_x,
+			H - margin_b + 10,
+			config.x_label,
+			config.font_scale,
+			config.axis_color,
+		)
+	}
+
+	if config.y_label != "" {
+		draw_text(&img, 10, margin_t, config.y_label, config.font_scale, config.axis_color)
+	}
+
+	// Draw tick marks and labels
+	for i in 0 ..< 5 {
+		px := margin_l + (plot_w * i) / 4
+		val := min_x + (max_x - min_x) * f64(i) / 4.0
+		draw_line(&img, px, H - margin_b, px, H - margin_b + 5, config.axis_color)
+		draw_number(&img, px - 15, H - margin_b + 10, val, config.font_scale, config.axis_color)
+	}
+	for i in 0 ..< 5 {
+		py := H - margin_b - (plot_h * i) / 4
+		val := min_y + (max_y - min_y) * f64(i) / 4.0
+		draw_line(&img, margin_l - 5, py, margin_l, py, config.axis_color)
+		draw_number(&img, 5, py - 5, val, config.font_scale, config.axis_color)
+	}
+
+	// Plot the line
+	range_x := max_x - min_x
+	range_y := max_y - min_y
+	if range_x == 0 {range_x = 1}
+	if range_y == 0 {range_y = 1}
+
+	// Convert data points to pixel coordinates
+	prev_px, prev_py := -1, -1
+	for i in 0 ..< n {
+		px := margin_l + int((xs[i] - min_x) / range_x * f64(plot_w))
+		py := H - margin_b - int((ys[i] - min_y) / range_y * f64(plot_h))
+
+		if prev_px >= 0 {
+			draw_line_segment(
+				&img,
+				prev_px,
+				prev_py,
+				px,
+				py,
+				config.point_color,
+				config.line_style,
+			)
+		}
+		prev_px = px
+		prev_py = py
+	}
+
+	return image_save_png(&img, path)
+}
+bar_png :: proc(
+	labels: []string,
+	values: []f64,
+	path: string,
+	config: PlotConfig = DEFAULT_PLOT_CONFIG,
+	allocator: mem.Allocator = context.allocator,
+) -> bool {
+	if len(labels) != len(values) || len(labels) == 0 {return false}
+	n := len(labels)
+
+	// Find max value for scaling
+	max_val := 0.0
+	for v in values {
+		if v > max_val {max_val = v}
+		if v < 0 {
+			// Handle negative values
+			if -v > max_val {max_val = -v}
+		}
+	}
+	if max_val == 0 {max_val = 1}
+
+	W, H := config.width, config.height
+	img := image_new(W, H, allocator)
+	defer image_free(&img)
+	image_clear(&img, config.bg_color.r, config.bg_color.g, config.bg_color.b, config.bg_color.a)
+
+	margin_l, margin_r, margin_t, margin_b :=
+		config.margin_left, config.margin_right, config.margin_top, config.margin_bottom
+	plot_w := W - margin_l - margin_r
+	plot_h := H - margin_t - margin_b
+
+	// Draw axes
+	draw_line(&img, margin_l, margin_t, margin_l, H - margin_b, config.axis_color)
+	draw_line(&img, margin_l, H - margin_b, W - margin_r, H - margin_b, config.axis_color)
+
+	// Draw title
+	if config.title != "" {
+		title_x := (W - len(config.title) * 4 * config.font_scale) / 2
+		draw_text(&img, title_x, 10, config.title, config.font_scale, config.axis_color)
+	}
+
+	// Draw axis labels
+	if config.y_label != "" {
+		draw_text(&img, 10, margin_t, config.y_label, config.font_scale, config.axis_color)
+	}
+
+	// Draw y-axis tick marks and labels
+	for i in 0 ..< 5 {
+		py := H - margin_b - (plot_h * i) / 4
+		val := max_val * f64(i) / 4.0
+		draw_line(&img, margin_l - 5, py, margin_l, py, config.axis_color)
+		draw_number(&img, 5, py - 5, val, config.font_scale, config.axis_color)
+	}
+
+	// Calculate bar width and gap
+	bar_width := plot_w / n
+	bar_gap := bar_width / 5 // 20% gap between bars
+	actual_bar_width := bar_width - bar_gap
+
+	// Draw bars and labels
+	for i in 0 ..< n {
+		// Calculate bar height (proportional to value)
+		bar_height := int(values[i] / max_val * f64(plot_h))
+
+		// Calculate bar position
+		x := margin_l + i * bar_width + bar_gap / 2
+		y := H - margin_b - bar_height
+
+		// Draw the bar
+		draw_rect(&img, x, y, actual_bar_width, bar_height, config.bar_color)
+
+		// Draw label (centered under the bar)
+		label := labels[i]
+		label_width := len(label) * 4 * config.font_scale
+		label_x := x + (actual_bar_width - label_width) / 2
+		draw_text(&img, label_x, H - margin_b + 10, label, config.font_scale, config.axis_color)
 	}
 
 	return image_save_png(&img, path)
