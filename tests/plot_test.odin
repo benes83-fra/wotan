@@ -179,3 +179,78 @@ bar_chart_test :: proc(allocator: mem.Allocator) {
 	ok4 := plot.bar_png(labels4, values4, "bar_accuracy.png", config4, allocator)
 	fmt.printf("Model comparison: %v\n", ok4)
 }
+multi_line_test :: proc(allocator: mem.Allocator) {
+	fmt.println("\n=== Testing Multi-Line Plot ===")
+
+	epochs := 50
+	train_xs := make([]f64, epochs, allocator)
+	train_ys := make([]f64, epochs, allocator)
+	val_ys := make([]f64, epochs, allocator)
+	defer delete(train_xs, allocator)
+	defer delete(train_ys, allocator)
+	defer delete(val_ys, allocator)
+
+	// Generate synthetic training data
+	for i in 0 ..< epochs {
+		train_xs[i] = f64(i)
+		// Training loss goes down smoothly
+		train_ys[i] = 1.0 / f64(i + 1) + rand.float64_normal(0, 0.02)
+		// Validation loss goes down but starts increasing later (overfitting)
+		if i < 30 {
+			val_ys[i] = 1.0 / f64(i + 1) + 0.1 + rand.float64_normal(0, 0.03)
+		} else {
+			val_ys[i] = 0.03 + f64(i - 30) * 0.005 + rand.float64_normal(0, 0.03)
+		}
+	}
+
+	// Define the lines
+	lines := []plot.LineData {
+		{
+			xs    = train_xs,
+			ys    = train_ys,
+			color = plot.Color{0, 255, 100, 255}, // Green
+			style = .Solid,
+			label = "Train Loss",
+		},
+		{
+			xs    = train_xs,
+			ys    = val_ys,
+			color = plot.Color{255, 100, 0, 255}, // Orange
+			style = .Dashed,
+			label = "Val Loss",
+		},
+	}
+
+	config := plot.DEFAULT_PLOT_CONFIG
+	config.title = "Model Training Progress"
+	config.x_label = "Epoch"
+	config.y_label = "Loss"
+	config.bg_color = plot.Color{20, 20, 20, 255}
+	config.axis_color = plot.WHITE
+	config.show_grid = true
+	config.grid_color = plot.Color{60, 60, 60, 255}
+
+	ok := plot.multi_line_png(lines, "multi_line_test.png", config, allocator)
+	fmt.printf("Multi-line plot: %v\n", ok)
+}
+heatmap_test :: proc(allocator: mem.Allocator) {
+	fmt.println("\n=== Testing Heatmap (Confusion Matrix) ===")
+
+	// 3x3 Confusion Matrix data (Row = Actual, Col = Predicted)
+	// [15, 2, 1]  -> 15 Cats correctly identified, 2 misclassified as Dogs, 1 as Bird
+	// [3, 12, 2]  -> 3 Dogs misclassified as Cats, 12 correct, 2 as Bird
+	// [0, 1, 10]  -> 0 Birds as Cats, 1 as Dog, 10 correct
+	data := []f64{15, 2, 1, 3, 12, 2, 0, 1, 10}
+
+	labels := []string{"Cat", "Dog", "Bird"}
+
+	config := plot.DEFAULT_PLOT_CONFIG
+	config.title = "Confusion Matrix"
+	config.bg_color = plot.Color{20, 20, 20, 255}
+	config.axis_color = plot.WHITE
+	config.font_scale = 2 // Bigger font for numbers
+
+	// Note: We pass 'labels' for both rows and cols
+	ok := plot.heatmap_png(data, 3, 3, "confusion_matrix.png", labels, labels, config, allocator)
+	fmt.printf("Heatmap saved: %v\n", ok)
+}

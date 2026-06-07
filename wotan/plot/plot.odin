@@ -55,7 +55,13 @@ DEFAULT_PLOT_CONFIG :: PlotConfig {
 // 1. Software Rasterizer & Image Buffer
 // ============================================================================
 
-
+LineData :: struct {
+	xs:    []f64,
+	ys:    []f64,
+	color: Color,
+	style: LineStyle,
+	label: string, // Used for the legend
+}
 Color :: struct {
 	r, g, b, a: u8,
 }
@@ -448,6 +454,30 @@ image_save_png :: proc(img: ^Image, path: string) -> bool {
 	png_write_chunk(f, "IEND", nil)
 	return true
 }
+
+
+// Maps a value between 0.0 and 1.0 to a color
+get_heat_color :: proc(val: f64) -> Color {
+	val := val
+	if val < 0.0 {val = 0.0}
+	if val > 1.0 {val = 1.0}
+
+	// 0.0 to 0.5: Dark Blue to Green
+	if val < 0.5 {
+		t := val * 2.0
+		r := u8(0)
+		g := u8(t * 200)
+		b := u8(128 + t * 127) // 128 to 255
+		return Color{r, g, b, 255}
+	} else {
+		t := (val - 0.5) * 2.0
+		r := u8(t * 255)
+		g := u8(200 + t * 55) // 200 to 255
+		b := u8(255 - t * 255) // 255 to 0
+		return Color{r, g, b, 255}
+	}
+}
+
 
 // ============================================================================
 // 4. Public Plotting API
@@ -862,6 +892,279 @@ bar_png :: proc(
 		label_width := len(label) * 4 * config.font_scale
 		label_x := x + (actual_bar_width - label_width) / 2
 		draw_text(&img, label_x, H - margin_b + 10, label, config.font_scale, config.axis_color)
+	}
+
+	return image_save_png(&img, path)
+}
+multi_line_png :: proc(
+	lines: []LineData,
+	path: string,
+	config: PlotConfig = DEFAULT_PLOT_CONFIG,
+	allocator: mem.Allocator = context.allocator,
+) -> bool {
+	if len(lines) == 0 {return false}
+
+	// 1. Find global min/max across all lines
+	min_x, max_x := math.F64_MAX, -math.F64_MAX
+	min_y, max_y := math.F64_MAX, -math.F64_MAX
+
+	for line in lines {
+		if len(line.xs) != len(line.ys) {continue}
+		for i in 0 ..< len(line.xs) {
+			if line.xs[i] < min_x {min_x = line.xs[i]}
+			if line.xs[i] > max_x {max_x = line.xs[i]}
+			if line.ys[i] < min_y {min_y = line.ys[i]}
+			if line.ys[i] > max_y {max_y = line.ys[i]}
+		}
+	}
+
+	if min_x == max_x {max_x = min_x + 1}
+	if min_y == max_y {max_y = min_y + 1}
+
+	W, H := config.width, config.height
+	img := image_new(W, H, allocator)
+	defer image_free(&img)
+	image_clear(&img, config.bg_color.r, config.bg_color.g, config.bg_color.b, config.bg_color.a)
+
+	margin_l, margin_r, margin_t, margin_b :=
+		config.margin_left, config.margin_right, config.margin_top, config.margin_bottom
+	plot_w := W - margin_l - margin_r
+	plot_h := H - margin_t - margin_b
+
+	// 2. Draw Grid (if enabled)
+	if config.show_grid {
+		for i in 1 ..< 5 {
+			px := margin_l + (plot_w * i) / 4
+			draw_line(&img, px, margin_t, px, H - margin_b, config.grid_color)
+		}
+		for i in 1 ..< 5 {
+			py := H - margin_b - (plot_h * i) / 4
+			draw_line(&img, margin_l, py, W - margin_r, py, config.grid_color)
+		}
+	}
+
+	// 3. Draw Axes
+	draw_line(&img, margin_l, margin_t, margin_l, H - margin_b, config.axis_color)
+	draw_line(&img, margin_l, H - margin_b, W - margin_r, H - margin_b, config.axis_color)
+
+	// 4. Draw Title & Labels
+	if config.title != "" {
+		title_x := (W - len(config.title) * 4 * config.font_scale) / 2
+		draw_text(&img, title_x, 10, config.title, config.font_scale, config.axis_color)
+	}
+	if config.x_label != "" {
+		label_x := margin_l + (plot_w - len(config.x_label) * 4 * config.font_scale) / 2
+		draw_text(
+			&img,
+			label_x,
+			H - margin_b + 10,
+			config.x_label,
+			config.font_scale,
+			config.axis_color,
+		)
+	}
+	if config.y_label != "" {
+		draw_text(&img, 10, margin_t, config.y_label, config.font_scale, config.axis_color)
+	}
+
+	// 5. Draw Ticks
+	for i in 0 ..< 5 {
+		px := margin_l + (plot_w * i) / 4
+		val := min_x + (max_x - min_x) * f64(i) / 4.0
+		draw_line(&img, px, H - margin_b, px, H - margin_b + 5, config.axis_color)
+		draw_number(&img, px - 15, H - margin_b + 10, val, config.font_scale, config.axis_color)
+	}
+	for i in 0 ..< 5 {
+		py := H - margin_b - (plot_h * i) / 4
+		val := min_y + (max_y - min_y) * f64(i) / 4.0
+		draw_line(&img, margin_l - 5, py, margin_l, py, config.axis_color)
+		draw_number(&img, 5, py - 5, val, config.font_scale, config.axis_color)
+	}
+
+	// 6. Draw Lines
+	range_x := max_x - min_x
+	range_y := max_y - min_y
+
+	for line in lines {
+		if len(line.xs) == 0 {continue}
+
+		prev_px, prev_py := -1, -1
+		for i in 0 ..< len(line.xs) {
+			px := margin_l + int((line.xs[i] - min_x) / range_x * f64(plot_w))
+			py := H - margin_b - int((line.ys[i] - min_y) / range_y * f64(plot_h))
+
+			if prev_px >= 0 {
+				draw_line_segment(&img, prev_px, prev_py, px, py, line.color, line.style)
+			}
+			prev_px = px
+			prev_py = py
+		}
+	}
+
+	// 7. Draw Legend (if labels exist)
+	has_legend := false
+	max_label_len := 0
+	n_labels := 0
+	for line in lines {
+		if line.label != "" {
+			has_legend = true
+			n_labels += 1
+			if len(line.label) > max_label_len {max_label_len = len(line.label)}
+		}
+	}
+
+	if has_legend {
+		// Calculate legend box size
+		legend_w := max_label_len * 4 * config.font_scale + 40 // 40px for line sample + padding
+		legend_h := n_labels * (5 * config.font_scale + 5) + 10
+
+		// Position: Top Right inside plot area
+		lx := W - margin_r - legend_w - 10
+		ly := margin_t + 10
+
+		// Draw Legend Background (opaque to cover grid lines)
+		draw_rect(&img, lx, ly, legend_w, legend_h, config.bg_color)
+
+		// Draw Legend Border
+		draw_line(&img, lx, ly, lx + legend_w, ly, config.axis_color)
+		draw_line(&img, lx + legend_w, ly, lx + legend_w, ly + legend_h, config.axis_color)
+		draw_line(&img, lx + legend_w, ly + legend_h, lx, ly + legend_h, config.axis_color)
+		draw_line(&img, lx, ly + legend_h, lx, ly, config.axis_color)
+
+		// Draw Legend Items
+		current_y := ly + 5
+		for line in lines {
+			if line.label != "" {
+				// Draw small line sample
+				draw_line_segment(
+					&img,
+					lx + 5,
+					current_y + 2,
+					lx + 20,
+					current_y + 2,
+					line.color,
+					line.style,
+				)
+				// Draw label text
+				draw_text(
+					&img,
+					lx + 25,
+					current_y,
+					line.label,
+					config.font_scale,
+					config.axis_color,
+				)
+				current_y += 5 * config.font_scale + 5
+			}
+		}
+	}
+
+	return image_save_png(&img, path)
+}
+heatmap_png :: proc(
+	data: []f64,
+	rows: int,
+	cols: int,
+	path: string,
+	row_labels: []string, // Optional: pass nil if not needed
+	col_labels: []string, // Optional: pass nil if not needed
+	config: PlotConfig = DEFAULT_PLOT_CONFIG,
+	allocator: mem.Allocator = context.allocator,
+) -> bool {
+	if len(data) != rows * cols {return false}
+
+	// 1. Find min/max for normalization
+	min_val, max_val := math.F64_MAX, -math.F64_MAX
+	for v in data {
+		if v < min_val {min_val = v}
+		if v > max_val {max_val = v}
+	}
+	if min_val == max_val {max_val = min_val + 1}
+	val_range := max_val - min_val
+
+	W, H := config.width, config.height
+	img := image_new(W, H, allocator)
+	defer image_free(&img)
+	image_clear(&img, config.bg_color.r, config.bg_color.g, config.bg_color.b, config.bg_color.a)
+
+	// Adjust margins if we have labels
+	margin_l := config.margin_left
+	margin_b := config.margin_bottom
+	if len(row_labels) > 0 {margin_l += 40} 	// Extra space for row labels
+	if len(col_labels) > 0 {margin_b += 20} 	// Extra space for col labels
+
+	margin_r := config.margin_right
+	margin_t := config.margin_top
+
+	plot_w := W - margin_l - margin_r
+	plot_h := H - margin_t - margin_b
+
+	cell_w := plot_w / cols
+	cell_h := plot_h / rows
+
+	// 2. Draw Title
+	if config.title != "" {
+		title_x := (W - len(config.title) * 4 * config.font_scale) / 2
+		draw_text(&img, title_x, 10, config.title, config.font_scale, config.axis_color)
+	}
+
+	// 3. Draw Cells
+	for r in 0 ..< rows {
+		for c in 0 ..< cols {
+			idx := r * cols + c
+			val := data[idx]
+
+			// Normalize value to 0.0 - 1.0
+			norm_val := (val - min_val) / val_range
+			color := get_heat_color(norm_val)
+
+			// Draw the cell
+			x := margin_l + c * cell_w
+			y := margin_t + r * cell_h
+			draw_rect(&img, x, y, cell_w, cell_h, color)
+
+			// Draw text inside cell if it's large enough
+			if cell_w > 25 && cell_h > 15 {
+				// Format the number (simple integer or 1 decimal)
+				text := fmt.tprintf("%.1f", val)
+				// If it's a whole number, remove the .0 for cleaner look
+				if val == math.floor(val) {
+					text = fmt.tprintf("%d", int(val))
+				}
+
+				text_w := len(text) * 4 * config.font_scale
+				text_x := x + (cell_w - text_w) / 2
+				text_y := y + (cell_h - 5 * config.font_scale) / 2
+
+				// Use white or black text depending on background brightness?
+				// For simplicity, let's use white text for dark cells, black for light.
+				// A simple heuristic: if norm_val < 0.5, use white, else black.
+				text_color := WHITE
+				if norm_val > 0.6 {text_color = BLACK}
+
+				draw_text(&img, text_x, text_y, text, config.font_scale, text_color)
+			}
+		}
+	}
+
+	// 4. Draw Labels (if provided)
+	if len(row_labels) > 0 {
+		for r in 0 ..< rows {
+			label := row_labels[r]
+			label_w := len(label) * 4 * config.font_scale
+			// Center vertically in the cell
+			y := margin_t + r * cell_h + (cell_h - 5 * config.font_scale) / 2
+			draw_text(&img, margin_l - label_w - 5, y, label, config.font_scale, config.axis_color)
+		}
+	}
+
+	if len(col_labels) > 0 {
+		for c in 0 ..< cols {
+			label := col_labels[c]
+			label_w := len(label) * 4 * config.font_scale
+			x := margin_l + c * cell_w + (cell_w - label_w) / 2
+			draw_text(&img, x, H - margin_b + 5, label, config.font_scale, config.axis_color)
+		}
 	}
 
 	return image_save_png(&img, path)
