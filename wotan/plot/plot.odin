@@ -6,9 +6,44 @@ import "core:math"
 import "core:mem"
 import "core:os"
 
+
+PlotConfig :: struct {
+	width:         int,
+	height:        int,
+	margin_left:   int,
+	margin_right:  int,
+	margin_top:    int,
+	margin_bottom: int,
+	point_color:   Color, // Color for scatter points
+	bar_color:     Color, // Color for histogram bars
+	axis_color:    Color, // Color for axes and text
+	bg_color:      Color, // Background color
+	font_scale:    int,
+	title:         string,
+	x_label:       string,
+	y_label:       string,
+}
+
+DEFAULT_PLOT_CONFIG :: PlotConfig {
+	width         = 800,
+	height        = 600,
+	margin_left   = 60,
+	margin_right  = 20,
+	margin_top    = 20,
+	margin_bottom = 40,
+	point_color   = RED,
+	bar_color     = BLUE,
+	axis_color    = BLACK,
+	bg_color      = WHITE,
+	font_scale    = 2,
+	title         = "",
+	x_label       = "",
+	y_label       = "",
+}
 // ============================================================================
 // 1. Software Rasterizer & Image Buffer
 // ============================================================================
+
 
 Color :: struct {
 	r, g, b, a: u8,
@@ -90,7 +125,17 @@ draw_line :: proc(img: ^Image, x0, y0, x1, y1: int, c: Color) {
 		}
 	}
 }
-
+draw_text :: proc(img: ^Image, x, y: int, text: string, scale: int, c: Color) {
+	cx := x
+	for b in text {
+		if b == ' ' {
+			cx += 4 * scale // Space character width
+		} else {
+			draw_char(img, cx, y, u8(b), scale, c)
+			cx += 4 * scale
+		}
+	}
+}
 draw_rect :: proc(img: ^Image, x, y, w, h: int, c: Color) {
 	for i in 0 ..< w {
 		for j in 0 ..< h {
@@ -103,7 +148,8 @@ draw_rect :: proc(img: ^Image, x, y, w, h: int, c: Color) {
 // 2. Minimal 3x5 Bitmap Font (Zero Dependencies)
 // ============================================================================
 
-FONT_3X5 :: [10][5]u8 {
+FONT_3X5 :: [36][5]u8 {
+	// Digits 0-9
 	{0b111, 0b101, 0b101, 0b101, 0b111}, // 0
 	{0b010, 0b110, 0b010, 0b010, 0b111}, // 1
 	{0b111, 0b001, 0b111, 0b100, 0b111}, // 2
@@ -114,12 +160,49 @@ FONT_3X5 :: [10][5]u8 {
 	{0b111, 0b001, 0b010, 0b010, 0b010}, // 7
 	{0b111, 0b101, 0b111, 0b101, 0b111}, // 8
 	{0b111, 0b101, 0b111, 0b001, 0b111}, // 9
+	// Letters A-Z
+	{0b111, 0b101, 0b111, 0b101, 0b101}, // A
+	{0b110, 0b101, 0b110, 0b101, 0b110}, // B
+	{0b111, 0b100, 0b100, 0b100, 0b111}, // C
+	{0b110, 0b101, 0b101, 0b101, 0b110}, // D
+	{0b111, 0b100, 0b111, 0b100, 0b111}, // E
+	{0b111, 0b100, 0b111, 0b100, 0b100}, // F
+	{0b111, 0b100, 0b101, 0b101, 0b111}, // G
+	{0b101, 0b101, 0b111, 0b101, 0b101}, // H
+	{0b111, 0b010, 0b010, 0b010, 0b111}, // I
+	{0b011, 0b001, 0b001, 0b101, 0b110}, // J
+	{0b101, 0b110, 0b100, 0b110, 0b101}, // K
+	{0b100, 0b100, 0b100, 0b100, 0b111}, // L
+	{0b101, 0b111, 0b101, 0b101, 0b101}, // M
+	{0b101, 0b111, 0b101, 0b101, 0b101}, // N (simplified)
+	{0b111, 0b101, 0b101, 0b101, 0b111}, // O
+	{0b111, 0b101, 0b111, 0b100, 0b100}, // P
+	{0b111, 0b101, 0b101, 0b111, 0b101}, // Q
+	{0b111, 0b101, 0b111, 0b110, 0b101}, // R
+	{0b111, 0b100, 0b111, 0b001, 0b111}, // S
+	{0b010, 0b111, 0b010, 0b010, 0b010}, // T
+	{0b101, 0b101, 0b101, 0b101, 0b111}, // U
+	{0b101, 0b101, 0b101, 0b101, 0b010}, // V
+	{0b101, 0b101, 0b101, 0b111, 0b101}, // W
+	{0b101, 0b101, 0b010, 0b101, 0b101}, // X
+	{0b101, 0b101, 0b010, 0b010, 0b010}, // Y
+	{0b111, 0b001, 0b010, 0b100, 0b111}, // Z
 }
 
 draw_char :: proc(img: ^Image, x, y: int, ch: u8, scale: int, c: Color) {
-	if ch < '0' || ch > '9' {return}
+	idx: int = -1
+
+	if ch >= '0' && ch <= '9' {
+		idx = int(ch - '0')
+	} else if ch >= 'A' && ch <= 'Z' {
+		idx = int(ch - 'A' + 10)
+	} else if ch >= 'a' && ch <= 'z' {
+		idx = int(ch - 'a' + 10)
+	}
+
+	if idx < 0 || idx >= len(FONT_3X5) {return}
 	font := FONT_3X5
-	glyph := font[ch - '0']
+	glyph := font[idx]
 	for row in 0 ..< 5 {
 		for col in 0 ..< 3 {
 			if (glyph[row] & (1 << u32(2 - col))) != 0 {
@@ -132,7 +215,6 @@ draw_char :: proc(img: ^Image, x, y: int, ch: u8, scale: int, c: Color) {
 		}
 	}
 }
-
 draw_number :: proc(img: ^Image, x, y: int, val: f64, scale: int, c: Color) {
 	str := fmt.tprintf("%.2f", val)
 	cx := x
@@ -320,6 +402,7 @@ scatter_png :: proc(
 	x_col: string,
 	y_col: string,
 	path: string,
+	config: PlotConfig = DEFAULT_PLOT_CONFIG,
 	allocator: mem.Allocator = context.allocator,
 ) -> bool {
 	col_x := w.column(df, x_col)
@@ -346,29 +429,52 @@ scatter_png :: proc(
 		if vy > max_y {max_y = vy}
 	}
 
-	W, H := 800, 600
+	W, H := config.width, config.height
 	img := image_new(W, H, allocator)
 	defer image_free(&img)
-	image_clear(&img, 255, 255, 255, 255)
+	image_clear(&img, config.bg_color.r, config.bg_color.g, config.bg_color.b, config.bg_color.a)
 
-	margin_l, margin_r, margin_t, margin_b := 60, 20, 20, 40
+	margin_l, margin_r, margin_t, margin_b :=
+		config.margin_left, config.margin_right, config.margin_top, config.margin_bottom
 	plot_w := W - margin_l - margin_r
 	plot_h := H - margin_t - margin_b
 
-	draw_line(&img, margin_l, margin_t, margin_l, H - margin_b, BLACK)
-	draw_line(&img, margin_l, H - margin_b, W - margin_r, H - margin_b, BLACK)
+	draw_line(&img, margin_l, margin_t, margin_l, H - margin_b, config.axis_color)
+	draw_line(&img, margin_l, H - margin_b, W - margin_r, H - margin_b, config.axis_color)
+	// Draw title
+	if config.title != "" {
+		title_x := (W - len(config.title) * 4 * config.font_scale) / 2
+		draw_text(&img, title_x, 10, config.title, config.font_scale, config.axis_color)
+	}
 
+	// Draw axis labels
+	if config.x_label != "" {
+		label_x := margin_l + (plot_w - len(config.x_label) * 4 * config.font_scale) / 2
+		draw_text(
+			&img,
+			label_x,
+			H - margin_b + 10,
+			config.x_label,
+			config.font_scale,
+			config.axis_color,
+		)
+	}
+
+	if config.y_label != "" {
+		// For y-label, we'll just draw it horizontally at the top left for now
+		draw_text(&img, 10, margin_t, config.y_label, config.font_scale, config.axis_color)
+	}
 	for i in 0 ..< 5 {
 		px := margin_l + (plot_w * i) / 4
 		val := min_x + (max_x - min_x) * f64(i) / 4.0
-		draw_line(&img, px, H - margin_b, px, H - margin_b + 5, BLACK)
-		draw_number(&img, px - 15, H - margin_b + 10, val, 2, BLACK)
+		draw_line(&img, px, H - margin_b, px, H - margin_b + 5, config.axis_color)
+		draw_number(&img, px - 15, H - margin_b + 10, val, config.font_scale, config.axis_color)
 	}
 	for i in 0 ..< 5 {
 		py := H - margin_b - (plot_h * i) / 4
 		val := min_y + (max_y - min_y) * f64(i) / 4.0
-		draw_line(&img, margin_l - 5, py, margin_l, py, BLACK)
-		draw_number(&img, 5, py - 5, val, 2, BLACK)
+		draw_line(&img, margin_l - 5, py, margin_l, py, config.axis_color)
+		draw_number(&img, 5, py - 5, val, config.font_scale, config.axis_color)
 	}
 
 	range_x := max_x - min_x
@@ -380,8 +486,8 @@ scatter_png :: proc(
 		px := margin_l + int((xs[i] - min_x) / range_x * f64(plot_w))
 		py := H - margin_b - int((ys[i] - min_y) / range_y * f64(plot_h))
 
-		draw_line(&img, px - 2, py, px + 2, py, RED)
-		draw_line(&img, px, py - 2, px, py + 2, RED)
+		draw_line(&img, px - 2, py, px + 2, py, config.point_color)
+		draw_line(&img, px, py - 2, px, py + 2, config.point_color)
 	}
 
 	return image_save_png(&img, path)
@@ -392,6 +498,7 @@ histogram_png :: proc(
 	col_name: string,
 	path: string,
 	bins: int = 20,
+	config: PlotConfig = DEFAULT_PLOT_CONFIG, // <--- ADD THIS LINE
 	allocator: mem.Allocator = context.allocator,
 ) -> bool {
 	col := w.column(df, col_name)
@@ -427,24 +534,46 @@ histogram_png :: proc(
 	}
 	if max_count == 0 {max_count = 1}
 
-	W, H := 800, 600
+	W, H := config.width, config.height
 	img := image_new(W, H, allocator)
 	defer image_free(&img)
-	image_clear(&img, 255, 255, 255, 255)
+	image_clear(&img, config.bg_color.r, config.bg_color.g, config.bg_color.b, config.bg_color.a)
 
-	margin_l, margin_r, margin_t, margin_b := 60, 20, 20, 40
+	margin_l, margin_r, margin_t, margin_b :=
+		config.margin_left, config.margin_right, config.margin_top, config.margin_bottom
 	plot_w := W - margin_l - margin_r
 	plot_h := H - margin_t - margin_b
 
-	draw_line(&img, margin_l, margin_t, margin_l, H - margin_b, BLACK)
-	draw_line(&img, margin_l, H - margin_b, W - margin_r, H - margin_b, BLACK)
+	draw_line(&img, margin_l, margin_t, margin_l, H - margin_b, config.axis_color)
+	draw_line(&img, margin_l, H - margin_b, W - margin_r, H - margin_b, config.axis_color)
+	// Draw title
+	if config.title != "" {
+		title_x := (W - len(config.title) * 4 * config.font_scale) / 2
+		draw_text(&img, title_x, 10, config.title, config.font_scale, config.axis_color)
+	}
 
+	// Draw axis labels
+	if config.x_label != "" {
+		label_x := margin_l + (plot_w - len(config.x_label) * 4 * config.font_scale) / 2
+		draw_text(
+			&img,
+			label_x,
+			H - margin_b + 10,
+			config.x_label,
+			config.font_scale,
+			config.axis_color,
+		)
+	}
+
+	if config.y_label != "" {
+		draw_text(&img, 10, margin_t, config.y_label, config.font_scale, config.axis_color)
+	}
 	bar_w := plot_w / bins
 	for i in 0 ..< bins {
 		h := int(f64(counts[i]) / f64(max_count) * f64(plot_h))
 		x := margin_l + i * bar_w
 		y := H - margin_b - h
-		draw_rect(&img, x, y, bar_w - 1, h, BLUE)
+		draw_rect(&img, x, y, bar_w - 1, h, config.point_color)
 	}
 
 	return image_save_png(&img, path)
