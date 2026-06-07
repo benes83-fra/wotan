@@ -28,6 +28,8 @@ PlotConfig :: struct {
 	x_label:       string,
 	y_label:       string,
 	line_style:    LineStyle, // Line style for line plots
+	show_grid:     bool, // Show grid lines
+	grid_color:    Color, // Color for grid lines
 }
 
 DEFAULT_PLOT_CONFIG :: PlotConfig {
@@ -46,6 +48,8 @@ DEFAULT_PLOT_CONFIG :: PlotConfig {
 	x_label       = "",
 	y_label       = "",
 	line_style    = .Solid,
+	show_grid     = false,
+	grid_color    = Color{128, 128, 128, 255}, // Gray
 }
 // ============================================================================
 // 1. Software Rasterizer & Image Buffer
@@ -493,6 +497,19 @@ scatter_png :: proc(
 
 	draw_line(&img, margin_l, margin_t, margin_l, H - margin_b, config.axis_color)
 	draw_line(&img, margin_l, H - margin_b, W - margin_r, H - margin_b, config.axis_color)
+	// Draw grid lines if enabled
+	if config.show_grid {
+		// Vertical grid lines
+		for i in 1 ..< 5 {
+			px := margin_l + (plot_w * i) / 4
+			draw_line(&img, px, margin_t, px, H - margin_b, config.grid_color)
+		}
+		// Horizontal grid lines
+		for i in 1 ..< 5 {
+			py := H - margin_b - (plot_h * i) / 4
+			draw_line(&img, margin_l, py, W - margin_r, py, config.grid_color)
+		}
+	}
 	// Draw title
 	if config.title != "" {
 		title_x := (W - len(config.title) * 4 * config.font_scale) / 2
@@ -598,6 +615,19 @@ histogram_png :: proc(
 
 	draw_line(&img, margin_l, margin_t, margin_l, H - margin_b, config.axis_color)
 	draw_line(&img, margin_l, H - margin_b, W - margin_r, H - margin_b, config.axis_color)
+	// Draw grid lines if enabled
+	if config.show_grid {
+		// Vertical grid lines
+		for i in 1 ..< 5 {
+			px := margin_l + (plot_w * i) / 4
+			draw_line(&img, px, margin_t, px, H - margin_b, config.grid_color)
+		}
+		// Horizontal grid lines
+		for i in 1 ..< 5 {
+			py := H - margin_b - (plot_h * i) / 4
+			draw_line(&img, margin_l, py, W - margin_r, py, config.grid_color)
+		}
+	}
 	// Draw title
 	if config.title != "" {
 		title_x := (W - len(config.title) * 4 * config.font_scale) / 2
@@ -663,6 +693,19 @@ line_png :: proc(
 	// Draw axes
 	draw_line(&img, margin_l, margin_t, margin_l, H - margin_b, config.axis_color)
 	draw_line(&img, margin_l, H - margin_b, W - margin_r, H - margin_b, config.axis_color)
+	// Draw grid lines if enabled
+	if config.show_grid {
+		// Vertical grid lines
+		for i in 1 ..< 5 {
+			px := margin_l + (plot_w * i) / 4
+			draw_line(&img, px, margin_t, px, H - margin_b, config.grid_color)
+		}
+		// Horizontal grid lines
+		for i in 1 ..< 5 {
+			py := H - margin_b - (plot_h * i) / 4
+			draw_line(&img, margin_l, py, W - margin_r, py, config.grid_color)
+		}
+	}
 
 	// Draw title
 	if config.title != "" {
@@ -764,6 +807,19 @@ bar_png :: proc(
 	// Draw axes
 	draw_line(&img, margin_l, margin_t, margin_l, H - margin_b, config.axis_color)
 	draw_line(&img, margin_l, H - margin_b, W - margin_r, H - margin_b, config.axis_color)
+	// Draw grid lines if enabled
+	if config.show_grid {
+		// Vertical grid lines
+		for i in 1 ..< 5 {
+			px := margin_l + (plot_w * i) / 4
+			draw_line(&img, px, margin_t, px, H - margin_b, config.grid_color)
+		}
+		// Horizontal grid lines
+		for i in 1 ..< 5 {
+			py := H - margin_b - (plot_h * i) / 4
+			draw_line(&img, margin_l, py, W - margin_r, py, config.grid_color)
+		}
+	}
 
 	// Draw title
 	if config.title != "" {

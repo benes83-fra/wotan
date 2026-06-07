@@ -22,6 +22,7 @@ plot_test :: proc(allocator: mem.Allocator) {
 	my_config.title = "Sine Wave with Noise"
 	my_config.x_label = "Time"
 	my_config.y_label = "Amplitude"
+	my_config.show_grid = true
 
 	n := 100
 	x_col := w.column_new("x", .Float, n)
