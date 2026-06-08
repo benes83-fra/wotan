@@ -199,3 +199,85 @@ autograd_sum_test :: proc(allocator: mem.Allocator) {
 	autograd.tensor_free(c)
 	autograd.tensor_free(loss)
 }
+autograd_relu_test :: proc(allocator: mem.Allocator) {
+	fmt.println("\n=== Testing Autograd ReLU ===")
+
+	// A = [[-2, 3],
+	//      [-1, 4]]
+	data_a := l.matrix_new(f64, 2, 2, allocator)
+	data_a.data[0] = -2; data_a.data[1] = 3
+	data_a.data[2] = -1; data_a.data[3] = 4
+	a := autograd.tensor_new(data_a, true, allocator)
+
+	// B = ReLU(A) -> [[0, 3], [0, 4]]
+	b := autograd.tensor_relu(a)
+
+	// L = sum(B) -> 0 + 3 + 0 + 4 = 7
+	loss := autograd.tensor_sum(b)
+
+	fmt.printf("Loss value (Sum of ReLU): %.1f\n", loss.data.data[0])
+
+	// Trigger backward pass
+	autograd.tensor_backward(loss)
+
+	// Gradient of A should be 0 where A was negative, and 1 where A was positive.
+	fmt.println("Gradient of A (Should be 0, 1, 0, 1):")
+	for i in 0 ..< 2 {
+		for j in 0 ..< 2 {
+			fmt.printf("%.1f ", a.grad.data[i * 2 + j])
+		}
+		fmt.println("")
+	}
+
+	// Cleanup
+	autograd.tensor_free(a)
+	autograd.tensor_free(b)
+	autograd.tensor_free(loss)
+}
+
+autograd_bias_test :: proc(allocator: mem.Allocator) {
+	fmt.println("\n=== Testing Autograd Bias Addition ===")
+
+	// A = [[1, 2],
+	//      [3, 4]] (2x2)
+	data_a := l.matrix_new(f64, 2, 2, allocator)
+	data_a.data[0] = 1; data_a.data[1] = 2
+	data_a.data[2] = 3; data_a.data[3] = 4
+	a := autograd.tensor_new(data_a, true, allocator)
+
+	// bias = [[10, 20]] (1x2)
+	data_bias := l.matrix_new(f64, 1, 2, allocator)
+	data_bias.data[0] = 10; data_bias.data[1] = 20
+	bias := autograd.tensor_new(data_bias, true, allocator)
+
+	// C = A + bias -> [[11, 22], [13, 24]]
+	c := autograd.tensor_add_bias(a, bias)
+
+	// L = sum(C) -> 11 + 22 + 13 + 24 = 70
+	loss := autograd.tensor_sum(c)
+
+	fmt.printf("Loss value (Sum of A + bias): %.1f\n", loss.data.data[0])
+
+	// Trigger backward pass
+	autograd.tensor_backward(loss)
+
+	// Gradient of A should be all 1s (since dL/dC is all 1s)
+	fmt.println("Gradient of A (Should be all 1s):")
+	for i in 0 ..< 2 {
+		for j in 0 ..< 2 {
+			fmt.printf("%.1f ", a.grad.data[i * 2 + j])
+		}
+		fmt.println("")
+	}
+
+	// Gradient of bias should be the sum of columns of dL/dC.
+	// Since dL/dC is all 1s, and there are 2 rows, the sum is [2, 2].
+	fmt.println("Gradient of bias (Should be 2, 2):")
+	fmt.printf("%.1f %.1f\n", bias.grad.data[0], bias.grad.data[1])
+
+	// Cleanup
+	autograd.tensor_free(a)
+	autograd.tensor_free(bias)
+	autograd.tensor_free(c)
+	autograd.tensor_free(loss)
+}

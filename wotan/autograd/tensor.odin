@@ -15,8 +15,10 @@ Op :: enum {
 	None,
 	Add,
 	Mul,
-	MatMul, // ✅ ADD THIS: Matrix multiplication
+	MatMul,
 	Sum,
+	Relu,
+	AddBias, // ✅ ADD THIS: Adds a 1xD bias to an NxD matrix
 }
 Tensor :: struct {
 	data:          l.Matrix(f64), // The actual values
@@ -72,11 +74,8 @@ tensor_zero_grad :: proc(t: ^Tensor) {
 
 // tensor_sum reduces a tensor to a single scalar value (1x1 matrix)
 tensor_sum :: proc(a: ^Tensor) -> ^Tensor {
-	// 1. Forward pass: sum all elements
-	total := 0.0
-	for v in a.data.data {
-		total += v
-	}
+	// ✅ SIMD Optimization: Fast reduction sum
+	total := l.sum_simd(a.data.data)
 
 	// Create a 1x1 matrix for the scalar output
 	out_data := l.matrix_new(f64, 1, 1, a.allocator)
@@ -121,6 +120,32 @@ tensor_add :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
 	return out
 }
 
+// tensor_relu applies the Rectified Linear Unit: max(0, x)
+tensor_relu :: proc(a: ^Tensor) -> ^Tensor {
+	// 1. Forward pass
+	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
+
+	for i in 0 ..< len(a.data.data) {
+		v := a.data.data[i]
+		if v > 0.0 {
+			out_data.data[i] = v
+		} else {
+			out_data.data[i] = 0.0
+		}
+	}
+
+	// 2. Create output tensor
+	out := tensor_new(out_data, a.requires_grad, a.allocator)
+
+	// 3. Record graph
+	if out.requires_grad {
+		out.op = .Relu
+		append(&out.inputs, a)
+	}
+
+	return out
+}
+
 
 // tensor_mul creates a new tensor C = A * B (element-wise)
 tensor_mul :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
@@ -144,7 +169,42 @@ tensor_mul :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
 
 	return out
 }
+// tensor_add_bias adds a 1xD bias vector to every row of an NxD matrix
+// a: [N, D], bias: [1, D] -> out: [N, D]
+tensor_add_bias :: proc(a: ^Tensor, bias: ^Tensor) -> ^Tensor {
+	if a.data.cols != bias.data.cols {
+		panic("tensor_add_bias: column mismatch")
+	}
+	if bias.data.rows != 1 {
+		panic("tensor_add_bias: bias must be a 1xD row vector")
+	}
 
+	N := a.data.rows
+	D := a.data.cols
+
+	// 1. Forward pass
+	out_data := l.matrix_new(f64, N, D, a.allocator)
+
+	for i in 0 ..< N {
+		row_out := out_data.data[i * D:(i + 1) * D]
+		row_a := a.data.data[i * D:(i + 1) * D]
+
+		// ✅ SIMD Optimization: out_row = a_row + bias
+		l.vec_add_simd(row_a, bias.data.data, row_out)
+	}
+
+	// 2. Create output tensor
+	out := tensor_new(out_data, a.requires_grad || bias.requires_grad, a.allocator)
+
+	// 3. Record graph
+	if out.requires_grad {
+		out.op = .AddBias
+		append(&out.inputs, a)
+		append(&out.inputs, bias)
+	}
+
+	return out
+}
 // ============================================================================
 // 4. The Backward Engine (Chain Rule)
 // ============================================================================
@@ -188,30 +248,23 @@ tensor_backward :: proc(root: ^Tensor) {
 
 		switch node.op {
 		case .Add:
-			// If C = A + B, then dC/dA = 1 and dC/dB = 1.
 			for input in node.inputs {
 				if input.requires_grad {
-					for j in 0 ..< len(input.grad.data) {
-						input.grad.data[j] += node.grad.data[j]
-					}
+					// ✅ SIMD Optimization: y += 1.0 * x
+					l.axpy_simd(1.0, node.grad.data, input.grad.data)
 				}
 			}
 		case .Mul:
-			// C = A * B
-			// dL/dA += dL/dC * B
-			// dL/dB += dL/dC * A
 			a_in := node.inputs[0]
 			b_in := node.inputs[1]
 
 			if a_in.requires_grad {
-				for j in 0 ..< len(a_in.grad.data) {
-					a_in.grad.data[j] += node.grad.data[j] * b_in.data.data[j]
-				}
+				// ✅ SIMD Optimization: grad_a += grad_c * b
+				l.vec_fma_inplace_simd(node.grad.data, b_in.data.data, a_in.grad.data)
 			}
 			if b_in.requires_grad {
-				for j in 0 ..< len(b_in.grad.data) {
-					b_in.grad.data[j] += node.grad.data[j] * a_in.data.data[j]
-				}
+				// ✅ SIMD Optimization: grad_b += grad_c * a
+				l.vec_fma_inplace_simd(node.grad.data, a_in.data.data, b_in.grad.data)
 			}
 		case .MatMul:
 			// C = A @ B
@@ -250,6 +303,39 @@ tensor_backward :: proc(root: ^Tensor) {
 				scalar_grad := node.grad.data[0]
 				for j in 0 ..< len(a_in.grad.data) {
 					a_in.grad.data[j] += scalar_grad
+				}
+			}
+		case .Relu:
+			// y = max(0, x)
+			// dy/dx = 1 if x > 0 else 0
+			a_in := node.inputs[0]
+			if a_in.requires_grad {
+				for j in 0 ..< len(a_in.grad.data) {
+					// Only pass the gradient through if the original input was positive
+					if a_in.data.data[j] > 0.0 {
+						a_in.grad.data[j] += node.grad.data[j]
+					}
+					// If it was <= 0, the gradient is 0, so we add nothing.
+				}
+			}
+		case .AddBias:
+			// C = A + bias (broadcasted)
+			a_in := node.inputs[0]
+			bias_in := node.inputs[1]
+			N := node.grad.rows
+			D := node.grad.cols
+
+			// dL/dA = dL/dC (just pass it through)
+			if a_in.requires_grad {
+				l.vec_add_simd(a_in.grad.data, node.grad.data, a_in.grad.data)
+			}
+
+			// dL/dbias = sum(dL/dC, axis=0)
+			if bias_in.requires_grad {
+				for i in 0 ..< N {
+					row_grad := node.grad.data[i * D:(i + 1) * D]
+					// ✅ SIMD Optimization: bias_grad += 1.0 * row_grad
+					l.axpy_simd(1.0, row_grad, bias_in.grad.data)
 				}
 			}
 		case .None:

@@ -913,3 +913,133 @@ vec_mul_simd :: proc(a, b, out: []f64) {
 		out[i] = a[i] * b[i]
 	}
 }
+// ============================================================================
+// SIMD Fused Multiply-Add (In-Place): c += a * b (element-wise, f64)
+// This is the core operation of Neural Network backward passes!
+// ============================================================================
+vec_fma_inplace_simd :: proc(a, b, c: []f64) {
+	n := len(a)
+	if n != len(b) || n != len(c) do panic("vec_fma_inplace_simd: length mismatch")
+
+	if !simd.HAS_HARDWARE_SIMD {
+		for i := 0; i < n; i += 1 {c[i] += a[i] * b[i]}
+		return
+	}
+
+	// AVX: f64x8
+	if intrinsics.has_target_feature("avx") {
+		i := 0
+		for ; i + 8 <= n; i += 8 {
+			va := simd.f64x8 {
+				a[i],
+				a[i + 1],
+				a[i + 2],
+				a[i + 3],
+				a[i + 4],
+				a[i + 5],
+				a[i + 6],
+				a[i + 7],
+			}
+			vb := simd.f64x8 {
+				b[i],
+				b[i + 1],
+				b[i + 2],
+				b[i + 3],
+				b[i + 4],
+				b[i + 5],
+				b[i + 6],
+				b[i + 7],
+			}
+			vc := simd.f64x8 {
+				c[i],
+				c[i + 1],
+				c[i + 2],
+				c[i + 3],
+				c[i + 4],
+				c[i + 5],
+				c[i + 6],
+				c[i + 7],
+			}
+
+			// FMA: c = a * b + c
+			vc = intrinsics.simd_add(vc, intrinsics.simd_mul(va, vb))
+
+			out_arr := transmute([8]f64)vc
+			for j := 0; j < 8; j += 1 {c[i + j] = out_arr[j]}
+		}
+		for ; i < n; i += 1 {c[i] += a[i] * b[i]}
+		return
+	}
+
+	// SSE2: f64x4
+	if intrinsics.has_target_feature("sse2") {
+		i := 0
+		for ; i + 4 <= n; i += 4 {
+			va := simd.f64x4{a[i], a[i + 1], a[i + 2], a[i + 3]}
+			vb := simd.f64x4{b[i], b[i + 1], b[i + 2], b[i + 3]}
+			vc := simd.f64x4{c[i], c[i + 1], c[i + 2], c[i + 3]}
+
+			vc = intrinsics.simd_add(vc, intrinsics.simd_mul(va, vb))
+
+			out_arr := transmute([4]f64)vc
+			for j := 0; j < 4; j += 1 {c[i + j] = out_arr[j]}
+		}
+		for ; i < n; i += 1 {c[i] += a[i] * b[i]}
+		return
+	}
+
+	// Fallback
+	for i := 0; i < n; i += 1 {c[i] += a[i] * b[i]}
+}
+
+// ============================================================================
+// SIMD Vector Sum: returns sum of all elements in a (f64)
+// ============================================================================
+sum_simd :: proc(a: []f64) -> f64 {
+	n := len(a)
+	if !simd.HAS_HARDWARE_SIMD {
+		sum := 0.0
+		for v in a {sum += v}
+		return sum
+	}
+
+	// AVX: f64x8
+	if intrinsics.has_target_feature("avx") {
+		acc8: simd.f64x8 = simd.f64x8{0, 0, 0, 0, 0, 0, 0, 0}
+		i := 0
+		for ; i + 8 <= n; i += 8 {
+			va := simd.f64x8 {
+				a[i],
+				a[i + 1],
+				a[i + 2],
+				a[i + 3],
+				a[i + 4],
+				a[i + 5],
+				a[i + 6],
+				a[i + 7],
+			}
+			acc8 = intrinsics.simd_add(acc8, va)
+		}
+		sum := intrinsics.simd_reduce_add_pairs(acc8)
+		for ; i < n; i += 1 {sum += a[i]}
+		return sum
+	}
+
+	// SSE2: f64x4
+	if intrinsics.has_target_feature("sse2") {
+		acc4: simd.f64x4 = simd.f64x4{0, 0, 0, 0}
+		i := 0
+		for ; i + 4 <= n; i += 4 {
+			va := simd.f64x4{a[i], a[i + 1], a[i + 2], a[i + 3]}
+			acc4 = intrinsics.simd_add(acc4, va)
+		}
+		sum := intrinsics.simd_reduce_add_pairs(acc4)
+		for ; i < n; i += 1 {sum += a[i]}
+		return sum
+	}
+
+	// Fallback
+	sum := 0.0
+	for v in a {sum += v}
+	return sum
+}

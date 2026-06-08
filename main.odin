@@ -435,6 +435,8 @@ main :: proc() {
 	test.autograd_mul_test(context.temp_allocator)
 	test.autograd_matmul_test(context.temp_allocator)
 	test.autograd_sum_test(context.temp_allocator)
+	test.autograd_relu_test(context.temp_allocator)
+	test.autograd_bias_test(context.temp_allocator)
 	fmt.println("Demo End")
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
