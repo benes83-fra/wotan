@@ -1,5 +1,5 @@
 
-package autograd
+package tensor
 
 import l "../linalg"
 import "core:fmt"
