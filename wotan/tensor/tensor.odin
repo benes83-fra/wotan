@@ -377,3 +377,37 @@ tensor_matmul :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
 
 	return out
 }
+
+// _tensor_free_graph_impl is the recursive helper
+_tensor_free_graph_impl :: proc(node: ^Tensor, visited: ^map[^Tensor]bool) {
+	if node == nil {return}
+	if visited[node] {return} 	// Prevent double-free in DAGs
+	visited[node] = true
+
+	// ✅ CRITICAL: Do NOT free leaf nodes (op == .None).
+	// Leaf nodes are user-managed (e.g., input data, weights).
+	if node.op == .None {
+		return
+	}
+
+	// Recursively free inputs first
+	for input in node.inputs {
+		_tensor_free_graph_impl(input, visited)
+	}
+
+	// Free this intermediate node
+	if node.data.data != nil {l.matrix_free(&node.data)}
+	if node.grad.data != nil {l.matrix_free(&node.grad)}
+	delete(node.inputs)
+	free(node, node.allocator)
+}
+
+// tensor_free_graph automatically cleans up all intermediate tensors
+// in the computation graph, starting from 'root'.
+// It protects leaf nodes (inputs/weights) from being freed.
+tensor_free_graph :: proc(root: ^Tensor) {
+	if root == nil {return}
+	visited := make(map[^Tensor]bool)
+	defer delete(visited)
+	_tensor_free_graph_impl(root, &visited)
+}

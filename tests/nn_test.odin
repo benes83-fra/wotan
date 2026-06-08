@@ -20,9 +20,10 @@ nn_test :: proc(allocator: mem.Allocator) {
 	x_data.data[2] = 3.0; x_data.data[3] = 4.0
 	x := t.tensor_new(x_data, true, allocator)
 
-	// Forward pass
-	matmul_out := t.tensor_matmul(x, layer.weights)
-	out := t.tensor_add_bias(matmul_out, layer.bias)
+	defer t.tensor_free(x) // User manages input lifecycle
+
+	// 3. Forward Pass (Clean API!)
+	out := nn.linear_forward(&layer, x)
 	fmt.printf("Input shape:  %dx%d\n", x.data.rows, x.data.cols)
 	fmt.printf("Output shape: %dx%d\n", out.data.rows, out.data.cols)
 
@@ -35,8 +36,5 @@ nn_test :: proc(allocator: mem.Allocator) {
 	}
 
 	// Cleanup
-	t.tensor_free(matmul_out)
-	t.tensor_free(x)
-	t.tensor_free(out)
-	nn.linear_layer_free(&layer)
+	t.tensor_free_graph(out)
 }
