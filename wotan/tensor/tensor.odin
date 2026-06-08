@@ -18,7 +18,8 @@ Op :: enum {
 	MatMul,
 	Sum,
 	Relu,
-	AddBias, // ✅ ADD THIS: Adds a 1xD bias to an NxD matrix
+	AddBias,
+	MSELoss, // ✅ ADD THIS: Fused Mean Squared Error
 }
 Tensor :: struct {
 	data:          l.Matrix(f64), // The actual values
@@ -205,6 +206,39 @@ tensor_add_bias :: proc(a: ^Tensor, bias: ^Tensor) -> ^Tensor {
 
 	return out
 }
+
+
+// tensor_mse_loss calculates Mean Squared Error: mean((pred - target)^2)
+// This is a Fused SIMD operation that avoids creating intermediate Sub/Mul tensors!
+tensor_mse_loss :: proc(pred: ^Tensor, target: ^Tensor) -> ^Tensor {
+	if pred.data.rows != target.data.rows || pred.data.cols != target.data.cols {
+		panic("tensor_mse_loss: shape mismatch")
+	}
+
+	n := f64(len(pred.data.data))
+
+	// 1. Forward pass: Calculate the scalar loss using SIMD
+	diff := make([]f64, len(pred.data.data), context.temp_allocator)
+	l.vec_sub_simd(pred.data.data, target.data.data, diff)
+
+	// sum(diff^2) is mathematically identical to the dot product of diff with itself!
+	squared_sum := l.dot_simd(diff, diff)
+	defer delete(diff, context.temp_allocator)
+
+	loss_val := squared_sum / n
+
+	// Create 1x1 output tensor
+	out_data := l.matrix_new(f64, 1, 1, pred.allocator)
+	out_data.data[0] = loss_val
+
+	out := tensor_new(out_data, pred.requires_grad, pred.allocator)
+	if out.requires_grad {
+		out.op = .MSELoss
+		append(&out.inputs, pred)
+		append(&out.inputs, target) // Keep target for the backward pass
+	}
+	return out
+}
 // ============================================================================
 // 4. The Backward Engine (Chain Rule)
 // ============================================================================
@@ -338,6 +372,26 @@ tensor_backward :: proc(root: ^Tensor) {
 					l.axpy_simd(1.0, row_grad, bias_in.grad.data)
 				}
 			}
+		case .MSELoss:
+			// L = mean((pred - target)^2)
+			// dL/dpred = 2 * (pred - target) / N
+			pred_in := node.inputs[0]
+			target_in := node.inputs[1]
+
+			if pred_in.requires_grad {
+				n := f64(len(pred_in.data.data))
+				scalar_grad := node.grad.data[0] // Usually 1.0
+				scale := 2.0 * scalar_grad / n
+
+				// Re-calculate (pred - target) using temp allocator
+				diff := make([]f64, len(pred_in.data.data), context.temp_allocator)
+				l.vec_sub_simd(pred_in.data.data, target_in.data.data, diff)
+
+				// ✅ SIMD Optimization: grad_pred += scale * diff
+				l.axpy_simd(scale, diff, pred_in.grad.data)
+				delete(diff, context.temp_allocator)
+			}
+		// We don't calculate gradients for the target data.
 		case .None:
 		// Leaf node, nothing to do
 		}
