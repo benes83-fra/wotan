@@ -431,6 +431,7 @@ main :: proc() {
 	test.bar_chart_test(context.temp_allocator)
 	test.multi_line_test(context.temp_allocator)
 	test.heatmap_test(context.temp_allocator)
+	test.autograd_test(context.temp_allocator)
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
 	w.destroy_dataframe(&right2)
