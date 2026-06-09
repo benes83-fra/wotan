@@ -22,7 +22,9 @@ Op :: enum {
 	AddBias,
 	MSELoss,
 	CrossEntropy,
-	Dropout, // ✅ ADD THIS
+	Dropout,
+	Conv2d, // ✅ ADD THIS
+	Flatten, // ✅ ADD THIS: Reshapes 4D tensor to 2D for linear layers
 }
 
 Tensor :: struct {
@@ -33,7 +35,16 @@ Tensor :: struct {
 	inputs:        [dynamic]^Tensor,
 	allocator:     mem.Allocator,
 	int_metadata:  [dynamic]int,
-	dropout_mask:  []f64, // ✅ ADD THIS: Stores the 0.0 or scale values
+	dropout_mask:  []f64,
+	shape:         [4]int, // ✅ ADD THIS: (N, C, H, W) for conv tensors
+	conv_params:   ConvParams, // ✅ ADD THIS: Stores stride, pad, kernel size for backward pass
+}
+
+ConvParams :: struct {
+	kH:     int,
+	kW:     int,
+	stride: int,
+	pad:    int,
 }
 // ============================================================================
 // 2. Construction & Lifecycle
@@ -319,7 +330,31 @@ tensor_cross_entropy_loss :: proc(logits: ^Tensor, target_indices: []int) -> ^Te
 		}
 	}
 	return out
-} // ============================================================================
+}
+
+
+// tensor_flatten reshapes a 4D tensor (N, C, H, W) to 2D (N, C*H*W)
+tensor_flatten :: proc(input: ^Tensor) -> ^Tensor {
+	N := input.shape[0]
+	features := input.shape[1] * input.shape[2] * input.shape[3]
+
+	// Just create a new tensor with the same data but different shape
+	out_data := l.matrix_new(f64, N, features, input.allocator)
+	copy(out_data.data, input.data.data)
+
+	out := tensor_new(out_data, input.requires_grad, input.allocator)
+	out.shape = [4]int{N, features, 1, 1} // Treat as 2D
+
+	if out.requires_grad {
+		out.op = .Flatten
+		append(&out.inputs, input)
+	}
+
+	return out
+}
+
+
+// ============================================================================
 // 4. The Backward Engine (Chain Rule)
 // ============================================================================
 
@@ -505,13 +540,276 @@ tensor_backward :: proc(root: ^Tensor) {
 				// vec_fma_inplace_simd does: c += a * b
 				l.vec_fma_inplace_simd(node.grad.data, node.dropout_mask, a_in.grad.data)
 			}
+		case .Flatten:
+			a_in := node.inputs[0]
+			if a_in.requires_grad {
+				// Just reshape the gradient back to 4D
+				copy(a_in.grad.data, node.grad.data)
+			}
+		case .Conv2d:
+			// Conv2d backward using im2col
+			input_in := node.inputs[0]
+			weight_in := node.inputs[1]
+			bias_in: ^Tensor = nil
+			if len(node.inputs) > 2 {
+				bias_in = node.inputs[2]
+			}
+
+			N := input_in.shape[0]
+			C_in := input_in.shape[1]
+			H := input_in.shape[2]
+			W := input_in.shape[3]
+
+			C_out := weight_in.shape[0]
+			kH := node.conv_params.kH
+			kW := node.conv_params.kW
+			stride := node.conv_params.stride
+			pad := node.conv_params.pad
+
+			out_h := node.shape[2]
+			out_w := node.shape[3]
+			col_h := out_h * out_w
+			col_w := C_in * kH * kW
+
+			// Recompute im2col for input
+			col, _, _ := _im2col(
+				input_in.data.data,
+				N,
+				C_in,
+				H,
+				W,
+				kH,
+				kW,
+				stride,
+				pad,
+				context.temp_allocator,
+			)
+			defer delete(col, context.temp_allocator)
+
+			// Gradient w.r.t. input: col2im(weight^T @ grad_output_col)
+			if input_in.requires_grad {
+				grad_input_col := make([]f64, N * col_w * col_h, context.temp_allocator)
+
+				weight_2d_t := _matrix_transpose(weight_in.data, context.temp_allocator)
+				defer l.matrix_free(&weight_2d_t)
+
+				for n in 0 ..< N {
+					// grad_output for this sample: (C_out, col_h)
+					grad_out_start := n * C_out * col_h
+					grad_out_2d := l.Matrix(f64) {
+						rows = C_out,
+						cols = col_h,
+						data = node.grad.data[grad_out_start:grad_out_start + C_out * col_h],
+					}
+
+					// (col_w, C_out) @ (C_out, col_h) -> (col_w, col_h)
+					grad_col_2d := l.matmul_dyn_simd(
+						&weight_2d_t,
+						&grad_out_2d,
+						context.temp_allocator,
+					)
+
+					// Copy to grad_input_col
+					col_start := n * col_w * col_h
+					copy(grad_input_col[col_start:col_start + col_w * col_h], grad_col_2d.data)
+					l.matrix_free(&grad_col_2d)
+				}
+
+				// col2im to get grad_input
+				grad_input := _col2im(
+					grad_input_col,
+					N,
+					C_in,
+					H,
+					W,
+					kH,
+					kW,
+					stride,
+					pad,
+					out_h,
+					out_w,
+					context.temp_allocator,
+				)
+				defer delete(grad_input, context.temp_allocator)
+
+				// Add to input gradient
+				for i in 0 ..< len(input_in.grad.data) {
+					input_in.grad.data[i] += grad_input[i]
+				}
+
+				delete(grad_input_col, context.temp_allocator)
+			}
+
+			// Gradient w.r.t. weight: grad_output_col @ col^T (summed over batch)
+			if weight_in.requires_grad {
+				grad_weight := make([]f64, len(weight_in.data.data), context.temp_allocator)
+				defer delete(grad_weight, context.temp_allocator)
+
+				for n in 0 ..< N {
+					// grad_output: (C_out, col_h)
+					grad_out_start := n * C_out * col_h
+					grad_out_2d := l.Matrix(f64) {
+						rows = C_out,
+						cols = col_h,
+						data = node.grad.data[grad_out_start:grad_out_start + C_out * col_h],
+					}
+
+					// col for this sample: (col_w, col_h)
+					col_start := n * col_w * col_h
+					col_2d := l.Matrix(f64) {
+						rows = col_w,
+						cols = col_h,
+						data = col[col_start:col_start + col_w * col_h],
+					}
+
+					// (C_out, col_h) @ (col_h, col_w) -> (C_out, col_w)
+					col_2d_t := _matrix_transpose(col_2d, context.temp_allocator)
+					grad_weight_2d := l.matmul_dyn_simd(
+						&grad_out_2d,
+						&col_2d_t,
+						context.temp_allocator,
+					)
+
+					// Accumulate
+					for i in 0 ..< len(grad_weight) {
+						grad_weight[i] += grad_weight_2d.data[i]
+					}
+
+					l.matrix_free(&col_2d_t)
+					l.matrix_free(&grad_weight_2d)
+				}
+
+				// Add to weight gradient
+				for i in 0 ..< len(weight_in.grad.data) {
+					weight_in.grad.data[i] += grad_weight[i]
+				}
+			}
+
+			// Gradient w.r.t. bias: sum grad_output over batch and spatial dims
+			if bias_in != nil && bias_in.requires_grad {
+				for n in 0 ..< N {
+					for c in 0 ..< C_out {
+						offset := n * C_out * col_h + c * col_h
+						sum := 0.0
+						for i in 0 ..< col_h {
+							sum += node.grad.data[offset + i]
+						}
+						bias_in.grad.data[c] += sum
+					}
+				}
+			}
 		// We don't calculate gradients for the target data.
 		case .None:
 		// Leaf node, nothing to do
 		}
 	}
 }
+// tensor_conv2d performs 2D convolution using im2col + SIMD matmul
+// input: (N, C_in, H, W)
+// weight: (C_out, C_in, kH, kW)
+// bias: (C_out,) or nil
+// output: (N, C_out, H_out, W_out)
+tensor_conv2d :: proc(
+	input: ^Tensor,
+	weight: ^Tensor,
+	bias: ^Tensor = nil,
+	stride: int = 1,
+	pad: int = 0,
+) -> ^Tensor {
+	// Extract shapes
+	N := input.shape[0]
+	C_in := input.shape[1]
+	H := input.shape[2]
+	W := input.shape[3]
 
+	C_out := weight.shape[0]
+	kH := weight.shape[2]
+	kW := weight.shape[3]
+
+	// Calculate output dimensions
+	out_h := (H + 2 * pad - kH) / stride + 1
+	out_w := (W + 2 * pad - kW) / stride + 1
+
+	// 1. im2col: unfold input patches
+	col, _, _ := _im2col(
+		input.data.data,
+		N,
+		C_in,
+		H,
+		W,
+		kH,
+		kW,
+		stride,
+		pad,
+		context.temp_allocator,
+	)
+
+	// 2. Reshape weight to (C_out, C_in*kH*kW)
+	// Weight is already in the right layout, just treat it as a matrix
+
+	// 3. Matrix multiply: (C_out, C_in*kH*kW) @ (C_in*kH*kW, H_out*W_out) per sample
+	// For simplicity, we'll do this per-sample in the batch
+	out_data := l.matrix_new(f64, 1, N * C_out * out_h * out_w, input.allocator)
+
+	col_w := C_in * kH * kW
+	col_h := out_h * out_w
+
+	// Flatten weight to 2D: (C_out, col_w)
+	weight_2d := l.Matrix(f64) {
+		rows = C_out,
+		cols = col_w,
+		data = weight.data.data,
+	}
+
+	for n in 0 ..< N {
+		// Extract this sample's columns: (col_w, col_h)
+		col_start := n * col_w * col_h
+		col_2d := l.Matrix(f64) {
+			rows = col_w,
+			cols = col_h,
+			data = col[col_start:col_start + col_w * col_h],
+		}
+
+		// Matmul: (C_out, col_w) @ (col_w, col_h) -> (C_out, col_h)
+		out_2d := l.matmul_dyn_simd(&weight_2d, &col_2d, context.temp_allocator)
+
+		// Copy to output
+		out_start := n * C_out * col_h
+		copy(out_data.data[out_start:out_start + C_out * col_h], out_2d.data)
+		l.matrix_free(&out_2d)
+	}
+
+	delete(col, context.temp_allocator)
+
+	// 4. Add bias if provided
+	if bias != nil {
+		for n in 0 ..< N {
+			for c in 0 ..< C_out {
+				b := bias.data.data[c]
+				offset := n * C_out * col_h + c * col_h
+				for i in 0 ..< col_h {
+					out_data.data[offset + i] += b
+				}
+			}
+		}
+	}
+
+	// 5. Create output tensor
+	out := tensor_new(out_data, input.requires_grad || weight.requires_grad, input.allocator)
+	out.shape = [4]int{N, C_out, out_h, out_w}
+
+	if out.requires_grad {
+		out.op = .Conv2d
+		append(&out.inputs, input)
+		append(&out.inputs, weight)
+		if bias != nil {
+			append(&out.inputs, bias)
+		}
+		out.conv_params = ConvParams{kH, kW, stride, pad}
+	}
+
+	return out
+}
 
 // Internal helper: Transpose a matrix (needed for MatMul backward pass)
 _matrix_transpose :: proc(m: l.Matrix(f64), alloc: mem.Allocator) -> l.Matrix(f64) {
@@ -580,4 +878,112 @@ tensor_free_graph :: proc(root: ^Tensor) {
 	visited := make(map[^Tensor]bool)
 	defer delete(visited)
 	_tensor_free_graph_impl(root, &visited)
+}
+
+
+// _im2col unfolds image patches into columns for matrix multiplication
+// Input shape: (N, C, H, W)
+// Output shape: (N, C*kH*kW, H_out*W_out)
+_im2col :: proc(
+	input: []f64,
+	N, C, H, W: int,
+	kH, kW, stride, pad: int,
+	allocator: mem.Allocator,
+) -> (
+	col: []f64,
+	out_h: int,
+	out_w: int,
+) {
+	out_h = (H + 2 * pad - kH) / stride + 1
+	out_w = (W + 2 * pad - kW) / stride + 1
+
+	col_size := N * (C * kH * kW) * (out_h * out_w)
+	col = make([]f64, col_size, allocator)
+
+	for n in 0 ..< N {
+		for c in 0 ..< C {
+			for kh in 0 ..< kH {
+				for kw in 0 ..< kW {
+					// Which row in the column matrix is this?
+					col_row := c * (kH * kW) + kh * kW + kw
+
+					for oh in 0 ..< out_h {
+						for ow in 0 ..< out_w {
+							// Which column in the column matrix?
+							col_col := oh * out_w + ow
+
+							// Input coordinates
+							ih := oh * stride - pad + kh
+							iw := ow * stride - pad + kw
+
+							// Handle padding (zero-fill)
+							val := 0.0
+							if ih >= 0 && ih < H && iw >= 0 && iw < W {
+								val = input[n * (C * H * W) + c * (H * W) + ih * W + iw]
+							}
+
+							// Write to col matrix: (N, C*kH*kW, H_out*W_out)
+							idx :=
+								n * ((C * kH * kW) * (out_h * out_w)) +
+								col_row * (out_h * out_w) +
+								col_col
+							col[idx] = val
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return col, out_h, out_w
+}
+
+// _col2im is the backward pass of im2col: accumulates gradients back to input shape
+_col2im :: proc(
+	col: []f64,
+	N, C, H, W: int,
+	kH, kW, stride, pad, out_h, out_w: int,
+	allocator: mem.Allocator,
+) -> []f64 {
+	grad_input := make([]f64, N * C * H * W, allocator)
+
+	for n in 0 ..< N {
+		for c in 0 ..< C {
+			for kh in 0 ..< kH {
+				for kw in 0 ..< kW {
+					col_row := c * (kH * kW) + kh * kW + kw
+
+					for oh in 0 ..< out_h {
+						for ow in 0 ..< out_w {
+							col_col := oh * out_w + ow
+
+							ih := oh * stride - pad + kh
+							iw := ow * stride - pad + kw
+
+							if ih >= 0 && ih < H && iw >= 0 && iw < W {
+								idx_col :=
+									n * ((C * kH * kW) * (out_h * out_w)) +
+									col_row * (out_h * out_w) +
+									col_col
+								idx_in := n * (C * H * W) + c * (H * W) + ih * W + iw
+								grad_input[idx_in] += col[idx_col]
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return grad_input
+}
+tensor_new_4d :: proc(
+	N, C, H, W: int,
+	requires_grad: bool = false,
+	allocator: mem.Allocator = context.allocator,
+) -> ^Tensor {
+	data := l.matrix_new(f64, 1, N * C * H * W, allocator)
+	t := tensor_new(data, requires_grad, allocator)
+	t.shape = [4]int{N, C, H, W}
+	return t
 }

@@ -281,3 +281,73 @@ autograd_bias_test :: proc(allocator: mem.Allocator) {
 	t.tensor_free(c)
 	t.tensor_free(loss)
 }
+
+
+conv2d_test :: proc(allocator: mem.Allocator) {
+	fmt.println("\n=== Testing Conv2d ===")
+
+	// Create a simple 4x4 image with a vertical edge
+	// Input: (1, 1, 4, 4) - batch=1, channels=1, height=4, width=4
+	input := t.tensor_new_4d(1, 1, 4, 4, true, allocator)
+	defer t.tensor_free(input)
+
+	// Image data: left half = 1.0, right half = 0.0
+	input.data.data[0] = 1.0; input.data.data[1] = 1.0; input.data.data[2] = 0.0; input.data.data[3] = 0.0
+	input.data.data[4] = 1.0; input.data.data[5] = 1.0; input.data.data[6] = 0.0; input.data.data[7] = 0.0
+	input.data.data[8] = 1.0; input.data.data[9] = 1.0; input.data.data[10] = 0.0; input.data.data[11] = 0.0
+	input.data.data[12] = 1.0; input.data.data[13] = 1.0; input.data.data[14] = 0.0; input.data.data[15] = 0.0
+
+	// Create a 3x3 edge detection kernel: (1, 1, 3, 3)
+	weight := t.tensor_new_4d(1, 1, 3, 3, true, allocator)
+	defer t.tensor_free(weight)
+
+	// Vertical edge detector: [[-1, 0, 1], [-1, 0, 1], [-1, 0, 1]]
+	weight.data.data[0] = -1.0; weight.data.data[1] = 0.0; weight.data.data[2] = 1.0
+	weight.data.data[3] = -1.0; weight.data.data[4] = 0.0; weight.data.data[5] = 1.0
+	weight.data.data[6] = -1.0; weight.data.data[7] = 0.0; weight.data.data[8] = 1.0
+
+	// Forward pass: conv2d with stride=1, no padding
+	output := t.tensor_conv2d(input, weight, nil, 1, 0)
+	defer t.tensor_free(output)
+
+	fmt.println("\nInput image (4x4):")
+	for i in 0 ..< 4 {
+		for j in 0 ..< 4 {
+			fmt.printf("%.0f ", input.data.data[i * 4 + j])
+		}
+		fmt.println("")
+	}
+
+	fmt.println("\nConv2d output (2x2):")
+	for i in 0 ..< 2 {
+		for j in 0 ..< 2 {
+			fmt.printf("%.1f ", output.data.data[i * 2 + j])
+		}
+		fmt.println("")
+	}
+
+	// The output should detect the vertical edge at column 2
+	// Expected: [[-1, 1], [-1, 1]] (or similar depending on padding)
+
+	// Test backward pass
+	loss := t.tensor_sum(output)
+	defer t.tensor_free(loss)
+
+	t.tensor_backward(loss)
+
+	fmt.println("\nGradient w.r.t. input (should be non-zero at edge):")
+	for i in 0 ..< 4 {
+		for j in 0 ..< 4 {
+			fmt.printf("%.1f ", input.grad.data[i * 4 + j])
+		}
+		fmt.println("")
+	}
+
+	fmt.println("\nGradient w.r.t. weight:")
+	for i in 0 ..< 3 {
+		for j in 0 ..< 3 {
+			fmt.printf("%.1f ", weight.grad.data[i * 3 + j])
+		}
+		fmt.println("")
+	}
+}
