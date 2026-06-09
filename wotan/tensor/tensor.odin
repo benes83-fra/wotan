@@ -4,6 +4,7 @@ package tensor
 import l "../linalg"
 import "core:fmt"
 import "core:math"
+import "core:math/rand"
 import "core:mem"
 // ============================================================================
 // 1. The Tensor Struct & Graph Nodes
@@ -20,8 +21,10 @@ Op :: enum {
 	Relu,
 	AddBias,
 	MSELoss,
-	CrossEntropy, // ✅ ADD THIS: Fused Softmax + Cross Entropy
+	CrossEntropy,
+	Dropout, // ✅ ADD THIS
 }
+
 Tensor :: struct {
 	data:          l.Matrix(f64),
 	grad:          l.Matrix(f64),
@@ -29,8 +32,8 @@ Tensor :: struct {
 	op:            Op,
 	inputs:        [dynamic]^Tensor,
 	allocator:     mem.Allocator,
-	// ✅ ADD THIS: For storing non-tensor metadata like class indices
 	int_metadata:  [dynamic]int,
+	dropout_mask:  []f64, // ✅ ADD THIS: Stores the 0.0 or scale values
 }
 // ============================================================================
 // 2. Construction & Lifecycle
@@ -62,19 +65,56 @@ tensor_free :: proc(t: ^Tensor) {
 	if t.grad.data != nil {l.matrix_free(&t.grad)}
 
 	delete(t.inputs)
-	delete(t.int_metadata) // ✅ ADD THIS: Clean up the metadata array
+	delete(t.int_metadata)
+	if t.dropout_mask != nil {delete(t.dropout_mask, t.allocator)} 	// ✅ ADD THIS
 	free(t, t.allocator)
 }
 
 tensor_zero_grad :: proc(t: ^Tensor) {
 	if t.grad.data != nil {
+		// Odin's compiler will auto-vectorize this simple zero loop perfectly.
 		for i in 0 ..< len(t.grad.data) {
 			t.grad.data[i] = 0.0
 		}
 	}
 }
 
+// tensor_dropout randomly zeroes elements with probability drop_prob.
+// Uses Inverted Dropout: scales remaining elements by 1/(1-p) during training.
+tensor_dropout :: proc(a: ^Tensor, drop_prob: f64, training: bool) -> ^Tensor {
+	// If not training, or drop_prob is 0, just return the input tensor directly.
+	// This is safe for tensor_free_graph because 'a' will have op == .None (or its original op).
+	if !training || drop_prob <= 0.0 {
+		return a
+	}
 
+	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
+	n := len(a.data.data)
+
+	// Allocate the mask to remember what we dropped for the backward pass
+	mask := make([]f64, n, a.allocator)
+	scale := 1.0 / (1.0 - drop_prob)
+
+	for i in 0 ..< n {
+		if rand.float64() > drop_prob {
+			out_data.data[i] = a.data.data[i] * scale
+			mask[i] = scale
+		} else {
+			out_data.data[i] = 0.0
+			mask[i] = 0.0
+		}
+	}
+
+	out := tensor_new(out_data, a.requires_grad, a.allocator)
+	out.dropout_mask = mask
+
+	if out.requires_grad {
+		out.op = .Dropout
+		append(&out.inputs, a)
+	}
+
+	return out
+}
 // tensor_sum reduces a tensor to a single scalar value (1x1 matrix)
 tensor_sum :: proc(a: ^Tensor) -> ^Tensor {
 	// ✅ SIMD Optimization: Fast reduction sum
@@ -125,17 +165,10 @@ tensor_add :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
 
 // tensor_relu applies the Rectified Linear Unit: max(0, x)
 tensor_relu :: proc(a: ^Tensor) -> ^Tensor {
+
 	// 1. Forward pass
 	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
-
-	for i in 0 ..< len(a.data.data) {
-		v := a.data.data[i]
-		if v > 0.0 {
-			out_data.data[i] = v
-		} else {
-			out_data.data[i] = 0.0
-		}
-	}
+	l.vec_relu_simd(a.data.data, out_data.data) // ✅ SIMD ReLU
 
 	// 2. Create output tensor
 	out := tensor_new(out_data, a.requires_grad, a.allocator)
@@ -391,13 +424,8 @@ tensor_backward :: proc(root: ^Tensor) {
 			// dy/dx = 1 if x > 0 else 0
 			a_in := node.inputs[0]
 			if a_in.requires_grad {
-				for j in 0 ..< len(a_in.grad.data) {
-					// Only pass the gradient through if the original input was positive
-					if a_in.data.data[j] > 0.0 {
-						a_in.grad.data[j] += node.grad.data[j]
-					}
-					// If it was <= 0, the gradient is 0, so we add nothing.
-				}
+				// ✅ SIMD Optimization: Use the SIMD backward function
+				l.vec_relu_backward_simd(node.grad.data, a_in.data.data, a_in.grad.data)
 			}
 		case .AddBias:
 			// C = A + bias (broadcasted)
@@ -470,6 +498,13 @@ tensor_backward :: proc(root: ^Tensor) {
 					logits_in.grad.data[i * C + j] += logit_grad
 				}
 			}
+		case .Dropout:
+			a_in := node.inputs[0]
+			if a_in.requires_grad {
+				// ✅ SIMD Optimization: grad_a += node.grad * mask
+				// vec_fma_inplace_simd does: c += a * b
+				l.vec_fma_inplace_simd(node.grad.data, node.dropout_mask, a_in.grad.data)
+			}
 		// We don't calculate gradients for the target data.
 		case .None:
 		// Leaf node, nothing to do
@@ -533,6 +568,7 @@ _tensor_free_graph_impl :: proc(node: ^Tensor, visited: ^map[^Tensor]bool) {
 	if node.grad.data != nil {l.matrix_free(&node.grad)}
 	delete(node.inputs)
 	delete(node.int_metadata)
+	if node.dropout_mask != nil {delete(node.dropout_mask, node.allocator)}
 	free(node, node.allocator)
 }
 

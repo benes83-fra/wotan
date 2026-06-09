@@ -384,3 +384,145 @@ adam_test :: proc(allocator: mem.Allocator) {
 	nn.mlp_free(&net_adam)
 	nn.adam_free(&opt_adam)
 }
+
+adam_classification_test :: proc(allocator: mem.Allocator) {
+	fmt.println("\n=== Adam vs SGD on Classification ===")
+
+	// Create Network: 2 inputs -> 16 hidden -> 3 classes
+	sizes := []int{2, 16, 3}
+
+	// Create 3 Clusters of Data
+	n_samples := 90 // 30 per class
+	x_data := l.matrix_new(f64, n_samples, 2, allocator)
+	targets := make([]int, n_samples, allocator)
+	defer delete(targets, allocator)
+
+	for i in 0 ..< n_samples {
+		class_idx := i % 3
+		targets[i] = class_idx
+
+		if class_idx == 0 {
+			x_data.data[i * 2] = -3.0 + rand.float64_normal(0, 0.8)
+			x_data.data[i * 2 + 1] = -3.0 + rand.float64_normal(0, 0.8)
+		} else if class_idx == 1 {
+			x_data.data[i * 2] = 3.0 + rand.float64_normal(0, 0.8)
+			x_data.data[i * 2 + 1] = 3.0 + rand.float64_normal(0, 0.8)
+		} else {
+			x_data.data[i * 2] = -3.0 + rand.float64_normal(0, 0.8)
+			x_data.data[i * 2 + 1] = 3.0 + rand.float64_normal(0, 0.8)
+		}
+	}
+
+	x := t.tensor_new(x_data, false, allocator)
+	defer t.tensor_free(x)
+
+	// Test SGD
+	fmt.println("\n--- SGD (lr=0.1) ---")
+	net_sgd := nn.mlp_new(sizes, allocator)
+	opt_sgd := nn.sgd_new(0.1, allocator)
+	nn.mlp_add_to_opt(&net_sgd, &opt_sgd)
+
+	epochs := 200
+	for epoch in 0 ..< epochs {
+		nn.sgd_zero_grad(&opt_sgd)
+		pred := nn.mlp_forward(&net_sgd, x)
+		loss := t.tensor_cross_entropy_loss(pred, targets)
+
+		if epoch % 50 == 0 {
+			fmt.printf("Epoch %d | Loss: %.4f\n", epoch, loss.data.data[0])
+		}
+
+		t.tensor_backward(loss)
+		nn.sgd_step(&opt_sgd)
+		t.tensor_free_graph(loss)
+	}
+	nn.mlp_free(&net_sgd)
+	nn.sgd_free(&opt_sgd)
+
+	// Test Adam
+	fmt.println("\n--- Adam (lr=0.01) ---")
+	net_adam := nn.mlp_new(sizes, allocator)
+	opt_adam := nn.adam_new(0.01, allocator = allocator)
+	nn.mlp_add_to_opt(&net_adam, &opt_adam)
+
+	for epoch in 0 ..< epochs {
+		nn.adam_zero_grad(&opt_adam)
+		pred := nn.mlp_forward(&net_adam, x)
+		loss := t.tensor_cross_entropy_loss(pred, targets)
+
+		if epoch % 50 == 0 {
+			fmt.printf("Epoch %d | Loss: %.4f\n", epoch, loss.data.data[0])
+		}
+
+		t.tensor_backward(loss)
+		nn.adam_step(&opt_adam)
+		t.tensor_free_graph(loss)
+	}
+	nn.mlp_free(&net_adam)
+	nn.adam_free(&opt_adam)
+}
+dropout_test :: proc(allocator: mem.Allocator) {
+	fmt.println("\n=== Testing Dropout Regularization ===")
+
+	sizes := []int{2, 32, 3} // Larger network to force overfitting
+	n_samples := 90
+	x_data := l.matrix_new(f64, n_samples, 2, allocator)
+	targets := make([]int, n_samples, allocator)
+	defer delete(targets, allocator)
+
+	for i in 0 ..< n_samples {
+		class_idx := i % 3
+		targets[i] = class_idx
+		if class_idx == 0 {
+			x_data.data[i * 2] = -3.0 + rand.float64_normal(0, 0.8)
+			x_data.data[i * 2 + 1] = -3.0 + rand.float64_normal(0, 0.8)
+		} else if class_idx == 1 {
+			x_data.data[i * 2] = 3.0 + rand.float64_normal(0, 0.8)
+			x_data.data[i * 2 + 1] = 3.0 + rand.float64_normal(0, 0.8)
+		} else {
+			x_data.data[i * 2] = -3.0 + rand.float64_normal(0, 0.8)
+			x_data.data[i * 2 + 1] = 3.0 + rand.float64_normal(0, 0.8)
+		}
+	}
+
+	x := t.tensor_new(x_data, false, allocator)
+	defer t.tensor_free(x)
+
+	// Test 1: No Dropout
+	fmt.println("\n--- No Dropout (Overfitting likely) ---")
+	net1 := nn.mlp_new(sizes, allocator)
+	opt1 := nn.adam_new(0.01, allocator = allocator)
+	nn.mlp_add_to_opt(&net1, &opt1)
+
+	for epoch in 0 ..< 100 {
+		nn.adam_zero_grad(&opt1)
+		// ✅ training = true, drop_prob = 0.0
+		pred := nn.mlp_forward(&net1, x, 0.0, true)
+		loss := t.tensor_cross_entropy_loss(pred, targets)
+		if epoch % 25 == 0 {fmt.printf("Epoch %d | Loss: %.4f\n", epoch, loss.data.data[0])}
+		t.tensor_backward(loss)
+		nn.adam_step(&opt1)
+		t.tensor_free_graph(loss)
+	}
+	nn.mlp_free(&net1)
+	nn.adam_free(&opt1)
+
+	// Test 2: With Dropout
+	fmt.println("\n--- With Dropout (p=0.3) ---")
+	net2 := nn.mlp_new(sizes, allocator)
+	opt2 := nn.adam_new(0.01, allocator = allocator)
+	nn.mlp_add_to_opt(&net2, &opt2)
+
+	for epoch in 0 ..< 100 {
+		nn.adam_zero_grad(&opt2)
+		// ✅ training = true, drop_prob = 0.3
+		pred := nn.mlp_forward(&net2, x, 0.3, true)
+		loss := t.tensor_cross_entropy_loss(pred, targets)
+		if epoch % 25 == 0 {fmt.printf("Epoch %d | Loss: %.4f\n", epoch, loss.data.data[0])}
+		t.tensor_backward(loss)
+		nn.adam_step(&opt2)
+		t.tensor_free_graph(loss)
+	}
+	nn.mlp_free(&net2)
+	nn.adam_free(&opt2)
+}

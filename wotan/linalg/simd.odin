@@ -3,6 +3,7 @@ package wotan_linalg
 import "base:builtin"
 import "base:intrinsics"
 import "core:fmt"
+import "core:math"
 import "core:mem"
 import simd "core:simd"
 
@@ -1042,4 +1043,136 @@ sum_simd :: proc(a: []f64) -> f64 {
 	sum := 0.0
 	for v in a {sum += v}
 	return sum
+}
+// ============================================================================
+// SIMD ReLU Forward: out = max(0, a)
+// ============================================================================
+vec_relu_simd :: proc(a, out: []f64) {
+	n := len(a)
+	if n != len(out) do panic("vec_relu_simd: length mismatch")
+
+	if intrinsics.has_target_feature("avx") {
+		zero8 := simd.f64x8{0, 0, 0, 0, 0, 0, 0, 0}
+		i := 0
+		for ; i + 8 <= n; i += 8 {
+			va := simd.f64x8 {
+				a[i],
+				a[i + 1],
+				a[i + 2],
+				a[i + 3],
+				a[i + 4],
+				a[i + 5],
+				a[i + 6],
+				a[i + 7],
+			}
+			// mask = (va > 0.0)
+			mask := intrinsics.simd_lanes_gt(va, zero8)
+			// out = mask ? va : 0
+			vout := intrinsics.simd_select(mask, va, zero8)
+
+			out_arr := transmute([8]f64)vout
+			for j in 0 ..< 8 {out[i + j] = out_arr[j]}
+		}
+		for ; i < n; i += 1 {out[i] = math.max(a[i], 0.0)}
+		return
+	}
+
+	if intrinsics.has_target_feature("sse2") {
+		zero4 := simd.f64x4{0, 0, 0, 0}
+		i := 0
+		for ; i + 4 <= n; i += 4 {
+			va := simd.f64x4{a[i], a[i + 1], a[i + 2], a[i + 3]}
+			mask := intrinsics.simd_lanes_gt(va, zero4)
+			vout := intrinsics.simd_select(mask, va, zero4)
+
+			out_arr := transmute([4]f64)vout
+			for j in 0 ..< 4 {out[i + j] = out_arr[j]}
+		}
+		for ; i < n; i += 1 {out[i] = math.max(a[i], 0.0)}
+		return
+	}
+
+	for i in 0 ..< n {out[i] = math.max(a[i], 0.0)}
+}
+
+// ============================================================================
+// SIMD ReLU Backward: grad_in += grad_out * (a_in > 0)
+// ============================================================================
+vec_relu_backward_simd :: proc(grad_out, a_in, grad_in: []f64) {
+	n := len(grad_out)
+	if n != len(a_in) || n != len(grad_in) do panic("vec_relu_backward_simd: length mismatch")
+
+	if intrinsics.has_target_feature("avx") {
+		zero8 := simd.f64x8{0, 0, 0, 0, 0, 0, 0, 0}
+		i := 0
+		for ; i + 8 <= n; i += 8 {
+			va := simd.f64x8 {
+				a_in[i],
+				a_in[i + 1],
+				a_in[i + 2],
+				a_in[i + 3],
+				a_in[i + 4],
+				a_in[i + 5],
+				a_in[i + 6],
+				a_in[i + 7],
+			}
+			vgrad := simd.f64x8 {
+				grad_out[i],
+				grad_out[i + 1],
+				grad_out[i + 2],
+				grad_out[i + 3],
+				grad_out[i + 4],
+				grad_out[i + 5],
+				grad_out[i + 6],
+				grad_out[i + 7],
+			}
+			vgrad_in := simd.f64x8 {
+				grad_in[i],
+				grad_in[i + 1],
+				grad_in[i + 2],
+				grad_in[i + 3],
+				grad_in[i + 4],
+				grad_in[i + 5],
+				grad_in[i + 6],
+				grad_in[i + 7],
+			}
+
+			mask := intrinsics.simd_lanes_gt(va, zero8)
+			// masked_grad = mask ? vgrad : 0
+			masked_grad := intrinsics.simd_select(mask, vgrad, zero8)
+			vres := intrinsics.simd_add(vgrad_in, masked_grad)
+
+			out_arr := transmute([8]f64)vres
+			for j in 0 ..< 8 {grad_in[i + j] = out_arr[j]}
+		}
+		for ; i < n; i += 1 {
+			if a_in[i] > 0.0 {grad_in[i] += grad_out[i]}
+		}
+		return
+	}
+
+	if intrinsics.has_target_feature("sse2") {
+		zero4 := simd.f64x4{0, 0, 0, 0}
+		i := 0
+		for ; i + 4 <= n; i += 4 {
+			va := simd.f64x4{a_in[i], a_in[i + 1], a_in[i + 2], a_in[i + 3]}
+			vgrad := simd.f64x4{grad_out[i], grad_out[i + 1], grad_out[i + 2], grad_out[i + 3]}
+			vgrad_in := simd.f64x4{grad_in[i], grad_in[i + 1], grad_in[i + 2], grad_in[i + 3]}
+
+			mask := intrinsics.simd_lanes_gt(va, zero4)
+			masked_grad := intrinsics.simd_select(mask, vgrad, zero4)
+			vres := intrinsics.simd_add(vgrad_in, masked_grad)
+
+			out_arr := transmute([4]f64)vres
+			for j in 0 ..< 4 {grad_in[i + j] = out_arr[j]}
+		}
+		for ; i < n; i += 1 {
+			if a_in[i] > 0.0 {grad_in[i] += grad_out[i]}
+		}
+		return
+	}
+
+	for i in 0 ..< n {
+		if a_in[i] > 0.0 {grad_in[i] += grad_out[i]}
+	}
 }

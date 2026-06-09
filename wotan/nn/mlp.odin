@@ -30,20 +30,29 @@ mlp_new :: proc(sizes: []int, allocator: mem.Allocator = context.allocator) -> M
 	return net
 }
 
+
 // mlp_forward performs the forward pass through the network
-mlp_forward :: proc(net: ^MLP, x: ^t.Tensor) -> ^t.Tensor {
+// ✅ Added drop_prob and training flag
+mlp_forward :: proc(
+	net: ^MLP,
+	x: ^t.Tensor,
+	drop_prob: f64 = 0.0,
+	training: bool = true,
+) -> ^t.Tensor {
 	out := x
 	n_layers := len(net.layers)
 
-	// Hidden layers: Linear + Relu
 	for i in 0 ..< n_layers - 1 {
 		out = linear_forward(&net.layers[i], out)
 		out = t.tensor_relu(out)
+
+		// ✅ Apply Dropout after ReLU if training and drop_prob > 0
+		if training && drop_prob > 0.0 {
+			out = t.tensor_dropout(out, drop_prob, training)
+		}
 	}
 
-	// Output layer: Linear only (for regression)
 	out = linear_forward(&net.layers[n_layers - 1], out)
-
 	return out
 }
 
