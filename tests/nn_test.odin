@@ -5,7 +5,10 @@ import l "../wotan/linalg"
 import nn "../wotan/nn"
 import t "../wotan/tensor"
 import "core:fmt"
+import "core:math"
+import "core:math/rand"
 import "core:mem"
+
 nn_test :: proc(allocator: mem.Allocator) {
 	fmt.println("\n=== Testing Neural Network Linear Layer ===")
 
@@ -228,5 +231,89 @@ xor_test :: proc(allocator: mem.Allocator) {
 			pred_final.data.data[i],
 		)
 	}
+	t.tensor_free_graph(pred_final)
+}
+classification_test :: proc(allocator: mem.Allocator) {
+	fmt.println("\n=== Testing Classification (Cross Entropy) ===")
+
+	// 1. Create Network: 2 inputs -> 8 hidden -> 3 classes
+	sizes := []int{2, 8, 3}
+	net := nn.mlp_new(sizes, allocator)
+	defer nn.mlp_free(&net)
+
+	opt := nn.sgd_new(0.1, allocator)
+	defer nn.sgd_free(&opt)
+	nn.mlp_add_to_opt(&net, &opt)
+
+	// 2. Create 3 Clusters of Data
+	n_samples := 30 // 10 per class
+	x_data := l.matrix_new(f64, n_samples, 2, allocator)
+	targets := make([]int, n_samples, allocator)
+	defer delete(targets, allocator)
+
+	for i in 0 ..< n_samples {
+		class_idx := i % 3
+		targets[i] = class_idx
+
+		// Cluster 0: around (-2, -2)
+		// Cluster 1: around (2, 2)
+		// Cluster 2: around (-2, 2)
+		if class_idx == 0 {
+			x_data.data[i * 2] = -2.0 + rand.float64_normal(0, 0.5)
+			x_data.data[i * 2 + 1] = -2.0 + rand.float64_normal(0, 0.5)
+		} else if class_idx == 1 {
+			x_data.data[i * 2] = 2.0 + rand.float64_normal(0, 0.5)
+			x_data.data[i * 2 + 1] = 2.0 + rand.float64_normal(0, 0.5)
+		} else {
+			x_data.data[i * 2] = -2.0 + rand.float64_normal(0, 0.5)
+			x_data.data[i * 2 + 1] = 2.0 + rand.float64_normal(0, 0.5)
+		}
+	}
+
+	x := t.tensor_new(x_data, false, allocator)
+	defer t.tensor_free(x)
+
+	// 3. Training Loop
+	epochs := 500
+	for epoch in 0 ..< epochs {
+		nn.sgd_zero_grad(&opt)
+
+		pred := nn.mlp_forward(&net, x)
+		// ✅ Use the new Cross Entropy Loss
+		loss := t.tensor_cross_entropy_loss(pred, targets)
+
+		if epoch % 100 == 0 {
+			fmt.printf("Epoch %d | Loss: %.4f\n", epoch, loss.data.data[0])
+		}
+
+		t.tensor_backward(loss)
+		nn.sgd_step(&opt)
+		t.tensor_free_graph(loss)
+	}
+
+	// 4. Check Accuracy
+	fmt.println("\nFinal Predictions:")
+	pred_final := nn.mlp_forward(&net, x)
+	correct := 0
+	for i in 0 ..< n_samples {
+		// Find class with highest probability
+		max_prob := -math.F64_MAX
+		pred_class := 0
+		for j in 0 ..< 3 {
+			v := pred_final.data.data[i * 3 + j]
+			if v > max_prob {
+				max_prob = v
+				pred_class = j
+			}
+		}
+		if pred_class == targets[i] {correct += 1}
+	}
+
+	fmt.printf(
+		"Accuracy: %d / %d (%.1f%%)\n",
+		correct,
+		n_samples,
+		f64(correct) / f64(n_samples) * 100.0,
+	)
 	t.tensor_free_graph(pred_final)
 }

@@ -3,8 +3,8 @@ package tensor
 
 import l "../linalg"
 import "core:fmt"
+import "core:math"
 import "core:mem"
-
 // ============================================================================
 // 1. The Tensor Struct & Graph Nodes
 // ============================================================================
@@ -19,17 +19,19 @@ Op :: enum {
 	Sum,
 	Relu,
 	AddBias,
-	MSELoss, // ✅ ADD THIS: Fused Mean Squared Error
+	MSELoss,
+	CrossEntropy, // ✅ ADD THIS: Fused Softmax + Cross Entropy
 }
 Tensor :: struct {
-	data:          l.Matrix(f64), // The actual values
-	grad:          l.Matrix(f64), // The gradients (same shape as data)
-	requires_grad: bool, // Do we track history for this?
-	op:            Op, // How was this tensor created?
-	inputs:        [dynamic]^Tensor, // Pointers to the tensors that created this one
+	data:          l.Matrix(f64),
+	grad:          l.Matrix(f64),
+	requires_grad: bool,
+	op:            Op,
+	inputs:        [dynamic]^Tensor,
 	allocator:     mem.Allocator,
+	// ✅ ADD THIS: For storing non-tensor metadata like class indices
+	int_metadata:  [dynamic]int,
 }
-
 // ============================================================================
 // 2. Construction & Lifecycle
 // ============================================================================
@@ -59,8 +61,8 @@ tensor_free :: proc(t: ^Tensor) {
 	if t.data.data != nil {l.matrix_free(&t.data)}
 	if t.grad.data != nil {l.matrix_free(&t.grad)}
 
-	// ✅ FIX: Odin's delete for dynamic arrays doesn't take an allocator
 	delete(t.inputs)
+	delete(t.int_metadata) // ✅ ADD THIS: Clean up the metadata array
 	free(t, t.allocator)
 }
 
@@ -210,6 +212,7 @@ tensor_add_bias :: proc(a: ^Tensor, bias: ^Tensor) -> ^Tensor {
 
 // tensor_mse_loss calculates Mean Squared Error: mean((pred - target)^2)
 // This is a Fused SIMD operation that avoids creating intermediate Sub/Mul tensors!
+// tensor_mse_loss calculates Mean Squared Error: mean((pred - target)^2)
 tensor_mse_loss :: proc(pred: ^Tensor, target: ^Tensor) -> ^Tensor {
 	if pred.data.rows != target.data.rows || pred.data.cols != target.data.cols {
 		panic("tensor_mse_loss: shape mismatch")
@@ -217,29 +220,73 @@ tensor_mse_loss :: proc(pred: ^Tensor, target: ^Tensor) -> ^Tensor {
 
 	n := f64(len(pred.data.data))
 
-	// 1. Forward pass: Calculate the scalar loss using SIMD
 	diff := make([]f64, len(pred.data.data), context.temp_allocator)
 	l.vec_sub_simd(pred.data.data, target.data.data, diff)
-
-	// sum(diff^2) is mathematically identical to the dot product of diff with itself!
 	squared_sum := l.dot_simd(diff, diff)
 	defer delete(diff, context.temp_allocator)
 
 	loss_val := squared_sum / n
 
-	// Create 1x1 output tensor
 	out_data := l.matrix_new(f64, 1, 1, pred.allocator)
 	out_data.data[0] = loss_val
 
 	out := tensor_new(out_data, pred.requires_grad, pred.allocator)
+
+	// ✅ FIX: Restored the correct MSE graph recording!
 	if out.requires_grad {
 		out.op = .MSELoss
 		append(&out.inputs, pred)
-		append(&out.inputs, target) // Keep target for the backward pass
+		append(&out.inputs, target)
 	}
 	return out
 }
-// ============================================================================
+
+// tensor_cross_entropy_loss calculates the loss for multi-class classification.
+tensor_cross_entropy_loss :: proc(logits: ^Tensor, target_indices: []int) -> ^Tensor {
+	if len(target_indices) != logits.data.rows {
+		panic("tensor_cross_entropy_loss: batch size mismatch")
+	}
+
+	N := logits.data.rows
+	C := logits.data.cols
+
+	loss := 0.0
+	for i in 0 ..< N {
+		max_val := -math.F64_MAX
+		for j in 0 ..< C {
+			v := logits.data.data[i * C + j]
+			if v > max_val {max_val = v}
+		}
+
+		sum_exp := 0.0
+		for j in 0 ..< C {
+			sum_exp += math.exp(logits.data.data[i * C + j] - max_val)
+		}
+
+		// Note: Use math.log for natural logarithm in Odin
+		log_sum_exp := math.ln(sum_exp) + max_val
+
+		target_class := target_indices[i]
+		log_prob := logits.data.data[i * C + target_class] - log_sum_exp
+		loss -= log_prob
+	}
+
+	loss /= f64(N)
+
+	out_data := l.matrix_new(f64, 1, 1, logits.allocator)
+	out_data.data[0] = loss
+
+	out := tensor_new(out_data, logits.requires_grad, logits.allocator)
+	if out.requires_grad {
+		out.op = .CrossEntropy
+		append(&out.inputs, logits)
+		// ✅ Save indices for the backward pass
+		for idx in target_indices {
+			append(&out.int_metadata, idx)
+		}
+	}
+	return out
+} // ============================================================================
 // 4. The Backward Engine (Chain Rule)
 // ============================================================================
 
@@ -391,6 +438,38 @@ tensor_backward :: proc(root: ^Tensor) {
 				l.axpy_simd(scale, diff, pred_in.grad.data)
 				delete(diff, context.temp_allocator)
 			}
+		case .CrossEntropy:
+			// The magical simplified gradient: grad = (softmax_prob - target_one_hot) / N
+			logits_in := node.inputs[0]
+			N := logits_in.data.rows
+			C := logits_in.data.cols
+			scalar_grad := node.grad.data[0] // Usually 1.0
+
+			for i in 0 ..< N {
+				// Recompute softmax for stability
+				max_val := -math.F64_MAX
+				for j in 0 ..< C {
+					v := logits_in.data.data[i * C + j]
+					if v > max_val {max_val = v}
+				}
+
+				sum_exp := 0.0
+				for j in 0 ..< C {
+					sum_exp += math.exp(logits_in.data.data[i * C + j] - max_val)
+				}
+
+				target_class := node.int_metadata[i]
+
+				for j in 0 ..< C {
+					prob := math.exp(logits_in.data.data[i * C + j] - max_val) / sum_exp
+					target_val := 0.0
+					if j == target_class {target_val = 1.0}
+
+					// Apply chain rule
+					logit_grad := (prob - target_val) * scalar_grad / f64(N)
+					logits_in.grad.data[i * C + j] += logit_grad
+				}
+			}
 		// We don't calculate gradients for the target data.
 		case .None:
 		// Leaf node, nothing to do
@@ -453,6 +532,7 @@ _tensor_free_graph_impl :: proc(node: ^Tensor, visited: ^map[^Tensor]bool) {
 	if node.data.data != nil {l.matrix_free(&node.data)}
 	if node.grad.data != nil {l.matrix_free(&node.grad)}
 	delete(node.inputs)
+	delete(node.int_metadata)
 	free(node, node.allocator)
 }
 
