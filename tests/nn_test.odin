@@ -317,3 +317,70 @@ classification_test :: proc(allocator: mem.Allocator) {
 	)
 	t.tensor_free_graph(pred_final)
 }
+
+
+adam_test :: proc(allocator: mem.Allocator) {
+	fmt.println("\n=== Testing Adam Optimizer vs SGD ===")
+
+	// Create Network: 2 inputs -> 4 hidden -> 1 output
+	sizes := []int{2, 4, 1}
+
+	// XOR Dataset
+	x_data := l.matrix_new(f64, 4, 2, allocator)
+	y_data := l.matrix_new(f64, 4, 1, allocator)
+
+	x_data.data[0] = 0; x_data.data[1] = 0; y_data.data[0] = 0
+	x_data.data[2] = 0; x_data.data[3] = 1; y_data.data[1] = 1
+	x_data.data[4] = 1; x_data.data[5] = 0; y_data.data[2] = 1
+	x_data.data[6] = 1; x_data.data[7] = 1; y_data.data[3] = 0
+
+	x := t.tensor_new(x_data, false, allocator)
+	target := t.tensor_new(y_data, false, allocator)
+	defer t.tensor_free(x)
+	defer t.tensor_free(target)
+
+	// Test 1: SGD
+	fmt.println("\n--- Training with SGD (lr=0.5) ---")
+	net_sgd := nn.mlp_new(sizes, allocator)
+	opt_sgd := nn.sgd_new(0.5, allocator)
+	nn.mlp_add_to_opt(&net_sgd, &opt_sgd)
+
+	epochs := 500
+	for epoch in 0 ..< epochs {
+		nn.sgd_zero_grad(&opt_sgd)
+		pred := nn.mlp_forward(&net_sgd, x)
+		loss := t.tensor_mse_loss(pred, target)
+
+		if epoch % 100 == 0 {
+			fmt.printf("Epoch %d | Loss: %.6f\n", epoch, loss.data.data[0])
+		}
+
+		t.tensor_backward(loss)
+		nn.sgd_step(&opt_sgd)
+		t.tensor_free_graph(loss)
+	}
+	nn.mlp_free(&net_sgd)
+	nn.sgd_free(&opt_sgd)
+
+	// Test 2: Adam
+	fmt.println("\n--- Training with Adam (lr=0.01) ---")
+	net_adam := nn.mlp_new(sizes, allocator)
+	opt_adam := nn.adam_new(0.01, allocator = allocator) // Lower learning rate, Adam is more stable
+	nn.mlp_add_to_opt(&net_adam, &opt_adam)
+
+	for epoch in 0 ..< epochs {
+		nn.adam_zero_grad(&opt_adam)
+		pred := nn.mlp_forward(&net_adam, x)
+		loss := t.tensor_mse_loss(pred, target)
+
+		if epoch % 100 == 0 {
+			fmt.printf("Epoch %d | Loss: %.6f\n", epoch, loss.data.data[0])
+		}
+
+		t.tensor_backward(loss)
+		nn.adam_step(&opt_adam)
+		t.tensor_free_graph(loss)
+	}
+	nn.mlp_free(&net_adam)
+	nn.adam_free(&opt_adam)
+}

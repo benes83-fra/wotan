@@ -47,12 +47,26 @@ mlp_forward :: proc(net: ^MLP, x: ^t.Tensor) -> ^t.Tensor {
 	return out
 }
 
-// mlp_add_to_opt registers all weights and biases of the MLP with an optimizer
-mlp_add_to_opt :: proc(net: ^MLP, opt: ^SGD) {
+// ✅ OVERLOADED: Add parameters to SGD optimizer
+mlp_add_to_sgd :: proc(net: ^MLP, opt: ^SGD) {
 	for i in 0 ..< len(net.layers) {
 		sgd_add_param(opt, net.layers[i].weights)
 		sgd_add_param(opt, net.layers[i].bias)
 	}
+}
+
+// ✅ OVERLOADED: Add parameters to Adam optimizer
+mlp_add_to_adam :: proc(net: ^MLP, opt: ^Adam) {
+	for i in 0 ..< len(net.layers) {
+		adam_add_param(opt, net.layers[i].weights)
+		adam_add_param(opt, net.layers[i].bias)
+	}
+}
+
+// ✅ PROCEDURE GROUP: Allows calling mlp_add_to_opt with either optimizer type
+mlp_add_to_opt :: proc {
+	mlp_add_to_sgd,
+	mlp_add_to_adam,
 }
 
 // mlp_free cleans up the MLP and all its layers

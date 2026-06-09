@@ -442,6 +442,7 @@ main :: proc() {
 	test.mse_train_test(context.temp_allocator)
 	test.xor_test(context.temp_allocator)
 	test.classification_test(context.temp_allocator)
+	test.adam_test(context.temp_allocator)
 	fmt.println("Demo End")
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
