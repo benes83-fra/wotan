@@ -163,3 +163,70 @@ mse_train_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("Weight: %.4f (Target: 2.0)\n", layer.weights.data.data[0])
 	fmt.printf("Bias:   %.4f (Target: 0.0)\n", layer.bias.data.data[0])
 }
+xor_test :: proc(allocator: mem.Allocator) {
+	fmt.println("\n=== Training MLP on XOR Problem ===")
+
+	// 1. Create Network: 2 inputs -> 4 hidden neurons -> 1 output
+	sizes := []int{2, 4, 1}
+	net := nn.mlp_new(sizes, allocator)
+	defer nn.mlp_free(&net)
+
+	// 2. Setup Optimizer (XOR requires a slightly higher learning rate)
+	opt := nn.sgd_new(0.5, allocator)
+	defer nn.sgd_free(&opt)
+	nn.mlp_add_to_opt(&net, &opt)
+
+	// 3. XOR Dataset
+	x_data := l.matrix_new(f64, 4, 2, allocator)
+	y_data := l.matrix_new(f64, 4, 1, allocator)
+
+	x_data.data[0] = 0; x_data.data[1] = 0; y_data.data[0] = 0
+	x_data.data[2] = 0; x_data.data[3] = 1; y_data.data[1] = 1
+	x_data.data[4] = 1; x_data.data[5] = 0; y_data.data[2] = 1
+	x_data.data[6] = 1; x_data.data[7] = 1; y_data.data[3] = 0
+
+	x := t.tensor_new(x_data, false, allocator)
+	target := t.tensor_new(y_data, false, allocator)
+	defer t.tensor_free(x)
+	defer t.tensor_free(target)
+
+	// 4. Training Loop
+	epochs := 2000
+	for epoch in 0 ..< epochs {
+		nn.sgd_zero_grad(&opt)
+
+		// Forward pass through the entire MLP
+		pred := nn.mlp_forward(&net, x)
+		loss := t.tensor_mse_loss(pred, target)
+
+		if epoch % 500 == 0 {
+			fmt.printf("Epoch %d | Loss: %.6f\n", epoch, loss.data.data[0])
+		}
+
+		// Backward pass (Chain rule through MatMul -> Relu -> MatMul -> MSE)
+		t.tensor_backward(loss)
+
+		// Optimizer step
+		nn.sgd_step(&opt)
+
+		// ✅ Graph Cleanup:
+		// This single call frees the 'pred', 'relu_out', and 'matmul_out'
+		// tensors created during this epoch, without touching 'x', 'target',
+		// or the network's weights/biases!
+		t.tensor_free_graph(loss)
+	}
+
+	// 5. Test the learned function
+	fmt.println("\nTesting XOR predictions:")
+	pred_final := nn.mlp_forward(&net, x)
+	for i in 0 ..< 4 {
+		fmt.printf(
+			"Input: [%.0f, %.0f] | Target: %.0f | Predicted: %.4f\n",
+			x.data.data[i * 2],
+			x.data.data[i * 2 + 1],
+			target.data.data[i],
+			pred_final.data.data[i],
+		)
+	}
+	t.tensor_free_graph(pred_final)
+}
