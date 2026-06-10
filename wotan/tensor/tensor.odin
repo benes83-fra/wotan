@@ -23,8 +23,17 @@ Op :: enum {
 	MSELoss,
 	CrossEntropy,
 	Dropout,
-	Conv2d, // ✅ ADD THIS
-	Flatten, // ✅ ADD THIS: Reshapes 4D tensor to 2D for linear layers
+	Conv2d,
+	Flatten,
+	MaxPool2d, // ✅ ADD THIS
+	AvgPool2d, // ✅ ADD THIS
+}
+
+PoolParams :: struct {
+	kH:     int,
+	kW:     int,
+	stride: int,
+	pad:    int,
 }
 
 Tensor :: struct {
@@ -36,8 +45,9 @@ Tensor :: struct {
 	allocator:     mem.Allocator,
 	int_metadata:  [dynamic]int,
 	dropout_mask:  []f64,
-	shape:         [4]int, // ✅ ADD THIS: (N, C, H, W) for conv tensors
-	conv_params:   ConvParams, // ✅ ADD THIS: Stores stride, pad, kernel size for backward pass
+	shape:         [4]int,
+	conv_params:   ConvParams,
+	pool_params:   PoolParams, // ✅ ADD THIS
 }
 
 ConvParams :: struct {
@@ -546,6 +556,52 @@ tensor_backward :: proc(root: ^Tensor) {
 				// Just reshape the gradient back to 4D
 				copy(a_in.grad.data, node.grad.data)
 			}
+		case .MaxPool2d:
+			// Route gradient ONLY to the index that was the maximum
+			a_in := node.inputs[0]
+			if a_in.requires_grad {
+				for i in 0 ..< len(node.grad.data) {
+					idx := node.int_metadata[i]
+					a_in.grad.data[idx] += node.grad.data[i]
+				}
+			}
+
+		case .AvgPool2d:
+			// Distribute gradient equally to all elements in the pooling window
+			a_in := node.inputs[0]
+			if a_in.requires_grad {
+				N := a_in.shape[0]
+				C := a_in.shape[1]
+				H := a_in.shape[2]
+				W := a_in.shape[3]
+				kH := node.pool_params.kH
+				kW := node.pool_params.kW
+				stride := node.pool_params.stride
+				out_h := node.shape[2]
+				out_w := node.shape[3]
+				pool_size := f64(kH * kW)
+
+				for n in 0 ..< N {
+					for c in 0 ..< C {
+						for oh in 0 ..< out_h {
+							for ow in 0 ..< out_w {
+								out_idx :=
+									n * (C * out_h * out_w) + c * (out_h * out_w) + oh * out_w + ow
+								grad := node.grad.data[out_idx] / pool_size
+
+								for kh in 0 ..< kH {
+									for kw in 0 ..< kW {
+										ih := oh * stride + kh
+										iw := ow * stride + kw
+										in_idx := n * (C * H * W) + c * (H * W) + ih * W + iw
+										a_in.grad.data[in_idx] += grad
+									}
+								}
+							}
+						}
+					}
+				}
+			}
 		case .Conv2d:
 			// Conv2d backward using im2col
 			input_in := node.inputs[0]
@@ -703,6 +759,111 @@ tensor_backward :: proc(root: ^Tensor) {
 		// Leaf node, nothing to do
 		}
 	}
+}
+// tensor_max_pool2d performs max pooling.
+// input: (N, C, H, W) -> output: (N, C, H_out, W_out)
+tensor_max_pool2d :: proc(input: ^Tensor, kH, kW, stride: int) -> ^Tensor {
+	N := input.shape[0]
+	C := input.shape[1]
+	H := input.shape[2]
+	W := input.shape[3]
+
+	out_h := (H - kH) / stride + 1
+	out_w := (W - kW) / stride + 1
+
+	out_data := l.matrix_new(f64, 1, N * C * out_h * out_w, input.allocator)
+
+	// We need to store the indices of the max values for the backward pass
+	indices := make([]int, N * C * out_h * out_w, input.allocator)
+
+	for n in 0 ..< N {
+		for c in 0 ..< C {
+			for oh in 0 ..< out_h {
+				for ow in 0 ..< out_w {
+					max_val := -math.F64_MAX
+					max_idx := 0
+
+					for kh in 0 ..< kH {
+						for kw in 0 ..< kW {
+							ih := oh * stride + kh
+							iw := ow * stride + kw
+							idx := n * (C * H * W) + c * (H * W) + ih * W + iw
+							val := input.data.data[idx]
+							if val > max_val {
+								max_val = val
+								max_idx = idx
+							}
+						}
+					}
+
+					out_idx := n * (C * out_h * out_w) + c * (out_h * out_w) + oh * out_w + ow
+					out_data.data[out_idx] = max_val
+					indices[out_idx] = max_idx
+				}
+			}
+		}
+	}
+
+	out := tensor_new(out_data, input.requires_grad, input.allocator)
+	out.shape = [4]int{N, C, out_h, out_w}
+
+	if out.requires_grad {
+		out.op = .MaxPool2d
+		append(&out.inputs, input)
+		out.pool_params = PoolParams{kH, kW, stride, 0}
+
+		// Save indices to int_metadata for backward pass
+		for idx in indices {
+			append(&out.int_metadata, idx)
+		}
+	}
+
+	delete(indices, input.allocator)
+	return out
+}
+// tensor_avg_pool2d performs average pooling.
+tensor_avg_pool2d :: proc(input: ^Tensor, kH, kW, stride: int) -> ^Tensor {
+	N := input.shape[0]
+	C := input.shape[1]
+	H := input.shape[2]
+	W := input.shape[3]
+
+	out_h := (H - kH) / stride + 1
+	out_w := (W - kW) / stride + 1
+
+	out_data := l.matrix_new(f64, 1, N * C * out_h * out_w, input.allocator)
+	pool_size := f64(kH * kW)
+
+	for n in 0 ..< N {
+		for c in 0 ..< C {
+			for oh in 0 ..< out_h {
+				for ow in 0 ..< out_w {
+					sum := 0.0
+					for kh in 0 ..< kH {
+						for kw in 0 ..< kW {
+							ih := oh * stride + kh
+							iw := ow * stride + kw
+							idx := n * (C * H * W) + c * (H * W) + ih * W + iw
+							sum += input.data.data[idx]
+						}
+					}
+					out_idx := n * (C * out_h * out_w) + c * (out_h * out_w) + oh * out_w + ow
+					out_data.data[out_idx] = sum / pool_size
+				}
+			}
+		}
+	}
+
+	out := tensor_new(out_data, input.requires_grad, input.allocator)
+	out.shape = [4]int{N, C, out_h, out_w}
+
+	if out.requires_grad {
+		out.op = .AvgPool2d
+		append(&out.inputs, input)
+		out.pool_params = PoolParams{kH, kW, stride, 0}
+	}
+
+	return out
 }
 // tensor_conv2d performs 2D convolution using im2col + SIMD matmul
 // input: (N, C_in, H, W)

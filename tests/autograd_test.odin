@@ -351,3 +351,78 @@ conv2d_test :: proc(allocator: mem.Allocator) {
 		fmt.println("")
 	}
 }
+pooling_test :: proc(allocator: mem.Allocator) {
+	fmt.println("\n=== Testing Pooling Layers ===")
+
+	// Create a 4x4 input image (1 channel, batch size 1)
+	input := t.tensor_new_4d(1, 1, 4, 4, true, allocator)
+	defer t.tensor_free(input)
+
+	// Fill with a simple gradient pattern
+	for i in 0 ..< 16 {
+		input.data.data[i] = f64(i)
+	}
+
+	fmt.println("Input (4x4):")
+	for i in 0 ..< 4 {
+		for j in 0 ..< 4 {
+			fmt.printf("%.0f ", input.data.data[i * 4 + j])
+		}
+		fmt.println("")
+	}
+
+	// 1. Max Pooling (2x2, stride 2)
+	fmt.println("\n--- Max Pool 2x2 ---")
+	max_out := t.tensor_max_pool2d(input, 2, 2, 2)
+	defer t.tensor_free(max_out)
+
+	fmt.println("Max Pool Output (2x2):")
+	for i in 0 ..< 2 {
+		for j in 0 ..< 2 {
+			fmt.printf("%.0f ", max_out.data.data[i * 2 + j])
+		}
+		fmt.println("")
+	}
+
+	// Backward pass for Max Pool
+	loss_max := t.tensor_sum(max_out)
+	defer t.tensor_free(loss_max)
+	t.tensor_backward(loss_max)
+
+	fmt.println("Gradient w.r.t Input (Max Pool):")
+	for i in 0 ..< 4 {
+		for j in 0 ..< 4 {
+			fmt.printf("%.0f ", input.grad.data[i * 4 + j])
+		}
+		fmt.println("")
+	}
+
+	// Zero out gradients for next test
+	t.tensor_zero_grad(input)
+
+	// 2. Average Pooling (2x2, stride 2)
+	fmt.println("\n--- Avg Pool 2x2 ---")
+	avg_out := t.tensor_avg_pool2d(input, 2, 2, 2)
+	defer t.tensor_free(avg_out)
+
+	fmt.println("Avg Pool Output (2x2):")
+	for i in 0 ..< 2 {
+		for j in 0 ..< 2 {
+			fmt.printf("%.1f ", avg_out.data.data[i * 2 + j])
+		}
+		fmt.println("")
+	}
+
+	// Backward pass for Avg Pool
+	loss_avg := t.tensor_sum(avg_out)
+	defer t.tensor_free(loss_avg)
+	t.tensor_backward(loss_avg)
+
+	fmt.println("Gradient w.r.t Input (Avg Pool):")
+	for i in 0 ..< 4 {
+		for j in 0 ..< 4 {
+			fmt.printf("%.2f ", input.grad.data[i * 4 + j])
+		}
+		fmt.println("")
+	}
+}
