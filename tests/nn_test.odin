@@ -599,3 +599,62 @@ flexible_network_test :: proc(allocator: mem.Allocator) {
 
 	t.tensor_free_graph(out)
 }
+sequential_test :: proc(allocator: mem.Allocator) {
+	fmt.println("\n=== Testing Sequential Container ===")
+
+	model := nn.sequential_new(allocator)
+	defer nn.sequential_free(&model)
+
+	nn.sequential_add(
+		&model,
+		nn.conv2d_layer_new(1, 8, 3, 1, 0, true, allocator),
+		nn.Activation.ReLU,
+		nn.maxpool2d_layer_new(2, 2),
+		nn.FlattenLayer{},
+		nn.linear_layer_new(32, 10, allocator),
+	)
+
+	input := t.tensor_new_4d(2, 1, 6, 6, false, allocator)
+	defer t.tensor_free(input)
+
+	for i in 0 ..< len(input.data.data) {
+		input.data.data[i] = f64(i) / 100.0
+	}
+
+	fmt.printf(
+		"Input shape: %dx%dx%dx%d\n",
+		input.shape[0],
+		input.shape[1],
+		input.shape[2],
+		input.shape[3],
+	)
+
+	output := nn.sequential_forward(&model, input)
+	// ❌ REMOVE THIS: defer t.tensor_free_graph(output)
+
+	fmt.printf("Output shape: %dx%d\n", output.data.rows, output.data.cols)
+
+	opt := nn.adam_new(0.001, allocator = allocator)
+	defer nn.adam_free(&opt)
+
+	nn.sequential_add_to_opt(&model, &opt)
+	fmt.printf("Optimizer registered %d parameter tensors\n", len(opt.parameters))
+
+	target_data := l.matrix_new(f64, output.data.rows, output.data.cols, allocator)
+	defer l.matrix_free(&target_data)
+	for i in 0 ..< len(target_data.data) {
+		target_data.data[i] = 0.0
+	}
+	target := t.tensor_new(target_data, false, allocator)
+	defer t.tensor_free(target)
+
+	loss := t.tensor_mse_loss(output, target)
+	defer t.tensor_free_graph(loss) // ✅ This frees output and all intermediates
+
+	fmt.printf("Initial loss: %.4f\n", loss.data.data[0])
+
+	t.tensor_backward(loss)
+	nn.adam_step(&opt)
+
+	fmt.println("✓ Backward pass and optimizer step completed successfully")
+}

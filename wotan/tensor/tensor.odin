@@ -196,7 +196,7 @@ tensor_relu :: proc(a: ^Tensor) -> ^Tensor {
 
 	// 2. Create output tensor
 	out := tensor_new(out_data, a.requires_grad, a.allocator)
-
+	out.shape = a.shape
 	// 3. Record graph
 	if out.requires_grad {
 		out.op = .Relu
@@ -308,6 +308,8 @@ tensor_sigmoid :: proc(a: ^Tensor) -> ^Tensor {
 	}
 
 	out := tensor_new(out_data, a.requires_grad, a.allocator)
+	out.shape = a.shape
+
 	if out.requires_grad {
 		out.op = .Sigmoid
 		append(&out.inputs, a)
@@ -325,6 +327,8 @@ tensor_tanh :: proc(a: ^Tensor) -> ^Tensor {
 	}
 
 	out := tensor_new(out_data, a.requires_grad, a.allocator)
+	out.shape = a.shape
+
 	if out.requires_grad {
 		out.op = .Tanh
 		append(&out.inputs, a)
@@ -343,6 +347,8 @@ tensor_leaky_relu :: proc(a: ^Tensor, alpha: f64 = 0.01) -> ^Tensor {
 	}
 
 	out := tensor_new(out_data, a.requires_grad, a.allocator)
+	out.shape = a.shape
+
 	if out.requires_grad {
 		out.op = .LeakyReLU
 		append(&out.inputs, a)
