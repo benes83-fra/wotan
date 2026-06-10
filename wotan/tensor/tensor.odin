@@ -19,14 +19,17 @@ Op :: enum {
 	MatMul,
 	Sum,
 	Relu,
+	Sigmoid, // ✅ ADD
+	Tanh, // ✅ ADD
+	LeakyReLU, // ✅ ADD
 	AddBias,
 	MSELoss,
 	CrossEntropy,
 	Dropout,
 	Conv2d,
 	Flatten,
-	MaxPool2d, // ✅ ADD THIS
-	AvgPool2d, // ✅ ADD THIS
+	MaxPool2d,
+	AvgPool2d,
 }
 
 PoolParams :: struct {
@@ -295,6 +298,59 @@ tensor_mse_loss :: proc(pred: ^Tensor, target: ^Tensor) -> ^Tensor {
 	return out
 }
 
+// tensor_sigmoid applies σ(x) = 1 / (1 + exp(-x))
+tensor_sigmoid :: proc(a: ^Tensor) -> ^Tensor {
+	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
+	n := len(a.data.data)
+
+	for i in 0 ..< n {
+		out_data.data[i] = 1.0 / (1.0 + math.exp(-a.data.data[i]))
+	}
+
+	out := tensor_new(out_data, a.requires_grad, a.allocator)
+	if out.requires_grad {
+		out.op = .Sigmoid
+		append(&out.inputs, a)
+	}
+	return out
+}
+
+// tensor_tanh applies tanh(x)
+tensor_tanh :: proc(a: ^Tensor) -> ^Tensor {
+	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
+	n := len(a.data.data)
+
+	for i in 0 ..< n {
+		out_data.data[i] = math.tanh(a.data.data[i])
+	}
+
+	out := tensor_new(out_data, a.requires_grad, a.allocator)
+	if out.requires_grad {
+		out.op = .Tanh
+		append(&out.inputs, a)
+	}
+	return out
+}
+
+// tensor_leaky_relu applies max(α*x, x) where α is small (e.g., 0.01)
+tensor_leaky_relu :: proc(a: ^Tensor, alpha: f64 = 0.01) -> ^Tensor {
+	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
+	n := len(a.data.data)
+
+	for i in 0 ..< n {
+		v := a.data.data[i]
+		out_data.data[i] = v > 0.0 ? v : alpha * v
+	}
+
+	out := tensor_new(out_data, a.requires_grad, a.allocator)
+	if out.requires_grad {
+		out.op = .LeakyReLU
+		append(&out.inputs, a)
+	}
+	return out
+}
+
+
 // tensor_cross_entropy_loss calculates the loss for multi-class classification.
 tensor_cross_entropy_loss :: proc(logits: ^Tensor, target_indices: []int) -> ^Tensor {
 	if len(target_indices) != logits.data.rows {
@@ -471,6 +527,39 @@ tensor_backward :: proc(root: ^Tensor) {
 			if a_in.requires_grad {
 				// ✅ SIMD Optimization: Use the SIMD backward function
 				l.vec_relu_backward_simd(node.grad.data, a_in.data.data, a_in.grad.data)
+			}
+		case .Sigmoid:
+			// d/dx σ(x) = σ(x) * (1 - σ(x))
+			a_in := node.inputs[0]
+			if a_in.requires_grad {
+				for i in 0 ..< len(a_in.grad.data) {
+					s := a_in.data.data[i] // already σ(x) from forward
+					a_in.grad.data[i] += node.grad.data[i] * s * (1.0 - s)
+				}
+			}
+
+		case .Tanh:
+			// d/dx tanh(x) = 1 - tanh²(x)
+			a_in := node.inputs[0]
+			if a_in.requires_grad {
+				for i in 0 ..< len(a_in.grad.data) {
+					t := a_in.data.data[i] // already tanh(x) from forward
+					a_in.grad.data[i] += node.grad.data[i] * (1.0 - t * t)
+				}
+			}
+
+		case .LeakyReLU:
+			// d/dx = 1 if x > 0 else α
+			a_in := node.inputs[0]
+			if a_in.requires_grad {
+				alpha := 0.01 // or store in Tensor struct
+				for i in 0 ..< len(a_in.grad.data) {
+					if a_in.data.data[i] > 0.0 {
+						a_in.grad.data[i] += node.grad.data[i]
+					} else {
+						a_in.grad.data[i] += node.grad.data[i] * alpha
+					}
+				}
 			}
 		case .AddBias:
 			// C = A + bias (broadcasted)

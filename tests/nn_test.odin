@@ -171,7 +171,7 @@ xor_test :: proc(allocator: mem.Allocator) {
 
 	// 1. Create Network: 2 inputs -> 4 hidden neurons -> 1 output
 	sizes := []int{2, 4, 1}
-	net := nn.mlp_new(sizes, allocator)
+	net := nn.mlp_new(sizes, allocator = allocator)
 	defer nn.mlp_free(&net)
 
 	// 2. Setup Optimizer (XOR requires a slightly higher learning rate)
@@ -238,7 +238,7 @@ classification_test :: proc(allocator: mem.Allocator) {
 
 	// 1. Create Network: 2 inputs -> 8 hidden -> 3 classes
 	sizes := []int{2, 8, 3}
-	net := nn.mlp_new(sizes, allocator)
+	net := nn.mlp_new(sizes, allocator = allocator)
 	defer nn.mlp_free(&net)
 
 	opt := nn.sgd_new(0.1, allocator)
@@ -341,7 +341,7 @@ adam_test :: proc(allocator: mem.Allocator) {
 
 	// Test 1: SGD
 	fmt.println("\n--- Training with SGD (lr=0.5) ---")
-	net_sgd := nn.mlp_new(sizes, allocator)
+	net_sgd := nn.mlp_new(sizes, allocator = allocator)
 	opt_sgd := nn.sgd_new(0.5, allocator)
 	nn.mlp_add_to_opt(&net_sgd, &opt_sgd)
 
@@ -364,7 +364,7 @@ adam_test :: proc(allocator: mem.Allocator) {
 
 	// Test 2: Adam
 	fmt.println("\n--- Training with Adam (lr=0.01) ---")
-	net_adam := nn.mlp_new(sizes, allocator)
+	net_adam := nn.mlp_new(sizes, allocator = allocator)
 	opt_adam := nn.adam_new(0.01, allocator = allocator) // Lower learning rate, Adam is more stable
 	nn.mlp_add_to_opt(&net_adam, &opt_adam)
 
@@ -418,7 +418,7 @@ adam_classification_test :: proc(allocator: mem.Allocator) {
 
 	// Test SGD
 	fmt.println("\n--- SGD (lr=0.1) ---")
-	net_sgd := nn.mlp_new(sizes, allocator)
+	net_sgd := nn.mlp_new(sizes, allocator = allocator)
 	opt_sgd := nn.sgd_new(0.1, allocator)
 	nn.mlp_add_to_opt(&net_sgd, &opt_sgd)
 
@@ -441,7 +441,7 @@ adam_classification_test :: proc(allocator: mem.Allocator) {
 
 	// Test Adam
 	fmt.println("\n--- Adam (lr=0.01) ---")
-	net_adam := nn.mlp_new(sizes, allocator)
+	net_adam := nn.mlp_new(sizes, allocator = allocator)
 	opt_adam := nn.adam_new(0.01, allocator = allocator)
 	nn.mlp_add_to_opt(&net_adam, &opt_adam)
 
@@ -490,7 +490,7 @@ dropout_test :: proc(allocator: mem.Allocator) {
 
 	// Test 1: No Dropout
 	fmt.println("\n--- No Dropout (Overfitting likely) ---")
-	net1 := nn.mlp_new(sizes, allocator)
+	net1 := nn.mlp_new(sizes, allocator = allocator)
 	opt1 := nn.adam_new(0.01, allocator = allocator)
 	nn.mlp_add_to_opt(&net1, &opt1)
 
@@ -509,7 +509,7 @@ dropout_test :: proc(allocator: mem.Allocator) {
 
 	// Test 2: With Dropout
 	fmt.println("\n--- With Dropout (p=0.3) ---")
-	net2 := nn.mlp_new(sizes, allocator)
+	net2 := nn.mlp_new(sizes, allocator = allocator)
 	opt2 := nn.adam_new(0.01, allocator = allocator)
 	nn.mlp_add_to_opt(&net2, &opt2)
 
@@ -525,4 +525,77 @@ dropout_test :: proc(allocator: mem.Allocator) {
 	}
 	nn.mlp_free(&net2)
 	nn.adam_free(&opt2)
+}
+flexible_network_test :: proc(allocator: mem.Allocator) {
+	fmt.println("\n=== Testing Flexible Network Architecture ===")
+
+	// Test 1: MLP with Tanh activation
+	fmt.println("\n--- MLP with Tanh ---")
+	net_tanh := nn.mlp_new([]int{2, 8, 1}, .Tanh, allocator)
+	defer nn.mlp_free(&net_tanh)
+
+	x_data := l.matrix_new(f64, 4, 2, allocator)
+	x_data.data[0] = 0; x_data.data[1] = 0
+	x_data.data[2] = 0; x_data.data[3] = 1
+	x_data.data[4] = 1; x_data.data[5] = 0
+	x_data.data[6] = 1; x_data.data[7] = 1
+	x := t.tensor_new(x_data, false, allocator)
+	defer t.tensor_free(x)
+
+	y_data := l.matrix_new(f64, 4, 1, allocator)
+	y_data.data[0] = 0; y_data.data[1] = 1; y_data.data[2] = 1; y_data.data[3] = 0
+	y := t.tensor_new(y_data, false, allocator)
+	defer t.tensor_free(y)
+
+	opt := nn.adam_new(0.01, allocator = allocator)
+	defer nn.adam_free(&opt)
+	nn.mlp_add_to_opt(&net_tanh, &opt)
+
+	for epoch in 0 ..< 100 {
+		nn.adam_zero_grad(&opt)
+		pred := nn.mlp_forward(&net_tanh, x)
+		loss := t.tensor_mse_loss(pred, y)
+		if epoch % 25 == 0 {
+			fmt.printf("Epoch %d | Loss: %.4f\n", epoch, loss.data.data[0])
+		}
+		t.tensor_backward(loss)
+		nn.adam_step(&opt)
+		t.tensor_free_graph(loss)
+	}
+
+	// Test 2: Manual CNN composition
+	fmt.println("\n--- Manual CNN Composition ---")
+	conv1 := nn.conv2d_layer_new(1, 8, 3, 1, 0, true, allocator)
+	defer nn.conv2d_layer_free(&conv1)
+
+	pool1 := nn.maxpool2d_layer_new(2, 2)
+
+	// Create a dummy 4x4 input
+	input := t.tensor_new_4d(1, 1, 4, 4, false, allocator)
+	defer t.tensor_free(input)
+	for i in 0 ..< 16 {
+		input.data.data[i] = f64(i) / 16.0
+	}
+
+	// Forward pass: Conv → ReLU → Pool
+	out := nn.conv2d_layer_forward(&conv1, input)
+	out = t.tensor_relu(out)
+	out = nn.maxpool2d_layer_forward(&pool1, out)
+
+	fmt.printf(
+		"Input shape: %dx%dx%dx%d\n",
+		input.shape[0],
+		input.shape[1],
+		input.shape[2],
+		input.shape[3],
+	)
+	fmt.printf(
+		"Output shape after Conv→ReLU→Pool: %dx%dx%dx%d\n",
+		out.shape[0],
+		out.shape[1],
+		out.shape[2],
+		out.shape[3],
+	)
+
+	t.tensor_free_graph(out)
 }
