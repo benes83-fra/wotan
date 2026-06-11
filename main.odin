@@ -449,6 +449,7 @@ main :: proc() {
 	test.pooling_test(context.temp_allocator)
 	test.flexible_network_test(context.temp_allocator)
 	test.sequential_test(context.temp_allocator)
+	test.mnist_loader_test(context.temp_allocator)
 	fmt.println("Demo End")
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
