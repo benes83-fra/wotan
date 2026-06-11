@@ -66,12 +66,8 @@ conv2d_layer_new :: proc(
 	layer.padding = padding
 
 	// Initialize weights with Xavier initialization
-	w_data := l.matrix_new(
-		f64,
-		1,
-		out_channels * in_channels * kernel_size * kernel_size,
-		allocator,
-	)
+	col_w := in_channels * kernel_size * kernel_size
+	w_data := l.matrix_new(f64, out_channels, col_w, allocator)
 	fan_in := in_channels * kernel_size * kernel_size
 	fan_out := out_channels * kernel_size * kernel_size
 	limit := math.sqrt(6.0 / f64(fan_in + fan_out))

@@ -1,8 +1,10 @@
 package tests
 
 import data "../wotan/data"
+import nn "../wotan/nn"
 import t "../wotan/tensor"
 import "core:fmt"
+import "core:math"
 import "core:mem"
 
 mnist_loader_test :: proc(allocator: mem.Allocator) {
@@ -74,4 +76,92 @@ mnist_loader_test :: proc(allocator: mem.Allocator) {
 	defer data.mnist_free(&test_set)
 
 	fmt.printf("\nLoaded %d test samples\n", test_set.num_samples)
+}
+mnist_cnn_test :: proc(allocator: mem.Allocator) {
+	fmt.println("\n=== Training CNN on MNIST ===")
+
+	train_set, ok := data.mnist_load(
+		"data/mnist/train-images-idx3-ubyte",
+		"data/mnist/train-labels-idx1-ubyte",
+		allocator,
+	)
+	if !ok {return}
+	defer data.mnist_free(&train_set)
+
+	model := nn.sequential_new(allocator)
+	defer nn.sequential_free(&model)
+
+	nn.sequential_add(
+		&model,
+		nn.conv2d_layer_new(1, 6, 5, 1, 0, true, allocator),
+		nn.Activation.ReLU,
+		nn.maxpool2d_layer_new(2, 2),
+		nn.conv2d_layer_new(6, 16, 5, 1, 0, true, allocator),
+		nn.Activation.ReLU,
+		nn.maxpool2d_layer_new(2, 2),
+		nn.FlattenLayer{},
+		nn.linear_layer_new(256, 120, allocator),
+		nn.Activation.ReLU,
+		nn.linear_layer_new(120, 84, allocator),
+		nn.Activation.ReLU,
+		nn.linear_layer_new(84, 10, allocator),
+	)
+
+	opt := nn.adam_new(0.001, allocator = allocator)
+	defer nn.adam_free(&opt)
+	nn.sequential_add_to_opt(&model, &opt)
+
+	batch_size := 64
+	epochs := 5
+	num_batches := train_set.num_samples / batch_size
+
+	for epoch in 0 ..< epochs {
+		epoch_loss := 0.0
+		correct := 0
+		total := 0
+
+		for i in 0 ..< num_batches {
+			// Get batch
+			batch_imgs, batch_labs := data.mnist_get_batch(
+				&train_set,
+				i * batch_size,
+				batch_size,
+				allocator,
+			)
+
+			// Forward pass
+			nn.adam_zero_grad(&opt)
+			output := nn.sequential_forward(&model, batch_imgs)
+			loss := t.tensor_cross_entropy_loss(output, batch_labs)
+
+			// Track metrics
+			epoch_loss += loss.data.data[0]
+
+			for j in 0 ..< batch_size {
+				pred_class := 0
+				max_val := -math.F64_MAX
+				for k in 0 ..< 10 {
+					if output.data.data[j * 10 + k] > max_val {
+						max_val = output.data.data[j * 10 + k]
+						pred_class = k
+					}
+				}
+				if pred_class == batch_labs[j] {correct += 1}
+				total += 1
+			}
+
+			// Backward pass
+			t.tensor_backward(loss)
+			nn.adam_step(&opt)
+
+			// ✅ Explicit cleanup in correct order
+			t.tensor_free_graph(loss) // Free computation graph
+			t.tensor_free(batch_imgs) // Free batch images
+			delete(batch_labs, allocator) // Free batch labels
+		}
+
+		avg_loss := epoch_loss / f64(num_batches)
+		accuracy := f64(correct) / f64(total) * 100.0
+		fmt.printf("Epoch %d | Loss: %.4f | Accuracy: %.2f%%\n", epoch, avg_loss, accuracy)
+	}
 }

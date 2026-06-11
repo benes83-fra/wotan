@@ -68,6 +68,13 @@ tensor_new :: proc(
 	requires_grad: bool = false,
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
+	if len(data.data) == 0 {
+		fmt.printf(
+			"WARNING: Creating tensor with empty data! rows=%d, cols=%d\n",
+			data.rows,
+			data.cols,
+		)
+	}
 	t := new(Tensor, allocator)
 	t.data = data
 	t.requires_grad = requires_grad
@@ -443,11 +450,18 @@ _build_topo :: proc(node: ^Tensor, topo: ^[dynamic]^Tensor, visited: ^map[^Tenso
 
 	append(topo, node)
 }
+// tensor_ensure_grad ensures a tensor has a gradient matrix allocated
+tensor_ensure_grad :: proc(t: ^Tensor) {
+	if t.requires_grad && t.grad.data == nil {
+		t.grad = l.matrix_new(f64, t.data.rows, t.data.cols, t.allocator)
+	}
+}
 
 tensor_backward :: proc(root: ^Tensor) {
 	if !root.requires_grad {return}
 
 	// 1. Set the gradient of the root node to 1.0
+	tensor_ensure_grad(root)
 	for i in 0 ..< len(root.grad.data) {
 		root.grad.data[i] = 1.0
 	}
@@ -466,13 +480,22 @@ tensor_backward :: proc(root: ^Tensor) {
 		node := topo[i]
 
 		if !node.requires_grad {continue}
+		// ✅ CRITICAL: Ensure this node has a gradient allocated
+		tensor_ensure_grad(node)
 
+		// ✅ CRITICAL: Skip if gradient is still empty (shouldn't happen, but defensive)
+		if len(node.grad.data) == 0 {
+			fmt.printf("WARNING: Skipping node with op %v - empty gradient\n", node.op)
+			continue
+		}
 		switch node.op {
 		case .Add:
 			for input in node.inputs {
 				if input.requires_grad {
-					// ✅ SIMD Optimization: y += 1.0 * x
-					l.axpy_simd(1.0, node.grad.data, input.grad.data)
+					tensor_ensure_grad(input)
+					if len(input.grad.data) > 0 {
+						l.axpy_simd(1.0, node.grad.data, input.grad.data)
+					}
 				}
 			}
 		case .Mul:
@@ -480,40 +503,41 @@ tensor_backward :: proc(root: ^Tensor) {
 			b_in := node.inputs[1]
 
 			if a_in.requires_grad {
-				// ✅ SIMD Optimization: grad_a += grad_c * b
-				l.vec_fma_inplace_simd(node.grad.data, b_in.data.data, a_in.grad.data)
+				tensor_ensure_grad(a_in)
+				if len(a_in.grad.data) > 0 {
+					l.vec_fma_inplace_simd(node.grad.data, b_in.data.data, a_in.grad.data)
+				}
 			}
 			if b_in.requires_grad {
-				// ✅ SIMD Optimization: grad_b += grad_c * a
-				l.vec_fma_inplace_simd(node.grad.data, a_in.data.data, b_in.grad.data)
+				tensor_ensure_grad(b_in)
+				if len(b_in.grad.data) > 0 {
+					l.vec_fma_inplace_simd(node.grad.data, a_in.data.data, b_in.grad.data)
+				}
 			}
 		case .MatMul:
-			// C = A @ B
-			// dA = dC @ B^T
-			// dB = A^T @ dC
 			a_in := node.inputs[0]
 			b_in := node.inputs[1]
 
 			if a_in.requires_grad {
-				bt := _matrix_transpose(b_in.data, node.allocator)
-				grad_a := l.matmul_dyn_simd(&node.grad, &bt, node.allocator)
-
-				// Add to existing gradient
-				l.vec_add_simd(a_in.grad.data, grad_a.data, a_in.grad.data)
-
-				l.matrix_free(&bt)
-				l.matrix_free(&grad_a)
+				tensor_ensure_grad(a_in)
+				if len(a_in.grad.data) > 0 && len(node.grad.data) > 0 {
+					bt := _matrix_transpose(b_in.data, node.allocator)
+					grad_a := l.matmul_dyn_simd(&node.grad, &bt, node.allocator)
+					l.vec_add_simd(a_in.grad.data, grad_a.data, a_in.grad.data)
+					l.matrix_free(&bt)
+					l.matrix_free(&grad_a)
+				}
 			}
 
 			if b_in.requires_grad {
-				at := _matrix_transpose(a_in.data, node.allocator)
-				grad_b := l.matmul_dyn_simd(&at, &node.grad, node.allocator)
-
-				// Add to existing gradient
-				l.vec_add_simd(b_in.grad.data, grad_b.data, b_in.grad.data)
-
-				l.matrix_free(&at)
-				l.matrix_free(&grad_b)
+				tensor_ensure_grad(b_in)
+				if len(b_in.grad.data) > 0 && len(node.grad.data) > 0 {
+					at := _matrix_transpose(a_in.data, node.allocator)
+					grad_b := l.matmul_dyn_simd(&at, &node.grad, node.allocator)
+					l.vec_add_simd(b_in.grad.data, grad_b.data, b_in.grad.data)
+					l.matrix_free(&at)
+					l.matrix_free(&grad_b)
+				}
 			}
 		case .Sum:
 			// L = sum(A)
@@ -521,6 +545,10 @@ tensor_backward :: proc(root: ^Tensor) {
 			// We just broadcast the incoming scalar gradient to the shape of A.
 			a_in := node.inputs[0]
 			if a_in.requires_grad {
+				if len(node.grad.data) == 0 {
+					fmt.println("ERROR: Sum grad.data is empty")
+					continue
+				}
 				scalar_grad := node.grad.data[0]
 				for j in 0 ..< len(a_in.grad.data) {
 					a_in.grad.data[j] += scalar_grad
@@ -594,6 +622,10 @@ tensor_backward :: proc(root: ^Tensor) {
 			target_in := node.inputs[1]
 
 			if pred_in.requires_grad {
+				if len(node.grad.data) == 0 {
+					fmt.println("WARNING: MSELoss node has empty gradient, skipping")
+					continue
+				}
 				n := f64(len(pred_in.data.data))
 				scalar_grad := node.grad.data[0] // Usually 1.0
 				scale := 2.0 * scalar_grad / n
@@ -611,8 +643,19 @@ tensor_backward :: proc(root: ^Tensor) {
 			logits_in := node.inputs[0]
 			N := logits_in.data.rows
 			C := logits_in.data.cols
+			if len(node.grad.data) == 0 {
+				fmt.println("WARNING: CrossEntropy node has empty gradient, skipping")
+				continue
+			}
 			scalar_grad := node.grad.data[0] // Usually 1.0
-
+			if len(node.int_metadata) < N {
+				fmt.printf(
+					"ERROR: CrossEntropy int_metadata length %d < N %d\n",
+					len(node.int_metadata),
+					N,
+				)
+				continue
+			}
 			for i in 0 ..< N {
 				// Recompute softmax for stability
 				max_val := -math.F64_MAX
@@ -652,11 +695,29 @@ tensor_backward :: proc(root: ^Tensor) {
 				copy(a_in.grad.data, node.grad.data)
 			}
 		case .MaxPool2d:
-			// Route gradient ONLY to the index that was the maximum
 			a_in := node.inputs[0]
 			if a_in.requires_grad {
+				// ✅ ADD: Bounds check
+				if len(node.int_metadata) != len(node.grad.data) {
+					fmt.printf(
+						"ERROR: MaxPool2d int_metadata length %d != grad length %d\n",
+						len(node.int_metadata),
+						len(node.grad.data),
+					)
+					continue
+				}
+
 				for i in 0 ..< len(node.grad.data) {
 					idx := node.int_metadata[i]
+					// ✅ ADD: Bounds check for idx
+					if idx >= len(a_in.grad.data) {
+						fmt.printf(
+							"ERROR: MaxPool2d idx %d >= grad length %d\n",
+							idx,
+							len(a_in.grad.data),
+						)
+						continue
+					}
 					a_in.grad.data[idx] += node.grad.data[i]
 				}
 			}
@@ -698,12 +759,17 @@ tensor_backward :: proc(root: ^Tensor) {
 				}
 			}
 		case .Conv2d:
-			// Conv2d backward using im2col
 			input_in := node.inputs[0]
 			weight_in := node.inputs[1]
 			bias_in: ^Tensor = nil
 			if len(node.inputs) > 2 {
 				bias_in = node.inputs[2]
+			}
+
+			// ✅ CRITICAL: Check that we have valid gradient data
+			if len(node.grad.data) == 0 {
+				fmt.println("WARNING: Conv2d node has empty gradient, skipping")
+				continue
 			}
 
 			N := input_in.shape[0]
@@ -722,7 +788,6 @@ tensor_backward :: proc(root: ^Tensor) {
 			col_h := out_h * out_w
 			col_w := C_in * kH * kW
 
-			// Recompute im2col for input
 			col, _, _ := _im2col(
 				input_in.data.data,
 				N,
@@ -737,115 +802,129 @@ tensor_backward :: proc(root: ^Tensor) {
 			)
 			defer delete(col, context.temp_allocator)
 
-			// Gradient w.r.t. input: col2im(weight^T @ grad_output_col)
 			if input_in.requires_grad {
-				grad_input_col := make([]f64, N * col_w * col_h, context.temp_allocator)
+				tensor_ensure_grad(input_in)
+				if len(input_in.grad.data) > 0 {
+					grad_input_col := make([]f64, N * col_w * col_h, context.temp_allocator)
 
-				weight_2d_t := _matrix_transpose(weight_in.data, context.temp_allocator)
-				defer l.matrix_free(&weight_2d_t)
+					weight_2d_t := _matrix_transpose(weight_in.data, context.temp_allocator)
+					defer l.matrix_free(&weight_2d_t)
 
-				for n in 0 ..< N {
-					// grad_output for this sample: (C_out, col_h)
-					grad_out_start := n * C_out * col_h
-					grad_out_2d := l.Matrix(f64) {
-						rows = C_out,
-						cols = col_h,
-						data = node.grad.data[grad_out_start:grad_out_start + C_out * col_h],
-					}
-
-					// (col_w, C_out) @ (C_out, col_h) -> (col_w, col_h)
-					grad_col_2d := l.matmul_dyn_simd(
-						&weight_2d_t,
-						&grad_out_2d,
-						context.temp_allocator,
-					)
-
-					// Copy to grad_input_col
-					col_start := n * col_w * col_h
-					copy(grad_input_col[col_start:col_start + col_w * col_h], grad_col_2d.data)
-					l.matrix_free(&grad_col_2d)
-				}
-
-				// col2im to get grad_input
-				grad_input := _col2im(
-					grad_input_col,
-					N,
-					C_in,
-					H,
-					W,
-					kH,
-					kW,
-					stride,
-					pad,
-					out_h,
-					out_w,
-					context.temp_allocator,
-				)
-				defer delete(grad_input, context.temp_allocator)
-
-				// Add to input gradient
-				for i in 0 ..< len(input_in.grad.data) {
-					input_in.grad.data[i] += grad_input[i]
-				}
-
-				delete(grad_input_col, context.temp_allocator)
-			}
-
-			// Gradient w.r.t. weight: grad_output_col @ col^T (summed over batch)
-			if weight_in.requires_grad {
-				grad_weight := make([]f64, len(weight_in.data.data), context.temp_allocator)
-				defer delete(grad_weight, context.temp_allocator)
-
-				for n in 0 ..< N {
-					// grad_output: (C_out, col_h)
-					grad_out_start := n * C_out * col_h
-					grad_out_2d := l.Matrix(f64) {
-						rows = C_out,
-						cols = col_h,
-						data = node.grad.data[grad_out_start:grad_out_start + C_out * col_h],
-					}
-
-					// col for this sample: (col_w, col_h)
-					col_start := n * col_w * col_h
-					col_2d := l.Matrix(f64) {
-						rows = col_w,
-						cols = col_h,
-						data = col[col_start:col_start + col_w * col_h],
-					}
-
-					// (C_out, col_h) @ (col_h, col_w) -> (C_out, col_w)
-					col_2d_t := _matrix_transpose(col_2d, context.temp_allocator)
-					grad_weight_2d := l.matmul_dyn_simd(
-						&grad_out_2d,
-						&col_2d_t,
-						context.temp_allocator,
-					)
-
-					// Accumulate
-					for i in 0 ..< len(grad_weight) {
-						grad_weight[i] += grad_weight_2d.data[i]
-					}
-
-					l.matrix_free(&col_2d_t)
-					l.matrix_free(&grad_weight_2d)
-				}
-
-				// Add to weight gradient
-				for i in 0 ..< len(weight_in.grad.data) {
-					weight_in.grad.data[i] += grad_weight[i]
-				}
-			}
-
-			// Gradient w.r.t. bias: sum grad_output over batch and spatial dims
-			if bias_in != nil && bias_in.requires_grad {
-				for n in 0 ..< N {
-					for c in 0 ..< C_out {
-						offset := n * C_out * col_h + c * col_h
-						sum := 0.0
-						for i in 0 ..< col_h {
-							sum += node.grad.data[offset + i]
+					for n in 0 ..< N {
+						grad_out_start := n * C_out * col_h
+						// ✅ CRITICAL: Bounds check before slicing
+						if grad_out_start + C_out * col_h > len(node.grad.data) {
+							fmt.printf(
+								"ERROR: Conv2d grad_out slice out of bounds: %d:%d > %d\n",
+								grad_out_start,
+								grad_out_start + C_out * col_h,
+								len(node.grad.data),
+							)
+							continue
 						}
-						bias_in.grad.data[c] += sum
+
+						grad_out_2d := l.Matrix(f64) {
+							rows = C_out,
+							cols = col_h,
+							data = node.grad.data[grad_out_start:grad_out_start + C_out * col_h],
+						}
+
+						grad_col_2d := l.matmul_dyn_simd(
+							&weight_2d_t,
+							&grad_out_2d,
+							context.temp_allocator,
+						)
+
+						col_start := n * col_w * col_h
+						copy(grad_input_col[col_start:col_start + col_w * col_h], grad_col_2d.data)
+						l.matrix_free(&grad_col_2d)
+					}
+
+					grad_input := _col2im(
+						grad_input_col,
+						N,
+						C_in,
+						H,
+						W,
+						kH,
+						kW,
+						stride,
+						pad,
+						out_h,
+						out_w,
+						context.temp_allocator,
+					)
+					defer delete(grad_input, context.temp_allocator)
+
+					for i in 0 ..< len(input_in.grad.data) {
+						input_in.grad.data[i] += grad_input[i]
+					}
+
+					delete(grad_input_col, context.temp_allocator)
+				}
+			}
+
+			if weight_in.requires_grad {
+				tensor_ensure_grad(weight_in)
+				if len(weight_in.grad.data) > 0 {
+					grad_weight := make([]f64, len(weight_in.data.data), context.temp_allocator)
+					defer delete(grad_weight, context.temp_allocator)
+
+					for n in 0 ..< N {
+						grad_out_start := n * C_out * col_h
+						if grad_out_start + C_out * col_h > len(node.grad.data) {
+							continue
+						}
+
+						grad_out_2d := l.Matrix(f64) {
+							rows = C_out,
+							cols = col_h,
+							data = node.grad.data[grad_out_start:grad_out_start + C_out * col_h],
+						}
+
+						col_start := n * col_w * col_h
+						col_2d := l.Matrix(f64) {
+							rows = col_w,
+							cols = col_h,
+							data = col[col_start:col_start + col_w * col_h],
+						}
+
+						col_2d_t := _matrix_transpose(col_2d, context.temp_allocator)
+						grad_weight_2d := l.matmul_dyn_simd(
+							&grad_out_2d,
+							&col_2d_t,
+							context.temp_allocator,
+						)
+
+						for i in 0 ..< len(grad_weight) {
+							grad_weight[i] += grad_weight_2d.data[i]
+						}
+
+						l.matrix_free(&col_2d_t)
+						l.matrix_free(&grad_weight_2d)
+					}
+
+					for i in 0 ..< len(weight_in.grad.data) {
+						weight_in.grad.data[i] += grad_weight[i]
+					}
+				}
+			}
+
+			if bias_in != nil && bias_in.requires_grad {
+				tensor_ensure_grad(bias_in)
+				if len(bias_in.grad.data) > 0 {
+					for n in 0 ..< N {
+						for c in 0 ..< C_out {
+							offset := n * C_out * col_h + c * col_h
+							if offset + col_h > len(node.grad.data) {
+								continue
+							}
+							sum := 0.0
+							for i in 0 ..< col_h {
+								sum += node.grad.data[offset + i]
+							}
+							bias_in.grad.data[c] += sum
+						}
 					}
 				}
 			}
