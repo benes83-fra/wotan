@@ -111,7 +111,7 @@ mnist_cnn_test :: proc(allocator: mem.Allocator) {
 	defer nn.adam_free(&opt)
 	nn.sequential_add_to_opt(&model, &opt)
 
-	batch_size := 64
+	batch_size := 32
 	epochs := 5
 	num_batches := train_set.num_samples / batch_size
 
@@ -133,7 +133,7 @@ mnist_cnn_test :: proc(allocator: mem.Allocator) {
 			nn.adam_zero_grad(&opt)
 			output := nn.sequential_forward(&model, batch_imgs)
 			loss := t.tensor_cross_entropy_loss(output, batch_labs)
-
+			batch_loss := loss.data.data[0]
 			// Track metrics
 			epoch_loss += loss.data.data[0]
 
@@ -151,13 +151,31 @@ mnist_cnn_test :: proc(allocator: mem.Allocator) {
 			}
 
 			// Backward pass
+			// In training loop, before backward pass:
+			if !t.tensor_validate_graph(loss) {
+				fmt.println("ERROR: Invalid computation graph detected!")
+				t.tensor_free_graph(loss)
+				t.tensor_free(batch_imgs)
+				delete(batch_labs, allocator)
+				continue
+			}
+
 			t.tensor_backward(loss)
 			nn.adam_step(&opt)
 
-			// ✅ Explicit cleanup in correct order
-			t.tensor_free_graph(loss) // Free computation graph
-			t.tensor_free(batch_imgs) // Free batch images
-			delete(batch_labs, allocator) // Free batch labels
+
+			// ✅ CRITICAL: Free in reverse order of creation
+			// 1. Free the loss (which triggers graph cleanup)
+			t.tensor_free_graph(loss)
+
+			// 2. Free the batch data
+			t.tensor_free(batch_imgs)
+			delete(batch_labs, allocator)
+
+			// ✅ FIX: Print saved loss value, not freed tensor
+			if i % 100 == 0 {
+				fmt.printf("Batch %d/%d - Loss: %.4f\n", i, num_batches, batch_loss)
+			}
 		}
 
 		avg_loss := epoch_loss / f64(num_batches)

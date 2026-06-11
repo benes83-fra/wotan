@@ -596,23 +596,57 @@ tensor_backward :: proc(root: ^Tensor) {
 				}
 			}
 		case .AddBias:
-			// C = A + bias (broadcasted)
 			a_in := node.inputs[0]
 			bias_in := node.inputs[1]
+
+			// ✅ CRITICAL: Check gradient dimensions
+			if len(node.grad.data) == 0 {
+				fmt.println("WARNING: AddBias node has empty gradient, skipping")
+				continue
+			}
+
 			N := node.grad.rows
 			D := node.grad.cols
 
-			// dL/dA = dL/dC (just pass it through)
-			if a_in.requires_grad {
-				l.vec_add_simd(a_in.grad.data, node.grad.data, a_in.grad.data)
+			// ✅ CRITICAL: Verify gradient size matches expected dimensions
+			if len(node.grad.data) != N * D {
+				fmt.printf(
+					"WARNING: AddBias gradient size mismatch: %d != %d * %d\n",
+					len(node.grad.data),
+					N,
+					D,
+				)
+				continue
 			}
 
-			// dL/dbias = sum(dL/dC, axis=0)
+			if a_in.requires_grad {
+				tensor_ensure_grad(a_in)
+				if len(a_in.grad.data) > 0 && len(a_in.grad.data) == len(node.grad.data) {
+					l.vec_add_simd(a_in.grad.data, node.grad.data, a_in.grad.data)
+				}
+			}
+
 			if bias_in.requires_grad {
-				for i in 0 ..< N {
-					row_grad := node.grad.data[i * D:(i + 1) * D]
-					// ✅ SIMD Optimization: bias_grad += 1.0 * row_grad
-					l.axpy_simd(1.0, row_grad, bias_in.grad.data)
+				tensor_ensure_grad(bias_in)
+				if len(bias_in.grad.data) > 0 && len(bias_in.grad.data) == D {
+					for i in 0 ..< N {
+						start_idx := i * D
+						end_idx := (i + 1) * D
+
+						// ✅ CRITICAL: Bounds check before slicing
+						if end_idx > len(node.grad.data) {
+							fmt.printf(
+								"ERROR: AddBias slice out of bounds: %d:%d > %d\n",
+								start_idx,
+								end_idx,
+								len(node.grad.data),
+							)
+							continue
+						}
+
+						row_grad := node.grad.data[start_idx:end_idx]
+						l.axpy_simd(1.0, row_grad, bias_in.grad.data)
+					}
 				}
 			}
 		case .MSELoss:
@@ -1210,11 +1244,41 @@ _tensor_free_graph_impl :: proc(node: ^Tensor, visited: ^map[^Tensor]bool) {
 // It protects leaf nodes (inputs/weights) from being freed.
 tensor_free_graph :: proc(root: ^Tensor) {
 	if root == nil {return}
+
 	visited := make(map[^Tensor]bool)
 	defer delete(visited)
-	_tensor_free_graph_impl(root, &visited)
+
+	// First pass: collect all nodes
+	nodes := make([dynamic]^Tensor, 0, context.temp_allocator)
+	_collect_graph_nodes(root, &nodes, &visited)
+
+	// Second pass: free in reverse order (children before parents)
+	for i := len(nodes) - 1; i >= 0; i -= 1 {
+		node := nodes[i]
+		if node.op != .None { 	// Don't free leaf nodes
+			if node.data.data != nil {l.matrix_free(&node.data)}
+			if node.grad.data != nil {l.matrix_free(&node.grad)}
+			delete(node.inputs)
+			delete(node.int_metadata)
+			if node.dropout_mask != nil {delete(node.dropout_mask, node.allocator)}
+			free(node, node.allocator)
+		}
+	}
+
+	delete(nodes)
 }
 
+_collect_graph_nodes :: proc(node: ^Tensor, nodes: ^[dynamic]^Tensor, visited: ^map[^Tensor]bool) {
+	if node == nil {return}
+	if visited[node] {return}
+	visited[node] = true
+
+	append(nodes, node)
+
+	for input in node.inputs {
+		_collect_graph_nodes(input, nodes, visited)
+	}
+}
 
 // _im2col unfolds image patches into columns for matrix multiplication
 // Input shape: (N, C, H, W)
@@ -1321,4 +1385,40 @@ tensor_new_4d :: proc(
 	t := tensor_new(data, requires_grad, allocator)
 	t.shape = [4]int{N, C, H, W}
 	return t
+}
+// tensor_validate_graph checks that all tensors in the graph have valid gradients
+tensor_validate_graph :: proc(root: ^Tensor) -> bool {
+	if root == nil {return false}
+
+	visited := make(map[^Tensor]bool)
+	defer delete(visited)
+
+	return _validate_graph_impl(root, &visited)
+}
+
+_validate_graph_impl :: proc(node: ^Tensor, visited: ^map[^Tensor]bool) -> bool {
+	if node == nil {return true}
+	if visited[node] {return true}
+	visited[node] = true
+
+	// Check that this node has valid data
+	if len(node.data.data) == 0 {
+		fmt.printf("ERROR: Tensor with op %v has empty data\n", node.op)
+		return false
+	}
+
+	// Check that gradient is allocated if requires_grad
+	if node.requires_grad && node.grad.data == nil {
+		fmt.printf("ERROR: Tensor with op %v requires grad but has nil gradient\n", node.op)
+		return false
+	}
+
+	// Recursively check inputs
+	for input in node.inputs {
+		if !_validate_graph_impl(input, visited) {
+			return false
+		}
+	}
+
+	return true
 }
