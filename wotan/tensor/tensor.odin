@@ -523,8 +523,9 @@ tensor_backward :: proc(root: ^Tensor) {
 			if a_in.requires_grad {
 				tensor_ensure_grad(a_in)
 				if len(a_in.grad.data) > 0 && len(node.grad.data) > 0 {
-					bt := _matrix_transpose(b_in.data, node.allocator)
-					grad_a := l.matmul_dyn_simd(&node.grad, &bt, node.allocator)
+					// ✅ FIX: Use context.allocator for ALL temporary matrices
+					bt := _matrix_transpose(b_in.data, context.allocator)
+					grad_a := l.matmul_dyn_simd(&node.grad, &bt, context.allocator)
 					l.vec_add_simd(a_in.grad.data, grad_a.data, a_in.grad.data)
 					l.matrix_free(&bt)
 					l.matrix_free(&grad_a)
@@ -534,8 +535,9 @@ tensor_backward :: proc(root: ^Tensor) {
 			if b_in.requires_grad {
 				tensor_ensure_grad(b_in)
 				if len(b_in.grad.data) > 0 && len(node.grad.data) > 0 {
-					at := _matrix_transpose(a_in.data, node.allocator)
-					grad_b := l.matmul_dyn_simd(&at, &node.grad, node.allocator)
+					// ✅ FIX: Use context.allocator
+					at := _matrix_transpose(a_in.data, context.allocator)
+					grad_b := l.matmul_dyn_simd(&at, &node.grad, context.allocator)
 					l.vec_add_simd(b_in.grad.data, grad_b.data, b_in.grad.data)
 					l.matrix_free(&at)
 					l.matrix_free(&grad_b)
@@ -800,7 +802,19 @@ tensor_backward :: proc(root: ^Tensor) {
 			bias_in: ^Tensor = nil
 			if len(node.inputs) > 2 {bias_in = node.inputs[2]}
 
-			if len(node.grad.data) == 0 {continue}
+			// ✅ ADD: Comprehensive checks for empty data
+			if len(node.grad.data) == 0 {
+				fmt.println("WARNING: Conv2d node has empty gradient, skipping")
+				continue
+			}
+			if len(input_in.data.data) == 0 {
+				fmt.println("WARNING: Conv2d input has empty data, skipping")
+				continue
+			}
+			if len(weight_in.data.data) == 0 {
+				fmt.println("WARNING: Conv2d weight has empty data, skipping")
+				continue
+			}
 
 			N := input_in.shape[0]
 			C_in := input_in.shape[1]
@@ -818,7 +832,18 @@ tensor_backward :: proc(root: ^Tensor) {
 			col_h := out_h * out_w
 			col_w := C_in * kH * kW
 
-			// ✅ FIX: Use context.allocator
+			// ✅ ADD: Skip if dimensions are 0
+			if col_h == 0 || col_w == 0 || C_out == 0 || N == 0 {
+				fmt.printf(
+					"WARNING: Conv2d has zero dimensions (col_h=%d, col_w=%d, C_out=%d, N=%d), skipping\n",
+					col_h,
+					col_w,
+					C_out,
+					N,
+				)
+				continue
+			}
+
 			col, _, _ := _im2col(
 				input_in.data.data,
 				N,
@@ -831,20 +856,30 @@ tensor_backward :: proc(root: ^Tensor) {
 				pad,
 				context.allocator,
 			)
-			defer delete(col, context.allocator)
+
+			// ✅ ADD: Check if col is empty
+			if len(col) == 0 {
+				fmt.println("WARNING: Conv2d im2col returned empty slice, skipping")
+				continue
+			}
 
 			if input_in.requires_grad {
 				tensor_ensure_grad(input_in)
 				if len(input_in.grad.data) > 0 {
 					grad_input_col := make([]f64, N * col_w * col_h, context.allocator)
-
-					// ✅ FIX: Use context.allocator
 					weight_2d_t := _matrix_transpose(weight_in.data, context.allocator)
-					defer l.matrix_free(&weight_2d_t)
 
 					for n in 0 ..< N {
 						grad_out_start := n * C_out * col_h
-						if grad_out_start + C_out * col_h > len(node.grad.data) {continue}
+						if grad_out_start + C_out * col_h > len(node.grad.data) {
+							fmt.printf(
+								"WARNING: Conv2d grad_out slice out of bounds: %d:%d > %d\n",
+								grad_out_start,
+								grad_out_start + C_out * col_h,
+								len(node.grad.data),
+							)
+							continue
+						}
 
 						grad_out_2d := l.Matrix(f64) {
 							rows = C_out,
@@ -852,7 +887,12 @@ tensor_backward :: proc(root: ^Tensor) {
 							data = node.grad.data[grad_out_start:grad_out_start + C_out * col_h],
 						}
 
-						// ✅ FIX: Use context.allocator
+						// ✅ ADD: Check if grad_out_2d is empty
+						if len(grad_out_2d.data) == 0 {
+							fmt.println("WARNING: Conv2d grad_out_2d is empty, skipping")
+							continue
+						}
+
 						grad_col_2d := l.matmul_dyn_simd(
 							&weight_2d_t,
 							&grad_out_2d,
@@ -860,9 +900,16 @@ tensor_backward :: proc(root: ^Tensor) {
 						)
 
 						col_start := n * col_w * col_h
-						copy(grad_input_col[col_start:col_start + col_w * col_h], grad_col_2d.data)
+						if col_start + col_w * col_h <= len(grad_input_col) {
+							copy(
+								grad_input_col[col_start:col_start + col_w * col_h],
+								grad_col_2d.data,
+							)
+						}
 						l.matrix_free(&grad_col_2d)
 					}
+
+					l.matrix_free(&weight_2d_t)
 
 					grad_input := _col2im(
 						grad_input_col,
@@ -878,12 +925,15 @@ tensor_backward :: proc(root: ^Tensor) {
 						out_w,
 						context.allocator,
 					)
-					defer delete(grad_input, context.allocator)
 
 					for i in 0 ..< len(input_in.grad.data) {
-						input_in.grad.data[i] += grad_input[i]
+						if i < len(grad_input) {
+							input_in.grad.data[i] += grad_input[i]
+						}
 					}
+
 					delete(grad_input_col, context.allocator)
+					delete(grad_input, context.allocator)
 				}
 			}
 
@@ -891,7 +941,6 @@ tensor_backward :: proc(root: ^Tensor) {
 				tensor_ensure_grad(weight_in)
 				if len(weight_in.grad.data) > 0 {
 					grad_weight := make([]f64, len(weight_in.data.data), context.allocator)
-					defer delete(grad_weight, context.allocator)
 
 					for n in 0 ..< N {
 						grad_out_start := n * C_out * col_h
@@ -904,13 +953,22 @@ tensor_backward :: proc(root: ^Tensor) {
 						}
 
 						col_start := n * col_w * col_h
+						if col_start + col_w * col_h > len(col) {
+							fmt.printf(
+								"WARNING: Conv2d col slice out of bounds: %d:%d > %d\n",
+								col_start,
+								col_start + col_w * col_h,
+								len(col),
+							)
+							continue
+						}
+
 						col_2d := l.Matrix(f64) {
 							rows = col_w,
 							cols = col_h,
 							data = col[col_start:col_start + col_w * col_h],
 						}
 
-						// ✅ FIX: Use context.allocator
 						col_2d_t := _matrix_transpose(col_2d, context.allocator)
 						grad_weight_2d := l.matmul_dyn_simd(
 							&grad_out_2d,
@@ -919,8 +977,11 @@ tensor_backward :: proc(root: ^Tensor) {
 						)
 
 						for i in 0 ..< len(grad_weight) {
-							grad_weight[i] += grad_weight_2d.data[i]
+							if i < len(grad_weight_2d.data) {
+								grad_weight[i] += grad_weight_2d.data[i]
+							}
 						}
+
 						l.matrix_free(&col_2d_t)
 						l.matrix_free(&grad_weight_2d)
 					}
@@ -928,6 +989,8 @@ tensor_backward :: proc(root: ^Tensor) {
 					for i in 0 ..< len(weight_in.grad.data) {
 						weight_in.grad.data[i] += grad_weight[i]
 					}
+
+					delete(grad_weight, context.allocator)
 				}
 			}
 
@@ -945,6 +1008,9 @@ tensor_backward :: proc(root: ^Tensor) {
 					}
 				}
 			}
+
+			delete(col, context.allocator)
+
 		// We don't calculate gradients for the target data.
 		case .None:
 		// Leaf node, nothing to do
@@ -1208,14 +1274,14 @@ tensor_free_graph :: proc(root: ^Tensor) {
 	visited := make(map[^Tensor]bool)
 	defer delete(visited)
 
-	// First pass: collect all nodes
-	nodes := make([dynamic]^Tensor, 0, context.temp_allocator)
+	// Use context.allocator for the nodes array
+	nodes := make([dynamic]^Tensor, 0, context.allocator)
 	_collect_graph_nodes(root, &nodes, &visited)
 
-	// Second pass: free in reverse order (children before parents)
+	// Free in reverse order
 	for i := len(nodes) - 1; i >= 0; i -= 1 {
 		node := nodes[i]
-		if node.op != .None { 	// Don't free leaf nodes
+		if node.op != .None {
 			if node.data.data != nil {l.matrix_free(&node.data)}
 			if node.grad.data != nil {l.matrix_free(&node.grad)}
 			delete(node.inputs)
@@ -1225,6 +1291,7 @@ tensor_free_graph :: proc(root: ^Tensor) {
 		}
 	}
 
+	// ✅ FIX: Dynamic arrays don't need allocator argument
 	delete(nodes)
 }
 

@@ -100,7 +100,7 @@ matmul_dyn_simd :: proc(
 	out := matrix_new(f64, a.rows, b.cols, allocator)
 
 	// Transpose B once
-	bt := matrix_new(f64, b.cols, b.rows, context.temp_allocator)
+	bt := matrix_new(f64, b.cols, b.rows, allocator)
 	for r in 0 ..< b.rows {
 		for c in 0 ..< b.cols {
 			bt.data[c * bt.cols + r] = b.data[r * b.cols + c]
@@ -131,7 +131,7 @@ matmul_dyn_simd :: proc(
 			}
 		}
 	}
-
+	matrix_free(&bt)
 	return out
 }
 
