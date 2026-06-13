@@ -78,7 +78,7 @@ mnist_loader_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("\nLoaded %d test samples\n", test_set.num_samples)
 }
 mnist_cnn_test :: proc(allocator: mem.Allocator) {
-	fmt.println("\n=== Training CNN on MNIST ===")
+	fmt.println("\n=== Training CNN on MNIST with Augmentation ===")
 
 	train_set, ok := data.mnist_load(
 		"data/mnist/train-images-idx3-ubyte",
@@ -111,6 +111,14 @@ mnist_cnn_test :: proc(allocator: mem.Allocator) {
 	defer nn.adam_free(&opt)
 	nn.sequential_add_to_opt(&model, &opt)
 
+	// ✅ NEW: Augmentation configuration
+	aug_config := nn.AugmentationConfig {
+		rotation_range    = 15.0, // ±15 degrees
+		translation_range = 2, // ±2 pixels
+		scale_range       = 0.1, // ±10%
+		apply             = true, // Enable augmentation
+	}
+
 	batch_size := 32
 	epochs := 5
 	num_batches := train_set.num_samples / batch_size
@@ -129,13 +137,17 @@ mnist_cnn_test :: proc(allocator: mem.Allocator) {
 				allocator,
 			)
 
-			// Forward pass
+			// ✅ NEW: Apply augmentation
+			augmented_imgs := nn.augment_batch(batch_imgs, aug_config, allocator)
+
+			// Forward pass (use augmented images)
 			nn.adam_zero_grad(&opt)
-			output := nn.sequential_forward(&model, batch_imgs)
+			output := nn.sequential_forward(&model, augmented_imgs)
 			loss := t.tensor_cross_entropy_loss(output, batch_labs)
 			batch_loss := loss.data.data[0]
+
 			// Track metrics
-			epoch_loss += loss.data.data[0]
+			epoch_loss += batch_loss
 
 			for j in 0 ..< batch_size {
 				pred_class := 0
@@ -151,10 +163,10 @@ mnist_cnn_test :: proc(allocator: mem.Allocator) {
 			}
 
 			// Backward pass
-			// In training loop, before backward pass:
 			if !t.tensor_validate_graph(loss) {
 				fmt.println("ERROR: Invalid computation graph detected!")
 				t.tensor_free_graph(loss)
+				t.tensor_free(augmented_imgs)
 				t.tensor_free(batch_imgs)
 				delete(batch_labs, allocator)
 				continue
@@ -163,16 +175,12 @@ mnist_cnn_test :: proc(allocator: mem.Allocator) {
 			t.tensor_backward(loss)
 			nn.adam_step(&opt)
 
-
-			// ✅ CRITICAL: Free in reverse order of creation
-			// 1. Free the loss (which triggers graph cleanup)
+			// ✅ CRITICAL: Free in reverse order
 			t.tensor_free_graph(loss)
-
-			// 2. Free the batch data
-			t.tensor_free(batch_imgs)
+			t.tensor_free(augmented_imgs) // ✅ Free augmented batch
+			t.tensor_free(batch_imgs) // Free original batch
 			delete(batch_labs, allocator)
 
-			// ✅ FIX: Print saved loss value, not freed tensor
 			if i % 100 == 0 {
 				fmt.printf("Batch %d/%d - Loss: %.4f\n", i, num_batches, batch_loss)
 			}
@@ -182,4 +190,51 @@ mnist_cnn_test :: proc(allocator: mem.Allocator) {
 		accuracy := f64(correct) / f64(total) * 100.0
 		fmt.printf("Epoch %d | Loss: %.4f | Accuracy: %.2f%%\n", epoch, avg_loss, accuracy)
 	}
+
+	// Save final augmented model
+	nn.save_checkpoint(&model, &opt, "mnist_augmented.bin", 5, allocator)
+	fmt.println("✓ Augmented model saved to mnist_augmented.bin")
+}
+
+
+augmentation_test :: proc(allocator: mem.Allocator) {
+	fmt.println("\n=== Testing Data Augmentation ===")
+
+	// Create a simple test image (4x4 for easy visualization)
+	test_img := t.tensor_new_4d(1, 1, 4, 4, false, allocator)
+	defer t.tensor_free(test_img)
+
+	// Fill with a simple pattern
+	for i in 0 ..< 16 {
+		test_img.data.data[i] = f64(i) / 16.0
+	}
+
+	fmt.println("Original image (4x4):")
+	for y in 0 ..< 4 {
+		for x in 0 ..< 4 {
+			fmt.printf("%.2f ", test_img.data.data[y * 4 + x])
+		}
+		fmt.println("")
+	}
+
+	// Apply augmentation
+	config := nn.AugmentationConfig {
+		rotation_range    = 45.0,
+		translation_range = 1,
+		scale_range       = 0.2,
+		apply             = true,
+	}
+
+	augmented := nn.augment_batch(test_img, config, allocator)
+	defer t.tensor_free(augmented)
+
+	fmt.println("\nAugmented image (4x4):")
+	for y in 0 ..< 4 {
+		for x in 0 ..< 4 {
+			fmt.printf("%.2f ", augmented.data.data[y * 4 + x])
+		}
+		fmt.println("")
+	}
+
+	fmt.println("\n✓ Augmentation test passed!")
 }
