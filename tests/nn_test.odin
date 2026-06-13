@@ -8,6 +8,7 @@ import "core:fmt"
 import "core:math"
 import "core:math/rand"
 import "core:mem"
+import "core:os"
 
 nn_test :: proc(allocator: mem.Allocator) {
 	fmt.println("\n=== Testing Neural Network Linear Layer ===")
@@ -657,4 +658,68 @@ sequential_test :: proc(allocator: mem.Allocator) {
 	nn.adam_step(&opt)
 
 	fmt.println("✓ Backward pass and optimizer step completed successfully")
+}
+
+persistence_test :: proc(allocator: mem.Allocator) {
+	fmt.println("\n=== Testing Model Persistence ===")
+
+	// 1. Create a simple model and optimizer
+	model := nn.sequential_new(allocator)
+	nn.sequential_add(
+		&model,
+		nn.linear_layer_new(10, 5, allocator),
+		nn.Activation.ReLU,
+		nn.linear_layer_new(5, 2, allocator),
+	)
+	defer nn.sequential_free(&model)
+
+	opt := nn.adam_new(0.01, allocator = allocator)
+	nn.sequential_add_to_opt(&model, &opt)
+	defer nn.adam_free(&opt)
+
+	// 2. Do a fake training step to change the weights and optimizer state
+	x := t.tensor_new_4d(1, 1, 1, 10, false, allocator)
+	for i in 0 ..< 10 {x.data.data[i] = 0.5}
+
+	out := nn.sequential_forward(&model, x)
+	loss := t.tensor_mse_loss(out, out) // Dummy loss
+	t.tensor_backward(loss)
+	nn.adam_step(&opt)
+	t.tensor_free_graph(loss)
+	t.tensor_free(x)
+
+	// Get the first linear layer
+	if layer, ok := model.layers[0].(nn.LinearLayer); ok {
+		fmt.printf("Original Weight[0]: %.4f\n", layer.weights.data.data[0])
+	}
+	fmt.printf("Original Optimizer Timestep: %d\n", opt.timestep)
+
+	// 3. Save Checkpoint
+	save_path := "test_checkpoint.bin"
+	ok := nn.save_checkpoint(&model, &opt, save_path, 5, allocator)
+	if !ok {
+		fmt.println("Failed to save checkpoint!")
+		return
+	}
+	fmt.println("✓ Checkpoint saved successfully")
+
+	// 4. Load Checkpoint
+	loaded_model, loaded_opt, loaded_epoch, ok2 := nn.load_checkpoint(save_path, allocator)
+	if !ok2 {
+		fmt.println("Failed to load checkpoint!")
+		return
+	}
+	defer nn.sequential_free(loaded_model)
+	defer nn.adam_free(loaded_opt)
+
+	// 5. Verify
+	if layer, ok := loaded_model.layers[0].(nn.LinearLayer); ok {
+		fmt.printf("Loaded Weight[0]: %.4f\n", layer.weights.data.data[0])
+	}
+	fmt.printf("Loaded Optimizer Timestep: %d\n", loaded_opt.timestep)
+	fmt.printf("Loaded Epoch: %d\n", loaded_epoch)
+
+	// Cleanup test file
+	os.remove(save_path)
+	fmt.println("✓ Persistence test passed!")
 }
