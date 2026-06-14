@@ -1532,6 +1532,8 @@ _validate_graph_impl :: proc(node: ^Tensor, visited: ^map[^Tensor]bool) -> bool 
 	return true
 }
 // tensor_batch_norm_2d performs Batch Normalization over a 4D tensor (N, C, H, W)
+// tensor_batch_norm_2d performs Batch Normalization over a 4D tensor (N, C, H, W)
+// ✅ SIMD-optimized version
 tensor_batch_norm_2d :: proc(
 	input: ^Tensor,
 	weight: ^Tensor,
@@ -1547,40 +1549,39 @@ tensor_batch_norm_2d :: proc(
 	H := input.shape[2]
 	W := input.shape[3]
 	N_hw := f64(N * H * W)
+	channel_size := N * H * W
 
 	out_data := l.matrix_new(f64, 1, N * C * H * W, input.allocator)
 
-	// We'll store saved variables for the backward pass
-	saved_mean := make([]f64, C, input.allocator)
-	saved_var := make([]f64, C, input.allocator)
-	saved_x_hat := make([]f64, N * C * H * W, input.allocator)
+	// ✅ Allocate contiguous buffers for SIMD operations
+	channel_data := make([]f64, channel_size, context.temp_allocator)
+	defer delete(channel_data, context.temp_allocator)
 
 	for c in 0 ..< C {
-		// 1. Compute batch statistics for this channel
-		mean := 0.0
+		// 1. Extract channel data into contiguous buffer
 		for n in 0 ..< N {
 			for h in 0 ..< H {
 				for w in 0 ..< W {
-					idx := n * (C * H * W) + c * (H * W) + h * W + w
-					mean += input.data.data[idx]
+					src_idx := n * (C * H * W) + c * (H * W) + h * W + w
+					dst_idx := n * (H * W) + h * W + w
+					channel_data[dst_idx] = input.data.data[src_idx]
 				}
 			}
 		}
-		mean /= N_hw
 
-		var := 0.0
-		for n in 0 ..< N {
-			for h in 0 ..< H {
-				for w in 0 ..< W {
-					idx := n * (C * H * W) + c * (H * W) + h * W + w
-					diff := input.data.data[idx] - mean
-					var += diff * diff
-				}
-			}
+		// 2. Compute mean using SIMD sum
+		mean := l.sum_simd(channel_data) / N_hw
+
+		// 3. Compute variance: var = mean((x - mean)^2)
+		// ✅ Use SIMD: subtract mean, then dot product with itself
+		centered := make([]f64, channel_size, context.temp_allocator)
+		l.vec_sub_simd(channel_data, make([]f64, channel_size), centered) // temp
+		for i in 0 ..< channel_size {
+			centered[i] = channel_data[i] - mean
 		}
-		var /= N_hw
+		var := l.dot_simd(centered, centered) / N_hw
 
-		// 2. Update running stats if training
+		// 4. Update running stats if training
 		if training {
 			running_mean.data.data[c] =
 				(1.0 - momentum) * running_mean.data.data[c] + momentum * mean
@@ -1594,24 +1595,39 @@ tensor_batch_norm_2d :: proc(
 			current_var = running_var.data.data[c]
 		}
 
-		saved_mean[c] = current_mean
-		saved_var[c] = current_var
-
-		// 3. Normalize, scale, and shift
+		// 5. Normalize: x_hat = (x - mean) / std
 		std := math.sqrt(current_var + eps)
 		gamma := weight.data.data[c]
 		beta := bias.data.data[c]
 
+		// ✅ SIMD: x_hat = (channel_data - mean) / std
+		normalized := make([]f64, channel_size, context.temp_allocator)
+		for i in 0 ..< channel_size {
+			normalized[i] = (channel_data[i] - current_mean) / std
+		}
+
+		// ✅ SIMD: out = gamma * x_hat + beta
+		// Use axpy: out = beta + gamma * x_hat
+		scaled := make([]f64, channel_size, context.temp_allocator)
+		for i in 0 ..< channel_size {
+			scaled[i] = beta
+		}
+		l.axpy_simd(gamma, normalized, scaled)
+
+		// 6. Write back to output (de-interleave)
 		for n in 0 ..< N {
 			for h in 0 ..< H {
 				for w in 0 ..< W {
-					idx := n * (C * H * W) + c * (H * W) + h * W + w
-					x_hat := (input.data.data[idx] - current_mean) / std
-					saved_x_hat[idx] = x_hat
-					out_data.data[idx] = gamma * x_hat + beta
+					src_idx := n * (H * W) + h * W + w
+					dst_idx := n * (C * H * W) + c * (H * W) + h * W + w
+					out_data.data[dst_idx] = scaled[src_idx]
 				}
 			}
 		}
+
+		delete(centered, context.temp_allocator)
+		delete(normalized, context.temp_allocator)
+		delete(scaled, context.temp_allocator)
 	}
 
 	out := tensor_new(out_data, input.requires_grad || weight.requires_grad, input.allocator)
@@ -1622,13 +1638,6 @@ tensor_batch_norm_2d :: proc(
 		append(&out.inputs, input)
 		append(&out.inputs, weight)
 		append(&out.inputs, bias)
-
-		// Store metadata for backward pass
-		// We'll pack: N_hw (as f64), eps, then saved_mean, saved_var, saved_x_hat
-		// For simplicity, let's just attach them to a custom struct or use int_metadata cleverly.
-		// Actually, let's just store pointers to slices in the tensor struct if we extend it,
-		// OR we can recompute mean/var in backward (slower but simpler and avoids metadata hacks).
-		// Given Odin's speed, recomputing mean/var in backward is perfectly fine and safer!
 	}
 
 	return out

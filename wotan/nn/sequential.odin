@@ -15,8 +15,11 @@ Layer :: union {
 	LinearLayer,
 	Conv2dLayer,
 	MaxPool2dLayer,
-	Activation, // enum: ReLU, Sigmoid, Tanh, LeakyReLU, None
-	FlattenLayer, // marker struct
+	AvgPool2dLayer, // ✅ ADDED
+	DropoutLayer, // ✅ ADDED
+	BatchNorm2dLayer, // ✅ ADDED
+	Activation,
+	FlattenLayer,
 }
 
 // ============================================================================
@@ -25,39 +28,69 @@ Layer :: union {
 
 Sequential :: struct {
 	layers:    [dynamic]Layer,
+	training:  bool, // ✅ ADD THIS: Controls BatchNorm and Dropout behavior
 	allocator: mem.Allocator,
 }
 
-// sequential_new creates an empty Sequential container
-sequential_new :: proc(allocator: mem.Allocator = context.allocator) -> Sequential {
-	return Sequential{layers = make([dynamic]Layer, 0, allocator), allocator = allocator}
+sequential_new :: proc(allocator: mem.Allocator = context.allocator) -> ^Sequential {
+	s := new(Sequential, allocator)
+	s.layers = make([dynamic]Layer, 0, allocator)
+	s.training = true // Default to training mode
+	s.allocator = allocator
+	return s
 }
 
-// sequential_add adds one or more layers to the sequence
-sequential_add :: proc(seq: ^Sequential, layers: ..Layer) {
+// ✅ ADD: Methods to switch modes
+sequential_train :: proc(s: ^Sequential) {
+	s.training = true
+}
+
+sequential_eval :: proc(s: ^Sequential) {
+	s.training = false
+}
+sequential_add :: proc(s: ^Sequential, layers: ..Layer) {
 	for layer in layers {
-		append(&seq.layers, layer)
+		append(&s.layers, layer)
 	}
 }
 
 // sequential_forward applies all layers in sequence
-sequential_forward :: proc(seq: ^Sequential, x: ^t.Tensor) -> ^t.Tensor {
-	out := x
-	for layer in seq.layers {
-		switch &l in layer {
+sequential_forward :: proc(s: ^Sequential, input: ^t.Tensor) -> ^t.Tensor {
+	x := input
+	for layer in s.layers {
+		switch l in layer {
 		case LinearLayer:
-			out = linear_forward(&l, out)
+			x = t.tensor_matmul(x, l.weights)
+			if l.bias != nil {
+				x = t.tensor_add_bias(x, l.bias)
+			}
 		case Conv2dLayer:
-			out = conv2d_layer_forward(&l, out)
+			x = t.tensor_conv2d(x, l.weight, l.bias, l.stride, l.padding)
 		case MaxPool2dLayer:
-			out = maxpool2d_layer_forward(&l, out)
-		case Activation:
-			out = apply_activation(out, l)
+			x = t.tensor_max_pool2d(x, l.kernel_size, l.kernel_size, l.stride)
+		case AvgPool2dLayer:
+			x = t.tensor_avg_pool2d(x, l.kernel_size, l.kernel_size, l.stride)
 		case FlattenLayer:
-			out = t.tensor_flatten(out)
+			x = t.tensor_flatten(x)
+		case Activation:
+			if l == .ReLU {x = t.tensor_relu(x)}
+		// ... other activations ...
+		case DropoutLayer:
+			x = t.tensor_dropout(x, l.drop_prob, s.training) // ✅ Use s.training
+		case BatchNorm2dLayer:
+			x = t.tensor_batch_norm_2d(
+				x,
+				l.weight,
+				l.bias,
+				l.running_mean,
+				l.running_var,
+				s.training,
+				l.momentum,
+				l.eps,
+			)
 		}
 	}
-	return out
+	return x
 }
 // sequential_add_to_sgd registers all parameters with SGD optimizer
 sequential_add_to_sgd :: proc(seq: ^Sequential, opt: ^SGD) {
@@ -71,7 +104,14 @@ sequential_add_to_sgd :: proc(seq: ^Sequential, opt: ^SGD) {
 			if l.bias != nil {
 				sgd_add_param(opt, l.bias)
 			}
+		case BatchNorm2dLayer:
+			sgd_add_param(opt, l.weight)
+			sgd_add_param(opt, l.bias)
 		case MaxPool2dLayer:
+		// No parameters
+		case AvgPool2dLayer:
+		// No parameters
+		case DropoutLayer:
 		// No parameters
 		case Activation:
 		// No parameters
@@ -93,7 +133,14 @@ sequential_add_to_adam :: proc(seq: ^Sequential, opt: ^Adam) {
 			if l.bias != nil {
 				adam_add_param(opt, l.bias)
 			}
+		case BatchNorm2dLayer:
+			adam_add_param(opt, l.weight)
+			adam_add_param(opt, l.bias)
 		case MaxPool2dLayer:
+		// No parameters
+		case AvgPool2dLayer:
+		// No parameters
+		case DropoutLayer:
 		// No parameters
 		case Activation:
 		// No parameters
@@ -111,7 +158,13 @@ sequential_free :: proc(seq: ^Sequential) {
 			linear_layer_free(&l)
 		case Conv2dLayer:
 			conv2d_layer_free(&l)
+		case BatchNorm2dLayer:
+			batch_norm_2d_layer_free(&l)
 		case MaxPool2dLayer:
+		// No heap allocations
+		case AvgPool2dLayer:
+		// No heap allocations
+		case DropoutLayer:
 		// No heap allocations
 		case Activation:
 		// No heap allocations
