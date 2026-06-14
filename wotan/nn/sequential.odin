@@ -1,5 +1,6 @@
 package nn
 
+import la "../linalg"
 import t "../tensor"
 import "core:mem"
 
@@ -20,6 +21,7 @@ Layer :: union {
 	BatchNorm2dLayer, // ✅ ADDED
 	Activation,
 	FlattenLayer,
+	RNNLayer,
 }
 
 // ============================================================================
@@ -55,10 +57,12 @@ sequential_add :: proc(s: ^Sequential, layers: ..Layer) {
 }
 
 // sequential_forward applies all layers in sequence
+// sequential_forward applies all layers in sequence
 sequential_forward :: proc(s: ^Sequential, input: ^t.Tensor) -> ^t.Tensor {
 	x := input
 	for layer in s.layers {
-		switch l in layer {
+		// ✅ FIX: Use '&l' to get a pointer to the layer variant
+		switch &l in layer {
 		case LinearLayer:
 			x = t.tensor_matmul(x, l.weights)
 			if l.bias != nil {
@@ -76,7 +80,7 @@ sequential_forward :: proc(s: ^Sequential, input: ^t.Tensor) -> ^t.Tensor {
 			if l == .ReLU {x = t.tensor_relu(x)}
 		// ... other activations ...
 		case DropoutLayer:
-			x = t.tensor_dropout(x, l.drop_prob, s.training) // ✅ Use s.training
+			x = t.tensor_dropout(x, l.drop_prob, s.training)
 		case BatchNorm2dLayer:
 			x = t.tensor_batch_norm_2d(
 				x,
@@ -88,10 +92,22 @@ sequential_forward :: proc(s: ^Sequential, input: ^t.Tensor) -> ^t.Tensor {
 				l.momentum,
 				l.eps,
 			)
+		case RNNLayer:
+			batch := x.shape[0]
+			hidden := l.hidden_size
+
+			// ✅ FIX: Use 'la' for the linalg package!
+			h_0_data := la.matrix_new(f64, 1, batch * hidden, x.allocator)
+			h_0 := t.tensor_new(h_0_data, false, x.allocator)
+
+			// ✅ FIX: 'l' is now a pointer, so this matches the ^RNNLayer signature
+			x = rnn_layer_forward(&l, x, h_0)
+			t.tensor_free(h_0)
 		}
 	}
 	return x
 }
+// sequential_add_to_sgd registers all parameters with SGD optimizer
 // sequential_add_to_sgd registers all parameters with SGD optimizer
 sequential_add_to_sgd :: proc(seq: ^Sequential, opt: ^SGD) {
 	for layer in seq.layers {
@@ -101,22 +117,22 @@ sequential_add_to_sgd :: proc(seq: ^Sequential, opt: ^SGD) {
 			sgd_add_param(opt, l.bias)
 		case Conv2dLayer:
 			sgd_add_param(opt, l.weight)
-			if l.bias != nil {
-				sgd_add_param(opt, l.bias)
-			}
+			if l.bias != nil {sgd_add_param(opt, l.bias)}
 		case BatchNorm2dLayer:
 			sgd_add_param(opt, l.weight)
 			sgd_add_param(opt, l.bias)
+
+		// ✅ FIX: Added missing case for RNN
+		case RNNLayer:
+			sgd_add_param(opt, l.w_ih)
+			sgd_add_param(opt, l.w_hh)
+			sgd_add_param(opt, l.bias)
+
 		case MaxPool2dLayer:
-		// No parameters
 		case AvgPool2dLayer:
-		// No parameters
 		case DropoutLayer:
-		// No parameters
 		case Activation:
-		// No parameters
 		case FlattenLayer:
-		// No parameters
 		}
 	}
 }
@@ -146,6 +162,10 @@ sequential_add_to_adam :: proc(seq: ^Sequential, opt: ^Adam) {
 		// No parameters
 		case FlattenLayer:
 		// No parameters
+		case RNNLayer:
+			adam_add_param(opt, l.w_ih)
+			adam_add_param(opt, l.w_hh)
+			adam_add_param(opt, l.bias)
 		}
 	}
 }
@@ -170,6 +190,8 @@ sequential_free :: proc(seq: ^Sequential) {
 		// No heap allocations
 		case FlattenLayer:
 		// No heap allocations
+		case RNNLayer:
+			rnn_layer_free(&l)
 		}
 	}
 	delete(seq.layers)

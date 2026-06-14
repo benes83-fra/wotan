@@ -189,3 +189,56 @@ batch_norm_2d_layer_free :: proc(layer: ^BatchNorm2dLayer) {
 	if layer.running_mean != nil {t.tensor_free(layer.running_mean)}
 	if layer.running_var != nil {t.tensor_free(layer.running_var)}
 }
+// ============================================================================
+// RNN Layer
+// ============================================================================
+
+RNNLayer :: struct {
+	input_size:  int,
+	hidden_size: int,
+	w_ih:        ^t.Tensor, // [input_size, hidden_size]
+	w_hh:        ^t.Tensor, // [hidden_size, hidden_size]
+	bias:        ^t.Tensor, // [1, hidden_size]
+}
+
+rnn_layer_new :: proc(
+	input_size: int,
+	hidden_size: int,
+	allocator: mem.Allocator = context.allocator,
+) -> RNNLayer {
+	layer: RNNLayer
+	layer.input_size = input_size
+	layer.hidden_size = hidden_size
+
+	// Xavier initialization for w_ih
+	w_ih_data := l.matrix_new(f64, input_size, hidden_size, allocator)
+	limit_ih := math.sqrt(6.0 / f64(input_size + hidden_size))
+	for i in 0 ..< len(w_ih_data.data) {
+		w_ih_data.data[i] = (rand.float64() * 2.0 - 1.0) * limit_ih
+	}
+	layer.w_ih = t.tensor_new(w_ih_data, true, allocator)
+
+	// Orthogonal/Xavier initialization for w_hh
+	w_hh_data := l.matrix_new(f64, hidden_size, hidden_size, allocator)
+	limit_hh := math.sqrt(6.0 / f64(hidden_size + hidden_size))
+	for i in 0 ..< len(w_hh_data.data) {
+		w_hh_data.data[i] = (rand.float64() * 2.0 - 1.0) * limit_hh
+	}
+	layer.w_hh = t.tensor_new(w_hh_data, true, allocator)
+
+	// Zero bias
+	bias_data := l.matrix_new(f64, 1, hidden_size, allocator)
+	layer.bias = t.tensor_new(bias_data, true, allocator)
+
+	return layer
+}
+
+rnn_layer_free :: proc(layer: ^RNNLayer) {
+	if layer.w_ih != nil {t.tensor_free(layer.w_ih)}
+	if layer.w_hh != nil {t.tensor_free(layer.w_hh)}
+	if layer.bias != nil {t.tensor_free(layer.bias)}
+}
+
+rnn_layer_forward :: proc(layer: ^RNNLayer, x: ^t.Tensor, h_0: ^t.Tensor) -> ^t.Tensor {
+	return t.tensor_rnn(x, h_0, layer.w_ih, layer.w_hh, layer.bias)
+}

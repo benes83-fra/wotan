@@ -215,6 +215,13 @@ save_checkpoint :: proc(
 		case DropoutLayer:
 			write_i32(file, 7) // Type 7
 			write_f64(file, l.drop_prob)
+		case RNNLayer:
+			write_i32(file, 8) // Type 8
+			write_i32(file, i32(l.input_size))
+			write_i32(file, i32(l.hidden_size))
+			write_tensor(file, l.w_ih)
+			write_tensor(file, l.w_hh)
+			write_tensor(file, l.bias)
 
 		}
 	}
@@ -419,6 +426,25 @@ load_checkpoint :: proc(
 			drop_prob: f64
 			drop_prob, offset = read_f64(data, offset)
 			append(&model.layers, dropout_layer_new(drop_prob))
+		} else if layer_type == 8 { 	// RNN
+			in_size: i32
+			hidden_size: i32
+			in_size, offset = read_i32(data, offset)
+			hidden_size, offset = read_i32(data, offset)
+
+			layer := rnn_layer_new(int(in_size), int(hidden_size), allocator)
+
+			// Free the randomly initialized defaults and load the saved weights
+			if layer.w_ih != nil {t.tensor_free(layer.w_ih)}
+			layer.w_ih, offset = read_tensor(data, offset, allocator)
+
+			if layer.w_hh != nil {t.tensor_free(layer.w_hh)}
+			layer.w_hh, offset = read_tensor(data, offset, allocator)
+
+			if layer.bias != nil {t.tensor_free(layer.bias)}
+			layer.bias, offset = read_tensor(data, offset, allocator)
+
+			append(&model.layers, layer)
 		}
 	}
 
