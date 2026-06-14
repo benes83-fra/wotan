@@ -1586,6 +1586,8 @@ _validate_graph_impl :: proc(node: ^Tensor, visited: ^map[^Tensor]bool) -> bool 
 // tensor_batch_norm_2d performs Batch Normalization over a 4D tensor (N, C, H, W)
 // tensor_batch_norm_2d performs Batch Normalization over a 4D tensor (N, C, H, W)
 // ✅ SIMD-optimized version
+// tensor_batch_norm_2d performs Batch Normalization over a 4D tensor (N, C, H, W)
+// ✅ SIMD-optimized with proper memory cleanup
 tensor_batch_norm_2d :: proc(
 	input: ^Tensor,
 	weight: ^Tensor,
@@ -1605,35 +1607,37 @@ tensor_batch_norm_2d :: proc(
 
 	out_data := l.matrix_new(f64, 1, N * C * H * W, input.allocator)
 
-	// ✅ Allocate contiguous buffers for SIMD operations
-	channel_data := make([]f64, channel_size, context.temp_allocator)
-	defer delete(channel_data, context.temp_allocator)
+	// ✅ Allocate buffers ONCE outside the loop for reuse
+	channel_buf := make([]f64, channel_size, context.temp_allocator)
+	mean_vec := make([]f64, channel_size, context.temp_allocator)
+	centered := make([]f64, channel_size, context.temp_allocator)
+	inv_std_vec := make([]f64, channel_size, context.temp_allocator)
+	normalized := make([]f64, channel_size, context.temp_allocator)
+	gamma_vec := make([]f64, channel_size, context.temp_allocator)
+	beta_vec := make([]f64, channel_size, context.temp_allocator)
+	scaled := make([]f64, channel_size, context.temp_allocator)
 
 	for c in 0 ..< C {
-		// 1. Extract channel data into contiguous buffer
+		// 1. Extract channel to contiguous buffer
 		for n in 0 ..< N {
 			for h in 0 ..< H {
 				for w in 0 ..< W {
 					src_idx := n * (C * H * W) + c * (H * W) + h * W + w
 					dst_idx := n * (H * W) + h * W + w
-					channel_data[dst_idx] = input.data.data[src_idx]
+					channel_buf[dst_idx] = input.data.data[src_idx]
 				}
 			}
 		}
 
-		// 2. Compute mean using SIMD sum
-		mean := l.sum_simd(channel_data) / N_hw
+		// 2. Compute mean (SIMD sum)
+		mean := l.sum_simd(channel_buf) / N_hw
 
-		// 3. Compute variance: var = mean((x - mean)^2)
-		// ✅ Use SIMD: subtract mean, then dot product with itself
-		centered := make([]f64, channel_size, context.temp_allocator)
-		l.vec_sub_simd(channel_data, make([]f64, channel_size), centered) // temp
-		for i in 0 ..< channel_size {
-			centered[i] = channel_data[i] - mean
-		}
+		// 3. Compute variance using SIMD
+		for i in 0 ..< channel_size {mean_vec[i] = mean}
+		l.vec_sub_simd(channel_buf, mean_vec, centered)
 		var := l.dot_simd(centered, centered) / N_hw
 
-		// 4. Update running stats if training
+		// 4. Update running stats
 		if training {
 			running_mean.data.data[c] =
 				(1.0 - momentum) * running_mean.data.data[c] + momentum * mean
@@ -1647,26 +1651,23 @@ tensor_batch_norm_2d :: proc(
 			current_var = running_var.data.data[c]
 		}
 
-		// 5. Normalize: x_hat = (x - mean) / std
+		// 5. Normalize and scale using SIMD
 		std := math.sqrt(current_var + eps)
 		gamma := weight.data.data[c]
 		beta := bias.data.data[c]
+		inv_std := 1.0 / std
 
-		// ✅ SIMD: x_hat = (channel_data - mean) / std
-		normalized := make([]f64, channel_size, context.temp_allocator)
+		for i in 0 ..< channel_size {inv_std_vec[i] = inv_std}
+		l.vec_mul_simd(centered, inv_std_vec, normalized)
+
 		for i in 0 ..< channel_size {
-			normalized[i] = (channel_data[i] - current_mean) / std
+			gamma_vec[i] = gamma
+			beta_vec[i] = beta
 		}
+		l.vec_mul_simd(normalized, gamma_vec, scaled)
+		l.vec_add_simd(scaled, beta_vec, scaled)
 
-		// ✅ SIMD: out = gamma * x_hat + beta
-		// Use axpy: out = beta + gamma * x_hat
-		scaled := make([]f64, channel_size, context.temp_allocator)
-		for i in 0 ..< channel_size {
-			scaled[i] = beta
-		}
-		l.axpy_simd(gamma, normalized, scaled)
-
-		// 6. Write back to output (de-interleave)
+		// 6. Write back (de-interleave)
 		for n in 0 ..< N {
 			for h in 0 ..< H {
 				for w in 0 ..< W {
@@ -1676,11 +1677,17 @@ tensor_batch_norm_2d :: proc(
 				}
 			}
 		}
-
-		delete(centered, context.temp_allocator)
-		delete(normalized, context.temp_allocator)
-		delete(scaled, context.temp_allocator)
 	}
+
+	// ✅ CRITICAL: Free all temporary buffers
+	delete(channel_buf, context.temp_allocator)
+	delete(mean_vec, context.temp_allocator)
+	delete(centered, context.temp_allocator)
+	delete(inv_std_vec, context.temp_allocator)
+	delete(normalized, context.temp_allocator)
+	delete(gamma_vec, context.temp_allocator)
+	delete(beta_vec, context.temp_allocator)
+	delete(scaled, context.temp_allocator)
 
 	out := tensor_new(out_data, input.requires_grad || weight.requires_grad, input.allocator)
 	out.shape = input.shape
