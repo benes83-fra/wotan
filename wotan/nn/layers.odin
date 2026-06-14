@@ -116,3 +116,76 @@ maxpool2d_layer_new :: proc(kernel_size: int, stride: int = 0) -> MaxPool2dLayer
 maxpool2d_layer_forward :: proc(layer: ^MaxPool2dLayer, x: ^t.Tensor) -> ^t.Tensor {
 	return t.tensor_max_pool2d(x, layer.kernel_size, layer.kernel_size, layer.stride)
 }
+AvgPool2dLayer :: struct {
+	kernel_size: int,
+	stride:      int,
+}
+
+avgpool2d_layer_new :: proc(kernel_size: int, stride: int = 0) -> AvgPool2dLayer {
+	layer: AvgPool2dLayer
+	layer.kernel_size = kernel_size
+	layer.stride = stride == 0 ? kernel_size : stride
+	return layer
+}
+
+// ============================================================================
+// Dropout Layer (NEW)
+// ============================================================================
+
+DropoutLayer :: struct {
+	drop_prob: f64,
+}
+
+dropout_layer_new :: proc(drop_prob: f64 = 0.5) -> DropoutLayer {
+	layer: DropoutLayer
+	layer.drop_prob = drop_prob
+	return layer
+}
+
+BatchNorm2dLayer :: struct {
+	num_features: int,
+	eps:          f64,
+	momentum:     f64,
+	weight:       ^t.Tensor, // gamma (scale)
+	bias:         ^t.Tensor, // beta (shift)
+	running_mean: ^t.Tensor, // Saved for eval mode
+	running_var:  ^t.Tensor, // Saved for eval mode
+}
+
+batch_norm_2d_layer_new :: proc(
+	num_features: int,
+	eps: f64 = 1e-5,
+	momentum: f64 = 0.1,
+	allocator: mem.Allocator = context.allocator,
+) -> BatchNorm2dLayer {
+	layer: BatchNorm2dLayer
+	layer.num_features = num_features
+	layer.eps = eps
+	layer.momentum = momentum
+
+	// Initialize weight (gamma) to 1.0
+	w_data := l.matrix_new(f64, 1, num_features, allocator)
+	for i in 0 ..< num_features {w_data.data[i] = 1.0}
+	layer.weight = t.tensor_new(w_data, true, allocator)
+
+	// Initialize bias (beta) to 0.0
+	b_data := l.matrix_new(f64, 1, num_features, allocator)
+	// (already zeroed by matrix_new)
+	layer.bias = t.tensor_new(b_data, true, allocator)
+
+	// Running stats (not requiring grad)
+	rm_data := l.matrix_new(f64, 1, num_features, allocator)
+	layer.running_mean = t.tensor_new(rm_data, false, allocator)
+
+	rv_data := l.matrix_new(f64, 1, num_features, allocator)
+	layer.running_var = t.tensor_new(rv_data, false, allocator)
+
+	return layer
+}
+
+batch_norm_2d_layer_free :: proc(layer: ^BatchNorm2dLayer) {
+	if layer.weight != nil {t.tensor_free(layer.weight)}
+	if layer.bias != nil {t.tensor_free(layer.bias)}
+	if layer.running_mean != nil {t.tensor_free(layer.running_mean)}
+	if layer.running_var != nil {t.tensor_free(layer.running_var)}
+}

@@ -604,10 +604,10 @@ sequential_test :: proc(allocator: mem.Allocator) {
 	fmt.println("\n=== Testing Sequential Container ===")
 
 	model := nn.sequential_new(allocator)
-	defer nn.sequential_free(&model)
+	defer nn.sequential_free(model)
 
 	nn.sequential_add(
-		&model,
+		model,
 		nn.conv2d_layer_new(1, 8, 3, 1, 0, true, allocator),
 		nn.Activation.ReLU,
 		nn.maxpool2d_layer_new(2, 2),
@@ -630,7 +630,7 @@ sequential_test :: proc(allocator: mem.Allocator) {
 		input.shape[3],
 	)
 
-	output := nn.sequential_forward(&model, input)
+	output := nn.sequential_forward(model, input)
 	// ❌ REMOVE THIS: defer t.tensor_free_graph(output)
 
 	fmt.printf("Output shape: %dx%d\n", output.data.rows, output.data.cols)
@@ -638,7 +638,7 @@ sequential_test :: proc(allocator: mem.Allocator) {
 	opt := nn.adam_new(0.001, allocator = allocator)
 	defer nn.adam_free(&opt)
 
-	nn.sequential_add_to_opt(&model, &opt)
+	nn.sequential_add_to_opt(model, &opt)
 	fmt.printf("Optimizer registered %d parameter tensors\n", len(opt.parameters))
 
 	target_data := l.matrix_new(f64, output.data.rows, output.data.cols, allocator)
@@ -666,22 +666,22 @@ persistence_test :: proc(allocator: mem.Allocator) {
 	// 1. Create a simple model and optimizer
 	model := nn.sequential_new(allocator)
 	nn.sequential_add(
-		&model,
+		model,
 		nn.linear_layer_new(10, 5, allocator),
 		nn.Activation.ReLU,
 		nn.linear_layer_new(5, 2, allocator),
 	)
-	defer nn.sequential_free(&model)
+	defer nn.sequential_free(model)
 
 	opt := nn.adam_new(0.01, allocator = allocator)
-	nn.sequential_add_to_opt(&model, &opt)
+	nn.sequential_add_to_opt(model, &opt)
 	defer nn.adam_free(&opt)
 
 	// 2. Do a fake training step to change the weights and optimizer state
 	x := t.tensor_new_4d(1, 1, 1, 10, false, allocator)
 	for i in 0 ..< 10 {x.data.data[i] = 0.5}
 
-	out := nn.sequential_forward(&model, x)
+	out := nn.sequential_forward(model, x)
 	loss := t.tensor_mse_loss(out, out) // Dummy loss
 	t.tensor_backward(loss)
 	nn.adam_step(&opt)
@@ -696,7 +696,7 @@ persistence_test :: proc(allocator: mem.Allocator) {
 
 	// 3. Save Checkpoint
 	save_path := "test_checkpoint.bin"
-	ok := nn.save_checkpoint(&model, &opt, save_path, 5, allocator)
+	ok := nn.save_checkpoint(model, &opt, save_path, 5, allocator)
 	if !ok {
 		fmt.println("Failed to save checkpoint!")
 		return

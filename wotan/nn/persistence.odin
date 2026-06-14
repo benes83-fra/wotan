@@ -198,6 +198,24 @@ save_checkpoint :: proc(
 
 		case FlattenLayer:
 			write_i32(file, 4) // type
+		case BatchNorm2dLayer:
+			write_i32(file, 5) // Type 5
+			write_i32(file, i32(l.num_features))
+			write_f64(file, l.eps)
+			write_f64(file, l.momentum)
+			write_tensor(file, l.weight)
+			write_tensor(file, l.bias)
+			write_tensor(file, l.running_mean)
+			write_tensor(file, l.running_var)
+		case AvgPool2dLayer:
+			write_i32(file, 6) // Type 6
+			write_i32(file, i32(l.kernel_size))
+			write_i32(file, i32(l.stride))
+
+		case DropoutLayer:
+			write_i32(file, 7) // Type 7
+			write_f64(file, l.drop_prob)
+
 		}
 	}
 
@@ -365,6 +383,42 @@ load_checkpoint :: proc(
 
 		} else if layer_type == 4 { 	// Flatten
 			append(&model.layers, FlattenLayer{})
+		} else if layer_type == 5 { 	// BatchNorm2d
+			num_features: i32
+			eps: f64
+			momentum: f64
+			num_features, offset = read_i32(data, offset)
+			eps, offset = read_f64(data, offset)
+			momentum, offset = read_f64(data, offset)
+
+			layer := batch_norm_2d_layer_new(int(num_features), eps, momentum, allocator)
+
+			// Free defaults and load saved
+			if layer.weight != nil {t.tensor_free(layer.weight)}
+			layer.weight, offset = read_tensor(data, offset, allocator)
+
+			if layer.bias != nil {t.tensor_free(layer.bias)}
+			layer.bias, offset = read_tensor(data, offset, allocator)
+
+			if layer.running_mean != nil {t.tensor_free(layer.running_mean)}
+			layer.running_mean, offset = read_tensor(data, offset, allocator)
+
+			if layer.running_var != nil {t.tensor_free(layer.running_var)}
+			layer.running_var, offset = read_tensor(data, offset, allocator)
+
+			append(&model.layers, layer)
+
+		} else if layer_type == 6 { 	// AvgPool2d
+			k: i32
+			s: i32
+			k, offset = read_i32(data, offset)
+			s, offset = read_i32(data, offset)
+			append(&model.layers, avgpool2d_layer_new(int(k), int(s)))
+
+		} else if layer_type == 7 { 	// Dropout
+			drop_prob: f64
+			drop_prob, offset = read_f64(data, offset)
+			append(&model.layers, dropout_layer_new(drop_prob))
 		}
 	}
 

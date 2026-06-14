@@ -89,10 +89,10 @@ mnist_cnn_test :: proc(allocator: mem.Allocator) {
 	defer data.mnist_free(&train_set)
 
 	model := nn.sequential_new(allocator)
-	defer nn.sequential_free(&model)
+	defer nn.sequential_free(model)
 
 	nn.sequential_add(
-		&model,
+		model,
 		nn.conv2d_layer_new(1, 6, 5, 1, 0, true, allocator),
 		nn.Activation.ReLU,
 		nn.maxpool2d_layer_new(2, 2),
@@ -109,7 +109,7 @@ mnist_cnn_test :: proc(allocator: mem.Allocator) {
 
 	opt := nn.adam_new(0.001, allocator = allocator)
 	defer nn.adam_free(&opt)
-	nn.sequential_add_to_opt(&model, &opt)
+	nn.sequential_add_to_opt(model, &opt)
 
 	// ✅ NEW: Augmentation configuration
 	aug_config := nn.AugmentationConfig {
@@ -142,7 +142,7 @@ mnist_cnn_test :: proc(allocator: mem.Allocator) {
 
 			// Forward pass (use augmented images)
 			nn.adam_zero_grad(&opt)
-			output := nn.sequential_forward(&model, augmented_imgs)
+			output := nn.sequential_forward(model, augmented_imgs)
 			loss := t.tensor_cross_entropy_loss(output, batch_labs)
 			batch_loss := loss.data.data[0]
 
@@ -192,7 +192,7 @@ mnist_cnn_test :: proc(allocator: mem.Allocator) {
 	}
 
 	// Save final augmented model
-	nn.save_checkpoint(&model, &opt, "mnist_augmented.bin", 5, allocator)
+	nn.save_checkpoint(model, &opt, "mnist_augmented.bin", 5, allocator)
 	fmt.println("✓ Augmented model saved to mnist_augmented.bin")
 }
 

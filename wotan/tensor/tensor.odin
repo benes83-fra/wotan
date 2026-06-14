@@ -30,6 +30,7 @@ Op :: enum {
 	Flatten,
 	MaxPool2d,
 	AvgPool2d,
+	BatchNorm2d,
 }
 
 PoolParams :: struct {
@@ -759,6 +760,87 @@ tensor_backward :: proc(root: ^Tensor) {
 					a_in.grad.data[idx] += node.grad.data[i]
 				}
 			}
+		case .BatchNorm2d:
+			input_in := node.inputs[0]
+			weight_in := node.inputs[1]
+			bias_in := node.inputs[2]
+
+			if len(node.grad.data) == 0 {continue}
+
+			N := input_in.shape[0]
+			C := input_in.shape[1]
+			H := input_in.shape[2]
+			W := input_in.shape[3]
+			N_hw := f64(N * H * W)
+			eps := 1e-5 // Match forward pass default
+
+			if input_in.requires_grad && len(input_in.grad.data) > 0 {
+				// Recompute mean and var for this channel
+				for c in 0 ..< C {
+					mean := 0.0
+					for n in 0 ..< N {
+						for h in 0 ..< H {
+							for w in 0 ..< W {
+								idx := n * (C * H * W) + c * (H * W) + h * W + w
+								mean += input_in.data.data[idx]
+							}
+						}
+					}
+					mean /= N_hw
+
+					var := 0.0
+					for n in 0 ..< N {
+						for h in 0 ..< H {
+							for w in 0 ..< W {
+								idx := n * (C * H * W) + c * (H * W) + h * W + w
+								diff := input_in.data.data[idx] - mean
+								var += diff * diff
+							}
+						}
+					}
+					var /= N_hw
+
+					std := math.sqrt(var + eps)
+					gamma := weight_in.data.data[c]
+
+					// Compute gradients for this channel
+					dgamma := 0.0
+					dbeta := 0.0
+
+					// Precompute sums for stable O(N) backward
+					sum_dout_gamma := 0.0
+					sum_dout_gamma_x_hat := 0.0
+					for n in 0 ..< N {
+						for h in 0 ..< H {
+							for w in 0 ..< W {
+								idx := n * (C * H * W) + c * (H * W) + h * W + w
+								x_hat := (input_in.data.data[idx] - mean) / std
+								dout := node.grad.data[idx]
+								sum_dout_gamma += dout * gamma
+								sum_dout_gamma_x_hat += dout * gamma * x_hat
+							}
+						}
+					}
+
+					for n in 0 ..< N {
+						for h in 0 ..< H {
+							for w in 0 ..< W {
+								idx := n * (C * H * W) + c * (H * W) + h * W + w
+								x_hat := (input_in.data.data[idx] - mean) / std
+								dout := node.grad.data[idx]
+
+								dx :=
+									(1.0 / (N_hw * std)) *
+									((N_hw * dout * gamma) -
+											sum_dout_gamma -
+											(x_hat * sum_dout_gamma_x_hat))
+
+								input_in.grad.data[idx] += dx
+							}
+						}
+					}
+				}
+			}
 
 		case .AvgPool2d:
 			// Distribute gradient equally to all elements in the pooling window
@@ -1448,4 +1530,106 @@ _validate_graph_impl :: proc(node: ^Tensor, visited: ^map[^Tensor]bool) -> bool 
 	}
 
 	return true
+}
+// tensor_batch_norm_2d performs Batch Normalization over a 4D tensor (N, C, H, W)
+tensor_batch_norm_2d :: proc(
+	input: ^Tensor,
+	weight: ^Tensor,
+	bias: ^Tensor,
+	running_mean: ^Tensor,
+	running_var: ^Tensor,
+	training: bool,
+	momentum: f64 = 0.1,
+	eps: f64 = 1e-5,
+) -> ^Tensor {
+	N := input.shape[0]
+	C := input.shape[1]
+	H := input.shape[2]
+	W := input.shape[3]
+	N_hw := f64(N * H * W)
+
+	out_data := l.matrix_new(f64, 1, N * C * H * W, input.allocator)
+
+	// We'll store saved variables for the backward pass
+	saved_mean := make([]f64, C, input.allocator)
+	saved_var := make([]f64, C, input.allocator)
+	saved_x_hat := make([]f64, N * C * H * W, input.allocator)
+
+	for c in 0 ..< C {
+		// 1. Compute batch statistics for this channel
+		mean := 0.0
+		for n in 0 ..< N {
+			for h in 0 ..< H {
+				for w in 0 ..< W {
+					idx := n * (C * H * W) + c * (H * W) + h * W + w
+					mean += input.data.data[idx]
+				}
+			}
+		}
+		mean /= N_hw
+
+		var := 0.0
+		for n in 0 ..< N {
+			for h in 0 ..< H {
+				for w in 0 ..< W {
+					idx := n * (C * H * W) + c * (H * W) + h * W + w
+					diff := input.data.data[idx] - mean
+					var += diff * diff
+				}
+			}
+		}
+		var /= N_hw
+
+		// 2. Update running stats if training
+		if training {
+			running_mean.data.data[c] =
+				(1.0 - momentum) * running_mean.data.data[c] + momentum * mean
+			running_var.data.data[c] = (1.0 - momentum) * running_var.data.data[c] + momentum * var
+		}
+
+		current_mean := mean
+		current_var := var
+		if !training {
+			current_mean = running_mean.data.data[c]
+			current_var = running_var.data.data[c]
+		}
+
+		saved_mean[c] = current_mean
+		saved_var[c] = current_var
+
+		// 3. Normalize, scale, and shift
+		std := math.sqrt(current_var + eps)
+		gamma := weight.data.data[c]
+		beta := bias.data.data[c]
+
+		for n in 0 ..< N {
+			for h in 0 ..< H {
+				for w in 0 ..< W {
+					idx := n * (C * H * W) + c * (H * W) + h * W + w
+					x_hat := (input.data.data[idx] - current_mean) / std
+					saved_x_hat[idx] = x_hat
+					out_data.data[idx] = gamma * x_hat + beta
+				}
+			}
+		}
+	}
+
+	out := tensor_new(out_data, input.requires_grad || weight.requires_grad, input.allocator)
+	out.shape = input.shape
+
+	if out.requires_grad {
+		out.op = .BatchNorm2d
+		append(&out.inputs, input)
+		append(&out.inputs, weight)
+		append(&out.inputs, bias)
+
+		// Store metadata for backward pass
+		// We'll pack: N_hw (as f64), eps, then saved_mean, saved_var, saved_x_hat
+		// For simplicity, let's just attach them to a custom struct or use int_metadata cleverly.
+		// Actually, let's just store pointers to slices in the tensor struct if we extend it,
+		// OR we can recompute mean/var in backward (slower but simpler and avoids metadata hacks).
+		// Given Odin's speed, recomputing mean/var in backward is perfectly fine and safer!
+	}
+
+	return out
 }
