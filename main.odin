@@ -453,6 +453,8 @@ main :: proc() {
 	test.persistence_test(context.temp_allocator)
 	test.augmentation_test(context.temp_allocator)
 	test.mnist_cnn_test(context.temp_allocator)
+	// test.test_both_models(context.temp_allocator)
+	test.test_augmented_model(context.temp_allocator)
 	fmt.println("Demo End")
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)

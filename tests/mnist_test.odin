@@ -238,3 +238,172 @@ augmentation_test :: proc(allocator: mem.Allocator) {
 
 	fmt.println("\n✓ Augmentation test passed!")
 }
+
+
+evaluate_on_test_set :: proc(
+	model: ^nn.Sequential,
+	test_set: ^data.MNIST_Dataset,
+	allocator: mem.Allocator,
+) -> f64 {
+	batch_size := 256
+	num_batches := test_set.num_samples / batch_size
+	correct := 0
+	total := 0
+
+	for i in 0 ..< num_batches {
+		batch_imgs, batch_labs := data.mnist_get_batch(
+			test_set,
+			i * batch_size,
+			batch_size,
+			allocator,
+		)
+
+		// Forward pass (no augmentation during evaluation!)
+		output := nn.sequential_forward(model, batch_imgs)
+
+		// Calculate accuracy
+		for j in 0 ..< batch_size {
+			pred_class := 0
+			max_val := -math.F64_MAX
+			for k in 0 ..< 10 {
+				if output.data.data[j * 10 + k] > max_val {
+					max_val = output.data.data[j * 10 + k]
+					pred_class = k
+				}
+			}
+			if pred_class == batch_labs[j] {
+				correct += 1
+			}
+			total += 1
+		}
+
+		t.tensor_free_graph(output)
+		t.tensor_free(batch_imgs)
+		delete(batch_labs, allocator)
+	}
+
+	accuracy := f64(correct) / f64(total) * 100.0
+	return accuracy
+}
+
+test_both_models :: proc(allocator: mem.Allocator) {
+	fmt.println("\n=== Comparing Models on Test Set ===")
+
+	// Load test set
+	test_set, ok := data.mnist_load(
+		"data/mnist/t10k-images-idx3-ubyte",
+		"data/mnist/t10k-labels-idx1-ubyte",
+		allocator,
+	)
+	if !ok {
+		fmt.println("Failed to load test set")
+		return
+	}
+	defer data.mnist_free(&test_set)
+
+	// Load non-augmented model
+	fmt.println("\nLoading non-augmented model...")
+	model1, opt1, epoch1, ok1 := nn.load_checkpoint("mnist_98_91.bin", allocator)
+	if !ok1 {
+		fmt.println("Failed to load non-augmented model")
+		return
+	}
+	defer nn.sequential_free(model1)
+	defer nn.adam_free(opt1)
+
+	acc1 := evaluate_on_test_set(model1, &test_set, allocator)
+	fmt.printf("Non-augmented model (epoch %d): %.2f%% on test set\n", epoch1, acc1)
+
+	// Load augmented model
+	fmt.println("\nLoading augmented model...")
+	model2, opt2, epoch2, ok2 := nn.load_checkpoint("mnist_augmented.bin", allocator)
+	if !ok2 {
+		fmt.println("Failed to load augmented model")
+		return
+	}
+	defer nn.sequential_free(model2)
+	defer nn.adam_free(opt2)
+
+	acc2 := evaluate_on_test_set(model2, &test_set, allocator)
+	fmt.printf("Augmented model (epoch %d): %.2f%% on test set\n", epoch2, acc2)
+
+	fmt.println("\n=== Results ===")
+	if acc2 > acc1 {
+		fmt.printf("✓ Augmentation improved test accuracy by %.2f%%\n", acc2 - acc1)
+	} else {
+		fmt.printf("Note: Augmentation decreased test accuracy by %.2f%%\n", acc1 - acc2)
+		fmt.println("This might be because:")
+		fmt.println("  1. More epochs needed for augmentation to pay off")
+		fmt.println("  2. Model capacity is already sufficient for MNIST")
+		fmt.println("  3. Augmentation parameters might need tuning")
+	}
+}
+test_augmented_model :: proc(allocator: mem.Allocator) {
+	fmt.println("\n=== Testing Augmented Model ===")
+
+	// Load test set
+	test_set, ok := data.mnist_load(
+		"data/mnist/t10k-images-idx3-ubyte",
+		"data/mnist/t10k-labels-idx1-ubyte",
+		allocator,
+	)
+	if !ok {
+		fmt.println("Failed to load test set")
+		return
+	}
+	defer data.mnist_free(&test_set)
+
+	// Load augmented model
+	fmt.println("Loading augmented model...")
+	model, opt, epoch, ok2 := nn.load_checkpoint("mnist_augmented.bin", allocator)
+	if !ok2 {
+		fmt.println("Failed to load augmented model")
+		return
+	}
+	defer nn.sequential_free(model)
+	defer nn.adam_free(opt)
+
+	fmt.printf("Loaded model from epoch %d\n", epoch)
+
+	// Evaluate on test set
+	batch_size := 256
+	num_batches := test_set.num_samples / batch_size
+	correct := 0
+	total := 0
+
+	for i in 0 ..< num_batches {
+		batch_imgs, batch_labs := data.mnist_get_batch(
+			&test_set,
+			i * batch_size,
+			batch_size,
+			allocator,
+		)
+
+		// Forward pass (no augmentation during evaluation!)
+		output := nn.sequential_forward(model, batch_imgs)
+
+		// Calculate accuracy
+		for j in 0 ..< batch_size {
+			pred_class := 0
+			max_val := -math.F64_MAX
+			for k in 0 ..< 10 {
+				if output.data.data[j * 10 + k] > max_val {
+					max_val = output.data.data[j * 10 + k]
+					pred_class = k
+				}
+			}
+			if pred_class == batch_labs[j] {
+				correct += 1
+			}
+			total += 1
+		}
+
+		t.tensor_free_graph(output)
+		t.tensor_free(batch_imgs)
+		delete(batch_labs, allocator)
+	}
+
+	accuracy := f64(correct) / f64(total) * 100.0
+	fmt.printf("\n✓ Augmented model accuracy on test set: %.2f%%\n", accuracy)
+	fmt.printf("  (Correct: %d / Total: %d)\n", correct, total)
+}
