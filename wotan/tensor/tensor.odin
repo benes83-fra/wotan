@@ -772,74 +772,126 @@ tensor_backward :: proc(root: ^Tensor) {
 			H := input_in.shape[2]
 			W := input_in.shape[3]
 			N_hw := f64(N * H * W)
-			eps := 1e-5 // Match forward pass default
+			channel_size := N * H * W
+			eps := 1e-5
 
-			if input_in.requires_grad && len(input_in.grad.data) > 0 {
-				// Recompute mean and var for this channel
-				for c in 0 ..< C {
-					mean := 0.0
-					for n in 0 ..< N {
-						for h in 0 ..< H {
-							for w in 0 ..< W {
-								idx := n * (C * H * W) + c * (H * W) + h * W + w
-								mean += input_in.data.data[idx]
-							}
-						}
-					}
-					mean /= N_hw
+			// ✅ Temporary contiguous buffers for SIMD operations
+			x_buf := make([]f64, channel_size, context.temp_allocator)
+			dout_buf := make([]f64, channel_size, context.temp_allocator)
+			defer delete(x_buf, context.temp_allocator)
+			defer delete(dout_buf, context.temp_allocator)
 
-					var := 0.0
-					for n in 0 ..< N {
-						for h in 0 ..< H {
-							for w in 0 ..< W {
-								idx := n * (C * H * W) + c * (H * W) + h * W + w
-								diff := input_in.data.data[idx] - mean
-								var += diff * diff
-							}
-						}
-					}
-					var /= N_hw
-
-					std := math.sqrt(var + eps)
-					gamma := weight_in.data.data[c]
-
-					// Compute gradients for this channel
-					dgamma := 0.0
-					dbeta := 0.0
-
-					// Precompute sums for stable O(N) backward
-					sum_dout_gamma := 0.0
-					sum_dout_gamma_x_hat := 0.0
-					for n in 0 ..< N {
-						for h in 0 ..< H {
-							for w in 0 ..< W {
-								idx := n * (C * H * W) + c * (H * W) + h * W + w
-								x_hat := (input_in.data.data[idx] - mean) / std
-								dout := node.grad.data[idx]
-								sum_dout_gamma += dout * gamma
-								sum_dout_gamma_x_hat += dout * gamma * x_hat
-							}
-						}
-					}
-
-					for n in 0 ..< N {
-						for h in 0 ..< H {
-							for w in 0 ..< W {
-								idx := n * (C * H * W) + c * (H * W) + h * W + w
-								x_hat := (input_in.data.data[idx] - mean) / std
-								dout := node.grad.data[idx]
-
-								dx :=
-									(1.0 / (N_hw * std)) *
-									((N_hw * dout * gamma) -
-											sum_dout_gamma -
-											(x_hat * sum_dout_gamma_x_hat))
-
-								input_in.grad.data[idx] += dx
-							}
+			for c in 0 ..< C {
+				// 1. Extract channel data and grad to contiguous buffers
+				for n in 0 ..< N {
+					for h in 0 ..< H {
+						for w in 0 ..< W {
+							idx := n * (C * H * W) + c * (H * W) + h * W + w
+							buf_idx := n * (H * W) + h * W + w
+							x_buf[buf_idx] = input_in.data.data[idx]
+							dout_buf[buf_idx] = node.grad.data[idx]
 						}
 					}
 				}
+
+				// 2. Compute mean (SIMD sum)
+				mean := l.sum_simd(x_buf) / N_hw
+
+				// 3. Compute variance (SIMD)
+				mean_vec := make([]f64, channel_size, context.temp_allocator)
+				for i in 0 ..< channel_size {mean_vec[i] = mean}
+				centered := make([]f64, channel_size, context.temp_allocator)
+				l.vec_sub_simd(x_buf, mean_vec, centered)
+				delete(mean_vec, context.temp_allocator)
+
+				var := l.dot_simd(centered, centered) / N_hw
+				std := math.sqrt(var + eps)
+				inv_std := 1.0 / std
+				gamma := weight_in.data.data[c]
+
+				// 4. Compute x_hat (SIMD mul)
+				x_hat := make([]f64, channel_size, context.temp_allocator)
+				inv_std_vec := make([]f64, channel_size, context.temp_allocator)
+				for i in 0 ..< channel_size {inv_std_vec[i] = inv_std}
+				l.vec_mul_simd(centered, inv_std_vec, x_hat)
+				delete(inv_std_vec, context.temp_allocator)
+
+				// 5. Compute weight gradient: dgamma = dot(dout, x_hat) (SIMD)
+				if weight_in.requires_grad && len(weight_in.grad.data) > 0 {
+					dgamma := l.dot_simd(dout_buf, x_hat)
+					weight_in.grad.data[c] += dgamma
+				}
+
+				// 6. Compute bias gradient: dbeta = sum(dout) (SIMD)
+				if bias_in.requires_grad && len(bias_in.grad.data) > 0 {
+					dbeta := l.sum_simd(dout_buf)
+					bias_in.grad.data[c] += dbeta
+				}
+
+				// 7. Compute input gradient (SIMD)
+				if input_in.requires_grad && len(input_in.grad.data) > 0 {
+					// dout_gamma = dout * gamma (SIMD)
+					dout_gamma := make([]f64, channel_size, context.temp_allocator)
+					gamma_vec := make([]f64, channel_size, context.temp_allocator)
+					for i in 0 ..< channel_size {gamma_vec[i] = gamma}
+					l.vec_mul_simd(dout_buf, gamma_vec, dout_gamma)
+					delete(gamma_vec, context.temp_allocator)
+
+					// Precompute sums (SIMD)
+					sum_dout_gamma := l.sum_simd(dout_gamma)
+					sum_dout_gamma_x_hat := l.dot_simd(dout_gamma, x_hat)
+
+					// dx = (1 / (N_hw * std)) * (N_hw * dout_gamma - sum_dout_gamma - x_hat * sum_dout_gamma_x_hat)
+
+					// term1 = N_hw * dout_gamma (SIMD)
+					term1 := make([]f64, channel_size, context.temp_allocator)
+					n_hw_vec := make([]f64, channel_size, context.temp_allocator)
+					for i in 0 ..< channel_size {n_hw_vec[i] = N_hw}
+					l.vec_mul_simd(dout_gamma, n_hw_vec, term1)
+					delete(n_hw_vec, context.temp_allocator)
+					delete(dout_gamma, context.temp_allocator)
+
+					// term2 = x_hat * sum_dout_gamma_x_hat (SIMD)
+					term2 := make([]f64, channel_size, context.temp_allocator)
+					s2_vec := make([]f64, channel_size, context.temp_allocator)
+					for i in 0 ..< channel_size {s2_vec[i] = sum_dout_gamma_x_hat}
+					l.vec_mul_simd(x_hat, s2_vec, term2)
+					delete(s2_vec, context.temp_allocator)
+					delete(x_hat, context.temp_allocator)
+
+					// combined = term1 - sum_dout_gamma (SIMD)
+					sum_dg_vec := make([]f64, channel_size, context.temp_allocator)
+					for i in 0 ..< channel_size {sum_dg_vec[i] = sum_dout_gamma}
+					l.vec_sub_simd(term1, sum_dg_vec, term1)
+					delete(sum_dg_vec, context.temp_allocator)
+
+					// combined = combined - term2 (SIMD)
+					l.vec_sub_simd(term1, term2, term1)
+					delete(term2, context.temp_allocator)
+
+					// dx = combined / (N_hw * std) (SIMD)
+					inv_denom := 1.0 / (N_hw * std)
+					inv_denom_vec := make([]f64, channel_size, context.temp_allocator)
+					for i in 0 ..< channel_size {inv_denom_vec[i] = inv_denom}
+					l.vec_mul_simd(term1, inv_denom_vec, term1)
+					delete(inv_denom_vec, context.temp_allocator)
+
+					// Write dx back to input gradient (de-interleave)
+					for n in 0 ..< N {
+						for h in 0 ..< H {
+							for w in 0 ..< W {
+								idx := n * (C * H * W) + c * (H * W) + h * W + w
+								buf_idx := n * (H * W) + h * W + w
+								input_in.grad.data[idx] += term1[buf_idx]
+							}
+						}
+					}
+					delete(term1, context.temp_allocator)
+				} else {
+					delete(x_hat, context.temp_allocator)
+				}
+
+				delete(centered, context.temp_allocator)
 			}
 
 		case .AvgPool2d:
