@@ -297,3 +297,58 @@ gru_layer_free :: proc(layer: ^GRULayer) {
 gru_layer_forward :: proc(layer: ^GRULayer, x: ^t.Tensor, h_0: ^t.Tensor) -> ^t.Tensor {
 	return t.tensor_gru(x, h_0, layer.w_ih, layer.w_hh, layer.bias)
 }
+LSTMLayer :: struct {
+	input_size:  int,
+	hidden_size: int,
+	w_ih:        ^t.Tensor,
+	w_hh:        ^t.Tensor,
+	bias:        ^t.Tensor,
+}
+
+lstm_layer_new :: proc(
+	input_size: int,
+	hidden_size: int,
+	allocator: mem.Allocator = context.allocator,
+) -> LSTMLayer {
+	layer: LSTMLayer
+	layer.input_size = input_size
+	layer.hidden_size = hidden_size
+	H4 := 4 * hidden_size
+
+	w_ih_data := l.matrix_new(f64, input_size, H4, allocator)
+	limit_ih := math.sqrt(6.0 / f64(input_size + hidden_size))
+	for i in 0 ..< len(w_ih_data.data) {
+		w_ih_data.data[i] = (rand.float64() * 2.0 - 1.0) * limit_ih
+	}
+	layer.w_ih = t.tensor_new(w_ih_data, true, allocator)
+	layer.w_ih.shape = [4]int{input_size, H4, 1, 1}
+
+	w_hh_data := l.matrix_new(f64, hidden_size, H4, allocator)
+	limit_hh := math.sqrt(6.0 / f64(hidden_size + hidden_size))
+	for i in 0 ..< len(w_hh_data.data) {
+		w_hh_data.data[i] = (rand.float64() * 2.0 - 1.0) * limit_hh
+	}
+	layer.w_hh = t.tensor_new(w_hh_data, true, allocator)
+	layer.w_hh.shape = [4]int{hidden_size, H4, 1, 1}
+
+	bias_data := l.matrix_new(f64, 1, H4, allocator)
+	layer.bias = t.tensor_new(bias_data, true, allocator)
+	layer.bias.shape = [4]int{1, H4, 1, 1}
+
+	return layer
+}
+
+lstm_layer_free :: proc(layer: ^LSTMLayer) {
+	if layer.w_ih != nil {t.tensor_free(layer.w_ih)}
+	if layer.w_hh != nil {t.tensor_free(layer.w_hh)}
+	if layer.bias != nil {t.tensor_free(layer.bias)}
+}
+
+lstm_layer_forward :: proc(
+	layer: ^LSTMLayer,
+	x: ^t.Tensor,
+	h_0: ^t.Tensor,
+	c_0: ^t.Tensor,
+) -> ^t.Tensor {
+	return t.tensor_lstm(x, h_0, c_0, layer.w_ih, layer.w_hh, layer.bias)
+}
