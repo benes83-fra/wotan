@@ -217,6 +217,8 @@ rnn_layer_new :: proc(
 		w_ih_data.data[i] = (rand.float64() * 2.0 - 1.0) * limit_ih
 	}
 	layer.w_ih = t.tensor_new(w_ih_data, true, allocator)
+	// ✅ FIX: Set shape so shape[0]=input_size, shape[1]=hidden_size
+	layer.w_ih.shape = [4]int{input_size, hidden_size, 1, 1}
 
 	// Orthogonal/Xavier initialization for w_hh
 	w_hh_data := l.matrix_new(f64, hidden_size, hidden_size, allocator)
@@ -225,14 +227,17 @@ rnn_layer_new :: proc(
 		w_hh_data.data[i] = (rand.float64() * 2.0 - 1.0) * limit_hh
 	}
 	layer.w_hh = t.tensor_new(w_hh_data, true, allocator)
+	// ✅ FIX: Set shape so shape[0]=hidden_size, shape[1]=hidden_size
+	layer.w_hh.shape = [4]int{hidden_size, hidden_size, 1, 1}
 
 	// Zero bias
 	bias_data := l.matrix_new(f64, 1, hidden_size, allocator)
 	layer.bias = t.tensor_new(bias_data, true, allocator)
+	// ✅ FIX: Set shape so shape[1]=hidden_size
+	layer.bias.shape = [4]int{1, hidden_size, 1, 1}
 
 	return layer
 }
-
 rnn_layer_free :: proc(layer: ^RNNLayer) {
 	if layer.w_ih != nil {t.tensor_free(layer.w_ih)}
 	if layer.w_hh != nil {t.tensor_free(layer.w_hh)}
