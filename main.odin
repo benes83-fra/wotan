@@ -457,6 +457,7 @@ main :: proc() {
 	// test.test_augmented_model(context.temp_allocator)
 	test.run_all_batchnorm_tests(context.temp_allocator)
 	test.rnn_simple_test(context.temp_allocator)
+	test.gru_simple_test(context.temp_allocator)
 	fmt.println("Demo End")
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)

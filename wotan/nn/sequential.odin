@@ -22,6 +22,7 @@ Layer :: union {
 	Activation,
 	FlattenLayer,
 	RNNLayer,
+	GRULayer,
 }
 
 // ============================================================================
@@ -103,6 +104,13 @@ sequential_forward :: proc(s: ^Sequential, input: ^t.Tensor) -> ^t.Tensor {
 			// ✅ FIX: 'l' is now a pointer, so this matches the ^RNNLayer signature
 			x = rnn_layer_forward(&l, x, h_0)
 			t.tensor_free(h_0)
+		case GRULayer:
+			batch := x.shape[0]
+			hidden := l.hidden_size
+			h_0_data := la.matrix_new(f64, 1, batch * hidden, x.allocator)
+			h_0 := t.tensor_new(h_0_data, false, x.allocator)
+			x = gru_layer_forward(&l, x, h_0)
+			t.tensor_free(h_0)
 		}
 	}
 	return x
@@ -133,6 +141,11 @@ sequential_add_to_sgd :: proc(seq: ^Sequential, opt: ^SGD) {
 		case DropoutLayer:
 		case Activation:
 		case FlattenLayer:
+
+		case GRULayer:
+			sgd_add_param(opt, l.w_ih) // or sgd_add_param
+			sgd_add_param(opt, l.w_hh)
+			sgd_add_param(opt, l.bias)
 		}
 	}
 }
@@ -161,6 +174,10 @@ sequential_add_to_adam :: proc(seq: ^Sequential, opt: ^Adam) {
 		case Activation:
 		// No parameters
 		case FlattenLayer:
+		case GRULayer:
+			adam_add_param(opt, l.w_ih) // or sgd_add_param
+			adam_add_param(opt, l.w_hh)
+			adam_add_param(opt, l.bias)
 		// No parameters
 		case RNNLayer:
 			adam_add_param(opt, l.w_ih)
@@ -189,6 +206,8 @@ sequential_free :: proc(seq: ^Sequential) {
 		case Activation:
 		// No heap allocations
 		case FlattenLayer:
+		case GRULayer:
+			gru_layer_free(&l)
 		// No heap allocations
 		case RNNLayer:
 			rnn_layer_free(&l)
