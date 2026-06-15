@@ -236,6 +236,11 @@ save_checkpoint :: proc(
 			write_tensor(file, l.w_ih)
 			write_tensor(file, l.w_hh)
 			write_tensor(file, l.bias)
+		case EmbeddingLayer:
+			write_i32(file, 11) // Type 11
+			write_i32(file, i32(l.num_embeddings))
+			write_i32(file, i32(l.embedding_dim))
+			write_tensor(file, l.weight)
 
 		}
 	}
@@ -497,6 +502,18 @@ load_checkpoint :: proc(
 
 			if layer.bias != nil {t.tensor_free(layer.bias)}
 			layer.bias, offset = read_tensor(data, offset, allocator)
+
+			append(&model.layers, layer)
+		} else if layer_type == 11 { 	// Embedding
+			num_embeddings: i32
+			embedding_dim: i32
+			num_embeddings, offset = read_i32(data, offset)
+			embedding_dim, offset = read_i32(data, offset)
+
+			layer := embedding_layer_new(int(num_embeddings), int(embedding_dim), allocator)
+
+			if layer.weight != nil {t.tensor_free(layer.weight)}
+			layer.weight, offset = read_tensor(data, offset, allocator)
 
 			append(&model.layers, layer)
 		}

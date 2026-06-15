@@ -34,6 +34,7 @@ Op :: enum {
 	RNN,
 	GRU,
 	LSTM,
+	Embedding,
 }
 
 PoolParams :: struct {
@@ -655,6 +656,39 @@ tensor_backward :: proc(root: ^Tensor) {
 						row_grad := node.grad.data[start_idx:end_idx]
 						l.axpy_simd(1.0, row_grad, bias_in.grad.data)
 					}
+				}
+			}
+		case .Embedding:
+			input_in := node.inputs[0] // indices (no grad)
+			weight_in := node.inputs[1] // weight matrix
+
+			if len(node.grad.data) == 0 || !weight_in.requires_grad {continue}
+
+			batch := input_in.shape[0]
+			seq_len := input_in.shape[1]
+			vocab_size := weight_in.shape[0]
+			embed_dim := weight_in.shape[1]
+
+			// Ensure gradient matrix is allocated
+			if weight_in.grad.data == nil {
+				weight_in.grad = l.matrix_new(f64, vocab_size, embed_dim, weight_in.allocator)
+			}
+
+			// ✅ OPTIMIZATION: Scatter-add using SIMD vector addition
+			for b in 0 ..< batch {
+				for s in 0 ..< seq_len {
+					idx := int(input_in.data.data[b * seq_len + s])
+					if idx < 0 || idx >= vocab_size {continue} 	// Safety
+
+					src_offset := (b * seq_len + s) * embed_dim
+					dst_offset := idx * embed_dim
+
+					// weight_in.grad[idx] += node.grad[b, s]
+					l.vec_add_simd(
+						weight_in.grad.data[dst_offset:dst_offset + embed_dim],
+						node.grad.data[src_offset:src_offset + embed_dim],
+						weight_in.grad.data[dst_offset:dst_offset + embed_dim],
+					)
 				}
 			}
 		case .MSELoss:
@@ -2758,6 +2792,49 @@ tensor_lstm :: proc(
 		append(&out.inputs, w_ih)
 		append(&out.inputs, w_hh)
 		append(&out.inputs, bias)
+	}
+
+	return out
+}
+// ============================================================================
+// Embedding Operations (SIMD-optimized lookup and scatter-add)
+// ============================================================================
+
+tensor_embedding :: proc(input: ^Tensor, weight: ^Tensor) -> ^Tensor {
+	batch := input.shape[0]
+	seq_len := input.shape[1]
+	vocab_size := weight.shape[0]
+	embed_dim := weight.shape[1]
+
+	out_data := l.matrix_new(f64, 1, batch * seq_len * embed_dim, input.allocator)
+
+	for b in 0 ..< batch {
+		for s in 0 ..< seq_len {
+			idx := int(input.data.data[b * seq_len + s])
+
+			// Safety bounds check
+			if idx < 0 || idx >= vocab_size {
+				panic(fmt.aprintf("Embedding index %d out of bounds [0, %d)", idx, vocab_size))
+			}
+
+			src_offset := idx * embed_dim
+			dst_offset := (b * seq_len + s) * embed_dim
+
+			// ✅ OPTIMIZATION: Odin's `copy` is highly optimized and uses SIMD/memcpy
+			copy(
+				out_data.data[dst_offset:dst_offset + embed_dim],
+				weight.data.data[src_offset:src_offset + embed_dim],
+			)
+		}
+	}
+
+	out := tensor_new(out_data, weight.requires_grad, input.allocator)
+	out.shape = [4]int{batch, seq_len, embed_dim, 1}
+
+	if out.requires_grad {
+		out.op = .Embedding
+		append(&out.inputs, input)
+		append(&out.inputs, weight)
 	}
 
 	return out

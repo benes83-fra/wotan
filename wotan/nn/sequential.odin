@@ -24,6 +24,7 @@ Layer :: union {
 	RNNLayer,
 	GRULayer,
 	LSTMLayer,
+	EmbeddingLayer,
 }
 
 // ============================================================================
@@ -122,6 +123,8 @@ sequential_forward :: proc(s: ^Sequential, input: ^t.Tensor) -> ^t.Tensor {
 			x = lstm_layer_forward(&l, x, h_0, c_0)
 			t.tensor_free(h_0)
 			t.tensor_free(c_0)
+		case EmbeddingLayer:
+			x = embedding_layer_forward(&l, x)
 		}
 	}
 	return x
@@ -161,6 +164,8 @@ sequential_add_to_sgd :: proc(seq: ^Sequential, opt: ^SGD) {
 			sgd_add_param(opt, l.w_ih)
 			sgd_add_param(opt, l.w_hh)
 			sgd_add_param(opt, l.bias)
+		case EmbeddingLayer:
+			sgd_add_param(opt, l.weight) // or sgd_add_param
 		}
 	}
 }
@@ -202,6 +207,8 @@ sequential_add_to_adam :: proc(seq: ^Sequential, opt: ^Adam) {
 			adam_add_param(opt, l.w_ih)
 			adam_add_param(opt, l.w_hh)
 			adam_add_param(opt, l.bias)
+		case EmbeddingLayer:
+			adam_add_param(opt, l.weight) // or sgd_add_param
 		}
 	}
 }
@@ -232,6 +239,8 @@ sequential_free :: proc(seq: ^Sequential) {
 			rnn_layer_free(&l)
 		case LSTMLayer:
 			lstm_layer_free(&l)
+		case EmbeddingLayer:
+			embedding_layer_free(&l)
 		}
 	}
 	delete(seq.layers)

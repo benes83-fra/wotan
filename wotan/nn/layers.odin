@@ -352,3 +352,43 @@ lstm_layer_forward :: proc(
 ) -> ^t.Tensor {
 	return t.tensor_lstm(x, h_0, c_0, layer.w_ih, layer.w_hh, layer.bias)
 }
+// ============================================================================
+// Embedding Layer
+// ============================================================================
+
+EmbeddingLayer :: struct {
+	num_embeddings: int,
+	embedding_dim:  int,
+	weight:         ^t.Tensor, // [vocab_size, embedding_dim]
+}
+
+embedding_layer_new :: proc(
+	num_embeddings: int,
+	embedding_dim: int,
+	allocator: mem.Allocator = context.allocator,
+) -> EmbeddingLayer {
+	layer: EmbeddingLayer
+	layer.num_embeddings = num_embeddings
+	layer.embedding_dim = embedding_dim
+
+	w_data := l.matrix_new(f64, num_embeddings, embedding_dim, allocator)
+
+	// Standard embedding initialization: Uniform(-1/sqrt(dim), 1/sqrt(dim))
+	limit := 1.0 / math.sqrt(f64(embedding_dim))
+	for i in 0 ..< len(w_data.data) {
+		w_data.data[i] = (rand.float64() * 2.0 - 1.0) * limit
+	}
+
+	layer.weight = t.tensor_new(w_data, true, allocator)
+	layer.weight.shape = [4]int{num_embeddings, embedding_dim, 1, 1}
+
+	return layer
+}
+
+embedding_layer_free :: proc(layer: ^EmbeddingLayer) {
+	if layer.weight != nil {t.tensor_free(layer.weight)}
+}
+
+embedding_layer_forward :: proc(layer: ^EmbeddingLayer, x: ^t.Tensor) -> ^t.Tensor {
+	return t.tensor_embedding(x, layer.weight)
+}
