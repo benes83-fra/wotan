@@ -25,6 +25,7 @@ Layer :: union {
 	GRULayer,
 	LSTMLayer,
 	EmbeddingLayer,
+	MultiHeadAttentionLayer,
 }
 
 // ============================================================================
@@ -125,6 +126,8 @@ sequential_forward :: proc(s: ^Sequential, input: ^t.Tensor) -> ^t.Tensor {
 			t.tensor_free(c_0)
 		case EmbeddingLayer:
 			x = embedding_layer_forward(&l, x)
+		case MultiHeadAttentionLayer:
+			x = multi_head_attention_layer_forward(&l, x)
 		}
 	}
 	return x
@@ -166,6 +169,15 @@ sequential_add_to_sgd :: proc(seq: ^Sequential, opt: ^SGD) {
 			sgd_add_param(opt, l.bias)
 		case EmbeddingLayer:
 			sgd_add_param(opt, l.weight) // or sgd_add_param
+		case MultiHeadAttentionLayer:
+			sgd_add_param(opt, l.q_proj.weights)
+			sgd_add_param(opt, l.q_proj.bias)
+			sgd_add_param(opt, l.k_proj.weights)
+			sgd_add_param(opt, l.k_proj.bias)
+			sgd_add_param(opt, l.v_proj.weights)
+			sgd_add_param(opt, l.v_proj.bias)
+			sgd_add_param(opt, l.out_proj.weights)
+			sgd_add_param(opt, l.out_proj.bias)
 		}
 	}
 }
@@ -209,6 +221,15 @@ sequential_add_to_adam :: proc(seq: ^Sequential, opt: ^Adam) {
 			adam_add_param(opt, l.bias)
 		case EmbeddingLayer:
 			adam_add_param(opt, l.weight) // or sgd_add_param
+		case MultiHeadAttentionLayer:
+			adam_add_param(opt, l.q_proj.weights)
+			adam_add_param(opt, l.q_proj.bias)
+			adam_add_param(opt, l.k_proj.weights)
+			adam_add_param(opt, l.k_proj.bias)
+			adam_add_param(opt, l.v_proj.weights)
+			adam_add_param(opt, l.v_proj.bias)
+			adam_add_param(opt, l.out_proj.weights)
+			adam_add_param(opt, l.out_proj.bias)
 		}
 	}
 }
@@ -241,6 +262,8 @@ sequential_free :: proc(seq: ^Sequential) {
 			lstm_layer_free(&l)
 		case EmbeddingLayer:
 			embedding_layer_free(&l)
+		case MultiHeadAttentionLayer:
+			multi_head_attention_layer_free(&l)
 		}
 	}
 	delete(seq.layers)

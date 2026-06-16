@@ -546,9 +546,9 @@ multi_head_attention_layer_forward :: proc(
 	out := linear_forward(&layer.out_proj, att_inv)
 
 	// Cleanup intermediate tensors (autograd handles graph, but we free the intermediates)
-	t.tensor_free(q); t.tensor_free(k); t.tensor_free(v)
-	t.tensor_free(q_perm); t.tensor_free(k_perm); t.tensor_free(v_perm)
-	t.tensor_free(att); t.tensor_free(att_inv)
+	// t.tensor_free(q); t.tensor_free(k); t.tensor_free(v)
+	// t.tensor_free(q_perm); t.tensor_free(k_perm); t.tensor_free(v_perm)
+	// t.tensor_free(att); t.tensor_free(att_inv)
 
 	return out
 }

@@ -472,12 +472,7 @@ multi_head_attention_test :: proc(allocator: mem.Allocator) {
 	mha_layer := nn.multi_head_attention_layer_new(d_model, num_heads, allocator)
 	defer nn.multi_head_attention_layer_free(&mha_layer)
 
-	// Manually set weights so Head 0 perfectly attends to token 0, and Head 1 attends to token 1
-	// This is a simplified conceptual test to ensure the shapes and flow are correct.
-	// In a real scenario, the network learns these weights.
-
 	x_data := l.matrix_new(f64, 1, batch * seq_len * d_model, allocator)
-	// Token 0: [1, 0, 0, 0], Token 1: [0, 1, 0, 0], Token 2: [0, 0, 1, 0]
 	x_data.data[0] = 1.0
 	x_data.data[5] = 1.0
 	x_data.data[10] = 1.0
@@ -487,12 +482,12 @@ multi_head_attention_test :: proc(allocator: mem.Allocator) {
 	defer t.tensor_free(x)
 
 	output := nn.multi_head_attention_layer_forward(&mha_layer, x)
-	defer t.tensor_free(output)
 
 	if output.shape[0] == batch && output.shape[1] == seq_len && output.shape[2] == d_model {
 		fmt.println("✓ Forward pass shape is correct!")
 	} else {
 		fmt.printf("❌ Forward pass shape mismatch! Got %v\n", output.shape)
+		t.tensor_free_graph(output) // Clean up even on failure
 		return
 	}
 
@@ -516,8 +511,12 @@ multi_head_attention_test :: proc(allocator: mem.Allocator) {
 		)
 	} else {
 		fmt.println("❌ Backward pass failed to flow gradients to input!")
+		t.tensor_free_graph(output) // Clean up even on failure
 		return
 	}
 
 	fmt.println("✓ Multi-Head Attention test completed successfully!")
+
+	// ✅ FIX: Clean up the entire computation graph to prevent memory leaks
+	t.tensor_free_graph(output)
 }

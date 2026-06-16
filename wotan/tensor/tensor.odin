@@ -249,31 +249,52 @@ tensor_mul :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
 // tensor_add_bias adds a 1xD bias vector to every row of an NxD matrix
 // a: [N, D], bias: [1, D] -> out: [N, D]
 tensor_add_bias :: proc(a: ^Tensor, bias: ^Tensor) -> ^Tensor {
-	if a.data.cols != bias.data.cols {
-		panic("tensor_add_bias: column mismatch")
-	}
+	D := bias.data.cols
 	if bias.data.rows != 1 {
 		panic("tensor_add_bias: bias must be a 1xD row vector")
 	}
 
-	N := a.data.rows
-	D := a.data.cols
+	// ✅ NEW: Handle flattened 3D tensor
+	if a.data.rows == 1 && a.data.cols != D {
+		if a.data.cols % D == 0 {
+			N := a.data.cols / D
+			out_data := l.matrix_new(f64, 1, a.data.cols, a.allocator)
 
-	// 1. Forward pass
+			for i in 0 ..< N {
+				row_out := out_data.data[i * D:(i + 1) * D]
+				row_a := a.data.data[i * D:(i + 1) * D]
+				l.vec_add_simd(row_a, bias.data.data, row_out)
+			}
+
+			out := tensor_new(out_data, a.requires_grad || bias.requires_grad, a.allocator)
+			out.shape = a.shape
+			if out.requires_grad {
+				out.op = .AddBias
+				append(&out.inputs, a)
+				append(&out.inputs, bias)
+				append(&out.int_metadata, N)
+				append(&out.int_metadata, D)
+			}
+			return out
+		}
+	}
+
+	// Standard 2D path
+	if a.data.cols != D {
+		panic("tensor_add_bias: column mismatch")
+	}
+
+	N := a.data.rows
 	out_data := l.matrix_new(f64, N, D, a.allocator)
 
 	for i in 0 ..< N {
 		row_out := out_data.data[i * D:(i + 1) * D]
 		row_a := a.data.data[i * D:(i + 1) * D]
-
-		// ✅ SIMD Optimization: out_row = a_row + bias
 		l.vec_add_simd(row_a, bias.data.data, row_out)
 	}
 
-	// 2. Create output tensor
 	out := tensor_new(out_data, a.requires_grad || bias.requires_grad, a.allocator)
-
-	// 3. Record graph
+	out.shape = a.shape
 	if out.requires_grad {
 		out.op = .AddBias
 		append(&out.inputs, a)
@@ -527,7 +548,45 @@ tensor_backward :: proc(root: ^Tensor) {
 		case .MatMul:
 			a_in := node.inputs[0]
 			b_in := node.inputs[1]
+			if len(node.int_metadata) == 3 {
+				N := node.int_metadata[0]
+				in_features := node.int_metadata[1]
+				out_features := node.int_metadata[2]
 
+				a_view := l.Matrix(f64) {
+					rows = N,
+					cols = in_features,
+					data = a_in.data.data,
+				}
+				b_view := b_in.data
+				grad_view := l.Matrix(f64) {
+					rows = N,
+					cols = out_features,
+					data = node.grad.data,
+				}
+
+				if a_in.requires_grad {
+					tensor_ensure_grad(a_in)
+					b_t := _matrix_transpose(b_view, context.temp_allocator)
+					grad_a_view := l.matmul_dyn_simd(&grad_view, &b_t, context.temp_allocator)
+					l.matrix_free(&b_t)
+
+					// Copy flattened gradient back
+					copy(a_in.grad.data, grad_a_view.data)
+					l.matrix_free(&grad_a_view)
+				}
+
+				if b_in.requires_grad {
+					tensor_ensure_grad(b_in)
+					a_t := _matrix_transpose(a_view, context.temp_allocator)
+					grad_b := l.matmul_dyn_simd(&a_t, &grad_view, context.temp_allocator)
+					l.matrix_free(&a_t)
+
+					l.vec_add_simd(b_in.grad.data, grad_b.data, b_in.grad.data)
+					l.matrix_free(&grad_b)
+				}
+				continue // Skip the standard 2D backward pass
+			}
 			if a_in.requires_grad {
 				tensor_ensure_grad(a_in)
 				if len(a_in.grad.data) > 0 && len(node.grad.data) > 0 {
@@ -660,7 +719,25 @@ tensor_backward :: proc(root: ^Tensor) {
 				fmt.println("WARNING: AddBias node has empty gradient, skipping")
 				continue
 			}
+			if len(node.int_metadata) == 2 {
+				N := node.int_metadata[0]
+				D := node.int_metadata[1]
 
+				if a_in.requires_grad {
+					tensor_ensure_grad(a_in)
+					l.vec_add_simd(a_in.grad.data, node.grad.data, a_in.grad.data)
+				}
+
+				if bias_in.requires_grad {
+					tensor_ensure_grad(bias_in)
+					// Sum gradients over the N rows
+					for i in 0 ..< N {
+						row_grad := node.grad.data[i * D:(i + 1) * D]
+						l.axpy_simd(1.0, row_grad, bias_in.grad.data)
+					}
+				}
+				continue // Skip standard 2D backward
+			}
 			N := node.grad.rows
 			D := node.grad.cols
 
@@ -2174,17 +2251,50 @@ _matrix_transpose :: proc(m: l.Matrix(f64), alloc: mem.Allocator) -> l.Matrix(f6
 
 // tensor_matmul creates a new tensor C = A @ B (Matrix Multiplication)
 tensor_matmul :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
+	// ✅ NEW: Handle flattened 3D/4D tensor @ 2D weight matrix
+	if a.data.rows == 1 && a.data.cols != b.data.rows {
+		if a.data.cols % b.data.rows == 0 {
+			N := a.data.cols / b.data.rows
+			in_features := b.data.rows
+			out_features := b.data.cols
+
+			// Create a temporary view to do the SIMD matmul
+			a_view := l.Matrix(f64) {
+				rows = N,
+				cols = in_features,
+				data = a.data.data,
+			}
+			temp_out := l.matmul_dyn_simd(&a_view, &b.data, a.allocator)
+
+			// Flatten the result back to 1 x (N * out_features) to match framework conventions
+			out_data := l.matrix_new(f64, 1, N * out_features, a.allocator)
+			copy(out_data.data, temp_out.data)
+			l.matrix_free(&temp_out)
+
+			out := tensor_new(out_data, a.requires_grad || b.requires_grad, a.allocator)
+			out.shape = a.shape
+			out.shape[2] = out_features
+			if out.requires_grad {
+				out.op = .MatMul
+				append(&out.inputs, a)
+				append(&out.inputs, b)
+				// Store metadata so the backward pass knows how to reshape gradients
+				append(&out.int_metadata, N)
+				append(&out.int_metadata, in_features)
+				append(&out.int_metadata, out_features)
+			}
+			return out
+		}
+	}
+
+	// Standard 2D matmul path
 	if a.data.cols != b.data.rows {
 		panic("tensor_matmul: dimension mismatch")
 	}
 
-	// 1. Forward pass using your blazing fast SIMD MatMul!
 	out_data := l.matmul_dyn_simd(&a.data, &b.data, a.allocator)
-
-	// 2. Create output tensor
 	out := tensor_new(out_data, a.requires_grad || b.requires_grad, a.allocator)
-
-	// 3. Record graph
+	out.shape = [4]int{a.data.rows, b.data.cols, 1, 1}
 	if out.requires_grad {
 		out.op = .MatMul
 		append(&out.inputs, a)
@@ -2193,7 +2303,6 @@ tensor_matmul :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
 
 	return out
 }
-
 // _tensor_free_graph_impl is the recursive helper
 _tensor_free_graph_impl :: proc(node: ^Tensor, visited: ^map[^Tensor]bool) {
 	if node == nil {return}
