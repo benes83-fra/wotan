@@ -35,6 +35,7 @@ Op :: enum {
 	GRU,
 	LSTM,
 	Embedding,
+	ScaledDotProductAttention,
 }
 
 PoolParams :: struct {
@@ -691,6 +692,132 @@ tensor_backward :: proc(root: ^Tensor) {
 					)
 				}
 			}
+		case .ScaledDotProductAttention:
+			Q_in := node.inputs[0]
+			K_in := node.inputs[1]
+			V_in := node.inputs[2]
+
+			if len(node.grad.data) == 0 {continue}
+
+			batch := Q_in.shape[0]
+			seq_q := Q_in.shape[1]
+			seq_k := K_in.shape[1]
+			d_k := Q_in.shape[2]
+			d_v := V_in.shape[2]
+			scale := 1.0 / math.sqrt(f64(d_k))
+
+			dQ := make([]f64, len(Q_in.data.data), context.temp_allocator)
+			dK := make([]f64, len(K_in.data.data), context.temp_allocator)
+			dV := make([]f64, len(V_in.data.data), context.temp_allocator)
+			defer {
+				delete(dQ, context.temp_allocator)
+				delete(dK, context.temp_allocator)
+				delete(dV, context.temp_allocator)
+			}
+
+			for b in 0 ..< batch {
+				q_b := l.Matrix(f64) {
+					rows = seq_q,
+					cols = d_k,
+					data = Q_in.data.data[b * seq_q * d_k:(b + 1) * seq_q * d_k],
+				}
+				k_b := l.Matrix(f64) {
+					rows = seq_k,
+					cols = d_k,
+					data = K_in.data.data[b * seq_k * d_k:(b + 1) * seq_k * d_k],
+				}
+				v_b := l.Matrix(f64) {
+					rows = seq_k,
+					cols = d_v,
+					data = V_in.data.data[b * seq_k * d_v:(b + 1) * seq_k * d_v],
+				}
+				dO_b := l.Matrix(f64) {
+					rows = seq_q,
+					cols = d_v,
+					data = node.grad.data[b * seq_q * d_v:(b + 1) * seq_q * d_v],
+				}
+
+				// 1. Recompute S_b and P_b (Checkpointing)
+				k_b_t := _matrix_transpose(k_b, context.temp_allocator)
+				s_b := l.matmul_dyn_simd(&q_b, &k_b_t, context.temp_allocator)
+				l.matrix_free(&k_b_t)
+
+				p_b := l.Matrix(f64) {
+					rows = seq_q,
+					cols = seq_k,
+					data = s_b.data,
+				}
+				for i in 0 ..< seq_q * seq_k {
+					p_b.data[i] *= scale
+				}
+
+				// Numerically stable softmax
+				for i in 0 ..< seq_q {
+					row_start := i * seq_k
+					max_val := p_b.data[row_start]
+					for j in 1 ..< seq_k {
+						if p_b.data[row_start + j] > max_val {max_val = p_b.data[row_start + j]}
+					}
+					sum_exp := 0.0
+					for j in 0 ..< seq_k {
+						p_b.data[row_start + j] = math.exp(p_b.data[row_start + j] - max_val)
+						sum_exp += p_b.data[row_start + j]
+					}
+					inv_sum := 1.0 / sum_exp
+					for j in 0 ..< seq_k {
+						p_b.data[row_start + j] *= inv_sum
+					}
+				}
+
+				// 2. dV = P_b^T @ dO_b
+				p_b_t := _matrix_transpose(p_b, context.temp_allocator)
+				dV_b := l.matmul_dyn_simd(&p_b_t, &dO_b, context.temp_allocator)
+				copy(dV[b * seq_k * d_v:(b + 1) * seq_k * d_v], dV_b.data)
+				l.matrix_free(&p_b_t)
+				l.matrix_free(&dV_b)
+
+				// 3. dP = dO_b @ V_b^T
+				v_b_t := _matrix_transpose(v_b, context.temp_allocator)
+				dP_b := l.matmul_dyn_simd(&dO_b, &v_b_t, context.temp_allocator)
+
+				// 4. dS = P_b * (dP_b - sum(dP_b * P_b, dim=-1))  [Standard Softmax Backward]
+				for i in 0 ..< seq_q {
+					row_start := i * seq_k
+					sum := 0.0
+					for j in 0 ..< seq_k {
+						sum += dP_b.data[row_start + j] * p_b.data[row_start + j]
+					}
+					for j in 0 ..< seq_k {
+						dP_b.data[row_start + j] =
+							p_b.data[row_start + j] * (dP_b.data[row_start + j] - sum)
+					}
+				}
+
+				// 5. dQ = (dP_b * scale) @ K_b
+				for i in 0 ..< seq_q * seq_k {
+					dP_b.data[i] *= scale
+				}
+				dQ_b := l.matmul_dyn_simd(&dP_b, &k_b, context.temp_allocator)
+				copy(dQ[b * seq_q * d_k:(b + 1) * seq_q * d_k], dQ_b.data)
+				l.matrix_free(&dQ_b)
+
+				// 6. dK = (dP_b * scale)^T @ Q_b  => dP_b^T @ Q_b
+				dP_b_t := _matrix_transpose(dP_b, context.temp_allocator)
+				dK_b := l.matmul_dyn_simd(&dP_b_t, &q_b, context.temp_allocator)
+				copy(dK[b * seq_k * d_k:(b + 1) * seq_k * d_k], dK_b.data)
+				l.matrix_free(&dP_b_t)
+				l.matrix_free(&dK_b)
+
+				l.matrix_free(&dP_b)
+				l.matrix_free(&s_b)
+			}
+
+			if Q_in.requires_grad &&
+			   len(Q_in.grad.data) > 0 {l.vec_add_simd(Q_in.grad.data, dQ, Q_in.grad.data)}
+			if K_in.requires_grad &&
+			   len(K_in.grad.data) > 0 {l.vec_add_simd(K_in.grad.data, dK, K_in.grad.data)}
+			if V_in.requires_grad &&
+			   len(V_in.grad.data) > 0 {l.vec_add_simd(V_in.grad.data, dV, V_in.grad.data)}
 		case .MSELoss:
 			// L = mean((pred - target)^2)
 			// dL/dpred = 2 * (pred - target) / N
@@ -2835,6 +2962,94 @@ tensor_embedding :: proc(input: ^Tensor, weight: ^Tensor) -> ^Tensor {
 		out.op = .Embedding
 		append(&out.inputs, input)
 		append(&out.inputs, weight)
+	}
+
+	return out
+}
+// ============================================================================
+// Scaled Dot-Product Attention (with Checkpointing for memory efficiency)
+// ============================================================================
+
+tensor_scaled_dot_product_attention :: proc(Q: ^Tensor, K: ^Tensor, V: ^Tensor) -> ^Tensor {
+	batch := Q.shape[0]
+	seq_q := Q.shape[1]
+	seq_k := K.shape[1]
+	d_k := Q.shape[2]
+	d_v := V.shape[2]
+
+	out_data := l.matrix_new(f64, 1, batch * seq_q * d_v, Q.allocator)
+	scale := 1.0 / math.sqrt(f64(d_k))
+
+	for b in 0 ..< batch {
+		q_b := l.Matrix(f64) {
+			rows = seq_q,
+			cols = d_k,
+			data = Q.data.data[b * seq_q * d_k:(b + 1) * seq_q * d_k],
+		}
+		k_b := l.Matrix(f64) {
+			rows = seq_k,
+			cols = d_k,
+			data = K.data.data[b * seq_k * d_k:(b + 1) * seq_k * d_k],
+		}
+		v_b := l.Matrix(f64) {
+			rows = seq_k,
+			cols = d_v,
+			data = V.data.data[b * seq_k * d_v:(b + 1) * seq_k * d_v],
+		}
+
+		// 1. S_b = Q_b @ K_b^T
+		k_b_t := _matrix_transpose(k_b, context.temp_allocator)
+		s_b := l.matmul_dyn_simd(&q_b, &k_b_t, context.temp_allocator)
+		l.matrix_free(&k_b_t)
+
+		// 2. Scale and Softmax to get P_b
+		p_b := l.Matrix(f64) {
+			rows = seq_q,
+			cols = seq_k,
+			data = s_b.data,
+		}
+		for i in 0 ..< seq_q * seq_k {
+			p_b.data[i] *= scale
+		}
+
+		// Numerically stable softmax along seq_k (rows of p_b)
+		for i in 0 ..< seq_q {
+			row_start := i * seq_k
+			max_val := p_b.data[row_start]
+			for j in 1 ..< seq_k {
+				if p_b.data[row_start + j] > max_val {
+					max_val = p_b.data[row_start + j]
+				}
+			}
+
+			sum_exp := 0.0
+			for j in 0 ..< seq_k {
+				p_b.data[row_start + j] = math.exp(p_b.data[row_start + j] - max_val)
+				sum_exp += p_b.data[row_start + j]
+			}
+
+			inv_sum := 1.0 / sum_exp
+			for j in 0 ..< seq_k {
+				p_b.data[row_start + j] *= inv_sum
+			}
+		}
+
+		// 3. O_b = P_b @ V_b
+		o_b := l.matmul_dyn_simd(&p_b, &v_b, context.temp_allocator)
+		copy(out_data.data[b * seq_q * d_v:(b + 1) * seq_q * d_v], o_b.data)
+
+		l.matrix_free(&o_b)
+		l.matrix_free(&s_b)
+	}
+
+	out := tensor_new(out_data, Q.requires_grad || K.requires_grad || V.requires_grad, Q.allocator)
+	out.shape = [4]int{batch, seq_q, d_v, 1}
+
+	if out.requires_grad {
+		out.op = .ScaledDotProductAttention
+		append(&out.inputs, Q)
+		append(&out.inputs, K)
+		append(&out.inputs, V)
 	}
 
 	return out

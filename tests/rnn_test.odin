@@ -377,3 +377,86 @@ positional_encoding_test :: proc(allocator: mem.Allocator) {
 
 	fmt.println("✓ Positional Encoding test completed successfully!")
 }
+attention_simple_test :: proc(allocator: mem.Allocator) {
+	fmt.println("\n=== Testing Scaled Dot-Product Attention ===")
+
+	batch := 1
+	seq_q := 1
+	seq_k := 3
+	d_k := 2
+	d_v := 2
+
+	// Q perfectly matches the first key (using larger values for sharp softmax)
+	q_data := l.matrix_new(f64, 1, batch * seq_q * d_k, allocator)
+	q_data.data[0] = 10.0
+	q_data.data[1] = 0.0
+	Q := t.tensor_new(q_data, true, allocator)
+	Q.shape = [4]int{batch, seq_q, d_k, 1}
+	defer t.tensor_free(Q)
+
+	// K has 3 keys: [10, 0], [0, 10], [0, 0]
+	k_data := l.matrix_new(f64, 1, batch * seq_k * d_k, allocator)
+	k_data.data[0] = 10.0; k_data.data[1] = 0.0 // Key 0 (matches Q, dot product = 100)
+	k_data.data[2] = 0.0; k_data.data[3] = 10.0 // Key 1 (dot product = 0)
+	k_data.data[4] = 0.0; k_data.data[5] = 0.0 // Key 2 (dot product = 0)
+	K := t.tensor_new(k_data, true, allocator)
+	K.shape = [4]int{batch, seq_k, d_k, 1}
+	defer t.tensor_free(K)
+
+	// V has 3 values
+	v_data := l.matrix_new(f64, 1, batch * seq_k * d_v, allocator)
+	v_data.data[0] = 5.0; v_data.data[1] = 5.0 // Value 0
+	v_data.data[2] = 10.0; v_data.data[3] = 10.0 // Value 1
+	v_data.data[4] = 0.0; v_data.data[5] = 0.0 // Value 2
+	V := t.tensor_new(v_data, true, allocator)
+	V.shape = [4]int{batch, seq_k, d_v, 1}
+	defer t.tensor_free(V)
+
+	output := t.tensor_scaled_dot_product_attention(Q, K, V)
+	defer t.tensor_free(output)
+
+	// Expected output is exactly V[0] = [5.0, 5.0]
+	// because Q perfectly matches K[0], so attention weight for K[0] will be ~1.0
+	expected_0 := 5.0
+	expected_1 := 5.0
+
+	if math.abs(output.data.data[0] - expected_0) < 0.01 &&
+	   math.abs(output.data.data[1] - expected_1) < 0.01 {
+		fmt.printf(
+			"✓ Forward pass correct! Output: [%.4f, %.4f] (Expected ~[%.1f, %.1f])\n",
+			output.data.data[0],
+			output.data.data[1],
+			expected_0,
+			expected_1,
+		)
+	} else {
+		fmt.printf(
+			"❌ Forward pass failed! Output: [%.4f, %.4f]\n",
+			output.data.data[0],
+			output.data.data[1],
+		)
+		return
+	}
+
+	// Test Backward Pass
+	// Set output gradient to [1.0, 1.0]
+	output.grad.data[0] = 1.0
+	output.grad.data[1] = 1.0
+
+	t.tensor_backward(output)
+
+	// V gradient should be approximately [1.0, 1.0] for the first row, 0 for others
+	// (since attention weight is ~1.0 for row 0)
+	if math.abs(V.grad.data[0] - 1.0) < 0.01 && math.abs(V.grad.data[1] - 1.0) < 0.01 {
+		fmt.println("✓ Backward pass correctly flows gradients to V!")
+	} else {
+		fmt.printf(
+			"❌ Backward pass V gradient failed! Got [%.4f, %.4f]\n",
+			V.grad.data[0],
+			V.grad.data[1],
+		)
+		return
+	}
+
+	fmt.println("✓ Scaled Dot-Product Attention test completed successfully!")
+}
