@@ -2,6 +2,7 @@ package nn
 
 import l "../linalg"
 import t "../tensor"
+import "core:fmt"
 import "core:math"
 import "core:math/rand"
 import "core:mem"
@@ -391,4 +392,91 @@ embedding_layer_free :: proc(layer: ^EmbeddingLayer) {
 
 embedding_layer_forward :: proc(layer: ^EmbeddingLayer, x: ^t.Tensor) -> ^t.Tensor {
 	return t.tensor_embedding(x, layer.weight)
+}
+// ============================================================================
+// Positional Encoding (Sinusoidal)
+// ============================================================================
+
+PositionalEncoding :: struct {
+	max_seq_len: int,
+	embed_dim:   int,
+	pe:          []f64, // Precomputed [max_seq_len, embed_dim]
+	allocator:   mem.Allocator,
+}
+
+positional_encoding_new :: proc(
+	max_seq_len: int,
+	embed_dim: int,
+	allocator: mem.Allocator = context.allocator,
+) -> PositionalEncoding {
+	pe := make([]f64, max_seq_len * embed_dim, allocator)
+
+	// Precompute the denominator: 10000^(2i / embed_dim)
+	// Using log/exp for numerical stability and efficiency
+	div_term := make([]f64, embed_dim / 2, allocator)
+	for i in 0 ..< embed_dim / 2 {
+		div_term[i] = math.exp(-f64(2 * i) * math.ln_f64(10000.0) / f64(embed_dim))
+	}
+
+	for pos in 0 ..< max_seq_len {
+		pos_f := f64(pos)
+		for i in 0 ..< embed_dim / 2 {
+			pe_idx_even := pos * embed_dim + 2 * i
+			pe_idx_odd := pos * embed_dim + 2 * i + 1
+
+			pe[pe_idx_even] = math.sin(pos_f * div_term[i])
+			if 2 * i + 1 < embed_dim {
+				pe[pe_idx_odd] = math.cos(pos_f * div_term[i])
+			}
+		}
+	}
+	delete(div_term, allocator)
+
+	return PositionalEncoding {
+		max_seq_len = max_seq_len,
+		embed_dim = embed_dim,
+		pe = pe,
+		allocator = allocator,
+	}
+}
+
+positional_encoding_free :: proc(pe: ^PositionalEncoding) {
+	if pe.pe != nil {
+		delete(pe.pe, pe.allocator)
+	}
+}
+
+// positional_encoding_forward adds the precomputed PE to the input embeddings
+// ✅ SIMD-optimized using vec_add_simd
+positional_encoding_forward :: proc(pe: ^PositionalEncoding, x: ^t.Tensor) -> ^t.Tensor {
+	batch := x.shape[0]
+	seq_len := x.shape[1]
+	embed_dim := x.shape[2]
+
+	if seq_len > pe.max_seq_len {
+		panic(fmt.aprintf("Sequence length %d exceeds max_seq_len %d", seq_len, pe.max_seq_len))
+	}
+	if embed_dim != pe.embed_dim {
+		panic(fmt.aprintf("Embed dim %d does not match PE embed_dim %d", embed_dim, pe.embed_dim))
+	}
+
+	out_data := l.matrix_new(f64, 1, batch * seq_len * embed_dim, x.allocator)
+
+	// 1. Copy input embeddings to output
+	copy(out_data.data, x.data.data)
+
+	// 2. ✅ SIMD-optimized addition of PE to each batch element
+	pe_slice := pe.pe[0:seq_len * embed_dim]
+	for b in 0 ..< batch {
+		batch_offset := b * seq_len * embed_dim
+		l.vec_add_simd(
+			out_data.data[batch_offset:batch_offset + seq_len * embed_dim],
+			pe_slice,
+			out_data.data[batch_offset:batch_offset + seq_len * embed_dim],
+		)
+	}
+
+	out := t.tensor_new(out_data, x.requires_grad, x.allocator)
+	out.shape = x.shape
+	return out
 }

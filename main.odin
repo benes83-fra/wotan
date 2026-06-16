@@ -460,6 +460,7 @@ main :: proc() {
 	test.gru_simple_test(context.temp_allocator)
 	test.lstm_simple_test(context.temp_allocator)
 	test.embedding_simple_test(context.temp_allocator)
+	test.positional_encoding_test(context.temp_allocator)
 	fmt.println("Demo End")
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
