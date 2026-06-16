@@ -36,6 +36,8 @@ Op :: enum {
 	LSTM,
 	Embedding,
 	ScaledDotProductAttention,
+	PermuteMHA,
+	PermuteMHAInverse,
 }
 
 PoolParams :: struct {
@@ -591,7 +593,51 @@ tensor_backward :: proc(root: ^Tensor) {
 					a_in.grad.data[i] += node.grad.data[i] * (1.0 - t * t)
 				}
 			}
+		case .PermuteMHA:
+			x_in := node.inputs[0]
+			if x_in.requires_grad && len(x_in.grad.data) > 0 {
+				batch := node.int_metadata[0]
+				seq_len := node.int_metadata[1]
+				num_heads := node.int_metadata[2]
+				head_dim := node.int_metadata[3]
+				d_model := num_heads * head_dim
 
+				for b in 0 ..< batch {
+					for s in 0 ..< seq_len {
+						for h in 0 ..< num_heads {
+							for d in 0 ..< head_dim {
+								src :=
+									(b * num_heads + h) * (seq_len * head_dim) + s * head_dim + d
+								dst := b * (seq_len * d_model) + s * d_model + h * head_dim + d
+								x_in.grad.data[dst] += node.grad.data[src]
+							}
+						}
+					}
+				}
+			}
+
+		case .PermuteMHAInverse:
+			x_in := node.inputs[0]
+			if x_in.requires_grad && len(x_in.grad.data) > 0 {
+				batch := node.int_metadata[0]
+				seq_len := node.int_metadata[1]
+				num_heads := node.int_metadata[2]
+				head_dim := node.int_metadata[3]
+				d_model := num_heads * head_dim
+
+				for b in 0 ..< batch {
+					for s in 0 ..< seq_len {
+						for h in 0 ..< num_heads {
+							for d in 0 ..< head_dim {
+								src := b * (seq_len * d_model) + s * d_model + h * head_dim + d
+								dst :=
+									(b * num_heads + h) * (seq_len * head_dim) + s * head_dim + d
+								x_in.grad.data[dst] += node.grad.data[src]
+							}
+						}
+					}
+				}
+			}
 		case .LeakyReLU:
 			// d/dx = 1 if x > 0 else α
 			a_in := node.inputs[0]
@@ -3050,6 +3096,84 @@ tensor_scaled_dot_product_attention :: proc(Q: ^Tensor, K: ^Tensor, V: ^Tensor) 
 		append(&out.inputs, Q)
 		append(&out.inputs, K)
 		append(&out.inputs, V)
+	}
+
+	return out
+}
+// ============================================================================
+// MHA Permute Helpers (to group heads for batched attention)
+// ============================================================================
+
+tensor_permute_mha :: proc(
+	x: ^Tensor,
+	batch: int,
+	seq_len: int,
+	num_heads: int,
+	head_dim: int,
+) -> ^Tensor {
+	d_model := num_heads * head_dim
+	out_data := l.matrix_new(f64, 1, batch * num_heads * seq_len * head_dim, x.allocator)
+
+	for b in 0 ..< batch {
+		for s in 0 ..< seq_len {
+			for h in 0 ..< num_heads {
+				for d in 0 ..< head_dim {
+					src := b * (seq_len * d_model) + s * d_model + h * head_dim + d
+					dst := (b * num_heads + h) * (seq_len * head_dim) + s * head_dim + d
+					out_data.data[dst] = x.data.data[src]
+				}
+			}
+		}
+	}
+
+	out := tensor_new(out_data, x.requires_grad, x.allocator)
+	out.shape = [4]int{batch * num_heads, seq_len, head_dim, 1}
+
+	if out.requires_grad {
+		out.op = .PermuteMHA
+		append(&out.inputs, x)
+		// Store metadata for the backward pass
+		append(&out.int_metadata, batch)
+		append(&out.int_metadata, seq_len)
+		append(&out.int_metadata, num_heads)
+		append(&out.int_metadata, head_dim)
+	}
+
+	return out
+}
+
+tensor_permute_mha_inverse :: proc(
+	x: ^Tensor,
+	batch: int,
+	seq_len: int,
+	num_heads: int,
+	head_dim: int,
+) -> ^Tensor {
+	d_model := num_heads * head_dim
+	out_data := l.matrix_new(f64, 1, batch * seq_len * d_model, x.allocator)
+
+	for b in 0 ..< batch {
+		for s in 0 ..< seq_len {
+			for h in 0 ..< num_heads {
+				for d in 0 ..< head_dim {
+					src := (b * num_heads + h) * (seq_len * head_dim) + s * head_dim + d
+					dst := b * (seq_len * d_model) + s * d_model + h * head_dim + d
+					out_data.data[dst] = x.data.data[src]
+				}
+			}
+		}
+	}
+
+	out := tensor_new(out_data, x.requires_grad, x.allocator)
+	out.shape = [4]int{batch, seq_len, d_model, 1}
+
+	if out.requires_grad {
+		out.op = .PermuteMHAInverse
+		append(&out.inputs, x)
+		append(&out.int_metadata, batch)
+		append(&out.int_metadata, seq_len)
+		append(&out.int_metadata, num_heads)
+		append(&out.int_metadata, head_dim)
 	}
 
 	return out

@@ -241,6 +241,18 @@ save_checkpoint :: proc(
 			write_i32(file, i32(l.num_embeddings))
 			write_i32(file, i32(l.embedding_dim))
 			write_tensor(file, l.weight)
+		case MultiHeadAttentionLayer:
+			write_i32(file, 12) // Type 12
+			write_i32(file, i32(l.d_model))
+			write_i32(file, i32(l.num_heads))
+			write_tensor(file, l.q_proj.weights)
+			write_tensor(file, l.q_proj.bias)
+			write_tensor(file, l.k_proj.weights)
+			write_tensor(file, l.k_proj.bias)
+			write_tensor(file, l.v_proj.weights)
+			write_tensor(file, l.v_proj.bias)
+			write_tensor(file, l.out_proj.weights)
+			write_tensor(file, l.out_proj.bias)
 
 		}
 	}
@@ -491,7 +503,7 @@ load_checkpoint :: proc(
 			hidden_size, offset = read_i32(data, offset)
 
 			// ✅ FIX: Use gru_layer_new, not rnn_layer_new
-			layer := gru_layer_new(int(in_size), int(hidden_size), allocator)
+			layer := lstm_layer_new(int(in_size), int(hidden_size), allocator)
 
 			// Free the randomly initialized defaults and load the saved weights
 			if layer.w_ih != nil {t.tensor_free(layer.w_ih)}
@@ -514,6 +526,39 @@ load_checkpoint :: proc(
 
 			if layer.weight != nil {t.tensor_free(layer.weight)}
 			layer.weight, offset = read_tensor(data, offset, allocator)
+
+			append(&model.layers, layer)
+		} else if layer_type == 12 { 	// MultiHeadAttention
+			d_model: i32
+			num_heads: i32
+			d_model, offset = read_i32(data, offset)
+			num_heads, offset = read_i32(data, offset)
+
+			layer := multi_head_attention_layer_new(int(d_model), int(num_heads), allocator)
+
+			// Load q_proj
+			if layer.q_proj.weights != nil {t.tensor_free(layer.q_proj.weights)}
+			layer.q_proj.weights, offset = read_tensor(data, offset, allocator)
+			if layer.q_proj.bias != nil {t.tensor_free(layer.q_proj.bias)}
+			layer.q_proj.bias, offset = read_tensor(data, offset, allocator)
+
+			// Load k_proj
+			if layer.k_proj.weights != nil {t.tensor_free(layer.k_proj.weights)}
+			layer.k_proj.weights, offset = read_tensor(data, offset, allocator)
+			if layer.k_proj.bias != nil {t.tensor_free(layer.k_proj.bias)}
+			layer.k_proj.bias, offset = read_tensor(data, offset, allocator)
+
+			// Load v_proj
+			if layer.v_proj.weights != nil {t.tensor_free(layer.v_proj.weights)}
+			layer.v_proj.weights, offset = read_tensor(data, offset, allocator)
+			if layer.v_proj.bias != nil {t.tensor_free(layer.v_proj.bias)}
+			layer.v_proj.bias, offset = read_tensor(data, offset, allocator)
+
+			// Load out_proj
+			if layer.out_proj.weights != nil {t.tensor_free(layer.out_proj.weights)}
+			layer.out_proj.weights, offset = read_tensor(data, offset, allocator)
+			if layer.out_proj.bias != nil {t.tensor_free(layer.out_proj.bias)}
+			layer.out_proj.bias, offset = read_tensor(data, offset, allocator)
 
 			append(&model.layers, layer)
 		}

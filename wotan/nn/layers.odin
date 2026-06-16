@@ -480,3 +480,75 @@ positional_encoding_forward :: proc(pe: ^PositionalEncoding, x: ^t.Tensor) -> ^t
 	out.shape = x.shape
 	return out
 }
+// ============================================================================
+// Multi-Head Attention Layer
+// ============================================================================
+
+MultiHeadAttentionLayer :: struct {
+	d_model:   int,
+	num_heads: int,
+	head_dim:  int,
+	q_proj:    LinearLayer,
+	k_proj:    LinearLayer,
+	v_proj:    LinearLayer,
+	out_proj:  LinearLayer,
+}
+
+multi_head_attention_layer_new :: proc(
+	d_model: int,
+	num_heads: int,
+	allocator: mem.Allocator = context.allocator,
+) -> MultiHeadAttentionLayer {
+	layer: MultiHeadAttentionLayer
+	layer.d_model = d_model
+	layer.num_heads = num_heads
+	layer.head_dim = d_model / num_heads
+
+	layer.q_proj = linear_layer_new(d_model, d_model, allocator)
+	layer.k_proj = linear_layer_new(d_model, d_model, allocator)
+	layer.v_proj = linear_layer_new(d_model, d_model, allocator)
+	layer.out_proj = linear_layer_new(d_model, d_model, allocator)
+
+	return layer
+}
+
+multi_head_attention_layer_free :: proc(layer: ^MultiHeadAttentionLayer) {
+	linear_layer_free(&layer.q_proj)
+	linear_layer_free(&layer.k_proj)
+	linear_layer_free(&layer.v_proj)
+	linear_layer_free(&layer.out_proj)
+}
+
+multi_head_attention_layer_forward :: proc(
+	layer: ^MultiHeadAttentionLayer,
+	x: ^t.Tensor,
+) -> ^t.Tensor {
+	batch := x.shape[0]
+	seq_len := x.shape[1]
+
+	// 1. Projections
+	q := linear_forward(&layer.q_proj, x)
+	k := linear_forward(&layer.k_proj, x)
+	v := linear_forward(&layer.v_proj, x)
+
+	// 2. Permute to [batch * num_heads, seq_len, head_dim]
+	q_perm := t.tensor_permute_mha(q, batch, seq_len, layer.num_heads, layer.head_dim)
+	k_perm := t.tensor_permute_mha(k, batch, seq_len, layer.num_heads, layer.head_dim)
+	v_perm := t.tensor_permute_mha(v, batch, seq_len, layer.num_heads, layer.head_dim)
+
+	// 3. Scaled Dot-Product Attention (processes all heads in parallel!)
+	att := t.tensor_scaled_dot_product_attention(q_perm, k_perm, v_perm)
+
+	// 4. Inverse permute back to [batch, seq_len, d_model]
+	att_inv := t.tensor_permute_mha_inverse(att, batch, seq_len, layer.num_heads, layer.head_dim)
+
+	// 5. Output projection
+	out := linear_forward(&layer.out_proj, att_inv)
+
+	// Cleanup intermediate tensors (autograd handles graph, but we free the intermediates)
+	t.tensor_free(q); t.tensor_free(k); t.tensor_free(v)
+	t.tensor_free(q_perm); t.tensor_free(k_perm); t.tensor_free(v_perm)
+	t.tensor_free(att); t.tensor_free(att_inv)
+
+	return out
+}

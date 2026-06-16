@@ -460,3 +460,64 @@ attention_simple_test :: proc(allocator: mem.Allocator) {
 
 	fmt.println("✓ Scaled Dot-Product Attention test completed successfully!")
 }
+multi_head_attention_test :: proc(allocator: mem.Allocator) {
+	fmt.println("\n=== Testing Multi-Head Attention ===")
+
+	batch := 1
+	seq_len := 3
+	d_model := 4
+	num_heads := 2
+	head_dim := d_model / num_heads // 2
+
+	mha_layer := nn.multi_head_attention_layer_new(d_model, num_heads, allocator)
+	defer nn.multi_head_attention_layer_free(&mha_layer)
+
+	// Manually set weights so Head 0 perfectly attends to token 0, and Head 1 attends to token 1
+	// This is a simplified conceptual test to ensure the shapes and flow are correct.
+	// In a real scenario, the network learns these weights.
+
+	x_data := l.matrix_new(f64, 1, batch * seq_len * d_model, allocator)
+	// Token 0: [1, 0, 0, 0], Token 1: [0, 1, 0, 0], Token 2: [0, 0, 1, 0]
+	x_data.data[0] = 1.0
+	x_data.data[5] = 1.0
+	x_data.data[10] = 1.0
+
+	x := t.tensor_new(x_data, true, allocator)
+	x.shape = [4]int{batch, seq_len, d_model, 1}
+	defer t.tensor_free(x)
+
+	output := nn.multi_head_attention_layer_forward(&mha_layer, x)
+	defer t.tensor_free(output)
+
+	if output.shape[0] == batch && output.shape[1] == seq_len && output.shape[2] == d_model {
+		fmt.println("✓ Forward pass shape is correct!")
+	} else {
+		fmt.printf("❌ Forward pass shape mismatch! Got %v\n", output.shape)
+		return
+	}
+
+	// Test Backward Pass
+	for i in 0 ..< len(output.grad.data) {
+		output.grad.data[i] = 1.0
+	}
+
+	t.tensor_backward(output)
+
+	// Verify gradients flowed back to the input
+	grad_sum := 0.0
+	for i in 0 ..< len(x.grad.data) {
+		grad_sum += math.abs(x.grad.data[i])
+	}
+
+	if grad_sum > 0.0 {
+		fmt.printf(
+			"✓ Backward pass correctly flows gradients to input (grad sum: %.4f)\n",
+			grad_sum,
+		)
+	} else {
+		fmt.println("❌ Backward pass failed to flow gradients to input!")
+		return
+	}
+
+	fmt.println("✓ Multi-Head Attention test completed successfully!")
+}
