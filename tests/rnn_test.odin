@@ -677,3 +677,115 @@ ffn_simple_test :: proc(allocator: mem.Allocator) {
 
 	fmt.println("✓ Feed-Forward Network test completed successfully!")
 }
+
+
+transformer_encoder_block_test :: proc(allocator: mem.Allocator) {
+	fmt.println("\n=== Testing Transformer Encoder Block ===")
+
+	// Hyperparameters
+	batch := 4
+	seq_len := 8
+	d_model := 32
+	num_heads := 4
+	d_ff := 128
+
+	// Create the block
+	block := nn.transformer_encoder_block_new(d_model, num_heads, d_ff, allocator)
+	defer nn.transformer_encoder_block_free(&block)
+
+	// Create optimizer
+	opt := nn.adam_new(0.001, allocator = allocator)
+	defer nn.adam_free(&opt)
+
+	// Register all parameters
+	nn.adam_add_param(&opt, block.mha.q_proj.weights)
+	nn.adam_add_param(&opt, block.mha.q_proj.bias)
+	nn.adam_add_param(&opt, block.mha.k_proj.weights)
+	nn.adam_add_param(&opt, block.mha.k_proj.bias)
+	nn.adam_add_param(&opt, block.mha.v_proj.weights)
+	nn.adam_add_param(&opt, block.mha.v_proj.bias)
+	nn.adam_add_param(&opt, block.mha.out_proj.weights)
+	nn.adam_add_param(&opt, block.mha.out_proj.bias)
+	nn.adam_add_param(&opt, block.ffn.fc1.weights)
+	nn.adam_add_param(&opt, block.ffn.fc1.bias)
+	nn.adam_add_param(&opt, block.ffn.fc2.weights)
+	nn.adam_add_param(&opt, block.ffn.fc2.bias)
+	nn.adam_add_param(&opt, block.ln1.gamma)
+	nn.adam_add_param(&opt, block.ln1.beta)
+	nn.adam_add_param(&opt, block.ln2.gamma)
+	nn.adam_add_param(&opt, block.ln2.beta)
+
+	// Create input data (random sequences)
+	x_data := l.matrix_new(f64, 1, batch * seq_len * d_model, allocator)
+	for i in 0 ..< len(x_data.data) {
+		x_data.data[i] = rand.float64() * 2.0 - 1.0
+	}
+	x := t.tensor_new(x_data, false, allocator)
+	x.shape = [4]int{batch, seq_len, d_model, 1}
+	defer t.tensor_free(x)
+
+	// Create target (we want the output to match a specific pattern)
+	target_data := l.matrix_new(f64, 1, batch * seq_len * d_model, allocator)
+	for i in 0 ..< len(target_data.data) {
+		target_data.data[i] = 0.5
+	}
+	target := t.tensor_new(target_data, false, allocator)
+	target.shape = [4]int{batch, seq_len, d_model, 1}
+	defer t.tensor_free(target)
+
+	// Training loop
+	epochs := 20
+	fmt.println("Training Transformer Encoder Block...")
+
+	initial_loss := 0.0
+	final_loss := 0.0
+
+	for epoch in 0 ..< epochs {
+		nn.adam_zero_grad(&opt)
+
+		// Forward pass
+		output := nn.transformer_encoder_block_forward(&block, x)
+
+		// Compute loss
+		loss := t.tensor_mse_loss(output, target)
+
+		if epoch == 0 {
+			initial_loss = loss.data.data[0]
+		}
+
+		// Backward pass
+		t.tensor_backward(loss)
+
+		// Optimizer step
+		nn.adam_step(&opt)
+
+		if epoch % 5 == 0 {
+			fmt.printf("Epoch %d | Loss: %.4f\n", epoch, loss.data.data[0])
+		}
+
+		if epoch == epochs - 1 {
+			final_loss = loss.data.data[0]
+		}
+
+		// Clean up graph
+		t.tensor_free_graph(loss)
+	}
+
+	// Verify learning
+	if final_loss < initial_loss * 0.5 {
+		fmt.printf(
+			"✓ Transformer Encoder Block successfully learned! Loss: %.4f → %.4f (%.1f%% reduction)\n",
+			initial_loss,
+			final_loss,
+			(1.0 - final_loss / initial_loss) * 100.0,
+		)
+	} else {
+		fmt.printf(
+			"⚠ Transformer Encoder Block showed minimal learning. Loss: %.4f → %.4f\n",
+			initial_loss,
+			final_loss,
+		)
+	}
+
+	fmt.println("✓ Transformer Encoder Block test completed successfully!")
+}

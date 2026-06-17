@@ -267,6 +267,33 @@ save_checkpoint :: proc(
 			write_tensor(file, l.fc1.bias)
 			write_tensor(file, l.fc2.weights)
 			write_tensor(file, l.fc2.bias)
+		case TransformerEncoderBlock:
+			write_i32(file, 15) // Type 15
+			write_i32(file, i32(l.d_model))
+			write_i32(file, i32(l.num_heads))
+			write_i32(file, i32(l.d_ff))
+
+			// Save MHA
+			write_tensor(file, l.mha.q_proj.weights)
+			write_tensor(file, l.mha.q_proj.bias)
+			write_tensor(file, l.mha.k_proj.weights)
+			write_tensor(file, l.mha.k_proj.bias)
+			write_tensor(file, l.mha.v_proj.weights)
+			write_tensor(file, l.mha.v_proj.bias)
+			write_tensor(file, l.mha.out_proj.weights)
+			write_tensor(file, l.mha.out_proj.bias)
+
+			// Save FFN
+			write_tensor(file, l.ffn.fc1.weights)
+			write_tensor(file, l.ffn.fc1.bias)
+			write_tensor(file, l.ffn.fc2.weights)
+			write_tensor(file, l.ffn.fc2.bias)
+
+			// Save LayerNorms
+			write_tensor(file, l.ln1.gamma)
+			write_tensor(file, l.ln1.beta)
+			write_tensor(file, l.ln2.gamma)
+			write_tensor(file, l.ln2.beta)
 
 		}
 	}
@@ -611,6 +638,69 @@ load_checkpoint :: proc(
 			layer.fc2.bias, offset = read_tensor(data, offset, allocator)
 
 			append(&model.layers, layer)
+		} else if layer_type == 15 { 	// TransformerEncoderBlock
+			d_model: i32
+			num_heads: i32
+			d_ff: i32
+			d_model, offset = read_i32(data, offset)
+			num_heads, offset = read_i32(data, offset)
+			d_ff, offset = read_i32(data, offset)
+
+			block := transformer_encoder_block_new(
+				int(d_model),
+				int(num_heads),
+				int(d_ff),
+				allocator,
+			)
+
+			// Load MHA q_proj
+			if block.mha.q_proj.weights != nil {t.tensor_free(block.mha.q_proj.weights)}
+			block.mha.q_proj.weights, offset = read_tensor(data, offset, allocator)
+			if block.mha.q_proj.bias != nil {t.tensor_free(block.mha.q_proj.bias)}
+			block.mha.q_proj.bias, offset = read_tensor(data, offset, allocator)
+
+			// Load MHA k_proj
+			if block.mha.k_proj.weights != nil {t.tensor_free(block.mha.k_proj.weights)}
+			block.mha.k_proj.weights, offset = read_tensor(data, offset, allocator)
+			if block.mha.k_proj.bias != nil {t.tensor_free(block.mha.k_proj.bias)}
+			block.mha.k_proj.bias, offset = read_tensor(data, offset, allocator)
+
+			// Load MHA v_proj
+			if block.mha.v_proj.weights != nil {t.tensor_free(block.mha.v_proj.weights)}
+			block.mha.v_proj.weights, offset = read_tensor(data, offset, allocator)
+			if block.mha.v_proj.bias != nil {t.tensor_free(block.mha.v_proj.bias)}
+			block.mha.v_proj.bias, offset = read_tensor(data, offset, allocator)
+
+			// Load MHA out_proj
+			if block.mha.out_proj.weights != nil {t.tensor_free(block.mha.out_proj.weights)}
+			block.mha.out_proj.weights, offset = read_tensor(data, offset, allocator)
+			if block.mha.out_proj.bias != nil {t.tensor_free(block.mha.out_proj.bias)}
+			block.mha.out_proj.bias, offset = read_tensor(data, offset, allocator)
+
+			// Load FFN fc1
+			if block.ffn.fc1.weights != nil {t.tensor_free(block.ffn.fc1.weights)}
+			block.ffn.fc1.weights, offset = read_tensor(data, offset, allocator)
+			if block.ffn.fc1.bias != nil {t.tensor_free(block.ffn.fc1.bias)}
+			block.ffn.fc1.bias, offset = read_tensor(data, offset, allocator)
+
+			// Load FFN fc2
+			if block.ffn.fc2.weights != nil {t.tensor_free(block.ffn.fc2.weights)}
+			block.ffn.fc2.weights, offset = read_tensor(data, offset, allocator)
+			if block.ffn.fc2.bias != nil {t.tensor_free(block.ffn.fc2.bias)}
+			block.ffn.fc2.bias, offset = read_tensor(data, offset, allocator)
+
+			// Load LayerNorms
+			if block.ln1.gamma != nil {t.tensor_free(block.ln1.gamma)}
+			block.ln1.gamma, offset = read_tensor(data, offset, allocator)
+			if block.ln1.beta != nil {t.tensor_free(block.ln1.beta)}
+			block.ln1.beta, offset = read_tensor(data, offset, allocator)
+
+			if block.ln2.gamma != nil {t.tensor_free(block.ln2.gamma)}
+			block.ln2.gamma, offset = read_tensor(data, offset, allocator)
+			if block.ln2.beta != nil {t.tensor_free(block.ln2.beta)}
+			block.ln2.beta, offset = read_tensor(data, offset, allocator)
+
+			append(&model.layers, block)
 		}
 	}
 

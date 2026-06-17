@@ -594,3 +594,115 @@ layer_norm_layer_free :: proc(layer: ^LayerNormLayer) {
 layer_norm_layer_forward :: proc(layer: ^LayerNormLayer, x: ^t.Tensor) -> ^t.Tensor {
 	return t.tensor_layer_norm(x, layer.gamma, layer.beta, layer.eps)
 }
+
+// ============================================================================
+// Feed-Forward Network (FFN) Layer
+// ============================================================================
+
+FFNLayer :: struct {
+	d_model: int,
+	d_ff:    int, // Hidden dimension (usually 4 * d_model)
+	fc1:     LinearLayer,
+	fc2:     LinearLayer,
+}
+
+ffn_layer_new :: proc(
+	d_model: int,
+	d_ff: int,
+	allocator: mem.Allocator = context.allocator,
+) -> FFNLayer {
+	layer: FFNLayer
+	layer.d_model = d_model
+	layer.d_ff = d_ff
+
+	// Standard FFN: Linear -> ReLU -> Linear
+	layer.fc1 = linear_layer_new(d_model, d_ff, allocator)
+	layer.fc2 = linear_layer_new(d_ff, d_model, allocator)
+
+	return layer
+}
+
+ffn_layer_free :: proc(layer: ^FFNLayer) {
+	linear_layer_free(&layer.fc1)
+	linear_layer_free(&layer.fc2)
+}
+
+ffn_layer_forward :: proc(layer: ^FFNLayer, x: ^t.Tensor) -> ^t.Tensor {
+	// 1. Project up to d_ff
+	x1 := linear_forward(&layer.fc1, x)
+
+	// 2. Apply ReLU activation
+	x2 := t.tensor_relu(x1)
+
+	// 3. Project back down to d_model
+	out := linear_forward(&layer.fc2, x2)
+
+	// ✅ CRITICAL: Do NOT free x1 or x2 here!
+	// They are needed for the backward pass and are kept alive by the autograd graph.
+
+	return out
+}
+// ============================================================================
+// Transformer Encoder Block
+// ============================================================================
+
+TransformerEncoderBlock :: struct {
+	d_model:   int,
+	num_heads: int,
+	d_ff:      int,
+	mha:       MultiHeadAttentionLayer,
+	ffn:       FFNLayer,
+	ln1:       LayerNormLayer,
+	ln2:       LayerNormLayer,
+}
+
+transformer_encoder_block_new :: proc(
+	d_model: int,
+	num_heads: int,
+	d_ff: int,
+	allocator: mem.Allocator = context.allocator,
+) -> TransformerEncoderBlock {
+	block: TransformerEncoderBlock
+	block.d_model = d_model
+	block.num_heads = num_heads
+	block.d_ff = d_ff
+
+	// Initialize sublayers
+	block.mha = multi_head_attention_layer_new(d_model, num_heads, allocator)
+	block.ffn = ffn_layer_new(d_model, d_ff, allocator)
+	block.ln1 = layer_norm_layer_new(d_model, 1e-5, allocator)
+	block.ln2 = layer_norm_layer_new(d_model, 1e-5, allocator)
+
+	return block
+}
+
+transformer_encoder_block_free :: proc(block: ^TransformerEncoderBlock) {
+	multi_head_attention_layer_free(&block.mha)
+	ffn_layer_free(&block.ffn)
+	layer_norm_layer_free(&block.ln1)
+	layer_norm_layer_free(&block.ln2)
+}
+
+transformer_encoder_block_forward :: proc(
+	block: ^TransformerEncoderBlock,
+	x: ^t.Tensor,
+) -> ^t.Tensor {
+	// 1. Multi-Head Attention
+	attn_out := multi_head_attention_layer_forward(&block.mha, x)
+
+	// 2. Residual Connection + LayerNorm
+	x1 := t.tensor_add(x, attn_out)
+	x1_norm := layer_norm_layer_forward(&block.ln1, x1)
+
+	// 3. Feed-Forward Network
+	ffn_out := ffn_layer_forward(&block.ffn, x1_norm)
+
+	// 4. Residual Connection + LayerNorm
+	x2 := t.tensor_add(x1_norm, ffn_out)
+	out := layer_norm_layer_forward(&block.ln2, x2)
+
+	// ✅ CRITICAL: Do NOT free intermediates! They're needed for backward pass.
+	// The autograd graph keeps them alive.
+
+	return out
+}

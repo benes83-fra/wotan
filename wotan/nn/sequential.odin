@@ -27,6 +27,8 @@ Layer :: union {
 	EmbeddingLayer,
 	MultiHeadAttentionLayer,
 	LayerNormLayer,
+	FFNLayer,
+	TransformerEncoderBlock,
 }
 
 // ============================================================================
@@ -131,6 +133,10 @@ sequential_forward :: proc(s: ^Sequential, input: ^t.Tensor) -> ^t.Tensor {
 			x = multi_head_attention_layer_forward(&l, x)
 		case LayerNormLayer:
 			x = layer_norm_layer_forward(&l, x)
+		case FFNLayer:
+			x = ffn_layer_forward(&l, x)
+		case TransformerEncoderBlock:
+			x = transformer_encoder_block_forward(&l, x)
 		}
 	}
 	return x
@@ -184,6 +190,33 @@ sequential_add_to_sgd :: proc(seq: ^Sequential, opt: ^SGD) {
 		case LayerNormLayer:
 			sgd_add_param(opt, l.gamma)
 			sgd_add_param(opt, l.beta)
+		case FFNLayer:
+			sgd_add_param(opt, l.fc1.weights)
+			sgd_add_param(opt, l.fc1.bias)
+			sgd_add_param(opt, l.fc2.weights)
+			sgd_add_param(opt, l.fc2.bias)
+		case TransformerEncoderBlock:
+			// MHA parameters
+			sgd_add_param(opt, l.mha.q_proj.weights)
+			sgd_add_param(opt, l.mha.q_proj.bias)
+			sgd_add_param(opt, l.mha.k_proj.weights)
+			sgd_add_param(opt, l.mha.k_proj.bias)
+			sgd_add_param(opt, l.mha.v_proj.weights)
+			sgd_add_param(opt, l.mha.v_proj.bias)
+			sgd_add_param(opt, l.mha.out_proj.weights)
+			sgd_add_param(opt, l.mha.out_proj.bias)
+
+			// FFN parameters
+			sgd_add_param(opt, l.ffn.fc1.weights)
+			sgd_add_param(opt, l.ffn.fc1.bias)
+			sgd_add_param(opt, l.ffn.fc2.weights)
+			sgd_add_param(opt, l.ffn.fc2.bias)
+
+			// LayerNorm parameters
+			sgd_add_param(opt, l.ln1.gamma)
+			sgd_add_param(opt, l.ln1.beta)
+			sgd_add_param(opt, l.ln2.gamma)
+			sgd_add_param(opt, l.ln2.beta)
 		}
 	}
 }
@@ -239,6 +272,33 @@ sequential_add_to_adam :: proc(seq: ^Sequential, opt: ^Adam) {
 		case LayerNormLayer:
 			adam_add_param(opt, l.gamma)
 			adam_add_param(opt, l.beta)
+		case FFNLayer:
+			adam_add_param(opt, l.fc1.weights)
+			adam_add_param(opt, l.fc1.bias)
+			adam_add_param(opt, l.fc2.weights)
+			adam_add_param(opt, l.fc2.bias)
+		case TransformerEncoderBlock:
+			// MHA parameters
+			adam_add_param(opt, l.mha.q_proj.weights)
+			adam_add_param(opt, l.mha.q_proj.bias)
+			adam_add_param(opt, l.mha.k_proj.weights)
+			adam_add_param(opt, l.mha.k_proj.bias)
+			adam_add_param(opt, l.mha.v_proj.weights)
+			adam_add_param(opt, l.mha.v_proj.bias)
+			adam_add_param(opt, l.mha.out_proj.weights)
+			adam_add_param(opt, l.mha.out_proj.bias)
+
+			// FFN parameters
+			adam_add_param(opt, l.ffn.fc1.weights)
+			adam_add_param(opt, l.ffn.fc1.bias)
+			adam_add_param(opt, l.ffn.fc2.weights)
+			adam_add_param(opt, l.ffn.fc2.bias)
+
+			// LayerNorm parameters
+			adam_add_param(opt, l.ln1.gamma)
+			adam_add_param(opt, l.ln1.beta)
+			adam_add_param(opt, l.ln2.gamma)
+			adam_add_param(opt, l.ln2.beta)
 		}
 	}
 }
@@ -275,6 +335,10 @@ sequential_free :: proc(seq: ^Sequential) {
 			multi_head_attention_layer_free(&l)
 		case LayerNormLayer:
 			layer_norm_layer_free(&l)
+		case FFNLayer:
+			ffn_layer_free(&l)
+		case TransformerEncoderBlock:
+			transformer_encoder_block_free(&l)
 		}
 	}
 	delete(seq.layers)
