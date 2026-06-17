@@ -259,6 +259,14 @@ save_checkpoint :: proc(
 			write_f64(file, l.eps)
 			write_tensor(file, l.gamma)
 			write_tensor(file, l.beta)
+		case FFNLayer:
+			write_i32(file, 14) // Type 14
+			write_i32(file, i32(l.d_model))
+			write_i32(file, i32(l.d_ff))
+			write_tensor(file, l.fc1.weights)
+			write_tensor(file, l.fc1.bias)
+			write_tensor(file, l.fc2.weights)
+			write_tensor(file, l.fc2.bias)
 
 		}
 	}
@@ -580,6 +588,27 @@ load_checkpoint :: proc(
 
 			if layer.beta != nil {t.tensor_free(layer.beta)}
 			layer.beta, offset = read_tensor(data, offset, allocator)
+
+			append(&model.layers, layer)
+		} else if layer_type == 14 { 	// FFN
+			d_model: i32
+			d_ff: i32
+			d_model, offset = read_i32(data, offset)
+			d_ff, offset = read_i32(data, offset)
+
+			layer := ffn_layer_new(int(d_model), int(d_ff), allocator)
+
+			// Load fc1
+			if layer.fc1.weights != nil {t.tensor_free(layer.fc1.weights)}
+			layer.fc1.weights, offset = read_tensor(data, offset, allocator)
+			if layer.fc1.bias != nil {t.tensor_free(layer.fc1.bias)}
+			layer.fc1.bias, offset = read_tensor(data, offset, allocator)
+
+			// Load fc2
+			if layer.fc2.weights != nil {t.tensor_free(layer.fc2.weights)}
+			layer.fc2.weights, offset = read_tensor(data, offset, allocator)
+			if layer.fc2.bias != nil {t.tensor_free(layer.fc2.bias)}
+			layer.fc2.bias, offset = read_tensor(data, offset, allocator)
 
 			append(&model.layers, layer)
 		}

@@ -621,3 +621,59 @@ layer_norm_test :: proc(allocator: mem.Allocator) {
 
 	fmt.println("✓ Layer Normalization test completed successfully!")
 }
+
+ffn_simple_test :: proc(allocator: mem.Allocator) {
+	fmt.println("\n=== Testing Feed-Forward Network ===")
+
+	batch := 2
+	seq_len := 4
+	d_model := 8
+	d_ff := 32 // Standard ratio is often 4x
+
+	ffn := nn.ffn_layer_new(d_model, d_ff, allocator)
+	defer nn.ffn_layer_free(&ffn)
+
+	// Create input
+	x_data := l.matrix_new(f64, 1, batch * seq_len * d_model, allocator)
+	for i in 0 ..< len(x_data.data) {
+		x_data.data[i] = rand.float64()
+	}
+
+	x := t.tensor_new(x_data, true, allocator)
+	x.shape = [4]int{batch, seq_len, d_model, 1}
+	defer t.tensor_free(x)
+
+	output := nn.ffn_layer_forward(&ffn, x)
+	defer t.tensor_free_graph(output)
+
+	// 1. Verify Shape
+	if output.shape[0] == batch && output.shape[1] == seq_len && output.shape[2] == d_model {
+		fmt.println("✓ Forward pass shape is correct (maintains d_model)")
+	} else {
+		fmt.printf("❌ Forward pass shape mismatch! Got %v\n", output.shape)
+		return
+	}
+
+	// 2. Verify Backward Pass
+	// Set gradients
+	for i in 0 ..< len(output.grad.data) {
+		output.grad.data[i] = 1.0
+	}
+
+	t.tensor_backward(output)
+
+	// Check that gradients flowed back to input and weights
+	grad_sum := 0.0
+	for i in 0 ..< len(x.grad.data) {
+		grad_sum += math.abs(x.grad.data[i])
+	}
+
+	if grad_sum > 0.0 {
+		fmt.printf("✓ Backward pass correctly flows gradients (sum: %.4f)\n", grad_sum)
+	} else {
+		fmt.println("❌ Backward pass gradient flow failed!")
+		return
+	}
+
+	fmt.println("✓ Feed-Forward Network test completed successfully!")
+}

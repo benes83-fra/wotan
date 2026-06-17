@@ -464,6 +464,7 @@ main :: proc() {
 	test.attention_simple_test(context.temp_allocator)
 	test.multi_head_attention_test(context.temp_allocator)
 	test.layer_norm_test(context.temp_allocator)
+	test.ffn_simple_test(context.temp_allocator)
 	fmt.println("Demo End")
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
