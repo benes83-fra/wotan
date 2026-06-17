@@ -194,7 +194,7 @@ tensor_add :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
 
 	// 2. Create the output tensor
 	out := tensor_new(out_data, a.requires_grad || b.requires_grad, a.allocator)
-
+	out.shape = a.shape
 	// 3. Record the graph
 	if out.requires_grad {
 		out.op = .Add

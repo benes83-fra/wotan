@@ -294,6 +294,39 @@ save_checkpoint :: proc(
 			write_tensor(file, l.ln1.beta)
 			write_tensor(file, l.ln2.gamma)
 			write_tensor(file, l.ln2.beta)
+		case TransformerEncoder:
+			write_i32(file, 16) // Type 16
+			write_i32(file, i32(l.num_layers))
+			write_i32(file, i32(l.d_model))
+			write_i32(file, i32(l.num_heads))
+			write_i32(file, i32(l.d_ff))
+
+			// Save each block
+			for i in 0 ..< len(l.blocks) {
+				block := &l.blocks[i]
+
+				// Save MHA
+				write_tensor(file, block.mha.q_proj.weights)
+				write_tensor(file, block.mha.q_proj.bias)
+				write_tensor(file, block.mha.k_proj.weights)
+				write_tensor(file, block.mha.k_proj.bias)
+				write_tensor(file, block.mha.v_proj.weights)
+				write_tensor(file, block.mha.v_proj.bias)
+				write_tensor(file, block.mha.out_proj.weights)
+				write_tensor(file, block.mha.out_proj.bias)
+
+				// Save FFN
+				write_tensor(file, block.ffn.fc1.weights)
+				write_tensor(file, block.ffn.fc1.bias)
+				write_tensor(file, block.ffn.fc2.weights)
+				write_tensor(file, block.ffn.fc2.bias)
+
+				// Save LayerNorms
+				write_tensor(file, block.ln1.gamma)
+				write_tensor(file, block.ln1.beta)
+				write_tensor(file, block.ln2.gamma)
+				write_tensor(file, block.ln2.beta)
+			}
 
 		}
 	}
@@ -701,6 +734,73 @@ load_checkpoint :: proc(
 			block.ln2.beta, offset = read_tensor(data, offset, allocator)
 
 			append(&model.layers, block)
+		} else if layer_type == 16 { 	// TransformerEncoder
+			num_layers: i32
+			d_model: i32
+			num_heads: i32
+			d_ff: i32
+			num_layers, offset = read_i32(data, offset)
+			d_model, offset = read_i32(data, offset)
+			num_heads, offset = read_i32(data, offset)
+			d_ff, offset = read_i32(data, offset)
+
+			encoder := transformer_encoder_new(
+				int(num_layers),
+				int(d_model),
+				int(num_heads),
+				int(d_ff),
+				allocator,
+			)
+
+			// Load each block
+			for i in 0 ..< int(num_layers) {
+				block := &encoder.blocks[i]
+
+				// Load MHA
+				if block.mha.q_proj.weights != nil {t.tensor_free(block.mha.q_proj.weights)}
+				block.mha.q_proj.weights, offset = read_tensor(data, offset, allocator)
+				if block.mha.q_proj.bias != nil {t.tensor_free(block.mha.q_proj.bias)}
+				block.mha.q_proj.bias, offset = read_tensor(data, offset, allocator)
+
+				if block.mha.k_proj.weights != nil {t.tensor_free(block.mha.k_proj.weights)}
+				block.mha.k_proj.weights, offset = read_tensor(data, offset, allocator)
+				if block.mha.k_proj.bias != nil {t.tensor_free(block.mha.k_proj.bias)}
+				block.mha.k_proj.bias, offset = read_tensor(data, offset, allocator)
+
+				if block.mha.v_proj.weights != nil {t.tensor_free(block.mha.v_proj.weights)}
+				block.mha.v_proj.weights, offset = read_tensor(data, offset, allocator)
+				if block.mha.v_proj.bias != nil {t.tensor_free(block.mha.v_proj.bias)}
+				block.mha.v_proj.bias, offset = read_tensor(data, offset, allocator)
+
+				if block.mha.out_proj.weights != nil {t.tensor_free(block.mha.out_proj.weights)}
+				block.mha.out_proj.weights, offset = read_tensor(data, offset, allocator)
+				if block.mha.out_proj.bias != nil {t.tensor_free(block.mha.out_proj.bias)}
+				block.mha.out_proj.bias, offset = read_tensor(data, offset, allocator)
+
+				// Load FFN
+				if block.ffn.fc1.weights != nil {t.tensor_free(block.ffn.fc1.weights)}
+				block.ffn.fc1.weights, offset = read_tensor(data, offset, allocator)
+				if block.ffn.fc1.bias != nil {t.tensor_free(block.ffn.fc1.bias)}
+				block.ffn.fc1.bias, offset = read_tensor(data, offset, allocator)
+
+				if block.ffn.fc2.weights != nil {t.tensor_free(block.ffn.fc2.weights)}
+				block.ffn.fc2.weights, offset = read_tensor(data, offset, allocator)
+				if block.ffn.fc2.bias != nil {t.tensor_free(block.ffn.fc2.bias)}
+				block.ffn.fc2.bias, offset = read_tensor(data, offset, allocator)
+
+				// Load LayerNorms
+				if block.ln1.gamma != nil {t.tensor_free(block.ln1.gamma)}
+				block.ln1.gamma, offset = read_tensor(data, offset, allocator)
+				if block.ln1.beta != nil {t.tensor_free(block.ln1.beta)}
+				block.ln1.beta, offset = read_tensor(data, offset, allocator)
+
+				if block.ln2.gamma != nil {t.tensor_free(block.ln2.gamma)}
+				block.ln2.gamma, offset = read_tensor(data, offset, allocator)
+				if block.ln2.beta != nil {t.tensor_free(block.ln2.beta)}
+				block.ln2.beta, offset = read_tensor(data, offset, allocator)
+			}
+
+			append(&model.layers, encoder)
 		}
 	}
 

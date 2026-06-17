@@ -706,3 +706,55 @@ transformer_encoder_block_forward :: proc(
 
 	return out
 }
+// ============================================================================
+// Transformer Encoder (Stacked Encoder Blocks)
+// ============================================================================
+
+TransformerEncoder :: struct {
+	num_layers: int,
+	d_model:    int,
+	num_heads:  int,
+	d_ff:       int,
+	blocks:     [dynamic]TransformerEncoderBlock,
+	allocator:  mem.Allocator,
+}
+
+transformer_encoder_new :: proc(
+	num_layers: int,
+	d_model: int,
+	num_heads: int,
+	d_ff: int,
+	allocator: mem.Allocator = context.allocator,
+) -> TransformerEncoder {
+	encoder: TransformerEncoder
+	encoder.num_layers = num_layers
+	encoder.d_model = d_model
+	encoder.num_heads = num_heads
+	encoder.d_ff = d_ff
+	encoder.allocator = allocator
+	encoder.blocks = make([dynamic]TransformerEncoderBlock, 0, allocator)
+
+	// Create stacked encoder blocks
+	for i in 0 ..< num_layers {
+		block := transformer_encoder_block_new(d_model, num_heads, d_ff, allocator)
+		append(&encoder.blocks, block)
+	}
+
+	return encoder
+}
+
+transformer_encoder_free :: proc(encoder: ^TransformerEncoder) {
+	for i in 0 ..< len(encoder.blocks) {
+		transformer_encoder_block_free(&encoder.blocks[i])
+	}
+	delete(encoder.blocks)
+}
+
+transformer_encoder_forward :: proc(encoder: ^TransformerEncoder, x: ^t.Tensor) -> ^t.Tensor {
+	// Pass through each encoder block sequentially
+	current := x
+	for i in 0 ..< len(encoder.blocks) {
+		current = transformer_encoder_block_forward(&encoder.blocks[i], current)
+	}
+	return current
+}
