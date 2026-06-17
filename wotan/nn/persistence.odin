@@ -253,6 +253,12 @@ save_checkpoint :: proc(
 			write_tensor(file, l.v_proj.bias)
 			write_tensor(file, l.out_proj.weights)
 			write_tensor(file, l.out_proj.bias)
+		case LayerNormLayer:
+			write_i32(file, 13)
+			write_i32(file, i32(l.d_model))
+			write_f64(file, l.eps)
+			write_tensor(file, l.gamma)
+			write_tensor(file, l.beta)
 
 		}
 	}
@@ -559,6 +565,21 @@ load_checkpoint :: proc(
 			layer.out_proj.weights, offset = read_tensor(data, offset, allocator)
 			if layer.out_proj.bias != nil {t.tensor_free(layer.out_proj.bias)}
 			layer.out_proj.bias, offset = read_tensor(data, offset, allocator)
+
+			append(&model.layers, layer)
+		} else if layer_type == 13 { 	// LayerNorm
+			d_model: i32
+			eps: f64
+			d_model, offset = read_i32(data, offset)
+			eps, offset = read_f64(data, offset)
+
+			layer := layer_norm_layer_new(int(d_model), eps, allocator)
+
+			if layer.gamma != nil {t.tensor_free(layer.gamma)}
+			layer.gamma, offset = read_tensor(data, offset, allocator)
+
+			if layer.beta != nil {t.tensor_free(layer.beta)}
+			layer.beta, offset = read_tensor(data, offset, allocator)
 
 			append(&model.layers, layer)
 		}

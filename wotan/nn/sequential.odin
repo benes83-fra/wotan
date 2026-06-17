@@ -26,6 +26,7 @@ Layer :: union {
 	LSTMLayer,
 	EmbeddingLayer,
 	MultiHeadAttentionLayer,
+	LayerNormLayer,
 }
 
 // ============================================================================
@@ -128,6 +129,8 @@ sequential_forward :: proc(s: ^Sequential, input: ^t.Tensor) -> ^t.Tensor {
 			x = embedding_layer_forward(&l, x)
 		case MultiHeadAttentionLayer:
 			x = multi_head_attention_layer_forward(&l, x)
+		case LayerNormLayer:
+			x = layer_norm_layer_forward(&l, x)
 		}
 	}
 	return x
@@ -178,6 +181,9 @@ sequential_add_to_sgd :: proc(seq: ^Sequential, opt: ^SGD) {
 			sgd_add_param(opt, l.v_proj.bias)
 			sgd_add_param(opt, l.out_proj.weights)
 			sgd_add_param(opt, l.out_proj.bias)
+		case LayerNormLayer:
+			sgd_add_param(opt, l.gamma)
+			sgd_add_param(opt, l.beta)
 		}
 	}
 }
@@ -230,6 +236,9 @@ sequential_add_to_adam :: proc(seq: ^Sequential, opt: ^Adam) {
 			adam_add_param(opt, l.v_proj.bias)
 			adam_add_param(opt, l.out_proj.weights)
 			adam_add_param(opt, l.out_proj.bias)
+		case LayerNormLayer:
+			adam_add_param(opt, l.gamma)
+			adam_add_param(opt, l.beta)
 		}
 	}
 }
@@ -264,6 +273,8 @@ sequential_free :: proc(seq: ^Sequential) {
 			embedding_layer_free(&l)
 		case MultiHeadAttentionLayer:
 			multi_head_attention_layer_free(&l)
+		case LayerNormLayer:
+			layer_norm_layer_free(&l)
 		}
 	}
 	delete(seq.layers)

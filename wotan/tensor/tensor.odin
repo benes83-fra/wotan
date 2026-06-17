@@ -38,6 +38,7 @@ Op :: enum {
 	ScaledDotProductAttention,
 	PermuteMHA,
 	PermuteMHAInverse,
+	LayerNorm,
 }
 
 PoolParams :: struct {
@@ -493,8 +494,19 @@ tensor_backward :: proc(root: ^Tensor) {
 
 	// 1. Set the gradient of the root node to 1.0
 	tensor_ensure_grad(root)
+	has_custom_grad := false
 	for i in 0 ..< len(root.grad.data) {
-		root.grad.data[i] = 1.0
+		if root.grad.data[i] != 0.0 {
+			has_custom_grad = true
+			break
+		}
+	}
+
+	// Only set to 1.0 if user hasn't set a custom gradient
+	if !has_custom_grad {
+		for i in 0 ..< len(root.grad.data) {
+			root.grad.data[i] = 1.0
+		}
 	}
 
 	// 2. Build the topological sort
@@ -963,6 +975,96 @@ tensor_backward :: proc(root: ^Tensor) {
 				// ✅ SIMD Optimization: grad_pred += scale * diff
 				l.axpy_simd(scale, diff, pred_in.grad.data)
 				delete(diff, context.temp_allocator)
+			}
+		case .LayerNorm:
+			input_in := node.inputs[0]
+			gamma_in := node.inputs[1]
+			beta_in := node.inputs[2]
+
+			if len(node.grad.data) == 0 {continue}
+
+			// ✅ FIX: Use stored metadata
+			N := node.int_metadata[0]
+			d_model := node.int_metadata[1]
+			eps := 1e-5
+
+			// ✅ FIX: Ensure gradient matrices are allocated before accumulating
+			if input_in.requires_grad {tensor_ensure_grad(input_in)}
+			if gamma_in.requires_grad {tensor_ensure_grad(gamma_in)}
+			if beta_in.requires_grad {tensor_ensure_grad(beta_in)}
+
+			// Temporary buffers
+			centered := make([]f64, d_model, context.temp_allocator)
+			x_hat := make([]f64, d_model, context.temp_allocator)
+			dx_hat := make([]f64, d_model, context.temp_allocator)
+			dx_row := make([]f64, d_model, context.temp_allocator)
+			inv_std_vec := make([]f64, d_model, context.temp_allocator)
+			defer {
+				delete(centered, context.temp_allocator)
+				delete(x_hat, context.temp_allocator)
+				delete(dx_hat, context.temp_allocator)
+				delete(dx_row, context.temp_allocator)
+				delete(inv_std_vec, context.temp_allocator)
+			}
+
+			for i in 0 ..< N {
+				row_start := i * d_model
+				row := input_in.data.data[row_start:row_start + d_model]
+				dy_row := node.grad.data[row_start:row_start + d_model]
+				gamma_row := gamma_in.data.data
+
+				// Recompute forward stats
+				mean := l.sum_simd(row) / f64(d_model)
+				for j in 0 ..< d_model {
+					centered[j] = row[j] - mean
+				}
+				var := l.dot_simd(centered, centered) / f64(d_model)
+				std := math.sqrt(var + eps)
+				inv_std := 1.0 / std
+
+				for j in 0 ..< d_model {inv_std_vec[j] = inv_std}
+				l.vec_mul_simd(centered, inv_std_vec, x_hat)
+
+				// dx_hat = dy * gamma (SIMD)
+				l.vec_mul_simd(dy_row, gamma_row, dx_hat)
+
+				// Stable O(N) backward formula
+				sum_dx_hat := l.sum_simd(dx_hat)
+				sum_dx_hat_x_hat := l.dot_simd(dx_hat, x_hat)
+
+				// term1 = d_model * dx_hat
+				d_model_f := f64(d_model)
+				for j in 0 ..< d_model {dx_row[j] = d_model_f * dx_hat[j]}
+
+				// term1 -= sum_dx_hat
+				for j in 0 ..< d_model {dx_row[j] -= sum_dx_hat}
+
+				// term1 -= x_hat * sum_dx_hat_x_hat
+				for j in 0 ..< d_model {dx_row[j] -= x_hat[j] * sum_dx_hat_x_hat}
+
+				// dx = dx_row / (d_model * std)
+				inv_denom := 1.0 / (d_model_f * std)
+				for j in 0 ..< d_model {dx_row[j] *= inv_denom}
+
+				// ✅ Accumulate dx to input gradient
+				if input_in.requires_grad && len(input_in.grad.data) > 0 {
+					dx_grad_row := input_in.grad.data[row_start:row_start + d_model]
+					l.vec_add_simd(dx_grad_row, dx_row, dx_grad_row)
+				}
+
+				// ✅ Accumulate dgamma: dgamma += dy * x_hat
+				if gamma_in.requires_grad && len(gamma_in.grad.data) > 0 {
+					dgamma_row := gamma_in.grad.data
+					for j in 0 ..< d_model {
+						dgamma_row[j] += dy_row[j] * x_hat[j]
+					}
+				}
+
+				// ✅ Accumulate dbeta: dbeta += dy
+				if beta_in.requires_grad && len(beta_in.grad.data) > 0 {
+					dbeta_row := beta_in.grad.data
+					l.vec_add_simd(dbeta_row, dy_row, dbeta_row)
+				}
 			}
 		case .GRU:
 			x_in := node.inputs[0]
@@ -3283,6 +3385,91 @@ tensor_permute_mha_inverse :: proc(
 		append(&out.int_metadata, seq_len)
 		append(&out.int_metadata, num_heads)
 		append(&out.int_metadata, head_dim)
+	}
+
+	return out
+}
+tensor_layer_norm :: proc(
+	input: ^Tensor,
+	gamma: ^Tensor, // [1, d_model]
+	beta: ^Tensor, // [1, d_model]
+	eps: f64 = 1e-5,
+) -> ^Tensor {
+	d_model := gamma.data.cols
+
+	if beta.data.cols != d_model {
+		panic("tensor_layer_norm: beta dimension mismatch")
+	}
+
+	// ✅ FIX: Detect flattened 3D tensor (rows=1, cols is a multiple of d_model)
+	N := input.data.rows
+	if N == 1 && input.data.cols != d_model {
+		if input.data.cols % d_model != 0 {
+			panic("tensor_layer_norm: input size not divisible by d_model")
+		}
+		N = input.data.cols / d_model
+	} else if input.data.cols != d_model && N != 1 {
+		// Standard 2D case: rows=N, cols=d_model
+		if input.data.cols != d_model {
+			panic("tensor_layer_norm: input column mismatch")
+		}
+	}
+
+	out_data := l.matrix_new(f64, input.data.rows, input.data.cols, input.allocator)
+
+	// Temporary buffers for SIMD operations (reused across rows)
+	centered := make([]f64, d_model, context.temp_allocator)
+	x_hat := make([]f64, d_model, context.temp_allocator)
+	inv_std_vec := make([]f64, d_model, context.temp_allocator)
+	defer {
+		delete(centered, context.temp_allocator)
+		delete(x_hat, context.temp_allocator)
+		delete(inv_std_vec, context.temp_allocator)
+	}
+
+	for i in 0 ..< N {
+		row_start := i * d_model
+		row := input.data.data[row_start:row_start + d_model]
+
+		// 1. Compute mean (SIMD sum)
+		mean := l.sum_simd(row) / f64(d_model)
+
+		// 2. Compute variance: var = dot(centered, centered) / d_model
+		for j in 0 ..< d_model {
+			centered[j] = row[j] - mean
+		}
+		var := l.dot_simd(centered, centered) / f64(d_model)
+		std := math.sqrt(var + eps)
+		inv_std := 1.0 / std
+
+		// 3. Normalize: x_hat = centered / std (SIMD)
+		for j in 0 ..< d_model {inv_std_vec[j] = inv_std}
+		l.vec_mul_simd(centered, inv_std_vec, x_hat)
+
+		// 4. Scale and shift: out = gamma * x_hat + beta (SIMD)
+		out_row := out_data.data[row_start:row_start + d_model]
+		gamma_row := gamma.data.data
+		beta_row := beta.data.data
+
+		l.vec_mul_simd(x_hat, gamma_row, out_row)
+		l.vec_add_simd(out_row, beta_row, out_row)
+	}
+
+	out := tensor_new(
+		out_data,
+		input.requires_grad || gamma.requires_grad || beta.requires_grad,
+		input.allocator,
+	)
+	out.shape = input.shape
+
+	if out.requires_grad {
+		out.op = .LayerNorm
+		append(&out.inputs, input)
+		append(&out.inputs, gamma)
+		append(&out.inputs, beta)
+		// ✅ Store metadata for backward pass
+		append(&out.int_metadata, N)
+		append(&out.int_metadata, d_model)
 	}
 
 	return out

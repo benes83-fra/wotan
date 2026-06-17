@@ -520,3 +520,104 @@ multi_head_attention_test :: proc(allocator: mem.Allocator) {
 	// ✅ FIX: Clean up the entire computation graph to prevent memory leaks
 	t.tensor_free_graph(output)
 }
+layer_norm_test :: proc(allocator: mem.Allocator) {
+	fmt.println("\n=== Testing Layer Normalization ===")
+
+	batch := 2
+	seq_len := 3
+	d_model := 4
+
+	ln_layer := nn.layer_norm_layer_new(d_model, 1e-5, allocator)
+	defer nn.layer_norm_layer_free(&ln_layer)
+
+	// Create input with known values
+	x_data := l.matrix_new(f64, 1, batch * seq_len * d_model, allocator)
+	for i in 0 ..< len(x_data.data) {
+		x_data.data[i] = f64(i + 1) // 1, 2, 3, 4, 5, 6, ...
+	}
+
+	x := t.tensor_new(x_data, true, allocator)
+	x.shape = [4]int{batch, seq_len, d_model, 1}
+	defer t.tensor_free(x)
+
+	output := nn.layer_norm_layer_forward(&ln_layer, x)
+	defer t.tensor_free_graph(output)
+
+	// Verify output shape
+	if output.shape[0] != batch || output.shape[1] != seq_len || output.shape[2] != d_model {
+		fmt.printf("❌ Shape mismatch! Got %v\n", output.shape)
+		return
+	}
+
+	// Verify each row has mean≈0, var≈1 (when gamma=1, beta=0)
+	all_normalized := true
+	N := batch * seq_len
+	for i in 0 ..< N {
+		row_start := i * d_model
+		row := output.data.data[row_start:row_start + d_model]
+
+		// Compute mean
+		mean := 0.0
+		for j in 0 ..< d_model {mean += row[j]}
+		mean /= f64(d_model)
+
+		// Compute variance
+		var := 0.0
+		for j in 0 ..< d_model {
+			diff := row[j] - mean
+			var += diff * diff
+		}
+		var /= f64(d_model)
+
+		if math.abs(mean) > 1e-5 || math.abs(var - 1.0) > 1e-5 {
+			all_normalized = false
+			fmt.printf("❌ Row %d not normalized: mean=%.6f, var=%.6f\n", i, mean, var)
+		}
+	}
+
+	if all_normalized {
+		fmt.println("✓ Forward pass correctly normalizes each row to mean≈0, var≈1")
+	} else {
+		return
+	}
+
+	// Test backward pass
+	// ✅ FIX: Use a non-linear gradient pattern!
+	// A linear gradient (like 1, 2, 3, 4) mathematically projects to exactly 0.0
+	// because it lies entirely in the span of the mean and x_hat.
+	for i in 0 ..< len(output.grad.data) {
+		output.grad.data[i] = (i % 2 == 0) ? 1.0 : 2.0 // Alternating 1.0, 2.0, 1.0, 2.0...
+	}
+
+	t.tensor_backward(output)
+
+	// Verify gradients flowed to input, gamma, and beta
+	input_grad_sum := 0.0
+	for i in 0 ..< len(x.grad.data) {
+		input_grad_sum += math.abs(x.grad.data[i])
+	}
+
+	gamma_grad_sum := 0.0
+	for i in 0 ..< len(ln_layer.gamma.grad.data) {
+		gamma_grad_sum += math.abs(ln_layer.gamma.grad.data[i])
+	}
+
+	beta_grad_sum := 0.0
+	for i in 0 ..< len(ln_layer.beta.grad.data) {
+		beta_grad_sum += math.abs(ln_layer.beta.grad.data[i])
+	}
+
+	if input_grad_sum > 0.0 && gamma_grad_sum > 0.0 && beta_grad_sum > 0.0 {
+		fmt.printf(
+			"✓ Backward pass correctly flows gradients (input: %.4f, gamma: %.4f, beta: %.4f)\n",
+			input_grad_sum,
+			gamma_grad_sum,
+			beta_grad_sum,
+		)
+	} else {
+		fmt.println("❌ Backward pass gradient flow failed!")
+		return
+	}
+
+	fmt.println("✓ Layer Normalization test completed successfully!")
+}

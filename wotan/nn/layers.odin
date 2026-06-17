@@ -552,3 +552,45 @@ multi_head_attention_layer_forward :: proc(
 
 	return out
 }
+// ============================================================================
+// Layer Normalization Layer
+// ============================================================================
+
+LayerNormLayer :: struct {
+	d_model: int,
+	eps:     f64,
+	gamma:   ^t.Tensor, // [1, d_model] (scale)
+	beta:    ^t.Tensor, // [1, d_model] (shift)
+}
+
+layer_norm_layer_new :: proc(
+	d_model: int,
+	eps: f64 = 1e-5,
+	allocator: mem.Allocator = context.allocator,
+) -> LayerNormLayer {
+	layer: LayerNormLayer
+	layer.d_model = d_model
+	layer.eps = eps
+
+	// Initialize gamma to 1.0
+	gamma_data := l.matrix_new(f64, 1, d_model, allocator)
+	for i in 0 ..< d_model {gamma_data.data[i] = 1.0}
+	layer.gamma = t.tensor_new(gamma_data, true, allocator)
+	layer.gamma.shape = [4]int{1, d_model, 1, 1}
+
+	// Initialize beta to 0.0
+	beta_data := l.matrix_new(f64, 1, d_model, allocator)
+	layer.beta = t.tensor_new(beta_data, true, allocator)
+	layer.beta.shape = [4]int{1, d_model, 1, 1}
+
+	return layer
+}
+
+layer_norm_layer_free :: proc(layer: ^LayerNormLayer) {
+	if layer.gamma != nil {t.tensor_free(layer.gamma)}
+	if layer.beta != nil {t.tensor_free(layer.beta)}
+}
+
+layer_norm_layer_forward :: proc(layer: ^LayerNormLayer, x: ^t.Tensor) -> ^t.Tensor {
+	return t.tensor_layer_norm(x, layer.gamma, layer.beta, layer.eps)
+}
