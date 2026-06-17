@@ -758,3 +758,219 @@ transformer_encoder_forward :: proc(encoder: ^TransformerEncoder, x: ^t.Tensor) 
 	}
 	return current
 }
+
+
+// ============================================================================
+// Masked Multi-Head Attention (for Decoder self-attention)
+// ============================================================================
+
+masked_multi_head_attention_layer_forward :: proc(
+	layer: ^MultiHeadAttentionLayer,
+	x: ^t.Tensor,
+	mask: []f64,
+) -> ^t.Tensor {
+	batch := x.shape[0]
+	seq_len := x.shape[1]
+
+	// 1. Projections
+	q := linear_forward(&layer.q_proj, x)
+	k := linear_forward(&layer.k_proj, x)
+	v := linear_forward(&layer.v_proj, x)
+
+	// 2. Permute to [batch * num_heads, seq_len, head_dim]
+	q_perm := t.tensor_permute_mha(q, batch, seq_len, layer.num_heads, layer.head_dim)
+	k_perm := t.tensor_permute_mha(k, batch, seq_len, layer.num_heads, layer.head_dim)
+	v_perm := t.tensor_permute_mha(v, batch, seq_len, layer.num_heads, layer.head_dim)
+
+	// 3. Masked Scaled Dot-Product Attention
+	att := t.tensor_masked_scaled_dot_product_attention(q_perm, k_perm, v_perm, mask)
+
+	// 4. Inverse permute back to [batch, seq_len, d_model]
+	att_inv := t.tensor_permute_mha_inverse(att, batch, seq_len, layer.num_heads, layer.head_dim)
+
+	// 5. Output projection
+	out := linear_forward(&layer.out_proj, att_inv)
+
+	return out
+}
+
+// Helper to create causal mask
+create_causal_mask :: proc(seq_len: int, allocator: mem.Allocator) -> []f64 {
+	mask := make([]f64, seq_len * seq_len, allocator)
+	neg_inf: f64 = -1e9 // Large negative value instead of -inf for numerical stability
+
+	for i in 0 ..< seq_len {
+		for j in 0 ..< seq_len {
+			if j > i {
+				mask[i * seq_len + j] = neg_inf
+			} else {
+				mask[i * seq_len + j] = 0.0
+			}
+		}
+	}
+
+	return mask
+}
+// ============================================================================
+// Cross-Attention Layer (Decoder attends to Encoder)
+// ============================================================================
+
+CrossAttentionLayer :: struct {
+	d_model:   int,
+	num_heads: int,
+	head_dim:  int,
+	q_proj:    LinearLayer, // From decoder
+	k_proj:    LinearLayer, // From encoder
+	v_proj:    LinearLayer, // From encoder
+	out_proj:  LinearLayer,
+}
+
+cross_attention_layer_new :: proc(
+	d_model: int,
+	num_heads: int,
+	allocator: mem.Allocator = context.allocator,
+) -> CrossAttentionLayer {
+	layer: CrossAttentionLayer
+	layer.d_model = d_model
+	layer.num_heads = num_heads
+	layer.head_dim = d_model / num_heads
+
+	layer.q_proj = linear_layer_new(d_model, d_model, allocator)
+	layer.k_proj = linear_layer_new(d_model, d_model, allocator)
+	layer.v_proj = linear_layer_new(d_model, d_model, allocator)
+	layer.out_proj = linear_layer_new(d_model, d_model, allocator)
+
+	return layer
+}
+
+cross_attention_layer_free :: proc(layer: ^CrossAttentionLayer) {
+	linear_layer_free(&layer.q_proj)
+	linear_layer_free(&layer.k_proj)
+	linear_layer_free(&layer.v_proj)
+	linear_layer_free(&layer.out_proj)
+}
+
+cross_attention_layer_forward :: proc(
+	layer: ^CrossAttentionLayer,
+	decoder_input: ^t.Tensor,
+	encoder_output: ^t.Tensor,
+) -> ^t.Tensor {
+	decoder_batch := decoder_input.shape[0]
+	decoder_seq_len := decoder_input.shape[1]
+	encoder_batch := encoder_output.shape[0]
+	encoder_seq_len := encoder_output.shape[1]
+
+	// Q from decoder, K and V from encoder
+	q := linear_forward(&layer.q_proj, decoder_input)
+	k := linear_forward(&layer.k_proj, encoder_output)
+	v := linear_forward(&layer.v_proj, encoder_output)
+
+	// Permute
+	q_perm := t.tensor_permute_mha(
+		q,
+		decoder_batch,
+		decoder_seq_len,
+		layer.num_heads,
+		layer.head_dim,
+	)
+	k_perm := t.tensor_permute_mha(
+		k,
+		encoder_batch,
+		encoder_seq_len,
+		layer.num_heads,
+		layer.head_dim,
+	)
+	v_perm := t.tensor_permute_mha(
+		v,
+		encoder_batch,
+		encoder_seq_len,
+		layer.num_heads,
+		layer.head_dim,
+	)
+
+	// Standard attention (no mask for cross-attention)
+	att := t.tensor_scaled_dot_product_attention(q_perm, k_perm, v_perm)
+
+	// Inverse permute
+	att_inv := t.tensor_permute_mha_inverse(
+		att,
+		decoder_batch,
+		decoder_seq_len,
+		layer.num_heads,
+		layer.head_dim,
+	)
+
+	// Output projection
+	out := linear_forward(&layer.out_proj, att_inv)
+
+	return out
+}
+// ============================================================================
+// Transformer Decoder Block
+// ============================================================================
+
+TransformerDecoderBlock :: struct {
+	d_model:    int,
+	num_heads:  int,
+	d_ff:       int,
+	masked_mha: MultiHeadAttentionLayer,
+	cross_attn: CrossAttentionLayer,
+	ffn:        FFNLayer,
+	ln1:        LayerNormLayer,
+	ln2:        LayerNormLayer,
+	ln3:        LayerNormLayer,
+}
+
+transformer_decoder_block_new :: proc(
+	d_model: int,
+	num_heads: int,
+	d_ff: int,
+	allocator: mem.Allocator = context.allocator,
+) -> TransformerDecoderBlock {
+	block: TransformerDecoderBlock
+	block.d_model = d_model
+	block.num_heads = num_heads
+	block.d_ff = d_ff
+
+	block.masked_mha = multi_head_attention_layer_new(d_model, num_heads, allocator)
+	block.cross_attn = cross_attention_layer_new(d_model, num_heads, allocator)
+	block.ffn = ffn_layer_new(d_model, d_ff, allocator)
+	block.ln1 = layer_norm_layer_new(d_model, 1e-5, allocator)
+	block.ln2 = layer_norm_layer_new(d_model, 1e-5, allocator)
+	block.ln3 = layer_norm_layer_new(d_model, 1e-5, allocator)
+
+	return block
+}
+
+transformer_decoder_block_free :: proc(block: ^TransformerDecoderBlock) {
+	multi_head_attention_layer_free(&block.masked_mha)
+	cross_attention_layer_free(&block.cross_attn)
+	ffn_layer_free(&block.ffn)
+	layer_norm_layer_free(&block.ln1)
+	layer_norm_layer_free(&block.ln2)
+	layer_norm_layer_free(&block.ln3)
+}
+
+transformer_decoder_block_forward :: proc(
+	block: ^TransformerDecoderBlock,
+	decoder_input: ^t.Tensor,
+	encoder_output: ^t.Tensor,
+	mask: []f64,
+) -> ^t.Tensor {
+	// 1. Masked Self-Attention
+	attn_out := masked_multi_head_attention_layer_forward(&block.masked_mha, decoder_input, mask)
+	x1 := t.tensor_add(decoder_input, attn_out)
+	x1_norm := layer_norm_layer_forward(&block.ln1, x1)
+
+	// 2. Cross-Attention
+	cross_out := cross_attention_layer_forward(&block.cross_attn, x1_norm, encoder_output)
+	x2 := t.tensor_add(x1_norm, cross_out)
+	x2_norm := layer_norm_layer_forward(&block.ln2, x2)
+
+	// 3. Feed-Forward Network
+	ffn_out := ffn_layer_forward(&block.ffn, x2_norm)
+	x3 := t.tensor_add(x2_norm, ffn_out)
+	out := layer_norm_layer_forward(&block.ln3, x3)
+
+	return out
+}

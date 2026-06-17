@@ -279,3 +279,176 @@ transformer_encoder_block_test :: proc(allocator: mem.Allocator) {
 
 	fmt.println("✓ Stacked Transformer Encoder test completed successfully!")
 }
+transformer_decoder_test :: proc(allocator: mem.Allocator) {
+	fmt.println("\n=== Testing Transformer Decoder ===")
+
+	batch := 2
+	src_seq_len := 6
+	tgt_seq_len := 6
+	d_model := 32
+	num_heads := 4
+	d_ff := 128
+
+	// Create encoder (we'll use a simple one for testing)
+	encoder := nn.transformer_encoder_new(2, d_model, num_heads, d_ff, allocator)
+	defer nn.transformer_encoder_free(&encoder)
+
+	// Create decoder block
+	decoder_block := nn.transformer_decoder_block_new(d_model, num_heads, d_ff, allocator)
+	defer nn.transformer_decoder_block_free(&decoder_block)
+
+	// Create optimizer
+	opt := nn.adam_new(0.01, allocator = allocator)
+	defer nn.adam_free(&opt)
+
+	// Register encoder parameters
+	for i in 0 ..< len(encoder.blocks) {
+		block := &encoder.blocks[i]
+		nn.adam_add_param(&opt, block.mha.q_proj.weights)
+		nn.adam_add_param(&opt, block.mha.q_proj.bias)
+		nn.adam_add_param(&opt, block.mha.k_proj.weights)
+		nn.adam_add_param(&opt, block.mha.k_proj.bias)
+		nn.adam_add_param(&opt, block.mha.v_proj.weights)
+		nn.adam_add_param(&opt, block.mha.v_proj.bias)
+		nn.adam_add_param(&opt, block.mha.out_proj.weights)
+		nn.adam_add_param(&opt, block.mha.out_proj.bias)
+		nn.adam_add_param(&opt, block.ffn.fc1.weights)
+		nn.adam_add_param(&opt, block.ffn.fc1.bias)
+		nn.adam_add_param(&opt, block.ffn.fc2.weights)
+		nn.adam_add_param(&opt, block.ffn.fc2.bias)
+		nn.adam_add_param(&opt, block.ln1.gamma)
+		nn.adam_add_param(&opt, block.ln1.beta)
+		nn.adam_add_param(&opt, block.ln2.gamma)
+		nn.adam_add_param(&opt, block.ln2.beta)
+	}
+
+	// Register decoder parameters
+	nn.adam_add_param(&opt, decoder_block.masked_mha.q_proj.weights)
+	nn.adam_add_param(&opt, decoder_block.masked_mha.q_proj.bias)
+	nn.adam_add_param(&opt, decoder_block.masked_mha.k_proj.weights)
+	nn.adam_add_param(&opt, decoder_block.masked_mha.k_proj.bias)
+	nn.adam_add_param(&opt, decoder_block.masked_mha.v_proj.weights)
+	nn.adam_add_param(&opt, decoder_block.masked_mha.v_proj.bias)
+	nn.adam_add_param(&opt, decoder_block.masked_mha.out_proj.weights)
+	nn.adam_add_param(&opt, decoder_block.masked_mha.out_proj.bias)
+	nn.adam_add_param(&opt, decoder_block.cross_attn.q_proj.weights)
+	nn.adam_add_param(&opt, decoder_block.cross_attn.q_proj.bias)
+	nn.adam_add_param(&opt, decoder_block.cross_attn.k_proj.weights)
+	nn.adam_add_param(&opt, decoder_block.cross_attn.k_proj.bias)
+	nn.adam_add_param(&opt, decoder_block.cross_attn.v_proj.weights)
+	nn.adam_add_param(&opt, decoder_block.cross_attn.v_proj.bias)
+	nn.adam_add_param(&opt, decoder_block.cross_attn.out_proj.weights)
+	nn.adam_add_param(&opt, decoder_block.cross_attn.out_proj.bias)
+	nn.adam_add_param(&opt, decoder_block.ffn.fc1.weights)
+	nn.adam_add_param(&opt, decoder_block.ffn.fc1.bias)
+	nn.adam_add_param(&opt, decoder_block.ffn.fc2.weights)
+	nn.adam_add_param(&opt, decoder_block.ffn.fc2.bias)
+	nn.adam_add_param(&opt, decoder_block.ln1.gamma)
+	nn.adam_add_param(&opt, decoder_block.ln1.beta)
+	nn.adam_add_param(&opt, decoder_block.ln2.gamma)
+	nn.adam_add_param(&opt, decoder_block.ln2.beta)
+	nn.adam_add_param(&opt, decoder_block.ln3.gamma)
+	nn.adam_add_param(&opt, decoder_block.ln3.beta)
+
+	// Create source (encoder input)
+	src_data := l.matrix_new(f64, 1, batch * src_seq_len * d_model, allocator)
+	for i in 0 ..< len(src_data.data) {
+		src_data.data[i] = rand.float64() * 2.0 - 1.0
+	}
+	src := t.tensor_new(src_data, false, allocator)
+	src.shape = [4]int{batch, src_seq_len, d_model, 1}
+	defer t.tensor_free(src)
+
+	// Create target (decoder input) - shifted version of source
+	tgt_data := l.matrix_new(f64, 1, batch * tgt_seq_len * d_model, allocator)
+	for i in 0 ..< len(tgt_data.data) {
+		tgt_data.data[i] = rand.float64() * 2.0 - 1.0
+	}
+	tgt := t.tensor_new(tgt_data, false, allocator)
+	tgt.shape = [4]int{batch, tgt_seq_len, d_model, 1}
+	defer t.tensor_free(tgt)
+
+	// Target output: decoder should learn to copy the source
+	target_data := l.matrix_new(f64, 1, batch * tgt_seq_len * d_model, allocator)
+	for b in 0 ..< batch {
+		for s in 0 ..< tgt_seq_len {
+			for d in 0 ..< d_model {
+				src_idx := b * src_seq_len * d_model + s * d_model + d
+				tgt_idx := b * tgt_seq_len * d_model + s * d_model + d
+				target_data.data[tgt_idx] = src_data.data[src_idx]
+			}
+		}
+	}
+	target := t.tensor_new(target_data, false, allocator)
+	target.shape = [4]int{batch, tgt_seq_len, d_model, 1}
+	defer t.tensor_free(target)
+
+	// Create causal mask
+	mask := nn.create_causal_mask(tgt_seq_len, allocator)
+	defer delete(mask, allocator)
+
+	// Training loop
+	epochs := 50
+	fmt.println("Training Encoder-Decoder (copy task)...")
+
+	initial_loss := 0.0
+	final_loss := 0.0
+
+	for epoch in 0 ..< epochs {
+		nn.adam_zero_grad(&opt)
+
+		// Encoder forward
+		encoder_output := nn.transformer_encoder_forward(&encoder, src)
+
+		// Decoder forward
+		decoder_output := nn.transformer_decoder_block_forward(
+			&decoder_block,
+			tgt,
+			encoder_output,
+			mask,
+		)
+
+		// Compute loss
+		loss := t.tensor_mse_loss(decoder_output, target)
+
+		if epoch == 0 {
+			initial_loss = loss.data.data[0]
+		}
+
+		// Backward pass
+		t.tensor_backward(loss)
+
+		// Optimizer step
+		nn.adam_step(&opt)
+
+		if epoch % 10 == 0 {
+			fmt.printf("Epoch %d | Loss: %.4f\n", epoch, loss.data.data[0])
+		}
+
+		if epoch == epochs - 1 {
+			final_loss = loss.data.data[0]
+		}
+
+		// Clean up graphs
+		t.tensor_free_graph(loss)
+	}
+
+	reduction := (1.0 - final_loss / initial_loss) * 100.0
+	if final_loss < initial_loss * 0.5 {
+		fmt.printf(
+			"✓ Encoder-Decoder successfully learned copy task! Loss: %.4f → %.4f (%.1f%% reduction)\n",
+			initial_loss,
+			final_loss,
+			reduction,
+		)
+	} else {
+		fmt.printf(
+			"⚠ Encoder-Decoder showed some learning. Loss: %.4f → %.4f (%.1f%% reduction)\n",
+			initial_loss,
+			final_loss,
+			reduction,
+		)
+	}
+
+	fmt.println("✓ Transformer Decoder test completed successfully!")
+}

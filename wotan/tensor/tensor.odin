@@ -39,6 +39,7 @@ Op :: enum {
 	PermuteMHA,
 	PermuteMHAInverse,
 	LayerNorm,
+	MaskedScaledDotProductAttention,
 }
 
 PoolParams :: struct {
@@ -168,7 +169,7 @@ tensor_sum :: proc(a: ^Tensor) -> ^Tensor {
 
 	// 2. Create output tensor
 	out := tensor_new(out_data, a.requires_grad, a.allocator)
-
+	out.shape = a.shape
 	// 3. Record graph
 	if out.requires_grad {
 		out.op = .Sum
@@ -237,7 +238,7 @@ tensor_mul :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
 
 	// 2. Create output tensor
 	out := tensor_new(out_data, a.requires_grad || b.requires_grad, a.allocator)
-
+	out.shape = a.shape
 	// 3. Record graph
 	if out.requires_grad {
 		out.op = .Mul
@@ -327,7 +328,6 @@ tensor_mse_loss :: proc(pred: ^Tensor, target: ^Tensor) -> ^Tensor {
 	out_data.data[0] = loss_val
 
 	out := tensor_new(out_data, pred.requires_grad, pred.allocator)
-
 	// ✅ FIX: Restored the correct MSE graph recording!
 	if out.requires_grad {
 		out.op = .MSELoss
@@ -432,6 +432,7 @@ tensor_cross_entropy_loss :: proc(logits: ^Tensor, target_indices: []int) -> ^Te
 	out_data.data[0] = loss
 
 	out := tensor_new(out_data, logits.requires_grad, logits.allocator)
+
 	if out.requires_grad {
 		out.op = .CrossEntropy
 		append(&out.inputs, logits)
@@ -637,6 +638,153 @@ tensor_backward :: proc(root: ^Tensor) {
 					a_in.grad.data[j] += scalar_grad
 				}
 			}
+		case .MaskedScaledDotProductAttention:
+			Q_in := node.inputs[0]
+			K_in := node.inputs[1]
+			V_in := node.inputs[2]
+
+			if len(node.grad.data) == 0 {continue}
+
+			batch := Q_in.shape[0]
+			seq_q := Q_in.shape[1]
+			seq_k := K_in.shape[1]
+			d_k := Q_in.shape[2]
+			d_v := V_in.shape[2]
+			scale := 1.0 / math.sqrt(f64(d_k))
+
+			// Retrieve mask from metadata
+			mask := make([]f64, seq_q * seq_k, context.temp_allocator)
+			neg_inf: f64 = -1e9
+			for i in 0 ..< len(mask) {
+				if node.int_metadata[i] == 1 {
+					mask[i] = neg_inf
+				} else {
+					mask[i] = 0.0
+				}
+			}
+			defer delete(mask, context.temp_allocator)
+
+			dQ := make([]f64, len(Q_in.data.data), context.temp_allocator)
+			dK := make([]f64, len(K_in.data.data), context.temp_allocator)
+			dV := make([]f64, len(V_in.data.data), context.temp_allocator)
+			defer {
+				delete(dQ, context.temp_allocator)
+				delete(dK, context.temp_allocator)
+				delete(dV, context.temp_allocator)
+			}
+
+			for b in 0 ..< batch {
+				q_b := l.Matrix(f64) {
+					rows = seq_q,
+					cols = d_k,
+					data = Q_in.data.data[b * seq_q * d_k:(b + 1) * seq_q * d_k],
+				}
+				k_b := l.Matrix(f64) {
+					rows = seq_k,
+					cols = d_k,
+					data = K_in.data.data[b * seq_k * d_k:(b + 1) * seq_k * d_k],
+				}
+				v_b := l.Matrix(f64) {
+					rows = seq_k,
+					cols = d_v,
+					data = V_in.data.data[b * seq_k * d_v:(b + 1) * seq_k * d_v],
+				}
+				dO_b := l.Matrix(f64) {
+					rows = seq_q,
+					cols = d_v,
+					data = node.grad.data[b * seq_q * d_v:(b + 1) * seq_q * d_v],
+				}
+
+				// Recompute S_b and P_b with mask
+				k_b_t := _matrix_transpose(k_b, context.temp_allocator)
+				s_b := l.matmul_dyn_simd(&q_b, &k_b_t, context.temp_allocator)
+				l.matrix_free(&k_b_t)
+
+				p_b := l.Matrix(f64) {
+					rows = seq_q,
+					cols = seq_k,
+					data = s_b.data,
+				}
+				for i in 0 ..< seq_q * seq_k {
+					p_b.data[i] *= scale
+				}
+
+				// Apply mask
+				for i in 0 ..< seq_q {
+					for j in 0 ..< seq_k {
+						if mask[i * seq_k + j] != 0.0 {
+							p_b.data[i * seq_k + j] += mask[i * seq_k + j]
+						}
+					}
+				}
+
+				// Softmax
+				for i in 0 ..< seq_q {
+					row_start := i * seq_k
+					max_val := p_b.data[row_start]
+					for j in 1 ..< seq_k {
+						if p_b.data[row_start + j] > max_val {max_val = p_b.data[row_start + j]}
+					}
+					sum_exp := 0.0
+					for j in 0 ..< seq_k {
+						p_b.data[row_start + j] = math.exp(p_b.data[row_start + j] - max_val)
+						sum_exp += p_b.data[row_start + j]
+					}
+					inv_sum := 1.0 / sum_exp
+					for j in 0 ..< seq_k {
+						p_b.data[row_start + j] *= inv_sum
+					}
+				}
+
+				// dV = P_b^T @ dO_b
+				p_b_t := _matrix_transpose(p_b, context.temp_allocator)
+				dV_b := l.matmul_dyn_simd(&p_b_t, &dO_b, context.temp_allocator)
+				copy(dV[b * seq_k * d_v:(b + 1) * seq_k * d_v], dV_b.data)
+				l.matrix_free(&p_b_t)
+				l.matrix_free(&dV_b)
+
+				// dP = dO_b @ V_b^T
+				v_b_t := _matrix_transpose(v_b, context.temp_allocator)
+				dP_b := l.matmul_dyn_simd(&dO_b, &v_b_t, context.temp_allocator)
+
+				// dS = P_b * (dP_b - sum(dP_b * P_b, dim=-1))
+				for i in 0 ..< seq_q {
+					row_start := i * seq_k
+					sum := 0.0
+					for j in 0 ..< seq_k {
+						sum += dP_b.data[row_start + j] * p_b.data[row_start + j]
+					}
+					for j in 0 ..< seq_k {
+						dP_b.data[row_start + j] =
+							p_b.data[row_start + j] * (dP_b.data[row_start + j] - sum)
+					}
+				}
+
+				// dQ = (dP_b * scale) @ K_b
+				for i in 0 ..< seq_q * seq_k {
+					dP_b.data[i] *= scale
+				}
+				dQ_b := l.matmul_dyn_simd(&dP_b, &k_b, context.temp_allocator)
+				copy(dQ[b * seq_q * d_k:(b + 1) * seq_q * d_k], dQ_b.data)
+				l.matrix_free(&dQ_b)
+
+				// dK = (dP_b * scale)^T @ Q_b
+				dP_b_t := _matrix_transpose(dP_b, context.temp_allocator)
+				dK_b := l.matmul_dyn_simd(&dP_b_t, &q_b, context.temp_allocator)
+				copy(dK[b * seq_k * d_k:(b + 1) * seq_k * d_k], dK_b.data)
+				l.matrix_free(&dP_b_t)
+				l.matrix_free(&dK_b)
+
+				l.matrix_free(&dP_b)
+				l.matrix_free(&s_b)
+			}
+
+			if Q_in.requires_grad &&
+			   len(Q_in.grad.data) > 0 {l.vec_add_simd(Q_in.grad.data, dQ, Q_in.grad.data)}
+			if K_in.requires_grad &&
+			   len(K_in.grad.data) > 0 {l.vec_add_simd(K_in.grad.data, dK, K_in.grad.data)}
+			if V_in.requires_grad &&
+			   len(V_in.grad.data) > 0 {l.vec_add_simd(V_in.grad.data, dV, V_in.grad.data)}
 		case .Relu:
 			// y = max(0, x)
 			// dy/dx = 1 if x > 0 else 0
@@ -3470,6 +3618,116 @@ tensor_layer_norm :: proc(
 		// ✅ Store metadata for backward pass
 		append(&out.int_metadata, N)
 		append(&out.int_metadata, d_model)
+	}
+
+	return out
+}
+// ============================================================================
+// Masked Scaled Dot-Product Attention (for Decoder self-attention)
+// ============================================================================
+
+tensor_masked_scaled_dot_product_attention :: proc(
+	Q: ^Tensor,
+	K: ^Tensor,
+	V: ^Tensor,
+	mask: []f64,
+) -> ^Tensor {
+	batch := Q.shape[0]
+	seq_q := Q.shape[1]
+	seq_k := K.shape[1]
+	d_k := Q.shape[2]
+	d_v := V.shape[2]
+
+	out_data := l.matrix_new(f64, 1, batch * seq_q * d_v, Q.allocator)
+	scale := 1.0 / math.sqrt(f64(d_k))
+
+	for b in 0 ..< batch {
+		q_b := l.Matrix(f64) {
+			rows = seq_q,
+			cols = d_k,
+			data = Q.data.data[b * seq_q * d_k:(b + 1) * seq_q * d_k],
+		}
+		k_b := l.Matrix(f64) {
+			rows = seq_k,
+			cols = d_k,
+			data = K.data.data[b * seq_k * d_k:(b + 1) * seq_k * d_k],
+		}
+		v_b := l.Matrix(f64) {
+			rows = seq_k,
+			cols = d_v,
+			data = V.data.data[b * seq_k * d_v:(b + 1) * seq_k * d_v],
+		}
+
+		// 1. S_b = Q_b @ K_b^T
+		k_b_t := _matrix_transpose(k_b, context.temp_allocator)
+		s_b := l.matmul_dyn_simd(&q_b, &k_b_t, context.temp_allocator)
+		l.matrix_free(&k_b_t)
+
+		// 2. Scale and apply mask
+		p_b := l.Matrix(f64) {
+			rows = seq_q,
+			cols = seq_k,
+			data = s_b.data,
+		}
+		for i in 0 ..< seq_q * seq_k {
+			p_b.data[i] *= scale
+		}
+
+		// ✅ Apply causal mask: add -inf to future positions
+		for i in 0 ..< seq_q {
+			for j in 0 ..< seq_k {
+				if mask[i * seq_k + j] != 0.0 {
+					p_b.data[i * seq_k + j] += mask[i * seq_k + j]
+				}
+			}
+		}
+
+		// 3. Numerically stable softmax
+		for i in 0 ..< seq_q {
+			row_start := i * seq_k
+			max_val := p_b.data[row_start]
+			for j in 1 ..< seq_k {
+				if p_b.data[row_start + j] > max_val {
+					max_val = p_b.data[row_start + j]
+				}
+			}
+
+			sum_exp := 0.0
+			for j in 0 ..< seq_k {
+				p_b.data[row_start + j] = math.exp(p_b.data[row_start + j] - max_val)
+				sum_exp += p_b.data[row_start + j]
+			}
+
+			inv_sum := 1.0 / sum_exp
+			for j in 0 ..< seq_k {
+				p_b.data[row_start + j] *= inv_sum
+			}
+		}
+
+		// 4. O_b = P_b @ V_b
+		o_b := l.matmul_dyn_simd(&p_b, &v_b, context.temp_allocator)
+		copy(out_data.data[b * seq_q * d_v:(b + 1) * seq_q * d_v], o_b.data)
+
+		l.matrix_free(&o_b)
+		l.matrix_free(&s_b)
+	}
+
+	out := tensor_new(out_data, Q.requires_grad || K.requires_grad || V.requires_grad, Q.allocator)
+	out.shape = [4]int{batch, seq_q, d_v, 1}
+
+	if out.requires_grad {
+		out.op = .MaskedScaledDotProductAttention
+		append(&out.inputs, Q)
+		append(&out.inputs, K)
+		append(&out.inputs, V)
+		// Store mask for backward pass
+		for i in 0 ..< len(mask) {
+			if mask[i] != 0.0 {
+				append(&out.int_metadata, 1) // Masked position
+			} else {
+				append(&out.int_metadata, 0) // Unmasked position
+			}
+		}
 	}
 
 	return out

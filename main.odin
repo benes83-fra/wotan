@@ -467,6 +467,7 @@ main :: proc() {
 	test.ffn_simple_test(context.temp_allocator)
 	test.transformer_encoder_block_test(context.temp_allocator)
 	test.transformer_encoder_test(context.temp_allocator)
+	test.transformer_decoder_test(context.temp_allocator)
 	fmt.println("Demo End")
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
