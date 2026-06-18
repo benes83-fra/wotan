@@ -7,6 +7,10 @@ import "core:fmt"
 import "core:math/rand"
 import "core:mem"
 
+import "core:math"
+
+import "core:strings"
+
 
 transformer_encoder_block_test :: proc(allocator: mem.Allocator) {
 	fmt.println("\n=== Testing Transformer Encoder Block ===")
@@ -451,4 +455,317 @@ transformer_decoder_test :: proc(allocator: mem.Allocator) {
 	}
 
 	fmt.println("✓ Transformer Decoder test completed successfully!")
+}
+
+
+// Simple character-level language model using decoder-only Transformer
+// Simple character-level language model using decoder-only Transformer
+char_lm_test :: proc(allocator: mem.Allocator) {
+	fmt.println("\n=== Character-Level Language Modeling ===")
+
+	// Small training corpus
+	text := "to be or not to be that is the question whether tis nobler in the mind to suffer the slings and arrows of outrageous fortune or to take arms against a sea of troubles and by opposing end them to die to sleep no more and by a sleep to say we end the heartache and the thousand natural shocks that flesh is heir to tis a consummation devoutly to be wished to die to sleep to sleep perchance to dream ay theres the rub for in that sleep of death what dreams may come when we have shuffled off this mortal coil must give us pause theres the respect that makes calamity of so long life"
+
+	// Build vocabulary
+	vocab := make(map[u8]int, allocator)
+	inv_vocab := make(map[int]u8, allocator)
+	vocab_size := 0
+
+	for c in text {
+		c_u8 := u8(c)
+		if !(c_u8 in vocab) {
+			vocab[c_u8] = vocab_size
+			inv_vocab[vocab_size] = c_u8
+			vocab_size += 1
+		}
+	}
+
+	fmt.printf("Vocabulary size: %d characters\n", vocab_size)
+	fmt.printf("Text length: %d characters\n", len(text))
+
+	// Hyperparameters
+	seq_len := 32
+	d_model := 64
+	num_heads := 4
+	d_ff := 256
+	num_layers := 2
+	batch_size := 16
+
+	// Create embedding layer
+	embedding := nn.embedding_layer_new(vocab_size, d_model, allocator)
+	defer nn.embedding_layer_free(&embedding)
+
+	// Create positional encoding
+	pos_enc := nn.positional_encoding_new(seq_len + 1, d_model, allocator)
+	defer nn.positional_encoding_free(&pos_enc)
+
+	// Create decoder blocks (decoder-only Transformer)
+	decoder_blocks := make([dynamic]nn.TransformerDecoderBlock, 0, allocator)
+	for i in 0 ..< num_layers {
+		block := nn.transformer_decoder_block_new(d_model, num_heads, d_ff, allocator)
+		append(&decoder_blocks, block)
+	}
+	defer {
+		for i in 0 ..< len(decoder_blocks) {
+			nn.transformer_decoder_block_free(&decoder_blocks[i])
+		}
+		delete(decoder_blocks)
+	}
+
+	// Create output projection (d_model -> vocab_size)
+	output_proj := nn.linear_layer_new(d_model, vocab_size, allocator)
+	defer nn.linear_layer_free(&output_proj)
+
+	// Create optimizer
+	opt := nn.adam_new(0.001, allocator = allocator)
+	defer nn.adam_free(&opt)
+
+	// Register all parameters
+	nn.adam_add_param(&opt, embedding.weight)
+
+	for i in 0 ..< len(decoder_blocks) {
+		block := &decoder_blocks[i]
+		nn.adam_add_param(&opt, block.masked_mha.q_proj.weights)
+		nn.adam_add_param(&opt, block.masked_mha.q_proj.bias)
+		nn.adam_add_param(&opt, block.masked_mha.k_proj.weights)
+		nn.adam_add_param(&opt, block.masked_mha.k_proj.bias)
+		nn.adam_add_param(&opt, block.masked_mha.v_proj.weights)
+		nn.adam_add_param(&opt, block.masked_mha.v_proj.bias)
+		nn.adam_add_param(&opt, block.masked_mha.out_proj.weights)
+		nn.adam_add_param(&opt, block.masked_mha.out_proj.bias)
+		nn.adam_add_param(&opt, block.cross_attn.q_proj.weights)
+		nn.adam_add_param(&opt, block.cross_attn.q_proj.bias)
+		nn.adam_add_param(&opt, block.cross_attn.k_proj.weights)
+		nn.adam_add_param(&opt, block.cross_attn.k_proj.bias)
+		nn.adam_add_param(&opt, block.cross_attn.v_proj.weights)
+		nn.adam_add_param(&opt, block.cross_attn.v_proj.bias)
+		nn.adam_add_param(&opt, block.cross_attn.out_proj.weights)
+		nn.adam_add_param(&opt, block.cross_attn.out_proj.bias)
+		nn.adam_add_param(&opt, block.ffn.fc1.weights)
+		nn.adam_add_param(&opt, block.ffn.fc1.bias)
+		nn.adam_add_param(&opt, block.ffn.fc2.weights)
+		nn.adam_add_param(&opt, block.ffn.fc2.bias)
+		nn.adam_add_param(&opt, block.ln1.gamma)
+		nn.adam_add_param(&opt, block.ln1.beta)
+		nn.adam_add_param(&opt, block.ln2.gamma)
+		nn.adam_add_param(&opt, block.ln2.beta)
+		nn.adam_add_param(&opt, block.ln3.gamma)
+		nn.adam_add_param(&opt, block.ln3.beta)
+	}
+
+	nn.adam_add_param(&opt, output_proj.weights)
+	nn.adam_add_param(&opt, output_proj.bias)
+
+	// Create causal mask
+	mask := nn.create_causal_mask(seq_len + 1, allocator)
+	defer delete(mask, allocator)
+
+	// Convert text to indices
+	text_indices := make([]int, len(text), allocator)
+	defer delete(text_indices, allocator)
+
+	for i in 0 ..< len(text) {
+		text_indices[i] = vocab[u8(text[i])]
+	}
+
+	// Training loop
+	epochs := 100
+	fmt.printf(
+		"Training decoder-only Transformer (seq_len=%d, d_model=%d, layers=%d)...\n",
+		seq_len,
+		d_model,
+		num_layers,
+	)
+
+	initial_loss := 0.0
+	final_loss := 0.0
+
+	for epoch in 0 ..< epochs {
+		nn.adam_zero_grad(&opt)
+
+		// Sample random sequences from text
+		input_data := l.matrix_new(f64, 1, batch_size * seq_len * d_model, allocator)
+		target_indices := make([]int, batch_size * seq_len, allocator)
+
+		for b in 0 ..< batch_size {
+			// ✅ FIX: Cast to int
+			start := int(rand.int31()) % (len(text) - seq_len - 1)
+
+			// Create input sequence (embedded)
+			for s in 0 ..< seq_len {
+				char_idx := text_indices[start + s]
+				for d in 0 ..< d_model {
+					input_data.data[b * seq_len * d_model + s * d_model + d] =
+						embedding.weight.data.data[char_idx * d_model + d]
+				}
+				target_indices[b * seq_len + s] = text_indices[start + s + 1]
+			}
+		}
+
+		input := t.tensor_new(input_data, false, allocator)
+		input.shape = [4]int{batch_size, seq_len, d_model, 1}
+
+		// Add positional encoding
+		input_with_pos := nn.positional_encoding_forward(&pos_enc, input)
+
+		// Forward through decoder blocks
+		hidden := input_with_pos
+		for i in 0 ..< len(decoder_blocks) {
+			// For decoder-only, we use the same input as both decoder input and "encoder output"
+			hidden = nn.transformer_decoder_block_forward(&decoder_blocks[i], hidden, hidden, mask)
+		}
+
+		// Implement linear layer forward inline
+		logits := t.tensor_matmul(hidden, output_proj.weights)
+		if output_proj.bias != nil {
+			logits = t.tensor_add_bias(logits, output_proj.bias)
+		}
+
+		// Compute cross-entropy loss
+		loss := t.tensor_cross_entropy_loss(logits, target_indices)
+
+		if epoch == 0 {
+			initial_loss = loss.data.data[0]
+		}
+
+		// Backward pass
+		t.tensor_backward(loss)
+
+		// Optimizer step
+		nn.adam_step(&opt)
+
+		if epoch % 20 == 0 {
+			fmt.printf("Epoch %d | Loss: %.4f\n", epoch, loss.data.data[0])
+		}
+
+		if epoch == epochs - 1 {
+			final_loss = loss.data.data[0]
+		}
+
+		// Clean up
+		t.tensor_free_graph(loss)
+		l.matrix_free(&input_data)
+		delete(target_indices, allocator)
+		t.tensor_free(input)
+		t.tensor_free(input_with_pos)
+		t.tensor_free(hidden)
+		t.tensor_free(logits)
+	}
+
+	reduction := (1.0 - final_loss / initial_loss) * 100.0
+	fmt.printf(
+		"\n✓ Training complete! Loss: %.4f → %.4f (%.1f%% reduction)\n",
+		initial_loss,
+		final_loss,
+		reduction,
+	)
+
+	// Generate text
+	fmt.println("\n=== Generating Text ===")
+	fmt.println("Seed: 'to be'")
+
+	// ✅ FIX: Use dynamic byte array instead of strings.Builder
+	seed := "to be"
+	generated := make([dynamic]u8, 0, allocator)
+	defer delete(generated)
+
+	// Append seed characters
+	for c in seed {
+		append(&generated, u8(c))
+	}
+
+	// Generate 50 characters
+	for i in 0 ..< 50 {
+		// Prepare input sequence (pad with zeros if needed)
+		gen_input := l.matrix_new(f64, 1, seq_len * d_model, allocator)
+
+		// ✅ FIX: Use the dynamic array directly
+		gen_len := len(generated)
+		if gen_len > seq_len {
+			gen_len = seq_len
+		}
+
+		for s in 0 ..< gen_len {
+			offset := len(generated) - gen_len + s
+			char_idx := vocab[generated[offset]]
+			for d in 0 ..< d_model {
+				gen_input.data[s * d_model + d] =
+					embedding.weight.data.data[char_idx * d_model + d]
+			}
+		}
+
+		gen_tensor := t.tensor_new(gen_input, false, allocator)
+		gen_tensor.shape = [4]int{1, seq_len, d_model, 1}
+
+		// Add positional encoding
+		gen_with_pos := nn.positional_encoding_forward(&pos_enc, gen_tensor)
+
+		// Forward through decoder
+		gen_hidden := gen_with_pos
+		for j in 0 ..< len(decoder_blocks) {
+			gen_hidden = nn.transformer_decoder_block_forward(
+				&decoder_blocks[j],
+				gen_hidden,
+				gen_hidden,
+				mask,
+			)
+		}
+
+		// Implement linear layer forward inline
+		gen_logits := t.tensor_matmul(gen_hidden, output_proj.weights)
+		if output_proj.bias != nil {
+			gen_logits = t.tensor_add_bias(gen_logits, output_proj.bias)
+		}
+
+		// Get logits for last position
+		last_logits := make([]f64, vocab_size, allocator)
+		for v in 0 ..< vocab_size {
+			last_logits[v] = gen_logits.data.data[(seq_len - 1) * vocab_size + v]
+		}
+
+		// Softmax and sample
+		max_logit := -math.F64_MAX
+		for v in 0 ..< vocab_size {
+			if last_logits[v] > max_logit {
+				max_logit = last_logits[v]
+			}
+		}
+
+		sum_exp := 0.0
+		for v in 0 ..< vocab_size {
+			last_logits[v] = math.exp(last_logits[v] - max_logit)
+			sum_exp += last_logits[v]
+		}
+
+		for v in 0 ..< vocab_size {
+			last_logits[v] /= sum_exp
+		}
+
+		// Sample from distribution
+		r := rand.float64()
+		cum_prob := 0.0
+		next_char_idx := 0
+		for v in 0 ..< vocab_size {
+			cum_prob += last_logits[v]
+			if r < cum_prob {
+				next_char_idx = v
+				break
+			}
+		}
+
+		// ✅ FIX: Append to dynamic array
+		append(&generated, inv_vocab[next_char_idx])
+
+		// Clean up
+		l.matrix_free(&gen_input)
+		delete(last_logits, allocator)
+		t.tensor_free(gen_tensor)
+		t.tensor_free(gen_with_pos)
+		t.tensor_free(gen_hidden)
+		t.tensor_free(gen_logits)
+	}
+
+	// ✅ FIX: Convert to string for printing
+	fmt.printf("Generated: %.*s\n", len(generated), generated[:])
+	fmt.println("✓ Character-level language modeling test completed!")
 }

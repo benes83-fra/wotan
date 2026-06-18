@@ -398,12 +398,27 @@ tensor_leaky_relu :: proc(a: ^Tensor, alpha: f64 = 0.01) -> ^Tensor {
 
 // tensor_cross_entropy_loss calculates the loss for multi-class classification.
 tensor_cross_entropy_loss :: proc(logits: ^Tensor, target_indices: []int) -> ^Tensor {
-	if len(target_indices) != logits.data.rows {
-		panic("tensor_cross_entropy_loss: batch size mismatch")
-	}
-
+	// ✅ FIX: Handle flattened 3D tensor [1, N*C] where N = batch*seq_len, C = vocab_size
 	N := logits.data.rows
 	C := logits.data.cols
+
+	// Detect flattened 3D tensor
+	if N == 1 && C > len(target_indices) {
+		if C % len(target_indices) == 0 {
+			C = C / len(target_indices)
+			N = len(target_indices)
+		}
+	}
+
+	if N != len(target_indices) {
+		panic(
+			fmt.aprintf(
+				"tensor_cross_entropy_loss: batch size mismatch (N=%d, targets=%d)",
+				N,
+				len(target_indices),
+			),
+		)
+	}
 
 	loss := 0.0
 	for i in 0 ..< N {
@@ -418,7 +433,6 @@ tensor_cross_entropy_loss :: proc(logits: ^Tensor, target_indices: []int) -> ^Te
 			sum_exp += math.exp(logits.data.data[i * C + j] - max_val)
 		}
 
-		// Note: Use math.log for natural logarithm in Odin
 		log_sum_exp := math.ln(sum_exp) + max_val
 
 		target_class := target_indices[i]
@@ -436,7 +450,9 @@ tensor_cross_entropy_loss :: proc(logits: ^Tensor, target_indices: []int) -> ^Te
 	if out.requires_grad {
 		out.op = .CrossEntropy
 		append(&out.inputs, logits)
-		// ✅ Save indices for the backward pass
+		// Save indices and dimensions for the backward pass
+		append(&out.int_metadata, N)
+		append(&out.int_metadata, C)
 		for idx in target_indices {
 			append(&out.int_metadata, idx)
 		}
@@ -1672,21 +1688,29 @@ tensor_backward :: proc(root: ^Tensor) {
 		case .CrossEntropy:
 			// The magical simplified gradient: grad = (softmax_prob - target_one_hot) / N
 			logits_in := node.inputs[0]
-			N := logits_in.data.rows
-			C := logits_in.data.cols
 			if len(node.grad.data) == 0 {
 				fmt.println("WARNING: CrossEntropy node has empty gradient, skipping")
 				continue
 			}
 			scalar_grad := node.grad.data[0] // Usually 1.0
-			if len(node.int_metadata) < N {
+
+			// ✅ FIX: Use stored dimensions
+			if len(node.int_metadata) < 2 {
+				fmt.println("ERROR: CrossEntropy missing dimension metadata")
+				continue
+			}
+			N := node.int_metadata[0]
+			C := node.int_metadata[1]
+
+			if len(node.int_metadata) < 2 + N {
 				fmt.printf(
-					"ERROR: CrossEntropy int_metadata length %d < N %d\n",
+					"ERROR: CrossEntropy int_metadata length %d < %d\n",
 					len(node.int_metadata),
-					N,
+					2 + N,
 				)
 				continue
 			}
+
 			for i in 0 ..< N {
 				// Recompute softmax for stability
 				max_val := -math.F64_MAX
@@ -1700,7 +1724,7 @@ tensor_backward :: proc(root: ^Tensor) {
 					sum_exp += math.exp(logits_in.data.data[i * C + j] - max_val)
 				}
 
-				target_class := node.int_metadata[i]
+				target_class := node.int_metadata[2 + i]
 
 				for j in 0 ..< C {
 					prob := math.exp(logits_in.data.data[i * C + j] - max_val) / sum_exp
