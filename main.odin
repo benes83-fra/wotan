@@ -470,6 +470,7 @@ main :: proc() {
 	test.transformer_decoder_test(context.temp_allocator)
 	test.transformer_reversal_test(context.temp_allocator)
 	test.char_lm_test(context.temp_allocator)
+	test.gpt_full_test(context.temp_allocator)
 	fmt.println("Demo End")
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
