@@ -456,6 +456,222 @@ transformer_decoder_test :: proc(allocator: mem.Allocator) {
 
 	fmt.println("✓ Transformer Decoder test completed successfully!")
 }
+transformer_reversal_test :: proc(allocator: mem.Allocator) {
+	fmt.println("\n=== Testing Transformer on Sequence Reversal ===")
+
+	// Hyperparameters
+	batch := 32
+	seq_len := 6
+	d_model := 64
+	num_heads := 4
+	d_ff := 256
+	num_encoder_layers := 2
+	num_decoder_layers := 2
+
+	// Create encoder
+	encoder := nn.transformer_encoder_new(num_encoder_layers, d_model, num_heads, d_ff, allocator)
+	defer nn.transformer_encoder_free(&encoder)
+
+	// Create decoder
+	decoder_blocks := make([dynamic]nn.TransformerDecoderBlock, 0, allocator)
+	for i in 0 ..< num_decoder_layers {
+		block := nn.transformer_decoder_block_new(d_model, num_heads, d_ff, allocator)
+		append(&decoder_blocks, block)
+	}
+	defer {
+		for i in 0 ..< len(decoder_blocks) {
+			nn.transformer_decoder_block_free(&decoder_blocks[i])
+		}
+		delete(decoder_blocks)
+	}
+
+	// Create output projection (d_model -> seq_len for simplicity)
+	output_proj := nn.linear_layer_new(d_model, seq_len, allocator)
+	defer nn.linear_layer_free(&output_proj)
+
+	// Create optimizer
+	opt := nn.adam_new(0.001, allocator = allocator)
+	defer nn.adam_free(&opt)
+
+	// Register encoder parameters
+	for i in 0 ..< len(encoder.blocks) {
+		block := &encoder.blocks[i]
+		nn.adam_add_param(&opt, block.mha.q_proj.weights)
+		nn.adam_add_param(&opt, block.mha.q_proj.bias)
+		nn.adam_add_param(&opt, block.mha.k_proj.weights)
+		nn.adam_add_param(&opt, block.mha.k_proj.bias)
+		nn.adam_add_param(&opt, block.mha.v_proj.weights)
+		nn.adam_add_param(&opt, block.mha.v_proj.bias)
+		nn.adam_add_param(&opt, block.mha.out_proj.weights)
+		nn.adam_add_param(&opt, block.mha.out_proj.bias)
+		nn.adam_add_param(&opt, block.ffn.fc1.weights)
+		nn.adam_add_param(&opt, block.ffn.fc1.bias)
+		nn.adam_add_param(&opt, block.ffn.fc2.weights)
+		nn.adam_add_param(&opt, block.ffn.fc2.bias)
+		nn.adam_add_param(&opt, block.ln1.gamma)
+		nn.adam_add_param(&opt, block.ln1.beta)
+		nn.adam_add_param(&opt, block.ln2.gamma)
+		nn.adam_add_param(&opt, block.ln2.beta)
+	}
+
+	// Register decoder parameters
+	for i in 0 ..< len(decoder_blocks) {
+		block := &decoder_blocks[i]
+		nn.adam_add_param(&opt, block.masked_mha.q_proj.weights)
+		nn.adam_add_param(&opt, block.masked_mha.q_proj.bias)
+		nn.adam_add_param(&opt, block.masked_mha.k_proj.weights)
+		nn.adam_add_param(&opt, block.masked_mha.k_proj.bias)
+		nn.adam_add_param(&opt, block.masked_mha.v_proj.weights)
+		nn.adam_add_param(&opt, block.masked_mha.v_proj.bias)
+		nn.adam_add_param(&opt, block.masked_mha.out_proj.weights)
+		nn.adam_add_param(&opt, block.masked_mha.out_proj.bias)
+		nn.adam_add_param(&opt, block.cross_attn.q_proj.weights)
+		nn.adam_add_param(&opt, block.cross_attn.q_proj.bias)
+		nn.adam_add_param(&opt, block.cross_attn.k_proj.weights)
+		nn.adam_add_param(&opt, block.cross_attn.k_proj.bias)
+		nn.adam_add_param(&opt, block.cross_attn.v_proj.weights)
+		nn.adam_add_param(&opt, block.cross_attn.v_proj.bias)
+		nn.adam_add_param(&opt, block.cross_attn.out_proj.weights)
+		nn.adam_add_param(&opt, block.cross_attn.out_proj.bias)
+		nn.adam_add_param(&opt, block.ffn.fc1.weights)
+		nn.adam_add_param(&opt, block.ffn.fc1.bias)
+		nn.adam_add_param(&opt, block.ffn.fc2.weights)
+		nn.adam_add_param(&opt, block.ffn.fc2.bias)
+		nn.adam_add_param(&opt, block.ln1.gamma)
+		nn.adam_add_param(&opt, block.ln1.beta)
+		nn.adam_add_param(&opt, block.ln2.gamma)
+		nn.adam_add_param(&opt, block.ln2.beta)
+		nn.adam_add_param(&opt, block.ln3.gamma)
+		nn.adam_add_param(&opt, block.ln3.beta)
+	}
+
+	// Register output projection
+	nn.adam_add_param(&opt, output_proj.weights)
+	nn.adam_add_param(&opt, output_proj.bias)
+
+	// Create causal mask
+	mask := nn.create_causal_mask(seq_len, allocator)
+	defer delete(mask, allocator)
+
+	// Training loop
+	epochs := 100
+	fmt.printf("Training Transformer on sequence reversal (seq_len=%d)...\n", seq_len)
+
+	initial_loss := 0.0
+	final_loss := 0.0
+
+	for epoch in 0 ..< epochs {
+		nn.adam_zero_grad(&opt)
+
+		// Generate random input sequences
+		src_data := l.matrix_new(f64, 1, batch * seq_len * d_model, allocator)
+		for b in 0 ..< batch {
+			for s in 0 ..< seq_len {
+				// Random value between 0 and 1
+				val := rand.float64()
+				for d in 0 ..< d_model {
+					src_data.data[b * seq_len * d_model + s * d_model + d] = val
+				}
+			}
+		}
+		src := t.tensor_new(src_data, false, allocator)
+		src.shape = [4]int{batch, seq_len, d_model, 1}
+
+		// Create target (shifted reversed sequence for teacher forcing)
+		tgt_data := l.matrix_new(f64, 1, batch * seq_len * d_model, allocator)
+		for b in 0 ..< batch {
+			for s in 0 ..< seq_len {
+				// Reversed position
+				rev_s := seq_len - 1 - s
+				// Copy value from reversed position
+				val := src_data.data[b * seq_len * d_model + rev_s * d_model]
+				for d in 0 ..< d_model {
+					tgt_data.data[b * seq_len * d_model + s * d_model + d] = val
+				}
+			}
+		}
+		tgt := t.tensor_new(tgt_data, false, allocator)
+		tgt.shape = [4]int{batch, seq_len, d_model, 1}
+
+		// Target output (reversed sequence)
+		target_data := l.matrix_new(f64, 1, batch * seq_len * seq_len, allocator)
+		for b in 0 ..< batch {
+			for s in 0 ..< seq_len {
+				// One-hot encoding of reversed position
+				rev_s := seq_len - 1 - s
+				target_data.data[b * seq_len * seq_len + s * seq_len + rev_s] = 1.0
+			}
+		}
+		target := t.tensor_new(target_data, false, allocator)
+		target.shape = [4]int{batch, seq_len, seq_len, 1}
+
+		// Encoder forward
+		encoder_output := nn.transformer_encoder_forward(&encoder, src)
+
+		// Decoder forward
+		decoder_output := tgt
+		for i in 0 ..< len(decoder_blocks) {
+			decoder_output = nn.transformer_decoder_block_forward(
+				&decoder_blocks[i],
+				decoder_output,
+				encoder_output,
+				mask,
+			)
+		}
+
+		// Output projection
+		output := nn.linear_forward(&output_proj, decoder_output)
+
+		// Compute loss
+		loss := t.tensor_mse_loss(output, target)
+
+		if epoch == 0 {
+			initial_loss = loss.data.data[0]
+		}
+
+		// Backward pass
+		t.tensor_backward(loss)
+
+		// Optimizer step
+		nn.adam_step(&opt)
+
+		if epoch % 20 == 0 {
+			fmt.printf("Epoch %d | Loss: %.4f\n", epoch, loss.data.data[0])
+		}
+
+		if epoch == epochs - 1 {
+			final_loss = loss.data.data[0]
+		}
+
+		// Clean up
+		t.tensor_free_graph(loss)
+		l.matrix_free(&src_data)
+		l.matrix_free(&tgt_data)
+		l.matrix_free(&target_data)
+		t.tensor_free(src)
+		t.tensor_free(tgt)
+		t.tensor_free(target)
+	}
+
+	reduction := (1.0 - final_loss / initial_loss) * 100.0
+	if final_loss < initial_loss * 0.3 {
+		fmt.printf(
+			"✓ Transformer successfully learned reversal! Loss: %.4f → %.4f (%.1f%% reduction)\n",
+			initial_loss,
+			final_loss,
+			reduction,
+		)
+	} else {
+		fmt.printf(
+			"⚠ Transformer showed some learning. Loss: %.4f → %.4f (%.1f%% reduction)\n",
+			initial_loss,
+			final_loss,
+			reduction,
+		)
+	}
+
+	fmt.println("✓ Sequence reversal test completed successfully!")
+}
 
 
 // Simple character-level language model using decoder-only Transformer
