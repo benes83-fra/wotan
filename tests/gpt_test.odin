@@ -138,12 +138,11 @@ gpt_full_test :: proc(allocator: mem.Allocator) {
 			final_loss = loss.data.data[0]
 		}
 
-		// Clean up
-		t.tensor_free_graph(loss)
-		l.matrix_free(&input_ids_data)
-		delete(target_indices, allocator)
-		t.tensor_free(input_ids)
-		t.tensor_free(logits)
+		// ✅ FIX: Proper cleanup
+		t.tensor_free_graph(loss) // Frees all intermediate tensors (logits, embeddings, etc.)
+		t.tensor_free(input_ids) // Free the leaf node (input)
+		delete(target_indices, allocator) // Free the target indices
+		// ❌ Don't call l.matrix_free(&input_ids_data) - it's owned by input_ids
 	}
 
 	reduction := (1.0 - final_loss / initial_loss) * 100.0

@@ -167,10 +167,11 @@ gpt_model_forward :: proc(model: ^GPTModel, input_ids: ^t.Tensor, mask: []f64) -
 	// Output projection
 	logits := linear_forward(&model.output_proj, x)
 
-	// Cleanup intermediates
-	t.tensor_free(pos_ids)
-	t.tensor_free(token_emb)
-	t.tensor_free(pos_emb)
+	// ✅ FIX: Don't manually free intermediates!
+	// tensor_free_graph(loss) will handle all cleanup
+	// t.tensor_free(pos_ids)  // ❌ Remove this
+	// t.tensor_free(token_emb)  // ❌ Remove this
+	// t.tensor_free(pos_emb)  // ❌ Remove this
 
 	return logits
 }
