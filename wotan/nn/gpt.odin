@@ -49,15 +49,31 @@ gpt_block_free :: proc(block: ^GPTBlock) {
 	ffn_layer_free(&block.ffn)
 }
 
-gpt_block_forward :: proc(block: ^GPTBlock, x: ^t.Tensor, mask: []f64) -> ^t.Tensor {
-	// Pre-LayerNorm: LayerNorm before attention/FFN
+gpt_block_forward :: proc(
+	block: ^GPTBlock,
+	x: ^t.Tensor,
+	mask: []f64,
+	training: bool,
+) -> ^t.Tensor {
+	// Pre-LayerNorm
 	x_norm := layer_norm_layer_forward(&block.ln1, x)
 	attn_out := masked_multi_head_attention_layer_forward(&block.mha, x_norm, mask)
-	x1 := t.tensor_add(x, attn_out) // Residual connection
+
+	// Add dropout if training
+	if training {
+		attn_out = t.tensor_dropout(attn_out, 0.1, true)
+	}
+
+	x1 := t.tensor_add(x, attn_out)
 
 	x1_norm := layer_norm_layer_forward(&block.ln2, x1)
 	ffn_out := ffn_layer_forward(&block.ffn, x1_norm)
-	out := t.tensor_add(x1, ffn_out) // Residual connection
+
+	if training {
+		ffn_out = t.tensor_dropout(ffn_out, 0.1, true)
+	}
+
+	out := t.tensor_add(x1, ffn_out)
 
 	return out
 }
@@ -134,7 +150,12 @@ gpt_model_free :: proc(model: ^GPTModel) {
 	linear_layer_free(&model.output_proj)
 }
 
-gpt_model_forward :: proc(model: ^GPTModel, input_ids: ^t.Tensor, mask: []f64) -> ^t.Tensor {
+gpt_model_forward :: proc(
+	model: ^GPTModel,
+	input_ids: ^t.Tensor,
+	mask: []f64,
+	training: bool,
+) -> ^t.Tensor {
 	batch := input_ids.shape[0]
 	seq_len := input_ids.shape[1]
 
@@ -156,27 +177,16 @@ gpt_model_forward :: proc(model: ^GPTModel, input_ids: ^t.Tensor, mask: []f64) -
 	// Add token and positional embeddings
 	x := t.tensor_add(token_emb, pos_emb)
 
-	// ✅ FIX: Don't manually free anything - let tensor_free_graph handle it
-	// t.tensor_free(pos_ids)  // ❌ Remove
-	// t.tensor_free(token_emb)  // ❌ Remove
-	// t.tensor_free(pos_emb)  // ❌ Remove
-
 	// Pass through GPT blocks
 	for i in 0 ..< len(model.blocks) {
-		x = gpt_block_forward(&model.blocks[i], x, mask)
-		// ✅ FIX: Don't free intermediate x tensors
-		// if x != input_ids { t.tensor_free(x) }  // ❌ Remove
+		x = gpt_block_forward(&model.blocks[i], x, mask, training) // ✅ Pass training
 	}
 
 	// Final LayerNorm
 	x = layer_norm_layer_forward(&model.final_ln, x)
-	// ✅ FIX: Don't free x
-	// t.tensor_free(x)  // ❌ Remove
 
 	// Output projection
 	logits := linear_forward(&model.output_proj, x)
-	// ✅ FIX: Don't free x
-	// t.tensor_free(x)  // ❌ Remove
 
 	return logits
 }
@@ -231,16 +241,41 @@ gpt_sample_temperature :: proc(logits: []f64, temperature: f64) -> int {
 		return max_idx
 	}
 
-	// Apply temperature
+	// Apply temperature and softmax
 	scaled := make([]f64, len(logits), context.temp_allocator)
 	defer delete(scaled, context.temp_allocator)
 
-	for i in 0 ..< len(logits) {
-		scaled[i] = logits[i] / temperature
+	// Find max for numerical stability
+	max_val := logits[0]
+	for i in 1 ..< len(logits) {
+		if logits[i] > max_val {
+			max_val = logits[i]
+		}
 	}
 
-	// Softmax
-	return gpt_softmax_sample(scaled)
+	// Apply temperature and compute softmax
+	sum_exp := 0.0
+	for i in 0 ..< len(logits) {
+		scaled[i] = math.exp((logits[i] - max_val) / temperature)
+		sum_exp += scaled[i]
+	}
+
+	// Normalize
+	for i in 0 ..< len(logits) {
+		scaled[i] /= sum_exp
+	}
+
+	// Sample from distribution
+	r := rand.float64()
+	cum_prob := 0.0
+	for i in 0 ..< len(logits) {
+		cum_prob += scaled[i]
+		if r < cum_prob {
+			return i
+		}
+	}
+
+	return len(logits) - 1
 }
 
 // Top-k sampling

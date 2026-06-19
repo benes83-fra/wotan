@@ -12,7 +12,9 @@ gpt_full_test :: proc(allocator: mem.Allocator) {
 	fmt.println("\n=== Full GPT Implementation Test ===")
 
 	// Larger training corpus (multiple Shakespeare excerpts)
-	text := "to be or not to be that is the question whether tis nobler in the mind to suffer the slings and arrows of outrageous fortune or to take arms against a sea of troubles and by opposing end them to die to sleep no more and by a sleep to say we end the heartache and the thousand natural shocks that flesh is heir to tis a consummation devoutly to be wished to die to sleep to sleep perchance to dream ay theres the rub for in that sleep of death what dreams may come when we have shuffled off this mortal coil must give us pause theres the respect that makes calamity of so long life for who would bear the whips and scorns of time the oppressors wrong the proud mans contumely the pangs of despised love the laws delay the insolence of office and the spurns that patient merit of the unworthy takes when he himself might his quietus make with a bare bodkin who would fardels bear to grunt and sweat under a weary life but that the dread of something after death the undiscovered country from whose bourn no traveller returns puzzles the will and makes us rather bear those ills we have than fly to others that we know not of thus conscience does make cowards of us all and thus the native hue of resolution is sicklied oer with the pale cast of thought and enterprises of great pith and moment with this regard their currents turn awry and lose the name of action"
+	// Much larger training corpus
+	text := "to be or not to be that is the question whether tis nobler in the mind to suffer the slings and arrows of outrageous fortune or to take arms against a sea of troubles and by opposing end them to die to sleep no more and by a sleep to say we end the heartache and the thousand natural shocks that flesh is heir to tis a consummation devoutly to be wished to die to sleep to sleep perchance to dream ay theres the rub for in that sleep of death what dreams may come when we have shuffled off this mortal coil must give us pause theres the respect that makes calamity of so long life for who would bear the whips and scorns of time the oppressors wrong the proud mans contumely the pangs of despised love the laws delay the insolence of office and the spurns that patient merit of the unworthy takes when he himself might his quietus make with a bare bodkin who would fardels bear to grunt and sweat under a weary life but that the dread of something after death the undiscovered country from whose bourn no traveller returns puzzles the will and makes us rather bear those ills we have than fly to others that we know not of thus conscience does make cowards of us all and thus the native hue of resolution is sicklied oer with the pale cast of thought and enterprises of great pith and moment with this regard their currents turn awry and lose the name of action soft you now the fair ophelia nymph in thy orisons be all my sins remembered my good lord how does your honour for this long time my lord i have had no answer would you vouchsafe to speak with me my lord i have a suit to you my lord the queen would speak with you and presently my lord i shall obey the queen my lord the king your father and the queen your mother are in a most sad plight the king my lord the queen your mother in most great addition of sorrow comes to your highness the queen your mother would speak with you presently the queen my lord the king your father and the queen your mother are in a most sad plight the king my lord the queen your mother in most great addition of sorrow comes to your highness"
+
 
 	// Build vocabulary
 	vocab := make(map[u8]int, allocator)
@@ -32,12 +34,12 @@ gpt_full_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("Text length: %d characters\n", len(text))
 
 	// Hyperparameters
-	seq_len := 32
-	d_model := 64
+	seq_len := 16 // Smaller sequences
+	d_model := 64 // Smaller model
 	num_heads := 4
-	d_ff := 256
-	num_layers := 3
-	batch_size := 16
+	d_ff := 512 // Back to 512
+	num_layers := 2 // Fewer layers
+	batch_size := 8 // Smaller batch
 	max_seq_len := seq_len + 1
 
 	// Create GPT model
@@ -104,7 +106,7 @@ gpt_full_test :: proc(allocator: mem.Allocator) {
 		input_ids.shape = [4]int{batch_size, seq_len, 1, 1}
 
 		// Forward pass
-		logits := nn.gpt_model_forward(&model, input_ids, mask)
+		logits := nn.gpt_model_forward(&model, input_ids, mask, true)
 
 		// Compute cross-entropy loss
 		loss := t.tensor_cross_entropy_loss(logits, target_indices)
@@ -168,10 +170,10 @@ gpt_full_test :: proc(allocator: mem.Allocator) {
 
 	// Test different sampling methods
 	sampling_configs := []SamplingConfig {
-		{"Temperature (0.8)", "temperature", 0.8},
-		{"Temperature (1.2)", "temperature", 1.2},
-		{"Top-k (k=10)", "top_k", 10.0},
-		{"Top-p (p=0.9)", "top_p", 0.9},
+		{"Temperature (1.5)", "temperature", 1.5},
+		{"Temperature (2.0)", "temperature", 2.0},
+		{"Top-k (k=40)", "top_k", 40.0},
+		{"Top-p (p=0.95)", "top_p", 0.95},
 	}
 
 	for config in sampling_configs {
@@ -204,7 +206,7 @@ gpt_full_test :: proc(allocator: mem.Allocator) {
 			gen_ids.shape = [4]int{1, seq_len, 1, 1}
 
 			// Forward pass
-			gen_logits := nn.gpt_model_forward(&model, gen_ids, mask)
+			gen_logits := nn.gpt_model_forward(&model, gen_ids, mask, false)
 
 			// Get logits for last position
 			last_logits := make([]f64, vocab_size, allocator)
