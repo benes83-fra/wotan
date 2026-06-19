@@ -227,23 +227,46 @@ gpt_model_add_to_optimizer :: proc(model: ^GPTModel, opt: ^Adam) {
 // ============================================================================
 
 // Temperature sampling
-gpt_sample_temperature :: proc(logits: []f64, temperature: f64) -> int {
+// Add repetition penalty to temperature sampling
+// Temperature sampling with repetition penalty
+gpt_sample_temperature :: proc(
+	logits: []f64,
+	temperature: f64,
+	recent_tokens: []int,
+	penalty: f64,
+) -> int {
 	if temperature <= 0.0 {
-		// Greedy decoding
+		// Greedy decoding with penalty
 		max_idx := 0
 		max_val := logits[0]
+
+		// Apply penalty to recent tokens
+		val := logits[0]
+		if penalty > 1.0 {
+			for recent in recent_tokens {
+				if 0 == recent {
+					if val > 0 {val /= penalty} else {val *= penalty}
+				}
+			}
+		}
+		max_val = val
+
 		for i in 1 ..< len(logits) {
-			if logits[i] > max_val {
-				max_val = logits[i]
+			val = logits[i]
+			if penalty > 1.0 {
+				for recent in recent_tokens {
+					if i == recent {
+						if val > 0 {val /= penalty} else {val *= penalty}
+					}
+				}
+			}
+			if val > max_val {
+				max_val = val
 				max_idx = i
 			}
 		}
 		return max_idx
 	}
-
-	// Apply temperature and softmax
-	scaled := make([]f64, len(logits), context.temp_allocator)
-	defer delete(scaled, context.temp_allocator)
 
 	// Find max for numerical stability
 	max_val := logits[0]
@@ -253,10 +276,28 @@ gpt_sample_temperature :: proc(logits: []f64, temperature: f64) -> int {
 		}
 	}
 
-	// Apply temperature and compute softmax
+	// Apply temperature and repetition penalty
+	scaled := make([]f64, len(logits), context.temp_allocator)
+	defer delete(scaled, context.temp_allocator)
+
 	sum_exp := 0.0
 	for i in 0 ..< len(logits) {
-		scaled[i] = math.exp((logits[i] - max_val) / temperature)
+		val := logits[i]
+
+		// Apply repetition penalty
+		if penalty > 1.0 {
+			for recent in recent_tokens {
+				if i == recent {
+					if val > 0 {
+						val /= penalty
+					} else {
+						val *= penalty
+					}
+				}
+			}
+		}
+
+		scaled[i] = math.exp((val - max_val) / temperature)
 		sum_exp += scaled[i]
 	}
 
@@ -265,7 +306,7 @@ gpt_sample_temperature :: proc(logits: []f64, temperature: f64) -> int {
 		scaled[i] /= sum_exp
 	}
 
-	// Sample from distribution
+	// Sample
 	r := rand.float64()
 	cum_prob := 0.0
 	for i in 0 ..< len(logits) {
@@ -278,13 +319,19 @@ gpt_sample_temperature :: proc(logits: []f64, temperature: f64) -> int {
 	return len(logits) - 1
 }
 
-// Top-k sampling
-gpt_sample_top_k :: proc(logits: []f64, k: int, temperature: f64) -> int {
+// Top-k sampling with repetition penalty
+gpt_sample_top_k :: proc(
+	logits: []f64,
+	k: int,
+	temperature: f64,
+	recent_tokens: []int,
+	penalty: f64,
+) -> int {
 	if k <= 0 || k >= len(logits) {
-		return gpt_sample_temperature(logits, temperature)
+		return gpt_sample_temperature(logits, temperature, recent_tokens, penalty)
 	}
 
-	// Find top-k logits
+	// Find top-k logits with penalty applied
 	top_k_indices := make([]int, k, context.temp_allocator)
 	top_k_logits := make([]f64, k, context.temp_allocator)
 	defer {
@@ -298,9 +345,19 @@ gpt_sample_top_k :: proc(logits: []f64, k: int, temperature: f64) -> int {
 		top_k_logits[i] = -math.F64_MAX
 	}
 
-	// Find top-k
+	// Find top-k with penalty
 	for i in 0 ..< len(logits) {
 		val := logits[i]
+
+		// Apply repetition penalty
+		if penalty > 1.0 {
+			for recent in recent_tokens {
+				if i == recent {
+					if val > 0 {val /= penalty} else {val *= penalty}
+				}
+			}
+		}
+
 		// Check if this should be in top-k
 		if val > top_k_logits[k - 1] {
 			// Insert in sorted position
@@ -357,26 +414,49 @@ gpt_sample_top_k :: proc(logits: []f64, k: int, temperature: f64) -> int {
 	return top_k_indices[k - 1]
 }
 
-// Top-p (nucleus) sampling
-gpt_sample_top_p :: proc(logits: []f64, p: f64, temperature: f64) -> int {
+// Top-p (nucleus) sampling with repetition penalty
+gpt_sample_top_p :: proc(
+	logits: []f64,
+	p: f64,
+	temperature: f64,
+	recent_tokens: []int,
+	penalty: f64,
+) -> int {
 	if p >= 1.0 {
-		return gpt_sample_temperature(logits, temperature)
+		return gpt_sample_temperature(logits, temperature, recent_tokens, penalty)
 	}
 
-	// Apply temperature and softmax
+	// Apply temperature, penalty and softmax
 	scaled := make([]f64, len(logits), context.temp_allocator)
 	defer delete(scaled, context.temp_allocator)
 
-	max_val := logits[0]
-	for i in 1 ..< len(logits) {
-		if logits[i] > max_val {
-			max_val = logits[i]
+	// Find max with penalty
+	max_val := -math.F64_MAX
+	for i in 0 ..< len(logits) {
+		val := logits[i]
+		if penalty > 1.0 {
+			for recent in recent_tokens {
+				if i == recent {
+					if val > 0 {val /= penalty} else {val *= penalty}
+				}
+			}
+		}
+		if val > max_val {
+			max_val = val
 		}
 	}
 
 	sum_exp := 0.0
 	for i in 0 ..< len(logits) {
-		scaled[i] = math.exp((logits[i] - max_val) / temperature)
+		val := logits[i]
+		if penalty > 1.0 {
+			for recent in recent_tokens {
+				if i == recent {
+					if val > 0 {val /= penalty} else {val *= penalty}
+				}
+			}
+		}
+		scaled[i] = math.exp((val - max_val) / temperature)
 		sum_exp += scaled[i]
 	}
 
@@ -397,11 +477,10 @@ gpt_sample_top_p :: proc(logits: []f64, p: f64, temperature: f64) -> int {
 		probs[i] = scaled[i]
 	}
 
-	// Simple bubble sort (could optimize but fine for vocab size)
+	// Simple bubble sort
 	for i in 0 ..< len(probs) - 1 {
 		for j in 0 ..< len(probs) - i - 1 {
 			if probs[j] < probs[j + 1] {
-				// Swap
 				temp_prob := probs[j]
 				probs[j] = probs[j + 1]
 				probs[j + 1] = temp_prob
@@ -413,7 +492,7 @@ gpt_sample_top_p :: proc(logits: []f64, p: f64, temperature: f64) -> int {
 		}
 	}
 
-	// Find nucleus (cumulative probability >= p)
+	// Find nucleus
 	cum_prob := 0.0
 	nucleus_size := 0
 	for i in 0 ..< len(probs) {
