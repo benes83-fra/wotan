@@ -14,6 +14,7 @@ import "core:mem"
 // We use an enum instead of function pointers to keep it Odin-idiomatic.
 Op :: enum {
 	None,
+	Constant,
 	Add,
 	Mul,
 	MatMul,
@@ -991,6 +992,7 @@ tensor_backward :: proc(root: ^Tensor) {
 					)
 				}
 			}
+		// In tensor_backward, find case .ScaledDotProductAttention and update it:
 		case .ScaledDotProductAttention:
 			Q_in := node.inputs[0]
 			K_in := node.inputs[1]
@@ -1078,6 +1080,9 @@ tensor_backward :: proc(root: ^Tensor) {
 				// 3. dP = dO_b @ V_b^T
 				v_b_t := _matrix_transpose(v_b, context.temp_allocator)
 				dP_b := l.matmul_dyn_simd(&dO_b, &v_b_t, context.temp_allocator)
+
+				// ✅ FIX: Free v_b_t immediately after use
+				l.matrix_free(&v_b_t)
 
 				// 4. dS = P_b * (dP_b - sum(dP_b * P_b, dim=-1))  [Standard Softmax Backward]
 				for i in 0 ..< seq_q {
@@ -2318,7 +2323,7 @@ tensor_backward :: proc(root: ^Tensor) {
 			delete(col, context.allocator)
 
 		// We don't calculate gradients for the target data.
-		case .None:
+		case .None, .Constant:
 		// Leaf node, nothing to do
 		}
 	}
@@ -3755,4 +3760,24 @@ tensor_masked_scaled_dot_product_attention :: proc(
 	}
 
 	return out
+}
+// In tensor.odin, add this helper function at the top:
+tensor_validate :: proc(t: ^Tensor, ctx: string) {
+	if t == nil {
+		fmt.printf("ERROR: %s - tensor is nil\n", ctx)
+		return
+	}
+	if t.data.data == nil || len(t.data.data) == 0 {
+		fmt.printf(
+			"ERROR: %s - tensor has empty data (rows=%d, cols=%d)\n",
+			ctx,
+			t.data.rows,
+			t.data.cols,
+		)
+		return
+	}
+	if t.requires_grad && (t.grad.data == nil || len(t.grad.data) == 0) {
+		fmt.printf("ERROR: %s - tensor requires grad but has empty gradient\n", ctx)
+		return
+	}
 }

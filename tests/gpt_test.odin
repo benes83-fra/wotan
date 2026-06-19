@@ -95,6 +95,7 @@ gpt_full_test :: proc(allocator: mem.Allocator) {
 	initial_loss := 0.0
 	final_loss := 0.0
 
+	// In your training loop, add validation:
 	for epoch in 0 ..< epochs {
 		nn.adam_zero_grad(&opt)
 
@@ -114,11 +115,20 @@ gpt_full_test :: proc(allocator: mem.Allocator) {
 		input_ids := t.tensor_new(input_ids_data, false, allocator)
 		input_ids.shape = [4]int{batch_size, seq_len, 1, 1}
 
+		// ✅ ADD: Validate input
+		t.tensor_validate(input_ids, "input_ids before forward")
+
 		// Forward pass with training=true for dropout
 		logits := nn.gpt_model_forward(&model, input_ids, mask, true)
 
+		// ✅ ADD: Validate logits
+		t.tensor_validate(logits, "logits after forward")
+
 		// Compute cross-entropy loss
 		loss := t.tensor_cross_entropy_loss(logits, target_indices)
+
+		// ✅ ADD: Validate loss
+		t.tensor_validate(loss, "loss after computation")
 
 		if epoch == 0 {
 			initial_loss = loss.data.data[0]
@@ -148,8 +158,17 @@ gpt_full_test :: proc(allocator: mem.Allocator) {
 		t.tensor_free_graph(loss)
 		t.tensor_free(input_ids)
 		delete(target_indices, allocator)
-		for i in 0 ..< len(input_ids_data.data) {
-			input_ids_data.data[i] = 0.0
+
+		// ✅ ADD: Periodic validation of model parameters
+		if epoch % 100 == 0 {
+			// Check a few key parameters
+			t.tensor_validate(model.token_emb.weight, fmt.aprintf("token_emb at epoch %d", epoch))
+			if len(model.blocks) > 0 {
+				t.tensor_validate(
+					model.blocks[0].mha.q_proj.weights,
+					fmt.aprintf("block0.q_proj at epoch %d", epoch),
+				)
+			}
 		}
 	}
 
