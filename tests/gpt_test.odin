@@ -32,10 +32,10 @@ gpt_full_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("Text length: %d characters\n", len(text))
 
 	// Hyperparameters
-	seq_len := 64
-	d_model := 128
+	seq_len := 32
+	d_model := 64
 	num_heads := 4
-	d_ff := 512
+	d_ff := 256
 	num_layers := 3
 	batch_size := 16
 	max_seq_len := seq_len + 1

@@ -156,22 +156,27 @@ gpt_model_forward :: proc(model: ^GPTModel, input_ids: ^t.Tensor, mask: []f64) -
 	// Add token and positional embeddings
 	x := t.tensor_add(token_emb, pos_emb)
 
+	// ✅ FIX: Don't manually free anything - let tensor_free_graph handle it
+	// t.tensor_free(pos_ids)  // ❌ Remove
+	// t.tensor_free(token_emb)  // ❌ Remove
+	// t.tensor_free(pos_emb)  // ❌ Remove
+
 	// Pass through GPT blocks
 	for i in 0 ..< len(model.blocks) {
 		x = gpt_block_forward(&model.blocks[i], x, mask)
+		// ✅ FIX: Don't free intermediate x tensors
+		// if x != input_ids { t.tensor_free(x) }  // ❌ Remove
 	}
 
 	// Final LayerNorm
 	x = layer_norm_layer_forward(&model.final_ln, x)
+	// ✅ FIX: Don't free x
+	// t.tensor_free(x)  // ❌ Remove
 
 	// Output projection
 	logits := linear_forward(&model.output_proj, x)
-
-	// ✅ FIX: Don't manually free intermediates!
-	// tensor_free_graph(loss) will handle all cleanup
-	// t.tensor_free(pos_ids)  // ❌ Remove this
-	// t.tensor_free(token_emb)  // ❌ Remove this
-	// t.tensor_free(pos_emb)  // ❌ Remove this
+	// ✅ FIX: Don't free x
+	// t.tensor_free(x)  // ❌ Remove
 
 	return logits
 }
