@@ -51,17 +51,18 @@ PoolParams :: struct {
 }
 
 Tensor :: struct {
-	data:          l.Matrix(f64),
-	grad:          l.Matrix(f64),
-	requires_grad: bool,
-	op:            Op,
-	inputs:        [dynamic]^Tensor,
-	allocator:     mem.Allocator,
-	int_metadata:  [dynamic]int,
-	dropout_mask:  []f64,
-	shape:         [4]int,
-	conv_params:   ConvParams,
-	pool_params:   PoolParams, // ✅ ADD THIS
+	data:           l.Matrix(f64),
+	grad:           l.Matrix(f64),
+	requires_grad:  bool,
+	op:             Op,
+	inputs:         [dynamic]^Tensor,
+	allocator:      mem.Allocator,
+	int_metadata:   [dynamic]int,
+	dropout_mask:   []f64,
+	shape:          [4]int,
+	conv_params:    ConvParams,
+	pool_params:    PoolParams,
+	owned_by_graph: bool, // ✅ ADD THIS
 }
 
 ConvParams :: struct {
@@ -318,10 +319,10 @@ tensor_mse_loss :: proc(pred: ^Tensor, target: ^Tensor) -> ^Tensor {
 
 	n := f64(len(pred.data.data))
 
-	diff := make([]f64, len(pred.data.data), context.temp_allocator)
+	diff := make([]f64, len(pred.data.data), context.allocator)
 	l.vec_sub_simd(pred.data.data, target.data.data, diff)
 	squared_sum := l.dot_simd(diff, diff)
-	defer delete(diff, context.temp_allocator)
+	defer delete(diff, context.allocator)
 
 	loss_val := squared_sum / n
 
@@ -597,8 +598,8 @@ tensor_backward :: proc(root: ^Tensor) {
 
 				if a_in.requires_grad {
 					tensor_ensure_grad(a_in)
-					b_t := _matrix_transpose(b_view, context.temp_allocator)
-					grad_a_view := l.matmul_dyn_simd(&grad_view, &b_t, context.temp_allocator)
+					b_t := _matrix_transpose(b_view, context.allocator)
+					grad_a_view := l.matmul_dyn_simd(&grad_view, &b_t, context.allocator)
 					l.matrix_free(&b_t)
 
 					// Copy flattened gradient back
@@ -608,8 +609,8 @@ tensor_backward :: proc(root: ^Tensor) {
 
 				if b_in.requires_grad {
 					tensor_ensure_grad(b_in)
-					a_t := _matrix_transpose(a_view, context.temp_allocator)
-					grad_b := l.matmul_dyn_simd(&a_t, &grad_view, context.temp_allocator)
+					a_t := _matrix_transpose(a_view, context.allocator)
+					grad_b := l.matmul_dyn_simd(&a_t, &grad_view, context.allocator)
 					l.matrix_free(&a_t)
 
 					l.vec_add_simd(b_in.grad.data, grad_b.data, b_in.grad.data)
@@ -670,7 +671,7 @@ tensor_backward :: proc(root: ^Tensor) {
 			scale := 1.0 / math.sqrt(f64(d_k))
 
 			// Retrieve mask from metadata
-			mask := make([]f64, seq_q * seq_k, context.temp_allocator)
+			mask := make([]f64, seq_q * seq_k, context.allocator)
 			neg_inf: f64 = -1e9
 			for i in 0 ..< len(mask) {
 				if node.int_metadata[i] == 1 {
@@ -679,15 +680,15 @@ tensor_backward :: proc(root: ^Tensor) {
 					mask[i] = 0.0
 				}
 			}
-			defer delete(mask, context.temp_allocator)
+			defer delete(mask, context.allocator)
 
-			dQ := make([]f64, len(Q_in.data.data), context.temp_allocator)
-			dK := make([]f64, len(K_in.data.data), context.temp_allocator)
-			dV := make([]f64, len(V_in.data.data), context.temp_allocator)
+			dQ := make([]f64, len(Q_in.data.data), context.allocator)
+			dK := make([]f64, len(K_in.data.data), context.allocator)
+			dV := make([]f64, len(V_in.data.data), context.allocator)
 			defer {
-				delete(dQ, context.temp_allocator)
-				delete(dK, context.temp_allocator)
-				delete(dV, context.temp_allocator)
+				delete(dQ, context.allocator)
+				delete(dK, context.allocator)
+				delete(dV, context.allocator)
 			}
 
 			for b in 0 ..< batch {
@@ -713,8 +714,8 @@ tensor_backward :: proc(root: ^Tensor) {
 				}
 
 				// Recompute S_b and P_b with mask
-				k_b_t := _matrix_transpose(k_b, context.temp_allocator)
-				s_b := l.matmul_dyn_simd(&q_b, &k_b_t, context.temp_allocator)
+				k_b_t := _matrix_transpose(k_b, context.allocator)
+				s_b := l.matmul_dyn_simd(&q_b, &k_b_t, context.allocator)
 				l.matrix_free(&k_b_t)
 
 				p_b := l.Matrix(f64) {
@@ -754,15 +755,15 @@ tensor_backward :: proc(root: ^Tensor) {
 				}
 
 				// dV = P_b^T @ dO_b
-				p_b_t := _matrix_transpose(p_b, context.temp_allocator)
-				dV_b := l.matmul_dyn_simd(&p_b_t, &dO_b, context.temp_allocator)
+				p_b_t := _matrix_transpose(p_b, context.allocator)
+				dV_b := l.matmul_dyn_simd(&p_b_t, &dO_b, context.allocator)
 				copy(dV[b * seq_k * d_v:(b + 1) * seq_k * d_v], dV_b.data)
 				l.matrix_free(&p_b_t)
 				l.matrix_free(&dV_b)
 
 				// dP = dO_b @ V_b^T
-				v_b_t := _matrix_transpose(v_b, context.temp_allocator)
-				dP_b := l.matmul_dyn_simd(&dO_b, &v_b_t, context.temp_allocator)
+				v_b_t := _matrix_transpose(v_b, context.allocator)
+				dP_b := l.matmul_dyn_simd(&dO_b, &v_b_t, context.allocator)
 
 				// ✅ FIX: Free v_b_t immediately after use
 				l.matrix_free(&v_b_t)
@@ -784,13 +785,13 @@ tensor_backward :: proc(root: ^Tensor) {
 				for i in 0 ..< seq_q * seq_k {
 					dP_b.data[i] *= scale
 				}
-				dQ_b := l.matmul_dyn_simd(&dP_b, &k_b, context.temp_allocator)
+				dQ_b := l.matmul_dyn_simd(&dP_b, &k_b, context.allocator)
 				copy(dQ[b * seq_q * d_k:(b + 1) * seq_q * d_k], dQ_b.data)
 				l.matrix_free(&dQ_b)
 
 				// dK = (dP_b * scale)^T @ Q_b
-				dP_b_t := _matrix_transpose(dP_b, context.temp_allocator)
-				dK_b := l.matmul_dyn_simd(&dP_b_t, &q_b, context.temp_allocator)
+				dP_b_t := _matrix_transpose(dP_b, context.allocator)
+				dK_b := l.matmul_dyn_simd(&dP_b_t, &q_b, context.allocator)
 				copy(dK[b * seq_k * d_k:(b + 1) * seq_k * d_k], dK_b.data)
 				l.matrix_free(&dP_b_t)
 				l.matrix_free(&dK_b)
@@ -806,29 +807,50 @@ tensor_backward :: proc(root: ^Tensor) {
 			if V_in.requires_grad &&
 			   len(V_in.grad.data) > 0 {l.vec_add_simd(V_in.grad.data, dV, V_in.grad.data)}
 		case .Relu:
-			// y = max(0, x)
-			// dy/dx = 1 if x > 0 else 0
 			a_in := node.inputs[0]
 			if a_in.requires_grad {
-				// ✅ SIMD Optimization: Use the SIMD backward function
+				// ✅ FIX: Add defensive length checks
+				grad_out_len := len(node.grad.data)
+				input_len := len(a_in.data.data)
+				grad_in_len := len(a_in.grad.data)
+
+				if grad_out_len != input_len || grad_out_len != grad_in_len {
+					fmt.printf(
+						"WARNING: ReLU backward length mismatch at epoch - " +
+						"grad_out=%d, input=%d, grad_in=%d\n",
+						grad_out_len,
+						input_len,
+						grad_in_len,
+					)
+					continue
+				}
+
 				l.vec_relu_backward_simd(node.grad.data, a_in.data.data, a_in.grad.data)
 			}
 		case .Sigmoid:
-			// d/dx σ(x) = σ(x) * (1 - σ(x))
 			a_in := node.inputs[0]
 			if a_in.requires_grad {
+				if len(node.grad.data) != len(a_in.data.data) ||
+				   len(node.grad.data) != len(a_in.grad.data) {
+					fmt.printf("WARNING: Sigmoid backward length mismatch\n")
+					continue
+				}
 				for i in 0 ..< len(a_in.grad.data) {
-					s := a_in.data.data[i] // already σ(x) from forward
+					s := a_in.data.data[i]
 					a_in.grad.data[i] += node.grad.data[i] * s * (1.0 - s)
 				}
 			}
 
 		case .Tanh:
-			// d/dx tanh(x) = 1 - tanh²(x)
 			a_in := node.inputs[0]
 			if a_in.requires_grad {
+				if len(node.grad.data) != len(a_in.data.data) ||
+				   len(node.grad.data) != len(a_in.grad.data) {
+					fmt.printf("WARNING: Tanh backward length mismatch\n")
+					continue
+				}
 				for i in 0 ..< len(a_in.grad.data) {
-					t := a_in.data.data[i] // already tanh(x) from forward
+					t := a_in.data.data[i]
 					a_in.grad.data[i] += node.grad.data[i] * (1.0 - t * t)
 				}
 			}
@@ -1167,17 +1189,17 @@ tensor_backward :: proc(root: ^Tensor) {
 			if beta_in.requires_grad {tensor_ensure_grad(beta_in)}
 
 			// Temporary buffers
-			centered := make([]f64, d_model, context.temp_allocator)
-			x_hat := make([]f64, d_model, context.temp_allocator)
-			dx_hat := make([]f64, d_model, context.temp_allocator)
-			dx_row := make([]f64, d_model, context.temp_allocator)
-			inv_std_vec := make([]f64, d_model, context.temp_allocator)
+			centered := make([]f64, d_model, context.allocator)
+			x_hat := make([]f64, d_model, context.allocator)
+			dx_hat := make([]f64, d_model, context.allocator)
+			dx_row := make([]f64, d_model, context.allocator)
+			inv_std_vec := make([]f64, d_model, context.allocator)
 			defer {
-				delete(centered, context.temp_allocator)
-				delete(x_hat, context.temp_allocator)
-				delete(dx_hat, context.temp_allocator)
-				delete(dx_row, context.temp_allocator)
-				delete(inv_std_vec, context.temp_allocator)
+				delete(centered, context.allocator)
+				delete(x_hat, context.allocator)
+				delete(dx_hat, context.allocator)
+				delete(dx_row, context.allocator)
+				delete(inv_std_vec, context.allocator)
 			}
 
 			for i in 0 ..< N {
@@ -1255,39 +1277,36 @@ tensor_backward :: proc(root: ^Tensor) {
 			H := hidden_size
 			H3 := 3 * H
 
-			dx := make([]f64, len(x_in.data.data), context.temp_allocator)
-			dw_ih := make([]f64, len(w_ih_in.data.data), context.temp_allocator)
-			dw_hh := make([]f64, len(w_hh_in.data.data), context.temp_allocator)
-			dbias := make([]f64, len(bias_in.data.data), context.temp_allocator)
+			dx := make([]f64, len(x_in.data.data), context.allocator)
+			dw_ih := make([]f64, len(w_ih_in.data.data), context.allocator)
+			dw_hh := make([]f64, len(w_hh_in.data.data), context.allocator)
+			dbias := make([]f64, len(bias_in.data.data), context.allocator)
 
-			h_t := make([]f64, batch * H, context.temp_allocator)
+			h_t := make([]f64, batch * H, context.allocator)
 			copy(h_t, h_0_in.data.data)
-			h_prev := make([]f64, batch * H, context.temp_allocator)
-			h_next := make([]f64, batch * H, context.temp_allocator)
-			x_t := make([]f64, batch * in_size, context.temp_allocator)
+			h_prev := make([]f64, batch * H, context.allocator)
+			h_next := make([]f64, batch * H, context.allocator)
+			x_t := make([]f64, batch * in_size, context.allocator)
 
-			r_buf := make([]f64, batch * H, context.temp_allocator)
-			z_buf := make([]f64, batch * H, context.temp_allocator)
-			n_buf := make([]f64, batch * H, context.temp_allocator)
-			n_hh_buf := make([]f64, batch * H, context.temp_allocator)
+			r_buf := make([]f64, batch * H, context.allocator)
+			z_buf := make([]f64, batch * H, context.allocator)
+			n_buf := make([]f64, batch * H, context.allocator)
+			n_hh_buf := make([]f64, batch * H, context.allocator)
 
-			dh_next := make([]f64, batch * H, context.temp_allocator)
-			dh_prev := make([]f64, batch * H, context.temp_allocator)
-			d_gate_ih := make([]f64, batch * H3, context.temp_allocator)
-			d_gate_hh := make([]f64, batch * H3, context.temp_allocator)
+			dh_next := make([]f64, batch * H, context.allocator)
+			dh_prev := make([]f64, batch * H, context.allocator)
+			d_gate_ih := make([]f64, batch * H3, context.allocator)
+			d_gate_hh := make([]f64, batch * H3, context.allocator)
 
 			defer {
-				delete(dx, context.temp_allocator); delete(dw_ih, context.temp_allocator)
-				delete(dw_hh, context.temp_allocator); delete(dbias, context.temp_allocator)
-				delete(h_t, context.temp_allocator); delete(h_prev, context.temp_allocator)
-				delete(h_next, context.temp_allocator); delete(x_t, context.temp_allocator)
-				delete(r_buf, context.temp_allocator); delete(z_buf, context.temp_allocator)
-				delete(n_buf, context.temp_allocator); delete(n_hh_buf, context.temp_allocator)
-				delete(dh_next, context.temp_allocator); delete(dh_prev, context.temp_allocator)
-				delete(
-					d_gate_ih,
-					context.temp_allocator,
-				); delete(d_gate_hh, context.temp_allocator)
+				delete(dx, context.allocator); delete(dw_ih, context.allocator)
+				delete(dw_hh, context.allocator); delete(dbias, context.allocator)
+				delete(h_t, context.allocator); delete(h_prev, context.allocator)
+				delete(h_next, context.allocator); delete(x_t, context.allocator)
+				delete(r_buf, context.allocator); delete(z_buf, context.allocator)
+				delete(n_buf, context.allocator); delete(n_hh_buf, context.allocator)
+				delete(dh_next, context.allocator); delete(dh_prev, context.allocator)
+				delete(d_gate_ih, context.allocator); delete(d_gate_hh, context.allocator)
 			}
 
 			for s := seq_len - 1; s >= 0; s -= 1 {
@@ -1345,9 +1364,9 @@ tensor_backward :: proc(root: ^Tensor) {
 				}
 
 				// Backprop through h_t = (1 - z) * n + z * h_prev
-				dz := make([]f64, batch * H, context.temp_allocator)
-				dn := make([]f64, batch * H, context.temp_allocator)
-				dr_from_n := make([]f64, batch * H, context.temp_allocator)
+				dz := make([]f64, batch * H, context.allocator)
+				dn := make([]f64, batch * H, context.allocator)
+				dr_from_n := make([]f64, batch * H, context.allocator)
 
 				for i in 0 ..< batch * H {
 					dh_prev[i] += dh_next[i] * z_buf[i]
@@ -1356,15 +1375,15 @@ tensor_backward :: proc(root: ^Tensor) {
 				}
 
 				// Backprop through n = tanh(n_ih + r * n_hh)
-				d_n_pre := make([]f64, batch * H, context.temp_allocator)
+				d_n_pre := make([]f64, batch * H, context.allocator)
 				for i in 0 ..< batch * H {
 					d_n_pre[i] = dn[i] * (1.0 - n_buf[i] * n_buf[i])
 					dr_from_n[i] = d_n_pre[i] * n_hh_buf[i]
 				}
 
 				// Backprop through sigmoid gates
-				dr_pre := make([]f64, batch * H, context.temp_allocator)
-				dz_pre := make([]f64, batch * H, context.temp_allocator)
+				dr_pre := make([]f64, batch * H, context.allocator)
+				dz_pre := make([]f64, batch * H, context.allocator)
 				for i in 0 ..< batch * H {
 					dr_pre[i] = dr_from_n[i] * r_buf[i] * (1.0 - r_buf[i])
 					dz_pre[i] = dz[i] * z_buf[i] * (1.0 - z_buf[i])
@@ -1387,9 +1406,9 @@ tensor_backward :: proc(root: ^Tensor) {
 					}
 				}
 
-				delete(dz, context.temp_allocator); delete(dn, context.temp_allocator)
-				delete(dr_from_n, context.temp_allocator); delete(d_n_pre, context.temp_allocator)
-				delete(dr_pre, context.temp_allocator); delete(dz_pre, context.temp_allocator)
+				delete(dz, context.allocator); delete(dn, context.allocator)
+				delete(dr_from_n, context.allocator); delete(d_n_pre, context.allocator)
+				delete(dr_pre, context.allocator); delete(dz_pre, context.allocator)
 
 				for b in 0 ..< batch {
 					for i in 0 ..< H3 {dbias[i] += d_gate_ih[b * H3 + i]}
@@ -1473,49 +1492,46 @@ tensor_backward :: proc(root: ^Tensor) {
 			H := hidden_size
 			H4 := 4 * H
 
-			dx := make([]f64, len(x_in.data.data), context.temp_allocator)
-			dw_ih := make([]f64, len(w_ih_in.data.data), context.temp_allocator)
-			dw_hh := make([]f64, len(w_hh_in.data.data), context.temp_allocator)
-			dbias := make([]f64, len(bias_in.data.data), context.temp_allocator)
+			dx := make([]f64, len(x_in.data.data), context.allocator)
+			dw_ih := make([]f64, len(w_ih_in.data.data), context.allocator)
+			dw_hh := make([]f64, len(w_hh_in.data.data), context.allocator)
+			dbias := make([]f64, len(bias_in.data.data), context.allocator)
 
-			h_t := make([]f64, batch * H, context.temp_allocator)
-			c_t := make([]f64, batch * H, context.temp_allocator)
+			h_t := make([]f64, batch * H, context.allocator)
+			c_t := make([]f64, batch * H, context.allocator)
 			copy(h_t, h_0_in.data.data)
 			copy(c_t, c_0_in.data.data)
 
-			h_prev := make([]f64, batch * H, context.temp_allocator)
-			c_prev := make([]f64, batch * H, context.temp_allocator)
-			h_next := make([]f64, batch * H, context.temp_allocator)
-			c_next := make([]f64, batch * H, context.temp_allocator)
-			x_t := make([]f64, batch * in_size, context.temp_allocator)
+			h_prev := make([]f64, batch * H, context.allocator)
+			c_prev := make([]f64, batch * H, context.allocator)
+			h_next := make([]f64, batch * H, context.allocator)
+			c_next := make([]f64, batch * H, context.allocator)
+			x_t := make([]f64, batch * in_size, context.allocator)
 
-			i_buf := make([]f64, batch * H, context.temp_allocator)
-			f_buf := make([]f64, batch * H, context.temp_allocator)
-			g_buf := make([]f64, batch * H, context.temp_allocator)
-			o_buf := make([]f64, batch * H, context.temp_allocator)
+			i_buf := make([]f64, batch * H, context.allocator)
+			f_buf := make([]f64, batch * H, context.allocator)
+			g_buf := make([]f64, batch * H, context.allocator)
+			o_buf := make([]f64, batch * H, context.allocator)
 
-			dh_next := make([]f64, batch * H, context.temp_allocator)
-			dc_next := make([]f64, batch * H, context.temp_allocator)
-			dh_prev := make([]f64, batch * H, context.temp_allocator)
-			dc_prev := make([]f64, batch * H, context.temp_allocator)
-			d_gate_ih := make([]f64, batch * H4, context.temp_allocator)
-			d_gate_hh := make([]f64, batch * H4, context.temp_allocator)
+			dh_next := make([]f64, batch * H, context.allocator)
+			dc_next := make([]f64, batch * H, context.allocator)
+			dh_prev := make([]f64, batch * H, context.allocator)
+			dc_prev := make([]f64, batch * H, context.allocator)
+			d_gate_ih := make([]f64, batch * H4, context.allocator)
+			d_gate_hh := make([]f64, batch * H4, context.allocator)
 
 			defer {
-				delete(dx, context.temp_allocator); delete(dw_ih, context.temp_allocator)
-				delete(dw_hh, context.temp_allocator); delete(dbias, context.temp_allocator)
-				delete(h_t, context.temp_allocator); delete(c_t, context.temp_allocator)
-				delete(h_prev, context.temp_allocator); delete(c_prev, context.temp_allocator)
-				delete(h_next, context.temp_allocator); delete(c_next, context.temp_allocator)
-				delete(x_t, context.temp_allocator)
-				delete(i_buf, context.temp_allocator); delete(f_buf, context.temp_allocator)
-				delete(g_buf, context.temp_allocator); delete(o_buf, context.temp_allocator)
-				delete(dh_next, context.temp_allocator); delete(dc_next, context.temp_allocator)
-				delete(dh_prev, context.temp_allocator); delete(dc_prev, context.temp_allocator)
-				delete(
-					d_gate_ih,
-					context.temp_allocator,
-				); delete(d_gate_hh, context.temp_allocator)
+				delete(dx, context.allocator); delete(dw_ih, context.allocator)
+				delete(dw_hh, context.allocator); delete(dbias, context.allocator)
+				delete(h_t, context.allocator); delete(c_t, context.allocator)
+				delete(h_prev, context.allocator); delete(c_prev, context.allocator)
+				delete(h_next, context.allocator); delete(c_next, context.allocator)
+				delete(x_t, context.allocator)
+				delete(i_buf, context.allocator); delete(f_buf, context.allocator)
+				delete(g_buf, context.allocator); delete(o_buf, context.allocator)
+				delete(dh_next, context.allocator); delete(dc_next, context.allocator)
+				delete(dh_prev, context.allocator); delete(dc_prev, context.allocator)
+				delete(d_gate_ih, context.allocator); delete(d_gate_hh, context.allocator)
 			}
 
 			for s := seq_len - 1; s >= 0; s -= 1 {
@@ -1545,7 +1561,7 @@ tensor_backward :: proc(root: ^Tensor) {
 					batch,
 					in_size,
 					hidden_size,
-					context.temp_allocator,
+					context.allocator,
 				)
 				copy(h_t, h_next)
 				copy(c_t, c_next)
@@ -1560,9 +1576,9 @@ tensor_backward :: proc(root: ^Tensor) {
 				}
 
 				// Backprop through h_t = o * tanh(c_t)
-				tanh_c := make([]f64, batch * H, context.temp_allocator)
-				dov := make([]f64, batch * H, context.temp_allocator)
-				dc := make([]f64, batch * H, context.temp_allocator)
+				tanh_c := make([]f64, batch * H, context.allocator)
+				dov := make([]f64, batch * H, context.allocator)
+				dc := make([]f64, batch * H, context.allocator)
 
 				for i in 0 ..< batch * H {
 					tanh_c[i] = math.tanh(c_t[i])
@@ -1571,9 +1587,9 @@ tensor_backward :: proc(root: ^Tensor) {
 				}
 
 				// Backprop through c_t = f * c_prev + i * g
-				df := make([]f64, batch * H, context.temp_allocator)
-				di := make([]f64, batch * H, context.temp_allocator)
-				dg := make([]f64, batch * H, context.temp_allocator)
+				df := make([]f64, batch * H, context.allocator)
+				di := make([]f64, batch * H, context.allocator)
+				dg := make([]f64, batch * H, context.allocator)
 
 				for i in 0 ..< batch * H {
 					df[i] = dc[i] * c_prev[i]
@@ -1583,10 +1599,10 @@ tensor_backward :: proc(root: ^Tensor) {
 				}
 
 				// Backprop through activation functions
-				di_pre := make([]f64, batch * H, context.temp_allocator)
-				df_pre := make([]f64, batch * H, context.temp_allocator)
-				dg_pre := make([]f64, batch * H, context.temp_allocator)
-				do_pre := make([]f64, batch * H, context.temp_allocator)
+				di_pre := make([]f64, batch * H, context.allocator)
+				df_pre := make([]f64, batch * H, context.allocator)
+				dg_pre := make([]f64, batch * H, context.allocator)
+				do_pre := make([]f64, batch * H, context.allocator)
 
 				for i in 0 ..< batch * H {
 					di_pre[i] = di[i] * i_buf[i] * (1.0 - i_buf[i])
@@ -1615,13 +1631,13 @@ tensor_backward :: proc(root: ^Tensor) {
 					}
 				}
 
-				delete(tanh_c, context.temp_allocator)
-				delete(dov, context.temp_allocator)
-				delete(dc, context.temp_allocator)
-				delete(df, context.temp_allocator)
-				delete(di, context.temp_allocator); delete(dg, context.temp_allocator)
-				delete(di_pre, context.temp_allocator); delete(df_pre, context.temp_allocator)
-				delete(dg_pre, context.temp_allocator); delete(do_pre, context.temp_allocator)
+				delete(tanh_c, context.allocator)
+				delete(dov, context.allocator)
+				delete(dc, context.allocator)
+				delete(df, context.allocator)
+				delete(di, context.allocator); delete(dg, context.allocator)
+				delete(di_pre, context.allocator); delete(df_pre, context.allocator)
+				delete(dg_pre, context.allocator); delete(do_pre, context.allocator)
 
 				// Accumulate bias gradients
 				for b in 0 ..< batch {
@@ -1650,18 +1666,18 @@ tensor_backward :: proc(root: ^Tensor) {
 					data = d_gate_hh,
 				}
 
-				x_t_t := _matrix_transpose(x_mat, context.temp_allocator)
-				dw_ih_res := l.matmul_dyn_simd(&x_t_t, &d_gate_ih_mat, context.temp_allocator)
+				x_t_t := _matrix_transpose(x_mat, context.allocator)
+				dw_ih_res := l.matmul_dyn_simd(&x_t_t, &d_gate_ih_mat, context.allocator)
 				for i in 0 ..< len(dw_ih) {dw_ih[i] += dw_ih_res.data[i]}
 				l.matrix_free(&x_t_t); l.matrix_free(&dw_ih_res)
 
-				h_prev_t := _matrix_transpose(h_prev_mat_bwd, context.temp_allocator)
-				dw_hh_res := l.matmul_dyn_simd(&h_prev_t, &d_gate_hh_mat, context.temp_allocator)
+				h_prev_t := _matrix_transpose(h_prev_mat_bwd, context.allocator)
+				dw_hh_res := l.matmul_dyn_simd(&h_prev_t, &d_gate_hh_mat, context.allocator)
 				for i in 0 ..< len(dw_hh) {dw_hh[i] += dw_hh_res.data[i]}
 				l.matrix_free(&h_prev_t); l.matrix_free(&dw_hh_res)
 
-				w_ih_t := _matrix_transpose(w_ih_in.data, context.temp_allocator)
-				dx_t_res := l.matmul_dyn_simd(&d_gate_ih_mat, &w_ih_t, context.temp_allocator)
+				w_ih_t := _matrix_transpose(w_ih_in.data, context.allocator)
+				dx_t_res := l.matmul_dyn_simd(&d_gate_ih_mat, &w_ih_t, context.allocator)
 				for b in 0 ..< batch {
 					src := b * in_size
 					dst := b * seq_len * in_size + s * in_size
@@ -1669,8 +1685,8 @@ tensor_backward :: proc(root: ^Tensor) {
 				}
 				l.matrix_free(&w_ih_t); l.matrix_free(&dx_t_res)
 
-				w_hh_t := _matrix_transpose(w_hh_in.data, context.temp_allocator)
-				dh_prev_res := l.matmul_dyn_simd(&d_gate_hh_mat, &w_hh_t, context.temp_allocator)
+				w_hh_t := _matrix_transpose(w_hh_in.data, context.allocator)
+				dh_prev_res := l.matmul_dyn_simd(&d_gate_hh_mat, &w_hh_t, context.allocator)
 				for i in 0 ..< len(dh_prev) {dh_prev[i] = dh_prev_res.data[i]}
 				l.matrix_free(&w_hh_t); l.matrix_free(&dh_prev_res)
 
@@ -1801,10 +1817,10 @@ tensor_backward :: proc(root: ^Tensor) {
 			eps := 1e-5
 
 			// ✅ Temporary contiguous buffers for SIMD operations
-			x_buf := make([]f64, channel_size, context.temp_allocator)
-			dout_buf := make([]f64, channel_size, context.temp_allocator)
-			defer delete(x_buf, context.temp_allocator)
-			defer delete(dout_buf, context.temp_allocator)
+			x_buf := make([]f64, channel_size, context.allocator)
+			dout_buf := make([]f64, channel_size, context.allocator)
+			defer delete(x_buf, context.allocator)
+			defer delete(dout_buf, context.allocator)
 
 			for c in 0 ..< C {
 				// 1. Extract channel data and grad to contiguous buffers
@@ -1823,11 +1839,11 @@ tensor_backward :: proc(root: ^Tensor) {
 				mean := l.sum_simd(x_buf) / N_hw
 
 				// 3. Compute variance (SIMD)
-				mean_vec := make([]f64, channel_size, context.temp_allocator)
+				mean_vec := make([]f64, channel_size, context.allocator)
 				for i in 0 ..< channel_size {mean_vec[i] = mean}
-				centered := make([]f64, channel_size, context.temp_allocator)
+				centered := make([]f64, channel_size, context.allocator)
 				l.vec_sub_simd(x_buf, mean_vec, centered)
-				delete(mean_vec, context.temp_allocator)
+				delete(mean_vec, context.allocator)
 
 				var := l.dot_simd(centered, centered) / N_hw
 				std := math.sqrt(var + eps)
@@ -1835,11 +1851,11 @@ tensor_backward :: proc(root: ^Tensor) {
 				gamma := weight_in.data.data[c]
 
 				// 4. Compute x_hat (SIMD mul)
-				x_hat := make([]f64, channel_size, context.temp_allocator)
-				inv_std_vec := make([]f64, channel_size, context.temp_allocator)
+				x_hat := make([]f64, channel_size, context.allocator)
+				inv_std_vec := make([]f64, channel_size, context.allocator)
 				for i in 0 ..< channel_size {inv_std_vec[i] = inv_std}
 				l.vec_mul_simd(centered, inv_std_vec, x_hat)
-				delete(inv_std_vec, context.temp_allocator)
+				delete(inv_std_vec, context.allocator)
 
 				// 5. Compute weight gradient: dgamma = dot(dout, x_hat) (SIMD)
 				if weight_in.requires_grad && len(weight_in.grad.data) > 0 {
@@ -1856,11 +1872,11 @@ tensor_backward :: proc(root: ^Tensor) {
 				// 7. Compute input gradient (SIMD)
 				if input_in.requires_grad && len(input_in.grad.data) > 0 {
 					// dout_gamma = dout * gamma (SIMD)
-					dout_gamma := make([]f64, channel_size, context.temp_allocator)
-					gamma_vec := make([]f64, channel_size, context.temp_allocator)
+					dout_gamma := make([]f64, channel_size, context.allocator)
+					gamma_vec := make([]f64, channel_size, context.allocator)
 					for i in 0 ..< channel_size {gamma_vec[i] = gamma}
 					l.vec_mul_simd(dout_buf, gamma_vec, dout_gamma)
-					delete(gamma_vec, context.temp_allocator)
+					delete(gamma_vec, context.allocator)
 
 					// Precompute sums (SIMD)
 					sum_dout_gamma := l.sum_simd(dout_gamma)
@@ -1869,37 +1885,37 @@ tensor_backward :: proc(root: ^Tensor) {
 					// dx = (1 / (N_hw * std)) * (N_hw * dout_gamma - sum_dout_gamma - x_hat * sum_dout_gamma_x_hat)
 
 					// term1 = N_hw * dout_gamma (SIMD)
-					term1 := make([]f64, channel_size, context.temp_allocator)
-					n_hw_vec := make([]f64, channel_size, context.temp_allocator)
+					term1 := make([]f64, channel_size, context.allocator)
+					n_hw_vec := make([]f64, channel_size, context.allocator)
 					for i in 0 ..< channel_size {n_hw_vec[i] = N_hw}
 					l.vec_mul_simd(dout_gamma, n_hw_vec, term1)
-					delete(n_hw_vec, context.temp_allocator)
-					delete(dout_gamma, context.temp_allocator)
+					delete(n_hw_vec, context.allocator)
+					delete(dout_gamma, context.allocator)
 
 					// term2 = x_hat * sum_dout_gamma_x_hat (SIMD)
-					term2 := make([]f64, channel_size, context.temp_allocator)
-					s2_vec := make([]f64, channel_size, context.temp_allocator)
+					term2 := make([]f64, channel_size, context.allocator)
+					s2_vec := make([]f64, channel_size, context.allocator)
 					for i in 0 ..< channel_size {s2_vec[i] = sum_dout_gamma_x_hat}
 					l.vec_mul_simd(x_hat, s2_vec, term2)
-					delete(s2_vec, context.temp_allocator)
-					delete(x_hat, context.temp_allocator)
+					delete(s2_vec, context.allocator)
+					delete(x_hat, context.allocator)
 
 					// combined = term1 - sum_dout_gamma (SIMD)
-					sum_dg_vec := make([]f64, channel_size, context.temp_allocator)
+					sum_dg_vec := make([]f64, channel_size, context.allocator)
 					for i in 0 ..< channel_size {sum_dg_vec[i] = sum_dout_gamma}
 					l.vec_sub_simd(term1, sum_dg_vec, term1)
-					delete(sum_dg_vec, context.temp_allocator)
+					delete(sum_dg_vec, context.allocator)
 
 					// combined = combined - term2 (SIMD)
 					l.vec_sub_simd(term1, term2, term1)
-					delete(term2, context.temp_allocator)
+					delete(term2, context.allocator)
 
 					// dx = combined / (N_hw * std) (SIMD)
 					inv_denom := 1.0 / (N_hw * std)
-					inv_denom_vec := make([]f64, channel_size, context.temp_allocator)
+					inv_denom_vec := make([]f64, channel_size, context.allocator)
 					for i in 0 ..< channel_size {inv_denom_vec[i] = inv_denom}
 					l.vec_mul_simd(term1, inv_denom_vec, term1)
-					delete(inv_denom_vec, context.temp_allocator)
+					delete(inv_denom_vec, context.allocator)
 
 					// Write dx back to input gradient (de-interleave)
 					for n in 0 ..< N {
@@ -1911,12 +1927,12 @@ tensor_backward :: proc(root: ^Tensor) {
 							}
 						}
 					}
-					delete(term1, context.temp_allocator)
+					delete(term1, context.allocator)
 				} else {
-					delete(x_hat, context.temp_allocator)
+					delete(x_hat, context.allocator)
 				}
 
-				delete(centered, context.temp_allocator)
+				delete(centered, context.allocator)
 			}
 		case .RNN:
 			x_in := node.inputs[0]
@@ -1932,41 +1948,41 @@ tensor_backward :: proc(root: ^Tensor) {
 			in_size := x_in.shape[2]
 			hidden_size := w_ih_in.shape[1]
 
-			dx := make([]f64, len(x_in.data.data), context.temp_allocator)
-			dh_0 := make([]f64, len(h_0_in.data.data), context.temp_allocator) // ✅ FIX: typo corrected
-			dw_ih := make([]f64, len(w_ih_in.data.data), context.temp_allocator)
-			dw_hh := make([]f64, len(w_hh_in.data.data), context.temp_allocator)
-			dbias := make([]f64, len(bias_in.data.data), context.temp_allocator)
+			dx := make([]f64, len(x_in.data.data), context.allocator)
+			dh_0 := make([]f64, len(h_0_in.data.data), context.allocator) // ✅ FIX: typo corrected
+			dw_ih := make([]f64, len(w_ih_in.data.data), context.allocator)
+			dw_hh := make([]f64, len(w_hh_in.data.data), context.allocator)
+			dbias := make([]f64, len(bias_in.data.data), context.allocator)
 
-			h_t := make([]f64, batch * hidden_size, context.temp_allocator)
+			h_t := make([]f64, batch * hidden_size, context.allocator)
 			copy(h_t, h_0_in.data.data)
-			h_prev := make([]f64, batch * hidden_size, context.temp_allocator)
-			h_next := make([]f64, batch * hidden_size, context.temp_allocator)
-			x_t := make([]f64, batch * in_size, context.temp_allocator)
+			h_prev := make([]f64, batch * hidden_size, context.allocator)
+			h_next := make([]f64, batch * hidden_size, context.allocator)
+			x_t := make([]f64, batch * in_size, context.allocator)
 
-			dh_next := make([]f64, batch * hidden_size, context.temp_allocator)
-			dx_t := make([]f64, batch * in_size, context.temp_allocator)
-			dh_prev := make([]f64, batch * hidden_size, context.temp_allocator)
-			dw_ih_step := make([]f64, in_size * hidden_size, context.temp_allocator)
-			dw_hh_step := make([]f64, hidden_size * hidden_size, context.temp_allocator)
-			dbias_step := make([]f64, hidden_size, context.temp_allocator)
+			dh_next := make([]f64, batch * hidden_size, context.allocator)
+			dx_t := make([]f64, batch * in_size, context.allocator)
+			dh_prev := make([]f64, batch * hidden_size, context.allocator)
+			dw_ih_step := make([]f64, in_size * hidden_size, context.allocator)
+			dw_hh_step := make([]f64, hidden_size * hidden_size, context.allocator)
+			dbias_step := make([]f64, hidden_size, context.allocator)
 
 			defer {
-				delete(dx, context.temp_allocator)
-				delete(dh_0, context.temp_allocator)
-				delete(dw_ih, context.temp_allocator)
-				delete(dw_hh, context.temp_allocator)
-				delete(dbias, context.temp_allocator)
-				delete(h_t, context.temp_allocator)
-				delete(h_prev, context.temp_allocator)
-				delete(h_next, context.temp_allocator)
-				delete(x_t, context.temp_allocator)
-				delete(dh_next, context.temp_allocator)
-				delete(dx_t, context.temp_allocator)
-				delete(dh_prev, context.temp_allocator)
-				delete(dw_ih_step, context.temp_allocator)
-				delete(dw_hh_step, context.temp_allocator)
-				delete(dbias_step, context.temp_allocator)
+				delete(dx, context.allocator)
+				delete(dh_0, context.allocator)
+				delete(dw_ih, context.allocator)
+				delete(dw_hh, context.allocator)
+				delete(dbias, context.allocator)
+				delete(h_t, context.allocator)
+				delete(h_prev, context.allocator)
+				delete(h_next, context.allocator)
+				delete(x_t, context.allocator)
+				delete(dh_next, context.allocator)
+				delete(dx_t, context.allocator)
+				delete(dh_prev, context.allocator)
+				delete(dw_ih_step, context.allocator)
+				delete(dw_hh_step, context.allocator)
+				delete(dbias_step, context.allocator)
 			}
 
 			for s := seq_len - 1; s >= 0; s -= 1 {
@@ -1986,7 +2002,7 @@ tensor_backward :: proc(root: ^Tensor) {
 					batch,
 					in_size,
 					hidden_size,
-					context.temp_allocator,
+					context.allocator,
 				)
 				copy(h_t, h_next)
 
@@ -2026,20 +2042,20 @@ tensor_backward :: proc(root: ^Tensor) {
 					data = dh_next,
 				}
 
-				x_t_t := _matrix_transpose(x_mat, context.temp_allocator)
-				dw_ih_res := l.matmul_dyn_simd(&x_t_t, &dh_mat, context.temp_allocator)
+				x_t_t := _matrix_transpose(x_mat, context.allocator)
+				dw_ih_res := l.matmul_dyn_simd(&x_t_t, &dh_mat, context.allocator)
 				for i in 0 ..< len(dw_ih) {dw_ih[i] += dw_ih_res.data[i]}
 				l.matrix_free(&x_t_t)
 				l.matrix_free(&dw_ih_res)
 
-				h_prev_t := _matrix_transpose(h_prev_mat, context.temp_allocator)
-				dw_hh_res := l.matmul_dyn_simd(&h_prev_t, &dh_mat, context.temp_allocator)
+				h_prev_t := _matrix_transpose(h_prev_mat, context.allocator)
+				dw_hh_res := l.matmul_dyn_simd(&h_prev_t, &dh_mat, context.allocator)
 				for i in 0 ..< len(dw_hh) {dw_hh[i] += dw_hh_res.data[i]}
 				l.matrix_free(&h_prev_t)
 				l.matrix_free(&dw_hh_res)
 
-				w_ih_t := _matrix_transpose(w_ih_in.data, context.temp_allocator)
-				dx_t_res := l.matmul_dyn_simd(&dh_mat, &w_ih_t, context.temp_allocator)
+				w_ih_t := _matrix_transpose(w_ih_in.data, context.allocator)
+				dx_t_res := l.matmul_dyn_simd(&dh_mat, &w_ih_t, context.allocator)
 				for b in 0 ..< batch {
 					src := b * in_size
 					dst := b * seq_len * in_size + s * in_size
@@ -2050,8 +2066,8 @@ tensor_backward :: proc(root: ^Tensor) {
 				l.matrix_free(&w_ih_t)
 				l.matrix_free(&dx_t_res)
 
-				w_hh_t := _matrix_transpose(w_hh_in.data, context.temp_allocator)
-				dh_prev_res := l.matmul_dyn_simd(&dh_mat, &w_hh_t, context.temp_allocator)
+				w_hh_t := _matrix_transpose(w_hh_in.data, context.allocator)
+				dh_prev_res := l.matmul_dyn_simd(&dh_mat, &w_hh_t, context.allocator)
 				for i in 0 ..< len(dh_prev) {
 					dh_prev[i] = dh_prev_res.data[i]
 				}
@@ -2621,14 +2637,13 @@ tensor_free_graph :: proc(root: ^Tensor) {
 	visited := make(map[^Tensor]bool)
 	defer delete(visited)
 
-	// Use context.allocator for the nodes array
 	nodes := make([dynamic]^Tensor, 0, context.allocator)
 	_collect_graph_nodes(root, &nodes, &visited)
 
-	// Free in reverse order
 	for i := len(nodes) - 1; i >= 0; i -= 1 {
 		node := nodes[i]
-		if node.op != .None {
+		// ✅ FIX: Free nodes that are either intermediate OR owned by the graph
+		if node.op != .None || node.owned_by_graph {
 			if node.data.data != nil {l.matrix_free(&node.data)}
 			if node.grad.data != nil {l.matrix_free(&node.grad)}
 			delete(node.inputs)
@@ -2638,7 +2653,6 @@ tensor_free_graph :: proc(root: ^Tensor) {
 		}
 	}
 
-	// ✅ FIX: Dynamic arrays don't need allocator argument
 	delete(nodes)
 }
 
@@ -2821,14 +2835,14 @@ tensor_batch_norm_2d :: proc(
 	out_data := l.matrix_new(f64, 1, N * C * H * W, input.allocator)
 
 	// ✅ Allocate buffers ONCE outside the loop for reuse
-	channel_buf := make([]f64, channel_size, context.temp_allocator)
-	mean_vec := make([]f64, channel_size, context.temp_allocator)
-	centered := make([]f64, channel_size, context.temp_allocator)
-	inv_std_vec := make([]f64, channel_size, context.temp_allocator)
-	normalized := make([]f64, channel_size, context.temp_allocator)
-	gamma_vec := make([]f64, channel_size, context.temp_allocator)
-	beta_vec := make([]f64, channel_size, context.temp_allocator)
-	scaled := make([]f64, channel_size, context.temp_allocator)
+	channel_buf := make([]f64, channel_size, context.allocator)
+	mean_vec := make([]f64, channel_size, context.allocator)
+	centered := make([]f64, channel_size, context.allocator)
+	inv_std_vec := make([]f64, channel_size, context.allocator)
+	normalized := make([]f64, channel_size, context.allocator)
+	gamma_vec := make([]f64, channel_size, context.allocator)
+	beta_vec := make([]f64, channel_size, context.allocator)
+	scaled := make([]f64, channel_size, context.allocator)
 
 	for c in 0 ..< C {
 		// 1. Extract channel to contiguous buffer
@@ -2893,14 +2907,14 @@ tensor_batch_norm_2d :: proc(
 	}
 
 	// ✅ CRITICAL: Free all temporary buffers
-	delete(channel_buf, context.temp_allocator)
-	delete(mean_vec, context.temp_allocator)
-	delete(centered, context.temp_allocator)
-	delete(inv_std_vec, context.temp_allocator)
-	delete(normalized, context.temp_allocator)
-	delete(gamma_vec, context.temp_allocator)
-	delete(beta_vec, context.temp_allocator)
-	delete(scaled, context.temp_allocator)
+	delete(channel_buf, context.allocator)
+	delete(mean_vec, context.allocator)
+	delete(centered, context.allocator)
+	delete(inv_std_vec, context.allocator)
+	delete(normalized, context.allocator)
+	delete(gamma_vec, context.allocator)
+	delete(beta_vec, context.allocator)
+	delete(scaled, context.allocator)
 
 	out := tensor_new(out_data, input.requires_grad || weight.requires_grad, input.allocator)
 	out.shape = input.shape
@@ -2988,15 +3002,15 @@ tensor_rnn :: proc(
 
 	out_data := l.matrix_new(f64, 1, batch * seq_len * hidden_size, x.allocator)
 
-	h_t := make([]f64, batch * hidden_size, context.temp_allocator)
+	h_t := make([]f64, batch * hidden_size, context.allocator)
 	copy(h_t, h_0.data.data)
 
-	h_next := make([]f64, batch * hidden_size, context.temp_allocator)
-	defer delete(h_t, context.temp_allocator)
-	defer delete(h_next, context.temp_allocator)
+	h_next := make([]f64, batch * hidden_size, context.allocator)
+	defer delete(h_t, context.allocator)
+	defer delete(h_next, context.allocator)
 
 	for s in 0 ..< seq_len {
-		x_t := make([]f64, batch * in_size, context.temp_allocator)
+		x_t := make([]f64, batch * in_size, context.allocator)
 		for b in 0 ..< batch {
 			src := b * seq_len * in_size + s * in_size
 			dst := b * in_size
@@ -3013,7 +3027,7 @@ tensor_rnn :: proc(
 			batch,
 			in_size,
 			hidden_size,
-			context.temp_allocator,
+			context.allocator,
 		)
 
 		for b in 0 ..< batch {
@@ -3023,7 +3037,7 @@ tensor_rnn :: proc(
 			copy(h_t[src:src + hidden_size], h_next[src:src + hidden_size])
 		}
 
-		delete(x_t, context.temp_allocator)
+		delete(x_t, context.allocator)
 	}
 
 	out := tensor_new(out_data, x.requires_grad || w_ih.requires_grad, x.allocator)
@@ -3136,14 +3150,14 @@ tensor_gru :: proc(
 
 	out_data := l.matrix_new(f64, 1, batch * seq_len * hidden_size, x.allocator)
 
-	h_t := make([]f64, batch * hidden_size, context.temp_allocator)
+	h_t := make([]f64, batch * hidden_size, context.allocator)
 	copy(h_t, h_0.data.data)
-	h_next := make([]f64, batch * hidden_size, context.temp_allocator)
-	defer delete(h_t, context.temp_allocator)
-	defer delete(h_next, context.temp_allocator)
+	h_next := make([]f64, batch * hidden_size, context.allocator)
+	defer delete(h_t, context.allocator)
+	defer delete(h_next, context.allocator)
 
 	for s in 0 ..< seq_len {
-		x_t := make([]f64, batch * in_size, context.temp_allocator)
+		x_t := make([]f64, batch * in_size, context.allocator)
 		for b in 0 ..< batch {
 			src := b * seq_len * in_size + s * in_size
 			dst := b * in_size
@@ -3172,7 +3186,7 @@ tensor_gru :: proc(
 			copy(out_data.data[dst:dst + hidden_size], h_next[src:src + hidden_size])
 			copy(h_t[src:src + hidden_size], h_next[src:src + hidden_size])
 		}
-		delete(x_t, context.temp_allocator)
+		delete(x_t, context.allocator)
 	}
 
 	out := tensor_new(out_data, x.requires_grad || w_ih.requires_grad, x.allocator)
@@ -3295,22 +3309,22 @@ tensor_lstm :: proc(
 
 	out_data := l.matrix_new(f64, 1, batch * seq_len * hidden_size, x.allocator)
 
-	h_t := make([]f64, batch * hidden_size, context.temp_allocator)
-	c_t := make([]f64, batch * hidden_size, context.temp_allocator)
+	h_t := make([]f64, batch * hidden_size, context.allocator)
+	c_t := make([]f64, batch * hidden_size, context.allocator)
 	copy(h_t, h_0.data.data)
 	copy(c_t, c_0.data.data)
 
-	h_next := make([]f64, batch * hidden_size, context.temp_allocator)
-	c_next := make([]f64, batch * hidden_size, context.temp_allocator)
+	h_next := make([]f64, batch * hidden_size, context.allocator)
+	c_next := make([]f64, batch * hidden_size, context.allocator)
 	defer {
-		delete(h_t, context.temp_allocator)
-		delete(c_t, context.temp_allocator)
-		delete(h_next, context.temp_allocator)
-		delete(c_next, context.temp_allocator)
+		delete(h_t, context.allocator)
+		delete(c_t, context.allocator)
+		delete(h_next, context.allocator)
+		delete(c_next, context.allocator)
 	}
 
 	for s in 0 ..< seq_len {
-		x_t := make([]f64, batch * in_size, context.temp_allocator)
+		x_t := make([]f64, batch * in_size, context.allocator)
 		for b in 0 ..< batch {
 			src := b * seq_len * in_size + s * in_size
 			dst := b * in_size
@@ -3333,7 +3347,7 @@ tensor_lstm :: proc(
 			batch,
 			in_size,
 			hidden_size,
-			context.temp_allocator,
+			context.allocator,
 		)
 
 		for b in 0 ..< batch {
@@ -3343,7 +3357,7 @@ tensor_lstm :: proc(
 			copy(h_t[src:src + hidden_size], h_next[src:src + hidden_size])
 			copy(c_t[src:src + hidden_size], c_next[src:src + hidden_size])
 		}
-		delete(x_t, context.temp_allocator)
+		delete(x_t, context.allocator)
 	}
 
 	out := tensor_new(out_data, x.requires_grad || w_ih.requires_grad, x.allocator)
@@ -3436,8 +3450,8 @@ tensor_scaled_dot_product_attention :: proc(Q: ^Tensor, K: ^Tensor, V: ^Tensor) 
 		}
 
 		// 1. S_b = Q_b @ K_b^T
-		k_b_t := _matrix_transpose(k_b, context.temp_allocator)
-		s_b := l.matmul_dyn_simd(&q_b, &k_b_t, context.temp_allocator)
+		k_b_t := _matrix_transpose(k_b, context.allocator)
+		s_b := l.matmul_dyn_simd(&q_b, &k_b_t, context.allocator)
 		l.matrix_free(&k_b_t)
 
 		// 2. Scale and Softmax to get P_b
@@ -3473,7 +3487,7 @@ tensor_scaled_dot_product_attention :: proc(Q: ^Tensor, K: ^Tensor, V: ^Tensor) 
 		}
 
 		// 3. O_b = P_b @ V_b
-		o_b := l.matmul_dyn_simd(&p_b, &v_b, context.temp_allocator)
+		o_b := l.matmul_dyn_simd(&p_b, &v_b, context.allocator)
 		copy(out_data.data[b * seq_q * d_v:(b + 1) * seq_q * d_v], o_b.data)
 
 		l.matrix_free(&o_b)
@@ -3599,13 +3613,13 @@ tensor_layer_norm :: proc(
 	out_data := l.matrix_new(f64, input.data.rows, input.data.cols, input.allocator)
 
 	// Temporary buffers for SIMD operations (reused across rows)
-	centered := make([]f64, d_model, context.temp_allocator)
-	x_hat := make([]f64, d_model, context.temp_allocator)
-	inv_std_vec := make([]f64, d_model, context.temp_allocator)
+	centered := make([]f64, d_model, context.allocator)
+	x_hat := make([]f64, d_model, context.allocator)
+	inv_std_vec := make([]f64, d_model, context.allocator)
 	defer {
-		delete(centered, context.temp_allocator)
-		delete(x_hat, context.temp_allocator)
-		delete(inv_std_vec, context.temp_allocator)
+		delete(centered, context.allocator)
+		delete(x_hat, context.allocator)
+		delete(inv_std_vec, context.allocator)
 	}
 
 	for i in 0 ..< N {
@@ -3692,8 +3706,8 @@ tensor_masked_scaled_dot_product_attention :: proc(
 		}
 
 		// 1. S_b = Q_b @ K_b^T
-		k_b_t := _matrix_transpose(k_b, context.temp_allocator)
-		s_b := l.matmul_dyn_simd(&q_b, &k_b_t, context.temp_allocator)
+		k_b_t := _matrix_transpose(k_b, context.allocator)
+		s_b := l.matmul_dyn_simd(&q_b, &k_b_t, context.allocator)
 		l.matrix_free(&k_b_t)
 
 		// 2. Scale and apply mask
@@ -3738,7 +3752,7 @@ tensor_masked_scaled_dot_product_attention :: proc(
 		}
 
 		// 4. O_b = P_b @ V_b
-		o_b := l.matmul_dyn_simd(&p_b, &v_b, context.temp_allocator)
+		o_b := l.matmul_dyn_simd(&p_b, &v_b, context.allocator)
 		copy(out_data.data[b * seq_q * d_v:(b + 1) * seq_q * d_v], o_b.data)
 
 		l.matrix_free(&o_b)

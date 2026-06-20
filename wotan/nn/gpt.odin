@@ -171,7 +171,7 @@ gpt_model_forward :: proc(
 	}
 	pos_ids := t.tensor_new(pos_ids_data, false, model.allocator)
 	pos_ids.shape = [4]int{batch, seq_len, 1, 1}
-	pos_ids.op = .Constant
+	pos_ids.owned_by_graph = true // ✅ Mark for automatic cleanup
 
 	pos_emb := embedding_layer_forward(&model.pos_emb, pos_ids)
 
@@ -180,7 +180,7 @@ gpt_model_forward :: proc(
 
 	// Pass through GPT blocks
 	for i in 0 ..< len(model.blocks) {
-		x = gpt_block_forward(&model.blocks[i], x, mask, training) // ✅ Pass training
+		x = gpt_block_forward(&model.blocks[i], x, mask, training)
 	}
 
 	// Final LayerNorm
