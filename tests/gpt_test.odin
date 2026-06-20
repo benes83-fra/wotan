@@ -162,11 +162,19 @@ gpt_full_test :: proc(allocator: mem.Allocator) {
 		// ✅ ADD: Periodic validation of model parameters
 		if epoch % 100 == 0 {
 			// Check a few key parameters
-			t.tensor_validate(model.token_emb.weight, fmt.aprintf("token_emb at epoch %d", epoch))
-			if len(model.blocks) > 0 {
+			for i in 0 ..< len(model.blocks) {
+				block := &model.blocks[i]
 				t.tensor_validate(
-					model.blocks[0].mha.q_proj.weights,
-					fmt.aprintf("block0.q_proj at epoch %d", epoch),
+					block.mha.q_proj.weights,
+					fmt.aprintf("block[%d].mha.q_proj at epoch %d", i, epoch),
+				)
+				t.tensor_validate(
+					block.mha.k_proj.weights,
+					fmt.aprintf("block[%d].mha.k_proj at epoch %d", i, epoch),
+				)
+				t.tensor_validate(
+					block.mha.v_proj.weights,
+					fmt.aprintf("block[%d].mha.v_proj at epoch %d", i, epoch),
 				)
 			}
 		}

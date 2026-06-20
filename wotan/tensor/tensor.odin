@@ -764,6 +764,9 @@ tensor_backward :: proc(root: ^Tensor) {
 				v_b_t := _matrix_transpose(v_b, context.temp_allocator)
 				dP_b := l.matmul_dyn_simd(&dO_b, &v_b_t, context.temp_allocator)
 
+				// ✅ FIX: Free v_b_t immediately after use
+				l.matrix_free(&v_b_t)
+
 				// dS = P_b * (dP_b - sum(dP_b * P_b, dim=-1))
 				for i in 0 ..< seq_q {
 					row_start := i * seq_k
@@ -1007,13 +1010,13 @@ tensor_backward :: proc(root: ^Tensor) {
 			d_v := V_in.shape[2]
 			scale := 1.0 / math.sqrt(f64(d_k))
 
-			dQ := make([]f64, len(Q_in.data.data), context.temp_allocator)
-			dK := make([]f64, len(K_in.data.data), context.temp_allocator)
-			dV := make([]f64, len(V_in.data.data), context.temp_allocator)
+			dQ := make([]f64, len(Q_in.data.data), context.allocator)
+			dK := make([]f64, len(K_in.data.data), context.allocator)
+			dV := make([]f64, len(V_in.data.data), context.allocator)
 			defer {
-				delete(dQ, context.temp_allocator)
-				delete(dK, context.temp_allocator)
-				delete(dV, context.temp_allocator)
+				delete(dQ, context.allocator)
+				delete(dK, context.allocator)
+				delete(dV, context.allocator)
 			}
 
 			for b in 0 ..< batch {
@@ -1039,9 +1042,9 @@ tensor_backward :: proc(root: ^Tensor) {
 				}
 
 				// 1. Recompute S_b and P_b (Checkpointing)
-				k_b_t := _matrix_transpose(k_b, context.temp_allocator)
-				s_b := l.matmul_dyn_simd(&q_b, &k_b_t, context.temp_allocator)
-				l.matrix_free(&k_b_t)
+				k_b_t := _matrix_transpose(k_b, context.allocator)
+				s_b := l.matmul_dyn_simd(&q_b, &k_b_t, context.allocator)
+				l.matrix_free(&k_b_t) // ✅ Free immediately
 
 				p_b := l.Matrix(f64) {
 					rows = seq_q,
@@ -1071,20 +1074,18 @@ tensor_backward :: proc(root: ^Tensor) {
 				}
 
 				// 2. dV = P_b^T @ dO_b
-				p_b_t := _matrix_transpose(p_b, context.temp_allocator)
-				dV_b := l.matmul_dyn_simd(&p_b_t, &dO_b, context.temp_allocator)
+				p_b_t := _matrix_transpose(p_b, context.allocator)
+				dV_b := l.matmul_dyn_simd(&p_b_t, &dO_b, context.allocator)
 				copy(dV[b * seq_k * d_v:(b + 1) * seq_k * d_v], dV_b.data)
-				l.matrix_free(&p_b_t)
-				l.matrix_free(&dV_b)
+				l.matrix_free(&p_b_t) // ✅ Free immediately
+				l.matrix_free(&dV_b) // ✅ Free immediately
 
 				// 3. dP = dO_b @ V_b^T
-				v_b_t := _matrix_transpose(v_b, context.temp_allocator)
-				dP_b := l.matmul_dyn_simd(&dO_b, &v_b_t, context.temp_allocator)
+				v_b_t := _matrix_transpose(v_b, context.allocator)
+				dP_b := l.matmul_dyn_simd(&dO_b, &v_b_t, context.allocator)
+				l.matrix_free(&v_b_t) // ✅ Free immediately
 
-				// ✅ FIX: Free v_b_t immediately after use
-				l.matrix_free(&v_b_t)
-
-				// 4. dS = P_b * (dP_b - sum(dP_b * P_b, dim=-1))  [Standard Softmax Backward]
+				// 4. dS = P_b * (dP_b - sum(dP_b * P_b, dim=-1))
 				for i in 0 ..< seq_q {
 					row_start := i * seq_k
 					sum := 0.0
@@ -1101,27 +1102,30 @@ tensor_backward :: proc(root: ^Tensor) {
 				for i in 0 ..< seq_q * seq_k {
 					dP_b.data[i] *= scale
 				}
-				dQ_b := l.matmul_dyn_simd(&dP_b, &k_b, context.temp_allocator)
+				dQ_b := l.matmul_dyn_simd(&dP_b, &k_b, context.allocator)
 				copy(dQ[b * seq_q * d_k:(b + 1) * seq_q * d_k], dQ_b.data)
-				l.matrix_free(&dQ_b)
+				l.matrix_free(&dQ_b) // ✅ Free immediately
 
-				// 6. dK = (dP_b * scale)^T @ Q_b  => dP_b^T @ Q_b
-				dP_b_t := _matrix_transpose(dP_b, context.temp_allocator)
-				dK_b := l.matmul_dyn_simd(&dP_b_t, &q_b, context.temp_allocator)
+				// 6. dK = (dP_b * scale)^T @ Q_b
+				dP_b_t := _matrix_transpose(dP_b, context.allocator)
+				dK_b := l.matmul_dyn_simd(&dP_b_t, &q_b, context.allocator)
 				copy(dK[b * seq_k * d_k:(b + 1) * seq_k * d_k], dK_b.data)
-				l.matrix_free(&dP_b_t)
-				l.matrix_free(&dK_b)
+				l.matrix_free(&dP_b_t) // ✅ Free immediately
+				l.matrix_free(&dK_b) // ✅ Free immediately
 
-				l.matrix_free(&dP_b)
-				l.matrix_free(&s_b)
+				l.matrix_free(&dP_b) // ✅ Free immediately
+				l.matrix_free(&s_b) // ✅ Free immediately
 			}
 
-			if Q_in.requires_grad &&
-			   len(Q_in.grad.data) > 0 {l.vec_add_simd(Q_in.grad.data, dQ, Q_in.grad.data)}
-			if K_in.requires_grad &&
-			   len(K_in.grad.data) > 0 {l.vec_add_simd(K_in.grad.data, dK, K_in.grad.data)}
-			if V_in.requires_grad &&
-			   len(V_in.grad.data) > 0 {l.vec_add_simd(V_in.grad.data, dV, V_in.grad.data)}
+			if Q_in.requires_grad && len(Q_in.grad.data) > 0 {
+				l.vec_add_simd(Q_in.grad.data, dQ, Q_in.grad.data)
+			}
+			if K_in.requires_grad && len(K_in.grad.data) > 0 {
+				l.vec_add_simd(K_in.grad.data, dK, K_in.grad.data)
+			}
+			if V_in.requires_grad && len(V_in.grad.data) > 0 {
+				l.vec_add_simd(V_in.grad.data, dV, V_in.grad.data)
+			}
 		case .MSELoss:
 			// L = mean((pred - target)^2)
 			// dL/dpred = 2 * (pred - target) / N
@@ -1138,12 +1142,12 @@ tensor_backward :: proc(root: ^Tensor) {
 				scale := 2.0 * scalar_grad / n
 
 				// Re-calculate (pred - target) using temp allocator
-				diff := make([]f64, len(pred_in.data.data), context.temp_allocator)
+				diff := make([]f64, len(pred_in.data.data), context.allocator)
 				l.vec_sub_simd(pred_in.data.data, target_in.data.data, diff)
 
 				// ✅ SIMD Optimization: grad_pred += scale * diff
 				l.axpy_simd(scale, diff, pred_in.grad.data)
-				delete(diff, context.temp_allocator)
+				delete(diff, context.allocator)
 			}
 		case .LayerNorm:
 			input_in := node.inputs[0]
