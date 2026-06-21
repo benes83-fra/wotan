@@ -3,6 +3,7 @@ package tests
 import l "../wotan/linalg"
 import nn "../wotan/nn"
 import t "../wotan/tensor"
+import "base:runtime"
 import "core:fmt"
 import "core:math"
 import "core:math/rand"

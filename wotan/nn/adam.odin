@@ -10,18 +10,19 @@ import "core:mem"
 // ============================================================================
 
 Adam :: struct {
-	parameters:    [dynamic]^t.Tensor,
-	moment_1:      [dynamic][]f64, // First moment (momentum)
-	moment_2:      [dynamic][]f64, // Second moment (RMSprop)
-	learning_rate: f64,
-	beta_1:        f64, // Exponential decay rate for moment_1 (typically 0.9)
-	beta_2:        f64, // Exponential decay rate for moment_2 (typically 0.999)
-	epsilon:       f64, // Small constant for numerical stability (typically 1e-8)
-	timestep:      int, // Current timestep for bias correction
-	allocator:     mem.Allocator,
+	parameters:     [dynamic]^t.Tensor,
+	moment_1:       [dynamic][]f64,
+	moment_2:       [dynamic][]f64,
+	learning_rate:  f64,
+	beta_1:         f64,
+	beta_2:         f64,
+	epsilon:        f64,
+	timestep:       int,
+	allocator:      mem.Allocator,
+	grad_sq:        []f64, // ✅ Pre-allocated temp buffer
+	max_param_size: int, // Track max size needed
 }
 
-// adam_new creates a new Adam optimizer with default hyperparameters
 adam_new :: proc(
 	learning_rate: f64 = 0.001,
 	beta_1: f64 = 0.9,
@@ -30,35 +31,44 @@ adam_new :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> Adam {
 	return Adam {
-		parameters = make([dynamic]^t.Tensor, 0, allocator),
-		moment_1 = make([dynamic][]f64, 0, allocator),
-		moment_2 = make([dynamic][]f64, 0, allocator),
-		learning_rate = learning_rate,
-		beta_1 = beta_1,
-		beta_2 = beta_2,
-		epsilon = epsilon,
-		timestep = 0,
-		allocator = allocator,
+		parameters     = make([dynamic]^t.Tensor, 0, allocator),
+		moment_1       = make([dynamic][]f64, 0, allocator),
+		moment_2       = make([dynamic][]f64, 0, allocator),
+		learning_rate  = learning_rate,
+		beta_1         = beta_1,
+		beta_2         = beta_2,
+		epsilon        = epsilon,
+		timestep       = 0,
+		allocator      = allocator,
+		grad_sq        = nil, // Will be allocated on first use
+		max_param_size = 0,
 	}
 }
 
-// adam_add_param registers a tensor (like weights or bias) to be optimized
 adam_add_param :: proc(opt: ^Adam, param: ^t.Tensor) {
 	append(&opt.parameters, param)
 
-	// Initialize moment vectors to zeros
 	n := len(param.data.data)
 	m := make([]f64, n, opt.allocator)
 	v := make([]f64, n, opt.allocator)
 
 	append(&opt.moment_1, m)
 	append(&opt.moment_2, v)
+
+	// Track max parameter size for temp buffer
+	if n > opt.max_param_size {
+		opt.max_param_size = n
+	}
 }
 
-// adam_step performs one step of Adam optimization
 adam_step :: proc(opt: ^Adam) {
 	opt.timestep += 1
 	t := f64(opt.timestep)
+
+	// ✅ Allocate temp buffer once, reuse for all parameters
+	if opt.grad_sq == nil && opt.max_param_size > 0 {
+		opt.grad_sq = make([]f64, opt.max_param_size, opt.allocator)
+	}
 
 	for i in 0 ..< len(opt.parameters) {
 		param := opt.parameters[i]
@@ -72,30 +82,20 @@ adam_step :: proc(opt: ^Adam) {
 		data := param.data.data
 		n := len(data)
 
-		// Update biased first moment estimate: m = beta_1 * m + (1 - beta_1) * grad
-		// Using SIMD: m = beta_1 * m + (1 - beta_1) * grad
-		// We can use axpy_simd for this: m = m + (1-beta_1) * grad, then scale by beta_1
-		// Actually, let's do it element-wise for clarity, or use a combination of operations
-
-		// Scale existing m by beta_1
+		// Update biased first moment: m = beta_1 * m + (1 - beta_1) * grad
 		for j in 0 ..< n {
 			m[j] *= opt.beta_1
 		}
-		// Add (1 - beta_1) * grad
 		l.axpy_simd(1.0 - opt.beta_1, grad, m)
 
-		// Update biased second moment estimate: v = beta_2 * v + (1 - beta_2) * grad^2
-		// First compute grad^2 into a temp buffer
-		grad_sq := make([]f64, n, context.temp_allocator)
-		l.vec_mul_simd(grad, grad, grad_sq)
+		// ✅ Reuse pre-allocated grad_sq buffer
+		l.vec_mul_simd(grad, grad, opt.grad_sq[:n])
 
-		// Scale existing v by beta_2
+		// Update biased second moment: v = beta_2 * v + (1 - beta_2) * grad^2
 		for j in 0 ..< n {
 			v[j] *= opt.beta_2
 		}
-		// Add (1 - beta_2) * grad^2
-		l.axpy_simd(1.0 - opt.beta_2, grad_sq, v)
-		delete(grad_sq, context.temp_allocator)
+		l.axpy_simd(1.0 - opt.beta_2, opt.grad_sq[:n], v)
 
 		// Bias correction
 		bias_correction_1 := 1.0 - math.pow(opt.beta_1, t)
@@ -104,8 +104,7 @@ adam_step :: proc(opt: ^Adam) {
 		m_hat_scale := 1.0 / bias_correction_1
 		v_hat_scale := 1.0 / bias_correction_2
 
-		// Update parameters: param = param - lr * m_hat / (sqrt(v_hat) + epsilon)
-		// We need to compute this element-wise
+		// Update parameters
 		for j in 0 ..< n {
 			m_hat := m[j] * m_hat_scale
 			v_hat := v[j] * v_hat_scale
@@ -114,14 +113,6 @@ adam_step :: proc(opt: ^Adam) {
 	}
 }
 
-// adam_zero_grad resets all gradients to 0.0
-adam_zero_grad :: proc(opt: ^Adam) {
-	for param in opt.parameters {
-		t.tensor_zero_grad(param)
-	}
-}
-
-// adam_free cleans up the optimizer's internal state
 adam_free :: proc(opt: ^Adam) {
 	for m in opt.moment_1 {
 		delete(m, opt.allocator)
@@ -129,7 +120,16 @@ adam_free :: proc(opt: ^Adam) {
 	for v in opt.moment_2 {
 		delete(v, opt.allocator)
 	}
+	if opt.grad_sq != nil {
+		delete(opt.grad_sq, opt.allocator) // ✅ Free temp buffer
+	}
 	delete(opt.parameters)
 	delete(opt.moment_1)
 	delete(opt.moment_2)
+}
+
+adam_zero_grad :: proc(opt: ^Adam) {
+	for param in opt.parameters {
+		t.tensor_zero_grad(param)
+	}
 }
