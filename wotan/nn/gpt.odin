@@ -162,18 +162,22 @@ gpt_model_forward :: proc(
 	// Token embeddings
 	token_emb := embedding_layer_forward(&model.token_emb, input_ids)
 
-	// Positional embeddings
-	pos_ids_data := l.matrix_new(f64, 1, batch * seq_len, model.allocator)
+	// ✅ FIX: Create positional embeddings directly, without creating pos_ids tensor
+	pos_emb_data := l.matrix_new(f64, 1, batch * seq_len * model.d_model, model.allocator)
 	for b in 0 ..< batch {
 		for s in 0 ..< seq_len {
-			pos_ids_data.data[b * seq_len + s] = f64(s)
+			// Copy the s-th row of pos_emb.weight to the appropriate position
+			src_offset := s * model.d_model
+			dst_offset := (b * seq_len + s) * model.d_model
+			copy(
+				pos_emb_data.data[dst_offset:dst_offset + model.d_model],
+				model.pos_emb.weight.data.data[src_offset:src_offset + model.d_model],
+			)
 		}
 	}
-	pos_ids := t.tensor_new(pos_ids_data, false, model.allocator)
-	pos_ids.shape = [4]int{batch, seq_len, 1, 1}
-	pos_ids.owned_by_graph = true // ✅ Mark for automatic cleanup
-
-	pos_emb := embedding_layer_forward(&model.pos_emb, pos_ids)
+	pos_emb := t.tensor_new(pos_emb_data, false, model.allocator)
+	pos_emb.shape = [4]int{batch, seq_len, model.d_model, 1}
+	pos_emb.owned_by_graph = true
 
 	// Add token and positional embeddings
 	x := t.tensor_add(token_emb, pos_emb)
@@ -191,7 +195,6 @@ gpt_model_forward :: proc(
 
 	return logits
 }
-
 // Register all GPT parameters with optimizer
 gpt_model_add_to_optimizer :: proc(model: ^GPTModel, opt: ^Adam) {
 	adam_add_param(opt, model.token_emb.weight)
