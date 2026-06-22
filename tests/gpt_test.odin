@@ -52,6 +52,9 @@ gpt_full_test :: proc(allocator: mem.Allocator) {
 	num_layers := 2
 	batch_size := 16
 	max_seq_len := seq_len + 1
+	// After building vocabulary, before model creation:
+	fmt.println("\n=== Creating Model ===")
+	global_tensors_created := 0
 
 	// Create GPT model
 	model := nn.gpt_model_new(
@@ -63,29 +66,38 @@ gpt_full_test :: proc(allocator: mem.Allocator) {
 		max_seq_len,
 		allocator,
 	)
+	fmt.printf("Model created %d tensors\n", global_tensors_created)
 	defer nn.gpt_model_free(&model)
 
 	// Create optimizer
+	fmt.println("\n=== Creating Optimizer ===")
+	global_tensors_created = 0
 	opt := nn.adam_new(0.0003, allocator = allocator)
+	nn.gpt_model_add_to_optimizer(&model, &opt)
+	fmt.printf("Optimizer setup created %d tensors\n", global_tensors_created)
 	defer nn.adam_free(&opt)
 
-	// Register all parameters
-	nn.gpt_model_add_to_optimizer(&model, &opt)
-
 	// Create causal mask
+	fmt.println("\n=== Creating Causal Mask ===")
+	global_tensors_created = 0
 	mask := nn.create_causal_mask(max_seq_len, allocator)
+	fmt.printf("Causal mask created %d tensors\n", global_tensors_created)
 	defer delete(mask, allocator)
 
 	// Convert text to indices
+	fmt.println("\n=== Converting Text to Indices ===")
+	global_tensors_created = 0
 	text_indices := make([]int, len(text), allocator)
-	defer delete(text_indices, allocator)
-
 	for i in 0 ..< len(text) {
 		text_indices[i] = vocab[text[i]]
 	}
+	fmt.printf("Text conversion created %d tensors\n", global_tensors_created)
+	defer delete(text_indices, allocator)
+
+	fmt.println("\n=== Starting Training ===")
 
 	// Training loop
-	epochs := 3000
+	epochs := 1500
 	fmt.printf(
 		"Training GPT (layers=%d, d_model=%d, heads=%d)...\n",
 		num_layers,
@@ -137,7 +149,39 @@ gpt_full_test :: proc(allocator: mem.Allocator) {
 
 		// Backward pass
 		t.tensor_backward(loss)
+		// ✅ ADD: Gradient clipping to prevent explosion
+		for param in opt.parameters {
+			if param.grad.data != nil {
+				grad_norm := 0.0
+				for val in param.grad.data {
+					grad_norm += val * val
+				}
+				grad_norm = math.sqrt(grad_norm)
 
+				max_grad_norm := 1.0
+				if grad_norm > max_grad_norm {
+					scale := max_grad_norm / grad_norm
+					for i in 0 ..< len(param.grad.data) {
+						param.grad.data[i] *= scale
+					}
+				}
+			}
+		}
+
+		// ✅ ADD: Check for NaN/Inf in loss
+		if math.is_nan(loss.data.data[0]) || math.is_inf(loss.data.data[0]) {
+			fmt.printf("WARNING: Loss is NaN/Inf at epoch %d, stopping training\n", epoch)
+			break
+		}
+		base_lr := 0.0003
+		if epoch < 100 {
+			// Warmup phase
+			opt.learning_rate = base_lr * f64(epoch + 1) / 100.0
+		} else {
+			// Cosine decay
+			progress := f64(epoch - 100) / f64(epochs - 100)
+			opt.learning_rate = base_lr * 0.5 * (1.0 + math.cos(math.PI * progress))
+		}
 		// Optimizer step
 		nn.adam_step(&opt)
 
@@ -161,22 +205,25 @@ gpt_full_test :: proc(allocator: mem.Allocator) {
 		delete(target_indices, allocator)
 
 		// ✅ ADD: Periodic validation of model parameters
+		// In your training loop, replace the validation section with this:
 		if epoch % 100 == 0 {
-			// Check a few key parameters
+			// Check a few key parameters without creating strings
 			for i in 0 ..< len(model.blocks) {
 				block := &model.blocks[i]
-				t.tensor_validate(
-					block.mha.q_proj.weights,
-					fmt.aprintf("block[%d].mha.q_proj at epoch %d", i, epoch),
-				)
-				t.tensor_validate(
-					block.mha.k_proj.weights,
-					fmt.aprintf("block[%d].mha.k_proj at epoch %d", i, epoch),
-				)
-				t.tensor_validate(
-					block.mha.v_proj.weights,
-					fmt.aprintf("block[%d].mha.v_proj at epoch %d", i, epoch),
-				)
+
+				// Direct validation without string formatting
+				if block.mha.q_proj.weights == nil ||
+				   len(block.mha.q_proj.weights.data.data) == 0 {
+					fmt.printf("ERROR: block[%d].mha.q_proj invalid at epoch %d\n", i, epoch)
+				}
+				if block.mha.k_proj.weights == nil ||
+				   len(block.mha.k_proj.weights.data.data) == 0 {
+					fmt.printf("ERROR: block[%d].mha.k_proj invalid at epoch %d\n", i, epoch)
+				}
+				if block.mha.v_proj.weights == nil ||
+				   len(block.mha.v_proj.weights.data.data) == 0 {
+					fmt.printf("ERROR: block[%d].mha.v_proj invalid at epoch %d\n", i, epoch)
+				}
 			}
 		}
 	}

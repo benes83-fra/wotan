@@ -2,10 +2,14 @@
 package tensor
 
 import l "../linalg"
+import "base:runtime"
 import "core:fmt"
 import "core:math"
 import "core:math/rand"
 import "core:mem"
+
+global_tensors_created: int = 0
+global_tensors_freed: int = 0
 // ============================================================================
 // 1. The Tensor Struct & Graph Nodes
 // ============================================================================
@@ -100,7 +104,7 @@ tensor_new :: proc(
 		t.grad = l.matrix_new(f64, data.rows, data.cols, allocator)
 		// (In a real implementation, we'd zero it out here, but matrix_new usually does)
 	}
-
+	global_tensors_created += 1
 	return t
 }
 
@@ -111,7 +115,8 @@ tensor_free :: proc(t: ^Tensor) {
 
 	delete(t.inputs)
 	delete(t.int_metadata)
-	if t.dropout_mask != nil {delete(t.dropout_mask, t.allocator)} 	// ✅ ADD THIS
+	if t.dropout_mask != nil {delete(t.dropout_mask, t.allocator)}
+	global_tensors_freed += 1 // ✅ ADD THIS
 	free(t, t.allocator)
 }
 
@@ -2639,7 +2644,7 @@ tensor_free_graph :: proc(root: ^Tensor) {
 
 	nodes := make([dynamic]^Tensor, 0, context.allocator)
 	_collect_graph_nodes(root, &nodes, &visited)
-
+	freed_in_graph := 0
 	for i := len(nodes) - 1; i >= 0; i -= 1 {
 		node := nodes[i]
 		// ✅ FIX: Free nodes that are either intermediate OR owned by the graph
@@ -2650,6 +2655,8 @@ tensor_free_graph :: proc(root: ^Tensor) {
 			delete(node.int_metadata)
 			if node.dropout_mask != nil {delete(node.dropout_mask, node.allocator)}
 			free(node, node.allocator)
+			freed_in_graph += 1
+			global_tensors_freed += 1
 		}
 	}
 
