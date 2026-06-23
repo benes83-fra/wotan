@@ -109,7 +109,14 @@ gpt_full_test :: proc(allocator: mem.Allocator) {
 
 	initial_loss := 0.0
 	final_loss := 0.0
-
+	arena: virtual.Arena
+	err := virtual.arena_init_static(&arena, 256 * mem.Megabyte)
+	if err != nil {
+		fmt.printf("Failed to initialize arena: %v\n", err)
+		return
+	}
+	defer virtual.arena_destroy(&arena)
+	arena_alloc := virtual.arena_allocator(&arena)
 	// In your training loop, add validation:
 	for epoch in 0 ..< epochs {
 		nn.adam_zero_grad(&opt)
@@ -150,7 +157,8 @@ gpt_full_test :: proc(allocator: mem.Allocator) {
 		}
 
 		// Backward pass
-		t.tensor_backward(loss)
+		t.tensor_backward(loss, arena_alloc)
+		virtual.arena_free_all(&arena)
 		// ✅ ADD: Gradient clipping to prevent explosion
 		for param in opt.parameters {
 			if param.grad.data != nil {
