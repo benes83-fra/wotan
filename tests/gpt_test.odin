@@ -8,6 +8,8 @@ import "core:fmt"
 import "core:math"
 import "core:math/rand"
 import "core:mem"
+
+import "core:mem/virtual"
 gpt_full_test :: proc(allocator: mem.Allocator) {
 	fmt.println("\n=== Full GPT Implementation Test ===")
 
@@ -657,6 +659,15 @@ And borrowing dulls the edge of husbandry.
 
 	initial_loss := 0.0
 	final_loss := 0.0
+	arena: virtual.Arena
+	err := virtual.arena_init_static(&arena, 256 * mem.Megabyte)
+	if err != nil {
+		fmt.printf("Failed to initialize arena: %v\n", err)
+		return
+	}
+	defer virtual.arena_destroy(&arena)
+
+	arena_alloc := virtual.arena_allocator(&arena)
 
 	for epoch in 0 ..< epochs {
 		nn.adam_zero_grad(&opt)
@@ -688,8 +699,8 @@ And borrowing dulls the edge of husbandry.
 		}
 
 		// Backward pass
-		t.tensor_backward(loss)
-
+		t.tensor_backward(loss, arena_alloc)
+		virtual.arena_free_all(&arena)
 		// Optimizer step
 		nn.adam_step(&opt)
 
