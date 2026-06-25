@@ -475,6 +475,7 @@ main :: proc() {
 	test.bert_test(context.temp_allocator)
 	// test.gan_test(context.temp_allocator)
 	test.gan_test_v2(context.temp_allocator)
+	test.wgan_test(context.temp_allocator)
 	fmt.println("Demo End")
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)

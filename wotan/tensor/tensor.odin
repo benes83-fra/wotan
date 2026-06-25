@@ -3840,3 +3840,18 @@ tensor_detach :: proc(t: ^Tensor) -> ^Tensor {
 	out.shape = t.shape
 	return out
 }
+
+
+// Add this function to tensor.odin
+tensor_clip_weights :: proc(t: ^Tensor, min_val: f64, max_val: f64) {
+	if t.data.data == nil {
+		return
+	}
+	for i in 0 ..< len(t.data.data) {
+		if t.data.data[i] < min_val {
+			t.data.data[i] = min_val
+		} else if t.data.data[i] > max_val {
+			t.data.data[i] = max_val
+		}
+	}
+}
