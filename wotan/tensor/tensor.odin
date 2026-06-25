@@ -45,6 +45,7 @@ Op :: enum {
 	PermuteMHAInverse,
 	LayerNorm,
 	MaskedScaledDotProductAttention,
+	BinaryCrossEntropy,
 }
 
 PoolParams :: struct {
@@ -2095,6 +2096,22 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 			if bias_in.requires_grad && len(bias_in.grad.data) > 0 {
 				l.vec_add_simd(bias_in.grad.data, dbias, bias_in.grad.data)
 			}
+		case .BinaryCrossEntropy:
+			pred_in := node.inputs[0]
+			target_in := node.inputs[1]
+
+			if pred_in.requires_grad {
+				eps := 1e-7
+				n := f64(len(pred_in.data.data))
+				scalar_grad := node.grad.data[0]
+
+				for i in 0 ..< len(pred_in.data.data) {
+					p := math.max(math.min(pred_in.data.data[i], 1.0 - eps), eps)
+					t := target_in.data.data[i]
+					grad := scalar_grad * (-t / p + (1.0 - t) / (1.0 - p)) / n
+					pred_in.grad.data[i] += grad
+				}
+			}
 		case .AvgPool2d:
 			// Distribute gradient equally to all elements in the pooling window
 			a_in := node.inputs[0]
@@ -3786,4 +3803,40 @@ tensor_validate :: proc(t: ^Tensor, ctx: string) {
 		fmt.printf("ERROR: %s - tensor requires grad but has empty gradient\n", ctx)
 		return
 	}
+}
+tensor_binary_cross_entropy :: proc(pred: ^Tensor, target: ^Tensor) -> ^Tensor {
+	if pred.data.rows != target.data.rows || pred.data.cols != target.data.cols {
+		panic("tensor_binary_cross_entropy: shape mismatch")
+	}
+
+	eps := 1e-7
+	n := f64(len(pred.data.data))
+
+	loss := 0.0
+	for i in 0 ..< len(pred.data.data) {
+		p := math.max(math.min(pred.data.data[i], 1.0 - eps), eps)
+		t := target.data.data[i]
+		loss += -(t * math.ln(p) + (1.0 - t) * math.ln(1.0 - p))
+	}
+	loss /= n
+
+	out_data := l.matrix_new(f64, 1, 1, pred.allocator)
+	out_data.data[0] = loss
+
+	out := tensor_new(out_data, pred.requires_grad, pred.allocator)
+	if out.requires_grad {
+		out.op = .BinaryCrossEntropy
+		append(&out.inputs, pred)
+		append(&out.inputs, target)
+	}
+	return out
+}
+
+// Add detach operation to break gradient chain:
+tensor_detach :: proc(t: ^Tensor) -> ^Tensor {
+	out_data := l.matrix_new(f64, t.data.rows, t.data.cols, t.allocator)
+	copy(out_data.data, t.data.data)
+	out := tensor_new(out_data, false, t.allocator)
+	out.shape = t.shape
+	return out
 }

@@ -473,6 +473,7 @@ main :: proc() {
 	// test.gpt_full_test(context.temp_allocator)
 	// test.gpt_shakespeare_test(context.temp_allocator)
 	test.bert_test(context.temp_allocator)
+	test.gan_test(context.temp_allocator)
 	fmt.println("Demo End")
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
