@@ -12,15 +12,16 @@ import "core:mem"
 wgan_test :: proc(allocator: mem.Allocator) {
 	fmt.println("\n=== WGAN Test: Wasserstein GAN ===")
 
-	// Hyperparameters - adjusted for better learning
-	noise_dim := 32
-	hidden_dim := 32
+	// Hyperparameters
+	noise_dim := 64
+	hidden_dim_gen := 64
+	hidden_dim_critic := 24
 	data_dim := 64
 	batch_size := 16
 	epochs := 5000
 	critic_iterations := 2
-	clip_value := 0.01 // ✅ Increased from 0.01 to 0.1
-	learning_rate := 0.0002 // ✅ Increased from 0.00005 to 0.0005
+	clip_value := 0.03
+	learning_rate := 0.0002
 
 	// Create training data: sine waves
 	num_samples := 100
@@ -47,13 +48,16 @@ wgan_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("Training data: %d sine wave samples\n", num_samples)
 
 	// Create Generator and Critic
-	gen := nn.generator_new(noise_dim, hidden_dim, data_dim, allocator)
+	gen := nn.generator_new_custom(noise_dim, hidden_dim_gen, data_dim, allocator)
 	defer nn.generator_free(&gen)
 
-	critic := nn.discriminator_new(data_dim, hidden_dim, allocator)
+	critic := nn.discriminator_new_custom(data_dim, hidden_dim_critic, allocator)
 	defer nn.discriminator_free(&critic)
 
-	// Separate optimizers
+	// Initialize weights
+	nn.initialize_generator_weights(&gen, allocator)
+	nn.initialize_discriminator_weights(&critic, allocator)
+
 	opt_g := nn.adam_new(learning_rate, allocator = allocator)
 	defer nn.adam_free(&opt_g)
 	nn.generator_add_to_optimizer(&gen, &opt_g)
@@ -70,8 +74,7 @@ wgan_test :: proc(allocator: mem.Allocator) {
 	wasserstein_dist := 0.0
 
 	for epoch in 0 ..< epochs {
-		// ==================== Train Critic ====================
-		// ==================== Train Critic ====================
+		// Train Critic
 		for _ in 0 ..< critic_iterations {
 			nn.adam_zero_grad(&opt_c)
 
@@ -80,7 +83,8 @@ wgan_test :: proc(allocator: mem.Allocator) {
 			for b in 0 ..< batch_size {
 				sample_idx := int(rand.int31()) % num_samples
 				for j in 0 ..< data_dim {
-					real_batch_data.data[b * data_dim + j] = real_data[sample_idx][j]
+					noise := rand.float64() * 0.02
+					real_batch_data.data[b * data_dim + j] = real_data[sample_idx][j] + noise
 				}
 			}
 			real_batch := t.tensor_new(real_batch_data, false, allocator)
@@ -93,15 +97,11 @@ wgan_test :: proc(allocator: mem.Allocator) {
 			noise := t.tensor_new(noise_data, false, allocator)
 			fake_data := nn.generator_forward(&gen, noise)
 
-			// Critic outputs (no sigmoid)
 			critic_real := nn.discriminator_forward_no_sigmoid(&critic, real_batch)
 			critic_fake := nn.discriminator_forward_no_sigmoid(&critic, fake_data)
 
-			// ✅ Compute means using tensor operations (maintains graph!)
 			critic_real_mean := t.tensor_mean(critic_real)
 			critic_fake_mean := t.tensor_mean(critic_fake)
-
-			// WGAN critic loss: minimize E[D(fake)] - E[D(real)]
 			critic_loss := t.tensor_sub(critic_fake_mean, critic_real_mean)
 
 			t.tensor_backward(critic_loss)
@@ -115,18 +115,16 @@ wgan_test :: proc(allocator: mem.Allocator) {
 			t.tensor_clip_weights(critic.fc3.weights, -clip_value, clip_value)
 			t.tensor_clip_weights(critic.fc3.bias, -clip_value, clip_value)
 
-			// Save values for logging
 			critic_loss_val = critic_loss.data.data[0]
 			wasserstein_dist = critic_real_mean.data.data[0] - critic_fake_mean.data.data[0]
 
-			// Cleanup
 			t.tensor_free_graph(critic_loss)
 			t.tensor_free(real_batch)
 			t.tensor_free(noise)
 			t.tensor_free(fake_data)
 		}
 
-		// ==================== Train Generator ====================
+		// Train Generator
 		nn.adam_zero_grad(&opt_g)
 
 		noise_data2 := l.matrix_new(f64, batch_size, noise_dim, allocator)
@@ -137,8 +135,6 @@ wgan_test :: proc(allocator: mem.Allocator) {
 		fake_data2 := nn.generator_forward(&gen, noise2)
 
 		critic_on_fake := nn.discriminator_forward_no_sigmoid(&critic, fake_data2)
-
-		// ✅ Generator loss: maximize E[D(fake)] = minimize -E[D(fake)]
 		critic_fake_mean2 := t.tensor_mean(critic_on_fake)
 		g_loss := t.tensor_neg(critic_fake_mean2)
 
@@ -147,12 +143,11 @@ wgan_test :: proc(allocator: mem.Allocator) {
 
 		g_loss_val = g_loss.data.data[0]
 
-		// Cleanup
 		t.tensor_free_graph(g_loss)
 		t.tensor_free(noise2)
 		t.tensor_free(fake_data2)
 
-		// Print progress
+		// Print progress in original format
 		if epoch % 200 == 0 {
 			fmt.printf(
 				"Epoch %d | Critic_loss: %.4f | G_loss: %.4f | Wasserstein: %.4f\n",
@@ -164,7 +159,7 @@ wgan_test :: proc(allocator: mem.Allocator) {
 		}
 	}
 
-	// Generate samples
+	// Generate samples with bar visualization
 	fmt.println("\n=== Generated Samples ===")
 	fmt.println("Generating 5 sine wave samples:\n")
 
