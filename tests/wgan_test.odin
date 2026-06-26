@@ -14,13 +14,13 @@ wgan_test :: proc(allocator: mem.Allocator) {
 
 	// Hyperparameters - adjusted for better learning
 	noise_dim := 32
-	hidden_dim := 64
+	hidden_dim := 32
 	data_dim := 64
 	batch_size := 16
 	epochs := 5000
-	critic_iterations := 5
-	clip_value := 0.1 // ✅ Increased from 0.01 to 0.1
-	learning_rate := 0.0005 // ✅ Increased from 0.00005 to 0.0005
+	critic_iterations := 2
+	clip_value := 0.01 // ✅ Increased from 0.01 to 0.1
+	learning_rate := 0.0002 // ✅ Increased from 0.00005 to 0.0005
 
 	// Create training data: sine waves
 	num_samples := 100
@@ -71,6 +71,7 @@ wgan_test :: proc(allocator: mem.Allocator) {
 
 	for epoch in 0 ..< epochs {
 		// ==================== Train Critic ====================
+		// ==================== Train Critic ====================
 		for _ in 0 ..< critic_iterations {
 			nn.adam_zero_grad(&opt_c)
 
@@ -92,25 +93,16 @@ wgan_test :: proc(allocator: mem.Allocator) {
 			noise := t.tensor_new(noise_data, false, allocator)
 			fake_data := nn.generator_forward(&gen, noise)
 
-			// Critic outputs
+			// Critic outputs (no sigmoid)
 			critic_real := nn.discriminator_forward_no_sigmoid(&critic, real_batch)
 			critic_fake := nn.discriminator_forward_no_sigmoid(&critic, fake_data)
 
-			// Compute means
-			critic_real_mean := 0.0
-			critic_fake_mean := 0.0
-			for i in 0 ..< batch_size {
-				critic_real_mean += critic_real.data.data[i]
-				critic_fake_mean += critic_fake.data.data[i]
-			}
-			critic_real_mean /= f64(batch_size)
-			critic_fake_mean /= f64(batch_size)
+			// ✅ Compute means using tensor operations (maintains graph!)
+			critic_real_mean := t.tensor_mean(critic_real)
+			critic_fake_mean := t.tensor_mean(critic_fake)
 
-			// WGAN critic loss: minimize -(E[D(real)] - E[D(fake)])
-			// = E[D(fake)] - E[D(real)]
-			loss_data := l.matrix_new(f64, 1, 1, allocator)
-			loss_data.data[0] = critic_fake_mean - critic_real_mean
-			critic_loss := t.tensor_new(loss_data, true, allocator)
+			// WGAN critic loss: minimize E[D(fake)] - E[D(real)]
+			critic_loss := t.tensor_sub(critic_fake_mean, critic_real_mean)
 
 			t.tensor_backward(critic_loss)
 			nn.adam_step(&opt_c)
@@ -123,9 +115,9 @@ wgan_test :: proc(allocator: mem.Allocator) {
 			t.tensor_clip_weights(critic.fc3.weights, -clip_value, clip_value)
 			t.tensor_clip_weights(critic.fc3.bias, -clip_value, clip_value)
 
-			// Save values
+			// Save values for logging
 			critic_loss_val = critic_loss.data.data[0]
-			wasserstein_dist = critic_real_mean - critic_fake_mean
+			wasserstein_dist = critic_real_mean.data.data[0] - critic_fake_mean.data.data[0]
 
 			// Cleanup
 			t.tensor_free_graph(critic_loss)
@@ -146,16 +138,9 @@ wgan_test :: proc(allocator: mem.Allocator) {
 
 		critic_on_fake := nn.discriminator_forward_no_sigmoid(&critic, fake_data2)
 
-		// Generator loss: minimize -E[D(fake)]
-		critic_fake_mean2 := 0.0
-		for i in 0 ..< batch_size {
-			critic_fake_mean2 += critic_on_fake.data.data[i]
-		}
-		critic_fake_mean2 /= f64(batch_size)
-
-		g_loss_data := l.matrix_new(f64, 1, 1, allocator)
-		g_loss_data.data[0] = -critic_fake_mean2
-		g_loss := t.tensor_new(g_loss_data, true, allocator)
+		// ✅ Generator loss: maximize E[D(fake)] = minimize -E[D(fake)]
+		critic_fake_mean2 := t.tensor_mean(critic_on_fake)
+		g_loss := t.tensor_neg(critic_fake_mean2)
 
 		t.tensor_backward(g_loss)
 		nn.adam_step(&opt_g)

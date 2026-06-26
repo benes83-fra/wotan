@@ -20,9 +20,12 @@ Op :: enum {
 	None,
 	Constant,
 	Add,
+	Sub,
 	Mul,
 	MatMul,
 	Sum,
+	Mean,
+	Neg,
 	Relu,
 	Sigmoid, // ✅ ADD
 	Tanh, // ✅ ADD
@@ -580,6 +583,52 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 				tensor_ensure_grad(b_in)
 				if len(b_in.grad.data) > 0 {
 					l.vec_fma_inplace_simd(node.grad.data, a_in.data.data, b_in.grad.data)
+				}
+			}
+		case .Sub:
+			a_in := node.inputs[0]
+			b_in := node.inputs[1]
+
+			// ∂L/∂a = ∂L/∂out (gradient flows through unchanged)
+			if a_in.requires_grad {
+				tensor_ensure_grad(a_in)
+				if len(a_in.grad.data) > 0 && len(node.grad.data) > 0 {
+					l.vec_add_simd(a_in.grad.data, node.grad.data, a_in.grad.data)
+				}
+			}
+
+			// ∂L/∂b = -∂L/∂out (negative gradient)
+			if b_in.requires_grad {
+				tensor_ensure_grad(b_in)
+				if len(b_in.grad.data) > 0 && len(node.grad.data) > 0 {
+					for i in 0 ..< len(b_in.grad.data) {
+						b_in.grad.data[i] -= node.grad.data[i]
+					}
+				}
+			}
+
+		case .Mean:
+			// Mean reduces to scalar, so gradient broadcasts back uniformly
+			// ∂L/∂a_i = ∂L/∂mean * (1/n)
+			a_in := node.inputs[0]
+			if a_in.requires_grad {
+				tensor_ensure_grad(a_in)
+				n := f64(len(a_in.data.data))
+				scalar_grad := node.grad.data[0] / n
+				for i in 0 ..< len(a_in.grad.data) {
+					a_in.grad.data[i] += scalar_grad
+				}
+			}
+
+		case .Neg:
+			// ∂L/∂a = -∂L/∂out
+			a_in := node.inputs[0]
+			if a_in.requires_grad {
+				tensor_ensure_grad(a_in)
+				if len(a_in.grad.data) > 0 && len(node.grad.data) > 0 {
+					for i in 0 ..< len(a_in.grad.data) {
+						a_in.grad.data[i] -= node.grad.data[i]
+					}
 				}
 			}
 		case .MatMul:
@@ -3854,4 +3903,55 @@ tensor_clip_weights :: proc(t: ^Tensor, min_val: f64, max_val: f64) {
 			t.data.data[i] = max_val
 		}
 	}
+}
+// tensor_sub computes element-wise subtraction: out = a - b
+tensor_sub :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
+	if a.data.rows != b.data.rows || a.data.cols != b.data.cols {
+		panic("tensor_sub: dimension mismatch")
+	}
+
+	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
+	l.vec_sub_simd(a.data.data, b.data.data, out_data.data)
+
+	out := tensor_new(out_data, a.requires_grad || b.requires_grad, a.allocator)
+	out.shape = a.shape
+	if out.requires_grad {
+		out.op = .Sub
+		append(&out.inputs, a)
+		append(&out.inputs, b)
+	}
+	return out
+}
+
+// tensor_mean computes the mean of all elements, returning a scalar tensor
+tensor_mean :: proc(a: ^Tensor) -> ^Tensor {
+	n := f64(len(a.data.data))
+	sum := l.sum_simd(a.data.data)
+	mean_val := sum / n
+
+	out_data := l.matrix_new(f64, 1, 1, a.allocator)
+	out_data.data[0] = mean_val
+
+	out := tensor_new(out_data, a.requires_grad, a.allocator)
+	if out.requires_grad {
+		out.op = .Mean
+		append(&out.inputs, a)
+	}
+	return out
+}
+
+// tensor_neg computes element-wise negation: out = -a
+tensor_neg :: proc(a: ^Tensor) -> ^Tensor {
+	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
+	for i in 0 ..< len(a.data.data) {
+		out_data.data[i] = -a.data.data[i]
+	}
+
+	out := tensor_new(out_data, a.requires_grad, a.allocator)
+	out.shape = a.shape
+	if out.requires_grad {
+		out.op = .Neg
+		append(&out.inputs, a)
+	}
+	return out
 }
