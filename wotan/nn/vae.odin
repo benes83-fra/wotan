@@ -47,7 +47,13 @@ vae_encoder_forward :: proc(
 
 	mu = linear_forward(&enc.fc_mu, h)
 	log_var = linear_forward(&enc.fc_logvar, h)
-
+	for i in 0 ..< len(log_var.data.data) {
+		if log_var.data.data[i] > 10.0 {
+			log_var.data.data[i] = 10.0
+		} else if log_var.data.data[i] < -10.0 {
+			log_var.data.data[i] = -10.0
+		}
+	}
 	return mu, log_var
 }
 
@@ -113,9 +119,6 @@ vae_decoder_add_to_optimizer :: proc(dec: ^VAEDecoder, opt: ^Adam) {
 // ============================================================================
 
 reparameterize :: proc(mu: ^t.Tensor, log_var: ^t.Tensor, allocator: mem.Allocator) -> ^t.Tensor {
-	// z = mu + sigma * epsilon, where epsilon ~ N(0, 1)
-	// sigma = exp(0.5 * log_var)
-
 	batch_size := mu.data.rows
 	latent_dim := mu.data.cols
 
@@ -125,9 +128,11 @@ reparameterize :: proc(mu: ^t.Tensor, log_var: ^t.Tensor, allocator: mem.Allocat
 		for d in 0 ..< latent_dim {
 			mu_val := mu.data.data[b * latent_dim + d]
 			log_var_val := log_var.data.data[b * latent_dim + d]
-			std := math.exp(0.5 * log_var_val)
 
-			// Sample from standard normal
+			// Clamp log_var to prevent numerical issues
+			log_var_val = max(-10.0, min(10.0, log_var_val))
+
+			std := math.exp(0.5 * log_var_val)
 			epsilon := rand.norm_float64()
 
 			z_data.data[b * latent_dim + d] = mu_val + std * epsilon
@@ -135,5 +140,11 @@ reparameterize :: proc(mu: ^t.Tensor, log_var: ^t.Tensor, allocator: mem.Allocat
 	}
 
 	z := t.tensor_new(z_data, true, allocator)
+
+	// ✅ CRITICAL: Record the reparameterization operation for backprop
+	z.op = .Reparameterize
+	append(&z.inputs, mu)
+	append(&z.inputs, log_var)
+
 	return z
 }

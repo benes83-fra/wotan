@@ -13,12 +13,12 @@ vae_test :: proc(allocator: mem.Allocator) {
 	fmt.println("\n=== VAE Test: Sine Wave Generation ===")
 
 	// Hyperparameters
-	input_dim := 64 // 64-point signals
-	hidden_dim := 128
-	latent_dim := 16 // Latent space dimension
+	input_dim := 64
+	hidden_dim := 64
+	latent_dim := 8 // Increased from 4 to 8 for better representation
 	batch_size := 16
 	epochs := 3000
-	learning_rate := 0.001
+	learning_rate := 0.0005 // Reduced for stability
 
 	// Create training data: sine waves
 	num_samples := 100
@@ -58,15 +58,19 @@ vae_test :: proc(allocator: mem.Allocator) {
 	defer nn.adam_free(&opt)
 	nn.vae_encoder_add_to_optimizer(&encoder, &opt)
 	nn.vae_decoder_add_to_optimizer(&decoder, &opt)
-	beta := 0.0 // Start with no KL penalty
-	beta_target := 0.001 // Very small target beta
-	kl_warmup_epochs := 500 // Gradually increase beta over 500 epochs
+
+	// ✅ CRITICAL: Proper beta scheduling
+	// Start with beta=0, gradually increase to 1.0 over first 1000 epochs
+	// This allows reconstruction to learn first, then adds KL regularization
+	beta := 0.0
+	beta_target := 1.0 // Full KL penalty
+	kl_warmup_epochs := 1000
 
 	fmt.printf("\nTraining VAE for %d epochs...\n", epochs)
-	fmt.println("Epoch | Recon_loss | KL_loss | Total_loss")
+	fmt.println("Epoch | Recon_loss | KL_loss | Beta | Total_loss")
 
 	for epoch in 0 ..< epochs {
-		// KL annealing
+		// ✅ Gradual beta increase
 		if epoch < kl_warmup_epochs {
 			beta = beta_target * f64(epoch) / f64(kl_warmup_epochs)
 		} else {
@@ -124,7 +128,7 @@ vae_test :: proc(allocator: mem.Allocator) {
 		// Print progress
 		if epoch % 200 == 0 {
 			fmt.printf(
-				"Epoch %d | Recon: %.4f | KL: %.4f | Beta: %.6f | Total: %.4f\n",
+				"Epoch %d | Recon: %.4f | KL: %.4f | Beta: %.4f | Total: %.4f\n",
 				epoch,
 				recon_loss_val,
 				kl_loss_val,
@@ -190,7 +194,7 @@ vae_test :: proc(allocator: mem.Allocator) {
 
 	// Interpolate in latent space
 	for step in 0 ..< 5 {
-		alpha := f64(step) / 4.0 // 0.0, 0.25, 0.5, 0.75, 1.0
+		alpha := f64(step) / 4.0
 
 		z_interp_data := l.matrix_new(f64, 1, latent_dim, allocator)
 		for d in 0 ..< latent_dim {

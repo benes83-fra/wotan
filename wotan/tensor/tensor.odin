@@ -51,6 +51,7 @@ Op :: enum {
 	BinaryCrossEntropy,
 	KLDivergence,
 	Scale,
+	Reparameterize,
 }
 
 PoolParams :: struct {
@@ -990,6 +991,36 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 					} else {
 						a_in.grad.data[i] += node.grad.data[i] * alpha
 					}
+				}
+			}
+		case .Reparameterize:
+			mu_in := node.inputs[0]
+			log_var_in := node.inputs[1]
+
+			if mu_in.requires_grad {
+				tensor_ensure_grad(mu_in)
+				// ∂z/∂mu = 1, so gradient flows directly
+				for i in 0 ..< len(mu_in.grad.data) {
+					mu_in.grad.data[i] += node.grad.data[i]
+				}
+			}
+
+			if log_var_in.requires_grad {
+				tensor_ensure_grad(log_var_in)
+				// ∂z/∂log_var = 0.5 * exp(0.5 * log_var) * epsilon
+				// But we don't have epsilon stored, so we use the chain rule approximation
+				// ∂z/∂log_var ≈ 0.5 * (z - mu) / exp(0.5 * log_var) * exp(0.5 * log_var)
+				// Simplified: ∂z/∂log_var = 0.5 * std * epsilon = 0.5 * (z - mu)
+				for i in 0 ..< len(log_var_in.grad.data) {
+					mu_val := mu_in.data.data[i]
+					z_val := node.data.data[i]
+					log_var_val := log_var_in.data.data[i]
+					log_var_val = max(-10.0, min(10.0, log_var_val))
+					std := math.exp(0.5 * log_var_val)
+
+					// Gradient through std
+					log_var_in.grad.data[i] +=
+						node.grad.data[i] * 0.5 * std * (z_val - mu_val) / std
 				}
 			}
 		case .AddBias:
