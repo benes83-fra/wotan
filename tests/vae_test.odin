@@ -53,6 +53,14 @@ vae_test :: proc(allocator: mem.Allocator) {
 	decoder := nn.vae_decoder_new(latent_dim, hidden_dim, input_dim, allocator)
 	defer nn.vae_decoder_free(&decoder)
 
+	// ✅ CRITICAL: Scale down initial weights to prevent immediate saturation
+	scale_weights(&encoder.fc1, 0.1)
+	scale_weights(&encoder.fc_mu, 0.1)
+	scale_weights(&encoder.fc_logvar, 0.1)
+	scale_weights(&decoder.fc1, 0.1)
+	scale_weights(&decoder.fc2, 0.1)
+	scale_weights(&decoder.fc3, 0.1)
+
 	// Single optimizer for entire VAE
 	opt := nn.adam_new(learning_rate, allocator = allocator)
 	defer nn.adam_free(&opt)
@@ -227,4 +235,10 @@ vae_test :: proc(allocator: mem.Allocator) {
 	t.tensor_free(mu2)
 
 	fmt.println("\n✓ VAE test completed!")
+}
+
+scale_weights :: proc(layer: ^nn.LinearLayer, scale: f64) {
+	for i in 0 ..< len(layer.weights.data.data) {
+		layer.weights.data.data[i] *= scale
+	}
 }

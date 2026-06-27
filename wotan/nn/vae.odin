@@ -47,13 +47,15 @@ vae_encoder_forward :: proc(
 
 	mu = linear_forward(&enc.fc_mu, h)
 	log_var = linear_forward(&enc.fc_logvar, h)
-	for i in 0 ..< len(log_var.data.data) {
-		if log_var.data.data[i] > 10.0 {
-			log_var.data.data[i] = 10.0
-		} else if log_var.data.data[i] < -10.0 {
-			log_var.data.data[i] = -10.0
-		}
+
+	// ✅ CRITICAL: Clamp mu and log_var to prevent explosion and tanh saturation
+	for i in 0 ..< len(mu.data.data) {
+		mu.data.data[i] = max(-5.0, min(5.0, mu.data.data[i]))
 	}
+	for i in 0 ..< len(log_var.data.data) {
+		log_var.data.data[i] = max(-5.0, min(5.0, log_var.data.data[i]))
+	}
+
 	return mu, log_var
 }
 
@@ -119,6 +121,9 @@ vae_decoder_add_to_optimizer :: proc(dec: ^VAEDecoder, opt: ^Adam) {
 // ============================================================================
 
 reparameterize :: proc(mu: ^t.Tensor, log_var: ^t.Tensor, allocator: mem.Allocator) -> ^t.Tensor {
+	// z = mu + sigma * epsilon, where epsilon ~ N(0, 1)
+	// sigma = exp(0.5 * log_var)
+
 	batch_size := mu.data.rows
 	latent_dim := mu.data.cols
 
@@ -129,13 +134,20 @@ reparameterize :: proc(mu: ^t.Tensor, log_var: ^t.Tensor, allocator: mem.Allocat
 			mu_val := mu.data.data[b * latent_dim + d]
 			log_var_val := log_var.data.data[b * latent_dim + d]
 
-			// Clamp log_var to prevent numerical issues
-			log_var_val = max(-10.0, min(10.0, log_var_val))
+			// ✅ Clamp log_var to prevent numerical issues
+			log_var_val = max(-5.0, min(5.0, log_var_val))
 
 			std := math.exp(0.5 * log_var_val)
+
+			// Sample from standard normal
 			epsilon := rand.norm_float64()
 
-			z_data.data[b * latent_dim + d] = mu_val + std * epsilon
+			z_val := mu_val + std * epsilon
+
+			// ✅ Clamp z to prevent decoder saturation
+			z_val = max(-5.0, min(5.0, z_val))
+
+			z_data.data[b * latent_dim + d] = z_val
 		}
 	}
 
@@ -147,4 +159,14 @@ reparameterize :: proc(mu: ^t.Tensor, log_var: ^t.Tensor, allocator: mem.Allocat
 	append(&z.inputs, log_var)
 
 	return z
+}
+
+// ============================================================================
+// Helper: Scale weights (for initialization)
+// ============================================================================
+
+scale_linear_weights :: proc(layer: ^LinearLayer, scale: f64) {
+	for i in 0 ..< len(layer.weights.data.data) {
+		layer.weights.data.data[i] *= scale
+	}
 }
