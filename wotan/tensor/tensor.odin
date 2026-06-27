@@ -49,6 +49,7 @@ Op :: enum {
 	LayerNorm,
 	MaskedScaledDotProductAttention,
 	BinaryCrossEntropy,
+	KLDivergence,
 }
 
 PoolParams :: struct {
@@ -709,6 +710,29 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 				scalar_grad := node.grad.data[0]
 				for j in 0 ..< len(a_in.grad.data) {
 					a_in.grad.data[j] += scalar_grad
+				}
+			}
+		case .KLDivergence:
+			mu_in := node.inputs[0]
+			log_var_in := node.inputs[1]
+
+			scalar_grad := node.grad.data[0]
+			n := f64(len(mu_in.data.data))
+
+			// ∂KL/∂mu = -0.5 * (-2 * mu) / n = mu / n
+			if mu_in.requires_grad {
+				tensor_ensure_grad(mu_in)
+				for i in 0 ..< len(mu_in.grad.data) {
+					mu_in.grad.data[i] += scalar_grad * mu_in.data.data[i] / n
+				}
+			}
+
+			// ∂KL/∂log_var = -0.5 * (1 - exp(log_var)) / n
+			if log_var_in.requires_grad {
+				tensor_ensure_grad(log_var_in)
+				for i in 0 ..< len(log_var_in.grad.data) {
+					log_var_in.grad.data[i] +=
+						scalar_grad * (1.0 - math.exp(log_var_in.data.data[i])) / (2.0 * n)
 				}
 			}
 		case .MaskedScaledDotProductAttention:
@@ -3952,6 +3976,34 @@ tensor_neg :: proc(a: ^Tensor) -> ^Tensor {
 	if out.requires_grad {
 		out.op = .Neg
 		append(&out.inputs, a)
+	}
+	return out
+}
+tensor_kl_divergence :: proc(mu: ^Tensor, log_var: ^Tensor) -> ^Tensor {
+	// KL(q(z|x) || p(z)) = -0.5 * sum(1 + log_var - mu^2 - exp(log_var))
+	// Returns scalar loss
+
+	n := f64(len(mu.data.data))
+	kl_sum := 0.0
+
+	for i in 0 ..< len(mu.data.data) {
+		mu_val := mu.data.data[i]
+		log_var_val := log_var.data.data[i]
+
+		// KL = -0.5 * (1 + log_var - mu^2 - exp(log_var))
+		kl_sum += 1.0 + log_var_val - mu_val * mu_val - math.exp(log_var_val)
+	}
+
+	kl_loss := -0.5 * kl_sum / n
+
+	out_data := l.matrix_new(f64, 1, 1, mu.allocator)
+	out_data.data[0] = kl_loss
+
+	out := tensor_new(out_data, mu.requires_grad || log_var.requires_grad, mu.allocator)
+	if out.requires_grad {
+		out.op = .KLDivergence
+		append(&out.inputs, mu)
+		append(&out.inputs, log_var)
 	}
 	return out
 }
