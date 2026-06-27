@@ -75,7 +75,19 @@ adam_step :: proc(opt: ^Adam) {
 		if !param.requires_grad || param.grad.data == nil {
 			continue
 		}
+		grad_norm := 0.0
+		for j in 0 ..< len(param.grad.data) {
+			grad_norm += param.grad.data[j] * param.grad.data[j]
+		}
+		grad_norm = math.sqrt(grad_norm)
 
+		max_grad_norm := 1.0
+		if grad_norm > max_grad_norm {
+			scale := max_grad_norm / grad_norm
+			for j in 0 ..< len(param.grad.data) {
+				param.grad.data[j] *= scale
+			}
+		}
 		m := opt.moment_1[i]
 		v := opt.moment_2[i]
 		grad := param.grad.data

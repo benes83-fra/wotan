@@ -50,6 +50,7 @@ Op :: enum {
 	MaskedScaledDotProductAttention,
 	BinaryCrossEntropy,
 	KLDivergence,
+	Scale,
 }
 
 PoolParams :: struct {
@@ -1789,6 +1790,16 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 			if bias_in.requires_grad &&
 			   len(bias_in.grad.data) >
 				   0 {l.vec_add_simd(bias_in.grad.data, dbias, bias_in.grad.data)}
+		case .Scale:
+			a_in := node.inputs[0]
+			scalar := f64(node.int_metadata[0]) / 1000000.0
+
+			if a_in.requires_grad {
+				tensor_ensure_grad(a_in)
+				for i in 0 ..< len(a_in.grad.data) {
+					a_in.grad.data[i] += node.grad.data[i] * scalar
+				}
+			}
 		case .CrossEntropy:
 			// The magical simplified gradient: grad = (softmax_prob - target_one_hot) / N
 			logits_in := node.inputs[0]
@@ -3990,8 +4001,12 @@ tensor_kl_divergence :: proc(mu: ^Tensor, log_var: ^Tensor) -> ^Tensor {
 		mu_val := mu.data.data[i]
 		log_var_val := log_var.data.data[i]
 
-		// KL = -0.5 * (1 + log_var - mu^2 - exp(log_var))
-		kl_sum += 1.0 + log_var_val - mu_val * mu_val - math.exp(log_var_val)
+		exp_val := math.exp(log_var_val)
+		if exp_val > 1e10 {
+			exp_val = 1e10
+		}
+
+		kl_sum += 1.0 + log_var_val - mu_val * mu_val - exp_val
 	}
 
 	kl_loss := -0.5 * kl_sum / n
@@ -4004,6 +4019,20 @@ tensor_kl_divergence :: proc(mu: ^Tensor, log_var: ^Tensor) -> ^Tensor {
 		out.op = .KLDivergence
 		append(&out.inputs, mu)
 		append(&out.inputs, log_var)
+	}
+	return out
+}
+tensor_scale :: proc(a: ^Tensor, scalar: f64) -> ^Tensor {
+	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
+	for i in 0 ..< len(a.data.data) {
+		out_data.data[i] = a.data.data[i] * scalar
+	}
+
+	out := tensor_new(out_data, a.requires_grad, a.allocator)
+	if out.requires_grad {
+		out.op = .Scale
+		append(&out.inputs, a)
+		append(&out.int_metadata, int(scalar * 1000000)) // Store scalar as int
 	}
 	return out
 }

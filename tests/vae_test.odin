@@ -58,11 +58,21 @@ vae_test :: proc(allocator: mem.Allocator) {
 	defer nn.adam_free(&opt)
 	nn.vae_encoder_add_to_optimizer(&encoder, &opt)
 	nn.vae_decoder_add_to_optimizer(&decoder, &opt)
+	beta := 0.0 // Start with no KL penalty
+	beta_target := 0.001 // Very small target beta
+	kl_warmup_epochs := 500 // Gradually increase beta over 500 epochs
 
 	fmt.printf("\nTraining VAE for %d epochs...\n", epochs)
 	fmt.println("Epoch | Recon_loss | KL_loss | Total_loss")
 
 	for epoch in 0 ..< epochs {
+		// KL annealing
+		if epoch < kl_warmup_epochs {
+			beta = beta_target * f64(epoch) / f64(kl_warmup_epochs)
+		} else {
+			beta = beta_target
+		}
+
 		nn.adam_zero_grad(&opt)
 
 		// Sample batch
@@ -90,8 +100,9 @@ vae_test :: proc(allocator: mem.Allocator) {
 		// KL divergence loss
 		kl_loss := t.tensor_kl_divergence(mu, log_var)
 
-		// Total loss = reconstruction + KL
-		total_loss := t.tensor_add(recon_loss, kl_loss)
+		// Weighted total loss: recon + beta * kl
+		weighted_kl := t.tensor_scale(kl_loss, beta)
+		total_loss := t.tensor_add(recon_loss, weighted_kl)
 
 		// Backward and step
 		t.tensor_backward(total_loss)
@@ -113,10 +124,11 @@ vae_test :: proc(allocator: mem.Allocator) {
 		// Print progress
 		if epoch % 200 == 0 {
 			fmt.printf(
-				"Epoch %d | Recon: %.4f | KL: %.4f | Total: %.4f\n",
+				"Epoch %d | Recon: %.4f | KL: %.4f | Beta: %.6f | Total: %.4f\n",
 				epoch,
 				recon_loss_val,
 				kl_loss_val,
+				beta,
 				total_loss_val,
 			)
 		}
