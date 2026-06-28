@@ -223,14 +223,14 @@ save_checkpoint :: proc(
 			write_tensor(file, l.w_hh)
 			write_tensor(file, l.bias)
 		case GRULayer:
-			write_i32(file, 9) // ✅ FIX: Use Type ID 9
+			write_i32(file, 9) // Type 9
 			write_i32(file, i32(l.input_size))
 			write_i32(file, i32(l.hidden_size))
 			write_tensor(file, l.w_ih)
 			write_tensor(file, l.w_hh)
 			write_tensor(file, l.bias)
 		case LSTMLayer:
-			write_i32(file, 10) // ✅ FIX: Use Type ID 10
+			write_i32(file, 10) // Type 10
 			write_i32(file, i32(l.input_size))
 			write_i32(file, i32(l.hidden_size))
 			write_tensor(file, l.w_ih)
@@ -327,8 +327,8 @@ save_checkpoint :: proc(
 				write_tensor(file, block.ln2.gamma)
 				write_tensor(file, block.ln2.beta)
 			}
-
 		}
+
 	}
 
 	// Save optimizer state
@@ -458,15 +458,13 @@ load_checkpoint :: proc(
 				allocator,
 			)
 
-			// Read weight
+			// Free default weight and load saved
 			if layer.weight != nil {
 				t.tensor_free(layer.weight)
 			}
-
-			// Read weight
 			layer.weight, offset = read_tensor(data, offset, allocator)
 
-			// ✅ CRITICAL: Set the shape field for Conv2d weights
+			// Set the shape field for Conv2d weights
 			layer.weight.shape = [4]int{int(out_c), int(in_c), int(k), int(k)}
 
 			// Read or discard bias
@@ -556,7 +554,6 @@ load_checkpoint :: proc(
 			in_size, offset = read_i32(data, offset)
 			hidden_size, offset = read_i32(data, offset)
 
-			// ✅ FIX: Use gru_layer_new, not rnn_layer_new
 			layer := gru_layer_new(int(in_size), int(hidden_size), allocator)
 
 			// Free the randomly initialized defaults and load the saved weights
@@ -576,7 +573,6 @@ load_checkpoint :: proc(
 			in_size, offset = read_i32(data, offset)
 			hidden_size, offset = read_i32(data, offset)
 
-			// ✅ FIX: Use gru_layer_new, not rnn_layer_new
 			layer := lstm_layer_new(int(in_size), int(hidden_size), allocator)
 
 			// Free the randomly initialized defaults and load the saved weights
@@ -801,6 +797,7 @@ load_checkpoint :: proc(
 			}
 
 			append(&model.layers, encoder)
+
 		}
 	}
 
@@ -857,4 +854,735 @@ load_checkpoint :: proc(
 	}
 
 	return model, opt, epoch, true
+}
+// ============================================================================
+// GPT Model Persistence
+// ============================================================================
+// ============================================================================
+// GPT Model Persistence
+// ============================================================================
+
+save_gpt_model :: proc(model: ^GPTModel, path: string) -> bool {
+	file, err := os.create(path)
+	if err != nil {
+		fmt.printf("Failed to create file: %v\n", err)
+		return false
+	}
+	defer os.close(file)
+
+	// Magic header
+	os.write(file, CHECKPOINT_MAGIC)
+
+	// Model type and hyperparameters
+	write_i32(file, 17) // GPT type ID
+	write_i32(file, i32(model.vocab_size))
+	write_i32(file, i32(model.d_model))
+	write_i32(file, i32(model.num_heads))
+	write_i32(file, i32(model.d_ff))
+	write_i32(file, i32(model.num_layers))
+	write_i32(file, i32(model.max_seq_len))
+
+	// Save embeddings
+	write_tensor(file, model.token_emb.weight)
+	write_tensor(file, model.pos_emb.weight)
+
+	// Save each decoder block
+	for i in 0 ..< len(model.blocks) {
+		block := &model.blocks[i]
+
+		// Save MHA
+		write_tensor(file, block.mha.q_proj.weights)
+		write_tensor(file, block.mha.q_proj.bias)
+		write_tensor(file, block.mha.k_proj.weights)
+		write_tensor(file, block.mha.k_proj.bias)
+		write_tensor(file, block.mha.v_proj.weights)
+		write_tensor(file, block.mha.v_proj.bias)
+		write_tensor(file, block.mha.out_proj.weights)
+		write_tensor(file, block.mha.out_proj.bias)
+
+		// Save FFN
+		write_tensor(file, block.ffn.fc1.weights)
+		write_tensor(file, block.ffn.fc1.bias)
+		write_tensor(file, block.ffn.fc2.weights)
+		write_tensor(file, block.ffn.fc2.bias)
+
+		// Save LayerNorms
+		write_tensor(file, block.ln1.gamma)
+		write_tensor(file, block.ln1.beta)
+		write_tensor(file, block.ln2.gamma)
+		write_tensor(file, block.ln2.beta)
+	}
+
+	// Save final layer norm
+	write_tensor(file, model.final_ln.gamma)
+	write_tensor(file, model.final_ln.beta)
+
+	// Save output projection
+	write_tensor(file, model.output_proj.weights)
+	write_tensor(file, model.output_proj.bias)
+
+	return true
+}
+
+load_gpt_model :: proc(
+	path: string,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	^GPTModel,
+	bool,
+) {
+	data, err := os.read_entire_file(path, allocator)
+	if err != nil {
+		fmt.printf("Failed to read file: %v\n", err)
+		return nil, false
+	}
+	defer delete(data, allocator)
+
+	offset := 0
+
+	// Magic header
+	if offset + 10 > len(data) {
+		fmt.println("File too small")
+		return nil, false
+	}
+	magic := CHECKPOINT_MAGIC
+	for i in 0 ..< 10 {
+		if data[offset + i] != magic[i] {
+			fmt.println("Invalid magic bytes")
+			return nil, false
+		}
+	}
+	offset += 10
+
+	// Model type
+	model_type: i32
+	model_type, offset = read_i32(data, offset)
+	if model_type != 17 {
+		fmt.println("Not a GPT model")
+		return nil, false
+	}
+
+	// Hyperparameters
+	vocab_size: i32
+	d_model: i32
+	num_heads: i32
+	d_ff: i32
+	num_layers: i32
+	max_seq_len: i32
+	vocab_size, offset = read_i32(data, offset)
+	d_model, offset = read_i32(data, offset)
+	num_heads, offset = read_i32(data, offset)
+	d_ff, offset = read_i32(data, offset)
+	num_layers, offset = read_i32(data, offset)
+	max_seq_len, offset = read_i32(data, offset)
+
+	model_ptr := new(GPTModel, allocator)
+	model_ptr^ = gpt_model_new(
+		int(vocab_size),
+		int(d_model),
+		int(num_heads),
+		int(d_ff),
+		int(num_layers),
+		int(max_seq_len),
+		allocator,
+	)
+
+	// Load embeddings
+	if model_ptr.token_emb.weight != nil {t.tensor_free(model_ptr.token_emb.weight)}
+	model_ptr.token_emb.weight, offset = read_tensor(data, offset, allocator)
+
+	if model_ptr.pos_emb.weight != nil {t.tensor_free(model_ptr.pos_emb.weight)}
+	model_ptr.pos_emb.weight, offset = read_tensor(data, offset, allocator)
+
+	// Load each decoder block
+	for i in 0 ..< int(num_layers) {
+		block := &model_ptr.blocks[i]
+
+		// Load MHA
+		if block.mha.q_proj.weights != nil {t.tensor_free(block.mha.q_proj.weights)}
+		block.mha.q_proj.weights, offset = read_tensor(data, offset, allocator)
+		if block.mha.q_proj.bias != nil {t.tensor_free(block.mha.q_proj.bias)}
+		block.mha.q_proj.bias, offset = read_tensor(data, offset, allocator)
+
+		if block.mha.k_proj.weights != nil {t.tensor_free(block.mha.k_proj.weights)}
+		block.mha.k_proj.weights, offset = read_tensor(data, offset, allocator)
+		if block.mha.k_proj.bias != nil {t.tensor_free(block.mha.k_proj.bias)}
+		block.mha.k_proj.bias, offset = read_tensor(data, offset, allocator)
+
+		if block.mha.v_proj.weights != nil {t.tensor_free(block.mha.v_proj.weights)}
+		block.mha.v_proj.weights, offset = read_tensor(data, offset, allocator)
+		if block.mha.v_proj.bias != nil {t.tensor_free(block.mha.v_proj.bias)}
+		block.mha.v_proj.bias, offset = read_tensor(data, offset, allocator)
+
+		if block.mha.out_proj.weights != nil {t.tensor_free(block.mha.out_proj.weights)}
+		block.mha.out_proj.weights, offset = read_tensor(data, offset, allocator)
+		if block.mha.out_proj.bias != nil {t.tensor_free(block.mha.out_proj.bias)}
+		block.mha.out_proj.bias, offset = read_tensor(data, offset, allocator)
+
+		// Load FFN
+		if block.ffn.fc1.weights != nil {t.tensor_free(block.ffn.fc1.weights)}
+		block.ffn.fc1.weights, offset = read_tensor(data, offset, allocator)
+		if block.ffn.fc1.bias != nil {t.tensor_free(block.ffn.fc1.bias)}
+		block.ffn.fc1.bias, offset = read_tensor(data, offset, allocator)
+
+		if block.ffn.fc2.weights != nil {t.tensor_free(block.ffn.fc2.weights)}
+		block.ffn.fc2.weights, offset = read_tensor(data, offset, allocator)
+		if block.ffn.fc2.bias != nil {t.tensor_free(block.ffn.fc2.bias)}
+		block.ffn.fc2.bias, offset = read_tensor(data, offset, allocator)
+
+		// Load LayerNorms
+		if block.ln1.gamma != nil {t.tensor_free(block.ln1.gamma)}
+		block.ln1.gamma, offset = read_tensor(data, offset, allocator)
+		if block.ln1.beta != nil {t.tensor_free(block.ln1.beta)}
+		block.ln1.beta, offset = read_tensor(data, offset, allocator)
+
+		if block.ln2.gamma != nil {t.tensor_free(block.ln2.gamma)}
+		block.ln2.gamma, offset = read_tensor(data, offset, allocator)
+		if block.ln2.beta != nil {t.tensor_free(block.ln2.beta)}
+		block.ln2.beta, offset = read_tensor(data, offset, allocator)
+	}
+
+	// Load final layer norm
+	if model_ptr.final_ln.gamma != nil {t.tensor_free(model_ptr.final_ln.gamma)}
+	model_ptr.final_ln.gamma, offset = read_tensor(data, offset, allocator)
+	if model_ptr.final_ln.beta != nil {t.tensor_free(model_ptr.final_ln.beta)}
+	model_ptr.final_ln.beta, offset = read_tensor(data, offset, allocator)
+
+	// Load output projection
+	if model_ptr.output_proj.weights != nil {t.tensor_free(model_ptr.output_proj.weights)}
+	model_ptr.output_proj.weights, offset = read_tensor(data, offset, allocator)
+	if model_ptr.output_proj.bias != nil {t.tensor_free(model_ptr.output_proj.bias)}
+	model_ptr.output_proj.bias, offset = read_tensor(data, offset, allocator)
+
+	return model_ptr, true
+}
+
+// ============================================================================
+// BERT Model Persistence
+// ============================================================================
+
+save_bert_model :: proc(model: ^BERTModel, path: string) -> bool {
+	file, err := os.create(path)
+	if err != nil {
+		fmt.printf("Failed to create file: %v\n", err)
+		return false
+	}
+	defer os.close(file)
+
+	os.write(file, CHECKPOINT_MAGIC)
+
+	write_i32(file, 18) // BERT type ID
+	write_i32(file, i32(model.vocab_size))
+	write_i32(file, i32(model.d_model))
+	write_i32(file, i32(model.num_heads))
+	write_i32(file, i32(model.d_ff))
+	write_i32(file, i32(model.num_layers))
+	write_i32(file, i32(model.max_seq_len))
+
+	write_tensor(file, model.token_emb.weight)
+	write_tensor(file, model.pos_emb.weight)
+	write_tensor(file, model.segment_emb.weight)
+
+	write_tensor(file, model.emb_ln.gamma)
+	write_tensor(file, model.emb_ln.beta)
+
+	for i in 0 ..< len(model.encoder_blocks) {
+		block := &model.encoder_blocks[i]
+
+		write_tensor(file, block.mha.q_proj.weights)
+		write_tensor(file, block.mha.q_proj.bias)
+		write_tensor(file, block.mha.k_proj.weights)
+		write_tensor(file, block.mha.k_proj.bias)
+		write_tensor(file, block.mha.v_proj.weights)
+		write_tensor(file, block.mha.v_proj.bias)
+		write_tensor(file, block.mha.out_proj.weights)
+		write_tensor(file, block.mha.out_proj.bias)
+
+		write_tensor(file, block.ffn.fc1.weights)
+		write_tensor(file, block.ffn.fc1.bias)
+		write_tensor(file, block.ffn.fc2.weights)
+		write_tensor(file, block.ffn.fc2.bias)
+
+		write_tensor(file, block.ln1.gamma)
+		write_tensor(file, block.ln1.beta)
+		write_tensor(file, block.ln2.gamma)
+		write_tensor(file, block.ln2.beta)
+	}
+
+	write_tensor(file, model.pooler.weights)
+	write_tensor(file, model.pooler.bias)
+
+	write_tensor(file, model.mlm_head.weights)
+	write_tensor(file, model.mlm_head.bias)
+
+	write_tensor(file, model.nsp_head.weights)
+	write_tensor(file, model.nsp_head.bias)
+
+	return true
+}
+
+load_bert_model :: proc(
+	path: string,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	^BERTModel,
+	bool,
+) {
+	data, err := os.read_entire_file(path, allocator)
+	if err != nil {
+		fmt.printf("Failed to read file: %v\n", err)
+		return nil, false
+	}
+	defer delete(data, allocator)
+
+	offset := 0
+
+	if offset + 10 > len(data) {
+		fmt.println("File too small")
+		return nil, false
+	}
+	magic := CHECKPOINT_MAGIC
+	for i in 0 ..< 10 {
+		if data[offset + i] != magic[i] {
+			fmt.println("Invalid magic bytes")
+			return nil, false
+		}
+	}
+	offset += 10
+
+	model_type: i32
+	model_type, offset = read_i32(data, offset)
+	if model_type != 18 {
+		fmt.println("Not a BERT model")
+		return nil, false
+	}
+
+	vocab_size: i32
+	d_model: i32
+	num_heads: i32
+	d_ff: i32
+	num_layers: i32
+	max_seq_len: i32
+	vocab_size, offset = read_i32(data, offset)
+	d_model, offset = read_i32(data, offset)
+	num_heads, offset = read_i32(data, offset)
+	d_ff, offset = read_i32(data, offset)
+	num_layers, offset = read_i32(data, offset)
+	max_seq_len, offset = read_i32(data, offset)
+
+	model_ptr := new(BERTModel, allocator)
+	model_ptr^ = bert_model_new(
+		int(vocab_size),
+		int(d_model),
+		int(num_heads),
+		int(d_ff),
+		int(num_layers),
+		int(max_seq_len),
+		allocator,
+	)
+
+	if model_ptr.token_emb.weight != nil {t.tensor_free(model_ptr.token_emb.weight)}
+	model_ptr.token_emb.weight, offset = read_tensor(data, offset, allocator)
+
+	if model_ptr.pos_emb.weight != nil {t.tensor_free(model_ptr.pos_emb.weight)}
+	model_ptr.pos_emb.weight, offset = read_tensor(data, offset, allocator)
+
+	if model_ptr.segment_emb.weight != nil {t.tensor_free(model_ptr.segment_emb.weight)}
+	model_ptr.segment_emb.weight, offset = read_tensor(data, offset, allocator)
+
+	if model_ptr.emb_ln.gamma != nil {t.tensor_free(model_ptr.emb_ln.gamma)}
+	model_ptr.emb_ln.gamma, offset = read_tensor(data, offset, allocator)
+	if model_ptr.emb_ln.beta != nil {t.tensor_free(model_ptr.emb_ln.beta)}
+	model_ptr.emb_ln.beta, offset = read_tensor(data, offset, allocator)
+
+	for i in 0 ..< int(num_layers) {
+		block := &model_ptr.encoder_blocks[i]
+
+		if block.mha.q_proj.weights != nil {t.tensor_free(block.mha.q_proj.weights)}
+		block.mha.q_proj.weights, offset = read_tensor(data, offset, allocator)
+		if block.mha.q_proj.bias != nil {t.tensor_free(block.mha.q_proj.bias)}
+		block.mha.q_proj.bias, offset = read_tensor(data, offset, allocator)
+
+		if block.mha.k_proj.weights != nil {t.tensor_free(block.mha.k_proj.weights)}
+		block.mha.k_proj.weights, offset = read_tensor(data, offset, allocator)
+		if block.mha.k_proj.bias != nil {t.tensor_free(block.mha.k_proj.bias)}
+		block.mha.k_proj.bias, offset = read_tensor(data, offset, allocator)
+
+		if block.mha.v_proj.weights != nil {t.tensor_free(block.mha.v_proj.weights)}
+		block.mha.v_proj.weights, offset = read_tensor(data, offset, allocator)
+		if block.mha.v_proj.bias != nil {t.tensor_free(block.mha.v_proj.bias)}
+		block.mha.v_proj.bias, offset = read_tensor(data, offset, allocator)
+
+		if block.mha.out_proj.weights != nil {t.tensor_free(block.mha.out_proj.weights)}
+		block.mha.out_proj.weights, offset = read_tensor(data, offset, allocator)
+		if block.mha.out_proj.bias != nil {t.tensor_free(block.mha.out_proj.bias)}
+		block.mha.out_proj.bias, offset = read_tensor(data, offset, allocator)
+
+		if block.ffn.fc1.weights != nil {t.tensor_free(block.ffn.fc1.weights)}
+		block.ffn.fc1.weights, offset = read_tensor(data, offset, allocator)
+		if block.ffn.fc1.bias != nil {t.tensor_free(block.ffn.fc1.bias)}
+		block.ffn.fc1.bias, offset = read_tensor(data, offset, allocator)
+
+		if block.ffn.fc2.weights != nil {t.tensor_free(block.ffn.fc2.weights)}
+		block.ffn.fc2.weights, offset = read_tensor(data, offset, allocator)
+		if block.ffn.fc2.bias != nil {t.tensor_free(block.ffn.fc2.bias)}
+		block.ffn.fc2.bias, offset = read_tensor(data, offset, allocator)
+
+		if block.ln1.gamma != nil {t.tensor_free(block.ln1.gamma)}
+		block.ln1.gamma, offset = read_tensor(data, offset, allocator)
+		if block.ln1.beta != nil {t.tensor_free(block.ln1.beta)}
+		block.ln1.beta, offset = read_tensor(data, offset, allocator)
+
+		if block.ln2.gamma != nil {t.tensor_free(block.ln2.gamma)}
+		block.ln2.gamma, offset = read_tensor(data, offset, allocator)
+		if block.ln2.beta != nil {t.tensor_free(block.ln2.beta)}
+		block.ln2.beta, offset = read_tensor(data, offset, allocator)
+	}
+
+	if model_ptr.pooler.weights != nil {t.tensor_free(model_ptr.pooler.weights)}
+	model_ptr.pooler.weights, offset = read_tensor(data, offset, allocator)
+	if model_ptr.pooler.bias != nil {t.tensor_free(model_ptr.pooler.bias)}
+	model_ptr.pooler.bias, offset = read_tensor(data, offset, allocator)
+
+	if model_ptr.mlm_head.weights != nil {t.tensor_free(model_ptr.mlm_head.weights)}
+	model_ptr.mlm_head.weights, offset = read_tensor(data, offset, allocator)
+	if model_ptr.mlm_head.bias != nil {t.tensor_free(model_ptr.mlm_head.bias)}
+	model_ptr.mlm_head.bias, offset = read_tensor(data, offset, allocator)
+
+	if model_ptr.nsp_head.weights != nil {t.tensor_free(model_ptr.nsp_head.weights)}
+	model_ptr.nsp_head.weights, offset = read_tensor(data, offset, allocator)
+	if model_ptr.nsp_head.bias != nil {t.tensor_free(model_ptr.nsp_head.bias)}
+	model_ptr.nsp_head.bias, offset = read_tensor(data, offset, allocator)
+
+	return model_ptr, true
+}
+// ============================================================================
+// Generator Persistence
+// ============================================================================
+
+save_generator :: proc(gen: ^Generator, path: string) -> bool {
+	file, err := os.create(path)
+	if err != nil {
+		fmt.printf("Failed to create file: %v\n", err)
+		return false
+	}
+	defer os.close(file)
+
+	os.write(file, CHECKPOINT_MAGIC)
+	write_i32(file, 19) // Generator type ID
+
+	write_tensor(file, gen.fc1.weights)
+	write_tensor(file, gen.fc1.bias)
+	write_tensor(file, gen.fc2.weights)
+	write_tensor(file, gen.fc2.bias)
+	write_tensor(file, gen.fc3.weights)
+	write_tensor(file, gen.fc3.bias)
+
+	return true
+}
+
+load_generator :: proc(
+	path: string,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	^Generator,
+	bool,
+) {
+	data, err := os.read_entire_file(path, allocator)
+	if err != nil {
+		fmt.printf("Failed to read file: %v\n", err)
+		return nil, false
+	}
+	defer delete(data, allocator)
+
+	offset := 0
+
+	if offset + 10 > len(data) {
+		fmt.println("File too small")
+		return nil, false
+	}
+	magic := CHECKPOINT_MAGIC
+	for i in 0 ..< 10 {
+		if data[offset + i] != magic[i] {
+			fmt.println("Invalid magic bytes")
+			return nil, false
+		}
+	}
+	offset += 10
+
+	model_type: i32
+	model_type, offset = read_i32(data, offset)
+	if model_type != 19 {
+		fmt.println("Not a Generator")
+		return nil, false
+	}
+
+	gen_ptr := new(Generator, allocator)
+
+	// Load fc1
+	gen_ptr.fc1 = linear_layer_new(1, 1, allocator)
+	if gen_ptr.fc1.weights != nil {t.tensor_free(gen_ptr.fc1.weights)}
+	gen_ptr.fc1.weights, offset = read_tensor(data, offset, allocator)
+	if gen_ptr.fc1.bias != nil {t.tensor_free(gen_ptr.fc1.bias)}
+	gen_ptr.fc1.bias, offset = read_tensor(data, offset, allocator)
+
+	// Load fc2
+	if gen_ptr.fc2.weights != nil {t.tensor_free(gen_ptr.fc2.weights)}
+	gen_ptr.fc2.weights, offset = read_tensor(data, offset, allocator)
+	if gen_ptr.fc2.bias != nil {t.tensor_free(gen_ptr.fc2.bias)}
+	gen_ptr.fc2.bias, offset = read_tensor(data, offset, allocator)
+
+	// Load fc3
+	if gen_ptr.fc3.weights != nil {t.tensor_free(gen_ptr.fc3.weights)}
+	gen_ptr.fc3.weights, offset = read_tensor(data, offset, allocator)
+	if gen_ptr.fc3.bias != nil {t.tensor_free(gen_ptr.fc3.bias)}
+	gen_ptr.fc3.bias, offset = read_tensor(data, offset, allocator)
+
+	return gen_ptr, true
+}
+
+// ============================================================================
+// Discriminator Persistence
+// ============================================================================
+
+save_discriminator :: proc(disc: ^Discriminator, path: string) -> bool {
+	file, err := os.create(path)
+	if err != nil {
+		fmt.printf("Failed to create file: %v\n", err)
+		return false
+	}
+	defer os.close(file)
+
+	os.write(file, CHECKPOINT_MAGIC)
+	write_i32(file, 20) // Discriminator type ID
+
+	write_tensor(file, disc.fc1.weights)
+	write_tensor(file, disc.fc1.bias)
+	write_tensor(file, disc.fc2.weights)
+	write_tensor(file, disc.fc2.bias)
+	write_tensor(file, disc.fc3.weights)
+	write_tensor(file, disc.fc3.bias)
+
+	return true
+}
+
+load_discriminator :: proc(
+	path: string,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	^Discriminator,
+	bool,
+) {
+	data, err := os.read_entire_file(path, allocator)
+	if err != nil {
+		fmt.printf("Failed to read file: %v\n", err)
+		return nil, false
+	}
+	defer delete(data, allocator)
+
+	offset := 0
+
+	if offset + 10 > len(data) {
+		fmt.println("File too small")
+		return nil, false
+	}
+	magic := CHECKPOINT_MAGIC
+	for i in 0 ..< 10 {
+		if data[offset + i] != magic[i] {
+			fmt.println("Invalid magic bytes")
+			return nil, false
+		}
+	}
+	offset += 10
+
+	model_type: i32
+	model_type, offset = read_i32(data, offset)
+	if model_type != 20 {
+		fmt.println("Not a Discriminator")
+		return nil, false
+	}
+
+	disc_ptr := new(Discriminator, allocator)
+
+	disc_ptr.fc1 = linear_layer_new(1, 1, allocator)
+	if disc_ptr.fc1.weights != nil {t.tensor_free(disc_ptr.fc1.weights)}
+	disc_ptr.fc1.weights, offset = read_tensor(data, offset, allocator)
+	if disc_ptr.fc1.bias != nil {t.tensor_free(disc_ptr.fc1.bias)}
+	disc_ptr.fc1.bias, offset = read_tensor(data, offset, allocator)
+
+	if disc_ptr.fc2.weights != nil {t.tensor_free(disc_ptr.fc2.weights)}
+	disc_ptr.fc2.weights, offset = read_tensor(data, offset, allocator)
+	if disc_ptr.fc2.bias != nil {t.tensor_free(disc_ptr.fc2.bias)}
+	disc_ptr.fc2.bias, offset = read_tensor(data, offset, allocator)
+
+	if disc_ptr.fc3.weights != nil {t.tensor_free(disc_ptr.fc3.weights)}
+	disc_ptr.fc3.weights, offset = read_tensor(data, offset, allocator)
+	if disc_ptr.fc3.bias != nil {t.tensor_free(disc_ptr.fc3.bias)}
+	disc_ptr.fc3.bias, offset = read_tensor(data, offset, allocator)
+
+	return disc_ptr, true
+}
+
+// ============================================================================
+// VAE Encoder Persistence
+// ============================================================================
+
+save_vae_encoder :: proc(enc: ^VAEEncoder, path: string) -> bool {
+	file, err := os.create(path)
+	if err != nil {
+		fmt.printf("Failed to create file: %v\n", err)
+		return false
+	}
+	defer os.close(file)
+
+	os.write(file, CHECKPOINT_MAGIC)
+	write_i32(file, 21) // VAEEncoder type ID
+
+	write_tensor(file, enc.fc1.weights)
+	write_tensor(file, enc.fc1.bias)
+	write_tensor(file, enc.fc_mu.weights)
+	write_tensor(file, enc.fc_mu.bias)
+	write_tensor(file, enc.fc_logvar.weights)
+	write_tensor(file, enc.fc_logvar.bias)
+
+	return true
+}
+
+load_vae_encoder :: proc(
+	path: string,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	^VAEEncoder,
+	bool,
+) {
+	data, err := os.read_entire_file(path, allocator)
+	if err != nil {
+		fmt.printf("Failed to read file: %v\n", err)
+		return nil, false
+	}
+	defer delete(data, allocator)
+
+	offset := 0
+
+	if offset + 10 > len(data) {
+		fmt.println("File too small")
+		return nil, false
+	}
+	magic := CHECKPOINT_MAGIC
+	for i in 0 ..< 10 {
+		if data[offset + i] != magic[i] {
+			fmt.println("Invalid magic bytes")
+			return nil, false
+		}
+	}
+	offset += 10
+
+	model_type: i32
+	model_type, offset = read_i32(data, offset)
+	if model_type != 21 {
+		fmt.println("Not a VAE Encoder")
+		return nil, false
+	}
+
+	enc_ptr := new(VAEEncoder, allocator)
+
+	enc_ptr.fc1 = linear_layer_new(1, 1, allocator)
+	if enc_ptr.fc1.weights != nil {t.tensor_free(enc_ptr.fc1.weights)}
+	enc_ptr.fc1.weights, offset = read_tensor(data, offset, allocator)
+	if enc_ptr.fc1.bias != nil {t.tensor_free(enc_ptr.fc1.bias)}
+	enc_ptr.fc1.bias, offset = read_tensor(data, offset, allocator)
+
+	if enc_ptr.fc_mu.weights != nil {t.tensor_free(enc_ptr.fc_mu.weights)}
+	enc_ptr.fc_mu.weights, offset = read_tensor(data, offset, allocator)
+	if enc_ptr.fc_mu.bias != nil {t.tensor_free(enc_ptr.fc_mu.bias)}
+	enc_ptr.fc_mu.bias, offset = read_tensor(data, offset, allocator)
+
+	if enc_ptr.fc_logvar.weights != nil {t.tensor_free(enc_ptr.fc_logvar.weights)}
+	enc_ptr.fc_logvar.weights, offset = read_tensor(data, offset, allocator)
+	if enc_ptr.fc_logvar.bias != nil {t.tensor_free(enc_ptr.fc_logvar.bias)}
+	enc_ptr.fc_logvar.bias, offset = read_tensor(data, offset, allocator)
+
+	return enc_ptr, true
+}
+
+// ============================================================================
+// VAE Decoder Persistence
+// ============================================================================
+
+save_vae_decoder :: proc(dec: ^VAEDecoder, path: string) -> bool {
+	file, err := os.create(path)
+	if err != nil {
+		fmt.printf("Failed to create file: %v\n", err)
+		return false
+	}
+	defer os.close(file)
+
+	os.write(file, CHECKPOINT_MAGIC)
+	write_i32(file, 22) // VAEDecoder type ID
+
+	write_tensor(file, dec.fc1.weights)
+	write_tensor(file, dec.fc1.bias)
+	write_tensor(file, dec.fc2.weights)
+	write_tensor(file, dec.fc2.bias)
+	write_tensor(file, dec.fc3.weights)
+	write_tensor(file, dec.fc3.bias)
+
+	return true
+}
+
+load_vae_decoder :: proc(
+	path: string,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	^VAEDecoder,
+	bool,
+) {
+	data, err := os.read_entire_file(path, allocator)
+	if err != nil {
+		fmt.printf("Failed to read file: %v\n", err)
+		return nil, false
+	}
+	defer delete(data, allocator)
+
+	offset := 0
+
+	if offset + 10 > len(data) {
+		fmt.println("File too small")
+		return nil, false
+	}
+	magic := CHECKPOINT_MAGIC
+	for i in 0 ..< 10 {
+		if data[offset + i] != magic[i] {
+			fmt.println("Invalid magic bytes")
+			return nil, false
+		}
+	}
+	offset += 10
+
+	model_type: i32
+	model_type, offset = read_i32(data, offset)
+	if model_type != 22 {
+		fmt.println("Not a VAE Decoder")
+		return nil, false
+	}
+
+	dec_ptr := new(VAEDecoder, allocator)
+
+	dec_ptr.fc1 = linear_layer_new(1, 1, allocator)
+	if dec_ptr.fc1.weights != nil {t.tensor_free(dec_ptr.fc1.weights)}
+	dec_ptr.fc1.weights, offset = read_tensor(data, offset, allocator)
+	if dec_ptr.fc1.bias != nil {t.tensor_free(dec_ptr.fc1.bias)}
+	dec_ptr.fc1.bias, offset = read_tensor(data, offset, allocator)
+
+	if dec_ptr.fc2.weights != nil {t.tensor_free(dec_ptr.fc2.weights)}
+	dec_ptr.fc2.weights, offset = read_tensor(data, offset, allocator)
+	if dec_ptr.fc2.bias != nil {t.tensor_free(dec_ptr.fc2.bias)}
+	dec_ptr.fc2.bias, offset = read_tensor(data, offset, allocator)
+
+	if dec_ptr.fc3.weights != nil {t.tensor_free(dec_ptr.fc3.weights)}
+	dec_ptr.fc3.weights, offset = read_tensor(data, offset, allocator)
+	if dec_ptr.fc3.bias != nil {t.tensor_free(dec_ptr.fc3.bias)}
+	dec_ptr.fc3.bias, offset = read_tensor(data, offset, allocator)
+
+	return dec_ptr, true
 }

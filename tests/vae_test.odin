@@ -70,9 +70,9 @@ vae_test :: proc(allocator: mem.Allocator) {
 	// ✅ CRITICAL: Proper beta scheduling
 	// Start with beta=0, gradually increase to 1.0 over first 1000 epochs
 	// This allows reconstruction to learn first, then adds KL regularization
-	beta := 0.0
+	beta := 1.0
 	beta_target := 1.0 // Full KL penalty
-	kl_warmup_epochs := 1000
+	kl_warmup_epochs := 0
 
 	fmt.printf("\nTraining VAE for %d epochs...\n", epochs)
 	fmt.println("Epoch | Recon_loss | KL_loss | Beta | Total_loss")
