@@ -560,3 +560,9 @@ gpt_softmax_sample :: proc(logits: []f64) -> int {
 
 	return len(logits) - 1
 }
+// In gpt.odin
+gpt_replace_output_head :: proc(model: ^GPTModel, new_vocab_size: int, allocator: mem.Allocator) {
+	linear_layer_free(&model.output_proj)
+	model.output_proj = linear_layer_new(model.d_model, new_vocab_size, allocator)
+	model.vocab_size = new_vocab_size
+}

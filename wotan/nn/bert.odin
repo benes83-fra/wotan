@@ -264,3 +264,18 @@ bert_model_add_to_optimizer :: proc(model: ^BERTModel, opt: ^Adam) {
 	adam_add_param(opt, model.nsp_head.weights)
 	adam_add_param(opt, model.nsp_head.bias)
 }
+
+
+bert_replace_nsp_head :: proc(model: ^BERTModel, new_num_classes: int, allocator: mem.Allocator) {
+	// Free old head
+	linear_layer_free(&model.nsp_head)
+
+	// Create new head
+	model.nsp_head = linear_layer_new(model.d_model, new_num_classes, allocator)
+}
+
+bert_replace_mlm_head :: proc(model: ^BERTModel, new_vocab_size: int, allocator: mem.Allocator) {
+	linear_layer_free(&model.mlm_head)
+	model.mlm_head = linear_layer_new(model.d_model, new_vocab_size, allocator)
+	model.vocab_size = new_vocab_size
+}

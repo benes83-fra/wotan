@@ -405,3 +405,23 @@ sequential_add_to_opt :: proc {
 	sequential_add_to_sgd,
 	sequential_add_to_adam,
 }
+sequential_replace_last_layer :: proc(
+	seq: ^Sequential,
+	new_layer: Layer,
+	allocator: mem.Allocator,
+) {
+	if len(seq.layers) == 0 {return}
+
+	// Free old last layer
+	last_idx := len(seq.layers) - 1
+	old_layer := &seq.layers[last_idx]
+	#partial switch &l in old_layer {
+	case LinearLayer:
+		linear_layer_free(&l)
+	case Conv2dLayer:
+		conv2d_layer_free(&l)
+	}
+
+	// Replace with new layer
+	seq.layers[last_idx] = new_layer
+}
