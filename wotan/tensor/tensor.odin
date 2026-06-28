@@ -351,64 +351,6 @@ tensor_mse_loss :: proc(pred: ^Tensor, target: ^Tensor) -> ^Tensor {
 	return out
 }
 
-// tensor_sigmoid applies σ(x) = 1 / (1 + exp(-x))
-tensor_sigmoid :: proc(a: ^Tensor) -> ^Tensor {
-	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
-	n := len(a.data.data)
-
-	for i in 0 ..< n {
-		out_data.data[i] = 1.0 / (1.0 + math.exp(-a.data.data[i]))
-	}
-
-	out := tensor_new(out_data, a.requires_grad, a.allocator)
-	out.shape = a.shape
-
-	if out.requires_grad {
-		out.op = .Sigmoid
-		append(&out.inputs, a)
-	}
-	return out
-}
-
-// tensor_tanh applies tanh(x)
-tensor_tanh :: proc(a: ^Tensor) -> ^Tensor {
-	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
-	n := len(a.data.data)
-
-	for i in 0 ..< n {
-		out_data.data[i] = math.tanh(a.data.data[i])
-	}
-
-	out := tensor_new(out_data, a.requires_grad, a.allocator)
-	out.shape = a.shape
-
-	if out.requires_grad {
-		out.op = .Tanh
-		append(&out.inputs, a)
-	}
-	return out
-}
-
-// tensor_leaky_relu applies max(α*x, x) where α is small (e.g., 0.01)
-tensor_leaky_relu :: proc(a: ^Tensor, alpha: f64 = 0.01) -> ^Tensor {
-	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
-	n := len(a.data.data)
-
-	for i in 0 ..< n {
-		v := a.data.data[i]
-		out_data.data[i] = v > 0.0 ? v : alpha * v
-	}
-
-	out := tensor_new(out_data, a.requires_grad, a.allocator)
-	out.shape = a.shape
-
-	if out.requires_grad {
-		out.op = .LeakyReLU
-		append(&out.inputs, a)
-	}
-	return out
-}
-
 
 // tensor_cross_entropy_loss calculates the loss for multi-class classification.
 tensor_cross_entropy_loss :: proc(logits: ^Tensor, target_indices: []int) -> ^Tensor {
@@ -591,47 +533,34 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 		case .Sub:
 			a_in := node.inputs[0]
 			b_in := node.inputs[1]
-
-			// ∂L/∂a = ∂L/∂out (gradient flows through unchanged)
 			if a_in.requires_grad {
 				tensor_ensure_grad(a_in)
 				if len(a_in.grad.data) > 0 && len(node.grad.data) > 0 {
 					l.vec_add_simd(a_in.grad.data, node.grad.data, a_in.grad.data)
 				}
 			}
-
-			// ∂L/∂b = -∂L/∂out (negative gradient)
 			if b_in.requires_grad {
 				tensor_ensure_grad(b_in)
 				if len(b_in.grad.data) > 0 && len(node.grad.data) > 0 {
-					for i in 0 ..< len(b_in.grad.data) {
-						b_in.grad.data[i] -= node.grad.data[i]
-					}
+					l.vec_sub_inplace_simd(b_in.grad.data, node.grad.data) // ✅ SIMD
 				}
 			}
 
 		case .Mean:
-			// Mean reduces to scalar, so gradient broadcasts back uniformly
-			// ∂L/∂a_i = ∂L/∂mean * (1/n)
 			a_in := node.inputs[0]
 			if a_in.requires_grad {
 				tensor_ensure_grad(a_in)
 				n := f64(len(a_in.data.data))
 				scalar_grad := node.grad.data[0] / n
-				for i in 0 ..< len(a_in.grad.data) {
-					a_in.grad.data[i] += scalar_grad
-				}
+				l.vec_broadcast_add_simd(scalar_grad, a_in.grad.data) // ✅ SIMD
 			}
 
 		case .Neg:
-			// ∂L/∂a = -∂L/∂out
 			a_in := node.inputs[0]
 			if a_in.requires_grad {
 				tensor_ensure_grad(a_in)
 				if len(a_in.grad.data) > 0 && len(node.grad.data) > 0 {
-					for i in 0 ..< len(a_in.grad.data) {
-						a_in.grad.data[i] -= node.grad.data[i]
-					}
+					l.vec_sub_inplace_simd(a_in.grad.data, node.grad.data) // ✅ SIMD
 				}
 			}
 		case .MatMul:
@@ -700,9 +629,6 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 				}
 			}
 		case .Sum:
-			// L = sum(A)
-			// dL/dA_ij = 1 for all i, j.
-			// We just broadcast the incoming scalar gradient to the shape of A.
 			a_in := node.inputs[0]
 			if a_in.requires_grad {
 				if len(node.grad.data) == 0 {
@@ -710,9 +636,7 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 					continue
 				}
 				scalar_grad := node.grad.data[0]
-				for j in 0 ..< len(a_in.grad.data) {
-					a_in.grad.data[j] += scalar_grad
-				}
+				l.vec_broadcast_add_simd(scalar_grad, a_in.grad.data) // ✅ SIMD
 			}
 		case .KLDivergence:
 			mu_in := node.inputs[0]
@@ -916,10 +840,7 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 					fmt.printf("WARNING: Sigmoid backward length mismatch\n")
 					continue
 				}
-				for i in 0 ..< len(a_in.grad.data) {
-					s := a_in.data.data[i]
-					a_in.grad.data[i] += node.grad.data[i] * s * (1.0 - s)
-				}
+				l.vec_sigmoid_backward_simd(node.grad.data, a_in.data.data, a_in.grad.data) // ✅ SIMD
 			}
 
 		case .Tanh:
@@ -930,10 +851,7 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 					fmt.printf("WARNING: Tanh backward length mismatch\n")
 					continue
 				}
-				for i in 0 ..< len(a_in.grad.data) {
-					t := a_in.data.data[i]
-					a_in.grad.data[i] += node.grad.data[i] * (1.0 - t * t)
-				}
+				l.vec_tanh_backward_simd(node.grad.data, a_in.data.data, a_in.grad.data) // ✅ SIMD
 			}
 		case .PermuteMHA:
 			x_in := node.inputs[0]
@@ -1824,12 +1742,15 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 		case .Scale:
 			a_in := node.inputs[0]
 			scalar := f64(node.int_metadata[0]) / 1000000.0
-
 			if a_in.requires_grad {
 				tensor_ensure_grad(a_in)
-				for i in 0 ..< len(a_in.grad.data) {
-					a_in.grad.data[i] += node.grad.data[i] * scalar
-				}
+				// a_in.grad += node.grad * scalar
+				// Use fma: out += a * b where a=node.grad, b=scalar (broadcast)
+				// Since we don't have a vec_fma_scalar, do it in two steps
+				temp := make([]f64, len(node.grad.data), allocator)
+				l.vec_scale_simd(node.grad.data, scalar, temp)
+				l.vec_add_simd(a_in.grad.data, temp, a_in.grad.data)
+				delete(temp, allocator)
 			}
 		case .CrossEntropy:
 			// The magical simplified gradient: grad = (softmax_prob - target_one_hot) / N
@@ -4007,20 +3928,7 @@ tensor_mean :: proc(a: ^Tensor) -> ^Tensor {
 }
 
 // tensor_neg computes element-wise negation: out = -a
-tensor_neg :: proc(a: ^Tensor) -> ^Tensor {
-	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
-	for i in 0 ..< len(a.data.data) {
-		out_data.data[i] = -a.data.data[i]
-	}
 
-	out := tensor_new(out_data, a.requires_grad, a.allocator)
-	out.shape = a.shape
-	if out.requires_grad {
-		out.op = .Neg
-		append(&out.inputs, a)
-	}
-	return out
-}
 tensor_kl_divergence :: proc(mu: ^Tensor, log_var: ^Tensor) -> ^Tensor {
 	// KL(q(z|x) || p(z)) = -0.5 * sum(1 + log_var - mu^2 - exp(log_var))
 	// Returns scalar loss
@@ -4053,17 +3961,63 @@ tensor_kl_divergence :: proc(mu: ^Tensor, log_var: ^Tensor) -> ^Tensor {
 	}
 	return out
 }
+
+tensor_sigmoid :: proc(a: ^Tensor) -> ^Tensor {
+	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
+	l.vec_sigmoid_simd(a.data.data, out_data.data) // ✅ SIMD
+	out := tensor_new(out_data, a.requires_grad, a.allocator)
+	out.shape = a.shape
+	if out.requires_grad {
+		out.op = .Sigmoid
+		append(&out.inputs, a)
+	}
+	return out
+}
+
+tensor_tanh :: proc(a: ^Tensor) -> ^Tensor {
+	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
+	l.vec_tanh_simd(a.data.data, out_data.data) // ✅ SIMD
+	out := tensor_new(out_data, a.requires_grad, a.allocator)
+	out.shape = a.shape
+	if out.requires_grad {
+		out.op = .Tanh
+		append(&out.inputs, a)
+	}
+	return out
+}
+
+tensor_leaky_relu :: proc(a: ^Tensor, alpha: f64 = 0.01) -> ^Tensor {
+	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
+	l.vec_leaky_relu_simd(a.data.data, alpha, out_data.data) // ✅ SIMD
+	out := tensor_new(out_data, a.requires_grad, a.allocator)
+	out.shape = a.shape
+	if out.requires_grad {
+		out.op = .LeakyReLU
+		append(&out.inputs, a)
+	}
+	return out
+}
+
+tensor_neg :: proc(a: ^Tensor) -> ^Tensor {
+	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
+	l.vec_neg_simd(a.data.data, out_data.data) // ✅ SIMD
+	out := tensor_new(out_data, a.requires_grad, a.allocator)
+	out.shape = a.shape
+	if out.requires_grad {
+		out.op = .Neg
+		append(&out.inputs, a)
+	}
+	return out
+}
+
 tensor_scale :: proc(a: ^Tensor, scalar: f64) -> ^Tensor {
 	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
-	for i in 0 ..< len(a.data.data) {
-		out_data.data[i] = a.data.data[i] * scalar
-	}
-
+	l.vec_scale_simd(a.data.data, scalar, out_data.data) // ✅ SIMD
 	out := tensor_new(out_data, a.requires_grad, a.allocator)
 	if out.requires_grad {
 		out.op = .Scale
 		append(&out.inputs, a)
-		append(&out.int_metadata, int(scalar * 1000000)) // Store scalar as int
+		append(&out.int_metadata, int(scalar * 1000000))
 	}
 	return out
 }

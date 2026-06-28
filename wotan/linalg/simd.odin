@@ -1176,3 +1176,717 @@ vec_relu_backward_simd :: proc(grad_out, a_in, grad_in: []f64) {
 		if a_in[i] > 0.0 {grad_in[i] += grad_out[i]}
 	}
 }
+// ============================================================================
+// SIMD Vector Negation: out = -a (element-wise, f64)
+// ============================================================================
+vec_neg_simd :: proc(a, out: []f64) {
+	n := len(a)
+	if n != len(out) do panic("vec_neg_simd: length mismatch")
+
+	if !simd.HAS_HARDWARE_SIMD {
+		for i := 0; i < n; i += 1 {
+			out[i] = -a[i]
+		}
+		return
+	}
+
+	// AVX: f64x8
+	if intrinsics.has_target_feature("avx") {
+		zero8 := simd.f64x8{0, 0, 0, 0, 0, 0, 0, 0}
+		i := 0
+		for ; i + 8 <= n; i += 8 {
+			va := simd.f64x8 {
+				a[i + 0],
+				a[i + 1],
+				a[i + 2],
+				a[i + 3],
+				a[i + 4],
+				a[i + 5],
+				a[i + 6],
+				a[i + 7],
+			}
+			vout := intrinsics.simd_sub(zero8, va)
+			out_arr := transmute([8]f64)vout
+			for j := 0; j < 8; j += 1 {
+				out[i + j] = out_arr[j]
+			}
+		}
+		for ; i < n; i += 1 {
+			out[i] = -a[i]
+		}
+		return
+	}
+
+	// SSE2: f64x4
+	if intrinsics.has_target_feature("sse2") {
+		zero4 := simd.f64x4{0, 0, 0, 0}
+		i := 0
+		for ; i + 4 <= n; i += 4 {
+			va := simd.f64x4{a[i + 0], a[i + 1], a[i + 2], a[i + 3]}
+			vout := intrinsics.simd_sub(zero4, va)
+			out_arr := transmute([4]f64)vout
+			for j := 0; j < 4; j += 1 {
+				out[i + j] = out_arr[j]
+			}
+		}
+		for ; i < n; i += 1 {
+			out[i] = -a[i]
+		}
+		return
+	}
+
+	// Fallback
+	for i := 0; i < n; i += 1 {
+		out[i] = -a[i]
+	}
+}
+
+// ============================================================================
+// SIMD Vector Scale: out = a * scalar (element-wise, f64)
+// ============================================================================
+vec_scale_simd :: proc(a: []f64, scalar: f64, out: []f64) {
+	n := len(a)
+	if n != len(out) do panic("vec_scale_simd: length mismatch")
+
+	if scalar == 0.0 {
+		for i := 0; i < n; i += 1 {
+			out[i] = 0.0
+		}
+		return
+	}
+
+	if !simd.HAS_HARDWARE_SIMD {
+		for i := 0; i < n; i += 1 {
+			out[i] = a[i] * scalar
+		}
+		return
+	}
+
+	// AVX: f64x8
+	if intrinsics.has_target_feature("avx") {
+		s8 := simd.f64x8{scalar, scalar, scalar, scalar, scalar, scalar, scalar, scalar}
+		i := 0
+		for ; i + 8 <= n; i += 8 {
+			va := simd.f64x8 {
+				a[i + 0],
+				a[i + 1],
+				a[i + 2],
+				a[i + 3],
+				a[i + 4],
+				a[i + 5],
+				a[i + 6],
+				a[i + 7],
+			}
+			vout := intrinsics.simd_mul(va, s8)
+			out_arr := transmute([8]f64)vout
+			for j := 0; j < 8; j += 1 {
+				out[i + j] = out_arr[j]
+			}
+		}
+		for ; i < n; i += 1 {
+			out[i] = a[i] * scalar
+		}
+		return
+	}
+
+	// SSE2: f64x4
+	if intrinsics.has_target_feature("sse2") {
+		s4 := simd.f64x4{scalar, scalar, scalar, scalar}
+		i := 0
+		for ; i + 4 <= n; i += 4 {
+			va := simd.f64x4{a[i + 0], a[i + 1], a[i + 2], a[i + 3]}
+			vout := intrinsics.simd_mul(va, s4)
+			out_arr := transmute([4]f64)vout
+			for j := 0; j < 4; j += 1 {
+				out[i + j] = out_arr[j]
+			}
+		}
+		for ; i < n; i += 1 {
+			out[i] = a[i] * scalar
+		}
+		return
+	}
+
+	// Fallback
+	for i := 0; i < n; i += 1 {
+		out[i] = a[i] * scalar
+	}
+}
+
+// ============================================================================
+// SIMD Sigmoid Forward: out = 1 / (1 + exp(-a)) (element-wise, f64)
+// ============================================================================
+vec_sigmoid_simd :: proc(a, out: []f64) {
+	n := len(a)
+	if n != len(out) do panic("vec_sigmoid_simd: length mismatch")
+
+	if !simd.HAS_HARDWARE_SIMD {
+		for i := 0; i < n; i += 1 {
+			out[i] = 1.0 / (1.0 + math.exp(-a[i]))
+		}
+		return
+	}
+
+	// AVX: f64x8
+	if intrinsics.has_target_feature("avx") {
+		one8 := simd.f64x8{1, 1, 1, 1, 1, 1, 1, 1}
+		zero8 := simd.f64x8{0, 0, 0, 0, 0, 0, 0, 0}
+		i := 0
+		for ; i + 8 <= n; i += 8 {
+			va := simd.f64x8 {
+				a[i + 0],
+				a[i + 1],
+				a[i + 2],
+				a[i + 3],
+				a[i + 4],
+				a[i + 5],
+				a[i + 6],
+				a[i + 7],
+			}
+			// Compute 1 / (1 + exp(-x))
+			// = exp(x) / (1 + exp(x))  (more numerically stable for positive x)
+			// We'll use the standard form: 1 / (1 + exp(-x))
+			neg_a := intrinsics.simd_sub(zero8, va)
+			// exp(-a) - need manual exp since SIMD doesn't have it
+			// Fall back to scalar for exp, but vectorize the rest
+			neg_arr := transmute([8]f64)neg_a
+			exp_vals: [8]f64
+			for j := 0; j < 8; j += 1 {
+				exp_vals[j] = math.exp(neg_arr[j])
+			}
+			v_exp := transmute(simd.f64x8)exp_vals
+			denom := intrinsics.simd_add(one8, v_exp)
+			vout := intrinsics.simd_div(one8, denom)
+
+			out_arr := transmute([8]f64)vout
+			for j := 0; j < 8; j += 1 {
+				out[i + j] = out_arr[j]
+			}
+		}
+		for ; i < n; i += 1 {
+			out[i] = 1.0 / (1.0 + math.exp(-a[i]))
+		}
+		return
+	}
+
+	// SSE2: f64x4
+	if intrinsics.has_target_feature("sse2") {
+		one4 := simd.f64x4{1, 1, 1, 1}
+		zero4 := simd.f64x4{0, 0, 0, 0}
+		i := 0
+		for ; i + 4 <= n; i += 4 {
+			va := simd.f64x4{a[i + 0], a[i + 1], a[i + 2], a[i + 3]}
+			neg_a := intrinsics.simd_sub(zero4, va)
+			neg_arr := transmute([4]f64)neg_a
+			exp_vals: [4]f64
+			for j := 0; j < 4; j += 1 {
+				exp_vals[j] = math.exp(neg_arr[j])
+			}
+			v_exp := transmute(simd.f64x4)exp_vals
+			denom := intrinsics.simd_add(one4, v_exp)
+			vout := intrinsics.simd_div(one4, denom)
+
+			out_arr := transmute([4]f64)vout
+			for j := 0; j < 4; j += 1 {
+				out[i + j] = out_arr[j]
+			}
+		}
+		for ; i < n; i += 1 {
+			out[i] = 1.0 / (1.0 + math.exp(-a[i]))
+		}
+		return
+	}
+
+	// Fallback
+	for i := 0; i < n; i += 1 {
+		out[i] = 1.0 / (1.0 + math.exp(-a[i]))
+	}
+}
+
+// ============================================================================
+// SIMD Tanh Forward: out = tanh(a) (element-wise, f64)
+// ============================================================================
+vec_tanh_simd :: proc(a, out: []f64) {
+	n := len(a)
+	if n != len(out) do panic("vec_tanh_simd: length mismatch")
+
+	if !simd.HAS_HARDWARE_SIMD {
+		for i := 0; i < n; i += 1 {
+			out[i] = math.tanh(a[i])
+		}
+		return
+	}
+
+	// AVX: f64x8
+	if intrinsics.has_target_feature("avx") {
+		one8 := simd.f64x8{1, 1, 1, 1, 1, 1, 1, 1}
+		zero8 := simd.f64x8{0, 0, 0, 0, 0, 0, 0, 0}
+		i := 0
+		for ; i + 8 <= n; i += 8 {
+			va := simd.f64x8 {
+				a[i + 0],
+				a[i + 1],
+				a[i + 2],
+				a[i + 3],
+				a[i + 4],
+				a[i + 5],
+				a[i + 6],
+				a[i + 7],
+			}
+			// tanh(x) = (exp(x) - exp(-x)) / (exp(x) + exp(-x))
+			// = (exp(2x) - 1) / (exp(2x) + 1)
+			two8 := simd.f64x8{2, 2, 2, 2, 2, 2, 2, 2}
+			two_x := intrinsics.simd_mul(va, two8)
+			two_x_arr := transmute([8]f64)two_x
+			exp_vals: [8]f64
+			for j := 0; j < 8; j += 1 {
+				exp_vals[j] = math.exp(two_x_arr[j])
+			}
+			v_exp := transmute(simd.f64x8)exp_vals
+			num := intrinsics.simd_sub(v_exp, one8)
+			denom := intrinsics.simd_add(v_exp, one8)
+			vout := intrinsics.simd_div(num, denom)
+
+			out_arr := transmute([8]f64)vout
+			for j := 0; j < 8; j += 1 {
+				out[i + j] = out_arr[j]
+			}
+		}
+		for ; i < n; i += 1 {
+			out[i] = math.tanh(a[i])
+		}
+		return
+	}
+
+	// SSE2: f64x4
+	if intrinsics.has_target_feature("sse2") {
+		one4 := simd.f64x4{1, 1, 1, 1}
+		i := 0
+		for ; i + 4 <= n; i += 4 {
+			va := simd.f64x4{a[i + 0], a[i + 1], a[i + 2], a[i + 3]}
+			two4 := simd.f64x4{2, 2, 2, 2}
+			two_x := intrinsics.simd_mul(va, two4)
+			two_x_arr := transmute([4]f64)two_x
+			exp_vals: [4]f64
+			for j := 0; j < 4; j += 1 {
+				exp_vals[j] = math.exp(two_x_arr[j])
+			}
+			v_exp := transmute(simd.f64x4)exp_vals
+			num := intrinsics.simd_sub(v_exp, one4)
+			denom := intrinsics.simd_add(v_exp, one4)
+			vout := intrinsics.simd_div(num, denom)
+
+			out_arr := transmute([4]f64)vout
+			for j := 0; j < 4; j += 1 {
+				out[i + j] = out_arr[j]
+			}
+		}
+		for ; i < n; i += 1 {
+			out[i] = math.tanh(a[i])
+		}
+		return
+	}
+
+	// Fallback
+	for i := 0; i < n; i += 1 {
+		out[i] = math.tanh(a[i])
+	}
+}
+
+// ============================================================================
+// SIMD Leaky ReLU Forward: out = max(alpha*a, a) (element-wise, f64)
+// ============================================================================
+vec_leaky_relu_simd :: proc(a: []f64, alpha: f64, out: []f64) {
+	n := len(a)
+	if n != len(out) do panic("vec_leaky_relu_simd: length mismatch")
+
+	if !simd.HAS_HARDWARE_SIMD {
+		for i := 0; i < n; i += 1 {
+			v := a[i]
+			out[i] = v > 0.0 ? v : alpha * v
+		}
+		return
+	}
+
+	// AVX: f64x8
+	if intrinsics.has_target_feature("avx") {
+		zero8 := simd.f64x8{0, 0, 0, 0, 0, 0, 0, 0}
+		a8 := simd.f64x8{alpha, alpha, alpha, alpha, alpha, alpha, alpha, alpha}
+		i := 0
+		for ; i + 8 <= n; i += 8 {
+			va := simd.f64x8 {
+				a[i + 0],
+				a[i + 1],
+				a[i + 2],
+				a[i + 3],
+				a[i + 4],
+				a[i + 5],
+				a[i + 6],
+				a[i + 7],
+			}
+			// mask = (va > 0.0)
+			mask := intrinsics.simd_lanes_gt(va, zero8)
+			// scaled = alpha * va
+			scaled := intrinsics.simd_mul(a8, va)
+			// out = mask ? va : scaled
+			vout := intrinsics.simd_select(mask, va, scaled)
+
+			out_arr := transmute([8]f64)vout
+			for j := 0; j < 8; j += 1 {
+				out[i + j] = out_arr[j]
+			}
+		}
+		for ; i < n; i += 1 {
+			v := a[i]
+			out[i] = v > 0.0 ? v : alpha * v
+		}
+		return
+	}
+
+	// SSE2: f64x4
+	if intrinsics.has_target_feature("sse2") {
+		zero4 := simd.f64x4{0, 0, 0, 0}
+		a4 := simd.f64x4{alpha, alpha, alpha, alpha}
+		i := 0
+		for ; i + 4 <= n; i += 4 {
+			va := simd.f64x4{a[i + 0], a[i + 1], a[i + 2], a[i + 3]}
+			mask := intrinsics.simd_lanes_gt(va, zero4)
+			scaled := intrinsics.simd_mul(a4, va)
+			vout := intrinsics.simd_select(mask, va, scaled)
+
+			out_arr := transmute([4]f64)vout
+			for j := 0; j < 4; j += 1 {
+				out[i + j] = out_arr[j]
+			}
+		}
+		for ; i < n; i += 1 {
+			v := a[i]
+			out[i] = v > 0.0 ? v : alpha * v
+		}
+		return
+	}
+
+	// Fallback
+	for i := 0; i < n; i += 1 {
+		v := a[i]
+		out[i] = v > 0.0 ? v : alpha * v
+	}
+}
+
+// ============================================================================
+// SIMD Sigmoid Backward: out += grad * sigmoid(a) * (1 - sigmoid(a))
+// ============================================================================
+vec_sigmoid_backward_simd :: proc(grad, a, out: []f64) {
+	n := len(grad)
+	if n != len(a) || n != len(out) do panic("vec_sigmoid_backward_simd: length mismatch")
+
+	if !simd.HAS_HARDWARE_SIMD {
+		for i := 0; i < n; i += 1 {
+			s := 1.0 / (1.0 + math.exp(-a[i]))
+			out[i] += grad[i] * s * (1.0 - s)
+		}
+		return
+	}
+
+	// AVX: f64x8
+	if intrinsics.has_target_feature("avx") {
+		one8 := simd.f64x8{1, 1, 1, 1, 1, 1, 1, 1}
+		zero8 := simd.f64x8{0, 0, 0, 0, 0, 0, 0, 0}
+		i := 0
+		for ; i + 8 <= n; i += 8 {
+			va := simd.f64x8 {
+				a[i + 0],
+				a[i + 1],
+				a[i + 2],
+				a[i + 3],
+				a[i + 4],
+				a[i + 5],
+				a[i + 6],
+				a[i + 7],
+			}
+			vgrad := simd.f64x8 {
+				grad[i + 0],
+				grad[i + 1],
+				grad[i + 2],
+				grad[i + 3],
+				grad[i + 4],
+				grad[i + 5],
+				grad[i + 6],
+				grad[i + 7],
+			}
+			vout := simd.f64x8 {
+				out[i + 0],
+				out[i + 1],
+				out[i + 2],
+				out[i + 3],
+				out[i + 4],
+				out[i + 5],
+				out[i + 6],
+				out[i + 7],
+			}
+
+			// Compute sigmoid
+			neg_a := intrinsics.simd_sub(zero8, va)
+			neg_arr := transmute([8]f64)neg_a
+			exp_vals: [8]f64
+			for j := 0; j < 8; j += 1 {
+				exp_vals[j] = math.exp(neg_arr[j])
+			}
+			v_exp := transmute(simd.f64x8)exp_vals
+			denom := intrinsics.simd_add(one8, v_exp)
+			s := intrinsics.simd_div(one8, denom)
+
+			// grad * s * (1 - s)
+			one_minus_s := intrinsics.simd_sub(one8, s)
+			local_grad := intrinsics.simd_mul(intrinsics.simd_mul(vgrad, s), one_minus_s)
+			vres := intrinsics.simd_add(vout, local_grad)
+
+			out_arr := transmute([8]f64)vres
+			for j := 0; j < 8; j += 1 {
+				out[i + j] = out_arr[j]
+			}
+		}
+		for ; i < n; i += 1 {
+			s := 1.0 / (1.0 + math.exp(-a[i]))
+			out[i] += grad[i] * s * (1.0 - s)
+		}
+		return
+	}
+
+	// SSE2: f64x4
+	if intrinsics.has_target_feature("sse2") {
+		one4 := simd.f64x4{1, 1, 1, 1}
+		zero4 := simd.f64x4{0, 0, 0, 0}
+		i := 0
+		for ; i + 4 <= n; i += 4 {
+			va := simd.f64x4{a[i + 0], a[i + 1], a[i + 2], a[i + 3]}
+			vgrad := simd.f64x4{grad[i + 0], grad[i + 1], grad[i + 2], grad[i + 3]}
+			vout := simd.f64x4{out[i + 0], out[i + 1], out[i + 2], out[i + 3]}
+
+			neg_a := intrinsics.simd_sub(zero4, va)
+			neg_arr := transmute([4]f64)neg_a
+			exp_vals: [4]f64
+			for j := 0; j < 4; j += 1 {
+				exp_vals[j] = math.exp(neg_arr[j])
+			}
+			v_exp := transmute(simd.f64x4)exp_vals
+			denom := intrinsics.simd_add(one4, v_exp)
+			s := intrinsics.simd_div(one4, denom)
+
+			one_minus_s := intrinsics.simd_sub(one4, s)
+			local_grad := intrinsics.simd_mul(intrinsics.simd_mul(vgrad, s), one_minus_s)
+			vres := intrinsics.simd_add(vout, local_grad)
+
+			out_arr := transmute([4]f64)vres
+			for j := 0; j < 4; j += 1 {
+				out[i + j] = out_arr[j]
+			}
+		}
+		for ; i < n; i += 1 {
+			s := 1.0 / (1.0 + math.exp(-a[i]))
+			out[i] += grad[i] * s * (1.0 - s)
+		}
+		return
+	}
+
+	// Fallback
+	for i := 0; i < n; i += 1 {
+		s := 1.0 / (1.0 + math.exp(-a[i]))
+		out[i] += grad[i] * s * (1.0 - s)
+	}
+}
+
+// ============================================================================
+// SIMD Tanh Backward: out += grad * (1 - tanh(a)^2)
+// ============================================================================
+vec_tanh_backward_simd :: proc(grad, a, out: []f64) {
+	n := len(grad)
+	if n != len(a) || n != len(out) do panic("vec_tanh_backward_simd: length mismatch")
+
+	if !simd.HAS_HARDWARE_SIMD {
+		for i := 0; i < n; i += 1 {
+			t := math.tanh(a[i])
+			out[i] += grad[i] * (1.0 - t * t)
+		}
+		return
+	}
+
+	// AVX: f64x8
+	if intrinsics.has_target_feature("avx") {
+		one8 := simd.f64x8{1, 1, 1, 1, 1, 1, 1, 1}
+		i := 0
+		for ; i + 8 <= n; i += 8 {
+			va := simd.f64x8 {
+				a[i + 0],
+				a[i + 1],
+				a[i + 2],
+				a[i + 3],
+				a[i + 4],
+				a[i + 5],
+				a[i + 6],
+				a[i + 7],
+			}
+			vgrad := simd.f64x8 {
+				grad[i + 0],
+				grad[i + 1],
+				grad[i + 2],
+				grad[i + 3],
+				grad[i + 4],
+				grad[i + 5],
+				grad[i + 6],
+				grad[i + 7],
+			}
+			vout := simd.f64x8 {
+				out[i + 0],
+				out[i + 1],
+				out[i + 2],
+				out[i + 3],
+				out[i + 4],
+				out[i + 5],
+				out[i + 6],
+				out[i + 7],
+			}
+
+			// Compute tanh using (exp(2x) - 1) / (exp(2x) + 1)
+			two8 := simd.f64x8{2, 2, 2, 2, 2, 2, 2, 2}
+			two_x := intrinsics.simd_mul(va, two8)
+			two_x_arr := transmute([8]f64)two_x
+			exp_vals: [8]f64
+			for j := 0; j < 8; j += 1 {
+				exp_vals[j] = math.exp(two_x_arr[j])
+			}
+			v_exp := transmute(simd.f64x8)exp_vals
+			t := intrinsics.simd_div(
+				intrinsics.simd_sub(v_exp, one8),
+				intrinsics.simd_add(v_exp, one8),
+			)
+
+			// grad * (1 - t^2)
+			t_sq := intrinsics.simd_mul(t, t)
+			local_grad := intrinsics.simd_mul(vgrad, intrinsics.simd_sub(one8, t_sq))
+			vres := intrinsics.simd_add(vout, local_grad)
+
+			out_arr := transmute([8]f64)vres
+			for j := 0; j < 8; j += 1 {
+				out[i + j] = out_arr[j]
+			}
+		}
+		for ; i < n; i += 1 {
+			t := math.tanh(a[i])
+			out[i] += grad[i] * (1.0 - t * t)
+		}
+		return
+	}
+
+	// SSE2: f64x4
+	if intrinsics.has_target_feature("sse2") {
+		one4 := simd.f64x4{1, 1, 1, 1}
+		i := 0
+		for ; i + 4 <= n; i += 4 {
+			va := simd.f64x4{a[i + 0], a[i + 1], a[i + 2], a[i + 3]}
+			vgrad := simd.f64x4{grad[i + 0], grad[i + 1], grad[i + 2], grad[i + 3]}
+			vout := simd.f64x4{out[i + 0], out[i + 1], out[i + 2], out[i + 3]}
+
+			two4 := simd.f64x4{2, 2, 2, 2}
+			two_x := intrinsics.simd_mul(va, two4)
+			two_x_arr := transmute([4]f64)two_x
+			exp_vals: [4]f64
+			for j := 0; j < 4; j += 1 {
+				exp_vals[j] = math.exp(two_x_arr[j])
+			}
+			v_exp := transmute(simd.f64x4)exp_vals
+			t := intrinsics.simd_div(
+				intrinsics.simd_sub(v_exp, one4),
+				intrinsics.simd_add(v_exp, one4),
+			)
+
+			t_sq := intrinsics.simd_mul(t, t)
+			local_grad := intrinsics.simd_mul(vgrad, intrinsics.simd_sub(one4, t_sq))
+			vres := intrinsics.simd_add(vout, local_grad)
+
+			out_arr := transmute([4]f64)vres
+			for j := 0; j < 4; j += 1 {
+				out[i + j] = out_arr[j]
+			}
+		}
+		for ; i < n; i += 1 {
+			t := math.tanh(a[i])
+			out[i] += grad[i] * (1.0 - t * t)
+		}
+		return
+	}
+
+	// Fallback
+	for i := 0; i < n; i += 1 {
+		t := math.tanh(a[i])
+		out[i] += grad[i] * (1.0 - t * t)
+	}
+}
+
+// ============================================================================
+// SIMD Broadcast Add: out[i] += scalar for all i (f64)
+// ============================================================================
+vec_broadcast_add_simd :: proc(scalar: f64, out: []f64) {
+	n := len(out)
+
+	if scalar == 0.0 {
+		return
+	}
+
+	if !simd.HAS_HARDWARE_SIMD {
+		for i := 0; i < n; i += 1 {
+			out[i] += scalar
+		}
+		return
+	}
+
+	// AVX: f64x8
+	if intrinsics.has_target_feature("avx") {
+		s8 := simd.f64x8{scalar, scalar, scalar, scalar, scalar, scalar, scalar, scalar}
+		i := 0
+		for ; i + 8 <= n; i += 8 {
+			vout := simd.f64x8 {
+				out[i + 0],
+				out[i + 1],
+				out[i + 2],
+				out[i + 3],
+				out[i + 4],
+				out[i + 5],
+				out[i + 6],
+				out[i + 7],
+			}
+			vres := intrinsics.simd_add(vout, s8)
+			out_arr := transmute([8]f64)vres
+			for j := 0; j < 8; j += 1 {
+				out[i + j] = out_arr[j]
+			}
+		}
+		for ; i < n; i += 1 {
+			out[i] += scalar
+		}
+		return
+	}
+
+	// SSE2: f64x4
+	if intrinsics.has_target_feature("sse2") {
+		s4 := simd.f64x4{scalar, scalar, scalar, scalar}
+		i := 0
+		for ; i + 4 <= n; i += 4 {
+			vout := simd.f64x4{out[i + 0], out[i + 1], out[i + 2], out[i + 3]}
+			vres := intrinsics.simd_add(vout, s4)
+			out_arr := transmute([4]f64)vres
+			for j := 0; j < 4; j += 1 {
+				out[i + j] = out_arr[j]
+			}
+		}
+		for ; i < n; i += 1 {
+			out[i] += scalar
+		}
+		return
+	}
+
+	// Fallback
+	for i := 0; i < n; i += 1 {
+		out[i] += scalar
+	}
+}
