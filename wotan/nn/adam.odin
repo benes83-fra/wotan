@@ -148,16 +148,31 @@ adam_step :: proc(opt: ^Adam) {
 }
 
 adam_free :: proc(opt: ^Adam) {
-	for m in opt.moment_1 {
-		delete(m, opt.allocator)
+	// Free all parameter moment arrays
+	for i in 0 ..< len(opt.moment_1) {
+		delete(opt.moment_1[i], opt.allocator)
 	}
-	for v in opt.moment_2 {
-		delete(v, opt.allocator)
+	for i in 0 ..< len(opt.moment_2) {
+		delete(opt.moment_2[i], opt.allocator)
 	}
+
+	// ✅ FIX: Free the grad_sq buffer
 	if opt.grad_sq != nil {
-		delete(opt.grad_sq, opt.allocator) // ✅ Free temp buffer
+		delete(opt.grad_sq, opt.allocator)
+		opt.grad_sq = nil
 	}
-	delete(opt.parameters)
+
+	// ✅ FIX: Free the learning_rates array
+	if len(opt.learning_rates) > 0 {
+		delete(opt.learning_rates)
+	}
+
+	// ✅ FIX: Free the parameters array
+	if len(opt.parameters) > 0 {
+		delete(opt.parameters)
+	}
+
+	// Free the moment arrays themselves
 	delete(opt.moment_1)
 	delete(opt.moment_2)
 }
