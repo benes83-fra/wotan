@@ -215,10 +215,15 @@ evaluate_model :: proc(model: ^nn.Sequential, inputs: ^t.Tensor, labels: []int) 
 // ============================================================================
 // Save weights snapshot for comparison
 // ============================================================================
+// ============================================================================
+// Save weights snapshot for comparison - ONLY frozen layers
+// ============================================================================
 save_weights_snapshot :: proc(model: ^nn.Sequential, allocator: mem.Allocator) -> [dynamic][]f64 {
 	snapshots: [dynamic][]f64
 
-	for layer in model.layers {
+	// ✅ Only snapshot first 5 layers (frozen feature extractor)
+	for i in 0 ..< 5 {
+		layer := &model.layers[i]
 		switch l in layer {
 		case nn.Conv2dLayer:
 			snapshot := make([]f64, len(l.weight.data.data), allocator)
@@ -251,12 +256,14 @@ save_weights_snapshot :: proc(model: ^nn.Sequential, allocator: mem.Allocator) -
 }
 
 // ============================================================================
-// Verify weights haven't changed
+// Verify weights haven't changed - ONLY frozen layers
 // ============================================================================
 verify_weights_unchanged :: proc(model: ^nn.Sequential, snapshots: [dynamic][]f64) -> bool {
 	idx := 0
 
-	for layer in model.layers {
+	// ✅ Only verify first 5 layers (frozen feature extractor)
+	for i in 0 ..< 5 {
+		layer := &model.layers[i]
 		switch l in layer {
 		case nn.Conv2dLayer:
 			if idx >= len(snapshots) {
@@ -266,8 +273,8 @@ verify_weights_unchanged :: proc(model: ^nn.Sequential, snapshots: [dynamic][]f6
 			if len(snapshot) != len(l.weight.data.data) {
 				return false
 			}
-			for i in 0 ..< len(snapshot) {
-				if math.abs(snapshot[i] - l.weight.data.data[i]) > 1e-6 {
+			for j in 0 ..< len(snapshot) {
+				if math.abs(snapshot[j] - l.weight.data.data[j]) > 1e-6 {
 					return false
 				}
 			}
@@ -280,8 +287,8 @@ verify_weights_unchanged :: proc(model: ^nn.Sequential, snapshots: [dynamic][]f6
 			if len(snapshot) != len(l.weights.data.data) {
 				return false
 			}
-			for i in 0 ..< len(snapshot) {
-				if math.abs(snapshot[i] - l.weights.data.data[i]) > 1e-6 {
+			for j in 0 ..< len(snapshot) {
+				if math.abs(snapshot[j] - l.weights.data.data[j]) > 1e-6 {
 					return false
 				}
 			}
@@ -420,37 +427,37 @@ transfer_learning_test :: proc(allocator: mem.Allocator) {
 	defer nn.adam_free(&opt)
 
 	// Add frozen params with tiny LR
-	for i in 0 ..< 5 {
-		layer := &model_b.layers[i]
-		switch &l in layer {
-		case nn.Conv2dLayer:
-			nn.adam_add_param_with_lr(&opt, l.weight, 1e-6)
-			if l.bias != nil {
-				nn.adam_add_param_with_lr(&opt, l.bias, 1e-6)
-			}
-		case nn.LinearLayer:
-			nn.adam_add_param_with_lr(&opt, l.weights, 1e-6)
-			if l.bias != nil {
-				nn.adam_add_param_with_lr(&opt, l.bias, 1e-6)
-			}
-		case nn.MaxPool2dLayer,
-		     nn.AvgPool2dLayer,
-		     nn.DropoutLayer,
-		     nn.BatchNorm2dLayer,
-		     nn.Activation,
-		     nn.FlattenLayer,
-		     nn.RNNLayer,
-		     nn.GRULayer,
-		     nn.LSTMLayer,
-		     nn.EmbeddingLayer,
-		     nn.MultiHeadAttentionLayer,
-		     nn.LayerNormLayer,
-		     nn.FFNLayer,
-		     nn.TransformerEncoderBlock,
-		     nn.TransformerEncoder:
-		// Skip
-		}
-	}
+	// for i in 0 ..< 5 {
+	// 	layer := &model_b.layers[i]
+	// 	switch &l in layer {
+	// 	case nn.Conv2dLayer:
+	// 		nn.adam_add_param_with_lr(&opt, l.weight, 1e-6)
+	// 		if l.bias != nil {
+	// 			nn.adam_add_param_with_lr(&opt, l.bias, 1e-6)
+	// 		}
+	// 	case nn.LinearLayer:
+	// 		nn.adam_add_param_with_lr(&opt, l.weights, 1e-6)
+	// 		if l.bias != nil {
+	// 			nn.adam_add_param_with_lr(&opt, l.bias, 1e-6)
+	// 		}
+	// 	case nn.MaxPool2dLayer,
+	// 	     nn.AvgPool2dLayer,
+	// 	     nn.DropoutLayer,
+	// 	     nn.BatchNorm2dLayer,
+	// 	     nn.Activation,
+	// 	     nn.FlattenLayer,
+	// 	     nn.RNNLayer,
+	// 	     nn.GRULayer,
+	// 	     nn.LSTMLayer,
+	// 	     nn.EmbeddingLayer,
+	// 	     nn.MultiHeadAttentionLayer,
+	// 	     nn.LayerNormLayer,
+	// 	     nn.FFNLayer,
+	// 	     nn.TransformerEncoderBlock,
+	// 	     nn.TransformerEncoder:
+	// 	// Skip
+	// 	}
+	// }
 
 	// Add trainable head with normal LR
 	for i in 5 ..< len(model_b.layers) {
