@@ -1,0 +1,291 @@
+package finance
+
+import l "../linalg"
+import t "../tensor"
+import "core:math"
+import "core:mem"
+
+// ============================================================================
+// Option Types
+// ============================================================================
+OptionType :: enum {
+	Call,
+	Put,
+}
+
+// ============================================================================
+// Greeks Container
+// ============================================================================
+Greeks :: struct {
+	price: f64,
+	delta: f64, // ∂V/∂S
+	gamma: f64, // ∂²V/∂S²
+	vega:  f64, // ∂V/∂σ  (per 1% move, divide by 100)
+	theta: f64, // ∂V/∂T  (per day, divide by 365)
+	rho:   f64, // ∂V/∂r  (per 1% move, divide by 100)
+}
+
+// ============================================================================
+// Black-Scholes Price (as a tensor for autograd)
+// ============================================================================
+// d1 = (ln(S/K) + (r + σ²/2)*T) / (σ*√T)
+// d2 = d1 - σ*√T
+// Call = S*N(d1) - K*exp(-r*T)*N(d2)
+// Put  = K*exp(-r*T)*N(-d2) - S*N(-d1)
+// ============================================================================
+black_scholes_price :: proc(
+	S_t: ^t.Tensor, // requires_grad = true
+	K_t: ^t.Tensor,
+	T_t: ^t.Tensor,
+	r_t: ^t.Tensor,
+	sigma_t: ^t.Tensor,
+	opt: OptionType,
+	allocator: mem.Allocator,
+) -> ^t.Tensor {
+	// ln(S/K)
+	S_over_K := t.tensor_div(S_t, K_t)
+	ln_S_K := t.tensor_log(S_over_K)
+
+	// σ²/2
+	sigma_sq := t.tensor_mul(sigma_t, sigma_t)
+	half := _scalar_tensor(0.5, allocator)
+	half_sig := t.tensor_mul(sigma_sq, half)
+
+	// r + σ²/2
+	r_plus_half_sig := t.tensor_add(r_t, half_sig)
+
+	// (r + σ²/2) * T
+	numer_term2 := t.tensor_mul(r_plus_half_sig, T_t)
+
+	// numerator = ln(S/K) + (r + σ²/2)*T
+	numer := t.tensor_add(ln_S_K, numer_term2)
+
+	// √T
+	sqrt_T := t.tensor_sqrt(T_t)
+
+	// σ * √T
+	sig_sqrt_T := t.tensor_mul(sigma_t, sqrt_T)
+
+	// d1 = numer / (σ*√T)
+	d1 := t.tensor_div(numer, sig_sqrt_T)
+
+	// d2 = d1 - σ*√T
+	d2 := t.tensor_sub(d1, sig_sqrt_T)
+
+	// N(d1), N(d2)
+	N_d1 := t.tensor_norm_cdf(d1)
+	N_d2 := t.tensor_norm_cdf(d2)
+
+	// exp(-r*T)
+	neg_r := t.tensor_neg(r_t)
+	rT := t.tensor_mul(neg_r, T_t)
+	disc := t.tensor_exp(rT)
+
+	// K * exp(-r*T)
+	K_disc := t.tensor_mul(K_t, disc)
+
+	if opt == .Call {
+		// C = S*N(d1) - K*exp(-r*T)*N(d2)
+		term1 := t.tensor_mul(S_t, N_d1)
+		term2 := t.tensor_mul(K_disc, N_d2)
+		return t.tensor_sub(term1, term2)
+	} else {
+		// P = K*exp(-r*T)*N(-d2) - S*N(-d1)
+		neg_d1 := t.tensor_neg(d1)
+		neg_d2 := t.tensor_neg(d2)
+		N_neg_d1 := t.tensor_norm_cdf(neg_d1)
+		N_neg_d2 := t.tensor_norm_cdf(neg_d2)
+
+		term1 := t.tensor_mul(K_disc, N_neg_d2)
+		term2 := t.tensor_mul(S_t, N_neg_d1)
+		return t.tensor_sub(term1, term2)
+	}
+}
+
+// Helper: create a scalar tensor (1x1)
+_scalar_tensor :: proc(val: f64, allocator: mem.Allocator) -> ^t.Tensor {
+	data := l.matrix_new(f64, 1, 1, allocator)
+	data.data[0] = val
+	return t.tensor_new(data, false, allocator)
+}
+
+// ============================================================================
+// Compute All Greeks via Autograd
+// ============================================================================
+// Creates S, K, T, r, σ as tensors, computes price, and reads off gradients.
+// For gamma, we use a finite difference on delta (since autograd gives first order).
+// ============================================================================
+compute_greeks :: proc(
+	S: f64,
+	K: f64,
+	T: f64,
+	r: f64,
+	sigma: f64,
+	opt: OptionType,
+	allocator: mem.Allocator = context.allocator,
+) -> Greeks {
+	// Create parameter tensors with requires_grad = true
+	S_t := _make_param(S, allocator)
+	K_t := _make_param(K, allocator)
+	T_t := _make_param(T, allocator)
+	r_t := _make_param(r, allocator)
+	sig_t := _make_param(sigma, allocator)
+
+	// Compute price
+	price_t := black_scholes_price(S_t, K_t, T_t, r_t, sig_t, opt, allocator)
+
+	// Backward pass
+	t.tensor_backward(price_t)
+
+	// Read off Greeks
+	price := price_t.data.data[0]
+	delta := S_t.grad.data[0]
+	vega := sig_t.grad.data[0]
+	rho := r_t.grad.data[0]
+	theta := T_t.grad.data[0]
+
+	// Gamma via finite difference on delta
+	h := 0.01 * S // 1% bump
+	delta_up := _compute_delta(S + h, K, T, r, sigma, opt, allocator)
+	delta_dn := _compute_delta(S - h, K, T, r, sigma, opt, allocator)
+	gamma := (delta_up - delta_dn) / (2.0 * h)
+
+	// Convert theta to per-day (divide by 365)
+	theta_per_day := theta / 365.0
+
+	// Convert vega and rho to per-1% (divide by 100)
+	vega_per_pct := vega / 100.0
+	rho_per_pct := rho / 100.0
+
+	return Greeks {
+		price = price,
+		delta = delta,
+		gamma = gamma,
+		vega = vega_per_pct,
+		theta = theta_per_day,
+		rho = rho_per_pct,
+	}
+}
+
+// Helper: create a parameter tensor
+_make_param :: proc(val: f64, allocator: mem.Allocator) -> ^t.Tensor {
+	data := l.matrix_new(f64, 1, 1, allocator)
+	data.data[0] = val
+	return t.tensor_new(data, true, allocator)
+}
+
+// Helper: compute delta at a specific S (for gamma finite difference)
+_compute_delta :: proc(
+	S: f64,
+	K: f64,
+	T: f64,
+	r: f64,
+	sigma: f64,
+	opt: OptionType,
+	allocator: mem.Allocator,
+) -> f64 {
+	S_t := _make_param(S, allocator)
+	K_t := _make_param(K, allocator)
+	T_t := _make_param(T, allocator)
+	r_t := _make_param(r, allocator)
+	sig_t := _make_param(sigma, allocator)
+
+	price_t := black_scholes_price(S_t, K_t, T_t, r_t, sig_t, opt, allocator)
+	t.tensor_backward(price_t)
+	delta := S_t.grad.data[0]
+
+	// Free the tensors we created
+	t.tensor_free_graph(price_t)
+
+	return delta
+}
+
+// ============================================================================
+// Implied Volatility via Newton-Raphson
+// ============================================================================
+// Uses autograd to compute vega (the derivative) at each step.
+// Converges in 3-6 iterations typically.
+// ============================================================================
+implied_volatility :: proc(
+	market_price: f64,
+	S: f64,
+	K: f64,
+	T: f64,
+	r: f64,
+	opt: OptionType,
+	allocator: mem.Allocator = context.allocator,
+	max_iter: int = 50,
+	tol: f64 = 1e-8,
+) -> (
+	sigma: f64,
+	converged: bool,
+	iterations: int,
+) {
+	// Initial guess: Brenner-Subrahmanyam approximation for ATM
+	// σ ≈ √(2π/T) * (C/S) for ATM calls
+	sigma = math.sqrt(2.0 * math.PI / T) * market_price / S
+	if sigma <= 0.0 || sigma > 5.0 {
+		sigma = 0.2 // fallback: 20% vol
+	}
+
+	for iter in 0 ..< max_iter {
+		// Compute price and vega at current sigma
+		S_t := _make_param(S, allocator)
+		K_t := _make_param(K, allocator)
+		T_t := _make_param(T, allocator)
+		r_t := _make_param(r, allocator)
+		sig_t := _make_param(sigma, allocator)
+
+		price_t := black_scholes_price(S_t, K_t, T_t, r_t, sig_t, opt, allocator)
+		t.tensor_backward(price_t)
+
+		model_price := price_t.data.data[0]
+		vega := sig_t.grad.data[0] // dV/dσ
+
+		// Free tensors
+		t.tensor_free_graph(price_t)
+
+		// Check convergence
+		err := model_price - market_price
+		if math.abs(err) < tol {
+			return sigma, true, iter + 1
+		}
+
+		// Newton step: σ_new = σ - (price - market) / vega
+		if math.abs(vega) < 1e-12 {
+			// Vega too small, can't continue
+			return sigma, false, iter + 1
+		}
+
+		sigma = sigma - err / vega
+
+		// Bounds check
+		if sigma <= 0.0 {
+			sigma = 0.001
+		}
+		if sigma > 10.0 {
+			sigma = 10.0
+		}
+	}
+
+	return sigma, false, max_iter
+}
+
+// ============================================================================
+// Convenience: Price + Greeks in one call
+// ============================================================================
+price_and_greeks :: proc(
+	S: f64,
+	K: f64,
+	T: f64,
+	r: f64,
+	sigma: f64,
+	opt: OptionType,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	price: f64,
+	greeks: Greeks,
+) {
+	greeks = compute_greeks(S, K, T, r, sigma, opt, allocator)
+	return greeks.price, greeks
+}

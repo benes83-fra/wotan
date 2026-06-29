@@ -52,6 +52,11 @@ Op :: enum {
 	KLDivergence,
 	Scale,
 	Reparameterize,
+	Exp,
+	Sqrt,
+	Log,
+	Div,
+	NormCDF,
 }
 
 PoolParams :: struct {
@@ -852,6 +857,68 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 					continue
 				}
 				l.vec_tanh_backward_simd(node.grad.data, a_in.data.data, a_in.grad.data) // ✅ SIMD
+			}
+		case .Exp:
+			a_in := node.inputs[0]
+			if a_in.requires_grad {
+				tensor_ensure_grad(a_in)
+				for i in 0 ..< len(a_in.grad.data) {
+					// d/dx exp(x) = exp(x) = node.data[i]
+					a_in.grad.data[i] += node.grad.data[i] * node.data.data[i]
+				}
+			}
+
+		case .Sqrt:
+			a_in := node.inputs[0]
+			if a_in.requires_grad {
+				tensor_ensure_grad(a_in)
+				for i in 0 ..< len(a_in.grad.data) {
+					// d/dx sqrt(x) = 1 / (2*sqrt(x)) = 1 / (2*out)
+					a_in.grad.data[i] += node.grad.data[i] / (2.0 * node.data.data[i])
+				}
+			}
+
+		case .Log:
+			a_in := node.inputs[0]
+			if a_in.requires_grad {
+				tensor_ensure_grad(a_in)
+				for i in 0 ..< len(a_in.grad.data) {
+					// d/dx log(x) = 1/x
+					a_in.grad.data[i] += node.grad.data[i] / a_in.data.data[i]
+				}
+			}
+
+		case .Div:
+			a_in := node.inputs[0]
+			b_in := node.inputs[1]
+			if a_in.requires_grad {
+				tensor_ensure_grad(a_in)
+				for i in 0 ..< len(a_in.grad.data) {
+					// d/da (a/b) = 1/b
+					a_in.grad.data[i] += node.grad.data[i] / b_in.data.data[i]
+				}
+			}
+			if b_in.requires_grad {
+				tensor_ensure_grad(b_in)
+				for i in 0 ..< len(b_in.grad.data) {
+					// d/db (a/b) = -a/b²
+					b_val := b_in.data.data[i]
+					_ = a_in.grad.data[i] // just to reference (not used)
+					b_in.grad.data[i] -= node.grad.data[i] * a_in.data.data[i] / (b_val * b_val)
+				}
+			}
+
+		case .NormCDF:
+			a_in := node.inputs[0]
+			if a_in.requires_grad {
+				tensor_ensure_grad(a_in)
+				inv_sqrt_2pi := 0.3989422804014327
+				for i in 0 ..< len(a_in.grad.data) {
+					// d/dx N(x) = φ(x) = (1/√(2π)) * exp(-x²/2)
+					x := a_in.data.data[i]
+					phi := math.exp(-0.5 * x * x) * inv_sqrt_2pi
+					a_in.grad.data[i] += node.grad.data[i] * phi
+				}
 			}
 		case .PermuteMHA:
 			x_in := node.inputs[0]
@@ -4018,6 +4085,134 @@ tensor_scale :: proc(a: ^Tensor, scalar: f64) -> ^Tensor {
 		out.op = .Scale
 		append(&out.inputs, a)
 		append(&out.int_metadata, int(scalar * 1000000))
+	}
+	return out
+}
+// ============================================================================
+// Element-wise Exponential: out = exp(a)
+// Backward: grad_a = grad_out * exp(a) = grad_out * out
+// ============================================================================
+tensor_exp :: proc(a: ^Tensor) -> ^Tensor {
+	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
+	for i in 0 ..< len(a.data.data) {
+		out_data.data[i] = math.exp(a.data.data[i])
+	}
+	out := tensor_new(out_data, a.requires_grad, a.allocator)
+	out.shape = a.shape
+	if out.requires_grad {
+		out.op = .Exp
+		append(&out.inputs, a)
+	}
+	return out
+}
+
+// ============================================================================
+// Element-wise Square Root: out = sqrt(a)
+// Backward: grad_a = grad_out / (2 * sqrt(a)) = grad_out / (2 * out)
+// ============================================================================
+tensor_sqrt :: proc(a: ^Tensor) -> ^Tensor {
+	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
+	for i in 0 ..< len(a.data.data) {
+		out_data.data[i] = math.sqrt(a.data.data[i])
+	}
+	out := tensor_new(out_data, a.requires_grad, a.allocator)
+	out.shape = a.shape
+	if out.requires_grad {
+		out.op = .Sqrt
+		append(&out.inputs, a)
+	}
+	return out
+}
+
+// ============================================================================
+// Element-wise Natural Log: out = log(a)
+// Backward: grad_a = grad_out / a
+// ============================================================================
+tensor_log :: proc(a: ^Tensor) -> ^Tensor {
+	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
+	for i in 0 ..< len(a.data.data) {
+		out_data.data[i] = math.ln_f64(a.data.data[i])
+	}
+	out := tensor_new(out_data, a.requires_grad, a.allocator)
+	out.shape = a.shape
+	if out.requires_grad {
+		out.op = .Log
+		append(&out.inputs, a)
+	}
+	return out
+}
+
+// ============================================================================
+// Element-wise Division: out = a / b
+// Backward: grad_a = grad_out / b
+//           grad_b = -grad_out * a / b²
+// ============================================================================
+tensor_div :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
+	if a.data.rows != b.data.rows || a.data.cols != b.data.cols {
+		panic("tensor_div: dimension mismatch")
+	}
+	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
+	for i in 0 ..< len(a.data.data) {
+		out_data.data[i] = a.data.data[i] / b.data.data[i]
+	}
+	out := tensor_new(out_data, a.requires_grad || b.requires_grad, a.allocator)
+	out.shape = a.shape
+	if out.requires_grad {
+		out.op = .Div
+		append(&out.inputs, a)
+		append(&out.inputs, b)
+	}
+	return out
+}
+
+// ============================================================================
+// Standard Normal CDF: out = N(a) = P(Z ≤ a) where Z ~ N(0,1)
+// Uses Hastings approximation (accurate to ~10^-7)
+// Backward: grad_a = grad_out * φ(a) where φ is the standard normal PDF
+// ============================================================================
+tensor_norm_cdf :: proc(a: ^Tensor) -> ^Tensor {
+	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
+
+	// Hastings approximation coefficients
+	p := 0.2316419
+	b1 := 0.319381530
+	b2 := -0.356563782
+	b3 := 1.781477937
+	b4 := -1.821255978
+	b5 := 1.330274429
+	inv_sqrt_2pi := 0.3989422804014327 // 1/√(2π)
+
+	for i in 0 ..< len(a.data.data) {
+		x := a.data.data[i]
+		sign := 1.0
+		ax := x
+		if x < 0.0 {
+			sign = -1.0
+			ax = -x
+		}
+
+		t := 1.0 / (1.0 + p * ax)
+		t2 := t * t
+		t3 := t2 * t
+		t4 := t3 * t
+		t5 := t4 * t
+
+		poly := b1 * t + b2 * t2 + b3 * t3 + b4 * t4 + b5 * t5
+		phi := math.exp(-0.5 * ax * ax) * inv_sqrt_2pi
+		cdf := 1.0 - phi * poly
+
+		if sign < 0.0 {
+			cdf = 1.0 - cdf
+		}
+
+		out_data.data[i] = cdf
+	}
+
+	out := tensor_new(out_data, a.requires_grad, a.allocator)
+	out.shape = a.shape
+	if out.requires_grad {
+		out.op = .NormCDF
+		append(&out.inputs, a)
 	}
 	return out
 }
