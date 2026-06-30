@@ -240,6 +240,7 @@ efficient_frontier :: proc(
 }
 
 // Helper: solve min w^T*Sigma*w subject to w^T*mu=target, sum(w)=1
+// Replace _solve_constrained_portfolio with this:
 _solve_constrained_portfolio :: proc(
 	expected_returns: []f64,
 	cov_matrix: ^l.Matrix(f64),
@@ -248,40 +249,67 @@ _solve_constrained_portfolio :: proc(
 ) -> []f64 {
 	n := len(expected_returns)
 
-	// Use a simplified approach: start with equal weights and adjust
-	// For a proper implementation, use quadratic programming
-	weights := make([]f64, n, allocator)
+	// Build the system: minimize w'Σw subject to:
+	// 1) w'μ = target_return
+	// 2) w'1 = 1
 
-	// Start with equal weights
+	// Using Lagrange multipliers:
+	// L = w'Σw - λ(w'μ - target) - γ(w'1 - 1)
+	// ∂L/∂w = 2Σw - λμ - γ1 = 0
+	// w = (1/2)Σ⁻¹(λμ + γ1)
+
+	// This gives us a 2x2 system in (λ, γ):
+	// [μ'Σ⁻¹μ  μ'Σ⁻¹1] [λ]   [2*target]
+	// [1'Σ⁻¹μ  1'Σ⁻¹1] [γ] = [2      ]
+
+	// Compute Σ⁻¹
+	Sigma_inv := l.matrix_inverse(cov_matrix, allocator)
+
+	// Compute the 2x2 system coefficients
+	ones := make([]f64, n, allocator)
+	for i in 0 ..< n {ones[i] = 1.0}
+
+	// A = μ'Σ⁻¹μ
+	Sigma_inv_mu := l.matvec_dyn_simd(&Sigma_inv, expected_returns, allocator)
+	A := l.dot_simd(expected_returns, Sigma_inv_mu)
+
+	// B = μ'Σ⁻¹1 = 1'Σ⁻¹μ
+	Sigma_inv_ones := l.matvec_dyn_simd(&Sigma_inv, ones, allocator)
+	B := l.dot_simd(expected_returns, Sigma_inv_ones)
+
+	// D = 1'Σ⁻¹1
+	D := l.dot_simd(ones, Sigma_inv_ones)
+
+	// Solve 2x2 system: [A B; B D] [λ; γ] = [2*target; 2]
+	det := A * D - B * B
+	if math.abs(det) < 1e-12 {
+		// Singular - fallback to equal weights
+		weights := make([]f64, n, allocator)
+		for i in 0 ..< n {weights[i] = 1.0 / f64(n)}
+		return weights
+	}
+
+	lambda := (2.0 * target_return * D - 2.0 * B) / det
+	gamma := (2.0 * A - 2.0 * target_return * B) / det
+
+	// Compute weights: w = (1/2)Σ⁻¹(λμ + γ1)
+	lambda_mu_plus_gamma_ones := make([]f64, n, allocator)
 	for i in 0 ..< n {
-		weights[i] = 1.0 / f64(n)
+		lambda_mu_plus_gamma_ones[i] = lambda * expected_returns[i] + gamma * ones[i]
 	}
 
-	// Iterative adjustment (simplified gradient descent)
-	learning_rate := 0.01
-	for _ in 0 ..< 100 {
-		// Calculate current return
-		current_return := portfolio_return(weights, expected_returns)
+	weights := l.matvec_dyn_simd(&Sigma_inv, lambda_mu_plus_gamma_ones, allocator)
+	for i in 0 ..< n {weights[i] *= 0.5}
 
-		// Adjust weights to move toward target return
-		error := target_return - current_return
-		for i in 0 ..< n {
-			weights[i] += learning_rate * error * expected_returns[i]
-		}
-
-		// Normalize to sum to 1
-		sum := 0.0
-		for i in 0 ..< n {
-			sum += weights[i]
-		}
-		for i in 0 ..< n {
-			weights[i] /= sum
-		}
-	}
+	// Cleanup
+	l.matrix_free(&Sigma_inv)
+	delete(ones, allocator)
+	delete(Sigma_inv_mu, allocator)
+	delete(Sigma_inv_ones, allocator)
+	delete(lambda_mu_plus_gamma_ones, allocator)
 
 	return weights
 }
-
 // ============================================================================
 // Utility Functions
 // ============================================================================

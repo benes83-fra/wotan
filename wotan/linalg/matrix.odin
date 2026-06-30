@@ -400,3 +400,61 @@ matrix_from_flat :: proc(
 	m.stride = cols // ← ADD THIS LINE: set stride for contiguous row-major layout
 	return m
 }
+
+
+// ============================================================================
+// SIMD-Optimized Matrix Inversion
+// Computes A^-1 by solving A * x_i = e_i using LU decomposition
+// ============================================================================
+matrix_inverse :: proc(
+	A: ^Matrix(f64),
+	allocator: mem.Allocator = context.allocator,
+) -> Matrix(f64) {
+	n := A.rows
+	if n == 0 || A.cols != n {
+		panic("matrix_inverse: matrix must be square and non-empty")
+	}
+
+	// 1. Perform LU decomposition (A = P * L * U)
+	LU, piv, sign, ok := lu_decompose(A, allocator)
+	if !ok {
+		panic("matrix_inverse: matrix is singular or LU decomposition failed")
+	}
+
+	// 2. Allocate the inverse matrix
+	Ainv := matrix_new(f64, n, n, allocator)
+
+	// 3. Solve A * x_i = e_i for each column i
+	// We use context.temp_allocator for the identity columns since they are short-lived
+	e := make([]f64, n, context.temp_allocator)
+
+	for i in 0 ..< n {
+		// Create i-th column of identity matrix
+		for j in 0 ..< n {
+			e[j] = 0.0
+		}
+		e[i] = 1.0
+
+		// Solve using SIMD-accelerated LU forward/backward substitution
+		x := lu_solve_simd(&LU, piv, e, allocator)
+
+		// Copy the solution vector x into the i-th column of Ainv
+		// Row-major order: column i is at indices [j * n + i]
+		for j in 0 ..< n {
+			Ainv.data[j * n + i] = x[j]
+		}
+
+		// Free the temporary solution vector
+		delete(x, allocator)
+	}
+
+	delete(e, context.temp_allocator)
+
+	// Clean up LU matrix and pivot array
+	matrix_free(&LU)
+	// Note: If lu_decompose allocated piv with context.temp_allocator,
+	// change this to delete(piv, context.temp_allocator)
+	delete(piv, allocator)
+
+	return Ainv
+}
