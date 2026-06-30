@@ -151,7 +151,7 @@ compute_greeks :: proc(
 	gamma := (delta_up - delta_dn) / (2.0 * h)
 
 	// Convert theta to per-day (divide by 365)
-	theta_per_day := theta / 365.0
+	theta_per_day := -theta / 365.0
 
 	// Convert vega and rho to per-1% (divide by 100)
 	vega_per_pct := vega / 100.0

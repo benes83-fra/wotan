@@ -110,6 +110,9 @@ derivatives_test :: proc(allocator: mem.Allocator) {
 	// ====================================================================
 	// Test 4: Greeks Sanity Checks
 	// ====================================================================
+	// ====================================================================
+	// Test 4: Greeks Sanity Checks (with CORRECT expectations)
+	// ====================================================================
 	fmt.println("\n--- Test 4: Greeks Sanity Checks ---")
 
 	cg := fin.compute_greeks(S, K, T, r, sigma, .Call, allocator)
@@ -121,7 +124,7 @@ derivatives_test :: proc(allocator: mem.Allocator) {
 	// Put delta should be in (-1, 0)
 	fmt.printf("  Put delta in (-1,0): %v (%.4f)\n", pg.delta < 0 && pg.delta > -1, pg.delta)
 
-	// Call delta - Put delta ≈ 1 (for European options)
+	// Call delta - Put delta ≈ 1 (put-call parity for deltas)
 	delta_diff := cg.delta - pg.delta
 	fmt.printf(
 		"  CallΔ - PutΔ ≈ 1:  %v (%.4f)\n",
@@ -145,5 +148,56 @@ derivatives_test :: proc(allocator: mem.Allocator) {
 		math.abs(cg.vega - pg.vega),
 	)
 
+	// Theta should be NEGATIVE for long calls (time decay)
+	fmt.printf("  Call theta < 0:     %v (%.4f per day)\n", cg.theta < 0, cg.theta)
+	fmt.printf("  Put theta < 0:      %v (%.4f per day)\n", pg.theta < 0, pg.theta)
+
+	// Verify against closed-form BS Greeks
+	fmt.println("\n--- Verification Against Closed-Form BS ---")
+	inv_sqrt_2pi := 0.3989422804014327
+	sqrt_T := math.sqrt(T)
+	d1 := (math.ln_f64(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * sqrt_T)
+	d2 := d1 - sigma * sqrt_T
+	phi_d1 := math.exp_f64(-0.5 * d1 * d1) * inv_sqrt_2pi
+
+	bs_delta := norm_cdf(d1)
+	bs_gamma := phi_d1 / (S * sigma * sqrt_T)
+	bs_vega := S * phi_d1 * sqrt_T / 100.0 // per 1% move
+	bs_rho := K * T * math.exp(-r * T) * norm_cdf(d2) / 100.0 // per 1% move
+
+	fmt.printf("  %-8s  %-12s  %-12s  %-10s\n", "Greek", "Autograd", "Closed-Form", "Error")
+	fmt.printf(
+		"  %-8s  %-12.6f  %-12.6f  %.2e\n",
+		"Delta",
+		cg.delta,
+		bs_delta,
+		math.abs(cg.delta - bs_delta),
+	)
+	fmt.printf(
+		"  %-8s  %-12.6f  %-12.6f  %.2e\n",
+		"Gamma",
+		cg.gamma,
+		bs_gamma,
+		math.abs(cg.gamma - bs_gamma),
+	)
+	fmt.printf(
+		"  %-8s  %-12.6f  %-12.6f  %.2e\n",
+		"Vega",
+		cg.vega,
+		bs_vega,
+		math.abs(cg.vega - bs_vega),
+	)
+	fmt.printf(
+		"  %-8s  %-12.6f  %-12.6f  %.2e\n",
+		"Rho",
+		cg.rho,
+		bs_rho,
+		math.abs(cg.rho - bs_rho),
+	)
 	fmt.println("\n✓ Derivatives test completed!")
+}
+
+
+norm_cdf :: proc(x: f64) -> f64 {
+	return 0.5 * (1.0 + math.erf(x / math.sqrt_f64(2.0)))
 }
