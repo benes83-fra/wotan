@@ -1,6 +1,7 @@
 package tests
 
 import fin "../wotan/finance"
+import l "../wotan/linalg"
 import "core:fmt"
 import "core:math"
 import "core:mem"
@@ -200,4 +201,104 @@ derivatives_test :: proc(allocator: mem.Allocator) {
 
 norm_cdf :: proc(x: f64) -> f64 {
 	return 0.5 * (1.0 + math.erf(x / math.sqrt_f64(2.0)))
+}
+
+
+portfolio_test :: proc(allocator: mem.Allocator) {
+	fmt.println("\n=== Portfolio Optimization Test ===\n")
+
+	// Create sample data: 3 assets
+	n_assets := 3
+
+	// Expected annual returns (10%, 15%, 20%)
+	expected_returns := []f64{0.10, 0.15, 0.20}
+
+	// Covariance matrix (annualized)
+	cov_matrix := l.matrix_new(f64, n_assets, n_assets, allocator)
+	defer l.matrix_free(&cov_matrix)
+
+	// Set covariance values
+	// Diagonal: variances (0.04, 0.09, 0.16)
+	cov_matrix.data[0] = 0.04 // Asset 1 variance
+	cov_matrix.data[4] = 0.09 // Asset 2 variance
+	cov_matrix.data[8] = 0.16 // Asset 3 variance
+
+	// Off-diagonal: covariances
+	cov_matrix.data[1] = 0.02 // Cov(1,2)
+	cov_matrix.data[2] = 0.01 // Cov(1,3)
+	cov_matrix.data[3] = 0.02 // Cov(2,1)
+	cov_matrix.data[5] = 0.03 // Cov(2,3)
+	cov_matrix.data[6] = 0.01 // Cov(3,1)
+	cov_matrix.data[7] = 0.03 // Cov(3,2)
+
+	risk_free_rate := 0.03 // 3% risk-free rate
+
+	// Test 1: Minimum Variance Portfolio
+	fmt.println("--- Minimum Variance Portfolio ---")
+	min_var_weights := fin.min_variance_portfolio(&cov_matrix, allocator)
+	defer delete(min_var_weights, allocator)
+
+	min_var_metrics := fin.portfolio_metrics(
+		min_var_weights,
+		expected_returns,
+		&cov_matrix,
+		risk_free_rate,
+	)
+	fmt.printf(
+		"Weights: [%.3f, %.3f, %.3f]\n",
+		min_var_metrics.weights[0],
+		min_var_metrics.weights[1],
+		min_var_metrics.weights[2],
+	)
+	fmt.printf("Expected Return: %.2f%%\n", min_var_metrics.expected_return * 100)
+	fmt.printf("Volatility: %.2f%%\n", min_var_metrics.volatility * 100)
+	fmt.printf("Sharpe Ratio: %.3f\n\n", min_var_metrics.sharpe_ratio)
+
+	// Test 2: Maximum Sharpe Ratio Portfolio
+	fmt.println("--- Maximum Sharpe Ratio Portfolio ---")
+	max_sharpe_weights := fin.max_sharpe_portfolio(
+		expected_returns,
+		&cov_matrix,
+		risk_free_rate,
+		allocator,
+	)
+	defer delete(max_sharpe_weights, allocator)
+
+	max_sharpe_metrics := fin.portfolio_metrics(
+		max_sharpe_weights,
+		expected_returns,
+		&cov_matrix,
+		risk_free_rate,
+	)
+	fmt.printf(
+		"Weights: [%.3f, %.3f, %.3f]\n",
+		max_sharpe_metrics.weights[0],
+		max_sharpe_metrics.weights[1],
+		max_sharpe_metrics.weights[2],
+	)
+	fmt.printf("Expected Return: %.2f%%\n", max_sharpe_metrics.expected_return * 100)
+	fmt.printf("Volatility: %.2f%%\n", max_sharpe_metrics.volatility * 100)
+	fmt.printf("Sharpe Ratio: %.3f\n\n", max_sharpe_metrics.sharpe_ratio)
+
+	// Test 3: Efficient Frontier
+	fmt.println("--- Efficient Frontier (5 points) ---")
+	frontier := fin.efficient_frontier(expected_returns, &cov_matrix, risk_free_rate, 5, allocator)
+	defer {
+		for point in frontier {
+			delete(point.weights, allocator)
+		}
+		delete(frontier, allocator)
+	}
+
+	for point, i in frontier {
+		fmt.printf(
+			"Point %d: Return=%.2f%%, Volatility=%.2f%%, Sharpe=%.3f\n",
+			i + 1,
+			point.expected_return * 100,
+			point.volatility * 100,
+			point.sharpe_ratio,
+		)
+	}
+
+	fmt.println("\n✓ Portfolio optimization test completed!")
 }
