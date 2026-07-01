@@ -480,6 +480,7 @@ main :: proc() {
 	test.transfer_learning_test(context.temp_allocator)
 	test.derivatives_test(context.temp_allocator)
 	test.portfolio_test(context.temp_allocator)
+	test.constraints_test(context.temp_allocator)
 	fmt.println("Demo End")
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)

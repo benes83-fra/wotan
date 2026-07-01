@@ -352,3 +352,6 @@ annualize_return :: proc(daily_return: f64, trading_days: int = 252) -> f64 {
 annualize_volatility :: proc(daily_volatility: f64, trading_days: int = 252) -> f64 {
 	return daily_volatility * math.sqrt(f64(trading_days))
 }
+// Add to wotan/finance/portfolio.odin
+
+// Constrained versions (add these after existing functions)

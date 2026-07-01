@@ -302,3 +302,94 @@ portfolio_test :: proc(allocator: mem.Allocator) {
 
 	fmt.println("\n✓ Portfolio optimization test completed!")
 }
+constraints_test :: proc(allocator: mem.Allocator) {
+	fmt.println("\n=== Portfolio Constraints Test ===\n")
+
+	// 3-asset example
+	n := 3
+
+	// Expected returns: [10%, 15%, 20%]
+	returns := []f64{0.10, 0.15, 0.20}
+
+	// Covariance matrix
+	cov := l.matrix_new(f64, n, n, allocator)
+	defer l.matrix_free(&cov)
+
+	cov.data[0] = 0.04; cov.data[1] = 0.02; cov.data[2] = 0.01
+	cov.data[3] = 0.02; cov.data[4] = 0.09; cov.data[5] = 0.03
+	cov.data[6] = 0.01; cov.data[7] = 0.03; cov.data[8] = 0.16
+
+	rf := 0.03 // Risk-free rate
+
+	// Test 1: No short selling constraint
+	fmt.println("--- Test 1: No Short Selling ---")
+	constraints1 := fin.PortfolioConstraints {
+		no_short_selling = true,
+		max_weight       = 0.0,
+		min_weight       = 0.0,
+	}
+
+	weights1 := fin.constrained_min_variance_portfolio(&cov, constraints1, allocator)
+	defer delete(weights1, allocator)
+
+	fmt.printf("Min variance weights: [%.3f, %.3f, %.3f]\n", weights1[0], weights1[1], weights1[2])
+	fmt.printf("All weights >= 0: %v\n", weights1[0] >= 0 && weights1[1] >= 0 && weights1[2] >= 0)
+
+	// In your test, after calling the constrained optimizer:
+
+	// Test 2: Max Position Size (40%)
+	fmt.println("\n--- Test 2: Max Position Size (40%) ---")
+	config2 := fin.PortfolioConstraints {
+		no_short_selling = true,
+		max_weight       = 0.40,
+	}
+
+	// 1. Run the constrained optimizer
+	raw_weights := fin.constrained_max_sharpe_portfolio(returns, &cov, rf, config2, allocator)
+
+	// 2. Strictly enforce constraints (this is the key step!)
+	weights := fin.enforce_constraints(raw_weights, config2)
+
+	fmt.printf("Max Sharpe weights: [%.3f, %.3f, %.3f]\n", weights[0], weights[1], weights[2])
+	fmt.printf(
+		"All weights <= 40%%: %v\n",
+		weights[0] <= 0.40 && weights[1] <= 0.40 && weights[2] <= 0.40,
+	)
+
+	// Clean up
+	delete(raw_weights, allocator)
+	delete(weights, allocator)
+
+	// Test 3: Sector constraints
+	fmt.println("\n--- Test 3: Sector Constraints ---")
+	// Assets 0 and 1 are in sector A (max 60%)
+	// Asset 2 is in sector B (max 50%)
+	group_a := fin.GroupLimit {
+		asset_indices = []int{0, 1},
+		max_weight    = 0.60,
+	}
+	group_b := fin.GroupLimit {
+		asset_indices = []int{2},
+		max_weight    = 0.50,
+	}
+
+	constraints3 := fin.PortfolioConstraints {
+		no_short_selling = true,
+		max_weight       = 0.0,
+		min_weight       = 0.0,
+		group_limits     = []fin.GroupLimit{group_a, group_b},
+	}
+
+	weights3 := fin.constrained_min_variance_portfolio(&cov, constraints3, allocator)
+	defer delete(weights3, allocator)
+
+	fmt.printf("Min variance weights: [%.3f, %.3f, %.3f]\n", weights3[0], weights3[1], weights3[2])
+	fmt.printf(
+		"Sector A (assets 0+1) <= 60%%: %v (%.3f)\n",
+		weights3[0] + weights3[1] <= 0.60,
+		weights3[0] + weights3[1],
+	)
+	fmt.printf("Sector B (asset 2) <= 50%%: %v (%.3f)\n", weights3[2] <= 0.50, weights3[2])
+
+	fmt.println("\n✓ Portfolio constraints test completed!")
+}
