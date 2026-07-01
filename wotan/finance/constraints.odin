@@ -423,82 +423,81 @@ constrained_mean_variance_portfolio :: proc(
 
 // enforce_constraints strictly applies all constraints to the weights
 // Call this AFTER the optimization solver returns
-enforce_constraints :: proc(weights: []f64, config: PortfolioConstraints) -> []f64 {
-	result := make([]f64, len(weights), context.temp_allocator)
-	copy(result, weights)
+// Replace the enforce_constraints function with this corrected version:
+enforce_constraints :: proc(
+	weights: []f64,
+	constraints: PortfolioConstraints,
+	allocator: mem.Allocator,
+) -> []f64 {
+	out := make([]f64, len(weights), allocator)
+	copy(out, weights)
 
-	// 1. Apply no-short-selling (clamp to >= 0)
-	if config.no_short_selling {
-		for i in 0 ..< len(result) {
-			if result[i] < 0.0 {
-				result[i] = 0.0
-			}
+	// 1. Hard clip individual bounds
+	if constraints.no_short_selling {
+		for i in 0 ..< len(out) {
+			if out[i] < 0.0 {out[i] = 0.0}
+		}
+	}
+	if constraints.max_weight > 0.0 {
+		for i in 0 ..< len(out) {
+			if out[i] > constraints.max_weight {out[i] = constraints.max_weight}
 		}
 	}
 
-	// 2. Apply max position size (clamp to <= max_weight)
-	if config.max_weight > 0.0 {
-		for i in 0 ..< len(result) {
-			if result[i] > config.max_weight {
-				result[i] = config.max_weight
-			}
+	// 2. Hard clip group/sector limits (Proportional Scaling)
+	for group in constraints.group_limits {
+		group_sum := 0.0
+		for idx in group.asset_indices {
+			group_sum += out[idx]
 		}
-	}
-
-	// 3. Apply sector constraints
-	if len(config.group_limits) > 0 {
-		for group in config.group_limits {
-			// Calculate current sum for this group
-			group_sum := 0.0
+		// If the group exceeds the limit, scale them down proportionally
+		if group_sum > group.max_weight + 1e-8 {
+			scale := group.max_weight / group_sum
 			for idx in group.asset_indices {
-				if idx >= 0 && idx < len(result) {
-					group_sum += result[idx]
+				out[idx] *= scale
+			}
+		}
+	}
+
+	// 3. Re-normalize to sum to 1.0 (Iterative projection)
+	// Clipping can cause the sum to drop below 1.0. We distribute the remainder
+	// to assets that haven't hit their max constraints.
+	for _ in 0 ..< 5 { 	// Max 5 iterations to converge
+		sum := 0.0
+		for w in out {sum += w}
+		if math.abs(sum - 1.0) < 1e-6 {break}
+
+		// Find how many assets can still accept more weight
+		adjustable_count := 0
+		for i in 0 ..< len(out) {
+			can_adjust := true
+			if constraints.no_short_selling && out[i] <= 0.0 {can_adjust = false}
+			if constraints.max_weight > 0.0 &&
+			   out[i] >= constraints.max_weight {can_adjust = false}
+			if can_adjust {adjustable_count += 1}
+		}
+
+		if adjustable_count == 0 {break} 	// Prevent division by zero
+
+		diff := (1.0 - sum) / f64(adjustable_count)
+		for i in 0 ..< len(out) {
+			can_adjust := true
+			if constraints.no_short_selling && out[i] <= 0.0 {can_adjust = false}
+			if constraints.max_weight > 0.0 &&
+			   out[i] >= constraints.max_weight {can_adjust = false}
+
+			if can_adjust {
+				out[i] += diff
+				// Re-apply hard limits just in case
+				if constraints.max_weight > 0.0 && out[i] > constraints.max_weight {
+					out[i] = constraints.max_weight
+				}
+				if constraints.no_short_selling && out[i] < 0.0 {
+					out[i] = 0.0
 				}
 			}
-
-			// If sum exceeds limit, scale down proportionally
-			if group_sum > group.max_weight && group_sum > 1e-10 {
-				scale := group.max_weight / group_sum
-				for idx in group.asset_indices {
-					if idx >= 0 && idx < len(result) {
-						result[idx] *= scale
-					}
-				}
-			}
 		}
 	}
 
-	// 4. Re-normalize to sum to 1.0
-	total := 0.0
-	for w in result {
-		total += w
-	}
-
-	if total > 1e-10 {
-		inv_total := 1.0 / total
-		for i in 0 ..< len(result) {
-			result[i] *= inv_total
-		}
-	} else {
-		// Fallback: equal weights
-		equal_w := 1.0 / f64(len(result))
-		for i in 0 ..< len(result) {
-			result[i] = equal_w
-		}
-	}
-
-	// 5. Final pass: re-apply box constraints after normalization
-	// (normalization might have pushed weights slightly out of bounds)
-	if config.no_short_selling || config.max_weight > 0.0 {
-		for i in 0 ..< len(result) {
-			if config.no_short_selling && result[i] < 0.0 {
-				result[i] = 0.0
-			}
-			if config.max_weight > 0.0 && result[i] > config.max_weight {
-				result[i] = config.max_weight
-			}
-		}
-	}
-
-	return result
+	return out
 }
