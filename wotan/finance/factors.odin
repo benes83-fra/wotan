@@ -11,10 +11,10 @@ import "core:mem"
 // Factor Analysis Result
 // ============================================================================
 FactorAnalysisResult :: struct {
-	loadings:      [][]f64, // [n_factors × n_variables] factor loadings
-	communalities: []f64, // [n_variables] variance explained by factors
-	uniqueness:    []f64, // [n_variables] unique variance (1 - communality)
-	eigenvalues:   []f64, // [n_factors] eigenvalues of reduced correlation
+	loadings:      [][]f64,
+	communalities: []f64,
+	uniqueness:    []f64,
+	eigenvalues:   []f64,
 	n_factors:     int,
 	converged:     bool,
 	n_iterations:  int,
@@ -37,24 +37,18 @@ factor_analysis :: proc(
 ) -> FactorAnalysisResult {
 	n_factors := n_factors
 	n_obs := len(data)
-	if n_obs == 0 {
-		return FactorAnalysisResult{}
-	}
+	if n_obs == 0 {return FactorAnalysisResult{}}
 	n_vars := len(data[0])
-	if n_vars == 0 {
-		return FactorAnalysisResult{}
-	}
-	if n_factors > n_vars {
-		n_factors = n_vars
-	}
+	if n_vars == 0 {return FactorAnalysisResult{}}
+	if n_factors > n_vars {n_factors = n_vars}
 
-	// Step 1: Compute correlation matrix (standardized)
+	// Step 1: Compute correlation matrix (SIMD optimized)
 	corr := _correlation_matrix(data, allocator)
-	defer _destroy_matrix(corr, allocator) // ✅ FIXED: Pass allocator
+	defer _destroy_matrix(corr, allocator)
 
-	// Step 2: Initial communalities (squared multiple correlations)
+	// Step 2: Initial communalities
 	pca := ana.pca_from_cov(corr, allocator)
-	defer _destroy_pca_result(pca, allocator) // ✅ FIXED: Use custom destroy with allocator
+	defer _destroy_pca_result(pca, allocator)
 
 	communalities := make([]f64, n_vars, allocator)
 	for i in 0 ..< n_vars {
@@ -73,30 +67,26 @@ factor_analysis :: proc(
 	for iter in 0 ..< max_iter {
 		n_iterations = iter + 1
 
-		// Replace diagonal with communalities
 		reduced_corr := _copy_matrix(corr, allocator)
 		for i in 0 ..< n_vars {
 			reduced_corr[i][i] = communalities[i]
 		}
 
-		// Extract factors via PCA on reduced correlation
 		factor_pca := ana.pca_from_cov(reduced_corr, allocator)
-		_destroy_matrix(reduced_corr, allocator) // ✅ FIXED: Pass allocator
+		_destroy_matrix(reduced_corr, allocator)
 
-		// Extract first n_factors eigenvectors as loadings
 		loadings = make([][]f64, n_factors, allocator)
 		for f in 0 ..< n_factors {
 			loadings[f] = make([]f64, n_vars, allocator)
 			if f < len(factor_pca.eigenvectors) {
+				scale := math.sqrt(max(0.0, factor_pca.eigenvalues[f]))
 				for v in 0 ..< n_vars {
-					scale := math.sqrt(max(0.0, factor_pca.eigenvalues[f]))
 					loadings[f][v] = factor_pca.eigenvectors[f][v] * scale
 				}
 			}
 		}
-		_destroy_pca_result(factor_pca, allocator) // ✅ FIXED: Use custom destroy with allocator
+		_destroy_pca_result(factor_pca, allocator)
 
-		// Update communalities: sum of squared loadings for each variable
 		new_communalities := make([]f64, n_vars, allocator)
 		for v in 0 ..< n_vars {
 			sum_sq := 0.0
@@ -106,16 +96,12 @@ factor_analysis :: proc(
 			new_communalities[v] = min(1.0, max(0.0, sum_sq))
 		}
 
-		// Check convergence
 		max_change := 0.0
 		for v in 0 ..< n_vars {
 			change := math.abs(new_communalities[v] - communalities[v])
-			if change > max_change {
-				max_change = change
-			}
+			if change > max_change {max_change = change}
 		}
 
-		// Clean up old communalities
 		delete(communalities, allocator)
 		communalities = new_communalities
 
@@ -125,20 +111,13 @@ factor_analysis :: proc(
 		}
 	}
 
-	// Compute uniqueness
 	uniqueness := make([]f64, n_vars, allocator)
-	for v in 0 ..< n_vars {
-		uniqueness[v] = 1.0 - communalities[v]
-	}
+	for v in 0 ..< n_vars {uniqueness[v] = 1.0 - communalities[v]}
 
-	// Extract eigenvalues from final loadings
 	eigenvalues := make([]f64, n_factors, allocator)
 	for f in 0 ..< n_factors {
-		sum_sq := 0.0
-		for v in 0 ..< n_vars {
-			sum_sq += loadings[f][v] * loadings[f][v]
-		}
-		eigenvalues[f] = sum_sq
+		// SIMD dot product for sum of squares
+		eigenvalues[f] = l.dot_simd(loadings[f], loadings[f])
 	}
 
 	return FactorAnalysisResult {
@@ -153,7 +132,7 @@ factor_analysis :: proc(
 }
 
 // ============================================================================
-// Varimax Rotation
+// Varimax Rotation (FIXED MATH + SIMD OPTIMIZED)
 // ============================================================================
 varimax_rotation :: proc(
 	loadings: [][]f64,
@@ -162,23 +141,23 @@ varimax_rotation :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> [][]f64 {
 	n_factors := len(loadings)
-	if n_factors < 2 {
-		rotated := make([][]f64, n_factors, allocator)
-		for f in 0 ..< n_factors {
-			rotated[f] = make([]f64, len(loadings[f]), allocator)
-			copy(rotated[f], loadings[f])
-		}
-		return rotated
-	}
-
+	if n_factors < 2 {return _copy_matrix(loadings, allocator)}
 	n_vars := len(loadings[0])
 
-	A := make([][]f64, n_vars, allocator)
-	for v in 0 ..< n_vars {
-		A[v] = make([]f64, n_factors, allocator)
-		for f in 0 ..< n_factors {
-			A[v][f] = loadings[f][v]
-		}
+	L := _copy_matrix(loadings, allocator)
+
+	// Pre-allocate SIMD buffers
+	u := make([]f64, n_vars, allocator)
+	v := make([]f64, n_vars, allocator)
+	Li_sq := make([]f64, n_vars, allocator)
+	Lj_sq := make([]f64, n_vars, allocator)
+	Li_Lj := make([]f64, n_vars, allocator)
+	defer {
+		delete(u, allocator)
+		delete(v, allocator)
+		delete(Li_sq, allocator)
+		delete(Lj_sq, allocator)
+		delete(Li_Lj, allocator)
 	}
 
 	for iter in 0 ..< max_iter {
@@ -186,31 +165,31 @@ varimax_rotation :: proc(
 
 		for i in 0 ..< n_factors - 1 {
 			for j in i + 1 ..< n_factors {
-				u := make([]f64, n_vars, allocator)
-				v := make([]f64, n_vars, allocator)
+				Li := L[i]
+				Lj := L[j]
 
-				for k in 0 ..< n_vars {
-					u[k] = A[k][i] * A[k][i] - A[k][j] * A[k][j]
-					v[k] = 2.0 * A[k][i] * A[k][j]
-				}
+				// SIMD: u = Li^2 - Lj^2, v = 2 * Li * Lj
+				l.vec_mul_simd(Li, Li, Li_sq)
+				l.vec_mul_simd(Lj, Lj, Lj_sq)
+				l.vec_mul_simd(Li, Lj, Li_Lj)
 
-				sum_u := 0.0
-				sum_v := 0.0
-				for k in 0 ..< n_vars {
-					sum_u += u[k]
-					sum_v += v[k]
-				}
+				l.vec_sub_simd(Li_sq, Lj_sq, u)
+				l.vec_scale_simd(Li_Lj, 2.0, v)
 
-				A_val := 0.0
-				B_val := 0.0
-				for k in 0 ..< n_vars {
-					A_val += u[k] - sum_u / f64(n_vars)
-					B_val += v[k] - sum_v / f64(n_vars)
-				}
+				// SIMD sums and dot products for Varimax angle
+				X := l.sum_simd(u)
+				Y := l.sum_simd(v)
+
+				sum_u2 := l.dot_simd(u, u)
+				sum_v2 := l.dot_simd(v, v)
+				sum_uv := l.dot_simd(u, v)
+
+				n := f64(n_vars)
+				// Corrected Varimax formulas (Kaiser, 1958)
+				A_val := (sum_u2 - sum_v2) - (X * X - Y * Y) / n
+				B_val := 2.0 * sum_uv - (2.0 * X * Y) / n
 
 				if math.abs(A_val) < 1e-10 && math.abs(B_val) < 1e-10 {
-					delete(u, allocator)
-					delete(v, allocator)
 					continue
 				}
 
@@ -218,43 +197,21 @@ varimax_rotation :: proc(
 				cos_phi := math.cos(phi)
 				sin_phi := math.sin(phi)
 
-				for k in 0 ..< n_vars {
-					old_i := A[k][i]
-					old_j := A[k][j]
-					A[k][i] = old_i * cos_phi - old_j * sin_phi
-					A[k][j] = old_i * sin_phi + old_j * cos_phi
-				}
+				// SIMD: Apply Givens rotation to the factor pairs
+				l.rotate_pair_simd(cos_phi, sin_phi, Li, Lj, n_vars)
 
 				delta += math.abs(sin_phi) + math.abs(1.0 - cos_phi)
-
-				delete(u, allocator)
-				delete(v, allocator)
 			}
 		}
 
-		if delta < tol {
-			break
-		}
+		if delta < tol {break}
 	}
 
-	rotated := make([][]f64, n_factors, allocator)
-	for f in 0 ..< n_factors {
-		rotated[f] = make([]f64, n_vars, allocator)
-		for v in 0 ..< n_vars {
-			rotated[f][v] = A[v][f]
-		}
-	}
-
-	for v in 0 ..< n_vars {
-		delete(A[v], allocator)
-	}
-	delete(A, allocator)
-
-	return rotated
+	return L
 }
 
 // ============================================================================
-// Factor Scoring
+// Factor Scoring (SIMD Optimized)
 // ============================================================================
 compute_factor_scores :: proc(
 	data: [][]f64,
@@ -262,27 +219,20 @@ compute_factor_scores :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> [][]f64 {
 	n_obs := len(data)
-	if n_obs == 0 {
-		return [][]f64{}
-	}
+	if n_obs == 0 {return [][]f64{}}
 	n_vars := len(data[0])
 	n_factors := fa.n_factors
 
 	std_data := _standardize_data(data, allocator)
-	defer _destroy_matrix(std_data, allocator) // ✅ FIXED: Pass allocator
+	defer _destroy_matrix(std_data, allocator)
 
 	scores := make([][]f64, n_obs, allocator)
 	for obs in 0 ..< n_obs {
 		scores[obs] = make([]f64, n_factors, allocator)
 		for f in 0 ..< n_factors {
-			sum := 0.0
-			for v in 0 ..< n_vars {
-				sum += std_data[obs][v] * fa.loadings[f][v]
-			}
-			var_sum := 0.0
-			for v in 0 ..< n_vars {
-				var_sum += fa.loadings[f][v] * fa.loadings[f][v]
-			}
+			// SIMD dot product
+			sum := l.dot_simd(std_data[obs], fa.loadings[f])
+			var_sum := l.dot_simd(fa.loadings[f], fa.loadings[f])
 			if var_sum > 1e-10 {
 				scores[obs][f] = sum / var_sum
 			}
@@ -293,7 +243,7 @@ compute_factor_scores :: proc(
 }
 
 // ============================================================================
-// Finance-Specific: Market Factor Extraction
+// Market Factor Extraction (SIMD Optimized)
 // ============================================================================
 extract_market_factor :: proc(
 	returns_data: [][]f64,
@@ -303,34 +253,26 @@ extract_market_factor :: proc(
 	f64,
 ) {
 	corr := _correlation_matrix(returns_data, allocator)
-	defer _destroy_matrix(corr, allocator) // ✅ FIXED: Pass allocator
+	defer _destroy_matrix(corr, allocator)
 
 	pca := ana.pca_from_cov(corr, allocator)
-	defer _destroy_pca_result(pca, allocator) // ✅ FIXED: Use custom destroy with allocator
+	defer _destroy_pca_result(pca, allocator)
 
-	if len(pca.eigenvalues) == 0 {
-		return []f64{}, 0.0
-	}
+	if len(pca.eigenvalues) == 0 {return []f64{}, 0.0}
 
 	n_obs := len(returns_data)
-	n_vars := len(returns_data[0])
-
 	std_data := _standardize_data(returns_data, allocator)
-	defer _destroy_matrix(std_data, allocator) // ✅ FIXED: Pass allocator
+	defer _destroy_matrix(std_data, allocator)
 
 	market_scores := make([]f64, n_obs, allocator)
+	ev0 := pca.eigenvectors[0]
 	for obs in 0 ..< n_obs {
-		sum := 0.0
-		for v in 0 ..< n_vars {
-			sum += std_data[obs][v] * pca.eigenvectors[0][v]
-		}
-		market_scores[obs] = sum
+		// SIMD dot product
+		market_scores[obs] = l.dot_simd(std_data[obs], ev0)
 	}
 
 	total_var := 0.0
-	for ev in pca.eigenvalues {
-		total_var += ev
-	}
+	for ev in pca.eigenvalues {total_var += ev}
 	variance_explained := 0.0
 	if total_var > 1e-10 {
 		variance_explained = pca.eigenvalues[0] / total_var
@@ -355,7 +297,6 @@ decompose_risk :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> RiskDecomposition {
 	fa := factor_analysis(returns_data, n_factors, 50, 1e-6, allocator)
-
 	n_assets := len(returns_data[0])
 
 	total_variance := make([]f64, n_assets, allocator)
@@ -374,39 +315,81 @@ decompose_risk :: proc(
 // ============================================================================
 // Helper Functions
 // ============================================================================
+
+// Converts data to standardized flat l.Matrix for SIMD X^T X
+_standardize_data_flat :: proc(data: [][]f64, allocator: mem.Allocator) -> l.Matrix(f64) {
+	n_obs := len(data)
+	if n_obs == 0 {return l.Matrix(f64){}}
+	n_vars := len(data[0])
+
+	out := l.matrix_new(f64, n_obs, n_vars, allocator)
+
+	means := make([]f64, n_vars, allocator)
+	for v in 0 ..< n_vars {
+		sum := 0.0
+		for obs in 0 ..< n_obs {sum += data[obs][v]}
+		means[v] = sum / f64(n_obs)
+	}
+
+	stds := make([]f64, n_vars, allocator)
+	for v in 0 ..< n_vars {
+		sum_sq := 0.0
+		for obs in 0 ..< n_obs {
+			diff := data[obs][v] - means[v]
+			sum_sq += diff * diff
+		}
+		stds[v] = math.sqrt(sum_sq / f64(n_obs - 1))
+		if stds[v] < 1e-10 {stds[v] = 1.0}
+	}
+
+	for obs in 0 ..< n_obs {
+		for v in 0 ..< n_vars {
+			out.data[obs * n_vars + v] = (data[obs][v] - means[v]) / stds[v]
+		}
+	}
+
+	delete(means, allocator)
+	delete(stds, allocator)
+	return out
+}
+
+_from_linalg_matrix :: proc(m: ^l.Matrix(f64), allocator: mem.Allocator) -> [][]f64 {
+	rows := m.rows
+	cols := m.cols
+	out := make([][]f64, rows, allocator)
+	for i in 0 ..< rows {
+		out[i] = make([]f64, cols, allocator)
+		copy(out[i], m.data[i * cols:(i + 1) * cols])
+	}
+	return out
+}
+
+// SIMD Optimized Correlation Matrix
 _correlation_matrix :: proc(
 	data: [][]f64,
 	allocator: mem.Allocator = context.allocator,
 ) -> [][]f64 {
 	n_obs := len(data)
-	if n_obs == 0 {
-		return [][]f64{}
-	}
+	if n_obs == 0 {return [][]f64{}}
 	n_vars := len(data[0])
 
-	std_data := _standardize_data(data, allocator)
+	std_data := _standardize_data_flat(data, allocator)
+	defer l.matrix_free(&std_data)
 
-	corr := make([][]f64, n_vars, allocator)
-	for i in 0 ..< n_vars {
-		corr[i] = make([]f64, n_vars, allocator)
-		for j in 0 ..< n_vars {
-			sum := 0.0
-			for obs in 0 ..< n_obs {
-				sum += std_data[obs][i] * std_data[obs][j]
-			}
-			corr[i][j] = sum / f64(n_obs - 1)
-		}
+	// X^T X using SIMD dot products
+	corr_linalg := l.xtx_simd(&std_data, allocator)
+
+	scale := 1.0 / f64(n_obs - 1)
+	for i in 0 ..< n_vars * n_vars {
+		corr_linalg.data[i] *= scale
 	}
 
-	_destroy_matrix(std_data, allocator) // ✅ FIXED: Pass allocator
-	return corr
+	return _from_linalg_matrix(&corr_linalg, allocator)
 }
 
 _standardize_data :: proc(data: [][]f64, allocator: mem.Allocator = context.allocator) -> [][]f64 {
 	n_obs := len(data)
-	if n_obs == 0 {
-		return [][]f64{}
-	}
+	if n_obs == 0 {return [][]f64{}}
 	n_vars := len(data[0])
 
 	means := make([]f64, n_vars, allocator)
@@ -414,9 +397,7 @@ _standardize_data :: proc(data: [][]f64, allocator: mem.Allocator = context.allo
 
 	for v in 0 ..< n_vars {
 		sum := 0.0
-		for obs in 0 ..< n_obs {
-			sum += data[obs][v]
-		}
+		for obs in 0 ..< n_obs {sum += data[obs][v]}
 		means[v] = sum / f64(n_obs)
 	}
 
@@ -427,9 +408,7 @@ _standardize_data :: proc(data: [][]f64, allocator: mem.Allocator = context.allo
 			sum_sq += diff * diff
 		}
 		stds[v] = math.sqrt(sum_sq / f64(n_obs - 1))
-		if stds[v] < 1e-10 {
-			stds[v] = 1.0
-		}
+		if stds[v] < 1e-10 {stds[v] = 1.0}
 	}
 
 	std_data := make([][]f64, n_obs, allocator)
@@ -442,17 +421,13 @@ _standardize_data :: proc(data: [][]f64, allocator: mem.Allocator = context.allo
 
 	delete(means, allocator)
 	delete(stds, allocator)
-
 	return std_data
 }
 
 _copy_matrix :: proc(mat: [][]f64, allocator: mem.Allocator = context.allocator) -> [][]f64 {
 	rows := len(mat)
-	if rows == 0 {
-		return [][]f64{}
-	}
+	if rows == 0 {return [][]f64{}}
 	cols := len(mat[0])
-
 	out := make([][]f64, rows, allocator)
 	for r in 0 ..< rows {
 		out[r] = make([]f64, cols, allocator)
@@ -461,19 +436,13 @@ _copy_matrix :: proc(mat: [][]f64, allocator: mem.Allocator = context.allocator)
 	return out
 }
 
-// ✅ FIXED: Added allocator parameter
 _destroy_matrix :: proc(mat: [][]f64, allocator: mem.Allocator) {
-	for row in mat {
-		delete(row, allocator)
-	}
+	for row in mat {delete(row, allocator)}
 	delete(mat, allocator)
 }
 
-// ✅ NEW: Custom destroy function that respects the allocator
 _destroy_pca_result :: proc(res: ana.PCAResult, allocator: mem.Allocator) {
-	for vec in res.eigenvectors {
-		delete(vec, allocator)
-	}
+	for vec in res.eigenvectors {delete(vec, allocator)}
 	delete(res.eigenvectors, allocator)
 	delete(res.eigenvalues, allocator)
 }
