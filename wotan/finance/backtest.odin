@@ -67,6 +67,8 @@ Position :: struct {
 	avg_price:      f64,
 	unrealized_pnl: f64,
 	realized_pnl:   f64,
+	round_trips:    int,
+	winning_trades: int,
 }
 
 // ============================================================================
@@ -76,8 +78,8 @@ Position :: struct {
 Portfolio :: struct {
 	cash:         f64,
 	positions:    map[string]Position,
-	equity_curve: [dynamic]f64, // Changed to [dynamic]
-	trades:       [dynamic]FilledOrder, // Changed to [dynamic]
+	equity_curve: [dynamic]f64,
+	trades:       [dynamic]FilledOrder,
 	current_bar:  int,
 }
 
@@ -181,9 +183,13 @@ context_submit_order :: proc(ctx: ^StrategyContext, order: Order) {
 				realized := (price - pos.avg_price) * order.quantity
 				pos.realized_pnl += realized
 				pos.quantity -= order.quantity
+
 				if pos.quantity <= 0.0001 {
-					// Mark position as closed (don't delete from map)
 					pos.quantity = 0.0
+					pos.round_trips += 1
+					if realized > 0 {
+						pos.winning_trades += 1
+					}
 					ctx.portfolio^.positions[order.symbol] = pos
 				} else {
 					ctx.portfolio^.positions[order.symbol] = pos
@@ -296,37 +302,33 @@ _calculate_backtest_metrics :: proc(
 	result.sharpe_ratio = sharpe_ratio_from_returns(returns, config.risk_free_rate, 252.0)
 	result.max_drawdown = max_drawdown(returns)
 
+	// Calculate win rate from realized P&L
 	wins := 0
+	total_round_trips := 0
 	gross_profit := 0.0
 	gross_loss := 0.0
 
-	for trade in portfolio.trades {
-		pnl := 0.0
-		if trade.order.side == .Buy {
-			for other in portfolio.trades {
-				if other.order.symbol == trade.order.symbol &&
-				   other.order.side == .Sell &&
-				   other.fill_time > trade.fill_time {
-					pnl = (other.fill_price - trade.fill_price) * trade.order.quantity
-					break
-				}
-			}
-		}
+	for symbol, pos in portfolio.positions {
+		if pos.round_trips > 0 {
+			total_round_trips += pos.round_trips
+			wins += pos.winning_trades
 
-		if pnl > 0 {
-			wins += 1
-			gross_profit += pnl
-		} else if pnl < 0 {
-			gross_loss += math.abs(pnl)
+			if pos.realized_pnl > 0 {
+				gross_profit += pos.realized_pnl
+			} else if pos.realized_pnl < 0 {
+				gross_loss += math.abs(pos.realized_pnl)
+			}
 		}
 	}
 
-	if result.total_trades > 0 {
-		result.win_rate = f64(wins) / f64(result.total_trades / 2)
+	if total_round_trips > 0 {
+		result.win_rate = f64(wins) / f64(total_round_trips)
 	}
 
 	if gross_loss > 0 {
 		result.profit_factor = gross_profit / gross_loss
+	} else if gross_profit > 0 {
+		result.profit_factor = 100.0
 	}
 
 	return result
@@ -369,7 +371,7 @@ plot_equity_curve :: proc(
 }
 
 plot_backtest_drawdown :: proc(
-	result: ^BacktestResult, // Renamed to avoid conflict
+	result: ^BacktestResult,
 	path: string,
 	allocator: mem.Allocator = context.allocator,
 ) -> bool {
@@ -406,7 +408,7 @@ plot_backtest_drawdown :: proc(
 }
 
 // ============================================================================
-// Example Strategies
+// Strategy 1: SMA Crossover
 // ============================================================================
 
 sma_crossover_strategy :: proc(
@@ -420,6 +422,7 @@ sma_crossover_strategy :: proc(
 
 	col := w.column(ctx.data, symbol)
 
+	// Calculate current SMAs
 	fast_sum := 0.0
 	for i in ctx.current_bar - fast_period + 1 ..= ctx.current_bar {
 		price, _ := w.column_at_float(col, i)
@@ -434,24 +437,284 @@ sma_crossover_strategy :: proc(
 	}
 	slow_sma := slow_sum / f64(slow_period)
 
-	current_price := context_get_price(ctx, symbol)
-	quantity := (ctx.portfolio^.cash * position_size) / current_price
+	// Check if we have a position WITH QUANTITY > 0
+	has_position := false
+	if pos, ok := ctx.portfolio^.positions[symbol]; ok {
+		has_position = pos.quantity > 0.0001
+	}
 
-	if _, has_position := ctx.portfolio^.positions[symbol]; !has_position {
-		if fast_sma > slow_sma {
+	// Get previous SMAs to detect crossover
+	prev_fast_sum := 0.0
+	for i in ctx.current_bar - fast_period ..= ctx.current_bar - 1 {
+		price, _ := w.column_at_float(col, i)
+		prev_fast_sum += price
+	}
+	prev_fast_sma := prev_fast_sum / f64(fast_period)
+
+	prev_slow_sum := 0.0
+	for i in ctx.current_bar - slow_period ..= ctx.current_bar - 1 {
+		price, _ := w.column_at_float(col, i)
+		prev_slow_sum += price
+	}
+	prev_slow_sma := prev_slow_sum / f64(slow_period)
+
+	// Golden cross: fast crosses above slow
+	golden_cross := (prev_fast_sma <= prev_slow_sma) && (fast_sma > slow_sma)
+
+	// Death cross: fast crosses below slow
+	death_cross := (prev_fast_sma >= prev_slow_sma) && (fast_sma < slow_sma)
+
+	current_price := context_get_price(ctx, symbol)
+
+	// Buy on golden cross if not in position
+	if golden_cross && !has_position {
+		quantity := (ctx.portfolio^.cash * position_size) / current_price
+		order := Order {
+			symbol     = symbol,
+			side       = .Buy,
+			quantity   = quantity,
+			order_type = .Market,
+		}
+		context_submit_order(ctx, order)
+	} else if death_cross && has_position {
+		// Sell on death cross if in position
+		if pos, ok := ctx.portfolio^.positions[symbol]; ok {
 			order := Order {
 				symbol     = symbol,
-				side       = .Buy,
-				quantity   = quantity,
+				side       = .Sell,
+				quantity   = pos.quantity,
 				order_type = .Market,
 			}
 			context_submit_order(ctx, order)
 		}
-	} else {
-		if fast_sma < slow_sma {
-			if pos, ok := ctx.portfolio^.positions[symbol]; ok {
+	}
+}
+
+// ============================================================================
+// Strategy 2: Mean Reversion (Bollinger Bands)
+// ============================================================================
+
+mean_reversion_strategy :: proc(
+	ctx: ^StrategyContext,
+	symbol: string,
+	lookback: int,
+	num_std_dev: f64,
+	position_size: f64,
+) {
+	if ctx.current_bar < lookback {return}
+
+	col := w.column(ctx.data, symbol)
+
+	// Calculate mean and standard deviation
+	sum := 0.0
+	for i in ctx.current_bar - lookback + 1 ..= ctx.current_bar {
+		price, _ := w.column_at_float(col, i)
+		sum += price
+	}
+	mean := sum / f64(lookback)
+
+	sum_sq := 0.0
+	for i in ctx.current_bar - lookback + 1 ..= ctx.current_bar {
+		price, _ := w.column_at_float(col, i)
+		diff := price - mean
+		sum_sq += diff * diff
+	}
+	std_dev := math.sqrt(sum_sq / f64(lookback))
+
+	// Bollinger Bands
+	upper_band := mean + num_std_dev * std_dev
+	lower_band := mean - num_std_dev * std_dev
+
+	current_price := context_get_price(ctx, symbol)
+
+	// Check if we have a position
+	has_position := false
+	if pos, ok := ctx.portfolio^.positions[symbol]; ok {
+		has_position = pos.quantity > 0.0001
+	}
+
+	// Buy when price touches lower band (oversold)
+	if current_price <= lower_band && !has_position {
+		quantity := (ctx.portfolio^.cash * position_size) / current_price
+		order := Order {
+			symbol     = symbol,
+			side       = .Buy,
+			quantity   = quantity,
+			order_type = .Market,
+		}
+		context_submit_order(ctx, order)
+	} else if current_price >= upper_band && has_position {
+		// Sell when price touches upper band (overbought)
+		if pos, ok := ctx.portfolio^.positions[symbol]; ok {
+			order := Order {
+				symbol     = symbol,
+				side       = .Sell,
+				quantity   = pos.quantity,
+				order_type = .Market,
+			}
+			context_submit_order(ctx, order)
+		}
+	}
+}
+
+// ============================================================================
+// Strategy 3: Momentum (Breakout)
+// ============================================================================
+
+momentum_strategy :: proc(
+	ctx: ^StrategyContext,
+	symbol: string,
+	lookback: int,
+	position_size: f64,
+) {
+	if ctx.current_bar < lookback {return}
+
+	col := w.column(ctx.data, symbol)
+
+	// Find highest high and lowest low over lookback period
+	highest := -math.F64_MAX
+	lowest := math.F64_MAX
+
+	for i in ctx.current_bar - lookback ..= ctx.current_bar - 1 {
+		price, _ := w.column_at_float(col, i)
+		if price > highest {highest = price}
+		if price < lowest {lowest = price}
+	}
+
+	current_price := context_get_price(ctx, symbol)
+
+	// Check if we have a position
+	has_position := false
+	if pos, ok := ctx.portfolio^.positions[symbol]; ok {
+		has_position = pos.quantity > 0.0001
+	}
+
+	// Buy on breakout above highest high
+	if current_price > highest && !has_position {
+		quantity := (ctx.portfolio^.cash * position_size) / current_price
+		order := Order {
+			symbol     = symbol,
+			side       = .Buy,
+			quantity   = quantity,
+			order_type = .Market,
+		}
+		context_submit_order(ctx, order)
+	} else if current_price < lowest && has_position {
+		// Sell on breakdown below lowest low
+		if pos, ok := ctx.portfolio^.positions[symbol]; ok {
+			order := Order {
+				symbol     = symbol,
+				side       = .Sell,
+				quantity   = pos.quantity,
+				order_type = .Market,
+			}
+			context_submit_order(ctx, order)
+		}
+	}
+}
+
+// ============================================================================
+// Strategy 4: Pairs Trading (Statistical Arbitrage)
+// ============================================================================
+
+pairs_trading_strategy :: proc(
+	ctx: ^StrategyContext,
+	symbol1: string,
+	symbol2: string,
+	lookback: int,
+	entry_z_score: f64,
+	exit_z_score: f64,
+	position_size: f64,
+) {
+	if ctx.current_bar < lookback {return}
+
+	col1 := w.column(ctx.data, symbol1)
+	col2 := w.column(ctx.data, symbol2)
+
+	// Calculate spread (price1 - price2)
+	spreads := make([]f64, lookback)
+	for i in 0 ..< lookback {
+		price1, _ := w.column_at_float(col1, ctx.current_bar - lookback + 1 + i)
+		price2, _ := w.column_at_float(col2, ctx.current_bar - lookback + 1 + i)
+		spreads[i] = price1 - price2
+	}
+
+	// Calculate mean and std of spread
+	sum := 0.0
+	for s in spreads {sum += s}
+	spread_mean := sum / f64(lookback)
+
+	sum_sq := 0.0
+	for s in spreads {
+		diff := s - spread_mean
+		sum_sq += diff * diff
+	}
+	spread_std := math.sqrt(sum_sq / f64(lookback))
+
+	if spread_std < 1e-10 {return}
+
+	// Current spread
+	price1 := context_get_price(ctx, symbol1)
+	price2 := context_get_price(ctx, symbol2)
+	current_spread := price1 - price2
+
+	// Z-score
+	z_score := (current_spread - spread_mean) / spread_std
+
+	// Check positions
+	has_pos1 := false
+	has_pos2 := false
+	if pos, ok := ctx.portfolio^.positions[symbol1]; ok {
+		has_pos1 = pos.quantity > 0.0001
+	}
+	if pos, ok := ctx.portfolio^.positions[symbol2]; ok {
+		has_pos2 = pos.quantity > 0.0001
+	}
+
+	// Entry: spread diverges (z_score > entry_z_score or < -entry_z_score)
+	if z_score > entry_z_score && !has_pos1 && !has_pos2 {
+		// Spread too high: short symbol1, long symbol2
+		quantity1 := (ctx.portfolio^.cash * position_size * 0.5) / price1
+		quantity2 := (ctx.portfolio^.cash * position_size * 0.5) / price2
+
+		// Note: This simplified version only goes long symbol2
+		// For true pairs trading, you'd need short selling support
+		order := Order {
+			symbol     = symbol2,
+			side       = .Buy,
+			quantity   = quantity2,
+			order_type = .Market,
+		}
+		context_submit_order(ctx, order)
+	} else if z_score < -entry_z_score && !has_pos1 && !has_pos2 {
+		// Spread too low: long symbol1, short symbol2
+		quantity1 := (ctx.portfolio^.cash * position_size * 0.5) / price1
+
+		// Simplified: only long symbol1
+		order := Order {
+			symbol     = symbol1,
+			side       = .Buy,
+			quantity   = quantity1,
+			order_type = .Market,
+		}
+		context_submit_order(ctx, order)
+	} else if math.abs(z_score) < exit_z_score && (has_pos1 || has_pos2) {
+		// Exit: spread reverts to mean
+		if has_pos1 {
+			if pos, ok := ctx.portfolio^.positions[symbol1]; ok {
 				order := Order {
-					symbol     = symbol,
+					symbol     = symbol1,
+					side       = .Sell,
+					quantity   = pos.quantity,
+					order_type = .Market,
+				}
+				context_submit_order(ctx, order)
+			}
+		}
+		if has_pos2 {
+			if pos, ok := ctx.portfolio^.positions[symbol2]; ok {
+				order := Order {
+					symbol     = symbol2,
 					side       = .Sell,
 					quantity   = pos.quantity,
 					order_type = .Market,

@@ -7,11 +7,18 @@ import "core:fmt"
 import "core:math/rand"
 import "core:mem"
 
-// Define strategy at package level to avoid scope issues
 test_symbol :: "TEST"
 
 sma_strategy :: proc(ctx: ^fin.StrategyContext) {
 	fin.sma_crossover_strategy(ctx, test_symbol, 10, 30, 0.95)
+}
+
+mean_reversion_strategy_wrapper :: proc(ctx: ^fin.StrategyContext) {
+	fin.mean_reversion_strategy(ctx, test_symbol, 20, 2.0, 0.95)
+}
+
+momentum_strategy_wrapper :: proc(ctx: ^fin.StrategyContext) {
+	fin.momentum_strategy(ctx, test_symbol, 20, 0.95)
 }
 
 backtest_test :: proc(allocator: mem.Allocator) {
@@ -41,33 +48,60 @@ backtest_test :: proc(allocator: mem.Allocator) {
 
 	config := fin.DEFAULT_BACKTEST_CONFIG
 	config.initial_capital = 100000.0
-	config.commission_rate = 0.001
-	config.slippage_rate = 0.0005
 
-	fmt.println("\n--- Running SMA Crossover Strategy (10/30) ---")
-	result := fin.backtest_run(&df, []string{symbol}, sma_strategy, config, allocator)
+	// Test 1: SMA Crossover
+	fmt.println("\n--- Strategy 1: SMA Crossover (10/30) ---")
+	result1 := fin.backtest_run(&df, []string{symbol}, sma_strategy, config, allocator)
 	defer {
-		delete(result.equity_curve, allocator)
-		delete(result.trades, allocator)
+		delete(result1.equity_curve, allocator)
+		delete(result1.trades, allocator)
 	}
+	fmt.printf(
+		"Total Return: %.2f%%, Sharpe: %.3f, Win Rate: %.1f%%\n",
+		result1.total_return * 100,
+		result1.sharpe_ratio,
+		result1.win_rate * 100,
+	)
 
-	fmt.println("\n--- Backtest Results ---")
-	fmt.printf("Initial Capital:    $%.2f\n", config.initial_capital)
-	fmt.printf("Final Value:        $%.2f\n", result.equity_curve[len(result.equity_curve) - 1])
-	fmt.printf("Total Return:       %.2f%%\n", result.total_return * 100)
-	fmt.printf("Annual Return:      %.2f%%\n", result.annual_return * 100)
-	fmt.printf("Sharpe Ratio:       %.3f\n", result.sharpe_ratio)
-	fmt.printf("Max Drawdown:       %.2f%%\n", result.max_drawdown * 100)
-	fmt.printf("Total Trades:       %d\n", result.total_trades)
-	fmt.printf("Win Rate:           %.1f%%\n", result.win_rate * 100)
-	fmt.printf("Profit Factor:      %.2f\n", result.profit_factor)
+	// Test 2: Mean Reversion
+	fmt.println("\n--- Strategy 2: Mean Reversion (Bollinger Bands) ---")
+	result2 := fin.backtest_run(
+		&df,
+		[]string{symbol},
+		mean_reversion_strategy_wrapper,
+		config,
+		allocator,
+	)
+	defer {
+		delete(result2.equity_curve, allocator)
+		delete(result2.trades, allocator)
+	}
+	fmt.printf(
+		"Total Return: %.2f%%, Sharpe: %.3f, Win Rate: %.1f%%\n",
+		result2.total_return * 100,
+		result2.sharpe_ratio,
+		result2.win_rate * 100,
+	)
 
-	fmt.println("\n--- Generating Plots ---")
-	ok1 := fin.plot_equity_curve(&result, "backtest_equity.png", allocator)
-	fmt.printf("Equity curve plot: %v\n", ok1)
-
-	ok2 := fin.plot_backtest_drawdown(&result, "backtest_drawdown.png", allocator)
-	fmt.printf("Drawdown plot: %v\n", ok2)
+	// Test 3: Momentum
+	fmt.println("\n--- Strategy 3: Momentum (Breakout) ---")
+	result3 := fin.backtest_run(
+		&df,
+		[]string{symbol},
+		momentum_strategy_wrapper,
+		config,
+		allocator,
+	)
+	defer {
+		delete(result3.equity_curve, allocator)
+		delete(result3.trades, allocator)
+	}
+	fmt.printf(
+		"Total Return: %.2f%%, Sharpe: %.3f, Win Rate: %.1f%%\n",
+		result3.total_return * 100,
+		result3.sharpe_ratio,
+		result3.win_rate * 100,
+	)
 
 	fmt.println("\n✓ Backtest completed!")
 }
