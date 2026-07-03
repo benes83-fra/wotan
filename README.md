@@ -22,14 +22,28 @@ A fast, expressive, allocator‑safe DataFrame and time‑series analytics engin
 - GroupBy + aggregations
 - Joins (single‑key & multi‑key)
 
-### **Time‑Series Analytics**
-- Rolling windows
-- Rolling correlation/covariance matrices
-- Exponential weighted statistics (EWM)
-- PCA & rolling PCA
-- ARIMA(p,d,q), ARMA(p,q), SARIMA
-- Residual diagnostics (ACF, PACF, Ljung‑Box, JB test)
-- Stationarity tests (ADF, KPSS)
+### **Classical Machine Learning**
+- Linear regression (OLS, WLS, GLS, Ridge, Lasso with CV)
+- Decision Trees, Random Forests, Gradient Boosting
+- Logistic Regression (binary + multiclass PCR)
+- KNN clustering, Gaussian Naive Bayes
+- Support Vector Machines (SVM, Kernel SVM SVR)
+- Metrics, Pipeline API, Grid/Random SearchCV
+
+### **Deep Learning**
+- Neural net primitives: Conv2D, Pooling, Dense, Dropout, BatchNorm
+- RNN family: Simple RNN, GRU, LSTM
+- Transformer architecture: multi-head attention, encoder/decoder, positional encoding
+- Pretrained-style models: GPT, BERT, character-level language model
+- Generative models: GAN, WGAN, VAE
+- Transfer learning utilities
+- Autograd engine (back-prop through matmul, mul, sum, ReLU, bias ops)
+
+### **Portfolio & Risk Analytics**
+- Portfolio construction with constraints
+- Risk decomposition and financial analytics
+- Monte Carlo simulation paths
+- Factor analysis
 
 ### **State‑Space Models**
 - Kalman filter
@@ -38,9 +52,22 @@ A fast, expressive, allocator‑safe DataFrame and time‑series analytics engin
 - Time‑varying Kalman
 - EKF, UKF + smoothing
 
+### **Time-Series Analytics**
+- Rolling windows and rolling correlation/covariance matrices
+- Exponentially weighted statistics (EWM)
+- PCA & rolling PCA
+- ARIMA(p,d,q), ARMA(p,q), SARIMA
+- Residual diagnostics (ACF, PACF, Ljung‑Box, JB test)
+- Stationarity tests (ADF, KPSS)
+
+### **Plotters**
+- Line plots (single, multi-line, dashed/dotted)
+- Bar charts
+- Heatmaps
+- Confusion matrices
+
 ### **Importers / Exporters**
-- CSV
-- JSON / JSONL
+- CSV, JSON, JSONL
 - HTML tables
 - Excel (.xlsx)
 - ZIP utilities
