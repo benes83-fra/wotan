@@ -69,6 +69,7 @@ Position :: struct {
 	realized_pnl:   f64,
 	round_trips:    int,
 	winning_trades: int,
+	is_short:       bool, // ← ADD THIS
 }
 
 // ============================================================================
@@ -97,7 +98,12 @@ portfolio_total_value :: proc(p: ^Portfolio, prices: map[string]f64) -> f64 {
 	total := p.cash
 	for symbol, pos in p.positions {
 		if price, ok := prices[symbol]; ok {
-			total += pos.quantity * price
+			if pos.is_short {
+				// Short position: profit when price drops
+				total += pos.quantity * price // quantity is negative
+			} else {
+				total += pos.quantity * price
+			}
 		}
 	}
 	return total
@@ -155,30 +161,72 @@ context_submit_order :: proc(ctx: ^StrategyContext, order: Order) {
 			price *= 0.9995
 		}
 
-		// Calculate commission
 		notional := order.quantity * price
 		commission := notional * 0.001
 
-		// Update portfolio
-		if order.side == .Buy {
-			ctx.portfolio^.cash -= (notional + commission)
-
+		// Check if this is a short sell (selling without existing long position)
+		is_short_sell := false
+		if order.side == .Sell {
 			if pos, ok := ctx.portfolio^.positions[order.symbol]; ok {
-				total_qty := pos.quantity + order.quantity
-				avg_price := (pos.avg_price * pos.quantity + price * order.quantity) / total_qty
-				pos.quantity = total_qty
-				pos.avg_price = avg_price
-				ctx.portfolio^.positions[order.symbol] = pos
+				if pos.quantity < 0.0001 {
+					is_short_sell = true
+				}
 			} else {
+				is_short_sell = true
+			}
+		}
+
+		if is_short_sell {
+			// Open short position
+			ctx.portfolio^.cash += (notional - commission) // Receive cash from short sale
+			ctx.portfolio^.positions[order.symbol] = Position {
+				symbol    = order.symbol,
+				quantity  = -order.quantity, // Negative quantity = short
+				avg_price = price,
+				is_short  = true,
+			}
+		} else if order.side == .Buy {
+			// Regular buy or cover short
+			if pos, ok := ctx.portfolio^.positions[order.symbol]; ok {
+				if pos.is_short && pos.quantity < 0 {
+					// Covering short position
+					cover_qty := min(order.quantity, -pos.quantity)
+					realized := (pos.avg_price - price) * cover_qty
+					pos.realized_pnl += realized
+					pos.quantity += cover_qty
+
+					if pos.quantity >= -0.0001 {
+						pos.quantity = 0.0
+						pos.round_trips += 1
+						if realized > 0 {
+							pos.winning_trades += 1
+						}
+					}
+					ctx.portfolio^.cash -= (notional + commission)
+					ctx.portfolio^.positions[order.symbol] = pos
+				} else {
+					// Adding to long position
+					ctx.portfolio^.cash -= (notional + commission)
+					total_qty := pos.quantity + order.quantity
+					avg_price :=
+						(pos.avg_price * pos.quantity + price * order.quantity) / total_qty
+					pos.quantity = total_qty
+					pos.avg_price = avg_price
+					ctx.portfolio^.positions[order.symbol] = pos
+				}
+			} else {
+				// New long position
+				ctx.portfolio^.cash -= (notional + commission)
 				ctx.portfolio^.positions[order.symbol] = Position {
 					symbol    = order.symbol,
 					quantity  = order.quantity,
 					avg_price = price,
+					is_short  = false,
 				}
 			}
 		} else {
+			// Regular sell (close long position)
 			ctx.portfolio^.cash += (notional - commission)
-
 			if pos, ok := ctx.portfolio^.positions[order.symbol]; ok {
 				realized := (price - pos.avg_price) * order.quantity
 				pos.realized_pnl += realized
@@ -613,6 +661,7 @@ momentum_strategy :: proc(
 	}
 }
 
+
 // ============================================================================
 // Strategy 4: Pairs Trading (Statistical Arbitrage)
 // ============================================================================
@@ -633,6 +682,7 @@ pairs_trading_strategy :: proc(
 
 	// Calculate spread (price1 - price2)
 	spreads := make([]f64, lookback)
+	defer delete(spreads)
 	for i in 0 ..< lookback {
 		price1, _ := w.column_at_float(col1, ctx.current_bar - lookback + 1 + i)
 		price2, _ := w.column_at_float(col2, ctx.current_bar - lookback + 1 + i)
@@ -717,6 +767,138 @@ pairs_trading_strategy :: proc(
 					symbol     = symbol2,
 					side       = .Sell,
 					quantity   = pos.quantity,
+					order_type = .Market,
+				}
+				context_submit_order(ctx, order)
+			}
+		}
+	}
+}
+
+pairs_trading_full :: proc(
+	ctx: ^StrategyContext,
+	symbol1: string,
+	symbol2: string,
+	lookback: int,
+	entry_z_score: f64,
+	exit_z_score: f64,
+	position_size: f64,
+) {
+	if ctx.current_bar < lookback {return}
+
+	col1 := w.column(ctx.data, symbol1)
+	col2 := w.column(ctx.data, symbol2)
+
+	// Calculate spread
+	spreads := make([]f64, lookback)
+	for i in 0 ..< lookback {
+		price1, _ := w.column_at_float(col1, ctx.current_bar - lookback + 1 + i)
+		price2, _ := w.column_at_float(col2, ctx.current_bar - lookback + 1 + i)
+		spreads[i] = price1 - price2
+	}
+
+	// Calculate mean and std
+	sum := 0.0
+	for s in spreads {sum += s}
+	spread_mean := sum / f64(lookback)
+
+	sum_sq := 0.0
+	for s in spreads {
+		diff := s - spread_mean
+		sum_sq += diff * diff
+	}
+	spread_std := math.sqrt(sum_sq / f64(lookback))
+
+	if spread_std < 1e-10 {return}
+
+	// Current spread and z-score
+	price1 := context_get_price(ctx, symbol1)
+	price2 := context_get_price(ctx, symbol2)
+	current_spread := price1 - price2
+	z_score := (current_spread - spread_mean) / spread_std
+
+	// Check positions
+	has_pos1 := false
+	has_pos2 := false
+	if pos, ok := ctx.portfolio^.positions[symbol1]; ok {
+		has_pos1 = math.abs(pos.quantity) > 0.0001
+	}
+	if pos, ok := ctx.portfolio^.positions[symbol2]; ok {
+		has_pos2 = math.abs(pos.quantity) > 0.0001
+	}
+
+	// Entry signals
+	if z_score > entry_z_score && !has_pos1 && !has_pos2 {
+		// Spread too high: short symbol1, long symbol2
+		quantity1 := (ctx.portfolio^.cash * position_size * 0.5) / price1
+		quantity2 := (ctx.portfolio^.cash * position_size * 0.5) / price2
+
+		// Short symbol1
+		order1 := Order {
+			symbol     = symbol1,
+			side       = .Sell,
+			quantity   = quantity1,
+			order_type = .Market,
+		}
+		context_submit_order(ctx, order1)
+
+		// Long symbol2
+		order2 := Order {
+			symbol     = symbol2,
+			side       = .Buy,
+			quantity   = quantity2,
+			order_type = .Market,
+		}
+		context_submit_order(ctx, order2)
+	} else if z_score < -entry_z_score && !has_pos1 && !has_pos2 {
+		// Spread too low: long symbol1, short symbol2
+		quantity1 := (ctx.portfolio^.cash * position_size * 0.5) / price1
+		quantity2 := (ctx.portfolio^.cash * position_size * 0.5) / price2
+
+		// Long symbol1
+		order1 := Order {
+			symbol     = symbol1,
+			side       = .Buy,
+			quantity   = quantity1,
+			order_type = .Market,
+		}
+		context_submit_order(ctx, order1)
+
+		// Short symbol2
+		order2 := Order {
+			symbol     = symbol2,
+			side       = .Sell,
+			quantity   = quantity2,
+			order_type = .Market,
+		}
+		context_submit_order(ctx, order2)
+	} else if math.abs(z_score) < exit_z_score && (has_pos1 || has_pos2) {
+		// Exit: spread reverts to mean - close all positions
+		if has_pos1 {
+			if pos, ok := ctx.portfolio^.positions[symbol1]; ok {
+				side := OrderSide.Sell
+				if pos.is_short {
+					side = .Buy
+				}
+				order := Order {
+					symbol     = symbol1,
+					side       = side,
+					quantity   = math.abs(pos.quantity),
+					order_type = .Market,
+				}
+				context_submit_order(ctx, order)
+			}
+		}
+		if has_pos2 {
+			if pos, ok := ctx.portfolio^.positions[symbol2]; ok {
+				side := OrderSide.Sell
+				if pos.is_short {
+					side = .Buy
+				}
+				order := Order {
+					symbol     = symbol2,
+					side       = side,
+					quantity   = math.abs(pos.quantity),
 					order_type = .Market,
 				}
 				context_submit_order(ctx, order)
