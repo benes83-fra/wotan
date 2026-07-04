@@ -90,11 +90,13 @@ git clone https://github.com/benes83-fra/wotan
 
 ```
 
-## Create a DataFrame
-```sh
-odin
+## 📖 Examples
 
+### Create a DataFrame
+
+```odin
 import w "../wotan/core"
+
 df := w.dataframe_new()
 
 col_age  := w.column_new("age", .Int, 4)
@@ -106,39 +108,158 @@ w.append_string(&col_name, "Hubert")
 w.append_int(&col_age, 20)
 w.append_string(&col_name, "Anna")
 
+w.append_int(&col_age, 30)
+w.append_string(&col_name, "Markus")
+
+w.append_int(&col_age, 40)
+w.append_string(&col_name, "Julia")
+
 w.add_column(&df, col_age)
 w.add_column(&df, col_name)
 
-w.dataframe_pretty_print(&df)
-
-```
-## Filtering & Slicing
-```sh
-young := w.filter(&df, w.mask_lt(w.column(&df, "age"), 30))
-w.dataframe_pretty_print(&young)
-
+w.dataframe_pretty_print(&df, 10)
 ```
 
-## Sorting
-```sh
-sorted := w.dataframe_sort(&df, "age", false)
-w.dataframe_pretty_print(&sorted)
+### Filter rows with boolean masks
 
+```odin
+// Show only rows where age < 31 and active == true
+df := csv.csv_load("people_dates.csv")
 
+m1 := w.mask_lt(w.column(&df, "age"), 31)
+m2 := w.column_mask(w.column(&df, "active"))
+mask := w.and(m1, m2)
+
+young_active := w.wobei(&df, mask)
+w.dataframe_pretty_print(&young_active, 10)
+
+delete(mask); delete(m1); delete(m2)
 ```
-## Web request i.e. Yahoo Finance
-```sh
-aapl := w.yahoo_load("AAPL", .Daily, .TenYears)
-sorted := w.dataframe_sort(&aapl, "Close", true)
-w.df_head(&sorted, 10)
 
+### Expressions: add, convert, and compute
 
+```odin
+exprs := []w.Select_Expr {
+    w.col_expr("age",           w.column(&df, "age")),
+    w.add_expr("age_plus_10",  w.column(&df, "age"), 10),
+    w.apply_expr("upper_name", w.column(&df, "name"), proc(s: string) -> string {
+        return strings.to_upper(s, context.temp_allocator)
+    }),
+    w.div_expr("salary_k",     w.column(&df, "salary"), 1000),
+    w.conv_int_to_f64_expr("age_f64", w.column(&df, "age")),
+}
+
+result := w.select(&df, exprs)
+w.dataframe_pretty_print(&result, 10)
+
+w.free_select_exprs(exprs) // or defer on the slice
 ```
-## Time Series Analysis like ARIMA
-```sh
-model := w.arima_fit(df, "y", p=1, d=0, q=1)
+
+### GroupBy + aggregation
+
+```odin
+gdf := w.groupby(&df, []string{"age"})
+agg := []w.Agg_Expr {
+    w.count("n"),
+    w.sum_agg("total_salary", w.column(&df, "salary")),
+    w.avg_agg("avg_salary",   w.column(&df, "salary")),
+}
+
+out := w.agg(&gdf, agg)
+w.dataframe_pretty_print(&out, 10)
+
+w.destroy_grouped_dataframe(&gdf)
+w.destroy_dataframe(&out)
+```
+
+### Join two dataframes
+
+```odin
+people := df_from(
+    column_from_ints("id",      []int{1, 2, 3}),
+    column_from_strings("name", []string{"Alice", "Bob", "Charlie"}),
+    column_from_ints("age",     []int{30, 20, 40}),
+)
+
+salary := df_from(
+    column_from_ints("id",     []int{1, 2, 4}),
+    column_from_floats("salary", []f64{50000.0, 42000.0, 90000.0}),
+)
+
+joined := w.join(&people, &salary, []string{"id"}, .Outer, context.temp_allocator)
+w.dataframe_pretty_print(&joined, 10)
+```
+
+### Multi-key join
+
+```odin
+left := df_from(
+    column_from_ints("id",     []int{1, 1, 2}),
+    column_from_strings("dept", []string{"10", "20", "10"}),
+    column_from_strings("name", []string{"Alice", "Bob", "Carol"}),
+)
+
+right := df_from(
+    column_from_ints("id",      []int{1, 2}),
+    column_from_strings("dept",  []string{"10", "10"}),
+    column_from_floats("salary",[]f64{50000.0, 60000.0}),
+)
+
+joined := w.join(&left, &right, []string{"id", "dept"}, .Inner, context.temp_allocator)
+w.dataframe_pretty_print(&joined, 10)
+```
+
+### Load CSV / JSON / Excel
+
+```odin
+// From CSV (type list required)
+types := []w.ColumnType{.Int, .String, .Float}
+df := csv.csv_load("data.csv", types)
+
+// From JSON / JSONL
+jdf := json.load("data.json")
+jldf := jsonl.load("data.jsonl")
+
+// From Excel
+edf := excel.read("data.xlsx")
+```
+
+### Time Series: ARIMA fit & forecast
+
+```odin
+model := w.arima_fit(df, "Close", .P(1), .D(0), .Q(1))
 forecast := w.arima_forecast(&model, 5)
+for i, v in forecast {
+    fmt.printf("Step %d: %f\n", i, v)
+}
+```
 
+### Date & datetime math
+
+```odin
+date1 := w.Date{2020, 2, 7}
+date2 := w.Date{2024, 2, 6}
+days_between := w.get_date_day_diffs(date1, date2)
+
+// Add months / days
+d := w.add_month_date(date1, -7)
+d = w.add_day_date(d, 30)
+
+// Time of day
+t := w.Time{16, 2, 58}
+t = w.add_seconds_time(t, -600)
+
+// Full datetime
+dt := w.Datetime{1983, 7, 20, 13, 13, 13}
+dt = w.add_hours_datetime(dt, -49)
+```
+
+### Yahoo Finance ingestion
+
+```odin
+df := w.yahoo_load("AAPL", .Daily, .TenYears)
+sorted := w.dataframe_sort(&df, "Close", true)
+w.df_head(&sorted, 10)
 ```
 
 ### 🧪 Tests
