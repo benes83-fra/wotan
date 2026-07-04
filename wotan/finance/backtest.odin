@@ -277,43 +277,6 @@ BacktestResult :: struct {
 	total_trades:  int,
 }
 
-backtest_run :: proc(
-	data: ^w.DataFrame,
-	symbols: []string,
-	strategy: StrategyFn,
-	config: BacktestConfig = DEFAULT_BACKTEST_CONFIG,
-	allocator: mem.Allocator = context.allocator,
-) -> BacktestResult {
-	portfolio := portfolio_init(config.initial_capital, allocator)
-
-	ctx := StrategyContext {
-		portfolio   = &portfolio,
-		data        = data,
-		current_bar = 0,
-		symbols     = symbols,
-	}
-
-	n_bars := data.rows
-	for bar in 0 ..< n_bars {
-		ctx.current_bar = bar
-
-		prices := context_get_prices(&ctx, symbols, allocator)
-		defer delete(prices)
-
-		strategy(&ctx)
-
-		portfolio_update(&portfolio, prices)
-	}
-
-	result := _calculate_backtest_metrics(&portfolio, config, allocator)
-
-	// Cleanup
-	delete(portfolio.positions)
-	delete(portfolio.equity_curve)
-	delete(portfolio.trades)
-
-	return result
-}
 
 _calculate_backtest_metrics :: proc(
 	portfolio: ^Portfolio,
@@ -907,19 +870,12 @@ pairs_trading_full :: proc(
 		}
 	}
 }
-// ============================================================================
-// Portfolio Backtest Engine
-// ============================================================================
 
-// A portfolio strategy returns a map of symbol -> target_weight (0.0 to 1.0)
-// Weights should sum to <= 1.0. The remainder is kept as cash.
 PortfolioStrategyFn :: proc(ctx: ^StrategyContext, allocator: mem.Allocator) -> map[string]f64
-
-backtest_portfolio_run :: proc(
+backtest_run :: proc(
 	data: ^w.DataFrame,
 	symbols: []string,
-	strategy: PortfolioStrategyFn,
-	rebalance_frequency: int = 21, // Rebalance every N bars (e.g., 21 = ~1 month)
+	strategy: StrategyFn,
 	config: BacktestConfig = DEFAULT_BACKTEST_CONFIG,
 	allocator: mem.Allocator = context.allocator,
 ) -> BacktestResult {
@@ -937,15 +893,51 @@ backtest_portfolio_run :: proc(
 		ctx.current_bar = bar
 
 		prices := context_get_prices(&ctx, symbols, allocator)
-		defer delete(prices)
 
-		// Rebalance on the specified frequency
+		strategy(&ctx)
+
+		portfolio_update(&portfolio, prices)
+
+		delete(prices) // ← ADD allocator parameter
+	}
+
+	result := _calculate_backtest_metrics(&portfolio, config, allocator)
+
+	delete(portfolio.positions)
+	delete(portfolio.equity_curve)
+	delete(portfolio.trades)
+
+	return result
+}
+
+backtest_portfolio_run :: proc(
+	data: ^w.DataFrame,
+	symbols: []string,
+	strategy: PortfolioStrategyFn,
+	rebalance_frequency: int = 21,
+	config: BacktestConfig = DEFAULT_BACKTEST_CONFIG,
+	allocator: mem.Allocator = context.allocator,
+) -> BacktestResult {
+	portfolio := portfolio_init(config.initial_capital, allocator)
+
+	ctx := StrategyContext {
+		portfolio   = &portfolio,
+		data        = data,
+		current_bar = 0,
+		symbols     = symbols,
+	}
+
+	n_bars := data.rows
+	for bar in 0 ..< n_bars {
+		ctx.current_bar = bar
+
+		prices := context_get_prices(&ctx, symbols, allocator)
+
 		if bar % rebalance_frequency == 0 {
 			target_weights := strategy(&ctx, allocator)
 
 			total_value := portfolio_total_value(&portfolio, prices)
 
-			// Execute trades to reach target weights
 			for sym in symbols {
 				target_w := 0.0
 				if w, ok := target_weights[sym]; ok {
@@ -962,15 +954,12 @@ backtest_portfolio_run :: proc(
 
 				delta_value := target_value - current_value
 
-				// Only trade if the delta is significant (e.g., > 1% of total value)
-				// This prevents churn and saves on commissions
 				if math.abs(delta_value) > (total_value * 0.01) {
 					qty := math.abs(delta_value) / current_price
 					side := OrderSide.Buy
 
 					if delta_value < 0 {
 						side = .Sell
-						// Ensure we don't sell more than we own
 						if pos, ok := portfolio.positions[sym]; ok {
 							qty = min(qty, pos.quantity)
 						}
@@ -988,11 +977,12 @@ backtest_portfolio_run :: proc(
 				}
 			}
 
-			// Clean up the weights map returned by the strategy
-			delete(target_weights)
+			delete(target_weights) // ← ADD allocator parameter
 		}
 
 		portfolio_update(&portfolio, prices)
+
+		delete(prices) // ← ADD allocator parameter
 	}
 
 	result := _calculate_backtest_metrics(&portfolio, config, allocator)
@@ -1032,19 +1022,19 @@ portfolio_inverse_volatility :: proc(
 	weights := make(map[string]f64, allocator)
 
 	if ctx.current_bar < lookback {
-		// Fallback to equal weight if not enough data
 		n := f64(len(ctx.symbols))
 		for sym in ctx.symbols {weights[sym] = 0.95 / n}
 		return weights
 	}
 
 	inv_vols := make([]f64, len(ctx.symbols), context.temp_allocator)
+	defer delete(inv_vols, context.temp_allocator) // ← ADD THIS
+
 	sum_inv_vol := 0.0
 
 	for sym, i in ctx.symbols {
 		col := w.column(ctx.data, sym)
 
-		// Calculate rolling standard deviation of returns
 		sum_ret := 0.0
 		sum_sq := 0.0
 		count := 0
@@ -1072,7 +1062,6 @@ portfolio_inverse_volatility :: proc(
 		}
 	}
 
-	// Normalize weights
 	if sum_inv_vol > 0 {
 		for sym, i in ctx.symbols {
 			weights[sym] = 0.95 * (inv_vols[i] / sum_inv_vol)
@@ -1085,11 +1074,9 @@ portfolio_inverse_volatility :: proc(
 	return weights
 }
 
-
 // ============================================================================
 // Portfolio Strategy 3: Rolling Minimum Variance (Markowitz)
 // ============================================================================
-
 portfolio_min_variance :: proc(
 	ctx: ^StrategyContext,
 	allocator: mem.Allocator,
@@ -1105,6 +1092,13 @@ portfolio_min_variance :: proc(
 
 	// 1. Extract returns matrix
 	returns_data := make([][]f64, n_assets, context.temp_allocator)
+	defer {
+		for row in returns_data {
+			delete(row, context.temp_allocator)
+		}
+		delete(returns_data, context.temp_allocator)
+	}
+
 	for i in 0 ..< n_assets {
 		returns_data[i] = make([]f64, lookback - 1, context.temp_allocator)
 		col := w.column(ctx.data, ctx.symbols[i])
@@ -1120,8 +1114,7 @@ portfolio_min_variance :: proc(
 		}
 	}
 
-	// 2. Compute Covariance Matrix (using your analytics module)
-	// FIX: Use context.allocator so it matches ana.destroy_matrix's default delete behavior!
+	// 2. Compute Covariance Matrix
 	cov_matrix := ana.covariance_matrix(returns_data, context.allocator)
 	defer ana.destroy_matrix(cov_matrix)
 
@@ -1134,10 +1127,10 @@ portfolio_min_variance :: proc(
 		}
 	}
 
-	// 3. Optimize (No short selling)
+	// 3. Optimize
 	constraints := PortfolioConstraints {
 		no_short_selling = true,
-		max_weight       = 0.0, // No max limit
+		max_weight       = 0.0,
 	}
 
 	opt_weights := constrained_min_variance_portfolio(
@@ -1147,7 +1140,7 @@ portfolio_min_variance :: proc(
 	)
 	defer delete(opt_weights, context.temp_allocator)
 
-	// 4. Map back to symbols (scale to 95% to leave cash buffer)
+	// 4. Map back to symbols
 	for i in 0 ..< n_assets {
 		weights[ctx.symbols[i]] = opt_weights[i] * 0.95
 	}

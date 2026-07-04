@@ -172,7 +172,8 @@ backtest_portfolio_test :: proc(allocator: mem.Allocator) {
 
 	// Generate 3 correlated assets
 	prices := [3]f64{100.0, 100.0, 100.0}
-	cols := make([]w.Column, 3)
+	// cols := make([]w.Column, 3)
+	cols: [3]w.Column
 	for i in 0 ..< 3 {
 		cols[i] = w.column_new(symbols[i], .Float, n_days)
 	}
