@@ -29,12 +29,7 @@ pdpm_test :: proc(allocator: mem.Allocator) {
 	fmt.println("--- Stochastic Discount Factor Construction ---")
 
 	// Linear SDF: M = a + b*R_m
-	sdf_linear := fin.sdf_linear_factor(
-		market_returns,
-		risk_free_rate,
-		market_risk_premium,
-		allocator,
-	)
+	sdf_linear := fin.sdf_linear_factor(market_returns, risk_free_rate, allocator)
 	defer {
 		delete(sdf_linear.values, allocator)
 		delete(sdf_linear.parameters, allocator)
@@ -220,7 +215,6 @@ pdpm2_test :: proc(allocator: mem.Allocator) {
 	sdf_linear := fin.sdf_linear_factor(
 		market_returns,
 		0.02, // Risk-free rate = 2%
-		0.06, // Market risk premium = 6%
 		allocator,
 	)
 	defer {

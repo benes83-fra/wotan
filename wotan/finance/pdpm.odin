@@ -155,40 +155,74 @@ sdf_exponential_utility :: proc(
 
 // Create SDF from linear factor model: M = a + b*R_m
 sdf_linear_factor :: proc(
-	market_returns: []f64, // Market portfolio returns
-	risk_free_rate: f64, // Risk-free rate
-	market_risk_premium: f64, // Expected excess return
+	market_returns: []f64,
+	risk_free_rate: f64,
 	allocator: mem.Allocator = context.allocator,
 ) -> StochasticDiscountFactor {
 	n := len(market_returns)
 
-	// Compute market statistics
-	mean_rm := 0.0
-	for r in market_returns {mean_rm += r}
-	mean_rm /= f64(n)
-
-	var_rm := 0.0
-	for r in market_returns {
-		diff := r - mean_rm
-		var_rm += diff * diff
+	// Convert to gross returns: R = 1 + r
+	gross_returns := make([]f64, n, context.temp_allocator)
+	for i in 0 ..< n {
+		gross_returns[i] = 1.0 + market_returns[i]
 	}
-	var_rm /= f64(n - 1)
 
-	// Linear SDF: M = a + b*R_m
-	// Constraints: E[M] = 1/(1+rf), Cov(M, R_m) = -E[R_m - rf]/Var(R_m)
-	a := (1.0 / (1.0 + risk_free_rate)) - (market_risk_premium * mean_rm / var_rm)
-	b := -market_risk_premium / var_rm
+	// Compute statistics
+	mean_R := 0.0
+	mean_R2 := 0.0
+	for r in gross_returns {
+		mean_R += r
+		mean_R2 += r * r
+	}
+	mean_R /= f64(n)
+	mean_R2 /= f64(n)
+
+	var_R := mean_R2 - mean_R * mean_R
+
+	// Two fundamental pricing constraints:
+	// E[M] = 1/(1+rf)
+	// E[M * R_m] = 1 (market portfolio prices to 1)
+
+	rf_discount := 1.0 / (1.0 + risk_free_rate)
+
+	// Solve 2x2 system using Cramer's rule:
+	// a + b*E[R] = rf_discount
+	// a*E[R] + b*E[R²] = 1
+
+	det := var_R // E[R²] - E[R]²
+
+	// Declare a and b in outer scope
+	a: f64
+	b: f64
+
+	if math.abs(det) < 1e-10 {
+		// Degenerate case: use constant SDF
+		a = rf_discount
+		b = 0.0
+	} else {
+		// Cramer's rule
+		a = (rf_discount * mean_R2 - mean_R) / det
+		b = (1.0 - rf_discount * mean_R) / det
+	}
 
 	values := make([]f64, n, allocator)
 	parameters := make([]f64, 2, allocator)
 
 	for i in 0 ..< n {
-		values[i] = a + b * market_returns[i]
+		values[i] = a + b * gross_returns[i]
 	}
 
+	// Verify constraints
 	mean := 0.0
 	for v in values {mean += v}
 	mean /= f64(n)
+
+	// Verify E[M * R_m] = 1
+	pricing_check := 0.0
+	for i in 0 ..< n {
+		pricing_check += values[i] * gross_returns[i]
+	}
+	pricing_check /= f64(n)
 
 	variance := 0.0
 	for v in values {
@@ -200,12 +234,14 @@ sdf_linear_factor :: proc(
 	parameters[0] = a
 	parameters[1] = b
 
+	fmt.printf("Linear SDF Calibration Check: E[M*R_m] = %.4f (Target: 1.0)\n", pricing_check)
+
 	return StochasticDiscountFactor {
 		model_type = .Linear_Factor,
 		values = values,
 		parameters = parameters,
 		risk_aversion = 0.0,
-		discount_factor = 1.0 / (1.0 + risk_free_rate),
+		discount_factor = rf_discount,
 		mean = mean,
 		variance = variance,
 	}
@@ -402,11 +438,16 @@ estimate_state_price_density :: proc(
 			z := (market_returns[j] - state) / bandwidth
 			kernel := kernel_norm * math.exp(-0.5 * z * z)
 
-			// Weight by SDF (this gives state prices, not probabilities)
+			// Weight by SDF
 			density += sdf.values[j] * kernel
 		}
 
 		densities[i] = density / f64(n_obs)
+
+		// Enforce non-negativity (critical for no-arbitrage)
+		if densities[i] < 0.0 {
+			densities[i] = 0.0
+		}
 	}
 
 	return StatePriceDensity{states = states, densities = densities, n_points = n_points}
@@ -508,14 +549,17 @@ price_payoff_continuous :: proc(
 	for i in 0 ..< n {
 		payoff := payoff_function(spd.states[i])
 		price += spd.densities[i] * payoff
-		expected_payoff += spd.densities[i] * payoff / spd.densities[i] // Simplified
+
+		// For expected payoff, we need the physical density, not state prices
+		// This is a simplification - in practice you'd need separate physical density
+		expected_payoff += payoff / f64(n)
 	}
 
 	// Trapezoidal integration
 	if n > 1 {
 		step := spd.states[1] - spd.states[0]
 		price *= step
-		expected_payoff *= step
+		expected_payoff *= (spd.states[n - 1] - spd.states[0])
 	}
 
 	// Compute state prices
@@ -527,11 +571,11 @@ price_payoff_continuous :: proc(
 	risk_premium := price - expected_payoff
 
 	return PDPMResult {
-		price                = price,
-		expected_payoff      = expected_payoff,
-		risk_premium         = risk_premium,
-		state_prices         = state_prices,
-		correlation_with_sdf = 0.0, // Not computed in continuous case
+		price = price,
+		expected_payoff = expected_payoff,
+		risk_premium = risk_premium,
+		state_prices = state_prices,
+		correlation_with_sdf = 0.0,
 		certainty_equivalent = price,
 	}
 }
