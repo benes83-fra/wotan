@@ -1,6 +1,7 @@
 // wotan/finance/backtest.odin
 package finance
 
+import ana "../analytics"
 import w "../core"
 import l "../linalg"
 import p "../plot"
@@ -905,4 +906,251 @@ pairs_trading_full :: proc(
 			}
 		}
 	}
+}
+// ============================================================================
+// Portfolio Backtest Engine
+// ============================================================================
+
+// A portfolio strategy returns a map of symbol -> target_weight (0.0 to 1.0)
+// Weights should sum to <= 1.0. The remainder is kept as cash.
+PortfolioStrategyFn :: proc(ctx: ^StrategyContext, allocator: mem.Allocator) -> map[string]f64
+
+backtest_portfolio_run :: proc(
+	data: ^w.DataFrame,
+	symbols: []string,
+	strategy: PortfolioStrategyFn,
+	rebalance_frequency: int = 21, // Rebalance every N bars (e.g., 21 = ~1 month)
+	config: BacktestConfig = DEFAULT_BACKTEST_CONFIG,
+	allocator: mem.Allocator = context.allocator,
+) -> BacktestResult {
+	portfolio := portfolio_init(config.initial_capital, allocator)
+
+	ctx := StrategyContext {
+		portfolio   = &portfolio,
+		data        = data,
+		current_bar = 0,
+		symbols     = symbols,
+	}
+
+	n_bars := data.rows
+	for bar in 0 ..< n_bars {
+		ctx.current_bar = bar
+
+		prices := context_get_prices(&ctx, symbols, allocator)
+		defer delete(prices)
+
+		// Rebalance on the specified frequency
+		if bar % rebalance_frequency == 0 {
+			target_weights := strategy(&ctx, allocator)
+
+			total_value := portfolio_total_value(&portfolio, prices)
+
+			// Execute trades to reach target weights
+			for sym in symbols {
+				target_w := 0.0
+				if w, ok := target_weights[sym]; ok {
+					target_w = w
+				}
+
+				current_price := prices[sym]
+				target_value := total_value * target_w
+				current_value := 0.0
+
+				if pos, ok := portfolio.positions[sym]; ok {
+					current_value = pos.quantity * current_price
+				}
+
+				delta_value := target_value - current_value
+
+				// Only trade if the delta is significant (e.g., > 1% of total value)
+				// This prevents churn and saves on commissions
+				if math.abs(delta_value) > (total_value * 0.01) {
+					qty := math.abs(delta_value) / current_price
+					side := OrderSide.Buy
+
+					if delta_value < 0 {
+						side = .Sell
+						// Ensure we don't sell more than we own
+						if pos, ok := portfolio.positions[sym]; ok {
+							qty = min(qty, pos.quantity)
+						}
+					}
+
+					if qty > 0.0001 {
+						order := Order {
+							symbol     = sym,
+							side       = side,
+							quantity   = qty,
+							order_type = .Market,
+						}
+						context_submit_order(&ctx, order)
+					}
+				}
+			}
+
+			// Clean up the weights map returned by the strategy
+			delete(target_weights)
+		}
+
+		portfolio_update(&portfolio, prices)
+	}
+
+	result := _calculate_backtest_metrics(&portfolio, config, allocator)
+
+	delete(portfolio.positions)
+	delete(portfolio.equity_curve)
+	delete(portfolio.trades)
+
+	return result
+}
+// ============================================================================
+// Portfolio Strategy 1: Equal Weight (Periodic Rebalance)
+// ============================================================================
+
+portfolio_equal_weight :: proc(ctx: ^StrategyContext, allocator: mem.Allocator) -> map[string]f64 {
+	weights := make(map[string]f64, allocator)
+	n := f64(len(ctx.symbols))
+
+	// Allocate 95% to assets, keep 5% cash buffer for slippage/commissions
+	allocation := 0.95 / n
+	for sym in ctx.symbols {
+		weights[sym] = allocation
+	}
+	return weights
+}
+
+// ============================================================================
+// Portfolio Strategy 2: Inverse Volatility (Risk Parity Lite)
+// ============================================================================
+// Allocates more capital to lower-volatility assets to equalize risk contribution.
+
+portfolio_inverse_volatility :: proc(
+	ctx: ^StrategyContext,
+	allocator: mem.Allocator,
+	lookback: int = 60,
+) -> map[string]f64 {
+	weights := make(map[string]f64, allocator)
+
+	if ctx.current_bar < lookback {
+		// Fallback to equal weight if not enough data
+		n := f64(len(ctx.symbols))
+		for sym in ctx.symbols {weights[sym] = 0.95 / n}
+		return weights
+	}
+
+	inv_vols := make([]f64, len(ctx.symbols), context.temp_allocator)
+	sum_inv_vol := 0.0
+
+	for sym, i in ctx.symbols {
+		col := w.column(ctx.data, sym)
+
+		// Calculate rolling standard deviation of returns
+		sum_ret := 0.0
+		sum_sq := 0.0
+		count := 0
+
+		for j in ctx.current_bar - lookback + 1 ..= ctx.current_bar {
+			p1, _ := w.column_at_float(col, j - 1)
+			p2, _ := w.column_at_float(col, j)
+			if p1 > 0 {
+				ret := (p2 - p1) / p1
+				sum_ret += ret
+				sum_sq += ret * ret
+				count += 1
+			}
+		}
+
+		if count > 1 {
+			mean_ret := sum_ret / f64(count)
+			variance := (sum_sq / f64(count)) - (mean_ret * mean_ret)
+			vol := math.sqrt(math.max(0.0, variance))
+
+			if vol > 1e-8 {
+				inv_vols[i] = 1.0 / vol
+				sum_inv_vol += inv_vols[i]
+			}
+		}
+	}
+
+	// Normalize weights
+	if sum_inv_vol > 0 {
+		for sym, i in ctx.symbols {
+			weights[sym] = 0.95 * (inv_vols[i] / sum_inv_vol)
+		}
+	} else {
+		n := f64(len(ctx.symbols))
+		for sym in ctx.symbols {weights[sym] = 0.95 / n}
+	}
+
+	return weights
+}
+
+
+// ============================================================================
+// Portfolio Strategy 3: Rolling Minimum Variance (Markowitz)
+// ============================================================================
+
+portfolio_min_variance :: proc(
+	ctx: ^StrategyContext,
+	allocator: mem.Allocator,
+	lookback: int = 120,
+) -> map[string]f64 {
+	weights := make(map[string]f64, allocator)
+	n_assets := len(ctx.symbols)
+
+	if ctx.current_bar < lookback {
+		for sym in ctx.symbols {weights[sym] = 0.95 / f64(n_assets)}
+		return weights
+	}
+
+	// 1. Extract returns matrix
+	returns_data := make([][]f64, n_assets, context.temp_allocator)
+	for i in 0 ..< n_assets {
+		returns_data[i] = make([]f64, lookback - 1, context.temp_allocator)
+		col := w.column(ctx.data, ctx.symbols[i])
+
+		for j in 0 ..< lookback - 1 {
+			p1, _ := w.column_at_float(col, ctx.current_bar - lookback + j)
+			p2, _ := w.column_at_float(col, ctx.current_bar - lookback + j + 1)
+			if p1 > 0 {
+				returns_data[i][j] = (p2 - p1) / p1
+			} else {
+				returns_data[i][j] = 0.0
+			}
+		}
+	}
+
+	// 2. Compute Covariance Matrix (using your analytics module)
+	// FIX: Use context.allocator so it matches ana.destroy_matrix's default delete behavior!
+	cov_matrix := ana.covariance_matrix(returns_data, context.allocator)
+	defer ana.destroy_matrix(cov_matrix)
+
+	// Convert to linalg Matrix
+	cov_linalg := l.matrix_new(f64, n_assets, n_assets, context.temp_allocator)
+	defer l.matrix_free(&cov_linalg)
+	for i in 0 ..< n_assets {
+		for j in 0 ..< n_assets {
+			cov_linalg.data[i * n_assets + j] = cov_matrix[i][j]
+		}
+	}
+
+	// 3. Optimize (No short selling)
+	constraints := PortfolioConstraints {
+		no_short_selling = true,
+		max_weight       = 0.0, // No max limit
+	}
+
+	opt_weights := constrained_min_variance_portfolio(
+		&cov_linalg,
+		constraints,
+		context.temp_allocator,
+	)
+	defer delete(opt_weights, context.temp_allocator)
+
+	// 4. Map back to symbols (scale to 95% to leave cash buffer)
+	for i in 0 ..< n_assets {
+		weights[ctx.symbols[i]] = opt_weights[i] * 0.95
+	}
+
+	return weights
 }

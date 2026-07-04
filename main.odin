@@ -485,6 +485,7 @@ main :: proc() {
 	test.finance_analytics_test(context.temp_allocator)
 	test.factor_analysis_test(context.temp_allocator)
 	test.backtest_test(context.temp_allocator)
+	test.backtest_portfolio_test(context.temp_allocator)
 	fmt.println("Demo End")
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
