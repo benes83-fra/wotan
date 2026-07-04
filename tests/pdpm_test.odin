@@ -6,7 +6,6 @@ import "core:fmt"
 import "core:math"
 import "core:math/rand"
 import "core:mem"
-
 pdpm_test :: proc(allocator: mem.Allocator) {
 	fmt.println("\n=== Dybvig PDPM Test ===\n")
 
@@ -24,7 +23,6 @@ pdpm_test :: proc(allocator: mem.Allocator) {
 
 	// 2. Construct Stochastic Discount Factors (SDF)
 	risk_free_rate := 0.04
-	market_risk_premium := mean_rm - risk_free_rate // 0.04
 
 	fmt.println("--- Stochastic Discount Factor Construction ---")
 
@@ -40,36 +38,15 @@ pdpm_test :: proc(allocator: mem.Allocator) {
 		1.0 / (1.0 + risk_free_rate),
 	)
 
-	// Power Utility SDF: M = beta * (C/C0)^(-gamma)
-	consumption_growth := make([]f64, n_states, allocator)
-	defer delete(consumption_growth, allocator)
-	for i in 0 ..< n_states {
-		consumption_growth[i] = 1.0 + market_returns[i] // Proxy consumption growth with market return
-	}
-
-	gamma := 3.0 // Risk aversion
-	sdf_power := fin.sdf_power_utility(consumption_growth, gamma, 0.96, allocator)
-	defer {
-		delete(sdf_power.values, allocator)
-		delete(sdf_power.parameters, allocator)
-	}
-	fmt.printf("Power Utility SDF (gamma=%.1f): E[M] = %.4f\n", gamma, sdf_power.mean)
-
-	// 3. Simulate Terminal Prices for an Asset
+	// 3. Generate Terminal Prices FROM THE SAME MARKET RETURNS
+	// This is critical for consistency!
 	spot_price := 100.0
-	drift := 0.10 // Expected return 10%
-	volatility := 0.20
-	time_to_maturity := 1.0 // 1 year
-
-	terminal_prices := fin.simulate_terminal_prices(
-		spot_price,
-		drift,
-		volatility,
-		time_to_maturity,
-		n_states,
-		allocator,
-	)
+	terminal_prices := make([]f64, n_states, allocator)
 	defer delete(terminal_prices, allocator)
+
+	for i in 0 ..< n_states {
+		terminal_prices[i] = spot_price * (1.0 + market_returns[i])
+	}
 
 	// 4. Payoff Distribution Analysis
 	fmt.println("\n--- Payoff Distribution Analysis ---")
@@ -77,91 +54,99 @@ pdpm_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("Terminal Price Distribution:\n")
 	fmt.printf("  Mean:    %.2f\n", dist.mean)
 	fmt.printf("  Std Dev: %.2f\n", math.sqrt(dist.variance))
-	fmt.printf("  Skewness: %.3f\n", dist.skewness)
-	fmt.printf("  Kurtosis: %.3f\n", dist.kurtosis)
 
 	// 5. Core PDPM Pricing (Options)
 	fmt.println("\n--- Option Pricing (PDPM) ---")
 
-	strike := 105.0 // OTM Call, ITM Put
+	strike := 105.0
 
 	// Price Call using Linear SDF
 	call_res := fin.price_european_call(
 		spot_price,
 		strike,
-		time_to_maturity,
+		1.0,
 		&sdf_linear,
 		terminal_prices,
 		allocator,
 	)
 	defer delete(call_res.state_prices, allocator)
-	fmt.printf(
-		"European Call (K=%.0f) Price: $%.4f (Risk Premium: $%.4f)\n",
-		strike,
-		call_res.price,
-		call_res.risk_premium,
-	)
+	fmt.printf("European Call (K=%.0f) Price: $%.4f\n", strike, call_res.price)
 
 	// Price Put
 	put_res := fin.price_european_put(
 		spot_price,
 		strike,
-		time_to_maturity,
+		1.0,
 		&sdf_linear,
 		terminal_prices,
 		allocator,
 	)
 	defer delete(put_res.state_prices, allocator)
-	fmt.printf(
-		"European Put  (K=%.0f) Price: $%.4f (Risk Premium: $%.4f)\n",
-		strike,
-		put_res.price,
-		put_res.risk_premium,
-	)
+	fmt.printf("European Put  (K=%.0f) Price: $%.4f\n", strike, put_res.price)
 
 	// Check Put-Call Parity: C - P = S - K * E[M]
-	// This is the fundamental theorem of asset pricing in action!
 	parity_lhs := call_res.price - put_res.price
 	parity_rhs := spot_price - strike * sdf_linear.mean
 	fmt.printf("Put-Call Parity Check:\n")
 	fmt.printf("  C - P        = %.4f\n", parity_lhs)
 	fmt.printf("  S - K * E[M] = %.4f\n", parity_rhs)
-
-	// Price Bull Spread
-	strike_high := 115.0
-	bull_res := fin.price_bull_spread(
-		spot_price,
-		strike,
-		strike_high,
-		&sdf_linear,
-		terminal_prices,
-		allocator,
-	)
-	defer delete(bull_res.state_prices, allocator)
-	fmt.printf("Bull Spread (%.0f/%.0f) Price: $%.4f\n", strike, strike_high, bull_res.price)
+	fmt.printf("  Difference   = %.6f (should be ~0)\n", math.abs(parity_lhs - parity_rhs))
 
 	// 6. Dybvig's Distributional Pricing
 	fmt.println("\n--- Dybvig Distributional Pricing ---")
 
-	// Price the underlying asset itself using Dybvig's quantile approach
 	dybvig_res := fin.dybvig_distributional_price(terminal_prices, &sdf_linear, 50, allocator)
 	defer delete(dybvig_res.state_prices, allocator)
 
-	fmt.printf(
-		"Dybvig Price of Underlying Asset: $%.4f (Spot: $%.2f)\n",
-		dybvig_res.price,
-		spot_price,
+	fmt.printf("Dybvig Price of Underlying: $%.4f (Spot: $%.2f)\n", dybvig_res.price, spot_price)
+	fmt.printf("Expected Payoff (Physical): $%.4f\n", dybvig_res.expected_payoff)
+
+	// Add to pdpm_test after the pricing section:
+
+	// 7. Visualize the complete PDPM analysis
+	fmt.println("\n--- Generating PDPM Visualizations ---")
+
+	// Plot complete analysis
+	ok1 := fin.plot_pdpm_analysis(
+		terminal_prices,
+		&sdf_linear,
+		market_returns,
+		"Linear SDF Analysis",
+		"pdpm_linear_sdf",
+		allocator,
 	)
-	fmt.printf("Expected Payoff (Physical P):     $%.4f\n", dybvig_res.expected_payoff)
-	fmt.printf("Certainty Equivalent:             $%.4f\n", dybvig_res.certainty_equivalent)
+	if ok1 {
+		fmt.println("✓ Generated 4 PDPM analysis plots:")
+		fmt.println("  - pdpm_linear_sdf_1_payoff_dist.png")
+		fmt.println("  - pdpm_linear_sdf_2_sdf_values.png")
+		fmt.println("  - pdpm_linear_sdf_3_state_price_density.png")
+		fmt.println("  - pdpm_linear_sdf_4_risk_neutral_dist.png")
+	}
 
-	// 7. Compute Risk Metrics
-	fmt.println("\n--- Risk Metrics ---")
-	metrics := fin.compute_distribution_metrics(terminal_prices, allocator)
-	fmt.printf("Value at Risk (95%%):      %.2f\n", metrics.value_at_risk_95)
-	fmt.printf("Value at Risk (99%%):      %.2f\n", metrics.value_at_risk_99)
-	fmt.printf("Expected Shortfall (95%%): %.2f\n", metrics.expected_shortfall_95)
+	// Plot option payoff profiles
+	ok2 := fin.plot_option_payoff_profile(
+		terminal_prices,
+		strike,
+		"call",
+		&sdf_linear,
+		"pdpm_call_payoff.png",
+		allocator,
+	)
 
+	ok3 := fin.plot_option_payoff_profile(
+		terminal_prices,
+		strike,
+		"put",
+		&sdf_linear,
+		"pdpm_put_payoff.png",
+		allocator,
+	)
+
+	if ok2 && ok3 {
+		fmt.println("✓ Generated option payoff profiles:")
+		fmt.println("  - pdpm_call_payoff.png")
+		fmt.println("  - pdpm_put_payoff.png")
+	}
 	fmt.println("\n✓ Dybvig PDPM test completed!")
 }
 

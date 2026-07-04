@@ -3,6 +3,7 @@ package finance
 
 import w "../core"
 import l "../linalg"
+import p "../plot"
 import "core:fmt"
 import "core:math"
 import "core:math/rand"
@@ -854,4 +855,313 @@ compute_distribution_metrics :: proc(
 		value_at_risk_99 = value_at_risk_99,
 		expected_shortfall_95 = expected_shortfall_95,
 	}
+}
+
+// Plot the complete PDPM analysis: payoff distribution, SDF, and state prices
+plot_pdpm_analysis :: proc(
+	payoffs: []f64,
+	sdf: ^StochasticDiscountFactor,
+	market_returns: []f64,
+	title: string,
+	output_path: string,
+	allocator: mem.Allocator = context.allocator,
+) -> bool {
+	n := len(payoffs)
+
+	// ========================================================================
+	// Plot 1: Payoff Distribution (Physical Measure)
+	// ========================================================================
+	n_bins := 50
+	min_payoff := payoffs[0]
+	max_payoff := payoffs[0]
+	for p in payoffs {
+		if p < min_payoff {min_payoff = p}
+		if p > max_payoff {max_payoff = p}
+	}
+
+	bin_width := (max_payoff - min_payoff) / f64(n_bins)
+	bin_counts := make([]f64, n_bins, context.temp_allocator)
+	bin_centers := make([]f64, n_bins, context.temp_allocator)
+
+	for i in 0 ..< n_bins {
+		bin_centers[i] = min_payoff + (f64(i) + 0.5) * bin_width
+		bin_counts[i] = 0.0
+	}
+
+	for p in payoffs {
+		bin_idx := int((p - min_payoff) / bin_width)
+		if bin_idx >= n_bins {bin_idx = n_bins - 1}
+		if bin_idx < 0 {bin_idx = 0}
+		bin_counts[bin_idx] += 1.0
+	}
+
+	// Normalize to density
+	for i in 0 ..< n_bins {
+		bin_counts[i] /= f64(n) * bin_width
+	}
+
+	// ========================================================================
+	// Plot 2: SDF Values vs Market Returns
+	// ========================================================================
+	sorted_returns := make([]f64, n, context.temp_allocator)
+	sorted_sdf := make([]f64, n, context.temp_allocator)
+
+	for i in 0 ..< n {
+		sorted_returns[i] = market_returns[i]
+		sorted_sdf[i] = sdf.values[i]
+	}
+
+	// Simple bubble sort
+	for i in 0 ..< n - 1 {
+		for j in 0 ..< n - i - 1 {
+			if sorted_returns[j] > sorted_returns[j + 1] {
+				sorted_returns[j], sorted_returns[j + 1] = sorted_returns[j + 1], sorted_returns[j]
+				sorted_sdf[j], sorted_sdf[j + 1] = sorted_sdf[j + 1], sorted_sdf[j]
+			}
+		}
+	}
+
+	// ========================================================================
+	// Plot 3: State Price Density
+	// ========================================================================
+	spd := estimate_state_price_density(sdf, market_returns, 0.02, 100, context.temp_allocator)
+	defer {
+		delete(spd.states, context.temp_allocator)
+		delete(spd.densities, context.temp_allocator)
+	}
+
+	// ========================================================================
+	// Plot 4: Risk-Neutral Distribution (SDF-weighted)
+	// ========================================================================
+	risk_neutral_density := make([]f64, n_bins, context.temp_allocator)
+	for i in 0 ..< n_bins {
+		bin_sum := 0.0
+		bin_count := 0
+		for j in 0 ..< n {
+			bin_idx := int((payoffs[j] - min_payoff) / bin_width)
+			if bin_idx >= n_bins {bin_idx = n_bins - 1}
+			if bin_idx < 0 {bin_idx = 0}
+			if bin_idx == i {
+				bin_sum += sdf.values[j]
+				bin_count += 1
+			}
+		}
+
+		if bin_count > 0 {
+			avg_sdf := bin_sum / f64(bin_count)
+			risk_neutral_density[i] = bin_counts[i] * avg_sdf / sdf.mean
+		}
+	}
+
+	// ========================================================================
+	// Create 4 separate plots
+	// ========================================================================
+
+	// Use fmt.tprintf for string formatting
+	path1 := fmt.tprintf("%s_1_payoff_dist.png", output_path)
+	path2 := fmt.tprintf("%s_2_sdf_values.png", output_path)
+	path3 := fmt.tprintf("%s_3_state_price_density.png", output_path)
+	path4 := fmt.tprintf("%s_4_risk_neutral_dist.png", output_path)
+
+	// Plot 1: Payoff Distribution
+	xs1 := make([]f64, n_bins, allocator)
+	ys1 := make([]f64, n_bins, allocator)
+	defer {
+		delete(xs1, allocator)
+		delete(ys1, allocator)
+	}
+
+	for i in 0 ..< n_bins {
+		xs1[i] = bin_centers[i]
+		ys1[i] = bin_counts[i]
+	}
+
+	lines1 := []p.LineData {
+		p.LineData{xs = xs1, ys = ys1, color = p.BLUE, style = .Solid, label = "Physical Density"},
+	}
+
+	config1 := p.DEFAULT_PLOT_CONFIG
+	config1.title = fmt.tprintf("%s - Payoff Distribution (Physical Measure P)", title)
+	config1.x_label = "Payoff Value"
+	config1.y_label = "Density"
+	config1.show_grid = true
+
+	ok1 := p.multi_line_png(lines1, path1, config1, allocator)
+
+	// Plot 2: SDF Values
+	xs2 := make([]f64, n, allocator)
+	ys2 := make([]f64, n, allocator)
+	defer {
+		delete(xs2, allocator)
+		delete(ys2, allocator)
+	}
+
+	for i in 0 ..< n {
+		xs2[i] = sorted_returns[i]
+		ys2[i] = sorted_sdf[i]
+	}
+
+	lines2 := []p.LineData {
+		p.LineData{xs = xs2, ys = ys2, color = p.RED, style = .Solid, label = "SDF M"},
+	}
+
+	config2 := p.DEFAULT_PLOT_CONFIG
+	config2.title = fmt.tprintf("%s - Stochastic Discount Factor", title)
+	config2.x_label = "Market Return"
+	config2.y_label = "SDF Value M"
+	config2.show_grid = true
+
+	ok2 := p.multi_line_png(lines2, path2, config2, allocator)
+
+	// Plot 3: State Price Density
+	xs3 := make([]f64, spd.n_points, allocator)
+	ys3 := make([]f64, spd.n_points, allocator)
+	defer {
+		delete(xs3, allocator)
+		delete(ys3, allocator)
+	}
+
+	for i in 0 ..< spd.n_points {
+		xs3[i] = spd.states[i]
+		ys3[i] = spd.densities[i]
+	}
+
+	lines3 := []p.LineData {
+		p.LineData {
+			xs = xs3,
+			ys = ys3,
+			color = p.Color{0, 150, 0, 255},
+			style = .Solid,
+			label = "State Price Density",
+		},
+	}
+
+	config3 := p.DEFAULT_PLOT_CONFIG
+	config3.title = fmt.tprintf("%s - State Price Density (Arrow-Debreu Prices)", title)
+	config3.x_label = "State (Market Return)"
+	config3.y_label = "State Price Density"
+	config3.show_grid = true
+
+	ok3 := p.multi_line_png(lines3, path3, config3, allocator)
+
+	// Plot 4: Risk-Neutral Distribution
+	xs4 := make([]f64, n_bins, allocator)
+	ys4 := make([]f64, n_bins, allocator)
+	ys4_phys := make([]f64, n_bins, allocator)
+	defer {
+		delete(xs4, allocator)
+		delete(ys4, allocator)
+		delete(ys4_phys, allocator)
+	}
+
+	for i in 0 ..< n_bins {
+		xs4[i] = bin_centers[i]
+		ys4[i] = risk_neutral_density[i]
+		ys4_phys[i] = bin_counts[i]
+	}
+
+	lines4 := []p.LineData {
+		p.LineData{xs = xs4, ys = ys4_phys, color = p.BLUE, style = .Solid, label = "Physical P"},
+		p.LineData{xs = xs4, ys = ys4, color = p.RED, style = .Solid, label = "Risk-Neutral Q"},
+	}
+
+	config4 := p.DEFAULT_PLOT_CONFIG
+	config4.title = fmt.tprintf("%s - Physical vs Risk-Neutral Distribution", title)
+	config4.x_label = "Payoff Value"
+	config4.y_label = "Density"
+	config4.show_grid = true
+
+	ok4 := p.multi_line_png(lines4, path4, config4, allocator)
+
+	return ok1 && ok2 && ok3 && ok4
+}
+plot_option_payoff_profile :: proc(
+	terminal_prices: []f64,
+	strike: f64,
+	option_type: string, // "call" or "put"
+	sdf: ^StochasticDiscountFactor,
+	output_path: string,
+	allocator: mem.Allocator = context.allocator,
+) -> bool {
+	n := len(terminal_prices)
+
+	// Compute payoffs
+	payoffs := make([]f64, n, context.temp_allocator)
+	for i in 0 ..< n {
+		if option_type == "call" {
+			payoffs[i] = math.max(terminal_prices[i] - strike, 0.0)
+		} else {
+			payoffs[i] = math.max(strike - terminal_prices[i], 0.0)
+		}
+	}
+
+	// Price the option
+	price := 0.0
+	for i in 0 ..< n {
+		price += sdf.values[i] * payoffs[i]
+	}
+	price /= f64(n)
+
+	// Sort by terminal price for clean plot
+	sorted_prices := make([]f64, n, context.temp_allocator)
+	sorted_payoffs := make([]f64, n, context.temp_allocator)
+
+	for i in 0 ..< n {
+		sorted_prices[i] = terminal_prices[i]
+		sorted_payoffs[i] = payoffs[i]
+	}
+
+	// Simple sort
+	for i in 0 ..< n - 1 {
+		for j in 0 ..< n - i - 1 {
+			if sorted_prices[j] > sorted_prices[j + 1] {
+				sorted_prices[j], sorted_prices[j + 1] = sorted_prices[j + 1], sorted_prices[j]
+				sorted_payoffs[j], sorted_payoffs[j + 1] = sorted_payoffs[j + 1], sorted_payoffs[j]
+			}
+		}
+	}
+
+	// Create plot data
+	xs := make([]f64, n, allocator)
+	ys := make([]f64, n, allocator)
+	defer {
+		delete(xs, allocator)
+		delete(ys, allocator)
+	}
+
+	for i in 0 ..< n {
+		xs[i] = sorted_prices[i]
+		ys[i] = sorted_payoffs[i]
+	}
+
+	// Add horizontal line for option price
+	xs_price := []f64{xs[0], xs[n - 1]}
+	ys_price := []f64{price, price}
+
+	lines := []p.LineData {
+		p.LineData{xs = xs, ys = ys, color = p.BLUE, style = .Solid, label = "Payoff at Maturity"},
+		p.LineData {
+			xs = xs_price,
+			ys = ys_price,
+			color = p.RED,
+			style = .Dashed,
+			label = fmt.tprintf("PDPM Price: $%.2f", price),
+		},
+	}
+
+	config := p.DEFAULT_PLOT_CONFIG
+	title_suffix := "Call"
+	if option_type == "put" {
+		title_suffix = "Put"
+	}
+	config.title = fmt.tprintf(
+		"European %s Option (K=%.0f) - Payoff Profile",
+		title_suffix,
+		strike,
+	)
+	config.x_label = "Terminal Stock Price"
+	config.y_label = "Option Payoff ($)"
+	config.show_grid = true
+
+	return p.multi_line_png(lines, output_path, config, allocator)
 }
