@@ -2,8 +2,9 @@
 package finance
 
 import w "../core"
-import csv "../importer"
+
 import l "../linalg"
+import opt "../optimize"
 import p "../plot"
 import "core:fmt"
 import "core:math"
@@ -163,8 +164,11 @@ sdf_linear_factor :: proc(
 ) -> StochasticDiscountFactor {
 	n := len(market_returns)
 
+	// Debug: Print the actual length
+	fmt.printf("sdf_linear_factor: n = %d\n", n)
+
 	// Convert to gross returns: R = 1 + r
-	gross_returns := make([]f64, n, context.temp_allocator)
+	gross_returns := make([]f64, n, allocator)
 	for i in 0 ..< n {
 		gross_returns[i] = 1.0 + market_returns[i]
 	}
@@ -181,28 +185,17 @@ sdf_linear_factor :: proc(
 
 	var_R := mean_R2 - mean_R * mean_R
 
-	// Two fundamental pricing constraints:
-	// E[M] = 1/(1+rf)
-	// E[M * R_m] = 1 (market portfolio prices to 1)
-
 	rf_discount := 1.0 / (1.0 + risk_free_rate)
 
-	// Solve 2x2 system using Cramer's rule:
-	// a + b*E[R] = rf_discount
-	// a*E[R] + b*E[R²] = 1
+	det := var_R
 
-	det := var_R // E[R²] - E[R]²
-
-	// Declare a and b in outer scope
 	a: f64
 	b: f64
 
 	if math.abs(det) < 1e-10 {
-		// Degenerate case: use constant SDF
 		a = rf_discount
 		b = 0.0
 	} else {
-		// Cramer's rule
 		a = (rf_discount * mean_R2 - mean_R) / det
 		b = (1.0 - rf_discount * mean_R) / det
 	}
@@ -210,6 +203,8 @@ sdf_linear_factor :: proc(
 	values := make([]f64, n, allocator)
 	parameters := make([]f64, 2, allocator)
 
+	// Debug: Print loop bounds
+	fmt.printf("Creating values array with n = %d\n", n)
 	for i in 0 ..< n {
 		values[i] = a + b * gross_returns[i]
 	}
@@ -219,7 +214,8 @@ sdf_linear_factor :: proc(
 	for v in values {mean += v}
 	mean /= f64(n)
 
-	// Verify E[M * R_m] = 1
+	// Debug: Print verification loop bounds
+	fmt.printf("Verifying E[M*R_m] with n = %d\n", n)
 	pricing_check := 0.0
 	for i in 0 ..< n {
 		pricing_check += values[i] * gross_returns[i]
@@ -237,6 +233,8 @@ sdf_linear_factor :: proc(
 	parameters[1] = b
 
 	fmt.printf("Linear SDF Calibration Check: E[M*R_m] = %.4f (Target: 1.0)\n", pricing_check)
+
+	delete(gross_returns, allocator)
 
 	return StochasticDiscountFactor {
 		model_type = .Linear_Factor,
@@ -1187,6 +1185,9 @@ OptionChain :: struct {
 // ============================================================================
 // SDF Calibration to Market Prices
 // ============================================================================
+// ============================================================================
+// SDF Calibration to Market Prices (Using SGD Optimizer)
+// ============================================================================
 
 CalibrationResult :: struct {
 	sdf:          StochasticDiscountFactor,
@@ -1196,8 +1197,81 @@ CalibrationResult :: struct {
 	converged:    bool,
 }
 
-// Calibrate Linear SDF to match observed option prices
-// Calibrate Linear SDF to match observed option prices
+// Objective function: sum of squared pricing errors
+_calibration_loss :: proc(
+	a: f64,
+	b: f64,
+	market_returns: []f64,
+	option_chain: ^OptionChain,
+	spot_price: f64,
+	terminal_prices: []f64,
+	allocator: mem.Allocator,
+) -> f64 {
+	n := len(market_returns)
+
+	// Use the main allocator, not temp_allocator
+	gross_returns := make([]f64, n, allocator)
+	defer delete(gross_returns, allocator)
+	for i in 0 ..< n {
+		gross_returns[i] = 1.0 + market_returns[i]
+	}
+
+	// Allocate with main allocator - DO NOT delete, it's needed by the SDF struct
+	sdf_values := make([]f64, n, allocator)
+	for i in 0 ..< n {
+		sdf_values[i] = a + b * gross_returns[i]
+	}
+
+	mean := 0.0
+	for v in sdf_values {mean += v}
+	mean /= f64(n)
+
+	sdf := StochasticDiscountFactor {
+		model_type = .Linear_Factor,
+		values     = sdf_values, // This slice must remain valid
+		mean       = mean,
+	}
+
+	total_error := 0.0
+	for i in 0 ..< option_chain.n_options {
+		theo_price: f64
+
+		if option_chain.option_types[i] == "call" {
+			result := price_european_call(
+				spot_price,
+				option_chain.strikes[i],
+				option_chain.expiries[i],
+				&sdf,
+				terminal_prices,
+				context.temp_allocator,
+			)
+			theo_price = result.price
+			delete(result.state_prices, context.temp_allocator)
+		} else {
+			result := price_european_put(
+				spot_price,
+				option_chain.strikes[i],
+				option_chain.expiries[i],
+				&sdf,
+				terminal_prices,
+				context.temp_allocator,
+			)
+			theo_price = result.price
+			delete(result.state_prices, context.temp_allocator)
+		}
+
+		error := theo_price - option_chain.market_prices[i]
+		total_error += error * error
+	}
+
+	// Clean up sdf_values after we're done using the SDF
+	delete(sdf_values, allocator)
+
+	return total_error / f64(option_chain.n_options)
+}
+
+// Calibrate Linear SDF using SGD optimizer
+// Calibrate Linear SDF using SGD optimizer
 calibrate_sdf_linear :: proc(
 	market_returns: []f64,
 	risk_free_rate: f64,
@@ -1208,9 +1282,41 @@ calibrate_sdf_linear :: proc(
 	tolerance: f64 = 1e-6,
 	allocator: mem.Allocator = context.allocator,
 ) -> CalibrationResult {
+	// Initial guess: theoretical SDF parameters
+	n := len(market_returns)
+	gross_returns := make([]f64, n, context.temp_allocator)
+	defer delete(gross_returns, context.temp_allocator)
+	for i in 0 ..< n {
+		gross_returns[i] = 1.0 + market_returns[i]
+	}
 
-	// Start with theoretical SDF as initial guess
-	sdf := sdf_linear_factor(market_returns, risk_free_rate, allocator)
+	mean_R := 0.0
+	mean_R2 := 0.0
+	for r in gross_returns {
+		mean_R += r
+		mean_R2 += r * r
+	}
+	mean_R /= f64(n)
+	mean_R2 /= f64(n)
+
+	var_R := mean_R2 - mean_R * mean_R
+	rf_discount := 1.0 / (1.0 + risk_free_rate)
+
+	a_init := (rf_discount * mean_R2 - mean_R) / var_R
+	b_init := (1.0 - rf_discount * mean_R) / var_R
+
+	// Initialize optimizer for 2 parameters (a, b)
+	opt_config := opt.optimizer_default_config(.SGD)
+	opt_config.learning_rate = 0.001
+	opt_config.momentum = 0.9
+
+	optimizer := opt.optimizer_init(opt_config, 2, allocator)
+	defer opt.optimizer_free(&optimizer)
+
+	// Parameters to optimize
+	params := []f64{a_init, b_init}
+	gradient := make([]f64, 2, allocator)
+	defer delete(gradient, allocator)
 
 	// Simulate terminal prices
 	terminal_prices := simulate_terminal_prices(
@@ -1223,95 +1329,161 @@ calibrate_sdf_linear :: proc(
 	)
 	defer delete(terminal_prices, allocator)
 
-	// Optimization using gradient descent
-	learning_rate := 0.01
-	best_rmse := math.F64_MAX
+	best_loss := math.F64_MAX
+	best_params := []f64{a_init, b_init}
 
-	// Ensure we have the same length for market_returns and sdf.values
-	n_returns := min(len(market_returns), len(sdf.values))
-
+	// Optimization loop
 	for iter in 0 ..< max_iterations {
-		// Compute pricing errors
-		total_error := 0.0
-		max_error := 0.0
+		// Compute current loss
+		loss := _calibration_loss(
+			params[0],
+			params[1],
+			market_returns,
+			option_chain,
+			spot_price,
+			terminal_prices,
+			allocator,
+		)
 
-		for i in 0 ..< option_chain.n_options {
-			// Compute theoretical price
-			theo_price: f64
-
-			if option_chain.option_types[i] == "call" {
-				result := price_european_call(
-					spot_price,
-					option_chain.strikes[i],
-					option_chain.expiries[i],
-					&sdf,
-					terminal_prices,
-					context.temp_allocator,
-				)
-				theo_price = result.price
-				delete(result.state_prices, context.temp_allocator)
-			} else {
-				result := price_european_put(
-					spot_price,
-					option_chain.strikes[i],
-					option_chain.expiries[i],
-					&sdf,
-					terminal_prices,
-					context.temp_allocator,
-				)
-				theo_price = result.price
-				delete(result.state_prices, context.temp_allocator)
-			}
-
-			// Compute error
-			error := theo_price - option_chain.market_prices[i]
-			total_error += error * error
-
-			if math.abs(error) > max_error {
-				max_error = math.abs(error)
-			}
+		if loss < best_loss {
+			best_loss = loss
+			best_params[0] = params[0]
+			best_params[1] = params[1]
 		}
-
-		rmse := math.sqrt(total_error / f64(option_chain.n_options))
 
 		// Check convergence
+		rmse := math.sqrt(loss)
 		if rmse < tolerance {
 			fmt.printf("Calibration converged in %d iterations (RMSE: %.6f)\n", iter, rmse)
-			return CalibrationResult {
-				sdf = sdf,
-				rmse = rmse,
-				max_error = max_error,
-				n_iterations = iter,
-				converged = true,
-			}
+			break
 		}
 
-		if rmse < best_rmse {
-			best_rmse = rmse
-		}
+		// Compute gradient numerically
+		eps := 1e-5
 
-		// Perturb SDF values slightly (simplified gradient descent)
-		gradient_scale := learning_rate * (best_rmse - rmse)
-		for j in 0 ..< n_returns { 	// FIX: Use n_returns instead of len(sdf.values)
-			sdf.values[j] += gradient_scale * (market_returns[j] - sdf.mean)
-		}
+		loss_a_plus := _calibration_loss(
+			params[0] + eps,
+			params[1],
+			market_returns,
+			option_chain,
+			spot_price,
+			terminal_prices,
+			allocator,
+		)
+		loss_a_minus := _calibration_loss(
+			params[0] - eps,
+			params[1],
+			market_returns,
+			option_chain,
+			spot_price,
+			terminal_prices,
+			allocator,
+		)
+		gradient[0] = (loss_a_plus - loss_a_minus) / (2.0 * eps)
 
-		// Recompute mean
-		mean := 0.0
-		for v in sdf.values {mean += v}
-		sdf.mean = mean / f64(len(sdf.values))
+		loss_b_plus := _calibration_loss(
+			params[0],
+			params[1] + eps,
+			market_returns,
+			option_chain,
+			spot_price,
+			terminal_prices,
+			allocator,
+		)
+		loss_b_minus := _calibration_loss(
+			params[0],
+			params[1] - eps,
+			market_returns,
+			option_chain,
+			spot_price,
+			terminal_prices,
+			allocator,
+		)
+		gradient[1] = (loss_b_plus - loss_b_minus) / (2.0 * eps)
+
+		// SGD step
+		opt.optimizer_step(&optimizer, params, gradient, loss)
 
 		if iter % 10 == 0 {
-			fmt.printf("Iteration %d: RMSE = %.6f\n", iter, rmse)
+			fmt.printf(
+				"Iteration %d: RMSE = %.6f, a = %.4f, b = %.4f\n",
+				iter,
+				rmse,
+				params[0],
+				params[1],
+			)
 		}
 	}
 
+	// Construct final SDF with best parameters
+	final_sdf := _construct_sdf_from_params(
+		best_params[0],
+		best_params[1],
+		market_returns,
+		allocator,
+	)
+
+	final_loss := _calibration_loss(
+		best_params[0],
+		best_params[1],
+		market_returns,
+		option_chain,
+		spot_price,
+		terminal_prices,
+		allocator,
+	)
+
 	return CalibrationResult {
-		sdf = sdf,
-		rmse = best_rmse,
+		sdf = final_sdf,
+		rmse = math.sqrt(final_loss),
 		max_error = 0.0,
 		n_iterations = max_iterations,
-		converged = false,
+		converged = final_loss < tolerance * tolerance,
+	}
+}
+
+// Helper: construct SDF from (a, b) parameters
+_construct_sdf_from_params :: proc(
+	a: f64,
+	b: f64,
+	market_returns: []f64,
+	allocator: mem.Allocator,
+) -> StochasticDiscountFactor {
+	n := len(market_returns)
+	gross_returns := make([]f64, n, context.temp_allocator)
+	defer delete(gross_returns, context.temp_allocator)
+	for i in 0 ..< n {
+		gross_returns[i] = 1.0 + market_returns[i]
+	}
+
+	values := make([]f64, n, allocator)
+	for i in 0 ..< n {
+		values[i] = a + b * gross_returns[i]
+	}
+
+	mean := 0.0
+	for v in values {mean += v}
+	mean /= f64(n)
+
+	variance := 0.0
+	for v in values {
+		diff := v - mean
+		variance += diff * diff
+	}
+	variance /= f64(n - 1)
+
+	parameters := make([]f64, 2, allocator)
+	parameters[0] = a
+	parameters[1] = b
+
+	return StochasticDiscountFactor {
+		model_type      = .Linear_Factor,
+		values          = values,
+		parameters      = parameters,
+		risk_aversion   = 0.0,
+		discount_factor = 1.0 / (1.0 + 0.05), // placeholder
+		mean            = mean,
+		variance        = variance,
 	}
 }
 
