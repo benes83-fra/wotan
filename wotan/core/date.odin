@@ -535,3 +535,37 @@ now :: proc() -> Datetime {
 	}
 	return Datetime{date.year, date.month, date.day, time.hour, time.minute, time.second}
 }
+// Returns the number of days from date a to date b (b - a)
+// Positive if b is after a, negative if b is before a
+date_diff :: proc(a, b: Date) -> i32 {
+	a_year := a.year
+	a_month := a.month
+	a_day := a.day
+	b_year := b.year
+	b_month := b.month
+	b_day := b.day
+
+	// Convert both dates to a day count since an epoch
+	days_a := date_to_days(a_year, a_month, a_day)
+	days_b := date_to_days(b_year, b_month, b_day)
+
+	return days_b - days_a
+}
+
+// Convert a date to a day count (similar to Julian Day Number)
+date_to_days :: proc(year: i32, month: i32, day: i32) -> i32 {
+	// Use a simplified algorithm
+	y := year
+	m := month
+
+	// Adjust for months January and February
+	if m <= 2 {
+		y -= 1
+		m += 12
+	}
+
+	// Calculate days using a formula similar to Julian Day
+	days := 365 * y + y / 4 - y / 100 + y / 400 + (153 * (m - 3) + 2) / 5 + day
+
+	return days
+}

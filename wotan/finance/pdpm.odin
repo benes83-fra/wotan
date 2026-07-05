@@ -2,6 +2,7 @@
 package finance
 
 import w "../core"
+import csv "../importer"
 import l "../linalg"
 import p "../plot"
 import "core:fmt"
@@ -1164,4 +1165,193 @@ plot_option_payoff_profile :: proc(
 	config.show_grid = true
 
 	return p.multi_line_png(lines, output_path, config, allocator)
+}
+MarketData :: struct {
+	dates:   []w.Date,
+	prices:  []f64,
+	volumes: []f64,
+	returns: []f64,
+	n_obs:   int,
+}
+
+OptionChain :: struct {
+	strikes:       []f64,
+	expiries:      []f64, // Time to expiry in years
+	implied_vols:  []f64,
+	market_prices: []f64,
+	option_types:  []string, // "call" or "put"
+	n_options:     int,
+}
+
+
+// ============================================================================
+// SDF Calibration to Market Prices
+// ============================================================================
+
+CalibrationResult :: struct {
+	sdf:          StochasticDiscountFactor,
+	rmse:         f64,
+	max_error:    f64,
+	n_iterations: int,
+	converged:    bool,
+}
+
+// Calibrate Linear SDF to match observed option prices
+calibrate_sdf_linear :: proc(
+	market_returns: []f64,
+	risk_free_rate: f64,
+	option_chain: ^OptionChain,
+	spot_price: f64,
+	n_simulations: int = 10000,
+	max_iterations: int = 100,
+	tolerance: f64 = 1e-6,
+	allocator: mem.Allocator = context.allocator,
+) -> CalibrationResult {
+
+	// Start with theoretical SDF as initial guess
+	sdf := sdf_linear_factor(market_returns, risk_free_rate, allocator)
+
+	// Simulate terminal prices
+	terminal_prices := simulate_terminal_prices(
+		spot_price,
+		risk_free_rate, // Use risk-free rate as drift for risk-neutral pricing
+		0.20, // Initial volatility guess
+		1.0,
+		n_simulations,
+		allocator,
+	)
+	defer delete(terminal_prices, allocator)
+
+	// Optimization using gradient descent
+	learning_rate := 0.01
+	best_rmse := math.F64_MAX
+
+	for iter in 0 ..< max_iterations {
+		// Compute pricing errors
+		total_error := 0.0
+		max_error := 0.0
+
+		for i in 0 ..< option_chain.n_options {
+			// Compute theoretical price
+			theo_price: f64
+
+			if option_chain.option_types[i] == "call" {
+				result := price_european_call(
+					spot_price,
+					option_chain.strikes[i],
+					option_chain.expiries[i],
+					&sdf,
+					terminal_prices,
+					context.temp_allocator,
+				)
+				theo_price = result.price
+				delete(result.state_prices, context.temp_allocator)
+			} else {
+				result := price_european_put(
+					spot_price,
+					option_chain.strikes[i],
+					option_chain.expiries[i],
+					&sdf,
+					terminal_prices,
+					context.temp_allocator,
+				)
+				theo_price = result.price
+				delete(result.state_prices, context.temp_allocator)
+			}
+
+			// Compute error
+			error := theo_price - option_chain.market_prices[i]
+			total_error += error * error
+
+			if math.abs(error) > max_error {
+				max_error = math.abs(error)
+			}
+		}
+
+		rmse := math.sqrt(total_error / f64(option_chain.n_options))
+
+		// Check convergence
+		if rmse < tolerance {
+			fmt.printf("Calibration converged in %d iterations (RMSE: %.6f)\n", iter, rmse)
+			return CalibrationResult {
+				sdf = sdf,
+				rmse = rmse,
+				max_error = max_error,
+				n_iterations = iter,
+				converged = true,
+			}
+		}
+
+		// Simple gradient step: adjust SDF parameters
+		// In practice, you'd use proper optimization (Nelder-Mead, L-BFGS, etc.)
+		// For now, we'll just adjust the linear coefficient
+		if rmse < best_rmse {
+			best_rmse = rmse
+		}
+
+		// Perturb SDF values slightly (simplified gradient descent)
+		gradient_scale := learning_rate * (best_rmse - rmse)
+		for j in 0 ..< len(sdf.values) {
+			sdf.values[j] += gradient_scale * (market_returns[j] - sdf.mean)
+		}
+
+		// Recompute mean
+		mean := 0.0
+		for v in sdf.values {mean += v}
+		sdf.mean = mean / f64(len(sdf.values))
+
+		if iter % 10 == 0 {
+			fmt.printf("Iteration %d: RMSE = %.6f\n", iter, rmse)
+		}
+	}
+
+	return CalibrationResult {
+		sdf = sdf,
+		rmse = best_rmse,
+		max_error = 0.0,
+		n_iterations = max_iterations,
+		converged = false,
+	}
+}
+
+// Compare PDPM prices to Black-Scholes
+compare_to_black_scholes :: proc(
+	spot_price: f64,
+	strike: f64,
+	time_to_expiry: f64,
+	risk_free_rate: f64,
+	volatility: f64,
+	sdf: ^StochasticDiscountFactor,
+	terminal_prices: []f64,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	f64,
+	f64,
+) {
+	// PDPM price
+	pdpm_price: f64
+	result := price_european_call(
+		spot_price,
+		strike,
+		time_to_expiry,
+		sdf,
+		terminal_prices,
+		allocator,
+	)
+	pdpm_price = result.price
+	delete(result.state_prices, allocator)
+
+	// Black-Scholes price
+	d1 :=
+		(math.ln(spot_price / strike) +
+			(risk_free_rate + 0.5 * volatility * volatility) * time_to_expiry) /
+		(volatility * math.sqrt(time_to_expiry))
+	d2 := d1 - volatility * math.sqrt(time_to_expiry)
+
+	nd1 := 0.5 * (1.0 + math.erf(d1 / math.sqrt_f64(2.0)))
+	nd2 := 0.5 * (1.0 + math.erf(d2 / math.sqrt_f64(2.0)))
+
+	bs_price := spot_price * nd1 - strike * math.exp(-risk_free_rate * time_to_expiry) * nd2
+
+	return pdpm_price, bs_price
 }
