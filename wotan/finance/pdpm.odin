@@ -1197,6 +1197,7 @@ CalibrationResult :: struct {
 }
 
 // Calibrate Linear SDF to match observed option prices
+// Calibrate Linear SDF to match observed option prices
 calibrate_sdf_linear :: proc(
 	market_returns: []f64,
 	risk_free_rate: f64,
@@ -1214,8 +1215,8 @@ calibrate_sdf_linear :: proc(
 	// Simulate terminal prices
 	terminal_prices := simulate_terminal_prices(
 		spot_price,
-		risk_free_rate, // Use risk-free rate as drift for risk-neutral pricing
-		0.20, // Initial volatility guess
+		risk_free_rate,
+		0.20,
 		1.0,
 		n_simulations,
 		allocator,
@@ -1225,6 +1226,9 @@ calibrate_sdf_linear :: proc(
 	// Optimization using gradient descent
 	learning_rate := 0.01
 	best_rmse := math.F64_MAX
+
+	// Ensure we have the same length for market_returns and sdf.values
+	n_returns := min(len(market_returns), len(sdf.values))
 
 	for iter in 0 ..< max_iterations {
 		// Compute pricing errors
@@ -1282,16 +1286,13 @@ calibrate_sdf_linear :: proc(
 			}
 		}
 
-		// Simple gradient step: adjust SDF parameters
-		// In practice, you'd use proper optimization (Nelder-Mead, L-BFGS, etc.)
-		// For now, we'll just adjust the linear coefficient
 		if rmse < best_rmse {
 			best_rmse = rmse
 		}
 
 		// Perturb SDF values slightly (simplified gradient descent)
 		gradient_scale := learning_rate * (best_rmse - rmse)
-		for j in 0 ..< len(sdf.values) {
+		for j in 0 ..< n_returns { 	// FIX: Use n_returns instead of len(sdf.values)
 			sdf.values[j] += gradient_scale * (market_returns[j] - sdf.mean)
 		}
 

@@ -46,12 +46,27 @@ load_market_data :: proc(
 	}
 }
 // Load option chain data
+// Load option chain data
 load_option_chain :: proc(
 	path: string,
 	current_date: w.Date,
 	allocator: mem.Allocator = context.allocator,
 ) -> OptionChain {
-	df := csv.csv_load(path)
+	// Force specific types for option data
+	types := []w.ColumnType {
+		.String, // Symbol
+		.String, // Type
+		.Float, // Strike (force to Float)
+		.Date, // Expiry
+		.Float, // ImpliedVol
+		.Float, // Price
+		.Float, // Bid
+		.Float, // Ask
+		.Float, // Volume
+		.Float, // OpenInterest
+	}
+
+	df := csv.csv_load(path, types)
 
 	n := df.rows
 	strikes := make([]f64, n, allocator)
@@ -70,7 +85,7 @@ load_option_chain :: proc(
 		option_types[i], _ = w.column_at_string(type_col, i)
 		strikes[i], _ = w.column_at_float(strike_col, i)
 
-		// FIX: Use column_at_date instead of column_at_string + parse_date
+		// Use column_at_date for already-parsed Date
 		expiry_date, _ := w.column_at_date(expiry_col, i)
 
 		// Calculate time to expiry in years
