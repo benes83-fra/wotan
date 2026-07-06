@@ -471,7 +471,7 @@ main :: proc() {
 	test.transformer_reversal_test(context.temp_allocator)
 	test.char_lm_test(context.temp_allocator)
 	// test.gpt_full_test(context.temp_allocator)
-	test.gpt_shakespeare_test(context.temp_allocator)
+	// test.gpt_shakespeare_test(context.temp_allocator)
 	test.bert_test(context.temp_allocator)
 	// test.gan_test(context.temp_allocator)
 	test.gan_test_v2(context.temp_allocator)

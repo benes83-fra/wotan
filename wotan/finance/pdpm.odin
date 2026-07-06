@@ -1280,6 +1280,7 @@ _calibration_loss :: proc(
 }
 
 // Calibrate Linear SDF using SGD optimizer (1D optimization for 'b')
+// Updated calibration function using grid search
 calibrate_sdf_linear :: proc(
 	market_returns: []f64,
 	risk_free_rate: f64,
@@ -1297,117 +1298,46 @@ calibrate_sdf_linear :: proc(
 	}
 
 	mean_R := 0.0
-	mean_R2 := 0.0
-	for r in gross_returns {
-		mean_R += r
-		mean_R2 += r * r
-	}
+	for r in gross_returns {mean_R += r}
 	mean_R /= f64(n)
-	mean_R2 /= f64(n)
 
-	var_R := mean_R2 - mean_R * mean_R
 	rf_discount := 1.0 / (1.0 + risk_free_rate)
 
-	// Initial guess for b (theoretical unconstrained value)
-	b_init := 0.0 //(1.0 - rf_discount * mean_R) / var_R
-	a_init := rf_discount - b_init * mean_R
-
-	// Initialize 1D optimizer for parameter 'b'
-	opt_config := opt.optimizer_default_config(.Adam)
-	opt_config.learning_rate = 0.01 // Smaller learning rate for 1D
-	opt_config.momentum = 0.9
-	opt_config.weight_decay = 0.1
-	optimizer := opt.optimizer_init(opt_config, 1, allocator)
-	defer opt.optimizer_free(&optimizer)
-
-	// Optimize only 'b'
-	params := []f64{b_init}
-	gradient := make([]f64, 1, allocator)
-	defer delete(gradient, allocator)
-
-	best_loss := math.F64_MAX
-	best_b := b_init
-
-	for iter in 0 ..< max_iterations {
-		loss := _calibration_loss(
-			params[0],
-			mean_R,
-			rf_discount,
-			market_returns,
-			option_chain,
-			spot_price,
-			allocator,
-		)
-
-		if loss < best_loss {
-			best_loss = loss
-			best_b = params[0]
-		}
-
-		rmse := math.sqrt_f64(loss)
-		if rmse < tolerance {
-			fmt.printf("Calibration converged in %d iterations (RMSE: %.6f)\n", iter, rmse)
-			break
-		}
-
-		// Numerical gradient for 'b'
-		eps := 1e-5
-		loss_plus := _calibration_loss(
-			params[0] + eps,
-			mean_R,
-			rf_discount,
-			market_returns,
-			option_chain,
-			spot_price,
-			allocator,
-		)
-		loss_minus := _calibration_loss(
-			params[0] - eps,
-			mean_R,
-			rf_discount,
-			market_returns,
-			option_chain,
-			spot_price,
-			allocator,
-		)
-		gradient[0] = (loss_plus - loss_minus) / (2.0 * eps)
-
-		opt.optimizer_step(&optimizer, params, gradient, loss)
-
-		if iter % 10 == 0 {
-			current_a := rf_discount - params[0] * mean_R
-			fmt.printf(
-				"Iteration %d: RMSE = %.6f, a = %.4f, b = %.4f\n",
-				iter,
-				rmse,
-				current_a,
-				params[0],
-			)
-		}
-	}
-
-	// Construct final SDF with best parameters
-	final_a := rf_discount - best_b * mean_R
-	final_sdf := _construct_sdf_from_params(final_a, best_b, market_returns, allocator)
-
-	final_loss := _calibration_loss(
-		best_b,
+	// Use grid search instead of gradient descent
+	fmt.println("Running PDPM grid search...")
+	best_b, best_rmse := pdpm_grid_search(
 		mean_R,
 		rf_discount,
 		market_returns,
 		option_chain,
 		spot_price,
+		-10.0,
+		0.0,
+		100,
 		allocator,
 	)
 
+	best_a := rf_discount - best_b * mean_R
+
+	fmt.printf(
+		"Grid search complete: RMSE = %.6f, a = %.4f, b = %.4f\n",
+		best_rmse,
+		best_a,
+		best_b,
+	)
+
+	// Construct final SDF
+	final_sdf := _construct_sdf_from_params(best_a, best_b, market_returns, allocator)
+
 	return CalibrationResult {
-		sdf = final_sdf,
-		rmse = math.sqrt_f64(final_loss),
-		max_error = 0.0,
-		n_iterations = max_iterations,
-		converged = final_loss < tolerance * tolerance,
+		sdf          = final_sdf,
+		rmse         = best_rmse,
+		max_error    = 0.0,
+		n_iterations = 200, // 100 coarse + 100 fine
+		converged    = best_rmse < tolerance,
 	}
 }
+
 
 _construct_sdf_from_params :: proc(
 	a: f64,
@@ -1490,4 +1420,102 @@ compare_to_black_scholes :: proc(
 	bs_price := spot_price * nd1 - strike * math.exp(-risk_free_rate * time_to_expiry) * nd2
 
 	return pdpm_price, bs_price
+}
+
+
+// ============================================================================
+// PDPM Grid Search Calibration
+// ============================================================================
+
+PDPMCalibrationParams :: struct {
+	b: f64, // The only parameter to optimize
+}
+
+// PDPM evaluator - computes negative RMSE (we want to maximize this)
+_pdpm_grid_evaluator :: proc(
+	b: f64,
+	mean_R: f64,
+	rf_discount: f64,
+	market_returns: []f64,
+	option_chain: ^OptionChain,
+	spot_price: f64,
+	allocator: mem.Allocator,
+) -> f64 {
+	loss := _calibration_loss(
+		b,
+		mean_R,
+		rf_discount,
+		market_returns,
+		option_chain,
+		spot_price,
+		allocator,
+	)
+	return -math.sqrt_f64(loss) // Return negative RMSE (higher is better)
+}
+
+// 1D Grid Search for PDPM calibration
+pdpm_grid_search :: proc(
+	mean_R: f64,
+	rf_discount: f64,
+	market_returns: []f64,
+	option_chain: ^OptionChain,
+	spot_price: f64,
+	b_min: f64 = -10.0,
+	b_max: f64 = 0.0,
+	n_grid: int = 100,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	best_b: f64,
+	best_rmse: f64,
+) {
+	best_score := -math.F64_MAX
+	best_b = b_min
+	b_min := b_min
+	b_max := b_max
+	// Coarse grid search
+	b_step := (b_max - b_min) / f64(n_grid - 1)
+
+	for i in 0 ..< n_grid {
+		b_test := b_min + f64(i) * b_step
+		score := _pdpm_grid_evaluator(
+			b_test,
+			mean_R,
+			rf_discount,
+			market_returns,
+			option_chain,
+			spot_price,
+			allocator,
+		)
+
+		if score > best_score {
+			best_score = score
+			best_b = b_test
+		}
+	}
+
+	// Fine grid search around best_b
+	b_min = best_b - b_step
+	b_max = best_b + b_step
+	b_step = (b_max - b_min) / f64(n_grid - 1)
+
+	for i in 0 ..< n_grid {
+		b_test := b_min + f64(i) * b_step
+		score := _pdpm_grid_evaluator(
+			b_test,
+			mean_R,
+			rf_discount,
+			market_returns,
+			option_chain,
+			spot_price,
+			allocator,
+		)
+
+		if score > best_score {
+			best_score = score
+			best_b = b_test
+		}
+	}
+
+	best_rmse = -best_score
+	return best_b, best_rmse
 }
