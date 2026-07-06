@@ -1186,7 +1186,7 @@ OptionChain :: struct {
 // SDF Calibration to Market Prices
 // ============================================================================
 // ============================================================================
-// SDF Calibration to Market Prices (Using SGD Optimizer)
+// SDF Calibration to Market Prices
 // ============================================================================
 
 CalibrationResult :: struct {
@@ -1198,25 +1198,23 @@ CalibrationResult :: struct {
 }
 
 // Objective function: sum of squared pricing errors
+// Objective function: sum of squared pricing errors
 _calibration_loss :: proc(
 	a: f64,
 	b: f64,
 	market_returns: []f64,
 	option_chain: ^OptionChain,
 	spot_price: f64,
-	terminal_prices: []f64,
 	allocator: mem.Allocator,
 ) -> f64 {
 	n := len(market_returns)
 
-	// Use the main allocator, not temp_allocator
 	gross_returns := make([]f64, n, allocator)
 	defer delete(gross_returns, allocator)
 	for i in 0 ..< n {
 		gross_returns[i] = 1.0 + market_returns[i]
 	}
 
-	// Allocate with main allocator - DO NOT delete, it's needed by the SDF struct
 	sdf_values := make([]f64, n, allocator)
 	for i in 0 ..< n {
 		sdf_values[i] = a + b * gross_returns[i]
@@ -1228,8 +1226,15 @@ _calibration_loss :: proc(
 
 	sdf := StochasticDiscountFactor {
 		model_type = .Linear_Factor,
-		values     = sdf_values, // This slice must remain valid
+		values     = sdf_values,
 		mean       = mean,
+	}
+
+	// Use historical returns as terminal states, NOT Monte Carlo
+	terminal_prices := make([]f64, n, allocator)
+	defer delete(terminal_prices, allocator)
+	for i in 0 ..< n {
+		terminal_prices[i] = spot_price * gross_returns[i]
 	}
 
 	total_error := 0.0
@@ -1242,7 +1247,7 @@ _calibration_loss :: proc(
 				option_chain.strikes[i],
 				option_chain.expiries[i],
 				&sdf,
-				terminal_prices,
+				terminal_prices, // Now has same length as sdf.values!
 				context.temp_allocator,
 			)
 			theo_price = result.price
@@ -1253,7 +1258,7 @@ _calibration_loss :: proc(
 				option_chain.strikes[i],
 				option_chain.expiries[i],
 				&sdf,
-				terminal_prices,
+				terminal_prices, // Now has same length as sdf.values!
 				context.temp_allocator,
 			)
 			theo_price = result.price
@@ -1264,25 +1269,21 @@ _calibration_loss :: proc(
 		total_error += error * error
 	}
 
-	// Clean up sdf_values after we're done using the SDF
 	delete(sdf_values, allocator)
 
 	return total_error / f64(option_chain.n_options)
 }
 
 // Calibrate Linear SDF using SGD optimizer
-// Calibrate Linear SDF using SGD optimizer
 calibrate_sdf_linear :: proc(
 	market_returns: []f64,
 	risk_free_rate: f64,
 	option_chain: ^OptionChain,
 	spot_price: f64,
-	n_simulations: int = 10000,
 	max_iterations: int = 100,
 	tolerance: f64 = 1e-6,
 	allocator: mem.Allocator = context.allocator,
 ) -> CalibrationResult {
-	// Initial guess: theoretical SDF parameters
 	n := len(market_returns)
 	gross_returns := make([]f64, n, context.temp_allocator)
 	defer delete(gross_returns, context.temp_allocator)
@@ -1305,7 +1306,6 @@ calibrate_sdf_linear :: proc(
 	a_init := (rf_discount * mean_R2 - mean_R) / var_R
 	b_init := (1.0 - rf_discount * mean_R) / var_R
 
-	// Initialize optimizer for 2 parameters (a, b)
 	opt_config := opt.optimizer_default_config(.SGD)
 	opt_config.learning_rate = 0.001
 	opt_config.momentum = 0.9
@@ -1313,35 +1313,20 @@ calibrate_sdf_linear :: proc(
 	optimizer := opt.optimizer_init(opt_config, 2, allocator)
 	defer opt.optimizer_free(&optimizer)
 
-	// Parameters to optimize
 	params := []f64{a_init, b_init}
 	gradient := make([]f64, 2, allocator)
 	defer delete(gradient, allocator)
 
-	// Simulate terminal prices
-	terminal_prices := simulate_terminal_prices(
-		spot_price,
-		risk_free_rate,
-		0.20,
-		1.0,
-		n_simulations,
-		allocator,
-	)
-	defer delete(terminal_prices, allocator)
-
 	best_loss := math.F64_MAX
 	best_params := []f64{a_init, b_init}
 
-	// Optimization loop
 	for iter in 0 ..< max_iterations {
-		// Compute current loss
 		loss := _calibration_loss(
 			params[0],
 			params[1],
 			market_returns,
 			option_chain,
 			spot_price,
-			terminal_prices,
 			allocator,
 		)
 
@@ -1351,14 +1336,12 @@ calibrate_sdf_linear :: proc(
 			best_params[1] = params[1]
 		}
 
-		// Check convergence
-		rmse := math.sqrt(loss)
+		rmse := math.sqrt_f64(loss)
 		if rmse < tolerance {
 			fmt.printf("Calibration converged in %d iterations (RMSE: %.6f)\n", iter, rmse)
 			break
 		}
 
-		// Compute gradient numerically
 		eps := 1e-5
 
 		loss_a_plus := _calibration_loss(
@@ -1367,7 +1350,6 @@ calibrate_sdf_linear :: proc(
 			market_returns,
 			option_chain,
 			spot_price,
-			terminal_prices,
 			allocator,
 		)
 		loss_a_minus := _calibration_loss(
@@ -1376,7 +1358,6 @@ calibrate_sdf_linear :: proc(
 			market_returns,
 			option_chain,
 			spot_price,
-			terminal_prices,
 			allocator,
 		)
 		gradient[0] = (loss_a_plus - loss_a_minus) / (2.0 * eps)
@@ -1387,7 +1368,6 @@ calibrate_sdf_linear :: proc(
 			market_returns,
 			option_chain,
 			spot_price,
-			terminal_prices,
 			allocator,
 		)
 		loss_b_minus := _calibration_loss(
@@ -1396,12 +1376,10 @@ calibrate_sdf_linear :: proc(
 			market_returns,
 			option_chain,
 			spot_price,
-			terminal_prices,
 			allocator,
 		)
 		gradient[1] = (loss_b_plus - loss_b_minus) / (2.0 * eps)
 
-		// SGD step
 		opt.optimizer_step(&optimizer, params, gradient, loss)
 
 		if iter % 10 == 0 {
@@ -1415,7 +1393,6 @@ calibrate_sdf_linear :: proc(
 		}
 	}
 
-	// Construct final SDF with best parameters
 	final_sdf := _construct_sdf_from_params(
 		best_params[0],
 		best_params[1],
@@ -1429,20 +1406,18 @@ calibrate_sdf_linear :: proc(
 		market_returns,
 		option_chain,
 		spot_price,
-		terminal_prices,
 		allocator,
 	)
 
 	return CalibrationResult {
 		sdf = final_sdf,
-		rmse = math.sqrt(final_loss),
+		rmse = math.sqrt_f64(final_loss),
 		max_error = 0.0,
 		n_iterations = max_iterations,
 		converged = final_loss < tolerance * tolerance,
 	}
 }
 
-// Helper: construct SDF from (a, b) parameters
 _construct_sdf_from_params :: proc(
 	a: f64,
 	b: f64,
@@ -1477,17 +1452,16 @@ _construct_sdf_from_params :: proc(
 	parameters[1] = b
 
 	return StochasticDiscountFactor {
-		model_type      = .Linear_Factor,
-		values          = values,
-		parameters      = parameters,
-		risk_aversion   = 0.0,
-		discount_factor = 1.0 / (1.0 + 0.05), // placeholder
-		mean            = mean,
-		variance        = variance,
+		model_type = .Linear_Factor,
+		values = values,
+		parameters = parameters,
+		risk_aversion = 0.0,
+		discount_factor = 1.0 / (1.0 + 0.05),
+		mean = mean,
+		variance = variance,
 	}
 }
 
-// Compare PDPM prices to Black-Scholes
 compare_to_black_scholes :: proc(
 	spot_price: f64,
 	strike: f64,
@@ -1501,7 +1475,6 @@ compare_to_black_scholes :: proc(
 	f64,
 	f64,
 ) {
-	// PDPM price
 	pdpm_price: f64
 	result := price_european_call(
 		spot_price,
@@ -1514,7 +1487,6 @@ compare_to_black_scholes :: proc(
 	pdpm_price = result.price
 	delete(result.state_prices, allocator)
 
-	// Black-Scholes price
 	d1 :=
 		(math.ln(spot_price / strike) +
 			(risk_free_rate + 0.5 * volatility * volatility) * time_to_expiry) /

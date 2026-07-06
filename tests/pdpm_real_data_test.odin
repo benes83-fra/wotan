@@ -37,7 +37,7 @@ pdpm_real_data_test :: proc(allocator: mem.Allocator) {
 	}
 	mean_ret := var_sum / f64(market_data.n_obs - 1)
 	variance := (var_sum_sq / f64(market_data.n_obs - 1)) - (mean_ret * mean_ret)
-	hist_vol := math.sqrt_f64(variance * 252.0) // Annualize
+	hist_vol := math.sqrt_f64(variance * 252.0)
 	fmt.printf("Historical Volatility: %.2f%%\n\n", hist_vol * 100)
 
 	// 2. Load option chain
@@ -65,14 +65,14 @@ pdpm_real_data_test :: proc(allocator: mem.Allocator) {
 	risk_free_rate := 0.05
 	spot_price := market_data.prices[market_data.n_obs - 1]
 
+	// UPDATED: New signature only takes 6 arguments
 	calibration := fin.calibrate_sdf_linear(
-		market_data.returns[1:], // Skip first return (undefined)
+		market_data.returns[1:],
 		risk_free_rate,
 		&option_chain,
 		spot_price,
-		10000, // n_simulations
 		100, // max_iterations
-		1e-4, // tolerance
+		1e-6, // tolerance
 		allocator,
 	)
 	defer {
