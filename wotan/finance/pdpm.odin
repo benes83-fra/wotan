@@ -1199,15 +1199,20 @@ CalibrationResult :: struct {
 
 // Objective function: sum of squared pricing errors
 // Objective function: sum of squared pricing errors
+// Enforces E[M] = 1/(1+rf) by expressing 'a' as a function of 'b'
 _calibration_loss :: proc(
-	a: f64,
 	b: f64,
+	mean_R: f64,
+	rf_discount: f64,
 	market_returns: []f64,
 	option_chain: ^OptionChain,
 	spot_price: f64,
 	allocator: mem.Allocator,
 ) -> f64 {
 	n := len(market_returns)
+
+	// Enforce the constraint: a = 1/(1+rf) - b * E[R]
+	a := rf_discount - b * mean_R
 
 	gross_returns := make([]f64, n, allocator)
 	defer delete(gross_returns, allocator)
@@ -1230,7 +1235,7 @@ _calibration_loss :: proc(
 		mean       = mean,
 	}
 
-	// Use historical returns as terminal states, NOT Monte Carlo
+	// Use historical returns as terminal states
 	terminal_prices := make([]f64, n, allocator)
 	defer delete(terminal_prices, allocator)
 	for i in 0 ..< n {
@@ -1247,7 +1252,7 @@ _calibration_loss :: proc(
 				option_chain.strikes[i],
 				option_chain.expiries[i],
 				&sdf,
-				terminal_prices, // Now has same length as sdf.values!
+				terminal_prices,
 				context.temp_allocator,
 			)
 			theo_price = result.price
@@ -1258,7 +1263,7 @@ _calibration_loss :: proc(
 				option_chain.strikes[i],
 				option_chain.expiries[i],
 				&sdf,
-				terminal_prices, // Now has same length as sdf.values!
+				terminal_prices,
 				context.temp_allocator,
 			)
 			theo_price = result.price
@@ -1274,7 +1279,7 @@ _calibration_loss :: proc(
 	return total_error / f64(option_chain.n_options)
 }
 
-// Calibrate Linear SDF using SGD optimizer
+// Calibrate Linear SDF using SGD optimizer (1D optimization for 'b')
 calibrate_sdf_linear :: proc(
 	market_returns: []f64,
 	risk_free_rate: f64,
@@ -1303,27 +1308,31 @@ calibrate_sdf_linear :: proc(
 	var_R := mean_R2 - mean_R * mean_R
 	rf_discount := 1.0 / (1.0 + risk_free_rate)
 
-	a_init := (rf_discount * mean_R2 - mean_R) / var_R
-	b_init := (1.0 - rf_discount * mean_R) / var_R
+	// Initial guess for b (theoretical unconstrained value)
+	b_init := 0.0 //(1.0 - rf_discount * mean_R) / var_R
+	a_init := rf_discount - b_init * mean_R
 
-	opt_config := opt.optimizer_default_config(.SGD)
-	opt_config.learning_rate = 0.001
+	// Initialize 1D optimizer for parameter 'b'
+	opt_config := opt.optimizer_default_config(.Adam)
+	opt_config.learning_rate = 0.01 // Smaller learning rate for 1D
 	opt_config.momentum = 0.9
-
-	optimizer := opt.optimizer_init(opt_config, 2, allocator)
+	opt_config.weight_decay = 0.1
+	optimizer := opt.optimizer_init(opt_config, 1, allocator)
 	defer opt.optimizer_free(&optimizer)
 
-	params := []f64{a_init, b_init}
-	gradient := make([]f64, 2, allocator)
+	// Optimize only 'b'
+	params := []f64{b_init}
+	gradient := make([]f64, 1, allocator)
 	defer delete(gradient, allocator)
 
 	best_loss := math.F64_MAX
-	best_params := []f64{a_init, b_init}
+	best_b := b_init
 
 	for iter in 0 ..< max_iterations {
 		loss := _calibration_loss(
 			params[0],
-			params[1],
+			mean_R,
+			rf_discount,
 			market_returns,
 			option_chain,
 			spot_price,
@@ -1332,8 +1341,7 @@ calibrate_sdf_linear :: proc(
 
 		if loss < best_loss {
 			best_loss = loss
-			best_params[0] = params[0]
-			best_params[1] = params[1]
+			best_b = params[0]
 		}
 
 		rmse := math.sqrt_f64(loss)
@@ -1342,67 +1350,50 @@ calibrate_sdf_linear :: proc(
 			break
 		}
 
+		// Numerical gradient for 'b'
 		eps := 1e-5
-
-		loss_a_plus := _calibration_loss(
+		loss_plus := _calibration_loss(
 			params[0] + eps,
-			params[1],
+			mean_R,
+			rf_discount,
 			market_returns,
 			option_chain,
 			spot_price,
 			allocator,
 		)
-		loss_a_minus := _calibration_loss(
+		loss_minus := _calibration_loss(
 			params[0] - eps,
-			params[1],
+			mean_R,
+			rf_discount,
 			market_returns,
 			option_chain,
 			spot_price,
 			allocator,
 		)
-		gradient[0] = (loss_a_plus - loss_a_minus) / (2.0 * eps)
-
-		loss_b_plus := _calibration_loss(
-			params[0],
-			params[1] + eps,
-			market_returns,
-			option_chain,
-			spot_price,
-			allocator,
-		)
-		loss_b_minus := _calibration_loss(
-			params[0],
-			params[1] - eps,
-			market_returns,
-			option_chain,
-			spot_price,
-			allocator,
-		)
-		gradient[1] = (loss_b_plus - loss_b_minus) / (2.0 * eps)
+		gradient[0] = (loss_plus - loss_minus) / (2.0 * eps)
 
 		opt.optimizer_step(&optimizer, params, gradient, loss)
 
 		if iter % 10 == 0 {
+			current_a := rf_discount - params[0] * mean_R
 			fmt.printf(
 				"Iteration %d: RMSE = %.6f, a = %.4f, b = %.4f\n",
 				iter,
 				rmse,
+				current_a,
 				params[0],
-				params[1],
 			)
 		}
 	}
 
-	final_sdf := _construct_sdf_from_params(
-		best_params[0],
-		best_params[1],
-		market_returns,
-		allocator,
-	)
+	// Construct final SDF with best parameters
+	final_a := rf_discount - best_b * mean_R
+	final_sdf := _construct_sdf_from_params(final_a, best_b, market_returns, allocator)
 
 	final_loss := _calibration_loss(
-		best_params[0],
-		best_params[1],
+		best_b,
+		mean_R,
+		rf_discount,
 		market_returns,
 		option_chain,
 		spot_price,

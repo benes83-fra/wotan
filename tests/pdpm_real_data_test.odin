@@ -66,13 +66,34 @@ pdpm_real_data_test :: proc(allocator: mem.Allocator) {
 	spot_price := market_data.prices[market_data.n_obs - 1]
 
 	// UPDATED: New signature only takes 6 arguments
+	// In pdpm_real_data_test.odin, after loading market_data:
+
+	// Calculate Implied Volatility (average from option chain)
+	avg_iv := 0.0
+	for i in 0 ..< option_chain.n_options {
+		avg_iv += option_chain.implied_vols[i]
+	}
+	avg_iv /= f64(option_chain.n_options)
+
+	fmt.printf("Historical Vol: %.2f%%, Implied Vol: %.2f%%\n", hist_vol * 100, avg_iv * 100)
+
+	// Scale historical returns to match implied volatility
+	vol_scale := avg_iv / hist_vol
+	scaled_returns := make([]f64, len(market_data.returns) - 1, allocator)
+	defer delete(scaled_returns, allocator)
+
+	for i in 0 ..< len(scaled_returns) {
+		scaled_returns[i] = market_data.returns[i + 1] * vol_scale
+	}
+
+	// Now calibrate using scaled_returns instead of market_data.returns[1:]
 	calibration := fin.calibrate_sdf_linear(
-		market_data.returns[1:],
+		scaled_returns, // <-- Use scaled returns here
 		risk_free_rate,
 		&option_chain,
 		spot_price,
-		100, // max_iterations
-		1e-6, // tolerance
+		1000,
+		1e-3,
 		allocator,
 	)
 	defer {
@@ -91,18 +112,18 @@ pdpm_real_data_test :: proc(allocator: mem.Allocator) {
 	)
 
 	// 4. Compare prices
+	// 4. Compare prices
 	fmt.println("\n--- Price Comparison ---")
 	fmt.printf("%-10s %-10s %-10s %-10s\n", "Strike", "Market", "PDPM", "BS")
 
-	terminal_prices := fin.simulate_terminal_prices(
-		spot_price,
-		risk_free_rate,
-		hist_vol,
-		option_chain.expiries[0],
-		10000,
-		allocator,
-	)
+	// Use historical returns as terminal states, NOT Monte Carlo
+	n_returns := len(market_data.returns) - 1 // Skip first undefined return
+	terminal_prices := make([]f64, n_returns, allocator)
 	defer delete(terminal_prices, allocator)
+
+	for i in 0 ..< n_returns {
+		terminal_prices[i] = spot_price * (1.0 + market_data.returns[i + 1])
+	}
 
 	for i in 0 ..< option_chain.n_options {
 		if option_chain.option_types[i] == "call" {
@@ -113,7 +134,7 @@ pdpm_real_data_test :: proc(allocator: mem.Allocator) {
 				risk_free_rate,
 				option_chain.implied_vols[i],
 				&calibration.sdf,
-				terminal_prices,
+				terminal_prices, // Now has 29 values, matching SDF!
 				context.temp_allocator,
 			)
 
