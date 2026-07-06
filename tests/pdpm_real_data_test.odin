@@ -208,5 +208,60 @@ pdpm_real_data_test :: proc(allocator: mem.Allocator) {
 		calibration_power.rmse,
 		calibration_quad.rmse,
 	)
+	// Test Exponential SDF
+	fmt.println("\n--- Exponential SDF Calibration ---")
+	calibration_exp := fin.calibrate_sdf_exponential(
+		scaled_returns,
+		risk_free_rate,
+		&option_chain,
+		spot_price,
+		allocator,
+	)
+	defer {
+		delete(calibration_exp.sdf.values, allocator)
+		delete(calibration_exp.sdf.parameters, allocator)
+	}
+
+	fmt.printf("Exponential SDF Results:\n")
+	fmt.printf("  Risk Aversion (γ): %.4f\n", calibration_exp.sdf.parameters[0])
+	fmt.printf("  RMSE: $%.4f\n", calibration_exp.rmse)
+	fmt.printf("  SDF Mean: %.4f\n", calibration_exp.sdf.mean)
+
+	// Update Model Comparison
+	fmt.println("\n--- Final Model Comparison ---")
+	fmt.printf("%-20s %-15s %-15s %-15s %-15s\n", "Model", "RMSE", "E[M]", "Parameters", "Type")
+	fmt.printf(
+		"%-20s $%-14.4f %-14.4f a=%.2f, b=%.2f       Linear\n",
+		"Linear",
+		calibration.rmse,
+		calibration.sdf.mean,
+		calibration.sdf.parameters[0],
+		calibration.sdf.parameters[1],
+	)
+	fmt.printf(
+		"%-20s $%-14.4f %-14.4f γ=%.2f              Power Utility\n",
+		"Power Utility",
+		calibration_power.rmse,
+		calibration_power.sdf.mean,
+		calibration_power.sdf.parameters[0],
+	)
+	fmt.printf(
+		"%-20s $%-14.4f %-14.4f γ=%.2f              Exponential\n",
+		"Exponential",
+		calibration_exp.rmse,
+		calibration_exp.sdf.mean,
+		calibration_exp.sdf.parameters[0],
+	)
+	fmt.printf(
+		"%-20s $%-14.4f %-14.4f a=%.2f, b=%.2f, c=%.2f Quadratic\n",
+		"Quadratic",
+		calibration_quad.rmse,
+		calibration_quad.sdf.mean,
+		calibration_quad.sdf.parameters[0],
+		calibration_quad.sdf.parameters[1],
+		calibration_quad.sdf.parameters[2],
+	)
+
+
 	fmt.println("\n✓ PDPM Real Market Data test completed!")
 }

@@ -2001,3 +2001,247 @@ calibrate_sdf_quadratic :: proc(
 		converged    = best_rmse < 1e-6,
 	}
 }
+
+
+// ============================================================================
+// Exponential SDF Calibration (CARA Utility)
+// ============================================================================
+
+// Exponential SDF: M = exp(a - γ*R)
+// Constraint E[M] = 1/(1+rf) is enforced by setting exp(a) = rf_discount / E[exp(-γ*R)]
+_calibration_loss_exponential :: proc(
+	gamma: f64,
+	rf_discount: f64,
+	market_returns: []f64,
+	option_chain: ^OptionChain,
+	spot_price: f64,
+	allocator: mem.Allocator,
+) -> f64 {
+	n := len(market_returns)
+
+	gross_returns := make([]f64, n, allocator)
+	defer delete(gross_returns, allocator)
+	for i in 0 ..< n {
+		gross_returns[i] = 1.0 + market_returns[i]
+	}
+
+	// Compute mean of exp(-γ*R) to enforce constraint
+	sum_exp := 0.0
+	for i in 0 ..< n {
+		// Clamp to prevent overflow
+		val := -gamma * gross_returns[i]
+		if val > 100.0 {val = 100.0}
+		if val < -100.0 {val = -100.0}
+		sum_exp += math.exp(val)
+	}
+	mean_exp := sum_exp / f64(n)
+
+	// Enforce constraint: E[M] = rf_discount
+	// M_i = (rf_discount / mean_exp) * exp(-γ * R_i)
+	scale := rf_discount / mean_exp
+
+	sdf_values := make([]f64, n, allocator)
+	for i in 0 ..< n {
+		val := -gamma * gross_returns[i]
+		if val > 100.0 {val = 100.0}
+		if val < -100.0 {val = -100.0}
+		sdf_values[i] = scale * math.exp(val)
+	}
+
+	mean := 0.0
+	for v in sdf_values {mean += v}
+	mean /= f64(n)
+
+	sdf := StochasticDiscountFactor {
+		model_type = .Exponential_Utility,
+		values     = sdf_values,
+		mean       = mean,
+	}
+
+	terminal_prices := make([]f64, n, allocator)
+	defer delete(terminal_prices, allocator)
+	for i in 0 ..< n {
+		terminal_prices[i] = spot_price * gross_returns[i]
+	}
+
+	total_error := 0.0
+	for i in 0 ..< option_chain.n_options {
+		theo_price: f64
+
+		if option_chain.option_types[i] == "call" {
+			result := price_european_call(
+				spot_price,
+				option_chain.strikes[i],
+				option_chain.expiries[i],
+				&sdf,
+				terminal_prices,
+				context.temp_allocator,
+			)
+			theo_price = result.price
+			delete(result.state_prices, context.temp_allocator)
+		} else {
+			result := price_european_put(
+				spot_price,
+				option_chain.strikes[i],
+				option_chain.expiries[i],
+				&sdf,
+				terminal_prices,
+				context.temp_allocator,
+			)
+			theo_price = result.price
+			delete(result.state_prices, context.temp_allocator)
+		}
+
+		error := theo_price - option_chain.market_prices[i]
+		total_error += error * error
+	}
+
+	delete(sdf_values, allocator)
+
+	return total_error / f64(option_chain.n_options)
+}
+
+// 1D Grid search for Exponential SDF parameter γ
+pdpm_grid_search_exponential :: proc(
+	rf_discount: f64,
+	market_returns: []f64,
+	option_chain: ^OptionChain,
+	spot_price: f64,
+	gamma_min: f64 = -5.0,
+	gamma_max: f64 = 5.0,
+	n_grid: int = 100,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	best_gamma: f64,
+	best_rmse: f64,
+) {
+	best_loss := math.F64_MAX
+	best_gamma = gamma_min
+	gamma_min := gamma_min
+	gamma_max := gamma_max
+
+
+	// Coarse grid search
+	gamma_step := (gamma_max - gamma_min) / f64(n_grid - 1)
+
+	for i in 0 ..< n_grid {
+		gamma_test := gamma_min + f64(i) * gamma_step
+		loss := _calibration_loss_exponential(
+			gamma_test,
+			rf_discount,
+			market_returns,
+			option_chain,
+			spot_price,
+			allocator,
+		)
+
+		if loss < best_loss {
+			best_loss = loss
+			best_gamma = gamma_test
+		}
+	}
+
+	// Fine grid search around best_gamma
+	gamma_min = best_gamma - gamma_step
+	gamma_max = best_gamma + gamma_step
+	gamma_step = (gamma_max - gamma_min) / f64(n_grid - 1)
+
+	for i in 0 ..< n_grid {
+		gamma_test := gamma_min + f64(i) * gamma_step
+		loss := _calibration_loss_exponential(
+			gamma_test,
+			rf_discount,
+			market_returns,
+			option_chain,
+			spot_price,
+			allocator,
+		)
+
+		if loss < best_loss {
+			best_loss = loss
+			best_gamma = gamma_test
+		}
+	}
+
+	best_rmse = math.sqrt_f64(best_loss)
+	return best_gamma, best_rmse
+}
+
+// Calibrate Exponential SDF
+calibrate_sdf_exponential :: proc(
+	market_returns: []f64,
+	risk_free_rate: f64,
+	option_chain: ^OptionChain,
+	spot_price: f64,
+	allocator: mem.Allocator = context.allocator,
+) -> CalibrationResult {
+	rf_discount := 1.0 / (1.0 + risk_free_rate)
+	n := len(market_returns)
+
+	fmt.println("Running Exponential SDF grid search...")
+	best_gamma, best_rmse := pdpm_grid_search_exponential(
+		rf_discount,
+		market_returns,
+		option_chain,
+		spot_price,
+		-5.0,
+		5.0,
+		100,
+		allocator,
+	)
+
+	fmt.printf(
+		"Exponential SDF calibration complete: γ = %.4f, RMSE = %.6f\n",
+		best_gamma,
+		best_rmse,
+	)
+
+	// Construct final SDF
+	gross_returns := make([]f64, n, context.temp_allocator)
+	defer delete(gross_returns, context.temp_allocator)
+	for i in 0 ..< n {
+		gross_returns[i] = 1.0 + market_returns[i]
+	}
+
+	sum_exp := 0.0
+	for i in 0 ..< n {sum_exp += math.exp(-best_gamma * gross_returns[i])}
+	mean_exp := sum_exp / f64(n)
+	scale := rf_discount / mean_exp
+
+	values := make([]f64, n, allocator)
+	for i in 0 ..< n {
+		values[i] = scale * math.exp(-best_gamma * gross_returns[i])
+	}
+
+	mean := 0.0
+	for v in values {mean += v}
+	mean /= f64(n)
+
+	variance := 0.0
+	for v in values {
+		diff := v - mean
+		variance += diff * diff
+	}
+	variance /= f64(n - 1)
+
+	parameters := make([]f64, 1, allocator)
+	parameters[0] = best_gamma
+
+	final_sdf := StochasticDiscountFactor {
+		model_type      = .Exponential_Utility,
+		values          = values,
+		parameters      = parameters,
+		risk_aversion   = best_gamma,
+		discount_factor = rf_discount,
+		mean            = mean,
+		variance        = variance,
+	}
+
+	return CalibrationResult {
+		sdf = final_sdf,
+		rmse = best_rmse,
+		max_error = 0.0,
+		n_iterations = 200,
+		converged = best_rmse < 1e-6,
+	}
+}
