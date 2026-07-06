@@ -147,6 +147,66 @@ pdpm_real_data_test :: proc(allocator: mem.Allocator) {
 			)
 		}
 	}
+	// In pdpm_real_data_test.odin, after the linear calibration:
 
+	// Test Power Utility SDF
+	fmt.println("\n--- Power Utility SDF Calibration ---")
+	calibration_power := fin.calibrate_sdf_power_utility(
+		scaled_returns,
+		risk_free_rate,
+		&option_chain,
+		spot_price,
+		allocator,
+	)
+	defer {
+		delete(calibration_power.sdf.values, allocator)
+		delete(calibration_power.sdf.parameters, allocator)
+	}
+
+	fmt.printf("Power Utility Results:\n")
+	fmt.printf("  Risk Aversion (γ): %.4f\n", calibration_power.sdf.parameters[0])
+	fmt.printf("  RMSE: $%.4f\n", calibration_power.rmse)
+	fmt.printf("  SDF Mean: %.4f\n", calibration_power.sdf.mean)
+
+	// Test Quadratic SDF
+	fmt.println("\n--- Quadratic SDF Calibration ---")
+	calibration_quad := fin.calibrate_sdf_quadratic(
+		scaled_returns,
+		risk_free_rate,
+		&option_chain,
+		spot_price,
+		allocator,
+	)
+	defer {
+		delete(calibration_quad.sdf.values, allocator)
+		delete(calibration_quad.sdf.parameters, allocator)
+	}
+
+	fmt.printf("Quadratic SDF Results:\n")
+	fmt.printf(
+		"  Parameters: a=%.4f, b=%.4f, c=%.4f\n",
+		calibration_quad.sdf.parameters[0],
+		calibration_quad.sdf.parameters[1],
+		calibration_quad.sdf.parameters[2],
+	)
+	fmt.printf("  RMSE: $%.4f\n", calibration_quad.rmse)
+	fmt.printf("  SDF Mean: %.4f\n", calibration_quad.sdf.mean)
+
+	// Compare all three models
+	fmt.println("\n--- Model Comparison ---")
+	fmt.printf(
+		"%-20s %-15s %-15s %-15s\n",
+		"Strike",
+		"Linear RMSE",
+		"Power RMSE",
+		"Quadratic RMSE",
+	)
+	fmt.printf(
+		"%-20s $%-14.4f $%-14.4f $%-14.4f\n",
+		"Overall",
+		calibration.rmse,
+		calibration_power.rmse,
+		calibration_quad.rmse,
+	)
 	fmt.println("\n✓ PDPM Real Market Data test completed!")
 }

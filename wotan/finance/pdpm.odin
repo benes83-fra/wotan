@@ -1519,3 +1519,485 @@ pdpm_grid_search :: proc(
 	best_rmse = -best_score
 	return best_b, best_rmse
 }
+// ============================================================================
+// Non-Linear SDF Calibration
+// ============================================================================
+
+// Power Utility SDF: M = β * (C/C0)^(-γ)
+// Here we use R (gross return) as proxy for consumption growth
+_calibration_loss_power_utility :: proc(
+	gamma: f64,
+	beta: f64,
+	market_returns: []f64,
+	option_chain: ^OptionChain,
+	spot_price: f64,
+	allocator: mem.Allocator,
+) -> f64 {
+	n := len(market_returns)
+
+	gross_returns := make([]f64, n, allocator)
+	defer delete(gross_returns, allocator)
+	for i in 0 ..< n {
+		gross_returns[i] = 1.0 + market_returns[i]
+	}
+
+	sdf_values := make([]f64, n, allocator)
+	for i in 0 ..< n {
+		sdf_values[i] = beta * math.pow(gross_returns[i], -gamma)
+	}
+
+	mean := 0.0
+	for v in sdf_values {mean += v}
+	mean /= f64(n)
+
+	sdf := StochasticDiscountFactor {
+		model_type = .Power_Utility,
+		values     = sdf_values,
+		mean       = mean,
+	}
+
+	// Use historical returns as terminal states
+	terminal_prices := make([]f64, n, allocator)
+	defer delete(terminal_prices, allocator)
+	for i in 0 ..< n {
+		terminal_prices[i] = spot_price * gross_returns[i]
+	}
+
+	total_error := 0.0
+	for i in 0 ..< option_chain.n_options {
+		theo_price: f64
+
+		if option_chain.option_types[i] == "call" {
+			result := price_european_call(
+				spot_price,
+				option_chain.strikes[i],
+				option_chain.expiries[i],
+				&sdf,
+				terminal_prices,
+				context.temp_allocator,
+			)
+			theo_price = result.price
+			delete(result.state_prices, context.temp_allocator)
+		} else {
+			result := price_european_put(
+				spot_price,
+				option_chain.strikes[i],
+				option_chain.expiries[i],
+				&sdf,
+				terminal_prices,
+				context.temp_allocator,
+			)
+			theo_price = result.price
+			delete(result.state_prices, context.temp_allocator)
+		}
+
+		error := theo_price - option_chain.market_prices[i]
+		total_error += error * error
+	}
+
+	delete(sdf_values, allocator)
+
+	return total_error / f64(option_chain.n_options)
+}
+
+// Grid search for power utility parameter γ
+pdpm_grid_search_power_utility :: proc(
+	beta: f64,
+	market_returns: []f64,
+	option_chain: ^OptionChain,
+	spot_price: f64,
+	gamma_min: f64 = 0.5,
+	gamma_max: f64 = 10.0,
+	n_grid: int = 100,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	best_gamma: f64,
+	best_rmse: f64,
+) {
+	best_loss := math.F64_MAX
+	best_gamma = gamma_min
+	gamma_min := gamma_min
+	gamma_max := gamma_max
+	// Coarse grid search
+	gamma_step := (gamma_max - gamma_min) / f64(n_grid - 1)
+
+	for i in 0 ..< n_grid {
+		gamma_test := gamma_min + f64(i) * gamma_step
+		loss := _calibration_loss_power_utility(
+			gamma_test,
+			beta,
+			market_returns,
+			option_chain,
+			spot_price,
+			allocator,
+		)
+
+		if loss < best_loss {
+			best_loss = loss
+			best_gamma = gamma_test
+		}
+	}
+
+	// Fine grid search around best_gamma
+	gamma_min = best_gamma - gamma_step
+	gamma_max = best_gamma + gamma_step
+	gamma_step = (gamma_max - gamma_min) / f64(n_grid - 1)
+
+	for i in 0 ..< n_grid {
+		gamma_test := gamma_min + f64(i) * gamma_step
+		if gamma_test > 0.0 { 	// γ must be positive
+			loss := _calibration_loss_power_utility(
+				gamma_test,
+				beta,
+				market_returns,
+				option_chain,
+				spot_price,
+				allocator,
+			)
+
+			if loss < best_loss {
+				best_loss = loss
+				best_gamma = gamma_test
+			}
+		}
+	}
+
+	best_rmse = math.sqrt_f64(best_loss)
+	return best_gamma, best_rmse
+}
+
+// Calibrate Power Utility SDF
+calibrate_sdf_power_utility :: proc(
+	market_returns: []f64,
+	risk_free_rate: f64,
+	option_chain: ^OptionChain,
+	spot_price: f64,
+	allocator: mem.Allocator = context.allocator,
+) -> CalibrationResult {
+	beta := 0.99 // Standard discount factor
+
+	fmt.println("Running Power Utility SDF grid search...")
+	best_gamma, best_rmse := pdpm_grid_search_power_utility(
+		beta,
+		market_returns,
+		option_chain,
+		spot_price,
+		0.5,
+		10.0,
+		100,
+		allocator,
+	)
+
+	fmt.printf(
+		"Power Utility calibration complete: γ = %.4f, RMSE = %.6f\n",
+		best_gamma,
+		best_rmse,
+	)
+
+	// Construct final SDF
+	n := len(market_returns)
+	gross_returns := make([]f64, n, context.temp_allocator)
+	defer delete(gross_returns, context.temp_allocator)
+	for i in 0 ..< n {
+		gross_returns[i] = 1.0 + market_returns[i]
+	}
+
+	values := make([]f64, n, allocator)
+	for i in 0 ..< n {
+		values[i] = beta * math.pow(gross_returns[i], -best_gamma)
+	}
+
+	mean := 0.0
+	for v in values {mean += v}
+	mean /= f64(n)
+
+	variance := 0.0
+	for v in values {
+		diff := v - mean
+		variance += diff * diff
+	}
+	variance /= f64(n - 1)
+
+	parameters := make([]f64, 2, allocator)
+	parameters[0] = best_gamma
+	parameters[1] = beta
+
+	final_sdf := StochasticDiscountFactor {
+		model_type      = .Power_Utility,
+		values          = values,
+		parameters      = parameters,
+		risk_aversion   = best_gamma,
+		discount_factor = beta,
+		mean            = mean,
+		variance        = variance,
+	}
+
+	return CalibrationResult {
+		sdf = final_sdf,
+		rmse = best_rmse,
+		max_error = 0.0,
+		n_iterations = 200,
+		converged = best_rmse < 1e-6,
+	}
+}
+
+// Quadratic SDF: M = a + b*R + c*R²
+// Constraint: E[M] = 1/(1+rf) => a = rf_discount - b*E[R] - c*E[R²]
+_calibration_loss_quadratic :: proc(
+	b: f64,
+	c: f64,
+	mean_R: f64,
+	mean_R2: f64,
+	rf_discount: f64,
+	market_returns: []f64,
+	option_chain: ^OptionChain,
+	spot_price: f64,
+	allocator: mem.Allocator,
+) -> f64 {
+	n := len(market_returns)
+
+	// Enforce constraint: a = rf_discount - b*E[R] - c*E[R²]
+	a := rf_discount - b * mean_R - c * mean_R2
+
+	gross_returns := make([]f64, n, allocator)
+	defer delete(gross_returns, allocator)
+	for i in 0 ..< n {
+		gross_returns[i] = 1.0 + market_returns[i]
+	}
+
+	sdf_values := make([]f64, n, allocator)
+	for i in 0 ..< n {
+		R := gross_returns[i]
+		sdf_values[i] = a + b * R + c * R * R
+	}
+
+	mean := 0.0
+	for v in sdf_values {mean += v}
+	mean /= f64(n)
+
+	sdf := StochasticDiscountFactor {
+		model_type = .Quadratic,
+		values     = sdf_values,
+		mean       = mean,
+	}
+
+	// Use historical returns as terminal states
+	terminal_prices := make([]f64, n, allocator)
+	defer delete(terminal_prices, allocator)
+	for i in 0 ..< n {
+		terminal_prices[i] = spot_price * gross_returns[i]
+	}
+
+	total_error := 0.0
+	for i in 0 ..< option_chain.n_options {
+		theo_price: f64
+
+		if option_chain.option_types[i] == "call" {
+			result := price_european_call(
+				spot_price,
+				option_chain.strikes[i],
+				option_chain.expiries[i],
+				&sdf,
+				terminal_prices,
+				context.temp_allocator,
+			)
+			theo_price = result.price
+			delete(result.state_prices, context.temp_allocator)
+		} else {
+			result := price_european_put(
+				spot_price,
+				option_chain.strikes[i],
+				option_chain.expiries[i],
+				&sdf,
+				terminal_prices,
+				context.temp_allocator,
+			)
+			theo_price = result.price
+			delete(result.state_prices, context.temp_allocator)
+		}
+
+		error := theo_price - option_chain.market_prices[i]
+		total_error += error * error
+	}
+
+	delete(sdf_values, allocator)
+
+	return total_error / f64(option_chain.n_options)
+}
+
+// 2D Grid search for quadratic SDF parameters (b, c)
+pdpm_grid_search_quadratic :: proc(
+	mean_R: f64,
+	mean_R2: f64,
+	rf_discount: f64,
+	market_returns: []f64,
+	option_chain: ^OptionChain,
+	spot_price: f64,
+	b_range: f64 = 20.0,
+	c_range: f64 = 10.0,
+	n_grid: int = 20,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	best_b: f64,
+	best_c: f64,
+	best_rmse: f64,
+) {
+	best_loss := math.F64_MAX
+	best_b = 0.0
+	best_c = 0.0
+
+	// Coarse 2D grid search
+	b_step := (2.0 * b_range) / f64(n_grid - 1)
+	c_step := (2.0 * c_range) / f64(n_grid - 1)
+
+	for i in 0 ..< n_grid {
+		b_test := -b_range + f64(i) * b_step
+		for j in 0 ..< n_grid {
+			c_test := -c_range + f64(j) * c_step
+			loss := _calibration_loss_quadratic(
+				b_test,
+				c_test,
+				mean_R,
+				mean_R2,
+				rf_discount,
+				market_returns,
+				option_chain,
+				spot_price,
+				allocator,
+			)
+
+			if loss < best_loss {
+				best_loss = loss
+				best_b = b_test
+				best_c = c_test
+			}
+		}
+	}
+
+	// Fine 2D grid search around best (b, c)
+	b_min := best_b - b_step
+	b_max := best_b + b_step
+	c_min := best_c - c_step
+	c_max := best_c + c_step
+	b_step = (b_max - b_min) / f64(n_grid - 1)
+	c_step = (c_max - c_min) / f64(n_grid - 1)
+
+	for i in 0 ..< n_grid {
+		b_test := b_min + f64(i) * b_step
+		for j in 0 ..< n_grid {
+			c_test := c_min + f64(j) * c_step
+			loss := _calibration_loss_quadratic(
+				b_test,
+				c_test,
+				mean_R,
+				mean_R2,
+				rf_discount,
+				market_returns,
+				option_chain,
+				spot_price,
+				allocator,
+			)
+
+			if loss < best_loss {
+				best_loss = loss
+				best_b = b_test
+				best_c = c_test
+			}
+		}
+	}
+
+	best_rmse = math.sqrt_f64(best_loss)
+	return best_b, best_c, best_rmse
+}
+
+// Calibrate Quadratic SDF
+calibrate_sdf_quadratic :: proc(
+	market_returns: []f64,
+	risk_free_rate: f64,
+	option_chain: ^OptionChain,
+	spot_price: f64,
+	allocator: mem.Allocator = context.allocator,
+) -> CalibrationResult {
+	n := len(market_returns)
+	gross_returns := make([]f64, n, context.temp_allocator)
+	defer delete(gross_returns, context.temp_allocator)
+	for i in 0 ..< n {
+		gross_returns[i] = 1.0 + market_returns[i]
+	}
+
+	mean_R := 0.0
+	mean_R2 := 0.0
+	for r in gross_returns {
+		mean_R += r
+		mean_R2 += r * r
+	}
+	mean_R /= f64(n)
+	mean_R2 /= f64(n)
+
+	rf_discount := 1.0 / (1.0 + risk_free_rate)
+
+	fmt.println("Running Quadratic SDF 2D grid search...")
+	best_b, best_c, best_rmse := pdpm_grid_search_quadratic(
+		mean_R,
+		mean_R2,
+		rf_discount,
+		market_returns,
+		option_chain,
+		spot_price,
+		20.0,
+		10.0,
+		20,
+		allocator,
+	)
+
+	best_a := rf_discount - best_b * mean_R - best_c * mean_R2
+
+	fmt.printf(
+		"Quadratic SDF calibration complete: a = %.4f, b = %.4f, c = %.4f, RMSE = %.6f\n",
+		best_a,
+		best_b,
+		best_c,
+		best_rmse,
+	)
+
+	// Construct final SDF
+	values := make([]f64, n, allocator)
+	for i in 0 ..< n {
+		R := gross_returns[i]
+		values[i] = best_a + best_b * R + best_c * R * R
+	}
+
+	mean := 0.0
+	for v in values {mean += v}
+	mean /= f64(n)
+
+	variance := 0.0
+	for v in values {
+		diff := v - mean
+		variance += diff * diff
+	}
+	variance /= f64(n - 1)
+
+	parameters := make([]f64, 3, allocator)
+	parameters[0] = best_a
+	parameters[1] = best_b
+	parameters[2] = best_c
+
+	final_sdf := StochasticDiscountFactor {
+		model_type      = .Quadratic,
+		values          = values,
+		parameters      = parameters,
+		risk_aversion   = 0.0,
+		discount_factor = rf_discount,
+		mean            = mean,
+		variance        = variance,
+	}
+
+	return CalibrationResult {
+		sdf          = final_sdf,
+		rmse         = best_rmse,
+		max_error    = 0.0,
+		n_iterations = 800, // 20*20 coarse + 20*20 fine
+		converged    = best_rmse < 1e-6,
+	}
+}
