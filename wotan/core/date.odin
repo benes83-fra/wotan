@@ -569,3 +569,29 @@ date_to_days :: proc(year: i32, month: i32, day: i32) -> i32 {
 
 	return days
 }
+
+// Convert Datetime to Unix timestamp (seconds since 1970-01-01 00:00:00 UTC)
+datetime_to_unix :: proc(dt: Datetime) -> i64 {
+	// Days from year 0 to 1970-01-01
+	days_from_epoch := 719162 // Days from year 0 to 1970-01-01
+
+	// Convert date to days since year 0
+	days := date_to_days(dt.year, dt.month, dt.day)
+
+	// Days since Unix epoch
+	days_since_epoch := i64(days) - i64(days_from_epoch)
+
+	// Convert to seconds and add time
+	seconds := days_since_epoch * 86400 // 24 * 60 * 60
+	seconds += i64(dt.hour) * 3600
+	seconds += i64(dt.minute) * 60
+	seconds += i64(dt.second)
+
+	return seconds
+}
+
+// Get current Unix timestamp
+now_unix :: proc() -> i64 {
+	dt := now()
+	return datetime_to_unix(dt)
+}
