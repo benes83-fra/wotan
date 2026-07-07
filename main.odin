@@ -489,6 +489,7 @@ main :: proc() {
 	test.pdpm_test(context.temp_allocator)
 	test.pdpm2_test(context.temp_allocator)
 	test.pdpm_real_data_test(context.temp_allocator)
+	test.pdpm_multifactor_test(context.temp_allocator)
 	fmt.println("Demo End")
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)

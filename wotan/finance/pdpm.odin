@@ -2245,3 +2245,300 @@ calibrate_sdf_exponential :: proc(
 		converged = best_rmse < 1e-6,
 	}
 }
+// ============================================================================
+// Multi-Factor SDF Calibration
+// ============================================================================
+
+MultiFactorSDF :: struct {
+	factors:   [][]f64, // Each row is a factor's returns
+	weights:   []f64, // Factor loadings (betas)
+	intercept: f64, // Alpha
+	values:    []f64, // SDF values for each state
+	mean:      f64,
+	variance:  f64,
+	n_factors: int,
+	n_states:  int,
+}
+
+// Multi-factor SDF: M = a + b1*F1 + b2*F2 + ... + bn*Fn
+// Constraint: E[M] = 1/(1+rf)
+// ============================================================================
+// Multi-Factor SDF Calibration (Exponential Form)
+// ============================================================================
+
+// Exponential Multi-Factor SDF: M = exp(a + b1*F1 + b2*F2 + ...)
+// This guarantees M > 0 (no-arbitrage)
+// Constraint: E[M] = 1/(1+rf) enforced by adjusting 'a'
+_calibration_loss_multifactor :: proc(
+	weights: []f64,
+	factors: [][]f64,
+	rf_discount: f64,
+	option_chain: ^OptionChain,
+	spot_price: f64,
+	allocator: mem.Allocator,
+) -> f64 {
+	n := len(factors[0])
+	n_factors := len(factors)
+
+	// Compute sum of weighted factors for each state
+	weighted_factors := make([]f64, n, allocator)
+	defer delete(weighted_factors, allocator)
+
+	for i in 0 ..< n {
+		weighted_factors[i] = 0.0
+		for j in 0 ..< n_factors {
+			weighted_factors[i] += weights[j] * factors[j][i]
+		}
+	}
+
+	// Compute mean of exp(weighted_factors) to enforce constraint
+	sum_exp := 0.0
+	for i in 0 ..< n {
+		// Clamp to prevent overflow
+		val := weighted_factors[i]
+		if val > 100.0 {val = 100.0}
+		if val < -100.0 {val = -100.0}
+		sum_exp += math.exp(val)
+	}
+	mean_exp := sum_exp / f64(n)
+
+	// Enforce constraint: E[M] = rf_discount
+	// M_i = (rf_discount / mean_exp) * exp(weighted_factors[i])
+	scale := rf_discount / mean_exp
+
+	sdf_values := make([]f64, n, allocator)
+	defer delete(sdf_values, allocator)
+
+	for i in 0 ..< n {
+		val := weighted_factors[i]
+		if val > 100.0 {val = 100.0}
+		if val < -100.0 {val = -100.0}
+		sdf_values[i] = scale * math.exp(val)
+	}
+
+	mean := 0.0
+	for v in sdf_values {mean += v}
+	mean /= f64(n)
+
+	sdf := StochasticDiscountFactor {
+		model_type = .Exponential_Utility,
+		values     = sdf_values,
+		mean       = mean,
+	}
+
+	// Use market returns as terminal states
+	terminal_prices := make([]f64, n, allocator)
+	defer delete(terminal_prices, allocator)
+	for i in 0 ..< n {
+		terminal_prices[i] = spot_price * (1.0 + factors[0][i])
+	}
+
+	total_error := 0.0
+	for i in 0 ..< option_chain.n_options {
+		theo_price: f64
+
+		if option_chain.option_types[i] == "call" {
+			result := price_european_call(
+				spot_price,
+				option_chain.strikes[i],
+				option_chain.expiries[i],
+				&sdf,
+				terminal_prices,
+				context.temp_allocator,
+			)
+			theo_price = result.price
+			delete(result.state_prices, context.temp_allocator)
+		} else {
+			result := price_european_put(
+				spot_price,
+				option_chain.strikes[i],
+				option_chain.expiries[i],
+				&sdf,
+				terminal_prices,
+				context.temp_allocator,
+			)
+			theo_price = result.price
+			delete(result.state_prices, context.temp_allocator)
+		}
+
+		error := theo_price - option_chain.market_prices[i]
+		total_error += error * error
+	}
+
+	return total_error / f64(option_chain.n_options)
+}
+
+// 2D Grid search for 2-factor exponential model
+pdpm_grid_search_multifactor_2d :: proc(
+	factors: [][]f64,
+	rf_discount: f64,
+	option_chain: ^OptionChain,
+	spot_price: f64,
+	range1: f64 = 5.0,
+	range2: f64 = 5.0,
+	n_grid: int = 20,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	best_weights: []f64,
+	best_rmse: f64,
+) {
+	best_loss := math.F64_MAX
+	best_weights = make([]f64, 2, allocator)
+	range1 := range1
+	range2 := range2
+	// Coarse 2D grid search
+	step1 := (2.0 * range1) / f64(n_grid - 1)
+	step2 := (2.0 * range2) / f64(n_grid - 1)
+
+	test_weights := make([]f64, 2, allocator)
+	defer delete(test_weights, allocator)
+
+	for i in 0 ..< n_grid {
+		test_weights[0] = -range1 + f64(i) * step1
+		for j in 0 ..< n_grid {
+			test_weights[1] = -range2 + f64(j) * step2
+			loss := _calibration_loss_multifactor(
+				test_weights,
+				factors,
+				rf_discount,
+				option_chain,
+				spot_price,
+				allocator,
+			)
+
+			if loss < best_loss {
+				best_loss = loss
+				best_weights[0] = test_weights[0]
+				best_weights[1] = test_weights[1]
+			}
+		}
+	}
+
+	// Fine 2D grid search around best
+	range1 = best_weights[0]
+	range2 = best_weights[1]
+	step1 = (2.0 * step1) / f64(n_grid - 1)
+	step2 = (2.0 * step2) / f64(n_grid - 1)
+
+	for i in 0 ..< n_grid {
+		test_weights[0] = range1 - step1 + f64(i) * step1
+		for j in 0 ..< n_grid {
+			test_weights[1] = range2 - step2 + f64(j) * step2
+			loss := _calibration_loss_multifactor(
+				test_weights,
+				factors,
+				rf_discount,
+				option_chain,
+				spot_price,
+				allocator,
+			)
+
+			if loss < best_loss {
+				best_loss = loss
+				best_weights[0] = test_weights[0]
+				best_weights[1] = test_weights[1]
+			}
+		}
+	}
+
+	best_rmse = math.sqrt_f64(best_loss)
+	return best_weights, best_rmse
+}
+
+// Calibrate 2-Factor Exponential SDF
+calibrate_sdf_multifactor_2d :: proc(
+	market_returns: []f64,
+	volatility_proxy: []f64,
+	risk_free_rate: f64,
+	option_chain: ^OptionChain,
+	spot_price: f64,
+	allocator: mem.Allocator = context.allocator,
+) -> CalibrationResult {
+	n := len(market_returns)
+	rf_discount := 1.0 / (1.0 + risk_free_rate)
+
+	// Prepare factors
+	factors := make([][]f64, 2, allocator)
+	factors[0] = market_returns
+	factors[1] = volatility_proxy
+
+	fmt.println("Running 2-Factor Exponential SDF grid search...")
+	best_weights, best_rmse := pdpm_grid_search_multifactor_2d(
+		factors,
+		rf_discount,
+		option_chain,
+		spot_price,
+		5.0,
+		5.0,
+		20,
+		allocator,
+	)
+
+	fmt.printf("2-Factor Exponential SDF calibration complete:\n")
+	fmt.printf("  Market beta (b1): %.4f\n", best_weights[0])
+	fmt.printf("  Vol beta (b2): %.4f\n", best_weights[1])
+	fmt.printf("  RMSE: $%.6f\n", best_rmse)
+
+	// Construct final SDF
+	weighted_factors := make([]f64, n, context.temp_allocator)
+	defer delete(weighted_factors, context.temp_allocator)
+
+	for i in 0 ..< n {
+		weighted_factors[i] =
+			best_weights[0] * market_returns[i] + best_weights[1] * volatility_proxy[i]
+	}
+
+	sum_exp := 0.0
+	for i in 0 ..< n {
+		val := weighted_factors[i]
+		if val > 100.0 {val = 100.0}
+		if val < -100.0 {val = -100.0}
+		sum_exp += math.exp(val)
+	}
+	mean_exp := sum_exp / f64(n)
+	scale := rf_discount / mean_exp
+
+	values := make([]f64, n, allocator)
+	for i in 0 ..< n {
+		val := weighted_factors[i]
+		if val > 100.0 {val = 100.0}
+		if val < -100.0 {val = -100.0}
+		values[i] = scale * math.exp(val)
+	}
+
+	mean := 0.0
+	for v in values {mean += v}
+	mean /= f64(n)
+
+	variance := 0.0
+	for v in values {
+		diff := v - mean
+		variance += diff * diff
+	}
+	variance /= f64(n - 1)
+
+	parameters := make([]f64, 2, allocator)
+	parameters[0] = best_weights[0]
+	parameters[1] = best_weights[1]
+
+	final_sdf := StochasticDiscountFactor {
+		model_type      = .Exponential_Utility,
+		values          = values,
+		parameters      = parameters,
+		risk_aversion   = 0.0,
+		discount_factor = rf_discount,
+		mean            = mean,
+		variance        = variance,
+	}
+
+	// Clean up
+	delete(factors, allocator)
+
+	return CalibrationResult {
+		sdf          = final_sdf,
+		rmse         = best_rmse,
+		max_error    = 0.0,
+		n_iterations = 800, // 20*20 coarse + 20*20 fine
+		converged    = best_rmse < 1e-6,
+	}
+}
