@@ -3,6 +3,7 @@ package tests
 import w "../wotan/core"
 import fin "../wotan/finance"
 import yahoo "../wotan/net"
+import p "../wotan/plot"
 import "core:fmt"
 import "core:math"
 import "core:mem"
@@ -57,16 +58,15 @@ pdpm_multifactor_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("SPY Historical Volatility: %.2f%%\n", hist_vol * 100)
 	fmt.printf("SPY Mean Return: %.4f%%\n", mean_ret * 100)
 
-	// Get current spot price from the last SPY close
+	// Get current spot price
 	spot_price, _ := w.column_at_float(&spy_df.columns[4], n_days - 1)
 	fmt.printf("Current SPY Price: $%.2f\n", spot_price)
 
-	// 3. Fetch REAL Option Chain from Yahoo Finance
+	// 3. Fetch or generate option chain
 	fmt.println("\n--- Fetching Real Option Chain ---")
 
 	option_chain := fin.fetch_yahoo_options("SPY", allocator)
 
-	// We need to defer delete the slices inside the option chain
 	defer {
 		delete(option_chain.strikes, allocator)
 		delete(option_chain.expiries, allocator)
@@ -77,20 +77,17 @@ pdpm_multifactor_test :: proc(allocator: mem.Allocator) {
 
 	fmt.printf("Loaded %d real options contracts\n", option_chain.n_options)
 
-	// DECLARE risk_free_rate HERE so it's available for synthetic options
 	risk_free_rate := 0.05
 
 	if option_chain.n_options == 0 {
 		fmt.println("\n⚠ Yahoo Options API blocked - generating synthetic option chain")
 
-		// Clean up empty slices first
 		if option_chain.strikes != nil {delete(option_chain.strikes, allocator)}
 		if option_chain.expiries != nil {delete(option_chain.expiries, allocator)}
 		if option_chain.implied_vols != nil {delete(option_chain.implied_vols, allocator)}
 		if option_chain.market_prices != nil {delete(option_chain.market_prices, allocator)}
 		if option_chain.option_types != nil {delete(option_chain.option_types, allocator)}
 
-		// Generate synthetic options using Black-Scholes
 		n_options := 12
 		syn_strikes := make([]f64, n_options, allocator)
 		syn_expiries := make([]f64, n_options, allocator)
@@ -98,9 +95,8 @@ pdpm_multifactor_test :: proc(allocator: mem.Allocator) {
 		syn_prices := make([]f64, n_options, allocator)
 		syn_types := make([]string, n_options, allocator)
 
-		// Use historical vol + 2% risk premium as implied vol (realistic)
 		base_vol := hist_vol + 0.02
-		time_to_expiry := 30.0 / 365.0 // 30 days
+		time_to_expiry := 30.0 / 365.0
 
 		for i in 0 ..< n_options {
 			if i < 6 {
@@ -114,7 +110,6 @@ pdpm_multifactor_test :: proc(allocator: mem.Allocator) {
 			syn_expiries[i] = time_to_expiry
 			syn_ivs[i] = base_vol
 
-			// Black-Scholes pricing (use explicit _f64 suffixes)
 			d1 :=
 				(math.ln_f64(spot_price / syn_strikes[i]) +
 					(risk_free_rate + 0.5 * base_vol * base_vol) * time_to_expiry) /
@@ -143,28 +138,26 @@ pdpm_multifactor_test :: proc(allocator: mem.Allocator) {
 			n_options     = n_options,
 		}
 
-		fmt.printf("Generated %d synthetic options (calls + puts)\n", n_options)
-		fmt.printf("Implied Volatility: %.2f%% (hist vol + 2%% risk premium)\n", base_vol * 100)
-	} else {
-		// Real data was fetched successfully
-		fmt.printf(
-			"Strike Range: $%.2f - $%.2f\n",
-			option_chain.strikes[0],
-			option_chain.strikes[option_chain.n_options - 1],
-		)
-
-		iv_sum := 0.0
-		for iv in option_chain.implied_vols {
-			iv_sum += iv
-		}
-		avg_iv := (iv_sum / f64(option_chain.n_options)) * 100
-		fmt.printf("Avg Implied Vol: %.2f%%\n", avg_iv)
+		fmt.printf("Generated %d synthetic options\n", n_options)
+		fmt.printf("Implied Volatility: %.2f%%\n", base_vol * 100)
 	}
 
-	// 4. Calibrate Multi-Factor SDF
-	fmt.println("\n--- Calibrating Multi-Factor SDF ---")
+	// 4. Calculate Momentum and Macro Factors
+	fmt.println("\n--- Calculating Additional Factors ---")
 
-	calibration := fin.calibrate_sdf_multifactor_2d(
+	momentum_factor := fin.calculate_momentum(spy_returns, 252, allocator)
+	defer delete(momentum_factor, allocator)
+
+	macro_factor := fin.calculate_macro_factor(spy_returns, 126, allocator)
+	defer delete(macro_factor, allocator)
+
+	fmt.println("✓ Calculated momentum (12-month rolling return)")
+	fmt.println("✓ Calculated macro factor (6-month rolling average)")
+
+	// 5. Calibrate 2-Factor Model
+	fmt.println("\n--- Calibrating 2-Factor SDF ---")
+
+	calibration_2f := fin.calibrate_sdf_multifactor_2d(
 		spy_returns,
 		vix_returns,
 		risk_free_rate,
@@ -173,43 +166,98 @@ pdpm_multifactor_test :: proc(allocator: mem.Allocator) {
 		allocator,
 	)
 	defer {
-		delete(calibration.sdf.values, allocator)
-		delete(calibration.sdf.parameters, allocator)
+		delete(calibration_2f.sdf.values, allocator)
+		delete(calibration_2f.sdf.parameters, allocator)
 	}
 
-	fmt.printf("\nMulti-Factor Calibration Results:\n")
-	fmt.printf("  RMSE: $%.4f\n", calibration.rmse)
-	fmt.printf(
-		"  SDF Mean: %.4f (Target: %.4f)\n",
-		calibration.sdf.mean,
-		1.0 / (1.0 + risk_free_rate),
-	)
+	// 6. Calibrate 4-Factor Model
+	fmt.println("\n--- Calibrating 4-Factor SDF ---")
 
-	// 5. Compare with Single-Factor Model
-	fmt.println("\n--- Comparing with Single-Factor Model ---")
-
-	calibration_single := fin.calibrate_sdf_linear(
+	calibration_4f := fin.calibrate_sdf_multifactor_4d(
 		spy_returns,
+		vix_returns,
+		momentum_factor,
+		macro_factor,
 		risk_free_rate,
 		&option_chain,
 		spot_price,
-		200,
-		1e-6,
 		allocator,
 	)
 	defer {
-		delete(calibration_single.sdf.values, allocator)
-		delete(calibration_single.sdf.parameters, allocator)
+		delete(calibration_4f.sdf.values, allocator)
+		delete(calibration_4f.sdf.parameters, allocator)
 	}
 
-	fmt.printf("Single-Factor RMSE: $%.4f\n", calibration_single.rmse)
-	fmt.printf("Multi-Factor RMSE:  $%.4f\n", calibration.rmse)
+	// 7. Compare Models
+	fmt.println("\n--- Model Comparison ---")
+	fmt.printf("2-Factor RMSE: $%.4f\n", calibration_2f.rmse)
+	fmt.printf("4-Factor RMSE: $%.4f\n", calibration_4f.rmse)
 
-	if calibration_single.rmse > 0 {
-		improvement :=
-			(calibration_single.rmse - calibration.rmse) / calibration_single.rmse * 100.0
+	if calibration_2f.rmse > 0 {
+		improvement := (calibration_2f.rmse - calibration_4f.rmse) / calibration_2f.rmse * 100.0
 		fmt.printf("Improvement: %.2f%%\n", improvement)
 	}
+
+	// 8. Generate Visualizations
+	fmt.println("\n--- Generating Visualizations ---")
+
+	// Plot SDF vs Market Returns for 2-factor model
+	n_states := len(spy_returns)
+	xs_2f := make([]f64, n_states, allocator)
+	ys_2f := make([]f64, n_states, allocator)
+	defer {
+		delete(xs_2f, allocator)
+		delete(ys_2f, allocator)
+	}
+
+	copy(xs_2f, spy_returns)
+	copy(ys_2f, calibration_2f.sdf.values)
+
+	// Sort by market return
+	for i in 0 ..< n_states - 1 {
+		for j in 0 ..< n_states - i - 1 {
+			if xs_2f[j] > xs_2f[j + 1] {
+				xs_2f[j], xs_2f[j + 1] = xs_2f[j + 1], xs_2f[j]
+				ys_2f[j], ys_2f[j + 1] = ys_2f[j + 1], ys_2f[j]
+			}
+		}
+	}
+
+	// Plot SDF vs Market Returns for 4-factor model
+	xs_4f := make([]f64, n_states, allocator)
+	ys_4f := make([]f64, n_states, allocator)
+	defer {
+		delete(xs_4f, allocator)
+		delete(ys_4f, allocator)
+	}
+
+	copy(xs_4f, spy_returns)
+	copy(ys_4f, calibration_4f.sdf.values)
+
+	// Sort by market return
+	for i in 0 ..< n_states - 1 {
+		for j in 0 ..< n_states - i - 1 {
+			if xs_4f[j] > xs_4f[j + 1] {
+				xs_4f[j], xs_4f[j + 1] = xs_4f[j + 1], xs_4f[j]
+				ys_4f[j], ys_4f[j + 1] = ys_4f[j + 1], ys_4f[j]
+			}
+		}
+	}
+
+	// Create comparison plot
+	lines := []p.LineData {
+		p.LineData{xs = xs_2f, ys = ys_2f, color = p.BLUE, style = .Solid, label = "2-Factor SDF"},
+		p.LineData{xs = xs_4f, ys = ys_4f, color = p.RED, style = .Dashed, label = "4-Factor SDF"},
+	}
+
+	config := p.DEFAULT_PLOT_CONFIG
+	config.title = "SDF vs Market Return: 2-Factor vs 4-Factor"
+	config.x_label = "Market Return"
+	config.y_label = "SDF Value M"
+	config.show_grid = true
+
+	p.multi_line_png(lines, "sdf_comparison.png", config, allocator)
+	fmt.println("✓ SDF comparison plot saved to: sdf_comparison.png")
 
 	fmt.println("\n✓ PDPM Multi-Factor test completed!")
 }
