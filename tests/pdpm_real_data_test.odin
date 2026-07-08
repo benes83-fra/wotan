@@ -3,6 +3,7 @@ package tests
 
 import w "../wotan/core"
 import fin "../wotan/finance"
+import p "../wotan/plot"
 import "core:fmt"
 import "core:math"
 import "core:mem"
@@ -261,6 +262,49 @@ pdpm_real_data_test :: proc(allocator: mem.Allocator) {
 		calibration_quad.sdf.parameters[1],
 		calibration_quad.sdf.parameters[2],
 	)
+
+	// 7. Generate Visualizations
+	fmt.println("\n--- Generating Visualizations ---")
+
+	// For 2D surface, we need a 2-factor model. Use the best model we have.
+	// For now, let's just plot the SDF vs returns for the quadratic model (best performer)
+	fmt.println("Plotting SDF vs Market Returns (Quadratic Model)...")
+
+	// Create a simple 1D plot of SDF values
+	n_states := len(scaled_returns)
+	xs := make([]f64, n_states, allocator)
+	ys := make([]f64, n_states, allocator)
+	defer {
+		delete(xs, allocator)
+		delete(ys, allocator)
+	}
+
+	// Copy and sort
+	copy(xs, scaled_returns)
+	copy(ys, calibration_quad.sdf.values)
+
+	// Sort by x
+	for i in 0 ..< n_states - 1 {
+		for j in 0 ..< n_states - i - 1 {
+			if xs[j] > xs[j + 1] {
+				xs[j], xs[j + 1] = xs[j + 1], xs[j]
+				ys[j], ys[j + 1] = ys[j + 1], ys[j]
+			}
+		}
+	}
+
+	lines := []p.LineData {
+		p.LineData{xs = xs, ys = ys, color = p.RED, style = .Solid, label = "Quadratic SDF"},
+	}
+
+	config := p.DEFAULT_PLOT_CONFIG
+	config.title = "Stochastic Discount Factor vs Market Return (Quadratic Model)"
+	config.x_label = "Market Return"
+	config.y_label = "SDF Value M"
+	config.show_grid = true
+
+	p.multi_line_png(lines, "sdf_vs_returns.png", config, allocator)
+	fmt.println("✓ SDF plot saved to: sdf_vs_returns.png")
 
 
 	fmt.println("\n✓ PDPM Real Market Data test completed!")

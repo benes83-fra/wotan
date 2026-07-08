@@ -2542,3 +2542,536 @@ calibrate_sdf_multifactor_2d :: proc(
 		converged    = best_rmse < 1e-6,
 	}
 }
+// ============================================================================
+// 4-Factor SDF Calibration (Market, Volatility, Momentum, Macro)
+// ============================================================================
+
+// Calculate momentum factor (12-month rolling return)
+calculate_momentum :: proc(
+	returns: []f64,
+	window: int = 252, // 12 months of trading days
+	allocator: mem.Allocator = context.allocator,
+) -> []f64 {
+	n := len(returns)
+	momentum := make([]f64, n, allocator)
+
+	for i in 0 ..< n {
+		if i < window {
+			momentum[i] = 0.0
+		} else {
+			// Calculate cumulative return over window
+			cum_return := 1.0
+			for j in (i - window) ..< i {
+				cum_return *= (1.0 + returns[j])
+			}
+			momentum[i] = cum_return - 1.0
+		}
+	}
+
+	return momentum
+}
+
+// Calculate macro factor (6-month rolling average of returns)
+calculate_macro_factor :: proc(
+	returns: []f64,
+	window: int = 126, // 6 months of trading days
+	allocator: mem.Allocator = context.allocator,
+) -> []f64 {
+	n := len(returns)
+	macro := make([]f64, n, allocator)
+
+	for i in 0 ..< n {
+		if i < window {
+			macro[i] = 0.0
+		} else {
+			// Calculate average return over window
+			sum := 0.0
+			for j in (i - window) ..< i {
+				sum += returns[j]
+			}
+			macro[i] = sum / f64(window)
+		}
+	}
+
+	return macro
+}
+
+// 4-Factor Exponential SDF loss function
+_calibration_loss_multifactor_4d :: proc(
+	weights: []f64,
+	factors: [][]f64,
+	rf_discount: f64,
+	option_chain: ^OptionChain,
+	spot_price: f64,
+	allocator: mem.Allocator,
+) -> f64 {
+	n := len(factors[0])
+	n_factors := len(factors)
+
+	// Compute sum of weighted factors for each state
+	weighted_factors := make([]f64, n, allocator)
+	defer delete(weighted_factors, allocator)
+
+	for i in 0 ..< n {
+		weighted_factors[i] = 0.0
+		for j in 0 ..< n_factors {
+			weighted_factors[i] += weights[j] * factors[j][i]
+		}
+	}
+
+	// Compute mean of exp(weighted_factors) to enforce constraint
+	sum_exp := 0.0
+	for i in 0 ..< n {
+		val := weighted_factors[i]
+		if val > 100.0 {val = 100.0}
+		if val < -100.0 {val = -100.0}
+		sum_exp += math.exp(val)
+	}
+	mean_exp := sum_exp / f64(n)
+
+	// Enforce constraint: E[M] = rf_discount
+	scale := rf_discount / mean_exp
+
+	sdf_values := make([]f64, n, allocator)
+	defer delete(sdf_values, allocator)
+
+	for i in 0 ..< n {
+		val := weighted_factors[i]
+		if val > 100.0 {val = 100.0}
+		if val < -100.0 {val = -100.0}
+		sdf_values[i] = scale * math.exp(val)
+	}
+
+	mean := 0.0
+	for v in sdf_values {mean += v}
+	mean /= f64(n)
+
+	sdf := StochasticDiscountFactor {
+		model_type = .Exponential_Utility,
+		values     = sdf_values,
+		mean       = mean,
+	}
+
+	terminal_prices := make([]f64, n, allocator)
+	defer delete(terminal_prices, allocator)
+	for i in 0 ..< n {
+		terminal_prices[i] = spot_price * (1.0 + factors[0][i])
+	}
+
+	total_error := 0.0
+	for i in 0 ..< option_chain.n_options {
+		theo_price: f64
+
+		if option_chain.option_types[i] == "call" {
+			result := price_european_call(
+				spot_price,
+				option_chain.strikes[i],
+				option_chain.expiries[i],
+				&sdf,
+				terminal_prices,
+				context.temp_allocator,
+			)
+			theo_price = result.price
+			delete(result.state_prices, context.temp_allocator)
+		} else {
+			result := price_european_put(
+				spot_price,
+				option_chain.strikes[i],
+				option_chain.expiries[i],
+				&sdf,
+				terminal_prices,
+				context.temp_allocator,
+			)
+			theo_price = result.price
+			delete(result.state_prices, context.temp_allocator)
+		}
+
+		error := theo_price - option_chain.market_prices[i]
+		total_error += error * error
+	}
+
+	return total_error / f64(option_chain.n_options)
+}
+
+// 4D Grid search (coarse then fine)
+pdpm_grid_search_multifactor_4d :: proc(
+	factors: [][]f64,
+	rf_discount: f64,
+	option_chain: ^OptionChain,
+	spot_price: f64,
+	range: f64 = 5.0,
+	n_grid: int = 10,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	best_weights: []f64,
+	best_rmse: f64,
+) {
+	best_loss := math.F64_MAX
+	best_weights = make([]f64, 4, allocator)
+	range := range
+
+	// Coarse 4D grid search
+	step := (2.0 * range) / f64(n_grid - 1)
+	test_weights := make([]f64, 4, allocator)
+	defer delete(test_weights, allocator)
+
+	for i in 0 ..< n_grid {
+		test_weights[0] = -range + f64(i) * step
+		for j in 0 ..< n_grid {
+			test_weights[1] = -range + f64(j) * step
+			for k in 0 ..< n_grid {
+				test_weights[2] = -range + f64(k) * step
+				for l in 0 ..< n_grid {
+					test_weights[3] = -range + f64(l) * step
+					loss := _calibration_loss_multifactor_4d(
+						test_weights,
+						factors,
+						rf_discount,
+						option_chain,
+						spot_price,
+						allocator,
+					)
+
+					if loss < best_loss {
+						best_loss = loss
+						best_weights[0] = test_weights[0]
+						best_weights[1] = test_weights[1]
+						best_weights[2] = test_weights[2]
+						best_weights[3] = test_weights[3]
+					}
+				}
+			}
+		}
+	}
+
+	// Fine grid search around best
+	range = best_weights[0]
+	step = (2.0 * step) / f64(n_grid - 1)
+
+	for i in 0 ..< n_grid {
+		test_weights[0] = range - step + f64(i) * step
+		for j in 0 ..< n_grid {
+			test_weights[1] = best_weights[1] - step + f64(j) * step
+			for k in 0 ..< n_grid {
+				test_weights[2] = best_weights[2] - step + f64(k) * step
+				for l in 0 ..< n_grid {
+					test_weights[3] = best_weights[3] - step + f64(l) * step
+					loss := _calibration_loss_multifactor_4d(
+						test_weights,
+						factors,
+						rf_discount,
+						option_chain,
+						spot_price,
+						allocator,
+					)
+
+					if loss < best_loss {
+						best_loss = loss
+						best_weights[0] = test_weights[0]
+						best_weights[1] = test_weights[1]
+						best_weights[2] = test_weights[2]
+						best_weights[3] = test_weights[3]
+					}
+				}
+			}
+		}
+	}
+
+	best_rmse = math.sqrt_f64(best_loss)
+	return best_weights, best_rmse
+}
+
+// Calibrate 4-Factor Exponential SDF
+calibrate_sdf_multifactor_4d :: proc(
+	market_returns: []f64,
+	volatility_proxy: []f64,
+	momentum_factor: []f64,
+	macro_factor: []f64,
+	risk_free_rate: f64,
+	option_chain: ^OptionChain,
+	spot_price: f64,
+	allocator: mem.Allocator = context.allocator,
+) -> CalibrationResult {
+	n := len(market_returns)
+	rf_discount := 1.0 / (1.0 + risk_free_rate)
+
+	// Prepare 4 factors
+	factors := make([][]f64, 4, allocator)
+	factors[0] = market_returns
+	factors[1] = volatility_proxy
+	factors[2] = momentum_factor
+	factors[3] = macro_factor
+
+	fmt.println("Running 4-Factor Exponential SDF grid search...")
+	fmt.println("Note: This will take longer due to 4D optimization")
+
+	best_weights, best_rmse := pdpm_grid_search_multifactor_4d(
+		factors,
+		rf_discount,
+		option_chain,
+		spot_price,
+		5.0,
+		10,
+		allocator,
+	)
+
+	fmt.printf("4-Factor Exponential SDF calibration complete:\n")
+	fmt.printf("  Market beta (b1): %.4f\n", best_weights[0])
+	fmt.printf("  Vol beta (b2): %.4f\n", best_weights[1])
+	fmt.printf("  Momentum beta (b3): %.4f\n", best_weights[2])
+	fmt.printf("  Macro beta (b4): %.4f\n", best_weights[3])
+	fmt.printf("  RMSE: $%.6f\n", best_rmse)
+
+	// Construct final SDF
+	weighted_factors := make([]f64, n, context.temp_allocator)
+	defer delete(weighted_factors, context.temp_allocator)
+
+	for i in 0 ..< n {
+		weighted_factors[i] =
+			best_weights[0] * market_returns[i] +
+			best_weights[1] * volatility_proxy[i] +
+			best_weights[2] * momentum_factor[i] +
+			best_weights[3] * macro_factor[i]
+	}
+
+	sum_exp := 0.0
+	for i in 0 ..< n {
+		val := weighted_factors[i]
+		if val > 100.0 {val = 100.0}
+		if val < -100.0 {val = -100.0}
+		sum_exp += math.exp(val)
+	}
+	mean_exp := sum_exp / f64(n)
+	scale := rf_discount / mean_exp
+
+	values := make([]f64, n, allocator)
+	for i in 0 ..< n {
+		val := weighted_factors[i]
+		if val > 100.0 {val = 100.0}
+		if val < -100.0 {val = -100.0}
+		values[i] = scale * math.exp(val)
+	}
+
+	mean := 0.0
+	for v in values {mean += v}
+	mean /= f64(n)
+
+	variance := 0.0
+	for v in values {
+		diff := v - mean
+		variance += diff * diff
+	}
+	variance /= f64(n - 1)
+
+	parameters := make([]f64, 4, allocator)
+	parameters[0] = best_weights[0]
+	parameters[1] = best_weights[1]
+	parameters[2] = best_weights[2]
+	parameters[3] = best_weights[3]
+
+	final_sdf := StochasticDiscountFactor {
+		model_type      = .Exponential_Utility,
+		values          = values,
+		parameters      = parameters,
+		risk_aversion   = 0.0,
+		discount_factor = rf_discount,
+		mean            = mean,
+		variance        = variance,
+	}
+
+	delete(factors, allocator)
+
+	return CalibrationResult {
+		sdf          = final_sdf,
+		rmse         = best_rmse,
+		max_error    = 0.0,
+		n_iterations = 20000, // 10^4 coarse + 10^4 fine
+		converged    = best_rmse < 1e-6,
+	}
+} // ============================================================================
+// SDF Surface Visualization (Using Your Plot Package)
+// ============================================================================
+
+// Generate SDF surface data as a 2D heatmap
+plot_sdf_surface_2d :: proc(
+	calibration: ^CalibrationResult,
+	market_returns: []f64,
+	volatility_proxy: []f64,
+	output_path: string,
+	allocator: mem.Allocator = context.allocator,
+) -> bool {
+	if len(calibration.sdf.parameters) < 2 {
+		fmt.println("Error: Need at least 2 parameters for 2D surface")
+		return false
+	}
+
+	// Create a grid of factor values
+	grid_size := 20
+	min_ret := -0.10 // -10%
+	max_ret := 0.10 // +10%
+	min_vol := -0.05 // -5%
+	max_vol := 0.05 // +5%
+
+	// Calculate normalization constant from historical data
+	weights := calibration.sdf.parameters
+	n_hist := len(market_returns)
+
+	sum_exp := 0.0
+	for i in 0 ..< n_hist {
+		val := weights[0] * market_returns[i] + weights[1] * volatility_proxy[i]
+		if val > 100.0 {val = 100.0}
+		if val < -100.0 {val = -100.0}
+		sum_exp += math.exp(val)
+	}
+	mean_exp := sum_exp / f64(n_hist)
+	scale := calibration.sdf.discount_factor / mean_exp
+
+	// Generate heatmap data
+	data := make([]f64, grid_size * grid_size, allocator)
+	defer delete(data, allocator)
+
+	min_sdf := math.F64_MAX
+	max_sdf := -math.F64_MAX
+
+	for i in 0 ..< grid_size {
+		market_ret := min_ret + (max_ret - min_ret) * f64(i) / f64(grid_size - 1)
+		for j in 0 ..< grid_size {
+			vol_ret := min_vol + (max_vol - min_vol) * f64(j) / f64(grid_size - 1)
+
+			// Calculate SDF value
+			val := weights[0] * market_ret + weights[1] * vol_ret
+			if val > 100.0 {val = 100.0}
+			if val < -100.0 {val = -100.0}
+			sdf_value := scale * math.exp(val)
+
+			idx := i * grid_size + j
+			data[idx] = sdf_value
+
+			if sdf_value < min_sdf {min_sdf = sdf_value}
+			if sdf_value > max_sdf {max_sdf = sdf_value}
+		}
+	}
+
+	// Create labels
+	row_labels := make([]string, grid_size, allocator)
+	col_labels := make([]string, grid_size, allocator)
+	defer {
+		delete(row_labels, allocator)
+		delete(col_labels, allocator)
+	}
+
+	for i in 0 ..< grid_size {
+		market_ret := min_ret + (max_ret - min_ret) * f64(i) / f64(grid_size - 1)
+		vol_ret := min_vol + (max_vol - min_vol) * f64(i) / f64(grid_size - 1)
+		row_labels[i] = fmt.tprintf("%.1f%%", market_ret * 100)
+		col_labels[i] = fmt.tprintf("%.1f%%", vol_ret * 100)
+	}
+
+	// Create plot config
+	config := p.DEFAULT_PLOT_CONFIG
+	config.title = "SDF Surface (Market Return vs Volatility)"
+	config.width = 1000
+	config.height = 800
+
+	// Generate heatmap
+	ok := p.heatmap_png(
+		data,
+		grid_size,
+		grid_size,
+		output_path,
+		row_labels,
+		col_labels,
+		config,
+		allocator,
+	)
+
+	if ok {
+		fmt.printf("SDF surface plot saved to: %s\n", output_path)
+		fmt.printf("SDF range: %.4f to %.4f\n", min_sdf, max_sdf)
+	}
+
+	return ok
+}
+
+// Plot SDF values against market returns (1D slice)
+plot_sdf_vs_returns :: proc(
+	calibration: ^CalibrationResult,
+	market_returns: []f64,
+	volatility_proxy: []f64,
+	output_path: string,
+	allocator: mem.Allocator = context.allocator,
+) -> bool {
+	n := len(market_returns)
+	if n == 0 {return false}
+
+	// Calculate SDF values for each historical state
+	sdf_values := make([]f64, n, allocator)
+	defer delete(sdf_values, allocator)
+
+	weights := calibration.sdf.parameters
+
+	// Calculate normalization
+	sum_exp := 0.0
+	for i in 0 ..< n {
+		val := weights[0] * market_returns[i] + weights[1] * volatility_proxy[i]
+		if val > 100.0 {val = 100.0}
+		if val < -100.0 {val = -100.0}
+		sum_exp += math.exp(val)
+	}
+	mean_exp := sum_exp / f64(n)
+	scale := calibration.sdf.discount_factor / mean_exp
+
+	// Calculate SDF for each state
+	for i in 0 ..< n {
+		val := weights[0] * market_returns[i] + weights[1] * volatility_proxy[i]
+		if val > 100.0 {val = 100.0}
+		if val < -100.0 {val = -100.0}
+		sdf_values[i] = scale * math.exp(val)
+	}
+
+	// Sort by market return for clean plot
+	sorted_returns := make([]f64, n, allocator)
+	sorted_sdf := make([]f64, n, allocator)
+	defer {
+		delete(sorted_returns, allocator)
+		delete(sorted_sdf, allocator)
+	}
+
+	copy(sorted_returns, market_returns)
+	copy(sorted_sdf, sdf_values)
+
+	// Simple bubble sort (replace with quicksort for large n)
+	for i in 0 ..< n - 1 {
+		for j in 0 ..< n - i - 1 {
+			if sorted_returns[j] > sorted_returns[j + 1] {
+				sorted_returns[j], sorted_returns[j + 1] = sorted_returns[j + 1], sorted_returns[j]
+				sorted_sdf[j], sorted_sdf[j + 1] = sorted_sdf[j + 1], sorted_sdf[j]
+			}
+		}
+	}
+
+	// Create plot
+	lines := []p.LineData {
+		p.LineData {
+			xs = sorted_returns,
+			ys = sorted_sdf,
+			color = p.RED,
+			style = .Solid,
+			label = "SDF M(R_mkt, R_vol)",
+		},
+	}
+
+	config := p.DEFAULT_PLOT_CONFIG
+	config.title = "Stochastic Discount Factor vs Market Return"
+	config.x_label = "Market Return"
+	config.y_label = "SDF Value M"
+	config.show_grid = true
+
+	ok := p.multi_line_png(lines, output_path, config, allocator)
+
+	if ok {
+		fmt.printf("SDF vs Returns plot saved to: %s\n", output_path)
+	}
+
+	return ok
+}
