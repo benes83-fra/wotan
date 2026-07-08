@@ -17,13 +17,13 @@ GARCH_Model_Type :: enum {
 }
 
 GARCH_Params :: struct {
-	omega:      f64, // Constant term
-	alpha:      []f64, // ARCH coefficients (lagged squared residuals)
-	beta:       []f64, // GARCH coefficients (lagged conditional variances)
-	gamma:      f64, // Asymmetry parameter (for GJR-GARCH)
+	omega:      f64,
+	alpha:      []f64,
+	beta:       []f64,
+	gamma:      f64,
 	model_type: GARCH_Model_Type,
-	p:          int, // ARCH order
-	q:          int, // GARCH order
+	p:          int,
+	q:          int,
 }
 
 GARCH_Result :: struct {
@@ -31,45 +31,49 @@ GARCH_Result :: struct {
 	log_likelihood:     f64,
 	aic:                f64,
 	bic:                f64,
-	conditional_var:    []f64, // σ²_t for each time point
-	standardized_resid: []f64, // ε_t / σ_t
+	conditional_var:    []f64,
+	standardized_resid: []f64,
 	converged:          bool,
 	n_iterations:       int,
+	persistence:        f64, // α + β (volatility persistence)
 }
 
 GARCH_Forecast :: struct {
-	mean_forecast:     f64,
 	variance_forecast: f64,
 	std_forecast:      f64,
-	confidence_95:     [2]f64, // [lower, upper]
+	confidence_95:     [2]f64,
 }
 
 // ============================================================================
-// Parameter Transformation (Enforces Constraints)
+// Parameter Transformation (Fixed: allows α+β < 1)
 // ============================================================================
 
-// Transforms unconstrained parameters x into valid GARCH parameters
-// Ensures: omega > 0, alpha/beta >= 0, and sum(alpha) + sum(beta) < 0.99
 unpack_params :: proc(x: []f64, params: ^GARCH_Params) {
-	// Omega: use exp to ensure positivity, scaled to typical variance range
+	// Omega: use exp to ensure positivity
 	params.omega = math.exp(x[0] - 10.0)
 
-	// Alpha and Beta: use exp for positivity, then scale to ensure stationarity
-	sum_exp := 0.0
-	for i in 0 ..< params.p {sum_exp += math.exp(x[1 + i])}
-	for j in 0 ..< params.q {sum_exp += math.exp(x[1 + params.p + j])}
-
-	// Scale factor to ensure sum(alpha) + sum(beta) <= 0.99
-	scale := 0.99 / (sum_exp + 1e-8)
-
+	// Alpha and Beta: use sigmoid to constrain to (0, 1)
+	// Then scale to ensure sum < 1
+	sum_raw := 0.0
 	for i in 0 ..< params.p {
-		params.alpha[i] = math.exp(x[1 + i]) * scale
+		val := 1.0 / (1.0 + math.exp(-x[1 + i])) // sigmoid
+		params.alpha[i] = val
+		sum_raw += val
 	}
 	for j in 0 ..< params.q {
-		params.beta[j] = math.exp(x[1 + params.p + j]) * scale
+		val := 1.0 / (1.0 + math.exp(-x[1 + params.p + j])) // sigmoid
+		params.beta[j] = val
+		sum_raw += val
 	}
 
-	// Gamma for GJR-GARCH (can be positive or negative)
+	// Scale to ensure sum < 0.999 (leave room for stationarity)
+	if sum_raw > 0.999 {
+		scale := 0.999 / sum_raw
+		for i in 0 ..< params.p {params.alpha[i] *= scale}
+		for j in 0 ..< params.q {params.beta[j] *= scale}
+	}
+
+	// Gamma for GJR-GARCH
 	if params.model_type == .GJR_GARCH && len(x) > 1 + params.p + params.q {
 		params.gamma = x[1 + params.p + params.q] * 0.1
 	}
@@ -102,7 +106,7 @@ _garch_neg_log_likelihood :: proc(
 		cond_var[i] = uncond_var
 	}
 
-	// Compute conditional variances
+	// Compute conditional variances with SIMD-friendly loop
 	for t in max(p, q) ..< n {
 		variance := params.omega
 
@@ -120,7 +124,7 @@ _garch_neg_log_likelihood :: proc(
 			}
 		}
 
-		// GJR-GARCH asymmetry term
+		// GJR-GARCH asymmetry
 		if params.model_type == .GJR_GARCH && params.gamma != 0.0 {
 			for i in 0 ..< p {
 				if t - i - 1 >= 0 && residuals[t - i - 1] < 0.0 {
@@ -150,7 +154,7 @@ _garch_neg_log_likelihood :: proc(
 }
 
 // ============================================================================
-// GARCH Parameter Estimation
+// GARCH Parameter Estimation (Fixed convergence)
 // ============================================================================
 
 garch_fit :: proc(
@@ -179,7 +183,7 @@ garch_fit :: proc(
 	}
 
 	opt_config := opt.optimizer_default_config(.Adam)
-	opt_config.learning_rate = 0.01 // Slightly higher for transformed space
+	opt_config.learning_rate = 0.01
 	optimizer := opt.optimizer_init(opt_config, n_params, allocator)
 	defer opt.optimizer_free(&optimizer)
 
@@ -191,9 +195,9 @@ garch_fit :: proc(
 	}
 
 	// Initial values in unconstrained space
-	param_vec[0] = 0.79 // exp(0.79 - 10) ≈ 0.0001
+	param_vec[0] = -5.0 // exp(-5 - 10) ≈ 3e-7 (small omega)
 	for i in 1 ..< 1 + p + q {
-		param_vec[i] = 0.0 // exp(0) = 1, will be scaled
+		param_vec[i] = 0.0 // sigmoid(0) = 0.5
 	}
 	if model_type == .GJR_GARCH {
 		param_vec[1 + p + q] = 0.0
@@ -203,7 +207,7 @@ garch_fit :: proc(
 	best_params := make([]f64, n_params, allocator)
 	defer delete(best_params, allocator)
 
-	// FIX: Allocate gradient buffers ONCE outside the loop
+	// Allocate gradient buffers ONCE
 	param_vec_plus := make([]f64, n_params, context.temp_allocator)
 	param_vec_minus := make([]f64, n_params, context.temp_allocator)
 	defer {
@@ -211,9 +215,11 @@ garch_fit :: proc(
 		delete(param_vec_minus, context.temp_allocator)
 	}
 
+	prev_loss := math.F64_MAX
+	converged := false
+
 	for iter in 0 ..< max_iter {
 		unpack_params(param_vec, &params)
-
 		loss := _garch_neg_log_likelihood(&params, residuals, allocator)
 
 		if loss < best_loss {
@@ -221,10 +227,17 @@ garch_fit :: proc(
 			copy(best_params, param_vec)
 		}
 
-		if iter > 0 && math.abs(loss - best_loss) < tolerance {
-			fmt.printf("GARCH converged at iteration %d\n", iter)
+		// FIXED: Check convergence after at least 50 iterations
+		if iter > 50 && math.abs(prev_loss - loss) < tolerance {
+			fmt.printf(
+				"GARCH converged at iteration %d (loss change: %.8f)\n",
+				iter,
+				math.abs(prev_loss - loss),
+			)
+			converged = true
 			break
 		}
+		prev_loss = loss
 
 		// Numerical gradient
 		eps := 1e-5
@@ -245,16 +258,39 @@ garch_fit :: proc(
 		}
 
 		opt.optimizer_step(&optimizer, param_vec, gradient, loss)
-
 		if iter % 100 == 0 {
-			fmt.printf("GARCH iteration %d: loss = %.6f\n", iter, loss)
+			unpack_params(param_vec, &params)
+			persistence := 0.0
+			for i in 0 ..< p {persistence += params.alpha[i]}
+			for j in 0 ..< q {persistence += params.beta[j]}
+
+			// Compute display values
+			alpha_0: f64 = 0.0
+			if p > 0 {
+				alpha_0 = params.alpha[0]
+			}
+
+			beta_0: f64 = 0.0
+			if q > 0 {
+				beta_0 = params.beta[0]
+			}
+
+			fmt.printf(
+				"GARCH iter %d: loss=%.4f, ω=%.6f, α=%.4f, β=%.4f, α+β=%.4f\n",
+				iter,
+				loss,
+				params.omega,
+				alpha_0,
+				beta_0,
+				persistence,
+			)
 		}
 	}
 
 	// Unpack best parameters
 	unpack_params(best_params, &params)
 
-	// Compute final conditional variances and standardized residuals
+	// Compute final conditional variances
 	cond_var := make([]f64, n, allocator)
 	std_resid := make([]f64, n, allocator)
 
@@ -300,6 +336,11 @@ garch_fit :: proc(
 	aic := 2.0 * k - 2.0 * log_lik
 	bic := k * math.ln_f64(f64(n)) - 2.0 * log_lik
 
+	// Calculate persistence
+	persistence := 0.0
+	for i in 0 ..< p {persistence += params.alpha[i]}
+	for j in 0 ..< q {persistence += params.beta[j]}
+
 	return GARCH_Result {
 		params = params,
 		log_likelihood = log_lik,
@@ -307,8 +348,9 @@ garch_fit :: proc(
 		bic = bic,
 		conditional_var = cond_var,
 		standardized_resid = std_resid,
-		converged = true,
+		converged = converged,
 		n_iterations = max_iter,
+		persistence = persistence,
 	}
 }
 
@@ -362,7 +404,6 @@ garch_forecast :: proc(
 	confidence_95 := [2]f64{-1.96 * forecast_std, 1.96 * forecast_std}
 
 	return GARCH_Forecast {
-		mean_forecast = 0.0,
 		variance_forecast = forecast_var,
 		std_forecast = forecast_std,
 		confidence_95 = confidence_95,
@@ -388,31 +429,4 @@ extract_residuals :: proc(series: []f64, allocator: mem.Allocator = context.allo
 	}
 
 	return residuals
-}
-
-rolling_volatility :: proc(
-	series: []f64,
-	window: int,
-	allocator: mem.Allocator = context.allocator,
-) -> []f64 {
-	n := len(series)
-	rolling_var := make([]f64, n, allocator)
-
-	for i in 0 ..< n {
-		if i < window {
-			rolling_var[i] = 0.0
-		} else {
-			sum := 0.0
-			sum_sq := 0.0
-			for j in (i - window) ..< i {
-				sum += series[j]
-				sum_sq += series[j] * series[j]
-			}
-			mean := sum / f64(window)
-			variance := sum_sq / f64(window) - mean * mean
-			rolling_var[i] = variance
-		}
-	}
-
-	return rolling_var
 }
