@@ -445,3 +445,32 @@ extract_residuals :: proc(series: []f64, allocator: mem.Allocator = context.allo
 
 	return residuals
 }
+// ============================================================================
+// GARCH-Based VaR Series
+// ============================================================================
+
+// Compute VaR series from GARCH model
+// Returns 95% and 99% VaR for each time point (assuming mean ≈ 0)
+garch_var_series :: proc(
+	result: ^GARCH_Result,
+	residuals: []f64,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	var_95: []f64,
+	var_99: []f64,
+) {
+	n := len(residuals)
+	var_95 = make([]f64, n, allocator)
+	var_99 = make([]f64, n, allocator)
+
+	z_95 := 1.6448536269514722
+	z_99 := 2.3263478740408408
+
+	for i in 0 ..< n {
+		std := math.sqrt_f64(result.conditional_var[i])
+		var_95[i] = z_95 * std // Assuming mean ≈ 0
+		var_99[i] = z_99 * std
+	}
+
+	return var_95, var_99
+}

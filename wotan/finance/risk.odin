@@ -37,11 +37,47 @@ VaRMethod :: enum {
 	Historical,
 	Parametric,
 	MonteCarlo,
+	GARCH, // ✅ NEW: GARCH-based dynamic VaR
+}
+
+// ✅ NEW: GARCH Risk Metrics (extends RiskMetrics with GARCH-specific fields)
+GARCH_RiskMetrics :: struct {
+	// Standard metrics
+	base:              RiskMetrics,
+	// GARCH-specific
+	garch_omega:       f64,
+	garch_alpha:       f64,
+	garch_beta:        f64,
+	garch_persistence: f64,
+	long_run_vol:      f64,
+	// Current GARCH-based VaR
+	current_vol:       f64,
+	current_var_95:    f64,
+	current_var_99:    f64,
+	current_cvar_95:   f64,
+	current_cvar_99:   f64,
+	// Backtesting results
+	backtest_95:       VaR_BacktestResult,
+	backtest_99:       VaR_BacktestResult,
+	converged:         bool,
+	n_iterations:      int,
+}
+
+// ✅ NEW: VaR Backtesting Result
+VaR_BacktestResult :: struct {
+	n_obs:             int,
+	n_breaches:        int,
+	expected_breaches: f64,
+	breach_rate:       f64,
+	kupiec_stat:       f64,
+	kupiec_pvalue:     f64,
+	passes_test:       bool, // True if p-value > 0.05
 }
 
 // ============================================================================
 // Helper: Inverse Normal CDF (Quantile Function)
 // ============================================================================
+
 norm_inv :: proc(p: f64) -> f64 {
 	a1 := -3.969683028665376e+01
 	a2 := 2.209460984245205e+02
@@ -175,6 +211,28 @@ var_monte_carlo :: proc(
 	return simulated_returns[index]
 }
 
+// ✅ NEW: GARCH-based VaR using conditional variance series
+// Returns negative value (loss is positive when negated)
+var_garch :: proc(cond_var: []f64, confidence: f64 = 0.95) -> []f64 {
+	n := len(cond_var)
+	var_series := make([]f64, n, context.allocator)
+
+	z_score := norm_inv(confidence)
+
+	for i in 0 ..< n {
+		std := math.sqrt_f64(cond_var[i])
+		var_series[i] = -z_score * std // Negative = potential loss
+	}
+
+	return var_series
+}
+
+// ✅ NEW: Single-point GARCH VaR
+var_garch_single :: proc(cond_variance: f64, confidence: f64 = 0.95) -> f64 {
+	z_score := norm_inv(confidence)
+	return -z_score * math.sqrt_f64(cond_variance)
+}
+
 value_at_risk :: proc(
 	returns: []f64,
 	confidence: f64 = 0.95,
@@ -189,6 +247,13 @@ value_at_risk :: proc(
 		return var_parametric(returns, confidence)
 	case .MonteCarlo:
 		return var_monte_carlo(returns, confidence, n_simulations, horizon)
+	case .GARCH:
+		// For single-point GARCH, use unconditional variance
+		if len(returns) == 0 {return 0.0}
+		variance := 0.0
+		for r in returns {variance += r * r}
+		variance /= f64(len(returns))
+		return var_garch_single(variance, confidence)
 	}
 	return 0.0
 }
@@ -217,11 +282,185 @@ expected_shortfall :: proc(returns: []f64, confidence: f64 = 0.95) -> f64 {
 	return conditional_var(returns, confidence)
 }
 
+// ✅ NEW: GARCH-based CVaR (Expected Shortfall)
+// Under normal distribution: CVaR_α = -μ + σ * φ(z_α) / (1-α)
+cvar_garch :: proc(cond_var: []f64, confidence: f64 = 0.95) -> []f64 {
+	n := len(cond_var)
+	cvar_series := make([]f64, n, context.allocator)
+
+	z_score := norm_inv(confidence)
+	// Standard normal PDF at z_score: φ(z) = (1/√(2π)) * exp(-z²/2)
+	inv_sqrt_2pi := 0.3989422804014327
+	phi_z := inv_sqrt_2pi * math.exp_f64(-0.5 * z_score * z_score)
+	scale := phi_z / (1.0 - confidence)
+
+	for i in 0 ..< n {
+		std := math.sqrt_f64(cond_var[i])
+		cvar_series[i] = -std * scale // Negative = expected loss
+	}
+
+	return cvar_series
+}
+
+// ============================================================================
+// ✅ NEW: VaR Backtesting (Kupiec POF Test)
+// ============================================================================
+
+// Backtest VaR: count breaches and compute Kupiec test statistic
+// A breach occurs when actual loss exceeds VaR (i.e., return < -VaR)
+backtest_var :: proc(
+	returns: []f64,
+	var_series: []f64,
+	confidence: f64 = 0.95,
+) -> VaR_BacktestResult {
+	n := min(len(returns), len(var_series))
+	if n == 0 {
+		return VaR_BacktestResult{}
+	}
+
+	n_breaches := 0
+	for i in 0 ..< n {
+		// Breach: actual loss (-return) exceeds VaR (-var_series is positive loss threshold)
+		if returns[i] < var_series[i] {
+			n_breaches += 1
+		}
+	}
+
+	expected := f64(n) * (1.0 - confidence)
+	breach_rate := f64(n_breaches) / f64(n)
+	kupiec_stat := _kupiec_pof_test(n, n_breaches, 1.0 - confidence)
+	p_value := _chi_squared_pvalue_1df(kupiec_stat)
+
+	return VaR_BacktestResult {
+		n_obs = n,
+		n_breaches = n_breaches,
+		expected_breaches = expected,
+		breach_rate = breach_rate,
+		kupiec_stat = kupiec_stat,
+		kupiec_pvalue = p_value,
+		passes_test = p_value > 0.05,
+	}
+}
+
+// Kupiec Proportion of Failures (POF) test statistic
+// Tests H0: actual breach rate = expected breach rate
+// Statistic follows chi-squared(1) under H0
+_kupiec_pof_test :: proc(n: int, k: int, p: f64) -> f64 {
+	if k == 0 || k == n || n == 0 {
+		return 0.0
+	}
+
+	p_hat := f64(k) / f64(n)
+
+	// LR = 2 * [k * ln(p_hat/p) + (n-k) * ln((1-p_hat)/(1-p))]
+	term1 := f64(k) * math.ln_f64(p_hat / p)
+	term2 := f64(n - k) * math.ln_f64((1.0 - p_hat) / (1.0 - p))
+
+	return 2.0 * (term1 + term2)
+}
+
+// Chi-squared p-value for df=1
+// Uses relationship: P(χ²(1) > x) = erfc(sqrt(x/2))
+_chi_squared_pvalue_1df :: proc(x: f64) -> f64 {
+	if x <= 0.0 {
+		return 1.0
+	}
+	return math.erfc_f64(math.sqrt_f64(x / 2.0))
+}
+
+// ============================================================================
+// ✅ NEW: Comprehensive GARCH Risk Analysis
+// ============================================================================
+
+// Fit GARCH and compute comprehensive risk metrics
+garch_risk_metrics :: proc(
+	returns: []f64,
+	p: int = 1,
+	q: int = 1,
+	risk_free_rate: f64 = 0.02,
+	allocator: mem.Allocator = context.allocator,
+) -> GARCH_RiskMetrics {
+	metrics: GARCH_RiskMetrics
+
+	// Compute base metrics
+	metrics.base = calculate_risk_metrics(returns, nil, risk_free_rate)
+
+	// Fit GARCH(1,1)
+	residuals := a.extract_residuals(returns, allocator)
+	defer delete(residuals, allocator)
+
+	garch_result := a.garch_fit(residuals, .GARCH, p, q, 2000, 1e-4, allocator)
+	defer {
+		delete(garch_result.params.alpha, allocator)
+		delete(garch_result.params.beta, allocator)
+		delete(garch_result.conditional_var, allocator)
+		delete(garch_result.standardized_resid, allocator)
+	}
+
+	// Store GARCH parameters
+	if p > 0 {
+		metrics.garch_omega = garch_result.params.omega
+		metrics.garch_alpha = garch_result.params.alpha[0]
+	}
+	if q > 0 {
+		metrics.garch_beta = garch_result.params.beta[0]
+	}
+	metrics.garch_persistence = garch_result.persistence
+	metrics.converged = garch_result.converged
+	metrics.n_iterations = garch_result.n_iterations
+
+	// Long-run volatility (annualized)
+	if metrics.garch_persistence < 1.0 {
+		long_run_var := metrics.garch_omega / (1.0 - metrics.garch_persistence)
+		metrics.long_run_vol = math.sqrt_f64(long_run_var * 252.0)
+	}
+
+	// Current GARCH-based metrics (last observation)
+	n := len(returns)
+	if n > 0 {
+		last_var := garch_result.conditional_var[n - 1]
+		metrics.current_vol = math.sqrt_f64(last_var * 252.0) // Annualized
+		metrics.current_var_95 = var_garch_single(last_var, 0.95)
+		metrics.current_var_99 = var_garch_single(last_var, 0.99)
+
+		// CVaR under normal
+		z_95 := norm_inv(0.95)
+		z_99 := norm_inv(0.99)
+		inv_sqrt_2pi := 0.3989422804014327
+		std := math.sqrt_f64(last_var)
+
+		phi_95 := inv_sqrt_2pi * math.exp_f64(-0.5 * z_95 * z_95)
+		phi_99 := inv_sqrt_2pi * math.exp_f64(-0.5 * z_99 * z_99)
+
+		metrics.current_cvar_95 = -std * phi_95 / 0.05
+		metrics.current_cvar_99 = -std * phi_99 / 0.01
+	}
+
+	// Backtest (skip first 100 observations for warmup)
+	warmup := min(100, n - 1)
+	if n > warmup {
+		returns_bt := returns[warmup:]
+		var_95_series := var_garch(garch_result.conditional_var, 0.95)
+		var_99_series := var_garch(garch_result.conditional_var, 0.99)
+		defer {
+			delete(var_95_series, allocator)
+			delete(var_99_series, allocator)
+		}
+
+		var_95_bt := var_95_series[warmup:]
+		var_99_bt := var_99_series[warmup:]
+
+		metrics.backtest_95 = backtest_var(returns_bt, var_95_bt, 0.95)
+		metrics.backtest_99 = backtest_var(returns_bt, var_99_bt, 0.99)
+	}
+
+	return metrics
+}
+
 // ============================================================================
 // Volatility Measures (Integrating Analytics Module)
 // ============================================================================
 
-// Historical volatility using your analytics rolling variance
 historical_volatility_rolling :: proc(
 	df: ^w.DataFrame,
 	returns_col: string,
@@ -247,11 +486,10 @@ historical_volatility_rolling :: proc(
 	return out
 }
 
-// EWMA volatility using your analytics EWM infrastructure
 ewma_volatility_df :: proc(
 	df: ^w.DataFrame,
 	returns_col: string,
-	alpha: f64 = 0.06, // lambda = 0.94 -> alpha = 0.06
+	alpha: f64 = 0.06,
 	min_periods: int = 20,
 	bias: bool = false,
 	periods_per_year: f64 = 252.0,
@@ -274,7 +512,6 @@ ewma_volatility_df :: proc(
 	return out
 }
 
-// Simple historical volatility (for backward compatibility)
 historical_volatility :: proc(returns: []f64, periods_per_year: f64 = 252.0) -> f64 {
 	if len(returns) < 2 {return 0.0}
 
@@ -292,7 +529,6 @@ historical_volatility :: proc(returns: []f64, periods_per_year: f64 = 252.0) -> 
 	return math.sqrt_f64(variance * periods_per_year)
 }
 
-// Simple EWMA volatility (for backward compatibility)
 ewma_volatility :: proc(returns: []f64, lambda: f64 = 0.94, periods_per_year: f64 = 252.0) -> f64 {
 	if len(returns) < 2 {return 0.0}
 
@@ -454,7 +690,6 @@ calmar_ratio :: proc(returns: []f64, periods_per_year: f64 = 252.0) -> f64 {
 // Beta and Correlation (Using Analytics Module)
 // ============================================================================
 
-// Rolling correlation using analytics module
 rolling_correlation_df :: proc(
 	df: ^w.DataFrame,
 	returns_col: string,
@@ -467,7 +702,6 @@ rolling_correlation_df :: proc(
 	return a.rolling_apply(rw, agg)
 }
 
-// Rolling beta using analytics rolling covariance and variance
 rolling_beta_df :: proc(
 	df: ^w.DataFrame,
 	returns_col: string,
@@ -500,7 +734,6 @@ rolling_beta_df :: proc(
 	return out
 }
 
-// Simple beta (for backward compatibility)
 beta :: proc(returns: []f64, benchmark_returns: []f64) -> f64 {
 	if len(returns) != len(benchmark_returns) || len(returns) < 2 {return 0.0}
 
@@ -686,12 +919,13 @@ calculate_risk_metrics :: proc(
 // ============================================================================
 // DataFrame Integration (Using Analytics Module)
 // ============================================================================
+
 risk_metrics_from_df :: proc(
 	df: ^w.DataFrame,
 	column_name: string,
 	benchmark_column: string = "",
 	risk_free_rate: f64 = 0.02,
-	allocator: mem.Allocator = context.allocator, // ✅ ADD THIS
+	allocator: mem.Allocator = context.allocator,
 ) -> RiskMetrics {
 	returns_col := w.column(df, column_name)
 	returns := make([dynamic]f64, 0, allocator)
@@ -720,7 +954,6 @@ risk_metrics_from_df :: proc(
 	return calculate_risk_metrics(returns[:], benchmark_returns, risk_free_rate)
 }
 
-// Rolling risk metrics using analytics infrastructure
 rolling_risk_metrics_df :: proc(
 	df: ^w.DataFrame,
 	returns_col: string,
@@ -731,15 +964,12 @@ rolling_risk_metrics_df :: proc(
 ) -> w.DataFrame {
 	out := w.dataframe_new()
 
-	// Rolling volatility
 	vol_col := historical_volatility_rolling(df, returns_col, window, min_periods)
 	w.add_column(&out, vol_col)
 
-	// Rolling EWMA volatility
 	ewma_vol_col := ewma_volatility_df(df, returns_col, 0.06, min_periods)
 	w.add_column(&out, ewma_vol_col)
 
-	// Rolling beta if benchmark provided
 	if benchmark_col != "" {
 		beta_col := rolling_beta_df(df, returns_col, benchmark_col, window, min_periods)
 		w.add_column(&out, beta_col)
@@ -756,12 +986,10 @@ rolling_risk_metrics_df :: proc(
 // Statistical Tests Integration
 // ============================================================================
 
-// Test if returns are normally distributed using Jarque-Bera
 returns_normality_test :: proc(returns: []f64) -> (jb_stat: f64, p_value: f64) {
 	return a.jarque_bera(returns)
 }
 
-// Test for autocorrelation in returns using Ljung-Box
 returns_autocorrelation_test :: proc(
 	returns: []f64,
 	max_lag: int = 10,
@@ -769,11 +997,10 @@ returns_autocorrelation_test :: proc(
 	q_stat: f64,
 	p_value: f64,
 ) {
-	q, _, p := a.ljung_box(returns, max_lag, 0) // ✅ Handle 3 return values
+	q, _, p := a.ljung_box(returns, max_lag, 0)
 	return q, p
 }
 
-// Test for stationarity using ADF
 returns_stationarity_test :: proc(
 	returns: []f64,
 ) -> (
@@ -781,24 +1008,13 @@ returns_stationarity_test :: proc(
 	p_value: f64,
 	is_stationary: bool,
 ) {
-	// ✅ Call a.adf_test directly with all required parameters
 	s, p, _, _, _, _, _ := a.adf_test(
 		returns,
-		10, // max_lags
-		a.RegressionType.Constant, // ✅ Use full enum path
-		a.LagSelection.AIC, // ✅ Use full enum path
+		10,
+		a.RegressionType.Constant,
+		a.LagSelection.AIC,
 		context.allocator,
 	)
 	is_stationary = p < 0.05
 	return s, p, is_stationary
 }
-
-// ✅ Remove these wrapper functions - they're causing conflicts
-// The functions above now call analytics directly
-
-// ============================================================================
-// Statistical Tests Integration
-// ============================================================================
-
-
-// Test for stationarity using ADF
