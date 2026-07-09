@@ -305,9 +305,10 @@ cvar_garch :: proc(cond_var: []f64, confidence: f64 = 0.95) -> []f64 {
 // ============================================================================
 // ✅ NEW: VaR Backtesting (Kupiec POF Test)
 // ============================================================================
-
 // Backtest VaR: count breaches and compute Kupiec test statistic
-// A breach occurs when actual loss exceeds VaR (i.e., return < -VaR)
+// A breach occurs when actual loss exceeds VaR
+// var_series contains POSITIVE values (magnitude of loss)
+// So we check if return < -var_series (return is more negative than the loss threshold)
 backtest_var :: proc(
 	returns: []f64,
 	var_series: []f64,
@@ -320,8 +321,9 @@ backtest_var :: proc(
 
 	n_breaches := 0
 	for i in 0 ..< n {
-		// Breach: actual loss (-return) exceeds VaR (-var_series is positive loss threshold)
-		if returns[i] < var_series[i] {
+		// Breach: actual return is worse (more negative) than the VaR threshold
+		// var_series[i] is positive (e.g., +1.6%), so -var_series[i] is the threshold (e.g., -1.6%)
+		if returns[i] < -var_series[i] {
 			n_breaches += 1
 		}
 	}
