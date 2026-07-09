@@ -154,7 +154,7 @@ _garch_neg_log_likelihood :: proc(
 }
 
 // ============================================================================
-// GARCH Parameter Estimation (Fixed convergence)
+// GARCH Parameter Estimation (Fixed convergence and optimizer)
 // ============================================================================
 
 garch_fit :: proc(
@@ -162,8 +162,8 @@ garch_fit :: proc(
 	model_type: GARCH_Model_Type = .GARCH,
 	p: int = 1,
 	q: int = 1,
-	max_iter: int = 1000,
-	tolerance: f64 = 1e-6,
+	max_iter: int = 2000, // Increased from 1000
+	tolerance: f64 = 1e-4, // Relaxed from 1e-6
 	allocator: mem.Allocator = context.allocator,
 ) -> GARCH_Result {
 	n := len(residuals)
@@ -182,8 +182,12 @@ garch_fit :: proc(
 		n_params += 1
 	}
 
+	// 1. Initialize optimizer with higher learning rate
 	opt_config := opt.optimizer_default_config(.Adam)
-	opt_config.learning_rate = 0.01
+	opt_config.learning_rate = 0.05
+	opt_config.beta1 = 0.9
+	opt_config.beta2 = 0.999
+
 	optimizer := opt.optimizer_init(opt_config, n_params, allocator)
 	defer opt.optimizer_free(&optimizer)
 
@@ -195,9 +199,9 @@ garch_fit :: proc(
 	}
 
 	// Initial values in unconstrained space
-	param_vec[0] = -5.0 // exp(-5 - 10) ≈ 3e-7 (small omega)
+	param_vec[0] = -5.0
 	for i in 1 ..< 1 + p + q {
-		param_vec[i] = 0.0 // sigmoid(0) = 0.5
+		param_vec[i] = 0.0
 	}
 	if model_type == .GJR_GARCH {
 		param_vec[1 + p + q] = 0.0
@@ -207,7 +211,6 @@ garch_fit :: proc(
 	best_params := make([]f64, n_params, allocator)
 	defer delete(best_params, allocator)
 
-	// Allocate gradient buffers ONCE
 	param_vec_plus := make([]f64, n_params, context.temp_allocator)
 	param_vec_minus := make([]f64, n_params, context.temp_allocator)
 	defer {
@@ -227,8 +230,8 @@ garch_fit :: proc(
 			copy(best_params, param_vec)
 		}
 
-		// FIXED: Check convergence after at least 50 iterations
-		if iter > 50 && math.abs(prev_loss - loss) < tolerance {
+		// 4. Convergence check inside the loop
+		if iter > 100 && math.abs(prev_loss - loss) < tolerance {
 			fmt.printf(
 				"GARCH converged at iteration %d (loss change: %.8f)\n",
 				iter,
@@ -237,6 +240,19 @@ garch_fit :: proc(
 			converged = true
 			break
 		}
+
+		// 5. Early stopping if loss INCREASES (becomes less negative)
+		// Since loss is negative, "increasing" means loss > prev_loss
+		if iter > 100 && loss > prev_loss {
+			// Only stop if it's been increasing for a while
+			if loss > prev_loss + 1.0 { 	// Increased by more than 1.0
+				fmt.println("Loss increasing, stopping early")
+				break
+			}
+		}
+
+		prev_loss = loss
+
 		prev_loss = loss
 
 		// Numerical gradient
@@ -258,13 +274,13 @@ garch_fit :: proc(
 		}
 
 		opt.optimizer_step(&optimizer, param_vec, gradient, loss)
+
 		if iter % 100 == 0 {
 			unpack_params(param_vec, &params)
 			persistence := 0.0
 			for i in 0 ..< p {persistence += params.alpha[i]}
 			for j in 0 ..< q {persistence += params.beta[j]}
 
-			// Compute display values
 			alpha_0: f64 = 0.0
 			if p > 0 {
 				alpha_0 = params.alpha[0]
@@ -336,7 +352,6 @@ garch_fit :: proc(
 	aic := 2.0 * k - 2.0 * log_lik
 	bic := k * math.ln_f64(f64(n)) - 2.0 * log_lik
 
-	// Calculate persistence
 	persistence := 0.0
 	for i in 0 ..< p {persistence += params.alpha[i]}
 	for j in 0 ..< q {persistence += params.beta[j]}
