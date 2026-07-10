@@ -55,11 +55,11 @@ garch_real_data_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("Annualized vol: %.2f%%\n", std_ret * math.sqrt_f64(252) * 100)
 
 	// 3. Fit GARCH(1,1) manually for plotting
-	fmt.println("\n--- Fitting GARCH(1,1) ---")
+	fmt.println("\n--- Fitting GARCH(1,1) with Student-t Errors---")
 	residuals := ts.extract_residuals(returns, main_alloc)
 	defer delete(residuals, main_alloc)
 
-	garch_result := ts.garch_fit(residuals, .GARCH, 1, 1, 2000, 1e-4, main_alloc)
+	garch_result := ts.garch_fit(residuals, .StudentT, 1, 1, 2000, 1e-4, main_alloc)
 	defer {
 		delete(garch_result.params.alpha, main_alloc)
 		delete(garch_result.params.beta, main_alloc)

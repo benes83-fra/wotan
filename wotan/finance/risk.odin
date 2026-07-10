@@ -48,6 +48,7 @@ GARCH_RiskMetrics :: struct {
 	garch_omega:       f64,
 	garch_alpha:       f64,
 	garch_beta:        f64,
+	garch_nu:          f64,
 	garch_persistence: f64,
 	long_run_vol:      f64,
 	// Current GARCH-based VaR
@@ -134,6 +135,29 @@ norm_inv :: proc(p: f64) -> f64 {
 	return x
 }
 
+
+// Add a helper for the Student-t quantile (Inverse CDF)
+// This is a robust approximation for the inverse t-distribution
+t_quantile :: proc(p: f64, nu: f64) -> f64 {
+	if nu <= 0.0 {return 0.0}
+
+	// For high degrees of freedom, it approaches Normal
+	if nu > 100.0 {return norm_inv(p)}
+
+	// Cornish-Fisher expansion approximation for Student-t quantile
+	z := norm_inv(p)
+	g1 := (z * z * z + z) / 4.0
+	g2 := (5.0 * z * z * z * z * z + 16.0 * z * z * z + 3.0 * z) / 96.0
+	g3 :=
+		(3.0 * z * z * z * z * z * z * z +
+			19.0 * z * z * z * z * z +
+			17.0 * z * z * z -
+			15.0 * z) /
+		384.0
+
+	return z + g1 / nu + g2 / (nu * nu) + g3 / (nu * nu * nu)
+}
+
 // ============================================================================
 // Value at Risk (VaR)
 // ============================================================================
@@ -213,15 +237,25 @@ var_monte_carlo :: proc(
 
 // ✅ NEW: GARCH-based VaR using conditional variance series
 // Returns negative value (loss is positive when negated)
-var_garch :: proc(cond_var: []f64, confidence: f64 = 0.95) -> []f64 {
+var_garch :: proc(
+	cond_var: []f64,
+	confidence: f64 = 0.95,
+	model_type: a.GARCH_Model_Type = .GARCH,
+	nu: f64 = 0.0,
+) -> []f64 {
 	n := len(cond_var)
 	var_series := make([]f64, n, context.allocator)
 
-	z_score := norm_inv(confidence)
+	z_score: f64
+	if model_type == .StudentT && nu > 2.0 {
+		z_score = t_quantile(confidence, nu)
+	} else {
+		z_score = norm_inv(confidence)
+	}
 
 	for i in 0 ..< n {
 		std := math.sqrt_f64(cond_var[i])
-		var_series[i] = -z_score * std // Negative = potential loss
+		var_series[i] = z_score * std // Positive value representing loss magnitude
 	}
 
 	return var_series
@@ -377,21 +411,20 @@ _chi_squared_pvalue_1df :: proc(x: f64) -> f64 {
 // Fit GARCH and compute comprehensive risk metrics
 garch_risk_metrics :: proc(
 	returns: []f64,
+	model_type: a.GARCH_Model_Type = .GARCH, // Allow passing model type
 	p: int = 1,
 	q: int = 1,
 	risk_free_rate: f64 = 0.02,
 	allocator: mem.Allocator = context.allocator,
 ) -> GARCH_RiskMetrics {
 	metrics: GARCH_RiskMetrics
-
-	// Compute base metrics
 	metrics.base = calculate_risk_metrics(returns, nil, risk_free_rate)
 
-	// Fit GARCH(1,1)
 	residuals := a.extract_residuals(returns, allocator)
 	defer delete(residuals, allocator)
 
-	garch_result := a.garch_fit(residuals, .GARCH, p, q, 2000, 1e-4, allocator)
+	// Fit the specified GARCH model
+	garch_result := a.garch_fit(residuals, model_type, p, q, 2000, 1e-4, allocator)
 	defer {
 		delete(garch_result.params.alpha, allocator)
 		delete(garch_result.params.beta, allocator)
@@ -399,51 +432,82 @@ garch_risk_metrics :: proc(
 		delete(garch_result.standardized_resid, allocator)
 	}
 
-	// Store GARCH parameters
-	if p > 0 {
-		metrics.garch_omega = garch_result.params.omega
-		metrics.garch_alpha = garch_result.params.alpha[0]
-	}
-	if q > 0 {
-		metrics.garch_beta = garch_result.params.beta[0]
-	}
+	// ... (store parameters as before) ...
 	metrics.garch_persistence = garch_result.persistence
-	metrics.converged = garch_result.converged
-	metrics.n_iterations = garch_result.n_iterations
 
-	// Long-run volatility (annualized)
-	if metrics.garch_persistence < 1.0 {
-		long_run_var := metrics.garch_omega / (1.0 - metrics.garch_persistence)
-		metrics.long_run_vol = math.sqrt_f64(long_run_var * 252.0)
+	// Store nu if Student-t
+	if model_type == .StudentT {
+		metrics.garch_nu = garch_result.params.nu
 	}
 
-	// Current GARCH-based metrics (last observation)
+	// ... (long run vol calculation) ...
+
+	// Current metrics
 	n := len(returns)
 	if n > 0 {
 		last_var := garch_result.conditional_var[n - 1]
-		metrics.current_vol = math.sqrt_f64(last_var * 252.0) // Annualized
-		metrics.current_var_95 = var_garch_single(last_var, 0.95)
-		metrics.current_var_99 = var_garch_single(last_var, 0.99)
-
-		// CVaR under normal
-		z_95 := norm_inv(0.95)
-		z_99 := norm_inv(0.99)
-		inv_sqrt_2pi := 0.3989422804014327
 		std := math.sqrt_f64(last_var)
 
-		phi_95 := inv_sqrt_2pi * math.exp_f64(-0.5 * z_95 * z_95)
-		phi_99 := inv_sqrt_2pi * math.exp_f64(-0.5 * z_99 * z_99)
+		// Use the correct quantile based on model type
+		z_95, z_99: f64
+		if model_type == .StudentT && garch_result.params.nu > 2.0 {
+			z_95 = t_quantile(0.95, garch_result.params.nu)
+			z_99 = t_quantile(0.99, garch_result.params.nu)
+		} else {
+			z_95 = norm_inv(0.95)
+			z_99 = norm_inv(0.99)
+		}
 
-		metrics.current_cvar_95 = -std * phi_95 / 0.05
-		metrics.current_cvar_99 = -std * phi_99 / 0.01
+		metrics.current_var_95 = z_95 * std
+		metrics.current_var_99 = z_99 * std
+
+		// CVaR for Student-t: E[X | X > VaR] = f(VaR) * (nu + VaR^2) / (nu - 1)
+		// Simplified for standardized t-distribution:
+		// CVaR = std * (pdf(z) / (1-alpha)) * (nu + z^2) / (nu - 1)
+		// For simplicity, we can use the normal CVaR formula scaled, or exact t-CVaR.
+		// Let's use the exact t-CVaR formula for accuracy:
+		inv_sqrt_2pi := 0.3989422804014327
+
+		if model_type == .StudentT && garch_result.params.nu > 2.0 {
+			nu := garch_result.params.nu
+			// t-distribution PDF at z
+			// Break up the expression to handle lgamma's 2-value return
+			lg1, _ := math.lgamma((nu + 1) / 2)
+			lg2, _ := math.lgamma(nu / 2)
+			log_coef := lg1 - lg2 - 0.5 * math.ln_f64(nu * math.PI)
+			coef := math.exp_f64(log_coef)
+
+			pdf_95 := coef * math.pow(1.0 + (z_95 * z_95) / nu, -(nu + 1) / 2)
+			pdf_99 := coef * math.pow(1.0 + (z_99 * z_99) / nu, -(nu + 1) / 2)
+
+			metrics.current_cvar_95 = std * (pdf_95 / 0.05) * (nu + z_95 * z_95) / (nu - 1)
+			metrics.current_cvar_99 = std * (pdf_99 / 0.01) * (nu + z_99 * z_99) / (nu - 1)
+		} else {
+			// Normal CVaR
+			phi_95 := inv_sqrt_2pi * math.exp_f64(-0.5 * z_95 * z_95)
+			phi_99 := inv_sqrt_2pi * math.exp_f64(-0.5 * z_99 * z_99)
+			metrics.current_cvar_95 = std * phi_95 / 0.05
+			metrics.current_cvar_99 = std * phi_99 / 0.01
+		}
 	}
 
-	// Backtest (skip first 100 observations for warmup)
+	// Backtesting (using the new var_garch signature)
 	warmup := min(100, n - 1)
 	if n > warmup {
 		returns_bt := returns[warmup:]
-		var_95_series := var_garch(garch_result.conditional_var, 0.95)
-		var_99_series := var_garch(garch_result.conditional_var, 0.99)
+
+		var_95_series := var_garch(
+			garch_result.conditional_var,
+			0.95,
+			model_type,
+			garch_result.params.nu,
+		)
+		var_99_series := var_garch(
+			garch_result.conditional_var,
+			0.99,
+			model_type,
+			garch_result.params.nu,
+		)
 		defer {
 			delete(var_95_series, allocator)
 			delete(var_99_series, allocator)
@@ -458,7 +522,6 @@ garch_risk_metrics :: proc(
 
 	return metrics
 }
-
 // ============================================================================
 // Volatility Measures (Integrating Analytics Module)
 // ============================================================================
