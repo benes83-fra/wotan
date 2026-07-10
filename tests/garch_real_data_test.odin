@@ -170,7 +170,68 @@ garch_real_data_test :: proc(allocator: mem.Allocator) {
 		pass_99 = "FAIL"
 	}
 	fmt.printf("  p-value: %.4f (%s)\n", backtest_99.kupiec_pvalue, pass_99)
+	// 6b. Historical Simulation (Rolling Window)
+	fmt.println("\n--- Historical Simulation VaR ---")
+	hist_window := 252 // 1 year rolling window
+	var_95_hist := fin.historical_var_rolling(returns, 0.95, hist_window, main_alloc)
+	var_99_hist := fin.historical_var_rolling(returns, 0.99, hist_window, main_alloc)
+	cvar_95_hist := fin.historical_cvar_rolling(returns, 0.95, hist_window, main_alloc)
+	cvar_99_hist := fin.historical_cvar_rolling(returns, 0.99, hist_window, main_alloc)
+	defer {
+		delete(var_95_hist, main_alloc)
+		delete(var_99_hist, main_alloc)
+		delete(cvar_95_hist, main_alloc)
+		delete(cvar_99_hist, main_alloc)
+	}
 
+	// Backtest Historical Simulation
+	start_idx_hist := hist_window // Use window size as warmup
+	returns_bt_hist := returns[start_idx_hist:]
+	var_95_hist_bt := var_95_hist[start_idx_hist:]
+	var_99_hist_bt := var_99_hist[start_idx_hist:]
+
+	backtest_hist_95 := fin.backtest_var(returns_bt_hist, var_95_hist_bt, 0.95)
+	backtest_hist_99 := fin.backtest_var(returns_bt_hist, var_99_hist_bt, 0.99)
+
+	fmt.printf("\n%-30s %-15s %-15s\n", "Method", "95% VaR", "99% VaR")
+	fmt.printf(
+		"%-30s %-15s %-15s\n",
+		"----------------------------",
+		"---------------",
+		"---------------",
+	)
+
+	// GARCH results
+	pass_g95 := "PASS"
+	if !backtest_95.passes_test {pass_g95 = "FAIL"}
+	pass_g99 := "PASS"
+	if !backtest_99.passes_test {pass_g99 = "FAIL"}
+	fmt.printf(
+		"%-30s %d (%.2f%%) %s   %d (%.2f%%) %s\n",
+		"GARCH(1,1) Student-t",
+		backtest_95.n_breaches,
+		backtest_95.breach_rate * 100,
+		pass_g95,
+		backtest_99.n_breaches,
+		backtest_99.breach_rate * 100,
+		pass_g99,
+	)
+
+	// Historical results
+	pass_h95 := "PASS"
+	if !backtest_hist_95.passes_test {pass_h95 = "FAIL"}
+	pass_h99 := "PASS"
+	if !backtest_hist_99.passes_test {pass_h99 = "FAIL"}
+	fmt.printf(
+		"%-30s %d (%.2f%%) %s   %d (%.2f%%) %s\n",
+		"Historical Simulation",
+		backtest_hist_95.n_breaches,
+		backtest_hist_95.breach_rate * 100,
+		pass_h95,
+		backtest_hist_99.n_breaches,
+		backtest_hist_99.breach_rate * 100,
+		pass_h99,
+	)
 	// 7. Compare with Historical VaR using new finance API
 	fmt.println("\n--- Historical vs GARCH VaR ---")
 	hist_var_95 := fin.var_historical(returns_bt, 0.95)
@@ -225,7 +286,41 @@ garch_real_data_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("  99%% VaR: $%.2f\n", portfolio * -var_99_current)
 	fmt.printf("  95%% CVaR: $%.2f\n", portfolio * -cvar_95_current)
 	fmt.printf("  99%% CVaR: $%.2f\n", portfolio * -cvar_99_current)
+	// 8b. Compare Current Risk Metrics
+	fmt.println("\n--- Current Risk Metrics Comparison ---")
+	last_idx := len(returns) - 1
 
+	fmt.printf("\n%-25s %-15s %-15s\n", "Metric", "GARCH", "Historical")
+	fmt.printf(
+		"%-25s %-15s %-15s\n",
+		"-------------------------",
+		"---------------",
+		"---------------",
+	)
+	fmt.printf(
+		"%-25s %-15.4f%% %-15.4f%%\n",
+		"95% VaR",
+		var_95[last_idx] * 100,
+		var_95_hist[last_idx] * 100,
+	)
+	fmt.printf(
+		"%-25s %-15.4f%% %-15.4f%%\n",
+		"99% VaR",
+		var_99[last_idx] * 100,
+		var_99_hist[last_idx] * 100,
+	)
+	fmt.printf(
+		"%-25s %-15.4f%% %-15.4f%%\n",
+		"95% CVaR",
+		cvar_95_current * 100,
+		cvar_95_hist[last_idx] * 100,
+	)
+	fmt.printf(
+		"%-25s %-15.4f%% %-15.4f%%\n",
+		"99% CVaR",
+		cvar_99_current * 100,
+		cvar_99_hist[last_idx] * 100,
+	)
 	// 9. Visualization
 	fmt.println("\n--- Generating Visualizations ---")
 
@@ -241,6 +336,7 @@ garch_real_data_test :: proc(allocator: mem.Allocator) {
 		"garch_vol_comparison.png",
 		allocator,
 	)
+	plot_var_comparison(dates, returns, var_95, var_95_hist, "var_comparison.png", allocator)
 
 	fmt.println("\n✓ GARCH Real Data test completed!")
 }
@@ -338,6 +434,56 @@ plot_volatility_comparison :: proc(
 	config.title = "Volatility Estimates Comparison (Annualized %)"
 	config.x_label = "Time (days)"
 	config.y_label = "Volatility (%)"
+	config.show_grid = true
+
+	p.multi_line_png(lines, output_path, config, allocator)
+	fmt.printf("✓ Saved: %s\n", output_path)
+}
+plot_var_comparison :: proc(
+	dates: []f64,
+	returns: []f64,
+	var_garch: []f64,
+	var_hist: []f64,
+	output_path: string,
+	allocator: mem.Allocator,
+) {
+	n := len(dates)
+
+	// Convert to negative for display (losses)
+	var_garch_neg := make([]f64, n, allocator)
+	var_hist_neg := make([]f64, n, allocator)
+	defer {
+		delete(var_garch_neg, allocator)
+		delete(var_hist_neg, allocator)
+	}
+
+	for i in 0 ..< n {
+		var_garch_neg[i] = -var_garch[i]
+		var_hist_neg[i] = -var_hist[i]
+	}
+
+	lines := []p.LineData {
+		p.LineData{xs = dates, ys = returns, color = p.BLUE, style = .Solid, label = "Returns"},
+		p.LineData {
+			xs = dates,
+			ys = var_garch_neg,
+			color = p.RED,
+			style = .Solid,
+			label = "GARCH 95% VaR",
+		},
+		p.LineData {
+			xs = dates,
+			ys = var_hist_neg,
+			color = p.Color{0, 150, 0, 255},
+			style = .Dashed,
+			label = "Historical 95% VaR",
+		},
+	}
+
+	config := p.DEFAULT_PLOT_CONFIG
+	config.title = "SPY Returns: GARCH vs Historical Simulation VaR"
+	config.x_label = "Time (days)"
+	config.y_label = "Daily Return / VaR Threshold"
 	config.show_grid = true
 
 	p.multi_line_png(lines, output_path, config, allocator)

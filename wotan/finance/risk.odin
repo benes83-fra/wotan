@@ -1083,3 +1083,86 @@ returns_stationarity_test :: proc(
 	is_stationary = p < 0.05
 	return s, p, is_stationary
 }
+// ============================================================================
+// Historical Simulation (Rolling Window)
+// ============================================================================
+
+// Compute rolling historical VaR using a fixed window
+// Returns a series of VaR estimates (one per observation after warmup)
+historical_var_rolling :: proc(
+	returns: []f64,
+	confidence: f64 = 0.95,
+	window: int = 252, // 1 year of trading days
+	allocator: mem.Allocator = context.allocator,
+) -> []f64 {
+	n := len(returns)
+	var_series := make([]f64, n, allocator)
+
+	// Fill with zeros for the warmup period
+	for i in 0 ..< min(window, n) {
+		var_series[i] = 0.0
+	}
+
+	// Compute rolling VaR
+	window_buf := make([]f64, window, context.temp_allocator)
+	defer delete(window_buf, context.temp_allocator)
+
+	for i in window ..< n {
+		// Copy current window
+		copy(window_buf, returns[i - window:i])
+
+		// Sort the window
+		slice.sort(window_buf)
+
+		// VaR is the (1-confidence) quantile
+		index := int((1.0 - confidence) * f64(window))
+		if index < 0 {index = 0}
+		if index >= window {index = window - 1}
+
+		var_series[i] = -window_buf[index] // Negative = loss
+	}
+
+	return var_series
+}
+
+// Compute rolling historical CVaR (Expected Shortfall)
+// Returns a series of CVaR estimates (one per observation after warmup)
+historical_cvar_rolling :: proc(
+	returns: []f64,
+	confidence: f64 = 0.95,
+	window: int = 252,
+	allocator: mem.Allocator = context.allocator,
+) -> []f64 {
+	n := len(returns)
+	cvar_series := make([]f64, n, allocator)
+
+	// Fill with zeros for the warmup period
+	for i in 0 ..< min(window, n) {
+		cvar_series[i] = 0.0
+	}
+
+	// Compute rolling CVaR
+	window_buf := make([]f64, window, context.temp_allocator)
+	defer delete(window_buf, context.temp_allocator)
+
+	for i in window ..< n {
+		// Copy current window
+		copy(window_buf, returns[i - window:i])
+
+		// Sort the window
+		slice.sort(window_buf)
+
+		// CVaR is the average of losses beyond VaR
+		cutoff := int((1.0 - confidence) * f64(window))
+		if cutoff < 1 {cutoff = 1}
+
+		sum := 0.0
+		for j in 0 ..< cutoff {
+			sum += -window_buf[j] // Negative = loss
+		}
+
+		cvar_series[i] = sum / f64(cutoff)
+	}
+
+	return cvar_series
+}
