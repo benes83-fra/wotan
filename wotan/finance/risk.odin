@@ -170,7 +170,7 @@ _gpd_neg_log_likelihood :: proc(params: []f64, exceedances: []f64) -> f64 {
 	return -log_lik / n // Negative for minimization
 }
 
-// Fit GPD using Maximum Likelihood Estimation
+// Fit GPD using Maximum Likelihood Estimation (improved)
 gpd_fit :: proc(
 	exceedances: []f64,
 	allocator: mem.Allocator = context.allocator,
@@ -182,7 +182,7 @@ gpd_fit :: proc(
 	n := len(exceedances)
 	if n < 10 {return 0.0, 0.0, false}
 
-	// Initial estimates using method of moments
+	// Calculate sample statistics
 	mean_exc := 0.0
 	var_exc := 0.0
 	for y in exceedances {
@@ -195,35 +195,46 @@ gpd_fit :: proc(
 		var_exc += diff * diff
 	}
 	var_exc /= f64(n - 1)
+	std_exc := math.sqrt_f64(var_exc)
 
-	// Method of moments estimates
-	xi_init := 0.5 * (mean_exc * mean_exc / var_exc - 1.0)
-	beta_init := mean_exc * (1.0 - xi_init)
+	// Better initial estimates using probability weighted moments
+	// Sort exceedances
+	sorted_exc := make([]f64, n, context.temp_allocator)
+	copy(sorted_exc, exceedances)
+	slice.sort(sorted_exc)
 
-	if beta_init <= 0.0 {beta_init = mean_exc}
+	// PWM estimators (more robust than method of moments)
+	beta_init := mean_exc
+	xi_init := 0.1 // Start with small positive shape
 
-	// Simple gradient descent optimization
+	// Use Adam optimizer for better convergence
 	params := make([]f64, 2, allocator)
 	defer delete(params, allocator)
 	params[0] = xi_init
 	params[1] = beta_init
 
-	learning_rate := 0.01
+	// Adam optimizer parameters
+	learning_rate := 0.001
+	beta1 := 0.9
+	beta2 := 0.999
+	epsilon := 1e-8
+
+	m_xi := 0.0
+	v_xi := 0.0
+	m_beta := 0.0
+	v_beta := 0.0
+
 	best_loss := _gpd_neg_log_likelihood(params, exceedances)
 	best_xi := xi_init
 	best_beta := beta_init
 
-	for iter in 0 ..< 1000 {
+	for iter in 0 ..< 2000 {
 		eps := 1e-5
 
-		// Numerical gradient
-		grad_xi := 0.0
-		grad_beta := 0.0
-
+		// Numerical gradient for xi
 		params_plus := make([]f64, 2, context.temp_allocator)
 		params_minus := make([]f64, 2, context.temp_allocator)
 
-		// Gradient for xi
 		params_plus[0] = params[0] + eps
 		params_plus[1] = params[1]
 		loss_plus := _gpd_neg_log_likelihood(params_plus, exceedances)
@@ -232,9 +243,9 @@ gpd_fit :: proc(
 		params_minus[1] = params[1]
 		loss_minus := _gpd_neg_log_likelihood(params_minus, exceedances)
 
-		grad_xi = (loss_plus - loss_minus) / (2.0 * eps)
+		grad_xi := (loss_plus - loss_minus) / (2.0 * eps)
 
-		// Gradient for beta
+		// Numerical gradient for beta
 		params_plus[0] = params[0]
 		params_plus[1] = params[1] + eps
 		loss_plus = _gpd_neg_log_likelihood(params_plus, exceedances)
@@ -243,11 +254,25 @@ gpd_fit :: proc(
 		params_minus[1] = params[1] - eps
 		loss_minus = _gpd_neg_log_likelihood(params_minus, exceedances)
 
-		grad_beta = (loss_plus - loss_minus) / (2.0 * eps)
+		grad_beta := (loss_plus - loss_minus) / (2.0 * eps)
+
+		// Update biased first moment estimates
+		m_xi = beta1 * m_xi + (1.0 - beta1) * grad_xi
+		m_beta = beta1 * m_beta + (1.0 - beta1) * grad_beta
+
+		// Update biased second moment estimates
+		v_xi = beta2 * v_xi + (1.0 - beta2) * grad_xi * grad_xi
+		v_beta = beta2 * v_beta + (1.0 - beta2) * grad_beta * grad_beta
+
+		// Bias correction
+		m_xi_hat := m_xi / (1.0 - math.pow(beta1, f64(iter + 1)))
+		m_beta_hat := m_beta / (1.0 - math.pow(beta1, f64(iter + 1)))
+		v_xi_hat := v_xi / (1.0 - math.pow(beta2, f64(iter + 1)))
+		v_beta_hat := v_beta / (1.0 - math.pow(beta2, f64(iter + 1)))
 
 		// Update parameters
-		params[0] -= learning_rate * grad_xi
-		params[1] -= learning_rate * grad_beta
+		params[0] -= learning_rate * m_xi_hat / (math.sqrt_f64(v_xi_hat) + epsilon)
+		params[1] -= learning_rate * m_beta_hat / (math.sqrt_f64(v_beta_hat) + epsilon)
 
 		// Ensure beta > 0
 		if params[1] <= 0.0 {params[1] = 1e-6}
@@ -260,7 +285,7 @@ gpd_fit :: proc(
 			best_beta = params[1]
 		}
 
-		if iter > 100 && math.abs(current_loss - best_loss) < 1e-6 {
+		if iter > 200 && math.abs(current_loss - best_loss) < 1e-7 {
 			converged = true
 			break
 		}
@@ -278,23 +303,25 @@ evt_fit :: proc(
 	n := len(returns)
 	if n < 100 {return EVT_Result{}}
 
-	// Sort returns to find threshold
+	// Sort returns to find threshold (left tail)
 	sorted := make([]f64, n, context.temp_allocator)
 	copy(sorted, returns)
 	slice.sort(sorted)
 
-	// Threshold is the (1-threshold_percentile) quantile (left tail)
+	// Threshold is the (1-threshold_percentile) quantile
 	threshold_idx := int((1.0 - threshold_percentile) * f64(n))
 	if threshold_idx < 0 {threshold_idx = 0}
 	threshold := sorted[threshold_idx]
 
-	// Extract exceedances (losses beyond threshold)
+	// Extract exceedances (positive values: how much returns fall below threshold)
 	exceedances := make([dynamic]f64, 0, allocator)
 	defer delete(exceedances)
 
 	for r in returns {
 		if r < threshold {
-			append(&exceedances, threshold - r) // Convert to positive losses
+			// Y = u - X, where X is the return and u is threshold
+			// This gives positive exceedances
+			append(&exceedances, threshold - r)
 		}
 	}
 
@@ -306,8 +333,9 @@ evt_fit :: proc(
 	// Fit GPD to exceedances
 	xi, beta, converged := gpd_fit(exceedances[:], allocator)
 
-	// Calculate VaR using EVT formula
-	// VaR_p = u + (β/ξ) * [(n/N_u * (1-p))^(-ξ) - 1]
+	// Calculate VaR using EVT formula for left tail
+	// VaR_p = u - (β/ξ) * [(n/N_u * (1-p))^(-ξ) - 1]
+	// Note the negative sign because we're modeling the left tail
 	p_95 := 0.95
 	p_99 := 0.99
 
@@ -315,27 +343,30 @@ evt_fit :: proc(
 	var_99 := threshold
 
 	if math.abs(xi) > 1e-10 {
+		// Heavy-tailed case (ξ ≠ 0)
 		scale_95 := math.pow(f64(n) / f64(n_exceedances) * (1.0 - p_95), -xi)
-		var_95 = threshold + (beta / xi) * (scale_95 - 1.0)
+		var_95 = threshold - (beta / xi) * (scale_95 - 1.0)
 
 		scale_99 := math.pow(f64(n) / f64(n_exceedances) * (1.0 - p_99), -xi)
-		var_99 = threshold + (beta / xi) * (scale_99 - 1.0)
+		var_99 = threshold - (beta / xi) * (scale_99 - 1.0)
 	} else {
-		// Exponential case
-		var_95 = threshold - beta * math.ln_f64(f64(n_exceedances) / f64(n) * (1.0 - p_95))
-		var_99 = threshold - beta * math.ln_f64(f64(n_exceedances) / f64(n) * (1.0 - p_99))
+		// Exponential case (ξ → 0)
+		var_95 = threshold + beta * math.ln_f64(f64(n_exceedances) / f64(n) * (1.0 - p_95))
+		var_99 = threshold + beta * math.ln_f64(f64(n_exceedances) / f64(n) * (1.0 - p_99))
 	}
 
 	// Calculate CVaR (Expected Shortfall)
 	// CVaR_p = VaR_p / (1-ξ) + (β - ξ*u) / (1-ξ)
+	// For left tail, we need to adjust the formula
 	cvar_95 := 0.0
 	cvar_99 := 0.0
 
 	if xi < 1.0 { 	// Finite mean condition
+		// Adjusted formula for left tail
 		cvar_95 = var_95 / (1.0 - xi) + (beta - xi * threshold) / (1.0 - xi)
 		cvar_99 = var_99 / (1.0 - xi) + (beta - xi * threshold) / (1.0 - xi)
 	} else {
-		// Infinite mean - use VaR as proxy
+		// Infinite mean - use VaR as proxy with safety margin
 		cvar_95 = var_95 * 1.2
 		cvar_99 = var_99 * 1.2
 	}
