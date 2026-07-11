@@ -15,6 +15,7 @@ GARCH_Model_Type :: enum {
 	GARCH,
 	GJR_GARCH, // Asymmetric GARCH (leverage effect)
 	StudentT,
+	GED,
 }
 
 GARCH_Params :: struct {
@@ -23,6 +24,7 @@ GARCH_Params :: struct {
 	beta:       []f64,
 	gamma:      f64,
 	nu:         f64,
+	shape:      f64,
 	model_type: GARCH_Model_Type,
 	p:          int,
 	q:          int,
@@ -84,6 +86,11 @@ unpack_params :: proc(x: []f64, params: ^GARCH_Params) {
 		if params.model_type == .GJR_GARCH {nu_idx += 1}
 		params.nu = 2.0 + math.exp(x[nu_idx])
 	}
+	if params.model_type == .GED {
+		shape_idx := 1 + params.p + params.q
+		if params.model_type == .GJR_GARCH {shape_idx += 1}
+		params.shape = math.exp(x[shape_idx])
+	}
 }
 
 // ============================================================================
@@ -124,7 +131,9 @@ _garch_neg_log_likelihood :: proc(
 
 	log_lik := 0.0
 	is_student_t := params.model_type == .StudentT
+	is_ged := params.model_type == .GED
 	nu := params.nu
+	shape := params.shape
 
 	for t in max(p, q) ..< n {
 		z := residuals[t] / math.sqrt_f64(cond_var[t])
@@ -138,6 +147,25 @@ _garch_neg_log_likelihood :: proc(
 			term5 := ((nu + 1.0) / 2.0) * math.ln_f64(1.0 + (z * z) / (nu - 2.0))
 
 			log_lik += term1 - term2 - term3 - term4 - term5
+		} else if is_ged && shape > 0.0 {
+			// GED log-likelihood
+			// λ_p = sqrt(Γ(1/p) / Γ(3/p))
+			lg1_p, _ := math.lgamma(1.0 / shape)
+			lg3_p, _ := math.lgamma(3.0 / shape)
+			lambda_p := math.exp_f64(0.5 * (lg1_p - lg3_p))
+
+			// Standardized residual
+			u := z / lambda_p
+
+			// log f = log(p) - log(2) - log(Γ(1/p)) - log(λ_p) - log(σ_t) - |u|^p
+			log_p := math.ln_f64(shape)
+			log_2 := math.ln_f64(2.0)
+			log_gamma, _ := math.lgamma(1.0 / shape)
+			log_lambda := math.ln_f64(lambda_p)
+			log_sigma := 0.5 * math.ln_f64(cond_var[t])
+			power_term := math.pow(math.abs(u), shape)
+
+			log_lik += log_p - log_2 - log_gamma - log_lambda - log_sigma - power_term
 		} else {
 			log_lik += -0.5 * (math.ln_f64(2.0 * math.PI) + math.ln_f64(cond_var[t]) + z * z)
 		}
@@ -175,6 +203,7 @@ garch_fit :: proc(
 		n_params += 1
 	}
 	if model_type == .StudentT {n_params += 1}
+	if model_type == .GED {n_params += 1}
 	// 1. Initialize optimizer with higher learning rate
 	opt_config := opt.optimizer_default_config(.Adam)
 	opt_config.learning_rate = 0.05
@@ -204,7 +233,9 @@ garch_fit :: proc(
 	if model_type == .StudentT {
 		param_vec[gamma_idx] = math.ln_f64(3.0) // Initial nu = 2 + exp(ln(3)) = 5.0
 	}
-
+	if model_type == .GED {
+		param_vec[gamma_idx] = math.ln_f64(2.0) // shape = 2 (Normal)
+	}
 	best_loss := math.F64_MAX
 	best_params := make([]f64, n_params, allocator)
 	defer delete(best_params, allocator)

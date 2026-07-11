@@ -82,6 +82,25 @@ garch_real_data_test :: proc(allocator: mem.Allocator) {
 		garch_result.converged,
 		garch_result.n_iterations,
 	)
+	// 3.b Fit GARCH(1,1) with GED distribution
+	fmt.println("\n--- Fitting GARCH(1,1) with GED Errors ---")
+	residuals2 := ts.extract_residuals(returns, main_alloc)
+	defer delete(residuals2, main_alloc)
+
+	garch_result2 := ts.garch_fit(residuals2, .GED, 1, 1, 2000, 1e-4, main_alloc)
+	defer {
+		delete(garch_result2.params.alpha, main_alloc)
+		delete(garch_result2.params.beta, main_alloc)
+		delete(garch_result2.conditional_var, main_alloc)
+		delete(garch_result2.standardized_resid, main_alloc)
+	}
+
+	fmt.printf("\nGARCH(1,1) GED Parameters:\n")
+	fmt.printf("  ω (omega): %.8f\n", garch_result2.params.omega)
+	fmt.printf("  α (alpha): %.4f\n", garch_result2.params.alpha[0])
+	fmt.printf("  β (beta):  %.4f\n", garch_result2.params.beta[0])
+	fmt.printf("  Shape (p): %.4f\n", garch_result2.params.shape)
+	fmt.printf("  Persistence (α+β): %.4f\n", garch_result2.persistence)
 
 	// 4. Compute volatility series for comparison
 	fmt.println("\n--- Computing Volatility Series ---")

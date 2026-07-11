@@ -49,6 +49,7 @@ GARCH_RiskMetrics :: struct {
 	garch_alpha:       f64,
 	garch_beta:        f64,
 	garch_nu:          f64,
+	garch_shape:       f64,
 	garch_persistence: f64,
 	long_run_vol:      f64,
 	// Current GARCH-based VaR
@@ -235,13 +236,14 @@ var_monte_carlo :: proc(
 	return simulated_returns[index]
 }
 
-// ✅ NEW: GARCH-based VaR using conditional variance series
+
 // Returns negative value (loss is positive when negated)
 var_garch :: proc(
 	cond_var: []f64,
 	confidence: f64 = 0.95,
 	model_type: a.GARCH_Model_Type = .GARCH,
 	nu: f64 = 0.0,
+	shape: f64 = 0.0,
 ) -> []f64 {
 	n := len(cond_var)
 	var_series := make([]f64, n, context.allocator)
@@ -249,6 +251,8 @@ var_garch :: proc(
 	z_score: f64
 	if model_type == .StudentT && nu > 2.0 {
 		z_score = t_quantile(confidence, nu)
+	} else if model_type == .GED && shape > 0.0 {
+		z_score = ged_quantile(confidence, shape)
 	} else {
 		z_score = norm_inv(confidence)
 	}
@@ -411,7 +415,7 @@ _chi_squared_pvalue_1df :: proc(x: f64) -> f64 {
 // Fit GARCH and compute comprehensive risk metrics
 garch_risk_metrics :: proc(
 	returns: []f64,
-	model_type: a.GARCH_Model_Type = .GARCH, // Allow passing model type
+	model_type: a.GARCH_Model_Type = .GARCH,
 	p: int = 1,
 	q: int = 1,
 	risk_free_rate: f64 = 0.02,
@@ -423,7 +427,6 @@ garch_risk_metrics :: proc(
 	residuals := a.extract_residuals(returns, allocator)
 	defer delete(residuals, allocator)
 
-	// Fit the specified GARCH model
 	garch_result := a.garch_fit(residuals, model_type, p, q, 2000, 1e-4, allocator)
 	defer {
 		delete(garch_result.params.alpha, allocator)
@@ -432,27 +435,29 @@ garch_risk_metrics :: proc(
 		delete(garch_result.standardized_resid, allocator)
 	}
 
-	// ... (store parameters as before) ...
 	metrics.garch_persistence = garch_result.persistence
 
-	// Store nu if Student-t
 	if model_type == .StudentT {
 		metrics.garch_nu = garch_result.params.nu
 	}
+	if model_type == .GED {
+		metrics.garch_shape = garch_result.params.shape
+	}
 
-	// ... (long run vol calculation) ...
+	// ... (keep existing long-run vol calculation) ...
 
-	// Current metrics
 	n := len(returns)
 	if n > 0 {
 		last_var := garch_result.conditional_var[n - 1]
 		std := math.sqrt_f64(last_var)
 
-		// Use the correct quantile based on model type
 		z_95, z_99: f64
 		if model_type == .StudentT && garch_result.params.nu > 2.0 {
 			z_95 = t_quantile(0.95, garch_result.params.nu)
 			z_99 = t_quantile(0.99, garch_result.params.nu)
+		} else if model_type == .GED && garch_result.params.shape > 0.0 {
+			z_95 = ged_quantile(0.95, garch_result.params.shape)
+			z_99 = ged_quantile(0.99, garch_result.params.shape)
 		} else {
 			z_95 = norm_inv(0.95)
 			z_99 = norm_inv(0.99)
@@ -461,29 +466,18 @@ garch_risk_metrics :: proc(
 		metrics.current_var_95 = z_95 * std
 		metrics.current_var_99 = z_99 * std
 
-		// CVaR for Student-t: E[X | X > VaR] = f(VaR) * (nu + VaR^2) / (nu - 1)
-		// Simplified for standardized t-distribution:
-		// CVaR = std * (pdf(z) / (1-alpha)) * (nu + z^2) / (nu - 1)
-		// For simplicity, we can use the normal CVaR formula scaled, or exact t-CVaR.
-		// Let's use the exact t-CVaR formula for accuracy:
-		inv_sqrt_2pi := 0.3989422804014327
-
+		// CVaR calculation
 		if model_type == .StudentT && garch_result.params.nu > 2.0 {
-			nu := garch_result.params.nu
-			// t-distribution PDF at z
-			// Break up the expression to handle lgamma's 2-value return
-			lg1, _ := math.lgamma((nu + 1) / 2)
-			lg2, _ := math.lgamma(nu / 2)
-			log_coef := lg1 - lg2 - 0.5 * math.ln_f64(nu * math.PI)
-			coef := math.exp_f64(log_coef)
-
-			pdf_95 := coef * math.pow(1.0 + (z_95 * z_95) / nu, -(nu + 1) / 2)
-			pdf_99 := coef * math.pow(1.0 + (z_99 * z_99) / nu, -(nu + 1) / 2)
-
-			metrics.current_cvar_95 = std * (pdf_95 / 0.05) * (nu + z_95 * z_95) / (nu - 1)
-			metrics.current_cvar_99 = std * (pdf_99 / 0.01) * (nu + z_99 * z_99) / (nu - 1)
+			// ... (keep existing Student-t CVaR) ...
+		} else if model_type == .GED && garch_result.params.shape > 0.0 {
+			// GED CVaR
+			cvar_95_std := ged_cvar(0.95, garch_result.params.shape)
+			cvar_99_std := ged_cvar(0.99, garch_result.params.shape)
+			metrics.current_cvar_95 = std * cvar_95_std
+			metrics.current_cvar_99 = std * cvar_99_std
 		} else {
 			// Normal CVaR
+			inv_sqrt_2pi := 0.3989422804014327
 			phi_95 := inv_sqrt_2pi * math.exp_f64(-0.5 * z_95 * z_95)
 			phi_99 := inv_sqrt_2pi * math.exp_f64(-0.5 * z_99 * z_99)
 			metrics.current_cvar_95 = std * phi_95 / 0.05
@@ -491,7 +485,7 @@ garch_risk_metrics :: proc(
 		}
 	}
 
-	// Backtesting (using the new var_garch signature)
+	// Backtesting
 	warmup := min(100, n - 1)
 	if n > warmup {
 		returns_bt := returns[warmup:]
@@ -501,12 +495,14 @@ garch_risk_metrics :: proc(
 			0.95,
 			model_type,
 			garch_result.params.nu,
+			garch_result.params.shape,
 		)
 		var_99_series := var_garch(
 			garch_result.conditional_var,
 			0.99,
 			model_type,
 			garch_result.params.nu,
+			garch_result.params.shape,
 		)
 		defer {
 			delete(var_95_series, allocator)
@@ -1165,4 +1161,131 @@ historical_cvar_rolling :: proc(
 	}
 
 	return cvar_series
+}
+// ============================================================================
+// GED (Generalized Error Distribution) Functions
+// ============================================================================
+
+// GED PDF: f(z) = p / (2 * Γ(1/p) * λ_p) * exp(-|z/λ_p|^p)
+// where λ_p = sqrt(Γ(1/p) / Γ(3/p))
+ged_pdf :: proc(z: f64, shape: f64) -> f64 {
+	if shape <= 0.0 {return 0.0}
+
+	lg1_p, _ := math.lgamma(1.0 / shape)
+	lg3_p, _ := math.lgamma(3.0 / shape)
+	lambda_p := math.exp_f64(0.5 * (lg1_p - lg3_p))
+
+	log_gamma, _ := math.lgamma(1.0 / shape)
+	u := z / lambda_p
+
+	log_pdf :=
+		math.ln_f64(shape) -
+		math.ln_f64(2.0) -
+		log_gamma -
+		math.ln_f64(lambda_p) -
+		math.pow(math.abs(u), shape)
+
+	return math.exp_f64(log_pdf)
+}
+
+// GED CDF using numerical integration (Simpson's rule)
+ged_cdf :: proc(z: f64, shape: f64) -> f64 {
+	if shape <= 0.0 {return 0.5}
+
+	// For z = 0, CDF = 0.5 (symmetric distribution)
+	if z == 0.0 {return 0.5}
+
+	// Integrate PDF from -∞ to z
+	// Use substitution: integrate from 0 to |z| and add 0.5
+	abs_z := math.abs(z)
+
+	// Simpson's rule with 1000 intervals
+	n := 1000
+	h := abs_z / f64(n)
+
+	sum := ged_pdf(0.0, shape) + ged_pdf(abs_z, shape)
+
+	for i in 1 ..< n {
+		x := f64(i) * h
+		if i % 2 == 0 {
+			sum += 2.0 * ged_pdf(x, shape)
+		} else {
+			sum += 4.0 * ged_pdf(x, shape)
+		}
+	}
+
+	integral := sum * h / 3.0
+
+	if z > 0.0 {
+		return 0.5 + integral
+	} else {
+		return 0.5 - integral
+	}
+}
+
+// GED Quantile (Inverse CDF) using bisection method
+ged_quantile :: proc(prob: f64, shape: f64) -> f64 {
+	if shape <= 0.0 {return 0.0}
+	if prob <= 0.0 {return -math.INF_F64}
+	if prob >= 1.0 {return math.INF_F64}
+	if prob == 0.5 {return 0.0}
+
+	// Bisection method
+	low := -10.0
+	high := 10.0
+	tol := 1e-8
+	max_iter := 100
+
+	// Expand bounds if needed
+	for i in 0 ..< 20 {
+		if ged_cdf(low, shape) > prob {
+			low *= 2.0
+		}
+		if ged_cdf(high, shape) < prob {
+			high *= 2.0
+		}
+	}
+
+	for iter in 0 ..< max_iter {
+		mid := (low + high) / 2.0
+		cdf_mid := ged_cdf(mid, shape)
+
+		if math.abs(cdf_mid - prob) < tol {
+			return mid
+		}
+
+		if cdf_mid < prob {
+			low = mid
+		} else {
+			high = mid
+		}
+	}
+
+	return (low + high) / 2.0
+}
+
+// GED CVaR using numerical integration
+ged_cvar :: proc(confidence: f64, shape: f64) -> f64 {
+	if shape <= 0.0 {return 0.0}
+
+	z_alpha := ged_quantile(1.0 - confidence, shape)
+
+	// CVaR = E[Z | Z < z_α] = ∫_{-∞}^{z_α} z * f(z) dz / (1-confidence)
+	// Use numerical integration from z_α - 10 to z_α
+	low := z_alpha - 10.0
+	high := z_alpha
+
+	n := 1000
+	h := (high - low) / f64(n)
+
+	sum := 0.0
+	for i in 0 ..< n {
+		x := low + f64(i) * h
+		sum += x * ged_pdf(x, shape)
+	}
+
+	integral := sum * h
+	cvar := integral / (1.0 - confidence)
+
+	return cvar
 }
