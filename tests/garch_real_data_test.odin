@@ -350,6 +350,117 @@ garch_real_data_test :: proc(allocator: mem.Allocator) {
 		evt_result.var_99 * 100,
 		hybrid_var_99 * 100,
 	)
+	// 6e. Copula Analysis (Bivariate Dependence)
+	fmt.println("\n--- Copula Analysis ---")
+
+	// Fetch VIX data for bivariate analysis
+	fmt.println("Fetching VIX data...")
+	vix_df := yahoo.read_yahoo("^VIX", .Daily, .TwoYears, allocator)
+	defer w.destroy_dataframe(&vix_df)
+
+	// Compute VIX returns
+	n_vix := vix_df.rows
+	vix_returns := make([]f64, n_vix - 1, main_alloc)
+	defer delete(vix_returns, main_alloc)
+
+	for i in 1 ..< n_vix {
+		prev_close, _ := w.column_at_float(&vix_df.columns[4], i - 1)
+		curr_close, _ := w.column_at_float(&vix_df.columns[4], i)
+		vix_returns[i - 1] = math.ln_f64(curr_close / prev_close)
+	}
+
+	// Align lengths
+	n_common := min(len(returns), len(vix_returns))
+	spy_aligned := returns[:n_common]
+	vix_aligned := vix_returns[:n_common]
+
+	fmt.printf("Aligned %d observations\n", n_common)
+
+	// Transform to uniform marginals
+	u_spy := fin.pit_empirical(spy_aligned, main_alloc)
+	u_vix := fin.pit_empirical(vix_aligned, main_alloc)
+	defer {
+		delete(u_spy, main_alloc)
+		delete(u_vix, main_alloc)
+	}
+
+	// Compute empirical dependence measures
+	tau := fin.kendall_tau(spy_aligned, vix_aligned)
+	rho_spearman := fin.spearman_rho(spy_aligned, vix_aligned, main_alloc)
+	ltd := fin.lower_tail_dependence(u_spy, u_vix, 0.05)
+	utd := fin.upper_tail_dependence(u_spy, u_vix, 0.95)
+
+	fmt.printf("\nEmpirical Dependence Measures:\n")
+	fmt.printf("  Kendall's τ: %.4f\n", tau)
+	fmt.printf("  Spearman's ρ: %.4f\n", rho_spearman)
+	fmt.printf("  Lower Tail Dependence (5%%): %.4f\n", ltd)
+	fmt.printf("  Upper Tail Dependence (95%%): %.4f\n", utd)
+
+	// Fit Gaussian copula
+	fmt.println("\nFitting Gaussian Copula...")
+	gauss_copula := fin.fit_gaussian_copula(u_spy, u_vix, main_alloc)
+	defer delete(gauss_copula.parameters, main_alloc)
+
+	fmt.printf("\nGaussian Copula:\n")
+	fmt.printf("  ρ (correlation): %.4f\n", gauss_copula.parameters[0])
+	fmt.printf("  Log-Likelihood: %.2f\n", gauss_copula.log_likelihood)
+	fmt.printf("  AIC: %.2f\n", gauss_copula.aic)
+	fmt.printf("  BIC: %.2f\n", gauss_copula.bic)
+
+	// Fit Student-t copula
+	fmt.println("\nFitting Student-t Copula...")
+	student_copula := fin.fit_student_t_copula(u_spy, u_vix, main_alloc)
+	defer delete(student_copula.parameters, main_alloc)
+
+	fmt.printf("\nStudent-t Copula:\n")
+	fmt.printf("  ρ (correlation): %.4f\n", student_copula.parameters[0])
+	fmt.printf("  ν (degrees of freedom): %.2f\n", student_copula.parameters[1])
+	fmt.printf("  Log-Likelihood: %.2f\n", student_copula.log_likelihood)
+	fmt.printf("  AIC: %.2f\n", student_copula.aic)
+	fmt.printf("  BIC: %.2f\n", student_copula.bic)
+
+	// Model comparison
+	fmt.printf("\n%-20s %-15s %-15s %-15s\n", "Copula", "Parameters", "AIC", "BIC")
+	fmt.printf(
+		"%-20s %-15s %-15s %-15s\n",
+		"--------------------",
+		"---------------",
+		"---------------",
+		"---------------",
+	)
+	fmt.printf(
+		"%-20s ρ=%.4f          %-15.2f %-15.2f\n",
+		"Gaussian",
+		gauss_copula.parameters[0],
+		gauss_copula.aic,
+		gauss_copula.bic,
+	)
+	fmt.printf(
+		"%-20s ρ=%.4f, ν=%.1f  %-15.2f %-15.2f\n",
+		"Student-t",
+		student_copula.parameters[0],
+		student_copula.parameters[1],
+		student_copula.aic,
+		student_copula.bic,
+	)
+
+	// Interpretation
+	fmt.printf("\nInterpretation:\n")
+	if student_copula.aic < gauss_copula.aic {
+		fmt.printf("  ✓ Student-t copula fits better (lower AIC)\n")
+		fmt.printf(
+			"  ✓ Evidence of tail dependence (ν = %.1f < ∞)\n",
+			student_copula.parameters[1],
+		)
+	} else {
+		fmt.printf("  ✓ Gaussian copula fits better (lower AIC)\n")
+		fmt.printf("  ✓ No significant tail dependence\n")
+	}
+
+	if ltd > 0.05 {
+		fmt.printf("  ⚠ Significant lower tail dependence (%.2f)\n", ltd)
+		fmt.printf("    Assets tend to crash together!\n")
+	}
 	// 7. Compare with Historical VaR using new finance API
 	fmt.println("\n--- Historical vs GARCH VaR ---")
 	hist_var_95 := fin.var_historical(returns_bt, 0.95)
