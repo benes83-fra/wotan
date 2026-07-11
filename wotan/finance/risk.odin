@@ -92,6 +92,24 @@ EVT_Result :: struct {
 	converged:     bool,
 }
 
+GARCH_EVT_Result :: struct {
+	// GARCH parameters
+	garch_omega:   f64,
+	garch_alpha:   f64,
+	garch_beta:    f64,
+	// EVT parameters (fitted on standardized residuals)
+	evt_xi:        f64,
+	evt_beta:      f64,
+	evt_threshold: f64,
+	n_exceedances: int,
+	// Dynamic VaR series
+	var_95_series: []f64,
+	var_99_series: []f64,
+	// Backtesting results
+	backtest_95:   VaR_BacktestResult,
+	backtest_99:   VaR_BacktestResult,
+}
+
 // GPD (Generalized Pareto Distribution) PDF
 // f(y) = (1/β) * (1 + ξ*y/β)^(-1/ξ - 1) for ξ ≠ 0
 // f(y) = (1/β) * exp(-y/β) for ξ = 0 (Exponential)
@@ -1596,4 +1614,107 @@ ged_cvar :: proc(confidence: f64, shape: f64) -> f64 {
 	cvar := integral / (1.0 - confidence)
 
 	return cvar
+}
+// Fit GARCH-EVT Hybrid Model
+garch_evt_fit :: proc(
+	returns: []f64,
+	threshold_percentile: f64 = 0.90, // Threshold for EVT on standardized residuals
+	allocator: mem.Allocator = context.allocator,
+) -> GARCH_EVT_Result {
+	result: GARCH_EVT_Result
+
+	n := len(returns)
+	if n < 100 {return result}
+
+	// 1. Fit GARCH(1,1) to capture volatility clustering
+	residuals := a.extract_residuals(returns, allocator)
+	defer delete(residuals, allocator)
+
+	garch_res := a.garch_fit(residuals, .StudentT, 1, 1, 2000, 1e-4, allocator)
+	defer {
+		delete(garch_res.params.alpha, allocator)
+		delete(garch_res.params.beta, allocator)
+		delete(garch_res.conditional_var, allocator)
+		delete(garch_res.standardized_resid, allocator)
+	}
+
+	result.garch_omega = garch_res.params.omega
+	result.garch_alpha = garch_res.params.alpha[0]
+	result.garch_beta = garch_res.params.beta[0]
+
+	// 2. Extract standardized residuals and focus on the left tail (losses)
+	// We model losses as positive numbers: L_t = -Z_t
+	losses := make([]f64, n, context.temp_allocator)
+	defer delete(losses, context.temp_allocator)
+
+	for i in 0 ..< n {
+		losses[i] = -garch_res.standardized_resid[i]
+	}
+
+	// 3. Find threshold for EVT (e.g., 90th percentile of standardized losses)
+	sorted_losses := make([]f64, n, context.temp_allocator)
+	copy(sorted_losses, losses)
+	slice.sort(sorted_losses)
+
+	threshold_idx := int(threshold_percentile * f64(n))
+	if threshold_idx >= n {threshold_idx = n - 1}
+	u := sorted_losses[threshold_idx]
+	result.evt_threshold = u
+
+	// 4. Extract exceedances beyond threshold
+	exceedances := make([dynamic]f64, 0, allocator)
+	defer delete(exceedances)
+
+	for l in losses {
+		if l > u {
+			append(&exceedances, l - u)
+		}
+	}
+
+	result.n_exceedances = len(exceedances)
+	if result.n_exceedances < 10 {return result}
+
+	// 5. Fit GPD to exceedances
+	xi, beta, _ := gpd_fit(exceedances[:], allocator)
+	result.evt_xi = xi
+	result.evt_beta = beta
+
+	// 6. Calculate GPD quantiles for standardized residuals
+	// Formula: q_p = u + (beta/xi) * [ ((1-p) / (N_u/N))^(-xi) - 1 ]
+	N_u := f64(result.n_exceedances)
+	N := f64(n)
+	F_u := N_u / N // Empirical probability of being in the tail
+
+	calc_q :: proc(p: f64, u_val: f64, xi_val: f64, beta_val: f64, F_u_val: f64) -> f64 {
+		if math.abs(xi_val) < 1e-10 {
+			return u_val - beta_val * math.ln_f64((1.0 - p) / F_u_val)
+		}
+		return u_val + (beta_val / xi_val) * (math.pow((1.0 - p) / F_u_val, -xi_val) - 1.0)
+	}
+
+	q_95 := calc_q(0.95, u, xi, beta, F_u)
+	q_99 := calc_q(0.99, u, xi, beta, F_u)
+
+	// 7. Generate dynamic VaR series: VaR_t = sigma_t * q_p
+	result.var_95_series = make([]f64, n, allocator)
+	result.var_99_series = make([]f64, n, allocator)
+
+	for i in 0 ..< n {
+		sigma_t := math.sqrt_f64(garch_res.conditional_var[i])
+		result.var_95_series[i] = sigma_t * q_95
+		result.var_99_series[i] = sigma_t * q_99
+	}
+
+	// 8. Backtest the hybrid model
+	warmup := min(100, n - 1)
+	if n > warmup {
+		returns_bt := returns[warmup:]
+		var_95_bt := result.var_95_series[warmup:]
+		var_99_bt := result.var_99_series[warmup:]
+
+		result.backtest_95 = backtest_var(returns_bt, var_95_bt, 0.95)
+		result.backtest_99 = backtest_var(returns_bt, var_99_bt, 0.99)
+	}
+
+	return result
 }

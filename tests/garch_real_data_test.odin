@@ -272,6 +272,84 @@ garch_real_data_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("  99%% VaR:  %.4f%%\n", evt_result.var_99 * 100)
 	fmt.printf("  95%% CVaR: %.4f%%\n", evt_result.cvar_95 * 100)
 	fmt.printf("  99%% CVaR: %.4f%%\n", evt_result.cvar_99 * 100)
+	// 6d. GARCH-EVT Hybrid Model
+	fmt.println("\n--- GARCH-EVT Hybrid Model ---")
+	// Use 90th percentile threshold for the standardized residuals
+	hybrid_result := fin.garch_evt_fit(returns, 0.90, main_alloc)
+	defer {
+		delete(hybrid_result.var_95_series, main_alloc)
+		delete(hybrid_result.var_99_series, main_alloc)
+	}
+
+	fmt.printf("\nGARCH-EVT Parameters:\n")
+	fmt.printf("  GARCH ω: %.8f\n", hybrid_result.garch_omega)
+	fmt.printf("  GARCH α: %.4f\n", hybrid_result.garch_alpha)
+	fmt.printf("  GARCH β: %.4f\n", hybrid_result.garch_beta)
+	fmt.printf("  EVT ξ (shape): %.4f\n", hybrid_result.evt_xi)
+	fmt.printf("  EVT β (scale): %.6f\n", hybrid_result.evt_beta)
+	fmt.printf("  Threshold (u): %.4f\n", hybrid_result.evt_threshold)
+	fmt.printf("  Exceedances: %d / %d\n", hybrid_result.n_exceedances, len(returns))
+
+	fmt.printf("\nGARCH-EVT Backtesting:\n")
+
+	pass_h95h := "PASS"
+	if !hybrid_result.backtest_95.passes_test {pass_h95h = "FAIL"}
+	pass_h99h := "PASS"
+	if !hybrid_result.backtest_99.passes_test {pass_h99h = "FAIL"}
+
+	fmt.printf(
+		"  95%% VaR: %d breaches (%.2f%%) - p-value: %.4f (%s)\n",
+		hybrid_result.backtest_95.n_breaches,
+		hybrid_result.backtest_95.breach_rate * 100,
+		hybrid_result.backtest_95.kupiec_pvalue,
+		pass_h95h,
+	)
+	fmt.printf(
+		"  99%% VaR: %d breaches (%.2f%%) - p-value: %.4f (%s)\n",
+		hybrid_result.backtest_99.n_breaches,
+		hybrid_result.backtest_99.breach_rate * 100,
+		hybrid_result.backtest_99.kupiec_pvalue,
+		pass_h99h,
+	)
+
+	// Add Hybrid to the final comparison table
+	fmt.printf(
+		"\n%-25s %-15s %-15s %-15s %-15s\n",
+		"Metric",
+		"GARCH",
+		"Historical",
+		"EVT",
+		"GARCH-EVT",
+	)
+	fmt.printf(
+		"%-25s %-15s %-15s %-15s %-15s\n",
+		"-------------------------",
+		"---------------",
+		"---------------",
+		"---------------",
+		"---------------",
+	)
+
+	last_idx := len(returns) - 1
+	hybrid_var_95 := hybrid_result.var_95_series[last_idx]
+	hybrid_var_99 := hybrid_result.var_99_series[last_idx]
+
+	fmt.printf(
+		"%-25s %-15.4f%% %-15.4f%% %-15.4f%% %-15.4f%%\n",
+		"95% VaR",
+		var_95[last_idx] * 100,
+		var_95_hist[last_idx] * 100,
+		evt_result.var_95 * 100,
+		hybrid_var_95 * 100,
+	)
+	fmt.printf(
+		"%-25s %-15.4f%% %-15.4f%% %-15.4f%% %-15.4f%%\n",
+		"99% VaR",
+		var_99[last_idx] * 100,
+		var_99_hist[last_idx] * 100,
+		evt_result.var_99 * 100,
+		hybrid_var_99 * 100,
+	)
 	// 7. Compare with Historical VaR using new finance API
 	fmt.println("\n--- Historical vs GARCH VaR ---")
 	hist_var_95 := fin.var_historical(returns_bt, 0.95)
@@ -328,7 +406,7 @@ garch_real_data_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("  99%% CVaR: $%.2f\n", portfolio * -cvar_99_current)
 	// 8b. Compare Current Risk Metrics (with EVT)
 	fmt.println("\n--- Current Risk Metrics Comparison ---")
-	last_idx := len(returns) - 1
+	last_idxh := len(returns) - 1
 
 	fmt.printf("\n%-25s %-15s %-15s %-15s\n", "Metric", "GARCH", "Historical", "EVT")
 	fmt.printf(
@@ -341,29 +419,29 @@ garch_real_data_test :: proc(allocator: mem.Allocator) {
 	fmt.printf(
 		"%-25s %-15.4f%% %-15.4f%% %-15.4f%%\n",
 		"95% VaR",
-		var_95[last_idx] * 100,
-		var_95_hist[last_idx] * 100,
+		var_95[last_idxh] * 100,
+		var_95_hist[last_idxh] * 100,
 		evt_result.var_95 * 100,
 	)
 	fmt.printf(
 		"%-25s %-15.4f%% %-15.4f%% %-15.4f%%\n",
 		"99% VaR",
-		var_99[last_idx] * 100,
-		var_99_hist[last_idx] * 100,
+		var_99[last_idxh] * 100,
+		var_99_hist[last_idxh] * 100,
 		evt_result.var_99 * 100,
 	)
 	fmt.printf(
 		"%-25s %-15.4f%% %-15.4f%% %-15.4f%%\n",
 		"95% CVaR",
 		cvar_95_current * 100,
-		cvar_95_hist[last_idx] * 100,
+		cvar_95_hist[last_idxh] * 100,
 		evt_result.cvar_95 * 100,
 	)
 	fmt.printf(
 		"%-25s %-15.4f%% %-15.4f%% %-15.4f%%\n",
 		"99% CVaR",
 		cvar_99_current * 100,
-		cvar_99_hist[last_idx] * 100,
+		cvar_99_hist[last_idxh] * 100,
 		evt_result.cvar_99 * 100,
 	)
 	// 9. Visualization
