@@ -251,6 +251,27 @@ garch_real_data_test :: proc(allocator: mem.Allocator) {
 		backtest_hist_99.breach_rate * 100,
 		pass_h99,
 	)
+	// 6c. Extreme Value Theory (EVT)
+	fmt.println("\n--- Extreme Value Theory (EVT) ---")
+	evt_result := fin.evt_fit(returns, 0.95, main_alloc) // 95th percentile threshold
+
+	fmt.printf("\nEVT Model Parameters:\n")
+	fmt.printf("  Threshold (u): %.4f%%\n", evt_result.threshold * 100)
+	fmt.printf("  Shape (ξ): %.4f\n", evt_result.xi)
+	fmt.printf("  Scale (β): %.6f\n", evt_result.beta)
+	fmt.printf(
+		"  Exceedances: %d / %d (%.2f%%)\n",
+		evt_result.n_exceedances,
+		evt_result.n_total,
+		f64(evt_result.n_exceedances) / f64(evt_result.n_total) * 100,
+	)
+	fmt.printf("  Converged: %v\n", evt_result.converged)
+
+	fmt.printf("\nEVT Risk Metrics:\n")
+	fmt.printf("  95%% VaR:  %.4f%%\n", evt_result.var_95 * 100)
+	fmt.printf("  99%% VaR:  %.4f%%\n", evt_result.var_99 * 100)
+	fmt.printf("  95%% CVaR: %.4f%%\n", evt_result.cvar_95 * 100)
+	fmt.printf("  99%% CVaR: %.4f%%\n", evt_result.cvar_99 * 100)
 	// 7. Compare with Historical VaR using new finance API
 	fmt.println("\n--- Historical vs GARCH VaR ---")
 	hist_var_95 := fin.var_historical(returns_bt, 0.95)
@@ -305,40 +326,45 @@ garch_real_data_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("  99%% VaR: $%.2f\n", portfolio * -var_99_current)
 	fmt.printf("  95%% CVaR: $%.2f\n", portfolio * -cvar_95_current)
 	fmt.printf("  99%% CVaR: $%.2f\n", portfolio * -cvar_99_current)
-	// 8b. Compare Current Risk Metrics
+	// 8b. Compare Current Risk Metrics (with EVT)
 	fmt.println("\n--- Current Risk Metrics Comparison ---")
 	last_idx := len(returns) - 1
 
-	fmt.printf("\n%-25s %-15s %-15s\n", "Metric", "GARCH", "Historical")
+	fmt.printf("\n%-25s %-15s %-15s %-15s\n", "Metric", "GARCH", "Historical", "EVT")
 	fmt.printf(
-		"%-25s %-15s %-15s\n",
+		"%-25s %-15s %-15s %-15s\n",
 		"-------------------------",
 		"---------------",
 		"---------------",
+		"---------------",
 	)
 	fmt.printf(
-		"%-25s %-15.4f%% %-15.4f%%\n",
+		"%-25s %-15.4f%% %-15.4f%% %-15.4f%%\n",
 		"95% VaR",
 		var_95[last_idx] * 100,
 		var_95_hist[last_idx] * 100,
+		evt_result.var_95 * 100,
 	)
 	fmt.printf(
-		"%-25s %-15.4f%% %-15.4f%%\n",
+		"%-25s %-15.4f%% %-15.4f%% %-15.4f%%\n",
 		"99% VaR",
 		var_99[last_idx] * 100,
 		var_99_hist[last_idx] * 100,
+		evt_result.var_99 * 100,
 	)
 	fmt.printf(
-		"%-25s %-15.4f%% %-15.4f%%\n",
+		"%-25s %-15.4f%% %-15.4f%% %-15.4f%%\n",
 		"95% CVaR",
 		cvar_95_current * 100,
 		cvar_95_hist[last_idx] * 100,
+		evt_result.cvar_95 * 100,
 	)
 	fmt.printf(
-		"%-25s %-15.4f%% %-15.4f%%\n",
+		"%-25s %-15.4f%% %-15.4f%% %-15.4f%%\n",
 		"99% CVaR",
 		cvar_99_current * 100,
 		cvar_99_hist[last_idx] * 100,
+		evt_result.cvar_99 * 100,
 	)
 	// 9. Visualization
 	fmt.println("\n--- Generating Visualizations ---")

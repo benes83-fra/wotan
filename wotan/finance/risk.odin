@@ -75,7 +75,284 @@ VaR_BacktestResult :: struct {
 	kupiec_pvalue:     f64,
 	passes_test:       bool, // True if p-value > 0.05
 }
+// ============================================================================
+// Extreme Value Theory (EVT) - Peak-over-Threshold Method
+// ============================================================================
 
+EVT_Result :: struct {
+	threshold:     f64, // Threshold u
+	xi:            f64, // Shape parameter ξ
+	beta:          f64, // Scale parameter β
+	n_exceedances: int, // Number of exceedances N_u
+	n_total:       int, // Total observations n
+	var_95:        f64, // 95% VaR
+	var_99:        f64, // 99% VaR
+	cvar_95:       f64, // 95% CVaR (Expected Shortfall)
+	cvar_99:       f64, // 99% CVaR
+	converged:     bool,
+}
+
+// GPD (Generalized Pareto Distribution) PDF
+// f(y) = (1/β) * (1 + ξ*y/β)^(-1/ξ - 1) for ξ ≠ 0
+// f(y) = (1/β) * exp(-y/β) for ξ = 0 (Exponential)
+gpd_pdf :: proc(y: f64, xi: f64, beta: f64) -> f64 {
+	if beta <= 0.0 {return 0.0}
+	if y < 0.0 {return 0.0}
+
+	if math.abs(xi) < 1e-10 {
+		// Exponential case (ξ → 0)
+		return (1.0 / beta) * math.exp_f64(-y / beta)
+	}
+
+	term := 1.0 + xi * y / beta
+	if term <= 0.0 {return 0.0}
+
+	return (1.0 / beta) * math.pow(term, -1.0 / xi - 1.0)
+}
+
+// GPD CDF
+// F(y) = 1 - (1 + ξ*y/β)^(-1/ξ) for ξ ≠ 0
+// F(y) = 1 - exp(-y/β) for ξ = 0
+gpd_cdf :: proc(y: f64, xi: f64, beta: f64) -> f64 {
+	if beta <= 0.0 {return 0.0}
+	if y < 0.0 {return 0.0}
+
+	if math.abs(xi) < 1e-10 {
+		// Exponential case
+		return 1.0 - math.exp_f64(-y / beta)
+	}
+
+	term := 1.0 + xi * y / beta
+	if term <= 0.0 {return 1.0}
+
+	return 1.0 - math.pow(term, -1.0 / xi)
+}
+
+// GPD Quantile (Inverse CDF)
+// Q(p) = (β/ξ) * [(1-p)^(-ξ) - 1] for ξ ≠ 0
+// Q(p) = -β * ln(1-p) for ξ = 0
+gpd_quantile :: proc(p: f64, xi: f64, beta: f64) -> f64 {
+	if beta <= 0.0 {return 0.0}
+	if p <= 0.0 {return 0.0}
+	if p >= 1.0 {return math.INF_F64}
+
+	if math.abs(xi) < 1e-10 {
+		// Exponential case
+		return -beta * math.ln_f64(1.0 - p)
+	}
+
+	return (beta / xi) * (math.pow(1.0 - p, -xi) - 1.0)
+}
+
+// GPD Negative Log-Likelihood for MLE
+_gpd_neg_log_likelihood :: proc(params: []f64, exceedances: []f64) -> f64 {
+	xi := params[0]
+	beta := params[1]
+
+	if beta <= 0.0 {return math.INF_F64}
+
+	n := f64(len(exceedances))
+	log_lik := 0.0
+
+	for y in exceedances {
+		if y < 0.0 {return math.INF_F64}
+
+		if math.abs(xi) < 1e-10 {
+			// Exponential case
+			log_lik += -math.ln_f64(beta) - y / beta
+		} else {
+			term := 1.0 + xi * y / beta
+			if term <= 0.0 {return math.INF_F64}
+			log_lik += -math.ln_f64(beta) - (1.0 / xi + 1.0) * math.ln_f64(term)
+		}
+	}
+
+	return -log_lik / n // Negative for minimization
+}
+
+// Fit GPD using Maximum Likelihood Estimation
+gpd_fit :: proc(
+	exceedances: []f64,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	xi: f64,
+	beta: f64,
+	converged: bool,
+) {
+	n := len(exceedances)
+	if n < 10 {return 0.0, 0.0, false}
+
+	// Initial estimates using method of moments
+	mean_exc := 0.0
+	var_exc := 0.0
+	for y in exceedances {
+		mean_exc += y
+	}
+	mean_exc /= f64(n)
+
+	for y in exceedances {
+		diff := y - mean_exc
+		var_exc += diff * diff
+	}
+	var_exc /= f64(n - 1)
+
+	// Method of moments estimates
+	xi_init := 0.5 * (mean_exc * mean_exc / var_exc - 1.0)
+	beta_init := mean_exc * (1.0 - xi_init)
+
+	if beta_init <= 0.0 {beta_init = mean_exc}
+
+	// Simple gradient descent optimization
+	params := make([]f64, 2, allocator)
+	defer delete(params, allocator)
+	params[0] = xi_init
+	params[1] = beta_init
+
+	learning_rate := 0.01
+	best_loss := _gpd_neg_log_likelihood(params, exceedances)
+	best_xi := xi_init
+	best_beta := beta_init
+
+	for iter in 0 ..< 1000 {
+		eps := 1e-5
+
+		// Numerical gradient
+		grad_xi := 0.0
+		grad_beta := 0.0
+
+		params_plus := make([]f64, 2, context.temp_allocator)
+		params_minus := make([]f64, 2, context.temp_allocator)
+
+		// Gradient for xi
+		params_plus[0] = params[0] + eps
+		params_plus[1] = params[1]
+		loss_plus := _gpd_neg_log_likelihood(params_plus, exceedances)
+
+		params_minus[0] = params[0] - eps
+		params_minus[1] = params[1]
+		loss_minus := _gpd_neg_log_likelihood(params_minus, exceedances)
+
+		grad_xi = (loss_plus - loss_minus) / (2.0 * eps)
+
+		// Gradient for beta
+		params_plus[0] = params[0]
+		params_plus[1] = params[1] + eps
+		loss_plus = _gpd_neg_log_likelihood(params_plus, exceedances)
+
+		params_minus[0] = params[0]
+		params_minus[1] = params[1] - eps
+		loss_minus = _gpd_neg_log_likelihood(params_minus, exceedances)
+
+		grad_beta = (loss_plus - loss_minus) / (2.0 * eps)
+
+		// Update parameters
+		params[0] -= learning_rate * grad_xi
+		params[1] -= learning_rate * grad_beta
+
+		// Ensure beta > 0
+		if params[1] <= 0.0 {params[1] = 1e-6}
+
+		// Check convergence
+		current_loss := _gpd_neg_log_likelihood(params, exceedances)
+		if current_loss < best_loss {
+			best_loss = current_loss
+			best_xi = params[0]
+			best_beta = params[1]
+		}
+
+		if iter > 100 && math.abs(current_loss - best_loss) < 1e-6 {
+			converged = true
+			break
+		}
+	}
+
+	return best_xi, best_beta, converged
+}
+
+// Fit EVT model using Peak-over-Threshold method
+evt_fit :: proc(
+	returns: []f64,
+	threshold_percentile: f64 = 0.95, // Use 95th percentile as threshold
+	allocator: mem.Allocator = context.allocator,
+) -> EVT_Result {
+	n := len(returns)
+	if n < 100 {return EVT_Result{}}
+
+	// Sort returns to find threshold
+	sorted := make([]f64, n, context.temp_allocator)
+	copy(sorted, returns)
+	slice.sort(sorted)
+
+	// Threshold is the (1-threshold_percentile) quantile (left tail)
+	threshold_idx := int((1.0 - threshold_percentile) * f64(n))
+	if threshold_idx < 0 {threshold_idx = 0}
+	threshold := sorted[threshold_idx]
+
+	// Extract exceedances (losses beyond threshold)
+	exceedances := make([dynamic]f64, 0, allocator)
+	defer delete(exceedances)
+
+	for r in returns {
+		if r < threshold {
+			append(&exceedances, threshold - r) // Convert to positive losses
+		}
+	}
+
+	n_exceedances := len(exceedances)
+	if n_exceedances < 10 {
+		return EVT_Result{}
+	}
+
+	// Fit GPD to exceedances
+	xi, beta, converged := gpd_fit(exceedances[:], allocator)
+
+	// Calculate VaR using EVT formula
+	// VaR_p = u + (β/ξ) * [(n/N_u * (1-p))^(-ξ) - 1]
+	p_95 := 0.95
+	p_99 := 0.99
+
+	var_95 := threshold
+	var_99 := threshold
+
+	if math.abs(xi) > 1e-10 {
+		scale_95 := math.pow(f64(n) / f64(n_exceedances) * (1.0 - p_95), -xi)
+		var_95 = threshold + (beta / xi) * (scale_95 - 1.0)
+
+		scale_99 := math.pow(f64(n) / f64(n_exceedances) * (1.0 - p_99), -xi)
+		var_99 = threshold + (beta / xi) * (scale_99 - 1.0)
+	} else {
+		// Exponential case
+		var_95 = threshold - beta * math.ln_f64(f64(n_exceedances) / f64(n) * (1.0 - p_95))
+		var_99 = threshold - beta * math.ln_f64(f64(n_exceedances) / f64(n) * (1.0 - p_99))
+	}
+
+	// Calculate CVaR (Expected Shortfall)
+	// CVaR_p = VaR_p / (1-ξ) + (β - ξ*u) / (1-ξ)
+	cvar_95 := 0.0
+	cvar_99 := 0.0
+
+	if xi < 1.0 { 	// Finite mean condition
+		cvar_95 = var_95 / (1.0 - xi) + (beta - xi * threshold) / (1.0 - xi)
+		cvar_99 = var_99 / (1.0 - xi) + (beta - xi * threshold) / (1.0 - xi)
+	} else {
+		// Infinite mean - use VaR as proxy
+		cvar_95 = var_95 * 1.2
+		cvar_99 = var_99 * 1.2
+	}
+
+	return EVT_Result {
+		threshold = threshold,
+		xi = xi,
+		beta = beta,
+		n_exceedances = n_exceedances,
+		n_total = n,
+		var_95 = var_95,
+		var_99 = var_99,
+		cvar_95 = cvar_95,
+		cvar_99 = cvar_99,
+		converged = converged,
+	}
+}
 // ============================================================================
 // Helper: Inverse Normal CDF (Quantile Function)
 // ============================================================================
