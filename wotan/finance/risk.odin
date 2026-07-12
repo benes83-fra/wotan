@@ -508,16 +508,29 @@ var_historical :: proc(returns: []f64, confidence: f64 = 0.95) -> f64 {
 var_parametric :: proc(returns: []f64, confidence: f64 = 0.95) -> f64 {
 	if len(returns) == 0 {return 0.0}
 
-	mean := 0.0
-	for r in returns {mean += r}
-	mean /= f64(len(returns))
+	n := len(returns)
 
-	variance := 0.0
-	for r in returns {
-		diff := r - mean
-		variance += diff * diff
-	}
-	variance /= f64(len(returns) - 1)
+	// SIMD sum for mean
+	mean := l.sum_simd(returns) / f64(n)
+
+	// SIMD variance calculation
+	ones := make([]f64, n, context.temp_allocator)
+	defer delete(ones, context.temp_allocator)
+	for i in 0 ..< n {ones[i] = 1.0}
+
+	mean_vec := make([]f64, n, context.temp_allocator)
+	defer delete(mean_vec, context.temp_allocator)
+	l.vec_scale_simd(ones, mean, mean_vec)
+
+	diff := make([]f64, n, context.temp_allocator)
+	defer delete(diff, context.temp_allocator)
+	l.vec_sub_simd(returns, mean_vec, diff)
+
+	diff_sq := make([]f64, n, context.temp_allocator)
+	defer delete(diff_sq, context.temp_allocator)
+	l.vec_mul_simd(diff, diff, diff_sq)
+
+	variance := l.sum_simd(diff_sq) / f64(n - 1)
 	std_dev := math.sqrt_f64(variance)
 
 	z_score := norm_inv(confidence)
@@ -638,8 +651,8 @@ conditional_var :: proc(returns: []f64, confidence: f64 = 0.95) -> f64 {
 	cutoff_index := int((1.0 - confidence) * f64(len(sorted)))
 	if cutoff_index < 1 {cutoff_index = 1}
 
-	sum := 0.0
-	for i in 0 ..< cutoff_index {sum += sorted[i]}
+	// SIMD sum of tail
+	sum := l.sum_simd(sorted[:cutoff_index])
 
 	return sum / f64(cutoff_index)
 }
@@ -682,92 +695,50 @@ backtest_var :: proc(
 	confidence: f64 = 0.95,
 ) -> VaR_BacktestResult {
 	n := min(len(returns), len(var_series))
-	if n == 0 {
-		return VaR_BacktestResult{}
-	}
+	if n == 0 {return VaR_BacktestResult{}}
 
-	// Auto-dispatch to SIMD if available
-	if intrinsics.has_target_feature("avx") && n >= 8 {
-		return _backtest_var_simd(returns, var_series, confidence)
-	}
-	return _backtest_var_scalar(returns, var_series, confidence)
-}
-
-_backtest_var_scalar :: proc(
-	returns: []f64,
-	var_series: []f64,
-	confidence: f64,
-) -> VaR_BacktestResult {
-	n := min(len(returns), len(var_series))
 	n_breaches := 0
-
-	for i in 0 ..< n {
-		if returns[i] < -var_series[i] {
-			n_breaches += 1
-		}
-	}
-
-	expected := f64(n) * (1.0 - confidence)
-	breach_rate := f64(n_breaches) / f64(n)
-	kupiec_stat := _kupiec_pof_test(n, n_breaches, 1.0 - confidence)
-	p_value := _chi_squared_pvalue_1df(kupiec_stat)
-
-	return VaR_BacktestResult {
-		n_obs = n,
-		n_breaches = n_breaches,
-		expected_breaches = expected,
-		breach_rate = breach_rate,
-		kupiec_stat = kupiec_stat,
-		kupiec_pvalue = p_value,
-		passes_test = p_value > 0.05,
-	}
-}
-
-_backtest_var_simd :: proc(
-	returns: []f64,
-	var_series: []f64,
-	confidence: f64,
-) -> VaR_BacktestResult {
-	n := min(len(returns), len(var_series))
-	n_breaches := 0
-
 	i := 0
-	for ; i + 8 <= n; i += 8 {
-		vret := simd.f64x8 {
-			returns[i],
-			returns[i + 1],
-			returns[i + 2],
-			returns[i + 3],
-			returns[i + 4],
-			returns[i + 5],
-			returns[i + 6],
-			returns[i + 7],
-		}
-		vvar := simd.f64x8 {
-			var_series[i],
-			var_series[i + 1],
-			var_series[i + 2],
-			var_series[i + 3],
-			var_series[i + 4],
-			var_series[i + 5],
-			var_series[i + 6],
-			var_series[i + 7],
-		}
 
-		zero_vec := simd.f64x8{0, 0, 0, 0, 0, 0, 0, 0}
-		neg_var := intrinsics.simd_sub(zero_vec, vvar)
-		mask := intrinsics.simd_lanes_lt(vret, neg_var)
+	// SIMD comparison (8 at a time)
+	if intrinsics.has_target_feature("avx") {
+		for ; i + 8 <= n; i += 8 {
+			vret := simd.f64x8 {
+				returns[i],
+				returns[i + 1],
+				returns[i + 2],
+				returns[i + 3],
+				returns[i + 4],
+				returns[i + 5],
+				returns[i + 6],
+				returns[i + 7],
+			}
+			vvar := simd.f64x8 {
+				var_series[i],
+				var_series[i + 1],
+				var_series[i + 2],
+				var_series[i + 3],
+				var_series[i + 4],
+				var_series[i + 5],
+				var_series[i + 6],
+				var_series[i + 7],
+			}
 
-		// Extract for counting
-		ret_arr := transmute([8]f64)vret
-		var_arr := transmute([8]f64)vvar
-		for j := 0; j < 8; j += 1 {
-			if ret_arr[j] < -var_arr[j] {
-				n_breaches += 1
+			zero_vec := simd.f64x8{0, 0, 0, 0, 0, 0, 0, 0}
+			neg_var := intrinsics.simd_sub(zero_vec, vvar)
+
+			// Extract and count
+			ret_arr := transmute([8]f64)vret
+			var_arr := transmute([8]f64)neg_var
+			for j := 0; j < 8; j += 1 {
+				if ret_arr[j] < var_arr[j] {
+					n_breaches += 1
+				}
 			}
 		}
 	}
 
+	// Scalar tail
 	for ; i < n; i += 1 {
 		if returns[i] < -var_series[i] {
 			n_breaches += 1
@@ -1599,28 +1570,42 @@ ged_pdf :: proc(z: f64, shape: f64) -> f64 {
 // GED CDF using numerical integration (Simpson's rule)
 ged_cdf :: proc(z: f64, shape: f64) -> f64 {
 	if shape <= 0.0 {return 0.5}
-
-	// For z = 0, CDF = 0.5 (symmetric distribution)
 	if z == 0.0 {return 0.5}
 
-	// Integrate PDF from -∞ to z
-	// Use substitution: integrate from 0 to |z| and add 0.5
 	abs_z := math.abs(z)
-
-	// Simpson's rule with 1000 intervals
 	n := 1000
 	h := abs_z / f64(n)
 
-	sum := ged_pdf(0.0, shape) + ged_pdf(abs_z, shape)
+	// Allocate arrays for SIMD integration
+	x_vals := make([]f64, n, context.temp_allocator)
+	defer delete(x_vals, context.temp_allocator)
+	pdf_vals := make([]f64, n, context.temp_allocator)
+	defer delete(pdf_vals, context.temp_allocator)
+	weights := make([]f64, n, context.temp_allocator)
+	defer delete(weights, context.temp_allocator)
 
-	for i in 1 ..< n {
-		x := f64(i) * h
+	// Fill x values and weights
+	for i in 0 ..< n {
+		x_vals[i] = f64(i) * h
 		if i % 2 == 0 {
-			sum += 2.0 * ged_pdf(x, shape)
+			weights[i] = 2.0
 		} else {
-			sum += 4.0 * ged_pdf(x, shape)
+			weights[i] = 4.0
 		}
 	}
+
+	// Calculate PDF values (scalar, unavoidable)
+	for i in 0 ..< n {
+		pdf_vals[i] = ged_pdf(x_vals[i], shape)
+	}
+
+	// SIMD weighted sum
+	weighted := make([]f64, n, context.temp_allocator)
+	defer delete(weighted, context.temp_allocator)
+	l.vec_mul_simd(pdf_vals, weights, weighted)
+
+	sum := l.sum_simd(weighted)
+	sum += ged_pdf(0.0, shape) + ged_pdf(abs_z, shape)
 
 	integral := sum * h / 3.0
 
@@ -1678,21 +1663,34 @@ ged_cvar :: proc(confidence: f64, shape: f64) -> f64 {
 
 	z_alpha := ged_quantile(1.0 - confidence, shape)
 
-	// CVaR = E[Z | Z < z_α] = ∫_{-∞}^{z_α} z * f(z) dz / (1-confidence)
-	// Use numerical integration from z_α - 10 to z_α
 	low := z_alpha - 10.0
 	high := z_alpha
 
 	n := 1000
 	h := (high - low) / f64(n)
 
-	sum := 0.0
+	// Allocate arrays for SIMD
+	x_vals := make([]f64, n, context.temp_allocator)
+	defer delete(x_vals, context.temp_allocator)
+	pdf_vals := make([]f64, n, context.temp_allocator)
+	defer delete(pdf_vals, context.temp_allocator)
+	weighted := make([]f64, n, context.temp_allocator)
+	defer delete(weighted, context.temp_allocator)
+
+	// Fill x values
 	for i in 0 ..< n {
-		x := low + f64(i) * h
-		sum += x * ged_pdf(x, shape)
+		x_vals[i] = low + f64(i) * h
 	}
 
-	integral := sum * h
+	// Calculate PDF (scalar)
+	for i in 0 ..< n {
+		pdf_vals[i] = ged_pdf(x_vals[i], shape)
+	}
+
+	// SIMD: x * pdf(x)
+	l.vec_mul_simd(x_vals, pdf_vals, weighted)
+
+	integral := l.sum_simd(weighted) * h
 	cvar := integral / (1.0 - confidence)
 
 	return cvar
