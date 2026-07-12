@@ -486,3 +486,262 @@ upper_tail_dependence :: proc(u1: []f64, u2: []f64, threshold: f64 = 0.95) -> f6
 
 	return f64(count_both_high) / f64(count_u1_high)
 }
+
+// ============================================================================
+// Clayton Copula (Lower Tail Dependence)
+// ============================================================================
+
+clayton_copula_loglik :: proc(u1: []f64, u2: []f64, theta: f64) -> f64 {
+	n := min(len(u1), len(u2))
+	loglik := 0.0
+
+	// Precompute constants
+	theta_plus_1 := theta + 1.0
+	inv_theta := 1.0 / theta
+	two_plus_inv := 2.0 + inv_theta
+
+	for i in 0 ..< n {
+		// Guard against domain errors
+		if u1[i] <= 0.0 || u1[i] >= 1.0 || u2[i] <= 0.0 || u2[i] >= 1.0 {continue}
+
+		// u^(-theta)
+		u1_neg := math.pow(u1[i], -theta)
+		u2_neg := math.pow(u2[i], -theta)
+		sum_neg := u1_neg + u2_neg - 1.0
+
+		if sum_neg <= 0.0 {continue}
+
+		// Log-density: ln(1+theta) - (theta+1)(ln u1 + ln u2) - (2 + 1/theta) ln(sum)
+		loglik +=
+			math.ln_f64(theta_plus_1) -
+			theta_plus_1 * (math.ln_f64(u1[i]) + math.ln_f64(u2[i])) -
+			two_plus_inv * math.ln_f64(sum_neg)
+	}
+
+	return loglik
+}
+
+fit_clayton :: proc(
+	u1: []f64,
+	u2: []f64,
+	allocator: mem.Allocator = context.allocator,
+) -> CopulaResult {
+	result: CopulaResult
+	result.copula_type = .Clayton
+	result.n_obs = min(len(u1), len(u2))
+
+	// Clayton requires positive dependence (tau > 0)
+	tau := kendall_tau(u1, u2)
+	if tau <= 0.0 {
+		result.converged = false
+		return result
+	}
+
+	// Theta estimation from Kendall's tau: theta = 2*tau / (1-tau)
+	theta := 2.0 * tau / (1.0 - tau)
+
+	result.parameters = make([]f64, 1, allocator)
+	result.parameters[0] = theta
+	result.log_likelihood = clayton_copula_loglik(u1, u2, theta)
+
+	k := 1.0
+	n := f64(result.n_obs)
+	result.aic = 2.0 * k - 2.0 * result.log_likelihood
+	result.bic = k * math.ln_f64(n) - 2.0 * result.log_likelihood
+	result.converged = true
+
+	return result
+}
+
+// ============================================================================
+// Gumbel Copula (Upper Tail Dependence)
+// ============================================================================
+
+gumbel_copula_loglik :: proc(u1: []f64, u2: []f64, theta: f64) -> f64 {
+	n := min(len(u1), len(u2))
+	loglik := 0.0
+
+	inv_theta := 1.0 / theta
+	theta_minus_1 := theta - 1.0
+
+	for i in 0 ..< n {
+		if u1[i] <= 0.0 || u1[i] >= 1.0 || u2[i] <= 0.0 || u2[i] >= 1.0 {continue}
+
+		a := -math.ln_f64(u1[i])
+		b := -math.ln_f64(u2[i])
+		K := math.pow(a, theta) + math.pow(b, theta)
+
+		if K <= 0.0 {continue}
+
+		// Log-density formula for Gumbel
+		// ln c = (1/theta - 2) ln K + ln(theta - 1 + K^(1/theta)) - a - b + (1-theta)(ln a + ln b)
+		K_inv := math.pow(K, inv_theta)
+		term := theta_minus_1 + K_inv
+
+		if term <= 0.0 {continue}
+
+		loglik +=
+			(inv_theta - 2.0) * math.ln_f64(K) +
+			math.ln_f64(term) -
+			a -
+			b +
+			(1.0 - theta) * (math.ln_f64(a) + math.ln_f64(b))
+	}
+
+	return loglik
+}
+
+fit_gumbel :: proc(
+	u1: []f64,
+	u2: []f64,
+	allocator: mem.Allocator = context.allocator,
+) -> CopulaResult {
+	result: CopulaResult
+	result.copula_type = .Gumbel
+	result.n_obs = min(len(u1), len(u2))
+
+	// Gumbel requires positive dependence (tau > 0)
+	tau := kendall_tau(u1, u2)
+	if tau <= 0.0 {
+		result.converged = false
+		return result
+	}
+
+	// Theta estimation: theta = 1 / (1 - tau)
+	theta := 1.0 / (1.0 - tau)
+
+	// Gumbel requires theta >= 1
+	if theta < 1.0 {theta = 1.0}
+
+	result.parameters = make([]f64, 1, allocator)
+	result.parameters[0] = theta
+	result.log_likelihood = gumbel_copula_loglik(u1, u2, theta)
+
+	k := 1.0
+	n := f64(result.n_obs)
+	result.aic = 2.0 * k - 2.0 * result.log_likelihood
+	result.bic = k * math.ln_f64(n) - 2.0 * result.log_likelihood
+	result.converged = true
+
+	return result
+}
+
+// ============================================================================
+// Frank Copula (Symmetric, No Tail Dependence)
+// ============================================================================
+
+frank_copula_loglik :: proc(u1: []f64, u2: []f64, theta: f64) -> f64 {
+	n := min(len(u1), len(u2))
+	loglik := 0.0
+
+	// Precompute constants
+	e_minus_theta := math.exp(-theta)
+	e_minus_theta_minus_1 := e_minus_theta - 1.0
+	num_const := -theta * e_minus_theta_minus_1
+
+	for i in 0 ..< n {
+		if u1[i] <= 0.0 || u1[i] >= 1.0 || u2[i] <= 0.0 || u2[i] >= 1.0 {continue}
+
+		// A = e^(-theta*u1), B = e^(-theta*u2)
+		A := math.exp(-theta * u1[i])
+		B := math.exp(-theta * u2[i])
+
+		// Denominator: (e^-theta - 1) + (A-1)(B-1)
+		denom := e_minus_theta_minus_1 + (A - 1.0) * (B - 1.0)
+
+		if denom <= 0.0 {continue}
+
+		// Log-density: ln(-theta(e^-theta-1)AB) - 2 ln(denom)
+		// = ln(|num_const|) + ln(A) + ln(B) - 2 ln(denom)
+		loglik +=
+			math.ln_f64(math.abs(num_const)) +
+			math.ln_f64(A) +
+			math.ln_f64(B) -
+			2.0 * math.ln_f64(denom)
+	}
+
+	return loglik
+}
+
+// Helper: Debye function D_1(x) for Frank copula tau-theta relationship
+_debye_1 :: proc(x: f64) -> f64 {
+	if x == 0.0 {return 1.0}
+
+	// Numerical integration of t/(e^t - 1) from 0 to x
+	n := 100
+	h := x / f64(n)
+	sum := 0.0
+
+	for i in 0 ..< n {
+		t := f64(i) * h
+		if t == 0.0 {
+			sum += 0.5 * 1.0 // Limit t->0 is 1
+		} else {
+			sum += 0.5 * (t / (math.exp(t) - 1.0))
+		}
+
+		t_mid := (f64(i) + 0.5) * h
+		sum += t_mid / (math.exp(t_mid) - 1.0)
+	}
+
+	return sum * h / x
+}
+
+fit_frank :: proc(
+	u1: []f64,
+	u2: []f64,
+	allocator: mem.Allocator = context.allocator,
+) -> CopulaResult {
+	result: CopulaResult
+	result.copula_type = .Frank
+	result.n_obs = min(len(u1), len(u2))
+
+	tau := kendall_tau(u1, u2)
+
+	// Frank can handle negative dependence, so tau can be negative
+	// We use numerical root finding to solve tau(theta) = empirical_tau
+	// tau(theta) = 1 - 4/theta * (1 - D_1(theta)/theta)
+
+	// Bisection search for theta in [-50, 50]
+	low := -50.0
+	high := 50.0
+	best_theta := 0.0
+	best_ll := -math.INF_F64
+
+	// Quick check for independence
+	if math.abs(tau) < 0.01 {
+		best_theta = 0.001 // Near independence
+	} else {
+		for iter in 0 ..< 50 {
+			mid := (low + high) / 2.0
+			if math.abs(mid) < 1e-6 {mid = 1e-6}
+
+			d1 := _debye_1(mid)
+			tau_model := 1.0 - 4.0 / mid * (1.0 - d1 / mid)
+
+			if tau_model > tau {
+				low = mid
+			} else {
+				high = mid
+			}
+
+			if math.abs(tau_model - tau) < 1e-4 {
+				best_theta = mid
+				break
+			}
+			best_theta = mid
+		}
+	}
+
+	result.parameters = make([]f64, 1, allocator)
+	result.parameters[0] = best_theta
+	result.log_likelihood = frank_copula_loglik(u1, u2, best_theta)
+
+	k := 1.0
+	n := f64(result.n_obs)
+	result.aic = 2.0 * k - 2.0 * result.log_likelihood
+	result.bic = k * math.ln_f64(n) - 2.0 * result.log_likelihood
+	result.converged = true
+
+	return result
+}

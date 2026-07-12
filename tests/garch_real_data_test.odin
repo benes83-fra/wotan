@@ -418,7 +418,110 @@ garch_real_data_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("  Log-Likelihood: %.2f\n", student_copula.log_likelihood)
 	fmt.printf("  AIC: %.2f\n", student_copula.aic)
 	fmt.printf("  BIC: %.2f\n", student_copula.bic)
+	// Fit Clayton Copula
+	fmt.println("\nFitting Clayton Copula...")
+	clayton_copula := fin.fit_clayton(u_spy, u_vix, main_alloc)
+	defer delete(clayton_copula.parameters, main_alloc)
 
+	if clayton_copula.converged {
+		fmt.printf("\nClayton Copula:\n")
+		fmt.printf("  θ (dependence): %.4f\n", clayton_copula.parameters[0])
+		fmt.printf("  Log-Likelihood: %.2f\n", clayton_copula.log_likelihood)
+		fmt.printf("  AIC: %.2f\n", clayton_copula.aic)
+	} else {
+		fmt.printf("\nClayton Copula: Skipped (requires positive dependence)\n")
+	}
+
+	// Fit Gumbel Copula
+	fmt.println("\nFitting Gumbel Copula...")
+	gumbel_copula := fin.fit_gumbel(u_spy, u_vix, main_alloc)
+	defer delete(gumbel_copula.parameters, main_alloc)
+
+	if gumbel_copula.converged {
+		fmt.printf("\nGumbel Copula:\n")
+		fmt.printf("  θ (dependence): %.4f\n", gumbel_copula.parameters[0])
+		fmt.printf("  Log-Likelihood: %.2f\n", gumbel_copula.log_likelihood)
+		fmt.printf("  AIC: %.2f\n", gumbel_copula.aic)
+	} else {
+		fmt.printf("\nGumbel Copula: Skipped (requires positive dependence)\n")
+	}
+
+	// Fit Frank Copula
+	fmt.println("\nFitting Frank Copula...")
+	frank_copula := fin.fit_frank(u_spy, u_vix, main_alloc)
+	defer delete(frank_copula.parameters, main_alloc)
+
+	fmt.printf("\nFrank Copula:\n")
+	fmt.printf("  θ (dependence): %.4f\n", frank_copula.parameters[0])
+	fmt.printf("  Log-Likelihood: %.2f\n", frank_copula.log_likelihood)
+	fmt.printf("  AIC: %.2f\n", frank_copula.aic)
+	fmt.printf("  BIC: %.2f\n", frank_copula.bic)
+
+	// Comprehensive Comparison Table
+	fmt.printf("\n%-15s %-15s %-15s %-15s\n", "Copula", "θ / ρ", "LogLik", "AIC")
+	fmt.printf(
+		"%-15s %-15s %-15s %-15s\n",
+		"---------------",
+		"---------------",
+		"---------------",
+		"---------------",
+	)
+
+	// Gaussian
+	fmt.printf(
+		"%-15s ρ=%.4f          %-15.2f %-15.2f\n",
+		"Gaussian",
+		gauss_copula.parameters[0],
+		gauss_copula.log_likelihood,
+		gauss_copula.aic,
+	)
+
+	// Student-t
+	fmt.printf(
+		"%-15s =%.4f, ν=%.1f  %-15.2f %-15.2f\n",
+		"Student-t",
+		student_copula.parameters[0],
+		student_copula.parameters[1],
+		student_copula.log_likelihood,
+		student_copula.aic,
+	)
+
+	// Clayton (if converged)
+	if clayton_copula.converged {
+		fmt.printf(
+			"%-15s θ=%.4f          %-15.2f %-15.2f\n",
+			"Clayton",
+			clayton_copula.parameters[0],
+			clayton_copula.log_likelihood,
+			clayton_copula.aic,
+		)
+	} else {
+		fmt.printf("%-15s %-15s %-15s %-15s\n", "Clayton", "N/A (neg dep)", "-", "-")
+	}
+
+	// Gumbel (if converged)
+	if gumbel_copula.converged {
+		fmt.printf(
+			"%-15s θ=%.4f          %-15.2f %-15.2f\n",
+			"Gumbel",
+			gumbel_copula.parameters[0],
+			gumbel_copula.log_likelihood,
+			gumbel_copula.aic,
+		)
+	} else {
+		fmt.printf("%-15s %-15s %-15s %-15s\n", "Gumbel", "N/A (neg dep)", "-", "-")
+	}
+
+	// Frank
+	fmt.printf(
+		"%-15s θ=%.4f          %-15.2f %-15.2f\n",
+		"Frank",
+		frank_copula.parameters[0],
+		frank_copula.log_likelihood,
+		frank_copula.aic,
+	)
+
+	fmt.printf("\nNote: Clayton/Gumbel model only positive dependence. Frank handles negative.\n")
 	// Model comparison
 	fmt.printf("\n%-20s %-15s %-15s %-15s\n", "Copula", "Parameters", "AIC", "BIC")
 	fmt.printf(
