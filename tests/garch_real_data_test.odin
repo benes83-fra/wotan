@@ -450,12 +450,15 @@ garch_real_data_test :: proc(allocator: mem.Allocator) {
 	fmt.println("\nFitting Frank Copula...")
 	frank_copula := fin.fit_frank(u_spy, u_vix, main_alloc)
 	defer delete(frank_copula.parameters, main_alloc)
-
-	fmt.printf("\nFrank Copula:\n")
-	fmt.printf("  θ (dependence): %.4f\n", frank_copula.parameters[0])
-	fmt.printf("  Log-Likelihood: %.2f\n", frank_copula.log_likelihood)
-	fmt.printf("  AIC: %.2f\n", frank_copula.aic)
-	fmt.printf("  BIC: %.2f\n", frank_copula.bic)
+	if frank_copula.converged {
+		fmt.printf("\nFrank Copula:\n")
+		fmt.printf("  θ (dependence): %.4f\n", frank_copula.parameters[0])
+		fmt.printf("  Log-Likelihood: %.2f\n", frank_copula.log_likelihood)
+		fmt.printf("  AIC: %.2f\n", frank_copula.aic)
+		fmt.printf("  BIC: %.2f\n", frank_copula.bic)
+	} else {
+		fmt.printf("\nFrank Copula: Skipped (weak correlation, numerically unstable)\n")
+	}
 
 	// Comprehensive Comparison Table
 	fmt.printf("\n%-15s %-15s %-15s %-15s\n", "Copula", "θ / ρ", "LogLik", "AIC")

@@ -626,6 +626,7 @@ fit_gumbel :: proc(
 	return result
 }
 
+
 // ============================================================================
 // Frank Copula (Symmetric, No Tail Dependence)
 // ============================================================================
@@ -634,59 +635,88 @@ frank_copula_loglik :: proc(u1: []f64, u2: []f64, theta: f64) -> f64 {
 	n := min(len(u1), len(u2))
 	loglik := 0.0
 
-	// Precompute constants
-	e_minus_theta := math.exp(-theta)
-	e_minus_theta_minus_1 := e_minus_theta - 1.0
-	num_const := -theta * e_minus_theta_minus_1
+	// Handle near-independence
+	if math.abs(theta) < 1e-6 {
+		return 0.0
+	}
+
+	// Use local variable to clamp theta
+	theta_local := theta
+	if theta_local > 35.0 {theta_local = 35.0}
+	if theta_local < -35.0 {theta_local = -35.0}
 
 	for i in 0 ..< n {
-		if u1[i] <= 0.0 || u1[i] >= 1.0 || u2[i] <= 0.0 || u2[i] >= 1.0 {continue}
+		if u1[i] <= 0.0 || u1[i] >= 1.0 || u2[i] <= 0.0 || u2[i] >= 1.0 {
+			continue
+		}
 
-		// A = e^(-theta*u1), B = e^(-theta*u2)
-		A := math.exp(-theta * u1[i])
-		B := math.exp(-theta * u2[i])
+		tu := theta_local * u1[i]
+		tv := theta_local * u2[i]
 
-		// Denominator: (e^-theta - 1) + (A-1)(B-1)
-		denom := e_minus_theta_minus_1 + (A - 1.0) * (B - 1.0)
+		// Clamp to prevent overflow
+		if tu > 35.0 {tu = 35.0}
+		if tu < -35.0 {tu = -35.0}
+		if tv > 35.0 {tv = 35.0}
+		if tv < -35.0 {tv = -35.0}
 
-		if denom <= 0.0 {continue}
+		e_tu := math.exp(-tu)
+		e_tv := math.exp(-tv)
+		e_theta := math.exp(-theta_local)
 
-		// Log-density: ln(-theta(e^-theta-1)AB) - 2 ln(denom)
-		// = ln(|num_const|) + ln(A) + ln(B) - 2 ln(denom)
-		loglik +=
-			math.ln_f64(math.abs(num_const)) +
-			math.ln_f64(A) +
-			math.ln_f64(B) -
-			2.0 * math.ln_f64(denom)
+		num := -theta_local * (1.0 - e_theta) * e_tu * e_tv
+		denom := (1.0 - e_theta) + (e_tu - 1.0) * (e_tv - 1.0)
+
+		if denom <= 0.0 || num <= 0.0 {
+			continue
+		}
+
+		loglik += math.ln_f64(num) - math.ln_f64(denom)
 	}
 
 	return loglik
 }
 
-// Helper: Debye function D_1(x) for Frank copula tau-theta relationship
+// Helper: Debye function D_1(x) using Gauss-Legendre quadrature
 _debye_1 :: proc(x: f64) -> f64 {
-	if x == 0.0 {return 1.0}
+	if math.abs(x) < 1e-10 {
+		return 1.0
+	}
 
-	// Numerical integration of t/(e^t - 1) from 0 to x
-	n := 100
+	// For very small x, use Taylor series
+	if math.abs(x) < 0.01 {
+		return 1.0 - x / 4.0 + x * x / 36.0
+	}
+
+	// Numerical integration using Simpson's rule
+	n := 2000
 	h := x / f64(n)
 	sum := 0.0
 
-	for i in 0 ..< n {
+	// Simpson's rule requires n+1 points (0 to n)
+	for i in 0 ..= n {
 		t := f64(i) * h
-		if t == 0.0 {
-			sum += 0.5 * 1.0 // Limit t->0 is 1
+
+		// Declare val before the if block
+		val: f64
+		if t < 1e-10 {
+			val = 1.0
 		} else {
-			sum += 0.5 * (t / (math.exp(t) - 1.0))
+			val = t / (math.exp(t) - 1.0)
 		}
 
-		t_mid := (f64(i) + 0.5) * h
-		sum += t_mid / (math.exp(t_mid) - 1.0)
+		// Apply Simpson's weights
+		if i == 0 || i == n {
+			sum += val
+		} else if i % 2 == 1 {
+			sum += 4.0 * val
+		} else {
+			sum += 2.0 * val
+		}
 	}
 
-	return sum * h / x
+	integral := sum * h / 3.0
+	return integral / x
 }
-
 fit_frank :: proc(
 	u1: []f64,
 	u2: []f64,
@@ -698,44 +728,62 @@ fit_frank :: proc(
 
 	tau := kendall_tau(u1, u2)
 
-	// Frank can handle negative dependence, so tau can be negative
-	// We use numerical root finding to solve tau(theta) = empirical_tau
-	// tau(theta) = 1 - 4/theta * (1 - D_1(theta)/theta)
-
-	// Bisection search for theta in [-50, 50]
-	low := -50.0
-	high := 50.0
-	best_theta := 0.0
-	best_ll := -math.INF_F64
-
-	// Quick check for independence
-	if math.abs(tau) < 0.01 {
-		best_theta = 0.001 // Near independence
-	} else {
-		for iter in 0 ..< 50 {
-			mid := (low + high) / 2.0
-			if math.abs(mid) < 1e-6 {mid = 1e-6}
-
-			d1 := _debye_1(mid)
-			tau_model := 1.0 - 4.0 / mid * (1.0 - d1 / mid)
-
-			if tau_model > tau {
-				low = mid
-			} else {
-				high = mid
-			}
-
-			if math.abs(tau_model - tau) < 1e-4 {
-				best_theta = mid
-				break
-			}
-			best_theta = mid
-		}
+	// Skip Frank for very weak correlations (numerically unstable)
+	if math.abs(tau) < 0.02 {
+		result.converged = false
+		return result
 	}
 
+	// Handle near-independence
+	if math.abs(tau) < 0.005 {
+		result.parameters = make([]f64, 1, allocator)
+		result.parameters[0] = 0.0
+		result.log_likelihood = 0.0
+		result.aic = 2.0
+		result.bic = 2.0 + math.ln_f64(f64(result.n_obs))
+		result.converged = true
+		return result
+	}
+
+	// Initial guess
+	theta := 9.0 * tau
+	if theta > 30.0 {theta = 30.0}
+	if theta < -30.0 {theta = -30.0}
+
+	// Bisection search
+	low := -35.0
+	high := 35.0
+
+	for iter in 0 ..< 100 {
+		mid := (low + high) / 2.0
+
+		if math.abs(mid) < 1e-6 {
+			mid = 1e-6
+		}
+
+		d1 := _debye_1(mid)
+		tau_model := 1.0 - 4.0 / mid * (1.0 - d1 / mid)
+
+		if math.abs(tau_model - tau) < 1e-6 {
+			theta = mid
+			break
+		}
+
+		if tau_model < tau {
+			low = mid
+		} else {
+			high = mid
+		}
+
+		theta = mid
+	}
+
+	if theta > 35.0 {theta = 35.0}
+	if theta < -35.0 {theta = -35.0}
+
 	result.parameters = make([]f64, 1, allocator)
-	result.parameters[0] = best_theta
-	result.log_likelihood = frank_copula_loglik(u1, u2, best_theta)
+	result.parameters[0] = theta
+	result.log_likelihood = frank_copula_loglik(u1, u2, theta)
 
 	k := 1.0
 	n := f64(result.n_obs)
