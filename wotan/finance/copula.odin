@@ -1,9 +1,10 @@
 package finance
 
+import "base:intrinsics"
 import "core:math"
 import "core:mem"
+import simd "core:simd"
 import "core:slice"
-import "runtime:intrinsics"
 
 // ============================================================================
 // Copula Models for Multivariate Dependence
@@ -375,13 +376,13 @@ upper_tail_dependence :: proc(u1: []f64, u2: []f64, threshold: f64 = 0.95) -> f6
 }
 
 // SIMD-optimized Gaussian copula log-likelihood
+// SIMD-optimized Gaussian copula log-likelihood
 gaussian_copula_loglik_simd :: proc(u1: []f64, u2: []f64, rho: f64) -> f64 {
 	n := min(len(u1), len(u2))
 	if n == 0 {return 0.0}
 
 	rho_sq := rho * rho
 	denom := 1.0 - rho_sq
-	sqrt_denom := math.sqrt_f64(denom)
 	log_coef := -0.5 * math.ln_f64(denom)
 
 	// AVX: process 8 observations at once
@@ -390,7 +391,7 @@ gaussian_copula_loglik_simd :: proc(u1: []f64, u2: []f64, rho: f64) -> f64 {
 		i := 0
 
 		for ; i + 8 <= n; i += 8 {
-			// Load 8 u1 values
+			// Load 8 u1 and u2 values into SIMD vectors
 			vu1 := simd.f64x8 {
 				u1[i],
 				u1[i + 1],
@@ -401,7 +402,6 @@ gaussian_copula_loglik_simd :: proc(u1: []f64, u2: []f64, rho: f64) -> f64 {
 				u1[i + 6],
 				u1[i + 7],
 			}
-			// Load 8 u2 values
 			vu2 := simd.f64x8 {
 				u2[i],
 				u2[i + 1],
@@ -413,15 +413,19 @@ gaussian_copula_loglik_simd :: proc(u1: []f64, u2: []f64, rho: f64) -> f64 {
 				u2[i + 7],
 			}
 
-			// Transform to normal (need scalar norm_inv for now)
-			// This is the bottleneck - norm_inv is complex
+			// Extract SIMD to arrays for scalar processing
+			u1_arr := transmute([8]f64)vu1
+			u2_arr := transmute([8]f64)vu2
+
+			// Transform to normal (scalar norm_inv)
 			x1_arr: [8]f64
 			x2_arr: [8]f64
 			for j := 0; j < 8; j += 1 {
-				x1_arr[j] = norm_inv(vu1[j])
-				x2_arr[j] = norm_inv(vu2[j])
+				x1_arr[j] = norm_inv(u1_arr[j])
+				x2_arr[j] = norm_inv(u2_arr[j])
 			}
 
+			// Convert back to SIMD for vectorized math
 			vx1 := transmute(simd.f64x8)x1_arr
 			vx2 := transmute(simd.f64x8)x2_arr
 
@@ -468,15 +472,7 @@ gaussian_copula_loglik_simd :: proc(u1: []f64, u2: []f64, rho: f64) -> f64 {
 			)
 			exponent := intrinsics.simd_div(numerator, two_denom_vec)
 
-			// exp(exponent)
-			exp_arr := transmute([8]f64)exponent
-			exp_vals: [8]f64
-			for j := 0; j < 8; j += 1 {
-				exp_vals[j] = math.exp(exp_arr[j])
-			}
-			v_exp := transmute(simd.f64x8)exp_vals
-
-			// log(pdf) = log_coef + exponent
+			// log(pdf) = log_coef + exponent (we're computing log-likelihood directly)
 			log_coef_vec := simd.f64x8 {
 				log_coef,
 				log_coef,
@@ -494,7 +490,7 @@ gaussian_copula_loglik_simd :: proc(u1: []f64, u2: []f64, rho: f64) -> f64 {
 
 		loglik := intrinsics.simd_reduce_add_pairs(acc8)
 
-		// Tail
+		// Tail: process remaining elements
 		for ; i < n; i += 1 {
 			pdf := gaussian_copula_pdf(u1[i], u2[i], rho)
 			if pdf > 0.0 {
