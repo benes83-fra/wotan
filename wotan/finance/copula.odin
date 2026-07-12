@@ -3,6 +3,7 @@ package finance
 import "core:math"
 import "core:mem"
 import "core:slice"
+import "runtime:intrinsics"
 
 // ============================================================================
 // Copula Models for Multivariate Dependence
@@ -118,38 +119,31 @@ gaussian_copula_loglik :: proc(u1: []f64, u2: []f64, rho: f64) -> f64 {
 // ============================================================================
 
 // Bivariate Student-t copula density
-// More complex - involves bivariate t-distribution
-student_t_copula_pdf :: proc(u1: f64, u2: f64, rho: f64, nu: f64) -> f64 {
-	if math.abs(rho) >= 1.0 || nu <= 2.0 {return 0.0}
-	if u1 <= 0.0 || u1 >= 1.0 || u2 <= 0.0 || u2 >= 1.0 {return 0.0}
+// Bivariate Student-t copula log-density (Mathematically Exact)
+student_t_copula_log_pdf :: proc(u1: f64, u2: f64, rho: f64, nu: f64) -> f64 {
+	if math.abs(rho) >= 1.0 || nu <= 2.0 {return -math.INF_F64}
+	if u1 <= 0.0 || u1 >= 1.0 || u2 <= 0.0 || u2 >= 1.0 {return -math.INF_F64}
 
-	// Transform to t-distribution quantiles
 	x1 := t_quantile(u1, nu)
 	x2 := t_quantile(u2, nu)
 
 	rho_sq := rho * rho
 	denom := 1.0 - rho_sq
-
-	// Bivariate t density
 	quad_form := (x1 * x1 + x2 * x2 - 2.0 * rho * x1 * x2) / denom
 
-	// t-distribution normalization
-	lg1, _ := math.lgamma((nu + 1.0) / 2.0)
-	lg2, _ := math.lgamma(nu / 2.0)
+	// Gamma terms for exact normalization
+	lg_nu_plus_2, _ := math.lgamma((nu + 2.0) / 2.0)
+	lg_nu_plus_1, _ := math.lgamma((nu + 1.0) / 2.0)
+	lg_nu, _ := math.lgamma(nu / 2.0)
 
-	log_coef := lg1 - lg2 - 0.5 * math.ln_f64(nu * math.PI)
+	// log(c(u1, u2)) = log(f_bivariate) - log(f_marginal1) - log(f_marginal2)
+	term1 := lg_nu_plus_2 - 2.0 * lg_nu_plus_1 + lg_nu
+	term2 := -0.5 * math.ln_f64(denom)
+	term3 := -((nu + 2.0) / 2.0) * math.ln_f64(1.0 + quad_form / nu)
+	term4 := ((nu + 1.0) / 2.0) * math.ln_f64(1.0 + x1 * x1 / nu)
+	term5 := ((nu + 1.0) / 2.0) * math.ln_f64(1.0 + x2 * x2 / nu)
 
-	// Copula density (ratio of bivariate t to product of univariate t)
-	log_pdf :=
-		log_coef -
-		0.5 * math.ln_f64(denom) -
-		((nu + 1.0) / 2.0) * math.ln_f64(1.0 + quad_form / nu)
-
-	// Subtract marginal densities
-	log_marginal := log_coef - ((nu + 1.0) / 2.0) * math.ln_f64(1.0 + x1 * x1 / nu)
-	log_marginal += log_coef - ((nu + 1.0) / 2.0) * math.ln_f64(1.0 + x2 * x2 / nu)
-
-	return math.exp_f64(log_pdf - log_marginal)
+	return term1 + term2 + term3 + term4 + term5
 }
 
 // Student-t copula log-likelihood
@@ -158,9 +152,9 @@ student_t_copula_loglik :: proc(u1: []f64, u2: []f64, rho: f64, nu: f64) -> f64 
 	loglik := 0.0
 
 	for i in 0 ..< n {
-		pdf := student_t_copula_pdf(u1[i], u2[i], rho, nu)
-		if pdf > 0.0 {
-			loglik += math.ln_f64(pdf)
+		log_pdf := student_t_copula_log_pdf(u1[i], u2[i], rho, nu)
+		if log_pdf > -math.INF_F64 {
+			loglik += log_pdf
 		}
 	}
 
@@ -378,4 +372,337 @@ upper_tail_dependence :: proc(u1: []f64, u2: []f64, threshold: f64 = 0.95) -> f6
 	if count_u1_high == 0 {return 0.0}
 
 	return f64(count_both_high) / f64(count_u1_high)
+}
+
+// SIMD-optimized Gaussian copula log-likelihood
+gaussian_copula_loglik_simd :: proc(u1: []f64, u2: []f64, rho: f64) -> f64 {
+	n := min(len(u1), len(u2))
+	if n == 0 {return 0.0}
+
+	rho_sq := rho * rho
+	denom := 1.0 - rho_sq
+	sqrt_denom := math.sqrt_f64(denom)
+	log_coef := -0.5 * math.ln_f64(denom)
+
+	// AVX: process 8 observations at once
+	if intrinsics.has_target_feature("avx") {
+		acc8 := simd.f64x8{0, 0, 0, 0, 0, 0, 0, 0}
+		i := 0
+
+		for ; i + 8 <= n; i += 8 {
+			// Load 8 u1 values
+			vu1 := simd.f64x8 {
+				u1[i],
+				u1[i + 1],
+				u1[i + 2],
+				u1[i + 3],
+				u1[i + 4],
+				u1[i + 5],
+				u1[i + 6],
+				u1[i + 7],
+			}
+			// Load 8 u2 values
+			vu2 := simd.f64x8 {
+				u2[i],
+				u2[i + 1],
+				u2[i + 2],
+				u2[i + 3],
+				u2[i + 4],
+				u2[i + 5],
+				u2[i + 6],
+				u2[i + 7],
+			}
+
+			// Transform to normal (need scalar norm_inv for now)
+			// This is the bottleneck - norm_inv is complex
+			x1_arr: [8]f64
+			x2_arr: [8]f64
+			for j := 0; j < 8; j += 1 {
+				x1_arr[j] = norm_inv(vu1[j])
+				x2_arr[j] = norm_inv(vu2[j])
+			}
+
+			vx1 := transmute(simd.f64x8)x1_arr
+			vx2 := transmute(simd.f64x8)x2_arr
+
+			// Compute exponent: -(ρ²(x1² + x2²) - 2ρx1x2) / (2(1-ρ²))
+			vx1_sq := intrinsics.simd_mul(vx1, vx1)
+			vx2_sq := intrinsics.simd_mul(vx2, vx2)
+			vx1x2 := intrinsics.simd_mul(vx1, vx2)
+
+			rho_sq_vec := simd.f64x8 {
+				rho_sq,
+				rho_sq,
+				rho_sq,
+				rho_sq,
+				rho_sq,
+				rho_sq,
+				rho_sq,
+				rho_sq,
+			}
+			two_rho_vec := simd.f64x8 {
+				2.0 * rho,
+				2.0 * rho,
+				2.0 * rho,
+				2.0 * rho,
+				2.0 * rho,
+				2.0 * rho,
+				2.0 * rho,
+				2.0 * rho,
+			}
+			two_denom_vec := simd.f64x8 {
+				2.0 * denom,
+				2.0 * denom,
+				2.0 * denom,
+				2.0 * denom,
+				2.0 * denom,
+				2.0 * denom,
+				2.0 * denom,
+				2.0 * denom,
+			}
+
+			sum_sq := intrinsics.simd_add(vx1_sq, vx2_sq)
+			numerator := intrinsics.simd_sub(
+				intrinsics.simd_mul(rho_sq_vec, sum_sq),
+				intrinsics.simd_mul(two_rho_vec, vx1x2),
+			)
+			exponent := intrinsics.simd_div(numerator, two_denom_vec)
+
+			// exp(exponent)
+			exp_arr := transmute([8]f64)exponent
+			exp_vals: [8]f64
+			for j := 0; j < 8; j += 1 {
+				exp_vals[j] = math.exp(exp_arr[j])
+			}
+			v_exp := transmute(simd.f64x8)exp_vals
+
+			// log(pdf) = log_coef + exponent
+			log_coef_vec := simd.f64x8 {
+				log_coef,
+				log_coef,
+				log_coef,
+				log_coef,
+				log_coef,
+				log_coef,
+				log_coef,
+				log_coef,
+			}
+			log_pdf := intrinsics.simd_add(log_coef_vec, exponent)
+
+			acc8 = intrinsics.simd_add(acc8, log_pdf)
+		}
+
+		loglik := intrinsics.simd_reduce_add_pairs(acc8)
+
+		// Tail
+		for ; i < n; i += 1 {
+			pdf := gaussian_copula_pdf(u1[i], u2[i], rho)
+			if pdf > 0.0 {
+				loglik += math.ln_f64(pdf)
+			}
+		}
+
+		return loglik
+	}
+
+	// Fallback to scalar
+	return gaussian_copula_loglik(u1, u2, rho)
+}
+// SIMD-optimized Kendall's Tau
+kendall_tau_simd :: proc(x: []f64, y: []f64) -> f64 {
+	n := min(len(x), len(y))
+	if n < 2 {return 0.0}
+
+	concordant := 0
+	discordant := 0
+
+	// AVX: vectorize inner loop
+	if intrinsics.has_target_feature("avx") {
+		for i := 0; i < n - 1; i += 1 {
+			dx_base := x[i]
+			dy_base := y[i]
+
+			j := i + 1
+			// Process 8 comparisons at once
+			for ; j + 8 <= n; j += 8 {
+				vx := simd.f64x8 {
+					x[j],
+					x[j + 1],
+					x[j + 2],
+					x[j + 3],
+					x[j + 4],
+					x[j + 5],
+					x[j + 6],
+					x[j + 7],
+				}
+				vy := simd.f64x8 {
+					y[j],
+					y[j + 1],
+					y[j + 2],
+					y[j + 3],
+					y[j + 4],
+					y[j + 5],
+					y[j + 6],
+					y[j + 7],
+				}
+
+				dx_base_vec := simd.f64x8 {
+					dx_base,
+					dx_base,
+					dx_base,
+					dx_base,
+					dx_base,
+					dx_base,
+					dx_base,
+					dx_base,
+				}
+				dy_base_vec := simd.f64x8 {
+					dy_base,
+					dy_base,
+					dy_base,
+					dy_base,
+					dy_base,
+					dy_base,
+					dy_base,
+					dy_base,
+				}
+
+				vdx := intrinsics.simd_sub(dx_base_vec, vx)
+				vdy := intrinsics.simd_sub(dy_base_vec, vy)
+
+				// Product of differences
+				vprod := intrinsics.simd_mul(vdx, vdy)
+
+				// Count positive (concordant) and negative (discordant)
+				zero_vec := simd.f64x8{0, 0, 0, 0, 0, 0, 0, 0}
+				mask_pos := intrinsics.simd_lanes_gt(vprod, zero_vec)
+				mask_neg := intrinsics.simd_lanes_lt(vprod, zero_vec)
+
+				// Convert masks to counts
+				// This is tricky - need to sum the mask bits
+				// For now, fall back to scalar for counting
+				prod_arr := transmute([8]f64)vprod
+				for k := 0; k < 8; k += 1 {
+					if prod_arr[k] > 0.0 {
+						concordant += 1
+					} else if prod_arr[k] < 0.0 {
+						discordant += 1
+					}
+				}
+			}
+
+			// Tail
+			for ; j < n; j += 1 {
+				dx := x[i] - x[j]
+				dy := y[i] - y[j]
+				if dx * dy > 0.0 {
+					concordant += 1
+				} else if dx * dy < 0.0 {
+					discordant += 1
+				}
+			}
+		}
+	} else {
+		// Scalar fallback
+		for i := 0; i < n - 1; i += 1 {
+			for j := i + 1; j < n; j += 1 {
+				dx := x[i] - x[j]
+				dy := y[i] - y[j]
+				if dx * dy > 0.0 {
+					concordant += 1
+				} else if dx * dy < 0.0 {
+					discordant += 1
+				}
+			}
+		}
+	}
+
+	total := f64(n * (n - 1) / 2)
+	return f64(concordant - discordant) / total
+}
+// SIMD-optimized backtesting
+backtest_var_simd :: proc(
+	returns: []f64,
+	var_series: []f64,
+	confidence: f64 = 0.95,
+) -> VaR_BacktestResult {
+	n := min(len(returns), len(var_series))
+	if n == 0 {
+		return VaR_BacktestResult{}
+	}
+
+	n_breaches := 0
+
+	// AVX: process 8 observations at once
+	if intrinsics.has_target_feature("avx") {
+		i := 0
+		for ; i + 8 <= n; i += 8 {
+			vret := simd.f64x8 {
+				returns[i],
+				returns[i + 1],
+				returns[i + 2],
+				returns[i + 3],
+				returns[i + 4],
+				returns[i + 5],
+				returns[i + 6],
+				returns[i + 7],
+			}
+			vvar := simd.f64x8 {
+				var_series[i],
+				var_series[i + 1],
+				var_series[i + 2],
+				var_series[i + 3],
+				var_series[i + 4],
+				var_series[i + 5],
+				var_series[i + 6],
+				var_series[i + 7],
+			}
+
+			// Negate var_series
+			zero_vec := simd.f64x8{0, 0, 0, 0, 0, 0, 0, 0}
+			neg_var := intrinsics.simd_sub(zero_vec, vvar)
+
+			// Check if returns < -var_series
+			mask := intrinsics.simd_lanes_lt(vret, neg_var)
+
+			// Count breaches (need to sum mask bits)
+			// For simplicity, use scalar counting
+			ret_arr := transmute([8]f64)vret
+			var_arr := transmute([8]f64)vvar
+			for j := 0; j < 8; j += 1 {
+				if ret_arr[j] < -var_arr[j] {
+					n_breaches += 1
+				}
+			}
+		}
+
+		// Tail
+		for ; i < n; i += 1 {
+			if returns[i] < -var_series[i] {
+				n_breaches += 1
+			}
+		}
+	} else {
+		// Scalar fallback
+		for i := 0; i < n; i += 1 {
+			if returns[i] < -var_series[i] {
+				n_breaches += 1
+			}
+		}
+	}
+
+	expected := f64(n) * (1.0 - confidence)
+	breach_rate := f64(n_breaches) / f64(n)
+	kupiec_stat := _kupiec_pof_test(n, n_breaches, 1.0 - confidence)
+	p_value := _chi_squared_pvalue_1df(kupiec_stat)
+
+	return VaR_BacktestResult {
+		n_obs = n,
+		n_breaches = n_breaches,
+		expected_breaches = expected,
+		breach_rate = breach_rate,
+		kupiec_stat = kupiec_stat,
+		kupiec_pvalue = p_value,
+		passes_test = p_value > 0.05,
+	}
 }
