@@ -455,7 +455,7 @@ garch_real_data_test :: proc(allocator: mem.Allocator) {
 		fmt.printf("  θ (dependence): %.4f\n", frank_copula.parameters[0])
 		fmt.printf("  Log-Likelihood: %.2f\n", frank_copula.log_likelihood)
 		fmt.printf("  AIC: %.2f\n", frank_copula.aic)
-		fmt.printf("  BIC: %.2f\n", frank_copula.bic)
+
 	} else {
 		fmt.printf("\nFrank Copula: Skipped (weak correlation, numerically unstable)\n")
 	}
@@ -515,14 +515,18 @@ garch_real_data_test :: proc(allocator: mem.Allocator) {
 		fmt.printf("%-15s %-15s %-15s %-15s\n", "Gumbel", "N/A (neg dep)", "-", "-")
 	}
 
-	// Frank
-	fmt.printf(
-		"%-15s θ=%.4f          %-15.2f %-15.2f\n",
-		"Frank",
-		frank_copula.parameters[0],
-		frank_copula.log_likelihood,
-		frank_copula.aic,
-	)
+	// Frank (if converged)
+	if frank_copula.converged {
+		fmt.printf(
+			"%-15s θ=%.4f          %-15.2f %-15.2f\n",
+			"Frank",
+			frank_copula.parameters[0],
+			frank_copula.log_likelihood,
+			frank_copula.aic,
+		)
+	} else {
+		fmt.printf("%-15s %-15s %-15s %-15s\n", "Frank", "N/A (weak corr)", "-", "-")
+	}
 
 	fmt.printf("\nNote: Clayton/Gumbel model only positive dependence. Frank handles negative.\n")
 	// Model comparison
