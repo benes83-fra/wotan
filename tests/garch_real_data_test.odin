@@ -3,6 +3,7 @@ package tests
 import ts "../wotan/analytics"
 import w "../wotan/core"
 import fin "../wotan/finance"
+import l "../wotan/linalg"
 import yahoo "../wotan/net"
 import p "../wotan/plot"
 import "core:fmt"
@@ -683,6 +684,232 @@ garch_real_data_test :: proc(allocator: mem.Allocator) {
 	plot_var_comparison(dates, returns, var_95, var_95_hist, "var_comparison.png", allocator)
 
 	fmt.println("\n✓ GARCH Real Data test completed!")
+	// 10. Portfolio Optimization with Advanced Risk Models
+	fmt.println("\n--- Portfolio Optimization ---")
+
+	// Fetch additional assets for portfolio
+	fmt.println("Fetching additional assets...")
+	qqq_df := yahoo.read_yahoo("QQQ", .Daily, .TwoYears, allocator)
+	defer w.destroy_dataframe(&qqq_df)
+
+	iwm_df := yahoo.read_yahoo("IWM", .Daily, .TwoYears, allocator)
+	defer w.destroy_dataframe(&iwm_df)
+
+	// Compute returns for all assets
+	n_qqq := qqq_df.rows
+	qqq_returns := make([]f64, n_qqq - 1, main_alloc)
+	defer delete(qqq_returns, main_alloc)
+
+	for i in 1 ..< n_qqq {
+		prev_close, _ := w.column_at_float(&qqq_df.columns[4], i - 1)
+		curr_close, _ := w.column_at_float(&qqq_df.columns[4], i)
+		qqq_returns[i - 1] = math.ln_f64(curr_close / prev_close)
+	}
+
+	n_iwm := iwm_df.rows
+	iwm_returns := make([]f64, n_iwm - 1, main_alloc)
+	defer delete(iwm_returns, main_alloc)
+
+	for i in 1 ..< n_iwm {
+		prev_close, _ := w.column_at_float(&iwm_df.columns[4], i - 1)
+		curr_close, _ := w.column_at_float(&iwm_df.columns[4], i)
+		iwm_returns[i - 1] = math.ln_f64(curr_close / prev_close)
+	}
+
+	// Align all returns
+	n_common_port := min(len(returns), min(len(qqq_returns), len(iwm_returns)))
+	spy_port := returns[:n_common_port]
+	qqq_port := qqq_returns[:n_common_port]
+	iwm_port := iwm_returns[:n_common_port]
+
+	// Build returns matrix (rows = time, cols = assets)
+	returns_matrix := l.matrix_new(f64, n_common_port, 3, main_alloc)
+	defer l.matrix_free(&returns_matrix)
+
+	for t in 0 ..< n_common_port {
+		returns_matrix.data[t * 3 + 0] = spy_port[t]
+		returns_matrix.data[t * 3 + 1] = qqq_port[t]
+		returns_matrix.data[t * 3 + 2] = iwm_port[t]
+	}
+
+	// Compute expected returns
+	expected_ret := fin.expected_returns_from_history(&returns_matrix, main_alloc)
+	defer delete(expected_ret, main_alloc)
+
+	// Compute covariance matrices
+	cov_standard := fin.covariance_matrix(&returns_matrix, main_alloc)
+	defer l.matrix_free(&cov_standard)
+
+	cov_garch := fin.garch_adjusted_covariance(&returns_matrix, 0.94, main_alloc)
+	defer l.matrix_free(&cov_garch)
+
+	// Define constraints
+	constraints := fin.PortfolioConstraints {
+		no_short_selling = true,
+		max_weight       = 0.5, // Max 50% in any asset
+	}
+
+	// Optimize portfolios
+	fmt.println("\nOptimizing portfolios...")
+
+	// 1. Minimum Variance (Markowitz)
+	weights_minvar := fin.constrained_min_variance_portfolio(
+		&cov_standard,
+		constraints,
+		main_alloc,
+	)
+	defer delete(weights_minvar, main_alloc)
+
+	// 2. Maximum Sharpe
+	weights_maxsharpe := fin.constrained_max_sharpe_portfolio(
+		expected_ret,
+		&cov_standard,
+		0.0,
+		constraints,
+		main_alloc,
+	)
+	defer delete(weights_maxsharpe, main_alloc)
+
+	// 3. Risk Parity
+	weights_riskparity := fin.risk_parity_portfolio(&cov_standard, constraints, main_alloc)
+	defer delete(weights_riskparity, main_alloc)
+
+	// 4. Minimum CVaR (using GARCH-adjusted covariance)
+	weights_mincvar := fin.min_cvar_portfolio(
+		&returns_matrix,
+		constraints,
+		0.95,
+		main_alloc,
+		500,
+		1e-5,
+	)
+	defer delete(weights_mincvar, main_alloc)
+
+	// Compute metrics for each portfolio
+	metrics_minvar := fin.portfolio_metrics_with_cvar(
+		weights_minvar,
+		expected_ret,
+		&returns_matrix,
+		&cov_standard,
+		0.0,
+		main_alloc,
+	)
+	metrics_maxsharpe := fin.portfolio_metrics_with_cvar(
+		weights_maxsharpe,
+		expected_ret,
+		&returns_matrix,
+		&cov_standard,
+		0.0,
+		main_alloc,
+	)
+	metrics_riskparity := fin.portfolio_metrics_with_cvar(
+		weights_riskparity,
+		expected_ret,
+		&returns_matrix,
+		&cov_standard,
+		0.0,
+		main_alloc,
+	)
+	metrics_mincvar := fin.portfolio_metrics_with_cvar(
+		weights_mincvar,
+		expected_ret,
+		&returns_matrix,
+		&cov_standard,
+		0.0,
+		main_alloc,
+	)
+
+	// Display results
+	fmt.printf(
+		"\n%-20s %-10s %-10s %-10s %-10s %-10s\n",
+		"Portfolio",
+		"SPY",
+		"QQQ",
+		"IWM",
+		"Return",
+		"Vol",
+	)
+	fmt.printf(
+		"%-20s %-10s %-10s %-10s %-10s %-10s\n",
+		"--------------------",
+		"----------",
+		"----------",
+		"----------",
+		"----------",
+		"----------",
+	)
+
+	fmt.printf(
+		"%-20s %-10.2f %-10.2f %-10.2f %-10.2f%% %-10.2f%%\n",
+		"Min Variance",
+		weights_minvar[0] * 100,
+		weights_minvar[1] * 100,
+		weights_minvar[2] * 100,
+		metrics_minvar.expected_return * 100,
+		metrics_minvar.volatility * 100,
+	)
+
+	fmt.printf(
+		"%-20s %-10.2f %-10.2f %-10.2f %-10.2f%% %-10.2f%%\n",
+		"Max Sharpe",
+		weights_maxsharpe[0] * 100,
+		weights_maxsharpe[1] * 100,
+		weights_maxsharpe[2] * 100,
+		metrics_maxsharpe.expected_return * 100,
+		metrics_maxsharpe.volatility * 100,
+	)
+
+	fmt.printf(
+		"%-20s %-10.2f %-10.2f %-10.2f %-10.2f%% %-10.2f%%\n",
+		"Risk Parity",
+		weights_riskparity[0] * 100,
+		weights_riskparity[1] * 100,
+		weights_riskparity[2] * 100,
+		metrics_riskparity.expected_return * 100,
+		metrics_riskparity.volatility * 100,
+	)
+
+	fmt.printf(
+		"%-20s %-10.2f %-10.2f %-10.2f %-10.2f%% %-10.2f%%\n",
+		"Min CVaR",
+		weights_mincvar[0] * 100,
+		weights_mincvar[1] * 100,
+		weights_mincvar[2] * 100,
+		metrics_mincvar.expected_return * 100,
+		metrics_mincvar.volatility * 100,
+	)
+
+	// CVaR comparison
+	fmt.printf("\n%-20s %-15s %-15s\n", "Portfolio", "95% CVaR", "99% CVaR")
+	fmt.printf("%-20s %-15s %-15s\n", "--------------------", "---------------", "---------------")
+	fmt.printf(
+		"%-20s %-15.4f%% %-15.4f%%\n",
+		"Min Variance",
+		metrics_minvar.cvar_95 * 100,
+		metrics_minvar.cvar_99 * 100,
+	)
+	fmt.printf(
+		"%-20s %-15.4f%% %-15.4f%%\n",
+		"Max Sharpe",
+		metrics_maxsharpe.cvar_95 * 100,
+		metrics_maxsharpe.cvar_99 * 100,
+	)
+	fmt.printf(
+		"%-20s %-15.4f%% %-15.4f%%\n",
+		"Risk Parity",
+		metrics_riskparity.cvar_95 * 100,
+		metrics_riskparity.cvar_99 * 100,
+	)
+	fmt.printf(
+		"%-20s %-15.4f%% %-15.4f%%\n",
+		"Min CVaR",
+		metrics_mincvar.cvar_95 * 100,
+		metrics_mincvar.cvar_99 * 100,
+	)
+
+	fmt.printf(
+		"\nNote: Min CVaR portfolio minimizes tail risk (expected loss in worst 5%% scenarios)\n",
+	)
 }
 
 plot_returns_with_vol :: proc(
