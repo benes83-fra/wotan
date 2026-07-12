@@ -1,9 +1,8 @@
 package finance
 
-import "base:intrinsics"
+import l "../linalg" // Import your existing SIMD library
 import "core:math"
 import "core:mem"
-import simd "core:simd"
 import "core:slice"
 
 // ============================================================================
@@ -20,7 +19,7 @@ CopulaType :: enum {
 
 CopulaResult :: struct {
 	copula_type:    CopulaType,
-	parameters:     []f64, // Copula parameters (e.g., correlation, df)
+	parameters:     []f64,
 	log_likelihood: f64,
 	aic:            f64,
 	bic:            f64,
@@ -32,13 +31,10 @@ CopulaResult :: struct {
 // Probability Integral Transform (PIT)
 // ============================================================================
 
-// Transform data to uniform [0,1] using empirical CDF
-// This is the first step in copula modeling
 pit_empirical :: proc(data: []f64, allocator: mem.Allocator = context.allocator) -> []f64 {
 	n := len(data)
 	u := make([]f64, n, allocator)
 
-	// Sort indices
 	indices := make([]int, n, context.temp_allocator)
 	defer delete(indices, context.temp_allocator)
 
@@ -46,7 +42,7 @@ pit_empirical :: proc(data: []f64, allocator: mem.Allocator = context.allocator)
 		indices[i] = i
 	}
 
-	// Simple sort by data values
+	// Bubble sort by data values
 	for i in 0 ..< n - 1 {
 		for j in 0 ..< n - i - 1 {
 			if data[indices[j]] > data[indices[j + 1]] {
@@ -55,7 +51,6 @@ pit_empirical :: proc(data: []f64, allocator: mem.Allocator = context.allocator)
 		}
 	}
 
-	// Assign ranks
 	for i in 0 ..< n {
 		u[indices[i]] = f64(i + 1) / f64(n + 1)
 	}
@@ -63,13 +58,11 @@ pit_empirical :: proc(data: []f64, allocator: mem.Allocator = context.allocator)
 	return u
 }
 
-// Transform using normal CDF (if data is already standardized)
 pit_normal :: proc(data: []f64, allocator: mem.Allocator = context.allocator) -> []f64 {
 	n := len(data)
 	u := make([]f64, n, allocator)
 
 	for i in 0 ..< n {
-		// Standard normal CDF
 		u[i] = 0.5 * (1.0 + math.erf_f64(data[i] / math.sqrt_f64(2.0)))
 	}
 
@@ -77,50 +70,89 @@ pit_normal :: proc(data: []f64, allocator: mem.Allocator = context.allocator) ->
 }
 
 // ============================================================================
-// Gaussian Copula
+// Gaussian Copula - Using Existing SIMD Infrastructure
 // ============================================================================
 
-// Bivariate Gaussian copula density
-// c(u1, u2) = (1/sqrt(1-ρ²)) * exp(-ρ²(x1² + x2² - 2ρx1x2) / (2(1-ρ²)))
-// where x1 = Φ⁻¹(u1), x2 = Φ⁻¹(u2)
 gaussian_copula_pdf :: proc(u1: f64, u2: f64, rho: f64) -> f64 {
 	if math.abs(rho) >= 1.0 {return 0.0}
 	if u1 <= 0.0 || u1 >= 1.0 || u2 <= 0.0 || u2 >= 1.0 {return 0.0}
 
-	// Transform to normal
 	x1 := norm_inv(u1)
 	x2 := norm_inv(u2)
 
 	rho_sq := rho * rho
 	denom := 1.0 - rho_sq
-
-	// Copula density
 	exponent := -(rho_sq * (x1 * x1 + x2 * x2) - 2.0 * rho * x1 * x2) / (2.0 * denom)
 
 	return (1.0 / math.sqrt_f64(denom)) * math.exp_f64(exponent)
 }
 
-// Gaussian copula log-likelihood
+// PUBLIC API: Uses existing SIMD primitives from wotan_linalg
 gaussian_copula_loglik :: proc(u1: []f64, u2: []f64, rho: f64) -> f64 {
 	n := min(len(u1), len(u2))
-	loglik := 0.0
+	if n == 0 {return 0.0}
 
-	for i in 0 ..< n {
-		pdf := gaussian_copula_pdf(u1[i], u2[i], rho)
-		if pdf > 0.0 {
-			loglik += math.ln_f64(pdf)
-		}
+	rho_sq := rho * rho
+	denom := 1.0 - rho_sq
+	log_coef := -0.5 * math.ln_f64(denom)
+
+	// Allocate working arrays
+	x1 := make([]f64, n, context.temp_allocator)
+	x2 := make([]f64, n, context.temp_allocator)
+	x1_sq := make([]f64, n, context.temp_allocator)
+	x2_sq := make([]f64, n, context.temp_allocator)
+	x1x2 := make([]f64, n, context.temp_allocator)
+	temp1 := make([]f64, n, context.temp_allocator)
+	temp2 := make([]f64, n, context.temp_allocator)
+	log_pdf := make([]f64, n, context.temp_allocator)
+	defer {
+		delete(x1, context.temp_allocator)
+		delete(x2, context.temp_allocator)
+		delete(x1_sq, context.temp_allocator)
+		delete(x2_sq, context.temp_allocator)
+		delete(x1x2, context.temp_allocator)
+		delete(temp1, context.temp_allocator)
+		delete(temp2, context.temp_allocator)
+		delete(log_pdf, context.temp_allocator)
 	}
 
-	return loglik
+	// Transform to normal (scalar bottleneck - unavoidable)
+	for i in 0 ..< n {
+		x1[i] = norm_inv(u1[i])
+		x2[i] = norm_inv(u2[i])
+	}
+
+	// Vectorized operations using existing SIMD primitives
+	l.vec_mul_simd(x1, x1, x1_sq) // x1²
+	l.vec_mul_simd(x2, x2, x2_sq) // x2²
+	l.vec_mul_simd(x1, x2, x1x2) // x1*x2
+
+	// x1² + x2²
+	l.vec_add_simd(x1_sq, x2_sq, temp1)
+
+	// rho² * (x1² + x2²)
+	l.vec_scale_simd(temp1, rho_sq, temp2)
+
+	// 2*rho*x1x2
+	l.vec_scale_simd(x1x2, 2.0 * rho, temp1)
+
+	// rho² * (x1² + x2²) - 2*rho*x1x2
+	l.vec_sub_simd(temp2, temp1, x1x2)
+
+	// Divide by 2*(1-rho²)
+	l.vec_scale_simd(x1x2, -1.0 / (2.0 * denom), temp1)
+
+	// Add log_coef
+	l.vec_broadcast_add_simd(log_coef, temp1)
+
+	// Sum all log-likelihoods
+	return l.sum_simd(temp1)
 }
 
 // ============================================================================
-// Student-t Copula
+// Student-t Copula - Using Existing SIMD Infrastructure
 // ============================================================================
 
-// Bivariate Student-t copula density
-// Bivariate Student-t copula log-density (Mathematically Exact)
 student_t_copula_log_pdf :: proc(u1: f64, u2: f64, rho: f64, nu: f64) -> f64 {
 	if math.abs(rho) >= 1.0 || nu <= 2.0 {return -math.INF_F64}
 	if u1 <= 0.0 || u1 >= 1.0 || u2 <= 0.0 || u2 >= 1.0 {return -math.INF_F64}
@@ -132,12 +164,10 @@ student_t_copula_log_pdf :: proc(u1: f64, u2: f64, rho: f64, nu: f64) -> f64 {
 	denom := 1.0 - rho_sq
 	quad_form := (x1 * x1 + x2 * x2 - 2.0 * rho * x1 * x2) / denom
 
-	// Gamma terms for exact normalization
 	lg_nu_plus_2, _ := math.lgamma((nu + 2.0) / 2.0)
 	lg_nu_plus_1, _ := math.lgamma((nu + 1.0) / 2.0)
 	lg_nu, _ := math.lgamma(nu / 2.0)
 
-	// log(c(u1, u2)) = log(f_bivariate) - log(f_marginal1) - log(f_marginal2)
 	term1 := lg_nu_plus_2 - 2.0 * lg_nu_plus_1 + lg_nu
 	term2 := -0.5 * math.ln_f64(denom)
 	term3 := -((nu + 2.0) / 2.0) * math.ln_f64(1.0 + quad_form / nu)
@@ -147,26 +177,118 @@ student_t_copula_log_pdf :: proc(u1: f64, u2: f64, rho: f64, nu: f64) -> f64 {
 	return term1 + term2 + term3 + term4 + term5
 }
 
-// Student-t copula log-likelihood
+// PUBLIC API: Uses existing SIMD primitives
 student_t_copula_loglik :: proc(u1: []f64, u2: []f64, rho: f64, nu: f64) -> f64 {
 	n := min(len(u1), len(u2))
-	loglik := 0.0
+	if n == 0 {return 0.0}
 
-	for i in 0 ..< n {
-		log_pdf := student_t_copula_log_pdf(u1[i], u2[i], rho, nu)
-		if log_pdf > -math.INF_F64 {
-			loglik += log_pdf
-		}
+	// Pre-compute constants
+	rho_sq := rho * rho
+	denom := 1.0 - rho_sq
+
+	lg_nu_plus_2, _ := math.lgamma((nu + 2.0) / 2.0)
+	lg_nu_plus_1, _ := math.lgamma((nu + 1.0) / 2.0)
+	lg_nu, _ := math.lgamma(nu / 2.0)
+
+	term1_const := lg_nu_plus_2 - 2.0 * lg_nu_plus_1 + lg_nu
+	term2_const := -0.5 * math.ln_f64(denom)
+
+	nu_plus_2_half := (nu + 2.0) / 2.0
+	nu_plus_1_half := (nu + 1.0) / 2.0
+	nu_inv := 1.0 / nu
+
+	// Allocate working arrays
+	x1 := make([]f64, n, context.temp_allocator)
+	x2 := make([]f64, n, context.temp_allocator)
+	x1_sq := make([]f64, n, context.temp_allocator)
+	x2_sq := make([]f64, n, context.temp_allocator)
+	x1x2 := make([]f64, n, context.temp_allocator)
+	quad_form := make([]f64, n, context.temp_allocator)
+	temp1 := make([]f64, n, context.temp_allocator)
+	temp2 := make([]f64, n, context.temp_allocator)
+	term3 := make([]f64, n, context.temp_allocator)
+	term4 := make([]f64, n, context.temp_allocator)
+	term5 := make([]f64, n, context.temp_allocator)
+	log_pdf := make([]f64, n, context.temp_allocator)
+	defer {
+		delete(x1, context.temp_allocator)
+		delete(x2, context.temp_allocator)
+		delete(x1_sq, context.temp_allocator)
+		delete(x2_sq, context.temp_allocator)
+		delete(x1x2, context.temp_allocator)
+		delete(quad_form, context.temp_allocator)
+		delete(temp1, context.temp_allocator)
+		delete(temp2, context.temp_allocator)
+		delete(term3, context.temp_allocator)
+		delete(term4, context.temp_allocator)
+		delete(term5, context.temp_allocator)
+		delete(log_pdf, context.temp_allocator)
 	}
 
-	return loglik
+	// Transform to t-distribution (scalar bottleneck)
+	for i in 0 ..< n {
+		x1[i] = t_quantile(u1[i], nu)
+		x2[i] = t_quantile(u2[i], nu)
+	}
+
+	// Vectorized operations
+	l.vec_mul_simd(x1, x1, x1_sq)
+	l.vec_mul_simd(x2, x2, x2_sq)
+	l.vec_mul_simd(x1, x2, x1x2)
+
+	// x1² + x2²
+	l.vec_add_simd(x1_sq, x2_sq, temp1)
+
+	// 2*rho*x1x2
+	l.vec_scale_simd(x1x2, 2.0 * rho, temp2)
+
+	// (x1² + x2²) - 2*rho*x1x2
+	l.vec_sub_simd(temp1, temp2, quad_form)
+
+	// Divide by (1-rho²)
+	l.vec_scale_simd(quad_form, 1.0 / denom, temp1)
+
+	// 1 + quad_form/nu
+	l.vec_scale_simd(temp1, nu_inv, temp2)
+	l.vec_broadcast_add_simd(1.0, temp2)
+
+	// ln(1 + quad_form/nu)
+	for i in 0 ..< n {
+		term3[i] = -nu_plus_2_half * math.ln_f64(temp2[i])
+	}
+
+	// 1 + x1²/nu
+	l.vec_scale_simd(x1_sq, nu_inv, temp1)
+	l.vec_broadcast_add_simd(1.0, temp1)
+
+	// ln(1 + x1²/nu)
+	for i in 0 ..< n {
+		term4[i] = nu_plus_1_half * math.ln_f64(temp1[i])
+	}
+
+	// 1 + x2²/nu
+	l.vec_scale_simd(x2_sq, nu_inv, temp1)
+	l.vec_broadcast_add_simd(1.0, temp1)
+
+	// ln(1 + x2²/nu)
+	for i in 0 ..< n {
+		term5[i] = nu_plus_1_half * math.ln_f64(temp1[i])
+	}
+
+	// Combine: term1 + term2 + term3 + term4 + term5
+	const_val := term1_const + term2_const
+	l.vec_broadcast_add_simd(const_val, term3)
+	l.vec_add_simd(term3, term4, temp1)
+	l.vec_add_simd(temp1, term5, log_pdf)
+
+	// Sum all log-likelihoods
+	return l.sum_simd(log_pdf)
 }
 
 // ============================================================================
 // Copula Fitting
 // ============================================================================
 
-// Fit Gaussian copula using MLE
 fit_gaussian_copula :: proc(
 	u1: []f64,
 	u2: []f64,
@@ -176,7 +298,6 @@ fit_gaussian_copula :: proc(
 	result.copula_type = .Gaussian
 	result.n_obs = min(len(u1), len(u2))
 
-	// Grid search for optimal rho
 	best_rho := 0.0
 	best_loglik := -math.INF_F64
 
@@ -190,7 +311,6 @@ fit_gaussian_copula :: proc(
 		}
 	}
 
-	// Fine-tune around best
 	for rho_i in -100 ..< 101 {
 		rho := best_rho + f64(rho_i) / 10000.0
 		if math.abs(rho) < 1.0 {
@@ -206,7 +326,7 @@ fit_gaussian_copula :: proc(
 	result.parameters[0] = best_rho
 	result.log_likelihood = best_loglik
 
-	k := 1.0 // 1 parameter
+	k := 1.0
 	n := f64(result.n_obs)
 	result.aic = 2.0 * k - 2.0 * best_loglik
 	result.bic = k * math.ln_f64(n) - 2.0 * best_loglik
@@ -215,7 +335,6 @@ fit_gaussian_copula :: proc(
 	return result
 }
 
-// Fit Student-t copula using MLE
 fit_student_t_copula :: proc(
 	u1: []f64,
 	u2: []f64,
@@ -225,7 +344,6 @@ fit_student_t_copula :: proc(
 	result.copula_type = .StudentT
 	result.n_obs = min(len(u1), len(u2))
 
-	// Grid search for optimal (rho, nu)
 	best_rho := 0.0
 	best_nu := 5.0
 	best_loglik := -math.INF_F64
@@ -249,7 +367,7 @@ fit_student_t_copula :: proc(
 	result.parameters[1] = best_nu
 	result.log_likelihood = best_loglik
 
-	k := 2.0 // 2 parameters
+	k := 2.0
 	n := f64(result.n_obs)
 	result.aic = 2.0 * k - 2.0 * best_loglik
 	result.bic = k * math.ln_f64(n) - 2.0 * best_loglik
@@ -262,7 +380,6 @@ fit_student_t_copula :: proc(
 // Empirical Dependence Measures
 // ============================================================================
 
-// Compute Kendall's tau (rank correlation)
 kendall_tau :: proc(x: []f64, y: []f64) -> f64 {
 	n := min(len(x), len(y))
 	if n < 2 {return 0.0}
@@ -287,12 +404,10 @@ kendall_tau :: proc(x: []f64, y: []f64) -> f64 {
 	return f64(concordant - discordant) / total
 }
 
-// Compute Spearman's rho (rank correlation)
 spearman_rho :: proc(x: []f64, y: []f64, allocator: mem.Allocator) -> f64 {
 	n := min(len(x), len(y))
 	if n < 2 {return 0.0}
 
-	// Transform to ranks
 	rank_x := pit_empirical(x, allocator)
 	rank_y := pit_empirical(y, allocator)
 	defer {
@@ -300,7 +415,6 @@ spearman_rho :: proc(x: []f64, y: []f64, allocator: mem.Allocator) -> f64 {
 		delete(rank_y, allocator)
 	}
 
-	// Pearson correlation of ranks
 	mean_x := 0.0
 	mean_y := 0.0
 	for i in 0 ..< n {
@@ -331,7 +445,6 @@ spearman_rho :: proc(x: []f64, y: []f64, allocator: mem.Allocator) -> f64 {
 // Tail Dependence
 // ============================================================================
 
-// Compute lower tail dependence (probability of joint extreme losses)
 lower_tail_dependence :: proc(u1: []f64, u2: []f64, threshold: f64 = 0.05) -> f64 {
 	n := min(len(u1), len(u2))
 	if n == 0 {return 0.0}
@@ -353,7 +466,6 @@ lower_tail_dependence :: proc(u1: []f64, u2: []f64, threshold: f64 = 0.05) -> f6
 	return f64(count_both_low) / f64(count_u1_low)
 }
 
-// Compute upper tail dependence
 upper_tail_dependence :: proc(u1: []f64, u2: []f64, threshold: f64 = 0.95) -> f64 {
 	n := min(len(u1), len(u2))
 	if n == 0 {return 0.0}
@@ -373,332 +485,4 @@ upper_tail_dependence :: proc(u1: []f64, u2: []f64, threshold: f64 = 0.95) -> f6
 	if count_u1_high == 0 {return 0.0}
 
 	return f64(count_both_high) / f64(count_u1_high)
-}
-
-// SIMD-optimized Gaussian copula log-likelihood
-// SIMD-optimized Gaussian copula log-likelihood
-gaussian_copula_loglik_simd :: proc(u1: []f64, u2: []f64, rho: f64) -> f64 {
-	n := min(len(u1), len(u2))
-	if n == 0 {return 0.0}
-
-	rho_sq := rho * rho
-	denom := 1.0 - rho_sq
-	log_coef := -0.5 * math.ln_f64(denom)
-
-	// AVX: process 8 observations at once
-	if intrinsics.has_target_feature("avx") {
-		acc8 := simd.f64x8{0, 0, 0, 0, 0, 0, 0, 0}
-		i := 0
-
-		for ; i + 8 <= n; i += 8 {
-			// Load 8 u1 and u2 values into SIMD vectors
-			vu1 := simd.f64x8 {
-				u1[i],
-				u1[i + 1],
-				u1[i + 2],
-				u1[i + 3],
-				u1[i + 4],
-				u1[i + 5],
-				u1[i + 6],
-				u1[i + 7],
-			}
-			vu2 := simd.f64x8 {
-				u2[i],
-				u2[i + 1],
-				u2[i + 2],
-				u2[i + 3],
-				u2[i + 4],
-				u2[i + 5],
-				u2[i + 6],
-				u2[i + 7],
-			}
-
-			// Extract SIMD to arrays for scalar processing
-			u1_arr := transmute([8]f64)vu1
-			u2_arr := transmute([8]f64)vu2
-
-			// Transform to normal (scalar norm_inv)
-			x1_arr: [8]f64
-			x2_arr: [8]f64
-			for j := 0; j < 8; j += 1 {
-				x1_arr[j] = norm_inv(u1_arr[j])
-				x2_arr[j] = norm_inv(u2_arr[j])
-			}
-
-			// Convert back to SIMD for vectorized math
-			vx1 := transmute(simd.f64x8)x1_arr
-			vx2 := transmute(simd.f64x8)x2_arr
-
-			// Compute exponent: -(ρ²(x1² + x2²) - 2ρx1x2) / (2(1-ρ²))
-			vx1_sq := intrinsics.simd_mul(vx1, vx1)
-			vx2_sq := intrinsics.simd_mul(vx2, vx2)
-			vx1x2 := intrinsics.simd_mul(vx1, vx2)
-
-			rho_sq_vec := simd.f64x8 {
-				rho_sq,
-				rho_sq,
-				rho_sq,
-				rho_sq,
-				rho_sq,
-				rho_sq,
-				rho_sq,
-				rho_sq,
-			}
-			two_rho_vec := simd.f64x8 {
-				2.0 * rho,
-				2.0 * rho,
-				2.0 * rho,
-				2.0 * rho,
-				2.0 * rho,
-				2.0 * rho,
-				2.0 * rho,
-				2.0 * rho,
-			}
-			two_denom_vec := simd.f64x8 {
-				2.0 * denom,
-				2.0 * denom,
-				2.0 * denom,
-				2.0 * denom,
-				2.0 * denom,
-				2.0 * denom,
-				2.0 * denom,
-				2.0 * denom,
-			}
-
-			sum_sq := intrinsics.simd_add(vx1_sq, vx2_sq)
-			numerator := intrinsics.simd_sub(
-				intrinsics.simd_mul(rho_sq_vec, sum_sq),
-				intrinsics.simd_mul(two_rho_vec, vx1x2),
-			)
-			exponent := intrinsics.simd_div(numerator, two_denom_vec)
-
-			// log(pdf) = log_coef + exponent (we're computing log-likelihood directly)
-			log_coef_vec := simd.f64x8 {
-				log_coef,
-				log_coef,
-				log_coef,
-				log_coef,
-				log_coef,
-				log_coef,
-				log_coef,
-				log_coef,
-			}
-			log_pdf := intrinsics.simd_add(log_coef_vec, exponent)
-
-			acc8 = intrinsics.simd_add(acc8, log_pdf)
-		}
-
-		loglik := intrinsics.simd_reduce_add_pairs(acc8)
-
-		// Tail: process remaining elements
-		for ; i < n; i += 1 {
-			pdf := gaussian_copula_pdf(u1[i], u2[i], rho)
-			if pdf > 0.0 {
-				loglik += math.ln_f64(pdf)
-			}
-		}
-
-		return loglik
-	}
-
-	// Fallback to scalar
-	return gaussian_copula_loglik(u1, u2, rho)
-}
-// SIMD-optimized Kendall's Tau
-kendall_tau_simd :: proc(x: []f64, y: []f64) -> f64 {
-	n := min(len(x), len(y))
-	if n < 2 {return 0.0}
-
-	concordant := 0
-	discordant := 0
-
-	// AVX: vectorize inner loop
-	if intrinsics.has_target_feature("avx") {
-		for i := 0; i < n - 1; i += 1 {
-			dx_base := x[i]
-			dy_base := y[i]
-
-			j := i + 1
-			// Process 8 comparisons at once
-			for ; j + 8 <= n; j += 8 {
-				vx := simd.f64x8 {
-					x[j],
-					x[j + 1],
-					x[j + 2],
-					x[j + 3],
-					x[j + 4],
-					x[j + 5],
-					x[j + 6],
-					x[j + 7],
-				}
-				vy := simd.f64x8 {
-					y[j],
-					y[j + 1],
-					y[j + 2],
-					y[j + 3],
-					y[j + 4],
-					y[j + 5],
-					y[j + 6],
-					y[j + 7],
-				}
-
-				dx_base_vec := simd.f64x8 {
-					dx_base,
-					dx_base,
-					dx_base,
-					dx_base,
-					dx_base,
-					dx_base,
-					dx_base,
-					dx_base,
-				}
-				dy_base_vec := simd.f64x8 {
-					dy_base,
-					dy_base,
-					dy_base,
-					dy_base,
-					dy_base,
-					dy_base,
-					dy_base,
-					dy_base,
-				}
-
-				vdx := intrinsics.simd_sub(dx_base_vec, vx)
-				vdy := intrinsics.simd_sub(dy_base_vec, vy)
-
-				// Product of differences
-				vprod := intrinsics.simd_mul(vdx, vdy)
-
-				// Count positive (concordant) and negative (discordant)
-				zero_vec := simd.f64x8{0, 0, 0, 0, 0, 0, 0, 0}
-				mask_pos := intrinsics.simd_lanes_gt(vprod, zero_vec)
-				mask_neg := intrinsics.simd_lanes_lt(vprod, zero_vec)
-
-				// Convert masks to counts
-				// This is tricky - need to sum the mask bits
-				// For now, fall back to scalar for counting
-				prod_arr := transmute([8]f64)vprod
-				for k := 0; k < 8; k += 1 {
-					if prod_arr[k] > 0.0 {
-						concordant += 1
-					} else if prod_arr[k] < 0.0 {
-						discordant += 1
-					}
-				}
-			}
-
-			// Tail
-			for ; j < n; j += 1 {
-				dx := x[i] - x[j]
-				dy := y[i] - y[j]
-				if dx * dy > 0.0 {
-					concordant += 1
-				} else if dx * dy < 0.0 {
-					discordant += 1
-				}
-			}
-		}
-	} else {
-		// Scalar fallback
-		for i := 0; i < n - 1; i += 1 {
-			for j := i + 1; j < n; j += 1 {
-				dx := x[i] - x[j]
-				dy := y[i] - y[j]
-				if dx * dy > 0.0 {
-					concordant += 1
-				} else if dx * dy < 0.0 {
-					discordant += 1
-				}
-			}
-		}
-	}
-
-	total := f64(n * (n - 1) / 2)
-	return f64(concordant - discordant) / total
-}
-// SIMD-optimized backtesting
-backtest_var_simd :: proc(
-	returns: []f64,
-	var_series: []f64,
-	confidence: f64 = 0.95,
-) -> VaR_BacktestResult {
-	n := min(len(returns), len(var_series))
-	if n == 0 {
-		return VaR_BacktestResult{}
-	}
-
-	n_breaches := 0
-
-	// AVX: process 8 observations at once
-	if intrinsics.has_target_feature("avx") {
-		i := 0
-		for ; i + 8 <= n; i += 8 {
-			vret := simd.f64x8 {
-				returns[i],
-				returns[i + 1],
-				returns[i + 2],
-				returns[i + 3],
-				returns[i + 4],
-				returns[i + 5],
-				returns[i + 6],
-				returns[i + 7],
-			}
-			vvar := simd.f64x8 {
-				var_series[i],
-				var_series[i + 1],
-				var_series[i + 2],
-				var_series[i + 3],
-				var_series[i + 4],
-				var_series[i + 5],
-				var_series[i + 6],
-				var_series[i + 7],
-			}
-
-			// Negate var_series
-			zero_vec := simd.f64x8{0, 0, 0, 0, 0, 0, 0, 0}
-			neg_var := intrinsics.simd_sub(zero_vec, vvar)
-
-			// Check if returns < -var_series
-			mask := intrinsics.simd_lanes_lt(vret, neg_var)
-
-			// Count breaches (need to sum mask bits)
-			// For simplicity, use scalar counting
-			ret_arr := transmute([8]f64)vret
-			var_arr := transmute([8]f64)vvar
-			for j := 0; j < 8; j += 1 {
-				if ret_arr[j] < -var_arr[j] {
-					n_breaches += 1
-				}
-			}
-		}
-
-		// Tail
-		for ; i < n; i += 1 {
-			if returns[i] < -var_series[i] {
-				n_breaches += 1
-			}
-		}
-	} else {
-		// Scalar fallback
-		for i := 0; i < n; i += 1 {
-			if returns[i] < -var_series[i] {
-				n_breaches += 1
-			}
-		}
-	}
-
-	expected := f64(n) * (1.0 - confidence)
-	breach_rate := f64(n_breaches) / f64(n)
-	kupiec_stat := _kupiec_pof_test(n, n_breaches, 1.0 - confidence)
-	p_value := _chi_squared_pvalue_1df(kupiec_stat)
-
-	return VaR_BacktestResult {
-		n_obs = n,
-		n_breaches = n_breaches,
-		expected_breaches = expected,
-		breach_rate = breach_rate,
-		kupiec_stat = kupiec_stat,
-		kupiec_pvalue = p_value,
-		passes_test = p_value > 0.05,
-	}
 }

@@ -4,9 +4,11 @@ package finance
 import a "../analytics"
 import w "../core"
 import l "../linalg"
+import "base:intrinsics"
 import "core:math"
 import "core:math/rand"
 import "core:mem"
+import "core:simd"
 import "core:slice"
 
 // ============================================================================
@@ -673,6 +675,7 @@ cvar_garch :: proc(cond_var: []f64, confidence: f64 = 0.95) -> []f64 {
 // A breach occurs when actual loss exceeds VaR
 // var_series contains POSITIVE values (magnitude of loss)
 // So we check if return < -var_series (return is more negative than the loss threshold)
+// PUBLIC API: User calls this, SIMD is automatic
 backtest_var :: proc(
 	returns: []f64,
 	var_series: []f64,
@@ -683,10 +686,89 @@ backtest_var :: proc(
 		return VaR_BacktestResult{}
 	}
 
+	// Auto-dispatch to SIMD if available
+	if intrinsics.has_target_feature("avx") && n >= 8 {
+		return _backtest_var_simd(returns, var_series, confidence)
+	}
+	return _backtest_var_scalar(returns, var_series, confidence)
+}
+
+_backtest_var_scalar :: proc(
+	returns: []f64,
+	var_series: []f64,
+	confidence: f64,
+) -> VaR_BacktestResult {
+	n := min(len(returns), len(var_series))
 	n_breaches := 0
+
 	for i in 0 ..< n {
-		// Breach: actual return is worse (more negative) than the VaR threshold
-		// var_series[i] is positive (e.g., +1.6%), so -var_series[i] is the threshold (e.g., -1.6%)
+		if returns[i] < -var_series[i] {
+			n_breaches += 1
+		}
+	}
+
+	expected := f64(n) * (1.0 - confidence)
+	breach_rate := f64(n_breaches) / f64(n)
+	kupiec_stat := _kupiec_pof_test(n, n_breaches, 1.0 - confidence)
+	p_value := _chi_squared_pvalue_1df(kupiec_stat)
+
+	return VaR_BacktestResult {
+		n_obs = n,
+		n_breaches = n_breaches,
+		expected_breaches = expected,
+		breach_rate = breach_rate,
+		kupiec_stat = kupiec_stat,
+		kupiec_pvalue = p_value,
+		passes_test = p_value > 0.05,
+	}
+}
+
+_backtest_var_simd :: proc(
+	returns: []f64,
+	var_series: []f64,
+	confidence: f64,
+) -> VaR_BacktestResult {
+	n := min(len(returns), len(var_series))
+	n_breaches := 0
+
+	i := 0
+	for ; i + 8 <= n; i += 8 {
+		vret := simd.f64x8 {
+			returns[i],
+			returns[i + 1],
+			returns[i + 2],
+			returns[i + 3],
+			returns[i + 4],
+			returns[i + 5],
+			returns[i + 6],
+			returns[i + 7],
+		}
+		vvar := simd.f64x8 {
+			var_series[i],
+			var_series[i + 1],
+			var_series[i + 2],
+			var_series[i + 3],
+			var_series[i + 4],
+			var_series[i + 5],
+			var_series[i + 6],
+			var_series[i + 7],
+		}
+
+		zero_vec := simd.f64x8{0, 0, 0, 0, 0, 0, 0, 0}
+		neg_var := intrinsics.simd_sub(zero_vec, vvar)
+		mask := intrinsics.simd_lanes_lt(vret, neg_var)
+
+		// Extract for counting
+		ret_arr := transmute([8]f64)vret
+		var_arr := transmute([8]f64)vvar
+		for j := 0; j < 8; j += 1 {
+			if ret_arr[j] < -var_arr[j] {
+				n_breaches += 1
+			}
+		}
+	}
+
+	for ; i < n; i += 1 {
 		if returns[i] < -var_series[i] {
 			n_breaches += 1
 		}
