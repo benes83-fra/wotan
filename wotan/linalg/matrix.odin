@@ -206,7 +206,7 @@ covariance :: proc(X: ^Matrix(f64), allocator: mem.Allocator = context.allocator
 	for i := 0; i < S.rows * S.cols; i += 1 {
 		S.data[i] *= scale
 	}
-
+	matrix_free(&Xc)
 	return S
 }
 

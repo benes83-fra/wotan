@@ -68,7 +68,7 @@ sequential_add :: proc(s: ^Sequential, layers: ..Layer) {
 // sequential_forward applies all layers in sequence
 sequential_forward :: proc(s: ^Sequential, input: ^t.Tensor) -> ^t.Tensor {
 	x := input
-	for layer in s.layers {
+	for &layer in s.layers {
 		// ✅ FIX: Use '&l' to get a pointer to the layer variant
 		switch &l in layer {
 		case LinearLayer:
@@ -391,7 +391,7 @@ sequential_add_to_adam :: proc(seq: ^Sequential, opt: ^Adam) {
 
 // sequential_free cleans up all layers
 sequential_free :: proc(seq: ^Sequential) {
-	for layer in seq.layers {
+	for &layer in seq.layers {
 		switch &l in layer {
 		case LinearLayer:
 			linear_layer_free(&l)

@@ -190,26 +190,25 @@ min_cvar_portfolio :: proc(
 	for i in 0 ..< n {
 		weights[i] = 1.0 / f64(n)
 	}
-
+	old_weights := weights
 	weights = project_constraints(weights, constraints, allocator)
-
+	delete(old_weights, allocator)
 	// Projected gradient descent
 	lr := 0.01
 	prev_cvar: f64 = 1000000.0
 
 	for iter in 0 ..< max_iter {
-		// Compute CVaR gradient
 		grad := cvar_gradient(weights, returns_data, confidence, allocator)
 
-		// Gradient step
 		for i in 0 ..< n {
 			weights[i] -= lr * grad[i]
 		}
 
-		// Project onto constraints
+		// FIX: Free old weights before reassigning
+		old_weights := weights
 		weights = project_constraints(weights, constraints, allocator)
+		delete(old_weights, allocator)
 
-		// Check convergence
 		port_ret := portfolio_returns(weights, returns_data, context.temp_allocator)
 		current_cvar := portfolio_cvar_historical(port_ret, confidence)
 		delete(port_ret, context.temp_allocator)
@@ -220,7 +219,7 @@ min_cvar_portfolio :: proc(
 		}
 		prev_cvar = current_cvar
 
-		delete(grad, allocator) // FIX: Delete gradient after each iteration
+		delete(grad, allocator)
 	}
 
 	return weights
@@ -278,8 +277,9 @@ risk_parity_portfolio :: proc(
 		weights[i] /= sum_inv_vol
 	}
 
+	old_weights := weights
 	weights = project_constraints(weights, constraints, allocator)
-
+	delete(old_weights, allocator)
 	// Iterative optimization to equalize risk contributions
 	target_risk := 1.0 / f64(n)
 
@@ -307,8 +307,9 @@ risk_parity_portfolio :: proc(
 		}
 
 		// Project onto constraints
+		old_weights := weights
 		weights = project_constraints(weights, constraints, allocator)
-
+		delete(old_weights, allocator)
 		delete(contrib, allocator)
 	}
 

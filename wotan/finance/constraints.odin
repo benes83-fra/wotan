@@ -268,8 +268,9 @@ constrained_min_variance_portfolio :: proc(
 	}
 
 	// Project initial weights
+	old_weights := weights
 	weights = project_constraints(weights, constraints, allocator)
-
+	delete(old_weights, allocator)
 	// Projected gradient descent
 	lr := 0.01
 	prev_var := portfolio_variance(weights, cov)
@@ -284,8 +285,9 @@ constrained_min_variance_portfolio :: proc(
 		}
 
 		// Project onto constraints
+		old_weights := weights
 		weights = project_constraints(weights, constraints, allocator)
-
+		delete(old_weights, allocator)
 		// Check convergence
 		var := portfolio_variance(weights, cov)
 		if math.abs(var - prev_var) < tol {
@@ -319,8 +321,9 @@ constrained_max_sharpe_portfolio :: proc(
 	}
 
 	// Project initial weights
+	old_weights := weights
 	weights = project_constraints(weights, constraints, allocator)
-
+	delete(old_weights, allocator)
 	// Projected gradient descent
 	lr := 0.01
 	prev_sharpe := negative_sharpe(weights, returns, cov, rf)
@@ -335,8 +338,9 @@ constrained_max_sharpe_portfolio :: proc(
 		}
 
 		// Project onto constraints
+		old_weights := weights
 		weights = project_constraints(weights, constraints, allocator)
-
+		delete(old_weights, allocator)
 		// Check convergence
 		sharpe := negative_sharpe(weights, returns, cov, rf)
 		if math.abs(sharpe - prev_sharpe) < tol {
@@ -370,8 +374,9 @@ constrained_mean_variance_portfolio :: proc(
 	}
 
 	// Project initial weights
+	old_weights := weights
 	weights = project_constraints(weights, constraints, allocator)
-
+	delete(old_weights, allocator)
 	// Projected gradient descent with penalty for target return
 	lr := 0.01
 	penalty := 10.0
@@ -400,7 +405,9 @@ constrained_mean_variance_portfolio :: proc(
 		}
 
 		// Project onto constraints
+		old_weights := weights
 		weights = project_constraints(weights, constraints, allocator)
+		delete(old_weights, allocator)
 
 		// Check convergence
 		obj := portfolio_variance(weights, cov) + penalty * return_error * return_error
