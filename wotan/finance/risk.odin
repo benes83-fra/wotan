@@ -1798,3 +1798,120 @@ garch_evt_fit :: proc(
 
 	return result
 }
+// ============================================================================
+// ✅ NEW: Expected Shortfall (CVaR) Backtesting (Acerbi-Szekely Test)
+// ============================================================================
+
+ES_BacktestResult :: struct {
+	n_obs:            int,
+	n_violations:     int,
+	violation_rate:   f64,
+	mean_excess_loss: f64, // Average of (Actual Loss - Predicted ES) during violations
+	z_statistic:      f64, // Acerbi-Szekely Z-score
+	p_value:          f64,
+	passes_test:      bool, // True if p-value > 0.05 (Z < 1.645)
+}
+
+// Backtest Expected Shortfall using the Acerbi-Szekely (2008) unconditional test.
+// Tests H0: E[(L_t - ES_t) * I_t] = 0, where L_t is actual loss, ES_t is predicted ES,
+// and I_t is the VaR violation indicator.
+backtest_es :: proc(
+	returns: []f64,
+	var_series: []f64,
+	es_series: []f64,
+	confidence: f64 = 0.95,
+) -> ES_BacktestResult {
+	n := min(len(returns), min(len(var_series), len(es_series)))
+	if n == 0 {
+		return ES_BacktestResult{}
+	}
+
+	n_violations := 0
+	sum_excess_loss := 0.0
+	sum_squared_excess_loss := 0.0
+
+	for i in 0 ..< n {
+		actual_loss := -returns[i] // Loss is positive when return is negative
+
+		// Check for VaR violation
+		if actual_loss > var_series[i] {
+			n_violations += 1
+
+			// Excess loss: how much worse was the actual loss than the predicted ES?
+			excess_loss := actual_loss - es_series[i]
+			sum_excess_loss += excess_loss
+			sum_squared_excess_loss += excess_loss * excess_loss
+		}
+	}
+
+	violation_rate := f64(n_violations) / f64(n)
+
+	// Acerbi-Szekely Z-statistic:
+	// Z = (1/N * sum(excess_loss)) / sqrt(1/N * sum(excess_loss^2))
+	// Which simplifies to: Z = sum(excess_loss) / sqrt(N * sum(excess_loss^2))
+	z_stat := 0.0
+	mean_excess := 0.0
+
+	if n_violations > 0 && sum_squared_excess_loss > 0.0 {
+		mean_excess = sum_excess_loss / f64(n_violations)
+		denominator := math.sqrt_f64(f64(n) * sum_squared_excess_loss)
+		if denominator > 1e-10 {
+			z_stat = sum_excess_loss / denominator
+		}
+	}
+
+	// P-value for one-sided test (we only care if Z is significantly > 0,
+	// meaning actual losses are worse than predicted)
+	// P(Z > z) = 1 - CDF(z) = 0.5 * erfc(z / sqrt(2))
+	p_value := 0.5 * math.erfc_f64(z_stat / math.sqrt_f64(2.0))
+
+	return ES_BacktestResult {
+		n_obs            = n,
+		n_violations     = n_violations,
+		violation_rate   = violation_rate,
+		mean_excess_loss = mean_excess,
+		z_statistic      = z_stat,
+		p_value          = p_value,
+		passes_test      = p_value > 0.05, // Fail if Z > 1.645 (p < 0.05)
+	}
+}
+// Generate GARCH-based CVaR series
+cvar_garch_series :: proc(
+	cond_var: []f64,
+	confidence: f64 = 0.95,
+	model_type: a.GARCH_Model_Type = .GARCH,
+	nu: f64 = 0.0,
+	shape: f64 = 0.0,
+	allocator: mem.Allocator = context.allocator,
+) -> []f64 {
+	n := len(cond_var)
+	cvar_series := make([]f64, n, allocator)
+
+	// Pre-compute the standard CVaR multiplier based on the model
+	std_cvar_mult: f64
+	if model_type == .StudentT && nu > 2.0 {
+		// Student-t CVaR multiplier
+		z := t_quantile(confidence, nu)
+		lg1, _ := math.lgamma((nu + 1.0) / 2.0)
+		lg2, _ := math.lgamma(nu / 2.0)
+		coef := math.exp_f64(lg1 - lg2 - 0.5 * math.ln_f64(nu * math.PI))
+		pdf := coef * math.pow(1.0 + (z * z) / nu, -(nu + 1.0) / 2.0)
+		std_cvar_mult = (pdf / (1.0 - confidence)) * (nu + z * z) / (nu - 1.0)
+	} else if model_type == .GED && shape > 0.0 {
+		// GED CVaR multiplier (using existing function)
+		std_cvar_mult = -ged_cvar(confidence, shape) // ged_cvar returns negative, we want positive magnitude
+	} else {
+		// Normal CVaR multiplier
+		z := norm_inv(confidence)
+		inv_sqrt_2pi := 0.3989422804014327
+		phi := inv_sqrt_2pi * math.exp_f64(-0.5 * z * z)
+		std_cvar_mult = phi / (1.0 - confidence)
+	}
+
+	for i in 0 ..< n {
+		std := math.sqrt_f64(cond_var[i])
+		cvar_series[i] = std_cvar_mult * std // Positive value representing expected loss magnitude
+	}
+
+	return cvar_series
+}

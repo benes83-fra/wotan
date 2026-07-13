@@ -572,6 +572,84 @@ garch_real_data_test :: proc(allocator: mem.Allocator) {
 		fmt.printf("  ⚠ Significant lower tail dependence (%.2f)\n", ltd)
 		fmt.printf("    Assets tend to crash together!\n")
 	}
+	// 6b. Expected Shortfall (CVaR) Backtesting
+	fmt.println("\n--- Expected Shortfall (CVaR) Backtesting ---")
+
+	// Generate CVaR series for GARCH and Historical
+	cvar_95_garch := fin.cvar_garch_series(
+		garch_result.conditional_var,
+		0.95,
+		.StudentT,
+		garch_result.params.nu,
+		0.0,
+		main_alloc,
+	)
+	cvar_99_garch := fin.cvar_garch_series(
+		garch_result.conditional_var,
+		0.99,
+		.StudentT,
+		garch_result.params.nu,
+		0.0,
+		main_alloc,
+	)
+	defer {
+		delete(cvar_95_garch, main_alloc)
+		delete(cvar_99_garch, main_alloc)
+	}
+
+	// Backtest GARCH CVaR
+	es_backtest_garch_95 := fin.backtest_es(returns_bt, var_95_bt, cvar_95_garch[start_idx:], 0.95)
+	es_backtest_garch_99 := fin.backtest_es(returns_bt, var_99_bt, cvar_99_garch[start_idx:], 0.99)
+
+	// Backtest Historical CVaR
+	es_backtest_hist_95 := fin.backtest_es(
+		returns_bt_hist,
+		var_95_hist_bt,
+		cvar_95_hist[start_idx_hist:],
+		0.95,
+	)
+	es_backtest_hist_99 := fin.backtest_es(
+		returns_bt_hist,
+		var_99_hist_bt,
+		cvar_99_hist[start_idx_hist:],
+		0.99,
+	)
+
+	// Helper proc to print ES results without allocating strings (prevents leaks)
+	print_es_result :: proc(
+		name: string,
+		res_95: fin.ES_BacktestResult,
+		res_99: fin.ES_BacktestResult,
+	) {
+		str_95 := "PASS"
+		if !res_95.passes_test {str_95 = "FAIL"}
+		str_99 := "PASS"
+		if !res_99.passes_test {str_99 = "FAIL"}
+
+		fmt.printf(
+			"%-30s %s (Z=%-5.2f)   %s (Z=%-5.2f)\n",
+			name,
+			str_95,
+			res_95.z_statistic,
+			str_99,
+			res_99.z_statistic,
+		)
+	}
+
+	fmt.printf("\n%-30s %-15s %-15s\n", "Method", "95% ES Test", "99% ES Test")
+	fmt.printf(
+		"%-30s %-15s %-15s\n",
+		"----------------------------",
+		"---------------",
+		"---------------",
+	)
+
+	print_es_result("GARCH(1,1) Student-t", es_backtest_garch_95, es_backtest_garch_99)
+	print_es_result("Historical Simulation", es_backtest_hist_95, es_backtest_hist_99)
+
+	fmt.printf("\nNote: ES Backtest checks if average tail losses match predictions.\n")
+	fmt.printf("      Z > 1.645 indicates the model UNDERESTIMATES tail risk.\n")
+	fmt.printf("      Z ≈ 0.00 indicates perfect calibration of tail severity.\n")
 	// 7. Compare with Historical VaR using new finance API
 	fmt.println("\n--- Historical vs GARCH VaR ---")
 	hist_var_95 := fin.var_historical(returns_bt, 0.95)
