@@ -471,3 +471,195 @@ compute_factor_scores_df :: proc(
 	defer ana.destroy_matrix(data)
 	return compute_factor_scores(data, fa, allocator)
 }
+// ============================================================================
+// Factor Model Covariance (Fama-French Style)
+// ============================================================================
+
+FactorModelCovariance :: struct {
+	factor_cov:        [][]f64, // Covariance matrix of factors (n_factors x n_factors)
+	betas:             [][]f64, // Factor loadings for each asset (n_assets x n_factors)
+	idiosyncratic_var: []f64, // Specific variance for each asset (n_assets)
+	reconstructed_cov: [][]f64, // Reconstructed asset covariance matrix (n_assets x n_assets)
+	sample_cov:        [][]f64, // Original sample covariance matrix (n_assets x n_assets)
+}
+
+// Compute Factor Model Covariance: Σ = B * Σ_f * B^T + D
+factor_model_covariance :: proc(
+	assets_data: [][]f64,
+	factors_data: [][]f64,
+	allocator: mem.Allocator = context.allocator,
+) -> FactorModelCovariance {
+	n_obs := len(assets_data)
+	if n_obs == 0 {return FactorModelCovariance{}}
+	n_assets := len(assets_data[0])
+	n_factors := len(factors_data[0])
+
+	// 1. Compute sample covariance of assets
+	sample_cov := _covariance_matrix(assets_data, allocator)
+
+	// 2. Compute covariance of factors
+	factor_cov := _covariance_matrix(factors_data, allocator)
+
+	// 3. Compute betas (factor loadings) and idiosyncratic variance
+	betas := make([][]f64, n_assets, allocator)
+	idiosyncratic_var := make([]f64, n_assets, allocator)
+
+	// Pre-compute factor means
+	factor_means := make([]f64, n_factors, allocator)
+	for f in 0 ..< n_factors {
+		for i in 0 ..< n_obs {factor_means[f] += factors_data[i][f]}
+		factor_means[f] /= f64(n_obs)
+	}
+
+	// Invert factor covariance matrix for OLS: beta = inv(Σ_f) * Cov(f, asset)
+	fcov_l := _to_linalg_matrix(factor_cov, allocator)
+	defer l.matrix_free(&fcov_l)
+
+	inv_fcov := l.matrix_inverse(&fcov_l, allocator)
+	defer l.matrix_free(&inv_fcov)
+
+	for a in 0 ..< n_assets {
+		betas[a] = make([]f64, n_factors, allocator)
+
+		asset_mean := 0.0
+		for i in 0 ..< n_obs {asset_mean += assets_data[i][a]}
+		asset_mean /= f64(n_obs)
+
+		asset_var := 0.0
+		cov_f_asset := make([]f64, n_factors, allocator)
+
+		for i in 0 ..< n_obs {
+			asset_diff := assets_data[i][a] - asset_mean
+			asset_var += asset_diff * asset_diff
+
+			for f in 0 ..< n_factors {
+				cov_f_asset[f] += (factors_data[i][f] - factor_means[f]) * asset_diff
+			}
+		}
+		asset_var /= f64(n_obs - 1)
+		for f in 0 ..< n_factors {
+			cov_f_asset[f] /= f64(n_obs - 1)
+		}
+
+		// Solve for beta
+		cov_f_asset_l := l.matrix_from_flat(cov_f_asset, n_factors, 1, allocator)
+		defer l.matrix_free(&cov_f_asset_l)
+
+		beta_l := l.matmul_dyn(&inv_fcov, &cov_f_asset_l, allocator)
+		defer l.matrix_free(&beta_l)
+
+		for f in 0 ..< n_factors {
+			betas[a][f] = beta_l.data[f]
+		}
+
+		// Idiosyncratic variance = Var(asset) - beta^T * Cov(f, asset)
+		beta_dot_cov := 0.0
+		for f in 0 ..< n_factors {
+			beta_dot_cov += betas[a][f] * cov_f_asset[f]
+		}
+
+		// Ensure non-negative
+		idiosyncratic_var[a] = math.max(0.0, asset_var - beta_dot_cov)
+
+		delete(cov_f_asset, allocator)
+	}
+
+	delete(factor_means, allocator)
+
+	// 4. Reconstruct covariance matrix: Σ = B * Σ_f * B^T + D
+	reconstructed_cov := make([][]f64, n_assets, allocator)
+	for i in 0 ..< n_assets {
+		reconstructed_cov[i] = make([]f64, n_assets, allocator)
+		for j in 0 ..< n_assets {
+			sys_var := 0.0
+			for f1 in 0 ..< n_factors {
+				for f2 in 0 ..< n_factors {
+					sys_var += betas[i][f1] * factor_cov[f1][f2] * betas[j][f2]
+				}
+			}
+
+			if i == j {
+				sys_var += idiosyncratic_var[i]
+			}
+
+			reconstructed_cov[i][j] = sys_var
+		}
+	}
+
+	return FactorModelCovariance {
+		factor_cov = factor_cov,
+		betas = betas,
+		idiosyncratic_var = idiosyncratic_var,
+		reconstructed_cov = reconstructed_cov,
+		sample_cov = sample_cov,
+	}
+}
+
+// Helper: Covariance Matrix
+_covariance_matrix :: proc(
+	data: [][]f64,
+	allocator: mem.Allocator = context.allocator,
+) -> [][]f64 {
+	n_obs := len(data)
+	if n_obs == 0 {return [][]f64{}}
+	n_vars := len(data[0])
+
+	means := make([]f64, n_vars, allocator)
+	for v in 0 ..< n_vars {
+		sum := 0.0
+		for obs in 0 ..< n_obs {sum += data[obs][v]}
+		means[v] = sum / f64(n_obs)
+	}
+
+	cov := make([][]f64, n_vars, allocator)
+	for i in 0 ..< n_vars {
+		cov[i] = make([]f64, n_vars, allocator)
+		for j in 0 ..< n_vars {
+			sum_prod := 0.0
+			for obs in 0 ..< n_obs {
+				sum_prod += (data[obs][i] - means[i]) * (data[obs][j] - means[j])
+			}
+			cov[i][j] = sum_prod / f64(n_obs - 1)
+		}
+	}
+
+	delete(means, allocator)
+	return cov
+}
+
+// Helper: Convert [][]f64 to l.Matrix(f64)
+_to_linalg_matrix :: proc(data: [][]f64, allocator: mem.Allocator) -> l.Matrix(f64) {
+	rows := len(data)
+	if rows == 0 {return l.Matrix(f64){}}
+	cols := len(data[0])
+
+	flat := make([]f64, rows * cols, allocator)
+	idx := 0
+	for r in 0 ..< rows {
+		for c in 0 ..< cols {
+			flat[idx] = data[r][c]
+			idx += 1
+		}
+	}
+
+	m := l.matrix_from_flat(flat, rows, cols, allocator)
+	delete(flat, allocator)
+	return m
+}
+
+// Helper: Cleanup
+destroy_factor_model_covariance :: proc(fm: ^FactorModelCovariance, allocator: mem.Allocator) {
+	for row in fm.factor_cov {delete(row, allocator)}
+	delete(fm.factor_cov, allocator)
+
+	for row in fm.betas {delete(row, allocator)}
+	delete(fm.betas, allocator)
+
+	delete(fm.idiosyncratic_var, allocator)
+
+	for row in fm.reconstructed_cov {delete(row, allocator)}
+	delete(fm.reconstructed_cov, allocator)
+
+	for row in fm.sample_cov {delete(row, allocator)}
+	delete(fm.sample_cov, allocator)
+}

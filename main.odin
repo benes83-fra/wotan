@@ -492,6 +492,7 @@ main :: proc() {
 	test.pdpm_multifactor_test(context.temp_allocator)
 	test.garch_test(context.temp_allocator)
 	test.garch_real_data_test(context.temp_allocator)
+	test.factor_model_test(context.temp_allocator)
 	fmt.println("Demo End")
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
