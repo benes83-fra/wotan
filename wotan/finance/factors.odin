@@ -484,6 +484,7 @@ FactorModelCovariance :: struct {
 }
 
 // Compute Factor Model Covariance: Σ = B * Σ_f * B^T + D
+// Compute Factor Model Covariance: Σ = B * Σ_f * B^T + D
 factor_model_covariance :: proc(
 	assets_data: [][]f64,
 	factors_data: [][]f64,
@@ -543,10 +544,7 @@ factor_model_covariance :: proc(
 
 		// Solve for beta
 		cov_f_asset_l := l.matrix_from_flat(cov_f_asset, n_factors, 1, allocator)
-		defer l.matrix_free(&cov_f_asset_l)
-
 		beta_l := l.matmul_dyn(&inv_fcov, &cov_f_asset_l, allocator)
-		defer l.matrix_free(&beta_l)
 
 		for f in 0 ..< n_factors {
 			betas[a][f] = beta_l.data[f]
@@ -561,6 +559,9 @@ factor_model_covariance :: proc(
 		// Ensure non-negative
 		idiosyncratic_var[a] = math.max(0.0, asset_var - beta_dot_cov)
 
+		// EXPLICIT CLEANUP: Free temporary allocations for this asset immediately
+		l.matrix_free(&cov_f_asset_l)
+		l.matrix_free(&beta_l)
 		delete(cov_f_asset, allocator)
 	}
 

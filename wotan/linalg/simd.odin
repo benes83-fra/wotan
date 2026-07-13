@@ -227,6 +227,7 @@ back_subst_upper_simd :: proc(
 	return x
 }
 // Solve LU x = Pb using SIMD triangular solves
+// Solve LU x = Pb using SIMD triangular solves
 lu_solve_simd :: proc(
 	LU: ^Matrix(f64),
 	piv: []int,
@@ -243,9 +244,11 @@ lu_solve_simd :: proc(
 
 	// y = P b
 	y_perm := apply_pivots_vec(piv, b)
+	defer delete(y_perm, context.temp_allocator) // FIX: Free the pivoted vector
 
 	// L y = P b  (L unit lower in LU)
 	y := forward_subst_unit_lower_simd(LU, y_perm, allocator)
+	defer delete(y, allocator) // FIX: Free the forward-substituted vector
 
 	// U x = y  (U upper in LU)
 	x := back_subst_upper_simd(LU, y, allocator)
