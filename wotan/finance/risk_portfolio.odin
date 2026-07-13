@@ -195,7 +195,7 @@ min_cvar_portfolio :: proc(
 
 	// Projected gradient descent
 	lr := 0.01
-	prev_cvar: f64 = 1000000.0 // FIX: Explicitly typed as f64 (or use a decimal point)
+	prev_cvar: f64 = 1000000.0
 
 	for iter in 0 ..< max_iter {
 		// Compute CVaR gradient
@@ -220,12 +220,11 @@ min_cvar_portfolio :: proc(
 		}
 		prev_cvar = current_cvar
 
-		delete(grad, allocator)
+		delete(grad, allocator) // FIX: Delete gradient after each iteration
 	}
 
 	return weights
 }
-
 // ============================================================================
 // Risk Parity Portfolio
 // ============================================================================

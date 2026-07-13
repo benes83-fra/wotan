@@ -33,9 +33,10 @@ project_simplex :: proc(weights: []f64, allocator: mem.Allocator) -> []f64 {
 
 	// Sort in descending order
 	sorted := make([]f64, n, allocator)
+	defer delete(sorted, allocator) // FIX: Add defer to ensure cleanup
 	copy(sorted, result)
 
-	// Simple insertion sort for small n, or use proper sort
+	// Simple insertion sort for small n
 	for i in 1 ..< n {
 		key := sorted[i]
 		j := i - 1
@@ -61,7 +62,7 @@ project_simplex :: proc(weights: []f64, allocator: mem.Allocator) -> []f64 {
 	if rho < 0 {
 		// All weights should be zero (shouldn't happen with sum=1)
 		for i in 0 ..< n {result[i] = 1.0 / f64(n)}
-		return result
+		return result // sorted will be deleted by defer
 	}
 
 	// Compute theta
@@ -76,8 +77,7 @@ project_simplex :: proc(weights: []f64, allocator: mem.Allocator) -> []f64 {
 		result[i] = math.max(weights[i] - theta, 0.0)
 	}
 
-	delete(sorted, allocator)
-	return result
+	return result // sorted will be deleted by defer
 }
 
 // Project onto box constraints: min_weight <= weights <= max_weight
