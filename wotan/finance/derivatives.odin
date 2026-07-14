@@ -101,14 +101,16 @@ black_scholes_price :: proc(
 		return t.tensor_sub(term1, term2)
 	}
 }
-
 // Helper: create a scalar tensor (1x1)
 _scalar_tensor :: proc(val: f64, allocator: mem.Allocator) -> ^t.Tensor {
 	data := l.matrix_new(f64, 1, 1, allocator)
 	data.data[0] = val
-	return t.tensor_new(data, false, allocator)
-}
 
+	t := t.tensor_new(data, false, allocator)
+	t.owned_by_graph = true // ✅ FIX: Tell the graph cleaner to free this internal constant
+
+	return t
+}
 // ============================================================================
 // Compute All Greeks via Autograd
 // ============================================================================
