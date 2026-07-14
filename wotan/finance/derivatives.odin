@@ -157,6 +157,14 @@ compute_greeks :: proc(
 	vega_per_pct := vega / 100.0
 	rho_per_pct := rho / 100.0
 
+	// ✅ FIX: Free the graph AND the explicitly created leaf nodes
+	t.tensor_free_graph(price_t)
+	t.tensor_free(S_t)
+	t.tensor_free(K_t)
+	t.tensor_free(T_t)
+	t.tensor_free(r_t)
+	t.tensor_free(sig_t)
+
 	return Greeks {
 		price = price,
 		delta = delta,
@@ -194,8 +202,13 @@ _compute_delta :: proc(
 	t.tensor_backward(price_t)
 	delta := S_t.grad.data[0]
 
-	// Free the tensors we created
+	// ✅ FIX: Free the graph AND the leaf nodes
 	t.tensor_free_graph(price_t)
+	t.tensor_free(S_t)
+	t.tensor_free(K_t)
+	t.tensor_free(T_t)
+	t.tensor_free(r_t)
+	t.tensor_free(sig_t)
 
 	return delta
 }
@@ -222,7 +235,6 @@ implied_volatility :: proc(
 	iterations: int,
 ) {
 	// Initial guess: Brenner-Subrahmanyam approximation for ATM
-	// σ ≈ √(2π/T) * (C/S) for ATM calls
 	sigma = math.sqrt(2.0 * math.PI / T) * market_price / S
 	if sigma <= 0.0 || sigma > 5.0 {
 		sigma = 0.2 // fallback: 20% vol
@@ -242,8 +254,13 @@ implied_volatility :: proc(
 		model_price := price_t.data.data[0]
 		vega := sig_t.grad.data[0] // dV/dσ
 
-		// Free tensors
+		// ✅ FIX: Free the graph AND the leaf nodes inside the loop!
 		t.tensor_free_graph(price_t)
+		t.tensor_free(S_t)
+		t.tensor_free(K_t)
+		t.tensor_free(T_t)
+		t.tensor_free(r_t)
+		t.tensor_free(sig_t)
 
 		// Check convergence
 		err := model_price - market_price
@@ -288,4 +305,65 @@ price_and_greeks :: proc(
 ) {
 	greeks = compute_greeks(S, K, T, r, sigma, opt, allocator)
 	return greeks.price, greeks
+}
+// ============================================================================
+// GARCH-Powered Option Pricing
+// ============================================================================
+
+// Forecast the average annualized volatility over a given horizon using GARCH(1,1)
+// This creates a dynamic volatility term structure, replacing the flat BS assumption.
+garch_term_structure_vol :: proc(
+	omega: f64,
+	alpha: f64,
+	beta: f64,
+	current_var: f64, // Today's conditional variance (e.g., garch_result.conditional_var[last])
+	horizon_days: int,
+) -> f64 {
+	if horizon_days <= 0 {return math.sqrt_f64(current_var) * math.sqrt_f64(252.0)}
+
+	persistence := alpha + beta
+	if persistence >= 1.0 {persistence = 0.999} 	// Prevent explosion
+
+	long_run_var := omega / (1.0 - persistence)
+
+	// Sum of expected variances over the horizon
+	sum_var := 0.0
+	for h in 1 ..< horizon_days + 1 {
+		// E[σ²_{t+h}] = V_L + (α+β)^{h-1} * (σ²_t - V_L)
+		expected_var :=
+			long_run_var + math.pow(persistence, f64(h - 1)) * (current_var - long_run_var)
+		sum_var += expected_var
+	}
+
+	// Average daily variance over the horizon
+	avg_daily_var := sum_var / f64(horizon_days)
+
+	// Annualize
+	return math.sqrt_f64(avg_daily_var * 252.0)
+}
+
+// Price an option and compute Greeks using GARCH-forecasted volatility
+garch_price_and_greeks :: proc(
+	S: f64,
+	K: f64,
+	T_years: f64,
+	r: f64,
+	omega: f64,
+	alpha: f64,
+	beta: f64,
+	current_var: f64,
+	opt: OptionType,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	price: f64,
+	greeks: Greeks,
+) {
+	// 1. Calculate horizon in days (e.g., 0.25 years = 63 days)
+	horizon_days := int(math.max(1.0, T_years * 252.0))
+
+	// 2. Get the GARCH-implied volatility for this specific maturity
+	sigma_garch := garch_term_structure_vol(omega, alpha, beta, current_var, horizon_days)
+
+	// 3. Plug into your existing autograd Black-Scholes engine
+	return price_and_greeks(S, K, T_years, r, sigma_garch, opt, allocator)
 }
