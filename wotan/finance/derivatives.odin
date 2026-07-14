@@ -385,9 +385,7 @@ _tensor_randn :: proc(rows, cols: int, allocator: mem.Allocator) -> ^t.Tensor {
 	return t.tensor_new(data, false, allocator)
 }
 
-// Price an Asian Call Option and compute exact Greeks via Autograd
-// Asian Call Payoff: max(average(S) - K, 0)
-// Price an Asian Call Option and compute exact Greeks via Autograd
+
 // Price an Asian Call Option and compute exact Greeks via Autograd
 monte_carlo_asian_option :: proc(
 	S_0: f64,
@@ -417,18 +415,6 @@ monte_carlo_asian_option :: proc(
 	current_S := t.tensor_new(S_broadcast_data, true, allocator)
 	sigma_tensor := t.tensor_new(sigma_broadcast_data, true, allocator)
 
-	// 🔍 DEBUG: Check dimensions immediately after creation
-	fmt.printf(
-		"🔍 DEBUG INIT: current_S rows=%d, cols=%d\n",
-		current_S.data.rows,
-		current_S.data.cols,
-	)
-	fmt.printf(
-		"🔍 DEBUG INIT: sigma_tensor rows=%d, cols=%d\n",
-		sigma_tensor.data.rows,
-		sigma_tensor.data.cols,
-	)
-
 	// 2. Generate random paths (constant tensor, no grad)
 	Z := _tensor_randn(n_paths, n_steps, allocator)
 
@@ -450,66 +436,45 @@ monte_carlo_asian_option :: proc(
 		}
 		z_step := t.tensor_new(z_col_data, false, allocator)
 
-		// 🔍 DEBUG: Check dimensions right before the first tensor_mul
-		if step == 0 {
-			fmt.printf(
-				"🔍 DEBUG STEP 0: sigma_tensor rows=%d, cols=%d\n",
-				sigma_tensor.data.rows,
-				sigma_tensor.data.cols,
-			)
-			fmt.printf(
-				"🔍 DEBUG STEP 0: z_step rows=%d, cols=%d\n",
-				z_step.data.rows,
-				z_step.data.cols,
-			)
-		}
-
 		// vol_term = sigma_tensor * z_step
 		vol_term := t.tensor_mul(sigma_tensor, z_step)
-
-		// vol_term_scaled = vol_term * sqrt_dt (preserves n_paths×1)
 		vol_term_scaled := t.tensor_scale(vol_term, sqrt_dt)
-		t.tensor_free(vol_term)
-		t.tensor_free(z_step)
+		// ✅ DO NOT FREE vol_term or z_step. They are part of the graph.
 
 		// drift_tensor = r*dt - 0.5 * dt * sigma_tensor^2
 		sigma_sq := t.tensor_mul(sigma_tensor, sigma_tensor)
 		sigma_sq_scaled := t.tensor_scale(sigma_sq, -0.5 * dt)
-		t.tensor_free(sigma_sq)
+		// ✅ DO NOT FREE sigma_sq.
 
 		drift_tensor := t.tensor_add(r_dt_tensor, sigma_sq_scaled)
-		t.tensor_free(sigma_sq_scaled)
+		// ✅ DO NOT FREE sigma_sq_scaled.
 
 		// exponent = drift_tensor + vol_term_scaled
 		exponent := t.tensor_add(drift_tensor, vol_term_scaled)
-		t.tensor_free(drift_tensor)
-		t.tensor_free(vol_term_scaled)
+		// ✅ DO NOT FREE drift_tensor or vol_term_scaled.
 
 		// growth = exp(exponent)
 		growth := t.tensor_exp(exponent)
-		t.tensor_free(exponent)
+		// ✅ DO NOT FREE exponent.
 
 		// next_S = current_S * growth
 		next_S := t.tensor_mul(current_S, growth)
-		t.tensor_free(growth)
+		// ✅ DO NOT FREE growth.
 
-		// Accumulate sum
+		// Accumulate sum safely.
+		// We DO NOT free current_S or sum_S here. They are part of the active
+		// computation graph needed for the backward pass!
 		if step == 0 {
 			sum_S = next_S
 		} else {
-			sum_S_new := t.tensor_add(sum_S, next_S)
-			t.tensor_free(sum_S)
-			t.tensor_free(next_S)
-			sum_S = sum_S_new
+			sum_S = t.tensor_add(sum_S, next_S)
 		}
 
-		t.tensor_free(current_S)
 		current_S = next_S
 	}
 
 	// 4. Calculate Asian Average (n_paths×1)
 	avg_S := t.tensor_scale(sum_S, 1.0 / f64(n_steps))
-	t.tensor_free(sum_S)
 
 	// 5. Payoff = ReLU(avg_S - K) (n_paths×1)
 	K_data := l.matrix_new(f64, n_paths, 1, allocator)
@@ -519,20 +484,14 @@ monte_carlo_asian_option :: proc(
 	K_tensor := t.tensor_new(K_data, false, allocator)
 
 	payoff_diff := t.tensor_sub(avg_S, K_tensor)
-	t.tensor_free(avg_S)
-	t.tensor_free(K_tensor)
-
 	payoff := t.tensor_relu(payoff_diff)
-	t.tensor_free(payoff_diff)
 
 	// 6. Discount (n_paths×1)
 	discount_factor := math.exp(-r * T)
 	discounted_payoff := t.tensor_scale(payoff, discount_factor)
-	t.tensor_free(payoff)
 
 	// 7. Mean over paths (scalar)
 	price_tensor := t.tensor_mean(discounted_payoff)
-	t.tensor_free(discounted_payoff)
 
 	// 8. Backward pass
 	t.tensor_backward(price_tensor)
@@ -550,11 +509,11 @@ monte_carlo_asian_option :: proc(
 	delta = delta_sum
 	vega = vega_sum
 
-	// 10. Cleanup
+	// 10. Cleanup: ONE CALL TO RULE THEM ALL
+	// tensor_free_graph recursively frees the ENTIRE computation graph,
+	// including current_S, sigma_tensor, r_dt_tensor, K_tensor, and ALL intermediate nodes.
+	// We only manually free 'Z' because it was never attached to the grad graph.
 	t.tensor_free_graph(price_tensor)
-	t.tensor_free(current_S)
-	t.tensor_free(sigma_tensor)
-	t.tensor_free(r_dt_tensor)
 	t.tensor_free(Z)
 
 	return price, delta, vega

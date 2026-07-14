@@ -130,6 +130,7 @@ tensor_free :: proc(t: ^Tensor) {
 	if t.dropout_mask != nil {delete(t.dropout_mask, t.allocator)}
 	global_tensors_freed += 1 // ✅ ADD THIS
 	free(t, t.allocator)
+
 }
 
 tensor_zero_grad :: proc(t: ^Tensor) {
@@ -247,6 +248,8 @@ tensor_relu :: proc(a: ^Tensor) -> ^Tensor {
 
 // tensor_mul creates a new tensor C = A * B (element-wise)
 tensor_mul :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
+
+
 	if a.data.rows != b.data.rows || a.data.cols != b.data.cols {
 		fmt.printf("DEBUG PANIC: tensor_mul dimension mismatch!\n")
 		fmt.printf("  Tensor A: rows=%d, cols=%d\n", a.data.rows, a.data.cols)
