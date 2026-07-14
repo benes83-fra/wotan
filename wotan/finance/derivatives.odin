@@ -2,7 +2,9 @@ package finance
 
 import l "../linalg"
 import t "../tensor"
+import "core:fmt"
 import "core:math"
+import "core:math/rand"
 import "core:mem"
 
 // ============================================================================
@@ -368,4 +370,192 @@ garch_price_and_greeks :: proc(
 
 	// 3. Plug into your existing autograd Black-Scholes engine
 	return price_and_greeks(S, K, T_years, r, sigma_garch, opt, allocator)
+}
+// ============================================================================
+// Advanced Derivatives: Differentiable Monte Carlo
+// ============================================================================
+
+// Helper: Create a tensor of standard normal random variables (constant, no grad)
+_tensor_randn :: proc(rows, cols: int, allocator: mem.Allocator) -> ^t.Tensor {
+	data := l.matrix_new(f64, rows, cols, allocator)
+	for i in 0 ..< len(data.data) {
+		data.data[i] = rand.float64_normal(0.0, 1.0)
+	}
+	// requires_grad = false because randomness is not a parameter we optimize
+	return t.tensor_new(data, false, allocator)
+}
+
+// Price an Asian Call Option and compute exact Greeks via Autograd
+// Asian Call Payoff: max(average(S) - K, 0)
+// Price an Asian Call Option and compute exact Greeks via Autograd
+// Price an Asian Call Option and compute exact Greeks via Autograd
+monte_carlo_asian_option :: proc(
+	S_0: f64,
+	K: f64,
+	T: f64,
+	r: f64,
+	sigma: f64,
+	n_paths: int,
+	n_steps: int,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	price: f64,
+	delta: f64,
+	vega: f64,
+) {
+	dt := T / f64(n_steps)
+	sqrt_dt := math.sqrt_f64(dt)
+
+	// 1. Initialize current_S and sigma_tensor as n_paths×1 column vectors
+	S_broadcast_data := l.matrix_new(f64, n_paths, 1, allocator)
+	sigma_broadcast_data := l.matrix_new(f64, n_paths, 1, allocator)
+	for p in 0 ..< n_paths {
+		S_broadcast_data.data[p] = S_0
+		sigma_broadcast_data.data[p] = sigma
+	}
+
+	current_S := t.tensor_new(S_broadcast_data, true, allocator)
+	sigma_tensor := t.tensor_new(sigma_broadcast_data, true, allocator)
+
+	// 🔍 DEBUG: Check dimensions immediately after creation
+	fmt.printf(
+		"🔍 DEBUG INIT: current_S rows=%d, cols=%d\n",
+		current_S.data.rows,
+		current_S.data.cols,
+	)
+	fmt.printf(
+		"🔍 DEBUG INIT: sigma_tensor rows=%d, cols=%d\n",
+		sigma_tensor.data.rows,
+		sigma_tensor.data.cols,
+	)
+
+	// 2. Generate random paths (constant tensor, no grad)
+	Z := _tensor_randn(n_paths, n_steps, allocator)
+
+	// Pre-allocate constant n_paths×1 tensor for r*dt
+	r_dt_data := l.matrix_new(f64, n_paths, 1, allocator)
+	for p in 0 ..< n_paths {
+		r_dt_data.data[p] = r * dt
+	}
+	r_dt_tensor := t.tensor_new(r_dt_data, false, allocator)
+
+	// 3. Simulate paths
+	sum_S: ^t.Tensor = nil
+
+	for step in 0 ..< n_steps {
+		// Extract column of Z for this step (n_paths×1)
+		z_col_data := l.matrix_new(f64, n_paths, 1, allocator)
+		for p in 0 ..< n_paths {
+			z_col_data.data[p] = Z.data.data[p * n_steps + step]
+		}
+		z_step := t.tensor_new(z_col_data, false, allocator)
+
+		// 🔍 DEBUG: Check dimensions right before the first tensor_mul
+		if step == 0 {
+			fmt.printf(
+				"🔍 DEBUG STEP 0: sigma_tensor rows=%d, cols=%d\n",
+				sigma_tensor.data.rows,
+				sigma_tensor.data.cols,
+			)
+			fmt.printf(
+				"🔍 DEBUG STEP 0: z_step rows=%d, cols=%d\n",
+				z_step.data.rows,
+				z_step.data.cols,
+			)
+		}
+
+		// vol_term = sigma_tensor * z_step
+		vol_term := t.tensor_mul(sigma_tensor, z_step)
+
+		// vol_term_scaled = vol_term * sqrt_dt (preserves n_paths×1)
+		vol_term_scaled := t.tensor_scale(vol_term, sqrt_dt)
+		t.tensor_free(vol_term)
+		t.tensor_free(z_step)
+
+		// drift_tensor = r*dt - 0.5 * dt * sigma_tensor^2
+		sigma_sq := t.tensor_mul(sigma_tensor, sigma_tensor)
+		sigma_sq_scaled := t.tensor_scale(sigma_sq, -0.5 * dt)
+		t.tensor_free(sigma_sq)
+
+		drift_tensor := t.tensor_add(r_dt_tensor, sigma_sq_scaled)
+		t.tensor_free(sigma_sq_scaled)
+
+		// exponent = drift_tensor + vol_term_scaled
+		exponent := t.tensor_add(drift_tensor, vol_term_scaled)
+		t.tensor_free(drift_tensor)
+		t.tensor_free(vol_term_scaled)
+
+		// growth = exp(exponent)
+		growth := t.tensor_exp(exponent)
+		t.tensor_free(exponent)
+
+		// next_S = current_S * growth
+		next_S := t.tensor_mul(current_S, growth)
+		t.tensor_free(growth)
+
+		// Accumulate sum
+		if step == 0 {
+			sum_S = next_S
+		} else {
+			sum_S_new := t.tensor_add(sum_S, next_S)
+			t.tensor_free(sum_S)
+			t.tensor_free(next_S)
+			sum_S = sum_S_new
+		}
+
+		t.tensor_free(current_S)
+		current_S = next_S
+	}
+
+	// 4. Calculate Asian Average (n_paths×1)
+	avg_S := t.tensor_scale(sum_S, 1.0 / f64(n_steps))
+	t.tensor_free(sum_S)
+
+	// 5. Payoff = ReLU(avg_S - K) (n_paths×1)
+	K_data := l.matrix_new(f64, n_paths, 1, allocator)
+	for p in 0 ..< n_paths {
+		K_data.data[p] = K
+	}
+	K_tensor := t.tensor_new(K_data, false, allocator)
+
+	payoff_diff := t.tensor_sub(avg_S, K_tensor)
+	t.tensor_free(avg_S)
+	t.tensor_free(K_tensor)
+
+	payoff := t.tensor_relu(payoff_diff)
+	t.tensor_free(payoff_diff)
+
+	// 6. Discount (n_paths×1)
+	discount_factor := math.exp(-r * T)
+	discounted_payoff := t.tensor_scale(payoff, discount_factor)
+	t.tensor_free(payoff)
+
+	// 7. Mean over paths (scalar)
+	price_tensor := t.tensor_mean(discounted_payoff)
+	t.tensor_free(discounted_payoff)
+
+	// 8. Backward pass
+	t.tensor_backward(price_tensor)
+
+	// 9. Extract results
+	price = price_tensor.data.data[0]
+
+	delta_sum := 0.0
+	vega_sum := 0.0
+	for p in 0 ..< n_paths {
+		delta_sum += current_S.grad.data[p]
+		vega_sum += sigma_tensor.grad.data[p]
+	}
+
+	delta = delta_sum
+	vega = vega_sum
+
+	// 10. Cleanup
+	t.tensor_free_graph(price_tensor)
+	t.tensor_free(current_S)
+	t.tensor_free(sigma_tensor)
+	t.tensor_free(r_dt_tensor)
+	t.tensor_free(Z)
+
+	return price, delta, vega
 }

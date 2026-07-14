@@ -248,6 +248,9 @@ tensor_relu :: proc(a: ^Tensor) -> ^Tensor {
 // tensor_mul creates a new tensor C = A * B (element-wise)
 tensor_mul :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
 	if a.data.rows != b.data.rows || a.data.cols != b.data.cols {
+		fmt.printf("DEBUG PANIC: tensor_mul dimension mismatch!\n")
+		fmt.printf("  Tensor A: rows=%d, cols=%d\n", a.data.rows, a.data.cols)
+		fmt.printf("  Tensor B: rows=%d, cols=%d\n", b.data.rows, b.data.cols)
 		panic("tensor_mul: dimension mismatch")
 	}
 
