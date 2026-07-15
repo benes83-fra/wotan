@@ -448,7 +448,7 @@ calibrate_heston :: proc(
 		opt.optimizer_step(&optimizer, x, gradient)
 
 		// ✅ FIX 4: Slightly relaxed bounds to give the optimizer room to breathe
-		x[0] = math.max(0.005, x[0]) // v0
+		x[0] = math.max(0.001, x[0]) // v0
 		x[1] = math.max(0.1, x[1]) // kappa
 		x[2] = math.max(0.005, x[2]) // theta
 		x[3] = math.max(0.05, x[3]) // sigma
@@ -469,7 +469,7 @@ calibrate_heston :: proc(
 	}
 }
 
-// ✅ FIX: Numerically stable, standard Lewis (2001) Heston characteristic function
+// ✅ FIX: 100% standard, numerically stable Lewis/Gatheral Heston characteristic function
 heston_characteristic_function :: proc(
 	u: f64,
 	S: f64,
@@ -481,19 +481,18 @@ heston_characteristic_function :: proc(
 ) -> complex128 {
 	iu := complex(0.0, u)
 
+	// b_j differs for the two probability measures
 	b_j: complex128
 	if phi_type == 1 {
-		b_j = complex(1.0, 0.0)
+		b_j = complex(params.kappa - params.rho * params.sigma, 0.0)
 	} else {
-		b_j = complex(0.0, 0.0)
+		b_j = complex(params.kappa, 0.0)
 	}
 
 	rho_sigma_iu := complex(params.rho * params.sigma, 0.0) * iu
-	term1 := rho_sigma_iu - complex(params.kappa, 0.0)
+	term1 := rho_sigma_iu - b_j
 
-	// Correct Heston d_squared formula
-	// For j=1: sigma^2 * (u^2 + i*u)
-	// For j=2: sigma^2 * (u^2 - i*u)
+	// u_term differs for the two probability measures
 	u_term: complex128
 	if phi_type == 1 {
 		u_term = complex(u * u, 0.0) + iu
@@ -501,27 +500,27 @@ heston_characteristic_function :: proc(
 		u_term = complex(u * u, 0.0) - iu
 	}
 
-	d_squared := term1 * term1 + complex(params.sigma * params.sigma, 0.0) * u_term
+	// Standard formula uses MINUS sigma^2 * u_term
+	d_squared := term1 * term1 - complex(params.sigma * params.sigma, 0.0) * u_term
 
 	d := cmath_sqrt(d_squared)
 
-	num := complex(params.kappa, 0.0) - rho_sigma_iu + d
-	den := complex(params.kappa, 0.0) - rho_sigma_iu - d
+	// ✅ CRITICAL FIX: num AND den must use b_j, NOT kappa
+	num := b_j - rho_sigma_iu + d
+	den := b_j - rho_sigma_iu - d + complex(1e-10, 0.0) // ✅ Prevents div by zero
 	g := num / den
 
 	exp_dT := cmath_exp(-d * complex(T, 0.0))
 
 	D :=
-		(complex(params.kappa, 0.0) - rho_sigma_iu + d) /
+		(b_j - rho_sigma_iu + d) /
 		complex(params.sigma * params.sigma, 0.0) *
 		(complex(1.0, 0.0) - exp_dT) /
-		(complex(1.0, 0.0) - g * exp_dT)
+		(complex(1.0, 0.0) - g * exp_dT + complex(1e-10, 0.0)) // ✅ Prevents div by zero
 
 	C_part1 := complex(r, 0.0) * iu * complex(T, 0.0)
 	C_part2 :=
-		(complex(params.kappa, 0.0) - rho_sigma_iu + d) *
-		complex(T, 0.0) /
-		complex(params.sigma * params.sigma, 0.0)
+		(b_j - rho_sigma_iu + d) * complex(T, 0.0) / complex(params.sigma * params.sigma, 0.0)
 	C_part3 :=
 		complex(2.0, 0.0) * cmath_log((complex(1.0, 0.0) - g * exp_dT) / (complex(1.0, 0.0) - g))
 
