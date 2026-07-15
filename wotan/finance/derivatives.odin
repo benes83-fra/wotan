@@ -832,22 +832,29 @@ monte_carlo_basket_option :: proc(
 
 // Helper: Smooth differentiable maximum of two tensors
 // max(a, b) ≈ (a + b + sqrt((a - b)^2 + ε)) / 2
+// Fully compatible with strict dimension-matching tensor operations.
 tensor_smooth_max :: proc(a: ^t.Tensor, b: ^t.Tensor, allocator: mem.Allocator) -> ^t.Tensor {
-	epsilon := 1e-6
-
 	diff := t.tensor_sub(a, b)
 	diff_sq := t.tensor_mul(diff, diff)
 
-	eps_tensor := _scalar_tensor(epsilon, allocator)
+	// Create an epsilon tensor with the EXACT same dimensions as diff_sq
+	// to avoid 1x1 broadcasting issues in tensor_add
+	eps_data := l.matrix_new(f64, diff_sq.data.rows, diff_sq.data.cols, allocator)
+	for i in 0 ..< len(eps_data.data) {
+		eps_data.data[i] = 1e-6
+	}
+	eps_tensor := t.tensor_new(eps_data, false, allocator)
+
 	diff_sq_eps := t.tensor_add(diff_sq, eps_tensor)
+	t.tensor_free(eps_tensor) // Clean up intermediate
 
 	sqrt_diff := t.tensor_sqrt(diff_sq_eps)
 	a_plus_b := t.tensor_add(a, b)
 
 	num := t.tensor_add(a_plus_b, sqrt_diff)
-	half_tensor := _scalar_tensor(0.5, allocator)
 
-	return t.tensor_mul(num, half_tensor)
+	// Use tensor_scale for division by 2 to avoid 1x1 tensor multiplication
+	return t.tensor_scale(num, 0.5)
 }
 
 // Fixed Strike Lookback Call: Pays max(S_max - K, 0)
