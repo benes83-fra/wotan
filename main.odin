@@ -496,6 +496,7 @@ main :: proc() {
 	test.rs_garch_test(context.temp_allocator)
 	test.garch_options_test(context.temp_allocator)
 	test.advanced_derivatives_test(context.temp_allocator)
+	test.exotic_options_test(context.temp_allocator)
 	fmt.println("Demo End")
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)

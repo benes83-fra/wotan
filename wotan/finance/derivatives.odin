@@ -413,6 +413,7 @@ monte_carlo_asian_option :: proc(
 	}
 
 	current_S := t.tensor_new(S_broadcast_data, true, allocator)
+	initial_S := current_S
 	sigma_tensor := t.tensor_new(sigma_broadcast_data, true, allocator)
 
 	// 2. Generate random paths (constant tensor, no grad)
@@ -502,7 +503,7 @@ monte_carlo_asian_option :: proc(
 	delta_sum := 0.0
 	vega_sum := 0.0
 	for p in 0 ..< n_paths {
-		delta_sum += current_S.grad.data[p]
+		delta_sum += initial_S.grad.data[p]
 		vega_sum += sigma_tensor.grad.data[p]
 	}
 
@@ -513,6 +514,444 @@ monte_carlo_asian_option :: proc(
 	// tensor_free_graph recursively frees the ENTIRE computation graph,
 	// including current_S, sigma_tensor, r_dt_tensor, K_tensor, and ALL intermediate nodes.
 	// We only manually free 'Z' because it was never attached to the grad graph.
+	t.tensor_free_graph(price_tensor)
+	t.tensor_free(Z)
+
+	return price, delta, vega
+}
+// Up-and-Out Call: Pays max(S_avg - K, 0) but knocks out if S_t > barrier at any time
+monte_carlo_barrier_asian_option :: proc(
+	S_0: f64,
+	K: f64,
+	T: f64,
+	r: f64,
+	sigma: f64,
+	barrier: f64,
+	n_paths: int,
+	n_steps: int,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	price: f64,
+	delta: f64,
+	vega: f64,
+) {
+	dt := T / f64(n_steps)
+	sqrt_dt := math.sqrt_f64(dt)
+
+	// Initialize tensors
+	S_broadcast_data := l.matrix_new(f64, n_paths, 1, allocator)
+	sigma_broadcast_data := l.matrix_new(f64, n_paths, 1, allocator)
+	for p in 0 ..< n_paths {
+		S_broadcast_data.data[p] = S_0
+		sigma_broadcast_data.data[p] = sigma
+	}
+
+	initial_S := t.tensor_new(S_broadcast_data, true, allocator)
+	current_S := initial_S
+	sigma_tensor := t.tensor_new(sigma_broadcast_data, true, allocator)
+
+	// Generate random paths
+	Z := _tensor_randn(n_paths, n_steps, allocator)
+
+	// Pre-allocate r*dt tensor
+	r_dt_data := l.matrix_new(f64, n_paths, 1, allocator)
+	for p in 0 ..< n_paths {
+		r_dt_data.data[p] = r * dt
+	}
+	r_dt_tensor := t.tensor_new(r_dt_data, false, allocator)
+
+	// Simulate paths with barrier check
+	sum_S: ^t.Tensor = nil
+	alive_mask := t.tensor_new(l.matrix_new(f64, n_paths, 1, allocator), false, allocator)
+	for p in 0 ..< n_paths {
+		alive_mask.data.data[p] = 1.0 // All paths start alive
+	}
+
+	for step in 0 ..< n_steps {
+		z_col_data := l.matrix_new(f64, n_paths, 1, allocator)
+		for p in 0 ..< n_paths {
+			z_col_data.data[p] = Z.data.data[p * n_steps + step]
+		}
+		z_step := t.tensor_new(z_col_data, false, allocator)
+
+		vol_term := t.tensor_mul(sigma_tensor, z_step)
+		vol_term_scaled := t.tensor_scale(vol_term, sqrt_dt)
+
+		sigma_sq := t.tensor_mul(sigma_tensor, sigma_tensor)
+		sigma_sq_scaled := t.tensor_scale(sigma_sq, -0.5 * dt)
+
+		drift_tensor := t.tensor_add(r_dt_tensor, sigma_sq_scaled)
+		exponent := t.tensor_add(drift_tensor, vol_term_scaled)
+		growth := t.tensor_exp(exponent)
+
+		next_S := t.tensor_mul(current_S, growth)
+
+		// Check barrier: if next_S > barrier, mark path as dead
+		// We use a simple approach: multiply by mask
+		barrier_check := t.tensor_new(l.matrix_new(f64, n_paths, 1, allocator), false, allocator)
+		for p in 0 ..< n_paths {
+			if next_S.data.data[p] > barrier {
+				barrier_check.data.data[p] = 0.0 // Knock out
+			} else {
+				barrier_check.data.data[p] = 1.0 // Stay alive
+			}
+		}
+
+		// Update alive mask
+		alive_mask = t.tensor_mul(alive_mask, barrier_check)
+		t.tensor_free(barrier_check)
+
+		// Accumulate sum (only for alive paths)
+		masked_S := t.tensor_mul(next_S, alive_mask)
+
+		if step == 0 {
+			sum_S = masked_S
+		} else {
+			sum_S = t.tensor_add(sum_S, masked_S)
+		}
+
+		current_S = next_S
+	}
+
+	// Calculate average
+	avg_S := t.tensor_scale(sum_S, 1.0 / f64(n_steps))
+
+	// Payoff with barrier condition
+	K_data := l.matrix_new(f64, n_paths, 1, allocator)
+	for p in 0 ..< n_paths {
+		K_data.data[p] = K
+	}
+	K_tensor := t.tensor_new(K_data, false, allocator)
+
+	payoff_diff := t.tensor_sub(avg_S, K_tensor)
+	payoff_raw := t.tensor_relu(payoff_diff)
+
+	// Apply alive mask to payoff
+	payoff := t.tensor_mul(payoff_raw, alive_mask)
+
+	// Discount
+	discount_factor := math.exp(-r * T)
+	discounted_payoff := t.tensor_scale(payoff, discount_factor)
+
+	// Mean
+	price_tensor := t.tensor_mean(discounted_payoff)
+
+	// Backward pass
+	t.tensor_backward(price_tensor)
+
+	price = price_tensor.data.data[0]
+
+	delta_sum := 0.0
+	vega_sum := 0.0
+	for p in 0 ..< n_paths {
+		delta_sum += initial_S.grad.data[p]
+		vega_sum += sigma_tensor.grad.data[p]
+	}
+
+	delta = delta_sum
+	vega = vega_sum
+
+	t.tensor_free_graph(price_tensor)
+	t.tensor_free(Z)
+
+	return price, delta, vega
+}
+// 2-Asset Basket Call: Pays max(w1*S1_avg + w2*S2_avg - K, 0)
+monte_carlo_basket_option :: proc(
+	S1_0: f64,
+	S2_0: f64,
+	K: f64,
+	T: f64,
+	r: f64,
+	sigma1: f64,
+	sigma2: f64,
+	corr: f64, // Correlation between assets
+	w1: f64, // Weight for asset 1
+	w2: f64, // Weight for asset 2
+	n_paths: int,
+	n_steps: int,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	price: f64,
+	delta1: f64,
+	delta2: f64,
+	vega1: f64,
+	vega2: f64,
+) {
+	dt := T / f64(n_steps)
+	sqrt_dt := math.sqrt_f64(dt)
+
+	// Cholesky decomposition for correlation
+	// L = [[1, 0], [corr, sqrt(1-corr^2)]]
+	cholesky_21 := corr
+	cholesky_22 := math.sqrt_f64(1.0 - corr * corr)
+
+	// Initialize asset 1
+	S1_broadcast := l.matrix_new(f64, n_paths, 1, allocator)
+	sigma1_broadcast := l.matrix_new(f64, n_paths, 1, allocator)
+	for p in 0 ..< n_paths {
+		S1_broadcast.data[p] = S1_0
+		sigma1_broadcast.data[p] = sigma1
+	}
+
+	initial_S1 := t.tensor_new(S1_broadcast, true, allocator)
+	current_S1 := initial_S1
+	sigma1_tensor := t.tensor_new(sigma1_broadcast, true, allocator)
+
+	// Initialize asset 2
+	S2_broadcast := l.matrix_new(f64, n_paths, 1, allocator)
+	sigma2_broadcast := l.matrix_new(f64, n_paths, 1, allocator)
+	for p in 0 ..< n_paths {
+		S2_broadcast.data[p] = S2_0
+		sigma2_broadcast.data[p] = sigma2
+	}
+
+	initial_S2 := t.tensor_new(S2_broadcast, true, allocator)
+	current_S2 := initial_S2
+	sigma2_tensor := t.tensor_new(sigma2_broadcast, true, allocator)
+
+	// Generate independent random paths
+	Z1 := _tensor_randn(n_paths, n_steps, allocator)
+	Z2 := _tensor_randn(n_paths, n_steps, allocator)
+
+	// Pre-allocate drift tensors
+	r_dt_data := l.matrix_new(f64, n_paths, 1, allocator)
+	for p in 0 ..< n_paths {
+		r_dt_data.data[p] = r * dt
+	}
+	r_dt_tensor := t.tensor_new(r_dt_data, false, allocator)
+
+	// Simulate correlated paths
+	sum_S1: ^t.Tensor = nil
+	sum_S2: ^t.Tensor = nil
+
+	for step in 0 ..< n_steps {
+		// Extract Z columns
+		z1_col_data := l.matrix_new(f64, n_paths, 1, allocator)
+		z2_col_data := l.matrix_new(f64, n_paths, 1, allocator)
+		for p in 0 ..< n_paths {
+			z1_col_data.data[p] = Z1.data.data[p * n_steps + step]
+			z2_col_data.data[p] = Z2.data.data[p * n_steps + step]
+		}
+		z1_step := t.tensor_new(z1_col_data, false, allocator)
+		z2_step := t.tensor_new(z2_col_data, false, allocator)
+
+		// Apply Cholesky to create correlated paths
+		// Z2_corr = cholesky_21 * Z1 + cholesky_22 * Z2
+		z2_corr_1 := t.tensor_scale(z1_step, cholesky_21)
+		z2_corr_2 := t.tensor_scale(z2_step, cholesky_22)
+		z2_corr := t.tensor_add(z2_corr_1, z2_corr_2)
+
+		// Asset 1 dynamics
+		vol1_term := t.tensor_mul(sigma1_tensor, z1_step)
+		vol1_scaled := t.tensor_scale(vol1_term, sqrt_dt)
+		sigma1_sq := t.tensor_mul(sigma1_tensor, sigma1_tensor)
+		sigma1_sq_scaled := t.tensor_scale(sigma1_sq, -0.5 * dt)
+		drift1 := t.tensor_add(r_dt_tensor, sigma1_sq_scaled)
+		exponent1 := t.tensor_add(drift1, vol1_scaled)
+		growth1 := t.tensor_exp(exponent1)
+		next_S1 := t.tensor_mul(current_S1, growth1)
+
+		// Asset 2 dynamics
+		vol2_term := t.tensor_mul(sigma2_tensor, z2_corr)
+		vol2_scaled := t.tensor_scale(vol2_term, sqrt_dt)
+		sigma2_sq := t.tensor_mul(sigma2_tensor, sigma2_tensor)
+		sigma2_sq_scaled := t.tensor_scale(sigma2_sq, -0.5 * dt)
+		drift2 := t.tensor_add(r_dt_tensor, sigma2_sq_scaled)
+		exponent2 := t.tensor_add(drift2, vol2_scaled)
+		growth2 := t.tensor_exp(exponent2)
+		next_S2 := t.tensor_mul(current_S2, growth2)
+
+		// Accumulate sums
+		if step == 0 {
+			sum_S1 = next_S1
+			sum_S2 = next_S2
+		} else {
+			sum_S1 = t.tensor_add(sum_S1, next_S1)
+			sum_S2 = t.tensor_add(sum_S2, next_S2)
+		}
+
+		current_S1 = next_S1
+		current_S2 = next_S2
+	}
+
+	// Calculate basket average
+	avg_S1 := t.tensor_scale(sum_S1, 1.0 / f64(n_steps))
+	avg_S2 := t.tensor_scale(sum_S2, 1.0 / f64(n_steps))
+
+	// Weighted basket
+	weighted_S1 := t.tensor_scale(avg_S1, w1)
+	weighted_S2 := t.tensor_scale(avg_S2, w2)
+	basket_value := t.tensor_add(weighted_S1, weighted_S2)
+
+	// Payoff
+	K_data := l.matrix_new(f64, n_paths, 1, allocator)
+	for p in 0 ..< n_paths {
+		K_data.data[p] = K
+	}
+	K_tensor := t.tensor_new(K_data, false, allocator)
+
+	payoff_diff := t.tensor_sub(basket_value, K_tensor)
+	payoff := t.tensor_relu(payoff_diff)
+
+	// Discount and mean
+	discount_factor := math.exp(-r * T)
+	discounted_payoff := t.tensor_scale(payoff, discount_factor)
+	price_tensor := t.tensor_mean(discounted_payoff)
+
+	// Backward pass
+	t.tensor_backward(price_tensor)
+
+	price = price_tensor.data.data[0]
+
+	delta1_sum := 0.0
+	delta2_sum := 0.0
+	vega1_sum := 0.0
+	vega2_sum := 0.0
+	for p in 0 ..< n_paths {
+		delta1_sum += initial_S1.grad.data[p]
+		delta2_sum += initial_S2.grad.data[p]
+		vega1_sum += sigma1_tensor.grad.data[p]
+		vega2_sum += sigma2_tensor.grad.data[p]
+	}
+
+	delta1 = delta1_sum
+	delta2 = delta2_sum
+	vega1 = vega1_sum
+	vega2 = vega2_sum
+
+	t.tensor_free_graph(price_tensor)
+	t.tensor_free(Z1)
+	t.tensor_free(Z2)
+
+	return price, delta1, delta2, vega1, vega2
+}
+// ============================================================================
+// Lookback Options
+// ============================================================================
+
+// Helper: Smooth differentiable maximum of two tensors
+// max(a, b) ≈ (a + b + sqrt((a - b)^2 + ε)) / 2
+tensor_smooth_max :: proc(a: ^t.Tensor, b: ^t.Tensor, allocator: mem.Allocator) -> ^t.Tensor {
+	epsilon := 1e-6
+
+	diff := t.tensor_sub(a, b)
+	diff_sq := t.tensor_mul(diff, diff)
+
+	eps_tensor := _scalar_tensor(epsilon, allocator)
+	diff_sq_eps := t.tensor_add(diff_sq, eps_tensor)
+
+	sqrt_diff := t.tensor_sqrt(diff_sq_eps)
+	a_plus_b := t.tensor_add(a, b)
+
+	num := t.tensor_add(a_plus_b, sqrt_diff)
+	half_tensor := _scalar_tensor(0.5, allocator)
+
+	return t.tensor_mul(num, half_tensor)
+}
+
+// Fixed Strike Lookback Call: Pays max(S_max - K, 0)
+monte_carlo_lookback_call_option :: proc(
+	S_0: f64,
+	K: f64,
+	T: f64,
+	r: f64,
+	sigma: f64,
+	n_paths: int,
+	n_steps: int,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	price: f64,
+	delta: f64,
+	vega: f64,
+) {
+	dt := T / f64(n_steps)
+	sqrt_dt := math.sqrt_f64(dt)
+
+	// Initialize tensors
+	S_broadcast_data := l.matrix_new(f64, n_paths, 1, allocator)
+	sigma_broadcast_data := l.matrix_new(f64, n_paths, 1, allocator)
+	for p in 0 ..< n_paths {
+		S_broadcast_data.data[p] = S_0
+		sigma_broadcast_data.data[p] = sigma
+	}
+
+	initial_S := t.tensor_new(S_broadcast_data, true, allocator)
+	current_S := initial_S
+	sigma_tensor := t.tensor_new(sigma_broadcast_data, true, allocator)
+
+	// Generate random paths
+	Z := _tensor_randn(n_paths, n_steps, allocator)
+
+	// Pre-allocate r*dt tensor
+	r_dt_data := l.matrix_new(f64, n_paths, 1, allocator)
+	for p in 0 ..< n_paths {
+		r_dt_data.data[p] = r * dt
+	}
+	r_dt_tensor := t.tensor_new(r_dt_data, false, allocator)
+
+	// Track running maximum (initialize with S_0)
+	S_max_data := l.matrix_new(f64, n_paths, 1, allocator)
+	for p in 0 ..< n_paths {
+		S_max_data.data[p] = S_0
+	}
+	S_max := t.tensor_new(S_max_data, false, allocator)
+
+	for step in 0 ..< n_steps {
+		z_col_data := l.matrix_new(f64, n_paths, 1, allocator)
+		for p in 0 ..< n_paths {
+			z_col_data.data[p] = Z.data.data[p * n_steps + step]
+		}
+		z_step := t.tensor_new(z_col_data, false, allocator)
+
+		vol_term := t.tensor_mul(sigma_tensor, z_step)
+		vol_term_scaled := t.tensor_scale(vol_term, sqrt_dt)
+
+		sigma_sq := t.tensor_mul(sigma_tensor, sigma_tensor)
+		sigma_sq_scaled := t.tensor_scale(sigma_sq, -0.5 * dt)
+
+		drift_tensor := t.tensor_add(r_dt_tensor, sigma_sq_scaled)
+		exponent := t.tensor_add(drift_tensor, vol_term_scaled)
+		growth := t.tensor_exp(exponent)
+
+		next_S := t.tensor_mul(current_S, growth)
+
+		// Update running maximum using smooth differentiable max
+		S_max = tensor_smooth_max(S_max, next_S, allocator)
+
+		current_S = next_S
+	}
+
+	// Payoff = max(S_max - K, 0)
+	K_data := l.matrix_new(f64, n_paths, 1, allocator)
+	for p in 0 ..< n_paths {
+		K_data.data[p] = K
+	}
+	K_tensor := t.tensor_new(K_data, false, allocator)
+
+	payoff_diff := t.tensor_sub(S_max, K_tensor)
+	payoff := t.tensor_relu(payoff_diff)
+
+	// Discount and mean
+	discount_factor := math.exp(-r * T)
+	discounted_payoff := t.tensor_scale(payoff, discount_factor)
+	price_tensor := t.tensor_mean(discounted_payoff)
+
+	// Backward pass
+	t.tensor_backward(price_tensor)
+
+	price = price_tensor.data.data[0]
+
+	delta_sum := 0.0
+	vega_sum := 0.0
+	for p in 0 ..< n_paths {
+		delta_sum += initial_S.grad.data[p]
+		vega_sum += sigma_tensor.grad.data[p]
+	}
+
+	delta = delta_sum
+	vega = vega_sum
+
 	t.tensor_free_graph(price_tensor)
 	t.tensor_free(Z)
 
