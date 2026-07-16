@@ -125,17 +125,32 @@ fetch_yahoo_options :: proc(
 	symbol: string,
 	allocator: mem.Allocator = context.allocator,
 ) -> OptionChain {
+	// 1. Get crumb and cookie first
+	crumb, cookie, ok := net.yahoo_get_crumb_and_cookie(allocator)
+	if !ok {
+		fmt.println("Warning: Failed to get Yahoo crumb/cookie")
+		return OptionChain{}
+	}
+
+	// 2. Build URL with crumb
 	url := fmt.aprintf(
-		"https://query1.finance.yahoo.com/v7/finance/options/%s",
+		"https://query1.finance.yahoo.com/v7/finance/options/%s?crumb=%s",
 		symbol,
+		crumb,
 		allocator = allocator,
 	)
-	//defer delete(url)
+	defer delete(url, allocator)
 
-	text, ok := net.http_get(url, allocator)
-	if !ok {
+	// 3. Fetch using your EXISTING net.http_get_with_cookie
+	text, ok2 := net.http_get_with_cookie(url, cookie, allocator)
+	if !ok2 {
 		panic(fmt.tprintf("Failed to fetch options data for %s", symbol))
 	}
+	defer delete(text, allocator)
+
+	// ========================================================================
+	// KEEP YOUR EXISTING PARSING LOGIC EXACTLY AS IT IS BELOW THIS LINE
+	// ========================================================================
 
 	// Dynamic arrays for building the chain
 	strikes := make([dynamic]f64, allocator)
@@ -158,6 +173,7 @@ fetch_yahoo_options :: proc(
 		fmt.println("Warning: No options data found in Yahoo response")
 		return OptionChain{}
 	}
+
 
 	// Extract expiration date
 	exp_timestamp, _ := _parse_json_f64(text, "\"expirationDate\":", opt_pos)

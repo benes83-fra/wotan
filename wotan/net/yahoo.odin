@@ -3,6 +3,8 @@ package net
 import w "../core"
 import "../importer"
 
+import "base:runtime"
+import "core:c"
 import "core:fmt"
 import "core:mem"
 import "core:strconv"
@@ -69,15 +71,110 @@ range_to_string :: proc(r: range) -> string {
 	return ""
 }
 
-// ------------------------------
-// 1) Fetch crumb + cookie
-// ------------------------------
-yahoo_get_crumb_and_cookie :: proc(allocator: mem.Allocator) -> (string, string, bool) {
-	// (full implementation goes here — you already have the pieces)
-	// returns: crumb, cookie, ok
-	return "", "", false
+// ============================================================================
+// Yahoo Crumb & Cookie Fetcher (Using your existing vendor:curl patterns)
+// ============================================================================
+
+// Global cache for crumb and cookie
+global_crumb: string = ""
+global_cookie: string = ""
+
+// Header buffer to capture Set-Cookie (matches your write_cb style exactly)
+HeaderBuffer :: struct {
+	data: [dynamic]u8,
 }
 
+header_cb :: proc "c" (ptr: [^]u8, size: uint, nmemb: uint, userdata: rawptr) -> uint {
+	context = runtime.default_context()
+	total := int(size * nmemb)
+	buf := cast(^HeaderBuffer)userdata
+	append_elems(&buf.data, ..ptr[:total])
+	return c.size_t(total)
+}
+
+yahoo_get_crumb_and_cookie :: proc(allocator: mem.Allocator) -> (string, string, bool) {
+	// Return cached values if already fetched
+	if global_crumb != "" && global_cookie != "" {
+		return global_crumb, global_cookie, true
+	}
+
+	// Step 1: Get initial cookie from Yahoo homepage using a HEAD request (headers only)
+	url1 := "https://fc.yahoo.com"
+	c_url1 := strings.clone_to_cstring(url1, context.temp_allocator)
+
+	curl_handle := curl.easy_init()
+	if curl_handle == nil {
+		return "", "", false
+	}
+	defer curl.easy_cleanup(curl_handle)
+
+	curl.easy_setopt(curl_handle, curl.option.URL, c_url1)
+	curl.easy_setopt(curl_handle, curl.option.FOLLOWLOCATION, i64(1))
+	curl.easy_setopt(
+		curl_handle,
+		curl.option.USERAGENT,
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+	)
+
+	// HEAD request: we only need headers to extract the Set-Cookie
+	curl.easy_setopt(curl_handle, curl.option.NOBODY, i64(1))
+
+	header_buf: HeaderBuffer
+	header_buf.data = make([dynamic]u8, allocator)
+	defer delete(header_buf.data)
+
+	curl.easy_setopt(curl_handle, curl.option.HEADERFUNCTION, header_cb)
+	curl.easy_setopt(curl_handle, curl.option.HEADERDATA, &header_buf)
+
+	res := curl.easy_perform(curl_handle)
+	if res != .E_OK {
+		return "", "", false
+	}
+
+	header_str := string(header_buf.data[:])
+
+	// Find "Set-Cookie:" (case-insensitive check)
+	cookie_pos := strings.index(header_str, "Set-Cookie:")
+	if cookie_pos < 0 {
+		cookie_pos = strings.index(header_str, "set-cookie:")
+	}
+
+	if cookie_pos >= 0 {
+		start := cookie_pos + len("Set-Cookie:")
+		// Find the end of the header line (\r\n or \n)
+		end := strings.index(header_str[start:], "\r\n")
+		if end < 0 {
+			end = strings.index(header_str[start:], "\n")
+		}
+		if end < 0 {
+			end = len(header_str) - start
+		}
+
+		raw_cookie := header_str[start:start + end]
+		// Take only the first part before ';' (e.g., "B=abc123; expires=...")
+		semi_pos := strings.index(raw_cookie, ";")
+		if semi_pos >= 0 {
+			global_cookie = strings.trim_space(raw_cookie[:semi_pos])
+		} else {
+			global_cookie = strings.trim_space(raw_cookie)
+		}
+	}
+
+	if global_cookie == "" {
+		return "", "", false
+	}
+
+	// Step 2: Get crumb using the cookie and YOUR EXISTING http_get_with_cookie
+	url2 := "https://query1.finance.yahoo.com/v1/test/getcrumb"
+	crumb_text, ok := http_get_with_cookie(url2, global_cookie, allocator)
+	if !ok || len(crumb_text) == 0 {
+		return "", "", false
+	}
+
+	global_crumb = strings.trim_space(crumb_text)
+
+	return global_crumb, global_cookie, true
+}
 // ------------------------------
 // 2) Download CSV using crumb + cookie
 // ------------------------------

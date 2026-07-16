@@ -602,7 +602,7 @@ debug_heston :: proc() {
 	fmt.printf("Expected Call Price:   $~10.50\n")
 
 	if math.abs(price - 10.50) < 0.2 {
-		fmt.printf("Status: PASS ✅ (Complex math is now mathematically sound)\n\n")
+		fmt.printf("Status: PASS ✅ \n\n")
 	} else {
 		fmt.printf("Status: FAIL ❌\n\n")
 	}
