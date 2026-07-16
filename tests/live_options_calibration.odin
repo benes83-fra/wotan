@@ -54,29 +54,43 @@ live_options_calibration_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("   Live Spot Price: $%.2f\n\n", spot)
 
 	// 3. Filter and build the VolSurfacePoint slice
+	// 3. Filter and build the VolSurfacePoint slice
 	fmt.println("3. Filtering for liquid, mid-term options (20-90 DTE)...")
 	surface := make([dynamic]fin.VolSurfacePoint, 0, allocator)
 	defer delete(surface)
+
+	// DEBUG: Print the first 5 options to see why they are being filtered
+	fmt.println("   DEBUG: First 5 raw options:")
+	for i in 0 ..< math.min(5, chain.n_options) {
+		iv := chain.implied_vols[i]
+		price := chain.market_prices[i]
+		days_to_exp := chain.expiries[i] * 365.25
+		fmt.printf(
+			"     Strike: %.2f, Price: %.2f, IV: %.4f, DTE: %.1f days\n",
+			chain.strikes[i],
+			price,
+			iv,
+			days_to_exp,
+		)
+	}
 
 	for i in 0 ..< chain.n_options {
 		iv := chain.implied_vols[i]
 		price := chain.market_prices[i]
 		days_to_exp := chain.expiries[i] * 365.25
 
-		// Filter out illiquid, deeply OTM, or nonsensical IVs
-		if iv > 0.05 && iv < 2.0 && price > 0.0 {
-			// Focus on a single, liquid expiration window for a clean smile fit
-			if days_to_exp >= 20.0 && days_to_exp <= 90.0 {
-				append(
-					&surface,
-					fin.VolSurfacePoint {
-						strike = chain.strikes[i],
-						expiry = chain.expiries[i],
-						implied_vol = iv,
-						market_price = price,
-					},
-				)
-			}
+		// Relaxed filter: Just ensure price > 0 and IV is reasonable
+		// We also accept any DTE > 7 days to catch the nearest valid weekly/monthly expiry
+		if iv > 0.05 && iv < 3.0 && price > 0.0 && days_to_exp >= 7.0 {
+			append(
+				&surface,
+				fin.VolSurfacePoint {
+					strike = chain.strikes[i],
+					expiry = chain.expiries[i],
+					implied_vol = iv,
+					market_price = price,
+				},
+			)
 		}
 	}
 
@@ -84,6 +98,7 @@ live_options_calibration_test :: proc(allocator: mem.Allocator) {
 
 	if len(surface) < 10 {
 		fmt.println("⚠️  Insufficient filtered data points for robust calibration.")
+		fmt.println("   (Check the DEBUG output above to see why options were rejected)")
 		return
 	}
 
