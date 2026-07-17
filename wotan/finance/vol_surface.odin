@@ -375,7 +375,7 @@ calibrate_heston :: proc(
 	defer delete(best_x, allocator)
 	copy(best_x, x)
 
-	max_iter := 200
+	max_iter := 500
 	converged := false
 
 	for iter in 0 ..< max_iter {

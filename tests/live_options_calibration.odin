@@ -78,7 +78,7 @@ live_options_calibration_test :: proc(allocator: mem.Allocator) {
 
 		// 3. Filter by reasonable Implied Volatility (5% to 150%)
 		// Anything above 150% is almost certainly a stale price artifact.
-		if iv < 0.05 || iv > 1.50 {
+		if iv < 0.05 || iv > 0.80 {
 			continue
 		}
 
@@ -132,8 +132,20 @@ live_options_calibration_test :: proc(allocator: mem.Allocator) {
 		heston_res.params.rho,
 	)
 
+	// Sort surface by strike for a clean, professional output
+	for i := 1; i < len(surface); i += 1 {
+		key := surface[i]
+		j := i - 1
+		for j >= 0 && surface[j].strike > key.strike {
+			surface[j + 1] = surface[j]
+			j -= 1
+		}
+		surface[j + 1] = key
+	}
+
 	// 6. Surface Fit Comparison
 	fmt.println("6. Surface Fit Comparison (Sample Strikes):")
+	// ... rest of your code
 	fmt.printf(
 		"%-10s | %-10s | %-10s | %-10s | %-10s\n",
 		"Strike",
