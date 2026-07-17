@@ -499,6 +499,7 @@ main :: proc() {
 	test.exotic_options_test(context.temp_allocator)
 	test.vol_surface_test(context.temp_allocator)
 	test.live_options_calibration_test(context.temp_allocator)
+	test.exotic_pricing_test(context.temp_allocator)
 	fmt.println("Demo End")
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)

@@ -963,4 +963,113 @@ monte_carlo_lookback_call_option :: proc(
 	t.tensor_free(Z)
 
 	return price, delta, vega
+} // ============================================================================
+// Black-Scholes Monte Carlo: Up-and-Out Call Option (Tensor-based)
+// ============================================================================
+monte_carlo_barrier_call_bs :: proc(
+	S_0: f64,
+	K: f64,
+	T: f64,
+	r: f64,
+	sigma: f64,
+	barrier: f64,
+	n_paths: int,
+	n_steps: int,
+	allocator: mem.Allocator = context.allocator,
+) -> f64 {
+	dt := T / f64(n_steps)
+	sqrt_dt := math.sqrt_f64(dt)
+
+	// 1. Initialize S and sigma as n_paths×1 column vectors
+	S_broadcast_data := l.matrix_new(f64, n_paths, 1, allocator)
+	sigma_broadcast_data := l.matrix_new(f64, n_paths, 1, allocator)
+	for p in 0 ..< n_paths {
+		S_broadcast_data.data[p] = S_0
+		sigma_broadcast_data.data[p] = sigma
+	}
+
+	// Use requires_grad = true to match your existing graph-based cleanup pattern
+	current_S := t.tensor_new(S_broadcast_data, true, allocator)
+	sigma_tensor := t.tensor_new(sigma_broadcast_data, true, allocator)
+
+	// 2. Generate random paths (constant tensor, no grad)
+	Z := _tensor_randn(n_paths, n_steps, allocator)
+
+	// Pre-allocate constant n_paths×1 tensors for drift
+	drift_data := l.matrix_new(f64, n_paths, 1, allocator)
+	for p in 0 ..< n_paths {
+		drift_data.data[p] = (r - 0.5 * sigma * sigma) * dt
+	}
+	drift_tensor := t.tensor_new(drift_data, false, allocator)
+
+	// Alive mask: 1.0 if alive, 0.0 if knocked out
+	alive_mask := t.tensor_new(l.matrix_new(f64, n_paths, 1, allocator), false, allocator)
+	for p in 0 ..< n_paths {
+		alive_mask.data.data[p] = 1.0
+	}
+
+	// 3. Simulate paths
+	for step in 0 ..< n_steps {
+		// Extract column of Z for this step (n_paths×1)
+		z_col_data := l.matrix_new(f64, n_paths, 1, allocator)
+		for p in 0 ..< n_paths {
+			z_col_data.data[p] = Z.data.data[p * n_steps + step]
+		}
+		z_step := t.tensor_new(z_col_data, false, allocator)
+
+		// vol_term = sigma_tensor * z_step * sqrt_dt
+		vol_term := t.tensor_mul(sigma_tensor, z_step)
+		vol_term_scaled := t.tensor_scale(vol_term, sqrt_dt)
+
+		// exponent = drift + vol_term_scaled
+		exponent := t.tensor_add(drift_tensor, vol_term_scaled)
+
+		// growth = exp(exponent)
+		growth := t.tensor_exp(exponent)
+
+		// next_S = current_S * growth
+		next_S := t.tensor_mul(current_S, growth)
+
+		// Check barrier: if next_S >= barrier, mark path as dead
+		barrier_check := t.tensor_new(l.matrix_new(f64, n_paths, 1, allocator), false, allocator)
+		for p in 0 ..< n_paths {
+			if next_S.data.data[p] >= barrier {
+				barrier_check.data.data[p] = 0.0 // Knock out
+			} else {
+				barrier_check.data.data[p] = 1.0 // Stay alive
+			}
+		}
+
+		// Update alive mask
+		alive_mask = t.tensor_mul(alive_mask, barrier_check)
+		t.tensor_free(barrier_check)
+
+		current_S = next_S
+	}
+
+	// 4. Payoff = ReLU(S_T - K) * alive_mask
+	K_data := l.matrix_new(f64, n_paths, 1, allocator)
+	for p in 0 ..< n_paths {
+		K_data.data[p] = K
+	}
+	K_tensor := t.tensor_new(K_data, false, allocator)
+
+	payoff_diff := t.tensor_sub(current_S, K_tensor)
+	payoff_raw := t.tensor_relu(payoff_diff)
+
+	// Apply alive mask to payoff
+	payoff := t.tensor_mul(payoff_raw, alive_mask)
+
+	// 5. Discount and mean
+	discount_factor := math.exp(-r * T)
+	discounted_payoff := t.tensor_scale(payoff, discount_factor)
+	price_tensor := t.tensor_mean(discounted_payoff)
+
+	price := price_tensor.data.data[0]
+
+	// 6. Cleanup: Match your existing graph-based pattern
+	t.tensor_free_graph(price_tensor)
+	t.tensor_free(Z)
+
+	return price
 }
