@@ -53,52 +53,55 @@ live_options_calibration_test :: proc(allocator: mem.Allocator) {
 	spot, _ := w.column_at_float(&df.columns[4], last_idx)
 	fmt.printf("   Live Spot Price: $%.2f\n\n", spot)
 
+
 	// 3. Filter and build the VolSurfacePoint slice
-	// 3. Filter and build the VolSurfacePoint slice
-	fmt.println("3. Filtering for liquid, mid-term options (20-90 DTE)...")
+	fmt.println("3. Filtering for liquid, near-the-money options...")
 	surface := make([dynamic]fin.VolSurfacePoint, 0, allocator)
 	defer delete(surface)
-
-	// DEBUG: Print the first 5 options to see why they are being filtered
-	fmt.println("   DEBUG: First 5 raw options:")
-	for i in 0 ..< math.min(5, chain.n_options) {
-		iv := chain.implied_vols[i]
-		price := chain.market_prices[i]
-		days_to_exp := chain.expiries[i] * 365.25
-		fmt.printf(
-			"     Strike: %.2f, Price: %.2f, IV: %.4f, DTE: %.1f days\n",
-			chain.strikes[i],
-			price,
-			iv,
-			days_to_exp,
-		)
-	}
 
 	for i in 0 ..< chain.n_options {
 		iv := chain.implied_vols[i]
 		price := chain.market_prices[i]
+		strike := chain.strikes[i]
 		days_to_exp := chain.expiries[i] * 365.25
 
-		// Relaxed filter: Just ensure price > 0 and IV is reasonable
-		// We also accept any DTE > 7 days to catch the nearest valid weekly/monthly expiry
-		if iv > 0.05 && iv < 3.0 && price > 0.0 && days_to_exp >= 7.0 {
-			append(
-				&surface,
-				fin.VolSurfacePoint {
-					strike = chain.strikes[i],
-					expiry = chain.expiries[i],
-					implied_vol = iv,
-					market_price = price,
-				},
-			)
+		// 1. Filter by Days to Expiry (e.g., 7 to 180 days)
+		if days_to_exp < 7.0 || days_to_exp > 180.0 {
+			continue
 		}
+
+		// 2. Filter by Moneyness: Keep options within 70% to 130% of the spot price.
+		// This eliminates illiquid, deeply ITM/OTM options with stale prices.
+		if strike < spot * 0.70 || strike > spot * 1.30 {
+			continue
+		}
+
+		// 3. Filter by reasonable Implied Volatility (5% to 150%)
+		// Anything above 150% is almost certainly a stale price artifact.
+		if iv < 0.05 || iv > 1.50 {
+			continue
+		}
+
+		// 4. Ensure price is positive
+		if price <= 0.0 {
+			continue
+		}
+
+		append(
+			&surface,
+			fin.VolSurfacePoint {
+				strike = strike,
+				expiry = chain.expiries[i],
+				implied_vol = iv,
+				market_price = price,
+			},
+		)
 	}
 
 	fmt.printf("   Filtered to %d high-quality data points.\n\n", len(surface))
 
 	if len(surface) < 10 {
 		fmt.println("⚠️  Insufficient filtered data points for robust calibration.")
-		fmt.println("   (Check the DEBUG output above to see why options were rejected)")
 		return
 	}
 

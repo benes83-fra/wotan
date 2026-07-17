@@ -101,7 +101,7 @@ vol_surface_test :: proc(allocator: mem.Allocator) {
 		sabr_vol := fin.sabr_implied_vol(F, K, T_test, sabr_result.params)
 
 		// ✅ FIX: 1. Price the option using the CALIBRATED Heston parameters
-		heston_price_val := fin.heston_price(S, K, T_test, r, heston_result.params, .Call, 4000)
+		heston_price_val := fin.heston_price(S, K, T_test, r, heston_result.params, .Call, 1000)
 
 		// ✅ FIX: 2. Find the implied volatility of THAT Heston price
 		heston_vol, _, _ := fin.implied_volatility(

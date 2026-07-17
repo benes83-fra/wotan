@@ -239,7 +239,7 @@ sabr_objective_fn :: proc(x: []f64, user_data: rawptr) -> f64 {
 	rmse := 0.0
 	for point in ctx.market_data {
 		// ✅ Use 4000 points here to match the pricing function
-		model_price := heston_price(ctx.S, point.strike, point.expiry, ctx.r, params, .Call, 4000)
+		model_price := heston_price(ctx.S, point.strike, point.expiry, ctx.r, params, .Call, 1000)
 
 		if math.is_nan(model_price) || math.is_inf(model_price, 0) {
 			return 1e6
@@ -493,7 +493,7 @@ heston_price :: proc(
 	r: f64,
 	params: Heston_Params,
 	opt: OptionType,
-	n_points: int = 4000,
+	n_points: int = 1000,
 ) -> f64 {
 	if T <= 0.0 {
 		if opt == .Call {return math.max(S - K, 0.0)}
