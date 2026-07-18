@@ -250,6 +250,73 @@ exotic_pricing_test :: proc(allocator: mem.Allocator) {
 	)
 
 	fmt.println("======================================================================\n")
+	// =========================================================================
+	// 9. Expand: 2-Asset Basket Option
+	// =========================================================================
+	fmt.println("6. Expanding the Library: 2-Asset Basket Call (Equal Weight)")
+	fmt.println("======================================================================")
+
+	// For demonstration, we'll use AAPL and a hypothetical Asset 2 with same params
+	// In production, you would calibrate params2 separately for MSFT, etc.
+	S2_0 := 400.00 // e.g., MSFT price
+	w1 := 0.5
+	w2 := 0.5
+	corr_12 := 0.65 // Typical tech sector correlation
+
+	basket_K := w1 * spot + w2 * S2_0 // ATM basket strike
+
+	// Black-Scholes Basket (using your existing tensor engine)
+	bs_basket_price, _, _, _, _ := fin.monte_carlo_basket_option(
+		spot,
+		S2_0,
+		basket_K,
+		T,
+		r,
+		atm_iv,
+		atm_iv,
+		corr_12,
+		w1,
+		w2,
+		n_paths,
+		n_steps,
+		allocator,
+	)
+
+	// Heston Basket
+	heston_basket_price, delta1, delta2, vega1, vega2 := fin.heston_mc_basket_call(
+		spot,
+		S2_0,
+		basket_K,
+		T,
+		r,
+		w1,
+		w2,
+		heston_res.params,
+		heston_res.params,
+		corr_12,
+		n_paths,
+		n_steps,
+		allocator,
+	)
+
+	fmt.printf(
+		" %-35s | BS: $%8.4f | Heston: $%8.4f | Diff: %6.2f%%\n",
+		"2-Asset Basket Call",
+		bs_basket_price,
+		heston_basket_price,
+		math.abs(heston_basket_price - bs_basket_price) / heston_basket_price * 100.0,
+	)
+
+	fmt.printf(
+		" %-35s | Delta1: %6.4f | Delta2: %6.4f | Vega1: %6.4f | Vega2: %6.4f\n",
+		"Heston Basket Greeks",
+		delta1,
+		delta2,
+		vega1,
+		vega2,
+	)
+
+	fmt.println("======================================================================\n")
 }
 
 // Helper: Simple BS Monte Carlo for Barrier Options (for baseline comparison)
