@@ -963,8 +963,9 @@ monte_carlo_lookback_call_option :: proc(
 	t.tensor_free(Z)
 
 	return price, delta, vega
-} // ============================================================================
-// Black-Scholes Monte Carlo: Up-and-Out Call Option (Tensor-based)
+}
+// ============================================================================
+// Black-Scholes Monte Carlo: Up-and-Out Call Option (Tensor-based with Autograd)
 // ============================================================================
 monte_carlo_barrier_call_bs :: proc(
 	S_0: f64,
@@ -976,11 +977,15 @@ monte_carlo_barrier_call_bs :: proc(
 	n_paths: int,
 	n_steps: int,
 	allocator: mem.Allocator = context.allocator,
-) -> f64 {
+) -> (
+	price: f64,
+	delta: f64,
+	vega: f64,
+) {
 	dt := T / f64(n_steps)
 	sqrt_dt := math.sqrt_f64(dt)
 
-	// 1. Initialize S and sigma as n_paths×1 column vectors
+	// 1. Initialize S and sigma as n_paths×1 column vectors with requires_grad = true
 	S_broadcast_data := l.matrix_new(f64, n_paths, 1, allocator)
 	sigma_broadcast_data := l.matrix_new(f64, n_paths, 1, allocator)
 	for p in 0 ..< n_paths {
@@ -988,8 +993,8 @@ monte_carlo_barrier_call_bs :: proc(
 		sigma_broadcast_data.data[p] = sigma
 	}
 
-	// Use requires_grad = true to match your existing graph-based cleanup pattern
-	current_S := t.tensor_new(S_broadcast_data, true, allocator)
+	initial_S := t.tensor_new(S_broadcast_data, true, allocator)
+	current_S := initial_S
 	sigma_tensor := t.tensor_new(sigma_broadcast_data, true, allocator)
 
 	// 2. Generate random paths (constant tensor, no grad)
@@ -1065,11 +1070,21 @@ monte_carlo_barrier_call_bs :: proc(
 	discounted_payoff := t.tensor_scale(payoff, discount_factor)
 	price_tensor := t.tensor_mean(discounted_payoff)
 
-	price := price_tensor.data.data[0]
+	// 6. Backward pass for Autograd
+	t.tensor_backward(price_tensor)
 
-	// 6. Cleanup: Match your existing graph-based pattern
+	price = price_tensor.data.data[0]
+
+	delta_sum := 0.0
+	vega_sum := 0.0
+	for p in 0 ..< n_paths {
+		delta_sum += initial_S.grad.data[p]
+		vega_sum += sigma_tensor.grad.data[p]
+	}
+
+	// 7. Cleanup: Match your existing graph-based pattern
 	t.tensor_free_graph(price_tensor)
 	t.tensor_free(Z)
 
-	return price
+	return price, delta_sum, vega_sum
 }

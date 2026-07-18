@@ -92,7 +92,19 @@ exotic_pricing_test :: proc(allocator: mem.Allocator) {
 	}
 
 	// We can reuse your existing BS MC or just write a quick inline one for comparison
-	bs_price_flat := fin.monte_carlo_barrier_call_bs(
+
+
+	// 4. Price using Black-Scholes MC (Skew-Adjusted Volatility)
+	// Find the IV at the strike K to approximate the skew
+	skew_iv := atm_iv
+	for pt in surface {
+		if math.abs(pt.strike - K) < 2.0 {
+			skew_iv = pt.implied_vol
+			break
+		}
+	}
+	// 4. Price using Black-Scholes MC (Flat Volatility = ATM Vol)
+	bs_price_flat, delta_bs_flat, vega_bs_flat := fin.monte_carlo_barrier_call_bs(
 		spot,
 		K,
 		T,
@@ -104,16 +116,8 @@ exotic_pricing_test :: proc(allocator: mem.Allocator) {
 		allocator,
 	)
 
-	// 4. Price using Black-Scholes MC (Skew-Adjusted Volatility)
-	// Find the IV at the strike K to approximate the skew
-	skew_iv := atm_iv
-	for pt in surface {
-		if math.abs(pt.strike - K) < 2.0 {
-			skew_iv = pt.implied_vol
-			break
-		}
-	}
-	bs_price_skew := fin.monte_carlo_barrier_call_bs(
+	// 5. Price using Black-Scholes MC (Skew-Adjusted Volatility)
+	bs_price_skew, _, _ := fin.monte_carlo_barrier_call_bs(
 		spot,
 		K,
 		T,
@@ -125,8 +129,8 @@ exotic_pricing_test :: proc(allocator: mem.Allocator) {
 		allocator,
 	)
 
-	// 5. Price using Calibrated Heston MC
-	heston_price := fin.heston_mc_barrier_call(
+	// 6. Price using Calibrated Heston MC
+	heston_price, delta_heston, vega_heston := fin.heston_mc_barrier_call(
 		spot,
 		K,
 		T,
@@ -138,7 +142,7 @@ exotic_pricing_test :: proc(allocator: mem.Allocator) {
 		allocator,
 	)
 
-	// 6. Display Results
+	// 7. Display Results
 	fmt.println("3. Pricing Results Comparison:")
 	fmt.println("----------------------------------------------------------------------")
 	fmt.printf(" %-35s | %12s\n", "Model / Assumption", "Option Price")
@@ -148,15 +152,35 @@ exotic_pricing_test :: proc(allocator: mem.Allocator) {
 	fmt.printf(" %-35s | $%10.4f\n", "Heston Model (Calibrated)", heston_price)
 	fmt.println("----------------------------------------------------------------------")
 
-	diff := math.abs(heston_price - bs_price_flat)
-	pct_diff := (diff / heston_price) * 100.0
+	fmt.println("\n4. Autograd Greeks Comparison (Delta / Vega):")
+	fmt.println("----------------------------------------------------------------------")
 	fmt.printf(
-		"\n💡 The Smile Effect: Black-Scholes overprices this barrier option by %.2f%%\n",
+		" %-35s | Delta: %8.4f | Vega: %8.4f\n",
+		"Black-Scholes (Flat ATM)",
+		delta_bs_flat,
+		vega_bs_flat,
+	)
+	fmt.printf(
+		" %-35s | Delta: %8.4f | Vega: %8.4f\n",
+		"Heston Model (Calibrated)",
+		delta_heston,
+		vega_heston,
+	)
+	fmt.println("----------------------------------------------------------------------")
+
+	diff := math.abs(heston_price - bs_price_flat)
+	pct_diff := 0.0
+	if heston_price > 0.0 {
+		pct_diff = (diff / heston_price) * 100.0
+	}
+
+	fmt.printf(
+		"\n💡 The Smile Effect: Black-Scholes (ATM) differs from Heston by %.2f%%\n",
 		pct_diff,
 	)
-	fmt.println("   Reason: BS assumes flat volatility, underestimating the probability")
+	fmt.println("   Reason: BS assumes flat volatility, failing to capture the true")
 	fmt.println(
-		"   of the asset drifting up and hitting the barrier due to the negative skew (ρ < 0).",
+		"   probability of the asset hitting the barrier due to the negative skew (ρ < 0).",
 	)
 	fmt.println("======================================================================\n")
 }
