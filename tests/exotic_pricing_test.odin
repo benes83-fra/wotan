@@ -183,6 +183,73 @@ exotic_pricing_test :: proc(allocator: mem.Allocator) {
 		"   probability of the asset hitting the barrier due to the negative skew (ρ < 0).",
 	)
 	fmt.println("======================================================================\n")
+	// =========================================================================
+	// 8. Expand: Asian and Lookback Options
+	// =========================================================================
+	fmt.println("5. Expanding the Library: Asian & Lookback Options")
+	fmt.println("======================================================================")
+
+	// Asian Option
+	asian_bs_price, _, _ := fin.monte_carlo_asian_option(
+		spot,
+		K,
+		T,
+		r,
+		atm_iv,
+		n_paths,
+		n_steps,
+		allocator,
+	)
+	asian_heston_price, _, _ := fin.heston_mc_asian_call(
+		spot,
+		K,
+		T,
+		r,
+		heston_res.params,
+		n_paths,
+		n_steps,
+		allocator,
+	)
+
+	fmt.printf(
+		" %-35s | BS: $%8.4f | Heston: $%8.4f | Diff: %6.2f%%\n",
+		"Arithmetic Asian Call",
+		asian_bs_price,
+		asian_heston_price,
+		math.abs(asian_heston_price - asian_bs_price) / asian_heston_price * 100.0,
+	)
+
+	// Lookback Option
+	lookback_bs_price, _, _ := fin.monte_carlo_lookback_call_option(
+		spot,
+		K,
+		T,
+		r,
+		atm_iv,
+		n_paths,
+		n_steps,
+		allocator,
+	)
+	lookback_heston_price, _, _ := fin.heston_mc_lookback_call(
+		spot,
+		K,
+		T,
+		r,
+		heston_res.params,
+		n_paths,
+		n_steps,
+		allocator,
+	)
+
+	fmt.printf(
+		" %-35s | BS: $%8.4f | Heston: $%8.4f | Diff: %6.2f%%\n",
+		"Fixed-Strike Lookback Call",
+		lookback_bs_price,
+		lookback_heston_price,
+		math.abs(lookback_heston_price - lookback_bs_price) / lookback_heston_price * 100.0,
+	)
+
+	fmt.println("======================================================================\n")
 }
 
 // Helper: Simple BS Monte Carlo for Barrier Options (for baseline comparison)

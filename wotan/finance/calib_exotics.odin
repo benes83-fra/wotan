@@ -164,3 +164,252 @@ heston_mc_barrier_call :: proc(
 
 	return price, delta, vega
 }
+// ============================================================================
+// Helper: Heston MC Asian Call Pricing Logic (Explicit arguments)
+// ============================================================================
+_heston_mc_asian_price_helper :: proc(
+	S_0: f64,
+	K: f64,
+	T: f64,
+	r: f64,
+	params: Heston_Params,
+	n_paths: int,
+	n_steps: int,
+	rand_data: []f64,
+) -> f64 {
+	dt := T / f64(n_steps)
+	sqrt_dt := math.sqrt_f64(dt)
+	discount := math.exp_f64(-r * T)
+	total_payoff := 0.0
+
+	rand_idx := 0
+	for path in 0 ..< n_paths {
+		S := S_0
+		v_curr := params.v0
+		sum_S := 0.0
+
+		for step in 0 ..< n_steps {
+			Z_v := rand_data[rand_idx]
+			Z_indep := rand_data[rand_idx + 1]
+			rand_idx += 2
+
+			Z_s := params.rho * Z_v + math.sqrt_f64(1.0 - params.rho * params.rho) * Z_indep
+			v_sqrt := math.sqrt_f64(math.max(0.0, v_curr))
+
+			// Full truncation scheme
+			v_curr =
+				v_curr +
+				params.kappa * (params.theta - v_curr) * dt +
+				params.sigma * v_sqrt * sqrt_dt * Z_v
+			v_curr = math.max(0.0, v_curr)
+
+			// Evolve spot
+			S = S * math.exp_f64((r - 0.5 * v_curr) * dt + v_sqrt * sqrt_dt * Z_s)
+
+			// Accumulate for arithmetic average
+			sum_S += S
+		}
+
+		avg_S := sum_S / f64(n_steps)
+		total_payoff += math.max(avg_S - K, 0.0)
+	}
+	return (total_payoff / f64(n_paths)) * discount
+}
+
+// ============================================================================
+// Heston Monte Carlo: Asian Call Option (with CRN Greeks)
+// ============================================================================
+heston_mc_asian_call :: proc(
+	S_0: f64,
+	K: f64,
+	T: f64,
+	r: f64,
+	params: Heston_Params,
+	n_paths: int,
+	n_steps: int,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	price: f64,
+	delta: f64,
+	vega: f64,
+) {
+
+	rand_count := n_paths * n_steps * 2
+	rand_data := make([]f64, rand_count, allocator)
+	defer delete(rand_data, allocator)
+
+	for i in 0 ..< rand_count {
+		rand_data[i] = rand.float64_normal(0.0, 1.0)
+	}
+
+	// 1. Base Price
+	price = _heston_mc_asian_price_helper(S_0, K, T, r, params, n_paths, n_steps, rand_data)
+
+	// 2. Delta via CRN (1% bump in S_0)
+	h_S := 0.01 * S_0
+	delta =
+		(_heston_mc_asian_price_helper(S_0 + h_S, K, T, r, params, n_paths, n_steps, rand_data) -
+			_heston_mc_asian_price_helper(
+				S_0 - h_S,
+				K,
+				T,
+				r,
+				params,
+				n_paths,
+				n_steps,
+				rand_data,
+			)) /
+		(2.0 * h_S)
+
+	// 3. Vega via CRN (1% bump in sigma)
+	h_sigma := 0.01 * params.sigma
+	if h_sigma < 0.001 {h_sigma = 0.001}
+
+	params_up := params
+	params_up.sigma = params.sigma + h_sigma
+
+	params_dn := params
+	params_dn.sigma = params.sigma - h_sigma
+
+	vega =
+		(_heston_mc_asian_price_helper(S_0, K, T, r, params_up, n_paths, n_steps, rand_data) -
+			_heston_mc_asian_price_helper(S_0, K, T, r, params_dn, n_paths, n_steps, rand_data)) /
+		(2.0 * h_sigma)
+
+	return price, delta, vega
+}
+
+
+// ============================================================================
+// Helper: Heston MC Lookback Call Pricing Logic (Explicit arguments)
+// ============================================================================
+_heston_mc_lookback_price_helper :: proc(
+	S_0: f64,
+	K: f64,
+	T: f64,
+	r: f64,
+	params: Heston_Params,
+	n_paths: int,
+	n_steps: int,
+	rand_data: []f64,
+) -> f64 {
+	dt := T / f64(n_steps)
+	sqrt_dt := math.sqrt_f64(dt)
+	discount := math.exp_f64(-r * T)
+	total_payoff := 0.0
+
+	rand_idx := 0
+	for path in 0 ..< n_paths {
+		S := S_0
+		v_curr := params.v0
+		max_S := S_0
+
+		for step in 0 ..< n_steps {
+			Z_v := rand_data[rand_idx]
+			Z_indep := rand_data[rand_idx + 1]
+			rand_idx += 2
+
+			Z_s := params.rho * Z_v + math.sqrt_f64(1.0 - params.rho * params.rho) * Z_indep
+			v_sqrt := math.sqrt_f64(math.max(0.0, v_curr))
+
+			// Full truncation scheme
+			v_curr =
+				v_curr +
+				params.kappa * (params.theta - v_curr) * dt +
+				params.sigma * v_sqrt * sqrt_dt * Z_v
+			v_curr = math.max(0.0, v_curr)
+
+			// Evolve spot
+			S = S * math.exp_f64((r - 0.5 * v_curr) * dt + v_sqrt * sqrt_dt * Z_s)
+
+			// Track running maximum
+			if S > max_S {
+				max_S = S
+			}
+		}
+
+		total_payoff += math.max(max_S - K, 0.0)
+	}
+	return (total_payoff / f64(n_paths)) * discount
+}
+
+// ============================================================================
+// Heston Monte Carlo: Fixed-Strike Lookback Call Option (with CRN Greeks)
+// ============================================================================
+heston_mc_lookback_call :: proc(
+	S_0: f64,
+	K: f64,
+	T: f64,
+	r: f64,
+	params: Heston_Params,
+	n_paths: int,
+	n_steps: int,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	price: f64,
+	delta: f64,
+	vega: f64,
+) {
+
+	rand_count := n_paths * n_steps * 2
+	rand_data := make([]f64, rand_count, allocator)
+	defer delete(rand_data, allocator)
+
+	for i in 0 ..< rand_count {
+		rand_data[i] = rand.float64_normal(0.0, 1.0)
+	}
+
+	// 1. Base Price
+	price = _heston_mc_lookback_price_helper(S_0, K, T, r, params, n_paths, n_steps, rand_data)
+
+	// 2. Delta via CRN (1% bump in S_0)
+	h_S := 0.01 * S_0
+	delta =
+		(_heston_mc_lookback_price_helper(
+				S_0 + h_S,
+				K,
+				T,
+				r,
+				params,
+				n_paths,
+				n_steps,
+				rand_data,
+			) -
+			_heston_mc_lookback_price_helper(
+				S_0 - h_S,
+				K,
+				T,
+				r,
+				params,
+				n_paths,
+				n_steps,
+				rand_data,
+			)) /
+		(2.0 * h_S)
+
+	// 3. Vega via CRN (1% bump in sigma)
+	h_sigma := 0.01 * params.sigma
+	if h_sigma < 0.001 {h_sigma = 0.001}
+
+	params_up := params
+	params_up.sigma = params.sigma + h_sigma
+
+	params_dn := params
+	params_dn.sigma = params.sigma - h_sigma
+
+	vega =
+		(_heston_mc_lookback_price_helper(S_0, K, T, r, params_up, n_paths, n_steps, rand_data) -
+			_heston_mc_lookback_price_helper(
+				S_0,
+				K,
+				T,
+				r,
+				params_dn,
+				n_paths,
+				n_steps,
+				rand_data,
+			)) /
+		(2.0 * h_sigma)
+
+	return price, delta, vega
+}
