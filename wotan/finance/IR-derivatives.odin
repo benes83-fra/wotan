@@ -276,7 +276,6 @@ _make_const_tensor :: proc(data: []f64, n: int, allocator: mem.Allocator) -> ^t.
 	}
 	return t.tensor_new(mat, false, allocator)
 }
-
 // ============================================================================
 // Hull-White Monte Carlo: Cap Option (with CRN Greeks)
 // ============================================================================
@@ -292,7 +291,8 @@ _hw_mc_cap_price_helper :: proc(
 	n_steps: int,
 	norm_data: []f64,
 ) -> f64 {
-	dt := T_end[n_caplets - 1] / f64(n_steps)
+	T_max := T_end[n_caplets - 1]
+	dt := T_max / f64(n_steps)
 	sqrt_dt := math.sqrt_f64(dt)
 	total_payoff := 0.0
 
@@ -300,22 +300,33 @@ _hw_mc_cap_price_helper :: proc(
 	for path in 0 ..< n_paths {
 		r := r0
 		cap_payoff := 0.0
+		next_caplet_idx := 0
 
-		for i in 0 ..< n_caplets {
-			steps_to_T := int(T_start[i] / dt)
-			for step in 0 ..< steps_to_T {
-				Z := norm_data[norm_idx]
-				norm_idx += 1
+		// Simulate ONE continuous path up to T_max
+		for step in 1 ..< n_steps + 1 {
+			Z := norm_data[norm_idx]
+			norm_idx += 1
 
-				dr := params.a * (r0 - r) * dt + params.sigma * sqrt_dt * Z
-				r = r + dr
+			// Euler step for Hull-White / Vasicek
+			dr := params.a * (r0 - r) * dt + params.sigma * sqrt_dt * Z
+			r = r + dr
+
+			t_current := f64(step) * dt
+
+			// Check if we have reached or passed the start of the next caplet
+			for next_caplet_idx < n_caplets && t_current >= T_start[next_caplet_idx] {
+				i := next_caplet_idx
+
+				// Caplet payoff at T_start[i]
+				disc := math.exp_f64(-r * (T_end[i] - T_start[i]))
+				fwd_rate := (1.0 / disc - 1.0) / delta[i]
+				payoff := delta[i] * math.max(fwd_rate - K, 0.0) * disc
+
+				// Discount back to t=0
+				cap_payoff += payoff * math.exp_f64(-r0 * T_start[i])
+
+				next_caplet_idx += 1
 			}
-
-			disc := math.exp_f64(-r * (T_end[i] - T_start[i]))
-			fwd_rate := (1.0 / disc - 1.0) / delta[i]
-			payoff := delta[i] * math.max(fwd_rate - K, 0.0) * disc
-
-			cap_payoff += payoff * math.exp_f64(-r0 * T_start[i])
 		}
 		total_payoff += cap_payoff
 	}
@@ -338,6 +349,7 @@ hw_mc_cap_option :: proc(
 	delta_r: f64,
 	vega: f64,
 ) {
+	// ✅ FIXED: Allocates exactly n_paths * n_steps random numbers
 	norm_count := n_paths * n_steps
 	norm_data := make([]f64, norm_count, allocator)
 	defer delete(norm_data, allocator)
