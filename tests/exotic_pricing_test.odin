@@ -378,6 +378,70 @@ exotic_pricing_test :: proc(allocator: mem.Allocator) {
 	fmt.println("   Reason: The strong negative skew (ρ < 0) fattens the left tail,")
 	fmt.println("   making the downside barrier much more likely to be hit than BS predicts.")
 	fmt.println("======================================================================\n")
+	// =========================================================================
+	// 8. The Jump Diffusion Effect: Merton Model
+	// =========================================================================
+	fmt.println("8. The Jump Diffusion Effect: Merton Jump Diffusion (MJD)")
+	fmt.println("======================================================================")
+
+	// Typical MJD parameters for a tech stock (e.g., AAPL)
+	// lambda = 0.15 (15% chance of a jump per year)
+	// mu_j = -0.05 (Jumps tend to be downward, avg -5%)
+	// sigma_j = 0.10 (Jump size volatility)
+	mjd_params := fin.MJD_Params {
+		sigma   = 0.25, // Diffusion vol (lower than total vol because jumps add risk)
+		lambda  = 0.15,
+		mu_j    = -0.05,
+		sigma_j = 0.10,
+	}
+
+	// Price Barrier Option under MJD
+	mjd_barrier_price, mjd_delta, mjd_vega := fin.mjd_mc_barrier_option(
+		spot,
+		K,
+		T,
+		r,
+		barrier,
+		true,
+		.Call,
+		mjd_params,
+		n_paths,
+		n_steps,
+		allocator,
+	)
+
+	// Price Asian Option under MJD
+	mjd_asian_price, _, _ := fin.mjd_mc_asian_option(
+		spot,
+		K,
+		T,
+		r,
+		.Call,
+		mjd_params,
+		n_paths,
+		n_steps,
+		allocator,
+	)
+
+	fmt.println(" Model Comparison (Up-and-Out Call):")
+	fmt.printf("  %-35s | $%8.4f\n", "Black-Scholes", bs_price_flat) // From earlier in script
+	fmt.printf("  %-35s | $%8.4f\n", "Heston (Stochastic Vol)", heston_price) // From earlier
+	fmt.printf("  %-35s | $%8.4f\n", "Merton Jump Diffusion", mjd_barrier_price)
+
+	fmt.println("\n Model Comparison (Asian Call):")
+	fmt.printf("  %-35s | $%8.4f\n", "Black-Scholes", asian_bs_price) // From earlier
+	fmt.printf("  %-35s | $%8.4f\n", "Heston (Stochastic Vol)", asian_heston_price) // From earlier
+	fmt.printf("  %-35s | $%8.4f\n", "Merton Jump Diffusion", mjd_asian_price)
+
+	fmt.printf("\n MJD Barrier Greeks | Delta: %6.4f | Vega: %6.4f\n", mjd_delta, mjd_vega)
+
+	fmt.println("\n💡 The Jump Effect: MJD prices are often lower for Up-and-Out calls")
+	fmt.println("   because a single downward jump doesn't hurt the call, but the *fear*")
+	fmt.println("   of an upward jump hitting the barrier is priced in via the jump intensity.")
+	fmt.println(
+		"   Conversely, for Asian options, jumps can spike the average, altering the price.",
+	)
+	fmt.println("======================================================================\n")
 }
 
 // Helper: Simple BS Monte Carlo for Barrier Options (for baseline comparison)

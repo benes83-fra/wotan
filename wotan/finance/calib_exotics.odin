@@ -822,3 +822,342 @@ heston_mc_basket_call :: proc(
 		allocator,
 	)
 }
+// ============================================================================
+// MERTON JUMP DIFFUSION (MJD) MODEL
+// ============================================================================
+
+MJD_Params :: struct {
+	sigma:   f64, // Diffusion volatility
+	lambda:  f64, // Jump intensity (expected jumps per year)
+	mu_j:    f64, // Mean of the log-normal jump size
+	sigma_j: f64, // Volatility of the log-normal jump size
+}
+
+_mjd_mc_barrier_price_helper :: proc(
+	S_0: f64,
+	K: f64,
+	T: f64,
+	r: f64,
+	barrier: f64,
+	is_up: bool,
+	opt: OptionType,
+	params: MJD_Params,
+	n_paths: int,
+	n_steps: int,
+	norm_data: []f64,
+	unif_data: []f64,
+) -> f64 {
+	dt := T / f64(n_steps)
+	sqrt_dt := math.sqrt_f64(dt)
+	discount := math.exp_f64(-r * T)
+
+	kappa := math.exp_f64(params.mu_j + 0.5 * params.sigma_j * params.sigma_j) - 1.0
+	drift := r - params.lambda * kappa
+	diffusion_drift := drift - 0.5 * params.sigma * params.sigma
+
+	lambda_dt := params.lambda * dt
+	total_payoff := 0.0
+
+	norm_idx := 0
+	unif_idx := 0
+	for path in 0 ..< n_paths {
+		S := S_0
+		hit_barrier := false
+
+		for step in 0 ..< n_steps {
+			Z := norm_data[norm_idx]; norm_idx += 1
+			U := unif_data[unif_idx]; unif_idx += 1
+			Z_J := norm_data[norm_idx]; norm_idx += 1
+
+			S = S * math.exp_f64(diffusion_drift * dt + params.sigma * sqrt_dt * Z)
+
+			if U < lambda_dt {
+				jump_multiplier := math.exp_f64(params.mu_j + params.sigma_j * Z_J)
+				S = S * jump_multiplier
+			}
+
+			if is_up {
+				if S >= barrier {hit_barrier = true; break}
+			} else {
+				if S <= barrier {hit_barrier = true; break}
+			}
+		}
+
+		if !hit_barrier {
+			if opt == .Call {
+				total_payoff += math.max(S - K, 0.0)
+			} else {
+				total_payoff += math.max(K - S, 0.0)
+			}
+		}
+	}
+	return (total_payoff / f64(n_paths)) * discount
+}
+
+mjd_mc_barrier_option :: proc(
+	S_0: f64,
+	K: f64,
+	T: f64,
+	r: f64,
+	barrier: f64,
+	is_up: bool,
+	opt: OptionType,
+	params: MJD_Params,
+	n_paths: int,
+	n_steps: int,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	price: f64,
+	delta: f64,
+	vega: f64,
+) {
+
+	norm_count := n_paths * n_steps * 2
+	unif_count := n_paths * n_steps
+
+	norm_data := make([]f64, norm_count, allocator)
+	unif_data := make([]f64, unif_count, allocator)
+	defer {delete(norm_data, allocator); delete(unif_data, allocator)}
+
+	for i in 0 ..< norm_count {norm_data[i] = rand.float64_normal(0.0, 1.0)}
+	for i in 0 ..< unif_count {unif_data[i] = rand.float64()}
+
+	price = _mjd_mc_barrier_price_helper(
+		S_0,
+		K,
+		T,
+		r,
+		barrier,
+		is_up,
+		opt,
+		params,
+		n_paths,
+		n_steps,
+		norm_data,
+		unif_data,
+	)
+
+	h_S := 0.01 * S_0
+	delta =
+		(_mjd_mc_barrier_price_helper(
+				S_0 + h_S,
+				K,
+				T,
+				r,
+				barrier,
+				is_up,
+				opt,
+				params,
+				n_paths,
+				n_steps,
+				norm_data,
+				unif_data,
+			) -
+			_mjd_mc_barrier_price_helper(
+				S_0 - h_S,
+				K,
+				T,
+				r,
+				barrier,
+				is_up,
+				opt,
+				params,
+				n_paths,
+				n_steps,
+				norm_data,
+				unif_data,
+			)) /
+		(2.0 * h_S)
+
+	h_sigma := 0.01 * params.sigma
+	if h_sigma < 0.001 {h_sigma = 0.001}
+	params_up := params; params_up.sigma = params.sigma + h_sigma
+	params_dn := params; params_dn.sigma = params.sigma - h_sigma
+
+	vega =
+		(_mjd_mc_barrier_price_helper(
+				S_0,
+				K,
+				T,
+				r,
+				barrier,
+				is_up,
+				opt,
+				params_up,
+				n_paths,
+				n_steps,
+				norm_data,
+				unif_data,
+			) -
+			_mjd_mc_barrier_price_helper(
+				S_0,
+				K,
+				T,
+				r,
+				barrier,
+				is_up,
+				opt,
+				params_dn,
+				n_paths,
+				n_steps,
+				norm_data,
+				unif_data,
+			)) /
+		(2.0 * h_sigma)
+
+	return price, delta, vega
+}
+
+_mjd_mc_asian_price_helper :: proc(
+	S_0: f64,
+	K: f64,
+	T: f64,
+	r: f64,
+	opt: OptionType,
+	params: MJD_Params,
+	n_paths: int,
+	n_steps: int,
+	norm_data: []f64,
+	unif_data: []f64,
+) -> f64 {
+	dt := T / f64(n_steps)
+	sqrt_dt := math.sqrt_f64(dt)
+	discount := math.exp_f64(-r * T)
+
+	kappa := math.exp_f64(params.mu_j + 0.5 * params.sigma_j * params.sigma_j) - 1.0
+	drift := r - params.lambda * kappa
+	diffusion_drift := drift - 0.5 * params.sigma * params.sigma
+
+	lambda_dt := params.lambda * dt
+	total_payoff := 0.0
+
+	norm_idx := 0
+	unif_idx := 0
+	for path in 0 ..< n_paths {
+		S := S_0
+		sum_S := 0.0
+
+		for step in 0 ..< n_steps {
+			Z := norm_data[norm_idx]; norm_idx += 1
+			U := unif_data[unif_idx]; unif_idx += 1
+			Z_J := norm_data[norm_idx]; norm_idx += 1
+
+			S = S * math.exp_f64(diffusion_drift * dt + params.sigma * sqrt_dt * Z)
+
+			if U < lambda_dt {
+				jump_multiplier := math.exp_f64(params.mu_j + params.sigma_j * Z_J)
+				S = S * jump_multiplier
+			}
+			sum_S += S
+		}
+
+		avg_S := sum_S / f64(n_steps)
+		if opt == .Call {
+			total_payoff += math.max(avg_S - K, 0.0)
+		} else {
+			total_payoff += math.max(K - avg_S, 0.0)
+		}
+	}
+	return (total_payoff / f64(n_paths)) * discount
+}
+
+mjd_mc_asian_option :: proc(
+	S_0: f64,
+	K: f64,
+	T: f64,
+	r: f64,
+	opt: OptionType,
+	params: MJD_Params,
+	n_paths: int,
+	n_steps: int,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	price: f64,
+	delta: f64,
+	vega: f64,
+) {
+	norm_count := n_paths * n_steps * 2
+	unif_count := n_paths * n_steps
+
+	norm_data := make([]f64, norm_count, allocator)
+	unif_data := make([]f64, unif_count, allocator)
+	defer {delete(norm_data, allocator); delete(unif_data, allocator)}
+
+	for i in 0 ..< norm_count {norm_data[i] = rand.float64_normal(0.0, 1.0)}
+	for i in 0 ..< unif_count {unif_data[i] = rand.float64()}
+
+	price = _mjd_mc_asian_price_helper(
+		S_0,
+		K,
+		T,
+		r,
+		opt,
+		params,
+		n_paths,
+		n_steps,
+		norm_data,
+		unif_data,
+	)
+
+	h_S := 0.01 * S_0
+	delta =
+		(_mjd_mc_asian_price_helper(
+				S_0 + h_S,
+				K,
+				T,
+				r,
+				opt,
+				params,
+				n_paths,
+				n_steps,
+				norm_data,
+				unif_data,
+			) -
+			_mjd_mc_asian_price_helper(
+				S_0 - h_S,
+				K,
+				T,
+				r,
+				opt,
+				params,
+				n_paths,
+				n_steps,
+				norm_data,
+				unif_data,
+			)) /
+		(2.0 * h_S)
+
+	h_sigma := 0.01 * params.sigma
+	if h_sigma < 0.001 {h_sigma = 0.001}
+	params_up := params; params_up.sigma = params.sigma + h_sigma
+	params_dn := params; params_dn.sigma = params.sigma - h_sigma
+
+	vega =
+		(_mjd_mc_asian_price_helper(
+				S_0,
+				K,
+				T,
+				r,
+				opt,
+				params_up,
+				n_paths,
+				n_steps,
+				norm_data,
+				unif_data,
+			) -
+			_mjd_mc_asian_price_helper(
+				S_0,
+				K,
+				T,
+				r,
+				opt,
+				params_dn,
+				n_paths,
+				n_steps,
+				norm_data,
+				unif_data,
+			)) /
+		(2.0 * h_sigma)
+
+	return price, delta, vega
+}
