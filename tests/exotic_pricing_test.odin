@@ -442,6 +442,49 @@ exotic_pricing_test :: proc(allocator: mem.Allocator) {
 		"   Conversely, for Asian options, jumps can spike the average, altering the price.",
 	)
 	fmt.println("======================================================================\n")
+	// =========================================================================
+	// 9. The Holy Trinity: Local Volatility (Dupire)
+	// =========================================================================
+	fmt.println("9. The Holy Trinity: Local Volatility (Dupire) vs Heston vs MJD")
+	fmt.println("======================================================================")
+
+	fmt.println("Building Local Volatility surface from calibrated Heston model...")
+	lv_surface := fin.build_lv_surface_from_heston(spot, r, heston_res.params, allocator)
+	defer {
+		delete(lv_surface.strikes, allocator)
+		delete(lv_surface.expiries, allocator)
+		delete(lv_surface.lv_data, allocator)
+	}
+
+	// Price Barrier Option under Local Volatility
+	lv_barrier_price, lv_delta, lv_vega := fin.lv_mc_barrier_option(
+		spot,
+		K,
+		T,
+		r,
+		barrier,
+		true,
+		.Call,
+		lv_surface,
+		n_paths,
+		n_steps,
+		allocator,
+	)
+
+	fmt.println(" Model Comparison (Up-and-Out Call):")
+	fmt.printf("  %-35s | $%8.4f\n", "Black-Scholes (Flat Vol)", bs_price_flat)
+	fmt.printf("  %-35s | $%8.4f\n", "Heston (Stochastic Vol)", heston_price)
+	fmt.printf("  %-35s | $%8.4f\n", "Merton Jump Diffusion", mjd_barrier_price)
+	fmt.printf("  %-35s | $%8.4f\n", "Local Volatility (Dupire)", lv_barrier_price)
+
+	fmt.printf("\n LV Barrier Greeks      | Delta: %6.4f | Vega: %6.4f\n", lv_delta, lv_vega)
+
+	fmt.println("\n💡 The LV Insight: Local Volatility perfectly matches ALL vanilla")
+	fmt.println("   option prices by construction. However, for exotics, it assumes")
+	fmt.println("   volatility is a deterministic function of S and t. This creates a")
+	fmt.println("   perfect, rigid leverage effect (vol spikes when S drops), but lacks")
+	fmt.println("   the random 'vol-of-vol' shocks that Heston and MJD capture.")
+	fmt.println("======================================================================\n")
 }
 
 // Helper: Simple BS Monte Carlo for Barrier Options (for baseline comparison)

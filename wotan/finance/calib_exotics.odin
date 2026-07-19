@@ -1161,3 +1161,304 @@ mjd_mc_asian_option :: proc(
 
 	return price, delta, vega
 }
+// ============================================================================
+// LOCAL VOLATILITY (DUPIRE) MODEL
+// ============================================================================
+
+LocalVolSurface :: struct {
+	strikes:      []f64,
+	expiries:     []f64,
+	lv_data:      []f64, // Flattened 2D grid: lv_data[expiry_idx * num_strikes + strike_idx]
+	num_strikes:  int,
+	num_expiries: int,
+}
+
+// Helper: Bilinear interpolation for Local Volatility
+get_local_vol :: proc(lv: LocalVolSurface, S: f64, t: f64) -> f64 {
+	// Clamp S and t to grid bounds
+	S := S
+	t := t
+	if S <= lv.strikes[0] {S = lv.strikes[0] + 1e-6}
+	if S >= lv.strikes[lv.num_strikes - 1] {S = lv.strikes[lv.num_strikes - 1] - 1e-6}
+	if t <= lv.expiries[0] {t = lv.expiries[0] + 1e-6}
+	if t >= lv.expiries[lv.num_expiries - 1] {t = lv.expiries[lv.num_expiries - 1] - 1e-6}
+
+	// Find indices
+	i_low := 0
+	for i in 0 ..< lv.num_strikes - 1 {
+		if lv.strikes[i] <= S && S < lv.strikes[i + 1] {
+			i_low = i
+			break
+		}
+	}
+	i_high := i_low + 1
+
+	j_low := 0
+	for j in 0 ..< lv.num_expiries - 1 {
+		if lv.expiries[j] <= t && t < lv.expiries[j + 1] {
+			j_low = j
+			break
+		}
+	}
+	j_high := j_low + 1
+
+	// Weights
+	w_k := (S - lv.strikes[i_low]) / (lv.strikes[i_high] - lv.strikes[i_low])
+	w_t := (t - lv.expiries[j_low]) / (lv.expiries[j_high] - lv.expiries[j_low])
+
+	// Bilinear interpolation
+	v00 := lv.lv_data[j_low * lv.num_strikes + i_low]
+	v10 := lv.lv_data[j_low * lv.num_strikes + i_high]
+	v01 := lv.lv_data[j_high * lv.num_strikes + i_low]
+	v11 := lv.lv_data[j_high * lv.num_strikes + i_high]
+
+	v0 := v00 * (1.0 - w_k) + v10 * w_k
+	v1 := v01 * (1.0 - w_k) + v11 * w_k
+
+	return v0 * (1.0 - w_t) + v1 * w_t
+}
+
+// Build LV Surface from Calibrated Heston Model using Dupire's Formula
+build_lv_surface_from_heston :: proc(
+	S_0: f64,
+	r: f64,
+	params: Heston_Params,
+	allocator: mem.Allocator = context.allocator,
+) -> LocalVolSurface {
+	num_strikes := 21
+	num_expiries := 10
+
+	strikes := make([]f64, num_strikes, allocator)
+	expiries := make([]f64, num_expiries, allocator)
+	lv_data := make([]f64, num_strikes * num_expiries, allocator)
+
+	// Define grid
+	for i in 0 ..< num_strikes {
+		strikes[i] = S_0 * (0.6 + f64(i) * 0.04) // 0.6 S_0 to 1.4 S_0
+	}
+	for j in 0 ..< num_expiries {
+		expiries[j] = 0.1 + f64(j) * 0.1 // 0.1 to 1.0 years
+	}
+
+	// Finite difference steps
+	dK := S_0 * 0.005
+	dT := 1.0 / 365.0
+
+	// Compute the grid (skip boundaries for finite differences)
+	for j in 1 ..< num_expiries - 1 {
+		T := expiries[j]
+		for i in 1 ..< num_strikes - 1 {
+			K := strikes[i]
+
+			// 1. Get Heston price at (K, T)
+			C := heston_price(S_0, K, T, r, params, .Call, 2000)
+
+			// 2. Get Heston prices at (K, T ± dT)
+			C_T_plus := heston_price(S_0, K, T + dT, r, params, .Call, 2000)
+			C_T_minus := heston_price(S_0, K, T - dT, r, params, .Call, 2000)
+
+			// 3. Get Heston prices at (K ± dK, T)
+			C_K_plus := heston_price(S_0, K + dK, T, r, params, .Call, 2000)
+			C_K_minus := heston_price(S_0, K - dK, T, r, params, .Call, 2000)
+
+			// 4. Dupire derivatives (central differences)
+			dC_dT := (C_T_plus - C_T_minus) / (2.0 * dT)
+			dC_dK := (C_K_plus - C_K_minus) / (2.0 * dK)
+			d2C_dK2 := (C_K_plus - 2.0 * C + C_K_minus) / (dK * dK)
+
+			// 5. Prevent numerical instability
+			if d2C_dK2 < 1e-8 {d2C_dK2 = 1e-8}
+			if d2C_dK2 < 0.0 {d2C_dK2 = 0.0}
+
+			// 6. Dupire's Formula: sigma_loc^2 = (dC/dT + r*K*dC/dK + r*C) / (0.5 * K^2 * d2C/dK2)
+			numerator := dC_dT + r * K * dC_dK + r * C
+			denominator := 0.5 * K * K * d2C_dK2
+
+			sigma_loc_sq := numerator / denominator
+			if sigma_loc_sq < 0.0 {sigma_loc_sq = 0.0} 	// Safety clamp
+
+			lv_data[j * num_strikes + i] = math.sqrt_f64(sigma_loc_sq)
+		}
+	}
+
+	// 7. Fill boundaries with nearest valid value
+	for j in 0 ..< num_expiries {
+		lv_data[j * num_strikes + 0] = lv_data[j * num_strikes + 1]
+		lv_data[j * num_strikes + num_strikes - 1] = lv_data[j * num_strikes + num_strikes - 2]
+	}
+	for i in 0 ..< num_strikes {
+		lv_data[0 * num_strikes + i] = lv_data[1 * num_strikes + i]
+		lv_data[(num_expiries - 1) * num_strikes + i] =
+			lv_data[(num_expiries - 2) * num_strikes + i]
+	}
+
+	return LocalVolSurface {
+		strikes = strikes,
+		expiries = expiries,
+		lv_data = lv_data,
+		num_strikes = num_strikes,
+		num_expiries = num_expiries,
+	}
+}
+
+// ============================================================================
+// Local Volatility Monte Carlo: Barrier Option (with CRN Greeks)
+// ============================================================================
+_lv_mc_barrier_price_helper :: proc(
+	S_0: f64,
+	K: f64,
+	T: f64,
+	r: f64,
+	barrier: f64,
+	is_up: bool,
+	opt: OptionType,
+	lv: LocalVolSurface,
+	n_paths: int,
+	n_steps: int,
+	norm_data: []f64,
+) -> f64 {
+	dt := T / f64(n_steps)
+	sqrt_dt := math.sqrt_f64(dt)
+	discount := math.exp_f64(-r * T)
+	total_payoff := 0.0
+
+	norm_idx := 0
+	for path in 0 ..< n_paths {
+		S := S_0
+		hit_barrier := false
+
+		for step in 0 ..< n_steps {
+			Z := norm_data[norm_idx]
+			norm_idx += 1
+
+			t_current := f64(step) * dt
+			sigma_loc := get_local_vol(lv, S, t_current)
+
+			S = S * math.exp_f64((r - 0.5 * sigma_loc * sigma_loc) * dt + sigma_loc * sqrt_dt * Z)
+
+			if is_up {
+				if S >= barrier {hit_barrier = true; break}
+			} else {
+				if S <= barrier {hit_barrier = true; break}
+			}
+		}
+
+		if !hit_barrier {
+			if opt == .Call {
+				total_payoff += math.max(S - K, 0.0)
+			} else {
+				total_payoff += math.max(K - S, 0.0)
+			}
+		}
+	}
+	return (total_payoff / f64(n_paths)) * discount
+}
+
+lv_mc_barrier_option :: proc(
+	S_0: f64,
+	K: f64,
+	T: f64,
+	r: f64,
+	barrier: f64,
+	is_up: bool,
+	opt: OptionType,
+	lv: LocalVolSurface,
+	n_paths: int,
+	n_steps: int,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	price: f64,
+	delta: f64,
+	vega: f64,
+) {
+	// Note: "Vega" for LV is technically the sensitivity to the entire surface.
+	// Here we approximate it as a parallel shift of the entire LV surface by 1%.
+
+	norm_count := n_paths * n_steps
+	norm_data := make([]f64, norm_count, allocator)
+	defer delete(norm_data, allocator)
+	for i in 0 ..< norm_count {norm_data[i] = rand.float64_normal(0.0, 1.0)}
+
+	price = _lv_mc_barrier_price_helper(
+		S_0,
+		K,
+		T,
+		r,
+		barrier,
+		is_up,
+		opt,
+		lv,
+		n_paths,
+		n_steps,
+		norm_data,
+	)
+
+	h_S := 0.01 * S_0
+	delta =
+		(_lv_mc_barrier_price_helper(
+				S_0 + h_S,
+				K,
+				T,
+				r,
+				barrier,
+				is_up,
+				opt,
+				lv,
+				n_paths,
+				n_steps,
+				norm_data,
+			) -
+			_lv_mc_barrier_price_helper(
+				S_0 - h_S,
+				K,
+				T,
+				r,
+				barrier,
+				is_up,
+				opt,
+				lv,
+				n_paths,
+				n_steps,
+				norm_data,
+			)) /
+		(2.0 * h_S)
+
+	// Parallel shift the LV surface by 1% for Vega
+	lv_shifted := lv
+	lv_shifted.lv_data = make([]f64, len(lv.lv_data), allocator)
+	for i in 0 ..< len(lv.lv_data) {
+		lv_shifted.lv_data[i] = lv.lv_data[i] * 1.01
+	}
+	defer delete(lv_shifted.lv_data, allocator)
+
+	vega =
+		(_lv_mc_barrier_price_helper(
+				S_0,
+				K,
+				T,
+				r,
+				barrier,
+				is_up,
+				opt,
+				lv_shifted,
+				n_paths,
+				n_steps,
+				norm_data,
+			) -
+			_lv_mc_barrier_price_helper(
+				S_0,
+				K,
+				T,
+				r,
+				barrier,
+				is_up,
+				opt,
+				lv,
+				n_paths,
+				n_steps,
+				norm_data,
+			)) /
+		0.01
+
+	return price, delta, vega
+}
