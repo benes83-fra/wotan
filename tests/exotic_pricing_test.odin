@@ -317,6 +317,67 @@ exotic_pricing_test :: proc(allocator: mem.Allocator) {
 	)
 
 	fmt.println("======================================================================\n")
+	// =========================================================================
+	// 7. The Downside Smile Effect: Down-and-Out Put
+	// =========================================================================
+	fmt.println("7. The Downside Smile Effect: Down-and-Out Put")
+	fmt.println("======================================================================")
+
+	put_K := spot * 0.95 // Slightly Out-of-The-Money Put
+	put_barrier := spot * 0.90 // 10% below current spot
+
+	// Black-Scholes Down-and-Out Put (using your existing tensor engine)
+	// Note: Your existing tensor engine might need a quick `.Put` and `is_up=false` branch if you want to test it,
+	// but for now we will just show the Heston price and the conceptual difference.
+	// For a fair comparison, we can just price a vanilla Put and note the barrier effect.
+
+	heston_do_put_price, delta_do_put, vega_do_put := fin.heston_mc_barrier_option(
+		spot,
+		put_K,
+		T,
+		r,
+		put_barrier,
+		false,
+		.Put, // is_up = false, opt = .Put
+		heston_res.params,
+		n_paths,
+		n_steps,
+		allocator,
+	)
+
+	// For baseline, price a Vanilla Put in Heston to show the barrier discount
+	heston_vanilla_put_price, _, _ := fin.heston_mc_barrier_option(
+		spot,
+		put_K,
+		T,
+		r,
+		0.0,
+		false,
+		.Put, // barrier = 0.0 ensures it never knocks out
+		heston_res.params,
+		n_paths,
+		n_steps,
+		allocator,
+	)
+
+	fmt.printf(" %-35s | $%10.4f\n", "Heston Vanilla Put", heston_vanilla_put_price)
+	fmt.printf(" %-35s | $%10.4f\n", "Heston Down-and-Out Put", heston_do_put_price)
+	fmt.printf(
+		" %-35s | Delta: %6.4f | Vega: %6.4f\n",
+		"Down-and-Out Put Greeks",
+		delta_do_put,
+		vega_do_put,
+	)
+
+	barrier_discount :=
+		(heston_vanilla_put_price - heston_do_put_price) / heston_vanilla_put_price * 100.0
+	fmt.printf(
+		"\n💡 Barrier Discount: The Down-and-Out feature reduces the Put's value by %.2f%%\n",
+		barrier_discount,
+	)
+	fmt.println("   Reason: The strong negative skew (ρ < 0) fattens the left tail,")
+	fmt.println("   making the downside barrier much more likely to be hit than BS predicts.")
+	fmt.println("======================================================================\n")
 }
 
 // Helper: Simple BS Monte Carlo for Barrier Options (for baseline comparison)
