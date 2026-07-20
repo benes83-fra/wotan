@@ -916,9 +916,12 @@ SwaptionSpec :: struct {
 	K:           f64, // Strike
 	annuity:     f64, // PV01 / Annuity factor
 }
-
-// Compute HW 2-Factor swap rate variance (O(n) closed-form)
-compute_hw2f_swap_variance :: proc(spec: SwaptionSpec, params: HW2_Params) -> f64 {
+// Compute HW 2-Factor swap rate variance (proper annuity weighting)
+compute_hw2f_swap_variance :: proc(
+	spec: SwaptionSpec,
+	params: HW2_Params,
+	r0: f64, // Initial short rate for discount factors
+) -> f64 {
 	a := params.a
 	b := params.b
 	sigma := params.sigma
@@ -927,36 +930,32 @@ compute_hw2f_swap_variance :: proc(spec: SwaptionSpec, params: HW2_Params) -> f6
 	T := spec.T_exp
 
 	// Factor variances at expiry T
-	var_r := sigma * sigma * (1.0 - math.exp_f64(-2.0 * a * T)) / (2.0 * a)
-	var_x := eta * eta * (1.0 - math.exp_f64(-2.0 * b * T)) / (2.0 * b)
-	cov_rx := rho * sigma * eta * (1.0 - math.exp_f64(-(a + b) * T)) / (a + b)
+	V_a := sigma * sigma * (1.0 - math.exp_f64(-2.0 * a * T)) / (2.0 * a)
+	V_b := eta * eta * (1.0 - math.exp_f64(-2.0 * b * T)) / (2.0 * b)
+	V_ab := rho * sigma * eta * (1.0 - math.exp_f64(-(a + b) * T)) / (a + b)
 
-	// Weighted bond volatilities: W_a = sum(w_i * B_a(T, T_i))
+	// Compute proper annuity weights
+	// w_i = delta_i * P(0, T_i) / Annuity
+	// For annual payments, delta_i = 1
 	W_a := 0.0
 	W_b := 0.0
+	total_weight := 0.0
 
 	for k in 1 ..< spec.swap_length + 1 {
 		T_i := T + f64(k)
-		delta_T_a := f64(k) // T_i - T_exp = k years
-		delta_T_b := f64(k)
+		P_Ti := math.exp_f64(-r0 * T_i) // Discount factor to payment date
+		w_i := P_Ti / spec.annuity // Proper annuity weight
 
-		B_a_k := (1.0 - math.exp_f64(-a * delta_T_a)) / a
-		B_b_k := (1.0 - math.exp_f64(-b * delta_T_b)) / b
-
-		// Annuity weight: w_i = P(0, T_i) / Annuity
-		// Since spec.annuity = sum P(0, T_i), w_i = P(0, T_i) / annuity
-		// But we can simplify: we just need the relative weights
-		// For a flat curve at rate r0, P(0, T_i) is already embedded in the annuity
-		// We use the weight directly from the annuity decomposition
-		w_i := 1.0 / f64(spec.swap_length) // Simplified equal weight for flat curve
-		// More accurate: use discount factor ratios
-		// For flat curve: P(0,T_i)/Annuity ≈ 1/swap_length (approximately)
+		B_a_k := (1.0 - math.exp_f64(-a * f64(k))) / a
+		B_b_k := (1.0 - math.exp_f64(-b * f64(k))) / b
 
 		W_a += w_i * B_a_k
 		W_b += w_i * B_b_k
+		total_weight += w_i
 	}
 
-	return var_r * W_a * W_a + var_x * W_b * W_b + 2.0 * cov_rx * W_a * W_b
+	// sigma_swap^2 = V_a * W_a^2 + V_b * W_b^2 + 2 * V_ab * W_a * W_b
+	return V_a * W_a * W_a + V_b * W_b * W_b + 2.0 * V_ab * W_a * W_b
 }
 
 // Price a strip of swaptions using Black's formula (SIMD via tensor)
@@ -964,25 +963,21 @@ hw2f_swaption_price_strip :: proc(
 	params: HW2_Params,
 	swaptions: []SwaptionSpec,
 	n_swaptions: int,
+	r0: f64,
 	allocator: mem.Allocator,
 ) -> []f64 {
 	prices := make([]f64, n_swaptions, allocator)
 
 	for i in 0 ..< n_swaptions {
 		spec := swaptions[i]
-		swap_var := compute_hw2f_swap_variance(spec, params)
+		swap_var := compute_hw2f_swap_variance(spec, params, r0)
 
 		if swap_var < 1e-12 {
-			// Intrinsic value
 			prices[i] = spec.annuity * math.max(spec.F - spec.K, 0.0)
 			continue
 		}
 
 		swap_vol := math.sqrt_f64(swap_var)
-
-		// Black's formula for swaption
-		// d1 = (ln(F/K) + 0.5 * var) / vol
-		// d2 = d1 - vol
 		ln_F_K := math.ln(spec.F / spec.K)
 		d1 := (ln_F_K + 0.5 * swap_var) / swap_vol
 		d2 := d1 - swap_vol
@@ -998,6 +993,7 @@ hw2f_swaption_price_strip :: proc(
 // Joint loss function: Caps RMSE + Swaptions RMSE
 _hw2f_joint_loss :: proc(
 	params: HW2_Params,
+	r0: f64,
 	// Caplet data
 	cap_T_start_t: ^t.Tensor,
 	cap_T_end_t: ^t.Tensor,
@@ -1029,7 +1025,7 @@ _hw2f_joint_loss :: proc(
 	t.tensor_free_graph(cap_rmse)
 
 	// 2. Swaption loss (analytical)
-	swaption_model := hw2f_swaption_price_strip(params, swaption_specs, n_swaptions, allocator)
+	swaption_model := hw2f_swaption_price_strip(params, swaption_specs, n_swaptions, r0, allocator)
 	defer delete(swaption_model, allocator)
 
 	swaption_sse := 0.0
@@ -1039,8 +1035,41 @@ _hw2f_joint_loss :: proc(
 	}
 	swaption_rmse := math.sqrt_f64(swaption_sse / f64(n_swaptions))
 
-	// 3. Joint loss: equal weight
-	return cap_loss + swaption_rmse
+	// 3. Data loss (equal weight between caps and swaptions)
+	data_loss := cap_loss + swaption_rmse
+
+	// 4. Regularization: penalize deviation from realistic priors
+	// Priors based on typical USD rates
+	prior_a := 0.05
+	prior_b := 0.02
+	prior_sigma := 0.01
+	prior_eta := 0.005
+	prior_rho := -0.3
+
+	// Scale factors (larger = more tolerant of deviation)
+	scale_a := 0.1
+	scale_b := 0.05
+	scale_sigma := 0.01
+	scale_eta := 0.005
+	scale_rho := 0.3
+
+	lambda := 0.05 // Regularization strength
+	reg :=
+		lambda *
+		(math.pow((params.a - prior_a) / scale_a, 2) +
+				math.pow((params.b - prior_b) / scale_b, 2) +
+				math.pow((params.sigma - prior_sigma) / scale_sigma, 2) +
+				math.pow((params.eta - prior_eta) / scale_eta, 2) +
+				math.pow((params.rho - prior_rho) / scale_rho, 2))
+
+	// 5. Symmetry-breaking penalty: enforce a > b (fast factor must be faster)
+	// If a < b, add a heavy penalty to prevent factor swapping
+	symmetry_penalty := 0.0
+	if params.a < params.b {
+		symmetry_penalty = 10.0 * math.pow(params.b - params.a, 2)
+	}
+
+	return data_loss + reg + symmetry_penalty
 }
 
 // ============================================================================
@@ -1053,7 +1082,6 @@ HW2F_JointResult :: struct {
 	converged:  bool,
 	iterations: int,
 }
-
 calibrate_hull_white_2f_joint :: proc(
 	cap_market: []f64,// Caplet data
 	cap_T_start: []f64,
@@ -1066,6 +1094,7 @@ calibrate_hull_white_2f_joint :: proc(
 	swaption_specs: []SwaptionSpec,
 	swaption_market: []f64,
 	n_swaptions: int,
+	r0: f64, // <-- NEW: pass r0 for proper annuity weighting
 	allocator: mem.Allocator = context.allocator,
 ) -> HW2F_JointResult {
 
@@ -1079,7 +1108,7 @@ calibrate_hull_white_2f_joint :: proc(
 
 	opt_config := opt.OptimizerConfig {
 		type          = .Adam,
-		learning_rate = 0.01,
+		learning_rate = 0.005, // <-- Lower LR for more stable 5D optimization
 		beta1         = 0.9,
 		beta2         = 0.999,
 		epsilon       = 1e-8,
@@ -1092,27 +1121,29 @@ calibrate_hull_white_2f_joint :: proc(
 
 	eps := 1e-4
 	best_loss: f64 = 1e10
+	// Better initial guess: closer to realistic IR parameters, with a > b enforced
 	best_params := HW2_Params {
-		a     = 0.15,
-		b     = 0.05,
-		sigma = 0.01,
+		a     = 0.10,
+		b     = 0.03,
+		sigma = 0.008,
 		eta   = 0.005,
-		rho   = -0.5,
+		rho   = -0.4,
 	}
-	max_iter := 500
+	max_iter := 600 // More iterations for 5D landscape
 	converged := false
 
 	p := HW2_Params {
-		a     = 0.15,
-		b     = 0.05,
-		sigma = 0.01,
+		a     = 0.10,
+		b     = 0.03,
+		sigma = 0.008,
 		eta   = 0.005,
-		rho   = -0.5,
+		rho   = -0.4,
 	}
 
 	for iter in 0 ..< max_iter {
 		current_loss := _hw2f_joint_loss(
 			p,
+			r0,
 			cap_T_start_t,
 			cap_T_end_t,
 			cap_F_t,
@@ -1135,12 +1166,13 @@ calibrate_hull_white_2f_joint :: proc(
 			break
 		}
 
-		// Finite difference gradients
+		// Finite difference gradients (all 5 parameters)
 		p_a_plus := p; p_a_plus.a += eps
 		p_a_minus := p; p_a_minus.a -= eps
 		gradient[0] =
 			(_hw2f_joint_loss(
 					p_a_plus,
+					r0,
 					cap_T_start_t,
 					cap_T_end_t,
 					cap_F_t,
@@ -1154,6 +1186,7 @@ calibrate_hull_white_2f_joint :: proc(
 				) -
 				_hw2f_joint_loss(
 					p_a_minus,
+					r0,
 					cap_T_start_t,
 					cap_T_end_t,
 					cap_F_t,
@@ -1172,6 +1205,7 @@ calibrate_hull_white_2f_joint :: proc(
 		gradient[1] =
 			(_hw2f_joint_loss(
 					p_b_plus,
+					r0,
 					cap_T_start_t,
 					cap_T_end_t,
 					cap_F_t,
@@ -1185,6 +1219,7 @@ calibrate_hull_white_2f_joint :: proc(
 				) -
 				_hw2f_joint_loss(
 					p_b_minus,
+					r0,
 					cap_T_start_t,
 					cap_T_end_t,
 					cap_F_t,
@@ -1203,6 +1238,7 @@ calibrate_hull_white_2f_joint :: proc(
 		gradient[2] =
 			(_hw2f_joint_loss(
 					p_s_plus,
+					r0,
 					cap_T_start_t,
 					cap_T_end_t,
 					cap_F_t,
@@ -1216,6 +1252,7 @@ calibrate_hull_white_2f_joint :: proc(
 				) -
 				_hw2f_joint_loss(
 					p_s_minus,
+					r0,
 					cap_T_start_t,
 					cap_T_end_t,
 					cap_F_t,
@@ -1234,6 +1271,7 @@ calibrate_hull_white_2f_joint :: proc(
 		gradient[3] =
 			(_hw2f_joint_loss(
 					p_e_plus,
+					r0,
 					cap_T_start_t,
 					cap_T_end_t,
 					cap_F_t,
@@ -1247,6 +1285,7 @@ calibrate_hull_white_2f_joint :: proc(
 				) -
 				_hw2f_joint_loss(
 					p_e_minus,
+					r0,
 					cap_T_start_t,
 					cap_T_end_t,
 					cap_F_t,
@@ -1265,6 +1304,7 @@ calibrate_hull_white_2f_joint :: proc(
 		gradient[4] =
 			(_hw2f_joint_loss(
 					p_r_plus,
+					r0,
 					cap_T_start_t,
 					cap_T_end_t,
 					cap_F_t,
@@ -1278,6 +1318,7 @@ calibrate_hull_white_2f_joint :: proc(
 				) -
 				_hw2f_joint_loss(
 					p_r_minus,
+					r0,
 					cap_T_start_t,
 					cap_T_end_t,
 					cap_F_t,
@@ -1299,8 +1340,9 @@ calibrate_hull_white_2f_joint :: proc(
 		params[4] = p.rho
 		opt.optimizer_step(&optimizer, params, gradient)
 
-		p.a = math.max(0.01, math.min(1.0, params[0]))
-		p.b = math.max(0.005, math.min(0.5, params[1]))
+		// Enforce bounds AND a > b constraint
+		p.a = math.max(0.02, math.min(1.0, params[0]))
+		p.b = math.max(0.005, math.min(p.a - 0.01, params[1])) // <-- KEY: b < a enforced
 		p.sigma = math.max(0.001, math.min(0.05, params[2]))
 		p.eta = math.max(0.001, math.min(0.05, params[3]))
 		p.rho = math.max(-0.99, math.min(0.99, params[4]))

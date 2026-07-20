@@ -262,7 +262,7 @@ ir_derivatives_2f_swaption_test :: proc(allocator: mem.Allocator) {
 		}
 
 		// Generate true price using HW2F
-		swap_var := fin.compute_hw2f_swap_variance(swaption_specs[i], true_params)
+		swap_var := fin.compute_hw2f_swap_variance(swaption_specs[i], true_params, r0)
 		swap_vol := math.sqrt_f64(math.max(swap_var, 1e-12))
 		ln_F_K := math.ln(r0 / r0) // ATM so this is 0
 		d1 := (ln_F_K + 0.5 * swap_var) / swap_vol
@@ -314,7 +314,8 @@ ir_derivatives_2f_swaption_test :: proc(allocator: mem.Allocator) {
 		swaption_specs,
 		swaption_market,
 		n_swaptions,
-		allocator,
+		r0,
+		allocator, // <-- pass r0
 	)
 	fmt.printf(
 		"   Joint:      a=%.4f, b=%.4f, σ=%.4f, η=%.4f, ρ=%.4f | RMSE=%.6f\n",
