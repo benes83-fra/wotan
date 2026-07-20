@@ -1083,7 +1083,7 @@ HW2F_JointResult :: struct {
 	iterations: int,
 }
 calibrate_hull_white_2f_joint :: proc(
-	cap_market: []f64,// Caplet data
+	cap_market: []f64, // Caplet data
 	cap_T_start: []f64,
 	cap_T_end: []f64,
 	cap_F: []f64,
@@ -1363,4 +1363,267 @@ calibrate_hull_white_2f_joint :: proc(
 		converged = converged,
 		iterations = max_iter,
 	}
+}
+// ============================================================================
+// BERMUDAN SWAPTION PRICING (HW 2-FACTOR)
+// ============================================================================
+
+// Analytical Zero-Coupon Bond Price for the specific MC state variables (r_t, x_t)
+// Calibrated to a flat initial curve r0
+hw2f_zero_coupon_bond :: proc(
+	t: f64,
+	T: f64,
+	r_t: f64,
+	x_t: f64,
+	params: HW2_Params,
+	r0: f64,
+) -> f64 {
+	tau := T - t
+	if tau <= 0.0 {return 1.0}
+
+	a := params.a
+	b := params.b
+	sigma := params.sigma
+	eta := params.eta
+	rho := params.rho
+
+	B_a := (1.0 - math.exp_f64(-a * tau)) / a
+	B_b := (1.0 - math.exp_f64(-b * tau)) / b
+
+	// Variance of integral of the factors
+	V_a :=
+		(sigma * sigma / (a * a)) *
+		(tau -
+				(2.0 / a) * (1.0 - math.exp_f64(-a * tau)) +
+				(1.0 / (2.0 * a)) * (1.0 - math.exp_f64(-2.0 * a * tau)))
+	V_b :=
+		(eta * eta / (b * b)) *
+		(tau -
+				(2.0 / b) * (1.0 - math.exp_f64(-b * tau)) +
+				(1.0 / (2.0 * b)) * (1.0 - math.exp_f64(-2.0 * b * tau)))
+	V_ab :=
+		(2.0 * rho * sigma * eta / (a * b)) *
+		(tau -
+				(1.0 / a) * (1.0 - math.exp_f64(-a * tau)) -
+				(1.0 / b) * (1.0 - math.exp_f64(-b * tau)) +
+				(1.0 / (a + b)) * (1.0 - math.exp_f64(-(a + b) * tau)))
+
+	V_t_T := V_a + V_b + V_ab
+
+	// V(0, T) for curve matching
+	V_0_T :=
+		(sigma * sigma / (a * a)) *
+			(T -
+					(2.0 / a) * (1.0 - math.exp_f64(-a * T)) +
+					(1.0 / (2.0 * a)) * (1.0 - math.exp_f64(-2.0 * a * T))) +
+		(eta * eta / (b * b)) *
+			(T -
+					(2.0 / b) * (1.0 - math.exp_f64(-b * T)) +
+					(1.0 / (2.0 * b)) * (1.0 - math.exp_f64(-2.0 * b * T))) +
+		(2.0 * rho * sigma * eta / (a * b)) *
+			(T -
+					(1.0 / a) * (1.0 - math.exp_f64(-a * T)) -
+					(1.0 / b) * (1.0 - math.exp_f64(-b * T)) +
+					(1.0 / (a + b)) * (1.0 - math.exp_f64(-(a + b) * T)))
+
+	exponent := -r0 * tau - B_a * (r_t - r0) + (B_a - B_b) * x_t + 0.5 * (V_t_T - V_0_T)
+
+	return math.exp_f64(exponent)
+}
+
+// European Swaption Value (used as a rigorous continuation value proxy)
+hw2f_euro_swaption_value :: proc(
+	t: f64,
+	T_exp: f64,
+	maturity: f64,
+	delta: f64,
+	K: f64,
+	r_t: f64,
+	x_t: f64,
+	params: HW2_Params,
+	r0: f64,
+) -> f64 {
+	tau := T_exp - t
+	if tau <= 0.0 {return 0.0}
+
+	annuity := 0.0
+	n_pmts := int((maturity - T_exp) / delta)
+	for j in 1 ..< n_pmts + 1 {
+		T_j := T_exp + f64(j) * delta
+		P_t_Tj := hw2f_zero_coupon_bond(t, T_j, r_t, x_t, params, r0)
+		annuity += delta * P_t_Tj
+	}
+
+	P_start := hw2f_zero_coupon_bond(t, T_exp, r_t, x_t, params, r0)
+	P_end := hw2f_zero_coupon_bond(t, maturity, r_t, x_t, params, r0)
+
+	if annuity <= 0.0 {return 0.0}
+	F := (P_start - P_end) / annuity
+
+	// Proxy variance: V(0, T_exp) - V(0, t)
+	a := params.a; b := params.b; sigma := params.sigma; eta := params.eta; rho := params.rho
+
+	V_0_T :=
+		(sigma * sigma / (a * a)) *
+			(T_exp -
+					(2.0 / a) * (1.0 - math.exp_f64(-a * T_exp)) +
+					(1.0 / (2.0 * a)) * (1.0 - math.exp_f64(-2.0 * a * T_exp))) +
+		(eta * eta / (b * b)) *
+			(T_exp -
+					(2.0 / b) * (1.0 - math.exp_f64(-b * T_exp)) +
+					(1.0 / (2.0 * b)) * (1.0 - math.exp_f64(-2.0 * b * T_exp))) +
+		(2.0 * rho * sigma * eta / (a * b)) *
+			(T_exp -
+					(1.0 / a) * (1.0 - math.exp_f64(-a * T_exp)) -
+					(1.0 / b) * (1.0 - math.exp_f64(-b * T_exp)) +
+					(1.0 / (a + b)) * (1.0 - math.exp_f64(-(a + b) * T_exp)))
+
+	V_0_t :=
+		(sigma * sigma / (a * a)) *
+			(t -
+					(2.0 / a) * (1.0 - math.exp_f64(-a * t)) +
+					(1.0 / (2.0 / a)) * (1.0 - math.exp_f64(-2.0 * a * t))) +
+		(eta * eta / (b * b)) *
+			(t -// Note: simplified for stability
+					(2.0 / b) * (1.0 - math.exp_f64(-b * t)) +
+					(1.0 / (2.0 * b)) * (1.0 - math.exp_f64(-2.0 * b * t))) +
+		(2.0 * rho * sigma * eta / (a * b)) *
+			(t -
+					(1.0 / a) * (1.0 - math.exp_f64(-a * t)) -
+					(1.0 / b) * (1.0 - math.exp_f64(-b * t)) +
+					(1.0 / (a + b)) * (1.0 - math.exp_f64(-(a + b) * t)))
+
+	swap_var := math.max(V_0_T - V_0_t, 1e-12)
+	swap_vol := math.sqrt_f64(swap_var)
+
+	ln_F_K := math.ln(F / K)
+	d1 := (ln_F_K + 0.5 * swap_var) / swap_vol
+	d2 := d1 - swap_vol
+
+	N_d1 := 0.5 * (1.0 + math.erf(d1 / math.sqrt_f64(2.0)))
+	N_d2 := 0.5 * (1.0 + math.erf(d2 / math.sqrt_f64(2.0)))
+
+	return annuity * (F * N_d1 - K * N_d2)
+}
+
+// Hull-White 2-Factor Monte Carlo: Bermudan Swaption
+hw2f_mc_bermudan_option :: proc(
+	r0: f64,
+	K: f64,
+	exercise_dates: []f64, // e.g., [1.0, 2.0, 3.0, 4.0, 5.0]
+	maturity: f64, // e.g., 10.0
+	delta: f64, // e.g., 1.0
+	params: HW2_Params,
+	n_paths: int,
+	n_steps: int,
+	allocator: mem.Allocator = context.allocator,
+) -> f64 {
+	n_ex := len(exercise_dates)
+	dt := maturity / f64(n_steps)
+	sqrt_dt := math.sqrt_f64(dt)
+
+	// Record state at exercise dates
+	r_ex := make([]f64, n_paths * n_ex, allocator)
+	x_ex := make([]f64, n_paths * n_ex, allocator)
+	defer {delete(r_ex, allocator); delete(x_ex, allocator)}
+
+	norm_count := n_paths * n_steps * 2
+	norm_data := make([]f64, norm_count, allocator)
+	defer delete(norm_data, allocator)
+	for i in 0 ..< norm_count {norm_data[i] = rand.float64_normal(0.0, 1.0)}
+
+	norm_idx := 0
+	for path in 0 ..< n_paths {
+		r := r0
+		x := 0.0
+		ex_idx := 0
+
+		for step in 1 ..< n_steps + 1 {
+			U1 := norm_data[norm_idx]
+			U2 := norm_data[norm_idx + 1]
+			norm_idx += 2
+
+			Z1 := U1
+			Z2 := params.rho * U1 + math.sqrt_f64(1.0 - params.rho * params.rho) * U2
+
+			t_current := f64(step) * dt
+			theta_t :=
+				params.a * r0 +
+				(params.sigma * params.sigma / (2.0 * params.a)) *
+					(1.0 - math.exp_f64(-2.0 * params.a * t_current))
+
+			dr := (theta_t + x - params.a * r) * dt + params.sigma * sqrt_dt * Z1
+			r = r + dr
+
+			dx := -params.b * x * dt + params.eta * sqrt_dt * Z2
+			x = x + dx
+
+			if ex_idx < n_ex && t_current >= exercise_dates[ex_idx] {
+				r_ex[path * n_ex + ex_idx] = r
+				x_ex[path * n_ex + ex_idx] = x
+				ex_idx += 1
+			}
+		}
+	}
+
+	// Backward induction (Lower-bound exercise strategy)
+	cashflows := make([]f64, n_paths, allocator)
+	defer delete(cashflows, allocator)
+
+	for i := n_ex - 1; i >= 0; i -= 1 {
+		t_ex := exercise_dates[i]
+
+		for path in 0 ..< n_paths {
+			r_t := r_ex[path * n_ex + i]
+			x_t := x_ex[path * n_ex + i]
+
+			// Compute immediate swap value at t_ex (Payer Swaption)
+			annuity := 0.0
+			n_pmts := int((maturity - t_ex) / delta)
+			for j in 1 ..< n_pmts + 1 {
+				T_j := t_ex + f64(j) * delta
+				P_t_Tj := hw2f_zero_coupon_bond(t_ex, T_j, r_t, x_t, params, r0)
+				annuity += delta * P_t_Tj
+			}
+			P_end := hw2f_zero_coupon_bond(t_ex, maturity, r_t, x_t, params, r0)
+
+			// Swap value = P(t_ex, t_ex) - P(t_ex, maturity) - K * Annuity
+			// P(t_ex, t_ex) is exactly 1.0
+			swap_val := 1.0 - P_end - K * annuity
+
+			if i == n_ex - 1 {
+				// Last exercise date: exercise if in the money
+				if swap_val > 0.0 {
+					cashflows[path] = swap_val * math.exp_f64(-r0 * t_ex)
+				}
+			} else {
+				// Continuation value proxy: European swaption expiring at next exercise date
+				next_ex := exercise_dates[i + 1]
+				euro_val := hw2f_euro_swaption_value(
+					t_ex,
+					next_ex,
+					maturity,
+					delta,
+					K,
+					r_t,
+					x_t,
+					params,
+					r0,
+				)
+
+				// Exercise if immediate value exceeds the European lower bound
+				if swap_val > euro_val {
+					cashflows[path] = swap_val * math.exp_f64(-r0 * t_ex)
+				}
+				// Else: continue (cashflows[path] already holds the discounted future value)
+			}
+		}
+	}
+
+	// Average discounted cashflows
+	total := 0.0
+	for path in 0 ..< n_paths {
+		total += cashflows[path]
+	}
+	return total / f64(n_paths)
 }

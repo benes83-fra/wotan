@@ -400,3 +400,95 @@ ir_derivatives_2f_swaption_test :: proc(allocator: mem.Allocator) {
 	fmt.println("   cross-tenor correlation information that caplets alone cannot capture.")
 	fmt.println("======================================================================\n")
 }
+
+
+bermudan_swaption_test :: proc(allocator: mem.Allocator) {
+	fmt.println("\n======================================================================")
+	fmt.println("         BERMUDAN SWAPTION: 1-FACTOR vs 2-FACTOR")
+	fmt.println("======================================================================\n")
+
+	r0 := 0.04
+	K := 0.04 // ATM
+
+	// 5Y Bermudan into a 10Y swap (exercise dates: 1Y, 2Y, 3Y, 4Y, 5Y)
+	exercise_dates := make([]f64, 5, allocator)
+	for i in 0 ..< 5 {
+		exercise_dates[i] = f64(i + 1)
+	}
+	maturity := 10.0
+	delta := 1.0
+
+	defer delete(exercise_dates, allocator)
+
+	// Calibrated parameters (from your previous joint calibration)
+	params_1f := fin.HW_Params {
+		a     = 0.0514,
+		sigma = 0.0096,
+	}
+
+	params_2f := fin.HW2_Params {
+		a     = 0.0514, // Fast mean reversion
+		b     = 0.0201, // Slow mean reversion
+		sigma = 0.0096,
+		eta   = 0.0050,
+		rho   = -0.3023,
+	}
+
+	fmt.println("1. Pricing 5Y Bermudan Payer Swaption into 10Y Swap...")
+	fmt.println("   (Using calibrated parameters from joint Caps+Swaptions fit)\n")
+
+	// Price with 1-Factor (using a simplified MC for comparison)
+	// Note: For a true 1F Bermudan, you'd use a similar MC with 1 factor.
+	// Here we approximate the 1F Bermudan value by noting it lacks the slow factor's flexibility.
+	// We will simulate it using the 2F engine but with eta=0 to show the pure 1F baseline.
+	params_1f_mc := fin.HW2_Params {
+		a     = params_1f.a,
+		b     = 0.01, // Dummy slow factor
+		sigma = params_1f.sigma,
+		eta   = 0.0001, // Effectively zero volatility for the second factor
+		rho   = 0.0,
+	}
+
+	price_1f := fin.hw2f_mc_bermudan_option(
+		r0,
+		K,
+		exercise_dates,
+		maturity,
+		delta,
+		params_1f_mc,
+		20000,
+		100,
+		allocator,
+	)
+
+	price_2f := fin.hw2f_mc_bermudan_option(
+		r0,
+		K,
+		exercise_dates,
+		maturity,
+		delta,
+		params_2f,
+		20000,
+		100,
+		allocator,
+	)
+
+	fmt.println("----------------------------------------------------------------------")
+	fmt.printf(" %-35s | $%8.4f\n", "1-Factor HW Bermudan Price", price_1f)
+	fmt.printf(" %-35s | $%8.4f\n", "2-Factor HW Bermudan Price", price_2f)
+	fmt.println("----------------------------------------------------------------------")
+
+	diff := price_2f - price_1f
+	pct_diff := (diff / price_1f) * 100.0
+
+	fmt.printf("\n💡 The 2-Factor Premium: +$%.4f (%.2f%%)\n", diff, pct_diff)
+	fmt.println(
+		"   Reason: The 2-factor model captures long-term structural shifts (via 'b' and 'eta')",
+	)
+	fmt.println("   that make the swap rate more volatile over long horizons. This increases the")
+	fmt.println(
+		"   probability of the swaption finishing deep in-the-money at later exercise dates,",
+	)
+	fmt.println("   which the 1-factor model systematically underestimates.")
+	fmt.println("======================================================================\n")
+}

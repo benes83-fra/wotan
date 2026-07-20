@@ -503,6 +503,7 @@ main :: proc() {
 	test.ir_derivatives_test(context.temp_allocator)
 	test.ir_derivatives_2f_test(context.temp_allocator)
 	test.ir_derivatives_2f_swaption_test(context.temp_allocator)
+	test.bermudan_swaption_test(context.temp_allocator)
 	fmt.println("Demo End")
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
