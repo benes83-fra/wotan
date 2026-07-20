@@ -905,3 +905,420 @@ hw2_mc_cap_option :: proc(
 
 	return price, delta_r, vega
 }
+// ============================================================================
+// SWAPTION PRICING & JOINT CALIBRATION (Caps + Swaptions)
+// ============================================================================
+
+SwaptionSpec :: struct {
+	T_exp:       f64,
+	swap_length: int, // Number of annual payments
+	F:           f64, // Forward swap rate
+	K:           f64, // Strike
+	annuity:     f64, // PV01 / Annuity factor
+}
+
+// Compute HW 2-Factor swap rate variance (O(n) closed-form)
+compute_hw2f_swap_variance :: proc(spec: SwaptionSpec, params: HW2_Params) -> f64 {
+	a := params.a
+	b := params.b
+	sigma := params.sigma
+	eta := params.eta
+	rho := params.rho
+	T := spec.T_exp
+
+	// Factor variances at expiry T
+	var_r := sigma * sigma * (1.0 - math.exp_f64(-2.0 * a * T)) / (2.0 * a)
+	var_x := eta * eta * (1.0 - math.exp_f64(-2.0 * b * T)) / (2.0 * b)
+	cov_rx := rho * sigma * eta * (1.0 - math.exp_f64(-(a + b) * T)) / (a + b)
+
+	// Weighted bond volatilities: W_a = sum(w_i * B_a(T, T_i))
+	W_a := 0.0
+	W_b := 0.0
+
+	for k in 1 ..< spec.swap_length + 1 {
+		T_i := T + f64(k)
+		delta_T_a := f64(k) // T_i - T_exp = k years
+		delta_T_b := f64(k)
+
+		B_a_k := (1.0 - math.exp_f64(-a * delta_T_a)) / a
+		B_b_k := (1.0 - math.exp_f64(-b * delta_T_b)) / b
+
+		// Annuity weight: w_i = P(0, T_i) / Annuity
+		// Since spec.annuity = sum P(0, T_i), w_i = P(0, T_i) / annuity
+		// But we can simplify: we just need the relative weights
+		// For a flat curve at rate r0, P(0, T_i) is already embedded in the annuity
+		// We use the weight directly from the annuity decomposition
+		w_i := 1.0 / f64(spec.swap_length) // Simplified equal weight for flat curve
+		// More accurate: use discount factor ratios
+		// For flat curve: P(0,T_i)/Annuity ≈ 1/swap_length (approximately)
+
+		W_a += w_i * B_a_k
+		W_b += w_i * B_b_k
+	}
+
+	return var_r * W_a * W_a + var_x * W_b * W_b + 2.0 * cov_rx * W_a * W_b
+}
+
+// Price a strip of swaptions using Black's formula (SIMD via tensor)
+hw2f_swaption_price_strip :: proc(
+	params: HW2_Params,
+	swaptions: []SwaptionSpec,
+	n_swaptions: int,
+	allocator: mem.Allocator,
+) -> []f64 {
+	prices := make([]f64, n_swaptions, allocator)
+
+	for i in 0 ..< n_swaptions {
+		spec := swaptions[i]
+		swap_var := compute_hw2f_swap_variance(spec, params)
+
+		if swap_var < 1e-12 {
+			// Intrinsic value
+			prices[i] = spec.annuity * math.max(spec.F - spec.K, 0.0)
+			continue
+		}
+
+		swap_vol := math.sqrt_f64(swap_var)
+
+		// Black's formula for swaption
+		// d1 = (ln(F/K) + 0.5 * var) / vol
+		// d2 = d1 - vol
+		ln_F_K := math.ln(spec.F / spec.K)
+		d1 := (ln_F_K + 0.5 * swap_var) / swap_vol
+		d2 := d1 - swap_vol
+
+		N_d1 := 0.5 * (1.0 + math.erf(d1 / math.sqrt_f64(2.0)))
+		N_d2 := 0.5 * (1.0 + math.erf(d2 / math.sqrt_f64(2.0)))
+
+		prices[i] = spec.annuity * (spec.F * N_d1 - spec.K * N_d2)
+	}
+	return prices
+}
+
+// Joint loss function: Caps RMSE + Swaptions RMSE
+_hw2f_joint_loss :: proc(
+	params: HW2_Params,
+	// Caplet data
+	cap_T_start_t: ^t.Tensor,
+	cap_T_end_t: ^t.Tensor,
+	cap_F_t: ^t.Tensor,
+	cap_K_t: ^t.Tensor,
+	cap_P_t: ^t.Tensor,
+	cap_market_t: ^t.Tensor,
+	// Swaption data
+	swaption_specs: []SwaptionSpec,
+	swaption_market: []f64,
+	n_swaptions: int,
+	allocator: mem.Allocator,
+) -> f64 {
+	// 1. Caplet loss (SIMD tensor)
+	cap_model_t := hull_white_2f_caplet_price_tensor(
+		params,
+		cap_T_start_t,
+		cap_T_end_t,
+		cap_F_t,
+		cap_K_t,
+		cap_P_t,
+		allocator,
+	)
+	cap_diff := t.tensor_sub(cap_model_t, cap_market_t)
+	cap_diff_sq := t.tensor_mul(cap_diff, cap_diff)
+	cap_mse := t.tensor_mean(cap_diff_sq)
+	cap_rmse := t.tensor_sqrt(cap_mse)
+	cap_loss := cap_rmse.data.data[0]
+	t.tensor_free_graph(cap_rmse)
+
+	// 2. Swaption loss (analytical)
+	swaption_model := hw2f_swaption_price_strip(params, swaption_specs, n_swaptions, allocator)
+	defer delete(swaption_model, allocator)
+
+	swaption_sse := 0.0
+	for i in 0 ..< n_swaptions {
+		err := swaption_model[i] - swaption_market[i]
+		swaption_sse += err * err
+	}
+	swaption_rmse := math.sqrt_f64(swaption_sse / f64(n_swaptions))
+
+	// 3. Joint loss: equal weight
+	return cap_loss + swaption_rmse
+}
+
+// ============================================================================
+// JOINT CALIBRATION: Caps + Swaptions
+// ============================================================================
+
+HW2F_JointResult :: struct {
+	params:     HW2_Params,
+	rmse:       f64,
+	converged:  bool,
+	iterations: int,
+}
+
+calibrate_hull_white_2f_joint :: proc(
+	cap_market: []f64,// Caplet data
+	cap_T_start: []f64,
+	cap_T_end: []f64,
+	cap_F: []f64,
+	cap_K: []f64,
+	cap_P: []f64,
+	n_caplets: int,
+	// Swaption data
+	swaption_specs: []SwaptionSpec,
+	swaption_market: []f64,
+	n_swaptions: int,
+	allocator: mem.Allocator = context.allocator,
+) -> HW2F_JointResult {
+
+	// Load caplet tensors
+	cap_T_start_t := _make_const_tensor(cap_T_start, n_caplets, allocator)
+	cap_T_end_t := _make_const_tensor(cap_T_end, n_caplets, allocator)
+	cap_F_t := _make_const_tensor(cap_F, n_caplets, allocator)
+	cap_K_t := _make_const_tensor(cap_K, n_caplets, allocator)
+	cap_P_t := _make_const_tensor(cap_P, n_caplets, allocator)
+	cap_market_t := _make_const_tensor(cap_market, n_caplets, allocator)
+
+	opt_config := opt.OptimizerConfig {
+		type          = .Adam,
+		learning_rate = 0.01,
+		beta1         = 0.9,
+		beta2         = 0.999,
+		epsilon       = 1e-8,
+	}
+	optimizer := opt.optimizer_init(opt_config, 5, allocator)
+	defer opt.optimizer_free(&optimizer)
+
+	gradient := make([]f64, 5, allocator)
+	defer delete(gradient, allocator)
+
+	eps := 1e-4
+	best_loss: f64 = 1e10
+	best_params := HW2_Params {
+		a     = 0.15,
+		b     = 0.05,
+		sigma = 0.01,
+		eta   = 0.005,
+		rho   = -0.5,
+	}
+	max_iter := 500
+	converged := false
+
+	p := HW2_Params {
+		a     = 0.15,
+		b     = 0.05,
+		sigma = 0.01,
+		eta   = 0.005,
+		rho   = -0.5,
+	}
+
+	for iter in 0 ..< max_iter {
+		current_loss := _hw2f_joint_loss(
+			p,
+			cap_T_start_t,
+			cap_T_end_t,
+			cap_F_t,
+			cap_K_t,
+			cap_P_t,
+			cap_market_t,
+			swaption_specs,
+			swaption_market,
+			n_swaptions,
+			allocator,
+		)
+
+		if current_loss < best_loss {
+			best_loss = current_loss
+			best_params = p
+		}
+
+		if current_loss < 1e-6 {
+			converged = true
+			break
+		}
+
+		// Finite difference gradients
+		p_a_plus := p; p_a_plus.a += eps
+		p_a_minus := p; p_a_minus.a -= eps
+		gradient[0] =
+			(_hw2f_joint_loss(
+					p_a_plus,
+					cap_T_start_t,
+					cap_T_end_t,
+					cap_F_t,
+					cap_K_t,
+					cap_P_t,
+					cap_market_t,
+					swaption_specs,
+					swaption_market,
+					n_swaptions,
+					allocator,
+				) -
+				_hw2f_joint_loss(
+					p_a_minus,
+					cap_T_start_t,
+					cap_T_end_t,
+					cap_F_t,
+					cap_K_t,
+					cap_P_t,
+					cap_market_t,
+					swaption_specs,
+					swaption_market,
+					n_swaptions,
+					allocator,
+				)) /
+			(2.0 * eps)
+
+		p_b_plus := p; p_b_plus.b += eps
+		p_b_minus := p; p_b_minus.b -= eps
+		gradient[1] =
+			(_hw2f_joint_loss(
+					p_b_plus,
+					cap_T_start_t,
+					cap_T_end_t,
+					cap_F_t,
+					cap_K_t,
+					cap_P_t,
+					cap_market_t,
+					swaption_specs,
+					swaption_market,
+					n_swaptions,
+					allocator,
+				) -
+				_hw2f_joint_loss(
+					p_b_minus,
+					cap_T_start_t,
+					cap_T_end_t,
+					cap_F_t,
+					cap_K_t,
+					cap_P_t,
+					cap_market_t,
+					swaption_specs,
+					swaption_market,
+					n_swaptions,
+					allocator,
+				)) /
+			(2.0 * eps)
+
+		p_s_plus := p; p_s_plus.sigma += eps
+		p_s_minus := p; p_s_minus.sigma -= eps
+		gradient[2] =
+			(_hw2f_joint_loss(
+					p_s_plus,
+					cap_T_start_t,
+					cap_T_end_t,
+					cap_F_t,
+					cap_K_t,
+					cap_P_t,
+					cap_market_t,
+					swaption_specs,
+					swaption_market,
+					n_swaptions,
+					allocator,
+				) -
+				_hw2f_joint_loss(
+					p_s_minus,
+					cap_T_start_t,
+					cap_T_end_t,
+					cap_F_t,
+					cap_K_t,
+					cap_P_t,
+					cap_market_t,
+					swaption_specs,
+					swaption_market,
+					n_swaptions,
+					allocator,
+				)) /
+			(2.0 * eps)
+
+		p_e_plus := p; p_e_plus.eta += eps
+		p_e_minus := p; p_e_minus.eta -= eps
+		gradient[3] =
+			(_hw2f_joint_loss(
+					p_e_plus,
+					cap_T_start_t,
+					cap_T_end_t,
+					cap_F_t,
+					cap_K_t,
+					cap_P_t,
+					cap_market_t,
+					swaption_specs,
+					swaption_market,
+					n_swaptions,
+					allocator,
+				) -
+				_hw2f_joint_loss(
+					p_e_minus,
+					cap_T_start_t,
+					cap_T_end_t,
+					cap_F_t,
+					cap_K_t,
+					cap_P_t,
+					cap_market_t,
+					swaption_specs,
+					swaption_market,
+					n_swaptions,
+					allocator,
+				)) /
+			(2.0 * eps)
+
+		p_r_plus := p; p_r_plus.rho += eps
+		p_r_minus := p; p_r_minus.rho -= eps
+		gradient[4] =
+			(_hw2f_joint_loss(
+					p_r_plus,
+					cap_T_start_t,
+					cap_T_end_t,
+					cap_F_t,
+					cap_K_t,
+					cap_P_t,
+					cap_market_t,
+					swaption_specs,
+					swaption_market,
+					n_swaptions,
+					allocator,
+				) -
+				_hw2f_joint_loss(
+					p_r_minus,
+					cap_T_start_t,
+					cap_T_end_t,
+					cap_F_t,
+					cap_K_t,
+					cap_P_t,
+					cap_market_t,
+					swaption_specs,
+					swaption_market,
+					n_swaptions,
+					allocator,
+				)) /
+			(2.0 * eps)
+
+		params := make([]f64, 5, allocator)
+		params[0] = p.a
+		params[1] = p.b
+		params[2] = p.sigma
+		params[3] = p.eta
+		params[4] = p.rho
+		opt.optimizer_step(&optimizer, params, gradient)
+
+		p.a = math.max(0.01, math.min(1.0, params[0]))
+		p.b = math.max(0.005, math.min(0.5, params[1]))
+		p.sigma = math.max(0.001, math.min(0.05, params[2]))
+		p.eta = math.max(0.001, math.min(0.05, params[3]))
+		p.rho = math.max(-0.99, math.min(0.99, params[4]))
+
+		delete(params, allocator)
+	}
+
+	t.tensor_free(cap_T_start_t)
+	t.tensor_free(cap_T_end_t)
+	t.tensor_free(cap_F_t)
+	t.tensor_free(cap_K_t)
+	t.tensor_free(cap_P_t)
+	t.tensor_free(cap_market_t)
+
+	return HW2F_JointResult {
+		params = best_params,
+		rmse = best_loss,
+		converged = converged,
+		iterations = max_iter,
+	}
+}
