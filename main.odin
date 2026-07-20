@@ -501,6 +501,7 @@ main :: proc() {
 	test.live_options_calibration_test(context.temp_allocator)
 	test.exotic_pricing_test(context.temp_allocator)
 	test.ir_derivatives_test(context.temp_allocator)
+	test.ir_derivatives_2f_test(context.temp_allocator)
 	fmt.println("Demo End")
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
