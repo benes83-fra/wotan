@@ -302,3 +302,160 @@ price_cdo_tranche_t_copula_mc :: proc(
 
 	return (total_tranche_pv / f64(n_paths)), (total_expected_loss / f64(n_paths))
 }
+// ============================================================================
+// PROFESSIONAL CDS CURVE BOOTSTRAPPING & PRICING
+// ============================================================================
+
+CDS_Curve :: struct {
+	tenors:   []f64, // e.g., [1.0, 3.0, 5.0, 7.0, 10.0]
+	hazards:  []f64, // piecewise constant hazard rates for each tenor bucket
+	recovery: f64,
+	r:        f64,
+}
+
+CDS_Price_Result :: struct {
+	upfront_pct:    f64, // Upfront payment as a percentage of notional
+	rpv01:          f64, // Risky PV01 (present value of 1 basis point)
+	premium_leg_pv: f64,
+	protection_pv:  f64,
+}
+
+// Helper: Calculate survival probability at time t given the piecewise curve
+get_survival_prob :: proc(t: f64, curve: CDS_Curve) -> f64 {
+	if t <= 0.0 {return 1.0}
+
+	// Find which tenor bucket 't' falls into
+	bucket := 0
+	for i in 0 ..< len(curve.tenors) {
+		if t <= curve.tenors[i] {
+			bucket = i
+			break
+		}
+		bucket = i
+	}
+
+	// Calculate cumulative hazard up to time t
+	cum_hazard := 0.0
+	prev_T := 0.0
+	for i in 0 ..= bucket {
+		end_T := curve.tenors[i]
+		if t < end_T {end_T = t}
+
+		cum_hazard += curve.hazards[i] * (end_T - prev_T)
+		prev_T = curve.tenors[i]
+	}
+
+	return math.exp_f64(-cum_hazard)
+}
+
+// Bootstrap piecewise constant hazard rates from market CDS spreads
+bootstrap_cds_curve :: proc(
+	tenors: []f64,
+	market_spreads: []f64, // in decimal (e.g., 0.0100 for 100bps)
+	recovery: f64,
+	r: f64,
+	payment_freq: f64, // e.g., 0.25 for quarterly
+	allocator: mem.Allocator = context.allocator,
+) -> CDS_Curve {
+	n := min(len(tenors), len(market_spreads))
+
+	curve := CDS_Curve {
+		tenors   = make([]f64, n, allocator),
+		hazards  = make([]f64, n, allocator),
+		recovery = recovery,
+		r        = r,
+	}
+
+	for i in 0 ..< n {
+		curve.tenors[i] = tenors[i]
+		target_spread := market_spreads[i]
+
+		// Bisection search for the hazard rate in this bucket
+		low := 0.0001
+		high := 0.5000
+		best_lambda := 0.01
+
+		for iter in 0 ..< 50 { 	// 50 iterations is more than enough for 1e-15 precision
+			mid := (low + high) / 2.0
+			curve.hazards[i] = mid
+
+			// Calculate PV of Premium and Protection legs up to tenors[i]
+			prem_pv := 0.0
+			prot_pv := 0.0
+
+			t := payment_freq
+			for t <= tenors[i] {
+				// Survival prob at payment date
+				S_t := get_survival_prob(t, curve)
+				disc := math.exp_f64(-r * t)
+
+				// Premium leg: spread * dt * S(t) * D(t)
+				prem_pv += target_spread * payment_freq * S_t * disc
+
+				// Protection leg: (1-R) * (S(t-dt) - S(t)) * D(t)
+				// (assuming default occurs at the end of the period for simplicity)
+				S_prev := get_survival_prob(t - payment_freq, curve)
+				prot_pv += (1.0 - recovery) * (S_prev - S_t) * disc
+
+				t += payment_freq
+			}
+
+			// If prem_pv > prot_pv, our hazard rate is too low (not enough default risk priced in)
+			if prem_pv > prot_pv {
+				low = mid
+			} else {
+				high = mid
+			}
+			best_lambda = mid
+
+			if math.abs(prem_pv - prot_pv) < 1e-10 {
+				break
+			}
+		}
+		curve.hazards[i] = best_lambda
+	}
+
+	return curve
+}
+
+// Price a CDS using a bootstrapped curve, returning Upfront and RPV01
+price_cds_full :: proc(
+	notional: f64,
+	fixed_coupon: f64, // Standardized coupon (e.g., 0.0100 for 100bps or 0.0500 for 500bps)
+	maturity: f64,
+	curve: CDS_Curve,
+	payment_freq: f64,
+) -> CDS_Price_Result {
+
+	prem_pv := 0.0
+	prot_pv := 0.0
+
+	t := payment_freq
+	for t <= maturity {
+		S_t := get_survival_prob(t, curve)
+		disc := math.exp_f64(-curve.r * t)
+
+		// Premium leg uses the FIXED coupon, not the market spread
+		prem_pv += fixed_coupon * payment_freq * S_t * disc
+
+		// Protection leg
+		S_prev := get_survival_prob(t - payment_freq, curve)
+		prot_pv += (1.0 - curve.recovery) * (S_prev - S_t) * disc
+
+		t += payment_freq
+	}
+
+	// RPV01 is the premium PV if the coupon was 1 basis point (0.0001)
+	rpv01 := prem_pv / (fixed_coupon / 0.0001)
+
+	// Upfront Payment = Protection PV - Premium PV (from protection buyer's perspective)
+	// If Upfront > 0, protection buyer pays upfront (credit is worse than the fixed coupon)
+	upfront := prot_pv - prem_pv
+
+	return CDS_Price_Result {
+		upfront_pct    = upfront / notional,
+		rpv01          = rpv01 / notional, // per unit of notional
+		premium_leg_pv = prem_pv,
+		protection_pv  = prot_pv,
+	}
+}
