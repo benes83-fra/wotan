@@ -408,42 +408,37 @@ _thomas_algorithm :: proc(
 		d[i] = d[i] - c_prime[i] * d[i + 1]
 	}
 }
-
-// ============================================================================
-// Crank-Nicolson Solver for European Options
-// ============================================================================
 crank_nicolson_european :: proc(
-	S: f64, // Spot price
-	K: f64, // Strike price
-	T: f64, // Time to expiry (years)
-	r: f64, // Risk-free rate
-	sigma: f64, // Volatility
+	S: f64,
+	K: f64,
+	T: f64,
+	r: f64,
+	sigma: f64,
 	opt: OptionType,
-	n_space: int = 200, // Number of spatial grid points
-	n_time: int = 200, // Number of time steps
+	n_space: int = 200,
+	n_time: int = 200,
 	allocator: mem.Allocator = context.allocator,
 ) -> FiniteDifferenceResult {
 
 	// Grid parameters
-	x_min := math.ln(S) - 5.0 * sigma * math.sqrt_f64(T) // 5 std devs below
-	x_max := math.ln(S) + 5.0 * sigma * math.sqrt_f64(T) // 5 std devs above
+	x_min := math.ln(S) - 5.0 * sigma * math.sqrt_f64(T)
+	x_max := math.ln(S) + 5.0 * sigma * math.sqrt_f64(T)
 
 	dx := (x_max - x_min) / f64(n_space - 1)
 	dt := T / f64(n_time)
 
-	// Coefficients for the PDE: ∂V/∂τ = α∂²V/∂x² + β∂V/∂x + γV
+	// PDE coefficients: ∂V/∂τ = α∂²V/∂x² + β∂V/∂x + γV
 	alpha := 0.5 * sigma * sigma
-	beta := r - 0.5 * sigma * sigma
+	beta_coef := r - 0.5 * sigma * sigma
 	gamma_coef := -r
 
-	// Crank-Nicolson parameter (θ = 0.5 for CN)
+	// Crank-Nicolson parameter (θ = 0.5)
 	theta := 0.5
 
 	// Discretization coefficients
-	rx := alpha * dt / (dx * dx)
-	rx_half := 0.5 * rx
-	r_beta := beta * dt / (2.0 * dx)
-	r_gamma := gamma_coef * dt
+	rx := alpha * dt / (dx * dx) // α*dt/dx²
+	r_beta := beta_coef * dt / (2.0 * dx) // β*dt/(2*dx)
+	r_gamma := gamma_coef * dt // γ*dt (this is negative)
 
 	// Allocate grid
 	V := make([]f64, n_space, allocator)
@@ -461,11 +456,13 @@ crank_nicolson_european :: proc(
 		}
 	}
 
+	n_unknowns := n_space - 2
+
 	// Tridiagonal system arrays
-	a := make([]f64, n_space - 1, context.temp_allocator)
-	b := make([]f64, n_space, context.temp_allocator)
-	c := make([]f64, n_space - 1, context.temp_allocator)
-	d := make([]f64, n_space, context.temp_allocator)
+	a := make([]f64, n_unknowns - 1, context.temp_allocator)
+	b := make([]f64, n_unknowns, context.temp_allocator)
+	c := make([]f64, n_unknowns - 1, context.temp_allocator)
+	d := make([]f64, n_unknowns, context.temp_allocator)
 	defer {
 		delete(a, context.temp_allocator)
 		delete(b, context.temp_allocator)
@@ -475,45 +472,48 @@ crank_nicolson_european :: proc(
 
 	// Time-stepping (backward from τ = T to τ = 0)
 	for n in 0 ..< n_time {
-		// Build tridiagonal system
-		for i in 1 ..< n_space - 1 {
-			// Lower diagonal
-			a[i - 1] = -theta * (rx_half - r_beta)
-
-			// Main diagonal
-			b[i] = 1.0 + theta * (rx + r_gamma)
-
-			// Upper diagonal
-			c[i - 1] = -theta * (rx_half + r_beta)
-
-			// Right-hand side (explicit part)
-			d[i] =
-				(1.0 - theta) * (rx_half - r_beta) * V[i - 1] +
-				(1.0 - (1.0 - theta) * (rx + r_gamma)) * V[i] +
-				(1.0 - theta) * (rx_half + r_beta) * V[i + 1]
-		}
-
-		// Boundary conditions
-		tau := f64(n + 1) * dt // Current time to maturity
+		tau := f64(n + 1) * dt
 
 		if opt == .Call {
-			// Lower boundary: V → 0 as S → 0
 			V[0] = 0.0
-			// Upper boundary: V → S - K*e^{-rτ} as S → ∞
 			V[n_space - 1] = math.exp_f64(x_max) - K * math.exp_f64(-r * tau)
 		} else {
-			// Lower boundary: V → K*e^{-rτ} - S as S → 0
 			V[0] = K * math.exp_f64(-r * tau) - math.exp_f64(x_min)
-			// Upper boundary: V → 0 as S → ∞
 			V[n_space - 1] = 0.0
 		}
 
+		// Build tridiagonal system with correct coefficients
+		for i in 1 ..< n_space - 1 {
+			idx := i - 1
+
+			// Lower diagonal (coefficient for V[i-1])
+			if idx > 0 {
+				a[idx - 1] = -theta * (rx - r_beta)
+			}
+
+			// ✅ FIXED: Main diagonal (coefficient for V[i])
+			// Must be (2.0 * rx - r_gamma), NOT + r_gamma
+			b[idx] = 1.0 + theta * (2.0 * rx - r_gamma)
+
+			// Upper diagonal (coefficient for V[i+1])
+			if idx < n_unknowns - 1 {
+				c[idx] = -theta * (rx + r_beta)
+			}
+
+			// ✅ FIXED: Right-hand side (explicit part)
+			// Must be (2.0 * rx - r_gamma), NOT + r_gamma
+			d[idx] =
+				(1.0 - theta) * (rx - r_beta) * V[i - 1] +
+				(1.0 - (1.0 - theta) * (2.0 * rx - r_gamma)) * V[i] +
+				(1.0 - theta) * (rx + r_beta) * V[i + 1]
+		}
+
 		// Adjust RHS for boundary conditions
-		d[1] -= a[0] * V[0]
-		d[n_space - 2] -= c[n_space - 2] * V[n_space - 1]
+		d[0] -= (-theta * (rx - r_beta)) * V[0]
+		d[n_unknowns - 1] -= (-theta * (rx + r_beta)) * V[n_space - 1]
 
 		// Solve tridiagonal system
-		_thomas_algorithm(a, b, c, d, n_space - 2)
+		_thomas_algorithm(a, b, c, d, n_unknowns)
 
 		// Update interior points
 		for i in 1 ..< n_space - 1 {
@@ -521,21 +521,21 @@ crank_nicolson_european :: proc(
 		}
 	}
 
-	// Extract option price at S (interpolate if needed)
+	// Extract option price at S
 	x_target := math.ln(S)
 	i_target := int((x_target - x_min) / dx)
 
 	price: f64
 	if i_target >= 0 && i_target < n_space - 1 {
-		// Linear interpolation
 		w := (x_target - (x_min + f64(i_target) * dx)) / dx
 		price = V[i_target] * (1.0 - w) + V[i_target + 1] * w
-	} else {
+	} else if i_target == n_space - 1 {
 		price = V[i_target]
+	} else {
+		price = 0.0
 	}
 
-	// Calculate Greeks using finite differences on the grid
-	// Delta: ∂V/∂S ≈ (V[i+1] - V[i-1]) / (2*S*dx)
+	// Calculate Greeks
 	delta: f64
 	if i_target > 0 && i_target < n_space - 1 {
 		S_plus := math.exp_f64(x_min + f64(i_target + 1) * dx)
@@ -543,15 +543,16 @@ crank_nicolson_european :: proc(
 		delta = (V[i_target + 1] - V[i_target - 1]) / (S_plus - S_minus)
 	}
 
-	// Gamma: ∂²V/∂S² ≈ (V[i+1] - 2*V[i] + V[i-1]) / (S*dx)²
 	gamma: f64
 	if i_target > 0 && i_target < n_space - 1 {
+		S_plus := math.exp_f64(x_min + f64(i_target + 1) * dx)
 		S_i := math.exp_f64(x_min + f64(i_target) * dx)
-		gamma = (V[i_target + 1] - 2.0 * V[i_target] + V[i_target - 1]) / (S_i * dx * S_i * dx)
+		S_minus := math.exp_f64(x_min + f64(i_target - 1) * dx)
+		gamma =
+			(V[i_target + 1] - 2.0 * V[i_target] + V[i_target - 1]) /
+			((S_plus - S_i) * (S_i - S_minus))
 	}
 
-	// Theta: ∂V/∂t (approximate by running one more time step backward)
-	// For simplicity, we'll use the PDE relationship
 	theta_val := -0.5 * sigma * sigma * S * S * gamma - r * S * delta + r * price
 
 	return FiniteDifferenceResult{price = price, delta = delta, gamma = gamma, theta = theta_val}
@@ -584,4 +585,202 @@ crank_nicolson_put :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> FiniteDifferenceResult {
 	return crank_nicolson_european(S, K, T, r, sigma, .Put, n_space, n_time, allocator)
+}
+
+// ============================================================================
+// AMERICAN OPTIONS: Fully Implicit Finite Difference (Brennan-Schwartz)
+// ============================================================================
+//
+// Why Fully Implicit (θ = 1.0) instead of Crank-Nicolson (θ = 0.5)?
+// Crank-Nicolson can produce spurious oscillations near the early exercise
+// boundary because it is not strictly monotonic (not L-stable).
+// Fully Implicit is L-stable and guarantees no oscillations, making it the
+// industry standard for American free-boundary problems.
+
+finite_difference_american :: proc(
+	S: f64,
+	K: f64,
+	T: f64,
+	r: f64,
+	sigma: f64,
+	opt: OptionType,
+	n_space: int = 200,
+	n_time: int = 200,
+	allocator: mem.Allocator = context.allocator,
+) -> FiniteDifferenceResult {
+
+	// Grid parameters
+	x_min := math.ln(S) - 5.0 * sigma * math.sqrt_f64(T)
+	x_max := math.ln(S) + 5.0 * sigma * math.sqrt_f64(T)
+
+	dx := (x_max - x_min) / f64(n_space - 1)
+	dt := T / f64(n_time)
+
+	// PDE coefficients
+	alpha := 0.5 * sigma * sigma
+	beta_coef := r - 0.5 * sigma * sigma
+	gamma_coef := -r
+
+	// Fully Implicit discretization coefficients (θ = 1.0)
+	rx := alpha * dt / (dx * dx)
+	r_beta := beta_coef * dt / (2.0 * dx)
+	r_gamma := gamma_coef * dt
+
+	// Allocate grid
+	V := make([]f64, n_space, allocator)
+	defer delete(V, allocator)
+
+	// Terminal condition (τ = 0, i.e., t = T)
+	for i in 0 ..< n_space {
+		x_i := x_min + f64(i) * dx
+		S_i := math.exp_f64(x_i)
+
+		if opt == .Call {
+			V[i] = math.max(S_i - K, 0.0)
+		} else {
+			V[i] = math.max(K - S_i, 0.0)
+		}
+	}
+
+	n_unknowns := n_space - 2
+
+	// Tridiagonal system arrays
+	a := make([]f64, n_unknowns - 1, context.temp_allocator)
+	b := make([]f64, n_unknowns, context.temp_allocator)
+	c := make([]f64, n_unknowns - 1, context.temp_allocator)
+	d := make([]f64, n_unknowns, context.temp_allocator)
+	defer {
+		delete(a, context.temp_allocator)
+		delete(b, context.temp_allocator)
+		delete(c, context.temp_allocator)
+		delete(d, context.temp_allocator)
+	}
+
+	// Time-stepping (backward from τ = T to τ = 0)
+	for n in 0 ..< n_time {
+		tau := f64(n + 1) * dt
+
+		// 1. Build tridiagonal system for Fully Implicit scheme
+		for i in 1 ..< n_space - 1 {
+			idx := i - 1
+
+			// Lower diagonal
+			if idx > 0 {
+				a[idx - 1] = -0.5 * rx + r_beta
+			}
+
+			// Main diagonal
+			b[idx] = 1.0 + rx - r_gamma // Note: -r_gamma because gamma_coef is -r
+
+			// Upper diagonal
+			if idx < n_unknowns - 1 {
+				c[idx] = -0.5 * rx - r_beta
+			}
+
+			// Right-hand side is simply V^{n+1} (no explicit part in fully implicit)
+			d[idx] = V[i]
+		}
+
+		// 2. Apply Boundary Conditions
+		if opt == .Call {
+			V[0] = 0.0
+			V[n_space - 1] = math.exp_f64(x_max) - K * math.exp_f64(-r * tau)
+		} else {
+			V[0] = K * math.exp_f64(-r * tau) - math.exp_f64(x_min)
+			V[n_space - 1] = 0.0
+		}
+
+		// Adjust RHS for boundary conditions
+		d[0] -= a[0] * V[0]
+		d[n_unknowns - 1] -= c[n_unknowns - 1] * V[n_space - 1]
+
+		// 3. Solve tridiagonal system
+		_thomas_algorithm(a, b, c, d, n_unknowns)
+
+		// 4. Update interior points
+		for i in 1 ..< n_space - 1 {
+			V[i] = d[i - 1]
+		}
+
+		// 5. ✅ PROJECTION STEP: Enforce early exercise constraint
+		// V(S, τ) >= Intrinsic Value
+		for i in 0 ..< n_space {
+			x_i := x_min + f64(i) * dx
+			S_i := math.exp_f64(x_i)
+			intrinsic := 0.0
+
+			if opt == .Call {
+				intrinsic = math.max(S_i - K, 0.0)
+			} else {
+				intrinsic = math.max(K - S_i, 0.0)
+			}
+
+			if V[i] < intrinsic {
+				V[i] = intrinsic
+			}
+		}
+	}
+
+	// Extract option price at S
+	x_target := math.ln(S)
+	i_target := int((x_target - x_min) / dx)
+
+	price: f64
+	if i_target >= 0 && i_target < n_space - 1 {
+		w := (x_target - (x_min + f64(i_target) * dx)) / dx
+		price = V[i_target] * (1.0 - w) + V[i_target + 1] * w
+	} else if i_target == n_space - 1 {
+		price = V[i_target]
+	} else {
+		price = 0.0
+	}
+
+	// Calculate Greeks using finite differences on the final grid
+	delta: f64
+	if i_target > 0 && i_target < n_space - 1 {
+		S_plus := math.exp_f64(x_min + f64(i_target + 1) * dx)
+		S_minus := math.exp_f64(x_min + f64(i_target - 1) * dx)
+		delta = (V[i_target + 1] - V[i_target - 1]) / (S_plus - S_minus)
+	}
+
+	gamma: f64
+	if i_target > 0 && i_target < n_space - 1 {
+		S_plus := math.exp_f64(x_min + f64(i_target + 1) * dx)
+		S_i := math.exp_f64(x_min + f64(i_target) * dx)
+		S_minus := math.exp_f64(x_min + f64(i_target - 1) * dx)
+		gamma =
+			(V[i_target + 1] - 2.0 * V[i_target] + V[i_target - 1]) /
+			((S_plus - S_i) * (S_i - S_minus))
+	}
+
+	theta_val := -0.5 * sigma * sigma * S * S * gamma - r * S * delta + r * price
+
+	return FiniteDifferenceResult{price = price, delta = delta, gamma = gamma, theta = theta_val}
+}
+
+// Convenience Wrappers
+fd_american_call :: proc(
+	S: f64,
+	K: f64,
+	T: f64,
+	r: f64,
+	sigma: f64,
+	n_space: int = 200,
+	n_time: int = 200,
+	allocator: mem.Allocator = context.allocator,
+) -> FiniteDifferenceResult {
+	return finite_difference_american(S, K, T, r, sigma, .Call, n_space, n_time, allocator)
+}
+
+fd_american_put :: proc(
+	S: f64,
+	K: f64,
+	T: f64,
+	r: f64,
+	sigma: f64,
+	n_space: int = 200,
+	n_time: int = 200,
+	allocator: mem.Allocator = context.allocator,
+) -> FiniteDifferenceResult {
+	return finite_difference_american(S, K, T, r, sigma, .Put, n_space, n_time, allocator)
 }
