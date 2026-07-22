@@ -368,3 +368,220 @@ american_put_trinomial :: proc(
 ) -> AmericanOptionResult {
 	return american_option_trinomial(S, K, T, r, sigma, q, .Put, n_steps, allocator)
 }
+
+FiniteDifferenceResult :: struct {
+	price: f64,
+	delta: f64,
+	gamma: f64,
+	theta: f64,
+}
+
+// ============================================================================
+// Thomas Algorithm for Tridiagonal Systems
+// ============================================================================
+// Solves: a[i]*x[i-1] + b[i]*x[i] + c[i]*x[i+1] = d[i]
+// Returns solution in d (overwrites input)
+_thomas_algorithm :: proc(
+	a: []f64, // Lower diagonal (length n-1)
+	b: []f64, // Main diagonal (length n)
+	c: []f64, // Upper diagonal (length n-1)
+	d: []f64, // Right-hand side (length n, solution overwrites this)
+	n: int,
+) {
+	// Forward elimination
+	c_prime := make([]f64, n - 1, context.temp_allocator)
+	defer delete(c_prime, context.temp_allocator)
+
+	c_prime[0] = c[0] / b[0]
+	d[0] = d[0] / b[0]
+
+	for i in 1 ..< n {
+		m := b[i] - a[i - 1] * c_prime[i - 1]
+		if i < n - 1 {
+			c_prime[i] = c[i] / m
+		}
+		d[i] = (d[i] - a[i - 1] * d[i - 1]) / m
+	}
+
+	// Back substitution
+	for i := n - 2; i >= 0; i -= 1 {
+		d[i] = d[i] - c_prime[i] * d[i + 1]
+	}
+}
+
+// ============================================================================
+// Crank-Nicolson Solver for European Options
+// ============================================================================
+crank_nicolson_european :: proc(
+	S: f64, // Spot price
+	K: f64, // Strike price
+	T: f64, // Time to expiry (years)
+	r: f64, // Risk-free rate
+	sigma: f64, // Volatility
+	opt: OptionType,
+	n_space: int = 200, // Number of spatial grid points
+	n_time: int = 200, // Number of time steps
+	allocator: mem.Allocator = context.allocator,
+) -> FiniteDifferenceResult {
+
+	// Grid parameters
+	x_min := math.ln(S) - 5.0 * sigma * math.sqrt_f64(T) // 5 std devs below
+	x_max := math.ln(S) + 5.0 * sigma * math.sqrt_f64(T) // 5 std devs above
+
+	dx := (x_max - x_min) / f64(n_space - 1)
+	dt := T / f64(n_time)
+
+	// Coefficients for the PDE: ∂V/∂τ = α∂²V/∂x² + β∂V/∂x + γV
+	alpha := 0.5 * sigma * sigma
+	beta := r - 0.5 * sigma * sigma
+	gamma_coef := -r
+
+	// Crank-Nicolson parameter (θ = 0.5 for CN)
+	theta := 0.5
+
+	// Discretization coefficients
+	rx := alpha * dt / (dx * dx)
+	rx_half := 0.5 * rx
+	r_beta := beta * dt / (2.0 * dx)
+	r_gamma := gamma_coef * dt
+
+	// Allocate grid
+	V := make([]f64, n_space, allocator)
+	defer delete(V, allocator)
+
+	// Terminal condition (τ = 0, i.e., t = T)
+	for i in 0 ..< n_space {
+		x_i := x_min + f64(i) * dx
+		S_i := math.exp_f64(x_i)
+
+		if opt == .Call {
+			V[i] = math.max(S_i - K, 0.0)
+		} else {
+			V[i] = math.max(K - S_i, 0.0)
+		}
+	}
+
+	// Tridiagonal system arrays
+	a := make([]f64, n_space - 1, context.temp_allocator)
+	b := make([]f64, n_space, context.temp_allocator)
+	c := make([]f64, n_space - 1, context.temp_allocator)
+	d := make([]f64, n_space, context.temp_allocator)
+	defer {
+		delete(a, context.temp_allocator)
+		delete(b, context.temp_allocator)
+		delete(c, context.temp_allocator)
+		delete(d, context.temp_allocator)
+	}
+
+	// Time-stepping (backward from τ = T to τ = 0)
+	for n in 0 ..< n_time {
+		// Build tridiagonal system
+		for i in 1 ..< n_space - 1 {
+			// Lower diagonal
+			a[i - 1] = -theta * (rx_half - r_beta)
+
+			// Main diagonal
+			b[i] = 1.0 + theta * (rx + r_gamma)
+
+			// Upper diagonal
+			c[i - 1] = -theta * (rx_half + r_beta)
+
+			// Right-hand side (explicit part)
+			d[i] =
+				(1.0 - theta) * (rx_half - r_beta) * V[i - 1] +
+				(1.0 - (1.0 - theta) * (rx + r_gamma)) * V[i] +
+				(1.0 - theta) * (rx_half + r_beta) * V[i + 1]
+		}
+
+		// Boundary conditions
+		tau := f64(n + 1) * dt // Current time to maturity
+
+		if opt == .Call {
+			// Lower boundary: V → 0 as S → 0
+			V[0] = 0.0
+			// Upper boundary: V → S - K*e^{-rτ} as S → ∞
+			V[n_space - 1] = math.exp_f64(x_max) - K * math.exp_f64(-r * tau)
+		} else {
+			// Lower boundary: V → K*e^{-rτ} - S as S → 0
+			V[0] = K * math.exp_f64(-r * tau) - math.exp_f64(x_min)
+			// Upper boundary: V → 0 as S → ∞
+			V[n_space - 1] = 0.0
+		}
+
+		// Adjust RHS for boundary conditions
+		d[1] -= a[0] * V[0]
+		d[n_space - 2] -= c[n_space - 2] * V[n_space - 1]
+
+		// Solve tridiagonal system
+		_thomas_algorithm(a, b, c, d, n_space - 2)
+
+		// Update interior points
+		for i in 1 ..< n_space - 1 {
+			V[i] = d[i - 1]
+		}
+	}
+
+	// Extract option price at S (interpolate if needed)
+	x_target := math.ln(S)
+	i_target := int((x_target - x_min) / dx)
+
+	price: f64
+	if i_target >= 0 && i_target < n_space - 1 {
+		// Linear interpolation
+		w := (x_target - (x_min + f64(i_target) * dx)) / dx
+		price = V[i_target] * (1.0 - w) + V[i_target + 1] * w
+	} else {
+		price = V[i_target]
+	}
+
+	// Calculate Greeks using finite differences on the grid
+	// Delta: ∂V/∂S ≈ (V[i+1] - V[i-1]) / (2*S*dx)
+	delta: f64
+	if i_target > 0 && i_target < n_space - 1 {
+		S_plus := math.exp_f64(x_min + f64(i_target + 1) * dx)
+		S_minus := math.exp_f64(x_min + f64(i_target - 1) * dx)
+		delta = (V[i_target + 1] - V[i_target - 1]) / (S_plus - S_minus)
+	}
+
+	// Gamma: ∂²V/∂S² ≈ (V[i+1] - 2*V[i] + V[i-1]) / (S*dx)²
+	gamma: f64
+	if i_target > 0 && i_target < n_space - 1 {
+		S_i := math.exp_f64(x_min + f64(i_target) * dx)
+		gamma = (V[i_target + 1] - 2.0 * V[i_target] + V[i_target - 1]) / (S_i * dx * S_i * dx)
+	}
+
+	// Theta: ∂V/∂t (approximate by running one more time step backward)
+	// For simplicity, we'll use the PDE relationship
+	theta_val := -0.5 * sigma * sigma * S * S * gamma - r * S * delta + r * price
+
+	return FiniteDifferenceResult{price = price, delta = delta, gamma = gamma, theta = theta_val}
+}
+
+// ============================================================================
+// Convenience Wrappers
+// ============================================================================
+crank_nicolson_call :: proc(
+	S: f64,
+	K: f64,
+	T: f64,
+	r: f64,
+	sigma: f64,
+	n_space: int = 200,
+	n_time: int = 200,
+	allocator: mem.Allocator = context.allocator,
+) -> FiniteDifferenceResult {
+	return crank_nicolson_european(S, K, T, r, sigma, .Call, n_space, n_time, allocator)
+}
+
+crank_nicolson_put :: proc(
+	S: f64,
+	K: f64,
+	T: f64,
+	r: f64,
+	sigma: f64,
+	n_space: int = 200,
+	n_time: int = 200,
+	allocator: mem.Allocator = context.allocator,
+) -> FiniteDifferenceResult {
+	return crank_nicolson_european(S, K, T, r, sigma, .Put, n_space, n_time, allocator)
+}

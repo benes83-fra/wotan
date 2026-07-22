@@ -168,3 +168,136 @@ trinomial_tree_test :: proc(allocator: mem.Allocator) {
 	fmt.println("     (p_u, p_m, p_d > 0) for reasonable parameter ranges")
 	fmt.println("======================================================================\n")
 }
+
+finite_differences_test :: proc(allocator: mem.Allocator) {
+	fmt.println("\n======================================================================")
+	fmt.println("         FINITE DIFFERENCE METHODS: CRANK-NICOLSON")
+	fmt.println("======================================================================\n")
+
+	// Test parameters
+	S := 100.0
+	K := 100.0
+	T := 1.0
+	r := 0.05
+	sigma := 0.20
+
+	fmt.println("Parameters: S=100, K=100, T=1Y, r=5%, σ=20%")
+	fmt.println("Instrument: European Call Option\n")
+
+	// 1. Validation against Black-Scholes
+	fmt.println("1. Validation: Crank-Nicolson vs Black-Scholes")
+	fmt.println("   ----------------------------------------------------------------------")
+
+	// Black-Scholes analytical price
+	d1 := (math.ln(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt_f64(T))
+	d2 := d1 - sigma * math.sqrt_f64(T)
+	N_d1 := 0.5 * (1.0 + math.erf(d1 / math.sqrt_f64(2.0)))
+	N_d2 := 0.5 * (1.0 + math.erf(d2 / math.sqrt_f64(2.0)))
+	bs_price := S * N_d1 - K * math.exp_f64(-r * T) * N_d2
+
+	bs_delta := N_d1
+	bs_gamma :=
+		(1.0 / (sigma * math.sqrt_f64(T) * math.sqrt_f64(2.0 * math.PI))) *
+		math.exp_f64(-0.5 * d1 * d1) /
+		S
+	bs_theta :=
+		-(S * sigma * math.exp_f64(-0.5 * d1 * d1)) / (2.0 * math.sqrt_f64(2.0 * math.PI * T)) -
+		r * K * math.exp_f64(-r * T) * N_d2
+
+	// Crank-Nicolson price
+	cn_result := fin.crank_nicolson_call(S, K, T, r, sigma, 200, 200, allocator)
+
+	fmt.printf("   %-20s | %-15s | %-15s | %-10s\n", "Method", "Price", "Delta", "Gamma")
+	fmt.println("   ----------------------------------------------------------------------")
+	fmt.printf(
+		"   %-20s | $%12.4f | %13.4f | %13.4f\n",
+		"Black-Scholes",
+		bs_price,
+		bs_delta,
+		bs_gamma,
+	)
+	fmt.printf(
+		"   %-20s | $%12.4f | %13.4f | %13.4f\n",
+		"Crank-Nicolson",
+		cn_result.price,
+		cn_result.delta,
+		cn_result.gamma,
+	)
+
+	price_error := math.abs(cn_result.price - bs_price) / bs_price * 100.0
+	delta_error := math.abs(cn_result.delta - bs_delta) / bs_delta * 100.0
+	gamma_error := math.abs(cn_result.gamma - bs_gamma) / bs_gamma * 100.0
+
+	fmt.printf(
+		"\n   Relative Errors: Price=%.4f%%, Delta=%.4f%%, Gamma=%.4f%%\n",
+		price_error,
+		delta_error,
+		gamma_error,
+	)
+
+	// 2. Convergence Analysis
+	fmt.println("\n2. Convergence Analysis (Grid Refinement)")
+	fmt.println("   ----------------------------------------------------------------------")
+	fmt.printf("   %-15s | %-15s | %-15s\n", "Grid Size", "Price", "Error (%)")
+	fmt.println("   ----------------------------------------------------------------------")
+
+	grid_sizes := []int{50, 100, 200, 400, 800}
+	for n in grid_sizes {
+		result := fin.crank_nicolson_call(S, K, T, r, sigma, n, n, allocator)
+		err := math.abs(result.price - bs_price) / bs_price * 100.0
+		fmt.printf("   %-15d | $%12.4f | %13.6f%%\n", n, result.price, err)
+	}
+
+	// 3. Put Option Test
+	fmt.println("\n3. European Put Option")
+	fmt.println("   ----------------------------------------------------------------------")
+
+	// Black-Scholes put price (put-call parity)
+	bs_put := bs_price - S + K * math.exp_f64(-r * T)
+
+	cn_put := fin.crank_nicolson_put(S, K, T, r, sigma, 200, 200, allocator)
+
+	fmt.printf("   %-20s | $%12.4f\n", "Black-Scholes Put", bs_put)
+	fmt.printf("   %-20s | $%12.4f\n", "Crank-Nicolson Put", cn_put.price)
+
+	put_error := math.abs(cn_put.price - bs_put) / bs_put * 100.0
+	fmt.printf("   Relative Error: %.4f%%\n", put_error)
+
+	// 4. Deep ITM and OTM Tests
+	fmt.println("\n4. Boundary Behavior (Deep ITM/OTM)")
+	fmt.println("   ----------------------------------------------------------------------")
+
+	test_cases := []struct {
+		name: string,
+		K:    f64,
+	} {
+		{"Deep ITM Call (K=80)", 80.0},
+		{"ATM Call (K=100)", 100.0},
+		{"Deep OTM Call (K=120)", 120.0},
+	}
+
+	fmt.printf("   %-25s | %-15s | %-15s | %-10s\n", "Option", "BS Price", "CN Price", "Error (%)")
+	fmt.println("   ----------------------------------------------------------------------")
+
+	for tc in test_cases {
+		// Calculate BS price
+		d1_tc := (math.ln(S / tc.K) + (r + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt_f64(T))
+		d2_tc := d1_tc - sigma * math.sqrt_f64(T)
+		N_d1_tc := 0.5 * (1.0 + math.erf(d1_tc / math.sqrt_f64(2.0)))
+		N_d2_tc := 0.5 * (1.0 + math.erf(d2_tc / math.sqrt_f64(2.0)))
+		bs_tc := S * N_d1_tc - tc.K * math.exp_f64(-r * T) * N_d2_tc
+
+		cn_tc := fin.crank_nicolson_call(S, tc.K, T, r, sigma, 200, 200, allocator)
+		err_tc := math.abs(cn_tc.price - bs_tc) / math.max(bs_tc, 0.01) * 100.0
+
+		fmt.printf("   %-25s | $%12.4f | $%12.4f | %9.4f%%\n", tc.name, bs_tc, cn_tc.price, err_tc)
+	}
+
+	fmt.println("\n💡 Key Insights:")
+	fmt.println("   • Crank-Nicolson is unconditionally stable (no CFL condition)")
+	fmt.println("   • Second-order accurate: error ∝ O(Δx²) + O(Δt²)")
+	fmt.println("   • Natural handling of boundary conditions")
+	fmt.println("   • Efficient tridiagonal solver: O(n) per time step")
+	fmt.println("   • Completes the 'holy trinity': Analytical, MC, and PDE methods")
+	fmt.println("======================================================================\n")
+}
