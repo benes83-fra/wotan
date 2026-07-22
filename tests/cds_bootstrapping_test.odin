@@ -11,18 +11,17 @@ cds_bootstrapping_test :: proc(allocator: mem.Allocator) {
 
 	// 1. Market Data: Typical BBB-rated corporate CDS spreads
 	tenors := []f64{1.0, 3.0, 5.0, 7.0, 10.0}
-	// Spreads in decimal (e.g., 0.0060 = 60 bps)
 	market_spreads := []f64{0.0040, 0.0060, 0.0080, 0.0095, 0.0110}
 
 	recovery := 0.40
 	r := 0.04
-	payment_freq := 0.25 // Quarterly
+	payment_freq := 0.25
 
 	fmt.println("1. Market Input Data:")
-	fmt.println("   Tenor   | Market Spread (bps)")
-	fmt.println("   --------|--------------------")
+	fmt.println("   Tenor  | Market Spread (bps)")
+	fmt.println("   -------|--------------------")
 	for i in 0 ..< len(tenors) {
-		fmt.printf("   %-7.1f | %16.1f\n", tenors[i], market_spreads[i] * 10000.0)
+		fmt.printf("   %5.1f  | %18.1f\n", tenors[i], market_spreads[i] * 10000.0)
 	}
 
 	// 2. Bootstrap the Hazard Rate Curve
@@ -33,12 +32,12 @@ cds_bootstrapping_test :: proc(allocator: mem.Allocator) {
 		delete(curve.hazards, allocator)
 	}
 
-	fmt.println("   Tenor   | Hazard Rate (λ) | Cumulative Default Prob (5Y)")
-	fmt.println("   --------|-----------------|-----------------------------")
+	fmt.println("   Tenor  | Hazard Rate (λ) | Cumulative Default Prob")
+	fmt.println("   -------|-----------------|------------------------")
 	for i in 0 ..< len(curve.tenors) {
 		cum_def := 1.0 - fin.get_survival_prob(curve.tenors[i], curve)
 		fmt.printf(
-			"   %-7.1f | %15.4f | %27.2f%%\n",
+			"   %5.1f  | %15.4f | %21.2f%%\n",
 			curve.tenors[i],
 			curve.hazards[i],
 			cum_def * 100.0,
@@ -46,7 +45,6 @@ cds_bootstrapping_test :: proc(allocator: mem.Allocator) {
 	}
 
 	// 3. Price a 5Y CDS with a Standardized Coupon
-	// Post-2009 "Big Bang" protocol standardized coupons to 100bps or 500bps
 	notional := 10_000_000.0
 	fixed_coupon := 0.0100 // 100 bps standardized coupon
 	maturity := 5.0
@@ -60,20 +58,20 @@ cds_bootstrapping_test :: proc(allocator: mem.Allocator) {
 	result := fin.price_cds_full(notional, fixed_coupon, maturity, curve, payment_freq)
 
 	fmt.println("   ----------------------------------------------------------------------")
-	fmt.printf("   %-30s | %12s\n", "Metric", "Value")
+	fmt.println("   Metric                         |        Value")
 	fmt.println("   ----------------------------------------------------------------------")
 	fmt.printf("   %-30s | %11.2f bps\n", "Market 5Y Spread", market_spreads[2] * 10000.0)
 	fmt.printf("   %-30s | %11.2f bps\n", "Standard Fixed Coupon", fixed_coupon * 10000.0)
 	fmt.printf("   %-30s | $%10.2f\n", "Upfront Payment", result.upfront_pct * notional)
 	fmt.printf("   %-30s | %11.4f%%\n", "Upfront (as % of Notional)", result.upfront_pct * 100.0)
-	fmt.printf("   %-30s | %11.4f\n", "Risky PV01 (per $1M notional)", result.rpv01 * 1_000_000.0)
+	fmt.printf("   %-30s | $%10.2f\n", "Risky PV01 (per $1M notional)", result.rpv01)
 	fmt.println("   ----------------------------------------------------------------------")
 
-	if result.upfront_pct > 0.0 {
+	if result.upfront_pct < 0.0 {
 		fmt.println("\n💡 Interpretation: The market spread (80 bps) is LOWER than the")
 		fmt.println("   standard coupon (100 bps). The protection buyer is overpaying")
 		fmt.println("   in running coupons, so the protection seller must rebate the")
-		fmt.println("   difference as an UPFRONT payment at inception.")
+		fmt.println("   difference as an UPFRONT payment to the buyer at inception.")
 	} else {
 		fmt.println("\n💡 Interpretation: The market spread is HIGHER than the standard")
 		fmt.println("   coupon. The protection buyer must pay an upfront fee to compensate")

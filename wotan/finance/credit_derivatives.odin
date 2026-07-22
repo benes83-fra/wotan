@@ -427,35 +427,34 @@ price_cds_full :: proc(
 	payment_freq: f64,
 ) -> CDS_Price_Result {
 
-	prem_pv := 0.0
-	prot_pv := 0.0
+	prem_pv_per_unit := 0.0
+	prot_pv_per_unit := 0.0
 
 	t := payment_freq
 	for t <= maturity {
 		S_t := get_survival_prob(t, curve)
 		disc := math.exp_f64(-curve.r * t)
 
-		// Premium leg uses the FIXED coupon, not the market spread
-		prem_pv += fixed_coupon * payment_freq * S_t * disc
+		// Premium leg uses the FIXED coupon
+		prem_pv_per_unit += fixed_coupon * payment_freq * S_t * disc
 
 		// Protection leg
 		S_prev := get_survival_prob(t - payment_freq, curve)
-		prot_pv += (1.0 - curve.recovery) * (S_prev - S_t) * disc
+		prot_pv_per_unit += (1.0 - curve.recovery) * (S_prev - S_t) * disc
 
 		t += payment_freq
 	}
 
-	// RPV01 is the premium PV if the coupon was 1 basis point (0.0001)
-	rpv01 := prem_pv / (fixed_coupon / 0.0001)
+	// RPV01 per unit notional (PV of 1bp annuity)
+	rpv01_per_unit := prem_pv_per_unit / (fixed_coupon / 0.0001)
 
-	// Upfront Payment = Protection PV - Premium PV (from protection buyer's perspective)
-	// If Upfront > 0, protection buyer pays upfront (credit is worse than the fixed coupon)
-	upfront := prot_pv - prem_pv
+	// Upfront per unit notional
+	upfront_per_unit := prot_pv_per_unit - prem_pv_per_unit
 
 	return CDS_Price_Result {
-		upfront_pct    = upfront / notional,
-		rpv01          = rpv01 / notional, // per unit of notional
-		premium_leg_pv = prem_pv,
-		protection_pv  = prot_pv,
+		upfront_pct    = upfront_per_unit, // Already per unit notional (e.g., -0.002 = -0.2%)
+		rpv01          = rpv01_per_unit * 1_000_000.0, // Per $1M notional in dollars
+		premium_leg_pv = prem_pv_per_unit * notional, // Dollar amount
+		protection_pv  = prot_pv_per_unit * notional, // Dollar amount
 	}
 }
