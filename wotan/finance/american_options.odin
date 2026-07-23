@@ -14,7 +14,6 @@ AmericanOptionResult :: struct {
 	theta:                  f64,
 	early_exercise_premium: f64,
 }
-
 // ============================================================================
 // CRR Binomial Tree for American Options
 // ============================================================================
@@ -72,15 +71,14 @@ american_option_binomial :: proc(
 	for i := n_steps - 1; i >= 0; i -= 1 {
 		for j in 0 ..< i + 1 {
 			S_ij := S * math.pow_f64(u, f64(j)) * math.pow_f64(d, f64(i - j))
-
 			node_idx := i * (i + 1) / 2 + j
 
 			// ✅ FIXED: Correct child node indexing
-			// Children of (i, j) are at (i+1, j) and (i+1, j+1)
-			// (i+1, j) = (i+1)*(i+2)/2 + j = i*(i+1)/2 + (i+1) + j = node_idx + i + 1
-			// (i+1, j+1) = node_idx + i + 2
-			up_child := tree[node_idx + i + 1]
-			down_child := tree[node_idx + i + 2]
+			// Children of (i, j) are at (i+1, j) [down] and (i+1, j+1) [up]
+			// idx(i+1, j+1) = (i+1)*(i+2)/2 + j + 1 = i*(i+1)/2 + i + 1 + j + 1 = node_idx + i + 2
+			// idx(i+1, j)   = (i+1)*(i+2)/2 + j     = i*(i+1)/2 + i + 1 + j     = node_idx + i + 1
+			up_child := tree[node_idx + i + 2] // ✅ SWAPPED
+			down_child := tree[node_idx + i + 1] // ✅ SWAPPED
 
 			cont := disc * (p * up_child + (1.0 - p) * down_child)
 
@@ -116,8 +114,8 @@ american_option_binomial :: proc(
 		for j in 0 ..< i + 1 {
 			node_idx := i * (i + 1) / 2 + j
 			// ✅ FIXED: Same correction for European tree
-			up_child := euro_tree[node_idx + i + 1]
-			down_child := euro_tree[node_idx + i + 2]
+			up_child := euro_tree[node_idx + i + 2] // ✅ SWAPPED
+			down_child := euro_tree[node_idx + i + 1] // ✅ SWAPPED
 			euro_tree[node_idx] = disc * (p * up_child + (1.0 - p) * down_child)
 		}
 	}
@@ -608,118 +606,102 @@ finite_difference_american :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> FiniteDifferenceResult {
 
-	// Grid parameters
-	x_min := math.ln(S) - 5.0 * sigma * math.sqrt_f64(T)
+	// ✅ FIX 1: Extend grid further to the left (10σ instead of 5σ)
+	// This makes S_min much smaller, so V[0] = K is more accurate
+	x_min := math.ln(S) - 10.0 * sigma * math.sqrt_f64(T) // Changed from 5.0 to 10.0
 	x_max := math.ln(S) + 5.0 * sigma * math.sqrt_f64(T)
 
 	dx := (x_max - x_min) / f64(n_space - 1)
 	dt := T / f64(n_time)
 
-	// PDE coefficients
 	alpha := 0.5 * sigma * sigma
 	beta_coef := r - 0.5 * sigma * sigma
 	gamma_coef := -r
 
-	// Fully Implicit discretization coefficients (θ = 1.0)
 	rx := alpha * dt / (dx * dx)
 	r_beta := beta_coef * dt / (2.0 * dx)
 	r_gamma := gamma_coef * dt
 
-	// Allocate grid
+	// Pre-compute intrinsic values
+	intrinsic := make([]f64, n_space, allocator)
+	defer delete(intrinsic, allocator)
+	for i in 0 ..< n_space {
+		S_i := math.exp_f64(x_min + f64(i) * dx)
+		if opt == .Call {
+			intrinsic[i] = math.max(S_i - K, 0.0)
+		} else {
+			intrinsic[i] = math.max(K - S_i, 0.0)
+		}
+	}
+
 	V := make([]f64, n_space, allocator)
 	defer delete(V, allocator)
 
-	// Terminal condition (τ = 0, i.e., t = T)
+	// Terminal condition
 	for i in 0 ..< n_space {
-		x_i := x_min + f64(i) * dx
-		S_i := math.exp_f64(x_i)
-
-		if opt == .Call {
-			V[i] = math.max(S_i - K, 0.0)
-		} else {
-			V[i] = math.max(K - S_i, 0.0)
-		}
+		V[i] = intrinsic[i]
 	}
 
 	n_unknowns := n_space - 2
 
-	// Tridiagonal system arrays
-	// ✅ NOTE: a and c have size n_unknowns - 1
-	// ✅ NOTE: b and d have size n_unknowns
 	a := make([]f64, n_unknowns - 1, context.temp_allocator)
 	b := make([]f64, n_unknowns, context.temp_allocator)
 	c := make([]f64, n_unknowns - 1, context.temp_allocator)
 	d := make([]f64, n_unknowns, context.temp_allocator)
+	V_old := make([]f64, n_space, context.temp_allocator)
 	defer {
 		delete(a, context.temp_allocator)
 		delete(b, context.temp_allocator)
 		delete(c, context.temp_allocator)
 		delete(d, context.temp_allocator)
+		delete(V_old, context.temp_allocator)
 	}
 
-	// Time-stepping (backward from τ = T to τ = 0)
+	// Time-stepping
 	for n in 0 ..< n_time {
 		tau := f64(n + 1) * dt
 
-		// 1. Build tridiagonal system for Fully Implicit scheme
-		for i in 1 ..< n_space - 1 {
-			idx := i - 1
-
-			// Lower diagonal
-			if idx > 0 {
-				a[idx - 1] = -0.5 * rx + r_beta
-			}
-
-			// Main diagonal
-			b[idx] = 1.0 + rx - r_gamma
-
-			// Upper diagonal
-			if idx < n_unknowns - 1 {
-				c[idx] = -0.5 * rx - r_beta
-			}
-
-			// Right-hand side is simply V^{n+1}
-			d[idx] = V[i]
-		}
-
-		// 2. Apply Boundary Conditions
+		// ✅ FIX 2: Use correct boundary conditions
 		if opt == .Call {
 			V[0] = 0.0
 			V[n_space - 1] = math.exp_f64(x_max) - K * math.exp_f64(-r * tau)
 		} else {
-			V[0] = K * math.exp_f64(-r * tau) - math.exp_f64(x_min)
+			// ✅ For American put at S ≈ 0, value is exactly K (immediate exercise)
+			V[0] = K // Changed from K - S_min to K
 			V[n_space - 1] = 0.0
 		}
 
-		// 3. ✅ CRITICAL FIX: Adjust RHS for boundary conditions
-		// Do NOT use c[n_unknowns - 1] as it is out of bounds!
-		// c has size n_unknowns - 1, so its max index is n_unknowns - 2.
-		// We must use the explicit coefficient instead.
-		d[0] -= (-0.5 * rx + r_beta) * V[0]
-		d[n_unknowns - 1] -= (-0.5 * rx - r_beta) * V[n_space - 1]
+		// Build tridiagonal system
+		for i in 1 ..< n_space - 1 {
+			idx := i - 1
 
-		// 4. Solve tridiagonal system
+			if idx > 0 {
+				a[idx - 1] = -(rx - r_beta)
+			}
+			b[idx] = 1.0 + 2.0 * rx - r_gamma
+			if idx < n_unknowns - 1 {
+				c[idx] = -(rx + r_beta)
+			}
+
+			d[idx] = V[i]
+		}
+
+		// Adjust RHS for boundary conditions
+		d[0] -= (-(rx - r_beta)) * V[0]
+		d[n_unknowns - 1] -= (-(rx + r_beta)) * V[n_space - 1]
+
+		// Solve
 		_thomas_algorithm(a, b, c, d, n_unknowns)
 
-		// 5. Update interior points
+		// Update interior points
 		for i in 1 ..< n_space - 1 {
 			V[i] = d[i - 1]
 		}
 
-		// 6. PROJECTION STEP: Enforce early exercise constraint
+		// Project: enforce early exercise constraint
 		for i in 0 ..< n_space {
-			x_i := x_min + f64(i) * dx
-			S_i := math.exp_f64(x_i)
-			intrinsic := 0.0
-
-			if opt == .Call {
-				intrinsic = math.max(S_i - K, 0.0)
-			} else {
-				intrinsic = math.max(K - S_i, 0.0)
-			}
-
-			if V[i] < intrinsic {
-				V[i] = intrinsic
+			if V[i] < intrinsic[i] {
+				V[i] = intrinsic[i]
 			}
 		}
 	}
