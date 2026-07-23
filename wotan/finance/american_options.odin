@@ -596,7 +596,6 @@ crank_nicolson_put :: proc(
 // boundary because it is not strictly monotonic (not L-stable).
 // Fully Implicit is L-stable and guarantees no oscillations, making it the
 // industry standard for American free-boundary problems.
-
 finite_difference_american :: proc(
 	S: f64,
 	K: f64,
@@ -645,6 +644,8 @@ finite_difference_american :: proc(
 	n_unknowns := n_space - 2
 
 	// Tridiagonal system arrays
+	// ✅ NOTE: a and c have size n_unknowns - 1
+	// ✅ NOTE: b and d have size n_unknowns
 	a := make([]f64, n_unknowns - 1, context.temp_allocator)
 	b := make([]f64, n_unknowns, context.temp_allocator)
 	c := make([]f64, n_unknowns - 1, context.temp_allocator)
@@ -670,14 +671,14 @@ finite_difference_american :: proc(
 			}
 
 			// Main diagonal
-			b[idx] = 1.0 + rx - r_gamma // Note: -r_gamma because gamma_coef is -r
+			b[idx] = 1.0 + rx - r_gamma
 
 			// Upper diagonal
 			if idx < n_unknowns - 1 {
 				c[idx] = -0.5 * rx - r_beta
 			}
 
-			// Right-hand side is simply V^{n+1} (no explicit part in fully implicit)
+			// Right-hand side is simply V^{n+1}
 			d[idx] = V[i]
 		}
 
@@ -690,20 +691,22 @@ finite_difference_american :: proc(
 			V[n_space - 1] = 0.0
 		}
 
-		// Adjust RHS for boundary conditions
-		d[0] -= a[0] * V[0]
-		d[n_unknowns - 1] -= c[n_unknowns - 1] * V[n_space - 1]
+		// 3. ✅ CRITICAL FIX: Adjust RHS for boundary conditions
+		// Do NOT use c[n_unknowns - 1] as it is out of bounds!
+		// c has size n_unknowns - 1, so its max index is n_unknowns - 2.
+		// We must use the explicit coefficient instead.
+		d[0] -= (-0.5 * rx + r_beta) * V[0]
+		d[n_unknowns - 1] -= (-0.5 * rx - r_beta) * V[n_space - 1]
 
-		// 3. Solve tridiagonal system
+		// 4. Solve tridiagonal system
 		_thomas_algorithm(a, b, c, d, n_unknowns)
 
-		// 4. Update interior points
+		// 5. Update interior points
 		for i in 1 ..< n_space - 1 {
 			V[i] = d[i - 1]
 		}
 
-		// 5. ✅ PROJECTION STEP: Enforce early exercise constraint
-		// V(S, τ) >= Intrinsic Value
+		// 6. PROJECTION STEP: Enforce early exercise constraint
 		for i in 0 ..< n_space {
 			x_i := x_min + f64(i) * dx
 			S_i := math.exp_f64(x_i)
@@ -735,7 +738,7 @@ finite_difference_american :: proc(
 		price = 0.0
 	}
 
-	// Calculate Greeks using finite differences on the final grid
+	// Calculate Greeks
 	delta: f64
 	if i_target > 0 && i_target < n_space - 1 {
 		S_plus := math.exp_f64(x_min + f64(i_target + 1) * dx)
