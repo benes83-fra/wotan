@@ -795,35 +795,42 @@ LSM_Result :: struct {
 	theta: f64,
 }
 
+
 // ============================================================================
 // Polynomial Basis Functions for Regression
 // ============================================================================
-// We use Laguerre polynomials which are orthogonal for log-normal distributions
-// L_0(x) = 1
-// L_1(x) = 1 - x
-// L_2(x) = 1 - 2x + x²/2
+// Simple polynomials (1, x, x², x³) are highly robust and the industry standard
+// for LSM. They avoid the severe multicollinearity that plagues Laguerre
+// polynomials when x is clustered around 1.0, which causes the regularization
+// to crush the coefficients to near zero and artificially deflate the
+// continuation value.
+// ============================================================================
+// Polynomial Basis Functions for Regression (CENTERED)
+// ============================================================================
+// We use CENTERED polynomials to avoid severe multicollinearity.
+// If we use 1, x, x^2, x^3 where x = S/S_0 ≈ 1, the columns are nearly identical.
+// By using z = (S - S_0) / S_0, z is centered around 0, making the powers
+// orthogonal and the regression matrix perfectly well-conditioned.
 
-_basis_functions :: proc(x: f64, degree: int) -> []f64 {
+_basis_functions :: proc(S_ex: f64, S_0: f64, degree: int) -> []f64 {
 	basis := make([]f64, degree + 1, context.temp_allocator)
 
-	// Standardize x to [0, 1] range for numerical stability
-	// x_std = (x - mean) / std (but we use simple normalization here)
-	x_std := x
+	// Center and scale the variable around 0
+	z := (S_ex - S_0) / S_0
 
 	basis[0] = 1.0
 	if degree >= 1 {
-		basis[1] = 1.0 - x_std
+		basis[1] = z
 	}
 	if degree >= 2 {
-		basis[2] = 1.0 - 2.0 * x_std + 0.5 * x_std * x_std
+		basis[2] = z * z
 	}
 	if degree >= 3 {
-		basis[3] = 1.0 - 3.0 * x_std + 1.5 * x_std * x_std - x_std * x_std * x_std / 6.0
+		basis[3] = z * z * z
 	}
 
 	return basis
 }
-
 // ============================================================================
 // Linear Regression via Least Squares (SIMD Optimized)
 // ============================================================================
@@ -883,7 +890,10 @@ _least_squares_regression :: proc(
 }
 
 // ============================================================================
-// LSM Core: American Vanilla Option (Black-Scholes Process)
+// LSM Core: American Vanilla Option (CORRECTED)
+// ============================================================================
+// ============================================================================
+// LSM Core: American Vanilla Option (CORRECTED TIME-0 DISCOUNTING)
 // ============================================================================
 lsm_american_vanilla :: proc(
 	S_0: f64,
@@ -894,8 +904,8 @@ lsm_american_vanilla :: proc(
 	opt: OptionType,
 	n_paths: int = 10000,
 	n_steps: int = 50,
-	n_exercise_dates: int = 10, // Number of exercise opportunities
-	poly_degree: int = 2, // Polynomial degree for regression
+	n_exercise_dates: int = 10,
+	poly_degree: int = 3,
 	allocator: mem.Allocator = context.allocator,
 ) -> LSM_Result {
 	dt := T / f64(n_steps)
@@ -932,25 +942,26 @@ lsm_american_vanilla :: proc(
 		}
 	}
 
-	// Backward induction with regression
+	// CRITICAL: cashflows array strictly stores the TIME-0 present value for each path
 	cashflows := make([]f64, n_paths, allocator)
 	defer delete(cashflows, allocator)
 
-	// Initialize cashflows with terminal payoff
+	// Initialize cashflows with terminal payoff discounted to t=0
 	for path in 0 ..< n_paths {
 		S_T := S_paths[path * (n_exercise_dates + 1) + n_exercise_dates]
+		payoff := 0.0
 		if opt == .Call {
-			cashflows[path] = math.max(S_T - K, 0.0)
+			payoff = math.max(S_T - K, 0.0)
 		} else {
-			cashflows[path] = math.max(K - S_T, 0.0)
+			payoff = math.max(K - S_T, 0.0)
 		}
+		cashflows[path] = payoff * math.exp_f64(-r * T)
 	}
-
-	// Discount factor per step
-	disc_per_step := math.exp_f64(-r * f64(exercise_step) * dt)
 
 	// Backward induction from last exercise date to first
 	for ex_idx := n_exercise_dates - 1; ex_idx >= 1; ex_idx -= 1 {
+		t_ex := f64(ex_idx) * f64(exercise_step) * dt
+
 		// Collect in-the-money paths for regression
 		itm_count := 0
 		for path in 0 ..< n_paths {
@@ -962,11 +973,10 @@ lsm_american_vanilla :: proc(
 			}
 		}
 
+		// ✅ FIX: If not enough ITM paths, we cannot regress.
+		// We assume continuation, which is already correctly represented in cashflows.
+		// DO NOT multiply by disc_per_step, as cashflows is already at t=0!
 		if itm_count < poly_degree + 1 {
-			// Not enough ITM paths for regression, discount all cashflows
-			for path in 0 ..< n_paths {
-				cashflows[path] *= disc_per_step
-			}
 			continue
 		}
 
@@ -985,28 +995,24 @@ lsm_american_vanilla :: proc(
 			}
 
 			if is_itm {
-				// Normalize S_ex for regression stability
 				x_std := S_ex / S_0
-
-				// Basis functions
-				basis := _basis_functions(x_std, poly_degree)
+				basis := _basis_functions(S_ex, S_0, poly_degree)
 				for j in 0 ..< poly_degree + 1 {
 					X[itm_idx * (poly_degree + 1) + j] = basis[j]
 				}
 
-				// Target: discounted future cashflow
-				y[itm_idx] = cashflows[path] * disc_per_step
+				// Bring the time-0 cashflow forward to t_ex for regression
+				y[itm_idx] = cashflows[path] * math.exp_f64(r * t_ex)
 
 				itm_idx += 1
 			}
 		}
 
-		// Fit regression
+		// Fit regression using least squares
 		beta := _least_squares_regression(X, y, itm_count, poly_degree + 1, allocator)
 		defer delete(beta, allocator)
 
-		// Update cashflows: exercise if immediate value > continuation value
-		itm_idx = 0
+		// Update cashflows
 		for path in 0 ..< n_paths {
 			S_ex := S_paths[path * (n_exercise_dates + 1) + ex_idx]
 			is_itm := false
@@ -1017,56 +1023,40 @@ lsm_american_vanilla :: proc(
 			}
 
 			if is_itm {
-				// Immediate exercise value
+				exercise_val := 0.0
 				if opt == .Call {
-					exercise_val := S_ex - K
-
-					// Continuation value (regression prediction)
-					x_std := S_ex / S_0
-					basis := _basis_functions(x_std, poly_degree)
-					cont_val := 0.0
-					for j in 0 ..< poly_degree + 1 {
-						cont_val += beta[j] * basis[j]
-					}
-
-					// Exercise if immediate > continuation
-					if exercise_val > cont_val {
-						cashflows[path] = exercise_val
-					} else {
-						cashflows[path] *= disc_per_step
-					}
+					exercise_val = S_ex - K
 				} else {
-					exercise_val := K - S_ex
-
-					x_std := S_ex / S_0
-					basis := _basis_functions(x_std, poly_degree)
-					cont_val := 0.0
-					for j in 0 ..< poly_degree + 1 {
-						cont_val += beta[j] * basis[j]
-					}
-
-					if exercise_val > cont_val {
-						cashflows[path] = exercise_val
-					} else {
-						cashflows[path] *= disc_per_step
-					}
+					exercise_val = K - S_ex
 				}
 
-				itm_idx += 1
-			} else {
-				// Out-of-the-money: continue
-				cashflows[path] *= disc_per_step
+				// Continuation value at t_ex
+				x_std := S_ex / S_0
+				basis := _basis_functions(S_ex, S_0, poly_degree)
+				cont_val := 0.0
+				for j in 0 ..< poly_degree + 1 {
+					cont_val += beta[j] * basis[j]
+				}
+
+				// Exercise if immediate > continuation
+				if exercise_val > cont_val {
+					// Overwrite with the time-0 value of the exercise payoff
+					cashflows[path] = exercise_val * math.exp_f64(-r * t_ex)
+				}
+				// If exercise_val <= cont_val, do nothing.
+				// cashflows[path] already holds the correct time-0 continuation value.
 			}
+			// If OTM, do nothing.
+			// cashflows[path] already holds the correct time-0 continuation value.
 		}
 	}
 
-	// Discount final cashflows to t=0
-	total_payoff := 0.0
+	// Final price is simply the average of the time-0 cashflows
+	price := 0.0
 	for path in 0 ..< n_paths {
-		total_payoff += cashflows[path]
+		price += cashflows[path]
 	}
-
-	price := total_payoff / f64(n_paths)
+	price /= f64(n_paths)
 
 	// Greeks via finite differences (CRN)
 	h_S := 0.01 * S_0
@@ -1188,7 +1178,6 @@ lsm_american_vanilla :: proc(
 
 	return LSM_Result{price = price, delta = delta, gamma = gamma, vega = vega, theta = theta}
 }
-
 // Helper for CRN Greeks
 _lsm_american_vanilla_helper :: proc(
 	S_0: f64,
@@ -1232,18 +1221,21 @@ _lsm_american_vanilla_helper :: proc(
 	cashflows := make([]f64, n_paths, allocator)
 	defer delete(cashflows, allocator)
 
+	// Initialize with terminal payoff discounted to t=0
 	for path in 0 ..< n_paths {
 		S_T := S_paths[path * (n_exercise_dates + 1) + n_exercise_dates]
+		payoff := 0.0
 		if opt == .Call {
-			cashflows[path] = math.max(S_T - K, 0.0)
+			payoff = math.max(S_T - K, 0.0)
 		} else {
-			cashflows[path] = math.max(K - S_T, 0.0)
+			payoff = math.max(K - S_T, 0.0)
 		}
+		cashflows[path] = payoff * math.exp_f64(-r * T)
 	}
 
-	disc_per_step := math.exp_f64(-r * f64(exercise_step) * dt)
-
 	for ex_idx := n_exercise_dates - 1; ex_idx >= 1; ex_idx -= 1 {
+		t_ex := f64(ex_idx) * f64(exercise_step) * dt
+
 		itm_count := 0
 		for path in 0 ..< n_paths {
 			S_ex := S_paths[path * (n_exercise_dates + 1) + ex_idx]
@@ -1254,10 +1246,8 @@ _lsm_american_vanilla_helper :: proc(
 			}
 		}
 
+		// ✅ FIX: Do nothing, cashflows already holds correct time-0 value
 		if itm_count < poly_degree + 1 {
-			for path in 0 ..< n_paths {
-				cashflows[path] *= disc_per_step
-			}
 			continue
 		}
 
@@ -1276,11 +1266,13 @@ _lsm_american_vanilla_helper :: proc(
 
 			if is_itm {
 				x_std := S_ex / S_0
-				basis := _basis_functions(x_std, poly_degree)
+				basis := _basis_functions(S_ex, S_0, poly_degree)
 				for j in 0 ..< poly_degree + 1 {
 					X[itm_idx * (poly_degree + 1) + j] = basis[j]
 				}
-				y[itm_idx] = cashflows[path] * disc_per_step
+
+				// Bring time-0 cashflow forward to t_ex
+				y[itm_idx] = cashflows[path] * math.exp_f64(r * t_ex)
 				itm_idx += 1
 			}
 		}
@@ -1288,7 +1280,6 @@ _lsm_american_vanilla_helper :: proc(
 		beta := _least_squares_regression(X, y, itm_count, poly_degree + 1, allocator)
 		defer delete(beta, allocator)
 
-		itm_idx = 0
 		for path in 0 ..< n_paths {
 			S_ex := S_paths[path * (n_exercise_dates + 1) + ex_idx]
 			is_itm := false
@@ -1299,36 +1290,23 @@ _lsm_american_vanilla_helper :: proc(
 			}
 
 			if is_itm {
+				exercise_val := 0.0
 				if opt == .Call {
-					exercise_val := S_ex - K
-					x_std := S_ex / S_0
-					basis := _basis_functions(x_std, poly_degree)
-					cont_val := 0.0
-					for j in 0 ..< poly_degree + 1 {
-						cont_val += beta[j] * basis[j]
-					}
-					if exercise_val > cont_val {
-						cashflows[path] = exercise_val
-					} else {
-						cashflows[path] *= disc_per_step
-					}
+					exercise_val = S_ex - K
 				} else {
-					exercise_val := K - S_ex
-					x_std := S_ex / S_0
-					basis := _basis_functions(x_std, poly_degree)
-					cont_val := 0.0
-					for j in 0 ..< poly_degree + 1 {
-						cont_val += beta[j] * basis[j]
-					}
-					if exercise_val > cont_val {
-						cashflows[path] = exercise_val
-					} else {
-						cashflows[path] *= disc_per_step
-					}
+					exercise_val = K - S_ex
 				}
-				itm_idx += 1
-			} else {
-				cashflows[path] *= disc_per_step
+
+				x_std := S_ex / S_0
+				basis := _basis_functions(S_ex, S_0, poly_degree)
+				cont_val := 0.0
+				for j in 0 ..< poly_degree + 1 {
+					cont_val += beta[j] * basis[j]
+				}
+
+				if exercise_val > cont_val {
+					cashflows[path] = exercise_val * math.exp_f64(-r * t_ex)
+				}
 			}
 		}
 	}
@@ -1351,7 +1329,7 @@ lsm_american_call :: proc(
 	n_paths: int = 10000,
 	n_steps: int = 50,
 	n_exercise_dates: int = 10,
-	poly_degree: int = 2,
+	poly_degree: int = 3, // ✅ Changed to 3
 	allocator: mem.Allocator = context.allocator,
 ) -> LSM_Result {
 	return lsm_american_vanilla(
@@ -1378,7 +1356,7 @@ lsm_american_put :: proc(
 	n_paths: int = 10000,
 	n_steps: int = 50,
 	n_exercise_dates: int = 10,
-	poly_degree: int = 2,
+	poly_degree: int = 3, // ✅ Changed to 3
 	allocator: mem.Allocator = context.allocator,
 ) -> LSM_Result {
 	return lsm_american_vanilla(
