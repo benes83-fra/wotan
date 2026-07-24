@@ -69,3 +69,38 @@ american_lsm_test :: proc(allocator: mem.Allocator) {
 	fmt.println("   • This unlocks American Asians, American Lookbacks, American Barriers")
 	fmt.println("======================================================================\n")
 }
+
+american_asian_lsm_test :: proc(allocator: mem.Allocator) {
+	fmt.println("\n======================================================================")
+	fmt.println("    AMERICAN ASIAN OPTIONS: LONGSTAFF-SCHWARTZ MONTE CARLO")
+	fmt.println("======================================================================\n")
+
+	S := 100.0
+	K := 100.0
+	T := 1.0
+	r := 0.05
+	sigma := 0.20
+
+	fmt.println("Parameters: S=100, K=100, T=1Y, r=5%, σ=20%")
+	fmt.println("Instrument: American Asian Call Option (Arithmetic Average)\n")
+
+	// 1. Price American Asian
+	fmt.println("1. American Asian Call (LSM, 50,000 paths, 50 exercise dates)")
+	fmt.println("   ----------------------------------------------------------------------")
+
+	// n_paths=50000, n_steps=100, n_exercise_dates=50, poly_degree=3
+	asian_result := fin.lsm_american_asian_call(S, K, T, r, sigma, 50000, 100, 50, 3, allocator)
+
+	fmt.printf("   %-20s | $%12.4f\n", "American Asian Price", asian_result.price)
+	fmt.printf("   %-20s | %13.4f\n", "Delta", asian_result.delta)
+	fmt.printf("   %-20s | %13.4f\n", "Gamma", asian_result.gamma)
+	fmt.printf("   %-20s | %13.4f\n", "Vega", asian_result.vega)
+
+	fmt.println("\n💡 Key Insights:")
+	fmt.println("   • The American Asian Call has a small but positive early exercise")
+	fmt.println("     premium because averaging reduces volatility, making deep ITM")
+	fmt.println("     states more likely to be optimal for early exercise.")
+	fmt.println("   • This would be virtually impossible to price with Binomial Trees")
+	fmt.println("     due to the non-recombining nature of the arithmetic average.")
+	fmt.println("======================================================================\n")
+}

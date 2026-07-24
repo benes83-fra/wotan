@@ -1368,3 +1368,384 @@ lsm_american_put :: proc(
 		allocator,
 	)
 }
+// ============================================================================
+// LONGSTAFF-SCHWARTZ: AMERICAN ASIAN CALL OPTION
+// ============================================================================
+// Prices an American-style Asian Call Option (arithmetic average).
+// This is where LSM truly shines, as trees/FD struggle with the extra state variable.
+
+lsm_american_asian_call :: proc(
+	S_0: f64,
+	K: f64,
+	T: f64,
+	r: f64,
+	sigma: f64,
+	n_paths: int = 10000,
+	n_steps: int = 50,
+	n_exercise_dates: int = 10,
+	poly_degree: int = 3,
+	allocator: mem.Allocator = context.allocator,
+) -> LSM_Result {
+	dt := T / f64(n_steps)
+	sqrt_dt := math.sqrt_f64(dt)
+	drift := (r - 0.5 * sigma * sigma) * dt
+
+	// Generate random paths
+	rand_count := n_paths * n_steps
+	norm_data := make([]f64, rand_count, allocator)
+	defer delete(norm_data, allocator)
+	for i in 0 ..< rand_count {
+		norm_data[i] = rand.float64_normal(0.0, 1.0)
+	}
+
+	// Simulate paths and store Spot and Average at exercise dates
+	exercise_step := n_steps / n_exercise_dates
+
+	// We need to store: [path][ex_idx] for both S and avg_S
+	S_ex_data := make([]f64, n_paths * (n_exercise_dates + 1), allocator)
+	avg_S_ex_data := make([]f64, n_paths * (n_exercise_dates + 1), allocator)
+	defer {
+		delete(S_ex_data, allocator)
+		delete(avg_S_ex_data, allocator)
+	}
+
+	rand_idx := 0
+	for path in 0 ..< n_paths {
+		S := S_0
+		sum_S := S_0 // Start sum with initial price
+
+		S_ex_data[path * (n_exercise_dates + 1) + 0] = S_0
+		avg_S_ex_data[path * (n_exercise_dates + 1) + 0] = S_0
+
+		for step in 1 ..< n_steps + 1 {
+			Z := norm_data[rand_idx]
+			rand_idx += 1
+			S = S * math.exp_f64(drift + sigma * sqrt_dt * Z)
+			sum_S += S
+
+			if step % exercise_step == 0 {
+				ex_idx := step / exercise_step
+				S_ex_data[path * (n_exercise_dates + 1) + ex_idx] = S
+				avg_S_ex_data[path * (n_exercise_dates + 1) + ex_idx] = sum_S / f64(step + 1)
+			}
+		}
+	}
+
+	// CRITICAL: cashflows array strictly stores the TIME-0 present value for each path
+	cashflows := make([]f64, n_paths, allocator)
+	defer delete(cashflows, allocator)
+
+	// Initialize cashflows with terminal payoff discounted to t=0
+	for path in 0 ..< n_paths {
+		avg_S_T := avg_S_ex_data[path * (n_exercise_dates + 1) + n_exercise_dates]
+		payoff := math.max(avg_S_T - K, 0.0)
+		cashflows[path] = payoff * math.exp_f64(-r * T)
+	}
+
+	// Backward induction from last exercise date to first
+	for ex_idx := n_exercise_dates - 1; ex_idx >= 1; ex_idx -= 1 {
+		t_ex := f64(ex_idx) * f64(exercise_step) * dt
+
+		// Collect in-the-money paths for regression (avg_S > K)
+		itm_count := 0
+		for path in 0 ..< n_paths {
+			avg_S_ex := avg_S_ex_data[path * (n_exercise_dates + 1) + ex_idx]
+			if avg_S_ex > K {
+				itm_count += 1
+			}
+		}
+
+		if itm_count < poly_degree + 1 {
+			continue // Not enough ITM paths, assume continuation
+		}
+
+		// Build regression matrices
+		X := make([]f64, itm_count * (poly_degree + 1), context.temp_allocator)
+		y := make([]f64, itm_count, context.temp_allocator)
+		itm_idx := 0
+
+		for path in 0 ..< n_paths {
+			avg_S_ex := avg_S_ex_data[path * (n_exercise_dates + 1) + ex_idx]
+			if avg_S_ex > K {
+				// ✅ BASIS: Use moneyness of the average price, centered around 1.0
+				x_moneyness := (avg_S_ex / K) - 1.0
+
+				// Manual polynomial basis for stability
+				X[itm_idx * (poly_degree + 1) + 0] = 1.0
+				if poly_degree >= 1 {X[itm_idx * (poly_degree + 1) + 1] = x_moneyness}
+				if poly_degree >=
+				   2 {X[itm_idx * (poly_degree + 1) + 2] = x_moneyness * x_moneyness}
+				if poly_degree >=
+				   3 {X[itm_idx * (poly_degree + 1) + 3] = x_moneyness * x_moneyness * x_moneyness}
+
+				// Bring the time-0 cashflow forward to t_ex for regression
+				y[itm_idx] = cashflows[path] * math.exp_f64(r * t_ex)
+				itm_idx += 1
+			}
+		}
+
+		// Fit regression using least squares (uses your corrected Cholesky solver)
+		beta := _least_squares_regression(X, y, itm_count, poly_degree + 1, allocator)
+		defer delete(beta, allocator)
+
+		// Update cashflows
+		for path in 0 ..< n_paths {
+			avg_S_ex := avg_S_ex_data[path * (n_exercise_dates + 1) + ex_idx]
+			if avg_S_ex > K {
+				exercise_val := avg_S_ex - K
+
+				// Continuation value at t_ex
+				x_moneyness := (avg_S_ex / K) - 1.0
+				cont_val := beta[0]
+				if poly_degree >= 1 {cont_val += beta[1] * x_moneyness}
+				if poly_degree >= 2 {cont_val += beta[2] * x_moneyness * x_moneyness}
+				if poly_degree >= 3 {cont_val += beta[3] * x_moneyness * x_moneyness * x_moneyness}
+
+				// Exercise if immediate > continuation
+				if exercise_val > cont_val {
+					cashflows[path] = exercise_val * math.exp_f64(-r * t_ex)
+				}
+				// Else: do nothing, cashflows[path] already holds the correct time-0 continuation value
+			}
+		}
+	}
+
+	// Final price is simply the average of the time-0 cashflows
+	price := 0.0
+	for path in 0 ..< n_paths {
+		price += cashflows[path]
+	}
+	price /= f64(n_paths)
+
+	// Greeks via finite differences (CRN)
+	h_S := 0.01 * S_0
+	price_up := _lsm_asian_helper(
+		S_0 + h_S,
+		K,
+		T,
+		r,
+		sigma,
+		n_paths,
+		n_steps,
+		n_exercise_dates,
+		poly_degree,
+		norm_data,
+		allocator,
+	)
+	price_dn := _lsm_asian_helper(
+		S_0 - h_S,
+		K,
+		T,
+		r,
+		sigma,
+		n_paths,
+		n_steps,
+		n_exercise_dates,
+		poly_degree,
+		norm_data,
+		allocator,
+	)
+	delta := (price_up - price_dn) / (2.0 * h_S)
+
+	h_S2 := 0.02 * S_0
+	delta_up :=
+		(_lsm_asian_helper(
+				S_0 + h_S2,
+				K,
+				T,
+				r,
+				sigma,
+				n_paths,
+				n_steps,
+				n_exercise_dates,
+				poly_degree,
+				norm_data,
+				allocator,
+			) -
+			price_dn) /
+		(2.0 * h_S2)
+	delta_dn :=
+		(price_up -
+			_lsm_asian_helper(
+				S_0 - h_S2,
+				K,
+				T,
+				r,
+				sigma,
+				n_paths,
+				n_steps,
+				n_exercise_dates,
+				poly_degree,
+				norm_data,
+				allocator,
+			)) /
+		(2.0 * h_S2)
+	gamma := (delta_up - delta_dn) / (2.0 * h_S2)
+
+	h_sigma := 0.01 * sigma
+	if h_sigma < 0.001 {h_sigma = 0.001}
+	price_sig_up := _lsm_asian_helper(
+		S_0,
+		K,
+		T,
+		r,
+		sigma + h_sigma,
+		n_paths,
+		n_steps,
+		n_exercise_dates,
+		poly_degree,
+		norm_data,
+		allocator,
+	)
+	price_sig_dn := _lsm_asian_helper(
+		S_0,
+		K,
+		T,
+		r,
+		sigma - h_sigma,
+		n_paths,
+		n_steps,
+		n_exercise_dates,
+		poly_degree,
+		norm_data,
+		allocator,
+	)
+	vega := (price_sig_up - price_sig_dn) / (2.0 * h_sigma)
+
+	h_T := 0.01
+	price_T_up := _lsm_asian_helper(
+		S_0,
+		K,
+		T + h_T,
+		r,
+		sigma,
+		n_paths,
+		n_steps,
+		n_exercise_dates,
+		poly_degree,
+		norm_data,
+		allocator,
+	)
+	theta := (price_T_up - price) / h_T
+
+	return LSM_Result{price = price, delta = delta, gamma = gamma, vega = vega, theta = theta}
+}
+
+// Helper for CRN Greeks (Asian)
+_lsm_asian_helper :: proc(
+	S_0: f64,
+	K: f64,
+	T: f64,
+	r: f64,
+	sigma: f64,
+	n_paths: int,
+	n_steps: int,
+	n_exercise_dates: int,
+	poly_degree: int,
+	norm_data: []f64,
+	allocator: mem.Allocator,
+) -> f64 {
+	dt := T / f64(n_steps)
+	sqrt_dt := math.sqrt_f64(dt)
+	drift := (r - 0.5 * sigma * sigma) * dt
+
+	exercise_step := n_steps / n_exercise_dates
+
+	S_ex_data := make([]f64, n_paths * (n_exercise_dates + 1), allocator)
+	avg_S_ex_data := make([]f64, n_paths * (n_exercise_dates + 1), allocator)
+	defer {
+		delete(S_ex_data, allocator)
+		delete(avg_S_ex_data, allocator)
+	}
+
+	rand_idx := 0
+	for path in 0 ..< n_paths {
+		S := S_0
+		sum_S := S_0
+
+		S_ex_data[path * (n_exercise_dates + 1) + 0] = S_0
+		avg_S_ex_data[path * (n_exercise_dates + 1) + 0] = S_0
+
+		for step in 1 ..< n_steps + 1 {
+			Z := norm_data[rand_idx]
+			rand_idx += 1
+			S = S * math.exp_f64(drift + sigma * sqrt_dt * Z)
+			sum_S += S
+
+			if step % exercise_step == 0 {
+				ex_idx := step / exercise_step
+				S_ex_data[path * (n_exercise_dates + 1) + ex_idx] = S
+				avg_S_ex_data[path * (n_exercise_dates + 1) + ex_idx] = sum_S / f64(step + 1)
+			}
+		}
+	}
+
+	cashflows := make([]f64, n_paths, allocator)
+	defer delete(cashflows, allocator)
+
+	for path in 0 ..< n_paths {
+		avg_S_T := avg_S_ex_data[path * (n_exercise_dates + 1) + n_exercise_dates]
+		payoff := math.max(avg_S_T - K, 0.0)
+		cashflows[path] = payoff * math.exp_f64(-r * T)
+	}
+
+	for ex_idx := n_exercise_dates - 1; ex_idx >= 1; ex_idx -= 1 {
+		t_ex := f64(ex_idx) * f64(exercise_step) * dt
+
+		itm_count := 0
+		for path in 0 ..< n_paths {
+			if avg_S_ex_data[path * (n_exercise_dates + 1) + ex_idx] > K {
+				itm_count += 1
+			}
+		}
+
+		if itm_count < poly_degree + 1 {continue}
+
+		X := make([]f64, itm_count * (poly_degree + 1), context.temp_allocator)
+		y := make([]f64, itm_count, context.temp_allocator)
+		itm_idx := 0
+
+		for path in 0 ..< n_paths {
+			avg_S_ex := avg_S_ex_data[path * (n_exercise_dates + 1) + ex_idx]
+			if avg_S_ex > K {
+				x_moneyness := (avg_S_ex / K) - 1.0
+
+				X[itm_idx * (poly_degree + 1) + 0] = 1.0
+				if poly_degree >= 1 {X[itm_idx * (poly_degree + 1) + 1] = x_moneyness}
+				if poly_degree >=
+				   2 {X[itm_idx * (poly_degree + 1) + 2] = x_moneyness * x_moneyness}
+				if poly_degree >=
+				   3 {X[itm_idx * (poly_degree + 1) + 3] = x_moneyness * x_moneyness * x_moneyness}
+
+				y[itm_idx] = cashflows[path] * math.exp_f64(r * t_ex)
+				itm_idx += 1
+			}
+		}
+
+		beta := _least_squares_regression(X, y, itm_count, poly_degree + 1, allocator)
+		defer delete(beta, allocator)
+
+		for path in 0 ..< n_paths {
+			avg_S_ex := avg_S_ex_data[path * (n_exercise_dates + 1) + ex_idx]
+			if avg_S_ex > K {
+				exercise_val := avg_S_ex - K
+				x_moneyness := (avg_S_ex / K) - 1.0
+
+				cont_val := beta[0]
+				if poly_degree >= 1 {cont_val += beta[1] * x_moneyness}
+				if poly_degree >= 2 {cont_val += beta[2] * x_moneyness * x_moneyness}
+				if poly_degree >= 3 {cont_val += beta[3] * x_moneyness * x_moneyness * x_moneyness}
+
+				if exercise_val > cont_val {
+					cashflows[path] = exercise_val * math.exp_f64(-r * t_ex)
+				}
+			}
+		}
+	}
+
+	total_payoff := 0.0
+	for path in 0 ..< n_paths {
+		total_payoff += cashflows[path]
+	}
+	return total_payoff / f64(n_paths)
+}
