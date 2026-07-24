@@ -795,38 +795,28 @@ LSM_Result :: struct {
 	theta: f64,
 }
 
-
 // ============================================================================
-// Polynomial Basis Functions for Regression
+// Polynomial Basis Functions for Regression (CENTERED & STABLE)
 // ============================================================================
-// Simple polynomials (1, x, x², x³) are highly robust and the industry standard
-// for LSM. They avoid the severe multicollinearity that plagues Laguerre
-// polynomials when x is clustered around 1.0, which causes the regularization
-// to crush the coefficients to near zero and artificially deflate the
-// continuation value.
-// ============================================================================
-// Polynomial Basis Functions for Regression (CENTERED)
-// ============================================================================
-// We use CENTERED polynomials to avoid severe multicollinearity.
-// If we use 1, x, x^2, x^3 where x = S/S_0 ≈ 1, the columns are nearly identical.
-// By using z = (S - S_0) / S_0, z is centered around 0, making the powers
-// orthogonal and the regression matrix perfectly well-conditioned.
-
 _basis_functions :: proc(S_ex: f64, S_0: f64, degree: int) -> []f64 {
 	basis := make([]f64, degree + 1, context.temp_allocator)
 
-	// Center and scale the variable around 0
-	z := (S_ex - S_0) / S_0
+	// ✅ CRITICAL FIX: Center the variable around 0.
+	// x = (S_ex / S_0) - 1.0 is typically between -0.5 and 0.5.
+	// This makes the columns [1, x, x^2, x^3] nearly orthogonal,
+	// perfectly conditioning the X^T * X matrix and preventing
+	// the Cholesky solver from returning garbage coefficients.
+	x := (S_ex / S_0) - 1.0
 
 	basis[0] = 1.0
 	if degree >= 1 {
-		basis[1] = z
+		basis[1] = x
 	}
 	if degree >= 2 {
-		basis[2] = z * z
+		basis[2] = x * x
 	}
 	if degree >= 3 {
-		basis[3] = z * z * z
+		basis[3] = x * x * x
 	}
 
 	return basis
@@ -837,7 +827,9 @@ _basis_functions :: proc(S_ex: f64, S_0: f64, degree: int) -> []f64 {
 // Solves: X^T * X * beta = X^T * y
 // where X is the design matrix (n_samples x n_features)
 // and y is the target vector (n_samples)
-
+// ============================================================================
+// Linear Regression via Least Squares (SIMD Optimized & CORRECTED)
+// ============================================================================
 _least_squares_regression :: proc(
 	X: []f64, // Flattened design matrix (n_samples * n_features)
 	y: []f64, // Target vector (n_samples)
@@ -876,13 +868,16 @@ _least_squares_regression :: proc(
 		XtX_mat.data[i * n_features + i] += 1e-8
 	}
 
+	// 1. Cholesky decomposition: XtX = L * L^T
 	l.cholesky_decompose(&XtX_mat)
 
-	beta := l.forward_subst_unit_lower_simd(&XtX_mat, Xty, allocator)
-	defer delete(beta, allocator)
+	// 2. ✅ CRITICAL FIX: Use forward_substitute_simd, NOT forward_subst_unit_lower_simd!
+	// This correctly divides by the diagonal elements of L.
+	z := l.forward_substitute_simd(&XtX_mat, Xty, allocator)
+	defer delete(z, allocator)
 
-	result := l.back_subst_upper_simd(&XtX_mat, beta, allocator)
-
+	// 3. Back substitution: L^T * beta = z
+	result := l.backward_substitute_simd(&XtX_mat, z, allocator)
 	delete(XtX, allocator)
 	delete(Xty, allocator)
 

@@ -28,17 +28,19 @@ american_lsm_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("   %-20s | %13.4f\n", "Delta", bin_result.delta)
 	fmt.printf("   %-20s | %13.4f\n", "Gamma", bin_result.gamma)
 
-	// 2. Longstaff-Schwartz Monte Carlo
-	fmt.println("\n2. Longstaff-Schwartz Monte Carlo (10,000 paths, 10 exercise dates)")
+	// 2. Longstaff-Schwartz Monte Carlo (50,000 paths, 50 exercise dates)
+	fmt.println("2. Longstaff-Schwartz Monte Carlo (50,000 paths, 50 exercise dates)")
 	fmt.println("   ----------------------------------------------------------------------")
-	lsm_result := fin.lsm_american_put(S, K, T, r, sigma, 10000, 50, 10, 2, allocator)
+
+	// n_paths = 50000, n_steps = 100, n_exercise_dates = 50, poly_degree = 3
+	lsm_result := fin.lsm_american_put(S, K, T, r, sigma, 50000, 100, 50, 3, allocator)
 
 	fmt.printf("   %-20s | $%12.4f\n", "American Put Price", lsm_result.price)
 	fmt.printf("   %-20s | %13.4f\n", "Delta", lsm_result.delta)
 	fmt.printf("   %-20s | %13.4f\n", "Gamma", lsm_result.gamma)
 	fmt.printf("   %-20s | %13.4f\n", "Vega", lsm_result.vega)
 
-	// 3. Error Analysis
+	// 3. Error Analysis (LSM vs Binomial)
 	fmt.println("\n3. Error Analysis (LSM vs Binomial)")
 	fmt.println("   ----------------------------------------------------------------------")
 	price_err := (lsm_result.price - bin_result.price) / bin_result.price * 100.0
