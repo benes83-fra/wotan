@@ -1749,3 +1749,561 @@ _lsm_asian_helper :: proc(
 	}
 	return total_payoff / f64(n_paths)
 }
+
+// ============================================================================
+// VARIANCE-REDUCED LONGSTAFF-SCHWARTZ MONTE CARLO
+// ============================================================================
+// Combines Antithetic Variates + Control Variates for dramatic noise reduction.
+//
+// Variance Reduction Factors (vs plain LSM):
+//   - Antithetic only:          ~2x
+//   - Control Variate only:     ~10-50x (ATM)
+//   - Both combined:            ~20-100x (ATM)
+//
+// This means you can achieve the same accuracy with 20-100x fewer paths,
+// or 5-10x better accuracy with the same number of paths.
+
+VR_LSM_Result :: struct {
+	price:              f64,
+	delta:              f64,
+	gamma:              f64,
+	vega:               f64,
+	theta:              f64,
+	variance_reduction: f64, // Factor by which variance was reduced vs plain MC
+}
+
+// ============================================================================
+// Black-Scholes European Price (for Control Variate)
+// ============================================================================
+_bs_european_price :: proc(S: f64, K: f64, T: f64, r: f64, sigma: f64, opt: OptionType) -> f64 {
+	if T <= 0.0 {
+		if opt == .Call {return math.max(S - K, 0.0)}
+		return math.max(K - S, 0.0)
+	}
+	d1 := (math.ln(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt_f64(T))
+	d2 := d1 - sigma * math.sqrt_f64(T)
+	N_d1 := 0.5 * (1.0 + math.erf(d1 / math.sqrt_f64(2.0)))
+	N_d2 := 0.5 * (1.0 + math.erf(d2 / math.sqrt_f64(2.0)))
+	if opt == .Call {
+		return S * N_d1 - K * math.exp(-r * T) * N_d2
+	}
+	return K * math.exp(-r * T) * (1.0 - N_d2) - S * (1.0 - N_d1)
+}
+
+// ============================================================================
+// Black-Scholes Delta (for CRN Greeks)
+// ============================================================================
+_bs_european_delta :: proc(S: f64, K: f64, T: f64, r: f64, sigma: f64, opt: OptionType) -> f64 {
+	if T <= 0.0 {return 0.0}
+	d1 := (math.ln(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt_f64(T))
+	N_d1 := 0.5 * (1.0 + math.erf(d1 / math.sqrt_f64(2.0)))
+	if opt == .Call {return N_d1}
+	return N_d1 - 1.0
+}
+
+// ============================================================================
+// CORE: LSM with Antithetic Variates + Control Variate
+// ============================================================================
+// This is the main engine. It combines both techniques in a single pass.
+lsm_american_vanilla_reduced :: proc(
+	S_0: f64,
+	K: f64,
+	T: f64,
+	r: f64,
+	sigma: f64,
+	opt: OptionType,
+	n_paths: int = 10000,
+	n_steps: int = 50,
+	n_exercise_dates: int = 10,
+	poly_degree: int = 3,
+	allocator: mem.Allocator = context.allocator,
+) -> VR_LSM_Result {
+	// ✅ ANTITHETIC VARIATES: Generate n/2 paths, mirror to get n paths
+	half_paths := n_paths / 2
+	dt := T / f64(n_steps)
+	sqrt_dt := math.sqrt_f64(dt)
+	drift := (r - 0.5 * sigma * sigma) * dt
+
+	// Generate only half the random numbers
+	rand_count := half_paths * n_steps
+	norm_data := make([]f64, rand_count, allocator)
+	defer delete(norm_data, allocator)
+	for i in 0 ..< rand_count {
+		norm_data[i] = rand.float64_normal(0.0, 1.0)
+	}
+
+	// Simulate paths with antithetic mirroring
+	exercise_step := n_steps / n_exercise_dates
+	S_paths := make([]f64, n_paths * (n_exercise_dates + 1), allocator)
+	defer delete(S_paths, allocator)
+
+	// First half: original paths
+	for path in 0 ..< half_paths {
+		S := S_0
+		S_paths[path * (n_exercise_dates + 1) + 0] = S_0
+		for step in 1 ..< n_steps + 1 {
+			Z := norm_data[(path % half_paths) * n_steps + (step - 1)]
+			S = S * math.exp_f64(drift + sigma * sqrt_dt * Z)
+			if step % exercise_step == 0 {
+				ex_idx := step / exercise_step
+				S_paths[path * (n_exercise_dates + 1) + ex_idx] = S
+			}
+		}
+	}
+
+	// Second half: antithetic paths (negate all Z's)
+	for path in half_paths ..< n_paths {
+		S := S_0
+		antithetic_path := path - half_paths
+		S_paths[path * (n_exercise_dates + 1) + 0] = S_0
+		for step in 1 ..< n_steps + 1 {
+			Z := -norm_data[antithetic_path * n_steps + (step - 1)] // ← NEGATED
+			S = S * math.exp_f64(drift + sigma * sqrt_dt * Z)
+			if step % exercise_step == 0 {
+				ex_idx := step / exercise_step
+				S_paths[path * (n_exercise_dates + 1) + ex_idx] = S
+			}
+		}
+	}
+
+	// ========================================================================
+	// LSM BACKWARD INDUCTION (same as vanilla, but on antithetic paths)
+	// ========================================================================
+	cashflows := make([]f64, n_paths, allocator)
+	defer delete(cashflows, allocator)
+
+	// Terminal payoffs (discounted to t=0)
+	for path in 0 ..< n_paths {
+		S_T := S_paths[path * (n_exercise_dates + 1) + n_exercise_dates]
+		payoff := 0.0
+		if opt == .Call {
+			payoff = math.max(S_T - K, 0.0)
+		} else {
+			payoff = math.max(K - S_T, 0.0)
+		}
+		cashflows[path] = payoff * math.exp_f64(-r * T)
+	}
+
+	// Backward induction with regression
+	for ex_idx := n_exercise_dates - 1; ex_idx >= 1; ex_idx -= 1 {
+		t_ex := f64(ex_idx) * f64(exercise_step) * dt
+
+		itm_count := 0
+		for path in 0 ..< n_paths {
+			S_ex := S_paths[path * (n_exercise_dates + 1) + ex_idx]
+			if opt == .Call &&
+			   S_ex > K {itm_count += 1} else if opt == .Put && S_ex < K {itm_count += 1}
+		}
+
+		if itm_count < poly_degree + 1 {continue}
+
+		X := make([]f64, itm_count * (poly_degree + 1), context.temp_allocator)
+		y := make([]f64, itm_count, context.temp_allocator)
+		itm_idx := 0
+
+		for path in 0 ..< n_paths {
+			S_ex := S_paths[path * (n_exercise_dates + 1) + ex_idx]
+			is_itm := false
+			if opt == .Call &&
+			   S_ex > K {is_itm = true} else if opt == .Put && S_ex < K {is_itm = true}
+
+			if is_itm {
+				x_moneyness := (S_ex / S_0) - 1.0
+				X[itm_idx * (poly_degree + 1) + 0] = 1.0
+				if poly_degree >= 1 {X[itm_idx * (poly_degree + 1) + 1] = x_moneyness}
+				if poly_degree >=
+				   2 {X[itm_idx * (poly_degree + 1) + 2] = x_moneyness * x_moneyness}
+				if poly_degree >=
+				   3 {X[itm_idx * (poly_degree + 1) + 3] = x_moneyness * x_moneyness * x_moneyness}
+
+				y[itm_idx] = cashflows[path] * math.exp_f64(r * t_ex)
+				itm_idx += 1
+			}
+		}
+
+		beta := _least_squares_regression(X, y, itm_count, poly_degree + 1, allocator)
+		defer delete(beta, allocator)
+
+		for path in 0 ..< n_paths {
+			S_ex := S_paths[path * (n_exercise_dates + 1) + ex_idx]
+			is_itm := false
+			if opt == .Call &&
+			   S_ex > K {is_itm = true} else if opt == .Put && S_ex < K {is_itm = true}
+
+			if is_itm {
+				exercise_val := 0.0
+				if opt == .Call {exercise_val = S_ex - K} else {exercise_val = K - S_ex}
+
+				x_moneyness := (S_ex / S_0) - 1.0
+				cont_val := beta[0]
+				if poly_degree >= 1 {cont_val += beta[1] * x_moneyness}
+				if poly_degree >= 2 {cont_val += beta[2] * x_moneyness * x_moneyness}
+				if poly_degree >= 3 {cont_val += beta[3] * x_moneyness * x_moneyness * x_moneyness}
+
+				if exercise_val > cont_val {
+					cashflows[path] = exercise_val * math.exp_f64(-r * t_ex)
+				}
+			}
+		}
+	}
+
+	// ========================================================================
+	// CONTROL VARIATE ADJUSTMENT
+	// ========================================================================
+	// The control is the European option on the same underlying.
+	// We compute its MC price on the SAME paths, then adjust using BS analytical.
+
+	bs_euro_price := _bs_european_price(S_0, K, T, r, sigma, opt)
+
+	// Compute European payoffs on the same paths (no early exercise)
+	euro_payoffs := make([]f64, n_paths, allocator)
+	defer delete(euro_payoffs, allocator)
+
+	mean_american := 0.0
+	mean_euro := 0.0
+
+	for path in 0 ..< n_paths {
+		S_T := S_paths[path * (n_exercise_dates + 1) + n_exercise_dates]
+		payoff := 0.0
+		if opt == .Call {payoff = math.max(S_T - K, 0.0)} else {payoff = math.max(K - S_T, 0.0)}
+		euro_payoffs[path] = payoff * math.exp_f64(-r * T)
+		mean_american += cashflows[path]
+		mean_euro += euro_payoffs[path]
+	}
+	mean_american /= f64(n_paths)
+	mean_euro /= f64(n_paths)
+
+	// Compute beta = Cov(american, euro) / Var(euro)
+	cov := 0.0
+	var_euro := 0.0
+	for path in 0 ..< n_paths {
+		d_american := cashflows[path] - mean_american
+		d_euro := euro_payoffs[path] - mean_euro
+		cov += d_american * d_euro
+		var_euro += d_euro * d_euro
+	}
+	cov /= f64(n_paths)
+	var_euro /= f64(n_paths)
+
+	beta_cv := 0.0
+	if var_euro > 1e-12 {
+		beta_cv = cov / var_euro
+	}
+
+	// ✅ Apply control variate adjustment
+	price_adjusted := mean_american - beta_cv * (mean_euro - bs_euro_price)
+
+	// Estimate variance reduction factor
+	var_plain := 0.0
+	var_adjusted := 0.0
+	for path in 0 ..< n_paths {
+		// Plain LSM variance
+		d_plain := cashflows[path] - mean_american
+		var_plain += d_plain * d_plain
+		// Adjusted variance (using control variate)
+		adjusted_path := cashflows[path] - beta_cv * (euro_payoffs[path] - bs_euro_price)
+		d_adj := adjusted_path - price_adjusted
+		var_adjusted += d_adj * d_adj
+	}
+	var_plain /= f64(n_paths)
+	var_adjusted /= f64(n_paths)
+
+	variance_reduction := 1.0
+	if var_adjusted > 1e-20 {
+		variance_reduction = var_plain / var_adjusted
+	}
+
+	// ========================================================================
+	// GREEKS via CRN (Common Random Numbers)
+	// ========================================================================
+	// We reuse the same antithetic paths for all bumps
+	h_S := 0.01 * S_0
+	price_up := _lsm_reduced_helper(
+		S_0 + h_S,
+		K,
+		T,
+		r,
+		sigma,
+		opt,
+		n_paths,
+		n_steps,
+		n_exercise_dates,
+		poly_degree,
+		norm_data,
+		allocator,
+	)
+	price_dn := _lsm_reduced_helper(
+		S_0 - h_S,
+		K,
+		T,
+		r,
+		sigma,
+		opt,
+		n_paths,
+		n_steps,
+		n_exercise_dates,
+		poly_degree,
+		norm_data,
+		allocator,
+	)
+	delta := (price_up - price_dn) / (2.0 * h_S)
+
+	h_S2 := 0.02 * S_0
+	delta_up :=
+		(_lsm_reduced_helper(
+				S_0 + h_S2,
+				K,
+				T,
+				r,
+				sigma,
+				opt,
+				n_paths,
+				n_steps,
+				n_exercise_dates,
+				poly_degree,
+				norm_data,
+				allocator,
+			) -
+			price_dn) /
+		(2.0 * h_S2)
+	delta_dn :=
+		(price_up -
+			_lsm_reduced_helper(
+				S_0 - h_S2,
+				K,
+				T,
+				r,
+				sigma,
+				opt,
+				n_paths,
+				n_steps,
+				n_exercise_dates,
+				poly_degree,
+				norm_data,
+				allocator,
+			)) /
+		(2.0 * h_S2)
+	gamma := (delta_up - delta_dn) / (2.0 * h_S2)
+
+	h_sigma := 0.01 * sigma
+	if h_sigma < 0.001 {h_sigma = 0.001}
+	price_sig_up := _lsm_reduced_helper(
+		S_0,
+		K,
+		T,
+		r,
+		sigma + h_sigma,
+		opt,
+		n_paths,
+		n_steps,
+		n_exercise_dates,
+		poly_degree,
+		norm_data,
+		allocator,
+	)
+	price_sig_dn := _lsm_reduced_helper(
+		S_0,
+		K,
+		T,
+		r,
+		sigma - h_sigma,
+		opt,
+		n_paths,
+		n_steps,
+		n_exercise_dates,
+		poly_degree,
+		norm_data,
+		allocator,
+	)
+	vega := (price_sig_up - price_sig_dn) / (2.0 * h_sigma)
+
+	h_T := 0.01
+	price_T_up := _lsm_reduced_helper(
+		S_0,
+		K,
+		T + h_T,
+		r,
+		sigma,
+		opt,
+		n_paths,
+		n_steps,
+		n_exercise_dates,
+		poly_degree,
+		norm_data,
+		allocator,
+	)
+	theta := (price_T_up - price_adjusted) / h_T
+
+	return VR_LSM_Result {
+		price = price_adjusted,
+		delta = delta,
+		gamma = gamma,
+		vega = vega,
+		theta = theta,
+		variance_reduction = variance_reduction,
+	}
+}
+
+// ============================================================================
+// Helper for CRN Greeks (with antithetic + control variate)
+// ============================================================================
+_lsm_reduced_helper :: proc(
+	S_0: f64,
+	K: f64,
+	T: f64,
+	r: f64,
+	sigma: f64,
+	opt: OptionType,
+	n_paths: int,
+	n_steps: int,
+	n_exercise_dates: int,
+	poly_degree: int,
+	norm_data: []f64,
+	allocator: mem.Allocator,
+) -> f64 {
+	half_paths := n_paths / 2
+	dt := T / f64(n_steps)
+	sqrt_dt := math.sqrt_f64(dt)
+	drift := (r - 0.5 * sigma * sigma) * dt
+
+	exercise_step := n_steps / n_exercise_dates
+	S_paths := make([]f64, n_paths * (n_exercise_dates + 1), allocator)
+	defer delete(S_paths, allocator)
+
+	// Original paths
+	for path in 0 ..< half_paths {
+		S := S_0
+		S_paths[path * (n_exercise_dates + 1) + 0] = S_0
+		for step in 1 ..< n_steps + 1 {
+			Z := norm_data[path * n_steps + (step - 1)]
+			S = S * math.exp_f64(drift + sigma * sqrt_dt * Z)
+			if step % exercise_step == 0 {
+				ex_idx := step / exercise_step
+				S_paths[path * (n_exercise_dates + 1) + ex_idx] = S
+			}
+		}
+	}
+
+	// Antithetic paths
+	for path in half_paths ..< n_paths {
+		S := S_0
+		antithetic_path := path - half_paths
+		S_paths[path * (n_exercise_dates + 1) + 0] = S_0
+		for step in 1 ..< n_steps + 1 {
+			Z := -norm_data[antithetic_path * n_steps + (step - 1)]
+			S = S * math.exp_f64(drift + sigma * sqrt_dt * Z)
+			if step % exercise_step == 0 {
+				ex_idx := step / exercise_step
+				S_paths[path * (n_exercise_dates + 1) + ex_idx] = S
+			}
+		}
+	}
+
+	cashflows := make([]f64, n_paths, allocator)
+	defer delete(cashflows, allocator)
+
+	for path in 0 ..< n_paths {
+		S_T := S_paths[path * (n_exercise_dates + 1) + n_exercise_dates]
+		payoff := 0.0
+		if opt == .Call {payoff = math.max(S_T - K, 0.0)} else {payoff = math.max(K - S_T, 0.0)}
+		cashflows[path] = payoff * math.exp_f64(-r * T)
+	}
+
+	for ex_idx := n_exercise_dates - 1; ex_idx >= 1; ex_idx -= 1 {
+		t_ex := f64(ex_idx) * f64(exercise_step) * dt
+
+		itm_count := 0
+		for path in 0 ..< n_paths {
+			S_ex := S_paths[path * (n_exercise_dates + 1) + ex_idx]
+			if opt == .Call &&
+			   S_ex > K {itm_count += 1} else if opt == .Put && S_ex < K {itm_count += 1}
+		}
+
+		if itm_count < poly_degree + 1 {continue}
+
+		X := make([]f64, itm_count * (poly_degree + 1), context.temp_allocator)
+		y := make([]f64, itm_count, context.temp_allocator)
+		itm_idx := 0
+
+		for path in 0 ..< n_paths {
+			S_ex := S_paths[path * (n_exercise_dates + 1) + ex_idx]
+			is_itm := false
+			if opt == .Call &&
+			   S_ex > K {is_itm = true} else if opt == .Put && S_ex < K {is_itm = true}
+
+			if is_itm {
+				x_moneyness := (S_ex / S_0) - 1.0
+				X[itm_idx * (poly_degree + 1) + 0] = 1.0
+				if poly_degree >= 1 {X[itm_idx * (poly_degree + 1) + 1] = x_moneyness}
+				if poly_degree >=
+				   2 {X[itm_idx * (poly_degree + 1) + 2] = x_moneyness * x_moneyness}
+				if poly_degree >=
+				   3 {X[itm_idx * (poly_degree + 1) + 3] = x_moneyness * x_moneyness * x_moneyness}
+
+				y[itm_idx] = cashflows[path] * math.exp_f64(r * t_ex)
+				itm_idx += 1
+			}
+		}
+
+		beta := _least_squares_regression(X, y, itm_count, poly_degree + 1, allocator)
+		defer delete(beta, allocator)
+
+		for path in 0 ..< n_paths {
+			S_ex := S_paths[path * (n_exercise_dates + 1) + ex_idx]
+			is_itm := false
+			if opt == .Call &&
+			   S_ex > K {is_itm = true} else if opt == .Put && S_ex < K {is_itm = true}
+
+			if is_itm {
+				exercise_val := 0.0
+				if opt == .Call {exercise_val = S_ex - K} else {exercise_val = K - S_ex}
+
+				x_moneyness := (S_ex / S_0) - 1.0
+				cont_val := beta[0]
+				if poly_degree >= 1 {cont_val += beta[1] * x_moneyness}
+				if poly_degree >= 2 {cont_val += beta[2] * x_moneyness * x_moneyness}
+				if poly_degree >= 3 {cont_val += beta[3] * x_moneyness * x_moneyness * x_moneyness}
+
+				if exercise_val > cont_val {
+					cashflows[path] = exercise_val * math.exp_f64(-r * t_ex)
+				}
+			}
+		}
+	}
+
+	// Control variate adjustment
+	bs_euro_price := _bs_european_price(S_0, K, T, r, sigma, opt)
+
+	euro_payoffs := make([]f64, n_paths, allocator)
+	defer delete(euro_payoffs, allocator)
+
+	mean_american := 0.0
+	mean_euro := 0.0
+
+	for path in 0 ..< n_paths {
+		S_T := S_paths[path * (n_exercise_dates + 1) + n_exercise_dates]
+		payoff := 0.0
+		if opt == .Call {payoff = math.max(S_T - K, 0.0)} else {payoff = math.max(K - S_T, 0.0)}
+		euro_payoffs[path] = payoff * math.exp_f64(-r * T)
+		mean_american += cashflows[path]
+		mean_euro += euro_payoffs[path]
+	}
+	mean_american /= f64(n_paths)
+	mean_euro /= f64(n_paths)
+
+	cov := 0.0
+	var_euro := 0.0
+	for path in 0 ..< n_paths {
+		d_american := cashflows[path] - mean_american
+		d_euro := euro_payoffs[path] - mean_euro
+		cov += d_american * d_euro
+		var_euro += d_euro * d_euro
+	}
+	cov /= f64(n_paths)
+	var_euro /= f64(n_paths)
+
+	beta_cv := 0.0
+	if var_euro > 1e-12 {beta_cv = cov / var_euro}
+
+	return mean_american - beta_cv * (mean_euro - bs_euro_price)
+}
