@@ -34,10 +34,17 @@ garch_real_data_test :: proc(allocator: mem.Allocator) {
 	for i in 1 ..< n {
 		prev_close, _ := w.column_at_float(&spy_df.columns[4], i - 1)
 		curr_close, _ := w.column_at_float(&spy_df.columns[4], i)
+
+		if curr_close / prev_close == 0 || prev_close == 0 {
+			fmt.printf("Divion by zero detected %f", prev_close)
+			continue
+		}
+
+
 		returns[i - 1] = math.ln_f64(curr_close / prev_close)
 		dates[i - 1] = f64(i)
 	}
-
+	w.dataframe_pretty_print(&spy_df)
 	// Compute mean and std
 	mean_ret := 0.0
 	for r in returns {
@@ -781,6 +788,10 @@ garch_real_data_test :: proc(allocator: mem.Allocator) {
 	for i in 1 ..< n_qqq {
 		prev_close, _ := w.column_at_float(&qqq_df.columns[4], i - 1)
 		curr_close, _ := w.column_at_float(&qqq_df.columns[4], i)
+		if curr_close / prev_close == 0 || prev_close == 0 {
+			fmt.printf("Divion by zero detected %f", prev_close)
+			continue
+		}
 		qqq_returns[i - 1] = math.ln_f64(curr_close / prev_close)
 	}
 
@@ -791,6 +802,10 @@ garch_real_data_test :: proc(allocator: mem.Allocator) {
 	for i in 1 ..< n_iwm {
 		prev_close, _ := w.column_at_float(&iwm_df.columns[4], i - 1)
 		curr_close, _ := w.column_at_float(&iwm_df.columns[4], i)
+		if curr_close / prev_close == 0 || prev_close == 0 {
+			fmt.printf("Divion by zero detected %f", prev_close)
+			continue
+		}
 		iwm_returns[i - 1] = math.ln_f64(curr_close / prev_close)
 	}
 

@@ -28,6 +28,9 @@ rs_garch_test :: proc(allocator: mem.Allocator) {
 	for i in 1 ..< n {
 		prev_close, _ := w.column_at_float(&spy_df.columns[4], i - 1)
 		curr_close, _ := w.column_at_float(&spy_df.columns[4], i)
+		if curr_close / prev_close == 0.0 || prev_close == 0 {
+			continue
+		}
 		returns[i - 1] = math.ln_f64(curr_close / prev_close)
 		dates[i - 1] = f64(i)
 	}

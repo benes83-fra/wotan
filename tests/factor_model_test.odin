@@ -82,11 +82,17 @@ factor_model_test :: proc(allocator: mem.Allocator) {
 		for a in 0 ..< len(assets) {
 			prev_close, _ := w.column_at_float(&asset_dfs[a].columns[4], idx - 1)
 			curr_close, _ := w.column_at_float(&asset_dfs[a].columns[4], idx)
+			if curr_close / prev_close == 0.0 || prev_close == 0 {
+				continue
+			}
 			assets_returns[t][a] = math.ln_f64(curr_close / prev_close)
 		}
 		for f in 0 ..< len(factors) {
 			prev_close, _ := w.column_at_float(&factor_dfs[f].columns[4], idx - 1)
 			curr_close, _ := w.column_at_float(&factor_dfs[f].columns[4], idx)
+			if curr_close / prev_close == 0.0 || prev_close == 0 {
+				continue
+			}
 			factors_returns[t][f] = math.ln_f64(curr_close / prev_close)
 		}
 	}

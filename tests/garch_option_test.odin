@@ -31,11 +31,18 @@ garch_options_test :: proc(allocator: mem.Allocator) {
 		if i > 0 {
 			prev_close := close_prices[i - 1]
 			curr_close := close_prices[i]
+			if curr_close / prev_close == 0.0 || prev_close == 0 {
+				continue
+			}
 			returns[i - 1] = math.ln_f64(curr_close / prev_close)
 		}
 	}
 
 	current_price := close_prices[n - 1]
+	if current_price == 0 {
+		fmt.println("Latest Close is 0.0, taking previous as a fallback")
+		current_price = close_prices[n - 2]
+	}
 	residuals := ts.extract_residuals(returns, main_alloc)
 	defer delete(residuals, main_alloc)
 

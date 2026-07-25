@@ -25,7 +25,10 @@ exotic_pricing_test :: proc(allocator: mem.Allocator) {
 
 	last_idx := df.rows - 1
 	spot, _ := w.column_at_float(&df.columns[4], last_idx)
-
+	if spot == 0.0 {
+		fmt.println("Fall back, also latest Spot is 0, take previous Spot")
+		spot, _ = w.column_at_float(&df.columns[4], last_idx - 1)
+	}
 	surface := make([dynamic]fin.VolSurfacePoint, 0, allocator)
 	defer delete(surface)
 
