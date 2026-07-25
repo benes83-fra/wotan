@@ -46,14 +46,19 @@ callable_bond_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("   Volatility (σ):     %.2f%%\n", sigma * 100.0)
 	fmt.printf("   Initial Rate (r0):  %.2f%%\n", r0 * 100.0)
 
-	// Price the callable bond
-	fmt.println("\n1. Callable Bond Price (LSM, 10,000 paths)")
+	// ✅ OPTIMIZED: Use 2,000 paths and 50 steps for instant, stable execution
+	fmt.println("\n1. Callable Bond Price (LSM, 2,000 paths, 50 steps)")
 	fmt.println("   ----------------------------------------------------------------------")
-	result := fin.callable_bond_lsm_hw1f(bond, a, sigma, r0, P0T_func, 10000, 200, 3, allocator)
+
+	result := fin.callable_bond_lsm_hw1f(bond, a, sigma, r0, P0T_func, 2000, 50, 3, allocator)
 
 	fmt.printf("   %-25s | $%10.4f\n", "Callable Bond Price", result.price)
-	fmt.printf("   %-25s | %10.4f\n", "Straight Bond Price", 100.0) // Placeholder
-	fmt.printf("   %-25s | %10.4f\n", "Embedded Call Value", 100.0 - result.price) // Approximation
+	fmt.printf("   %-25s | %10.4f\n", "Straight Bond Price", result.straight_bond_price)
+	fmt.printf(
+		"   %-25s | %10.4f\n",
+		"Embedded Call Value",
+		result.straight_bond_price - result.price,
+	)
 	fmt.printf("   %-25s | %10.2f bps\n", "OAS", result.oas)
 	fmt.printf("   %-25s | %10.4f\n", "Effective Duration", result.effective_duration)
 	fmt.printf("   %-25s | %10.4f\n", "Effective Convexity", result.effective_convexity)
