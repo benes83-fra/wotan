@@ -1,7 +1,6 @@
 package finance
 
 import l "../linalg"
-
 import "core:math"
 import rand "core:math/rand"
 import "core:mem"
@@ -48,11 +47,8 @@ _hw1f_zero_coupon_bond :: proc(
 	if t >= T {return 1.0}
 
 	tau := T - t
-
-	// B(t,T)
 	B := (1.0 - math.exp_f64(-a * tau)) / a
 
-	// Variance term v(t,T)^2
 	v_sq :=
 		(sigma * sigma) /
 		(2.0 * a * a * a) *
@@ -60,19 +56,15 @@ _hw1f_zero_coupon_bond :: proc(
 		(1.0 - math.exp_f64(-a * tau)) *
 		(math.exp_f64(2.0 * a * t) - 1.0)
 
-	// Forward rate f(0,t) ≈ -d/dt ln(P(0,t))
-	// Approximate with finite difference
 	h := 0.0001
 	P0t := P0T_func(t)
 	P0t_h := P0T_func(t + h)
 	f_0t := -(math.ln(P0t_h) - math.ln(P0t)) / h
 
-	// A(t,T)
 	P0T := P0T_func(T)
 	log_A := math.ln(P0T / P0t) + B * f_0t - 0.5 * v_sq
 	A := math.exp_f64(log_A)
 
-	// P(t,T) = A(t,T) * exp(-B(t,T) * r(t))
 	return A * math.exp_f64(-B * r_t)
 }
 
@@ -90,18 +82,15 @@ _price_straight_bond :: proc(
 	price := 0.0
 	coupon_payment := bond.face_value * bond.coupon_rate / f64(bond.coupon_frequency)
 
-	// Generate all cash flow dates
 	n_periods := int(bond.maturity * f64(bond.coupon_frequency))
 	for i in 1 ..< n_periods + 1 {
 		t_i := f64(i) / f64(bond.coupon_frequency)
-		if t_i <= t {continue} 	// Skip past cash flows
+		if t_i <= t {continue}
 
 		cf: f64
 		if i == n_periods {
-			// Final payment: coupon + principal
 			cf = coupon_payment + bond.face_value
 		} else {
-			// Coupon only
 			cf = coupon_payment
 		}
 
@@ -111,32 +100,32 @@ _price_straight_bond :: proc(
 
 	return price
 }
-// ============================================================================
-// LSM FOR CALLABLE BONDS (HULL-WHITE 1F) - OPTIMIZED
-// ============================================================================
-callable_bond_lsm_hw1f :: proc(
-	bond: CallableBond,
-	a: f64, // HW mean reversion
-	sigma: f64, // HW volatility
-	r0: f64, // Initial short rate
-	P0T_func: proc(_: f64) -> f64, // Market discount curve
-	n_paths: int = 10000,
-	n_steps: int = 100,
-	poly_degree: int = 3,
-	allocator: mem.Allocator = context.allocator,
-) -> CallableBondResult {
-	bond := bond
 
+// ============================================================================
+// CORE PRICING ENGINE (No Greeks, prevents infinite recursion)
+// ============================================================================
+_callable_bond_price_and_prob :: proc(
+	bond: CallableBond,
+	a: f64,
+	sigma: f64,
+	r0: f64,
+	P0T_func: proc(_: f64) -> f64,
+	n_paths: int,
+	n_steps: int,
+	poly_degree: int,
+	allocator: mem.Allocator,
+) -> (
+	f64,
+	f64,
+) { 	// Returns (price, call_probability)
+	bond := bond
 	T := bond.maturity
 	dt := T / f64(n_steps)
 
-	// ========================================================================
-	// 1. SIMULATE SHORT RATE PATHS (Hull-White 1F)
-	// ========================================================================
 	theta := make([]f64, n_steps + 1, allocator)
 	defer delete(theta, allocator)
 	for i in 0 ..< n_steps + 1 {
-		theta[i] = a * r0 + 0.02 // Simplified constant approximation
+		theta[i] = a * r0 + 0.02
 	}
 
 	rand_count := n_paths * n_steps
@@ -152,20 +141,15 @@ callable_bond_lsm_hw1f :: proc(
 	rand_idx := 0
 	for path in 0 ..< n_paths {
 		r_paths[path * (n_steps + 1) + 0] = r0
-
 		for step in 1 ..< n_steps + 1 {
 			r_prev := r_paths[path * (n_steps + 1) + (step - 1)]
 			Z := norm_data[rand_idx]
 			rand_idx += 1
-
 			dr := (theta[step] - a * r_prev) * dt + sigma * math.sqrt_f64(dt) * Z
 			r_paths[path * (n_steps + 1) + step] = r_prev + dr
 		}
 	}
 
-	// ========================================================================
-	// 2. COMPUTE CASH FLOWS AT EACH CALL DATE
-	// ========================================================================
 	call_dates := bond.call_schedule
 	n_call_dates := len(call_dates)
 
@@ -174,13 +158,9 @@ callable_bond_lsm_hw1f :: proc(
 
 	for path in 0 ..< n_paths {
 		r_0 := r_paths[path * (n_steps + 1) + 0]
-		straight_value := _price_straight_bond(&bond, r_0, 0.0, a, sigma, P0T_func)
-		cashflows[path] = straight_value
+		cashflows[path] = _price_straight_bond(&bond, r_0, 0.0, a, sigma, P0T_func)
 	}
 
-	// ========================================================================
-	// 3. BACKWARD INDUCTION (LSM)
-	// ========================================================================
 	called := make([]bool, n_paths, allocator)
 	defer delete(called, allocator)
 	called_count := 0
@@ -255,7 +235,6 @@ callable_bond_lsm_hw1f :: proc(
 						integral_r += r_paths[path * (n_steps + 1) + s] * dt
 					}
 					disc_factor := math.exp_f64(-integral_r)
-
 					cashflows[path] = call_price * disc_factor
 					called[path] = true
 					called_count += 1
@@ -264,30 +243,51 @@ callable_bond_lsm_hw1f :: proc(
 		}
 	}
 
-	// ========================================================================
-	// 4. COMPUTE FINAL RESULTS
-	// ========================================================================
 	price := 0.0
 	for path in 0 ..< n_paths {
 		price += cashflows[path]
 	}
-	price /= f64(n_paths)
 
-	call_prob := f64(called_count) / f64(n_paths)
+	return price / f64(n_paths), f64(called_count) / f64(n_paths)
+}
 
-	// Recalculate straight bond price at r0 for accurate embedded value
+// ============================================================================
+// MAIN API: LSM FOR CALLABLE BONDS (HULL-WHITE 1F)
+// ============================================================================
+callable_bond_lsm_hw1f :: proc(
+	bond: CallableBond,
+	a: f64,
+	sigma: f64,
+	r0: f64,
+	P0T_func: proc(_: f64) -> f64,
+	n_paths: int = 10000,
+	n_steps: int = 100,
+	poly_degree: int = 3,
+	allocator: mem.Allocator = context.allocator,
+) -> CallableBondResult {
+	bond := bond
+
+	// 1. Get main price and call probability
+	price, call_prob := _callable_bond_price_and_prob(
+		bond,
+		a,
+		sigma,
+		r0,
+		P0T_func,
+		n_paths,
+		n_steps,
+		poly_degree,
+		allocator,
+	)
 	straight_price := _price_straight_bond(&bond, r0, 0.0, a, sigma, P0T_func)
-	embedded_call := straight_price - price
 
-	// ========================================================================
-	// 5. COMPUTE GREEKS (OPTIMIZED: Use max 25% of paths to prevent OOM/Slowdown)
-	// ========================================================================
+	// 2. Compute Greeks using a fraction of paths to prevent OOM/Slowdown
 	greek_paths := n_paths / 4
-	if greek_paths < 500 {greek_paths = 500} 	// Minimum 500 for stability
+	if greek_paths < 500 {greek_paths = 500}
 
 	h := 0.0001 // 1 bp parallel shift
-	price_up := _callable_bond_helper_shift(
-		&bond,
+	price_up, _ := _callable_bond_price_and_prob(
+		bond,
 		a,
 		sigma,
 		r0 + h,
@@ -297,8 +297,8 @@ callable_bond_lsm_hw1f :: proc(
 		poly_degree,
 		allocator,
 	)
-	price_dn := _callable_bond_helper_shift(
-		&bond,
+	price_dn, _ := _callable_bond_price_and_prob(
+		bond,
 		a,
 		sigma,
 		r0 - h,
@@ -314,39 +314,11 @@ callable_bond_lsm_hw1f :: proc(
 
 	return CallableBondResult {
 		price               = price,
-		oas                 = 0.0, // Requires root-finding against market price
 		straight_bond_price = straight_price,
-		embedded_call_value = embedded_call,
+		embedded_call_value = straight_price - price,
+		oas                 = 0.0, // Requires root-finding against market price
 		effective_duration  = effective_duration,
 		effective_convexity = effective_convexity,
 		call_probability    = call_prob,
 	}
-}
-
-// Helper for duration/convexity calculation
-_callable_bond_helper_shift :: proc(
-	bond: ^CallableBond,
-	a: f64,
-	sigma: f64,
-	r0: f64,
-	P0T_func: proc(_: f64) -> f64,
-	n_paths: int,
-	n_steps: int,
-	poly_degree: int,
-	allocator: mem.Allocator,
-) -> f64 {
-	// Simplified: just rerun LSM with shifted r0
-	// In production, reuse the same random paths for CRN
-	result := callable_bond_lsm_hw1f(
-		bond^,
-		a,
-		sigma,
-		r0,
-		P0T_func,
-		n_paths,
-		n_steps,
-		poly_degree,
-		allocator,
-	)
-	return result.price
 }
