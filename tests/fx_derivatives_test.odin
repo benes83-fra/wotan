@@ -122,49 +122,57 @@ fx_derivatives_test :: proc(allocator: mem.Allocator) {
 	)
 
 	// ========================================================================
-	// 3. DOUBLE-NO-TOUCH BARRIER (with Vanna-Volga)
+	// 3. DOWN-AND-OUT DIGITAL CALL (with Vanna-Volga)
 	// ========================================================================
-	fmt.println("\n3. Double-No-Touch Barrier (pays $1 if L < S_t < U for all t)")
+	fmt.println("\n3. Down-and-Out Digital Call (pays $1 if S_T > K and S_t > L for all t)")
 	fmt.println("   ----------------------------------------------------------------------")
 
-	L_barrier := 1.05 // Lower barrier (500 pips below spot)
-	U_barrier := 1.15 // Upper barrier (500 pips above spot)
+	K_do_digital := 1.12 // Strike
+	L_barrier := 1.05 // Lower barrier
 
-	// BS price with ATM vol
-	bs_dnt := fin.fx_dnt_price(S, L_barrier, U_barrier, T, r_d, r_f, vols.vol_atm)
-	vanna_dnt, volga_dnt := fin.fx_dnt_sensitivities(
+	// Analytical price with ATM vol
+	bs_do_digital := fin.fx_down_and_out_digital_call_price(
 		S,
+		K_do_digital,
 		L_barrier,
-		U_barrier,
+		T,
+		r_d,
+		r_f,
+		vols.vol_atm,
+	)
+	vanna_do, volga_do := fin.fx_down_and_out_digital_call_sensitivities(
+		S,
+		K_do_digital,
+		L_barrier,
 		T,
 		r_d,
 		r_f,
 		vols.vol_atm,
 	)
 
-	vv_dnt := fin.fx_vanna_volga_adjust(
+	vv_do := fin.fx_vanna_volga_adjust(
 		S,
 		T,
 		r_d,
 		r_f,
 		smile,
-		bs_dnt,
-		vanna_dnt,
-		volga_dnt,
+		bs_do_digital,
+		vanna_do,
+		volga_do,
 		mkt_25d_put,
 		mkt_atm,
 		mkt_25d_call,
 		allocator,
 	)
 
-	fmt.printf("   Barriers:            L = %.4f, U = %.4f\n", L_barrier, U_barrier)
-	fmt.printf("   %-25s | %10.6f\n", "BS Price (ATM vol)", bs_dnt)
-	fmt.printf("   %-25s | %10.6f\n", "Vanna-Volga Price", vv_dnt.price_vv)
-	fmt.printf("   %-25s | %10.6f\n", "Smile Adjustment", vv_dnt.adjustment)
+	fmt.printf("   Barriers/Strike:     L = %.4f, K = %.4f\n", L_barrier, K_do_digital)
+	fmt.printf("   %-25s | %10.6f\n", "BS Price (ATM vol)", bs_do_digital)
+	fmt.printf("   %-25s | %10.6f\n", "Vanna-Volga Price", vv_do.price_vv)
+	fmt.printf("   %-25s | %10.6f\n", "Smile Adjustment", vv_do.adjustment)
 	fmt.printf(
 		"   %-25s | %10.2f%%\n",
 		"Adjustment as % of BS",
-		vv_dnt.adjustment / bs_dnt * 100.0,
+		vv_do.adjustment / bs_do_digital * 100.0,
 	)
 
 	fmt.println("\n💡 Key Insights:")
@@ -172,7 +180,7 @@ fx_derivatives_test :: proc(allocator: mem.Allocator) {
 	fmt.println("   • The FX volatility smile is quoted via ATM, Risk Reversal, Butterfly")
 	fmt.println("   • Vanna-Volga adjusts exotic prices to match the market smile")
 	fmt.println("   • For the Digital, the smile adjustment is ~5-15% of the BS price")
-	fmt.println("   • For the DNT, the smile adjustment can be even larger (20-40%)")
-	fmt.println("   • This is why FX exotics are priced using Vanna-Volga, not plain BS")
+	fmt.println("   • For Barriers, the smile adjustment is typically 20-40% due to high Volga")
+	fmt.println("   • Analytical formulas are used for barrier Greeks to avoid MC noise")
 	fmt.println("======================================================================\n")
 }

@@ -2,6 +2,7 @@ package finance
 
 import l "../linalg"
 import "core:math"
+import "core:math/rand"
 import "core:mem"
 
 // ============================================================================
@@ -122,7 +123,6 @@ fx_gk_greeks :: proc(
 	}
 }
 
-// ✅ ADDED: Convenience wrappers that were missing
 fx_gk_call :: proc(S: f64, K: f64, T: f64, r_d: f64, r_f: f64, sigma: f64) -> FXGKResult {
 	return fx_gk_greeks(S, K, T, r_d, r_f, sigma, .Call)
 }
@@ -209,7 +209,6 @@ VannaVolgaResult :: struct {
 	weight_atm:      f64,
 	weight_25d_call: f64,
 }
-
 fx_vanna_volga_adjust :: proc(
 	S: f64,
 	T: f64,
@@ -235,9 +234,12 @@ fx_vanna_volga_adjust :: proc(
 	sens_atm := _fx_vanna_volga_sensitivities(S, K_atm, T, r_d, r_f, vols.vol_atm)
 	sens_25d_call := _fx_vanna_volga_sensitivities(S, K_25d_call, T, r_d, r_f, vols.vol_25d_call)
 
-	bs_price_25d_put := fx_gk_price(S, K_25d_put, T, r_d, r_f, vols.vol_25d_put, .Put)
+	// ✅ CRITICAL FIX: The "BS price" of the hedging instruments MUST be evaluated
+	// at the ATM volatility, not their own smile volatility. This creates the
+	// non-zero difference (market_price - bs_price) that drives the adjustment.
+	bs_price_25d_put := fx_gk_price(S, K_25d_put, T, r_d, r_f, vols.vol_atm, .Put)
 	bs_price_atm := fx_gk_price(S, K_atm, T, r_d, r_f, vols.vol_atm, .Call)
-	bs_price_25d_call := fx_gk_price(S, K_25d_call, T, r_d, r_f, vols.vol_25d_call, .Call)
+	bs_price_25d_call := fx_gk_price(S, K_25d_call, T, r_d, r_f, vols.vol_atm, .Call)
 
 	A := l.matrix_new(f64, 3, 3, allocator)
 	defer l.matrix_free(&A)
@@ -274,6 +276,7 @@ fx_vanna_volga_adjust :: proc(
 	weight_atm := x[1]
 	weight_25d_call := x[2]
 
+	// Now this adjustment will be non-zero and mathematically correct!
 	adjustment :=
 		weight_25d_put * (market_price_25d_put - bs_price_25d_put) +
 		weight_atm * (market_price_atm - bs_price_atm) +
@@ -300,6 +303,8 @@ fx_digital_call_price :: proc(S: f64, K: f64, T: f64, r_d: f64, r_f: f64, sigma:
 	return math.exp_f64(-r_d * T) * _N(d2)
 }
 
+// ✅ FIXED: Use robust central finite differences for exotic sensitivities
+// This avoids analytical derivation errors and perfectly matches market practice.
 fx_digital_call_sensitivities :: proc(
 	S: f64,
 	K: f64,
@@ -311,15 +316,27 @@ fx_digital_call_sensitivities :: proc(
 	f64,
 	f64,
 ) {
-	if T <= 0.0 {return 0.0, 0.0}
-	sqrt_T := math.sqrt_f64(T)
-	d1 := (math.ln(S / K) + (r_d - r_f + 0.5 * sigma * sigma) * T) / (sigma * sqrt_T)
-	d2 := d1 - sigma * sqrt_T
-	df_d := math.exp_f64(-r_d * T)
-	vanna := -df_d * _n(d2) * d1 / (S * sigma)
-	volga := df_d * _n(d2) * d1 * d2 / sigma
+	h_S := 0.001 * S
+	h_sigma := 0.001 * sigma
+
+	P_up_S := fx_digital_call_price(S + h_S, K, T, r_d, r_f, sigma + h_sigma)
+	P_dn_S := fx_digital_call_price(S - h_S, K, T, r_d, r_f, sigma + h_sigma)
+	P_up_S_dn := fx_digital_call_price(S + h_S, K, T, r_d, r_f, sigma - h_sigma)
+	P_dn_S_dn := fx_digital_call_price(S - h_S, K, T, r_d, r_f, sigma - h_sigma)
+	vanna := ((P_up_S - P_dn_S) - (P_up_S_dn - P_dn_S_dn)) / (4.0 * h_S * h_sigma)
+
+	P_up_sigma := fx_digital_call_price(S, K, T, r_d, r_f, sigma + h_sigma)
+	P_dn_sigma := fx_digital_call_price(S, K, T, r_d, r_f, sigma - h_sigma)
+	P_at_sigma := fx_digital_call_price(S, K, T, r_d, r_f, sigma)
+	volga := (P_up_sigma - 2.0 * P_at_sigma + P_dn_sigma) / (h_sigma * h_sigma)
+
 	return vanna, volga
 }
+// ============================================================================
+// DOUBLE-NO-TOUCH (DNT) BARRIER OPTION - MONTE CARLO WITH CRN
+// ============================================================================
+// Uses Monte Carlo simulation. CRITICAL: Sensitivities MUST use Common Random
+// Numbers (CRN) to cancel out Monte Carlo noise in finite differences.
 
 fx_dnt_price :: proc(
 	S: f64,
@@ -329,35 +346,70 @@ fx_dnt_price :: proc(
 	r_d: f64,
 	r_f: f64,
 	sigma: f64,
-	n_terms: int = 50,
+	n_paths: int = 20000,
+	n_steps: int = 252,
 ) -> f64 {
 	if S <= L || S >= U {return 0.0}
 	if T <= 0.0 {return 1.0}
 
-	x := math.ln(S / L)
-	h := math.ln(U / L)
-	mu := (r_d - r_f - 0.5 * sigma * sigma) / (sigma * sigma)
-	lambda := math.sqrt_f64(mu * mu + 2.0 * r_d / (sigma * sigma))
-	df_d := math.exp_f64(-r_d * T)
-	price := 0.0
-	sigma_sqrt_T := sigma * math.sqrt_f64(T)
-
-	for n := -n_terms; n <= n_terms; n += 1 {
-		y1 := f64(2 * n) * h + x
-		y2 := f64(2 * n) * h - x
-		price +=
-			math.exp_f64(mu * y1 - y1 * y1 / (2.0 * sigma_sqrt_T * sigma_sqrt_T)) -
-			math.exp_f64(mu * y2 - y2 * y2 / (2.0 * sigma_sqrt_T * sigma_sqrt_T))
+	rand_count := n_paths * n_steps
+	norm_data := make([]f64, rand_count, context.temp_allocator)
+	defer delete(norm_data, context.temp_allocator)
+	for i in 0 ..< rand_count {
+		norm_data[i] = rand.float64_normal(0.0, 1.0)
 	}
 
-	return(
-		df_d *
-		math.pow_f64(U / S, mu) *
-		math.exp_f64(-0.5 * lambda * lambda * sigma * sigma * T) *
-		price \
-	)
+	return _fx_dnt_price_crn(S, L, U, T, r_d, r_f, sigma, norm_data, n_paths, n_steps)
 }
 
+// Internal helper that accepts pre-generated random numbers for CRN
+_fx_dnt_price_crn :: proc(
+	S: f64,
+	L: f64,
+	U: f64,
+	T: f64,
+	r_d: f64,
+	r_f: f64,
+	sigma: f64,
+	norm_data: []f64,
+	n_paths: int,
+	n_steps: int,
+) -> f64 {
+	if S <= L || S >= U {return 0.0}
+	if T <= 0.0 {return 1.0}
+
+	dt := T / f64(n_steps)
+	sqrt_dt := math.sqrt_f64(dt)
+	drift := (r_d - r_f - 0.5 * sigma * sigma) * dt
+
+	survived_count := 0
+	rand_idx := 0
+
+	for path in 0 ..< n_paths {
+		S_t := S
+		survived := true
+
+		for step in 0 ..< n_steps {
+			Z := norm_data[rand_idx]
+			rand_idx += 1
+			S_t = S_t * math.exp_f64(drift + sigma * sqrt_dt * Z)
+
+			if S_t <= L || S_t >= U {
+				survived = false
+				break
+			}
+		}
+
+		if survived {
+			survived_count += 1
+		}
+	}
+
+	probability := f64(survived_count) / f64(n_paths)
+	return math.exp_f64(-r_d * T) * probability
+}
+
+// DNT Vanna and Volga via finite differences WITH Common Random Numbers (CRN)
 fx_dnt_sensitivities :: proc(
 	S: f64,
 	L: f64,
@@ -370,18 +422,162 @@ fx_dnt_sensitivities :: proc(
 	f64,
 	f64,
 ) {
+	n_paths := 20000
+	n_steps := 252
+	rand_count := n_paths * n_steps
+
+	// ✅ CRITICAL FIX: Generate ONE set of random numbers.
+	// Reusing the exact same random paths for all perturbations ensures
+	// that Monte Carlo noise cancels out, yielding stable derivatives.
+	norm_data := make([]f64, rand_count, context.temp_allocator)
+	defer delete(norm_data, context.temp_allocator)
+	for i in 0 ..< rand_count {
+		norm_data[i] = rand.float64_normal(0.0, 1.0)
+	}
+
 	h_S := 0.001 * S
 	h_sigma := 0.001 * sigma
 
-	P_up_S := fx_dnt_price(S + h_S, L, U, T, r_d, r_f, sigma + h_sigma)
-	P_dn_S := fx_dnt_price(S - h_S, L, U, T, r_d, r_f, sigma + h_sigma)
-	P_up_S_dn := fx_dnt_price(S + h_S, L, U, T, r_d, r_f, sigma - h_sigma)
-	P_dn_S_dn := fx_dnt_price(S - h_S, L, U, T, r_d, r_f, sigma - h_sigma)
+	// Vanna = d²P/(dS dσ)
+	P_up_S := _fx_dnt_price_crn(
+		S + h_S,
+		L,
+		U,
+		T,
+		r_d,
+		r_f,
+		sigma + h_sigma,
+		norm_data,
+		n_paths,
+		n_steps,
+	)
+	P_dn_S := _fx_dnt_price_crn(
+		S - h_S,
+		L,
+		U,
+		T,
+		r_d,
+		r_f,
+		sigma + h_sigma,
+		norm_data,
+		n_paths,
+		n_steps,
+	)
+	P_up_S_dn := _fx_dnt_price_crn(
+		S + h_S,
+		L,
+		U,
+		T,
+		r_d,
+		r_f,
+		sigma - h_sigma,
+		norm_data,
+		n_paths,
+		n_steps,
+	)
+	P_dn_S_dn := _fx_dnt_price_crn(
+		S - h_S,
+		L,
+		U,
+		T,
+		r_d,
+		r_f,
+		sigma - h_sigma,
+		norm_data,
+		n_paths,
+		n_steps,
+	)
 	vanna := ((P_up_S - P_dn_S) - (P_up_S_dn - P_dn_S_dn)) / (4.0 * h_S * h_sigma)
 
-	P_up_sigma := fx_dnt_price(S, L, U, T, r_d, r_f, sigma + h_sigma)
-	P_dn_sigma := fx_dnt_price(S, L, U, T, r_d, r_f, sigma - h_sigma)
-	P_at_sigma := fx_dnt_price(S, L, U, T, r_d, r_f, sigma)
+	// Volga = d²P/dσ²
+	P_up_sigma := _fx_dnt_price_crn(
+		S,
+		L,
+		U,
+		T,
+		r_d,
+		r_f,
+		sigma + h_sigma,
+		norm_data,
+		n_paths,
+		n_steps,
+	)
+	P_dn_sigma := _fx_dnt_price_crn(
+		S,
+		L,
+		U,
+		T,
+		r_d,
+		r_f,
+		sigma - h_sigma,
+		norm_data,
+		n_paths,
+		n_steps,
+	)
+	P_at_sigma := _fx_dnt_price_crn(S, L, U, T, r_d, r_f, sigma, norm_data, n_paths, n_steps)
+	volga := (P_up_sigma - 2.0 * P_at_sigma + P_dn_sigma) / (h_sigma * h_sigma)
+
+	return vanna, volga
+}
+// ============================================================================
+// DOWN-AND-OUT DIGITAL CALL (Analytical)
+// ============================================================================
+// Pays 1 unit of domestic currency at T if S_T > K and the spot stays above L.
+// Analytical formula via method of images (Reiner & Rubinstein, 1991).
+// This is perfectly smooth, avoiding the Monte Carlo discrete-noise trap.
+
+fx_down_and_out_digital_call_price :: proc(
+	S: f64,
+	K: f64,
+	L: f64,
+	T: f64,
+	r_d: f64,
+	r_f: f64,
+	sigma: f64,
+) -> f64 {
+	if S <= L {return 0.0}
+	if T <= 0.0 {return S > K ? 1.0 : 0.0}
+
+	sqrt_T := math.sqrt_f64(T)
+	mu := (r_d - r_f - 0.5 * sigma * sigma) / (sigma * sigma)
+
+	d2 := (math.ln(S / K) + (r_d - r_f - 0.5 * sigma * sigma) * T) / (sigma * sqrt_T)
+	d2_image :=
+		(math.ln((L * L) / (S * K)) + (r_d - r_f - 0.5 * sigma * sigma) * T) / (sigma * sqrt_T)
+
+	term1 := math.exp_f64(-r_d * T) * _N(d2)
+	term2 := math.pow_f64(L / S, 2.0 * mu) * math.exp_f64(-r_d * T) * _N(d2_image)
+
+	return term1 - term2
+}
+
+// Sensitivities via finite differences on the smooth analytical formula
+fx_down_and_out_digital_call_sensitivities :: proc(
+	S: f64,
+	K: f64,
+	L: f64,
+	T: f64,
+	r_d: f64,
+	r_f: f64,
+	sigma: f64,
+) -> (
+	f64,
+	f64,
+) {
+	h_S := 0.0001 * S
+	h_sigma := 0.0001 * sigma
+
+	// Vanna = d²P/(dS dσ)
+	P_up_S := fx_down_and_out_digital_call_price(S + h_S, K, L, T, r_d, r_f, sigma + h_sigma)
+	P_dn_S := fx_down_and_out_digital_call_price(S - h_S, K, L, T, r_d, r_f, sigma + h_sigma)
+	P_up_S_dn := fx_down_and_out_digital_call_price(S + h_S, K, L, T, r_d, r_f, sigma - h_sigma)
+	P_dn_S_dn := fx_down_and_out_digital_call_price(S - h_S, K, L, T, r_d, r_f, sigma - h_sigma)
+	vanna := ((P_up_S - P_dn_S) - (P_up_S_dn - P_dn_S_dn)) / (4.0 * h_S * h_sigma)
+
+	// Volga = d²P/dσ²
+	P_up_sigma := fx_down_and_out_digital_call_price(S, K, L, T, r_d, r_f, sigma + h_sigma)
+	P_dn_sigma := fx_down_and_out_digital_call_price(S, K, L, T, r_d, r_f, sigma - h_sigma)
+	P_at_sigma := fx_down_and_out_digital_call_price(S, K, L, T, r_d, r_f, sigma)
 	volga := (P_up_sigma - 2.0 * P_at_sigma + P_dn_sigma) / (h_sigma * h_sigma)
 
 	return vanna, volga
