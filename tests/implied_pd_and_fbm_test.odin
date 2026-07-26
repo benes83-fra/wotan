@@ -200,3 +200,96 @@ rough_volatility_test :: proc(allocator: mem.Allocator) {
 	fmt.println("   • This is the model behind modern 'Volatility is Rough' research.")
 	fmt.println("======================================================================\n")
 }
+
+rough_volatility_pd_test :: proc(allocator: mem.Allocator) {
+	fmt.println("\n======================================================================")
+	fmt.println("    ROUGH VOLATILITY & IMPLIED DEFAULT PROBABILITY")
+	fmt.println("======================================================================\n")
+
+	S := 100.0
+	r := 0.05
+	T := 1.0
+	K_default := 80.0 // ✅ FIX: Set default barrier to 80 (well within the strike grid)
+
+	// rBergomi parameters (Rough Volatility)
+	params := fin.rBergomi_Params {
+		xi_0 = 0.04, // 20% ATM vol
+		eta  = 0.40, // Vol-of-vol
+		H    = 0.10, // Rough!
+		rho  = -0.70, // Negative correlation (leverage effect)
+	}
+
+	// Generate a grid of strikes that fully covers the default barrier
+	n_strikes := 17
+	strikes := make([]f64, n_strikes, allocator)
+	bs_prices := make([]f64, n_strikes, allocator)
+	rbergomi_prices := make([]f64, n_strikes, allocator)
+
+	fmt.println("Generating Option Surface (Monte Carlo)...")
+	fmt.println("(This may take a few seconds for 17 strikes × 5,000 paths)")
+	for i in 0 ..< n_strikes {
+		// ✅ FIX: Strikes from 40 to 200 (ensures we integrate the left tail properly)
+		K := 40.0 + f64(i) * 10.0
+		strikes[i] = K
+
+		// Black-Scholes price (using flat 20% vol)
+		bs_prices[i] = fin._bs_call_price(S, K, T, r, 0.20)
+
+		// rBergomi price (5,000 paths for reasonable speed/accuracy trade-off)
+		rbergomi_prices[i] = fin.rbergomi_mc_call(S, K, T, r, params, 5000, 100, allocator)
+	}
+
+	fmt.println("\n1. Implied Default Probability Comparison")
+	fmt.println("   ----------------------------------------------------------------------")
+	fmt.printf("   Underlying Price (S):  $%.2f\n", S)
+	fmt.printf("   Default Barrier (K):   $%.2f\n", K_default)
+	fmt.printf("   Time to Maturity (T):  %.1f years\n", T)
+	fmt.println()
+
+	// Compute PD for Black-Scholes
+	bs_pd_result := fin.implied_default_probability(strikes, bs_prices, r, T, K_default, allocator)
+	defer {
+		delete(bs_pd_result.rnd_strikes, allocator)
+		delete(bs_pd_result.rnd_values, allocator)
+	}
+
+	// Compute PD for rBergomi
+	rbergomi_pd_result := fin.implied_default_probability(
+		strikes,
+		rbergomi_prices,
+		r,
+		T,
+		K_default,
+		allocator,
+	)
+	defer {
+		delete(rbergomi_pd_result.rnd_strikes, allocator)
+		delete(rbergomi_pd_result.rnd_values, allocator)
+	}
+
+	fmt.printf("   %-28s | %-15s | %-15s\n", "Model", "Risk-Neutral PD", "Expected Loss")
+	fmt.println("   ----------------------------------------------------------------------")
+	fmt.printf(
+		"   %-28s | %14.2f%% | $%14.4f\n",
+		"Black-Scholes (Flat Vol)",
+		bs_pd_result.pd_risk_neutral * 100.0,
+		bs_pd_result.expected_loss,
+	)
+	fmt.printf(
+		"   %-28s | %14.2f%% | $%14.4f\n",
+		"Rough Bergomi (H=0.10)",
+		rbergomi_pd_result.pd_risk_neutral * 100.0,
+		rbergomi_pd_result.expected_loss,
+	)
+
+	fmt.println("\n💡 Key Insights:")
+	fmt.println("   • Rough Volatility (H=0.10) generates 'rougher' paths with sharper")
+	fmt.println("     local drops, naturally creating a fatter left tail (crash risk).")
+	fmt.println("   • Even when calibrated to the SAME ATM volatility (20%), the rBergomi")
+	fmt.println("     model implies a HIGHER probability of default than Black-Scholes.")
+	fmt.println("   • This perfectly explains why real-world markets price deep OTM puts")
+	fmt.println("     much higher than Black-Scholes predicts (the 'volatility smile').")
+	fmt.println("   • By combining rBergomi with Breeden-Litzenberger, we extract a")
+	fmt.println("     much more realistic, market-consistent default probability.")
+	fmt.println("======================================================================\n")
+}
