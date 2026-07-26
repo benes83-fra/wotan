@@ -129,3 +129,74 @@ implied_pd_and_fbm_test :: proc(allocator: mem.Allocator) {
 	fmt.println("     standard for fitting the steep short-term implied vol skew.")
 	fmt.println("======================================================================\n")
 }
+
+rough_volatility_test :: proc(allocator: mem.Allocator) {
+	fmt.println("\n======================================================================")
+	fmt.println("    ROUGH VOLATILITY: ROUGH BERGOMI (rBergomi) MODEL")
+	fmt.println("======================================================================\n")
+
+	S := 100.0
+	K := 100.0
+	T := 0.25 // 3 months (short maturity, where rough vol effects are most pronounced)
+	r := 0.05
+
+	// rBergomi parameters (typical empirical estimates from SPX options)
+	xi_0 := 0.04 // Initial variance (20% vol)
+	eta := 0.40 // Vol-of-vol
+	H := 0.10 // Hurst parameter (0.1 is the empirical "rough" value)
+	rho := -0.70 // Leverage effect (negative correlation)
+
+	params := fin.rBergomi_Params {
+		xi_0 = xi_0,
+		eta  = eta,
+		H    = H,
+		rho  = rho,
+	}
+
+	fmt.println("Market Setup:")
+	fmt.printf("   Spot (S):            $%.2f\n", S)
+	fmt.printf("   Strike (K):          $%.2f\n", K)
+	fmt.printf("   Time to Expiry (T):  %.2f years (3 months)\n", T)
+	fmt.printf("   Risk-Free Rate (r):  %.2f%%\n", r * 100.0)
+	fmt.println("\nrBergomi Parameters:")
+	fmt.printf(
+		"   Initial Var (ξ_0):   %.4f (ATM Vol: %.2f%%)\n",
+		xi_0,
+		math.sqrt_f64(xi_0) * 100.0,
+	)
+	fmt.printf("   Vol-of-Vol (η):      %.2f\n", eta)
+	fmt.printf("   Hurst (H):           %.2f (Rough!)\n", H)
+	fmt.printf("   Correlation (ρ):     %.2f\n", rho)
+
+	// 1. Black-Scholes Baseline (using ATM volatility)
+	bs_sigma := math.sqrt_f64(xi_0)
+	bs_price := fin._bs_call_price(S, K, T, r, bs_sigma)
+
+	// 2. rBergomi Monte Carlo Pricing
+	n_paths := 10000
+	n_steps := 100 // 100 steps is plenty for T=0.25
+
+	fmt.println("\n1. Option Pricing Comparison")
+	fmt.println("   ----------------------------------------------------------------------")
+	fmt.printf("   %-25s | $%10.4f\n", "Black-Scholes (Flat Vol)", bs_price)
+
+	rbergomi_price := fin.rbergomi_mc_call(S, K, T, r, params, n_paths, n_steps, allocator)
+	fmt.printf("   %-25s | $%10.4f\n", "rBergomi Monte Carlo", rbergomi_price)
+
+	diff := rbergomi_price - bs_price
+	fmt.printf(
+		"   %-25s | $%10.4f (%.2f%%)\n",
+		"Rough Vol Premium",
+		diff,
+		(diff / bs_price) * 100.0,
+	)
+
+	fmt.println("\n💡 Key Insights:")
+	fmt.println("   • H = 0.10 means volatility paths are 'rougher' than Brownian motion.")
+	fmt.println("   • The negative correlation (ρ = -0.7) combined with roughness creates")
+	fmt.println("     a steep, realistic short-term implied volatility skew.")
+	fmt.println("   • Even when calibrated to the same ATM variance, rBergomi prices")
+	fmt.println("     differ from Black-Scholes due to the path-dependent volatility clustering.")
+	fmt.println("   • This is the model behind modern 'Volatility is Rough' research.")
+	fmt.println("======================================================================\n")
+}
