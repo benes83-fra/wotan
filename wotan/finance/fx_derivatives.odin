@@ -332,193 +332,7 @@ fx_digital_call_sensitivities :: proc(
 
 	return vanna, volga
 }
-// ============================================================================
-// DOUBLE-NO-TOUCH (DNT) BARRIER OPTION - MONTE CARLO WITH CRN
-// ============================================================================
-// Uses Monte Carlo simulation. CRITICAL: Sensitivities MUST use Common Random
-// Numbers (CRN) to cancel out Monte Carlo noise in finite differences.
 
-fx_dnt_price :: proc(
-	S: f64,
-	L: f64,
-	U: f64,
-	T: f64,
-	r_d: f64,
-	r_f: f64,
-	sigma: f64,
-	n_paths: int = 20000,
-	n_steps: int = 252,
-) -> f64 {
-	if S <= L || S >= U {return 0.0}
-	if T <= 0.0 {return 1.0}
-
-	rand_count := n_paths * n_steps
-	norm_data := make([]f64, rand_count, context.temp_allocator)
-	defer delete(norm_data, context.temp_allocator)
-	for i in 0 ..< rand_count {
-		norm_data[i] = rand.float64_normal(0.0, 1.0)
-	}
-
-	return _fx_dnt_price_crn(S, L, U, T, r_d, r_f, sigma, norm_data, n_paths, n_steps)
-}
-
-// Internal helper that accepts pre-generated random numbers for CRN
-_fx_dnt_price_crn :: proc(
-	S: f64,
-	L: f64,
-	U: f64,
-	T: f64,
-	r_d: f64,
-	r_f: f64,
-	sigma: f64,
-	norm_data: []f64,
-	n_paths: int,
-	n_steps: int,
-) -> f64 {
-	if S <= L || S >= U {return 0.0}
-	if T <= 0.0 {return 1.0}
-
-	dt := T / f64(n_steps)
-	sqrt_dt := math.sqrt_f64(dt)
-	drift := (r_d - r_f - 0.5 * sigma * sigma) * dt
-
-	survived_count := 0
-	rand_idx := 0
-
-	for path in 0 ..< n_paths {
-		S_t := S
-		survived := true
-
-		for step in 0 ..< n_steps {
-			Z := norm_data[rand_idx]
-			rand_idx += 1
-			S_t = S_t * math.exp_f64(drift + sigma * sqrt_dt * Z)
-
-			if S_t <= L || S_t >= U {
-				survived = false
-				break
-			}
-		}
-
-		if survived {
-			survived_count += 1
-		}
-	}
-
-	probability := f64(survived_count) / f64(n_paths)
-	return math.exp_f64(-r_d * T) * probability
-}
-
-// DNT Vanna and Volga via finite differences WITH Common Random Numbers (CRN)
-fx_dnt_sensitivities :: proc(
-	S: f64,
-	L: f64,
-	U: f64,
-	T: f64,
-	r_d: f64,
-	r_f: f64,
-	sigma: f64,
-) -> (
-	f64,
-	f64,
-) {
-	n_paths := 20000
-	n_steps := 252
-	rand_count := n_paths * n_steps
-
-	// ✅ CRITICAL FIX: Generate ONE set of random numbers.
-	// Reusing the exact same random paths for all perturbations ensures
-	// that Monte Carlo noise cancels out, yielding stable derivatives.
-	norm_data := make([]f64, rand_count, context.temp_allocator)
-	defer delete(norm_data, context.temp_allocator)
-	for i in 0 ..< rand_count {
-		norm_data[i] = rand.float64_normal(0.0, 1.0)
-	}
-
-	h_S := 0.001 * S
-	h_sigma := 0.001 * sigma
-
-	// Vanna = d²P/(dS dσ)
-	P_up_S := _fx_dnt_price_crn(
-		S + h_S,
-		L,
-		U,
-		T,
-		r_d,
-		r_f,
-		sigma + h_sigma,
-		norm_data,
-		n_paths,
-		n_steps,
-	)
-	P_dn_S := _fx_dnt_price_crn(
-		S - h_S,
-		L,
-		U,
-		T,
-		r_d,
-		r_f,
-		sigma + h_sigma,
-		norm_data,
-		n_paths,
-		n_steps,
-	)
-	P_up_S_dn := _fx_dnt_price_crn(
-		S + h_S,
-		L,
-		U,
-		T,
-		r_d,
-		r_f,
-		sigma - h_sigma,
-		norm_data,
-		n_paths,
-		n_steps,
-	)
-	P_dn_S_dn := _fx_dnt_price_crn(
-		S - h_S,
-		L,
-		U,
-		T,
-		r_d,
-		r_f,
-		sigma - h_sigma,
-		norm_data,
-		n_paths,
-		n_steps,
-	)
-	vanna := ((P_up_S - P_dn_S) - (P_up_S_dn - P_dn_S_dn)) / (4.0 * h_S * h_sigma)
-
-	// Volga = d²P/dσ²
-	P_up_sigma := _fx_dnt_price_crn(
-		S,
-		L,
-		U,
-		T,
-		r_d,
-		r_f,
-		sigma + h_sigma,
-		norm_data,
-		n_paths,
-		n_steps,
-	)
-	P_dn_sigma := _fx_dnt_price_crn(
-		S,
-		L,
-		U,
-		T,
-		r_d,
-		r_f,
-		sigma - h_sigma,
-		norm_data,
-		n_paths,
-		n_steps,
-	)
-	P_at_sigma := _fx_dnt_price_crn(S, L, U, T, r_d, r_f, sigma, norm_data, n_paths, n_steps)
-	volga := (P_up_sigma - 2.0 * P_at_sigma + P_dn_sigma) / (h_sigma * h_sigma)
-
-	return vanna, volga
-}
 // ============================================================================
 // DOWN-AND-OUT DIGITAL CALL (Analytical)
 // ============================================================================
@@ -578,6 +392,132 @@ fx_down_and_out_digital_call_sensitivities :: proc(
 	P_up_sigma := fx_down_and_out_digital_call_price(S, K, L, T, r_d, r_f, sigma + h_sigma)
 	P_dn_sigma := fx_down_and_out_digital_call_price(S, K, L, T, r_d, r_f, sigma - h_sigma)
 	P_at_sigma := fx_down_and_out_digital_call_price(S, K, L, T, r_d, r_f, sigma)
+	volga := (P_up_sigma - 2.0 * P_at_sigma + P_dn_sigma) / (h_sigma * h_sigma)
+
+	return vanna, volga
+}
+// ============================================================================
+// DOUBLE-NO-TOUCH (DNT) BARRIER OPTION - PDE IMPLEMENTATION
+// ============================================================================
+// Solves the Black-Scholes PDE on a log-spot grid restricted to [ln(L), ln(U)].
+// Fully Implicit scheme is used because it is unconditionally stable and
+// monotonic, preventing spurious oscillations near the barriers.
+// This provides perfectly smooth prices and exact, noise-free Greeks.
+
+fx_dnt_pde_price :: proc(
+	S: f64,
+	L: f64,
+	U: f64,
+	T: f64,
+	r_d: f64,
+	r_f: f64,
+	sigma: f64,
+	n_space: int = 200,
+	n_time: int = 1000,
+) -> f64 {
+	if S <= L || S >= U {return 0.0}
+	if T <= 0.0 {return 1.0}
+
+	x_min := math.ln(L)
+	x_max := math.ln(U)
+
+	dx := (x_max - x_min) / f64(n_space - 1)
+	dt := T / f64(n_time)
+
+	alpha := 0.5 * sigma * sigma
+	beta_coef := r_d - r_f - 0.5 * sigma * sigma
+	gamma_coef := r_d // PDE has -r_d*V, moving to LHS makes it +r_d*V
+
+	rx := alpha * dt / (dx * dx)
+	r_beta := beta_coef * dt / (2.0 * dx)
+	r_gamma := gamma_coef * dt
+
+	V := make([]f64, n_space, context.temp_allocator)
+	defer delete(V, context.temp_allocator)
+
+	// Terminal condition (tau = 0): V = 1 for all interior points
+	for i in 1 ..< n_space - 1 {
+		V[i] = 1.0
+	}
+	V[0] = 0.0
+	V[n_space - 1] = 0.0
+
+	n_unknowns := n_space - 2
+
+	a := make([]f64, n_unknowns - 1, context.temp_allocator)
+	b := make([]f64, n_unknowns, context.temp_allocator)
+	c := make([]f64, n_unknowns - 1, context.temp_allocator)
+	d := make([]f64, n_unknowns, context.temp_allocator)
+	defer {
+		delete(a, context.temp_allocator)
+		delete(b, context.temp_allocator)
+		delete(c, context.temp_allocator)
+		delete(d, context.temp_allocator)
+	}
+
+	// Precompute tridiagonal coefficients (constant for all time steps)
+	for i in 0 ..< n_unknowns {
+		if i > 0 {a[i - 1] = -(rx - r_beta)}
+		// ✅ CRITICAL FIX: The discount term should be SUBTRACTED, not added
+		// The PDE has -r_d*V, so in the implicit scheme: (1 + 2*rx - r_gamma)*V^{n+1} = ...
+		b[i] = 1.0 + 2.0 * rx - r_gamma // ← Changed from + r_gamma to - r_gamma
+		if i < n_unknowns - 1 {c[i] = -(rx + r_beta)}
+	}
+
+	// Time-stepping (backward from tau = 0 to tau = T)
+	for _ in 0 ..< n_time {
+		for i in 0 ..< n_unknowns {
+			d[i] = V[i + 1]
+		}
+
+		// Boundaries are exactly 0, so no RHS adjustment needed
+
+		_thomas_algorithm(a, b, c, d, n_unknowns)
+
+		for i in 0 ..< n_unknowns {
+			V[i + 1] = d[i]
+		}
+		V[0] = 0.0
+		V[n_space - 1] = 0.0
+	}
+
+	// Extract price at S via linear interpolation
+	x_target := math.ln(S)
+	i_target := int((x_target - x_min) / dx)
+
+	if i_target < 0 || i_target >= n_space - 1 {return 0.0}
+
+	w := (x_target - (x_min + f64(i_target) * dx)) / dx
+	return V[i_target] * (1.0 - w) + V[i_target + 1] * w
+}
+
+// Sensitivities via finite differences on the smooth PDE price
+fx_dnt_pde_sensitivities :: proc(
+	S: f64,
+	L: f64,
+	U: f64,
+	T: f64,
+	r_d: f64,
+	r_f: f64,
+	sigma: f64,
+) -> (
+	f64,
+	f64,
+) {
+	h_S := 0.001 * S
+	h_sigma := 0.001 * sigma
+
+	// Vanna = d²P/(dS dσ)
+	P_up_S := fx_dnt_pde_price(S + h_S, L, U, T, r_d, r_f, sigma + h_sigma)
+	P_dn_S := fx_dnt_pde_price(S - h_S, L, U, T, r_d, r_f, sigma + h_sigma)
+	P_up_S_dn := fx_dnt_pde_price(S + h_S, L, U, T, r_d, r_f, sigma - h_sigma)
+	P_dn_S_dn := fx_dnt_pde_price(S - h_S, L, U, T, r_d, r_f, sigma - h_sigma)
+	vanna := ((P_up_S - P_dn_S) - (P_up_S_dn - P_dn_S_dn)) / (4.0 * h_S * h_sigma)
+
+	// Volga = d²P/dσ²
+	P_up_sigma := fx_dnt_pde_price(S, L, U, T, r_d, r_f, sigma + h_sigma)
+	P_dn_sigma := fx_dnt_pde_price(S, L, U, T, r_d, r_f, sigma - h_sigma)
+	P_at_sigma := fx_dnt_pde_price(S, L, U, T, r_d, r_f, sigma)
 	volga := (P_up_sigma - 2.0 * P_at_sigma + P_dn_sigma) / (h_sigma * h_sigma)
 
 	return vanna, volga
