@@ -24,12 +24,19 @@ _fbm_covariance_matrix :: proc(times: []f64, H: f64, allocator: mem.Allocator) -
 			cov_val :=
 				0.5 *
 				(math.pow(t, 2.0 * H) + math.pow(s, 2.0 * H) - math.pow(math.abs(t - s), 2.0 * H))
+
+			// ✅ FIX: Add a tiny epsilon to the diagonal to ensure strict positive definiteness.
+			// This prevents Cholesky from panicking when t=0 (where covariance is exactly 0)
+			// or due to floating-point roundoff errors in the covariance calculation.
+			if i == j {
+				cov_val += 1e-12
+			}
+
 			cov.data[i * n + j] = cov_val
 		}
 	}
 	return cov
 }
-
 // Generate a single fBm path using Cholesky decomposition
 generate_fbm_path :: proc(
 	times: []f64,
