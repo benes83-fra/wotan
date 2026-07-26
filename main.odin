@@ -517,6 +517,7 @@ main :: proc() {
 	test.callable_bond_test(context.temp_allocator)
 	test.puttable_bond_test(context.temp_allocator)
 	test.fx_derivatives_test(context.temp_allocator)
+	test.implied_pd_and_fbm_test(context.temp_allocator)
 	fmt.println("Demo End")
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
