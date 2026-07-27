@@ -36,10 +36,14 @@ pdpm_multifactor_test :: proc(allocator: mem.Allocator) {
 	for i in 1 ..< n_days {
 		spy_close_prev, _ := w.column_at_float(&spy_df.columns[4], i - 1)
 		spy_close_curr, _ := w.column_at_float(&spy_df.columns[4], i)
-		spy_returns[i - 1] = (spy_close_curr - spy_close_prev) / spy_close_prev
-
 		vix_close_prev, _ := w.column_at_float(&vix_df.columns[4], i - 1)
 		vix_close_curr, _ := w.column_at_float(&vix_df.columns[4], i)
+		if spy_close_prev == 0.0 || vix_close_prev == 0.0 {
+			continue
+		}
+		spy_returns[i - 1] = (spy_close_curr - spy_close_prev) / spy_close_prev
+
+
 		vix_returns[i - 1] = (vix_close_curr - vix_close_prev) / vix_close_prev
 	}
 
