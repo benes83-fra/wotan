@@ -110,13 +110,20 @@ swap_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("   %-30s | $%15.2f\n", "NPV", receiver_result.npv)
 	fmt.printf("   %-30s | %.4f%%\n", "Par Swap Rate", receiver_result.par_swap_rate * 100.0)
 	fmt.printf("   %-30s | $%15.2f\n", "PV01 (per 1bp)", receiver_result.pv01)
+	fmt.printf("   %-30s | %15.4f\n", "Modified Duration", receiver_result.modified_duration)
 
 	// ========================================================================
 	// PART 3: SWAP RISK METRICS ACROSS MATURITIES
 	// ========================================================================
 	fmt.println("\n3. Swap Risk Metrics Across Maturities")
 	fmt.println("   ----------------------------------------------------------------------")
-	fmt.printf("   %-8s | %-12s | %-12s | %-12s\n", "Maturity", "Par Rate", "PV01 ($)", "Duration")
+	fmt.printf(
+		"   %-10s | %-12s | %-14s | %-12s\n",
+		"Maturity",
+		"Par Rate",
+		"PV01 ($)",
+		"Duration",
+	)
 	fmt.println("   ----------------------------------------------------------------------")
 
 	maturities := []f64{1.0, 2.0, 5.0, 10.0, 30.0}
@@ -127,7 +134,7 @@ swap_test :: proc(allocator: mem.Allocator) {
 
 		// ✅ FIX 3: Cast to int to prevent float formatting quirks
 		fmt.printf(
-			"   %-8dY | %11.4f%% | $%11.2f | %11.4f\n",
+			"   %-8d.1Y | %11.4f%% | $%13.2f | %11.4f\n",
 			int(mat),
 			par_rate * 100.0,
 			pv01,
