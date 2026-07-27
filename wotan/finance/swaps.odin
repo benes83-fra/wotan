@@ -6,19 +6,6 @@ import "core:mem"
 // ============================================================================
 // INTEREST RATE SWAPS (IRS)
 // ============================================================================
-// The workhorse of fixed income. An IRS exchanges fixed-rate cash flows for
-// floating-rate cash flows (or vice versa) on a notional amount.
-//
-// Key concepts:
-// - Fixed Leg: Pays/receives fixed rate × day count fraction × notional
-// - Floating Leg: Pays/receives floating rate (e.g., SOFR, EURIBOR) × DCF × notional
-// - Par Swap Rate: The fixed rate that makes the swap worth zero at inception
-// - PV01 (DV01): Present value of a 1 basis point parallel shift
-// - Swap Duration/Convexity: Risk metrics
-
-// ============================================================================
-// ENUMS AND STRUCTURES
-// ============================================================================
 
 SwapLegType :: enum {
 	Fixed,
@@ -73,7 +60,6 @@ SwapCashFlow :: struct {
 // DAY COUNT FRACTION CALCULATIONS
 // ============================================================================
 
-// Compute day count fraction between two dates (in years)
 day_count_fraction :: proc(t1: f64, t2: f64, convention: DayCountConvention) -> f64 {
 	dt := t2 - t1
 	if dt <= 0.0 {
@@ -88,7 +74,6 @@ day_count_fraction :: proc(t1: f64, t2: f64, convention: DayCountConvention) -> 
 	case .ACT_ACT:
 		return dt
 	case .THIRTY_360:
-		// Simplified 30/360: assume 30 days per month, 360 days per year
 		months := dt * 12.0
 		return months / 12.0
 	}
@@ -100,8 +85,6 @@ day_count_fraction :: proc(t1: f64, t2: f64, convention: DayCountConvention) -> 
 // ZERO COUPON BOND PRICING (FLAT CURVE)
 // ============================================================================
 
-// Simple flat curve discount factor
-// In production, you'd use a bootstrapped curve (Nelson-Siegel, cubic spline, etc.)
 _discount_factor_flat :: proc(t: f64, r: f64) -> f64 {
 	if t <= 0.0 {
 		return 1.0
@@ -113,13 +96,12 @@ _discount_factor_flat :: proc(t: f64, r: f64) -> f64 {
 // SWAP LEG VALUATION
 // ============================================================================
 
-// Value a fixed leg
 _valuate_fixed_leg :: proc(
 	leg: SwapLeg,
 	notional: f64,
 	effective_date: f64,
 	maturity: f64,
-	r: f64, // Flat rate for discounting
+	r: f64,
 ) -> (
 	pv: f64,
 	cashflows: []SwapCashFlow,
@@ -151,9 +133,6 @@ _valuate_fixed_leg :: proc(
 	return pv, cashflows
 }
 
-// Value a floating leg (assuming flat forward curve)
-// Under a flat curve, the floating leg is worth: notional × (DF_start - DF_end)
-// This is a well-known result from swap pricing theory.
 _valuate_floating_leg :: proc(
 	leg: SwapLeg,
 	notional: f64,
@@ -169,8 +148,6 @@ _valuate_floating_leg :: proc(
 
 	cashflows = make([]SwapCashFlow, n_payments, context.allocator)
 
-	// Under a flat curve, forward rate = spot rate
-	// Floating payment = notional × r × DCF
 	for i in 0 ..< n_payments {
 		t_start := effective_date + f64(i) * leg.payment_frequency
 		t_end := t_start + leg.payment_frequency
@@ -179,7 +156,7 @@ _valuate_floating_leg :: proc(
 		}
 
 		dcf := day_count_fraction(t_start, t_end, leg.day_count)
-		fwd_rate := r + leg.floating_spread // Forward rate + spread
+		fwd_rate := r + leg.floating_spread
 		payment := notional * fwd_rate * dcf
 
 		cashflows[i] = SwapCashFlow {
@@ -193,11 +170,6 @@ _valuate_floating_leg :: proc(
 
 	return pv, cashflows
 }
-
-// ============================================================================
-// MAIN SWAP PRICING FUNCTION
-// ============================================================================
-
 // ============================================================================
 // INTERNAL PRICING HELPER (No Greeks - prevents infinite recursion)
 // ============================================================================
@@ -253,7 +225,7 @@ _price_swap_internal :: proc(
 	// NPV = Receiver - Payer
 	npv := pv_receiver - pv_payer
 
-	// Par swap rate
+	// Par swap rate (per unit notional)
 	annuity := _compute_swap_annuity(
 		swap.receiver_leg.payment_frequency,
 		swap.effective_date,
@@ -264,15 +236,50 @@ _price_swap_internal :: proc(
 
 	par_swap_rate := 0.0
 	if annuity > 1e-10 {
+		// ✅ FIX 1: Divide dollar PV by notional to get unit PV before dividing by annuity
 		if swap.receiver_leg.leg_type == .Floating {
-			par_swap_rate = pv_receiver / annuity
+			par_swap_rate = (pv_receiver / swap.notional) / annuity
 		} else {
-			par_swap_rate = pv_payer / annuity
+			par_swap_rate = (pv_payer / swap.notional) / annuity
 		}
 	}
 
 	// PV01
 	pv01 := annuity * swap.notional * 0.0001
+
+	// ✅ FIX 2: Calculate Modified Duration of the FIXED LEG (Standard Swap Metric)
+	// Traders don't care about the duration of the NPV; they care about the fixed leg's duration.
+	mac_duration := 0.0
+	pv_fixed_unit := 0.0
+
+	fixed_leg: SwapLeg
+	if swap.payer_leg.leg_type == .Fixed {
+		fixed_leg = swap.payer_leg
+	} else {
+		fixed_leg = swap.receiver_leg
+	}
+
+	n_payments := int((swap.maturity - swap.effective_date) / fixed_leg.payment_frequency)
+	for i in 0 ..< n_payments {
+		t_start := swap.effective_date + f64(i) * fixed_leg.payment_frequency
+		t_end := t_start + fixed_leg.payment_frequency
+		if t_end > swap.maturity {
+			t_end = swap.maturity
+		}
+		dcf := day_count_fraction(t_start, t_end, fixed_leg.day_count)
+		df := _discount_factor_flat(t_end, r)
+
+		pv_cf := dcf * df
+		pv_fixed_unit += pv_cf
+		mac_duration += t_end * pv_cf
+	}
+
+	modified_duration := 0.0
+	if pv_fixed_unit > 1e-10 {
+		mac_duration /= pv_fixed_unit
+		// Modified Duration ≈ Macaulay Duration / (1 + r * freq)
+		modified_duration = mac_duration / (1.0 + r * fixed_leg.payment_frequency)
+	}
 
 	return SwapValuationResult {
 		pv_fixed_leg = 0.0,
@@ -280,7 +287,7 @@ _price_swap_internal :: proc(
 		npv = npv,
 		par_swap_rate = par_swap_rate,
 		pv01 = pv01,
-		modified_duration = 0.0,
+		modified_duration = modified_duration,
 		convexity = 0.0,
 	}
 }
@@ -293,19 +300,14 @@ price_swap :: proc(
 	r: f64,
 	allocator: mem.Allocator = context.allocator,
 ) -> SwapValuationResult {
-	// Get base price using internal helper
+	// Get base price using internal helper (which now includes correct duration)
 	result := _price_swap_internal(swap, r, allocator)
 	npv := result.npv
 
-	// Compute Greeks using finite differences
+	// Compute Convexity using finite differences on NPV
 	h := 0.0001 // 1bp shift
 	price_up := _price_swap_internal(swap, r + h, allocator)
 	price_dn := _price_swap_internal(swap, r - h, allocator)
-
-	modified_duration := 0.0
-	if math.abs(npv) > 1e-10 {
-		modified_duration = -(price_up.npv - price_dn.npv) / (2.0 * h * npv)
-	}
 
 	convexity := 0.0
 	if math.abs(npv) > 1e-10 {
@@ -318,7 +320,7 @@ price_swap :: proc(
 		npv = npv,
 		par_swap_rate = result.par_swap_rate,
 		pv01 = result.pv01,
-		modified_duration = modified_duration,
+		modified_duration = result.modified_duration,
 		convexity = convexity,
 	}
 }
@@ -327,7 +329,6 @@ price_swap :: proc(
 // SWAP ANNUITY (PV01 per unit notional)
 // ============================================================================
 
-// Compute the swap annuity (sum of discounted day count fractions)
 _compute_swap_annuity :: proc(
 	payment_frequency: f64,
 	effective_date: f64,
@@ -357,12 +358,11 @@ _compute_swap_annuity :: proc(
 // CONVENIENCE FUNCTIONS
 // ============================================================================
 
-// Create a standard payer swap (pay fixed, receive floating)
 create_payer_swap :: proc(
 	notional: f64,
 	fixed_rate: f64,
 	maturity: f64,
-	payment_frequency: f64 = 0.25, // Quarterly
+	payment_frequency: f64 = 0.25,
 	day_count: DayCountConvention = .ACT_360,
 ) -> InterestRateSwap {
 	return InterestRateSwap {
@@ -387,7 +387,6 @@ create_payer_swap :: proc(
 	}
 }
 
-// Create a standard receiver swap (receive fixed, pay floating)
 create_receiver_swap :: proc(
 	notional: f64,
 	fixed_rate: f64,
@@ -417,15 +416,12 @@ create_receiver_swap :: proc(
 	}
 }
 
-// Compute the par swap rate for a given maturity and curve
 compute_par_swap_rate :: proc(
 	maturity: f64,
 	r: f64,
 	payment_frequency: f64 = 0.25,
 	day_count: DayCountConvention = .ACT_360,
 ) -> f64 {
-	// Par swap rate = (1 - DF_maturity) / annuity
-	// This is the standard formula for a swap starting today
 	df_maturity := _discount_factor_flat(maturity, r)
 	annuity := _compute_swap_annuity(payment_frequency, 0.0, maturity, day_count, r)
 
@@ -433,14 +429,13 @@ compute_par_swap_rate :: proc(
 		return (1.0 - df_maturity) / annuity
 	}
 
-	return r // Fallback to flat rate
+	return r
 }
 
 // ============================================================================
 // SWAP RISK METRICS
 // ============================================================================
 
-// Compute PV01 (DV01) for a swap
 compute_swap_pv01 :: proc(
 	maturity: f64,
 	notional: f64,
@@ -449,18 +444,15 @@ compute_swap_pv01 :: proc(
 	day_count: DayCountConvention = .ACT_360,
 ) -> f64 {
 	annuity := _compute_swap_annuity(payment_frequency, 0.0, maturity, day_count, r)
-	return annuity * notional * 0.0001 // 1bp = 0.0001
+	return annuity * notional * 0.0001
 }
 
-// Compute swap duration (modified duration)
 compute_swap_duration :: proc(
 	maturity: f64,
 	r: f64,
 	payment_frequency: f64 = 0.25,
 	day_count: DayCountConvention = .ACT_360,
 ) -> f64 {
-	// For a par swap, duration ≈ (1 - DF_maturity) / (r × annuity)
-	// This is a simplified approximation
 	df_maturity := _discount_factor_flat(maturity, r)
 	annuity := _compute_swap_annuity(payment_frequency, 0.0, maturity, day_count, r)
 
@@ -468,5 +460,5 @@ compute_swap_duration :: proc(
 		return (1.0 - df_maturity) / (r * annuity)
 	}
 
-	return maturity / 2.0 // Rough approximation
+	return maturity / 2.0
 }

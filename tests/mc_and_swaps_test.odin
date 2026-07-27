@@ -5,7 +5,7 @@ import "core:fmt"
 import "core:math"
 import "core:mem"
 
-unified_mc_and_swaps_test :: proc(allocator: mem.Allocator) {
+unified_mc_test :: proc(allocator: mem.Allocator) {
 	fmt.println("\n======================================================================")
 	fmt.println("    UNIFIED MONTE CARLO ENGINE + INTEREST RATE SWAPS")
 	fmt.println("======================================================================\n")
@@ -64,34 +64,45 @@ unified_mc_and_swaps_test :: proc(allocator: mem.Allocator) {
 	// Demonstrate lookback primitive
 	max_S := fin.mc_compute_lookback_max(S_paths, 0, n_steps)
 	fmt.printf("   %-30s | $%10.4f\n", "Running Maximum (first path)", max_S)
+}
 
-	// ========================================================================
-	// PART 2: INTEREST RATE SWAPS
-	// ========================================================================
-	fmt.println("\n2. Interest Rate Swaps (IRS)")
-	fmt.println("   ----------------------------------------------------------------------")
+swap_test :: proc(allocator: mem.Allocator) {
+	fmt.println("\n======================================================================")
+	fmt.println("    INTEREST RATE SWAPS (IRS)")
+	fmt.println("======================================================================\n")
 
 	notional := 100_000_000.0 // $100M
 	r_swap := 0.03 // 3% flat curve
 
-	// Compute par swap rate for 5Y and 10Y
+	// ========================================================================
+	// PART 1: PAR SWAP RATES
+	// ========================================================================
+	fmt.println("1. Par Swap Rates (Flat 3% Curve)")
+	fmt.println("   ----------------------------------------------------------------------")
+
 	par_5y := fin.compute_par_swap_rate(5.0, r_swap, 0.25, .ACT_360)
 	par_10y := fin.compute_par_swap_rate(10.0, r_swap, 0.25, .ACT_360)
 
 	fmt.printf("   %-30s | %.4f%%\n", "5Y Par Swap Rate", par_5y * 100.0)
 	fmt.printf("   %-30s | %.4f%%\n", "10Y Par Swap Rate", par_10y * 100.0)
 
-	// Create and price a payer swap (pay fixed, receive floating)
+	// ========================================================================
+	// PART 2: SWAP VALUATION
+	// ========================================================================
+	fmt.println("\n2. Swap Valuation")
+	fmt.println("   ----------------------------------------------------------------------")
+
+	// Create and price a payer swap (pay 3.5% fixed, receive floating)
 	payer_swap := fin.create_payer_swap(notional, 0.035, 10.0, 0.25, .ACT_360)
 	payer_result := fin.price_swap(payer_swap, r_swap, allocator)
 
-	fmt.println("\n   10Y Payer Swap (pay 3.5% fixed, receive floating):")
+	fmt.println("   10Y Payer Swap (pay 3.5% fixed, receive floating):")
 	fmt.printf("   %-30s | $%15.2f\n", "NPV", payer_result.npv)
 	fmt.printf("   %-30s | %.4f%%\n", "Par Swap Rate", payer_result.par_swap_rate * 100.0)
 	fmt.printf("   %-30s | $%15.2f\n", "PV01 (per 1bp)", payer_result.pv01)
 	fmt.printf("   %-30s | %10.4f\n", "Modified Duration", payer_result.modified_duration)
 
-	// Create and price a receiver swap
+	// Create and price a receiver swap (receive 2.5% fixed, pay floating)
 	receiver_swap := fin.create_receiver_swap(notional, 0.025, 5.0, 0.25, .ACT_360)
 	receiver_result := fin.price_swap(receiver_swap, r_swap, allocator)
 
@@ -101,7 +112,7 @@ unified_mc_and_swaps_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("   %-30s | $%15.2f\n", "PV01 (per 1bp)", receiver_result.pv01)
 
 	// ========================================================================
-	// PART 3: SWAP RISK ANALYSIS
+	// PART 3: SWAP RISK METRICS ACROSS MATURITIES
 	// ========================================================================
 	fmt.println("\n3. Swap Risk Metrics Across Maturities")
 	fmt.println("   ----------------------------------------------------------------------")
@@ -114,9 +125,10 @@ unified_mc_and_swaps_test :: proc(allocator: mem.Allocator) {
 		pv01 := fin.compute_swap_pv01(mat, notional, r_swap, 0.25, .ACT_360)
 		duration := fin.compute_swap_duration(mat, r_swap, 0.25, .ACT_360)
 
+		// ✅ FIX 3: Cast to int to prevent float formatting quirks
 		fmt.printf(
-			"   %-8.0fY | %11.4f%% | $%11.2f | %11.4f\n",
-			mat,
+			"   %-8dY | %11.4f%% | $%11.2f | %11.4f\n",
+			int(mat),
 			par_rate * 100.0,
 			pv01,
 			duration,
@@ -124,12 +136,9 @@ unified_mc_and_swaps_test :: proc(allocator: mem.Allocator) {
 	}
 
 	fmt.println("\n💡 Key Insights:")
-	fmt.println("   • Unified MC engine eliminates ~20 duplications of path generation code")
-	fmt.println("   • Shared primitives: GBM, Heston, MJD, Hull-White path generators")
-	fmt.println("   • Shared payoff primitives: Asian averaging, barrier checking, lookback")
-	fmt.println("   • Shared LSM primitives: regression steps for American exercise")
 	fmt.println("   • Swaps are the foundation of fixed income (Calypso uses these everywhere)")
 	fmt.println("   • Par swap rate = (1 - DF_maturity) / annuity")
 	fmt.println("   • PV01 = annuity × notional × 0.0001 (risk per 1bp shift)")
+	fmt.println("   • Modified duration is computed via finite differences on NPV")
 	fmt.println("======================================================================\n")
 }
