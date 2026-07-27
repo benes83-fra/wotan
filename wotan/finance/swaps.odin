@@ -198,11 +198,13 @@ _valuate_floating_leg :: proc(
 // MAIN SWAP PRICING FUNCTION
 // ============================================================================
 
-// Price an interest rate swap
-price_swap :: proc(
+// ============================================================================
+// INTERNAL PRICING HELPER (No Greeks - prevents infinite recursion)
+// ============================================================================
+_price_swap_internal :: proc(
 	swap: InterestRateSwap,
-	r: f64, // Flat discount rate
-	allocator: mem.Allocator = context.allocator,
+	r: f64,
+	allocator: mem.Allocator,
 ) -> SwapValuationResult {
 	// Value payer leg
 	pv_payer: f64
@@ -251,11 +253,7 @@ price_swap :: proc(
 	// NPV = Receiver - Payer
 	npv := pv_receiver - pv_payer
 
-	// Par swap rate: the fixed rate that makes NPV = 0
-	// For a standard payer swap (pay fixed, receive floating):
-	// PV_fixed = PV_floating at par
-	// fixed_rate × annuity = PV_floating
-	// fixed_rate = PV_floating / annuity
+	// Par swap rate
 	annuity := _compute_swap_annuity(
 		swap.receiver_leg.payment_frequency,
 		swap.effective_date,
@@ -266,44 +264,62 @@ price_swap :: proc(
 
 	par_swap_rate := 0.0
 	if annuity > 1e-10 {
-		// If receiver is floating, par rate = PV_floating / annuity
 		if swap.receiver_leg.leg_type == .Floating {
 			par_swap_rate = pv_receiver / annuity
 		} else {
-			// If payer is floating, par rate = PV_floating / annuity
 			par_swap_rate = pv_payer / annuity
 		}
 	}
 
-	// PV01: PV of a 1bp parallel shift
-	// = annuity × notional × 0.0001
+	// PV01
 	pv01 := annuity * swap.notional * 0.0001
 
-	// Modified duration: -dNPV/dr / NPV (approximation)
-	// For a swap, duration ≈ (duration_receiver - duration_payer)
+	return SwapValuationResult {
+		pv_fixed_leg = 0.0,
+		pv_floating_leg = 0.0,
+		npv = npv,
+		par_swap_rate = par_swap_rate,
+		pv01 = pv01,
+		modified_duration = 0.0,
+		convexity = 0.0,
+	}
+}
+
+// ============================================================================
+// MAIN SWAP PRICING FUNCTION (with Greeks via finite differences)
+// ============================================================================
+price_swap :: proc(
+	swap: InterestRateSwap,
+	r: f64,
+	allocator: mem.Allocator = context.allocator,
+) -> SwapValuationResult {
+	// Get base price using internal helper
+	result := _price_swap_internal(swap, r, allocator)
+	npv := result.npv
+
+	// Compute Greeks using finite differences
 	h := 0.0001 // 1bp shift
-	price_up := price_swap(swap, r + h, allocator)
-	price_dn := price_swap(swap, r - h, allocator)
+	price_up := _price_swap_internal(swap, r + h, allocator)
+	price_dn := _price_swap_internal(swap, r - h, allocator)
 
 	modified_duration := 0.0
 	if math.abs(npv) > 1e-10 {
 		modified_duration = -(price_up.npv - price_dn.npv) / (2.0 * h * npv)
 	}
 
-	// Convexity
 	convexity := 0.0
 	if math.abs(npv) > 1e-10 {
 		convexity = (price_up.npv + price_dn.npv - 2.0 * npv) / (h * h * npv)
 	}
 
 	return SwapValuationResult {
-		pv_fixed_leg      = 0.0, // Would need to track which leg is fixed
-		pv_floating_leg   = 0.0,
-		npv               = npv,
-		par_swap_rate     = par_swap_rate,
-		pv01              = pv01,
+		pv_fixed_leg = result.pv_fixed_leg,
+		pv_floating_leg = result.pv_floating_leg,
+		npv = npv,
+		par_swap_rate = result.par_swap_rate,
+		pv01 = result.pv01,
 		modified_duration = modified_duration,
-		convexity         = convexity,
+		convexity = convexity,
 	}
 }
 
