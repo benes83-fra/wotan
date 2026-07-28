@@ -522,6 +522,7 @@ main :: proc() {
 	test.rough_volatility_pd_test(context.temp_allocator)
 	test.unified_mc_test(context.temp_allocator)
 	test.swap_test(context.temp_allocator)
+	test.bonds_test(context.temp_allocator)
 	fmt.println("Demo End")
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
