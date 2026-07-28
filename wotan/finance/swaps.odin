@@ -60,6 +60,7 @@ SwapCashFlow :: struct {
 // DAY COUNT FRACTION CALCULATIONS
 // ============================================================================
 
+
 day_count_fraction :: proc(t1: f64, t2: f64, convention: DayCountConvention) -> f64 {
 	dt := t2 - t1
 	if dt <= 0.0 {
@@ -74,12 +75,14 @@ day_count_fraction :: proc(t1: f64, t2: f64, convention: DayCountConvention) -> 
 	case .ACT_ACT:
 		return dt
 	case .THIRTY_360:
+		// Simplified: assume 30 days per month
 		months := dt * 12.0
 		return months / 12.0
 	}
 
 	return dt
 }
+
 
 // ============================================================================
 // ZERO COUPON BOND PRICING (FLAT CURVE)
