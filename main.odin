@@ -521,7 +521,7 @@ main :: proc() {
 	test.rough_volatility_test(context.temp_allocator)
 	test.rough_volatility_pd_test(context.temp_allocator)
 	test.unified_mc_test(context.temp_allocator)
-	test.swap_test(context.temp_allocator)
+	test.swaps_test(context.temp_allocator)
 	test.bonds_test(context.temp_allocator)
 	test.yield_curve_test(context.temp_allocator)
 	fmt.println("Demo End")

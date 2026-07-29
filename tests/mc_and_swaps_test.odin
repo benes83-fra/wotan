@@ -65,87 +65,74 @@ unified_mc_test :: proc(allocator: mem.Allocator) {
 	max_S := fin.mc_compute_lookback_max(S_paths, 0, n_steps)
 	fmt.printf("   %-30s | $%10.4f\n", "Running Maximum (first path)", max_S)
 }
-
-swap_test :: proc(allocator: mem.Allocator) {
+swaps_test :: proc(allocator: mem.Allocator) {
 	fmt.println("\n======================================================================")
-	fmt.println("    INTEREST RATE SWAPS (IRS)")
+	fmt.println("    INTEREST RATE SWAPS (CURVE-AWARE)")
 	fmt.println("======================================================================\n")
 
 	notional := 100_000_000.0 // $100M
-	r_swap := 0.03 // 3% flat curve
 
-	// ========================================================================
-	// PART 1: PAR SWAP RATES
-	// ========================================================================
-	fmt.println("1. Par Swap Rates (Flat 3% Curve)")
+	// 1. Define market par swap rates (upward sloping curve)
+	tenors := []f64{1.0, 2.0, 3.0, 5.0, 7.0, 10.0}
+	market_rates := []f64{0.0450, 0.0460, 0.0465, 0.0475, 0.0480, 0.0490}
+
+	fmt.println("1. Bootstrapping Yield Curve from Market Par Rates")
 	fmt.println("   ----------------------------------------------------------------------")
+	for i in 0 ..< len(tenors) {
+		fmt.printf("   %-5.1fY Par Swap Rate: %6.4f%%\n", tenors[i], market_rates[i] * 100.0)
+	}
 
-	par_5y := fin.compute_par_swap_rate(5.0, r_swap, 0.25, .ACT_360)
-	par_10y := fin.compute_par_swap_rate(10.0, r_swap, 0.25, .ACT_360)
-
-	fmt.printf("   %-30s | %.4f%%\n", "5Y Par Swap Rate", par_5y * 100.0)
-	fmt.printf("   %-30s | %.4f%%\n", "10Y Par Swap Rate", par_10y * 100.0)
-
-	// ========================================================================
-	// PART 2: SWAP VALUATION
-	// ========================================================================
-	fmt.println("\n2. Swap Valuation")
-	fmt.println("   ----------------------------------------------------------------------")
-
-	// Create and price a payer swap (pay 3.5% fixed, receive floating)
-	payer_swap := fin.create_payer_swap(notional, 0.035, 10.0, 0.25, .ACT_360)
-	payer_result := fin.price_swap(payer_swap, r_swap, allocator)
-
-	fmt.println("   10Y Payer Swap (pay 3.5% fixed, receive floating):")
-	fmt.printf("   %-30s | $%15.2f\n", "NPV", payer_result.npv)
-	fmt.printf("   %-30s | %.4f%%\n", "Par Swap Rate", payer_result.par_swap_rate * 100.0)
-	fmt.printf("   %-30s | $%15.2f\n", "PV01 (per 1bp)", payer_result.pv01)
-	fmt.printf("   %-30s | %10.4f\n", "Modified Duration", payer_result.modified_duration)
-
-	// Create and price a receiver swap (receive 2.5% fixed, pay floating)
-	receiver_swap := fin.create_receiver_swap(notional, 0.025, 5.0, 0.25, .ACT_360)
-	receiver_result := fin.price_swap(receiver_swap, r_swap, allocator)
-
-	fmt.println("\n   5Y Receiver Swap (receive 2.5% fixed, pay floating):")
-	fmt.printf("   %-30s | $%15.2f\n", "NPV", receiver_result.npv)
-	fmt.printf("   %-30s | %.4f%%\n", "Par Swap Rate", receiver_result.par_swap_rate * 100.0)
-	fmt.printf("   %-30s | $%15.2f\n", "PV01 (per 1bp)", receiver_result.pv01)
-	fmt.printf("   %-30s | %15.4f\n", "Modified Duration", receiver_result.modified_duration)
-
-	// ========================================================================
-	// PART 3: SWAP RISK METRICS ACROSS MATURITIES
-	// ========================================================================
-	fmt.println("\n3. Swap Risk Metrics Across Maturities")
-	fmt.println("   ----------------------------------------------------------------------")
-	fmt.printf(
-		"   %-10s | %-12s | %-14s | %-12s\n",
-		"Maturity",
-		"Par Rate",
-		"PV01 ($)",
-		"Duration",
+	// ✅ FIX: Corrected arguments to match the 5-parameter signature
+	curve := fin.bootstrap_yield_curve_from_swaps(
+		tenors,
+		market_rates,
+		0.25, // Quarterly payments
+		.ACT_360,
+		allocator,
 	)
-	fmt.println("   ----------------------------------------------------------------------")
+	defer fin.free_yield_curve(&curve, allocator)
 
-	maturities := []f64{1.0, 2.0, 5.0, 10.0, 30.0}
-	for mat in maturities {
-		par_rate := fin.compute_par_swap_rate(mat, r_swap, 0.25, .ACT_360)
-		pv01 := fin.compute_swap_pv01(mat, notional, r_swap, 0.25, .ACT_360)
-		duration := fin.compute_swap_duration(mat, r_swap, 0.25, .ACT_360)
-
-		// ✅ FIX 3: Cast to int to prevent float formatting quirks
+	fmt.println("\n   Bootstrapped Zero Rates:")
+	for i in 0 ..< len(curve.tenors) {
 		fmt.printf(
-			"   %-8d.1Y | %11.4f%% | $%13.2f | %11.4f\n",
-			int(mat),
-			par_rate * 100.0,
-			pv01,
-			duration,
+			"   %-5.1fY Zero Rate:     %6.4f%%\n",
+			curve.tenors[i],
+			curve.zero_rates[i] * 100.0,
 		)
 	}
 
+	// 2. Price a specific swap using the bootstrapped curve
+	fmt.println("\n2. Pricing a 5-Year Payer Swap (Pay 4.80% Fixed)")
+	fmt.println("   ----------------------------------------------------------------------")
+
+	// Create a swap that pays 4.80% fixed (slightly above the 5Y par rate of 4.75%)
+	payer_swap := fin.create_payer_swap(notional, 0.0480, 5.0, 0.25, .ACT_360)
+
+	// Price it against the curve
+	result := fin.price_swap(payer_swap, &curve, allocator)
+
+	fmt.printf("   %-25s | $%15.2f\n", "NPV (Receiver - Payer)", result.npv)
+	fmt.printf("   %-25s | %15.4f%%\n", "Market Par Swap Rate", result.par_swap_rate * 100.0)
+	fmt.printf("   %-25s | $%15.2f\n", "PV01 (per 1bp)", result.pv01)
+	fmt.printf("   %-25s | %15.4f\n", "Modified Duration", result.modified_duration)
+
+	// 3. Verify Par Swap Rate calculation
+	fmt.println("\n3. Curve Metrics Verification")
+	fmt.println("   ----------------------------------------------------------------------")
+
+	// The par rate for 5Y should be very close to the input 4.75%
+	verified_par := fin.compute_par_swap_rate(5.0, &curve, 0.25, .ACT_360)
+	fmt.printf("   %-25s | %15.4f%%\n", "Computed 5Y Par Rate", verified_par * 100.0)
+
+	verified_pv01 := fin.compute_swap_pv01(5.0, notional, &curve, 0.25, .ACT_360)
+	fmt.printf("   %-25s | $%15.2f\n", "Computed 5Y PV01", verified_pv01)
+
 	fmt.println("\n💡 Key Insights:")
-	fmt.println("   • Swaps are the foundation of fixed income (Calypso uses these everywhere)")
-	fmt.println("   • Par swap rate = (1 - DF_maturity) / annuity")
-	fmt.println("   • PV01 = annuity × notional × 0.0001 (risk per 1bp shift)")
-	fmt.println("   • Modified duration is computed via finite differences on NPV")
+	fmt.println("   • The floating leg is valued using the exact no-arbitrage identity:")
+	fmt.println("     PV_float = Notional × (DF_start - DF_end)")
+	fmt.println("   • This avoids interpolation errors and perfectly matches market practice.")
+	fmt.println(
+		"   • Because we pay 4.80% but the market par rate is ~4.75%, the NPV is negative.",
+	)
 	fmt.println("======================================================================\n")
 }

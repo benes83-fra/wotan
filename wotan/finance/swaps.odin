@@ -4,7 +4,7 @@ import "core:math"
 import "core:mem"
 
 // ============================================================================
-// INTEREST RATE SWAPS (IRS)
+// INTEREST RATE SWAPS (IRS) - CURVE-AWARE
 // ============================================================================
 
 SwapLegType :: enum {
@@ -60,7 +60,6 @@ SwapCashFlow :: struct {
 // DAY COUNT FRACTION CALCULATIONS
 // ============================================================================
 
-
 day_count_fraction :: proc(t1: f64, t2: f64, convention: DayCountConvention) -> f64 {
 	dt := t2 - t1
 	if dt <= 0.0 {
@@ -75,7 +74,6 @@ day_count_fraction :: proc(t1: f64, t2: f64, convention: DayCountConvention) -> 
 	case .ACT_ACT:
 		return dt
 	case .THIRTY_360:
-		// Simplified: assume 30 days per month
 		months := dt * 12.0
 		return months / 12.0
 	}
@@ -83,28 +81,18 @@ day_count_fraction :: proc(t1: f64, t2: f64, convention: DayCountConvention) -> 
 	return dt
 }
 
-
 // ============================================================================
-// ZERO COUPON BOND PRICING (FLAT CURVE)
-// ============================================================================
-
-_discount_factor_flat :: proc(t: f64, r: f64) -> f64 {
-	if t <= 0.0 {
-		return 1.0
-	}
-	return math.exp_f64(-r * t)
-}
-
-// ============================================================================
-// SWAP LEG VALUATION
+// SWAP LEG VALUATION (CURVE-AWARE)
 // ============================================================================
 
+// Value a fixed leg using the yield curve
 _valuate_fixed_leg :: proc(
 	leg: SwapLeg,
 	notional: f64,
 	effective_date: f64,
 	maturity: f64,
-	r: f64,
+	curve: ^YieldCurve,
+	allocator: mem.Allocator,
 ) -> (
 	pv: f64,
 	cashflows: []SwapCashFlow,
@@ -112,7 +100,7 @@ _valuate_fixed_leg :: proc(
 	pv = 0.0
 	n_payments := int((maturity - effective_date) / leg.payment_frequency)
 
-	cashflows = make([]SwapCashFlow, n_payments, context.allocator)
+	cashflows = make([]SwapCashFlow, n_payments, allocator)
 
 	for i in 0 ..< n_payments {
 		t_start := effective_date + f64(i) * leg.payment_frequency
@@ -129,19 +117,23 @@ _valuate_fixed_leg :: proc(
 			amount       = payment,
 		}
 
-		df := _discount_factor_flat(t_end, r)
+		// ✅ UPGRADE: Use curve discount factor instead of flat rate
+		df := yield_curve_discount_factor(curve, t_end)
 		pv += payment * df
 	}
 
 	return pv, cashflows
 }
 
+// Value a floating leg using the yield curve
+// ✅ UPGRADE: Uses the exact no-arbitrage identity: PV_float = N * (DF_start - DF_end)
 _valuate_floating_leg :: proc(
 	leg: SwapLeg,
 	notional: f64,
 	effective_date: f64,
 	maturity: f64,
-	r: f64,
+	curve: ^YieldCurve,
+	allocator: mem.Allocator,
 ) -> (
 	pv: f64,
 	cashflows: []SwapCashFlow,
@@ -149,7 +141,7 @@ _valuate_floating_leg :: proc(
 	pv = 0.0
 	n_payments := int((maturity - effective_date) / leg.payment_frequency)
 
-	cashflows = make([]SwapCashFlow, n_payments, context.allocator)
+	cashflows = make([]SwapCashFlow, n_payments, allocator)
 
 	for i in 0 ..< n_payments {
 		t_start := effective_date + f64(i) * leg.payment_frequency
@@ -159,26 +151,40 @@ _valuate_floating_leg :: proc(
 		}
 
 		dcf := day_count_fraction(t_start, t_end, leg.day_count)
-		fwd_rate := r + leg.floating_spread
-		payment := notional * fwd_rate * dcf
+
+		// ✅ UPGRADE: Exact no-arbitrage PV of floating leg
+		df_start := yield_curve_discount_factor(curve, t_start)
+		df_end := yield_curve_discount_factor(curve, t_end)
+
+		// PV of the floating rate payment (without spread)
+		pv += notional * (df_start - df_end)
+
+		// PV of the floating spread payment
+		pv += notional * leg.floating_spread * dcf * df_end
+
+		// For reporting: calculate the implied forward rate
+		fwd_rate := 0.0
+		if dcf > 1e-10 {
+			fwd_rate = (df_start / df_end - 1.0) / dcf
+		}
+		payment := notional * (fwd_rate + leg.floating_spread) * dcf
 
 		cashflows[i] = SwapCashFlow {
 			payment_date = t_end,
 			amount       = payment,
 		}
-
-		df := _discount_factor_flat(t_end, r)
-		pv += payment * df
 	}
 
 	return pv, cashflows
 }
+
 // ============================================================================
-// INTERNAL PRICING HELPER (No Greeks - prevents infinite recursion)
+// INTERNAL PRICING HELPER
 // ============================================================================
+
 _price_swap_internal :: proc(
 	swap: InterestRateSwap,
-	r: f64,
+	curve: ^YieldCurve,
 	allocator: mem.Allocator,
 ) -> SwapValuationResult {
 	// Value payer leg
@@ -190,7 +196,8 @@ _price_swap_internal :: proc(
 			swap.notional,
 			swap.effective_date,
 			swap.maturity,
-			r,
+			curve,
+			allocator,
 		)
 	} else {
 		pv_payer, cashflows_payer = _valuate_floating_leg(
@@ -198,10 +205,11 @@ _price_swap_internal :: proc(
 			swap.notional,
 			swap.effective_date,
 			swap.maturity,
-			r,
+			curve,
+			allocator,
 		)
 	}
-	defer delete(cashflows_payer, context.allocator)
+	defer delete(cashflows_payer, allocator)
 
 	// Value receiver leg
 	pv_receiver: f64
@@ -212,7 +220,8 @@ _price_swap_internal :: proc(
 			swap.notional,
 			swap.effective_date,
 			swap.maturity,
-			r,
+			curve,
+			allocator,
 		)
 	} else {
 		pv_receiver, cashflows_receiver = _valuate_floating_leg(
@@ -220,38 +229,37 @@ _price_swap_internal :: proc(
 			swap.notional,
 			swap.effective_date,
 			swap.maturity,
-			r,
+			curve,
+			allocator,
 		)
 	}
-	defer delete(cashflows_receiver, context.allocator)
+	defer delete(cashflows_receiver, allocator)
 
 	// NPV = Receiver - Payer
 	npv := pv_receiver - pv_payer
 
-	// Par swap rate (per unit notional)
+	// Par swap rate
 	annuity := _compute_swap_annuity(
 		swap.receiver_leg.payment_frequency,
 		swap.effective_date,
 		swap.maturity,
 		swap.receiver_leg.day_count,
-		r,
+		curve,
 	)
 
 	par_swap_rate := 0.0
 	if annuity > 1e-10 {
-		// ✅ FIX 1: Divide dollar PV by notional to get unit PV before dividing by annuity
 		if swap.receiver_leg.leg_type == .Floating {
-			par_swap_rate = (pv_receiver / swap.notional) / annuity
+			par_swap_rate = pv_receiver / (swap.notional * annuity)
 		} else {
-			par_swap_rate = (pv_payer / swap.notional) / annuity
+			par_swap_rate = pv_payer / (swap.notional * annuity)
 		}
 	}
 
-	// PV01
+	// PV01 (per 1bp shift)
 	pv01 := annuity * swap.notional * 0.0001
 
-	// ✅ FIX 2: Calculate Modified Duration of the FIXED LEG (Standard Swap Metric)
-	// Traders don't care about the duration of the NPV; they care about the fixed leg's duration.
+	// Modified Duration of the fixed leg
 	mac_duration := 0.0
 	pv_fixed_unit := 0.0
 
@@ -270,7 +278,7 @@ _price_swap_internal :: proc(
 			t_end = swap.maturity
 		}
 		dcf := day_count_fraction(t_start, t_end, fixed_leg.day_count)
-		df := _discount_factor_flat(t_end, r)
+		df := yield_curve_discount_factor(curve, t_end)
 
 		pv_cf := dcf * df
 		pv_fixed_unit += pv_cf
@@ -280,56 +288,35 @@ _price_swap_internal :: proc(
 	modified_duration := 0.0
 	if pv_fixed_unit > 1e-10 {
 		mac_duration /= pv_fixed_unit
-		// Modified Duration ≈ Macaulay Duration / (1 + r * freq)
-		modified_duration = mac_duration / (1.0 + r * fixed_leg.payment_frequency)
+		// Approximate modified duration
+		modified_duration = mac_duration / (1.0 + par_swap_rate * fixed_leg.payment_frequency)
 	}
 
 	return SwapValuationResult {
-		pv_fixed_leg = 0.0,
-		pv_floating_leg = 0.0,
-		npv = npv,
-		par_swap_rate = par_swap_rate,
-		pv01 = pv01,
+		pv_fixed_leg      = 0.0, // Can be populated if needed
+		pv_floating_leg   = 0.0,
+		npv               = npv,
+		par_swap_rate     = par_swap_rate,
+		pv01              = pv01,
 		modified_duration = modified_duration,
-		convexity = 0.0,
+		convexity         = 0.0, // Can be added via finite differences if needed
 	}
 }
 
 // ============================================================================
-// MAIN SWAP PRICING FUNCTION (with Greeks via finite differences)
+// MAIN SWAP PRICING FUNCTION
 // ============================================================================
+
 price_swap :: proc(
 	swap: InterestRateSwap,
-	r: f64,
+	curve: ^YieldCurve,
 	allocator: mem.Allocator = context.allocator,
 ) -> SwapValuationResult {
-	// Get base price using internal helper (which now includes correct duration)
-	result := _price_swap_internal(swap, r, allocator)
-	npv := result.npv
-
-	// Compute Convexity using finite differences on NPV
-	h := 0.0001 // 1bp shift
-	price_up := _price_swap_internal(swap, r + h, allocator)
-	price_dn := _price_swap_internal(swap, r - h, allocator)
-
-	convexity := 0.0
-	if math.abs(npv) > 1e-10 {
-		convexity = (price_up.npv + price_dn.npv - 2.0 * npv) / (h * h * npv)
-	}
-
-	return SwapValuationResult {
-		pv_fixed_leg = result.pv_fixed_leg,
-		pv_floating_leg = result.pv_floating_leg,
-		npv = npv,
-		par_swap_rate = result.par_swap_rate,
-		pv01 = result.pv01,
-		modified_duration = result.modified_duration,
-		convexity = convexity,
-	}
+	return _price_swap_internal(swap, curve, allocator)
 }
 
 // ============================================================================
-// SWAP ANNUITY (PV01 per unit notional)
+// SWAP ANNUITY & METRICS (CURVE-AWARE)
 // ============================================================================
 
 _compute_swap_annuity :: proc(
@@ -337,7 +324,7 @@ _compute_swap_annuity :: proc(
 	effective_date: f64,
 	maturity: f64,
 	day_count: DayCountConvention,
-	r: f64,
+	curve: ^YieldCurve,
 ) -> f64 {
 	annuity := 0.0
 	n_payments := int((maturity - effective_date) / payment_frequency)
@@ -350,11 +337,55 @@ _compute_swap_annuity :: proc(
 		}
 
 		dcf := day_count_fraction(t_start, t_end, day_count)
-		df := _discount_factor_flat(t_end, r)
+		df := yield_curve_discount_factor(curve, t_end)
 		annuity += dcf * df
 	}
 
 	return annuity
+}
+
+compute_par_swap_rate :: proc(
+	maturity: f64,
+	curve: ^YieldCurve,
+	payment_frequency: f64 = 0.25,
+	day_count: DayCountConvention = .ACT_360,
+) -> f64 {
+	df_maturity := yield_curve_discount_factor(curve, maturity)
+	annuity := _compute_swap_annuity(payment_frequency, 0.0, maturity, day_count, curve)
+
+	if annuity > 1e-10 {
+		return (1.0 - df_maturity) / annuity
+	}
+
+	return 0.0
+}
+
+compute_swap_pv01 :: proc(
+	maturity: f64,
+	notional: f64,
+	curve: ^YieldCurve,
+	payment_frequency: f64 = 0.25,
+	day_count: DayCountConvention = .ACT_360,
+) -> f64 {
+	annuity := _compute_swap_annuity(payment_frequency, 0.0, maturity, day_count, curve)
+	return annuity * notional * 0.0001
+}
+
+compute_swap_duration :: proc(
+	maturity: f64,
+	curve: ^YieldCurve,
+	payment_frequency: f64 = 0.25,
+	day_count: DayCountConvention = .ACT_360,
+) -> f64 {
+	df_maturity := yield_curve_discount_factor(curve, maturity)
+	annuity := _compute_swap_annuity(payment_frequency, 0.0, maturity, day_count, curve)
+	par_rate := compute_par_swap_rate(maturity, curve, payment_frequency, day_count)
+
+	if par_rate * annuity > 1e-10 {
+		return (1.0 - df_maturity) / (par_rate * annuity)
+	}
+
+	return maturity / 2.0
 }
 
 // ============================================================================
@@ -417,51 +448,4 @@ create_receiver_swap :: proc(
 		},
 		direction = .Receiver,
 	}
-}
-
-compute_par_swap_rate :: proc(
-	maturity: f64,
-	r: f64,
-	payment_frequency: f64 = 0.25,
-	day_count: DayCountConvention = .ACT_360,
-) -> f64 {
-	df_maturity := _discount_factor_flat(maturity, r)
-	annuity := _compute_swap_annuity(payment_frequency, 0.0, maturity, day_count, r)
-
-	if annuity > 1e-10 {
-		return (1.0 - df_maturity) / annuity
-	}
-
-	return r
-}
-
-// ============================================================================
-// SWAP RISK METRICS
-// ============================================================================
-
-compute_swap_pv01 :: proc(
-	maturity: f64,
-	notional: f64,
-	r: f64,
-	payment_frequency: f64 = 0.25,
-	day_count: DayCountConvention = .ACT_360,
-) -> f64 {
-	annuity := _compute_swap_annuity(payment_frequency, 0.0, maturity, day_count, r)
-	return annuity * notional * 0.0001
-}
-
-compute_swap_duration :: proc(
-	maturity: f64,
-	r: f64,
-	payment_frequency: f64 = 0.25,
-	day_count: DayCountConvention = .ACT_360,
-) -> f64 {
-	df_maturity := _discount_factor_flat(maturity, r)
-	annuity := _compute_swap_annuity(payment_frequency, 0.0, maturity, day_count, r)
-
-	if r * annuity > 1e-10 {
-		return (1.0 - df_maturity) / (r * annuity)
-	}
-
-	return maturity / 2.0
 }
