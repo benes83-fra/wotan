@@ -40,16 +40,6 @@ BondPriceResult :: struct {
 	convexity:         f64,
 }
 
-FlatCurveParams :: struct {
-	rate: f64,
-}
-
-// ✅ Idiomatic Odin callback: takes rawptr for context
-flat_curve_proc :: proc(t: f64, user_data: rawptr) -> f64 {
-	params := (^FlatCurveParams)(user_data)
-	return math.exp_f64(-params.rate * t)
-}
-
 // ============================================================================
 // COUPON SCHEDULING
 // ============================================================================
@@ -127,10 +117,77 @@ calculate_accrued_interest :: proc(bond: Bond) -> f64 {
 }
 
 // ============================================================================
-// BOND PRICING FROM YIELD CURVE
+// BOND PRICING FROM YIELD CURVE STRUCT (Production Standard)
 // ============================================================================
+// Prices a bond using a bootstrapped YieldCurve instead of a flat rate callback.
+// This directly leverages the yield_curve_discount_factor function.
 
-// ✅ FIX: Added user_data parameter to pass context to the callback
+price_bond_from_yield_curve :: proc(
+	bond: Bond,
+	curve: ^YieldCurve,
+	allocator: mem.Allocator = context.allocator,
+) -> BondPriceResult {
+
+	coupon_dates := get_coupon_dates(bond, allocator)
+	defer delete(coupon_dates, allocator)
+
+	freq: f64
+	switch bond.coupon_frequency {
+	case .Annual:
+		freq = 1.0
+	case .SemiAnnual:
+		freq = 2.0
+	case .Quarterly:
+		freq = 4.0
+	case .Monthly:
+		freq = 12.0
+	}
+
+	coupon_payment := bond.face_value * bond.coupon_rate / freq
+	dirty_price := 0.0
+
+	for i in 0 ..< len(coupon_dates) {
+		t := coupon_dates[i]
+		if t <= bond.settlement_date {
+			continue
+		}
+
+		// ✅ Use the bootstrapped yield curve discount factor
+		df := yield_curve_discount_factor(curve, t)
+
+		if bond.bond_type != .ZeroCoupon {
+			dirty_price += coupon_payment * df
+		}
+
+		if i == len(coupon_dates) - 1 {
+			dirty_price += bond.face_value * df
+		}
+	}
+
+	accrued_interest := calculate_accrued_interest(bond)
+	clean_price := dirty_price - accrued_interest
+
+	// YTM, Duration, and Convexity are still calculated relative to a flat yield
+	// that equates to the clean price, as is standard market practice.
+	ytm := solve_ytm(bond, clean_price, allocator)
+	mod_duration, conv := calculate_duration_convexity(bond, ytm, allocator)
+
+	return BondPriceResult {
+		clean_price = clean_price,
+		dirty_price = dirty_price,
+		accrued_interest = accrued_interest,
+		yield_to_maturity = ytm,
+		modified_duration = mod_duration,
+		convexity = conv,
+	}
+}
+
+// ============================================================================
+// BOND PRICING FROM YIELD CURVE CALLBACK (Legacy / Custom Curves)
+// ============================================================================
+// Kept for backward compatibility or for pricing against custom curve implementations
+// that don't use the standard YieldCurve struct.
+
 price_bond_from_curve :: proc(
 	bond: Bond,
 	yield_curve: proc(t: f64, user_data: rawptr) -> f64,
@@ -162,7 +219,6 @@ price_bond_from_curve :: proc(
 			continue
 		}
 
-		// ✅ FIX: Pass user_data to the yield_curve function
 		df := yield_curve(t, user_data)
 
 		if bond.bond_type != .ZeroCoupon {
