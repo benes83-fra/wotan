@@ -130,3 +130,131 @@ ir_derivatives_test :: proc(allocator: mem.Allocator) {
 	)
 	fmt.println("======================================================================\n")
 }
+// ========================================================================
+// NEW: Hull-White 1F Floor Option Test
+// ========================================================================
+ir_derivatives_floor_test :: proc(allocator: mem.Allocator) {
+	fmt.println("\n======================================================================")
+	fmt.println("    INTEREST RATE DERIVATIVES: HULL-WHITE 1F FLOOR OPTION")
+	fmt.println("======================================================================\n")
+
+	r0 := 0.04
+	K := 0.04 // 4% strike
+
+	// 5-year floor with annual payments
+	n_caplets := 5
+	T_start := make([]f64, n_caplets, allocator)
+	T_end := make([]f64, n_caplets, allocator)
+	delta := make([]f64, n_caplets, allocator)
+	defer {
+		delete(T_start, allocator)
+		delete(T_end, allocator)
+		delete(delta, allocator)
+	}
+
+	for i in 0 ..< n_caplets {
+		T_start[i] = f64(i + 1)
+		T_end[i] = f64(i + 2)
+		delta[i] = 1.0
+	}
+
+	params := fin.HW_Params {
+		a     = 0.10,
+		sigma = 0.012,
+	}
+
+	n_paths := 20000
+	n_steps := 100
+
+	fmt.printf("   %-30s | %10.4f%%\n", "Initial Short Rate (r0)", r0 * 100.0)
+	fmt.printf("   %-30s | %10.4f%%\n", "Floor Strike (K)", K * 100.0)
+	fmt.printf("   %-30s | %10d\n", "Number of Floorlets", n_caplets)
+	fmt.printf("   %-30s | %10.4f%%\n", "Mean Reversion (a)", params.a * 100.0)
+	fmt.printf("   %-30s | %10.4f%%\n", "Volatility (sigma)", params.sigma * 100.0)
+	fmt.println()
+
+	floor_price, delta_r, vega := fin.hw_mc_floor_option(
+		r0,
+		K,
+		T_start,
+		T_end,
+		delta,
+		n_caplets,
+		params,
+		n_paths,
+		n_steps,
+		allocator,
+	)
+
+	fmt.println("   Monte Carlo Pricing Results (1F Floor):")
+	fmt.println("   ----------------------------------------------------------------------")
+	fmt.printf("   %-30s | $%10.4f\n", "Floor Price", floor_price)
+	fmt.printf("   %-30s | %10.4f\n", "Delta (dPrice/dr0)", delta_r)
+	fmt.printf("   %-30s | %10.4f\n", "Vega (dPrice/dsigma)", vega)
+	fmt.println("======================================================================\n")
+}
+
+// ========================================================================
+// NEW: Hull-White 2F Swaption Strip Test
+// ========================================================================
+ir_derivatives_swaption_strip_test :: proc(allocator: mem.Allocator) {
+	fmt.println("\n======================================================================")
+	fmt.println("    INTEREST RATE DERIVATIVES: HULL-WHITE 2F SWAPTION STRIP")
+	fmt.println("======================================================================\n")
+
+	r0 := 0.04
+	params := fin.HW2_Params {
+		a     = 0.10,
+		b     = 0.03,
+		sigma = 0.010,
+		eta   = 0.008,
+		rho   = -0.50,
+	}
+
+	n_swaptions := 5
+	swaptions := make([]fin.SwaptionSpec, n_swaptions, allocator)
+	defer delete(swaptions, allocator)
+
+	fmt.println("   Swaption Strip Setup (ATM Payer Swaptions):")
+	fmt.println("   ----------------------------------------------------------------------")
+	for i in 0 ..< n_swaptions {
+		T_exp := f64(i + 1)
+		swap_length := 5 // 5-year underlying swap
+
+		// Simplified annuity calculation for flat curve
+		annuity := 0.0
+		for k in 1 ..< swap_length + 1 {
+			annuity += math.exp_f64(-r0 * (T_exp + f64(k)))
+		}
+
+		swaptions[i] = fin.SwaptionSpec {
+			T_exp       = T_exp,
+			swap_length = swap_length,
+			F           = r0, // ATM forward rate
+			K           = r0, // ATM strike
+			annuity     = annuity,
+		}
+		fmt.printf(
+			"   %-5.1fY x %-2dY ATM Swaption | Annuity: %8.4f\n",
+			T_exp,
+			swap_length,
+			annuity,
+		)
+	}
+	fmt.println()
+
+	prices := fin.hw2f_swaption_price_strip(params, swaptions, n_swaptions, r0, allocator)
+	defer delete(prices, allocator)
+
+	fmt.println("   Analytical Pricing Results (Black's Formula with HW2F Vol):")
+	fmt.println("   ----------------------------------------------------------------------")
+	for i in 0 ..< n_swaptions {
+		fmt.printf(
+			"   %-5.1fY x %-2dY Swaption Price | $%10.6f\n",
+			swaptions[i].T_exp,
+			swaptions[i].swap_length,
+			prices[i],
+		)
+	}
+	fmt.println("======================================================================\n")
+}

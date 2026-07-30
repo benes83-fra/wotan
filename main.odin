@@ -524,6 +524,8 @@ main :: proc() {
 	test.swaps_test(context.temp_allocator)
 	test.bonds_test(context.temp_allocator)
 	test.yield_curve_test(context.temp_allocator)
+	test.ir_derivatives_floor_test(context.temp_allocator)
+	test.ir_derivatives_swaption_strip_test(context.temp_allocator)
 	fmt.println("Demo End")
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
