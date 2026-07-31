@@ -526,6 +526,7 @@ main :: proc() {
 	test.yield_curve_test(context.temp_allocator)
 	test.ir_derivatives_floor_test(context.temp_allocator)
 	test.ir_derivatives_swaption_strip_test(context.temp_allocator)
+	test.deep_hedging_test(context.temp_allocator)
 	fmt.println("Demo End")
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
