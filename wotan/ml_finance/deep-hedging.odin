@@ -5,6 +5,7 @@ import nn "../nn"
 import t "../tensor"
 import "core:math"
 import "core:mem"
+import "core:slice"
 
 // ============================================================================
 // Deep Hedging Configuration
@@ -154,12 +155,63 @@ deep_hedger_train_step :: proc(
 
 	// 6. Compute Loss (Risk Measure)
 	loss: ^t.Tensor
+
 	if hedger.config.risk_measure == .Variance {
 		// Variance proxy: Mean(PnL^2)
 		pnl_sq := t.tensor_mul(pnl, pnl)
 		loss = t.tensor_mean(pnl_sq)
+	} else if hedger.config.risk_measure == .CVaR {
+		// CVaR (Expected Shortfall) of the loss L = -PnL
+		// Uses Rockafellar-Uryasev formulation with empirical VaR threshold
+		n := len(pnl.data.data)
+		alpha := hedger.config.cvar_alpha // e.g., 0.05 for 95% CVaR
+
+		// 1. Extract PnL data to compute empirical VaR (non-differentiable step)
+		losses := make([]f64, n, hedger.allocator) // ← FIXED
+		defer delete(losses, hedger.allocator) // ← FIXED
+		for i in 0 ..< n {
+			losses[i] = -pnl.data.data[i] // Convert Profit to Loss
+		}
+
+		// Sort losses to find VaR threshold
+		sorted_losses := make([]f64, n, hedger.allocator) // ← FIXED
+		defer delete(sorted_losses, hedger.allocator) // ← FIXED
+		copy(sorted_losses, losses)
+		slice.sort(sorted_losses)
+
+		// VaR is the (1-alpha) quantile of the loss distribution
+		cutoff_idx := int((1.0 - alpha) * f64(n))
+		if cutoff_idx >= n {cutoff_idx = n - 1}
+		if cutoff_idx < 0 {cutoff_idx = 0}
+
+		var_val := sorted_losses[cutoff_idx]
+
+		// 2. Compute CVaR using Rockafellar-Uryasev formulation (differentiable step)
+		// Formula: CVaR = VaR + 1/alpha * mean( max(L - VaR, 0) )
+
+		// Create a constant tensor for the VaR threshold
+		var_data := l.matrix_new(f64, 1, 1, hedger.allocator) // ← FIXED
+		var_data.data[0] = var_val
+		var_tensor := t.tensor_new(var_data, false, hedger.allocator) // ← FIXED
+		var_tensor.owned_by_graph = true // Ensure it's freed by tensor_free_graph
+
+		// L = -PnL (Differentiable)
+		L := t.tensor_neg(pnl)
+
+		// excess = max(L - VaR, 0) (Differentiable via ReLU)
+		diff := t.tensor_sub(L, var_tensor)
+		excess := t.tensor_relu(diff)
+
+		// mean_excess = mean(excess)
+		mean_excess := t.tensor_mean(excess)
+
+		// CVaR = VaR + mean_excess / alpha
+		scaled_excess := t.tensor_scale(mean_excess, 1.0 / alpha)
+
+		// Add VaR to get final CVaR loss
+		loss = t.tensor_add(var_tensor, scaled_excess)
 	} else {
-		// Fallback to Variance for CVaR if not implemented
+		// Fallback to Variance
 		pnl_sq := t.tensor_mul(pnl, pnl)
 		loss = t.tensor_mean(pnl_sq)
 	}
