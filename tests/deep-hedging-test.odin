@@ -113,7 +113,7 @@ deep_hedging_test :: proc(allocator: mem.Allocator) {
 		state_size   = 3,
 		hidden_size  = 64,
 		num_layers   = 2,
-		risk_measure = .Variance,
+		risk_measure = .CVaR,
 		cvar_alpha   = 0.05,
 	}
 	hedger := ml_fin.deep_hedger_new(config, allocator)
@@ -156,19 +156,125 @@ deep_hedging_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("   Loss Reduction: %.2f%%\n", loss_reduction)
 
 	// ========================================================================
-	// 5. Results Summary
+	// 5. Compute True Baselines
 	// ========================================================================
-	fmt.println("\n5. Results Summary")
+	fmt.println("\n5. Computing True Baselines...")
 	fmt.println("   ----------------------------------------------------------------------")
-	fmt.printf("   %-25s | $%.4f\n", "Black-Scholes Price", bs_price)
-	fmt.printf("   %-25s | $%.4f\n", "Final Training Loss", final_loss)
-	fmt.printf("   %-25s | %.2f%%\n", "Loss Reduction", loss_reduction)
+
+	// True unhedged variance
+	true_unhedged_var := _unhedged_variance(payoffs, n_paths)
+	fmt.printf("   True Unhedged Variance:  $%.4f\n", true_unhedged_var)
+
+	// Static delta baseline
+	static_var, delta_bs := _static_delta_variance(
+		S_0,
+		K,
+		T,
+		r,
+		sigma,
+		paths,
+		payoffs,
+		n_paths,
+		n_steps,
+		allocator,
+	)
+	fmt.printf("   BS Delta (t=0):          %.4f\n", delta_bs)
+	fmt.printf("   Static Hedge Variance:   $%.4f\n", static_var)
+
+	// ========================================================================
+	// 6. Results Summary
+	// ========================================================================
+	fmt.println("\n6. Results Summary")
+	fmt.println("   ----------------------------------------------------------------------")
+	fmt.printf("   %-30s | $%.4f\n", "Black-Scholes Price", bs_price)
+	fmt.printf("   %-30s | $%.4f\n", "True Unhedged Variance", true_unhedged_var)
+	fmt.printf("   %-30s | $%.4f\n", "Static Delta Variance", static_var)
+	fmt.printf("   %-30s | $%.4f\n", "Deep Hedge Variance (epoch 0)", initial_loss)
+	fmt.printf("   %-30s | $%.4f\n", "Deep Hedge Variance (final)", final_loss)
+	fmt.println("   ----------------------------------------------------------------------")
+
+	// Improvement metrics
+	static_improvement := (1.0 - static_var / true_unhedged_var) * 100.0
+	deep_improvement := (1.0 - final_loss / true_unhedged_var) * 100.0
+	deep_vs_static := 0.0
+	if static_var > 1e-10 {
+		deep_vs_static = (1.0 - final_loss / static_var) * 100.0
+	}
+
+	fmt.printf("   %-30s | %.2f%%\n", "Static vs Unhedged", static_improvement)
+	fmt.printf("   %-30s | %.2f%%\n", "Deep vs Unhedged", deep_improvement)
+	fmt.printf("   %-30s | %.2f%%\n", "Deep vs Static", deep_vs_static)
 
 	fmt.println("\n[*] Key Insights:")
-	fmt.println("   - Deep Hedging learns optimal hedge ratios directly from data")
-	fmt.println("   - The network minimizes PnL variance (or CVaR) end-to-end")
-	fmt.println("   - This approach works for ANY payoff structure (exotics, path-dependent)")
-	fmt.println("   - Traditional Greeks become unstable for complex derivatives")
-	fmt.println("   - Deep Hedging provides a model-free alternative to Delta hedging")
+	fmt.println("   - Static Delta removes first-order (linear) risk")
+	fmt.println("   - Deep Hedging additionally removes Gamma and higher-order risk")
+	fmt.println("   - The gap between Static and Deep = value of dynamic rebalancing")
+	if deep_vs_static > 5.0 {
+		fmt.println("   - The NN significantly outperforms static hedging!")
+	} else {
+		fmt.println("   - For vanilla European calls, static Delta is already strong.")
+		fmt.println("   - Try exotic payoffs (Asians, Barriers) to see bigger gaps.")
+	}
 	fmt.println("======================================================================")
+}
+// Compute TRUE unhedged variance (variance of -payoff)
+_unhedged_variance :: proc(payoffs: ^t.Tensor, n_paths: int) -> f64 {
+	sum := 0.0
+	sq_sum := 0.0
+	for i in 0 ..< n_paths {
+		p := -payoffs.data.data[i] // Loss = -payoff
+		sum += p
+		sq_sum += p * p
+	}
+	mean := sum / f64(n_paths)
+	return (sq_sum / f64(n_paths)) - mean * mean
+}
+
+// Compute static delta variance (corrected)
+_static_delta_variance :: proc(
+	S_0: f64,
+	K: f64,
+	T: f64,
+	r: f64,
+	sigma: f64,
+	paths: ^t.Tensor,
+	payoffs: ^t.Tensor,
+	n_paths: int,
+	n_steps: int,
+	allocator: mem.Allocator,
+) -> (
+	static_var: f64,
+	static_delta: f64,
+) {
+	// 1. Compute Black-Scholes Delta at t=0
+	d1 := (math.ln(S_0 / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt_f64(T))
+	N_d1 := 0.5 * (1.0 + math.erf(d1 / math.sqrt_f64(2.0)))
+	delta_bs := N_d1
+
+	// 2. Compute BS price (premium received)
+	d2 := d1 - sigma * math.sqrt_f64(T)
+	N_d2 := 0.5 * (1.0 + math.erf(d2 / math.sqrt_f64(2.0)))
+	call_price := S_0 * N_d1 - K * math.exp_f64(-r * T) * N_d2
+
+	// 3. Compute static hedge PnL for each path
+	//    PnL = call_price + delta * (S_T - S_0) - payoff
+	pnl_sum := 0.0
+	pnl_sq_sum := 0.0
+
+	for p in 0 ..< n_paths {
+		s_t_idx := p * (n_steps + 1) * 3 + n_steps * 3 + 0
+		S_T := paths.data.data[s_t_idx]
+		payoff := payoffs.data.data[p]
+
+		// Static hedge PnL (includes premium received)
+		hedge_pnl := call_price + delta_bs * (S_T - S_0) - payoff
+
+		pnl_sum += hedge_pnl
+		pnl_sq_sum += hedge_pnl * hedge_pnl
+	}
+
+	mean_pnl := pnl_sum / f64(n_paths)
+	variance := (pnl_sq_sum / f64(n_paths)) - mean_pnl * mean_pnl
+
+	return variance, delta_bs
 }

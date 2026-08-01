@@ -98,7 +98,7 @@ deep_hedger_train_step :: proc(
 	pnl_data := l.matrix_new(f64, batch_size, 1, alloc)
 	for i in 0 ..< batch_size {pnl_data.data[i] = 0.0}
 	pnl := t.tensor_new(pnl_data, false, alloc)
-
+	pnl.shape = [4]int{batch_size, 1, 1, 1}
 	// Broadcast V_0 to batch_size and add to PnL
 	v0_broadcast_data := l.matrix_new(f64, batch_size, 1, alloc)
 	for i in 0 ..< batch_size {v0_broadcast_data.data[i] = v0.data.data[0]}
@@ -167,15 +167,15 @@ deep_hedger_train_step :: proc(
 		alpha := hedger.config.cvar_alpha // e.g., 0.05 for 95% CVaR
 
 		// 1. Extract PnL data to compute empirical VaR (non-differentiable step)
-		losses := make([]f64, n, hedger.allocator) // ← FIXED
-		defer delete(losses, hedger.allocator) // ← FIXED
+		losses := make([]f64, n, hedger.allocator)
+		defer delete(losses, hedger.allocator)
 		for i in 0 ..< n {
 			losses[i] = -pnl.data.data[i] // Convert Profit to Loss
 		}
 
 		// Sort losses to find VaR threshold
-		sorted_losses := make([]f64, n, hedger.allocator) // ← FIXED
-		defer delete(sorted_losses, hedger.allocator) // ← FIXED
+		sorted_losses := make([]f64, n, hedger.allocator)
+		defer delete(sorted_losses, hedger.allocator)
 		copy(sorted_losses, losses)
 		slice.sort(sorted_losses)
 
@@ -189,11 +189,16 @@ deep_hedger_train_step :: proc(
 		// 2. Compute CVaR using Rockafellar-Uryasev formulation (differentiable step)
 		// Formula: CVaR = VaR + 1/alpha * mean( max(L - VaR, 0) )
 
-		// Create a constant tensor for the VaR threshold
-		var_data := l.matrix_new(f64, 1, 1, hedger.allocator) // ← FIXED
-		var_data.data[0] = var_val
-		var_tensor := t.tensor_new(var_data, false, hedger.allocator) // ← FIXED
-		var_tensor.owned_by_graph = true // Ensure it's freed by tensor_free_graph
+		// Create a BROADCASTED constant tensor for the VaR threshold
+		// Must match pnl's shape: [batch_size, 1, 1, 1]
+		batch_size := pnl.shape[0]
+		var_data := l.matrix_new(f64, batch_size, 1, hedger.allocator)
+		for i in 0 ..< batch_size {
+			var_data.data[i] = var_val
+		}
+		var_tensor := t.tensor_new(var_data, false, hedger.allocator)
+		var_tensor.shape = [4]int{batch_size, 1, 1, 1}
+		var_tensor.owned_by_graph = true
 
 		// L = -PnL (Differentiable)
 		L := t.tensor_neg(pnl)
@@ -208,8 +213,11 @@ deep_hedger_train_step :: proc(
 		// CVaR = VaR + mean_excess / alpha
 		scaled_excess := t.tensor_scale(mean_excess, 1.0 / alpha)
 
+		// For the final loss, we need a scalar. Use the mean of var_tensor.
+		var_mean := t.tensor_mean(var_tensor)
+
 		// Add VaR to get final CVaR loss
-		loss = t.tensor_add(var_tensor, scaled_excess)
+		loss = t.tensor_add(var_mean, scaled_excess)
 	} else {
 		// Fallback to Variance
 		pnl_sq := t.tensor_mul(pnl, pnl)
