@@ -465,6 +465,7 @@ main :: proc() {
 	test.multi_head_attention_test(context.temp_allocator)
 	test.layer_norm_test(context.temp_allocator)
 	test.ffn_simple_test(context.temp_allocator)
+	test.deep_hedging_portfolio_test(context.temp_allocator)
 	test.deep_hedging_real_data_test(context.temp_allocator)
 	test.deep_hedging_test(context.temp_allocator)
 	test.deep_hedging_exotic_test(context.temp_allocator)
