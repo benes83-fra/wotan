@@ -17,11 +17,12 @@ RiskMeasure :: enum {
 }
 
 DeepHedgerConfig :: struct {
-	state_size:   int, // Number of features in the state (e.g., 3: spot, time, vol)
-	hidden_size:  int, // Hidden layer size for the MLP
-	num_layers:   int, // Number of hidden layers
-	risk_measure: RiskMeasure,
-	cvar_alpha:   f64, // Alpha for CVaR (e.g., 0.05 for 95% CVaR)
+	state_size:       int, // Number of features in the state (e.g., 3: spot, time, vol)
+	hidden_size:      int, // Hidden layer size for the MLP
+	num_layers:       int, // Number of hidden layers
+	risk_measure:     RiskMeasure,
+	cvar_alpha:       f64, // Alpha for CVaR (e.g., 0.05 for 95% CVaR)
+	transaction_cost: f64,
 }
 
 DeepHedger :: struct {
@@ -143,6 +144,25 @@ deep_hedger_train_step :: proc(
 
 			ds := t.tensor_sub(s_t, s_prev)
 			pnl_increment := t.tensor_mul(prev_delta, ds)
+
+			// --- Transaction Cost Calculation ---
+			if hedger.config.transaction_cost > 0.0 {
+				// 1. d_delta = delta_t - delta_{t-1}
+				d_delta := t.tensor_sub(delta, prev_delta)
+
+				// 2. |d_delta| using differentiable ReLU trick: |x| = ReLU(x) + ReLU(-x)
+				pos_part := t.tensor_relu(d_delta)
+				neg_part := t.tensor_relu(t.tensor_neg(d_delta))
+				abs_d_delta := t.tensor_add(pos_part, neg_part)
+
+				// 3. cost = c * |d_delta| * S_t
+				cost_coeff := t.tensor_scale(abs_d_delta, hedger.config.transaction_cost)
+				cost := t.tensor_mul(cost_coeff, s_t)
+
+				// 4. Subtract cost from PnL increment
+				pnl_increment = t.tensor_sub(pnl_increment, cost)
+			}
+
 			pnl = t.tensor_add(pnl, pnl_increment)
 		}
 

@@ -110,11 +110,12 @@ deep_hedging_test :: proc(allocator: mem.Allocator) {
 	// ========================================================================
 	fmt.println("\n3. Initializing Deep Hedger...")
 	config := ml_fin.DeepHedgerConfig {
-		state_size   = 3,
-		hidden_size  = 64,
-		num_layers   = 2,
-		risk_measure = .CVaR,
-		cvar_alpha   = 0.05,
+		state_size       = 3,
+		hidden_size      = 64,
+		num_layers       = 2,
+		risk_measure     = .CVaR,
+		cvar_alpha       = 0.05,
+		transaction_cost = 0.001,
 	}
 	hedger := ml_fin.deep_hedger_new(config, allocator)
 	defer ml_fin.deep_hedger_free(hedger)
@@ -125,7 +126,7 @@ deep_hedging_test :: proc(allocator: mem.Allocator) {
 	nn.sequential_add_to_adam(hedger.network, &opt)
 
 	fmt.println("   [OK] Created MLP with 2 hidden layers (64 units each)")
-
+	fmt.printf("   [OK] Transaction Cost: %.2f%% per trade\n", config.transaction_cost * 100)
 	// ========================================================================
 	// 4. Training Loop
 	// ========================================================================
