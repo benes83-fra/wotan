@@ -9,6 +9,7 @@ import "core:fmt"
 import "core:math"
 import "core:math/rand"
 import "core:mem"
+import "core:os"
 
 // ============================================================================
 // Exotic Option Path Generators
@@ -370,4 +371,42 @@ deep_hedging_exotic_test :: proc(allocator: mem.Allocator) {
 	fmt.println("  - Deep Hedging learns optimal dynamic strategies end-to-end")
 	fmt.println("  - Significantly outperforms naive static hedging")
 	fmt.println("======================================================================")
+	// ========================================================================
+	// 7. Model Persistence (Save & Load)
+	// ========================================================================
+	fmt.println("\n7. Testing Model Persistence (Save/Load)...")
+	fmt.println("   ----------------------------------------------------------------------")
+
+	save_path := "deep_hedger_exotic_test.bin"
+
+	// Save the trained model
+	save_ok := ml_fin.deep_hedger_save(hedger, save_path)
+	if !save_ok {
+		fmt.println("   [FAIL] Could not save model to disk!")
+	} else {
+		fmt.printf("   [OK] Model saved to %s\n", save_path)
+	}
+
+	// Load the model back into a new DeepHedger instance
+	loaded_hedger, load_ok := ml_fin.deep_hedger_load(save_path, allocator)
+	if !load_ok {
+		fmt.println("   [FAIL] Could not load model from disk!")
+	} else {
+		fmt.println("   [OK] Model loaded successfully from disk!")
+
+		// Verify the loaded model has the correct network structure
+		if loaded_hedger.network != nil && len(loaded_hedger.network.layers) > 0 {
+			fmt.printf(
+				"   [OK] Loaded network has %d layers.\n",
+				len(loaded_hedger.network.layers),
+			)
+		}
+
+		// Clean up the loaded model to prevent memory leaks
+		ml_fin.deep_hedger_free(loaded_hedger)
+	}
+
+	// Clean up the test file
+	os.remove(save_path)
+	fmt.println("   [OK] Test file cleaned up.")
 }

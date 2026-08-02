@@ -255,3 +255,46 @@ deep_hedger_train_step :: proc(
 
 	return loss_val
 }
+// ============================================================================
+// Model Persistence (Save/Load)
+// ============================================================================
+
+// deep_hedger_save serializes the trained MLP weights to a binary file.
+deep_hedger_save :: proc(hedger: ^DeepHedger, path: string) -> bool {
+	// nn.save_checkpoint requires an Adam optimizer to satisfy its signature.
+	// We create a dummy one just to register the network's parameters for saving.
+	dummy_opt := nn.adam_new(0.001, allocator = hedger.allocator)
+	defer nn.adam_free(&dummy_opt)
+
+	// Register the network parameters with the dummy optimizer
+	nn.sequential_add_to_adam(hedger.network, &dummy_opt)
+
+	return nn.save_checkpoint(hedger.network, &dummy_opt, path, 0, hedger.allocator)
+}
+
+// deep_hedger_load deserializes the MLP weights from a binary file into a new DeepHedger.
+deep_hedger_load :: proc(
+	path: string,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	^DeepHedger,
+	bool,
+) {
+	// load_checkpoint returns the model, optimizer state, epoch, and success flag
+	loaded_model, loaded_opt, _, ok := nn.load_checkpoint(path, allocator)
+	if !ok {
+		return nil, false
+	}
+
+	// Free the loaded optimizer state since we only need the model weights for inference
+	if loaded_opt != nil {
+		nn.adam_free(loaded_opt)
+	}
+
+	// Wrap the loaded Sequential model in a DeepHedger struct
+	hedger := new(DeepHedger, allocator)
+	hedger.network = loaded_model
+	hedger.allocator = allocator
+
+	return hedger, true
+}
