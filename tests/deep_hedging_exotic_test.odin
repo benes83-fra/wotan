@@ -13,8 +13,6 @@ import "core:mem"
 // ============================================================================
 // Exotic Option Path Generators
 // ============================================================================
-
-// Generate Asian Option paths (arithmetic average)
 _generate_asian_paths :: proc(
 	S_0: f64,
 	K: f64,
@@ -32,20 +30,22 @@ _generate_asian_paths :: proc(
 	sqrt_dt := math.sqrt_f64(dt)
 	drift := (r - 0.5 * sigma * sigma) * dt
 
-	paths_data := l.matrix_new(f64, n_paths * (n_steps + 1), 3, allocator)
+	// 4 features: [spot, time_remaining, volatility, running_average]
+	paths_data := l.matrix_new(f64, n_paths * (n_steps + 1), 4, allocator)
 	payoffs_data := l.matrix_new(f64, n_paths, 1, allocator)
 
 	for path in 0 ..< n_paths {
 		S := S_0
-		sum_S := S_0 // Start with initial price for averaging
+		sum_S := S_0 // Running sum for average calculation
 		for step in 0 ..< n_steps + 1 {
-			idx := (path * (n_steps + 1) + step) * 3
+			idx := (path * (n_steps + 1) + step) * 4
 			time_remaining := T - f64(step) * dt
-			avg_S := sum_S / f64(step + 1)
+			current_avg := sum_S / f64(step + 1)
 
 			paths_data.data[idx + 0] = S
 			paths_data.data[idx + 1] = time_remaining
 			paths_data.data[idx + 2] = sigma
+			paths_data.data[idx + 3] = current_avg // Running average
 
 			if step < n_steps {
 				Z := rand.float64_normal(0.0, 1.0)
@@ -60,7 +60,7 @@ _generate_asian_paths :: proc(
 	}
 
 	paths = t.tensor_new(paths_data, false, allocator)
-	paths.shape = [4]int{n_paths, n_steps + 1, 3, 1}
+	paths.shape = [4]int{n_paths, n_steps + 1, 4, 1}
 
 	payoffs = t.tensor_new(payoffs_data, false, allocator)
 	payoffs.shape = [4]int{n_paths, 1, 1, 1}
@@ -236,7 +236,7 @@ deep_hedging_exotic_test :: proc(allocator: mem.Allocator) {
 	// Deep Hedging
 	fmt.println("\nTraining Deep Hedger on Asian option...")
 	config := ml_fin.DeepHedgerConfig {
-		state_size   = 3,
+		state_size   = 4,
 		hidden_size  = 64,
 		num_layers   = 2,
 		risk_measure = .Variance,
@@ -312,7 +312,17 @@ deep_hedging_exotic_test :: proc(allocator: mem.Allocator) {
 
 	// Deep Hedging
 	fmt.println("\nTraining Deep Hedger on Barrier option...")
-	hedger2 := ml_fin.deep_hedger_new(config, allocator)
+
+	// ✅ FIX: Barrier paths only have 3 features (spot, time, vol), not 4!
+	barrier_config := ml_fin.DeepHedgerConfig {
+		state_size   = 3,
+		hidden_size  = 64,
+		num_layers   = 2,
+		risk_measure = .Variance,
+		cvar_alpha   = 0.05,
+	}
+
+	hedger2 := ml_fin.deep_hedger_new(barrier_config, allocator)
 	defer ml_fin.deep_hedger_free(hedger2)
 
 	opt2 := nn.adam_new(0.001, allocator = allocator)
@@ -345,8 +355,11 @@ deep_hedging_exotic_test :: proc(allocator: mem.Allocator) {
 	fmt.println("")
 	fmt.printf("%-30s | %-15s | %-15s\n", "Option Type", "Static Var", "Deep Var")
 	fmt.println("-------------------------------|-----------------|----------------")
-	fmt.printf("%-30s | $%13.4f | $%13.4f\n", "Asian Call", asian_static_var, final_loss)
-	fmt.printf("%-30s | $%13.4f | $%13.4f\n", "Barrier Call", barrier_static_var, final_loss2)
+
+	// ✅ FIX: Removed width specifier (%13) to prevent Odin's zero-padding quirk
+	fmt.printf("%-30s | $%.4f | $%.4f\n", "Asian Call", asian_static_var, final_loss)
+	fmt.printf("%-30s | $%.4f | $%.4f\n", "Barrier Call", barrier_static_var, final_loss2)
+
 	fmt.println("")
 	fmt.printf("Asian Improvement:    %.2f%%\n", asian_improvement)
 	fmt.printf("Barrier Improvement:  %.2f%%\n", barrier_improvement)
