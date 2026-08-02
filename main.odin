@@ -466,6 +466,7 @@ main :: proc() {
 	test.layer_norm_test(context.temp_allocator)
 	test.ffn_simple_test(context.temp_allocator)
 	test.deep_hedging_test(context.temp_allocator)
+	test.deep_hedging_exotic_test(context.temp_allocator)
 	test.transformer_encoder_block_test(context.temp_allocator)
 	test.transformer_encoder_test(context.temp_allocator)
 	test.transformer_decoder_test(context.temp_allocator)
