@@ -57,6 +57,7 @@ Op :: enum {
 	Log,
 	Div,
 	NormCDF,
+	SumDim1,
 }
 
 PoolParams :: struct {
@@ -522,6 +523,20 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 					tensor_ensure_grad(input)
 					if len(input.grad.data) > 0 {
 						l.axpy_simd(1.0, node.grad.data, input.grad.data)
+					}
+				}
+			}
+		case .SumDim1:
+			a_in := node.inputs[0]
+			if a_in.requires_grad {
+				tensor_ensure_grad(a_in)
+				batch_size := node.shape[0]
+				num_assets := node.shape[1]
+				// The gradient of a sum is just the gradient of the output, broadcasted to all summed elements
+				for b in 0 ..< batch_size {
+					grad_val := node.grad.data[b]
+					for asset in 0 ..< num_assets {
+						a_in.grad.data[b * num_assets + asset] += grad_val
 					}
 				}
 			}
@@ -4218,6 +4233,27 @@ tensor_norm_cdf :: proc(a: ^Tensor) -> ^Tensor {
 	out.shape = a.shape
 	if out.requires_grad {
 		out.op = .NormCDF
+		append(&out.inputs, a)
+	}
+	return out
+}
+tensor_sum_dim1 :: proc(a: ^Tensor) -> ^Tensor {
+	batch_size := a.shape[0]
+	num_assets := a.shape[1]
+
+	out_data := l.matrix_new(f64, batch_size, 1, a.allocator)
+	for b in 0 ..< batch_size {
+		sum := 0.0
+		for asset in 0 ..< num_assets {
+			sum += a.data.data[b * num_assets + asset]
+		}
+		out_data.data[b] = sum
+	}
+
+	out := tensor_new(out_data, a.requires_grad, a.allocator)
+	out.shape = [4]int{batch_size, 1, 1, 1}
+	if out.requires_grad {
+		out.op = .SumDim1
 		append(&out.inputs, a)
 	}
 	return out

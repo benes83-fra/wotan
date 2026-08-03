@@ -145,6 +145,7 @@ deep_hedging_real_data_test :: proc(allocator: mem.Allocator) {
 		risk_measure     = .Variance,
 		cvar_alpha       = 0.05,
 		transaction_cost = 0.001, // 10 bps
+		num_assets       = 1, // Single asset (SPY)
 	}
 
 	hedger := ml_fin.deep_hedger_new(config, allocator)
@@ -274,8 +275,6 @@ deep_hedging_real_data_test :: proc(allocator: mem.Allocator) {
 	delete(spot_prices, allocator)
 
 }
-
-// Helper: Generate paths using real market parameters
 _generate_real_paths :: proc(
 	S_0: f64,
 	K: f64,
@@ -290,34 +289,44 @@ _generate_real_paths :: proc(
 	payoffs: ^t.Tensor,
 ) {
 	dt := T / f64(n_steps)
-	sqrt_dt := math.sqrt(dt)
+	sqrt_dt := math.sqrt_f64(dt)
 	drift := (r - 0.5 * sigma * sigma) * dt
 
+	// ✅ FIX: Generate 3 features: [Spot, Time Remaining, Volatility]
 	paths_data := l.matrix_new(f64, n_paths * (n_steps + 1), 3, allocator)
 	payoffs_data := l.matrix_new(f64, n_paths, 1, allocator)
 
+	rand_count := n_paths * n_steps
+	norm_data := make([]f64, rand_count, allocator)
+	for i in 0 ..< rand_count {
+		norm_data[i] = rand.float64_normal(0.0, 1.0)
+	}
+
+	rand_idx := 0
 	for path in 0 ..< n_paths {
 		S := S_0
 		for step in 0 ..< n_steps + 1 {
 			idx := (path * (n_steps + 1) + step) * 3
 			time_remaining := T - f64(step) * dt
 
+			// Feature 0: Spot Price
 			paths_data.data[idx + 0] = S
+			// Feature 1: Time Remaining
 			paths_data.data[idx + 1] = time_remaining
+			// Feature 2: Volatility
 			paths_data.data[idx + 2] = sigma
 
 			if step < n_steps {
-				Z := rand.float64_normal(0.0, 1.0)
-				S = S * math.exp(drift + sigma * sqrt_dt * Z)
+				Z := norm_data[rand_idx]
+				rand_idx += 1
+				S = S * math.exp_f64(drift + sigma * sqrt_dt * Z)
 			}
 		}
-
-		// European call payoff
-		S_T := paths_data.data[(path * (n_steps + 1) + n_steps) * 3 + 0]
-		payoffs_data.data[path] = math.max(S_T - K, 0.0)
+		payoffs_data.data[path] = math.max(S - K, 0.0)
 	}
 
 	paths = t.tensor_new(paths_data, false, allocator)
+	// ✅ FIX: shape[2] must be 3 to match state_size
 	paths.shape = [4]int{n_paths, n_steps + 1, 3, 1}
 
 	payoffs = t.tensor_new(payoffs_data, false, allocator)

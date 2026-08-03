@@ -242,6 +242,7 @@ deep_hedging_exotic_test :: proc(allocator: mem.Allocator) {
 		num_layers   = 2,
 		risk_measure = .Variance,
 		cvar_alpha   = 0.05,
+		num_assets   = 1,
 	}
 	hedger := ml_fin.deep_hedger_new(config, allocator)
 	defer ml_fin.deep_hedger_free(hedger)
@@ -321,6 +322,7 @@ deep_hedging_exotic_test :: proc(allocator: mem.Allocator) {
 		num_layers   = 2,
 		risk_measure = .Variance,
 		cvar_alpha   = 0.05,
+		num_assets   = 1,
 	}
 
 	hedger2 := ml_fin.deep_hedger_new(barrier_config, allocator)

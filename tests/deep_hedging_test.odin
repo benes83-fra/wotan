@@ -116,6 +116,7 @@ deep_hedging_test :: proc(allocator: mem.Allocator) {
 		risk_measure     = .CVaR,
 		cvar_alpha       = 0.05,
 		transaction_cost = 0.001,
+		num_assets       = 1,
 	}
 	hedger := ml_fin.deep_hedger_new(config, allocator)
 	defer ml_fin.deep_hedger_free(hedger)
