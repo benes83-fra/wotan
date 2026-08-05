@@ -24,6 +24,7 @@ alt_data_gdelt_pipeline_test :: proc(allocator: mem.Allocator = context.allocato
 	api_key := os.get_env("GDELT_API_KEY", allocator)
 
 	text: string
+	ok: bool
 	use_mock := false
 
 	if api_key == "" {
@@ -36,17 +37,19 @@ alt_data_gdelt_pipeline_test :: proc(allocator: mem.Allocator = context.allocato
 	} else {
 		// 2. Use the correct GDELT Cloud API endpoint
 		url := fmt.aprintf(
-			"https://api.gdelt.cloud/v2/timelinetone/timelinetone?query=%s&timespan=365d&format=csv&apikey=%s",
+			"https://api.gdeltproject.org/api/v2/doc/doc?query=%s&mode=timelinetone&format=csv&timespan=365d&apikey=%s",
 			symbol,
 			api_key,
 			allocator = context.temp_allocator,
 		)
 
-		text, ok := net.http_get(url, context.temp_allocator)
+		text, ok = net.http_get(url, context.temp_allocator)
+		fmt.println(text)
 		if !ok ||
 		   strings.contains(text, "<!DOCTYPE") ||
 		   strings.contains(text, "<html") ||
-		   strings.contains(text, "Not Found") {
+		   strings.contains(text, "Not Found") ||
+		   len(text) < 100 {
 			fmt.println("WARNING: GDELT API request failed or returned an HTML error.")
 			fmt.println("Falling back to mock data for pipeline validation...\n")
 			use_mock = true
@@ -96,7 +99,7 @@ alt_data_gdelt_pipeline_test :: proc(allocator: mem.Allocator = context.allocato
 20230228,2.8,160
 20230301,2.3,155`
 	}
-
+	fmt.println(text)
 	// 3. Parse the data (whether live or mock)
 	df_gdelt := importer.csv_load_from_string(text, allocator)
 	defer w.destroy_dataframe(&df_gdelt)
