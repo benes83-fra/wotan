@@ -533,6 +533,7 @@ main :: proc() {
 	test.ir_derivatives_swaption_strip_test(context.temp_allocator)
 	test.alt_data_gdelt_pipeline_test(context.temp_allocator)
 	test.alt_data_finnhub_pipeline_test(context.temp_allocator)
+	test.neural_sdf_test(context.temp_allocator)
 	fmt.println("Demo End")
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
