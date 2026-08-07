@@ -70,92 +70,88 @@ neural_sdf_free :: proc(model: ^NeuralSDF) {
 //
 // The SDF is M_t = (f_θ(Z_t))² + ε, ensuring M > 0.
 // Loss = Σ_i ( (1/T) Σ_t M_t · R_{i,t}  -  1 )²
-
 neural_sdf_train_step :: proc(
 	model: ^NeuralSDF,
 	z: ^t.Tensor,
 	r: ^t.Tensor,
 	opt: ^nn.Adam,
 ) -> f64 {
-	T := z.shape[0]
+	n := z.shape[0]
 	num_assets := model.config.num_assets
 	eps := model.config.epsilon
-	alloc := model.allocator
+	alloc := z.allocator
 
-	// 1. Forward pass: raw [T, 1]
+	// 1. Forward pass: M = f(Z)² + ε
 	raw := nn.sequential_forward(model.network, z)
-
-	// 2. SDF = raw² + ε  (element-wise, [T, 1])
 	raw_sq := t.tensor_mul(raw, raw)
 
-	// Add epsilon for positivity floor
-	eps_data := l.matrix_new(f64, T, 1, alloc)
-	for i in 0 ..< T {
-		eps_data.data[i] = eps
-	}
+	eps_data := l.matrix_new(f64, n, 1, alloc)
+	for i in 0 ..< n {eps_data.data[i] = eps}
 	eps_tensor := t.tensor_new(eps_data, false, alloc)
-	m := t.tensor_add(raw_sq, eps_tensor) // [T, 1]
+	m := t.tensor_add(raw_sq, eps_tensor)
 
-	// 3. Compute Euler equation loss for each asset
-	//    loss_i = (mean_t(M_t * R_{i,t}) - 1)²
-	//    total_loss = Σ_i loss_i
-
-	// We accumulate the total loss scalar manually
-	total_loss_val := 0.0
-
-	// For autograd, we build the loss tensor step by step
-	// Start with a zero loss tensor [1,1]
-	loss_data := l.matrix_new(f64, 1, 1, alloc)
-	loss_data.data[0] = 0.0
-	total_loss := t.tensor_new(loss_data, false, alloc)
-	total_loss.shape = [4]int{1, 1, 1, 1}
+	// 2. Euler equation loss: Σ_i (E[M·R_i] - 1)²
+	euler_loss_data := l.matrix_new(f64, 1, 1, alloc)
+	euler_loss_data.data[0] = 0.0
+	euler_loss := t.tensor_new(euler_loss_data, false, alloc)
 
 	for asset in 0 ..< num_assets {
-		// Extract column `asset` from r -> r_col [T, 1]
-		r_col_data := l.matrix_new(f64, T, 1, alloc)
-		for row in 0 ..< T {
+		r_col_data := l.matrix_new(f64, n, 1, alloc)
+		for row in 0 ..< n {
 			r_col_data.data[row] = r.data.data[row * num_assets + asset]
 		}
 		r_col := t.tensor_new(r_col_data, false, alloc)
-		r_col.shape = [4]int{T, 1, 1, 1}
 
-		// M * R_i  (element-wise, [T, 1])
 		mr := t.tensor_mul(m, r_col)
-
-		// mean(M * R_i)  -> scalar [1, 1]
 		mean_mr := t.tensor_mean(mr)
 
-		// mean(M * R_i) - 1
 		one_data := l.matrix_new(f64, 1, 1, alloc)
 		one_data.data[0] = 1.0
-		one_tensor := t.tensor_new(one_data, false, alloc)
-		one_tensor.shape = [4]int{1, 1, 1, 1}
+		one := t.tensor_new(one_data, false, alloc)
 
-		diff := t.tensor_sub(mean_mr, one_tensor)
-
-		// (mean(M * R_i) - 1)²
+		diff := t.tensor_sub(mean_mr, one)
 		diff_sq := t.tensor_mul(diff, diff)
+		euler_loss = t.tensor_add(euler_loss, diff_sq)
 
-		// Accumulate into total loss
-		total_loss = t.tensor_add(total_loss, diff_sq)
-
-		total_loss_val += diff_sq.data.data[0]
+		// ✅ FIX: DO NOT free intermediate tensors here!
+		// They are part of the computation graph. Freeing them before
+		// t.tensor_backward destroys their gradient matrices, causing
+		// "empty gradient" warnings and "length mismatch" panics.
 	}
+
+	// 3. Regularization: Penalize variance of M
+	m_mean := t.tensor_mean(m)
+
+	m_mean_data := l.matrix_new(f64, n, 1, alloc)
+	mean_val := m_mean.data.data[0]
+	for i in 0 ..< n {
+		m_mean_data.data[i] = mean_val
+	}
+	m_mean_tensor := t.tensor_new(m_mean_data, false, alloc)
+
+	m_centered := t.tensor_sub(m, m_mean_tensor)
+	m_centered_sq := t.tensor_mul(m_centered, m_centered)
+	m_variance := t.tensor_mean(m_centered_sq)
+
+	reg_strength := 1.0
+	reg_loss := t.tensor_scale(m_variance, reg_strength)
+
+	// Total loss = Euler loss + Regularization
+	total_loss := t.tensor_add(euler_loss, reg_loss)
 
 	// 4. Backward pass
 	t.tensor_backward(total_loss)
 	nn.adam_step(opt)
 
-	// 5. Cleanup
+	// 5. Get loss value
+	loss_val := total_loss.data.data[0]
+
+	// 6. Cleanup the ENTIRE computation graph at once
+	// This safely frees all intermediate nodes and their gradients
 	t.tensor_free_graph(total_loss)
 
-	// Free the epsilon tensor (not part of the graph since we used tensor_add)
-	l.matrix_free(&eps_data)
-	t.tensor_free(eps_tensor)
-
-	return total_loss_val
+	return loss_val
 }
-
 // ============================================================================
 // Evaluation: compute pricing error per asset
 // ============================================================================

@@ -169,47 +169,76 @@ neural_sdf_test :: proc(allocator: mem.Allocator = context.allocator) {
 	fmt.printf("   Loss reduction: %.2f%%\n", (1.0 - final_loss / initial_loss) * 100.0)
 
 	// ========================================================================
-	// 5. Evaluate Pricing Errors
+	// 5. Evaluate Pricing Errors & SDF Variance
 	// ========================================================================
-	fmt.println("\n5. Evaluating Pricing Errors (|E[M·R] - 1| per asset)...")
+	fmt.println("\n5. Evaluating Pricing Errors & SDF Statistics...")
 	fmt.println("   ----------------------------------------------------------------------")
+
+	// Get the learned SDF values to compute variance and prove it's not constant
+	raw := nn.sequential_forward(model.network, z)
+
+	sum_m := 0.0
+	sum_m_sq := 0.0
+	m_values := make([]f64, T, allocator)
+
+	for row in 0 ..< T {
+		raw_val := raw.data.data[row]
+		m_val := raw_val * raw_val + config.epsilon
+		m_values[row] = m_val
+		sum_m += m_val
+		sum_m_sq += m_val * m_val
+	}
+	t.tensor_free(raw)
+
+	mean_m := sum_m / f64(T)
+	variance_m := (sum_m_sq / f64(T)) - (mean_m * mean_m)
+
+	min_m := m_values[0]
+	max_m := m_values[0]
+	for row in 1 ..< T {
+		if m_values[row] < min_m {min_m = m_values[row]}
+		if m_values[row] > max_m {max_m = m_values[row]}
+	}
+	delete(m_values, allocator)
+
+	fmt.println("   Learned Neural SDF Statistics:")
+	fmt.printf("     Mean(M):     %.6f\n", mean_m)
+	fmt.printf("     Variance(M): %.8f  <-- Must be > 0 to capture risk!\n", variance_m)
+	fmt.printf("     Min(M):      %.6f\n", min_m)
+	fmt.printf("     Max(M):      %.6f\n", max_m)
 
 	pricing_errors := ml_fin.neural_sdf_evaluate(model, z, r, allocator)
 	defer delete(pricing_errors, allocator)
 
+	fmt.println("\n   Neural SDF Pricing Errors (|E[M·R] - 1|):")
 	for j in 0 ..< num_assets {
-		fmt.printf("   %s: |E[M·R] - 1| = %.6f\n", symbols[j], pricing_errors[j])
+		fmt.printf("     %s: %.6f\n", symbols[j], pricing_errors[j])
 	}
-
-	avg_error := 0.0
-	for j in 0 ..< num_assets {
-		avg_error += pricing_errors[j]
-	}
-	avg_error /= f64(num_assets)
-	fmt.printf("   Average pricing error: %.6f\n", avg_error)
 
 	// ========================================================================
 	// 6. Compare Against Trivial SDF (M = constant)
 	// ========================================================================
-	fmt.println("\n6. Baseline Comparison (Trivial Constant SDF)...")
+	fmt.println("\n6. Baseline Comparison (Single Constant SDF)...")
 	fmt.println("   ----------------------------------------------------------------------")
+	fmt.println("   (A single constant SDF cannot price assets with different expected returns)")
 
-	// Trivial SDF: M = 1/E[R] for each asset independently
+	// Calibrate a single constant SDF to the Market (SPY)
+	sum_r_spy := 0.0
+	for row in 0 ..< T {
+		sum_r_spy += r_data.data[row * num_assets + 0]
+	}
+	mean_r_spy := sum_r_spy / f64(T)
+	trivial_m := 1.0 / mean_r_spy
+
+	fmt.printf("   Trivial Constant SDF (calibrated to SPY): M = %.6f\n", trivial_m)
+
 	for j in 0 ..< num_assets {
-		sum_r := 0.0
+		sum_mr := 0.0
 		for row in 0 ..< T {
-			sum_r += r_data.data[row * num_assets + j]
+			sum_mr += trivial_m * r_data.data[row * num_assets + j]
 		}
-		mean_r := sum_r / f64(T)
-		// If M = c (constant), then c * E[R] = 1 => c = 1/E[R]
-		// Pricing error for OTHER assets with this constant SDF:
-		trivial_m := 1.0 / mean_r
-		sum_mr_other := 0.0
-		for row in 0 ..< T {
-			sum_mr_other += trivial_m * r_data.data[row * num_assets + j]
-		}
-		trivial_error := math.abs(sum_mr_other / f64(T) - 1.0)
-		fmt.printf("   %s trivial SDF error: %.6f\n", symbols[j], trivial_error)
+		trivial_error := math.abs(sum_mr / f64(T) - 1.0)
+		fmt.printf("     %s trivial SDF error: %.6f\n", symbols[j], trivial_error)
 	}
 
 	// ========================================================================
