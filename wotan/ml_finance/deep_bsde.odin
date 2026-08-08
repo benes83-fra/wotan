@@ -3,6 +3,7 @@ package ml_finance
 import l "../linalg"
 import nn "../nn"
 import t "../tensor"
+import "core:fmt"
 import "core:math"
 import "core:math/rand"
 import "core:mem"
@@ -11,7 +12,7 @@ import "core:mem"
 // Deep BSDE Model
 // ============================================================================
 DeepBSDEModel :: struct {
-	y0:        ^t.Tensor, // [n_paths, 1] trainable tensor
+	y0:        ^t.Tensor,
 	z_net:     ^nn.Sequential,
 	T:         f64,
 	N:         int,
@@ -20,6 +21,7 @@ DeepBSDEModel :: struct {
 }
 
 deep_bsde_model_new :: proc(
+	initial_y0: f64,
 	d: int,
 	T: f64,
 	N: int,
@@ -34,14 +36,12 @@ deep_bsde_model_new :: proc(
 	model.d = d
 	model.allocator = allocator
 
-	// y0 is a trainable [n_paths, 1] tensor, initialized to 0.0
 	y0_data := l.matrix_new(f64, n_paths, 1, allocator)
 	for i in 0 ..< n_paths {
-		y0_data.data[i] = 0.0
+		y0_data.data[i] = initial_y0
 	}
 	model.y0 = t.tensor_new(y0_data, true, allocator)
 
-	// z_net takes [t, X_1, ..., X_d] -> [d]
 	model.z_net = nn.sequential_new(allocator)
 	nn.sequential_add(model.z_net, nn.linear_layer_new(1 + d, hidden_size, allocator))
 	nn.sequential_add(model.z_net, nn.Activation.ReLU)
@@ -60,14 +60,14 @@ deep_bsde_model_free :: proc(model: ^DeepBSDEModel) {
 }
 
 // ============================================================================
-// Deep BSDE Forward Pass for Black-Scholes PDE (Multi-dimensional)
+// Forward Pass
 // ============================================================================
 deep_bsde_bs_forward :: proc(
 	model: ^DeepBSDEModel,
-	S_0: []f64, // [d]
+	S_0: []f64,
 	K: f64,
 	r: f64,
-	sigma: []f64, // [d]
+	sigma: []f64,
 	n_paths: int,
 	n_steps: int,
 	allocator: mem.Allocator = context.allocator,
@@ -79,7 +79,6 @@ deep_bsde_bs_forward :: proc(
 	dt := model.T / f64(n_steps)
 	sqrt_dt := math.sqrt(dt)
 
-	// Initialize X_t as [n_paths, d]
 	X_data := l.matrix_new(f64, n_paths, d, allocator)
 	for i in 0 ..< n_paths {
 		for j in 0 ..< d {
@@ -87,14 +86,11 @@ deep_bsde_bs_forward :: proc(
 		}
 	}
 	X := t.tensor_new(X_data, false, allocator)
-
-	// Y starts as Y_0_tensor [n_paths, 1]
 	Y := model.y0
 
 	for step in 0 ..< n_steps {
 		t_k := f64(step) * dt
 
-		// Generate dW ~ N(0, dt) for each path and dimension
 		dW_data := l.matrix_new(f64, n_paths, d, allocator)
 		for i in 0 ..< n_paths {
 			for j in 0 ..< d {
@@ -103,7 +99,6 @@ deep_bsde_bs_forward :: proc(
 		}
 		dW := t.tensor_new(dW_data, false, allocator)
 
-		// Z_k = Z_net([t_k, X_k])
 		input_data := l.matrix_new(f64, n_paths, 1 + d, allocator)
 		for i in 0 ..< n_paths {
 			input_data.data[i * (1 + d) + 0] = t_k
@@ -115,7 +110,6 @@ deep_bsde_bs_forward :: proc(
 
 		Z_k := nn.sequential_forward(model.z_net, input)
 
-		// X_next = X + r * X * dt + sigma * X * dW
 		X_next_data := l.matrix_new(f64, n_paths, d, allocator)
 		for i in 0 ..< n_paths {
 			for j in 0 ..< d {
@@ -127,14 +121,12 @@ deep_bsde_bs_forward :: proc(
 		}
 		X_next := t.tensor_new(X_next_data, false, allocator)
 
-		// f_k = -r * Y * dt
 		f_k_data := l.matrix_new(f64, n_paths, 1, allocator)
 		for i in 0 ..< n_paths {
 			f_k_data.data[i] = -r * Y.data.data[i] * dt
 		}
 		f_k := t.tensor_new(f_k_data, false, allocator)
 
-		// Z_k * dW: dot product for each path
 		Z_dW_data := l.matrix_new(f64, n_paths, 1, allocator)
 		for i in 0 ..< n_paths {
 			sum := 0.0
@@ -145,7 +137,6 @@ deep_bsde_bs_forward :: proc(
 		}
 		Z_dW := t.tensor_new(Z_dW_data, true, allocator)
 
-		// Y_next = Y + f_k + Z_dW
 		Y_next := t.tensor_add(Y, f_k)
 		Y_next = t.tensor_add(Y_next, Z_dW)
 
@@ -157,7 +148,7 @@ deep_bsde_bs_forward :: proc(
 }
 
 // ============================================================================
-// Deep BSDE Loss for Black-Scholes PDE
+// Loss Function
 // ============================================================================
 deep_bsde_bs_loss :: proc(
 	model: ^DeepBSDEModel,
@@ -172,7 +163,6 @@ deep_bsde_bs_loss :: proc(
 	d := model.d
 	Y_T, X_T := deep_bsde_bs_forward(model, S_0, K, r, sigma, n_paths, n_steps, allocator)
 
-	// Terminal condition for Max-Call: Y_T = max(max_j(X_T_j) - K, 0)
 	max_X_data := l.matrix_new(f64, n_paths, 1, allocator)
 	for i in 0 ..< n_paths {
 		max_val := X_T.data.data[i * d + 0]
@@ -185,12 +175,9 @@ deep_bsde_bs_loss :: proc(
 	}
 	max_X := t.tensor_new(max_X_data, false, allocator)
 
-	// Loss = |Y_T - max_X|^2
 	diff := t.tensor_sub(Y_T, max_X)
 	diff_sq := t.tensor_mul(diff, diff)
 	loss := t.tensor_mean(diff_sq)
 
-	// ✅ CRITICAL: DO NOT FREE ANYTHING HERE.
-	// Let t.tensor_free_graph(loss) handle the entire graph safely after backward pass.
 	return loss
 }
