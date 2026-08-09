@@ -121,21 +121,23 @@ deep_bsde_bs_forward :: proc(
 		}
 		X_next := t.tensor_new(X_next_data, false, allocator)
 
-		f_k_data := l.matrix_new(f64, n_paths, 1, allocator)
-		for i in 0 ..< n_paths {
-			f_k_data.data[i] = -r * Y.data.data[i] * dt
-		}
-		f_k := t.tensor_new(f_k_data, false, allocator)
+		// ✅ CRITICAL FIX: The drift term MUST be +r * Y * dt.
+		// Under the risk-neutral measure, the portfolio grows at the risk-free rate.
+		// The previous "-r * dt" caused artificial decay, forcing Y_0 to inflate.
+		f_k := t.tensor_scale(Y, r * dt)
 
-		Z_dW_data := l.matrix_new(f64, n_paths, 1, allocator)
-		for i in 0 ..< n_paths {
-			sum := 0.0
-			for j in 0 ..< d {
-				sum += Z_k.data.data[i * d + j] * dW.data.data[i * d + j]
-			}
-			Z_dW_data.data[i] = sum
+		// 1. Element-wise multiplication: [n_paths, d] * [n_paths, d] -> [n_paths, d]
+		Z_k_dW := t.tensor_mul(Z_k, dW)
+
+		// 2. Create a [d, 1] tensor of ones for the reduction
+		ones_data := l.matrix_new(f64, d, 1, allocator)
+		for j in 0 ..< d {
+			ones_data.data[j] = 1.0
 		}
-		Z_dW := t.tensor_new(Z_dW_data, true, allocator)
+		ones := t.tensor_new(ones_data, false, allocator)
+
+		// 3. Matrix multiplication: [n_paths, d] @ [d, 1] -> [n_paths, 1]
+		Z_dW := t.tensor_matmul(Z_k_dW, ones)
 
 		Y_next := t.tensor_add(Y, f_k)
 		Y_next = t.tensor_add(Y_next, Z_dW)
@@ -146,7 +148,6 @@ deep_bsde_bs_forward :: proc(
 
 	return Y, X
 }
-
 // ============================================================================
 // Loss Function
 // ============================================================================

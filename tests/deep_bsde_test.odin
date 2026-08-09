@@ -45,7 +45,7 @@ deep_bsde_test :: proc(allocator: mem.Allocator = context.allocator) {
 	model := ml_fin.deep_bsde_model_new(12.0, d, T, N, 64, 2, batch_size, allocator)
 	defer ml_fin.deep_bsde_model_free(&model)
 
-	opt := nn.adam_new(0.001, allocator = allocator)
+	opt := nn.adam_new(0.0005, allocator = allocator)
 	defer nn.adam_free(&opt)
 	nn.adam_add_param(&opt, model.y0)
 	nn.sequential_add_to_adam(model.z_net, &opt)
