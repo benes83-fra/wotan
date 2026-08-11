@@ -285,3 +285,28 @@ sequential_add_trainable_to_adam :: proc(seq: ^Sequential, opt: ^Adam) {
 		}
 	}
 }
+// clip_grad_norm clips the global norm of all gradients in the optimizer.
+// If the total norm exceeds max_norm, all gradients are scaled down so that
+// the total norm equals max_norm.
+clip_grad_norm :: proc(opt: ^Adam, max_norm: f64) {
+	if max_norm <= 0.0 {return}
+
+	total_norm_sq := 0.0
+	for param in opt.parameters {
+		if param.grad.data != nil && len(param.grad.data) > 0 {
+			// Use SIMD dot product for efficient squared sum
+			total_norm_sq += l.dot_simd(param.grad.data, param.grad.data)
+		}
+	}
+
+	total_norm := math.sqrt(total_norm_sq)
+	if total_norm > max_norm {
+		scale := max_norm / (total_norm + 1e-6) // Add epsilon for stability
+		for param in opt.parameters {
+			if param.grad.data != nil && len(param.grad.data) > 0 {
+				// Scale gradient in-place using SIMD
+				l.vec_scale_simd(param.grad.data, scale, param.grad.data)
+			}
+		}
+	}
+}
