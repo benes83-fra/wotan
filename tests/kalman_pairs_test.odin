@@ -1,100 +1,87 @@
 package tests
 
 import w "../wotan/core"
-import fin "../wotan/finance"
 import ml_fin "../wotan/ml_finance"
+import net "../wotan/net"
 import "core:fmt"
 import "core:math"
-import "core:math/rand"
 import "core:mem"
+kalman_pairs_real_data_test :: proc(allocator: mem.Allocator = context.allocator) {
+	fmt.println("\n=== Kalman Filter Pairs Trading (Real Data) ===")
 
-// Helper to generate cointegrated GBM series
-generate_cointegrated_series :: proc(
-	n: int,
-	mean1: f64,
-	std1: f64,
-	mean2: f64,
-	std2: f64,
-	correlation: f64,
-	cointegration_strength: f64, // How strongly they revert to each other
-	allocator: mem.Allocator,
-) -> (
-	series1: []f64,
-	series2: []f64,
-) {
-	s1 := make([]f64, n, allocator)
-	s2 := make([]f64, n, allocator)
+	// Fetch real market data using existing yahoo infrastructure
+	df := net.read_yahoo("KO", .Daily, .TwoYears, allocator)
+	if df.rows == 0 {
+		fmt.println("ERROR: Failed to fetch KO data")
+		return
+	}
+	defer w.destroy_dataframe(&df)
 
-	// Initialize prices
-	s1[0] = 100.0
-	s2[0] = 50.0
+	df2 := net.read_yahoo("PEP", .Daily, .TwoYears, allocator)
+	if df2.rows == 0 {
+		fmt.println("ERROR: Failed to fetch PEP data")
+		return
+	}
+	defer w.destroy_dataframe(&df2)
 
-	for i in 1 ..< n {
-		// Generate independent normal random variables
-		z1 := rand.float64_normal(0.0, 1.0)
-		z2 := rand.float64_normal(0.0, 1.0)
-		z_spread := rand.float64_normal(0.0, 1.0) // Noise for the spread
+	// ========================================================================
+	// CRITICAL FIX: Align dataframes by DATE, not by index!
+	// ========================================================================
+	aligned_df := w.dataframe_new()
+	defer w.destroy_dataframe(&aligned_df)
 
-		// Correlate them: y2 = corr * z1 + sqrt(1-corr^2) * z2
-		y1 := z1
-		y2 := correlation * z1 + math.sqrt(1.0 - correlation * correlation) * z2
+	col_date := w.column_new("Date", .Date, 0)
+	col_ko := w.column_new("Asset_A", .Float, 0)
+	col_pep := w.column_new("Asset_B", .Float, 0)
 
-		// Update prices using GBM
-		s1[i] = s1[i - 1] * math.exp((mean1 - 0.5 * std1 * std1) + std1 * y1)
+	date_col1 := w.column(&df, "Date")
+	close_col1 := w.column(&df, "Close")
 
-		// Make s2 cointegrated with s1
-		// Log-price of s2 follows: log(s2[i]) = log(s1[i]) + spread[i]
-		// spread[i] = spread[i-1] * (1 - cointegration_strength) + noise
-		log_s1 := math.ln(s1[i])
-		log_s2_prev := math.ln(s2[i - 1])
+	date_col2 := w.column(&df2, "Date")
+	close_col2 := w.column(&df2, "Close")
 
-		// Simple error correction model
-		spread_error := log_s1 - log_s2_prev
-		new_log_s2 :=
-			log_s2_prev +
-			(mean2 - 0.5 * std2 * std2) +
-			std2 * y2 +
-			cointegration_strength * spread_error
+	// Two-pointer approach to align by date
+	i1 := 0
+	i2 := 0
+	for i1 < df.rows && i2 < df2.rows {
+		date1, _ := w.column_at_date(date_col1, i1)
+		date2, _ := w.column_at_date(date_col2, i2)
 
-		s2[i] = math.exp(new_log_s2)
+		cmp := w.date_compare(date1, date2)
+		if cmp == 0 {
+			// Dates match: append to aligned dataframe
+			w.append_date(&col_date, date1)
+
+			val1, _ := w.column_at_float(close_col1, i1)
+			w.append_float(&col_ko, val1)
+
+			val2, _ := w.column_at_float(close_col2, i2)
+			w.append_float(&col_pep, val2)
+
+			i1 += 1
+			i2 += 1
+		} else if cmp < 0 {
+			// date1 is earlier, advance i1
+			i1 += 1
+		} else {
+			// date2 is earlier, advance i2
+			i2 += 1
+		}
 	}
 
-	return s1[:], s2[:]
-}
+	w.add_column(&aligned_df, col_date)
+	w.add_column(&aligned_df, col_ko)
+	w.add_column(&aligned_df, col_pep)
+	aligned_df.rows = col_date.len
 
-kalman_pairs_test :: proc(allocator: mem.Allocator = context.allocator) {
-	fmt.println("\n=== Kalman Filter Pairs Trading Test ===")
+	fmt.printf("Loaded %d properly aligned days of real KO/PEP data\n", aligned_df.rows)
 
-	// 1. Generate Cointegrated Data
-	n_days := 500
-	s1, s2 := generate_cointegrated_series(
-		n_days,
-		0.0005, // daily mean return
-		0.01, // daily vol
-		0.0005,
-		0.015,
-		0.85, // correlation
-		0.05, // cointegration strength (adjust this!)
-		allocator,
-	)
-	defer {
-		delete(s1, allocator)
-		delete(s2, allocator)
-	}
-
-	// Create DataFrame
-	df := w.dataframe_new()
-	w.add_column(&df, w.column_from_floats("Asset_A", s1))
-	w.add_column(&df, w.column_from_floats("Asset_B", s2))
-
-	fmt.printf("Generated %d days of cointegrated data\n", n_days)
-
-	// 2. Run Kalman Filter Pairs Trading Strategy
+	// Run Kalman Filter Pairs Trading Strategy
 	window := 60
-	initial_hedge_ratio := 1.0 // Start with 1:1
+	initial_hedge_ratio := 1.0
 
 	strategy_result := ml_fin.kalman_pairs_strategy(
-		&df,
+		&aligned_df,
 		"Asset_A",
 		"Asset_B",
 		window,
@@ -102,7 +89,7 @@ kalman_pairs_test :: proc(allocator: mem.Allocator = context.allocator) {
 		allocator,
 	)
 
-	// 3. Analyze Results
+	// Analyze Results
 	fmt.println("\n--- Strategy Performance ---")
 	if len(strategy_result.returns) > 0 {
 		total_return := 1.0
@@ -152,6 +139,4 @@ kalman_pairs_test :: proc(allocator: mem.Allocator = context.allocator) {
 	} else {
 		fmt.println("No trades generated or error in strategy execution.")
 	}
-
-	w.destroy_dataframe(&df)
 }
