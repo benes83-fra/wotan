@@ -34,6 +34,9 @@ extract_float_col :: proc(df: ^w.DataFrame, col_name: string, allocator: mem.All
 // ============================================================================
 // Kalman Filter Pairs Trading Strategy (Log-Price Version)
 // ============================================================================
+// ============================================================================
+// Kalman Filter Pairs Trading Strategy (Log-Price Version)
+// ============================================================================
 kalman_pairs_strategy :: proc(
 	df: ^w.DataFrame,
 	col_x: string,
@@ -120,7 +123,7 @@ kalman_pairs_strategy :: proc(
 	}
 
 	// Process noise: small fraction of the spread variance
-	Q := spread_variance * 1e-4
+	Q := spread_variance * 1e-3
 	// Measurement noise: the variance of the spread itself
 	R := spread_variance
 
@@ -130,9 +133,10 @@ kalman_pairs_strategy :: proc(
 	prev_ln_px := math.ln_f64(x_data[0])
 	prev_ln_py := math.ln_f64(y_data[0])
 
-	// Industry-standard thresholds (now correctly scaled to actual std devs)
+	// Industry-standard thresholds
 	entry_threshold := 2.0
-	exit_threshold := 0.0
+	exit_threshold := 0.5 // Half-mean reversion to avoid whipsaws
+	stop_loss_threshold := 3.5 // Cut losses if the spread diverges further
 
 	for i in 0 ..< n {
 		px := x_data[i]
@@ -178,15 +182,24 @@ kalman_pairs_strategy :: proc(
 
 		if position == 0 {
 			if z_score > entry_threshold {
-				signal = -1 // Short Spread
+				signal = -1 // Short Spread (Bet on spread decreasing)
 			} else if z_score < -entry_threshold {
-				signal = 1 // Long Spread
+				signal = 1 // Long Spread (Bet on spread increasing)
 			}
 		} else {
-			// Exit when spread crosses back through the mean (0.0)
-			if (position == 1 && z_score > exit_threshold) ||
-			   (position == -1 && z_score < exit_threshold) {
-				signal = 0
+			// ✅ CRITICAL FIX: Corrected exit logic for mean reversion
+			if position == 1 {
+				// Entered at z < -2.0. Exit when z reverts up to -0.5,
+				// OR stop loss if it crashes further to -3.5
+				if z_score > -exit_threshold || z_score < -stop_loss_threshold {
+					signal = 0
+				}
+			} else if position == -1 {
+				// Entered at z > 2.0. Exit when z reverts down to 0.5,
+				// OR stop loss if it explodes further to 3.5
+				if z_score < exit_threshold || z_score > stop_loss_threshold {
+					signal = 0
+				}
 			}
 		}
 
@@ -197,8 +210,10 @@ kalman_pairs_strategy :: proc(
 			ret_y := ln_py - prev_ln_py
 
 			if position == 1 {
+				// Long Spread: Long Y, Short X
 				daily_ret = ret_y - position_beta * ret_x
 			} else if position == -1 {
+				// Short Spread: Short Y, Long X
 				daily_ret = -ret_y + position_beta * ret_x
 			}
 		}
