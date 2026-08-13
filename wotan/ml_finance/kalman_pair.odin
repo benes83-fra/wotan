@@ -1,8 +1,9 @@
 package ml_finance
 
+import analytic "../analytics"
 import ml "../analytics/ML"
 import w "../core"
-import l "../linalg" // Import your existing ML module
+import l "../linalg"
 import "core:math"
 import "core:mem"
 
@@ -34,9 +35,6 @@ extract_float_col :: proc(df: ^w.DataFrame, col_name: string, allocator: mem.All
 // ============================================================================
 // Kalman Filter Pairs Trading Strategy (Log-Price Version)
 // ============================================================================
-// ============================================================================
-// Kalman Filter Pairs Trading Strategy (Log-Price Version)
-// ============================================================================
 kalman_pairs_strategy :: proc(
 	df: ^w.DataFrame,
 	col_x: string,
@@ -51,190 +49,166 @@ kalman_pairs_strategy :: proc(
 	defer delete(y_data, allocator)
 
 	n := len(x_data)
+	if n == 0 {
+		return PairsTradingResult{}
+	}
+
+	// Kalman Filter parameters (N=2, M=1)
+	kf: analytic.KalmanFilter(2, 1)
+
+	// Initial state
+	kf.x[0] = 0.0
+	kf.x[1] = initial_hedge_ratio
+
+	// Initial covariance
+	kf.P[0, 0] = 1.0
+	kf.P[0, 1] = 0.0
+	kf.P[1, 0] = 0.0
+	kf.P[1, 1] = 1.0
+
+	// F matrix (Random Walk)
+	kf.F[0, 0] = 1.0
+	kf.F[0, 1] = 0.0
+	kf.F[1, 0] = 0.0
+	kf.F[1, 1] = 1.0
+
+	// ✅ CRITICAL FIX: Drastically reduce Q for log-price stability.
+	// This prevents the filter from "chasing" the price and keeps z-scores meaningful.
+	kf.Q[0, 0] = 1e-8
+	kf.Q[0, 1] = 0.0
+	kf.Q[1, 0] = 0.0
+	kf.Q[1, 1] = 1e-8
+
+	// R matrix (will be overwritten by OLS if window >= 2)
+	kf.R[0, 0] = 1e-4
+
+	// Initialize P, R, and state from OLS
+	if n >= window {
+		X_mat := l.matrix_new(f64, window, 2, allocator)
+		y_vec := make([]f64, window, allocator)
+		for i in 0 ..< window {
+			X_mat.data[i * 2 + 0] = 1.0
+			X_mat.data[i * 2 + 1] = math.ln_f64(x_data[i])
+			y_vec[i] = math.ln_f64(y_data[i])
+		}
+		ols_res := ml.ols_fit(&X_mat, y_vec, .Cholesky, allocator)
+
+		// Update initial state from OLS
+		kf.x[0] = ols_res.beta[0]
+		kf.x[1] = ols_res.beta[1]
+
+		if ols_res.vcov.data != nil && ols_res.vcov.rows == 2 && ols_res.vcov.cols == 2 {
+			kf.P[0, 0] = ols_res.vcov.data[0]
+			kf.P[0, 1] = ols_res.vcov.data[1]
+			kf.P[1, 0] = ols_res.vcov.data[2]
+			kf.P[1, 1] = ols_res.vcov.data[3]
+		}
+
+		// Update R from OLS residual variance (use max_f64 for Odin compatibility)
+		kf.R[0, 0] = math.max(ols_res.sigma2, 1e-6)
+
+		l.matrix_free(&X_mat)
+		delete(y_vec, allocator)
+	}
 
 	result_returns := make([dynamic]f64, 0, allocator)
 	result_trades := make([dynamic]int, 0, allocator)
 	result_betas := make([dynamic]f64, 0, allocator)
 	result_spreads := make([dynamic]f64, 0, allocator)
 
-	if n < 2 {
-		return PairsTradingResult {
-			returns = result_returns[:],
-			trades = result_trades[:],
-			betas = result_betas[:],
-			spreads = result_spreads[:],
-		}
-	}
-
-	// Kalman Filter State: [intercept, slope]
-	state := make([]f64, 2, allocator)
-	state[0] = 0.0
-	state[1] = initial_hedge_ratio
-
-	// Covariance Matrix [P00, P01, P10, P11]
-	cov := make([]f64, 4, allocator)
-	cov[0] = 1.0; cov[1] = 0.0
-	cov[2] = 0.0; cov[3] = 1.0
-
-	// =========================================================
-	// USE OLS TO CALIBRATE THE KALMAN FILTER SCALES
-	// =========================================================
-	init_len := window
-	if init_len >= n {
-		init_len = n - 1
-	}
-
-	spread_variance := 1e-4 // Fallback default
-
-	if init_len >= 2 {
-		X_mat := l.matrix_new(f64, init_len, 2, allocator)
-		y_vec := make([]f64, init_len, allocator)
-
-		for i in 0 ..< init_len {
-			X_mat.data[i * 2 + 0] = 1.0
-			X_mat.data[i * 2 + 1] = math.ln_f64(x_data[i]) // Log price
-			y_vec[i] = math.ln_f64(y_data[i]) // Log price
-		}
-
-		ols_res := ml.ols_fit(&X_mat, y_vec, .Cholesky, allocator)
-
-		state[0] = ols_res.beta[0]
-		state[1] = ols_res.beta[1]
-
-		// CRITICAL FIX: Use the actual residual variance from OLS to scale the filter
-		spread_variance = math.max(ols_res.sigma2, 1e-6)
-
-		// Initialize P to the OLS covariance matrix (scaled)
-		if ols_res.vcov.data != nil && ols_res.vcov.rows == 2 && ols_res.vcov.cols == 2 {
-			cov[0] = ols_res.vcov.data[0]
-			cov[1] = ols_res.vcov.data[1]
-			cov[2] = ols_res.vcov.data[2]
-			cov[3] = ols_res.vcov.data[3]
-		} else {
-			// Fallback to diagonal if vcov is unavailable
-			cov[0] = spread_variance * 10.0
-			cov[1] = 0.0
-			cov[2] = 0.0
-			cov[3] = spread_variance * 10.0
-		}
-
-		l.matrix_free(&X_mat)
-		delete(y_vec, allocator)
-	}
-
-	// Process noise: small fraction of the spread variance
-	Q := spread_variance * 1e-3
-	// Measurement noise: the variance of the spread itself
-	R := spread_variance
-
 	position: i32 = 0
-	position_beta := 0.0 // Hedge ratio locked at the time of entry
+	position_beta := 0.0
 
-	prev_ln_px := math.ln_f64(x_data[0])
-	prev_ln_py := math.ln_f64(y_data[0])
-
-	// Industry-standard thresholds
-	entry_threshold := 2.0
-	exit_threshold := 0.5 // Half-mean reversion to avoid whipsaws
-	stop_loss_threshold := 3.5 // Cut losses if the spread diverges further
+	// Slightly more aggressive thresholds to guarantee we capture mean-reversion
+	entry_threshold := 1.5
+	exit_threshold := 0.0
+	stop_loss_threshold := 3.0
 
 	for i in 0 ..< n {
-		px := x_data[i]
-		py := y_data[i]
+		ln_px := math.ln_f64(x_data[i])
+		ln_py := math.ln_f64(y_data[i])
 
-		ln_px := math.ln_f64(px)
-		ln_py := math.ln_f64(py)
+		// Update H matrix
+		kf.H[0, 0] = 1.0
+		kf.H[0, 1] = ln_px
 
-		// --- Kalman Filter Update ---
-		pred_cov_00 := cov[0] + Q
-		pred_cov_11 := cov[3] + Q
+		// Predict
+		analytic.kalman_predict(&kf)
 
-		spread_pred := state[0] + state[1] * ln_px
-		innovation := ln_py - spread_pred
+		// Innovation
+		innovation := ln_py - (kf.H[0, 0] * kf.x[0] + kf.H[0, 1] * kf.x[1])
 
-		s := pred_cov_00 + 2.0 * ln_px * cov[1] + ln_px * ln_px * pred_cov_11 + R
+		// Innovation variance S
+		H00 := kf.H[0, 0]
+		H01 := kf.H[0, 1]
+		P00 := kf.P[0, 0]
+		P01 := kf.P[0, 1]
+		P11 := kf.P[1, 1]
+		R00 := kf.R[0, 0]
 
-		k1 := (cov[0] + ln_px * cov[1]) / s
-		k2 := (cov[1] + ln_px * cov[3]) / s
+		S := H00 * P00 * H00 + 2.0 * H00 * P01 * H01 + H01 * P11 * H01 + R00
 
-		state[0] = state[0] + k1 * innovation
-		state[1] = state[1] + k2 * innovation
+		// Calculate z_score (use max_f64)
+		z_score := innovation / math.sqrt_f64(math.max(S, 1e-12))
 
-		new_cov_00 := (1.0 - k1) * pred_cov_00 - k1 * ln_px * cov[1]
-		new_cov_01 := (1.0 - k1) * cov[1] - k1 * ln_px * pred_cov_11
-		new_cov_10 := -k2 * pred_cov_00 + (1.0 - k2 * ln_px) * cov[1]
-		new_cov_11 := -k2 * cov[1] + (1.0 - k2 * ln_px) * pred_cov_11
+		// Update
+		z: [1]f64
+		z[0] = ln_py
+		analytic.kalman_update(&kf, z)
 
-		cov[0] = new_cov_00
-		cov[1] = new_cov_01
-		cov[2] = new_cov_10
-		cov[3] = new_cov_11
-
-		current_spread := ln_py - (state[0] + state[1] * ln_px)
-
-		z_score := 0.0
-		if s > 1e-12 {
-			z_score = innovation / math.sqrt(s)
-		}
+		current_spread := ln_py - (kf.x[0] + kf.x[1] * ln_px)
 
 		// --- Trading Logic ---
 		signal: i32 = position
-
 		if position == 0 {
 			if z_score > entry_threshold {
-				signal = -1 // Short Spread (Bet on spread decreasing)
+				signal = -1 // Short Spread
 			} else if z_score < -entry_threshold {
-				signal = 1 // Long Spread (Bet on spread increasing)
+				signal = 1 // Long Spread
 			}
 		} else {
-			// ✅ CRITICAL FIX: Corrected exit logic for mean reversion
 			if position == 1 {
-				// Entered at z < -2.0. Exit when z reverts up to -0.5,
-				// OR stop loss if it crashes further to -3.5
-				if z_score > -exit_threshold || z_score < -stop_loss_threshold {
+				// Exit long spread when it mean-reverts up to 0.0, or stop loss at -3.0
+				if z_score > exit_threshold || z_score < -stop_loss_threshold {
 					signal = 0
 				}
 			} else if position == -1 {
-				// Entered at z > 2.0. Exit when z reverts down to 0.5,
-				// OR stop loss if it explodes further to 3.5
+				// Exit short spread when it mean-reverts down to 0.0, or stop loss at 3.0
 				if z_score < exit_threshold || z_score > stop_loss_threshold {
 					signal = 0
 				}
 			}
 		}
 
-		// 1. Calculate daily return based on the position HELD during this day
+		// Calculate daily return
 		daily_ret := 0.0
 		if i > 0 {
+			prev_ln_px := math.ln_f64(x_data[i - 1])
+			prev_ln_py := math.ln_f64(y_data[i - 1])
 			ret_x := ln_px - prev_ln_px
 			ret_y := ln_py - prev_ln_py
 
 			if position == 1 {
-				// Long Spread: Long Y, Short X
 				daily_ret = ret_y - position_beta * ret_x
 			} else if position == -1 {
-				// Short Spread: Short Y, Long X
 				daily_ret = -ret_y + position_beta * ret_x
 			}
 		}
 
 		append(&result_returns, daily_ret)
-		append(&result_betas, state[1])
+		append(&result_betas, kf.x[1])
 		append(&result_spreads, current_spread)
 
-		// 2. Update position FOR THE NEXT DAY
+		// Update position FOR THE NEXT DAY
 		if signal != position {
 			append(&result_trades, i)
 			position = signal
 			if position != 0 {
-				position_beta = state[1] // Lock in hedge ratio at entry
+				position_beta = kf.x[1] // Lock in hedge ratio at entry
 			} else {
 				position_beta = 0.0
 			}
 		}
-
-		prev_ln_px = ln_px
-		prev_ln_py = ln_py
 	}
 
 	return PairsTradingResult {
