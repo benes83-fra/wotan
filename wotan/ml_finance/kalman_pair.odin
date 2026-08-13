@@ -32,8 +32,7 @@ extract_float_col :: proc(df: ^w.DataFrame, col_name: string, allocator: mem.All
 		}
 	}
 	return out
-}
-// ============================================================================
+} // ============================================================================
 // Kalman Filter Pairs Trading Strategy (Log-Price Version)
 // ============================================================================
 kalman_pairs_strategy :: proc(
@@ -73,12 +72,15 @@ kalman_pairs_strategy :: proc(
 	kf.F[1, 0] = 0.0
 	kf.F[1, 1] = 1.0
 
-	// ✅ CRITICAL FIX: Drastically reduce Q for log-price stability.
-	// This prevents the filter from "chasing" the price and keeps z-scores meaningful.
-	kf.Q[0, 0] = 1e-8
+	// ========================================================================
+	// 1. Kalman Filter Process Noise (Q)
+	// ========================================================================
+	// Increased to 1e-5. This is the sweet spot for daily data.
+	// It allows the hedge ratio to adapt to regime changes without chasing noise.
+	kf.Q[0, 0] = 1e-5
 	kf.Q[0, 1] = 0.0
 	kf.Q[1, 0] = 0.0
-	kf.Q[1, 1] = 1e-8
+	kf.Q[1, 1] = 1e-5
 
 	// R matrix (will be overwritten by OLS if window >= 2)
 	kf.R[0, 0] = 1e-4
@@ -105,7 +107,7 @@ kalman_pairs_strategy :: proc(
 			kf.P[1, 1] = ols_res.vcov.data[3]
 		}
 
-		// Update R from OLS residual variance (use max_f64 for Odin compatibility)
+		// Update R from OLS residual variance
 		kf.R[0, 0] = math.max(ols_res.sigma2, 1e-6)
 
 		l.matrix_free(&X_mat)
@@ -120,11 +122,15 @@ kalman_pairs_strategy :: proc(
 
 	position: i32 = 0
 	position_beta := 0.0
+	days_in_position := 0
 
-	// Slightly more aggressive thresholds to guarantee we capture mean-reversion
-	entry_threshold := 1.5
-	exit_threshold := 0.0
-	stop_loss_threshold := 3.0
+	// ========================================================================
+	// 2. Trading Thresholds & Rules
+	// ========================================================================
+	entry_threshold := 2.0
+	exit_threshold := 0.5
+	stop_loss_threshold := 3.5
+	min_hold_days := 3 // Prevents immediate whipsaw exits
 
 	for i in 0 ..< n {
 		ln_px := math.ln_f64(x_data[i])
@@ -150,7 +156,7 @@ kalman_pairs_strategy :: proc(
 
 		S := H00 * P00 * H00 + 2.0 * H00 * P01 * H01 + H01 * P11 * H01 + R00
 
-		// Calculate z_score (use max_f64)
+		// Calculate z_score
 		z_score := innovation / math.sqrt_f64(math.max(S, 1e-12))
 
 		// Update
@@ -162,6 +168,14 @@ kalman_pairs_strategy :: proc(
 
 		// --- Trading Logic ---
 		signal: i32 = position
+
+		// Track holding period
+		if position != 0 {
+			days_in_position += 1
+		} else {
+			days_in_position = 0
+		}
+
 		if position == 0 {
 			if z_score > entry_threshold {
 				signal = -1 // Short Spread
@@ -169,14 +183,14 @@ kalman_pairs_strategy :: proc(
 				signal = 1 // Long Spread
 			}
 		} else {
-			if position == 1 {
-				// Exit long spread when it mean-reverts up to 0.0, or stop loss at -3.0
-				if z_score > exit_threshold || z_score < -stop_loss_threshold {
-					signal = 0
-				}
-			} else if position == -1 {
-				// Exit short spread when it mean-reverts down to 0.0, or stop loss at 3.0
-				if z_score < exit_threshold || z_score > stop_loss_threshold {
+			// Hard stop loss ALWAYS applies, even during min hold
+			if (position == 1 && z_score < -stop_loss_threshold) ||
+			   (position == -1 && z_score > stop_loss_threshold) {
+				signal = 0
+			} else if days_in_position >= min_hold_days {
+				// Normal mean-reversion exit
+				if (position == 1 && z_score > exit_threshold) ||
+				   (position == -1 && z_score < -exit_threshold) {
 					signal = 0
 				}
 			}
