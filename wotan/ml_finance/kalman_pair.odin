@@ -11,10 +11,11 @@ import "core:mem"
 // Pairs Trading Result Structure
 // ============================================================================
 PairsTradingResult :: struct {
-	returns: []f64,
-	trades:  []int,
-	betas:   []f64,
-	spreads: []f64,
+	returns:  []f64,
+	trades:   []int,
+	betas:    []f64,
+	spreads:  []f64,
+	z_scores: []f64,
 }
 
 // Helper to extract float column from DataFrame
@@ -115,6 +116,7 @@ kalman_pairs_strategy :: proc(
 	result_trades := make([dynamic]int, 0, allocator)
 	result_betas := make([dynamic]f64, 0, allocator)
 	result_spreads := make([dynamic]f64, 0, allocator)
+	result_z_scores := make([dynamic]f64, 0, allocator)
 
 	position: i32 = 0
 	position_beta := 0.0
@@ -198,6 +200,7 @@ kalman_pairs_strategy :: proc(
 		append(&result_returns, daily_ret)
 		append(&result_betas, kf.x[1])
 		append(&result_spreads, current_spread)
+		append(&result_z_scores, z_score)
 
 		// Update position FOR THE NEXT DAY
 		if signal != position {
@@ -216,5 +219,6 @@ kalman_pairs_strategy :: proc(
 		trades = result_trades[:],
 		betas = result_betas[:],
 		spreads = result_spreads[:],
+		z_scores = result_z_scores[:],
 	}
 }

@@ -3,6 +3,7 @@ package tests
 import w "../wotan/core"
 import ml_fin "../wotan/ml_finance"
 import net "../wotan/net"
+import plot "../wotan/plot"
 import "core:fmt"
 import "core:math"
 import "core:mem"
@@ -138,5 +139,105 @@ kalman_pairs_real_data_test :: proc(allocator: mem.Allocator = context.allocator
 		fmt.printf("Total Trades:      %d\n", len(strategy_result.trades))
 	} else {
 		fmt.println("No trades generated or error in strategy execution.")
+	}
+	// ========================================================================
+	// 4. Visualization: Z-Score and Equity Curve
+	// ========================================================================
+	n_steps := len(strategy_result.z_scores)
+	if n_steps > 0 {
+		xs := make([]f64, n_steps, allocator)
+		for i in 0 ..< n_steps {xs[i] = f64(i)}
+
+		// --- Plot 1: Z-Score with Thresholds ---
+		thresh_pos := make([]f64, n_steps, allocator)
+		thresh_neg := make([]f64, n_steps, allocator)
+		thresh_exit_pos := make([]f64, n_steps, allocator)
+		thresh_exit_neg := make([]f64, n_steps, allocator)
+		for i in 0 ..< n_steps {
+			thresh_pos[i] = 2.0
+			thresh_neg[i] = -2.0
+			thresh_exit_pos[i] = 0.5
+			thresh_exit_neg[i] = -0.5
+		}
+
+		z_lines := []plot.LineData {
+			plot.LineData {
+				xs = xs,
+				ys = strategy_result.z_scores,
+				color = plot.BLUE,
+				style = .Solid,
+				label = "Z-Score",
+			},
+			plot.LineData {
+				xs = xs,
+				ys = thresh_pos,
+				color = plot.RED,
+				style = .Dashed,
+				label = "Entry (+2.0)",
+			},
+			plot.LineData {
+				xs = xs,
+				ys = thresh_neg,
+				color = plot.RED,
+				style = .Dashed,
+				label = "Entry (-2.0)",
+			},
+			plot.LineData {
+				xs = xs,
+				ys = thresh_exit_pos,
+				color = plot.GREEN,
+				style = .Dotted,
+				label = "Exit (+0.5)",
+			},
+			plot.LineData {
+				xs = xs,
+				ys = thresh_exit_neg,
+				color = plot.GREEN,
+				style = .Dotted,
+				label = "Exit (-0.5)",
+			},
+		}
+
+		z_config := plot.DEFAULT_PLOT_CONFIG
+		z_config.title = "Kalman Pairs Trading: Z-Score"
+		z_config.x_label = "Time Step"
+		z_config.y_label = "Z-Score"
+		z_config.show_grid = true
+		plot.multi_line_png(z_lines, "kalman_zscore.png", z_config, allocator)
+		fmt.println("✓ Saved: kalman_zscore.png")
+
+		// --- Plot 2: Equity Curve ---
+		equity := make([]f64, n_steps, allocator)
+		cum := 1.0
+		for i in 0 ..< n_steps {
+			cum *= (1.0 + strategy_result.returns[i])
+			equity[i] = cum
+		}
+
+		eq_lines := []plot.LineData {
+			plot.LineData {
+				xs = xs,
+				ys = equity,
+				color = plot.BLUE,
+				style = .Solid,
+				label = "Cumulative Return",
+			},
+		}
+
+		eq_config := plot.DEFAULT_PLOT_CONFIG
+		eq_config.title = "Kalman Pairs Trading: Equity Curve"
+		eq_config.x_label = "Time Step"
+		eq_config.y_label = "Portfolio Value"
+		eq_config.show_grid = true
+		plot.multi_line_png(eq_lines, "kalman_equity.png", eq_config, allocator)
+		fmt.println("✓ Saved: kalman_equity.png")
+
+		// Cleanup plot arrays
+		delete(xs, allocator)
+		delete(thresh_pos, allocator)
+		delete(thresh_neg, allocator)
+		delete(thresh_exit_pos, allocator)
+		delete(thresh_exit_neg, allocator)
+		delete(equity, allocator)
 	}
 }
