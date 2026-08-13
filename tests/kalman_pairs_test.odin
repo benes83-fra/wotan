@@ -7,6 +7,7 @@ import plot "../wotan/plot"
 import "core:fmt"
 import "core:math"
 import "core:mem"
+
 kalman_pairs_real_data_test :: proc(allocator: mem.Allocator = context.allocator) {
 	fmt.println("\n=== Kalman Filter Pairs Trading (Real Data) ===")
 
@@ -77,21 +78,43 @@ kalman_pairs_real_data_test :: proc(allocator: mem.Allocator = context.allocator
 
 	fmt.printf("Loaded %d properly aligned days of real KO/PEP data\n", aligned_df.rows)
 
-	// Run Kalman Filter Pairs Trading Strategy
-	window := 60
-	initial_hedge_ratio := 1.0
+	// ========================================================================
+	// CONFIGURABLE STRATEGY PARAMETERS
+	// ========================================================================
+	config := ml_fin.kalman_pairs_default_config()
 
+	// Customize parameters for your strategy
+	config.warmup_window = 60 // OLS estimation window
+	config.process_noise = 1e-5 // Kalman filter process noise
+	config.measurement_noise = 1e-4 // Kalman filter measurement noise
+	config.initial_hedge_ratio = 1.0 // Initial beta estimate
+
+	// Trading thresholds
+	config.entry_threshold = 2.0 // Enter when |z-score| > 2.0
+	config.exit_threshold = 0.5 // Exit when |z-score| < 0.5
+	config.stop_loss_threshold = 3.5 // Stop loss at |z-score| > 3.5
+	config.min_hold_days = 3 // Minimum 3 days holding period
+
+	// Run Kalman Filter Pairs Trading Strategy with config
 	strategy_result := ml_fin.kalman_pairs_strategy(
 		&aligned_df,
 		"Asset_A",
 		"Asset_B",
-		window,
-		initial_hedge_ratio,
+		config, // Pass the configuration struct
 		allocator,
 	)
 
 	// Analyze Results
 	fmt.println("\n--- Strategy Performance ---")
+	fmt.println("--- Configuration ---")
+	fmt.printf("Warmup Window:     %d days\n", config.warmup_window)
+	fmt.printf("Entry Threshold:   ±%.2f\n", config.entry_threshold)
+	fmt.printf("Exit Threshold:    ±%.2f\n", config.exit_threshold)
+	fmt.printf("Stop Loss:         ±%.2f\n", config.stop_loss_threshold)
+	fmt.printf("Min Hold Days:     %d\n", config.min_hold_days)
+	fmt.printf("Process Noise:     %.2e\n", config.process_noise)
+	fmt.println()
+
 	if len(strategy_result.returns) > 0 {
 		total_return := 1.0
 		for r in strategy_result.returns {
@@ -140,6 +163,7 @@ kalman_pairs_real_data_test :: proc(allocator: mem.Allocator = context.allocator
 	} else {
 		fmt.println("No trades generated or error in strategy execution.")
 	}
+
 	// ========================================================================
 	// 4. Visualization: Z-Score and Equity Curve
 	// ========================================================================
@@ -148,16 +172,16 @@ kalman_pairs_real_data_test :: proc(allocator: mem.Allocator = context.allocator
 		xs := make([]f64, n_steps, allocator)
 		for i in 0 ..< n_steps {xs[i] = f64(i)}
 
-		// --- Plot 1: Z-Score with Thresholds ---
+		// --- Plot 1: Z-Score with Configurable Thresholds ---
 		thresh_pos := make([]f64, n_steps, allocator)
 		thresh_neg := make([]f64, n_steps, allocator)
 		thresh_exit_pos := make([]f64, n_steps, allocator)
 		thresh_exit_neg := make([]f64, n_steps, allocator)
 		for i in 0 ..< n_steps {
-			thresh_pos[i] = 2.0
-			thresh_neg[i] = -2.0
-			thresh_exit_pos[i] = 0.5
-			thresh_exit_neg[i] = -0.5
+			thresh_pos[i] = config.entry_threshold
+			thresh_neg[i] = -config.entry_threshold
+			thresh_exit_pos[i] = config.exit_threshold
+			thresh_exit_neg[i] = -config.exit_threshold
 		}
 
 		z_lines := []plot.LineData {
@@ -173,28 +197,28 @@ kalman_pairs_real_data_test :: proc(allocator: mem.Allocator = context.allocator
 				ys = thresh_pos,
 				color = plot.RED,
 				style = .Dashed,
-				label = "Entry (+2.0)",
+				label = fmt.tprintf("Entry (+%.1f)", config.entry_threshold),
 			},
 			plot.LineData {
 				xs = xs,
 				ys = thresh_neg,
 				color = plot.RED,
 				style = .Dashed,
-				label = "Entry (-2.0)",
+				label = fmt.tprintf("Entry (-%.1f)", config.entry_threshold),
 			},
 			plot.LineData {
 				xs = xs,
 				ys = thresh_exit_pos,
 				color = plot.GREEN,
 				style = .Dotted,
-				label = "Exit (+0.5)",
+				label = fmt.tprintf("Exit (+%.1f)", config.exit_threshold),
 			},
 			plot.LineData {
 				xs = xs,
 				ys = thresh_exit_neg,
 				color = plot.GREEN,
 				style = .Dotted,
-				label = "Exit (-0.5)",
+				label = fmt.tprintf("Exit (-%.1f)", config.exit_threshold),
 			},
 		}
 

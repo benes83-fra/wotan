@@ -8,6 +8,37 @@ import "core:math"
 import "core:mem"
 
 // ============================================================================
+// Configuration Structures
+// ============================================================================
+KalmanPairsConfig :: struct {
+	// Kalman Filter Parameters
+	process_noise:       f64, // Q matrix diagonal (default: 1e-5)
+	measurement_noise:   f64, // R matrix initial value (default: 1e-4)
+	initial_hedge_ratio: f64, // Initial beta estimate (default: 1.0)
+
+	// Trading Parameters
+	entry_threshold:     f64, // Z-score threshold to enter (default: 2.0)
+	exit_threshold:      f64, // Z-score threshold to exit (default: 0.5)
+	stop_loss_threshold: f64, // Z-score threshold for stop loss (default: 3.5)
+	min_hold_days:       int, // Minimum days to hold position (default: 3)
+	warmup_window:       int, // OLS warmup period (default: 60)
+}
+
+// Default configuration
+kalman_pairs_default_config :: proc() -> KalmanPairsConfig {
+	return KalmanPairsConfig {
+		process_noise = 1e-5,
+		measurement_noise = 1e-4,
+		initial_hedge_ratio = 1.0,
+		entry_threshold = 2.0,
+		exit_threshold = 0.5,
+		stop_loss_threshold = 3.5,
+		min_hold_days = 3,
+		warmup_window = 60,
+	}
+}
+
+// ============================================================================
 // Pairs Trading Result Structure
 // ============================================================================
 PairsTradingResult :: struct {
@@ -32,15 +63,16 @@ extract_float_col :: proc(df: ^w.DataFrame, col_name: string, allocator: mem.All
 		}
 	}
 	return out
-} // ============================================================================
-// Kalman Filter Pairs Trading Strategy (Log-Price Version)
+}
+
+// ============================================================================
+// Kalman Filter Pairs Trading Strategy (Configurable)
 // ============================================================================
 kalman_pairs_strategy :: proc(
 	df: ^w.DataFrame,
 	col_x: string,
 	col_y: string,
-	window: int,
-	initial_hedge_ratio: f64,
+	config: KalmanPairsConfig,
 	allocator: mem.Allocator = context.allocator,
 ) -> PairsTradingResult {
 	x_data := extract_float_col(df, col_x, allocator)
@@ -58,7 +90,7 @@ kalman_pairs_strategy :: proc(
 
 	// Initial state
 	kf.x[0] = 0.0
-	kf.x[1] = initial_hedge_ratio
+	kf.x[1] = config.initial_hedge_ratio
 
 	// Initial covariance
 	kf.P[0, 0] = 1.0
@@ -72,24 +104,20 @@ kalman_pairs_strategy :: proc(
 	kf.F[1, 0] = 0.0
 	kf.F[1, 1] = 1.0
 
-	// ========================================================================
-	// 1. Kalman Filter Process Noise (Q)
-	// ========================================================================
-	// Increased to 1e-5. This is the sweet spot for daily data.
-	// It allows the hedge ratio to adapt to regime changes without chasing noise.
-	kf.Q[0, 0] = 1e-5
+	// Process noise (Q matrix) - configurable
+	kf.Q[0, 0] = config.process_noise
 	kf.Q[0, 1] = 0.0
 	kf.Q[1, 0] = 0.0
-	kf.Q[1, 1] = 1e-5
+	kf.Q[1, 1] = config.process_noise
 
-	// R matrix (will be overwritten by OLS if window >= 2)
-	kf.R[0, 0] = 1e-4
+	// Measurement noise (R matrix) - will be overwritten by OLS if warmup >= 2
+	kf.R[0, 0] = config.measurement_noise
 
-	// Initialize P, R, and state from OLS
-	if n >= window {
-		X_mat := l.matrix_new(f64, window, 2, allocator)
-		y_vec := make([]f64, window, allocator)
-		for i in 0 ..< window {
+	// Initialize P, R, and state from OLS warmup
+	if n >= config.warmup_window {
+		X_mat := l.matrix_new(f64, config.warmup_window, 2, allocator)
+		y_vec := make([]f64, config.warmup_window, allocator)
+		for i in 0 ..< config.warmup_window {
 			X_mat.data[i * 2 + 0] = 1.0
 			X_mat.data[i * 2 + 1] = math.ln_f64(x_data[i])
 			y_vec[i] = math.ln_f64(y_data[i])
@@ -123,14 +151,6 @@ kalman_pairs_strategy :: proc(
 	position: i32 = 0
 	position_beta := 0.0
 	days_in_position := 0
-
-	// ========================================================================
-	// 2. Trading Thresholds & Rules
-	// ========================================================================
-	entry_threshold := 2.0
-	exit_threshold := 0.5
-	stop_loss_threshold := 3.5
-	min_hold_days := 3 // Prevents immediate whipsaw exits
 
 	for i in 0 ..< n {
 		ln_px := math.ln_f64(x_data[i])
@@ -166,7 +186,7 @@ kalman_pairs_strategy :: proc(
 
 		current_spread := ln_py - (kf.x[0] + kf.x[1] * ln_px)
 
-		// --- Trading Logic ---
+		// --- Trading Logic with Configurable Thresholds ---
 		signal: i32 = position
 
 		// Track holding period
@@ -177,20 +197,21 @@ kalman_pairs_strategy :: proc(
 		}
 
 		if position == 0 {
-			if z_score > entry_threshold {
+			// Entry signals
+			if z_score > config.entry_threshold {
 				signal = -1 // Short Spread
-			} else if z_score < -entry_threshold {
+			} else if z_score < -config.entry_threshold {
 				signal = 1 // Long Spread
 			}
 		} else {
 			// Hard stop loss ALWAYS applies, even during min hold
-			if (position == 1 && z_score < -stop_loss_threshold) ||
-			   (position == -1 && z_score > stop_loss_threshold) {
+			if (position == 1 && z_score < -config.stop_loss_threshold) ||
+			   (position == -1 && z_score > config.stop_loss_threshold) {
 				signal = 0
-			} else if days_in_position >= min_hold_days {
+			} else if days_in_position >= config.min_hold_days {
 				// Normal mean-reversion exit
-				if (position == 1 && z_score > exit_threshold) ||
-				   (position == -1 && z_score < -exit_threshold) {
+				if (position == 1 && z_score > config.exit_threshold) ||
+				   (position == -1 && z_score < -config.exit_threshold) {
 					signal = 0
 				}
 			}
