@@ -538,6 +538,7 @@ main :: proc() {
 	test.deep_bsde_test(context.temp_allocator)
 	test.deep_bsde_100d_test(context.temp_allocator)
 	test.kalman_pairs_real_data_test(context.temp_allocator)
+	test.kalman_pairs_real_data_grid_test(context.temp_allocator)
 	fmt.println("Demo End")
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
