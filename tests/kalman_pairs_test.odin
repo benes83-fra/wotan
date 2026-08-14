@@ -90,10 +90,10 @@ kalman_pairs_real_data_test :: proc(allocator: mem.Allocator = context.allocator
 	config.initial_hedge_ratio = 1.0 // Initial beta estimate
 
 	// Trading thresholds
-	config.entry_threshold = 2.0 // Enter when |z-score| > 2.0
+	config.entry_threshold = 1.00 // Enter when |z-score| > 2.0
 	config.exit_threshold = 0.5 // Exit when |z-score| < 0.5
-	config.stop_loss_threshold = 3.5 // Stop loss at |z-score| > 3.5
-	config.min_hold_days = 3 // Minimum 3 days holding period
+	config.stop_loss_threshold = 3.0 // Stop loss at |z-score| > 3.5
+	config.min_hold_days = 1 // Minimum 3 days holding period
 
 	// Run Kalman Filter Pairs Trading Strategy with config
 	strategy_result := ml_fin.kalman_pairs_strategy(
