@@ -317,13 +317,25 @@ kalman_pairs_real_data_grid_test :: proc(allocator: mem.Allocator = context.allo
 	w.add_column(&aligned_df, col_pep)
 	aligned_df.rows = col_date.len
 	fmt.printf("Loaded %d properly aligned days of real KO/PEP data\n", aligned_df.rows)
-
 	// --- Grid Search ---
 	fmt.println("\n--- Running Grid Search ---")
-	entry_thresholds := []f64{1.5, 2.0, 2.5}
-	exit_thresholds := []f64{0.0, 0.5}
-	process_noises := []f64{1e-6, 1e-5}
-	transaction_cost := 0.001 // 10 bps per trade
+
+	// 1. Higher entry thresholds to ensure the spread deviation is large enough to overcome 20bps round-trip costs
+	entry_thresholds := []f64{2.0, 2.5, 3.0}
+
+	// 2. Tighter exit thresholds to capture the mean reversion quickly before it reverses
+	exit_thresholds := []f64{0.0, 0.25}
+
+	// 3. Much lower process noise. KO/PEP are stable; the hedge ratio shouldn't jump around.
+	// 1e-3 is way too high and causes the filter to "chase" the price.
+	process_noises := []f64{1e-6, 1e-7}
+
+	min_hold_days_list := []int{3, 5}
+	cooldown_days_list := []int{3, 5}
+
+	// Note: 0.001 = 10 bps per leg. A round trip is ~20 bps.
+	// This is a realistic friction, but it demands high z-score moves to be profitable.
+	transaction_cost := 0.001
 
 	best_config, best_sharpe := ml_fin.kalman_pairs_grid_search(
 		&aligned_df,
@@ -332,14 +344,17 @@ kalman_pairs_real_data_grid_test :: proc(allocator: mem.Allocator = context.allo
 		entry_thresholds,
 		exit_thresholds,
 		process_noises,
+		min_hold_days_list,
+		cooldown_days_list,
 		transaction_cost,
 		allocator,
 	)
-
 	fmt.printf("Best Config Found:\n")
 	fmt.printf("  Entry Threshold:  %.2f\n", best_config.entry_threshold)
 	fmt.printf("  Exit Threshold:   %.2f\n", best_config.exit_threshold)
 	fmt.printf("  Process Noise:    %.2e\n", best_config.process_noise)
+	fmt.printf("  Min Hold Days:    %d\n", best_config.min_hold_days) // ✅ NEW
+	fmt.printf("  Cooldown Days:    %d\n", best_config.cooldown_days)
 	fmt.printf("  Transaction Cost: %.4f\n", best_config.transaction_cost)
 	fmt.printf("  Best Sharpe:      %.4f\n", best_sharpe)
 

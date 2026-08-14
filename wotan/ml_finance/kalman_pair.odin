@@ -23,13 +23,18 @@ KalmanPairsConfig :: struct {
 	stop_loss_threshold: f64, // Z-score threshold for stop loss (default: 3.5)
 	min_hold_days:       int, // Minimum days to hold position (default: 3)
 	warmup_window:       int, // OLS warmup period (default: 60)
+	cooldown_days:       int,
 }
 
 DEFAULT_KALMAN_PAIRS_CONFIG :: KalmanPairsConfig {
-	entry_threshold  = 2.0,
-	exit_threshold   = 0.5,
-	process_noise    = 1e-5,
-	transaction_cost = 0.001,
+	entry_threshold     = 2.0,
+	exit_threshold      = 0.5,
+	process_noise       = 1e-4, // ✅ Increased default
+	transaction_cost    = 0.001,
+	stop_loss_threshold = 3.5,
+	min_hold_days       = 3,
+	cooldown_days       = 5, // ✅ NEW: 5 day cooldown after stop loss
+	warmup_window       = 60,
 }
 
 // Helper to calculate annualized Sharpe ratio from a returns slice
@@ -93,8 +98,7 @@ kalman_pairs_default_config :: proc() -> KalmanPairsConfig {
 		min_hold_days = 3,
 		warmup_window = 60,
 	}
-}
-// ============================================================================
+} // ============================================================================
 // Kalman Filter Pairs Trading Strategy
 // ============================================================================
 kalman_pairs_strategy :: proc(
@@ -119,7 +123,7 @@ kalman_pairs_strategy :: proc(
 
 	// Initial state
 	kf.x[0] = 0.0
-	kf.x[1] = 1.0
+	kf.x[1] = config.initial_hedge_ratio
 
 	// Initial covariance
 	kf.P[0, 0] = 1.0
@@ -134,13 +138,15 @@ kalman_pairs_strategy :: proc(
 	kf.Q[1, 1] = config.process_noise
 
 	// Measurement noise (R)
-	kf.R[0, 0] = 1e-4
+	kf.R[0, 0] = config.measurement_noise
 
 	// Initialize P and R from OLS
-	if n >= 60 {
-		X_mat := l.matrix_new(f64, 60, 2, allocator)
-		y_vec := make([]f64, 60, allocator)
-		for i in 0 ..< 60 {
+	warmup := config.warmup_window
+	if warmup <= 0 {warmup = 60}
+	if n >= warmup {
+		X_mat := l.matrix_new(f64, warmup, 2, allocator)
+		y_vec := make([]f64, warmup, allocator)
+		for i in 0 ..< warmup {
 			X_mat.data[i * 2 + 0] = 1.0
 			X_mat.data[i * 2 + 1] = x_data[i]
 			y_vec[i] = y_data[i]
@@ -161,6 +167,8 @@ kalman_pairs_strategy :: proc(
 
 	position: i32 = 0
 	position_beta := 0.0
+	days_in_position := 0 // ✅ CRITICAL: Track holding period
+	last_stop_loss_day := -100 // ✅ NEW: Track last stop loss
 
 	for i in 0 ..< n {
 		px := x_data[i]
@@ -196,17 +204,41 @@ kalman_pairs_strategy :: proc(
 
 		// --- Trading Logic ---
 		signal: i32 = position
+
+		// ✅ Track holding period
+		if position != 0 {
+			days_in_position += 1
+		} else {
+			days_in_position = 0
+		}
+
 		if position == 0 {
-			if z_score > config.entry_threshold {
+			if i - last_stop_loss_day < config.cooldown_days {
+				signal = 0
+			} else if z_score > config.entry_threshold {
 				signal = -1
 			} else if z_score < -config.entry_threshold {
 				signal = 1
 			}
 		} else {
-			if position == 1 {
-				if z_score > -config.exit_threshold || z_score < -3.0 {signal = 0}
-			} else if position == -1 {
-				if z_score < config.exit_threshold || z_score > 3.0 {signal = 0}
+			// ✅ Enforce minimum hold days for normal exits
+			if days_in_position >= config.min_hold_days {
+				if position == 1 {
+					if z_score > -config.exit_threshold || z_score < -config.stop_loss_threshold {
+						signal = 0
+					}
+				} else if position == -1 {
+					if z_score < config.exit_threshold || z_score > config.stop_loss_threshold {
+						signal = 0
+					}
+				}
+			} else {
+				// ✅ Still in min hold period, but allow HARD stop loss
+				if position == 1 && z_score < -config.stop_loss_threshold {
+					signal = 0
+				} else if position == -1 && z_score > config.stop_loss_threshold {
+					signal = 0
+				}
 			}
 		}
 
@@ -225,7 +257,13 @@ kalman_pairs_strategy :: proc(
 				}
 			}
 		}
-
+		// ✅ NEW: Record if this exit was a stop loss
+		if signal == 0 && position != 0 {
+			if (position == 1 && z_score < -config.stop_loss_threshold) ||
+			   (position == -1 && z_score > config.stop_loss_threshold) {
+				last_stop_loss_day = i
+			}
+		}
 		// Apply Transaction Costs
 		if signal != position && config.transaction_cost > 0.0 {
 			daily_ret -= config.transaction_cost
@@ -267,6 +305,8 @@ kalman_pairs_grid_search :: proc(
 	entry_thresholds: []f64,
 	exit_thresholds: []f64,
 	process_noises: []f64,
+	min_hold_days_list: []int, // ✅ ADDED
+	cooldown_days_list: []int, // ✅ NEW
 	transaction_cost: f64 = 0.001,
 	allocator: mem.Allocator = context.allocator,
 ) -> (
@@ -279,20 +319,31 @@ kalman_pairs_grid_search :: proc(
 	for entry in entry_thresholds {
 		for exit in exit_thresholds {
 			for noise in process_noises {
-				config := KalmanPairsConfig {
-					entry_threshold  = entry,
-					exit_threshold   = exit,
-					process_noise    = noise,
-					transaction_cost = transaction_cost,
-				}
+				for min_hold in min_hold_days_list {
+					for cooldown in cooldown_days_list { 	// ✅ NEW
+						config := KalmanPairsConfig {
+							entry_threshold  = entry,
+							exit_threshold   = exit,
+							process_noise    = noise,
+							transaction_cost = transaction_cost,
+							min_hold_days    = min_hold,
+							cooldown_days    = cooldown,
+						}
 
-				// Run strategy using temp_allocator for intermediate results
-				result := kalman_pairs_strategy(df, col_x, col_y, config, context.temp_allocator)
-				sharpe := calculate_sharpe(result.returns)
+						result := kalman_pairs_strategy(
+							df,
+							col_x,
+							col_y,
+							config,
+							context.temp_allocator,
+						)
+						sharpe := calculate_sharpe(result.returns)
 
-				if sharpe > best_sharpe {
-					best_sharpe = sharpe
-					best_config = config
+						if sharpe > best_sharpe {
+							best_sharpe = sharpe
+							best_config = config
+						}
+					}
 				}
 			}
 		}
