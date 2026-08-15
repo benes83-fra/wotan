@@ -289,7 +289,13 @@ PPOAgent :: struct {
 	buffer:       ^RolloutBuffer,
 	allocator:    mem.Allocator,
 }
-
+PPOUpdateStats :: struct {
+	policy_loss: f64,
+	value_loss:  f64,
+	entropy:     f64,
+	total_loss:  f64,
+	n_updates:   int,
+}
 new_ppo_agent :: proc(
 	obs_dim: int,
 	action_space: int,
@@ -378,9 +384,13 @@ compute_gae :: proc(
 	}
 	return advantages
 }
-
-ppo_agent_update :: proc(agent: ^PPOAgent, epochs: int = 10, batch_size: int = 64) {
-	if agent.buffer.size == 0 {return}
+ppo_agent_update :: proc(
+	agent: ^PPOAgent,
+	epochs: int = 10,
+	batch_size: int = 64,
+) -> PPOUpdateStats {
+	stats: PPOUpdateStats
+	if agent.buffer.size == 0 {return stats}
 
 	advantages := compute_gae(
 		agent.buffer.rewards[:agent.buffer.size],
@@ -444,7 +454,6 @@ ppo_agent_update :: proc(agent: ^PPOAgent, epochs: int = 10, batch_size: int = 6
 				ratio := math.exp_f64(new_log_prob - old_log_prob)
 				surr1 := ratio * advantage
 
-				// ✅ FIXED: Manual clamping to avoid math.clamp_f64 generic issues
 				clamped_ratio := ratio
 				if clamped_ratio < 1.0 - agent.clip_epsilon {
 					clamped_ratio = 1.0 - agent.clip_epsilon
@@ -481,6 +490,13 @@ ppo_agent_update :: proc(agent: ^PPOAgent, epochs: int = 10, batch_size: int = 6
 			total_loss :=
 				policy_loss + agent.value_coef * value_loss - agent.entropy_coef * entropy_loss
 
+			// ✅ Accumulate stats for reporting
+			stats.policy_loss += policy_loss
+			stats.value_loss += value_loss
+			stats.entropy += entropy_loss
+			stats.total_loss += total_loss
+			stats.n_updates += 1
+
 			loss_tensor := tensor.tensor_new(
 				l.matrix_new(f64, 1, 1, agent.allocator),
 				true,
@@ -497,6 +513,16 @@ ppo_agent_update :: proc(agent: ^PPOAgent, epochs: int = 10, batch_size: int = 6
 	}
 
 	rollout_buffer_clear(agent.buffer)
+
+	// ✅ Average the accumulated stats before returning
+	if stats.n_updates > 0 {
+		stats.policy_loss /= f64(stats.n_updates)
+		stats.value_loss /= f64(stats.n_updates)
+		stats.entropy /= f64(stats.n_updates)
+		stats.total_loss /= f64(stats.n_updates)
+	}
+
+	return stats
 }
 
 ppo_agent_free :: proc(agent: ^PPOAgent) {

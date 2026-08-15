@@ -42,12 +42,26 @@ ppo_trading_test :: proc(allocator: mem.Allocator = context.allocator) {
 	)
 	defer ml_finance.ppo_agent_free(agent)
 
+	// ✅ Verbose Setup Info
+	fmt.printf(
+		"Environment: %d steps | Window: %d | Indicators: %d\n",
+		len(prices),
+		env.window,
+		env.n_indicators,
+	)
+	fmt.printf(
+		"Agent:       Obs Dim: %d | Action Space: %d | Hidden Dim: 64\n",
+		obs_dim,
+		action_space,
+	)
+	fmt.println("Starting episode...\n")
+
 	state := ml_finance.env_reset(&env.env)
 	ep_reward := 0.0
 	done := false
+	step_count := 0
 
 	for !done {
-		// ✅ FIXED: Convert Observation to Tensor before passing to agent
 		state_tensor := tensor.tensor_new(
 			l.matrix_new(f64, 1, len(state.data), allocator),
 			false,
@@ -57,7 +71,6 @@ ppo_trading_test :: proc(allocator: mem.Allocator = context.allocator) {
 		state_tensor.shape = [4]int{1, len(state.data), 1, 1}
 
 		action, log_prob, value := ml_finance.ppo_agent_select_action(agent, state_tensor)
-
 		step := ml_finance.env_step(&env.env, action)
 
 		ml_finance.rollout_buffer_add(
@@ -71,16 +84,50 @@ ppo_trading_test :: proc(allocator: mem.Allocator = context.allocator) {
 		)
 
 		ep_reward += step.reward
+		step_count += 1
 		done = step.done
 
-		if agent.buffer.size >= 2048 {
-			ml_finance.ppo_agent_update(agent, 10, 64)
+		// ✅ Periodic Step Logging
+		if step_count % 100 == 0 || done {
+			fmt.printf(
+				"  Step %04d | Action: %-6v | Reward: %+.4f | Inventory: %2d | Cash: $%10.2f | Ep Reward: %+.4f\n",
+				step_count,
+				action,
+				step.reward,
+				env.inventory,
+				env.cash,
+				ep_reward,
+			)
 		}
 
-		// ✅ FIXED: Free the tensor we created
+		// ✅ Verbose Update Logging
+		if agent.buffer.size >= 2048 {
+			stats := ml_finance.ppo_agent_update(agent, 10, 64)
+			fmt.printf(
+				"  [Update] Buffer cleared (%d samples). Policy Loss: %.4f | Value Loss: %.4f | Entropy: %.4f | Total Loss: %.4f\n",
+				agent.buffer.capacity,
+				stats.policy_loss,
+				stats.value_loss,
+				stats.entropy,
+				stats.total_loss,
+			)
+		}
+
 		tensor.tensor_free(state_tensor)
 		state = step.observation
 	}
 
-	fmt.printf("Episode Reward: %.2f\n", ep_reward)
+	// ✅ Final Episode Summary
+	fmt.println("\n--- Episode Summary ---")
+	fmt.printf("Total Steps:     %d\n", step_count)
+	fmt.printf("Final Cash:      $%.2f\n", env.cash)
+	fmt.printf("Final Inventory: %d\n", env.inventory)
+	fmt.printf("Episode Reward:  %.4f\n", ep_reward)
+	fmt.printf("Initial Cash:    $100,000.00\n")
+	fmt.printf(
+		"Net PnL:         $%.2f (%.2f%%)\n",
+		env.cash - 100000.0,
+		(env.cash - 100000.0) / 100000.0 * 100.0,
+	)
+	fmt.println("=========================")
 }
