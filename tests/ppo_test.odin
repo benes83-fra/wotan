@@ -87,10 +87,10 @@ ppo_trading_test :: proc(allocator: mem.Allocator = context.allocator) {
 		step_count += 1
 		done = step.done
 
-		// ✅ Periodic Step Logging
+		// ✅ Periodic Step Logging (Changed %-6v to %-6d for action)
 		if step_count % 100 == 0 || done {
 			fmt.printf(
-				"  Step %04d | Action: %-6v | Reward: %+.4f | Inventory: %2d | Cash: $%10.2f | Ep Reward: %+.4f\n",
+				"  Step %04d | Action: %-6d | Reward: %+.4f | Inventory: %2d | Cash: $%10.2f | Ep Reward: %+.4f\n",
 				step_count,
 				action,
 				step.reward,
@@ -104,8 +104,7 @@ ppo_trading_test :: proc(allocator: mem.Allocator = context.allocator) {
 		if agent.buffer.size >= 2048 {
 			stats := ml_finance.ppo_agent_update(agent, 10, 64)
 			fmt.printf(
-				"  [Update] Buffer cleared (%d samples). Policy Loss: %.4f | Value Loss: %.4f | Entropy: %.4f | Total Loss: %.4f\n",
-				agent.buffer.capacity,
+				"  [Update] Buffer cleared. Policy Loss: %.4f | Value Loss: %.4f | Entropy: %.4f | Total Loss: %.4f\n",
 				stats.policy_loss,
 				stats.value_loss,
 				stats.entropy,

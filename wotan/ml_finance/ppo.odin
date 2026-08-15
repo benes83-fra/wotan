@@ -56,6 +56,7 @@ TradingEnv :: struct {
 	n_indicators:    int,
 	window:          int,
 	cash:            f64,
+	initial_cash:    f64,
 	inventory:       i32,
 	entry_price:     f64,
 	transaction_fee: f64,
@@ -65,6 +66,7 @@ TradingEnv :: struct {
 
 trading_env_reset :: proc(env: ^Environment) -> Observation {
 	t_env := cast(^TradingEnv)env
+	t_env.initial_cash = 100000.0 //
 	t_env.cash = 100000.0
 	t_env.inventory = 0
 	t_env.entry_price = 0.0
@@ -92,11 +94,16 @@ trading_env_reset :: proc(env: ^Environment) -> Observation {
 
 trading_env_step :: proc(env: ^Environment, action: int) -> Step {
 	t_env := cast(^TradingEnv)env
-	price := t_env.prices[t_env.env.current_step]
 
+	// 1. Calculate portfolio value BEFORE action
+	prev_price := t_env.prices[max(0, t_env.env.current_step - 1)]
+	prev_value := t_env.cash + f64(t_env.inventory) * prev_price
+
+	price := t_env.prices[t_env.env.current_step]
 	reward := 0.0
 	info := ""
 
+	// 2. Execute action
 	if action == 1 && t_env.inventory < t_env.max_position {
 		cost := price * (1.0 + t_env.transaction_fee)
 		if t_env.cash >= cost {
@@ -113,16 +120,25 @@ trading_env_step :: proc(env: ^Environment, action: int) -> Step {
 		t_env.inventory -= 1
 		if t_env.inventory == 0 {
 			profit := (price - t_env.entry_price) / t_env.entry_price
-			reward = profit
+			reward += profit * 0.1 // Bonus reward for realizing a profit
 			info = fmt.tprintf("Sold, PnL=%.4f", profit)
 		}
 	}
 
-	reward -= math.abs(f64(t_env.inventory)) * 0.0001
+	// 3. Calculate portfolio value AFTER action
+	curr_value := t_env.cash + f64(t_env.inventory) * price
 
+	// 4. Reward is the normalized change in portfolio value
+	reward += (curr_value - prev_value) / t_env.initial_cash
+
+	// 5. Tiny penalty for holding to encourage turnover, but not enough to override PnL
+	reward -= math.abs(f64(t_env.inventory)) * 0.00001
+
+	// 6. Check if done
 	t_env.env.current_step += 1
 	if t_env.env.current_step >= len(t_env.prices) {
 		t_env.env.done = true
+		// Force liquidate at end
 		if t_env.inventory != 0 {
 			price = t_env.prices[len(t_env.prices) - 1]
 			if t_env.inventory > 0 {
@@ -130,12 +146,13 @@ trading_env_step :: proc(env: ^Environment, action: int) -> Step {
 			} else {
 				t_env.cash -= price * (1.0 + t_env.transaction_fee) * f64(-t_env.inventory)
 			}
-			profit := (t_env.cash - 100000.0) / 100000.0
+			profit := (t_env.cash - t_env.initial_cash) / t_env.initial_cash
 			reward += profit
 			t_env.inventory = 0
 		}
 	}
 
+	// 7. Build observation
 	obs_dim := t_env.window * (2 + t_env.n_indicators)
 	obs := make([]f64, obs_dim, t_env.allocator)
 	idx := 0
@@ -191,6 +208,7 @@ new_trading_env :: proc(
 	env.env.action_space = 3
 	env.env.obs_dim = window * (2 + n_indicators)
 	env.env.max_steps = len(prices)
+	env.initial_cash = 100000.0
 	env.env.reset_fn = trading_env_reset
 	env.env.step_fn = trading_env_step
 	env.allocator = alloc
