@@ -541,6 +541,7 @@ main :: proc() {
 	test.kalman_pairs_real_data_grid_test(context.temp_allocator)
 	test.kalman_pairs_semiconductor_adf_test(context.temp_allocator)
 	test.kalman_pairs_auto_select_test(context.temp_allocator)
+	test.ppo_trading_test(context.temp_allocator)
 	fmt.println("Demo End")
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)

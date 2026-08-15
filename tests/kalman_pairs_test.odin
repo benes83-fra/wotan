@@ -1189,12 +1189,12 @@ kalman_pairs_auto_select_test :: proc(allocator: mem.Allocator = context.allocat
 	fmt.println("\n--- Step 4: Running Grid Search ---")
 
 	// Define search space
-	entry_thresholds := []f64{1.5, 2.0, 2.5}
-	exit_thresholds := []f64{0.0, 0.5}
-	process_noises := []f64{1e-6, 1e-5, 1e-4}
-	min_hold_days_list := []int{1, 3, 5}
-	cooldown_days_list := []int{0, 3}
-	transaction_cost := 0.001 // 10 bps per leg
+	entry_thresholds := []f64{1.5, 2.0, 2.5, 3.0}
+	exit_thresholds := []f64{0.5, 1.0} // ✅ REMOVED 0.0 to prevent immediate exits
+	process_noises := []f64{1e-6, 1e-5}
+	min_hold_days_list := []int{3, 5} // ✅ REMOVED 1 to force holding
+	cooldown_days_list := []int{3, 5} // ✅ REMOVED 0 to force cooldown
+	transaction_cost := 0.0001
 
 	best_config, best_sharpe := ml_fin.kalman_pairs_grid_search(
 		&aligned_df,
