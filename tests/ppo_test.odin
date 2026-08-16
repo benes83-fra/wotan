@@ -12,19 +12,26 @@ import "core:mem"
 ppo_trading_test :: proc(allocator: mem.Allocator = context.allocator) {
 	fmt.println("\n=== PPO Trading Test (Verbose) ===")
 
-	// ✅ Increased to 2500 steps to allow multiple PPO updates
 	n_days := 2500
 	prices := make([]f64, n_days, allocator)
 	volumes := make([]f64, n_days, allocator)
 	indicators := make([]f64, n_days, allocator)
 
 	price := 100.0
+	mean_price := 100.0
+
 	for i in 0 ..< n_days {
-		ret := rand.float64_normal(0.0, 0.02)
-		price *= (1.0 + ret)
+		// Ornstein-Uhlenbeck process: pulls price back to mean_price
+		reversion_speed := 0.05
+		noise := rand.float64_normal(0.0, 1.5)
+		price += reversion_speed * (mean_price - price) + noise
+
 		prices[i] = price
 		volumes[i] = rand.float64_uniform(1000.0, 10000.0)
-		indicators[i] = rand.float64_uniform(-1.0, 1.0)
+
+		// ✅ Predictive Indicator: Normalized distance from the mean
+		// The agent can learn: "If this is high, SELL. If low, BUY."
+		indicators[i] = (price - mean_price) / 10.0
 	}
 
 	env := ml_finance.new_trading_env(prices, volumes, indicators, 1, 10, 0.001, 10, allocator)
@@ -63,7 +70,7 @@ ppo_trading_test :: proc(allocator: mem.Allocator = context.allocator) {
 	fmt.printf("Buffer Size: %d | Update Threshold: 2048\n", agent.buffer.capacity)
 	fmt.println("---------------------\n")
 
-	n_episodes := 3 // ✅ Multiple episodes to see learning
+	n_episodes := 10 // ✅ Multiple episodes to see learning
 	update_count := 0
 
 	for ep in 0 ..< n_episodes {
@@ -119,7 +126,7 @@ ppo_trading_test :: proc(allocator: mem.Allocator = context.allocator) {
 			}
 
 			// ✅ PPO Update Logging
-			if agent.buffer.size >= 2048 {
+			if agent.buffer.size >= 512 {
 				update_count += 1
 				fmt.printf(
 					"  [Update #%d] Buffer full (%d samples). Running PPO update...\n",

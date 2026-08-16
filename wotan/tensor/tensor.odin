@@ -54,6 +54,7 @@ Op :: enum {
 	Reparameterize,
 	Exp,
 	Sqrt,
+	Clamp,
 	Log,
 	Div,
 	NormCDF,
@@ -524,6 +525,20 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 					if len(input.grad.data) > 0 {
 						l.axpy_simd(1.0, node.grad.data, input.grad.data)
 					}
+				}
+			}
+		case .Clamp:
+			a_in := node.inputs[0]
+			if a_in.requires_grad {
+				tensor_ensure_grad(a_in)
+				lo := f64(node.int_metadata[0]) / 1_000_000.0
+				hi := f64(node.int_metadata[1]) / 1_000_000.0
+				for i in 0 ..< len(a_in.grad.data) {
+					v := a_in.data.data[i]
+					if v >= lo && v <= hi {
+						a_in.grad.data[i] += node.grad.data[i]
+					}
+					// outside [lo,hi] → gradient is 0 (clamped)
 				}
 			}
 		case .SumDim1:
@@ -4255,6 +4270,28 @@ tensor_sum_dim1 :: proc(a: ^Tensor) -> ^Tensor {
 	if out.requires_grad {
 		out.op = .SumDim1
 		append(&out.inputs, a)
+	}
+	return out
+}
+// ===== add to ./wotan/tensor/tensor.odin =====
+
+// tensor_clamp: element-wise clamp to [lo, hi]
+tensor_clamp :: proc(a: ^Tensor, lo: f64, hi: f64) -> ^Tensor {
+	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
+	for i in 0 ..< len(a.data.data) {
+		v := a.data.data[i]
+		if v < lo {v = lo}
+		if v > hi {v = hi}
+		out_data.data[i] = v
+	}
+	out := tensor_new(out_data, a.requires_grad, a.allocator)
+	out.shape = a.shape
+	if out.requires_grad {
+		out.op = .Clamp // add .Clamp to the Op enum
+		append(&out.inputs, a)
+		// store lo/hi for backward
+		append(&out.int_metadata, int(lo * 1_000_000))
+		append(&out.int_metadata, int(hi * 1_000_000))
 	}
 	return out
 }
