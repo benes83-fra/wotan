@@ -379,7 +379,6 @@ ppo_agent_select_action :: proc(
 
 	return action, log_prob, value
 }
-
 compute_gae :: proc(
 	rewards: []f64,
 	values: []f64,
@@ -390,16 +389,24 @@ compute_gae :: proc(
 ) -> []f64 {
 	advantages := make([]f64, len(rewards), alloc)
 	last_gae := 0.0
+
 	for t := len(rewards) - 1; t >= 0; t -= 1 {
 		if dones[t] {
 			delta := rewards[t] - values[t]
 			last_gae = delta
 		} else {
-			delta := rewards[t] + gamma * values[t + 1] - values[t]
+			// ✅ FIXED: Safely check bounds before accessing t + 1
+			next_value := 0.0
+			if t + 1 < len(values) {
+				next_value = values[t + 1]
+			}
+
+			delta := rewards[t] + gamma * next_value - values[t]
 			last_gae = delta + gamma * gae_lambda * last_gae
 		}
 		advantages[t] = last_gae
 	}
+
 	return advantages
 }
 ppo_agent_update :: proc(
@@ -461,13 +468,15 @@ ppo_agent_update :: proc(
 				state := agent.buffer.states[idx]
 				action := agent.buffer.actions[idx]
 				old_log_prob := agent.buffer.old_log_probs[idx]
-				advantage := advantages[i]
-				target_return := returns[i]
+				// ✅ FIXED: Use idx instead of i
+				advantage := advantages[idx]
+				target_return := returns[idx]
 
 				logits := nn.sequential_forward(agent.actor, state)
 				probs := tensor_softmax(logits)
 				new_log_prob := tensor_categorical_log_prob(probs, action)
-				value := nn.sequential_forward(agent.critic, state).data.data[0]
+				val_tensor := nn.sequential_forward(agent.critic, state)
+				value := val_tensor.data.data[0]
 
 				ratio := math.exp_f64(new_log_prob - old_log_prob)
 				surr1 := ratio * advantage
@@ -498,6 +507,7 @@ ppo_agent_update :: proc(
 
 				tensor.tensor_free_graph(logits)
 				tensor.tensor_free_graph(probs)
+				tensor.tensor_free_graph(val_tensor)
 			}
 
 			batch_len := f64(end - start)
@@ -508,7 +518,6 @@ ppo_agent_update :: proc(
 			total_loss :=
 				policy_loss + agent.value_coef * value_loss - agent.entropy_coef * entropy_loss
 
-			// ✅ Accumulate stats for reporting
 			stats.policy_loss += policy_loss
 			stats.value_loss += value_loss
 			stats.entropy += entropy_loss
@@ -532,7 +541,6 @@ ppo_agent_update :: proc(
 
 	rollout_buffer_clear(agent.buffer)
 
-	// ✅ Average the accumulated stats before returning
 	if stats.n_updates > 0 {
 		stats.policy_loss /= f64(stats.n_updates)
 		stats.value_loss /= f64(stats.n_updates)

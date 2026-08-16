@@ -10,16 +10,21 @@ import "core:math/rand"
 import "core:mem"
 
 ppo_trading_test :: proc(allocator: mem.Allocator = context.allocator) {
-	fmt.println("\n=== PPO Trading Test ===")
+	fmt.println("\n=== PPO Trading Test (Verbose) ===")
 
-	// Dummy environment setup for testing
-	prices := make([]f64, 1000, allocator)
-	volumes := make([]f64, 1000, allocator)
-	indicators := make([]f64, 1000, allocator)
-	for i in 0 ..< 1000 {
-		prices[i] = 100.0 + f64(i) * 0.1 + rand.float64_normal(0.0, 1.0)
-		volumes[i] = 1000.0 + rand.float64_normal(0.0, 100.0)
-		indicators[i] = rand.float64_normal(0.0, 1.0)
+	// ✅ Increased to 2500 steps to allow multiple PPO updates
+	n_days := 2500
+	prices := make([]f64, n_days, allocator)
+	volumes := make([]f64, n_days, allocator)
+	indicators := make([]f64, n_days, allocator)
+
+	price := 100.0
+	for i in 0 ..< n_days {
+		ret := rand.float64_normal(0.0, 0.02)
+		price *= (1.0 + ret)
+		prices[i] = price
+		volumes[i] = rand.float64_uniform(1000.0, 10000.0)
+		indicators[i] = rand.float64_uniform(-1.0, 1.0)
 	}
 
 	env := ml_finance.new_trading_env(prices, volumes, indicators, 1, 10, 0.001, 10, allocator)
@@ -43,9 +48,10 @@ ppo_trading_test :: proc(allocator: mem.Allocator = context.allocator) {
 	defer ml_finance.ppo_agent_free(agent)
 
 	// ✅ Verbose Setup Info
+	fmt.println("\n--- Configuration ---")
 	fmt.printf(
 		"Environment: %d steps | Window: %d | Indicators: %d\n",
-		len(prices),
+		n_days,
 		env.window,
 		env.n_indicators,
 	)
@@ -54,79 +60,103 @@ ppo_trading_test :: proc(allocator: mem.Allocator = context.allocator) {
 		obs_dim,
 		action_space,
 	)
-	fmt.println("Starting episode...\n")
+	fmt.printf("Buffer Size: %d | Update Threshold: 2048\n", agent.buffer.capacity)
+	fmt.println("---------------------\n")
 
-	state := ml_finance.env_reset(&env.env)
-	ep_reward := 0.0
-	done := false
-	step_count := 0
+	n_episodes := 3 // ✅ Multiple episodes to see learning
+	update_count := 0
 
-	for !done {
-		state_tensor := tensor.tensor_new(
-			l.matrix_new(f64, 1, len(state.data), allocator),
-			false,
-			allocator,
-		)
-		copy(state_tensor.data.data, state.data)
-		state_tensor.shape = [4]int{1, len(state.data), 1, 1}
+	for ep in 0 ..< n_episodes {
+		fmt.printf("=== Episode %d/%d ===\n", ep + 1, n_episodes)
 
-		action, log_prob, value := ml_finance.ppo_agent_select_action(agent, state_tensor)
-		step := ml_finance.env_step(&env.env, action)
+		state := ml_finance.env_reset(&env.env)
+		ep_reward := 0.0
+		done := false
+		step_count := 0
 
-		ml_finance.rollout_buffer_add(
-			agent.buffer,
-			state_tensor,
-			action,
-			log_prob,
-			step.reward,
-			value,
-			step.done,
-		)
+		for !done {
+			// Create as row vector [1, features] for neural network compatibility
+			state_tensor := tensor.tensor_new(
+				l.matrix_new(f64, 1, len(state.data), allocator),
+				false,
+				allocator,
+			)
+			copy(state_tensor.data.data, state.data)
+			state_tensor.shape = [4]int{1, len(state.data), 1, 1}
 
-		ep_reward += step.reward
-		step_count += 1
-		done = step.done
+			action, log_prob, value := ml_finance.ppo_agent_select_action(agent, state_tensor)
+			step := ml_finance.env_step(&env.env, action)
 
-		// ✅ Periodic Step Logging (Changed %-6v to %-6d for action)
-		if step_count % 100 == 0 || done {
-			fmt.printf(
-				"  Step %04d | Action: %-6d | Reward: %+.4f | Inventory: %2d | Cash: $%10.2f | Ep Reward: %+.4f\n",
-				step_count,
+			ml_finance.rollout_buffer_add(
+				agent.buffer,
+				state_tensor,
 				action,
+				log_prob,
 				step.reward,
-				env.inventory,
-				env.cash,
-				ep_reward,
+				value,
+				step.done,
 			)
+
+			ep_reward += step.reward
+			step_count += 1
+			done = step.done
+
+			// ✅ Periodic Step Logging (every 500 steps)
+			if step_count % 500 == 0 {
+				action_str := "Hold"
+				if action == 1 {action_str = "Buy"}
+				if action == 2 {action_str = "Sell"}
+
+				fmt.printf(
+					"  Step %04d | Action: %-4s | Reward: %+.4f | Inventory: %2d | Cash: $%9.2f | Buffer: %d\n",
+					step_count,
+					action_str,
+					step.reward,
+					env.inventory,
+					env.cash,
+					agent.buffer.size,
+				)
+			}
+
+			// ✅ PPO Update Logging
+			if agent.buffer.size >= 2048 {
+				update_count += 1
+				fmt.printf(
+					"  [Update #%d] Buffer full (%d samples). Running PPO update...\n",
+					update_count,
+					agent.buffer.size,
+				)
+
+				stats := ml_finance.ppo_agent_update(agent, 10, 64)
+
+				fmt.printf(
+					"    Policy Loss: %.4f | Value Loss: %.4f | Entropy: %.4f | Total Loss: %.4f\n",
+					stats.policy_loss,
+					stats.value_loss,
+					stats.entropy,
+					stats.total_loss,
+				)
+			}
+
+			// ✅ REMOVED: tensor.tensor_free(state_tensor)
+			// The buffer takes ownership and will safely free it later in rollout_buffer_clear/free
+
+			state = step.observation
 		}
 
-		// ✅ Verbose Update Logging
-		if agent.buffer.size >= 2048 {
-			stats := ml_finance.ppo_agent_update(agent, 10, 64)
-			fmt.printf(
-				"  [Update] Buffer cleared. Policy Loss: %.4f | Value Loss: %.4f | Entropy: %.4f | Total Loss: %.4f\n",
-				stats.policy_loss,
-				stats.value_loss,
-				stats.entropy,
-				stats.total_loss,
-			)
-		}
-
-		tensor.tensor_free(state_tensor)
-		state = step.observation
+		// ✅ Episode Summary
+		fmt.println("\n--- Episode Summary ---")
+		fmt.printf("Total Steps:     %d\n", step_count)
+		fmt.printf("Final Cash:      $%.2f\n", env.cash)
+		fmt.printf("Final Inventory: %d\n", env.inventory)
+		fmt.printf("Episode Reward:  %.4f\n", ep_reward)
+		fmt.printf(
+			"Net PnL:         $%.2f (%.2f%%)\n",
+			env.cash - 100000.0,
+			(env.cash - 100000.0) / 100000.0 * 100.0,
+		)
+		fmt.println("=========================\n")
 	}
 
-	// ✅ Final Episode Summary
-	fmt.println("\n--- Episode Summary ---")
-	fmt.printf("Total Steps:     %d\n", step_count)
-	fmt.printf("Final Cash:      $%.2f\n", env.cash)
-	fmt.printf("Final Inventory: %d\n", env.inventory)
-	fmt.printf("Episode Reward:  %.4f\n", ep_reward)
-	fmt.printf("Initial Cash:    $100,000.00\n")
-	fmt.printf(
-		"Net PnL:         $%.2f (%.2f%%)\n",
-		env.cash - 100000.0,
-		(env.cash - 100000.0) / 100000.0 * 100.0,
-	)
-	fmt.println("=========================")
+	fmt.printf("Training complete! Total PPO updates: %d\n", update_count)
 }
