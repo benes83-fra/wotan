@@ -59,6 +59,7 @@ TradingEnv :: struct {
 	initial_cash:    f64,
 	inventory:       i32,
 	entry_price:     f64,
+	cooldown:        int,
 	transaction_fee: f64,
 	max_position:    i32,
 	allocator:       mem.Allocator,
@@ -70,6 +71,7 @@ trading_env_reset :: proc(env: ^Environment) -> Observation {
 	t_env.cash = 100000.0
 	t_env.inventory = 0
 	t_env.entry_price = 0.0
+	t_env.cooldown = 0
 	t_env.env.current_step = t_env.window
 	t_env.env.done = false
 
@@ -78,7 +80,7 @@ trading_env_reset :: proc(env: ^Environment) -> Observation {
 	start := t_env.env.current_step - t_env.window
 	if start < 0 {start = 0}
 
-	// ✅ FIX: Normalize prices and volumes relative to the start of the window
+	// ✅ Normalize prices and volumes relative to the start of the window
 	base_price := t_env.prices[start]
 	if base_price == 0 {base_price = 1.0}
 
@@ -107,12 +109,11 @@ trading_env_reset :: proc(env: ^Environment) -> Observation {
 
 trading_env_step :: proc(env: ^Environment, action: int) -> Step {
 	t_env := cast(^TradingEnv)env
+	t_env.cooldown += 1
 
 	// ✅ CRITICAL FIX: If the environment is already done, liquidate and return safely.
-	// This prevents accessing prices[current_step] when current_step == max_steps.
 	if t_env.env.done {
 		if t_env.inventory != 0 {
-			// Liquidate at the last available valid price
 			price := t_env.prices[len(t_env.prices) - 1]
 			if t_env.inventory > 0 {
 				t_env.cash += price * (1.0 - t_env.transaction_fee) * f64(t_env.inventory)
@@ -133,7 +134,6 @@ trading_env_step :: proc(env: ^Environment, action: int) -> Step {
 			}
 		}
 
-		// Already flat, just return a terminal step
 		obs_dim := t_env.window * (2 + t_env.n_indicators)
 		obs := make([]f64, obs_dim, t_env.allocator)
 		return Step {
@@ -153,7 +153,7 @@ trading_env_step :: proc(env: ^Environment, action: int) -> Step {
 	info := ""
 
 	// 2. Execute action
-	if action == 1 && t_env.inventory < t_env.max_position {
+	if action == 1 && t_env.inventory < t_env.max_position && t_env.cooldown >= 5 {
 		cost := price * (1.0 + t_env.transaction_fee)
 		if t_env.cash >= cost {
 			t_env.cash -= cost
@@ -162,8 +162,9 @@ trading_env_step :: proc(env: ^Environment, action: int) -> Step {
 				t_env.entry_price = price
 			}
 			info = "Bought"
+			t_env.cooldown = 0
 		}
-	} else if action == 2 && t_env.inventory > -t_env.max_position {
+	} else if action == 2 && t_env.inventory > -t_env.max_position && t_env.cooldown >= 5 {
 		revenue := price * (1.0 - t_env.transaction_fee)
 		t_env.cash += revenue
 		t_env.inventory -= 1
@@ -171,6 +172,7 @@ trading_env_step :: proc(env: ^Environment, action: int) -> Step {
 			profit := (price - t_env.entry_price) / t_env.entry_price
 			reward += profit * 0.1
 			info = fmt.tprintf("Sold, PnL=%.4f", profit)
+			t_env.cooldown = 0
 		}
 	}
 
@@ -178,9 +180,15 @@ trading_env_step :: proc(env: ^Environment, action: int) -> Step {
 	curr_value := t_env.cash + f64(t_env.inventory) * price
 
 	// 4. Reward is the normalized change in portfolio value
+	// ✅ FIX: The fee is ALREADY accounted for in curr_value vs prev_value!
+	// Do NOT subtract trade_cost again, or you penalize the agent 100x the actual fee.
 	reward += (curr_value - prev_value) / t_env.initial_cash
 
-	// 5. Tiny penalty for holding
+	// ✅ FIX: Small explicit penalty to discourage excessive churn
+	if action != 0 {
+		reward -= 0.00005
+	}
+	// 5. Tiny penalty for holding inventory
 	reward -= math.abs(f64(t_env.inventory)) * 0.00001
 
 	// 6. Build observation for the NEXT step
@@ -189,7 +197,6 @@ trading_env_step :: proc(env: ^Environment, action: int) -> Step {
 
 	start := max(0, t_env.env.current_step - t_env.window + 1)
 
-	// ✅ FIX: Normalize prices and volumes
 	base_price := t_env.prices[start]
 	if base_price == 0 {base_price = 1.0}
 
@@ -336,7 +343,7 @@ rollout_buffer_free :: proc(buf: ^RolloutBuffer) {
 PPOAgent :: struct {
 	actor:        ^nn.Sequential,
 	critic:       ^nn.Sequential,
-	optimizer:    nn.Adam, // ✅ FIXED: Use nn.Adam directly
+	optimizer:    nn.Adam,
 	gamma:        f64,
 	gae_lambda:   f64,
 	clip_epsilon: f64,
@@ -347,6 +354,7 @@ PPOAgent :: struct {
 	buffer:       ^RolloutBuffer,
 	allocator:    mem.Allocator,
 }
+
 PPOUpdateStats :: struct {
 	policy_loss: f64,
 	value_loss:  f64,
@@ -354,6 +362,7 @@ PPOUpdateStats :: struct {
 	total_loss:  f64,
 	n_updates:   int,
 }
+
 new_ppo_agent :: proc(
 	obs_dim: int,
 	action_space: int,
@@ -386,7 +395,6 @@ new_ppo_agent :: proc(
 	nn.sequential_add(agent.critic, nn.Activation.ReLU)
 	nn.sequential_add(agent.critic, nn.linear_layer_new(hidden_dim, 1, alloc))
 
-	// ✅ FIXED: Use nn.adam_new
 	agent.optimizer = nn.adam_new(lr, 0.9, 0.999, 1e-8, alloc)
 
 	nn.sequential_add_to_adam(agent.actor, &agent.optimizer)
@@ -406,7 +414,7 @@ ppo_agent_select_action :: proc(
 	value: f64,
 ) {
 	logits := nn.sequential_forward(agent.actor, state)
-	probs := tensor_softmax(logits)
+	probs := tensor.tensor_softmax(logits) // Uses the new autograd op
 	action = tensor_categorical_sample(probs)
 	log_prob = tensor_categorical_log_prob(probs, action)
 
@@ -419,6 +427,7 @@ ppo_agent_select_action :: proc(
 
 	return action, log_prob, value
 }
+
 compute_gae :: proc(
 	rewards: []f64,
 	values: []f64,
@@ -439,7 +448,6 @@ compute_gae :: proc(
 			if t + 1 < len(values) {
 				next_value = values[t + 1]
 			} else {
-				// ✅ FIX: Bootstrap with the last value in the buffer if episode is not done
 				next_value = values[len(values) - 1]
 			}
 
@@ -452,7 +460,6 @@ compute_gae :: proc(
 	return advantages
 }
 
-// ===== ./wotan/nn/ppo.odin — replace ppo_agent_update =====
 ppo_agent_update :: proc(
 	agent: ^PPOAgent,
 	epochs: int = 10,
@@ -489,7 +496,11 @@ ppo_agent_update :: proc(
 	for i in 0 ..< len(advantages) {
 		returns[i] = advantages[i] + agent.buffer.values[i]
 	}
-
+	max_return := 0.01
+	for i in 0 ..< len(returns) {
+		if returns[i] > max_return {returns[i] = max_return}
+		if returns[i] < -max_return {returns[i] = -max_return}
+	}
 	for _ in 0 ..< epochs {
 		indices := make([]int, agent.buffer.size, agent.allocator)
 		for i in 0 ..< agent.buffer.size {indices[i] = i}
@@ -530,12 +541,8 @@ ppo_agent_update :: proc(
 
 				// ── Actor forward ──
 				logits := nn.sequential_forward(agent.actor, state)
-				probs := tensor.tensor_softmax(logits) // Now correctly records graph!
+				probs := tensor.tensor_softmax(logits)
 
-				// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-				// ✅ FIX 1: Use CrossEntropy directly on logits!
-				// This guarantees correct gradients and numerical stability.
-				// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 				ce_loss := tensor.tensor_cross_entropy_loss(logits, []int{action})
 
 				new_log_prob := math.ln_f64(probs.data.data[action])
@@ -547,10 +554,15 @@ ppo_agent_update :: proc(
 					math.min(1.0 + agent.clip_epsilon, ratio),
 				)
 				surr2 := clamped_ratio * advantage
-				min_surr := math.min(surr1, surr2)
 
-				// The loss is -min_surr * ln(prob_a), which is exactly min_surr * CE_loss
-				policy_loss_tensor := tensor.tensor_scale(ce_loss, min_surr)
+				// ✅ CORRECT PPO GRADIENT TRICK:
+				// dL/d(logits) = A * ratio * d(ce_loss)/d(logits) when unclipped, 0 otherwise.
+				scale := 0.0
+				if surr1 <= surr2 {
+					scale = advantage * ratio
+				}
+
+				policy_loss_tensor := tensor.tensor_scale(ce_loss, scale)
 				total_policy_loss = tensor.tensor_add(total_policy_loss, policy_loss_tensor)
 
 				// ── Critic forward ──
@@ -565,17 +577,15 @@ ppo_agent_update :: proc(
 				total_value_loss = tensor.tensor_add(total_value_loss, value_loss_tensor)
 
 				// ── Entropy ──
-				// ✅ FIX 2: Use the proper Entropy Op!
 				entropy_tensor := tensor.tensor_entropy(probs)
-				// We want to MAXIMIZE entropy, so we MINIMIZE -entropy_coef * entropy
 				entropy_loss_tensor := tensor.tensor_scale(entropy_tensor, -agent.entropy_coef)
 				total_entropy = tensor.tensor_add(total_entropy, entropy_loss_tensor)
 
-				stats.policy_loss += -min_surr
+				stats.policy_loss += -math.min(surr1, surr2)
 				stats.value_loss += value_loss_tensor.data.data[0]
 				stats.entropy += entropy_tensor.data.data[0]
 				stats.total_loss +=
-					-min_surr +
+					-math.min(surr1, surr2) +
 					agent.value_coef * value_loss_tensor.data.data[0] -
 					agent.entropy_coef * entropy_tensor.data.data[0]
 				stats.n_updates += 1
@@ -615,38 +625,13 @@ ppo_agent_update :: proc(
 	}
 	return stats
 }
+
 ppo_agent_free :: proc(agent: ^PPOAgent) {
 	nn.sequential_free(agent.actor)
 	nn.sequential_free(agent.critic)
-	nn.adam_free(&agent.optimizer) // ✅ FIXED
+	nn.adam_free(&agent.optimizer)
 	rollout_buffer_free(agent.buffer)
 	free(agent, agent.allocator)
-}
-
-tensor_softmax :: proc(logits: ^tensor.Tensor) -> ^tensor.Tensor {
-	max_val := -math.F64_MAX
-	for v in logits.data.data {
-		if v > max_val {max_val = v}
-	}
-	exp_sum := 0.0
-	n := len(logits.data.data)
-	exps := make([]f64, n, context.allocator)
-
-	// ✅ FIXED: Use explicit index loop to avoid type inference issues
-	for i in 0 ..< n {
-		v := logits.data.data[i]
-		exps[i] = math.exp_f64(v - max_val)
-		exp_sum += exps[i]
-	}
-
-	out_data := l.matrix_new(f64, logits.data.rows, logits.data.cols, logits.allocator)
-	for i in 0 ..< n {
-		out_data.data[i] = exps[i] / exp_sum
-	}
-	delete(exps, context.allocator)
-	out := tensor.tensor_new(out_data, logits.requires_grad, logits.allocator)
-	out.shape = logits.shape
-	return out
 }
 
 tensor_categorical_sample :: proc(probs: ^tensor.Tensor) -> int {

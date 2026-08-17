@@ -367,6 +367,9 @@ ppo_trading_real_data_test :: proc(allocator: mem.Allocator = context.allocator)
 	defer delete(ep_pnls)
 
 	for ep in 0 ..< n_episodes {
+		if ep > 0 {
+			ml_finance.rollout_buffer_clear(agent.buffer)
+		}
 		state := ml_finance.env_reset(&env.env)
 		ep_reward := 0.0
 		done := false
