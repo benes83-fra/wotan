@@ -59,6 +59,8 @@ Op :: enum {
 	Div,
 	NormCDF,
 	SumDim1,
+	Softmax, // <--- ADD THIS
+	Entropy,
 }
 
 PoolParams :: struct {
@@ -2287,7 +2289,31 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 					}
 				}
 			}
-
+		case .Softmax:
+			a_in := node.inputs[0]
+			if a_in.requires_grad {
+				tensor_ensure_grad(a_in)
+				sum_p_grad := 0.0
+				for j in 0 ..< len(node.data.data) {
+					sum_p_grad += node.data.data[j] * node.grad.data[j]
+				}
+				for i in 0 ..< len(a_in.grad.data) {
+					a_in.grad.data[i] += node.data.data[i] * (node.grad.data[i] - sum_p_grad)
+				}
+			}
+		case .Entropy:
+			a_in := node.inputs[0]
+			if a_in.requires_grad {
+				tensor_ensure_grad(a_in)
+				scalar_grad := node.grad.data[0]
+				for i in 0 ..< len(a_in.grad.data) {
+					p := a_in.data.data[i]
+					if p > 1e-10 {
+						// d(-sum p ln p)/dp = -(1 + ln p)
+						a_in.grad.data[i] += scalar_grad * (-(1.0 + math.ln_f64(p)))
+					}
+				}
+			}
 		case .Conv2d:
 			input_in := node.inputs[0]
 			weight_in := node.inputs[1]
@@ -4292,6 +4318,49 @@ tensor_clamp :: proc(a: ^Tensor, lo: f64, hi: f64) -> ^Tensor {
 		// store lo/hi for backward
 		append(&out.int_metadata, int(lo * 1_000_000))
 		append(&out.int_metadata, int(hi * 1_000_000))
+	}
+	return out
+}
+tensor_softmax :: proc(logits: ^Tensor) -> ^Tensor {
+	max_val := -math.F64_MAX
+	for v in logits.data.data {
+		if v > max_val {max_val = v}
+	}
+	exp_sum := 0.0
+	n := len(logits.data.data)
+	exps := make([]f64, n, context.allocator)
+	for i in 0 ..< n {
+		exps[i] = math.exp_f64(logits.data.data[i] - max_val)
+		exp_sum += exps[i]
+	}
+	out_data := l.matrix_new(f64, logits.data.rows, logits.data.cols, logits.allocator)
+	for i in 0 ..< n {
+		out_data.data[i] = exps[i] / exp_sum
+	}
+	delete(exps, context.allocator)
+	out := tensor_new(out_data, logits.requires_grad, logits.allocator)
+	out.shape = logits.shape
+	if out.requires_grad {
+		out.op = .Softmax
+		append(&out.inputs, logits)
+	}
+	return out
+}
+
+tensor_entropy :: proc(a: ^Tensor) -> ^Tensor {
+	entropy_val := 0.0
+	for i in 0 ..< len(a.data.data) {
+		p := a.data.data[i]
+		if p > 1e-10 {
+			entropy_val += -p * math.ln_f64(p)
+		}
+	}
+	out_data := l.matrix_new(f64, 1, 1, a.allocator)
+	out_data.data[0] = entropy_val
+	out := tensor_new(out_data, a.requires_grad, a.allocator)
+	if out.requires_grad {
+		out.op = .Entropy
+		append(&out.inputs, a)
 	}
 	return out
 }

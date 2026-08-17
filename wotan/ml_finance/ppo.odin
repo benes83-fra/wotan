@@ -66,7 +66,7 @@ TradingEnv :: struct {
 
 trading_env_reset :: proc(env: ^Environment) -> Observation {
 	t_env := cast(^TradingEnv)env
-	t_env.initial_cash = 100000.0 //
+	t_env.initial_cash = 100000.0
 	t_env.cash = 100000.0
 	t_env.inventory = 0
 	t_env.entry_price = 0.0
@@ -74,18 +74,31 @@ trading_env_reset :: proc(env: ^Environment) -> Observation {
 	t_env.env.done = false
 
 	obs := make([]f64, t_env.window * (2 + t_env.n_indicators), t_env.allocator)
+
+	start := t_env.env.current_step - t_env.window
+	if start < 0 {start = 0}
+
+	// ✅ FIX: Normalize prices and volumes relative to the start of the window
+	base_price := t_env.prices[start]
+	if base_price == 0 {base_price = 1.0}
+
+	base_vol := t_env.volumes[start]
+	if base_vol == 0 {base_vol = 1.0}
+
 	idx := 0
 	for w in 0 ..< t_env.window {
-		obs[idx] = t_env.prices[t_env.env.current_step - t_env.window + w]
+		obs[idx] = (t_env.prices[start + w] / base_price) - 1.0
 		idx += 1
 	}
 	for w in 0 ..< t_env.window {
-		obs[idx] = t_env.volumes[t_env.env.current_step - t_env.window + w]
+		obs[idx] = (t_env.volumes[start + w] / base_vol) - 1.0
 		idx += 1
 	}
 	for w in 0 ..< t_env.window {
-		obs[idx] =
-			t_env.indicators[(t_env.env.current_step - t_env.window + w) * t_env.n_indicators]
+		idx_in_data := (start + w) * t_env.n_indicators
+		if idx_in_data < len(t_env.indicators) {
+			obs[idx] = t_env.indicators[idx_in_data] // Assumes indicators are already scaled
+		}
 		idx += 1
 	}
 
@@ -173,20 +186,28 @@ trading_env_step :: proc(env: ^Environment, action: int) -> Step {
 	// 6. Build observation for the NEXT step
 	obs_dim := t_env.window * (2 + t_env.n_indicators)
 	obs := make([]f64, obs_dim, t_env.allocator)
-	idx := 0
-	// +1 because current_step was already incremented by env_step
+
 	start := max(0, t_env.env.current_step - t_env.window + 1)
+
+	// ✅ FIX: Normalize prices and volumes
+	base_price := t_env.prices[start]
+	if base_price == 0 {base_price = 1.0}
+
+	base_vol := t_env.volumes[start]
+	if base_vol == 0 {base_vol = 1.0}
+
+	idx := 0
 	for w in 0 ..< t_env.window {
 		idx_in_data := start + w
 		if idx_in_data < len(t_env.prices) {
-			obs[idx] = t_env.prices[idx_in_data]
+			obs[idx] = (t_env.prices[idx_in_data] / base_price) - 1.0
 		}
 		idx += 1
 	}
 	for w in 0 ..< t_env.window {
 		idx_in_data := start + w
 		if idx_in_data < len(t_env.volumes) {
-			obs[idx] = t_env.volumes[idx_in_data]
+			obs[idx] = (t_env.volumes[idx_in_data] / base_vol) - 1.0
 		}
 		idx += 1
 	}
@@ -414,10 +435,12 @@ compute_gae :: proc(
 			delta := rewards[t] - values[t]
 			last_gae = delta
 		} else {
-			// ✅ FIXED: Safely check bounds before accessing t + 1
 			next_value := 0.0
 			if t + 1 < len(values) {
 				next_value = values[t + 1]
+			} else {
+				// ✅ FIX: Bootstrap with the last value in the buffer if episode is not done
+				next_value = values[len(values) - 1]
 			}
 
 			delta := rewards[t] + gamma * next_value - values[t]
@@ -430,7 +453,6 @@ compute_gae :: proc(
 }
 
 // ===== ./wotan/nn/ppo.odin — replace ppo_agent_update =====
-
 ppo_agent_update :: proc(
 	agent: ^PPOAgent,
 	epochs: int = 10,
@@ -487,21 +509,16 @@ ppo_agent_update :: proc(
 				true,
 				agent.allocator,
 			)
-			total_policy_loss.data.data[0] = 0.0
-
 			total_value_loss := tensor.tensor_new(
 				l.matrix_new(f64, 1, 1, agent.allocator),
 				true,
 				agent.allocator,
 			)
-			total_value_loss.data.data[0] = 0.0
-
 			total_entropy := tensor.tensor_new(
 				l.matrix_new(f64, 1, 1, agent.allocator),
 				true,
 				agent.allocator,
 			)
-			total_entropy.data.data[0] = 0.0
 
 			for i in 0 ..< b_len {
 				idx := indices[start + i]
@@ -513,29 +530,15 @@ ppo_agent_update :: proc(
 
 				// ── Actor forward ──
 				logits := nn.sequential_forward(agent.actor, state)
-				probs := tensor_softmax(logits)
+				probs := tensor.tensor_softmax(logits) // Now correctly records graph!
 
 				// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-				// ✅ FIX: Extract action prob via one-hot mask
-				//   (keeps the autograd graph intact)
+				// ✅ FIX 1: Use CrossEntropy directly on logits!
+				// This guarantees correct gradients and numerical stability.
 				// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-				one_hot_data := l.matrix_new(
-					f64,
-					probs.data.rows,
-					probs.data.cols,
-					agent.allocator,
-				)
-				one_hot_data.data[action] = 1.0
-				one_hot := tensor.tensor_new(one_hot_data, false, agent.allocator)
-				one_hot.owned_by_graph = true
+				ce_loss := tensor.tensor_cross_entropy_loss(logits, []int{action})
 
-				masked_probs := tensor.tensor_mul(probs, one_hot)
-				action_prob := tensor.tensor_sum(masked_probs)
-				// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-				new_log_prob_tensor := tensor.tensor_log(action_prob)
-				new_log_prob := new_log_prob_tensor.data.data[0]
-
+				new_log_prob := math.ln_f64(probs.data.data[action])
 				ratio := math.exp_f64(new_log_prob - old_log_prob)
 
 				surr1 := ratio * advantage
@@ -546,11 +549,9 @@ ppo_agent_update :: proc(
 				surr2 := clamped_ratio * advantage
 				min_surr := math.min(surr1, surr2)
 
-				policy_loss_scalar := -min_surr
-
-				policy_loss_tensor := tensor.tensor_scale(action_prob, policy_loss_scalar)
-				policy_loss_sum := tensor.tensor_sum(policy_loss_tensor)
-				total_policy_loss = tensor.tensor_add(total_policy_loss, policy_loss_sum)
+				// The loss is -min_surr * ln(prob_a), which is exactly min_surr * CE_loss
+				policy_loss_tensor := tensor.tensor_scale(ce_loss, min_surr)
+				total_policy_loss = tensor.tensor_add(total_policy_loss, policy_loss_tensor)
 
 				// ── Critic forward ──
 				value_tensor := nn.sequential_forward(agent.critic, state)
@@ -564,30 +565,19 @@ ppo_agent_update :: proc(
 				total_value_loss = tensor.tensor_add(total_value_loss, value_loss_tensor)
 
 				// ── Entropy ──
-				entropy_val := 0.0
-				for j in 0 ..< len(probs.data.data) {
-					p := probs.data.data[j]
-					if p > 1e-10 {
-						entropy_val += -p * math.ln_f64(p)
-					}
-				}
-				entropy_tensor := tensor.tensor_new(
-					l.matrix_new(f64, 1, 1, agent.allocator),
-					true,
-					agent.allocator,
-				)
-				entropy_tensor.data.data[0] = entropy_val
-				entropy_scaled := tensor.tensor_scale(probs, entropy_val)
-				entropy_sum := tensor.tensor_sum(entropy_scaled)
-				total_entropy = tensor.tensor_add(total_entropy, entropy_sum)
+				// ✅ FIX 2: Use the proper Entropy Op!
+				entropy_tensor := tensor.tensor_entropy(probs)
+				// We want to MAXIMIZE entropy, so we MINIMIZE -entropy_coef * entropy
+				entropy_loss_tensor := tensor.tensor_scale(entropy_tensor, -agent.entropy_coef)
+				total_entropy = tensor.tensor_add(total_entropy, entropy_loss_tensor)
 
-				stats.policy_loss += policy_loss_scalar
+				stats.policy_loss += -min_surr
 				stats.value_loss += value_loss_tensor.data.data[0]
-				stats.entropy += entropy_val
+				stats.entropy += entropy_tensor.data.data[0]
 				stats.total_loss +=
-					policy_loss_scalar +
+					-min_surr +
 					agent.value_coef * value_loss_tensor.data.data[0] -
-					agent.entropy_coef * entropy_val
+					agent.entropy_coef * entropy_tensor.data.data[0]
 				stats.n_updates += 1
 			}
 
@@ -604,27 +594,8 @@ ppo_agent_update :: proc(
 			total_value_loss = tensor.tensor_mul(total_value_loss, inv_batch)
 			total_entropy = tensor.tensor_mul(total_entropy, inv_batch)
 
-			value_coef_tensor := tensor.tensor_new(
-				l.matrix_new(f64, 1, 1, agent.allocator),
-				false,
-				agent.allocator,
-			)
-			value_coef_tensor.data.data[0] = agent.value_coef
-			value_coef_tensor.owned_by_graph = true
-
-			entropy_coef_tensor := tensor.tensor_new(
-				l.matrix_new(f64, 1, 1, agent.allocator),
-				false,
-				agent.allocator,
-			)
-			entropy_coef_tensor.data.data[0] = agent.entropy_coef
-			entropy_coef_tensor.owned_by_graph = true
-
-			value_scaled := tensor.tensor_mul(total_value_loss, value_coef_tensor)
-			entropy_scaled := tensor.tensor_mul(total_entropy, entropy_coef_tensor)
-
-			total_loss := tensor.tensor_add(total_policy_loss, value_scaled)
-			total_loss = tensor.tensor_sub(total_loss, entropy_scaled)
+			total_loss := tensor.tensor_add(total_policy_loss, total_value_loss)
+			total_loss = tensor.tensor_add(total_loss, total_entropy)
 
 			tensor.tensor_backward(total_loss)
 			nn.adam_step(&agent.optimizer)
