@@ -425,14 +425,14 @@ ppo_agent_select_action :: proc(
 	value: f64,
 ) {
 	logits := nn.sequential_forward(agent.actor, state)
-	probs := tensor.tensor_softmax(logits) // Uses the new autograd op
+	probs := tensor.tensor_softmax(logits)
 	action = tensor_categorical_sample(probs)
 	log_prob = tensor_categorical_log_prob(probs, action)
-
 	val_tensor := nn.sequential_forward(agent.critic, state)
 	value = val_tensor.data.data[0]
 
-	tensor.tensor_free_graph(logits)
+	// ✅ FIX: probs depends on logits, so freeing probs frees logits too.
+	// val_tensor is a separate graph. Do NOT free logits separately.
 	tensor.tensor_free_graph(probs)
 	tensor.tensor_free_graph(val_tensor)
 
