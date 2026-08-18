@@ -155,23 +155,34 @@ trading_env_step :: proc(env: ^Environment, action: int) -> Step {
 	// 2. Execute action
 	if action == 1 && t_env.inventory < t_env.max_position && t_env.cooldown >= 5 {
 		cost := price * (1.0 + t_env.transaction_fee)
-		if t_env.cash >= cost {
-			t_env.cash -= cost
-			t_env.inventory += 1
-			if t_env.inventory == 1 {
+
+		// ✅ FIX: Allow block trading (buy up to 10 shares at once if cash allows)
+		// This helps deploy capital faster without requiring 50 sequential 'Buy' actions
+		trade_size := 1
+		if t_env.cash > cost * 10 {trade_size = 10}
+
+		if t_env.cash >= cost * f64(trade_size) {
+			t_env.cash -= cost * f64(trade_size)
+			t_env.inventory += i32(trade_size)
+			if t_env.inventory == i32(trade_size) {
 				t_env.entry_price = price
 			}
-			info = "Bought"
+			info = fmt.tprintf("Bought %d", trade_size)
 			t_env.cooldown = 0
 		}
 	} else if action == 2 && t_env.inventory > -t_env.max_position && t_env.cooldown >= 5 {
 		revenue := price * (1.0 - t_env.transaction_fee)
-		t_env.cash += revenue
-		t_env.inventory -= 1
-		if t_env.inventory == 0 {
-			profit := (price - t_env.entry_price) / t_env.entry_price
-			reward += profit * 0.1
-			info = fmt.tprintf("Sold, PnL=%.4f", profit)
+
+		// ✅ FIX: Sell block
+		trade_size := min(t_env.inventory, 10)
+		if trade_size > 0 {
+			t_env.cash += revenue * f64(trade_size)
+			t_env.inventory -= i32(trade_size)
+			if t_env.inventory == 0 {
+				profit := (price - t_env.entry_price) / t_env.entry_price
+				reward += profit * 0.1
+				info = fmt.tprintf("Sold %d, PnL=%.4f", trade_size, profit)
+			}
 			t_env.cooldown = 0
 		}
 	}
@@ -186,7 +197,7 @@ trading_env_step :: proc(env: ^Environment, action: int) -> Step {
 
 	// ✅ FIX: Small explicit penalty to discourage excessive churn
 	if action != 0 {
-		reward -= 0.00005
+		reward -= t_env.transaction_fee * 2.0
 	}
 	// 5. Tiny penalty for holding inventory
 	reward -= math.abs(f64(t_env.inventory)) * 0.00001

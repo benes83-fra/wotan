@@ -319,7 +319,7 @@ ppo_trading_real_data_test :: proc(allocator: mem.Allocator = context.allocator)
 	fmt.println("\n[3/5] Creating environment and PPO agent...")
 
 	transaction_fee := 0.001 // 10 bps per trade
-	max_position: i32 = 10
+	max_position: i32 = 200
 	env := ml_finance.new_trading_env(
 		prices,
 		volumes,
@@ -338,12 +338,12 @@ ppo_trading_real_data_test :: proc(allocator: mem.Allocator = context.allocator)
 	agent := ml_finance.new_ppo_agent(
 		obs_dim,
 		action_space,
-		64, // hidden_dim
+		128, // hidden_dim
 		0.99, // gamma
 		0.95, // gae_lambda
 		0.2, // clip_epsilon
 		0.5, // value_coef
-		0.01, // entropy_coef
+		0.05, // entropy_coef
 		3e-4, // learning_rate
 		allocator,
 	)
@@ -488,5 +488,253 @@ ppo_trading_real_data_test :: proc(allocator: mem.Allocator = context.allocator)
 	fmt.printf("  Avg PnL/Episode:   $%+9.2f (%+.2f%%)\n", avg_pnl, avg_pnl / 1000.0)
 	fmt.printf("  Best PnL:          $%+9.2f\n", best_pnl)
 	fmt.printf("  Sharpe (approx):   %.3f\n", sharpe)
+	fmt.println("======================================================================")
+}
+
+// ============================================================================
+// 3. WALK-FORWARD VALIDATION TEST
+// ============================================================================
+WalkForwardWindow :: struct {
+	train_start:  int,
+	train_end:    int,
+	test_start:   int,
+	test_end:     int,
+	window_index: int,
+}
+
+WalkForwardResult :: struct {
+	window_index:     int,
+	train_pnl:        f64,
+	test_pnl:         f64,
+	test_trades:      int,
+	test_max_dd:      f64,
+	walk_forward_eff: f64,
+}
+
+build_walk_forward_windows :: proc(
+	n_days, train_len, test_len: int,
+	alloc: mem.Allocator,
+) -> []WalkForwardWindow {
+	n_windows := 0
+	test_start := train_len
+	for test_start < n_days {
+		test_end := min(test_start + test_len, n_days)
+		if test_end - test_start < test_len / 2 {break}
+		n_windows += 1
+		test_start += test_len
+	}
+	if n_windows == 0 {return make([]WalkForwardWindow, 0, alloc)}
+
+	windows := make([]WalkForwardWindow, n_windows, alloc)
+	test_start = train_len
+	for w in 0 ..< n_windows {
+		test_end := min(test_start + test_len, n_days)
+		if test_end - test_start < test_len / 2 {break}
+		train_start := max(0, test_start - train_len)
+		windows[w] = WalkForwardWindow{train_start, test_start, test_start, test_end, w}
+		test_start += test_len
+	}
+	return windows
+}
+
+walk_forward_validation_test :: proc(allocator: mem.Allocator = context.allocator) {
+	fmt.println("\n======================================================================")
+	fmt.println("    WALK-FORWARD VALIDATION: PPO TRADING AGENT")
+	fmt.println("======================================================================")
+
+	symbol := "SPY"
+	spy_df := net.read_yahoo(symbol, .Daily, .FiveYears, allocator)
+	defer w.destroy_dataframe(&spy_df)
+	if spy_df.rows < 400 {return}
+
+	n_days := spy_df.rows
+	close_col := w.column(&spy_df, "Close")
+	volume_col := w.column(&spy_df, "Volume")
+
+	all_prices := make([]f64, n_days, allocator)
+	all_volumes := make([]f64, n_days, allocator)
+	defer {delete(all_prices, allocator); delete(all_volumes, allocator)}
+
+	for i in 0 ..< n_days {
+		all_prices[i], _ = w.column_at_float(close_col, i)
+		all_volumes[i], _ = w.column_at_float(volume_col, i)
+	}
+
+	// ✅ Compute features ONCE globally
+	indicators, n_indicators := ml_finance.compute_trading_features(
+		all_prices,
+		all_volumes,
+		allocator,
+	)
+	defer delete(indicators, allocator)
+
+	window := 10
+	train_len := 252 // 1 year
+	test_len := 63 // 1 quarter
+
+	windows := build_walk_forward_windows(n_days, train_len, test_len, allocator)
+	defer delete(windows, allocator)
+
+	fmt.printf(
+		"Data: %d days | Train: %d | Test: %d | Windows: %d\n",
+		n_days,
+		train_len,
+		test_len,
+		len(windows),
+	)
+
+	results := make([dynamic]WalkForwardResult, 0, allocator)
+	defer delete(results)
+
+	obs_dim := window * (2 + n_indicators)
+
+	for w_idx in 0 ..< len(windows) {
+		win := windows[w_idx]
+
+		// Slice arrays
+		train_prices := all_prices[win.train_start:win.train_end]
+		train_volumes := all_volumes[win.train_start:win.train_end]
+		train_indicators := indicators[win.train_start * n_indicators:win.train_end * n_indicators]
+
+		test_prices := all_prices[win.test_start:win.test_end]
+		test_volumes := all_volumes[win.test_start:win.test_end]
+		test_indicators := indicators[win.test_start * n_indicators:win.test_end * n_indicators]
+
+		train_env := ml_finance.new_trading_env(
+			train_prices,
+			train_volumes,
+			train_indicators,
+			n_indicators,
+			window,
+			0.001,
+			10,
+			allocator,
+		)
+		test_env := ml_finance.new_trading_env(
+			test_prices,
+			test_volumes,
+			test_indicators,
+			n_indicators,
+			window,
+			0.001,
+			10,
+			allocator,
+		)
+		w_agent := ml_finance.new_ppo_agent(
+			obs_dim,
+			3,
+			64,
+			0.99,
+			0.95,
+			0.2,
+			0.5,
+			0.01,
+			3e-4,
+			allocator,
+		)
+
+		// --- TRAIN ---
+		for ep in 0 ..< 3 {
+			state := ml_finance.env_reset(&train_env.env)
+			done := false
+			for !done {
+				state_tensor := tensor.tensor_new(
+					l.matrix_new(f64, 1, len(state.data), allocator),
+					false,
+					allocator,
+				)
+				copy(state_tensor.data.data, state.data)
+				state_tensor.shape = [4]int{1, len(state.data), 1, 1}
+
+				action, log_prob, value := ml_finance.ppo_agent_select_action(
+					w_agent,
+					state_tensor,
+				)
+				step := ml_finance.env_step(&train_env.env, action)
+				ml_finance.rollout_buffer_add(
+					w_agent.buffer,
+					state_tensor,
+					action,
+					log_prob,
+					step.reward,
+					value,
+					step.done,
+				)
+
+				done = step.done
+				state = step.observation
+				if w_agent.buffer.size >= 256 {_ = ml_finance.ppo_agent_update(w_agent, 5, 64)}
+			}
+		}
+		if w_agent.buffer.size >= 64 {_ = ml_finance.ppo_agent_update(w_agent, 5, 64)}
+		is_pnl := train_env.cash - 100000.0
+
+		// --- TEST ---
+		state := ml_finance.env_reset(&test_env.env)
+		done := false
+		trades := 0
+		prev_inv := test_env.inventory
+		peak := 100000.0
+		max_dd := 0.0
+
+		for !done {
+			state_tensor := tensor.tensor_new(
+				l.matrix_new(f64, 1, len(state.data), allocator),
+				false,
+				allocator,
+			)
+			copy(state_tensor.data.data, state.data)
+			state_tensor.shape = [4]int{1, len(state.data), 1, 1}
+
+			action, _, _ := ml_finance.ppo_agent_select_action(w_agent, state_tensor)
+			step := ml_finance.env_step(&test_env.env, action)
+
+			if test_env.cash > peak {peak = test_env.cash}
+			dd := (peak - test_env.cash) / peak
+			if dd > max_dd {max_dd = dd}
+
+			if test_env.inventory != prev_inv {
+				trades += 1
+				prev_inv = test_env.inventory
+			}
+			done = step.done
+			state = step.observation
+		}
+
+		test_pnl := test_env.cash - 100000.0
+		wfe := 0.0
+		if math.abs(is_pnl) > 1e-6 {wfe = test_pnl / is_pnl}
+
+		append(
+			&results,
+			WalkForwardResult{win.window_index, is_pnl, test_pnl, trades, max_dd, wfe},
+		)
+		fmt.printf(
+			"Win %2d | Train PnL: $%+8.2f | Test PnL: $%+8.2f | Trades: %3d | MaxDD: %5.2f%% | WFE: %5.2f\n",
+			win.window_index,
+			is_pnl,
+			test_pnl,
+			trades,
+			max_dd * 100.0,
+			wfe,
+		)
+
+		ml_finance.trading_env_free(train_env)
+		ml_finance.trading_env_free(test_env)
+		ml_finance.ppo_agent_free(w_agent)
+	}
+
+	fmt.println("\n--- Walk-Forward Summary ---")
+	total_test := 0.0
+	profits := 0
+	for r in results {
+		total_test += r.test_pnl
+		if r.test_pnl > 0 {profits += 1}
+	}
+	fmt.printf(
+		"Avg OOS PnL: $%+.2f | Win Rate: %.1f%%\n",
+		total_test / f64(len(results)),
+		f64(profits) / f64(len(results)) * 100.0,
+	)
 	fmt.println("======================================================================")
 }
