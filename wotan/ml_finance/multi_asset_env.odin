@@ -93,7 +93,15 @@ multi_asset_env_step :: proc(env: ^Environment, action: int) -> Step {
 	for a in 0 ..< t_env.n_assets {
 		curr_value += t_env.positions[a] * curr_prices[a]
 	}
-
+	if curr_value < t_env.initial_cash * 0.10 {
+		t_env.env.done = true
+		// Liquidate everything to cash for the final observation
+		for a in 0 ..< t_env.n_assets {
+			t_env.cash += t_env.positions[a] * curr_prices[a] * (1.0 - t_env.transaction_fee)
+			t_env.positions[a] = 0.0
+		}
+		curr_value = t_env.cash
+	}
 	// 5. Update peak and calculate drawdown
 	if curr_value > t_env.peak_cash {
 		t_env.peak_cash = curr_value
@@ -124,6 +132,7 @@ build_multi_asset_obs :: proc(
 	curr_prices: []f64,
 	total_value: f64,
 ) -> []f64 {
+	total_value := total_value
 	obs_dim := t_env.env.obs_dim
 	obs := make([]f64, obs_dim, t_env.allocator)
 	idx := 0
@@ -170,13 +179,20 @@ build_multi_asset_obs :: proc(
 	}
 
 	// 2. Current Portfolio State (Crucial for Multi-Asset!)
-	// The agent MUST know its current weights to decide if it needs to rebalance
+	// ✅ FIX: Prevent division by zero and NaN propagation
+	if total_value < 1.0 {
+		total_value = 1.0
+	}
+
 	for a in 0 ..< t_env.n_assets {
 		asset_val := t_env.positions[a] * curr_prices[a]
-		obs[idx] = asset_val / total_value
+		weight := asset_val / total_value
+		// Clamp weights to [-2.0, 2.0] to prevent NaN/Inf from breaking the NN
+		obs[idx] = math.max(-2.0, math.min(2.0, weight))
 		idx += 1
 	}
-	obs[idx] = t_env.cash / total_value // Cash ratio
+	cash_ratio := t_env.cash / total_value
+	obs[idx] = math.max(-2.0, math.min(2.0, cash_ratio))
 	idx += 1
 
 	return obs

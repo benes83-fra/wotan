@@ -175,13 +175,21 @@ ppo_multi_asset_test :: proc(allocator: mem.Allocator = context.allocator) {
 			}
 		}
 
-		pnl := env.cash - 100000.0
+		// ✅ FIX: Calculate true final portfolio value (Cash + Open Positions)
+		final_val := env.cash
+		last_step_idx := n_days - 1
+		for a in 0 ..< n_assets {
+			last_price := prices[last_step_idx * n_assets + a]
+			final_val += env.positions[a] * last_price
+		}
+
+		pnl := final_val - 100000.0
 		fmt.printf(
-			"Ep %2d/%2d | PnL: $%+9.2f (%+.2f%%) | Cash: $%.2f | Pos: [%.2f, %.2f]\n",
+			"Ep %2d/%2d | PnL: $%+9.2f (%+.2f%%) | Cash: $%9.2f | Pos: [%6.2f, %6.2f]\n",
 			ep + 1,
 			n_episodes,
 			pnl,
-			pnl / 1000.0,
+			(pnl / 100000.0) * 100.0,
 			env.cash,
 			env.positions[0],
 			env.positions[1],
