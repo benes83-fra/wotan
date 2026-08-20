@@ -543,6 +543,8 @@ main :: proc() {
 	test.kalman_pairs_auto_select_test(context.temp_allocator)
 	test.ppo_trading_test(context.temp_allocator)
 	test.ppo_trading_real_data_test(context.temp_allocator)
+	test.walk_forward_validation_test(context.temp_allocator)
+	test.ppo_multi_asset_test(context.temp_allocator)
 	fmt.println("Demo End")
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)

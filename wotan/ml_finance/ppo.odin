@@ -56,6 +56,7 @@ TradingEnv :: struct {
 	n_indicators:    int,
 	window:          int,
 	cash:            f64,
+	peak_cash:       f64, // <--- ADD THIS FIELD
 	initial_cash:    f64,
 	inventory:       i32,
 	entry_price:     f64,
@@ -69,6 +70,7 @@ trading_env_reset :: proc(env: ^Environment) -> Observation {
 	t_env := cast(^TradingEnv)env
 	t_env.initial_cash = 100000.0
 	t_env.cash = 100000.0
+	t_env.peak_cash = 100000.0
 	t_env.inventory = 0
 	t_env.entry_price = 0.0
 	t_env.cooldown = 0
@@ -189,7 +191,15 @@ trading_env_step :: proc(env: ^Environment, action: int) -> Step {
 
 	// 3. Calculate portfolio value AFTER action
 	curr_value := t_env.cash + f64(t_env.inventory) * price
+	if curr_value > t_env.peak_cash {
+		t_env.peak_cash = curr_value
+	}
 
+	// Calculate drawdown (0.0 means no drawdown, 0.1 means 10% drawdown)
+	drawdown := 0.0
+	if t_env.peak_cash > 0.0 {
+		drawdown = (t_env.peak_cash - curr_value) / t_env.peak_cash
+	}
 	// 4. Reward is the normalized change in portfolio value
 	// ✅ FIX: The fee is ALREADY accounted for in curr_value vs prev_value!
 	// Do NOT subtract trade_cost again, or you penalize the agent 100x the actual fee.
@@ -201,7 +211,8 @@ trading_env_step :: proc(env: ^Environment, action: int) -> Step {
 	}
 	// 5. Tiny penalty for holding inventory
 	reward -= math.abs(f64(t_env.inventory)) * 0.00001
-
+	drawdown_penalty_weight := 2.0
+	reward -= drawdown_penalty_weight * drawdown
 	// 6. Build observation for the NEXT step
 	obs_dim := t_env.window * (2 + t_env.n_indicators)
 	obs := make([]f64, obs_dim, t_env.allocator)
