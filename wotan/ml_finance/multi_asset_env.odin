@@ -70,6 +70,7 @@ multi_asset_env_step :: proc(env: ^Environment, action: int) -> Step {
 	}
 
 	// 3. Execute Rebalancing Action
+	total_fees_paid := 0.0
 	if action >= 0 && action < len(t_env.action_defs) {
 		target_weights := t_env.action_defs[action].weights
 
@@ -78,12 +79,13 @@ multi_asset_env_step :: proc(env: ^Environment, action: int) -> Step {
 			curr_val := t_env.positions[a] * curr_prices[a]
 			delta_val := target_val - curr_val
 
-			// Threshold ($50) to prevent churning on tiny weight drifts
-			if math.abs(delta_val) > 50.0 {
+			// ✅ FIX: Increased threshold to $500 to prevent daily micro-churning
+			if math.abs(delta_val) > 500.0 {
 				shares := delta_val / curr_prices[a]
 				fee := math.abs(delta_val) * t_env.transaction_fee
 				t_env.positions[a] += shares
 				t_env.cash -= delta_val + fee
+				total_fees_paid += fee
 			}
 		}
 	}
@@ -102,6 +104,7 @@ multi_asset_env_step :: proc(env: ^Environment, action: int) -> Step {
 		}
 		curr_value = t_env.cash
 	}
+
 	// 5. Update peak and calculate drawdown
 	if curr_value > t_env.peak_cash {
 		t_env.peak_cash = curr_value
@@ -113,9 +116,32 @@ multi_asset_env_step :: proc(env: ^Environment, action: int) -> Step {
 
 	// 6. Reward Shaping
 	reward := (curr_value - prev_value) / t_env.initial_cash
-	reward -= drawdown * 2.0 // Drawdown penalty
+	reward -= drawdown * 0.5 // Drawdown penalty
+	// 7. Calculate Volatility Penalty
+	// Discourage holding risky assets during high-volatility regimes
+	vol_penalty := 0.0
+	for a in 0 ..< t_env.n_assets {
+		if t_env.positions[a] != 0.0 {
+			start_idx := max(0, step_idx - t_env.window)
+			if step_idx > start_idx {
+				avg_abs_ret := 0.0
+				for d in start_idx ..< step_idx {
+					p0 := t_env.prices[d * t_env.n_assets + a]
+					p1 := t_env.prices[(d + 1) * t_env.n_assets + a]
+					if p0 > 0 {
+						avg_abs_ret += math.abs((p1 - p0) / p0)
+					}
+				}
+				avg_abs_ret /= f64(step_idx - start_idx)
+				vol_penalty += avg_abs_ret * 0.5 // Scale the penalty
+			}
+		}
+	}
+	reward -= vol_penalty
+	// Cash bonus: small reward for holding cash (risk-free asset)
+	reward += (t_env.cash / t_env.initial_cash) * 0.0001
+	// 8. Build observation for the NEXT step
 
-	// 7. Build observation for the NEXT step
 	obs := build_multi_asset_obs(t_env, step_idx, curr_prices, curr_value)
 
 	return Step {
@@ -156,7 +182,8 @@ build_multi_asset_obs :: proc(
 		for w in 0 ..< t_env.window {
 			w_idx := start + w
 			if w_idx < len(t_env.prices) / t_env.n_assets {
-				obs[idx] = (t_env.prices[w_idx * t_env.n_assets + a] / base_price) - 1.0
+				price_ret := (t_env.prices[w_idx * t_env.n_assets + a] / base_price) - 1.0
+				obs[idx] = math.max(-0.1, math.min(0.1, price_ret))
 				idx += 1
 				obs[idx] = (t_env.volumes[w_idx * t_env.n_assets + a] / base_vol) - 1.0
 				idx += 1

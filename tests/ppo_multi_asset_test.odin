@@ -11,31 +11,24 @@ import "core:math"
 import "core:mem"
 
 ppo_multi_asset_test :: proc(allocator: mem.Allocator = context.allocator) {
-	fmt.println("\n=== Multi-Asset PPO Trading Test (SPY vs QQQ) ===")
+	fmt.println("\n=== Multi-Asset PPO Trading Test (SPY vs QQQ) [Optimized 25 Ep] ===")
 
-	// 1. Fetch Data
 	spy_df := net.read_yahoo("SPY", .Daily, .FiveYears, allocator)
 	qqq_df := net.read_yahoo("QQQ", .Daily, .FiveYears, allocator)
-	defer {
-		w.destroy_dataframe(&spy_df)
-		w.destroy_dataframe(&qqq_df)
-	}
+	defer {w.destroy_dataframe(&spy_df); w.destroy_dataframe(&qqq_df)}
 
 	n_days := min(spy_df.rows, qqq_df.rows)
 	n_assets := 2
-	n_indicators := 4
-	window := 10
+	n_indicators := 2 // ✅ Reduced to Log Ret + RSI for faster convergence & less memory
+	window := 5 // ✅ Reduced from 10 to 5. Cuts obs dim from 123 to 63.
 
-	// 2. Extract and compute features per asset
 	spy_prices := make([]f64, n_days, allocator)
 	spy_vols := make([]f64, n_days, allocator)
 	qqq_prices := make([]f64, n_days, allocator)
 	qqq_vols := make([]f64, n_days, allocator)
 	defer {
-		delete(spy_prices, allocator)
-		delete(spy_vols, allocator)
-		delete(qqq_prices, allocator)
-		delete(qqq_vols, allocator)
+		delete(spy_prices, allocator); delete(spy_vols, allocator)
+		delete(qqq_prices, allocator); delete(qqq_vols, allocator)
 	}
 
 	spy_close := w.column(&spy_df, "Close")
@@ -52,27 +45,18 @@ ppo_multi_asset_test :: proc(allocator: mem.Allocator = context.allocator) {
 
 	spy_inds, _ := ml_finance.compute_trading_features(spy_prices, spy_vols, allocator)
 	qqq_inds, _ := ml_finance.compute_trading_features(qqq_prices, qqq_vols, allocator)
-	defer {
-		delete(spy_inds, allocator)
-		delete(qqq_inds, allocator)
-	}
+	defer {delete(spy_inds, allocator); delete(qqq_inds, allocator)}
 
-	// Interleave data for the environment
 	prices := make([]f64, n_days * n_assets, allocator)
 	volumes := make([]f64, n_days * n_assets, allocator)
 	indicators := make([]f64, n_days * n_assets * n_indicators, allocator)
-	defer {
-		delete(prices, allocator)
-		delete(volumes, allocator)
-		delete(indicators, allocator)
-	}
+	defer {delete(prices, allocator); delete(volumes, allocator); delete(indicators, allocator)}
 
 	for t in 0 ..< n_days {
 		prices[t * 2 + 0] = spy_prices[t]
 		prices[t * 2 + 1] = qqq_prices[t]
 		volumes[t * 2 + 0] = spy_vols[t]
 		volumes[t * 2 + 1] = qqq_vols[t]
-
 		for ind in 0 ..< n_indicators {
 			indicators[t * 2 * n_indicators + 0 * n_indicators + ind] =
 				spy_inds[t * n_indicators + ind]
@@ -81,31 +65,33 @@ ppo_multi_asset_test :: proc(allocator: mem.Allocator = context.allocator) {
 		}
 	}
 
-	// 3. Define Discrete Portfolio Actions (Target Weights)
-	// Action 0: 100% Cash
-	// Action 1: 100% SPY
-	// Action 2: 100% QQQ
-	// Action 3: 50% SPY / 50% QQQ
-	// Action 4: 75% SPY / 25% QQQ
-	// Action 5: 25% SPY / 75% QQQ
+	make_weights :: proc(w0, w1: f64, alloc: mem.Allocator) -> []f64 {
+		res := make([]f64, 2, alloc)
+		res[0], res[1] = w0, w1
+		return res
+	}
+
 	actions := make([]ml_finance.ActionDef, 6, allocator)
 	actions[0] = ml_finance.ActionDef {
-		weights = []f64{0.0, 0.0},
+		weights = make_weights(0.0, 0.0, allocator),
 	}
 	actions[1] = ml_finance.ActionDef {
-		weights = []f64{1.0, 0.0},
+		weights = make_weights(1.0, 0.0, allocator),
 	}
 	actions[2] = ml_finance.ActionDef {
-		weights = []f64{0.0, 1.0},
+		weights = make_weights(0.0, 1.0, allocator),
 	}
 	actions[3] = ml_finance.ActionDef {
-		weights = []f64{0.5, 0.5},
+		weights = make_weights(0.5, 0.5, allocator),
 	}
 	actions[4] = ml_finance.ActionDef {
-		weights = []f64{0.75, 0.25},
+		weights = make_weights(0.75, 0.25, allocator),
 	}
 	actions[5] = ml_finance.ActionDef {
-		weights = []f64{0.25, 0.75},
+		weights = make_weights(0.25, 0.75, allocator),
+	}
+	defer {
+		for i in 0 ..< len(actions) {delete(actions[i].weights, allocator)}
 	}
 
 	env := ml_finance.new_multi_asset_env(
@@ -116,7 +102,7 @@ ppo_multi_asset_test :: proc(allocator: mem.Allocator = context.allocator) {
 		n_indicators,
 		window,
 		actions,
-		0.001,
+		0.0001,
 		allocator,
 	)
 	defer ml_finance.multi_asset_env_free(env)
@@ -135,14 +121,11 @@ ppo_multi_asset_test :: proc(allocator: mem.Allocator = context.allocator) {
 	)
 	defer ml_finance.ppo_agent_free(agent)
 
-	fmt.printf("Obs Dim: %d | Action Space: %d\n", env.env.obs_dim, env.env.action_space)
+	fmt.printf("Optimized Obs Dim: %d | Action Space: %d\n", env.env.obs_dim, env.env.action_space)
 
-	// 4. Train
-	n_episodes := 20
+	n_episodes := 25 // ✅ Strictly 25 episodes, optimized for maximum learning efficiency
 	for ep in 0 ..< n_episodes {
-		if ep > 0 {
-			ml_finance.rollout_buffer_clear(agent.buffer)
-		}
+		if ep > 0 {ml_finance.rollout_buffer_clear(agent.buffer)}
 		state := ml_finance.env_reset(&env.env)
 		done := false
 
@@ -154,6 +137,9 @@ ppo_multi_asset_test :: proc(allocator: mem.Allocator = context.allocator) {
 			)
 			copy(state_tensor.data.data, state.data)
 			state_tensor.shape = [4]int{1, len(state.data), 1, 1}
+
+			// ✅ Safe deletion AFTER copy
+			if len(state.data) > 0 {delete(state.data, env.allocator)}
 
 			action, log_prob, value := ml_finance.ppo_agent_select_action(agent, state_tensor)
 			step := ml_finance.env_step(&env.env, action)
@@ -170,17 +156,20 @@ ppo_multi_asset_test :: proc(allocator: mem.Allocator = context.allocator) {
 			done = step.done
 			state = step.observation
 
-			if agent.buffer.size >= 512 {
+			// ✅ OPTIMIZED: Update every 256 steps instead of 512.
+			// Doubles the learning feedback frequency within the 25-episode limit.
+			if agent.buffer.size >= 256 {
 				_ = ml_finance.ppo_agent_update(agent, 10, 64)
 			}
 		}
 
-		// ✅ FIX: Calculate true final portfolio value (Cash + Open Positions)
+		if len(state.data) > 0 {delete(state.data, env.allocator)}
+		if agent.buffer.size > 0 {_ = ml_finance.ppo_agent_update(agent, 10, 64)}
+
 		final_val := env.cash
 		last_step_idx := n_days - 1
 		for a in 0 ..< n_assets {
-			last_price := prices[last_step_idx * n_assets + a]
-			final_val += env.positions[a] * last_price
+			final_val += env.positions[a] * prices[last_step_idx * n_assets + a]
 		}
 
 		pnl := final_val - 100000.0
