@@ -54,6 +54,16 @@ multi_asset_env_reset :: proc(env: ^Environment) -> Observation {
 
 multi_asset_env_step :: proc(env: ^Environment, action: int) -> Step {
 	t_env := cast(^MultiAssetEnv)env
+	if t_env.env.done {
+		obs_dim := t_env.env.obs_dim
+		obs := make([]f64, obs_dim, t_env.allocator)
+		return Step {
+			observation = Observation{data = obs, shape = [4]int{1, obs_dim, 1, 1}},
+			reward = 0.0,
+			done = true,
+			info = "Already done",
+		}
+	}
 	step_idx := t_env.env.current_step
 
 	// 1. Get current prices for all assets
