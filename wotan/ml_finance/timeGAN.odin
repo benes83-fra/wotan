@@ -105,7 +105,6 @@ timegan_free :: proc(tg: ^TimeGAN) {
 // ============================================================================
 // Data Preparation
 // ============================================================================
-
 prepare_market_data :: proc(
 	prices: []f64,
 	volumes: []f64,
@@ -140,6 +139,29 @@ prepare_market_data :: proc(
 	for i in 0 ..< n_days {
 		log_returns[i] = math.max(-0.1, math.min(0.1, log_returns[i]))
 		vol_changes[i] = math.max(-2.0, math.min(2.0, vol_changes[i]))
+	}
+
+	// ✅ CRITICAL FIX: Standardize indicators to prevent scale mismatch with log returns
+	for ind in 0 ..< n_indicators {
+		mean := 0.0
+		for i in 0 ..< n_days {
+			mean += indicators[i * n_indicators + ind]
+		}
+		mean /= f64(n_days)
+
+		var := 0.0
+		for i in 0 ..< n_days {
+			diff := indicators[i * n_indicators + ind] - mean
+			var += diff * diff
+		}
+		std := math.sqrt(var / f64(n_days))
+		if std < 1e-6 {std = 1.0}
+
+		for i in 0 ..< n_days {
+			val := (indicators[i * n_indicators + ind] - mean) / std
+			// Clip to [-3, 3] to prevent extreme outliers from dominating the loss
+			indicators[i * n_indicators + ind] = math.max(-3.0, math.min(3.0, val))
+		}
 	}
 
 	n_sequences = n_days - seq_len
@@ -497,4 +519,43 @@ generate_synthetic_data :: proc(tg: ^TimeGAN, n_sequences: int, alloc: mem.Alloc
 	}
 
 	return output
+}
+// timegan_init_weights applies Xavier/He initialization to all Linear and LSTM layers in the TimeGAN
+// This directly adapts the logic from your nn/gan.odin module for sequential networks.
+timegan_init_weights :: proc(tg: ^TimeGAN) {
+	// Helper to initialize a single weight matrix
+	init_weights :: proc(weights: ^tensor.Tensor) {
+		if weights == nil || weights.data.data == nil {return}
+		fan_in := f64(weights.data.rows)
+		fan_out := f64(weights.data.cols)
+		// He initialization (perfect for ReLU/Tanh activations used in GANs)
+		scale := math.sqrt(2.0 / (fan_in + fan_out))
+
+		for i in 0 ..< len(weights.data.data) {
+			weights.data.data[i] = (rand.float64() * 2.0 - 1.0) * scale
+		}
+	}
+
+	// Helper to iterate through a Sequential network's layers
+	init_sequential :: proc(seq: ^nn.Sequential) {
+		for layer in seq.layers {
+			#partial switch l in layer {
+			case nn.LinearLayer:
+				init_weights(l.weights)
+				if l.bias != nil {init_weights(l.bias)}
+			case nn.LSTMLayer:
+				// Initialize both input-hidden and hidden-hidden weights
+				init_weights(l.w_ih)
+				init_weights(l.w_hh)
+				if l.bias != nil {init_weights(l.bias)}
+			}
+		}
+	}
+
+	// Apply to all 5 TimeGAN networks
+	init_sequential(tg.embedder)
+	init_sequential(tg.recovery)
+	init_sequential(tg.generator)
+	init_sequential(tg.discriminator)
+	init_sequential(tg.supervisor)
 }
