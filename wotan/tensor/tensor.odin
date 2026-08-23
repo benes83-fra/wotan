@@ -61,6 +61,7 @@ Op :: enum {
 	SumDim1,
 	Softmax, // <--- ADD THIS
 	Entropy,
+	BCELoss,
 }
 
 PoolParams :: struct {
@@ -1920,6 +1921,29 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 			if a_in.requires_grad {
 				// Just reshape the gradient back to 4D
 				copy(a_in.grad.data, node.grad.data)
+			}
+		case .BCELoss:
+			prediction := node.inputs[0]
+			target := node.inputs[1]
+
+			if prediction.requires_grad {
+				tensor_ensure_grad(prediction)
+				n := len(prediction.data.data)
+				grad_scalar := node.grad.data[0]
+
+				// Gradient of BCE loss w.r.t. prediction:
+				// dL/dp = -(t/p - (1-t)/(1-p)) / n
+				for i in 0 ..< n {
+					p := prediction.data.data[i]
+					t := target.data.data[i]
+
+					// Clamp prediction for numerical stability
+					p = math.max(1e-7, math.min(1.0 - 1e-7, p))
+
+					// Gradient: -(t/p - (1-t)/(1-p))
+					grad := -(t / p - (1.0 - t) / (1.0 - p)) / f64(n)
+					prediction.grad.data[i] += grad_scalar * grad
+				}
 			}
 		case .MaxPool2d:
 			a_in := node.inputs[0]
@@ -4362,5 +4386,50 @@ tensor_entropy :: proc(a: ^Tensor) -> ^Tensor {
 		out.op = .Entropy
 		append(&out.inputs, a)
 	}
+	return out
+}
+// ============================================================================
+// Binary Cross-Entropy Loss
+// ============================================================================
+tensor_bce_loss :: proc(prediction: ^Tensor, target: ^Tensor) -> ^Tensor {
+	// ✅ FIX: Use runtime assert instead of compile-time #assert
+	assert(
+		len(prediction.data.data) == len(target.data.data),
+		"BCE loss: prediction and target must have same size",
+	)
+
+	n := len(prediction.data.data)
+	loss_sum := 0.0
+
+	// Forward pass: compute BCE loss
+	for i in 0 ..< n {
+		p := prediction.data.data[i]
+		t := target.data.data[i]
+
+		// Clamp prediction to avoid log(0)
+		p = math.max(1e-7, math.min(1.0 - 1e-7, p))
+
+		// BCE formula: -[t * log(p) + (1-t) * log(1-p)]
+		loss_sum += -(t * math.ln_f64(p) + (1.0 - t) * math.ln_f64(1.0 - p))
+	}
+
+	// Average loss
+	avg_loss := loss_sum / f64(n)
+
+	// Create output tensor
+	out_data := l.matrix_new(f64, 1, 1, prediction.allocator)
+	out_data.data[0] = avg_loss
+	out := tensor_new(
+		out_data,
+		prediction.requires_grad || target.requires_grad,
+		prediction.allocator,
+	)
+
+	if out.requires_grad {
+		out.op = .BCELoss
+		append(&out.inputs, prediction)
+		append(&out.inputs, target)
+	}
+
 	return out
 }
