@@ -53,28 +53,30 @@ new_timegan :: proc(
 	nn.sequential_add(tg.recovery, nn.lstm_layer_new(latent_dim, hidden_dim, alloc))
 	nn.sequential_add(tg.recovery, nn.linear_layer_new(hidden_dim, feature_dim, alloc))
 
-	// Generator: latent_dim -> latent_dim (generates in latent space)
+	// Generator: latent_dim -> latent_dim
 	tg.generator = nn.sequential_new(alloc)
 	nn.sequential_add(tg.generator, nn.lstm_layer_new(latent_dim, hidden_dim, alloc))
 	nn.sequential_add(tg.generator, nn.linear_layer_new(hidden_dim, latent_dim, alloc))
 	nn.sequential_add(tg.generator, nn.Activation.Sigmoid)
 
-	// Discriminator: latent_dim -> 1 (real vs fake)
+	// Discriminator: latent_dim -> 1
 	tg.discriminator = nn.sequential_new(alloc)
 	nn.sequential_add(tg.discriminator, nn.lstm_layer_new(latent_dim, hidden_dim, alloc))
 	nn.sequential_add(tg.discriminator, nn.linear_layer_new(hidden_dim, 1, alloc))
 	nn.sequential_add(tg.discriminator, nn.Activation.Sigmoid)
 
-	// Supervisor: latent_dim -> feature_dim (helps generator learn temporal dynamics)
+	// Supervisor: latent_dim -> feature_dim
 	tg.supervisor = nn.sequential_new(alloc)
 	nn.sequential_add(tg.supervisor, nn.lstm_layer_new(latent_dim, hidden_dim, alloc))
 	nn.sequential_add(tg.supervisor, nn.linear_layer_new(hidden_dim, feature_dim, alloc))
 
-	// Optimizers
+	// ✅ FIX: Discriminator learns 10x slower to prevent it from dominating the Generator
+	d_lr := lr * 0.1
+
 	tg.optimizer_e = nn.adam_new(lr, 0.9, 0.999, 1e-8, alloc)
 	tg.optimizer_r = nn.adam_new(lr, 0.9, 0.999, 1e-8, alloc)
 	tg.optimizer_g = nn.adam_new(lr, 0.9, 0.999, 1e-8, alloc)
-	tg.optimizer_d = nn.adam_new(lr, 0.9, 0.999, 1e-8, alloc)
+	tg.optimizer_d = nn.adam_new(d_lr, 0.9, 0.999, 1e-8, alloc) // ← Slower D
 	tg.optimizer_s = nn.adam_new(lr, 0.9, 0.999, 1e-8, alloc)
 
 	nn.sequential_add_to_adam(tg.embedder, &tg.optimizer_e)
@@ -104,7 +106,6 @@ timegan_free :: proc(tg: ^TimeGAN) {
 // Data Preparation
 // ============================================================================
 
-// prepare_market_data normalizes and sequences market data for TimeGAN
 prepare_market_data :: proc(
 	prices: []f64,
 	volumes: []f64,
@@ -118,9 +119,8 @@ prepare_market_data :: proc(
 	feature_dim: int,
 ) {
 	n_days := len(prices)
-	feature_dim = 2 + n_indicators // price_return, volume_change, indicators
+	feature_dim = 2 + n_indicators
 
-	// Normalize data
 	log_returns := make([]f64, n_days, alloc)
 	defer delete(log_returns, alloc)
 	for i in 1 ..< n_days {
@@ -137,13 +137,11 @@ prepare_market_data :: proc(
 		}
 	}
 
-	// Clip outliers
 	for i in 0 ..< n_days {
 		log_returns[i] = math.max(-0.1, math.min(0.1, log_returns[i]))
 		vol_changes[i] = math.max(-2.0, math.min(2.0, vol_changes[i]))
 	}
 
-	// Create sequences
 	n_sequences = n_days - seq_len
 	sequences = make([]f64, n_sequences * seq_len * feature_dim, alloc)
 
@@ -166,7 +164,6 @@ prepare_market_data :: proc(
 // Forward Passes
 // ============================================================================
 
-// embedder_forward processes a sequence through the embedder
 embedder_forward :: proc(tg: ^TimeGAN, sequence: []f64, alloc: mem.Allocator) -> ^tensor.Tensor {
 	input := tensor.tensor_new(l.matrix_new(f64, tg.seq_len, tg.feature_dim, alloc), false, alloc)
 	copy(input.data.data, sequence)
@@ -177,7 +174,6 @@ embedder_forward :: proc(tg: ^TimeGAN, sequence: []f64, alloc: mem.Allocator) ->
 	return h
 }
 
-// recovery_forward processes latent sequence back to feature space
 recovery_forward :: proc(
 	tg: ^TimeGAN,
 	latent_seq: ^tensor.Tensor,
@@ -187,7 +183,6 @@ recovery_forward :: proc(
 	return x_hat
 }
 
-// generator_forward generates synthetic latent sequences
 generator_forward :: proc(
 	tg: ^TimeGAN,
 	noise: ^tensor.Tensor,
@@ -197,7 +192,6 @@ generator_forward :: proc(
 	return e_hat
 }
 
-// discriminator_forward classifies sequences as real or fake
 discriminator_forward :: proc(
 	tg: ^TimeGAN,
 	latent_seq: ^tensor.Tensor,
@@ -207,7 +201,6 @@ discriminator_forward :: proc(
 	return y_hat
 }
 
-// supervisor_forward predicts next feature from latent
 supervisor_forward :: proc(
 	tg: ^TimeGAN,
 	latent_seq: ^tensor.Tensor,
@@ -221,7 +214,6 @@ supervisor_forward :: proc(
 // Training Steps
 // ============================================================================
 
-// train_embedder_recovery trains the embedding and recovery networks
 train_embedder_recovery :: proc(
 	tg: ^TimeGAN,
 	real_data: []f64,
@@ -244,25 +236,20 @@ train_embedder_recovery :: proc(
 	}
 
 	for b in 0 ..< batch_size {
-		// Sample a random sequence
 		seq_idx := rand.int_range(0, n_seqs - 1)
 		seq_start := seq_idx * tg.seq_len * tg.feature_dim
 		seq := real_data[seq_start:seq_start + tg.seq_len * tg.feature_dim]
 
-		// Embed
 		h := embedder_forward(tg, seq, alloc)
-
-		// Recover
 		x_hat := recovery_forward(tg, h, alloc)
 
-		// ✅ DYNAMIC FIX: Create target with the EXACT same matrix dimensions as x_hat
 		target := tensor.tensor_new(
 			l.matrix_new(f64, x_hat.data.rows, x_hat.data.cols, alloc),
 			false,
 			alloc,
 		)
 		copy(target.data.data, seq)
-		target.shape = x_hat.shape // Copy the shape metadata too
+		target.shape = x_hat.shape
 
 		loss := tensor.tensor_mse_loss(x_hat, target)
 		total_loss += loss.data.data[0]
@@ -281,7 +268,6 @@ train_embedder_recovery :: proc(
 	return total_loss / f64(batch_size)
 }
 
-// train_supervisor pre-trains the supervisor to predict features from latent space
 train_supervisor :: proc(
 	tg: ^TimeGAN,
 	real_data: []f64,
@@ -293,18 +279,13 @@ train_supervisor :: proc(
 	total_loss := 0.0
 
 	for b in 0 ..< batch_size {
-		// Sample a random sequence
 		seq_idx := rand.int_range(0, len(real_data) / (tg.seq_len * tg.feature_dim) - 1)
 		seq_start := seq_idx * tg.seq_len * tg.feature_dim
 		seq := real_data[seq_start:seq_start + tg.seq_len * tg.feature_dim]
 
-		// Embed real data
 		h_real := embedder_forward(tg, seq, alloc)
-
-		// Supervisor predicts features from latent representation
 		y_pred := supervisor_forward(tg, h_real, alloc)
 
-		// ✅ DYNAMIC FIX: Match y_pred's exact matrix dimensions
 		target_feat := tensor.tensor_new(
 			l.matrix_new(f64, y_pred.data.rows, y_pred.data.cols, alloc),
 			false,
@@ -313,7 +294,6 @@ train_supervisor :: proc(
 		copy(target_feat.data.data, seq)
 		target_feat.shape = y_pred.shape
 
-		// Compute MSE loss
 		loss := tensor.tensor_mse_loss(y_pred, target_feat)
 		total_loss += loss.data.data[0]
 
@@ -329,7 +309,6 @@ train_supervisor :: proc(
 	return total_loss / f64(batch_size)
 }
 
-// train_generator trains the generator with adversarial + supervised loss
 train_generator :: proc(
 	tg: ^TimeGAN,
 	real_data: []f64,
@@ -341,7 +320,6 @@ train_generator :: proc(
 	total_loss := 0.0
 
 	for b in 0 ..< batch_size {
-		// Generate noise
 		noise := tensor.tensor_new(
 			l.matrix_new(f64, tg.seq_len, tg.latent_dim, alloc),
 			false,
@@ -352,13 +330,9 @@ train_generator :: proc(
 		}
 		noise.shape = [4]int{1, tg.seq_len, tg.latent_dim, 1}
 
-		// Generate synthetic latent sequence
 		e_hat := generator_forward(tg, noise, alloc)
-
-		// Adversarial loss (fool discriminator)
 		y_hat_fake := discriminator_forward(tg, e_hat, alloc)
 
-		// ✅ DYNAMIC FIX: Match y_hat_fake's exact matrix dimensions for BCE
 		target_real := tensor.tensor_new(
 			l.matrix_new(f64, y_hat_fake.data.rows, y_hat_fake.data.cols, alloc),
 			false,
@@ -371,7 +345,6 @@ train_generator :: proc(
 
 		adv_loss := tensor.tensor_bce_loss(y_hat_fake, target_real)
 
-		// Supervised loss (predict next feature)
 		seq_idx := rand.int_range(0, len(real_data) / (tg.seq_len * tg.feature_dim) - 1)
 		seq_start := seq_idx * tg.seq_len * tg.feature_dim
 		seq := real_data[seq_start:seq_start + tg.seq_len * tg.feature_dim]
@@ -379,7 +352,6 @@ train_generator :: proc(
 		h_real := embedder_forward(tg, seq, alloc)
 		y_pred := supervisor_forward(tg, h_real, alloc)
 
-		// ✅ DYNAMIC FIX: Match y_pred's exact matrix dimensions
 		target_feat := tensor.tensor_new(
 			l.matrix_new(f64, y_pred.data.rows, y_pred.data.cols, alloc),
 			false,
@@ -390,7 +362,6 @@ train_generator :: proc(
 
 		sup_loss := tensor.tensor_mse_loss(y_pred, target_feat)
 
-		// Combined loss
 		combined := tensor.tensor_add(adv_loss, sup_loss)
 		total_loss += combined.data.data[0]
 
@@ -408,12 +379,13 @@ train_generator :: proc(
 		tensor.tensor_free_graph(combined)
 	}
 
+	// ✅ FIX: Clip gradients to prevent exploding gradients in GANs
+	nn.clip_grad_norm(&tg.optimizer_g, 1.0)
 	nn.adam_step(&tg.optimizer_g)
 
 	return total_loss / f64(batch_size)
 }
 
-// train_discriminator trains the discriminator to distinguish real from fake
 train_discriminator :: proc(
 	tg: ^TimeGAN,
 	real_data: []f64,
@@ -425,7 +397,6 @@ train_discriminator :: proc(
 	total_loss := 0.0
 
 	for b in 0 ..< batch_size {
-		// Real sequence
 		seq_idx := rand.int_range(0, len(real_data) / (tg.seq_len * tg.feature_dim) - 1)
 		seq_start := seq_idx * tg.seq_len * tg.feature_dim
 		seq := real_data[seq_start:seq_start + tg.seq_len * tg.feature_dim]
@@ -433,7 +404,6 @@ train_discriminator :: proc(
 		h_real := embedder_forward(tg, seq, alloc)
 		y_hat_real := discriminator_forward(tg, h_real, alloc)
 
-		// ✅ DYNAMIC FIX: Match y_hat_real's exact matrix dimensions for BCE
 		target_real := tensor.tensor_new(
 			l.matrix_new(f64, y_hat_real.data.rows, y_hat_real.data.cols, alloc),
 			false,
@@ -446,7 +416,6 @@ train_discriminator :: proc(
 
 		loss_real := tensor.tensor_bce_loss(y_hat_real, target_real)
 
-		// Fake sequence
 		noise := tensor.tensor_new(
 			l.matrix_new(f64, tg.seq_len, tg.latent_dim, alloc),
 			false,
@@ -460,7 +429,6 @@ train_discriminator :: proc(
 		e_hat := generator_forward(tg, noise, alloc)
 		y_hat_fake := discriminator_forward(tg, e_hat, alloc)
 
-		// ✅ DYNAMIC FIX: Match y_hat_fake's exact matrix dimensions for BCE
 		target_fake := tensor.tensor_new(
 			l.matrix_new(f64, y_hat_fake.data.rows, y_hat_fake.data.cols, alloc),
 			false,
@@ -473,7 +441,6 @@ train_discriminator :: proc(
 
 		loss_fake := tensor.tensor_bce_loss(y_hat_fake, target_fake)
 
-		// Combined loss
 		combined := tensor.tensor_add(loss_real, loss_fake)
 		total_loss += combined.data.data[0]
 
@@ -491,20 +458,21 @@ train_discriminator :: proc(
 		tensor.tensor_free_graph(combined)
 	}
 
+	// ✅ FIX: Clip gradients to prevent exploding gradients in GANs
+	nn.clip_grad_norm(&tg.optimizer_d, 1.0)
 	nn.adam_step(&tg.optimizer_d)
 
 	return total_loss / f64(batch_size)
 }
+
 // ============================================================================
 // Generation
 // ============================================================================
 
-// generate_synthetic_data creates synthetic market sequences
 generate_synthetic_data :: proc(tg: ^TimeGAN, n_sequences: int, alloc: mem.Allocator) -> []f64 {
 	output := make([]f64, n_sequences * tg.seq_len * tg.feature_dim, alloc)
 
 	for s in 0 ..< n_sequences {
-		// Generate noise
 		noise := tensor.tensor_new(
 			l.matrix_new(f64, tg.seq_len, tg.latent_dim, alloc),
 			false,
@@ -513,17 +481,11 @@ generate_synthetic_data :: proc(tg: ^TimeGAN, n_sequences: int, alloc: mem.Alloc
 		for i in 0 ..< tg.seq_len * tg.latent_dim {
 			noise.data.data[i] = rand.float64()
 		}
-
-		// ✅ CRITICAL FIX: Set the shape so the LSTM knows the sequence length!
 		noise.shape = [4]int{1, tg.seq_len, tg.latent_dim, 1}
 
-		// Generate latent sequence
 		e_hat := generator_forward(tg, noise, alloc)
-
-		// Recover to feature space
 		x_hat := recovery_forward(tg, e_hat, alloc)
 
-		// Copy to output
 		copy(
 			output[s * tg.seq_len * tg.feature_dim:(s + 1) * tg.seq_len * tg.feature_dim],
 			x_hat.data.data,
