@@ -6,6 +6,7 @@ import nn "../nn"
 import p "../plot"
 import t "../tensor"
 import "core:math"
+import "core:math/rand"
 import "core:mem"
 import "core:slice"
 
@@ -335,6 +336,74 @@ deep_hedging_evaluate :: proc(
 
 	return pnl_values, spot_prices
 }
+
+// compute_hedging_loss computes either Variance or a smooth CVaR proxy
+compute_hedging_loss :: proc(
+	pnl: ^t.Tensor,
+	risk_measure: RiskMeasure,
+	cvar_alpha: f64,
+	alloc: mem.Allocator,
+) -> ^t.Tensor {
+	if risk_measure == .Variance {
+		// Variance proxy: Mean(PnL^2)
+		pnl_sq := t.tensor_mul(pnl, pnl)
+		return t.tensor_mean(pnl_sq)
+	}
+
+	// ✅ Smooth Differentiable CVaR Proxy
+	// CVaR is the average of the worst alpha% losses.
+	// Sorting breaks the autograd graph, so we use a smooth proxy:
+	// CVaR_proxy = Mean(L) + (1/alpha) * Mean(Relu(L - Mean(L) - 2*Std(L)))
+	// where L = -PnL (Loss)
+
+	batch_size_f := f64(pnl.shape[0])
+
+	// 1. L = -PnL
+	loss_tensor := t.tensor_scale(pnl, -1.0)
+
+	// 2. Mean(L)
+	mean_l := t.tensor_mean(loss_tensor)
+
+	// 3. Std(L) = sqrt(Mean((L - Mean(L))^2))
+	centered := t.tensor_sub(loss_tensor, mean_l)
+	centered_sq := t.tensor_mul(centered, centered)
+	var_l := t.tensor_mean(centered_sq)
+
+	// Smooth sqrt to prevent NaN gradients
+	eps := t.tensor_new(l.matrix_new(f64, 1, 1, alloc), false, alloc)
+	eps.data.data[0] = 1e-6
+	std_l := t.tensor_sqrt(t.tensor_add(var_l, eps))
+
+	// 4. Threshold = Mean(L) + 2 * Std(L)
+	two := t.tensor_new(l.matrix_new(f64, 1, 1, alloc), false, alloc)
+	two.data.data[0] = 2.0
+	two_std := t.tensor_mul(two, std_l)
+	threshold := t.tensor_add(mean_l, two_std)
+
+	// 5. Relu(L - Threshold)
+	excess_loss := t.tensor_sub(loss_tensor, threshold)
+	excess_positive := t.tensor_relu(excess_loss)
+	mean_excess := t.tensor_mean(excess_positive)
+
+	// 6. CVaR = Mean(L) + (1/alpha) * Mean(Excess)
+	inv_alpha := t.tensor_new(l.matrix_new(f64, 1, 1, alloc), false, alloc)
+	inv_alpha.data.data[0] = 1.0 / cvar_alpha
+
+	scaled_excess := t.tensor_mul(mean_excess, inv_alpha)
+	cvar_loss := t.tensor_add(mean_l, scaled_excess)
+
+	// Cleanup temporary scalars
+	t.tensor_free(eps)
+	t.tensor_free(two)
+	t.tensor_free(inv_alpha)
+
+	return cvar_loss
+}
+
+// ============================================================================
+// Enhanced Multi-Asset Training Step (with Transaction Costs)
+// ============================================================================
+
 deep_hedger_train_step_multi :: proc(
 	hedger: ^DeepHedger,
 	paths: ^t.Tensor,
@@ -353,13 +422,22 @@ deep_hedger_train_step_multi :: proc(
 	pnl := t.tensor_new(pnl_data, false, alloc)
 	pnl.shape = [4]int{batch_size, 1, 1, 1}
 
-	// 2. Pre-allocate state and ds buffers (reused every step)
+	// 2. Pre-allocate buffers
 	state_data := l.matrix_new(f64, batch_size, state_size, alloc)
 	state := t.tensor_new(state_data, false, alloc)
 
 	ds_data := l.matrix_new(f64, batch_size, num_assets, alloc)
 	ds := t.tensor_new(ds_data, false, alloc)
 	ds.shape = [4]int{batch_size, num_assets, 1, 1}
+
+	prev_delta_data := l.matrix_new(f64, batch_size, num_assets, alloc)
+	for i in 0 ..< batch_size * num_assets {prev_delta_data.data[i] = 0.0}
+	prev_delta := t.tensor_new(prev_delta_data, false, alloc)
+	prev_delta.shape = [4]int{batch_size, num_assets, 1, 1}
+
+	s_t_data := l.matrix_new(f64, batch_size, num_assets, alloc)
+	s_t := t.tensor_new(s_t_data, false, alloc)
+	s_t.shape = [4]int{batch_size, num_assets, 1, 1}
 
 	// 3. Time loop
 	for t_step in 0 ..< seq_len {
@@ -376,53 +454,70 @@ deep_hedger_train_step_multi :: proc(
 		delta := nn.sequential_forward(hedger.network, state)
 
 		if t_step > 0 {
-			// Build [batch_size, num_assets] tensor of price changes (dS)
+			// Build [batch_size, num_assets] tensor of price changes (dS) and current prices
 			for b in 0 ..< batch_size {
 				for asset in 0 ..< num_assets {
-					s_t :=
+					s_t_val :=
 						paths.data.data[b * (seq_len * state_size) + t_step * state_size + asset]
-					s_prev :=
+					s_prev_val :=
 						paths.data.data[b * (seq_len * state_size) + (t_step - 1) * state_size + asset]
-					ds_data.data[b * num_assets + asset] = s_t - s_prev
+
+					ds_data.data[b * num_assets + asset] = s_t_val - s_prev_val
+					s_t_data.data[b * num_assets + asset] = s_t_val
 				}
 			}
 
 			// PnL increment = sum(delta * dS) across assets
-			product := t.tensor_mul(delta, ds) // Element-wise multiplication
-
-			// ✅ FIX: Use tensor_sum_dim1 to preserve the autograd graph!
+			product := t.tensor_mul(delta, ds)
 			pnl_increment := t.tensor_sum_dim1(product)
 
-			pnl = t.tensor_add(pnl, pnl_increment)
+			// ✅ FIX: Add Multi-Asset Transaction Costs
+			if hedger.config.transaction_cost > 0.0 {
+				d_delta := t.tensor_sub(delta, prev_delta)
+				pos_part := t.tensor_relu(d_delta)
+				neg_part := t.tensor_relu(t.tensor_neg(d_delta))
+				abs_d_delta := t.tensor_add(pos_part, neg_part)
 
-			// ❌ CRITICAL: DO NOT FREE `product` or `pnl_increment` here!
-			// They are part of the autograd graph. Freeing them causes use-after-free
-			// during the backward pass, resulting in "empty gradient" warnings.
-			// `tensor_free_graph(loss)` at the end of the function will clean them up safely.
+				// Cost = transaction_cost * |d_delta| * S_t
+				cost_coeff := t.tensor_scale(abs_d_delta, hedger.config.transaction_cost)
+				cost := t.tensor_mul(cost_coeff, s_t)
+				cost_sum := t.tensor_sum_dim1(cost)
+
+				pnl_increment = t.tensor_sub(pnl_increment, cost_sum)
+			}
+
+			pnl = t.tensor_add(pnl, pnl_increment)
+		}
+
+		// Update prev_delta for next step
+		for i in 0 ..< batch_size * num_assets {
+			prev_delta_data.data[i] = delta.data.data[i]
 		}
 	}
 
 	// 4. Subtract payoff
 	pnl = t.tensor_sub(pnl, payoffs)
 
-	// 5. Compute Loss (Variance proxy: Mean(PnL^2))
-	pnl_sq := t.tensor_mul(pnl, pnl)
-	loss := t.tensor_mean(pnl_sq)
+	// 5. Compute Loss (Variance or CVaR)
+	loss := compute_hedging_loss(pnl, hedger.config.risk_measure, hedger.config.cvar_alpha, alloc)
 
 	// 6. Backward pass & Optimizer step
 	t.tensor_backward(loss)
 	nn.adam_step(opt)
 	loss_val := loss.data.data[0]
 
-	// 7. Cleanup: This single call frees the ENTIRE computation graph,
-	// including all intermediate `pnl`, `product`, and `pnl_increment` nodes.
+	// 7. Cleanup graph
 	t.tensor_free_graph(loss)
 
-	// Free the pre-allocated buffers that are NOT part of the graph
+	// Free pre-allocated buffers
 	l.matrix_free(&state_data)
 	t.tensor_free(state)
 	l.matrix_free(&ds_data)
 	t.tensor_free(ds)
+	l.matrix_free(&prev_delta_data)
+	t.tensor_free(prev_delta)
+	l.matrix_free(&s_t_data)
+	t.tensor_free(s_t)
 
 	return loss_val
 }
