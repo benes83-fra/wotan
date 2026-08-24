@@ -73,92 +73,92 @@ deep_hedger_free :: proc(hedger: ^DeepHedger) {
 // Training Step (Single Asset)
 // ============================================================================
 
-deep_hedger_train_step :: proc(
-	hedger: ^DeepHedger,
-	paths: ^t.Tensor,
-	payoffs: ^t.Tensor,
-	opt: ^nn.Adam,
-) -> f64 {
-	batch_size := paths.shape[0]
-	seq_len := paths.shape[1]
-	state_size := paths.shape[2]
-	alloc := hedger.allocator
+// deep_hedger_train_step :: proc(
+// 	hedger: ^DeepHedger,
+// 	paths: ^t.Tensor,
+// 	payoffs: ^t.Tensor,
+// 	opt: ^nn.Adam,
+// ) -> f64 {
+// 	batch_size := paths.shape[0]
+// 	seq_len := paths.shape[1]
+// 	state_size := paths.shape[2]
+// 	alloc := hedger.allocator
 
-	pnl_data := l.matrix_new(f64, batch_size, 1, alloc)
-	for i in 0 ..< batch_size {pnl_data.data[i] = 0.0}
-	pnl := t.tensor_new(pnl_data, false, alloc)
-	pnl.shape = [4]int{batch_size, 1, 1, 1}
+// 	pnl_data := l.matrix_new(f64, batch_size, 1, alloc)
+// 	for i in 0 ..< batch_size {pnl_data.data[i] = 0.0}
+// 	pnl := t.tensor_new(pnl_data, false, alloc)
+// 	pnl.shape = [4]int{batch_size, 1, 1, 1}
 
-	state_data := l.matrix_new(f64, batch_size, state_size, alloc)
-	state := t.tensor_new(state_data, false, alloc)
+// 	state_data := l.matrix_new(f64, batch_size, state_size, alloc)
+// 	state := t.tensor_new(state_data, false, alloc)
 
-	s_t_data := l.matrix_new(f64, batch_size, 1, alloc)
-	s_t := t.tensor_new(s_t_data, false, alloc)
+// 	s_t_data := l.matrix_new(f64, batch_size, 1, alloc)
+// 	s_t := t.tensor_new(s_t_data, false, alloc)
 
-	s_prev_data := l.matrix_new(f64, batch_size, 1, alloc)
-	s_prev := t.tensor_new(s_prev_data, false, alloc)
+// 	s_prev_data := l.matrix_new(f64, batch_size, 1, alloc)
+// 	s_prev := t.tensor_new(s_prev_data, false, alloc)
 
-	prev_delta: ^t.Tensor = nil
+// 	prev_delta: ^t.Tensor = nil
 
-	for t_step in 0 ..< seq_len {
-		for b in 0 ..< batch_size {
-			for s in 0 ..< state_size {
-				src_idx := b * (seq_len * state_size) + t_step * state_size + s
-				dst_idx := b * state_size + s
-				state_data.data[dst_idx] = paths.data.data[src_idx]
-			}
-		}
+// 	for t_step in 0 ..< seq_len {
+// 		for b in 0 ..< batch_size {
+// 			for s in 0 ..< state_size {
+// 				src_idx := b * (seq_len * state_size) + t_step * state_size + s
+// 				dst_idx := b * state_size + s
+// 				state_data.data[dst_idx] = paths.data.data[src_idx]
+// 			}
+// 		}
 
-		// ✅ Uses hedger.network (single network)
-		delta := nn.sequential_forward(hedger.network, state)
+// 		// ✅ Uses hedger.network (single network)
+// 		delta := nn.sequential_forward(hedger.network, state)
 
-		if t_step > 0 {
-			for b in 0 ..< batch_size {
-				s_t_data.data[b] =
-					paths.data.data[b * (seq_len * state_size) + t_step * state_size + 0]
-				s_prev_data.data[b] =
-					paths.data.data[b * (seq_len * state_size) + (t_step - 1) * state_size + 0]
-			}
+// 		if t_step > 0 {
+// 			for b in 0 ..< batch_size {
+// 				s_t_data.data[b] =
+// 					paths.data.data[b * (seq_len * state_size) + t_step * state_size + 0]
+// 				s_prev_data.data[b] =
+// 					paths.data.data[b * (seq_len * state_size) + (t_step - 1) * state_size + 0]
+// 			}
 
-			ds := t.tensor_sub(s_t, s_prev)
-			product := t.tensor_mul(delta, ds) // [batch_size, num_assets, 1, 1]
+// 			ds := t.tensor_sub(s_t, s_prev)
+// 			product := t.tensor_mul(delta, ds) // [batch_size, num_assets, 1, 1]
 
-			// ✅ FIX: Use tensor_sum_dim1 to preserve the autograd graph!
-			pnl_increment := t.tensor_sum_dim1(product)
+// 			// ✅ FIX: Use tensor_sum_dim1 to preserve the autograd graph!
+// 			pnl_increment := t.tensor_sum_dim1(product)
 
-			if hedger.config.transaction_cost > 0.0 {
-				d_delta := t.tensor_sub(delta, prev_delta)
-				pos_part := t.tensor_relu(d_delta)
-				neg_part := t.tensor_relu(t.tensor_neg(d_delta))
-				abs_d_delta := t.tensor_add(pos_part, neg_part)
-				cost_coeff := t.tensor_scale(abs_d_delta, hedger.config.transaction_cost)
-				cost := t.tensor_mul(cost_coeff, s_t)
-				pnl_increment = t.tensor_sub(pnl_increment, cost)
-			}
+// 			if hedger.config.transaction_cost > 0.0 {
+// 				d_delta := t.tensor_sub(delta, prev_delta)
+// 				pos_part := t.tensor_relu(d_delta)
+// 				neg_part := t.tensor_relu(t.tensor_neg(d_delta))
+// 				abs_d_delta := t.tensor_add(pos_part, neg_part)
+// 				cost_coeff := t.tensor_scale(abs_d_delta, hedger.config.transaction_cost)
+// 				cost := t.tensor_mul(cost_coeff, s_t)
+// 				pnl_increment = t.tensor_sub(pnl_increment, cost)
+// 			}
 
-			pnl = t.tensor_add(pnl, pnl_increment)
-		}
-		prev_delta = delta
-	}
+// 			pnl = t.tensor_add(pnl, pnl_increment)
+// 		}
+// 		prev_delta = delta
+// 	}
 
-	pnl = t.tensor_sub(pnl, payoffs)
-	pnl_sq := t.tensor_mul(pnl, pnl)
-	loss := t.tensor_mean(pnl_sq)
+// 	pnl = t.tensor_sub(pnl, payoffs)
+// 	pnl_sq := t.tensor_mul(pnl, pnl)
+// 	loss := t.tensor_mean(pnl_sq)
 
-	t.tensor_backward(loss)
-	nn.adam_step(opt)
-	loss_val := loss.data.data[0]
+// 	t.tensor_backward(loss)
+// 	nn.adam_step(opt)
+// 	loss_val := loss.data.data[0]
 
-	t.tensor_free_graph(loss)
-	l.matrix_free(&state_data)
-	t.tensor_free(state)
-	l.matrix_free(&s_t_data)
-	t.tensor_free(s_t)
-	l.matrix_free(&s_prev_data)
-	t.tensor_free(s_prev)
+// 	t.tensor_free_graph(loss)
+// 	l.matrix_free(&state_data)
+// 	t.tensor_free(state)
+// 	l.matrix_free(&s_t_data)
+// 	t.tensor_free(s_t)
+// 	l.matrix_free(&s_prev_data)
+// 	t.tensor_free(s_prev)
 
-	return loss_val
-}
+// 	return loss_val
+// }
 
 // ============================================================================
 // Model Persistence (Save/Load)
@@ -399,6 +399,98 @@ compute_hedging_loss :: proc(
 
 	return cvar_loss
 }
+// ============================================================================
+// Training Step (Single Asset)
+// ============================================================================
+
+deep_hedger_train_step :: proc(
+	hedger: ^DeepHedger,
+	paths: ^t.Tensor,
+	payoffs: ^t.Tensor,
+	opt: ^nn.Adam,
+) -> f64 {
+	batch_size := paths.shape[0]
+	seq_len := paths.shape[1]
+	state_size := paths.shape[2]
+	alloc := hedger.allocator
+
+	pnl_data := l.matrix_new(f64, batch_size, 1, alloc)
+	for i in 0 ..< batch_size {pnl_data.data[i] = 0.0}
+	pnl := t.tensor_new(pnl_data, false, alloc)
+	pnl.shape = [4]int{batch_size, 1, 1, 1}
+	pnl.owned_by_graph = true // Ensure cleanup
+
+	prev_delta: ^t.Tensor = nil
+
+	for t_step in 0 ..< seq_len {
+		// ✅ FIX: Allocate fresh state buffer for this time step to preserve autograd history
+		state_data := l.matrix_new(f64, batch_size, state_size, alloc)
+		for b in 0 ..< batch_size {
+			for s in 0 ..< state_size {
+				src_idx := b * (seq_len * state_size) + t_step * state_size + s
+				dst_idx := b * state_size + s
+				state_data.data[dst_idx] = paths.data.data[src_idx]
+			}
+		}
+		state := t.tensor_new(state_data, false, alloc)
+		state.owned_by_graph = true
+
+		delta := nn.sequential_forward(hedger.network, state)
+
+		if t_step > 0 {
+			s_t_data := l.matrix_new(f64, batch_size, 1, alloc)
+			s_prev_data := l.matrix_new(f64, batch_size, 1, alloc)
+			for b in 0 ..< batch_size {
+				s_t_data.data[b] =
+					paths.data.data[b * (seq_len * state_size) + t_step * state_size + 0]
+				s_prev_data.data[b] =
+					paths.data.data[b * (seq_len * state_size) + (t_step - 1) * state_size + 0]
+			}
+
+			s_t := t.tensor_new(s_t_data, false, alloc)
+			s_t.owned_by_graph = true
+			s_prev := t.tensor_new(s_prev_data, false, alloc)
+			s_prev.owned_by_graph = true
+
+			ds := t.tensor_sub(s_t, s_prev)
+			product := t.tensor_mul(delta, ds)
+			pnl_increment := t.tensor_sum_dim1(product)
+
+			if hedger.config.transaction_cost > 0.0 && prev_delta != nil {
+				d_delta := t.tensor_sub(delta, prev_delta)
+				pos_part := t.tensor_relu(d_delta)
+				neg_part := t.tensor_relu(t.tensor_neg(d_delta))
+				abs_d_delta := t.tensor_add(pos_part, neg_part)
+				cost_coeff := t.tensor_scale(abs_d_delta, hedger.config.transaction_cost)
+				cost := t.tensor_mul(cost_coeff, s_t)
+				pnl_increment = t.tensor_sub(pnl_increment, cost)
+			}
+
+			pnl = t.tensor_add(pnl, pnl_increment)
+		}
+
+		// Detach delta for next step's transaction cost (prevents infinite graph unrolling)
+		prev_delta_data := l.matrix_new(f64, batch_size, 1, alloc)
+		for i in 0 ..< batch_size {
+			prev_delta_data.data[i] = delta.data.data[i]
+		}
+		prev_delta = t.tensor_new(prev_delta_data, false, alloc)
+		prev_delta.owned_by_graph = true
+	}
+
+	pnl = t.tensor_sub(pnl, payoffs)
+	pnl_sq := t.tensor_mul(pnl, pnl)
+	loss := t.tensor_mean(pnl_sq)
+
+	t.tensor_backward(loss)
+	nn.adam_step(opt)
+	loss_val := loss.data.data[0]
+
+	// This will now safely free the loss graph AND all the leaf nodes we marked as owned_by_graph
+	t.tensor_free_graph(loss)
+
+	return loss_val
+}
 
 // ============================================================================
 // Enhanced Multi-Asset Training Step (with Transaction Costs)
@@ -416,32 +508,17 @@ deep_hedger_train_step_multi :: proc(
 	num_assets := hedger.config.num_assets
 	alloc := hedger.allocator
 
-	// 1. Initialize PnL accumulator [batch_size, 1]
 	pnl_data := l.matrix_new(f64, batch_size, 1, alloc)
 	for i in 0 ..< batch_size {pnl_data.data[i] = 0.0}
 	pnl := t.tensor_new(pnl_data, false, alloc)
 	pnl.shape = [4]int{batch_size, 1, 1, 1}
+	pnl.owned_by_graph = true
 
-	// 2. Pre-allocate buffers
-	state_data := l.matrix_new(f64, batch_size, state_size, alloc)
-	state := t.tensor_new(state_data, false, alloc)
+	prev_delta: ^t.Tensor = nil
 
-	ds_data := l.matrix_new(f64, batch_size, num_assets, alloc)
-	ds := t.tensor_new(ds_data, false, alloc)
-	ds.shape = [4]int{batch_size, num_assets, 1, 1}
-
-	prev_delta_data := l.matrix_new(f64, batch_size, num_assets, alloc)
-	for i in 0 ..< batch_size * num_assets {prev_delta_data.data[i] = 0.0}
-	prev_delta := t.tensor_new(prev_delta_data, false, alloc)
-	prev_delta.shape = [4]int{batch_size, num_assets, 1, 1}
-
-	s_t_data := l.matrix_new(f64, batch_size, num_assets, alloc)
-	s_t := t.tensor_new(s_t_data, false, alloc)
-	s_t.shape = [4]int{batch_size, num_assets, 1, 1}
-
-	// 3. Time loop
 	for t_step in 0 ..< seq_len {
-		// Fill state buffer
+		// ✅ FIX: Allocate fresh state buffer for this time step
+		state_data := l.matrix_new(f64, batch_size, state_size, alloc)
 		for b in 0 ..< batch_size {
 			for s in 0 ..< state_size {
 				src_idx := b * (seq_len * state_size) + t_step * state_size + s
@@ -449,12 +526,15 @@ deep_hedger_train_step_multi :: proc(
 				state_data.data[dst_idx] = paths.data.data[src_idx]
 			}
 		}
+		state := t.tensor_new(state_data, false, alloc)
+		state.owned_by_graph = true
 
-		// Forward pass: delta is [batch_size, num_assets, 1, 1]
 		delta := nn.sequential_forward(hedger.network, state)
 
 		if t_step > 0 {
-			// Build [batch_size, num_assets] tensor of price changes (dS) and current prices
+			ds_data := l.matrix_new(f64, batch_size, num_assets, alloc)
+			s_t_data := l.matrix_new(f64, batch_size, num_assets, alloc)
+
 			for b in 0 ..< batch_size {
 				for asset in 0 ..< num_assets {
 					s_t_val :=
@@ -467,18 +547,23 @@ deep_hedger_train_step_multi :: proc(
 				}
 			}
 
-			// PnL increment = sum(delta * dS) across assets
+			ds := t.tensor_new(ds_data, false, alloc)
+			ds.shape = [4]int{batch_size, num_assets, 1, 1}
+			ds.owned_by_graph = true
+
+			s_t := t.tensor_new(s_t_data, false, alloc)
+			s_t.shape = [4]int{batch_size, num_assets, 1, 1}
+			s_t.owned_by_graph = true
+
 			product := t.tensor_mul(delta, ds)
 			pnl_increment := t.tensor_sum_dim1(product)
 
-			// ✅ FIX: Add Multi-Asset Transaction Costs
-			if hedger.config.transaction_cost > 0.0 {
+			if hedger.config.transaction_cost > 0.0 && prev_delta != nil {
 				d_delta := t.tensor_sub(delta, prev_delta)
 				pos_part := t.tensor_relu(d_delta)
 				neg_part := t.tensor_relu(t.tensor_neg(d_delta))
 				abs_d_delta := t.tensor_add(pos_part, neg_part)
 
-				// Cost = transaction_cost * |d_delta| * S_t
 				cost_coeff := t.tensor_scale(abs_d_delta, hedger.config.transaction_cost)
 				cost := t.tensor_mul(cost_coeff, s_t)
 				cost_sum := t.tensor_sum_dim1(cost)
@@ -489,35 +574,24 @@ deep_hedger_train_step_multi :: proc(
 			pnl = t.tensor_add(pnl, pnl_increment)
 		}
 
-		// Update prev_delta for next step
+		// Detach delta for next step
+		prev_delta_data := l.matrix_new(f64, batch_size, num_assets, alloc)
 		for i in 0 ..< batch_size * num_assets {
 			prev_delta_data.data[i] = delta.data.data[i]
 		}
+		prev_delta = t.tensor_new(prev_delta_data, false, alloc)
+		prev_delta.shape = [4]int{batch_size, num_assets, 1, 1}
+		prev_delta.owned_by_graph = true
 	}
 
-	// 4. Subtract payoff
 	pnl = t.tensor_sub(pnl, payoffs)
-
-	// 5. Compute Loss (Variance or CVaR)
 	loss := compute_hedging_loss(pnl, hedger.config.risk_measure, hedger.config.cvar_alpha, alloc)
 
-	// 6. Backward pass & Optimizer step
 	t.tensor_backward(loss)
 	nn.adam_step(opt)
 	loss_val := loss.data.data[0]
 
-	// 7. Cleanup graph
 	t.tensor_free_graph(loss)
-
-	// Free pre-allocated buffers
-	l.matrix_free(&state_data)
-	t.tensor_free(state)
-	l.matrix_free(&ds_data)
-	t.tensor_free(ds)
-	l.matrix_free(&prev_delta_data)
-	t.tensor_free(prev_delta)
-	l.matrix_free(&s_t_data)
-	t.tensor_free(s_t)
 
 	return loss_val
 }
