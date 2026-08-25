@@ -62,6 +62,7 @@ Op :: enum {
 	Softmax, // <--- ADD THIS
 	Entropy,
 	BCELoss,
+	PermuteLOB,
 }
 
 PoolParams :: struct {
@@ -542,6 +543,32 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 						a_in.grad.data[i] += node.grad.data[i]
 					}
 					// outside [lo,hi] → gradient is 0 (clamped)
+				}
+			}
+		case .PermuteLOB:
+			x_in := node.inputs[0]
+			if x_in.requires_grad && len(x_in.grad.data) > 0 {
+				batch := node.int_metadata[0]
+				c_out := node.int_metadata[1]
+				t_out := node.int_metadata[2]
+				l_out := node.int_metadata[3]
+				feat_dim := c_out * l_out
+
+				// Reverse the permutation to route gradients back to [B, C, T, L]
+				for b in 0 ..< batch {
+					for tt in 0 ..< t_out {
+						for c in 0 ..< c_out {
+							for ll in 0 ..< l_out {
+								src_idx := (b * t_out + tt) * feat_dim + c * l_out + ll
+								dst_idx :=
+									b * (c_out * t_out * l_out) +
+									c * (t_out * l_out) +
+									tt * l_out +
+									ll
+								x_in.grad.data[dst_idx] += node.grad.data[src_idx]
+							}
+						}
+					}
 				}
 			}
 		case .SumDim1:
