@@ -548,6 +548,7 @@ main :: proc() {
 	// test.ppo_multi_asset_wf_test(context.temp_allocator)
 	// test.timegan_test(context.temp_allocator)
 	test.deeplob_test(context.temp_allocator)
+	test.deeplob_talkative_test(context.temp_allocator)
 	fmt.println("Demo End")
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
