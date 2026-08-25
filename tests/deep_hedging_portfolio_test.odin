@@ -19,7 +19,10 @@ deep_hedging_portfolio_test :: proc(allocator: mem.Allocator) {
 
 	fmt.println("1. Fetching real historical data for SPY and QQQ...")
 	spy_df := net.read_yahoo("SPY", .Daily, .OneYear, allocator)
+	defer w.destroy_dataframe(&spy_df) // ✅ FIX: Free DataFrame
+
 	qqq_df := net.read_yahoo("QQQ", .Daily, .OneYear, allocator)
+	defer w.destroy_dataframe(&qqq_df) // ✅ FIX: Free DataFrame
 
 	corr := 0.92
 	spy_last, _ := w.column_at_float(w.column(&spy_df, "Close"), spy_df.rows - 1)
@@ -45,8 +48,12 @@ deep_hedging_portfolio_test :: proc(allocator: mem.Allocator) {
 	w2 := 0.5
 
 	paths_data := l.matrix_new(f64, n_paths * (n_steps + 1), state_size, allocator)
+	// Note: paths_data memory is freed when the `paths` tensor is freed.
+
 	rand_count := n_paths * n_steps * 2
 	norm_data := make([]f64, rand_count, allocator)
+	defer delete(norm_data, allocator) // ✅ FIX: Free dynamic slice
+
 	for i in 0 ..< rand_count {
 		norm_data[i] = rand.float64_normal(0.0, 1.0)
 	}
@@ -86,6 +93,7 @@ deep_hedging_portfolio_test :: proc(allocator: mem.Allocator) {
 
 	paths := t.tensor_new(paths_data, false, allocator)
 	paths.shape = [4]int{n_paths, n_steps + 1, state_size, 1}
+	defer t.tensor_free(paths) // ✅ FIX: Free Tensor (also frees paths_data matrix)
 
 	// ========================================================================
 	// ✅ CRITICAL FIX: Normalize Payoff to match the normalized input prices
@@ -124,6 +132,7 @@ deep_hedging_portfolio_test :: proc(allocator: mem.Allocator) {
 
 	payoffs := t.tensor_new(payoffs_data, false, allocator)
 	payoffs.shape = [4]int{n_paths, 1, 1, 1}
+	defer t.tensor_free(payoffs) // ✅ FIX: Free Tensor (also frees payoffs_data matrix)
 
 	fmt.println("\n3. Training Multi-Asset Deep Hedger...")
 	config := ml_fin.DeepHedgerConfig {
