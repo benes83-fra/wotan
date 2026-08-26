@@ -95,28 +95,34 @@ deeplob_forward :: proc(model: ^DeepLOB, input: ^t.Tensor) -> ^t.Tensor {
 	lstm_in := tensor_permute_lob(cnn_out, batch, c_out, t_out, l_out, alloc)
 
 	// 3. Pass through LSTM
+	// Initialize h0 and c0 with zeros
 	h0_data := l.matrix_new(f64, batch, model.config.hidden_dim, alloc)
 	c0_data := l.matrix_new(f64, batch, model.config.hidden_dim, alloc)
+
 	h0 := t.tensor_new(h0_data, false, alloc)
 	c0 := t.tensor_new(c0_data, false, alloc)
 	h0.owned_by_graph = true
 	c0.owned_by_graph = true
 
 	lstm_out := nn.lstm_layer_forward(&model.lstm, lstm_in, h0, c0)
-	// lstm_out shape: [Batch, T_out, Hidden]
+	// lstm_out shape: [Batch, T_out, Hidden, 1]
 
 	// 4. Extract the last time step for classification
-	last_step_data := l.matrix_new(f64, batch, model.config.hidden_dim, alloc)
+	// OPTIMIZED: Using Odin's highly optimized `copy` (SIMD/memcpy) instead of manual element-wise loops
+	hidden_dim := model.config.hidden_dim
+	last_step_data := l.matrix_new(f64, batch, hidden_dim, alloc)
+
 	for b in 0 ..< batch {
-		for h in 0 ..< model.config.hidden_dim {
-			src_idx :=
-				b * (t_out * model.config.hidden_dim) + (t_out - 1) * model.config.hidden_dim + h
-			last_step_data.data[b * model.config.hidden_dim + h] = lstm_out.data.data[src_idx]
-		}
+		src_idx := b * (t_out * hidden_dim) + (t_out - 1) * hidden_dim
+		dst_idx := b * hidden_dim
+		copy(
+			last_step_data.data[dst_idx:dst_idx + hidden_dim],
+			lstm_out.data.data[src_idx:src_idx + hidden_dim],
+		)
 	}
 
 	last_step := t.tensor_new(last_step_data, true, alloc)
-	last_step.shape = [4]int{batch, model.config.hidden_dim, 1, 1}
+	last_step.shape = [4]int{batch, hidden_dim, 1, 1}
 	last_step.owned_by_graph = true
 
 	// DO NOT call t.tensor_free_graph here. Let the training loop handle it
@@ -131,8 +137,8 @@ deeplob_forward :: proc(model: ^DeepLOB, input: ^t.Tensor) -> ^t.Tensor {
 // ============================================================================
 // Custom Permute Operation for Autograd Graph
 // ============================================================================
-// NOTE: This requires adding `.PermuteLOB` to the `Op` enum in `wotan/tensor/tensor.odin`
-// and adding the corresponding backward pass case. See the patch notes below.
+// NOTE: This requires `.PermuteLOB` to be present in the `Op` enum in `wotan/tensor/tensor.odin`
+// and the corresponding backward pass case (which is already present in the repo).
 
 tensor_permute_lob :: proc(
 	x: ^t.Tensor,
@@ -142,14 +148,14 @@ tensor_permute_lob :: proc(
 	feat_dim := c_out * l_out
 	out_data := l.matrix_new(f64, batch * t_out, feat_dim, alloc)
 
+	// OPTIMIZED: Permutation using Odin's `copy` for contiguous blocks.
+	// The innermost loop over `l_out` copies a contiguous slice, leveraging SIMD/memcpy.
 	for b in 0 ..< batch {
 		for tt in 0 ..< t_out {
 			for c in 0 ..< c_out {
-				for ll in 0 ..< l_out {
-					src_idx := b * (c_out * t_out * l_out) + c * (t_out * l_out) + tt * l_out + ll
-					dst_idx := (b * t_out + tt) * feat_dim + c * l_out + ll
-					out_data.data[dst_idx] = x.data.data[src_idx]
-				}
+				src_idx := b * (c_out * t_out * l_out) + c * (t_out * l_out) + tt * l_out
+				dst_idx := (b * t_out + tt) * feat_dim + c * l_out
+				copy(out_data.data[dst_idx:dst_idx + l_out], x.data.data[src_idx:src_idx + l_out])
 			}
 		}
 	}
@@ -158,7 +164,7 @@ tensor_permute_lob :: proc(
 	out.shape = [4]int{batch, t_out, feat_dim, 1}
 
 	if out.requires_grad {
-		out.op = .PermuteLOB // Requires patch to tensor.odin
+		out.op = .PermuteLOB
 		append(&out.inputs, x)
 		append(&out.int_metadata, batch)
 		append(&out.int_metadata, c_out)
