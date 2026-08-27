@@ -1,6 +1,7 @@
 package tests
 
-import core "../wotan/core"
+import w "../wotan/core"
+import importer "../wotan/importer"
 import l "../wotan/linalg"
 import ml_fin "../wotan/ml_finance"
 import net "../wotan/net"
@@ -9,17 +10,37 @@ import t "../wotan/tensor"
 import "core:fmt"
 import "core:math"
 import "core:mem"
+import "core:strings"
 
 // ============================================================================
-// 1. Data Ingestion (Reusing net and importer modules)
+// 1. Data Ingestion (Reusing net.http_get and importer.csv_load_from_string)
 // ============================================================================
 
-load_lob_data :: proc(url: string, allocator: mem.Allocator) -> core.DataFrame {
-	fmt.println("Downloading and parsing LOB data via libcurl...")
+load_real_lob_data :: proc(url: string, allocator: mem.Allocator) -> w.DataFrame {
+	fmt.println("Downloading real LOB data via libcurl...")
 	fmt.println("URL:", url)
 
-	// Reuse existing net module to fetch and parse CSV directly.
-	df := net.read_csv_from_url(url, allocator)
+	// 1. Fetch raw text using your existing net module
+	text, ok := net.http_get(url, context.temp_allocator)
+	if !ok {
+		fmt.println("Failed to download data.")
+		return w.dataframe_new()
+	}
+
+	// 2. The raw TSLA sample has no header. Define it as a constant.
+	header := "bid_p1,bid_p2,bid_p3,bid_p4,bid_p5,bid_p6,bid_p7,bid_p8,bid_p9,bid_p10,bid_v1,bid_v2,bid_v3,bid_v4,bid_v5,bid_v6,bid_v7,bid_v8,bid_v9,bid_v10,ask_p1,ask_p2,ask_p3,ask_p4,ask_p5,ask_p6,ask_p7,ask_p8,ask_p9,ask_p10,ask_v1,ask_v2,ask_v3,ask_v4,ask_v5,ask_v6,ask_v7,ask_v8,ask_v9,ask_v10\n"
+
+	// 3. Proper Odin string concatenation for runtime strings
+	full_text := strings.join([]string{header, text}, "", allocator)
+
+	// 4. Explicitly define types to bypass inference and ensure robust parsing
+	types := make([]w.ColumnType, 40, context.temp_allocator)
+	for i in 0 ..< 40 {
+		types[i] = .Float
+	}
+
+	// 5. Parse using your existing importer
+	df := importer.csv_load_from_string(full_text, allocator, types, ',')
 
 	if df.rows == 0 {
 		fmt.println("Warning: Loaded DataFrame has 0 rows.")
@@ -34,7 +55,7 @@ load_lob_data :: proc(url: string, allocator: mem.Allocator) -> core.DataFrame {
 // ============================================================================
 
 extract_and_window_lob :: proc(
-	df: ^core.DataFrame,
+	df: ^w.DataFrame,
 	time_steps: int,
 	price_levels: int,
 	max_windows: int,
@@ -63,37 +84,37 @@ extract_and_window_lob :: proc(
 	stride_c := time_steps * price_levels
 	stride_t := price_levels
 
-	// Extract raw data from DataFrame columns using the existing core API.
-	// We assume the first 40 columns are Float features, and the 41st is the Int label.
-	feature_cols: [40]^core.Column
+	// Extract the first 40 float columns as our LOB features.
+	feature_cols: [40]^w.Column
 	for j in 0 ..< 40 {
 		feature_cols[j] = &df.columns[j]
 	}
-	label_col := &df.columns[40]
 
-	for w in 0 ..< n_windows {
+	for win in 0 ..< n_windows {
 		// 1. Extract raw window data into channels
 		for t_idx in 0 ..< time_steps {
-			row := w + t_idx
+			row := win + t_idx
 			for l_idx in 0 ..< price_levels {
-				// Channel 0: Bid Price (cols 0-9)
-				v0, _ := core.column_at_float(feature_cols[l_idx], row)
-				feat_data.data[w * (channels * stride_c) + 0 * stride_c + t_idx * stride_t + l_idx] =
+				// Map the 40 columns to the 4 DeepLOB channels sequentially.
+				col_idx_0 := l_idx
+				col_idx_1 := 10 + l_idx
+				col_idx_2 := 20 + l_idx
+				col_idx_3 := 30 + l_idx
+
+				v0, _ := w.column_at_float(feature_cols[col_idx_0], row)
+				feat_data.data[win * (channels * stride_c) + 0 * stride_c + t_idx * stride_t + l_idx] =
 					v0
 
-				// Channel 1: Bid Volume (cols 10-19)
-				v1, _ := core.column_at_float(feature_cols[10 + l_idx], row)
-				feat_data.data[w * (channels * stride_c) + 1 * stride_c + t_idx * stride_t + l_idx] =
+				v1, _ := w.column_at_float(feature_cols[col_idx_1], row)
+				feat_data.data[win * (channels * stride_c) + 1 * stride_c + t_idx * stride_t + l_idx] =
 					v1
 
-				// Channel 2: Ask Price (cols 20-29)
-				v2, _ := core.column_at_float(feature_cols[20 + l_idx], row)
-				feat_data.data[w * (channels * stride_c) + 2 * stride_c + t_idx * stride_t + l_idx] =
+				v2, _ := w.column_at_float(feature_cols[col_idx_2], row)
+				feat_data.data[win * (channels * stride_c) + 2 * stride_c + t_idx * stride_t + l_idx] =
 					v2
 
-				// Channel 3: Ask Volume (cols 30-39)
-				v3, _ := core.column_at_float(feature_cols[30 + l_idx], row)
-				feat_data.data[w * (channels * stride_c) + 3 * stride_c + t_idx * stride_t + l_idx] =
+				v3, _ := w.column_at_float(feature_cols[col_idx_3], row)
+				feat_data.data[win * (channels * stride_c) + 3 * stride_c + t_idx * stride_t + l_idx] =
 					v3
 			}
 		}
@@ -101,34 +122,40 @@ extract_and_window_lob :: proc(
 		// 2. Per-Window Z-Score Normalization (prevents look-ahead bias)
 		for c in 0 ..< channels {
 			for l in 0 ..< price_levels {
-				// Calculate mean
 				mean := 0.0
 				for t_idx in 0 ..< time_steps {
-					idx := w * (channels * stride_c) + c * stride_c + t_idx * stride_t + l
+					idx := win * (channels * stride_c) + c * stride_c + t_idx * stride_t + l
 					mean += feat_data.data[idx]
 				}
 				mean /= f64(time_steps)
 
-				// Calculate std
 				var_sum := 0.0
 				for t_idx in 0 ..< time_steps {
-					idx := w * (channels * stride_c) + c * stride_c + t_idx * stride_t + l
+					idx := win * (channels * stride_c) + c * stride_c + t_idx * stride_t + l
 					diff := feat_data.data[idx] - mean
 					var_sum += diff * diff
 				}
 				std := math.sqrt(var_sum / f64(time_steps)) + 1e-8
 
-				// Normalize
 				for t_idx in 0 ..< time_steps {
-					idx := w * (channels * stride_c) + c * stride_c + t_idx * stride_t + l
+					idx := win * (channels * stride_c) + c * stride_c + t_idx * stride_t + l
 					feat_data.data[idx] = (feat_data.data[idx] - mean) / std
 				}
 			}
 		}
 
-		// 3. Assign Label (FI-2010 uses 1, 2, 3. We convert to 0, 1, 2 for cross-entropy)
-		label_val, _ := core.column_at_int(label_col, w + time_steps - 1)
-		window_labels[w] = label_val - 1
+		// 3. Assign Label (Generate 0, 1, 2 based on mid-price movement)
+		price_start, _ := w.column_at_float(feature_cols[0], win)
+		price_end, _ := w.column_at_float(feature_cols[0], win + time_steps - 1)
+		change := (price_end - price_start) / price_start
+
+		label := 1 // Stationary
+		if change > 0.0001 {
+			label = 2 // Up
+		} else if change < -0.0001 {
+			label = 0 // Down
+		}
+		window_labels[win] = label
 	}
 
 	features_tensor := t.tensor_new(feat_data, false, allocator)
@@ -144,23 +171,23 @@ extract_and_window_lob :: proc(
 deeplob_real_data_test :: proc(allocator: mem.Allocator) {
 	fmt.println("\n=== DeepLOB Real Data Pipeline Test ===")
 
-	// 1. Setup URL for FI-2010 dataset
-	url := "https://raw.githubusercontent.com/zbrent/DeepLOB/master/data/Train_Dst_NoAuction_DecPreProcessing.txt"
+	// Verified public URL for real 10-level Limit Order Book data (TSLA)
+	url := "https://raw.githubusercontent.com/thertrader/Using-random-forest-to-model-limit-order-book-dynamic/master/TSLA_2015-01-07_34200000_57600000_orderbook_10_SAMPLE.csv"
 
-	// 2. Load data using existing net/importer modules
-	df := load_lob_data(url, allocator)
-	defer core.destroy_dataframe(&df)
+	// Load data
+	df := load_real_lob_data(url, allocator)
+	defer w.destroy_dataframe(&df)
 
 	if df.rows == 0 {
 		fmt.println("Aborting test due to empty DataFrame.")
 		return
 	}
 
-	// 3. Build windows
-	time_steps := 100
+	// Build windows (Adjusted to 40 steps since the sample file has ~50 rows)
+	time_steps := 40
 	price_levels := 10
 	num_classes := 3
-	max_windows := 2000 // Limit memory usage for the test
+	max_windows := 10
 
 	fmt.printf("Creating sliding windows (max %d)...\n", max_windows)
 	features_tensor, window_labels := extract_and_window_lob(
@@ -181,7 +208,7 @@ deeplob_real_data_test :: proc(allocator: mem.Allocator) {
 	batch_size := features_tensor.shape[0]
 	fmt.printf("Built tensor of shape [%d, 4, %d, %d]\n", batch_size, time_steps, price_levels)
 
-	// 4. Train Model
+	// Train Model
 	fmt.println("Initializing DeepLOB model...")
 	config := ml_fin.DeepLOBConfig {
 		time_steps   = time_steps,
@@ -196,7 +223,7 @@ deeplob_real_data_test :: proc(allocator: mem.Allocator) {
 	defer nn.adam_free(&opt)
 	ml_fin.deeplob_add_to_adam(model, &opt)
 
-	fmt.println("Starting Training on Real Data...")
+	fmt.println("Starting Training on Real LOB Data...")
 	fmt.println("Epoch | Loss    | Accuracy | Status")
 	fmt.println("------|---------|----------|-------------------------")
 
@@ -227,7 +254,6 @@ deeplob_real_data_test :: proc(allocator: mem.Allocator) {
 		}
 		acc := f64(correct) / f64(batch_size) * 100.0
 
-		// FIXED: Odin uses "else if" (two words), not "elseif"
 		status := ""
 		if epoch == 0 {
 			status = "(Initial)"
