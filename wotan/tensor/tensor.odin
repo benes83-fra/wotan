@@ -63,6 +63,7 @@ Op :: enum {
 	Entropy,
 	BCELoss,
 	PermuteLOB,
+	SharpeLoss,
 	Concat,
 }
 
@@ -2134,6 +2135,28 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 				}
 
 				delete(centered, allocator)
+			}
+		case .SharpeLoss:
+			ret_in := node.inputs[0]
+			if ret_in.requires_grad && len(ret_in.grad.data) > 0 {
+				n := f64(node.int_metadata[0])
+				rf := f64(node.int_metadata[1]) / 1_000_000.0
+				mean := f64(node.int_metadata[2]) / 1_000_000.0
+				std := f64(node.int_metadata[3]) / 1_000_000.0
+
+				// Analytical gradient of L = -Sharpe w.r.t x_i:
+				// dL/dx_i = ( (mean - rf) * (x_i - mean) - std^2 ) / (n * std^3)
+				scalar_grad := node.grad.data[0]
+				std_sq := std * std
+				std_cube := std_sq * std
+				denominator := n * std_cube
+				excess_mean := mean - rf
+
+				for i in 0 ..< len(ret_in.grad.data) {
+					x_i := ret_in.data.data[i]
+					grad := ((excess_mean * (x_i - mean)) - std_sq) / denominator
+					ret_in.grad.data[i] += scalar_grad * grad
+				}
 			}
 		case .RNN:
 			x_in := node.inputs[0]
@@ -4628,5 +4651,61 @@ tensor_permute_lob :: proc(
 		append(&out.int_metadata, t_out)
 		append(&out.int_metadata, l_out)
 	}
+	return out
+}
+
+// ============================================================================
+// Differentiable Financial Loss: Sharpe Ratio
+// ============================================================================
+// tensor_sharpe_loss computes the negative Sharpe Ratio of a batch of returns.
+// Optimizing this loss maximizes the risk-adjusted return.
+// returns: 1D or 2D tensor of periodic returns.
+// risk_free_rate: scalar f64 (e.g., 0.0).
+tensor_sharpe_loss :: proc(
+	returns: ^Tensor,
+	risk_free_rate: f64 = 0.0,
+	allocator: mem.Allocator = context.allocator,
+) -> ^Tensor {
+	n := f64(len(returns.data.data))
+	if n == 0 {
+		panic("tensor_sharpe_loss: empty returns tensor")
+	}
+
+	// 1. Compute mean
+	mean := 0.0
+	for i in 0 ..< len(returns.data.data) {
+		mean += returns.data.data[i]
+	}
+	mean /= n
+
+	// 2. Compute variance
+	var_sum := 0.0
+	for i in 0 ..< len(returns.data.data) {
+		d := returns.data.data[i] - mean
+		var_sum += d * d
+	}
+	var := var_sum / n
+	std := math.sqrt(var + 1e-8)
+
+	// 3. Compute Sharpe Ratio
+	excess_mean := mean - risk_free_rate
+	sharpe := excess_mean / std
+
+	// 4. Create output tensor (negative sharpe for minimization)
+	out_data := l.matrix_new(f64, 1, 1, allocator)
+	out_data.data[0] = -sharpe
+
+	out := tensor_new(out_data, returns.requires_grad, allocator)
+
+	if out.requires_grad {
+		out.op = .SharpeLoss
+		append(&out.inputs, returns)
+		// Store metadata for backward pass (scaled by 1,000,000 to fit in int)
+		append(&out.int_metadata, int(n))
+		append(&out.int_metadata, int(risk_free_rate * 1_000_000))
+		append(&out.int_metadata, int(mean * 1_000_000))
+		append(&out.int_metadata, int(std * 1_000_000))
+	}
+
 	return out
 }
