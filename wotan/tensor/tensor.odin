@@ -546,7 +546,7 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 					// outside [lo,hi] → gradient is 0 (clamped)
 				}
 			}
-			
+
 		case .PermuteLOB:
 			x_in := node.inputs[0]
 			if x_in.requires_grad && len(x_in.grad.data) > 0 {
@@ -618,7 +618,7 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 					l.vec_sub_inplace_simd(b_in.grad.data, node.grad.data) // ✅ SIMD
 				}
 			}
-			
+
 		case .Mean:
 			a_in := node.inputs[0]
 			if a_in.requires_grad {
@@ -636,7 +636,7 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 					l.vec_sub_inplace_simd(a_in.grad.data, node.grad.data) // ✅ SIMD
 				}
 			}
-			
+
 		case .MatMul:
 			a_in := node.inputs[0]
 			b_in := node.inputs[1]
@@ -2368,47 +2368,50 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 					}
 				}
 			}
-			case .Concat:
-	dim := node.int_metadata[0]
-	num_tensors := len(node.inputs)
+		case .Concat:
+			dim := node.int_metadata[0]
+			num_tensors := len(node.inputs)
 
-	// Calculate total dim size for source indexing
-	total_dim_size := 0
-	for j in 0 ..< num_tensors {
-		total_dim_size += node.int_metadata[1 + j]
-	}
-
-	offset := 0
-	for i in 0 ..< num_tensors {
-		t_in := node.inputs[i]
-		// ✅ FIX: Declare t_dim_size outside the if block so it's visible for offset update
-		t_dim_size := node.int_metadata[1 + i]
-
-		if t_in.requires_grad && len(t_in.grad.data) > 0 {
-			outer_blocks := 1
-			for d in 0 ..< dim {
-				outer_blocks *= t_in.shape[d]
+			// Calculate total dim size for source indexing
+			total_dim_size := 0
+			for j in 0 ..< num_tensors {
+				total_dim_size += node.int_metadata[1 + j]
 			}
 
-			inner_block_size := 1
-			for d in dim + 1 ..< 4 {
-				inner_block_size *= t_in.shape[d]
-			}
+			offset := 0
+			for i in 0 ..< num_tensors {
+				t_in := node.inputs[i]
+				// ✅ FIX: Declare t_dim_size outside the if block so it's visible for offset update
+				t_dim_size := node.int_metadata[1 + i]
 
-			for ob in 0 ..< outer_blocks {
-				for c in 0 ..< t_dim_size {
-					src_start := ob * (total_dim_size * inner_block_size) + (offset + c) * inner_block_size
-					dst_start := ob * (t_dim_size * inner_block_size) + c * inner_block_size
+				if t_in.requires_grad && len(t_in.grad.data) > 0 {
+					outer_blocks := 1
+					for d in 0 ..< dim {
+						outer_blocks *= t_in.shape[d]
+					}
 
-					for k in 0 ..< inner_block_size {
-						t_in.grad.data[dst_start + k] += node.grad.data[src_start + k]
+					inner_block_size := 1
+					for d in dim + 1 ..< 4 {
+						inner_block_size *= t_in.shape[d]
+					}
+
+					for ob in 0 ..< outer_blocks {
+						for c in 0 ..< t_dim_size {
+							src_start :=
+								ob * (total_dim_size * inner_block_size) +
+								(offset + c) * inner_block_size
+							dst_start :=
+								ob * (t_dim_size * inner_block_size) + c * inner_block_size
+
+							for k in 0 ..< inner_block_size {
+								t_in.grad.data[dst_start + k] += node.grad.data[src_start + k]
+							}
+						}
 					}
 				}
+				// ✅ FIX: Now t_dim_size is in scope here
+				offset += t_dim_size
 			}
-		}
-		// ✅ FIX: Now t_dim_size is in scope here
-		offset += t_dim_size
-	}
 		case .Conv2d:
 			input_in := node.inputs[0]
 			weight_in := node.inputs[1]
@@ -4508,7 +4511,11 @@ tensor_bce_loss :: proc(prediction: ^Tensor, target: ^Tensor) -> ^Tensor {
 // Tensor Concatenation (Multi-dimensional)
 // ============================================================================
 
-tensor_concat :: proc(tensors: []^Tensor, dim: int, allocator: mem.Allocator = context.allocator) -> ^Tensor {
+tensor_concat :: proc(
+	tensors: []^Tensor,
+	dim: int,
+	allocator: mem.Allocator = context.allocator,
+) -> ^Tensor {
 	if len(tensors) == 0 {
 		panic("tensor_concat: empty tensor slice")
 	}
@@ -4527,7 +4534,14 @@ tensor_concat :: proc(tensors: []^Tensor, dim: int, allocator: mem.Allocator = c
 		}
 		for d in 0 ..< 4 {
 			if d != dim && t.shape[d] != ref_shape[d] {
-				panic(fmt.tprintf("tensor_concat: shape mismatch at dim %d (expected %d, got %d)", d, ref_shape[d], t.shape[d]))
+				panic(
+					fmt.tprintf(
+						"tensor_concat: shape mismatch at dim %d (expected %d, got %d)",
+						d,
+						ref_shape[d],
+						t.shape[d],
+					),
+				)
 			}
 		}
 	}
@@ -4556,11 +4570,12 @@ tensor_concat :: proc(tensors: []^Tensor, dim: int, allocator: mem.Allocator = c
 		for ob in 0 ..< outer_blocks {
 			for c in 0 ..< t_dim_size {
 				src_start := ob * (t_dim_size * inner_block_size) + c * inner_block_size
-				dst_start := ob * (total_dim_size * inner_block_size) + (dim_offset + c) * inner_block_size
+				dst_start :=
+					ob * (total_dim_size * inner_block_size) + (dim_offset + c) * inner_block_size
 
 				copy(
-					out_data.data[dst_start : dst_start + inner_block_size],
-					t.data.data[src_start : src_start + inner_block_size],
+					out_data.data[dst_start:dst_start + inner_block_size],
+					t.data.data[src_start:src_start + inner_block_size],
 				)
 			}
 		}

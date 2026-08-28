@@ -10,26 +10,26 @@ import "core:mem"
 // ============================================================================
 
 DeepLOBConfig :: struct {
-	time_steps:   int, // T (e.g., 100 ticks)
-	price_levels: int, // L (e.g., 10 bid/ask levels)
-	num_classes:  int, // Usually 3 (Up, Down, Stationary)
-	hidden_dim:   int, // LSTM hidden size
+	time_steps:   int,
+	price_levels: int,
+	num_classes:  int,
+	hidden_dim:   int,
+	dropout_prob: f64,
 }
 
 DeepLOB :: struct {
 	cnn:       ^nn.Sequential,
-	inception: InceptionBlock, // Multi-scale feature extraction
+	inception: InceptionBlock,
 	lstm:      nn.LSTMLayer,
 	fc_head:   nn.LinearLayer,
 	config:    DeepLOBConfig,
 	allocator: mem.Allocator,
+	training:  bool,
 }
 
 // ============================================================================
 // Inception Block (Multi-Scale Feature Extraction)
 // ============================================================================
-// Implements parallel convolutional branches. Outputs are fused via element-wise
-// addition to avoid requiring tensor_concat, while maintaining identical shapes.
 
 InceptionBlock :: struct {
 	b1_1x1: nn.Conv2dLayer,
@@ -46,20 +46,16 @@ inception_block_new :: proc(
 ) -> InceptionBlock {
 	block: InceptionBlock
 
-	// Split output channels equally among the 3 main branches so they can be added
-	c := out_channels / 3
-	if c < 1 {c = 1}
+	// Split channels to ensure the sum exactly equals out_channels
+	c1 := out_channels / 3
+	c2 := out_channels / 3
+	c3 := out_channels - c1 - c2 // Guarantees c1 + c2 + c3 == out_channels
 
-	// Branch 1: Direct 1x1 Conv
-	block.b1_1x1 = nn.conv2d_layer_new(in_channels, c, 1, 1, 0, true, allocator)
-
-	// Branch 2: 1x1 Conv (dimensionality reduction) -> 3x3 Conv
-	block.b2_1x1 = nn.conv2d_layer_new(in_channels, c, 1, 1, 0, true, allocator)
-	block.b2_3x3 = nn.conv2d_layer_new(c, c, 3, 1, 1, true, allocator)
-
-	// Branch 3: 1x1 Conv (dimensionality reduction) -> 5x5 Conv
-	block.b3_1x1 = nn.conv2d_layer_new(in_channels, c, 1, 1, 0, true, allocator)
-	block.b3_5x5 = nn.conv2d_layer_new(c, c, 5, 1, 2, true, allocator)
+	block.b1_1x1 = nn.conv2d_layer_new(in_channels, c1, 1, 1, 0, true, allocator)
+	block.b2_1x1 = nn.conv2d_layer_new(in_channels, c2, 1, 1, 0, true, allocator)
+	block.b2_3x3 = nn.conv2d_layer_new(c2, c2, 3, 1, 1, true, allocator)
+	block.b3_1x1 = nn.conv2d_layer_new(in_channels, c3, 1, 1, 0, true, allocator)
+	block.b3_5x5 = nn.conv2d_layer_new(c3, c3, 5, 1, 2, true, allocator)
 
 	return block
 }
@@ -72,39 +68,68 @@ inception_block_free :: proc(block: ^InceptionBlock) {
 	nn.conv2d_layer_free(&block.b3_5x5)
 }
 
-inception_block_forward :: proc(block: ^InceptionBlock, x: ^t.Tensor, alloc: mem.Allocator) -> ^t.Tensor {
-	// Branch 1: 1x1 Conv + ReLU
-	b1 := t.tensor_conv2d(x, block.b1_1x1.weight, block.b1_1x1.bias, block.b1_1x1.stride, block.b1_1x1.padding)
+inception_block_forward :: proc(
+	block: ^InceptionBlock,
+	x: ^t.Tensor,
+	alloc: mem.Allocator,
+) -> ^t.Tensor {
+	b1 := t.tensor_conv2d(
+		x,
+		block.b1_1x1.weight,
+		block.b1_1x1.bias,
+		block.b1_1x1.stride,
+		block.b1_1x1.padding,
+	)
 	b1 = t.tensor_relu(b1)
 
-	// Branch 2: 1x1 Conv + ReLU -> 3x3 Conv + ReLU
-	b2 := t.tensor_conv2d(x, block.b2_1x1.weight, block.b2_1x1.bias, block.b2_1x1.stride, block.b2_1x1.padding)
+	b2 := t.tensor_conv2d(
+		x,
+		block.b2_1x1.weight,
+		block.b2_1x1.bias,
+		block.b2_1x1.stride,
+		block.b2_1x1.padding,
+	)
 	b2 = t.tensor_relu(b2)
-	b2 = t.tensor_conv2d(b2, block.b2_3x3.weight, block.b2_3x3.bias, block.b2_3x3.stride, block.b2_3x3.padding)
+	b2 = t.tensor_conv2d(
+		b2,
+		block.b2_3x3.weight,
+		block.b2_3x3.bias,
+		block.b2_3x3.stride,
+		block.b2_3x3.padding,
+	)
 	b2 = t.tensor_relu(b2)
 
-	// Branch 3: 1x1 Conv + ReLU -> 5x5 Conv + ReLU
-	b3 := t.tensor_conv2d(x, block.b3_1x1.weight, block.b3_1x1.bias, block.b3_1x1.stride, block.b3_1x1.padding)
+	b3 := t.tensor_conv2d(
+		x,
+		block.b3_1x1.weight,
+		block.b3_1x1.bias,
+		block.b3_1x1.stride,
+		block.b3_1x1.padding,
+	)
 	b3 = t.tensor_relu(b3)
-	b3 = t.tensor_conv2d(b3, block.b3_5x5.weight, block.b3_5x5.bias, block.b3_5x5.stride, block.b3_5x5.padding)
+	b3 = t.tensor_conv2d(
+		b3,
+		block.b3_5x5.weight,
+		block.b3_5x5.bias,
+		block.b3_5x5.stride,
+		block.b3_5x5.padding,
+	)
 	b3 = t.tensor_relu(b3)
 
-	// Combine branches via concatenation along the channel dimension (dim = 1)
-	// Using a fixed-size array avoids dynamic literal allocation issues
 	branches: [3]^t.Tensor
 	branches[0] = b1
 	branches[1] = b2
 	branches[2] = b3
-	
+
 	out := t.tensor_concat(branches[:], 1, alloc)
 
-	// Clean up intermediate tensors to prevent memory leaks in the autograd graph
-	t.tensor_free_graph(b1)
-	t.tensor_free_graph(b2)
-	t.tensor_free_graph(b3)
+	// NOTE: Do NOT free b1, b2, or b3 here! They are required for the
+	// backward pass. The final t.tensor_free_graph(loss) call in the
+	// training loop will safely clean up the entire computation graph.
 
 	return out
 }
+
 // ============================================================================
 // Initialization & Lifecycle
 // ============================================================================
@@ -116,31 +141,31 @@ deeplob_new :: proc(
 	model := new(DeepLOB, allocator)
 	model.config = config
 	model.allocator = allocator
+	model.training = true
 
-	// 1. Initial CNN Feature Extractor
+	if model.config.dropout_prob == 0.0 {
+		model.config.dropout_prob = 0.3
+	}
+
 	model.cnn = nn.sequential_new(allocator)
 
-	// Conv1: 4 -> 16 channels, 3x3 kernel, stride 1, padding 1
 	nn.sequential_add(model.cnn, nn.conv2d_layer_new(4, 16, 3, 1, 1, true, allocator))
 	nn.sequential_add(model.cnn, nn.Activation.ReLU)
 
-	// Conv2: 16 -> 32 channels, 3x3 kernel, stride 1, padding 1
 	nn.sequential_add(model.cnn, nn.conv2d_layer_new(16, 32, 3, 1, 1, true, allocator))
 	nn.sequential_add(model.cnn, nn.Activation.ReLU)
 
-	// 2. Inception Module for Multi-Scale Feature Extraction
-	// Takes 32 channels, outputs 32 channels (split across branches)
-	model.inception = inception_block_new(32, 32, allocator)
+	// Inception Module: takes 32 channels, outputs exactly 32 channels
+	inception_out_channels := 32
+	model.inception = inception_block_new(32, inception_out_channels, allocator)
 
-	// 3. MaxPool: 2x2 kernel, stride 2 (downsamples T -> T/2, L -> L/2)
 	nn.sequential_add(model.cnn, nn.maxpool2d_layer_new(2, 2))
 
-	// 4. LSTM for Temporal Sequence Modeling
-	// The input features will be C_out * L_out (32 * (price_levels / 2))
-	lstm_feat_dim := 32 * (config.price_levels / 2)
+	// LSTM: input features = C_out * L_out
+	// After MaxPool2d, L_out = price_levels / 2
+	lstm_feat_dim := inception_out_channels * (config.price_levels / 2)
 	model.lstm = nn.lstm_layer_new(lstm_feat_dim, config.hidden_dim, allocator)
 
-	// 5. Classification Head
 	model.fc_head = nn.linear_layer_new(config.hidden_dim, config.num_classes, allocator)
 
 	return model
@@ -156,6 +181,14 @@ deeplob_free :: proc(model: ^DeepLOB) {
 	free(model, model.allocator)
 }
 
+deeplob_train :: proc(model: ^DeepLOB) {
+	model.training = true
+}
+
+deeplob_eval :: proc(model: ^DeepLOB) {
+	model.training = false
+}
+
 // ============================================================================
 // Forward Pass
 // ============================================================================
@@ -164,22 +197,16 @@ deeplob_forward :: proc(model: ^DeepLOB, input: ^t.Tensor) -> ^t.Tensor {
 	alloc := model.allocator
 	batch := input.shape[0]
 
-	// 1. Pass through initial CNN
 	cnn_out := nn.sequential_forward(model.cnn, input)
 
-	// 2. Pass through Inception Block (Multi-scale extraction)
 	inception_out := inception_block_forward(&model.inception, cnn_out, alloc)
-	t.tensor_free_graph(cnn_out) // Clean up intermediate to prevent graph bloat
 
 	c_out := inception_out.shape[1]
 	t_out := inception_out.shape[2]
 	l_out := inception_out.shape[3]
 
-	// 3. Permute for LSTM: [Batch, C, T, L] -> [Batch, T, C*L]
 	lstm_in := tensor_permute_lob(inception_out, batch, c_out, t_out, l_out, alloc)
-	t.tensor_free_graph(inception_out) // Clean up intermediate
 
-	// 4. Pass through LSTM
 	h0_data := l.matrix_new(f64, batch, model.config.hidden_dim, alloc)
 	c0_data := l.matrix_new(f64, batch, model.config.hidden_dim, alloc)
 	h0 := t.tensor_new(h0_data, false, alloc)
@@ -188,9 +215,7 @@ deeplob_forward :: proc(model: ^DeepLOB, input: ^t.Tensor) -> ^t.Tensor {
 	c0.owned_by_graph = true
 
 	lstm_out := nn.lstm_layer_forward(&model.lstm, lstm_in, h0, c0)
-	// lstm_out shape: [Batch, T_out, Hidden, 1]
 
-	// 5. Extract the last time step for classification
 	hidden_dim := model.config.hidden_dim
 	last_step_data := l.matrix_new(f64, batch, hidden_dim, alloc)
 
@@ -207,7 +232,10 @@ deeplob_forward :: proc(model: ^DeepLOB, input: ^t.Tensor) -> ^t.Tensor {
 	last_step.shape = [4]int{batch, hidden_dim, 1, 1}
 	last_step.owned_by_graph = true
 
-	// 6. Classification Head
+	if model.training && model.config.dropout_prob > 0.0 {
+		last_step = t.tensor_dropout(last_step, model.config.dropout_prob, model.training)
+	}
+
 	logits := nn.linear_forward(&model.fc_head, last_step)
 
 	return logits
@@ -256,7 +284,6 @@ tensor_permute_lob :: proc(
 deeplob_add_to_adam :: proc(model: ^DeepLOB, opt: ^nn.Adam) {
 	nn.sequential_add_to_adam(model.cnn, opt)
 
-	// Manually add Inception block parameters
 	nn.adam_add_param(opt, model.inception.b1_1x1.weight)
 	if model.inception.b1_1x1.bias != nil {nn.adam_add_param(opt, model.inception.b1_1x1.bias)}
 
@@ -270,7 +297,6 @@ deeplob_add_to_adam :: proc(model: ^DeepLOB, opt: ^nn.Adam) {
 	nn.adam_add_param(opt, model.inception.b3_5x5.weight)
 	if model.inception.b3_5x5.bias != nil {nn.adam_add_param(opt, model.inception.b3_5x5.bias)}
 
-	// Manually add LSTM and FC weights
 	nn.adam_add_param(opt, model.lstm.w_ih)
 	nn.adam_add_param(opt, model.lstm.w_hh)
 	if model.lstm.bias != nil {
