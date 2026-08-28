@@ -4599,3 +4599,34 @@ tensor_concat :: proc(
 
 	return out
 }
+tensor_permute_lob :: proc(
+	x: ^Tensor,
+	batch, c_out, t_out, l_out: int,
+	alloc: mem.Allocator,
+) -> ^Tensor {
+	feat_dim := c_out * l_out
+	out_data := l.matrix_new(f64, batch * t_out, feat_dim, alloc)
+
+	for b: int = 0; b < batch; b += 1 {
+		for tt: int = 0; tt < t_out; tt += 1 {
+			for c: int = 0; c < c_out; c += 1 {
+				src_idx := b * (c_out * t_out * l_out) + c * (t_out * l_out) + tt * l_out
+				dst_idx := (b * t_out + tt) * feat_dim + c * l_out
+				copy(out_data.data[dst_idx:dst_idx + l_out], x.data.data[src_idx:src_idx + l_out])
+			}
+		}
+	}
+
+	out := tensor_new(out_data, x.requires_grad, alloc)
+	out.shape = [4]int{batch, t_out, feat_dim, 1}
+
+	if out.requires_grad {
+		out.op = .PermuteLOB
+		append(&out.inputs, x)
+		append(&out.int_metadata, batch)
+		append(&out.int_metadata, c_out)
+		append(&out.int_metadata, t_out)
+		append(&out.int_metadata, l_out)
+	}
+	return out
+}
