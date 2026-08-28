@@ -72,63 +72,31 @@ inception_block_free :: proc(block: ^InceptionBlock) {
 	nn.conv2d_layer_free(&block.b3_5x5)
 }
 
-inception_block_forward :: proc(
-	block: ^InceptionBlock,
-	x: ^t.Tensor,
-	alloc: mem.Allocator,
-) -> ^t.Tensor {
+inception_block_forward :: proc(block: ^InceptionBlock, x: ^t.Tensor, alloc: mem.Allocator) -> ^t.Tensor {
 	// Branch 1: 1x1 Conv + ReLU
-	b1 := t.tensor_conv2d(
-		x,
-		block.b1_1x1.weight,
-		block.b1_1x1.bias,
-		block.b1_1x1.stride,
-		block.b1_1x1.padding,
-	)
+	b1 := t.tensor_conv2d(x, block.b1_1x1.weight, block.b1_1x1.bias, block.b1_1x1.stride, block.b1_1x1.padding)
 	b1 = t.tensor_relu(b1)
 
 	// Branch 2: 1x1 Conv + ReLU -> 3x3 Conv + ReLU
-	b2 := t.tensor_conv2d(
-		x,
-		block.b2_1x1.weight,
-		block.b2_1x1.bias,
-		block.b2_1x1.stride,
-		block.b2_1x1.padding,
-	)
+	b2 := t.tensor_conv2d(x, block.b2_1x1.weight, block.b2_1x1.bias, block.b2_1x1.stride, block.b2_1x1.padding)
 	b2 = t.tensor_relu(b2)
-	b2 = t.tensor_conv2d(
-		b2,
-		block.b2_3x3.weight,
-		block.b2_3x3.bias,
-		block.b2_3x3.stride,
-		block.b2_3x3.padding,
-	)
+	b2 = t.tensor_conv2d(b2, block.b2_3x3.weight, block.b2_3x3.bias, block.b2_3x3.stride, block.b2_3x3.padding)
 	b2 = t.tensor_relu(b2)
 
 	// Branch 3: 1x1 Conv + ReLU -> 5x5 Conv + ReLU
-	b3 := t.tensor_conv2d(
-		x,
-		block.b3_1x1.weight,
-		block.b3_1x1.bias,
-		block.b3_1x1.stride,
-		block.b3_1x1.padding,
-	)
+	b3 := t.tensor_conv2d(x, block.b3_1x1.weight, block.b3_1x1.bias, block.b3_1x1.stride, block.b3_1x1.padding)
 	b3 = t.tensor_relu(b3)
-	b3 = t.tensor_conv2d(
-		b3,
-		block.b3_5x5.weight,
-		block.b3_5x5.bias,
-		block.b3_5x5.stride,
-		block.b3_5x5.padding,
-	)
+	b3 = t.tensor_conv2d(b3, block.b3_5x5.weight, block.b3_5x5.bias, block.b3_5x5.stride, block.b3_5x5.padding)
 	b3 = t.tensor_relu(b3)
 
-	// Combine branches via element-wise addition.
-	// NOTE: This works because all branches output 'c' channels with identical spatial dims.
-	// Once you implement t.tensor_concat in wotan/tensor/tensor.odin, you can replace
-	// these two lines with: out := t.tensor_concat([]^t.Tensor{b1, b2, b3}, 1)
-	out := t.tensor_add(b1, b2)
-	out = t.tensor_add(out, b3)
+	// Combine branches via concatenation along the channel dimension (dim = 1)
+	// Using a fixed-size array avoids dynamic literal allocation issues
+	branches: [3]^t.Tensor
+	branches[0] = b1
+	branches[1] = b2
+	branches[2] = b3
+	
+	out := t.tensor_concat(branches[:], 1, alloc)
 
 	// Clean up intermediate tensors to prevent memory leaks in the autograd graph
 	t.tensor_free_graph(b1)
@@ -137,7 +105,6 @@ inception_block_forward :: proc(
 
 	return out
 }
-
 // ============================================================================
 // Initialization & Lifecycle
 // ============================================================================
