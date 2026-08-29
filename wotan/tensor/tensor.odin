@@ -65,6 +65,7 @@ Op :: enum {
 	PermuteLOB,
 	SharpeLoss,
 	Concat,
+	NormalizeTime,
 }
 
 PoolParams :: struct {
@@ -1425,6 +1426,81 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 				if beta_in.requires_grad && len(beta_in.grad.data) > 0 {
 					dbeta_row := beta_in.grad.data
 					l.vec_add_simd(dbeta_row, dy_row, dbeta_row)
+				}
+			}
+		case .NormalizeTime:
+			input_in := node.inputs[0]
+			if input_in.requires_grad && len(input_in.grad.data) > 0 {
+				N := node.int_metadata[0]
+				C := node.int_metadata[1]
+				T := node.int_metadata[2]
+				L := node.int_metadata[3]
+				eps := f64(node.int_metadata[4]) / 1_000_000_000.0
+
+				T_f := f64(T)
+				// Temporary buffers
+				grad_buf := make([]f64, T, context.allocator)
+				norm_buf := make([]f64, T, context.allocator)
+				mean_vec := make([]f64, T, context.allocator)
+				defer {
+					delete(grad_buf, context.allocator)
+					delete(norm_buf, context.allocator)
+					delete(mean_vec, context.allocator)
+				}
+
+				for n: int = 0; n < N; n += 1 {
+					for c: int = 0; c < C; c += 1 {
+						for el: int = 0; el < L; el += 1 {
+							// Extract gradients and normalized values
+							for t: int = 0; t < T; t += 1 {
+								idx := n * (C * T * L) + c * (T * L) + t * L + el
+								grad_buf[t] = node.grad.data[idx]
+								norm_buf[t] = node.data.data[idx] // This is the normalized input
+							}
+
+							// Gradient of Z-score: dx = (dy - mean(dy) - y * dot(dy, y) / T) / std
+							sum_grad := l.sum_simd(grad_buf)
+							mean_grad := sum_grad / T_f
+							dot_grad_y := l.dot_simd(grad_buf, norm_buf)
+
+							for i: int = 0; i < T; i += 1 {mean_vec[i] = mean_grad}
+
+							temp := make([]f64, T, context.allocator)
+							l.vec_sub_simd(grad_buf, mean_vec, temp)
+
+							scalar := dot_grad_y / T_f
+							for t: int = 0; t < T; t += 1 {
+								temp[t] -= norm_buf[t] * scalar
+							}
+
+							// Recompute std of input for this slice to divide the gradient
+							in_buf := make([]f64, T, context.allocator)
+							for t: int = 0; t < T; t += 1 {
+								idx := n * (C * T * L) + c * (T * L) + t * L + el
+								in_buf[t] = input_in.data.data[idx]
+							}
+							in_mean := l.sum_simd(in_buf) / T_f
+							for i: int = 0; i < T; i += 1 {mean_vec[i] = in_mean}
+
+							in_centered := make([]f64, T, context.allocator)
+							l.vec_sub_simd(in_buf, mean_vec, in_centered)
+							in_var := l.dot_simd(in_centered, in_centered) / T_f
+							in_std := math.sqrt(in_var + eps)
+							inv_std := 1.0 / in_std
+
+							for t: int = 0; t < T; t += 1 {temp[t] *= inv_std}
+
+							// Accumulate to input gradient
+							for t: int = 0; t < T; t += 1 {
+								idx := n * (C * T * L) + c * (T * L) + t * L + el
+								input_in.grad.data[idx] += temp[t]
+							}
+
+							delete(in_buf, context.allocator)
+							delete(in_centered, context.allocator)
+							delete(temp, context.allocator)
+						}
+					}
 				}
 			}
 		case .GRU:
@@ -4705,6 +4781,84 @@ tensor_sharpe_loss :: proc(
 		append(&out.int_metadata, int(risk_free_rate * 1_000_000))
 		append(&out.int_metadata, int(mean * 1_000_000))
 		append(&out.int_metadata, int(std * 1_000_000))
+	}
+
+	return out
+}
+// ============================================================================
+// Time-Dimension Z-Score Normalization (SIMD-Optimized)
+// ============================================================================
+// tensor_normalize_time applies Z-score normalization along the Time dimension (dim=2)
+// for a 4D tensor of shape [Batch, Channels, Time, Levels].
+// This prevents look-ahead bias and is highly optimized using SIMD reductions.
+tensor_normalize_time :: proc(
+	input: ^Tensor,
+	eps: f64 = 1e-8,
+	allocator: mem.Allocator = context.allocator,
+) -> ^Tensor {
+	N := input.shape[0]
+	C := input.shape[1]
+	T := input.shape[2]
+	L := input.shape[3]
+
+	out_data := l.matrix_new(f64, 1, N * C * T * L, allocator)
+
+	// Temporary contiguous buffers for SIMD operations (allocated once)
+	time_buf := make([]f64, T, context.allocator)
+	centered := make([]f64, T, context.allocator)
+	mean_vec := make([]f64, T, context.allocator)
+	inv_std_vec := make([]f64, T, context.allocator)
+
+	defer {
+		delete(time_buf, context.allocator)
+		delete(centered, context.allocator)
+		delete(mean_vec, context.allocator)
+		delete(inv_std_vec, context.allocator)
+	}
+
+	for n: int = 0; n < N; n += 1 {
+		for c: int = 0; c < C; c += 1 {
+			for el: int = 0; el < L; el += 1 {
+				// 1. Extract time series to contiguous buffer
+				for t: int = 0; t < T; t += 1 {
+					src_idx := n * (C * T * L) + c * (T * L) + t * L + el
+					time_buf[t] = input.data.data[src_idx]
+				}
+
+				// 2. Compute mean (SIMD sum)
+				mean := l.sum_simd(time_buf) / f64(T)
+				for i: int = 0; i < T; i += 1 {mean_vec[i] = mean}
+
+				// 3. Compute variance (SIMD)
+				l.vec_sub_simd(time_buf, mean_vec, centered)
+				var := l.dot_simd(centered, centered) / f64(T)
+				std := math.sqrt_f64(var + eps)
+				inv_std := 1.0 / std
+
+				// 4. Normalize (SIMD)
+				for i: int = 0; i < T; i += 1 {inv_std_vec[i] = inv_std}
+				l.vec_mul_simd(centered, inv_std_vec, time_buf) // Reuse time_buf for output
+
+				// 5. Write back
+				for t: int = 0; t < T; t += 1 {
+					dst_idx := n * (C * T * L) + c * (T * L) + t * L + el
+					out_data.data[dst_idx] = time_buf[t]
+				}
+			}
+		}
+	}
+
+	out := tensor_new(out_data, input.requires_grad, allocator)
+	out.shape = input.shape
+
+	if out.requires_grad {
+		out.op = .NormalizeTime
+		append(&out.inputs, input)
+		append(&out.int_metadata, N)
+		append(&out.int_metadata, C)
+		append(&out.int_metadata, T)
+		append(&out.int_metadata, L)
+		append(&out.int_metadata, int(eps * 1_000_000_000.0)) // Store eps scaled to fit in int
 	}
 
 	return out

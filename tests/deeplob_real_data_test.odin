@@ -54,6 +54,10 @@ load_real_lob_data :: proc(url: string, allocator: mem.Allocator) -> w.DataFrame
 // 2. Data Extraction & Windowing (Reusing core DataFrame API)
 // ============================================================================
 
+// ============================================================================
+// 2. Data Extraction & Windowing (Reusing core DataFrame API)
+// ============================================================================
+
 extract_and_window_lob :: proc(
 	df: ^w.DataFrame,
 	time_steps: int,
@@ -119,32 +123,7 @@ extract_and_window_lob :: proc(
 			}
 		}
 
-		// 2. Per-Window Z-Score Normalization (prevents look-ahead bias)
-		for c in 0 ..< channels {
-			for l in 0 ..< price_levels {
-				mean := 0.0
-				for t_idx in 0 ..< time_steps {
-					idx := win * (channels * stride_c) + c * stride_c + t_idx * stride_t + l
-					mean += feat_data.data[idx]
-				}
-				mean /= f64(time_steps)
-
-				var_sum := 0.0
-				for t_idx in 0 ..< time_steps {
-					idx := win * (channels * stride_c) + c * stride_c + t_idx * stride_t + l
-					diff := feat_data.data[idx] - mean
-					var_sum += diff * diff
-				}
-				std := math.sqrt(var_sum / f64(time_steps)) + 1e-8
-
-				for t_idx in 0 ..< time_steps {
-					idx := win * (channels * stride_c) + c * stride_c + t_idx * stride_t + l
-					feat_data.data[idx] = (feat_data.data[idx] - mean) / std
-				}
-			}
-		}
-
-		// 3. Assign Label (Generate 0, 1, 2 based on mid-price movement)
+		// 2. Assign Label (Generate 0, 1, 2 based on mid-price movement)
 		price_start, _ := w.column_at_float(feature_cols[0], win)
 		price_end, _ := w.column_at_float(feature_cols[0], win + time_steps - 1)
 		change := (price_end - price_start) / price_start
@@ -158,8 +137,12 @@ extract_and_window_lob :: proc(
 		window_labels[win] = label
 	}
 
+	// 3. Create tensor and apply SIMD-optimized Z-score normalization along the time dimension
 	features_tensor := t.tensor_new(feat_data, false, allocator)
 	features_tensor.shape = [4]int{n_windows, channels, time_steps, price_levels}
+
+	// Apply the new SIMD-optimized normalization
+	features_tensor = t.tensor_normalize_time(features_tensor, 1e-8, allocator)
 
 	return features_tensor, window_labels
 }
