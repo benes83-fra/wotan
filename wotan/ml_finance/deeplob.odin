@@ -246,7 +246,6 @@ deeplob_forward :: proc(model: ^DeepLOB, input: ^t.Tensor) -> ^t.Tensor {
 // ============================================================================
 
 
-
 // ============================================================================
 // Optimizer Integration
 // ============================================================================
@@ -277,4 +276,47 @@ deeplob_add_to_adam :: proc(model: ^DeepLOB, opt: ^nn.Adam) {
 	if model.fc_head.bias != nil {
 		nn.adam_add_param(opt, model.fc_head.bias)
 	}
+}
+compute_lob_microstructure :: proc(
+	raw_data: []f64,
+	n_windows: int,
+	time_steps: int,
+	price_levels: int,
+	allocator: mem.Allocator,
+) -> []f64 {
+	out_C := 3
+	in_C := 4
+	total_elements := n_windows * out_C * time_steps * price_levels
+	out_data := make([]f64, total_elements, allocator)
+
+	TL := time_steps * price_levels
+
+	for n: int = 0; n < n_windows; n += 1 {
+		for t: int = 0; t < time_steps; t += 1 {
+			for l: int = 0; l < price_levels; l += 1 {
+				in_base := n * (in_C * TL) + t * price_levels + l
+				out_base := n * (out_C * TL) + t * price_levels + l
+
+				bid_p := raw_data[in_base + 0 * TL]
+				bid_v := raw_data[in_base + 1 * TL]
+				ask_p := raw_data[in_base + 2 * TL]
+				ask_v := raw_data[in_base + 3 * TL]
+
+				// 1. Mid-Price: (Ask + Bid) / 2
+				out_data[out_base + 0 * TL] = (ask_p + bid_p) * 0.5
+
+				// 2. Spread: Ask - Bid
+				out_data[out_base + 1 * TL] = ask_p - bid_p
+
+				// 3. Order Book Imbalance (OBI): (BidVol - AskVol) / (BidVol + AskVol)
+				vol_sum := bid_v + ask_v
+				if vol_sum != 0.0 {
+					out_data[out_base + 2 * TL] = (bid_v - ask_v) / vol_sum
+				} else {
+					out_data[out_base + 2 * TL] = 0.0
+				}
+			}
+		}
+	}
+	return out_data
 }

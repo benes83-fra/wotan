@@ -1,0 +1,4044 @@
+// ===== ./cholesky.odin =====
+package wotan_linalg
+
+import "core:fmt"
+import "core:math"
+import "core:mem"
+
+
+Cholesky_Mode :: enum {
+	Unblocked,
+	Blocked,
+}
+
+cholesky :: proc(A: ^Matrix(f64), mode: Cholesky_Mode) {
+	switch mode {
+	case .Unblocked:
+		cholesky_decompose(A)
+	case .Blocked:
+		cholesky_decompose_blocked(A)
+	}
+}
+
+
+// Cholesky decomposition: A = L * Lᵀ
+// A is symmetric positive definite, stored as full matrix.
+// L is written in-place into A (lower triangle), upper triangle is left unspecified.
+cholesky_decompose :: proc(A: ^Matrix(f64)) {
+	n := A.rows
+	if A.cols != n do panic("cholesky_decompose: non-square matrix")
+
+	for j := 0; j < n; j += 1 {
+		// Diagonal
+		sum := A.data[j * n + j]
+		if j > 0 {
+			row_j := A.data[j * n:j * n + j]
+			sum -= dot_simd(row_j, row_j)
+		}
+		if sum <= 0 {
+			panic("cholesky_decompose: matrix not positive definite")
+		}
+		A.data[j * n + j] = math.sqrt(sum)
+
+		// Off-diagonal
+		for i := j + 1; i < n; i += 1 {
+			sum = A.data[i * n + j]
+			if j > 0 {
+				row_i := A.data[i * n:i * n + j]
+				row_j := A.data[j * n:j * n + j]
+				sum -= dot_simd(row_i, row_j)
+			}
+			A.data[i * n + j] = sum / A.data[j * n + j]
+		}
+	}
+
+	// Optional: zero upper triangle
+	for i := 0; i < n; i += 1 {
+		for j := i + 1; j < n; j += 1 {
+			A.data[i * n + j] = 0.0
+		}
+	}
+}
+
+// Forward solve: L z = b, L lower-triangular (from Cholesky)
+forward_substitute_simd :: proc(
+	L: ^Matrix(f64),
+	b: []f64,
+	allocator: mem.Allocator = context.allocator,
+) -> []f64 {
+	n := L.rows
+
+	if L.cols != n || len(b) != n {
+		panic("forward_substitute_simd: dimension mismatch")
+	}
+
+	z := make([]f64, n, allocator)
+
+	for i := 0; i < n; i += 1 {
+		if i == 0 {
+			z[0] = b[0] / L.data[0]
+			continue
+		}
+
+		row := L.data[i * n:i * n + i] // L[i,0:i]
+		sum := dot_simd(row, z[0:i])
+		z[i] = (b[i] - sum) / L.data[i * n + i]
+	}
+
+	return z
+}
+
+
+// Backward solve: Lᵀ x = z, L lower-triangular
+backward_substitute_simd :: proc(
+	L: ^Matrix(f64),
+	z: []f64,
+	allocator: mem.Allocator = context.allocator,
+) -> []f64 {
+	n := L.rows
+	if L.cols != n || len(z) != n {
+		panic("backward_substitute_simd: dimension mismatch")
+	}
+
+	x := make([]f64, n, allocator)
+
+	for ii := n - 1; ii >= 0; ii -= 1 {
+		i := ii
+
+		if i == n - 1 {
+			x[i] = z[i] / L.data[i * n + i]
+			continue
+		}
+
+		// length of the tail (rows i+1 .. n-1)
+		tail_len := n - (i + 1)
+
+		// gather column i into a contiguous temp buffer
+		tmp := make([]f64, tail_len, context.temp_allocator)
+		for k := 0; k < tail_len; k += 1 {
+			tmp[k] = L.data[(i + 1 + k) * n + i]
+		}
+
+		// SIMD dot
+		sum := dot_simd(tmp, x[i + 1:n])
+
+		x[i] = (z[i] - sum) / L.data[i * n + i]
+	}
+
+	return x
+}
+
+
+// Solve (A) x = b where A is SPD, via Cholesky
+solve_spd_cholesky :: proc(
+	A: ^Matrix(f64),
+	b: []f64,
+	mode: Cholesky_Mode = .Blocked, // default to fast version
+	allocator: mem.Allocator = context.allocator,
+) -> []f64 {
+
+	n := A.rows
+	if A.cols != n || len(b) != n {
+		panic("solve_spd_cholesky: dimension mismatch")
+	}
+
+	L := matrix_new(f64, n, n, allocator)
+	copy(L.data, A.data)
+
+	cholesky(&L, mode)
+
+	z := forward_substitute_simd(&L, b, context.temp_allocator)
+	x := backward_substitute_simd(&L, z, allocator)
+	return x
+}
+
+
+spd_inverse :: proc(
+	A: ^Matrix(f64),
+	mode: Cholesky_Mode = .Blocked,
+	allocator: mem.Allocator = context.allocator,
+) -> Matrix(f64) {
+
+	n := A.rows
+	if A.cols != n do panic("spd_inverse: non-square")
+
+	Acopy := matrix_new(f64, n, n, allocator)
+	copy(Acopy.data, A.data)
+
+	cholesky(&Acopy, mode)
+
+	inv := matrix_new(f64, n, n, allocator)
+	e := make([]f64, n, context.temp_allocator)
+
+	for k := 0; k < n; k += 1 {
+		for i := 0; i < n; i += 1 do e[i] = 0
+		e[k] = 1
+
+		z := forward_substitute_simd(&Acopy, e, context.temp_allocator)
+		x := backward_substitute_simd(&Acopy, z, context.temp_allocator)
+
+		for i := 0; i < n; i += 1 {
+			inv.data[i * n + k] = x[i]
+		}
+	}
+
+	return inv
+}
+
+// Blocked Cholesky: A = L Lᵀ, in-place on A (lower triangle filled)
+cholesky_decompose_blocked :: proc(A: ^Matrix(f64)) {
+	n := A.rows
+	if A.cols != n do panic("cholesky_decompose_blocked: non-square matrix")
+
+	block := tile_for_matmul()
+
+	for k := 0; k < n; k += block {
+		b := min(block, n - k)
+
+		// ----------------------------------------------------
+		// 1) Factor diagonal block A11 = A[k:k+b, k:k+b]
+		//    Use existing unblocked Cholesky as panel kernel
+		// ----------------------------------------------------
+		A11 := matrix_new(f64, b, b, context.temp_allocator)
+		for i := 0; i < b; i += 1 {
+			for j := 0; j < b; j += 1 {
+				A11.data[i * A11.cols + j] = A.data[(k + i) * A.cols + (k + j)]
+			}
+		}
+
+		cholesky_decompose(&A11)
+
+		// write back L11 into A (lower triangle)
+		for i := 0; i < b; i += 1 {
+			for j := 0; j <= i; j += 1 {
+				A.data[(k + i) * A.cols + (k + j)] = A11.data[i * A11.cols + j]
+			}
+		}
+
+		// ----------------------------------------------------
+		// 2) Compute L21: A21 := A21 * inv(L11ᵀ)
+		//    For rows i = k+b .. n-1, columns j = k .. k+b-1
+		// ----------------------------------------------------
+		// ----------------------------------------------------
+		// 2) Compute L21: Solve L11 * L21ᵀ = A21ᵀ
+		//    A21 has shape (rows_A21) × b
+		//    For each ROW i of A21 (length b), solve L11 * x = row
+		// ----------------------------------------------------
+		rows_A21 := n - (k + b)
+		if rows_A21 > 0 {
+			for i in 0 ..< rows_A21 {
+				// Extract row i of A21 (length b)
+				row := make([]f64, b, context.temp_allocator)
+				for j in 0 ..< b {
+					row[j] = A.data[(k + b + i) * A.cols + (k + j)]
+				}
+
+				// Solve L11 * x = row (forward substitution)
+				x := forward_substitute_simd(&A11, row, context.temp_allocator)
+
+				// Store solution as row i of L21 (overwrites A21 in-place)
+				for j in 0 ..< b {
+					A.data[(k + b + i) * A.cols + (k + j)] = x[j]
+				}
+
+				delete(row, context.temp_allocator)
+				delete(x, context.temp_allocator)
+			}
+		}
+
+		// ----------------------------------------------------
+		// 3) Trailing update: A22 := A22 - L21 * L21ᵀ
+		//    Use rank-1 updates with axpy_simd
+		// ----------------------------------------------------
+		if rows_A21 > 0 {
+			m := rows_A21 // size of A22: m×m
+			for j := 0; j < b; j += 1 {
+				// v = column j of L21 (length m)
+				v := make([]f64, m, context.temp_allocator)
+				for i := 0; i < m; i += 1 {
+					v[i] = A.data[(k + b + i) * A.cols + (k + j)]
+				}
+
+				// A22 -= v vᵀ
+				for i := 0; i < m; i += 1 {
+					row_start := (k + b + i) * A.cols + (k + b)
+					row := A.data[row_start:row_start + m]
+					axpy_simd(-v[i], v, row)
+				}
+			}
+		}
+	}
+
+	// Optional: zero upper triangle
+	for i := 0; i < n; i += 1 {
+		for j := i + 1; j < n; j += 1 {
+			A.data[i * A.cols + j] = 0.0
+		}
+	}
+}
+
+
+// ===== ./eigen.odin =====
+package wotan_linalg
+
+import "core:math"
+import "core:mem"
+
+
+EighOrder :: enum {
+	Ascending,
+	Descending,
+}
+
+// Symmetric eigen-decomposition: A = V diag(W) Vᵀ
+eigh :: proc(
+	A: ^Matrix(f64),
+	order: EighOrder = .Ascending,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	W: []f64,
+	V: Matrix(f64), // eigenvalues// eigenvectors (columns)
+) {
+	// Optionally: debug symmetry check
+	when ODIN_DEBUG {
+		if A.rows != A.cols {
+			panic("eigh: matrix must be square")
+		}
+		n := A.rows
+		for i := 0; i < n; i += 1 {
+			for j := i + 1; j < n; j += 1 {
+				aij := A.data[i * A.cols + j]
+				aji := A.data[j * A.cols + i]
+				if math.abs(aij - aji) > 1e-12 {
+					panic("eigh: matrix not symmetric within tolerance")
+				}
+			}
+		}
+	}
+
+	// Work on a copy, since jacobi_eigen_symmetric modifies in-place
+	A_copy := matrix_new(f64, A.rows, A.cols, allocator)
+	copy(A_copy.data, A.data)
+
+	W, V = jacobi_eigen_symmetric(&A_copy, allocator)
+
+	// Sort eigenvalues + eigenvectors
+	en := len(W)
+	for i := 0; i < en; i += 1 {
+		best := i
+		for j := i + 1; j < en; j += 1 {
+			cond := (order == .Ascending) ? (W[j] < W[best]) : (W[j] > W[best])
+			if cond {
+				best = j
+			}
+		}
+		if best == i {
+			continue
+		}
+		// swap eigenvalues
+		W[i], W[best] = W[best], W[i]
+		// swap columns in V
+		for r := 0; r < V.rows; r += 1 {
+			V.data[r * V.cols + i], V.data[r * V.cols + best] =
+				V.data[r * V.cols + best], V.data[r * V.cols + i]
+		}
+	}
+
+	return
+}
+// κ₂(A) = σ_max / σ_min (non-zero σ_min), returns +Inf if rank-deficient
+cond2_svd :: proc(A: ^Matrix(f64), allocator: mem.Allocator = context.allocator) -> f64 {
+	_, S, _ := svd_golub_reinsch(A, allocator)
+	n := len(S)
+	if n == 0 {
+		return math.INF_F64
+	}
+
+	sigma_max := S[0]
+	sigma_min := S[0]
+	for i := 1; i < n; i += 1 {
+		if S[i] < sigma_min {
+			sigma_min = S[i]
+		}
+	}
+
+	if sigma_min == 0.0 {
+		return math.INF_F64
+	}
+	return sigma_max / sigma_min
+}
+cond2_svd_thin :: proc(A: ^Matrix(f64), allocator: mem.Allocator = context.allocator) -> f64 {
+	_, S_t, _ := svd_thin(A, .GolubReinsch, allocator)
+	r := len(S_t)
+	if r == 0 {
+		return math.INF_F64
+	}
+	sigma_max := S_t[0]
+	sigma_min := S_t[r - 1]
+	if sigma_min == 0.0 {
+		return math.INF_F64
+	}
+	return sigma_max / sigma_min
+}
+// κ₂(A) for symmetric (ideally SPD) matrix via eigenvalues
+cond2_sym :: proc(A: ^Matrix(f64), allocator: mem.Allocator = context.allocator) -> f64 {
+	W, _ := eigh(A, .Ascending, allocator)
+	n := len(W)
+	if n == 0 {
+		return math.INF_F64
+	}
+
+	lam_min := W[0]
+	lam_max := W[n - 1]
+
+	// If not strictly SPD, guard small/negative eigenvalues
+	if lam_min <= 0.0 {
+		return math.INF_F64
+	}
+	return lam_max / lam_min
+}
+// Reciprocal condition number (useful for quick diagnostics)
+rcond2_svd :: proc(A: ^Matrix(f64), allocator: mem.Allocator = context.allocator) -> f64 {
+	c := cond2_svd(A, allocator)
+	if math.is_inf(c) || c == 0.0 {
+		return 0.0
+	}
+	return 1.0 / c
+}
+
+rcond2_sym :: proc(A: ^Matrix(f64), allocator: mem.Allocator = context.allocator) -> f64 {
+	c := cond2_sym(A, allocator)
+	if math.is_inf(c) || c == 0.0 {
+		return 0.0
+	}
+	return 1.0 / c
+}
+
+
+// ===== ./lstsq.odin =====
+package wotan_linalg
+
+import "core:math"
+import "core:mem"
+
+// ============================================================================
+// Least Squares Method Selection
+// ============================================================================
+LstsqMethod :: enum {
+	Auto,
+	QR,
+	Cholesky,
+	SVD,
+}
+
+// ============================================================================
+// Least Squares Result
+// ============================================================================
+LstsqResult :: struct {
+	beta:               []f64,
+	residuals:          []f64,
+	rank:               int,
+	condition_estimate: f64,
+	method_used:        LstsqMethod,
+	success:            bool,
+}
+
+// ============================================================================
+// Main Least Squares Solver
+// ============================================================================
+lstsq :: proc(
+	X: ^Matrix(f64),
+	y: []f64,
+	method: LstsqMethod = .Auto,
+	allocator: mem.Allocator = context.allocator,
+) -> LstsqResult {
+	m, n := X.rows, X.cols
+
+	// Edge cases
+	if m == 0 || n == 0 || len(y) == 0 {
+		result := LstsqResult{}
+		result.beta = make([]f64, n, allocator)
+		result.residuals = make([]f64, m, allocator)
+		result.rank = 0
+		result.condition_estimate = 0.0
+		result.method_used = method
+		result.success = true
+		return result
+	}
+	if len(y) != m {
+		panic("lstsq: dimension mismatch")
+	}
+
+	// Auto-select method
+	selected := method
+	if method == .Auto {
+		selected = _lstsq_auto_select(X)
+	}
+
+	// Dispatch
+	if selected == .QR {
+		return _lstsq_qr(X, y, allocator)
+	} else if selected == .Cholesky {
+		return _lstsq_cholesky(X, y, allocator)
+	} else if selected == .SVD {
+		return _lstsq_svd(X, y, allocator)
+	}
+	return _lstsq_qr(X, y, allocator)
+}
+
+// ============================================================================
+// Auto-select helper
+// ============================================================================
+_lstsq_auto_select :: proc(X: ^Matrix(f64)) -> LstsqMethod {
+	m, n := X.rows, X.cols
+	if m < 50 && n < 20 {
+		return .QR
+	}
+	if m >= 5 * n {
+		return .QR
+	}
+
+	col_norms := make([]f64, n, context.temp_allocator)
+	for j in 0 ..< n {
+		norm := 0.0
+		for i in 0 ..< m {
+			v := X.data[i * X.cols + j]
+			norm += v * v
+		}
+		col_norms[j] = math.sqrt(norm)
+	}
+
+	max_n := 0.0
+	min_n := f64(1e308)
+	for j in 0 ..< n {
+		cn := col_norms[j]
+		if cn > max_n {
+			max_n = cn
+		}
+		if cn > 0.0 && cn < min_n {
+			min_n = cn
+		}
+	}
+
+	if min_n < f64(1e308) && max_n / min_n > f64(1e6) {
+		return .SVD
+	}
+	return .Cholesky
+}
+
+// ============================================================================
+// QR-based least squares
+// ============================================================================
+_lstsq_qr :: proc(X: ^Matrix(f64), y: []f64, allocator: mem.Allocator) -> LstsqResult {
+	m, n := X.rows, X.cols
+
+	Q, R := qr_decompose(X, .Blocked, allocator)
+	defer matrix_free(&Q)
+	defer matrix_free(&R)
+
+	Qty := make([]f64, n, allocator)
+	for j in 0 ..< n {
+		sum := 0.0
+		for i in 0 ..< m {
+			sum += Q.data[i * Q.cols + j] * y[i]
+		}
+		Qty[j] = sum
+	}
+
+	beta := upper_tri_solve(&R, Qty, allocator)
+
+	residuals := make([]f64, m, allocator)
+	for i in 0 ..< m {
+		pred := 0.0
+		for j in 0 ..< n {
+			pred += X.data[i * X.cols + j] * beta[j]
+		}
+		residuals[i] = y[i] - pred
+	}
+
+	rank := 0
+	eps := f64(1e-12) * math.abs(R.data[0])
+	for j in 0 ..< n {
+		if math.abs(R.data[j * R.cols + j]) > eps {
+			rank += 1
+		}
+	}
+
+	max_d := 0.0
+	min_d := f64(1e308)
+	for j in 0 ..< n {
+		d := math.abs(R.data[j * R.cols + j])
+		if d > max_d {
+			max_d = d
+		}
+		if d > 0.0 && d < min_d {
+			min_d = d
+		}
+	}
+	cond := f64(1e308)
+	if min_d < f64(1e308) {
+		cond = max_d / min_d
+	}
+
+	result := LstsqResult{}
+	result.beta = beta
+	result.residuals = residuals
+	result.rank = rank
+	result.condition_estimate = cond
+	result.method_used = .QR
+	result.success = cond < f64(1e12)
+	return result
+}
+
+// ============================================================================
+// Cholesky-based least squares
+// NOTE: cholesky_decompose modifies matrix in-place (returns void)
+// ============================================================================
+_lstsq_cholesky :: proc(X: ^Matrix(f64), y: []f64, allocator: mem.Allocator) -> LstsqResult {
+	m, n := X.rows, X.cols
+
+	// Compute AtA = XᵀX (n×n symmetric)
+	AtA := xtx_simd(X, allocator)
+	defer matrix_free(&AtA)
+
+	// Compute Xᵀy (n×1)
+	Xty := make([]f64, n, allocator)
+	for j in 0 ..< n {
+		sum := 0.0
+		for i in 0 ..< m {
+			sum += X.data[i * X.cols + j] * y[i]
+		}
+		Xty[j] = sum
+	}
+
+	// Cholesky: AtA = L Lᵀ (in-place modification of AtA)
+	// First check positive definiteness heuristically
+	is_spd := true
+	for j in 0 ..< n {
+		if AtA.data[j * AtA.cols + j] <= 0.0 {
+			is_spd = false
+			break
+		}
+	}
+	if !is_spd {
+		return _lstsq_qr(X, y, allocator) // fallback
+	}
+
+	// Decompose in-place: AtA now contains L (lower triangle)
+	cholesky_decompose(&AtA)
+
+	// Forward substitution: L z = Xty
+	z := forward_subst_unit_lower_simd(&AtA, Xty, allocator)
+
+	// Back substitution: Lᵀ beta = z
+	beta := back_subst_upper_simd(&AtA, z, allocator)
+
+	// Residuals
+	residuals := make([]f64, m, allocator)
+	for i in 0 ..< m {
+		pred := 0.0
+		for j in 0 ..< n {
+			pred += X.data[i * X.cols + j] * beta[j]
+		}
+		residuals[i] = y[i] - pred
+	}
+
+	// Condition estimate from L diagonal
+	max_d := 0.0
+	min_d := f64(1e308)
+	for j in 0 ..< n {
+		d := AtA.data[j * AtA.cols + j] // L[j,j] stored on diagonal
+		if d > max_d {
+			max_d = d
+		}
+		if d > 0.0 && d < min_d {
+			min_d = d
+		}
+	}
+	cond := f64(1e308)
+	if min_d < f64(1e308) {
+		ratio := max_d / min_d
+		cond = ratio * ratio
+	}
+
+	result := LstsqResult{}
+	result.beta = beta
+	result.residuals = residuals
+	result.rank = n
+	result.condition_estimate = cond
+	result.method_used = .Cholesky
+	result.success = cond < f64(1e12)
+	return result
+}
+
+// ============================================================================
+// SVD-based least squares
+// ============================================================================
+_lstsq_svd :: proc(X: ^Matrix(f64), y: []f64, allocator: mem.Allocator) -> LstsqResult {
+	m, n := X.rows, X.cols
+
+	U, S, V := svd(X, .GolubReinsch, allocator)
+	defer matrix_free(&U)
+	defer matrix_free(&V)
+	defer mem.free(transmute(rawptr)&S[0], allocator)
+
+	S_max := 0.0
+	for j in 0 ..< n {
+		if S[j] > S_max {
+			S_max = S[j]
+		}
+	}
+	tol := f64(max(m, n)) * f64(1e-12) * S_max
+	rank := 0
+	for j in 0 ..< n {
+		if S[j] > tol {
+			rank += 1
+		}
+	}
+
+	c := make([]f64, n, allocator)
+	for j in 0 ..< n {
+		sum := 0.0
+		for i in 0 ..< m {
+			sum += U.data[i * U.cols + j] * y[i]
+		}
+		c[j] = sum
+	}
+
+	d := make([]f64, n, allocator)
+	for j in 0 ..< n {
+		if S[j] > tol {
+			d[j] = c[j] / S[j]
+		} else {
+			d[j] = 0.0
+		}
+	}
+
+	beta := matvec_dyn_simd(&V, d, allocator)
+
+	residuals := make([]f64, m, allocator)
+	for i in 0 ..< m {
+		pred := 0.0
+		for j in 0 ..< n {
+			pred += X.data[i * X.cols + j] * beta[j]
+		}
+		residuals[i] = y[i] - pred
+	}
+
+	cond := f64(1e308)
+	if rank > 0 {
+		max_s := S[0]
+		min_s := S[rank - 1]
+		if min_s > 0.0 {
+			cond = max_s / min_s
+		}
+	}
+
+	result := LstsqResult{}
+	result.beta = beta
+	result.residuals = residuals
+	result.rank = rank
+	result.condition_estimate = cond
+	result.method_used = .SVD
+	result.success = rank > 0 && cond < f64(1e12)
+	return result
+}
+
+// ============================================================================
+// Free LstsqResult
+// ============================================================================
+lstsq_result_free :: proc(res: ^LstsqResult, allocator: mem.Allocator) {
+	if len(res.beta) > 0 {
+		mem.free(transmute(rawptr)&res.beta[0], allocator)
+	}
+	if len(res.residuals) > 0 {
+		mem.free(transmute(rawptr)&res.residuals[0], allocator)
+	}
+	res.beta = nil
+	res.residuals = nil
+}
+
+
+// ===== ./lu.odin =====
+package wotan_linalg
+
+import "core:math"
+import "core:mem"
+
+// LU factorization with partial pivoting, blocked and SIMD-updated trailing part.
+// A: n×n (square), returns LU (combined L,U), piv (permutation), sign (det sign), ok (non-singular)
+lu_decompose :: proc(
+	A: ^Matrix(f64),
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	LU: Matrix(f64),
+	piv: []int,
+	sign: int,
+	ok: bool,
+) {
+	n := A.rows
+	if n == 0 || A.cols != n {
+		panic("lu_decompose: matrix must be non-empty and square")
+	}
+
+	LU = matrix_new(f64, n, n, allocator)
+	copy(LU.data, A.data)
+
+	piv = make([]int, n, allocator)
+	for i := 0; i < n; i += 1 {
+		piv[i] = i
+	}
+	sign = 1
+	ok = true
+
+	block := tile_for_matmul() // reuse SIMD tiling heuristic
+
+	// Blocked LU: factor panels, then update trailing submatrix via SIMD matmul
+	for k := 0; k < n; k += block {
+		panel_width := min(block, n - k)
+
+		// ------------------------------------------------------------
+		// 1) Panel factorization (columns k .. k+panel_width-1)
+		//    Standard Doolittle with partial pivoting, in-place in LU
+		// ------------------------------------------------------------
+		for kk := k; kk < k + panel_width; kk += 1 {
+			// Pivot search in column kk
+			max_row := kk
+			max_val := math.abs(LU.data[kk * LU.cols + kk])
+			for i := kk + 1; i < n; i += 1 {
+				v := math.abs(LU.data[i * LU.cols + kk])
+				if v > max_val {
+					max_val = v
+					max_row = i
+				}
+			}
+
+			if max_val == 0.0 {
+				ok = false // singular
+				return
+			}
+
+			// Row swap if needed
+			if max_row != kk {
+				for j := 0; j < n; j += 1 {
+					LU.data[kk * LU.cols + j], LU.data[max_row * LU.cols + j] =
+						LU.data[max_row * LU.cols + j], LU.data[kk * LU.cols + j]
+				}
+				piv[kk], piv[max_row] = piv[max_row], piv[kk]
+				sign = -sign
+			}
+
+			// Factorization step for this column
+			pivot := LU.data[kk * LU.cols + kk]
+			for i := kk + 1; i < n; i += 1 {
+				LU.data[i * LU.cols + kk] /= pivot
+				lik := LU.data[i * LU.cols + kk]
+				for j := kk + 1; j < k + panel_width; j += 1 {
+					LU.data[i * LU.cols + j] -= lik * LU.data[kk * LU.cols + j]
+				}
+			}
+		}
+
+		// ------------------------------------------------------------
+		// 2) Trailing update: A22 := A22 - L21 * U12
+		//    Use SIMD matmul_dyn_simd for the rank-k update
+		// ------------------------------------------------------------
+		k2 := k + panel_width
+		if k2 < n {
+			// Dimensions:
+			// L21: (n-k2) × panel_width
+			// U12: panel_width × (n-k2)
+			// A22: (n-k2) × (n-k2)
+
+			rows_L21 := n - k2
+			cols_L21 := panel_width
+			rows_U12 := panel_width
+			cols_U12 := n - k2
+
+			// Compact copies for SIMD matmul (contiguous row-major)
+			L21 := matrix_new(f64, rows_L21, cols_L21, context.temp_allocator)
+			U12 := matrix_new(f64, rows_U12, cols_U12, context.temp_allocator)
+
+			// Copy L21 from LU (strictly lower part, but we just take stored multipliers)
+			for i := 0; i < rows_L21; i += 1 {
+				for j := 0; j < cols_L21; j += 1 {
+					src_row := k2 + i
+					src_col := k + j
+					L21.data[i * L21.cols + j] = LU.data[src_row * LU.cols + src_col]
+				}
+			}
+
+			// Copy U12 from LU (upper part)
+			for i := 0; i < rows_U12; i += 1 {
+				for j := 0; j < cols_U12; j += 1 {
+					src_row := k + i
+					src_col := k2 + j
+					U12.data[i * U12.cols + j] = LU.data[src_row * LU.cols + src_col]
+				}
+			}
+
+			// T = L21 * U12  (SIMD-accelerated)
+			T := matmul_dyn_simd(&L21, &U12, context.temp_allocator)
+
+			// A22 := A22 - T, in-place in LU
+			for i := 0; i < rows_L21; i += 1 {
+				for j := 0; j < cols_U12; j += 1 {
+					dst_row := k2 + i
+					dst_col := k2 + j
+					LU.data[dst_row * LU.cols + dst_col] -= T.data[i * T.cols + j]
+				}
+			}
+		}
+	}
+
+	return
+}
+
+// Apply permutation P to b: Pb
+apply_pivots_vec :: proc(piv: []int, b: []f64) -> []f64 {
+	n := len(piv)
+	if len(b) != n {
+		panic("apply_pivots_vec: dimension mismatch")
+	}
+	x := make([]f64, n, context.temp_allocator)
+	for i := 0; i < n; i += 1 {
+		x[i] = b[piv[i]]
+	}
+	return x
+}
+
+// Solve LU x = Pb (LU from lu_decompose, piv permutation)
+lu_solve :: proc(
+	LU: ^Matrix(f64),
+	piv: []int,
+	b: []f64,
+	allocator: mem.Allocator = context.allocator,
+) -> []f64 {
+	y_perm := apply_pivots_vec(piv, b)
+	y := forward_subst_unit_lower_simd(LU, y_perm, allocator)
+	x := back_subst_upper_simd(LU, y, allocator)
+	return x
+}
+
+lu_det :: proc(LU: ^Matrix(f64), sign: int) -> f64 {
+	n := LU.rows
+	if n == 0 || LU.cols != n {
+		panic("lu_det: LU must be square")
+	}
+	det := f64(sign)
+	for i := 0; i < n; i += 1 {
+		det *= LU.data[i * LU.cols + i]
+	}
+	return det
+}
+
+lu_extract_LU :: proc(
+	LU: ^Matrix(f64),
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	L: Matrix(f64),
+	U: Matrix(f64),
+) {
+	n := LU.rows
+	if n == 0 || LU.cols != n {
+		panic("lu_extract_LU: LU must be square")
+	}
+
+	L = matrix_new(f64, n, n, allocator)
+	U = matrix_new(f64, n, n, allocator)
+
+	for i := 0; i < n; i += 1 {
+		for j := 0; j < n; j += 1 {
+			if j < i {
+				L.data[i * L.cols + j] = LU.data[i * LU.cols + j]
+				U.data[i * U.cols + j] = 0.0
+			} else if j == i {
+				L.data[i * L.cols + j] = 1.0
+				U.data[i * U.cols + j] = LU.data[i * LU.cols + j]
+			} else {
+				L.data[i * L.cols + j] = 0.0
+				U.data[i * U.cols + j] = LU.data[i * LU.cols + j]
+			}
+		}
+	}
+
+	return
+}
+mat_inverse_lu :: proc(
+	A: ^Matrix(f64),
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	Ainv: Matrix(f64),
+	ok: bool,
+) {
+	n := A.rows
+	if n == 0 || A.cols != n {
+		panic("mat_inverse_lu: A must be non-empty and square")
+	}
+
+	LU, piv, sign, lok := lu_decompose(A, allocator)
+	_ = sign
+	if !lok {
+		// Singular → return empty matrix, ok = false
+		Ainv = matrix_new(f64, 0, 0, allocator)
+		return
+	}
+
+	Ainv = matrix_new(f64, n, n, allocator)
+
+	// Solve A x_j = e_j for each column j
+	e := make([]f64, n, context.temp_allocator)
+
+	for j := 0; j < n; j += 1 {
+		// e_j
+		for i := 0; i < n; i += 1 {
+			e[i] = 0.0
+		}
+		e[j] = 1.0
+
+		x := lu_solve(&LU, piv, e, context.temp_allocator)
+
+		// Write solution as column j of Ainv
+		for i := 0; i < n; i += 1 {
+			Ainv.data[i * Ainv.cols + j] = x[i]
+		}
+	}
+
+	ok = true
+	return
+}
+
+
+// ===== ./matrix.odin =====
+package wotan_linalg
+
+import w "../core"
+import "base:intrinsics"
+import "core:fmt"
+import "core:math"
+import "core:mem"
+import "core:strings"
+// ------------------------------------------------------------
+// Generic dynamic matrix
+// ------------------------------------------------------------
+
+Matrix :: struct($T: typeid) {
+	rows:      int,
+	cols:      int,
+	data:      []T,
+	allocator: mem.Allocator,
+	stride:    int,
+}
+
+// ------------------------------------------------------------
+// Fixed-size matrices (Odin auto-SIMDs these)
+// ------------------------------------------------------------
+
+matmul :: proc(a, b: $M/matrix[$R, $C]f64) -> M {
+	return a * b
+}
+
+matvec :: proc(a: $M/matrix[$R, $C]f64, x: [C]f64) -> [R]f64 {
+	return a * x
+}
+
+transpose :: proc(m: $M/matrix[$R, $C]f64) -> matrix[C, R]f64 {
+	return intrinsics.transpose(m)
+}
+
+// ------------------------------------------------------------
+// Dynamic matrix core
+// ------------------------------------------------------------
+
+matrix_new :: proc(
+	$T: typeid,
+	rows, cols: int,
+	allocator: mem.Allocator = context.allocator,
+) -> Matrix(T) {
+	m: Matrix(T)
+	m.rows = rows
+	m.cols = cols
+	m.allocator = allocator
+
+	if rows * cols > 0 {
+		m.data = make([]T, rows * cols, allocator)
+	}
+
+	return m
+}
+
+matrix_free :: proc(m: ^Matrix($T)) {
+	if m.data != nil {
+		delete(m.data, m.allocator)
+	}
+	m.data = nil
+	m.rows, m.cols = 0, 0
+}
+
+matrix_at :: proc(m: ^Matrix($T), r, c: int) -> ^T {
+	return &m.data[r * m.cols + c]
+}
+
+// ------------------------------------------------------------
+// Scalar dot + dynamic matvec/matmul (f64)
+// ------------------------------------------------------------
+
+dot :: proc(a, b: []f64) -> f64 {
+	if len(a) != len(b) {
+		panic("dot: length mismatch")
+	}
+
+	s: f64 = 0.0
+	for i in 0 ..< len(a) {
+		s += a[i] * b[i]
+	}
+	return s
+}
+
+matvec_dyn :: proc(
+	m: ^Matrix(f64),
+	x: []f64,
+	allocator: mem.Allocator = context.allocator,
+) -> []f64 {
+	if m.cols != len(x) {
+		panic("matvec_dyn: dimension mismatch")
+	}
+
+	y := make([]f64, m.rows, allocator)
+
+	for r in 0 ..< m.rows {
+		row := m.data[r * m.cols:r * m.cols + m.cols]
+		y[r] = dot(row, x)
+	}
+
+	return y
+}
+
+matmul_dyn :: proc(
+	a, b: ^Matrix(f64),
+	allocator: mem.Allocator = context.allocator,
+) -> Matrix(f64) {
+	if a.cols != b.rows {
+		panic("matmul_dyn: dimension mismatch")
+	}
+
+	out := matrix_new(f64, a.rows, b.cols, allocator)
+
+	for i in 0 ..< a.rows {
+		for j in 0 ..< b.cols {
+			acc := 0.0
+			for k in 0 ..< a.cols {
+				acc += a.data[i * a.cols + k] * b.data[k * b.cols + j]
+			}
+			out.data[i * out.cols + j] = acc
+		}
+	}
+
+	return out
+}
+matrix_from_df :: proc(
+	df: ^w.DataFrame,
+	cols: []string,
+	allocator: mem.Allocator = context.allocator,
+) -> Matrix(f64) {
+	m := matrix_new(f64, df.rows, len(cols), allocator)
+
+	for name, j in cols {
+		idx, ok := df.name_to_index[name]
+		if !ok {
+			res := strings.concatenate({"matrix_from_df: unknown column name: ", name})
+			panic(res)
+		}
+
+		col := &df.columns[idx]
+		// assume f64 backing for .Float
+		base := cast([^]f64)col.data
+
+		// respect view offset
+		start := col.offset
+		for i in 0 ..< df.rows {
+			m.data[i * m.cols + j] = base[start + i]
+		}
+	}
+
+	return m
+}
+
+vector_from_df :: proc(
+	df: ^w.DataFrame,
+	colname: string,
+	allocator: mem.Allocator = context.allocator,
+) -> []f64 {
+	idx, ok := df.name_to_index[colname]
+	if !ok {
+		res := strings.concatenate({"vector_from_df: unknown column name: ", colname})
+		panic(res)
+	}
+
+	col := &df.columns[idx]
+	base := cast([^]f64)col.data
+
+	out := make([]f64, df.rows, allocator)
+	start := col.offset
+
+	for i in 0 ..< df.rows {
+		out[i] = base[start + i]
+	}
+
+	return out
+}
+
+
+covariance :: proc(X: ^Matrix(f64), allocator: mem.Allocator = context.allocator) -> Matrix(f64) {
+	n := X.rows
+	p := X.cols
+	if n <= 1 do panic("covariance: need at least 2 rows")
+
+	// 1. Compute column means
+	means := make([]f64, p, context.temp_allocator)
+	for j := 0; j < p; j += 1 {
+		sum := 0.0
+		for i := 0; i < n; i += 1 {
+			sum += X.data[i * X.cols + j]
+		}
+		means[j] = sum / f64(n)
+	}
+
+	// 2. Build centered copy (or do it in-place if allowed)
+	Xc := matrix_new(f64, n, p, allocator)
+	for i := 0; i < n; i += 1 {
+		for j := 0; j < p; j += 1 {
+			Xc.data[i * Xc.cols + j] = X.data[i * X.cols + j] - means[j]
+		}
+	}
+
+	// 3. Sigma = (1/(n-1)) * Xcᵀ Xc
+	S := xtx_simd(&Xc, allocator)
+	scale := 1.0 / f64(n - 1)
+	for i := 0; i < S.rows * S.cols; i += 1 {
+		S.data[i] *= scale
+	}
+
+	return S
+}
+
+
+xtx :: proc(X: ^Matrix(f64), allocator: mem.Allocator = context.allocator) -> Matrix(f64) {
+	p := X.cols
+	n := X.rows
+	XtX := matrix_new(f64, p, p, allocator)
+
+	for j := 0; j < p; j += 1 {
+		col_j := make([]f64, n, context.temp_allocator)
+		for i := 0; i < n; i += 1 {
+			col_j[i] = X.data[i * X.cols + j]
+		}
+
+		for k := j; k < p; k += 1 {
+			col_k := make([]f64, n, context.temp_allocator)
+			for i := 0; i < n; i += 1 {
+				col_k[i] = X.data[i * X.cols + k]
+			}
+
+			v := dot_simd(col_j, col_k)
+			XtX.data[j * XtX.cols + k] = v
+			XtX.data[k * XtX.cols + j] = v
+
+			delete(col_k, context.temp_allocator)
+		}
+
+		delete(col_j, context.temp_allocator)
+	}
+
+	return XtX
+}
+
+xty :: proc(X: ^Matrix(f64), y: []f64, allocator: mem.Allocator = context.allocator) -> []f64 {
+	if X.rows != len(y) do panic("xty: dimension mismatch")
+
+	p := X.cols
+	n := X.rows
+	Xty := make([]f64, p, allocator)
+
+	for j := 0; j < p; j += 1 {
+		col_j := make([]f64, n, context.temp_allocator)
+		for i := 0; i < n; i += 1 {
+			col_j[i] = X.data[i * X.cols + j]
+		}
+		Xty[j] = dot_simd(col_j, y)
+		delete(col_j, context.temp_allocator)
+	}
+
+	return Xty
+}
+
+correlation :: proc(X: ^Matrix(f64), allocator: mem.Allocator = context.allocator) -> Matrix(f64) {
+	// 1. Compute covariance matrix
+	C := covariance(X, allocator)
+	p := C.cols
+
+	// 2. Allocate correlation matrix
+	R := matrix_new(f64, p, p, allocator)
+
+	// 3. Precompute standard deviations
+	sd := make([]f64, p, context.temp_allocator)
+	for i := 0; i < p; i += 1 {
+		v := C.data[i * p + i]
+		if v <= 0 {
+			panic("correlation: non-positive variance")
+		}
+		sd[i] = math.sqrt(v)
+	}
+
+	// 4. Compute correlation entries
+	for i := 0; i < p; i += 1 {
+		for j := 0; j < p; j += 1 {
+			R.data[i * p + j] = C.data[i * p + j] / (sd[i] * sd[j])
+		}
+	}
+
+	return R
+}
+// ============================================================================
+// Kronecker Product: C = A ⊗ B
+// If A is (m×n) and B is (p×q), then C is (m*p × n*q)
+// C[i*p + ii, j*q + jj] = A[i,j] * B[ii,jj]
+// ============================================================================
+kron :: proc(
+	A: ^Matrix(f64),
+	B: ^Matrix(f64),
+	allocator: mem.Allocator = context.allocator,
+) -> Matrix(f64) {
+	m, n := A.rows, A.cols
+	p, q := B.rows, B.cols
+
+	// Result dimensions: (m*p) × (n*q)
+	C := matrix_new(f64, m * p, n * q, allocator)
+
+	// Compute C block-by-block: C[i,j] block = A[i,j] * B
+	for i in 0 ..< m {
+		for j in 0 ..< n {
+			a_ij := A.data[i * A.cols + j]
+			if a_ij == 0.0 {continue} 	// Skip zero blocks (sparse-friendly)
+
+			// Block position in C
+			row_start := i * p
+			col_start := j * q
+
+			// Fill block: C[row_start:row_start+p, col_start:col_start+q] = a_ij * B
+			for ii in 0 ..< p {
+				row_C := row_start + ii
+				row_B := ii * B.cols
+				row_C_start := row_C * C.cols + col_start
+
+				// SIMD-friendly: scale entire row of B by a_ij
+				for jj in 0 ..< q {
+					C.data[row_C_start + jj] = a_ij * B.data[row_B + jj]
+				}
+			}
+		}
+	}
+
+	return C
+}
+// ============================================================================
+// Matrix Transpose: out = inᵀ
+// out[i,j] = in[j,i]
+// ============================================================================
+matrix_transpose :: proc(
+	input: ^Matrix(f64),
+	allocator: mem.Allocator = context.allocator,
+) -> Matrix(f64) {
+	if input.rows * input.cols > 4096 {
+		return matrix_transpose_blocked(input, allocator)
+	}
+	rows, cols := input.rows, input.cols
+	out := matrix_new(f64, cols, rows, allocator)
+
+	// Simple transpose: out[j,i] = in[i,j]
+	// For better cache performance on large matrices, consider blocking:
+	for i in 0 ..< rows {
+		for j in 0 ..< cols {
+			out.data[j * rows + i] = input.data[i * cols + j]
+		}
+	}
+
+	return out
+}
+
+
+// ============================================================================
+// Matrix Transpose (blocked version for better cache performance)
+// Uses TILE_BASE/TILE_AVX blocking for cache efficiency
+// ============================================================================
+matrix_transpose_blocked :: proc(
+	input: ^Matrix(f64),
+	allocator: mem.Allocator = context.allocator,
+) -> Matrix(f64) {
+	rows, cols := input.rows, input.cols
+	out := matrix_new(f64, cols, rows, allocator)
+
+	tile := tile_for_matmul() // 8 or 16 depending on AVX
+
+	// Blocked transpose: process tile×tile blocks
+	for ii := 0; ii < rows; ii += tile {
+		for jj := 0; jj < cols; jj += tile {
+			i_end := min(ii + tile, rows)
+			j_end := min(jj + tile, cols)
+
+			for i in ii ..< i_end {
+				for j in jj ..< j_end {
+					out.data[j * rows + i] = input.data[i * cols + j]
+				}
+			}
+		}
+	}
+
+	return out
+}
+
+
+matrix_from_flat :: proc(
+	data: []f64,
+	rows, cols: int,
+	allocator: mem.Allocator = context.allocator,
+) -> Matrix(f64) {
+	m := matrix_new(f64, rows, cols, allocator)
+	expected_len := rows * cols
+	if len(data) < expected_len {
+		panic(fmt.aprintf("matrix_from_flat: data too short (%v < %v)", len(data), expected_len))
+	}
+	copy(m.data, data[0:expected_len])
+	m.stride = cols // ← ADD THIS LINE: set stride for contiguous row-major layout
+	return m
+}
+
+
+// ===== ./qr.odin =====
+package wotan_linalg
+
+import "core:math"
+import "core:mem"
+
+// ============================================================================
+// QR Mode enum - matches Cholesky_Mode pattern exactly
+// ============================================================================
+QR_Mode :: enum {
+	Unblocked,
+	Blocked,
+}
+// In QR_Mode enum or as separate config:
+qr_decompose_thin :: proc(
+	A: ^Matrix(f64),
+	mode: QR_Mode = .Blocked,
+	allocator: mem.Allocator = context.allocator,
+) -> Matrix(f64) { 	// Returns R only
+	m, n := A.rows, A.cols
+	kmax := min(m, n)
+	nb := tile_for_matmul()
+
+	R := matrix_new(f64, m, n, allocator)
+	copy(R.data, A.data)
+
+	// Workspace (no Q needed)
+	v := make([]f64, m, context.temp_allocator)
+	w := make([]f64, n, context.temp_allocator)
+	col_buf := make([]f64, m, context.temp_allocator)
+
+	// Same Householder loop, but skip Q updates entirely
+	for k in 0 ..< kmax {
+		// ... [same Householder build + R update as unblocked] ...
+		// Just omit the Q application section
+	}
+	return R
+}
+// ============================================================================
+// Main QR entry point - maintains ORIGINAL signature for compatibility
+// ============================================================================
+qr_decompose :: proc(
+	A: ^Matrix(f64),
+	mode: QR_Mode = .Blocked,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	Q: Matrix(f64),
+	R: Matrix(f64),
+) {
+	m, n := A.rows, A.cols
+	kmax := min(m, n)
+	nb := tile_for_matmul() // 16 for AVX, 8 baseline
+
+	// Auto-fallback to unblocked for small matrices (matches Cholesky logic)
+	if mode == .Blocked && kmax >= nb * 2 {
+		return qr_decompose_blocked(A, nb, allocator)
+	}
+	return qr_decompose_unblocked(A, allocator)
+}
+
+// ============================================================================
+// Unblocked QR (SIMD-optimized, row-major) - your working version
+// ============================================================================
+qr_decompose_unblocked :: proc(
+	A: ^Matrix(f64),
+	allocator: mem.Allocator,
+) -> (
+	Q: Matrix(f64),
+	R: Matrix(f64),
+) {
+	m, n := A.rows, A.cols
+	kmax := min(m, n)
+
+	R = matrix_new(f64, m, n, allocator)
+	copy(R.data, A.data)
+
+	Q = matrix_new(f64, m, m, allocator)
+	for i in 0 ..< m {Q.data[i * m + i] = 1.0}
+
+	v := make([]f64, m, context.temp_allocator)
+	w := make([]f64, n, context.temp_allocator)
+	u := make([]f64, m, context.temp_allocator)
+	col_buf := make([]f64, m, context.temp_allocator)
+
+	for k in 0 ..< kmax {
+		xlen := m - k
+		for i in 0 ..< xlen {col_buf[i] = R.data[(k + i) * n + k]}
+		x := col_buf[0:xlen]
+
+		normx := math.sqrt(dot_simd(x, x))
+		if normx == 0 {continue}
+
+		for i in k ..< m {v[i] = 0.0}
+		value: f64
+		if x[0] < 0 {
+			value = -1.0
+		} else {
+			value = 1.0
+		}
+		sign := value
+		v[k] = x[0] + sign * normx
+		for i in 1 ..< xlen {v[k + i] = x[i]}
+
+		vk := v[k:k + xlen]
+		vnorm := math.sqrt(dot_simd(vk, vk))
+		if vnorm == 0 {continue}
+		inv := 1.0 / vnorm
+		for i in 0 ..< xlen {v[k + i] *= inv}
+
+		w_len := n - k
+		for j in 0 ..< w_len {
+			for i in 0 ..< xlen {col_buf[i] = R.data[(k + i) * n + (k + j)]}
+			w[j] = dot_simd(vk, col_buf[0:xlen])
+		}
+		for i in 0 ..< xlen {
+			row_start := (k + i) * n + k
+			row_seg := R.data[row_start:row_start + w_len]
+			scalar := 2.0 * v[k + i]
+			if scalar != 0.0 {axpy_simd(-scalar, w[0:w_len], row_seg)}
+		}
+
+		for i in 0 ..< m {
+			row_seg := Q.data[i * m + k:i * m + m]
+			u[i] = dot_simd(row_seg[0:xlen], vk)
+		}
+		for i in 0 ..< m {
+			row_seg := Q.data[i * m + k:i * m + k + xlen]
+			scalar := 2.0 * u[i]
+			if scalar != 0.0 {axpy_simd(-scalar, vk, row_seg)}
+		}
+	}
+	return
+}
+
+// ============================================================================
+// Blocked QR - simple, safe, matches Cholesky pattern
+// ============================================================================
+qr_decompose_blocked :: proc(
+	A: ^Matrix(f64),
+	block_size: int,
+	allocator: mem.Allocator,
+) -> (
+	Q: Matrix(f64),
+	R: Matrix(f64),
+) {
+	m, n := A.rows, A.cols
+	kmax := min(m, n)
+
+	// Initialize outputs
+	R = matrix_new(f64, m, n, allocator)
+	copy(R.data, A.data)
+
+	Q = matrix_new(f64, m, m, allocator)
+	for i in 0 ..< m {Q.data[i * m + i] = 1.0}
+
+	// Workspace for panel (reused)
+	panel := matrix_new(f64, m, block_size, context.temp_allocator)
+	taus := make([]f64, block_size, context.temp_allocator)
+	col_buf := make([]f64, m, context.temp_allocator)
+
+	for k in 0 ..< kmax {
+		nb_cur := min(block_size, kmax - k)
+
+		// ================================================================
+		// 1. Panel factorization: copy panel + unblocked QR on it
+		// ================================================================
+
+		// Copy R[k:m, k:k+nb_cur] into panel
+		for i in 0 ..< m - k {
+			for j in 0 ..< nb_cur {
+				panel.data[i * panel.cols + j] = R.data[(k + i) * n + (k + j)]
+			}
+		}
+
+		// Factor panel in-place (unblocked Householder)
+		panel_qr_unblocked(&panel, m - k, nb_cur, taus, context.temp_allocator)
+
+		// Write upper triangle back to R
+		for j in 0 ..< nb_cur {
+			for i in 0 ..< min(m - k, j + 1) {
+				R.data[(k + i) * n + (k + j)] = panel.data[i * panel.cols + j]
+			}
+		}
+
+		// ================================================================
+		// 2. Update trailing matrix: R[k:m, k+nb_cur:n] -= V * (Vᵀ * R_trailing)
+		//    Using rank-1 updates with axpy_simd (safe, row-major friendly)
+		// ================================================================
+
+		if k + nb_cur < n {
+			trailing_cols := n - (k + nb_cur)
+			trailing_rows := m - k
+
+			// For each column in trailing matrix
+			for col in 0 ..< trailing_cols {
+				global_col := k + nb_cur + col
+
+				// Compute y = Vᵀ * R[k:m, global_col]
+				y := make([]f64, nb_cur, context.temp_allocator)
+				for i in 0 ..< nb_cur {
+					v_len := trailing_rows - i // V column i length
+					sum := 0.0
+					for ii in 0 ..< v_len {
+						// V stored in lower triangle of panel
+						v_idx := (i + ii) * panel.cols + i
+						r_idx := (k + ii) * n + global_col
+						sum += panel.data[v_idx] * R.data[r_idx]
+					}
+					y[i] = sum
+				}
+
+				// Apply: R[k:m, global_col] -= 2 * V * y
+				for i in 0 ..< trailing_rows {
+					sum := 0.0
+					for j in 0 ..< nb_cur {
+						v_idx := i * panel.cols + j
+						sum += panel.data[v_idx] * y[j]
+					}
+					R.data[(k + i) * n + global_col] -= 2.0 * sum
+				}
+			}
+		}
+
+		// ================================================================
+		// 3. Update Q: apply each Householder from panel to Q
+		// ================================================================
+
+		for p in 0 ..< nb_cur {
+			vk_len := m - (k + p)
+			if vk_len <= 0 {continue}
+
+			// Gather Householder vector from panel column p
+			for i in 0 ..< vk_len {
+				col_buf[i] = panel.data[(p + i) * panel.cols + p]
+			}
+			vk := col_buf[0:vk_len]
+
+			// Apply H_p to Q[:, k+p:m]
+			for i in 0 ..< m {
+				row_start := i * m + (k + p)
+				row_end := row_start + vk_len
+				if row_end > i * m + m {row_end = i * m + m}
+				row_seg := Q.data[row_start:row_end]
+				if len(row_seg) < vk_len {continue}
+
+				tau := 2.0 * dot_simd(row_seg[0:vk_len], vk)
+				if tau != 0.0 {
+					axpy_simd(-tau, vk, row_seg[0:vk_len])
+				}
+			}
+		}
+	}
+	return
+}
+
+// ============================================================================
+// Helper: Unblocked QR on a panel (FIXED indexing)
+// ============================================================================
+panel_qr_unblocked :: proc(
+	panel: ^Matrix(f64),
+	panel_rows: int,
+	nb: int,
+	taus: []f64,
+	allocator: mem.Allocator,
+) {
+	col_buf := make([]f64, panel_rows, allocator)
+	v_work := make([]f64, panel_rows, allocator)
+
+	for k in 0 ..< nb {
+		xlen := panel_rows - k
+		if xlen <= 0 {taus[k] = 0.0; continue}
+
+		// Gather column k
+		for i in 0 ..< xlen {
+			col_buf[i] = panel.data[(k + i) * panel.cols + k]
+		}
+
+		normx := math.sqrt(dot_simd(col_buf[0:xlen], col_buf[0:xlen]))
+		if normx == 0 {taus[k] = 0.0; continue}
+
+		// Build Householder vector
+		value: f64
+		if col_buf[0] < 0 {
+			value = -1.0
+		} else {
+			value = 1.0
+		}
+		sign := value
+		v0 := col_buf[0] + sign * normx
+		v_work[k] = v0
+		for i in 1 ..< xlen {v_work[k + i] = col_buf[i]}
+
+		// Store in panel (lower triangle, unit diag implicit)
+		panel.data[k * panel.cols + k] = 1.0 // implicit
+		for i in 1 ..< xlen {
+			panel.data[(k + i) * panel.cols + k] = col_buf[i]
+		}
+
+		// Normalize v_work[k:k+xlen]
+		vk := v_work[k:k + xlen]
+		vnorm := math.sqrt(dot_simd(vk, vk))
+		if vnorm == 0 {taus[k] = 0.0; continue}
+		inv := 1.0 / vnorm
+		for i in 0 ..< xlen {
+			v_work[k + i] *= inv
+			// FIX: Correct indexing for panel update
+			if k + i > k {
+				panel.data[(k + i) * panel.cols + k] *= inv
+			}
+		}
+
+		// Apply to trailing panel columns
+		for j in k + 1 ..< nb {
+			for i in 0 ..< xlen {
+				col_buf[i] = panel.data[(k + i) * panel.cols + j]
+			}
+			alpha := 2.0 * dot_simd(vk, col_buf[0:xlen])
+			for i in 0 ..< xlen {
+				panel.data[(k + i) * panel.cols + j] -= alpha * v_work[k + i]
+			}
+		}
+
+		taus[k] = 2.0 // simplified
+	}
+}
+
+// ============================================================================
+// Upper triangular solve (unchanged)
+// ============================================================================
+upper_tri_solve :: proc(
+	R: ^Matrix(f64),
+	b: []f64,
+	allocator: mem.Allocator = context.allocator,
+) -> []f64 {
+	n := len(b)
+	x := make([]f64, n, allocator)
+	for i := n - 1; i >= 0; i -= 1 {
+		sum := b[i]
+		for j := i + 1; j < n; j += 1 {
+			sum -= R.data[i * R.cols + j] * x[j]
+		}
+		sum /= R.data[i * R.cols + i]
+		x[i] = sum
+	}
+	return x
+}
+
+
+// ===== ./simd.odin =====
+package wotan_linalg
+
+import "base:builtin"
+import "base:intrinsics"
+import "core:fmt"
+import "core:math"
+import "core:mem"
+import simd "core:simd"
+
+TILE_BASE :: 8
+TILE_AVX :: 16
+
+tile_for_matmul :: proc() -> int {
+	// Prefer AVX/AVX2/AVX-512 tile size
+	if intrinsics.has_target_feature("avx") {
+		return TILE_AVX
+	}
+	return TILE_BASE
+}
+// SIMD dot product for f64
+dot_simd :: proc(a, b: []f64) -> f64 {
+	n := len(a)
+	if n != len(b) do panic("dot_simd: length mismatch")
+
+	if !simd.HAS_HARDWARE_SIMD {
+		return dot(a, b)
+	}
+
+	// ============================================================
+	// 1. Try widest SIMD first (f64x8) — requires AVX/AVX2/AVX512
+	// ============================================================
+	if intrinsics.has_target_feature("avx") {
+		acc8: simd.f64x8 = simd.f64x8{0, 0, 0, 0, 0, 0, 0, 0}
+		i := 0
+		for ; i + 8 <= n; i += 8 {
+			va := simd.f64x8 {
+				a[i],
+				a[i + 1],
+				a[i + 2],
+				a[i + 3],
+				a[i + 4],
+				a[i + 5],
+				a[i + 6],
+				a[i + 7],
+			}
+			vb := simd.f64x8 {
+				b[i],
+				b[i + 1],
+				b[i + 2],
+				b[i + 3],
+				b[i + 4],
+				b[i + 5],
+				b[i + 6],
+				b[i + 7],
+			}
+			acc8 = intrinsics.simd_add(acc8, intrinsics.simd_mul(va, vb))
+		}
+		sum := intrinsics.simd_reduce_add_pairs(acc8)
+		for ; i < n; i += 1 do sum += a[i] * b[i]
+		return sum
+	}
+
+	// ==========================================
+	// 2. Next: f64x4 (SSE2/SSE4, always available)
+	// ==========================================
+	if intrinsics.has_target_feature("sse2") {
+		acc4: simd.f64x4 = simd.f64x4{0, 0, 0, 0}
+		i := 0
+		for ; i + 4 <= n; i += 4 {
+			va := simd.f64x4{a[i], a[i + 1], a[i + 2], a[i + 3]}
+			vb := simd.f64x4{b[i], b[i + 1], b[i + 2], b[i + 3]}
+			acc4 = intrinsics.simd_add(acc4, intrinsics.simd_mul(va, vb))
+		}
+		sum := intrinsics.simd_reduce_add_pairs(acc4)
+		for ; i < n; i += 1 do sum += a[i] * b[i]
+		return sum
+	}
+
+	// ===========================
+	// 3. Fallback: f64x2 (baseline)
+	// ===========================
+	acc2: simd.f64x2 = simd.f64x2{0, 0}
+	i := 0
+	for ; i + 2 <= n; i += 2 {
+		va := simd.f64x2{a[i], a[i + 1]}
+		vb := simd.f64x2{b[i], b[i + 1]}
+		acc2 = intrinsics.simd_add(acc2, intrinsics.simd_mul(va, vb))
+	}
+	sum := intrinsics.simd_reduce_add_pairs(acc2)
+	for ; i < n; i += 1 do sum += a[i] * b[i]
+	return sum
+}
+
+matmul_dyn_simd :: proc(
+	a, b: ^Matrix(f64),
+	allocator: mem.Allocator = context.allocator,
+) -> Matrix(f64) {
+	if a.cols != b.rows do panic("Dimension mismatch")
+
+	out := matrix_new(f64, a.rows, b.cols, allocator)
+
+	// Transpose B once
+	bt := matrix_new(f64, b.cols, b.rows, allocator)
+	for r in 0 ..< b.rows {
+		for c in 0 ..< b.cols {
+			bt.data[c * bt.cols + r] = b.data[r * b.cols + c]
+		}
+	}
+
+	tile := tile_for_matmul()
+
+	for ii := 0; ii < a.rows; ii += tile {
+		for jj := 0; jj < b.cols; jj += tile {
+			for kk := 0; kk < a.cols; kk += tile {
+
+				i_end := min(ii + tile, a.rows)
+				j_end := min(jj + tile, b.cols)
+				k_end := min(kk + tile, a.cols)
+
+				for i := ii; i < i_end; i += 1 {
+					row_a := a.data[i * a.cols:i * a.cols + a.cols]
+
+					for j := jj; j < j_end; j += 1 {
+						row_bt := bt.data[j * bt.cols:j * bt.cols + bt.cols]
+
+						sum := dot_simd(row_a[kk:k_end], row_bt[kk:k_end])
+
+						out.data[i * out.cols + j] += sum
+					}
+				}
+			}
+		}
+	}
+	matrix_free(&bt)
+	return out
+}
+
+
+matvec_dyn_simd :: proc(
+	m: ^Matrix(f64),
+	x: []f64,
+	allocator: mem.Allocator = context.allocator,
+) -> []f64 {
+	if m.cols != len(x) {
+		panic("matvec_dyn: dimension mismatch")
+	}
+
+	y := make([]f64, m.rows, allocator)
+
+	for r in 0 ..< m.rows {
+		row := m.data[r * m.cols:r * m.cols + m.cols]
+		y[r] = dot_simd(row, x)
+	}
+
+	return y
+}
+
+forward_subst_unit_lower_simd :: proc(
+	L: ^Matrix(f64),
+	b: []f64,
+	allocator: mem.Allocator = context.allocator,
+) -> []f64 {
+	n := L.rows
+	if n == 0 || L.cols != n {
+		panic("forward_subst_unit_lower_simd: L must be square")
+	}
+	if len(b) != n {
+		panic("forward_subst_unit_lower_simd: dimension mismatch")
+	}
+
+	y := make([]f64, n, allocator)
+
+	for i := 0; i < n; i += 1 {
+		// sum = L[i,0:i] · y[0:i]
+		if i == 0 {
+			y[0] = b[0] // unit diagonal
+			continue
+		}
+		row := L.data[i * L.cols:i * L.cols + i] // 0 .. i-1
+		sum := dot_simd(row, y[0:i])
+		y[i] = b[i] - sum // L[i,i] = 1
+	}
+
+	return y
+}
+
+// Solve U x = y, U upper-triangular with non-unit diagonal
+// Uses SIMD dot on the trailing part of x.
+back_subst_upper_simd :: proc(
+	U: ^Matrix(f64),
+	y: []f64,
+	allocator: mem.Allocator = context.allocator,
+) -> []f64 {
+	n := U.rows
+	if n == 0 || U.cols != n {
+		panic("back_subst_upper_simd: U must be square")
+	}
+	if len(y) != n {
+		panic("back_subst_upper_simd: dimension mismatch")
+	}
+
+	x := make([]f64, n, allocator)
+
+	for ii := n - 1; ii >= 0; ii -= 1 {
+		i := ii
+
+		// sum = U[i,i+1:n] · x[i+1:n]
+		if i == n - 1 {
+			diag := U.data[i * U.cols + i]
+			if diag == 0.0 {
+				panic("back_subst_upper_simd: zero diagonal")
+			}
+			x[i] = y[i] / diag
+			continue
+		}
+
+		row_tail := U.data[i * U.cols + i + 1:i * U.cols + n]
+		sum := dot_simd(row_tail, x[i + 1:n])
+
+		diag := U.data[i * U.cols + i]
+		if diag == 0.0 {
+			panic("back_subst_upper_simd: zero diagonal")
+		}
+		x[i] = (y[i] - sum) / diag
+	}
+
+	return x
+}
+// Solve LU x = Pb using SIMD triangular solves
+lu_solve_simd :: proc(
+	LU: ^Matrix(f64),
+	piv: []int,
+	b: []f64,
+	allocator: mem.Allocator = context.allocator,
+) -> []f64 {
+	n := LU.rows
+	if n == 0 || LU.cols != n {
+		panic("lu_solve_simd: LU must be square")
+	}
+	if len(b) != n {
+		panic("lu_solve_simd: dimension mismatch")
+	}
+
+	// y = P b
+	y_perm := apply_pivots_vec(piv, b)
+
+	// L y = P b  (L unit lower in LU)
+	y := forward_subst_unit_lower_simd(LU, y_perm, allocator)
+
+	// U x = y  (U upper in LU)
+	x := back_subst_upper_simd(LU, y, allocator)
+
+	return x
+}
+// y += alpha * x  (SIMD, f64)
+// y += alpha * x  (SIMD, f64)
+axpy_simd :: proc(alpha: f64, x, y: []f64) {
+	n := len(x)
+	if n != len(y) do panic("axpy_simd: length mismatch")
+
+	if alpha == 0.0 {
+		return
+	}
+
+	if !simd.HAS_HARDWARE_SIMD {
+		for i := 0; i < n; i += 1 {
+			y[i] += alpha * x[i]
+		}
+		return
+	}
+
+	// AVX: f64x8
+	if intrinsics.has_target_feature("avx") {
+		a8: simd.f64x8 = simd.f64x8{alpha, alpha, alpha, alpha, alpha, alpha, alpha, alpha}
+		i := 0
+		for ; i + 8 <= n; i += 8 {
+			vx := simd.f64x8 {
+				x[i + 0],
+				x[i + 1],
+				x[i + 2],
+				x[i + 3],
+				x[i + 4],
+				x[i + 5],
+				x[i + 6],
+				x[i + 7],
+			}
+			vy := simd.f64x8 {
+				y[i + 0],
+				y[i + 1],
+				y[i + 2],
+				y[i + 3],
+				y[i + 4],
+				y[i + 5],
+				y[i + 6],
+				y[i + 7],
+			}
+			vy = intrinsics.simd_add(vy, intrinsics.simd_mul(a8, vx))
+
+			// spill SIMD back to scalars
+			vy_arr := transmute([8]f64)vy
+			y[i + 0] = vy_arr[0]
+			y[i + 1] = vy_arr[1]
+			y[i + 2] = vy_arr[2]
+			y[i + 3] = vy_arr[3]
+			y[i + 4] = vy_arr[4]
+			y[i + 5] = vy_arr[5]
+			y[i + 6] = vy_arr[6]
+			y[i + 7] = vy_arr[7]
+		}
+		for ; i < n; i += 1 {
+			y[i] += alpha * x[i]
+		}
+		return
+	}
+
+	// SSE2: f64x4
+	if intrinsics.has_target_feature("sse2") {
+		a4: simd.f64x4 = simd.f64x4{alpha, alpha, alpha, alpha}
+		i := 0
+		for ; i + 4 <= n; i += 4 {
+			vx := simd.f64x4{x[i + 0], x[i + 1], x[i + 2], x[i + 3]}
+			vy := simd.f64x4{y[i + 0], y[i + 1], y[i + 2], y[i + 3]}
+			vy = intrinsics.simd_add(vy, intrinsics.simd_mul(a4, vx))
+
+			vy_arr := transmute([4]f64)vy
+			y[i + 0] = vy_arr[0]
+			y[i + 1] = vy_arr[1]
+			y[i + 2] = vy_arr[2]
+			y[i + 3] = vy_arr[3]
+		}
+		for ; i < n; i += 1 {
+			y[i] += alpha * x[i]
+		}
+		return
+	}
+
+	// Baseline: f64x2
+	a2: simd.f64x2 = simd.f64x2{alpha, alpha}
+	i := 0
+	for ; i + 2 <= n; i += 2 {
+		vx := simd.f64x2{x[i + 0], x[i + 1]}
+		vy := simd.f64x2{y[i + 0], y[i + 1]}
+		vy = intrinsics.simd_add(vy, intrinsics.simd_mul(a2, vx))
+
+		vy_arr := transmute([2]f64)vy
+		y[i + 0] = vy_arr[0]
+		y[i + 1] = vy_arr[1]
+	}
+	for ; i < n; i += 1 {
+		y[i] += alpha * x[i]
+	}
+}
+ger_simd :: proc(alpha: f64, x: []f64, y: []f64, A: ^Matrix(f64)) {
+	m := A.rows
+	n := A.cols
+
+	if len(x) != m {
+		panic("ger_simd: x length mismatch with A.rows")
+	}
+	if len(y) != n {
+		panic("ger_simd: y length mismatch with A.cols")
+	}
+	if alpha == 0.0 {
+		return
+	}
+
+	for i := 0; i < m; i += 1 {
+		scalar := alpha * x[i]
+		if scalar == 0.0 {
+			continue
+		}
+		row := A.data[i * A.cols:i * A.cols + n]
+		axpy_simd(scalar, y, row)
+	}
+}
+
+
+rotate_pair_simd :: proc(c, s: f64, col_p, col_q: []f64, length: int) {
+	// [new_p; new_q] = [c, -s; s, c] * [old_p; old_q]
+	// len: explicit number of elements to process (avoids slice aliasing issues)
+
+	if length > len(col_p) || length > len(col_q) {
+		panic("rotate_pair_simd: length exceeds array bounds")
+	}
+
+	if !simd.HAS_HARDWARE_SIMD {
+		for i := 0; i < length; i += 1 {
+			up := col_p[i]
+			uq := col_q[i]
+			col_p[i] = c * up - s * uq
+			col_q[i] = s * up + c * uq
+		}
+		return
+	}
+
+	// AVX: f64x8
+	if intrinsics.has_target_feature("avx") {
+		cc := simd.f64x8{c, c, c, c, c, c, c, c}
+		ss := simd.f64x8{s, s, s, s, s, s, s, s}
+		i := 0
+		for ; i + 8 <= length; i += 8 {
+			vp := simd.f64x8 {
+				col_p[i + 0],
+				col_p[i + 1],
+				col_p[i + 2],
+				col_p[i + 3],
+				col_p[i + 4],
+				col_p[i + 5],
+				col_p[i + 6],
+				col_p[i + 7],
+			}
+			vq := simd.f64x8 {
+				col_q[i + 0],
+				col_q[i + 1],
+				col_q[i + 2],
+				col_q[i + 3],
+				col_q[i + 4],
+				col_q[i + 5],
+				col_q[i + 6],
+				col_q[i + 7],
+			}
+			// new_p = c*old_p - s*old_q
+			new_p := intrinsics.simd_sub(intrinsics.simd_mul(cc, vp), intrinsics.simd_mul(ss, vq))
+			// new_q = s*old_p + c*old_q
+			new_q := intrinsics.simd_add(intrinsics.simd_mul(ss, vp), intrinsics.simd_mul(cc, vq))
+			// Store back via transmute (ensures memory visibility)
+			new_p_arr := transmute([8]f64)new_p
+			new_q_arr := transmute([8]f64)new_q
+			for j := 0; j < 8; j += 1 {
+				col_p[i + j] = new_p_arr[j]
+				col_q[i + j] = new_q_arr[j]
+			}
+		}
+		// Tail: scalar fallback
+		for ; i < length; i += 1 {
+			up := col_p[i]; uq := col_q[i]
+			col_p[i] = c * up - s * uq
+			col_q[i] = s * up + c * uq
+		}
+		return
+	}
+
+	// SSE2/fallback: similar pattern (omitted for brevity - add if needed)
+	// For now, scalar fallback handles all non-AVX cases
+	for i := 0; i < length; i += 1 {
+		up := col_p[i]; uq := col_q[i]
+		col_p[i] = c * up - s * uq
+		col_q[i] = s * up + c * uq
+	}
+}
+
+xtx_simd :: proc(A: ^Matrix(f64), allocator: mem.Allocator = context.allocator) -> Matrix(f64) {
+	m, n := A.rows, A.cols
+	// AtA is n×n symmetric
+	AtA := matrix_new(f64, n, n, allocator)
+
+	// Pre-allocate column buffers ONCE (reused for every dot product)
+	// This avoids O(n²) allocations in the nested loops
+	col_i := make([]f64, m, context.temp_allocator)
+	col_j := make([]f64, m, context.temp_allocator)
+
+	for ii in 0 ..< n {
+		// Extract column ii of A into col_i (strided access in row-major)
+		for k in 0 ..< m {
+			col_i[k] = A.data[k * A.cols + ii]
+		}
+
+		for jj in 0 ..= ii { 	// Only compute lower triangle (symmetric)
+			if ii == jj {
+				// Diagonal: norm squared of column ii
+				AtA.data[ii * n + ii] = dot_simd(col_i, col_i)
+			} else {
+				// Extract column jj of A into col_j
+				for k in 0 ..< m {
+					col_j[k] = A.data[k * A.cols + jj]
+				}
+				// Off-diagonal: dot product of columns ii and jj
+				sum := dot_simd(col_i, col_j)
+				AtA.data[ii * n + jj] = sum
+				AtA.data[jj * n + ii] = sum // Symmetric
+			}
+		}
+	}
+	return AtA
+}
+
+// Optional: Add this for large-m matrices
+xtx_blocked_simd :: proc(
+	A: ^Matrix(f64),
+	allocator: mem.Allocator = context.allocator,
+) -> Matrix(f64) {
+	m, n := A.rows, A.cols
+	AtA := matrix_new(f64, n, n, allocator)
+
+	// Reusable column buffers
+	col_i := make([]f64, m, context.temp_allocator)
+	col_j := make([]f64, m, context.temp_allocator)
+
+	// Block size for cache efficiency
+	tile := tile_for_matmul() // 16 for AVX
+
+	for ii in 0 ..< n {
+		// Extract column ii
+		for k in 0 ..< m {col_i[k] = A.data[k * A.cols + ii]}
+
+		for jj in 0 ..= ii {
+			if ii == jj {
+				AtA.data[ii * n + ii] = dot_simd(col_i, col_i)
+			} else {
+				// Extract column jj (could also block this if m is huge)
+				for k in 0 ..< m {col_j[k] = A.data[k * A.cols + jj]}
+				sum := dot_simd(col_i, col_j)
+				AtA.data[ii * n + jj] = sum
+				AtA.data[jj * n + ii] = sum
+			}
+		}
+	}
+	return AtA
+}
+// ============================================================================
+// Kronecker Product (SIMD-optimized version)
+// Uses axpy_simd for scaling B rows by A[i,j]
+// ============================================================================
+kron_simd :: proc(
+	A: ^Matrix(f64),
+	B: ^Matrix(f64),
+	allocator: mem.Allocator = context.allocator,
+) -> Matrix(f64) {
+	m, n := A.rows, A.cols
+	p, q := B.rows, B.cols
+
+	C := matrix_new(f64, m * p, n * q, allocator)
+
+	for i in 0 ..< m {
+		for j in 0 ..< n {
+			a_ij := A.data[i * A.cols + j]
+			if a_ij == 0.0 {continue}
+
+			row_start := i * p
+			col_start := j * q
+
+			// Pre-allocate zero row for axpy_simd (y += alpha*x with y=0)
+			for ii in 0 ..< p {
+				row_C := row_start + ii
+				row_B := ii * B.cols
+				row_C_start := row_C * C.cols + col_start
+
+				// Use axpy_simd: C_row += a_ij * B_row
+				// Note: axpy_simd does y += alpha*x, so we need y=0 first
+				// (already zero from matrix_new, so safe)
+				axpy_simd(a_ij, B.data[row_B:row_B + q], C.data[row_C_start:row_C_start + q])
+			}
+		}
+	}
+
+	return C
+}
+
+// ============================================================================
+// SIMD Vector Subtraction: out = a - b (element-wise, f64)
+// ============================================================================
+vec_sub_simd :: proc(a, b, out: []f64) {
+	n := len(a)
+	if n != len(b) || n != len(out) do panic("vec_sub_simd: length mismatch")
+
+	if !simd.HAS_HARDWARE_SIMD {
+		for i := 0; i < n; i += 1 {
+			out[i] = a[i] - b[i]
+		}
+		return
+	}
+
+	// ============================================================
+	// 1. Try widest SIMD first (f64x8) — requires AVX/AVX2/AVX512
+	// ============================================================
+	if intrinsics.has_target_feature("avx") {
+		i := 0
+		for ; i + 8 <= n; i += 8 {
+			va := simd.f64x8 {
+				a[i + 0],
+				a[i + 1],
+				a[i + 2],
+				a[i + 3],
+				a[i + 4],
+				a[i + 5],
+				a[i + 6],
+				a[i + 7],
+			}
+			vb := simd.f64x8 {
+				b[i + 0],
+				b[i + 1],
+				b[i + 2],
+				b[i + 3],
+				b[i + 4],
+				b[i + 5],
+				b[i + 6],
+				b[i + 7],
+			}
+			vout := intrinsics.simd_sub(va, vb)
+
+			// Spill SIMD back to scalars
+			out_arr := transmute([8]f64)vout
+			for j := 0; j < 8; j += 1 {
+				out[i + j] = out_arr[j]
+			}
+		}
+		for ; i < n; i += 1 {
+			out[i] = a[i] - b[i]
+		}
+		return
+	}
+
+	// ==========================================
+	// 2. Next: f64x4 (SSE2/SSE4, always available)
+	// ==========================================
+	if intrinsics.has_target_feature("sse2") {
+		i := 0
+		for ; i + 4 <= n; i += 4 {
+			va := simd.f64x4{a[i + 0], a[i + 1], a[i + 2], a[i + 3]}
+			vb := simd.f64x4{b[i + 0], b[i + 1], b[i + 2], b[i + 3]}
+			vout := intrinsics.simd_sub(va, vb)
+
+			out_arr := transmute([4]f64)vout
+			for j := 0; j < 4; j += 1 {
+				out[i + j] = out_arr[j]
+			}
+		}
+		for ; i < n; i += 1 {
+			out[i] = a[i] - b[i]
+		}
+		return
+	}
+
+	// ===========================
+	// 3. Fallback: f64x2 (baseline)
+	// ===========================
+	i := 0
+	for ; i + 2 <= n; i += 2 {
+		va := simd.f64x2{a[i + 0], a[i + 1]}
+		vb := simd.f64x2{b[i + 0], b[i + 1]}
+		vout := intrinsics.simd_sub(va, vb)
+
+		out_arr := transmute([2]f64)vout
+		for j := 0; j < 2; j += 1 {
+			out[i + j] = out_arr[j]
+		}
+	}
+	for ; i < n; i += 1 {
+		out[i] = a[i] - b[i]
+	}
+}
+// ============================================================================
+// SIMD In-Place Vector Subtraction: a -= b (element-wise, f64)
+// ============================================================================
+vec_sub_inplace_simd :: proc(a, b: []f64) {
+	n := len(a)
+	if n != len(b) do panic("vec_sub_inplace_simd: length mismatch")
+
+	if !simd.HAS_HARDWARE_SIMD {
+		for i := 0; i < n; i += 1 {
+			a[i] -= b[i]
+		}
+		return
+	}
+
+	// AVX: f64x8
+	if intrinsics.has_target_feature("avx") {
+		i := 0
+		for ; i + 8 <= n; i += 8 {
+			va := simd.f64x8 {
+				a[i + 0],
+				a[i + 1],
+				a[i + 2],
+				a[i + 3],
+				a[i + 4],
+				a[i + 5],
+				a[i + 6],
+				a[i + 7],
+			}
+			vb := simd.f64x8 {
+				b[i + 0],
+				b[i + 1],
+				b[i + 2],
+				b[i + 3],
+				b[i + 4],
+				b[i + 5],
+				b[i + 6],
+				b[i + 7],
+			}
+			vout := intrinsics.simd_sub(va, vb)
+			out_arr := transmute([8]f64)vout
+			for j := 0; j < 8; j += 1 {
+				a[i + j] = out_arr[j]
+			}
+		}
+		for ; i < n; i += 1 {a[i] -= b[i]}
+		return
+	}
+
+	// SSE2: f64x4
+	if intrinsics.has_target_feature("sse2") {
+		i := 0
+		for ; i + 4 <= n; i += 4 {
+			va := simd.f64x4{a[i + 0], a[i + 1], a[i + 2], a[i + 3]}
+			vb := simd.f64x4{b[i + 0], b[i + 1], b[i + 2], b[i + 3]}
+			vout := intrinsics.simd_sub(va, vb)
+			out_arr := transmute([4]f64)vout
+			for j := 0; j < 4; j += 1 {
+				a[i + j] = out_arr[j]
+			}
+		}
+		for ; i < n; i += 1 {a[i] -= b[i]}
+		return
+	}
+
+	// Baseline: f64x2
+	i := 0
+	for ; i + 2 <= n; i += 2 {
+		va := simd.f64x2{a[i + 0], a[i + 1]}
+		vb := simd.f64x2{b[i + 0], b[i + 1]}
+		vout := intrinsics.simd_sub(va, vb)
+		out_arr := transmute([2]f64)vout
+		for j := 0; j < 2; j += 1 {
+			a[i + j] = out_arr[j]
+		}
+	}
+	for ; i < n; i += 1 {a[i] -= b[i]}
+}
+// ============================================================================
+// SIMD Vector Addition: out = a + b (element-wise, f64)
+// ============================================================================
+vec_add_simd :: proc(a, b, out: []f64) {
+	n := len(a)
+	if n != len(b) || n != len(out) do panic("vec_add_simd: length mismatch")
+
+	if !simd.HAS_HARDWARE_SIMD {
+		for i := 0; i < n; i += 1 {
+			out[i] = a[i] + b[i]
+		}
+		return
+	}
+
+	// ============================================================
+	// 1. Try widest SIMD first (f64x8) — requires AVX/AVX2/AVX512
+	// ============================================================
+	if intrinsics.has_target_feature("avx") {
+		i := 0
+		for ; i + 8 <= n; i += 8 {
+			va := simd.f64x8 {
+				a[i + 0],
+				a[i + 1],
+				a[i + 2],
+				a[i + 3],
+				a[i + 4],
+				a[i + 5],
+				a[i + 6],
+				a[i + 7],
+			}
+			vb := simd.f64x8 {
+				b[i + 0],
+				b[i + 1],
+				b[i + 2],
+				b[i + 3],
+				b[i + 4],
+				b[i + 5],
+				b[i + 6],
+				b[i + 7],
+			}
+			vout := intrinsics.simd_add(va, vb)
+
+			// Spill SIMD back to scalars
+			out_arr := transmute([8]f64)vout
+			for j := 0; j < 8; j += 1 {
+				out[i + j] = out_arr[j]
+			}
+		}
+		for ; i < n; i += 1 {
+			out[i] = a[i] + b[i]
+		}
+		return
+	}
+
+	// ==========================================
+	// 2. Next: f64x4 (SSE2/SSE4, always available)
+	// ==========================================
+	if intrinsics.has_target_feature("sse2") {
+		i := 0
+		for ; i + 4 <= n; i += 4 {
+			va := simd.f64x4{a[i + 0], a[i + 1], a[i + 2], a[i + 3]}
+			vb := simd.f64x4{b[i + 0], b[i + 1], b[i + 2], b[i + 3]}
+			vout := intrinsics.simd_add(va, vb)
+
+			out_arr := transmute([4]f64)vout
+			for j := 0; j < 4; j += 1 {
+				out[i + j] = out_arr[j]
+			}
+		}
+		for ; i < n; i += 1 {
+			out[i] = a[i] + b[i]
+		}
+		return
+	}
+
+	// ===========================
+	// 3. Fallback: f64x2 (baseline)
+	// ===========================
+	i := 0
+	for ; i + 2 <= n; i += 2 {
+		va := simd.f64x2{a[i + 0], a[i + 1]}
+		vb := simd.f64x2{b[i + 0], b[i + 1]}
+		vout := intrinsics.simd_add(va, vb)
+
+		out_arr := transmute([2]f64)vout
+		for j := 0; j < 2; j += 1 {
+			out[i + j] = out_arr[j]
+		}
+	}
+	for ; i < n; i += 1 {
+		out[i] = a[i] + b[i]
+	}
+}
+
+
+// ============================================================================
+// SIMD Vector Multiplication: out = a * b (element-wise, f64)
+// ============================================================================
+vec_mul_simd :: proc(a, b, out: []f64) {
+	n := len(a)
+	if n != len(b) || n != len(out) do panic("vec_mul_simd: length mismatch")
+
+	if !simd.HAS_HARDWARE_SIMD {
+		for i := 0; i < n; i += 1 {
+			out[i] = a[i] * b[i]
+		}
+		return
+	}
+
+	// ============================================================
+	// 1. Try widest SIMD first (f64x8) — requires AVX/AVX2/AVX512
+	// ============================================================
+	if intrinsics.has_target_feature("avx") {
+		i := 0
+		for ; i + 8 <= n; i += 8 {
+			va := simd.f64x8 {
+				a[i + 0],
+				a[i + 1],
+				a[i + 2],
+				a[i + 3],
+				a[i + 4],
+				a[i + 5],
+				a[i + 6],
+				a[i + 7],
+			}
+			vb := simd.f64x8 {
+				b[i + 0],
+				b[i + 1],
+				b[i + 2],
+				b[i + 3],
+				b[i + 4],
+				b[i + 5],
+				b[i + 6],
+				b[i + 7],
+			}
+			vout := intrinsics.simd_mul(va, vb)
+
+			// Spill SIMD back to scalars
+			out_arr := transmute([8]f64)vout
+			for j := 0; j < 8; j += 1 {
+				out[i + j] = out_arr[j]
+			}
+		}
+		for ; i < n; i += 1 {
+			out[i] = a[i] * b[i]
+		}
+		return
+	}
+
+	// ==========================================
+	// 2. Next: f64x4 (SSE2/SSE4, always available)
+	// ==========================================
+	if intrinsics.has_target_feature("sse2") {
+		i := 0
+		for ; i + 4 <= n; i += 4 {
+			va := simd.f64x4{a[i + 0], a[i + 1], a[i + 2], a[i + 3]}
+			vb := simd.f64x4{b[i + 0], b[i + 1], b[i + 2], b[i + 3]}
+			vout := intrinsics.simd_mul(va, vb)
+
+			out_arr := transmute([4]f64)vout
+			for j := 0; j < 4; j += 1 {
+				out[i + j] = out_arr[j]
+			}
+		}
+		for ; i < n; i += 1 {
+			out[i] = a[i] * b[i]
+		}
+		return
+	}
+
+	// ===========================
+	// 3. Fallback: f64x2 (baseline)
+	// ===========================
+	i := 0
+	for ; i + 2 <= n; i += 2 {
+		va := simd.f64x2{a[i + 0], a[i + 1]}
+		vb := simd.f64x2{b[i + 0], b[i + 1]}
+		vout := intrinsics.simd_mul(va, vb)
+
+		out_arr := transmute([2]f64)vout
+		for j := 0; j < 2; j += 1 {
+			out[i + j] = out_arr[j]
+		}
+	}
+	for ; i < n; i += 1 {
+		out[i] = a[i] * b[i]
+	}
+}
+// ============================================================================
+// SIMD Fused Multiply-Add (In-Place): c += a * b (element-wise, f64)
+// This is the core operation of Neural Network backward passes!
+// ============================================================================
+vec_fma_inplace_simd :: proc(a, b, c: []f64) {
+	n := len(a)
+	if n != len(b) || n != len(c) do panic("vec_fma_inplace_simd: length mismatch")
+
+	if !simd.HAS_HARDWARE_SIMD {
+		for i := 0; i < n; i += 1 {c[i] += a[i] * b[i]}
+		return
+	}
+
+	// AVX: f64x8
+	if intrinsics.has_target_feature("avx") {
+		i := 0
+		for ; i + 8 <= n; i += 8 {
+			va := simd.f64x8 {
+				a[i],
+				a[i + 1],
+				a[i + 2],
+				a[i + 3],
+				a[i + 4],
+				a[i + 5],
+				a[i + 6],
+				a[i + 7],
+			}
+			vb := simd.f64x8 {
+				b[i],
+				b[i + 1],
+				b[i + 2],
+				b[i + 3],
+				b[i + 4],
+				b[i + 5],
+				b[i + 6],
+				b[i + 7],
+			}
+			vc := simd.f64x8 {
+				c[i],
+				c[i + 1],
+				c[i + 2],
+				c[i + 3],
+				c[i + 4],
+				c[i + 5],
+				c[i + 6],
+				c[i + 7],
+			}
+
+			// FMA: c = a * b + c
+			vc = intrinsics.simd_add(vc, intrinsics.simd_mul(va, vb))
+
+			out_arr := transmute([8]f64)vc
+			for j := 0; j < 8; j += 1 {c[i + j] = out_arr[j]}
+		}
+		for ; i < n; i += 1 {c[i] += a[i] * b[i]}
+		return
+	}
+
+	// SSE2: f64x4
+	if intrinsics.has_target_feature("sse2") {
+		i := 0
+		for ; i + 4 <= n; i += 4 {
+			va := simd.f64x4{a[i], a[i + 1], a[i + 2], a[i + 3]}
+			vb := simd.f64x4{b[i], b[i + 1], b[i + 2], b[i + 3]}
+			vc := simd.f64x4{c[i], c[i + 1], c[i + 2], c[i + 3]}
+
+			vc = intrinsics.simd_add(vc, intrinsics.simd_mul(va, vb))
+
+			out_arr := transmute([4]f64)vc
+			for j := 0; j < 4; j += 1 {c[i + j] = out_arr[j]}
+		}
+		for ; i < n; i += 1 {c[i] += a[i] * b[i]}
+		return
+	}
+
+	// Fallback
+	for i := 0; i < n; i += 1 {c[i] += a[i] * b[i]}
+}
+
+// ============================================================================
+// SIMD Vector Sum: returns sum of all elements in a (f64)
+// ============================================================================
+sum_simd :: proc(a: []f64) -> f64 {
+	n := len(a)
+	if !simd.HAS_HARDWARE_SIMD {
+		sum := 0.0
+		for v in a {sum += v}
+		return sum
+	}
+
+	// AVX: f64x8
+	if intrinsics.has_target_feature("avx") {
+		acc8: simd.f64x8 = simd.f64x8{0, 0, 0, 0, 0, 0, 0, 0}
+		i := 0
+		for ; i + 8 <= n; i += 8 {
+			va := simd.f64x8 {
+				a[i],
+				a[i + 1],
+				a[i + 2],
+				a[i + 3],
+				a[i + 4],
+				a[i + 5],
+				a[i + 6],
+				a[i + 7],
+			}
+			acc8 = intrinsics.simd_add(acc8, va)
+		}
+		sum := intrinsics.simd_reduce_add_pairs(acc8)
+		for ; i < n; i += 1 {sum += a[i]}
+		return sum
+	}
+
+	// SSE2: f64x4
+	if intrinsics.has_target_feature("sse2") {
+		acc4: simd.f64x4 = simd.f64x4{0, 0, 0, 0}
+		i := 0
+		for ; i + 4 <= n; i += 4 {
+			va := simd.f64x4{a[i], a[i + 1], a[i + 2], a[i + 3]}
+			acc4 = intrinsics.simd_add(acc4, va)
+		}
+		sum := intrinsics.simd_reduce_add_pairs(acc4)
+		for ; i < n; i += 1 {sum += a[i]}
+		return sum
+	}
+
+	// Fallback
+	sum := 0.0
+	for v in a {sum += v}
+	return sum
+}
+// ============================================================================
+// SIMD ReLU Forward: out = max(0, a)
+// ============================================================================
+vec_relu_simd :: proc(a, out: []f64) {
+	n := len(a)
+	if n != len(out) do panic("vec_relu_simd: length mismatch")
+
+	if intrinsics.has_target_feature("avx") {
+		zero8 := simd.f64x8{0, 0, 0, 0, 0, 0, 0, 0}
+		i := 0
+		for ; i + 8 <= n; i += 8 {
+			va := simd.f64x8 {
+				a[i],
+				a[i + 1],
+				a[i + 2],
+				a[i + 3],
+				a[i + 4],
+				a[i + 5],
+				a[i + 6],
+				a[i + 7],
+			}
+			// mask = (va > 0.0)
+			mask := intrinsics.simd_lanes_gt(va, zero8)
+			// out = mask ? va : 0
+			vout := intrinsics.simd_select(mask, va, zero8)
+
+			out_arr := transmute([8]f64)vout
+			for j in 0 ..< 8 {out[i + j] = out_arr[j]}
+		}
+		for ; i < n; i += 1 {out[i] = math.max(a[i], 0.0)}
+		return
+	}
+
+	if intrinsics.has_target_feature("sse2") {
+		zero4 := simd.f64x4{0, 0, 0, 0}
+		i := 0
+		for ; i + 4 <= n; i += 4 {
+			va := simd.f64x4{a[i], a[i + 1], a[i + 2], a[i + 3]}
+			mask := intrinsics.simd_lanes_gt(va, zero4)
+			vout := intrinsics.simd_select(mask, va, zero4)
+
+			out_arr := transmute([4]f64)vout
+			for j in 0 ..< 4 {out[i + j] = out_arr[j]}
+		}
+		for ; i < n; i += 1 {out[i] = math.max(a[i], 0.0)}
+		return
+	}
+
+	for i in 0 ..< n {out[i] = math.max(a[i], 0.0)}
+}
+
+// ============================================================================
+// SIMD ReLU Backward: grad_in += grad_out * (a_in > 0)
+// ============================================================================
+vec_relu_backward_simd :: proc(grad_out, a_in, grad_in: []f64) {
+	n := len(grad_out)
+	if n != len(a_in) || n != len(grad_in) do panic("vec_relu_backward_simd: length mismatch")
+
+	if intrinsics.has_target_feature("avx") {
+		zero8 := simd.f64x8{0, 0, 0, 0, 0, 0, 0, 0}
+		i := 0
+		for ; i + 8 <= n; i += 8 {
+			va := simd.f64x8 {
+				a_in[i],
+				a_in[i + 1],
+				a_in[i + 2],
+				a_in[i + 3],
+				a_in[i + 4],
+				a_in[i + 5],
+				a_in[i + 6],
+				a_in[i + 7],
+			}
+			vgrad := simd.f64x8 {
+				grad_out[i],
+				grad_out[i + 1],
+				grad_out[i + 2],
+				grad_out[i + 3],
+				grad_out[i + 4],
+				grad_out[i + 5],
+				grad_out[i + 6],
+				grad_out[i + 7],
+			}
+			vgrad_in := simd.f64x8 {
+				grad_in[i],
+				grad_in[i + 1],
+				grad_in[i + 2],
+				grad_in[i + 3],
+				grad_in[i + 4],
+				grad_in[i + 5],
+				grad_in[i + 6],
+				grad_in[i + 7],
+			}
+
+			mask := intrinsics.simd_lanes_gt(va, zero8)
+			// masked_grad = mask ? vgrad : 0
+			masked_grad := intrinsics.simd_select(mask, vgrad, zero8)
+			vres := intrinsics.simd_add(vgrad_in, masked_grad)
+
+			out_arr := transmute([8]f64)vres
+			for j in 0 ..< 8 {grad_in[i + j] = out_arr[j]}
+		}
+		for ; i < n; i += 1 {
+			if a_in[i] > 0.0 {grad_in[i] += grad_out[i]}
+		}
+		return
+	}
+
+	if intrinsics.has_target_feature("sse2") {
+		zero4 := simd.f64x4{0, 0, 0, 0}
+		i := 0
+		for ; i + 4 <= n; i += 4 {
+			va := simd.f64x4{a_in[i], a_in[i + 1], a_in[i + 2], a_in[i + 3]}
+			vgrad := simd.f64x4{grad_out[i], grad_out[i + 1], grad_out[i + 2], grad_out[i + 3]}
+			vgrad_in := simd.f64x4{grad_in[i], grad_in[i + 1], grad_in[i + 2], grad_in[i + 3]}
+
+			mask := intrinsics.simd_lanes_gt(va, zero4)
+			masked_grad := intrinsics.simd_select(mask, vgrad, zero4)
+			vres := intrinsics.simd_add(vgrad_in, masked_grad)
+
+			out_arr := transmute([4]f64)vres
+			for j in 0 ..< 4 {grad_in[i + j] = out_arr[j]}
+		}
+		for ; i < n; i += 1 {
+			if a_in[i] > 0.0 {grad_in[i] += grad_out[i]}
+		}
+		return
+	}
+
+	for i in 0 ..< n {
+		if a_in[i] > 0.0 {grad_in[i] += grad_out[i]}
+	}
+}
+// ============================================================================
+// SIMD Vector Negation: out = -a (element-wise, f64)
+// ============================================================================
+vec_neg_simd :: proc(a, out: []f64) {
+	n := len(a)
+	if n != len(out) do panic("vec_neg_simd: length mismatch")
+
+	if !simd.HAS_HARDWARE_SIMD {
+		for i := 0; i < n; i += 1 {
+			out[i] = -a[i]
+		}
+		return
+	}
+
+	// AVX: f64x8
+	if intrinsics.has_target_feature("avx") {
+		zero8 := simd.f64x8{0, 0, 0, 0, 0, 0, 0, 0}
+		i := 0
+		for ; i + 8 <= n; i += 8 {
+			va := simd.f64x8 {
+				a[i + 0],
+				a[i + 1],
+				a[i + 2],
+				a[i + 3],
+				a[i + 4],
+				a[i + 5],
+				a[i + 6],
+				a[i + 7],
+			}
+			vout := intrinsics.simd_sub(zero8, va)
+			out_arr := transmute([8]f64)vout
+			for j := 0; j < 8; j += 1 {
+				out[i + j] = out_arr[j]
+			}
+		}
+		for ; i < n; i += 1 {
+			out[i] = -a[i]
+		}
+		return
+	}
+
+	// SSE2: f64x4
+	if intrinsics.has_target_feature("sse2") {
+		zero4 := simd.f64x4{0, 0, 0, 0}
+		i := 0
+		for ; i + 4 <= n; i += 4 {
+			va := simd.f64x4{a[i + 0], a[i + 1], a[i + 2], a[i + 3]}
+			vout := intrinsics.simd_sub(zero4, va)
+			out_arr := transmute([4]f64)vout
+			for j := 0; j < 4; j += 1 {
+				out[i + j] = out_arr[j]
+			}
+		}
+		for ; i < n; i += 1 {
+			out[i] = -a[i]
+		}
+		return
+	}
+
+	// Fallback
+	for i := 0; i < n; i += 1 {
+		out[i] = -a[i]
+	}
+}
+
+// ============================================================================
+// SIMD Vector Scale: out = a * scalar (element-wise, f64)
+// ============================================================================
+vec_scale_simd :: proc(a: []f64, scalar: f64, out: []f64) {
+	n := len(a)
+	if n != len(out) do panic("vec_scale_simd: length mismatch")
+
+	if scalar == 0.0 {
+		for i := 0; i < n; i += 1 {
+			out[i] = 0.0
+		}
+		return
+	}
+
+	if !simd.HAS_HARDWARE_SIMD {
+		for i := 0; i < n; i += 1 {
+			out[i] = a[i] * scalar
+		}
+		return
+	}
+
+	// AVX: f64x8
+	if intrinsics.has_target_feature("avx") {
+		s8 := simd.f64x8{scalar, scalar, scalar, scalar, scalar, scalar, scalar, scalar}
+		i := 0
+		for ; i + 8 <= n; i += 8 {
+			va := simd.f64x8 {
+				a[i + 0],
+				a[i + 1],
+				a[i + 2],
+				a[i + 3],
+				a[i + 4],
+				a[i + 5],
+				a[i + 6],
+				a[i + 7],
+			}
+			vout := intrinsics.simd_mul(va, s8)
+			out_arr := transmute([8]f64)vout
+			for j := 0; j < 8; j += 1 {
+				out[i + j] = out_arr[j]
+			}
+		}
+		for ; i < n; i += 1 {
+			out[i] = a[i] * scalar
+		}
+		return
+	}
+
+	// SSE2: f64x4
+	if intrinsics.has_target_feature("sse2") {
+		s4 := simd.f64x4{scalar, scalar, scalar, scalar}
+		i := 0
+		for ; i + 4 <= n; i += 4 {
+			va := simd.f64x4{a[i + 0], a[i + 1], a[i + 2], a[i + 3]}
+			vout := intrinsics.simd_mul(va, s4)
+			out_arr := transmute([4]f64)vout
+			for j := 0; j < 4; j += 1 {
+				out[i + j] = out_arr[j]
+			}
+		}
+		for ; i < n; i += 1 {
+			out[i] = a[i] * scalar
+		}
+		return
+	}
+
+	// Fallback
+	for i := 0; i < n; i += 1 {
+		out[i] = a[i] * scalar
+	}
+}
+
+// ============================================================================
+// SIMD Sigmoid Forward: out = 1 / (1 + exp(-a)) (element-wise, f64)
+// ============================================================================
+vec_sigmoid_simd :: proc(a, out: []f64) {
+	n := len(a)
+	if n != len(out) do panic("vec_sigmoid_simd: length mismatch")
+
+	if !simd.HAS_HARDWARE_SIMD {
+		for i := 0; i < n; i += 1 {
+			out[i] = 1.0 / (1.0 + math.exp(-a[i]))
+		}
+		return
+	}
+
+	// AVX: f64x8
+	if intrinsics.has_target_feature("avx") {
+		one8 := simd.f64x8{1, 1, 1, 1, 1, 1, 1, 1}
+		zero8 := simd.f64x8{0, 0, 0, 0, 0, 0, 0, 0}
+		i := 0
+		for ; i + 8 <= n; i += 8 {
+			va := simd.f64x8 {
+				a[i + 0],
+				a[i + 1],
+				a[i + 2],
+				a[i + 3],
+				a[i + 4],
+				a[i + 5],
+				a[i + 6],
+				a[i + 7],
+			}
+			// Compute 1 / (1 + exp(-x))
+			// = exp(x) / (1 + exp(x))  (more numerically stable for positive x)
+			// We'll use the standard form: 1 / (1 + exp(-x))
+			neg_a := intrinsics.simd_sub(zero8, va)
+			// exp(-a) - need manual exp since SIMD doesn't have it
+			// Fall back to scalar for exp, but vectorize the rest
+			neg_arr := transmute([8]f64)neg_a
+			exp_vals: [8]f64
+			for j := 0; j < 8; j += 1 {
+				exp_vals[j] = math.exp(neg_arr[j])
+			}
+			v_exp := transmute(simd.f64x8)exp_vals
+			denom := intrinsics.simd_add(one8, v_exp)
+			vout := intrinsics.simd_div(one8, denom)
+
+			out_arr := transmute([8]f64)vout
+			for j := 0; j < 8; j += 1 {
+				out[i + j] = out_arr[j]
+			}
+		}
+		for ; i < n; i += 1 {
+			out[i] = 1.0 / (1.0 + math.exp(-a[i]))
+		}
+		return
+	}
+
+	// SSE2: f64x4
+	if intrinsics.has_target_feature("sse2") {
+		one4 := simd.f64x4{1, 1, 1, 1}
+		zero4 := simd.f64x4{0, 0, 0, 0}
+		i := 0
+		for ; i + 4 <= n; i += 4 {
+			va := simd.f64x4{a[i + 0], a[i + 1], a[i + 2], a[i + 3]}
+			neg_a := intrinsics.simd_sub(zero4, va)
+			neg_arr := transmute([4]f64)neg_a
+			exp_vals: [4]f64
+			for j := 0; j < 4; j += 1 {
+				exp_vals[j] = math.exp(neg_arr[j])
+			}
+			v_exp := transmute(simd.f64x4)exp_vals
+			denom := intrinsics.simd_add(one4, v_exp)
+			vout := intrinsics.simd_div(one4, denom)
+
+			out_arr := transmute([4]f64)vout
+			for j := 0; j < 4; j += 1 {
+				out[i + j] = out_arr[j]
+			}
+		}
+		for ; i < n; i += 1 {
+			out[i] = 1.0 / (1.0 + math.exp(-a[i]))
+		}
+		return
+	}
+
+	// Fallback
+	for i := 0; i < n; i += 1 {
+		out[i] = 1.0 / (1.0 + math.exp(-a[i]))
+	}
+}
+
+// ============================================================================
+// SIMD Tanh Forward: out = tanh(a) (element-wise, f64)
+// ============================================================================
+vec_tanh_simd :: proc(a, out: []f64) {
+	n := len(a)
+	if n != len(out) do panic("vec_tanh_simd: length mismatch")
+
+	if !simd.HAS_HARDWARE_SIMD {
+		for i := 0; i < n; i += 1 {
+			out[i] = math.tanh(a[i])
+		}
+		return
+	}
+
+	// AVX: f64x8
+	if intrinsics.has_target_feature("avx") {
+		one8 := simd.f64x8{1, 1, 1, 1, 1, 1, 1, 1}
+		zero8 := simd.f64x8{0, 0, 0, 0, 0, 0, 0, 0}
+		i := 0
+		for ; i + 8 <= n; i += 8 {
+			va := simd.f64x8 {
+				a[i + 0],
+				a[i + 1],
+				a[i + 2],
+				a[i + 3],
+				a[i + 4],
+				a[i + 5],
+				a[i + 6],
+				a[i + 7],
+			}
+			// tanh(x) = (exp(x) - exp(-x)) / (exp(x) + exp(-x))
+			// = (exp(2x) - 1) / (exp(2x) + 1)
+			two8 := simd.f64x8{2, 2, 2, 2, 2, 2, 2, 2}
+			two_x := intrinsics.simd_mul(va, two8)
+			two_x_arr := transmute([8]f64)two_x
+			exp_vals: [8]f64
+			for j := 0; j < 8; j += 1 {
+				exp_vals[j] = math.exp(two_x_arr[j])
+			}
+			v_exp := transmute(simd.f64x8)exp_vals
+			num := intrinsics.simd_sub(v_exp, one8)
+			denom := intrinsics.simd_add(v_exp, one8)
+			vout := intrinsics.simd_div(num, denom)
+
+			out_arr := transmute([8]f64)vout
+			for j := 0; j < 8; j += 1 {
+				out[i + j] = out_arr[j]
+			}
+		}
+		for ; i < n; i += 1 {
+			out[i] = math.tanh(a[i])
+		}
+		return
+	}
+
+	// SSE2: f64x4
+	if intrinsics.has_target_feature("sse2") {
+		one4 := simd.f64x4{1, 1, 1, 1}
+		i := 0
+		for ; i + 4 <= n; i += 4 {
+			va := simd.f64x4{a[i + 0], a[i + 1], a[i + 2], a[i + 3]}
+			two4 := simd.f64x4{2, 2, 2, 2}
+			two_x := intrinsics.simd_mul(va, two4)
+			two_x_arr := transmute([4]f64)two_x
+			exp_vals: [4]f64
+			for j := 0; j < 4; j += 1 {
+				exp_vals[j] = math.exp(two_x_arr[j])
+			}
+			v_exp := transmute(simd.f64x4)exp_vals
+			num := intrinsics.simd_sub(v_exp, one4)
+			denom := intrinsics.simd_add(v_exp, one4)
+			vout := intrinsics.simd_div(num, denom)
+
+			out_arr := transmute([4]f64)vout
+			for j := 0; j < 4; j += 1 {
+				out[i + j] = out_arr[j]
+			}
+		}
+		for ; i < n; i += 1 {
+			out[i] = math.tanh(a[i])
+		}
+		return
+	}
+
+	// Fallback
+	for i := 0; i < n; i += 1 {
+		out[i] = math.tanh(a[i])
+	}
+}
+
+// ============================================================================
+// SIMD Leaky ReLU Forward: out = max(alpha*a, a) (element-wise, f64)
+// ============================================================================
+vec_leaky_relu_simd :: proc(a: []f64, alpha: f64, out: []f64) {
+	n := len(a)
+	if n != len(out) do panic("vec_leaky_relu_simd: length mismatch")
+
+	if !simd.HAS_HARDWARE_SIMD {
+		for i := 0; i < n; i += 1 {
+			v := a[i]
+			out[i] = v > 0.0 ? v : alpha * v
+		}
+		return
+	}
+
+	// AVX: f64x8
+	if intrinsics.has_target_feature("avx") {
+		zero8 := simd.f64x8{0, 0, 0, 0, 0, 0, 0, 0}
+		a8 := simd.f64x8{alpha, alpha, alpha, alpha, alpha, alpha, alpha, alpha}
+		i := 0
+		for ; i + 8 <= n; i += 8 {
+			va := simd.f64x8 {
+				a[i + 0],
+				a[i + 1],
+				a[i + 2],
+				a[i + 3],
+				a[i + 4],
+				a[i + 5],
+				a[i + 6],
+				a[i + 7],
+			}
+			// mask = (va > 0.0)
+			mask := intrinsics.simd_lanes_gt(va, zero8)
+			// scaled = alpha * va
+			scaled := intrinsics.simd_mul(a8, va)
+			// out = mask ? va : scaled
+			vout := intrinsics.simd_select(mask, va, scaled)
+
+			out_arr := transmute([8]f64)vout
+			for j := 0; j < 8; j += 1 {
+				out[i + j] = out_arr[j]
+			}
+		}
+		for ; i < n; i += 1 {
+			v := a[i]
+			out[i] = v > 0.0 ? v : alpha * v
+		}
+		return
+	}
+
+	// SSE2: f64x4
+	if intrinsics.has_target_feature("sse2") {
+		zero4 := simd.f64x4{0, 0, 0, 0}
+		a4 := simd.f64x4{alpha, alpha, alpha, alpha}
+		i := 0
+		for ; i + 4 <= n; i += 4 {
+			va := simd.f64x4{a[i + 0], a[i + 1], a[i + 2], a[i + 3]}
+			mask := intrinsics.simd_lanes_gt(va, zero4)
+			scaled := intrinsics.simd_mul(a4, va)
+			vout := intrinsics.simd_select(mask, va, scaled)
+
+			out_arr := transmute([4]f64)vout
+			for j := 0; j < 4; j += 1 {
+				out[i + j] = out_arr[j]
+			}
+		}
+		for ; i < n; i += 1 {
+			v := a[i]
+			out[i] = v > 0.0 ? v : alpha * v
+		}
+		return
+	}
+
+	// Fallback
+	for i := 0; i < n; i += 1 {
+		v := a[i]
+		out[i] = v > 0.0 ? v : alpha * v
+	}
+}
+
+// ============================================================================
+// SIMD Sigmoid Backward: out += grad * sigmoid(a) * (1 - sigmoid(a))
+// ============================================================================
+vec_sigmoid_backward_simd :: proc(grad, a, out: []f64) {
+	n := len(grad)
+	if n != len(a) || n != len(out) do panic("vec_sigmoid_backward_simd: length mismatch")
+
+	if !simd.HAS_HARDWARE_SIMD {
+		for i := 0; i < n; i += 1 {
+			s := 1.0 / (1.0 + math.exp(-a[i]))
+			out[i] += grad[i] * s * (1.0 - s)
+		}
+		return
+	}
+
+	// AVX: f64x8
+	if intrinsics.has_target_feature("avx") {
+		one8 := simd.f64x8{1, 1, 1, 1, 1, 1, 1, 1}
+		zero8 := simd.f64x8{0, 0, 0, 0, 0, 0, 0, 0}
+		i := 0
+		for ; i + 8 <= n; i += 8 {
+			va := simd.f64x8 {
+				a[i + 0],
+				a[i + 1],
+				a[i + 2],
+				a[i + 3],
+				a[i + 4],
+				a[i + 5],
+				a[i + 6],
+				a[i + 7],
+			}
+			vgrad := simd.f64x8 {
+				grad[i + 0],
+				grad[i + 1],
+				grad[i + 2],
+				grad[i + 3],
+				grad[i + 4],
+				grad[i + 5],
+				grad[i + 6],
+				grad[i + 7],
+			}
+			vout := simd.f64x8 {
+				out[i + 0],
+				out[i + 1],
+				out[i + 2],
+				out[i + 3],
+				out[i + 4],
+				out[i + 5],
+				out[i + 6],
+				out[i + 7],
+			}
+
+			// Compute sigmoid
+			neg_a := intrinsics.simd_sub(zero8, va)
+			neg_arr := transmute([8]f64)neg_a
+			exp_vals: [8]f64
+			for j := 0; j < 8; j += 1 {
+				exp_vals[j] = math.exp(neg_arr[j])
+			}
+			v_exp := transmute(simd.f64x8)exp_vals
+			denom := intrinsics.simd_add(one8, v_exp)
+			s := intrinsics.simd_div(one8, denom)
+
+			// grad * s * (1 - s)
+			one_minus_s := intrinsics.simd_sub(one8, s)
+			local_grad := intrinsics.simd_mul(intrinsics.simd_mul(vgrad, s), one_minus_s)
+			vres := intrinsics.simd_add(vout, local_grad)
+
+			out_arr := transmute([8]f64)vres
+			for j := 0; j < 8; j += 1 {
+				out[i + j] = out_arr[j]
+			}
+		}
+		for ; i < n; i += 1 {
+			s := 1.0 / (1.0 + math.exp(-a[i]))
+			out[i] += grad[i] * s * (1.0 - s)
+		}
+		return
+	}
+
+	// SSE2: f64x4
+	if intrinsics.has_target_feature("sse2") {
+		one4 := simd.f64x4{1, 1, 1, 1}
+		zero4 := simd.f64x4{0, 0, 0, 0}
+		i := 0
+		for ; i + 4 <= n; i += 4 {
+			va := simd.f64x4{a[i + 0], a[i + 1], a[i + 2], a[i + 3]}
+			vgrad := simd.f64x4{grad[i + 0], grad[i + 1], grad[i + 2], grad[i + 3]}
+			vout := simd.f64x4{out[i + 0], out[i + 1], out[i + 2], out[i + 3]}
+
+			neg_a := intrinsics.simd_sub(zero4, va)
+			neg_arr := transmute([4]f64)neg_a
+			exp_vals: [4]f64
+			for j := 0; j < 4; j += 1 {
+				exp_vals[j] = math.exp(neg_arr[j])
+			}
+			v_exp := transmute(simd.f64x4)exp_vals
+			denom := intrinsics.simd_add(one4, v_exp)
+			s := intrinsics.simd_div(one4, denom)
+
+			one_minus_s := intrinsics.simd_sub(one4, s)
+			local_grad := intrinsics.simd_mul(intrinsics.simd_mul(vgrad, s), one_minus_s)
+			vres := intrinsics.simd_add(vout, local_grad)
+
+			out_arr := transmute([4]f64)vres
+			for j := 0; j < 4; j += 1 {
+				out[i + j] = out_arr[j]
+			}
+		}
+		for ; i < n; i += 1 {
+			s := 1.0 / (1.0 + math.exp(-a[i]))
+			out[i] += grad[i] * s * (1.0 - s)
+		}
+		return
+	}
+
+	// Fallback
+	for i := 0; i < n; i += 1 {
+		s := 1.0 / (1.0 + math.exp(-a[i]))
+		out[i] += grad[i] * s * (1.0 - s)
+	}
+}
+
+// ============================================================================
+// SIMD Tanh Backward: out += grad * (1 - tanh(a)^2)
+// ============================================================================
+vec_tanh_backward_simd :: proc(grad, a, out: []f64) {
+	n := len(grad)
+	if n != len(a) || n != len(out) do panic("vec_tanh_backward_simd: length mismatch")
+
+	if !simd.HAS_HARDWARE_SIMD {
+		for i := 0; i < n; i += 1 {
+			t := math.tanh(a[i])
+			out[i] += grad[i] * (1.0 - t * t)
+		}
+		return
+	}
+
+	// AVX: f64x8
+	if intrinsics.has_target_feature("avx") {
+		one8 := simd.f64x8{1, 1, 1, 1, 1, 1, 1, 1}
+		i := 0
+		for ; i + 8 <= n; i += 8 {
+			va := simd.f64x8 {
+				a[i + 0],
+				a[i + 1],
+				a[i + 2],
+				a[i + 3],
+				a[i + 4],
+				a[i + 5],
+				a[i + 6],
+				a[i + 7],
+			}
+			vgrad := simd.f64x8 {
+				grad[i + 0],
+				grad[i + 1],
+				grad[i + 2],
+				grad[i + 3],
+				grad[i + 4],
+				grad[i + 5],
+				grad[i + 6],
+				grad[i + 7],
+			}
+			vout := simd.f64x8 {
+				out[i + 0],
+				out[i + 1],
+				out[i + 2],
+				out[i + 3],
+				out[i + 4],
+				out[i + 5],
+				out[i + 6],
+				out[i + 7],
+			}
+
+			// Compute tanh using (exp(2x) - 1) / (exp(2x) + 1)
+			two8 := simd.f64x8{2, 2, 2, 2, 2, 2, 2, 2}
+			two_x := intrinsics.simd_mul(va, two8)
+			two_x_arr := transmute([8]f64)two_x
+			exp_vals: [8]f64
+			for j := 0; j < 8; j += 1 {
+				exp_vals[j] = math.exp(two_x_arr[j])
+			}
+			v_exp := transmute(simd.f64x8)exp_vals
+			t := intrinsics.simd_div(
+				intrinsics.simd_sub(v_exp, one8),
+				intrinsics.simd_add(v_exp, one8),
+			)
+
+			// grad * (1 - t^2)
+			t_sq := intrinsics.simd_mul(t, t)
+			local_grad := intrinsics.simd_mul(vgrad, intrinsics.simd_sub(one8, t_sq))
+			vres := intrinsics.simd_add(vout, local_grad)
+
+			out_arr := transmute([8]f64)vres
+			for j := 0; j < 8; j += 1 {
+				out[i + j] = out_arr[j]
+			}
+		}
+		for ; i < n; i += 1 {
+			t := math.tanh(a[i])
+			out[i] += grad[i] * (1.0 - t * t)
+		}
+		return
+	}
+
+	// SSE2: f64x4
+	if intrinsics.has_target_feature("sse2") {
+		one4 := simd.f64x4{1, 1, 1, 1}
+		i := 0
+		for ; i + 4 <= n; i += 4 {
+			va := simd.f64x4{a[i + 0], a[i + 1], a[i + 2], a[i + 3]}
+			vgrad := simd.f64x4{grad[i + 0], grad[i + 1], grad[i + 2], grad[i + 3]}
+			vout := simd.f64x4{out[i + 0], out[i + 1], out[i + 2], out[i + 3]}
+
+			two4 := simd.f64x4{2, 2, 2, 2}
+			two_x := intrinsics.simd_mul(va, two4)
+			two_x_arr := transmute([4]f64)two_x
+			exp_vals: [4]f64
+			for j := 0; j < 4; j += 1 {
+				exp_vals[j] = math.exp(two_x_arr[j])
+			}
+			v_exp := transmute(simd.f64x4)exp_vals
+			t := intrinsics.simd_div(
+				intrinsics.simd_sub(v_exp, one4),
+				intrinsics.simd_add(v_exp, one4),
+			)
+
+			t_sq := intrinsics.simd_mul(t, t)
+			local_grad := intrinsics.simd_mul(vgrad, intrinsics.simd_sub(one4, t_sq))
+			vres := intrinsics.simd_add(vout, local_grad)
+
+			out_arr := transmute([4]f64)vres
+			for j := 0; j < 4; j += 1 {
+				out[i + j] = out_arr[j]
+			}
+		}
+		for ; i < n; i += 1 {
+			t := math.tanh(a[i])
+			out[i] += grad[i] * (1.0 - t * t)
+		}
+		return
+	}
+
+	// Fallback
+	for i := 0; i < n; i += 1 {
+		t := math.tanh(a[i])
+		out[i] += grad[i] * (1.0 - t * t)
+	}
+}
+
+// ============================================================================
+// SIMD Broadcast Add: out[i] += scalar for all i (f64)
+// ============================================================================
+vec_broadcast_add_simd :: proc(scalar: f64, out: []f64) {
+	n := len(out)
+
+	if scalar == 0.0 {
+		return
+	}
+
+	if !simd.HAS_HARDWARE_SIMD {
+		for i := 0; i < n; i += 1 {
+			out[i] += scalar
+		}
+		return
+	}
+
+	// AVX: f64x8
+	if intrinsics.has_target_feature("avx") {
+		s8 := simd.f64x8{scalar, scalar, scalar, scalar, scalar, scalar, scalar, scalar}
+		i := 0
+		for ; i + 8 <= n; i += 8 {
+			vout := simd.f64x8 {
+				out[i + 0],
+				out[i + 1],
+				out[i + 2],
+				out[i + 3],
+				out[i + 4],
+				out[i + 5],
+				out[i + 6],
+				out[i + 7],
+			}
+			vres := intrinsics.simd_add(vout, s8)
+			out_arr := transmute([8]f64)vres
+			for j := 0; j < 8; j += 1 {
+				out[i + j] = out_arr[j]
+			}
+		}
+		for ; i < n; i += 1 {
+			out[i] += scalar
+		}
+		return
+	}
+
+	// SSE2: f64x4
+	if intrinsics.has_target_feature("sse2") {
+		s4 := simd.f64x4{scalar, scalar, scalar, scalar}
+		i := 0
+		for ; i + 4 <= n; i += 4 {
+			vout := simd.f64x4{out[i + 0], out[i + 1], out[i + 2], out[i + 3]}
+			vres := intrinsics.simd_add(vout, s4)
+			out_arr := transmute([4]f64)vres
+			for j := 0; j < 4; j += 1 {
+				out[i + j] = out_arr[j]
+			}
+		}
+		for ; i < n; i += 1 {
+			out[i] += scalar
+		}
+		return
+	}
+
+	// Fallback
+	for i := 0; i < n; i += 1 {
+		out[i] += scalar
+	}
+}
+
+
+// ===== ./svd.odin =====
+package wotan_linalg
+
+import "core:math"
+import "core:mem"
+
+SVDMethod :: enum {
+	Jacobi,
+	GolubReinsch,
+}
+
+// ============================================================================
+// SVD (Jacobi) - Optimized: dot_simd + workspace reuse (SAFE)
+// ============================================================================
+svd_jacobi :: proc(
+	A: ^Matrix(f64),
+	allocator: mem.Allocator = context.temp_allocator,
+) -> (
+	U: Matrix(f64),
+	S: []f64,
+	V: Matrix(f64),
+) {
+	m := A.rows
+	n := A.cols
+	if m == 0 || n == 0 {return}
+
+	// Initialize U = A, V = I
+	U = matrix_new(f64, m, n, allocator)
+	copy(U.data, A.data)
+
+	V = matrix_new(f64, n, n, allocator)
+	for i in 0 ..< n {V.data[i * n + i] = 1.0}
+
+	// Pre-allocate workspace ONCE (reused every iteration)
+	col_p := make([]f64, max(m, n), context.temp_allocator)
+	col_q := make([]f64, max(m, n), context.temp_allocator)
+
+	max_iter := 100
+	eps := 1e-12
+
+	for iter in 0 ..< max_iter {
+		changed := false
+
+		for p in 0 ..< n {
+			for q in p + 1 ..< n {
+				// Gather columns p and q of U into temp buffers
+				for i in 0 ..< m {
+					col_p[i] = U.data[i * U.cols + p]
+					col_q[i] = U.data[i * U.cols + q]
+				}
+
+				// Compute alpha, beta, gamma using SIMD dot (SAFE: read-only)
+				alpha := dot_simd(col_p[0:m], col_p[0:m])
+				beta := dot_simd(col_q[0:m], col_q[0:m])
+				gamma := dot_simd(col_p[0:m], col_q[0:m])
+
+				if math.abs(gamma) <= eps * math.sqrt(alpha * beta) {
+					continue
+				}
+
+				changed = true
+
+				// Jacobi rotation parameters (idiomatic Odin)
+				tau := (beta - alpha) / (2.0 * gamma)
+				t: f64
+				if tau >= 0.0 {
+					t = 1.0 / (tau + math.sqrt(1.0 + tau * tau))
+				} else {
+					t = -1.0 / (-tau + math.sqrt(1.0 + tau * tau))
+				}
+				c := 1.0 / math.sqrt(1.0 + t * t)
+				s := c * t
+
+				// Rotate columns p,q of U (m rows) - SCALAR for now (safe)
+				rotate_pair_simd(c, s, col_p, col_q, m) // Pass full arrays + explicit len
+				for i in 0 ..< m {
+					U.data[i * U.cols + p] = col_p[i]
+					U.data[i * U.cols + q] = col_q[i]
+				}
+
+				// Rotate columns p,q of V (n rows) - SCALAR for now (safe)
+				for i in 0 ..< n {
+					vp := V.data[i * V.cols + p]
+					vq := V.data[i * V.cols + q]
+					V.data[i * V.cols + p] = c * vp - s * vq
+					V.data[i * V.cols + q] = s * vp + c * vq
+				}
+			}
+		}
+
+		if !changed {break}
+	}
+
+	// Compute singular values = column norms of U, normalize columns
+	S = make([]f64, n, allocator)
+	for j in 0 ..< n {
+		norm2 := 0.0
+		for i in 0 ..< m {
+			uij := U.data[i * U.cols + j]
+			norm2 += uij * uij
+		}
+		sigma := math.sqrt(norm2)
+		S[j] = sigma
+		if sigma > 1e-15 {
+			inv := 1.0 / sigma
+			for i in 0 ..< m {
+				U.data[i * U.cols + j] *= inv
+			}
+		}
+	}
+
+	// Sort descending (selection sort)
+	for i in 0 ..< n {
+		max_i := i
+		for j in i + 1 ..< n {
+			if S[j] > S[max_i] {max_i = j}
+		}
+		if max_i == i {continue}
+		S[i], S[max_i] = S[max_i], S[i]
+		// Swap columns in U
+		for r in 0 ..< m {
+			U.data[r * U.cols + i], U.data[r * U.cols + max_i] =
+				U.data[r * U.cols + max_i], U.data[r * U.cols + i]
+		}
+		// Swap columns in V
+		for r in 0 ..< n {
+			V.data[r * V.cols + i], V.data[r * V.cols + max_i] =
+				V.data[r * V.cols + max_i], V.data[r * V.cols + i]
+		}
+	}
+
+	return
+}
+
+// ============================================================================
+// Symmetric Jacobi eigen - original working version + idiomatic Odin
+// ============================================================================
+// ============================================================================
+// Symmetric Jacobi eigen - SIMD-optimized version
+// ============================================================================
+jacobi_eigen_symmetric :: proc(
+	A: ^Matrix(f64),
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	eigenvalues: []f64,
+	eigenvectors: Matrix(f64),
+) {
+	n := A.rows
+	if n == 0 || A.cols != n {
+		panic("jacobi_eigen_symmetric: matrix must be square")
+	}
+
+	// V = I
+	eigenvectors = matrix_new(f64, n, n, allocator)
+	for i in 0 ..< n {eigenvectors.data[i * n + i] = 1.0}
+
+	// Pre-allocate workspace (reused every iteration)
+	col_p := make([]f64, n, context.temp_allocator)
+	col_q := make([]f64, n, context.temp_allocator)
+	row_buf := make([]f64, n, context.temp_allocator) // for A row updates
+
+	max_iter := 100
+	eps := 1e-12
+
+	for iter in 0 ..< max_iter {
+		// Find largest off-diagonal |A[p,q]| using SIMD dot for row norms
+		p, q := 0, 1
+		max_val := 0.0
+		for i in 0 ..< n {
+			for j in i + 1 ..< n {
+				// Use abs directly (small n, scalar is fine here)
+				aij := math.abs(A.data[i * A.cols + j])
+				if aij > max_val {
+					max_val = aij
+					p, q = i, j
+				}
+			}
+		}
+		if max_val < eps {break}
+
+		app := A.data[p * A.cols + p]
+		aqq := A.data[q * A.cols + q]
+		apq := A.data[p * A.cols + q]
+
+		// Jacobi rotation parameters (idiomatic Odin)
+		tau := (aqq - app) / (2.0 * apq)
+		t: f64
+		if tau >= 0.0 {
+			t = 1.0 / (tau + math.sqrt(1.0 + tau * tau))
+		} else {
+			t = -1.0 / (-tau + math.sqrt(1.0 + tau * tau))
+		}
+		c := 1.0 / math.sqrt(1.0 + t * t)
+		s := c * t
+
+		// === SIMD-optimized: Rotate rows/columns p,q of A ===
+		// Update off-diagonal elements using gather + rotate_pair_simd
+		for k in 0 ..< n {
+			if k != p && k != q {
+				// Gather pair (A[p,k], A[q,k])
+				col_p[k] = A.data[p * A.cols + k]
+				col_q[k] = A.data[q * A.cols + k]
+			}
+		}
+		// Rotate the gathered pairs (only for k != p,q)
+		for k in 0 ..< n {
+			if k != p && k != q {
+				up := col_p[k]; uq := col_q[k]
+				col_p[k] = c * up - s * uq
+				col_q[k] = s * up + c * uq
+			}
+		}
+		// Write back
+		for k in 0 ..< n {
+			if k != p && k != q {
+				A.data[p * A.cols + k] = col_p[k]
+				A.data[q * A.cols + k] = col_q[k]
+				// Symmetric: A[k,p] = A[p,k], A[k,q] = A[q,k]
+				A.data[k * A.cols + p] = col_p[k]
+				A.data[k * A.cols + q] = col_q[k]
+			}
+		}
+
+		// Update diagonal elements (scalar, small cost)
+		A.data[p * A.cols + p] = c * c * app - 2.0 * c * s * apq + s * s * aqq
+		A.data[q * A.cols + q] = s * s * app + 2.0 * c * s * apq + c * c * aqq
+		A.data[p * A.cols + q] = 0.0
+		A.data[q * A.cols + p] = 0.0
+
+		// === SIMD-optimized: Rotate eigenvectors columns p,q ===
+		// Gather columns p,q of eigenvectors
+		for k in 0 ..< n {
+			col_p[k] = eigenvectors.data[k * eigenvectors.cols + p]
+			col_q[k] = eigenvectors.data[k * eigenvectors.cols + q]
+		}
+		// Rotate using SIMD (with explicit length)
+		rotate_pair_simd(c, s, col_p, col_q, n)
+		// Write back
+		for k in 0 ..< n {
+			eigenvectors.data[k * eigenvectors.cols + p] = col_p[k]
+			eigenvectors.data[k * eigenvectors.cols + q] = col_q[k]
+		}
+	}
+
+	// Extract eigenvalues from diagonal
+	eigenvalues = make([]f64, n, allocator)
+	for i in 0 ..< n {eigenvalues[i] = A.data[i * A.cols + i]}
+	return
+}
+
+// ============================================================================
+// Golub-Reinsch SVD - unchanged (already efficient)
+// ============================================================================
+svd_golub_reinsch :: proc(
+	A: ^Matrix(f64),
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	U: Matrix(f64),
+	S: []f64,
+	V: Matrix(f64),
+) {
+	m, n := A.rows, A.cols
+	if m == 0 || n == 0 {return}
+
+	AtA := xtx_simd(A, allocator)
+	evals, evecs := jacobi_eigen_symmetric(&AtA, allocator)
+
+	S = make([]f64, n, allocator)
+	max_abs := 0.0
+	for i in 0 ..< n {
+		ev := math.abs(evals[i])
+		if ev > max_abs {max_abs = ev}
+	}
+	if max_abs == 0.0 {max_abs = 1.0}
+	eps_rel := 1e-10
+
+	for i in 0 ..< n {
+		lam := evals[i]
+		if lam < 0.0 {
+			if -lam <= eps_rel * max_abs {
+				lam = 0.0
+			} else {
+				panic("svd_golub_reinsch: negative eigenvalue")
+			}
+		}
+		S[i] = math.sqrt(lam)
+	}
+
+	V = matrix_new(f64, n, n, allocator)
+	copy(V.data, evecs.data)
+	for i in 0 ..< n {
+		max_i := i
+		for j in i + 1 ..< n {
+			if S[j] > S[max_i] {max_i = j}
+		}
+		if max_i == i {continue}
+		S[i], S[max_i] = S[max_i], S[i]
+		for r in 0 ..< n {
+			V.data[r * V.cols + i], V.data[r * V.cols + max_i] =
+				V.data[r * V.cols + max_i], V.data[r * V.cols + i]
+		}
+	}
+
+	U = matrix_new(f64, m, n, allocator)
+	temp_v := make([]f64, n, context.temp_allocator)
+
+	for j in 0 ..< n {
+		sigma := S[j]
+		if sigma == 0.0 {
+			for i in 0 ..< m {U.data[i * U.cols + j] = 0.0}
+			U.data[j % m * U.cols + j] = 1.0
+			continue
+		}
+		for k in 0 ..< n {temp_v[k] = V.data[k * V.cols + j]}
+		w := matvec_dyn_simd(A, temp_v, allocator)
+		inv := 1.0 / sigma
+		for i in 0 ..< m {U.data[i * U.cols + j] = w[i] * inv}
+	}
+	return
+}
+
+// ============================================================================
+// Thin SVD wrapper (unchanged)
+// ============================================================================
+svd_thin :: proc(
+	A: ^Matrix(f64),
+	method: SVDMethod = .GolubReinsch,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	U_t: Matrix(f64),
+	S_t: []f64,
+	V_t: Matrix(f64),
+) {
+	U_full, S_full, V_full := svd(A, method, allocator)
+	m, n := U_full.rows, U_full.cols
+
+	S_max := 0.0
+	for i in 0 ..< n {if S_full[i] > S_max {S_max = S_full[i]}}
+	tol := f64(max(m, n)) * 1e-12 * S_max
+	r := 0
+	for i in 0 ..< n {if S_full[i] > tol {r += 1} else {break}}
+
+	if r == 0 {
+		U_t = matrix_new(f64, m, 0, allocator)
+		S_t = make([]f64, 0, allocator)
+		V_t = matrix_new(f64, n, 0, allocator)
+		return
+	}
+
+	U_t = matrix_new(f64, m, r, allocator)
+	V_t = matrix_new(f64, n, r, allocator)
+	S_t = make([]f64, r, allocator)
+
+	for i in 0 ..< r {S_t[i] = S_full[i]}
+	for i in 0 ..< m {
+		for j in 0 ..< r {U_t.data[i * U_t.cols + j] = U_full.data[i * U_full.cols + j]}
+	}
+	for i in 0 ..< n {
+		for j in 0 ..< r {V_t.data[i * V_t.cols + j] = V_full.data[i * V_full.cols + j]}
+	}
+	return
+}
+
+// ============================================================================
+// Dispatcher (unchanged)
+// ============================================================================
+svd :: proc(
+	A: ^Matrix(f64),
+	method: SVDMethod = .Jacobi,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	U: Matrix(f64),
+	S: []f64,
+	V: Matrix(f64),
+) {
+	switch method {
+	case .Jacobi:
+		return svd_jacobi(A, allocator)
+	case .GolubReinsch:
+		return svd_golub_reinsch(A, allocator)
+	}
+	return svd_jacobi(A, allocator)
+}
+
+

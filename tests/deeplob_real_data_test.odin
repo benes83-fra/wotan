@@ -58,6 +58,10 @@ load_real_lob_data :: proc(url: string, allocator: mem.Allocator) -> w.DataFrame
 // 2. Data Extraction & Windowing (Reusing core DataFrame API)
 // ============================================================================
 
+// ============================================================================
+// 2. Data Extraction & Windowing (Reusing core DataFrame API)
+// ============================================================================
+
 extract_and_window_lob :: proc(
 	df: ^w.DataFrame,
 	time_steps: int,
@@ -81,49 +85,54 @@ extract_and_window_lob :: proc(
 		return nil, nil
 	}
 
-	channels := 4
-	feat_data := l.matrix_new(f64, n_windows, channels * time_steps * price_levels, allocator)
+	in_channels := 4
+	out_channels := 3 // Mid-Price, Spread, OBI
+	feat_data_raw := l.matrix_new(
+		f64,
+		n_windows,
+		in_channels * time_steps * price_levels,
+		allocator,
+	)
 	window_labels := make([]int, n_windows, allocator)
 
 	stride_c := time_steps * price_levels
 	stride_t := price_levels
 
-	// Extract the first 40 float columns as our LOB features.
+	// Extract the first 40 float columns as our raw LOB features.
 	feature_cols: [40]^w.Column
 	for j in 0 ..< 40 {
 		feature_cols[j] = &df.columns[j]
 	}
 
+	// 1. Extract raw 4-channel data
 	for win in 0 ..< n_windows {
-		// 1. Extract raw window data into channels
 		for t_idx in 0 ..< time_steps {
 			row := win + t_idx
 			for l_idx in 0 ..< price_levels {
-				// Map the 40 columns to the 4 DeepLOB channels sequentially.
 				col_idx_0 := l_idx
 				col_idx_1 := 10 + l_idx
 				col_idx_2 := 20 + l_idx
 				col_idx_3 := 30 + l_idx
 
 				v0, _ := w.column_at_float(feature_cols[col_idx_0], row)
-				feat_data.data[win * (channels * stride_c) + 0 * stride_c + t_idx * stride_t + l_idx] =
+				feat_data_raw.data[win * (in_channels * stride_c) + 0 * stride_c + t_idx * stride_t + l_idx] =
 					v0
 
 				v1, _ := w.column_at_float(feature_cols[col_idx_1], row)
-				feat_data.data[win * (channels * stride_c) + 1 * stride_c + t_idx * stride_t + l_idx] =
+				feat_data_raw.data[win * (in_channels * stride_c) + 1 * stride_c + t_idx * stride_t + l_idx] =
 					v1
 
 				v2, _ := w.column_at_float(feature_cols[col_idx_2], row)
-				feat_data.data[win * (channels * stride_c) + 2 * stride_c + t_idx * stride_t + l_idx] =
+				feat_data_raw.data[win * (in_channels * stride_c) + 2 * stride_c + t_idx * stride_t + l_idx] =
 					v2
 
 				v3, _ := w.column_at_float(feature_cols[col_idx_3], row)
-				feat_data.data[win * (channels * stride_c) + 3 * stride_c + t_idx * stride_t + l_idx] =
+				feat_data_raw.data[win * (in_channels * stride_c) + 3 * stride_c + t_idx * stride_t + l_idx] =
 					v3
 			}
 		}
 
-		// 2. Assign Label (Generate 0, 1, 2 based on mid-price movement)
+		// Assign Label
 		price_start, _ := w.column_at_float(feature_cols[0], win)
 		price_end, _ := w.column_at_float(feature_cols[0], win + time_steps - 1)
 		change := (price_end - price_start) / price_start
@@ -137,11 +146,28 @@ extract_and_window_lob :: proc(
 		window_labels[win] = label
 	}
 
-	// 3. Create tensor and apply SIMD-optimized Z-score normalization along the time dimension
-	features_tensor := t.tensor_new(feat_data, false, allocator)
-	features_tensor.shape = [4]int{n_windows, channels, time_steps, price_levels}
+	// 2. Convert raw 4 channels into 3 Microstructure channels (Mid, Spread, OBI)
+	feat_data_micro := ml_fin.compute_lob_microstructure(
+		feat_data_raw.data,
+		n_windows,
+		time_steps,
+		price_levels,
+		allocator,
+	)
+	delete(feat_data_raw.data, allocator) // Free raw data slice
 
-	// Apply the new SIMD-optimized normalization
+	// Wrap the flat slice in a Matrix struct for tensor_new
+	micro_matrix := l.Matrix(f64) {
+		rows = 1,
+		cols = len(feat_data_micro),
+		data = feat_data_micro,
+	}
+
+	// 3. Create tensor and apply SIMD-optimized Z-score normalization
+	features_tensor := t.tensor_new(micro_matrix, false, allocator)
+	features_tensor.shape = [4]int{n_windows, out_channels, time_steps, price_levels}
+
+	// Apply the SIMD-optimized normalization
 	features_tensor = t.tensor_normalize_time(features_tensor, 1e-8, allocator)
 
 	return features_tensor, window_labels
