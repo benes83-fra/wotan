@@ -27,11 +27,11 @@ deeplob_test :: proc(allocator: mem.Allocator) {
 
 	ml_fin.deeplob_add_to_adam(model, &opt)
 
-	// Dummy input: [Batch=8, Channels=4, Time=100, Levels=10]
-	// Wotan stores 4D tensors as flat 2D matrices under the hood.
-	input_data := l.matrix_new(f64, 8, 4 * 100 * 10, allocator)
+	// ✅ FIX: Dummy input now has 3 channels (Mid-Price, Spread, OBI)
+	// Shape: [Batch=8, Channels=3, Time=100, Levels=10]
+	input_data := l.matrix_new(f64, 8, 3 * 100 * 10, allocator)
 	input_tensor := t.tensor_new(input_data, true, allocator)
-	input_tensor.shape = [4]int{8, 4, 100, 10}
+	input_tensor.shape = [4]int{8, 3, 100, 10}
 
 	// Forward pass
 	logits := ml_fin.deeplob_forward(model, input_tensor)

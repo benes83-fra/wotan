@@ -149,7 +149,7 @@ deeplob_new :: proc(
 
 	model.cnn = nn.sequential_new(allocator)
 
-	nn.sequential_add(model.cnn, nn.conv2d_layer_new(4, 16, 3, 1, 1, true, allocator))
+	nn.sequential_add(model.cnn, nn.conv2d_layer_new(3, 16, 3, 1, 1, true, allocator))
 	nn.sequential_add(model.cnn, nn.Activation.ReLU)
 
 	nn.sequential_add(model.cnn, nn.conv2d_layer_new(16, 32, 3, 1, 1, true, allocator))
