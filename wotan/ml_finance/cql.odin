@@ -58,11 +58,15 @@ cql_loss :: proc(
 	dones: ^t.Tensor, // [Batch, 1, 1, 1]
 	config: CQLConfig,
 	allocator: mem.Allocator,
-) -> ^t.Tensor {
+) -> (
+	^t.Tensor,
+	f64,
+	f64,
+) { 	// <-- Return total_loss, td_loss_val, cql_reg_val
 	batch := q_values.shape[0]
 	num_actions := config.num_actions
 
-	// 1. Compute max_next_q manually (no new tensor ops needed)
+	// 1. Compute max_next_q manually
 	max_next_q_data := l.matrix_new(f64, batch, 1, allocator)
 	for i in 0 ..< batch {
 		max_val := -math.F64_MAX
@@ -82,8 +86,8 @@ cql_loss :: proc(
 		done := dones.data.data[i]
 		target_data.data[i] = r + config.gamma * max_nq * (1.0 - done)
 	}
-	target := t.tensor_new(target_data, false, allocator) // Detached
-	target.shape = [4]int{batch, 1, 1, 1} // ✅ Ensure shape matches q_taken
+	target := t.tensor_new(target_data, false, allocator)
+	target.shape = [4]int{batch, 1, 1, 1} // Ensure shape matches q_taken
 
 	// 3. q_taken = sum(q_values * one_hot(actions), dim=1)
 	one_hot_data := l.matrix_new(f64, batch, num_actions, allocator)
@@ -94,7 +98,7 @@ cql_loss :: proc(
 	one_hot := t.tensor_new(one_hot_data, false, allocator)
 
 	q_masked := t.tensor_mul(q_values, one_hot)
-	q_taken := t.tensor_sum_dim1(q_masked) // [Batch, 1]
+	q_taken := t.tensor_sum_dim1(q_masked) // [Batch, 1, 1, 1]
 
 	// 4. TD Loss
 	td_loss := t.tensor_mse_loss(q_taken, target)
@@ -112,7 +116,11 @@ cql_loss :: proc(
 	scaled_cql := t.tensor_mul(cql_reg, alpha_tensor)
 	total_loss := t.tensor_add(td_loss, scaled_cql)
 
-	return total_loss
+	// Capture scalar values for logging before returning
+	td_val := td_loss.data.data[0]
+	cql_val := cql_reg.data.data[0]
+
+	return total_loss, td_val, cql_val
 }
 
 // ============================================================================
