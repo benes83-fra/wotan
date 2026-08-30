@@ -66,6 +66,7 @@ Op :: enum {
 	SharpeLoss,
 	Concat,
 	NormalizeTime,
+	LogSumExpDim1,
 }
 
 PoolParams :: struct {
@@ -1185,6 +1186,28 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 				}
 			}
 		// In tensor_backward, find case .ScaledDotProductAttention and update it:
+		case .LogSumExpDim1:
+			q_in := node.inputs[0]
+			if q_in.requires_grad && len(q_in.grad.data) > 0 {
+				num_actions := node.int_metadata[0]
+				batch := node.shape[0]
+				for i in 0 ..< batch {
+					max_val := -math.F64_MAX
+					for a in 0 ..< num_actions {
+						val := q_in.data.data[i * num_actions + a]
+						if val > max_val {max_val = val}
+					}
+					sum_exp := 0.0
+					for a in 0 ..< num_actions {
+						sum_exp += math.exp(q_in.data.data[i * num_actions + a] - max_val)
+					}
+					grad_out := node.grad.data[i]
+					for a in 0 ..< num_actions {
+						prob := math.exp(q_in.data.data[i * num_actions + a] - max_val) / sum_exp
+						q_in.grad.data[i * num_actions + a] += grad_out * prob
+					}
+				}
+			}
 		case .ScaledDotProductAttention:
 			Q_in := node.inputs[0]
 			K_in := node.inputs[1]
@@ -4861,5 +4884,37 @@ tensor_normalize_time :: proc(
 		append(&out.int_metadata, int(eps * 1_000_000_000.0)) // Store eps scaled to fit in int
 	}
 
+	return out
+}
+// ============================================================================
+// LogSumExp over Dimension 1 (Core Math Primitive)
+// ============================================================================
+tensor_logsumexp_dim1 :: proc(
+	q: ^Tensor,
+	num_actions: int,
+	allocator: mem.Allocator = context.allocator,
+) -> ^Tensor {
+	batch := q.shape[0]
+	out_data := l.matrix_new(f64, batch, 1, allocator)
+
+	for i in 0 ..< batch {
+		max_val := -math.F64_MAX
+		for a in 0 ..< num_actions {
+			val := q.data.data[i * num_actions + a]
+			if val > max_val {max_val = val}
+		}
+		sum_exp := 0.0
+		for a in 0 ..< num_actions {
+			sum_exp += math.exp(q.data.data[i * num_actions + a] - max_val)
+		}
+		out_data.data[i] = max_val + math.ln(sum_exp)
+	}
+
+	out := tensor_new(out_data, q.requires_grad, allocator)
+	if out.requires_grad {
+		out.op = .LogSumExpDim1
+		append(&out.inputs, q)
+		append(&out.int_metadata, num_actions)
+	}
 	return out
 }
