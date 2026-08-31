@@ -168,7 +168,7 @@ cql_real_data_trading_test :: proc(allocator: mem.Allocator) {
 		num_actions = 3,
 		hidden_dim  = 32,
 		gamma       = 0.95,
-		alpha       = 1.0, // Conservative penalty weight
+		alpha       = 0.1, // Conservative penalty weight
 	}
 
 	// 2. Initialize Q-Networks
@@ -229,6 +229,111 @@ cql_real_data_trading_test :: proc(allocator: mem.Allocator) {
 
 		t.tensor_free_graph(loss)
 	}
+
+	// ============================================================================
+	// 4. Inference & Evaluation Loop
+	// ============================================================================
+	fmt.println("\n=== Evaluating Trained Agent ===")
+	fmt.println("Step | Price   | Agent Action | Behavioral Action | Daily Ret | Agent PnL")
+	fmt.println("-----|---------|--------------|-------------------|-----------|----------")
+
+	// Forward pass to get Q-values for all states
+	q_values_eval := ml_fin.cql_network_forward(&q_net, states)
+	defer t.tensor_free(q_values_eval) // Clean up the evaluation tensor
+
+	close_col := &df.columns[4] // Close price
+
+	cumulative_agent_pnl := 0.0
+	cumulative_behavioral_pnl := 0.0
+	agent_action_count := [3]int{0, 0, 0}
+	behavioral_action_count := [3]int{0, 0, 0}
+
+	print_steps := 10
+	prev_agent_action := 1
+	prev_behav_action := 1
+
+	for i := 0; i < batch_size; i += 1 {
+		// 1. Get Agent's Action (argmax of Q-values)
+		agent_action := 1 // Default Hold
+		max_q := -math.F64_MAX
+		for a := 0; a < 3; a += 1 {
+			q_val := q_values_eval.data.data[i * 3 + a]
+			if q_val > max_q {
+				max_q = q_val
+				agent_action = a
+			}
+		}
+
+		// 2. Get Behavioral Action
+		behavioral_action := actions[i]
+
+		// 3. Get Daily Return
+		close_today, _ := w.column_at_float(close_col, i)
+		close_tomorrow, _ := w.column_at_float(close_col, i + 1)
+		daily_ret := (close_tomorrow - close_today) / close_today
+
+		// 4. Calculate PnL for this step (with 10bps transaction cost for flips)
+		agent_direction := f64(agent_action - 1)
+		behav_direction := f64(behavioral_action - 1)
+
+		agent_tx_cost := 0.001 * math.abs(agent_direction - f64(prev_agent_action - 1))
+		behav_tx_cost := 0.001 * math.abs(behav_direction - f64(prev_behav_action - 1))
+
+		agent_step_pnl := agent_direction * daily_ret - agent_tx_cost
+		behav_step_pnl := behav_direction * daily_ret - behav_tx_cost
+
+		cumulative_agent_pnl += agent_step_pnl
+		cumulative_behavioral_pnl += behav_step_pnl
+
+		agent_action_count[agent_action] += 1
+		behavioral_action_count[behavioral_action] += 1
+
+		prev_agent_action = agent_action
+		prev_behav_action = behavioral_action
+
+		// Print first N and last N steps to avoid flooding the console
+		if i < print_steps || i >= batch_size - print_steps {
+			action_str := ""
+			if agent_action ==
+			   0 {action_str = "Short"} else if agent_action == 1 {action_str = "Hold "} else {action_str = "Long "}
+
+			behav_str := ""
+			if behavioral_action ==
+			   0 {behav_str = "Short"} else if behavioral_action == 1 {behav_str = "Hold "} else {behav_str = "Long "}
+
+			if i == print_steps && batch_size > 2 * print_steps {
+				fmt.println(
+					"  ...  |   ...   |     ...      |        ...        |    ...    |    ...   ",
+				)
+			}
+
+			fmt.printf(
+				" %4d | %7.2f | %12s | %17s | %9.4f | %8.4f\n",
+				i + 1,
+				close_today,
+				action_str,
+				behav_str,
+				daily_ret,
+				agent_step_pnl,
+			)
+		}
+	}
+
+	fmt.println("\n--- Summary ---")
+	fmt.printf("Cumulative Agent PnL (net of tx):     %.4f\n", cumulative_agent_pnl)
+	fmt.printf("Cumulative Behavioral PnL (net of tx): %.4f\n", cumulative_behavioral_pnl)
+	fmt.printf(
+		"Agent Action Distribution:   Short: %d, Hold: %d, Long: %d\n",
+		agent_action_count[0],
+		agent_action_count[1],
+		agent_action_count[2],
+	)
+	fmt.printf(
+		"Behavioral Action Distribution: Short: %d, Hold: %d, Long: %d\n",
+		behavioral_action_count[0],
+		behavioral_action_count[1],
+		behavioral_action_count[2],
+	)
 
 	fmt.println("\n✓ Yahoo Finance CQL Test Complete!")
 	fmt.println("The agent learned to trade AAPL directly from historical logs,")
