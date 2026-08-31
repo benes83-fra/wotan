@@ -113,10 +113,7 @@ neural_sdf_train_step :: proc(
 		diff_sq := t.tensor_mul(diff, diff)
 		euler_loss = t.tensor_add(euler_loss, diff_sq)
 
-		// ✅ FIX: DO NOT free intermediate tensors here!
-		// They are part of the computation graph. Freeing them before
-		// t.tensor_backward destroys their gradient matrices, causing
-		// "empty gradient" warnings and "length mismatch" panics.
+
 	}
 
 	// 3. Regularization: Penalize variance of M

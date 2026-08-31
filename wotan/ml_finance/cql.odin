@@ -17,6 +17,7 @@ CQLConfig :: struct {
 	hidden_dim:  int,
 	gamma:       f64, // Discount factor
 	alpha:       f64, // CQL regularization weight
+	tau:         f64,
 }
 
 CQLNetwork :: struct {
@@ -47,22 +48,22 @@ cql_network_forward :: proc(net: ^CQLNetwork, states: ^t.Tensor) -> ^t.Tensor {
 }
 
 // ============================================================================
-// CQL Loss Function
+// CQL Loss Function (Bulletproof Adaptive Version)
 // ============================================================================
 
 cql_loss :: proc(
-	q_values: ^t.Tensor, // [Batch, num_actions, 1, 1]
-	actions: []int, // [Batch]
-	rewards: ^t.Tensor, // [Batch, 1, 1, 1]
-	next_q_values: ^t.Tensor, // [Batch, num_actions, 1, 1]
-	dones: ^t.Tensor, // [Batch, 1, 1, 1]
+	q_values: ^t.Tensor,
+	actions: []int,
+	rewards: ^t.Tensor,
+	next_q_values: ^t.Tensor,
+	dones: ^t.Tensor,
 	config: CQLConfig,
 	allocator: mem.Allocator,
 ) -> (
 	^t.Tensor,
 	f64,
 	f64,
-) { 	// <-- Return total_loss, td_loss_val, cql_reg_val
+) {
 	batch := q_values.shape[0]
 	num_actions := config.num_actions
 
@@ -72,7 +73,9 @@ cql_loss :: proc(
 		max_val := -math.F64_MAX
 		for a in 0 ..< num_actions {
 			val := next_q_values.data.data[i * num_actions + a]
-			if val > max_val {max_val = val}
+			if val > max_val {
+				max_val = val
+			}
 		}
 		max_next_q_data.data[i] = max_val
 	}
@@ -87,18 +90,34 @@ cql_loss :: proc(
 		target_data.data[i] = r + config.gamma * max_nq * (1.0 - done)
 	}
 	target := t.tensor_new(target_data, false, allocator)
-	target.shape = [4]int{batch, 1, 1, 1} // Ensure shape matches q_taken
+	target.shape = [4]int{batch, 1, 1, 1}
 
 	// 3. q_taken = sum(q_values * one_hot(actions), dim=1)
-	one_hot_data := l.matrix_new(f64, batch, num_actions, allocator)
-	for i in 0 ..< batch {
-		a := actions[i]
-		one_hot_data.data[i * num_actions + a] = 1.0
+	// ✅ BULLETPROOF FIX: Dynamically match the physical shape of q_values
+	one_hot_data: l.Matrix(f64)
+	if q_values.data.rows == 1 {
+		// Flattened batch case (e.g., 1 x 1500)
+		one_hot_data = l.matrix_new(f64, 1, batch * num_actions, allocator)
+		for i in 0 ..< batch {
+			a := actions[i]
+			one_hot_data.data[i * num_actions + a] = 1.0
+		}
+	} else {
+		// Standard 2D case (e.g., 250 x 3)
+		one_hot_data = l.matrix_new(f64, batch, num_actions, allocator)
+		for i in 0 ..< batch {
+			a := actions[i]
+			one_hot_data.data[i * num_actions + a] = 1.0
+		}
 	}
 	one_hot := t.tensor_new(one_hot_data, false, allocator)
 
 	q_masked := t.tensor_mul(q_values, one_hot)
-	q_taken := t.tensor_sum_dim1(q_masked) // [Batch, 1, 1, 1]
+
+	// Explicitly set logical shape so tensor_sum_dim1 interprets dimensions correctly
+	q_masked.shape = [4]int{batch, num_actions, 1, 1}
+
+	q_taken := t.tensor_sum_dim1(q_masked) // Results in [Batch, 1, 1, 1]
 
 	// 4. TD Loss
 	td_loss := t.tensor_mse_loss(q_taken, target)
@@ -122,11 +141,6 @@ cql_loss :: proc(
 
 	return total_loss, td_val, cql_val
 }
-
-// ============================================================================
-// Financial Dataset Generator (Historical Trade Execution)
-// ============================================================================
-
 // ============================================================================
 // Financial Dataset Generator (Historical Trade Execution)
 // ============================================================================
@@ -145,10 +159,11 @@ generate_trading_dataset :: proc(
 	state_dim := 4
 	num_actions := 3 // 0: Short, 1: Hold, 2: Long
 
-	states_data := l.matrix_new(f64, num_steps, state_dim, allocator)
-	rewards_data := l.matrix_new(f64, num_steps, 1, allocator)
-	next_states_data := l.matrix_new(f64, num_steps, state_dim, allocator)
-	dones_data := l.matrix_new(f64, num_steps, 1, allocator)
+	// ✅ FIX: Use rows=1 to ensure tensor_matmul hits the flattened batch handling
+	states_data := l.matrix_new(f64, 1, num_steps * state_dim, allocator)
+	rewards_data := l.matrix_new(f64, 1, num_steps, allocator)
+	next_states_data := l.matrix_new(f64, 1, num_steps * state_dim, allocator)
+	dones_data := l.matrix_new(f64, 1, num_steps, allocator)
 	actions_slice := make([]int, num_steps, allocator)
 
 	prev_action := 1 // Start with Hold
@@ -214,4 +229,45 @@ generate_trading_dataset :: proc(
 	dones.shape = [4]int{num_steps, 1, 1, 1}
 
 	return states, actions_slice, rewards, next_states, dones
+}
+
+// cql_network_copy performs a hard copy of weights from src to dst
+cql_network_copy :: proc(src: ^CQLNetwork, dst: ^CQLNetwork) {
+	copy(dst.fc1.weights.data.data, src.fc1.weights.data.data)
+	if src.fc1.bias != nil && dst.fc1.bias != nil {
+		copy(dst.fc1.bias.data.data, src.fc1.bias.data.data)
+	}
+	copy(dst.fc2.weights.data.data, src.fc2.weights.data.data)
+	if src.fc2.bias != nil && dst.fc2.bias != nil {
+		copy(dst.fc2.bias.data.data, src.fc2.bias.data.data)
+	}
+}
+
+// cql_soft_update performs: target = tau * main + (1 - tau) * target
+cql_soft_update :: proc(main_net: ^CQLNetwork, target_net: ^CQLNetwork, tau: f64) {
+	inv_tau := 1.0 - tau
+
+	// Update fc1 weights
+	for i in 0 ..< len(main_net.fc1.weights.data.data) {
+		target_net.fc1.weights.data.data[i] =
+			tau * main_net.fc1.weights.data.data[i] + inv_tau * target_net.fc1.weights.data.data[i]
+	}
+	if main_net.fc1.bias != nil && target_net.fc1.bias != nil {
+		for i in 0 ..< len(main_net.fc1.bias.data.data) {
+			target_net.fc1.bias.data.data[i] =
+				tau * main_net.fc1.bias.data.data[i] + inv_tau * target_net.fc1.bias.data.data[i]
+		}
+	}
+
+	// Update fc2 weights
+	for i in 0 ..< len(main_net.fc2.weights.data.data) {
+		target_net.fc2.weights.data.data[i] =
+			tau * main_net.fc2.weights.data.data[i] + inv_tau * target_net.fc2.weights.data.data[i]
+	}
+	if main_net.fc2.bias != nil && target_net.fc2.bias != nil {
+		for i in 0 ..< len(main_net.fc2.bias.data.data) {
+			target_net.fc2.bias.data.data[i] =
+				tau * main_net.fc2.bias.data.data[i] + inv_tau * target_net.fc2.bias.data.data[i]
+		}
+	}
 }
