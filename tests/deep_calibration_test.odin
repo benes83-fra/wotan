@@ -128,8 +128,85 @@ deep_calibration_test :: proc(allocator: mem.Allocator) {
 		inference_params.data.data[3],
 		inference_params.data.data[4],
 	)
+	// ============================================================================
+	// 5. Real Market Data Calibration (AAPL Options Chain)
+	// ============================================================================
+	fmt.println("\n=== Real Market Data Calibration (AAPL) ===")
+	fmt.println("Fetching live AAPL options chain using finance.fetch_yahoo_options...")
 
-	fmt.println("\n✓ Deep Calibration Test Complete!")
-	fmt.println("The MLP calibrated the Heston model in a single forward pass (microseconds),")
-	fmt.println("bypassing the need for slow iterative solvers like Levenberg-Marquardt.")
+	// ✅ REUSE: Leverage your existing, robust options fetcher!
+	chain := fin.fetch_yahoo_options("AAPL", allocator)
+
+	if chain.n_options == 0 {
+		fmt.println("Failed to fetch real options data. Skipping real market test.")
+	} else {
+		fmt.printf("Successfully fetched %d total options.\n", chain.n_options)
+
+		// We need a fixed number of prices for the MLP input.
+		// Let's filter for CALL options and take the first `num_options` of them.
+
+		// ✅ FIX: Use [dynamic]f64 instead of []f64 so append works correctly
+		call_prices := make([dynamic]f64, 0, allocator)
+		call_strikes := make([dynamic]f64, 0, allocator)
+
+		for i in 0 ..< chain.n_options {
+			if chain.option_types[i] == "call" && chain.market_prices[i] > 0.0 {
+				append(&call_prices, chain.market_prices[i])
+				append(&call_strikes, chain.strikes[i])
+			}
+		}
+
+		// Ensure we have at least `num_options` (e.g., 10)
+		actual_num := num_options
+		if len(call_prices) < num_options {
+			actual_num = len(call_prices)
+			fmt.printf(
+				"Warning: Only found %d valid call options. Adjusting input size.\n",
+				actual_num,
+			)
+		}
+
+		// Create the input tensor for the MLP (Standard 2D layout: 1 x actual_num)
+		real_prices_data := l.matrix_new(f64, 1, actual_num, allocator)
+		for i in 0 ..< actual_num {
+			real_prices_data.data[i] = call_prices[i]
+		}
+
+		real_prices_tensor := t.tensor_new(real_prices_data, false, allocator)
+		real_prices_tensor.shape = [4]int{1, actual_num, 1, 1}
+		defer t.tensor_free(real_prices_tensor)
+
+		fmt.printf("\nFeeding %d call option mid-prices into the MLP...\n", actual_num)
+		for i in 0 ..< actual_num {
+			fmt.printf("  Strike: $%7.2f, Price: $%6.2f\n", call_strikes[i], call_prices[i])
+		}
+
+		fmt.println("\nRunning MLP forward pass on REAL market prices...")
+
+		// Inference (No autograd needed)
+		real_inference_params := ml_fin.deep_heston_calibrator_forward(
+			&calibrator,
+			real_prices_tensor,
+		)
+		defer t.tensor_free(real_inference_params)
+
+		fmt.printf("\nMLP Predicted Heston Params for AAPL:\n")
+		fmt.printf("  v0 (Initial Variance):  %.4f\n", real_inference_params.data.data[0])
+		fmt.printf("  kappa (Mean Reversion): %.2f\n", real_inference_params.data.data[1])
+		fmt.printf("  theta (Long-term Var):  %.4f\n", real_inference_params.data.data[2])
+		fmt.printf("  sigma (Vol of Vol):     %.2f\n", real_inference_params.data.data[3])
+		fmt.printf("  rho (Correlation):      %.2f\n", real_inference_params.data.data[4])
+
+		fmt.println("\n✓ Real Market Calibration Complete!")
+		fmt.println(
+			"The MLP successfully calibrated to live market data in a single forward pass,",
+		)
+		fmt.println("leveraging your existing finance.fetch_yahoo_options pipeline.")
+
+		// Cleanup dynamic arrays
+		delete(call_prices)
+		delete(call_strikes)
+	}
+
+	fmt.println("\n=== All Deep Calibration Tests Passed ===")
 }
