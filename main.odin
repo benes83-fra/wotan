@@ -553,6 +553,7 @@ main :: proc() {
 	test.deeplob_real_data_sharpe_test(context.temp_allocator)
 	test.cql_trading_test(context.temp_allocator)
 	test.cql_real_data_trading_test(context.temp_allocator)
+	test.deep_calibration_test(context.temp_allocator)
 	fmt.println("Demo End")
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
