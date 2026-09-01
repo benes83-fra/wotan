@@ -99,7 +99,7 @@ deep_calibration_test :: proc(allocator: mem.Allocator) {
 		T := 0.5 + f64(o) * 0.1
 		// Price using your existing engine
 		price := fin.heston_price(S0, K, T, r, true_params, .Call, 1000)
-		new_prices_data.data[o] = price
+		new_prices_data.data[o] = price / S0
 	}
 
 	new_prices := t.tensor_new(new_prices_data, false, allocator)
@@ -165,11 +165,11 @@ deep_calibration_test :: proc(allocator: mem.Allocator) {
 				actual_num,
 			)
 		}
-
+		estimated_S0 := 260.0
 		// Create the input tensor for the MLP (Standard 2D layout: 1 x actual_num)
 		real_prices_data := l.matrix_new(f64, 1, actual_num, allocator)
 		for i in 0 ..< actual_num {
-			real_prices_data.data[i] = call_prices[i]
+			real_prices_data.data[i] = call_prices[i] / estimated_S0
 		}
 
 		real_prices_tensor := t.tensor_new(real_prices_data, false, allocator)

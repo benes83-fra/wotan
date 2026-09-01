@@ -121,8 +121,10 @@ generate_heston_calibration_dataset :: proc(
 		// 3. Price options using your EXISTING, optimized finance.heston_price
 		// (Using 1000 points is fast and accurate enough for dataset generation)
 		for o in 0 ..< num_options {
+			moneyness := strikes[o] / S0
 			price := fin.heston_price(S0, strikes[o], maturities[o], r, params, .Call, 1000)
-			inputs_data.data[s * num_options + o] = price
+			normalized_price := price / S0
+			inputs_data.data[s * num_options + o] = normalized_price
 		}
 	}
 
