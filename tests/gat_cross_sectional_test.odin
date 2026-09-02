@@ -177,10 +177,14 @@ gat_real_world_test :: proc(allocator: mem.Allocator) {
 		// Compute daily returns: (Close[t] - Close[t-1]) / Close[t-1]
 		returns := make([]f64, n_rows, allocator)
 		valid_count := 0
+
+
 		for d in 1 ..< n_rows {
-			prev_close, ok1 := w.column_at_float(close_col, d - 1)
-			curr_close, ok2 := w.column_at_float(close_col, d)
-			if ok1 && ok2 && prev_close > 0.0 {
+			prev_close, is_null1 := w.column_at_float(close_col, d - 1)
+			curr_close, is_null2 := w.column_at_float(close_col, d)
+
+			// ✅ FIX: We want values that are NOT null (!is_null)
+			if !is_null1 && !is_null2 && prev_close > 0.0 {
 				returns[d] = (curr_close - prev_close) / prev_close
 				valid_count += 1
 			}
