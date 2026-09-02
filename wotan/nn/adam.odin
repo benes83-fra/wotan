@@ -280,6 +280,14 @@ sequential_add_trainable_to_adam :: proc(seq: ^Sequential, opt: ^Adam) {
 				if block.ffn.fc2.bias != nil &&
 				   block.ffn.fc2.bias.requires_grad {adam_add_param(opt, block.ffn.fc2.bias)}
 			}
+		case GATLayer:
+			if l.linear.weights.requires_grad {adam_add_param(opt, l.linear.weights)}
+			if l.linear.bias != nil &&
+			   l.linear.bias.requires_grad {adam_add_param(opt, l.linear.bias)}
+			if l.mha.q_proj.weights.requires_grad {adam_add_param(opt, l.mha.q_proj.weights)}
+			if l.mha.k_proj.weights.requires_grad {adam_add_param(opt, l.mha.k_proj.weights)}
+			if l.mha.v_proj.weights.requires_grad {adam_add_param(opt, l.mha.v_proj.weights)}
+			if l.mha.out_proj.weights.requires_grad {adam_add_param(opt, l.mha.out_proj.weights)}
 		case MaxPool2dLayer, AvgPool2dLayer, DropoutLayer, Activation, FlattenLayer:
 		// No trainable parameters
 		}

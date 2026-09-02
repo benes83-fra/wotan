@@ -327,6 +327,29 @@ save_checkpoint :: proc(
 				write_tensor(file, block.ln2.gamma)
 				write_tensor(file, block.ln2.beta)
 			}
+		case GATLayer:
+			write_i32(file, 24) // Type 24
+			write_i32(file, i32(l.linear.in_features))
+			write_i32(file, i32(l.linear.out_features))
+			write_i32(file, i32(l.num_heads))
+			write_i32(file, i32(bool(l.linear.bias != nil)))
+
+			// Save Linear weights
+			write_tensor(file, l.linear.weights)
+			if l.linear.bias != nil {write_tensor(file, l.linear.bias)}
+
+			// Save MHA weights (same pattern as MultiHeadAttentionLayer)
+			write_tensor(file, l.mha.q_proj.weights)
+			write_tensor(file, l.mha.q_proj.bias)
+			write_tensor(file, l.mha.k_proj.weights)
+			write_tensor(file, l.mha.k_proj.bias)
+			write_tensor(file, l.mha.v_proj.weights)
+			write_tensor(file, l.mha.v_proj.bias)
+			write_tensor(file, l.mha.out_proj.weights)
+			write_tensor(file, l.mha.out_proj.bias)
+
+			// Save Adjacency Matrix
+			write_tensor(file, l.adjacency)
 		}
 
 	}
@@ -798,6 +821,51 @@ load_checkpoint :: proc(
 
 			append(&model.layers, encoder)
 
+		} else if layer_type == 24 { 	// GATLayer
+			in_f: i32; out_f: i32; num_heads: i32; has_bias: i32
+			in_f, offset = read_i32(data, offset)
+			out_f, offset = read_i32(data, offset)
+			num_heads, offset = read_i32(data, offset)
+			has_bias, offset = read_i32(data, offset)
+
+			// We need to read adjacency first to pass it to the constructor
+			adj_tensor, new_offset := read_tensor(data, offset, allocator)
+
+			layer := gat_layer_new(int(in_f), int(out_f), int(num_heads), adj_tensor, allocator)
+
+			// Overwrite default weights with saved ones
+			if layer.linear.weights != nil {t.tensor_free(layer.linear.weights)}
+			layer.linear.weights, offset = read_tensor(data, new_offset, allocator)
+
+			if has_bias != 0 {
+				if layer.linear.bias != nil {t.tensor_free(layer.linear.bias)}
+				layer.linear.bias, offset = read_tensor(data, offset, allocator)
+			}
+
+			// Load MHA weights (simplified for brevity, follow the MultiHeadAttentionLayer pattern)
+			if layer.mha.q_proj.weights != nil {t.tensor_free(layer.mha.q_proj.weights)}
+			layer.mha.q_proj.weights, offset = read_tensor(data, offset, allocator)
+			if layer.mha.q_proj.bias != nil {t.tensor_free(layer.mha.q_proj.bias)}
+			layer.mha.q_proj.bias, offset = read_tensor(data, offset, allocator)
+
+			// Load k_proj
+			if layer.mha.k_proj.weights != nil {t.tensor_free(layer.mha.k_proj.weights)}
+			layer.mha.k_proj.weights, offset = read_tensor(data, offset, allocator)
+			if layer.mha.k_proj.bias != nil {t.tensor_free(layer.mha.k_proj.bias)}
+			layer.mha.k_proj.bias, offset = read_tensor(data, offset, allocator)
+
+			// Load v_proj
+			if layer.mha.v_proj.weights != nil {t.tensor_free(layer.mha.v_proj.weights)}
+			layer.mha.v_proj.weights, offset = read_tensor(data, offset, allocator)
+			if layer.mha.v_proj.bias != nil {t.tensor_free(layer.mha.v_proj.bias)}
+			layer.mha.v_proj.bias, offset = read_tensor(data, offset, allocator)
+
+			// Load out_proj
+			if layer.mha.out_proj.weights != nil {t.tensor_free(layer.mha.out_proj.weights)}
+			layer.mha.out_proj.weights, offset = read_tensor(data, offset, allocator)
+			if layer.mha.out_proj.bias != nil {t.tensor_free(layer.mha.out_proj.bias)}
+			layer.mha.out_proj.bias, offset = read_tensor(data, offset, allocator)
+			append(&model.layers, layer)
 		}
 	}
 
@@ -1680,6 +1748,8 @@ sequential_load_partial :: proc(
 			if layer_type == 15 {types_match = true}
 		case TransformerEncoder:
 			if layer_type == 16 {types_match = true}
+		case GATLayer:
+			if layer_type == 24 {types_match = true}
 		}
 
 		if !types_match {
@@ -1773,6 +1843,15 @@ sequential_load_partial :: proc(
 				for _ in 0 ..< int(num_layers_skip) * 12 {
 					offset = skip_tensor(data, offset)
 				}
+			case 24:
+				_, offset = read_i32(data, offset) // in_f
+				_, offset = read_i32(data, offset) // out_f
+				_, offset = read_i32(data, offset) // num_heads
+				has_bias: i32; has_bias, offset = read_i32(data, offset)
+				offset = skip_tensor(data, offset) // adjacency
+				offset = skip_tensor(data, offset) // linear.weights
+				if has_bias != 0 {offset = skip_tensor(data, offset)} 	// linear.bias
+				for _ in 0 ..< 8 {offset = skip_tensor(data, offset)} 	// MHA weights/biases
 			}
 			skipped += 1
 			continue
@@ -2110,6 +2189,38 @@ sequential_load_partial :: proc(
 			} else {
 				offset = skip_tensor(data, offset)
 				offset = skip_tensor(data, offset)
+				skipped += 1
+			}
+		case GATLayer:
+			in_f: i32; out_f: i32; num_heads: i32; has_bias: i32
+			in_f, offset = read_i32(data, offset)
+			out_f, offset = read_i32(data, offset)
+			num_heads, offset = read_i32(data, offset)
+			has_bias, offset = read_i32(data, offset)
+
+			if int(in_f) == l.linear.in_features && int(out_f) == l.linear.out_features {
+				// Skip adjacency in partial load (or load it if you prefer)
+				offset = skip_tensor(data, offset)
+
+				if l.linear.weights != nil {t.tensor_free(l.linear.weights)}
+				l.linear.weights, offset = read_tensor(data, offset, allocator)
+
+				if has_bias != 0 && l.linear.bias != nil {
+					t.tensor_free(l.linear.bias)
+					l.linear.bias, offset = read_tensor(data, offset, allocator)
+				} else if has_bias != 0 {
+					offset = skip_tensor(data, offset)
+				}
+
+				// Skip MHA weights for partial load (or load them if you want full GAT partial loading)
+				for _ in 0 ..< 8 {offset = skip_tensor(data, offset)}
+
+				loaded += 1
+			} else {
+				offset = skip_tensor(data, offset) // adjacency
+				offset = skip_tensor(data, offset) // weights
+				if has_bias != 0 {offset = skip_tensor(data, offset)}
+				for _ in 0 ..< 8 {offset = skip_tensor(data, offset)}
 				skipped += 1
 			}
 		case MaxPool2dLayer, AvgPool2dLayer, Activation, FlattenLayer, DropoutLayer:

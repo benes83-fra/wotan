@@ -92,6 +92,17 @@ sequential_freeze_all :: proc(seq: ^Sequential) {
 				block.ffn.fc2.weights.requires_grad = false
 				block.ffn.fc2.bias.requires_grad = false
 			}
+		case GATLayer:
+			l.linear.weights.requires_grad = false // (or true for unfreeze)
+			if l.linear.bias != nil {l.linear.bias.requires_grad = false} 	// (or true)
+			l.mha.q_proj.weights.requires_grad = false // (or true)
+			l.mha.q_proj.bias.requires_grad = false // (or true)
+			l.mha.k_proj.weights.requires_grad = false // (or true)
+			l.mha.k_proj.bias.requires_grad = false // (or true)
+			l.mha.v_proj.weights.requires_grad = false // (or true)
+			l.mha.v_proj.bias.requires_grad = false // (or true)
+			l.mha.out_proj.weights.requires_grad = false // (or true)
+			l.mha.out_proj.bias.requires_grad = false // (or true)
 		case MaxPool2dLayer, AvgPool2dLayer, DropoutLayer, Activation, FlattenLayer:
 		// No trainable parameters
 		}
@@ -178,6 +189,17 @@ sequential_unfreeze_all :: proc(seq: ^Sequential) {
 				block.ffn.fc2.weights.requires_grad = true
 				block.ffn.fc2.bias.requires_grad = true
 			}
+		case GATLayer:
+			l.linear.weights.requires_grad = true // (or true for unfreeze)
+			if l.linear.bias != nil {l.linear.bias.requires_grad = true} 	// (or true)
+			l.mha.q_proj.weights.requires_grad = true // (or true)
+			l.mha.q_proj.bias.requires_grad = true // (or true)
+			l.mha.k_proj.weights.requires_grad = true // (or true)
+			l.mha.k_proj.bias.requires_grad = true // (or true)
+			l.mha.v_proj.weights.requires_grad = true // (or true)
+			l.mha.v_proj.bias.requires_grad = true // (or true)
+			l.mha.out_proj.weights.requires_grad = true // (or true)
+			l.mha.out_proj.bias.requires_grad = true // (or true)
 		case MaxPool2dLayer, AvgPool2dLayer, DropoutLayer, Activation, FlattenLayer:
 		// No trainable parameters
 		}
@@ -271,6 +293,17 @@ sequential_freeze_range :: proc(seq: ^Sequential, start: int, end: int) {
 				block.ffn.fc2.weights.requires_grad = false
 				block.ffn.fc2.bias.requires_grad = false
 			}
+		case GATLayer:
+			l.linear.weights.requires_grad = false // (or true for unfreeze)
+			if l.linear.bias != nil {l.linear.bias.requires_grad = false} 	// (or true)
+			l.mha.q_proj.weights.requires_grad = false // (or true)
+			l.mha.q_proj.bias.requires_grad = false // (or true)
+			l.mha.k_proj.weights.requires_grad = false // (or true)
+			l.mha.k_proj.bias.requires_grad = false // (or true)
+			l.mha.v_proj.weights.requires_grad = false // (or true)
+			l.mha.v_proj.bias.requires_grad = false // (or true)
+			l.mha.out_proj.weights.requires_grad = false // (or true)
+			l.mha.out_proj.bias.requires_grad = false // (or true)
 		case MaxPool2dLayer, AvgPool2dLayer, DropoutLayer, Activation, FlattenLayer:
 		// No trainable parameters
 		}

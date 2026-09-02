@@ -9,30 +9,30 @@ import "core:mem"
 // ============================================================================
 // Combines explicit graph structure (Adjacency Matrix) with Multi-Head Attention.
 // Perfect for cross-sectional asset pricing where assets influence each other.
-
 GATLayer :: struct {
 	linear:    LinearLayer,
 	mha:       MultiHeadAttentionLayer,
 	num_heads: int,
 	head_dim:  int,
+	adjacency: ^t.Tensor, // ✅ Added for Sequential compatibility
 	allocator: mem.Allocator,
 }
 
+// Update the constructor to accept or initialize adjacency
 gat_layer_new :: proc(
 	in_features: int,
 	hidden_dim: int,
 	num_heads: int,
+	adjacency: ^t.Tensor, // ✅ Pass it in
 	allocator: mem.Allocator = context.allocator,
 ) -> GATLayer {
 	layer: GATLayer
 	layer.num_heads = num_heads
 	layer.head_dim = hidden_dim / num_heads
 	layer.allocator = allocator
+	layer.adjacency = adjacency // ✅ Store it
 
-	// 1. Linear projection to hidden dimension
 	layer.linear = linear_layer_new(in_features, hidden_dim, allocator)
-
-	// 2. Multi-Head Attention to learn complex relational weights
 	layer.mha = multi_head_attention_layer_new(hidden_dim, num_heads, allocator)
 
 	return layer
@@ -41,6 +41,9 @@ gat_layer_new :: proc(
 gat_layer_free :: proc(layer: ^GATLayer) {
 	linear_layer_free(&layer.linear)
 	multi_head_attention_layer_free(&layer.mha)
+	if layer.adjacency != nil {
+		t.tensor_free(layer.adjacency)
+	}
 }
 
 // Forward pass:
