@@ -7,6 +7,7 @@ import net "../wotan/net"
 import nn "../wotan/nn"
 import t "../wotan/tensor"
 import "core:fmt"
+import "core:math"
 import "core:math/rand"
 import "core:mem"
 
@@ -207,9 +208,9 @@ gat_real_world_test :: proc(allocator: mem.Allocator) {
 		}
 	}
 
-	// 3. Build Sliding Window Tensors
+	// 3. Build Volatility-Scaled Sliding Window Tensors
 	// Shape: [Batch, Num_Assets, Time_Steps, 1]
-	// We predict the return at day `t` using features from `t - time_steps` to `t - 1`
+	// We predict the volatility-scaled return at day `t` using volatility-scaled features.
 	num_windows := actual_days - time_steps - 1
 	if num_windows <= 0 {
 		fmt.println("Not enough data for sliding windows.")
@@ -217,7 +218,7 @@ gat_real_world_test :: proc(allocator: mem.Allocator) {
 	}
 
 	fmt.printf(
-		"\nBuilding sliding windows (Batch=%d, Assets=%d, Time=%d)...\n",
+		"\nBuilding volatility-scaled sliding windows (Batch=%d, Assets=%d, Time=%d)...\n",
 		num_windows,
 		num_assets,
 		time_steps,
@@ -229,16 +230,47 @@ gat_real_world_test :: proc(allocator: mem.Allocator) {
 	for w_idx in 0 ..< num_windows {
 		for a in 0 ..< num_assets {
 			rets := all_returns[a]
-			// Target is the return at the end of the window
-			target_day := w_idx + time_steps
-			targ_data.data[w_idx * num_assets + a] = rets[target_day]
 
-			// Features are the previous `time_steps` returns
+			// 1. Compute rolling volatility for the FEATURE window
+			mean_ret := 0.0
+			for t_idx in 0 ..< time_steps {
+				mean_ret += rets[w_idx + t_idx]
+			}
+			mean_ret /= f64(time_steps)
+
+			var_sum := 0.0
+			for t_idx in 0 ..< time_steps {
+				diff := rets[w_idx + t_idx] - mean_ret
+				var_sum += diff * diff
+			}
+			std_ret := math.sqrt(var_sum / f64(time_steps)) + 1e-8 // Epsilon for stability
+
+			// 2. Scale features by inverse volatility
 			for t_idx in 0 ..< time_steps {
 				feat_day := w_idx + t_idx
+				scaled_ret := rets[feat_day] / std_ret
 				feat_data.data[w_idx * (num_assets * time_steps) + a * time_steps + t_idx] =
-					rets[feat_day]
+					scaled_ret
 			}
+
+			// 3. Compute rolling volatility for the TARGET window (ending at target_day)
+			target_day := w_idx + time_steps
+			target_mean_ret := 0.0
+			for t_idx in 0 ..< time_steps {
+				target_mean_ret += rets[target_day - time_steps + t_idx]
+			}
+			target_mean_ret /= f64(time_steps)
+
+			target_var_sum := 0.0
+			for t_idx in 0 ..< time_steps {
+				diff := rets[target_day - time_steps + t_idx] - target_mean_ret
+				target_var_sum += diff * diff
+			}
+			target_std_ret := math.sqrt(target_var_sum / f64(time_steps)) + 1e-8
+
+			// 4. Scale target by its own recent volatility
+			// This makes the MSE loss directly interpretable as "variance of standardized returns"
+			targ_data.data[w_idx * num_assets + a] = rets[target_day] / target_std_ret
 		}
 	}
 
@@ -316,5 +348,7 @@ gat_real_world_test :: proc(allocator: mem.Allocator) {
 
 	fmt.println("\n✓ GAT Real-World Test Complete!")
 	fmt.println("The GAT successfully used the real correlation matrix to")
-	fmt.println("propagate sector shocks and predict next-day returns.")
+	fmt.println("propagate sector shocks and predict VOLATILITY-SCALED returns.")
+	fmt.println("Note: A loss < 1.0 indicates the model is extracting actual alpha,")
+	fmt.println("as 1.0 is the baseline variance of standardized (Z-scored) returns.")
 }
