@@ -316,7 +316,7 @@ gat_real_world_test :: proc(allocator: mem.Allocator) {
 	fmt.println("Epoch | MSE Loss   | Status")
 	fmt.println("------|------------|-------------------------")
 
-	epochs := 100
+	epochs := 500
 	for epoch in 0 ..< epochs {
 		nn.adam_zero_grad(&opt)
 
@@ -345,7 +345,48 @@ gat_real_world_test :: proc(allocator: mem.Allocator) {
 
 		t.tensor_free_graph(loss)
 	}
+	// ============================================================================
+	// 8. Compute Rank IC (Industry-Standard Alpha Metric)
+	// ============================================================================
+	fmt.println("\n=== Computing Cross-Sectional Rank IC ===")
+	fmt.println("(Spearman correlation between predicted and actual returns)")
 
+	// Forward pass to get final predictions
+	final_h := nn.gat_layer_forward(&gat, features, adjacency)
+	final_preds := nn.linear_forward(&pred_head, final_h)
+	defer t.tensor_free(final_h)
+	defer t.tensor_free(final_preds)
+
+	// Compute Rank IC across all time periods
+	ic_result := ml_fin.cross_sectional_rank_ic(final_preds, targets, allocator)
+
+	fmt.println("\n=== Cross-Sectional Rank IC Results ===")
+	fmt.printf("Number of periods:  %d\n", ic_result.num_periods)
+	fmt.printf("Mean IC:            %+.4f\n", ic_result.mean_ic)
+	fmt.printf("Std IC:             %.4f\n", ic_result.std_ic)
+	fmt.printf("ICIR:               %.4f\n", ic_result.icir)
+	fmt.printf("Positive IC Ratio:  %.2f%%\n", ic_result.positive_ic_ratio * 100.0)
+
+	fmt.println("\n--- Interpretation ---")
+	if ic_result.mean_ic > 0.10 {
+		fmt.println("✓ EXCELLENT: IC > 0.10 is considered strong alpha")
+	} else if ic_result.mean_ic > 0.05 {
+		fmt.println("✓ GOOD: IC > 0.05 is tradable")
+	} else if ic_result.mean_ic > 0.02 {
+		fmt.println("~ MARGINAL: IC > 0.02 may be tradable with low transaction costs")
+	} else if ic_result.mean_ic > 0.0 {
+		fmt.println("✗ WEAK: IC < 0.02 is likely noise")
+	} else {
+		fmt.println("✗ NEGATIVE: Model is systematically wrong (consider inverting signals)")
+	}
+
+	if ic_result.icir > 0.5 {
+		fmt.println("✓ ICIR > 0.5: Signal is highly consistent")
+	} else if ic_result.icir > 0.25 {
+		fmt.println("~ ICIR > 0.25: Signal has moderate consistency")
+	} else {
+		fmt.println("✗ ICIR < 0.25: Signal is inconsistent")
+	}
 	fmt.println("\n✓ GAT Real-World Test Complete!")
 	fmt.println("The GAT successfully used the real correlation matrix to")
 	fmt.println("propagate sector shocks and predict VOLATILITY-SCALED returns.")
