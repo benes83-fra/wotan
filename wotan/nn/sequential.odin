@@ -30,6 +30,7 @@ Layer :: union {
 	FFNLayer,
 	TransformerEncoderBlock,
 	TransformerEncoder,
+	GATLayer,
 }
 
 // ============================================================================
@@ -140,6 +141,9 @@ sequential_forward :: proc(s: ^Sequential, input: ^t.Tensor) -> ^t.Tensor {
 			x = transformer_encoder_block_forward(&l, x)
 		case TransformerEncoder:
 			x = transformer_encoder_forward(&l, x)
+		case GATLayer:
+			// ✅ Use the stored adjacency matrix
+			x = gat_layer_forward(&l, x, l.adjacency)
 		}
 	}
 	return x
@@ -246,6 +250,14 @@ sequential_add_to_sgd :: proc(seq: ^Sequential, opt: ^SGD) {
 				sgd_add_param(opt, block.ln2.gamma)
 				sgd_add_param(opt, block.ln2.beta)
 			}
+		case GATLayer:
+			if l.linear.weights.requires_grad {sgd_add_param(opt, l.linear.weights)}
+			if l.linear.bias != nil &&
+			   l.linear.bias.requires_grad {sgd_add_param(opt, l.linear.bias)}
+			if l.mha.q_proj.weights.requires_grad {sgd_add_param(opt, l.mha.q_proj.weights)}
+			if l.mha.k_proj.weights.requires_grad {sgd_add_param(opt, l.mha.k_proj.weights)}
+			if l.mha.v_proj.weights.requires_grad {sgd_add_param(opt, l.mha.v_proj.weights)}
+			if l.mha.out_proj.weights.requires_grad {sgd_add_param(opt, l.mha.out_proj.weights)}
 		}
 	}
 }
@@ -383,6 +395,14 @@ sequential_add_to_adam :: proc(seq: ^Sequential, opt: ^Adam) {
 				if block.ffn.fc2.bias != nil &&
 				   block.ffn.fc2.bias.requires_grad {adam_add_param(opt, block.ffn.fc2.bias)}
 			}
+		case GATLayer:
+			if l.linear.weights.requires_grad {adam_add_param(opt, l.linear.weights)}
+			if l.linear.bias != nil &&
+			   l.linear.bias.requires_grad {adam_add_param(opt, l.linear.bias)}
+			if l.mha.q_proj.weights.requires_grad {adam_add_param(opt, l.mha.q_proj.weights)}
+			if l.mha.k_proj.weights.requires_grad {adam_add_param(opt, l.mha.k_proj.weights)}
+			if l.mha.v_proj.weights.requires_grad {adam_add_param(opt, l.mha.v_proj.weights)}
+			if l.mha.out_proj.weights.requires_grad {adam_add_param(opt, l.mha.out_proj.weights)}
 		case MaxPool2dLayer, AvgPool2dLayer, DropoutLayer, Activation, FlattenLayer:
 		// No trainable parameters
 		}
@@ -427,7 +447,10 @@ sequential_free :: proc(seq: ^Sequential) {
 			transformer_encoder_block_free(&l)
 		case TransformerEncoder:
 			transformer_encoder_free(&l)
+		case GATLayer:
+			gat_layer_free(&l)
 		}
+
 	}
 	delete(seq.layers)
 }

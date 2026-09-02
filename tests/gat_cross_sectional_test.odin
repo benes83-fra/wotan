@@ -61,7 +61,7 @@ gat_cross_sectional_test :: proc(allocator: mem.Allocator) {
 
 	// 2. Initialize GAT Model
 	fmt.println("Initializing GAT Layer...")
-	gat := nn.gat_layer_new(feature_dim, hidden_dim, num_heads, allocator)
+	gat := nn.gat_layer_new(feature_dim, hidden_dim, num_heads, adjacency, allocator)
 	defer nn.gat_layer_free(&gat)
 
 	// Final prediction head
@@ -189,7 +189,7 @@ gat_real_world_test :: proc(allocator: mem.Allocator) {
 				valid_count += 1
 			}
 		}
-		fmt.printf("OK (%d days, Valid Returns: %d)\n", n_rows, valid_count)
+
 		all_returns[i] = returns
 		fmt.printf("OK (%d days)\n", n_rows)
 	}
@@ -259,7 +259,7 @@ gat_real_world_test :: proc(allocator: mem.Allocator) {
 	fmt.println("Initializing GAT Layer...")
 	hidden_dim := 16
 	num_heads := 2
-	gat := nn.gat_layer_new(time_steps, hidden_dim, num_heads, allocator)
+	gat := nn.gat_layer_new(time_steps, hidden_dim, num_heads, adjacency, allocator)
 	defer nn.gat_layer_free(&gat)
 
 	// Final prediction head
