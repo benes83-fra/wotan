@@ -316,7 +316,7 @@ gat_real_world_test :: proc(allocator: mem.Allocator) {
 	fmt.println("Epoch | MSE Loss   | Status")
 	fmt.println("------|------------|-------------------------")
 
-	epochs := 500
+	epochs := 200
 	for epoch in 0 ..< epochs {
 		nn.adam_zero_grad(&opt)
 

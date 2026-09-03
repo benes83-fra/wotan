@@ -557,6 +557,7 @@ main :: proc() {
 	test.gat_cross_sectional_test(context.temp_allocator)
 	test.gat_real_world_test(context.temp_allocator)
 	test.gat_real_world_cv_test(context.temp_allocator)
+	test.event_study_test(context.temp_allocator)
 	fmt.println("Demo End")
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
