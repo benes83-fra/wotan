@@ -1,8 +1,8 @@
 package ml_finance
 
+import "core:fmt"
 import "core:math"
 import "core:mem"
-import "core:strings" // ✅ Added for robust string comparison
 
 // ============================================================================
 // Event Study & Cumulative Abnormal Returns (CAR)
@@ -15,6 +15,7 @@ EventStudyResult :: struct {
 	car_values:         []f64,
 	mean_car:           f64,
 	t_statistic:        f64,
+	num_events:         int,
 }
 
 compute_car :: proc(
@@ -28,34 +29,41 @@ compute_car :: proc(
 	allocator: mem.Allocator,
 ) -> EventStudyResult {
 
-	// ✅ FIX: Trim whitespace to prevent parser formatting mismatches
-	find_date_idx :: proc(dates: []string, date_str: string) -> int {
-		target := strings.trim_space(date_str)
-		for d, i in dates {
-			if strings.trim_space(d) == target {
-				return i
-			}
-		}
-		return -1
-	}
-
-	car_values := make([dynamic]f64, allocator)
-	valid_dates := make([dynamic]string, allocator)
-
+	max_events := len(event_dates)
 	num_rows := len(all_dates)
 
-	for event_date in event_dates {
-		event_idx := find_date_idx(all_dates, event_date)
+	// ✅ NO dynamic arrays. Pre-allocate fixed slices.
+	res_dates := make([]string, max_events, allocator)
+	res_cars := make([]f64, max_events, allocator)
+	found_count := 0
+
+	fmt.printf("  [compute_car] num_rows=%d, max_events=%d\n", num_rows, max_events)
+
+	for ev in 0 ..< max_events {
+		target := event_dates[ev]
+
+		// ✅ NO nested proc. Inline the search.
+		event_idx := -1
+		for i in 0 ..< num_rows {
+			if all_dates[i] == target {
+				event_idx = i
+				break
+			}
+		}
+
 		if event_idx < 0 {
-			// Optional: uncomment to debug missing dates
-			// fmt.printf("Warning: Date %s not found in dataset.\n", event_date)
+			fmt.printf("  [compute_car] Date '%s' NOT found in dataset.\n", target)
 			continue
 		}
 
-		// 1. Calculate Expected Return (Mean of estimation window)
+		fmt.printf("  [compute_car] Date '%s' found at index %d.\n", target, event_idx)
+
+		// 1. Expected return from estimation window
 		est_sum := 0.0
 		est_count := 0
-		for i in event_idx + est_start ..< event_idx + est_end {
+		est_lo := event_idx + est_start
+		est_hi := event_idx + est_end
+		for i in est_lo ..< est_hi {
 			if i >= 0 && i < num_rows {
 				est_sum += returns[i]
 				est_count += 1
@@ -63,53 +71,50 @@ compute_car :: proc(
 		}
 
 		expected_return := 0.0
-		if est_count > 0 {expected_return = est_sum / f64(est_count)}
+		if est_count > 0 {
+			expected_return = est_sum / f64(est_count)
+		}
 
-		// 2. Calculate Abnormal Returns (AR) and Cumulative Abnormal Return (CAR)
+		// 2. CAR from event window
 		car := 0.0
-		for i in event_idx + evt_start ..< event_idx + evt_end + 1 {
+		evt_lo := event_idx + evt_start
+		evt_hi := event_idx + evt_end + 1
+		for i in evt_lo ..< evt_hi {
 			if i >= 0 && i < num_rows {
-				abnormal_return := returns[i] - expected_return
-				car += abnormal_return
+				car += returns[i] - expected_return
 			}
 		}
 
-		append(&car_values, car)
-		append(&valid_dates, event_date)
+		res_dates[found_count] = target
+		res_cars[found_count] = car
+		found_count += 1
 	}
 
-	// 3. Aggregate Statistics
+	fmt.printf("  [compute_car] Matched %d events.\n", found_count)
+
+	// 3. Aggregate statistics
 	mean_car := 0.0
-	n := len(car_values)
-	if n > 0 {
-		for car in car_values {mean_car += car}
-		mean_car /= f64(n)
+	if found_count > 0 {
+		for i in 0 ..< found_count {
+			mean_car += res_cars[i]
+		}
+		mean_car /= f64(found_count)
 	}
 
 	variance := 0.0
-	if n > 1 {
-		for car in car_values {
-			diff := car - mean_car
+	if found_count > 1 {
+		for i in 0 ..< found_count {
+			diff := res_cars[i] - mean_car
 			variance += diff * diff
 		}
-		variance /= f64(n - 1)
+		variance /= f64(found_count - 1)
 	}
 
 	std_dev := math.sqrt(variance)
 	t_stat := 0.0
-	if std_dev > 1e-12 && n > 0 {
-		t_stat = (mean_car / std_dev) * math.sqrt(f64(n))
+	if std_dev > 1e-12 && found_count > 0 {
+		t_stat = (mean_car / std_dev) * math.sqrt(f64(found_count))
 	}
-
-	res_dates := make([]string, n, allocator)
-	res_cars := make([]f64, n, allocator)
-	for i in 0 ..< n {
-		res_dates[i] = valid_dates[i]
-		res_cars[i] = car_values[i]
-	}
-
-	delete(car_values)
-	delete(valid_dates)
 
 	return EventStudyResult {
 		event_window_start = evt_start,
@@ -118,6 +123,7 @@ compute_car :: proc(
 		car_values = res_cars,
 		mean_car = mean_car,
 		t_statistic = t_stat,
+		num_events = found_count,
 	}
 }
 
