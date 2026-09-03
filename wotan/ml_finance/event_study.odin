@@ -2,6 +2,7 @@ package ml_finance
 
 import "core:math"
 import "core:mem"
+import "core:strings" // ✅ Added for robust string comparison
 
 // ============================================================================
 // Event Study & Cumulative Abnormal Returns (CAR)
@@ -27,17 +28,17 @@ compute_car :: proc(
 	allocator: mem.Allocator,
 ) -> EventStudyResult {
 
-	// Helper to find row index by date string (explicit arguments, no closure capture)
+	// ✅ FIX: Trim whitespace to prevent parser formatting mismatches
 	find_date_idx :: proc(dates: []string, date_str: string) -> int {
+		target := strings.trim_space(date_str)
 		for d, i in dates {
-			if d == date_str {
+			if strings.trim_space(d) == target {
 				return i
 			}
 		}
 		return -1
 	}
 
-	// ✅ FIX: Use [dynamic] arrays so append works without an allocator argument
 	car_values := make([dynamic]f64, allocator)
 	valid_dates := make([dynamic]string, allocator)
 
@@ -45,7 +46,11 @@ compute_car :: proc(
 
 	for event_date in event_dates {
 		event_idx := find_date_idx(all_dates, event_date)
-		if event_idx < 0 {continue}
+		if event_idx < 0 {
+			// Optional: uncomment to debug missing dates
+			// fmt.printf("Warning: Date %s not found in dataset.\n", event_date)
+			continue
+		}
 
 		// 1. Calculate Expected Return (Mean of estimation window)
 		est_sum := 0.0
@@ -69,7 +74,6 @@ compute_car :: proc(
 			}
 		}
 
-		// ✅ FIX: append on [dynamic] arrays does NOT take an allocator
 		append(&car_values, car)
 		append(&valid_dates, event_date)
 	}
@@ -97,7 +101,6 @@ compute_car :: proc(
 		t_stat = (mean_car / std_dev) * math.sqrt(f64(n))
 	}
 
-	// Convert dynamic arrays to fixed slices for the result struct
 	res_dates := make([]string, n, allocator)
 	res_cars := make([]f64, n, allocator)
 	for i in 0 ..< n {
@@ -105,7 +108,6 @@ compute_car :: proc(
 		res_cars[i] = car_values[i]
 	}
 
-	// Cleanup dynamic arrays
 	delete(car_values)
 	delete(valid_dates)
 

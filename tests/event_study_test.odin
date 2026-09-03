@@ -24,7 +24,6 @@ event_study_test :: proc(allocator: mem.Allocator) {
 	close_col := &df.columns[5] // AdjClose
 	date_col := &df.columns[0] // Date
 
-	// Build flat slices for the event study to avoid DataFrame API guessing
 	all_dates := make([]string, df.rows, allocator)
 	returns := make([]f64, df.rows, allocator)
 	defer {
@@ -49,13 +48,18 @@ event_study_test :: proc(allocator: mem.Allocator) {
 
 	fmt.println("\nSimulating NLP Sentiment Analysis on Earnings Dates...")
 
-	event_dates := []string{"2023-11-02", "2024-02-01", "2024-05-02", "2024-08-01"}
+	// ✅ FIX: Updated to 2025/2026 dates to ensure they fall within the .TwoYears fetch window from Sept 2026
+	event_dates := []string {
+		"2025-11-03", // Q4 2025
+		"2026-02-02", // Q1 2026
+		"2026-05-04", // Q2 2026
+		"2026-08-03", // Q3 2026
+	}
 
-	// ✅ FIX: 'for val in array' is the correct Odin syntax for value-only iteration
 	for date_str in event_dates {
 		sentiment := "Positive"
-		if date_str == "2024-08-01" {
-			sentiment = "Negative"
+		if date_str == "2026-08-03" {
+			sentiment = "Negative" // Mocking a mixed reaction
 		}
 		fmt.printf("  [%s] Detected Sentiment: %s\n", date_str, sentiment)
 	}
@@ -78,22 +82,29 @@ event_study_test :: proc(allocator: mem.Allocator) {
 
 	fmt.println("\n=== Event Study Results ===")
 	fmt.printf("Events Analyzed: %d\n", len(car_result.dates))
-	fmt.printf("Mean CAR (-5 to +5 days): %+.4f%%\n", car_result.mean_car * 100.0)
-	fmt.printf("T-Statistic:              %.4f\n", car_result.t_statistic)
 
-	fmt.println("\nPer-Event CAR:")
-	for i in 0 ..< len(car_result.dates) {
-		fmt.printf("  %s : %+.4f%%\n", car_result.dates[i], car_result.car_values[i] * 100.0)
-	}
+	if len(car_result.dates) > 0 {
+		fmt.printf("Mean CAR (-5 to +5 days): %+.4f%%\n", car_result.mean_car * 100.0)
+		fmt.printf("T-Statistic:              %.4f\n", car_result.t_statistic)
 
-	fmt.println("\n--- Interpretation ---")
-	if math.abs(car_result.t_statistic) > 1.96 {
-		fmt.println(
-			"✓ STATISTICALLY SIGNIFICANT: The NLP-detected events have a measurable impact on price.",
-		)
+		fmt.println("\nPer-Event CAR:")
+		for i in 0 ..< len(car_result.dates) {
+			fmt.printf("  %s : %+.4f%%\n", car_result.dates[i], car_result.car_values[i] * 100.0)
+		}
+
+		fmt.println("\n--- Interpretation ---")
+		if math.abs(car_result.t_statistic) > 1.96 {
+			fmt.println(
+				"✓ STATISTICALLY SIGNIFICANT: The NLP-detected events have a measurable impact on price.",
+			)
+		} else {
+			fmt.println(
+				"~ NOT SIGNIFICANT: The average CAR is not statistically different from zero (efficient market).",
+			)
+		}
 	} else {
 		fmt.println(
-			"~ NOT SIGNIFICANT: The average CAR is not statistically different from zero (efficient market).",
+			"⚠ WARNING: No events matched the dataset. Check date formats or fetch window.",
 		)
 	}
 
