@@ -393,3 +393,199 @@ gat_real_world_test :: proc(allocator: mem.Allocator) {
 	fmt.println("Note: A loss < 1.0 indicates the model is extracting actual alpha,")
 	fmt.println("as 1.0 is the baseline variance of standardized (Z-scored) returns.")
 }
+
+
+gat_real_world_cv_test :: proc(allocator: mem.Allocator) {
+	fmt.println("\n=== GAT Real-World Cross-Sectional Test (K-Fold CV) ===")
+
+	symbols := []string {
+		"AAPL",
+		"MSFT",
+		"GOOGL",
+		"AMZN",
+		"NVDA",
+		"META",
+		"TSLA",
+		"AMD",
+		"NFLX",
+		"INTC",
+	}
+	num_assets := len(symbols)
+	time_steps := 20
+
+	fmt.printf("Fetching 1 year of daily data for %d assets...\n", num_assets)
+
+	max_days := 252
+	all_returns := make([][]f64, num_assets, allocator)
+	defer {
+		for r in all_returns {
+			if r != nil {delete(r, allocator)}
+		}
+		delete(all_returns, allocator)
+	}
+
+	actual_days := max_days
+	for sym, i in symbols {
+		fmt.printf("  Fetching %s... ", sym)
+		df := net.read_yahoo(sym, .Daily, .OneYear, allocator)
+
+		if df.rows == 0 {
+			fmt.println("FAILED")
+			actual_days = 0
+			break
+		}
+		defer w.destroy_dataframe(&df)
+
+		close_col := &df.columns[5] // AdjClose
+		n_rows := df.rows
+		if n_rows < actual_days {actual_days = n_rows}
+
+		returns := make([]f64, n_rows, allocator)
+		for d in 1 ..< n_rows {
+			prev_close, is_null1 := w.column_at_float(close_col, d - 1)
+			curr_close, is_null2 := w.column_at_float(close_col, d)
+			if !is_null1 && !is_null2 && prev_close > 0.0 {
+				returns[d] = (curr_close - prev_close) / prev_close
+			}
+		}
+		all_returns[i] = returns
+		fmt.printf("OK (%d days)\n", n_rows)
+	}
+
+	if actual_days == 0 {
+		fmt.println("Aborting test due to data fetch failure.")
+		return
+	}
+
+	for i in 0 ..< num_assets {
+		if len(all_returns[i]) > actual_days {
+			all_returns[i] = all_returns[i][:actual_days]
+		}
+	}
+
+	num_windows := actual_days - time_steps - 1
+	if num_windows <= 0 {
+		fmt.println("Not enough data for sliding windows.")
+		return
+	}
+
+	fmt.printf(
+		"\nBuilding volatility-scaled sliding windows (Total Windows: %d)...\n",
+		num_windows,
+	)
+
+	// Allocate full dataset matrices
+	feat_data := l.matrix_new(f64, 1, num_windows * num_assets * time_steps, allocator)
+	targ_data := l.matrix_new(f64, 1, num_windows * num_assets, allocator)
+
+	for w_idx in 0 ..< num_windows {
+		for a in 0 ..< num_assets {
+			rets := all_returns[a]
+
+			// Compute rolling volatility for features
+			mean_ret := 0.0
+			for t_idx in 0 ..< time_steps {mean_ret += rets[w_idx + t_idx]}
+			mean_ret /= f64(time_steps)
+
+			var_sum := 0.0
+			for t_idx in 0 ..< time_steps {
+				diff := rets[w_idx + t_idx] - mean_ret
+				var_sum += diff * diff
+			}
+			std_ret := math.sqrt(var_sum / f64(time_steps)) + 1e-8
+
+			// Compute rolling volatility for target
+			target_day := w_idx + time_steps
+			target_mean_ret := 0.0
+			for t_idx in 0 ..< time_steps {
+				target_mean_ret += rets[target_day - time_steps + t_idx]
+			}
+			target_mean_ret /= f64(time_steps)
+
+			target_var_sum := 0.0
+			for t_idx in 0 ..< time_steps {
+				diff := rets[target_day - time_steps + t_idx] - target_mean_ret
+				target_var_sum += diff * diff
+			}
+			target_std_ret := math.sqrt(target_var_sum / f64(time_steps)) + 1e-8
+
+			scaled_target := rets[target_day] / target_std_ret
+
+			// Write to full dataset
+			for t_idx in 0 ..< time_steps {
+				feat_day := w_idx + t_idx
+				scaled_ret := rets[feat_day] / std_ret
+				feat_data.data[w_idx * (num_assets * time_steps) + a * time_steps + t_idx] =
+					scaled_ret
+			}
+			targ_data.data[w_idx * num_assets + a] = scaled_target
+		}
+	}
+
+	// Create Tensors (requires_grad = false for inputs!)
+	features := t.tensor_new(feat_data, false, allocator)
+	features.shape = [4]int{num_windows, num_assets, time_steps, 1}
+	defer t.tensor_free(features)
+
+	targets := t.tensor_new(targ_data, false, allocator)
+	targets.shape = [4]int{num_windows, num_assets, 1, 1}
+	defer t.tensor_free(targets)
+
+	// 4. K-Fold Cross Validation
+	fmt.println("\n=== Starting 5-Fold Cross Validation ===")
+	fmt.println("(This will train 5 separate models on different time periods)")
+
+	n_splits := 5
+	hidden_dim := 4 // Reduced to prevent overfitting
+	num_heads := 1
+	epochs := 100
+	learning_rate := 0.001
+
+	cv_results := ml_fin.gat_cross_val_score(
+		features,
+		targets,
+		n_splits,
+		hidden_dim,
+		num_heads,
+		epochs,
+		learning_rate,
+		allocator,
+	)
+
+	// Compute aggregate statistics
+	mean_ic := 0.0
+	mean_val_loss := 0.0
+	for r in cv_results {
+		mean_ic += r.mean_ic
+		mean_val_loss += r.val_loss
+	}
+	mean_ic /= f64(n_splits)
+	mean_val_loss /= f64(n_splits)
+
+	var_sum := 0.0
+	for r in cv_results {
+		d := r.mean_ic - mean_ic
+		var_sum += d * d
+	}
+	std_ic := math.sqrt(var_sum / f64(n_splits))
+	icir := mean_ic / (std_ic + 1e-8)
+
+	fmt.println("\n=== Aggregate Cross-Validation Results ===")
+	fmt.printf("Mean Rank IC:      %+.4f\n", mean_ic)
+	fmt.printf("Std Rank IC:       %.4f\n", std_ic)
+	fmt.printf("ICIR:              %.4f\n", icir)
+	fmt.printf("Mean Val Loss:     %.4f\n", mean_val_loss)
+
+	fmt.println("\n--- Interpretation ---")
+	if mean_ic > 0.05 {
+		fmt.println("✓ EXCELLENT OOS: Consistent cross-sectional alpha across all folds")
+	} else if mean_ic > 0.02 {
+		fmt.println("~ MARGINAL OOS: Weak but potentially tradable signal")
+	} else if mean_ic > 0.0 {
+		fmt.println("✗ WEAK OOS: Signal is likely noise or the model is underfitting")
+	} else {
+		fmt.println("✗ NEGATIVE OOS: Model is systematically predicting the wrong direction")
+	}
+
+	fmt.println("\n✓ GAT Real-World Cross-Validation Complete!")
+}

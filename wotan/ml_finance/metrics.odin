@@ -1,6 +1,9 @@
 package ml_finance
 
+import l "../linalg"
+import nn "../nn"
 import t "../tensor"
+import "core:fmt"
 import "core:math"
 import "core:mem"
 
@@ -176,4 +179,189 @@ cross_sectional_rank_ic :: proc(
 		positive_ic_ratio = positive_ratio,
 		num_periods = batch,
 	}
+}
+
+GATFoldResult :: struct {
+	mean_ic:          f64,
+	val_loss:         f64,
+	early_stop_epoch: int,
+}
+
+gat_cross_val_score :: proc(
+	features: ^t.Tensor, // [Total_Windows, Num_Assets, Time, 1]
+	targets: ^t.Tensor, // [Total_Windows, Num_Assets, 1, 1]
+	n_splits: int,
+	hidden_dim: int,
+	num_heads: int,
+	epochs: int,
+	learning_rate: f64,
+	allocator: mem.Allocator = context.allocator,
+) -> []GATFoldResult {
+	batch := features.shape[0]
+	num_assets := features.shape[1]
+	time_steps := features.shape[2]
+
+	// 1. Generate and shuffle indices
+	indices := make([]int, batch, context.temp_allocator)
+	for i in 0 ..< batch {indices[i] = i}
+
+	// LCG shuffle (deterministic, reproducible)
+	state := u32(42) | 1
+	n := batch
+	for i := n - 1; i > 0; i -= 1 {
+		state = u32(u64(state) * 1664525 + 1013904223)
+		j := int(state % u32(i + 1))
+		indices[i], indices[j] = indices[j], indices[i]
+	}
+
+	results := make([]GATFoldResult, n_splits, allocator)
+	fold_size := batch / n_splits
+	remainder := batch % n_splits
+
+	for k in 0 ..< n_splits {
+		val_start := k * fold_size + math.min(k, remainder)
+		val_end := val_start + fold_size
+		if k < remainder {val_end += 1}
+
+		val_count := val_end - val_start
+		train_count := batch - val_count
+
+		train_idx := make([]int, train_count, context.temp_allocator)
+		val_idx := make([]int, val_count, context.temp_allocator)
+
+		t_idx, v_idx := 0, 0
+		for i in 0 ..< batch {
+			orig_idx := indices[i]
+			if orig_idx >= val_start && orig_idx < val_end {
+				val_idx[v_idx] = orig_idx
+				v_idx += 1
+			} else {
+				train_idx[t_idx] = orig_idx
+				t_idx += 1
+			}
+		}
+
+		// Extract train and val tensors
+		train_feat := _extract_tensor_by_indices(features, train_idx, allocator)
+		train_targ := _extract_tensor_by_indices(targets, train_idx, allocator)
+		val_feat := _extract_tensor_by_indices(features, val_idx, allocator)
+		val_targ := _extract_tensor_by_indices(targets, val_idx, allocator)
+
+		// ✅ Compute adjacency matrix STRICTLY on training data to prevent data leakage
+		adjacency := compute_correlation_adjacency(train_feat, num_assets, time_steps, allocator)
+
+		// Initialize Model
+		gat := nn.gat_layer_new(time_steps, hidden_dim, num_heads, adjacency, allocator)
+		pred_head := nn.linear_layer_new(hidden_dim, 1, allocator)
+		opt := nn.adam_new(learning_rate, allocator = allocator)
+
+		nn.adam_add_param(&opt, gat.linear.weights)
+		nn.adam_add_param(&opt, gat.linear.bias)
+		nn.adam_add_param(&opt, gat.mha.q_proj.weights)
+		nn.adam_add_param(&opt, gat.mha.k_proj.weights)
+		nn.adam_add_param(&opt, gat.mha.v_proj.weights)
+		nn.adam_add_param(&opt, gat.mha.out_proj.weights)
+		nn.adam_add_param(&opt, pred_head.weights)
+		nn.adam_add_param(&opt, pred_head.bias)
+
+		// Training loop with early stopping
+		best_val_loss := math.F64_MAX
+		patience := 10
+		patience_counter := 0
+		last_epoch := 0
+
+		for epoch in 0 ..< epochs {
+			nn.adam_zero_grad(&opt)
+			h_gat := nn.gat_layer_forward(&gat, train_feat, adjacency)
+			preds := nn.linear_forward(&pred_head, h_gat)
+			loss := t.tensor_mse_loss(preds, train_targ)
+			t.tensor_backward(loss)
+			nn.adam_step(&opt)
+			t.tensor_free_graph(loss)
+
+			// Evaluate on validation set
+			val_h := nn.gat_layer_forward(&gat, val_feat, adjacency)
+			val_preds := nn.linear_forward(&pred_head, val_h)
+			val_loss := t.tensor_mse_loss(val_preds, val_targ)
+			val_loss_val := val_loss.data.data[0]
+			t.tensor_free_graph(val_loss)
+			t.tensor_free(val_h)
+			t.tensor_free(val_preds)
+
+			if val_loss_val < best_val_loss {
+				best_val_loss = val_loss_val
+				patience_counter = 0
+			} else {
+				patience_counter += 1
+			}
+			last_epoch = epoch
+			if patience_counter >= patience {break}
+		}
+
+		// Final evaluation on val set for Rank IC
+		final_val_h := nn.gat_layer_forward(&gat, val_feat, adjacency)
+		final_val_preds := nn.linear_forward(&pred_head, final_val_h)
+
+		ic_result := cross_sectional_rank_ic(final_val_preds, val_targ, allocator)
+
+		results[k] = GATFoldResult {
+			mean_ic          = ic_result.mean_ic,
+			val_loss         = best_val_loss,
+			early_stop_epoch = last_epoch + 1,
+		}
+
+		fmt.printf(
+			"  Fold %d/%d: Mean IC = %+.4f, Val Loss = %.4f (stopped at epoch %d)\n",
+			k + 1,
+			n_splits,
+			results[k].mean_ic,
+			results[k].val_loss,
+			results[k].early_stop_epoch,
+		)
+
+		// Cleanup fold
+		t.tensor_free(final_val_h)
+		t.tensor_free(final_val_preds)
+		t.tensor_free(adjacency)
+		nn.gat_layer_free(&gat)
+		nn.linear_layer_free(&pred_head)
+		nn.adam_free(&opt)
+		t.tensor_free(train_feat)
+		t.tensor_free(train_targ)
+		t.tensor_free(val_feat)
+		t.tensor_free(val_targ)
+		delete(train_idx, context.temp_allocator)
+		delete(val_idx, context.temp_allocator)
+	}
+
+	delete(indices, context.temp_allocator)
+	return results
+}
+
+// Helper: Extract rows from a 4D tensor by indices
+// ✅ FIX: Renamed parameter 'l' to 'last_dim' to avoid shadowing linalg package
+_extract_tensor_by_indices :: proc(
+	src: ^t.Tensor,
+	indices: []int,
+	allocator: mem.Allocator,
+) -> ^t.Tensor {
+	new_batch := len(indices)
+	c := src.shape[1]
+	t_steps := src.shape[2]
+	last_dim := src.shape[3]
+
+	out_data := l.matrix_new(f64, 1, new_batch * c * t_steps * last_dim, allocator)
+
+	for orig_i, new_i in indices {
+		src_offset := orig_i * (c * t_steps * last_dim)
+		dst_offset := new_i * (c * t_steps * last_dim)
+		copy(
+			out_data.data[dst_offset:dst_offset + c * t_steps * last_dim],
+			src.data.data[src_offset:src_offset + c * t_steps * last_dim],
+		)
+	}
+
+	out := t.tensor_new(out_data, false, allocator)
+	out.shape = [4]int{new_batch, c, t_steps, last_dim}
+	return out
 }
