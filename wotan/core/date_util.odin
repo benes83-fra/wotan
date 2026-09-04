@@ -116,24 +116,62 @@ parse_datetime :: proc(datetime_str: string) -> (Datetime, bool) {
 }
 
 
-date_to_string :: proc(d: Date) -> string {
-	// Use a string builder for efficiency
-	sb := strings.builder_make()
-	defer strings.builder_destroy(&sb)
+// date_to_string :: proc(d: Date) -> string {
+// 	// Use a string builder for efficiency
+// 	sb := strings.builder_make()
 
-	// Format with zero-padding for month/day
-	fmt.sbprintf(&sb, "%04d-%02d-%02d", d.year, d.month, d.day)
 
-	return strings.to_string(sb) // Convert builder to string
+// 	// Format with zero-padding for month/day
+// 	fmt.sbprintf(&sb, "%04d-%02d-%02d", d.year, d.month, d.day)
+
+// 	return strings.to_string(sb) // Convert builder to string
+// }
+// time_to_string :: proc(t: Time) -> string {
+// 	sb := strings.builder_make()
+// 	defer strings.builder_destroy(&sb)
+
+// 	fmt.sbprintf(&sb, "%02d:%02d:%02d", t.hour, t.minute, t.second)
+
+// 	return strings.to_string(sb)
+
+// }
+// datetime_to_string :: proc(dt: Datetime) -> string {
+// 	sb := strings.builder_make()
+// 	defer strings.builder_destroy(&sb)
+
+// 	fmt.sbprintf(
+// 		&sb,
+// 		"%04d-%02d-%02d %02d:%02d:%02d",
+// 		dt.year,
+// 		dt.month,
+// 		dt.day,
+// 		dt.hour,
+// 		dt.minute,
+// 		dt.second,
+// 	)
+
+// 	return strings.to_string(sb)
+
+// }
+date_to_string :: proc(d: Date, allocator := context.allocator) -> string {
+	return fmt.aprintf("%04d-%02d-%02d", d.year, d.month, d.day, allocator = allocator)
 }
-time_to_string :: proc(t: Time) -> string {
-	sb := strings.builder_make()
-	defer strings.builder_destroy(&sb)
 
-	fmt.sbprintf(&sb, "%02d:%02d:%02d", t.hour, t.minute, t.second)
+time_to_string :: proc(t: Time, allocator := context.allocator) -> string {
+	return fmt.aprintf("%02d:%02d:%02d", t.hour, t.minute, t.second, allocator = allocator)
+}
 
-	return strings.to_string(sb)
-
+datetime_to_string :: proc(dt: Datetime, allocator := context.allocator) -> string {
+	return fmt.aprintf(
+		"%04d-%02d-%02d %02d:%02d:%02d",
+		dt.year,
+		dt.month,
+		dt.day,
+		dt.hour,
+		dt.minute,
+		dt.second,
+		allocator = allocator,
+	)
 }
 datetime_to_string_na :: proc(dt: Datetime) -> string {
 	// 19 chars for "YYYY-MM-DD HH:MM:SS" + 1 for safety if needed
@@ -199,24 +237,6 @@ datetime_format_iso_into :: proc(dt: Datetime, buf: []u8) -> string {
 }
 
 
-datetime_to_string :: proc(dt: Datetime) -> string {
-	sb := strings.builder_make()
-	defer strings.builder_destroy(&sb)
-
-	fmt.sbprintf(
-		&sb,
-		"%04d-%02d-%02d %02d:%02d:%02d",
-		dt.year,
-		dt.month,
-		dt.day,
-		dt.hour,
-		dt.minute,
-		dt.second,
-	)
-
-	return strings.to_string(sb)
-
-}
 date_to_int :: proc(d: Date) -> i32 {
 	// Validate ranges
 	if d.month < 1 || d.month > 12 {

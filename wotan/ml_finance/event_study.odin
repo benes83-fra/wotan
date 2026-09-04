@@ -32,20 +32,20 @@ compute_car :: proc(
 	max_events := len(event_dates)
 	num_rows := len(all_dates)
 
-	// ✅ NO dynamic arrays. Pre-allocate fixed slices.
 	res_dates := make([]string, max_events, allocator)
 	res_cars := make([]f64, max_events, allocator)
 	found_count := 0
 
 	fmt.printf("  [compute_car] num_rows=%d, max_events=%d\n", num_rows, max_events)
 
+
 	for ev in 0 ..< max_events {
 		target := event_dates[ev]
 
-		// ✅ NO nested proc. Inline the search.
 		event_idx := -1
 		for i in 0 ..< num_rows {
-			if all_dates[i] == target {
+			// Explicit length check first, then equality
+			if len(all_dates[i]) == len(target) && all_dates[i] == target {
 				event_idx = i
 				break
 			}

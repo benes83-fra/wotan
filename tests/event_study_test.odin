@@ -6,6 +6,7 @@ import net "../wotan/net"
 import "core:fmt"
 import "core:math"
 import "core:mem"
+import "core:strconv"
 
 event_study_test :: proc(allocator: mem.Allocator) {
 	fmt.println("\n=== FinBERT Event Study & CAR Pipeline Test ===")
@@ -22,7 +23,7 @@ event_study_test :: proc(allocator: mem.Allocator) {
 	}
 
 	close_col := &df.columns[5] // AdjClose
-	date_col := &df.columns[0] // Date
+	date_col := &df.columns[0] // Date (Type: .Date)
 
 	all_dates := make([]string, df.rows, allocator)
 	returns := make([]f64, df.rows, allocator)
@@ -31,8 +32,21 @@ event_study_test :: proc(allocator: mem.Allocator) {
 		delete(returns, allocator)
 	}
 
+	fmt.println("Extracting data using w.column_at_date...")
+
 	for i in 0 ..< df.rows {
-		date_str, _ := w.column_at_string(date_col, i)
+		// ✅ FIX: Use column_at_date (or column_at_i64) instead of column_at_string
+		date_val, is_null := w.column_at_date(date_col, i)
+		if is_null {
+			all_dates[i] = ""
+			continue
+		}
+
+		// Format the date value to a string.
+		// If w.column_at_date returns an i64 (Unix timestamp), this formats it.
+		// If it returns a w.Date struct, you may need to use w.date_to_string(date_val) here.
+		date_str := w.date_to_string(date_val, allocator = allocator)
+
 		all_dates[i] = date_str
 
 		if i > 0 {
@@ -48,7 +62,7 @@ event_study_test :: proc(allocator: mem.Allocator) {
 
 	fmt.println("\nSimulating NLP Sentiment Analysis on Earnings Dates...")
 
-	// ✅ FIX: Updated to 2025/2026 dates to ensure they fall within the .TwoYears fetch window from Sept 2026
+	// Updated to 2025/2026 dates to ensure they fall within the .TwoYears fetch window from Sept 2026
 	event_dates := []string {
 		"2025-11-03", // Q4 2025
 		"2026-02-02", // Q1 2026
@@ -81,14 +95,14 @@ event_study_test :: proc(allocator: mem.Allocator) {
 	defer ml_fin.event_study_result_free(&car_result, allocator)
 
 	fmt.println("\n=== Event Study Results ===")
-	fmt.printf("Events Analyzed: %d\n", len(car_result.dates))
+	fmt.printf("Events Analyzed: %d\n", car_result.num_events)
 
-	if len(car_result.dates) > 0 {
+	if car_result.num_events > 0 {
 		fmt.printf("Mean CAR (-5 to +5 days): %+.4f%%\n", car_result.mean_car * 100.0)
 		fmt.printf("T-Statistic:              %.4f\n", car_result.t_statistic)
 
 		fmt.println("\nPer-Event CAR:")
-		for i in 0 ..< len(car_result.dates) {
+		for i in 0 ..< car_result.num_events {
 			fmt.printf("  %s : %+.4f%%\n", car_result.dates[i], car_result.car_values[i] * 100.0)
 		}
 
@@ -99,14 +113,13 @@ event_study_test :: proc(allocator: mem.Allocator) {
 			)
 		} else {
 			fmt.println(
-				"~ NOT SIGNIFICANT: The average CAR is not statistically different from zero (efficient market).",
+				"~ NOT SIGNIFICANT: The average CAR is not statistically different from zero.",
 			)
 		}
 	} else {
-		fmt.println(
-			"⚠ WARNING: No events matched the dataset. Check date formats or fetch window.",
-		)
+		fmt.println("⚠ WARNING: No events matched the dataset. Check date formatting.")
 	}
 
 	fmt.println("\n✓ Event Study Pipeline Test Complete!")
+
 }
