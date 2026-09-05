@@ -469,6 +469,7 @@ main :: proc() {
 	test.event_study_nlp_test(context.temp_allocator)
 	test.deep_hedging_portfolio_test(context.temp_allocator)
 	test.tokenizer_wordpiece_test(context.temp_allocator)
+	test.tokenizer_bpe_test(context.temp_allocator)
 	// test.deep_hedging_real_data_test(context.temp_allocator)
 	// test.deep_hedging_test(context.temp_allocator)
 	// test.deep_hedging_exotic_test(context.temp_allocator)
