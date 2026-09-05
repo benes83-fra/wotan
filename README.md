@@ -77,9 +77,33 @@ A fast, expressive, allocator‑safe DataFrame and time‑series analytics engin
 - Dividends
 - Splits
 - Event alignment
+## 💰 `ml_finance`: Machine Learning for Quantitative Finance
 
+Wotan includes a **comprehensive ML library for finance**, with **zero Python dependencies**:
+
+### 🎯 Core Features
+   Feature | Description | Use Case |
+ |---------|-------------|----------|
+ | **Deep Hedging** | Neural network-based optimal hedging | Hedge options, futures, or portfolios |
+ | **Deep BSDE** | Solve high-dimensional PDEs | Price exotic options (100D+) |
+ | **DeepLOB** | Limit Order Book modeling | Predict price movements |
+ | **TimeGAN** | Time-series data generation | Synthetic data for testing |
+ | **PPO** | Reinforcement Learning | Train trading agents |
+ | **Kalman Pairs** | Pairs trading with Kalman Filters | Trade correlated assets |
+ | **Sentiment** | BERT-based text analysis | Classify financial news |
+ | **Event Study** | Cumulative Abnormal Returns | Measure event impact |
+ | **Metrics** | Quant finance metrics | Evaluate strategies (Rank IC, Sharpe, etc.) |
+
+### 🚀 Quick Start
+```odin
+import ml_fin "../wotan/ml_finance"
+
+// Example: Deep Hedging
+config := ml_fin.DeepHedgerConfig{...}
+hedger := ml_fin.deep_hedger_new(config, context.allocator)
+ml_fin.deep_hedger_train(hedger, &paths, &payoffs, 100, 0.001, context.allocator)
 ---
-
+```
 Wotan is very lean so far, apart from libcurl for webrequest there are no external dependencies
 
 ## 📦 Installation

@@ -450,7 +450,6 @@ event_study_tokenizer_nlp_test :: proc(allocator: mem.Allocator) {
 	fmt.println("\nLoading WordPiece Tokenizer Vocabulary...")
 	vocab_path := "bert_vocab.txt"
 
-	// Try to read existing vocab; if it fails, download it from HuggingFace
 	_, err := os.read_entire_file(vocab_path, allocator)
 	if err != nil {
 		fmt.println(
@@ -487,33 +486,59 @@ event_study_tokenizer_nlp_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("✓ Tokenizer loaded with %d tokens.\n", len(tokenizer.ids_to_tokens))
 
 	// ========================================================================
-	// 2. Initialize FinBERT Sentiment Analyzer
+	// 2. Load Pre-trained FinBERT Model (or fallback to random)
 	// ========================================================================
-	fmt.println("\nInitializing FinBERT Sentiment Analyzer (2 layers for testing)...")
-	vocab_size := len(tokenizer.ids_to_tokens)
-	d_model := 768
-	num_heads := 12
-	d_ff := 3072
-	num_layers := 2 // Keep small for quick test execution
+	fmt.println("\nLoading FinBERT Model...")
+	checkpoint_path := "finbert_checkpoint.bin"
 
-	analyzer := ml_fin.sentiment_analyzer_new(
-		vocab_size,
-		d_model,
-		num_heads,
-		d_ff,
-		num_layers,
-		max_seq_len,
-		allocator,
-	)
+	bert_model: ^nn.BERTModel
+	ok_load := false
+
+	// ✅ Try to load pre-trained weights using your existing persistence module
+	bert_model, ok_load = nn.load_bert_model(checkpoint_path, allocator)
+
+	if !ok_load {
+		fmt.println(
+			"⚠ Checkpoint not found or invalid. Initializing random model for demonstration...",
+		)
+		fmt.println(
+			"  (To see real sentiment, place a valid finbert_checkpoint.bin in the directory)",
+		)
+
+		// Fallback to random initialization
+		vocab_size := len(tokenizer.ids_to_tokens)
+		d_model := 768
+		num_heads := 12
+		d_ff := 3072
+		num_layers := 2 // Keep small for quick test execution if random
+
+		bert_model = new(nn.BERTModel, allocator)
+		bert_model^ = nn.bert_model_new(
+			vocab_size,
+			d_model,
+			num_heads,
+			d_ff,
+			num_layers,
+			max_seq_len,
+			allocator,
+		)
+		// Replace NSP head with 3-class sentiment head
+		nn.bert_replace_nsp_head(bert_model, 3, allocator)
+	} else {
+		fmt.println("✓ Pre-trained FinBERT model loaded successfully from checkpoint!")
+	}
+
+	analyzer := ml_fin.SentimentAnalyzer {
+		bert      = bert_model,
+		allocator = allocator,
+	}
 	defer ml_fin.sentiment_analyzer_free(&analyzer)
-	fmt.println("✓ Analyzer initialized.")
 
 	// ========================================================================
 	// 3. Real NLP Pipeline: Tokenize -> Predict Sentiment
 	// ========================================================================
 	fmt.println("\nRunning NLP Pipeline on Earnings Dates...")
 
-	// Realistic mock earnings summaries
 	event_data := []struct {
 		date: string,
 		text: string,
@@ -543,18 +568,15 @@ event_study_tokenizer_nlp_test :: proc(allocator: mem.Allocator) {
 		fmt.printf("\n  Processing: %s\n", event.date)
 		fmt.printf("  Text: \"%s...\"\n", event.text[:min(60, len(event.text))])
 
-		// ✅ REAL TOKENIZATION using the downloaded HuggingFace vocab
 		input_ids, segment_ids := tok.tokenize_to_tensors(&tokenizer, event.text, allocator)
 		defer {
 			t.tensor_free(input_ids)
 			t.tensor_free(segment_ids)
 		}
 
-		// Forward Pass through FinBERT
 		logits := ml_fin.analyze_text(&analyzer, input_ids, segment_ids, false)
 		defer t.tensor_free(logits)
 
-		// Argmax to get sentiment label
 		batch_offset := 0 * (1 * 3 * 1)
 		neg_score := logits.data.data[batch_offset + 0]
 		neu_score := logits.data.data[batch_offset + 1]
@@ -582,7 +604,6 @@ event_study_tokenizer_nlp_test :: proc(allocator: mem.Allocator) {
 		)
 		fmt.printf("  ➔ Detected Sentiment: %s\n", sentiment_str)
 
-		// Filter: Only run Event Study on strong Positive or Negative signals
 		if sentiment == .Positive || sentiment == .Negative {
 			append(&nlp_filtered_dates, event.date)
 		}
