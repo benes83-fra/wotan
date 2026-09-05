@@ -31,10 +31,6 @@ wordpiece_tokenizer_new :: proc(
 	tok.allocator = allocator
 	tok.max_len = max_len
 	tok.unk_token = "[UNK]"
-	tok.unk_id = 100
-	tok.cls_id = 101
-	tok.sep_id = 102
-	tok.pad_id = 0
 
 	tok.vocab = make(map[string]int, allocator)
 
@@ -50,26 +46,29 @@ wordpiece_tokenizer_new :: proc(
 
 	tok.ids_to_tokens = make([]string, len(lines), allocator)
 
-	// Odin loop is strictly: for index, value in collection
 	for line, i in lines {
 		trimmed := strings.trim_space(line)
-		if len(trimmed) == 0 {
-			continue
-		}
+		if len(trimmed) == 0 {continue}
 
 		owned_token := strings.clone(trimmed, allocator)
 		tok.vocab[owned_token] = i
 		tok.ids_to_tokens[i] = owned_token
 	}
 
+	// ✅ DYNAMIC LOOKUP: Fixes the 101 vs 2 mismatch by reading directly from your file
+	if id, ok := tok.vocab["[PAD]"]; ok {tok.pad_id = id}
+	if id, ok := tok.vocab["[UNK]"]; ok {tok.unk_id = id}
+	if id, ok := tok.vocab["[CLS]"]; ok {tok.cls_id = id}
+	if id, ok := tok.vocab["[SEP]"]; ok {tok.sep_id = id}
+
 	return tok, true
 }
 
 wordpiece_tokenizer_free :: proc(tok: ^WordPieceTokenizer) {
-	// '_' discards the int index, 'token' is the string value
+	// ✅ FIX PANIC: Must explicitly pass tok.allocator to match how strings were cloned
 	for token, _ in tok.ids_to_tokens {
 		if len(token) > 0 {
-			delete(token)
+			delete(token, tok.allocator)
 		}
 	}
 	delete(tok.ids_to_tokens, tok.allocator)
@@ -88,12 +87,9 @@ tokenize :: proc(
 	defer delete(words, allocator)
 
 	tokens := make([dynamic]string, allocator)
-	defer delete(tokens)
 
 	for word in words {
-		if len(word) == 0 {
-			continue
-		}
+		if len(word) == 0 {continue}
 
 		start := 0
 		word_len := len(word)
@@ -104,9 +100,11 @@ tokenize :: proc(
 
 			for end > start {
 				sub := word[start:end]
+				allocated_sub := false
 
 				if start > 0 {
 					sub = fmt.aprintf("##%s", sub, allocator = allocator)
+					allocated_sub = true
 				}
 
 				if id, ok := tok.vocab[sub]; ok {
@@ -114,6 +112,11 @@ tokenize :: proc(
 					start = end
 					found = true
 					break
+				}
+
+				// Free immediately if it didn't match to prevent leaks
+				if allocated_sub {
+					delete(sub, allocator)
 				}
 				end -= 1
 			}
@@ -158,6 +161,14 @@ tokenize :: proc(
 		input_ids[i] = tok.pad_id
 		attention_mask[i] = 0
 	}
+
+	// Clean up dynamically allocated "##" subwords safely
+	for t_str, _ in tokens {
+		if strings.has_prefix(t_str, "##") {
+			delete(t_str, allocator)
+		}
+	}
+	delete(tokens)
 
 	return input_ids, attention_mask
 }
