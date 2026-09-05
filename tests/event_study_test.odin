@@ -5,10 +5,12 @@ import l "../wotan/linalg"
 import ml_fin "../wotan/ml_finance"
 import net "../wotan/net"
 import nn "../wotan/nn"
+import tok "../wotan/nn/tokenizers"
 import t "../wotan/tensor"
 import "core:fmt"
 import "core:math"
 import "core:mem"
+import "core:os"
 import "core:strconv"
 import "core:strings"
 
@@ -362,6 +364,256 @@ event_study_nlp_test :: proc(allocator: mem.Allocator) {
 
 	// ========================================================================
 	// 4. Print Results
+	// ========================================================================
+	fmt.println("\n=== NLP-Driven Event Study Results ===")
+	fmt.printf("Total Events Scanned: %d\n", len(event_data))
+	fmt.printf("Events Triggering Trade (Pos/Neg): %d\n", car_result.num_events)
+
+	if car_result.num_events > 0 {
+		fmt.printf("Mean CAR (-5 to +5 days): %+.4f%%\n", car_result.mean_car * 100.0)
+		fmt.printf("T-Statistic:              %.4f\n", car_result.t_statistic)
+
+		fmt.println("\nPer-Event CAR:")
+		for i in 0 ..< car_result.num_events {
+			fmt.printf("  %s : %+.4f%%\n", car_result.dates[i], car_result.car_values[i] * 100.0)
+		}
+
+		fmt.println("\n--- Interpretation ---")
+		if math.abs(car_result.t_statistic) > 1.96 {
+			fmt.println(
+				"✓ STATISTICALLY SIGNIFICANT: The NLP-detected sentiment events have a measurable impact on price.",
+			)
+		} else {
+			fmt.println(
+				"~ NOT SIGNIFICANT: The average CAR is not statistically different from zero (efficient market).",
+			)
+		}
+	} else {
+		fmt.println("⚠ WARNING: No NLP events met the sentiment threshold for analysis.")
+	}
+
+	fmt.println("\n✓ Real NLP Integration Pipeline Test Complete!")
+}
+
+
+event_study_tokenizer_nlp_test :: proc(allocator: mem.Allocator) {
+	fmt.println("\n=== Real NLP Integration & Event Study Pipeline ===")
+
+	symbol := "AAPL"
+	fmt.printf("Fetching daily data for %s to establish baseline returns...\n", symbol)
+
+	df := net.read_yahoo(symbol, .Daily, .TwoYears, allocator)
+	defer w.destroy_dataframe(&df)
+
+	if df.rows == 0 {
+		fmt.println("Failed to fetch data. Aborting.")
+		return
+	}
+
+	close_col := &df.columns[5] // AdjClose
+	date_col := &df.columns[0] // Date
+
+	all_dates := make([]string, df.rows, allocator)
+	returns := make([]f64, df.rows, allocator)
+	defer {
+		for i in 0 ..< df.rows {
+			if len(all_dates[i]) > 0 {
+				delete(all_dates[i], allocator)
+			}
+		}
+		delete(all_dates, allocator)
+		delete(returns, allocator)
+	}
+
+	fmt.println("Extracting data using w.column_at_date...")
+	for i in 0 ..< df.rows {
+		date_val, is_null := w.column_at_date(date_col, i)
+		if is_null {
+			all_dates[i] = ""
+			continue
+		}
+		all_dates[i] = w.date_to_string(date_val, allocator)
+
+		if i > 0 {
+			prev_close, _ := w.column_at_float(close_col, i - 1)
+			curr_close, _ := w.column_at_float(close_col, i)
+			if prev_close > 0.0 {
+				returns[i] = (curr_close - prev_close) / prev_close
+			}
+		}
+	}
+	fmt.printf("Successfully loaded %d days of data.\n", df.rows)
+
+	// ========================================================================
+	// 1. Fetch or Load Real WordPiece Vocabulary
+	// ========================================================================
+	fmt.println("\nLoading WordPiece Tokenizer Vocabulary...")
+	vocab_path := "bert_vocab.txt"
+
+	// Try to read existing vocab; if it fails, download it from HuggingFace
+	_, err := os.read_entire_file(vocab_path, allocator)
+	if err != nil {
+		fmt.println(
+			"vocab.txt not found locally. Downloading from HuggingFace (bert-base-uncased)...",
+		)
+		url := "https://huggingface.co/bert-base-uncased/resolve/main/vocab.txt"
+		vocab_data_str, ok := net.http_get(url, allocator)
+		if !ok {
+			fmt.println("Failed to download vocab.txt. Aborting.")
+			return
+		}
+
+		file, create_err := os.create(vocab_path)
+		if create_err != nil {
+			fmt.printf("Failed to create vocab file: %v\n", create_err)
+			delete(vocab_data_str, allocator)
+			return
+		}
+		os.write(file, transmute([]u8)vocab_data_str)
+		os.close(file)
+		delete(vocab_data_str, allocator)
+		fmt.println("✓ Vocabulary downloaded and cached successfully.")
+	} else {
+		fmt.println("✓ Found local vocab.txt")
+	}
+
+	max_seq_len := 128
+	tokenizer, ok := tok.wordpiece_tokenizer_new(vocab_path, max_seq_len, allocator)
+	if !ok {
+		fmt.println("Failed to load tokenizer.")
+		return
+	}
+	defer tok.wordpiece_tokenizer_free(&tokenizer)
+	fmt.printf("✓ Tokenizer loaded with %d tokens.\n", len(tokenizer.ids_to_tokens))
+
+	// ========================================================================
+	// 2. Initialize FinBERT Sentiment Analyzer
+	// ========================================================================
+	fmt.println("\nInitializing FinBERT Sentiment Analyzer (2 layers for testing)...")
+	vocab_size := len(tokenizer.ids_to_tokens)
+	d_model := 768
+	num_heads := 12
+	d_ff := 3072
+	num_layers := 2 // Keep small for quick test execution
+
+	analyzer := ml_fin.sentiment_analyzer_new(
+		vocab_size,
+		d_model,
+		num_heads,
+		d_ff,
+		num_layers,
+		max_seq_len,
+		allocator,
+	)
+	defer ml_fin.sentiment_analyzer_free(&analyzer)
+	fmt.println("✓ Analyzer initialized.")
+
+	// ========================================================================
+	// 3. Real NLP Pipeline: Tokenize -> Predict Sentiment
+	// ========================================================================
+	fmt.println("\nRunning NLP Pipeline on Earnings Dates...")
+
+	// Realistic mock earnings summaries
+	event_data := []struct {
+		date: string,
+		text: string,
+	} {
+		{
+			"2025-11-03",
+			"Apple reports record-breaking iPhone sales, exceeding all analyst expectations. Services revenue also hit an all-time high, driving strong margin expansion.",
+		},
+		{
+			"2026-02-02",
+			"Strong guidance for the upcoming quarter driven by AI integration in macOS. Management raised full-year revenue outlook.",
+		},
+		{
+			"2026-05-04",
+			"Solid results, but supply chain constraints in Asia may impact next quarter's hardware shipments slightly. Overall demand remains robust.",
+		},
+		{
+			"2026-08-03",
+			"Apple misses revenue estimates due to unexpected slowdown in China market. CEO warns of challenging macroeconomic headwinds and delayed product cycles.",
+		},
+	}
+
+	nlp_filtered_dates := make([dynamic]string, allocator)
+	defer delete(nlp_filtered_dates)
+
+	for event, _ in event_data {
+		fmt.printf("\n  Processing: %s\n", event.date)
+		fmt.printf("  Text: \"%s...\"\n", event.text[:min(60, len(event.text))])
+
+		// ✅ REAL TOKENIZATION using the downloaded HuggingFace vocab
+		input_ids, segment_ids := tok.tokenize_to_tensors(&tokenizer, event.text, allocator)
+		defer {
+			t.tensor_free(input_ids)
+			t.tensor_free(segment_ids)
+		}
+
+		// Forward Pass through FinBERT
+		logits := ml_fin.analyze_text(&analyzer, input_ids, segment_ids, false)
+		defer t.tensor_free(logits)
+
+		// Argmax to get sentiment label
+		batch_offset := 0 * (1 * 3 * 1)
+		neg_score := logits.data.data[batch_offset + 0]
+		neu_score := logits.data.data[batch_offset + 1]
+		pos_score := logits.data.data[batch_offset + 2]
+
+		sentiment: ml_fin.SentimentLabel
+		sentiment_str: string
+
+		if pos_score >= neg_score && pos_score >= neu_score {
+			sentiment = .Positive
+			sentiment_str = "Positive"
+		} else if neg_score >= pos_score && neg_score >= neu_score {
+			sentiment = .Negative
+			sentiment_str = "Negative"
+		} else {
+			sentiment = .Neutral
+			sentiment_str = "Neutral"
+		}
+
+		fmt.printf(
+			"  Scores -> Neg: %.4f, Neu: %.4f, Pos: %.4f\n",
+			neg_score,
+			neu_score,
+			pos_score,
+		)
+		fmt.printf("  ➔ Detected Sentiment: %s\n", sentiment_str)
+
+		// Filter: Only run Event Study on strong Positive or Negative signals
+		if sentiment == .Positive || sentiment == .Negative {
+			append(&nlp_filtered_dates, event.date)
+		}
+	}
+
+	// ========================================================================
+	// 4. Run Event Study on NLP-Filtered Dates
+	// ========================================================================
+	fmt.println("\nRunning Event Study (Cumulative Abnormal Returns)...")
+	fmt.println("Estimation Window: -120 to -10 days relative to event")
+	fmt.println("Event Window:      -5 to +5 days relative to event")
+
+	filtered_slice := make([]string, len(nlp_filtered_dates), allocator)
+	for i in 0 ..< len(nlp_filtered_dates) {
+		filtered_slice[i] = nlp_filtered_dates[i]
+	}
+
+	car_result := ml_fin.compute_car(
+		all_dates,
+		returns,
+		filtered_slice,
+		-120, // est_start
+		-10, // est_end
+		-5, // evt_start
+		5, // evt_end
+		allocator,
+	)
+	defer ml_fin.event_study_result_free(&car_result, allocator)
+
+	// ========================================================================
+	// 5. Print Results
 	// ========================================================================
 	fmt.println("\n=== NLP-Driven Event Study Results ===")
 	fmt.printf("Total Events Scanned: %d\n", len(event_data))
