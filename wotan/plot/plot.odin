@@ -815,13 +815,11 @@ bar_png :: proc(
 	n := len(labels)
 
 	// Find max value for scaling
-	max_val := 0.0
+	min_val := values[0]
+	max_val := values[0]
 	for v in values {
 		if v > max_val {max_val = v}
-		if v < 0 {
-			// Handle negative values
-			if -v > max_val {max_val = -v}
-		}
+		if v < min_val {min_val = v}
 	}
 	if max_val == 0 {max_val = 1}
 
@@ -838,6 +836,11 @@ bar_png :: proc(
 	// Draw axes
 	draw_line(&img, margin_l, margin_t, margin_l, H - margin_b, config.axis_color)
 	draw_line(&img, margin_l, H - margin_b, W - margin_r, H - margin_b, config.axis_color)
+	if min_val < 0 && max_val > 0 {
+		zero_y := H - margin_b - int((0.0 - min_val) / (max_val - min_val) * f64(plot_h))
+		draw_line(&img, margin_l, zero_y, W - margin_r, zero_y, config.grid_color)
+	}
+
 	// Draw grid lines if enabled
 	if config.show_grid {
 		// Vertical grid lines
@@ -878,20 +881,31 @@ bar_png :: proc(
 
 	// Draw bars and labels
 	for i in 0 ..< n {
-		// Calculate bar height (proportional to value)
-		bar_height := int(values[i] / max_val * f64(plot_h))
+		// ✅ FIX: Calculate bar position relative to zero
+		if values[i] >= 0 {
+			// Positive bar: starts at zero line, goes up
+			zero_y := H - margin_b - int((0.0 - min_val) / (max_val - min_val) * f64(plot_h))
+			bar_height := int(values[i] / (max_val - min_val) * f64(plot_h))
+			y := zero_y - bar_height
+			x := margin_l + i * bar_width + bar_gap / 2
 
-		// Calculate bar position
-		x := margin_l + i * bar_width + bar_gap / 2
-		y := H - margin_b - bar_height
+			// Draw the bar (upward from zero)
+			draw_rect(&img, x, y, actual_bar_width, bar_height, config.bar_color)
+		} else {
+			// Negative bar: starts at zero line, goes down
+			zero_y := H - margin_b - int((0.0 - min_val) / (max_val - min_val) * f64(plot_h))
+			bar_height := int(-values[i] / (max_val - min_val) * f64(plot_h))
+			y := zero_y
+			x := margin_l + i * bar_width + bar_gap / 2
 
-		// Draw the bar
-		draw_rect(&img, x, y, actual_bar_width, bar_height, config.bar_color)
+			// Draw the bar (downward from zero)
+			draw_rect(&img, x, y, actual_bar_width, bar_height, config.bar_color)
+		}
 
 		// Draw label (centered under the bar)
 		label := labels[i]
 		label_width := len(label) * 4 * config.font_scale
-		label_x := x + (actual_bar_width - label_width) / 2
+		label_x := margin_l + i * bar_width + (bar_width - label_width) / 2
 		draw_text(&img, label_x, H - margin_b + 10, label, config.font_scale, config.axis_color)
 	}
 
