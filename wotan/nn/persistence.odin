@@ -133,6 +133,7 @@ read_tensor :: proc(data: []u8, offset: int, allocator: mem.Allocator) -> (^t.Te
 	}
 
 	tensor := t.tensor_new(m, true, allocator)
+	tensor.shape = [4]int{rows, cols, 1, 1}
 	return tensor, curr_offset
 }
 
@@ -1252,11 +1253,14 @@ load_bert_model :: proc(
 	if model_ptr.token_emb.weight != nil {t.tensor_free(model_ptr.token_emb.weight)}
 	model_ptr.token_emb.weight, offset = read_tensor(data, offset, allocator)
 
+
 	if model_ptr.pos_emb.weight != nil {t.tensor_free(model_ptr.pos_emb.weight)}
 	model_ptr.pos_emb.weight, offset = read_tensor(data, offset, allocator)
 
+
 	if model_ptr.segment_emb.weight != nil {t.tensor_free(model_ptr.segment_emb.weight)}
 	model_ptr.segment_emb.weight, offset = read_tensor(data, offset, allocator)
+
 
 	if model_ptr.emb_ln.gamma != nil {t.tensor_free(model_ptr.emb_ln.gamma)}
 	model_ptr.emb_ln.gamma, offset = read_tensor(data, offset, allocator)

@@ -3,6 +3,7 @@ package nn
 
 import l "../linalg"
 import t "../tensor"
+import "core:fmt"
 import "core:mem"
 
 // ============================================================================

@@ -2,10 +2,10 @@
   <img src="https://raw.githubusercontent.com/benes83-fra/wotan/main/wotan%20logo.png" width="280" alt="Wotan Logo">
 </p>
 
-<h1 align="center">Wotan — High‑Performance DataFrame Engine for Odin</h1>
+<h1 align="center">Wotan — High‑Performance DataFrame and Finance Engine for Odin</h1>
 
 <p align="center">
-A fast, expressive, allocator‑safe DataFrame and time‑series analytics engine written in Odin.
+A fast, expressive, allocator‑safe DataFrame and time‑series analytics and finance engine written in Odin.
 </p>
 
 ---
@@ -855,9 +855,7 @@ for mp in test_prices {
     )
 }
 
-// ====================================================================
-// Test 4: Greeks Sanity Checks
-// ====================================================================
+
 // ====================================================================
 // Test 4: Greeks Sanity Checks (with CORRECT expectations)
 // ====================================================================
@@ -973,7 +971,12 @@ odin build . -build_mode:dynamic
 
 ```
 
-
+### FinBERT example
+In order to run the FinBERT example with HuggingFaces weights, run this
+```sh
+python convert_bert.py ProsusAI/finbert finbert_checkpoint.bin
+```
+Otherwise it will run uninitialized
 
 ### 🤝 Contributing
 Contributions, bug reports, and feature requests are welcome.

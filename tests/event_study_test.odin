@@ -476,7 +476,7 @@ event_study_tokenizer_nlp_test :: proc(allocator: mem.Allocator) {
 		fmt.println("✓ Found local vocab.txt")
 	}
 
-	max_seq_len := 128
+	max_seq_len := 512
 	tokenizer, ok := tok.wordpiece_tokenizer_new(vocab_path, max_seq_len, allocator)
 	if !ok {
 		fmt.println("Failed to load tokenizer.")

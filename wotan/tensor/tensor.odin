@@ -2938,6 +2938,8 @@ _matrix_transpose :: proc(m: l.Matrix(f64), alloc: mem.Allocator) -> l.Matrix(f6
 
 // tensor_matmul creates a new tensor C = A @ B (Matrix Multiplication)
 tensor_matmul :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
+
+
 	// ✅ NEW: Handle flattened 3D/4D tensor @ 2D weight matrix
 	if a.data.rows == 1 && a.data.cols != b.data.rows {
 		if a.data.cols % b.data.rows == 0 {
@@ -2973,6 +2975,7 @@ tensor_matmul :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
 			return out
 		}
 	}
+
 
 	// Standard 2D matmul path
 	if a.data.cols != b.data.rows {
@@ -3770,6 +3773,7 @@ tensor_lstm :: proc(
 // ============================================================================
 
 tensor_embedding :: proc(input: ^Tensor, weight: ^Tensor) -> ^Tensor {
+
 	batch := input.shape[0]
 	seq_len := input.shape[1]
 	vocab_size := weight.shape[0]
@@ -3981,9 +3985,28 @@ tensor_layer_norm :: proc(
 	eps: f64 = 1e-5,
 ) -> ^Tensor {
 	d_model := gamma.data.cols
-
 	if beta.data.cols != d_model {
 		panic("tensor_layer_norm: beta dimension mismatch")
+	}
+
+	// ✅ CRITICAL CHECK: Ensure gamma and beta actually have at least d_model elements
+	if len(gamma.data.data) < d_model {
+		panic(
+			fmt.aprintf(
+				"tensor_layer_norm: gamma data length %d is less than d_model %d",
+				len(gamma.data.data),
+				d_model,
+			),
+		)
+	}
+	if len(beta.data.data) < d_model {
+		panic(
+			fmt.aprintf(
+				"tensor_layer_norm: beta data length %d is less than d_model %d",
+				len(beta.data.data),
+				d_model,
+			),
+		)
 	}
 
 	// ✅ FIX: Detect flattened 3D tensor (rows=1, cols is a multiple of d_model)
@@ -4033,8 +4056,10 @@ tensor_layer_norm :: proc(
 
 		// 4. Scale and shift: out = gamma * x_hat + beta (SIMD)
 		out_row := out_data.data[row_start:row_start + d_model]
-		gamma_row := gamma.data.data
-		beta_row := beta.data.data
+
+		// ✅ BULLETPROOF: Explicitly slice to d_model to prevent vec_mul_simd length mismatch
+		gamma_row := gamma.data.data[0:d_model]
+		beta_row := beta.data.data[0:d_model]
 
 		l.vec_mul_simd(x_hat, gamma_row, out_row)
 		l.vec_add_simd(out_row, beta_row, out_row)
