@@ -6,6 +6,7 @@ import ml_fin "../wotan/ml_finance"
 import net "../wotan/net"
 import nn "../wotan/nn"
 import tok "../wotan/nn/tokenizers"
+import p "../wotan/plot"
 import t "../wotan/tensor"
 import "core:fmt"
 import "core:math"
@@ -662,6 +663,37 @@ event_study_tokenizer_nlp_test :: proc(allocator: mem.Allocator) {
 	} else {
 		fmt.println("⚠ WARNING: No NLP events met the sentiment threshold for analysis.")
 	}
+	// ========================================================================
+	// 6. Visualize Results
+	// ========================================================================
+	fmt.println("\nGenerating CAR Visualization...")
+
+	// Prepare data for the bar chart
+	car_labels := make([]string, car_result.num_events, allocator)
+	car_vals := make([]f64, car_result.num_events, allocator)
+
+	for i in 0 ..< car_result.num_events {
+		car_labels[i] = car_result.dates[i]
+		car_vals[i] = car_result.car_values[i] * 100.0 // Convert to percentage
+	}
+
+	// Configure the plot
+	plot_config := p.DEFAULT_PLOT_CONFIG
+	plot_config.title = "Cumulative Abnormal Returns (CAR) by Event"
+	plot_config.x_label = "Event Date"
+	plot_config.y_label = "CAR (%)"
+	plot_config.bar_color = p.BLUE
+	plot_config.show_grid = true
+	plot_config.width = 800
+	plot_config.height = 600
+
+	// Generate the PNG
+	if p.bar_png(car_labels, car_vals, "car_results.png", plot_config, allocator) {
+		fmt.println("✓ Successfully saved CAR visualization to 'car_results.png'")
+	} else {
+		fmt.println("⚠ Failed to save CAR visualization.")
+	}
+
 
 	fmt.println("\n✓ Real NLP Integration Pipeline Test Complete!")
 }
