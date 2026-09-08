@@ -1326,6 +1326,10 @@ load_bert_model :: proc(
 	if model_ptr.nsp_head.bias != nil {t.tensor_free(model_ptr.nsp_head.bias)}
 	model_ptr.nsp_head.bias, offset = read_tensor(data, offset, allocator)
 
+	if model_ptr.nsp_head.weights != nil {
+		model_ptr.nsp_head.out_features = model_ptr.nsp_head.weights.data.cols
+	}
+
 	return model_ptr, true
 }
 // ============================================================================

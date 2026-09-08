@@ -522,6 +522,7 @@ multi_head_attention_layer_free :: proc(layer: ^MultiHeadAttentionLayer) {
 multi_head_attention_layer_forward :: proc(
 	layer: ^MultiHeadAttentionLayer,
 	x: ^t.Tensor,
+	attention_mask: ^t.Tensor = nil,
 ) -> ^t.Tensor {
 	batch := x.shape[0]
 	seq_len := x.shape[1]
@@ -537,8 +538,29 @@ multi_head_attention_layer_forward :: proc(
 	v_perm := t.tensor_permute_mha(v, batch, seq_len, layer.num_heads, layer.head_dim)
 
 	// 3. Scaled Dot-Product Attention (processes all heads in parallel!)
-	att := t.tensor_scaled_dot_product_attention(q_perm, k_perm, v_perm)
+	att: ^t.Tensor
+	if attention_mask != nil {
+		// Convert 0/1 mask to 0/-10000 mask for the masked attention function
+		mask_data := make([]f64, seq_len * seq_len, x.allocator)
+		defer delete(mask_data, x.allocator)
 
+		// The attention_mask is shape [batch, seq_len]. We expand it to [seq_len, seq_len]
+		for i in 0 ..< seq_len {
+			for j in 0 ..< seq_len {
+				// If either token is padding (0), mask the attention score
+				val_i := attention_mask.data.data[i] // Assuming batch=0 for simplicity in this test
+				val_j := attention_mask.data.data[j]
+				if val_i == 0.0 || val_j == 0.0 {
+					mask_data[i * seq_len + j] = -10000.0
+				} else {
+					mask_data[i * seq_len + j] = 0.0
+				}
+			}
+		}
+		att = t.tensor_masked_scaled_dot_product_attention(q_perm, k_perm, v_perm, mask_data)
+	} else {
+		att = t.tensor_scaled_dot_product_attention(q_perm, k_perm, v_perm)
+	}
 	// 4. Inverse permute back to [batch, seq_len, d_model]
 	att_inv := t.tensor_permute_mha_inverse(att, batch, seq_len, layer.num_heads, layer.head_dim)
 

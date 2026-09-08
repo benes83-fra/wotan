@@ -49,30 +49,30 @@ bert_encoder_block_free :: proc(block: ^BERTEncoderBlock) {
 bert_encoder_block_forward :: proc(
 	block: ^BERTEncoderBlock,
 	x: ^t.Tensor,
+	attention_mask: ^t.Tensor = nil,
 	training: bool,
 ) -> ^t.Tensor {
 	// Pre-LayerNorm
-	x_norm := layer_norm_layer_forward(&block.ln1, x)
-
-	// Bidirectional attention (no mask!)
-	attn_out := multi_head_attention_layer_forward(&block.mha, x_norm)
+	attn_out := multi_head_attention_layer_forward(&block.mha, x, attention_mask)
 
 	// Dropout if training
 	if training {
 		attn_out = t.tensor_dropout(attn_out, 0.1, true)
 	}
-
 	x1 := t.tensor_add(x, attn_out)
 
-	x1_norm := layer_norm_layer_forward(&block.ln2, x1)
+	x1_norm := layer_norm_layer_forward(&block.ln1, x1)
+
+
+	//x1_norm := layer_norm_layer_forward(&block.ln2, x1)
 	ffn_out := ffn_layer_forward(&block.ffn, x1_norm)
 
 	if training {
 		ffn_out = t.tensor_dropout(ffn_out, 0.1, true)
 	}
 
-	out := t.tensor_add(x1, ffn_out)
-
+	x2 := t.tensor_add(x1, ffn_out)
+	out := layer_norm_layer_forward(&block.ln2, x2)
 	return out
 }
 
@@ -199,10 +199,23 @@ bert_model_forward :: proc(
 
 	// LayerNorm
 	x = layer_norm_layer_forward(&model.emb_ln, x)
-
+	attention_mask: ^t.Tensor = nil
+	if true { 	// Always create it to be safe
+		mask_data := l.matrix_new(f64, 1, batch * seq_len, model.allocator)
+		for i in 0 ..< batch * seq_len {
+			// If the token ID is 0, it's a padding token
+			if input_ids.data.data[i] == 0.0 {
+				mask_data.data[i] = 0.0
+			} else {
+				mask_data.data[i] = 1.0
+			}
+		}
+		attention_mask = t.tensor_new(mask_data, false, model.allocator)
+		attention_mask.shape = [4]int{batch, seq_len, 1, 1}
+	}
 	// Pass through encoder blocks
 	for i in 0 ..< len(model.encoder_blocks) {
-		x = bert_encoder_block_forward(&model.encoder_blocks[i], x, training)
+		x = bert_encoder_block_forward(&model.encoder_blocks[i], x, attention_mask, training)
 	}
 
 	// MLM head (applied to all positions)
@@ -221,11 +234,15 @@ bert_model_forward :: proc(
 
 	// Pool and predict
 	pooled := linear_forward(&model.pooler, cls_tensor)
+	pooled = t.tensor_tanh(pooled)
 	nsp_logits = linear_forward(&model.nsp_head, pooled)
 
 	// Cleanup temporary tensors
 	t.tensor_free(pos_ids)
 	t.tensor_free(cls_tensor)
+	if attention_mask != nil {
+		t.tensor_free(attention_mask) // ✅ Don't forget to free the new mask!
+	}
 
 	return mlm_logits, nsp_logits
 }

@@ -83,9 +83,11 @@ tokenize :: proc(
 	input_ids: []int,
 	attention_mask: []int,
 ) {
-	words := strings.split(text, " ", allocator)
-	defer delete(words, allocator)
+	lower_text := strings.to_lower(text, allocator)
+	defer delete(lower_text, allocator)
 
+	words := strings.split(lower_text, " ", allocator)
+	defer delete(words, allocator)
 	tokens := make([dynamic]string, allocator)
 
 	for word in words {
