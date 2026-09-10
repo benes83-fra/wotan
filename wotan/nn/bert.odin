@@ -71,7 +71,7 @@ bert_encoder_block_forward :: proc(
 		ffn_out = t.tensor_dropout(ffn_out, 0.1, true)
 	}
 
-	x2 := t.tensor_add(x1, ffn_out)
+	x2 := t.tensor_add(x1_norm, ffn_out)
 	out := layer_norm_layer_forward(&block.ln2, x2)
 	return out
 }

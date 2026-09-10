@@ -27,6 +27,7 @@ Op :: enum {
 	Mean,
 	Neg,
 	Relu,
+	Gelu,
 	Sigmoid, // ✅ ADD
 	Tanh, // ✅ ADD
 	LeakyReLU, // ✅ ADD
@@ -254,7 +255,16 @@ tensor_relu :: proc(a: ^Tensor) -> ^Tensor {
 
 	return out
 }
-
+tensor_gelu :: proc(a: ^Tensor) -> ^Tensor {
+	// GELU(x) = x * Φ(x) where Φ is the standard normal CDF
+	cdf := tensor_norm_cdf(a)
+	out := tensor_mul(a, cdf)
+	// Free intermediate if not building graph
+	if !a.requires_grad {
+		tensor_free(cdf)
+	}
+	return out
+}
 
 // tensor_mul creates a new tensor C = A * B (element-wise)
 tensor_mul :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
@@ -909,6 +919,46 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 
 				l.vec_relu_backward_simd(node.grad.data, a_in.data.data, a_in.grad.data)
 			}
+		case .Gelu:
+			a_in := node.inputs[0]
+			if a_in.requires_grad {
+				tensor_ensure_grad(a_in)
+
+				// Constants for Hastings approximation of CDF and PDF
+				inv_sqrt_2pi := 0.3989422804014327
+				p := 0.2316419
+				b1 := 0.319381530
+				b2 := -0.356563782
+				b3 := 1.781477937
+				b4 := -1.821255978
+				b5 := 1.330274429
+
+				for i in 0 ..< len(a_in.grad.data) {
+					x := a_in.data.data[i]
+
+					// 1. Compute PDF: φ(x) = (1/√(2π)) * e^(-x²/2)
+					phi := math.exp(-0.5 * x * x) * inv_sqrt_2pi
+
+					// 2. Compute CDF: Φ(x) using Hastings approximation
+					ax := math.abs(x)
+					t_val := 1.0 / (1.0 + p * ax)
+					t2 := t_val * t_val
+					t3 := t2 * t_val
+					t4 := t3 * t_val
+					t5 := t4 * t_val
+					poly := b1 * t_val + b2 * t2 + b3 * t3 + b4 * t4 + b5 * t5
+					cdf := 1.0 - phi * poly
+					if x < 0.0 {
+						cdf = 1.0 - cdf
+					}
+
+					// 3. GELU derivative: Φ(x) + x * φ(x)
+					grad := cdf + x * phi
+
+					a_in.grad.data[i] += node.grad.data[i] * grad
+				}
+			}
+
 		case .Sigmoid:
 			a_in := node.inputs[0]
 			if a_in.requires_grad {

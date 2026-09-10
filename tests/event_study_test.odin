@@ -527,6 +527,7 @@ event_study_tokenizer_nlp_test :: proc(allocator: mem.Allocator) {
 		nn.bert_replace_nsp_head(bert_model, 3, allocator)
 	} else {
 		fmt.println("✓ Pre-trained FinBERT model loaded successfully from checkpoint!")
+
 	}
 
 	analyzer := ml_fin.SentimentAnalyzer {
@@ -534,7 +535,16 @@ event_study_tokenizer_nlp_test :: proc(allocator: mem.Allocator) {
 		allocator = allocator,
 	}
 	defer ml_fin.sentiment_analyzer_free(&analyzer)
+	// ... after analyzer is initialized ...
+	fmt.println("✓ Analyzer initialized.")
 
+
+	fmt.print("First 5 weights: ")
+	for i in 0 ..< 5 {
+		fmt.printf("%.4f ", analyzer.bert.nsp_head.weights.data.data[i])
+	}
+	fmt.println()
+	fmt.println("-------------------------------------------------------\n")
 	// ========================================================================
 	// 3. Real NLP Pipeline: Tokenize -> Predict Sentiment
 	// ========================================================================
@@ -560,6 +570,10 @@ event_study_tokenizer_nlp_test :: proc(allocator: mem.Allocator) {
 			"2026-08-03",
 			"Apple misses revenue estimates due to unexpected slowdown in China market. CEO warns of challenging macroeconomic headwinds and delayed product cycles.",
 		},
+		{
+			"2026-09-01",
+			"Apple declares Chapter 11 bankruptcy. All operations are ceasing immediately and trading is halted.",
+		},
 	}
 
 	nlp_filtered_dates := make([dynamic]string, allocator)
@@ -575,13 +589,16 @@ event_study_tokenizer_nlp_test :: proc(allocator: mem.Allocator) {
 			t.tensor_free(segment_ids)
 		}
 
+		fmt.println()
 		logits := ml_fin.analyze_text(&analyzer, input_ids, segment_ids, false)
 		defer t.tensor_free(logits)
 
-		batch_offset := 0 * (1 * 3 * 1)
-		neg_score := logits.data.data[batch_offset + 0]
-		neu_score := logits.data.data[batch_offset + 1]
-		pos_score := logits.data.data[batch_offset + 2]
+		batch_offset := 0 * (1 * 3 * 1) // batch=0, seq=0, features=3
+
+		// ✅ FIX: ProsusAI/finbert uses {0: positive, 1: negative, 2: neutral}
+		pos_score := logits.data.data[batch_offset + 0]
+		neg_score := logits.data.data[batch_offset + 1]
+		neu_score := logits.data.data[batch_offset + 2]
 
 		sentiment: ml_fin.SentimentLabel
 		sentiment_str: string
@@ -596,13 +613,41 @@ event_study_tokenizer_nlp_test :: proc(allocator: mem.Allocator) {
 			sentiment = .Neutral
 			sentiment_str = "Neutral"
 		}
-
 		fmt.printf(
-			"  Scores -> Neg: %.4f, Neu: %.4f, Pos: %.4f\n",
+			"  RAW LOGITS     -> Neg: %.4f, Neu: %.4f, Pos: %.4f\n",
 			neg_score,
 			neu_score,
 			pos_score,
 		)
+
+		// After getting the raw logits from the classifier head
+		// Apply softmax to convert to probabilities
+		max_val := neg_score
+		if neu_score > max_val {max_val = neu_score}
+		if pos_score > max_val {max_val = pos_score}
+
+		neg_exp := math.exp(neg_score - max_val)
+		neu_exp := math.exp(neu_score - max_val)
+		pos_exp := math.exp(pos_score - max_val)
+
+		sum_exp := neg_exp + neu_exp + pos_exp
+
+		neg_prob := neg_exp / sum_exp
+		neu_prob := neu_exp / sum_exp
+		pos_prob := pos_exp / sum_exp
+
+		// if pos_score >= neg_score && pos_score >= neu_score {
+		// 	sentiment = .Positive
+		// 	sentiment_str = "Positive"
+		// } else if neg_score >= pos_score && neg_score >= neu_score {
+		// 	sentiment = .Negative
+		// 	sentiment_str = "Negative"
+		// } else {
+		// 	sentiment = .Neutral
+		// 	sentiment_str = "Neutral"
+		// }
+
+		fmt.printf("  Scores -> Neg: %.4f, Neu: %.4f, Pos: %.4f\n", neg_prob, neu_prob, pos_prob)
 		fmt.printf("  ➔ Detected Sentiment: %s\n", sentiment_str)
 
 		if sentiment == .Positive || sentiment == .Negative {

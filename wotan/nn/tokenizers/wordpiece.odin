@@ -197,7 +197,7 @@ tokenize_to_tensors :: proc(
 
 	for i in 0 ..< seq_len {
 		ids_data.data[i] = f64(ids[i])
-		seg_data.data[i] = f64(mask[i])
+		seg_data.data[i] = 0.0
 	}
 
 	in_tensor := t.tensor_new(ids_data, false, allocator)

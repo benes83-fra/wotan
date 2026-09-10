@@ -543,17 +543,18 @@ multi_head_attention_layer_forward :: proc(
 		// Convert 0/1 mask to 0/-10000 mask for the masked attention function
 		mask_data := make([]f64, seq_len * seq_len, x.allocator)
 		defer delete(mask_data, x.allocator)
-
-		// The attention_mask is shape [batch, seq_len]. We expand it to [seq_len, seq_len]
-		for i in 0 ..< seq_len {
-			for j in 0 ..< seq_len {
-				// If either token is padding (0), mask the attention score
-				val_i := attention_mask.data.data[i] // Assuming batch=0 for simplicity in this test
-				val_j := attention_mask.data.data[j]
-				if val_i == 0.0 || val_j == 0.0 {
-					mask_data[i * seq_len + j] = -10000.0
-				} else {
-					mask_data[i * seq_len + j] = 0.0
+		for b in 0 ..< batch {
+			// The attention_mask is shape [batch, seq_len]. We expand it to [seq_len, seq_len]
+			for i in 0 ..< seq_len {
+				for j in 0 ..< seq_len {
+					// If either token is padding (0), mask the attention score
+					val_i := attention_mask.data.data[b * seq_len + i]
+					val_j := attention_mask.data.data[b * seq_len + j]
+					if val_i == 0.0 || val_j == 0.0 {
+						mask_data[i * seq_len + j] = -10000.0
+					} else {
+						mask_data[i * seq_len + j] = 0.0
+					}
 				}
 			}
 		}
@@ -653,8 +654,8 @@ ffn_layer_forward :: proc(layer: ^FFNLayer, x: ^t.Tensor) -> ^t.Tensor {
 	// 1. Project up to d_ff
 	x1 := linear_forward(&layer.fc1, x)
 
-	// 2. Apply ReLU activation
-	x2 := t.tensor_relu(x1)
+	// 2. Apply GELU activation
+	x2 := t.tensor_gelu(x1)
 
 	// 3. Project back down to d_model
 	out := linear_forward(&layer.fc2, x2)
