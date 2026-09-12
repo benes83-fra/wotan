@@ -978,6 +978,12 @@ python convert_bert.py ProsusAI/finbert finbert_checkpoint.bin
 ```
 Otherwise it will run uninitialized
 
+### GPT 2 Completeness check
+In order to run the GPT Completion example with HuggingFaces weights, run this
+```sh
+python .\convert_gpt2.p
+```
+
 ### 🤝 Contributing
 Contributions, bug reports, and feature requests are welcome.
 Wotan is evolving rapidly — feedback is highly appreciated.

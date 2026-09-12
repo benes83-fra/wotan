@@ -27,13 +27,10 @@ gpt_completion_test :: proc(allocator: mem.Allocator) {
 	}
 	fmt.println("✓ Pre-trained DistilGPT-2 model loaded successfully!")
 
-	// ========================================================================
-	// 2. Download or Load GPT-2 Tokenizer Files (PURE ODIN, NO PYTHON)
-	// ========================================================================
+	// 2. Download or Load GPT-2 Tokenizer Files
 	vocab_path := "vocab.json"
 	merges_path := "merges.txt"
 
-	// Download vocab.json if not present
 	_, err_vocab := os.read_entire_file(vocab_path, allocator)
 	if err_vocab != nil {
 		fmt.println("vocab.json not found locally. Downloading from HuggingFace (gpt2)...")
@@ -57,7 +54,6 @@ gpt_completion_test :: proc(allocator: mem.Allocator) {
 		fmt.println("✓ Found local vocab.json")
 	}
 
-	// Download merges.txt if not present
 	_, err_merges := os.read_entire_file(merges_path, allocator)
 	if err_merges != nil {
 		fmt.println("merges.txt not found locally. Downloading from HuggingFace (gpt2)...")
@@ -98,9 +94,6 @@ gpt_completion_test :: proc(allocator: mem.Allocator) {
 	input_ids_slice := gpt_encode(&tokenizer, prompt_text, allocator)
 	defer delete(input_ids_slice, allocator)
 
-	// ✅ DEBUG: Verify we have the exact same tokens as Python
-	fmt.printf("DEBUG: Clean Token IDs: %v (Length: %d)\n", input_ids_slice, len(input_ids_slice))
-
 	seq_len := len(input_ids_slice)
 	batch := 1
 
@@ -113,7 +106,7 @@ gpt_completion_test :: proc(allocator: mem.Allocator) {
 	input_ids.shape = [4]int{batch, seq_len, 1, 1}
 	defer t.tensor_free(input_ids)
 
-	// 5. Create Causal Mask (Required by gpt_model_forward)
+	// 5. Create Causal Mask
 	causal_mask := nn.create_causal_mask(seq_len, allocator)
 	defer delete(causal_mask, allocator)
 
@@ -122,43 +115,10 @@ gpt_completion_test :: proc(allocator: mem.Allocator) {
 	logits := nn.gpt_model_forward(gpt_model, input_ids, causal_mask, false)
 	defer t.tensor_free(logits)
 
-	fmt.printf("DEBUG: gpt_model.vocab_size = %d\n", gpt_model.vocab_size)
-	fmt.printf("DEBUG: logits.data.cols = %d\n", logits.data.cols)
-
 	// 7. Extract Top-5 Predictions for the Next Token
-	// ✅ FIX: Because seq_len is now exactly 5, last_token_idx is correctly 4!
 	last_token_idx := seq_len - 1
 	vocab_size := gpt_model.vocab_size
 	offset := last_token_idx * vocab_size
-
-	fmt.printf(
-		"DEBUG: Predicting for token at index %d (Token ID: %d)\n",
-		last_token_idx,
-		input_ids_slice[last_token_idx],
-	)
-	// last_token_idx := seq_len - 1
-	// for last_token_idx >= 0 {
-	// 	tok_id := input_ids_slice[last_token_idx]
-	// 	// Skip padding tokens (0 or 50256)
-	// 	if tok_id == 0 || tok_id == 50256 {
-	// 		last_token_idx -= 1
-	// 	} else {
-	// 		break
-	// 	}
-	// }
-
-	// // Fallback safety
-	// if last_token_idx < 0 {
-	// 	last_token_idx = 0
-	// }
-
-	// vocab_size := gpt_model.vocab_size
-	// offset := last_token_idx * vocab_size
-
-	// fmt.printf(
-	// 	"DEBUG: Predicting for token at index %d (Token ID: %d)\n",
-	// 	last_token_idx,
-	// 	input_ids_slice[last_token_idx],
 
 	fmt.println("\n--- Top 5 Predictions for Next Token ---")
 
@@ -205,13 +165,12 @@ gpt_completion_test :: proc(allocator: mem.Allocator) {
 	}
 	fmt.println("\n✓ GPT Completion Test Complete!")
 }
+
 // GPT-2 does not use [CLS] or [SEP] tokens, and we want to strip padding.
 // This helper returns ONLY the actual text tokens.
 gpt_encode :: proc(toki: ^tok.BPETokenizer, text: string, allocator: mem.Allocator) -> []int {
-	// Tokenize without special tokens (GPT-2 style)
 	ids, _ := tok.bpe_tokenize(toki, text, allocator, false)
 
-	// Find the first non-padding token
 	start := 0
 	for start < len(ids) {
 		if ids[start] == 0 || ids[start] == 50256 {
@@ -221,7 +180,6 @@ gpt_encode :: proc(toki: ^tok.BPETokenizer, text: string, allocator: mem.Allocat
 		}
 	}
 
-	// Find the last non-padding token
 	end := len(ids) - 1
 	for end >= 0 {
 		if ids[end] == 0 || ids[end] == 50256 {

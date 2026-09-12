@@ -44,9 +44,6 @@ bpe_tokenizer_new :: proc(
 	}
 	defer delete(vocab_data, allocator)
 
-	// ========================================================================
-	// ROBUST JSON PARSER FOR VOCAB.JSON
-	// ========================================================================
 	vocab_str := string(vocab_data)
 	pos := strings.index(vocab_str, "{")
 	if pos < 0 {
@@ -64,24 +61,33 @@ bpe_tokenizer_new :: proc(
 				    vocab_str[pos] == '\t') {
 			pos += 1
 		}
-		if pos >= len(vocab_str) || vocab_str[pos] == '}' {break}
+		if pos >= len(vocab_str) {break}
+		if vocab_str[pos] == '}' {break}
 
-		// 2. Expect opening quote for key
 		if vocab_str[pos] != '"' {
 			pos += 1
 			continue
 		}
 		pos += 1
 
-		// 3. Extract key
+		// ✅ ROBUST KEY EXTRACTION: Handle escaped characters like \" and \\
 		key_start := pos
-		for pos < len(vocab_str) && vocab_str[pos] != '"' {
-			pos += 1
+		for pos < len(vocab_str) {
+			if vocab_str[pos] == '\\' && pos + 1 < len(vocab_str) {
+				pos += 2 // Skip backslash and the escaped character
+			} else if vocab_str[pos] == '"' {
+				break // End of key
+			} else {
+				pos += 1
+			}
 		}
 		key := vocab_str[key_start:pos]
 		pos += 1 // skip closing '"'
+
+		// ✅ BULLETPROOF: Force replace the literal 6-char "\u0120" with the actual 1-char "Ġ"
 		key, _ = strings.replace(key, "\\u0120", "Ġ", -1, allocator)
-		// 4. Skip whitespace and colon
+
+		// Skip whitespace and colon
 		for pos < len(vocab_str) &&
 		    (vocab_str[pos] == ' ' ||
 				    vocab_str[pos] == '\n' ||
@@ -91,8 +97,11 @@ bpe_tokenizer_new :: proc(
 			pos += 1
 		}
 
-		// 5. Parse integer value
+		// Parse integer value (handle negative numbers just in case)
 		val_start := pos
+		if pos < len(vocab_str) && vocab_str[pos] == '-' {
+			pos += 1
+		}
 		for pos < len(vocab_str) && vocab_str[pos] >= '0' && vocab_str[pos] <= '9' {
 			pos += 1
 		}
@@ -100,23 +109,29 @@ bpe_tokenizer_new :: proc(
 		if pos > val_start {
 			val_str := vocab_str[val_start:pos]
 			val := 0
+			negative := false
+			if val_str[0] == '-' {
+				negative = true
+				val_str = val_str[1:]
+			}
 			for i in 0 ..< len(val_str) {
 				val = val * 10 + int(val_str[i] - '0')
 			}
-			// ✅ FIX: Use tok.vocab instead of vocab
-			tok.vocab[strings.clone(key, allocator)] = val
+			if negative {val = -val}
+			tok.vocab[key] = val
 		}
 
-		// 6. Skip to next comma or closing brace
+		// Skip to next comma or closing brace
 		for pos < len(vocab_str) && vocab_str[pos] != ',' && vocab_str[pos] != '}' {
 			pos += 1
 		}
 		if pos < len(vocab_str) && vocab_str[pos] == ',' {
 			pos += 1
 		} else {
-			break // End of JSON object
+			break
 		}
 	}
+
 
 	max_id := 0
 	for token, id in tok.vocab {
@@ -153,6 +168,9 @@ bpe_tokenizer_new :: proc(
 
 		first := trimmed[:space_pos]
 		second := trimmed[space_pos + 1:]
+
+		first, _ = strings.replace(first, "\\u0120", "Ġ", -1, allocator)
+		second, _ = strings.replace(second, "\\u0120", "Ġ", -1, allocator)
 
 		merge_key := fmt.aprintf("%s %s", first, second, allocator = allocator)
 		tok.merges[merge_key] = rank
@@ -277,6 +295,13 @@ bpe_tokenize :: proc(
 		}
 
 		bpe_tokens := _bpe(tok, chars[:], allocator)
+		fmt.printf(
+			"DEBUG: _bpe produced %d tokens for word '%s': %v\n",
+			len(bpe_tokens),
+			word,
+			bpe_tokens,
+		)
+
 		defer delete(bpe_tokens)
 
 		for token in bpe_tokens {
