@@ -953,6 +953,7 @@ fmt.println("\n✓ Derivatives test completed!")
 - Stationarity tests
 - JSON / HTML / Excel importers
 - Yahoo Finance ingestion
+and many many more
 
 ## Run
 ```sh
@@ -981,7 +982,7 @@ Otherwise it will run uninitialized
 ### GPT 2 Completeness check
 In order to run the GPT Completion example with HuggingFaces weights, run this
 ```sh
-python .\convert_gpt2.p
+python .\convert_gpt2.py
 ```
 
 ### 🤝 Contributing
@@ -989,7 +990,5 @@ Contributions, bug reports, and feature requests are welcome.
 Wotan is evolving rapidly — feedback is highly appreciated.
 
 ### 🛠 Roadmap
-- For pandas like Data Querring support
-- Support for traditional ML - Regression, Classification, Trees, SVMs, Forrests and all that fun stuff
-- A graphic Plotter, either via Raylib (this is an Odin Project after all) or as plain PNG files.
+
 - to maybe once net/http drops, be crazy and try to implement some Wotan Notebook... It might at least be interesting to try
