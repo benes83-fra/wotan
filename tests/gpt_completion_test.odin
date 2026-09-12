@@ -91,20 +91,20 @@ gpt_completion_test :: proc(allocator: mem.Allocator) {
 	defer tok.bpe_tokenizer_free(&tokenizer)
 	fmt.println("✓ BPE Tokenizer loaded successfully!")
 
-	// 4. Tokenize the prompt
+	// 4. Tokenize the prompt (GPT-2 style, stripped of padding)
 	prompt_text := "The Federal Reserve announced a"
 	fmt.printf("\nPrompt: \"%s\"\n", prompt_text)
 
-	ids, _ := tok.bpe_tokenize(&tokenizer, prompt_text, allocator)
-	input_ids_slice := ids
-	// defer delete(input_ids_slice)
+	input_ids_slice := gpt_encode(&tokenizer, prompt_text, allocator)
+	defer delete(input_ids_slice, allocator)
+
+	// ✅ DEBUG: Verify we have the exact same tokens as Python
+	fmt.printf("DEBUG: Clean Token IDs: %v (Length: %d)\n", input_ids_slice, len(input_ids_slice))
 
 	seq_len := len(input_ids_slice)
 	batch := 1
 
 	ids_data := l.matrix_new(f64, 1, batch * seq_len, allocator)
-	// defer l.matrix_free(&ids_data)
-
 	for i in 0 ..< len(input_ids_slice) {
 		ids_data.data[i] = f64(input_ids_slice[i])
 	}
@@ -122,10 +122,43 @@ gpt_completion_test :: proc(allocator: mem.Allocator) {
 	logits := nn.gpt_model_forward(gpt_model, input_ids, causal_mask, false)
 	defer t.tensor_free(logits)
 
+	fmt.printf("DEBUG: gpt_model.vocab_size = %d\n", gpt_model.vocab_size)
+	fmt.printf("DEBUG: logits.data.cols = %d\n", logits.data.cols)
+
 	// 7. Extract Top-5 Predictions for the Next Token
+	// ✅ FIX: Because seq_len is now exactly 5, last_token_idx is correctly 4!
 	last_token_idx := seq_len - 1
 	vocab_size := gpt_model.vocab_size
 	offset := last_token_idx * vocab_size
+
+	fmt.printf(
+		"DEBUG: Predicting for token at index %d (Token ID: %d)\n",
+		last_token_idx,
+		input_ids_slice[last_token_idx],
+	)
+	// last_token_idx := seq_len - 1
+	// for last_token_idx >= 0 {
+	// 	tok_id := input_ids_slice[last_token_idx]
+	// 	// Skip padding tokens (0 or 50256)
+	// 	if tok_id == 0 || tok_id == 50256 {
+	// 		last_token_idx -= 1
+	// 	} else {
+	// 		break
+	// 	}
+	// }
+
+	// // Fallback safety
+	// if last_token_idx < 0 {
+	// 	last_token_idx = 0
+	// }
+
+	// vocab_size := gpt_model.vocab_size
+	// offset := last_token_idx * vocab_size
+
+	// fmt.printf(
+	// 	"DEBUG: Predicting for token at index %d (Token ID: %d)\n",
+	// 	last_token_idx,
+	// 	input_ids_slice[last_token_idx],
 
 	fmt.println("\n--- Top 5 Predictions for Next Token ---")
 
@@ -170,6 +203,41 @@ gpt_completion_test :: proc(allocator: mem.Allocator) {
 			decoded_token,
 		)
 	}
-
 	fmt.println("\n✓ GPT Completion Test Complete!")
+}
+// GPT-2 does not use [CLS] or [SEP] tokens, and we want to strip padding.
+// This helper returns ONLY the actual text tokens.
+gpt_encode :: proc(toki: ^tok.BPETokenizer, text: string, allocator: mem.Allocator) -> []int {
+	// Tokenize without special tokens (GPT-2 style)
+	ids, _ := tok.bpe_tokenize(toki, text, allocator, false)
+
+	// Find the first non-padding token
+	start := 0
+	for start < len(ids) {
+		if ids[start] == 0 || ids[start] == 50256 {
+			start += 1
+		} else {
+			break
+		}
+	}
+
+	// Find the last non-padding token
+	end := len(ids) - 1
+	for end >= 0 {
+		if ids[end] == 0 || ids[end] == 50256 {
+			end -= 1
+		} else {
+			break
+		}
+	}
+
+	if start > end {
+		return make([]int, 0, allocator)
+	}
+
+	result := make([]int, end - start + 1, allocator)
+	for i in 0 ..< len(result) {
+		result[i] = ids[start + i]
+	}
+	return result
 }

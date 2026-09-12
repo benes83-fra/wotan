@@ -44,55 +44,81 @@ bpe_tokenizer_new :: proc(
 	}
 	defer delete(vocab_data, allocator)
 
+	// ========================================================================
+	// ROBUST JSON PARSER FOR VOCAB.JSON
+	// ========================================================================
 	vocab_str := string(vocab_data)
 	pos := strings.index(vocab_str, "{")
 	if pos < 0 {
-		fmt.println("Invalid vocab.json format")
+		fmt.println("Invalid vocab.json format: missing '{'")
 		return tok, false
 	}
+	pos += 1
 
 	for pos < len(vocab_str) {
-		key_start := strings.index(vocab_str[pos:], "\"")
-		if key_start < 0 {break}
-		key_start += pos
-
-		key_end := strings.index(vocab_str[key_start + 1:], "\"")
-		if key_end < 0 {break}
-		key_end += key_start + 1
-
-		key := vocab_str[key_start + 1:key_end]
-
-		colon_pos := strings.index(vocab_str[key_end:], ":")
-		if colon_pos < 0 {break}
-		colon_pos += key_end
-
-		val_start := colon_pos + 1
-		val_end := val_start
-		for val_end < len(vocab_str) && (vocab_str[val_end] == ' ' || vocab_str[val_end] == '\t') {
-			val_start += 1
-			val_end += 1
+		// 1. Skip whitespace
+		for pos < len(vocab_str) &&
+		    (vocab_str[pos] == ' ' ||
+				    vocab_str[pos] == '\n' ||
+				    vocab_str[pos] == '\r' ||
+				    vocab_str[pos] == '\t') {
+			pos += 1
 		}
-		for val_end < len(vocab_str) && vocab_str[val_end] >= '0' && vocab_str[val_end] <= '9' {
-			val_end += 1
+		if pos >= len(vocab_str) || vocab_str[pos] == '}' {break}
+
+		// 2. Expect opening quote for key
+		if vocab_str[pos] != '"' {
+			pos += 1
+			continue
+		}
+		pos += 1
+
+		// 3. Extract key
+		key_start := pos
+		for pos < len(vocab_str) && vocab_str[pos] != '"' {
+			pos += 1
+		}
+		key := vocab_str[key_start:pos]
+		pos += 1 // skip closing '"'
+		key, _ = strings.replace(key, "\\u0120", "Ġ", -1, allocator)
+		// 4. Skip whitespace and colon
+		for pos < len(vocab_str) &&
+		    (vocab_str[pos] == ' ' ||
+				    vocab_str[pos] == '\n' ||
+				    vocab_str[pos] == '\r' ||
+				    vocab_str[pos] == '\t' ||
+				    vocab_str[pos] == ':') {
+			pos += 1
 		}
 
-		if val_end > val_start {
-			val_str := vocab_str[val_start:val_end]
+		// 5. Parse integer value
+		val_start := pos
+		for pos < len(vocab_str) && vocab_str[pos] >= '0' && vocab_str[pos] <= '9' {
+			pos += 1
+		}
+
+		if pos > val_start {
+			val_str := vocab_str[val_start:pos]
 			val := 0
-			// ✅ ODIN: for value, index in string
-			for ch, _ in val_str {
-				val = val * 10 + int(ch - '0')
+			for i in 0 ..< len(val_str) {
+				val = val * 10 + int(val_str[i] - '0')
 			}
-
-			owned_key := strings.clone(key, allocator)
-			tok.vocab[owned_key] = val
+			// ✅ FIX: Use tok.vocab instead of vocab
+			tok.vocab[strings.clone(key, allocator)] = val
 		}
 
-		pos = val_end
+		// 6. Skip to next comma or closing brace
+		for pos < len(vocab_str) && vocab_str[pos] != ',' && vocab_str[pos] != '}' {
+			pos += 1
+		}
+		if pos < len(vocab_str) && vocab_str[pos] == ',' {
+			pos += 1
+		} else {
+			break // End of JSON object
+		}
 	}
 
 	max_id := 0
-	// ✅ ODIN: for key, value in map
 	for token, id in tok.vocab {
 		if id > max_id {
 			max_id = id
@@ -114,9 +140,7 @@ bpe_tokenizer_new :: proc(
 	defer delete(merge_lines, allocator)
 
 	rank := 0
-	// ✅ ODIN: for value, index in slice
-	for line, i in merge_lines {
-		_ = i
+	for line, _ in merge_lines {
 		trimmed := strings.trim_space(line)
 		if len(trimmed) == 0 || trimmed[0] == '#' {
 			continue
@@ -144,9 +168,7 @@ bpe_tokenizer_new :: proc(
 }
 
 bpe_tokenizer_free :: proc(tok: ^BPETokenizer) {
-	// ✅ ODIN: for value, index in slice
-	for token, i in tok.ids_to_tokens {
-		_ = i
+	for token, _ in tok.ids_to_tokens {
 		if len(token) > 0 {
 			delete(token, tok.allocator)
 		}
@@ -154,7 +176,6 @@ bpe_tokenizer_free :: proc(tok: ^BPETokenizer) {
 	delete(tok.ids_to_tokens, tok.allocator)
 	delete(tok.vocab)
 
-	// ✅ ODIN: for key, value in map
 	for key, _ in tok.merges {
 		delete(key, tok.allocator)
 	}
@@ -164,15 +185,14 @@ bpe_tokenizer_free :: proc(tok: ^BPETokenizer) {
 _bpe :: proc(tok: ^BPETokenizer, word: []string, allocator: mem.Allocator) -> [dynamic]string {
 	if len(word) < 2 {
 		res := make([dynamic]string, allocator)
-		// ✅ ODIN: for value, index in slice
-		for s, _ in word {
+		for s in word {
 			append(&res, s)
 		}
 		return res
 	}
 
 	symbols := make([dynamic]string, allocator)
-	for s, _ in word {
+	for s in word {
 		append(&symbols, s)
 	}
 
@@ -215,15 +235,19 @@ _bpe :: proc(tok: ^BPETokenizer, word: []string, allocator: mem.Allocator) -> [d
 		delete(symbols)
 		symbols = new_symbols
 		delete(best_pair_key, allocator)
+		delete(merged, allocator)
 	}
 
 	return symbols
 }
 
+// bpe_tokenize tokenizes text using BPE.
+// add_special_tokens: If true, adds [CLS] and [SEP] (for BERT). If false, returns raw tokens (for GPT-2).
 bpe_tokenize :: proc(
 	tok: ^BPETokenizer,
 	text: string,
 	allocator: mem.Allocator = context.allocator,
+	add_special_tokens: bool = true,
 ) -> (
 	input_ids: []int,
 	attention_mask: []int,
@@ -232,66 +256,81 @@ bpe_tokenize :: proc(
 	defer delete(words, allocator)
 
 	all_tokens := make([dynamic]string, allocator)
+	defer delete(all_tokens)
 
-	// ✅ ODIN: for value, index in slice
-	for word, _ in words {
+	for word, i in words {
 		if len(word) == 0 {continue}
 
 		chars := make([dynamic]string, allocator)
-		// ✅ ODIN: for value, index in string
-		for ch, _ in word {
+		defer delete(chars)
+
+		if i > 0 {
+			// ✅ CRITICAL FIX: Use the actual Unicode character "Ġ" (U+0120).
+			// The Hugging Face vocab.json contains the actual character, and our JSON parser reads it as such.
+			// Using "\\u0120" creates a 6-character string that will never match "Ġ".
+			append(&chars, "Ġ")
+		}
+
+		for ch in word {
 			char_str := fmt.aprintf("%c", ch, allocator = allocator)
 			append(&chars, char_str)
 		}
 
 		bpe_tokens := _bpe(tok, chars[:], allocator)
+		defer delete(bpe_tokens)
 
-		for token, _ in bpe_tokens {
+		for token in bpe_tokens {
 			append(&all_tokens, token)
 		}
-
-		delete(chars)
-		delete(bpe_tokens)
 	}
 
 	actual_len := len(all_tokens)
-	total_len := actual_len + 2
 
+	// Calculate required length
+	req_len := actual_len
+	if add_special_tokens {
+		req_len += 2
+	}
+
+	total_len := req_len
 	if total_len > tok.max_len {
 		total_len = tok.max_len
-		actual_len = total_len - 2
+		actual_len = total_len
+		if add_special_tokens {
+			actual_len -= 2
+		}
 	}
 
 	input_ids = make([]int, tok.max_len, allocator)
 	attention_mask = make([]int, tok.max_len, allocator)
 
-	input_ids[0] = tok.cls_id
-	attention_mask[0] = 1
+	// ✅ FIX: Correct offset logic
+	offset := 0
+	if add_special_tokens {
+		input_ids[0] = tok.cls_id
+		attention_mask[0] = 1
+		offset = 1 // Tokens now correctly start at index 1
+	}
 
 	for i in 0 ..< actual_len {
 		token_str := all_tokens[i]
 		if id, ok := tok.vocab[token_str]; ok {
-			input_ids[i + 1] = id
+			input_ids[i + offset] = id
 		} else {
-			input_ids[i + 1] = tok.unk_id
+			input_ids[i + offset] = tok.unk_id
 		}
-		attention_mask[i + 1] = 1
+		attention_mask[i + offset] = 1
 	}
 
-	if total_len > 1 {
-		input_ids[actual_len + 1] = tok.sep_id
-		attention_mask[actual_len + 1] = 1
+	if add_special_tokens && total_len > 1 {
+		input_ids[actual_len + offset] = tok.sep_id
+		attention_mask[actual_len + offset] = 1
 	}
 
 	for i in total_len ..< tok.max_len {
 		input_ids[i] = tok.pad_id
 		attention_mask[i] = 0
 	}
-
-	for token, _ in all_tokens {
-		delete(token, allocator)
-	}
-	delete(all_tokens)
 
 	return input_ids, attention_mask
 }
@@ -304,7 +343,8 @@ bpe_tokenize_to_tensors :: proc(
 	input_ids_tensor: ^t.Tensor,
 	segment_ids_tensor: ^t.Tensor,
 ) {
-	ids, mask := bpe_tokenize(tok, text, allocator)
+	// Default to no special tokens for generic usage, adjust if needed for BERT
+	ids, mask := bpe_tokenize(tok, text, allocator, false)
 	defer {
 		delete(ids, allocator)
 		delete(mask, allocator)
@@ -318,7 +358,7 @@ bpe_tokenize_to_tensors :: proc(
 
 	for i in 0 ..< seq_len {
 		ids_data.data[i] = f64(ids[i])
-		seg_data.data[i] = f64(mask[i])
+		seg_data.data[i] = 0.0 // Segment IDs are 0 for single sentence
 	}
 
 	in_tensor := t.tensor_new(ids_data, false, allocator)
