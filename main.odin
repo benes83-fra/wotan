@@ -466,6 +466,7 @@ main :: proc() {
 	test.multi_head_attention_test(context.temp_allocator)
 	test.layer_norm_test(context.temp_allocator)
 	test.ffn_simple_test(context.temp_allocator)
+	test.volatility_forecasting_test(context.temp_allocator)
 	test.event_study_tokenizer_nlp_test(context.temp_allocator)
 	// test.event_study_nlp_test(context.temp_allocator)
 	// test.deep_hedging_portfolio_test(context.temp_allocator)
