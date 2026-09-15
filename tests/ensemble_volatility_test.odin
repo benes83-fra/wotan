@@ -1,0 +1,349 @@
+package tests
+
+import ts "../wotan/analytics"
+import w "../wotan/core"
+import l "../wotan/linalg"
+import ml_fin "../wotan/ml_finance"
+import yahoo "../wotan/net"
+import nn "../wotan/nn"
+import t "../wotan/tensor"
+import "core:fmt"
+import "core:math"
+import "core:mem"
+
+ensemble_volatility_test :: proc(allocator: mem.Allocator) {
+	fmt.println("\n=== Ensemble Volatility Forecasting (GARCH + LSTM) ===")
+
+	main_alloc := context.allocator
+
+	// ----------------------------------------------------------------
+	// 1. Fetch Data
+	// ----------------------------------------------------------------
+	fmt.println("--- Fetching Market Data ---")
+	spy_df := yahoo.read_yahoo("SPY", .Daily, .FiveYears, allocator)
+	defer w.destroy_dataframe(&spy_df)
+	vix_df := yahoo.read_yahoo("^VIX", .Daily, .FiveYears, allocator)
+	defer w.destroy_dataframe(&vix_df)
+
+	n_spy := spy_df.rows
+	n_vix := vix_df.rows
+	n_common := min(n_spy, n_vix)
+	num_days := n_common - 1
+	fmt.printf("Aligned %d days of SPY and VIX data\n", num_days)
+
+	// ----------------------------------------------------------------
+	// 2. Compute Returns & Features
+	// ----------------------------------------------------------------
+	returns := make([]f64, num_days, allocator)
+	vix_levels := make([]f64, num_days, allocator)
+	defer {delete(returns, allocator); delete(vix_levels, allocator)}
+
+	for i in 1 ..< n_common {
+		prev_close, _ := w.column_at_float(&spy_df.columns[4], i - 1)
+		curr_close, _ := w.column_at_float(&spy_df.columns[4], i)
+		returns[i - 1] = math.ln_f64(curr_close / prev_close)
+		vix_close, _ := w.column_at_float(&vix_df.columns[4], i)
+		vix_levels[i - 1] = vix_close / 100.0
+	}
+
+	num_features := 4
+	window := 20
+	features := make([]f64, num_days * num_features, allocator)
+	targets := make([]f64, num_days, allocator)
+	defer {delete(features, allocator); delete(targets, allocator)}
+
+	for i in 0 ..< num_days {
+		features[i * num_features + 0] = returns[i]
+		features[i * num_features + 1] = math.abs(returns[i])
+		if i < window {
+			features[i * num_features + 2] = 0.0
+		} else {
+			sum := 0.0; sum_sq := 0.0
+			for j in (i - window) ..< i {
+				sum += returns[j]
+				sum_sq += returns[j] * returns[j]
+			}
+			m := sum / f64(window)
+			features[i * num_features + 2] = math.sqrt_f64((sum_sq / f64(window)) - m * m)
+		}
+		features[i * num_features + 3] = vix_levels[i]
+		if i + 1 < num_days {
+			targets[i] = math.abs(returns[i + 1])
+		}
+	}
+
+	start_idx := window
+	end_idx := num_days - 1
+	valid_days := end_idx - start_idx
+
+	// ----------------------------------------------------------------
+	// 3. Fit GARCH(1,1) on Training Data
+	// ----------------------------------------------------------------
+	fmt.println("\n--- Fitting GARCH(1,1) ---")
+	train_ratio := 0.8
+	train_days := int(f64(valid_days) * train_ratio)
+
+	train_returns := returns[:start_idx + train_days]
+	residuals := ts.extract_residuals(train_returns, main_alloc)
+	defer delete(residuals, main_alloc)
+
+	garch_result := ts.garch_fit(residuals, .StudentT, 1, 1, 2000, 1e-4, main_alloc)
+	defer {
+		delete(garch_result.params.alpha, main_alloc)
+		delete(garch_result.params.beta, main_alloc)
+		delete(garch_result.conditional_var, main_alloc)
+		delete(garch_result.standardized_resid, main_alloc)
+	}
+
+	fmt.printf("GARCH(1,1) Parameters:\n")
+	fmt.printf("  ω (omega): %.8f\n", garch_result.params.omega)
+	fmt.printf("  α (alpha): %.4f\n", garch_result.params.alpha[0])
+	fmt.printf("  β (beta):  %.4f\n", garch_result.params.beta[0])
+
+	garch_vol_series := ml_fin.garch_recursive_forecast(
+		returns[start_idx:end_idx],
+		garch_result.params.omega,
+		garch_result.params.alpha[0],
+		garch_result.params.beta[0],
+		allocator,
+	)
+	defer delete(garch_vol_series, allocator)
+
+	// ----------------------------------------------------------------
+	// 4. Standardize Features & Create Sequences
+	// ----------------------------------------------------------------
+	means := make([]f64, num_features, allocator)
+	stds := make([]f64, num_features, allocator)
+	defer {delete(means, allocator); delete(stds, allocator)}
+
+	for day in 0 ..< train_days {
+		idx := start_idx + day
+		for f in 0 ..< num_features {means[f] += features[idx * num_features + f]}
+	}
+	for f in 0 ..< num_features {means[f] /= f64(train_days)}
+
+	for day in 0 ..< train_days {
+		idx := start_idx + day
+		for f in 0 ..< num_features {
+			diff := features[idx * num_features + f] - means[f]
+			stds[f] += diff * diff
+		}
+	}
+	for f in 0 ..< num_features {
+		stds[f] = math.sqrt(stds[f] / f64(train_days))
+		if stds[f] < 1e-8 {stds[f] = 1.0}
+	}
+
+	for day in 0 ..< valid_days {
+		idx := start_idx + day
+		for f in 0 ..< num_features {
+			features[idx * num_features + f] =
+				(features[idx * num_features + f] - means[f]) / stds[f]
+		}
+	}
+
+	seq_len := 20
+	num_samples := valid_days - seq_len
+	X_seq := make([]f64, num_samples * seq_len * num_features, allocator)
+	Y_seq := make([]f64, num_samples, allocator)
+	defer {delete(X_seq, allocator); delete(Y_seq, allocator)}
+
+	for i in 0 ..< num_samples {
+		src_start := (start_idx + i) * num_features
+		dst_start := i * seq_len * num_features
+		copy(
+			X_seq[dst_start:dst_start + seq_len * num_features],
+			features[src_start:src_start + seq_len * num_features],
+		)
+		Y_seq[i] = targets[start_idx + i + seq_len]
+	}
+
+	num_train_samples := int(f64(num_samples) * train_ratio)
+	num_val_samples := num_samples - num_train_samples
+
+	// ----------------------------------------------------------------
+	// 5. Train LSTM via Ensemble Struct
+	// ----------------------------------------------------------------
+	fmt.println("\n--- Training LSTM ---")
+	input_size := num_features
+	hidden_size := 32
+	batch_size := 32
+	epochs := 50
+	learning_rate := 0.001
+
+	// ✅ Use the new value-based Ensemble struct
+	ensemble := ml_fin.ensemble_volatility_new(input_size, hidden_size, seq_len, allocator)
+	defer ml_fin.ensemble_volatility_free(&ensemble)
+
+	// Store GARCH params in the ensemble struct
+	ensemble.garch_omega = garch_result.params.omega
+	ensemble.garch_alpha = garch_result.params.alpha[0]
+	ensemble.garch_beta = garch_result.params.beta[0]
+
+	opt := nn.adam_new(learning_rate, 0.9, 0.999, 1e-8, allocator)
+	defer nn.adam_free(&opt)
+
+	// ✅ Use the ensemble optimizer helper
+	ml_fin.ensemble_add_to_optimizer(&ensemble, &opt)
+
+	for epoch in 0 ..< epochs {
+		epoch_loss := 0.0
+		for b in 0 ..< num_train_samples / batch_size {
+			batch_start := b * batch_size
+			x_batch_data := l.matrix_new(f64, 1, batch_size * seq_len * input_size, allocator)
+			copy(
+				x_batch_data.data,
+				X_seq[batch_start *
+				seq_len *
+				input_size:(batch_start + batch_size) *
+				seq_len *
+				input_size],
+			)
+			x_batch := t.tensor_new(x_batch_data, true, allocator)
+			x_batch.shape = [4]int{batch_size, seq_len, input_size, 1}
+
+			h0_data := l.matrix_new(f64, 1, batch_size * hidden_size, allocator)
+			h_0 := t.tensor_new(h0_data, false, allocator)
+			c0_data := l.matrix_new(f64, 1, batch_size * hidden_size, allocator)
+			c_0 := t.tensor_new(c0_data, false, allocator)
+
+			y_batch_data := l.matrix_new(f64, batch_size, 1, allocator)
+			copy(y_batch_data.data, Y_seq[batch_start:batch_start + batch_size])
+			y_batch := t.tensor_new(y_batch_data, false, allocator)
+			y_batch.shape = [4]int{batch_size, 1, 1, 1}
+
+			// ✅ Pass pointer to the internal LSTM
+			preds := ml_fin.lstm_volatility_forecaster_forward(&ensemble.lstm, x_batch, h_0, c_0)
+			loss := t.tensor_mse_loss(preds, y_batch)
+			t.tensor_backward(loss, allocator)
+			nn.adam_step(&opt)
+			nn.adam_zero_grad(&opt)
+			epoch_loss += loss.data.data[0]
+
+			t.tensor_free_graph(loss)
+			t.tensor_free(x_batch); t.tensor_free(h_0); t.tensor_free(c_0); t.tensor_free(y_batch)
+		}
+		if epoch % 10 == 0 {
+			fmt.printf(
+				"  Epoch %02d | Train MSE: %.6f\n",
+				epoch,
+				epoch_loss / f64(num_train_samples / batch_size),
+			)
+		}
+	}
+
+	// ----------------------------------------------------------------
+	// 6. Generate Validation Forecasts
+	// ----------------------------------------------------------------
+	fmt.println("\n--- Generating Validation Forecasts ---")
+	lstm_val_forecasts := make([]f64, num_val_samples, allocator)
+	garch_val_forecasts := make([]f64, num_val_samples, allocator)
+	actual_val_vols := make([]f64, num_val_samples, allocator)
+	defer {
+		delete(lstm_val_forecasts, allocator)
+		delete(garch_val_forecasts, allocator)
+		delete(actual_val_vols, allocator)
+	}
+
+	for i in 0 ..< num_val_samples {
+		sample_idx := num_train_samples + i
+
+		x_batch_data := l.matrix_new(f64, 1, 1 * seq_len * input_size, allocator)
+		copy(
+			x_batch_data.data,
+			X_seq[sample_idx * seq_len * input_size:(sample_idx + 1) * seq_len * input_size],
+		)
+		x_batch := t.tensor_new(x_batch_data, true, allocator)
+		x_batch.shape = [4]int{1, seq_len, input_size, 1}
+
+		h0_data := l.matrix_new(f64, 1, hidden_size, allocator)
+		h_0 := t.tensor_new(h0_data, false, allocator)
+		c0_data := l.matrix_new(f64, 1, hidden_size, allocator)
+		c_0 := t.tensor_new(c0_data, false, allocator)
+
+		preds := ml_fin.lstm_volatility_forecaster_forward(&ensemble.lstm, x_batch, h_0, c_0)
+		lstm_val_forecasts[i] = preds.data.data[0]
+
+		t.tensor_free_graph(preds)
+		t.tensor_free(x_batch); t.tensor_free(h_0); t.tensor_free(c_0)
+
+		garch_idx := sample_idx + seq_len
+		if garch_idx < len(garch_vol_series) {
+			garch_val_forecasts[i] = garch_vol_series[garch_idx]
+		}
+		actual_val_vols[i] = Y_seq[sample_idx]
+	}
+
+	// ----------------------------------------------------------------
+	// 7. Compute Optimal Ensemble Weight
+	// ----------------------------------------------------------------
+	fmt.println("\n--- Computing Optimal Ensemble Weight ---")
+	ensemble.ensemble_weight = ml_fin.compute_optimal_weight(
+		garch_val_forecasts,
+		lstm_val_forecasts,
+		actual_val_vols,
+	)
+	fmt.printf(
+		"Optimal GARCH weight: %.2f (LSTM weight: %.2f)\n",
+		ensemble.ensemble_weight,
+		1.0 - ensemble.ensemble_weight,
+	)
+
+	// ----------------------------------------------------------------
+	// 8. Evaluate All Three Models
+	// ----------------------------------------------------------------
+	fmt.println("\n--- Validation Results ---")
+	mse_garch := 0.0
+	mse_lstm := 0.0
+	mse_ensemble := 0.0
+
+	for i in 0 ..< num_val_samples {
+		actual := actual_val_vols[i]
+		garch_pred := garch_val_forecasts[i]
+		lstm_pred := lstm_val_forecasts[i]
+
+		// ✅ Use the library function for ensemble prediction
+		ensemble_pred := ml_fin.ensemble_predict(&ensemble, garch_pred, lstm_pred)
+
+		mse_garch += (garch_pred - actual) * (garch_pred - actual)
+		mse_lstm += (lstm_pred - actual) * (lstm_pred - actual)
+		mse_ensemble += (ensemble_pred - actual) * (ensemble_pred - actual)
+	}
+
+	mse_garch /= f64(num_val_samples)
+	mse_lstm /= f64(num_val_samples)
+	mse_ensemble /= f64(num_val_samples)
+
+	fmt.printf("\n%-20s %-15s %-15s\n", "Model", "Val MSE", "Improvement")
+	fmt.printf("%-20s %-15s %-15s\n", "--------------------", "---------------", "---------------")
+	fmt.printf("%-20s %-15.6f %-15s\n", "GARCH(1,1)", mse_garch, "baseline")
+	fmt.printf("%-20s %-15.6f %-15.1f%%\n", "LSTM", mse_lstm, (1.0 - mse_lstm / mse_garch) * 100)
+	fmt.printf(
+		"%-20s %-15.6f %-15.1f%%\n",
+		"Ensemble",
+		mse_ensemble,
+		(1.0 - mse_ensemble / mse_garch) * 100,
+	)
+
+	// ----------------------------------------------------------------
+	// 9. Latest Forecast Comparison
+	// ----------------------------------------------------------------
+	fmt.println("\n--- Latest Day Forecast ---")
+	last_garch := garch_val_forecasts[num_val_samples - 1]
+	last_lstm := lstm_val_forecasts[num_val_samples - 1]
+	last_ensemble := ml_fin.ensemble_predict(&ensemble, last_garch, last_lstm)
+	last_actual := actual_val_vols[num_val_samples - 1]
+
+	fmt.printf("  Actual next-day vol:     %.4f%%\n", last_actual * 100)
+	fmt.printf("  GARCH forecast:          %.4f%%\n", last_garch * 100)
+	fmt.printf("  LSTM forecast:           %.4f%%\n", last_lstm * 100)
+	fmt.printf("  Ensemble forecast:       %.4f%%\n", last_ensemble * 100)
+
+	scale := math.sqrt_f64(252) * 100
+	fmt.printf("\n  Annualized forecasts:\n")
+	fmt.printf("    GARCH:    %.2f%%\n", last_garch * scale)
+	fmt.printf("    LSTM:     %.2f%%\n", last_lstm * scale)
+	fmt.printf("    Ensemble: %.2f%%\n", last_ensemble * scale)
+
+	fmt.println("\n✓ Ensemble Volatility Forecasting Test Complete!")
+}
