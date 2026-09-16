@@ -471,6 +471,7 @@ main :: proc() {
 	test.lstm_volatility_real_data_test(context.temp_allocator)
 	test.event_study_tokenizer_nlp_test(context.temp_allocator)
 	test.ensemble_volatility_test(context.temp_allocator)
+	test.vrp_signal_test(context.temp_allocator)
 	// test.event_study_nlp_test(context.temp_allocator)
 	// test.deep_hedging_portfolio_test(context.temp_allocator)
 	test.tokenizer_wordpiece_test(context.temp_allocator)

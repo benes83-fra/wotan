@@ -347,3 +347,246 @@ ensemble_volatility_test :: proc(allocator: mem.Allocator) {
 
 	fmt.println("\n✓ Ensemble Volatility Forecasting Test Complete!")
 }
+
+
+vrp_signal_test :: proc(allocator: mem.Allocator) {
+	fmt.println("\n=== Live Volatility Risk Premium (VRP) Signal Generation ===")
+	main_alloc := context.allocator
+
+	// 1. Fetch Data
+	spy_df := yahoo.read_yahoo("SPY", .Daily, .TwoYears, allocator)
+	defer w.destroy_dataframe(&spy_df)
+	vix_df := yahoo.read_yahoo("^VIX", .Daily, .TwoYears, allocator)
+	defer w.destroy_dataframe(&vix_df)
+
+	n_common := min(spy_df.rows, vix_df.rows)
+	num_days := n_common - 1
+
+	returns := make([]f64, num_days, allocator)
+	vix_levels := make([]f64, num_days, allocator) // Annualized %
+	defer {delete(returns, allocator); delete(vix_levels, allocator)}
+
+	for i in 1 ..< n_common {
+		prev_c, _ := w.column_at_float(&spy_df.columns[4], i - 1)
+		curr_c, _ := w.column_at_float(&spy_df.columns[4], i)
+		returns[i - 1] = math.ln_f64(curr_c / prev_c)
+
+		vix_c, _ := w.column_at_float(&vix_df.columns[4], i)
+		vix_levels[i - 1] = vix_c
+	}
+
+	// 2. Compute Historical VRP Stats (using 20-day rolling RV as proxy)
+	window := 20
+	hist_vrps := make([]f64, num_days - window, allocator)
+	defer delete(hist_vrps, allocator)
+
+	for i in window ..< num_days {
+		sum_sq := 0.0
+		for j in (i - window) ..< i {
+			sum_sq += returns[j] * returns[j]
+		}
+		daily_rv := math.sqrt(sum_sq / f64(window))
+		annualized_rv := daily_rv * math.sqrt_f64(252.0) * 100.0
+		hist_vrps[i - window] = vix_levels[i] - annualized_rv
+	}
+
+	vrp_mean := 0.0
+	for v in hist_vrps {vrp_mean += v}
+	vrp_mean /= f64(len(hist_vrps))
+
+	vrp_var := 0.0
+	for v in hist_vrps {vrp_var += (v - vrp_mean) * (v - vrp_mean)}
+	vrp_std := math.sqrt(vrp_var / f64(len(hist_vrps) - 1))
+
+	fmt.printf("Historical VRP Mean: %.2f%%\n", vrp_mean)
+	fmt.printf("Historical VRP Std:  %.2f%%\n", vrp_std)
+
+	// 3. Streamlined Ensemble Training for Inference
+	num_features := 4
+	features := make([]f64, num_days * num_features, allocator)
+	targets := make([]f64, num_days, allocator)
+	defer {delete(features, allocator); delete(targets, allocator)}
+
+	for i in 0 ..< num_days {
+		features[i * num_features + 0] = returns[i]
+		features[i * num_features + 1] = math.abs(returns[i])
+		if i < window {
+			features[i * num_features + 2] = 0.0
+		} else {
+			sum_sq := 0.0
+			for j in (i - window) ..< i {sum_sq += returns[j] * returns[j]}
+			features[i * num_features + 2] = math.sqrt(sum_sq / f64(window))
+		}
+		features[i * num_features + 3] = vix_levels[i] / 100.0
+		if i + 1 < num_days {targets[i] = math.abs(returns[i + 1])}
+	}
+
+	start_idx := window
+	valid_days := num_days - 1 - start_idx
+	train_days := int(f64(valid_days) * 0.8)
+
+	means := make([]f64, num_features, allocator)
+	stds := make([]f64, num_features, allocator)
+	defer {delete(means, allocator); delete(stds, allocator)}
+
+	for day in 0 ..< train_days {
+		idx := start_idx + day
+		for f in 0 ..< num_features {means[f] += features[idx * num_features + f]}
+	}
+	for f in 0 ..< num_features {means[f] /= f64(train_days)}
+
+	for day in 0 ..< train_days {
+		idx := start_idx + day
+		for f in 0 ..< num_features {
+			diff := features[idx * num_features + f] - means[f]
+			stds[f] += diff * diff
+		}
+	}
+	for f in 0 ..< num_features {
+		stds[f] = math.sqrt(stds[f] / f64(train_days))
+		if stds[f] < 1e-8 {stds[f] = 1.0}
+	}
+
+	for day in 0 ..< valid_days {
+		idx := start_idx + day
+		for f in 0 ..< num_features {
+			features[idx * num_features + f] =
+				(features[idx * num_features + f] - means[f]) / stds[f]
+		}
+	}
+
+	seq_len := 20
+	num_samples := valid_days - seq_len
+	X_seq := make([]f64, num_samples * seq_len * num_features, allocator)
+	Y_seq := make([]f64, num_samples, allocator)
+	defer {delete(X_seq, allocator); delete(Y_seq, allocator)}
+
+	for i in 0 ..< num_samples {
+		src_start := (start_idx + i) * num_features
+		dst_start := i * seq_len * num_features
+		copy(
+			X_seq[dst_start:dst_start + seq_len * num_features],
+			features[src_start:src_start + seq_len * num_features],
+		)
+		Y_seq[i] = targets[start_idx + i + seq_len]
+	}
+
+	num_train_samples := int(f64(num_samples) * 0.8)
+
+	// Fit GARCH
+	train_returns := returns[:start_idx + train_days]
+	residuals := ts.extract_residuals(train_returns, main_alloc)
+	defer delete(residuals, main_alloc)
+	garch_result := ts.garch_fit(residuals, .StudentT, 1, 1, 1000, 1e-4, main_alloc)
+	defer {
+		delete(garch_result.params.alpha, main_alloc)
+		delete(garch_result.params.beta, main_alloc)
+		delete(garch_result.conditional_var, main_alloc)
+		delete(garch_result.standardized_resid, main_alloc)
+	}
+
+	// Train LSTM quickly
+	input_size := num_features
+	hidden_size := 32
+	batch_size := 32
+	epochs := 20 // Fast training for signal demo
+	learning_rate := 0.001
+
+	ensemble := ml_fin.ensemble_volatility_new(input_size, hidden_size, seq_len, allocator)
+	defer ml_fin.ensemble_volatility_free(&ensemble)
+
+	ensemble.garch_omega = garch_result.params.omega
+	ensemble.garch_alpha = garch_result.params.alpha[0]
+	ensemble.garch_beta = garch_result.params.beta[0]
+
+	opt := nn.adam_new(learning_rate, 0.9, 0.999, 1e-8, allocator)
+	defer nn.adam_free(&opt)
+	ml_fin.ensemble_add_to_optimizer(&ensemble, &opt)
+
+	fmt.println("Training Ensemble for Inference...")
+	for epoch in 0 ..< epochs {
+		for b in 0 ..< num_train_samples / batch_size {
+			batch_start := b * batch_size
+			x_batch_data := l.matrix_new(f64, 1, batch_size * seq_len * input_size, allocator)
+			copy(
+				x_batch_data.data,
+				X_seq[batch_start *
+				seq_len *
+				input_size:(batch_start + batch_size) *
+				seq_len *
+				input_size],
+			)
+			x_batch := t.tensor_new(x_batch_data, true, allocator)
+			x_batch.shape = [4]int{batch_size, seq_len, input_size, 1}
+
+			h0_data := l.matrix_new(f64, 1, batch_size * hidden_size, allocator)
+			h_0 := t.tensor_new(h0_data, false, allocator)
+			c0_data := l.matrix_new(f64, 1, batch_size * hidden_size, allocator)
+			c_0 := t.tensor_new(c0_data, false, allocator)
+
+			y_batch_data := l.matrix_new(f64, batch_size, 1, allocator)
+			copy(y_batch_data.data, Y_seq[batch_start:batch_start + batch_size])
+			y_batch := t.tensor_new(y_batch_data, false, allocator)
+			y_batch.shape = [4]int{batch_size, 1, 1, 1}
+
+			preds := ml_fin.lstm_volatility_forecaster_forward(&ensemble.lstm, x_batch, h_0, c_0)
+			loss := t.tensor_mse_loss(preds, y_batch)
+			t.tensor_backward(loss, allocator)
+			nn.adam_step(&opt)
+			nn.adam_zero_grad(&opt)
+
+			t.tensor_free_graph(loss)
+			t.tensor_free(x_batch); t.tensor_free(h_0); t.tensor_free(c_0); t.tensor_free(y_batch)
+		}
+	}
+
+	// 4. Generate Next-Day Forecast (Inference)
+	last_sample_idx := num_samples - 1
+
+	x_inf_data := l.matrix_new(f64, 1, 1 * seq_len * input_size, allocator)
+	copy(
+		x_inf_data.data,
+		X_seq[last_sample_idx * seq_len * input_size:(last_sample_idx + 1) * seq_len * input_size],
+	)
+	x_inf := t.tensor_new(x_inf_data, false, allocator) // No grad needed for inference
+	x_inf.shape = [4]int{1, seq_len, input_size, 1}
+
+	h0_inf := l.matrix_new(f64, 1, hidden_size, allocator)
+	h_0_inf := t.tensor_new(h0_inf, false, allocator)
+	c0_inf := l.matrix_new(f64, 1, hidden_size, allocator)
+	c_0_inf := t.tensor_new(c0_inf, false, allocator)
+
+	lstm_pred_tensor := ml_fin.lstm_volatility_forecaster_forward(
+		&ensemble.lstm,
+		x_inf,
+		h_0_inf,
+		c_0_inf,
+	)
+	lstm_pred_daily := lstm_pred_tensor.data.data[0]
+
+	t.tensor_free(lstm_pred_tensor)
+	t.tensor_free(x_inf); t.tensor_free(h_0_inf); t.tensor_free(c_0_inf)
+
+	// GARCH forecast for next day
+	last_return := returns[num_days - 1]
+	last_cond_var := garch_result.conditional_var[len(garch_result.conditional_var) - 1]
+	garch_var_next :=
+		garch_result.params.omega +
+		garch_result.params.alpha[0] * last_return * last_return +
+		garch_result.params.beta[0] * last_cond_var
+	garch_pred_daily := math.sqrt(garch_var_next)
+
+	// Ensemble combination (using the 0.65/0.35 weight discovered in the previous test)
+	ensemble_weight := 0.65
+	ensemble_pred_daily :=
+		ensemble_weight * garch_pred_daily + (1.0 - ensemble_weight) * lstm_pred_daily
+
+	// Current VIX
+	current_vix := vix_levels[num_days - 1]
+
+	// 5. Compute and Print VRP Signal
+	sig := ml_fin.compute_vrp(current_vix, ensemble_pred_daily, vrp_mean, vrp_std)
+	ml_fin.print_vrp_signal(sig)
+
+	fmt.println("✓ VRP Signal Generation Complete!")
+}
