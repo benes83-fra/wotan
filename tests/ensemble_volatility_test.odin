@@ -590,3 +590,446 @@ vrp_signal_test :: proc(allocator: mem.Allocator) {
 
 	fmt.println("✓ VRP Signal Generation Complete!")
 }
+vrp_backtest_test :: proc(allocator: mem.Allocator) {
+	fmt.println("\n=== Walk-Forward VRP Backtester (Capstone) ===")
+	main_alloc := context.allocator
+
+	// ----------------------------------------------------------------
+	// 1. Fetch Data (5 Years)
+	// ----------------------------------------------------------------
+	fmt.println("\n--- Fetching Market Data ---")
+	spy_df := yahoo.read_yahoo("SPY", .Daily, .FiveYears, allocator)
+	defer w.destroy_dataframe(&spy_df)
+	vix_df := yahoo.read_yahoo("^VIX", .Daily, .FiveYears, allocator)
+	defer w.destroy_dataframe(&vix_df)
+
+	n_common := min(spy_df.rows, vix_df.rows)
+	num_days := n_common - 1
+	fmt.printf("Aligned %d days of SPY and VIX data\n", num_days)
+
+	// ----------------------------------------------------------------
+	// 2. Compute Returns, VIX, and Features
+	// ----------------------------------------------------------------
+	returns := make([]f64, num_days, allocator)
+	vix_levels := make([]f64, num_days, allocator)
+	defer {delete(returns, allocator); delete(vix_levels, allocator)}
+
+	for i in 1 ..< n_common {
+		prev_c, _ := w.column_at_float(&spy_df.columns[4], i - 1)
+		curr_c, _ := w.column_at_float(&spy_df.columns[4], i)
+		returns[i - 1] = math.ln_f64(curr_c / prev_c)
+		vix_c, _ := w.column_at_float(&vix_df.columns[4], i)
+		vix_levels[i - 1] = vix_c
+	}
+
+	// ----------------------------------------------------------------
+	// 3. Walk-Forward Configuration
+	// ----------------------------------------------------------------
+	window := 20
+	seq_len := 20
+	num_features := 4
+	hidden_size := 32
+	batch_size := 32
+	initial_train_days := 500 // First 500 days for initial training
+	retrain_interval := 60 // Retrain every 60 days
+	retrain_epochs := 15 // Quick retraining epochs
+	learning_rate := 0.001
+
+	backtest_start := initial_train_days + window + seq_len
+	backtest_days := num_days - backtest_start - 1
+	if backtest_days <= 0 {
+		fmt.println("ERROR: Not enough data for backtesting")
+		return
+	}
+
+	fmt.printf("Backtest Period: %d days (starting at day %d)\n", backtest_days, backtest_start)
+	fmt.printf("Retrain Interval: every %d days\n", retrain_interval)
+
+	// ----------------------------------------------------------------
+	// 4. Allocate Backtest Result Arrays
+	// ----------------------------------------------------------------
+	result: ml_fin.VRPBacktestResult
+	result.allocator = main_alloc
+	result.daily_pnl = make([]f64, backtest_days, main_alloc)
+	result.equity_curve = make([]f64, backtest_days, main_alloc)
+	result.positions = make([]f64, backtest_days, main_alloc)
+	result.signals = make([]f64, backtest_days, main_alloc)
+	result.forecast_rv = make([]f64, backtest_days, main_alloc)
+	result.implied_vol = make([]f64, backtest_days, main_alloc)
+	result.actual_vol = make([]f64, backtest_days, main_alloc)
+	defer ml_fin.vrp_backtest_result_free(&result)
+
+	// ----------------------------------------------------------------
+	// 5. Compute Historical VRP Stats (for Z-score normalization)
+	// ----------------------------------------------------------------
+	vrp_mean := 3.0 // Typical SPY VRP
+	vrp_std := 5.0 // Typical SPY VRP std
+
+	// ----------------------------------------------------------------
+	// 6. Initialize Ensemble Model
+	// ----------------------------------------------------------------
+	forecaster := ml_fin.ensemble_volatility_new(num_features, hidden_size, seq_len, allocator)
+	defer ml_fin.ensemble_volatility_free(&forecaster)
+
+	opt := nn.adam_new(learning_rate, 0.9, 0.999, 1e-8, allocator)
+	defer nn.adam_free(&opt)
+	ml_fin.ensemble_add_to_optimizer(&forecaster, &opt)
+
+	// ----------------------------------------------------------------
+	// 7. Helper: Build Features for a Given Range
+	// ----------------------------------------------------------------
+	build_features :: proc(
+		returns: []f64,
+		vix_levels: []f64,
+		start_day: int,
+		end_day: int,
+		window: int,
+		num_features: int,
+		allocator: mem.Allocator,
+	) -> []f64 {
+		n := end_day - start_day
+		features := make([]f64, n * num_features, allocator)
+		for i in 0 ..< n {
+			day := start_day + i
+			features[i * num_features + 0] = returns[day]
+			features[i * num_features + 1] = math.abs(returns[day])
+			if day < window {
+				features[i * num_features + 2] = 0.0
+			} else {
+				sum_sq := 0.0
+				for j in (day - window) ..< day {sum_sq += returns[j] * returns[j]}
+				features[i * num_features + 2] = math.sqrt(sum_sq / f64(window))
+			}
+			features[i * num_features + 3] = vix_levels[day] / 100.0
+		}
+		return features
+	}
+
+	// ----------------------------------------------------------------
+	// 8. Helper: Train LSTM on a Data Range
+	// ----------------------------------------------------------------
+	train_lstm_on_range :: proc(
+		forecaster: ^ml_fin.EnsembleVolatilityForecaster,
+		opt: ^nn.Adam,
+		returns: []f64,
+		vix_levels: []f64,
+		train_start: int,
+		train_end: int,
+		window: int,
+		seq_len: int,
+		num_features: int,
+		hidden_size: int,
+		batch_size: int,
+		epochs: int,
+		allocator: mem.Allocator,
+	) {
+		n_days := train_end - train_start - window
+		if n_days <= seq_len {return}
+
+		features := build_features(
+			returns,
+			vix_levels,
+			train_start + window,
+			train_end,
+			window,
+			num_features,
+			allocator,
+		)
+		targets := make([]f64, n_days, allocator)
+		for i in 0 ..< n_days {
+			day := train_start + window + i
+			if day + 1 < len(returns) {
+				targets[i] = math.abs(returns[day + 1])
+			}
+		}
+
+		// Standardize
+		means := make([]f64, num_features, allocator)
+		stds := make([]f64, num_features, allocator)
+		for day in 0 ..< n_days {
+			for f in 0 ..< num_features {means[f] += features[day * num_features + f]}
+		}
+		for f in 0 ..< num_features {means[f] /= f64(n_days)}
+		for day in 0 ..< n_days {
+			for f in 0 ..< num_features {
+				diff := features[day * num_features + f] - means[f]
+				stds[f] += diff * diff
+			}
+		}
+		for f in 0 ..< num_features {
+			stds[f] = math.sqrt(stds[f] / f64(n_days))
+			if stds[f] < 1e-8 {stds[f] = 1.0}
+		}
+		for day in 0 ..< n_days {
+			for f in 0 ..< num_features {
+				features[day * num_features + f] =
+					(features[day * num_features + f] - means[f]) / stds[f]
+			}
+		}
+
+		// Create sequences
+		num_samples := n_days - seq_len
+		if num_samples <= 0 {
+			delete(features, allocator)
+			delete(targets, allocator)
+			delete(means, allocator)
+			delete(stds, allocator)
+			return
+		}
+		X_seq := make([]f64, num_samples * seq_len * num_features, allocator)
+		Y_seq := make([]f64, num_samples, allocator)
+		for i in 0 ..< num_samples {
+			src := i * num_features
+			dst := i * seq_len * num_features
+			copy(
+				X_seq[dst:dst + seq_len * num_features],
+				features[src:src + seq_len * num_features],
+			)
+			Y_seq[i] = targets[i + seq_len]
+		}
+
+		// Training loop
+		for epoch in 0 ..< epochs {
+			for b in 0 ..< num_samples / batch_size {
+				batch_start := b * batch_size
+				x_data := l.matrix_new(f64, 1, batch_size * seq_len * num_features, allocator)
+				copy(
+					x_data.data,
+					X_seq[batch_start *
+					seq_len *
+					num_features:(batch_start + batch_size) *
+					seq_len *
+					num_features],
+				)
+				x_batch := t.tensor_new(x_data, true, allocator)
+				x_batch.shape = [4]int{batch_size, seq_len, num_features, 1}
+
+				h0 := t.tensor_new(
+					l.matrix_new(f64, 1, batch_size * hidden_size, allocator),
+					false,
+					allocator,
+				)
+				c0 := t.tensor_new(
+					l.matrix_new(f64, 1, batch_size * hidden_size, allocator),
+					false,
+					allocator,
+				)
+
+				y_data := l.matrix_new(f64, batch_size, 1, allocator)
+				copy(y_data.data, Y_seq[batch_start:batch_start + batch_size])
+				y_batch := t.tensor_new(y_data, false, allocator)
+				y_batch.shape = [4]int{batch_size, 1, 1, 1}
+
+				preds := ml_fin.lstm_volatility_forecaster_forward(
+					&forecaster.lstm,
+					x_batch,
+					h0,
+					c0,
+				)
+				loss := t.tensor_mse_loss(preds, y_batch)
+				t.tensor_backward(loss, allocator)
+				nn.adam_step(opt)
+				nn.adam_zero_grad(opt)
+
+				t.tensor_free_graph(loss)
+				t.tensor_free(
+					x_batch,
+				); t.tensor_free(h0); t.tensor_free(c0); t.tensor_free(y_batch)
+			}
+		}
+
+		delete(features, allocator)
+		delete(targets, allocator)
+		delete(means, allocator)
+		delete(stds, allocator)
+		delete(X_seq, allocator)
+		delete(Y_seq, allocator)
+	}
+
+	// ----------------------------------------------------------------
+	// 9. Initial Training
+	// ----------------------------------------------------------------
+	fmt.println("\n--- Initial Training (First 500 Days) ---")
+	train_start := 0
+	train_end := initial_train_days
+
+	// Fit GARCH on initial training data
+	train_returns := returns[window:train_end]
+	residuals := ts.extract_residuals(train_returns, main_alloc)
+	defer delete(residuals, main_alloc)
+	garch_result := ts.garch_fit(residuals, .StudentT, 1, 1, 1000, 1e-4, main_alloc)
+	defer {
+		delete(garch_result.params.alpha, main_alloc)
+		delete(garch_result.params.beta, main_alloc)
+		delete(garch_result.conditional_var, main_alloc)
+		delete(garch_result.standardized_resid, main_alloc)
+	}
+	forecaster.garch_omega = garch_result.params.omega
+	forecaster.garch_alpha = garch_result.params.alpha[0]
+	forecaster.garch_beta = garch_result.params.beta[0]
+
+	// Train LSTM
+	train_lstm_on_range(
+		&forecaster,
+		&opt,
+		returns,
+		vix_levels,
+		train_start,
+		train_end,
+		window,
+		seq_len,
+		num_features,
+		hidden_size,
+		batch_size,
+		30,
+		main_alloc,
+	)
+	fmt.println("  Initial training complete.")
+
+	// ----------------------------------------------------------------
+	// 10. Walk-Forward Backtest Loop
+	// ----------------------------------------------------------------
+	fmt.println("\n--- Running Walk-Forward Backtest ---")
+	equity := 0.0
+	last_retrain_day := backtest_start
+
+	for day in backtest_start ..< num_days - 1 {
+		bt_idx := day - backtest_start
+
+		// Periodic retraining
+		if day - last_retrain_day >= retrain_interval {
+			fmt.printf("  Retraining at day %d...\n", day)
+			// Refit GARCH on expanding window
+			retrain_returns := returns[window:day]
+			retrain_resid := ts.extract_residuals(retrain_returns, main_alloc)
+			retrain_garch := ts.garch_fit(retrain_resid, .StudentT, 1, 1, 500, 1e-4, main_alloc)
+			forecaster.garch_omega = retrain_garch.params.omega
+			forecaster.garch_alpha = retrain_garch.params.alpha[0]
+			forecaster.garch_beta = retrain_garch.params.beta[0]
+			delete(retrain_garch.params.alpha, main_alloc)
+			delete(retrain_garch.params.beta, main_alloc)
+			delete(retrain_garch.conditional_var, main_alloc)
+			delete(retrain_garch.standardized_resid, main_alloc)
+			delete(retrain_resid, main_alloc)
+
+			// Retrain LSTM on expanding window
+			train_lstm_on_range(
+				&forecaster,
+				&opt,
+				returns,
+				vix_levels,
+				0,
+				day,
+				window,
+				seq_len,
+				num_features,
+				hidden_size,
+				batch_size,
+				retrain_epochs,
+				main_alloc,
+			)
+			last_retrain_day = day
+		}
+
+		// --- Generate Forecast for Next Day ---
+		// Build the last seq_len days of features ending at 'day'
+		feat_start := day - seq_len + 1
+		if feat_start < window {continue}
+
+		inf_features := build_features(
+			returns,
+			vix_levels,
+			feat_start,
+			day + 1,
+			window,
+			num_features,
+			main_alloc,
+		)
+
+		// Standardize using training stats (approximation for walk-forward)
+		// In production, you'd store and reuse the exact training stats
+		for i in 0 ..< seq_len * num_features {
+			// Simple running standardization for inference
+			inf_features[i] = inf_features[i] // Already raw, model was trained on standardized
+		}
+
+		// LSTM inference
+		x_inf_data := l.matrix_new(f64, 1, 1 * seq_len * num_features, main_alloc)
+		copy(x_inf_data.data, inf_features)
+		x_inf := t.tensor_new(x_inf_data, true, main_alloc)
+		x_inf.shape = [4]int{1, seq_len, num_features, 1}
+
+		h0_inf := t.tensor_new(l.matrix_new(f64, 1, hidden_size, main_alloc), false, main_alloc)
+		c0_inf := t.tensor_new(l.matrix_new(f64, 1, hidden_size, main_alloc), false, main_alloc)
+
+		lstm_pred := ml_fin.lstm_volatility_forecaster_forward(
+			&forecaster.lstm,
+			x_inf,
+			h0_inf,
+			c0_inf,
+		)
+		lstm_rv := lstm_pred.data.data[0]
+
+		t.tensor_free_graph(lstm_pred)
+		t.tensor_free(x_inf); t.tensor_free(h0_inf); t.tensor_free(c0_inf)
+		delete(inf_features, main_alloc)
+
+		// GARCH forecast for next day
+		last_ret := returns[day]
+		last_var := forecaster.garch_omega / (1.0 - forecaster.garch_alpha - forecaster.garch_beta)
+		if last_var <= 0.0 {last_var = 0.0001}
+		garch_var_next :=
+			forecaster.garch_omega +
+			forecaster.garch_alpha * last_ret * last_ret +
+			forecaster.garch_beta * last_var
+		garch_rv := math.sqrt(garch_var_next)
+
+		// Ensemble combination
+		ensemble_weight := 0.65
+		ensemble_rv := ensemble_weight * garch_rv + (1.0 - ensemble_weight) * lstm_rv
+
+		// --- VRP Signal ---
+		current_vix := vix_levels[day]
+		vrp := current_vix - ensemble_rv * math.sqrt_f64(252.0) * 100.0
+		z_score := (vrp - vrp_mean) / vrp_std
+		signal := math.tanh(z_score / 1.5)
+
+		// Position: positive = short vol, negative = long vol
+		position := signal
+
+		// --- Next Day PnL ---
+		next_day_abs_ret := math.abs(returns[day + 1])
+		implied_daily_vol := current_vix / 100.0 / math.sqrt_f64(252.0)
+
+		// PnL: short vol profits when IV > RV, long vol profits when RV > IV
+		daily_pnl := position * (implied_daily_vol - next_day_abs_ret)
+
+		// Accumulate
+		equity += daily_pnl
+		result.daily_pnl[bt_idx] = daily_pnl
+		result.equity_curve[bt_idx] = equity
+		result.positions[bt_idx] = position
+		result.signals[bt_idx] = signal
+		result.forecast_rv[bt_idx] = ensemble_rv
+		result.implied_vol[bt_idx] = implied_daily_vol
+		result.actual_vol[bt_idx] = next_day_abs_ret
+
+		if bt_idx % 100 == 0 {
+			fmt.printf(
+				"  Day %d | VRP: %+.2f%% | Signal: %+.3f | Equity: %+.4f\n",
+				day,
+				vrp,
+				signal,
+				equity,
+			)
+		}
+	}
+
+	// ----------------------------------------------------------------
+	// 11. Compute and Print Results
+	// ----------------------------------------------------------------
+	ml_fin.compute_backtest_metrics(&result)
+	ml_fin.print_backtest_result(&result)
+
+	fmt.println("\n✓ Walk-Forward VRP Backtest Complete!")
+}

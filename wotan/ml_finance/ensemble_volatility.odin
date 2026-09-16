@@ -187,3 +187,117 @@ print_vrp_signal :: proc(sig: VRPSignal) {
 	}
 	fmt.println("========================================\n")
 }
+// VRPBacktestResult holds the complete output of a walk-forward backtest.
+VRPBacktestResult :: struct {
+	daily_pnl:    []f64,
+	equity_curve: []f64,
+	positions:    []f64,
+	signals:      []f64,
+	forecast_rv:  []f64,
+	implied_vol:  []f64,
+	actual_vol:   []f64,
+	total_pnl:    f64,
+	sharpe_ratio: f64,
+	max_drawdown: f64,
+	win_rate:     f64,
+	num_trades:   int,
+	num_days:     int,
+	allocator:    mem.Allocator,
+}
+
+vrp_backtest_result_free :: proc(r: ^VRPBacktestResult) {
+	if r.daily_pnl != nil {delete(r.daily_pnl, r.allocator)}
+	if r.equity_curve != nil {delete(r.equity_curve, r.allocator)}
+	if r.positions != nil {delete(r.positions, r.allocator)}
+	if r.signals != nil {delete(r.signals, r.allocator)}
+	if r.forecast_rv != nil {delete(r.forecast_rv, r.allocator)}
+	if r.implied_vol != nil {delete(r.implied_vol, r.allocator)}
+	if r.actual_vol != nil {delete(r.actual_vol, r.allocator)}
+}
+
+// compute_backtest_metrics calculates Sharpe, Max Drawdown, and Win Rate
+// from a daily PnL series.
+compute_backtest_metrics :: proc(result: ^VRPBacktestResult) {
+	n := len(result.daily_pnl)
+	if n == 0 {return}
+
+	// Total PnL
+	total := 0.0
+	for p in result.daily_pnl {total += p}
+	result.total_pnl = total
+
+	// Sharpe Ratio (annualized, assuming 252 trading days)
+	mean_pnl := total / f64(n)
+	var_sum := 0.0
+	for p in result.daily_pnl {
+		d := p - mean_pnl
+		var_sum += d * d
+	}
+	std_pnl := math.sqrt(var_sum / f64(n))
+	if std_pnl > 1e-10 {
+		result.sharpe_ratio = (mean_pnl / std_pnl) * math.sqrt_f64(252.0)
+	} else {
+		result.sharpe_ratio = 0.0
+	}
+
+	// Max Drawdown
+	peak := result.equity_curve[0]
+	max_dd := 0.0
+	for i in 0 ..< n {
+		if result.equity_curve[i] > peak {
+			peak = result.equity_curve[i]
+		}
+		dd := peak - result.equity_curve[i]
+		if dd > max_dd {max_dd = dd}
+	}
+	result.max_drawdown = max_dd
+
+	// Win Rate & Trade Count
+	wins := 0
+	trades := 0
+	for i in 0 ..< n {
+		if math.abs(result.positions[i]) > 0.1 {
+			trades += 1
+			if result.daily_pnl[i] > 0.0 {wins += 1}
+		}
+	}
+	result.num_trades = trades
+	if trades > 0 {
+		result.win_rate = f64(wins) / f64(trades)
+	} else {
+		result.win_rate = 0.0
+	}
+	result.num_days = n
+}
+
+print_backtest_result :: proc(r: ^VRPBacktestResult) {
+	fmt.println(
+		"\n╔══════════════════════════════════════════════════╗",
+	)
+	fmt.println("║     WALK-FORWARD VRP BACKTEST RESULTS           ║")
+	fmt.println(
+		"╠══════════════════════════════════════════════════╣",
+	)
+	fmt.printf("║  Trading Days:        %6d                     ║\n", r.num_days)
+	fmt.printf("║  Active Trades:       %6d                     ║\n", r.num_trades)
+	fmt.printf("║  Total PnL:           %+8.4f (daily vol units) ║\n", r.total_pnl)
+	fmt.printf("║  Sharpe Ratio:        %+8.2f (annualized)     ║\n", r.sharpe_ratio)
+	fmt.printf("║  Max Drawdown:        %8.4f                  ║\n", r.max_drawdown)
+	fmt.printf("║  Win Rate:            %6.1f%%                   ║\n", r.win_rate * 100)
+	fmt.println(
+		"╠══════════════════════════════════════════════════╣",
+	)
+
+	if r.sharpe_ratio > 1.5 {
+		fmt.println("║  ★ STRONG EDGE: Strategy shows significant α   ║")
+	} else if r.sharpe_ratio > 0.5 {
+		fmt.println("║  ● MODERATE EDGE: Positive expectancy           ║")
+	} else if r.sharpe_ratio > 0.0 {
+		fmt.println("║  ○ WEAK EDGE: Marginal positive expectancy      ║")
+	} else {
+		fmt.println("║  ✗ NO EDGE: Strategy needs refinement           ║")
+	}
+	fmt.println(
+		"╚══════════════════════════════════════════════════╝",
+	)
+}
