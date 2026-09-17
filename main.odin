@@ -473,6 +473,7 @@ main :: proc() {
 	test.ensemble_volatility_test(context.temp_allocator)
 	test.vrp_signal_test(context.temp_allocator)
 	test.vrp_backtest_test(context.temp_allocator)
+	test.volatility_arbitrage_test(context.temp_allocator)
 	// test.event_study_nlp_test(context.temp_allocator)
 	// test.deep_hedging_portfolio_test(context.temp_allocator)
 	test.tokenizer_wordpiece_test(context.temp_allocator)
