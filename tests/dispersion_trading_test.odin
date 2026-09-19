@@ -2,6 +2,7 @@ package tests
 
 import ts "../wotan/analytics"
 import w "../wotan/core"
+import fin "../wotan/finance"
 import l "../wotan/linalg"
 import ml_fin "../wotan/ml_finance"
 import yahoo "../wotan/net"
@@ -442,6 +443,48 @@ dispersion_trading_test :: proc(allocator: mem.Allocator) {
 	}
 
 	ml_fin.print_dispersion_signal(sig)
+	// 5. Factor-Adjusted Component Selection
+	fmt.println("\n--- Factor Risk Decomposition ---")
+
+	// Build returns matrix for components only [num_days][n_comps]
+	comp_returns := make([][]f64, num_days, main_alloc)
+	defer {
+		for r in comp_returns {delete(r, main_alloc)}
+		delete(comp_returns, main_alloc)
+	}
+	for d in 0 ..< num_days {
+		comp_returns[d] = make([]f64, n_assets - 1, main_alloc)
+		for c in 0 ..< n_assets - 1 {
+			comp_returns[d][c] = returns_matrix[c + 1][d]
+		}
+	}
+
+	risk := fin.decompose_risk(comp_returns, 1, main_alloc) // 1 factor = market
+	defer {
+		delete(risk.factor_variance, main_alloc)
+		delete(risk.idiosyncratic_var, main_alloc)
+		delete(risk.total_variance, main_alloc)
+		for row in risk.factor_exposure {delete(row, main_alloc)}
+		delete(risk.factor_exposure, main_alloc)
+	}
+
+	fmt.printf("  %-8s %-12s %-12s %-12s\n", "Asset", "Systematic", "Idiosync.", "Total")
+	fmt.printf(
+		"  %-8s %-12s %-12s %-12s\n",
+		"--------",
+		"------------",
+		"------------",
+		"------------",
+	)
+	for c in 0 ..< n_assets - 1 {
+		fmt.printf(
+			"  %-8s %10.2f%% %10.2f%% %10.2f%%\n",
+			tickers[c + 1],
+			risk.factor_variance[c] * 100.0,
+			risk.idiosyncratic_var[c] * 100.0,
+			risk.total_variance[c] * 100.0,
+		)
+	}
 
 	fmt.println("\n✓ Cross-Asset Dispersion Trading Test Complete!")
 }
