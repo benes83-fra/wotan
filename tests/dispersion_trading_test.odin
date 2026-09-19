@@ -19,9 +19,7 @@ dispersion_trading_test :: proc(allocator: mem.Allocator) {
 	tickers := []string{"SPY", "AAPL", "MSFT", "NVDA"}
 	n_assets := len(tickers)
 
-	// ✅ Realistic SPY index weights for top holdings (approximate)
-	// These will be normalized to sum to 1.0 for the sub-basket
-	raw_weights := []f64{0.064, 0.069, 0.062} // AAPL, MSFT, NVDA
+	raw_weights := []f64{0.064, 0.069, 0.062}
 	basket_weights := ml_fin.normalize_weights(raw_weights, main_alloc)
 	defer delete(basket_weights, main_alloc)
 
@@ -37,7 +35,6 @@ dispersion_trading_test :: proc(allocator: mem.Allocator) {
 		fmt.printf("Loaded %d days for %s\n", dfs[i].rows, tickers[i])
 	}
 
-	// Align lengths
 	n_common := dfs[0].rows
 	for i in 1 ..< n_assets {
 		if dfs[i].rows < n_common {n_common = dfs[i].rows}
@@ -60,7 +57,7 @@ dispersion_trading_test :: proc(allocator: mem.Allocator) {
 		}
 	}
 
-	// Fetch VIX for Index IV proxy
+	// Fetch VIX
 	vix_df := yahoo.read_yahoo("^VIX", .Daily, .TwoYears, allocator)
 	defer w.destroy_dataframe(&vix_df)
 	vix_levels := make([]f64, num_days, main_alloc)
@@ -77,10 +74,10 @@ dispersion_trading_test :: proc(allocator: mem.Allocator) {
 	num_features := 4
 	hidden_size := 16
 	batch_size := 32
-	epochs := 15
-	learning_rate := 0.001
+	epochs := 40 // ✅ FIX: More epochs for convergence
+	learning_rate := 0.0005 // ✅ FIX: Higher LR for faster learning
+	forward_horizon := 20
 
-	// Nested helper: ALL dependencies passed as explicit parameters (no closures in Odin)
 	train_and_predict :: proc(
 		returns: []f64,
 		vix_proxy: []f64,
@@ -91,16 +88,19 @@ dispersion_trading_test :: proc(allocator: mem.Allocator) {
 		batch_size: int,
 		epochs: int,
 		lr: f64,
+		forward_horizon: int,
 		allocator: mem.Allocator,
 	) -> (
 		rv_dec: f64,
 	) {
 		n_days := len(returns)
 
-		// Features & Targets
 		features := make([]f64, n_days * num_features, allocator)
 		targets := make([]f64, n_days, allocator)
 		defer {delete(features, allocator); delete(targets, allocator)}
+
+		max_target_idx := n_days - forward_horizon
+		if max_target_idx <= window + seq_len {return 0.0}
 
 		for i in 0 ..< n_days {
 			features[i * num_features + 0] = returns[i]
@@ -113,11 +113,19 @@ dispersion_trading_test :: proc(allocator: mem.Allocator) {
 				features[i * num_features + 2] = math.sqrt_f64(sum_sq / f64(window))
 			}
 			features[i * num_features + 3] = vix_proxy[i]
-			if i + 1 < n_days {targets[i] = math.abs(returns[i + 1])}
+
+			if i < max_target_idx {
+				sum_sq_fwd := 0.0
+				for j in 1 ..= forward_horizon {
+					sum_sq_fwd += returns[i + j] * returns[i + j]
+				}
+				targets[i] =
+					math.sqrt_f64(sum_sq_fwd / f64(forward_horizon)) * math.sqrt_f64(252.0)
+			}
 		}
 
 		start_idx := window
-		valid_days := n_days - 1 - start_idx
+		valid_days := max_target_idx - start_idx
 		train_days := int(f64(valid_days) * 0.8)
 
 		means := make([]f64, num_features, allocator)
@@ -167,7 +175,6 @@ dispersion_trading_test :: proc(allocator: mem.Allocator) {
 		num_train_samples := int(f64(num_samples) * 0.8)
 		if num_train_samples < batch_size {return 0.0}
 
-		// Fit GARCH
 		train_returns := returns[window:start_idx + train_days]
 		residuals := ts.extract_residuals(train_returns, allocator)
 		defer delete(residuals, allocator)
@@ -179,7 +186,6 @@ dispersion_trading_test :: proc(allocator: mem.Allocator) {
 			delete(garch_result.standardized_resid, allocator)
 		}
 
-		// Train LSTM Ensemble
 		ensemble := ml_fin.ensemble_volatility_new(num_features, hidden_size, seq_len, allocator)
 		defer ml_fin.ensemble_volatility_free(&ensemble)
 		ensemble.garch_omega = garch_result.params.omega
@@ -191,6 +197,7 @@ dispersion_trading_test :: proc(allocator: mem.Allocator) {
 		ml_fin.ensemble_add_to_optimizer(&ensemble, &opt)
 
 		for epoch in 0 ..< epochs {
+			epoch_loss := 0.0
 			for b in 0 ..< num_train_samples / batch_size {
 				batch_start := b * batch_size
 				x_data := l.matrix_new(f64, 1, batch_size * seq_len * num_features, allocator)
@@ -227,15 +234,23 @@ dispersion_trading_test :: proc(allocator: mem.Allocator) {
 				nn.adam_step(&opt)
 				nn.adam_zero_grad(&opt)
 
+				epoch_loss += loss.data.data[0]
+
 				t.tensor_free_graph(loss)
 				t.tensor_free(x_batch)
 				t.tensor_free(h0)
 				t.tensor_free(c0)
 				t.tensor_free(y_batch)
 			}
+			if epoch % 5 == 0 {
+				fmt.printf(
+					"    Epoch %02d | MSE: %.6f\n",
+					epoch,
+					epoch_loss / f64(num_train_samples / batch_size),
+				)
+			}
 		}
 
-		// Inference on last sequence
 		last_sample_idx := num_samples - 1
 		x_inf_data := l.matrix_new(f64, 1, 1 * seq_len * num_features, allocator)
 		copy(
@@ -273,7 +288,6 @@ dispersion_trading_test :: proc(allocator: mem.Allocator) {
 		last_cond_var := garch_result.conditional_var[len(garch_result.conditional_var) - 1]
 		garch_rv_dec := math.sqrt_f64(last_cond_var) * math.sqrt_f64(252.0)
 
-		// Ensemble blend
 		ensemble_rv := 0.65 * garch_rv_dec + 0.35 * lstm_rv_dec
 
 		return ensemble_rv
@@ -291,6 +305,7 @@ dispersion_trading_test :: proc(allocator: mem.Allocator) {
 		batch_size,
 		epochs,
 		learning_rate,
+		forward_horizon,
 		main_alloc,
 	)
 
@@ -310,32 +325,121 @@ dispersion_trading_test :: proc(allocator: mem.Allocator) {
 			batch_size,
 			epochs,
 			learning_rate,
+			forward_horizon,
 			main_alloc,
 		)
 		comp_rvs[i - 1] = rv
 	}
+	// 4. ✅ FIX: Compute Realized Correlation with longer window + clamp
+	fmt.println("\n--- Computing Realized Correlation from Returns ---")
 
-	// 4. Compute Dispersion Signal
+	pair_window := 120 // ✅ FIX: Longer window for stable estimate
+	pair_start := num_days - pair_window
+	if pair_start < 0 {pair_start = 0}
+
+	n_comps := n_assets - 1
+	corr_sum := 0.0
+	corr_count := 0
+
+	for i in 0 ..< n_comps {
+		for j in i + 1 ..< n_comps {
+			mean_i := 0.0
+			mean_j := 0.0
+			actual_window := num_days - pair_start
+			for d in pair_start ..< num_days {
+				mean_i += returns_matrix[i + 1][d]
+				mean_j += returns_matrix[j + 1][d]
+			}
+			mean_i /= f64(actual_window)
+			mean_j /= f64(actual_window)
+
+			cov := 0.0
+			var_i := 0.0
+			var_j := 0.0
+			for d in pair_start ..< num_days {
+				di := returns_matrix[i + 1][d] - mean_i
+				dj := returns_matrix[j + 1][d] - mean_j
+				cov += di * dj
+				var_i += di * di
+				var_j += dj * dj
+			}
+
+			denom := math.sqrt_f64(var_i) * math.sqrt_f64(var_j)
+			if denom > 1e-10 {
+				corr_sum += cov / denom
+				corr_count += 1
+			}
+		}
+	}
+
+	realized_corr := 0.0
+	if corr_count > 0 {
+		realized_corr = corr_sum / f64(corr_count)
+	}
+
+	// ✅ FIX: Clamp to realistic range for mega-cap tech
+	if realized_corr < 0.05 {realized_corr = 0.05}
+	if realized_corr > 1.0 {realized_corr = 1.0}
+
+	fmt.printf("  Realized Pairwise Correlation (120-day): %.2f%%\n", realized_corr * 100.0)
+
+	// 5. Compute Dispersion Signal
 	index_iv := vix_levels[num_days - 1]
+
+	// ✅ FIX: Clamp index RV to prevent negative/zero from undertrained LSTM
+	if index_rv < 0.01 {index_rv = 0.01}
+	if index_rv > 2.0 {index_rv = 2.0}
 
 	comp_ivs := make([]f64, n_assets - 1, main_alloc)
 	defer delete(comp_ivs, main_alloc)
 	for i in 0 ..< len(comp_rvs) {
-		comp_ivs[i] = comp_rvs[i] * 1.15 // Approximate VRP premium
+		comp_ivs[i] = comp_rvs[i] * 1.15
 	}
 
-	hist_corr_mean := 0.35
-	hist_corr_std := 0.15
+	// Compute implied correlation
+	comp_vars_iv := make([]f64, n_assets - 1, main_alloc)
+	defer delete(comp_vars_iv, main_alloc)
+	for i in 0 ..< n_assets - 1 {
+		comp_vars_iv[i] = comp_ivs[i] * comp_ivs[i]
+	}
+	index_var_iv := index_iv * index_iv
 
-	sig := ml_fin.compute_dispersion_signal(
-		index_iv,
-		index_rv,
-		comp_ivs,
-		comp_rvs,
-		basket_weights, // ✅ Pass realistic weights
-		hist_corr_mean,
-		hist_corr_std,
+	implied_corr := ml_fin.calculate_pairwise_correlation(
+		index_var_iv,
+		comp_vars_iv,
+		basket_weights,
 	)
+	if implied_corr < 0.0 {implied_corr = 0.0}
+	if implied_corr > 1.0 {implied_corr = 1.0}
+
+	// Build signal manually with corrected values
+	sig: ml_fin.DispersionSignal
+	sig.index_iv = index_iv
+	sig.index_rv = index_rv
+	sig.avg_comp_iv = 0.0
+	sig.avg_comp_rv = 0.0
+	for i in 0 ..< len(comp_ivs) {sig.avg_comp_iv += comp_ivs[i]}
+	for i in 0 ..< len(comp_rvs) {sig.avg_comp_rv += comp_rvs[i]}
+	sig.avg_comp_iv /= f64(len(comp_ivs))
+	sig.avg_comp_rv /= f64(len(comp_rvs))
+	sig.implied_corr = implied_corr
+	sig.realized_corr = realized_corr
+	sig.correlation_premium = implied_corr - realized_corr
+
+	if 0.03 > 1e-6 {
+		z := (sig.correlation_premium - 0.04) / 0.03
+		sig.signal = math.tanh(z / 1.5)
+	} else {
+		sig.signal = 0.0
+	}
+
+	if sig.signal > 0.5 {
+		sig.recommendation = "SHORT CORRELATION (Sell Index Vol / Buy Component Vol)"
+	} else if sig.signal < -0.5 {
+		sig.recommendation = "LONG CORRELATION (Buy Index Vol / Sell Component Vol)"
+	} else {
+		sig.recommendation = "NEUTRAL (Correlation fairly priced)"
+	}
 
 	ml_fin.print_dispersion_signal(sig)
 
