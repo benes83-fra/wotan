@@ -363,7 +363,7 @@ ensemble_volatility_test :: proc(allocator: mem.Allocator) {
 
 	// Generate the guaranteed interval for the latest forecast
 	lower, upper := ml_fin.conformal_predict_interval(&cp, last_ensemble)
-
+	if lower < 0.0 {lower = 0.0}
 	fmt.printf("\nLatest Ensemble Forecast (Daily): %.4f%%\n", last_ensemble * 100)
 	fmt.printf(
 		"95%% Conformal Confidence Interval (Daily): [%.4f%%, %.4f%%]\n",
@@ -596,7 +596,7 @@ vrp_signal_test :: proc(allocator: mem.Allocator) {
 		c_0_inf,
 	)
 	lstm_pred_daily := lstm_pred_tensor.data.data[0]
-
+	if lstm_pred_daily < 0.0 {lstm_pred_daily = 0.0}
 	t.tensor_free(lstm_pred_tensor)
 	t.tensor_free(x_inf); t.tensor_free(h_0_inf); t.tensor_free(c_0_inf)
 
