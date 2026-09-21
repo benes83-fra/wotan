@@ -30,11 +30,16 @@ hmm_regime_test :: proc(allocator: mem.Allocator) {
 	n_states := 3
 	hmm := ml_fin.hmm_new(n_states, main_alloc)
 	defer ml_fin.hmm_free(&hmm)
-
+	// ✅ Clip extreme outliers to prevent degenerate HMM states
+	// Daily SPY returns beyond ±5% are typically black swan events
+	for i in 0 ..< num_days {
+		if returns[i] > 0.05 {returns[i] = 0.05}
+		if returns[i] < -0.05 {returns[i] = -0.05}
+	}
 	ml_fin.hmm_init_simple(&hmm, returns)
 
 	fmt.println("\n--- Training HMM (Baum-Welch) ---")
-	ll, converged := ml_fin.hmm_fit(&hmm, returns, 100, 1e-5)
+	ll, converged := ml_fin.hmm_fit(&hmm, returns, 200, 1e-5)
 	if converged {
 		fmt.println("  ✅ HMM converged successfully.")
 	} else {

@@ -296,7 +296,8 @@ ensemble_volatility_test :: proc(allocator: mem.Allocator) {
 	mse_garch := 0.0
 	mse_lstm := 0.0
 	mse_ensemble := 0.0
-
+	ensemble_val_forecasts := make([]f64, num_val_samples, allocator)
+	defer delete(ensemble_val_forecasts, allocator)
 	for i in 0 ..< num_val_samples {
 		actual := actual_val_vols[i]
 		garch_pred := garch_val_forecasts[i]
@@ -304,7 +305,7 @@ ensemble_volatility_test :: proc(allocator: mem.Allocator) {
 
 		// ✅ Use the library function for ensemble prediction
 		ensemble_pred := ml_fin.ensemble_predict(&ensemble, garch_pred, lstm_pred)
-
+		ensemble_val_forecasts[i] = ensemble_pred
 		mse_garch += (garch_pred - actual) * (garch_pred - actual)
 		mse_lstm += (lstm_pred - actual) * (lstm_pred - actual)
 		mse_ensemble += (ensemble_pred - actual) * (ensemble_pred - actual)
@@ -344,6 +345,38 @@ ensemble_volatility_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("    GARCH:    %.2f%%\n", last_garch * scale)
 	fmt.printf("    LSTM:     %.2f%%\n", last_lstm * scale)
 	fmt.printf("    Ensemble: %.2f%%\n", last_ensemble * scale)
+
+	// ... (existing Step 9 code) ...
+	fmt.printf("    Ensemble: %.2f%%\n", last_ensemble * scale)
+
+	// ----------------------------------------------------------------
+	// 10. Conformal Prediction (Distribution-Free Risk Bounds)
+	// ----------------------------------------------------------------
+	fmt.println("\n--- Calibrating Conformal Risk Bounds ---")
+	cp := ml_fin.conformal_new(main_alloc)
+	defer ml_fin.conformal_free(&cp)
+
+	// Calibrate on the validation set (acting as our holdout calibration set)
+	// We use the Ensemble predictions and the actual realized vols
+	ml_fin.conformal_calibrate(&cp, actual_val_vols, ensemble_val_forecasts, 0.05) // 95% confidence
+	ml_fin.print_conformal_stats(&cp)
+
+	// Generate the guaranteed interval for the latest forecast
+	lower, upper := ml_fin.conformal_predict_interval(&cp, last_ensemble)
+
+	fmt.printf("\nLatest Ensemble Forecast (Daily): %.4f%%\n", last_ensemble * 100)
+	fmt.printf(
+		"95%% Conformal Confidence Interval (Daily): [%.4f%%, %.4f%%]\n",
+		lower * 100,
+		upper * 100,
+	)
+
+	fmt.printf("\nLatest Ensemble Forecast (Annualized): %.2f%%\n", last_ensemble * scale)
+	fmt.printf(
+		"95%% Conformal Confidence Interval (Ann.): [%.2f%%, %.2f%%]\n",
+		lower * scale,
+		upper * scale,
+	)
 
 	fmt.println("\n✓ Ensemble Volatility Forecasting Test Complete!")
 }
