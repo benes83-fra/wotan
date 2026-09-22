@@ -478,6 +478,7 @@ main :: proc() {
 	test.hrp_test(context.temp_allocator)
 	test.hmm_regime_test(context.temp_allocator)
 	test.optimal_execution_test(context.temp_allocator)
+	test.orchestrator_test(context.temp_allocator)
 	// test.event_study_nlp_test(context.temp_allocator)
 	// test.deep_hedging_portfolio_test(context.temp_allocator)
 	test.tokenizer_wordpiece_test(context.temp_allocator)
