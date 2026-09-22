@@ -29,6 +29,7 @@ hrp_result_free :: proc(res: ^HRPResult) {
 hrp_allocate :: proc(
 	returns: ^l.Matrix(f64),
 	allocator: mem.Allocator = context.allocator,
+	limit: bool = true,
 ) -> HRPResult {
 	n_assets := returns.cols
 	if n_assets == 0 {
@@ -135,6 +136,34 @@ hrp_allocate :: proc(
 	for i in 0 ..< n_assets {weights[i] = 1.0}
 
 	hrp_bisect(root_node, n_assets, left_child, right_child, cov_mat.data, weights, allocator)
+	// In hrp_allocate, after the recursive bisection and normalization:
+
+	// ✅ Max-weight constraint (e.g., no single asset > 30%)
+	if limit {
+		max_weight := 0.30
+		for iter in 0 ..< 10 { 	// Iterate to redistribute excess
+			excess := 0.0
+			n_uncapped := 0
+			for i in 0 ..< n_assets {
+				if weights[i] > max_weight {
+					excess += weights[i] - max_weight
+					weights[i] = max_weight
+				} else {
+					n_uncapped += 1
+				}
+			}
+			if excess < 1e-8 {break}
+			// Redistribute excess to uncapped assets proportionally
+			if n_uncapped > 0 {
+				redistribute := excess / f64(n_uncapped)
+				for i in 0 ..< n_assets {
+					if weights[i] < max_weight {
+						weights[i] += redistribute
+					}
+				}
+			}
+		}
+	}
 
 	// Normalize weights to sum to 1.0
 	sum_w := 0.0
