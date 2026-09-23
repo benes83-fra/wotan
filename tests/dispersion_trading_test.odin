@@ -281,7 +281,7 @@ dispersion_trading_test :: proc(allocator: mem.Allocator) {
 		)
 		lstm_rv_dec := lstm_pred_tensor.data.data[0]
 
-		t.tensor_free(lstm_pred_tensor)
+		t.tensor_free_graph(lstm_pred_tensor)
 		t.tensor_free(x_inf)
 		t.tensor_free(h0_inf)
 		t.tensor_free(c0_inf)

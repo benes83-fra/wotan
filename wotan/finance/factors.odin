@@ -90,7 +90,9 @@ factor_analysis :: proc(
 
 		factor_pca := ana.pca_from_cov(reduced_corr, allocator)
 		_destroy_matrix(reduced_corr, allocator)
-
+		if iter > 0 {
+			_destroy_matrix(loadings, allocator)
+		}
 		loadings = make([][]f64, n_factors, allocator)
 		for f in 0 ..< n_factors {
 			loadings[f] = make([]f64, n_vars, allocator)

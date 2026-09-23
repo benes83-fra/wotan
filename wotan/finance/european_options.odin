@@ -75,8 +75,7 @@ black_scholes_price :: proc(
 	d2 := t.tensor_sub(d1, sig_sqrt_T)
 
 	// N(d1), N(d2)
-	N_d1 := t.tensor_norm_cdf(d1)
-	N_d2 := t.tensor_norm_cdf(d2)
+
 
 	// exp(-r*T)
 	neg_r := t.tensor_neg(r_t)
@@ -88,6 +87,8 @@ black_scholes_price :: proc(
 
 	if opt == .Call {
 		// C = S*N(d1) - K*exp(-r*T)*N(d2)
+		N_d1 := t.tensor_norm_cdf(d1)
+		N_d2 := t.tensor_norm_cdf(d2)
 		term1 := t.tensor_mul(S_t, N_d1)
 		term2 := t.tensor_mul(K_disc, N_d2)
 		return t.tensor_sub(term1, term2)
@@ -160,9 +161,10 @@ compute_greeks :: proc(
 	// Convert vega and rho to per-1% (divide by 100)
 	vega_per_pct := vega / 100.0
 	rho_per_pct := rho / 100.0
-
+	price_t.op = .None
 	// ✅ FIX: Free the graph AND the explicitly created leaf nodes
 	t.tensor_free_graph(price_t)
+	t.tensor_free(price_t)
 	t.tensor_free(S_t)
 	t.tensor_free(K_t)
 	t.tensor_free(T_t)
@@ -205,9 +207,10 @@ _compute_delta :: proc(
 	price_t := black_scholes_price(S_t, K_t, T_t, r_t, sig_t, opt, allocator)
 	t.tensor_backward(price_t)
 	delta := S_t.grad.data[0]
-
+	price_t.op = .None
 	// ✅ FIX: Free the graph AND the leaf nodes
 	t.tensor_free_graph(price_t)
+	t.tensor_free(price_t)
 	t.tensor_free(S_t)
 	t.tensor_free(K_t)
 	t.tensor_free(T_t)

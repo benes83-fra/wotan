@@ -49,7 +49,6 @@ volatility_arbitrage_test :: proc(allocator: mem.Allocator) {
 	learning_rate := 0.001
 	forward_horizon := 20
 
-	// Feature generation & standardization (abbreviated for test brevity, same as VRP test)
 	features := make([]f64, num_days * num_features, allocator)
 	targets := make([]f64, num_days, allocator)
 	defer {delete(features, allocator); delete(targets, allocator)}
@@ -143,6 +142,8 @@ volatility_arbitrage_test :: proc(allocator: mem.Allocator) {
 	for epoch in 0 ..< epochs {
 		for b in 0 ..< num_train_samples / batch_size {
 			batch_start := b * batch_size
+
+			// ✅ FIX: Explicitly track matrices to prevent leaks
 			x_data := l.matrix_new(f64, 1, batch_size * seq_len * num_features, allocator)
 			copy(
 				x_data.data,
@@ -152,18 +153,15 @@ volatility_arbitrage_test :: proc(allocator: mem.Allocator) {
 				seq_len *
 				num_features],
 			)
-			x_batch := t.tensor_new(x_data, true, allocator)
+			x_batch := t.tensor_new(x_data, false, allocator)
 			x_batch.shape = [4]int{batch_size, seq_len, num_features, 1}
-			h0 := t.tensor_new(
-				l.matrix_new(f64, 1, batch_size * hidden_size, allocator),
-				false,
-				allocator,
-			)
-			c0 := t.tensor_new(
-				l.matrix_new(f64, 1, batch_size * hidden_size, allocator),
-				false,
-				allocator,
-			)
+
+			h0_mat := l.matrix_new(f64, 1, batch_size * hidden_size, allocator)
+			h0 := t.tensor_new(h0_mat, false, allocator)
+
+			c0_mat := l.matrix_new(f64, 1, batch_size * hidden_size, allocator)
+			c0 := t.tensor_new(c0_mat, false, allocator)
+
 			y_data := l.matrix_new(f64, batch_size, 1, allocator)
 			copy(y_data.data, Y_seq[batch_start:batch_start + batch_size])
 			y_batch := t.tensor_new(y_data, false, allocator)
@@ -174,11 +172,20 @@ volatility_arbitrage_test :: proc(allocator: mem.Allocator) {
 			t.tensor_backward(loss, allocator)
 			nn.adam_step(&opt)
 			nn.adam_zero_grad(&opt)
+
+			// Free the autograd graph intermediates
 			t.tensor_free_graph(loss)
-			t.tensor_free(x_batch); t.tensor_free(h0); t.tensor_free(c0); t.tensor_free(y_batch)
+
+			// Free the Tensor structs
+			t.tensor_free(x_batch)
+			t.tensor_free(h0)
+			t.tensor_free(c0)
+			t.tensor_free(y_batch)
+
+
 		}
 	}
-
+	probe("after training")
 	// 3. Generate Next-Day Forecast
 	last_sample_idx := num_samples - 1
 	x_inf_data := l.matrix_new(f64, 1, 1 * seq_len * num_features, allocator)
@@ -201,8 +208,12 @@ volatility_arbitrage_test :: proc(allocator: mem.Allocator) {
 
 	x_inf := t.tensor_new(x_inf_data, false, allocator)
 	x_inf.shape = [4]int{1, seq_len, num_features, 1}
-	h0_inf := t.tensor_new(l.matrix_new(f64, 1, hidden_size, allocator), false, allocator)
-	c0_inf := t.tensor_new(l.matrix_new(f64, 1, hidden_size, allocator), false, allocator)
+
+	h0_inf_mat := l.matrix_new(f64, 1, hidden_size, allocator)
+	h0_inf := t.tensor_new(h0_inf_mat, false, allocator)
+
+	c0_inf_mat := l.matrix_new(f64, 1, hidden_size, allocator)
+	c0_inf := t.tensor_new(c0_inf_mat, false, allocator)
 
 	lstm_pred_tensor := ml_fin.lstm_volatility_forecaster_forward(
 		&ensemble.lstm,
@@ -210,10 +221,13 @@ volatility_arbitrage_test :: proc(allocator: mem.Allocator) {
 		h0_inf,
 		c0_inf,
 	)
-	lstm_rv_dec := lstm_pred_tensor.data.data[0] // Already annualized decimal from target definition
+	lstm_rv_dec := lstm_pred_tensor.data.data[0]
 
-	t.tensor_free(lstm_pred_tensor)
-	t.tensor_free(x_inf); t.tensor_free(h0_inf); t.tensor_free(c0_inf)
+	t.tensor_free_graph(lstm_pred_tensor)
+	t.tensor_free(x_inf)
+	t.tensor_free(h0_inf)
+	t.tensor_free(c0_inf)
+	probe("after inference")
 
 	// 4. Price the 30-Day ATM Straddle
 	S := math.exp(returns[num_days - 1]) * 450.0 // Approximate SPY price
@@ -279,7 +293,7 @@ volatility_arbitrage_test :: proc(allocator: mem.Allocator) {
 		main_alloc,
 	)
 	model_straddle_price := model_call_price + model_put_price
-
+	probe("after pricing")
 	// 5. Output the Arbitrage Dashboard
 	fmt.println(
 		"\n╔══════════════════════════════════════════════════════════════╗",
@@ -361,4 +375,13 @@ volatility_arbitrage_test :: proc(allocator: mem.Allocator) {
 	)
 
 	fmt.println("\n✓ Volatility Arbitrage Test Complete!")
+}
+probe :: proc(tag: string) {
+	fmt.printf(
+		"[mem] %-18s created=%d freed=%d live=%d\n",
+		tag,
+		t.global_tensors_created,
+		t.global_tensors_freed,
+		t.global_tensors_created - t.global_tensors_freed,
+	)
 }
