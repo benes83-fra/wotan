@@ -284,7 +284,7 @@ correlation :: proc(X: ^Matrix(f64), allocator: mem.Allocator = context.allocato
 			R.data[i * p + j] = C.data[i * p + j] / (sd[i] * sd[j])
 		}
 	}
-
+	matrix_free(&C)
 	return R
 }
 // ============================================================================

@@ -328,7 +328,7 @@ decompose_risk :: proc(
 	for v in 0 ..< n_assets {
 		total_variance[v] = fa.communalities[v] + fa.uniqueness[v]
 	}
-
+	delete(fa.eigenvalues, allocator)
 	return RiskDecomposition {
 		factor_variance = fa.communalities,
 		idiosyncratic_var = fa.uniqueness,

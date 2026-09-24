@@ -37,6 +37,7 @@ eigh :: proc(
 
 	// Work on a copy, since jacobi_eigen_symmetric modifies in-place
 	A_copy := matrix_new(f64, A.rows, A.cols, allocator)
+	defer matrix_free(&A_copy)
 	copy(A_copy.data, A.data)
 
 	W, V = jacobi_eigen_symmetric(&A_copy, allocator)
