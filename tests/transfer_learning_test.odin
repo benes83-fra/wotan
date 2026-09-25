@@ -248,7 +248,8 @@ save_weights_snapshot :: proc(model: ^nn.Sequential, allocator: mem.Allocator) -
 		     nn.FFNLayer,
 		     nn.TransformerEncoderBlock,
 		     nn.TransformerEncoder,
-		     nn.GATLayer:
+		     nn.GATLayer,
+		     nn.MambaLayer:
 		// Skip non-trainable or unhandled layers
 		}
 	}
@@ -309,7 +310,8 @@ verify_weights_unchanged :: proc(model: ^nn.Sequential, snapshots: [dynamic][]f6
 		     nn.FFNLayer,
 		     nn.TransformerEncoderBlock,
 		     nn.TransformerEncoder,
-		     nn.GATLayer:
+		     nn.GATLayer,
+		     nn.MambaLayer:
 		// Skip
 		}
 	}
@@ -487,6 +489,7 @@ transfer_learning_test :: proc(allocator: mem.Allocator) {
 		     nn.TransformerEncoderBlock,
 		     nn.TransformerEncoder:
 		case nn.GATLayer:
+		case nn.MambaLayer:
 		// GAT handled (or add specific logic if needed)
 		// Skip
 		}

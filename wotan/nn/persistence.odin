@@ -351,6 +351,36 @@ save_checkpoint :: proc(
 
 			// Save Adjacency Matrix
 			write_tensor(file, l.adjacency)
+		case MambaLayer:
+			write_i32(file, 25) // Type 25
+			write_i32(file, i32(l.d_model))
+			write_i32(file, i32(l.d_state))
+
+			// Save Linear projections
+			write_tensor(
+				file,
+				l.proj_x.weights,
+			); if l.proj_x.bias != nil {write_tensor(file, l.proj_x.bias)}
+			write_tensor(
+				file,
+				l.proj_B.weights,
+			); if l.proj_B.bias != nil {write_tensor(file, l.proj_B.bias)}
+			write_tensor(
+				file,
+				l.proj_C.weights,
+			); if l.proj_C.bias != nil {write_tensor(file, l.proj_C.bias)}
+			write_tensor(
+				file,
+				l.proj_Delta.weights,
+			); if l.proj_Delta.bias != nil {write_tensor(file, l.proj_Delta.bias)}
+			write_tensor(
+				file,
+				l.proj_out.weights,
+			); if l.proj_out.bias != nil {write_tensor(file, l.proj_out.bias)}
+
+			// Save SSM parameters
+			write_tensor(file, l.A)
+			write_tensor(file, l.D)
 		}
 
 	}
@@ -867,6 +897,46 @@ load_checkpoint :: proc(
 			if layer.mha.out_proj.bias != nil {t.tensor_free(layer.mha.out_proj.bias)}
 			layer.mha.out_proj.bias, offset = read_tensor(data, offset, allocator)
 			append(&model.layers, layer)
+		} else if layer_type == 25 { 	// Mamba
+			d_model: i32; d_state: i32
+			d_model, offset = read_i32(data, offset)
+			d_state, offset = read_i32(data, offset)
+
+			layer := mamba_layer_new(int(d_model), int(d_state), allocator)
+
+			// Load Linear projections (free defaults first)
+			if layer.proj_x.weights != nil {t.tensor_free(layer.proj_x.weights)}
+			layer.proj_x.weights, offset = read_tensor(data, offset, allocator)
+			if layer.proj_x.bias != nil {t.tensor_free(layer.proj_x.bias)}
+			layer.proj_x.bias, offset = read_tensor(data, offset, allocator)
+
+			if layer.proj_B.weights != nil {t.tensor_free(layer.proj_B.weights)}
+			layer.proj_B.weights, offset = read_tensor(data, offset, allocator)
+			if layer.proj_B.bias != nil {t.tensor_free(layer.proj_B.bias)}
+			layer.proj_B.bias, offset = read_tensor(data, offset, allocator)
+
+			if layer.proj_C.weights != nil {t.tensor_free(layer.proj_C.weights)}
+			layer.proj_C.weights, offset = read_tensor(data, offset, allocator)
+			if layer.proj_C.bias != nil {t.tensor_free(layer.proj_C.bias)}
+			layer.proj_C.bias, offset = read_tensor(data, offset, allocator)
+
+			if layer.proj_Delta.weights != nil {t.tensor_free(layer.proj_Delta.weights)}
+			layer.proj_Delta.weights, offset = read_tensor(data, offset, allocator)
+			if layer.proj_Delta.bias != nil {t.tensor_free(layer.proj_Delta.bias)}
+			layer.proj_Delta.bias, offset = read_tensor(data, offset, allocator)
+
+			if layer.proj_out.weights != nil {t.tensor_free(layer.proj_out.weights)}
+			layer.proj_out.weights, offset = read_tensor(data, offset, allocator)
+			if layer.proj_out.bias != nil {t.tensor_free(layer.proj_out.bias)}
+			layer.proj_out.bias, offset = read_tensor(data, offset, allocator)
+
+			// Load SSM parameters
+			if layer.A != nil {t.tensor_free(layer.A)}
+			layer.A, offset = read_tensor(data, offset, allocator)
+			if layer.D != nil {t.tensor_free(layer.D)}
+			layer.D, offset = read_tensor(data, offset, allocator)
+
+			append(&model.layers, layer)
 		}
 	}
 
@@ -927,9 +997,7 @@ load_checkpoint :: proc(
 // ============================================================================
 // GPT Model Persistence
 // ============================================================================
-// ============================================================================
-// GPT Model Persistence
-// ============================================================================
+
 
 save_gpt_model :: proc(model: ^GPTModel, path: string) -> bool {
 	file, err := os.create(path)
@@ -1758,6 +1826,8 @@ sequential_load_partial :: proc(
 			if layer_type == 16 {types_match = true}
 		case GATLayer:
 			if layer_type == 24 {types_match = true}
+		case MambaLayer:
+			if layer_type == 25 {types_match = true}
 		}
 
 		if !types_match {
@@ -1860,6 +1930,12 @@ sequential_load_partial :: proc(
 				offset = skip_tensor(data, offset) // linear.weights
 				if has_bias != 0 {offset = skip_tensor(data, offset)} 	// linear.bias
 				for _ in 0 ..< 8 {offset = skip_tensor(data, offset)} 	// MHA weights/biases
+			case 25:
+				_, offset = read_i32(data, offset) // d_model
+				_, offset = read_i32(data, offset) // d_state
+				for _ in 0 ..< 12 { 	// 5 linear layers (w+b) + A + D = 12 tensors
+					offset = skip_tensor(data, offset)
+				}
 			}
 			skipped += 1
 			continue
@@ -2231,6 +2307,49 @@ sequential_load_partial :: proc(
 				for _ in 0 ..< 8 {offset = skip_tensor(data, offset)}
 				skipped += 1
 			}
+		case MambaLayer:
+			d_model: i32; d_state: i32
+			d_model, offset = read_i32(data, offset)
+			d_state, offset = read_i32(data, offset)
+
+			if int(d_model) == l.d_model && int(d_state) == l.d_state {
+				if l.proj_x.weights != nil {t.tensor_free(l.proj_x.weights)}
+				l.proj_x.weights, offset = read_tensor(data, offset, allocator)
+				if l.proj_x.bias != nil {t.tensor_free(l.proj_x.bias)}
+				l.proj_x.bias, offset = read_tensor(data, offset, allocator)
+
+				if l.proj_B.weights != nil {t.tensor_free(l.proj_B.weights)}
+				l.proj_B.weights, offset = read_tensor(data, offset, allocator)
+				if l.proj_B.bias != nil {t.tensor_free(l.proj_B.bias)}
+				l.proj_B.bias, offset = read_tensor(data, offset, allocator)
+
+				if l.proj_C.weights != nil {t.tensor_free(l.proj_C.weights)}
+				l.proj_C.weights, offset = read_tensor(data, offset, allocator)
+				if l.proj_C.bias != nil {t.tensor_free(l.proj_C.bias)}
+				l.proj_C.bias, offset = read_tensor(data, offset, allocator)
+
+				if l.proj_Delta.weights != nil {t.tensor_free(l.proj_Delta.weights)}
+				l.proj_Delta.weights, offset = read_tensor(data, offset, allocator)
+				if l.proj_Delta.bias != nil {t.tensor_free(l.proj_Delta.bias)}
+				l.proj_Delta.bias, offset = read_tensor(data, offset, allocator)
+
+				if l.proj_out.weights != nil {t.tensor_free(l.proj_out.weights)}
+				l.proj_out.weights, offset = read_tensor(data, offset, allocator)
+				if l.proj_out.bias != nil {t.tensor_free(l.proj_out.bias)}
+				l.proj_out.bias, offset = read_tensor(data, offset, allocator)
+
+				if l.A != nil {t.tensor_free(l.A)}
+				l.A, offset = read_tensor(data, offset, allocator)
+				if l.D != nil {t.tensor_free(l.D)}
+				l.D, offset = read_tensor(data, offset, allocator)
+
+				loaded += 1
+			} else {
+				for _ in 0 ..< 12 {
+					offset = skip_tensor(data, offset)
+				}
+				skipped += 1
+			}
 		case MaxPool2dLayer, AvgPool2dLayer, Activation, FlattenLayer, DropoutLayer:
 			switch layer_type {
 			case 2:
@@ -2330,6 +2449,12 @@ sequential_load_partial :: proc(
 			_, offset = read_i32(data, offset)
 			_, offset = read_i32(data, offset)
 			for _ in 0 ..< int(num_layers_skip) * 12 {
+				offset = skip_tensor(data, offset)
+			}
+		case 25:
+			_, offset = read_i32(data, offset)
+			_, offset = read_i32(data, offset)
+			for _ in 0 ..< 12 {
 				offset = skip_tensor(data, offset)
 			}
 		}

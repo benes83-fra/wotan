@@ -103,6 +103,19 @@ sequential_freeze_all :: proc(seq: ^Sequential) {
 			l.mha.v_proj.bias.requires_grad = false // (or true)
 			l.mha.out_proj.weights.requires_grad = false // (or true)
 			l.mha.out_proj.bias.requires_grad = false // (or true)
+		case MambaLayer:
+			l.proj_x.weights.requires_grad = false // (or true for unfreeze)
+			if l.proj_x.bias != nil {l.proj_x.bias.requires_grad = false}
+			l.proj_B.weights.requires_grad = false
+			if l.proj_B.bias != nil {l.proj_B.bias.requires_grad = false}
+			l.proj_C.weights.requires_grad = false
+			if l.proj_C.bias != nil {l.proj_C.bias.requires_grad = false}
+			l.proj_Delta.weights.requires_grad = false
+			if l.proj_Delta.bias != nil {l.proj_Delta.bias.requires_grad = false}
+			l.proj_out.weights.requires_grad = false
+			if l.proj_out.bias != nil {l.proj_out.bias.requires_grad = false}
+			l.A.requires_grad = false
+			l.D.requires_grad = false
 		case MaxPool2dLayer, AvgPool2dLayer, DropoutLayer, Activation, FlattenLayer:
 		// No trainable parameters
 		}
@@ -200,6 +213,19 @@ sequential_unfreeze_all :: proc(seq: ^Sequential) {
 			l.mha.v_proj.bias.requires_grad = true // (or true)
 			l.mha.out_proj.weights.requires_grad = true // (or true)
 			l.mha.out_proj.bias.requires_grad = true // (or true)
+		case MambaLayer:
+			l.proj_x.weights.requires_grad = true // (or true for unfreeze)
+			if l.proj_x.bias != nil {l.proj_x.bias.requires_grad = true}
+			l.proj_B.weights.requires_grad = true
+			if l.proj_B.bias != nil {l.proj_B.bias.requires_grad = true}
+			l.proj_C.weights.requires_grad = true
+			if l.proj_C.bias != nil {l.proj_C.bias.requires_grad = true}
+			l.proj_Delta.weights.requires_grad = true
+			if l.proj_Delta.bias != nil {l.proj_Delta.bias.requires_grad = true}
+			l.proj_out.weights.requires_grad = true
+			if l.proj_out.bias != nil {l.proj_out.bias.requires_grad = true}
+			l.A.requires_grad = true
+			l.D.requires_grad = true
 		case MaxPool2dLayer, AvgPool2dLayer, DropoutLayer, Activation, FlattenLayer:
 		// No trainable parameters
 		}
@@ -304,6 +330,19 @@ sequential_freeze_range :: proc(seq: ^Sequential, start: int, end: int) {
 			l.mha.v_proj.bias.requires_grad = false // (or true)
 			l.mha.out_proj.weights.requires_grad = false // (or true)
 			l.mha.out_proj.bias.requires_grad = false // (or true)
+		case MambaLayer:
+			l.proj_x.weights.requires_grad = false
+			if l.proj_x.bias != nil {l.proj_x.bias.requires_grad = false}
+			l.proj_B.weights.requires_grad = false
+			if l.proj_B.bias != nil {l.proj_B.bias.requires_grad = false}
+			l.proj_C.weights.requires_grad = false
+			if l.proj_C.bias != nil {l.proj_C.bias.requires_grad = false}
+			l.proj_Delta.weights.requires_grad = false
+			if l.proj_Delta.bias != nil {l.proj_Delta.bias.requires_grad = false}
+			l.proj_out.weights.requires_grad = false
+			if l.proj_out.bias != nil {l.proj_out.bias.requires_grad = false}
+			l.A.requires_grad = false
+			l.D.requires_grad = false
 		case MaxPool2dLayer, AvgPool2dLayer, DropoutLayer, Activation, FlattenLayer:
 		// No trainable parameters
 		}

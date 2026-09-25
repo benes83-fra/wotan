@@ -31,6 +31,7 @@ Layer :: union {
 	TransformerEncoderBlock,
 	TransformerEncoder,
 	GATLayer,
+	MambaLayer,
 }
 
 // ============================================================================
@@ -144,6 +145,16 @@ sequential_forward :: proc(s: ^Sequential, input: ^t.Tensor) -> ^t.Tensor {
 		case GATLayer:
 			// ✅ Use the stored adjacency matrix
 			x = gat_layer_forward(&l, x, l.adjacency)
+		case MambaLayer:
+			batch := x.shape[0]
+			seq_len := x.shape[1]
+			d_model := x.shape[2]
+			d_state := l.d_state
+			h_0_data := la.matrix_new(f64, 1, batch * d_model * d_state, x.allocator)
+			h_0 := t.tensor_new(h_0_data, false, x.allocator)
+			h_0.shape = [4]int{batch, d_model, d_state, 1}
+			x = mamba_layer_forward(&l, x, h_0)
+			t.tensor_free(h_0)
 		}
 	}
 	return x
@@ -258,6 +269,19 @@ sequential_add_to_sgd :: proc(seq: ^Sequential, opt: ^SGD) {
 			if l.mha.k_proj.weights.requires_grad {sgd_add_param(opt, l.mha.k_proj.weights)}
 			if l.mha.v_proj.weights.requires_grad {sgd_add_param(opt, l.mha.v_proj.weights)}
 			if l.mha.out_proj.weights.requires_grad {sgd_add_param(opt, l.mha.out_proj.weights)}
+		case MambaLayer:
+			sgd_add_param(opt, l.proj_x.weights)
+			if l.proj_x.bias != nil {sgd_add_param(opt, l.proj_x.bias)}
+			sgd_add_param(opt, l.proj_B.weights)
+			if l.proj_B.bias != nil {sgd_add_param(opt, l.proj_B.bias)}
+			sgd_add_param(opt, l.proj_C.weights)
+			if l.proj_C.bias != nil {sgd_add_param(opt, l.proj_C.bias)}
+			sgd_add_param(opt, l.proj_Delta.weights)
+			if l.proj_Delta.bias != nil {sgd_add_param(opt, l.proj_Delta.bias)}
+			sgd_add_param(opt, l.proj_out.weights)
+			if l.proj_out.bias != nil {sgd_add_param(opt, l.proj_out.bias)}
+			sgd_add_param(opt, l.A)
+			sgd_add_param(opt, l.D)
 		}
 	}
 }
@@ -403,6 +427,24 @@ sequential_add_to_adam :: proc(seq: ^Sequential, opt: ^Adam) {
 			if l.mha.k_proj.weights.requires_grad {adam_add_param(opt, l.mha.k_proj.weights)}
 			if l.mha.v_proj.weights.requires_grad {adam_add_param(opt, l.mha.v_proj.weights)}
 			if l.mha.out_proj.weights.requires_grad {adam_add_param(opt, l.mha.out_proj.weights)}
+		case MambaLayer:
+			if l.proj_x.weights.requires_grad {adam_add_param(opt, l.proj_x.weights)}
+			if l.proj_x.bias != nil &&
+			   l.proj_x.bias.requires_grad {adam_add_param(opt, l.proj_x.bias)}
+			if l.proj_B.weights.requires_grad {adam_add_param(opt, l.proj_B.weights)}
+			if l.proj_B.bias != nil &&
+			   l.proj_B.bias.requires_grad {adam_add_param(opt, l.proj_B.bias)}
+			if l.proj_C.weights.requires_grad {adam_add_param(opt, l.proj_C.weights)}
+			if l.proj_C.bias != nil &&
+			   l.proj_C.bias.requires_grad {adam_add_param(opt, l.proj_C.bias)}
+			if l.proj_Delta.weights.requires_grad {adam_add_param(opt, l.proj_Delta.weights)}
+			if l.proj_Delta.bias != nil &&
+			   l.proj_Delta.bias.requires_grad {adam_add_param(opt, l.proj_Delta.bias)}
+			if l.proj_out.weights.requires_grad {adam_add_param(opt, l.proj_out.weights)}
+			if l.proj_out.bias != nil &&
+			   l.proj_out.bias.requires_grad {adam_add_param(opt, l.proj_out.bias)}
+			if l.A.requires_grad {adam_add_param(opt, l.A)}
+			if l.D.requires_grad {adam_add_param(opt, l.D)}
 		case MaxPool2dLayer, AvgPool2dLayer, DropoutLayer, Activation, FlattenLayer:
 		// No trainable parameters
 		}
@@ -449,6 +491,8 @@ sequential_free :: proc(seq: ^Sequential) {
 			transformer_encoder_free(&l)
 		case GATLayer:
 			gat_layer_free(&l)
+		case MambaLayer:
+			mamba_layer_free(&l)
 		}
 
 	}

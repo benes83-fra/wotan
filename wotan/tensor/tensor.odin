@@ -60,7 +60,7 @@ Op :: enum {
 	Div,
 	NormCDF,
 	SumDim1,
-	Softmax, // <--- ADD THIS
+	Softmax,
 	Entropy,
 	BCELoss,
 	PermuteLOB,
@@ -68,6 +68,8 @@ Op :: enum {
 	Concat,
 	NormalizeTime,
 	LogSumExpDim1,
+	Softplus, // ✅ ADD
+	SSM, // ✅ ADD
 }
 
 PoolParams :: struct {
@@ -1258,6 +1260,210 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 					}
 				}
 			}
+		case .Softplus:
+			a_in := node.inputs[0]
+			if a_in.requires_grad {
+				tensor_ensure_grad(a_in)
+				for i in 0 ..< len(a_in.grad.data) {
+					x := a_in.data.data[i]
+					sig := 1.0 / (1.0 + math.exp(-x))
+					a_in.grad.data[i] += node.grad.data[i] * sig
+				}
+			}
+
+		case .SSM:
+			x_in := node.inputs[0]
+			h_0_in := node.inputs[1]
+			A_in := node.inputs[2]
+			B_in := node.inputs[3]
+			C_in := node.inputs[4]
+			Delta_in := node.inputs[5]
+			D_in := node.inputs[6]
+
+			if len(node.grad.data) == 0 {continue}
+
+			batch := x_in.shape[0]
+			seq_len := x_in.shape[1]
+			d_model := x_in.shape[2]
+			d_state := A_in.shape[1]
+
+			dx := make([]f64, len(x_in.data.data), allocator)
+			dh_0 := make([]f64, len(h_0_in.data.data), allocator)
+			dA := make([]f64, len(A_in.data.data), allocator)
+			dB := make([]f64, len(B_in.data.data), allocator)
+			dC := make([]f64, len(C_in.data.data), allocator)
+			dDelta := make([]f64, len(Delta_in.data.data), allocator)
+			dD := make([]f64, len(D_in.data.data), allocator)
+
+			h_t := make([]f64, batch * d_model * d_state, allocator)
+			copy(h_t, h_0_in.data.data)
+			h_prev := make([]f64, batch * d_model * d_state, allocator)
+			h_next := make([]f64, batch * d_model * d_state, allocator)
+			y_t := make([]f64, batch * d_model, allocator)
+
+			x_s := make([]f64, batch * d_model, allocator)
+			B_s := make([]f64, batch * d_state, allocator)
+			C_s := make([]f64, batch * d_state, allocator)
+			Delta_s := make([]f64, batch * d_model, allocator)
+
+			dh_next := make([]f64, batch * d_model * d_state, allocator)
+			dh_prev := make([]f64, batch * d_model * d_state, allocator)
+			dy_t := make([]f64, batch * d_model, allocator)
+
+			dx_s := make([]f64, batch * d_model, allocator)
+			dB_s := make([]f64, batch * d_state, allocator)
+			dC_s := make([]f64, batch * d_state, allocator)
+			dDelta_s := make([]f64, batch * d_model, allocator)
+
+			defer {
+				delete(dx, allocator); delete(dh_0, allocator); delete(dA, allocator)
+				delete(
+					dB,
+					allocator,
+				); delete(dC, allocator); delete(dDelta, allocator); delete(dD, allocator)
+				delete(h_t, allocator); delete(h_prev, allocator); delete(h_next, allocator)
+				delete(y_t, allocator); delete(x_s, allocator); delete(B_s, allocator)
+				delete(C_s, allocator); delete(Delta_s, allocator); delete(dh_next, allocator)
+				delete(dy_t, allocator); delete(dx_s, allocator); delete(dB_s, allocator)
+				delete(dC_s, allocator); delete(dDelta_s, allocator)
+			}
+
+			h_states := make([]f64, seq_len * batch * d_model * d_state, allocator)
+			defer delete(h_states, allocator)
+
+			// 1. Recompute all forward states (Checkpointing)
+			copy(h_t, h_0_in.data.data)
+			for s in 0 ..< seq_len {
+				copy(
+					h_states[s * batch * d_model * d_state:(s + 1) * batch * d_model * d_state],
+					h_t,
+				)
+				for b in 0 ..< batch {
+					src_x := b * seq_len * d_model + s * d_model
+					copy(x_s[b * d_model:(b + 1) * d_model], x_in.data.data[src_x:src_x + d_model])
+					src_B := b * seq_len * d_state + s * d_state
+					copy(B_s[b * d_state:(b + 1) * d_state], B_in.data.data[src_B:src_B + d_state])
+					src_C := b * seq_len * d_state + s * d_state
+					copy(C_s[b * d_state:(b + 1) * d_state], C_in.data.data[src_C:src_C + d_state])
+					src_D := b * seq_len * d_model + s * d_model
+					copy(
+						Delta_s[b * d_model:(b + 1) * d_model],
+						Delta_in.data.data[src_D:src_D + d_model],
+					)
+				}
+				_ssm_step_forward(
+					x_s,
+					h_t,
+					A_in.data.data,
+					B_s,
+					C_s,
+					Delta_s,
+					D_in.data.data,
+					h_next,
+					y_t,
+					batch,
+					d_model,
+					d_state,
+				)
+				copy(h_t, h_next)
+			}
+
+			// 2. Backward pass
+			for s := seq_len - 1; s >= 0; s -= 1 {
+				copy(
+					h_prev,
+					h_states[s * batch * d_model * d_state:(s + 1) * batch * d_model * d_state],
+				)
+
+				for b in 0 ..< batch {
+					src_x := b * seq_len * d_model + s * d_model
+					copy(x_s[b * d_model:(b + 1) * d_model], x_in.data.data[src_x:src_x + d_model])
+					src_B := b * seq_len * d_state + s * d_state
+					copy(B_s[b * d_state:(b + 1) * d_state], B_in.data.data[src_B:src_B + d_state])
+					src_C := b * seq_len * d_state + s * d_state
+					copy(C_s[b * d_state:(b + 1) * d_state], C_in.data.data[src_C:src_C + d_state])
+					src_D := b * seq_len * d_model + s * d_model
+					copy(
+						Delta_s[b * d_model:(b + 1) * d_model],
+						Delta_in.data.data[src_D:src_D + d_model],
+					)
+
+					src_dy := b * seq_len * d_model + s * d_model
+					copy(
+						dy_t[b * d_model:(b + 1) * d_model],
+						node.grad.data[src_dy:src_dy + d_model],
+					)
+				}
+
+				for i in 0 ..< len(dx_s) {dx_s[i] = 0.0}
+				for i in 0 ..< len(dB_s) {dB_s[i] = 0.0}
+				for i in 0 ..< len(dC_s) {dC_s[i] = 0.0}
+				for i in 0 ..< len(dDelta_s) {dDelta_s[i] = 0.0}
+
+				for b in 0 ..< batch {
+					for d in 0 ..< d_model {
+						idx_x := b * d_model + d
+						x_val := x_s[idx_x]
+						delta := Delta_s[idx_x]
+						dy_val := dy_t[idx_x]
+						D_val := D_in.data.data[d]
+
+						dx_s[idx_x] += dy_val * D_val
+						dD[d] += dy_val * x_val
+
+						for n in 0 ..< d_state {
+							idx_h := (b * d_model + d) * d_state + n
+							idx_A := d * d_state + n
+							idx_BC := b * d_state + n
+
+							A_val := A_in.data.data[idx_A]
+							A_bar := math.exp(delta * A_val)
+							B_bar := delta * B_s[idx_BC]
+
+							h_prev_val := h_prev[idx_h]
+							dh_n := dh_next[idx_h] + dy_val * C_s[idx_BC]
+
+							h_n := A_bar * h_prev_val + B_bar * x_val
+							dC_s[idx_BC] += dy_val * h_n
+							dh_prev[idx_h] = dh_n * A_bar
+							dA[idx_A] += dh_n * h_prev_val * delta * A_bar
+							dB_s[idx_BC] += dh_n * x_val * delta
+							dx_s[idx_x] += dh_n * B_bar
+							dDelta_s[idx_x] +=
+								dh_n * (h_prev_val * A_val * A_bar + x_val * B_s[idx_BC])
+						}
+					}
+				}
+
+				for b in 0 ..< batch {
+					src_x := b * seq_len * d_model + s * d_model
+					for i in 0 ..< d_model {dx[src_x + i] += dx_s[b * d_model + i]}
+					src_B := b * seq_len * d_state + s * d_state
+					for i in 0 ..< d_state {dB[src_B + i] += dB_s[b * d_state + i]}
+					src_C := b * seq_len * d_state + s * d_state
+					for i in 0 ..< d_state {dC[src_C + i] += dC_s[b * d_state + i]}
+					src_D := b * seq_len * d_model + s * d_model
+					for i in 0 ..< d_model {dDelta[src_D + i] += dDelta_s[b * d_model + i]}
+				}
+			}
+
+			copy(dh_0, dh_prev)
+
+			if x_in.requires_grad &&
+			   len(x_in.grad.data) > 0 {l.vec_add_simd(x_in.grad.data, dx, x_in.grad.data)}
+			if h_0_in.requires_grad &&
+			   len(h_0_in.grad.data) > 0 {l.vec_add_simd(h_0_in.grad.data, dh_0, h_0_in.grad.data)}
+			if A_in.requires_grad &&
+			   len(A_in.grad.data) > 0 {l.vec_add_simd(A_in.grad.data, dA, A_in.grad.data)}
+			if B_in.requires_grad &&
+			   len(B_in.grad.data) > 0 {l.vec_add_simd(B_in.grad.data, dB, B_in.grad.data)}
+			if C_in.requires_grad &&
+			   len(C_in.grad.data) > 0 {l.vec_add_simd(C_in.grad.data, dC, C_in.grad.data)}
+			if Delta_in.requires_grad &&
+			   len(Delta_in.grad.data) >
+				   0 {l.vec_add_simd(Delta_in.grad.data, dDelta, Delta_in.grad.data)}
+			if D_in.requires_grad &&
+			   len(D_in.grad.data) > 0 {l.vec_add_simd(D_in.grad.data, dD, D_in.grad.data)}
 		case .ScaledDotProductAttention:
 			Q_in := node.inputs[0]
 			K_in := node.inputs[1]
@@ -4991,5 +5197,160 @@ tensor_logsumexp_dim1 :: proc(
 		append(&out.inputs, q)
 		append(&out.int_metadata, num_actions)
 	}
+	return out
+}
+// ============================================================================
+// Softplus: out = log(1 + exp(x))
+// Backward: grad_a = grad_out * sigmoid(x)
+// ============================================================================
+tensor_softplus :: proc(a: ^Tensor) -> ^Tensor {
+	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
+	for i in 0 ..< len(a.data.data) {
+		x := a.data.data[i]
+		// Numerically stable softplus: x + log(1 + exp(-abs(x)))
+		out_data.data[i] = x + math.ln_f64(1.0 + math.exp(-math.abs(x)))
+	}
+	out := tensor_new(out_data, a.requires_grad, a.allocator)
+	out.shape = a.shape
+	if out.requires_grad {
+		out.op = .Softplus
+		append(&out.inputs, a)
+	}
+	return out
+}
+// ============================================================================
+// Selective State Space Model (Mamba-style) Operations
+// ============================================================================
+
+_ssm_step_forward :: proc(
+	x: []f64,
+	h_prev: []f64,
+	A: []f64,
+	B: []f64,
+	C: []f64,
+	Delta: []f64,
+	D: []f64,
+	h_next: []f64,
+	y: []f64,
+	batch, d_model, d_state: int,
+) {
+	for b in 0 ..< batch {
+		for d in 0 ..< d_model {
+			idx_x := b * d_model + d
+			x_val := x[idx_x]
+			delta := Delta[idx_x]
+			D_val := D[d]
+
+			y_val := x_val * D_val // Skip connection
+			for n in 0 ..< d_state {
+				idx_h := (b * d_model + d) * d_state + n
+				idx_A := d * d_state + n
+				idx_BC := b * d_state + n
+
+				A_val := A[idx_A]
+				A_bar := math.exp(delta * A_val)
+				B_bar := delta * B[idx_BC]
+
+				h_val := A_bar * h_prev[idx_h] + B_bar * x_val
+				h_next[idx_h] = h_val
+
+				y_val += C[idx_BC] * h_val
+			}
+			y[idx_x] = y_val
+		}
+	}
+}
+
+tensor_ssm :: proc(
+	x: ^Tensor, // [batch, seq_len, d_model]
+	h_0: ^Tensor, // [batch, d_model, d_state] (flattened)
+	A: ^Tensor, // [d_model, d_state]
+	B: ^Tensor, // [batch, seq_len, d_state]
+	C: ^Tensor, // [batch, seq_len, d_state]
+	Delta: ^Tensor, // [batch, seq_len, d_model]
+	D: ^Tensor, // [1, d_model]
+) -> ^Tensor {
+	batch := x.shape[0]
+	seq_len := x.shape[1]
+	d_model := x.shape[2]
+	d_state := A.shape[1]
+
+	out_data := l.matrix_new(f64, 1, batch * seq_len * d_model, x.allocator)
+
+	h_t := make([]f64, batch * d_model * d_state, context.allocator)
+	copy(h_t, h_0.data.data)
+	h_next := make([]f64, batch * d_model * d_state, context.allocator)
+	y_t := make([]f64, batch * d_model, context.allocator)
+
+	defer {
+		delete(h_t, context.allocator)
+		delete(h_next, context.allocator)
+		delete(y_t, context.allocator)
+	}
+
+	for s in 0 ..< seq_len {
+		x_s := make([]f64, batch * d_model, context.allocator)
+		B_s := make([]f64, batch * d_state, context.allocator)
+		C_s := make([]f64, batch * d_state, context.allocator)
+		Delta_s := make([]f64, batch * d_model, context.allocator)
+
+		for b in 0 ..< batch {
+			src_x := b * seq_len * d_model + s * d_model
+			copy(x_s[b * d_model:(b + 1) * d_model], x.data.data[src_x:src_x + d_model])
+			src_B := b * seq_len * d_state + s * d_state
+			copy(B_s[b * d_state:(b + 1) * d_state], B.data.data[src_B:src_B + d_state])
+			src_C := b * seq_len * d_state + s * d_state
+			copy(C_s[b * d_state:(b + 1) * d_state], C.data.data[src_C:src_C + d_state])
+			src_D := b * seq_len * d_model + s * d_model
+			copy(Delta_s[b * d_model:(b + 1) * d_model], Delta.data.data[src_D:src_D + d_model])
+		}
+
+		_ssm_step_forward(
+			x_s,
+			h_t,
+			A.data.data,
+			B_s,
+			C_s,
+			Delta_s,
+			D.data.data,
+			h_next,
+			y_t,
+			batch,
+			d_model,
+			d_state,
+		)
+
+		for b in 0 ..< batch {
+			dst_y := b * seq_len * d_model + s * d_model
+			copy(out_data.data[dst_y:dst_y + d_model], y_t[b * d_model:(b + 1) * d_model])
+			copy(
+				h_t[b * d_model * d_state:(b + 1) * d_model * d_state],
+				h_next[b * d_model * d_state:(b + 1) * d_model * d_state],
+			)
+		}
+
+		delete(x_s, context.allocator)
+		delete(B_s, context.allocator)
+		delete(C_s, context.allocator)
+		delete(Delta_s, context.allocator)
+	}
+
+	out := tensor_new(
+		out_data,
+		x.requires_grad ||
+		A.requires_grad ||
+		B.requires_grad ||
+		C.requires_grad ||
+		Delta.requires_grad ||
+		D.requires_grad,
+		x.allocator,
+	)
+	out.shape = [4]int{batch, seq_len, d_model, 1}
+
+	if out.requires_grad {
+		out.op = .SSM
+		append(&out.inputs, x, h_0, A, B, C, Delta, D)
+	}
+
 	return out
 }

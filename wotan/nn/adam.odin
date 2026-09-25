@@ -288,6 +288,24 @@ sequential_add_trainable_to_adam :: proc(seq: ^Sequential, opt: ^Adam) {
 			if l.mha.k_proj.weights.requires_grad {adam_add_param(opt, l.mha.k_proj.weights)}
 			if l.mha.v_proj.weights.requires_grad {adam_add_param(opt, l.mha.v_proj.weights)}
 			if l.mha.out_proj.weights.requires_grad {adam_add_param(opt, l.mha.out_proj.weights)}
+		case MambaLayer:
+			if l.proj_x.weights.requires_grad {adam_add_param(opt, l.proj_x.weights)}
+			if l.proj_x.bias != nil &&
+			   l.proj_x.bias.requires_grad {adam_add_param(opt, l.proj_x.bias)}
+			if l.proj_B.weights.requires_grad {adam_add_param(opt, l.proj_B.weights)}
+			if l.proj_B.bias != nil &&
+			   l.proj_B.bias.requires_grad {adam_add_param(opt, l.proj_B.bias)}
+			if l.proj_C.weights.requires_grad {adam_add_param(opt, l.proj_C.weights)}
+			if l.proj_C.bias != nil &&
+			   l.proj_C.bias.requires_grad {adam_add_param(opt, l.proj_C.bias)}
+			if l.proj_Delta.weights.requires_grad {adam_add_param(opt, l.proj_Delta.weights)}
+			if l.proj_Delta.bias != nil &&
+			   l.proj_Delta.bias.requires_grad {adam_add_param(opt, l.proj_Delta.bias)}
+			if l.proj_out.weights.requires_grad {adam_add_param(opt, l.proj_out.weights)}
+			if l.proj_out.bias != nil &&
+			   l.proj_out.bias.requires_grad {adam_add_param(opt, l.proj_out.bias)}
+			if l.A.requires_grad {adam_add_param(opt, l.A)}
+			if l.D.requires_grad {adam_add_param(opt, l.D)}
 		case MaxPool2dLayer, AvgPool2dLayer, DropoutLayer, Activation, FlattenLayer:
 		// No trainable parameters
 		}
