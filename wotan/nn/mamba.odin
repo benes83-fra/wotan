@@ -11,7 +11,6 @@ import "core:mem"
 // ============================================================================
 // Mamba Layer (Selective State Space Model)
 // ============================================================================
-
 MambaLayer :: struct {
 	d_model:    int,
 	d_state:    int,
@@ -19,8 +18,8 @@ MambaLayer :: struct {
 	proj_B:     LinearLayer,
 	proj_C:     LinearLayer,
 	proj_Delta: LinearLayer,
-	A:          ^t.Tensor, // [d_model, d_state]
-	D:          ^t.Tensor, // [1, d_model] (Skip connection)
+	A:          ^t.Tensor, // ✅ CHANGED: Trainable theta_A (was A)
+	D:          ^t.Tensor,
 	proj_out:   LinearLayer,
 }
 
@@ -39,22 +38,26 @@ mamba_layer_new :: proc(
 	layer.proj_Delta = linear_layer_new(d_model, d_model, allocator)
 	layer.proj_out = linear_layer_new(d_model, d_model, allocator)
 
-	// Initialize A (Diagonal state transition matrix)
-	A_data := l.matrix_new(f64, d_model, d_state, allocator)
+	// ✅ Initialize A_param (theta_A)
+	// We want the actual A to be in [-0.5, -4.0] for stable decay.
+	// Since A = -exp(theta_A), theta_A = log(-A).
+	A_param_data := l.matrix_new(f64, d_model, d_state, allocator)
 	for d in 0 ..< d_model {
 		for n in 0 ..< d_state {
-			// Stable initialization
 			frac := f64(n) / f64(d_state - 1)
-			A_data.data[d * d_state + n] = -(0.5 * math.pow(8.0, frac))
+			target_A := -(0.5 * math.pow(8.0, frac)) // -0.5 to -4.0
+			A_param_data.data[d * d_state + n] = math.ln_f64(-target_A)
 		}
 	}
-	layer.A = t.tensor_new(A_data, true, allocator)
+	layer.A = t.tensor_new(A_param_data, true, allocator)
 	layer.A.shape = [4]int{d_model, d_state, 1, 1}
 
 	// Initialize D (Skip connection)
 	D_data := l.matrix_new(f64, 1, d_model, allocator)
 	for i in 0 ..< d_model {D_data.data[i] = 1.0}
-	layer.D = t.tensor_new(D_data, false, allocator)
+	// ✅ UNFROZEN: Safe to train now that softplus is fixed!
+	layer.D = t.tensor_new(D_data, true, allocator)
+
 	if layer.proj_Delta.bias != nil {
 		for i in 0 ..< d_model {
 			layer.proj_Delta.bias.data.data[i] = -2.0
@@ -79,15 +82,33 @@ mamba_layer_forward :: proc(layer: ^MambaLayer, x: ^t.Tensor, h_0: ^t.Tensor) ->
 	B_proj := linear_forward(&layer.proj_B, x)
 	C_proj := linear_forward(&layer.proj_C, x)
 	delta_raw := linear_forward(&layer.proj_Delta, x)
-
-	// 2. Apply softplus to Delta to ensure it is positive
 	Delta := t.tensor_softplus(delta_raw)
+	if layer.proj_x.weights.requires_grad {
+		x_proj.requires_grad = true
+		B_proj.requires_grad = true
+		C_proj.requires_grad = true
+		delta_raw.requires_grad = true
+		Delta.requires_grad = true
+	}
+	// 2. ✅ REPARAMETERIZE A: A = -exp(theta_A)
+	// This mathematically guarantees A is ALWAYS negative, preventing explosions!
+	A_pos := t.tensor_exp(layer.A)
+	A := t.tensor_neg(A_pos)
 
 	// 3. Selective SSM
-	ssm_out := t.tensor_ssm(x_proj, h_0, layer.A, B_proj, C_proj, Delta, layer.D)
+	ssm_out := t.tensor_ssm(x_proj, h_0, A, B_proj, C_proj, Delta, layer.D)
+
+	// Clean up A intermediates if we aren't building an autograd graph
+	if !layer.A.requires_grad {
+		t.tensor_free(A_pos)
+		t.tensor_free(A)
+	}
 
 	// 4. Output projection
 	out := linear_forward(&layer.proj_out, ssm_out)
 
 	return out
+}
+mamba_layer_constrain :: proc(layer: ^MambaLayer) {
+	t.tensor_clip_weights(layer.A, -8.0, -0.05)
 }

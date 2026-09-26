@@ -1325,7 +1325,7 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 				delete(y_t, allocator); delete(x_s, allocator); delete(B_s, allocator)
 				delete(C_s, allocator); delete(Delta_s, allocator); delete(dh_next, allocator)
 				delete(dy_t, allocator); delete(dx_s, allocator); delete(dB_s, allocator)
-				delete(dC_s, allocator); delete(dDelta_s, allocator)
+				delete(dC_s, allocator); delete(dDelta_s, allocator); delete(dh_prev, allocator)
 			}
 
 			h_states := make([]f64, seq_len * batch * d_model * d_state, allocator)
@@ -5357,7 +5357,20 @@ tensor_ssm :: proc(
 
 	if out.requires_grad {
 		out.op = .SSM
-		append(&out.inputs, x, h_0, A, B, C, Delta, D)
+		// ✅ CRITICAL: Append ALL 7 inputs so tensor_free_graph can find them!
+		append(&out.inputs, x) // x_proj
+		append(&out.inputs, h_0)
+		append(&out.inputs, A)
+		append(&out.inputs, B) // B_proj
+		append(&out.inputs, C) // C_proj
+		append(&out.inputs, Delta)
+		append(&out.inputs, D) // layer.D
+
+		// If your backward pass uses int_metadata for shapes, keep that too
+		append(&out.int_metadata, batch)
+		append(&out.int_metadata, seq_len)
+		append(&out.int_metadata, d_model)
+		append(&out.int_metadata, d_state)
 	}
 
 	return out

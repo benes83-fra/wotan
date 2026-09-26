@@ -154,8 +154,11 @@ mock_tokenize :: proc(
 	ids_data.data[0] = 101.0
 	seg_data.data[0] = 0.0 // Segment A
 
-	// Fill middle with dummy token IDs representing the text
-	word_count := len(strings.split(text, " "))
+	// ✅ FIX: Bind the slice and defer its deletion to free the backing array
+	words := strings.split(text, " ")
+	defer delete(words)
+
+	word_count := len(words)
 	for i in 1 ..< max_seq_len - 1 {
 		if i <= word_count {
 			ids_data.data[i] = 1000.0 + f64(i) // Mock token ID
