@@ -44,7 +44,8 @@ mamba_layer_new :: proc(
 	for d in 0 ..< d_model {
 		for n in 0 ..< d_state {
 			// Stable initialization
-			A_data.data[d * d_state + n] = -math.exp_f64(f64(n) / f64(d_state) * math.ln_f64(10.0))
+			frac := f64(n) / f64(d_state - 1)
+			A_data.data[d * d_state + n] = -(0.5 * math.pow(8.0, frac))
 		}
 	}
 	layer.A = t.tensor_new(A_data, true, allocator)
@@ -54,7 +55,11 @@ mamba_layer_new :: proc(
 	D_data := l.matrix_new(f64, 1, d_model, allocator)
 	for i in 0 ..< d_model {D_data.data[i] = 1.0}
 	layer.D = t.tensor_new(D_data, true, allocator)
-
+	if layer.proj_Delta.bias != nil {
+		for i in 0 ..< d_model {
+			layer.proj_Delta.bias.data.data[i] = -2.0
+		}
+	}
 	return layer
 }
 
