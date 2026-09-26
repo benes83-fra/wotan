@@ -1445,6 +1445,7 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 					src_D := b * seq_len * d_model + s * d_model
 					for i in 0 ..< d_model {dDelta[src_D + i] += dDelta_s[b * d_model + i]}
 				}
+				copy(dh_next, dh_prev)
 			}
 
 			copy(dh_0, dh_prev)
@@ -5199,6 +5200,7 @@ tensor_logsumexp_dim1 :: proc(
 	}
 	return out
 }
+
 // ============================================================================
 // Softplus: out = log(1 + exp(x))
 // Backward: grad_a = grad_out * sigmoid(x)
@@ -5207,8 +5209,14 @@ tensor_softplus :: proc(a: ^Tensor) -> ^Tensor {
 	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
 	for i in 0 ..< len(a.data.data) {
 		x := a.data.data[i]
-		// Numerically stable softplus: x + log(1 + exp(-abs(x)))
-		out_data.data[i] = x + math.ln_f64(1.0 + math.exp(-math.abs(x)))
+		// ✅ FIX: Correct numerically stable softplus
+		if x > 20.0 {
+			out_data.data[i] = x
+		} else if x < -20.0 {
+			out_data.data[i] = math.exp(x)
+		} else {
+			out_data.data[i] = math.ln_f64(1.0 + math.exp(x))
+		}
 	}
 	out := tensor_new(out_data, a.requires_grad, a.allocator)
 	out.shape = a.shape

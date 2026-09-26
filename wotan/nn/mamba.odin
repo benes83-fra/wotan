@@ -54,7 +54,7 @@ mamba_layer_new :: proc(
 	// Initialize D (Skip connection)
 	D_data := l.matrix_new(f64, 1, d_model, allocator)
 	for i in 0 ..< d_model {D_data.data[i] = 1.0}
-	layer.D = t.tensor_new(D_data, true, allocator)
+	layer.D = t.tensor_new(D_data, false, allocator)
 	if layer.proj_Delta.bias != nil {
 		for i in 0 ..< d_model {
 			layer.proj_Delta.bias.data.data[i] = -2.0

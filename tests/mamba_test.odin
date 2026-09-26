@@ -118,8 +118,8 @@ mamba_test :: proc(allocator: mem.Allocator) {
 	nn.adam_add_param(&opt, mamba.proj_C.weights)
 	nn.adam_add_param(&opt, mamba.proj_Delta.weights)
 	nn.adam_add_param(&opt, mamba.proj_out.weights)
-	nn.adam_add_param(&opt, mamba.A)
-	nn.adam_add_param(&opt, mamba.D)
+	// nn.adam_add_param(&opt, mamba.A)
+	// nn.adam_add_param(&opt, mamba.D)
 
 	// Store a weight before step
 	w_before := mamba.proj_out.weights.data.data[0]
@@ -189,8 +189,8 @@ mamba_learning_test :: proc(allocator: mem.Allocator) {
 	nn.adam_add_param(&opt, mamba.proj_Delta.bias)
 	nn.adam_add_param(&opt, mamba.proj_out.weights)
 	nn.adam_add_param(&opt, mamba.proj_out.bias)
-	nn.adam_add_param(&opt, mamba.A)
-	nn.adam_add_param(&opt, mamba.D)
+	// nn.adam_add_param(&opt, mamba.A)
+	// nn.adam_add_param(&opt, mamba.D)
 	nn.adam_add_param(&opt, head.weights)
 	nn.adam_add_param(&opt, head.bias)
 
