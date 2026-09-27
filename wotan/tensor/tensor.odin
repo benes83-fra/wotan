@@ -1281,10 +1281,9 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 			D_in := node.inputs[6]
 
 			if len(node.grad.data) == 0 {continue}
-
-			batch := x_in.shape[0]
-			seq_len := x_in.shape[1]
-			d_model := x_in.shape[2]
+			batch := node.shape[0]
+			seq_len := node.shape[1]
+			d_model := node.shape[2]
 			d_state := A_in.shape[1]
 
 			dx := make([]f64, len(x_in.data.data), allocator)
@@ -5009,7 +5008,7 @@ tensor_permute_lob :: proc(
 	alloc: mem.Allocator,
 ) -> ^Tensor {
 	feat_dim := c_out * l_out
-	out_data := l.matrix_new(f64, batch * t_out, feat_dim, alloc)
+	out_data := l.matrix_new(f64, 1, batch * t_out * feat_dim, alloc)
 
 	for b: int = 0; b < batch; b += 1 {
 		for tt: int = 0; tt < t_out; tt += 1 {

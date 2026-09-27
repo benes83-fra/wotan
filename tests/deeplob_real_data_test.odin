@@ -224,6 +224,7 @@ deeplob_real_data_test :: proc(allocator: mem.Allocator) {
 		price_levels = price_levels,
 		num_classes  = num_classes,
 		hidden_dim   = 64,
+		seq_backend  = .Mamba,
 	}
 	model := ml_fin.deeplob_new(config, allocator)
 	defer ml_fin.deeplob_free(model)
@@ -327,6 +328,7 @@ deeplob_real_data_sharpe_test :: proc(allocator: mem.Allocator) {
 		price_levels = price_levels,
 		num_classes  = num_classes,
 		hidden_dim   = 64,
+		seq_backend  = .Mamba,
 	}
 	model := ml_fin.deeplob_new(config, allocator)
 	defer ml_fin.deeplob_free(model)

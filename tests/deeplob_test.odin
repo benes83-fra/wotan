@@ -17,6 +17,7 @@ deeplob_test :: proc(allocator: mem.Allocator) {
 		price_levels = 10,
 		num_classes  = 3,
 		hidden_dim   = 64,
+		seq_backend  = .Mamba,
 	}
 
 	model := ml_fin.deeplob_new(config, allocator)
