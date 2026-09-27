@@ -15,12 +15,13 @@ DeepLOBConfig :: struct {
 	num_classes:  int,
 	hidden_dim:   int,
 	dropout_prob: f64,
+	seq_backend:  nn.SeqBackend,
 }
 
 DeepLOB :: struct {
 	cnn:       ^nn.Sequential,
 	inception: InceptionBlock,
-	lstm:      nn.LSTMLayer,
+	seq_layer: ^nn.Sequential,
 	fc_head:   nn.LinearLayer,
 	config:    DeepLOBConfig,
 	allocator: mem.Allocator,
@@ -148,35 +149,36 @@ deeplob_new :: proc(
 	}
 
 	model.cnn = nn.sequential_new(allocator)
-
 	nn.sequential_add(model.cnn, nn.conv2d_layer_new(3, 16, 3, 1, 1, true, allocator))
 	nn.sequential_add(model.cnn, nn.Activation.ReLU)
-
 	nn.sequential_add(model.cnn, nn.conv2d_layer_new(16, 32, 3, 1, 1, true, allocator))
 	nn.sequential_add(model.cnn, nn.Activation.ReLU)
 
-	// Inception Module: takes 32 channels, outputs exactly 32 channels
 	inception_out_channels := 32
 	model.inception = inception_block_new(32, inception_out_channels, allocator)
-
 	nn.sequential_add(model.cnn, nn.maxpool2d_layer_new(2, 2))
 
-	// LSTM: input features = C_out * L_out
-	// After MaxPool2d, L_out = price_levels / 2
-	lstm_feat_dim := inception_out_channels * (config.price_levels / 2)
-	model.lstm = nn.lstm_layer_new(lstm_feat_dim, config.hidden_dim, allocator)
+	// ✅ Unified Sequence Layer (LSTM / GRU / Mamba)
+	seq_feat_dim := inception_out_channels * (config.price_levels / 2)
+	model.seq_layer = nn.sequential_new(allocator)
+	nn.sequential_add_seq_block(
+		model.seq_layer,
+		config.seq_backend,
+		seq_feat_dim,
+		config.hidden_dim,
+		16, // d_state for Mamba
+		allocator,
+	)
 
 	model.fc_head = nn.linear_layer_new(config.hidden_dim, config.num_classes, allocator)
-
 	return model
 }
 
+
 deeplob_free :: proc(model: ^DeepLOB) {
-	if model.cnn != nil {
-		nn.sequential_free(model.cnn)
-	}
+	if model.cnn != nil {nn.sequential_free(model.cnn)}
 	inception_block_free(&model.inception)
-	nn.lstm_layer_free(&model.lstm)
+	if model.seq_layer != nil {nn.sequential_free(model.seq_layer)} 	// ✅ Cleans up any backend
 	nn.linear_layer_free(&model.fc_head)
 	free(model, model.allocator)
 }
@@ -188,7 +190,6 @@ deeplob_train :: proc(model: ^DeepLOB) {
 deeplob_eval :: proc(model: ^DeepLOB) {
 	model.training = false
 }
-
 // ============================================================================
 // Forward Pass
 // ============================================================================
@@ -198,24 +199,20 @@ deeplob_forward :: proc(model: ^DeepLOB, input: ^t.Tensor) -> ^t.Tensor {
 	batch := input.shape[0]
 
 	cnn_out := nn.sequential_forward(model.cnn, input)
-
 	inception_out := inception_block_forward(&model.inception, cnn_out, alloc)
 
 	c_out := inception_out.shape[1]
 	t_out := inception_out.shape[2]
 	l_out := inception_out.shape[3]
 
+	// Permute to [Batch, Time, Features] for the sequence layer
 	lstm_in := t.tensor_permute_lob(inception_out, batch, c_out, t_out, l_out, alloc)
 
-	h0_data := l.matrix_new(f64, batch, model.config.hidden_dim, alloc)
-	c0_data := l.matrix_new(f64, batch, model.config.hidden_dim, alloc)
-	h0 := t.tensor_new(h0_data, false, alloc)
-	c0 := t.tensor_new(c0_data, false, alloc)
-	h0.owned_by_graph = true
-	c0.owned_by_graph = true
+	// ✅ Unified Sequence Forward Pass
+	// sequential_forward automatically handles zero-initialization of h0/c0 internally.
+	seq_out := nn.sequential_forward(model.seq_layer, lstm_in)
 
-	lstm_out := nn.lstm_layer_forward(&model.lstm, lstm_in, h0, c0)
-
+	// Extract the last time step (identical indexing for LSTM, GRU, and Mamba)
 	hidden_dim := model.config.hidden_dim
 	last_step_data := l.matrix_new(f64, batch, hidden_dim, alloc)
 
@@ -224,7 +221,7 @@ deeplob_forward :: proc(model: ^DeepLOB, input: ^t.Tensor) -> ^t.Tensor {
 		dst_idx := b * hidden_dim
 		copy(
 			last_step_data.data[dst_idx:dst_idx + hidden_dim],
-			lstm_out.data.data[src_idx:src_idx + hidden_dim],
+			seq_out.data.data[src_idx:src_idx + hidden_dim],
 		)
 	}
 
@@ -237,7 +234,6 @@ deeplob_forward :: proc(model: ^DeepLOB, input: ^t.Tensor) -> ^t.Tensor {
 	}
 
 	logits := nn.linear_forward(&model.fc_head, last_step)
-
 	return logits
 }
 
@@ -266,12 +262,8 @@ deeplob_add_to_adam :: proc(model: ^DeepLOB, opt: ^nn.Adam) {
 	nn.adam_add_param(opt, model.inception.b3_5x5.weight)
 	if model.inception.b3_5x5.bias != nil {nn.adam_add_param(opt, model.inception.b3_5x5.bias)}
 
-	nn.adam_add_param(opt, model.lstm.w_ih)
-	nn.adam_add_param(opt, model.lstm.w_hh)
-	if model.lstm.bias != nil {
-		nn.adam_add_param(opt, model.lstm.bias)
-	}
 
+	nn.sequential_add_to_adam(model.seq_layer, opt)
 	nn.adam_add_param(opt, model.fc_head.weights)
 	if model.fc_head.bias != nil {
 		nn.adam_add_param(opt, model.fc_head.bias)
