@@ -156,18 +156,13 @@ volatility_arbitrage_test :: proc(allocator: mem.Allocator) {
 			x_batch := t.tensor_new(x_data, false, allocator)
 			x_batch.shape = [4]int{batch_size, seq_len, num_features, 1}
 
-			h0_mat := l.matrix_new(f64, 1, batch_size * hidden_size, allocator)
-			h0 := t.tensor_new(h0_mat, false, allocator)
-
-			c0_mat := l.matrix_new(f64, 1, batch_size * hidden_size, allocator)
-			c0 := t.tensor_new(c0_mat, false, allocator)
-
 			y_data := l.matrix_new(f64, batch_size, 1, allocator)
 			copy(y_data.data, Y_seq[batch_start:batch_start + batch_size])
 			y_batch := t.tensor_new(y_data, false, allocator)
 			y_batch.shape = [4]int{batch_size, 1, 1, 1}
 
-			preds := ml_fin.lstm_volatility_forecaster_forward(&ensemble.lstm, x_batch, h0, c0)
+			// ✅ NEW API: 2-arg forward
+			preds := ml_fin.lstm_volatility_forecaster_forward(&ensemble.lstm, x_batch)
 			loss := t.tensor_mse_loss(preds, y_batch)
 			t.tensor_backward(loss, allocator)
 			nn.adam_step(&opt)
@@ -178,14 +173,11 @@ volatility_arbitrage_test :: proc(allocator: mem.Allocator) {
 
 			// Free the Tensor structs
 			t.tensor_free(x_batch)
-			t.tensor_free(h0)
-			t.tensor_free(c0)
 			t.tensor_free(y_batch)
-
-
 		}
 	}
 	probe("after training")
+
 	// 3. Generate Next-Day Forecast
 	last_sample_idx := num_samples - 1
 	x_inf_data := l.matrix_new(f64, 1, 1 * seq_len * num_features, allocator)
@@ -209,24 +201,12 @@ volatility_arbitrage_test :: proc(allocator: mem.Allocator) {
 	x_inf := t.tensor_new(x_inf_data, false, allocator)
 	x_inf.shape = [4]int{1, seq_len, num_features, 1}
 
-	h0_inf_mat := l.matrix_new(f64, 1, hidden_size, allocator)
-	h0_inf := t.tensor_new(h0_inf_mat, false, allocator)
-
-	c0_inf_mat := l.matrix_new(f64, 1, hidden_size, allocator)
-	c0_inf := t.tensor_new(c0_inf_mat, false, allocator)
-
-	lstm_pred_tensor := ml_fin.lstm_volatility_forecaster_forward(
-		&ensemble.lstm,
-		x_inf,
-		h0_inf,
-		c0_inf,
-	)
+	// ✅ NEW API: 2-arg forward
+	lstm_pred_tensor := ml_fin.lstm_volatility_forecaster_forward(&ensemble.lstm, x_inf)
 	lstm_rv_dec := lstm_pred_tensor.data.data[0]
 
 	t.tensor_free_graph(lstm_pred_tensor)
 	t.tensor_free(x_inf)
-	t.tensor_free(h0_inf)
-	t.tensor_free(c0_inf)
 	probe("after inference")
 
 	// 4. Price the 30-Day ATM Straddle
@@ -294,6 +274,7 @@ volatility_arbitrage_test :: proc(allocator: mem.Allocator) {
 	)
 	model_straddle_price := model_call_price + model_put_price
 	probe("after pricing")
+
 	// 5. Output the Arbitrage Dashboard
 	fmt.println(
 		"\n╔══════════════════════════════════════════════════════════════╗",
@@ -376,6 +357,7 @@ volatility_arbitrage_test :: proc(allocator: mem.Allocator) {
 
 	fmt.println("\n✓ Volatility Arbitrage Test Complete!")
 }
+
 probe :: proc(tag: string) {
 	fmt.printf(
 		"[mem] %-18s created=%d freed=%d live=%d\n",

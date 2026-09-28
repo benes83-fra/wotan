@@ -23,11 +23,20 @@ ensemble_volatility_new :: proc(
 	hidden_size: int,
 	seq_len: int,
 	allocator: mem.Allocator = context.allocator,
+	seq_backend: nn.SeqBackend = .LSTM, // ✅ Opt-in Mamba support!
 ) -> EnsembleVolatilityForecaster {
 	e: EnsembleVolatilityForecaster
 	e.allocator = allocator
-	e.lstm = lstm_volatility_forecaster_new(input_size, hidden_size, seq_len, allocator)
-	e.ensemble_weight = 0.5 // Start with equal weight
+
+	// ✅ Construct the unified config
+	config := LSTMVolaConfig {
+		input_size  = input_size,
+		hidden_size = hidden_size,
+		seq_len     = seq_len,
+		seq_backend = seq_backend,
+	}
+	e.lstm = lstm_volatility_forecaster_new(config, allocator)
+	e.ensemble_weight = 0.5
 	return e
 }
 
@@ -36,13 +45,9 @@ ensemble_volatility_free :: proc(e: ^EnsembleVolatilityForecaster) {
 }
 
 ensemble_add_to_optimizer :: proc(e: ^EnsembleVolatilityForecaster, opt: ^nn.Adam) {
-	nn.adam_add_param(opt, e.lstm.lstm.w_ih)
-	nn.adam_add_param(opt, e.lstm.lstm.w_hh)
-	nn.adam_add_param(opt, e.lstm.lstm.bias)
-	nn.adam_add_param(opt, e.lstm.fc1.weights)
-	nn.adam_add_param(opt, e.lstm.fc1.bias)
-	nn.adam_add_param(opt, e.lstm.fc2.weights)
-	nn.adam_add_param(opt, e.lstm.fc2.bias)
+	// ✅ Delegate to the forecaster's centralized optimizer registration
+	// This completely replaces the manual w_ih, w_hh, bias extractions!
+	lstm_volatility_add_to_optimizer(&e.lstm, opt)
 }
 
 garch_recursive_forecast :: proc(

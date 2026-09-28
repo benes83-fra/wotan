@@ -302,7 +302,7 @@ tensor_add_bias :: proc(a: ^Tensor, bias: ^Tensor) -> ^Tensor {
 	if bias.data.rows != 1 {
 		panic("tensor_add_bias: bias must be a 1xD row vector")
 	}
-
+	bias_slice := bias.data.data[0:D]
 	// ✅ NEW: Handle flattened 3D tensor
 	if a.data.rows == 1 && a.data.cols != D {
 		if a.data.cols % D == 0 {
@@ -312,7 +312,7 @@ tensor_add_bias :: proc(a: ^Tensor, bias: ^Tensor) -> ^Tensor {
 			for i in 0 ..< N {
 				row_out := out_data.data[i * D:(i + 1) * D]
 				row_a := a.data.data[i * D:(i + 1) * D]
-				l.vec_add_simd(row_a, bias.data.data, row_out)
+				l.vec_add_simd(row_a, bias_slice, row_out)
 			}
 
 			out := tensor_new(out_data, a.requires_grad || bias.requires_grad, a.allocator)
@@ -339,7 +339,7 @@ tensor_add_bias :: proc(a: ^Tensor, bias: ^Tensor) -> ^Tensor {
 	for i in 0 ..< N {
 		row_out := out_data.data[i * D:(i + 1) * D]
 		row_a := a.data.data[i * D:(i + 1) * D]
-		l.vec_add_simd(row_a, bias.data.data, row_out)
+		l.vec_add_simd(row_a, bias_slice, row_out)
 	}
 
 	out := tensor_new(out_data, a.requires_grad || bias.requires_grad, a.allocator)
@@ -1153,9 +1153,13 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 				if bias_in.requires_grad {
 					tensor_ensure_grad(bias_in)
 					// Sum gradients over the N rows
-					for i in 0 ..< N {
-						row_grad := node.grad.data[i * D:(i + 1) * D]
-						l.axpy_simd(1.0, row_grad, bias_in.grad.data)
+					if len(bias_in.grad.data) >= D {
+						bias_grad_slice := bias_in.grad.data[0:D]
+						// Sum gradients over the N rows
+						for i in 0 ..< N {
+							row_grad := node.grad.data[i * D:(i + 1) * D]
+							l.axpy_simd(1.0, row_grad, bias_grad_slice)
+						}
 					}
 				}
 				continue // Skip standard 2D backward
@@ -1184,6 +1188,7 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 			if bias_in.requires_grad {
 				tensor_ensure_grad(bias_in)
 				if len(bias_in.grad.data) > 0 && len(bias_in.grad.data) == D {
+					bias_grad_slice := bias_in.grad.data[0:D]
 					for i in 0 ..< N {
 						start_idx := i * D
 						end_idx := (i + 1) * D
@@ -1200,7 +1205,7 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 						}
 
 						row_grad := node.grad.data[start_idx:end_idx]
-						l.axpy_simd(1.0, row_grad, bias_in.grad.data)
+						l.axpy_simd(1.0, row_grad, bias_grad_slice)
 					}
 				}
 			}

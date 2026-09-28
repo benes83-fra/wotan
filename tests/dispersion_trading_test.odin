@@ -213,23 +213,13 @@ dispersion_trading_test :: proc(allocator: mem.Allocator) {
 				x_batch := t.tensor_new(x_data, true, allocator)
 				x_batch.shape = [4]int{batch_size, seq_len, num_features, 1}
 
-				h0 := t.tensor_new(
-					l.matrix_new(f64, 1, batch_size * hidden_size, allocator),
-					false,
-					allocator,
-				)
-				c0 := t.tensor_new(
-					l.matrix_new(f64, 1, batch_size * hidden_size, allocator),
-					false,
-					allocator,
-				)
 
 				y_data := l.matrix_new(f64, batch_size, 1, allocator)
 				copy(y_data.data, Y_seq[batch_start:batch_start + batch_size])
 				y_batch := t.tensor_new(y_data, false, allocator)
 				y_batch.shape = [4]int{batch_size, 1, 1, 1}
 
-				preds := ml_fin.lstm_volatility_forecaster_forward(&ensemble.lstm, x_batch, h0, c0)
+				preds := ml_fin.lstm_volatility_forecaster_forward(&ensemble.lstm, x_batch)
 				loss := t.tensor_mse_loss(preds, y_batch)
 				t.tensor_backward(loss, allocator)
 				nn.adam_step(&opt)
@@ -239,8 +229,7 @@ dispersion_trading_test :: proc(allocator: mem.Allocator) {
 
 				t.tensor_free_graph(loss)
 				t.tensor_free(x_batch)
-				t.tensor_free(h0)
-				t.tensor_free(c0)
+
 				t.tensor_free(y_batch)
 			}
 			if epoch % 5 == 0 {
@@ -270,21 +259,12 @@ dispersion_trading_test :: proc(allocator: mem.Allocator) {
 		}
 		x_inf := t.tensor_new(x_inf_data, false, allocator)
 		x_inf.shape = [4]int{1, seq_len, num_features, 1}
-		h0_inf := t.tensor_new(l.matrix_new(f64, 1, hidden_size, allocator), false, allocator)
-		c0_inf := t.tensor_new(l.matrix_new(f64, 1, hidden_size, allocator), false, allocator)
-
-		lstm_pred_tensor := ml_fin.lstm_volatility_forecaster_forward(
-			&ensemble.lstm,
-			x_inf,
-			h0_inf,
-			c0_inf,
-		)
+		lstm_pred_tensor := ml_fin.lstm_volatility_forecaster_forward(&ensemble.lstm, x_inf)
 		lstm_rv_dec := lstm_pred_tensor.data.data[0]
 
 		t.tensor_free_graph(lstm_pred_tensor)
 		t.tensor_free(x_inf)
-		t.tensor_free(h0_inf)
-		t.tensor_free(c0_inf)
+
 
 		last_cond_var := garch_result.conditional_var[len(garch_result.conditional_var) - 1]
 		garch_rv_dec := math.sqrt_f64(last_cond_var) * math.sqrt_f64(252.0)

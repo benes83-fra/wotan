@@ -10,11 +10,23 @@ import t "../wotan/tensor"
 import "core:fmt"
 import "core:math"
 import "core:mem"
-
 ensemble_volatility_test :: proc(allocator: mem.Allocator) {
-	fmt.println("\n=== Ensemble Volatility Forecasting (GARCH + LSTM) ===")
+	fmt.println("\n=== Ensemble Volatility Forecasting (GARCH + Sequence Model) ===")
 
 	main_alloc := context.allocator
+
+	// ✅ Sequence backend switch: .LSTM (default), .GRU, or .Mamba
+	seq_backend: nn.SeqBackend = .LSTM
+	backend_name := "LSTM"
+	switch seq_backend {
+	case .LSTM:
+		backend_name = "LSTM"
+	case .GRU:
+		backend_name = "GRU"
+	case .Mamba:
+		backend_name = "Mamba"
+	}
+	fmt.printf("--- Sequence Backend: %s ---\n", backend_name)
 
 	// ----------------------------------------------------------------
 	// 1. Fetch Data
@@ -162,17 +174,23 @@ ensemble_volatility_test :: proc(allocator: mem.Allocator) {
 	num_val_samples := num_samples - num_train_samples
 
 	// ----------------------------------------------------------------
-	// 5. Train LSTM via Ensemble Struct
+	// 5. Train Sequence Model via Ensemble Struct
 	// ----------------------------------------------------------------
-	fmt.println("\n--- Training LSTM ---")
+	fmt.printf("\n--- Training %s ---\n", backend_name)
 	input_size := num_features
 	hidden_size := 32
 	batch_size := 32
 	epochs := 50
 	learning_rate := 0.001
 
-	// ✅ Use the new value-based Ensemble struct
-	ensemble := ml_fin.ensemble_volatility_new(input_size, hidden_size, seq_len, allocator)
+	// ✅ Value-based Ensemble struct; backend passed as trailing arg (defaults to .LSTM)
+	ensemble := ml_fin.ensemble_volatility_new(
+		input_size,
+		hidden_size,
+		seq_len,
+		allocator,
+		seq_backend,
+	)
 	defer ml_fin.ensemble_volatility_free(&ensemble)
 
 	// Store GARCH params in the ensemble struct
@@ -183,7 +201,7 @@ ensemble_volatility_test :: proc(allocator: mem.Allocator) {
 	opt := nn.adam_new(learning_rate, 0.9, 0.999, 1e-8, allocator)
 	defer nn.adam_free(&opt)
 
-	// ✅ Use the ensemble optimizer helper
+	// ✅ Delegated optimizer registration (works for any backend)
 	ml_fin.ensemble_add_to_optimizer(&ensemble, &opt)
 
 	for epoch in 0 ..< epochs {
@@ -202,18 +220,13 @@ ensemble_volatility_test :: proc(allocator: mem.Allocator) {
 			x_batch := t.tensor_new(x_batch_data, true, allocator)
 			x_batch.shape = [4]int{batch_size, seq_len, input_size, 1}
 
-			h0_data := l.matrix_new(f64, 1, batch_size * hidden_size, allocator)
-			h_0 := t.tensor_new(h0_data, false, allocator)
-			c0_data := l.matrix_new(f64, 1, batch_size * hidden_size, allocator)
-			c_0 := t.tensor_new(c0_data, false, allocator)
-
 			y_batch_data := l.matrix_new(f64, batch_size, 1, allocator)
 			copy(y_batch_data.data, Y_seq[batch_start:batch_start + batch_size])
 			y_batch := t.tensor_new(y_batch_data, false, allocator)
 			y_batch.shape = [4]int{batch_size, 1, 1, 1}
 
-			// ✅ Pass pointer to the internal LSTM
-			preds := ml_fin.lstm_volatility_forecaster_forward(&ensemble.lstm, x_batch, h_0, c_0)
+			// ✅ NEW API: no h_0 / c_0 — sequential_forward zero-inits states internally
+			preds := ml_fin.lstm_volatility_forecaster_forward(&ensemble.lstm, x_batch)
 			loss := t.tensor_mse_loss(preds, y_batch)
 			t.tensor_backward(loss, allocator)
 			nn.adam_step(&opt)
@@ -221,7 +234,8 @@ ensemble_volatility_test :: proc(allocator: mem.Allocator) {
 			epoch_loss += loss.data.data[0]
 
 			t.tensor_free_graph(loss)
-			t.tensor_free(x_batch); t.tensor_free(h_0); t.tensor_free(c_0); t.tensor_free(y_batch)
+			t.tensor_free(x_batch)
+			t.tensor_free(y_batch)
 		}
 		if epoch % 10 == 0 {
 			fmt.printf(
@@ -256,16 +270,12 @@ ensemble_volatility_test :: proc(allocator: mem.Allocator) {
 		x_batch := t.tensor_new(x_batch_data, true, allocator)
 		x_batch.shape = [4]int{1, seq_len, input_size, 1}
 
-		h0_data := l.matrix_new(f64, 1, hidden_size, allocator)
-		h_0 := t.tensor_new(h0_data, false, allocator)
-		c0_data := l.matrix_new(f64, 1, hidden_size, allocator)
-		c_0 := t.tensor_new(c0_data, false, allocator)
-
-		preds := ml_fin.lstm_volatility_forecaster_forward(&ensemble.lstm, x_batch, h_0, c_0)
+		// ✅ NEW API: 2-arg forward
+		preds := ml_fin.lstm_volatility_forecaster_forward(&ensemble.lstm, x_batch)
 		lstm_val_forecasts[i] = preds.data.data[0]
 
 		t.tensor_free_graph(preds)
-		t.tensor_free(x_batch); t.tensor_free(h_0); t.tensor_free(c_0)
+		t.tensor_free(x_batch)
 
 		garch_idx := sample_idx + seq_len
 		if garch_idx < len(garch_vol_series) {
@@ -284,8 +294,9 @@ ensemble_volatility_test :: proc(allocator: mem.Allocator) {
 		actual_val_vols,
 	)
 	fmt.printf(
-		"Optimal GARCH weight: %.2f (LSTM weight: %.2f)\n",
+		"Optimal GARCH weight: %.2f (%s weight: %.2f)\n",
 		ensemble.ensemble_weight,
+		backend_name,
 		1.0 - ensemble.ensemble_weight,
 	)
 
@@ -303,7 +314,6 @@ ensemble_volatility_test :: proc(allocator: mem.Allocator) {
 		garch_pred := garch_val_forecasts[i]
 		lstm_pred := lstm_val_forecasts[i]
 
-		// ✅ Use the library function for ensemble prediction
 		ensemble_pred := ml_fin.ensemble_predict(&ensemble, garch_pred, lstm_pred)
 		ensemble_val_forecasts[i] = ensemble_pred
 		mse_garch += (garch_pred - actual) * (garch_pred - actual)
@@ -318,7 +328,12 @@ ensemble_volatility_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("\n%-20s %-15s %-15s\n", "Model", "Val MSE", "Improvement")
 	fmt.printf("%-20s %-15s %-15s\n", "--------------------", "---------------", "---------------")
 	fmt.printf("%-20s %-15.6f %-15s\n", "GARCH(1,1)", mse_garch, "baseline")
-	fmt.printf("%-20s %-15.6f %-15.1f%%\n", "LSTM", mse_lstm, (1.0 - mse_lstm / mse_garch) * 100)
+	fmt.printf(
+		"%-20s %-15.6f %-15.1f%%\n",
+		backend_name,
+		mse_lstm,
+		(1.0 - mse_lstm / mse_garch) * 100,
+	)
 	fmt.printf(
 		"%-20s %-15.6f %-15.1f%%\n",
 		"Ensemble",
@@ -337,16 +352,13 @@ ensemble_volatility_test :: proc(allocator: mem.Allocator) {
 
 	fmt.printf("  Actual next-day vol:     %.4f%%\n", last_actual * 100)
 	fmt.printf("  GARCH forecast:          %.4f%%\n", last_garch * 100)
-	fmt.printf("  LSTM forecast:           %.4f%%\n", last_lstm * 100)
+	fmt.printf("  %s forecast:       %.4f%%\n", backend_name, last_lstm * 100)
 	fmt.printf("  Ensemble forecast:       %.4f%%\n", last_ensemble * 100)
 
 	scale := math.sqrt_f64(252) * 100
 	fmt.printf("\n  Annualized forecasts:\n")
 	fmt.printf("    GARCH:    %.2f%%\n", last_garch * scale)
-	fmt.printf("    LSTM:     %.2f%%\n", last_lstm * scale)
-	fmt.printf("    Ensemble: %.2f%%\n", last_ensemble * scale)
-
-	// ... (existing Step 9 code) ...
+	fmt.printf("    %s:     %.2f%%\n", backend_name, last_lstm * scale)
 	fmt.printf("    Ensemble: %.2f%%\n", last_ensemble * scale)
 
 	// ----------------------------------------------------------------
@@ -357,7 +369,6 @@ ensemble_volatility_test :: proc(allocator: mem.Allocator) {
 	defer ml_fin.conformal_free(&cp)
 
 	// Calibrate on the validation set (acting as our holdout calibration set)
-	// We use the Ensemble predictions and the actual realized vols
 	ml_fin.conformal_calibrate(&cp, actual_val_vols, ensemble_val_forecasts, 0.05) // 95% confidence
 	ml_fin.print_conformal_stats(&cp)
 
@@ -373,7 +384,7 @@ ensemble_volatility_test :: proc(allocator: mem.Allocator) {
 
 	fmt.printf("\nLatest Ensemble Forecast (Annualized): %.2f%%\n", last_ensemble * scale)
 	fmt.printf(
-		"95%% Conformal Confidence Interval (Ann.): [%.2f%%, %.2f%%]\n",
+		"95%% Conformal Confidence Interval (Ann.): [%.2f%%, %.2f%%\n]",
 		lower * scale,
 		upper * scale,
 	)
@@ -385,6 +396,9 @@ ensemble_volatility_test :: proc(allocator: mem.Allocator) {
 vrp_signal_test :: proc(allocator: mem.Allocator) {
 	fmt.println("\n=== Live Volatility Risk Premium (VRP) Signal Generation ===")
 	main_alloc := context.allocator
+
+	// ✅ Sequence backend switch (flip to .Mamba for the shootout)
+	seq_backend: nn.SeqBackend = .LSTM
 
 	// 1. Fetch Data
 	spy_df := yahoo.read_yahoo("SPY", .Daily, .TwoYears, allocator)
@@ -518,14 +532,20 @@ vrp_signal_test :: proc(allocator: mem.Allocator) {
 		delete(garch_result.standardized_resid, main_alloc)
 	}
 
-	// Train LSTM quickly
+	// Train the sequence model quickly
 	input_size := num_features
 	hidden_size := 32
 	batch_size := 32
 	epochs := 20 // Fast training for signal demo
 	learning_rate := 0.001
 
-	ensemble := ml_fin.ensemble_volatility_new(input_size, hidden_size, seq_len, allocator)
+	ensemble := ml_fin.ensemble_volatility_new(
+		input_size,
+		hidden_size,
+		seq_len,
+		allocator,
+		seq_backend,
+	)
 	defer ml_fin.ensemble_volatility_free(&ensemble)
 
 	ensemble.garch_omega = garch_result.params.omega
@@ -552,24 +572,21 @@ vrp_signal_test :: proc(allocator: mem.Allocator) {
 			x_batch := t.tensor_new(x_batch_data, true, allocator)
 			x_batch.shape = [4]int{batch_size, seq_len, input_size, 1}
 
-			h0_data := l.matrix_new(f64, 1, batch_size * hidden_size, allocator)
-			h_0 := t.tensor_new(h0_data, false, allocator)
-			c0_data := l.matrix_new(f64, 1, batch_size * hidden_size, allocator)
-			c_0 := t.tensor_new(c0_data, false, allocator)
-
 			y_batch_data := l.matrix_new(f64, batch_size, 1, allocator)
 			copy(y_batch_data.data, Y_seq[batch_start:batch_start + batch_size])
 			y_batch := t.tensor_new(y_batch_data, false, allocator)
 			y_batch.shape = [4]int{batch_size, 1, 1, 1}
 
-			preds := ml_fin.lstm_volatility_forecaster_forward(&ensemble.lstm, x_batch, h_0, c_0)
+			// ✅ NEW API: 2-arg forward, no h_0 / c_0
+			preds := ml_fin.lstm_volatility_forecaster_forward(&ensemble.lstm, x_batch)
 			loss := t.tensor_mse_loss(preds, y_batch)
 			t.tensor_backward(loss, allocator)
 			nn.adam_step(&opt)
 			nn.adam_zero_grad(&opt)
 
 			t.tensor_free_graph(loss)
-			t.tensor_free(x_batch); t.tensor_free(h_0); t.tensor_free(c_0); t.tensor_free(y_batch)
+			t.tensor_free(x_batch)
+			t.tensor_free(y_batch)
 		}
 	}
 
@@ -584,21 +601,15 @@ vrp_signal_test :: proc(allocator: mem.Allocator) {
 	x_inf := t.tensor_new(x_inf_data, false, allocator) // No grad needed for inference
 	x_inf.shape = [4]int{1, seq_len, input_size, 1}
 
-	h0_inf := l.matrix_new(f64, 1, hidden_size, allocator)
-	h_0_inf := t.tensor_new(h0_inf, false, allocator)
-	c0_inf := l.matrix_new(f64, 1, hidden_size, allocator)
-	c_0_inf := t.tensor_new(c0_inf, false, allocator)
-
-	lstm_pred_tensor := ml_fin.lstm_volatility_forecaster_forward(
-		&ensemble.lstm,
-		x_inf,
-		h_0_inf,
-		c_0_inf,
-	)
+	// ✅ NEW API: 2-arg forward
+	lstm_pred_tensor := ml_fin.lstm_volatility_forecaster_forward(&ensemble.lstm, x_inf)
 	lstm_pred_daily := lstm_pred_tensor.data.data[0]
 	if lstm_pred_daily < 0.0 {lstm_pred_daily = 0.0}
-	t.tensor_free(lstm_pred_tensor)
-	t.tensor_free(x_inf); t.tensor_free(h_0_inf); t.tensor_free(c_0_inf)
+
+	// ✅ FIX: free_graph (not tensor_free) so all intermediates are released;
+	// leaves (x_inf, weights) are skipped and freed/owned separately.
+	t.tensor_free_graph(lstm_pred_tensor)
+	t.tensor_free(x_inf)
 
 	// GARCH forecast for next day
 	last_return := returns[num_days - 1]
@@ -829,21 +840,15 @@ vrp_backtest_test :: proc(allocator: mem.Allocator) {
 				y_batch := t.tensor_new(y_data, false, allocator)
 				y_batch.shape = [4]int{batch_size, 1, 1, 1}
 
-				preds := ml_fin.lstm_volatility_forecaster_forward(
-					&forecaster.lstm,
-					x_batch,
-					h0,
-					c0,
-				)
+				preds := ml_fin.lstm_volatility_forecaster_forward(&forecaster.lstm, x_batch)
 				loss := t.tensor_mse_loss(preds, y_batch)
 				t.tensor_backward(loss, allocator)
 				nn.adam_step(opt)
 				nn.adam_zero_grad(opt)
 
 				t.tensor_free_graph(loss)
-				t.tensor_free(
-					x_batch,
-				); t.tensor_free(h0); t.tensor_free(c0); t.tensor_free(y_batch)
+				t.tensor_free(x_batch)
+				t.tensor_free(y_batch)
 			}
 		}
 
@@ -962,18 +967,11 @@ vrp_backtest_test :: proc(allocator: mem.Allocator) {
 		copy(x_inf_data.data, inf_features)
 		x_inf := t.tensor_new(x_inf_data, true, main_alloc)
 		x_inf.shape = [4]int{1, seq_len, num_features, 1}
-		h0_inf := t.tensor_new(l.matrix_new(f64, 1, hidden_size, main_alloc), false, main_alloc)
-		c0_inf := t.tensor_new(l.matrix_new(f64, 1, hidden_size, main_alloc), false, main_alloc)
 
-		lstm_pred := ml_fin.lstm_volatility_forecaster_forward(
-			&forecaster.lstm,
-			x_inf,
-			h0_inf,
-			c0_inf,
-		)
-		lstm_rv := lstm_pred.data.data[0] // Already annualized % from target definition
+		lstm_pred := ml_fin.lstm_volatility_forecaster_forward(&forecaster.lstm, x_inf)
+		lstm_rv := lstm_pred.data.data[0]
 		t.tensor_free_graph(lstm_pred)
-		t.tensor_free(x_inf); t.tensor_free(h0_inf); t.tensor_free(c0_inf)
+		t.tensor_free(x_inf)
 		delete(inf_features, main_alloc)
 
 		// GARCH Forecast (20-day average approximation)

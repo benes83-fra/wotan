@@ -118,6 +118,7 @@ volatility_forecaster_add_to_optimizer :: proc(
 	nn.adam_add_param(opt, model.fc3.weights)
 	nn.adam_add_param(opt, model.fc3.bias)
 }
+
 lstm_volatility_test :: proc(allocator: mem.Allocator) {
 	fmt.println("\n=== LSTM Volatility Forecasting Test ===")
 
@@ -136,12 +137,14 @@ lstm_volatility_test :: proc(allocator: mem.Allocator) {
 		epochs,
 	)
 
-	forecaster := ml_fin.lstm_volatility_forecaster_new(
-		input_size,
-		hidden_size,
-		seq_len,
-		allocator,
-	)
+	// ✅ NEW API: Use the unified Config struct
+	vola_config := ml_fin.LSTMVolaConfig {
+		input_size  = input_size,
+		hidden_size = hidden_size,
+		seq_len     = seq_len,
+		seq_backend = .LSTM, // Flip to .Mamba for the shootout!
+	}
+	forecaster := ml_fin.lstm_volatility_forecaster_new(vola_config, allocator)
 	defer ml_fin.lstm_volatility_forecaster_free(&forecaster)
 
 	opt := nn.adam_new(learning_rate, 0.9, 0.999, 1e-8, allocator)
@@ -193,15 +196,6 @@ lstm_volatility_test :: proc(allocator: mem.Allocator) {
 			x_batch := t.tensor_new(x_batch_data, true, allocator)
 			x_batch.shape = [4]int{batch_size, seq_len, input_size, 1}
 
-			// h_0, c_0: zeros [1, batch*hidden_size]
-			h0_data := l.matrix_new(f64, 1, batch_size * hidden_size, allocator)
-			h_0 := t.tensor_new(h0_data, false, allocator)
-			h_0.shape = [4]int{batch_size, 1, hidden_size, 1}
-
-			c0_data := l.matrix_new(f64, 1, batch_size * hidden_size, allocator)
-			c_0 := t.tensor_new(c0_data, false, allocator)
-			c_0.shape = [4]int{batch_size, 1, hidden_size, 1}
-
 			// Target: [batch, 1], shape [batch, 1, 1, 1]
 			y_batch_data := l.matrix_new(f64, batch_size, 1, allocator)
 			for i in 0 ..< batch_size {
@@ -210,8 +204,8 @@ lstm_volatility_test :: proc(allocator: mem.Allocator) {
 			y_batch := t.tensor_new(y_batch_data, false, allocator)
 			y_batch.shape = [4]int{batch_size, 1, 1, 1}
 
-			// Forward → Loss → Backward → Step
-			preds := ml_fin.lstm_volatility_forecaster_forward(&forecaster, x_batch, h_0, c_0)
+			// ✅ NEW API: 2-arg forward (no h_0 / c_0 needed!)
+			preds := ml_fin.lstm_volatility_forecaster_forward(&forecaster, x_batch)
 			loss := t.tensor_mse_loss(preds, y_batch)
 
 			t.tensor_backward(loss, allocator)
@@ -223,8 +217,6 @@ lstm_volatility_test :: proc(allocator: mem.Allocator) {
 			// Free graph first, then leaf nodes
 			t.tensor_free_graph(loss)
 			t.tensor_free(x_batch)
-			t.tensor_free(h_0)
-			t.tensor_free(c_0)
 			t.tensor_free(y_batch)
 		}
 
@@ -240,15 +232,11 @@ lstm_volatility_test :: proc(allocator: mem.Allocator) {
 	fmt.println("\n✓ LSTM Volatility Forecasting Test Complete!")
 }
 
+// ✅ Delegated optimizer registration
 lstm_volatility_add_to_optimizer :: proc(model: ^ml_fin.LSTMVolatilityForecaster, opt: ^nn.Adam) {
-	nn.adam_add_param(opt, model.lstm.w_ih)
-	nn.adam_add_param(opt, model.lstm.w_hh)
-	nn.adam_add_param(opt, model.lstm.bias)
-	nn.adam_add_param(opt, model.fc1.weights)
-	nn.adam_add_param(opt, model.fc1.bias)
-	nn.adam_add_param(opt, model.fc2.weights)
-	nn.adam_add_param(opt, model.fc2.bias)
+	ml_fin.lstm_volatility_add_to_optimizer(model, opt)
 }
+
 lstm_volatility_real_data_test :: proc(allocator: mem.Allocator) {
 	fmt.println("\n=== LSTM Volatility (Real Market Data Pipeline) ===")
 
@@ -378,12 +366,14 @@ lstm_volatility_real_data_test :: proc(allocator: mem.Allocator) {
 	epochs := 50
 	learning_rate := 0.001
 
-	forecaster := ml_fin.lstm_volatility_forecaster_new(
-		input_size,
-		hidden_size,
-		seq_len,
-		allocator,
-	)
+	// ✅ NEW API: Use the unified Config struct
+	vola_config := ml_fin.LSTMVolaConfig {
+		input_size  = input_size,
+		hidden_size = hidden_size,
+		seq_len     = seq_len,
+		seq_backend = .LSTM,
+	}
+	forecaster := ml_fin.lstm_volatility_forecaster_new(vola_config, allocator)
 	defer ml_fin.lstm_volatility_forecaster_free(&forecaster)
 
 	opt := nn.adam_new(learning_rate, 0.9, 0.999, 1e-8, allocator)
@@ -411,17 +401,13 @@ lstm_volatility_real_data_test :: proc(allocator: mem.Allocator) {
 			x_batch := t.tensor_new(x_batch_data, true, allocator)
 			x_batch.shape = [4]int{batch_size, seq_len, input_size, 1}
 
-			h0_data := l.matrix_new(f64, 1, batch_size * hidden_size, allocator)
-			h_0 := t.tensor_new(h0_data, false, allocator)
-			c0_data := l.matrix_new(f64, 1, batch_size * hidden_size, allocator)
-			c_0 := t.tensor_new(c0_data, false, allocator)
-
 			y_batch_data := l.matrix_new(f64, batch_size, 1, allocator)
 			copy(y_batch_data.data, Y_seq[batch_start:batch_start + batch_size])
 			y_batch := t.tensor_new(y_batch_data, false, allocator)
 			y_batch.shape = [4]int{batch_size, 1, 1, 1}
 
-			preds := ml_fin.lstm_volatility_forecaster_forward(&forecaster, x_batch, h_0, c_0)
+			// ✅ NEW API: 2-arg forward
+			preds := ml_fin.lstm_volatility_forecaster_forward(&forecaster, x_batch)
 			loss := t.tensor_mse_loss(preds, y_batch)
 
 			t.tensor_backward(loss, allocator)
@@ -431,7 +417,8 @@ lstm_volatility_real_data_test :: proc(allocator: mem.Allocator) {
 			epoch_train_loss += loss.data.data[0]
 
 			t.tensor_free_graph(loss)
-			t.tensor_free(x_batch); t.tensor_free(h_0); t.tensor_free(c_0); t.tensor_free(y_batch)
+			t.tensor_free(x_batch)
+			t.tensor_free(y_batch)
 		}
 
 		// --- VALIDATION PHASE ---
@@ -452,23 +439,20 @@ lstm_volatility_real_data_test :: proc(allocator: mem.Allocator) {
 			x_batch := t.tensor_new(x_batch_data, true, allocator)
 			x_batch.shape = [4]int{batch_size, seq_len, input_size, 1}
 
-			h0_data := l.matrix_new(f64, 1, batch_size * hidden_size, allocator)
-			h_0 := t.tensor_new(h0_data, false, allocator)
-			c0_data := l.matrix_new(f64, 1, batch_size * hidden_size, allocator)
-			c_0 := t.tensor_new(c0_data, false, allocator)
-
 			y_batch_data := l.matrix_new(f64, batch_size, 1, allocator)
 			copy(y_batch_data.data, Y_seq[batch_start:batch_start + batch_size])
 			y_batch := t.tensor_new(y_batch_data, false, allocator)
 			y_batch.shape = [4]int{batch_size, 1, 1, 1}
 
-			preds := ml_fin.lstm_volatility_forecaster_forward(&forecaster, x_batch, h_0, c_0)
+			// ✅ NEW API: 2-arg forward
+			preds := ml_fin.lstm_volatility_forecaster_forward(&forecaster, x_batch)
 			loss := t.tensor_mse_loss(preds, y_batch)
 			epoch_val_loss += loss.data.data[0]
 
 			// Free graph cleans up all intermediates (lstm_out, flat, h1, etc.)
 			t.tensor_free_graph(loss)
-			t.tensor_free(x_batch); t.tensor_free(h_0); t.tensor_free(c_0); t.tensor_free(y_batch)
+			t.tensor_free(x_batch)
+			t.tensor_free(y_batch)
 		}
 
 		if epoch % 5 == 0 {
