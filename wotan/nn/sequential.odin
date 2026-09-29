@@ -42,6 +42,9 @@ Sequential :: struct {
 	layers:    [dynamic]Layer,
 	training:  bool, // ✅ ADD THIS: Controls BatchNorm and Dropout behavior
 	allocator: mem.Allocator,
+	rnn_h0:    ^t.Tensor,
+	rnn_c0:    ^t.Tensor,
+	gru_h0:    ^t.Tensor,
 }
 
 sequential_new :: proc(allocator: mem.Allocator = context.allocator) -> ^Sequential {
@@ -87,7 +90,22 @@ sequential_forward :: proc(s: ^Sequential, input: ^t.Tensor) -> ^t.Tensor {
 		case FlattenLayer:
 			x = t.tensor_flatten(x)
 		case Activation:
-			if l == .ReLU {x = t.tensor_relu(x)}
+			#partial switch l {
+			case .ReLU:
+				x = t.tensor_relu(x)
+			case .Gelu:
+				x = t.tensor_gelu(x)
+			case .Sigmoid:
+				x = t.tensor_sigmoid(x)
+			case .Tanh:
+				x = t.tensor_tanh(x)
+			case .LeakyReLU:
+				x = t.tensor_leaky_relu(x, 0.01)
+			case .Softmax:
+				x = t.tensor_softmax(x)
+			case .Softplus:
+				x = t.tensor_softplus(x)
+			}
 		// ... other activations ...
 		case DropoutLayer:
 			x = t.tensor_dropout(x, l.drop_prob, s.training)
@@ -106,20 +124,41 @@ sequential_forward :: proc(s: ^Sequential, input: ^t.Tensor) -> ^t.Tensor {
 			batch := x.shape[0]
 			hidden := l.hidden_size
 
-			// ✅ FIX: Use 'la' for the linalg package!
 			h_0_data := la.matrix_new(f64, 1, batch * hidden, x.allocator)
 			h_0 := t.tensor_new(h_0_data, false, x.allocator)
 
-			// ✅ FIX: 'l' is now a pointer, so this matches the ^RNNLayer signature
+			needs_grad :=
+				x.requires_grad ||
+				l.w_ih.requires_grad ||
+				l.w_hh.requires_grad ||
+				(l.bias != nil && l.bias.requires_grad)
+			if needs_grad {
+				h_0.owned_by_graph = true // ✅ tensor_free_graph will clean this up
+			} else {
+				defer t.tensor_free(h_0) // ✅ Pure inference: clean up immediately
+			}
+
 			x = rnn_layer_forward(&l, x, h_0)
-			t.tensor_free(h_0)
+
 		case GRULayer:
 			batch := x.shape[0]
 			hidden := l.hidden_size
 			h_0_data := la.matrix_new(f64, 1, batch * hidden, x.allocator)
 			h_0 := t.tensor_new(h_0_data, false, x.allocator)
+
+			needs_grad :=
+				x.requires_grad ||
+				l.w_ih.requires_grad ||
+				l.w_hh.requires_grad ||
+				(l.bias != nil && l.bias.requires_grad)
+			if needs_grad {
+				h_0.owned_by_graph = true
+			} else {
+				defer t.tensor_free(h_0)
+			}
+
 			x = gru_layer_forward(&l, x, h_0)
-			t.tensor_free(h_0)
+
 		case LSTMLayer:
 			batch := x.shape[0]
 			hidden := l.hidden_size
@@ -127,9 +166,23 @@ sequential_forward :: proc(s: ^Sequential, input: ^t.Tensor) -> ^t.Tensor {
 			c_0_data := la.matrix_new(f64, 1, batch * hidden, x.allocator)
 			h_0 := t.tensor_new(h_0_data, false, x.allocator)
 			c_0 := t.tensor_new(c_0_data, false, x.allocator)
+
+
+			needs_grad :=
+				x.requires_grad ||
+				l.w_ih.requires_grad ||
+				l.w_hh.requires_grad ||
+				(l.bias != nil && l.bias.requires_grad)
+			if needs_grad {
+				h_0.owned_by_graph = true
+				c_0.owned_by_graph = true
+			} else {
+				defer t.tensor_free(h_0)
+				defer t.tensor_free(c_0)
+			}
+
 			x = lstm_layer_forward(&l, x, h_0, c_0)
-			t.tensor_free(h_0)
-			t.tensor_free(c_0)
+
 		case EmbeddingLayer:
 			x = embedding_layer_forward(&l, x)
 		case MultiHeadAttentionLayer:
@@ -153,8 +206,22 @@ sequential_forward :: proc(s: ^Sequential, input: ^t.Tensor) -> ^t.Tensor {
 			h_0_data := la.matrix_new(f64, 1, batch * d_model * d_state, x.allocator)
 			h_0 := t.tensor_new(h_0_data, false, x.allocator)
 			h_0.shape = [4]int{batch, d_model, d_state, 1}
+			needs_grad :=
+				x.requires_grad ||
+				l.proj_x.weights.requires_grad ||
+				l.proj_B.weights.requires_grad ||
+				l.proj_C.weights.requires_grad ||
+				l.proj_Delta.weights.requires_grad ||
+				l.proj_out.weights.requires_grad ||
+				l.A.requires_grad ||
+				l.D.requires_grad
+			if needs_grad {
+				h_0.owned_by_graph = true
+			} else {
+				defer t.tensor_free(h_0)
+			}
 			x = mamba_layer_forward(&l, x, h_0)
-			t.tensor_free(h_0)
+
 		}
 	}
 	return x
@@ -496,7 +563,12 @@ sequential_free :: proc(seq: ^Sequential) {
 		}
 
 	}
+	if seq.rnn_h0 != nil {t.tensor_free(seq.rnn_h0)}
+	if seq.rnn_c0 != nil {t.tensor_free(seq.rnn_c0)}
+	if seq.gru_h0 != nil {t.tensor_free(seq.gru_h0)}
+
 	delete(seq.layers)
+	free(seq, seq.allocator)
 }
 // Procedure group for optimizer registration
 sequential_add_to_opt :: proc {
@@ -506,18 +578,45 @@ sequential_add_to_opt :: proc {
 sequential_replace_last_layer :: proc(
 	seq: ^Sequential,
 	new_layer: Layer,
-	allocator: mem.Allocator,
+	allocator: mem.Allocator = context.allocator,
 ) {
 	if len(seq.layers) == 0 {return}
 
-	// Free old last layer
 	last_idx := len(seq.layers) - 1
 	old_layer := &seq.layers[last_idx]
-	#partial switch &l in old_layer {
+
+	// Re-use the exact same cleanup logic from sequential_free to prevent memory leaks
+	switch &l in old_layer {
 	case LinearLayer:
 		linear_layer_free(&l)
 	case Conv2dLayer:
 		conv2d_layer_free(&l)
+	case BatchNorm2dLayer:
+		batch_norm_2d_layer_free(&l)
+	case GRULayer:
+		gru_layer_free(&l)
+	case RNNLayer:
+		rnn_layer_free(&l)
+	case LSTMLayer:
+		lstm_layer_free(&l)
+	case EmbeddingLayer:
+		embedding_layer_free(&l)
+	case MultiHeadAttentionLayer:
+		multi_head_attention_layer_free(&l)
+	case LayerNormLayer:
+		layer_norm_layer_free(&l)
+	case FFNLayer:
+		ffn_layer_free(&l)
+	case TransformerEncoderBlock:
+		transformer_encoder_block_free(&l)
+	case TransformerEncoder:
+		transformer_encoder_free(&l)
+	case GATLayer:
+		gat_layer_free(&l)
+	case MambaLayer:
+		mamba_layer_free(&l)
+	case MaxPool2dLayer, AvgPool2dLayer, DropoutLayer, Activation, FlattenLayer:
+	// No heap allocations to free for these marker/stateless layers
 	}
 
 	// Replace with new layer

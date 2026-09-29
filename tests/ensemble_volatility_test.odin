@@ -824,16 +824,16 @@ vrp_backtest_test :: proc(allocator: mem.Allocator) {
 				x_batch := t.tensor_new(x_data, true, allocator)
 				x_batch.shape = [4]int{batch_size, seq_len, num_features, 1}
 
-				h0 := t.tensor_new(
-					l.matrix_new(f64, 1, batch_size * hidden_size, allocator),
-					false,
-					allocator,
-				)
-				c0 := t.tensor_new(
-					l.matrix_new(f64, 1, batch_size * hidden_size, allocator),
-					false,
-					allocator,
-				)
+				// h0 := t.tensor_new(
+				// 	l.matrix_new(f64, 1, batch_size * hidden_size, allocator),
+				// 	false,
+				// 	allocator,
+				// )
+				// c0 := t.tensor_new(
+				// 	l.matrix_new(f64, 1, batch_size * hidden_size, allocator),
+				// 	false,
+				// 	allocator,
+				// )
 
 				y_data := l.matrix_new(f64, batch_size, 1, allocator)
 				copy(y_data.data, Y_seq[batch_start:batch_start + batch_size])

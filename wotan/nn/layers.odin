@@ -17,6 +17,9 @@ Activation :: enum {
 	Sigmoid,
 	Tanh,
 	LeakyReLU,
+	Gelu,
+	Softmax,
+	Softplus,
 }
 
 // apply_activation applies an activation function to a tensor
@@ -32,7 +35,14 @@ apply_activation :: proc(x: ^t.Tensor, act: Activation) -> ^t.Tensor {
 		return t.tensor_tanh(x)
 	case .LeakyReLU:
 		return t.tensor_leaky_relu(x, 0.01)
+	case .Gelu:
+		return t.tensor_gelu(x)
+	case .Softmax:
+		return t.tensor_softmax(x)
+	case .Softplus:
+		return t.tensor_softplus(x)
 	}
+
 	return x
 }
 
