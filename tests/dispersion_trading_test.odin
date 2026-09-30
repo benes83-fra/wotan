@@ -187,11 +187,18 @@ dispersion_trading_test :: proc(allocator: mem.Allocator) {
 			delete(garch_result.standardized_resid, allocator)
 		}
 
-		ensemble := ml_fin.ensemble_volatility_new(num_features, hidden_size, seq_len, allocator)
+		ensemble := ml_fin.ensemble_volatility_new(
+			num_features,
+			hidden_size,
+			seq_len,
+			allocator,
+			.Mamba,
+		)
 		defer ml_fin.ensemble_volatility_free(&ensemble)
 		ensemble.garch_omega = garch_result.params.omega
 		ensemble.garch_alpha = garch_result.params.alpha[0]
 		ensemble.garch_beta = garch_result.params.beta[0]
+		ensemble.lstm.config.seq_backend = .Mamba
 
 		opt := nn.adam_new(lr, 0.9, 0.999, 1e-8, allocator)
 		defer nn.adam_free(&opt)

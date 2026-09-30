@@ -16,7 +16,7 @@ ensemble_volatility_test :: proc(allocator: mem.Allocator) {
 	main_alloc := context.allocator
 
 	// ✅ Sequence backend switch: .LSTM (default), .GRU, or .Mamba
-	seq_backend: nn.SeqBackend = .LSTM
+	seq_backend: nn.SeqBackend = .Mamba
 	backend_name := "LSTM"
 	switch seq_backend {
 	case .LSTM:
@@ -398,7 +398,7 @@ vrp_signal_test :: proc(allocator: mem.Allocator) {
 	main_alloc := context.allocator
 
 	// ✅ Sequence backend switch (flip to .Mamba for the shootout)
-	seq_backend: nn.SeqBackend = .LSTM
+	seq_backend: nn.SeqBackend = .Mamba
 
 	// 1. Fetch Data
 	spy_df := yahoo.read_yahoo("SPY", .Daily, .TwoYears, allocator)
@@ -699,7 +699,13 @@ vrp_backtest_test :: proc(allocator: mem.Allocator) {
 	vrp_std := 5.0
 
 	// 4. Initialize Model
-	forecaster := ml_fin.ensemble_volatility_new(num_features, hidden_size, seq_len, allocator)
+	forecaster := ml_fin.ensemble_volatility_new(
+		num_features,
+		hidden_size,
+		seq_len,
+		allocator,
+		.Mamba,
+	)
 	defer ml_fin.ensemble_volatility_free(&forecaster)
 	opt := nn.adam_new(learning_rate, 0.9, 0.999, 1e-8, allocator)
 	defer nn.adam_free(&opt)

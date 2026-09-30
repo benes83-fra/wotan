@@ -371,7 +371,7 @@ lstm_volatility_real_data_test :: proc(allocator: mem.Allocator) {
 		input_size  = input_size,
 		hidden_size = hidden_size,
 		seq_len     = seq_len,
-		seq_backend = .LSTM,
+		seq_backend = .Mamba,
 	}
 	forecaster := ml_fin.lstm_volatility_forecaster_new(vola_config, allocator)
 	defer ml_fin.lstm_volatility_forecaster_free(&forecaster)
