@@ -45,6 +45,7 @@ Op :: enum {
 	LSTM,
 	Embedding,
 	ScaledDotProductAttention,
+	FlashAttention,
 	PermuteMHA,
 	PermuteMHAInverse,
 	LayerNorm,
@@ -2992,6 +2993,119 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 			delete(col, allocator)
 
 		// We don't calculate gradients for the target data.
+		case .FlashAttention:
+			Q_in := node.inputs[0]
+			K_in := node.inputs[1]
+			V_in := node.inputs[2]
+			if len(node.grad.data) == 0 {continue}
+
+			batch := Q_in.shape[0]
+			seq_len := Q_in.shape[1]
+			d_k := Q_in.shape[2]
+			d_v := V_in.shape[2]
+			scale := 1.0 / math.sqrt(f64(d_k))
+
+			if Q_in.requires_grad {tensor_ensure_grad(Q_in)}
+			if K_in.requires_grad {tensor_ensure_grad(K_in)}
+			if V_in.requires_grad {tensor_ensure_grad(V_in)}
+
+			Bc := 64
+			if seq_len < Bc {Bc = seq_len}
+
+			s_tile := make([]f64, Bc, context.allocator)
+			p_tile := make([]f64, Bc, context.allocator)
+
+			defer {
+				delete(s_tile, context.allocator)
+				delete(p_tile, context.allocator)
+			}
+
+			for b in 0 ..< batch {
+				for i in 0 ..< seq_len {
+					q_offset := (b * seq_len + i) * d_k
+					q_row := Q_in.data.data[q_offset:q_offset + d_k]
+
+					dO_offset := (b * seq_len + i) * d_v
+					dO_row := node.grad.data[dO_offset:dO_offset + d_v]
+
+					// Pass 1: Recompute Softmax stats (m_i, l_i) and D_i
+					m_i: f64 = -math.F64_MAX
+					l_i: f64 = 0.0
+					D_i: f64 = 0.0 // sum_j P_ij (dO_i . V_j)
+
+					for j_start := 0; j_start < seq_len; j_start += Bc {
+						j_end := j_start + Bc
+						if j_end > seq_len {j_end = seq_len}
+						curr_Bc := j_end - j_start
+
+						block_max := -math.F64_MAX
+						for x in 0 ..< curr_Bc {
+							k_offset := (b * seq_len + j_start + x) * d_k
+							k_row := K_in.data.data[k_offset:k_offset + d_k]
+							s_val := l.dot_simd(q_row, k_row) * scale
+							s_tile[x] = s_val
+							if s_val > block_max {block_max = s_val}
+						}
+
+						new_m := m_i
+						if block_max > new_m {new_m = block_max}
+						correction := math.exp(m_i - new_m)
+
+						block_sum: f64 = 0.0
+						block_D: f64 = 0.0
+						for x in 0 ..< curr_Bc {
+							p_val := math.exp(s_tile[x] - new_m)
+							p_tile[x] = p_val
+							block_sum += p_val
+
+							v_offset := (b * seq_len + j_start + x) * d_v
+							v_row := V_in.data.data[v_offset:v_offset + d_v]
+							block_D += p_val * l.dot_simd(dO_row, v_row)
+						}
+
+						D_i = D_i * correction + block_D
+						l_i = l_i * correction + block_sum
+						m_i = new_m
+					}
+
+					// Pass 2: Compute dQ_i, and scatter dK_j, dV_j
+					inv_l := 1.0 / l_i
+					dQ_row := Q_in.grad.data[q_offset:q_offset + d_k]
+
+					for j_start := 0; j_start < seq_len; j_start += Bc {
+						j_end := j_start + Bc
+						if j_end > seq_len {j_end = seq_len}
+						curr_Bc := j_end - j_start
+
+						for x in 0 ..< curr_Bc {
+							k_offset := (b * seq_len + j_start + x) * d_k
+							k_row := K_in.data.data[k_offset:k_offset + d_k]
+							s_val := l.dot_simd(q_row, k_row) * scale
+							p_val := math.exp(s_val - m_i) * inv_l
+
+							v_offset := (b * seq_len + j_start + x) * d_v
+							v_row := V_in.data.data[v_offset:v_offset + d_v]
+							dot_dO_V := l.dot_simd(dO_row, v_row)
+
+							dS_ij := p_val * (dot_dO_V - D_i) * scale
+
+							if V_in.requires_grad {
+								dV_row := V_in.grad.data[v_offset:v_offset + d_v]
+								for d in 0 ..< d_v {dV_row[d] += p_val * dO_row[d]}
+							}
+
+							if Q_in.requires_grad {
+								for d in 0 ..< d_k {dQ_row[d] += dS_ij * k_row[d]}
+							}
+
+							if K_in.requires_grad {
+								dK_row := K_in.grad.data[k_offset:k_offset + d_k]
+								for d in 0 ..< d_k {dK_row[d] += dS_ij * q_row[d]}
+							}
+						}
+					}
+				}
+			}
 		case .None, .Constant:
 		// Leaf node, nothing to do
 		}
@@ -5377,5 +5491,117 @@ tensor_ssm :: proc(
 		append(&out.int_metadata, d_state)
 	}
 
+	return out
+}
+// ============================================================================
+// FlashAttention (Memory-Efficient Tiled Attention with Online Softmax)
+// ============================================================================
+// Fuses Q @ K^T, Scaling, Softmax, and @ V into a single memory-bound pass.
+// Reduces memory complexity from O(N^2) to O(N) by avoiding the materialization
+// of the N x N attention matrix in main memory.
+tensor_flash_attention :: proc(Q: ^Tensor, K: ^Tensor, V: ^Tensor) -> ^Tensor {
+	batch := Q.shape[0]
+	seq_len := Q.shape[1]
+	d_k := Q.shape[2]
+	d_v := V.shape[2]
+
+	out_data := l.matrix_new(f64, 1, batch * seq_len * d_v, Q.allocator)
+	scale := 1.0 / math.sqrt(f64(d_k))
+
+	// Block size for K and V tiling (chosen to fit in L1/L2 cache)
+	Bc := 64
+	if seq_len < Bc {Bc = seq_len}
+
+	// Pre-allocate SRAM-like buffers to avoid allocations in the inner loop
+	s_tile := make([]f64, Bc, context.allocator)
+	p_tile := make([]f64, Bc, context.allocator)
+	o_acc := make([]f64, d_v, context.allocator)
+
+	defer {
+		delete(s_tile, context.allocator)
+		delete(p_tile, context.allocator)
+		delete(o_acc, context.allocator)
+	}
+
+	for b in 0 ..< batch {
+		for i in 0 ..< seq_len {
+			q_offset := (b * seq_len + i) * d_k
+			q_row := Q.data.data[q_offset:q_offset + d_k]
+
+			// Online softmax accumulators
+			m_i: f64 = -math.F64_MAX
+			l_i: f64 = 0.0
+			for d in 0 ..< d_v {o_acc[d] = 0.0}
+
+			// Tile over K and V
+			for j_start := 0; j_start < seq_len; j_start += Bc {
+				j_end := j_start + Bc
+				if j_end > seq_len {j_end = seq_len}
+				curr_Bc := j_end - j_start
+
+				// 1. Fused MatMul + Scale: S_ij = Q_i @ K_j^T * scale
+				for x in 0 ..< curr_Bc {
+					k_offset := (b * seq_len + j_start + x) * d_k
+					k_row := K.data.data[k_offset:k_offset + d_k]
+					s_tile[x] = l.dot_simd(q_row, k_row) * scale
+				}
+
+				// 2. Find block max
+				block_max := -math.F64_MAX
+				for x in 0 ..< curr_Bc {
+					if s_tile[x] > block_max {block_max = s_tile[x]}
+				}
+
+				// 3. Update global max and compute correction factor
+				new_m := m_i
+				if block_max > new_m {new_m = block_max}
+				correction := math.exp(m_i - new_m)
+
+				// 4. Compute P_ij = exp(S_ij - new_m) and sum
+				block_sum: f64 = 0.0
+				for x in 0 ..< curr_Bc {
+					p_val := math.exp(s_tile[x] - new_m)
+					p_tile[x] = p_val
+					block_sum += p_val
+				}
+
+				// 5. Update denominator
+				new_l := l_i * correction + block_sum
+
+				// 6. Fused MAC: O_i = O_i * correction + P_ij @ V_j
+				for d in 0 ..< d_v {o_acc[d] *= correction}
+
+				for x in 0 ..< curr_Bc {
+					v_offset := (b * seq_len + j_start + x) * d_v
+					v_row := V.data.data[v_offset:v_offset + d_v]
+					p_val := p_tile[x]
+
+					// Auto-vectorized inner loop
+					for d in 0 ..< d_v {
+						o_acc[d] += p_val * v_row[d]
+					}
+				}
+
+				m_i = new_m
+				l_i = new_l
+			}
+
+			// 7. Final normalization: O_i = O_i / l_i
+			inv_l := 1.0 / l_i
+			out_offset := (b * seq_len + i) * d_v
+			for d in 0 ..< d_v {
+				out_data.data[out_offset + d] = o_acc[d] * inv_l
+			}
+		}
+	}
+
+	out := tensor_new(out_data, Q.requires_grad || K.requires_grad || V.requires_grad, Q.allocator)
+	out.shape = [4]int{batch, seq_len, d_v, 1}
+	if out.requires_grad {
+		out.op = .FlashAttention
+		append(&out.inputs, Q)
+		append(&out.inputs, K)
+		append(&out.inputs, V)
+	}
 	return out
 }
