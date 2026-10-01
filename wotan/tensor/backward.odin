@@ -1235,13 +1235,13 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 
 				T_f := f64(T)
 				// Temporary buffers
-				grad_buf := make([]f64, T, context.allocator)
-				norm_buf := make([]f64, T, context.allocator)
-				mean_vec := make([]f64, T, context.allocator)
+				grad_buf := make([]f64, T, allocator)
+				norm_buf := make([]f64, T, allocator)
+				mean_vec := make([]f64, T, allocator)
 				defer {
-					delete(grad_buf, context.allocator)
-					delete(norm_buf, context.allocator)
-					delete(mean_vec, context.allocator)
+					delete(grad_buf, allocator)
+					delete(norm_buf, allocator)
+					delete(mean_vec, allocator)
 				}
 
 				for n: int = 0; n < N; n += 1 {
@@ -1261,7 +1261,7 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 
 							for i: int = 0; i < T; i += 1 {mean_vec[i] = mean_grad}
 
-							temp := make([]f64, T, context.allocator)
+							temp := make([]f64, T, allocator)
 							l.vec_sub_simd(grad_buf, mean_vec, temp)
 
 							scalar := dot_grad_y / T_f
@@ -1270,7 +1270,7 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 							}
 
 							// Recompute std of input for this slice to divide the gradient
-							in_buf := make([]f64, T, context.allocator)
+							in_buf := make([]f64, T, allocator)
 							for t: int = 0; t < T; t += 1 {
 								idx := n * (C * T * L) + c * (T * L) + t * L + el
 								in_buf[t] = input_in.data.data[idx]
@@ -1278,7 +1278,7 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 							in_mean := l.sum_simd(in_buf) / T_f
 							for i: int = 0; i < T; i += 1 {mean_vec[i] = in_mean}
 
-							in_centered := make([]f64, T, context.allocator)
+							in_centered := make([]f64, T, allocator)
 							l.vec_sub_simd(in_buf, mean_vec, in_centered)
 							in_var := l.dot_simd(in_centered, in_centered) / T_f
 							in_std := math.sqrt(in_var + eps)
@@ -1292,9 +1292,9 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 								input_in.grad.data[idx] += temp[t]
 							}
 
-							delete(in_buf, context.allocator)
-							delete(in_centered, context.allocator)
-							delete(temp, context.allocator)
+							delete(in_buf, allocator)
+							delete(in_centered, allocator)
+							delete(temp, allocator)
 						}
 					}
 				}
@@ -2523,12 +2523,12 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 			Bc := 64
 			if seq_len < Bc {Bc = seq_len}
 
-			s_tile := make([]f64, Bc, context.allocator)
-			p_tile := make([]f64, Bc, context.allocator)
+			s_tile := make([]f64, Bc, allocator)
+			p_tile := make([]f64, Bc, allocator)
 
 			defer {
-				delete(s_tile, context.allocator)
-				delete(p_tile, context.allocator)
+				delete(s_tile, allocator)
+				delete(p_tile, allocator)
 			}
 
 			for b in 0 ..< batch {
