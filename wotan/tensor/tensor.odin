@@ -787,13 +787,13 @@ _tensor_free_graph_impl :: proc(node: ^Tensor, visited: ^map[^Tensor]bool) {
 // tensor_free_graph automatically cleans up all intermediate tensors
 // in the computation graph, starting from 'root'.
 // It protects leaf nodes (inputs/weights) from being freed.
-tensor_free_graph :: proc(root: ^Tensor) {
+tensor_free_graph :: proc(root: ^Tensor, allocator: mem.Allocator = context.allocator) {
 	if root == nil {return}
 
 	visited := make(map[^Tensor]bool)
 	defer delete(visited)
 
-	nodes := make([dynamic]^Tensor, 0, context.allocator)
+	nodes := make([dynamic]^Tensor, 0, allocator)
 	_collect_graph_nodes(root, &nodes, &visited)
 	freed_in_graph := 0
 	for i := len(nodes) - 1; i >= 0; i -= 1 {
@@ -1509,7 +1509,7 @@ tensor_lstm :: proc(
 			batch,
 			in_size,
 			hidden_size,
-			context.allocator,
+			allocator,
 		)
 
 		for b in 0 ..< batch {
@@ -1868,6 +1868,7 @@ tensor_masked_scaled_dot_product_attention :: proc(
 	K: ^Tensor,
 	V: ^Tensor,
 	mask: []f64,
+	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
 	batch := Q.shape[0]
 	seq_q := Q.shape[1]
@@ -1896,8 +1897,8 @@ tensor_masked_scaled_dot_product_attention :: proc(
 		}
 
 		// 1. S_b = Q_b @ K_b^T
-		k_b_t := _matrix_transpose(k_b, context.allocator)
-		s_b := l.matmul_dyn_simd(&q_b, &k_b_t, context.allocator)
+		k_b_t := _matrix_transpose(k_b, allocator)
+		s_b := l.matmul_dyn_simd(&q_b, &k_b_t, allocator)
 		l.matrix_free(&k_b_t)
 
 		// 2. Scale and apply mask
@@ -1942,7 +1943,7 @@ tensor_masked_scaled_dot_product_attention :: proc(
 		}
 
 		// 4. O_b = P_b @ V_b
-		o_b := l.matmul_dyn_simd(&p_b, &v_b, context.allocator)
+		o_b := l.matmul_dyn_simd(&p_b, &v_b, allocator)
 		copy(out_data.data[b * seq_q * d_v:(b + 1) * seq_q * d_v], o_b.data)
 
 		l.matrix_free(&o_b)
