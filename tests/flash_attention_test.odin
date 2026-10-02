@@ -57,6 +57,19 @@ flash_attention_test :: proc(allocator: mem.Allocator) {
 	loss_std := t.tensor_sum(Out_std)
 	t.tensor_backward(loss_std)
 
+	// ✅ CRITICAL: Save the standard gradients BEFORE zeroing them out
+	dQ_std := make([]f64, len(Q.grad.data), alloc)
+	dK_std := make([]f64, len(K.grad.data), alloc)
+	dV_std := make([]f64, len(V.grad.data), alloc)
+	defer {
+		delete(dQ_std, alloc)
+		delete(dK_std, alloc)
+		delete(dV_std, alloc)
+	}
+	copy(dQ_std, Q.grad.data)
+	copy(dK_std, K.grad.data)
+	copy(dV_std, V.grad.data)
+
 	// Zero out gradients to test Flash backward independently
 	t.tensor_zero_grad(Q)
 	t.tensor_zero_grad(K)
@@ -67,8 +80,32 @@ flash_attention_test :: proc(allocator: mem.Allocator) {
 
 	// Verify Backward Pass Equivalence
 	fmt.println("Verifying Gradients...")
-	fmt.printf("dQ Max Diff: %e\n", max_diff) // Simplified for brevity, you can write a loop to check Q.grad vs Q.grad
+	max_diff_dQ: f64 = 0.0
+	max_diff_dK: f64 = 0.0
+	max_diff_dV: f64 = 0.0
 
+	for i in 0 ..< len(Q.grad.data) {
+		diff := math.abs(Q.grad.data[i] - dQ_std[i])
+		if diff > max_diff_dQ {max_diff_dQ = diff}
+	}
+	for i in 0 ..< len(K.grad.data) {
+		diff := math.abs(K.grad.data[i] - dK_std[i])
+		if diff > max_diff_dK {max_diff_dK = diff}
+	}
+	for i in 0 ..< len(V.grad.data) {
+		diff := math.abs(V.grad.data[i] - dV_std[i])
+		if diff > max_diff_dV {max_diff_dV = diff}
+	}
+
+	fmt.printf("dQ Max Diff: %e (Should be ~1e-15)\n", max_diff_dQ)
+	fmt.printf("dK Max Diff: %e (Should be ~1e-15)\n", max_diff_dK)
+	fmt.printf("dV Max Diff: %e (Should be ~1e-15)\n", max_diff_dV)
+
+	if max_diff_dQ < 1e-10 && max_diff_dK < 1e-10 && max_diff_dV < 1e-10 {
+		fmt.println("✅ FlashAttention Backward Pass Matches Standard Attention!")
+	} else {
+		fmt.println("❌ Gradient Mismatch Detected!")
+	}
 	fmt.println("✅ FlashAttention Test Complete!")
 
 	// Cleanup

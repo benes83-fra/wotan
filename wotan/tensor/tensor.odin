@@ -358,17 +358,21 @@ tensor_add_bias :: proc(a: ^Tensor, bias: ^Tensor) -> ^Tensor {
 // tensor_mse_loss calculates Mean Squared Error: mean((pred - target)^2)
 // This is a Fused SIMD operation that avoids creating intermediate Sub/Mul tensors!
 // tensor_mse_loss calculates Mean Squared Error: mean((pred - target)^2)
-tensor_mse_loss :: proc(pred: ^Tensor, target: ^Tensor) -> ^Tensor {
+tensor_mse_loss :: proc(
+	pred: ^Tensor,
+	target: ^Tensor,
+	allocator: mem.Allocator = context.allocator,
+) -> ^Tensor {
 	if pred.data.rows != target.data.rows || pred.data.cols != target.data.cols {
 		panic("tensor_mse_loss: shape mismatch")
 	}
 
 	n := f64(len(pred.data.data))
 
-	diff := make([]f64, len(pred.data.data), context.allocator)
+	diff := make([]f64, len(pred.data.data), allocator)
 	l.vec_sub_simd(pred.data.data, target.data.data, diff)
 	squared_sum := l.dot_simd(diff, diff)
-	defer delete(diff, context.allocator)
+	defer delete(diff, allocator)
 
 	loss_val := squared_sum / n
 

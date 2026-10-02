@@ -2525,7 +2525,6 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 
 			s_tile := make([]f64, Bc, allocator)
 			p_tile := make([]f64, Bc, allocator)
-
 			defer {
 				delete(s_tile, allocator)
 				delete(p_tile, allocator)
@@ -2539,10 +2538,10 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 					dO_offset := (b * seq_len + i) * d_v
 					dO_row := node.grad.data[dO_offset:dO_offset + d_v]
 
-					// Pass 1: Recompute Softmax stats (m_i, l_i) and D_i
+					// ── Pass 1: Recompute softmax stats (m_i, l_i) and D_i ──
 					m_i: f64 = -math.F64_MAX
 					l_i: f64 = 0.0
-					D_i: f64 = 0.0 // sum_j P_ij (dO_i . V_j)
+					D_i: f64 = 0.0
 
 					for j_start := 0; j_start < seq_len; j_start += Bc {
 						j_end := j_start + Bc
@@ -2565,7 +2564,7 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 						block_sum: f64 = 0.0
 						block_D: f64 = 0.0
 						for x in 0 ..< curr_Bc {
-							p_val := math.exp(s_tile[x] - new_m)
+							p_val := math.exp(s_tile[x] - new_m) // unnormalized
 							p_tile[x] = p_val
 							block_sum += p_val
 
@@ -2579,8 +2578,11 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 						m_i = new_m
 					}
 
-					// Pass 2: Compute dQ_i, and scatter dK_j, dV_j
+					// ✅ FIX: Normalize D_i (it was accumulated with unnormalized probs)
 					inv_l := 1.0 / l_i
+					D_i *= inv_l
+
+					// ── Pass 2: Compute dQ_i, scatter dK_j, dV_j ──
 					dQ_row := Q_in.grad.data[q_offset:q_offset + d_k]
 
 					for j_start := 0; j_start < seq_len; j_start += Bc {
@@ -2592,12 +2594,13 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 							k_offset := (b * seq_len + j_start + x) * d_k
 							k_row := K_in.data.data[k_offset:k_offset + d_k]
 							s_val := l.dot_simd(q_row, k_row) * scale
-							p_val := math.exp(s_val - m_i) * inv_l
+							p_val := math.exp(s_val - m_i) * inv_l // ← correct P_ij
 
 							v_offset := (b * seq_len + j_start + x) * d_v
 							v_row := V_in.data.data[v_offset:v_offset + d_v]
 							dot_dO_V := l.dot_simd(dO_row, v_row)
 
+							// dS_ij = P_ij * (dP_ij - D_i) * scale
 							dS_ij := p_val * (dot_dO_V - D_i) * scale
 
 							if V_in.requires_grad {
