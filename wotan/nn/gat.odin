@@ -33,7 +33,7 @@ gat_layer_new :: proc(
 	layer.adjacency = adjacency // ✅ Store it
 
 	layer.linear = linear_layer_new(in_features, hidden_dim, allocator)
-	layer.mha = multi_head_attention_layer_new(hidden_dim, num_heads, allocator)
+	layer.mha = multi_head_attention_layer_new(hidden_dim, num_heads, allocator = allocator)
 
 	return layer
 }

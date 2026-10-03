@@ -658,7 +658,11 @@ load_checkpoint :: proc(
 			d_model, offset = read_i32(data, offset)
 			num_heads, offset = read_i32(data, offset)
 
-			layer := multi_head_attention_layer_new(int(d_model), int(num_heads), allocator)
+			layer := multi_head_attention_layer_new(
+				int(d_model),
+				int(num_heads),
+				allocator = allocator,
+			)
 
 			// Load q_proj
 			if layer.q_proj.weights != nil {t.tensor_free(layer.q_proj.weights)}

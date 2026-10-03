@@ -32,7 +32,7 @@ bert_encoder_block_new :: proc(
 	block.d_ff = d_ff
 
 	block.ln1 = layer_norm_layer_new(d_model, 1e-5, allocator)
-	block.mha = multi_head_attention_layer_new(d_model, num_heads, allocator)
+	block.mha = multi_head_attention_layer_new(d_model, num_heads, allocator = allocator)
 	block.ln2 = layer_norm_layer_new(d_model, 1e-5, allocator)
 	block.ffn = ffn_layer_new(d_model, d_ff, allocator)
 

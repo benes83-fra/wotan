@@ -469,7 +469,7 @@ multi_head_attention_test :: proc(allocator: mem.Allocator) {
 	num_heads := 2
 	head_dim := d_model / num_heads // 2
 
-	mha_layer := nn.multi_head_attention_layer_new(d_model, num_heads, allocator)
+	mha_layer := nn.multi_head_attention_layer_new(d_model, num_heads, allocator = allocator)
 	defer nn.multi_head_attention_layer_free(&mha_layer)
 
 	x_data := l.matrix_new(f64, 1, batch * seq_len * d_model, allocator)

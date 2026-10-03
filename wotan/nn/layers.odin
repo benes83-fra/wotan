@@ -502,17 +502,23 @@ MultiHeadAttentionLayer :: struct {
 	k_proj:    LinearLayer,
 	v_proj:    LinearLayer,
 	out_proj:  LinearLayer,
+	use_flash: bool, // ✅ NEW: Toggle for FlashAttention kernel
+	is_causal: bool, // ✅ NEW: Toggle for Causal Masking (Decoder-style)
 }
 
 multi_head_attention_layer_new :: proc(
 	d_model: int,
 	num_heads: int,
+	use_flash: bool = false, // ✅ NEW
+	is_causal: bool = false, // ✅ NEW
 	allocator: mem.Allocator = context.allocator,
 ) -> MultiHeadAttentionLayer {
 	layer: MultiHeadAttentionLayer
 	layer.d_model = d_model
 	layer.num_heads = num_heads
 	layer.head_dim = d_model / num_heads
+	layer.use_flash = use_flash
+	layer.is_causal = is_causal
 
 	layer.q_proj = linear_layer_new(d_model, d_model, allocator)
 	layer.k_proj = linear_layer_new(d_model, d_model, allocator)
@@ -528,7 +534,6 @@ multi_head_attention_layer_free :: proc(layer: ^MultiHeadAttentionLayer) {
 	linear_layer_free(&layer.v_proj)
 	linear_layer_free(&layer.out_proj)
 }
-
 multi_head_attention_layer_forward :: proc(
 	layer: ^MultiHeadAttentionLayer,
 	x: ^t.Tensor,
@@ -547,41 +552,69 @@ multi_head_attention_layer_forward :: proc(
 	k_perm := t.tensor_permute_mha(k, batch, seq_len, layer.num_heads, layer.head_dim)
 	v_perm := t.tensor_permute_mha(v, batch, seq_len, layer.num_heads, layer.head_dim)
 
-	// 3. Scaled Dot-Product Attention (processes all heads in parallel!)
+	// 3. Scaled Dot-Product Attention
 	att: ^t.Tensor
-	if attention_mask != nil {
-		// Convert 0/1 mask to 0/-10000 mask for the masked attention function
-		mask_data := make([]f64, seq_len * seq_len, x.allocator)
-		defer delete(mask_data, x.allocator)
-		for b in 0 ..< batch {
-			// The attention_mask is shape [batch, seq_len]. We expand it to [seq_len, seq_len]
-			for i in 0 ..< seq_len {
-				for j in 0 ..< seq_len {
-					// If either token is padding (0), mask the attention score
-					val_i := attention_mask.data.data[b * seq_len + i]
-					val_j := attention_mask.data.data[b * seq_len + j]
-					if val_i == 0.0 || val_j == 0.0 {
-						mask_data[i * seq_len + j] = -10000.0
-					} else {
-						mask_data[i * seq_len + j] = 0.0
+
+	if layer.use_flash {
+		// ✅ FlashAttention path: Fused kernel, O(N) memory
+		if attention_mask != nil && !layer.is_causal {
+			fmt.println(
+				"WARNING: FlashAttention does not support arbitrary padding masks yet. Falling back to standard attention.",
+			)
+
+			mask_data := make([]f64, seq_len * seq_len, x.allocator)
+			defer delete(mask_data, x.allocator)
+			for b in 0 ..< batch {
+				for i in 0 ..< seq_len {
+					for j in 0 ..< seq_len {
+						val_i := attention_mask.data.data[b * seq_len + i]
+						val_j := attention_mask.data.data[b * seq_len + j]
+						if val_i == 0.0 || val_j == 0.0 {
+							mask_data[i * seq_len + j] = -10000.0
+						} else {
+							mask_data[i * seq_len + j] = 0.0
+						}
 					}
 				}
 			}
+			att = t.tensor_masked_scaled_dot_product_attention(q_perm, k_perm, v_perm, mask_data)
+		} else {
+			// Native FlashAttention (Standard or Causal)
+			att = t.tensor_flash_attention(q_perm, k_perm, v_perm, causal = layer.is_causal)
 		}
-		att = t.tensor_masked_scaled_dot_product_attention(q_perm, k_perm, v_perm, mask_data)
 	} else {
-		att = t.tensor_scaled_dot_product_attention(q_perm, k_perm, v_perm)
+		// ✅ Standard Attention path
+		if layer.is_causal {
+			causal_mask := create_causal_mask(seq_len, x.allocator)
+			defer delete(causal_mask, x.allocator)
+			att = t.tensor_masked_scaled_dot_product_attention(q_perm, k_perm, v_perm, causal_mask)
+		} else if attention_mask != nil {
+			mask_data := make([]f64, seq_len * seq_len, x.allocator)
+			defer delete(mask_data, x.allocator)
+			for b in 0 ..< batch {
+				for i in 0 ..< seq_len {
+					for j in 0 ..< seq_len {
+						val_i := attention_mask.data.data[b * seq_len + i]
+						val_j := attention_mask.data.data[b * seq_len + j]
+						if val_i == 0.0 || val_j == 0.0 {
+							mask_data[i * seq_len + j] = -10000.0
+						} else {
+							mask_data[i * seq_len + j] = 0.0
+						}
+					}
+				}
+			}
+			att = t.tensor_masked_scaled_dot_product_attention(q_perm, k_perm, v_perm, mask_data)
+		} else {
+			att = t.tensor_scaled_dot_product_attention(q_perm, k_perm, v_perm)
+		}
 	}
+
 	// 4. Inverse permute back to [batch, seq_len, d_model]
 	att_inv := t.tensor_permute_mha_inverse(att, batch, seq_len, layer.num_heads, layer.head_dim)
 
 	// 5. Output projection
 	out := linear_forward(&layer.out_proj, att_inv)
-
-	// Cleanup intermediate tensors (autograd handles graph, but we free the intermediates)
-	// t.tensor_free(q); t.tensor_free(k); t.tensor_free(v)
-	// t.tensor_free(q_perm); t.tensor_free(k_perm); t.tensor_free(v_perm)
-	// t.tensor_free(att); t.tensor_free(att_inv)
 
 	return out
 }
@@ -701,7 +734,7 @@ transformer_encoder_block_new :: proc(
 	block.d_ff = d_ff
 
 	// Initialize sublayers
-	block.mha = multi_head_attention_layer_new(d_model, num_heads, allocator)
+	block.mha = multi_head_attention_layer_new(d_model, num_heads, allocator = allocator)
 	block.ffn = ffn_layer_new(d_model, d_ff, allocator)
 	block.ln1 = layer_norm_layer_new(d_model, 1e-5, allocator)
 	block.ln2 = layer_norm_layer_new(d_model, 1e-5, allocator)
@@ -816,7 +849,14 @@ masked_multi_head_attention_layer_forward :: proc(
 	v_perm := t.tensor_permute_mha(v, batch, seq_len, layer.num_heads, layer.head_dim)
 
 	// 3. Masked Scaled Dot-Product Attention
-	att := t.tensor_masked_scaled_dot_product_attention(q_perm, k_perm, v_perm, mask)
+	att: ^t.Tensor
+	if layer.use_flash {
+		// ✅ FlashAttention handles causal masking natively, ignoring the explicit `mask` array
+		// This saves massive amounts of memory bandwidth by not reading the mask from RAM.
+		att = t.tensor_flash_attention(q_perm, k_perm, v_perm, causal = true)
+	} else {
+		att = t.tensor_masked_scaled_dot_product_attention(q_perm, k_perm, v_perm, mask)
+	}
 
 	// 4. Inverse permute back to [batch, seq_len, d_model]
 	att_inv := t.tensor_permute_mha_inverse(att, batch, seq_len, layer.num_heads, layer.head_dim)
@@ -965,7 +1005,7 @@ transformer_decoder_block_new :: proc(
 	block.num_heads = num_heads
 	block.d_ff = d_ff
 
-	block.masked_mha = multi_head_attention_layer_new(d_model, num_heads, allocator)
+	block.masked_mha = multi_head_attention_layer_new(d_model, num_heads, allocator = allocator)
 	block.cross_attn = cross_attention_layer_new(d_model, num_heads, allocator)
 	block.ffn = ffn_layer_new(d_model, d_ff, allocator)
 	block.ln1 = layer_norm_layer_new(d_model, 1e-5, allocator)
