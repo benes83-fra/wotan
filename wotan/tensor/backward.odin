@@ -2510,6 +2510,11 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 			V_in := node.inputs[2]
 			if len(node.grad.data) == 0 {continue}
 
+			is_causal := false
+			if len(node.int_metadata) > 0 && node.int_metadata[0] == 1 {
+				is_causal = true
+			}
+
 			batch := Q_in.shape[0]
 			seq_len := Q_in.shape[1]
 			d_k := Q_in.shape[2]
@@ -2538,23 +2543,29 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 					dO_offset := (b * seq_len + i) * d_v
 					dO_row := node.grad.data[dO_offset:dO_offset + d_v]
 
-					// ── Pass 1: Recompute softmax stats (m_i, l_i) and D_i ──
+					// Pass 1: Recompute Softmax stats (m_i, l_i) and D_i
 					m_i: f64 = -math.F64_MAX
 					l_i: f64 = 0.0
 					D_i: f64 = 0.0
 
 					for j_start := 0; j_start < seq_len; j_start += Bc {
+						if is_causal && j_start > i {break}
 						j_end := j_start + Bc
 						if j_end > seq_len {j_end = seq_len}
 						curr_Bc := j_end - j_start
 
 						block_max := -math.F64_MAX
 						for x in 0 ..< curr_Bc {
-							k_offset := (b * seq_len + j_start + x) * d_k
-							k_row := K_in.data.data[k_offset:k_offset + d_k]
-							s_val := l.dot_simd(q_row, k_row) * scale
-							s_tile[x] = s_val
-							if s_val > block_max {block_max = s_val}
+							j_idx := j_start + x
+							if is_causal && j_idx > i {
+								s_tile[x] = -math.F64_MAX
+							} else {
+								k_offset := (b * seq_len + j_idx) * d_k
+								k_row := K_in.data.data[k_offset:k_offset + d_k]
+								s_val := l.dot_simd(q_row, k_row) * scale
+								s_tile[x] = s_val
+								if s_val > block_max {block_max = s_val}
+							}
 						}
 
 						new_m := m_i
@@ -2563,14 +2574,18 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 
 						block_sum: f64 = 0.0
 						block_D: f64 = 0.0
-						for x in 0 ..< curr_Bc {
-							p_val := math.exp(s_tile[x] - new_m) // unnormalized
-							p_tile[x] = p_val
-							block_sum += p_val
 
-							v_offset := (b * seq_len + j_start + x) * d_v
-							v_row := V_in.data.data[v_offset:v_offset + d_v]
-							block_D += p_val * l.dot_simd(dO_row, v_row)
+						for x in 0 ..< curr_Bc {
+							j_idx := j_start + x
+							p_val := math.exp(s_tile[x] - new_m)
+							p_tile[x] = p_val
+
+							if !(is_causal && j_idx > i) {
+								block_sum += p_val
+								v_offset := (b * seq_len + j_idx) * d_v
+								v_row := V_in.data.data[v_offset:v_offset + d_v]
+								block_D += p_val * l.dot_simd(dO_row, v_row)
+							}
 						}
 
 						D_i = D_i * correction + block_D
@@ -2578,43 +2593,45 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 						m_i = new_m
 					}
 
-					// ✅ FIX: Normalize D_i (it was accumulated with unnormalized probs)
+					// Pass 2: Compute dQ_i, and scatter dK_j, dV_j
+					// Pass 2: Compute dQ_i, and scatter dK_j, dV_j
 					inv_l := 1.0 / l_i
-					D_i *= inv_l
-
-					// ── Pass 2: Compute dQ_i, scatter dK_j, dV_j ──
+					D_i *= inv_l // ✅ FIX: Normalize D_i by the softmax denominator
 					dQ_row := Q_in.grad.data[q_offset:q_offset + d_k]
 
 					for j_start := 0; j_start < seq_len; j_start += Bc {
+						if is_causal && j_start > i {break}
 						j_end := j_start + Bc
 						if j_end > seq_len {j_end = seq_len}
 						curr_Bc := j_end - j_start
 
 						for x in 0 ..< curr_Bc {
-							k_offset := (b * seq_len + j_start + x) * d_k
+							j_idx := j_start + x
+							if is_causal && j_idx > i {continue}
+
+							k_offset := (b * seq_len + j_idx) * d_k
 							k_row := K_in.data.data[k_offset:k_offset + d_k]
+
 							s_val := l.dot_simd(q_row, k_row) * scale
-							p_val := math.exp(s_val - m_i) * inv_l // ← correct P_ij
+							p_val := math.exp(s_val - m_i) * inv_l
 
-							v_offset := (b * seq_len + j_start + x) * d_v
+							v_offset := (b * seq_len + j_idx) * d_v
 							v_row := V_in.data.data[v_offset:v_offset + d_v]
-							dot_dO_V := l.dot_simd(dO_row, v_row)
 
-							// dS_ij = P_ij * (dP_ij - D_i) * scale
+							dot_dO_V := l.dot_simd(dO_row, v_row)
 							dS_ij := p_val * (dot_dO_V - D_i) * scale
 
+							// ✅ SIMD Optimization: Replaced scalar loops with axpy_simd
 							if V_in.requires_grad {
 								dV_row := V_in.grad.data[v_offset:v_offset + d_v]
-								for d in 0 ..< d_v {dV_row[d] += p_val * dO_row[d]}
+								l.axpy_simd(p_val, dO_row, dV_row)
 							}
-
 							if Q_in.requires_grad {
-								for d in 0 ..< d_k {dQ_row[d] += dS_ij * k_row[d]}
+								l.axpy_simd(dS_ij, k_row, dQ_row)
 							}
-
 							if K_in.requires_grad {
 								dK_row := K_in.grad.data[k_offset:k_offset + d_k]
-								for d in 0 ..< d_k {dK_row[d] += dS_ij * q_row[d]}
+								l.axpy_simd(dS_ij, q_row, dK_row)
 							}
 						}
 					}

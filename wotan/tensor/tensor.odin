@@ -2898,13 +2898,11 @@ tensor_ssm :: proc(
 // ============================================================================
 // FlashAttention (Memory-Efficient Tiled Attention with Online Softmax)
 // ============================================================================
-// Fuses Q @ K^T, Scaling, Softmax, and @ V into a single memory-bound pass.
-// Reduces memory complexity from O(N^2) to O(N) by avoiding the materialization
-// of the N x N attention matrix in main memory.
 tensor_flash_attention :: proc(
 	Q: ^Tensor,
 	K: ^Tensor,
 	V: ^Tensor,
+	causal: bool = false,
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
 	batch := Q.shape[0]
@@ -2923,7 +2921,6 @@ tensor_flash_attention :: proc(
 	s_tile := make([]f64, Bc, allocator)
 	p_tile := make([]f64, Bc, allocator)
 	o_acc := make([]f64, d_v, allocator)
-
 	defer {
 		delete(s_tile, allocator)
 		delete(p_tile, allocator)
@@ -2946,11 +2943,21 @@ tensor_flash_attention :: proc(
 				if j_end > seq_len {j_end = seq_len}
 				curr_Bc := j_end - j_start
 
+				// Causal optimization: skip entire blocks that are strictly in the future
+				if causal && j_start > i {
+					break
+				}
+
 				// 1. Fused MatMul + Scale: S_ij = Q_i @ K_j^T * scale
 				for x in 0 ..< curr_Bc {
-					k_offset := (b * seq_len + j_start + x) * d_k
-					k_row := K.data.data[k_offset:k_offset + d_k]
-					s_tile[x] = l.dot_simd(q_row, k_row) * scale
+					j := j_start + x
+					if causal && j > i {
+						s_tile[x] = -1e9 // Safe mask value to avoid NaNs during correction
+					} else {
+						k_offset := (b * seq_len + j) * d_k
+						k_row := K.data.data[k_offset:k_offset + d_k]
+						s_tile[x] = l.dot_simd(q_row, k_row) * scale
+					}
 				}
 
 				// 2. Find block max
@@ -2977,13 +2984,14 @@ tensor_flash_attention :: proc(
 
 				// 6. Fused MAC: O_i = O_i * correction + P_ij @ V_j
 				for d in 0 ..< d_v {o_acc[d] *= correction}
-
 				for x in 0 ..< curr_Bc {
-					v_offset := (b * seq_len + j_start + x) * d_v
+					j := j_start + x
+					if causal && j > i {
+						continue
+					}
+					v_offset := (b * seq_len + j) * d_v
 					v_row := V.data.data[v_offset:v_offset + d_v]
 					p_val := p_tile[x]
-
-					// Auto-vectorized inner loop
 					l.axpy_simd(p_val, v_row, o_acc)
 				}
 
@@ -2992,7 +3000,10 @@ tensor_flash_attention :: proc(
 			}
 
 			// 7. Final normalization: O_i = O_i / l_i
-			inv_l := 1.0 / l_i
+			inv_l := 0.0
+			if l_i > 1e-12 {
+				inv_l = 1.0 / l_i
+			}
 			out_offset := (b * seq_len + i) * d_v
 			for d in 0 ..< d_v {
 				out_data.data[out_offset + d] = o_acc[d] * inv_l
@@ -3007,6 +3018,12 @@ tensor_flash_attention :: proc(
 		append(&out.inputs, Q)
 		append(&out.inputs, K)
 		append(&out.inputs, V)
+		// Store causal flag for backward pass
+		if causal {
+			append(&out.int_metadata, 1)
+		} else {
+			append(&out.int_metadata, 0)
+		}
 	}
 	return out
 }
