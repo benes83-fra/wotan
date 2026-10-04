@@ -2906,16 +2906,17 @@ tensor_flash_attention :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
 	batch := Q.shape[0]
-	seq_len := Q.shape[1]
+	seq_q := Q.shape[1]
+	seq_k := K.shape[1]
 	d_k := Q.shape[2]
 	d_v := V.shape[2]
 
-	out_data := l.matrix_new(f64, 1, batch * seq_len * d_v, Q.allocator)
+	out_data := l.matrix_new(f64, 1, batch * seq_q * d_v, Q.allocator)
 	scale := 1.0 / math.sqrt(f64(d_k))
 
 	// Block size for K and V tiling (chosen to fit in L1/L2 cache)
 	Bc := 64
-	if seq_len < Bc {Bc = seq_len}
+	if seq_k < Bc {Bc = seq_k}
 
 	// Pre-allocate SRAM-like buffers to avoid allocations in the inner loop
 	s_tile := make([]f64, Bc, allocator)
@@ -2928,19 +2929,18 @@ tensor_flash_attention :: proc(
 	}
 
 	for b in 0 ..< batch {
-		for i in 0 ..< seq_len {
-			q_offset := (b * seq_len + i) * d_k
+		for i in 0 ..< seq_q {
+			q_offset := (b * seq_q + i) * d_k
 			q_row := Q.data.data[q_offset:q_offset + d_k]
 
 			// Online softmax accumulators
 			m_i: f64 = -math.F64_MAX
 			l_i: f64 = 0.0
 			for d in 0 ..< d_v {o_acc[d] = 0.0}
-
 			// Tile over K and V
-			for j_start := 0; j_start < seq_len; j_start += Bc {
+			for j_start := 0; j_start < seq_k; j_start += Bc {
 				j_end := j_start + Bc
-				if j_end > seq_len {j_end = seq_len}
+				if j_end > seq_k {j_end = seq_k}
 				curr_Bc := j_end - j_start
 
 				// Causal optimization: skip entire blocks that are strictly in the future
@@ -2954,7 +2954,7 @@ tensor_flash_attention :: proc(
 					if causal && j > i {
 						s_tile[x] = -1e9 // Safe mask value to avoid NaNs during correction
 					} else {
-						k_offset := (b * seq_len + j) * d_k
+						k_offset := (b * seq_k + j) * d_k
 						k_row := K.data.data[k_offset:k_offset + d_k]
 						s_tile[x] = l.dot_simd(q_row, k_row) * scale
 					}
@@ -2989,7 +2989,7 @@ tensor_flash_attention :: proc(
 					if causal && j > i {
 						continue
 					}
-					v_offset := (b * seq_len + j) * d_v
+					v_offset := (b * seq_k + j) * d_v
 					v_row := V.data.data[v_offset:v_offset + d_v]
 					p_val := p_tile[x]
 					l.axpy_simd(p_val, v_row, o_acc)
@@ -3004,7 +3004,7 @@ tensor_flash_attention :: proc(
 			if l_i > 1e-12 {
 				inv_l = 1.0 / l_i
 			}
-			out_offset := (b * seq_len + i) * d_v
+			out_offset := (b * seq_q + i) * d_v
 			for d in 0 ..< d_v {
 				out_data.data[out_offset + d] = o_acc[d] * inv_l
 			}
@@ -3012,7 +3012,7 @@ tensor_flash_attention :: proc(
 	}
 
 	out := tensor_new(out_data, Q.requires_grad || K.requires_grad || V.requires_grad, Q.allocator)
-	out.shape = [4]int{batch, seq_len, d_v, 1}
+	out.shape = [4]int{batch, seq_q, d_v, 1}
 	if out.requires_grad {
 		out.op = .FlashAttention
 		append(&out.inputs, Q)

@@ -896,17 +896,20 @@ CrossAttentionLayer :: struct {
 	k_proj:    LinearLayer, // From encoder
 	v_proj:    LinearLayer, // From encoder
 	out_proj:  LinearLayer,
+	use_flash: bool,
 }
 
 cross_attention_layer_new :: proc(
 	d_model: int,
 	num_heads: int,
+	use_flash: bool = false,
 	allocator: mem.Allocator = context.allocator,
 ) -> CrossAttentionLayer {
 	layer: CrossAttentionLayer
 	layer.d_model = d_model
 	layer.num_heads = num_heads
 	layer.head_dim = d_model / num_heads
+	layer.use_flash = use_flash
 
 	layer.q_proj = linear_layer_new(d_model, d_model, allocator)
 	layer.k_proj = linear_layer_new(d_model, d_model, allocator)
@@ -962,8 +965,13 @@ cross_attention_layer_forward :: proc(
 	)
 
 	// Standard attention (no mask for cross-attention)
-	att := t.tensor_scaled_dot_product_attention(q_perm, k_perm, v_perm)
+	att: ^t.Tensor
+	if layer.use_flash {
 
+		att = t.tensor_flash_attention(q_perm, k_perm, v_perm, causal = false)
+	} else {
+		att = t.tensor_scaled_dot_product_attention(q_perm, k_perm, v_perm)
+	}
 	// Inverse permute
 	att_inv := t.tensor_permute_mha_inverse(
 		att,
@@ -1012,7 +1020,12 @@ transformer_decoder_block_new :: proc(
 		use_flash = use_flash,
 		allocator = allocator,
 	)
-	block.cross_attn = cross_attention_layer_new(d_model, num_heads, allocator)
+	block.cross_attn = cross_attention_layer_new(
+		d_model,
+		num_heads,
+		use_flash = use_flash,
+		allocator = allocator,
+	)
 	block.ffn = ffn_layer_new(d_model, d_ff, allocator)
 	block.ln1 = layer_norm_layer_new(d_model, 1e-5, allocator)
 	block.ln2 = layer_norm_layer_new(d_model, 1e-5, allocator)
