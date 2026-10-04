@@ -19,7 +19,7 @@ gpt_completion_test :: proc(allocator: mem.Allocator) {
 
 	gpt_model: ^nn.GPTModel
 	ok_load := false
-	gpt_model, ok_load = nn.load_gpt_model(checkpoint_path, allocator)
+	gpt_model, ok_load = nn.load_gpt_model(checkpoint_path, allocator = allocator)
 
 	if !ok_load {
 		fmt.println("⚠ Checkpoint not found. Please ensure it was generated.")

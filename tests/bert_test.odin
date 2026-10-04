@@ -70,7 +70,7 @@ bert_test :: proc(allocator: mem.Allocator) {
 		d_ff,
 		num_layers,
 		max_seq_len,
-		allocator,
+		allocator = allocator,
 	)
 	defer nn.bert_model_free(&model)
 

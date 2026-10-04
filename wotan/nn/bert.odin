@@ -24,6 +24,7 @@ bert_encoder_block_new :: proc(
 	d_model: int,
 	num_heads: int,
 	d_ff: int,
+	use_flash: bool = false,
 	allocator: mem.Allocator = context.allocator,
 ) -> BERTEncoderBlock {
 	block: BERTEncoderBlock
@@ -32,7 +33,12 @@ bert_encoder_block_new :: proc(
 	block.d_ff = d_ff
 
 	block.ln1 = layer_norm_layer_new(d_model, 1e-5, allocator)
-	block.mha = multi_head_attention_layer_new(d_model, num_heads, allocator = allocator)
+	block.mha = multi_head_attention_layer_new(
+		d_model,
+		num_heads,
+		use_flash = use_flash,
+		allocator = allocator,
+	)
 	block.ln2 = layer_norm_layer_new(d_model, 1e-5, allocator)
 	block.ffn = ffn_layer_new(d_model, d_ff, allocator)
 
@@ -105,6 +111,7 @@ bert_model_new :: proc(
 	d_ff: int,
 	num_layers: int,
 	max_seq_len: int,
+	use_flash: bool = false,
 	allocator: mem.Allocator = context.allocator,
 ) -> BERTModel {
 	model: BERTModel
@@ -131,7 +138,13 @@ bert_model_new :: proc(
 	// Encoder blocks
 	model.encoder_blocks = make([dynamic]BERTEncoderBlock, 0, allocator)
 	for i in 0 ..< num_layers {
-		block := bert_encoder_block_new(d_model, num_heads, d_ff, allocator)
+		block := bert_encoder_block_new(
+			d_model,
+			num_heads,
+			d_ff,
+			use_flash = use_flash,
+			allocator = allocator,
+		)
 		append(&model.encoder_blocks, block)
 	}
 

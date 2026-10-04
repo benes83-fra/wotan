@@ -26,6 +26,7 @@ gpt_block_new :: proc(
 	d_model: int,
 	num_heads: int,
 	d_ff: int,
+	use_flash: bool = false,
 	allocator: mem.Allocator = context.allocator,
 ) -> GPTBlock {
 	block: GPTBlock
@@ -35,7 +36,12 @@ gpt_block_new :: proc(
 
 	// Pre-LayerNorm architecture (GPT-2 style)
 	block.ln1 = layer_norm_layer_new(d_model, 1e-5, allocator)
-	block.mha = multi_head_attention_layer_new(d_model, num_heads, allocator = allocator)
+	block.mha = multi_head_attention_layer_new(
+		d_model,
+		num_heads,
+		use_flash = use_flash,
+		allocator = allocator,
+	)
 	block.ln2 = layer_norm_layer_new(d_model, 1e-5, allocator)
 	block.ffn = ffn_layer_new(d_model, d_ff, allocator)
 
@@ -104,6 +110,7 @@ gpt_model_new :: proc(
 	d_ff: int,
 	num_layers: int,
 	max_seq_len: int,
+	use_flash: bool = false,
 	allocator: mem.Allocator = context.allocator,
 ) -> GPTModel {
 	model: GPTModel
@@ -124,7 +131,13 @@ gpt_model_new :: proc(
 	// GPT blocks
 	model.blocks = make([dynamic]GPTBlock, 0, allocator)
 	for i in 0 ..< num_layers {
-		block := gpt_block_new(d_model, num_heads, d_ff, allocator)
+		block := gpt_block_new(
+			d_model,
+			num_heads,
+			d_ff,
+			use_flash = use_flash,
+			allocator = allocator,
+		)
 		append(&model.blocks, block)
 	}
 

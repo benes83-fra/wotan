@@ -524,7 +524,7 @@ event_study_tokenizer_nlp_test :: proc(allocator: mem.Allocator) {
 			d_ff,
 			num_layers,
 			max_seq_len,
-			allocator,
+			allocator = allocator,
 		)
 		// Replace NSP head with 3-class sentiment head
 		nn.bert_replace_nsp_head(bert_model, 3, allocator)

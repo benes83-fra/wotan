@@ -66,7 +66,7 @@ gpt_full_test :: proc(allocator: mem.Allocator) {
 		d_ff,
 		num_layers,
 		max_seq_len,
-		allocator,
+		allocator = allocator,
 	)
 	fmt.printf("Model created %d tensors\n", global_tensors_created)
 	defer nn.gpt_model_free(&model)
@@ -633,7 +633,7 @@ And borrowing dulls the edge of husbandry.
 		d_ff,
 		num_layers,
 		max_seq_len,
-		allocator,
+		allocator = allocator,
 	)
 	defer nn.gpt_model_free(&model)
 

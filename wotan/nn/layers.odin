@@ -998,6 +998,7 @@ transformer_decoder_block_new :: proc(
 	d_model: int,
 	num_heads: int,
 	d_ff: int,
+	use_flash: bool = false,
 	allocator: mem.Allocator = context.allocator,
 ) -> TransformerDecoderBlock {
 	block: TransformerDecoderBlock
@@ -1005,7 +1006,12 @@ transformer_decoder_block_new :: proc(
 	block.num_heads = num_heads
 	block.d_ff = d_ff
 
-	block.masked_mha = multi_head_attention_layer_new(d_model, num_heads, allocator = allocator)
+	block.masked_mha = multi_head_attention_layer_new(
+		d_model,
+		num_heads,
+		use_flash = use_flash,
+		allocator = allocator,
+	)
 	block.cross_attn = cross_attention_layer_new(d_model, num_heads, allocator)
 	block.ffn = ffn_layer_new(d_model, d_ff, allocator)
 	block.ln1 = layer_norm_layer_new(d_model, 1e-5, allocator)

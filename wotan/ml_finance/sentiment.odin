@@ -40,7 +40,7 @@ sentiment_analyzer_new :: proc(
 		d_ff,
 		num_layers,
 		max_seq_len,
-		allocator,
+		allocator = allocator,
 	)
 
 	// 2. Replace the default 2-class NSP head with a 3-class Sentiment head.

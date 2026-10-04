@@ -1067,6 +1067,7 @@ save_gpt_model :: proc(model: ^GPTModel, path: string) -> bool {
 
 load_gpt_model :: proc(
 	path: string,
+	use_flash: bool = false,
 	allocator: mem.Allocator = context.allocator,
 ) -> (
 	^GPTModel,
@@ -1125,7 +1126,8 @@ load_gpt_model :: proc(
 		int(d_ff),
 		int(num_layers),
 		int(max_seq_len),
-		allocator,
+		use_flash = use_flash,
+		allocator = allocator,
 	)
 
 	// Load embeddings
@@ -1265,6 +1267,7 @@ save_bert_model :: proc(model: ^BERTModel, path: string) -> bool {
 load_bert_model :: proc(
 	path: string,
 	allocator: mem.Allocator = context.allocator,
+	use_flash: bool = false,
 ) -> (
 	^BERTModel,
 	bool,
@@ -1319,7 +1322,8 @@ load_bert_model :: proc(
 		int(d_ff),
 		int(num_layers),
 		int(max_seq_len),
-		allocator,
+		use_flash = use_flash,
+		allocator = allocator,
 	)
 
 	if model_ptr.token_emb.weight != nil {t.tensor_free(model_ptr.token_emb.weight)}

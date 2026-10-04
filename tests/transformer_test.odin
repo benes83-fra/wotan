@@ -298,7 +298,12 @@ transformer_decoder_test :: proc(allocator: mem.Allocator) {
 	defer nn.transformer_encoder_free(&encoder)
 
 	// Create decoder block
-	decoder_block := nn.transformer_decoder_block_new(d_model, num_heads, d_ff, allocator)
+	decoder_block := nn.transformer_decoder_block_new(
+		d_model,
+		num_heads,
+		d_ff,
+		allocator = allocator,
+	)
 	defer nn.transformer_decoder_block_free(&decoder_block)
 
 	// Create optimizer
@@ -475,7 +480,7 @@ transformer_reversal_test :: proc(allocator: mem.Allocator) {
 	// Create decoder
 	decoder_blocks := make([dynamic]nn.TransformerDecoderBlock, 0, allocator)
 	for i in 0 ..< num_decoder_layers {
-		block := nn.transformer_decoder_block_new(d_model, num_heads, d_ff, allocator)
+		block := nn.transformer_decoder_block_new(d_model, num_heads, d_ff, allocator = allocator)
 		append(&decoder_blocks, block)
 	}
 	defer {
@@ -718,7 +723,7 @@ char_lm_test :: proc(allocator: mem.Allocator) {
 	// Create decoder blocks (decoder-only Transformer)
 	decoder_blocks := make([dynamic]nn.TransformerDecoderBlock, 0, allocator)
 	for i in 0 ..< num_layers {
-		block := nn.transformer_decoder_block_new(d_model, num_heads, d_ff, allocator)
+		block := nn.transformer_decoder_block_new(d_model, num_heads, d_ff, allocator = allocator)
 		append(&decoder_blocks, block)
 	}
 	defer {
