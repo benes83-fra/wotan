@@ -62,11 +62,14 @@ Op :: enum {
 	NormCDF,
 	SumDim1,
 	Softmax,
+	GateMul,
+	TopKMask,
 	Entropy,
 	BCELoss,
 	PermuteLOB,
 	SharpeLoss,
 	Concat,
+	Reshape,
 	NormalizeTime,
 	LogSumExpDim1,
 	Softplus, // ✅ ADD
@@ -3024,6 +3027,115 @@ tensor_flash_attention :: proc(
 		} else {
 			append(&out.int_metadata, 0)
 		}
+	}
+	return out
+}
+// ============================================================================
+// Top-K Mask (Non-Differentiable)
+// ============================================================================
+tensor_top_k_mask :: proc(
+	probs: ^Tensor,
+	k: int,
+	allocator: mem.Allocator = context.allocator,
+) -> ^Tensor {
+	N := probs.shape[0]
+	E := probs.shape[1]
+	mask_data := l.matrix_new(f64, N, E, allocator)
+
+	for n in 0 ..< N {
+		row := probs.data.data[n * E:(n + 1) * E]
+
+		// Simple insertion-sort based Top-K for each row
+		top_k_indices := make([]int, k, allocator)
+		for i in 0 ..< k {top_k_indices[i] = i}
+
+		for e in 0 ..< E {
+			val := row[e]
+			// Check if it belongs in top_k
+			if val > row[top_k_indices[k - 1]] {
+				top_k_indices[k - 1] = e
+				// Bubble up to maintain sorted order
+				for j := k - 1; j > 0; j -= 1 {
+					if row[top_k_indices[j]] > row[top_k_indices[j - 1]] {
+						tmp := top_k_indices[j]
+						top_k_indices[j] = top_k_indices[j - 1]
+						top_k_indices[j - 1] = tmp
+					} else {
+						break
+					}
+				}
+			}
+		}
+
+		for i in 0 ..< k {
+			mask_data.data[n * E + top_k_indices[i]] = 1.0
+		}
+	}
+
+	// Mask is NOT differentiable. It acts as a constant.
+	out := tensor_new(mask_data, false, allocator)
+	out.shape = probs.shape
+	return out
+}
+
+// ============================================================================
+// Gate Multiply: out[n, d] = x[n, d] * gate[n, 0]
+// ============================================================================
+tensor_gate_mul :: proc(
+	x: ^Tensor,
+	gate: ^Tensor,
+	allocator: mem.Allocator = context.allocator,
+) -> ^Tensor {
+	N := x.shape[0]
+	D := x.shape[1]
+	out_data := l.matrix_new(f64, N, D, allocator)
+
+	for n in 0 ..< N {
+		g := gate.data.data[n]
+		for d in 0 ..< D {
+			out_data.data[n * D + d] = x.data.data[n * D + d] * g
+		}
+	}
+
+	out := tensor_new(out_data, x.requires_grad || gate.requires_grad, allocator)
+	out.shape = x.shape
+	if out.requires_grad {
+		out.op = .GateMul
+		append(&out.inputs, x)
+		append(&out.inputs, gate)
+	}
+	return out
+}
+
+// tensor_reshape changes the logical shape of the tensor without altering the flat memory layout.
+tensor_reshape :: proc(
+	input: ^Tensor,
+	new_shape: [4]int,
+	allocator: mem.Allocator = context.allocator,
+) -> ^Tensor {
+	old_total := len(input.data.data)
+	new_total := new_shape[0] * new_shape[1] * new_shape[2] * new_shape[3]
+
+	if old_total != new_total {
+		panic(
+			fmt.aprintf(
+				"tensor_reshape: cannot reshape tensor of size %d to size %d",
+				old_total,
+				new_total,
+			),
+		)
+	}
+
+	// Create a new matrix container with the exact same flat data
+	out_data := l.matrix_new(f64, 1, new_total, allocator)
+	copy(out_data.data, input.data.data)
+
+	out := tensor_new(out_data, input.requires_grad, allocator)
+	out.shape = new_shape
+
+	if out.requires_grad {
+		out.op = .Reshape
+		append(&out.inputs, input)
 	}
 	return out
 }

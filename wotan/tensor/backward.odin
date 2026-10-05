@@ -2593,7 +2593,7 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 						m_i = new_m
 					}
 
-					// Pass 2: Compute dQ_i, and scatter dK_j, dV_j
+
 					// Pass 2: Compute dQ_i, and scatter dK_j, dV_j
 					inv_l := 1.0 / l_i
 					D_i *= inv_l // ✅ FIX: Normalize D_i by the softmax denominator
@@ -2637,7 +2637,40 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 					}
 				}
 			}
-		case .None, .Constant:
+		case .GateMul:
+			x_in := node.inputs[0]
+			gate_in := node.inputs[1]
+
+			if x_in.requires_grad {
+				tensor_ensure_grad(x_in)
+				for n in 0 ..< x_in.shape[0] {
+					g := gate_in.data.data[n]
+					for d in 0 ..< x_in.shape[1] {
+						idx := n * x_in.shape[1] + d
+						x_in.grad.data[idx] += node.grad.data[idx] * g
+					}
+				}
+			}
+
+			if gate_in.requires_grad {
+				tensor_ensure_grad(gate_in)
+				for n in 0 ..< x_in.shape[0] {
+					sum_d: f64 = 0.0
+					for d in 0 ..< x_in.shape[1] {
+						idx := n * x_in.shape[1] + d
+						sum_d += node.grad.data[idx] * x_in.data.data[idx]
+					}
+					gate_in.grad.data[n] += sum_d
+				}
+			}
+		case .Reshape:
+			input_in := node.inputs[0]
+			if input_in.requires_grad {
+				tensor_ensure_grad(input_in)
+				// Gradients flow back 1:1 because the memory layout is unchanged
+				l.vec_add_simd(node.grad.data, input_in.grad.data, input_in.grad.data)
+			}
+		case .None, .Constant, .TopKMask:
 		// Leaf node, nothing to do
 		}
 	}
