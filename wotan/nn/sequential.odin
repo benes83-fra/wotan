@@ -32,6 +32,7 @@ Layer :: union {
 	TransformerEncoder,
 	GATLayer,
 	MambaLayer,
+	MoELayer,
 }
 
 // ============================================================================
@@ -198,6 +199,8 @@ sequential_forward :: proc(s: ^Sequential, input: ^t.Tensor) -> ^t.Tensor {
 		case GATLayer:
 			// ✅ Use the stored adjacency matrix
 			x = gat_layer_forward(&l, x, l.adjacency)
+		case MoELayer:
+			x = moe_layer_forward(&l, x, x.allocator)
 		case MambaLayer:
 			batch := x.shape[0]
 			seq_len := x.shape[1]
@@ -336,6 +339,15 @@ sequential_add_to_sgd :: proc(seq: ^Sequential, opt: ^SGD) {
 			if l.mha.k_proj.weights.requires_grad {sgd_add_param(opt, l.mha.k_proj.weights)}
 			if l.mha.v_proj.weights.requires_grad {sgd_add_param(opt, l.mha.v_proj.weights)}
 			if l.mha.out_proj.weights.requires_grad {sgd_add_param(opt, l.mha.out_proj.weights)}
+		case MoELayer:
+			sgd_add_param(opt, l.router.weights)
+			if l.router.bias != nil {sgd_add_param(opt, l.router.bias)}
+			for i in 0 ..< l.num_experts {
+				sgd_add_param(opt, l.experts[i].fc1.weights)
+				if l.experts[i].fc1.bias != nil {sgd_add_param(opt, l.experts[i].fc1.bias)}
+				sgd_add_param(opt, l.experts[i].fc2.weights)
+				if l.experts[i].fc2.bias != nil {sgd_add_param(opt, l.experts[i].fc2.bias)}
+			}
 		case MambaLayer:
 			sgd_add_param(opt, l.proj_x.weights)
 			if l.proj_x.bias != nil {sgd_add_param(opt, l.proj_x.bias)}
@@ -512,6 +524,18 @@ sequential_add_to_adam :: proc(seq: ^Sequential, opt: ^Adam) {
 			   l.proj_out.bias.requires_grad {adam_add_param(opt, l.proj_out.bias)}
 			if l.A.requires_grad {adam_add_param(opt, l.A)}
 			if l.D.requires_grad {adam_add_param(opt, l.D)}
+		case MoELayer:
+			if l.router.weights.requires_grad {adam_add_param(opt, l.router.weights)}
+			if l.router.bias != nil &&
+			   l.router.bias.requires_grad {adam_add_param(opt, l.router.bias)}
+			for i in 0 ..< l.num_experts {
+				if l.experts[i].fc1.weights.requires_grad {adam_add_param(opt, l.experts[i].fc1.weights)}
+				if l.experts[i].fc1.bias != nil &&
+				   l.experts[i].fc1.bias.requires_grad {adam_add_param(opt, l.experts[i].fc1.bias)}
+				if l.experts[i].fc2.weights.requires_grad {adam_add_param(opt, l.experts[i].fc2.weights)}
+				if l.experts[i].fc2.bias != nil &&
+				   l.experts[i].fc2.bias.requires_grad {adam_add_param(opt, l.experts[i].fc2.bias)}
+			}
 		case MaxPool2dLayer, AvgPool2dLayer, DropoutLayer, Activation, FlattenLayer:
 		// No trainable parameters
 		}
@@ -558,6 +582,8 @@ sequential_free :: proc(seq: ^Sequential) {
 			transformer_encoder_free(&l)
 		case GATLayer:
 			gat_layer_free(&l)
+		case MoELayer:
+			moe_layer_free(&l)
 		case MambaLayer:
 			mamba_layer_free(&l)
 		}
@@ -615,6 +641,8 @@ sequential_replace_last_layer :: proc(
 		gat_layer_free(&l)
 	case MambaLayer:
 		mamba_layer_free(&l)
+	case MoELayer:
+		moe_layer_free(&l)
 	case MaxPool2dLayer, AvgPool2dLayer, DropoutLayer, Activation, FlattenLayer:
 	// No heap allocations to free for these marker/stateless layers
 	}

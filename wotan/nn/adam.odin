@@ -306,6 +306,18 @@ sequential_add_trainable_to_adam :: proc(seq: ^Sequential, opt: ^Adam) {
 			   l.proj_out.bias.requires_grad {adam_add_param(opt, l.proj_out.bias)}
 			if l.A.requires_grad {adam_add_param(opt, l.A)}
 			if l.D.requires_grad {adam_add_param(opt, l.D)}
+		case MoELayer:
+			if l.router.weights.requires_grad {adam_add_param(opt, l.router.weights)}
+			if l.router.bias != nil &&
+			   l.router.bias.requires_grad {adam_add_param(opt, l.router.bias)}
+			for i in 0 ..< l.num_experts {
+				if l.experts[i].fc1.weights.requires_grad {adam_add_param(opt, l.experts[i].fc1.weights)}
+				if l.experts[i].fc1.bias != nil &&
+				   l.experts[i].fc1.bias.requires_grad {adam_add_param(opt, l.experts[i].fc1.bias)}
+				if l.experts[i].fc2.weights.requires_grad {adam_add_param(opt, l.experts[i].fc2.weights)}
+				if l.experts[i].fc2.bias != nil &&
+				   l.experts[i].fc2.bias.requires_grad {adam_add_param(opt, l.experts[i].fc2.bias)}
+			}
 		case MaxPool2dLayer, AvgPool2dLayer, DropoutLayer, Activation, FlattenLayer:
 		// No trainable parameters
 		}

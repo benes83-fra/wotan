@@ -381,6 +381,29 @@ save_checkpoint :: proc(
 			// Save SSM parameters
 			write_tensor(file, l.A)
 			write_tensor(file, l.D)
+		case MoELayer:
+			write_i32(file, 26) // Type 26
+			write_i32(file, i32(l.num_experts))
+			write_i32(file, i32(l.top_k))
+			write_i32(file, i32(l.d_model))
+			write_i32(file, i32(l.d_ff))
+
+			// Save Router
+			write_i32(file, i32(bool(l.router.bias != nil)))
+			write_tensor(file, l.router.weights)
+			if l.router.bias != nil {write_tensor(file, l.router.bias)}
+
+			// Save Experts
+			for i in 0 ..< l.num_experts {
+				exp := l.experts[i]
+				write_i32(file, i32(bool(exp.fc1.bias != nil)))
+				write_tensor(file, exp.fc1.weights)
+				if exp.fc1.bias != nil {write_tensor(file, exp.fc1.bias)}
+
+				write_i32(file, i32(bool(exp.fc2.bias != nil)))
+				write_tensor(file, exp.fc2.weights)
+				if exp.fc2.bias != nil {write_tensor(file, exp.fc2.bias)}
+			}
 		}
 
 	}
@@ -940,6 +963,63 @@ load_checkpoint :: proc(
 			if layer.D != nil {t.tensor_free(layer.D)}
 			layer.D, offset = read_tensor(data, offset, allocator)
 
+			append(&model.layers, layer)
+		} else if layer_type == 26 { 	// MoE
+			num_experts: i32; top_k: i32; d_model: i32; d_ff: i32
+			num_experts, offset = read_i32(data, offset)
+			top_k, offset = read_i32(data, offset)
+			d_model, offset = read_i32(data, offset)
+			d_ff, offset = read_i32(data, offset)
+
+			layer := moe_layer_new(
+				int(d_model),
+				int(d_ff),
+				int(num_experts),
+				int(top_k),
+				allocator,
+			)
+
+			// Load Router
+			has_bias_router: i32
+			has_bias_router, offset = read_i32(data, offset)
+			if layer.router.weights != nil {t.tensor_free(layer.router.weights)}
+			layer.router.weights, offset = read_tensor(data, offset, allocator)
+			if has_bias_router != 0 {
+				if layer.router.bias != nil {t.tensor_free(layer.router.bias)}
+				layer.router.bias, offset = read_tensor(data, offset, allocator)
+			} else {
+				if layer.router.bias !=
+				   nil {t.tensor_free(layer.router.bias); layer.router.bias = nil}
+			}
+
+			// Load Experts
+			for i in 0 ..< int(num_experts) {
+				has_bias_fc1: i32
+				has_bias_fc1, offset = read_i32(data, offset)
+				if layer.experts[i].fc1.weights !=
+				   nil {t.tensor_free(layer.experts[i].fc1.weights)}
+				layer.experts[i].fc1.weights, offset = read_tensor(data, offset, allocator)
+				if has_bias_fc1 != 0 {
+					if layer.experts[i].fc1.bias != nil {t.tensor_free(layer.experts[i].fc1.bias)}
+					layer.experts[i].fc1.bias, offset = read_tensor(data, offset, allocator)
+				} else {
+					if layer.experts[i].fc1.bias !=
+					   nil {t.tensor_free(layer.experts[i].fc1.bias); layer.experts[i].fc1.bias = nil}
+				}
+
+				has_bias_fc2: i32
+				has_bias_fc2, offset = read_i32(data, offset)
+				if layer.experts[i].fc2.weights !=
+				   nil {t.tensor_free(layer.experts[i].fc2.weights)}
+				layer.experts[i].fc2.weights, offset = read_tensor(data, offset, allocator)
+				if has_bias_fc2 != 0 {
+					if layer.experts[i].fc2.bias != nil {t.tensor_free(layer.experts[i].fc2.bias)}
+					layer.experts[i].fc2.bias, offset = read_tensor(data, offset, allocator)
+				} else {
+					if layer.experts[i].fc2.bias !=
+					   nil {t.tensor_free(layer.experts[i].fc2.bias); layer.experts[i].fc2.bias = nil}
+				}
+			}
 			append(&model.layers, layer)
 		}
 	}
@@ -1836,6 +1916,8 @@ sequential_load_partial :: proc(
 			if layer_type == 24 {types_match = true}
 		case MambaLayer:
 			if layer_type == 25 {types_match = true}
+		case MoELayer:
+			if layer_type == 26 {types_match = true}
 		}
 
 		if !types_match {
@@ -1943,6 +2025,29 @@ sequential_load_partial :: proc(
 				_, offset = read_i32(data, offset) // d_state
 				for _ in 0 ..< 12 { 	// 5 linear layers (w+b) + A + D = 12 tensors
 					offset = skip_tensor(data, offset)
+				}
+			case 26:
+				num_exp_skip: i32
+				num_exp_skip, offset = read_i32(data, offset)
+				_, offset = read_i32(data, offset) // top_k
+				_, offset = read_i32(data, offset) // d_model
+				_, offset = read_i32(data, offset) // d_ff
+
+				has_bias_r: i32
+				has_bias_r, offset = read_i32(data, offset)
+				offset = skip_tensor(data, offset)
+				if has_bias_r != 0 {offset = skip_tensor(data, offset)}
+
+				for _ in 0 ..< int(num_exp_skip) {
+					has_bias_1: i32
+					has_bias_1, offset = read_i32(data, offset)
+					offset = skip_tensor(data, offset)
+					if has_bias_1 != 0 {offset = skip_tensor(data, offset)}
+
+					has_bias_2: i32
+					has_bias_2, offset = read_i32(data, offset)
+					offset = skip_tensor(data, offset)
+					if has_bias_2 != 0 {offset = skip_tensor(data, offset)}
 				}
 			}
 			skipped += 1
@@ -2352,6 +2457,7 @@ sequential_load_partial :: proc(
 				l.D, offset = read_tensor(data, offset, allocator)
 
 				loaded += 1
+
 			} else {
 				for _ in 0 ..< 12 {
 					offset = skip_tensor(data, offset)
@@ -2372,6 +2478,70 @@ sequential_load_partial :: proc(
 				_, offset = read_f64(data, offset)
 			}
 			loaded += 1
+		case MoELayer:
+			num_experts: i32; top_k: i32; d_model: i32; d_ff: i32
+			num_experts, offset = read_i32(data, offset)
+			top_k, offset = read_i32(data, offset)
+			d_model, offset = read_i32(data, offset)
+			d_ff, offset = read_i32(data, offset)
+
+			if int(num_experts) == l.num_experts &&
+			   int(d_model) == l.d_model &&
+			   int(d_ff) == l.d_ff {
+				has_bias_r: i32
+				has_bias_r, offset = read_i32(data, offset)
+				if l.router.weights != nil {t.tensor_free(l.router.weights)}
+				l.router.weights, offset = read_tensor(data, offset, allocator)
+				if has_bias_r != 0 && l.router.bias != nil {
+					t.tensor_free(l.router.bias)
+					l.router.bias, offset = read_tensor(data, offset, allocator)
+				} else if has_bias_r != 0 {
+					offset = skip_tensor(data, offset)
+				}
+
+				for i in 0 ..< int(num_experts) {
+					has_bias_1: i32
+					has_bias_1, offset = read_i32(data, offset)
+					if l.experts[i].fc1.weights != nil {t.tensor_free(l.experts[i].fc1.weights)}
+					l.experts[i].fc1.weights, offset = read_tensor(data, offset, allocator)
+					if has_bias_1 != 0 && l.experts[i].fc1.bias != nil {
+						t.tensor_free(l.experts[i].fc1.bias)
+						l.experts[i].fc1.bias, offset = read_tensor(data, offset, allocator)
+					} else if has_bias_1 != 0 {
+						offset = skip_tensor(data, offset)
+					}
+
+					has_bias_2: i32
+					has_bias_2, offset = read_i32(data, offset)
+					if l.experts[i].fc2.weights != nil {t.tensor_free(l.experts[i].fc2.weights)}
+					l.experts[i].fc2.weights, offset = read_tensor(data, offset, allocator)
+					if has_bias_2 != 0 && l.experts[i].fc2.bias != nil {
+						t.tensor_free(l.experts[i].fc2.bias)
+						l.experts[i].fc2.bias, offset = read_tensor(data, offset, allocator)
+					} else if has_bias_2 != 0 {
+						offset = skip_tensor(data, offset)
+					}
+				}
+				loaded += 1
+			} else {
+				// Skip router
+				has_bias_r: i32
+				has_bias_r, offset = read_i32(data, offset)
+				offset = skip_tensor(data, offset)
+				if has_bias_r != 0 {offset = skip_tensor(data, offset)}
+				// Skip experts
+				for _ in 0 ..< int(num_experts) {
+					has_bias_1: i32
+					has_bias_1, offset = read_i32(data, offset)
+					offset = skip_tensor(data, offset)
+					if has_bias_1 != 0 {offset = skip_tensor(data, offset)}
+					has_bias_2: i32
+					has_bias_2, offset = read_i32(data, offset)
+					offset = skip_tensor(data, offset)
+					if has_bias_2 != 0 {offset = skip_tensor(data, offset)}
+				}
+				skipped += 1
+			}
 		}
 	}
 
@@ -2464,6 +2634,29 @@ sequential_load_partial :: proc(
 			_, offset = read_i32(data, offset)
 			for _ in 0 ..< 12 {
 				offset = skip_tensor(data, offset)
+			}
+		case 26:
+			num_exp_skip: i32
+			num_exp_skip, offset = read_i32(data, offset)
+			_, offset = read_i32(data, offset) // top_k
+			_, offset = read_i32(data, offset) // d_model
+			_, offset = read_i32(data, offset) // d_ff
+
+			has_bias_r: i32
+			has_bias_r, offset = read_i32(data, offset)
+			offset = skip_tensor(data, offset)
+			if has_bias_r != 0 {offset = skip_tensor(data, offset)}
+
+			for _ in 0 ..< int(num_exp_skip) {
+				has_bias_1: i32
+				has_bias_1, offset = read_i32(data, offset)
+				offset = skip_tensor(data, offset)
+				if has_bias_1 != 0 {offset = skip_tensor(data, offset)}
+
+				has_bias_2: i32
+				has_bias_2, offset = read_i32(data, offset)
+				offset = skip_tensor(data, offset)
+				if has_bias_2 != 0 {offset = skip_tensor(data, offset)}
 			}
 		}
 		skipped += 1

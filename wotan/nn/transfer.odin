@@ -116,6 +116,15 @@ sequential_freeze_all :: proc(seq: ^Sequential) {
 			if l.proj_out.bias != nil {l.proj_out.bias.requires_grad = false}
 			l.A.requires_grad = false
 			l.D.requires_grad = false
+		case MoELayer:
+			l.router.weights.requires_grad = false
+			if l.router.bias != nil {l.router.bias.requires_grad = false}
+			for i in 0 ..< l.num_experts {
+				l.experts[i].fc1.weights.requires_grad = false
+				if l.experts[i].fc1.bias != nil {l.experts[i].fc1.bias.requires_grad = false}
+				l.experts[i].fc2.weights.requires_grad = false
+				if l.experts[i].fc2.bias != nil {l.experts[i].fc2.bias.requires_grad = false}
+			}
 		case MaxPool2dLayer, AvgPool2dLayer, DropoutLayer, Activation, FlattenLayer:
 		// No trainable parameters
 		}
@@ -226,6 +235,15 @@ sequential_unfreeze_all :: proc(seq: ^Sequential) {
 			if l.proj_out.bias != nil {l.proj_out.bias.requires_grad = true}
 			l.A.requires_grad = true
 			l.D.requires_grad = true
+		case MoELayer:
+			l.router.weights.requires_grad = true
+			if l.router.bias != nil {l.router.bias.requires_grad = true}
+			for i in 0 ..< l.num_experts {
+				l.experts[i].fc1.weights.requires_grad = true
+				if l.experts[i].fc1.bias != nil {l.experts[i].fc1.bias.requires_grad = true}
+				l.experts[i].fc2.weights.requires_grad = true
+				if l.experts[i].fc2.bias != nil {l.experts[i].fc2.bias.requires_grad = true}
+			}
 		case MaxPool2dLayer, AvgPool2dLayer, DropoutLayer, Activation, FlattenLayer:
 		// No trainable parameters
 		}
@@ -343,6 +361,15 @@ sequential_freeze_range :: proc(seq: ^Sequential, start: int, end: int) {
 			if l.proj_out.bias != nil {l.proj_out.bias.requires_grad = false}
 			l.A.requires_grad = false
 			l.D.requires_grad = false
+		case MoELayer:
+			l.router.weights.requires_grad = false
+			if l.router.bias != nil {l.router.bias.requires_grad = false}
+			for i in 0 ..< l.num_experts {
+				l.experts[i].fc1.weights.requires_grad = false
+				if l.experts[i].fc1.bias != nil {l.experts[i].fc1.bias.requires_grad = false}
+				l.experts[i].fc2.weights.requires_grad = false
+				if l.experts[i].fc2.bias != nil {l.experts[i].fc2.bias.requires_grad = false}
+			}
 		case MaxPool2dLayer, AvgPool2dLayer, DropoutLayer, Activation, FlattenLayer:
 		// No trainable parameters
 		}
