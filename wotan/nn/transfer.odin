@@ -395,10 +395,24 @@ gpt_freeze_all :: proc(model: ^GPTModel) {
 		block.mha.out_proj.bias.requires_grad = false
 		block.ln2.gamma.requires_grad = false
 		block.ln2.beta.requires_grad = false
-		block.ffn.fc1.weights.requires_grad = false
-		block.ffn.fc1.bias.requires_grad = false
-		block.ffn.fc2.weights.requires_grad = false
-		block.ffn.fc2.bias.requires_grad = false
+		// Replace the unconditional FFN block:
+		if block.use_moe {
+			block.moe.router.weights.requires_grad = false // or true for unfreeze
+			if block.moe.router.bias != nil {block.moe.router.bias.requires_grad = false}
+			for e in 0 ..< block.moe.num_experts {
+				block.moe.experts[e].fc1.weights.requires_grad = false
+				if block.moe.experts[e].fc1.bias !=
+				   nil {block.moe.experts[e].fc1.bias.requires_grad = false}
+				block.moe.experts[e].fc2.weights.requires_grad = false
+				if block.moe.experts[e].fc2.bias !=
+				   nil {block.moe.experts[e].fc2.bias.requires_grad = false}
+			}
+		} else {
+			block.ffn.fc1.weights.requires_grad = false
+			if block.ffn.fc1.bias != nil {block.ffn.fc1.bias.requires_grad = false}
+			block.ffn.fc2.weights.requires_grad = false
+			if block.ffn.fc2.bias != nil {block.ffn.fc2.bias.requires_grad = false}
+		}
 	}
 
 	model.final_ln.gamma.requires_grad = false
@@ -425,10 +439,24 @@ gpt_unfreeze_all :: proc(model: ^GPTModel) {
 		block.mha.out_proj.bias.requires_grad = true
 		block.ln2.gamma.requires_grad = true
 		block.ln2.beta.requires_grad = true
-		block.ffn.fc1.weights.requires_grad = true
-		block.ffn.fc1.bias.requires_grad = true
-		block.ffn.fc2.weights.requires_grad = true
-		block.ffn.fc2.bias.requires_grad = true
+		// Replace the unconditional FFN block:
+		if block.use_moe {
+			block.moe.router.weights.requires_grad = true // or false for freeze
+			if block.moe.router.bias != nil {block.moe.router.bias.requires_grad = true}
+			for e in 0 ..< block.moe.num_experts {
+				block.moe.experts[e].fc1.weights.requires_grad = true
+				if block.moe.experts[e].fc1.bias !=
+				   nil {block.moe.experts[e].fc1.bias.requires_grad = true}
+				block.moe.experts[e].fc2.weights.requires_grad = true
+				if block.moe.experts[e].fc2.bias !=
+				   nil {block.moe.experts[e].fc2.bias.requires_grad = true}
+			}
+		} else {
+			block.ffn.fc1.weights.requires_grad = true
+			if block.ffn.fc1.bias != nil {block.ffn.fc1.bias.requires_grad = true}
+			block.ffn.fc2.weights.requires_grad = true
+			if block.ffn.fc2.bias != nil {block.ffn.fc2.bias.requires_grad = true}
+		}
 	}
 
 	model.final_ln.gamma.requires_grad = true
@@ -458,10 +486,24 @@ gpt_freeze_blocks :: proc(model: ^GPTModel, start: int, end: int) {
 		block.mha.out_proj.bias.requires_grad = false
 		block.ln2.gamma.requires_grad = false
 		block.ln2.beta.requires_grad = false
-		block.ffn.fc1.weights.requires_grad = false
-		block.ffn.fc1.bias.requires_grad = false
-		block.ffn.fc2.weights.requires_grad = false
-		block.ffn.fc2.bias.requires_grad = false
+		// Replace the unconditional FFN block:
+		if block.use_moe {
+			block.moe.router.weights.requires_grad = false // or true for unfreeze
+			if block.moe.router.bias != nil {block.moe.router.bias.requires_grad = false}
+			for e in 0 ..< block.moe.num_experts {
+				block.moe.experts[e].fc1.weights.requires_grad = false
+				if block.moe.experts[e].fc1.bias !=
+				   nil {block.moe.experts[e].fc1.bias.requires_grad = false}
+				block.moe.experts[e].fc2.weights.requires_grad = false
+				if block.moe.experts[e].fc2.bias !=
+				   nil {block.moe.experts[e].fc2.bias.requires_grad = false}
+			}
+		} else {
+			block.ffn.fc1.weights.requires_grad = false
+			if block.ffn.fc1.bias != nil {block.ffn.fc1.bias.requires_grad = false}
+			block.ffn.fc2.weights.requires_grad = false
+			if block.ffn.fc2.bias != nil {block.ffn.fc2.bias.requires_grad = false}
+		}
 	}
 }
 

@@ -90,8 +90,8 @@ moe_layer_forward :: proc(
 
 	// 6. Initialize Accumulator
 	out_data := l.matrix_new(f64, N, layer.d_model, allocator)
-	out_flat := t.tensor_new(out_data, true, allocator)
-	out_flat.shape = x_flat.shape
+	out_flat: ^t.Tensor
+
 
 	// 7. Route through Experts
 	for i in 0 ..< layer.num_experts {
@@ -110,10 +110,77 @@ moe_layer_forward :: proc(
 		e_out := ffn_layer_forward(&layer.experts[i], x_gated)
 
 		// Accumulate
-		out_flat = t.tensor_add(out_flat, e_out)
+		if out_flat == nil {
+			out_flat = e_out // ✅ First expert becomes the base
+		} else {
+			out_flat = t.tensor_add(out_flat, e_out) // ✅ Subsequent experts add to the graph
+		}
 	}
 
 	// 8. Reshape back to [batch, seq_len, d_model, 1]
 	out := t.tensor_reshape(out_flat, [4]int{batch, seq_len, layer.d_model, 1})
+	return out
+}
+// moe_layer_aux_loss computes the load-balancing loss to prevent expert collapse.
+// It encourages the router to distribute tokens evenly across all experts.
+moe_layer_aux_loss :: proc(
+	layer: ^MoELayer,
+	x: ^t.Tensor,
+	allocator: mem.Allocator = context.allocator,
+) -> ^t.Tensor {
+	batch := x.shape[0]
+	seq_len := x.shape[1]
+	N := batch * seq_len
+	E := layer.num_experts
+
+	// 1. Recompute router probabilities (very cheap, just one Linear layer)
+	x_flat := t.tensor_reshape(x, [4]int{N, layer.d_model, 1, 1})
+	logits := linear_forward(&layer.router, x_flat)
+	probs := t.tensor_softmax(logits)
+	mask := t.tensor_top_k_mask(probs, layer.top_k)
+
+	// 2. Compute Load (fraction of tokens routed to each expert)
+	// load[e] = sum(mask[:, e]) / N
+	load := make([]f64, E, allocator)
+	for n in 0 ..< N {
+		for e in 0 ..< E {
+			load[e] += mask.data.data[n * E + e]
+		}
+	}
+	for e in 0 ..< E {load[e] /= f64(N)}
+
+	// 3. Compute Importance (average router probability for each expert)
+	// importance[e] = sum(probs[:, e]) / N
+	importance := make([]f64, E, allocator)
+	for n in 0 ..< N {
+		for e in 0 ..< E {
+			importance[e] += probs.data.data[n * E + e]
+		}
+	}
+	for e in 0 ..< E {importance[e] /= f64(N)}
+
+	// 4. Aux Loss = E * sum(load * importance)
+	aux_loss_val := 0.0
+	for e in 0 ..< E {
+		aux_loss_val += load[e] * importance[e]
+	}
+	aux_loss_val *= f64(E)
+
+	// 5. Wrap in a scalar tensor
+	out_data := l.matrix_new(f64, 1, 1, allocator)
+	out_data.data[0] = aux_loss_val
+
+	// Note: We don't attach this to the autograd graph because the routing mask
+	// is non-differentiable. The gradients for the router flow through the
+	// Straight-Through Estimator in the main forward pass.
+	out := t.tensor_new(out_data, false, allocator)
+
+	delete(load, allocator)
+	delete(importance, allocator)
+	t.tensor_free(x_flat)
+	t.tensor_free(logits)
+	t.tensor_free_graph(probs)
+	t.tensor_free_graph(mask)
+
 	return out
 }

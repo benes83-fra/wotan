@@ -16,35 +16,45 @@ GPTBlock :: struct {
 	d_model:   int,
 	num_heads: int,
 	d_ff:      int,
+	use_moe:   bool,
 	ln1:       LayerNormLayer,
 	mha:       MultiHeadAttentionLayer,
 	ln2:       LayerNormLayer,
 	ffn:       FFNLayer,
+	moe:       MoELayer,
 }
 
 gpt_block_new :: proc(
 	d_model: int,
 	num_heads: int,
 	d_ff: int,
-	use_flash: bool = false,
+	use_flash: bool = true,
+	use_moe: bool = false, // ✅ NEW
+	num_experts: int = 8, // ✅ NEW
+	top_k: int = 2, // ✅ NEW
 	allocator: mem.Allocator = context.allocator,
 ) -> GPTBlock {
 	block: GPTBlock
 	block.d_model = d_model
 	block.num_heads = num_heads
 	block.d_ff = d_ff
+	block.use_moe = use_moe
 
-	// Pre-LayerNorm architecture (GPT-2 style)
 	block.ln1 = layer_norm_layer_new(d_model, 1e-5, allocator)
 	block.mha = multi_head_attention_layer_new(
 		d_model,
 		num_heads,
 		use_flash = use_flash,
+		is_causal = true,
 		allocator = allocator,
 	)
 	block.ln2 = layer_norm_layer_new(d_model, 1e-5, allocator)
-	block.ffn = ffn_layer_new(d_model, d_ff, allocator)
 
+	if use_moe {
+		block.moe = moe_layer_new(d_model, d_ff, num_experts, top_k, allocator)
+	} else {
+		block.ffn = ffn_layer_new(d_model, d_ff, allocator)
+	}
 	return block
 }
 
@@ -52,7 +62,12 @@ gpt_block_free :: proc(block: ^GPTBlock) {
 	layer_norm_layer_free(&block.ln1)
 	multi_head_attention_layer_free(&block.mha)
 	layer_norm_layer_free(&block.ln2)
-	ffn_layer_free(&block.ffn)
+
+	if block.use_moe {
+		moe_layer_free(&block.moe)
+	} else {
+		ffn_layer_free(&block.ffn)
+	}
 }
 
 gpt_block_forward :: proc(
@@ -73,8 +88,12 @@ gpt_block_forward :: proc(
 	x1 := t.tensor_add(x, attn_out)
 
 	x1_norm := layer_norm_layer_forward(&block.ln2, x1)
-	ffn_out := ffn_layer_forward(&block.ffn, x1_norm)
-
+	ffn_out: ^t.Tensor
+	if block.use_moe {
+		ffn_out = moe_layer_forward(&block.moe, x1_norm)
+	} else {
+		ffn_out = ffn_layer_forward(&block.ffn, x1_norm)
+	}
 	if training {
 		ffn_out = t.tensor_dropout(ffn_out, 0.1, true)
 	}
@@ -111,6 +130,9 @@ gpt_model_new :: proc(
 	num_layers: int,
 	max_seq_len: int,
 	use_flash: bool = false,
+	use_moe: bool = false,
+	num_experts: int = 8,
+	top_k: int = 2,
 	allocator: mem.Allocator = context.allocator,
 ) -> GPTModel {
 	model: GPTModel
@@ -136,6 +158,9 @@ gpt_model_new :: proc(
 			num_heads,
 			d_ff,
 			use_flash = use_flash,
+			use_moe = use_moe,
+			num_experts = num_experts,
+			top_k = top_k,
 			allocator = allocator,
 		)
 		append(&model.blocks, block)
@@ -227,10 +252,25 @@ gpt_model_add_to_optimizer :: proc(model: ^GPTModel, opt: ^Adam) {
 		adam_add_param(opt, block.mha.out_proj.bias)
 		adam_add_param(opt, block.ln2.gamma)
 		adam_add_param(opt, block.ln2.beta)
-		adam_add_param(opt, block.ffn.fc1.weights)
-		adam_add_param(opt, block.ffn.fc1.bias)
-		adam_add_param(opt, block.ffn.fc2.weights)
-		adam_add_param(opt, block.ffn.fc2.bias)
+
+		// ✅ FIX: Register either MoE or FFN parameters
+		if block.use_moe {
+			adam_add_param(opt, block.moe.router.weights)
+			if block.moe.router.bias != nil {adam_add_param(opt, block.moe.router.bias)}
+			for e in 0 ..< block.moe.num_experts {
+				adam_add_param(opt, block.moe.experts[e].fc1.weights)
+				if block.moe.experts[e].fc1.bias !=
+				   nil {adam_add_param(opt, block.moe.experts[e].fc1.bias)}
+				adam_add_param(opt, block.moe.experts[e].fc2.weights)
+				if block.moe.experts[e].fc2.bias !=
+				   nil {adam_add_param(opt, block.moe.experts[e].fc2.bias)}
+			}
+		} else {
+			adam_add_param(opt, block.ffn.fc1.weights)
+			if block.ffn.fc1.bias != nil {adam_add_param(opt, block.ffn.fc1.bias)}
+			adam_add_param(opt, block.ffn.fc2.weights)
+			if block.ffn.fc2.bias != nil {adam_add_param(opt, block.ffn.fc2.bias)}
+		}
 	}
 
 	adam_add_param(opt, model.final_ln.gamma)

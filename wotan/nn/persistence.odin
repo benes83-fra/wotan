@@ -1095,7 +1095,7 @@ save_gpt_model :: proc(model: ^GPTModel, path: string) -> bool {
 	os.write(file, CHECKPOINT_MAGIC)
 
 	// Model type and hyperparameters
-	write_i32(file, 17) // GPT type ID
+	write_i32(file, 27) // GPT type ID
 	write_i32(file, i32(model.vocab_size))
 	write_i32(file, i32(model.d_model))
 	write_i32(file, i32(model.num_heads))
@@ -1108,10 +1108,14 @@ save_gpt_model :: proc(model: ^GPTModel, path: string) -> bool {
 	write_tensor(file, model.pos_emb.weight)
 
 	// Save each decoder block
+	// Save each decoder block
 	for i in 0 ..< len(model.blocks) {
 		block := &model.blocks[i]
 
-		// Save MHA
+		// ✅ Save the use_moe flag
+		write_i32(file, i32(block.use_moe))
+
+		// Save MHA (unchanged)
 		write_tensor(file, block.mha.q_proj.weights)
 		write_tensor(file, block.mha.q_proj.bias)
 		write_tensor(file, block.mha.k_proj.weights)
@@ -1121,13 +1125,35 @@ save_gpt_model :: proc(model: ^GPTModel, path: string) -> bool {
 		write_tensor(file, block.mha.out_proj.weights)
 		write_tensor(file, block.mha.out_proj.bias)
 
-		// Save FFN
-		write_tensor(file, block.ffn.fc1.weights)
-		write_tensor(file, block.ffn.fc1.bias)
-		write_tensor(file, block.ffn.fc2.weights)
-		write_tensor(file, block.ffn.fc2.bias)
+		// ✅ Save FFN or MoE conditionally
+		if block.use_moe {
+			write_i32(file, i32(block.moe.num_experts))
+			write_i32(file, i32(block.moe.top_k))
 
-		// Save LayerNorms
+			// Router
+			write_i32(file, i32(bool(block.moe.router.bias != nil)))
+			write_tensor(file, block.moe.router.weights)
+			if block.moe.router.bias != nil {write_tensor(file, block.moe.router.bias)}
+
+			// Experts
+			for e in 0 ..< block.moe.num_experts {
+				exp := block.moe.experts[e]
+				write_i32(file, i32(bool(exp.fc1.bias != nil)))
+				write_tensor(file, exp.fc1.weights)
+				if exp.fc1.bias != nil {write_tensor(file, exp.fc1.bias)}
+
+				write_i32(file, i32(bool(exp.fc2.bias != nil)))
+				write_tensor(file, exp.fc2.weights)
+				if exp.fc2.bias != nil {write_tensor(file, exp.fc2.bias)}
+			}
+		} else {
+			write_tensor(file, block.ffn.fc1.weights)
+			if block.ffn.fc1.bias != nil {write_tensor(file, block.ffn.fc1.bias)}
+			write_tensor(file, block.ffn.fc2.weights)
+			if block.ffn.fc2.bias != nil {write_tensor(file, block.ffn.fc2.bias)}
+		}
+
+		// Save LayerNorms (unchanged)
 		write_tensor(file, block.ln1.gamma)
 		write_tensor(file, block.ln1.beta)
 		write_tensor(file, block.ln2.gamma)
@@ -1148,6 +1174,9 @@ save_gpt_model :: proc(model: ^GPTModel, path: string) -> bool {
 load_gpt_model :: proc(
 	path: string,
 	use_flash: bool = false,
+	use_moe: bool = false,
+	num_experts: int = 8,
+	top_k: int = 2,
 	allocator: mem.Allocator = context.allocator,
 ) -> (
 	^GPTModel,
@@ -1177,9 +1206,16 @@ load_gpt_model :: proc(
 	offset += 10
 
 	// Model type
+	// Model type
 	model_type: i32
 	model_type, offset = read_i32(data, offset)
-	if model_type != 17 {
+
+	is_moe_aware := false
+	if model_type == 27 {
+		is_moe_aware = true
+	} else if model_type == 17 {
+		is_moe_aware = false // ✅ Old FFN-only format (backwards compatible)
+	} else {
 		fmt.println("Not a GPT model")
 		return nil, false
 	}
@@ -1207,10 +1243,13 @@ load_gpt_model :: proc(
 		int(num_layers),
 		int(max_seq_len),
 		use_flash = use_flash,
+		use_moe = use_moe,
+		num_experts = num_experts,
+		top_k = top_k,
 		allocator = allocator,
 	)
 
-	// Load embeddings
+	// Load embeddings (unchanged)
 	if model_ptr.token_emb.weight != nil {t.tensor_free(model_ptr.token_emb.weight)}
 	model_ptr.token_emb.weight, offset = read_tensor(data, offset, allocator)
 
@@ -1221,7 +1260,15 @@ load_gpt_model :: proc(
 	for i in 0 ..< int(num_layers) {
 		block := &model_ptr.blocks[i]
 
-		// Load MHA
+		// ✅ Only read the use_moe flag if it's the new format
+		block_is_moe := false
+		if is_moe_aware {
+			block_moe_i32: i32
+			block_moe_i32, offset = read_i32(data, offset)
+			block_is_moe = block_moe_i32 != 0
+		}
+
+		// Load MHA (unchanged)
 		if block.mha.q_proj.weights != nil {t.tensor_free(block.mha.q_proj.weights)}
 		block.mha.q_proj.weights, offset = read_tensor(data, offset, allocator)
 		if block.mha.q_proj.bias != nil {t.tensor_free(block.mha.q_proj.bias)}
@@ -1242,18 +1289,61 @@ load_gpt_model :: proc(
 		if block.mha.out_proj.bias != nil {t.tensor_free(block.mha.out_proj.bias)}
 		block.mha.out_proj.bias, offset = read_tensor(data, offset, allocator)
 
-		// Load FFN
-		if block.ffn.fc1.weights != nil {t.tensor_free(block.ffn.fc1.weights)}
-		block.ffn.fc1.weights, offset = read_tensor(data, offset, allocator)
-		if block.ffn.fc1.bias != nil {t.tensor_free(block.ffn.fc1.bias)}
-		block.ffn.fc1.bias, offset = read_tensor(data, offset, allocator)
+		// ✅ Load FFN or MoE conditionally
+		if block_is_moe {
+			ckpt_num_experts: i32
+			ckpt_top_k: i32
+			ckpt_num_experts, offset = read_i32(data, offset)
+			ckpt_top_k, offset = read_i32(data, offset)
 
-		if block.ffn.fc2.weights != nil {t.tensor_free(block.ffn.fc2.weights)}
-		block.ffn.fc2.weights, offset = read_tensor(data, offset, allocator)
-		if block.ffn.fc2.bias != nil {t.tensor_free(block.ffn.fc2.bias)}
-		block.ffn.fc2.bias, offset = read_tensor(data, offset, allocator)
+			// Router
+			has_bias_r: i32
+			has_bias_r, offset = read_i32(data, offset)
+			if block.moe.router.weights != nil {t.tensor_free(block.moe.router.weights)}
+			block.moe.router.weights, offset = read_tensor(data, offset, allocator)
+			if has_bias_r != 0 {
+				if block.moe.router.bias != nil {t.tensor_free(block.moe.router.bias)}
+				block.moe.router.bias, offset = read_tensor(data, offset, allocator)
+			}
 
-		// Load LayerNorms
+			// Experts
+			for e in 0 ..< int(ckpt_num_experts) {
+				has_bias_1: i32
+				has_bias_1, offset = read_i32(data, offset)
+				if block.moe.experts[e].fc1.weights !=
+				   nil {t.tensor_free(block.moe.experts[e].fc1.weights)}
+				block.moe.experts[e].fc1.weights, offset = read_tensor(data, offset, allocator)
+				if has_bias_1 != 0 {
+					if block.moe.experts[e].fc1.bias !=
+					   nil {t.tensor_free(block.moe.experts[e].fc1.bias)}
+					block.moe.experts[e].fc1.bias, offset = read_tensor(data, offset, allocator)
+				}
+
+				has_bias_2: i32
+				has_bias_2, offset = read_i32(data, offset)
+				if block.moe.experts[e].fc2.weights !=
+				   nil {t.tensor_free(block.moe.experts[e].fc2.weights)}
+				block.moe.experts[e].fc2.weights, offset = read_tensor(data, offset, allocator)
+				if has_bias_2 != 0 {
+					if block.moe.experts[e].fc2.bias !=
+					   nil {t.tensor_free(block.moe.experts[e].fc2.bias)}
+					block.moe.experts[e].fc2.bias, offset = read_tensor(data, offset, allocator)
+				}
+			}
+		} else {
+			// Old format or explicitly non-MoE: Load standard FFN
+			if block.ffn.fc1.weights != nil {t.tensor_free(block.ffn.fc1.weights)}
+			block.ffn.fc1.weights, offset = read_tensor(data, offset, allocator)
+			if block.ffn.fc1.bias != nil {t.tensor_free(block.ffn.fc1.bias)}
+			block.ffn.fc1.bias, offset = read_tensor(data, offset, allocator)
+
+			if block.ffn.fc2.weights != nil {t.tensor_free(block.ffn.fc2.weights)}
+			block.ffn.fc2.weights, offset = read_tensor(data, offset, allocator)
+			if block.ffn.fc2.bias != nil {t.tensor_free(block.ffn.fc2.bias)}
+			block.ffn.fc2.bias, offset = read_tensor(data, offset, allocator)
+		}
+
+		// Load LayerNorms (unchanged)
 		if block.ln1.gamma != nil {t.tensor_free(block.ln1.gamma)}
 		block.ln1.gamma, offset = read_tensor(data, offset, allocator)
 		if block.ln1.beta != nil {t.tensor_free(block.ln1.beta)}
@@ -1265,13 +1355,13 @@ load_gpt_model :: proc(
 		block.ln2.beta, offset = read_tensor(data, offset, allocator)
 	}
 
-	// Load final layer norm
+	// Load final layer norm (unchanged)
 	if model_ptr.final_ln.gamma != nil {t.tensor_free(model_ptr.final_ln.gamma)}
 	model_ptr.final_ln.gamma, offset = read_tensor(data, offset, allocator)
 	if model_ptr.final_ln.beta != nil {t.tensor_free(model_ptr.final_ln.beta)}
 	model_ptr.final_ln.beta, offset = read_tensor(data, offset, allocator)
 
-	// Load output projection
+	// Load output projection (unchanged)
 	if model_ptr.output_proj.weights != nil {t.tensor_free(model_ptr.output_proj.weights)}
 	model_ptr.output_proj.weights, offset = read_tensor(data, offset, allocator)
 	if model_ptr.output_proj.bias != nil {t.tensor_free(model_ptr.output_proj.bias)}
