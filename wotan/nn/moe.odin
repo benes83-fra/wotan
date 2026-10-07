@@ -17,6 +17,7 @@ MoELayer :: struct {
 	d_ff:        int,
 	experts:     []FFNLayer,
 	router:      LinearLayer, // Maps d_model -> num_experts
+	allocator:   mem.Allocator,
 }
 
 moe_layer_new :: proc(
@@ -31,6 +32,7 @@ moe_layer_new :: proc(
 	layer.top_k = top_k
 	layer.d_model = d_model
 	layer.d_ff = d_ff
+	layer.allocator = allocator
 
 	// Router: d_model -> num_experts
 	layer.router = linear_layer_new(d_model, num_experts, allocator)
@@ -49,7 +51,11 @@ moe_layer_free :: proc(layer: ^MoELayer) {
 	for i in 0 ..< layer.num_experts {
 		ffn_layer_free(&layer.experts[i])
 	}
-	delete(layer.experts)
+	if layer.experts != nil {
+		delete(layer.experts, layer.allocator) // ✅ USE IT HERE
+		layer.experts = nil
+	}
+	layer.num_experts = 0
 }
 
 // moe_layer_forward performs Sparse MoE routing using Gated Dense Routing.
@@ -63,8 +69,17 @@ moe_layer_forward :: proc(
 	N := batch * seq_len
 
 	// 1. Flatten to [N, d_model] for routing
-	x_flat := t.tensor_reshape(x, [4]int{N, layer.d_model, 1, 1})
-
+	// ✅ FIX: Manually create a true 2D matrix (rows=N, cols=d_model).
+	// This forces tensor_matmul to use the clean Standard 2D path, bypassing
+	// the sequence-model hack that mutates shape[2] and breaks the router dimensions.
+	x_flat_data := l.matrix_new(f64, N, layer.d_model, allocator)
+	copy(x_flat_data.data, x.data.data)
+	x_flat := t.tensor_new(x_flat_data, x.requires_grad, allocator)
+	x_flat.shape = [4]int{N, layer.d_model, 1, 1}
+	if x_flat.requires_grad {
+		x_flat.op = .Reshape
+		append(&x_flat.inputs, x)
+	}
 	// 2. Router Logits & Softmax
 	logits := linear_forward(&layer.router, x_flat)
 	probs := t.tensor_softmax(logits) // [N, num_experts]
@@ -133,8 +148,13 @@ moe_layer_aux_loss :: proc(
 	N := batch * seq_len
 	E := layer.num_experts
 
+
 	// 1. Recompute router probabilities (very cheap, just one Linear layer)
-	x_flat := t.tensor_reshape(x, [4]int{N, layer.d_model, 1, 1})
+	// ✅ FIX: Use true 2D matrix to bypass the sequence hack
+	x_flat_data := l.matrix_new(f64, N, layer.d_model, allocator)
+	copy(x_flat_data.data, x.data.data)
+	x_flat := t.tensor_new(x_flat_data, false, allocator) // Detached from graph
+	x_flat.shape = [4]int{N, layer.d_model, 1, 1}
 	logits := linear_forward(&layer.router, x_flat)
 	probs := t.tensor_softmax(logits)
 	mask := t.tensor_top_k_mask(probs, layer.top_k)

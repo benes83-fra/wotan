@@ -689,8 +689,8 @@ ffn_layer_new :: proc(
 }
 
 ffn_layer_free :: proc(layer: ^FFNLayer) {
-	linear_layer_free(&layer.fc1)
-	linear_layer_free(&layer.fc2)
+	if layer.fc1.weights != nil {linear_layer_free(&layer.fc1)}
+	if layer.fc2.weights != nil {linear_layer_free(&layer.fc2)}
 }
 
 ffn_layer_forward :: proc(layer: ^FFNLayer, x: ^t.Tensor) -> ^t.Tensor {
