@@ -2670,6 +2670,18 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 				// Gradients flow back 1:1 because the memory layout is unchanged
 				l.vec_add_simd(node.grad.data, input_in.grad.data, input_in.grad.data)
 			}
+		case .SliceGate:
+			gates_in := node.inputs[0]
+			if gates_in.requires_grad {
+				tensor_ensure_grad(gates_in)
+				expert_idx := node.int_metadata[0]
+				E := node.int_metadata[1]
+				N := gates_in.data.rows
+				// Scatter the gradient back to the exact column it came from
+				for n in 0 ..< N {
+					gates_in.grad.data[n * E + expert_idx] += node.grad.data[n]
+				}
+			}
 		case .None, .Constant, .TopKMask:
 		// Leaf node, nothing to do
 		}

@@ -121,7 +121,7 @@ gpt_moe_flash_test :: proc(allocator: mem.Allocator) {
 			fmt.printf("Epoch %3d | CE Loss: %.4f\n", epoch, ce_loss.data.data[0])
 		}
 
-		t.tensor_free_graph(logits)
+		t.tensor_free_graph(ce_loss)
 		t.tensor_free(x_batch)
 		delete(y_batch, allocator)
 		delete(mask, allocator)

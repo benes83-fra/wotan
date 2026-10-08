@@ -104,37 +104,33 @@ moe_layer_forward :: proc(
 	}
 
 	// 6. Initialize Accumulator
-	out_data := l.matrix_new(f64, N, layer.d_model, allocator)
+	//out_data := l.matrix_new(f64, N, layer.d_model, allocator)
 	out_flat: ^t.Tensor
 
 
 	// 7. Route through Experts
 	for i in 0 ..< layer.num_experts {
-		// Extract the gate weights for this expert: [N, 1]
-		gate_i_data := l.matrix_new(f64, N, 1, allocator)
-		for n in 0 ..< N {
-			gate_i_data.data[n] = gates.data.data[n * layer.num_experts + i]
-		}
-		gate_i := t.tensor_new(gate_i_data, true, allocator)
-		gate_i.shape = [4]int{N, 1, 1, 1}
+		// ✅ FIX: Use the graph-preserving slice operation.
+		// gate_i is now a legitimate child of `gates`. The DAG is unbroken.
+		gate_i := t.tensor_slice_gate(gates, i, allocator)
 
-		// Apply gates to input: x_gated[n] = x_flat[n] * gate_i[n]
 		x_gated := t.tensor_gate_mul(x_flat, gate_i)
-
-		// Pass through expert FFN
 		e_out := ffn_layer_forward(&layer.experts[i], x_gated)
 
-		// Accumulate
 		if out_flat == nil {
-			out_flat = e_out // ✅ First expert becomes the base
+			out_flat = e_out
 		} else {
-			out_flat = t.tensor_add(out_flat, e_out) // ✅ Subsequent experts add to the graph
+			if out_flat.data.rows != e_out.data.rows || out_flat.data.cols != e_out.data.cols {
+				e_out = t.tensor_reshape(e_out, out_flat.shape)
+			}
+			out_flat = t.tensor_add(out_flat, e_out)
 		}
 	}
 
-	// 8. Reshape back to [batch, seq_len, d_model, 1]
+	// 8. Reshape back
 	out := t.tensor_reshape(out_flat, [4]int{batch, seq_len, layer.d_model, 1})
 	return out
+
 }
 // moe_layer_aux_loss computes the load-balancing loss to prevent expert collapse.
 // It encourages the router to distribute tokens evenly across all experts.

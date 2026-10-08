@@ -74,6 +74,7 @@ Op :: enum {
 	LogSumExpDim1,
 	Softplus, // ✅ ADD
 	SSM, // ✅ ADD
+	SliceGate,
 }
 
 PoolParams :: struct {
@@ -3075,6 +3076,7 @@ tensor_top_k_mask :: proc(
 	// Mask is NOT differentiable. It acts as a constant.
 	out := tensor_new(mask_data, false, allocator)
 	out.shape = probs.shape
+	out.owned_by_graph = true
 	return out
 }
 
@@ -3136,6 +3138,31 @@ tensor_reshape :: proc(
 	if out.requires_grad {
 		out.op = .Reshape
 		append(&out.inputs, input)
+	}
+	return out
+}
+// tensor_slice_gate extracts a single expert's gate column while preserving the autograd graph.
+tensor_slice_gate :: proc(
+	gates: ^Tensor,
+	expert_idx: int,
+	allocator: mem.Allocator = context.allocator,
+) -> ^Tensor {
+	N := gates.data.rows
+	E := gates.data.cols
+
+	out_data := l.matrix_new(f64, N, 1, allocator)
+	for n in 0 ..< N {
+		out_data.data[n] = gates.data.data[n * E + expert_idx]
+	}
+
+	out := tensor_new(out_data, gates.requires_grad, allocator)
+	out.shape = [4]int{N, 1, 1, 1}
+
+	if out.requires_grad {
+		out.op = .SliceGate
+		append(&out.inputs, gates)
+		append(&out.int_metadata, expert_idx)
+		append(&out.int_metadata, E) // Store total experts for backward pass
 	}
 	return out
 }
