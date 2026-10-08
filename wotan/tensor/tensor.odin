@@ -3041,12 +3041,12 @@ tensor_top_k_mask :: proc(
 	N := probs.shape[0]
 	E := probs.shape[1]
 	mask_data := l.matrix_new(f64, N, E, allocator)
-
+	top_k_indices := make([]int, k, allocator)
+	defer delete(top_k_indices, allocator)
 	for n in 0 ..< N {
 		row := probs.data.data[n * E:(n + 1) * E]
 
 		// Simple insertion-sort based Top-K for each row
-		top_k_indices := make([]int, k, allocator)
 		for i in 0 ..< k {top_k_indices[i] = i}
 
 		for e in 0 ..< E {
