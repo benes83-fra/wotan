@@ -11,13 +11,14 @@ import "core:mem"
 // ============================================================================
 
 MoELayer :: struct {
-	num_experts: int,
-	top_k:       int,
-	d_model:     int,
-	d_ff:        int,
-	experts:     []FFNLayer,
-	router:      LinearLayer, // Maps d_model -> num_experts
-	allocator:   mem.Allocator,
+	num_experts:  int,
+	top_k:        int,
+	d_model:      int,
+	d_ff:         int,
+	experts:      []FFNLayer,
+	router:       LinearLayer, // Maps d_model -> num_experts
+	allocator:    mem.Allocator,
+	aux_loss_val: f64,
 }
 
 moe_layer_new :: proc(
@@ -102,7 +103,26 @@ moe_layer_forward :: proc(
 			}
 		}
 	}
+	load := make([]f64, layer.num_experts, allocator)
+	importance := make([]f64, layer.num_experts, allocator)
 
+	for n in 0 ..< N {
+		for e in 0 ..< layer.num_experts {
+			load[e] += mask.data.data[n * layer.num_experts + e]
+			importance[e] += probs.data.data[n * layer.num_experts + e]
+		}
+	}
+
+	aux_loss_val := 0.0
+	for e in 0 ..< layer.num_experts {
+		f_i := load[e] / f64(N)
+		P_i := importance[e] / f64(N)
+		aux_loss_val += f_i * P_i
+	}
+	layer.aux_loss_val = aux_loss_val * f64(layer.num_experts)
+
+	delete(load, allocator)
+	delete(importance, allocator)
 	// 6. Initialize Accumulator
 	//out_data := l.matrix_new(f64, N, layer.d_model, allocator)
 	out_flat: ^t.Tensor

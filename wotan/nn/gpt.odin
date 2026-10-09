@@ -108,18 +108,19 @@ gpt_block_forward :: proc(
 // ============================================================================
 
 GPTModel :: struct {
-	vocab_size:  int,
-	d_model:     int,
-	num_heads:   int,
-	d_ff:        int,
-	num_layers:  int,
-	max_seq_len: int,
-	token_emb:   EmbeddingLayer,
-	pos_emb:     EmbeddingLayer, // Learned positional embeddings
-	blocks:      [dynamic]GPTBlock,
-	final_ln:    LayerNormLayer,
-	output_proj: LinearLayer,
-	allocator:   mem.Allocator,
+	vocab_size:     int,
+	d_model:        int,
+	num_heads:      int,
+	d_ff:           int,
+	num_layers:     int,
+	max_seq_len:    int,
+	token_emb:      EmbeddingLayer,
+	pos_emb:        EmbeddingLayer, // Learned positional embeddings
+	blocks:         [dynamic]GPTBlock,
+	final_ln:       LayerNormLayer,
+	output_proj:    LinearLayer,
+	total_aux_loss: f64,
+	allocator:      mem.Allocator,
 }
 
 gpt_model_new :: proc(
@@ -196,7 +197,7 @@ gpt_model_forward :: proc(
 ) -> ^t.Tensor {
 	batch := input_ids.shape[0]
 	seq_len := input_ids.shape[1]
-
+	model.total_aux_loss = 0.0
 	// Token embeddings
 	token_emb := embedding_layer_forward(&model.token_emb, input_ids)
 
@@ -223,6 +224,9 @@ gpt_model_forward :: proc(
 	// Pass through GPT blocks
 	for i in 0 ..< len(model.blocks) {
 		x = gpt_block_forward(&model.blocks[i], x, mask, training)
+		if model.blocks[i].use_moe {
+			model.total_aux_loss += model.blocks[i].moe.aux_loss_val
+		}
 	}
 
 	// Final LayerNorm

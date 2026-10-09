@@ -112,6 +112,12 @@ gpt_moe_flash_test :: proc(allocator: mem.Allocator) {
 		logits := nn.gpt_model_forward(&model, x_batch, mask, true)
 		ce_loss := t.tensor_cross_entropy_loss(logits, y_batch)
 
+		aux_loss_data := l.matrix_new(f64, 1, 1, allocator)
+		aux_loss_data.data[0] = model.total_aux_loss * 0.01 // 0.01 is standard weight
+		aux_loss_tensor := t.tensor_new(aux_loss_data, false, allocator)
+
+		total_loss := t.tensor_add(ce_loss, aux_loss_tensor)
+
 		// Backward pass
 		t.tensor_backward(ce_loss)
 		nn.clip_grad_norm(&opt, 1.0)
@@ -121,7 +127,8 @@ gpt_moe_flash_test :: proc(allocator: mem.Allocator) {
 			fmt.printf("Epoch %3d | CE Loss: %.4f\n", epoch, ce_loss.data.data[0])
 		}
 
-		t.tensor_free_graph(ce_loss)
+		t.tensor_free_graph(total_loss)
+		t.tensor_free(aux_loss_tensor)
 		t.tensor_free(x_batch)
 		delete(y_batch, allocator)
 		delete(mask, allocator)
