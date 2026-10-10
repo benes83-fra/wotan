@@ -119,7 +119,7 @@ gpt_moe_flash_test :: proc(allocator: mem.Allocator) {
 		total_loss := t.tensor_add(ce_loss, aux_loss_tensor)
 
 		// Backward pass
-		t.tensor_backward(ce_loss)
+		t.tensor_backward(total_loss)
 		nn.clip_grad_norm(&opt, 1.0)
 		nn.adam_step(&opt)
 

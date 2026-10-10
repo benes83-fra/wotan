@@ -72,9 +72,12 @@ Op :: enum {
 	Reshape,
 	NormalizeTime,
 	LogSumExpDim1,
-	Softplus, // ✅ ADD
-	SSM, // ✅ ADD
+	Softplus,
+	SSM,
 	SliceGate,
+	ProspectValue,
+	ProbWeighting,
+	ProspectUtility,
 }
 
 PoolParams :: struct {
@@ -3163,6 +3166,118 @@ tensor_slice_gate :: proc(
 		append(&out.inputs, gates)
 		append(&out.int_metadata, expert_idx)
 		append(&out.int_metadata, E) // Store total experts for backward pass
+	}
+	return out
+}
+// ============================================================================
+// Prospect Theory: Value Function (Kahneman & Tversky, 1992)
+// ============================================================================
+// v(x) = x^α           if x ≥ 0  (concave gains)
+// v(x) = -λ(-x)^β      if x < 0  (convex losses, loss-averse)
+// Calibrated: α = β = 0.88, λ = 2.25
+
+tensor_prospect_value :: proc(
+	returns: ^Tensor,
+	alpha: f64 = 0.88,
+	beta: f64 = 0.88,
+	lambda: f64 = 2.25,
+	allocator: mem.Allocator = context.allocator,
+) -> ^Tensor {
+	out_data := l.matrix_new(f64, returns.data.rows, returns.data.cols, allocator)
+
+	for i in 0 ..< len(returns.data.data) {
+		x := returns.data.data[i]
+		if x >= 0.0 {
+			out_data.data[i] = math.pow(x, alpha)
+		} else {
+			out_data.data[i] = -lambda * math.pow(-x, beta)
+		}
+	}
+
+	out := tensor_new(out_data, returns.requires_grad, allocator)
+	out.shape = returns.shape
+	if out.requires_grad {
+		out.op = .ProspectValue
+		append(&out.inputs, returns)
+		append(&out.int_metadata, int(alpha * 1_000_000))
+		append(&out.int_metadata, int(beta * 1_000_000))
+		append(&out.int_metadata, int(lambda * 1_000_000))
+	}
+	return out
+}
+
+// ============================================================================
+// Prospect Theory: Probability Weighting (Cumulative PT, Tversky & Kahneman 1992)
+// ============================================================================
+// w(p) = p^γ / (p^γ + (1-p)^γ)^(1/γ)
+// Calibrated: γ_gain = 0.61, γ_loss = 0.69
+
+tensor_prob_weighting :: proc(
+	p: ^Tensor,
+	gamma: f64 = 0.61,
+	allocator: mem.Allocator = context.allocator,
+) -> ^Tensor {
+	eps := 1e-7
+	out_data := l.matrix_new(f64, p.data.rows, p.data.cols, allocator)
+
+	for i in 0 ..< len(p.data.data) {
+		pi := math.max(eps, math.min(1.0 - eps, p.data.data[i]))
+		p_gamma := math.pow(pi, gamma)
+		q_gamma := math.pow(1.0 - pi, gamma)
+		denom := math.pow(p_gamma + q_gamma, 1.0 / gamma)
+		out_data.data[i] = p_gamma / denom
+	}
+
+	out := tensor_new(out_data, p.requires_grad, allocator)
+	out.shape = p.shape
+	if out.requires_grad {
+		out.op = .ProbWeighting
+		append(&out.inputs, p)
+		append(&out.int_metadata, int(gamma * 1_000_000))
+	}
+	return out
+}
+
+// ============================================================================
+// Prospect Theory: Fused Portfolio Utility (like tensor_sharpe_loss)
+// ============================================================================
+// U = -mean(v(r_i))   (negated for gradient descent minimization)
+// This is the RL reward signal that makes agents trade like humans.
+
+tensor_prospect_utility :: proc(
+	returns: ^Tensor,
+	alpha: f64 = 0.88,
+	beta: f64 = 0.88,
+	lambda: f64 = 2.25,
+	allocator: mem.Allocator = context.allocator,
+) -> ^Tensor {
+	n := f64(len(returns.data.data))
+	if n == 0 {
+		panic("tensor_prospect_utility: empty returns tensor")
+	}
+
+	// Fused forward: compute mean prospect value in one pass
+	utility_sum := 0.0
+	for i in 0 ..< len(returns.data.data) {
+		x := returns.data.data[i]
+		if x >= 0.0 {
+			utility_sum += math.pow(x, alpha)
+		} else {
+			utility_sum += -lambda * math.pow(-x, beta)
+		}
+	}
+
+	// Negate for minimization (like sharpe_loss)
+	out_data := l.matrix_new(f64, 1, 1, allocator)
+	out_data.data[0] = -(utility_sum / n)
+
+	out := tensor_new(out_data, returns.requires_grad, allocator)
+	if out.requires_grad {
+		out.op = .ProspectUtility
+		append(&out.inputs, returns)
+		append(&out.int_metadata, int(alpha * 1_000_000))
+		append(&out.int_metadata, int(beta * 1_000_000))
+		append(&out.int_metadata, int(lambda * 1_000_000))
 	}
 	return out
 }

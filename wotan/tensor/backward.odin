@@ -2682,6 +2682,85 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 					gates_in.grad.data[n * E + expert_idx] += node.grad.data[n]
 				}
 			}
+		// ============================================================================
+		// Prospect Value Backward
+		// ============================================================================
+		case .ProspectValue:
+			x_in := node.inputs[0]
+			if x_in.requires_grad {
+				tensor_ensure_grad(x_in)
+				alpha := f64(node.int_metadata[0]) / 1_000_000
+				beta := f64(node.int_metadata[1]) / 1_000_000
+				lambda := f64(node.int_metadata[2]) / 1_000_000
+
+				for i in 0 ..< len(x_in.data.data) {
+					x := x_in.data.data[i]
+					grad_out := node.grad.data[i]
+
+					if x > 1e-10 {
+						// dv/dx = α · x^(α-1)
+						x_in.grad.data[i] += grad_out * alpha * math.pow(x, alpha - 1.0)
+					} else if x < -1e-10 {
+						// dv/dx = λ · β · (-x)^(β-1)
+						x_in.grad.data[i] += grad_out * lambda * beta * math.pow(-x, beta - 1.0)
+					}
+					// At x ≈ 0: subgradient = 0
+				}
+			}
+
+		// ============================================================================
+		// Probability Weighting Backward
+		// ============================================================================
+		case .ProbWeighting:
+			p_in := node.inputs[0]
+			if p_in.requires_grad {
+				tensor_ensure_grad(p_in)
+				gamma := f64(node.int_metadata[0]) / 1_000_000
+				eps := 1e-7
+
+				for i in 0 ..< len(p_in.data.data) {
+					pi := math.max(eps, math.min(1.0 - eps, p_in.data.data[i]))
+					w := node.data.data[i] // w(p) from forward pass
+
+					p_gamma := math.pow(pi, gamma)
+					q_gamma := math.pow(1.0 - pi, gamma)
+					denom_inner := p_gamma + q_gamma
+
+					// dw/dp = w · [γ/p - (p^(γ-1) - (1-p)^(γ-1)) / (p^γ + (1-p)^γ)]
+					term1 := gamma / pi
+					term2 :=
+						(math.pow(pi, gamma - 1.0) - math.pow(1.0 - pi, gamma - 1.0)) / denom_inner
+					dw_dp := w * (term1 - term2)
+
+					p_in.grad.data[i] += node.grad.data[i] * dw_dp
+				}
+			}
+
+		// ============================================================================
+		// Prospect Utility Backward (fused, like SharpeLoss)
+		// ============================================================================
+		case .ProspectUtility:
+			x_in := node.inputs[0]
+			if x_in.requires_grad {
+				tensor_ensure_grad(x_in)
+				alpha := f64(node.int_metadata[0]) / 1_000_000
+				beta := f64(node.int_metadata[1]) / 1_000_000
+				lambda := f64(node.int_metadata[2]) / 1_000_000
+				n := f64(len(x_in.data.data))
+
+				// d(-U)/dx_i = -dv/dx_i / n
+				for i in 0 ..< len(x_in.data.data) {
+					x := x_in.data.data[i]
+					grad_out := node.grad.data[0] // scalar gradient flows to all elements
+
+					if x > 1e-10 {
+						x_in.grad.data[i] += grad_out * (-alpha * math.pow(x, alpha - 1.0)) / n
+					} else if x < -1e-10 {
+						x_in.grad.data[i] +=
+							grad_out * (-lambda * beta * math.pow(-x, beta - 1.0)) / n
+					}
+				}
+			}
 		case .None, .Constant, .TopKMask:
 		// Leaf node, nothing to do
 		}
