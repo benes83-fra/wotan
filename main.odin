@@ -583,6 +583,7 @@ main :: proc() {
 	test.prospect_theory_test(context.temp_allocator)
 	test.prospect_ppo_test(context.temp_allocator)
 	test.prospect_vol_smile_test(context.temp_allocator)
+	test.market_implied_psychology_test(context.temp_allocator)
 	fmt.println("Demo End")
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
