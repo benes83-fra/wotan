@@ -4,6 +4,7 @@ import bfin "../wotan/behavoral_finance"
 import w "../wotan/core"
 import fin "../wotan/finance"
 import net "../wotan/net"
+import plot "../wotan/plot"
 import "core:fmt"
 import "core:math"
 import "core:mem"
@@ -251,6 +252,127 @@ real_market_psychology_test :: proc(allocator: mem.Allocator) {
 			"The market exhibits standard behavioral biases (moderate tail overweighting).",
 		)
 	}
-
+	plot_prospect_curves(result.params, allocator)
 	fmt.println("\n=== Real Market-Implied Psychology Test Complete ===\n")
+}
+
+plot_prospect_curves :: proc(market_params: bfin.Prospect_Params, allocator: mem.Allocator) {
+	fmt.println("\n=== Generating High-Res Prospect Curve PNGs ===")
+
+	tk92 := bfin.Prospect_Params {
+		alpha  = 0.88,
+		beta   = 0.88,
+		lambda = 2.25,
+		gamma  = 0.61,
+	}
+	n_points := 200
+
+	// --- 1. Value Function v(x) ---
+	x_vals := make([]f64, n_points, allocator)
+	y_tk92_val := make([]f64, n_points, allocator)
+	y_market_val := make([]f64, n_points, allocator)
+	defer {delete(x_vals, allocator); delete(y_tk92_val, allocator)
+		delete(y_market_val, allocator)}
+
+	for i in 0 ..< n_points {
+		x := -3.0 + 6.0 * f64(i) / f64(n_points - 1)
+		x_vals[i] = x
+
+		if x >= 0 {
+			y_tk92_val[i] = math.pow(x, tk92.alpha)
+			y_market_val[i] = math.pow(x, market_params.alpha)
+		} else {
+			y_tk92_val[i] = -tk92.lambda * math.pow(-x, tk92.beta)
+			y_market_val[i] = -market_params.lambda * math.pow(-x, market_params.beta)
+		}
+	}
+
+	val_lines := []plot.LineData {
+		{xs = x_vals, ys = y_tk92_val, color = plot.BLUE, style = .Solid, label = "TK92 Baseline"},
+		{
+			xs = x_vals,
+			ys = y_market_val,
+			color = plot.RED,
+			style = .Dashed,
+			label = "Live Market (SPY)",
+		},
+	}
+
+	val_config := plot.DEFAULT_PLOT_CONFIG
+	val_config.title = "Prospect Theory Value Function v(x)"
+	val_config.x_label = "Payoff (x)"
+	val_config.y_label = "Subjective Value v(x)"
+	val_config.width = 800
+	val_config.height = 600
+	val_config.show_grid = true
+
+	if plot.multi_line_png(val_lines, "prospect_value_curve.png", val_config, allocator) {
+		fmt.println("Saved: prospect_value_curve.png")
+	} else {
+		fmt.println("Failed to save value curve PNG.")
+	}
+
+	// --- 2. Probability Weighting w(p) ---
+	p_vals := make([]f64, n_points, allocator)
+	y_tk92_prob := make([]f64, n_points, allocator)
+	y_market_prob := make([]f64, n_points, allocator)
+	y_rational := make([]f64, n_points, allocator)
+	defer {delete(p_vals, allocator); delete(y_tk92_prob, allocator)
+		delete(y_market_prob, allocator)
+		delete(y_rational, allocator)}
+
+	for i in 0 ..< n_points {
+		// Avoid exactly 0.0 or 1.0 to prevent math.pow domain errors with fractional exponents
+		p := 0.001 + 0.998 * f64(i) / f64(n_points - 1)
+		p_vals[i] = p
+		y_rational[i] = p
+
+		p_g_tk := math.pow(p, tk92.gamma)
+		q_g_tk := math.pow(1.0 - p, tk92.gamma)
+		y_tk92_prob[i] = p_g_tk / math.pow(p_g_tk + q_g_tk, 1.0 / tk92.gamma)
+
+		p_g_mk := math.pow(p, market_params.gamma)
+		q_g_mk := math.pow(1.0 - p, market_params.gamma)
+		y_market_prob[i] = p_g_mk / math.pow(p_g_mk + q_g_mk, 1.0 / market_params.gamma)
+	}
+
+	prob_lines := []plot.LineData {
+		{
+			xs = p_vals,
+			ys = y_rational,
+			color = plot.Color{128, 128, 128, 255},
+			style = .Dotted,
+			label = "Rational (w=p)",
+		},
+		{
+			xs = p_vals,
+			ys = y_tk92_prob,
+			color = plot.BLUE,
+			style = .Solid,
+			label = "TK92 Baseline",
+		},
+		{
+			xs = p_vals,
+			ys = y_market_prob,
+			color = plot.RED,
+			style = .Dashed,
+			label = "Live Market (SPY)",
+		},
+	}
+
+	prob_config := plot.DEFAULT_PLOT_CONFIG
+	prob_config.title = "Probability Weighting Function w(p)"
+	prob_config.x_label = "Objective Probability (p)"
+	prob_config.y_label = "Subjective Weight w(p)"
+	prob_config.width = 800
+	prob_config.height = 600
+	prob_config.show_grid = true
+
+	if plot.multi_line_png(prob_lines, "prospect_weighting_curve.png", prob_config, allocator) {
+		fmt.println("Saved: prospect_weighting_curve.png")
+	} else {
+		fmt.println("Failed to save weighting curve PNG.")
+	}
+
+	fmt.println("=== PNG Generation Complete ===\n")
 }
