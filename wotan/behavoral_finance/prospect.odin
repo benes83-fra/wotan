@@ -264,3 +264,49 @@ calibrate_prospect_theory :: proc(
 		iterations = max_iter,
 	}
 }
+BehavioralSignal :: struct {
+	regime:     string, // "Complacency", "Panic", "Euphoria", "Rational"
+	action:     string, // "Buy Tail Protection", "Short Volatility", "Hold"
+	conviction: f64, // 0.0 to 1.0
+	bvrp:       f64, // Behavioral Volatility Risk Premium (IV - HV)
+}
+
+generate_behavioral_signal :: proc(
+	market_params: Prospect_Params,
+	hist_vol: f64,
+	avg_implied_vol: f64,
+) -> BehavioralSignal {
+	sig: BehavioralSignal
+
+	// 1. Calculate the Behavioral Volatility Risk Premium (BVRP)
+	// This is the exact dollar amount investors are over/under-paying for fear.
+	sig.bvrp = avg_implied_vol - hist_vol
+
+	// 2. Determine the Psychological Regime
+	if market_params.gamma < 0.55 {
+		sig.regime = "Panic (Crashophobia)"
+		if sig.bvrp > 0.05 { 	// IV is 5%+ higher than HV
+			sig.action = "SHORT VOLATILITY (Sell OTM Puts / Short Strangle)"
+			sig.conviction = math.min(1.0, sig.bvrp / 0.15) // Max conviction at 15% spread
+		} else {
+			sig.action = "Hold (Fear is high, but not mispriced)"
+			sig.conviction = 0.2
+		}
+	} else if market_params.gamma > 0.75 {
+		sig.regime = "Complacency / Euphoria"
+		if sig.bvrp < 0.02 { 	// IV is barely above HV
+			sig.action = "BUY TAIL PROTECTION (Buy cheap OTM Puts)"
+			// Conviction increases the closer gamma is to 1.0 (pure rationality/blindness)
+			sig.conviction = (market_params.gamma - 0.75) / 0.25
+		} else {
+			sig.action = "Hold (Market is rational and fairly priced)"
+			sig.conviction = 0.1
+		}
+	} else {
+		sig.regime = "Standard Behavioral Bias"
+		sig.action = "Delta Neutral / Market Making"
+		sig.conviction = 0.3
+	}
+
+	return sig
+}

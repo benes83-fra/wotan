@@ -253,6 +253,44 @@ real_market_psychology_test :: proc(allocator: mem.Allocator) {
 		)
 	}
 	plot_prospect_curves(result.params, allocator)
+	// --- GENERATE BEHAVIORAL ALPHA SIGNAL ---
+	fmt.println("\n=== Behavioral Alpha Engine ===")
+
+	// Calculate the average Implied Volatility from the filtered liquid options
+	sum_iv := 0.0
+	count_iv := 0
+	for point in market_data {
+		if point.implied_vol > 0.01 && point.implied_vol < 2.0 { 	// Filter bad data
+			sum_iv += point.implied_vol
+			count_iv += 1
+		}
+	}
+
+	avg_iv := 0.0
+	if count_iv > 0 {avg_iv = sum_iv / f64(count_iv)}
+
+	fmt.printf("Average Implied Volatility (Chain): %.2f%%\n", avg_iv * 100)
+	fmt.printf("Historical Volatility (Physical):   %.2f%%\n", true_sigma * 100)
+
+	signal := bfin.generate_behavioral_signal(result.params, true_sigma, avg_iv)
+
+	fmt.println("\n--- Trading Directive ---")
+	fmt.printf("Market Regime:  %s\n", signal.regime)
+	fmt.printf("Action:         %s\n", signal.action)
+	fmt.printf("Conviction:     %.1f%%\n", signal.conviction * 100)
+	fmt.printf("BVRP Spread:    %.2f%% (Implied - Historical)\n", signal.bvrp * 100)
+
+	fmt.println("\n💡 Quant Insight:")
+	if signal.regime == "Complacency / Euphoria" {
+		fmt.println("The market is currently ignoring tail risk. OTM options are cheap.")
+		fmt.println("A rational quant fund would allocate 1-2% of capital to long-vol strategies")
+		fmt.println("here, waiting for a sudden regime shift to panic.")
+	} else if signal.regime == "Panic (Crashophobia)" {
+		fmt.println("The market is overpricing fear. The 'Irrationality Spread' is high.")
+		fmt.println(
+			"A rational quant fund would sell this fear, acting as the insurer of last resort.",
+		)
+	}
 	fmt.println("\n=== Real Market-Implied Psychology Test Complete ===\n")
 }
 
