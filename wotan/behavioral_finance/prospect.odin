@@ -1,4 +1,4 @@
-package behavorial_finance
+package behavioral_finance
 
 import fin "../finance"
 import l "../linalg"

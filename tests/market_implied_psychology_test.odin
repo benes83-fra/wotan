@@ -1,6 +1,6 @@
 package tests
 
-import bfin "../wotan/behavoral_finance"
+import bfin "../wotan/behavioral_finance"
 import w "../wotan/core"
 import fin "../wotan/finance"
 import net "../wotan/net"
