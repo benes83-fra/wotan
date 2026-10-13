@@ -57,7 +57,7 @@ exotic_pricing_test :: proc(allocator: mem.Allocator) {
 		}
 	}
 
-	heston_res := fin.calibrate_heston(surface[:], spot, r, allocator)
+	heston_res := fin.calibrate_heston(surface[:], spot, r, allocator = allocator)
 	fmt.printf(
 		"   Calibrated Heston Params: v0=%.4f, κ=%.4f, θ=%.4f, σ=%.4f, ρ=%.4f\n\n",
 		heston_res.params.v0,

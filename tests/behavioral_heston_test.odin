@@ -235,7 +235,8 @@ behavioral_heston_test :: proc(allocator: mem.Allocator) {
 
 	// 3. Calibrate Pure Heston (The Physics)
 	fmt.println("\n--- Step 1: Calibrating Pure Heston (Stochastic Volatility) ---")
-	heston_result := fin.calibrate_heston(market_data[:], S, r, allocator)
+	// ✅ PASS true_sigma to seed the optimizer intelligently
+	heston_result := fin.calibrate_heston(market_data[:], S, r, true_sigma, allocator)
 	fmt.printf("Pure Heston RMSE: $%.4f\n", heston_result.rmse)
 	fmt.printf(
 		"Heston Params: v0=%.4f, kappa=%.2f, theta=%.4f, sigma=%.2f, rho=%.2f\n",

@@ -69,7 +69,7 @@ vol_surface_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("  ν (nu):    %.6f\n\n", sabr_result.params.nu)
 
 	fmt.println("--- Calibrating Heston Model ---")
-	heston_result := fin.calibrate_heston(market_data[:], S, r, allocator)
+	heston_result := fin.calibrate_heston(market_data[:], S, r, allocator = allocator)
 	fmt.printf(
 		"Converged: %v (iterations: %d)\n",
 		heston_result.converged,

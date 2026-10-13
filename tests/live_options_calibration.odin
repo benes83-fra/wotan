@@ -120,7 +120,7 @@ live_options_calibration_test :: proc(allocator: mem.Allocator) {
 
 	// 5. Calibrate Heston
 	fmt.println("5. Calibrating Heston Model...")
-	heston_res := fin.calibrate_heston(surface[:], spot, r, allocator)
+	heston_res := fin.calibrate_heston(surface[:], spot, r, allocator = allocator)
 	fmt.printf("   Status:   %v (Iterations: %d)\n", heston_res.converged, heston_res.iterations)
 	fmt.printf("   RMSE:     %.4f%%\n", heston_res.rmse * 100.0)
 	fmt.printf(
