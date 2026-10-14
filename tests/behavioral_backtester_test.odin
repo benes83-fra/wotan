@@ -1,7 +1,9 @@
 package tests
 
 import bfin "../wotan/behavioral_finance"
+import w "../wotan/core"
 import fin "../wotan/finance"
+import net "../wotan/net"
 import plot "../wotan/plot"
 import "core:fmt"
 import "core:math"
@@ -218,4 +220,332 @@ behavioral_backtester_test :: proc(allocator: mem.Allocator) {
 	}
 
 	fmt.println("\n=== Behavioral Alpha Backtester Complete ===\n")
+}
+
+// Rolling annualized realized volatility of log returns ending at index i.
+rolling_realized_vol :: proc(log_returns: []f64, i: int, window: int) -> f64 {
+	if i < window {return 0.20} 	// warmup default
+	start := i - window + 1
+	mean := 0.0
+	for j in start ..< i + 1 {mean += log_returns[j]}
+	mean /= f64(window)
+	variance := 0.0
+	for j in start ..< i + 1 {
+		d := log_returns[j] - mean
+		variance += d * d
+	}
+	variance /= f64(window)
+	return math.sqrt(variance) * math.sqrt_f64(252.0)
+}
+
+// Map a "fear ratio" (implied vol / realized vol) to a market-maker gamma.
+// ratio ≈ 1.0  → rational/complacent → high gamma
+// ratio  > 2.0 → extreme panic        → low gamma
+fear_ratio_to_gamma :: proc(fear_ratio: f64) -> f64 {
+	gamma := 0.90 - 0.30 * (fear_ratio - 1.0)
+	return math.max(0.40, math.min(0.95, gamma))
+}
+
+// ============================================================================
+// Main Backtest
+// ============================================================================
+historical_gamma_backtest_test :: proc(allocator: mem.Allocator) {
+	fmt.println("\n=== Real-World Historical Gamma Backtest ===")
+	fmt.println("Replaying actual SPY + VIX history through the Behavioral Alpha Engine.")
+
+	symbol := "SPY"
+	r := 0.04
+
+	// ---- Tunable strategy parameters ----
+	vol_window := 63 // Slow realized vol baseline (3 months)
+	long_vol_gamma := 0.85 // Buy vol when gamma is above this (complacency)
+	short_vol_gamma := 0.50 // Sell vol when gamma is below this (panic)
+	vol_leverage := 300.0 // Scales daily variance spread to strategy return
+
+	// 1. Fetch real SPY history
+	fmt.printf("- Fetching %s historical data...\n", symbol)
+	spy_df := net.read_yahoo(symbol, .Daily, .FiveYears, allocator) // ✅ Swap to .TenYears to capture 2020
+	defer w.destroy_dataframe(&spy_df)
+
+	n_days := spy_df.rows
+	if n_days < 150 {
+		fmt.println("Failed to fetch sufficient SPY data.")
+		return
+	}
+
+	close_col := w.column(&spy_df, "Close")
+	prices := make([]f64, n_days, allocator)
+	defer delete(prices, allocator)
+	for i in 0 ..< n_days {prices[i], _ = w.column_at_float(close_col, i)}
+
+	log_returns := make([]f64, n_days, allocator)
+	defer delete(log_returns, allocator)
+	for i in 1 ..< n_days {log_returns[i] = math.ln_f64(prices[i] / prices[i - 1])}
+
+	// 2. Fetch real VIX history (the market's fear gauge)
+	fmt.println("- Fetching ^VIX historical data...")
+	vix_df := net.read_yahoo("^VIX", .Daily, .FiveYears, allocator)
+	defer w.destroy_dataframe(&vix_df)
+
+	have_vix := vix_df.rows >= 150
+	vix := make([]f64, n_days, allocator)
+	defer delete(vix, allocator)
+	if have_vix {
+		vix_close := w.column(&vix_df, "Close")
+		n_vix := vix_df.rows
+		// Align from the most recent day backward
+		for i in 0 ..< n_days {
+			vix_idx := n_vix - n_days + i
+			if vix_idx >= 0 && vix_idx < n_vix {
+				vix[i], _ = w.column_at_float(vix_close, vix_idx)
+			} else {
+				vix[i] = 18.0
+			}
+		}
+	} else {
+		fmt.println("  (VIX unavailable — falling back to realized-vol regime proxy)")
+	}
+
+	// 3. Allocate result trackers
+	warmup := vol_window + 5
+	equity_curve := make([]f64, n_days, allocator)
+	gamma_series := make([]f64, n_days, allocator)
+	vix_norm := make([]f64, n_days, allocator)
+	spy_norm := make([]f64, n_days, allocator)
+	strat_returns := make([]f64, n_days, allocator)
+	defer {
+		delete(equity_curve, allocator)
+		delete(gamma_series, allocator)
+		delete(vix_norm, allocator)
+		delete(spy_norm, allocator)
+		delete(strat_returns, allocator)
+	}
+
+	cash := 100000.0
+	prev_position := 0 // -1 short vol, 0 flat, +1 long vol
+	prev_implied_var := 0.0
+
+	long_days, short_days, flat_days := 0, 0, 0
+
+	// 4. Daily loop over REAL history
+	for t in warmup ..< n_days {
+		St := prices[t]
+		realized_vol := rolling_realized_vol(log_returns, t, vol_window)
+		if realized_vol < 1e-4 {realized_vol = 1e-4}
+
+		// --- Determine market gamma from the fear ratio ---
+		market_gamma: f64
+		if have_vix && vix[t] > 0 {
+			fear_ratio := (vix[t] / 100.0) / realized_vol
+			market_gamma = fear_ratio_to_gamma(fear_ratio)
+		} else {
+			// Fallback: short-term vol spike vs long-term baseline
+			short_vol := rolling_realized_vol(log_returns, t, 10)
+			fear_ratio := short_vol / realized_vol
+			market_gamma = fear_ratio_to_gamma(fear_ratio)
+		}
+		gamma_series[t] = market_gamma
+		vix_norm[t] = vix[t] / 100.0
+		spy_norm[t] = St / prices[0]
+
+		// --- Settle YESTERDAY's position against TODAY's real return ---
+		if t > warmup {
+			realized_var_today := log_returns[t] * log_returns[t]
+			spread := realized_var_today - prev_implied_var // + means vol was underpriced
+			daily_ret := f64(prev_position) * spread * vol_leverage
+			cash *= (1.0 + daily_ret)
+			strat_returns[t] = daily_ret
+		}
+		equity_curve[t] = cash
+
+		// --- Decide TODAY's position from the gamma signal ---
+		implied_var := (vix[t] / 100.0) * (vix[t] / 100.0) / 252.0
+		if !have_vix {implied_var = realized_vol * realized_vol / 252.0}
+		prev_implied_var = implied_var
+
+		if market_gamma > long_vol_gamma {
+			prev_position = 1 // Complacency: vol is cheap, buy tail protection
+			long_days += 1
+		} else if market_gamma < short_vol_gamma {
+			prev_position = -1 // Panic: fear is overpriced, sell it
+			short_days += 1
+		} else {
+			prev_position = 0
+			flat_days += 1
+		}
+	}
+
+	// 5. Performance metrics
+	total_ret := (cash / 100000.0 - 1.0) * 100.0
+	spy_ret := (prices[n_days - 1] / prices[0] - 1.0) * 100.0
+
+	mean_r := 0.0
+	count := 0
+	for t in warmup ..< n_days {
+		mean_r += strat_returns[t]
+		count += 1
+	}
+	if count > 0 {mean_r /= f64(count)}
+	var_r := 0.0
+	for t in warmup ..< n_days {
+		d := strat_returns[t] - mean_r
+		var_r += d * d
+	}
+	if count > 1 {var_r /= f64(count - 1)}
+	std_r := math.sqrt(var_r)
+	sharpe := 0.0
+	if std_r > 1e-9 {sharpe = (mean_r / std_r) * math.sqrt_f64(252.0)}
+
+	// Max drawdown
+	peak := 0.0
+	max_dd := 0.0
+	for t in warmup ..< n_days {
+		if equity_curve[t] > peak {peak = equity_curve[t]}
+		if peak > 0 {
+			dd := (peak - equity_curve[t]) / peak
+			if dd > max_dd {max_dd = dd}
+		}
+	}
+
+	fmt.println("\n--- Real-World Backtest Results ---")
+	fmt.printf("Period:              %d trading days\n", n_days - warmup)
+	fmt.printf("SPY Buy & Hold:      %+7.2f%%\n", spy_ret)
+	fmt.printf("Gamma Strategy:      %+7.2f%%\n", total_ret)
+	fmt.printf("Sharpe Ratio:        %7.2f\n", sharpe)
+	fmt.printf("Max Drawdown:        %7.2f%%\n", max_dd * 100.0)
+	fmt.printf("Long-Vol Days:       %d\n", long_days)
+	fmt.printf("Short-Vol Days:      %d\n", short_days)
+	fmt.printf("Flat Days:           %d\n", flat_days)
+
+	// 6. Validation: run the FULL calibrator on 3 representative days
+	//    to prove the engine recovers the VIX-implied gamma from option prices.
+	fmt.println("\n--- Calibration Spot-Check (Engine Validation) ---")
+	if have_vix {
+		max_vix_idx, min_vix_idx := warmup, warmup
+		for t in warmup ..< n_days {
+			if vix[t] > vix[max_vix_idx] {max_vix_idx = t}
+			if vix[t] < vix[min_vix_idx] {min_vix_idx = t}
+		}
+		mid_idx := (max_vix_idx + min_vix_idx) / 2
+		check_days := [3]int{min_vix_idx, mid_idx, max_vix_idx}
+		labels := [3]string{"Peak Complacency", "Median", "Peak Panic"}
+
+		chain := make([]fin.VolSurfacePoint, 3, allocator)
+		defer delete(chain, allocator)
+		strikes_rel := []f64{0.90, 1.00, 1.10}
+		base := bfin.Prospect_Params {
+			alpha  = 0.88,
+			beta   = 0.88,
+			lambda = 2.25,
+			gamma  = 0.61,
+		}
+
+		for c in 0 ..< 3 {
+			t := check_days[c]
+			St := prices[t]
+			rv := rolling_realized_vol(log_returns, t, vol_window)
+			if rv < 1e-4 {rv = 1e-4}
+			fear_ratio := (vix[t] / 100.0) / rv
+			true_gamma := fear_ratio_to_gamma(fear_ratio)
+
+			for i in 0 ..< 3 {
+				K := St * strikes_rel[i]
+				mp := bfin.prospect_theory_price(
+					St,
+					K,
+					30.0 / 252.0,
+					r,
+					rv,
+					bfin.Prospect_Params {
+						alpha = base.alpha,
+						beta = base.beta,
+						lambda = base.lambda,
+						gamma = true_gamma,
+					},
+					.Call,
+					80,
+					allocator,
+				)
+				chain[i] = fin.VolSurfacePoint {
+					strike       = K,
+					expiry       = 30.0 / 252.0,
+					market_price = mp,
+					implied_vol  = 0.0,
+				}
+			}
+
+			res := bfin.calibrate_prospect_theory(chain, St, r, rv, allocator)
+			fmt.printf(
+				"  %-16s | VIX=%.1f | VIX-implied γ=%.2f | Calibrator γ=%.2f | RMSE=$%.3f\n",
+				labels[c],
+				vix[t],
+				true_gamma,
+				res.params.gamma,
+				res.rmse,
+			)
+		}
+	}
+
+	// 7. Plots
+	fmt.println("\n- Generating plots...")
+	plot_days := make([]f64, n_days - warmup, allocator)
+	plot_equity := make([]f64, n_days - warmup, allocator)
+	plot_spy := make([]f64, n_days - warmup, allocator)
+	plot_gamma := make([]f64, n_days - warmup, allocator)
+	plot_vix := make([]f64, n_days - warmup, allocator)
+	defer {
+		delete(plot_days, allocator)
+		delete(plot_equity, allocator)
+		delete(plot_spy, allocator)
+		delete(plot_gamma, allocator)
+		delete(plot_vix, allocator)
+	}
+	for t in warmup ..< n_days {
+		i := t - warmup
+		plot_days[i] = f64(t)
+		plot_equity[i] = equity_curve[t] / 100000.0
+		plot_spy[i] = spy_norm[t]
+		plot_gamma[i] = gamma_series[t]
+		plot_vix[i] = vix_norm[t]
+	}
+
+	equity_lines := []plot.LineData {
+		{xs = plot_days, ys = plot_spy, color = plot.BLUE, style = .Solid, label = "SPY"},
+		{
+			xs = plot_days,
+			ys = plot_equity,
+			color = plot.RED,
+			style = .Solid,
+			label = "Gamma Strategy",
+		},
+	}
+	eq_cfg := plot.DEFAULT_PLOT_CONFIG
+	eq_cfg.title = "Historical Gamma Strategy vs SPY"
+	eq_cfg.x_label = "Trading Day"
+	eq_cfg.y_label = "Normalized Value"
+	eq_cfg.show_grid = true
+	if plot.multi_line_png(equity_lines, "hist_gamma_equity.png", eq_cfg, allocator) {
+		fmt.println("Saved: hist_gamma_equity.png")
+	}
+
+	gamma_lines := []plot.LineData {
+		{
+			xs = plot_days,
+			ys = plot_gamma,
+			color = plot.RED,
+			style = .Solid,
+			label = "Calibrated Gamma",
+		},
+		{xs = plot_days, ys = plot_vix, color = plot.BLUE, style = .Dashed, label = "VIX / 100"},
+	}
+	g_cfg := plot.DEFAULT_PLOT_CONFIG
+	g_cfg.title = "Market-Implied Psychology (Gamma) vs VIX"
+	g_cfg.x_label = "Trading Day"
+	g_cfg.y_label = "Level"
+	g_cfg.show_grid = true
+	if plot.multi_line_png(gamma_lines, "hist_gamma_vs_vix.png", g_cfg, allocator) {
+		fmt.println("Saved: hist_gamma_vs_vix.png")
+	}
+
+	fmt.println("\n=== Historical Gamma Backtest Complete ===\n")
 }
