@@ -260,7 +260,11 @@ historical_gamma_backtest_test :: proc(allocator: mem.Allocator) {
 	vol_window := 63 // Slow realized vol baseline (3 months)
 	long_vol_gamma := 0.85 // Buy vol when gamma is above this (complacency)
 	short_vol_gamma := 0.50 // Sell vol when gamma is below this (panic)
-	vol_leverage := 300.0 // Scales daily variance spread to strategy return
+
+	// ✅ FIX 1: Volatility Targeting parameters (replaces static vol_leverage)
+	target_annual_vol := 0.15 // Cap strategy risk at 15% annualized
+	target_daily_var := (target_annual_vol * target_annual_vol) / 252.0
+	strat_var_window := 21 // Rolling window for strategy variance
 
 	// 1. Fetch real SPY history
 	fmt.printf("- Fetching %s historical data...\n", symbol)
@@ -333,10 +337,14 @@ historical_gamma_backtest_test :: proc(allocator: mem.Allocator) {
 		realized_vol := rolling_realized_vol(log_returns, t, vol_window)
 		if realized_vol < 1e-4 {realized_vol = 1e-4}
 
+		// ✅ FIX 2: Clean Yahoo Finance VIX artifacts (VIX rarely drops below 9 in reality)
+		clean_vix := vix[t]
+		if have_vix && clean_vix < 9.0 {clean_vix = 12.0}
+
 		// --- Determine market gamma from the fear ratio ---
 		market_gamma: f64
-		if have_vix && vix[t] > 0 {
-			fear_ratio := (vix[t] / 100.0) / realized_vol
+		if have_vix && clean_vix > 0 {
+			fear_ratio := (clean_vix / 100.0) / realized_vol
 			market_gamma = fear_ratio_to_gamma(fear_ratio)
 		} else {
 			// Fallback: short-term vol spike vs long-term baseline
@@ -345,21 +353,44 @@ historical_gamma_backtest_test :: proc(allocator: mem.Allocator) {
 			market_gamma = fear_ratio_to_gamma(fear_ratio)
 		}
 		gamma_series[t] = market_gamma
-		vix_norm[t] = vix[t] / 100.0
+		vix_norm[t] = clean_vix / 100.0
 		spy_norm[t] = St / prices[0]
 
 		// --- Settle YESTERDAY's position against TODAY's real return ---
 		if t > warmup {
 			realized_var_today := log_returns[t] * log_returns[t]
 			spread := realized_var_today - prev_implied_var // + means vol was underpriced
-			daily_ret := f64(prev_position) * spread * vol_leverage
+
+			// ✅ FIX 3: Calculate dynamic position size based on recent strategy variance
+			current_leverage := 100.0 // Fallback
+			if t > warmup + strat_var_window {
+				strat_mean := 0.0
+				for w in 1 ..< strat_var_window + 1 {strat_mean += strat_returns[t - w]}
+				strat_mean /= f64(strat_var_window)
+
+				strat_var := 0.0
+				for w in 1 ..< strat_var_window + 1 {
+					d := strat_returns[t - w] - strat_mean
+					strat_var += d * d
+				}
+				strat_var /= f64(strat_var_window)
+
+				if strat_var > 1e-10 {
+					// Scale leverage so that (leverage^2 * strat_var) == target_daily_var
+					current_leverage = math.sqrt(target_daily_var / strat_var)
+					// Cap max leverage to prevent insane spikes during flat periods
+					if current_leverage > 500.0 {current_leverage = 500.0}
+				}
+			}
+
+			daily_ret := f64(prev_position) * spread * current_leverage
 			cash *= (1.0 + daily_ret)
 			strat_returns[t] = daily_ret
 		}
 		equity_curve[t] = cash
 
 		// --- Decide TODAY's position from the gamma signal ---
-		implied_var := (vix[t] / 100.0) * (vix[t] / 100.0) / 252.0
+		implied_var := (clean_vix / 100.0) * (clean_vix / 100.0) / 252.0
 		if !have_vix {implied_var = realized_vol * realized_vol / 252.0}
 		prev_implied_var = implied_var
 
@@ -445,7 +476,11 @@ historical_gamma_backtest_test :: proc(allocator: mem.Allocator) {
 			St := prices[t]
 			rv := rolling_realized_vol(log_returns, t, vol_window)
 			if rv < 1e-4 {rv = 1e-4}
-			fear_ratio := (vix[t] / 100.0) / rv
+
+			// ✅ Use clean_vix for spot check too
+			clean_vix_spot := vix[t]
+			if clean_vix_spot < 9.0 {clean_vix_spot = 12.0}
+			fear_ratio := (clean_vix_spot / 100.0) / rv
 			true_gamma := fear_ratio_to_gamma(fear_ratio)
 
 			for i in 0 ..< 3 {
@@ -478,7 +513,7 @@ historical_gamma_backtest_test :: proc(allocator: mem.Allocator) {
 			fmt.printf(
 				"  %-16s | VIX=%.1f | VIX-implied γ=%.2f | Calibrator γ=%.2f | RMSE=$%.3f\n",
 				labels[c],
-				vix[t],
+				clean_vix_spot,
 				true_gamma,
 				res.params.gamma,
 				res.rmse,
