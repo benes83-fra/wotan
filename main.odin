@@ -586,6 +586,7 @@ main :: proc() {
 	test.market_implied_psychology_test(context.temp_allocator)
 	test.real_market_psychology_test(context.temp_allocator)
 	test.behavioral_heston_test(context.temp_allocator)
+	test.behavioral_backtester_test(context.temp_allocator)
 	fmt.println("Demo End")
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
