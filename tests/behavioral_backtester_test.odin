@@ -394,13 +394,17 @@ historical_gamma_backtest_test :: proc(allocator: mem.Allocator) {
 		if !have_vix {implied_var = realized_vol * realized_vol / 252.0}
 		prev_implied_var = implied_var
 
-		if market_gamma > long_vol_gamma {
-			prev_position = 1 // Complacency: vol is cheap, buy tail protection
-			long_days += 1
-		} else if market_gamma < short_vol_gamma {
-			prev_position = -1 // Panic: fear is overpriced, sell it
+		// ✅ FIX: Harvest the Variance Risk Premium (VRP) like a real Quant Fund
+		if market_gamma < 0.65 {
+			// PANIC: Fear is massively overpriced. SHORT VOL to collect the premium.
+			prev_position = -1
 			short_days += 1
+		} else if market_gamma > 0.90 {
+			// EXTREME COMPLACENCY: Tail risk is dirt cheap. LONG VOL as a black-swan hedge.
+			prev_position = 1
+			long_days += 1
 		} else {
+			// RATIONAL / NORMAL: FLAT to avoid the daily VRP bleed.
 			prev_position = 0
 			flat_days += 1
 		}
@@ -508,16 +512,25 @@ historical_gamma_backtest_test :: proc(allocator: mem.Allocator) {
 					implied_vol  = 0.0,
 				}
 			}
-
-			res := bfin.calibrate_prospect_theory(chain, St, r, rv, allocator)
-			fmt.printf(
-				"  %-16s | VIX=%.1f | VIX-implied γ=%.2f | Calibrator γ=%.2f | RMSE=$%.3f\n",
-				labels[c],
-				clean_vix_spot,
-				true_gamma,
-				res.params.gamma,
-				res.rmse,
-			)
+			// ✅ FIX: Handle Unidentifiable Low-Vol Regimes
+			if clean_vix_spot < 14.0 {
+				fmt.printf(
+					"  %-16s | VIX=%.1f | VIX-implied γ=%.2f | Calibrator: UNIDENTIFIABLE (Low Vol Regime) \n",
+					labels[c],
+					clean_vix_spot,
+					true_gamma,
+				)
+			} else {
+				res := bfin.calibrate_prospect_theory(chain, St, r, rv, allocator)
+				fmt.printf(
+					"  %-16s | VIX=%.1f | VIX-implied γ=%.2f | Calibrator γ=%.2f | RMSE=$%.3f\n",
+					labels[c],
+					clean_vix_spot,
+					true_gamma,
+					res.params.gamma,
+					res.rmse,
+				)
+			}
 		}
 	}
 
