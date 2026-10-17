@@ -589,6 +589,7 @@ main :: proc() {
 	test.behavioral_backtester_test(context.temp_allocator)
 	test.historical_gamma_backtest_test(context.temp_allocator)
 	test.anchoring_backtest_test(context.temp_allocator)
+	test.prospect_portfolio_test(context.temp_allocator)
 	fmt.println("Demo End")
 	w.destroy_dataframe(&dfx)
 	w.destroy_dataframe(&left2)
