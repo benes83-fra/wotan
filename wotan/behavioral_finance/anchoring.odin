@@ -142,3 +142,72 @@ generate_anchoring_portfolio :: proc(
 
 	return weights
 }
+// Cross-sectional Long/Short based on percentiles (Market Neutral)
+generate_cross_sectional_portfolio :: proc(
+	signal: []f64,
+	n_long: int,
+	n_short: int,
+	allocator: mem.Allocator,
+) -> []f64 {
+	n_assets := len(signal)
+	weights := make([]f64, n_assets, allocator)
+
+	// Create indices and sort them based on signal (ascending order)
+	indices := make([]int, n_assets, allocator)
+	for i in 0 ..< n_assets {indices[i] = i}
+
+	// Simple insertion sort for indices based on signal value
+	for i in 1 ..< n_assets {
+		key := indices[i]
+		j := i - 1
+		for j >= 0 && signal[indices[j]] > signal[key] {
+			indices[j + 1] = indices[j]
+			j -= 1
+		}
+		indices[j + 1] = key
+	}
+
+	// Short the bottom n_short assets (furthest from 52-week high)
+	for i in 0 ..< n_short {
+		weights[indices[i]] = -1.0 / f64(n_short)
+	}
+
+	// Long the top n_long assets (closest to 52-week high)
+	for i in n_assets - n_long ..< n_assets {
+		weights[indices[i]] = 1.0 / f64(n_long)
+	}
+
+	delete(indices, allocator)
+	return weights
+}
+// Long-Only Breakout Portfolio (Cash when no breakouts)
+generate_long_only_portfolio :: proc(
+	signal: []f64,
+	threshold: f64,
+	allocator: mem.Allocator,
+) -> []f64 {
+	n_assets := len(signal)
+	weights := make([]f64, n_assets, allocator)
+
+	count := 0
+	for a in 0 ..< n_assets {
+		if signal[a] >= threshold {
+			count += 1
+		}
+	}
+
+	// If nothing is breaking out, hold 100% cash (all weights remain 0.0)
+	if count == 0 {
+		return weights
+	}
+
+	// Equal weight among the breakouts
+	weight := 1.0 / f64(count)
+	for a in 0 ..< n_assets {
+		if signal[a] >= threshold {
+			weights[a] = weight
+		}
+	}
+
+	return weights
+}

@@ -14,7 +14,21 @@ anchoring_backtest_test :: proc(allocator: mem.Allocator) {
 	fmt.println("Strategy: Long stocks near 52-week high, short stocks far below.")
 
 	// 1. Define universe of ETFs (diversified asset classes)
-	symbols := []string{"SPY", "QQQ", "IWM", "EFA", "EEM", "TLT", "GLD", "VNQ", "XLE", "XLF"}
+	// 1. Define universe: S&P 500 Sectors (High dispersion, sentiment-driven)
+	symbols := []string {
+		"XLK", // Technology
+		"XLF", // Financials
+		"XLE", // Energy
+		"XLV", // Health Care
+		"XLI", // Industrials
+		"XLY", // Consumer Discretionary
+		"XLP", // Consumer Staples
+		"XLB", // Materials
+		"XLRE", // Real Estate
+		"XLU", // Utilities
+		"XLC", // Communication Services
+	}
+
 	n_assets := len(symbols)
 
 	// 2. Fetch historical data
@@ -119,8 +133,9 @@ anchoring_backtest_test :: proc(allocator: mem.Allocator) {
 			}
 		}
 
-		// Generate portfolio weights
-		weights := bfin.generate_anchoring_portfolio(current_signal, 0.95, 0.5, allocator)
+		// ✅ PIVOT: Long-Only Breakout Strategy
+		// Buy sectors crossing the 0.90 threshold, hold Cash for the rest.
+		weights := bfin.generate_long_only_portfolio(current_signal, 0.90, allocator)
 		// ✅ FIX 2: DO NOT use `defer` inside a loop! It will leak memory.
 		// We explicitly delete it at the end of the loop body.
 
@@ -204,6 +219,7 @@ anchoring_backtest_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("Benchmark Return:    %+7.2f%%\n", total_bench_ret)
 	fmt.printf("Anchoring Return:    %+7.2f%%\n", total_port_ret)
 	fmt.printf("Alpha:               %+7.2f%%\n", total_port_ret - total_bench_ret)
+	fmt.printf("Absolute Return:     %+7.2f%% (vs Cash)\n", total_port_ret)
 	fmt.printf("Benchmark Sharpe:    %7.2f\n", sharpe_bench)
 	fmt.printf("Anchoring Sharpe:    %7.2f\n", sharpe_port)
 	fmt.printf("Max Drawdown:        %7.2f%%\n", max_dd_port * 100.0)
