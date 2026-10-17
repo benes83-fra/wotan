@@ -72,8 +72,8 @@ prospect_metrics :: proc(
 prospect_portfolio_optimize :: proc(
 	returns_data: ^l.Matrix(f64),
 	params: ProspectPortfolioParams,
-	learning_rate: f64 = 0.5,
-	max_iter: int = 2000,
+	learning_rate: f64 = 0.1, // Lowered for stability
+	max_iter: int = 3000,
 	allocator: mem.Allocator = context.allocator,
 ) -> []f64 {
 	T := returns_data.rows
@@ -88,6 +88,8 @@ prospect_portfolio_optimize :: proc(
 
 	port_rets := make([]f64, T, allocator)
 	defer delete(port_rets, allocator)
+
+	eps := 1e-4 // ✅ FIX: Epsilon to prevent gradient singularity at x=0
 
 	for iter in 0 ..< max_iter {
 		// 1. Compute portfolio returns for all scenarios
@@ -105,12 +107,15 @@ prospect_portfolio_optimize :: proc(
 		for t in 0 ..< T {
 			x := port_rets[t] - params.ref_point
 
-			// Derivative of Prospect Value function v(x)
+			// ✅ FIX: Smoothed Derivative of Prospect Value function v(x)
 			dv_dx := 0.0
-			if x > 1e-8 {
+			if x > eps {
 				dv_dx = params.alpha * math.pow(x, params.alpha - 1.0)
-			} else if x < -1e-8 {
+			} else if x < -eps {
 				dv_dx = params.lambda * params.beta * math.pow(-x, params.beta - 1.0)
+			} else {
+				// In the epsilon neighborhood, cap the gradient to prevent explosion
+				dv_dx = params.alpha * math.pow(eps, params.alpha - 1.0)
 			}
 
 			// Chain rule: dU/dw_i = (1/T) * sum_t dv/dx * r_{t,i}

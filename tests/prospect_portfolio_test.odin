@@ -62,7 +62,25 @@ prospect_portfolio_test :: proc(allocator: mem.Allocator) {
 			returns_mat.data[(t - 1) * n_assets + a] = math.ln_f64(prices[a][t] / prices[a][t - 1])
 		}
 	}
+	// 2b. Compute Monthly Returns Matrix (for Prospect Theory - Myopic Loss Aversion)
+	// Benartzi & Thaler (1995): Evaluating less frequently reduces loss-aversion penalty
+	rebalance_days := 21
+	n_months := (min_time - 1) / rebalance_days
+	monthly_returns := l.matrix_new(f64, n_months, n_assets, allocator)
+	defer l.matrix_free(&monthly_returns)
 
+	m_idx := 0
+	for t in rebalance_days ..< min_time {
+		if t % rebalance_days == 0 && m_idx < n_months {
+			for a in 0 ..< n_assets {
+				// Cumulative return over 21 days
+				monthly_returns.data[m_idx * n_assets + a] = math.ln_f64(
+					prices[a][t] / prices[a][t - rebalance_days],
+				)
+			}
+			m_idx += 1
+		}
+	}
 	// 3. Markowitz Max Sharpe
 	fmt.println("- Computing Markowitz Max-Sharpe Portfolio...")
 	mu := fin.expected_returns_from_history(&returns_mat, allocator)
@@ -80,19 +98,20 @@ prospect_portfolio_test :: proc(allocator: mem.Allocator) {
 		bfin.ProspectPortfolioParams{0.88, 0.88, 2.25, 0.0},
 	)
 
-	// 4. Prospect Theory Optimization
-	fmt.println("- Computing Prospect Theory Portfolio (Loss-Averse)...")
+	// 4. Prospect Theory Optimization (Evaluated Monthly to avoid Myopic Loss Aversion)
+	fmt.println("- Computing Prospect Theory Portfolio (Loss-Averse, Monthly Evaluation)...")
 	params := bfin.ProspectPortfolioParams {
 		alpha     = 0.88,
 		beta      = 0.88,
 		lambda    = 2.25,
-		ref_point = 0.0, // Beating cash
+		ref_point = 0.0,
 	}
 
-	w_prospect := bfin.prospect_portfolio_optimize(&returns_mat, params, 0.5, 2000, allocator)
+	w_prospect := bfin.prospect_portfolio_optimize(&monthly_returns, params, 0.1, 3000, allocator)
 	defer delete(w_prospect, allocator)
 
-	metrics_prospect := bfin.prospect_metrics(w_prospect, &returns_mat, params)
+	// Evaluate metrics on the monthly data
+	metrics_prospect := bfin.prospect_metrics(w_prospect, &monthly_returns, params)
 
 	// 5. Print Comparison
 	fmt.println("\n--- Asset Allocation Comparison ---")
