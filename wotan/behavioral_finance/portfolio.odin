@@ -1,5 +1,6 @@
 package behavioral_finance
 
+import fin "../finance"
 import l "../linalg"
 import "core:math"
 import "core:mem"
@@ -143,4 +144,61 @@ prospect_portfolio_optimize :: proc(
 	}
 
 	return w
+}
+// ============================================================================
+// Behavioral Portfolio Theory (Shefrin & Statman, 2000)
+// ============================================================================
+
+// Optimizes a 3-layer Mental Accounting Pyramid.
+// Layer 1 (Safety): Min Variance (Capital Preservation)
+// Layer 2 (Aspiration): Max Sharpe (Efficient Growth)
+// Layer 3 (Speculative): Risk-Seeking Prospect (Lottery Tickets)
+bpt_optimize :: proc(
+	returns_data: ^l.Matrix(f64),
+	safety_alloc: f64,
+	aspiration_alloc: f64,
+	speculative_alloc: f64,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	combined: []f64,
+	w_safety: []f64,
+	w_asp: []f64,
+	w_spec: []f64,
+) {
+	N := returns_data.cols
+
+	// Compute moments for classical layers
+	mu := fin.expected_returns_from_history(returns_data, allocator)
+	defer delete(mu, allocator)
+
+	cov := fin.covariance_matrix(returns_data, allocator)
+	defer l.matrix_free(&cov)
+
+	// 1. Safety Layer: Min Variance (Protect the downside)
+	w_safety = fin.min_variance_portfolio(&cov, allocator)
+
+	// 2. Aspiration Layer: Max Sharpe (Efficient market growth)
+	w_asp = fin.max_sharpe_portfolio(mu, &cov, 0.0, allocator)
+
+	// 3. Speculative Layer: Risk-Seeking Prospect (Chase the upside)
+	// alpha > 1.0 makes the utility function convex for gains (risk-seeking).
+	// lambda = 1.0 removes loss aversion (they don't care about the downside here).
+	spec_params := ProspectPortfolioParams {
+		alpha     = 1.2,
+		beta      = 0.88,
+		lambda    = 1.0,
+		ref_point = 0.0,
+	}
+	w_spec = prospect_portfolio_optimize(returns_data, spec_params, 0.1, 2000, allocator)
+
+	// 4. Combine Weights (The Mental Accounting Pyramid)
+	combined = make([]f64, N, allocator)
+	for i in 0 ..< N {
+		combined[i] =
+			(safety_alloc * w_safety[i]) +
+			(aspiration_alloc * w_asp[i]) +
+			(speculative_alloc * w_spec[i])
+	}
+
+	return combined, w_safety, w_asp, w_spec
 }
