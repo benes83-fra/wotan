@@ -202,3 +202,111 @@ bpt_optimize :: proc(
 
 	return combined, w_safety, w_asp, w_spec
 }
+
+// Helper: Extract a sub-matrix of returns based on a boolean universe mask
+extract_sub_returns :: proc(
+	returns_data: ^l.Matrix(f64),
+	mask: []bool,
+	allocator: mem.Allocator = context.allocator,
+) -> l.Matrix(f64) {
+	T := returns_data.rows
+	N := returns_data.cols
+
+	sub_cols := 0
+	for b in mask {if b {sub_cols += 1}}
+
+	sub_mat := l.matrix_new(f64, T, sub_cols, allocator)
+	col_idx := 0
+	for j in 0 ..< N {
+		if mask[j] {
+			for i in 0 ..< T {
+				sub_mat.data[i * sub_cols + col_idx] = returns_data.data[i * N + j]
+			}
+			col_idx += 1
+		}
+	}
+	return sub_mat
+}
+
+// ============================================================================
+// Behavioral Portfolio Theory V2 (Sleeve Mandating)
+// ============================================================================
+
+bpt_optimize_v2 :: proc(
+	returns_data: ^l.Matrix(f64),
+	safety_universe: []bool,
+	aspiration_universe: []bool,
+	speculative_universe: []bool,
+	safety_alloc: f64,
+	aspiration_alloc: f64,
+	speculative_alloc: f64,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	combined: []f64,
+	w_safety: []f64,
+	w_asp: []f64,
+	w_spec: []f64,
+) {
+	N := returns_data.cols
+
+	// 1. Extract sub-matrices for each mandated sleeve
+	safe_mat := extract_sub_returns(returns_data, safety_universe, allocator)
+	defer l.matrix_free(&safe_mat)
+
+	asp_mat := extract_sub_returns(returns_data, aspiration_universe, allocator)
+	defer l.matrix_free(&asp_mat)
+
+	spec_mat := extract_sub_returns(returns_data, speculative_universe, allocator)
+	defer l.matrix_free(&spec_mat)
+
+	// 2. Optimize each sleeve within its mandate
+	// Safety Sleeve: Min Variance
+	safe_cov := fin.covariance_matrix(&safe_mat, allocator)
+	defer l.matrix_free(&safe_cov)
+	sub_w_safety := fin.min_variance_portfolio(&safe_cov, allocator)
+	defer delete(sub_w_safety, allocator)
+
+	// Aspiration Sleeve: Max Sharpe
+	asp_mu := fin.expected_returns_from_history(&asp_mat, allocator)
+	defer delete(asp_mu, allocator)
+	asp_cov := fin.covariance_matrix(&asp_mat, allocator)
+	defer l.matrix_free(&asp_cov)
+	sub_w_asp := fin.max_sharpe_portfolio(asp_mu, &asp_cov, 0.0, allocator)
+	defer delete(sub_w_asp, allocator)
+
+	// Speculative Sleeve: Risk-Seeking Prospect (Lottery Tickets)
+	spec_params := ProspectPortfolioParams {
+		alpha     = 1.2,
+		beta      = 0.88,
+		lambda    = 1.0,
+		ref_point = 0.0,
+	}
+	sub_w_spec := prospect_portfolio_optimize(&spec_mat, spec_params, 0.1, 2000, allocator)
+	defer delete(sub_w_spec, allocator)
+
+	// 3. Map the sleeve weights back to the full asset universe
+	w_safety = make([]f64, N, allocator)
+	w_asp = make([]f64, N, allocator)
+	w_spec = make([]f64, N, allocator)
+
+	safe_idx := 0
+	asp_idx := 0
+	spec_idx := 0
+
+	for j in 0 ..< N {
+		if safety_universe[j] {w_safety[j] = sub_w_safety[safe_idx]; safe_idx += 1}
+		if aspiration_universe[j] {w_asp[j] = sub_w_asp[asp_idx]; asp_idx += 1}
+		if speculative_universe[j] {w_spec[j] = sub_w_spec[spec_idx]; spec_idx += 1}
+	}
+
+	// 4. Combine Weights (The Mandated Pyramid)
+	combined = make([]f64, N, allocator)
+	for i in 0 ..< N {
+		combined[i] =
+			(safety_alloc * w_safety[i]) +
+			(aspiration_alloc * w_asp[i]) +
+			(speculative_alloc * w_spec[i])
+	}
+
+	return combined, w_safety, w_asp, w_spec
+}

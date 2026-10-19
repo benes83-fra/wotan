@@ -131,3 +131,146 @@ bpt_test :: proc(allocator: mem.Allocator) {
 
 	fmt.println("\n=== Behavioral Portfolio Theory Test Complete ===\n")
 }
+
+bpt_v2_test :: proc(allocator: mem.Allocator) {
+	fmt.println("\n=== Behavioral Portfolio Theory V2 (Sleeve Mandating) ===")
+	fmt.println("Enforcing human narrative constraints on the Mental Accounting Pyramid.")
+
+	// Universe
+	symbols := []string {
+		"TLT", // 0: Bonds
+		"GLD", // 1: Gold
+		"XLU", // 2: Utilities
+		"SPY", // 3: Broad Market
+		"XLF", // 4: Financials
+		"XLI", // 5: Industrials
+		"XLK", // 6: Tech
+		"XLE", // 7: Energy
+		"XLY", // 8: Discretionary
+	}
+	n_assets := len(symbols)
+
+	// 1. Fetch Data
+	fmt.println("- Fetching historical data...")
+	prices := make([][]f64, n_assets, allocator)
+	defer {
+		for a in 0 ..< n_assets {if prices[a] != nil {delete(prices[a], allocator)}}
+		delete(prices, allocator)
+	}
+
+	n_time := 0
+	for a in 0 ..< n_assets {
+		df := net.read_yahoo(symbols[a], .Daily, .FiveYears, allocator)
+		if df.rows >= 252 {
+			close_col := w.column(&df, "Close")
+			prices[a] = make([]f64, df.rows, allocator)
+			for i in 0 ..< df.rows {prices[a][i], _ = w.column_at_float(close_col, i)}
+			if df.rows > n_time {n_time = df.rows}
+		}
+		w.destroy_dataframe(&df)
+	}
+
+	min_time := n_time
+	for a in 0 ..< n_assets {
+		if prices[a] != nil && len(prices[a]) < min_time {min_time = len(prices[a])}
+	}
+
+	// 2. Compute Monthly Returns
+	rebalance_days := 21
+	n_months := (min_time - 1) / rebalance_days
+	monthly_returns := l.matrix_new(f64, n_months, n_assets, allocator)
+	defer l.matrix_free(&monthly_returns)
+
+	m_idx := 0
+	for t in rebalance_days ..< min_time {
+		if t % rebalance_days == 0 && m_idx < n_months {
+			for a in 0 ..< n_assets {
+				monthly_returns.data[m_idx * n_assets + a] = math.ln_f64(
+					prices[a][t] / prices[a][t - rebalance_days],
+				)
+			}
+			m_idx += 1
+		}
+	}
+
+	// 3. Define Narrative Mandates (Boolean Masks)
+	safety_mask := make([]bool, n_assets, allocator)
+	safety_mask[0] = true // TLT
+	safety_mask[1] = true // GLD
+	safety_mask[2] = true // XLU
+
+	asp_mask := make([]bool, n_assets, allocator)
+	asp_mask[3] = true // SPY
+	asp_mask[4] = true // XLF
+	asp_mask[5] = true // XLI
+	asp_mask[6] = true // XLK
+
+	spec_mask := make([]bool, n_assets, allocator)
+	spec_mask[7] = true // XLE
+	spec_mask[8] = true // XLY
+
+	defer {delete(safety_mask, allocator); delete(asp_mask, allocator)
+		delete(spec_mask, allocator)}
+
+	// 4. Run BPT V2 Optimizer
+	fmt.println("- Optimizing Mandated Sleeves...")
+	combined, w_safety, w_asp, w_spec := bfin.bpt_optimize_v2(
+		&monthly_returns,
+		safety_mask,
+		asp_mask,
+		spec_mask,
+		0.40,
+		0.50,
+		0.10,
+		allocator,
+	)
+	defer {
+		delete(combined, allocator)
+		delete(w_safety, allocator)
+		delete(w_asp, allocator)
+		delete(w_spec, allocator)
+	}
+
+	// 5. Print the Mandated Pyramid
+	fmt.println("\n--- The Mandated Mental Accounting Pyramid ---")
+	fmt.printf(
+		"%-5s | %-10s | %-10s | %-10s | %-10s\n",
+		"Asset",
+		"Safety",
+		"Aspiration",
+		"Speculative",
+		"COMBINED",
+	)
+	fmt.println("------|------------|------------|-------------|-----------")
+	for a in 0 ..< n_assets {
+		fmt.printf(
+			"%-5s | %9.2f%% | %9.2f%% | %10.2f%% | %9.2f%%\n",
+			symbols[a],
+			w_safety[a] * 100.0,
+			w_asp[a] * 100.0,
+			w_spec[a] * 100.0,
+			combined[a] * 100.0,
+		)
+	}
+
+	// 6. Evaluate Combined Metrics
+	metrics := bfin.prospect_metrics(
+		combined,
+		&monthly_returns,
+		bfin.ProspectPortfolioParams{0.88, 0.88, 2.25, 0.0},
+	)
+
+	fmt.println("\n--- Combined Mandated Portfolio Metrics (Monthly) ---")
+	fmt.printf("Expected Return:   %+8.4f%%\n", metrics.expected_return * 100.0)
+	fmt.printf("Volatility:        %8.4f%%\n", metrics.volatility * 100.0)
+	fmt.printf("Loss Probability:  %8.2f%%\n", metrics.loss_probability * 100.0)
+	fmt.printf("Prospect Utility:  %8.4f\n", metrics.prospect_utility)
+
+	fmt.println("\n💡 Insight: V2 enforces human narrative boundaries.")
+	fmt.println("Tech is now strictly confined to Aspiration/Speculative,")
+	fmt.println(
+		"and Bonds are strictly confined to Safety, exactly as a human wealth manager would dictate.",
+	)
+
+	fmt.println("\n=== Behavioral Portfolio Theory V2 Test Complete ===\n")
+}
