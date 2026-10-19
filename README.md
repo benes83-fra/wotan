@@ -1,994 +1,303 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/benes83-fra/wotan/main/wotan%20logo.png" width="280" alt="Wotan Logo">
+  <img src="https://raw.githubusercontent.com/benes83-fra/wotan/main/wotan%20logo.png" width="240" alt="Wotan logo">
 </p>
 
-<h1 align="center">Wotan — High‑Performance DataFrame and Finance Engine for Odin</h1>
+<h1 align="center">Wotan</h1>
 
 <p align="center">
-A fast, expressive, allocator‑safe DataFrame and time‑series analytics and finance engine written in Odin.
+  DataFrames, statistics, machine learning and quantitative finance, written in <a href="https://odin-lang.org/">Odin</a>.
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
+  <img src="https://img.shields.io/badge/language-Odin-1e90ff.svg" alt="Odin">
+  <img src="https://img.shields.io/badge/status-active%20development-orange.svg" alt="Status: active development">
 </p>
 
 ---
 
-## 🚀 Features
+Wotan is a library for data analysis and quantitative finance in Odin. It started as a typed DataFrame and grew into a toolkit covering time series, classical ML, a small autograd and deep learning stack, and a large set of finance models. It has no Python runtime dependency. The only external library is libcurl, used for HTTP requests.
 
-### **DataFrame Engine**
-- Strongly typed columns (`Int`, `Float`, `String`, `Bool`, `Date`, `Time`, `Datetime`)
-- Row slicing (copy + view)
-- Column selection
-- Boolean filtering & mask algebra
-- Sorting (all types)
-- Expression engine (`select`, `apply`, `add`, `conv`, `mask_expr`)
-- GroupBy + aggregations
-- Joins (single‑key & multi‑key)
+> **Status:** Wotan covers a lot of ground, but it is still a work in progress. APIs can change between commits, documentation is thin in places, and some models have only been checked against the reference values in the test suite. Bug reports and feedback are very welcome.
 
-### **Classical Machine Learning**
-- Linear regression (OLS, WLS, GLS, Ridge, Lasso with CV)
-- Decision Trees, Random Forests, Gradient Boosting
-- Logistic Regression (binary + multiclass PCR)
-- KNN clustering, Gaussian Naive Bayes
-- Support Vector Machines (SVM, Kernel SVM SVR)
-- Metrics, Pipeline API, Grid/Random SearchCV
+## Contents
 
-### **Deep Learning**
-- Neural net primitives: Conv2D, Pooling, Dense, Dropout, BatchNorm
-- RNN family: Simple RNN, GRU, LSTM
-- Transformer architecture: multi-head attention, encoder/decoder, positional encoding
-- Pretrained-style models: GPT, BERT, character-level language model
-- Generative models: GAN, WGAN, VAE
-- Transfer learning utilities
-- Autograd engine (back-prop through matmul, mul, sum, ReLU, bias ops)
+- [Features](#features)
+- [Getting started](#getting-started)
+- [Examples](#examples)
+- [Project layout](#project-layout)
+- [Tests](#tests)
+- [Optional: pretrained weights](#optional-pretrained-weights)
+- [Limitations](#limitations)
+- [Contributing](#contributing)
+- [License](#license)
 
-### **Portfolio & Risk Analytics**
-- Portfolio construction with constraints
-- Risk decomposition and financial analytics
-- Monte Carlo simulation paths
-- Factor analysis
+## Features
 
-### **State‑Space Models**
-- Kalman filter
-- Kalman smoother (RTS)
-- Control models
-- Time‑varying Kalman
-- EKF, UKF + smoothing
+**Data handling** (`core`, `importer`, `exporter`)
+- Typed columns: `Int`, `Float`, `String`, `Bool`, `Date`, `Time`, `Datetime`
+- Slicing, column selection, sorting, boolean masks and filtering
+- Expression-based `select` (arithmetic, type conversion, custom procs)
+- GroupBy with aggregations; inner, left, right and outer joins on one or more keys
+- Read and write CSV, JSON, JSONL, HTML tables and Excel (`.xlsx`)
+- Date, time and datetime arithmetic
 
-### **Time-Series Analytics**
-- Rolling windows and rolling correlation/covariance matrices
-- Exponentially weighted statistics (EWM)
-- PCA & rolling PCA
-- ARIMA(p,d,q), ARMA(p,q), SARIMA
-- Residual diagnostics (ACF, PACF, Ljung‑Box, JB test)
-- Stationarity tests (ADF, KPSS)
+**Statistics and time series** (`analytics`, `linalg`)
+- Linear algebra: LU, QR, Cholesky, SVD and eigen decompositions, with SIMD kernels
+- Rolling and exponentially weighted statistics, rolling covariance and PCA
+- ARMA, ARIMA, SARIMA; GARCH and regime-switching GARCH
+- Diagnostics: ACF/PACF, Ljung–Box, Jarque–Bera, ADF, KPSS
+- Kalman filter and RTS smoother, EKF, UKF
 
-### **Plotters**
-- Line plots (single, multi-line, dashed/dotted)
-- Bar charts
-- Heatmaps
-- Confusion matrices
+**Machine learning** (`analytics/ML`)
+- OLS, WLS, GLS, Ridge, Lasso (with cross-validation)
+- Logistic regression, naive Bayes, KNN, k-means
+- Decision trees, random forests, gradient boosting
+- SVM, kernel SVM, SVR
+- Pipelines, grid and random search, metrics, model serialization
 
-### **Importers / Exporters**
-- CSV, JSON, JSONL
-- HTML tables
-- Excel (.xlsx)
-- ZIP utilities
+**Deep learning** (`tensor`, `nn`, `optimize`)
+- Reverse-mode autograd on tensors
+- Dense, Conv2D, pooling, dropout, batch norm, RNN/GRU/LSTM
+- Transformers (encoder/decoder, multi-head and flash attention), GPT and BERT style models, mixture-of-experts, Mamba
+- GAN, WGAN, VAE; BPE and WordPiece tokenizers
+- SGD, Adam, RMSProp, L-BFGS and learning-rate schedulers
 
-### **Yahoo Finance Ingestion**
-- Historical prices
-- Dividends
-- Splits
-- Event alignment
-## 💰 `ml_finance`: Machine Learning for Quantitative Finance
+**Quantitative finance** (`finance`, `ml_finance`, `behavioral_finance`)
+- European, American (LSM) and exotic options; Greeks computed with autograd; implied volatility and volatility surfaces
+- Bonds, yield curves, swaps, interest-rate, FX and credit derivatives, CDS bootstrapping
+- Portfolio optimisation with constraints, HRP, risk decomposition, VaR, factor models, backtesting
+- Monte Carlo simulation, copulas, fractional Brownian motion
+- ML methods for finance: deep hedging, deep BSDE, DeepLOB, TimeGAN, PPO and CQL agents, Kalman pairs trading, HMM regimes, neural SDF, event studies
+- Behavioural finance: prospect theory, anchoring, behavioural portfolio theory
 
-Wotan includes a **comprehensive ML library for finance**, with **zero Python dependencies**:
+**Data sources and output** (`net`, `plot`)
+- Yahoo Finance prices, dividends, splits and option chains
+- PNG charts: line, multi-line, scatter, histogram, bar and heatmap
 
-### 🎯 Core Features
-   Feature | Description | Use Case |
- |---------|-------------|----------|
- | **Deep Hedging** | Neural network-based optimal hedging | Hedge options, futures, or portfolios |
- | **Deep BSDE** | Solve high-dimensional PDEs | Price exotic options (100D+) |
- | **DeepLOB** | Limit Order Book modeling | Predict price movements |
- | **TimeGAN** | Time-series data generation | Synthetic data for testing |
- | **PPO** | Reinforcement Learning | Train trading agents |
- | **Kalman Pairs** | Pairs trading with Kalman Filters | Trade correlated assets |
- | **Sentiment** | BERT-based text analysis | Classify financial news |
- | **Event Study** | Cumulative Abnormal Returns | Measure event impact |
- | **Metrics** | Quant finance metrics | Evaluate strategies (Rank IC, Sharpe, etc.) |
+## Getting started
 
-### 🚀 Quick Start
-```odin
-import ml_fin "../wotan/ml_finance"
+### Requirements
 
-// Example: Deep Hedging
-config := ml_fin.DeepHedgerConfig{...}
-hedger := ml_fin.deep_hedger_new(config, context.allocator)
-ml_fin.deep_hedger_train(hedger, &paths, &payoffs, 100, 0.001, context.allocator)
----
-```
-Wotan is very lean so far, apart from libcurl for webrequest there are no external dependencies
+- A recent [Odin](https://odin-lang.org/docs/install/) compiler
+- libcurl, used through Odin's `vendor:curl` package. It is only needed for the `net` package (Yahoo Finance and HTTP).
 
-## 📦 Installation
+### Build and run
 
 ```sh
 git clone https://github.com/benes83-fra/wotan
+cd wotan
 
-
+odin run . -debug          # runs main.odin; debug builds report memory leaks
 ```
 
-## 📖 Examples
+`main.odin` is the demo and test driver. Comment calls in or out there to choose which examples run.
 
-### Create a DataFrame
+To build Wotan as a library:
 
-```odin
-import w "../wotan/core"
-
-df := w.dataframe_new()
-
-col_age  := w.column_new("age", .Int, 4)
-col_name := w.column_new("name", .String, 4)
-
-w.append_int(&col_age, 10)
-w.append_string(&col_name, "Hubert")
-
-w.append_int(&col_age, 20)
-w.append_string(&col_name, "Anna")
-
-w.append_int(&col_age, 30)
-w.append_string(&col_name, "Markus")
-
-w.append_int(&col_age, 40)
-w.append_string(&col_name, "Julia")
-
-w.add_column(&df, col_age)
-w.add_column(&df, col_name)
-
-w.dataframe_pretty_print(&df, 10)
+```sh
+odin build . -o:speed -build-mode:static
+odin build . -o:speed -build-mode:dynamic
 ```
 
-### Filter rows with boolean masks
+`makeall.sh` and `makeall.bat` build all three variants.
+
+### Using Wotan in your project
+
+Wotan is a set of ordinary Odin packages. Copy or submodule the `wotan/` directory and import the packages you need:
 
 ```odin
-// Show only rows where age < 31 and active == true
-df := csv.csv_load("people_dates.csv")
+import w     "wotan/core"
+import io    "wotan/importer"
+import ts    "wotan/analytics"
+import fin   "wotan/finance"
+import net   "wotan/net"
+```
 
-m1 := w.mask_lt(w.column(&df, "age"), 31)
-m2 := w.column_mask(w.column(&df, "active"))
+## Examples
+
+The examples below are shortened. Every one of them has a complete, runnable version in [`tests/`](tests/).
+
+### DataFrames: load, filter, group, join
+
+```odin
+df := io.csv_load("people_dates.csv")            // column types are inferred
+defer w.destroy_dataframe(&df)
+
+// Filter: age < 31 AND active
+m1   := w.mask_lt(w.column(&df, "age"), 31)
+m2   := w.column_mask(w.column(&df, "active"))
 mask := w.and(m1, m2)
-
 young_active := w.wobei(&df, mask)
 w.dataframe_pretty_print(&young_active, 10)
 
-delete(mask); delete(m1); delete(m2)
-```
-
-### Expressions: add, convert, and compute
-
-```odin
-exprs := []w.Select_Expr {
-    w.col_expr("age",           w.column(&df, "age")),
-    w.add_expr("age_plus_10",  w.column(&df, "age"), 10),
-    w.apply_expr("upper_name", w.column(&df, "name"), proc(s: string) -> string {
-        return strings.to_upper(s, context.temp_allocator)
-    }),
-    w.div_expr("salary_k",     w.column(&df, "salary"), 1000),
-    w.conv_int_to_f64_expr("age_f64", w.column(&df, "age")),
-}
-
-result := w.select(&df, exprs)
-w.dataframe_pretty_print(&result, 10)
-
-w.free_select_exprs(exprs) // or defer on the slice
-```
-
-### GroupBy + aggregation
-
-```odin
+// Group by age and aggregate salary
 gdf := w.groupby(&df, []string{"age"})
-agg := []w.Agg_Expr {
+out := w.agg(&gdf, []w.Agg_Expr{
     w.count("n"),
     w.sum_agg("total_salary", w.column(&df, "salary")),
     w.avg_agg("avg_salary",   w.column(&df, "salary")),
-}
-
-out := w.agg(&gdf, agg)
+})
 w.dataframe_pretty_print(&out, 10)
-
-w.destroy_grouped_dataframe(&gdf)
-w.destroy_dataframe(&out)
 ```
 
-### Join two dataframes
+Joins work on one or more keys:
 
 ```odin
-people := df_from(
-    column_from_ints("id",      []int{1, 2, 3}),
-    column_from_strings("name", []string{"Alice", "Bob", "Charlie"}),
-    column_from_ints("age",     []int{30, 20, 40}),
+people := w.df_from(
+    w.column_from_ints("id",      []int{1, 2, 3}),
+    w.column_from_strings("name", []string{"Alice", "Bob", "Charlie"}),
+)
+salary := w.df_from(
+    w.column_from_ints("id",       []int{1, 2, 4}),
+    w.column_from_floats("salary", []f64{50000, 42000, 90000}),
 )
 
-salary := df_from(
-    column_from_ints("id",     []int{1, 2, 4}),
-    column_from_floats("salary", []f64{50000.0, 42000.0, 90000.0}),
-)
-
-joined := w.join(&people, &salary, []string{"id"}, .Outer, context.temp_allocator)
+joined := w.join(&people, &salary, []string{"id"}, .Outer)
 w.dataframe_pretty_print(&joined, 10)
 ```
 
-### Multi-key join
+### Option pricing with Greeks from autograd
+
+Greeks are computed by differentiating the pricing graph, not by finite differences.
 
 ```odin
-left := df_from(
-    column_from_ints("id",     []int{1, 1, 2}),
-    column_from_strings("dept", []string{"10", "20", "10"}),
-    column_from_strings("name", []string{"Alice", "Bob", "Carol"}),
-)
-
-right := df_from(
-    column_from_ints("id",      []int{1, 2}),
-    column_from_strings("dept",  []string{"10", "10"}),
-    column_from_floats("salary",[]f64{50000.0, 60000.0}),
-)
-
-joined := w.join(&left, &right, []string{"id", "dept"}, .Inner, context.temp_allocator)
-w.dataframe_pretty_print(&joined, 10)
-```
-
-### Load CSV / JSON / Excel
-
-```odin
-// From CSV (type list required)
-types := []w.ColumnType{.Int, .String, .Float}
-df := csv.csv_load("data.csv", types)
-
-// From JSON / JSONL
-jdf := json.load("data.json")
-jldf := jsonl.load("data.jsonl")
-
-// From Excel
-edf := excel.read("data.xlsx")
-```
-
-### Time Series: ARIMA fit & forecast
-
-```odin
-model := ana.arima_fit(df, "Close", .P(1), .D(0), .Q(1))
-forecast := ana.arima_forecast(&model, 5)
-for i, v in forecast {
-    fmt.printf("Step %d: %f\n", i, v)
-}
-```
-
-### Date & datetime math
-
-```odin
-date1 := w.Date{2020, 2, 7}
-date2 := w.Date{2024, 2, 6}
-days_between := w.get_date_day_diffs(date1, date2)
-
-// Add months / days
-d := w.add_month_date(date1, -7)
-d = w.add_day_date(d, 30)
-
-// Time of day
-t := w.Time{16, 2, 58}
-t = w.add_seconds_time(t, -600)
-
-// Full datetime
-dt := w.Datetime{1983, 7, 20, 13, 13, 13}
-dt = w.add_hours_datetime(dt, -49)
-```
-
-### Yahoo Finance ingestion
-
-```odin
-df := net.yahoo_load("AAPL", .Daily, .TenYears)
-sorted := w.dataframe_sort(&df, "Close", true)
-w.df_head(&sorted, 10)
-```
-
-## GARCH (1,1)
-```odin
-// Generate synthetic GARCH(1,1) returns
-n := 1000
-returns := make([]f64, n, context.allocator)
-true_omega := 0.00001
-true_alpha := 0.1
-true_beta := 0.85
-
-// Initialize variance
-cond_var := make([]f64, n, context.temp_allocator)
-cond_var[0] = true_omega / (1.0 - true_alpha - true_beta)
-
-// Generate returns with Box-Muller transform
-for i in 1 ..< n {
-    cond_var[i] = true_omega + true_alpha * returns[i-1]^2 + true_beta * cond_var[i-1]
-    std_dev := math.sqrt(cond_var[i])
-    z := math.sqrt(-2.0 * math.ln(rand.float64())) * math.cos(2.0 * math.PI * rand.float64())
-    returns[i] = z * std_dev
-}
-
-// Fit GARCH(1,1) model
-result := ts.garch_fit(returns, .GARCH, 1, 1, 1000, 1e-6, context.allocator)
-fmt.printf("GARCH(1,1): ω=%.6f, α=%.4f, β=%.4f (α+β=%.4f)\n",
-    result.params.omega, result.params.alpha[0], result.params.beta[0],
-    result.params.alpha[0] + result.params.beta[0])
-
-// Forecast volatility
-forecast := ts.garch_forecast(&result, returns, 5, context.allocator)
-fmt.printf("5-day volatility forecast: σ²=%.6f, σ=%.6f\n",
-    forecast.variance_forecast, forecast.std_forecast)
-
-```
-##  Automatic Differentiation (Autograd)
-```odin
-// Create tensors
-A := t.tensor_new(l.matrix_from_f64([[1, 2], [3, 4]]), true, context.allocator)
-B := t.tensor_new(l.matrix_from_f64([[5, 6], [7, 8]]), true, context.allocator)
-
-// Build computation graph: C = A + B
-C := t.tensor_add(A, B)
-
-// Backward pass
-t.tensor_backward(C)
-
-// Check gradients (dC/dA = 1, dC/dB = 1)
-fmt.println("Gradient of A (should be all 1.0s):")
-for i in 0 ..< 2 {
-    for j in 0 ..< 2 {
-        fmt.printf("%.1f ", A.grad.data[i * 2 + j]) // Output: 1.0 1.0
-    }
-    fmt.println()
-}
-
-// Matrix multiplication: D = A * B
-D := t.tensor_matmul(A, B)
-t.tensor_backward(D) // Gradients automatically computed!
-```
-
-##  BERT Model (Transformer from Scratch)
-```odin
-// Build vocabulary
-vocab := make(map[u8]int, context.allocator)
-vocab['['] = 0  // CLS_TOKEN
-vocab[']'] = 1  // SEP_TOKEN
-vocab['_'] = 2  // MASK_TOKEN
-// Add characters from training text...
-
-// Create BERT model
-model := nn.bert_model_new(
-    vocab_size=256,
-    d_model=64,
-    num_heads=4,
-    d_ff=256,
-    num_layers=2,
-    max_seq_len=32,
-    context.allocator,
-)
-
-// Training loop
-for epoch in 0 ..< 2500 {
-    nn.adam_zero_grad(&optimizer)
-    loss := nn.bert_forward(&model, input_ids, segment_ids)
-    t.tensor_backward(loss)
-    nn.adam_step(&optimizer)
-    if epoch % 100 == 0 {
-        fmt.printf("Epoch %d: Loss = %.4f\n", epoch, loss.data[0])
-    }
-}
-```
-##   ARIMA Time Series Modeling
-```odin
-// Generate synthetic ARMA(1,1) data
-phi := []f64{0.7}
-theta := []f64{0.4}
-sigma2 := 0.1
-T := 400
-
-y := make([]f64, T, context.allocator)
-for t in 1 ..< T {
-    e := rand.float64_normal(0.0, math.sqrt(sigma2))
-    y[t] = phi[0] * y[t-1] + e + theta[0] * (y[t-1] - phi[0] * y[t-2])
-}
-
-// Fit ARIMA(1,0,1)
-fit := analytic.arima_fit(y, 1, 0, 1, context.allocator)
-fmt.printf("ARIMA(1,0,1): φ=%.3f, θ=%.3f, σ²=%.3f\n",
-    fit.phi[0], fit.theta[0], fit.sigma2)
-
-// Forecast 20 steps ahead
-forecast := analytic.arima_forecast(y, fit, 1, 0, 1, 20, 0.05, context.allocator)
-for i in 0 ..< 5 {
-    fmt.printf("t+%d: mean=%.3f [%.3f, %.3f]\n", i+1,
-        forecast.mean[i], forecast.lower[i], forecast.upper[i])
-}
-```
-##  Support Vector Machines (SVM)
-```odin
-n := 100
-X := l.matrix_new(f64, n, 2, allocator)
-y := make([]f64, n, allocator)
-
-for i in 0 ..< n {
-    x0 := rand.float64_normal(0, 1)
-    x1 := rand.float64_normal(0, 1)
-    X.data[i * 2 + 0] = x0
-    X.data[i * 2 + 1] = x1
-    // XOR pattern: +1 if x0*x1 > 0, else -1
-    tmp: f64
-    if x0 + x1 > 0 {
-        tmp = 1.0
-    } else {
-        tmp = -1.0
-    }
-    y[i] = tmp
-}
-
-params := ml.KernelSVMParams {
-    C             = 10.0,
-    gamma         = 1.0, // RBF width
-    kernel_type   = .RBF,
-    max_iter      = 500,
-    tol           = 1e-3,
-    learning_rate = 0.01,
-}
-
-model := ml.kernel_svm_fit(&X, y, params, allocator)
-defer ml.kernel_svm_free(&model)
-
-fmt.printf(
-    "Kernel SVM: %v support vectors, bias=%.3f\n",
-    len(model.support_vectors),
-    model.bias,
-)
-
-// Predict on training data
-preds := ml.kernel_svm_predict(&model, &X, allocator)
-defer delete(preds, allocator)
-
-// Compute accuracy
-correct := 0
-for i in 0 ..< n {
-    tmp: f64
-    if preds[i] > 0 {
-        tmp = 1.0
-    } else {
-        tmp = -1.0
-    }
-    pred_class := tmp
-    if pred_class == y[i] {correct += 1}
-}
-accuracy := f64(correct) / f64(n)
-fmt.printf("Training accuracy (RBF kernel): %.2f%%\n", accuracy * 100)
-```
-
-## Q-Learning
-```odin
-df := net.read_yahoo("AAPL", .Daily, .OneYear, allocator)
-defer w.destroy_dataframe(&df)
-
-if df.rows == 0 {
-    fmt.println("Aborting test due to empty DataFrame.")
-    return
-}
-
-fmt.printf("✓ Successfully loaded %d days of OHLCV data.\n", df.rows)
-
-fmt.println("Building CQL dataset from OHLCV features...")
-states, actions, rewards, next_states, dones := build_cql_dataset_from_ohlcv(&df, allocator)
-defer t.tensor_free(states)
-defer t.tensor_free(next_states)
-defer t.tensor_free(rewards)
-defer t.tensor_free(dones)
-defer delete(actions, allocator)
-
-if states == nil {
-    fmt.println("Error: Failed to build CQL dataset.")
-    return
-}
-
-batch_size := states.shape[0]
-fmt.printf("Dataset size: %d steps\n", batch_size)
-
-// 1. CQL Configuration
-config := ml_fin.CQLConfig {
-    state_dim   = 3,
-    num_actions = 3,
-    hidden_dim  = 32,
-    gamma       = 0.95,
-    alpha       = 1.0, // Conservative penalty weight
-}
-
-// 2. Initialize Q-Networks
-q_net := ml_fin.cql_network_new(config, allocator)
-defer ml_fin.cql_network_free(&q_net)
-
-// 3. Optimizer
-opt := nn.adam_new(0.003, allocator = allocator)
-defer nn.adam_free(&opt)
-
-nn.adam_add_param(&opt, q_net.fc1.weights)
-nn.adam_add_param(&opt, q_net.fc1.bias)
-nn.adam_add_param(&opt, q_net.fc2.weights)
-nn.adam_add_param(&opt, q_net.fc2.bias)
-
-fmt.println("\nStarting Offline CQL Training on Real AAPL Data...")
-fmt.println("Epoch | Total Loss | TD Loss  | CQL Reg  | Status")
-fmt.println("------|------------|----------|----------|-------------------------")
-
-epochs := 50
-
-for epoch := 0; epoch < epochs; epoch += 1 {
-    nn.adam_zero_grad(&opt)
-
-    q_values := ml_fin.cql_network_forward(&q_net, states)
-    next_q_values := ml_fin.cql_network_forward(&q_net, next_states)
-
-    loss, td_val, cql_val := ml_fin.cql_loss(
-        q_values,
-        actions,
-        rewards,
-        next_q_values,
-        dones,
-        config,
-        allocator,
-    )
-
-    t.tensor_backward(loss)
-    nn.adam_step(&opt)
-
-    total_loss_val := loss.data.data[0]
-
-    status := ""
-    if epoch == 0 {
-        status = "(Initial)"
-    } else if total_loss_val < 2.0 {
-        status = "(Converging)"
-    }
-
-    fmt.printf(
-        " %3d  | %.5f    | %.5f | %.5f | %s\n",
-        epoch + 1,
-        total_loss_val,
-        td_val,
-        cql_val,
-        status,
-    )
-
-    t.tensor_free_graph(loss)
-}
-```
-
-## Alternative Data
-```odin
-symbol := "AAPL"
-fmt.printf("Target Asset: %s\n", symbol)
-
-// 1. Get Finnhub API Key
-api_key := os.get_env("FINNHUB_API_KEY", allocator)
-text: string
-
-if api_key != "" {
-    now := w.now()
-    to_date_str := fmt.tprintf("%04d-%02d-%02d", now.year, int(now.month), now.day)
-
-    // Subtract 30 days safely
-    thirty_days_ago := w.add_day_datetime(now, -30)
-    from_date_str := fmt.tprintf(
-        "%04d-%02d-%02d",
-        thirty_days_ago.year,
-        int(thirty_days_ago.month),
-        thirty_days_ago.day,
-    )
-
-    url := fmt.aprintf(
-        "https://finnhub.io/api/v1/company-news?symbol=%s&from=%s&to=%s&token=%s",
-        symbol,
-        from_date_str,
-        to_date_str,
-        api_key,
-        allocator = context.temp_allocator,
-    )
-
-    response, ok := net.http_get(url, context.temp_allocator)
-    if ok {
-        text = response
-    }
-
-    // ✅ CRITICAL FIX: Strip UTF-8 BOM if present.
-    // This is the #1 cause of "Unexpected_Token" errors in Odin's JSON parser.
-    if len(text) >= 3 && text[0] == 0xEF && text[1] == 0xBB && text[2] == 0xBF {
-        text = text[3:]
-    }
-
-    trimmed_text := strings.trim_space(text)
-
-
-} 
-
-// 2. Parse the JSON data
-root, err := json.parse_string(text, json.DEFAULT_SPECIFICATION, true, allocator)
-if err != .None {
-    fmt.printf("ERROR: Failed to parse JSON: %v\n", err)
-    fmt.println(
-        "Hint: If the API returned an error message, the pipeline will fall back to mock data next time.",
-    )
-    return
-}
-
-// Extract sentiment scores and timestamps
-NewsItem :: struct {
-    datetime:  i64,
-    sentiment: f64,
-}
-items := make([dynamic]NewsItem, 0, allocator)
-
-#partial switch val in root {
-case json.Array:
-    for item in val {
-        #partial switch v in item {
-        case json.Object:
-            dt: i64 = 0
-            sent: f64 = 0.0
-            for key, v2 in v {
-                if key == "datetime" {
-                    #partial switch v3 in v2 {
-                    case json.Integer:
-                        dt = v3
-                    }
-                } else if key == "sentiment" {
-                    #partial switch v3 in v2 {
-                    case json.Float:
-                        sent = v3
-                    case json.Integer:
-                        sent = f64(v3)
-                    }
-                }
-            }
-            if dt > 0 {
-                append(&items, NewsItem{datetime = dt, sentiment = sent})
-            }
-        }
-    }
-}
-
-
-// 3. Fetch Yahoo Finance Price Data
-fmt.println("\n2. Fetching Yahoo Finance Price Data...")
-df_yahoo := net.read_yahoo(symbol, .Daily, .OneYear, allocator)
-defer w.destroy_dataframe(&df_yahoo)
-fmt.printf("Fetched %d rows of price data\n", df_yahoo.rows)
-
-// 4. Align Data (Group sentiment by day and align with daily returns)
-fmt.println("\n3. Aligning Sentiment with Daily Returns...")
-
-// Create a map of date -> average sentiment
-sentiment_by_date := make(map[i64]f64, allocator)
-count_by_date := make(map[i64]int, allocator)
-
-for item in items {
-    sentiment_by_date[item.datetime] += item.sentiment
-    count_by_date[item.datetime] += 1
-}
-
-// For this mock/demo, we will just use the parsed items directly aligned with mock returns
-// to prove the Random Forest pipeline works end-to-end.
-n_samples := len(items)
-X_data := l.matrix_new(f64, n_samples, 1, allocator)
-y_data := make([]f64, n_samples, allocator)
-
-for item, i in items {
-    avg_sent := sentiment_by_date[item.datetime] / f64(count_by_date[item.datetime])
-    X_data.data[i] = avg_sent
-
-    // Mock return: positive sentiment slightly correlates with positive return
-    // plus some random noise
-    y_data[i] = (avg_sent * 0.01) + (rand.float64_normal(0.0, 0.02))
-}
-
-// 5. Train Random Forest Model
-fmt.println("\n4. Training Random Forest Model...")
-split_idx := max(10, int(f64(n_samples) * 0.8))
-
-X_train := l.matrix_new(f64, split_idx, 1, allocator)
-y_train := make([]f64, split_idx, allocator)
-
-test_size := n_samples - split_idx
-X_test := l.matrix_new(f64, test_size, 1, allocator)
-y_test := make([]f64, test_size, allocator)
-
-for i in 0 ..< split_idx {
-    X_train.data[i] = X_data.data[i]
-    y_train[i] = y_data[i]
-}
-for i in 0 ..< test_size {
-    X_test.data[i] = X_data.data[split_idx + i]
-    y_test[i] = y_data[split_idx + i] // Corrected indexing
-}
-
-rf_params := ml.RFParams {
-    n_trees     = 50,
-    max_depth   = 5,
-    min_samples = 5,
-    bootstrap   = true,
-}
-
-model := ml.rf_fit(&X_train, y_train, rf_params, allocator)
-defer ml.rf_free(&model)
-fmt.println("   Model trained successfully")
-
-// 6. Inference & Backtest
-fmt.println("\n5. Running Inference & Backtest...")
-predictions := ml.rf_predict(&model, &X_test, allocator)
-defer delete(predictions, allocator)
-
-strategy_returns := make([]f64, test_size, allocator)
-defer delete(strategy_returns, allocator)
-
-correct_direction := 0
-for i in 0 ..< test_size {
-    if predictions[i] > 0.0 {
-        strategy_returns[i] = y_test[i]
-        if y_test[i] > 0.0 {
-            correct_direction += 1
-        }
-    } else {
-        strategy_returns[i] = 0.0
-    }
-}
-
-sharpe := fin.sharpe_ratio_from_returns(strategy_returns, 0.0, 252.0)
-accuracy := f64(correct_direction) / f64(test_size) * 100.0
-
-fmt.printf("   Directional Accuracy: %.2f%%\n", accuracy)
-fmt.printf("   Annualized Sharpe Ratio: %.3f\n", sharpe)
-
-// Cleanup
-l.matrix_free(&X_data)
-delete(y_data, allocator)
-l.matrix_free(&X_train)
-delete(y_train, allocator)
-l.matrix_free(&X_test)
-delete(y_test, allocator)
-delete(strategy_returns, allocator)
-```
-
-## Analytical Option Pricing with Autograd
-```odin
-fmt.println("\n=== Derivatives Pricing Test ===\n")
-
-// ====================================================================
-// Test 1: Black-Scholes Pricing (known values)
-// ====================================================================
-fmt.println("--- Test 1: Black-Scholes Pricing ---")
-
-// Standard test case: S=100, K=100, T=1, r=5%, σ=20%
 S, K, T, r, sigma := 100.0, 100.0, 1.0, 0.05, 0.20
 
-call_price, call_greeks := fin.price_and_greeks(S, K, T, r, sigma, .Call, allocator)
-put_price, put_greeks := fin.price_and_greeks(S, K, T, r, sigma, .Put, allocator)
+price, g := fin.price_and_greeks(S, K, T, r, sigma, .Call)
+fmt.printf("price=%.4f  delta=%.4f  gamma=%.4f  vega=%.4f\n",
+    price, g.delta, g.gamma, g.vega)
+// price=10.4506  delta=0.6368  gamma=0.0188  vega=0.3752
 
-fmt.printf("ATM Call (S=100, K=100, T=1, r=5%%, σ=20%%):\n")
-fmt.printf("  Price: %.4f  (expected ~10.4506)\n", call_price)
-fmt.printf("  Delta: %.4f  (expected ~0.6368)\n", call_greeks.delta)
-fmt.printf("  Gamma: %.4f  (expected ~0.0187)\n", call_greeks.gamma)
-fmt.printf("  Vega:  %.4f  (expected ~0.1870 per 1%%)\n", call_greeks.vega)
-fmt.printf("  Theta: %.4f  (expected ~-0.0163 per day)\n", call_greeks.theta)
-fmt.printf("  Rho:   %.4f  (expected ~0.0532 per 1%%)\n", call_greeks.rho)
-
-fmt.printf("\nATM Put:\n")
-fmt.printf("  Price: %.4f  (expected ~5.5735)\n", put_price)
-fmt.printf("  Delta: %.4f  (expected ~-0.3632)\n", put_greeks.delta)
-
-// Put-Call Parity check: C - P = S - K*exp(-r*T)
-pcp_rhs := S - K * math.exp(-r * T)
-pcp_lhs := call_price - put_price
-fmt.printf("\nPut-Call Parity:\n")
-fmt.printf("  C - P = %.4f\n", pcp_lhs)
-fmt.printf("  S - K*exp(-rT) = %.4f\n", pcp_rhs)
-fmt.printf("  Error: %.2e\n", math.abs(pcp_lhs - pcp_rhs))
-
-// ====================================================================
-// Test 2: Moneyness (ITM, ATM, OTM)
-// ====================================================================
-fmt.println("\n--- Test 2: Moneyness ---")
-
-strikes := []f64{80.0, 90.0, 100.0, 110.0, 120.0}
-labels := []string{"ITM", "ITM", "ATM", "OTM", "OTM"}
-
-fmt.printf(
-    "  %-5s  K=%-6s  Call=%-10s  Put=%-10s  CallΔ=%-8s  PutΔ=%-8s\n",
-    "Type",
-    "Strike",
-    "Price",
-    "Price",
-    "Delta",
-    "Delta",
-)
-
-for i in 0 ..< len(strikes) {
-    cp, cg := fin.price_and_greeks(S, strikes[i], T, r, sigma, .Call, allocator)
-    pp, pg := fin.price_and_greeks(S, strikes[i], T, r, sigma, .Put, allocator)
-    fmt.printf(
-        "  %-5s  K=%-6.0f  Call=%-10.4f  Put=%-10.4f  CallΔ=%-8.4f  PutΔ=%-8.4f\n",
-        labels[i],
-        strikes[i],
-        cp,
-        pp,
-        cg.delta,
-        pg.delta,
-    )
-}
-
-// ====================================================================
-// Test 3: Implied Volatility
-// ====================================================================
-fmt.println("\n--- Test 3: Implied Volatility ---")
-
-// Given a market price, find the implied vol
-market_call := 10.45 // approximately ATM call price
-iv, converged, iters := fin.implied_volatility(market_call, S, K, T, r, .Call, allocator)
-
-fmt.printf("  Market Call Price: %.2f\n", market_call)
-fmt.printf("  Implied Vol:       %.4f (%.2f%%)\n", iv, iv * 100)
-fmt.printf("  Converged:         %v in %d iterations\n", converged, iters)
-
-// Verify: price at implied vol should match market price
-verify_price, _ := fin.price_and_greeks(S, K, T, r, iv, .Call, allocator)
-fmt.printf(
-    "  Verify Price:      %.4f (error: %.2e)\n",
-    verify_price,
-    math.abs(verify_price - market_call),
-)
-
-// Test with different market prices
-fmt.println("\n  Vol Surface Scan:")
-test_prices := []f64{5.0, 8.0, 10.45, 13.0, 16.0}
-for mp in test_prices {
-    iv2, conv2, it2 := fin.implied_volatility(mp, S, K, T, r, .Call, allocator)
-    fmt.printf(
-        "    Market=%.2f  →  IV=%.4f (%.2f%%)  [%v in %d iter]\n",
-        mp,
-        iv2,
-        iv2 * 100,
-        conv2,
-        it2,
-    )
-}
-
-
-// ====================================================================
-// Test 4: Greeks Sanity Checks (with CORRECT expectations)
-// ====================================================================
-fmt.println("\n--- Test 4: Greeks Sanity Checks ---")
-
-cg := fin.compute_greeks(S, K, T, r, sigma, .Call, allocator)
-pg := fin.compute_greeks(S, K, T, r, sigma, .Put, allocator)
-
-// Call delta should be in (0, 1)
-fmt.printf("  Call delta in (0,1): %v (%.4f)\n", cg.delta > 0 && cg.delta < 1, cg.delta)
-
-// Put delta should be in (-1, 0)
-fmt.printf("  Put delta in (-1,0): %v (%.4f)\n", pg.delta < 0 && pg.delta > -1, pg.delta)
-
-// Call delta - Put delta ≈ 1 (put-call parity for deltas)
-delta_diff := cg.delta - pg.delta
-fmt.printf(
-    "  CallΔ - PutΔ ≈ 1:  %v (%.4f)\n",
-    math.abs(delta_diff - 1.0) < 0.01,
-    delta_diff,
-)
-
-// Gamma should be positive and same for call/put
-fmt.printf("  Gamma > 0:          %v (%.4f)\n", cg.gamma > 0, cg.gamma)
-fmt.printf(
-    "  Call γ ≈ Put γ:     %v (diff: %.2e)\n",
-    math.abs(cg.gamma - pg.gamma) < 1e-6,
-    math.abs(cg.gamma - pg.gamma),
-)
-
-// Vega should be positive and same for call/put
-fmt.printf("  Vega > 0:           %v (%.4f)\n", cg.vega > 0, cg.vega)
-fmt.printf(
-    "  Call ν ≈ Put ν:     %v (diff: %.2e)\n",
-    math.abs(cg.vega - pg.vega) < 1e-6,
-    math.abs(cg.vega - pg.vega),
-)
-
-// Theta should be NEGATIVE for long calls (time decay)
-fmt.printf("  Call theta < 0:     %v (%.4f per day)\n", cg.theta < 0, cg.theta)
-fmt.printf("  Put theta < 0:      %v (%.4f per day)\n", pg.theta < 0, pg.theta)
-
-// Verify against closed-form BS Greeks
-fmt.println("\n--- Verification Against Closed-Form BS ---")
-inv_sqrt_2pi := 0.3989422804014327
-sqrt_T := math.sqrt(T)
-d1 := (math.ln_f64(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * sqrt_T)
-d2 := d1 - sigma * sqrt_T
-phi_d1 := math.exp_f64(-0.5 * d1 * d1) * inv_sqrt_2pi
-
-bs_delta := norm_cdf(d1)
-bs_gamma := phi_d1 / (S * sigma * sqrt_T)
-bs_vega := S * phi_d1 * sqrt_T / 100.0 // per 1% move
-bs_rho := K * T * math.exp(-r * T) * norm_cdf(d2) / 100.0 // per 1% move
-
-fmt.printf("  %-8s  %-12s  %-12s  %-10s\n", "Greek", "Autograd", "Closed-Form", "Error")
-fmt.printf(
-    "  %-8s  %-12.6f  %-12.6f  %.2e\n",
-    "Delta",
-    cg.delta,
-    bs_delta,
-    math.abs(cg.delta - bs_delta),
-)
-fmt.printf(
-    "  %-8s  %-12.6f  %-12.6f  %.2e\n",
-    "Gamma",
-    cg.gamma,
-    bs_gamma,
-    math.abs(cg.gamma - bs_gamma),
-)
-fmt.printf(
-    "  %-8s  %-12.6f  %-12.6f  %.2e\n",
-    "Vega",
-    cg.vega,
-    bs_vega,
-    math.abs(cg.vega - bs_vega),
-)
-fmt.printf(
-    "  %-8s  %-12.6f  %-12.6f  %.2e\n",
-    "Rho",
-    cg.rho,
-    bs_rho,
-    math.abs(cg.rho - bs_rho),
-)
-fmt.println("\n✓ Derivatives test completed!")
+iv, converged, iters := fin.implied_volatility(10.45, S, K, T, r, .Call)
+fmt.printf("implied vol=%.4f (converged=%v after %d iterations)\n", iv, converged, iters)
 ```
 
-### 🧪 Tests
-- GroupBy
-- Rolling windows
-- PCA
-- EWM
-- Kalman filters
-- ARIMA / SARIMA
-- Stationarity tests
-- JSON / HTML / Excel importers
-- Yahoo Finance ingestion
-and many many more
+See `tests/american_options_test.odin`, `tests/exotic_pricing_test.odin` and `tests/vol_surface_test.odin` for more.
 
-## Run
-```sh
-odin run . -debug 
+### Market data and volatility forecasting
 
+```odin
+df := net.read_yahoo("AAPL", .Daily, .FiveYears)
+defer w.destroy_dataframe(&df)
+
+// ...compute log returns from the "Close" column...
+
+fit := ts.garch_fit(returns, .GARCH, p = 1, q = 1)
+fmt.printf("omega=%.6f alpha=%.4f beta=%.4f\n",
+    fit.params.omega, fit.params.alpha[0], fit.params.beta[0])
+
+fc := ts.garch_forecast(&fit, returns, horizon = 5)
+fmt.printf("5-day vol forecast: %.4f\n", fc.std_forecast)
 ```
 
-## Build - Executeable and Libraries
-```sh
-odin build . 
+ARIMA works the same way and returns prediction intervals:
 
-
-odin build . -build_mode:static
-
-odin build . -build_mode:dynamic
-
+```odin
+fit := ts.arima_fit(y, 1, 0, 1)
+fc  := ts.arima_forecast(y, fit, 1, 0, 1, h = 20, alpha = 0.05)
+// fc.mean, fc.lower, fc.upper
 ```
 
-### FinBERT example
-In order to run the FinBERT example with HuggingFaces weights, run this
+### Kalman filter pairs trading
+
+```odin
+import ml_fin "wotan/ml_finance"
+
+// aligned_df holds two date-aligned price columns
+config := ml_fin.kalman_pairs_default_config()
+config.entry_threshold = 2.0
+config.exit_threshold  = 0.5
+
+result := ml_fin.kalman_pairs_strategy(&aligned_df, "Asset_A", "Asset_B", config)
+// result.betas    – dynamic hedge ratio
+// result.z_scores – spread z-score
+// result.returns  – strategy returns
+```
+
+The full version, including date alignment and a parameter grid search, is in `tests/kalman_pairs_test.odin`.
+
+### Autograd
+
+```odin
+import l "wotan/linalg"
+import t "wotan/tensor"
+
+a := t.tensor_new(l.matrix_new(f64, 2, 2), true)   // requires_grad = true
+b := t.tensor_new(l.matrix_new(f64, 2, 2), true)
+// ...fill a.data.data and b.data.data...
+
+loss := t.tensor_sum(t.tensor_relu(t.tensor_matmul(a, b)))
+t.tensor_backward(loss)
+// a.grad and b.grad now hold d(loss)/da and d(loss)/db
+```
+
+The same engine runs the neural network layers in `nn`, the deep hedging and deep BSDE solvers, and the Greeks calculation shown above.
+
+### Plotting
+
+```odin
+import plot "wotan/plot"
+
+plot.line_png(xs, ys, "equity_curve.png")
+```
+
+## Project layout
+
+```
+wotan/
+├── core/               DataFrame, columns, masks, select, groupby, join, dates
+├── importer/           CSV, JSON, JSONL, HTML, Excel readers (with type inference)
+├── exporter/           CSV, JSON, HTML, Excel writers
+├── linalg/             matrices and decompositions (LU, QR, SVD, eigen, Cholesky)
+├── analytics/          time series, statistical tests, Kalman filters, GARCH
+│   └── ML/             classical machine learning
+├── tensor/             autograd engine
+├── nn/                 neural network layers and models, tokenizers
+├── optimize/           optimizers and learning-rate schedulers
+├── finance/            pricing, fixed income, portfolio, risk, backtesting
+├── ml_finance/         ML methods for finance
+├── behavioral_finance/ prospect theory, anchoring, behavioural portfolios
+├── net/                HTTP via libcurl, Yahoo Finance
+├── plot/               PNG chart rendering
+└── data/               dataset loaders (MNIST)
+tests/                  runnable examples and regression tests
+main.odin               demo and test driver
+```
+
+## Tests
+
+`tests/` contains over 100 test procedures, one per area: DataFrame operations, I/O, linear algebra, every ML model, the deep learning stack, and the finance modules. Each is a plain `proc(allocator: mem.Allocator)` called from `main.odin`. Most print results next to known reference values. Some write PNG charts to the working directory.
+
+Tests whose names contain `real_data` fetch live data from Yahoo Finance and need network access. [`test_catalog.md`](test_catalog.md) gives an overview of what each test covers.
+
+Run with `-debug` to turn on the tracking allocator. It reports any leaked allocation when the program exits.
+
+## Optional: pretrained weights
+
+The FinBERT and GPT-2 examples can load Hugging Face weights. The conversion scripts need Python with `transformers` installed:
+
 ```sh
 python convert_bert.py ProsusAI/finbert finbert_checkpoint.bin
-```
-Otherwise it will run uninitialized
-
-### GPT 2 Completeness check
-In order to run the GPT Completion example with HuggingFaces weights, run this
-```sh
-python .\convert_gpt2.py
+python convert_gpt2.py
 ```
 
-### 🤝 Contributing
-Contributions, bug reports, and feature requests are welcome.
-Wotan is evolving rapidly — feedback is highly appreciated.
+Without these checkpoints the examples still run, but with randomly initialised weights.
 
-### 🛠 Roadmap
+## Limitations
 
-- to maybe once net/http drops, be crazy and try to implement some Wotan Notebook... It might at least be interesting to try
+These are areas where Wotan is known to be incomplete:
+
+- **API stability:** names and signatures are still changing. There are no versioned releases yet.
+- **Documentation:** apart from this README, the tests are the main documentation.
+- **Performance:** everything runs on the CPU. Some hot paths use SIMD, but most code has not been profiled or tuned, and large deep learning models are slow.
+- **Validation:** models are tested against textbook and reference values. They have not been validated for production trading or risk use.
+- **Memory management:** ownership is explicit, as is usual in Odin. Most objects need a matching `destroy_*` or `*_free` call.
+
+## Contributing
+
+Contributions, bug reports and feature requests are welcome. Please open an issue or a pull request. When you add a feature, please also add a test in `tests/` that shows how to use it.
+
+## License
+
+[MIT](LICENSE) © 2026 Benjamin Eßer
