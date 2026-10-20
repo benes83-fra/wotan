@@ -135,6 +135,77 @@ matmul_dyn_simd :: proc(
 	return out
 }
 
+// ============================================================================
+// Accumulating matmul kernels (no transposes, no temporaries)
+// All operate on row-major matrices and ADD into `out`, which is what the
+// autograd backward pass needs (grad += ...). Zero `out` first for a plain product.
+// ============================================================================
+
+// matmul_nn_acc_simd: out += A @ B
+// A: [M, K], B: [K, N], out: [M, N]
+// i-k-j order: each step is an axpy of a contiguous row of B into a row of out.
+matmul_nn_acc_simd :: proc(a, b, out: ^Matrix(f64)) {
+	if a.cols != b.rows || out.rows != a.rows || out.cols != b.cols {
+		panic("matmul_nn_acc_simd: dimension mismatch")
+	}
+	M, K, N := a.rows, a.cols, b.cols
+	tile := tile_for_matmul()
+
+	for kk := 0; kk < K; kk += tile {
+		k_end := min(kk + tile, K)
+		for i in 0 ..< M {
+			row_out := out.data[i * N:(i + 1) * N]
+			row_a := a.data[i * K:(i + 1) * K]
+			for k in kk ..< k_end {
+				axpy_simd(row_a[k], b.data[k * N:(k + 1) * N], row_out)
+			}
+		}
+	}
+}
+
+// matmul_nt_acc_simd: out += A @ B^T
+// A: [M, K], B: [N, K], out: [M, N]
+// Every output element is a dot product of two contiguous rows.
+matmul_nt_acc_simd :: proc(a, b, out: ^Matrix(f64)) {
+	if a.cols != b.cols || out.rows != a.rows || out.cols != b.rows {
+		panic("matmul_nt_acc_simd: dimension mismatch")
+	}
+	M, K, N := a.rows, a.cols, b.rows
+	tile := tile_for_matmul()
+
+	for jj := 0; jj < N; jj += tile {
+		j_end := min(jj + tile, N)
+		for i in 0 ..< M {
+			row_a := a.data[i * K:(i + 1) * K]
+			for j in jj ..< j_end {
+				out.data[i * N + j] += dot_simd(row_a, b.data[j * K:(j + 1) * K])
+			}
+		}
+	}
+}
+
+// matmul_tn_acc_simd: out += A^T @ B
+// A: [M, K], B: [M, N], out: [K, N]
+// Sum of rank-1 updates: out[k, :] += A[i, k] * B[i, :]. Blocked over k so
+// the touched rows of `out` stay in cache.
+matmul_tn_acc_simd :: proc(a, b, out: ^Matrix(f64)) {
+	if a.rows != b.rows || out.rows != a.cols || out.cols != b.cols {
+		panic("matmul_tn_acc_simd: dimension mismatch")
+	}
+	M, K, N := a.rows, a.cols, b.cols
+	tile := tile_for_matmul()
+
+	for kk := 0; kk < K; kk += tile {
+		k_end := min(kk + tile, K)
+		for i in 0 ..< M {
+			row_b := b.data[i * N:(i + 1) * N]
+			for k in kk ..< k_end {
+				axpy_simd(a.data[i * K + k], row_b, out.data[k * N:(k + 1) * N])
+			}
+		}
+	}
+}
+
 
 matvec_dyn_simd :: proc(
 	m: ^Matrix(f64),

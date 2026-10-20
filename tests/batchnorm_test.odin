@@ -131,6 +131,7 @@ batchnorm_backward_test :: proc(allocator: mem.Allocator) {
 	)
 
 	// Set output gradients to 1.0
+	t.tensor_ensure_grad(output) // op outputs get grad buffers lazily
 	for i in 0 ..< len(output.grad.data) {
 		output.grad.data[i] = 1.0
 	}

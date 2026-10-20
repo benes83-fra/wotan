@@ -352,6 +352,7 @@ positional_encoding_test :: proc(allocator: mem.Allocator) {
 
 	// 3. Test Gradient Flow (PE has no grad, so input grad should equal output grad)
 	// Set output gradient to 2.0 everywhere
+	t.tensor_ensure_grad(output) // op outputs get grad buffers lazily
 	for i in 0 ..< len(output.grad.data) {
 		output.grad.data[i] = 2.0
 	}
@@ -440,6 +441,7 @@ attention_simple_test :: proc(allocator: mem.Allocator) {
 
 	// Test Backward Pass
 	// Set output gradient to [1.0, 1.0]
+	t.tensor_ensure_grad(output) // op outputs get grad buffers lazily
 	output.grad.data[0] = 1.0
 	output.grad.data[1] = 1.0
 
@@ -492,6 +494,7 @@ multi_head_attention_test :: proc(allocator: mem.Allocator) {
 	}
 
 	// Test Backward Pass
+	t.tensor_ensure_grad(output) // op outputs get grad buffers lazily
 	for i in 0 ..< len(output.grad.data) {
 		output.grad.data[i] = 1.0
 	}
@@ -585,6 +588,7 @@ layer_norm_test :: proc(allocator: mem.Allocator) {
 	// ✅ FIX: Use a non-linear gradient pattern!
 	// A linear gradient (like 1, 2, 3, 4) mathematically projects to exactly 0.0
 	// because it lies entirely in the span of the mean and x_hat.
+	t.tensor_ensure_grad(output) // op outputs get grad buffers lazily
 	for i in 0 ..< len(output.grad.data) {
 		output.grad.data[i] = (i % 2 == 0) ? 1.0 : 2.0 // Alternating 1.0, 2.0, 1.0, 2.0...
 	}
@@ -656,6 +660,7 @@ ffn_simple_test :: proc(allocator: mem.Allocator) {
 
 	// 2. Verify Backward Pass
 	// Set gradients
+	t.tensor_ensure_grad(output) // op outputs get grad buffers lazily
 	for i in 0 ..< len(output.grad.data) {
 		output.grad.data[i] = 1.0
 	}

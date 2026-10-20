@@ -450,6 +450,8 @@ main :: proc() {
 	test.pooling_test(context.temp_allocator)
 	test.flexible_network_test(context.temp_allocator)
 	test.gradcheck_test(context.temp_allocator)
+	test.gradcheck_layers_test(context.temp_allocator)
+	test.matmul_kernels_test(context.temp_allocator)
 	test.sequential_test(context.temp_allocator)
 	test.mnist_loader_test(context.temp_allocator)
 	test.persistence_test(context.temp_allocator)

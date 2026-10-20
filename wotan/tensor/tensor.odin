@@ -143,6 +143,28 @@ tensor_new :: proc(
 	return t
 }
 
+// _tensor_new_op creates the output node of an operation. Unlike tensor_new it
+// does not allocate a gradient buffer: tensor_backward allocates gradients for
+// every node it walks, so forward-only passes (e.g. inference with trainable
+// weights) never pay for gradient memory. To seed a custom upstream gradient on
+// an op output before tensor_backward, call tensor_ensure_grad on it first.
+_tensor_new_op :: proc(
+	data: l.Matrix(f64),
+	requires_grad: bool,
+	allocator: mem.Allocator = context.allocator,
+) -> ^Tensor {
+	t := new(Tensor, allocator)
+	t.data = data
+	t.requires_grad = requires_grad
+	t.op = .None
+	t.allocator = allocator
+	t.inputs = make([dynamic]^Tensor, 0, allocator)
+	t.int_metadata = make([dynamic]int, 0, allocator)
+	t.f64_metadata = make([dynamic]f64, 0, allocator)
+	global_tensors_created += 1
+	return t
+}
+
 tensor_free :: proc(t: ^Tensor) {
 	if t == nil {return}
 	if t.data.data != nil {l.matrix_free(&t.data)}
@@ -192,7 +214,7 @@ tensor_dropout :: proc(a: ^Tensor, drop_prob: f64, training: bool) -> ^Tensor {
 		}
 	}
 
-	out := tensor_new(out_data, a.requires_grad, a.allocator)
+	out := _tensor_new_op(out_data, a.requires_grad, a.allocator)
 	out.dropout_mask = mask
 
 	if out.requires_grad {
@@ -212,7 +234,7 @@ tensor_sum :: proc(a: ^Tensor) -> ^Tensor {
 	out_data.data[0] = total
 
 	// 2. Create output tensor
-	out := tensor_new(out_data, a.requires_grad, a.allocator)
+	out := _tensor_new_op(out_data, a.requires_grad, a.allocator)
 	out.shape = a.shape
 	// 3. Record graph
 	if out.requires_grad {
@@ -238,7 +260,7 @@ tensor_add :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
 	l.vec_add_simd(a.data.data, b.data.data, out_data.data)
 
 	// 2. Create the output tensor
-	out := tensor_new(out_data, a.requires_grad || b.requires_grad, a.allocator)
+	out := _tensor_new_op(out_data, a.requires_grad || b.requires_grad, a.allocator)
 	out.shape = a.shape
 	// 3. Record the graph
 	if out.requires_grad {
@@ -258,7 +280,7 @@ tensor_relu :: proc(a: ^Tensor) -> ^Tensor {
 	l.vec_relu_simd(a.data.data, out_data.data) // ✅ SIMD ReLU
 
 	// 2. Create output tensor
-	out := tensor_new(out_data, a.requires_grad, a.allocator)
+	out := _tensor_new_op(out_data, a.requires_grad, a.allocator)
 	out.shape = a.shape
 	// 3. Record graph
 	if out.requires_grad {
@@ -295,7 +317,7 @@ tensor_mul :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
 	l.vec_mul_simd(a.data.data, b.data.data, out_data.data)
 
 	// 2. Create output tensor
-	out := tensor_new(out_data, a.requires_grad || b.requires_grad, a.allocator)
+	out := _tensor_new_op(out_data, a.requires_grad || b.requires_grad, a.allocator)
 	out.shape = a.shape
 	// 3. Record graph
 	if out.requires_grad {
@@ -326,7 +348,7 @@ tensor_add_bias :: proc(a: ^Tensor, bias: ^Tensor) -> ^Tensor {
 				l.vec_add_simd(row_a, bias_slice, row_out)
 			}
 
-			out := tensor_new(out_data, a.requires_grad || bias.requires_grad, a.allocator)
+			out := _tensor_new_op(out_data, a.requires_grad || bias.requires_grad, a.allocator)
 			out.shape = a.shape
 			if out.requires_grad {
 				out.op = .AddBias
@@ -353,7 +375,7 @@ tensor_add_bias :: proc(a: ^Tensor, bias: ^Tensor) -> ^Tensor {
 		l.vec_add_simd(row_a, bias_slice, row_out)
 	}
 
-	out := tensor_new(out_data, a.requires_grad || bias.requires_grad, a.allocator)
+	out := _tensor_new_op(out_data, a.requires_grad || bias.requires_grad, a.allocator)
 	out.shape = a.shape
 	if out.requires_grad {
 		out.op = .AddBias
@@ -389,7 +411,7 @@ tensor_mse_loss :: proc(
 	out_data := l.matrix_new(f64, 1, 1, pred.allocator)
 	out_data.data[0] = loss_val
 
-	out := tensor_new(out_data, pred.requires_grad, pred.allocator)
+	out := _tensor_new_op(out_data, pred.requires_grad, pred.allocator)
 	// ✅ FIX: Restored the correct MSE graph recording!
 	if out.requires_grad {
 		out.op = .MSELoss
@@ -449,7 +471,7 @@ tensor_cross_entropy_loss :: proc(logits: ^Tensor, target_indices: []int) -> ^Te
 	out_data := l.matrix_new(f64, 1, 1, logits.allocator)
 	out_data.data[0] = loss
 
-	out := tensor_new(out_data, logits.requires_grad, logits.allocator)
+	out := _tensor_new_op(out_data, logits.requires_grad, logits.allocator)
 
 	if out.requires_grad {
 		out.op = .CrossEntropy
@@ -474,7 +496,7 @@ tensor_flatten :: proc(input: ^Tensor) -> ^Tensor {
 	out_data := l.matrix_new(f64, N, features, input.allocator)
 	copy(out_data.data, input.data.data)
 
-	out := tensor_new(out_data, input.requires_grad, input.allocator)
+	out := _tensor_new_op(out_data, input.requires_grad, input.allocator)
 	out.shape = [4]int{N, features, 1, 1} // Treat as 2D
 
 	if out.requires_grad {
@@ -554,7 +576,7 @@ tensor_max_pool2d :: proc(input: ^Tensor, kH, kW, stride: int) -> ^Tensor {
 		}
 	}
 
-	out := tensor_new(out_data, input.requires_grad, input.allocator)
+	out := _tensor_new_op(out_data, input.requires_grad, input.allocator)
 	out.shape = [4]int{N, C, out_h, out_w}
 
 	if out.requires_grad {
@@ -604,7 +626,7 @@ tensor_avg_pool2d :: proc(input: ^Tensor, kH, kW, stride: int) -> ^Tensor {
 		}
 	}
 
-	out := tensor_new(out_data, input.requires_grad, input.allocator)
+	out := _tensor_new_op(out_data, input.requires_grad, input.allocator)
 	out.shape = [4]int{N, C, out_h, out_w}
 
 	if out.requires_grad {
@@ -662,7 +684,7 @@ tensor_conv2d :: proc(
 		}
 
 		// ✅ FIX: Use context.allocator for temporary matmul
-		out_2d := l.matmul_dyn_simd(&weight_2d, &col_2d, allocator)
+		out_2d := _matmul(&weight_2d, &col_2d, allocator)
 
 		out_start := n * C_out * col_h
 		copy(out_data.data[out_start:out_start + C_out * col_h], out_2d.data)
@@ -686,7 +708,7 @@ tensor_conv2d :: proc(
 		}
 	}
 
-	out := tensor_new(out_data, input.requires_grad || weight.requires_grad, input.allocator)
+	out := _tensor_new_op(out_data, input.requires_grad || weight.requires_grad, input.allocator)
 	out.shape = [4]int{N, C_out, out_h, out_w}
 
 	if out.requires_grad {
@@ -700,14 +722,12 @@ tensor_conv2d :: proc(
 	return out
 }
 
-// Internal helper: Transpose a matrix (needed for MatMul backward pass)
-_matrix_transpose :: proc(m: l.Matrix(f64), alloc: mem.Allocator) -> l.Matrix(f64) {
-	out := l.matrix_new(f64, m.cols, m.rows, alloc)
-	for r in 0 ..< m.rows {
-		for c in 0 ..< m.cols {
-			out.data[c * out.cols + r] = m.data[r * m.cols + c]
-		}
-	}
+
+// _matmul returns a new [a.rows, b.cols] matrix A @ B. It uses the transpose-free
+// i-k-j kernel, which avoids re-transposing B (usually the weights) on every call.
+_matmul :: proc(a, b: ^l.Matrix(f64), allocator: mem.Allocator) -> l.Matrix(f64) {
+	out := l.matrix_new(f64, a.rows, b.cols, allocator)
+	l.matmul_nn_acc_simd(a, b, &out)
 	return out
 }
 
@@ -728,14 +748,13 @@ tensor_matmul :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
 				cols = in_features,
 				data = a.data.data,
 			}
-			temp_out := l.matmul_dyn_simd(&a_view, &b.data, a.allocator)
-
-			// Flatten the result back to 1 x (N * out_features) to match framework conventions
+			// Result stays flattened as 1 x (N * out_features) to match framework
+			// conventions; compute it in place through an [N, out_features] view.
 			out_data := l.matrix_new(f64, 1, N * out_features, a.allocator)
-			copy(out_data.data, temp_out.data)
-			l.matrix_free(&temp_out)
+			out_view := _mat(N, out_features, out_data.data)
+			l.matmul_nn_acc_simd(&a_view, &b.data, &out_view)
 
-			out := tensor_new(out_data, a.requires_grad || b.requires_grad, a.allocator)
+			out := _tensor_new_op(out_data, a.requires_grad || b.requires_grad, a.allocator)
 			out.shape = a.shape
 			out.shape[2] = out_features
 			if out.requires_grad {
@@ -757,8 +776,8 @@ tensor_matmul :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
 		panic("tensor_matmul: dimension mismatch")
 	}
 
-	out_data := l.matmul_dyn_simd(&a.data, &b.data, a.allocator)
-	out := tensor_new(out_data, a.requires_grad || b.requires_grad, a.allocator)
+	out_data := _matmul(&a.data, &b.data, a.allocator)
+	out := _tensor_new_op(out_data, a.requires_grad || b.requires_grad, a.allocator)
 	out.shape = [4]int{a.data.rows, b.data.cols, 1, 1}
 	if out.requires_grad {
 		out.op = .MatMul
@@ -965,9 +984,10 @@ _validate_graph_impl :: proc(node: ^Tensor, visited: ^map[^Tensor]bool) -> bool 
 		return false
 	}
 
-	// Check that gradient is allocated if requires_grad
-	if node.requires_grad && node.grad.data == nil {
-		fmt.printf("ERROR: Tensor with op %v requires grad but has nil gradient\n", node.op)
+	// Leaves (inputs/parameters) must own a gradient buffer. Op outputs get
+	// theirs lazily in tensor_backward, so they are not checked here.
+	if node.op == .None && node.requires_grad && node.grad.data == nil {
+		fmt.printf("ERROR: Leaf tensor requires grad but has nil gradient\n")
 		return false
 	}
 
@@ -1087,7 +1107,7 @@ tensor_batch_norm_2d :: proc(
 	delete(beta_vec, allocator)
 	delete(scaled, allocator)
 
-	out := tensor_new(out_data, input.requires_grad || weight.requires_grad, input.allocator)
+	out := _tensor_new_op(out_data, input.requires_grad || weight.requires_grad, input.allocator)
 	out.shape = input.shape
 
 	if out.requires_grad {
@@ -1139,17 +1159,16 @@ _rnn_step_forward :: proc(
 	}
 
 	// 1. h_ih = x_t @ w_ih
-	h_ih := l.matmul_dyn_simd(&x_mat, &w_ih_mat, allocator)
+	h_ih := _matmul(&x_mat, &w_ih_mat, allocator)
 	defer l.matrix_free(&h_ih)
 
 	// 2. h_hh = h_prev @ w_hh
-	h_hh := l.matmul_dyn_simd(&h_prev_mat, &w_hh_mat, allocator)
+	h_hh := _matmul(&h_prev_mat, &w_hh_mat, allocator)
 	defer l.matrix_free(&h_hh)
 
 	// 3. h_sum = h_ih + h_hh + bias
 	for i in 0 ..< batch * hidden_size {
-		row := i / hidden_size
-		h_t[i] = h_ih.data[i] + h_hh.data[i] + bias[row]
+		h_t[i] = h_ih.data[i] + h_hh.data[i] + bias[i % hidden_size]
 	}
 
 	// 4. h_t = tanh(h_sum)
@@ -1212,7 +1231,11 @@ tensor_rnn :: proc(
 		delete(x_t, allocator)
 	}
 
-	out := tensor_new(out_data, x.requires_grad || w_ih.requires_grad, x.allocator)
+	out := _tensor_new_op(
+		out_data,
+		x.requires_grad || h_0.requires_grad || w_ih.requires_grad || w_hh.requires_grad || bias.requires_grad,
+		x.allocator,
+	)
 	out.shape = [4]int{batch, seq_len, hidden_size, 1}
 
 	if out.requires_grad {
@@ -1270,8 +1293,8 @@ _gru_step_forward :: proc(
 	}
 
 	// ✅ SIMD: Two large matmuls instead of 6 small ones
-	gate_ih := l.matmul_dyn_simd(&x_mat, &w_ih_mat, allocator)
-	gate_hh := l.matmul_dyn_simd(&h_prev_mat, &w_hh_mat, allocator)
+	gate_ih := _matmul(&x_mat, &w_ih_mat, allocator)
+	gate_hh := _matmul(&h_prev_mat, &w_hh_mat, allocator)
 	defer l.matrix_free(&gate_ih)
 	defer l.matrix_free(&gate_hh)
 
@@ -1362,7 +1385,11 @@ tensor_gru :: proc(
 		delete(x_t, allocator)
 	}
 
-	out := tensor_new(out_data, x.requires_grad || w_ih.requires_grad, x.allocator)
+	out := _tensor_new_op(
+		out_data,
+		x.requires_grad || h_0.requires_grad || w_ih.requires_grad || w_hh.requires_grad || bias.requires_grad,
+		x.allocator,
+	)
 	out.shape = [4]int{batch, seq_len, hidden_size, 1}
 
 	if out.requires_grad {
@@ -1423,8 +1450,8 @@ _lstm_step_forward :: proc(
 	}
 
 	// ✅ SIMD: Two massive matmuls for all 4 gates
-	gate_ih := l.matmul_dyn_simd(&x_mat, &w_ih_mat, allocator)
-	gate_hh := l.matmul_dyn_simd(&h_prev_mat, &w_hh_mat, allocator)
+	gate_ih := _matmul(&x_mat, &w_ih_mat, allocator)
+	gate_hh := _matmul(&h_prev_mat, &w_hh_mat, allocator)
 	defer l.matrix_free(&gate_ih)
 	defer l.matrix_free(&gate_hh)
 
@@ -1534,7 +1561,16 @@ tensor_lstm :: proc(
 		delete(x_t, allocator)
 	}
 
-	out := tensor_new(out_data, x.requires_grad || w_ih.requires_grad, x.allocator)
+	out := _tensor_new_op(
+		out_data,
+		x.requires_grad ||
+		h_0.requires_grad ||
+		c_0.requires_grad ||
+		w_ih.requires_grad ||
+		w_hh.requires_grad ||
+		bias.requires_grad,
+		x.allocator,
+	)
 	out.shape = [4]int{batch, seq_len, hidden_size, 1}
 
 	if out.requires_grad {
@@ -1582,7 +1618,7 @@ tensor_embedding :: proc(input: ^Tensor, weight: ^Tensor) -> ^Tensor {
 		}
 	}
 
-	out := tensor_new(out_data, weight.requires_grad, input.allocator)
+	out := _tensor_new_op(out_data, weight.requires_grad, input.allocator)
 	out.shape = [4]int{batch, seq_len, embed_dim, 1}
 
 	if out.requires_grad {
@@ -1629,10 +1665,9 @@ tensor_scaled_dot_product_attention :: proc(
 			data = V.data.data[b * seq_k * d_v:(b + 1) * seq_k * d_v],
 		}
 
-		// 1. S_b = Q_b @ K_b^T
-		k_b_t := _matrix_transpose(k_b, allocator)
-		s_b := l.matmul_dyn_simd(&q_b, &k_b_t, allocator)
-		l.matrix_free(&k_b_t)
+		// 1. S_b = Q_b @ K_b^T (row dot products, no transpose)
+		s_b := l.matrix_new(f64, seq_q, seq_k, allocator)
+		l.matmul_nt_acc_simd(&q_b, &k_b, &s_b)
 
 		// 2. Scale and Softmax to get P_b
 		p_b := l.Matrix(f64) {
@@ -1667,14 +1702,14 @@ tensor_scaled_dot_product_attention :: proc(
 		}
 
 		// 3. O_b = P_b @ V_b
-		o_b := l.matmul_dyn_simd(&p_b, &v_b, allocator)
+		o_b := _matmul(&p_b, &v_b, allocator)
 		copy(out_data.data[b * seq_q * d_v:(b + 1) * seq_q * d_v], o_b.data)
 
 		l.matrix_free(&o_b)
 		l.matrix_free(&s_b)
 	}
 
-	out := tensor_new(out_data, Q.requires_grad || K.requires_grad || V.requires_grad, Q.allocator)
+	out := _tensor_new_op(out_data, Q.requires_grad || K.requires_grad || V.requires_grad, Q.allocator)
 	out.shape = [4]int{batch, seq_q, d_v, 1}
 
 	if out.requires_grad {
@@ -1712,7 +1747,7 @@ tensor_permute_mha :: proc(
 		}
 	}
 
-	out := tensor_new(out_data, x.requires_grad, x.allocator)
+	out := _tensor_new_op(out_data, x.requires_grad, x.allocator)
 	out.shape = [4]int{batch * num_heads, seq_len, head_dim, 1}
 
 	if out.requires_grad {
@@ -1750,7 +1785,7 @@ tensor_permute_mha_inverse :: proc(
 		}
 	}
 
-	out := tensor_new(out_data, x.requires_grad, x.allocator)
+	out := _tensor_new_op(out_data, x.requires_grad, x.allocator)
 	out.shape = [4]int{batch, seq_len, d_model, 1}
 
 	if out.requires_grad {
@@ -1852,7 +1887,7 @@ tensor_layer_norm :: proc(
 		l.vec_add_simd(out_row, beta_row, out_row)
 	}
 
-	out := tensor_new(
+	out := _tensor_new_op(
 		out_data,
 		input.requires_grad || gamma.requires_grad || beta.requires_grad,
 		input.allocator,
@@ -1908,10 +1943,9 @@ tensor_masked_scaled_dot_product_attention :: proc(
 			data = V.data.data[b * seq_k * d_v:(b + 1) * seq_k * d_v],
 		}
 
-		// 1. S_b = Q_b @ K_b^T
-		k_b_t := _matrix_transpose(k_b, allocator)
-		s_b := l.matmul_dyn_simd(&q_b, &k_b_t, allocator)
-		l.matrix_free(&k_b_t)
+		// 1. S_b = Q_b @ K_b^T (row dot products, no transpose)
+		s_b := l.matrix_new(f64, seq_q, seq_k, allocator)
+		l.matmul_nt_acc_simd(&q_b, &k_b, &s_b)
 
 		// 2. Scale and apply mask
 		p_b := l.Matrix(f64) {
@@ -1955,14 +1989,14 @@ tensor_masked_scaled_dot_product_attention :: proc(
 		}
 
 		// 4. O_b = P_b @ V_b
-		o_b := l.matmul_dyn_simd(&p_b, &v_b, allocator)
+		o_b := _matmul(&p_b, &v_b, allocator)
 		copy(out_data.data[b * seq_q * d_v:(b + 1) * seq_q * d_v], o_b.data)
 
 		l.matrix_free(&o_b)
 		l.matrix_free(&s_b)
 	}
 
-	out := tensor_new(out_data, Q.requires_grad || K.requires_grad || V.requires_grad, Q.allocator)
+	out := _tensor_new_op(out_data, Q.requires_grad || K.requires_grad || V.requires_grad, Q.allocator)
 	out.shape = [4]int{batch, seq_q, d_v, 1}
 
 	if out.requires_grad {
@@ -1970,14 +2004,8 @@ tensor_masked_scaled_dot_product_attention :: proc(
 		append(&out.inputs, Q)
 		append(&out.inputs, K)
 		append(&out.inputs, V)
-		// Store mask for backward pass
-		for i in 0 ..< len(mask) {
-			if mask[i] != 0.0 {
-				append(&out.int_metadata, 1) // Masked position
-			} else {
-				append(&out.int_metadata, 0) // Unmasked position
-			}
-		}
+		// Store the exact additive mask for the backward pass
+		append(&out.f64_metadata, ..mask)
 	}
 
 	return out
@@ -2021,7 +2049,7 @@ tensor_binary_cross_entropy :: proc(pred: ^Tensor, target: ^Tensor) -> ^Tensor {
 	out_data := l.matrix_new(f64, 1, 1, pred.allocator)
 	out_data.data[0] = loss
 
-	out := tensor_new(out_data, pred.requires_grad, pred.allocator)
+	out := _tensor_new_op(out_data, pred.requires_grad, pred.allocator)
 	if out.requires_grad {
 		out.op = .BinaryCrossEntropy
 		append(&out.inputs, pred)
@@ -2062,7 +2090,7 @@ tensor_sub :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
 	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
 	l.vec_sub_simd(a.data.data, b.data.data, out_data.data)
 
-	out := tensor_new(out_data, a.requires_grad || b.requires_grad, a.allocator)
+	out := _tensor_new_op(out_data, a.requires_grad || b.requires_grad, a.allocator)
 	out.shape = a.shape
 	if out.requires_grad {
 		out.op = .Sub
@@ -2081,7 +2109,7 @@ tensor_mean :: proc(a: ^Tensor) -> ^Tensor {
 	out_data := l.matrix_new(f64, 1, 1, a.allocator)
 	out_data.data[0] = mean_val
 
-	out := tensor_new(out_data, a.requires_grad, a.allocator)
+	out := _tensor_new_op(out_data, a.requires_grad, a.allocator)
 	if out.requires_grad {
 		out.op = .Mean
 		append(&out.inputs, a)
@@ -2115,7 +2143,7 @@ tensor_kl_divergence :: proc(mu: ^Tensor, log_var: ^Tensor) -> ^Tensor {
 	out_data := l.matrix_new(f64, 1, 1, mu.allocator)
 	out_data.data[0] = kl_loss
 
-	out := tensor_new(out_data, mu.requires_grad || log_var.requires_grad, mu.allocator)
+	out := _tensor_new_op(out_data, mu.requires_grad || log_var.requires_grad, mu.allocator)
 	if out.requires_grad {
 		out.op = .KLDivergence
 		append(&out.inputs, mu)
@@ -2127,7 +2155,7 @@ tensor_kl_divergence :: proc(mu: ^Tensor, log_var: ^Tensor) -> ^Tensor {
 tensor_sigmoid :: proc(a: ^Tensor) -> ^Tensor {
 	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
 	l.vec_sigmoid_simd(a.data.data, out_data.data) // ✅ SIMD
-	out := tensor_new(out_data, a.requires_grad, a.allocator)
+	out := _tensor_new_op(out_data, a.requires_grad, a.allocator)
 	out.shape = a.shape
 	if out.requires_grad {
 		out.op = .Sigmoid
@@ -2139,7 +2167,7 @@ tensor_sigmoid :: proc(a: ^Tensor) -> ^Tensor {
 tensor_tanh :: proc(a: ^Tensor) -> ^Tensor {
 	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
 	l.vec_tanh_simd(a.data.data, out_data.data) // ✅ SIMD
-	out := tensor_new(out_data, a.requires_grad, a.allocator)
+	out := _tensor_new_op(out_data, a.requires_grad, a.allocator)
 	out.shape = a.shape
 	if out.requires_grad {
 		out.op = .Tanh
@@ -2151,7 +2179,7 @@ tensor_tanh :: proc(a: ^Tensor) -> ^Tensor {
 tensor_leaky_relu :: proc(a: ^Tensor, alpha: f64 = 0.01) -> ^Tensor {
 	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
 	l.vec_leaky_relu_simd(a.data.data, alpha, out_data.data) // ✅ SIMD
-	out := tensor_new(out_data, a.requires_grad, a.allocator)
+	out := _tensor_new_op(out_data, a.requires_grad, a.allocator)
 	out.shape = a.shape
 	if out.requires_grad {
 		out.op = .LeakyReLU
@@ -2164,7 +2192,7 @@ tensor_leaky_relu :: proc(a: ^Tensor, alpha: f64 = 0.01) -> ^Tensor {
 tensor_neg :: proc(a: ^Tensor) -> ^Tensor {
 	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
 	l.vec_neg_simd(a.data.data, out_data.data) // ✅ SIMD
-	out := tensor_new(out_data, a.requires_grad, a.allocator)
+	out := _tensor_new_op(out_data, a.requires_grad, a.allocator)
 	out.shape = a.shape
 	if out.requires_grad {
 		out.op = .Neg
@@ -2176,7 +2204,7 @@ tensor_neg :: proc(a: ^Tensor) -> ^Tensor {
 tensor_scale :: proc(a: ^Tensor, scalar: f64) -> ^Tensor {
 	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
 	l.vec_scale_simd(a.data.data, scalar, out_data.data) // ✅ SIMD
-	out := tensor_new(out_data, a.requires_grad, a.allocator)
+	out := _tensor_new_op(out_data, a.requires_grad, a.allocator)
 	if out.requires_grad {
 		out.op = .Scale
 		append(&out.inputs, a)
@@ -2193,7 +2221,7 @@ tensor_exp :: proc(a: ^Tensor) -> ^Tensor {
 	for i in 0 ..< len(a.data.data) {
 		out_data.data[i] = math.exp(a.data.data[i])
 	}
-	out := tensor_new(out_data, a.requires_grad, a.allocator)
+	out := _tensor_new_op(out_data, a.requires_grad, a.allocator)
 	out.shape = a.shape
 	if out.requires_grad {
 		out.op = .Exp
@@ -2211,7 +2239,7 @@ tensor_sqrt :: proc(a: ^Tensor) -> ^Tensor {
 	for i in 0 ..< len(a.data.data) {
 		out_data.data[i] = math.sqrt(a.data.data[i])
 	}
-	out := tensor_new(out_data, a.requires_grad, a.allocator)
+	out := _tensor_new_op(out_data, a.requires_grad, a.allocator)
 	out.shape = a.shape
 	if out.requires_grad {
 		out.op = .Sqrt
@@ -2229,7 +2257,7 @@ tensor_log :: proc(a: ^Tensor) -> ^Tensor {
 	for i in 0 ..< len(a.data.data) {
 		out_data.data[i] = math.ln_f64(a.data.data[i])
 	}
-	out := tensor_new(out_data, a.requires_grad, a.allocator)
+	out := _tensor_new_op(out_data, a.requires_grad, a.allocator)
 	out.shape = a.shape
 	if out.requires_grad {
 		out.op = .Log
@@ -2251,7 +2279,7 @@ tensor_div :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
 	for i in 0 ..< len(a.data.data) {
 		out_data.data[i] = a.data.data[i] / b.data.data[i]
 	}
-	out := tensor_new(out_data, a.requires_grad || b.requires_grad, a.allocator)
+	out := _tensor_new_op(out_data, a.requires_grad || b.requires_grad, a.allocator)
 	out.shape = a.shape
 	if out.requires_grad {
 		out.op = .Div
@@ -2304,7 +2332,7 @@ tensor_norm_cdf :: proc(a: ^Tensor) -> ^Tensor {
 		out_data.data[i] = cdf
 	}
 
-	out := tensor_new(out_data, a.requires_grad, a.allocator)
+	out := _tensor_new_op(out_data, a.requires_grad, a.allocator)
 	out.shape = a.shape
 	if out.requires_grad {
 		out.op = .NormCDF
@@ -2325,7 +2353,7 @@ tensor_sum_dim1 :: proc(a: ^Tensor) -> ^Tensor {
 		out_data.data[b] = sum
 	}
 
-	out := tensor_new(out_data, a.requires_grad, a.allocator)
+	out := _tensor_new_op(out_data, a.requires_grad, a.allocator)
 	out.shape = [4]int{batch_size, 1, 1, 1}
 	if out.requires_grad {
 		out.op = .SumDim1
@@ -2344,7 +2372,7 @@ tensor_clamp :: proc(a: ^Tensor, lo: f64, hi: f64) -> ^Tensor {
 		if v > hi {v = hi}
 		out_data.data[i] = v
 	}
-	out := tensor_new(out_data, a.requires_grad, a.allocator)
+	out := _tensor_new_op(out_data, a.requires_grad, a.allocator)
 	out.shape = a.shape
 	if out.requires_grad {
 		out.op = .Clamp // add .Clamp to the Op enum
@@ -2381,7 +2409,7 @@ tensor_softmax :: proc(logits: ^Tensor, allocator: mem.Allocator = context.alloc
 		}
 	}
 
-	out := tensor_new(out_data, logits.requires_grad, logits.allocator)
+	out := _tensor_new_op(out_data, logits.requires_grad, logits.allocator)
 	out.shape = logits.shape
 	if out.requires_grad {
 		out.op = .Softmax
@@ -2401,7 +2429,7 @@ tensor_entropy :: proc(a: ^Tensor) -> ^Tensor {
 	}
 	out_data := l.matrix_new(f64, 1, 1, a.allocator)
 	out_data.data[0] = entropy_val
-	out := tensor_new(out_data, a.requires_grad, a.allocator)
+	out := _tensor_new_op(out_data, a.requires_grad, a.allocator)
 	if out.requires_grad {
 		out.op = .Entropy
 		append(&out.inputs, a)
@@ -2439,7 +2467,7 @@ tensor_bce_loss :: proc(prediction: ^Tensor, target: ^Tensor) -> ^Tensor {
 	// Create output tensor
 	out_data := l.matrix_new(f64, 1, 1, prediction.allocator)
 	out_data.data[0] = avg_loss
-	out := tensor_new(
+	out := _tensor_new_op(
 		out_data,
 		prediction.requires_grad || target.requires_grad,
 		prediction.allocator,
@@ -2528,7 +2556,7 @@ tensor_concat :: proc(
 		dim_offset += t_dim_size
 	}
 
-	out := tensor_new(out_data, requires_grad, allocator)
+	out := _tensor_new_op(out_data, requires_grad, allocator)
 	out.shape = out_shape
 
 	if requires_grad {
@@ -2563,7 +2591,7 @@ tensor_permute_lob :: proc(
 		}
 	}
 
-	out := tensor_new(out_data, x.requires_grad, alloc)
+	out := _tensor_new_op(out_data, x.requires_grad, alloc)
 	out.shape = [4]int{batch, t_out, feat_dim, 1}
 
 	if out.requires_grad {
@@ -2618,7 +2646,7 @@ tensor_sharpe_loss :: proc(
 	out_data := l.matrix_new(f64, 1, 1, allocator)
 	out_data.data[0] = -sharpe
 
-	out := tensor_new(out_data, returns.requires_grad, allocator)
+	out := _tensor_new_op(out_data, returns.requires_grad, allocator)
 
 	if out.requires_grad {
 		out.op = .SharpeLoss
@@ -2695,7 +2723,7 @@ tensor_normalize_time :: proc(
 		}
 	}
 
-	out := tensor_new(out_data, input.requires_grad, allocator)
+	out := _tensor_new_op(out_data, input.requires_grad, allocator)
 	out.shape = input.shape
 
 	if out.requires_grad {
@@ -2734,7 +2762,7 @@ tensor_logsumexp_dim1 :: proc(
 		out_data.data[i] = max_val + math.ln(sum_exp)
 	}
 
-	out := tensor_new(out_data, q.requires_grad, allocator)
+	out := _tensor_new_op(out_data, q.requires_grad, allocator)
 	if out.requires_grad {
 		out.op = .LogSumExpDim1
 		append(&out.inputs, q)
@@ -2760,7 +2788,7 @@ tensor_softplus :: proc(a: ^Tensor) -> ^Tensor {
 			out_data.data[i] = math.ln_f64(1.0 + math.exp(x))
 		}
 	}
-	out := tensor_new(out_data, a.requires_grad, a.allocator)
+	out := _tensor_new_op(out_data, a.requires_grad, a.allocator)
 	out.shape = a.shape
 	if out.requires_grad {
 		out.op = .Softplus
@@ -2886,7 +2914,7 @@ tensor_ssm :: proc(
 		delete(Delta_s, allocator)
 	}
 
-	out := tensor_new(
+	out := _tensor_new_op(
 		out_data,
 		x.requires_grad ||
 		A.requires_grad ||
@@ -3034,7 +3062,7 @@ tensor_flash_attention :: proc(
 		}
 	}
 
-	out := tensor_new(out_data, Q.requires_grad || K.requires_grad || V.requires_grad, Q.allocator)
+	out := _tensor_new_op(out_data, Q.requires_grad || K.requires_grad || V.requires_grad, Q.allocator)
 	out.shape = [4]int{batch, seq_q, d_v, 1}
 	if out.requires_grad {
 		out.op = .FlashAttention
@@ -3118,7 +3146,7 @@ tensor_gate_mul :: proc(
 		}
 	}
 
-	out := tensor_new(out_data, x.requires_grad || gate.requires_grad, allocator)
+	out := _tensor_new_op(out_data, x.requires_grad || gate.requires_grad, allocator)
 	out.shape = x.shape
 	if out.requires_grad {
 		out.op = .GateMul
@@ -3151,7 +3179,7 @@ tensor_reshape :: proc(
 	out_data := l.matrix_new(f64, 1, new_total, allocator)
 	copy(out_data.data, input.data.data)
 
-	out := tensor_new(out_data, input.requires_grad, allocator)
+	out := _tensor_new_op(out_data, input.requires_grad, allocator)
 	out.shape = new_shape
 
 	if out.requires_grad {
@@ -3174,7 +3202,7 @@ tensor_slice_gate :: proc(
 		out_data.data[n] = gates.data.data[n * E + expert_idx]
 	}
 
-	out := tensor_new(out_data, gates.requires_grad, allocator)
+	out := _tensor_new_op(out_data, gates.requires_grad, allocator)
 	out.shape = [4]int{N, 1, 1, 1}
 
 	if out.requires_grad {
@@ -3210,7 +3238,7 @@ tensor_prospect_value :: proc(
 		}
 	}
 
-	out := tensor_new(out_data, returns.requires_grad, allocator)
+	out := _tensor_new_op(out_data, returns.requires_grad, allocator)
 	out.shape = returns.shape
 	if out.requires_grad {
 		out.op = .ProspectValue
@@ -3244,7 +3272,7 @@ tensor_prob_weighting :: proc(
 		out_data.data[i] = p_gamma / denom
 	}
 
-	out := tensor_new(out_data, p.requires_grad, allocator)
+	out := _tensor_new_op(out_data, p.requires_grad, allocator)
 	out.shape = p.shape
 	if out.requires_grad {
 		out.op = .ProbWeighting
@@ -3287,7 +3315,7 @@ tensor_prospect_utility :: proc(
 	out_data := l.matrix_new(f64, 1, 1, allocator)
 	out_data.data[0] = -(utility_sum / n)
 
-	out := tensor_new(out_data, returns.requires_grad, allocator)
+	out := _tensor_new_op(out_data, returns.requires_grad, allocator)
 	if out.requires_grad {
 		out.op = .ProspectUtility
 		append(&out.inputs, returns)
