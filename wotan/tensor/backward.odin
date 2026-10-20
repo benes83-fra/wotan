@@ -190,8 +190,8 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 					grad_a_view := l.matmul_dyn_simd(&grad_view, &b_t, allocator)
 					l.matrix_free(&b_t)
 
-					// Copy flattened gradient back
-					copy(a_in.grad.data, grad_a_view.data)
+					// Accumulate flattened gradient (input may feed multiple consumers)
+					l.vec_add_simd(a_in.grad.data, grad_a_view.data, a_in.grad.data)
 					l.matrix_free(&grad_a_view)
 				}
 
@@ -254,12 +254,12 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 				}
 			}
 
-			// ∂KL/∂log_var = -0.5 * (1 - exp(log_var)) / n
+			// ∂KL/∂log_var = -0.5 * (1 - exp(log_var)) / n = (exp(log_var) - 1) / (2n)
 			if log_var_in.requires_grad {
 				tensor_ensure_grad(log_var_in)
 				for i in 0 ..< len(log_var_in.grad.data) {
 					log_var_in.grad.data[i] +=
-						scalar_grad * (1.0 - math.exp(log_var_in.data.data[i])) / (2.0 * n)
+						scalar_grad * (math.exp(log_var_in.data.data[i]) - 1.0) / (2.0 * n)
 				}
 			}
 		case .MaskedScaledDotProductAttention:
@@ -539,7 +539,6 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 				for i in 0 ..< len(b_in.grad.data) {
 					// d/db (a/b) = -a/b²
 					b_val := b_in.data.data[i]
-					_ = a_in.grad.data[i] // just to reference (not used)
 					b_in.grad.data[i] -= node.grad.data[i] * a_in.data.data[i] / (b_val * b_val)
 				}
 			}
@@ -1822,8 +1821,9 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 		case .Flatten:
 			a_in := node.inputs[0]
 			if a_in.requires_grad {
-				// Just reshape the gradient back to 4D
-				copy(a_in.grad.data, node.grad.data)
+				// Same flat layout: accumulate gradient 1:1
+				tensor_ensure_grad(a_in)
+				l.vec_add_simd(a_in.grad.data, node.grad.data, a_in.grad.data)
 			}
 		case .BCELoss:
 			prediction := node.inputs[0]

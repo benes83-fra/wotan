@@ -449,6 +449,7 @@ main :: proc() {
 	test.conv2d_test(context.temp_allocator)
 	test.pooling_test(context.temp_allocator)
 	test.flexible_network_test(context.temp_allocator)
+	test.gradcheck_test(context.temp_allocator)
 	test.sequential_test(context.temp_allocator)
 	test.mnist_loader_test(context.temp_allocator)
 	test.persistence_test(context.temp_allocator)
