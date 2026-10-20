@@ -2242,12 +2242,17 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 			a_in := node.inputs[0]
 			if a_in.requires_grad {
 				tensor_ensure_grad(a_in)
-				sum_p_grad := 0.0
-				for j in 0 ..< len(node.data.data) {
-					sum_p_grad += node.data.data[j] * node.grad.data[j]
-				}
-				for i in 0 ..< len(a_in.grad.data) {
-					a_in.grad.data[i] += node.data.data[i] * (node.grad.data[i] - sum_p_grad)
+				// Per-row Jacobian-vector product: dx = p * (g - sum(p * g))
+				C := node.int_metadata[0]
+				N := len(node.data.data) / C
+				for r in 0 ..< N {
+					p := node.data.data[r * C:(r + 1) * C]
+					g := node.grad.data[r * C:(r + 1) * C]
+					dx := a_in.grad.data[r * C:(r + 1) * C]
+					sum_p_grad := l.dot_simd(p, g)
+					for j in 0 ..< C {
+						dx[j] += p[j] * (g[j] - sum_p_grad)
+					}
 				}
 			}
 		case .Entropy:

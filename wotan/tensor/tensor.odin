@@ -2349,28 +2349,38 @@ tensor_clamp :: proc(a: ^Tensor, lo: f64, hi: f64) -> ^Tensor {
 	}
 	return out
 }
+// tensor_softmax applies a numerically stable softmax independently to each row
+// of a [N, C] matrix (normalizes over the last dim). A [1, C] tensor is a single row.
 tensor_softmax :: proc(logits: ^Tensor, allocator: mem.Allocator = context.allocator) -> ^Tensor {
-	max_val := -math.F64_MAX
-	for v in logits.data.data {
-		if v > max_val {max_val = v}
+	N := logits.data.rows
+	C := logits.data.cols
+	out_data := l.matrix_new(f64, N, C, logits.allocator)
+
+	for r in 0 ..< N {
+		row_in := logits.data.data[r * C:(r + 1) * C]
+		row_out := out_data.data[r * C:(r + 1) * C]
+
+		max_val := -math.F64_MAX
+		for v in row_in {
+			if v > max_val {max_val = v}
+		}
+		exp_sum := 0.0
+		for j in 0 ..< C {
+			row_out[j] = math.exp_f64(row_in[j] - max_val)
+			exp_sum += row_out[j]
+		}
+		inv_sum := 1.0 / exp_sum
+		for j in 0 ..< C {
+			row_out[j] *= inv_sum
+		}
 	}
-	exp_sum := 0.0
-	n := len(logits.data.data)
-	exps := make([]f64, n, allocator)
-	for i in 0 ..< n {
-		exps[i] = math.exp_f64(logits.data.data[i] - max_val)
-		exp_sum += exps[i]
-	}
-	out_data := l.matrix_new(f64, logits.data.rows, logits.data.cols, logits.allocator)
-	for i in 0 ..< n {
-		out_data.data[i] = exps[i] / exp_sum
-	}
-	defer delete(exps, allocator)
+
 	out := tensor_new(out_data, logits.requires_grad, logits.allocator)
 	out.shape = logits.shape
 	if out.requires_grad {
 		out.op = .Softmax
 		append(&out.inputs, logits)
+		append(&out.int_metadata, C) // row width for backward
 	}
 	return out
 }
