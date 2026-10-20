@@ -74,7 +74,7 @@ gcl_check :: proc(
 			num := (fp - fm) / (2 * h)
 			an := x.grad.data[i]
 			err := abs(num - an) / max(abs(num), abs(an), 1e-6)
-			if err > max_err {
+			if err > max_err || err != err { 	// err != err: NaN must fail, not be skipped
 				max_err = err
 				worst_input = k
 			}

@@ -451,6 +451,7 @@ main :: proc() {
 	test.flexible_network_test(context.temp_allocator)
 	test.gradcheck_test(context.temp_allocator)
 	test.gradcheck_layers_test(context.temp_allocator)
+	test.gradcheck_ops_test(context.temp_allocator)
 	test.matmul_kernels_test(context.temp_allocator)
 	test.sequential_test(context.temp_allocator)
 	test.mnist_loader_test(context.temp_allocator)

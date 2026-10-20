@@ -48,7 +48,7 @@ gc_check :: proc(
 		// Relative error; the 1e-6 floor keeps finite-difference noise on
 		// near-zero gradients from failing, while still catching tiny wrong ones.
 		err := abs(num - analytic[i]) / max(abs(num), abs(analytic[i]), 1e-6)
-		if err > max_err {max_err = err}
+		if err > max_err || err != err {max_err = err} 	// err != err: NaN must fail, not be skipped
 		if i < 3 {fmt.printf("    [%d] analytic=% .6e numeric=% .6e\n", i, analytic[i], num)}
 	}
 

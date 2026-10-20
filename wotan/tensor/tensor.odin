@@ -215,6 +215,7 @@ tensor_dropout :: proc(a: ^Tensor, drop_prob: f64, training: bool) -> ^Tensor {
 	}
 
 	out := _tensor_new_op(out_data, a.requires_grad, a.allocator)
+	out.shape = a.shape
 	out.dropout_mask = mask
 
 	if out.requires_grad {
@@ -411,7 +412,7 @@ tensor_mse_loss :: proc(
 	out_data := l.matrix_new(f64, 1, 1, pred.allocator)
 	out_data.data[0] = loss_val
 
-	out := _tensor_new_op(out_data, pred.requires_grad, pred.allocator)
+	out := _tensor_new_op(out_data, pred.requires_grad || target.requires_grad, pred.allocator)
 	// ✅ FIX: Restored the correct MSE graph recording!
 	if out.requires_grad {
 		out.op = .MSELoss
@@ -2049,7 +2050,7 @@ tensor_binary_cross_entropy :: proc(pred: ^Tensor, target: ^Tensor) -> ^Tensor {
 	out_data := l.matrix_new(f64, 1, 1, pred.allocator)
 	out_data.data[0] = loss
 
-	out := _tensor_new_op(out_data, pred.requires_grad, pred.allocator)
+	out := _tensor_new_op(out_data, pred.requires_grad || target.requires_grad, pred.allocator)
 	if out.requires_grad {
 		out.op = .BinaryCrossEntropy
 		append(&out.inputs, pred)
@@ -2205,6 +2206,7 @@ tensor_scale :: proc(a: ^Tensor, scalar: f64) -> ^Tensor {
 	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
 	l.vec_scale_simd(a.data.data, scalar, out_data.data) // ✅ SIMD
 	out := _tensor_new_op(out_data, a.requires_grad, a.allocator)
+	out.shape = a.shape
 	if out.requires_grad {
 		out.op = .Scale
 		append(&out.inputs, a)
@@ -2763,6 +2765,7 @@ tensor_logsumexp_dim1 :: proc(
 	}
 
 	out := _tensor_new_op(out_data, q.requires_grad, allocator)
+	out.shape = [4]int{batch, 1, 1, 1}
 	if out.requires_grad {
 		out.op = .LogSumExpDim1
 		append(&out.inputs, q)

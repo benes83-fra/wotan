@@ -110,8 +110,9 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 			a_in := node.inputs[0]
 			if a_in.requires_grad {
 				tensor_ensure_grad(a_in)
-				batch_size := node.shape[0]
-				num_assets := node.shape[1]
+				// Output is [batch, 1]; the summed width comes from the input
+				batch_size := node.data.rows
+				num_assets := len(a_in.data.data) / batch_size
 				// The gradient of a sum is just the gradient of the output, broadcasted to all summed elements
 				for b in 0 ..< batch_size {
 					grad_val := node.grad.data[b]
@@ -593,7 +594,7 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 			q_in := node.inputs[0]
 			if q_in.requires_grad && len(q_in.grad.data) > 0 {
 				num_actions := node.int_metadata[0]
-				batch := node.shape[0]
+				batch := node.data.rows
 				for i in 0 ..< batch {
 					max_val := -math.F64_MAX
 					for a in 0 ..< num_actions {
@@ -823,22 +824,17 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 			pred_in := node.inputs[0]
 			target_in := node.inputs[1]
 
-			if pred_in.requires_grad {
-				if len(node.grad.data) == 0 {
-					fmt.println("WARNING: MSELoss node has empty gradient, skipping")
-					continue
-				}
+			// dL/dtarget = -dL/dpred
+			if pred_in.requires_grad || target_in.requires_grad {
 				n := f64(len(pred_in.data.data))
-				scalar_grad := node.grad.data[0] // Usually 1.0
-				scale := 2.0 * scalar_grad / n
+				scale := 2.0 * node.grad.data[0] / n
 
-				// Re-calculate (pred - target) using temp allocator
 				diff := make([]f64, len(pred_in.data.data), allocator)
+				defer delete(diff, allocator)
 				l.vec_sub_simd(pred_in.data.data, target_in.data.data, diff)
 
-				// ✅ SIMD Optimization: grad_pred += scale * diff
-				l.axpy_simd(scale, diff, pred_in.grad.data)
-				delete(diff, allocator)
+				if pred_in.requires_grad {l.axpy_simd(scale, diff, pred_in.grad.data)}
+				if target_in.requires_grad {l.axpy_simd(-scale, diff, target_in.grad.data)}
 			}
 		case .LayerNorm:
 			input_in := node.inputs[0]
@@ -1105,6 +1101,15 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 					prediction.grad.data[i] += grad_scalar * grad
 				}
 			}
+			if target.requires_grad {
+				n := len(prediction.data.data)
+				grad_scalar := node.grad.data[0]
+				// dL/dt = (ln(1-p) - ln p) / n, with the same clamping as the forward
+				for i in 0 ..< n {
+					p := math.max(1e-7, math.min(1.0 - 1e-7, prediction.data.data[i]))
+					target.grad.data[i] += grad_scalar * (math.ln(1.0 - p) - math.ln(p)) / f64(n)
+				}
+			}
 		case .MaxPool2d:
 			a_in := node.inputs[0]
 			if a_in.requires_grad {
@@ -1303,6 +1308,15 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 					t := target_in.data.data[i]
 					grad := scalar_grad * (-t / p + (1.0 - t) / (1.0 - p)) / n
 					pred_in.grad.data[i] += grad
+				}
+			}
+			if target_in.requires_grad {
+				eps := 1e-7
+				n := f64(len(pred_in.data.data))
+				scalar_grad := node.grad.data[0]
+				for i in 0 ..< len(pred_in.data.data) {
+					p := math.max(math.min(pred_in.data.data[i], 1.0 - eps), eps)
+					target_in.grad.data[i] += scalar_grad * (math.ln(1.0 - p) - math.ln(p)) / n
 				}
 			}
 		case .AvgPool2d:
