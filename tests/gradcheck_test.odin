@@ -25,6 +25,7 @@ gc_check :: proc(
 	x: ^t.Tensor,
 	f: proc(x: ^t.Tensor) -> ^t.Tensor,
 	allocator: mem.Allocator,
+	h: f64 = 1e-6,
 ) {
 	t.tensor_zero_grad(x)
 	loss := f(x)
@@ -34,7 +35,6 @@ gc_check :: proc(
 	copy(analytic, x.grad.data)
 	t.tensor_free_graph(loss, allocator)
 
-	h := 1e-6
 	max_err := 0.0
 	for i in 0 ..< len(x.data.data) {
 		orig := x.data.data[i]
@@ -174,6 +174,40 @@ gradcheck_test :: proc(allocator: mem.Allocator) {
 		W := gc_mk([]f64{1.0, -2.0, 0.5, 3.0}, 1, 4, false, context.allocator)
 		W.owned_by_graph = true
 		return t.tensor_sum(t.tensor_mul(t.tensor_softmax(x), W))
+	}, allocator)
+
+	// 9. Clamp with a tiny bound (old int*1e6 encoding rounded lo=-2.5e-7 to 0).
+	// x[0] = -1e-7 is inside [lo, hi], so its gradient must be 1.
+	cl := gc_mk([]f64{-1e-7, 0.3, 2.0}, 1, 3, true, allocator)
+	defer t.tensor_free(cl)
+	gc_check("clamp(x, -2.5e-7, 1.5)", cl, proc(x: ^t.Tensor) -> ^t.Tensor {
+		return t.tensor_sum(t.tensor_clamp(x, -2.5e-7, 1.5))
+	}, allocator, 1e-9)
+
+	// 10. Prospect theory ops with non-round parameters
+	pv := gc_mk([]f64{0.02, -0.015, 0.3, -0.4}, 1, 4, true, allocator)
+	defer t.tensor_free(pv)
+	gc_check("prospect_value(a=0.8812345)", pv, proc(x: ^t.Tensor) -> ^t.Tensor {
+		return t.tensor_sum(t.tensor_prospect_value(x, 0.8812345, 0.8712345, 2.2512345, context.allocator))
+	}, allocator)
+	gc_check("prospect_utility(a=0.8812345)", pv, proc(x: ^t.Tensor) -> ^t.Tensor {
+		return t.tensor_prospect_utility(x, 0.8812345, 0.8712345, 2.2512345, context.allocator)
+	}, allocator)
+
+	pw := gc_mk([]f64{0.1, 0.35, 0.6, 0.9}, 1, 4, true, allocator)
+	defer t.tensor_free(pw)
+	gc_check("prob_weighting(gamma=0.6123457)", pw, proc(x: ^t.Tensor) -> ^t.Tensor {
+		return t.tensor_sum(t.tensor_prob_weighting(x, 0.6123457, context.allocator))
+	}, allocator)
+
+	// 11. Time-dimension z-score (eps passed through f64_metadata)
+	nt := gc_mk([]f64{0.5, -1.0, 2.0, 0.3, -0.7, 1.1, 0.0, 0.9}, 1, 8, true, allocator)
+	defer t.tensor_free(nt)
+	nt.shape = [4]int{1, 1, 4, 2} // [N, C, T, L]
+	gc_check("normalize_time [1,1,4,2]", nt, proc(x: ^t.Tensor) -> ^t.Tensor {
+		W := gc_mk([]f64{0.3, -1.2, 0.8, 2.0, 0.5, -0.7, 1.4, -0.2}, 1, 8, false, context.allocator)
+		W.owned_by_graph = true
+		return t.tensor_sum(t.tensor_mul(t.tensor_normalize_time(x, 1e-8, context.allocator), W))
 	}, allocator)
 
 	fmt.printf("Gradcheck summary: %d/%d passed\n", gc_passed, gc_total)

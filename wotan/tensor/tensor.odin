@@ -95,6 +95,7 @@ Tensor :: struct {
 	inputs:         [dynamic]^Tensor,
 	allocator:      mem.Allocator,
 	int_metadata:   [dynamic]int,
+	f64_metadata:   [dynamic]f64, // float op parameters (scalars, eps, alpha, ...) for backward
 	dropout_mask:   []f64,
 	shape:          [4]int,
 	conv_params:    ConvParams,
@@ -132,6 +133,7 @@ tensor_new :: proc(
 
 	t.inputs = make([dynamic]^Tensor, 0, allocator)
 	t.int_metadata = make([dynamic]int, 0, allocator)
+	t.f64_metadata = make([dynamic]f64, 0, allocator)
 	// Initialize gradients to zero
 	if requires_grad {
 		t.grad = l.matrix_new(f64, data.rows, data.cols, allocator)
@@ -148,6 +150,7 @@ tensor_free :: proc(t: ^Tensor) {
 
 	delete(t.inputs)
 	delete(t.int_metadata)
+	delete(t.f64_metadata)
 	if t.dropout_mask != nil {delete(t.dropout_mask, t.allocator)}
 	global_tensors_freed += 1 // ✅ ADD THIS
 	free(t, t.allocator)
@@ -787,6 +790,7 @@ _tensor_free_graph_impl :: proc(node: ^Tensor, visited: ^map[^Tensor]bool) {
 	if node.grad.data != nil {l.matrix_free(&node.grad)}
 	delete(node.inputs)
 	delete(node.int_metadata)
+	delete(node.f64_metadata)
 	if node.dropout_mask != nil {delete(node.dropout_mask, node.allocator)}
 	free(node, node.allocator)
 }
@@ -811,6 +815,7 @@ tensor_free_graph :: proc(root: ^Tensor, allocator: mem.Allocator = context.allo
 			if node.grad.data != nil {l.matrix_free(&node.grad)}
 			delete(node.inputs)
 			delete(node.int_metadata)
+			delete(node.f64_metadata)
 			if node.dropout_mask != nil {delete(node.dropout_mask, node.allocator)}
 			free(node, node.allocator)
 			freed_in_graph += 1
@@ -2151,6 +2156,7 @@ tensor_leaky_relu :: proc(a: ^Tensor, alpha: f64 = 0.01) -> ^Tensor {
 	if out.requires_grad {
 		out.op = .LeakyReLU
 		append(&out.inputs, a)
+		append(&out.f64_metadata, alpha)
 	}
 	return out
 }
@@ -2174,7 +2180,7 @@ tensor_scale :: proc(a: ^Tensor, scalar: f64) -> ^Tensor {
 	if out.requires_grad {
 		out.op = .Scale
 		append(&out.inputs, a)
-		append(&out.int_metadata, int(scalar * 1000000))
+		append(&out.f64_metadata, scalar)
 	}
 	return out
 }
@@ -2344,8 +2350,8 @@ tensor_clamp :: proc(a: ^Tensor, lo: f64, hi: f64) -> ^Tensor {
 		out.op = .Clamp // add .Clamp to the Op enum
 		append(&out.inputs, a)
 		// store lo/hi for backward
-		append(&out.int_metadata, int(lo * 1_000_000))
-		append(&out.int_metadata, int(hi * 1_000_000))
+		append(&out.f64_metadata, lo)
+		append(&out.f64_metadata, hi)
 	}
 	return out
 }
@@ -2617,11 +2623,11 @@ tensor_sharpe_loss :: proc(
 	if out.requires_grad {
 		out.op = .SharpeLoss
 		append(&out.inputs, returns)
-		// Store metadata for backward pass (scaled by 1,000,000 to fit in int)
+		// Store metadata for backward pass
 		append(&out.int_metadata, int(n))
-		append(&out.int_metadata, int(risk_free_rate * 1_000_000))
-		append(&out.int_metadata, int(mean * 1_000_000))
-		append(&out.int_metadata, int(std * 1_000_000))
+		append(&out.f64_metadata, risk_free_rate)
+		append(&out.f64_metadata, mean)
+		append(&out.f64_metadata, std)
 	}
 
 	return out
@@ -2699,7 +2705,7 @@ tensor_normalize_time :: proc(
 		append(&out.int_metadata, C)
 		append(&out.int_metadata, T)
 		append(&out.int_metadata, L)
-		append(&out.int_metadata, int(eps * 1_000_000_000.0)) // Store eps scaled to fit in int
+		append(&out.f64_metadata, eps)
 	}
 
 	return out
@@ -3209,9 +3215,9 @@ tensor_prospect_value :: proc(
 	if out.requires_grad {
 		out.op = .ProspectValue
 		append(&out.inputs, returns)
-		append(&out.int_metadata, int(alpha * 1_000_000))
-		append(&out.int_metadata, int(beta * 1_000_000))
-		append(&out.int_metadata, int(lambda * 1_000_000))
+		append(&out.f64_metadata, alpha)
+		append(&out.f64_metadata, beta)
+		append(&out.f64_metadata, lambda)
 	}
 	return out
 }
@@ -3243,7 +3249,7 @@ tensor_prob_weighting :: proc(
 	if out.requires_grad {
 		out.op = .ProbWeighting
 		append(&out.inputs, p)
-		append(&out.int_metadata, int(gamma * 1_000_000))
+		append(&out.f64_metadata, gamma)
 	}
 	return out
 }
@@ -3285,9 +3291,9 @@ tensor_prospect_utility :: proc(
 	if out.requires_grad {
 		out.op = .ProspectUtility
 		append(&out.inputs, returns)
-		append(&out.int_metadata, int(alpha * 1_000_000))
-		append(&out.int_metadata, int(beta * 1_000_000))
-		append(&out.int_metadata, int(lambda * 1_000_000))
+		append(&out.f64_metadata, alpha)
+		append(&out.f64_metadata, beta)
+		append(&out.f64_metadata, lambda)
 	}
 	return out
 }

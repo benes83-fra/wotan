@@ -63,8 +63,8 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 			a_in := node.inputs[0]
 			if a_in.requires_grad {
 				tensor_ensure_grad(a_in)
-				lo := f64(node.int_metadata[0]) / 1_000_000.0
-				hi := f64(node.int_metadata[1]) / 1_000_000.0
+				lo := node.f64_metadata[0]
+				hi := node.f64_metadata[1]
 				for i in 0 ..< len(a_in.grad.data) {
 					v := a_in.data.data[i]
 					if v >= lo && v <= hi {
@@ -604,7 +604,8 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 			// d/dx = 1 if x > 0 else α
 			a_in := node.inputs[0]
 			if a_in.requires_grad {
-				alpha := 0.01 // or store in Tensor struct
+				tensor_ensure_grad(a_in)
+				alpha := node.f64_metadata[0]
 				for i in 0 ..< len(a_in.grad.data) {
 					if a_in.data.data[i] > 0.0 {
 						a_in.grad.data[i] += node.grad.data[i]
@@ -1230,7 +1231,7 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 				C := node.int_metadata[1]
 				T := node.int_metadata[2]
 				L := node.int_metadata[3]
-				eps := f64(node.int_metadata[4]) / 1_000_000_000.0
+				eps := node.f64_metadata[0]
 
 				T_f := f64(T)
 				// Temporary buffers
@@ -1749,16 +1750,11 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 				   0 {l.vec_add_simd(bias_in.grad.data, dbias, bias_in.grad.data)}
 		case .Scale:
 			a_in := node.inputs[0]
-			scalar := f64(node.int_metadata[0]) / 1000000.0
+			scalar := node.f64_metadata[0]
 			if a_in.requires_grad {
 				tensor_ensure_grad(a_in)
-				// a_in.grad += node.grad * scalar
-				// Use fma: out += a * b where a=node.grad, b=scalar (broadcast)
-				// Since we don't have a vec_fma_scalar, do it in two steps
-				temp := make([]f64, len(node.grad.data), allocator)
-				l.vec_scale_simd(node.grad.data, scalar, temp)
-				l.vec_add_simd(a_in.grad.data, temp, a_in.grad.data)
-				delete(temp, allocator)
+				// a_in.grad += scalar * node.grad
+				l.axpy_simd(scalar, node.grad.data, a_in.grad.data)
 			}
 		case .CrossEntropy:
 			// The magical simplified gradient: grad = (softmax_prob - target_one_hot) / N
@@ -2012,9 +2008,9 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 			ret_in := node.inputs[0]
 			if ret_in.requires_grad && len(ret_in.grad.data) > 0 {
 				n := f64(node.int_metadata[0])
-				rf := f64(node.int_metadata[1]) / 1_000_000.0
-				mean := f64(node.int_metadata[2]) / 1_000_000.0
-				std := f64(node.int_metadata[3]) / 1_000_000.0
+				rf := node.f64_metadata[0]
+				mean := node.f64_metadata[1]
+				std := node.f64_metadata[2]
 
 				// Analytical gradient of L = -Sharpe w.r.t x_i:
 				// dL/dx_i = ( (mean - rf) * (x_i - mean) - std^2 ) / (n * std^3)
@@ -2694,9 +2690,9 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 			x_in := node.inputs[0]
 			if x_in.requires_grad {
 				tensor_ensure_grad(x_in)
-				alpha := f64(node.int_metadata[0]) / 1_000_000
-				beta := f64(node.int_metadata[1]) / 1_000_000
-				lambda := f64(node.int_metadata[2]) / 1_000_000
+				alpha := node.f64_metadata[0]
+				beta := node.f64_metadata[1]
+				lambda := node.f64_metadata[2]
 
 				for i in 0 ..< len(x_in.data.data) {
 					x := x_in.data.data[i]
@@ -2720,7 +2716,7 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 			p_in := node.inputs[0]
 			if p_in.requires_grad {
 				tensor_ensure_grad(p_in)
-				gamma := f64(node.int_metadata[0]) / 1_000_000
+				gamma := node.f64_metadata[0]
 				eps := 1e-7
 
 				for i in 0 ..< len(p_in.data.data) {
@@ -2748,9 +2744,9 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 			x_in := node.inputs[0]
 			if x_in.requires_grad {
 				tensor_ensure_grad(x_in)
-				alpha := f64(node.int_metadata[0]) / 1_000_000
-				beta := f64(node.int_metadata[1]) / 1_000_000
-				lambda := f64(node.int_metadata[2]) / 1_000_000
+				alpha := node.f64_metadata[0]
+				beta := node.f64_metadata[1]
+				lambda := node.f64_metadata[2]
 				n := f64(len(x_in.data.data))
 
 				// d(-U)/dx_i = -dv/dx_i / n
