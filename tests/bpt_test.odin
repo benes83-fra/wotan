@@ -133,24 +133,13 @@ bpt_test :: proc(allocator: mem.Allocator) {
 }
 
 bpt_v2_test :: proc(allocator: mem.Allocator) {
-	fmt.println("\n=== Behavioral Portfolio Theory V2 (Sleeve Mandating) ===")
+	fmt.println("\n=== Behavioral Portfolio Theory V2 (Sleeve Mandating - FIXED) ===")
 	fmt.println("Enforcing human narrative constraints on the Mental Accounting Pyramid.")
+	fmt.println("Speculative Layer now uses Upside Variance (Lottery Ticket Hunting).")
 
-	// Universe
-	symbols := []string {
-		"TLT", // 0: Bonds
-		"GLD", // 1: Gold
-		"XLU", // 2: Utilities
-		"SPY", // 3: Broad Market
-		"XLF", // 4: Financials
-		"XLI", // 5: Industrials
-		"XLK", // 6: Tech
-		"XLE", // 7: Energy
-		"XLY", // 8: Discretionary
-	}
+	symbols := []string{"TLT", "GLD", "XLU", "SPY", "XLF", "XLI", "XLK", "XLE", "XLY"}
 	n_assets := len(symbols)
 
-	// 1. Fetch Data
 	fmt.println("- Fetching historical data...")
 	prices := make([][]f64, n_assets, allocator)
 	defer {
@@ -175,7 +164,6 @@ bpt_v2_test :: proc(allocator: mem.Allocator) {
 		if prices[a] != nil && len(prices[a]) < min_time {min_time = len(prices[a])}
 	}
 
-	// 2. Compute Monthly Returns
 	rebalance_days := 21
 	n_months := (min_time - 1) / rebalance_days
 	monthly_returns := l.matrix_new(f64, n_months, n_assets, allocator)
@@ -193,26 +181,18 @@ bpt_v2_test :: proc(allocator: mem.Allocator) {
 		}
 	}
 
-	// 3. Define Narrative Mandates (Boolean Masks)
 	safety_mask := make([]bool, n_assets, allocator)
-	safety_mask[0] = true // TLT
-	safety_mask[1] = true // GLD
-	safety_mask[2] = true // XLU
+	safety_mask[0] = true; safety_mask[1] = true; safety_mask[2] = true
 
 	asp_mask := make([]bool, n_assets, allocator)
-	asp_mask[3] = true // SPY
-	asp_mask[4] = true // XLF
-	asp_mask[5] = true // XLI
-	asp_mask[6] = true // XLK
+	asp_mask[3] = true; asp_mask[4] = true; asp_mask[5] = true; asp_mask[6] = true
 
 	spec_mask := make([]bool, n_assets, allocator)
-	spec_mask[7] = true // XLE
-	spec_mask[8] = true // XLY
+	spec_mask[7] = true; spec_mask[8] = true
 
 	defer {delete(safety_mask, allocator); delete(asp_mask, allocator)
 		delete(spec_mask, allocator)}
 
-	// 4. Run BPT V2 Optimizer
 	fmt.println("- Optimizing Mandated Sleeves...")
 	combined, w_safety, w_asp, w_spec := bfin.bpt_optimize_v2(
 		&monthly_returns,
@@ -231,7 +211,6 @@ bpt_v2_test :: proc(allocator: mem.Allocator) {
 		delete(w_spec, allocator)
 	}
 
-	// 5. Print the Mandated Pyramid
 	fmt.println("\n--- The Mandated Mental Accounting Pyramid ---")
 	fmt.printf(
 		"%-5s | %-10s | %-10s | %-10s | %-10s\n",
@@ -253,7 +232,6 @@ bpt_v2_test :: proc(allocator: mem.Allocator) {
 		)
 	}
 
-	// 6. Evaluate Combined Metrics
 	metrics := bfin.prospect_metrics(
 		combined,
 		&monthly_returns,
@@ -266,10 +244,8 @@ bpt_v2_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("Loss Probability:  %8.2f%%\n", metrics.loss_probability * 100.0)
 	fmt.printf("Prospect Utility:  %8.4f\n", metrics.prospect_utility)
 
-	fmt.println("\n💡 Insight: V2 enforces human narrative boundaries.")
-	fmt.println("Tech is now strictly confined to Aspiration/Speculative,")
 	fmt.println(
-		"and Bonds are strictly confined to Safety, exactly as a human wealth manager would dictate.",
+		"\n💡 Insight: The Speculative layer now actively hunts for explosive upside variance.",
 	)
 
 	fmt.println("\n=== Behavioral Portfolio Theory V2 Test Complete ===\n")

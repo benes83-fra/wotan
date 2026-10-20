@@ -153,6 +153,72 @@ prospect_portfolio_optimize :: proc(
 // Layer 1 (Safety): Min Variance (Capital Preservation)
 // Layer 2 (Aspiration): Max Sharpe (Efficient Growth)
 // Layer 3 (Speculative): Risk-Seeking Prospect (Lottery Tickets)
+// Maximize Upside Variance (The "Lottery Ticket" Objective)
+// Hunts for assets with explosive positive spikes, ignoring downside risk.
+upside_variance_optimize :: proc(
+	returns_data: ^l.Matrix(f64),
+	learning_rate: f64 = 0.1,
+	max_iter: int = 3000,
+	allocator: mem.Allocator = context.allocator,
+) -> []f64 {
+	T := returns_data.rows
+	N := returns_data.cols
+
+	w := make([]f64, N, allocator)
+	for i in 0 ..< N {w[i] = 1.0 / f64(N)}
+
+	grad := make([]f64, N, allocator)
+	defer delete(grad, allocator)
+	port_rets := make([]f64, T, allocator)
+	defer delete(port_rets, allocator)
+
+	for iter in 0 ..< max_iter {
+		// 1. Compute portfolio returns and mean
+		sum := 0.0
+		for t in 0 ..< T {
+			r := 0.0
+			for i in 0 ..< N {r += w[i] * returns_data.data[t * N + i]}
+			port_rets[t] = r
+			sum += r
+		}
+		mean_ret := sum / f64(T)
+
+		// 2. Compute gradient of Upside Variance: E[ max(R - mean, 0)^2 ]
+		for i in 0 ..< N {grad[i] = 0.0}
+
+		for t in 0 ..< T {
+			diff := port_rets[t] - mean_ret
+			if diff > 0 {
+				// Gradient of upside semi-variance
+				for i in 0 ..< N {
+					grad[i] += 2.0 * diff * (returns_data.data[t * N + i] - mean_ret)
+				}
+			}
+		}
+		for i in 0 ..< N {grad[i] /= f64(T)}
+
+		// 3. Gradient Ascent
+		for i in 0 ..< N {w[i] += learning_rate * grad[i]}
+
+		// 4. Project onto simplex
+		sum_w := 0.0
+		for i in 0 ..< N {
+			if w[i] < 0.0 {w[i] = 0.0}
+			sum_w += w[i]
+		}
+		if sum_w > 1e-12 {
+			for i in 0 ..< N {w[i] /= sum_w}
+		} else {
+			for i in 0 ..< N {w[i] = 1.0 / f64(N)}
+		}
+	}
+	return w
+}
+
+// ============================================================================
+// Behavioral Portfolio Theory (V1 & V2) - Fixed
+// ============================================================================
+
 bpt_optimize :: proc(
 	returns_data: ^l.Matrix(f64),
 	safety_alloc: f64,
@@ -166,32 +232,17 @@ bpt_optimize :: proc(
 	w_spec: []f64,
 ) {
 	N := returns_data.cols
-
-	// Compute moments for classical layers
 	mu := fin.expected_returns_from_history(returns_data, allocator)
 	defer delete(mu, allocator)
-
 	cov := fin.covariance_matrix(returns_data, allocator)
 	defer l.matrix_free(&cov)
 
-	// 1. Safety Layer: Min Variance (Protect the downside)
 	w_safety = fin.min_variance_portfolio(&cov, allocator)
-
-	// 2. Aspiration Layer: Max Sharpe (Efficient market growth)
 	w_asp = fin.max_sharpe_portfolio(mu, &cov, 0.0, allocator)
 
-	// 3. Speculative Layer: Risk-Seeking Prospect (Chase the upside)
-	// alpha > 1.0 makes the utility function convex for gains (risk-seeking).
-	// lambda = 1.0 removes loss aversion (they don't care about the downside here).
-	spec_params := ProspectPortfolioParams {
-		alpha     = 1.2,
-		beta      = 0.88,
-		lambda    = 1.0,
-		ref_point = 0.0,
-	}
-	w_spec = prospect_portfolio_optimize(returns_data, spec_params, 0.1, 2000, allocator)
+	// ✅ FIX: Use proper Upside Variance for Speculative layer
+	w_spec = upside_variance_optimize(returns_data, 0.1, 3000, allocator)
 
-	// 4. Combine Weights (The Mental Accounting Pyramid)
 	combined = make([]f64, N, allocator)
 	for i in 0 ..< N {
 		combined[i] =
@@ -199,7 +250,6 @@ bpt_optimize :: proc(
 			(aspiration_alloc * w_asp[i]) +
 			(speculative_alloc * w_spec[i])
 	}
-
 	return combined, w_safety, w_asp, w_spec
 }
 
@@ -211,7 +261,6 @@ extract_sub_returns :: proc(
 ) -> l.Matrix(f64) {
 	T := returns_data.rows
 	N := returns_data.cols
-
 	sub_cols := 0
 	for b in mask {if b {sub_cols += 1}}
 
@@ -227,10 +276,6 @@ extract_sub_returns :: proc(
 	}
 	return sub_mat
 }
-
-// ============================================================================
-// Behavioral Portfolio Theory V2 (Sleeve Mandating)
-// ============================================================================
 
 bpt_optimize_v2 :: proc(
 	returns_data: ^l.Matrix(f64),
@@ -249,24 +294,18 @@ bpt_optimize_v2 :: proc(
 ) {
 	N := returns_data.cols
 
-	// 1. Extract sub-matrices for each mandated sleeve
 	safe_mat := extract_sub_returns(returns_data, safety_universe, allocator)
 	defer l.matrix_free(&safe_mat)
-
 	asp_mat := extract_sub_returns(returns_data, aspiration_universe, allocator)
 	defer l.matrix_free(&asp_mat)
-
 	spec_mat := extract_sub_returns(returns_data, speculative_universe, allocator)
 	defer l.matrix_free(&spec_mat)
 
-	// 2. Optimize each sleeve within its mandate
-	// Safety Sleeve: Min Variance
 	safe_cov := fin.covariance_matrix(&safe_mat, allocator)
 	defer l.matrix_free(&safe_cov)
 	sub_w_safety := fin.min_variance_portfolio(&safe_cov, allocator)
 	defer delete(sub_w_safety, allocator)
 
-	// Aspiration Sleeve: Max Sharpe
 	asp_mu := fin.expected_returns_from_history(&asp_mat, allocator)
 	defer delete(asp_mu, allocator)
 	asp_cov := fin.covariance_matrix(&asp_mat, allocator)
@@ -274,17 +313,10 @@ bpt_optimize_v2 :: proc(
 	sub_w_asp := fin.max_sharpe_portfolio(asp_mu, &asp_cov, 0.0, allocator)
 	defer delete(sub_w_asp, allocator)
 
-	// Speculative Sleeve: Risk-Seeking Prospect (Lottery Tickets)
-	spec_params := ProspectPortfolioParams {
-		alpha     = 1.2,
-		beta      = 0.88,
-		lambda    = 1.0,
-		ref_point = 0.0,
-	}
-	sub_w_spec := prospect_portfolio_optimize(&spec_mat, spec_params, 0.1, 2000, allocator)
+	// ✅ FIX: Use proper Upside Variance for Speculative layer
+	sub_w_spec := upside_variance_optimize(&spec_mat, 0.1, 3000, allocator)
 	defer delete(sub_w_spec, allocator)
 
-	// 3. Map the sleeve weights back to the full asset universe
 	w_safety = make([]f64, N, allocator)
 	w_asp = make([]f64, N, allocator)
 	w_spec = make([]f64, N, allocator)
@@ -299,7 +331,6 @@ bpt_optimize_v2 :: proc(
 		if speculative_universe[j] {w_spec[j] = sub_w_spec[spec_idx]; spec_idx += 1}
 	}
 
-	// 4. Combine Weights (The Mandated Pyramid)
 	combined = make([]f64, N, allocator)
 	for i in 0 ..< N {
 		combined[i] =
