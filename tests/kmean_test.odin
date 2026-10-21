@@ -7,6 +7,7 @@ import "core:math/rand"
 import "core:mem"
 
 km_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	// Generate synthetic clustered data
 	n_samples := 300
 	n_features := 2
@@ -63,6 +64,7 @@ km_test :: proc(allocator: mem.Allocator) {
 	l.matrix_free(&X_new)
 }
 knn_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	// Generate 3 distinct clusters (Classes: 0.0, 1.0, 2.0)
 	n := 150
 	X := l.matrix_new(f64, n, 2, allocator)

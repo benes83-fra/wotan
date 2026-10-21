@@ -8,6 +8,7 @@ import "core:mem"
 
 
 gnb_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	// Generate 3 distinct clusters (Classes: 0.0, 1.0, 2.0)
 	n := 300
 	X := l.matrix_new(f64, n, 4, allocator)

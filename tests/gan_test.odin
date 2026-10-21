@@ -10,6 +10,7 @@ import "core:math/rand"
 import "core:mem"
 
 gan_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== GAN Test: Sine Wave Generation ===")
 
 	// Hyperparameters
@@ -221,6 +222,7 @@ gan_test :: proc(allocator: mem.Allocator) {
 }
 
 gan_test_v2 :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== GAN Test V2: Improved Training ===")
 
 	// Hyperparameters - adjusted for stability

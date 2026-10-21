@@ -7,6 +7,7 @@ import "core:mem"
 import "core:os"
 
 tokenizer_bpe_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== BPE Tokenizer Isolated Test ===")
 
 	vocab_json := `{"a": 0, "b": 1, "c": 2, "ab": 3, "abc": 4, "[PAD]": 100, "[UNK]": 101, "[CLS]": 102, "[SEP]": 103}`

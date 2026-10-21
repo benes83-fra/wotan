@@ -12,6 +12,7 @@ import "core:mem"
 // Mamba (State Space Model) Integration Test
 // ============================================================================
 mamba_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Mamba (State Space Model) Test ===\n")
 
 	// 1. Setup dimensions
@@ -152,6 +153,7 @@ mamba_test :: proc(allocator: mem.Allocator) {
 // EVERY timestep. Tracking the random per-sample phase requires memory,
 // so the SSM state must do real work.
 mamba_learning_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Mamba Learning Test: Sequence Forecasting ===\n")
 
 	batch_size := 32

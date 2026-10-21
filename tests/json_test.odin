@@ -8,6 +8,7 @@ import "core:mem"
 import "core:os"
 
 json_basic_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
+	seed_test(#procedure)
 	fmt.println("=== JSON load test ===")
 
 	df_json := importer.json_load("example_data.json", importer.DEFAULT_NULL_TOKEN, allocator)
@@ -21,6 +22,7 @@ json_basic_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
 
 
 jsonl_basic_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
+	seed_test(#procedure)
 	fmt.println("=== JSONL load test ===")
 
 	df_jsonl := importer.jsonl_load("example_data2.jsonl", importer.DEFAULT_NULL_TOKEN, allocator)
@@ -33,6 +35,7 @@ jsonl_basic_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
 }
 
 json_export_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("=== JSON Export Test ===")
 
 	// Create a DataFrame

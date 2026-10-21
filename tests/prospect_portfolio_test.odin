@@ -10,6 +10,7 @@ import "core:math"
 import "core:mem"
 
 prospect_portfolio_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Prospect Theory Portfolio Optimization ===")
 	fmt.println("Comparing Markowitz Max-Sharpe vs Behavioral Prospect Optimization.")
 

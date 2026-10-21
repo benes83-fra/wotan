@@ -9,6 +9,7 @@ import "core:mem"
 
 
 model_selection_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing Model Selection Module ===")
 
 	// Generate data for Gaussian NB (3 classes, 4 features)

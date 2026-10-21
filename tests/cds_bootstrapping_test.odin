@@ -5,6 +5,7 @@ import "core:fmt"
 import "core:mem"
 
 cds_bootstrapping_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n======================================================================")
 	fmt.println("         CDS CURVE BOOTSTRAPPING & UPFRONT PRICING")
 	fmt.println("======================================================================\n")

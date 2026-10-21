@@ -5,6 +5,7 @@ import "core:fmt"
 import "core:mem"
 
 optimal_execution_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Optimal Execution & Market Making ===")
 	main_alloc := context.allocator
 

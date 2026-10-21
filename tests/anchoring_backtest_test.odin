@@ -9,6 +9,7 @@ import "core:math"
 import "core:mem"
 
 anchoring_backtest_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Anchoring & 52-Week High Backtest ===")
 	fmt.println("Testing the George & Hwang (2004) anchoring anomaly.")
 	fmt.println("Strategy: Long stocks near 52-week high, short stocks far below.")

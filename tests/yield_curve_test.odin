@@ -5,6 +5,7 @@ import "core:fmt"
 import "core:mem"
 
 yield_curve_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n======================================================================")
 	fmt.println("    YIELD CURVE BOOTSTRAPPING & INTERPOLATION")
 	fmt.println("======================================================================\n")

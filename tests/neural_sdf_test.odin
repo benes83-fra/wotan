@@ -17,6 +17,7 @@ import "core:mem"
 // ============================================================================
 
 neural_sdf_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("\n======================================================================")
 	fmt.println("    NEURAL SDF CALIBRATION: LEARNING THE PRICING KERNEL")
 	fmt.println("    E[M_{t+1} · R_{i,t+1}] = 1  for all assets i")

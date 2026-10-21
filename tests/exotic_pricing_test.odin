@@ -9,6 +9,7 @@ import "core:math/rand"
 import "core:mem"
 
 exotic_pricing_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n======================================================================")
 	fmt.println("              EXOTIC PRICING: THE 'SMILE EFFECT' DEMO")
 	fmt.println("======================================================================\n")

@@ -8,6 +8,7 @@ import "core:mem"
 
 
 logistic_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	// Generate linearly separable 2D data (Labels: 0.0 or 1.0)
 	n := 200
 	X := l.matrix_new(f64, n, 2, allocator)
@@ -70,6 +71,7 @@ logistic_test :: proc(allocator: mem.Allocator) {
 
 
 real_world_logistic_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	// Raw nominal data (e.g., "Weather" and "Wind")
 	weather_data := []string{"Sunny", "Rainy", "Sunny", "Overcast", "Rainy", "Sunny"}
 	wind_data := []string{"Weak", "Strong", "Weak", "Strong", "Weak", "Strong"}
@@ -147,6 +149,7 @@ real_world_logistic_test :: proc(allocator: mem.Allocator) {
 	l.matrix_free(&X_new)
 }
 multiclass_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	// Generate 3 distinct clusters (Classes: 0.0, 1.0, 2.0)
 	n := 150
 	X := l.matrix_new(f64, n, 2, allocator)

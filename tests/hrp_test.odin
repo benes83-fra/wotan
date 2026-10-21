@@ -9,6 +9,7 @@ import "core:math"
 import "core:mem"
 
 hrp_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Hierarchical Risk Parity (HRP) Portfolio Allocation ===")
 	main_alloc := context.allocator
 

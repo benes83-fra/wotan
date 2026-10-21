@@ -6,6 +6,7 @@ import "core:fmt"
 import "core:mem"
 
 html_basic_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
+	seed_test(#procedure)
 	fmt.println("=== HTML load test ===")
 
 	df := importer.html_load("example_table.html", allocator)
@@ -71,6 +72,7 @@ test_all :: proc(allocator: mem.Allocator) {
 }
 
 html_extended_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
+	seed_test(#procedure)
 	test_extract_tables()
 	test_id(allocator)
 	test_index(allocator)
@@ -78,6 +80,7 @@ html_extended_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
 }
 
 html_tags_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
+	seed_test(#procedure)
 	df := importer.html_load_table_id("tag_table.html", "test", allocator)
 	defer w.destroy_dataframe(&df)
 	w.dataframe_pretty_print(&df, 20)
@@ -87,6 +90,7 @@ html_tags_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
 
 
 html_export_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
+	seed_test(#procedure)
 	fmt.println("=== HTML EXPORT TEST ===")
 
 	// Build a small DF

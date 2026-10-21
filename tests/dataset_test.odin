@@ -8,6 +8,7 @@ import "core:fmt"
 import "core:mem"
 
 dataset_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing DataFrame Bridge ===")
 
 	// 1. Load your CSVs into your DataFrames (using your existing CSV reader)

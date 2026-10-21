@@ -10,6 +10,7 @@ import "core:math/rand"
 import "core:mem"
 
 deeplob_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("=== DeepLOB Training Step Test ===")
 
 	config := ml_fin.DeepLOBConfig {
@@ -55,6 +56,7 @@ deeplob_test :: proc(allocator: mem.Allocator) {
 	fmt.println("✓ DeepLOB training step complete!")
 }
 deeplob_talkative_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== DeepLOB (Synthetic LOB) Talkative Training Test ===")
 
 	// 1. Hyperparameters

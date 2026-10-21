@@ -9,6 +9,7 @@ import "core:math"
 import "core:mem"
 
 deep_bsde_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("\n======================================================================")
 	fmt.println("    DEEP BSDE: HIGH-DIMENSIONAL BLACK-SCHOLES PDE")
 	fmt.println("======================================================================\n")
@@ -78,6 +79,7 @@ deep_bsde_test :: proc(allocator: mem.Allocator = context.allocator) {
 }
 
 deep_bsde_european_call_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== DEEP BSDE: 1D EUROPEAN CALL VALIDATION ===")
 
 	d := 1
@@ -138,6 +140,7 @@ deep_bsde_european_call_test :: proc(allocator: mem.Allocator = context.allocato
 	fmt.printf("Error: %.4f%%\n", math.abs(model.y0.data.data[0] - bs_price) / bs_price * 100)
 }
 deep_bsde_100d_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== 100D Max-Call Option (Han et al. 2018 Benchmark) ===")
 
 	d := 100

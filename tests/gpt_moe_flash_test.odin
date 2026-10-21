@@ -50,6 +50,7 @@ generate_batch_moe :: proc(
 }
 
 gpt_moe_flash_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== GPT MoE + Flash Attention Test (Associative Recall) ===")
 
 	// 1. Hyperparameters (Kept small for fast execution)

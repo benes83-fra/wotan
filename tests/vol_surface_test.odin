@@ -6,6 +6,7 @@ import "core:math"
 import "core:mem"
 
 vol_surface_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Volatility Surface Calibration ===\n")
 	fin.debug_heston()
 

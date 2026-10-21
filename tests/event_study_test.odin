@@ -16,6 +16,7 @@ import "core:strconv"
 import "core:strings"
 
 event_study_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== FinBERT Event Study & CAR Pipeline Test ===")
 
 	symbol := "AAPL"
@@ -187,6 +188,7 @@ mock_tokenize :: proc(
 
 
 event_study_nlp_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Real NLP Integration & Event Study Pipeline ===")
 
 	symbol := "AAPL"
@@ -401,6 +403,7 @@ event_study_nlp_test :: proc(allocator: mem.Allocator) {
 
 
 event_study_tokenizer_nlp_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Real NLP Integration & Event Study Pipeline ===")
 
 	symbol := "AAPL"

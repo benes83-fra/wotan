@@ -7,6 +7,7 @@ import "core:math"
 import "core:mem"
 
 ridge_cv_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== RIDGE CV TEST ===")
 
 	// Generate synthetic data: y = 3 + 2*x + noise
@@ -47,6 +48,7 @@ ridge_cv_test :: proc(allocator: mem.Allocator = context.allocator) {
 }
 
 lasso_cv_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== LASSO CV TEST ===")
 
 	// Generate data with 2 signal + 2 noise features

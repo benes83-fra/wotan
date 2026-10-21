@@ -7,6 +7,7 @@ import rand "core:math/rand"
 import "core:mem"
 
 ir_derivatives_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n======================================================================")
 	fmt.println("         INTEREST RATE DERIVATIVES: HULL-WHITE MODEL")
 	fmt.println("======================================================================\n")
@@ -134,6 +135,7 @@ ir_derivatives_test :: proc(allocator: mem.Allocator) {
 // NEW: Hull-White 1F Floor Option Test
 // ========================================================================
 ir_derivatives_floor_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n======================================================================")
 	fmt.println("    INTEREST RATE DERIVATIVES: HULL-WHITE 1F FLOOR OPTION")
 	fmt.println("======================================================================\n")
@@ -198,6 +200,7 @@ ir_derivatives_floor_test :: proc(allocator: mem.Allocator) {
 // NEW: Hull-White 2F Swaption Strip Test
 // ========================================================================
 ir_derivatives_swaption_strip_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n======================================================================")
 	fmt.println("    INTEREST RATE DERIVATIVES: HULL-WHITE 2F SWAPTION STRIP")
 	fmt.println("======================================================================\n")

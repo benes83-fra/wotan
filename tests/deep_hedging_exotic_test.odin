@@ -175,6 +175,7 @@ _static_delta_variance_exotic :: proc(
 // ============================================================================
 
 deep_hedging_exotic_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("")
 	fmt.println("======================================================================")
 	fmt.println("    DEEP HEDGING: EXOTIC OPTIONS (ASIAN & BARRIER)")

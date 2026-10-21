@@ -7,6 +7,7 @@ import "core:math"
 import "core:math/rand"
 import "core:mem"
 pdpm_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Dybvig PDPM Test ===\n")
 
 	// 1. Generate synthetic market data (Physical Measure P)
@@ -151,6 +152,7 @@ pdpm_test :: proc(allocator: mem.Allocator) {
 }
 
 pdpm2_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== PDPM (Payoff Distribution Pricing Model) Test ===\n")
 
 	// ========================================================================

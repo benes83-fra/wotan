@@ -15,6 +15,7 @@ SEP_TOKEN :: 1
 MASK_TOKEN :: 2
 
 bert_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== BERT Character-Level Test (Arena Allocation) ===")
 
 	// Training corpus - two related sentence groups

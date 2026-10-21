@@ -10,6 +10,7 @@ import "core:math"
 import "core:mem"
 
 bpt_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Behavioral Portfolio Theory (Mental Accounting) ===")
 	fmt.println("Building the Shefrin & Statman 3-Layer Pyramid.")
 	fmt.println("Layer 1: Safety (Min Variance)")
@@ -133,6 +134,7 @@ bpt_test :: proc(allocator: mem.Allocator) {
 }
 
 bpt_v2_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Behavioral Portfolio Theory V2 (Sleeve Mandating - FIXED) ===")
 	fmt.println("Enforcing human narrative constraints on the Mental Accounting Pyramid.")
 	fmt.println("Speculative Layer now uses Upside Variance (Lottery Ticket Hunting).")

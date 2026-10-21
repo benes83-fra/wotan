@@ -8,6 +8,7 @@ import "core:math"
 import "core:mem"
 
 hmm_regime_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Hidden Markov Model (HMM) Regime Switching ===")
 	main_alloc := context.allocator
 

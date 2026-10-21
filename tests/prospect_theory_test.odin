@@ -7,6 +7,7 @@ import "core:math"
 import "core:mem"
 
 prospect_theory_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Prospect Theory Backbone Test ===")
 
 	// ========================================================================

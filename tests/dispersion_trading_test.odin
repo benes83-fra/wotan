@@ -13,6 +13,7 @@ import "core:math"
 import "core:mem"
 
 dispersion_trading_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Cross-Asset Dispersion Trading Test ===")
 	main_alloc := context.allocator
 

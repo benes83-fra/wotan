@@ -8,6 +8,7 @@ import "core:math"
 import "core:math/rand"
 import "core:mem"
 grid_search_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing Generic Grid Search ===")
 
 	// Generate data
@@ -96,6 +97,7 @@ grid_search_test :: proc(allocator: mem.Allocator) {
 }
 
 extended_grid_search_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Extended Grid Search Tests (Full Library) ===")
 
 	// ---------------------------------------------------------
@@ -296,6 +298,7 @@ extended_grid_search_test :: proc(allocator: mem.Allocator) {
 	delete(y_cls, allocator)
 }
 random_search_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing Random Search ===")
 
 	// ---------------------------------------------------------

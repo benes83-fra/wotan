@@ -260,6 +260,7 @@ test_schedulers :: proc() -> bool {
 // ============================================================================
 
 run_optimizer_tests :: proc(allocator: mem.Allocator) -> bool {
+	seed_test(#procedure)
 	fmt.println("\n=== Running Optimizer Unit Tests ===\n")
 
 	all_passed := true

@@ -16,6 +16,7 @@ import "core:strings"
 import "core:time"
 
 alt_data_gdelt_pipeline_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("\n======================================================================")
 	fmt.println("    ALTERNATIVE DATA PIPELINE: GDELT NEWS SENTIMENT & YAHOO PRICES")
 	fmt.println("======================================================================\n")
@@ -237,6 +238,7 @@ alt_data_gdelt_pipeline_test :: proc(allocator: mem.Allocator = context.allocato
 	fmt.println("======================================================================\n")
 }
 alt_data_finnhub_pipeline_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("\n======================================================================")
 	fmt.println("    ALTERNATIVE DATA PIPELINE: FINNHUB NEWS SENTIMENT & YAHOO PRICES")
 	fmt.println("======================================================================\n")

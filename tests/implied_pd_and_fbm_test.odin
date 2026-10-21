@@ -6,6 +6,7 @@ import "core:math"
 import "core:mem"
 
 implied_pd_and_fbm_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n======================================================================")
 	fmt.println("    IMPLIED DEFAULT PROBABILITY & FRACTIONAL BROWNIAN MOTION")
 	fmt.println("======================================================================\n")
@@ -131,6 +132,7 @@ implied_pd_and_fbm_test :: proc(allocator: mem.Allocator) {
 }
 
 rough_volatility_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n======================================================================")
 	fmt.println("    ROUGH VOLATILITY: ROUGH BERGOMI (rBergomi) MODEL")
 	fmt.println("======================================================================\n")
@@ -202,6 +204,7 @@ rough_volatility_test :: proc(allocator: mem.Allocator) {
 }
 
 rough_volatility_pd_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n======================================================================")
 	fmt.println("    ROUGH VOLATILITY & IMPLIED DEFAULT PROBABILITY")
 	fmt.println("======================================================================\n")

@@ -8,6 +8,7 @@ import "core:math"
 import "core:mem"
 
 timegan_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("\n======================================================================")
 	fmt.println("    TimeGAN: Synthetic Market Data Generation Test")
 	fmt.println("======================================================================")

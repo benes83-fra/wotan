@@ -11,6 +11,7 @@ import "core:math/rand"
 import "core:mem"
 
 behavioral_backtester_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Behavioral Alpha Backtester ===")
 	fmt.println("Testing the profitability of the Market-Implied Psychology (Gamma) signal.")
 	fmt.println(
@@ -250,6 +251,7 @@ fear_ratio_to_gamma :: proc(fear_ratio: f64) -> f64 {
 // Main Backtest
 // ============================================================================
 historical_gamma_backtest_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Real-World Historical Gamma Backtest ===")
 	fmt.println("Replaying actual SPY + VIX history through the Behavioral Alpha Engine.")
 

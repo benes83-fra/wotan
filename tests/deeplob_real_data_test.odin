@@ -178,6 +178,7 @@ extract_and_window_lob :: proc(
 // ============================================================================
 
 deeplob_real_data_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== DeepLOB Real Data Pipeline Test ===")
 
 	// Verified public URL for real 10-level Limit Order Book data (TSLA)
@@ -283,6 +284,7 @@ deeplob_real_data_test :: proc(allocator: mem.Allocator) {
 // ============================================================================
 
 deeplob_real_data_sharpe_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== DeepLOB Real Data Pipeline Test (Sharpe Loss) ===")
 
 	// Verified public URL for real 10-level Limit Order Book data (TSLA)

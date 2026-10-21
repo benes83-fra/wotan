@@ -27,6 +27,7 @@ apply_prospect_value :: proc(reward: f64, alloc: mem.Allocator) -> f64 {
 }
 
 prospect_ppo_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Prospect Theory PPO Trading Test (Disposition Effect) ===")
 
 	// 1. Fetch Data

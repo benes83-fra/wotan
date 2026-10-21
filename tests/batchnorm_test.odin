@@ -318,6 +318,7 @@ batchnorm_train_eval_test :: proc(allocator: mem.Allocator) {
 // Run all BatchNorm tests
 // Run all BatchNorm tests
 run_all_batchnorm_tests :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("")
 	fmt.println("============================================================")
 	fmt.println("RUNNING ALL BATCHNORM TESTS")

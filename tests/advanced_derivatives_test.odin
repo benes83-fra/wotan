@@ -5,6 +5,7 @@ import "core:fmt"
 import "core:mem"
 
 advanced_derivatives_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Advanced Derivatives: Differentiable Monte Carlo ===\n")
 
 	// Asian Call Option Parameters
@@ -45,6 +46,7 @@ advanced_derivatives_test :: proc(allocator: mem.Allocator) {
 	fmt.println("\n✓ Advanced Derivatives test completed!")
 }
 exotic_options_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Exotic Options Pricing ===\n")
 
 	// Test 1: Up-and-Out Barrier Asian

@@ -7,6 +7,7 @@ import "core:math/rand"
 import "core:mem"
 
 risk_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== RISK METRICS TEST ===\n")
 
 	// 1. Generate synthetic daily returns (e.g., 252 days = 1 year)

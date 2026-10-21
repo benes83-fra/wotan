@@ -7,6 +7,7 @@ import "core:math/rand"
 import "core:mem"
 
 credit_derivatives_2008_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n======================================================================")
 	fmt.println("         CREDIT DERIVATIVES: THE 2008 GAUSSIAN COPULA ENGINE")
 	fmt.println("======================================================================\n")
@@ -167,6 +168,7 @@ generate_student_t_data :: proc(
 }
 
 credit_derivatives_pipeline_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n======================================================================")
 	fmt.println("    END-TO-END CDO PIPELINE: CALIBRATION ➔ PRICING")
 	fmt.println("======================================================================\n")

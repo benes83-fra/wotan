@@ -8,6 +8,7 @@ import "core:mem"
 import "core:os"
 
 serialization_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing Model Serialization ===")
 
 	// 1. Generate Data
@@ -72,6 +73,7 @@ serialization_test :: proc(allocator: mem.Allocator) {
 }
 
 tree_serialization_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing Tree Serialization ===")
 
 	// 1. Generate a simple non-linear dataset

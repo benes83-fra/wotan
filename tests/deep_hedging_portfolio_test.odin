@@ -13,6 +13,7 @@ import "core:math/rand"
 import "core:mem"
 
 deep_hedging_portfolio_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n======================================================================")
 	fmt.println("    DEEP HEDGING: MULTI-ASSET PORTFOLIO (Real Data Correlation)")
 	fmt.println("======================================================================\n")

@@ -8,6 +8,7 @@ import "core:math"
 import "core:mem"
 
 matrix_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== LINALG TEST ===")
 
 	// Build DataFrame
@@ -80,6 +81,7 @@ assert_close :: proc(a, b: f64, eps: f64, msg: string) {
 }
 
 simd_linalg_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== SIMD LINALG TEST ===")
 
 	// ------------------------------------------------------------
@@ -137,6 +139,7 @@ simd_linalg_test :: proc(allocator: mem.Allocator = context.allocator) {
 }
 
 ols_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== OLS TEST ===")
 
 	// Model: y = 3 + 2*x
@@ -162,6 +165,7 @@ ols_test :: proc(allocator: mem.Allocator = context.allocator) {
 
 
 ols_full_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== OLS FULL TEST ===")
 
 	// Model: y = 3 + 2x
@@ -187,6 +191,7 @@ ols_full_test :: proc(allocator: mem.Allocator = context.allocator) {
 
 
 correlation_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== CORRELATION TEST ===")
 
 	// X = [1 2; 2 4; 3 6] → perfect correlation
@@ -204,6 +209,7 @@ correlation_test :: proc(allocator: mem.Allocator = context.allocator) {
 }
 
 qr_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== QR TEST ===")
 
 	A := l.matrix_new(f64, 3, 2, allocator)
@@ -249,6 +255,7 @@ qr_test :: proc(allocator: mem.Allocator = context.allocator) {
 
 
 svd_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== SVD TEST ===")
 
 	// A: 3x2 (tall, non-square)
@@ -333,6 +340,7 @@ svd_test :: proc(allocator: mem.Allocator = context.allocator) {
 	fmt.println("SVD test OK")
 }
 svd_golub_reinsch_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== SVD GOLUB - REINSCH TEST ===")
 
 	// A: 3x2 (tall, non-square)
@@ -417,6 +425,7 @@ svd_golub_reinsch_test :: proc(allocator: mem.Allocator = context.allocator) {
 }
 
 thin_svd_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== THIN SVD TEST ===")
 
 	// A: 3x2 (rank 2)
@@ -511,6 +520,7 @@ thin_svd_test :: proc(allocator: mem.Allocator = context.allocator) {
 }
 
 svd_zero_matrix_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== SVD ZERO MATRIX TEST ===")
 
 	A := l.matrix_new(f64, 3, 2, allocator)
@@ -557,6 +567,7 @@ svd_zero_matrix_test :: proc(allocator: mem.Allocator = context.allocator) {
 	fmt.println("SVD ZERO MATRIX test OK")
 }
 svd_1x1_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== SVD 1x1 TEST ===")
 
 	A := l.matrix_new(f64, 1, 1, allocator)
@@ -577,6 +588,7 @@ svd_1x1_test :: proc(allocator: mem.Allocator = context.allocator) {
 	fmt.println("SVD 1x1 test OK")
 }
 svd_rank1_tall_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== SVD RANK-1 TALL TEST ===")
 
 	// A = u vᵀ with u = [1,2,3]ᵀ, v = [4,5]ᵀ
@@ -618,6 +630,7 @@ svd_rank1_tall_test :: proc(allocator: mem.Allocator = context.allocator) {
 
 	fmt.println("SVD RANK-1 TALL test OK")
 }; svd_wide_matrix_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== SVD WIDE MATRIX TEST ===")
 
 	A := l.matrix_new(f64, 2, 3, allocator)
@@ -681,6 +694,7 @@ svd_rank1_tall_test :: proc(allocator: mem.Allocator = context.allocator) {
 }
 
 svd_nearly_rank_deficient_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== SVD NEARLY RANK-DEFICIENT TEST ===")
 
 	// A = [1 0; 0 1e-8; 0 0] (3x2)
@@ -722,6 +736,7 @@ svd_nearly_rank_deficient_test :: proc(allocator: mem.Allocator = context.alloca
 	fmt.println("SVD NEARLY RANK-DEFICIENT test OK")
 }
 svd_numeric_dump_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== SVD NUMERIC DUMP TEST ===")
 
 	A := l.matrix_new(f64, 3, 2, allocator)
@@ -773,6 +788,7 @@ svd_numeric_dump_test :: proc(allocator: mem.Allocator = context.allocator) {
 	fmt.println("SVD NUMERIC DUMP test DONE")
 }
 rotate_simd_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== ROTATE_PAIR_SIMD TEST ===")
 
 	n := 16 // multiple of 8 for AVX

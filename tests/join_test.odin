@@ -6,6 +6,7 @@ import "core:fmt"
 
 
 join_test :: proc() {
+	seed_test(#procedure)
 
 	fmt.println("TEST 1: Inner Join - Perfect Match")
 

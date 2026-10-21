@@ -6,6 +6,7 @@ import "core:math"
 import "core:mem"
 
 american_options_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n======================================================================")
 	fmt.println("         AMERICAN OPTIONS: BINOMIAL TREE PRICING")
 	fmt.println("======================================================================\n")
@@ -80,6 +81,7 @@ american_options_test :: proc(allocator: mem.Allocator) {
 
 
 trinomial_tree_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n======================================================================")
 	fmt.println("         TRINOMIAL TREES: CONVERGENCE COMPARISON")
 	fmt.println("======================================================================\n")
@@ -170,6 +172,7 @@ trinomial_tree_test :: proc(allocator: mem.Allocator) {
 }
 
 finite_differences_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n======================================================================")
 	fmt.println("         FINITE DIFFERENCE METHODS: CRANK-NICOLSON")
 	fmt.println("======================================================================\n")
@@ -304,6 +307,7 @@ finite_differences_test :: proc(allocator: mem.Allocator) {
 
 
 american_finite_difference_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n======================================================================")
 	fmt.println("    AMERICAN OPTIONS: FINITE DIFFERENCE vs BINOMIAL TREE")
 	fmt.println("======================================================================\n")

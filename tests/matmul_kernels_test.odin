@@ -23,6 +23,7 @@ mk_naive_acc :: proc(a_t, b_t: bool, A, B, expected: ^l.Matrix(f64), M, N, K: in
 }
 
 matmul_kernels_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Accumulating MatMul Kernel Tests ===")
 	shapes := [][3]int{{1, 1, 1}, {3, 5, 7}, {17, 9, 13}, {64, 33, 65}, {5, 130, 3}}
 	kinds := []string{"nn  A@B", "nt  A@B^T", "tn  A^T@B"}
@@ -66,4 +67,5 @@ matmul_kernels_test :: proc(allocator: mem.Allocator) {
 		}
 	}
 	fmt.printf("MatMul kernel summary: %d/%d passed\n", passed, total)
+	record_failures(total - passed)
 }

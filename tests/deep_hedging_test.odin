@@ -62,6 +62,7 @@ _generate_gbm_paths :: proc(
 
 // Main test procedure
 deep_hedging_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("")
 	fmt.println("======================================================================")
 	fmt.println("    DEEP HEDGING: NEURAL NETWORK OPTION PRICING & HEDGING")

@@ -10,6 +10,7 @@ import "core:fmt"
 import "core:mem"
 
 excel_basic_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
+	seed_test(#procedure)
 	fmt.println("=== EXCEL LOAD TEST ===")
 
 	df := importer.xlsx_load("example.xlsx", allocator)
@@ -23,6 +24,7 @@ excel_basic_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
 
 
 zip_smoke_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
+	seed_test(#procedure)
 	fmt.println("=== ZIP SMOKE TEST ===")
 	bytes, ok := zm.zip_read_file("example.xlsx", "xl/workbook.xml", allocator)
 	fmt.println("ok:", ok, "len:", len(bytes))
@@ -35,6 +37,7 @@ zip_smoke_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
 }
 
 excel_date_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
+	seed_test(#procedure)
 	fmt.println("=== EXCEL DATE TEST ===")
 
 	df := importer.xlsx_load("datetime.xlsx", allocator)
@@ -49,6 +52,7 @@ excel_date_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
 
 
 excel_export_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
+	seed_test(#procedure)
 	fmt.println("=== EXCEL EXPORT TEST ===")
 
 	// 1) Build a small DataFrame

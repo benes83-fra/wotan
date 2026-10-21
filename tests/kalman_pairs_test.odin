@@ -11,6 +11,7 @@ import "core:mem"
 
 
 kalman_pairs_real_data_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Kalman Filter Pairs Trading (Real Data) ===")
 
 	// Fetch real market data using existing yahoo infrastructure
@@ -269,6 +270,7 @@ kalman_pairs_real_data_test :: proc(allocator: mem.Allocator = context.allocator
 }
 
 kalman_pairs_real_data_grid_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Kalman Filter Grid Pairs Trading (Real Data) ===")
 
 	// Fetch real market data
@@ -709,6 +711,7 @@ kalman_pairs_semiconductor_test :: proc(allocator: mem.Allocator = context.alloc
 	}
 }
 kalman_pairs_semiconductor_adf_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Kalman Filter Pairs Trading (Semiconductors with ADF Check) ===")
 
 	// 1. Fetch NVDA
@@ -1043,6 +1046,7 @@ kalman_pairs_semiconductor_adf_test :: proc(allocator: mem.Allocator = context.a
 	}
 }
 kalman_pairs_auto_select_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Kalman Filter Pairs Auto-Selection + Grid Search ===")
 
 	// Candidate pairs (Symbol 1, Symbol 2)

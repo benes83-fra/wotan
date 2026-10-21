@@ -9,6 +9,7 @@ import "core:math"
 import "core:mem"
 
 pdpm_real_data_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== PDPM Real Market Data Test ===\n")
 
 	// 1. Load historical price data

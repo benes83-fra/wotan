@@ -8,6 +8,7 @@ import "core:math"
 import "core:mem"
 
 live_options_calibration_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=======================================================")
 	fmt.println("         LIVE OPTIONS VOLATILITY CALIBRATION")
 	fmt.println("=======================================================\n")

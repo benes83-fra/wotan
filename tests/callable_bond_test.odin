@@ -6,6 +6,7 @@ import "core:math"
 import "core:mem"
 
 callable_bond_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n======================================================================")
 	fmt.println("    CALLABLE BONDS: HULL-WHITE 1F + LONGSTAFF-SCHWARTZ + OAS")
 	fmt.println("======================================================================\n")
@@ -84,6 +85,7 @@ callable_bond_test :: proc(allocator: mem.Allocator) {
 }
 
 puttable_bond_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n======================================================================")
 	fmt.println("    PUTTABLE BONDS: HULL-WHITE 1F + LONGSTAFF-SCHWARTZ + OAS")
 	fmt.println("======================================================================\n")

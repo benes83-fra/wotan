@@ -62,6 +62,7 @@ gc_check :: proc(
 }
 
 gradcheck_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Autograd Numerical Gradient Checks ===")
 	// Closures cannot capture, so tensors built inside the loss procs use context.allocator
 	context.allocator = allocator
@@ -211,4 +212,5 @@ gradcheck_test :: proc(allocator: mem.Allocator) {
 	}, allocator)
 
 	fmt.printf("Gradcheck summary: %d/%d passed\n", gc_passed, gc_total)
+	record_failures(gc_total - gc_passed)
 }

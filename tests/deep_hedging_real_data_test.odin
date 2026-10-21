@@ -14,6 +14,7 @@ import "core:math/rand"
 import "core:mem"
 
 deep_hedging_real_data_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n======================================================================")
 	fmt.println("    DEEP HEDGING: REAL MARKET DATA BACKTEST")
 	fmt.println("    Training on Live Options Data & Comparing to Market Prices")

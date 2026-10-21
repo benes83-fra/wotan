@@ -6,6 +6,7 @@ import "core:math"
 import "core:mem"
 
 fx_derivatives_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n======================================================================")
 	fmt.println("    FX DERIVATIVES: GARMAN-KOHLHAGEN + VANNA-VOLGA")
 	fmt.println("======================================================================\n")

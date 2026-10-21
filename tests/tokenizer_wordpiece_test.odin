@@ -8,6 +8,7 @@ import "core:os"
 import "core:strings"
 
 tokenizer_wordpiece_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== WordPiece Tokenizer Isolated Test ===")
 
 	vocab_content := "[PAD]\n[UNK]\n[CLS]\n[SEP]\napple\n##s\nplay\n##ing\nun\n##want\n##ed\n"

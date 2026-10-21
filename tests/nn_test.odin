@@ -11,6 +11,7 @@ import "core:mem"
 import "core:os"
 
 nn_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing Neural Network Linear Layer ===")
 
 	// Create a Linear Layer: 2 inputs -> 3 outputs
@@ -44,6 +45,7 @@ nn_test :: proc(allocator: mem.Allocator) {
 }
 
 optim_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing SGD Optimizer ===")
 
 	// 1. Setup Layer and Optimizer
@@ -106,6 +108,7 @@ optim_test :: proc(allocator: mem.Allocator) {
 
 
 mse_train_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Training a Layer with MSE Loss ===")
 
 	// 1. Setup: 1 input -> 1 output
@@ -168,6 +171,7 @@ mse_train_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("Bias:   %.4f (Target: 0.0)\n", layer.bias.data.data[0])
 }
 xor_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Training MLP on XOR Problem ===")
 
 	// 1. Create Network: 2 inputs -> 4 hidden neurons -> 1 output
@@ -235,6 +239,7 @@ xor_test :: proc(allocator: mem.Allocator) {
 	t.tensor_free_graph(pred_final)
 }
 classification_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing Classification (Cross Entropy) ===")
 
 	// 1. Create Network: 2 inputs -> 8 hidden -> 3 classes
@@ -321,6 +326,7 @@ classification_test :: proc(allocator: mem.Allocator) {
 
 
 adam_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing Adam Optimizer vs SGD ===")
 
 	// Create Network: 2 inputs -> 4 hidden -> 1 output
@@ -387,6 +393,7 @@ adam_test :: proc(allocator: mem.Allocator) {
 }
 
 adam_classification_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Adam vs SGD on Classification ===")
 
 	// Create Network: 2 inputs -> 16 hidden -> 3 classes
@@ -463,6 +470,7 @@ adam_classification_test :: proc(allocator: mem.Allocator) {
 	nn.adam_free(&opt_adam)
 }
 dropout_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing Dropout Regularization ===")
 
 	sizes := []int{2, 32, 3} // Larger network to force overfitting
@@ -528,6 +536,7 @@ dropout_test :: proc(allocator: mem.Allocator) {
 	nn.adam_free(&opt2)
 }
 flexible_network_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing Flexible Network Architecture ===")
 
 	// Test 1: MLP with Tanh activation
@@ -601,6 +610,7 @@ flexible_network_test :: proc(allocator: mem.Allocator) {
 	t.tensor_free_graph(out)
 }
 sequential_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing Sequential Container ===")
 
 	model := nn.sequential_new(allocator)
@@ -661,6 +671,7 @@ sequential_test :: proc(allocator: mem.Allocator) {
 }
 
 persistence_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing Model Persistence ===")
 
 	// 1. Create a simple model and optimizer

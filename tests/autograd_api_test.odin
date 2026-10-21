@@ -21,6 +21,7 @@ api_expect :: proc(cond: bool, name: string) {
 }
 
 autograd_api_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Autograd API Contract Tests ===")
 	context.allocator = allocator
 	api_passed, api_total = 0, 0
@@ -110,4 +111,5 @@ autograd_api_test :: proc(allocator: mem.Allocator) {
 	t.tensor_free_graph(out_b, allocator)
 
 	fmt.printf("Autograd API summary: %d/%d passed\n", api_passed, api_total)
+	record_failures(api_total - api_passed)
 }

@@ -11,6 +11,7 @@ import "core:math"
 import "core:mem"
 
 garch_real_data_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== GARCH Real Data Test (SPY) ===\n")
 
 	main_alloc := context.allocator

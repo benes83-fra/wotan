@@ -10,6 +10,7 @@ import "core:math"
 import "core:mem"
 
 garch_options_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== GARCH-Powered Option Pricing Test ===\n")
 
 	main_alloc := context.allocator

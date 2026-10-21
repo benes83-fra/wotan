@@ -12,6 +12,7 @@ import "core:math/rand"
 import "core:mem"
 
 volatility_forecasting_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Volatility Forecasting Test ===")
 
 	input_size := 3
@@ -120,6 +121,7 @@ volatility_forecaster_add_to_optimizer :: proc(
 }
 
 lstm_volatility_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== LSTM Volatility Forecasting Test ===")
 
 	input_size := 3
@@ -238,6 +240,7 @@ lstm_volatility_add_to_optimizer :: proc(model: ^ml_fin.LSTMVolatilityForecaster
 }
 
 lstm_volatility_real_data_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== LSTM Volatility (Real Market Data Pipeline) ===")
 
 	// 1. Fetch Real Data (5 Years of SPY and VIX)

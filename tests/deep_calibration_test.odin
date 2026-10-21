@@ -9,6 +9,7 @@ import "core:fmt"
 import "core:mem"
 
 deep_calibration_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Deep Heston Calibration Test ===")
 
 	num_samples := 5000 // Generate 5000 synthetic market scenarios

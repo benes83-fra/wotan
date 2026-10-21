@@ -7,6 +7,7 @@ import "core:math"
 import "core:mem"
 
 kalman_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("=== KALMAN FILTER TEST ===")
 
 	x0: [2]f64 = {0.0, 1.0}
@@ -100,6 +101,7 @@ kalman_test :: proc(allocator: mem.Allocator) {
 
 
 kalman_control_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 
 
 	fmt.println("=== KALMAN CONTROL FILTER TEST ===")
@@ -204,6 +206,7 @@ kalman_control_test :: proc(allocator: mem.Allocator) {
 	fmt.println("\n=== END Control KALMAN FILTER TEST ===")
 }
 kalman_tv_control_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("=== KALMAN TV CONTROL FILTER + SMOOTHER TEST ===")
 
 	// State: [position, velocity]
@@ -303,6 +306,7 @@ kalman_tv_control_test :: proc(allocator: mem.Allocator) {
 
 
 ekf_tiny_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("=== EKF TINY NONLINEAR TEST ===")
 
 	// Initial state
@@ -381,6 +385,7 @@ ekf_tiny_test :: proc(allocator: mem.Allocator) {
 
 
 ekf_tiny_rts_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("=== EKF TINY NONLINEAR + RTS TEST ===")
 
 	x: [2]f64 = {0.1, 1.0}
@@ -475,6 +480,7 @@ ekf_tiny_rts_test :: proc(allocator: mem.Allocator) {
 	fmt.println("\n=== END EKF TINY NONLINEAR + RTS TEST ===")
 }
 ukf_tiny_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("=== UKF TINY NONLINEAR TEST ===")
 
 	// Initial state
@@ -540,6 +546,7 @@ ukf_tiny_test :: proc(allocator: mem.Allocator) {
 	fmt.println("\n=== END UKF TINY NONLINEAR TEST ===")
 }
 ukf_tiny_rts_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("=== UKF TINY NONLINEAR + RTS TEST ===")
 
 	// Initial state
@@ -643,6 +650,7 @@ ukf_tiny_rts_test :: proc(allocator: mem.Allocator) {
 	fmt.println("\n=== END UKF TINY NONLINEAR + RTS TEST ===")
 }
 ukf_tiny_control_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("=== UKF TINY NONLINEAR + CONTROL TEST ===")
 
 	// Initial state
@@ -710,6 +718,7 @@ ukf_tiny_control_test :: proc(allocator: mem.Allocator) {
 	fmt.println("\n=== END UKF TINY NONLINEAR + CONTROL TEST ===")
 }
 ukf_tiny_control_rts_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("=== UKF TINY NONLINEAR + CONTROL + RTS TEST ===")
 
 	// Initial state

@@ -10,6 +10,7 @@ import "core:math/rand"
 import "core:mem"
 
 svm_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	// Generate linearly separable 2D data
 	n := 100
 	X := l.matrix_new(f64, n, 2, allocator)
@@ -73,6 +74,7 @@ svm_test :: proc(allocator: mem.Allocator) {
 }
 
 kernel_svm_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	// Generate non-linearly separable data (XOR-like)
 	n := 100
 	X := l.matrix_new(f64, n, 2, allocator)
@@ -134,6 +136,7 @@ kernel_svm_test :: proc(allocator: mem.Allocator) {
 	delete(y, allocator)
 }
 svr_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing Support Vector Regression ===")
 
 	// Generate non-linear regression data: y = sin(x) + noise

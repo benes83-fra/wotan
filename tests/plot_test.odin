@@ -8,6 +8,7 @@ import "core:math/rand"
 import "core:mem"
 
 plot_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing Pure PNG Plotter ===")
 
 	// 1. Create a DataFrame with some numeric data
@@ -47,6 +48,7 @@ plot_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("Histogram Saved: %v\n", ok2)
 }
 line_plot_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing Line Plot ===")
 
 	// Test 1: Simple sine wave
@@ -127,6 +129,7 @@ line_plot_test :: proc(allocator: mem.Allocator) {
 
 
 bar_chart_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing Bar Chart ===")
 
 	// Test 1: Simple categorical data
@@ -180,6 +183,7 @@ bar_chart_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("Model comparison: %v\n", ok4)
 }
 multi_line_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing Multi-Line Plot ===")
 
 	epochs := 50
@@ -234,6 +238,7 @@ multi_line_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("Multi-line plot: %v\n", ok)
 }
 heatmap_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing Heatmap (Confusion Matrix) ===")
 
 	// 3x3 Confusion Matrix data (Row = Actual, Col = Predicted)

@@ -6,6 +6,7 @@ import w "../wotan/core"
 
 
 groupby2_test :: proc() {
+	seed_test(#procedure)
 	fmt.println("=== Testing GroupBy2 ===")
 
 	df_gb := w.dataframe_new()

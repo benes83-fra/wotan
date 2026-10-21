@@ -325,6 +325,7 @@ verify_weights_unchanged :: proc(model: ^nn.Sequential, snapshots: [dynamic][]f6
 // Main test
 // ============================================================================
 transfer_learning_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Transfer Learning Test ===\n")
 
 	// ========================================================================

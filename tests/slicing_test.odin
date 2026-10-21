@@ -5,6 +5,7 @@ import "core:fmt"
 import "core:mem"
 
 loc_slice_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== LOC / LOC_RANGE TEST ===")
 
 	df := w.dataframe_new()
@@ -53,6 +54,7 @@ loc_slice_test :: proc(allocator: mem.Allocator = context.allocator) {
 
 
 loc_many_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== LOC_MANY TEST ===")
 
 	df := w.dataframe_new()
@@ -96,6 +98,7 @@ loc_many_test :: proc(allocator: mem.Allocator = context.allocator) {
 }
 
 loc_from_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== LOC_FROM TEST ===")
 
 	df := w.dataframe_new()
@@ -132,6 +135,7 @@ loc_from_test :: proc(allocator: mem.Allocator = context.allocator) {
 	fmt.println("=== END LOC_FROM TEST ===")
 }
 loc_until_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== LOC_UNTIL TEST ===")
 
 	df := w.dataframe_new()
@@ -168,6 +172,7 @@ loc_until_test :: proc(allocator: mem.Allocator = context.allocator) {
 	fmt.println("=== END LOC_UNTIL TEST ===")
 }
 loc_mask_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== LOC_MASK TEST ===")
 
 	df := w.dataframe_new()
@@ -209,6 +214,7 @@ loc_mask_test :: proc(allocator: mem.Allocator = context.allocator) {
 
 
 iloc_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== ILOC TEST ===")
 
 	df := w.dataframe_new()
@@ -257,6 +263,7 @@ iloc_test :: proc(allocator: mem.Allocator = context.allocator) {
 }
 
 materialize_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== MATERIALIZE TEST ===")
 
 	df := w.dataframe_new()

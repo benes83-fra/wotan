@@ -131,6 +131,7 @@ build_cql_dataset_from_ohlcv :: proc(
 // ============================================================================
 
 cql_real_data_trading_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Yahoo Finance Offline CQL Trading Test ===")
 
 	// ✅ FIX: Use your existing, robust JSON-based Yahoo Finance downloader

@@ -8,6 +8,7 @@ import "core:math"
 import "core:mem"
 
 prospect_vol_smile_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Prospect Theory & The Volatility Smile ===")
 	fmt.println("Proving that Probability Weighting generates the Volatility Smile.")
 	fmt.println("We will price OTM options using a distorted probability distribution")

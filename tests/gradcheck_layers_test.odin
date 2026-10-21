@@ -98,6 +98,7 @@ gcl_free_inputs :: proc(n: int) {
 }
 
 gradcheck_layers_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Autograd Layer Gradient Checks ===")
 	context.allocator = allocator
 	gc_passed, gc_total = 0, 0
@@ -226,4 +227,5 @@ gradcheck_layers_test :: proc(allocator: mem.Allocator) {
 	}
 
 	fmt.printf("Layer gradcheck summary: %d/%d passed\n", gc_passed, gc_total)
+	record_failures(gc_total - gc_passed)
 }

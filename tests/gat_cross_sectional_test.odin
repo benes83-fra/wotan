@@ -12,6 +12,7 @@ import "core:math/rand"
 import "core:mem"
 
 gat_cross_sectional_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== GAT Cross-Sectional Arbitrage Test ===")
 
 	batch_size := 32
@@ -126,6 +127,7 @@ gat_cross_sectional_test :: proc(allocator: mem.Allocator) {
 }
 
 gat_real_world_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== GAT Real-World Cross-Sectional Test ===")
 
 	// 1. Define Universe of Assets (10 Major Tech Stocks)
@@ -396,6 +398,7 @@ gat_real_world_test :: proc(allocator: mem.Allocator) {
 
 
 gat_real_world_cv_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== GAT Real-World Cross-Sectional Test (K-Fold CV) ===")
 
 	symbols := []string {

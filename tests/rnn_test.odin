@@ -9,6 +9,7 @@ import "core:math/rand"
 import "core:mem"
 
 rnn_simple_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing Simple RNN Training ===")
 
 	// Hyperparameters
@@ -86,6 +87,7 @@ rnn_simple_test :: proc(allocator: mem.Allocator) {
 
 
 gru_simple_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing Simple GRU Training ===")
 
 	batch := 2
@@ -136,6 +138,7 @@ gru_simple_test :: proc(allocator: mem.Allocator) {
 	fmt.println("✓ Simple GRU training test completed successfully!")
 }
 lstm_simple_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing Simple LSTM Training ===")
 
 	batch := 2
@@ -189,6 +192,7 @@ lstm_simple_test :: proc(allocator: mem.Allocator) {
 	fmt.println("✓ Simple LSTM training test completed successfully!")
 }
 embedding_simple_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing Embedding Layer ===")
 
 	vocab_size := 10
@@ -289,6 +293,7 @@ embedding_simple_test :: proc(allocator: mem.Allocator) {
 	fmt.println("✓ Embedding layer test completed successfully!")
 }
 positional_encoding_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing Positional Encoding ===")
 
 	max_seq_len := 10
@@ -379,6 +384,7 @@ positional_encoding_test :: proc(allocator: mem.Allocator) {
 	fmt.println("✓ Positional Encoding test completed successfully!")
 }
 attention_simple_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing Scaled Dot-Product Attention ===")
 
 	batch := 1
@@ -463,6 +469,7 @@ attention_simple_test :: proc(allocator: mem.Allocator) {
 	fmt.println("✓ Scaled Dot-Product Attention test completed successfully!")
 }
 multi_head_attention_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing Multi-Head Attention ===")
 
 	batch := 1
@@ -524,6 +531,7 @@ multi_head_attention_test :: proc(allocator: mem.Allocator) {
 	t.tensor_free_graph(output)
 }
 layer_norm_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing Layer Normalization ===")
 
 	batch := 2
@@ -627,6 +635,7 @@ layer_norm_test :: proc(allocator: mem.Allocator) {
 }
 
 ffn_simple_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing Feed-Forward Network ===")
 
 	batch := 2

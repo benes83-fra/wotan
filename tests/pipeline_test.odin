@@ -8,6 +8,7 @@ import "core:math/rand"
 import "core:mem"
 
 pipeline_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing ML Pipeline ===")
 
 	// 1. Generate data with vastly different scales
@@ -60,6 +61,7 @@ pipeline_test :: proc(allocator: mem.Allocator) {
 }
 
 pipeline_comprehensive_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Comprehensive Pipeline Test (All Models) ===")
 
 	// Generate Classification Data (3 classes)

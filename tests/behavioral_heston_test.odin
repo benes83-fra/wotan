@@ -133,6 +133,7 @@ plot_behavioral_heston_curves :: proc(
 // Main Test: Behavioral Heston (Physics + Psychology)
 // ============================================================================
 behavioral_heston_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Behavioral Heston Test (Physics + Psychology) ===")
 	fmt.println("Separating Stochastic Volatility (Physics) from Investor Bias (Psychology).")
 	fmt.println("WARNING: This involves heavy Fourier inversion. Compile with `-o:speed`!")

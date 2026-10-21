@@ -11,6 +11,7 @@ import "core:mem"
 
 import "core:mem/virtual"
 gpt_full_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Full GPT Implementation Test ===")
 
 	// Base training text
@@ -372,6 +373,7 @@ gpt_full_test :: proc(allocator: mem.Allocator) {
 
 
 gpt_shakespeare_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== GPT Shakespeare Corpus Test ===")
 
 	// Large Shakespeare corpus - Hamlet and other famous passages

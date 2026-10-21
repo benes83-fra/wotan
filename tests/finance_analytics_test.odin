@@ -11,6 +11,7 @@ import "core:mem"
 import "core:os"
 
 finance_analytics_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Finance Analytics Test ===\n")
 
 	// ========================================================================

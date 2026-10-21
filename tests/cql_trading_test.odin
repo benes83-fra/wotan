@@ -10,6 +10,7 @@ import "core:mem"
 // ============================================================================
 
 cql_trading_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Offline CQL Historical Trading Test ===")
 
 	// 1. CQL Configuration (Added tau for soft updates)

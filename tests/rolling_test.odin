@@ -7,6 +7,7 @@ import "core:fmt"
 import "core:mem"
 
 rolling_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	df := w.dataframe_new()
 	defer w.destroy_dataframe(&df)
 	col := w.column_new("value", .Int, 0)

@@ -7,6 +7,7 @@ import "core:math"
 import "core:mem"
 
 flash_attention_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("=== Testing FlashAttention (Kernel Fusion) ===")
 
 	batch := 2
@@ -104,6 +105,7 @@ flash_attention_test :: proc(allocator: mem.Allocator) {
 }
 
 flash_attention_2_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("=== Testing FlashAttention (Kernel Fusion & Causal Masking) ===")
 
 	batch := 2

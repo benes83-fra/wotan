@@ -8,6 +8,7 @@ import "core:math"
 import "core:math/rand"
 import "core:mem"
 arima_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("=== ARIMA TEST ===")
 
 	// Synthetic ARMA(1,1) data
@@ -37,6 +38,7 @@ arima_test :: proc(allocator: mem.Allocator) {
 	fmt.println("=== END ARIMA TEST ===")
 }
 arima_fit_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("=== ARIMA(p,d,q) FIT TEST ===")
 
 	phi_true := []f64{0.7}
@@ -68,6 +70,7 @@ arima_fit_test :: proc(allocator: mem.Allocator) {
 	)
 }
 arima_dataframe_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("=== ARIMA DataFrame Test ===")
 
 	// --- 1. Generate synthetic ARMA(1,1) data ---
@@ -237,6 +240,7 @@ mc_arima_arma11 :: proc(allocator: mem.Allocator, n_sims: int, T: int) {
 	fmt.println("=== END ARIMA(1,0,1) Monte Carlo ===")
 }
 arima_fit_arma22_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("=== ARIMA(p,d,q) FIT TEST ARMA(2,2) ===")
 
 	phi_true := []f64{0.5, -0.2}
@@ -670,6 +674,7 @@ arima_auto_test :: proc(allocator: mem.Allocator) {
 
 
 autocorrelation_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	ddf := w.dataframe_new()
 	defer w.destroy_dataframe(&ddf)
 	col := w.column_from_floats("y", []f64{1, 2, 3, 4, 5, 4, 3, 2, 1})
@@ -689,6 +694,7 @@ autocorrelation_test :: proc(allocator: mem.Allocator) {
 	w.dataframe_pretty_print(&dpc, 20)
 }
 ljung_box_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("=== LJUNG-BOX TEST ===")
 
 	// ------------------------------------------------------------
@@ -724,6 +730,7 @@ ljung_box_test :: proc(allocator: mem.Allocator) {
 	fmt.println("=== END LJUNG-BOX TEST ===")
 }
 jarque_bera_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("=== JARQUE-BERA TEST ===")
 
 	T := 500
@@ -748,6 +755,7 @@ jarque_bera_test :: proc(allocator: mem.Allocator) {
 	fmt.println("=== END JARQUE-BERA TEST ===")
 }
 residual_diagnostics_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("=== RESIDUAL DIAGNOSTICS TEST ===")
 
 	// --- 1) Simulate ARMA(1,1) data ---
@@ -806,6 +814,7 @@ residual_diagnostics_test :: proc(allocator: mem.Allocator) {
 	fmt.println("=== END RESIDUAL DIAGNOSTICS TEST ===")
 }
 residuals_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("=== RESIDUALS TEST ===")
 
 	// Simulate ARMA(1,1)
@@ -858,6 +867,7 @@ residuals_test :: proc(allocator: mem.Allocator) {
 	fmt.println("=== END RESIDUALS TEST ===")
 }
 adf_test_block :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("=== ADF TEST BLOCK ===")
 
 	// Simulate AR(1) with phi = 0.7 (stationary)
@@ -882,6 +892,7 @@ adf_test_block :: proc(allocator: mem.Allocator) {
 	fmt.println("=== END ADF TEST BLOCK ===")
 }
 kpss_test_block :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("=== KPSS TEST BLOCK ===")
 
 	T := 300
@@ -925,6 +936,7 @@ kpss_test_block :: proc(allocator: mem.Allocator) {
 }
 
 stationarity_test_block :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("=== STATIONARITY TEST BLOCK ===")
 
 	T := 300
@@ -1313,6 +1325,7 @@ vec_sub :: proc(a, b: []f64, allocator: mem.Allocator) -> []f64 {
 
 
 sarima_light_demo :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	// --- 1) Fixed SARIMA(1,1,1)(1,1,1)_12 parameters ---
 	phi_true := []f64{0.5} // non-seasonal AR(1)
 	theta_true := []f64{0.4} // non-seasonal MA(1)
@@ -1428,6 +1441,7 @@ sarima_resid_diagnostics_demo :: proc(
 }
 
 sarima_resid_diagnostics_quick_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 
 	fmt.println("=== SARIMA residual diagnostics quick test ===")
 

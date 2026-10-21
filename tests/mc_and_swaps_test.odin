@@ -6,6 +6,7 @@ import "core:math"
 import "core:mem"
 
 unified_mc_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n======================================================================")
 	fmt.println("    UNIFIED MONTE CARLO ENGINE + INTEREST RATE SWAPS")
 	fmt.println("======================================================================\n")
@@ -66,6 +67,7 @@ unified_mc_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("   %-30s | $%10.4f\n", "Running Maximum (first path)", max_S)
 }
 swaps_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n======================================================================")
 	fmt.println("    INTEREST RATE SWAPS (CURVE-AWARE)")
 	fmt.println("======================================================================\n")

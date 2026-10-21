@@ -12,6 +12,7 @@ import "core:math"
 import "core:mem"
 
 orchestrator_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Closed-Loop Trading Orchestrator ===")
 	main_alloc := context.allocator
 

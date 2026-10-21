@@ -5,6 +5,7 @@ import w "../wotan/core"
 import "core:fmt"
 
 sort_test :: proc() {
+	seed_test(#procedure)
 	fmt.println("=== SORT TEST ===")
 
 	df := w.dataframe_new()

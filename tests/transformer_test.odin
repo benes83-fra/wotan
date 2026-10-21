@@ -13,6 +13,7 @@ import "core:strings"
 
 
 transformer_encoder_block_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing Transformer Encoder Block ===")
 
 	// Hyperparameters
@@ -138,6 +139,7 @@ transformer_encoder_block_test :: proc(allocator: mem.Allocator) {
 
 	fmt.println("✓ Transformer Encoder Block test completed successfully!")
 }; transformer_encoder_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing Stacked Transformer Encoder ===")
 
 	num_layers := 3
@@ -284,6 +286,7 @@ transformer_encoder_block_test :: proc(allocator: mem.Allocator) {
 	fmt.println("✓ Stacked Transformer Encoder test completed successfully!")
 }
 transformer_decoder_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing Transformer Decoder ===")
 
 	batch := 2
@@ -462,6 +465,7 @@ transformer_decoder_test :: proc(allocator: mem.Allocator) {
 	fmt.println("✓ Transformer Decoder test completed successfully!")
 }
 transformer_reversal_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing Transformer on Sequence Reversal ===")
 
 	// Hyperparameters
@@ -682,6 +686,7 @@ transformer_reversal_test :: proc(allocator: mem.Allocator) {
 // Simple character-level language model using decoder-only Transformer
 // Simple character-level language model using decoder-only Transformer
 char_lm_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Character-Level Language Modeling ===")
 
 	// Small training corpus

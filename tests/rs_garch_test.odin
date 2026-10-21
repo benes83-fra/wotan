@@ -9,6 +9,7 @@ import "core:math"
 import "core:mem"
 
 rs_garch_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Regime-Switching GARCH Test (SPY) ===\n")
 
 	main_alloc := context.allocator

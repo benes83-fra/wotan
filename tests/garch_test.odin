@@ -8,6 +8,7 @@ import "core:math/rand"
 import "core:mem"
 
 garch_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== GARCH Model Test ===\n")
 
 	main_alloc := context.allocator

@@ -11,6 +11,7 @@ import "core:math"
 import "core:mem"
 
 ppo_multi_asset_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Multi-Asset PPO Trading Test (SPY vs QQQ) [Optimized 25 Ep] ===")
 
 	spy_df := net.read_yahoo("SPY", .Daily, .FiveYears, allocator)
@@ -212,6 +213,7 @@ build_multi_asset_wf_windows :: proc(
 }
 
 ppo_multi_asset_wf_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("\n======================================================================")
 	fmt.println("    MULTI-ASSET WALK-FORWARD VALIDATION (SPY vs QQQ)")
 	fmt.println("======================================================================")

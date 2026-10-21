@@ -10,6 +10,7 @@ import analytic "../wotan/analytics"
 import w "../wotan/core"
 
 pca_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("PCA Test...........")
 	df := w.dataframe_new()
 	x := w.column_from_f64("x", []f64{1, 2, 3, 4})
@@ -42,6 +43,7 @@ pca_test :: proc(allocator: mem.Allocator) {
 
 }
 pcr_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	// Generate highly collinear data (5 features, but really only 1 underlying signal)
 	n := 200
 	X := l.matrix_new(f64, n, 5, allocator)

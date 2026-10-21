@@ -28,6 +28,7 @@ gco_remap :: proc(x: ^t.Tensor, lo, hi: f64) {
 }
 
 gradcheck_ops_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Autograd Op Gradient Checks ===")
 	context.allocator = allocator
 	gc_passed, gc_total = 0, 0
@@ -269,4 +270,5 @@ gradcheck_ops_test :: proc(allocator: mem.Allocator) {
 	}
 
 	fmt.printf("Op gradcheck summary: %d/%d passed\n", gc_passed, gc_total)
+	record_failures(gc_total - gc_passed)
 }

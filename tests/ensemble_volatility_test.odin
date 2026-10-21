@@ -11,6 +11,7 @@ import "core:fmt"
 import "core:math"
 import "core:mem"
 ensemble_volatility_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Ensemble Volatility Forecasting (GARCH + Sequence Model) ===")
 
 	main_alloc := context.allocator
@@ -394,6 +395,7 @@ ensemble_volatility_test :: proc(allocator: mem.Allocator) {
 
 
 vrp_signal_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Live Volatility Risk Premium (VRP) Signal Generation ===")
 	main_alloc := context.allocator
 
@@ -636,6 +638,7 @@ vrp_signal_test :: proc(allocator: mem.Allocator) {
 }
 
 vrp_backtest_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Walk-Forward VRP Backtester V2 (Capstone) ===")
 	main_alloc := context.allocator
 

@@ -5,6 +5,7 @@ import "core:fmt"
 import "core:mem"
 
 bonds_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n======================================================================")
 	fmt.println("    VANILLA BONDS: PRICING WITH BOOTSTRAPPED YIELD CURVES")
 	fmt.println("======================================================================\n")

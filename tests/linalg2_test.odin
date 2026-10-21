@@ -13,6 +13,7 @@ import "core:mem"
 // 1. Basic 3×3 LU test
 // ------------------------------------------------------------
 lu_basic_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== LU BASIC TEST ===")
 
 	A := l.matrix_new(f64, 3, 3, allocator)
@@ -44,6 +45,7 @@ lu_basic_test :: proc(allocator: mem.Allocator = context.allocator) {
 // 2. Solve test: A x = b
 // ------------------------------------------------------------
 lu_solve_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== LU SOLVE TEST ===")
 
 	A := l.matrix_new(f64, 3, 3, allocator)
@@ -68,6 +70,7 @@ lu_solve_test :: proc(allocator: mem.Allocator = context.allocator) {
 // 3. Determinant test
 // ------------------------------------------------------------
 lu_det_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== LU DET TEST ===")
 
 	A := l.matrix_new(f64, 3, 3, allocator)
@@ -88,6 +91,7 @@ lu_det_test :: proc(allocator: mem.Allocator = context.allocator) {
 // 4. Identity matrix test
 // ------------------------------------------------------------
 lu_identity_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== LU IDENTITY TEST ===")
 
 	A := l.matrix_new(f64, 4, 4, allocator)
@@ -116,6 +120,7 @@ lu_identity_test :: proc(allocator: mem.Allocator = context.allocator) {
 // 5. Singular matrix test
 // ------------------------------------------------------------
 lu_singular_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== LU SINGULAR TEST ===")
 
 	A := l.matrix_new(f64, 3, 3, allocator)
@@ -181,6 +186,7 @@ lu_random_test :: proc(allocator: mem.Allocator = context.allocator) {
 // 7. Numeric dump test (debugging)
 // ------------------------------------------------------------
 lu_numeric_dump_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== LU NUMERIC DUMP TEST ===")
 
 	A := l.matrix_new(f64, 3, 3, allocator)
@@ -214,6 +220,7 @@ lu_numeric_dump_test :: proc(allocator: mem.Allocator = context.allocator) {
 }
 
 lu_inverse_basic_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== LU INVERSE BASIC TEST ===")
 
 	A := l.matrix_new(f64, 3, 3, allocator)
@@ -241,6 +248,7 @@ lu_inverse_basic_test :: proc(allocator: mem.Allocator = context.allocator) {
 }
 
 lu_inverse_identity_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== LU INVERSE IDENTITY TEST ===")
 
 	n := 4
@@ -267,6 +275,7 @@ lu_inverse_identity_test :: proc(allocator: mem.Allocator = context.allocator) {
 }
 
 lu_inverse_singular_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== LU INVERSE SINGULAR TEST ===")
 
 	A := l.matrix_new(f64, 3, 3, allocator)
@@ -284,6 +293,7 @@ lu_inverse_singular_test :: proc(allocator: mem.Allocator = context.allocator) {
 // -------------------- EIGH TESTS --------------------
 
 eigh_diagonal_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== EIGH DIAGONAL TEST ===")
 
 	A := l.matrix_new(f64, 3, 3, allocator)
@@ -317,6 +327,7 @@ eigh_diagonal_test :: proc(allocator: mem.Allocator = context.allocator) {
 }
 
 eigh_symmetric_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== EIGH SYMMETRIC TEST ===")
 
 	// Simple symmetric 2x2 with known eigenvalues
@@ -348,6 +359,7 @@ eigh_symmetric_test :: proc(allocator: mem.Allocator = context.allocator) {
 // -------------------- COND / RCOND TESTS --------------------
 
 cond2_svd_identity_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== COND2_SVD IDENTITY TEST ===")
 
 	A := l.matrix_new(f64, 3, 3, allocator)
@@ -373,6 +385,7 @@ cond2_svd_identity_test :: proc(allocator: mem.Allocator = context.allocator) {
 }
 
 cond2_sym_identity_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== COND2_SYM IDENTITY TEST ===")
 
 	A := l.matrix_new(f64, 4, 4, allocator)
@@ -398,6 +411,7 @@ cond2_sym_identity_test :: proc(allocator: mem.Allocator = context.allocator) {
 }
 
 cond2_sym_spd_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== COND2_SYM SPD TEST ===")
 
 	// Diagonal SPD: diag(1, 2, 10) → κ = 10 / 1 = 10
@@ -414,6 +428,7 @@ cond2_sym_spd_test :: proc(allocator: mem.Allocator = context.allocator) {
 }
 
 cond2_svd_rank_deficient_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== COND2_SVD RANK-DEFICIENT TEST ===")
 
 	// Rank-1 matrix: [1 2; 2 4]
@@ -432,6 +447,7 @@ cond2_svd_rank_deficient_test :: proc(allocator: mem.Allocator = context.allocat
 }
 
 eigh_cond_full_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== EIGH + COND TEST SUITE ===")
 
 	eigh_diagonal_test(allocator)
@@ -447,6 +463,7 @@ eigh_cond_full_test :: proc(allocator: mem.Allocator = context.allocator) {
 
 
 wls_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== WLS TEST ===")
 
 	// Simple weighted regression: y = 3 + 2*x + noise
@@ -469,6 +486,7 @@ wls_test :: proc(allocator: mem.Allocator = context.allocator) {
 	fmt.println("WLS test OK")
 }
 gls_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== GLS TEST ===")
 
 	// Simple case: Ω = I (identity) → GLS = OLS
@@ -506,6 +524,7 @@ gls_test :: proc(allocator: mem.Allocator = context.allocator) {
 	fmt.println("GLS test OK")
 }
 ridge_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== RIDGE TEST ===")
 
 	// Simple case: y = 3 + 2*x, λ = 0 → should match OLS
@@ -534,6 +553,7 @@ ridge_test :: proc(allocator: mem.Allocator = context.allocator) {
 }
 
 lasso_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== LASSO TEST ===")
 
 	// Test 1: λ=0 should approximately match OLS (within iterative tolerance)
@@ -613,6 +633,7 @@ lasso_test :: proc(allocator: mem.Allocator = context.allocator) {
 	fmt.println("Lasso test OK")
 }
 kron_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== KRONECKER TEST ===")
 
 	// Test 1: Simple 2×2 ⊗ 2×2
@@ -715,6 +736,7 @@ kron_test :: proc(allocator: mem.Allocator = context.allocator) {
 	fmt.println("=== ALL KRONECKER TESTS PASSED ===")
 }
 gls_kron_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== GLS KRONECKER TEST ===")
 
 	// Simple case: Ω = I₂ ⊗ I₃ = I₆ (identity) → GLS = OLS

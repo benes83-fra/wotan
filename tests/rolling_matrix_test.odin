@@ -6,6 +6,7 @@ import "core:fmt"
 import "core:mem"
 
 rolling_matrix_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("=== ROLLING MATRIX TESTS ===")
 
 	// ------------------------------------------------------------
@@ -129,6 +130,7 @@ rolling_matrix_test :: proc(allocator: mem.Allocator) {
 
 
 ewm_cov_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	df := w.dataframe_new()
 	defer w.destroy_dataframe(&df)
 
@@ -162,6 +164,7 @@ ewm_cov_test :: proc(allocator: mem.Allocator) {
 
 
 ewm_pca_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("=== EWM PCA Test ===")
 
 	// Build a tiny test DataFrame

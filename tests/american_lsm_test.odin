@@ -6,6 +6,7 @@ import "core:math"
 import "core:mem"
 
 american_lsm_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n======================================================================")
 	fmt.println("    LONGSTAFF-SCHWARTZ MONTE CARLO: AMERICAN OPTIONS")
 	fmt.println("======================================================================\n")
@@ -71,6 +72,7 @@ american_lsm_test :: proc(allocator: mem.Allocator) {
 }
 
 american_asian_lsm_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n======================================================================")
 	fmt.println("    AMERICAN ASIAN OPTIONS: LONGSTAFF-SCHWARTZ MONTE CARLO")
 	fmt.println("======================================================================\n")
@@ -107,6 +109,7 @@ american_asian_lsm_test :: proc(allocator: mem.Allocator) {
 
 
 variance_reduction_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n======================================================================")
 	fmt.println("    VARIANCE REDUCTION: ANTITHETIC + CONTROL VARIATE")
 	fmt.println("======================================================================\n")

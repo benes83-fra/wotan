@@ -38,6 +38,7 @@ min_var_wrapper :: proc(ctx: ^fin.StrategyContext, allocator: mem.Allocator) -> 
 	return fin.portfolio_min_variance(ctx, allocator, 120)
 }
 backtest_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Backtest Test ===\n")
 
 	n_days := 500
@@ -162,6 +163,7 @@ backtest_test :: proc(allocator: mem.Allocator) {
 
 
 backtest_portfolio_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Portfolio Backtest Test ===\n")
 
 	n_days := 500

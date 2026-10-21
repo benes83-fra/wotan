@@ -8,6 +8,7 @@ import "core:mem"
 import "core:strings"
 
 http_get_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
+	seed_test(#procedure)
 	fmt.println("=== HTTP GET TEST ===")
 
 	url := "https://example.com"
@@ -55,6 +56,7 @@ yahoo_finance_csv_test :: proc(allocator: mem.Allocator = context.temp_allocator
 }
 
 yahoo_finance_json_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
+	seed_test(#procedure)
 	fmt.println("=== YAHOO FINANCE JSON TEST ===")
 
 	df := net.read_yahoo("GOOG", .Daily, .OneMonth, allocator)
@@ -68,6 +70,7 @@ yahoo_finance_json_test :: proc(allocator: mem.Allocator = context.temp_allocato
 }
 
 yahoo_finance_events_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
+	seed_test(#procedure)
 	fmt.println("=== YAHOO FINANCE DIVIDENDS & SPLITS TEST ===")
 
 	df := net.read_yahoo("AAPL", .Daily, .TenYears, allocator)

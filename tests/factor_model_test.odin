@@ -8,6 +8,7 @@ import "core:math"
 import "core:mem"
 
 factor_model_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Factor Model Covariance Test (Fama-French Proxies) ===\n")
 
 	main_alloc := context.allocator

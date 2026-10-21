@@ -10,6 +10,7 @@ import "core:math/rand"
 import "core:mem"
 
 vae_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== VAE Test: Sine Wave Generation ===")
 
 	// Hyperparameters

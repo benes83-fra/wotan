@@ -7,6 +7,7 @@ import "core:fmt"
 import "core:mem"
 
 csv_export_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
+	seed_test(#procedure)
 	fmt.println("=== CSV EXPORT TEST ===")
 
 	// 1) Build a small DataFrame

@@ -9,6 +9,10 @@ import "core:mem"
 import "core:strings"
 
 main :: proc() {
+	// Deferred first so it runs last: after cleanup and the debug leak report,
+	// exit with code 1 if any correctness check (gradcheck, kernels, API) failed.
+	defer test.exit_on_failures()
+
 	when ODIN_DEBUG {
 		default_allocator := context.allocator
 		tracking_allocator: mem.Tracking_Allocator

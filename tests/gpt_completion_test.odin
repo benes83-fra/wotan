@@ -11,6 +11,7 @@ import "core:mem"
 import "core:os"
 
 gpt_completion_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== GPT Financial Text Completion Test ===")
 
 	// 1. Load the converted DistilGPT-2 model

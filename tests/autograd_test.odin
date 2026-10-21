@@ -6,6 +6,7 @@ import t "../wotan/tensor"
 import "core:fmt"
 import "core:mem"
 autograd_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing Autograd Engine ===")
 
 	// 1. Create two 2x2 matrices (Leaf nodes)
@@ -54,6 +55,7 @@ autograd_test :: proc(allocator: mem.Allocator) {
 
 
 autograd_mul_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing Autograd Multiplication ===")
 
 	// A = [[1, 2], [3, 4]]
@@ -102,6 +104,7 @@ autograd_mul_test :: proc(allocator: mem.Allocator) {
 	t.tensor_free(c)
 }
 autograd_matmul_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing Autograd Matrix Multiplication ===")
 
 	// A = [[1, 2, 3],
@@ -149,6 +152,7 @@ autograd_matmul_test :: proc(allocator: mem.Allocator) {
 }
 
 autograd_sum_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing Autograd Sum (Scalar Loss) ===")
 
 	// A = [[1, 2, 3], [4, 5, 6]] (2x3)
@@ -200,6 +204,7 @@ autograd_sum_test :: proc(allocator: mem.Allocator) {
 	t.tensor_free(loss)
 }
 autograd_relu_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing Autograd ReLU ===")
 
 	// A = [[-2, 3],
@@ -236,6 +241,7 @@ autograd_relu_test :: proc(allocator: mem.Allocator) {
 }
 
 autograd_bias_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing Autograd Bias Addition ===")
 
 	// A = [[1, 2],
@@ -284,6 +290,7 @@ autograd_bias_test :: proc(allocator: mem.Allocator) {
 
 
 conv2d_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing Conv2d ===")
 
 	// Create a simple 4x4 image with a vertical edge
@@ -352,6 +359,7 @@ conv2d_test :: proc(allocator: mem.Allocator) {
 	}
 }
 pooling_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing Pooling Layers ===")
 
 	// Create a 4x4 input image (1 channel, batch size 1)

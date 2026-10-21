@@ -7,6 +7,7 @@ import "core:math"
 import "core:mem"
 
 derivatives_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Derivatives Pricing Test ===\n")
 
 	// ====================================================================
@@ -205,6 +206,7 @@ norm_cdf :: proc(x: f64) -> f64 {
 
 
 portfolio_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Portfolio Optimization Test ===\n")
 
 	// Create sample data: 3 assets
@@ -303,6 +305,7 @@ portfolio_test :: proc(allocator: mem.Allocator) {
 	fmt.println("\n✓ Portfolio optimization test completed!")
 }
 constraints_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Portfolio Constraints Test ===\n")
 
 

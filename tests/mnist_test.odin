@@ -8,6 +8,7 @@ import "core:math"
 import "core:mem"
 
 mnist_loader_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing MNIST Loader ===")
 
 	// Load training set
@@ -78,6 +79,7 @@ mnist_loader_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("\nLoaded %d test samples\n", test_set.num_samples)
 }
 mnist_cnn_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Training CNN on MNIST with Augmentation ===")
 
 	train_set, ok := data.mnist_load(
@@ -198,6 +200,7 @@ mnist_cnn_test :: proc(allocator: mem.Allocator) {
 
 
 augmentation_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing Data Augmentation ===")
 
 	// Create a simple test image (4x4 for easy visualization)
@@ -287,6 +290,7 @@ evaluate_on_test_set :: proc(
 }
 
 test_both_models :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Comparing Models on Test Set ===")
 
 	// Load test set
@@ -339,6 +343,7 @@ test_both_models :: proc(allocator: mem.Allocator) {
 	}
 }
 test_augmented_model :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Testing Augmented Model ===")
 
 	// Load test set

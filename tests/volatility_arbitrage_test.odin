@@ -13,6 +13,7 @@ import "core:math"
 import "core:mem"
 
 volatility_arbitrage_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Volatility Arbitrage: Market IV vs Ensemble RV ===")
 	main_alloc := context.allocator
 

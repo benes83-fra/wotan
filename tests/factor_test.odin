@@ -7,6 +7,7 @@ import "core:math/rand"
 import "core:mem"
 
 factor_analysis_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Factor Analysis Test ===\n")
 
 	// Generate synthetic data with 3 latent factors

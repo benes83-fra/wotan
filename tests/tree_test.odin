@@ -10,6 +10,7 @@ import "core:mem"
 
 // Simple test
 dt_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	// Create tiny dataset: y = 2*x + noise
 	X := l.matrix_new(f64, 100, 1, allocator)
 	y := make([]f64, 100, allocator)
@@ -46,6 +47,7 @@ dt_test :: proc(allocator: mem.Allocator) {
 
 
 rf_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	// Generate synthetic data: y = 2*x1 + 3*x2 + noise
 	n := 200
 	p := 5
@@ -91,6 +93,7 @@ rf_test :: proc(allocator: mem.Allocator) {
 }
 
 gb_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	// Generate synthetic data: y = 2*x1 + 3*x2 + noise
 	n := 200
 	p := 5
@@ -135,6 +138,7 @@ gb_test :: proc(allocator: mem.Allocator) {
 }
 
 vec_sub_simd_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	n := 100
 	a := make([]f64, n, allocator)
 	b := make([]f64, n, allocator)
@@ -168,6 +172,7 @@ vec_sub_simd_test :: proc(allocator: mem.Allocator) {
 
 
 tree_stats_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	// Generate data
 	n := 100
 	p := 5

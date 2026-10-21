@@ -9,6 +9,7 @@ import "core:math"
 import "core:mem"
 
 pdpm_multifactor_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== PDPM Multi-Factor Test with Real Data ===\n")
 
 	// 1. Fetch real market data

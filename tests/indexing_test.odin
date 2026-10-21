@@ -5,6 +5,7 @@ import "core:fmt"
 import "core:mem"
 
 indexing_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== INDEXING TEST ===")
 
 	df := w.dataframe_new()
@@ -76,6 +77,7 @@ indexing_test :: proc(allocator: mem.Allocator = context.allocator) {
 	fmt.println("=== END INDEXING TEST ===")
 }
 reset_index_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== RESET INDEX TEST ===")
 
 	df := w.dataframe_new()
@@ -138,6 +140,7 @@ reset_index_test :: proc(allocator: mem.Allocator = context.allocator) {
 }
 
 reindex_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== REINDEX TEST ===")
 
 	df := w.dataframe_new()
@@ -191,6 +194,7 @@ reindex_test :: proc(allocator: mem.Allocator = context.allocator) {
 
 
 set_index_drop_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("=== SET INDEX DROP TEST ===")
 
 	df := w.dataframe_new()

@@ -7,6 +7,7 @@ import rand "core:math/rand"
 import "core:mem"
 
 ir_derivatives_2f_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n======================================================================")
 	fmt.println("    INTEREST RATE DERIVATIVES: HULL-WHITE 2-FACTOR MODEL")
 	fmt.println("======================================================================\n")
@@ -161,6 +162,7 @@ ir_derivatives_2f_test :: proc(allocator: mem.Allocator) {
 
 
 ir_derivatives_2f_swaption_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n======================================================================")
 	fmt.println("    HW 2-FACTOR JOINT CALIBRATION: CAPS + SWAPTIONS")
 	fmt.println("======================================================================\n")
@@ -403,6 +405,7 @@ ir_derivatives_2f_swaption_test :: proc(allocator: mem.Allocator) {
 
 
 bermudan_swaption_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n======================================================================")
 	fmt.println("         BERMUDAN SWAPTION: 1-FACTOR vs 2-FACTOR")
 	fmt.println("======================================================================\n")

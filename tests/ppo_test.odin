@@ -16,6 +16,7 @@ import "core:mem"
 // 1. SYNTHETIC DATA TEST (Ornstein-Uhlenbeck)
 // ============================================================================
 ppo_trading_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== PPO Trading Test (Synthetic Data) ===")
 
 	n_days := 2500
@@ -104,6 +105,7 @@ ppo_trading_test :: proc(allocator: mem.Allocator = context.allocator) {
 // 2. REAL MARKET DATA TEST (Yahoo Finance)
 // ============================================================================
 ppo_trading_real_data_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== PPO Trading Test (REAL MARKET DATA) ===")
 
 	fmt.println("\n[1/4] Fetching real market data from Yahoo Finance...")
@@ -228,6 +230,7 @@ WalkForwardResult :: struct {
 }
 
 walk_forward_validation_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
 	fmt.println("\n======================================================================")
 	fmt.println("    WALK-FORWARD VALIDATION: PPO TRADING AGENT")
 	fmt.println("======================================================================")

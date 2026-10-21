@@ -10,6 +10,7 @@ import "core:math"
 import "core:mem"
 
 market_implied_psychology_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Market-Implied Psychology Calibration ===")
 	fmt.println("Reverse-engineering investor bias from a synthetic option chain.")
 
@@ -86,6 +87,7 @@ market_implied_psychology_test :: proc(allocator: mem.Allocator) {
 }
 
 real_market_psychology_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
 	fmt.println("\n=== Real Market-Implied Psychology (Live SPY Options) ===")
 	fmt.println("Extracting investor bias from live Yahoo Finance data.")
 
