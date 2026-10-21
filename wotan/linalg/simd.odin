@@ -803,9 +803,11 @@ vec_sub_inplace_simd :: proc(a, b: []f64) {
 // ============================================================================
 // SIMD Vector Addition: out = a + b (element-wise, f64)
 // ============================================================================
-vec_add_simd :: proc(a, b, out: []f64) {
+vec_add_simd :: proc(a, b, out: []f64, loc := #caller_location) {
 	n := len(a)
-	if n != len(b) || n != len(out) do panic("vec_add_simd: length mismatch")
+	if n != len(b) || n != len(out) {
+		panic(fmt.tprintf("vec_add_simd: length mismatch (%d, %d, %d)", n, len(b), len(out)), loc)
+	}
 
 	if !simd.HAS_HARDWARE_SIMD {
 		for i := 0; i < n; i += 1 {

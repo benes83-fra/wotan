@@ -49,7 +49,13 @@ matrix_new :: proc(
 	m.allocator = allocator
 
 	if rows * cols > 0 {
-		m.data = make([]T, rows * cols, allocator)
+		err: mem.Allocator_Error
+		m.data, err = make([]T, rows * cols, allocator)
+		// Fail here instead of returning an empty matrix that crashes far away
+		// with a misleading length/slice error (e.g. when the machine runs out of memory)
+		if err != nil {
+			panic(fmt.tprintf("matrix_new: failed to allocate %d x %d (%v)", rows, cols, err))
+		}
 	}
 
 	return m

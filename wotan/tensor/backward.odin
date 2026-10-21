@@ -7,27 +7,54 @@ import "core:math"
 import "core:mem"
 
 
+// tensor_backward backpropagates from `root`.
+// - Scalar roots (losses) are always seeded with dL/dL = 1.
+// - Non-scalar roots use a gradient already written into root.grad (legacy
+//   pattern: tensor_ensure_grad + fill), or all ones if none was written.
+//   Prefer tensor_backward_with_grad to pass the upstream gradient explicitly.
 tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.allocator) {
 	if !root.requires_grad {return}
 
-	// 1. Set the gradient of the root node to 1.0
 	tensor_ensure_grad(root)
-	has_custom_grad := false
-	for i in 0 ..< len(root.grad.data) {
-		if root.grad.data[i] != 0.0 {
-			has_custom_grad = true
-			break
+	seeded := false
+	if len(root.data.data) > 1 {
+		for v in root.grad.data {
+			if v != 0.0 {
+				seeded = true
+				break
+			}
 		}
 	}
-
-	// Only set to 1.0 if user hasn't set a custom gradient
-	if !has_custom_grad {
-		for i in 0 ..< len(root.grad.data) {
-			root.grad.data[i] = 1.0
-		}
+	if !seeded {
+		for i in 0 ..< len(root.grad.data) {root.grad.data[i] = 1.0}
 	}
+	_backward_from_root(root, allocator)
+}
 
-	// 2. Build the topological sort
+// tensor_backward_with_grad backpropagates from `root` using `grad_output`
+// (dL/droot, one value per element of root) as the upstream gradient.
+tensor_backward_with_grad :: proc(
+	root: ^Tensor,
+	grad_output: []f64,
+	allocator: mem.Allocator = context.allocator,
+	loc := #caller_location,
+) {
+	if !root.requires_grad {return}
+	fmt.assertf(
+		len(grad_output) == len(root.data.data),
+		"tensor_backward_with_grad: %d gradient values for a root with %d elements",
+		len(grad_output),
+		len(root.data.data),
+		loc = loc,
+	)
+	tensor_ensure_grad(root)
+	copy(root.grad.data, grad_output)
+	_backward_from_root(root, allocator)
+}
+
+// _backward_from_root runs the reverse pass once root.grad holds the seed.
+_backward_from_root :: proc(root: ^Tensor, allocator: mem.Allocator) {
+	// 1. Build the topological sort
 	topo := make([dynamic]^Tensor, 0, root.allocator)
 	defer delete(topo) // ✅ FIX: Removed allocator
 
@@ -50,11 +77,13 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 		// ✅ CRITICAL: Ensure this node has a gradient allocated
 		tensor_ensure_grad(node)
 
-		// ✅ CRITICAL: Skip if gradient is still empty (shouldn't happen, but defensive)
-		if len(node.grad.data) == 0 {
-			fmt.printf("WARNING: Skipping node with op %v - empty gradient\n", node.op)
-			continue
-		}
+		fmt.assertf(
+			len(node.grad.data) == len(node.data.data),
+			"backward: %v node has %d gradient values for %d data values",
+			node.op,
+			len(node.grad.data),
+			len(node.data.data),
+		)
 		switch node.op {
 		case .Add:
 			for input in node.inputs {
@@ -214,10 +243,6 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 		case .Sum:
 			a_in := node.inputs[0]
 			if a_in.requires_grad {
-				if len(node.grad.data) == 0 {
-					fmt.println("ERROR: Sum grad.data is empty")
-					continue
-				}
 				scalar_grad := node.grad.data[0]
 				l.vec_broadcast_add_simd(scalar_grad, a_in.grad.data) // ✅ SIMD
 			}
@@ -250,83 +275,20 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 		case .Relu:
 			a_in := node.inputs[0]
 			if a_in.requires_grad {
-				// ✅ FIX: Add defensive length checks
-				grad_out_len := len(node.grad.data)
-				input_len := len(a_in.data.data)
-				grad_in_len := len(a_in.grad.data)
-
-				if grad_out_len != input_len || grad_out_len != grad_in_len {
-					fmt.printf(
-						"WARNING: ReLU backward length mismatch at epoch - " +
-						"grad_out=%d, input=%d, grad_in=%d\n",
-						grad_out_len,
-						input_len,
-						grad_in_len,
-					)
-					continue
-				}
-
+				_assert_same_len(node, a_in)
 				l.vec_relu_backward_simd(node.grad.data, a_in.data.data, a_in.grad.data)
 			}
-		case .Gelu:
-			a_in := node.inputs[0]
-			if a_in.requires_grad {
-				tensor_ensure_grad(a_in)
-
-				// Constants for Hastings approximation of CDF and PDF
-				inv_sqrt_2pi := 0.3989422804014327
-				p := 0.2316419
-				b1 := 0.319381530
-				b2 := -0.356563782
-				b3 := 1.781477937
-				b4 := -1.821255978
-				b5 := 1.330274429
-
-				for i in 0 ..< len(a_in.grad.data) {
-					x := a_in.data.data[i]
-
-					// 1. Compute PDF: φ(x) = (1/√(2π)) * e^(-x²/2)
-					phi := math.exp(-0.5 * x * x) * inv_sqrt_2pi
-
-					// 2. Compute CDF: Φ(x) using Hastings approximation
-					ax := math.abs(x)
-					t_val := 1.0 / (1.0 + p * ax)
-					t2 := t_val * t_val
-					t3 := t2 * t_val
-					t4 := t3 * t_val
-					t5 := t4 * t_val
-					poly := b1 * t_val + b2 * t2 + b3 * t3 + b4 * t4 + b5 * t5
-					cdf := 1.0 - phi * poly
-					if x < 0.0 {
-						cdf = 1.0 - cdf
-					}
-
-					// 3. GELU derivative: Φ(x) + x * φ(x)
-					grad := cdf + x * phi
-
-					a_in.grad.data[i] += node.grad.data[i] * grad
-				}
-			}
-
 		case .Sigmoid:
 			a_in := node.inputs[0]
 			if a_in.requires_grad {
-				if len(node.grad.data) != len(a_in.data.data) ||
-				   len(node.grad.data) != len(a_in.grad.data) {
-					fmt.printf("WARNING: Sigmoid backward length mismatch\n")
-					continue
-				}
+				_assert_same_len(node, a_in)
 				l.vec_sigmoid_backward_simd(node.grad.data, a_in.data.data, a_in.grad.data) // ✅ SIMD
 			}
 
 		case .Tanh:
 			a_in := node.inputs[0]
 			if a_in.requires_grad {
-				if len(node.grad.data) != len(a_in.data.data) ||
-				   len(node.grad.data) != len(a_in.grad.data) {
-					fmt.printf("WARNING: Tanh backward length mismatch\n")
-					continue
-				}
+				_assert_same_len(node, a_in)
 				l.vec_tanh_backward_simd(node.grad.data, a_in.data.data, a_in.grad.data) // ✅ SIMD
 			}
 		case .Exp:
@@ -483,77 +445,34 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 			a_in := node.inputs[0]
 			bias_in := node.inputs[1]
 
-			// ✅ CRITICAL: Check gradient dimensions
-			if len(node.grad.data) == 0 {
-				fmt.println("WARNING: AddBias node has empty gradient, skipping")
-				continue
-			}
-			if len(node.int_metadata) == 2 {
-				N := node.int_metadata[0]
-				D := node.int_metadata[1]
-
-				if a_in.requires_grad {
-					tensor_ensure_grad(a_in)
-					l.vec_add_simd(a_in.grad.data, node.grad.data, a_in.grad.data)
-				}
-
-				if bias_in.requires_grad {
-					tensor_ensure_grad(bias_in)
-					// Sum gradients over the N rows
-					if len(bias_in.grad.data) >= D {
-						bias_grad_slice := bias_in.grad.data[0:D]
-						// Sum gradients over the N rows
-						for i in 0 ..< N {
-							row_grad := node.grad.data[i * D:(i + 1) * D]
-							l.axpy_simd(1.0, row_grad, bias_grad_slice)
-						}
-					}
-				}
-				continue // Skip standard 2D backward
-			}
+			// Output is N rows of width D (the flattened path stores N, D explicitly)
 			N := node.grad.rows
 			D := node.grad.cols
-
-			// ✅ CRITICAL: Verify gradient size matches expected dimensions
-			if len(node.grad.data) != N * D {
-				fmt.printf(
-					"WARNING: AddBias gradient size mismatch: %d != %d * %d\n",
-					len(node.grad.data),
-					N,
-					D,
-				)
-				continue
+			if len(node.int_metadata) == 2 {
+				N = node.int_metadata[0]
+				D = node.int_metadata[1]
 			}
+			fmt.assertf(
+				N * D == len(node.grad.data),
+				"AddBias backward: grad has %d elements, expected %d x %d",
+				len(node.grad.data),
+				N,
+				D,
+			)
 
 			if a_in.requires_grad {
-				tensor_ensure_grad(a_in)
-				if len(a_in.grad.data) > 0 && len(a_in.grad.data) == len(node.grad.data) {
-					l.vec_add_simd(a_in.grad.data, node.grad.data, a_in.grad.data)
-				}
+				l.vec_add_simd(a_in.grad.data, node.grad.data, a_in.grad.data)
 			}
-
 			if bias_in.requires_grad {
-				tensor_ensure_grad(bias_in)
-				if len(bias_in.grad.data) > 0 && len(bias_in.grad.data) == D {
-					bias_grad_slice := bias_in.grad.data[0:D]
-					for i in 0 ..< N {
-						start_idx := i * D
-						end_idx := (i + 1) * D
-
-						// ✅ CRITICAL: Bounds check before slicing
-						if end_idx > len(node.grad.data) {
-							fmt.printf(
-								"ERROR: AddBias slice out of bounds: %d:%d > %d\n",
-								start_idx,
-								end_idx,
-								len(node.grad.data),
-							)
-							continue
-						}
-
-						row_grad := node.grad.data[start_idx:end_idx]
-						l.axpy_simd(1.0, row_grad, bias_grad_slice)
-					}
+				fmt.assertf(
+					len(bias_in.grad.data) == D,
+					"AddBias backward: bias has %d elements, expected %d",
+					len(bias_in.grad.data),
+					D,
+				)
+				// Sum the gradient over the N rows
+				for i in 0 ..< N {
+					l.axpy_simd(1.0, node.grad.data[i * D:(i + 1) * D], bias_in.grad.data)
 				}
 			}
 		case .Embedding:
@@ -1016,28 +935,18 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 		case .CrossEntropy:
 			// The magical simplified gradient: grad = (softmax_prob - target_one_hot) / N
 			logits_in := node.inputs[0]
-			if len(node.grad.data) == 0 {
-				fmt.println("WARNING: CrossEntropy node has empty gradient, skipping")
-				continue
-			}
 			scalar_grad := node.grad.data[0] // Usually 1.0
 
-			// ✅ FIX: Use stored dimensions
-			if len(node.int_metadata) < 2 {
-				fmt.println("ERROR: CrossEntropy missing dimension metadata")
-				continue
-			}
+			// Stored by the forward: [N, C, target_0 .. target_{N-1}]
 			N := node.int_metadata[0]
 			C := node.int_metadata[1]
-
-			if len(node.int_metadata) < 2 + N {
-				fmt.printf(
-					"ERROR: CrossEntropy int_metadata length %d < %d\n",
-					len(node.int_metadata),
-					2 + N,
-				)
-				continue
-			}
+			fmt.assertf(
+				len(node.int_metadata) == 2 + N && N * C == len(logits_in.data.data),
+				"CrossEntropy backward: metadata (%d entries) does not match N=%d, C=%d",
+				len(node.int_metadata),
+				N,
+				C,
+			)
 
 			for i in 0 ..< N {
 				// Recompute softmax for stability
@@ -1113,28 +1022,15 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 		case .MaxPool2d:
 			a_in := node.inputs[0]
 			if a_in.requires_grad {
-				// ✅ ADD: Bounds check
-				if len(node.int_metadata) != len(node.grad.data) {
-					fmt.printf(
-						"ERROR: MaxPool2d int_metadata length %d != grad length %d\n",
-						len(node.int_metadata),
-						len(node.grad.data),
-					)
-					continue
-				}
-
+				// int_metadata holds the argmax input index of every output element
+				fmt.assertf(
+					len(node.int_metadata) == len(node.grad.data),
+					"MaxPool2d backward: %d argmax indices for %d outputs",
+					len(node.int_metadata),
+					len(node.grad.data),
+				)
 				for i in 0 ..< len(node.grad.data) {
-					idx := node.int_metadata[i]
-					// ✅ ADD: Bounds check for idx
-					if idx >= len(a_in.grad.data) {
-						fmt.printf(
-							"ERROR: MaxPool2d idx %d >= grad length %d\n",
-							idx,
-							len(a_in.grad.data),
-						)
-						continue
-					}
-					a_in.grad.data[idx] += node.grad.data[i]
+					a_in.grad.data[node.int_metadata[i]] += node.grad.data[i]
 				}
 			}
 		case .BatchNorm2d:
@@ -1688,7 +1584,7 @@ tensor_backward :: proc(root: ^Tensor, allocator: mem.Allocator = context.alloca
 					}
 				}
 			}
-		case .None, .Constant, .TopKMask:
+		case .None, .TopKMask:
 		// Leaf node, nothing to do
 		}
 	}
@@ -2174,4 +2070,18 @@ _conv2d_backward :: proc(node: ^Tensor, allocator: mem.Allocator) {
 			}
 		}
 	}
+}
+
+// _assert_same_len checks that an element-wise op's output, input and input
+// gradient all have the same number of elements.
+_assert_same_len :: proc(node, input: ^Tensor, loc := #caller_location) {
+	fmt.assertf(
+		len(node.grad.data) == len(input.data.data) && len(input.grad.data) == len(input.data.data),
+		"%v backward: output grad %d, input %d, input grad %d elements",
+		node.op,
+		len(node.grad.data),
+		len(input.data.data),
+		len(input.grad.data),
+		loc = loc,
+	)
 }
