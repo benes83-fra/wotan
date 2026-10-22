@@ -108,10 +108,11 @@ SABR_CalibrationResult :: struct {
 }
 
 Heston_CalibrationResult :: struct {
-	params:     Heston_Params,
-	rmse:       f64,
-	converged:  bool,
-	iterations: int,
+	params:        Heston_Params,
+	rmse:          f64, // pricing RMSE (excludes any Feller penalty)
+	converged:     bool,
+	iterations:    int,
+	feller_margin: f64, // 2*kappa*theta - sigma^2; > 0 means the Feller condition holds
 }
 
 
@@ -200,9 +201,10 @@ SABR_CalibrationContext :: struct {
 }
 
 Heston_CalibrationContext :: struct {
-	market_data: []VolSurfacePoint,
-	S:           f64,
-	r:           f64,
+	market_data:   []VolSurfacePoint,
+	S:             f64,
+	r:             f64,
+	feller_weight: f64, // penalty per unit of Feller violation (0 = not enforced)
 }
 
 sabr_objective_fn :: proc(x: []f64, user_data: rawptr) -> f64 {
@@ -233,12 +235,13 @@ heston_objective_fn :: proc(x: []f64, user_data: rawptr) -> f64 {
 		rho   = x[4],
 	}
 
-	// ✅ CRITICAL: Enforce Feller condition. If violated, reject immediately.
+	// Optional Feller condition (2*kappa*theta > sigma^2): a penalty proportional
+	// to the violation. Fourier pricing does not need it; Monte Carlo simulation
+	// of the variance process does (variance can otherwise hit zero).
 	feller_penalty := 0.0
 	feller_condition := 2.0 * params.kappa * params.theta - params.sigma * params.sigma
-	if feller_condition <= 0.0 {
-		// Heavy but differentiable penalty for violating Feller
-		feller_penalty = 50.0 * math.abs(feller_condition)
+	if ctx.feller_weight > 0.0 && feller_condition <= 0.0 {
+		feller_penalty = ctx.feller_weight * math.abs(feller_condition)
 	}
 
 	n := len(ctx.market_data)
@@ -259,7 +262,7 @@ heston_objective_fn :: proc(x: []f64, user_data: rawptr) -> f64 {
 		err := model_price - bs_price
 		rmse += err * err
 	}
-	return math.sqrt_f64(rmse / f64(n))
+	return math.sqrt_f64(rmse / f64(n)) + feller_penalty
 }
 
 // _heston_model_prices fills out[i] with the 1000-node Heston call price of
@@ -337,13 +340,17 @@ calibrate_heston :: proc(
 	market_data: []VolSurfacePoint,
 	S: f64,
 	r: f64,
-	true_sigma: f64 = 0.16, // ✅ ADD: Pass historical vol to seed the optimizer
+	true_sigma: f64 = 0.16, // historical vol, seeds v0 and theta
 	allocator: mem.Allocator = context.allocator,
+	// Penalty weight for violating the Feller condition (0 = not enforced).
+	// Use e.g. 50 when the parameters feed a Monte Carlo simulation.
+	feller_weight: f64 = 0.0,
 ) -> Heston_CalibrationResult {
 	ctx := Heston_CalibrationContext {
-		market_data = market_data,
-		S           = S,
-		r           = r,
+		market_data   = market_data,
+		S             = S,
+		r             = r,
+		feller_weight = feller_weight,
 	}
 
 	// Seeded with realistic equity dynamics: v0 and theta near the historical
@@ -366,17 +373,19 @@ calibrate_heston :: proc(
 	res := opt.calibrate(params, heston_objective_fn, &ctx, config, allocator)
 	defer opt.calibration_result_free(&res)
 
+	// With the penalty active the loss is RMSE + penalty; report the pure pricing RMSE
+	rmse := res.loss
+	if feller_weight > 0.0 {
+		ctx.feller_weight = 0.0
+		rmse = heston_objective_fn(res.x, &ctx)
+	}
+	p := Heston_Params{v0 = res.x[0], kappa = res.x[1], theta = res.x[2], sigma = res.x[3], rho = res.x[4]}
 	return Heston_CalibrationResult {
-		params = Heston_Params {
-			v0 = res.x[0],
-			kappa = res.x[1],
-			theta = res.x[2],
-			sigma = res.x[3],
-			rho = res.x[4],
-		},
-		rmse = res.loss,
+		params = p,
+		rmse = rmse,
 		converged = res.converged,
 		iterations = res.iterations,
+		feller_margin = 2.0 * p.kappa * p.theta - p.sigma * p.sigma,
 	}
 }
 // ============================================================================

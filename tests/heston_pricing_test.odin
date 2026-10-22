@@ -57,6 +57,25 @@ heston_pricing_test :: proc(allocator: mem.Allocator) {
 	}
 	expect(&passed, &total, same, "precomputed behavioral price == direct price (exact)")
 
+	// Feller option: off by default; feller_weight > 0 yields 2*kappa*theta > sigma^2.
+	// A zig-zag smile Heston cannot fit pushes the unconstrained fit into violation.
+	chain: [dynamic]fin.VolSurfacePoint
+	defer delete(chain)
+	for Tc in ([]f64{0.25, 0.5, 1.0}) {
+		for K := 85.0; K <= 115.0; K += 5.0 {
+			iv := 0.25 + (0.15 if int(K) % 10 == 5 else 0.0)
+			append(&chain, fin.VolSurfacePoint{strike = K, expiry = Tc, implied_vol = iv, market_price = fin.black_scholes_call(S, K, Tc, r, iv)})
+		}
+	}
+	free_fit := fin.calibrate_heston(chain[:], S, r, 0.2, allocator)
+	feller_fit := fin.calibrate_heston(chain[:], S, r, 0.2, allocator, feller_weight = 50)
+	expect(&passed, &total, free_fit.feller_margin < 0 && feller_fit.feller_margin > 0,
+		fmt.tprintf("Feller: margin %.3f (default) -> %.3f (feller_weight = 50)", free_fit.feller_margin, feller_fit.feller_margin))
+	ctx := fin.Heston_CalibrationContext{market_data = chain[:], S = S, r = r}
+	p := feller_fit.params
+	pure := fin.heston_objective_fn([]f64{p.v0, p.kappa, p.theta, p.sigma, p.rho}, &ctx)
+	expect(&passed, &total, feller_fit.rmse == pure, "Feller fit reports the pure pricing RMSE (no penalty)")
+
 	fmt.printf("Heston pricing summary: %d/%d passed\n", passed, total)
 	record_failures(total - passed)
 }
