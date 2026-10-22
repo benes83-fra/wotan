@@ -54,7 +54,13 @@ ir_derivatives_2f_test :: proc(allocator: mem.Allocator) {
 		B_a := (1.0 - math.exp_f64(-true_a * delta_arr[i])) / true_a
 		B_b := (1.0 - math.exp_f64(-true_b * delta_arr[i])) / true_b
 
-		term1 := true_sigma * true_sigma * B_a * B_a * T_start_arr[i]
+		term1 :=
+			true_sigma *
+			true_sigma *
+			B_a *
+			B_a *
+			(1.0 - math.exp_f64(-2.0 * true_a * T_start_arr[i])) /
+			(2.0 * true_a)
 		term2 :=
 			true_eta *
 			true_eta *
@@ -210,7 +216,13 @@ ir_derivatives_2f_swaption_test :: proc(allocator: mem.Allocator) {
 		noise := 1.0 + 0.02 * (rand.float64() - 0.5)
 		B_a := (1.0 - math.exp_f64(-true_a * delta_arr[i])) / true_a
 		B_b := (1.0 - math.exp_f64(-true_b * delta_arr[i])) / true_b
-		term1 := true_sigma * true_sigma * B_a * B_a * T_start_arr[i]
+		term1 :=
+			true_sigma *
+			true_sigma *
+			B_a *
+			B_a *
+			(1.0 - math.exp_f64(-2.0 * true_a * T_start_arr[i])) /
+			(2.0 * true_a)
 		term2 :=
 			true_eta *
 			true_eta *

@@ -427,11 +427,13 @@ hull_white_2f_caplet_price_tensor :: proc(
 	exp_b_delta := t.tensor_exp(t.tensor_neg(b_delta))
 	B_b := t.tensor_scale(t.tensor_sub(one, exp_b_delta), 1.0 / params.b)
 
-	// Variance of forward rate (Brigo-Mercurio formula)
-	// Term 1: sigma^2 * B_a^2 * T_start
+	// Variance of the bond-option log price (Brigo-Mercurio G2++ formula)
+	// Term 1: sigma^2 * B_a^2 * (1 - exp(-2*a*T_start)) / (2*a)
 	sigma_sq := params.sigma * params.sigma
 	B_a_sq := t.tensor_mul(B_a, B_a)
-	term1 := t.tensor_scale(t.tensor_mul(B_a_sq, T_start), sigma_sq)
+	exp_2a_T := t.tensor_exp(t.tensor_scale(T_start, -2.0 * params.a))
+	var_factor_a := t.tensor_scale(t.tensor_sub(one, exp_2a_T), 1.0 / (2.0 * params.a))
+	term1 := t.tensor_scale(t.tensor_mul(B_a_sq, var_factor_a), sigma_sq)
 
 	// Term 2: eta^2 * B_b^2 * (1 - exp(-2*b*T_start)) / (2*b)
 	eta_sq := params.eta * params.eta
@@ -526,10 +528,10 @@ calibrate_hull_white_2f :: proc(
 
 	ctx := _HW_Caplet_Ctx{T_start_t, T_end_t, F_t, K_t, P_t, market_t, allocator}
 	params := []opt.Calibration_Param {
-		{"a", 0.1, 0.01, 1.0, .Linear},
-		{"b", 0.01, 0.01, 1.0, .Linear},
-		{"sigma", 0.01, 0.001, 0.05, .Linear},
-		{"eta", 0.005, 0.001, 0.05, .Linear},
+		{"a", 0.1, 0.01, 1.0, .Log},
+		{"b", 0.01, 0.01, 1.0, .Log},
+		{"sigma", 0.01, 0.001, 0.05, .Log},
+		{"eta", 0.005, 0.001, 0.05, .Log},
 		{"rho", -0.3, -0.99, 0.99, .Linear},
 	}
 	config := opt.Calibration_Config {
