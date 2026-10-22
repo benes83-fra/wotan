@@ -275,15 +275,12 @@ ir_derivatives_2f_swaption_test :: proc(allocator: mem.Allocator) {
 			annuity     = annuity,
 		}
 
-		// Generate true price using HW2F
-		swap_var := fin.compute_hw2f_swap_variance(swaption_specs[i], true_params, r0)
-		swap_vol := math.sqrt_f64(math.max(swap_var, 1e-12))
-		ln_F_K := math.ln(r0 / r0) // ATM so this is 0
-		d1 := (ln_F_K + 0.5 * swap_var) / swap_vol
-		d2 := d1 - swap_vol
-		N_d1 := 0.5 * (1.0 + math.erf(d1 / math.sqrt_f64(2.0)))
-		N_d2 := 0.5 * (1.0 + math.erf(d2 / math.sqrt_f64(2.0)))
-		true_price := annuity * (r0 * N_d1 - r0 * N_d2)
+		// Generate true price using the HW2F swaption pricer (Bachelier on the
+		// G2++ swap-rate variance; validated against the exact price in
+		// hull_white_contracts_test)
+		true_prices := fin.hw2f_swaption_price_strip(true_params, swaption_specs[i:i + 1], 1, r0, allocator)
+		true_price := true_prices[0]
+		delete(true_prices, allocator)
 
 		noise := 1.0 + 0.02 * (rand.float64() - 0.5)
 		swaption_market[i] = true_price * noise

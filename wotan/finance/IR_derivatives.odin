@@ -742,49 +742,53 @@ SwaptionSpec :: struct {
 	K:           f64, // Strike
 	annuity:     f64, // PV01 / Annuity factor
 }
-// Compute HW 2-Factor swap rate variance (proper annuity weighting)
+// Total normal (Bachelier) variance of the forward swap rate at expiry under
+// G2++, frozen-weights approximation (Schrager-Pelsser style).
+//
+// With bond sensitivities dP(t,T_i)/dx = -B_a(T_i - t) P frozen on today's
+// curve P(0,t) = exp(-r0 t), the swap rate responds to the factors with
+//   C_x(t) = [-B_a(T0-t) P(T0) + B_a(Tn-t) P(Tn) + F sum_i B_a(Ti-t) P(Ti)] / A
+//          = alpha_x + kappa_x e^{a t}     (alpha_x = 0 when F is the par rate)
+// and the variance integrates in closed form over [0, T]. Matches the exact
+// G2++ swaption price to ~0.03% (see tests/hull_white_test.odin).
 compute_hw2f_swap_variance :: proc(
 	spec: SwaptionSpec,
 	params: HW2_Params,
-	r0: f64, // Initial short rate for discount factors
+	r0: f64, // flat continuously compounded rate for discount factors
 ) -> f64 {
-	a := params.a
-	b := params.b
-	sigma := params.sigma
-	eta := params.eta
-	rho := params.rho
+	a, b := params.a, params.b
+	sigma, eta, rho := params.sigma, params.eta, params.rho
 	T := spec.T_exp
+	S0, A0 := spec.F, spec.annuity
 
-	// Factor variances at expiry T
-	V_a := sigma * sigma * (1.0 - math.exp_f64(-2.0 * a * T)) / (2.0 * a)
-	V_b := eta * eta * (1.0 - math.exp_f64(-2.0 * b * T)) / (2.0 * b)
-	V_ab := rho * sigma * eta * (1.0 - math.exp_f64(-(a + b) * T)) / (a + b)
-
-	// Compute proper annuity weights
-	// w_i = delta_i * P(0, T_i) / Annuity
-	// For annual payments, delta_i = 1
-	W_a := 0.0
-	W_b := 0.0
-	total_weight := 0.0
-
-	for k in 1 ..< spec.swap_length + 1 {
+	// Payment schedule: annual, T_i = T + i, i = 1..swap_length
+	P_T0 := math.exp_f64(-r0 * T)
+	P_Tn := math.exp_f64(-r0 * (T + f64(spec.swap_length)))
+	G_a := -P_T0 * math.exp_f64(-a * T) + P_Tn * math.exp_f64(-a * (T + f64(spec.swap_length)))
+	G_b := -P_T0 * math.exp_f64(-b * T) + P_Tn * math.exp_f64(-b * (T + f64(spec.swap_length)))
+	H := -P_T0 + P_Tn // level part of the numerator
+	for k in 1 ..= spec.swap_length {
 		T_i := T + f64(k)
-		P_Ti := math.exp_f64(-r0 * T_i) // Discount factor to payment date
-		w_i := P_Ti / spec.annuity // Proper annuity weight
-
-		B_a_k := (1.0 - math.exp_f64(-a * f64(k))) / a
-		B_b_k := (1.0 - math.exp_f64(-b * f64(k))) / b
-
-		W_a += w_i * B_a_k
-		W_b += w_i * B_b_k
-		total_weight += w_i
+		P_Ti := math.exp_f64(-r0 * T_i)
+		G_a += S0 * P_Ti * math.exp_f64(-a * T_i)
+		G_b += S0 * P_Ti * math.exp_f64(-b * T_i)
+		H += S0 * P_Ti
 	}
+	// C_x(t) = alpha_x + kappa_x e^{a t}, C_y(t) = alpha_y + kappa_y e^{b t}
+	alpha_x, kappa_x := H / (a * A0), -G_a / (a * A0)
+	alpha_y, kappa_y := H / (b * A0), -G_b / (b * A0)
 
-	// sigma_swap^2 = V_a * W_a^2 + V_b * W_b^2 + 2 * V_ab * W_a * W_b
-	return V_a * W_a * W_a + V_b * W_b * W_b + 2.0 * V_ab * W_a * W_b
+	// integral_0^T (alpha + kappa e^{k t})(alpha' + kappa' e^{k' t}) dt
+	cross :: proc(al, ka, k, al2, ka2, k2, T: f64) -> f64 {
+		return al * al2 * T + al * ka2 * (math.exp_f64(k2 * T) - 1.0) / k2 + al2 * ka * (math.exp_f64(k * T) - 1.0) / k + ka * ka2 * (math.exp_f64((k + k2) * T) - 1.0) / (k + k2)
+	}
+	return sigma * sigma * cross(alpha_x, kappa_x, a, alpha_x, kappa_x, a, T) +
+		eta * eta * cross(alpha_y, kappa_y, b, alpha_y, kappa_y, b, T) +
+		2.0 * rho * sigma * eta * cross(alpha_x, kappa_x, a, alpha_y, kappa_y, b, T)
 }
 
-// Price a strip of swaptions using Black's formula (SIMD via tensor)
+// Price a strip of payer swaptions under G2++ with the Bachelier (normal)
+// formula on the frozen-weights swap-rate variance.
 hw2f_swaption_price_strip :: proc(
 	params: HW2_Params,
 	swaptions: []SwaptionSpec,
@@ -798,20 +802,16 @@ hw2f_swaption_price_strip :: proc(
 		spec := swaptions[i]
 		swap_var := compute_hw2f_swap_variance(spec, params, r0)
 
-		if swap_var < 1e-12 {
+		if swap_var < 1e-18 {
 			prices[i] = spec.annuity * math.max(spec.F - spec.K, 0.0)
 			continue
 		}
 
-		swap_vol := math.sqrt_f64(swap_var)
-		ln_F_K := math.ln(spec.F / spec.K)
-		d1 := (ln_F_K + 0.5 * swap_var) / swap_vol
-		d2 := d1 - swap_vol
-
-		N_d1 := 0.5 * (1.0 + math.erf(d1 / math.sqrt_f64(2.0)))
-		N_d2 := 0.5 * (1.0 + math.erf(d2 / math.sqrt_f64(2.0)))
-
-		prices[i] = spec.annuity * (spec.F * N_d1 - spec.K * N_d2)
+		sd := math.sqrt_f64(swap_var)
+		d := (spec.F - spec.K) / sd
+		N_d := 0.5 * (1.0 + math.erf(d / math.sqrt_f64(2.0)))
+		phi_d := math.exp_f64(-0.5 * d * d) / math.sqrt_f64(2.0 * math.PI)
+		prices[i] = spec.annuity * ((spec.F - spec.K) * N_d + sd * phi_d)
 	}
 	return prices
 }
@@ -843,7 +843,9 @@ _hw2f_joint_loss :: proc(
 		cap_P_t,
 		allocator,
 	)
-	cap_diff := t.tensor_sub(cap_model_t, cap_market_t)
+	// Relative errors: caps (~1e-4) and swaptions (~1e-2) are priced on very
+	// different scales; relative RMSE lets both instruments inform the fit.
+	cap_diff := t.tensor_div(t.tensor_sub(cap_model_t, cap_market_t), cap_market_t)
 	cap_diff_sq := t.tensor_mul(cap_diff, cap_diff)
 	cap_mse := t.tensor_mean(cap_diff_sq)
 	cap_rmse := t.tensor_sqrt(cap_mse)
@@ -856,46 +858,15 @@ _hw2f_joint_loss :: proc(
 
 	swaption_sse := 0.0
 	for i in 0 ..< n_swaptions {
-		err := swaption_model[i] - swaption_market[i]
+		err := (swaption_model[i] - swaption_market[i]) / swaption_market[i]
 		swaption_sse += err * err
 	}
 	swaption_rmse := math.sqrt_f64(swaption_sse / f64(n_swaptions))
 
-	// 3. Data loss (equal weight between caps and swaptions)
-	data_loss := cap_loss + swaption_rmse
-
-	// 4. Regularization: penalize deviation from realistic priors
-	// Priors based on typical USD rates
-	prior_a := 0.05
-	prior_b := 0.02
-	prior_sigma := 0.01
-	prior_eta := 0.005
-	prior_rho := -0.3
-
-	// Scale factors (larger = more tolerant of deviation)
-	scale_a := 0.1
-	scale_b := 0.05
-	scale_sigma := 0.01
-	scale_eta := 0.005
-	scale_rho := 0.3
-
-	lambda := 0.05 // Regularization strength
-	reg :=
-		lambda *
-		(math.pow((params.a - prior_a) / scale_a, 2) +
-				math.pow((params.b - prior_b) / scale_b, 2) +
-				math.pow((params.sigma - prior_sigma) / scale_sigma, 2) +
-				math.pow((params.eta - prior_eta) / scale_eta, 2) +
-				math.pow((params.rho - prior_rho) / scale_rho, 2))
-
-	// 5. Symmetry-breaking penalty: enforce a > b (fast factor must be faster)
-	// If a < b, add a heavy penalty to prevent factor swapping
-	symmetry_penalty := 0.0
-	if params.a < params.b {
-		symmetry_penalty = 10.0 * math.pow(params.b - params.a, 2)
-	}
-
-	return data_loss + reg + symmetry_penalty
+	// 3. Equal weight between caps and swaptions. No prior: a fixed-centre prior
+	// dominated the (small) data loss and pulled the fit toward its centres.
+	// a > b is enforced by the projection in calibrate_hull_white_2f_joint.
+	return cap_loss + swaption_rmse
 }
 
 // ============================================================================
@@ -904,7 +875,7 @@ _hw2f_joint_loss :: proc(
 
 HW2F_JointResult :: struct {
 	params:     HW2_Params,
-	rmse:       f64,
+	rmse:       f64, // relative RMSE of caplets + relative RMSE of swaptions (dimensionless)
 	converged:  bool,
 	iterations: int,
 }
@@ -941,14 +912,14 @@ calibrate_hull_white_2f_joint :: proc(
 	}
 	// Starting point close to realistic IR parameters, with a > b enforced
 	params := []opt.Calibration_Param {
-		{"a", 0.10, 0.02, 1.0, .Linear},
-		{"b", 0.03, 0.005, math.inf_f64(1), .Linear}, // upper bound b <= a - 0.01 applied by `project`
-		{"sigma", 0.008, 0.001, 0.05, .Linear},
-		{"eta", 0.005, 0.001, 0.05, .Linear},
+		{"a", 0.10, 0.02, 1.0, .Log},
+		{"b", 0.03, 0.005, 1.0, .Log}, // tighter bound b <= a - 0.01 applied by `project`
+		{"sigma", 0.008, 0.001, 0.05, .Log},
+		{"eta", 0.005, 0.001, 0.05, .Log},
 		{"rho", -0.4, -0.99, 0.99, .Linear},
 	}
 	config := opt.Calibration_Config {
-		optimizer = {type = .Adam, learning_rate = 0.005, beta1 = 0.9, beta2 = 0.999, epsilon = 1e-8},
+		optimizer = {type = .Adam, learning_rate = 0.05, beta1 = 0.9, beta2 = 0.999, epsilon = 1e-8},
 		max_iter = 600, // more iterations for the 5D landscape
 		loss_threshold = 1e-6,
 		fd_step = 1e-4,
