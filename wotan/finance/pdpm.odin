@@ -9,6 +9,7 @@ import p "../plot"
 import "core:fmt"
 import "core:math"
 import "core:math/rand"
+import "base:runtime"
 import "core:mem"
 
 // ============================================================================
@@ -1209,6 +1210,8 @@ _calibration_loss :: proc(
 	spot_price: f64,
 	allocator: mem.Allocator,
 ) -> f64 {
+	// pricing scratch (payoffs, state prices) lives only for this evaluation
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	n := len(market_returns)
 
 	// Enforce the constraint: a = 1/(1+rf) - b * E[R]
@@ -1304,6 +1307,7 @@ calibrate_sdf_linear :: proc(
 	rf_discount := 1.0 / (1.0 + risk_free_rate)
 
 	// Use grid search instead of gradient descent
+	b_lo, b_hi := -10.0, 0.0
 	fmt.println("Running PDPM grid search...")
 	best_b, best_rmse := pdpm_grid_search(
 		mean_R,
@@ -1311,8 +1315,8 @@ calibrate_sdf_linear :: proc(
 		market_returns,
 		option_chain,
 		spot_price,
-		-10.0,
-		0.0,
+		b_lo,
+		b_hi,
 		100,
 		allocator,
 	)
@@ -1327,14 +1331,14 @@ calibrate_sdf_linear :: proc(
 	)
 
 	// Construct final SDF
-	final_sdf := _construct_sdf_from_params(best_a, best_b, market_returns, allocator)
+	final_sdf := _construct_sdf_from_params(best_a, best_b, rf_discount, market_returns, allocator)
 
 	return CalibrationResult {
 		sdf          = final_sdf,
 		rmse         = best_rmse,
 		max_error    = 0.0,
 		n_iterations = 200, // 100 coarse + 100 fine
-		converged    = best_rmse < tolerance,
+		converged    = best_rmse < tolerance || _grid_interior(best_b, b_lo, b_hi),
 	}
 }
 
@@ -1342,6 +1346,7 @@ calibrate_sdf_linear :: proc(
 _construct_sdf_from_params :: proc(
 	a: f64,
 	b: f64,
+	rf_discount: f64,
 	market_returns: []f64,
 	allocator: mem.Allocator,
 ) -> StochasticDiscountFactor {
@@ -1377,7 +1382,7 @@ _construct_sdf_from_params :: proc(
 		values = values,
 		parameters = parameters,
 		risk_aversion = 0.0,
-		discount_factor = 1.0 / (1.0 + 0.05),
+		discount_factor = rf_discount,
 		mean = mean,
 		variance = variance,
 	}
@@ -1426,6 +1431,20 @@ compare_to_black_scholes :: proc(
 // ============================================================================
 // PDPM Grid Search Calibration
 // ============================================================================
+
+// Fine-grid point i of n: centred on the coarse best c, covering ±1 coarse step,
+// clipped to the coarse search range [lo, hi]
+_fine_grid_point :: proc(c, coarse_step, lo, hi: f64, i, n: int) -> f64 {
+	a, b := max(c - coarse_step, lo), min(c + coarse_step, hi)
+	return a + (b - a) * f64(i) / f64(n - 1)
+}
+
+// A grid-search optimum is only trustworthy away from the edge of the search
+// range; on the edge the true optimum is likely outside it
+_grid_interior :: proc(x, lo, hi: f64) -> bool {
+	tol := 1e-9 * (hi - lo)
+	return x > lo + tol && x < hi - tol
+}
 
 PDPMCalibrationParams :: struct {
 	b: f64, // The only parameter to optimize
@@ -1494,12 +1513,10 @@ pdpm_grid_search :: proc(
 	}
 
 	// Fine grid search around best_b
-	b_min = best_b - b_step
-	b_max = best_b + b_step
-	b_step = (b_max - b_min) / f64(n_grid - 1)
+	b_center := best_b
 
 	for i in 0 ..< n_grid {
-		b_test := b_min + f64(i) * b_step
+		b_test := _fine_grid_point(b_center, b_step, b_min, b_max, i, n_grid)
 		score := _pdpm_grid_evaluator(
 			b_test,
 			mean_R,
@@ -1524,15 +1541,25 @@ pdpm_grid_search :: proc(
 // ============================================================================
 
 // Power Utility SDF: M = β * (C/C0)^(-γ)
-// Here we use R (gross return) as proxy for consumption growth
+// Here we use R (gross return) as proxy for consumption growth.
+// β is set so that E[M] = 1/(1+rf), like every other SDF here
+_power_utility_beta :: proc(gamma, rf_discount: f64, market_returns: []f64) -> f64 {
+	mean_pow := 0.0
+	for r in market_returns {mean_pow += math.pow(1.0 + r, -gamma)}
+	mean_pow /= f64(len(market_returns))
+	return rf_discount / mean_pow
+}
+
 _calibration_loss_power_utility :: proc(
 	gamma: f64,
-	beta: f64,
+	rf_discount: f64,
 	market_returns: []f64,
 	option_chain: ^OptionChain,
 	spot_price: f64,
 	allocator: mem.Allocator,
 ) -> f64 {
+	// pricing scratch (payoffs, state prices) lives only for this evaluation
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	n := len(market_returns)
 
 	gross_returns := make([]f64, n, allocator)
@@ -1541,6 +1568,7 @@ _calibration_loss_power_utility :: proc(
 		gross_returns[i] = 1.0 + market_returns[i]
 	}
 
+	beta := _power_utility_beta(gamma, rf_discount, market_returns)
 	sdf_values := make([]f64, n, allocator)
 	for i in 0 ..< n {
 		sdf_values[i] = beta * math.pow(gross_returns[i], -gamma)
@@ -1602,7 +1630,7 @@ _calibration_loss_power_utility :: proc(
 
 // Grid search for power utility parameter γ
 pdpm_grid_search_power_utility :: proc(
-	beta: f64,
+	rf_discount: f64,
 	market_returns: []f64,
 	option_chain: ^OptionChain,
 	spot_price: f64,
@@ -1625,7 +1653,7 @@ pdpm_grid_search_power_utility :: proc(
 		gamma_test := gamma_min + f64(i) * gamma_step
 		loss := _calibration_loss_power_utility(
 			gamma_test,
-			beta,
+			rf_discount,
 			market_returns,
 			option_chain,
 			spot_price,
@@ -1639,16 +1667,14 @@ pdpm_grid_search_power_utility :: proc(
 	}
 
 	// Fine grid search around best_gamma
-	gamma_min = best_gamma - gamma_step
-	gamma_max = best_gamma + gamma_step
-	gamma_step = (gamma_max - gamma_min) / f64(n_grid - 1)
+	gamma_center := best_gamma
 
 	for i in 0 ..< n_grid {
-		gamma_test := gamma_min + f64(i) * gamma_step
+		gamma_test := _fine_grid_point(gamma_center, gamma_step, gamma_min, gamma_max, i, n_grid)
 		if gamma_test > 0.0 { 	// γ must be positive
 			loss := _calibration_loss_power_utility(
 				gamma_test,
-				beta,
+				rf_discount,
 				market_returns,
 				option_chain,
 				spot_price,
@@ -1674,19 +1700,21 @@ calibrate_sdf_power_utility :: proc(
 	spot_price: f64,
 	allocator: mem.Allocator = context.allocator,
 ) -> CalibrationResult {
-	beta := 0.99 // Standard discount factor
+	rf_discount := 1.0 / (1.0 + risk_free_rate)
+	gamma_lo, gamma_hi := 0.5, 10.0
 
 	fmt.println("Running Power Utility SDF grid search...")
 	best_gamma, best_rmse := pdpm_grid_search_power_utility(
-		beta,
+		rf_discount,
 		market_returns,
 		option_chain,
 		spot_price,
-		0.5,
-		10.0,
+		gamma_lo,
+		gamma_hi,
 		100,
 		allocator,
 	)
+	beta := _power_utility_beta(best_gamma, rf_discount, market_returns)
 
 	fmt.printf(
 		"Power Utility calibration complete: γ = %.4f, RMSE = %.6f\n",
@@ -1737,7 +1765,7 @@ calibrate_sdf_power_utility :: proc(
 		rmse = best_rmse,
 		max_error = 0.0,
 		n_iterations = 200,
-		converged = best_rmse < 1e-6,
+		converged = _grid_interior(best_gamma, gamma_lo, gamma_hi),
 	}
 }
 
@@ -1754,6 +1782,8 @@ _calibration_loss_quadratic :: proc(
 	spot_price: f64,
 	allocator: mem.Allocator,
 ) -> f64 {
+	// pricing scratch (payoffs, state prices) lives only for this evaluation
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	n := len(market_returns)
 
 	// Enforce constraint: a = rf_discount - b*E[R] - c*E[R²]
@@ -1875,17 +1905,12 @@ pdpm_grid_search_quadratic :: proc(
 	}
 
 	// Fine 2D grid search around best (b, c)
-	b_min := best_b - b_step
-	b_max := best_b + b_step
-	c_min := best_c - c_step
-	c_max := best_c + c_step
-	b_step = (b_max - b_min) / f64(n_grid - 1)
-	c_step = (c_max - c_min) / f64(n_grid - 1)
+	b_center, c_center := best_b, best_c
 
 	for i in 0 ..< n_grid {
-		b_test := b_min + f64(i) * b_step
+		b_test := _fine_grid_point(b_center, b_step, -b_range, b_range, i, n_grid)
 		for j in 0 ..< n_grid {
-			c_test := c_min + f64(j) * c_step
+			c_test := _fine_grid_point(c_center, c_step, -c_range, c_range, j, n_grid)
 			loss := _calibration_loss_quadratic(
 				b_test,
 				c_test,
@@ -1935,6 +1960,7 @@ calibrate_sdf_quadratic :: proc(
 	mean_R2 /= f64(n)
 
 	rf_discount := 1.0 / (1.0 + risk_free_rate)
+	b_range, c_range := 20.0, 10.0
 
 	fmt.println("Running Quadratic SDF 2D grid search...")
 	best_b, best_c, best_rmse := pdpm_grid_search_quadratic(
@@ -1944,8 +1970,8 @@ calibrate_sdf_quadratic :: proc(
 		market_returns,
 		option_chain,
 		spot_price,
-		20.0,
-		10.0,
+		b_range,
+		c_range,
 		20,
 		allocator,
 	)
@@ -1998,7 +2024,7 @@ calibrate_sdf_quadratic :: proc(
 		rmse         = best_rmse,
 		max_error    = 0.0,
 		n_iterations = 800, // 20*20 coarse + 20*20 fine
-		converged    = best_rmse < 1e-6,
+		converged    = _grid_interior(best_b, -b_range, b_range) && _grid_interior(best_c, -c_range, c_range),
 	}
 }
 
@@ -2017,6 +2043,8 @@ _calibration_loss_exponential :: proc(
 	spot_price: f64,
 	allocator: mem.Allocator,
 ) -> f64 {
+	// pricing scratch (payoffs, state prices) lives only for this evaluation
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	n := len(market_returns)
 
 	gross_returns := make([]f64, n, allocator)
@@ -2142,12 +2170,10 @@ pdpm_grid_search_exponential :: proc(
 	}
 
 	// Fine grid search around best_gamma
-	gamma_min = best_gamma - gamma_step
-	gamma_max = best_gamma + gamma_step
-	gamma_step = (gamma_max - gamma_min) / f64(n_grid - 1)
+	gamma_center := best_gamma
 
 	for i in 0 ..< n_grid {
-		gamma_test := gamma_min + f64(i) * gamma_step
+		gamma_test := _fine_grid_point(gamma_center, gamma_step, gamma_min, gamma_max, i, n_grid)
 		loss := _calibration_loss_exponential(
 			gamma_test,
 			rf_discount,
@@ -2178,14 +2204,15 @@ calibrate_sdf_exponential :: proc(
 	rf_discount := 1.0 / (1.0 + risk_free_rate)
 	n := len(market_returns)
 
+	gamma_lo, gamma_hi := -5.0, 5.0
 	fmt.println("Running Exponential SDF grid search...")
 	best_gamma, best_rmse := pdpm_grid_search_exponential(
 		rf_discount,
 		market_returns,
 		option_chain,
 		spot_price,
-		-5.0,
-		5.0,
+		gamma_lo,
+		gamma_hi,
 		100,
 		allocator,
 	)
@@ -2242,7 +2269,7 @@ calibrate_sdf_exponential :: proc(
 		rmse = best_rmse,
 		max_error = 0.0,
 		n_iterations = 200,
-		converged = best_rmse < 1e-6,
+		converged = _grid_interior(best_gamma, gamma_lo, gamma_hi),
 	}
 }
 // ============================================================================
@@ -2277,6 +2304,8 @@ _calibration_loss_multifactor :: proc(
 	spot_price: f64,
 	allocator: mem.Allocator,
 ) -> f64 {
+	// pricing scratch (payoffs, state prices) lives only for this evaluation
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	n := len(factors[0])
 	n_factors := len(factors)
 
@@ -2414,16 +2443,13 @@ pdpm_grid_search_multifactor_2d :: proc(
 		}
 	}
 
-	// Fine 2D grid search around best
-	range1 = best_weights[0]
-	range2 = best_weights[1]
-	step1 = (2.0 * step1) / f64(n_grid - 1)
-	step2 = (2.0 * step2) / f64(n_grid - 1)
+	// Fine 2D grid search: ±1 coarse step around the (frozen) coarse best
+	center1, center2 := best_weights[0], best_weights[1]
 
 	for i in 0 ..< n_grid {
-		test_weights[0] = range1 - step1 + f64(i) * step1
+		test_weights[0] = _fine_grid_point(center1, step1, -range1, range1, i, n_grid)
 		for j in 0 ..< n_grid {
-			test_weights[1] = range2 - step2 + f64(j) * step2
+			test_weights[1] = _fine_grid_point(center2, step2, -range2, range2, j, n_grid)
 			loss := _calibration_loss_multifactor(
 				test_weights,
 				factors,
@@ -2462,14 +2488,15 @@ calibrate_sdf_multifactor_2d :: proc(
 	factors[0] = market_returns
 	factors[1] = volatility_proxy
 
+	range1, range2 := 5.0, 5.0
 	fmt.println("Running 2-Factor Exponential SDF grid search...")
 	best_weights, best_rmse := pdpm_grid_search_multifactor_2d(
 		factors,
 		rf_discount,
 		option_chain,
 		spot_price,
-		5.0,
-		5.0,
+		range1,
+		range2,
 		20,
 		allocator,
 	)
@@ -2539,7 +2566,7 @@ calibrate_sdf_multifactor_2d :: proc(
 		rmse         = best_rmse,
 		max_error    = 0.0,
 		n_iterations = 800, // 20*20 coarse + 20*20 fine
-		converged    = best_rmse < 1e-6,
+		converged    = _grid_interior(best_weights[0], -range1, range1) && _grid_interior(best_weights[1], -range2, range2),
 	}
 }
 // ============================================================================
@@ -2605,6 +2632,8 @@ _calibration_loss_multifactor_4d :: proc(
 	spot_price: f64,
 	allocator: mem.Allocator,
 ) -> f64 {
+	// pricing scratch (payoffs, state prices) lives only for this evaluation
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	n := len(factors[0])
 	n_factors := len(factors)
 
@@ -2744,18 +2773,18 @@ pdpm_grid_search_multifactor_4d :: proc(
 		}
 	}
 
-	// Fine grid search around best
-	range = best_weights[0]
-	step = (2.0 * step) / f64(n_grid - 1)
+	// Fine grid search: ±1 coarse step around the coarse best, frozen so the
+	// window does not move while best_weights improves inside the scan
+	center := [4]f64{best_weights[0], best_weights[1], best_weights[2], best_weights[3]}
 
 	for i in 0 ..< n_grid {
-		test_weights[0] = range - step + f64(i) * step
+		test_weights[0] = _fine_grid_point(center[0], step, -range, range, i, n_grid)
 		for j in 0 ..< n_grid {
-			test_weights[1] = best_weights[1] - step + f64(j) * step
+			test_weights[1] = _fine_grid_point(center[1], step, -range, range, j, n_grid)
 			for k in 0 ..< n_grid {
-				test_weights[2] = best_weights[2] - step + f64(k) * step
+				test_weights[2] = _fine_grid_point(center[2], step, -range, range, k, n_grid)
 				for l in 0 ..< n_grid {
-					test_weights[3] = best_weights[3] - step + f64(l) * step
+					test_weights[3] = _fine_grid_point(center[3], step, -range, range, l, n_grid)
 					loss := _calibration_loss_multifactor_4d(
 						test_weights,
 						factors,
@@ -2805,12 +2834,13 @@ calibrate_sdf_multifactor_4d :: proc(
 	fmt.println("Running 4-Factor Exponential SDF grid search...")
 	fmt.println("Note: This will take longer due to 4D optimization")
 
+	weight_range := 5.0
 	best_weights, best_rmse := pdpm_grid_search_multifactor_4d(
 		factors,
 		rf_discount,
 		option_chain,
 		spot_price,
-		5.0,
+		weight_range,
 		10,
 		allocator,
 	)
@@ -2886,7 +2916,10 @@ calibrate_sdf_multifactor_4d :: proc(
 		rmse         = best_rmse,
 		max_error    = 0.0,
 		n_iterations = 20000, // 10^4 coarse + 10^4 fine
-		converged    = best_rmse < 1e-6,
+		converged    = _grid_interior(best_weights[0], -weight_range, weight_range) &&
+			_grid_interior(best_weights[1], -weight_range, weight_range) &&
+			_grid_interior(best_weights[2], -weight_range, weight_range) &&
+			_grid_interior(best_weights[3], -weight_range, weight_range),
 	}
 } // ============================================================================
 // SDF Surface Visualization (Using Your Plot Package)

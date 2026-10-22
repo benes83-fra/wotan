@@ -47,20 +47,28 @@ nelder_mead :: proc(
 ) -> (
 	best_x: []f64,
 	best_f: f64,
+	converged: bool, // value spread fell below tol before max_iter
 ) {
 	n := len(x0)
 	if n == 0 {
 		best_x = make([]f64, 0, allocator)
 		best_f = 0.0
+		converged = true
 		return
 	}
 
-	// Simplex: n+1 vertices
-	simplex := make([][]f64, n + 1, allocator)
-	values := make([]f64, n + 1, allocator)
+	// Simplex: n+1 vertices (work buffers from the temp allocator; only
+	// best_x is returned in `allocator`)
+	simplex := make([][]f64, n + 1, context.temp_allocator)
+	values := make([]f64, n + 1, context.temp_allocator)
 
 	for i in 0 ..< n + 1 {
-		simplex[i] = make([]f64, n, allocator)
+		simplex[i] = make([]f64, n, context.temp_allocator)
+	}
+	defer {
+		for v in simplex {delete(v, context.temp_allocator)}
+		delete(simplex, context.temp_allocator)
+		delete(values, context.temp_allocator)
 	}
 
 	// Initialize simplex around x0
@@ -81,13 +89,19 @@ nelder_mead :: proc(
 	rho := 0.5
 	sigma := 0.5
 
-	centroid := make([]f64, n, allocator)
-	xr := make([]f64, n, allocator)
-	xe := make([]f64, n, allocator)
-	xc := make([]f64, n, allocator)
+	centroid := make([]f64, n, context.temp_allocator)
+	xr := make([]f64, n, context.temp_allocator)
+	xe := make([]f64, n, context.temp_allocator)
+	xc := make([]f64, n, context.temp_allocator)
+	defer {
+		delete(centroid, context.temp_allocator)
+		delete(xr, context.temp_allocator)
+		delete(xe, context.temp_allocator)
+		delete(xc, context.temp_allocator)
+	}
 
-	for iter in 0 ..< max_iter {
-		// sort simplex by value
+	sort_simplex :: proc(simplex: [][]f64, values: []f64) {
+		n := len(values) - 1
 		for i in 0 ..< n + 1 {
 			for j in i + 1 ..< n + 1 {
 				if values[j] < values[i] {
@@ -96,11 +110,16 @@ nelder_mead :: proc(
 				}
 			}
 		}
+	}
+
+	for iter in 0 ..< max_iter {
+		sort_simplex(simplex, values)
 
 		// check convergence: spread of values
 		fmin := values[0]
 		fmax := values[n]
 		if math.abs(fmax - fmin) < tol {
+			converged = true
 			break
 		}
 
@@ -167,6 +186,8 @@ nelder_mead :: proc(
 		}
 	}
 
+	// the last step may have placed a new best vertex anywhere
+	sort_simplex(simplex, values)
 	best_x = make([]f64, n, allocator)
 	vec_copy(best_x, simplex[0])
 	best_f = values[0]

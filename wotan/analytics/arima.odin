@@ -4,6 +4,7 @@ import w "../core"
 import l "../linalg"
 import "core:math"
 import "core:math/rand"
+import "base:runtime"
 import "core:mem"
 
 arima_state_space :: proc(
@@ -142,6 +143,9 @@ ArimaObjectiveCtx :: struct {
 }
 arima_neg_loglik_obj :: proc(params: []f64, ctx: rawptr) -> f64 {
 	data := (^ArimaObjectiveCtx)(ctx)
+	// Everything below is per-evaluation scratch: release it on return
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	scratch := context.temp_allocator
 
 	p := data.p
 	q := data.q
@@ -151,8 +155,8 @@ arima_neg_loglik_obj :: proc(params: []f64, ctx: rawptr) -> f64 {
 	}
 
 	// unpack params: [phi_0..phi_{p-1}, theta_0..theta_{q-1}, log_sigma2]
-	phi := make([]f64, p, data.allocator)
-	theta := make([]f64, q, data.allocator)
+	phi := make([]f64, p, scratch)
+	theta := make([]f64, q, scratch)
 
 	for i in 0 ..< p {
 		phi[i] = 0.95 * math.tanh(params[i])
@@ -170,13 +174,13 @@ arima_neg_loglik_obj :: proc(params: []f64, ctx: rawptr) -> f64 {
 	// differencing if needed
 	y_eff := data.y
 	if data.d > 0 {
-		y_eff = difference(data.y, data.d, data.allocator)
+		y_eff = difference(data.y, data.d, scratch)
 		if len(y_eff) < (p + q + 5) {
 			return 1e9
 		}
 	}
 
-	ll := arima_loglik(y_eff, phi, theta, data.d, sigma2, data.allocator)
+	ll := arima_loglik(y_eff, phi, theta, data.d, sigma2, scratch)
 
 	// minimize negative log-likelihood
 	return -ll
@@ -202,22 +206,53 @@ arima_fit :: proc(y: []f64, p, d, q: int, allocator := context.allocator) -> Ari
 
 	n_params := p + q + 1
 	current_best_f := math.INF_F64 // Changed name to avoid collision
-	best_params := make([]f64, n_params, allocator)
+	best_params := make([]f64, n_params, context.temp_allocator)
+	defer delete(best_params, context.temp_allocator)
+	best_converged := false
 
 	max_iter := 800
 	tol := 1e-6
-	n_starts := 5
 
-	for s in 0 ..< n_starts {
-		x0 := make([]f64, n_params, allocator)
-		// ... init x0 ...
+	// sigma2 starts at the sample variance of the (differenced) series, so the
+	// fit is scale-free (returns ~1e-4 vs unit-variance data)
+	y_eff := y
+	if d > 0 {y_eff = difference(y, d, context.temp_allocator)}
+	n_eff := len(y_eff)
+	mean_eff, var_eff := 0.0, 0.0
+	for v in y_eff {mean_eff += v}
+	mean_eff /= f64(max(n_eff, 1))
+	for v in y_eff {var_eff += (v - mean_eff) * (v - mean_eff)}
+	var_eff /= f64(max(n_eff - 1, 1))
+	if d > 0 {delete(y_eff, context.temp_allocator)}
+	log_sig2_0 := math.ln_f64(var_eff) if var_eff > 0.0 else 0.0
 
-		x_s, f_s := nelder_mead(arima_neg_loglik_obj, &ctx, x0, max_iter, tol, allocator)
+	// Deterministic starts (phi_k, theta_k scaled by 1/(k+1) across lags)
+	starts := [][2]f64{{0.0, 0.0}, {0.5, 0.0}, {0.0, 0.5}, {0.5, -0.5}, {-0.5, 0.5}}
+	x0 := make([]f64, n_params, context.temp_allocator)
+	defer delete(x0, context.temp_allocator)
+	for st in starts {
+		for i in 0 ..< p {x0[i] = math.atanh(st[0] / (0.95 * f64(i + 1)))}
+		for j in 0 ..< q {x0[p + j] = math.atanh(st[1] / (0.95 * f64(j + 1)))}
+		x0[p + q] = log_sig2_0
 
+		x_s, f_s, conv := nelder_mead(arima_neg_loglik_obj, &ctx, x0, max_iter, tol, context.temp_allocator)
 		if f_s < current_best_f {
 			current_best_f = f_s
 			copy(best_params, x_s)
+			best_converged = conv
 		}
+		delete(x_s, context.temp_allocator)
+	}
+
+	// Polish: restart from the best vertex with a fresh simplex
+	{
+		x_s, f_s, conv := nelder_mead(arima_neg_loglik_obj, &ctx, best_params, max_iter, tol, context.temp_allocator)
+		if f_s <= current_best_f {
+			current_best_f = f_s
+			copy(best_params, x_s)
+			best_converged = conv
+		}
+		delete(x_s, context.temp_allocator)
 	}
 
 	res: ArimaFitResult
@@ -233,13 +268,10 @@ arima_fit :: proc(y: []f64, p, d, q: int, allocator := context.allocator) -> Ari
 
 	res.sigma2 = math.exp_f64(best_params[p + q])
 	res.loglik = -current_best_f
-	res.converged = true
+	res.converged = best_converged
 	// compute AIC and BIC
 	k := p + q + 1
-	n := len(y)
-	if d > 0 {
-		n = len(difference(y, d, allocator))
-	}
+	n := n_eff
 
 	res.aic = -2.0 * res.loglik + 2.0 * f64(k)
 	res.bic = -2.0 * res.loglik + f64(k) * math.ln(f64(n))

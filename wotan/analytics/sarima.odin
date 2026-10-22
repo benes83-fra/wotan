@@ -3,7 +3,7 @@ package analytics
 import w "../core"
 import l "../linalg"
 import "core:math"
-import "core:math/rand"
+import "base:runtime"
 import "core:mem"
 
 sarima_difference :: proc(
@@ -373,7 +373,9 @@ sarima_neg_loglik_obj :: proc(params: []f64, ctx: rawptr) -> f64 {
 		return 1e12
 	}
 
-	allocator := data.allocator
+	// Everything below is per-evaluation scratch: release it on return
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	allocator := context.temp_allocator
 
 	// unpack parameters
 	phi := make([]f64, p, allocator)
@@ -405,8 +407,7 @@ sarima_neg_loglik_obj :: proc(params: []f64, ctx: rawptr) -> f64 {
 		return 1e9
 	}
 
-	// differencing
-	y1 := difference(data.y, data.d, allocator)
+	// differenced series is precomputed by sarima_fit
 	y2 := data.y_diff
 	if len(y2) < (p + q + P + Q + 5) {
 		return 1e9
@@ -459,21 +460,53 @@ sarima_fit :: proc(
 
 	max_iter := 800
 	tol := 1e-6
-	n_starts := 5
 
-	for s_i in 0 ..< n_starts {
-		x0 := make([]f64, n_params, allocator)
-		// random init
-		for i in 0 ..< n_params {
-			x0[i] = rand.float64_normal(0.0, 0.3)
+	// sigma2 starts at the sample variance of the differenced series (scale-free);
+	// deterministic starts so the fit does not depend on the global RNG state.
+	// Each start is {phi, theta, Phi, Theta}, scaled by 1/(k+1) across lags.
+	mean2, var2 := 0.0, 0.0
+	for v in y2 {mean2 += v}
+	mean2 /= f64(max(len(y2), 1))
+	for v in y2 {var2 += (v - mean2) * (v - mean2)}
+	var2 /= f64(max(len(y2) - 1, 1))
+	log_sig2_0 := math.ln_f64(var2) if var2 > 0.0 else 0.0
+
+	starts := [][4]f64 {
+		{0.0, 0.0, 0.0, 0.0},
+		{0.5, 0.0, 0.3, 0.0},
+		{0.0, 0.5, 0.0, 0.3},
+		{0.5, -0.5, 0.3, -0.3},
+		{-0.5, 0.5, -0.3, 0.3},
+	}
+	x_start := make([]f64, n_params, context.temp_allocator)
+	defer delete(x_start, context.temp_allocator)
+	for st in starts {
+		idx := 0
+		counts := [4]int{p, q, P, Q}
+		for g in 0 ..< 4 {
+			for k in 0 ..< counts[g] {
+				x_start[idx] = math.atanh(st[g] / (0.95 * f64(k + 1)))
+				idx += 1
+			}
 		}
+		x_start[idx] = log_sig2_0
 
-		x_opt, f_opt := nelder_mead(sarima_neg_loglik_obj, &ctx, x0, max_iter, tol, allocator)
-
+		x_opt, f_opt, _ := nelder_mead(sarima_neg_loglik_obj, &ctx, x_start, max_iter, tol, context.temp_allocator)
 		if f_opt < best_f {
 			best_f = f_opt
 			copy(best_params, x_opt)
 		}
+		delete(x_opt, context.temp_allocator)
+	}
+
+	// Polish: restart from the best vertex with a fresh simplex
+	{
+		x_opt, f_opt, _ := nelder_mead(sarima_neg_loglik_obj, &ctx, best_params, max_iter, tol, context.temp_allocator)
+		if f_opt <= best_f {
+			best_f = f_opt
+			copy(best_params, x_opt)
+		}
+		delete(x_opt, context.temp_allocator)
 	}
 
 	// unpack best parameters
