@@ -90,7 +90,7 @@ gpt_block_forward :: proc(
 	x1_norm := layer_norm_layer_forward(&block.ln2, x1)
 	ffn_out: ^t.Tensor
 	if block.use_moe {
-		ffn_out = moe_layer_forward(&block.moe, x1_norm)
+		ffn_out = moe_layer_forward(&block.moe, x1_norm, x1_norm.allocator)
 	} else {
 		ffn_out = ffn_layer_forward(&block.ffn, x1_norm)
 	}
@@ -202,7 +202,7 @@ gpt_model_forward :: proc(
 	token_emb := embedding_layer_forward(&model.token_emb, input_ids)
 
 	// ✅ FIX: Create positional embeddings directly, without creating pos_ids tensor
-	pos_emb_data := l.matrix_new(f64, 1, batch * seq_len * model.d_model, model.allocator)
+	pos_emb_data := l.matrix_new(f64, 1, batch * seq_len * model.d_model, input_ids.allocator)
 	for b in 0 ..< batch {
 		for s in 0 ..< seq_len {
 			// Copy the s-th row of pos_emb.weight to the appropriate position
@@ -214,7 +214,7 @@ gpt_model_forward :: proc(
 			)
 		}
 	}
-	pos_emb := t.tensor_new(pos_emb_data, false, model.allocator)
+	pos_emb := t.tensor_new(pos_emb_data, false, input_ids.allocator)
 	pos_emb.shape = [4]int{batch, seq_len, model.d_model, 1}
 	pos_emb.owned_by_graph = true
 

@@ -86,7 +86,7 @@ moe_layer_forward :: proc(
 	probs := t.tensor_softmax(logits) // [N, num_experts]
 
 	// 3. Top-K Masking
-	mask := t.tensor_top_k_mask(probs, layer.top_k)
+	mask := t.tensor_top_k_mask(probs, layer.top_k, allocator)
 
 	// 4. Gates = probs * mask (Straight-Through Estimator)
 	gates := t.tensor_mul(probs, mask)
@@ -134,7 +134,7 @@ moe_layer_forward :: proc(
 		// gate_i is now a legitimate child of `gates`. The DAG is unbroken.
 		gate_i := t.tensor_slice_gate(gates, i, allocator)
 
-		x_gated := t.tensor_gate_mul(x_flat, gate_i)
+		x_gated := t.tensor_gate_mul(x_flat, gate_i, allocator)
 		e_out := ffn_layer_forward(&layer.experts[i], x_gated)
 
 		if out_flat == nil {
@@ -148,7 +148,7 @@ moe_layer_forward :: proc(
 	}
 
 	// 8. Reshape back
-	out := t.tensor_reshape(out_flat, [4]int{batch, seq_len, layer.d_model, 1})
+	out := t.tensor_reshape(out_flat, [4]int{batch, seq_len, layer.d_model, 1}, allocator)
 	return out
 
 }
