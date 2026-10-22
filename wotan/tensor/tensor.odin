@@ -729,14 +729,10 @@ tensor_conv2d :: proc(
 			data = col[col_start:col_start + col_w * col_h],
 		}
 
-		// ✅ FIX: Use context.allocator for temporary matmul
-		out_2d := _matmul(&weight_2d, &col_2d, allocator)
-
+		// Multiply straight into this sample's slice of the (zeroed) output
 		out_start := n * C_out * col_h
-		copy(out_data.data[out_start:out_start + C_out * col_h], out_2d.data)
-
-		// ✅ FIX: matrix_free defaults to context.allocator, which now matches!
-		l.matrix_free(&out_2d)
+		out_2d := _mat(C_out, col_h, out_data.data[out_start:out_start + C_out * col_h])
+		l.matmul_nn_acc_simd(&weight_2d, &col_2d, &out_2d)
 	}
 
 	// ✅ FIX: Delete with context.allocator to match allocation

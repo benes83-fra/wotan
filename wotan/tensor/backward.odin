@@ -855,14 +855,18 @@ _backward_from_root :: proc(root: ^Tensor, allocator: mem.Allocator) {
 				eps := node.f64_metadata[0]
 
 				T_f := f64(T)
-				// Temporary buffers
+				// Per-slice buffers, allocated once for all (n, c, l) slices
 				grad_buf := make([]f64, T, allocator)
 				norm_buf := make([]f64, T, allocator)
-				mean_vec := make([]f64, T, allocator)
+				temp := make([]f64, T, allocator)
+				in_buf := make([]f64, T, allocator)
+				in_centered := make([]f64, T, allocator)
 				defer {
 					delete(grad_buf, allocator)
 					delete(norm_buf, allocator)
-					delete(mean_vec, allocator)
+					delete(temp, allocator)
+					delete(in_buf, allocator)
+					delete(in_centered, allocator)
 				}
 
 				for n: int = 0; n < N; n += 1 {
@@ -880,10 +884,7 @@ _backward_from_root :: proc(root: ^Tensor, allocator: mem.Allocator) {
 							mean_grad := sum_grad / T_f
 							dot_grad_y := l.dot_simd(grad_buf, norm_buf)
 
-							for i: int = 0; i < T; i += 1 {mean_vec[i] = mean_grad}
-
-							temp := make([]f64, T, allocator)
-							l.vec_sub_simd(grad_buf, mean_vec, temp)
+							for t: int = 0; t < T; t += 1 {temp[t] = grad_buf[t] - mean_grad}
 
 							scalar := dot_grad_y / T_f
 							for t: int = 0; t < T; t += 1 {
@@ -891,16 +892,12 @@ _backward_from_root :: proc(root: ^Tensor, allocator: mem.Allocator) {
 							}
 
 							// Recompute std of input for this slice to divide the gradient
-							in_buf := make([]f64, T, allocator)
 							for t: int = 0; t < T; t += 1 {
 								idx := n * (C * T * L) + c * (T * L) + t * L + el
 								in_buf[t] = input_in.data.data[idx]
 							}
 							in_mean := l.sum_simd(in_buf) / T_f
-							for i: int = 0; i < T; i += 1 {mean_vec[i] = in_mean}
-
-							in_centered := make([]f64, T, allocator)
-							l.vec_sub_simd(in_buf, mean_vec, in_centered)
+							for t: int = 0; t < T; t += 1 {in_centered[t] = in_buf[t] - in_mean}
 							in_var := l.dot_simd(in_centered, in_centered) / T_f
 							in_std := math.sqrt(in_var + eps)
 							inv_std := 1.0 / in_std
@@ -912,10 +909,6 @@ _backward_from_root :: proc(root: ^Tensor, allocator: mem.Allocator) {
 								idx := n * (C * T * L) + c * (T * L) + t * L + el
 								input_in.grad.data[idx] += temp[t]
 							}
-
-							delete(in_buf, allocator)
-							delete(in_centered, allocator)
-							delete(temp, allocator)
 						}
 					}
 				}
@@ -1048,11 +1041,19 @@ _backward_from_root :: proc(root: ^Tensor, allocator: mem.Allocator) {
 			channel_size := N * H * W
 			eps := 1e-5
 
-			// ✅ Temporary contiguous buffers for SIMD operations
+			// Contiguous per-channel buffers, allocated once for all channels
 			x_buf := make([]f64, channel_size, allocator)
 			dout_buf := make([]f64, channel_size, allocator)
-			defer delete(x_buf, allocator)
-			defer delete(dout_buf, allocator)
+			centered := make([]f64, channel_size, allocator)
+			x_hat := make([]f64, channel_size, allocator)
+			dout_gamma := make([]f64, channel_size, allocator)
+			defer {
+				delete(x_buf, allocator)
+				delete(dout_buf, allocator)
+				delete(centered, allocator)
+				delete(x_hat, allocator)
+				delete(dout_gamma, allocator)
+			}
 
 			for c in 0 ..< C {
 				// 1. Extract channel data and grad to contiguous buffers
@@ -1071,23 +1072,15 @@ _backward_from_root :: proc(root: ^Tensor, allocator: mem.Allocator) {
 				mean := l.sum_simd(x_buf) / N_hw
 
 				// 3. Compute variance (SIMD)
-				mean_vec := make([]f64, channel_size, allocator)
-				for i in 0 ..< channel_size {mean_vec[i] = mean}
-				centered := make([]f64, channel_size, allocator)
-				l.vec_sub_simd(x_buf, mean_vec, centered)
-				delete(mean_vec, allocator)
+				for i in 0 ..< channel_size {centered[i] = x_buf[i] - mean}
 
 				var := l.dot_simd(centered, centered) / N_hw
 				std := math.sqrt(var + eps)
 				inv_std := 1.0 / std
 				gamma := weight_in.data.data[c]
 
-				// 4. Compute x_hat (SIMD mul)
-				x_hat := make([]f64, channel_size, allocator)
-				inv_std_vec := make([]f64, channel_size, allocator)
-				for i in 0 ..< channel_size {inv_std_vec[i] = inv_std}
-				l.vec_mul_simd(centered, inv_std_vec, x_hat)
-				delete(inv_std_vec, allocator)
+				// 4. Compute x_hat
+				for i in 0 ..< channel_size {x_hat[i] = centered[i] * inv_std}
 
 				// 5. Compute weight gradient: dgamma = dot(dout, x_hat) (SIMD)
 				if weight_in.requires_grad && len(weight_in.grad.data) > 0 {
@@ -1101,70 +1094,27 @@ _backward_from_root :: proc(root: ^Tensor, allocator: mem.Allocator) {
 					bias_in.grad.data[c] += dbeta
 				}
 
-				// 7. Compute input gradient (SIMD)
+				// 7. Compute input gradient
 				if input_in.requires_grad && len(input_in.grad.data) > 0 {
-					// dout_gamma = dout * gamma (SIMD)
-					dout_gamma := make([]f64, channel_size, allocator)
-					gamma_vec := make([]f64, channel_size, allocator)
-					for i in 0 ..< channel_size {gamma_vec[i] = gamma}
-					l.vec_mul_simd(dout_buf, gamma_vec, dout_gamma)
-					delete(gamma_vec, allocator)
+					for i in 0 ..< channel_size {dout_gamma[i] = dout_buf[i] * gamma}
 
 					// Precompute sums (SIMD)
 					sum_dout_gamma := l.sum_simd(dout_gamma)
 					sum_dout_gamma_x_hat := l.dot_simd(dout_gamma, x_hat)
 
-					// dx = (1 / (N_hw * std)) * (N_hw * dout_gamma - sum_dout_gamma - x_hat * sum_dout_gamma_x_hat)
-
-					// term1 = N_hw * dout_gamma (SIMD)
-					term1 := make([]f64, channel_size, allocator)
-					n_hw_vec := make([]f64, channel_size, allocator)
-					for i in 0 ..< channel_size {n_hw_vec[i] = N_hw}
-					l.vec_mul_simd(dout_gamma, n_hw_vec, term1)
-					delete(n_hw_vec, allocator)
-					delete(dout_gamma, allocator)
-
-					// term2 = x_hat * sum_dout_gamma_x_hat (SIMD)
-					term2 := make([]f64, channel_size, allocator)
-					s2_vec := make([]f64, channel_size, allocator)
-					for i in 0 ..< channel_size {s2_vec[i] = sum_dout_gamma_x_hat}
-					l.vec_mul_simd(x_hat, s2_vec, term2)
-					delete(s2_vec, allocator)
-					delete(x_hat, allocator)
-
-					// combined = term1 - sum_dout_gamma (SIMD)
-					sum_dg_vec := make([]f64, channel_size, allocator)
-					for i in 0 ..< channel_size {sum_dg_vec[i] = sum_dout_gamma}
-					l.vec_sub_simd(term1, sum_dg_vec, term1)
-					delete(sum_dg_vec, allocator)
-
-					// combined = combined - term2 (SIMD)
-					l.vec_sub_simd(term1, term2, term1)
-					delete(term2, allocator)
-
-					// dx = combined / (N_hw * std) (SIMD)
+					// dx = (N_hw * dout_gamma - sum_dout_gamma - x_hat * sum_dout_gamma_x_hat) / (N_hw * std)
 					inv_denom := 1.0 / (N_hw * std)
-					inv_denom_vec := make([]f64, channel_size, allocator)
-					for i in 0 ..< channel_size {inv_denom_vec[i] = inv_denom}
-					l.vec_mul_simd(term1, inv_denom_vec, term1)
-					delete(inv_denom_vec, allocator)
-
-					// Write dx back to input gradient (de-interleave)
 					for n in 0 ..< N {
 						for h in 0 ..< H {
 							for w in 0 ..< W {
 								idx := n * (C * H * W) + c * (H * W) + h * W + w
-								buf_idx := n * (H * W) + h * W + w
-								input_in.grad.data[idx] += term1[buf_idx]
+								i := n * (H * W) + h * W + w
+								dx := ((dout_gamma[i] * N_hw) - sum_dout_gamma) - (x_hat[i] * sum_dout_gamma_x_hat)
+								input_in.grad.data[idx] += dx * inv_denom
 							}
 						}
 					}
-					delete(term1, allocator)
-				} else {
-					delete(x_hat, allocator)
 				}
-
-				delete(centered, allocator)
 			}
 		case .SharpeLoss:
 			ret_in := node.inputs[0]

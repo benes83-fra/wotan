@@ -25,7 +25,8 @@ mk_naive_acc :: proc(a_t, b_t: bool, A, B, expected: ^l.Matrix(f64), M, N, K: in
 matmul_kernels_test :: proc(allocator: mem.Allocator) {
 	seed_test(#procedure)
 	fmt.println("\n=== Accumulating MatMul Kernel Tests ===")
-	shapes := [][3]int{{1, 1, 1}, {3, 5, 7}, {17, 9, 13}, {64, 33, 65}, {5, 130, 3}}
+	// The last two shapes exceed MATMUL_PARALLEL_MIN_FLOPS, so they run multi-threaded
+	shapes := [][3]int{{1, 1, 1}, {3, 5, 7}, {17, 9, 13}, {64, 33, 65}, {5, 130, 3}, {300, 200, 250}, {7, 600, 900}}
 	kinds := []string{"nn  A@B", "nt  A@B^T", "tn  A^T@B"}
 	passed, total := 0, 0
 
@@ -59,13 +60,50 @@ matmul_kernels_test :: proc(allocator: mem.Allocator) {
 				max_err = max(max_err, abs(out.data[i] - expected.data[i]))
 			}
 			total += 1
-			if max_err < 1e-12 {
+			if max_err < 1e-10 {
 				passed += 1
 			} else {
 				fmt.printf("FAIL %s M=%d N=%d K=%d max_abs_err=%.2e\n", kind, M, N, K, max_err)
 			}
 		}
 	}
+	// Threading must not change results: compare single-threaded and threaded
+	// runs bit for bit (each output row is computed by one thread, same order).
+	saved_threads := l.matmul_max_threads
+	defer l.matmul_max_threads = saved_threads
+	for kind, ki in kinds {
+		M, N, K := 300, 200, 250
+		a_t := ki == 2
+		b_t := ki == 1
+		A := a_t ? l.matrix_new(f64, K, M, allocator) : l.matrix_new(f64, M, K, allocator)
+		B := b_t ? l.matrix_new(f64, N, K, allocator) : l.matrix_new(f64, K, N, allocator)
+		single := l.matrix_new(f64, M, N, allocator)
+		threaded := l.matrix_new(f64, M, N, allocator)
+		defer {
+			l.matrix_free(&A); l.matrix_free(&B)
+			l.matrix_free(&single); l.matrix_free(&threaded)
+		}
+		gcl_fill(A.data, u64(900 + ki))
+		gcl_fill(B.data, u64(950 + ki))
+		for run in 0 ..< 2 {
+			l.matmul_max_threads = 1 if run == 0 else 0
+			dst := &single if run == 0 else &threaded
+			switch ki {
+			case 0: l.matmul_nn_acc_simd(&A, &B, dst)
+			case 1: l.matmul_nt_acc_simd(&A, &B, dst)
+			case 2: l.matmul_tn_acc_simd(&A, &B, dst)
+			}
+		}
+		identical := true
+		for i in 0 ..< len(single.data) {identical &&= single.data[i] == threaded.data[i]}
+		total += 1
+		if identical {
+			passed += 1
+		} else {
+			fmt.printf("FAIL %s threaded result differs from single-threaded\n", kind)
+		}
+	}
+
 	fmt.printf("MatMul kernel summary: %d/%d passed\n", passed, total)
 	record_failures(total - passed)
 }

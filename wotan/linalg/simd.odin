@@ -2,9 +2,13 @@ package wotan_linalg
 
 import "base:builtin"
 import "base:intrinsics"
+import "base:runtime"
 import "core:fmt"
 import "core:math"
 import "core:mem"
+import "core:os"
+import "core:sync"
+import "core:thread"
 import simd "core:simd"
 
 TILE_BASE :: 8
@@ -141,6 +145,96 @@ matmul_dyn_simd :: proc(
 // autograd backward pass needs (grad += ...). Zero `out` first for a plain product.
 // ============================================================================
 
+// Multi-threading for large products: the output rows are split into contiguous
+// ranges, one per thread. Each output row is still computed by exactly one
+// thread in the same order, so results are bit-identical to a single-threaded run.
+
+// matmul_max_threads caps the worker threads (0 = one per logical processor,
+// 1 = always single-threaded).
+matmul_max_threads := 0
+
+// Products below this many multiply-adds stay single-threaded: thread start-up
+// would cost more than it saves.
+MATMUL_PARALLEL_MIN_FLOPS :: 1 << 16
+
+// Minimum multiply-adds per thread, so large products are not split into
+// chunks too small to amortize starting a thread.
+MATMUL_MIN_FLOPS_PER_THREAD :: 1 << 15
+
+@(private = "file")
+_Rows_Worker :: proc(a, b, out: ^Matrix(f64), r0, r1: int)
+
+@(private = "file")
+_Rows_Job :: struct {
+	worker:      _Rows_Worker,
+	a, b, out:   ^Matrix(f64),
+	r0, r1:      int,
+}
+
+// _parallel_rows runs worker over [0, rows) split across threads when the
+// product is large enough. The calling thread processes the first range itself.
+@(private = "file")
+_parallel_rows :: proc(rows, flops: int, a, b, out: ^Matrix(f64), worker: _Rows_Worker) {
+	n := 1
+	if flops >= MATMUL_PARALLEL_MIN_FLOPS {
+		n = matmul_max_threads
+		if n <= 0 {n = os.get_processor_core_count()}
+		n = min(n, rows, flops / MATMUL_MIN_FLOPS_PER_THREAD, len(_pool.wake) + 1)
+	}
+	if n <= 1 {
+		worker(a, b, out, 0, rows)
+		return
+	}
+
+	chunk := (rows + n - 1) / n
+	n = (rows + chunk - 1) / chunk // drop empty trailing ranges
+
+	sync.mutex_lock(&_pool.mutex)
+	defer sync.mutex_unlock(&_pool.mutex)
+	_pool_ensure_workers(n - 1)
+
+	sync.wait_group_add(&_pool.done, n - 1)
+	for t in 1 ..< n {
+		_pool.jobs[t - 1] = _Rows_Job{worker, a, b, out, t * chunk, min(rows, (t + 1) * chunk)}
+		sync.sema_post(&_pool.wake[t - 1])
+	}
+	worker(a, b, out, 0, min(rows, chunk)) // the calling thread does the first range
+	sync.wait_group_wait(&_pool.done)
+}
+
+// Persistent worker pool: threads are started once (lazily) and then sleep on a
+// semaphore between jobs, so a parallel matmul only pays for a wake-up instead
+// of creating and joining OS threads on every call.
+@(private = "file")
+_Worker_Pool :: struct {
+	mutex:   sync.Mutex, // one parallel dispatch at a time
+	done:    sync.Wait_Group,
+	wake:    [63]sync.Sema,
+	jobs:    [63]_Rows_Job,
+	started: int,
+}
+
+@(private = "file")
+_pool: _Worker_Pool
+
+@(private = "file")
+_pool_ensure_workers :: proc(n: int) {
+	// The workers live for the whole process; allocate them outside any tracking
+	// allocator so debug builds do not report them as leaks at exit.
+	context.allocator = runtime.heap_allocator()
+	for _pool.started < n {
+		thread.create_and_start_with_poly_data(_pool.started, proc(slot: int) {
+			for {
+				sync.sema_wait(&_pool.wake[slot])
+				j := _pool.jobs[slot]
+				j.worker(j.a, j.b, j.out, j.r0, j.r1)
+				sync.wait_group_done(&_pool.done)
+			}
+		})
+		_pool.started += 1
+	}
+}
+
 // matmul_nn_acc_simd: out += A @ B
 // A: [M, K], B: [K, N], out: [M, N]
 // i-k-j order: each step is an axpy of a contiguous row of B into a row of out.
@@ -148,12 +242,17 @@ matmul_nn_acc_simd :: proc(a, b, out: ^Matrix(f64)) {
 	if a.cols != b.rows || out.rows != a.rows || out.cols != b.cols {
 		panic("matmul_nn_acc_simd: dimension mismatch")
 	}
-	M, K, N := a.rows, a.cols, b.cols
+	_parallel_rows(a.rows, a.rows * a.cols * b.cols, a, b, out, _nn_rows)
+}
+
+@(private = "file")
+_nn_rows :: proc(a, b, out: ^Matrix(f64), r0, r1: int) {
+	K, N := a.cols, b.cols
 	tile := tile_for_matmul()
 
 	for kk := 0; kk < K; kk += tile {
 		k_end := min(kk + tile, K)
-		for i in 0 ..< M {
+		for i in r0 ..< r1 {
 			row_out := out.data[i * N:(i + 1) * N]
 			row_a := a.data[i * K:(i + 1) * K]
 			for k in kk ..< k_end {
@@ -170,12 +269,17 @@ matmul_nt_acc_simd :: proc(a, b, out: ^Matrix(f64)) {
 	if a.cols != b.cols || out.rows != a.rows || out.cols != b.rows {
 		panic("matmul_nt_acc_simd: dimension mismatch")
 	}
-	M, K, N := a.rows, a.cols, b.rows
+	_parallel_rows(a.rows, a.rows * a.cols * b.rows, a, b, out, _nt_rows)
+}
+
+@(private = "file")
+_nt_rows :: proc(a, b, out: ^Matrix(f64), r0, r1: int) {
+	K, N := a.cols, b.rows
 	tile := tile_for_matmul()
 
 	for jj := 0; jj < N; jj += tile {
 		j_end := min(jj + tile, N)
-		for i in 0 ..< M {
+		for i in r0 ..< r1 {
 			row_a := a.data[i * K:(i + 1) * K]
 			for j in jj ..< j_end {
 				out.data[i * N + j] += dot_simd(row_a, b.data[j * K:(j + 1) * K])
@@ -187,16 +291,21 @@ matmul_nt_acc_simd :: proc(a, b, out: ^Matrix(f64)) {
 // matmul_tn_acc_simd: out += A^T @ B
 // A: [M, K], B: [M, N], out: [K, N]
 // Sum of rank-1 updates: out[k, :] += A[i, k] * B[i, :]. Blocked over k so
-// the touched rows of `out` stay in cache.
+// the touched rows of `out` stay in cache. Threads split the K output rows.
 matmul_tn_acc_simd :: proc(a, b, out: ^Matrix(f64)) {
 	if a.rows != b.rows || out.rows != a.cols || out.cols != b.cols {
 		panic("matmul_tn_acc_simd: dimension mismatch")
 	}
+	_parallel_rows(a.cols, a.rows * a.cols * b.cols, a, b, out, _tn_rows)
+}
+
+@(private = "file")
+_tn_rows :: proc(a, b, out: ^Matrix(f64), r0, r1: int) {
 	M, K, N := a.rows, a.cols, b.cols
 	tile := tile_for_matmul()
 
-	for kk := 0; kk < K; kk += tile {
-		k_end := min(kk + tile, K)
+	for kk := r0; kk < r1; kk += tile {
+		k_end := min(kk + tile, r1)
 		for i in 0 ..< M {
 			row_b := b.data[i * N:(i + 1) * N]
 			for k in kk ..< k_end {
@@ -205,7 +314,6 @@ matmul_tn_acc_simd :: proc(a, b, out: ^Matrix(f64)) {
 		}
 	}
 }
-
 
 matvec_dyn_simd :: proc(
 	m: ^Matrix(f64),
