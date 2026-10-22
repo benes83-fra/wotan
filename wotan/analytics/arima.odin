@@ -288,35 +288,8 @@ arima_forecast :: proc(
 	for step in 0 ..< h {
 		// --- Optimized Predict Step: x_pred = F*x, P_pred = F*P*Fᵀ + Q ---
 		if _kalman_use_optimized(N) {
-			// Convert flat arrays to dynamic matrices for optimized linalg
-			F_mat := _matrix_from_flat(F, N, N, context.temp_allocator)
-			defer l.matrix_free(&F_mat)
-
-			P_mat := _matrix_from_flat(P, N, N, context.temp_allocator)
-			defer l.matrix_free(&P_mat)
-
-			Q_mat := _matrix_from_flat(Q, N, N, context.temp_allocator)
-			defer l.matrix_free(&Q_mat)
-
-			// x_pred = F * x using SIMD matvec
-			x_pred_vec := l.matvec_dyn_simd(&F_mat, x, context.temp_allocator)
-			defer delete(x_pred_vec, context.temp_allocator)
-
-			// P_pred = F * P * Fᵀ + Q
-			// Step 1: FP = F * P (P is symmetric, so Pᵀ = P)
-			FP := l.matmul_dyn_simd(&F_mat, &P_mat, context.temp_allocator)
-			defer l.matrix_free(&FP)
-
-			// Step 2: P_pred = FP * Fᵀ + Q (matmul_dyn_simd computes FP * Fᵀ directly)
-			P_pred_mat := l.matmul_dyn_simd(&FP, &F_mat, context.temp_allocator)
-			defer l.matrix_free(&P_pred_mat)
-
-			// Add Q
-			for i in 0 ..< N * N {P_pred_mat.data[i] += Q_mat.data[i]}
-
-			// Copy results back to flat arrays for next iteration
-			copy(x, x_pred_vec)
-			for i in 0 ..< N * N {P[i] = P_pred_mat.data[i]}
+			// x = F x,  P = F P Fᵀ + Q  (row-major flat arrays, in place)
+			_kalman_predict_flat(F, Q, x, P, N)
 		} else {
 			// Built-in Odin ops for small N (≤8) - keep original manual loops
 			// x_pred = F * x

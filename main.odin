@@ -302,6 +302,7 @@ main :: proc() {
 	test.ukf_tiny_rts_test(context.temp_allocator)
 	test.ukf_tiny_control_test(context.temp_allocator)
 	test.ukf_tiny_control_rts_test(context.temp_allocator)
+	test.kalman_large_n_test(context.temp_allocator)
 	test.arima_test(context.temp_allocator)
 	test.arima_fit_test(context.temp_allocator)
 	test.arima_dataframe_test(context.temp_allocator)
