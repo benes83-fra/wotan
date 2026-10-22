@@ -313,10 +313,10 @@ calibrate_sabr :: proc(
 
 	inf := math.inf_f64(1)
 	params := []opt.Calibration_Param {
-		{"alpha", 0.2, 0.01, inf},
-		{"beta", 0.7, 0.0, 1.0},
-		{"rho", -0.3, -0.99, 0.99},
-		{"nu", 0.4, 0.01, inf},
+		{"alpha", 0.2, 0.01, inf, .Linear},
+		{"beta", 0.7, 0.0, 1.0, .Linear},
+		{"rho", -0.3, -0.99, 0.99, .Linear},
+		{"nu", 0.4, 0.01, inf, .Linear},
 	}
 	config := opt.Calibration_Config {
 		optimizer = {type = .Adam, learning_rate = 0.1, beta1 = 0.9, beta2 = 0.999, epsilon = 1e-8},
@@ -357,11 +357,11 @@ calibrate_heston :: proc(
 	// variance, strongly negative rho (leverage effect / skew).
 	v_hist := true_sigma * true_sigma
 	params := []opt.Calibration_Param {
-		{"v0", v_hist, 0.001, 0.2},
-		{"kappa", 2.0, 0.1, 10.0}, // mean reversion speed
-		{"theta", v_hist, 0.001, 0.2}, // long-run variance
-		{"sigma", 0.4, 0.01, 1.5}, // vol of vol
-		{"rho", -0.7, -0.99, -0.1}, // strictly negative for equities
+		{"v0", v_hist, 0.001, 0.2, .Linear},
+		{"kappa", 2.0, 0.1, 10.0, .Linear}, // mean reversion speed
+		{"theta", v_hist, 0.001, 0.2, .Linear}, // long-run variance
+		{"sigma", 0.4, 0.01, 1.5, .Linear}, // vol of vol
+		{"rho", -0.7, -0.99, -0.1, .Linear}, // strictly negative for equities
 	}
 	config := opt.Calibration_Config {
 		optimizer = {type = .Adam, learning_rate = 0.05, beta1 = 0.9, beta2 = 0.999, epsilon = 1e-8},

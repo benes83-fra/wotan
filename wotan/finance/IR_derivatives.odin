@@ -194,8 +194,8 @@ calibrate_hull_white :: proc(
 
 	ctx := _HW_Caplet_Ctx{T_start_t, T_end_t, F_t, K_t, P_t, market_t, allocator}
 	params := []opt.Calibration_Param {
-		{"a", 0.05, 0.01, 0.5},
-		{"sigma", 0.01, 0.001, 0.1},
+		{"a", 0.05, 0.01, 0.5, .Log},
+		{"sigma", 0.01, 0.001, 0.1, .Log},
 	}
 	config := opt.Calibration_Config {
 		optimizer = {type = .Adam, learning_rate = 0.05, beta1 = 0.9, beta2 = 0.999, epsilon = 1e-8},
@@ -526,11 +526,11 @@ calibrate_hull_white_2f :: proc(
 
 	ctx := _HW_Caplet_Ctx{T_start_t, T_end_t, F_t, K_t, P_t, market_t, allocator}
 	params := []opt.Calibration_Param {
-		{"a", 0.1, 0.01, 1.0},
-		{"b", 0.01, 0.01, 1.0},
-		{"sigma", 0.01, 0.001, 0.05},
-		{"eta", 0.005, 0.001, 0.05},
-		{"rho", -0.3, -0.99, 0.99},
+		{"a", 0.1, 0.01, 1.0, .Linear},
+		{"b", 0.01, 0.01, 1.0, .Linear},
+		{"sigma", 0.01, 0.001, 0.05, .Linear},
+		{"eta", 0.005, 0.001, 0.05, .Linear},
+		{"rho", -0.3, -0.99, 0.99, .Linear},
 	}
 	config := opt.Calibration_Config {
 		optimizer = {type = .Adam, learning_rate = 0.02, beta1 = 0.9, beta2 = 0.999, epsilon = 1e-8},
@@ -939,11 +939,11 @@ calibrate_hull_white_2f_joint :: proc(
 	}
 	// Starting point close to realistic IR parameters, with a > b enforced
 	params := []opt.Calibration_Param {
-		{"a", 0.10, 0.02, 1.0},
-		{"b", 0.03, 0.005, math.inf_f64(1)}, // upper bound b <= a - 0.01 applied by `project`
-		{"sigma", 0.008, 0.001, 0.05},
-		{"eta", 0.005, 0.001, 0.05},
-		{"rho", -0.4, -0.99, 0.99},
+		{"a", 0.10, 0.02, 1.0, .Linear},
+		{"b", 0.03, 0.005, math.inf_f64(1), .Linear}, // upper bound b <= a - 0.01 applied by `project`
+		{"sigma", 0.008, 0.001, 0.05, .Linear},
+		{"eta", 0.005, 0.001, 0.05, .Linear},
+		{"rho", -0.4, -0.99, 0.99, .Linear},
 	}
 	config := opt.Calibration_Config {
 		optimizer = {type = .Adam, learning_rate = 0.005, beta1 = 0.9, beta2 = 0.999, epsilon = 1e-8},

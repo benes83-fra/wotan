@@ -308,10 +308,10 @@ _calibrate_prospect_params :: proc(
 	allocator: mem.Allocator,
 ) -> Prospect_CalibrationResult {
 	params := []opt.Calibration_Param {
-		{"alpha", 0.88, 0.1, 1.0}, // gain curvature
-		{"beta", 0.88, 0.1, 1.0}, // loss curvature
-		{"lambda", 2.25, 1.0, 5.0}, // loss aversion, usually 1 to 5
-		{"gamma", 0.61, 0.1, 0.99}, // probability weighting
+		{"alpha", 0.88, 0.1, 1.0, .Linear}, // gain curvature
+		{"beta", 0.88, 0.1, 1.0, .Linear}, // loss curvature
+		{"lambda", 2.25, 1.0, 5.0, .Linear}, // loss aversion, usually 1 to 5
+		{"gamma", 0.61, 0.1, 0.99, .Linear}, // probability weighting
 	}
 	config := opt.Calibration_Config {
 		optimizer = {type = .Adam, learning_rate = 0.05, beta1 = 0.9, beta2 = 0.999, epsilon = 1e-8},

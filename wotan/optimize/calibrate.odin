@@ -19,13 +19,24 @@ import "core:mem"
 //   4. optimizer step, then clamp every parameter into [lower, upper]
 // The result is the best point seen, not the last one.
 
+// How the optimizer moves a parameter.
+//   .Linear: steps act on x directly.
+//   .Log:    steps act on ln(x), i.e. are relative changes. Use for positive
+//            parameters whose scale differs from the learning rate (e.g. a
+//            volatility of 0.01 under an Adam step of ~0.05). Needs lower > 0.
+Param_Scale :: enum {
+	Linear,
+	Log,
+}
+
 // A calibrated parameter: starting value and box bounds (use math.inf_f64(±1)
-// for an open side).
+// for an open side). The objective always receives natural values.
 Calibration_Param :: struct {
 	name:  string,
 	init:  f64,
 	lower: f64,
 	upper: f64,
+	scale: Param_Scale,
 }
 
 Calibration_Config :: struct {
@@ -38,8 +49,8 @@ Calibration_Config :: struct {
 	// (no shared mutable state; scratch memory from context.temp_allocator).
 	// Results are identical to a serial run.
 	parallel:       bool,
-	// Optional constraint linking parameters (e.g. b < a), applied after the
-	// box clamp on every step.
+	// Optional constraint linking parameters (e.g. b < a), applied to the
+	// natural values after the box clamp on every step.
 	project:        proc(x: []f64),
 }
 
@@ -66,17 +77,36 @@ calibrate :: proc(
 		allocator = allocator,
 	}
 
+	// z: the optimizer's variables (ln x for .Log parameters, x otherwise);
+	// x: natural values passed to the objective.
+	z := make([]f64, n, allocator)
 	x := make([]f64, n, allocator)
+	lower := make([]f64, n, allocator)
+	upper := make([]f64, n, allocator)
 	gradient := make([]f64, n, allocator)
-	probes := make([]f64, 2 * n * n, allocator) // one perturbed copy of x per probe
+	probes := make([]f64, 2 * n * n, allocator) // one perturbed copy of z per probe
 	probe_loss := make([]f64, 2 * n, allocator)
 	defer {
+		delete(z, allocator)
 		delete(x, allocator)
+		delete(lower, allocator)
+		delete(upper, allocator)
 		delete(gradient, allocator)
 		delete(probes, allocator)
 		delete(probe_loss, allocator)
 	}
-	for p, i in params {x[i] = p.init}
+	any_log := false
+	for p, i in params {
+		switch p.scale {
+		case .Linear:
+			z[i], lower[i], upper[i] = p.init, p.lower, p.upper
+		case .Log:
+			assert(p.lower > 0.0 && p.init > 0.0, "calibrate: .Log parameters need positive init and lower bound")
+			z[i], lower[i], upper[i] = math.ln_f64(p.init), math.ln_f64(p.lower), math.ln_f64(p.upper)
+			any_log = true
+		}
+	}
+	_to_natural(params, z, x)
 	copy(result.x, x)
 
 	optimizer := optimizer_init(config.optimizer, n, allocator)
@@ -85,7 +115,8 @@ calibrate :: proc(
 	job := _Probe_Job {
 		objective  = objective,
 		user_data  = user_data,
-		x          = x,
+		params     = params,
+		z          = z,
 		probes     = probes,
 		probe_loss = probe_loss,
 		n          = n,
@@ -115,11 +146,20 @@ calibrate :: proc(
 			gradient[i] = (probe_loss[2 * i] - probe_loss[2 * i + 1]) / (2.0 * config.fd_step)
 		}
 
-		optimizer_step(&optimizer, x, gradient)
-		for p, i in params {
-			x[i] = math.max(p.lower, math.min(p.upper, x[i]))
+		optimizer_step(&optimizer, z, gradient)
+		for i in 0 ..< n {
+			z[i] = math.max(lower[i], math.min(upper[i], z[i]))
 		}
-		if config.project != nil {config.project(x)}
+		if config.project != nil {
+			if any_log {
+				_to_natural(params, z, x)
+				config.project(x)
+				for p, i in params {z[i] = math.ln_f64(x[i]) if p.scale == .Log else x[i]}
+			} else {
+				config.project(z) // z == x: no conversion, so linear problems are unaffected
+			}
+		}
+		_to_natural(params, z, x)
 		result.iterations += 1
 	}
 
@@ -135,7 +175,8 @@ calibration_result_free :: proc(result: ^Calibration_Result) {
 _Probe_Job :: struct {
 	objective:  ObjectiveFunc,
 	user_data:  rawptr,
-	x:          []f64,
+	params:     []Calibration_Param,
+	z:          []f64,
 	probes:     []f64,
 	probe_loss: []f64,
 	n:          int,
@@ -150,15 +191,34 @@ _probe_range :: proc(data: rawptr, begin, end: int) {
 	for k in begin ..< end {
 		i := k / 2
 		probe := job.probes[k * n:(k + 1) * n]
-		copy(probe, job.x)
+		copy(probe, job.z)
 		if k % 2 == 0 {
 			probe[i] += job.h
 		} else {
 			probe[i] -= job.h
 		}
+		_to_natural(job.params, probe, probe)
 		// Release the objective's scratch memory after each probe; this matters
 		// on pool threads, whose temp allocators are never reset otherwise.
 		runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 		job.probe_loss[k] = job.objective(probe, job.user_data)
+	}
+}
+
+// _to_natural maps optimizer variables to natural parameter values (exp for
+// .Log parameters, unchanged otherwise). z and x may alias. A .Log parameter
+// sitting exactly on a bound maps to the bound itself, not exp(ln(bound)).
+@(private = "file")
+_to_natural :: proc(params: []Calibration_Param, z, x: []f64) {
+	for p, i in params {
+		if p.scale != .Log {
+			x[i] = z[i]
+		} else if z[i] == math.ln_f64(p.lower) {
+			x[i] = p.lower
+		} else if z[i] == math.ln_f64(p.upper) {
+			x[i] = p.upper
+		} else {
+			x[i] = math.exp_f64(z[i])
+		}
 	}
 }
