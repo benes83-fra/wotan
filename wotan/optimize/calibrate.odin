@@ -52,6 +52,12 @@ Calibration_Config :: struct {
 	// Optional constraint linking parameters (e.g. b < a), applied to the
 	// natural values after the box clamp on every step.
 	project:        proc(x: []f64),
+	// Optional stall stop (0 = off), for objectives without a natural target
+	// value such as negative log-likelihoods: converged once the best loss has
+	// not improved by more than stall_rel_tol * (1 + |best|) for stall_iters
+	// consecutive iterations.
+	stall_iters:    int,
+	stall_rel_tol:  f64,
 }
 
 Calibration_Result :: struct {
@@ -123,6 +129,8 @@ calibrate :: proc(
 		h          = config.fd_step,
 	}
 
+	stall_ref := math.inf_f64(1) // best loss at the last significant improvement
+	stalled := 0
 	for _ in 0 ..< config.max_iter {
 		loss := objective(x, user_data)
 		result.evaluations += 1
@@ -133,6 +141,18 @@ calibrate :: proc(
 		if loss < config.loss_threshold {
 			result.converged = true
 			break
+		}
+		if config.stall_iters > 0 {
+			if result.loss < stall_ref - config.stall_rel_tol * (1.0 + abs(result.loss)) {
+				stall_ref = result.loss
+				stalled = 0
+			} else {
+				stalled += 1
+				if stalled >= config.stall_iters {
+					result.converged = true
+					break
+				}
+			}
 		}
 
 		// Probes 2i and 2i+1 are x + h e_i and x - h e_i

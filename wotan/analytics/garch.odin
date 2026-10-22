@@ -39,7 +39,7 @@ GARCH_Result :: struct {
 	standardized_resid: []f64,
 	converged:          bool,
 	n_iterations:       int,
-	persistence:        f64, // α + β (volatility persistence)
+	persistence:        f64, // α + β (+ γ/2 for GJR): volatility persistence
 }
 
 GARCH_Forecast :: struct {
@@ -70,16 +70,20 @@ unpack_params :: proc(x: []f64, params: ^GARCH_Params) {
 		sum_raw += val
 	}
 
-	// Scale to ensure sum < 0.999 (leave room for stationarity)
+	// Gamma for GJR-GARCH: sigmoid keeps it in (0, 1); with symmetric shocks
+	// the leverage term adds γ/2 to the persistence
+	is_gjr := params.model_type == .GJR_GARCH && len(x) > 1 + params.p + params.q
+	if is_gjr {
+		params.gamma = 1.0 / (1.0 + math.exp(-x[1 + params.p + params.q]))
+		sum_raw += 0.5 * params.gamma
+	}
+
+	// Scale to ensure persistence < 0.999 (leave room for stationarity)
 	if sum_raw > 0.999 {
 		scale := 0.999 / sum_raw
 		for i in 0 ..< params.p {params.alpha[i] *= scale}
 		for j in 0 ..< params.q {params.beta[j] *= scale}
-	}
-
-	// Gamma for GJR-GARCH
-	if params.model_type == .GJR_GARCH && len(x) > 1 + params.p + params.q {
-		params.gamma = x[1 + params.p + params.q] * 0.1
+		if is_gjr {params.gamma *= scale}
 	}
 	if params.model_type == .StudentT {
 		nu_idx := 1 + params.p + params.q
@@ -96,6 +100,27 @@ unpack_params :: proc(x: []f64, params: ^GARCH_Params) {
 // ============================================================================
 // GARCH Log-Likelihood Function
 // ============================================================================
+
+// Conditional variance at t from residuals and cond_var before t:
+// ω + Σ α_i ε²_{t-i} + Σ β_j σ²_{t-j} (+ γ Σ ε²_{t-i} 1[ε_{t-i} < 0] for GJR)
+_garch_variance_at :: proc(params: ^GARCH_Params, residuals, cond_var: []f64, t: int) -> f64 {
+	variance := params.omega
+	for i in 0 ..< params.p {
+		if t - i - 1 >= 0 {variance += params.alpha[i] * residuals[t - i - 1] * residuals[t - i - 1]}
+	}
+	for j in 0 ..< params.q {
+		if t - j - 1 >= 0 {variance += params.beta[j] * cond_var[t - j - 1]}
+	}
+	if params.model_type == .GJR_GARCH && params.gamma != 0.0 {
+		for i in 0 ..< params.p {
+			if t - i - 1 >= 0 && residuals[t - i - 1] < 0.0 {
+				variance += params.gamma * residuals[t - i - 1] * residuals[t - i - 1]
+			}
+		}
+	}
+	if variance < 1e-8 {variance = 1e-8}
+	return variance
+}
 
 _garch_neg_log_likelihood :: proc(
 	params: ^GARCH_Params,
@@ -115,19 +140,7 @@ _garch_neg_log_likelihood :: proc(
 
 	for i in 0 ..< max(p, q) {cond_var[i] = uncond_var}
 
-	for t in max(p, q) ..< n {
-		variance := params.omega
-		for i in 0 ..< p {
-			if t - i - 1 >=
-			   0 {variance += params.alpha[i] * residuals[t - i - 1] * residuals[t - i - 1]}
-		}
-		for j in 0 ..< q {
-			if t - j - 1 >= 0 {variance += params.beta[j] * cond_var[t - j - 1]}
-		}
-		// ... (keep GJR logic if needed) ...
-		if variance < 1e-8 {variance = 1e-8}
-		cond_var[t] = variance
-	}
+	for t in max(p, q) ..< n {cond_var[t] = _garch_variance_at(params, residuals, cond_var, t)}
 
 	log_lik := 0.0
 	is_student_t := params.model_type == .StudentT
@@ -227,7 +240,7 @@ garch_fit :: proc(
 	}
 	gamma_idx := 1 + p + q
 	if model_type == .GJR_GARCH {
-		param_vec[gamma_idx] = 0.0
+		param_vec[gamma_idx] = math.ln_f64(0.05 / 0.95) // gamma = 0.05
 		gamma_idx += 1
 	}
 	if model_type == .StudentT {
@@ -351,29 +364,8 @@ garch_fit :: proc(
 	}
 
 	for t in max(p, q) ..< n {
-		variance := params.omega
-		for i in 0 ..< p {
-			if t - i - 1 >= 0 {
-				variance += params.alpha[i] * residuals[t - i - 1] * residuals[t - i - 1]
-			}
-		}
-		for j in 0 ..< q {
-			if t - j - 1 >= 0 {
-				variance += params.beta[j] * cond_var[t - j - 1]
-			}
-		}
-		if params.model_type == .GJR_GARCH && params.gamma != 0.0 {
-			for i in 0 ..< p {
-				if t - i - 1 >= 0 && residuals[t - i - 1] < 0.0 {
-					variance += params.gamma * residuals[t - i - 1] * residuals[t - i - 1]
-				}
-			}
-		}
-		if variance < 1e-8 {
-			variance = 1e-8
-		}
-		cond_var[t] = variance
-		std_resid[t] = residuals[t] / math.sqrt_f64(variance)
+		cond_var[t] = _garch_variance_at(&params, residuals, cond_var, t)
+		std_resid[t] = residuals[t] / math.sqrt_f64(cond_var[t])
 	}
 
 	log_lik := -best_loss
@@ -384,6 +376,7 @@ garch_fit :: proc(
 	persistence := 0.0
 	for i in 0 ..< p {persistence += params.alpha[i]}
 	for j in 0 ..< q {persistence += params.beta[j]}
+	if model_type == .GJR_GARCH {persistence += 0.5 * params.gamma}
 
 	return GARCH_Result {
 		params = params,
@@ -402,6 +395,9 @@ garch_fit :: proc(
 // GARCH Forecasting
 // ============================================================================
 
+// h-step-ahead conditional variance. The first step uses the observed lagged
+// residuals and variances; later steps replace ε² by its expectation σ² (and
+// ε² 1[ε < 0] by σ²/2 for GJR), so the forecast reverts to ω / (1 - persistence).
 garch_forecast :: proc(
 	result: ^GARCH_Result,
 	residuals: []f64,
@@ -409,34 +405,40 @@ garch_forecast :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> GARCH_Forecast {
 	n := len(residuals)
-	p := result.params.p
-	q := result.params.q
+	params := &result.params
+	p, q := params.p, params.q
+	is_gjr := params.model_type == .GJR_GARCH
 
-	last_residual := residuals[n - 1]
-	last_cond_var := result.conditional_var[n - 1]
+	// Timeline: index k < n is observed, k >= n is forecast
+	total := n + max(horizon, 1)
+	sq := make([]f64, total, context.temp_allocator) // ε² or its expectation
+	neg_sq := make([]f64, total, context.temp_allocator) // ε² 1[ε < 0] or its expectation
+	s2 := make([]f64, total, context.temp_allocator)
+	defer {
+		delete(sq, context.temp_allocator)
+		delete(neg_sq, context.temp_allocator)
+		delete(s2, context.temp_allocator)
+	}
+	for k in 0 ..< n {
+		sq[k] = residuals[k] * residuals[k]
+		neg_sq[k] = sq[k] if residuals[k] < 0.0 else 0.0
+		s2[k] = result.conditional_var[k]
+	}
 
-	forecast_var := last_cond_var
-
-	for h in 1 ..= horizon {
-		new_var := result.params.omega
-
+	forecast_var := result.conditional_var[n - 1]
+	for k in n ..< n + horizon {
+		v := params.omega
 		for i in 0 ..< p {
-			if i == 0 {
-				new_var += result.params.alpha[i] * last_residual * last_residual
-			} else {
-				new_var += result.params.alpha[i] * forecast_var
+			if k - i - 1 >= 0 {
+				v += params.alpha[i] * sq[k - i - 1]
+				if is_gjr {v += params.gamma * neg_sq[k - i - 1]}
 			}
 		}
-
 		for j in 0 ..< q {
-			if j == 0 {
-				new_var += result.params.beta[j] * last_cond_var
-			} else {
-				new_var += result.params.beta[j] * forecast_var
-			}
+			if k - j - 1 >= 0 {v += params.beta[j] * s2[k - j - 1]}
 		}
-
-		forecast_var = new_var
+		s2[k], sq[k], neg_sq[k] = v, v, 0.5 * v
+		forecast_var = v
 	}
 
 	if forecast_var < 1e-8 {

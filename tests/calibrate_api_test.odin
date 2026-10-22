@@ -91,6 +91,20 @@ calibrate_api_test :: proc(allocator: mem.Allocator) {
 	defer opt.calibration_result_free(&r6)
 	expect(&passed, &total, r6.x[0] == 0.02, fmt.tprintf("log-scale bound is exact (sigma = %.17g)", r6.x[0]))
 
+	// 7. Stall stop: an objective with no known target value (like an NLL) has no
+	//    usable loss_threshold; without the stall stop it burns the full budget
+	shifted_bowl :: proc(x: []f64, ud: rawptr) -> f64 {return cal_bowl(x, ud) - 5.0}
+	cfg7 := opt.Calibration_Config{optimizer = adam, max_iter = 2000, loss_threshold = -inf, fd_step = 1e-6}
+	r7_off := opt.calibrate(free, shifted_bowl, nil, cfg7, allocator)
+	defer opt.calibration_result_free(&r7_off)
+	cfg7.stall_iters, cfg7.stall_rel_tol = 50, 1e-12
+	r7 := opt.calibrate(free, shifted_bowl, nil, cfg7, allocator)
+	defer opt.calibration_result_free(&r7)
+	expect(&passed, &total,
+		!r7_off.converged && r7_off.iterations == 2000 && r7.converged && r7.iterations < 2000 &&
+		abs(r7.x[0] - 1.0) < 1e-4 && abs(r7.x[1] + 2.0) < 1e-4,
+		fmt.tprintf("stall stop converges at (%.5f, %.5f) after %d steps (off: %d steps)", r7.x[0], r7.x[1], r7.iterations, r7_off.iterations))
+
 	fmt.printf("Calibration API summary: %d/%d passed\n", passed, total)
 	record_failures(total - passed)
 }

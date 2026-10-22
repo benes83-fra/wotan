@@ -4,6 +4,7 @@ package finance
 import a "../analytics"
 import w "../core"
 import l "../linalg"
+import opt "../optimize"
 import "base:intrinsics"
 import "core:math"
 import "core:math/rand"
@@ -190,7 +191,13 @@ _gpd_neg_log_likelihood :: proc(params: []f64, exceedances: []f64) -> f64 {
 	return -log_lik / n // Negative for minimization
 }
 
-// Fit GPD using Maximum Likelihood Estimation (improved)
+_gpd_objective :: proc(x: []f64, user_data: rawptr) -> f64 {
+	return _gpd_neg_log_likelihood(x, (^[]f64)(user_data)^)
+}
+
+// Fit GPD by maximum likelihood. beta is optimised on log scale (it spans
+// orders of magnitude with the data units); `converged` reports that the
+// likelihood stopped improving, not that the iteration budget ran out.
 gpd_fit :: proc(
 	exceedances: []f64,
 	allocator: mem.Allocator = context.allocator,
@@ -202,116 +209,27 @@ gpd_fit :: proc(
 	n := len(exceedances)
 	if n < 10 {return 0.0, 0.0, false}
 
-	// Calculate sample statistics
 	mean_exc := 0.0
-	var_exc := 0.0
-	for y in exceedances {
-		mean_exc += y
-	}
+	for y in exceedances {mean_exc += y}
 	mean_exc /= f64(n)
+	if !(mean_exc > 0.0) {return 0.0, 0.0, false}
 
-	for y in exceedances {
-		diff := y - mean_exc
-		var_exc += diff * diff
+	params := []opt.Calibration_Param {
+		{"xi", 0.1, -0.9, 2.0, .Linear},
+		{"beta", mean_exc, 1e-6 * mean_exc, 1e3 * mean_exc, .Log},
 	}
-	var_exc /= f64(n - 1)
-	std_exc := math.sqrt_f64(var_exc)
-
-	// Better initial estimates using probability weighted moments
-	// Sort exceedances
-	sorted_exc := make([]f64, n, context.temp_allocator)
-	copy(sorted_exc, exceedances)
-	slice.sort(sorted_exc)
-
-	// PWM estimators (more robust than method of moments)
-	beta_init := mean_exc
-	xi_init := 0.1 // Start with small positive shape
-
-	// Use Adam optimizer for better convergence
-	params := make([]f64, 2, allocator)
-	defer delete(params, allocator)
-	params[0] = xi_init
-	params[1] = beta_init
-
-	// Adam optimizer parameters
-	learning_rate := 0.001
-	beta1 := 0.9
-	beta2 := 0.999
-	epsilon := 1e-8
-
-	m_xi := 0.0
-	v_xi := 0.0
-	m_beta := 0.0
-	v_beta := 0.0
-
-	best_loss := _gpd_neg_log_likelihood(params, exceedances)
-	best_xi := xi_init
-	best_beta := beta_init
-
-	for iter in 0 ..< 2000 {
-		eps := 1e-5
-
-		// Numerical gradient for xi
-		params_plus := make([]f64, 2, context.temp_allocator)
-		params_minus := make([]f64, 2, context.temp_allocator)
-
-		params_plus[0] = params[0] + eps
-		params_plus[1] = params[1]
-		loss_plus := _gpd_neg_log_likelihood(params_plus, exceedances)
-
-		params_minus[0] = params[0] - eps
-		params_minus[1] = params[1]
-		loss_minus := _gpd_neg_log_likelihood(params_minus, exceedances)
-
-		grad_xi := (loss_plus - loss_minus) / (2.0 * eps)
-
-		// Numerical gradient for beta
-		params_plus[0] = params[0]
-		params_plus[1] = params[1] + eps
-		loss_plus = _gpd_neg_log_likelihood(params_plus, exceedances)
-
-		params_minus[0] = params[0]
-		params_minus[1] = params[1] - eps
-		loss_minus = _gpd_neg_log_likelihood(params_minus, exceedances)
-
-		grad_beta := (loss_plus - loss_minus) / (2.0 * eps)
-
-		// Update biased first moment estimates
-		m_xi = beta1 * m_xi + (1.0 - beta1) * grad_xi
-		m_beta = beta1 * m_beta + (1.0 - beta1) * grad_beta
-
-		// Update biased second moment estimates
-		v_xi = beta2 * v_xi + (1.0 - beta2) * grad_xi * grad_xi
-		v_beta = beta2 * v_beta + (1.0 - beta2) * grad_beta * grad_beta
-
-		// Bias correction
-		m_xi_hat := m_xi / (1.0 - math.pow(beta1, f64(iter + 1)))
-		m_beta_hat := m_beta / (1.0 - math.pow(beta1, f64(iter + 1)))
-		v_xi_hat := v_xi / (1.0 - math.pow(beta2, f64(iter + 1)))
-		v_beta_hat := v_beta / (1.0 - math.pow(beta2, f64(iter + 1)))
-
-		// Update parameters
-		params[0] -= learning_rate * m_xi_hat / (math.sqrt_f64(v_xi_hat) + epsilon)
-		params[1] -= learning_rate * m_beta_hat / (math.sqrt_f64(v_beta_hat) + epsilon)
-
-		// Ensure beta > 0
-		if params[1] <= 0.0 {params[1] = 1e-6}
-
-		// Check convergence
-		current_loss := _gpd_neg_log_likelihood(params, exceedances)
-		if current_loss < best_loss {
-			best_loss = current_loss
-			best_xi = params[0]
-			best_beta = params[1]
-		}
-
-		if iter > 200 && math.abs(current_loss - best_loss) < 1e-7 {
-			converged = true
-			break
-		}
+	config := opt.Calibration_Config {
+		optimizer      = {type = .Adam, learning_rate = 0.02, beta1 = 0.9, beta2 = 0.999, epsilon = 1e-8},
+		max_iter       = 2000,
+		loss_threshold = math.inf_f64(-1),
+		fd_step        = 1e-6,
+		stall_iters    = 100,
+		stall_rel_tol  = 1e-10,
 	}
-
-	return best_xi, best_beta, converged
+	data := exceedances
+	res := opt.calibrate(params, _gpd_objective, &data, config, allocator)
+	defer opt.calibration_result_free(&res)
+	return res.x[0], res.x[1], res.converged
 }
 
 // Fit EVT model using Peak-over-Threshold method

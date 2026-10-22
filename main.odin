@@ -598,6 +598,8 @@ main :: proc() {
 	test.real_market_psychology_test(context.temp_allocator)
 	test.calibrate_api_test(context.temp_allocator)
 	test.heston_pricing_test(context.temp_allocator)
+	test.gpd_fit_test(context.temp_allocator)
+	test.gjr_garch_test(context.temp_allocator)
 	test.behavioral_heston_test(context.temp_allocator)
 	test.behavioral_backtester_test(context.temp_allocator)
 	test.historical_gamma_backtest_test(context.temp_allocator)
