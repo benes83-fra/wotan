@@ -52,7 +52,7 @@ heston_pricing_test :: proc(allocator: mem.Allocator) {
 		direct := bfin.behavioral_heston_price(S, K, T, r, params, prospect, .Call)
 		pre := bfin.behavioral_heston_precompute(S, K, T, r, params, .Call)
 		cached := bfin.behavioral_heston_price_precomputed(&pre, K, T, r, prospect, .Call)
-		delete(pre.heston_cdf)
+		delete(pre.cdf)
 		same &&= direct == cached
 	}
 	expect(&passed, &total, same, "precomputed behavioral price == direct price (exact)")

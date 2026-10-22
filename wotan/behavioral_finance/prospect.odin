@@ -33,6 +33,8 @@ Prospect_CalibrationContext :: struct {
 	true_sigma:  f64, // The physical/historical volatility
 	n_points:    int,
 	allocator:   mem.Allocator,
+	// Optional per-option cache (same order as market_data); see calibrate_prospect_theory
+	precomputed: []Prospect_Precomputed,
 }
 
 // Prices an option using Prospect Theory distorted probabilities.
@@ -52,7 +54,34 @@ prospect_theory_price :: proc(
 		if opt_type == .Call {return math.max(S - K, 0.0)}
 		return math.max(K - S, 0.0)
 	}
+	pre := prospect_precompute(S, K, T, r, true_sigma, opt_type, n_points, allocator)
+	defer delete(pre.cdf, allocator)
+	return prospect_theory_price_precomputed(&pre, K, T, r, params, opt_type, allocator)
+}
 
+// The part of a prospect-theory price that does not depend on the prospect
+// parameters: the CDF of S_T on the terminal-price grid and the reference
+// premium. Calibration computes it once per option. Also used by the
+// behavioral Heston model, which supplies a Heston CDF instead.
+Prospect_Precomputed :: struct {
+	cdf:         []f64, // CDF of S_T at ST_min + i*dS
+	premium_ref: f64, // price the investor pays (reference point)
+	ST_min:      f64,
+	dS:          f64,
+	n_points:    int,
+}
+
+// prospect_precompute: true log-normal CDF and Black-Scholes reference premium.
+prospect_precompute :: proc(
+	S: f64,
+	K: f64,
+	T: f64,
+	r: f64,
+	true_sigma: f64,
+	opt_type: fin.OptionType,
+	n_points: int = 500,
+	allocator: mem.Allocator = context.allocator,
+) -> Prospect_Precomputed {
 	// 1. Grid of terminal prices
 	ST_min := S * 0.1
 	ST_max := S * 3.0
@@ -64,8 +93,6 @@ prospect_theory_price :: proc(
 	std_dev := math.sqrt_f64(variance)
 
 	true_cdf := make([]f64, n_points, allocator)
-	defer delete(true_cdf, allocator)
-
 	for i in 0 ..< n_points {
 		ST := ST_min + f64(i) * dS
 		if ST <= 0 {
@@ -75,6 +102,37 @@ prospect_theory_price :: proc(
 			true_cdf[i] = 0.5 * (1.0 + math.erf(z / math.sqrt_f64(2.0)))
 		}
 	}
+
+	// Reference premium (the price the investor pays): the standard
+	// Black-Scholes price with the true physical volatility as the anchor.
+	premium_ref := 0.0
+	if opt_type == .Call {
+		premium_ref = fin.black_scholes_call(S, K, T, r, true_sigma)
+	} else {
+		// Put-Call Parity: P = C - S + K*exp(-rT)
+		bs_call := fin.black_scholes_call(S, K, T, r, true_sigma)
+		premium_ref = bs_call - S + K * math.exp(-r * T)
+	}
+
+	return Prospect_Precomputed{cdf = true_cdf, premium_ref = premium_ref, ST_min = ST_min, dS = dS, n_points = n_points}
+}
+
+// prospect_theory_price_precomputed values an option under cumulative prospect
+// theory from a precomputed CDF and reference premium: probability weighting,
+// distorted PDF, value function, certainty equivalent.
+prospect_theory_price_precomputed :: proc(
+	pre: ^Prospect_Precomputed,
+	K: f64,
+	T: f64,
+	r: f64,
+	params: Prospect_Params,
+	opt_type: fin.OptionType,
+	allocator: mem.Allocator = context.allocator,
+) -> f64 {
+	n_points := pre.n_points
+	true_cdf := pre.cdf
+	ST_min := pre.ST_min
+	dS := pre.dS
 
 	// 3. Apply Probability Weighting w(p) = p^γ / (p^γ + (1-p)^γ)^(1/γ)
 	distorted_cdf := make([]f64, n_points, allocator)
@@ -108,16 +166,7 @@ prospect_theory_price :: proc(
 		for i in 0 ..< n_points {dist_pdf[i] /= sum_pdf}
 	}
 
-	// Calculate the reference premium (the price the investor pays).
-	// We use the standard Black-Scholes price with the true physical volatility as the anchor.
-	premium_ref := 0.0
-	if opt_type == .Call {
-		premium_ref = fin.black_scholes_call(S, K, T, r, true_sigma)
-	} else {
-		// Put-Call Parity: P = C - S + K*exp(-rT)
-		bs_call := fin.black_scholes_call(S, K, T, r, true_sigma)
-		premium_ref = bs_call - S + K * math.exp(-r * T)
-	}
+	premium_ref := pre.premium_ref
 
 	// 5. Integrate CPT Value * Distorted PDF
 	expected_value := 0.0
@@ -170,18 +219,32 @@ prospect_objective_fn :: proc(x: []f64, user_data: rawptr) -> f64 {
 	}
 
 	rmse := 0.0
-	for point in ctx.market_data {
-		model_price := prospect_theory_price(
-			ctx.S,
-			point.strike,
-			point.expiry,
-			ctx.r,
-			ctx.true_sigma,
-			params,
-			.Call,
-			ctx.n_points,
-			ctx.allocator,
-		)
+	for point, idx in ctx.market_data {
+		model_price: f64
+		if ctx.precomputed != nil && point.expiry > 0.0 {
+			// Scratch from the (thread-local) temp allocator: safe for parallel probes
+			model_price = prospect_theory_price_precomputed(
+				&ctx.precomputed[idx],
+				point.strike,
+				point.expiry,
+				ctx.r,
+				params,
+				.Call,
+				context.temp_allocator,
+			)
+		} else {
+			model_price = prospect_theory_price(
+				ctx.S,
+				point.strike,
+				point.expiry,
+				ctx.r,
+				ctx.true_sigma,
+				params,
+				.Call,
+				ctx.n_points,
+				ctx.allocator,
+			)
+		}
 
 		// Compare against market price (or convert market IV to price)
 		market_price := point.market_price
@@ -210,15 +273,6 @@ calibrate_prospect_theory :: proc(
 	true_sigma: f64, // Historical/Realized Volatility
 	allocator: mem.Allocator = context.allocator,
 ) -> Prospect_CalibrationResult {
-	x := make([]f64, 4, allocator)
-	defer delete(x, allocator)
-
-	// Initial guess: Tversky & Kahneman (1992)
-	x[0] = 0.88 // alpha
-	x[1] = 0.88 // beta
-	x[2] = 2.25 // lambda
-	x[3] = 0.61 // gamma
-
 	ctx := Prospect_CalibrationContext {
 		market_data = market_data,
 		S           = S,
@@ -228,76 +282,52 @@ calibrate_prospect_theory :: proc(
 		allocator   = allocator,
 	}
 
-	opt_config := opt.OptimizerConfig {
-		type          = .Adam,
-		learning_rate = 0.05,
-		beta1         = 0.9,
-		beta2         = 0.999,
-		epsilon       = 1e-8,
+	// The true CDF grid and reference premium do not depend on the prospect
+	// parameters being calibrated: compute them once per option.
+	ctx.precomputed = make([]Prospect_Precomputed, len(market_data), allocator)
+	for point, idx in market_data {
+		if point.expiry <= 0.0 {continue}
+		ctx.precomputed[idx] = prospect_precompute(S, point.strike, point.expiry, r, true_sigma, .Call, ctx.n_points, allocator)
 	}
-	optimizer := opt.optimizer_init(opt_config, 4, allocator)
-	defer opt.optimizer_free(&optimizer)
-
-	gradient := make([]f64, 4, allocator)
-	defer delete(gradient, allocator)
-
-	eps := 1e-4
-	best_loss := prospect_objective_fn(x, rawptr(&ctx))
-	best_x := make([]f64, 4, allocator)
-	defer delete(best_x, allocator)
-	copy(best_x, x)
-
-	max_iter := 200
-	converged := false
-
-	for iter in 0 ..< max_iter {
-		current_loss := prospect_objective_fn(x, rawptr(&ctx))
-		if current_loss < best_loss {
-			best_loss = current_loss
-			copy(best_x, x)
-		}
-		if current_loss < 1e-4 {
-			converged = true
-			break
-		}
-
-		for i in 0 ..< 4 {
-			x_plus := make([]f64, 4, allocator)
-			x_minus := make([]f64, 4, allocator)
-			copy(x_plus, x)
-			copy(x_minus, x)
-
-			x_plus[i] += eps
-			x_minus[i] -= eps
-
-			loss_plus := prospect_objective_fn(x_plus, rawptr(&ctx))
-			loss_minus := prospect_objective_fn(x_minus, rawptr(&ctx))
-
-			gradient[i] = (loss_plus - loss_minus) / (2.0 * eps)
-
-			delete(x_plus, allocator)
-			delete(x_minus, allocator)
-		}
-
-		opt.optimizer_step(&optimizer, x, gradient)
-
-		// Enforce behavioral bounds
-		x[0] = math.max(0.1, math.min(1.0, x[0])) // alpha
-		x[1] = math.max(0.1, math.min(1.0, x[1])) // beta
-		x[2] = math.max(1.0, math.min(5.0, x[2])) // lambda (loss aversion usually 1 to 5)
-		x[3] = math.max(0.1, math.min(0.99, x[3])) // gamma
+	defer {
+		for pre in ctx.precomputed {delete(pre.cdf, allocator)}
+		delete(ctx.precomputed, allocator)
 	}
+
+	return _calibrate_prospect_params(&ctx, prospect_objective_fn, 200, true, allocator)
+}
+
+// _calibrate_prospect_params fits (alpha, beta, lambda, gamma) from the
+// Tversky & Kahneman (1992) starting point; shared by the prospect-theory and
+// behavioral Heston calibrations.
+_calibrate_prospect_params :: proc(
+	ctx: rawptr,
+	objective: opt.ObjectiveFunc,
+	max_iter: int,
+	parallel: bool,
+	allocator: mem.Allocator,
+) -> Prospect_CalibrationResult {
+	params := []opt.Calibration_Param {
+		{"alpha", 0.88, 0.1, 1.0}, // gain curvature
+		{"beta", 0.88, 0.1, 1.0}, // loss curvature
+		{"lambda", 2.25, 1.0, 5.0}, // loss aversion, usually 1 to 5
+		{"gamma", 0.61, 0.1, 0.99}, // probability weighting
+	}
+	config := opt.Calibration_Config {
+		optimizer = {type = .Adam, learning_rate = 0.05, beta1 = 0.9, beta2 = 0.999, epsilon = 1e-8},
+		max_iter = max_iter,
+		loss_threshold = 1e-4,
+		fd_step = 1e-4,
+		parallel = parallel,
+	}
+	res := opt.calibrate(params, objective, ctx, config, allocator)
+	defer opt.calibration_result_free(&res)
 
 	return Prospect_CalibrationResult {
-		params = Prospect_Params {
-			alpha = best_x[0],
-			beta = best_x[1],
-			lambda = best_x[2],
-			gamma = best_x[3],
-		},
-		rmse = best_loss,
-		converged = converged,
-		iterations = max_iter,
+		params = Prospect_Params{alpha = res.x[0], beta = res.x[1], lambda = res.x[2], gamma = res.x[3]},
+		rmse = res.loss,
+		converged = res.converged,
+		iterations = res.iterations,
 	}
 }
 BehavioralSignal :: struct {

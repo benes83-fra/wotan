@@ -302,82 +302,33 @@ calibrate_sabr :: proc(
 	r: f64,
 	allocator: mem.Allocator = context.allocator,
 ) -> SABR_CalibrationResult {
-	x := make([]f64, 4, allocator)
-	defer delete(x, allocator)
-	x[0], x[1], x[2], x[3] = 0.2, 0.7, -0.3, 0.4
-
 	ctx := SABR_CalibrationContext {
 		market_data = market_data,
 		S           = S,
 		r           = r,
 	}
 
-	opt_config := opt.OptimizerConfig {
-		type          = .Adam,
-		learning_rate = 0.1,
-		beta1         = 0.9,
-		beta2         = 0.999,
-		epsilon       = 1e-8,
+	inf := math.inf_f64(1)
+	params := []opt.Calibration_Param {
+		{"alpha", 0.2, 0.01, inf},
+		{"beta", 0.7, 0.0, 1.0},
+		{"rho", -0.3, -0.99, 0.99},
+		{"nu", 0.4, 0.01, inf},
 	}
-	optimizer := opt.optimizer_init(opt_config, 4, allocator)
-	defer opt.optimizer_free(&optimizer)
-
-	gradient := make([]f64, 4, allocator)
-	defer delete(gradient, allocator)
-
-	eps := 1e-5
-	best_loss := sabr_objective_fn(x, rawptr(&ctx))
-	best_x := make([]f64, 4, allocator)
-	defer delete(best_x, allocator)
-	copy(best_x, x)
-
-	max_iter := 300
-	converged := false
-
-	for iter in 0 ..< max_iter {
-		current_loss := sabr_objective_fn(x, rawptr(&ctx))
-		if current_loss < best_loss {
-			best_loss = current_loss
-			copy(best_x, x)
-		}
-		if current_loss < 1e-6 {
-			converged = true
-			break
-		}
-
-		// ✅ FIX: Explicitly allocate and copy to avoid shallow slice aliasing!
-		for i in 0 ..< 4 {
-			x_plus := make([]f64, 4, allocator)
-			x_minus := make([]f64, 4, allocator)
-			copy(x_plus, x)
-			copy(x_minus, x)
-
-			x_plus[i] += eps
-			x_minus[i] -= eps
-
-			loss_plus := sabr_objective_fn(x_plus, rawptr(&ctx))
-			loss_minus := sabr_objective_fn(x_minus, rawptr(&ctx))
-
-			gradient[i] = (loss_plus - loss_minus) / (2.0 * eps)
-
-			delete(x_plus, allocator)
-			delete(x_minus, allocator)
-		}
-
-		opt.optimizer_step(&optimizer, x, gradient)
-
-		// Enforce bounds
-		x[0] = math.max(0.01, x[0])
-		x[1] = math.max(0.0, math.min(1.0, x[1]))
-		x[2] = math.max(-0.99, math.min(0.99, x[2]))
-		x[3] = math.max(0.01, x[3])
+	config := opt.Calibration_Config {
+		optimizer = {type = .Adam, learning_rate = 0.1, beta1 = 0.9, beta2 = 0.999, epsilon = 1e-8},
+		max_iter = 300,
+		loss_threshold = 1e-6,
+		fd_step = 1e-5,
 	}
+	res := opt.calibrate(params, sabr_objective_fn, &ctx, config, allocator)
+	defer opt.calibration_result_free(&res)
 
 	return SABR_CalibrationResult {
-		params = SABR_Params{alpha = best_x[0], beta = best_x[1], rho = best_x[2], nu = best_x[3]},
-		rmse = best_loss,
-		converged = converged,
-		iterations = max_iter,
+		params = SABR_Params{alpha = res.x[0], beta = res.x[1], rho = res.x[2], nu = res.x[3]},
+		rmse = res.loss,
+		converged = res.converged,
+		iterations = res.iterations,
 	}
 }
 
@@ -389,97 +340,43 @@ calibrate_heston :: proc(
 	true_sigma: f64 = 0.16, // ✅ ADD: Pass historical vol to seed the optimizer
 	allocator: mem.Allocator = context.allocator,
 ) -> Heston_CalibrationResult {
-	x := make([]f64, 5, allocator)
-	defer delete(x, allocator)
-
-	// ✅ FIX: Seed with realistic SPY dynamics based on historical volatility
-	// v0 and theta should be near the historical variance (e.g., 0.16^2 = 0.025)
-	// rho for equities is strongly negative (-0.7 to -0.9)
-	x[0] = true_sigma * true_sigma // v0
-	x[1] = 2.0 // kappa (mean reversion speed)
-	x[2] = true_sigma * true_sigma // theta (long-run variance)
-	x[3] = 0.4 // sigma (vol of vol)
-	x[4] = -0.7 // rho (leverage effect / skew)
-
 	ctx := Heston_CalibrationContext {
 		market_data = market_data,
 		S           = S,
 		r           = r,
 	}
 
-	opt_config := opt.OptimizerConfig {
-		type          = .Adam,
-		learning_rate = 0.05, // Increased LR to escape local minima
-		beta1         = 0.9,
-		beta2         = 0.999,
-		epsilon       = 1e-8,
+	// Seeded with realistic equity dynamics: v0 and theta near the historical
+	// variance, strongly negative rho (leverage effect / skew).
+	v_hist := true_sigma * true_sigma
+	params := []opt.Calibration_Param {
+		{"v0", v_hist, 0.001, 0.2},
+		{"kappa", 2.0, 0.1, 10.0}, // mean reversion speed
+		{"theta", v_hist, 0.001, 0.2}, // long-run variance
+		{"sigma", 0.4, 0.01, 1.5}, // vol of vol
+		{"rho", -0.7, -0.99, -0.1}, // strictly negative for equities
 	}
-	optimizer := opt.optimizer_init(opt_config, 5, allocator)
-	defer opt.optimizer_free(&optimizer)
-
-	gradient := make([]f64, 5, allocator)
-	defer delete(gradient, allocator)
-
-	// ✅ FIX: Larger eps to step over complex branch-cut noise
-	eps := 1e-3
-	best_loss := heston_objective_fn(x, rawptr(&ctx))
-	best_x := make([]f64, 5, allocator)
-	defer delete(best_x, allocator)
-	copy(best_x, x)
-
-	max_iter := 300
-	converged := false
-
-	for iter in 0 ..< max_iter {
-		current_loss := heston_objective_fn(x, rawptr(&ctx))
-		if current_loss < best_loss {
-			best_loss = current_loss
-			copy(best_x, x)
-		}
-		if current_loss < 0.50 { 	// $0.50 RMSE is excellent for Heston
-			converged = true
-			break
-		}
-
-		for i in 0 ..< 5 {
-			x_plus := make([]f64, 5, allocator)
-			x_minus := make([]f64, 5, allocator)
-			copy(x_plus, x)
-			copy(x_minus, x)
-
-			x_plus[i] += eps
-			x_minus[i] -= eps
-
-			loss_plus := heston_objective_fn(x_plus, rawptr(&ctx))
-			loss_minus := heston_objective_fn(x_minus, rawptr(&ctx))
-
-			gradient[i] = (loss_plus - loss_minus) / (2.0 * eps)
-
-			delete(x_plus, allocator)
-			delete(x_minus, allocator)
-		}
-
-		opt.optimizer_step(&optimizer, x, gradient)
-
-		// ✅ Tighter, more realistic bounds
-		x[0] = math.max(0.001, math.min(0.2, x[0])) // v0
-		x[1] = math.max(0.1, math.min(10.0, x[1])) // kappa
-		x[2] = math.max(0.001, math.min(0.2, x[2])) // theta
-		x[3] = math.max(0.01, math.min(1.5, x[3])) // sigma
-		x[4] = math.max(-0.99, math.min(-0.1, x[4])) // rho (strictly negative for equities)
+	config := opt.Calibration_Config {
+		optimizer = {type = .Adam, learning_rate = 0.05, beta1 = 0.9, beta2 = 0.999, epsilon = 1e-8},
+		max_iter = 300,
+		loss_threshold = 0.50, // $0.50 RMSE is excellent for Heston
+		fd_step = 1e-3, // large enough to step over complex branch-cut noise
+		parallel = true, // heston_objective_fn only uses context.temp_allocator scratch
 	}
+	res := opt.calibrate(params, heston_objective_fn, &ctx, config, allocator)
+	defer opt.calibration_result_free(&res)
 
 	return Heston_CalibrationResult {
 		params = Heston_Params {
-			v0 = best_x[0],
-			kappa = best_x[1],
-			theta = best_x[2],
-			sigma = best_x[3],
-			rho = best_x[4],
+			v0 = res.x[0],
+			kappa = res.x[1],
+			theta = res.x[2],
+			sigma = res.x[3],
+			rho = res.x[4],
 		},
-		rmse = best_loss,
-		converged = converged,
-		iterations = max_iter,
+		rmse = res.loss,
+		converged = res.converged,
+		iterations = res.iterations,
 	}
 }
 // ============================================================================

@@ -123,6 +123,58 @@ _hw_eval_loss :: proc(
 	return res
 }
 
+// ----------------------------------------------------------------------------
+// Objective adapters for the unified calibrator (optimize.calibrate)
+// ----------------------------------------------------------------------------
+
+@(private = "file")
+_HW_Caplet_Ctx :: struct {
+	T_start, T_end, F, K, P, market: ^t.Tensor,
+	allocator:                       mem.Allocator,
+}
+
+@(private = "file")
+_hw1f_objective :: proc(x: []f64, user_data: rawptr) -> f64 {
+	c := (^_HW_Caplet_Ctx)(user_data)
+	return _hw_eval_loss(x[0], x[1], c.T_start, c.T_end, c.F, c.K, c.P, c.market, c.allocator)
+}
+
+@(private = "file")
+_hw2f_objective :: proc(x: []f64, user_data: rawptr) -> f64 {
+	c := (^_HW_Caplet_Ctx)(user_data)
+	p := HW2_Params{a = x[0], b = x[1], sigma = x[2], eta = x[3], rho = x[4]}
+	return _hw2_eval_loss(p, c.T_start, c.T_end, c.F, c.K, c.P, c.market, c.allocator)
+}
+
+@(private = "file")
+_HW2F_Joint_Ctx :: struct {
+	r0:              f64,
+	caps:            _HW_Caplet_Ctx,
+	swaption_specs:  []SwaptionSpec,
+	swaption_market: []f64,
+	n_swaptions:     int,
+}
+
+@(private = "file")
+_hw2f_joint_objective :: proc(x: []f64, user_data: rawptr) -> f64 {
+	c := (^_HW2F_Joint_Ctx)(user_data)
+	p := HW2_Params{a = x[0], b = x[1], sigma = x[2], eta = x[3], rho = x[4]}
+	return _hw2f_joint_loss(
+		p,
+		c.r0,
+		c.caps.T_start,
+		c.caps.T_end,
+		c.caps.F,
+		c.caps.K,
+		c.caps.P,
+		c.caps.market,
+		c.swaption_specs,
+		c.swaption_market,
+		c.n_swaptions,
+		c.caps.allocator,
+	)
+}
+
 calibrate_hull_white :: proc(
 	market_prices: []f64,
 	T_start: []f64,
@@ -140,119 +192,19 @@ calibrate_hull_white :: proc(
 	P_t := _make_const_tensor(P, n_caplets, allocator)
 	market_t := _make_const_tensor(market_prices, n_caplets, allocator)
 
-	opt_config := opt.OptimizerConfig {
-		type          = .Adam,
-		learning_rate = 0.05,
-		beta1         = 0.9,
-		beta2         = 0.999,
-		epsilon       = 1e-8,
+	ctx := _HW_Caplet_Ctx{T_start_t, T_end_t, F_t, K_t, P_t, market_t, allocator}
+	params := []opt.Calibration_Param {
+		{"a", 0.05, 0.01, 0.5},
+		{"sigma", 0.01, 0.001, 0.1},
 	}
-	optimizer := opt.optimizer_init(opt_config, 2, allocator)
-	defer opt.optimizer_free(&optimizer)
-
-	gradient := make([]f64, 2, allocator)
-	defer delete(gradient, allocator)
-
-	eps := 1e-5
-	best_loss: f64 = 1e10 // Explicitly typed as f64
-	best_a := 0.05
-	best_sigma := 0.01
-	max_iter := 300
-	converged := false
-
-	a_val := 0.05
-	sigma_val := 0.01
-
-	for iter in 0 ..< max_iter {
-		current_loss := _hw_eval_loss(
-			a_val,
-			sigma_val,
-			T_start_t,
-			T_end_t,
-			F_t,
-			K_t,
-			P_t,
-			market_t,
-			allocator,
-		)
-
-		if current_loss < best_loss {
-			best_loss = current_loss
-			best_a = a_val
-			best_sigma = sigma_val
-		}
-
-		if current_loss < 1e-6 {
-			converged = true
-			break
-		}
-
-		a_plus := a_val + eps
-		a_minus := a_val - eps
-		sigma_plus := sigma_val + eps
-		sigma_minus := sigma_val - eps
-
-		gradient[0] =
-			(_hw_eval_loss(
-					a_plus,
-					sigma_val,
-					T_start_t,
-					T_end_t,
-					F_t,
-					K_t,
-					P_t,
-					market_t,
-					allocator,
-				) -
-				_hw_eval_loss(
-					a_minus,
-					sigma_val,
-					T_start_t,
-					T_end_t,
-					F_t,
-					K_t,
-					P_t,
-					market_t,
-					allocator,
-				)) /
-			(2.0 * eps)
-
-		gradient[1] =
-			(_hw_eval_loss(
-					a_val,
-					sigma_plus,
-					T_start_t,
-					T_end_t,
-					F_t,
-					K_t,
-					P_t,
-					market_t,
-					allocator,
-				) -
-				_hw_eval_loss(
-					a_val,
-					sigma_minus,
-					T_start_t,
-					T_end_t,
-					F_t,
-					K_t,
-					P_t,
-					market_t,
-					allocator,
-				)) /
-			(2.0 * eps)
-
-		params := make([]f64, 2, allocator)
-		params[0] = a_val
-		params[1] = sigma_val
-		opt.optimizer_step(&optimizer, params, gradient)
-
-		// ✅ FIXED: Using standard math.max and math.min as per Odin's library
-		a_val = math.max(0.01, math.min(0.5, params[0]))
-		sigma_val = math.max(0.001, math.min(0.1, params[1]))
-
-		delete(params, allocator)
+	config := opt.Calibration_Config {
+		optimizer = {type = .Adam, learning_rate = 0.05, beta1 = 0.9, beta2 = 0.999, epsilon = 1e-8},
+		max_iter = 300,
+		loss_threshold = 1e-6,
+		fd_step = 1e-5,
 	}
+	res := opt.calibrate(params, _hw1f_objective, &ctx, config, allocator)
+	defer opt.calibration_result_free(&res)
 
 	t.tensor_free(T_start_t)
 	t.tensor_free(T_end_t)
@@ -262,10 +214,10 @@ calibrate_hull_white :: proc(
 	t.tensor_free(market_t)
 
 	return HW_CalibrationResult {
-		params = HW_Params{a = best_a, sigma = best_sigma},
-		rmse = best_loss,
-		converged = converged,
-		iterations = max_iter,
+		params = HW_Params{a = res.x[0], sigma = res.x[1]},
+		rmse = res.loss,
+		converged = res.converged,
+		iterations = res.iterations,
 	}
 }
 
@@ -572,150 +524,22 @@ calibrate_hull_white_2f :: proc(
 	P_t := _make_const_tensor(P, n_caplets, allocator)
 	market_t := _make_const_tensor(market_prices, n_caplets, allocator)
 
-	opt_config := opt.OptimizerConfig {
-		type          = .Adam,
-		learning_rate = 0.02,
-		beta1         = 0.9,
-		beta2         = 0.999,
-		epsilon       = 1e-8,
+	ctx := _HW_Caplet_Ctx{T_start_t, T_end_t, F_t, K_t, P_t, market_t, allocator}
+	params := []opt.Calibration_Param {
+		{"a", 0.1, 0.01, 1.0},
+		{"b", 0.01, 0.01, 1.0},
+		{"sigma", 0.01, 0.001, 0.05},
+		{"eta", 0.005, 0.001, 0.05},
+		{"rho", -0.3, -0.99, 0.99},
 	}
-	optimizer := opt.optimizer_init(opt_config, 5, allocator)
-	defer opt.optimizer_free(&optimizer)
-
-	gradient := make([]f64, 5, allocator)
-	defer delete(gradient, allocator)
-
-	eps := 1e-4
-	best_loss: f64 = 1e10
-	best_params := HW2_Params {
-		a     = 0.1,
-		b     = 0.01,
-		sigma = 0.01,
-		eta   = 0.005,
-		rho   = -0.3,
+	config := opt.Calibration_Config {
+		optimizer = {type = .Adam, learning_rate = 0.02, beta1 = 0.9, beta2 = 0.999, epsilon = 1e-8},
+		max_iter = 400,
+		loss_threshold = 1e-6,
+		fd_step = 1e-4,
 	}
-	max_iter := 400
-	converged := false
-
-	p := HW2_Params {
-		a     = 0.1,
-		b     = 0.01,
-		sigma = 0.01,
-		eta   = 0.005,
-		rho   = -0.3,
-	}
-
-	for iter in 0 ..< max_iter {
-		current_loss := _hw2_eval_loss(p, T_start_t, T_end_t, F_t, K_t, P_t, market_t, allocator)
-
-		if current_loss < best_loss {
-			best_loss = current_loss
-			best_params = p
-		}
-
-		if current_loss < 1e-6 {
-			converged = true
-			break
-		}
-
-		// Finite difference gradients for all 5 parameters
-		p_a_plus := p; p_a_plus.a += eps
-		p_a_minus := p; p_a_minus.a -= eps
-		gradient[0] =
-			(_hw2_eval_loss(p_a_plus, T_start_t, T_end_t, F_t, K_t, P_t, market_t, allocator) -
-				_hw2_eval_loss(
-					p_a_minus,
-					T_start_t,
-					T_end_t,
-					F_t,
-					K_t,
-					P_t,
-					market_t,
-					allocator,
-				)) /
-			(2.0 * eps)
-
-		p_b_plus := p; p_b_plus.b += eps
-		p_b_minus := p; p_b_minus.b -= eps
-		gradient[1] =
-			(_hw2_eval_loss(p_b_plus, T_start_t, T_end_t, F_t, K_t, P_t, market_t, allocator) -
-				_hw2_eval_loss(
-					p_b_minus,
-					T_start_t,
-					T_end_t,
-					F_t,
-					K_t,
-					P_t,
-					market_t,
-					allocator,
-				)) /
-			(2.0 * eps)
-
-		p_sigma_plus := p; p_sigma_plus.sigma += eps
-		p_sigma_minus := p; p_sigma_minus.sigma -= eps
-		gradient[2] =
-			(_hw2_eval_loss(p_sigma_plus, T_start_t, T_end_t, F_t, K_t, P_t, market_t, allocator) -
-				_hw2_eval_loss(
-					p_sigma_minus,
-					T_start_t,
-					T_end_t,
-					F_t,
-					K_t,
-					P_t,
-					market_t,
-					allocator,
-				)) /
-			(2.0 * eps)
-
-		p_eta_plus := p; p_eta_plus.eta += eps
-		p_eta_minus := p; p_eta_minus.eta -= eps
-		gradient[3] =
-			(_hw2_eval_loss(p_eta_plus, T_start_t, T_end_t, F_t, K_t, P_t, market_t, allocator) -
-				_hw2_eval_loss(
-					p_eta_minus,
-					T_start_t,
-					T_end_t,
-					F_t,
-					K_t,
-					P_t,
-					market_t,
-					allocator,
-				)) /
-			(2.0 * eps)
-
-		p_rho_plus := p; p_rho_plus.rho += eps
-		p_rho_minus := p; p_rho_minus.rho -= eps
-		gradient[4] =
-			(_hw2_eval_loss(p_rho_plus, T_start_t, T_end_t, F_t, K_t, P_t, market_t, allocator) -
-				_hw2_eval_loss(
-					p_rho_minus,
-					T_start_t,
-					T_end_t,
-					F_t,
-					K_t,
-					P_t,
-					market_t,
-					allocator,
-				)) /
-			(2.0 * eps)
-
-		params := make([]f64, 5, allocator)
-		params[0] = p.a
-		params[1] = p.b
-		params[2] = p.sigma
-		params[3] = p.eta
-		params[4] = p.rho
-		opt.optimizer_step(&optimizer, params, gradient)
-
-		// Enforce bounds
-		p.a = math.max(0.01, math.min(1.0, params[0]))
-		p.b = math.max(0.01, math.min(1.0, params[1]))
-		p.sigma = math.max(0.001, math.min(0.05, params[2]))
-		p.eta = math.max(0.001, math.min(0.05, params[3]))
-		p.rho = math.max(-0.99, math.min(0.99, params[4]))
-
-		delete(params, allocator)
-	}
+	res := opt.calibrate(params, _hw2f_objective, &ctx, config, allocator)
+	defer opt.calibration_result_free(&res)
 
 	t.tensor_free(T_start_t)
 	t.tensor_free(T_end_t)
@@ -725,10 +549,10 @@ calibrate_hull_white_2f :: proc(
 	t.tensor_free(market_t)
 
 	return HW2_CalibrationResult {
-		params = best_params,
-		rmse = best_loss,
-		converged = converged,
-		iterations = max_iter,
+		params = HW2_Params{a = res.x[0], b = res.x[1], sigma = res.x[2], eta = res.x[3], rho = res.x[4]},
+		rmse = res.loss,
+		converged = res.converged,
+		iterations = res.iterations,
 	}
 }
 
@@ -1106,249 +930,30 @@ calibrate_hull_white_2f_joint :: proc(
 	cap_P_t := _make_const_tensor(cap_P, n_caplets, allocator)
 	cap_market_t := _make_const_tensor(cap_market, n_caplets, allocator)
 
-	opt_config := opt.OptimizerConfig {
-		type          = .Adam,
-		learning_rate = 0.005, // <-- Lower LR for more stable 5D optimization
-		beta1         = 0.9,
-		beta2         = 0.999,
-		epsilon       = 1e-8,
+	ctx := _HW2F_Joint_Ctx{
+		r0 = r0,
+		caps = {cap_T_start_t, cap_T_end_t, cap_F_t, cap_K_t, cap_P_t, cap_market_t, allocator},
+		swaption_specs = swaption_specs,
+		swaption_market = swaption_market,
+		n_swaptions = n_swaptions,
 	}
-	optimizer := opt.optimizer_init(opt_config, 5, allocator)
-	defer opt.optimizer_free(&optimizer)
-
-	gradient := make([]f64, 5, allocator)
-	defer delete(gradient, allocator)
-
-	eps := 1e-4
-	best_loss: f64 = 1e10
-	// Better initial guess: closer to realistic IR parameters, with a > b enforced
-	best_params := HW2_Params {
-		a     = 0.10,
-		b     = 0.03,
-		sigma = 0.008,
-		eta   = 0.005,
-		rho   = -0.4,
+	// Starting point close to realistic IR parameters, with a > b enforced
+	params := []opt.Calibration_Param {
+		{"a", 0.10, 0.02, 1.0},
+		{"b", 0.03, 0.005, math.inf_f64(1)}, // upper bound b <= a - 0.01 applied by `project`
+		{"sigma", 0.008, 0.001, 0.05},
+		{"eta", 0.005, 0.001, 0.05},
+		{"rho", -0.4, -0.99, 0.99},
 	}
-	max_iter := 600 // More iterations for 5D landscape
-	converged := false
-
-	p := HW2_Params {
-		a     = 0.10,
-		b     = 0.03,
-		sigma = 0.008,
-		eta   = 0.005,
-		rho   = -0.4,
+	config := opt.Calibration_Config {
+		optimizer = {type = .Adam, learning_rate = 0.005, beta1 = 0.9, beta2 = 0.999, epsilon = 1e-8},
+		max_iter = 600, // more iterations for the 5D landscape
+		loss_threshold = 1e-6,
+		fd_step = 1e-4,
+		project = proc(x: []f64) {x[1] = math.max(0.005, math.min(x[0] - 0.01, x[1]))}, // b < a
 	}
-
-	for iter in 0 ..< max_iter {
-		current_loss := _hw2f_joint_loss(
-			p,
-			r0,
-			cap_T_start_t,
-			cap_T_end_t,
-			cap_F_t,
-			cap_K_t,
-			cap_P_t,
-			cap_market_t,
-			swaption_specs,
-			swaption_market,
-			n_swaptions,
-			allocator,
-		)
-
-		if current_loss < best_loss {
-			best_loss = current_loss
-			best_params = p
-		}
-
-		if current_loss < 1e-6 {
-			converged = true
-			break
-		}
-
-		// Finite difference gradients (all 5 parameters)
-		p_a_plus := p; p_a_plus.a += eps
-		p_a_minus := p; p_a_minus.a -= eps
-		gradient[0] =
-			(_hw2f_joint_loss(
-					p_a_plus,
-					r0,
-					cap_T_start_t,
-					cap_T_end_t,
-					cap_F_t,
-					cap_K_t,
-					cap_P_t,
-					cap_market_t,
-					swaption_specs,
-					swaption_market,
-					n_swaptions,
-					allocator,
-				) -
-				_hw2f_joint_loss(
-					p_a_minus,
-					r0,
-					cap_T_start_t,
-					cap_T_end_t,
-					cap_F_t,
-					cap_K_t,
-					cap_P_t,
-					cap_market_t,
-					swaption_specs,
-					swaption_market,
-					n_swaptions,
-					allocator,
-				)) /
-			(2.0 * eps)
-
-		p_b_plus := p; p_b_plus.b += eps
-		p_b_minus := p; p_b_minus.b -= eps
-		gradient[1] =
-			(_hw2f_joint_loss(
-					p_b_plus,
-					r0,
-					cap_T_start_t,
-					cap_T_end_t,
-					cap_F_t,
-					cap_K_t,
-					cap_P_t,
-					cap_market_t,
-					swaption_specs,
-					swaption_market,
-					n_swaptions,
-					allocator,
-				) -
-				_hw2f_joint_loss(
-					p_b_minus,
-					r0,
-					cap_T_start_t,
-					cap_T_end_t,
-					cap_F_t,
-					cap_K_t,
-					cap_P_t,
-					cap_market_t,
-					swaption_specs,
-					swaption_market,
-					n_swaptions,
-					allocator,
-				)) /
-			(2.0 * eps)
-
-		p_s_plus := p; p_s_plus.sigma += eps
-		p_s_minus := p; p_s_minus.sigma -= eps
-		gradient[2] =
-			(_hw2f_joint_loss(
-					p_s_plus,
-					r0,
-					cap_T_start_t,
-					cap_T_end_t,
-					cap_F_t,
-					cap_K_t,
-					cap_P_t,
-					cap_market_t,
-					swaption_specs,
-					swaption_market,
-					n_swaptions,
-					allocator,
-				) -
-				_hw2f_joint_loss(
-					p_s_minus,
-					r0,
-					cap_T_start_t,
-					cap_T_end_t,
-					cap_F_t,
-					cap_K_t,
-					cap_P_t,
-					cap_market_t,
-					swaption_specs,
-					swaption_market,
-					n_swaptions,
-					allocator,
-				)) /
-			(2.0 * eps)
-
-		p_e_plus := p; p_e_plus.eta += eps
-		p_e_minus := p; p_e_minus.eta -= eps
-		gradient[3] =
-			(_hw2f_joint_loss(
-					p_e_plus,
-					r0,
-					cap_T_start_t,
-					cap_T_end_t,
-					cap_F_t,
-					cap_K_t,
-					cap_P_t,
-					cap_market_t,
-					swaption_specs,
-					swaption_market,
-					n_swaptions,
-					allocator,
-				) -
-				_hw2f_joint_loss(
-					p_e_minus,
-					r0,
-					cap_T_start_t,
-					cap_T_end_t,
-					cap_F_t,
-					cap_K_t,
-					cap_P_t,
-					cap_market_t,
-					swaption_specs,
-					swaption_market,
-					n_swaptions,
-					allocator,
-				)) /
-			(2.0 * eps)
-
-		p_r_plus := p; p_r_plus.rho += eps
-		p_r_minus := p; p_r_minus.rho -= eps
-		gradient[4] =
-			(_hw2f_joint_loss(
-					p_r_plus,
-					r0,
-					cap_T_start_t,
-					cap_T_end_t,
-					cap_F_t,
-					cap_K_t,
-					cap_P_t,
-					cap_market_t,
-					swaption_specs,
-					swaption_market,
-					n_swaptions,
-					allocator,
-				) -
-				_hw2f_joint_loss(
-					p_r_minus,
-					r0,
-					cap_T_start_t,
-					cap_T_end_t,
-					cap_F_t,
-					cap_K_t,
-					cap_P_t,
-					cap_market_t,
-					swaption_specs,
-					swaption_market,
-					n_swaptions,
-					allocator,
-				)) /
-			(2.0 * eps)
-
-		params := make([]f64, 5, allocator)
-		params[0] = p.a
-		params[1] = p.b
-		params[2] = p.sigma
-		params[3] = p.eta
-		params[4] = p.rho
-		opt.optimizer_step(&optimizer, params, gradient)
-
-		// Enforce bounds AND a > b constraint
-		p.a = math.max(0.02, math.min(1.0, params[0]))
-		p.b = math.max(0.005, math.min(p.a - 0.01, params[1])) // <-- KEY: b < a enforced
-		p.sigma = math.max(0.001, math.min(0.05, params[2]))
-		p.eta = math.max(0.001, math.min(0.05, params[3]))
-		p.rho = math.max(-0.99, math.min(0.99, params[4]))
-
-		delete(params, allocator)
-	}
+	res := opt.calibrate(params, _hw2f_joint_objective, &ctx, config, allocator)
+	defer opt.calibration_result_free(&res)
 
 	t.tensor_free(cap_T_start_t)
 	t.tensor_free(cap_T_end_t)
@@ -1358,10 +963,10 @@ calibrate_hull_white_2f_joint :: proc(
 	t.tensor_free(cap_market_t)
 
 	return HW2F_JointResult {
-		params = best_params,
-		rmse = best_loss,
-		converged = converged,
-		iterations = max_iter,
+		params = HW2_Params{a = res.x[0], b = res.x[1], sigma = res.x[2], eta = res.x[3], rho = res.x[4]},
+		rmse = res.loss,
+		converged = res.converged,
+		iterations = res.iterations,
 	}
 }
 // ============================================================================

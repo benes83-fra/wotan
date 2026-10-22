@@ -2,13 +2,11 @@ package wotan_linalg
 
 import "base:builtin"
 import "base:intrinsics"
-import "base:runtime"
 import "core:fmt"
 import "core:math"
 import "core:mem"
 import "core:os"
-import "core:sync"
-import "core:thread"
+import "../util"
 import simd "core:simd"
 
 TILE_BASE :: 8
@@ -179,60 +177,17 @@ _parallel_rows :: proc(rows, flops: int, a, b, out: ^Matrix(f64), worker: _Rows_
 	if flops >= MATMUL_PARALLEL_MIN_FLOPS {
 		n = matmul_max_threads
 		if n <= 0 {n = os.get_processor_core_count()}
-		n = min(n, rows, flops / MATMUL_MIN_FLOPS_PER_THREAD, len(_pool.wake) + 1)
+		n = min(n, rows, flops / MATMUL_MIN_FLOPS_PER_THREAD)
 	}
 	if n <= 1 {
 		worker(a, b, out, 0, rows)
 		return
 	}
-
-	chunk := (rows + n - 1) / n
-	n = (rows + chunk - 1) / chunk // drop empty trailing ranges
-
-	sync.mutex_lock(&_pool.mutex)
-	defer sync.mutex_unlock(&_pool.mutex)
-	_pool_ensure_workers(n - 1)
-
-	sync.wait_group_add(&_pool.done, n - 1)
-	for t in 1 ..< n {
-		_pool.jobs[t - 1] = _Rows_Job{worker, a, b, out, t * chunk, min(rows, (t + 1) * chunk)}
-		sync.sema_post(&_pool.wake[t - 1])
-	}
-	worker(a, b, out, 0, min(rows, chunk)) // the calling thread does the first range
-	sync.wait_group_wait(&_pool.done)
-}
-
-// Persistent worker pool: threads are started once (lazily) and then sleep on a
-// semaphore between jobs, so a parallel matmul only pays for a wake-up instead
-// of creating and joining OS threads on every call.
-@(private = "file")
-_Worker_Pool :: struct {
-	mutex:   sync.Mutex, // one parallel dispatch at a time
-	done:    sync.Wait_Group,
-	wake:    [63]sync.Sema,
-	jobs:    [63]_Rows_Job,
-	started: int,
-}
-
-@(private = "file")
-_pool: _Worker_Pool
-
-@(private = "file")
-_pool_ensure_workers :: proc(n: int) {
-	// The workers live for the whole process; allocate them outside any tracking
-	// allocator so debug builds do not report them as leaks at exit.
-	context.allocator = runtime.heap_allocator()
-	for _pool.started < n {
-		thread.create_and_start_with_poly_data(_pool.started, proc(slot: int) {
-			for {
-				sync.sema_wait(&_pool.wake[slot])
-				j := _pool.jobs[slot]
-				j.worker(j.a, j.b, j.out, j.r0, j.r1)
-				sync.wait_group_done(&_pool.done)
-			}
-		})
-		_pool.started += 1
-	}
+	job := _Rows_Job{worker, a, b, out, 0, 0}
+	util.parallel_for(rows, &job, proc(data: rawptr, begin, end: int) {
+		j := (^_Rows_Job)(data)
+		j.worker(j.a, j.b, j.out, begin, end)
+	}, n)
 }
 
 // matmul_nn_acc_simd: out += A @ B
