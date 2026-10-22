@@ -241,10 +241,15 @@ heston_objective_fn :: proc(x: []f64, user_data: rawptr) -> f64 {
 		feller_penalty = 50.0 * math.abs(feller_condition)
 	}
 
+	n := len(ctx.market_data)
+	model_prices := make([]f64, n, context.temp_allocator)
+	defer delete(model_prices, context.temp_allocator)
+	_heston_model_prices(ctx.market_data, ctx.S, ctx.r, params, model_prices)
+
+	// Accumulate in the original option order
 	rmse := 0.0
-	for point in ctx.market_data {
-		// ✅ Use 4000 points here to match the pricing function
-		model_price := heston_price(ctx.S, point.strike, point.expiry, ctx.r, params, .Call, 1000)
+	for point, idx in ctx.market_data {
+		model_price := model_prices[idx]
 
 		if math.is_nan(model_price) || math.is_inf(model_price, 0) {
 			return 1e6
@@ -254,7 +259,40 @@ heston_objective_fn :: proc(x: []f64, user_data: rawptr) -> f64 {
 		err := model_price - bs_price
 		rmse += err * err
 	}
-	return math.sqrt_f64(rmse / f64(len(ctx.market_data)))
+	return math.sqrt_f64(rmse / f64(n))
+}
+
+// _heston_model_prices fills out[i] with the 1000-node Heston call price of
+// market_data[i]. Options are grouped by expiry so the characteristic function
+// is evaluated once per (expiry, node) instead of once per option.
+_heston_model_prices :: proc(market_data: []VolSurfacePoint, S, r: f64, params: Heston_Params, out: []f64) {
+	n := len(market_data)
+	done := make([]bool, n, context.temp_allocator)
+	strikes := make([]f64, n, context.temp_allocator)
+	prices := make([]f64, n, context.temp_allocator)
+	members := make([]int, n, context.temp_allocator)
+	defer {
+		delete(done, context.temp_allocator)
+		delete(strikes, context.temp_allocator)
+		delete(prices, context.temp_allocator)
+		delete(members, context.temp_allocator)
+	}
+
+	for i in 0 ..< n {
+		if done[i] {continue}
+		T := market_data[i].expiry
+		m := 0
+		for j in i ..< n {
+			if !done[j] && market_data[j].expiry == T {
+				members[m] = j
+				strikes[m] = market_data[j].strike
+				done[j] = true
+				m += 1
+			}
+		}
+		heston_prices_same_expiry(S, strikes[:m], T, r, params, .Call, prices[:m], 1000)
+		for k in 0 ..< m {out[members[k]] = prices[k]}
+	}
 }
 
 // Calibrate SABR using Adam (with FIXED deep copies for gradients)
@@ -509,9 +547,47 @@ heston_price :: proc(
 	opt: OptionType,
 	n_points: int = 1000,
 ) -> f64 {
+	strikes := [1]f64{K}
+	price: [1]f64
+	heston_prices_same_expiry(S, strikes[:], T, r, params, opt, price[:], n_points)
+	return price[0]
+}
+
+// heston_prices_same_expiry prices options that share S, T, r and the Heston
+// parameters, writing one price per strike into `out`. The characteristic
+// function does not depend on the strike, so it is evaluated once per
+// integration node and reused for every strike; each strike's integral is
+// accumulated exactly as for a single heston_price call.
+heston_prices_same_expiry :: proc(
+	S: f64,
+	strikes: []f64,
+	T: f64,
+	r: f64,
+	params: Heston_Params,
+	opt: OptionType,
+	out: []f64,
+	n_points: int = 1000,
+) {
+	assert(len(out) == len(strikes), "heston_prices_same_expiry: out must have one slot per strike")
 	if T <= 0.0 {
-		if opt == .Call {return math.max(S - K, 0.0)}
-		return math.max(K - S, 0.0)
+		for K, k in strikes {
+			out[k] = opt == .Call ? math.max(S - K, 0.0) : math.max(K - S, 0.0)
+		}
+		return
+	}
+
+	// Per-strike accumulators; on the stack for typical chain sizes
+	stack_P: [128]f64
+	P1, P2: []f64
+	if len(strikes) <= 64 {
+		P1, P2 = stack_P[:len(strikes)], stack_P[64:64 + len(strikes)]
+	} else {
+		P1 = make([]f64, len(strikes), context.temp_allocator)
+		P2 = make([]f64, len(strikes), context.temp_allocator)
+	}
+	defer if len(strikes) > 64 {
+		delete(P1, context.temp_allocator)
+		delete(P2, context.temp_allocator)
 	}
 
 	// ✅ CRITICAL FIX: Normalization factor for P1.
@@ -521,8 +597,6 @@ heston_price :: proc(
 
 	u_max := 200.0
 	du := u_max / f64(n_points)
-	P1 := 0.0
-	P2 := 0.0
 
 	for i in 0 ..< n_points {
 		u := (f64(i) + 0.5) * du
@@ -531,29 +605,35 @@ heston_price :: proc(
 		u1 := complex(u, -1.0)
 		phi1_raw := heston_char_func(u1, S, r, T, params)
 		phi1 := phi1_raw / complex(normalization_P1, 0.0)
-		integrand1 := real(cmath_exp(-complex(0.0, u * math.ln(K))) * phi1 / complex(0.0, u))
-		P1 += integrand1 * du
 
 		// P2 uses risk-neutral measure: evaluate at u (already normalized)
 		u2 := complex(u, 0.0)
 		phi2 := heston_char_func(u2, S, r, T, params)
-		integrand2 := real(cmath_exp(-complex(0.0, u * math.ln(K))) * phi2 / complex(0.0, u))
-		P2 += integrand2 * du
+
+		for K, k in strikes {
+			e_k := cmath_exp(-complex(0.0, u * math.ln(K))) // e^{-iu ln K}, shared by both integrals
+			integrand1 := real(e_k * phi1 / complex(0.0, u))
+			P1[k] += integrand1 * du
+			integrand2 := real(e_k * phi2 / complex(0.0, u))
+			P2[k] += integrand2 * du
+		}
 	}
 
-	P1 = 0.5 + P1 / math.PI
-	P2 = 0.5 + P2 / math.PI
-	call_price := S * P1 - K * math.exp(-r * T) * P2
+	for K, k in strikes {
+		p1 := 0.5 + P1[k] / math.PI
+		p2 := 0.5 + P2[k] / math.PI
+		call_price := S * p1 - K * math.exp(-r * T) * p2
 
-	if opt == .Call {
-		intrinsic := math.max(S - K * math.exp(-r * T), 0.0)
-		if call_price < intrinsic {call_price = intrinsic}
-		return call_price
-	} else {
-		put_price := call_price - S + K * math.exp(-r * T)
-		intrinsic := math.max(K * math.exp(-r * T) - S, 0.0)
-		if put_price < intrinsic {put_price = intrinsic}
-		return put_price
+		if opt == .Call {
+			intrinsic := math.max(S - K * math.exp(-r * T), 0.0)
+			if call_price < intrinsic {call_price = intrinsic}
+			out[k] = call_price
+		} else {
+			put_price := call_price - S + K * math.exp(-r * T)
+			intrinsic := math.max(K * math.exp(-r * T) - S, 0.0)
+			if put_price < intrinsic {put_price = intrinsic}
+			out[k] = put_price
+		}
 	}
 }
 debug_heston :: proc() {

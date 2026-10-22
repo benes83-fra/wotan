@@ -70,24 +70,62 @@ behavioral_heston_price :: proc(
 		if opt_type == .Call {return math.max(S - K, 0.0)}
 		return math.max(K - S, 0.0)
 	}
+	pre := behavioral_heston_precompute(S, K, T, r, heston_params, opt_type, n_grid, n_int, allocator)
+	defer delete(pre.heston_cdf, allocator)
+	return behavioral_heston_price_precomputed(&pre, K, T, r, prospect_params, opt_type, allocator)
+}
 
+// The part of a behavioral Heston price that depends only on the Heston
+// parameters (not on the prospect parameters): the Heston CDF of S_T on the
+// price grid and the Heston reference premium. Calibrating the prospect
+// parameters with Heston fixed computes this once per option.
+BehavioralHeston_Precomputed :: struct {
+	heston_cdf:  []f64,
+	premium_ref: f64,
+	ST_min:      f64,
+	dS:          f64,
+	n_grid:      int,
+}
+
+behavioral_heston_precompute :: proc(
+	S: f64,
+	K: f64,
+	T: f64,
+	r: f64,
+	heston_params: fin.Heston_Params,
+	opt_type: fin.OptionType,
+	n_grid: int = 100,
+	n_int: int = 200,
+	allocator: mem.Allocator = context.allocator,
+) -> BehavioralHeston_Precomputed {
 	ST_min := S * 0.2
 	ST_max := S * 3.0
-	dS := (ST_max - ST_min) / f64(n_grid)
+	return BehavioralHeston_Precomputed {
+		// 1. Extract Heston CDF (The Physics)
+		heston_cdf = extract_heston_cdf_grid(S, r, T, heston_params, ST_min, ST_max, n_grid, n_int, allocator),
+		// 4. Reference Premium (Anchor for Value Function)
+		premium_ref = fin.heston_price(S, K, T, r, heston_params, opt_type, 200),
+		ST_min = ST_min,
+		dS = (ST_max - ST_min) / f64(n_grid),
+		n_grid = n_grid,
+	}
+}
 
-	// 1. Extract Heston CDF (The Physics)
-	heston_cdf := extract_heston_cdf_grid(
-		S,
-		r,
-		T,
-		heston_params,
-		ST_min,
-		ST_max,
-		n_grid,
-		n_int,
-		allocator,
-	)
-	defer delete(heston_cdf, allocator)
+// behavioral_heston_price_precomputed applies the prospect-theory valuation to a
+// precomputed Heston CDF (steps 2, 3 and 5 of behavioral_heston_price).
+behavioral_heston_price_precomputed :: proc(
+	pre: ^BehavioralHeston_Precomputed,
+	K: f64,
+	T: f64,
+	r: f64,
+	prospect_params: Prospect_Params,
+	opt_type: fin.OptionType,
+	allocator: mem.Allocator = context.allocator,
+) -> f64 {
+	n_grid := pre.n_grid
+	heston_cdf := pre.heston_cdf
+	ST_min := pre.ST_min
+	dS := pre.dS
 
 	// 2. Apply Probability Weighting (The Psychology)
 	distorted_cdf := make([]f64, n_grid, allocator)
@@ -121,8 +159,7 @@ behavioral_heston_price :: proc(
 		for i in 0 ..< n_grid {dist_pdf[i] /= sum_pdf}
 	}
 
-	// 4. Reference Premium (Anchor for Value Function)
-	premium_ref := fin.heston_price(S, K, T, r, heston_params, opt_type, 200)
+	premium_ref := pre.premium_ref
 
 	// 5. Integrate CPT Value
 	expected_value := 0.0
@@ -171,6 +208,8 @@ BehavioralHeston_CalibrationContext :: struct {
 	n_grid:        int,
 	n_int:         int,
 	allocator:     mem.Allocator,
+	// Optional per-option cache (same order as market_data); see calibrate_behavioral_heston
+	precomputed:   []BehavioralHeston_Precomputed,
 }
 
 behavioral_heston_objective_fn :: proc(x: []f64, user_data: rawptr) -> f64 {
@@ -183,19 +222,32 @@ behavioral_heston_objective_fn :: proc(x: []f64, user_data: rawptr) -> f64 {
 	}
 
 	rmse := 0.0
-	for point in ctx.market_data {
-		model_price := behavioral_heston_price(
-			ctx.S,
-			point.strike,
-			point.expiry,
-			ctx.r,
-			ctx.heston_params,
-			prospect_params,
-			.Call,
-			ctx.n_grid,
-			ctx.n_int,
-			ctx.allocator,
-		)
+	for point, idx in ctx.market_data {
+		model_price: f64
+		if ctx.precomputed != nil && point.expiry > 0.0 {
+			model_price = behavioral_heston_price_precomputed(
+				&ctx.precomputed[idx],
+				point.strike,
+				point.expiry,
+				ctx.r,
+				prospect_params,
+				.Call,
+				ctx.allocator,
+			)
+		} else {
+			model_price = behavioral_heston_price(
+				ctx.S,
+				point.strike,
+				point.expiry,
+				ctx.r,
+				ctx.heston_params,
+				prospect_params,
+				.Call,
+				ctx.n_grid,
+				ctx.n_int,
+				ctx.allocator,
+			)
+		}
 
 		market_price := point.market_price
 		if market_price <= 0 {
@@ -237,6 +289,28 @@ calibrate_behavioral_heston :: proc(
 		n_grid        = 100,
 		n_int         = 200,
 		allocator     = allocator,
+	}
+
+	// The Heston CDF grid and reference premium do not depend on the prospect
+	// parameters being calibrated: compute them once per option.
+	ctx.precomputed = make([]BehavioralHeston_Precomputed, len(market_data), allocator)
+	for point, idx in market_data {
+		if point.expiry <= 0.0 {continue}
+		ctx.precomputed[idx] = behavioral_heston_precompute(
+			S,
+			point.strike,
+			point.expiry,
+			r,
+			heston_params,
+			.Call,
+			ctx.n_grid,
+			ctx.n_int,
+			allocator,
+		)
+	}
+	defer {
+		for pre in ctx.precomputed {delete(pre.heston_cdf, allocator)}
+		delete(ctx.precomputed, allocator)
 	}
 
 	opt_config := opt.OptimizerConfig {
