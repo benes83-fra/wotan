@@ -232,6 +232,17 @@ gpd_fit :: proc(
 	return res.x[0], res.x[1], res.converged
 }
 
+// Left-tail EVT VaR (as a return) at confidence p from a GPD fitted to the
+// N_u exceedances below threshold u out of n observations:
+//   VaR = u - (β/ξ) [((n/N_u)(1-p))^(-ξ) - 1],  ξ → 0: u + β ln((n/N_u)(1-p))
+_evt_tail_var :: proc(threshold, xi, beta: f64, n, n_exceedances: int, p: f64) -> f64 {
+	ratio := f64(n) / f64(n_exceedances) * (1.0 - p)
+	if math.abs(xi) > 1e-10 {
+		return threshold - (beta / xi) * (math.pow(ratio, -xi) - 1.0)
+	}
+	return threshold + beta * math.ln_f64(ratio)
+}
+
 // Fit EVT model using Peak-over-Threshold method
 evt_fit :: proc(
 	returns: []f64,
@@ -277,32 +288,19 @@ evt_fit :: proc(
 	p_95 := 0.95
 	p_99 := 0.99
 
-	var_95 := threshold
-	var_99 := threshold
-
-	if math.abs(xi) > 1e-10 {
-		// Heavy-tailed case (ξ ≠ 0)
-		scale_95 := math.pow(f64(n) / f64(n_exceedances) * (1.0 - p_95), -xi)
-		var_95 = threshold - (beta / xi) * (scale_95 - 1.0)
-
-		scale_99 := math.pow(f64(n) / f64(n_exceedances) * (1.0 - p_99), -xi)
-		var_99 = threshold - (beta / xi) * (scale_99 - 1.0)
-	} else {
-		// Exponential case (ξ → 0)
-		var_95 = threshold + beta * math.ln_f64(f64(n_exceedances) / f64(n) * (1.0 - p_95))
-		var_99 = threshold + beta * math.ln_f64(f64(n_exceedances) / f64(n) * (1.0 - p_99))
-	}
+	var_95 := _evt_tail_var(threshold, xi, beta, n, n_exceedances, p_95)
+	var_99 := _evt_tail_var(threshold, xi, beta, n, n_exceedances, p_99)
 
 	// Calculate CVaR (Expected Shortfall)
-	// CVaR_p = VaR_p / (1-ξ) + (β - ξ*u) / (1-ξ)
-	// For left tail, we need to adjust the formula
+	// In losses L = -r (threshold u_L = -u, VaR_L = -VaR):
+	//   ES_L = VaR_L / (1-ξ) + (β - ξ u_L) / (1-ξ)
+	// so for returns: CVaR = VaR / (1-ξ) - (β + ξ u) / (1-ξ)
 	cvar_95 := 0.0
 	cvar_99 := 0.0
 
 	if xi < 1.0 { 	// Finite mean condition
-		// Adjusted formula for left tail
-		cvar_95 = var_95 / (1.0 - xi) + (beta - xi * threshold) / (1.0 - xi)
-		cvar_99 = var_99 / (1.0 - xi) + (beta - xi * threshold) / (1.0 - xi)
+		cvar_95 = var_95 / (1.0 - xi) - (beta + xi * threshold) / (1.0 - xi)
+		cvar_99 = var_99 / (1.0 - xi) - (beta + xi * threshold) / (1.0 - xi)
 	} else {
 		// Infinite mean - use VaR as proxy with safety margin
 		cvar_95 = var_95 * 1.2
