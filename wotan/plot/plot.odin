@@ -5,6 +5,7 @@ import "core:fmt"
 import "core:math"
 import "core:mem"
 import "core:os"
+import "core:sync"
 
 LineStyle :: enum {
 	Solid,
@@ -200,38 +201,45 @@ draw_line_segment :: proc(img: ^Image, x0, y0, x1, y1: int, c: Color, style: Lin
 // 3. Pure Odin PNG Encoder (with built-in CRC32 and Adler32)
 // ============================================================================
 
-_crc32_table :: proc() -> [256]u32 {
-	table: [256]u32
+@(private = "file")
+_crc_table: [256]u32
+@(private = "file")
+_crc_once: sync.Once
+
+@(private = "file")
+_build_crc_table :: proc() {
 	for i in 0 ..< 256 {
 		crc := u32(i)
 		for _ in 0 ..< 8 {
-			if (crc & 1) != 0 {
-				crc = (crc >> 1) ~ 0xEDB88320
-			} else {
-				crc = crc >> 1
-			}
+			crc = (crc >> 1) ~ 0xEDB88320 if (crc & 1) != 0 else crc >> 1
 		}
-		table[i] = crc
+		_crc_table[i] = crc
 	}
-	return table
 }
 
-crc32_checksum :: proc(data: []u8) -> u32 {
-	table := _crc32_table()
-	crc := u32(0xFFFFFFFF)
-	for b in data {
-		idx := (crc ~ u32(b)) & 0xFF
-		crc = (crc >> 8) ~ table[idx]
-	}
-	return crc ~ 0xFFFFFFFF
+// Running CRC-32 (start with crc = 0, feed chunks in order)
+crc32_update :: proc(crc: u32, data: []u8) -> u32 {
+	sync.once_do(&_crc_once, _build_crc_table)
+	c := ~crc
+	for b in data {c = (c >> 8) ~ _crc_table[(c ~ u32(b)) & 0xFF]}
+	return ~c
 }
+
+crc32_checksum :: proc(data: []u8) -> u32 {return crc32_update(0, data)}
 
 _adler32_checksum :: proc(data: []u8) -> u32 {
 	a: u32 = 1
 	b: u32 = 0
-	for v in data {
-		a = (a + u32(v)) % 65521
-		b = (b + a) % 65521
+	for i := 0; i < len(data); {
+		// 5552 bytes keep the sums below 2^32 before the modulo (zlib's NMAX)
+		end := min(i + 5552, len(data))
+		for v in data[i:end] {
+			a += u32(v)
+			b += a
+		}
+		a %= 65521
+		b %= 65521
+		i = end
 	}
 	return (b << 16) | a
 }
@@ -243,110 +251,65 @@ png_write_chunk :: proc(f: ^os.File, chunk_type: string, data: []u8) {
 
 	type_bytes := transmute([]u8)chunk_type
 	_, _ = os.write(f, type_bytes)
-
 	if data_len > 0 {
 		_, _ = os.write(f, data)
 	}
 
-	crc_data := make([]u8, 4 + len(data))
-	copy(crc_data, type_bytes)
-	if data_len > 0 {
-		copy(crc_data[4:], data)
-	}
-
-	crc := crc32_checksum(crc_data)
+	crc := crc32_update(crc32_update(0, type_bytes), data)
 	b_crc := [4]u8{u8(crc >> 24), u8(crc >> 16), u8(crc >> 8), u8(crc)}
 	_, _ = os.write(f, b_crc[:])
-	delete(crc_data)
+}
+
+// Encode the image as PNG bytes: RGB when fully opaque (else RGBA), adaptive
+// per-row filters, DEFLATE-compressed IDAT. Result allocated with `allocator`.
+image_encode_png :: proc(img: ^Image, allocator := context.allocator) -> []u8 {
+	n_px := img.width * img.height
+	opaque := true
+	for i in 0 ..< n_px {
+		if img.pixels[i * 4 + 3] != 255 {opaque = false; break}
+	}
+	bpp := 3 if opaque else 4
+	src := img.pixels
+	if opaque {
+		rgb := make([]u8, n_px * 3, context.temp_allocator)
+		for i in 0 ..< n_px {
+			rgb[i * 3], rgb[i * 3 + 1], rgb[i * 3 + 2] = img.pixels[i * 4], img.pixels[i * 4 + 1], img.pixels[i * 4 + 2]
+		}
+		src = rgb
+	}
+	filtered := png_filter_rows(src, img.width, img.height, bpp, context.temp_allocator)
+	idat := zlib_compress(filtered, context.temp_allocator)
+	defer {
+		if opaque {delete(src, context.temp_allocator)}
+		delete(filtered, context.temp_allocator)
+		delete(idat, context.temp_allocator)
+	}
+
+	out := make([dynamic]u8, 0, len(idat) + 64, allocator)
+	chunk :: proc(out: ^[dynamic]u8, kind: string, data: []u8) {
+		n := u32(len(data))
+		append(out, u8(n >> 24), u8(n >> 16), u8(n >> 8), u8(n))
+		append(out, ..transmute([]u8)kind)
+		append(out, ..data)
+		crc := crc32_update(crc32_update(0, transmute([]u8)kind), data)
+		append(out, u8(crc >> 24), u8(crc >> 16), u8(crc >> 8), u8(crc))
+	}
+	append(&out, 137, 80, 78, 71, 13, 10, 26, 10)
+	ihdr := [13]u8 {
+		u8(img.width >> 24), u8(img.width >> 16), u8(img.width >> 8), u8(img.width),
+		u8(img.height >> 24), u8(img.height >> 16), u8(img.height >> 8), u8(img.height),
+		8, 2 if opaque else 6, 0, 0, 0, // 8-bit, RGB / RGBA, deflate, adaptive filters, no interlace
+	}
+	chunk(&out, "IHDR", ihdr[:])
+	chunk(&out, "IDAT", idat)
+	chunk(&out, "IEND", nil)
+	return out[:]
 }
 
 image_save_png :: proc(img: ^Image, path: string) -> bool {
-	f, err := os.create(path)
-	if err != nil {return false}
-	defer os.close(f)
-
-	sig := [8]u8{137, 80, 78, 71, 13, 10, 26, 10}
-	_, _ = os.write(f, sig[:])
-
-	ihdr := make([]u8, 13)
-	ihdr[0] = u8(img.width >> 24); ihdr[1] = u8(img.width >> 16)
-	ihdr[2] = u8(img.width >> 8); ihdr[3] = u8(img.width)
-	ihdr[4] = u8(img.height >> 24); ihdr[5] = u8(img.height >> 16)
-	ihdr[6] = u8(img.height >> 8); ihdr[7] = u8(img.height)
-	ihdr[8] = 8; ihdr[9] = 6; ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0
-	png_write_chunk(f, "IHDR", ihdr)
-	delete(ihdr)
-
-	// Prepare raw data with filter byte 0 at the start of each row
-	raw_len := img.width * img.height * 4 + img.height
-	raw := make([]u8, raw_len)
-	for y in 0 ..< img.height {
-		raw[y * (img.width * 4 + 1)] = 0
-		copy(
-			raw[y * (img.width * 4 + 1) + 1:],
-			img.pixels[y * img.width * 4:(y + 1) * img.width * 4],
-		)
-	}
-
-	// Compute Adler32 checksum of the raw data BEFORE wrapping it
-	adler := _adler32_checksum(raw)
-
-	// ✅ MASTERPIECE: Build a valid Zlib stream using Deflate "Stored" blocks!
-	// This bypasses the need for core:compress/flate entirely.
-	n_blocks := (raw_len + 65534) / 65535
-	idat_len := 2 + 4 + n_blocks * 5 + raw_len
-
-	idat := make([]u8, idat_len)
-	idat[0] = 0x78 // Zlib CMF (Deflate, 32K window)
-	idat[1] = 0x01 // Zlib FLG (Check bits)
-
-	offset := 2
-	remaining := raw_len
-	raw_offset := 0
-
-	for remaining > 0 {
-		block_len := remaining
-		if block_len > 65535 {block_len = 65535}
-
-		is_final := (remaining == block_len)
-		if is_final {
-			idat[offset] = 0x01 // BFINAL=1, BTYPE=00 (Stored)
-		} else {
-			idat[offset] = 0x00 // BFINAL=0, BTYPE=00 (Stored)
-		}
-		offset += 1
-
-		// LEN (little-endian)
-		idat[offset] = u8(block_len)
-		idat[offset + 1] = u8(block_len >> 8)
-		offset += 2
-
-		// NLEN (little-endian, one's complement)
-		nlen := ~u16(block_len) & 0xFFFF
-		idat[offset] = u8(nlen)
-		idat[offset + 1] = u8(nlen >> 8)
-		offset += 2
-
-		// Raw data
-		copy(idat[offset:], raw[raw_offset:raw_offset + block_len])
-		offset += block_len
-		raw_offset += block_len
-		remaining -= block_len
-	}
-
-	delete(raw) // Free the temporary raw buffer
-
-	// Adler32 checksum (big-endian)
-	idat[offset] = u8(adler >> 24)
-	idat[offset + 1] = u8(adler >> 16)
-	idat[offset + 2] = u8(adler >> 8)
-	idat[offset + 3] = u8(adler)
-
-	png_write_chunk(f, "IDAT", idat)
-	delete(idat)
-
-	png_write_chunk(f, "IEND", nil)
-	return true
+	png := image_encode_png(img, context.temp_allocator)
+	defer delete(png, context.temp_allocator)
+	return os.write_entire_file(path, png) == nil
 }
 
 
