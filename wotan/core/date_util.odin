@@ -84,13 +84,18 @@ parse_time :: proc(time_str: string) -> (Time, bool) {
 }
 
 parse_datetime :: proc(datetime_str: string) -> (Datetime, bool) {
-	parts := strings.split(datetime_str, " ")
-	defer delete(parts)
-	if len(parts) != 2 {
+	// "YYYY-MM-DD HH:MM:SS" or ISO 8601 "YYYY-MM-DDTHH:MM:SS"
+	sep := strings.index_byte(datetime_str, ' ')
+	if sep < 0 {sep = strings.index_byte(datetime_str, 'T')}
+	if sep < 0 {
 		return Datetime{}, false
 	}
+	parts := [2]string{datetime_str[:sep], datetime_str[sep + 1:]}
 	dparts := strings.split(parts[0], "-")
 	defer delete(dparts)
+	if len(dparts) != 3 {
+		return Datetime{}, false
+	}
 	year, ok1 := strconv.parse_int(dparts[0])
 	month, ok2 := strconv.parse_int(dparts[1])
 	day, ok3 := strconv.parse_int(dparts[2])
@@ -102,6 +107,9 @@ parse_datetime :: proc(datetime_str: string) -> (Datetime, bool) {
 	}
 	tparts := strings.split(parts[1], ":")
 	defer delete(tparts)
+	if len(tparts) != 3 {
+		return Datetime{}, false
+	}
 	hour, ok4 := strconv.parse_int(tparts[0])
 	minute, ok5 := strconv.parse_int(tparts[1])
 	second, ok6 := strconv.parse_int(tparts[2])

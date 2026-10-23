@@ -211,13 +211,11 @@ zip_read_file :: proc(path: string, filename: string, allocator: mem.Allocator) 
 
 	eocd_off, ok := find_eocd(data)
 	if !ok {
-		fmt.println("zip_read_file: EOCD not found")
 		return nil, false
 	}
 
 	cdh_off, ok2 := find_central_entry(data, eocd_off, filename)
 	if !ok2 {
-		fmt.println("zip_read_file: central entry not found for", filename)
 		return nil, false
 	}
 

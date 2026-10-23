@@ -10,6 +10,9 @@ ZipEntry :: struct {
 	data: []u8,
 }
 
+// DOS date 1980-01-01 (day 0 / month 0 is not a valid date for some readers)
+DOS_DATE_1980 :: (0 << 9) | (1 << 5) | 1
+
 zip_write :: proc(path: string, entries: []ZipEntry, allocator: mem.Allocator) -> bool {
 	// Build ZIP in memory
 	backing := make([]u8, 0, allocator)
@@ -44,7 +47,7 @@ zip_write :: proc(path: string, entries: []ZipEntry, allocator: mem.Allocator) -
 		write_u16_le(&buf, 0) // flags
 		write_u16_le(&buf, 0) // compression = stored
 		write_u16_le(&buf, 0) // mod time
-		write_u16_le(&buf, 0) // mod date
+		write_u16_le(&buf, DOS_DATE_1980) // mod date
 
 		crc := hash.crc32(data_bytes)
 		write_u32_le(&buf, crc)
@@ -74,7 +77,7 @@ zip_write :: proc(path: string, entries: []ZipEntry, allocator: mem.Allocator) -
 		write_u16_le(&buf, 0) // flags
 		write_u16_le(&buf, 0) // compression
 		write_u16_le(&buf, 0) // mod time
-		write_u16_le(&buf, 0) // mod date
+		write_u16_le(&buf, DOS_DATE_1980) // mod date
 		write_u32_le(&buf, crc)
 		write_u32_le(&buf, u32(len(data_bytes)))
 		write_u32_le(&buf, u32(len(data_bytes)))

@@ -20,100 +20,73 @@ is_float :: proc(s: string) -> bool {
 }
 
 is_bool :: proc(s: string) -> bool {
-	return s == "true" || s == "false"
+	return strings.equal_fold(s, "true") || strings.equal_fold(s, "false")
 }
 
+// Date / time checks use the same validating parsers as the loaders, so an
+// inferred type can always be parsed (e.g. "2024-13-45" stays a string)
 is_date :: proc(s: string) -> bool {
-	parts := strings.split(s, "-")
-	defer delete(parts)
-	if len(parts) != 3 {
-		return false
-	}
-	_, err1 := strconv.parse_int(parts[0])
-	_, err2 := strconv.parse_int(parts[1])
-	_, err3 := strconv.parse_int(parts[2])
-
-
-	return err1 && err2 && err3
+	_, ok := w.parse_date(s)
+	return ok
 }
-
 
 is_time :: proc(s: string) -> bool {
-	parts := strings.split(s, ":")
-	defer delete(parts)
-	if len(parts) != 3 {
-		return false
-	}
-	_, err1 := strconv.parse_int(parts[0])
-	_, err2 := strconv.parse_int(parts[1])
-	_, err3 := strconv.parse_int(parts[2])
-
-
-	return err1 && err2 && err3
+	_, ok := w.parse_time(s)
+	return ok
 }
+
+// "YYYY-MM-DD HH:MM:SS" or ISO 8601 "YYYY-MM-DDTHH:MM:SS"
 is_datetime :: proc(s: string) -> bool {
-	parts := strings.split(s, " ")
-	defer delete(parts)
-	if len(parts) != 2 {
-		return false
-	}
-	date := is_date(parts[0])
-	time := is_time(parts[1])
-	return date && time
-
+	_, ok := w.parse_datetime(s)
+	return ok
 }
 
+// Most specific type that every (non-null) sample parses as. Ints and floats
+// combine to Float; any other mix of kinds (e.g. numbers and booleans, dates
+// and datetimes) falls back to String, so the inferred type always parses.
 infer_column_type :: proc(samples: []string) -> w.ColumnType {
-	has_string := false
-	has_float := false
-	has_int := false
-	has_bool := false
-	has_date := false
-	has_time := false
-	has_datetime := false
+	has_float, has_int, has_bool, has_date, has_time, has_datetime, has_string := false, false, false, false, false, false, false
 
-	for s in samples {
-		if s == "" {
+	for raw in samples {
+		s := strings.trim(raw, " 	")
+		if s == "" || is_null(s) {
 			continue
 		}
-		if is_null(s) {
-			continue
-		}
-		if is_int(s) {
+		switch {
+		case is_int(s):
 			has_int = true
-			continue
-		}
-		if is_float(s) {
+		case is_float(s):
 			has_float = true
-			continue
-		}
-		if is_bool(s) {
+		case is_bool(s):
 			has_bool = true
-			continue
-		}
-		if is_datetime(s) {
+		case is_datetime(s):
 			has_datetime = true
-			continue
-		}
-		if is_date(s) {
+		case is_date(s):
 			has_date = true
-			continue
-
-		}
-		if is_time(s) {
+		case is_time(s):
 			has_time = true
-			continue
+		case:
+			has_string = true
 		}
-		has_string = true
 	}
 
-	if has_string {return .String}
-	if has_float {return .Float}
-	if has_int {return .Int}
-	if has_bool {return .Bool}
-	if has_datetime {return .Datetime}
-	if has_date {return .Date}
-	if has_time {return .Time}
-
+	numeric := has_int || has_float
+	kinds := int(numeric) + int(has_bool) + int(has_datetime) + int(has_date) + int(has_time) + int(has_string)
+	switch {
+	case kinds != 1:
+		return .String
+	case has_float:
+		return .Float
+	case has_int:
+		return .Int
+	case has_bool:
+		return .Bool
+	case has_datetime:
+		return .Datetime
+	case has_date:
+		return .Date
+	case has_time:
+		return .Time
+	}
 	return .String
 }

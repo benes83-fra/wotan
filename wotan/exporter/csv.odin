@@ -1,11 +1,13 @@
 package exporter
 
 import w "../core"
-
-import "core:fmt"
 import "core:mem"
 import "core:strings"
 
+// DataFrame → CSV. Round-trips through importer.csv_load: null cells are
+// written as empty unquoted fields, strings that would otherwise read back
+// differently (empty, padded, null tokens, separators, quotes, newlines) are
+// quoted, floats keep their exact value and type, dates use ISO format.
 csv_save :: proc(
 	df: ^w.DataFrame,
 	path: string,
@@ -31,12 +33,14 @@ csv_save :: proc(
 	for r in 0 ..< rows {
 		for c in 0 ..< cols {
 			col := &df.columns[c]
-
-			if !w.is_null(col, r) {
-				v := w.value_as_string(col, r, allocator)
-				write_csv_field(&b, v, sep)
+			text, is_null := cell_text(col, r, allocator)
+			if !is_null {
+				if col.type == .String {
+					write_csv_field(&b, text, sep)
+				} else {
+					strings.write_string(&b, text)
+				}
 			}
-
 			if c < cols - 1 {
 				strings.write_byte(&b, sep)
 			}
@@ -44,30 +48,18 @@ csv_save :: proc(
 		strings.write_byte(&b, '\n')
 	}
 
-	csv_text := strings.to_string(b)
-	return write_file(path, csv_text)
+	return write_file(path, strings.to_string(b))
 }
 
 
 write_csv_field :: proc(b: ^strings.Builder, s: string, sep: u8) {
-	needs_quote := false
-
-	for i in 0 ..< len(s) {
-		ch := s[i]
-		if ch == sep || ch == '"' || ch == '\n' || ch == '\r' {
-			needs_quote = true
-			break
-		}
-	}
-
-	if !needs_quote {
+	if !csv_field_needs_quotes(s, sep) {
 		strings.write_string(b, s)
 		return
 	}
 
-	// quoted field
+	// quoted field, embedded quotes doubled
 	strings.write_byte(b, '"')
-
 	for i in 0 ..< len(s) {
 		ch := s[i]
 		if ch == '"' {
@@ -76,6 +68,5 @@ write_csv_field :: proc(b: ^strings.Builder, s: string, sep: u8) {
 			strings.write_byte(b, ch)
 		}
 	}
-
 	strings.write_byte(b, '"')
 }

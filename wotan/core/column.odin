@@ -903,48 +903,53 @@ value_as_string :: proc(col: ^Column, row: int, allocator: mem.Allocator) -> str
 	if row < 0 || row >= col.len {
 		panic("value_as_string: index out of range")
 	}
-
-	// Adjust the cases to your actual ColumnType enum names.
-	#partial switch col.type {
-	case .Int:
-		v, is_null := column_at_int(col, row)
-		if is_null {
-			return ""
-		}
-		return fmt.aprintf("%v", v, allocator = allocator)
-
-	case .Float:
-		v, is_null := column_at_float(col, row)
-		if is_null {
-			return ""
-		}
-		return fmt.aprintf("%v", v, allocator = allocator)
-
-	case .Bool:
-		v, is_null := column_at_bool(col, row)
-		if is_null {
-			return ""
-		}
-		if v {
-			return "1"
-		}
-		return "0"
-
-	case .String:
-		v, is_null := column_at_string(col, row)
-		if is_null {
-			return ""
-		}
-		return v
-
-	case .Datetime:
-		v, is_null := column_at_datetime(col, row)
-		if is_null {
-			return ""
-		}
-		return fmt.aprintf("%v", v, allocator = allocator)
+	if is_null(col, row) {
+		return ""
 	}
 
-	// Fallback for unsupported types (Date, Time, etc. if you want to add them later)
-	panic("value_as_string: unsupported column type")
+	// Canonical text form, readable back by the importers without loss:
+	// shortest exact floats (always with '.'/exponent so they stay Float),
+	// true/false, ISO dates "YYYY-MM-DD", times "HH:MM:SS",
+	// datetimes "YYYY-MM-DD HH:MM:SS"
+	switch col.type {
+	case .Int:
+		v, _ := column_at_int(col, row)
+		return fmt.aprintf("%d", v, allocator = allocator)
+	case .Float:
+		v, _ := column_at_float(col, row)
+		return float_to_string(v, allocator)
+	case .Bool:
+		v, _ := column_at_bool(col, row)
+		return "true" if v else "false"
+	case .String:
+		v, _ := column_at_string(col, row)
+		return v
+	case .Date:
+		v, _ := column_at_date(col, row)
+		return date_to_string(v, allocator)
+	case .Time:
+		v, _ := column_at_time(col, row)
+		return time_to_string(v, allocator)
+	case .Datetime:
+		v, _ := column_at_datetime(col, row)
+		return datetime_to_string(v, allocator)
+	case .Invalid:
+	}
+	return ""
+}
+
+// Shortest decimal text that parses back to exactly `v`; integral values keep
+// a ".0" so that a re-imported column is still inferred as Float.
+// Non-finite values: "NaN", "Inf", "-Inf".
+float_to_string :: proc(v: f64, allocator: mem.Allocator) -> string {
+	if v != v {return "NaN"}
+	if v > max(f64) {return "Inf"}
+	if v < -max(f64) {return "-Inf"}
+	s := fmt.aprintf("%v", v, allocator = allocator)
+	for i in 0 ..< len(s) {
+		if s[i] == '.' || s[i] == 'e' || s[i] == 'E' {return s}
+	}
+	out := fmt.aprintf("%s.0", s, allocator = allocator)
+	delete(s, allocator)
+	return out
 }

@@ -4,20 +4,52 @@ import w "../core"
 import zm "../zip_min"
 
 import "core:fmt"
+import "core:math"
 import "core:mem"
 import "core:strconv"
 import "core:strings"
 
+// .xlsx → DataFrame. The first row is the header. Each cell keeps the kind
+// Excel stored: numbers become Int / Float, booleans Bool, numbers with a date
+// / time number format Date, Datetime or Time. A column with a text cell is a
+// String column, except that "numbers stored as text" in canonical form
+// ("88.5", "-3") count as numbers; codes like "007" keep the column text. Error cells and missing
+// cells are null. Sheet, shared-string and style parts are located through the
+// workbook relationships (absolute or relative targets).
 
 SheetInfo :: struct {
 	name: string,
 	rid:  string,
-	path: string, // resolved "xl/worksheets/....xml"
+	path: string, // resolved zip path, e.g. "xl/worksheets/sheet1.xml"
 }
 
 RelInfo :: struct {
 	id:     string,
 	target: string,
+	type:   string,
+}
+
+Xlsx_Cell_Kind :: enum {
+	Empty,
+	Text,
+	Number,
+	Bool,
+	Date,
+	Datetime,
+	Time,
+	Error,
+}
+
+Xlsx_Cell :: struct {
+	kind: Xlsx_Cell_Kind,
+	text: string,
+}
+
+Xlsx_Date_Kind :: enum {
+	None,
+	Date,
+	Datetime,
+	Time,
 }
 
 
@@ -25,232 +57,495 @@ RelInfo :: struct {
 // Public API
 // ------------------------------------------------------------
 
+// First sheet of the workbook
 xlsx_load :: proc(path: string, allocator: mem.Allocator) -> w.DataFrame {
-	df := w.dataframe_new()
-
-	fmt.println(path)
-	sheets := discover_sheets(path, allocator)
+	sheets := discover_sheets(path, context.temp_allocator)
 	if len(sheets) == 0 {
-		fmt.println("No sheets found.")
-		return df
+		return w.dataframe_new(allocator)
 	}
-	first_sheet := sheets[0]
+	return _xlsx_load_sheet(path, sheets[0], allocator)
+}
 
-	// 1) sharedStrings (optional)
-	shared_bytes, ok_shared := zm.zip_read_file(path, "xl/sharedStrings.xml", allocator)
-	// defer if ok_shared {delete(shared_bytes)}
+// Sheet by name; ok = false if the workbook has no such sheet
+xlsx_load_sheet :: proc(path: string, sheet_name: string, allocator: mem.Allocator) -> (w.DataFrame, bool) {
+	for s in discover_sheets(path, context.temp_allocator) {
+		if s.name == sheet_name {
+			return _xlsx_load_sheet(path, s, allocator), true
+		}
+	}
+	return w.dataframe_new(allocator), false
+}
+
+// Names of the worksheets, in workbook order
+xlsx_sheet_names :: proc(path: string, allocator: mem.Allocator) -> []string {
+	sheets := discover_sheets(path, context.temp_allocator)
+	names := make([]string, len(sheets), allocator)
+	for s, i in sheets {names[i] = strings.clone(s.name, allocator)}
+	return names
+}
+
+@(private = "file")
+_xlsx_load_sheet :: proc(path: string, sheet: SheetInfo, allocator: mem.Allocator) -> w.DataFrame {
+	df := w.dataframe_new(allocator)
+	scratch := context.temp_allocator
+
+	rels := _workbook_rels(path)
+	shared_path := _rel_target_of_type(rels, "/sharedStrings", "xl/sharedStrings.xml")
+	styles_path := _rel_target_of_type(rels, "/styles", "xl/styles.xml")
 
 	shared := []string{}
-	if ok_shared {
-		shared = parse_shared_strings(string(shared_bytes), allocator)
+	if shared_bytes, ok := zm.zip_read_file(path, shared_path, scratch); ok {
+		shared = parse_shared_strings(string(shared_bytes), scratch)
 	}
-
-	// 2) load first worksheet by resolved path
-	sheet_bytes, ok_sheet := zm.zip_read_file(path, first_sheet.path, allocator)
+	date_kinds := []Xlsx_Date_Kind{}
+	if styles_bytes, ok := zm.zip_read_file(path, styles_path, scratch); ok {
+		date_kinds = parse_styles_date_kinds(string(styles_bytes), scratch)
+	}
+	sheet_bytes, ok_sheet := zm.zip_read_file(path, sheet.path, scratch)
 	if !ok_sheet {
 		return df
 	}
 
-	styles_bytes, ok_styles := zm.zip_read_file(path, "xl/styles.xml", allocator)
-	styles_is_date := []bool{}
-	if ok_styles {
-		styles_is_date = parse_styles_date_formats(string(styles_bytes), allocator)
-	}
-	rows := parse_sheet_to_grid(string(sheet_bytes), shared, styles_is_date, allocator)
-
+	rows := parse_sheet_cells(string(sheet_bytes), shared, date_kinds, scratch)
 	if len(rows) == 0 {
 		return df
 	}
 
-
+	n_cols := 0
+	for r in rows {n_cols = max(n_cols, len(r))}
 	header := rows[0]
 	row_count := len(rows) - 1
+	cell :: proc(row: []Xlsx_Cell, c: int) -> Xlsx_Cell {return row[c] if c < len(row) else Xlsx_Cell{}}
 
-	inferred := infer_column_types_excel(rows)
+	for c in 0 ..< n_cols {
+		h := cell(header, c)
+		name := h.text if h.kind != .Empty && h.kind != .Error && strings.trim_space(h.text) != "" else fmt.tprintf("col_%d", c)
 
-	for name, i in header {
-		safe_name := name
-
-		// Optional: avoid empty names
-		if strings.trim_space(safe_name) == "" {
-			safe_name = fmt.aprintf("col_%d", i, allocator = allocator) // allocates a fresh string
-
-		} else {
-			// Force a copy so we don't keep a pointer into the XML buffer arena
-			safe_name = fmt.aprintf("%s", safe_name, allocator = allocator)
+		// column type from the stored cell kinds
+		any_text := false
+		samples := make([dynamic]string, 0, row_count, scratch)
+		for r in 1 ..< len(rows) {
+			v := cell(rows[r], c)
+			#partial switch v.kind {
+			case .Text:
+				if _canonical_number(v.text) {
+					append(&samples, v.text)
+				} else {
+					any_text = true
+				}
+			case .Number, .Bool, .Date, .Datetime, .Time:
+				append(&samples, v.text)
+			}
 		}
+		type := w.ColumnType.String if any_text else infer_column_type(samples[:])
 
-		col := w.column_new(safe_name, inferred[i], row_count)
+		col := w.column_new(strings.clone(name, allocator), type, row_count, allocator)
+		for r in 1 ..< len(rows) {
+			v := cell(rows[r], c)
+			if v.kind == .Empty || v.kind == .Error {
+				w.append_null(&col)
+				continue
+			}
+			if type == .String || (v.kind == .Text && !_canonical_number(v.text)) {
+				w.append_string(&col, v.text)
+				continue
+			}
+			s := v.text
+			ok := true
+			#partial switch type {
+			case .Int:
+				x: int
+				x, ok = strconv.parse_int(s)
+				if ok {w.append_int(&col, x)}
+			case .Float:
+				x: f64
+				x, ok = strconv.parse_f64(s)
+				if ok {w.append_float(&col, x)}
+			case .Bool:
+				w.append_bool(&col, s == "true")
+			case .Date:
+				d: w.Date
+				d, ok = w.parse_date(s)
+				if ok {w.append_date(&col, d)}
+			case .Datetime:
+				dt: w.Datetime
+				dt, ok = w.parse_datetime(s)
+				if ok {w.append_datetime(&col, dt)}
+			case .Time:
+				t: w.Time
+				t, ok = w.parse_time(s)
+				if ok {w.append_time(&col, t)}
+			}
+			if !ok {w.append_null(&col)} 	// unreachable: types are inferred from these values
+		}
 		w.add_column(&df, col)
 	}
-
-	for r_i in 1 ..< len(rows) {
-		row := rows[r_i]
-
-		// iterate over all columns defined by the header
-		for c_i in 0 ..< len(header) {
-			val := ""
-			if c_i < len(row) {
-				val = row[c_i]
-			}
-			append_value_excel(&df.columns[c_i], val)
-		}
-	}
-
 
 	df.rows = row_count
 	return df
 }
 
 
+// Text that is a plain decimal number as a number cell would print it: no
+// padding, no '+', no leading zeros ("007", "01234" are codes, not numbers)
+@(private = "file")
+_canonical_number :: proc(s: string) -> bool {
+	if len(s) == 0 || s[0] == '+' || s != strings.trim_space(s) {return false}
+	_, ok := strconv.parse_f64(s)
+	if !ok {return false}
+	t := s[1:] if s[0] == '-' else s
+	if len(t) > 1 && t[0] == '0' && t[1] >= '0' && t[1] <= '9' {return false}
+	for i in 0 ..< len(t) { 	// digits, one '.', exponent only (no inf / nan words)
+		ch := t[i]
+		if !((ch >= '0' && ch <= '9') || ch == '.' || ch == 'e' || ch == 'E' || ch == '-' || ch == '+') {return false}
+	}
+	return true
+}
+
 // ------------------------------------------------------------
-// Shared strings
+// Workbook structure
 // ------------------------------------------------------------
+
+@(private = "file")
+_workbook_rels :: proc(path: string) -> []RelInfo {
+	rel_bytes, ok := zm.zip_read_file(path, "xl/_rels/workbook.xml.rels", context.temp_allocator)
+	if !ok {
+		rel_bytes, ok = zm.zip_read_file(path, "xl/rels/workbook.xml.rels", context.temp_allocator)
+	}
+	if !ok {return {}}
+	return parse_rels(string(rel_bytes), context.temp_allocator)
+}
+
+// Zip path of a relationship target relative to xl/ ("/xl/..." is absolute)
+@(private = "file")
+_resolve_target :: proc(target: string, allocator: mem.Allocator) -> string {
+	t := target
+	if strings.has_prefix(t, "/") {return strings.clone(t[1:], allocator)}
+	for strings.has_prefix(t, "./") {t = t[2:]}
+	return fmt.aprintf("xl/%s", t, allocator = allocator)
+}
+
+@(private = "file")
+_rel_target_of_type :: proc(rels: []RelInfo, type_suffix: string, fallback: string) -> string {
+	for r in rels {
+		if strings.has_suffix(r.type, type_suffix) {
+			return _resolve_target(r.target, context.temp_allocator)
+		}
+	}
+	return fallback
+}
+
+discover_sheets :: proc(path: string, allocator: mem.Allocator) -> []SheetInfo {
+	sheets := make([dynamic]SheetInfo, 0, allocator)
+	wb_bytes, ok_wb := zm.zip_read_file(path, "xl/workbook.xml", context.temp_allocator)
+	if !ok_wb {
+		return sheets[:]
+	}
+	rels := _workbook_rels(path)
+	if len(rels) == 0 {
+		return sheets[:]
+	}
+
+	for &s in parse_workbook_sheets(string(wb_bytes), context.temp_allocator) {
+		for r in rels {
+			if s.rid != r.id {continue}
+			if strings.has_suffix(r.type, "/worksheet") || strings.contains(r.target, "worksheets/") {
+				append(&sheets, SheetInfo{name = strings.clone(s.name, allocator), rid = strings.clone(s.rid, allocator), path = _resolve_target(r.target, allocator)})
+			}
+			break
+		}
+	}
+	return sheets[:]
+}
+
+
+// ------------------------------------------------------------
+// Shared strings / rich text
+// ------------------------------------------------------------
+
+// Concatenated text of all <t> runs in a fragment (rich text), phonetic
+// <rPh> runs excluded, entities decoded
+@(private = "file")
+_rich_text :: proc(xml: string, allocator: mem.Allocator) -> string {
+	b := strings.builder_make(0, 32, context.temp_allocator)
+	pos := 0
+	for {
+		i := find_exact_tag_start(xml, pos, "<t")
+		if i < 0 {break}
+		if ph := strings.index(xml[pos:i], "<rPh"); ph >= 0 { 	// skip phonetic run
+			close := strings.index(xml[pos + ph:], "</rPh>")
+			if close < 0 {break}
+			pos = pos + ph + close + len("</rPh>")
+			continue
+		}
+		gt := strings.index_byte(xml[i:], '>')
+		if gt < 0 {break}
+		gt += i
+		if xml[gt - 1] == '/' { 	// <t/>
+			pos = gt + 1
+			continue
+		}
+		end := strings.index(xml[gt + 1:], "</t>")
+		if end < 0 {break}
+		strings.write_string(&b, xml[gt + 1:gt + 1 + end])
+		pos = gt + 1 + end + len("</t>")
+	}
+	return strings.clone(decode_entities(strings.to_string(b)), allocator)
+}
 
 parse_shared_strings :: proc(xml: string, allocator: mem.Allocator) -> []string {
 	out := make([dynamic]string, 0, allocator)
-
 	start := 0
 	for {
-		i := strings.index(xml[start:], "<si")
-		if i < 0 {
-			break
-		}
-		i += start
-
+		i := find_exact_tag_start(xml, start, "<si")
+		if i < 0 {break}
 		j := strings.index(xml[i:], "</si>")
-		if j < 0 {
-			break
-		}
+		if j < 0 {break}
 		j += i + len("</si>")
-
-		si := xml[i:j]
-
-		// find <t>...</t> inside <si>
-		t_start := strings.index(si, "<t")
-		if t_start >= 0 {
-			gt := strings.index(si[t_start:], ">")
-			if gt >= 0 {
-				gt += t_start + 1
-				t_end := strings.index(si[gt:], "</t>")
-				if t_end >= 0 {
-					t_end += gt
-					text := si[gt:t_end]
-					// minimal entity decoding
-					text, _ = strings.replace_all(text, "&amp;", "&")
-					text, _ = strings.replace_all(text, "&lt;", "<")
-					text, _ = strings.replace_all(text, "&gt;", ">")
-					text, _ = strings.replace_all(text, "&quot;", "\"")
-					text, _ = strings.replace_all(text, "&apos;", "'")
-					append(&out, text)
-				}
-			}
-		}
-
+		append(&out, _rich_text(xml[i:j], allocator))
 		start = j
 	}
-
 	return out[:]
 }
+
+
+// ------------------------------------------------------------
+// Styles: which cell formats are dates / times
+// ------------------------------------------------------------
+
+// Date kind of every <cellXfs> entry (the index used by a cell's s="...")
+parse_styles_date_kinds :: proc(xml: string, allocator: mem.Allocator) -> []Xlsx_Date_Kind {
+	kinds := make([dynamic]Xlsx_Date_Kind, 0, allocator)
+
+	custom := make(map[int]string, allocator = context.temp_allocator)
+	start := 0
+	for {
+		tag, next := extract_xml_tag(xml, start, "numFmt")
+		if next < 0 {break}
+		start = next
+		attrs := parse_attrs(tag, context.temp_allocator)
+		if id, ok := strconv.parse_int(attrs["numFmtId"]); ok {
+			custom[id] = decode_entities(attrs["formatCode"])
+		}
+	}
+
+	// only <cellXfs> (cellStyleXfs, which usually comes first, has other indices)
+	sec_start := find_exact_tag_start(xml, 0, "<cellXfs")
+	if sec_start < 0 {return kinds[:]}
+	sec_end := strings.index(xml[sec_start:], "</cellXfs>")
+	section := xml[sec_start:] if sec_end < 0 else xml[sec_start:sec_start + sec_end]
+
+	start = len("<cellXfs")
+	for {
+		tag, next := extract_xml_tag(section, start, "xf")
+		if next < 0 {break}
+		start = next
+		attrs := parse_attrs(tag, context.temp_allocator)
+		kind := Xlsx_Date_Kind.None
+		if id, ok := strconv.parse_int(attrs["numFmtId"]); ok {
+			if code, has := custom[id]; has {
+				kind = classify_number_format(code)
+			} else {
+				kind = _builtin_date_kind(id)
+			}
+		}
+		append(&kinds, kind)
+	}
+	return kinds[:]
+}
+
+@(private = "file")
+_builtin_date_kind :: proc(id: int) -> Xlsx_Date_Kind {
+	switch id {
+	case 14 ..= 17, 27 ..= 36, 50 ..= 58:
+		return .Date
+	case 22:
+		return .Datetime
+	case 18 ..= 21, 45 ..= 47:
+		return .Time
+	}
+	return .None
+}
+
+// Date / time kind of a custom number format code. Quoted literals, escaped
+// characters and [...] sections (colours, locales) are ignored, so a format
+// like `#,##0 "USD"` is not mistaken for a time.
+classify_number_format :: proc(code: string) -> Xlsx_Date_Kind {
+	has_date, has_time, has_m := false, false, false
+	i := 0
+	for i < len(code) {
+		ch := code[i]
+		switch ch {
+		case '"':
+			j := strings.index_byte(code[i + 1:], '"')
+			i = len(code) if j < 0 else i + j + 2
+			continue
+		case '\\', '_', '*':
+			i += 2
+			continue
+		case '[':
+			j := strings.index_byte(code[i:], ']')
+			inner := strings.to_lower(code[i + 1:i + j] if j > 0 else "", context.temp_allocator)
+			if inner == "h" || inner == "hh" || inner == "m" || inner == "mm" || inner == "s" || inner == "ss" {
+				has_time = true // elapsed time
+			}
+			i = len(code) if j < 0 else i + j + 1
+			continue
+		case 'y', 'Y', 'd', 'D':
+			has_date = true
+		case 'h', 'H', 's', 'S':
+			has_time = true
+		case 'm', 'M':
+			has_m = true
+		}
+		i += 1
+	}
+	switch {
+	case has_date && has_time:
+		return .Datetime
+	case has_date || (has_m && !has_time):
+		return .Date
+	case has_time:
+		return .Time
+	}
+	return .None
+}
+
+// Kept for compatibility: true for date or time formats
+looks_like_date_format :: proc(code: string) -> bool {
+	return classify_number_format(code) != .None
+}
+
 
 // ------------------------------------------------------------
 // Sheet parsing
 // ------------------------------------------------------------
 
-parse_sheet_to_grid :: proc(
+parse_sheet_cells :: proc(
 	xml: string,
 	shared: []string,
-	styles_is_date: []bool,
+	date_kinds: []Xlsx_Date_Kind,
 	allocator: mem.Allocator,
-) -> [][]string {
-	rows_dyn := make([dynamic][]string, 0, allocator)
-
+) -> [][]Xlsx_Cell {
+	rows := make([dynamic][]Xlsx_Cell, 0, allocator)
 	start := 0
 	for {
-		i := strings.index(xml[start:], "<row")
-		if i < 0 {
-			break
+		i := find_exact_tag_start(xml, start, "<row")
+		if i < 0 {break}
+		gt := strings.index_byte(xml[i:], '>')
+		if gt < 0 {break}
+		gt += i
+		if xml[gt - 1] == '/' { 	// <row .../> : empty row
+			start = gt + 1
+			continue
 		}
-		i += start
-
-		j := strings.index(xml[i:], "</row>")
-		if j < 0 {
-			break
-		}
-		j += i + len("</row>")
-
-		row_xml := xml[i:j]
-		row := parse_row(row_xml, shared, styles_is_date, allocator)
-
-		append(&rows_dyn, row)
-
-		start = j
+		j := strings.index(xml[gt:], "</row>")
+		if j < 0 {break}
+		j += gt
+		append(&rows, parse_row_cells(xml[gt + 1:j], shared, date_kinds, allocator))
+		start = j + len("</row>")
 	}
-
-	return rows_dyn[:]
+	return rows[:]
 }
 
-parse_row :: proc(
+// Value of attribute `name` in a start tag (double or single quotes)
+@(private = "file")
+_attr :: proc(tag: string, name: string) -> string {
+	pos := 0
+	for {
+		k := strings.index(tag[pos:], name)
+		if k < 0 {return ""}
+		k += pos
+		after := k + len(name)
+		before_ok := k > 0 && (tag[k - 1] == ' ' || tag[k - 1] == '\t' || tag[k - 1] == '\n' || tag[k - 1] == '\r')
+		if before_ok && after + 1 < len(tag) && tag[after] == '=' && (tag[after + 1] == '"' || tag[after + 1] == '\'') {
+			q := tag[after + 1]
+			end := strings.index_byte(tag[after + 2:], q)
+			if end < 0 {return ""}
+			return tag[after + 2:after + 2 + end]
+		}
+		pos = after
+	}
+}
+
+parse_row_cells :: proc(
 	row_xml: string,
 	shared: []string,
-	styles_is_date: []bool,
+	date_kinds: []Xlsx_Date_Kind,
 	allocator: mem.Allocator,
-) -> []string {
-	row := make([dynamic]string, 0, allocator)
-
+) -> []Xlsx_Cell {
+	row := make([dynamic]Xlsx_Cell, 0, allocator)
+	next_col := 0
 	start := 0
 	for {
-		i := strings.index(row_xml[start:], "<c")
-		if i < 0 {
-			break
-		}
-		i += start
-
-		// find end of the <c ...> tag
-		tag_end := strings.index(row_xml[i:], ">")
-		if tag_end < 0 {
-			break
-		}
-		tag_end += i + 1
-
-		// check if self-closing: .../>
-		self_closing := tag_end >= 2 && row_xml[tag_end - 2] == '/'
-
-		cell_end := tag_end
+		i := find_exact_tag_start(row_xml, start, "<c")
+		if i < 0 {break}
+		gt := strings.index_byte(row_xml[i:], '>')
+		if gt < 0 {break}
+		gt += i
+		tag := row_xml[i:gt + 1]
+		self_closing := row_xml[gt - 1] == '/'
+		content := ""
+		cell_end := gt + 1
 		if !self_closing {
-			// normal cell: find </c>
-			j := strings.index(row_xml[tag_end:], "</c>")
-			if j < 0 {
+			j := strings.index(row_xml[gt + 1:], "</c>")
+			if j < 0 {break}
+			content = row_xml[gt + 1:gt + 1 + j]
+			cell_end = gt + 1 + j + len("</c>")
+		}
+		start = cell_end
+
+		col := next_col
+		if ref := _attr(tag, "r"); ref != "" {col = cell_ref_to_col(fmt.tprintf(` r="%s"`, ref))}
+		next_col = col + 1
+
+		c := Xlsx_Cell{}
+		t := _attr(tag, "t")
+		v := ""
+		if vs := strings.index(content, "<v>"); vs >= 0 {
+			ve := strings.index(content[vs + 3:], "</v>")
+			if ve >= 0 {v = content[vs + 3:vs + 3 + ve]}
+		}
+		switch t {
+		case "s":
+			if idx, ok := strconv.parse_int(v); ok && idx >= 0 && idx < len(shared) {
+				c = {.Text, shared[idx]}
+			}
+		case "inlineStr":
+			c = {.Text, _rich_text(content, allocator)}
+		case "str":
+			c = {.Text, strings.clone(decode_entities(v), allocator)}
+		case "b":
+			if v != "" {c = {.Bool, "true" if strings.trim_space(v) == "1" else "false"}}
+		case "e":
+			c = {.Error, v}
+		case:
+			if v == "" {break}
+			kind := Xlsx_Date_Kind.None
+			if sidx, ok := strconv.parse_int(_attr(tag, "s")); ok && sidx >= 0 && sidx < len(date_kinds) {
+				kind = date_kinds[sidx]
+			}
+			serial, is_num := strconv.parse_f64(v)
+			if kind == .None || !is_num {
+				c = {.Number, v}
 				break
 			}
-			cell_end = tag_end + j + len("</c>")
-		}
-
-		cell_xml := row_xml[i:cell_end]
-
-		col_idx := cell_ref_to_col(cell_xml)
-
-		val := ""
-		if !self_closing {
-			raw, is_dt := cell_value_raw(cell_xml, shared, styles_is_date)
-			if is_dt {
-				val = cell_value_datetime(raw, allocator)
-			} else {
-				val = raw
+			dt := excel_serial_to_datetime(serial)
+			switch kind {
+			case .Date:
+				c = {.Date, fmt.aprintf("%04d-%02d-%02d", dt.year, dt.month, dt.day, allocator = allocator)}
+			case .Time:
+				c = {.Time, fmt.aprintf("%02d:%02d:%02d", dt.hour, dt.minute, dt.second, allocator = allocator)}
+			case .Datetime, .None:
+				c = {.Datetime, fmt.aprintf("%04d-%02d-%02d %02d:%02d:%02d", dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second, allocator = allocator)}
 			}
 		}
 
-		if col_idx >= len(row) {
-			needed := col_idx + 1 - len(row)
-			for k in 0 ..< needed {
-				append(&row, "")
-			}
+		if col >= len(row) {
+			for _ in len(row) ..= col {append(&row, Xlsx_Cell{})}
 		}
-		row[col_idx] = val
-
-		start = cell_end
+		row[col] = c
 	}
-
 	return row[:]
 }
 
@@ -268,7 +563,6 @@ cell_ref_to_col :: proc(cell_xml: string) -> int {
 	}
 	ref := cell_xml[r_pos:end]
 
-	// letters prefix
 	col := 0
 	for i in 0 ..< len(ref) {
 		ch := ref[i]
@@ -285,501 +579,135 @@ cell_ref_to_col :: proc(cell_xml: string) -> int {
 
 
 // ------------------------------------------------------------
-// Type inference + append (reuse pattern from HTML importer)
+// Excel dates (1900 date system)
 // ------------------------------------------------------------
 
-infer_column_types_excel :: proc(tmp: [][]string) -> []w.ColumnType {
-	col_count := len(tmp[0])
-	types := make([]w.ColumnType, col_count, context.temp_allocator)
-
-	for c in 0 ..< col_count {
-		all_int := true
-		all_float := true
-		all_bool := true
-
-		for r in 1 ..< len(tmp) {
-			if c >= len(tmp[r]) {
-				continue
-			}
-			v := strings.trim_space(tmp[r][c])
-			if v == "" {
-				continue
-			}
-
-			if _, ok := strconv.parse_int(v); !ok {
-				all_int = false
-			}
-			if _, ok := strconv.parse_f64(v); !ok {
-				all_float = false
-			}
-			if !(v == "true" || v == "false" || v == "TRUE" || v == "FALSE") {
-				all_bool = false
-			}
-		}
-
-		if all_int {
-			types[c] = .Int
-		} else if all_float {
-			types[c] = .Float
-		} else if all_bool {
-			types[c] = .Bool
-		} else {
-			types[c] = .String
-		}
-	}
-
-	return types[:]
-}
-
-append_value_excel :: proc(col: ^w.Column, s: string) {
-	trimmed := strings.trim_space(s)
-
-	if trimmed == "" {
-		w.append_null(col)
-		return
-	}
-
-	#partial switch col.type {
-	case .Int:
-		v, _ := strconv.parse_int(trimmed)
-		w.append_int(col, v)
-
-	case .Float:
-		v, _ := strconv.parse_f64(trimmed)
-		w.append_float(col, v)
-
-	case .Bool:
-		w.append_bool(col, trimmed == "true" || trimmed == "TRUE")
-
-	case .String:
-		w.append_string(col, trimmed)
-	}
-}
-parse_attrs :: proc(tag: string, allocator: mem.Allocator) -> map[string]string {
-	attrs := make(map[string]string, allocator)
-	i := 0
-	// skip until first space or end
-	for i < len(tag) &&
-	    tag[i] != ' ' &&
-	    tag[i] != '\t' &&
-	    tag[i] != '\r' &&
-	    tag[i] != '\n' &&
-	    tag[i] != '>' &&
-	    tag[i] != '/' {
-		i += 1
-	}
-	for i < len(tag) {
-		// skip whitespace
-		for i < len(tag) && (tag[i] == ' ' || tag[i] == '\t' || tag[i] == '\r' || tag[i] == '\n') {
-			i += 1
-		}
-		if i >= len(tag) || tag[i] == '>' {
-			break
-		}
-		// parse key
-		key_start := i
-		for i < len(tag) &&
-		    tag[i] != '=' &&
-		    tag[i] != ' ' &&
-		    tag[i] != '\t' &&
-		    tag[i] != '\r' &&
-		    tag[i] != '\n' &&
-		    tag[i] != '>' {
-			i += 1
-		}
-		key_end := i
-		// skip whitespace
-		for i < len(tag) && (tag[i] == ' ' || tag[i] == '\t' || tag[i] == '\r' || tag[i] == '\n') {
-			i += 1
-		}
-		if i >= len(tag) || tag[i] != '=' {
-			break
-		}
-		i += 1 // skip '='
-		// skip whitespace
-		for i < len(tag) && (tag[i] == ' ' || tag[i] == '\t' || tag[i] == '\r' || tag[i] == '\n') {
-			i += 1
-		}
-		if i >= len(tag) || tag[i] != '"' {
-			break
-		}
-		i += 1 // skip opening quote
-		val_start := i
-		for i < len(tag) && tag[i] != '"' {
-			i += 1
-		}
-		val_end := i
-		if i < len(tag) && tag[i] == '"' {
-			i += 1
-		}
-
-		key := tag[key_start:key_end]
-		val := tag[val_start:val_end]
-		attrs[key] = val
-	}
-	return attrs
-}
-parse_workbook_sheets :: proc(xml: string, allocator: mem.Allocator) -> []SheetInfo {
-	sheets := make([dynamic]SheetInfo, 0, allocator)
-
-	start := 0
-	for {
-		tag, next := extract_xml_tag(xml, start, "sheet")
-		if next < 0 {
-			break
-		}
-		attrs := parse_attrs(tag, allocator)
-
-		si := SheetInfo{}
-		if name, ok := attrs["name"]; ok {
-			si.name = name
-		}
-		if rid, ok := attrs["r:id"]; ok {
-			si.rid = rid
-		}
-
-		// only keep real sheets
-		if si.name != "" && si.rid != "" {
-			append(&sheets, si)
-		}
-
-		start = next
-	}
-
-	return sheets[:]
-}
-
-
-parse_rels :: proc(xml: string, allocator: mem.Allocator) -> []RelInfo {
-	rels := make([dynamic]RelInfo, 0, allocator)
-
-	start := 0
-	for {
-		tag, next := extract_xml_tag(xml, start, "Relationship")
-		if next < 0 {
-			break
-		}
-		attrs := parse_attrs(tag, allocator)
-
-		r := RelInfo{}
-		if id, ok := attrs["Id"]; ok {
-			r.id = id
-		}
-		if target, ok := attrs["Target"]; ok {
-			r.target = target
-		}
-
-		if r.id != "" && r.target != "" {
-			append(&rels, r)
-		}
-
-		start = next
-	}
-
-	return rels[:]
-}
-
-
-discover_sheets :: proc(path: string, allocator: mem.Allocator) -> []SheetInfo {
-	sheets := make([dynamic]SheetInfo, 0, allocator)
-	wb_bytes, ok_wb := zm.zip_read_file(path, "xl/workbook.xml", allocator)
-	if !ok_wb {
-		return sheets[:]
-	}
-	//defer delete(wb_bytes)
-	rel_bytes, ok_rels := zm.zip_read_file(path, "xl/_rels/workbook.xml.rels", allocator)
-	if !ok_rels {
-		rel_bytes, ok_rels = zm.zip_read_file(path, "xl/rels/workbook.xml.rels", allocator)
-	}
-	if !ok_rels {
-		fmt.println("Warning: workbook.xml.rels not found in either location")
-		return sheets[:]
-	}
-
-	//defer delete(rel_bytes)
-	wb_xml := string(wb_bytes)
-	rel_xml := string(rel_bytes)
-
-	wb_sheets := parse_workbook_sheets(wb_xml, allocator)
-	rels := parse_rels(rel_xml, allocator)
-
-	for &s in wb_sheets {
-		for r in rels {
-			if s.rid == r.id {
-				// only take worksheet targets
-				if strings.index(r.target, "worksheets/") >= 0 {
-					pth := fmt.aprintf("xl/%s", r.target, allocator = allocator)
-					s.path = pth
-					append(&sheets, s)
-				}
-				break
-			}
-		}
-	}
-
-	return sheets[:]
-}
-parse_styles_date_formats :: proc(xml: string, allocator: mem.Allocator) -> []bool {
-	is_date := make([dynamic]bool, 0, allocator)
-
-	// 1) custom formats
-	custom := make(map[int]string, allocator)
-	start := 0
-	for {
-		tag, next := extract_xml_tag(xml, start, "numFmt")
-		if next < 0 {
-			break
-		}
-		attrs := parse_attrs(tag, allocator)
-		start = next
-
-		if id_str, ok := attrs["numFmtId"]; ok {
-			if code, ok2 := attrs["formatCode"]; ok2 {
-				id, ok3 := strconv.parse_int(id_str)
-				if ok3 {
-					custom[id] = code
-				}
-			}
-		}
-	}
-
-	// 2) xf entries
-	start = 0
-	for {
-		tag, next := extract_xml_tag(xml, start, "xf")
-		if next < 0 {
-			break
-		}
-		attrs := parse_attrs(tag, allocator)
-		start = next
-
-		is_date_format := false
-
-		if numFmtId_str, ok := attrs["numFmtId"]; ok {
-			numFmtId, ok2 := strconv.parse_int(numFmtId_str)
-			if ok2 {
-				if numFmtId == 14 ||
-				   numFmtId == 15 ||
-				   numFmtId == 16 ||
-				   numFmtId == 17 ||
-				   numFmtId == 22 ||
-				   numFmtId == 18 ||
-				   numFmtId == 19 ||
-				   numFmtId == 20 ||
-				   numFmtId == 21 ||
-				   numFmtId == 45 ||
-				   numFmtId == 46 ||
-				   numFmtId == 47 {
-					is_date_format = true
-				}
-
-				if code, ok3 := custom[numFmtId]; ok3 {
-					if looks_like_date_format(code) {
-						is_date_format = true
-					}
-				}
-			}
-		}
-
-		append(&is_date, is_date_format)
-	}
-
-	return is_date[:]
-}
-
-looks_like_date_format :: proc(code: string) -> bool {
-	lower := strings.to_lower(code)
-	defer delete(lower)
-	// detect date formats (must contain day + month)
-	if strings.contains(lower, "d") && strings.contains(lower, "m") {
-		return true
-	}
-
-	// detect time formats (must contain hour or second)
-	if strings.contains(lower, "h") || strings.contains(lower, "s") {
-		return true
-	}
-
-	return false
-}
-
-
+// Serial → datetime; serial 60 is Excel's fictitious 1900-02-29. The time of
+// day is rounded to the nearest second (serials are binary fractions of a day).
 excel_serial_to_datetime :: proc(n: f64) -> w.Datetime {
-	// Excel epoch: 1899-12-31
 	base := w.Date {
 		year  = 1899,
 		month = 12,
 		day   = 31,
 	}
 
-	days := i32(n)
-	frac := n - f64(days)
+	total := i64(math.round(n * 86400.0)) // seconds since the epoch, rounded
+	days := i32(total / 86400)
+	secs := i32(total % 86400)
 
-	// Excel's fake leap day: serial 60 = 1900-02-29
 	if days >= 60 {
 		days -= 1
 	}
-
-	// add days
 	date := w.add_day_date(base, days)
-
-	// time of day
-	total_seconds := int(frac * 86400.0)
-	hour := i32(total_seconds / 3600)
-	minute := i32((total_seconds % 3600) / 60)
-	second := i32(total_seconds % 60)
-
-	time := w.Time{hour, minute, second}
-
+	time := w.Time{secs / 3600, (secs % 3600) / 60, secs % 60}
 	return w.new_Datetime_from_Date_and_Time(date, time)
 }
 
-cell_value_raw :: proc(
-	cell_xml: string,
-	shared: []string,
-	styles_is_date: []bool,
-) -> (
-	string,
-	bool,
-) {
-	// detect type attribute
-	t_pos := strings.index(cell_xml, " t=\"")
-	cell_type := ""
-	if t_pos >= 0 {
-		t_pos += len(" t=\"")
-		end := t_pos
-		for end < len(cell_xml) && cell_xml[end] != '"' {
-			end += 1
-		}
-		cell_type = cell_xml[t_pos:end]
+
+// ------------------------------------------------------------
+// Small XML helpers
+// ------------------------------------------------------------
+
+parse_attrs :: proc(tag: string, allocator: mem.Allocator) -> map[string]string {
+	attrs := make(map[string]string, allocator)
+	i := 0
+	is_ws :: proc(c: u8) -> bool {return c == ' ' || c == '\t' || c == '\r' || c == '\n'}
+	// skip the tag name
+	for i < len(tag) && !is_ws(tag[i]) && tag[i] != '>' && tag[i] != '/' {
+		i += 1
 	}
-
-	// --- inline string ---
-	if cell_type == "inlineStr" {
-		t_start := strings.index(cell_xml, "<t")
-		if t_start >= 0 {
-			gt := strings.index(cell_xml[t_start:], ">")
-			if gt >= 0 {
-				gt += t_start + 1
-				t_end := strings.index(cell_xml[gt:], "</t>")
-				if t_end >= 0 {
-					t_end += gt
-					return cell_xml[gt:t_end], false
-				}
-			}
-		}
-		return "", false
+	for i < len(tag) {
+		for i < len(tag) && is_ws(tag[i]) {i += 1}
+		if i >= len(tag) || tag[i] == '>' || tag[i] == '/' {break}
+		key_start := i
+		for i < len(tag) && tag[i] != '=' && !is_ws(tag[i]) && tag[i] != '>' {i += 1}
+		key_end := i
+		for i < len(tag) && is_ws(tag[i]) {i += 1}
+		if i >= len(tag) || tag[i] != '=' {break}
+		i += 1
+		for i < len(tag) && is_ws(tag[i]) {i += 1}
+		if i >= len(tag) || (tag[i] != '"' && tag[i] != '\'') {break}
+		q := tag[i]
+		i += 1
+		val_start := i
+		for i < len(tag) && tag[i] != q {i += 1}
+		val_end := i
+		if i < len(tag) {i += 1}
+		attrs[tag[key_start:key_end]] = tag[val_start:val_end]
 	}
-
-	// --- shared string ---
-	if cell_type == "s" {
-		v_start := strings.index(cell_xml, "<v>")
-		if v_start < 0 {return "", false}
-		v_start += len("<v>")
-		v_end := strings.index(cell_xml[v_start:], "</v>")
-		if v_end < 0 {return "", false}
-		v_end += v_start
-
-		raw := cell_xml[v_start:v_end]
-		idx, ok := strconv.parse_int(raw)
-		if ok && idx >= 0 && idx < len(shared) {
-			return shared[idx], false
-		}
-		return "", false
-	}
-
-	// --- normal numeric / boolean / text ---
-	v_start := strings.index(cell_xml, "<v>")
-	if v_start < 0 {return "", false}
-	v_start += len("<v>")
-	v_end := strings.index(cell_xml[v_start:], "</v>")
-	if v_end < 0 {return "", false}
-	v_end += v_start
-
-	raw := cell_xml[v_start:v_end]
-
-	// --- DATE DETECTION ---
-	s_pos := strings.index(cell_xml, " s=\"")
-	if s_pos >= 0 {
-		s_pos += len(" s=\"")
-		end := s_pos
-		for end < len(cell_xml) && cell_xml[end] != '"' {
-			end += 1
-		}
-		s_idx_str := cell_xml[s_pos:end]
-		s_idx, ok := strconv.parse_int(s_idx_str)
-		if ok && s_idx >= 0 && s_idx < len(styles_is_date) {
-			if styles_is_date[s_idx] {
-				// Only treat as datetime if the raw value parses as float
-				if _, ok2 := strconv.parse_f64(raw); ok2 {
-					return raw, true
-				}
-			}
-		}
-	}
-
-	// fallback: raw view
-	return raw, false
+	return attrs
 }
 
-cell_value_datetime :: proc(raw: string, allocator: mem.Allocator) -> string {
-	f, ok := strconv.parse_f64(raw)
-	if !ok {
-		// keep original numeric if it wasn't a valid float after all
-		return raw
+parse_workbook_sheets :: proc(xml: string, allocator: mem.Allocator) -> []SheetInfo {
+	sheets := make([dynamic]SheetInfo, 0, allocator)
+	start := 0
+	for {
+		tag, next := extract_xml_tag(xml, start, "sheet")
+		if next < 0 {break}
+		start = next
+		attrs := parse_attrs(tag, context.temp_allocator)
+		si := SheetInfo {
+			name = decode_entities(attrs["name"], allocator),
+			rid  = attrs["r:id"],
+		}
+		if si.name != "" && si.rid != "" {
+			append(&sheets, si)
+		}
 	}
+	return sheets[:]
+}
 
-	dt := excel_serial_to_datetime(f)
+parse_rels :: proc(xml: string, allocator: mem.Allocator) -> []RelInfo {
+	rels := make([dynamic]RelInfo, 0, allocator)
+	start := 0
+	for {
+		tag, next := extract_xml_tag(xml, start, "Relationship")
+		if next < 0 {break}
+		start = next
+		attrs := parse_attrs(tag, context.temp_allocator)
+		r := RelInfo {
+			id     = attrs["Id"],
+			target = attrs["Target"],
+			type   = attrs["Type"],
+		}
+		if r.id != "" && r.target != "" {
+			append(&rels, r)
+		}
+	}
+	return rels[:]
+}
 
-	// allocate backing storage with the *same* allocator as the DataFrame
-	buf := make([]u8, 19, allocator) // "YYYY-MM-DD HH:MM:SS" = 19 bytes
-	s := w.datetime_format_iso_into(dt, buf[:])
-	return s
-} // Helper: find "<tag_name" or "<x:tag_name" where the tag name is *exactly* tag_name
-// i.e. the next character after the name must be a terminator: space, '>', '/', or whitespace.
+// Helper: find "<tag_name" where the tag name is *exactly* tag_name, i.e. the
+// next character is a terminator: space, '>', '/', or whitespace.
 find_exact_tag_start :: proc(xml: string, from: int, pattern: string) -> int {
 	from := from
-	i := strings.index(xml[from:], pattern)
-	for i >= 0 {
+	for from < len(xml) {
+		i := strings.index(xml[from:], pattern)
+		if i < 0 {return -1}
 		i += from
 		next_idx := i + len(pattern)
-		if next_idx >= len(xml) {
-			return -1
-		}
-
+		if next_idx >= len(xml) {return -1}
 		ch := xml[next_idx]
 		if ch == ' ' || ch == '>' || ch == '/' || ch == '\t' || ch == '\r' || ch == '\n' {
 			return i
 		}
-
-		// false positive (e.g. "<sheets"), continue searching after this position
-		from = next_idx
-		i = strings.index(xml[from:], pattern)
+		from = next_idx // false positive (e.g. "<sheets"), continue after it
 	}
-
 	return -1
 }
 
 extract_xml_tag :: proc(xml: string, start: int, tag_name: string) -> (string, int) {
-	bigger := fmt.aprintf("<%s", tag_name)
-	bigger_x := fmt.aprintf("<x:%s", tag_name)
-	defer delete(bigger)
-	defer delete(bigger_x)
-
-	i := find_exact_tag_start(xml, start, bigger)
+	i := find_exact_tag_start(xml, start, fmt.tprintf("<%s", tag_name))
 	if i < 0 {
-		i = find_exact_tag_start(xml, start, bigger_x)
+		i = find_exact_tag_start(xml, start, fmt.tprintf("<x:%s", tag_name))
 		if i < 0 {
 			return "", -1
 		}
 	}
-
-	// Find the closing '>'
 	j := strings.index(xml[i:], ">")
 	if j < 0 {
 		return "", -1
 	}
 	j += i + 1
-
 	return xml[i:j], j
 }

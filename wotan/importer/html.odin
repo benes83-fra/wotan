@@ -7,173 +7,162 @@ import "core:mem"
 import "core:strconv"
 import "core:strings"
 
-html_load :: proc(path: string, allocator: mem.Allocator) -> w.DataFrame {
-	df := w.dataframe_new()
+// HTML <table> → DataFrame. Tags are matched case-insensitively, <th> and <td>
+// cells are taken in document order (row headers included), colspan repeats
+// the cell, closing tags may be omitted, text is UTF-8 safe with HTML entities
+// decoded. The first row is the header; short rows are padded with nulls and
+// extra cells are ignored. Cell text is trimmed; empty cells are null.
 
+html_load :: proc(path: string, allocator: mem.Allocator) -> w.DataFrame {
 	contents, err := read_file(path)
 	if err != nil {
 		panic("html_load: cannot read file")
 	}
 	defer delete(contents)
-	html := string(contents)
+	return html_load_from_string(contents, allocator)
+}
 
-	start := strings.index(html, "<table")
-	if start < 0 {return df}
-	end := strings.index(html[start:], "</table>")
-	if end < 0 {return df}
-
-	table := html[start:start + end]
-
-	rows := extract_rows(table)
-	if len(rows) == 0 {return df}
-
-	// PASS 1: parse all cells as strings
-	tmp := make([][]string, len(rows), allocator)
-
-	for r, r_i in rows {
-		cells := extract_cells(r)
-
-		tmp[r_i] = make([]string, len(cells), allocator)
-
-		for cell, c_i in cells {
-			clean := strip_html(cell)
-			tmp[r_i][c_i] = clean
-		}
+// ASCII lower-case copy (byte offsets unchanged) for case-insensitive search
+@(private = "file")
+_lower_ascii :: proc(s: string, allocator := context.temp_allocator) -> string {
+	b := make([]u8, len(s), allocator)
+	for i in 0 ..< len(s) {
+		ch := s[i]
+		b[i] = ch + 32 if ch >= 'A' && ch <= 'Z' else ch
 	}
+	return string(b)
+}
 
-	header := tmp[0]
-	row_count := len(tmp) - 1
-	col_count := len(header)
-
-	// PASS 2: infer column types
-	inferred := infer_column_types(tmp)
-	// PASS 3: create columns
-	for name, i in header {
-		col := w.column_new(name, inferred[i], row_count)
-		w.add_column(&df, col)
+// Start of the next "<name" tag at or after `from` (whole tag name only, so
+// "<th" does not match "<thead"); `lower` is the lower-cased text
+@(private = "file")
+_find_tag :: proc(lower: string, from: int, name: string) -> int {
+	pos := from
+	for pos < len(lower) {
+		i := strings.index(lower[pos:], name)
+		if i < 0 {return -1}
+		i += pos
+		after := i + len(name)
+		if after >= len(lower) {return -1}
+		ch := lower[after]
+		if ch == '>' || ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '/' {return i}
+		pos = after
 	}
+	return -1
+}
 
-	// PASS 4: append values
-	for r_i in 1 ..< len(tmp) {
-		row := tmp[r_i]
-		for value, c_i in row {
-			append_value(&df.columns[c_i], value)
-		}
+// Blocks "<tag ...>...</tag>" of the text, in order (outer tag included)
+@(private = "file")
+_extract_blocks :: proc(text: string, tag: string) -> []string {
+	out := make([dynamic]string, 0, context.temp_allocator)
+	lower := _lower_ascii(text)
+	open := fmt.tprintf("<%s", tag)
+	close := fmt.tprintf("</%s>", tag)
+	start := 0
+	for {
+		i := _find_tag(lower, start, open)
+		if i < 0 {break}
+		j := strings.index(lower[i:], close)
+		if j < 0 {break}
+		j += i + len(close)
+		append(&out, text[i:j])
+		start = j
 	}
-	df.rows = row_count
-	return df
+	return out[:]
 }
 
 extract_rows :: proc(table: string) -> []string {
-	rows := make([dynamic]string, 0, context.temp_allocator)
-
-	start := 0
-	for {
-		i := strings.index(table[start:], "<tr")
-		if i < 0 {
-			break
-		}
-		i += start
-
-		j := strings.index(table[i:], "</tr>")
-		if j < 0 {
-			break
-		}
-		j += i + len("</tr>")
-
-		row := table[i:j]
-		append(&rows, row)
-
-		start = j
-	}
-
-	return rows[:]
+	return _extract_blocks(table, "tr")
 }
+
+extract_tables :: proc(html: string) -> []string {
+	return _extract_blocks(html, "table")
+}
+
 extract_header :: proc(row: string) -> []string {
 	headers := make([dynamic]string, 0, context.temp_allocator)
-
-	cells := extract_cells(row)
-	for c in cells {
-		clean := strip_html(c)
-		append(&headers, clean)
+	for c in extract_cells(row) {
+		append(&headers, strip_html(c))
 	}
-
-
 	return headers[:]
 }
+
+// Inner HTML of the <th> / <td> cells of a row, in document order
 extract_cells :: proc(row: string) -> []string {
-	cells := make([dynamic]string, 0, context.temp_allocator)
-
-	// Try <th> first
-	tag := "<th"
-	end_tag := "</th>"
-
-	if strings.index(row, "<td") >= 0 {
-		tag = "<td"
-		end_tag = "</td>"
-	}
-
-	start := 0
-	for {
-		i := strings.index(row[start:], tag)
-		if i < 0 {
-			break
-		}
-		i += start
-
-		// find '>' of opening tag
-		gt := strings.index(row[i:], ">")
-		if gt < 0 {
-			break
-		}
-		gt += i + 1
-
-		j := strings.index(row[gt:], end_tag)
-		if j < 0 {
-			break
-		}
-		j += gt
-
-		cell := row[gt:j]
-		append(&cells, cell)
-
-		start = j + len(end_tag)
-	}
-
-	return cells[:]
+	cells, _ := _extract_cells_spans(row)
+	return cells
 }
-strip_html :: proc(s: string, allocator: mem.Allocator = context.temp_allocator) -> string {
-	// Remove tags: <...>
-	out := strings.Builder{}
-	strings.builder_init(&out, allocator)
 
+// Cells plus their colspan
+@(private = "file")
+_extract_cells_spans :: proc(row: string) -> (cells: []string, spans: []int) {
+	out := make([dynamic]string, 0, context.temp_allocator)
+	out_spans := make([dynamic]int, 0, context.temp_allocator)
+	lower := _lower_ascii(row)
+
+	next_cell :: proc(lower: string, from: int) -> int {
+		td := _find_tag(lower, from, "<td")
+		th := _find_tag(lower, from, "<th")
+		if td < 0 {return th}
+		if th < 0 {return td}
+		return min(td, th)
+	}
+
+	pos := next_cell(lower, 0)
+	for pos >= 0 {
+		gt := strings.index_byte(row[pos:], '>')
+		if gt < 0 {break}
+		open_tag := lower[pos:pos + gt]
+		content_start := pos + gt + 1
+
+		// content ends at the closing tag, the next cell or the end of the row
+		is_th := strings.has_prefix(open_tag, "<th")
+		close := "</th" if is_th else "</td"
+		end := len(row)
+		if j := strings.index(lower[content_start:], close); j >= 0 {end = content_start + j}
+		if j := strings.index(lower[content_start:], "</tr"); j >= 0 {end = min(end, content_start + j)}
+		nxt := next_cell(lower, content_start)
+		if nxt >= 0 {end = min(end, nxt)}
+
+		span := 1
+		if k := strings.index(open_tag, "colspan"); k >= 0 {
+			rest := open_tag[k + len("colspan"):]
+			digits := strings.trim_left(rest, " \t=\"'")
+			n := 0
+			for n < len(digits) && digits[n] >= '0' && digits[n] <= '9' {n += 1}
+			if v, ok := strconv.parse_int(digits[:n]); ok && v > 1 && v < 1000 {span = v}
+		}
+
+		append(&out, row[content_start:end])
+		append(&out_spans, span)
+		pos = nxt if nxt >= 0 && nxt >= end else next_cell(lower, end)
+	}
+	return out[:], out_spans[:]
+}
+
+// Text content of an HTML fragment: tags removed (UTF-8 preserved), entities
+// decoded, surrounding whitespace trimmed
+strip_html :: proc(s: string, allocator: mem.Allocator = context.temp_allocator) -> string {
+	out := strings.builder_make(0, len(s), context.temp_allocator)
 	inside := false
-	for b in s {
+	for i in 0 ..< len(s) {
+		b := s[i]
 		if b == '<' {
 			inside = true
 			continue
 		}
-		if b == '>' {
+		if b == '>' && inside {
 			inside = false
 			continue
 		}
 		if !inside {
-			strings.write_byte(&out, u8(b))
+			strings.write_byte(&out, b)
 		}
 	}
-
-	raw := strings.to_string(out)
-	strings.builder_destroy(&out)
-	err: bool
-	// Decode minimal HTML entities
-	raw, _ = strings.replace_all(raw, "&nbsp;", " ")
-	raw, _ = strings.replace_all(raw, "&amp;", "&")
-	raw, _ = strings.replace_all(raw, "&lt;", "<")
-	raw, _ = strings.replace_all(raw, "&gt;", ">")
-	raw, _ = strings.replace_all(raw, "&quot;", "\"")
-
-	return raw
+	decoded := decode_entities(strings.to_string(out), context.temp_allocator)
+	return strings.clone(strings.trim_space(decoded), allocator)
 }
+
 infer_and_append :: proc(col: ^w.Column, s: string) {
 	trimmed := strings.trim_space(s)
 
@@ -181,35 +170,26 @@ infer_and_append :: proc(col: ^w.Column, s: string) {
 		w.append_null(col)
 		return
 	}
-
-	// Try int
 	if v, ok := strconv.parse_int(trimmed); ok {
 		w.append_int(col, v)
 		return
 	}
-
-	// Try float
 	if v, ok := strconv.parse_f64(trimmed); ok {
 		w.append_float(col, v)
 		return
 	}
-
-	// Try bool
-	if trimmed == "true" || trimmed == "TRUE" {
+	if strings.equal_fold(trimmed, "true") {
 		w.append_bool(col, true)
 		return
 	}
-	if trimmed == "false" || trimmed == "FALSE" {
+	if strings.equal_fold(trimmed, "false") {
 		w.append_bool(col, false)
 		return
 	}
-
-	// Try date/datetime/time?
-	// If you want, we can add this later.
-
-	// Fallback: string
 	w.append_string(col, trimmed)
 }
+
+// Column types from the data rows (row 0 is the header); ragged rows allowed
 infer_column_types :: proc(tmp: [][]string) -> []w.ColumnType {
 	col_count := len(tmp[0])
 	types := make([]w.ColumnType, col_count, context.temp_allocator)
@@ -221,52 +201,39 @@ infer_column_types :: proc(tmp: [][]string) -> []w.ColumnType {
 		all_date := true
 		all_time := true
 		all_datetime := true
+		any_value := false
 
 		for r in 1 ..< len(tmp) {
+			if c >= len(tmp[r]) {continue}
 			v := strings.trim_space(tmp[r][c])
 			if v == "" {continue}
+			any_value = true
 
-			// int
-			if _, ok := strconv.parse_int(v); !ok {
-				all_int = false
-			}
-
-			// float
-			if _, ok := strconv.parse_f64(v); !ok {
-				all_float = false
-			}
-
-			// bool
-			if !(v == "true" || v == "false" || v == "TRUE" || v == "FALSE") {
-				all_bool = false
-			}
-
-			// date/time/datetime
-			if !is_date(v) {
-				all_date = false
-			}
-			if !is_time(v) {
-				all_time = false
-			}
-			if !is_datetime(v) {
-				all_datetime = false
-			}
+			if _, ok := strconv.parse_int(v); !ok {all_int = false}
+			if _, ok := strconv.parse_f64(v); !ok {all_float = false}
+			if !(strings.equal_fold(v, "true") || strings.equal_fold(v, "false")) {all_bool = false}
+			if !is_date(v) {all_date = false}
+			if !is_time(v) {all_time = false}
+			if !is_datetime(v) {all_datetime = false}
 		}
 
 		// precedence: datetime > date > time > int > float > bool > string
-		if all_datetime {
+		switch {
+		case !any_value:
+			types[c] = .String
+		case all_datetime:
 			types[c] = .Datetime
-		} else if all_date {
+		case all_date:
 			types[c] = .Date
-		} else if all_time {
+		case all_time:
 			types[c] = .Time
-		} else if all_int {
+		case all_int:
 			types[c] = .Int
-		} else if all_float {
+		case all_float:
 			types[c] = .Float
-		} else if all_bool {
+		case all_bool:
 			types[c] = .Bool
-		} else {
+		case:
 			types[c] = .String
 		}
 	}
@@ -286,51 +253,23 @@ append_value :: proc(col: ^w.Column, s: string) {
 	case .Int:
 		v, _ := strconv.parse_int(trimmed)
 		w.append_int(col, v)
-
 	case .Float:
 		v, _ := strconv.parse_f64(trimmed)
 		w.append_float(col, v)
-
 	case .Bool:
-		w.append_bool(col, trimmed == "true" || trimmed == "TRUE")
-
+		w.append_bool(col, strings.equal_fold(trimmed, "true"))
 	case .String:
 		w.append_string(col, trimmed)
 	case .Date:
 		date, _ := w.parse_date(trimmed)
 		w.append_date(col, date)
-
 	case .Time:
 		time, _ := w.parse_time(trimmed)
 		w.append_time(col, time)
-
 	case .Datetime:
 		datetime, _ := w.parse_datetime(trimmed)
 		w.append_datetime(col, datetime)
-
 	}
-
-}
-extract_tables :: proc(html: string) -> []string {
-	tables := make([dynamic]string, 0, context.temp_allocator)
-
-	start := 0
-	for {
-		i := strings.index(html[start:], "<table")
-		if i < 0 {break}
-		i += start
-
-		j := strings.index(html[i:], "</table>")
-		if j < 0 {break}
-		j += i + len("</table>")
-
-		table := html[i:j]
-		append(&tables, table)
-
-		start = j
-	}
-
-	return tables[:]
 }
 
 html_load_table_index :: proc(path: string, index: int, allocator: mem.Allocator) -> w.DataFrame {
@@ -338,94 +277,71 @@ html_load_table_index :: proc(path: string, index: int, allocator: mem.Allocator
 	if err != nil {panic("html_load: cannot read file")}
 	defer delete(contents)
 
-	html := string(contents)
-	tables := extract_tables(html)
-
+	tables := extract_tables(contents)
 	if index < 0 || index >= len(tables) {
-		return w.dataframe_new()
+		return w.dataframe_new(allocator)
 	}
-
 	return html_parse_table(tables[index], allocator)
 }
+
 html_load_table_id :: proc(path: string, id: string, allocator: mem.Allocator) -> w.DataFrame {
 	contents, err := read_file(path)
 	if err != nil {panic("html_load: cannot read file")}
 	defer delete(contents)
 
-	html := string(contents)
-	tables := extract_tables(html)
-	needle := fmt.aprintf("id=\"%s\"", id)
-	defer delete(needle)
-
+	tables := extract_tables(contents)
+	needle := fmt.tprintf("id=\"%s\"", id)
+	needle_sq := fmt.tprintf("id='%s'", id)
 	for t in tables {
-		if strings.index(t, needle) >= 0 {
+		open_tag := t[:max(strings.index_byte(t, '>'), 0)]
+		if strings.contains(open_tag, needle) || strings.contains(open_tag, needle_sq) {
 			return html_parse_table(t, allocator)
 		}
 	}
-
-	return w.dataframe_new()
+	return w.dataframe_new(allocator)
 }
+
 html_load_all :: proc(path: string, allocator: mem.Allocator) -> []w.DataFrame {
 	contents, err := read_file(path)
 	if err != nil {panic("html_load: cannot read file")}
 	defer delete(contents)
-
-	html := string(contents)
-	tables := extract_tables(html)
-
-	dfs := make([]w.DataFrame, len(tables), allocator)
-
-	for t, i in tables {
-		dfs[i] = html_parse_table(t, allocator)
-	}
-
-	return dfs[:]
+	return html_load_all_from_string(contents, allocator)
 }
+
 html_parse_table :: proc(table: string, allocator: mem.Allocator) -> w.DataFrame {
-	df := w.dataframe_new()
+	df := w.dataframe_new(allocator)
 
-	// Collect rows in logical order: thead (header) + tbody (data)
-	rows_dyn := make([dynamic]string, 0, allocator)
-
-	thead := extract_section(table, "thead", allocator)
-	tbody := extract_section(table, "tbody", allocator)
-
+	// Rows in logical order: <thead> rows, then <tbody> rows (or all rows)
+	rows_dyn := make([dynamic]string, 0, context.temp_allocator)
+	thead := extract_section(table, "thead")
+	tbody := extract_section(table, "tbody")
 	if thead != "" {
-		rs := extract_rows(thead)
-		for r in rs {
-			append(&rows_dyn, r)
-		}
+		for r in extract_rows(thead) {append(&rows_dyn, r)}
 	}
-
 	if tbody != "" {
-		rs := extract_rows(tbody)
-		for r in rs {
-			append(&rows_dyn, r)
-		}
+		for r in extract_rows(tbody) {append(&rows_dyn, r)}
+	} else if thead == "" {
+		for r in extract_rows(table) {append(&rows_dyn, r)}
 	} else {
-		// Fallback: no <tbody>, use all rows in table
-		rs := extract_rows(table)
-		for r in rs {
-			append(&rows_dyn, r)
-		}
+		// header in <thead>, body rows directly in <table>
+		after := strings.index(table, thead) + len(thead)
+		for r in extract_rows(table[after:]) {append(&rows_dyn, r)}
 	}
-
 	rows := rows_dyn[:]
 	if len(rows) == 0 {
 		return df
 	}
 
-	// PASS 1: parse all cells as strings
-	tmp := make([][]string, len(rows), allocator)
-
+	// PASS 1: all cells as text (colspan expanded)
+	tmp := make([][]string, len(rows), context.temp_allocator)
 	for r, r_i in rows {
-		cells := extract_cells(r)
-		tmp[r_i] = make([]string, len(cells), allocator)
-
+		cells, spans := _extract_cells_spans(r)
+		line := make([dynamic]string, 0, len(cells), context.temp_allocator)
 		for cell, c_i in cells {
 			clean := strip_html(cell)
-			tmp[r_i][c_i] = clean
+			for _ in 0 ..< spans[c_i] {append(&line, clean)}
 		}
+		tmp[r_i] = line[:]
 	}
 
 	header := tmp[0]
@@ -436,15 +352,15 @@ html_parse_table :: proc(table: string, allocator: mem.Allocator) -> w.DataFrame
 
 	// PASS 3: create columns
 	for name, i in header {
-		col := w.column_new(name, inferred[i], row_count)
+		col := w.column_new(strings.clone(name, allocator), inferred[i], row_count, allocator)
 		w.add_column(&df, col)
 	}
 
-	// PASS 4: append values
+	// PASS 4: append values (short rows padded with nulls, extra cells ignored)
 	for r_i in 1 ..< len(tmp) {
 		row := tmp[r_i]
-		for value, c_i in row {
-			append_value(&df.columns[c_i], value)
+		for c_i in 0 ..< len(header) {
+			append_value(&df.columns[c_i], row[c_i] if c_i < len(row) else "")
 		}
 	}
 
@@ -458,46 +374,29 @@ extract_section :: proc(
 	tag: string,
 	allocator: mem.Allocator = context.temp_allocator,
 ) -> string {
-	open_tag := fmt.aprintf("<%s", tag)
-	close_tag := fmt.aprintf("</%s>", tag)
-	defer {
-		delete(open_tag)
-		delete(close_tag)
-	}
-
-	start := strings.index(table, open_tag)
-	if start < 0 {return ""}
-
-	end := strings.index(table[start:], close_tag)
-	if end < 0 {return ""}
-
-	end += start + len(close_tag)
-	return table[start:end]
+	blocks := _extract_blocks(table, tag)
+	return blocks[0] if len(blocks) > 0 else ""
 }
+
 html_load_from_string :: proc(
 	html: string,
 	allocator: mem.Allocator = context.allocator,
 ) -> w.DataFrame {
-	df := w.dataframe_new()
-
-	// Extract the first table in the HTML
 	tables := extract_tables(html)
 	if len(tables) == 0 {
-		return df
+		return w.dataframe_new(allocator)
 	}
-
 	return html_parse_table(tables[0], allocator)
 }
+
 html_load_all_from_string :: proc(
 	html: string,
 	allocator: mem.Allocator = context.allocator,
 ) -> []w.DataFrame {
 	tables := extract_tables(html)
 	dfs := make([]w.DataFrame, len(tables), allocator)
-
 	for t, i in tables {
 		dfs[i] = html_parse_table(t, allocator)
 	}
-
 	return dfs[:]
 }

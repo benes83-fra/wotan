@@ -9,6 +9,12 @@ import "core:strings"
 import w "../core"
 import infer "../importer"
 
+// Columns are the union of the keys of all records, in order of first
+// appearance in the file; a record without a key contributes null. JSON null
+// is null; in String columns a JSON string is always the literal text (so ""
+// and "NA" stay strings); in typed columns empty strings and null tokens are
+// null. Nested objects / arrays are kept as their JSON text.
+
 
 // ------------------------------------------------------------
 // JSON Loader (array of objects)
@@ -25,134 +31,236 @@ json_load :: proc(
 	}
 	defer delete(contents)
 
-	text := string(contents)
-
-	root, err2 := json.parse_string(text, json.DEFAULT_SPECIFICATION, true, allocator)
+	root, err2 := json.parse_string(contents, json.DEFAULT_SPECIFICATION, true, allocator)
 	if err2 != .None {
 		panic("json_load: invalid JSON")
 	}
+	defer json.destroy_value(root, allocator)
 
-	// Declare arr here so it exists in the outer scope
-	arr: json.Array
-
-	#partial switch v in root {
-	case json.Array:
-		arr = v
-	case:
+	arr, is_arr := root.(json.Array)
+	if !is_arr {
 		panic("json_load: expected top-level JSON array")
 	}
-
 	if len(arr) == 0 {
 		panic("json_load: empty JSON array")
 	}
 
-	// Use type assertion to ensure elements are Objects
+	objects := make([]json.Object, len(arr), context.temp_allocator)
+	defer delete(objects, context.temp_allocator)
 	for val, i in arr {
-		if _, ok := val.(json.Object); !ok {
+		obj, ok := val.(json.Object)
+		if !ok {
 			panic(fmt.tprintf("json_load: element %d is not an object", i + 1))
 		}
+		objects[i] = obj
 	}
 
-	// Determine schema from first object
-	first_obj := arr[0].(json.Object)
-	col_count := len(first_obj)
-	keys := make([]string, col_count, allocator)
+	keys := make([dynamic]string, 0, 16, context.temp_allocator)
+	seen := make(map[string]bool, allocator = context.temp_allocator)
+	defer {
+		delete(keys)
+		delete(seen)
+	}
+	_json_collect_keys(contents, 2, &keys, &seen) // array = depth 1, records = depth 2
+	return _json_build(objects, keys[:], null_tokens, allocator, "json_load")
+}
 
+
+// ------------------------------------------------------------
+// JSON Lines Loader (one object per line)
+// ------------------------------------------------------------
+jsonl_load :: proc(
+	path: string,
+	null_tokens: []string = DEFAULT_NULL_TOKEN,
+	allocator: mem.Allocator,
+) -> w.DataFrame {
+
+	contents, err := read_file(path)
+	if err != nil {
+		panic("jsonl_load: failed to read file")
+	}
+	defer delete(contents)
+
+	lines := strings.split(contents, "\n")
+	defer delete(lines)
+
+	values := make([dynamic]json.Value, 0, len(lines), context.temp_allocator)
+	objects := make([dynamic]json.Object, 0, len(lines), context.temp_allocator)
+	keys := make([dynamic]string, 0, 16, context.temp_allocator)
+	seen := make(map[string]bool, allocator = context.temp_allocator)
+	defer {
+		for v in values {json.destroy_value(v, allocator)}
+		delete(values)
+		delete(objects)
+		delete(keys)
+		delete(seen)
+	}
+
+	for raw_line, i in lines {
+		line := strings.trim(raw_line, " \t\r")
+		if len(line) == 0 {
+			continue
+		}
+		root, err2 := json.parse_string(line, json.DEFAULT_SPECIFICATION, true, allocator)
+		if err2 != .None {
+			panic(fmt.tprintf("jsonl_load: invalid JSON on line %d", i + 1))
+		}
+		append(&values, root)
+		obj, ok := root.(json.Object)
+		if !ok {
+			panic(fmt.tprintf("jsonl_load: line %d is not a JSON object", i + 1))
+		}
+		append(&objects, obj)
+		_json_collect_keys(line, 1, &keys, &seen)
+	}
+
+	if len(objects) == 0 {
+		panic("jsonl_load: no valid JSON objects found")
+	}
+	return _json_build(objects[:], keys[:], null_tokens, allocator, "jsonl_load")
+}
+
+
+// Object keys found at nesting `depth` (1 = top-level object), appended to
+// `keys` in order of first appearance. A string at that depth followed by ':'
+// is a key; escaped keys are unescaped with the JSON parser.
+@(private = "file")
+_json_collect_keys :: proc(text: string, depth: int, keys: ^[dynamic]string, seen: ^map[string]bool) {
+	d := 0
 	i := 0
-	for key in first_obj {
-		keys[i] = key
-		i += 1
+	n := len(text)
+	for i < n {
+		ch := text[i]
+		switch ch {
+		case '{', '[':
+			d += 1
+			i += 1
+		case '}', ']':
+			d -= 1
+			i += 1
+		case '"':
+			start := i
+			i += 1
+			escaped := false
+			for i < n && text[i] != '"' {
+				if text[i] == '\\' {escaped = true; i += 1}
+				i += 1
+			}
+			end := min(i, n) // index of the closing quote
+			i += 1
+			if d != depth {continue}
+			j := i
+			for j < n && (text[j] == ' ' || text[j] == '\t' || text[j] == '\r' || text[j] == '\n') {j += 1}
+			if j >= n || text[j] != ':' {continue}
+			key := text[start + 1:end]
+			if escaped {
+				v, err := json.parse_string(text[start:end + 1], json.DEFAULT_SPECIFICATION, true, context.temp_allocator)
+				if s, ok := v.(json.String); ok && err == .None {key = s}
+			}
+			if !seen[key] {
+				seen[key] = true
+				append(keys, key)
+			}
+		case:
+			i += 1
+		}
 	}
+}
+
+@(private = "file")
+_json_build :: proc(
+	objects: []json.Object,
+	keys: []string,
+	null_tokens: []string,
+	allocator: mem.Allocator,
+	label: string,
+) -> w.DataFrame {
+	col_count := len(keys)
+
+	// Infer types from every record
 	samples := make([][dynamic]string, col_count)
-
-	sample_limit := min(100, len(arr))
-	for i in 0 ..< sample_limit {
-		obj := arr[i].(json.Object) // Cast to Object
-
-		for col_i in 0 ..< col_count {
-			key := keys[col_i]
-			val := obj[key]
-
-			// Check for Null type in union
-			if _, is_null := val.(json.Null); is_null {
-				continue
-			}
-
+	defer {
+		for i in 0 ..< col_count {delete(samples[i])}
+		delete(samples)
+	}
+	for &obj in objects {
+		for key, col_i in keys {
+			val, present := obj[key]
+			if !present {continue}
+			if _, is_null := val.(json.Null); is_null {continue}
 			s := json_value_to_string(val)
-			if is_null_field(s, null_tokens) {
-				continue
-			}
-
+			if is_null_field(s, null_tokens) {continue}
 			append(&samples[col_i], s)
 		}
 	}
-
-	types := make([]w.ColumnType, col_count, allocator)
+	types := make([]w.ColumnType, col_count, context.temp_allocator)
+	defer delete(types, context.temp_allocator)
 	for i in 0 ..< col_count {
 		types[i] = infer.infer_column_type(samples[i][:])
 	}
 
+	df := w.dataframe_new(allocator)
+	cols := make([]w.Column, col_count, context.temp_allocator)
+	defer delete(cols, context.temp_allocator)
 	for i in 0 ..< col_count {
-		delete(samples[i])
-	}
-	delete(samples)
-
-	df := w.dataframe_new()
-	cols := make([]w.Column, col_count, allocator)
-
-	for i in 0 ..< col_count {
-		cols[i] = w.column_new(keys[i], types[i], len(arr))
+		cols[i] = w.column_new(strings.clone(keys[i], allocator), types[i], len(objects), allocator)
 	}
 
-	for row_i in 0 ..< len(arr) {
-		obj := arr[row_i].(json.Object) // Cast to Object
-
-		for col_i in 0 ..< col_count {
-			key := keys[col_i]
-			val := obj[key]
-
+	for &obj, row_i in objects {
+		for key, col_i in keys {
+			col := &cols[col_i]
+			val, present := obj[key]
+			if !present {
+				w.append_null(col)
+				continue
+			}
 			if _, is_null := val.(json.Null); is_null {
-				w.append_null(&cols[col_i])
+				w.append_null(col)
 				continue
 			}
 
 			s := json_value_to_string(val)
-			if is_null_field(s, null_tokens) {
-				w.append_null(&cols[col_i])
+			if types[col_i] == .String {
+				if _, is_str := val.(json.String); !is_str && is_null_field(s, null_tokens) {
+					w.append_null(col)
+				} else {
+					w.append_string(col, s)
+				}
 				continue
 			}
 
+			field := strings.trim(s, " \t")
+			if is_null_field(field, null_tokens) {
+				w.append_null(col)
+				continue
+			}
+			ok := true
 			#partial switch types[col_i] {
 			case .Int:
-				v, ok := strconv.parse_int(s)
-				if !ok {panic(fmt.tprintf("json_load: invalid int '%s'", s))}
-				w.append_int(&cols[col_i], v)
-
+				v: int
+				v, ok = strconv.parse_int(field)
+				if ok {w.append_int(col, v)}
 			case .Float:
-				v, ok := strconv.parse_f64(s)
-				if !ok {panic(fmt.tprintf("json_load: invalid float '%s'", s))}
-				w.append_float(&cols[col_i], v)
-
+				v: f64
+				v, ok = strconv.parse_f64(field)
+				if ok {w.append_float(col, v)}
 			case .Bool:
-				w.append_bool(&cols[col_i], s == "true")
-
-			case .String:
-				w.append_string(&cols[col_i], s)
-
+				w.append_bool(col, strings.equal_fold(field, "true"))
 			case .Date:
-				d, ok := w.parse_date(s)
-				if !ok {panic(fmt.tprintf("json_load: invalid date '%s'", s))}
-				w.append_date(&cols[col_i], d)
-
+				d: w.Date
+				d, ok = w.parse_date(field)
+				if ok {w.append_date(col, d)}
 			case .Time:
-				t, ok := w.parse_time(s)
-				if !ok {panic(fmt.tprintf("json_load: invalid time '%s'", s))}
-				w.append_time(&cols[col_i], t)
-
+				t: w.Time
+				t, ok = w.parse_time(field)
+				if ok {w.append_time(col, t)}
 			case .Datetime:
-				dt, ok := w.parse_datetime(s)
-				if !ok {panic(fmt.tprintf("json_load: invalid datetime '%s'", s))}
-				w.append_datetime(&cols[col_i], dt)
+				dt: w.Datetime
+				dt, ok = w.parse_datetime(field)
+				if ok {w.append_datetime(col, dt)}
+			}
+			if !ok {
+				panic(fmt.tprintf("%s: record %d, key %q: cannot parse '%s' as %v", label, row_i + 1, key, field, types[col_i]))
 			}
 		}
 	}
@@ -160,7 +268,7 @@ json_load :: proc(
 	for col in cols {
 		w.add_column(&df, col)
 	}
-
+	df.rows = len(objects)
 	return df
 }
 
@@ -177,12 +285,8 @@ json_value_to_string :: proc(v: json.Value) -> string {
 		buf: [32]byte
 		return strings.clone(strconv.write_int(buf[:], i64(val), 10), context.temp_allocator)
 	case json.Float:
-		// write_float requires a buffer.
-		buf: [64]byte
-		return strings.clone(
-			strconv.write_float(buf[:], f64(val), 'f', -1, 64),
-			context.temp_allocator,
-		)
+		// shortest text that parses back exactly; always marked as a float
+		return w.float_to_string(f64(val), context.temp_allocator)
 	case json.Boolean:
 		return val ? "true" : "false"
 	case json.Null:
@@ -194,185 +298,9 @@ json_value_to_string :: proc(v: json.Value) -> string {
 	}
 	return ""
 }
-jsonl_load :: proc(
-	path: string,
-	null_tokens: []string = DEFAULT_NULL_TOKEN,
-	allocator: mem.Allocator,
-) -> w.DataFrame {
 
-	contents, err := read_file(path)
-	if err != nil {
-		panic("jsonl_load: failed to read file")
-	}
-	defer delete(contents)
 
-	text := string(contents)
-	lines := strings.split(text, "\n")
-	defer delete(lines)
 
-	// --------------------------------------------------------
-	// First pass: collect sample objects for schema inference
-	// --------------------------------------------------------
-	sample_objects := make([dynamic]json.Object, 0, allocator)
-
-	for i in 0 ..< len(lines) {
-		line := strings.trim(lines[i], " \t\r")
-		if len(line) == 0 {
-			continue
-		}
-
-		root, err2 := json.parse_string(line, json.DEFAULT_SPECIFICATION, true, allocator)
-		if err2 != .None {
-			panic(fmt.tprintf("jsonl_load: invalid JSON on line %d", i + 1))
-		}
-
-		obj, ok := root.(json.Object)
-		if !ok {
-			panic(fmt.tprintf("jsonl_load: line %d is not a JSON object", i + 1))
-		}
-
-		append(&sample_objects, obj)
-		if len(sample_objects) >= 100 {
-			break
-		}
-	}
-
-	if len(sample_objects) == 0 {
-		panic("jsonl_load: no valid JSON objects found")
-	}
-
-	// --------------------------------------------------------
-	// Determine schema from first object
-	// --------------------------------------------------------
-	first_obj := sample_objects[0]
-	col_count := len(first_obj)
-	keys := make([]string, col_count, allocator)
-
-	idx := 0
-	for key in first_obj {
-		keys[idx] = key
-		idx += 1
-	}
-
-	samples := make([][dynamic]string, col_count)
-
-	// Collect sample values for type inference
-	for &obj in sample_objects {
-		for col_i in 0 ..< col_count {
-			key := keys[col_i]
-			val := obj[key]
-
-			if _, is_null := val.(json.Null); is_null {
-				continue
-			}
-
-			s := json_value_to_string(val)
-			if is_null_field(s, null_tokens) {
-				continue
-			}
-
-			append(&samples[col_i], s)
-		}
-	}
-
-	// Infer column types
-	types := make([]w.ColumnType, col_count, allocator)
-	for i in 0 ..< col_count {
-		types[i] = infer.infer_column_type(samples[i][:])
-	}
-
-	// Cleanup sample buffers
-	for i in 0 ..< col_count {
-		delete(samples[i])
-	}
-	delete(samples)
-
-	// --------------------------------------------------------
-	// Create DataFrame + columns
-	// --------------------------------------------------------
-	df := w.dataframe_new()
-	cols := make([]w.Column, col_count, allocator)
-
-	for i in 0 ..< col_count {
-		cols[i] = w.column_new(keys[i], types[i], len(lines))
-	}
-
-	// --------------------------------------------------------
-	// Second pass: parse all lines and append rows
-	// --------------------------------------------------------
-	for line_i in 0 ..< len(lines) {
-		line := strings.trim(lines[line_i], " \t\r")
-		if len(line) == 0 {
-			continue
-		}
-
-		root, err2 := json.parse_string(line, json.DEFAULT_SPECIFICATION, true, allocator)
-		if err2 != .None {
-			panic(fmt.tprintf("jsonl_load: invalid JSON on line %d", line_i + 1))
-		}
-
-		obj, ok := root.(json.Object)
-		if !ok {
-			panic(fmt.tprintf("jsonl_load: line %d is not a JSON object", line_i + 1))
-		}
-
-		for col_i in 0 ..< col_count {
-			key := keys[col_i]
-			val := obj[key]
-
-			if _, is_null := val.(json.Null); is_null {
-				w.append_null(&cols[col_i])
-				continue
-			}
-
-			s := json_value_to_string(val)
-			if is_null_field(s, null_tokens) {
-				w.append_null(&cols[col_i])
-				continue
-			}
-
-			#partial switch types[col_i] {
-			case .Int:
-				v, ok := strconv.parse_int(s)
-				if !ok {panic(fmt.tprintf("jsonl_load: invalid int '%s'", s))}
-				w.append_int(&cols[col_i], v)
-
-			case .Float:
-				v, ok := strconv.parse_f64(s)
-				if !ok {panic(fmt.tprintf("jsonl_load: invalid float '%s'", s))}
-				w.append_float(&cols[col_i], v)
-
-			case .Bool:
-				w.append_bool(&cols[col_i], s == "true")
-
-			case .String:
-				w.append_string(&cols[col_i], s)
-
-			case .Date:
-				d, ok := w.parse_date(s)
-				if !ok {panic(fmt.tprintf("jsonl_load: invalid date '%s'", s))}
-				w.append_date(&cols[col_i], d)
-
-			case .Time:
-				t, ok := w.parse_time(s)
-				if !ok {panic(fmt.tprintf("jsonl_load: invalid time '%s'", s))}
-				w.append_time(&cols[col_i], t)
-
-			case .Datetime:
-				dt, ok := w.parse_datetime(s)
-				if !ok {panic(fmt.tprintf("jsonl_load: invalid datetime '%s'", s))}
-				w.append_datetime(&cols[col_i], dt)
-			}
-		}
-	}
-
-	// Add columns to DataFrame
-	for col in cols {
-		w.add_column(&df, col)
-	}
-
-	return df
-}
 extract_json_array_i64 :: proc(json: string, key: string) -> []i64 {
 	start := strings.index(json, key)
 	if start < 0 {return []i64{}}

@@ -2,7 +2,6 @@ package importer
 
 import "core:fmt"
 import "core:mem"
-import vmem "core:mem/virtual"
 import "core:strconv"
 import "core:strings"
 
@@ -11,43 +10,38 @@ import infer "../importer" // or whatever path matches your layout
 
 DEFAULT_NULL_TOKEN :: []string{"NA", "null", "None", ""}
 
+// Null semantics (lossless with exporter.csv_save):
+// - an unquoted field that is empty or a null token is null
+// - in a String column a quoted field is always the literal string
+//   ("" is the empty string, "NA" the text NA)
+// - in typed columns quoted content is parsed like unquoted content
 
+
+// Types inferred from every data row (fields trimmed; null tokens skipped)
 infer_col_types :: proc(
 	records: [][]string,
 	null_tokens: []string = DEFAULT_NULL_TOKEN,
 ) -> []w.ColumnType {
-
 	header := records[0]
 	col_count := len(header)
-	sample_limit := min(100, len(records) - 1)
 	samples := make([][dynamic]string, col_count)
+	defer {
+		for i in 0 ..< col_count {delete(samples[i])}
+		delete(samples)
+	}
 
-	for row_i in 1 ..= sample_limit {
+	for row_i in 1 ..< len(records) {
 		fields := records[row_i]
-
-		if len(fields) != col_count {
-			continue
-		}
-		for col_i in 0 ..< col_count {
+		for col_i in 0 ..< min(col_count, len(fields)) {
 			if is_null_field(fields[col_i], null_tokens) {
 				continue
-			} else {
-				append(&samples[col_i], fields[col_i])
 			}
+			append(&samples[col_i], strings.trim(fields[col_i], " \t"))
 		}
 	}
 	types := make([]w.ColumnType, col_count, context.temp_allocator)
 	for i in 0 ..< col_count {
 		types[i] = infer.infer_column_type(samples[i][:])
-	}
-	defer {
-		for i in 0 ..< col_count {
-			if samples[i] != nil {
-				// free (raw_data(samp))
-				delete(samples[i])
-			}
-		}
-		delete(samples)
 	}
 	return types
 }
@@ -59,117 +53,132 @@ csv_load :: proc(
 	sep: u8 = ',',
 	null_tokens: []string = DEFAULT_NULL_TOKEN,
 ) -> w.DataFrame {
-
-	auto: bool
-	types := types
-	if types != nil {
-		auto = false
-	} else {
-		auto = true
-	}
 	contents, err := read_file(path)
 	if err != nil {
 		panic("csv_load: failed to read file")
 	}
 	defer delete(contents)
+	return _csv_build(contents, context.allocator, types, sep, null_tokens, "csv_load")
+}
 
-	text := string(contents)
-	records := parse_csv_records(text, sep)
-	defer csv_free(records)
-	if len(records) == 0 {
-		panic("csv_load: empty file")
+csv_load_from_string :: proc(
+	text: string,
+	allocator: mem.Allocator = context.allocator,
+	types: []w.ColumnType = nil,
+	sep: u8 = ',',
+	null_tokens: []string = DEFAULT_NULL_TOKEN,
+) -> w.DataFrame {
+	return _csv_build(text, allocator, types, sep, null_tokens, "csv_load_from_string")
+}
 
+@(private = "file")
+_csv_build :: proc(
+	text: string,
+	allocator: mem.Allocator,
+	types: []w.ColumnType,
+	sep: u8,
+	null_tokens: []string,
+	label: string,
+) -> w.DataFrame {
+	records, quoted := _parse_csv(text, sep)
+	defer {
+		csv_free(records)
+		for q in quoted {delete(q)}
+		delete(quoted)
 	}
-	lines := strings.split(text, "\n")
-	defer delete(lines)
+	if len(records) == 0 {
+		panic(fmt.tprintf("%s: empty input", label))
+	}
+
 	header := records[0]
-	if auto {
+	types := types
+	explicit := types != nil
+	if !explicit {
 		types = infer_col_types(records, null_tokens)
 	}
 	if len(header) != len(types) {
-		panic("csv_load: header/type count missmatch")
+		panic(fmt.tprintf("%s: header/type count mismatch", label))
 	}
-	df := w.dataframe_new()
+	n_cols := len(types)
 
-	// Create columns
-	cols := make([]w.Column, len(types))
-	for i in 0 ..< len(types) {
-		cols[i] = w.column_new(header[i], types[i], len(records))
-	}
+	df := w.dataframe_new(allocator)
+	cols := make([]w.Column, n_cols)
 	defer delete(cols)
+	for i in 0 ..< n_cols {
+		cols[i] = w.column_new(header[i], types[i], len(records), allocator)
+	}
 
-	// Parse rows
+	long_rows := 0
 	for row_i in 1 ..< len(records) {
-
-
 		fields := records[row_i]
+		if len(fields) > n_cols {long_rows += 1}
 
-		if len(fields) != len(types) {
-			panic(fmt.tprintf("csv_load: row %d has wrong number of fields", row_i))
-		}
-
-		for col_i in 0 ..< len(types) {
-			field_raw := fields[col_i]
-			if is_null_field(field_raw, null_tokens) {
-				w.append_null(&cols[col_i])
+		for col_i in 0 ..< n_cols {
+			col := &cols[col_i]
+			if col_i >= len(fields) { 	// short row: missing trailing fields are null
+				w.append_null(col)
 				continue
 			}
-			field := unquote_and_trim(strings.trim(field_raw, "\t"))
+			raw := fields[col_i]
+			was_quoted := quoted[row_i][col_i]
 
-			#partial switch types[col_i] {
-			case .Int:
-				v, ok := strconv.parse_int(field)
-				if !ok {
-					panic(fmt.tprintf("csv_load: invalid int '%s'", field))
+			if types[col_i] == .String {
+				if was_quoted {
+					w.append_string(col, raw)
+				} else if is_null_field(raw, null_tokens) {
+					w.append_null(col)
+				} else {
+					w.append_string(col, strings.trim(raw, " \t"))
 				}
-				w.append_int(&cols[col_i], v)
-
-			case .Float:
-				v, ok := strconv.parse_f64(field)
-				if !ok {
-					panic(fmt.tprintf("csv_load: invalid float '%s'", field))
-				}
-				w.append_float(&cols[col_i], v)
-
-			case .Bool:
-				w.append_bool(&cols[col_i], field == "true")
-
-			case .String:
-				w.append_string(&cols[col_i], field)
-
-			case .Date:
-				// Very simple YYYY-MM-DD parser
-				date, ok := w.parse_date(field)
-				if !ok {
-					panic(fmt.tprintf("csv_load: invalid date '%s", field))
-				}
-
-				w.append_date(&cols[col_i], date)
-			case .Time:
-				time, ok := w.parse_time(field)
-				if !ok {
-
-					panic(fmt.tprintf("csv_load: invalid time formart '%s'", field))
-
-				}
-				w.append_time(&cols[col_i], time)
-
-			case .Datetime:
-				datetime, ok := w.parse_datetime(field)
-				if !ok {
-
-					panic(fmt.tprintf("csv_load: invalid datetime formart '%s'", field))
-				}
-				w.append_datetime(&cols[col_i], datetime)
-
+				continue
 			}
 
+			field := strings.trim(raw, " \t")
+			if is_null_field(field, null_tokens) {
+				w.append_null(col)
+				continue
+			}
+			ok := true
+			#partial switch types[col_i] {
+			case .Int:
+				v: int
+				v, ok = strconv.parse_int(field)
+				if ok {w.append_int(col, v)}
+			case .Float:
+				v: f64
+				v, ok = strconv.parse_f64(field)
+				if ok {w.append_float(col, v)}
+			case .Bool:
+				truthy := strings.equal_fold(field, "true") || field == "1"
+				ok = truthy || strings.equal_fold(field, "false") || field == "0"
+				if ok {w.append_bool(col, truthy)}
+			case .Date:
+				d: w.Date
+				d, ok = w.parse_date(field)
+				if ok {w.append_date(col, d)}
+			case .Time:
+				t: w.Time
+				t, ok = w.parse_time(field)
+				if ok {w.append_time(col, t)}
+			case .Datetime:
+				dt: w.Datetime
+				dt, ok = w.parse_datetime(field)
+				if ok {w.append_datetime(col, dt)}
+			}
+			if !ok {
+				// inferred types cover every row, so this only happens with explicit types
+				panic(fmt.tprintf("%s: row %d, column %q: cannot parse '%s' as %v", label, row_i, header[col_i], field, types[col_i]))
+			}
 		}
 	}
-	// Add columns to DataFrame
+	if long_rows > 0 {
+		fmt.eprintf("%s: %d row(s) had more than %d fields; extra fields ignored\n", label, long_rows, n_cols)
+	}
+
 	for col in cols {
 		w.add_column(&df, col)
 	}
+	df.rows = len(records) - 1
 	return df
 }
 
@@ -177,103 +186,95 @@ csv_load :: proc(
 // Parse the entire CSV text into records, honoring quoted fields and newlines inside quotes.
 // Returns an array of records, each record is an array of fields.
 parse_csv_records :: proc(text: string, seperator: u8 = ',') -> [][]string {
-	records := make([dynamic][]string)
+	records, quoted := _parse_csv(text, seperator)
+	for q in quoted {delete(q)}
+	delete(quoted)
+	return records
+}
+
+// RFC 4180 parsing plus: UTF-8 BOM skipped, CRLF / LF / CR line ends, blank
+// lines skipped, a quote only opens a quoted field at the start of the field
+// (elsewhere it is a literal character). `quoted` marks fields that were quoted.
+@(private = "file")
+_parse_csv :: proc(text: string, seperator: u8) -> (records: [][]string, quoted: [][]bool) {
+	recs := make([dynamic][]string)
+	quots := make([dynamic][]bool)
 	cur_fields := make([dynamic]string)
+	cur_quoted := make([dynamic]bool)
 	cur_field_bytes := make([dynamic]u8, context.temp_allocator)
-	defer delete(cur_field_bytes)
-	// defer delete (cur_fields)
+	field_quoted := false
 	in_quote := false
+
+	end_field :: proc(cur_fields: ^[dynamic]string, cur_quoted: ^[dynamic]bool, bytes: ^[dynamic]u8, field_quoted: ^bool) {
+		append(cur_fields, string(bytes[:]))
+		append(cur_quoted, field_quoted^)
+		bytes^ = make([dynamic]u8, context.temp_allocator)
+		field_quoted^ = false
+	}
+	end_record :: proc(recs: ^[dynamic][]string, quots: ^[dynamic][]bool, cur_fields: ^[dynamic]string, cur_quoted: ^[dynamic]bool) {
+		// a blank line is a single empty unquoted field: skip it
+		if len(cur_fields) == 1 && len(cur_fields[0]) == 0 && !cur_quoted[0] {
+			clear(cur_fields)
+			clear(cur_quoted)
+			return
+		}
+		append(recs, cur_fields[:])
+		append(quots, cur_quoted[:])
+		cur_fields^ = make([dynamic]string)
+		cur_quoted^ = make([dynamic]bool)
+	}
+
 	i := 0
 	n := len(text)
+	if strings.has_prefix(text, "\xEF\xBB\xBF") {i = 3} 	// UTF-8 byte order mark
 	for i < n {
 		b := text[i]
-		field := string(cur_field_bytes[:])
-		// CRLF normalization: treat '\r' as part of newline handling
+
 		if b == '"' {
-			// Quote handling
-			if !in_quote {
-				in_quote = true
-				i += 1
-				continue
-			} else {
-				// If next char is also a quote, it's an escaped quote -> append one quote
-				if i + 1 < n && text[i + 1] == '"' {
+			if in_quote {
+				if i + 1 < n && text[i + 1] == '"' { 	// escaped quote
 					append(&cur_field_bytes, u8('"'))
 					i += 2
-					continue
-				} else {
-					// Closing quote
+				} else { 	// closing quote
 					in_quote = false
 					i += 1
-					continue
 				}
+				continue
 			}
+			if len(cur_field_bytes) == 0 && !field_quoted { 	// opening quote at field start
+				in_quote = true
+				field_quoted = true
+				i += 1
+				continue
+			}
+			// a quote inside an unquoted field is a literal character
 		}
 
 		if !in_quote {
 			if b == seperator {
-				// end of field
-				// field := string(cur_field_bytes[:])
-				append(&cur_fields, field)
-				// reset field buffer
-				cur_field_bytes = make([dynamic]u8, context.temp_allocator)
+				end_field(&cur_fields, &cur_quoted, &cur_field_bytes, &field_quoted)
 				i += 1
 				continue
 			}
-
-			if b == '\n' {
-				// end of record
-				// field := string(cur_field_bytes[:])
-				append(&cur_fields, field)
-
-				append(&records, cur_fields[:])
-				// reset for next record
-				cur_fields = make([dynamic]string)
-				cur_field_bytes = make([dynamic]u8, context.temp_allocator)
-				i += 1
+			if b == '\n' || b == '\r' {
+				end_field(&cur_fields, &cur_quoted, &cur_field_bytes, &field_quoted)
+				end_record(&recs, &quots, &cur_fields, &cur_quoted)
+				i += 2 if b == '\r' && i + 1 < n && text[i + 1] == '\n' else 1
 				continue
-			}
-
-			if b == '\r' {
-				// handle CRLF or lone CR
-				// if next is '\n', skip both; otherwise treat CR as newline
-				if i + 1 < n && text[i + 1] == '\n' {
-					// field := string(cur_field_bytes[:])
-					append(&cur_fields, field)
-					append(&records, cur_fields[:])
-
-					cur_fields = make([dynamic]string)
-					cur_field_bytes = make([dynamic]u8, context.temp_allocator)
-					i += 2
-					continue
-				} else {
-					// field := string(cur_field_bytes[:])
-					append(&cur_fields, field)
-					append(&records, cur_fields[:])
-
-					cur_fields = make([dynamic]string)
-					cur_field_bytes = make([dynamic]u8, context.temp_allocator)
-					i += 1
-					continue
-				}
 			}
 		}
 
-		// default: append byte to current field
-		append(&cur_field_bytes, u8(b))
-
+		append(&cur_field_bytes, b)
 		i += 1
 	}
-	// End of file: flush remaining field/record if any
-	// If we are still in a quote at EOF, we treat it as closed (lenient)
-	if len(cur_field_bytes) > 0 || len(cur_fields) > 0 {
-		field := string(cur_field_bytes[:])
-		append(&cur_fields, field)
-		append(&records, cur_fields[:])
+	// End of file: flush remaining field/record if any (an unterminated quote is closed leniently)
+	if len(cur_field_bytes) > 0 || len(cur_fields) > 0 || field_quoted {
+		end_field(&cur_fields, &cur_quoted, &cur_field_bytes, &field_quoted)
+		end_record(&recs, &quots, &cur_fields, &cur_quoted)
 	}
-
-
-	return records[:]
+	delete(cur_fields)
+	delete(cur_quoted)
+	return recs[:], quots[:]
 }
 
 
@@ -282,7 +283,6 @@ csv_free :: proc(records: [][]string) {
 		if record != nil {
 			for &s in record {
 				if s != "" {
-					// fmt.printf("(debug) to be freed: %s\r\n", s)
 					delete(s, context.temp_allocator)
 				}
 			}
@@ -302,10 +302,7 @@ unquote_and_trim :: proc(str: string) -> string {
 	if len(s) >= 2 && s[0] == '"' && s[len(s) - 1] == '"' {
 		// remove surrounding quotes and unescape double quotes
 		inner := s[1:len(s) - 1]
-		// replace "" with "
-		// simple implementation: scan and build
-		out_bytes := make([dynamic]u8)
-		defer delete(out_bytes)
+		out_bytes := make([dynamic]u8, context.temp_allocator)
 		i := 0
 		for i < len(inner) {
 			if inner[i] == '"' && i + 1 < len(inner) && inner[i + 1] == '"' {
@@ -328,125 +325,16 @@ is_token_equal :: proc(a: string, b: string) -> bool {
 }
 
 
+// True if the (unquoted) field text is a null token after trimming
 is_null_field :: proc(field: string, null_tokens: []string) -> bool {
-	// Trim whitespace first
 	trimmed := strings.trim(field, " \t")
-	// If quoted, unquote and treat inner value as the field content
 	if len(trimmed) >= 2 && trimmed[0] == '"' && trimmed[len(trimmed) - 1] == '"' {
-		inner := unquote_and_trim(trimmed)
-		// If you want quoted empty string to be considered empty string (not null),
-		// remove "" from default null_tokens. Current behavior: compare inner to tokens.
-		for t in null_tokens {
-			if is_token_equal(inner, t) {
-				return true
-			}
-		}
-		return false
+		trimmed = unquote_and_trim(trimmed)
 	}
-	// Unquoted: compare trimmed value to tokens
 	for t in null_tokens {
 		if is_token_equal(trimmed, t) {
 			return true
 		}
 	}
 	return false
-}
-csv_load_from_string :: proc(
-	text: string,
-	allocator: mem.Allocator = context.allocator,
-	types: []w.ColumnType = nil,
-	sep: u8 = ',',
-	null_tokens: []string = DEFAULT_NULL_TOKEN,
-) -> w.DataFrame {
-
-	types := types
-	auto := (types == nil)
-
-	// Parse CSV text into records
-	records := parse_csv_records(text, sep)
-	defer csv_free(records)
-
-	if len(records) == 0 {
-		panic("csv_load_from_string: empty input")
-	}
-
-	header := records[0]
-
-	// Infer types if needed
-	if auto {
-		types = infer_col_types(records, null_tokens)
-	}
-
-	if len(header) != len(types) {
-		panic("csv_load_from_string: header/type count mismatch")
-	}
-
-	df := w.dataframe_new(allocator)
-
-	// Create columns
-	cols := make([]w.Column, len(types))
-	for i in 0 ..< len(types) {
-		cols[i] = w.column_new(header[i], types[i], len(records), allocator)
-	}
-	defer delete(cols)
-
-	// Parse rows
-	for row_i in 1 ..< len(records) {
-		fields := records[row_i]
-
-		if len(fields) != len(types) {
-			panic(fmt.tprintf("csv_load_from_string: row %d has wrong number of fields", row_i))
-		}
-
-		for col_i in 0 ..< len(types) {
-			raw := fields[col_i]
-
-			if is_null_field(raw, null_tokens) {
-				w.append_null(&cols[col_i])
-				continue
-			}
-
-			field := unquote_and_trim(strings.trim(raw, "\t"))
-
-			#partial switch types[col_i] {
-			case .Int:
-				v, ok := strconv.parse_int(field)
-				if !ok {panic(fmt.tprintf("csv_load_from_string: invalid int '%s'", field))}
-				w.append_int(&cols[col_i], v)
-
-			case .Float:
-				v, ok := strconv.parse_f64(field)
-				if !ok {panic(fmt.tprintf("csv_load_from_string: invalid float '%s'", field))}
-				w.append_float(&cols[col_i], v)
-
-			case .Bool:
-				w.append_bool(&cols[col_i], field == "true")
-
-			case .String:
-				w.append_string(&cols[col_i], field)
-
-			case .Date:
-				d, ok := w.parse_date(field)
-				if !ok {panic(fmt.tprintf("csv_load_from_string: invalid date '%s'", field))}
-				w.append_date(&cols[col_i], d)
-
-			case .Time:
-				t, ok := w.parse_time(field)
-				if !ok {panic(fmt.tprintf("csv_load_from_string: invalid time '%s'", field))}
-				w.append_time(&cols[col_i], t)
-
-			case .Datetime:
-				dt, ok := w.parse_datetime(field)
-				if !ok {panic(fmt.tprintf("csv_load_from_string: invalid datetime '%s'", field))}
-				w.append_datetime(&cols[col_i], dt)
-			}
-		}
-	}
-
-	// Add columns to DataFrame
-	for col in cols {
-		w.add_column(&df, col)
-	}
-
-	return df
 }

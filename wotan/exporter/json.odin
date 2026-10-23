@@ -1,11 +1,40 @@
 package exporter
 
-import "core:encoding/json"
+import w "../core"
 import "core:mem"
 import "core:os"
 import "core:strings"
 
-import w "../core"
+// One JSON object per row, keys in column order. Numbers keep their exact
+// value (floats always carry a '.' or exponent so they stay floats), missing
+// and non-finite values are null, dates / times are ISO strings.
+@(private = "file")
+_json_write_row :: proc(b: ^strings.Builder, df: ^w.DataFrame, row: int, allocator: mem.Allocator) {
+	strings.write_byte(b, '{')
+	for &col, c in df.columns {
+		if c > 0 {strings.write_byte(b, ',')}
+		json_write_string(b, col.name)
+		strings.write_byte(b, ':')
+
+		text, is_null := cell_text(&col, row, allocator)
+		switch {
+		case is_null:
+			strings.write_string(b, "null")
+		case col.type == .Int || col.type == .Bool:
+			strings.write_string(b, text)
+		case col.type == .Float:
+			v, _ := w.column_at_float(&col, row)
+			if v != v || v > max(f64) || v < -max(f64) {
+				strings.write_string(b, "null") // JSON has no NaN / Inf
+			} else {
+				strings.write_string(b, text)
+			}
+		case:
+			json_write_string(b, text)
+		}
+	}
+	strings.write_byte(b, '}')
+}
 
 // ------------------------------------------------------------
 // JSON Writer (DataFrame → JSON array of objects)
@@ -15,99 +44,15 @@ json_write :: proc(df: ^w.DataFrame, path: string, allocator: mem.Allocator) {
 	strings.builder_init(&builder, allocator)
 	defer strings.builder_destroy(&builder)
 
-	// opening bracket
 	strings.write_byte(&builder, '[')
-
 	for row in 0 ..< df.rows {
-		obj := json.Object{}
-
-		for &col in df.columns {
-			#partial switch col.type {
-			case .Int:
-				if col.nulls != nil && col.nulls[row] {
-					obj[col.name] = json.Null{}
-				} else {
-					base := uintptr(col.data) + uintptr(row * size_of(int))
-					v := (cast(^int)base)^
-					obj[col.name] = json.Integer(v)
-				}
-
-			case .Float:
-				if col.nulls != nil && col.nulls[row] {
-					obj[col.name] = json.Null{}
-				} else {
-					base := uintptr(col.data) + uintptr(row * size_of(f64))
-					v := (cast(^f64)base)^
-					obj[col.name] = json.Float(v)
-				}
-
-			case .Bool:
-				if col.nulls != nil && col.nulls[row] {
-					obj[col.name] = json.Null{}
-				} else {
-					base := uintptr(col.data) + uintptr(row * size_of(bool))
-					v := (cast(^bool)base)^
-					obj[col.name] = json.Boolean(v)
-				}
-
-			case .String:
-				if col.nulls != nil && col.nulls[row] {
-					obj[col.name] = json.Null{}
-				} else {
-					base := uintptr(col.data) + uintptr(row * size_of(string))
-					v := (cast(^string)base)^
-					obj[col.name] = json.String(v)
-				}
-
-			case .Date:
-				if col.nulls != nil && col.nulls[row] {
-					obj[col.name] = json.Null{}
-				} else {
-					base := uintptr(col.data) + uintptr(row * size_of(w.Date))
-					v := (cast(^w.Date)base)^
-					obj[col.name] = json.String(w.date_to_string(v))
-				}
-
-			case .Time:
-				if col.nulls != nil && col.nulls[row] {
-					obj[col.name] = json.Null{}
-				} else {
-					base := uintptr(col.data) + uintptr(row * size_of(w.Time))
-					v := (cast(^w.Time)base)^
-					obj[col.name] = json.String(w.time_to_string(v))
-				}
-
-			case .Datetime:
-				if col.nulls != nil && col.nulls[row] {
-					obj[col.name] = json.Null{}
-				} else {
-					base := uintptr(col.data) + uintptr(row * size_of(w.Datetime))
-					v := (cast(^w.Datetime)base)^
-					obj[col.name] = json.String(w.datetime_to_string(v))
-				}
-			}
-		}
-
-		bytes, err := json.marshal(obj, allocator = allocator)
-		if err != nil {
-			panic("json_write: marshal failed")
-		}
-
-		if row > 0 {
-			strings.write_byte(&builder, ',')
-		}
-		strings.write_string(&builder, string(bytes))
-
-
-		delete(obj) // now safe: no array holds it
+		if row > 0 {strings.write_byte(&builder, ',')}
+		_json_write_row(&builder, df, row, allocator)
 	}
-
-	// closing bracket
 	strings.write_byte(&builder, ']')
 
-	final := strings.to_string(builder)
-	err2 := os.write_entire_file(path, transmute([]u8)final)
-	if err2 != nil {
+	err := os.write_entire_file(path, transmute([]u8)strings.to_string(builder))
+	if err != nil {
 		panic("json_write: failed to write file")
 	}
 }
@@ -118,90 +63,15 @@ json_write :: proc(df: ^w.DataFrame, path: string, allocator: mem.Allocator) {
 jsonl_write :: proc(df: ^w.DataFrame, path: string, allocator: mem.Allocator) {
 	builder := strings.Builder{}
 	strings.builder_init(&builder, allocator)
+	defer strings.builder_destroy(&builder)
 
 	for row in 0 ..< df.rows {
-		obj := json.Object{}
-		defer delete(obj)
-
-		for &col in df.columns {
-			#partial switch col.type {
-			case .Int:
-				if col.nulls != nil && col.nulls[row] {
-					obj[col.name] = json.Null{}
-				} else {
-					base := uintptr(col.data) + uintptr(row * size_of(int))
-					v := (cast(^int)base)^
-					obj[col.name] = json.Integer(v)
-				}
-
-			case .Float:
-				if col.nulls != nil && col.nulls[row] {
-					obj[col.name] = json.Null{}
-				} else {
-					base := uintptr(col.data) + uintptr(row * size_of(f64))
-					v := (cast(^f64)base)^
-					obj[col.name] = json.Float(v)
-				}
-
-			case .Bool:
-				if col.nulls != nil && col.nulls[row] {
-					obj[col.name] = json.Null{}
-				} else {
-					base := uintptr(col.data) + uintptr(row * size_of(bool))
-					v := (cast(^bool)base)^
-					obj[col.name] = json.Boolean(v)
-				}
-
-			case .String:
-				if col.nulls != nil && col.nulls[row] {
-					obj[col.name] = json.Null{}
-				} else {
-					base := uintptr(col.data) + uintptr(row * size_of(string))
-					v := (cast(^string)base)^
-					obj[col.name] = json.String(v)
-				}
-
-			case .Date:
-				if col.nulls != nil && col.nulls[row] {
-					obj[col.name] = json.Null{}
-				} else {
-					base := uintptr(col.data) + uintptr(row * size_of(w.Date))
-					v := (cast(^w.Date)base)^
-					obj[col.name] = json.String(w.date_to_string(v))
-				}
-
-			case .Time:
-				if col.nulls != nil && col.nulls[row] {
-					obj[col.name] = json.Null{}
-				} else {
-					base := uintptr(col.data) + uintptr(row * size_of(w.Time))
-					v := (cast(^w.Time)base)^
-					obj[col.name] = json.String(w.time_to_string(v))
-				}
-
-			case .Datetime:
-				if col.nulls != nil && col.nulls[row] {
-					obj[col.name] = json.Null{}
-				} else {
-					base := uintptr(col.data) + uintptr(row * size_of(w.Datetime))
-					v := (cast(^w.Datetime)base)^
-					obj[col.name] = json.String(w.datetime_to_string(v))
-				}
-			}
-		}
-
-		bytes, err := json.marshal(obj, allocator = allocator)
-		if err != nil {
-			panic("jsonl_write: marshal failed")
-		}
-
-		strings.write_string(&builder, string(bytes))
+		_json_write_row(&builder, df, row, allocator)
 		strings.write_byte(&builder, '\n')
 	}
 
-	final := strings.to_string(builder)
-	err2 := os.write_entire_file(path, transmute([]u8)final)
-	if err2 != nil {
-		panic("json_write: failed to write file")
+	err := os.write_entire_file(path, transmute([]u8)strings.to_string(builder))
+	if err != nil {
+		panic("jsonl_write: failed to write file")
 	}
 }
