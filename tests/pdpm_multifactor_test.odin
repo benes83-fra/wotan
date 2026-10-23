@@ -169,6 +169,7 @@ pdpm_multifactor_test :: proc(allocator: mem.Allocator) {
 		&option_chain,
 		spot_price,
 		allocator,
+		1.0 / 252.0, // daily returns: price each option at its own expiry
 	)
 	defer {
 		delete(calibration_2f.sdf.values, allocator)
@@ -187,6 +188,7 @@ pdpm_multifactor_test :: proc(allocator: mem.Allocator) {
 		&option_chain,
 		spot_price,
 		allocator,
+		1.0 / 252.0, // daily returns: price each option at its own expiry
 	)
 	defer {
 		delete(calibration_4f.sdf.values, allocator)

@@ -1209,9 +1209,19 @@ _calibration_loss :: proc(
 	option_chain: ^OptionChain,
 	spot_price: f64,
 	allocator: mem.Allocator,
+	horizon: PDPM_Horizon = {},
 ) -> f64 {
 	// pricing scratch (payoffs, state prices) lives only for this evaluation
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	if horizon.returns_period > 0.0 {
+		Ctx :: struct {b, spot: f64, allocator: mem.Allocator}
+		ctx := Ctx{b, spot_price, allocator}
+		return _horizon_mse(market_returns, option_chain, horizon, proc(rets: []f64, disc: f64, sub: ^OptionChain, ud: rawptr) -> f64 {
+			c := (^Ctx)(ud)
+			mean_R, _ := _mean_gross(rets)
+			return _calibration_loss(c.b, mean_R, disc, rets, sub, c.spot, c.allocator)
+		}, &ctx)
+	}
 	n := len(market_returns)
 
 	// Enforce the constraint: a = 1/(1+rf) - b * E[R]
@@ -1292,6 +1302,7 @@ calibrate_sdf_linear :: proc(
 	max_iterations: int = 100,
 	tolerance: f64 = 1e-6,
 	allocator: mem.Allocator = context.allocator,
+	returns_period: f64 = 0.0, // years per return; > 0 prices each option at its own expiry (see PDPM_Horizon)
 ) -> CalibrationResult {
 	n := len(market_returns)
 	gross_returns := make([]f64, n, context.temp_allocator)
@@ -1304,7 +1315,8 @@ calibrate_sdf_linear :: proc(
 	for r in gross_returns {mean_R += r}
 	mean_R /= f64(n)
 
-	rf_discount := 1.0 / (1.0 + risk_free_rate)
+	rf_discount := _period_discount(risk_free_rate, returns_period)
+	horizon := PDPM_Horizon{returns_period, risk_free_rate}
 
 	// Use grid search instead of gradient descent
 	b_lo, b_hi := -10.0, 0.0
@@ -1319,6 +1331,7 @@ calibrate_sdf_linear :: proc(
 		b_hi,
 		100,
 		allocator,
+		horizon,
 	)
 
 	best_a := rf_discount - best_b * mean_R
@@ -1446,6 +1459,100 @@ _grid_interior :: proc(x, lo, hi: f64) -> bool {
 	return x > lo + tol && x < hi - tol
 }
 
+// Horizon-consistent pricing (opt-in). market_returns are one observation per
+// `returns_period` years (e.g. 1/252 for daily data); each option is then priced
+// on the states mapped to its own expiry T and discounted with e^(-r T), with
+// risk_free_rate read as an annual, continuously compounded rate.
+// returns_period = 0 keeps the legacy one-period pricing (states = 1 + r_i,
+// discount 1/(1+rf), option expiry unused).
+PDPM_Horizon :: struct {
+	returns_period: f64,
+	risk_free_rate: f64,
+}
+
+// Per-state-period discount used for the SDF a calibrator returns
+_period_discount :: proc(risk_free_rate, returns_period: f64) -> f64 {
+	if returns_period > 0.0 {return math.exp(-risk_free_rate * returns_period)}
+	return 1.0 / (1.0 + risk_free_rate)
+}
+
+// Map one-period net returns to horizon T by square-root-of-time scaling of the
+// log returns around their mean: ln R_T = h m + (ln R - m) sqrt(h), h = T / period.
+// Preserves the empirical shape of the shocks; the drift scales with h.
+pdpm_horizon_returns :: proc(
+	returns: []f64,
+	returns_period, T: f64,
+	allocator: mem.Allocator = context.allocator,
+) -> []f64 {
+	n := len(returns)
+	out := make([]f64, n, allocator)
+	m := 0.0
+	for r in returns {m += math.ln(1.0 + r)}
+	m /= f64(n)
+	h := T / returns_period
+	sh := math.sqrt(h)
+	for r, i in returns {
+		out[i] = math.exp(h * m + (math.ln(1.0 + r) - m) * sh) - 1.0
+	}
+	return out
+}
+
+// Option-count-weighted MSE over the distinct expiries of the chain: `eval` is a
+// one-period loss called with the horizon states and e^(-r T) for each expiry group
+_Horizon_Eval :: proc(horizon_returns: []f64, discount: f64, sub: ^OptionChain, user_data: rawptr) -> f64
+
+_horizon_mse :: proc(
+	market_returns: []f64,
+	option_chain: ^OptionChain,
+	horizon: PDPM_Horizon,
+	eval: _Horizon_Eval,
+	user_data: rawptr,
+) -> f64 {
+	n_opt := option_chain.n_options
+	done := make([]bool, n_opt, context.temp_allocator)
+	idx := make([dynamic]int, 0, n_opt, context.temp_allocator)
+	total := 0.0
+	for k in 0 ..< n_opt {
+		if done[k] {continue}
+		T := option_chain.expiries[k]
+		clear(&idx)
+		for j in k ..< n_opt {
+			if !done[j] && option_chain.expiries[j] == T {
+				append(&idx, j)
+				done[j] = true
+			}
+		}
+		m := len(idx)
+		sub := OptionChain {
+			strikes       = make([]f64, m, context.temp_allocator),
+			expiries      = make([]f64, m, context.temp_allocator),
+			implied_vols  = make([]f64, m, context.temp_allocator),
+			market_prices = make([]f64, m, context.temp_allocator),
+			option_types  = make([]string, m, context.temp_allocator),
+			n_options     = m,
+		}
+		for j, q in idx {
+			sub.strikes[q] = option_chain.strikes[j]
+			sub.expiries[q] = T
+			sub.implied_vols[q] = option_chain.implied_vols[j] if len(option_chain.implied_vols) > j else 0.0
+			sub.market_prices[q] = option_chain.market_prices[j]
+			sub.option_types[q] = option_chain.option_types[j]
+		}
+		rets := pdpm_horizon_returns(market_returns, horizon.returns_period, T, context.temp_allocator)
+		total += f64(m) * eval(rets, math.exp(-horizon.risk_free_rate * T), &sub, user_data)
+	}
+	return total / f64(n_opt)
+}
+
+_mean_gross :: proc(returns: []f64) -> (mean_R, mean_R2: f64) {
+	for r in returns {
+		R := 1.0 + r
+		mean_R += R
+		mean_R2 += R * R
+	}
+	return mean_R / f64(len(returns)), mean_R2 / f64(len(returns))
+}
+
 PDPMCalibrationParams :: struct {
 	b: f64, // The only parameter to optimize
 }
@@ -1459,6 +1566,7 @@ _pdpm_grid_evaluator :: proc(
 	option_chain: ^OptionChain,
 	spot_price: f64,
 	allocator: mem.Allocator,
+	horizon: PDPM_Horizon = {},
 ) -> f64 {
 	loss := _calibration_loss(
 		b,
@@ -1468,6 +1576,7 @@ _pdpm_grid_evaluator :: proc(
 		option_chain,
 		spot_price,
 		allocator,
+		horizon,
 	)
 	return -math.sqrt_f64(loss) // Return negative RMSE (higher is better)
 }
@@ -1483,6 +1592,7 @@ pdpm_grid_search :: proc(
 	b_max: f64 = 0.0,
 	n_grid: int = 100,
 	allocator: mem.Allocator = context.allocator,
+	horizon := PDPM_Horizon{},
 ) -> (
 	best_b: f64,
 	best_rmse: f64,
@@ -1504,6 +1614,7 @@ pdpm_grid_search :: proc(
 			option_chain,
 			spot_price,
 			allocator,
+			horizon,
 		)
 
 		if score > best_score {
@@ -1525,6 +1636,7 @@ pdpm_grid_search :: proc(
 			option_chain,
 			spot_price,
 			allocator,
+			horizon,
 		)
 
 		if score > best_score {
@@ -1557,9 +1669,18 @@ _calibration_loss_power_utility :: proc(
 	option_chain: ^OptionChain,
 	spot_price: f64,
 	allocator: mem.Allocator,
+	horizon: PDPM_Horizon = {},
 ) -> f64 {
 	// pricing scratch (payoffs, state prices) lives only for this evaluation
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	if horizon.returns_period > 0.0 {
+		Ctx :: struct {gamma, spot: f64, allocator: mem.Allocator}
+		ctx := Ctx{gamma, spot_price, allocator}
+		return _horizon_mse(market_returns, option_chain, horizon, proc(rets: []f64, disc: f64, sub: ^OptionChain, ud: rawptr) -> f64 {
+			c := (^Ctx)(ud)
+			return _calibration_loss_power_utility(c.gamma, disc, rets, sub, c.spot, c.allocator)
+		}, &ctx)
+	}
 	n := len(market_returns)
 
 	gross_returns := make([]f64, n, allocator)
@@ -1638,6 +1759,7 @@ pdpm_grid_search_power_utility :: proc(
 	gamma_max: f64 = 10.0,
 	n_grid: int = 100,
 	allocator: mem.Allocator = context.allocator,
+	horizon := PDPM_Horizon{},
 ) -> (
 	best_gamma: f64,
 	best_rmse: f64,
@@ -1658,6 +1780,7 @@ pdpm_grid_search_power_utility :: proc(
 			option_chain,
 			spot_price,
 			allocator,
+			horizon,
 		)
 
 		if loss < best_loss {
@@ -1679,6 +1802,7 @@ pdpm_grid_search_power_utility :: proc(
 				option_chain,
 				spot_price,
 				allocator,
+				horizon,
 			)
 
 			if loss < best_loss {
@@ -1699,8 +1823,10 @@ calibrate_sdf_power_utility :: proc(
 	option_chain: ^OptionChain,
 	spot_price: f64,
 	allocator: mem.Allocator = context.allocator,
+	returns_period: f64 = 0.0, // years per return; > 0 prices each option at its own expiry (see PDPM_Horizon)
 ) -> CalibrationResult {
-	rf_discount := 1.0 / (1.0 + risk_free_rate)
+	rf_discount := _period_discount(risk_free_rate, returns_period)
+	horizon := PDPM_Horizon{returns_period, risk_free_rate}
 	gamma_lo, gamma_hi := 0.5, 10.0
 
 	fmt.println("Running Power Utility SDF grid search...")
@@ -1713,6 +1839,7 @@ calibrate_sdf_power_utility :: proc(
 		gamma_hi,
 		100,
 		allocator,
+		horizon,
 	)
 	beta := _power_utility_beta(best_gamma, rf_discount, market_returns)
 
@@ -1781,9 +1908,19 @@ _calibration_loss_quadratic :: proc(
 	option_chain: ^OptionChain,
 	spot_price: f64,
 	allocator: mem.Allocator,
+	horizon: PDPM_Horizon = {},
 ) -> f64 {
 	// pricing scratch (payoffs, state prices) lives only for this evaluation
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	if horizon.returns_period > 0.0 {
+		Ctx :: struct {b, c, spot: f64, allocator: mem.Allocator}
+		ctx := Ctx{b, c, spot_price, allocator}
+		return _horizon_mse(market_returns, option_chain, horizon, proc(rets: []f64, disc: f64, sub: ^OptionChain, ud: rawptr) -> f64 {
+			q := (^Ctx)(ud)
+			mean_R, mean_R2 := _mean_gross(rets)
+			return _calibration_loss_quadratic(q.b, q.c, mean_R, mean_R2, disc, rets, sub, q.spot, q.allocator)
+		}, &ctx)
+	}
 	n := len(market_returns)
 
 	// Enforce constraint: a = rf_discount - b*E[R] - c*E[R²]
@@ -1867,6 +2004,7 @@ pdpm_grid_search_quadratic :: proc(
 	c_range: f64 = 10.0,
 	n_grid: int = 20,
 	allocator: mem.Allocator = context.allocator,
+	horizon := PDPM_Horizon{},
 ) -> (
 	best_b: f64,
 	best_c: f64,
@@ -1894,6 +2032,7 @@ pdpm_grid_search_quadratic :: proc(
 				option_chain,
 				spot_price,
 				allocator,
+				horizon,
 			)
 
 			if loss < best_loss {
@@ -1921,6 +2060,7 @@ pdpm_grid_search_quadratic :: proc(
 				option_chain,
 				spot_price,
 				allocator,
+				horizon,
 			)
 
 			if loss < best_loss {
@@ -1942,6 +2082,7 @@ calibrate_sdf_quadratic :: proc(
 	option_chain: ^OptionChain,
 	spot_price: f64,
 	allocator: mem.Allocator = context.allocator,
+	returns_period: f64 = 0.0, // years per return; > 0 prices each option at its own expiry (see PDPM_Horizon)
 ) -> CalibrationResult {
 	n := len(market_returns)
 	gross_returns := make([]f64, n, context.temp_allocator)
@@ -1959,7 +2100,8 @@ calibrate_sdf_quadratic :: proc(
 	mean_R /= f64(n)
 	mean_R2 /= f64(n)
 
-	rf_discount := 1.0 / (1.0 + risk_free_rate)
+	rf_discount := _period_discount(risk_free_rate, returns_period)
+	horizon := PDPM_Horizon{returns_period, risk_free_rate}
 	b_range, c_range := 20.0, 10.0
 
 	fmt.println("Running Quadratic SDF 2D grid search...")
@@ -1974,6 +2116,7 @@ calibrate_sdf_quadratic :: proc(
 		c_range,
 		20,
 		allocator,
+		horizon,
 	)
 
 	best_a := rf_discount - best_b * mean_R - best_c * mean_R2
@@ -2042,9 +2185,18 @@ _calibration_loss_exponential :: proc(
 	option_chain: ^OptionChain,
 	spot_price: f64,
 	allocator: mem.Allocator,
+	horizon: PDPM_Horizon = {},
 ) -> f64 {
 	// pricing scratch (payoffs, state prices) lives only for this evaluation
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	if horizon.returns_period > 0.0 {
+		Ctx :: struct {gamma, spot: f64, allocator: mem.Allocator}
+		ctx := Ctx{gamma, spot_price, allocator}
+		return _horizon_mse(market_returns, option_chain, horizon, proc(rets: []f64, disc: f64, sub: ^OptionChain, ud: rawptr) -> f64 {
+			c := (^Ctx)(ud)
+			return _calibration_loss_exponential(c.gamma, disc, rets, sub, c.spot, c.allocator)
+		}, &ctx)
+	}
 	n := len(market_returns)
 
 	gross_returns := make([]f64, n, allocator)
@@ -2139,6 +2291,7 @@ pdpm_grid_search_exponential :: proc(
 	gamma_max: f64 = 5.0,
 	n_grid: int = 100,
 	allocator: mem.Allocator = context.allocator,
+	horizon := PDPM_Horizon{},
 ) -> (
 	best_gamma: f64,
 	best_rmse: f64,
@@ -2161,6 +2314,7 @@ pdpm_grid_search_exponential :: proc(
 			option_chain,
 			spot_price,
 			allocator,
+			horizon,
 		)
 
 		if loss < best_loss {
@@ -2181,6 +2335,7 @@ pdpm_grid_search_exponential :: proc(
 			option_chain,
 			spot_price,
 			allocator,
+			horizon,
 		)
 
 		if loss < best_loss {
@@ -2200,8 +2355,10 @@ calibrate_sdf_exponential :: proc(
 	option_chain: ^OptionChain,
 	spot_price: f64,
 	allocator: mem.Allocator = context.allocator,
+	returns_period: f64 = 0.0, // years per return; > 0 prices each option at its own expiry (see PDPM_Horizon)
 ) -> CalibrationResult {
-	rf_discount := 1.0 / (1.0 + risk_free_rate)
+	rf_discount := _period_discount(risk_free_rate, returns_period)
+	horizon := PDPM_Horizon{returns_period, risk_free_rate}
 	n := len(market_returns)
 
 	gamma_lo, gamma_hi := -5.0, 5.0
@@ -2215,6 +2372,7 @@ calibrate_sdf_exponential :: proc(
 		gamma_hi,
 		100,
 		allocator,
+		horizon,
 	)
 
 	fmt.printf(
@@ -2303,9 +2461,22 @@ _calibration_loss_multifactor :: proc(
 	option_chain: ^OptionChain,
 	spot_price: f64,
 	allocator: mem.Allocator,
+	horizon: PDPM_Horizon = {},
 ) -> f64 {
 	// pricing scratch (payoffs, state prices) lives only for this evaluation
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	if horizon.returns_period > 0.0 {
+		// only the market factor (factors[0], the terminal-price driver) is mapped to the horizon
+		Ctx :: struct {weights: []f64, factors: [][]f64, spot: f64, allocator: mem.Allocator}
+		ctx := Ctx{weights, factors, spot_price, allocator}
+		return _horizon_mse(factors[0], option_chain, horizon, proc(rets: []f64, disc: f64, sub: ^OptionChain, ud: rawptr) -> f64 {
+			c := (^Ctx)(ud)
+			fT := make([][]f64, len(c.factors), context.temp_allocator)
+			copy(fT, c.factors)
+			fT[0] = rets
+			return _calibration_loss_multifactor(c.weights, fT, disc, sub, c.spot, c.allocator)
+		}, &ctx)
+	}
 	n := len(factors[0])
 	n_factors := len(factors)
 
@@ -2407,6 +2578,7 @@ pdpm_grid_search_multifactor_2d :: proc(
 	range2: f64 = 5.0,
 	n_grid: int = 20,
 	allocator: mem.Allocator = context.allocator,
+	horizon := PDPM_Horizon{},
 ) -> (
 	best_weights: []f64,
 	best_rmse: f64,
@@ -2433,6 +2605,7 @@ pdpm_grid_search_multifactor_2d :: proc(
 				option_chain,
 				spot_price,
 				allocator,
+				horizon,
 			)
 
 			if loss < best_loss {
@@ -2457,6 +2630,7 @@ pdpm_grid_search_multifactor_2d :: proc(
 				option_chain,
 				spot_price,
 				allocator,
+				horizon,
 			)
 
 			if loss < best_loss {
@@ -2479,9 +2653,11 @@ calibrate_sdf_multifactor_2d :: proc(
 	option_chain: ^OptionChain,
 	spot_price: f64,
 	allocator: mem.Allocator = context.allocator,
+	returns_period: f64 = 0.0, // years per return; > 0 prices each option at its own expiry (see PDPM_Horizon)
 ) -> CalibrationResult {
 	n := len(market_returns)
-	rf_discount := 1.0 / (1.0 + risk_free_rate)
+	rf_discount := _period_discount(risk_free_rate, returns_period)
+	horizon := PDPM_Horizon{returns_period, risk_free_rate}
 
 	// Prepare factors
 	factors := make([][]f64, 2, allocator)
@@ -2499,6 +2675,7 @@ calibrate_sdf_multifactor_2d :: proc(
 		range2,
 		20,
 		allocator,
+		horizon,
 	)
 
 	fmt.printf("2-Factor Exponential SDF calibration complete:\n")
@@ -2631,9 +2808,22 @@ _calibration_loss_multifactor_4d :: proc(
 	option_chain: ^OptionChain,
 	spot_price: f64,
 	allocator: mem.Allocator,
+	horizon: PDPM_Horizon = {},
 ) -> f64 {
 	// pricing scratch (payoffs, state prices) lives only for this evaluation
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	if horizon.returns_period > 0.0 {
+		// only the market factor (factors[0], the terminal-price driver) is mapped to the horizon
+		Ctx :: struct {weights: []f64, factors: [][]f64, spot: f64, allocator: mem.Allocator}
+		ctx := Ctx{weights, factors, spot_price, allocator}
+		return _horizon_mse(factors[0], option_chain, horizon, proc(rets: []f64, disc: f64, sub: ^OptionChain, ud: rawptr) -> f64 {
+			c := (^Ctx)(ud)
+			fT := make([][]f64, len(c.factors), context.temp_allocator)
+			copy(fT, c.factors)
+			fT[0] = rets
+			return _calibration_loss_multifactor_4d(c.weights, fT, disc, sub, c.spot, c.allocator)
+		}, &ctx)
+	}
 	n := len(factors[0])
 	n_factors := len(factors)
 
@@ -2731,6 +2921,7 @@ pdpm_grid_search_multifactor_4d :: proc(
 	range: f64 = 5.0,
 	n_grid: int = 10,
 	allocator: mem.Allocator = context.allocator,
+	horizon := PDPM_Horizon{},
 ) -> (
 	best_weights: []f64,
 	best_rmse: f64,
@@ -2759,6 +2950,7 @@ pdpm_grid_search_multifactor_4d :: proc(
 						option_chain,
 						spot_price,
 						allocator,
+						horizon,
 					)
 
 					if loss < best_loss {
@@ -2792,6 +2984,7 @@ pdpm_grid_search_multifactor_4d :: proc(
 						option_chain,
 						spot_price,
 						allocator,
+						horizon,
 					)
 
 					if loss < best_loss {
@@ -2820,9 +3013,11 @@ calibrate_sdf_multifactor_4d :: proc(
 	option_chain: ^OptionChain,
 	spot_price: f64,
 	allocator: mem.Allocator = context.allocator,
+	returns_period: f64 = 0.0, // years per return; > 0 prices each option at its own expiry (see PDPM_Horizon)
 ) -> CalibrationResult {
 	n := len(market_returns)
-	rf_discount := 1.0 / (1.0 + risk_free_rate)
+	rf_discount := _period_discount(risk_free_rate, returns_period)
+	horizon := PDPM_Horizon{returns_period, risk_free_rate}
 
 	// Prepare 4 factors
 	factors := make([][]f64, 4, allocator)
@@ -2843,6 +3038,7 @@ calibrate_sdf_multifactor_4d :: proc(
 		weight_range,
 		10,
 		allocator,
+		horizon,
 	)
 
 	fmt.printf("4-Factor Exponential SDF calibration complete:\n")

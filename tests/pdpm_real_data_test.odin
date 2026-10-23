@@ -97,6 +97,7 @@ pdpm_real_data_test :: proc(allocator: mem.Allocator) {
 		1000,
 		1e-3,
 		allocator,
+		1.0 / 252.0, // daily returns: price each option at its own expiry
 	)
 	defer {
 		delete(calibration.sdf.values, allocator)
@@ -110,7 +111,7 @@ pdpm_real_data_test :: proc(allocator: mem.Allocator) {
 	fmt.printf(
 		"  SDF Mean: %.4f (Target: %.4f)\n",
 		calibration.sdf.mean,
-		1.0 / (1.0 + risk_free_rate),
+		math.exp(-risk_free_rate / 252.0), // per-day discount of the returned daily SDF
 	)
 
 	// 4. Compare prices
@@ -159,6 +160,7 @@ pdpm_real_data_test :: proc(allocator: mem.Allocator) {
 		&option_chain,
 		spot_price,
 		allocator,
+		1.0 / 252.0, // daily returns: price each option at its own expiry
 	)
 	defer {
 		delete(calibration_power.sdf.values, allocator)
@@ -178,6 +180,7 @@ pdpm_real_data_test :: proc(allocator: mem.Allocator) {
 		&option_chain,
 		spot_price,
 		allocator,
+		1.0 / 252.0, // daily returns: price each option at its own expiry
 	)
 	defer {
 		delete(calibration_quad.sdf.values, allocator)
@@ -218,6 +221,7 @@ pdpm_real_data_test :: proc(allocator: mem.Allocator) {
 		&option_chain,
 		spot_price,
 		allocator,
+		1.0 / 252.0, // daily returns: price each option at its own expiry
 	)
 	defer {
 		delete(calibration_exp.sdf.values, allocator)

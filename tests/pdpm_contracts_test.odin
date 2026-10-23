@@ -11,6 +11,8 @@ import "core:mem"
 // - exponential, power-utility and 2-factor calibrations recover the generating
 //   parameters, report an interior optimum as converged, and keep E[M] = 1/(1+rf)
 // - an optimum on the edge of the search range is reported as not converged
+// - returns_period: horizon states scale correctly and daily states price a
+//   multi-expiry Black-Scholes chain that one-period pricing cannot
 
 pdpm_contracts_test :: proc(allocator: mem.Allocator) {
 	seed_test(#procedure)
@@ -119,6 +121,56 @@ pdpm_contracts_test :: proc(allocator: mem.Allocator) {
 	defer free_cal(&edge)
 	expect(&passed, &total, edge.sdf.risk_aversion == 5.0 && !edge.converged,
 		fmt.tprintf("edge optimum gamma = %.4f reported as not converged (%v)", edge.sdf.risk_aversion, edge.converged))
+
+	// 6. horizon mapping: identity at T = period, log-variance scales with T / period
+	dt := 1.0 / 252.0
+	daily := make([]f64, 2000)
+	defer delete(daily)
+	for &v in daily {v = math.exp(0.0003 + 0.0126 * rand.norm_float64()) - 1.0}
+	same := fin.pdpm_horizon_returns(daily, dt, dt, allocator)
+	defer delete(same)
+	month := fin.pdpm_horizon_returns(daily, dt, 21 * dt, allocator)
+	defer delete(month)
+	log_var :: proc(x: []f64) -> f64 {
+		m, v := 0.0, 0.0
+		for r in x {m += math.ln(1 + r)}
+		m /= f64(len(x))
+		for r in x {v += (math.ln(1 + r) - m) * (math.ln(1 + r) - m)}
+		return v / f64(len(x))
+	}
+	worst := 0.0
+	for v, i in same {worst = max(worst, abs(v - daily[i]))}
+	ratio := log_var(month) / log_var(daily)
+	expect(&passed, &total, worst < 1e-15 && abs(ratio / 21.0 - 1.0) < 1e-9,
+		fmt.tprintf("horizon states: identity at T = period (%.1e), log-variance x%.6f at 21 periods", worst, ratio))
+
+	// 7. returns_period: daily states price a Black-Scholes chain with 7d / 30d / 3m
+	//    expiries; one-period pricing cannot (it prices every option as 1-day)
+	bs_r, bs_sigma := 0.03, 0.2
+	Ts := []f64{7.0 / 365.0, 30.0 / 365.0, 0.25}
+	n_bs := 10 * len(Ts)
+	bs := fin.OptionChain{make([]f64, n_bs), make([]f64, n_bs), make([]f64, n_bs), make([]f64, n_bs), make([]string, n_bs), n_bs}
+	defer {delete(bs.strikes); delete(bs.expiries); delete(bs.implied_vols); delete(bs.market_prices); delete(bs.option_types)}
+	Ncdf :: proc(x: f64) -> f64 {return 0.5 * (1 + math.erf(x / math.sqrt_f64(2)))}
+	for T, t in Ts {
+		for k in 0 ..< 10 {
+			idx := 10 * t + k
+			K := spot * math.exp(bs_sigma * math.sqrt(T) * (f64(k / 2) - 2.0)) // -2 .. +2 sd
+			d1 := (math.ln(spot / K) + (bs_r + 0.5 * bs_sigma * bs_sigma) * T) / (bs_sigma * math.sqrt(T))
+			d2 := d1 - bs_sigma * math.sqrt(T)
+			call := spot * Ncdf(d1) - K * math.exp(-bs_r * T) * Ncdf(d2)
+			bs.strikes[idx], bs.expiries[idx], bs.implied_vols[idx] = K, T, bs_sigma
+			bs.option_types[idx] = "call" if k % 2 == 0 else "put"
+			bs.market_prices[idx] = call if k % 2 == 0 else call - spot + K * math.exp(-bs_r * T)
+		}
+	}
+	for &v in daily {v = math.exp((0.08 - 0.02) * dt + bs_sigma * math.sqrt(dt) * rand.norm_float64()) - 1.0}
+	legacy := fin.calibrate_sdf_power_utility(daily, bs_r, &bs, spot, allocator)
+	defer free_cal(&legacy)
+	hz := fin.calibrate_sdf_power_utility(daily, bs_r, &bs, spot, allocator, dt)
+	defer free_cal(&hz)
+	expect(&passed, &total, hz.rmse < 0.1 && legacy.rmse > 10 * hz.rmse && abs(hz.sdf.mean / math.exp(-bs_r * dt) - 1.0) < 1e-12,
+		fmt.tprintf("returns_period prices 7d/30d/3m BS chain: RMSE $%.4f (one-period $%.4f, gamma %.2f)", hz.rmse, legacy.rmse, hz.sdf.risk_aversion))
 
 	fmt.printf("PDPM contracts summary: %d/%d passed\n", passed, total)
 	record_failures(total - passed)
