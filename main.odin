@@ -465,6 +465,7 @@ main :: proc() {
 	test.gradcheck_ops_test(context.temp_allocator)
 	test.matmul_kernels_test(context.temp_allocator)
 	test.autograd_api_test(context.temp_allocator)
+	test.autograd_deep_graph_test(context.temp_allocator)
 	test.sequential_test(context.temp_allocator)
 	test.mnist_loader_test(context.temp_allocator)
 	test.persistence_test(context.temp_allocator)

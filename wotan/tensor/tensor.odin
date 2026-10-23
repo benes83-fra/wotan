@@ -556,18 +556,37 @@ tensor_flatten :: proc(input: ^Tensor) -> ^Tensor {
 // 4. The Backward Engine (Chain Rule)
 // ============================================================================
 
+// Graph walks use an explicit stack instead of recursion: unrolled recurrent
+// nets and long accumulation loops build graphs thousands of nodes deep, which
+// overflowed the call stack. Each frame remembers the next input to visit, so
+// the visiting order is exactly that of the recursive depth-first walk.
+_Walk_Frame :: struct {
+	node: ^Tensor,
+	next: int,
+}
+
 // Helper: Topological Sort to determine the order of operations
+// (post-order depth-first: every node after all of its inputs)
 _build_topo :: proc(node: ^Tensor, topo: ^[dynamic]^Tensor, visited: ^map[^Tensor]bool) {
-	if node == nil {return}
-	if visited[node] {return}
-
+	if node == nil || visited[node] {return}
+	stack := make([dynamic]_Walk_Frame, 0, 64, context.temp_allocator)
+	defer delete(stack)
 	visited[node] = true
-
-	for input in node.inputs {
-		_build_topo(input, topo, visited)
+	append(&stack, _Walk_Frame{node, 0})
+	for len(stack) > 0 {
+		top := &stack[len(stack) - 1]
+		if top.next < len(top.node.inputs) {
+			input := top.node.inputs[top.next]
+			top.next += 1
+			if input != nil && !visited[input] {
+				visited[input] = true
+				append(&stack, _Walk_Frame{input, 0})
+			}
+			continue
+		}
+		append(topo, top.node)
+		pop(&stack)
 	}
-
-	append(topo, node)
 }
 // tensor_ensure_grad ensures a tensor has a gradient matrix allocated
 tensor_ensure_grad :: proc(t: ^Tensor) {
@@ -825,31 +844,36 @@ tensor_matmul :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
 
 	return out
 }
-// _tensor_free_graph_impl is the recursive helper
+// _tensor_free_graph_impl frees the intermediate nodes below `node`, inputs
+// first (post-order). Leaf nodes (op == .None) are user-managed and kept.
 _tensor_free_graph_impl :: proc(node: ^Tensor, visited: ^map[^Tensor]bool) {
-	if node == nil {return}
-	if visited[node] {return} 	// Prevent double-free in DAGs
+	if node == nil || visited[node] {return} 	// visited prevents double-free in DAGs
 	visited[node] = true
-
-	// ✅ CRITICAL: Do NOT free leaf nodes (op == .None).
-	// Leaf nodes are user-managed (e.g., input data, weights).
-	if node.op == .None {
-		return
+	if node.op == .None {return}
+	stack := make([dynamic]_Walk_Frame, 0, 64, context.temp_allocator)
+	defer delete(stack)
+	append(&stack, _Walk_Frame{node, 0})
+	for len(stack) > 0 {
+		top := &stack[len(stack) - 1]
+		if top.next < len(top.node.inputs) {
+			input := top.node.inputs[top.next]
+			top.next += 1
+			if input != nil && !visited[input] {
+				visited[input] = true
+				if input.op != .None {append(&stack, _Walk_Frame{input, 0})}
+			}
+			continue
+		}
+		n := top.node
+		pop(&stack)
+		if n.data.data != nil {l.matrix_free(&n.data)}
+		if n.grad.data != nil {l.matrix_free(&n.grad)}
+		delete(n.inputs)
+		delete(n.int_metadata)
+		delete(n.f64_metadata)
+		if n.dropout_mask != nil {delete(n.dropout_mask, n.allocator)}
+		free(n, n.allocator)
 	}
-
-	// Recursively free inputs first
-	for input in node.inputs {
-		_tensor_free_graph_impl(input, visited)
-	}
-
-	// Free this intermediate node
-	if node.data.data != nil {l.matrix_free(&node.data)}
-	if node.grad.data != nil {l.matrix_free(&node.grad)}
-	delete(node.inputs)
-	delete(node.int_metadata)
-	delete(node.f64_metadata)
-	if node.dropout_mask != nil {delete(node.dropout_mask, node.allocator)}
-	free(node, node.allocator)
 }
 
 // tensor_free_graph automatically cleans up all intermediate tensors
@@ -883,15 +907,27 @@ tensor_free_graph :: proc(root: ^Tensor, allocator: mem.Allocator = context.allo
 	delete(nodes)
 }
 
+// Pre-order depth-first collection (node before its inputs)
 _collect_graph_nodes :: proc(node: ^Tensor, nodes: ^[dynamic]^Tensor, visited: ^map[^Tensor]bool) {
-	if node == nil {return}
-	if visited[node] {return}
+	if node == nil || visited[node] {return}
+	stack := make([dynamic]_Walk_Frame, 0, 64, context.temp_allocator)
+	defer delete(stack)
 	visited[node] = true
-
 	append(nodes, node)
-
-	for input in node.inputs {
-		_collect_graph_nodes(input, nodes, visited)
+	append(&stack, _Walk_Frame{node, 0})
+	for len(stack) > 0 {
+		top := &stack[len(stack) - 1]
+		if top.next < len(top.node.inputs) {
+			input := top.node.inputs[top.next]
+			top.next += 1
+			if input != nil && !visited[input] {
+				visited[input] = true
+				append(nodes, input)
+				append(&stack, _Walk_Frame{input, 0})
+			}
+			continue
+		}
+		pop(&stack)
 	}
 }
 
@@ -1011,11 +1047,32 @@ tensor_validate_graph :: proc(root: ^Tensor) -> bool {
 	return _validate_graph_impl(root, &visited)
 }
 
+// Pre-order check of every node (explicit stack); stops at the first invalid one
 _validate_graph_impl :: proc(node: ^Tensor, visited: ^map[^Tensor]bool) -> bool {
-	if node == nil {return true}
-	if visited[node] {return true}
+	if node == nil || visited[node] {return true}
 	visited[node] = true
+	if !_validate_node(node) {return false}
+	stack := make([dynamic]_Walk_Frame, 0, 64, context.temp_allocator)
+	defer delete(stack)
+	append(&stack, _Walk_Frame{node, 0})
+	for len(stack) > 0 {
+		top := &stack[len(stack) - 1]
+		if top.next < len(top.node.inputs) {
+			input := top.node.inputs[top.next]
+			top.next += 1
+			if input != nil && !visited[input] {
+				visited[input] = true
+				if !_validate_node(input) {return false}
+				append(&stack, _Walk_Frame{input, 0})
+			}
+			continue
+		}
+		pop(&stack)
+	}
+	return true
+}
 
+_validate_node :: proc(node: ^Tensor) -> bool {
 	// Check that this node has valid data
 	if len(node.data.data) == 0 {
 		fmt.printf("ERROR: Tensor with op %v has empty data\n", node.op)
@@ -1027,13 +1084,6 @@ _validate_graph_impl :: proc(node: ^Tensor, visited: ^map[^Tensor]bool) -> bool 
 	if node.op == .None && node.requires_grad && node.grad.data == nil {
 		fmt.printf("ERROR: Leaf tensor requires grad but has nil gradient\n")
 		return false
-	}
-
-	// Recursively check inputs
-	for input in node.inputs {
-		if !_validate_graph_impl(input, visited) {
-			return false
-		}
 	}
 
 	return true
