@@ -90,24 +90,27 @@ grow :: proc(c: ^Column, new_capacity: int) {
 		return
 	}
 
+	// buffers belong to the column's allocator (columns built by literal fall
+	// back to the context allocator)
+	if c.allocator.procedure == nil {c.allocator = context.allocator}
 	new_size := new_capacity * type_size(c.type)
-	new_data, err := mem.alloc(new_size)
+	new_data, err := mem.alloc(new_size, allocator = c.allocator)
 	if err != nil {
 		panic("allocation failed")
 	}
 
-
 	old_size := c.len * type_size(c.type)
-	mem.copy(new_data, c.data, old_size)
-
-	mem.free(c.data)
+	if c.data != nil {
+		mem.copy(new_data, c.data, old_size)
+		mem.free(c.data, c.allocator)
+	}
 	c.data = new_data
 	c.capacity = new_capacity
 
 	if c.nulls != nil {
-		new_nulls := make([]bool, new_capacity)
+		new_nulls := make([]bool, new_capacity, c.allocator)
 		copy(new_nulls, c.nulls)
-		delete(c.nulls)
+		delete(c.nulls, c.allocator)
 		c.nulls = new_nulls
 	}
 }
@@ -240,7 +243,7 @@ append_time :: proc(c: ^Column, v: Time) {
 	idx := c.len
 	c.len += 1
 
-	base := uintptr(c.data) + uintptr(idx * size_of(Date))
+	base := uintptr(c.data) + uintptr(idx * size_of(Time))
 	(cast(^Time)base)^ = v
 }
 
@@ -273,149 +276,208 @@ append_null :: proc(c: ^Column) {
 	c.len += 1
 
 	if c.nulls == nil {
-		c.nulls = make([]bool, c.capacity)
+		if c.allocator.procedure == nil {c.allocator = context.allocator}
+		c.nulls = make([]bool, c.capacity, c.allocator)
 	}
 	c.nulls[idx] = true
 }
 
+// Physical column and row behind row `i` of `col`: bounds-checked against the
+// (view) column itself, then resolved through views (nested views add up
+// their offsets)
+column_resolve :: proc(col: ^Column, i: int, loc := #caller_location) -> (^Column, int) {
+	if i < 0 || i >= col.len {
+		panic(fmt.tprintf("column %q: row %d out of range 0..<%d", col.name, i, col.len), loc)
+	}
+	c, r := col, i
+	for c.is_view {
+		r += c.offset
+		c = c.orig
+	}
+	return c, r
+}
+
+@(private = "file")
+_cell_ptr :: #force_inline proc(c: ^Column, r: int) -> uintptr {
+	return uintptr(c.data) + uintptr(r * type_size(c.type))
+}
+
+@(private = "file")
+_null_at :: #force_inline proc(c: ^Column, r: int) -> bool {
+	return c.nulls != nil && r < len(c.nulls) && c.nulls[r]
+}
+
 column_at_ptr :: proc(col: ^Column, i: int) -> (uintptr, bool) {
-
-	if i < 0 || i >= col.len {
-		panic("column_at_int: index out of range")
-	}
-
-	if col.is_view {
-		return column_at_ptr(col.orig, col.offset + i)
-	}
-
-	if col.nulls != nil && col.nulls[i] {
+	c, r := column_resolve(col, i)
+	if _null_at(c, r) {
 		return 0, true
 	}
-	base := uintptr(col.data) + uintptr(i * type_size(col.type))
-
-	return base, false
-
+	return _cell_ptr(c, r), false
 }
 
 
-// Column read helpers (safe, copy-based readers)
+// Column read helpers (safe, copy-based readers; second result = is_null)
 column_at_int :: proc(col: ^Column, i: int) -> (int, bool) {
-	if col.is_view {
-		return column_at_int(col.orig, col.offset + i)
-	}
-
-	if i < 0 || i >= col.len {
-		fmt.println(" Index is :", i)
-		panic("column_at_int: index out of range")
-	}
-
-	if col.nulls != nil && col.nulls[i] {
-		return 0, true
-	}
-	base := uintptr(col.data) + uintptr(i * type_size(col.type))
-	return (cast(^int)base)^, false
+	c, r := column_resolve(col, i)
+	if _null_at(c, r) {return 0, true}
+	return (cast(^int)_cell_ptr(c, r))^, false
 }
-
 
 column_at_float :: proc(col: ^Column, i: int) -> (f64, bool) {
-	if i < 0 || i >= col.len {
-		panic("column_at_float: index out of range")
-	}
-	if col.is_view {
-		return column_at_float(col.orig, col.offset + i)
-	}
-	if col.nulls != nil && col.nulls[i] {
-		return 0.0, true
-	}
-	base := uintptr(col.data) + uintptr(i * type_size(col.type))
-	return (cast(^f64)base)^, false
+	c, r := column_resolve(col, i)
+	if _null_at(c, r) {return 0.0, true}
+	return (cast(^f64)_cell_ptr(c, r))^, false
 }
 
 column_at_bool :: proc(col: ^Column, i: int) -> (bool, bool) {
-	if i < 0 || i >= col.len {
-		panic("column_at_bool: index out of range")
-	}
-	if col.is_view {
-		return column_at_bool(col.orig, col.offset + i)
-	}
-	if col.nulls != nil && col.nulls[i] {
-		return false, true
-	}
-	base := uintptr(col.data) + uintptr(i * type_size(col.type))
-	return (cast(^bool)base)^, false
+	c, r := column_resolve(col, i)
+	if _null_at(c, r) {return false, true}
+	return (cast(^bool)_cell_ptr(c, r))^, false
 }
 
 column_at_string :: proc(col: ^Column, i: int) -> (string, bool) {
-	if i < 0 || i >= col.len {
-		panic("column_at_string: index out of range")
-	}
-	if col.is_view {
-		return column_at_string(col.orig, col.offset + i)
-	}
-	if col.nulls != nil && col.nulls[i] {
-		return "", true
-	}
-	base := uintptr(col.data) + uintptr(i * type_size(col.type))
-	return (cast(^string)base)^, false
+	c, r := column_resolve(col, i)
+	if _null_at(c, r) {return "", true}
+	return (cast(^string)_cell_ptr(c, r))^, false
 }
 
 column_at_date :: proc(col: ^Column, i: int) -> (Date, bool) {
-	if i < 0 || i >= col.len {
-		panic("column_at_date: index out of range")
-	}
-	if col.is_view {
-		return column_at_date(col.orig, col.offset + i)
-	}
-	if col.nulls != nil && col.nulls[i] {
-		return Date{0, 0, 0}, true
-	}
-	base := uintptr(col.data) + uintptr(i * type_size(col.type))
-	return (cast(^Date)base)^, false
+	c, r := column_resolve(col, i)
+	if _null_at(c, r) {return Date{0, 0, 0}, true}
+	return (cast(^Date)_cell_ptr(c, r))^, false
 }
 
 column_at_time :: proc(col: ^Column, i: int) -> (Time, bool) {
-	if i < 0 || i >= col.len {
-		panic("column_at_date: index out of range")
-	}
-	if col.is_view {
-		return column_at_time(col.orig, col.offset + i)
-	}
-	if col.nulls != nil && col.nulls[i] {
-		return Time{0, 0, 0}, true
-	}
-	base := uintptr(col.data) + uintptr(i * type_size(col.type))
-	return (cast(^Time)base)^, false
+	c, r := column_resolve(col, i)
+	if _null_at(c, r) {return Time{0, 0, 0}, true}
+	return (cast(^Time)_cell_ptr(c, r))^, false
 }
 
 column_at_datetime :: proc(col: ^Column, i: int) -> (Datetime, bool) {
-	if i < 0 || i >= col.len {
-		panic("column_at_datetime: index out of range")
-	}
-	if col.is_view {
-		return column_at_datetime(col.orig, col.offset + i)
-	}
-	if col.nulls != nil && col.nulls[i] {
-		return Datetime{0, 0, 0, 0, 0, 0}, true
-	}
-	base := uintptr(col.data) + uintptr(i * type_size(col.type))
-	return (cast(^Datetime)base)^, false
+	c, r := column_resolve(col, i)
+	if _null_at(c, r) {return Datetime{0, 0, 0, 0, 0, 0}, true}
+	return (cast(^Datetime)_cell_ptr(c, r))^, false
 }
+
+// New owned column with the given rows of `src` (view-aware; nulls kept;
+// strings cloned into the new column). A row index of -1 yields null.
+column_take :: proc(src: ^Column, rows: []int, allocator := context.allocator) -> Column {
+	out := column_new(src.name, src.type, max(len(rows), 1), allocator)
+	for r in rows {
+		if r < 0 || is_null(src, r) {
+			append_null(&out)
+			continue
+		}
+		switch src.type {
+		case .Int:
+			v, _ := column_at_int(src, r)
+			append_int(&out, v)
+		case .Float:
+			v, _ := column_at_float(src, r)
+			append_float(&out, v)
+		case .Bool:
+			v, _ := column_at_bool(src, r)
+			append_bool(&out, v)
+		case .String:
+			v, _ := column_at_string(src, r)
+			append_string(&out, v)
+		case .Date:
+			v, _ := column_at_date(src, r)
+			append_date(&out, v)
+		case .Time:
+			v, _ := column_at_time(src, r)
+			append_time(&out, v)
+		case .Datetime:
+			v, _ := column_at_datetime(src, r)
+			append_datetime(&out, v)
+		case .Invalid:
+			append_null(&out)
+		}
+	}
+	return out
+}
+
+// Owned copy of all rows of a column (materializes views)
+column_clone :: proc(src: ^Column, allocator := context.allocator) -> Column {
+	rows := make([]int, src.len, context.temp_allocator)
+	defer delete(rows, context.temp_allocator)
+	for i in 0 ..< src.len {rows[i] = i}
+	return column_take(src, rows, allocator)
+}
+
+// Three-way comparison of two cells of one column; nulls (and float NaN)
+// order after every value. Returns -1 / 0 / +1.
+column_compare_rows :: proc(col: ^Column, a, b: int) -> int {
+	na, nb := is_null(col, a), is_null(col, b)
+	if col.type == .Float {
+		fa, _ := column_at_float(col, a)
+		fb, _ := column_at_float(col, b)
+		na, nb = na || fa != fa, nb || fb != fb
+	}
+	if na || nb {
+		if na && nb {return 0}
+		return 1 if na else -1
+	}
+	cmp3 :: proc(x, y: $T) -> int {
+		if x < y {return -1}
+		if x > y {return 1}
+		return 0
+	}
+	switch col.type {
+	case .Int:
+		x, _ := column_at_int(col, a)
+		y, _ := column_at_int(col, b)
+		return cmp3(x, y)
+	case .Float:
+		x, _ := column_at_float(col, a)
+		y, _ := column_at_float(col, b)
+		return cmp3(x, y)
+	case .Bool:
+		x, _ := column_at_bool(col, a)
+		y, _ := column_at_bool(col, b)
+		return cmp3(int(x), int(y))
+	case .String:
+		x, _ := column_at_string(col, a)
+		y, _ := column_at_string(col, b)
+		return strings.compare(x, y)
+	case .Date:
+		x, _ := column_at_date(col, a)
+		y, _ := column_at_date(col, b)
+		return int(date_compare(x, y))
+	case .Time:
+		x, _ := column_at_time(col, a)
+		y, _ := column_at_time(col, b)
+		return int(time_compare(x, y))
+	case .Datetime:
+		x, _ := column_at_datetime(col, a)
+		y, _ := column_at_datetime(col, b)
+		return int(datetime_compare(x, y))
+	case .Invalid:
+	}
+	return 0
+}
+
 column_slice_view :: proc(orig: ^Column, start: int, end: int) -> Column {
 	if start < 0 || end < start || end > orig.len {
 		panic("column_slice_view: invalid range")
 	}
 
 	n := end - start
+	base, offset := orig, start
+	for base.is_view { 	// view of a view: point straight at the physical column
+		offset += base.offset
+		base = base.orig
+	}
 
 	return Column {
 		name     = orig.name, // shared, not owned
 		type     = orig.type,
 		len      = n,
 		capacity = n, // logical capacity for the view
-		data     = nil, // no storage
-		nulls    = nil, // no bitmap; delegate to orig
-		orig     = orig,
-		offset   = start,
+		data     = nil, // no storage; read through column_at_* / is_null
+		nulls    = nil,
+		orig     = base,
+		offset   = offset,
 		is_view  = true,
 	}
 }
@@ -767,7 +829,7 @@ column_lt_datetime :: proc(col: ^Column, value: Datetime) -> Column {
 }
 
 column_eq_datetime :: proc(col: ^Column, value: Datetime) -> Column {
-	if col.type != .Date {
+	if col.type != .Datetime {
 		panic("column_eq_datetime: wrong column type")
 	}
 	out := column_new_bool_mask(col.len)
@@ -837,7 +899,7 @@ column_from_dates :: proc(name: string, values: []Date) -> Column {
 	return col
 }
 column_from_times :: proc(name: string, values: []Time) -> Column {
-	col := column_new(name, .Date, len(values))
+	col := column_new(name, .Time, len(values))
 	for v in values {
 		append_time(&col, v)
 	}
@@ -845,7 +907,7 @@ column_from_times :: proc(name: string, values: []Time) -> Column {
 }
 
 column_from_datetimes :: proc(name: string, values: []Datetime) -> Column {
-	col := column_new(name, .Date, len(values))
+	col := column_new(name, .Datetime, len(values))
 	for v in values {
 		append_datetime(&col, v)
 	}
@@ -878,31 +940,13 @@ column_from_f64_nullable :: proc(name: string, values: []f64, nulls: []bool) -> 
 
 // Returns true if the cell at (col, row) is null, respecting views and bounds.
 is_null :: proc(col: ^Column, row: int) -> bool {
-	if col.is_view {
-		return is_null(col.orig, col.offset + row)
-	}
-
-	if row < 0 || row >= col.len {
-		panic("is_null: index out of range")
-	}
-
-	if col.nulls == nil {
-		return false
-	}
-
-	return col.nulls[row]
+	c, r := column_resolve(col, row)
+	return _null_at(c, r)
 }
 
 // Returns the value at (col, row) as a string, using your typed accessors.
 // Null -> "" (caller decides what to do with that).
 value_as_string :: proc(col: ^Column, row: int, allocator: mem.Allocator) -> string {
-	if col.is_view {
-		return value_as_string(col.orig, col.offset + row, allocator)
-	}
-
-	if row < 0 || row >= col.len {
-		panic("value_as_string: index out of range")
-	}
 	if is_null(col, row) {
 		return ""
 	}

@@ -95,31 +95,49 @@ groupby2_debug_print :: proc(gb: ^GroupBy2) {
 		fmt.println()
 	}
 }
+// Output column type of an aggregation over a column of type `src`
+groupby2_output_type :: proc(src: ColumnType, kind: AggregationKind) -> ColumnType {
+	numeric := src == .Int || src == .Float || src == .Bool
+	switch kind {
+	case .Count:
+		return .Int
+	case .Min, .Max:
+		return src
+	case .Sum:
+		if src == .Float {return .Float}
+		return .Int if numeric else src
+	case .Mean, .Median, .Quantile, .Var, .Cov, .Corr, .EWM_Mean, .EWM_Var, .EWM_Std, .EWM_Cov, .EWM_Corr:
+		return .Float if numeric else src
+	}
+	return src
+}
+
 build_groupby2_schema :: proc(
 	gb: ^GroupBy2,
 	aggs: []Aggregator,
 	allocator: mem.Allocator = context.allocator,
 ) -> DataFrame {
-	out := dataframe_new()
+	out := dataframe_new(allocator)
 
-	// 1. Add key columns (same type as original)
+	// 1. Key columns (same type as original)
 	for key in gb.keys {
 		src := column(gb.df, key)
-		dst := column_new(key, src.type, 0)
-		add_column(&out, dst)
+		add_column(&out, column_new(key, src.type, 0, allocator))
 	}
 
-	// 2. Add aggregated columns
+	// 2. Aggregated columns
 	for agg in aggs {
 		src := column(gb.df, agg.column)
-
-		col_type := src.type
-		if agg.kind == .Count {
-			col_type = .Int
+		if (agg.kind == .Cov || agg.kind == .Corr || agg.kind == .EWM_Cov || agg.kind == .EWM_Corr) && agg.other == "" {
+			panic(fmt.tprintf("groupby2: %v aggregation %q needs a second column (other)", agg.kind, agg.name))
 		}
-
-		new_col := column_new(agg.name, col_type, 0)
-		add_column(&out, new_col)
+		if agg.kind == .Quantile && !(agg.quantile >= 0 && agg.quantile <= 1) {
+			panic(fmt.tprintf("groupby2: quantile %v of %q is outside [0, 1]", agg.quantile, agg.name))
+		}
+		if (agg.kind == .EWM_Mean || agg.kind == .EWM_Var || agg.kind == .EWM_Std || agg.kind == .EWM_Cov || agg.kind == .EWM_Corr) && !(agg.alpha > 0 && agg.alpha <= 1) {
+			panic(fmt.tprintf("groupby2: EWM alpha %v of %q must be in (0, 1]", agg.alpha, agg.name))
+		}
+		add_column(&out, column_new(agg.name, groupby2_output_type(src.type, agg.kind), 0, allocator))
 	}
 
 	return out
@@ -142,6 +160,8 @@ agg_compute_into :: proc(out_col: ^Column, src_col: ^Column, rows: []int, agg: A
 		agg_time_into(out_col, src_col, rows, agg)
 	case .Datetime:
 		agg_datetime_into(out_col, src_col, rows, agg)
+	case:
+		append_null(out_col)
 	}
 }
 
@@ -153,32 +173,30 @@ emit_groupby2_row :: proc(
 	aggs: []Aggregator,
 	allocator: mem.Allocator = context.allocator,
 ) {
-	// 1. Collect row indices for this group
-	rows := make([dynamic]int, 0, 16, allocator)
-	i := group_head
-	for i != -1 {
+	// 1. Row indices of this group (in row order)
+	rows := make([dynamic]int, 0, 16, context.temp_allocator)
+	defer delete(rows)
+	for i := group_head; i != -1; i = gb.index.next[i] {
 		append(&rows, gb.index.rows[i])
-		i = gb.index.next[i]
 	}
 
-
-	// 2. Emit key values (use first row of group)
-	first := rows[0]
+	// 2. Key values (first row of the group; a null key stays null)
 	for key, ki in gb.keys {
-		src := column(gb.df, key)
-		dst := &out.columns[ki]
-		copy_cell(dst, src, first)
+		copy_cell(&out.columns[ki], column(gb.df, key), rows[0])
 	}
 
-
-	// 3. Emit aggregated values
+	// 3. Aggregated values
 	key_count := len(gb.keys)
 	for agg, ai in aggs {
-		src := column(gb.df, agg.column)
 		out_col := &out.columns[key_count + ai]
-		agg_compute_into(out_col, src, rows[:], agg)
+		src := column(gb.df, agg.column)
+		#partial switch agg.kind {
+		case .Cov, .Corr, .EWM_Cov, .EWM_Corr:
+			_agg_pair_into(out_col, src, column(gb.df, agg.other), rows[:], agg)
+		case:
+			agg_compute_into(out_col, src, rows[:], agg)
+		}
 	}
-
 }
 
 
@@ -189,346 +207,292 @@ groupby2_agg :: proc(
 ) -> DataFrame {
 	out := build_groupby2_schema(gb, aggs, allocator)
 
-	// Iterate groups in stable order
+	// Groups in order of first appearance
 	for key in gb.index.ordered_keys {
-		head := gb.index.bucket_head[key]
-		emit_groupby2_row(&out, gb, head, aggs, allocator)
+		emit_groupby2_row(&out, gb, gb.index.bucket_head[key], aggs, allocator)
 	}
 
-	out.rows = out.columns[0].len
+	out.rows = len(gb.index.ordered_keys)
+	for c in out.columns {
+		fmt.assertf(c.len == out.rows, "groupby2_agg: column %q has %d rows, expected %d", c.name, c.len, out.rows)
+	}
 	return out
 }
 
-agg_int_into :: proc(out: ^Column, src: ^Column, rows: []int, agg: Aggregator) {
-	kind := agg.kind
-	sum := 0
-	count := 0
-	min := int(1 << 62)
-	max := -min
+destroy_groupby2 :: proc(gb: ^GroupBy2) {
+	join_multi_index_destroy(&gb.index)
+}
 
+
+// --- numeric aggregations ----------------------------------------------------
+
+// Non-null values of a numeric column (Int / Float / Bool as f64), in row order
+@(private = "file")
+_numeric_values :: proc(src: ^Column, rows: []int) -> [dynamic]f64 {
+	vals := make([dynamic]f64, 0, len(rows), context.temp_allocator)
 	for r in rows {
-		v, is_null := column_at_int(src, r)
-		if is_null do continue
-
-		count += 1
-		sum += v
-		if v < min do min = v
-		if v > max do max = v
-	}
-
-	if count == 0 {
-		append_null(out)
-		return
-	}
-
-	#partial switch kind {
-	case .Sum:
-		append_int(out, sum)
-	case .Mean:
-		append_int(out, sum / count)
-	case .Min:
-		append_int(out, min)
-	case .Max:
-		append_int(out, max)
-	case .Count:
-		append_int(out, count)
-	case .Median, .Quantile:
-		values := make([dynamic]int, 0, len(rows))
-		defer delete(values)
-		for r in rows {
-			v, is_null := column_at_int(src, r)
-			if !is_null do append(&values, v)
+		if is_null(src, r) {continue}
+		v: f64
+		#partial switch src.type {
+		case .Int:
+			x, _ := column_at_int(src, r)
+			v = f64(x)
+		case .Float:
+			v, _ = column_at_float(src, r)
+			if v != v {continue} // NaN is skipped like a null
+		case .Bool:
+			x, _ := column_at_bool(src, r)
+			v = 1 if x else 0
 		}
+		append(&vals, v)
+	}
+	return vals
+}
 
-		if len(values) == 0 {
+// Linear-interpolated quantile of sorted values (pandas default)
+@(private = "file")
+_quantile :: proc(sorted: []f64, q: f64) -> f64 {
+	pos := q * f64(len(sorted) - 1)
+	lo := int(math.floor(pos))
+	hi := min(lo + 1, len(sorted) - 1)
+	return sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - f64(lo))
+}
+
+// EWM weights (adjust=True): w_i = (1 - alpha)^(n - 1 - i), newest weight 1
+@(private = "file")
+_ewm_weights :: proc(n: int, alpha: f64) -> []f64 {
+	w := make([]f64, n, context.temp_allocator)
+	for i in 0 ..< n {w[i] = math.pow(1 - alpha, f64(n - 1 - i))}
+	return w
+}
+
+// Weighted (co)variance with pandas' bias correction (bias=false)
+@(private = "file")
+_ewm_cov :: proc(x, y, w: []f64, bias: bool) -> f64 {
+	sw, sw2, mx, my := 0.0, 0.0, 0.0, 0.0
+	for i in 0 ..< len(x) {
+		sw += w[i]
+		sw2 += w[i] * w[i]
+		mx += w[i] * x[i]
+		my += w[i] * y[i]
+	}
+	mx /= sw
+	my /= sw
+	c := 0.0
+	for i in 0 ..< len(x) {c += w[i] * (x[i] - mx) * (y[i] - my)}
+	c /= sw
+	if !bias {
+		denom := sw * sw - sw2
+		if denom <= 0 {return math.nan_f64()}
+		c *= sw * sw / denom
+	}
+	return c
+}
+
+// Aggregate the numeric values of a group into `out` (type from groupby2_output_type)
+@(private = "file")
+_agg_numeric :: proc(out: ^Column, src: ^Column, rows: []int, agg: Aggregator) {
+	vals := _numeric_values(src, rows)
+	defer delete(vals)
+	n := len(vals)
+
+	put :: proc(out: ^Column, v: f64) {
+		if v != v {
 			append_null(out)
 			return
 		}
-		q: f64
-		if kind == .Median {
-			q = 0.5
-		} else {
-			q = agg.quantile
+		#partial switch out.type {
+		case .Int:
+			append_int(out, int(v))
+		case .Bool:
+			append_bool(out, v != 0)
+		case:
+			append_float(out, v)
 		}
+	}
 
-		slice.sort(values[:])
-		idx := int(q * f64(len(values) - 1))
-		append_int(out, values[idx])
+	if agg.kind == .Count {
+		append_int(out, n)
+		return
+	}
+	if n == 0 {
+		if agg.kind == .Sum { 	// sum of nothing is 0 (pandas min_count=0)
+			put(out, 0)
+		} else {
+			append_null(out)
+		}
+		return
+	}
+
+	#partial switch agg.kind {
+	case .Sum:
+		if src.type == .Int { 	// exact integer sum
+			total := 0
+			for r in rows {
+				if v, null := column_at_int(src, r); !null {total += v}
+			}
+			append_int(out, total)
+			return
+		}
+		s := 0.0
+		for v in vals {s += v}
+		put(out, s)
+	case .Mean:
+		s := 0.0
+		for v in vals {s += v}
+		put(out, s / f64(n))
+	case .Min, .Max:
+		best := -1
+		for r in rows { 	// keep the original value / type (exact ints)
+			if is_null(src, r) {continue}
+			if src.type == .Float {
+				if v, _ := column_at_float(src, r); v != v {continue}
+			}
+			if best < 0 {best = r; continue}
+			c := column_compare_rows(src, r, best)
+			if (agg.kind == .Min && c < 0) || (agg.kind == .Max && c > 0) {best = r}
+		}
+		copy_cell(out, src, best)
+	case .Median, .Quantile:
+		sorted := slice_clone_sorted(vals[:])
+		defer delete(sorted, context.temp_allocator)
+		put(out, _quantile(sorted, 0.5 if agg.kind == .Median else agg.quantile))
+	case .Var:
+		if n < 2 {
+			append_null(out)
+			return
+		}
+		m := 0.0
+		for v in vals {m += v}
+		m /= f64(n)
+		ss := 0.0
+		for v in vals {ss += (v - m) * (v - m)}
+		put(out, ss / f64(n - 1))
+	case .EWM_Mean, .EWM_Var, .EWM_Std:
+		w := _ewm_weights(n, agg.alpha)
+		defer delete(w, context.temp_allocator)
+		if agg.kind == .EWM_Mean {
+			sw, s := 0.0, 0.0
+			for i in 0 ..< n {sw += w[i]; s += w[i] * vals[i]}
+			put(out, s / sw)
+			return
+		}
+		v := _ewm_cov(vals[:], vals[:], w, agg.bias)
+		put(out, math.sqrt(v) if agg.kind == .EWM_Std else v)
+	case:
+		append_null(out)
 	}
 }
 
+// Sorted copy (temp allocator)
+slice_clone_sorted :: proc(v: []f64) -> []f64 {
+	out := make([]f64, len(v), context.temp_allocator)
+	copy(out, v)
+	slice.sort(out)
+	return out
+}
+
+// Pairwise statistics over rows where both columns are present
+@(private = "file")
+_agg_pair_into :: proc(out: ^Column, a: ^Column, b: ^Column, rows: []int, agg: Aggregator) {
+	numeric :: proc(t: ColumnType) -> bool {return t == .Int || t == .Float || t == .Bool}
+	if !numeric(a.type) || !numeric(b.type) {
+		append_null(out)
+		return
+	}
+	xs := make([dynamic]f64, 0, len(rows), context.temp_allocator)
+	ys := make([dynamic]f64, 0, len(rows), context.temp_allocator)
+	defer {delete(xs); delete(ys)}
+	for r in rows {
+		one := []int{r}
+		x := _numeric_values(a, one)
+		y := _numeric_values(b, one)
+		if len(x) == 1 && len(y) == 1 {
+			append(&xs, x[0])
+			append(&ys, y[0])
+		}
+		delete(x)
+		delete(y)
+	}
+	n := len(xs)
+	if n < 2 {
+		append_null(out)
+		return
+	}
+	w: []f64
+	bias := agg.bias
+	if agg.kind == .Cov || agg.kind == .Corr { 	// sample statistics: equal weights, n - 1
+		w = make([]f64, n, context.temp_allocator)
+		for &v in w {v = 1}
+		bias = false
+	} else {
+		w = _ewm_weights(n, agg.alpha)
+	}
+	defer delete(w, context.temp_allocator)
+	cxy := _ewm_cov(xs[:], ys[:], w, bias)
+	if agg.kind == .Cov || agg.kind == .EWM_Cov {
+		if cxy != cxy {append_null(out)} else {append_float(out, cxy)}
+		return
+	}
+	sx := _ewm_cov(xs[:], xs[:], w, bias)
+	sy := _ewm_cov(ys[:], ys[:], w, bias)
+	r := cxy / math.sqrt(sx * sy)
+	if r != r || sx <= 0 || sy <= 0 {append_null(out)} else {append_float(out, r)}
+}
+
+agg_int_into :: proc(out: ^Column, src: ^Column, rows: []int, agg: Aggregator) {
+	_agg_numeric(out, src, rows, agg)
+}
 
 agg_float_into :: proc(out: ^Column, src: ^Column, rows: []int, agg: Aggregator) {
-	kind := agg.kind
-
-	sum := 0.0
-	count := 0
-	min := math.INF_F64
-	max := -math.INF_F64
-
-	for r in rows {
-		v, is_null := column_at_float(src, r)
-		if is_null do continue
-
-		count += 1
-		sum += v
-		if v < min do min = v
-		if v > max do max = v
-	}
-
-	if count == 0 {
-		append_null(out)
-		return
-	}
-
-	#partial switch kind {
-	case .Sum:
-		append_float(out, sum)
-	case .Mean:
-		append_float(out, sum / f64(count))
-	case .Min:
-		append_float(out, min)
-	case .Max:
-		append_float(out, max)
-	case .Count:
-		append_float(out, f64(count))
-	case .Median, .Quantile:
-		values := make([dynamic]f64, 0, len(rows))
-		defer delete(values)
-		for r in rows {
-			v, is_null := column_at_float(src, r)
-			if !is_null do append(&values, v)
-		}
-
-		if len(values) == 0 {
-			append_null(out)
-			return
-		}
-		q: f64
-		if kind == .Median {
-			q = 0.5
-		} else {
-			q = agg.quantile
-		}
-
-		slice.sort(values[:])
-		idx := int(q * f64(len(values) - 1))
-		append_float(out, values[idx])
-	}
+	_agg_numeric(out, src, rows, agg)
 }
 
-
+// Bool: Sum = number of trues, Mean = fraction of trues, Min / Max = all / any
 agg_bool_into :: proc(out: ^Column, src: ^Column, rows: []int, agg: Aggregator) {
-	kind := agg.kind
-	count_true := 0
-	count := 0
-	min := true
-	max := false
-
-	for r in rows {
-		v, is_null := column_at_bool(src, r)
-		if is_null do continue
-
-		count += 1
-		if v do count_true += 1
-		if !v do min = false
-		if v do max = true
-	}
-
-	if count == 0 {
-		append_null(out)
-		return
-	}
-	switch kind {
-	case .Sum:
-		append_bool(out, count_true > 0)
-	case .Mean:
-		append_float(out, f64(count_true) / f64(count))
-	case .Min:
-		append_bool(out, min)
-	case .Max:
-		append_bool(out, max)
-	case .Count:
-		append_int(out, count)
-	case .Median, .Quantile, .EWM_Mean, .EWM_Var, .EWM_Std, .EWM_Cov, .EWM_Corr, .Corr, .Var, .Cov:
-		append_null(out)
-
-	}
+	_agg_numeric(out, src, rows, agg)
 }
 
+// Non-numeric columns: Count, Min, Max; other aggregations give null
+@(private = "file")
+_agg_ordered :: proc(out: ^Column, src: ^Column, rows: []int, agg: Aggregator) {
+	#partial switch agg.kind {
+	case .Count:
+		n := 0
+		for r in rows {
+			if !is_null(src, r) {n += 1}
+		}
+		append_int(out, n)
+	case .Min, .Max:
+		best := -1
+		for r in rows {
+			if is_null(src, r) {continue}
+			if best < 0 {best = r; continue}
+			c := column_compare_rows(src, r, best)
+			if (agg.kind == .Min && c < 0) || (agg.kind == .Max && c > 0) {best = r}
+		}
+		if best < 0 {append_null(out)} else {copy_cell(out, src, best)}
+	case:
+		append_null(out)
+	}
+}
 
 agg_string_into :: proc(out: ^Column, src: ^Column, rows: []int, agg: Aggregator) {
-	kind := agg.kind
-	count := 0
-	min := ""
-	max := ""
-
-	first := true
-
-	for r in rows {
-		v, is_null := column_at_string(src, r)
-		if is_null do continue
-
-		count += 1
-
-		if first {
-			min = v
-			max = v
-			first = false
-		} else {
-			if v < min do min = v
-			if v > max do max = v
-		}
-	}
-
-	if count == 0 {
-		append_null(out)
-		return
-	}
-
-	switch kind {
-	case .Min:
-		append_string(out, min)
-	case .Max:
-		append_string(out, max)
-	case .Count:
-		append_int(out, count)
-	case .Sum, .Mean:
-		append_null(out)
-	case .Median, .Quantile, .EWM_Mean, .EWM_Var, .EWM_Std, .EWM_Cov, .EWM_Corr, .Corr, .Var, .Cov:
-		append_null(out)
-	}
+	_agg_ordered(out, src, rows, agg)
 }
-
 
 agg_date_into :: proc(out: ^Column, src: ^Column, rows: []int, agg: Aggregator) {
-	kind := agg.kind
-	count := 0
-	min := Date {
-		year  = 9999,
-		month = 12,
-		day   = 31,
-	}
-	max := Date {
-		year  = 0,
-		month = 1,
-		day   = 1,
-	}
-
-	for r in rows {
-		v, is_null := column_at_date(src, r)
-		if is_null do continue
-
-		count += 1
-		if date_less(v, min) do min = v
-		if date_less(max, v) do max = v
-	}
-
-	if count == 0 {
-		append_null(out)
-		return
-	}
-
-	switch kind {
-	case .Min:
-		append_date(out, min)
-	case .Max:
-		append_date(out, max)
-	case .Count:
-		append_int(out, count)
-	case .Sum, .Mean:
-		append_null(out)
-	case .Median, .Quantile, .EWM_Mean, .EWM_Var, .EWM_Std, .EWM_Cov, .EWM_Corr, .Corr, .Var, .Cov:
-		append_null(out)
-
-	}
+	_agg_ordered(out, src, rows, agg)
 }
-
 
 agg_time_into :: proc(out: ^Column, src: ^Column, rows: []int, agg: Aggregator) {
-	kind := agg.kind
-	count := 0
-	min := Time {
-		hour   = 23,
-		minute = 59,
-		second = 59,
-	}
-	max := Time {
-		hour   = 0,
-		minute = 0,
-		second = 0,
-	}
-
-	for r in rows {
-		v, is_null := column_at_time(src, r)
-		if is_null do continue
-
-		count += 1
-		if time_less(v, min) do min = v
-		if time_less(max, v) do max = v
-	}
-
-	if count == 0 {
-		append_null(out)
-		return
-	}
-
-	switch kind {
-	case .Min:
-		append_time(out, min)
-	case .Max:
-		append_time(out, max)
-	case .Count:
-		append_int(out, count)
-	case .Sum, .Mean:
-		append_null(out)
-	case .Median, .Quantile, .EWM_Mean, .EWM_Var, .EWM_Std, .EWM_Cov, .EWM_Corr, .Corr, .Var, .Cov:
-		append_null(out)
-	}
+	_agg_ordered(out, src, rows, agg)
 }
-
 
 agg_datetime_into :: proc(out: ^Column, src: ^Column, rows: []int, agg: Aggregator) {
-	kind := agg.kind
-	count := 0
-	min := Datetime {
-		year  = 9999,
-		month = 12,
-		day   = 31,
-	}
-	max := Datetime {
-		year  = 0,
-		month = 1,
-		day   = 1,
-	}
-
-	for r in rows {
-		v, is_null := column_at_datetime(src, r)
-		if is_null do continue
-
-		count += 1
-		if datetime_less(v, min) do min = v
-		if datetime_less(max, v) do max = v
-	}
-
-	if count == 0 {
-		append_null(out)
-		return
-	}
-
-	switch kind {
-	case .Min:
-		append_datetime(out, min)
-	case .Max:
-		append_datetime(out, max)
-	case .Count:
-		append_int(out, count)
-	case .Sum, .Mean:
-		append_null(out)
-	case .Median, .Quantile, .EWM_Mean, .EWM_Var, .EWM_Std, .EWM_Cov, .EWM_Corr, .Corr, .Var, .Cov:
-		append_null(out)
-	}
+	_agg_ordered(out, src, rows, agg)
 }
+
 copy_cell :: proc(dst: ^Column, src: ^Column, row: int) {
 	#partial switch src.type {
 	case .Int:

@@ -26,19 +26,55 @@ datetime_compare :: proc(a, b: Datetime) -> i32 {
 }
 
 validate_date :: proc(year: i32, month: i32, day: i32) -> bool {
-	days_in_month := get_days_in_month(year, Months(month))
-
-	if month < 1 || month > 12 || day < 0 || day > days_in_month {
+	if month < 1 || month > 12 || day < 1 {
 		return false
 	}
-	return true
+	return day <= get_days_in_month(year, Months(month))
 }
 validate_time :: proc(hour: i32, minute: i32, second: i32) -> bool {
+	return hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59 && second >= 0 && second <= 59
+}
 
-	if hour < 0 || hour > 24 || minute < 0 || minute > 60 || second < 0 || second > 60 {
-		return false
-	}
-	return true
+// Days since 1970-01-01 of a proleptic Gregorian date (H. Hinnant's
+// days_from_civil; exact for every year)
+days_from_civil :: proc(y, m, d: i64) -> i64 {
+	y := y - (1 if m <= 2 else 0)
+	era := (y if y >= 0 else y - 399) / 400
+	yoe := y - era * 400
+	mp := (m + 9) % 12
+	doy := (153 * mp + 2) / 5 + d - 1
+	doe := yoe * 365 + yoe / 4 - yoe / 100 + doy
+	return era * 146097 + doe - 719468
+}
+
+// Inverse of days_from_civil
+civil_from_days :: proc(z: i64) -> Date {
+	z := z + 719468
+	era := (z if z >= 0 else z - 146096) / 146097
+	doe := z - era * 146097
+	yoe := (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+	doy := doe - (365 * yoe + yoe / 4 - yoe / 100)
+	mp := (5 * doy + 2) / 153
+	d := doy - (153 * mp + 2) / 5 + 1
+	m := mp + 3 if mp < 10 else mp - 9
+	y := yoe + era * 400 + (1 if m <= 2 else 0)
+	return Date{i32(y), i32(m), i32(d)}
+}
+
+@(private = "file")
+_floor_div :: proc(a, b: i64) -> i64 {
+	q := a / b
+	if (a % b != 0) && ((a < 0) != (b < 0)) {q -= 1}
+	return q
+}
+
+// Datetime of a Unix timestamp (seconds since 1970-01-01 00:00:00 UTC;
+// negative timestamps are before 1970)
+datetime_from_unix :: proc(ts: i64) -> Datetime {
+	days := _floor_div(ts, 86400)
+	secs := ts - days * 86400
+	d := civil_from_days(days)
+	return Datetime{d.year, d.month, d.day, i32(secs / 3600), i32((secs % 3600) / 60), i32(secs % 60)}
 }
 
 parse_date :: proc(date_str: string) -> (Date, bool) {
@@ -290,42 +326,23 @@ date_to_f64 :: proc(d: Date) -> f64 {
 	return jd
 }
 
-// Convert f64 (Julian Day Number) → Date
+// Convert f64 (Julian Day Number) → Date (inverse of date_to_f64; a
+// fractional day gives the date it falls on)
 f64_to_date :: proc(jd: f64) -> Date {
-	jd := jd
-	jd += 0.5
-	z := math.floor_f64(jd)
-	f := jd - z
-
-	a := z
-	if z >= 2299161 {
-		alpha := f64((z - 1867216.25) / 36524.25)
-		a += 1 + alpha - alpha / 4
-	}
-
-	b: f64 = a + f64(1524)
-	c := cast(i64)((f64(b) - f64(122.1)) / f64(365.25))
-	d := cast(f64)(365.25 * cast(f64)c)
-	e := cast(i64)(f64(b - d) / 30.6001)
-
-	day := f64(b - d - (f64(30.6001) * f64(e)) + f)
-	month := e < 14 ? e - 1 : e - 13
-	year := month > 2 ? c - 4716 : c - 4715
-
-	return Date{year = cast(i32)year, month = cast(i32)month, day = cast(i32)math.floor_f64(day)}
+	// JD 2440587.5 is 1970-01-01 00:00 UTC
+	return civil_from_days(i64(math.floor_f64(jd - 2440587.5 + 1e-9)))
 }
-
 
 time_to_int :: proc(t: Time) -> i32 {
 	return t.hour * HOUR + t.minute * MINUTE + t.second
 }
 
+// Seconds → time of day (wraps around midnight in both directions)
 int_to_time :: proc(s: i32) -> Time {
-	s := s
+	s := s % DAY
 	if s < 0 {
-		s = 0
+		s += DAY
 	}
-	s = s % DAY
 	hour := s / HOUR
 	minute := (s % HOUR) / MINUTE
 	second := s % MINUTE
@@ -343,27 +360,6 @@ datetime_less :: proc(a, b: Datetime) -> bool {
 	return datetime_compare(a, b) < 0
 }
 date_from_unix :: proc(ts: i64) -> Date {
-	// Convert UNIX seconds → days since epoch
-	days := ts / 86400
-
-	// Unix epoch: 1970-01-01
-	year := 1970
-	month := 1
-	day := 1
-
-	// Add days one by one (simple, robust, no DST issues)
-	for days > 0 {
-		day += 1
-		if day > int(get_days_in_month(i32(year), Months(month))) {
-			day = 1
-			month += 1
-			if month > 12 {
-				month = 1
-				year += 1
-			}
-		}
-		days -= 1
-	}
-
-	return Date{i32(year), i32(month), i32(day)}
+	// Unix seconds → calendar date (UTC); negative timestamps are before 1970
+	return civil_from_days(_floor_div(ts, 86400))
 }

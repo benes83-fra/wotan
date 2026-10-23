@@ -59,6 +59,8 @@ make_group_key_in_arena :: proc(
 	return strings.to_string(sb)
 }
 
+// Groups rows by the values of `keys` (groups in order of first appearance;
+// null key values form their own group). Keys are compared by type and value.
 groupby :: proc(df: ^DataFrame, keys: []string) -> GroupedDataFrame {
 	gdf := GroupedDataFrame {
 		df     = df,
@@ -66,35 +68,39 @@ groupby :: proc(df: ^DataFrame, keys: []string) -> GroupedDataFrame {
 		groups = make([dynamic]Group),
 	}
 
-	// Initialize Arena for all string/group data
-	arene_err := vmem.arena_init_growing(&gdf.arena, 4000)
+	// Arena for all group data (key texts, row lists)
+	if err := vmem.arena_init_growing(&gdf.arena, 4000); err != nil {
+		panic("groupby: cannot allocate arena")
+	}
 	allocator := vmem.arena_allocator(&gdf.arena)
 
-	// Map to track unique keys during construction
+	key_cols := make([]^Column, len(keys), context.temp_allocator)
+	defer delete(key_cols, context.temp_allocator)
+	for k, i in keys {key_cols[i] = column(df, k)}
+
 	groups_map := make(map[string]int)
 	defer delete(groups_map)
 
 	for row in 0 ..< df.rows {
-		// Temporary key for map lookup
-		temp_key := make_group_key_in_arena(df, row, keys, allocator)
-
-		idx, exists := groups_map[temp_key]
-		if !exists {
-			// Persist the key and values into the arena
-			persistent_key := strings.clone(temp_key, allocator)
-			parts := strings.split(persistent_key, "|", allocator)
-
-			g := Group {
-				key_values  = parts,
-				row_indices = make([dynamic]int, allocator),
-			}
-			append(&g.row_indices, row)
-			append(&gdf.groups, g)
-
-			groups_map[persistent_key] = len(gdf.groups) - 1
-		} else {
+		key := make_composite_key_string(key_cols, row, context.temp_allocator)
+		if idx, exists := groups_map[key]; exists {
 			append(&gdf.groups[idx].row_indices, row)
+			delete(key, context.temp_allocator)
+			continue
 		}
+		// readable key values (NULL for missing)
+		parts := make([]string, len(keys), allocator)
+		for col, i in key_cols {
+			parts[i] = strings.clone(column_value_string(col, row), allocator)
+		}
+		g := Group {
+			key_values  = parts,
+			row_indices = make([dynamic]int, allocator),
+		}
+		append(&g.row_indices, row)
+		append(&gdf.groups, g)
+		groups_map[strings.clone(key, allocator)] = len(gdf.groups) - 1
+		delete(key, context.temp_allocator)
 	}
 
 	return gdf
@@ -104,7 +110,7 @@ destroy_grouped_dataframe :: proc(gdf: ^GroupedDataFrame) {
 	// 1. Delete the top-level dynamic array
 	delete(gdf.groups)
 	// 2. Free everything else (strings, row_indices, etc.) in one go
-	vmem.arena_free_all(&gdf.arena)
+	vmem.arena_destroy(&gdf.arena)
 }
 
 

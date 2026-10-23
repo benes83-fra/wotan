@@ -102,6 +102,15 @@ get_column_type :: proc($T: typeid) -> ColumnType {
 	when T == string {
 		col = .String
 	}
+	when T == Date {
+		col = .Date
+	}
+	when T == Time {
+		col = .Time
+	}
+	when T == Datetime {
+		col = .Datetime
+	}
 
 
 	return col

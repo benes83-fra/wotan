@@ -74,46 +74,9 @@ pretty_row_label :: proc(df: ^DataFrame, r: int) -> int {
 }
 
 
+// Cell text for printing (NULL for missing values; views resolved)
 column_value_string_df :: proc(df: ^DataFrame, col: ^Column, r: int) -> string {
-	#partial switch col.type {
-	case .Int:
-		v := col_get_df(df, col, r, int)
-		return fmt.tprintf("%v", v)
-
-	case .Float:
-		v := col_get_df(df, col, r, f64)
-		return fmt.tprintf("%v", v)
-
-	case .Bool:
-		v := col_get_df(df, col, r, bool)
-		return fmt.tprintf("%v", v)
-
-	case .String:
-		v := col_get_df(df, col, r, string)
-		return v
-
-	case .Date:
-		v := col_get_df(df, col, r, Date)
-		return fmt.tprintf("%04d-%02d-%02d", v.year, v.month, v.day)
-
-	case .Time:
-		v := col_get_df(df, col, r, Time)
-		return fmt.tprintf("%02d:%02d:%02d", v.hour, v.minute, v.second)
-
-	case .Datetime:
-		v := col_get_df(df, col, r, Datetime)
-		return fmt.tprintf(
-			"%04d-%02d-%02d %02d:%02d:%02d",
-			v.year,
-			v.month,
-			v.day,
-			v.hour,
-			v.minute,
-			v.second,
-		)
-	}
-
-	return "<?>"
+	return column_value_string(col, r)
 }
 // Simple right-padding helper
 pad_right :: proc(s: string, width: int) -> string {

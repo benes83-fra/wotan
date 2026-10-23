@@ -109,51 +109,7 @@ get_days_of_the_year :: proc(year: i32) -> i32 {
 	return 365
 }
 add_day_date :: proc(date: Date, n: i32) -> Date {
-	n := n
-	year := date.year
-	month := date.month
-	day := date.day
-	days_left_in_month: i32
-
-	if n > 0 {
-		for n > 0 {
-			days_left_in_month = get_days_in_month(year, Months(month)) - day
-			if (n > days_left_in_month) {
-				n -= (days_left_in_month + 1)
-				day = 1
-				month += 1
-				if (month > 12) {
-					month = i32(Months.January)
-					year += 1
-				}
-			} else {
-				day += n
-				n = 0
-			}
-		}
-		return Date{year, month, day}
-	} else if n < 0 {
-		n = -n
-		for n > 0 {
-			if n >= day {
-				n -= day
-				month -= 1
-				if month < 1 {
-					month = i32(Months.December)
-					year -= 1
-				}
-				day = get_days_in_month(year, Months(month))
-
-			} else {
-				day -= n
-				n = 0
-			}
-		}
-		return Date{year, month, day}
-
-
-	}
-	return Date{year, month, day}
+	return civil_from_days(days_from_civil(i64(date.year), i64(date.month), i64(date.day)) + i64(n))
 }
 add_day_datetime :: proc(dt: Datetime, n: i32) -> Datetime {
 	year := dt.year
@@ -167,22 +123,14 @@ add_day_datetime :: proc(dt: Datetime, n: i32) -> Datetime {
 }
 
 
+// Calendar months later (earlier for n < 0); the day is clamped to the
+// length of the target month (2024-01-31 + 1 month = 2024-02-29)
 add_month_date :: proc(date: Date, n: i32) -> Date {
-	year := date.year
-	month := date.month
-	day := date.day
-
-	total_months := year * 12 + month - 1 + n
+	total_months := date.year * 12 + date.month - 1 + n
 	new_year := math.floor_div(total_months, 12)
-	new_month := (total_months % 12) + 1
-	days_in_month := get_days_in_month(new_year, Months(new_month))
-	if day > days_in_month {
-		new_month += 1
-		day = day - days_in_month
-	}
+	new_month := total_months - new_year * 12 + 1
+	day := min(date.day, get_days_in_month(new_year, Months(new_month)))
 	return Date{new_year, new_month, day}
-
-
 }
 add_month_datetime :: proc(dt: Datetime, n: i32) -> Datetime {
 	year := dt.year
@@ -195,13 +143,11 @@ add_month_datetime :: proc(dt: Datetime, n: i32) -> Datetime {
 	return Datetime{new_date.year, new_date.month, new_date.day, hour, minute, second}
 }
 
+// Same month and day n years later; Feb 29 becomes Feb 28 in common years
 add_year_date :: proc(date: Date, n: i32) -> Date {
-	year := date.year
-	month := date.month
-	day := date.day
-	year = year + n
-	return Date{year, month, day}
-
+	year := date.year + n
+	day := min(date.day, get_days_in_month(year, Months(date.month)))
+	return Date{year, date.month, day}
 }
 
 add_year_datetime :: proc(dt: Datetime, n: i32) -> Datetime {
@@ -215,41 +161,12 @@ add_year_datetime :: proc(dt: Datetime, n: i32) -> Datetime {
 	return Datetime{new_date.year, new_date.month, new_date.day, hour, minute, second}
 }
 
+// Time of day n seconds later (earlier for n < 0), wrapping around midnight
 add_seconds_time :: proc(time: Time, n: i32) -> Time {
-	hour := time.hour
-	minute := time.minute
-	second := time.second
-	new_second := second + n
-	minute_in_seconds := minute * MINUTE
-	hour_in_seconds := hour * HOUR
-	if new_second >= MINUTE {
-		new_minute := minute + new_second / MINUTE
-
-		new_second = new_second % MINUTE
-		if new_minute >= HOUR / MINUTE {
-			new_hour := hour + new_minute * MINUTE / HOUR
-			new_minute = new_minute % 60
-			return Time{new_hour, new_minute, new_second}
-		}
-		return Time{hour, new_minute, new_second}
-
-	} else if new_second < MINUTE && new_second >= 0 {
-
-		return Time{hour, minute, new_second}
-	}
-	if new_second < 0 && minute > 0 {
-		new_minute := minute + new_second / MINUTE - 1
-		new_second = MINUTE + new_second % MINUTE
-		if new_minute <= 0 {
-			new_hour := hour - 1 + new_minute / (60)
-			new_minute = 60 + new_minute % 60
-			return Time{new_hour, new_minute, new_second}
-		}
-		return Time{hour, new_minute, new_second}
-	}
-	return Time{hour, minute, second}
+	total := i64(time.hour) * HOUR + i64(time.minute) * MINUTE + i64(time.second) + i64(n)
+	total %%= DAY
+	return Time{i32(total / HOUR), i32((total % HOUR) / MINUTE), i32(total % MINUTE)}
 }
-
 
 add_second_time :: proc(time: Time) -> Time {
 	hour := time.hour
@@ -357,35 +274,9 @@ add_minute_datetime :: proc(datetime: Datetime) -> Datetime {
 	}
 }
 
+// Datetime n seconds later (earlier for n < 0), across day / month / year boundaries
 add_seconds_datetime :: proc(datetime: Datetime, n: i32) -> Datetime {
-
-	year := datetime.year
-	month := datetime.month
-	day := datetime.day
-	hour := datetime.hour
-	minute := datetime.minute
-	second := datetime.second
-
-	time := Time{hour, minute, second}
-	time = add_seconds_time(time, n)
-
-	if time.hour > 24 {
-
-		days := time.hour / 24
-		date := Date{year, month, day}
-		date = add_day_date(date, days)
-		time.hour = time.hour % 24
-		return Datetime{date.year, date.month, date.day, time.hour, time.minute, time.second}
-	} else if time.hour < 0 {
-		days := -(1 - time.hour / 24)
-		fmt.println(days, n)
-		date := Date{year, month, day}
-		date = add_day_date(date, days)
-		time.hour = time.hour % 24 + 24
-		return Datetime{date.year, date.month, date.day, time.hour, time.minute, time.second}
-	} else {
-		return Datetime{year, month, day, time.hour, time.minute, time.second}
-	}
+	return datetime_from_unix(datetime_to_unix(datetime) + i64(n))
 }
 
 add_minutes_datetime :: proc(datetime: Datetime, n: i32) -> Datetime {
@@ -488,33 +379,12 @@ get_day_diff_between_years :: proc(a, b: Date) -> i32 {
 	days = days + get_day_diff_between_months(date, b)
 	return days
 }
+// Absolute number of days between two dates
 get_date_day_diffs :: proc(a, b: Date) -> i32 {
-	a_year := a.year
-	a_month := a.month
-	a_day := a.day
-	b_year := b.year
-	b_month := b.month
-	b_day := b.day
-
-	if (a_year == b_year) && (a_month == b_month) {
-		return abs_days(b_day - a_day)
-	}
-	if a_year == b_year {
-		if a_month < b_month {
-			return get_day_diff_between_months(a, b)
-		} else {
-			return get_day_diff_between_months(b, a)
-		}
-	}
-	if a_year < b_year {
-		return get_day_diff_between_years(a, b)
-	} else {
-		return get_day_diff_between_years(b, a)
-	}
-
+	return abs_days(date_diff(a, b))
 }
 
-
+// Current time (UTC)
 now :: proc() -> Datetime {
 
 	now := t.now()
@@ -522,7 +392,6 @@ now :: proc() -> Datetime {
 	res := t.to_string_yyyy_mm_dd(now, buf[:])
 	buf2: [20]u8
 	res2 := t.to_string_hms(now, buf2[:])
-	fmt.println(res2)
 
 	date, ok := parse_date(res)
 	if !ok {
@@ -572,22 +441,8 @@ date_to_days :: proc(year: i32, month: i32, day: i32) -> i32 {
 
 // Convert Datetime to Unix timestamp (seconds since 1970-01-01 00:00:00 UTC)
 datetime_to_unix :: proc(dt: Datetime) -> i64 {
-	// Days from year 0 to 1970-01-01
-	days_from_epoch := 719162 // Days from year 0 to 1970-01-01
-
-	// Convert date to days since year 0
-	days := date_to_days(dt.year, dt.month, dt.day)
-
-	// Days since Unix epoch
-	days_since_epoch := i64(days) - i64(days_from_epoch)
-
-	// Convert to seconds and add time
-	seconds := days_since_epoch * 86400 // 24 * 60 * 60
-	seconds += i64(dt.hour) * 3600
-	seconds += i64(dt.minute) * 60
-	seconds += i64(dt.second)
-
-	return seconds
+	days := days_from_civil(i64(dt.year), i64(dt.month), i64(dt.day))
+	return days * 86400 + i64(dt.hour) * 3600 + i64(dt.minute) * 60 + i64(dt.second)
 }
 
 // Get current Unix timestamp

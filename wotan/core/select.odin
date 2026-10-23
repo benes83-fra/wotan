@@ -163,8 +163,9 @@ apply_datetime_expr :: proc(
 	return Select_Expr{name = name, kind = .ApplyDatetime, col = col, fn_datetime = fn}
 }
 
+// Int (or Bool) column as Float; a Float column is passed through
 conv_int_to_f64_expr :: proc(name: string, col: ^Column) -> Select_Expr {
-	assert(col.type == .Float)
+	assert(col.type == .Int || col.type == .Float || col.type == .Bool, "conv_int_to_f64_expr: column must be numeric")
 	return Select_Expr{name = name, kind = .ConvIntFloat, col = col}
 }
 
@@ -251,130 +252,99 @@ select_exprs :: proc(df: ^DataFrame, exprs: []Select_Expr) -> DataFrame {
 			add_column(&out, new_col)
 
 		// ---------------------------------------------------------------------
-		case .IntAdd:
+		// Arithmetic / apply on numeric columns: values are read with numeric
+		// coercion (Int, Float, Bool); integer arithmetic on a Float column is
+		// done in floating point and gives a Float column.
+		case .IntAdd, .IntSub, .IntMult, .IntDiv:
 			orig := expr.col
-			new_col := column_new(expr.name, .Int, orig.len)
-
-			for i in 0 ..< orig.len {
-				v, n := column_at_int(orig, i)
-				if n {append_null(&new_col)} else {append_int(&new_col, v + expr.int_value)}
+			_require_numeric(orig, expr.name)
+			as_float := orig.type == .Float
+			new_col := column_new(expr.name, .Float if as_float else .Int, orig.len)
+			if expr.kind == .IntDiv && expr.int_value == 0 {
+				panic("select: Division by zero")
 			}
-
-			add_column(&out, new_col)
-
-		// ---------------------------------------------------------------------
-		case .IntSub:
-			orig := expr.col
-			new_col := column_new(expr.name, .Int, orig.len)
-
 			for i in 0 ..< orig.len {
-				v, n := column_at_int(orig, i)
-				if n {append_null(&new_col)} else {append_int(&new_col, v - expr.int_value)}
-			}
-
-			add_column(&out, new_col)
-
-		// ---------------------------------------------------------------------
-		case .FloatAdd:
-			orig := expr.col
-			new_col := column_new(expr.name, .Float, orig.len)
-
-			for i in 0 ..< orig.len {
-				v, n := column_at_float(orig, i)
-				if n {append_null(&new_col)} else {append_float(&new_col, v + expr.float_value)}
-			}
-
-			add_column(&out, new_col)
-
-		// ---------------------------------------------------------------------
-		case .FloatSub:
-			orig := expr.col
-			new_col := column_new(expr.name, .Float, orig.len)
-
-			for i in 0 ..< orig.len {
-				v, n := column_at_float(orig, i)
-				if n {append_null(&new_col)} else {append_float(&new_col, v - expr.float_value)}
-			}
-
-			add_column(&out, new_col)
-		case .IntMult:
-			orig := expr.col
-			new_col := column_new(expr.name, .Int, orig.len)
-			for i in 0 ..< orig.len {
-				v, n := column_at_int(orig, i)
-				if n {append_null(&new_col)} else {append_int(&new_col, v * expr.int_value)}
-
-			}
-			add_column(&out, new_col)
-		case .IntDiv:
-			orig := expr.col
-			new_col := column_new(expr.name, .Int, orig.len)
-			for i in 0 ..< orig.len {
-				v, n := column_at_int(orig, i)
-				if n {append_null(&new_col)} else {
-					div := expr.int_value
-					if div != 0 {
-						append_int(&new_col, v / div)
-					} else {
-						panic("select: Division by zero")
-					}
-				}
-
-			}
-			add_column(&out, new_col)
-		case .FloatMult:
-			orig := expr.col
-			new_col := column_new(expr.name, .Float, orig.len)
-			for i in 0 ..< orig.len {
-				v, n := column_at_float(orig, i)
-				if n {append_null(&new_col)} else {append_float(&new_col, v * expr.float_value)}
-
-			}
-			add_column(&out, new_col)
-		case .FloatDiv:
-			orig := expr.col
-			new_col := column_new(expr.name, .Float, orig.len)
-			for i in 0 ..< orig.len {
-				v, n := column_at_float(orig, i)
-				if n {append_null(&new_col)} else {
-					div := expr.float_value
-					if div != 0 {
-						append_float(&new_col, v / div)
-					} else {
-						panic("select: Division by zero")
-					}
-				}
-
-			}
-			add_column(&out, new_col)
-		case .ApplyInt:
-			orig := expr.col
-			new_col := column_new(expr.name, .Int, orig.len)
-			for i in 0 ..< orig.len {
-				v, n := column_at_int(orig, i)
+				x, xi, n := _num_at(orig, i)
 				if n {
 					append_null(&new_col)
-				} else {
-					append_int(&new_col, expr.fn_int(v))
+					continue
 				}
+				if as_float {
+					d := f64(expr.int_value)
+					#partial switch expr.kind {
+					case .IntAdd:
+						append_float(&new_col, x + d)
+					case .IntSub:
+						append_float(&new_col, x - d)
+					case .IntMult:
+						append_float(&new_col, x * d)
+					case:
+						append_float(&new_col, x / d)
+					}
+				} else {
+					#partial switch expr.kind {
+					case .IntAdd:
+						append_int(&new_col, xi + expr.int_value)
+					case .IntSub:
+						append_int(&new_col, xi - expr.int_value)
+					case .IntMult:
+						append_int(&new_col, xi * expr.int_value)
+					case:
+						append_int(&new_col, xi / expr.int_value)
+					}
+				}
+			}
+			add_column(&out, new_col)
+
+		case .FloatAdd, .FloatSub, .FloatMult, .FloatDiv:
+			orig := expr.col
+			_require_numeric(orig, expr.name)
+			new_col := column_new(expr.name, .Float, orig.len)
+			if expr.kind == .FloatDiv && expr.float_value == 0 {
+				panic("select: Division by zero")
+			}
+			for i in 0 ..< orig.len {
+				x, _, n := _num_at(orig, i)
+				if n {
+					append_null(&new_col)
+					continue
+				}
+				#partial switch expr.kind {
+				case .FloatAdd:
+					append_float(&new_col, x + expr.float_value)
+				case .FloatSub:
+					append_float(&new_col, x - expr.float_value)
+				case .FloatMult:
+					append_float(&new_col, x * expr.float_value)
+				case:
+					append_float(&new_col, x / expr.float_value)
+				}
+			}
+			add_column(&out, new_col)
+
+		case .ApplyInt:
+			orig := expr.col
+			_require_numeric(orig, expr.name)
+			new_col := column_new(expr.name, .Int, orig.len)
+			for i in 0 ..< orig.len {
+				_, xi, n := _num_at(orig, i)
+				if n {append_null(&new_col)} else {append_int(&new_col, expr.fn_int(xi))}
 			}
 			add_column(&out, new_col)
 
 		case .ApplyFloat:
 			orig := expr.col
+			_require_numeric(orig, expr.name)
 			new_col := column_new(expr.name, .Float, orig.len)
 			for i in 0 ..< orig.len {
-				v, n := column_at_float(orig, i)
-				if n {
-					append_null(&new_col)
-				} else {
-					append_float(&new_col, expr.fn_float(v))
-				}
+				x, _, n := _num_at(orig, i)
+				if n {append_null(&new_col)} else {append_float(&new_col, expr.fn_float(x))}
 			}
 			add_column(&out, new_col)
 
 		case .ApplyString:
 			orig := expr.col
+			_require_type(orig, .String, expr.name)
 			new_col := column_new(expr.name, .String, orig.len)
 			for i in 0 ..< orig.len {
 				v, n := column_at_string(orig, i)
@@ -388,19 +358,17 @@ select_exprs :: proc(df: ^DataFrame, exprs: []Select_Expr) -> DataFrame {
 
 		case .ApplyBool:
 			orig := expr.col
+			_require_numeric(orig, expr.name) // numbers count as true when non-zero
 			new_col := column_new(expr.name, .Bool, orig.len)
 			for i in 0 ..< orig.len {
-				v, n := column_at_bool(orig, i)
-				if n {
-					append_null(&new_col)
-				} else {
-					append_bool(&new_col, expr.fn_bool(v))
-				}
+				x, _, n := _num_at(orig, i)
+				if n {append_null(&new_col)} else {append_bool(&new_col, expr.fn_bool(x != 0))}
 			}
 			add_column(&out, new_col)
 
 		case .ApplyDate:
 			orig := expr.col
+			_require_type(orig, .Date, expr.name)
 			new_col := column_new(expr.name, .Date, orig.len)
 			for i in 0 ..< orig.len {
 				v, n := column_at_date(orig, i)
@@ -413,6 +381,7 @@ select_exprs :: proc(df: ^DataFrame, exprs: []Select_Expr) -> DataFrame {
 			add_column(&out, new_col)
 		case .ApplyTime:
 			orig := expr.col
+			_require_type(orig, .Time, expr.name)
 			new_col := column_new(expr.name, .Time, orig.len)
 			for i in 0 ..< orig.len {
 				v, n := column_at_time(orig, i)
@@ -425,6 +394,7 @@ select_exprs :: proc(df: ^DataFrame, exprs: []Select_Expr) -> DataFrame {
 			add_column(&out, new_col)
 		case .ApplyDatetime:
 			orig := expr.col
+			_require_type(orig, .Datetime, expr.name)
 			new_col := column_new(expr.name, .Datetime, orig.len)
 			for i in 0 ..< orig.len {
 				v, n := column_at_datetime(orig, i)
@@ -437,28 +407,20 @@ select_exprs :: proc(df: ^DataFrame, exprs: []Select_Expr) -> DataFrame {
 			add_column(&out, new_col)
 		case .ConvFloatInt:
 			orig := expr.col
+			_require_numeric(orig, expr.name)
 			new_col := column_new(expr.name, .Int, orig.len)
 			for i in 0 ..< orig.len {
-				v, n := column_at_float(orig, i)
-				if n {
-					append_null(&new_col)
-				} else {
-					w: int = int(v)
-					append_int(&new_col, w)
-				}
+				_, xi, n := _num_at(orig, i)
+				if n {append_null(&new_col)} else {append_int(&new_col, xi)}
 			}
 			add_column(&out, new_col)
 		case .ConvIntFloat:
 			orig := expr.col
+			_require_numeric(orig, expr.name)
 			new_col := column_new(expr.name, .Float, orig.len)
 			for i in 0 ..< orig.len {
-				v, n := column_at_int(orig, i)
-				if n {
-					append_null(&new_col)
-				} else {
-					w: f64 = f64(v)
-					append_float(&new_col, w)
-				}
+				x, _, n := _num_at(orig, i)
+				if n {append_null(&new_col)} else {append_float(&new_col, x)}
 			}
 			add_column(&out, new_col)
 		case .Conv:
@@ -468,165 +430,17 @@ select_exprs :: proc(df: ^DataFrame, exprs: []Select_Expr) -> DataFrame {
 
 			orig := expr.col
 			target_type := get_column_type_by_type(expr.conv)
-			new_col := column_new(expr.name, target_type, orig.len)
-
-			for i in 0 ..< orig.len {
-				// read value based on *source* type
-				#partial switch orig.type {
-				case .Int:
-					v, n := column_at_int(orig, i)
-					if n {
-						append_null(&new_col)
-					} else {
-						#partial switch target_type {
-						case .Int:
-							append_int(&new_col, v)
-						case .Float:
-							append_float(&new_col, f64(v))
-						case .String:
-							buf: [32]u8
-							res := strconv.write_int(buf[:], i64(v), 10)
-							append_string(&new_col, res)
-						case .Bool:
-							append_bool(&new_col, v != 0)
-						case .Date:
-							date := int_to_date(i32(v))
-							append_date(&new_col, date)
-						case .Time:
-							time := int_to_time(i32(v))
-							append_time(&new_col, time)
-						}
-					}
-
-				case .Float:
-					v, n := column_at_float(orig, i)
-					if n {
-						append_null(&new_col)
-					} else {
-						#partial switch target_type {
-						case .Int:
-							append_int(&new_col, int(v))
-						case .Float:
-							append_float(&new_col, v)
-						case .String:
-							buf: [32]u8
-							res := strconv.write_float(buf[:], v, 'f', 4, 64)
-							append_string(&new_col, res)
-						case .Bool:
-							append_bool(&new_col, v != 0.0)
-						case .Date:
-							date := f64_to_date(v)
-							append_date(&new_col, date)
-						}
-					}
-				case .String:
-					v, n := column_at_string(orig, i)
-					if n {
-						append_null(&new_col)
-					} else {
-						#partial switch target_type {
-						case .Int:
-							integer, ok := strconv.parse_int(v)
-							if !ok {
-								panic("parse int: could not parse Integer")
-							}
-							append_int(&new_col, integer)
-						case .Float:
-							float, ok := strconv.parse_f64(v)
-							if !ok {
-								panic("parse float: could not parse Float")
-							}
-							append_float(&new_col, float)
-						case .String:
-							append_string(&new_col, v)
-						case .Bool:
-							b: bool = false
-							if strings.to_upper(v) == "TRUE" {
-								b = true
-							}
-							append_bool(&new_col, b)
-						case .Date:
-							date, ok := parse_date(v)
-							if !ok {
-								panic(
-									"parse date: could not parse Date, string formated incorrectly",
-								)
-							}
-							append_date(&new_col, date)
-						case .Time:
-							time, ok := parse_time(v)
-							if !ok {
-								panic(
-									"parse time: could not parse Time, string formated incorrectly",
-								)
-							}
-							append_time(&new_col, time)
-						case .Datetime:
-							datetime, ok := parse_datetime(v)
-							if !ok {
-								panic(
-									"parse_datetime: could parse Datetime, string formated incorrectly",
-								)
-							}
-							append_datetime(&new_col, datetime)
-						}
-					}
-				case .Date:
-					v, n := column_at_date(orig, i)
-					if n {
-						append_null(&new_col)
-					} else {
-						#partial switch target_type {
-						case .Int:
-							integer := date_to_int(v)
-
-							append_int(&new_col, int(integer))
-						case .Float:
-							float := date_to_f64(v)
-
-							append_float(&new_col, float)
-						case .String:
-							str := date_to_string(v)
-							append_string(&new_col, str)
-						case .Bool:
-							b: bool = false
-
-							append_bool(&new_col, b)
-						case .Date:
-							append_date(&new_col, v)
-						}
-					}
-
-				case .Time:
-					v, n := column_at_time(orig, i)
-					if n {
-						append_null(&new_col)
-					} else {
-						#partial switch target_type {
-						case .String:
-							str := time_to_string(v)
-							append_string(&new_col, str)
-						case .Int:
-							integer := time_to_int(v)
-							append_int(&new_col, int(integer))
-						}
-					}
-
-				case .Datetime:
-					v, n := column_at_datetime(orig, i)
-					if n {
-						append_null(&new_col)
-					} else {
-						#partial switch target_type {
-						case .String:
-							str := datetime_to_string(v)
-							append_string(&new_col, str)
-						}
-					}
-				}
-
+			if target_type == .Invalid {
+				panic(fmt.tprintf("Conv: unknown target type %q for %s", expr.conv, expr.name))
 			}
-
+			new_col := column_new(expr.name, target_type, orig.len)
+			for i in 0 ..< orig.len {
+				if is_null(orig, i) {
+					append_null(&new_col)
+				} else {
+					_conv_append(&new_col, orig, i, expr.name)
+				}
+			}
 			add_column(&out, new_col)
 
 
@@ -636,6 +450,181 @@ select_exprs :: proc(df: ^DataFrame, exprs: []Select_Expr) -> DataFrame {
 	}
 
 	return out
+}
+
+
+// Convert cell i of src (not null) to dst.type and append it. Supported:
+// any type -> String (canonical text) and -> itself; Int/Float/Bool between
+// each other (non-zero = true); Int <-> Date (YYYYMMDD), Float <-> Date (Julian
+// day); Int/Float <-> Time (seconds of day); Int/Float <-> Datetime (Unix
+// seconds); Datetime -> Date / Time; Date -> Datetime (midnight); String ->
+// any type (parsed). Other pairs panic instead of producing a short column.
+@(private = "file")
+_conv_append :: proc(dst: ^Column, src: ^Column, i: int, name: string) {
+	target := dst.type
+	if target == .String {
+		append_string(dst, value_as_string(src, i, context.temp_allocator))
+		return
+	}
+	unsupported :: proc(name: string, from, to: ColumnType) -> ! {
+		panic(fmt.tprintf("Conv %s: no conversion from %v to %v", name, from, to))
+	}
+	bad_text :: proc(name: string, v: string, to: ColumnType) -> ! {
+		panic(fmt.tprintf("Conv %s: cannot parse %q as %v", name, v, to))
+	}
+
+	switch src.type {
+	case .Int, .Float, .Bool:
+		x: f64
+		iv: int
+		switch src.type {
+		case .Int:
+			iv, _ = column_at_int(src, i)
+			x = f64(iv)
+		case .Float:
+			x, _ = column_at_float(src, i)
+			iv = int(x)
+		case .Bool:
+			bv, _ := column_at_bool(src, i)
+			iv = 1 if bv else 0
+			x = f64(iv)
+		case .String, .Date, .Time, .Datetime, .Invalid:
+		}
+		#partial switch target {
+		case .Int:
+			append_int(dst, iv)
+		case .Float:
+			append_float(dst, x)
+		case .Bool:
+			append_bool(dst, x != 0)
+		case .Date:
+			if src.type == .Int {
+				append_date(dst, int_to_date(i32(iv)))
+			} else if src.type == .Float {
+				append_date(dst, f64_to_date(x))
+			} else {
+				unsupported(name, src.type, target)
+			}
+		case .Time:
+			if src.type == .Bool {unsupported(name, src.type, target)}
+			append_time(dst, int_to_time(i32(iv)))
+		case .Datetime:
+			if src.type == .Bool {unsupported(name, src.type, target)}
+			append_datetime(dst, datetime_from_unix(i64(x)))
+		case:
+			unsupported(name, src.type, target)
+		}
+
+	case .String:
+		v, _ := column_at_string(src, i)
+		t := strings.trim_space(v)
+		#partial switch target {
+		case .Int:
+			x, ok := strconv.parse_int(t)
+			if !ok {bad_text(name, v, target)}
+			append_int(dst, x)
+		case .Float:
+			x, ok := strconv.parse_f64(t)
+			if !ok {bad_text(name, v, target)}
+			append_float(dst, x)
+		case .Bool:
+			append_bool(dst, strings.equal_fold(t, "true") || t == "1")
+		case .Date:
+			x, ok := parse_date(t)
+			if !ok {bad_text(name, v, target)}
+			append_date(dst, x)
+		case .Time:
+			x, ok := parse_time(t)
+			if !ok {bad_text(name, v, target)}
+			append_time(dst, x)
+		case .Datetime:
+			x, ok := parse_datetime(t)
+			if !ok {bad_text(name, v, target)}
+			append_datetime(dst, x)
+		case:
+			unsupported(name, src.type, target)
+		}
+
+	case .Date:
+		v, _ := column_at_date(src, i)
+		#partial switch target {
+		case .Int:
+			append_int(dst, int(date_to_int(v)))
+		case .Float:
+			append_float(dst, date_to_f64(v))
+		case .Date:
+			append_date(dst, v)
+		case .Datetime:
+			append_datetime(dst, Datetime{v.year, v.month, v.day, 0, 0, 0})
+		case:
+			unsupported(name, src.type, target)
+		}
+
+	case .Time:
+		v, _ := column_at_time(src, i)
+		#partial switch target {
+		case .Int:
+			append_int(dst, int(time_to_int(v)))
+		case .Float:
+			append_float(dst, f64(time_to_int(v)))
+		case .Time:
+			append_time(dst, v)
+		case:
+			unsupported(name, src.type, target)
+		}
+
+	case .Datetime:
+		v, _ := column_at_datetime(src, i)
+		#partial switch target {
+		case .Int:
+			append_int(dst, int(datetime_to_unix(v)))
+		case .Float:
+			append_float(dst, f64(datetime_to_unix(v)))
+		case .Date:
+			append_date(dst, Date{v.year, v.month, v.day})
+		case .Time:
+			append_time(dst, Time{v.hour, v.minute, v.second})
+		case .Datetime:
+			append_datetime(dst, v)
+		case:
+			unsupported(name, src.type, target)
+		}
+
+	case .Invalid:
+		unsupported(name, src.type, target)
+	}
+}
+
+
+// Numeric cell with coercion: (as float, as int (truncated), is_null)
+@(private = "file")
+_num_at :: proc(col: ^Column, i: int) -> (f64, int, bool) {
+	#partial switch col.type {
+	case .Int:
+		v, n := column_at_int(col, i)
+		return f64(v), v, n
+	case .Float:
+		v, n := column_at_float(col, i)
+		return v, int(v), n
+	case .Bool:
+		v, n := column_at_bool(col, i)
+		return 1 if v else 0, 1 if v else 0, n
+	}
+	return 0, 0, true
+}
+
+@(private = "file")
+_require_numeric :: proc(col: ^Column, name: string) {
+	if col.type != .Int && col.type != .Float && col.type != .Bool {
+		panic(fmt.tprintf("select %s: column %q is %v, expected a numeric column", name, col.name, col.type))
+	}
+}
+
+@(private = "file")
+_require_type :: proc(col: ^Column, t: ColumnType, name: string) {
+	if col.type != t {
+		panic(fmt.tprintf("select %s: column %q is %v, expected %v", name, col.name, col.type, t))
+	}
 }
 
 

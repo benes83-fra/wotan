@@ -1,194 +1,54 @@
 package core
 
-import "base:intrinsics"
-import "core:mem"
-import "core:sort"
-
 // ------------------------------------------------------------
 // Indexing
 // ------------------------------------------------------------
 
+// Make `colname` the index: rows are reordered by it (stable, nulls last) so
+// loc_* can binary-search. drop=true removes the column from the data and
+// keeps its values as the hidden index (df.index_values).
 set_index :: proc(df: ^DataFrame, colname: string, drop: bool = false) {
 	if !(colname in df.name_to_index) {
 		panic("set_index: no such column")
 	}
-
 	col_idx := df.name_to_index[colname]
-	col := &df.columns[col_idx]
-
-	// 1. Build index vector [0,1,2,...]
-	index_vec := make([]int, df.rows, context.allocator)
-	for i in 0 ..< df.rows {
-		index_vec[i] = i
-	}
-
-	// 2. Sort index_vec using your existing sorter system
-	#partial switch col.type {
-	case .Int:
-		sorter := IntSorter {
-			idx  = &index_vec,
-			data = cast([^]int)col.data,
-		}
-		sort.sort(make_int_sorter(&sorter))
-
-	case .Float:
-		sorter := FloatSorter {
-			idx  = &index_vec,
-			data = cast([^]f64)col.data,
-		}
-		sort.sort(make_float_sorter(&sorter))
-
-	case .String:
-		sorter := StringSorter {
-			idx  = &index_vec,
-			data = cast([^]string)col.data,
-		}
-		sort.sort(make_string_sorter(&sorter))
-
-	case .Bool:
-		sorter := BoolSorter {
-			idx  = &index_vec,
-			data = cast([^]bool)col.data,
-		}
-		sort.sort(make_bool_sorter(&sorter))
-
-	case .Date:
-		sorter := DateSorter {
-			idx  = &index_vec,
-			data = cast([^]Date)col.data,
-		}
-		sort.sort(make_date_sorter(&sorter))
-
-	case .Time:
-		sorter := TimeSorter {
-			idx  = &index_vec,
-			data = cast([^]Time)col.data,
-		}
-		sort.sort(make_time_sorter(&sorter))
-
-	case .Datetime:
-		sorter := DatetimeSorter {
-			idx  = &index_vec,
-			data = cast([^]Datetime)col.data,
-		}
-		sort.sort(make_datetime_sorter(&sorter))
-
-	case:
+	key_col := &df.columns[col_idx]
+	if key_col.type == .Invalid {
 		panic("set_index: unsupported index type")
 	}
 
-	// 3. Reorder all columns in-place BEFORE removing anything
+	// 1. stable order by the key column
+	order := column_sort_order(key_col, false, context.temp_allocator)
+	defer delete(order, context.temp_allocator)
+
+	// 2. reorder every column (owned copies: strings cloned, nulls kept)
+	if df.index_values.type != .Invalid { 	// an earlier hidden index follows the rows
+		reordered := column_take(&df.index_values, order, df.columns[0].allocator if len(df.columns) > 0 else context.allocator)
+		destroy_column(&df.index_values)
+		df.index_values = reordered
+	}
 	for &c in df.columns {
-		reorder_column_inplace(&c, index_vec)
+		reorder_column_inplace(&c, order)
+	}
+	if df.index != nil { 	// row labels no longer apply to the new order
+		delete(df.index)
+		df.index = nil
 	}
 
-	delete(index_vec)
-
-	// 4. If drop=true, remove the index column entirely
+	// 3. drop: the column becomes the hidden index
 	if drop {
-		old_cols := df.columns
-		df.columns = make([dynamic]Column, 0, len(old_cols) - 1)
-
-		for i in 0 ..< len(old_cols) {
-			if i == col_idx {
-				destroy_column(&old_cols[i]) // safe: no one references it now
-			} else {
-				append(&df.columns, old_cols[i])
-			}
-		}
-
-		delete(old_cols)
+		destroy_column(&df.index_values)
+		df.index_values = df.columns[col_idx]
+		ordered_remove(&df.columns, col_idx)
+		_rebuild_name_index(df)
 	}
 
-	// 5. Rebuild name_to_index
-	if df.name_to_index != nil {
-		delete(df.name_to_index)
-	}
-	df.name_to_index = make(map[string]int)
-	for c, i in df.columns {
-		df.name_to_index[c.name] = i
-	}
-
-	// 6. Mark index metadata
 	df.index_column = colname
 	df.has_index = true
 }
 
-
-materialize :: proc(df: ^DataFrame) -> DataFrame {
-	out := dataframe_new(context.allocator)
-	out.rows = df.rows
-	out.index = nil
-	out.index_column = df.index_column
-	out.has_index = df.has_index
-
-	// logical indices 0..rows-1
-	indices := make([]int, out.rows)
-	for i in 0 ..< out.rows do indices[i] = i
-
-	for &col in df.columns {
-		dst := column_new(col.name, col.type, out.rows, context.allocator)
-
-		// this internally uses col_get_df(df, col, indices[i], T)
-		copy_column_values(df, &col, &dst, indices)
-
-		dst.is_view = false
-		dst.orig = nil
-		dst.offset = 0
-		dst.len = out.rows
-		dst.capacity = out.rows
-
-		add_column(&out, dst)
-	}
-
-	delete(indices)
-	return out
-}
-
-
-reset_index :: proc(df: ^DataFrame, drop: bool = false) {
-	if !df.has_index {
-		return
-	}
-
-	name := df.index_column
-	idx := df.name_to_index[name]
-
-	// Optionally materialize index as a new column at front
-	if !drop {
-		col := df.columns[idx]
-
-		new_col := column_new(name, col.type, df.rows, context.allocator)
-		mapping := make([]int, df.rows)
-		defer delete(mapping)
-		for i in 0 ..< df.rows do mapping[i] = i
-		copy_column_direct(&col, &new_col, mapping)
-
-		new_col.len = df.rows
-		insert_column_front(df, new_col)
-	}
-
-	// Rebuild columns without the index column (and only free it if dropped)
-	old_cols := df.columns
-	df.columns = make([dynamic]Column, 0, len(old_cols) - 1)
-
-	for i in 0 ..< len(old_cols) {
-		if i == idx {
-			if drop {
-				// index column is *not* appended anywhere, so we own and free it here
-				destroy_column(&old_cols[i])
-			} else {
-				// keep original index column as a normal column
-				append(&df.columns, old_cols[i])
-			}
-		} else {
-			append(&df.columns, old_cols[i])
-		}
-	}
-
-	delete(old_cols)
-
-	// rebuild name_to_index
+@(private = "file")
+_rebuild_name_index :: proc(df: ^DataFrame) {
 	if df.name_to_index != nil {
 		delete(df.name_to_index)
 	}
@@ -196,58 +56,98 @@ reset_index :: proc(df: ^DataFrame, drop: bool = false) {
 	for c, i in df.columns {
 		df.name_to_index[c.name] = i
 	}
+}
+
+
+// Owned copy of a DataFrame (views materialized, index metadata kept)
+materialize :: proc(df: ^DataFrame) -> DataFrame {
+	rows := make([]int, df.rows, context.temp_allocator)
+	defer delete(rows, context.temp_allocator)
+	for i in 0 ..< df.rows {rows[i] = i}
+	out := df_take(df, rows)
+	if out.index != nil { 	// a materialized frame is numbered afresh
+		delete(out.index)
+		out.index = nil
+	}
+	return out
+}
+
+
+// Clear the index. drop=false: the index becomes the first column again if it
+// was dropped by set_index (a column that is still present stays where it is);
+// drop=true: the index values are removed from the frame.
+reset_index :: proc(df: ^DataFrame, drop: bool = false) {
+	if !df.has_index {
+		return
+	}
+	name := df.index_column
+	idx, present := df.name_to_index[name]
+
+	if drop {
+		if present {
+			destroy_column(&df.columns[idx])
+			ordered_remove(&df.columns, idx)
+		}
+	} else if !present && df.index_values.type != .Invalid {
+		restored := column_clone(&df.index_values)
+		insert_column_front(df, restored)
+	}
+	destroy_column(&df.index_values)
+	df.index_values = {}
+	_rebuild_name_index(df)
 
 	df.index_column = ""
 	df.has_index = false
 }
 
+// Rows for the given Date keys, in that order; keys not in the index give a
+// row of nulls (the index column itself holds the requested key)
 reindex_date :: proc(df: ^DataFrame, new_index: []Date) -> DataFrame {
 	if !df.has_index {
 		panic("reindex: DataFrame has no index")
 	}
-
-	// 1. Ensure index column is Date
-	idx_col := &df.columns[df.name_to_index[df.index_column]]
+	idx_col: ^Column
+	if i, ok := df.name_to_index[df.index_column]; ok {
+		idx_col = &df.columns[i]
+	} else {
+		idx_col = &df.index_values
+	}
 	if idx_col.type != .Date {
 		panic("reindex_date: index column is not Date")
 	}
 
-	// 2. Build lookup: Date -> row index
+	// Date -> first row with that key
 	lookup := make(map[Date]int)
-	src := cast([^]Date)idx_col.data
-	for i in 0 ..< df.rows {
-		lookup[src[i]] = i
-	}
-
-	// 3. Build mapping: logical position -> physical row (or -1 for missing)
-	mapping := make([]int, len(new_index))
-	for i in 0 ..< len(new_index) {
-		if row, ok := lookup[new_index[i]]; ok {
-			mapping[i] = row
-		} else {
-			mapping[i] = -1
+	defer delete(lookup)
+	for i := df.rows - 1; i >= 0; i -= 1 {
+		if d, null := column_at_date(idx_col, i); !null {
+			lookup[d] = i
 		}
 	}
 
-	// 4. Create output DataFrame
+	mapping := make([]int, len(new_index))
+	defer delete(mapping)
+	for d, i in new_index {
+		mapping[i] = lookup[d] if d in lookup else -1
+	}
+
 	out := dataframe_new(context.allocator)
+	for &col in df.columns {
+		if col.name == df.index_column { 	// the index column shows the requested keys
+			keys := column_new(col.name, .Date, len(new_index))
+			for d in new_index {append_date(&keys, d)}
+			add_column(&out, keys)
+			continue
+		}
+		add_column(&out, column_take(&col, mapping))
+	}
 	out.rows = len(new_index)
 	out.index_column = df.index_column
 	out.has_index = true
-
-	// 5. For each column, build a new column using mapping
-	for &col in df.columns {
-		dst := column_new(col.name, col.type, out.rows, context.allocator)
-
-		// uses mapping[i] == -1 -> NULL inside
-		copy_column_direct_or_null(&col, &dst, mapping)
-
-		dst.len = out.rows
-		add_column(&out, dst)
+	if df.index_values.type != .Invalid {
+		out.index_values = column_new(df.index_column, .Date, len(new_index))
+		for d in new_index {append_date(&out.index_values, d)}
 	}
-
-	delete(mapping)
-	delete(lookup)
 	return out
 }
 
@@ -255,3 +155,4 @@ reindex_date :: proc(df: ^DataFrame, new_index: []Date) -> DataFrame {
 reindex :: proc {
 	reindex_date,
 }
+

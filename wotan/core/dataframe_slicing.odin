@@ -8,47 +8,14 @@ dataframe_slice_rows_copy :: proc(df: ^DataFrame, start: int, end: int) -> DataF
 		panic(fmt.tprintf("slice_rows: invalid range %d..%d", start, end))
 	}
 
-	n := end - start
+	rows := make([]int, end - start, context.temp_allocator)
+	defer delete(rows, context.temp_allocator)
+	for i in 0 ..< len(rows) {rows[i] = start + i}
 	out := dataframe_new()
-
-	col_count := dataframe_column_count(df)
-	for ci in 0 ..< col_count {
-		name := dataframe_column_name(df, ci)
-		col_type := dataframe_column_type(df, ci)
-		new_col := column_new(name, col_type, n)
-
-		orig := dataframe_column_ptr(df, ci)
-
-		for i in start ..< end {
-			switch col_type {
-			case .Int:
-				v, is_null := column_at_int(orig, i)
-				if is_null {append_null(&new_col)} else {append_int(&new_col, v)}
-			case .Float:
-				v, is_null := column_at_float(orig, i)
-				if is_null {append_null(&new_col)} else {append_float(&new_col, v)}
-			case .Bool:
-				v, is_null := column_at_bool(orig, i)
-				if is_null {append_null(&new_col)} else {append_bool(&new_col, v)}
-			case .String:
-				v, is_null := column_at_string(orig, i)
-				if is_null {append_null(&new_col)} else {append_string(&new_col, v)}
-			case .Date:
-				v, is_null := column_at_date(orig, i)
-				if is_null {append_null(&new_col)} else {append_date(&new_col, v)}
-			case .Time:
-				v, is_null := column_at_time(orig, i)
-				if is_null {append_null(&new_col)} else {append_time(&new_col, v)}
-			case .Datetime:
-				v, is_null := column_at_datetime(orig, i)
-				if is_null {append_null(&new_col)} else {append_datetime(&new_col, v)}
-			case .Invalid:
-			}
-		}
-
-		add_column(&out, new_col)
+	for &col in df.columns {
+		add_column(&out, column_take(&col, rows))
 	}
-
+	out.rows = len(rows)
 	return out
 }
 
@@ -57,11 +24,15 @@ dataframe_slice_rows :: proc(df: ^DataFrame, start: int, end: int, copy: bool) -
 	if copy {
 		return dataframe_slice_rows_copy(df, start, end)
 	}
+	if start < 0 || end < start || end > df.rows {
+		panic(fmt.tprintf("slice_rows: invalid range %d..%d", start, end))
+	}
 	out := dataframe_new()
 	for ci in 0 ..< dataframe_column_count(df) {
 		orig := dataframe_column_ptr(df, ci)
 		new_col := column_slice_view(orig, start, end)
 		add_column(&out, new_col)
 	}
+	out.rows = end - start
 	return out
 }

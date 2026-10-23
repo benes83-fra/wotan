@@ -49,178 +49,128 @@ infer_agg_type :: proc(expr: Agg_Expr) -> ColumnType {
 	switch expr.kind {
 	case .Count:
 		return .Int
-	case .Sum, .Min, .Max:
+	case .Min, .Max:
 		return expr.col.type
+	case .Sum:
+		#partial switch expr.col.type {
+		case .Float:
+			return .Float
+		case .Int, .Bool:
+			return .Int
+		}
+		return expr.col.type // unsupported: nulls of the column's type
 	case .Avg:
-		if expr.col.type == .Int {
+		#partial switch expr.col.type {
+		case .Int, .Float, .Bool:
 			return .Float
 		}
-		return expr.col.type // <-- FIXED
-
+		return expr.col.type
 	}
-
 	return .Int
 }
 
 // --- Helper: copy single value ----------------------------------------------
 
+// Append src[row] to dst (view-aware, nulls kept; out-of-range rows give null)
 copy_value_safe :: proc(dst: ^Column, src: ^Column, row: int) {
-	// if src is a view, compute the real index into the origin
-	src := src
-	real_index := row
-	if src.is_view {
-		real_index = src.offset + row
-		src = src.orig
-	}
-
-	if real_index < 0 || real_index >= src.len {
-		// out of range — append null to dst
+	if row < 0 || row >= src.len {
 		append_null(dst)
 		return
 	}
-
-	#partial switch src.type {
-	case .Int:
-		v, n := column_at_int(src, real_index)
-		if n {append_null(dst)} else {append_int(dst, v)}
-
-	case .Float:
-		v, n := column_at_float(src, real_index)
-		if n {append_null(dst)} else {append_float(dst, v)}
-
-	case .String:
-		v, n := column_at_string(src, real_index)
-		if n {append_null(dst)} else {append_string(dst, v)}
-
-	case .Bool:
-		v, n := column_at_bool(src, real_index)
-		if n {append_null(dst)} else {append_bool(dst, v)}
-
-	case .Date:
-		v, n := column_at_date(src, real_index)
-		if n {append_null(dst)} else {append_date(dst, v)}
-
-	case .Time:
-		v, n := column_at_time(src, real_index)
-		if n {append_null(dst)} else {append_time(dst, v)}
-
-	case .Datetime:
-		v, n := column_at_datetime(src, real_index)
-		if n {append_null(dst)} else {append_datetime(dst, v)}
-	}
+	copy_cell(dst, src, row)
 }
 
 
 // --- Aggregation implementations ---------------------------------------------
 
+// Sum of Int / Bool (number of trues) / Float; 0 for a group without values;
+// other types give null
 sum_value :: proc(expr: Agg_Expr, g: Group, outcol: ^Column) {
 	col := expr.col
-
 	#partial switch col.type {
 	case .Int:
 		total := 0
 		for row in g.row_indices {
-			v, n := column_at_int(col, row)
-			if !n {total += v}
+			if v, n := column_at_int(col, row); !n {total += v}
 		}
 		append_int(outcol, total)
-
+	case .Bool:
+		total := 0
+		for row in g.row_indices {
+			if v, n := column_at_bool(col, row); !n && v {total += 1}
+		}
+		append_int(outcol, total)
 	case .Float:
 		total := 0.0
 		for row in g.row_indices {
-			v, n := column_at_float(col, row)
-			if !n {total += v}
+			if v, n := column_at_float(col, row); !n && v == v {total += v}
 		}
-		append_float(outcol, total) //experimental attempt since even if Int it should make sense calculate average, thus column type check disabled int his call
+		append_float(outcol, total)
+	case:
+		append_null(outcol)
 	}
 }
 
+// Mean of Int / Float / Bool as Float (nulls and NaN skipped); other types give null
 avg_value :: proc(expr: Agg_Expr, g: Group, outcol: ^Column) {
 	col := expr.col
+	total := 0.0
+	count := 0
+	for row in g.row_indices {
+		if is_null(col, row) {continue}
+		#partial switch col.type {
+		case .Int:
+			v, _ := column_at_int(col, row)
+			total += f64(v)
+		case .Float:
+			v, _ := column_at_float(col, row)
+			if v != v {continue}
+			total += v
+		case .Bool:
+			v, _ := column_at_bool(col, row)
+			total += 1 if v else 0
+		case:
+			continue
+		}
+		count += 1
+	}
+	if count == 0 {
+		append_null(outcol)
+	} else {
+		append_float(outcol, total / f64(count))
+	}
+}
 
-	#partial switch col.type {
-	case .Int:
-		total := 0
-		count := 0
-		for row in g.row_indices {
-			v, n := column_at_int(col, row)
-			if !n {total += v; count += 1}
+// Smallest / largest value of any type (nulls and NaN skipped)
+@(private = "file")
+_extreme_value :: proc(expr: Agg_Expr, g: Group, outcol: ^Column, want_max: bool) {
+	col := expr.col
+	best := -1
+	for row in g.row_indices {
+		if is_null(col, row) {continue}
+		if col.type == .Float {
+			if v, _ := column_at_float(col, row); v != v {continue}
 		}
-		if count == 0 {
-			append_null(outcol)
-		} else {
-			append_fake_float(outcol, f64(total / count))
+		if best < 0 {
+			best = row
+			continue
 		}
-
-	case .Float:
-		total := 0.0
-		count := 0
-		for row in g.row_indices {
-			v, n := column_at_float(col, row)
-			if !n {total += v; count += 1}
-		}
-		if count == 0 {
-			append_null(outcol)
-		} else {
-			append_float(outcol, total / f64(count))
-		}
+		c := column_compare_rows(col, row, best)
+		if (want_max && c > 0) || (!want_max && c < 0) {best = row}
+	}
+	if best < 0 {
+		append_null(outcol)
+	} else {
+		copy_cell(outcol, col, best)
 	}
 }
 
 min_value :: proc(expr: Agg_Expr, g: Group, outcol: ^Column) {
-	col := expr.col
-
-	#partial switch col.type {
-	case .Int:
-		first := true
-		minv := 0
-		for row in g.row_indices {
-			fmt.println(row)
-			v, n := column_at_int(col, row)
-			fmt.println(v)
-			if n {continue}
-			if first || v < minv {minv = v; first = false}
-		}
-		if first {append_null(outcol)} else {append_int(outcol, minv)}
-
-	case .Float:
-		first := true
-		minv := 0.0
-		for row in g.row_indices {
-			fmt.println(row)
-			v, n := column_at_float(col, row)
-			fmt.println(v)
-			if n {continue}
-			if first || v < minv {minv = v; first = false}
-		}
-		if first {append_null(outcol)} else {append_float(outcol, minv)}
-	}
+	_extreme_value(expr, g, outcol, false)
 }
 
 max_value :: proc(expr: Agg_Expr, g: Group, outcol: ^Column) {
-	col := expr.col
-
-	#partial switch col.type {
-	case .Int:
-		first := true
-		maxv := 0
-		for row in g.row_indices {
-			v, n := column_at_int(col, row)
-			if n {continue}
-			if first || v > maxv {maxv = v; first = false}
-		}
-		if first {append_null(outcol)} else {append_int(outcol, maxv)}
-
-	case .Float:
-		first := true
-		maxv := 0.0
-		for row in g.row_indices {
-			v, n := column_at_float(col, row)
-			if n {continue}
-			if first || v > maxv {maxv = v; first = false}
-		}
-		if first {append_null(outcol)} else {append_float(outcol, maxv)}
-	}
+	_extreme_value(expr, g, outcol, true)
 }
 
 // --- Aggregation driver ------------------------------------------------------

@@ -46,132 +46,108 @@ DatetimeSorter :: struct {
 }
 
 
+// Copy of df with rows ordered by one column (stable; nulls / NaN last)
 dataframe_sort :: proc(
 	df: ^DataFrame,
 	column_name: string,
 	descending: bool,
 	allocator: mem.Allocator = context.allocator,
 ) -> DataFrame {
+	return dataframe_sort_by(df, []string{column_name}, []bool{descending}, allocator)
+}
 
-	col := column(df, column_name)
-	if col == nil {
-		panic("dataframe_sort: column not found")
+// Copy of df with rows ordered by several columns (lexicographic, stable;
+// nulls / NaN last in every key). `descending` may be shorter than `columns`
+// (missing entries are ascending).
+dataframe_sort_by :: proc(
+	df: ^DataFrame,
+	columns: []string,
+	descending: []bool,
+	allocator: mem.Allocator = context.allocator,
+) -> DataFrame {
+	keys := make([]^Column, len(columns), context.temp_allocator)
+	defer delete(keys, context.temp_allocator)
+	for name, i in columns {
+		keys[i] = column(df, name)
 	}
+	order := _sort_order(keys, descending, df.rows, context.temp_allocator)
+	defer delete(order, context.temp_allocator)
 
-	// 1. Build index array
-	idx := make([]int, df.rows, allocator)
-	defer delete(idx)
-	for i in 0 ..< df.rows {
-		idx[i] = i
+	out := df_take(df, order, allocator)
+	if out.index != nil { 	// sorted frames are numbered afresh
+		delete(out.index, allocator)
+		out.index = nil
 	}
-
-	// 2. Sort index array based on column type
-	#partial switch col.type {
-
-	case .Int:
-		sorter := IntSorter {
-			idx        = &idx,
-			data       = ([^]int)(col.data),
-			descending = descending,
-		}
-		sort.sort(make_sorter(&sorter))
-
-	case .Float:
-		sorter := FloatSorter {
-			idx        = &idx,
-			data       = ([^]f64)(col.data),
-			descending = descending,
-		}
-		sort.sort(make_sorter(&sorter))
-
-	case .String:
-		sorter := StringSorter {
-			idx        = &idx,
-			data       = ([^]string)(col.data),
-			descending = descending,
-		}
-		sort.sort(make_sorter(&sorter))
-
-	case .Bool:
-		sorter := BoolSorter {
-			idx        = &idx,
-			data       = ([^]bool)(col.data),
-			descending = descending,
-		}
-		sort.sort(make_sorter(&sorter))
-
-	case .Date:
-		sorter := DateSorter {
-			idx        = &idx,
-			data       = ([^]Date)(col.data),
-			descending = descending,
-		}
-		sort.sort(make_sorter(&sorter))
-	case .Time:
-		sorter := TimeSorter {
-			idx        = &idx,
-			data       = ([^]Time)(col.data),
-			descending = descending,
-		}
-		sort.sort(make_sorter(&sorter))
-
-
-	case .Datetime:
-		sorter := DatetimeSorter {
-			idx        = &idx,
-			data       = ([^]Datetime)(col.data),
-			descending = descending,
-		}
-		sort.sort(make_sorter(&sorter))
-
-	case:
-		panic("dataframe_sort: unsupported column type")
-	}
-
-
-	// 3. Build sorted DataFrame (copy-based)
-	out := dataframe_new(allocator)
-	out.rows = df.rows
-
-	for &src_col in df.columns {
-		dst_col := column_new(src_col.name, src_col.type, df.rows, allocator)
-
-		#partial switch src_col.type {
-		case .Int:
-			src := cast([^]int)src_col.data
-			dst := cast([^]int)dst_col.data
-			for i in 0 ..< df.rows do dst[i] = src[idx[i]]
-
-		case .Float:
-			src := cast([^]f64)src_col.data
-			dst := cast([^]f64)dst_col.data
-			for i in 0 ..< df.rows do dst[i] = src[idx[i]]
-
-		case .String:
-			src := cast([^]string)src_col.data
-			dst := cast([^]string)dst_col.data
-			for i in 0 ..< df.rows do dst[i] = src[idx[i]]
-
-		case .Bool:
-			src := cast([^]bool)src_col.data
-			dst := cast([^]bool)dst_col.data
-			for i in 0 ..< df.rows do dst[i] = src[idx[i]]
-
-		case .Date:
-			src := cast([^]Date)src_col.data
-			dst := cast([^]Date)dst_col.data
-			for i in 0 ..< df.rows do dst[i] = src[idx[i]]
-
-		case .Datetime:
-			src := cast([^]Datetime)src_col.data
-			dst := cast([^]Datetime)dst_col.data
-			for i in 0 ..< df.rows do dst[i] = src[idx[i]]
-		}
-		dst_col.len = df.rows
-		add_column(&out, dst_col)
-	}
-
 	return out
+}
+
+// Stable row order of one column (nulls / NaN last)
+column_sort_order :: proc(col: ^Column, descending: bool, allocator := context.allocator) -> []int {
+	keys := []^Column{col}
+	return _sort_order(keys, []bool{descending}, col.len, allocator)
+}
+
+@(private = "file")
+_Sort_Ctx :: struct {
+	keys: []^Column,
+	desc: []bool,
+}
+
+@(private = "file")
+_row_less :: proc(ctx: ^_Sort_Ctx, a, b: int) -> bool {
+	for col, k in ctx.keys {
+		c := column_compare_rows(col, a, b)
+		if c == 0 {continue}
+		// nulls stay last in both directions: only flip value comparisons
+		if k < len(ctx.desc) && ctx.desc[k] && !is_null(col, a) && !is_null(col, b) && !_is_nan(col, a) && !_is_nan(col, b) {
+			c = -c
+		}
+		return c < 0
+	}
+	return false
+}
+
+@(private = "file")
+_is_nan :: proc(col: ^Column, r: int) -> bool {
+	if col.type != .Float {return false}
+	v, _ := column_at_float(col, r)
+	return v != v
+}
+
+// Merge sort of row indices 0..<n (stable)
+@(private = "file")
+_sort_order :: proc(keys: []^Column, desc: []bool, n: int, allocator: mem.Allocator) -> []int {
+	order := make([]int, n, allocator)
+	for i in 0 ..< n {order[i] = i}
+	if n < 2 || len(keys) == 0 {return order}
+	ctx := _Sort_Ctx{keys, desc}
+	tmp := make([]int, n, context.temp_allocator)
+	defer delete(tmp, context.temp_allocator)
+	width := 1
+	src, dst := order, tmp
+	for width < n {
+		for lo := 0; lo < n; lo += 2 * width {
+			mid := min(lo + width, n)
+			hi := min(lo + 2 * width, n)
+			i, j, k := lo, mid, lo
+			for i < mid && j < hi {
+				if _row_less(&ctx, src[j], src[i]) {
+					dst[k] = src[j]
+					j += 1
+				} else {
+					dst[k] = src[i]
+					i += 1
+				}
+				k += 1
+			}
+			for i < mid {dst[k] = src[i]; i += 1; k += 1}
+			for j < hi {dst[k] = src[j]; j += 1; k += 1}
+		}
+		src, dst = dst, src
+		width *= 2
+	}
+	if raw_data(src) != raw_data(order) {copy(order, src)}
+	return order
 }
 
 

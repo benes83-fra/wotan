@@ -8,10 +8,11 @@ import "core:strings"
 DataFrame :: struct {
 	columns:       [dynamic]Column,
 	name_to_index: map[string]int,
-	index:         []int,
+	index:         []int, // row labels for printing (source row numbers); not used for data access
 	rows:          int,
 	index_column:  string, // name of the index column
 	has_index:     bool,
+	index_values:  Column, // index keys after set_index(drop=true) removed the column
 }
 
 //
@@ -34,6 +35,8 @@ destroy_dataframe :: proc(df: ^DataFrame) {
 	if df.index != nil {
 		delete(df.index)
 	}
+	destroy_column(&df.index_values)
+	df.index_values = {}
 
 	if df.columns != nil {
 		delete(df.columns)
@@ -76,14 +79,25 @@ column :: proc(df: ^DataFrame, name: string) -> ^Column {
 	return &df.columns[idx]
 }
 
+// Series over a column's storage (views resolved to their rows of the
+// physical column; no copy)
 df_series :: proc(df: ^DataFrame, name: string) -> Series {
 	col := column(df, name)
+	base, offset := col, 0
+	for base.is_view {
+		offset += base.offset
+		base = base.orig
+	}
+	nulls: []bool
+	if base.nulls != nil && len(base.nulls) >= offset + col.len {
+		nulls = base.nulls[offset:offset + col.len]
+	}
 	return Series {
 		name = col.name,
 		type = col.type,
 		len = col.len,
-		data = col.data,
-		nulls = col.nulls,
+		data = rawptr(uintptr(base.data) + uintptr(offset * type_size(col.type))),
+		nulls = nulls,
 	}
 }
 
@@ -121,49 +135,7 @@ df_head :: proc(df: ^DataFrame, n: int) {
 		fmt.printf("%3d ", i)
 
 		for &col in df.columns {
-			if col.is_view {
-				v, is_null := column_at_int(&col, i)
-				if is_null {
-					fmt.print("NULL\t")
-				} else {
-					fmt.printf("%v\t", v)
-				}
-				continue
-			}
-			base := uintptr(col.data) + uintptr(i * type_size(col.type))
-
-			if col.nulls != nil && col.nulls[i] {
-				fmt.print("NULL\t")
-				continue
-			}
-
-			#partial switch col.type {
-			case .Int:
-				fmt.printf("%v\t", (cast(^int)base)^)
-			case .Float:
-				fmt.printf("%v\t", (cast(^f64)base)^)
-			case .Bool:
-				fmt.printf("%v\t", (cast(^bool)base)^)
-			case .String:
-				fmt.printf("%v\t", (cast(^string)base)^)
-			case .Date:
-				d := (cast(^Date)base)^
-				fmt.printf("%04d-%02d-%02d\t", d.year, d.month, d.day)
-			case .Time:
-				d := (cast(^Time)base)^
-				fmt.printf("%02d:%02d:%02d\t", d.hour, d.minute, d.second)
-			case .Datetime:
-				d := (cast(^Datetime)base)^
-				fmt.printf(
-					"%04d-%02d-%02d\t%02d:%02d:%02d\t",
-					d.year,
-					d.month,
-					d.day,
-					d.hour,
-					d.minute,
-					d.second,
-				)
-			}
+			fmt.printf("%s\t", column_value_string(&col, i))
 		}
 
 		fmt.println()
@@ -179,33 +151,7 @@ dataframe_select_columns :: proc(df: ^DataFrame, names: []string, copy: bool) ->
 
 		if copy {
 			// deep copy column
-			new_col := column_new(col.name, col.type, col.len)
-			for i in 0 ..< col.len {
-				#partial switch col.type {
-				case .Int:
-					v, is_null := column_at_int(col, i)
-					if is_null {append_null(&new_col)} else {append_int(&new_col, v)}
-				case .Float:
-					v, is_null := column_at_float(col, i)
-					if is_null {append_null(&new_col)} else {append_float(&new_col, v)}
-				case .Bool:
-					v, is_null := column_at_bool(col, i)
-					if is_null {append_null(&new_col)} else {append_bool(&new_col, v)}
-				case .String:
-					v, is_null := column_at_string(col, i)
-					if is_null {append_null(&new_col)} else {append_string(&new_col, v)}
-				case .Date:
-					v, is_null := column_at_date(col, i)
-					if is_null {append_null(&new_col)} else {append_date(&new_col, v)}
-				case .Time:
-					v, is_null := column_at_time(col, i)
-					if is_null {append_null(&new_col)} else {append_time(&new_col, v)}
-				case .Datetime:
-					v, is_null := column_at_datetime(col, i)
-					if is_null {append_null(&new_col)} else {append_datetime(&new_col, v)}
-				}
-			}
-			add_column(&out, new_col)
+			add_column(&out, column_clone(col))
 		} else {
 			// view: full-row slice of this column
 			view_col := column_slice_view(col, 0, col.len)
@@ -253,7 +199,7 @@ column_value_string :: proc(col: ^Column, row: int) -> string {
 		if is_null {return "NULL"}
 
 		return fmt.tprintf(
-			"%04d-%02d-%02d\t%02d:%02d:%02d",
+			"%04d-%02d-%02d %02d:%02d:%02d",
 			v.year,
 			v.month,
 			v.day,
@@ -268,7 +214,7 @@ column_value_string :: proc(col: ^Column, row: int) -> string {
 
 
 df_from :: proc(cols: ..Column, allocator: mem.Allocator = context.allocator) -> DataFrame {
-	df := dataframe_new()
+	df := dataframe_new(allocator)
 	rows := -1
 
 	for col in cols {

@@ -15,7 +15,7 @@ Series :: struct {
 //
 
 series_from_slice :: proc(name: string, slice: []$T, type: ColumnType) -> Series {
-	return Series{name = name, type = type, len = slice.len, data = slice.data, nulls = nil}
+	return Series{name = name, type = type, len = len(slice), data = raw_data(slice), nulls = nil}
 }
 
 series_empty :: proc(name: string, type: ColumnType, capacity: int) -> Series {
@@ -115,28 +115,28 @@ series_at_date :: proc(s: ^Series, i: int) -> (Date, bool) {
 	return (cast(^Date)base)^, false
 }
 series_at_time :: proc(s: ^Series, i: int) -> (Time, bool) {
-	if s.type != .Date {
-		panic("series_at_date: wrong type")
+	if s.type != .Time {
+		panic("series_at_time: wrong type")
 	}
 	if i < 0 || i >= s.len {
-		panic("series_at_date: index out of bounds")
+		panic("series_at_time: index out of bounds")
 	}
 	if s.nulls != nil && s.nulls[i] {
 		return Time{}, true
 	}
-	base := uintptr(s.data) + uintptr(i * size_of(Date))
+	base := uintptr(s.data) + uintptr(i * size_of(Time))
 	return (cast(^Time)base)^, false
 }
 series_at_datetime :: proc(s: ^Series, i: int) -> (Datetime, bool) {
-	if s.type != .Date {
-		panic("series_at_date: wrong type")
+	if s.type != .Datetime {
+		panic("series_at_datetime: wrong type")
 	}
 	if i < 0 || i >= s.len {
-		panic("series_at_date: index out of bounds")
+		panic("series_at_datetime: index out of bounds")
 	}
 	if s.nulls != nil && s.nulls[i] {
 		return Datetime{}, true
 	}
-	base := uintptr(s.data) + uintptr(i * size_of(Date))
+	base := uintptr(s.data) + uintptr(i * size_of(Datetime))
 	return (cast(^Datetime)base)^, false
 }

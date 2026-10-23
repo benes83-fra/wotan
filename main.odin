@@ -368,6 +368,7 @@ main :: proc() {
 	test.reset_index_test(context.temp_allocator)
 	test.reindex_test(context.temp_allocator)
 	test.set_index_drop_test(context.temp_allocator)
+	test.core_contracts_test(context.temp_allocator)
 	test.matrix_test(context.temp_allocator)
 	test.simd_linalg_test(context.temp_allocator)
 	test.ols_test(context.temp_allocator)

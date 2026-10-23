@@ -48,93 +48,57 @@ mask_not :: proc(a: []bool) -> []bool {
 }
 
 
-column_and :: proc(a, b: ^Column) -> []bool {
+// Bool column as a mask value: null counts as false (like column_mask)
+@(private = "file")
+_truthy :: proc(c: ^Column, i: int) -> bool {
+	v, null := column_at_bool(c, i)
+	return !null && v
+}
 
+column_and :: proc(a, b: ^Column) -> []bool {
 	if a.len != b.len {
 		panic("column_and: Length mismatch")
 	}
 	out := make_mask(a.len)
-	for i in 0 ..< a.len {
-		a_val, a_ok := column_at_bool(a, i)
-		b_val, b_ok := column_at_bool(b, i)
-		if a_ok && b_ok {
-			out[i] = a_val && b_val
-		} else {
-			out[i] = false
-		}
-	}
+	for i in 0 ..< a.len {out[i] = _truthy(a, i) && _truthy(b, i)}
 	return out
 }
 
 column_or :: proc(a, b: ^Column) -> []bool {
-
 	if a.len != b.len {
-		panic("column_and: Length mismatch")
+		panic("column_or: Length mismatch")
 	}
 	out := make_mask(a.len)
-	for i in 0 ..< a.len {
-		a_val, a_ok := column_at_bool(a, i)
-		b_val, b_ok := column_at_bool(b, i)
-		if a_ok && b_ok {
-			out[i] = a_val || b_val
-		} else {
-			out[i] = false
-		}
-	}
+	for i in 0 ..< a.len {out[i] = _truthy(a, i) || _truthy(b, i)}
 	return out
 }
 
+// Negation; null rows stay excluded (false)
 column_not :: proc(a: ^Column) -> []bool {
-
-
 	out := make_mask(a.len)
 	for i in 0 ..< a.len {
-		a_val, a_ok := column_at_bool(a, i)
-		if a_ok {
-			out[i] = !a_val
-		} else {
-			out[i] = false
-		}
+		v, null := column_at_bool(a, i)
+		out[i] = !null && !v
 	}
 	return out
 }
 
 mask_and_column :: proc(a: []bool, b: ^Column) -> []bool {
-
 	if len(a) != b.len {
 		panic("mask_and_column: Length mismatch")
 	}
 	out := make_mask(len(a))
-	for i in 0 ..< len(a) {
-		b_val, b_ok := column_at_bool(b, i)
-		if b_ok {
-			out[i] = a[i] && b_val
-		} else {
-			out[i] = false
-		}
-	}
+	for i in 0 ..< len(a) {out[i] = a[i] && _truthy(b, i)}
 	return out
-
-
 }
 
 mask_or_column :: proc(a: []bool, b: ^Column) -> []bool {
-
 	if len(a) != b.len {
 		panic("mask_or_column: Length mismatch")
 	}
 	out := make_mask(len(a))
-	for i in 0 ..< len(a) {
-		b_val, b_ok := column_at_bool(b, i)
-		if b_ok {
-			out[i] = a[i] || b_val
-		} else {
-			out[i] = false
-		}
-	}
+	for i in 0 ..< len(a) {out[i] = a[i] || _truthy(b, i)}
 	return out
-
-
 }
 
 
