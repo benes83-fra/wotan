@@ -15,21 +15,23 @@ LineStyle :: enum {
 PlotConfig :: struct {
 	width:         int,
 	height:        int,
-	margin_left:   int,
+	margin_left:   int, // minimum margins; grown to fit tick / axis labels
 	margin_right:  int,
 	margin_top:    int,
 	margin_bottom: int,
-	point_color:   Color, // Color for scatter points
-	bar_color:     Color, // Color for histogram bars
+	point_color:   Color, // Color for scatter points / single line plots
+	bar_color:     Color, // Color for bars and histogram bars
 	axis_color:    Color, // Color for axes and text
 	bg_color:      Color, // Background color
-	font_scale:    int,
+	font_scale:    int, // 1 small .. 5 large (used when font_size == 0)
 	title:         string,
 	x_label:       string,
 	y_label:       string,
 	line_style:    LineStyle, // Line style for line plots
-	show_grid:     bool, // Show grid lines
+	show_grid:     bool, // Show grid lines at the ticks
 	grid_color:    Color, // Color for grid lines
+	font_size:     int, // body text size in pixels (0 = from font_scale)
+	line_width:    f64, // data line width in pixels (0 = 1.5)
 }
 
 DEFAULT_PLOT_CONFIG :: PlotConfig {
@@ -41,7 +43,7 @@ DEFAULT_PLOT_CONFIG :: PlotConfig {
 	margin_bottom = 40,
 	point_color   = RED,
 	bar_color     = BLUE,
-	axis_color    = BLACK,
+	axis_color    = Color{40, 40, 40, 255},
 	bg_color      = WHITE,
 	font_scale    = 2,
 	title         = "",
@@ -49,7 +51,9 @@ DEFAULT_PLOT_CONFIG :: PlotConfig {
 	y_label       = "",
 	line_style    = .Solid,
 	show_grid     = false,
-	grid_color    = Color{128, 128, 128, 255}, // Gray
+	grid_color    = Color{225, 225, 225, 255},
+	font_size     = 0,
+	line_width    = 1.5,
 }
 // ============================================================================
 // 1. Software Rasterizer & Image Buffer
@@ -58,7 +62,7 @@ DEFAULT_PLOT_CONFIG :: PlotConfig {
 LineData :: struct {
 	xs:    []f64,
 	ys:    []f64,
-	color: Color,
+	color: Color, // zero value = next palette colour
 	style: LineStyle,
 	label: string, // Used for the legend
 }
@@ -67,9 +71,18 @@ Color :: struct {
 }
 WHITE :: Color{255, 255, 255, 255}
 BLACK :: Color{0, 0, 0, 255}
-RED :: Color{255, 0, 0, 255}
-BLUE :: Color{0, 0, 255, 255}
-GREEN :: Color{0, 255, 0, 255}
+// Named colours follow the matplotlib "tab10" palette (readable on white)
+RED :: Color{214, 39, 40, 255}
+BLUE :: Color{31, 119, 180, 255}
+GREEN :: Color{44, 160, 44, 255}
+ORANGE :: Color{255, 127, 14, 255}
+PURPLE :: Color{148, 103, 189, 255}
+BROWN :: Color{140, 86, 75, 255}
+PINK :: Color{227, 119, 194, 255}
+GRAY :: Color{127, 127, 127, 255}
+OLIVE :: Color{188, 189, 34, 255}
+CYAN :: Color{23, 190, 207, 255}
+PALETTE :: [10]Color{BLUE, ORANGE, GREEN, RED, PURPLE, BROWN, PINK, GRAY, OLIVE, CYAN}
 
 Image :: struct {
 	width:     int,
@@ -112,7 +125,7 @@ draw_pixel :: proc(img: ^Image, x, y: int, c: Color) {
 	img.pixels[idx + 3] = c.a
 }
 
-// Bresenham's Line Algorithm
+// Bresenham's Line Algorithm (crisp 1-px lines for frames and grids)
 draw_line :: proc(img: ^Image, x0, y0, x1, y1: int, c: Color) {
 	x0 := x0
 	y0 := y0
@@ -143,17 +156,12 @@ draw_line :: proc(img: ^Image, x0, y0, x1, y1: int, c: Color) {
 		}
 	}
 }
+
+// Text at (x, y) = top-left of the line box, in the font size of `scale`
 draw_text :: proc(img: ^Image, x, y: int, text: string, scale: int, c: Color) {
-	cx := x
-	for b in text {
-		if b == ' ' {
-			cx += 4 * scale // Space character width
-		} else {
-			draw_char(img, cx, y, u8(b), scale, c)
-			cx += 4 * scale
-		}
-	}
+	draw_string(img, font_get(font_size_for_scale(scale)), f64(x), f64(y), text, c)
 }
+
 draw_rect :: proc(img: ^Image, x, y, w, h: int, c: Color) {
 	for i in 0 ..< w {
 		for j in 0 ..< h {
@@ -162,145 +170,30 @@ draw_rect :: proc(img: ^Image, x, y, w, h: int, c: Color) {
 	}
 }
 
-// ============================================================================
-// 2. Minimal 3x5 Bitmap Font (Zero Dependencies)
-// ============================================================================
-
-FONT_3X5 :: [36][5]u8 {
-	// Digits 0-9
-	{0b111, 0b101, 0b101, 0b101, 0b111}, // 0
-	{0b010, 0b110, 0b010, 0b010, 0b111}, // 1
-	{0b111, 0b001, 0b111, 0b100, 0b111}, // 2
-	{0b111, 0b001, 0b111, 0b001, 0b111}, // 3
-	{0b101, 0b101, 0b111, 0b001, 0b001}, // 4
-	{0b111, 0b100, 0b111, 0b001, 0b111}, // 5
-	{0b111, 0b100, 0b111, 0b101, 0b111}, // 6
-	{0b111, 0b001, 0b010, 0b010, 0b010}, // 7
-	{0b111, 0b101, 0b111, 0b101, 0b111}, // 8
-	{0b111, 0b101, 0b111, 0b001, 0b111}, // 9
-	// Letters A-Z
-	{0b111, 0b101, 0b111, 0b101, 0b101}, // A
-	{0b110, 0b101, 0b110, 0b101, 0b110}, // B
-	{0b111, 0b100, 0b100, 0b100, 0b111}, // C
-	{0b110, 0b101, 0b101, 0b101, 0b110}, // D
-	{0b111, 0b100, 0b111, 0b100, 0b111}, // E
-	{0b111, 0b100, 0b111, 0b100, 0b100}, // F
-	{0b111, 0b100, 0b101, 0b101, 0b111}, // G
-	{0b101, 0b101, 0b111, 0b101, 0b101}, // H
-	{0b111, 0b010, 0b010, 0b010, 0b111}, // I
-	{0b011, 0b001, 0b001, 0b101, 0b110}, // J
-	{0b101, 0b110, 0b100, 0b110, 0b101}, // K
-	{0b100, 0b100, 0b100, 0b100, 0b111}, // L
-	{0b101, 0b111, 0b101, 0b101, 0b101}, // M
-	{0b101, 0b111, 0b101, 0b101, 0b101}, // N (simplified)
-	{0b111, 0b101, 0b101, 0b101, 0b111}, // O
-	{0b111, 0b101, 0b111, 0b100, 0b100}, // P
-	{0b111, 0b101, 0b101, 0b111, 0b101}, // Q
-	{0b111, 0b101, 0b111, 0b110, 0b101}, // R
-	{0b111, 0b100, 0b111, 0b001, 0b111}, // S
-	{0b010, 0b111, 0b010, 0b010, 0b010}, // T
-	{0b101, 0b101, 0b101, 0b101, 0b111}, // U
-	{0b101, 0b101, 0b101, 0b101, 0b010}, // V
-	{0b101, 0b101, 0b101, 0b111, 0b101}, // W
-	{0b101, 0b101, 0b010, 0b101, 0b101}, // X
-	{0b101, 0b101, 0b010, 0b010, 0b010}, // Y
-	{0b111, 0b001, 0b010, 0b100, 0b111}, // Z
-}
-
 draw_char :: proc(img: ^Image, x, y: int, ch: u8, scale: int, c: Color) {
-	idx: int = -1
-
-	if ch >= '0' && ch <= '9' {
-		idx = int(ch - '0')
-	} else if ch >= 'A' && ch <= 'Z' {
-		idx = int(ch - 'A' + 10)
-	} else if ch >= 'a' && ch <= 'z' {
-		idx = int(ch - 'a' + 10)
-	}
-
-	if idx < 0 || idx >= len(FONT_3X5) {return}
-	font := FONT_3X5
-	glyph := font[idx]
-	for row in 0 ..< 5 {
-		for col in 0 ..< 3 {
-			if (glyph[row] & (1 << u32(2 - col))) != 0 {
-				for sx in 0 ..< scale {
-					for sy in 0 ..< scale {
-						draw_pixel(img, x + col * scale + sx, y + row * scale + sy, c)
-					}
-				}
-			}
-		}
-	}
+	buf := [1]u8{ch}
+	draw_text(img, x, y, string(buf[:]), scale, c)
 }
+
 draw_number :: proc(img: ^Image, x, y: int, val: f64, scale: int, c: Color) {
-	str := fmt.tprintf("%.2f", val)
-	cx := x
-	for b in str {
-		if b >= '0' && b <= '9' {
-			draw_char(img, cx, y, u8(b), scale, c)
-			cx += 4 * scale
-		} else if b == '.' {
-			for sx in 0 ..< scale {
-				for sy in 0 ..< scale {
-					draw_pixel(img, cx + sx, y + 4 * scale + sy, c)
-				}
-			}
-			cx += 2 * scale
-		} else if b == '-' {
-			for sx in 0 ..< 3 * scale {
-				for sy in 0 ..< scale {
-					draw_pixel(img, cx + sx, y + 2 * scale + sy, c)
-				}
-			}
-			cx += 4 * scale
-		}
-	}
+	draw_text(img, x, y, fmt.tprintf("%.2f", val), scale, c)
 }
 
+// Anti-aliased line with the given style (single segment)
 draw_line_segment :: proc(img: ^Image, x0, y0, x1, y1: int, c: Color, style: LineStyle) {
-	switch style {
-	case .Solid:
-		draw_line(img, x0, y0, x1, y1, c)
-	case .Dashed:
-		// Draw dashed line (6 pixels on, 4 pixels off)
-		dx := math.abs(x1 - x0)
-		dy := math.abs(y1 - y0)
-		steps := dx
-		if dy > dx {steps = dy}
-
-		if steps == 0 {return}
-
-		x_inc := f64(x1 - x0) / f64(steps)
-		y_inc := f64(y1 - y0) / f64(steps)
-
-		for i in 0 ..< steps {
-			if (i % 10) < 6 { 	// 6 on, 4 off
-				x := x0 + int(x_inc * f64(i))
-				y := y0 + int(y_inc * f64(i))
-				draw_pixel(img, x, y, c)
-			}
-		}
-	case .Dotted:
-		// Draw dotted line (2 pixels on, 3 pixels off)
-		dx := math.abs(x1 - x0)
-		dy := math.abs(y1 - y0)
-		steps := dx
-		if dy > dx {steps = dy}
-
-		if steps == 0 {return}
-
-		x_inc := f64(x1 - x0) / f64(steps)
-		y_inc := f64(y1 - y0) / f64(steps)
-
-		for i in 0 ..< steps {
-			if (i % 5) < 2 { 	// 2 on, 3 off
-				x := x0 + int(x_inc * f64(i))
-				y := y0 + int(y_inc * f64(i))
-				draw_pixel(img, x, y, c)
-			}
-		}
+	ax := Axes {
+		img    = img,
+		left   = -1,
+		top    = -1,
+		right  = img.width,
+		bottom = img.height,
 	}
+	cv := coverage_new(&ax, context.temp_allocator)
+	defer coverage_free(&cv, context.temp_allocator)
+	xs := [2]f64{f64(x0), f64(x1)}
+	ys := [2]f64{f64(y0), f64(y1)}
+	cov_polyline(&cv, xs[:], ys[:], 0.75, style)
+	cov_flush(img, &cv, c)
 }
 
 // ============================================================================
@@ -457,32 +350,48 @@ image_save_png :: proc(img: ^Image, path: string) -> bool {
 }
 
 
-// Maps a value between 0.0 and 1.0 to a color
+// Maps a value between 0.0 and 1.0 to a color (perceptually ordered,
+// viridis-like: dark blue -> teal -> green -> yellow)
 get_heat_color :: proc(val: f64) -> Color {
-	val := val
-	if val < 0.0 {val = 0.0}
-	if val > 1.0 {val = 1.0}
-
-	// 0.0 to 0.5: Dark Blue to Green
-	if val < 0.5 {
-		t := val * 2.0
-		r := u8(0)
-		g := u8(t * 200)
-		b := u8(128 + t * 127) // 128 to 255
-		return Color{r, g, b, 255}
-	} else {
-		t := (val - 0.5) * 2.0
-		r := u8(t * 255)
-		g := u8(200 + t * 55) // 200 to 255
-		b := u8(255 - t * 255) // 255 to 0
-		return Color{r, g, b, 255}
+	stops := [5][3]f64 {
+		{68, 1, 84},
+		{59, 82, 139},
+		{33, 145, 140},
+		{94, 201, 98},
+		{253, 231, 37},
 	}
+	v := clamp(val, 0, 1) if !math.is_nan(val) else 0
+	pos := v * 4
+	i := min(int(pos), 3)
+	t := pos - f64(i)
+	a, b := stops[i], stops[i + 1]
+	return Color{u8(a[0] + (b[0] - a[0]) * t), u8(a[1] + (b[1] - a[1]) * t), u8(a[2] + (b[2] - a[2]) * t), 255}
 }
 
 
 // ============================================================================
 // 4. Public Plotting API
 // ============================================================================
+
+@(private = "file")
+_begin :: proc(cfg: PlotConfig, allocator: mem.Allocator) -> Image {
+	img := image_new(cfg.width, cfg.height, allocator)
+	image_clear(&img, cfg.bg_color.r, cfg.bg_color.g, cfg.bg_color.b, cfg.bg_color.a)
+	return img
+}
+
+// Map data to pixel coordinates (NaN stays NaN and breaks lines)
+@(private = "file")
+_to_pixels :: proc(ax: ^Axes, xs, ys: []f64, allocator: mem.Allocator) -> (px, py: []f64) {
+	n := min(len(xs), len(ys))
+	px = make([]f64, n, allocator)
+	py = make([]f64, n, allocator)
+	for i in 0 ..< n {
+		px[i] = axes_px(ax, xs[i])
+		py[i] = axes_py(ax, ys[i])
+	}
+	return
+}
 
 scatter_png :: proc(
 	df: ^w.DataFrame,
@@ -501,95 +410,30 @@ scatter_png :: proc(
 	ys := make([]f64, n, allocator)
 	defer delete(xs, allocator)
 	defer delete(ys, allocator)
-
-	min_x, max_x := math.F64_MAX, -math.F64_MAX
-	min_y, max_y := math.F64_MAX, -math.F64_MAX
-
 	for i in 0 ..< n {
-		vx, _ := w.column_at_float(col_x, i)
-		vy, _ := w.column_at_float(col_y, i)
-		xs[i] = vx
-		ys[i] = vy
-		if vx < min_x {min_x = vx}
-		if vx > max_x {max_x = vx}
-		if vy < min_y {min_y = vy}
-		if vy > max_y {max_y = vy}
+		xs[i], _ = w.column_at_float(col_x, i)
+		ys[i], _ = w.column_at_float(col_y, i)
 	}
+	min_x, max_x := data_range(xs)
+	min_y, max_y := data_range(ys)
 
-	W, H := config.width, config.height
-	img := image_new(W, H, allocator)
+	img := _begin(config, allocator)
 	defer image_free(&img)
-	image_clear(&img, config.bg_color.r, config.bg_color.g, config.bg_color.b, config.bg_color.a)
+	ax := axes_setup(&img, config, min_x, max_x, min_y, max_y, {pad_frac = 0.05})
+	axes_draw_grid(&ax)
 
-	margin_l, margin_r, margin_t, margin_b :=
-		config.margin_left, config.margin_right, config.margin_top, config.margin_bottom
-	plot_w := W - margin_l - margin_r
-	plot_h := H - margin_t - margin_b
-
-	draw_line(&img, margin_l, margin_t, margin_l, H - margin_b, config.axis_color)
-	draw_line(&img, margin_l, H - margin_b, W - margin_r, H - margin_b, config.axis_color)
-	// Draw grid lines if enabled
-	if config.show_grid {
-		// Vertical grid lines
-		for i in 1 ..< 5 {
-			px := margin_l + (plot_w * i) / 4
-			draw_line(&img, px, margin_t, px, H - margin_b, config.grid_color)
-		}
-		// Horizontal grid lines
-		for i in 1 ..< 5 {
-			py := H - margin_b - (plot_h * i) / 4
-			draw_line(&img, margin_l, py, W - margin_r, py, config.grid_color)
-		}
-	}
-	// Draw title
-	if config.title != "" {
-		title_x := (W - len(config.title) * 4 * config.font_scale) / 2
-		draw_text(&img, title_x, 10, config.title, config.font_scale, config.axis_color)
-	}
-
-	// Draw axis labels
-	if config.x_label != "" {
-		label_x := margin_l + (plot_w - len(config.x_label) * 4 * config.font_scale) / 2
-		draw_text(
-			&img,
-			label_x,
-			H - margin_b + 10,
-			config.x_label,
-			config.font_scale,
-			config.axis_color,
-		)
-	}
-
-	if config.y_label != "" {
-		// For y-label, we'll just draw it horizontally at the top left for now
-		draw_text(&img, 10, margin_t, config.y_label, config.font_scale, config.axis_color)
-	}
-	for i in 0 ..< 5 {
-		px := margin_l + (plot_w * i) / 4
-		val := min_x + (max_x - min_x) * f64(i) / 4.0
-		draw_line(&img, px, H - margin_b, px, H - margin_b + 5, config.axis_color)
-		draw_number(&img, px - 15, H - margin_b + 10, val, config.font_scale, config.axis_color)
-	}
-	for i in 0 ..< 5 {
-		py := H - margin_b - (plot_h * i) / 4
-		val := min_y + (max_y - min_y) * f64(i) / 4.0
-		draw_line(&img, margin_l - 5, py, margin_l, py, config.axis_color)
-		draw_number(&img, 5, py - 5, val, config.font_scale, config.axis_color)
-	}
-
-	range_x := max_x - min_x
-	range_y := max_y - min_y
-	if range_x == 0 {range_x = 1}
-	if range_y == 0 {range_y = 1}
-
+	cv := coverage_new(&ax, allocator)
+	defer coverage_free(&cv, allocator)
+	radius := max(2.5, 1.6 * line_width_of(config))
 	for i in 0 ..< n {
-		px := margin_l + int((xs[i] - min_x) / range_x * f64(plot_w))
-		py := H - margin_b - int((ys[i] - min_y) / range_y * f64(plot_h))
-
-		draw_line(&img, px - 2, py, px + 2, py, config.point_color)
-		draw_line(&img, px, py - 2, px, py + 2, config.point_color)
+		px, py := axes_px(&ax, xs[i]), axes_py(&ax, ys[i])
+		if !math.is_nan(px) && !math.is_nan(py) {cov_disc(&cv, px, py, radius)}
 	}
+	marker := config.point_color
+	marker.a = u8(f64(marker.a) * 0.85)
+	cov_flush(&img, &cv, marker)
 
+	axes_draw_frame(&ax)
 	return image_save_png(&img, path)
 }
 
@@ -598,99 +442,48 @@ histogram_png :: proc(
 	col_name: string,
 	path: string,
 	bins: int = 20,
-	config: PlotConfig = DEFAULT_PLOT_CONFIG, // <--- ADD THIS LINE
+	config: PlotConfig = DEFAULT_PLOT_CONFIG,
 	allocator: mem.Allocator = context.allocator,
 ) -> bool {
 	col := w.column(df, col_name)
-	if col.type != .Float {return false}
+	if col.type != .Float || bins <= 0 {return false}
 
 	n := df.rows
 	vals := make([]f64, n, allocator)
 	defer delete(vals, allocator)
-
-	min_v, max_v := math.F64_MAX, -math.F64_MAX
-	for i in 0 ..< n {
-		v, _ := w.column_at_float(col, i)
-		vals[i] = v
-		if v < min_v {min_v = v}
-		if v > max_v {max_v = v}
-	}
-
+	for i in 0 ..< n {vals[i], _ = w.column_at_float(col, i)}
+	min_v, max_v := data_range(vals)
+	if !(min_v <= max_v) {min_v, max_v = 0, 1}
+	if min_v == max_v {min_v, max_v = min_v - 0.5, max_v + 0.5}
 	val_range := max_v - min_v
-	if val_range == 0 {val_range = 1}
 
 	counts := make([]int, bins, allocator)
 	defer delete(counts, allocator)
-
 	for v in vals {
-		idx := int((v - min_v) / val_range * f64(bins))
-		if idx >= bins {idx = bins - 1}
+		if math.is_nan(v) || math.is_inf(v) {continue}
+		idx := clamp(int((v - min_v) / val_range * f64(bins)), 0, bins - 1)
 		counts[idx] += 1
 	}
+	max_count := 1
+	for c in counts {max_count = max(max_count, c)}
 
-	max_count := 0
-	for c in counts {
-		if c > max_count {max_count = c}
-	}
-	if max_count == 0 {max_count = 1}
-
-	W, H := config.width, config.height
-	img := image_new(W, H, allocator)
+	img := _begin(config, allocator)
 	defer image_free(&img)
-	image_clear(&img, config.bg_color.r, config.bg_color.g, config.bg_color.b, config.bg_color.a)
+	ax := axes_setup(&img, config, min_v, max_v, 0, f64(max_count), {y_from_zero = true, x_exact = true, pad_frac = 0.05})
+	axes_draw_grid(&ax)
 
-	margin_l, margin_r, margin_t, margin_b :=
-		config.margin_left, config.margin_right, config.margin_top, config.margin_bottom
-	plot_w := W - margin_l - margin_r
-	plot_h := H - margin_t - margin_b
-
-	draw_line(&img, margin_l, margin_t, margin_l, H - margin_b, config.axis_color)
-	draw_line(&img, margin_l, H - margin_b, W - margin_r, H - margin_b, config.axis_color)
-	// Draw grid lines if enabled
-	if config.show_grid {
-		// Vertical grid lines
-		for i in 1 ..< 5 {
-			px := margin_l + (plot_w * i) / 4
-			draw_line(&img, px, margin_t, px, H - margin_b, config.grid_color)
-		}
-		// Horizontal grid lines
-		for i in 1 ..< 5 {
-			py := H - margin_b - (plot_h * i) / 4
-			draw_line(&img, margin_l, py, W - margin_r, py, config.grid_color)
-		}
-	}
-	// Draw title
-	if config.title != "" {
-		title_x := (W - len(config.title) * 4 * config.font_scale) / 2
-		draw_text(&img, title_x, 10, config.title, config.font_scale, config.axis_color)
-	}
-
-	// Draw axis labels
-	if config.x_label != "" {
-		label_x := margin_l + (plot_w - len(config.x_label) * 4 * config.font_scale) / 2
-		draw_text(
-			&img,
-			label_x,
-			H - margin_b + 10,
-			config.x_label,
-			config.font_scale,
-			config.axis_color,
-		)
-	}
-
-	if config.y_label != "" {
-		draw_text(&img, 10, margin_t, config.y_label, config.font_scale, config.axis_color)
-	}
-	bar_w := plot_w / bins
+	gap := 1.0 if (f64(ax.right - ax.left) / f64(bins)) > 4 else 0.0
 	for i in 0 ..< bins {
-		h := int(f64(counts[i]) / f64(max_count) * f64(plot_h))
-		x := margin_l + i * bar_w
-		y := H - margin_b - h
-		draw_rect(&img, x, y, bar_w - 1, h, config.point_color)
+		if counts[i] == 0 {continue}
+		x0 := axes_px(&ax, min_v + val_range * f64(i) / f64(bins))
+		x1 := axes_px(&ax, min_v + val_range * f64(i + 1) / f64(bins))
+		fill_rect_clipped(&ax, x0, axes_py(&ax, f64(counts[i])), x1 - gap, axes_py(&ax, 0), config.bar_color)
 	}
 
+	axes_draw_frame(&ax)
 	return image_save_png(&img, path)
 }
+
 line_png :: proc(
 	xs: []f64,
 	ys: []f64,
@@ -699,111 +492,25 @@ line_png :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> bool {
 	if len(xs) != len(ys) || len(xs) == 0 {return false}
-	n := len(xs)
+	min_x, max_x := data_range(xs)
+	min_y, max_y := data_range(ys)
 
-	min_x, max_x := math.F64_MAX, -math.F64_MAX
-	min_y, max_y := math.F64_MAX, -math.F64_MAX
-
-	for i in 0 ..< n {
-		if xs[i] < min_x {min_x = xs[i]}
-		if xs[i] > max_x {max_x = xs[i]}
-		if ys[i] < min_y {min_y = ys[i]}
-		if ys[i] > max_y {max_y = ys[i]}
-	}
-
-	W, H := config.width, config.height
-	img := image_new(W, H, allocator)
+	img := _begin(config, allocator)
 	defer image_free(&img)
-	image_clear(&img, config.bg_color.r, config.bg_color.g, config.bg_color.b, config.bg_color.a)
+	ax := axes_setup(&img, config, min_x, max_x, min_y, max_y)
+	axes_draw_grid(&ax)
 
-	margin_l, margin_r, margin_t, margin_b :=
-		config.margin_left, config.margin_right, config.margin_top, config.margin_bottom
-	plot_w := W - margin_l - margin_r
-	plot_h := H - margin_t - margin_b
+	cv := coverage_new(&ax, allocator)
+	defer coverage_free(&cv, allocator)
+	px, py := _to_pixels(&ax, xs, ys, allocator)
+	defer {delete(px, allocator); delete(py, allocator)}
+	cov_polyline(&cv, px, py, 0.5 * line_width_of(config), config.line_style)
+	cov_flush(&img, &cv, config.point_color)
 
-	// Draw axes
-	draw_line(&img, margin_l, margin_t, margin_l, H - margin_b, config.axis_color)
-	draw_line(&img, margin_l, H - margin_b, W - margin_r, H - margin_b, config.axis_color)
-	// Draw grid lines if enabled
-	if config.show_grid {
-		// Vertical grid lines
-		for i in 1 ..< 5 {
-			px := margin_l + (plot_w * i) / 4
-			draw_line(&img, px, margin_t, px, H - margin_b, config.grid_color)
-		}
-		// Horizontal grid lines
-		for i in 1 ..< 5 {
-			py := H - margin_b - (plot_h * i) / 4
-			draw_line(&img, margin_l, py, W - margin_r, py, config.grid_color)
-		}
-	}
-
-	// Draw title
-	if config.title != "" {
-		title_x := (W - len(config.title) * 4 * config.font_scale) / 2
-		draw_text(&img, title_x, 10, config.title, config.font_scale, config.axis_color)
-	}
-
-	// Draw axis labels
-	if config.x_label != "" {
-		label_x := margin_l + (plot_w - len(config.x_label) * 4 * config.font_scale) / 2
-		draw_text(
-			&img,
-			label_x,
-			H - margin_b + 10,
-			config.x_label,
-			config.font_scale,
-			config.axis_color,
-		)
-	}
-
-	if config.y_label != "" {
-		draw_text(&img, 10, margin_t, config.y_label, config.font_scale, config.axis_color)
-	}
-
-	// Draw tick marks and labels
-	for i in 0 ..< 5 {
-		px := margin_l + (plot_w * i) / 4
-		val := min_x + (max_x - min_x) * f64(i) / 4.0
-		draw_line(&img, px, H - margin_b, px, H - margin_b + 5, config.axis_color)
-		draw_number(&img, px - 15, H - margin_b + 10, val, config.font_scale, config.axis_color)
-	}
-	for i in 0 ..< 5 {
-		py := H - margin_b - (plot_h * i) / 4
-		val := min_y + (max_y - min_y) * f64(i) / 4.0
-		draw_line(&img, margin_l - 5, py, margin_l, py, config.axis_color)
-		draw_number(&img, 5, py - 5, val, config.font_scale, config.axis_color)
-	}
-
-	// Plot the line
-	range_x := max_x - min_x
-	range_y := max_y - min_y
-	if range_x == 0 {range_x = 1}
-	if range_y == 0 {range_y = 1}
-
-	// Convert data points to pixel coordinates
-	prev_px, prev_py := -1, -1
-	for i in 0 ..< n {
-		px := margin_l + int((xs[i] - min_x) / range_x * f64(plot_w))
-		py := H - margin_b - int((ys[i] - min_y) / range_y * f64(plot_h))
-
-		if prev_px >= 0 {
-			draw_line_segment(
-				&img,
-				prev_px,
-				prev_py,
-				px,
-				py,
-				config.point_color,
-				config.line_style,
-			)
-		}
-		prev_px = px
-		prev_py = py
-	}
-
+	axes_draw_frame(&ax)
 	return image_save_png(&img, path)
 }
+
 bar_png :: proc(
 	labels: []string,
 	values: []f64,
@@ -813,104 +520,30 @@ bar_png :: proc(
 ) -> bool {
 	if len(labels) != len(values) || len(labels) == 0 {return false}
 	n := len(labels)
+	min_val, max_val := data_range(values)
 
-	// Find max value for scaling
-	min_val := values[0]
-	max_val := values[0]
-	for v in values {
-		if v > max_val {max_val = v}
-		if v < min_val {min_val = v}
-	}
-	if max_val == 0 {max_val = 1}
-
-	W, H := config.width, config.height
-	img := image_new(W, H, allocator)
+	img := _begin(config, allocator)
 	defer image_free(&img)
-	image_clear(&img, config.bg_color.r, config.bg_color.g, config.bg_color.b, config.bg_color.a)
+	ax := axes_setup(&img, config, 0, f64(n - 1), min(min_val, 0), max(max_val, 0), {y_from_zero = true, x_categories = labels, pad_frac = 0.05})
+	axes_draw_grid(&ax)
 
-	margin_l, margin_r, margin_t, margin_b :=
-		config.margin_left, config.margin_right, config.margin_top, config.margin_bottom
-	plot_w := W - margin_l - margin_r
-	plot_h := H - margin_t - margin_b
-
-	// Draw axes
-	draw_line(&img, margin_l, margin_t, margin_l, H - margin_b, config.axis_color)
-	draw_line(&img, margin_l, H - margin_b, W - margin_r, H - margin_b, config.axis_color)
-	if min_val < 0 && max_val > 0 {
-		zero_y := H - margin_b - int((0.0 - min_val) / (max_val - min_val) * f64(plot_h))
-		draw_line(&img, margin_l, zero_y, W - margin_r, zero_y, config.grid_color)
+	slot := f64(ax.right - ax.left) / f64(n)
+	half := 0.4 * slot
+	zero := axes_py(&ax, 0)
+	for v, i in values {
+		if math.is_nan(v) {continue}
+		cx := axes_px(&ax, f64(i))
+		fill_rect_clipped(&ax, cx - half, axes_py(&ax, v), cx + half, zero, config.bar_color)
+	}
+	if ax.ymin < 0 && ax.ymax > 0 {
+		zy := int(math.round(zero))
+		draw_line(&img, ax.left, zy, ax.right, zy, config.axis_color)
 	}
 
-	// Draw grid lines if enabled
-	if config.show_grid {
-		// Vertical grid lines
-		for i in 1 ..< 5 {
-			px := margin_l + (plot_w * i) / 4
-			draw_line(&img, px, margin_t, px, H - margin_b, config.grid_color)
-		}
-		// Horizontal grid lines
-		for i in 1 ..< 5 {
-			py := H - margin_b - (plot_h * i) / 4
-			draw_line(&img, margin_l, py, W - margin_r, py, config.grid_color)
-		}
-	}
-
-	// Draw title
-	if config.title != "" {
-		title_x := (W - len(config.title) * 4 * config.font_scale) / 2
-		draw_text(&img, title_x, 10, config.title, config.font_scale, config.axis_color)
-	}
-
-	// Draw axis labels
-	if config.y_label != "" {
-		draw_text(&img, 10, margin_t, config.y_label, config.font_scale, config.axis_color)
-	}
-
-	// Draw y-axis tick marks and labels
-	for i in 0 ..< 5 {
-		py := H - margin_b - (plot_h * i) / 4
-		val := max_val * f64(i) / 4.0
-		draw_line(&img, margin_l - 5, py, margin_l, py, config.axis_color)
-		draw_number(&img, 5, py - 5, val, config.font_scale, config.axis_color)
-	}
-
-	// Calculate bar width and gap
-	bar_width := plot_w / n
-	bar_gap := bar_width / 5 // 20% gap between bars
-	actual_bar_width := bar_width - bar_gap
-
-	// Draw bars and labels
-	for i in 0 ..< n {
-		// ✅ FIX: Calculate bar position relative to zero
-		if values[i] >= 0 {
-			// Positive bar: starts at zero line, goes up
-			zero_y := H - margin_b - int((0.0 - min_val) / (max_val - min_val) * f64(plot_h))
-			bar_height := int(values[i] / (max_val - min_val) * f64(plot_h))
-			y := zero_y - bar_height
-			x := margin_l + i * bar_width + bar_gap / 2
-
-			// Draw the bar (upward from zero)
-			draw_rect(&img, x, y, actual_bar_width, bar_height, config.bar_color)
-		} else {
-			// Negative bar: starts at zero line, goes down
-			zero_y := H - margin_b - int((0.0 - min_val) / (max_val - min_val) * f64(plot_h))
-			bar_height := int(-values[i] / (max_val - min_val) * f64(plot_h))
-			y := zero_y
-			x := margin_l + i * bar_width + bar_gap / 2
-
-			// Draw the bar (downward from zero)
-			draw_rect(&img, x, y, actual_bar_width, bar_height, config.bar_color)
-		}
-
-		// Draw label (centered under the bar)
-		label := labels[i]
-		label_width := len(label) * 4 * config.font_scale
-		label_x := margin_l + i * bar_width + (bar_width - label_width) / 2
-		draw_text(&img, label_x, H - margin_b + 10, label, config.font_scale, config.axis_color)
-	}
-
+	axes_draw_frame(&ax)
 	return image_save_png(&img, path)
 }
+
 multi_line_png :: proc(
 	lines: []LineData,
 	path: string,
@@ -919,163 +552,62 @@ multi_line_png :: proc(
 ) -> bool {
 	if len(lines) == 0 {return false}
 
-	// 1. Find global min/max across all lines
-	min_x, max_x := math.F64_MAX, -math.F64_MAX
-	min_y, max_y := math.F64_MAX, -math.F64_MAX
-
+	// 1. Global data range across all lines
+	min_x, max_x := math.inf_f64(1), math.inf_f64(-1)
+	min_y, max_y := math.inf_f64(1), math.inf_f64(-1)
 	for line in lines {
 		if len(line.xs) != len(line.ys) {continue}
-		for i in 0 ..< len(line.xs) {
-			if line.xs[i] < min_x {min_x = line.xs[i]}
-			if line.xs[i] > max_x {max_x = line.xs[i]}
-			if line.ys[i] < min_y {min_y = line.ys[i]}
-			if line.ys[i] > max_y {max_y = line.ys[i]}
-		}
+		lo, hi := data_range(line.xs)
+		min_x, max_x = min(min_x, lo), max(max_x, hi)
+		lo, hi = data_range(line.ys)
+		min_y, max_y = min(min_y, lo), max(max_y, hi)
 	}
 
-	if min_x == max_x {max_x = min_x + 1}
-	if min_y == max_y {max_y = min_y + 1}
-
-	W, H := config.width, config.height
-	img := image_new(W, H, allocator)
+	img := _begin(config, allocator)
 	defer image_free(&img)
-	image_clear(&img, config.bg_color.r, config.bg_color.g, config.bg_color.b, config.bg_color.a)
+	ax := axes_setup(&img, config, min_x, max_x, min_y, max_y)
+	axes_draw_grid(&ax)
 
-	margin_l, margin_r, margin_t, margin_b :=
-		config.margin_left, config.margin_right, config.margin_top, config.margin_bottom
-	plot_w := W - margin_l - margin_r
-	plot_h := H - margin_t - margin_b
-
-	// 2. Draw Grid (if enabled)
-	if config.show_grid {
-		for i in 1 ..< 5 {
-			px := margin_l + (plot_w * i) / 4
-			draw_line(&img, px, margin_t, px, H - margin_b, config.grid_color)
-		}
-		for i in 1 ..< 5 {
-			py := H - margin_b - (plot_h * i) / 4
-			draw_line(&img, margin_l, py, W - margin_r, py, config.grid_color)
+	// 2. Lines (zero colour = next palette colour)
+	palette := PALETTE
+	colors := make([]Color, len(lines), allocator)
+	defer delete(colors, allocator)
+	next := 0
+	for line, i in lines {
+		colors[i] = line.color
+		if line.color == (Color{}) {
+			colors[i] = palette[next % len(palette)]
+			next += 1
 		}
 	}
-
-	// 3. Draw Axes
-	draw_line(&img, margin_l, margin_t, margin_l, H - margin_b, config.axis_color)
-	draw_line(&img, margin_l, H - margin_b, W - margin_r, H - margin_b, config.axis_color)
-
-	// 4. Draw Title & Labels
-	if config.title != "" {
-		title_x := (W - len(config.title) * 4 * config.font_scale) / 2
-		draw_text(&img, title_x, 10, config.title, config.font_scale, config.axis_color)
-	}
-	if config.x_label != "" {
-		label_x := margin_l + (plot_w - len(config.x_label) * 4 * config.font_scale) / 2
-		draw_text(
-			&img,
-			label_x,
-			H - margin_b + 10,
-			config.x_label,
-			config.font_scale,
-			config.axis_color,
-		)
-	}
-	if config.y_label != "" {
-		draw_text(&img, 10, margin_t, config.y_label, config.font_scale, config.axis_color)
+	cv := coverage_new(&ax, allocator)
+	defer coverage_free(&cv, allocator)
+	hw := 0.5 * line_width_of(config)
+	for line, i in lines {
+		if len(line.xs) == 0 || len(line.xs) != len(line.ys) {continue}
+		px, py := _to_pixels(&ax, line.xs, line.ys, allocator)
+		cov_polyline(&cv, px, py, hw, line.style)
+		cov_flush(&img, &cv, colors[i])
+		delete(px, allocator)
+		delete(py, allocator)
 	}
 
-	// 5. Draw Ticks
-	for i in 0 ..< 5 {
-		px := margin_l + (plot_w * i) / 4
-		val := min_x + (max_x - min_x) * f64(i) / 4.0
-		draw_line(&img, px, H - margin_b, px, H - margin_b + 5, config.axis_color)
-		draw_number(&img, px - 15, H - margin_b + 10, val, config.font_scale, config.axis_color)
-	}
-	for i in 0 ..< 5 {
-		py := H - margin_b - (plot_h * i) / 4
-		val := min_y + (max_y - min_y) * f64(i) / 4.0
-		draw_line(&img, margin_l - 5, py, margin_l, py, config.axis_color)
-		draw_number(&img, 5, py - 5, val, config.font_scale, config.axis_color)
+	// 3. Legend for labelled lines, in the emptiest corner
+	entries := make([dynamic]Legend_Entry, 0, len(lines), allocator)
+	defer delete(entries)
+	pts_x := make([][]f64, len(lines), allocator)
+	pts_y := make([][]f64, len(lines), allocator)
+	defer {delete(pts_x, allocator); delete(pts_y, allocator)}
+	for line, i in lines {
+		pts_x[i], pts_y[i] = line.xs, line.ys
+		if line.label != "" {append(&entries, Legend_Entry{line.label, colors[i], line.style, false})}
 	}
 
-	// 6. Draw Lines
-	range_x := max_x - min_x
-	range_y := max_y - min_y
-
-	for line in lines {
-		if len(line.xs) == 0 {continue}
-
-		prev_px, prev_py := -1, -1
-		for i in 0 ..< len(line.xs) {
-			px := margin_l + int((line.xs[i] - min_x) / range_x * f64(plot_w))
-			py := H - margin_b - int((line.ys[i] - min_y) / range_y * f64(plot_h))
-
-			if prev_px >= 0 {
-				draw_line_segment(&img, prev_px, prev_py, px, py, line.color, line.style)
-			}
-			prev_px = px
-			prev_py = py
-		}
-	}
-
-	// 7. Draw Legend (if labels exist)
-	has_legend := false
-	max_label_len := 0
-	n_labels := 0
-	for line in lines {
-		if line.label != "" {
-			has_legend = true
-			n_labels += 1
-			if len(line.label) > max_label_len {max_label_len = len(line.label)}
-		}
-	}
-
-	if has_legend {
-		// Calculate legend box size
-		legend_w := max_label_len * 4 * config.font_scale + 40 // 40px for line sample + padding
-		legend_h := n_labels * (5 * config.font_scale + 5) + 10
-
-		// Position: Top Right inside plot area
-		lx := W - margin_r - legend_w - 10
-		ly := margin_t + 10
-
-		// Draw Legend Background (opaque to cover grid lines)
-		draw_rect(&img, lx, ly, legend_w, legend_h, config.bg_color)
-
-		// Draw Legend Border
-		draw_line(&img, lx, ly, lx + legend_w, ly, config.axis_color)
-		draw_line(&img, lx + legend_w, ly, lx + legend_w, ly + legend_h, config.axis_color)
-		draw_line(&img, lx + legend_w, ly + legend_h, lx, ly + legend_h, config.axis_color)
-		draw_line(&img, lx, ly + legend_h, lx, ly, config.axis_color)
-
-		// Draw Legend Items
-		current_y := ly + 5
-		for line in lines {
-			if line.label != "" {
-				// Draw small line sample
-				draw_line_segment(
-					&img,
-					lx + 5,
-					current_y + 2,
-					lx + 20,
-					current_y + 2,
-					line.color,
-					line.style,
-				)
-				// Draw label text
-				draw_text(
-					&img,
-					lx + 25,
-					current_y,
-					line.label,
-					config.font_scale,
-					config.axis_color,
-				)
-				current_y += 5 * config.font_scale + 5
-			}
-		}
-	}
-
+	axes_draw_frame(&ax)
+	axes_draw_legend(&ax, entries[:], pts_x, pts_y, allocator)
 	return image_save_png(&img, path)
 }
+
 heatmap_png :: proc(
 	data: []f64,
 	rows: int,
@@ -1086,100 +618,90 @@ heatmap_png :: proc(
 	config: PlotConfig = DEFAULT_PLOT_CONFIG,
 	allocator: mem.Allocator = context.allocator,
 ) -> bool {
-	if len(data) != rows * cols {return false}
+	if len(data) != rows * cols || rows == 0 || cols == 0 {return false}
 
-	// 1. Find min/max for normalization
-	min_val, max_val := math.F64_MAX, -math.F64_MAX
-	for v in data {
-		if v < min_val {min_val = v}
-		if v > max_val {max_val = v}
-	}
+	min_val, max_val := data_range(data)
+	if !(min_val <= max_val) {min_val, max_val = 0, 1}
 	if min_val == max_val {max_val = min_val + 1}
 	val_range := max_val - min_val
 
-	W, H := config.width, config.height
-	img := image_new(W, H, allocator)
+	img := _begin(config, allocator)
 	defer image_free(&img)
-	image_clear(&img, config.bg_color.r, config.bg_color.g, config.bg_color.b, config.bg_color.a)
+	size := config.font_size if config.font_size > 0 else font_size_for_scale(config.font_scale)
+	f := font_get(size)
+	tf := font_get(int(math.round(f64(size) * 1.25)), true)
+	pad := max(6, size / 2)
+	lh := line_height(f)
 
-	// Adjust margins if we have labels
-	margin_l := config.margin_left
-	margin_b := config.margin_bottom
-	if len(row_labels) > 0 {margin_l += 40} 	// Extra space for row labels
-	if len(col_labels) > 0 {margin_b += 20} 	// Extra space for col labels
+	// Margins from the labels and a colour bar on the right
+	widest_row := 0.0
+	for s in row_labels {widest_row = max(widest_row, text_width(f, s))}
+	widest_col := 0.0
+	for s in col_labels {widest_col = max(widest_col, text_width(f, s))}
+	cb_w := max(12, size)
+	cb_ticks, cb_step := nice_ticks(min_val, max_val, 6)
+	cb_labels := format_ticks(cb_ticks, cb_step)
+	widest_cb := 0.0
+	for s in cb_labels {widest_cb = max(widest_cb, text_width(f, s))}
 
-	margin_r := config.margin_right
-	margin_t := config.margin_top
+	left := max(config.margin_left / 2, pad + int(math.ceil(widest_row)) + pad)
+	right := config.width - (pad + cb_w + pad / 2 + int(math.ceil(widest_cb)) + 2 * pad)
+	top := pad + (line_height(tf) + pad if config.title != "" else 0)
+	cell_w := f64(right - left - 2 * pad) / f64(cols)
+	vertical_cols := widest_col > cell_w - f64(pad)
+	col_h := (int(math.ceil(widest_col)) if vertical_cols else lh) if len(col_labels) > 0 else 0
+	bottom := config.height - (pad + col_h + pad)
+	right -= 2 * pad
+	cell_h := f64(bottom - top) / f64(rows)
 
-	plot_w := W - margin_l - margin_r
-	plot_h := H - margin_t - margin_b
-
-	cell_w := plot_w / cols
-	cell_h := plot_h / rows
-
-	// 2. Draw Title
 	if config.title != "" {
-		title_x := (W - len(config.title) * 4 * config.font_scale) / 2
-		draw_text(&img, title_x, 10, config.title, config.font_scale, config.axis_color)
+		draw_string(&img, tf, f64(left + right) / 2, f64(pad), config.title, config.axis_color, .Center, .Top)
 	}
 
-	// 3. Draw Cells
+	// Cells with values (text colour from cell luminance)
+	show_values := cell_w > 4 * f64(size) && cell_h > 1.4 * f64(lh)
 	for r in 0 ..< rows {
 		for c in 0 ..< cols {
-			idx := r * cols + c
-			val := data[idx]
-
-			// Normalize value to 0.0 - 1.0
-			norm_val := (val - min_val) / val_range
-			color := get_heat_color(norm_val)
-
-			// Draw the cell
-			x := margin_l + c * cell_w
-			y := margin_t + r * cell_h
-			draw_rect(&img, x, y, cell_w, cell_h, color)
-
-			// Draw text inside cell if it's large enough
-			if cell_w > 25 && cell_h > 15 {
-				// Format the number (simple integer or 1 decimal)
-				text := fmt.tprintf("%.1f", val)
-				// If it's a whole number, remove the .0 for cleaner look
-				if val == math.floor(val) {
-					text = fmt.tprintf("%d", int(val))
-				}
-
-				text_w := len(text) * 4 * config.font_scale
-				text_x := x + (cell_w - text_w) / 2
-				text_y := y + (cell_h - 5 * config.font_scale) / 2
-
-				// Use white or black text depending on background brightness?
-				// For simplicity, let's use white text for dark cells, black for light.
-				// A simple heuristic: if norm_val < 0.5, use white, else black.
-				text_color := WHITE
-				if norm_val > 0.6 {text_color = BLACK}
-
-				draw_text(&img, text_x, text_y, text, config.font_scale, text_color)
+			val := data[r * cols + c]
+			color := get_heat_color((val - min_val) / val_range)
+			x0 := int(math.round(f64(left) + f64(c) * cell_w))
+			x1 := int(math.round(f64(left) + f64(c + 1) * cell_w))
+			y0 := int(math.round(f64(top) + f64(r) * cell_h))
+			y1 := int(math.round(f64(top) + f64(r + 1) * cell_h))
+			draw_rect(&img, x0, y0, x1 - x0, y1 - y0, color)
+			if show_values {
+				text := fmt.tprintf("%d", int(val)) if val == math.floor(val) && abs(val) < 1e9 else fmt.tprintf("%.2f", val)
+				lum := 0.299 * f64(color.r) + 0.587 * f64(color.g) + 0.114 * f64(color.b)
+				tc := BLACK if lum > 140 else WHITE
+				draw_string(&img, f, f64(x0 + x1) / 2, f64(y0 + y1) / 2, text, tc, .Center, .Middle)
 			}
 		}
 	}
 
-	// 4. Draw Labels (if provided)
-	if len(row_labels) > 0 {
-		for r in 0 ..< rows {
-			label := row_labels[r]
-			label_w := len(label) * 4 * config.font_scale
-			// Center vertically in the cell
-			y := margin_t + r * cell_h + (cell_h - 5 * config.font_scale) / 2
-			draw_text(&img, margin_l - label_w - 5, y, label, config.font_scale, config.axis_color)
+	for r in 0 ..< min(rows, len(row_labels)) {
+		cy := f64(top) + (f64(r) + 0.5) * cell_h
+		draw_string(&img, f, f64(left - pad / 2), cy, row_labels[r], config.axis_color, .Right, .Middle)
+	}
+	for c in 0 ..< min(cols, len(col_labels)) {
+		cx := f64(left) + (f64(c) + 0.5) * cell_w
+		if vertical_cols {
+			draw_string_vertical(&img, f, cx, f64(bottom + pad / 2) + text_width(f, col_labels[c]) / 2, col_labels[c], config.axis_color)
+		} else {
+			draw_string(&img, f, cx, f64(bottom + pad / 2), col_labels[c], config.axis_color, .Center, .Top)
 		}
 	}
 
-	if len(col_labels) > 0 {
-		for c in 0 ..< cols {
-			label := col_labels[c]
-			label_w := len(label) * 4 * config.font_scale
-			x := margin_l + c * cell_w + (cell_w - label_w) / 2
-			draw_text(&img, x, H - margin_b + 5, label, config.font_scale, config.axis_color)
-		}
+	// Colour bar
+	cb_x := right + 2 * pad
+	for y in top ..< bottom {
+		t := 1 - f64(y - top) / f64(max(bottom - top - 1, 1))
+		color := get_heat_color(t)
+		for x in cb_x ..< cb_x + cb_w {draw_pixel(&img, x, y, color)}
+	}
+	for t, i in cb_ticks {
+		py := int(math.round(f64(bottom - 1) - (t - min_val) / val_range * f64(bottom - top - 1)))
+		draw_line(&img, cb_x + cb_w, py, cb_x + cb_w + 3, py, config.axis_color)
+		draw_string(&img, f, f64(cb_x + cb_w + 3 + pad / 2), f64(py), cb_labels[i], config.axis_color, .Left, .Middle)
 	}
 
 	return image_save_png(&img, path)

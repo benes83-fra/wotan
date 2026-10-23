@@ -439,6 +439,7 @@ main :: proc() {
 	test.bar_chart_test(context.temp_allocator)
 	test.multi_line_test(context.temp_allocator)
 	test.heatmap_test(context.temp_allocator)
+	test.plot_layout_test(context.temp_allocator)
 	test.autograd_test(context.temp_allocator)
 	test.autograd_mul_test(context.temp_allocator)
 	test.autograd_matmul_test(context.temp_allocator)
