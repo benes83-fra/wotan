@@ -392,6 +392,8 @@ main :: proc() {
 	test.lu_inverse_basic_test(context.temp_allocator)
 	test.lu_inverse_identity_test(context.temp_allocator)
 	test.lu_inverse_singular_test(context.temp_allocator)
+	test.linalg_contracts_test(context.temp_allocator)
+	test.cholesky_callers_test(context.temp_allocator)
 	test.eigh_diagonal_test(context.temp_allocator)
 	test.eigh_symmetric_test(context.temp_allocator)
 	test.eigh_cond_full_test(context.temp_allocator)

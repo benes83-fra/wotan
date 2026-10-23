@@ -24,8 +24,16 @@ cholesky :: proc(A: ^Matrix(f64), mode: Cholesky_Mode) {
 // A is symmetric positive definite, stored as full matrix.
 // L is written in-place into A (lower triangle), upper triangle is left unspecified.
 cholesky_decompose :: proc(A: ^Matrix(f64)) {
+	if !cholesky_try(A) {
+		panic("cholesky_decompose: matrix not positive definite")
+	}
+}
+
+// In-place Cholesky (lower triangle, upper zeroed) without panicking:
+// returns false if A is not (numerically) positive definite; A is then partial
+cholesky_try :: proc(A: ^Matrix(f64)) -> bool {
 	n := A.rows
-	if A.cols != n do panic("cholesky_decompose: non-square matrix")
+	if A.cols != n do panic("cholesky_try: non-square matrix")
 
 	for j := 0; j < n; j += 1 {
 		// Diagonal
@@ -34,8 +42,8 @@ cholesky_decompose :: proc(A: ^Matrix(f64)) {
 			row_j := A.data[j * n:j * n + j]
 			sum -= dot_simd(row_j, row_j)
 		}
-		if sum <= 0 {
-			panic("cholesky_decompose: matrix not positive definite")
+		if !(sum > 0) {
+			return false
 		}
 		A.data[j * n + j] = math.sqrt(sum)
 
@@ -57,6 +65,7 @@ cholesky_decompose :: proc(A: ^Matrix(f64)) {
 			A.data[i * n + j] = 0.0
 		}
 	}
+	return true
 }
 
 // Forward solve: L z = b, L lower-triangular (from Cholesky)

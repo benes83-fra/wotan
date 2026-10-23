@@ -193,27 +193,18 @@ _lstsq_cholesky :: proc(X: ^Matrix(f64), y: []f64, allocator: mem.Allocator) -> 
 		Xty[j] = sum
 	}
 
-	// Cholesky: AtA = L Lᵀ (in-place modification of AtA)
-	// First check positive definiteness heuristically
-	is_spd := true
-	for j in 0 ..< n {
-		if AtA.data[j * AtA.cols + j] <= 0.0 {
-			is_spd = false
-			break
-		}
-	}
-	if !is_spd {
-		return _lstsq_qr(X, y, allocator) // fallback
+	// Cholesky: AtA = L Lᵀ (in-place, lower triangle). Rank-deficient X makes
+	// XᵀX singular: fall back to the SVD (minimum-norm) solution
+	if !cholesky_try(&AtA) {
+		delete(Xty, allocator)
+		return _lstsq_svd(X, y, allocator)
 	}
 
-	// Decompose in-place: AtA now contains L (lower triangle)
-	cholesky_decompose(&AtA)
-
-	// Forward substitution: L z = Xty
-	z := forward_subst_unit_lower_simd(&AtA, Xty, allocator)
-
-	// Back substitution: Lᵀ beta = z
-	beta := back_subst_upper_simd(&AtA, z, allocator)
+	// L z = Xᵀy, then Lᵀ beta = z
+	z := forward_substitute_simd(&AtA, Xty, context.temp_allocator)
+	beta := backward_substitute_simd(&AtA, z, allocator)
+	delete(z, context.temp_allocator)
+	delete(Xty, allocator)
 
 	// Residuals
 	residuals := make([]f64, m, allocator)
@@ -242,6 +233,13 @@ _lstsq_cholesky :: proc(X: ^Matrix(f64), y: []f64, allocator: mem.Allocator) -> 
 		ratio := max_d / min_d
 		cond = ratio * ratio
 	}
+	// Numerically singular normal equations (cond(X)² beyond double precision):
+	// the SVD solution is the reliable one
+	if cond >= f64(1e12) {
+		delete(beta, allocator)
+		delete(residuals, allocator)
+		return _lstsq_svd(X, y, allocator)
+	}
 
 	result := LstsqResult{}
 	result.beta = beta
@@ -259,10 +257,10 @@ _lstsq_cholesky :: proc(X: ^Matrix(f64), y: []f64, allocator: mem.Allocator) -> 
 _lstsq_svd :: proc(X: ^Matrix(f64), y: []f64, allocator: mem.Allocator) -> LstsqResult {
 	m, n := X.rows, X.cols
 
-	U, S, V := svd(X, .GolubReinsch, allocator)
+	U, S, V := svd(X, .Jacobi, allocator)
 	defer matrix_free(&U)
 	defer matrix_free(&V)
-	defer mem.free(transmute(rawptr)&S[0], allocator)
+	defer delete(S, allocator)
 
 	S_max := 0.0
 	for j in 0 ..< n {

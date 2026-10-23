@@ -99,11 +99,11 @@ min_variance_portfolio :: proc(
 	l.cholesky_decompose(&cov_copy)
 
 	// Forward substitution: L * y = ones
-	y := l.forward_subst_unit_lower_simd(&cov_copy, ones, allocator)
+	y := l.forward_substitute_simd(&cov_copy, ones, allocator)
 	defer delete(y, allocator)
 
 	// Back substitution: L^T * x = y
-	x := l.back_subst_upper_simd(&cov_copy, y, allocator)
+	x := l.backward_substitute_simd(&cov_copy, y, allocator)
 	defer delete(x, allocator)
 
 	// Calculate sum = 1^T * x
@@ -149,10 +149,10 @@ max_sharpe_portfolio :: proc(
 
 	l.cholesky_decompose(&cov_copy)
 
-	y := l.forward_subst_unit_lower_simd(&cov_copy, excess_returns, allocator)
+	y := l.forward_substitute_simd(&cov_copy, excess_returns, allocator)
 	defer delete(y, allocator)
 
-	x := l.back_subst_upper_simd(&cov_copy, y, allocator)
+	x := l.backward_substitute_simd(&cov_copy, y, allocator)
 	defer delete(x, allocator)
 
 	// Normalize so weights sum to 1

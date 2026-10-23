@@ -163,8 +163,9 @@ ols_fit_full :: proc(
 			for i in 0 ..< p {e[i] = 0.0}
 			e[k] = 1.0
 
-			z := l.forward_subst_unit_lower_simd(&L, e, context.temp_allocator)
-			x := l.back_subst_upper_simd(&L, z, context.temp_allocator)
+			// (XᵀX)⁻¹ e_k via L Lᵀ: L z = e_k, then Lᵀ x = z (L has a non-unit diagonal)
+			z := l.forward_substitute_simd(&L, e, context.temp_allocator)
+			x := l.backward_substitute_simd(&L, z, context.temp_allocator)
 
 			for i in 0 ..< p {
 				vcov.data[i * vcov.cols + k] = x[i] * sigma2

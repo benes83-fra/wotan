@@ -78,10 +78,24 @@ lu_decompose :: proc(
 		}
 
 		// ------------------------------------------------------------
-		// 2) Trailing update: A22 := A22 - L21 * U12
-		//    Use SIMD matmul_dyn_simd for the rank-k update
+		// 2) U12 := L11⁻¹ A12 (unit lower triangular solve on the block row
+		//    right of the panel; the panel step only touched its own columns)
 		// ------------------------------------------------------------
 		k2 := k + panel_width
+		if k2 < n {
+			for kk := k; kk < k2; kk += 1 {
+				src := LU.data[kk * LU.cols + k2:kk * LU.cols + n]
+				for i := kk + 1; i < k2; i += 1 {
+					lik := LU.data[i * LU.cols + kk]
+					if lik != 0 {axpy_simd(-lik, src, LU.data[i * LU.cols + k2:i * LU.cols + n])}
+				}
+			}
+		}
+
+		// ------------------------------------------------------------
+		// 3) Trailing update: A22 := A22 - L21 * U12
+		//    Use SIMD matmul_dyn_simd for the rank-k update
+		// ------------------------------------------------------------
 		if k2 < n {
 			// Dimensions:
 			// L21: (n-k2) × panel_width

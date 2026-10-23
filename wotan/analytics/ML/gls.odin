@@ -45,7 +45,7 @@ gls_fit :: proc(
 	// =====================================================================
 	// 2. Transform y: y_star = L⁻¹ y (forward substitution)
 	// =====================================================================
-	y_star := l.forward_subst_unit_lower_simd(&L, y, allocator)
+	y_star := l.forward_substitute_simd(&L, y, allocator)
 	defer delete(y_star, allocator)
 	// =====================================================================
 	// 3. Transform X: X_star = L⁻¹ X (solve L * X_star = X for each column)
@@ -61,7 +61,7 @@ gls_fit :: proc(
 		}
 
 		// Solve L * x_star_col = x_col
-		x_star_col := l.forward_subst_unit_lower_simd(&L, x_col, context.temp_allocator)
+		x_star_col := l.forward_substitute_simd(&L, x_col, context.temp_allocator)
 		defer delete(x_star_col, context.temp_allocator)
 
 		// Store in X_star
@@ -168,7 +168,7 @@ _kron_solve_lower :: proc(
 		y_col := make([]f64, n, context.temp_allocator)
 		for i in 0 ..< n {y_col[i] = Y.data[i * m + col]}
 
-		z_col := l.forward_subst_unit_lower_simd(L_B, y_col, context.temp_allocator)
+		z_col := l.forward_substitute_simd(L_B, y_col, context.temp_allocator)
 
 		for i in 0 ..< n {Z.data[i * m + col] = z_col[i]}
 		delete(y_col, context.temp_allocator)
@@ -190,7 +190,7 @@ _kron_solve_lower :: proc(
 		zt_col := make([]f64, m, context.temp_allocator)
 		for i in 0 ..< m {zt_col[i] = ZT.data[i * n + col]}
 
-		w_col := l.forward_subst_unit_lower_simd(L_A, zt_col, context.temp_allocator)
+		w_col := l.forward_substitute_simd(L_A, zt_col, context.temp_allocator)
 
 		for i in 0 ..< m {W.data[i * n + col] = w_col[i]}
 		delete(zt_col, context.temp_allocator)
