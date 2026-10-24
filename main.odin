@@ -6,6 +6,7 @@ import csv "./wotan/importer"
 import "base:intrinsics"
 import "core:fmt"
 import "core:mem"
+import "core:os"
 import "core:strings"
 
 main :: proc() {
@@ -29,6 +30,12 @@ main :: proc() {
 			mem.tracking_allocator_destroy(&tracking_allocator)
 		}
 
+	}
+	if !os.exists("plots") {
+		os.mkdir("plots")
+	}
+	if !os.exists("model_checkpoints") {
+		os.mkdir("model_checkpoints")
 	}
 	defer free_all(context.temp_allocator)
 	df := w.dataframe_new()
