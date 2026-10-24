@@ -268,7 +268,12 @@ heston_objective_fn :: proc(x: []f64, user_data: rawptr) -> f64 {
 // _heston_model_prices fills out[i] with the 1000-node Heston call price of
 // market_data[i]. Options are grouped by expiry so the characteristic function
 // is evaluated once per (expiry, node) instead of once per option.
-_heston_model_prices :: proc(market_data: []VolSurfacePoint, S, r: f64, params: Heston_Params, out: []f64) {
+_heston_model_prices :: proc(
+	market_data: []VolSurfacePoint,
+	S, r: f64,
+	params: Heston_Params,
+	out: []f64,
+) {
 	n := len(market_data)
 	done := make([]bool, n, context.temp_allocator)
 	strikes := make([]f64, n, context.temp_allocator)
@@ -319,7 +324,13 @@ calibrate_sabr :: proc(
 		{"nu", 0.4, 0.01, inf, .Linear},
 	}
 	config := opt.Calibration_Config {
-		optimizer = {type = .Adam, learning_rate = 0.1, beta1 = 0.9, beta2 = 0.999, epsilon = 1e-8},
+		optimizer = {
+			type = .Adam,
+			learning_rate = 0.1,
+			beta1 = 0.9,
+			beta2 = 0.999,
+			epsilon = 1e-8,
+		},
 		max_iter = 300,
 		loss_threshold = 1e-6,
 		fd_step = 1e-5,
@@ -364,7 +375,13 @@ calibrate_heston :: proc(
 		{"rho", -0.7, -0.99, -0.1, .Linear}, // strictly negative for equities
 	}
 	config := opt.Calibration_Config {
-		optimizer = {type = .Adam, learning_rate = 0.05, beta1 = 0.9, beta2 = 0.999, epsilon = 1e-8},
+		optimizer = {
+			type = .Adam,
+			learning_rate = 0.05,
+			beta1 = 0.9,
+			beta2 = 0.999,
+			epsilon = 1e-8,
+		},
 		max_iter = 300,
 		loss_threshold = 0.50, // $0.50 RMSE is excellent for Heston
 		fd_step = 1e-3, // large enough to step over complex branch-cut noise
@@ -379,7 +396,13 @@ calibrate_heston :: proc(
 		ctx.feller_weight = 0.0
 		rmse = heston_objective_fn(res.x, &ctx)
 	}
-	p := Heston_Params{v0 = res.x[0], kappa = res.x[1], theta = res.x[2], sigma = res.x[3], rho = res.x[4]}
+	p := Heston_Params {
+		v0    = res.x[0],
+		kappa = res.x[1],
+		theta = res.x[2],
+		sigma = res.x[3],
+		rho   = res.x[4],
+	}
 	return Heston_CalibrationResult {
 		params = p,
 		rmse = rmse,
@@ -474,7 +497,10 @@ heston_prices_same_expiry :: proc(
 	out: []f64,
 	n_points: int = 1000,
 ) {
-	assert(len(out) == len(strikes), "heston_prices_same_expiry: out must have one slot per strike")
+	assert(
+		len(out) == len(strikes),
+		"heston_prices_same_expiry: out must have one slot per strike",
+	)
 	if T <= 0.0 {
 		for K, k in strikes {
 			out[k] = opt == .Call ? math.max(S - K, 0.0) : math.max(K - S, 0.0)

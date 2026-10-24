@@ -22,11 +22,11 @@ Font :: struct {
 }
 
 Glyph :: struct {
-	advance:    f64,
-	x_off:      int,
-	y_off:      int, // from the line box top
-	w, h:       int,
-	pixels:     []u8,
+	advance: f64,
+	x_off:   int,
+	y_off:   int, // from the line box top
+	w, h:    int,
+	pixels:  []u8,
 }
 
 @(private = "file")

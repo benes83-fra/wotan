@@ -167,12 +167,26 @@ _csv_build :: proc(
 			}
 			if !ok {
 				// inferred types cover every row, so this only happens with explicit types
-				panic(fmt.tprintf("%s: row %d, column %q: cannot parse '%s' as %v", label, row_i, header[col_i], field, types[col_i]))
+				panic(
+					fmt.tprintf(
+						"%s: row %d, column %q: cannot parse '%s' as %v",
+						label,
+						row_i,
+						header[col_i],
+						field,
+						types[col_i],
+					),
+				)
 			}
 		}
 	}
 	if long_rows > 0 {
-		fmt.eprintf("%s: %d row(s) had more than %d fields; extra fields ignored\n", label, long_rows, n_cols)
+		fmt.eprintf(
+			"%s: %d row(s) had more than %d fields; extra fields ignored\n",
+			label,
+			long_rows,
+			n_cols,
+		)
 	}
 
 	for col in cols {
@@ -205,13 +219,23 @@ _parse_csv :: proc(text: string, seperator: u8) -> (records: [][]string, quoted:
 	field_quoted := false
 	in_quote := false
 
-	end_field :: proc(cur_fields: ^[dynamic]string, cur_quoted: ^[dynamic]bool, bytes: ^[dynamic]u8, field_quoted: ^bool) {
+	end_field :: proc(
+		cur_fields: ^[dynamic]string,
+		cur_quoted: ^[dynamic]bool,
+		bytes: ^[dynamic]u8,
+		field_quoted: ^bool,
+	) {
 		append(cur_fields, string(bytes[:]))
 		append(cur_quoted, field_quoted^)
 		bytes^ = make([dynamic]u8, context.temp_allocator)
 		field_quoted^ = false
 	}
-	end_record :: proc(recs: ^[dynamic][]string, quots: ^[dynamic][]bool, cur_fields: ^[dynamic]string, cur_quoted: ^[dynamic]bool) {
+	end_record :: proc(
+		recs: ^[dynamic][]string,
+		quots: ^[dynamic][]bool,
+		cur_fields: ^[dynamic]string,
+		cur_quoted: ^[dynamic]bool,
+	) {
 		// a blank line is a single empty unquoted field: skip it
 		if len(cur_fields) == 1 && len(cur_fields[0]) == 0 && !cur_quoted[0] {
 			clear(cur_fields)

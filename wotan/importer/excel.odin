@@ -67,7 +67,14 @@ xlsx_load :: proc(path: string, allocator: mem.Allocator) -> w.DataFrame {
 }
 
 // Sheet by name; ok = false if the workbook has no such sheet
-xlsx_load_sheet :: proc(path: string, sheet_name: string, allocator: mem.Allocator) -> (w.DataFrame, bool) {
+xlsx_load_sheet :: proc(
+	path: string,
+	sheet_name: string,
+	allocator: mem.Allocator,
+) -> (
+	w.DataFrame,
+	bool,
+) {
 	for s in discover_sheets(path, context.temp_allocator) {
 		if s.name == sheet_name {
 			return _xlsx_load_sheet(path, s, allocator), true
@@ -115,11 +122,14 @@ _xlsx_load_sheet :: proc(path: string, sheet: SheetInfo, allocator: mem.Allocato
 	for r in rows {n_cols = max(n_cols, len(r))}
 	header := rows[0]
 	row_count := len(rows) - 1
-	cell :: proc(row: []Xlsx_Cell, c: int) -> Xlsx_Cell {return row[c] if c < len(row) else Xlsx_Cell{}}
+	cell :: proc(row: []Xlsx_Cell, c: int) -> Xlsx_Cell {return(
+			row[c] if c < len(row) else Xlsx_Cell{} \
+		)}
 
 	for c in 0 ..< n_cols {
 		h := cell(header, c)
-		name := h.text if h.kind != .Empty && h.kind != .Error && strings.trim_space(h.text) != "" else fmt.tprintf("col_%d", c)
+		name :=
+			h.text if h.kind != .Empty && h.kind != .Error && strings.trim_space(h.text) != "" else fmt.tprintf("col_%d", c)
 
 		// column type from the stored cell kinds
 		any_text := false
@@ -197,7 +207,12 @@ _canonical_number :: proc(s: string) -> bool {
 	if len(t) > 1 && t[0] == '0' && t[1] >= '0' && t[1] <= '9' {return false}
 	for i in 0 ..< len(t) { 	// digits, one '.', exponent only (no inf / nan words)
 		ch := t[i]
-		if !((ch >= '0' && ch <= '9') || ch == '.' || ch == 'e' || ch == 'E' || ch == '-' || ch == '+') {return false}
+		if !((ch >= '0' && ch <= '9') ||
+			   ch == '.' ||
+			   ch == 'e' ||
+			   ch == 'E' ||
+			   ch == '-' ||
+			   ch == '+') {return false}
 	}
 	return true
 }
@@ -249,8 +264,16 @@ discover_sheets :: proc(path: string, allocator: mem.Allocator) -> []SheetInfo {
 	for &s in parse_workbook_sheets(string(wb_bytes), context.temp_allocator) {
 		for r in rels {
 			if s.rid != r.id {continue}
-			if strings.has_suffix(r.type, "/worksheet") || strings.contains(r.target, "worksheets/") {
-				append(&sheets, SheetInfo{name = strings.clone(s.name, allocator), rid = strings.clone(s.rid, allocator), path = _resolve_target(r.target, allocator)})
+			if strings.has_suffix(r.type, "/worksheet") ||
+			   strings.contains(r.target, "worksheets/") {
+				append(
+					&sheets,
+					SheetInfo {
+						name = strings.clone(s.name, allocator),
+						rid = strings.clone(s.rid, allocator),
+						path = _resolve_target(r.target, allocator),
+					},
+				)
 			}
 			break
 		}
@@ -386,7 +409,12 @@ classify_number_format :: proc(code: string) -> Xlsx_Date_Kind {
 		case '[':
 			j := strings.index_byte(code[i:], ']')
 			inner := strings.to_lower(code[i + 1:i + j] if j > 0 else "", context.temp_allocator)
-			if inner == "h" || inner == "hh" || inner == "m" || inner == "mm" || inner == "s" || inner == "ss" {
+			if inner == "h" ||
+			   inner == "hh" ||
+			   inner == "m" ||
+			   inner == "mm" ||
+			   inner == "s" ||
+			   inner == "ss" {
 				has_time = true // elapsed time
 			}
 			i = len(code) if j < 0 else i + j + 1
@@ -457,8 +485,13 @@ _attr :: proc(tag: string, name: string) -> string {
 		if k < 0 {return ""}
 		k += pos
 		after := k + len(name)
-		before_ok := k > 0 && (tag[k - 1] == ' ' || tag[k - 1] == '\t' || tag[k - 1] == '\n' || tag[k - 1] == '\r')
-		if before_ok && after + 1 < len(tag) && tag[after] == '=' && (tag[after + 1] == '"' || tag[after + 1] == '\'') {
+		before_ok :=
+			k > 0 &&
+			(tag[k - 1] == ' ' || tag[k - 1] == '\t' || tag[k - 1] == '\n' || tag[k - 1] == '\r')
+		if before_ok &&
+		   after + 1 < len(tag) &&
+		   tag[after] == '=' &&
+		   (tag[after + 1] == '"' || tag[after + 1] == '\'') {
 			q := tag[after + 1]
 			end := strings.index_byte(tag[after + 2:], q)
 			if end < 0 {return ""}
@@ -522,7 +555,8 @@ parse_row_cells :: proc(
 		case:
 			if v == "" {break}
 			kind := Xlsx_Date_Kind.None
-			if sidx, ok := strconv.parse_int(_attr(tag, "s")); ok && sidx >= 0 && sidx < len(date_kinds) {
+			if sidx, ok := strconv.parse_int(_attr(tag, "s"));
+			   ok && sidx >= 0 && sidx < len(date_kinds) {
 				kind = date_kinds[sidx]
 			}
 			serial, is_num := strconv.parse_f64(v)
@@ -533,11 +567,41 @@ parse_row_cells :: proc(
 			dt := excel_serial_to_datetime(serial)
 			switch kind {
 			case .Date:
-				c = {.Date, fmt.aprintf("%04d-%02d-%02d", dt.year, dt.month, dt.day, allocator = allocator)}
+				c = {
+					.Date,
+					fmt.aprintf(
+						"%04d-%02d-%02d",
+						dt.year,
+						dt.month,
+						dt.day,
+						allocator = allocator,
+					),
+				}
 			case .Time:
-				c = {.Time, fmt.aprintf("%02d:%02d:%02d", dt.hour, dt.minute, dt.second, allocator = allocator)}
+				c = {
+					.Time,
+					fmt.aprintf(
+						"%02d:%02d:%02d",
+						dt.hour,
+						dt.minute,
+						dt.second,
+						allocator = allocator,
+					),
+				}
 			case .Datetime, .None:
-				c = {.Datetime, fmt.aprintf("%04d-%02d-%02d %02d:%02d:%02d", dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second, allocator = allocator)}
+				c = {
+					.Datetime,
+					fmt.aprintf(
+						"%04d-%02d-%02d %02d:%02d:%02d",
+						dt.year,
+						dt.month,
+						dt.day,
+						dt.hour,
+						dt.minute,
+						dt.second,
+						allocator = allocator,
+					),
+				}
 			}
 		}
 

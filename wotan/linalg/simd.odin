@@ -1,12 +1,12 @@
 package wotan_linalg
 
+import "../util"
 import "base:builtin"
 import "base:intrinsics"
 import "core:fmt"
 import "core:math"
 import "core:mem"
 import "core:os"
-import "../util"
 import simd "core:simd"
 
 TILE_BASE :: 8
@@ -164,9 +164,9 @@ _Rows_Worker :: proc(a, b, out: ^Matrix(f64), r0, r1: int)
 
 @(private = "file")
 _Rows_Job :: struct {
-	worker:      _Rows_Worker,
-	a, b, out:   ^Matrix(f64),
-	r0, r1:      int,
+	worker:    _Rows_Worker,
+	a, b, out: ^Matrix(f64),
+	r0, r1:    int,
 }
 
 // _parallel_rows runs worker over [0, rows) split across threads when the
@@ -185,9 +185,9 @@ _parallel_rows :: proc(rows, flops: int, a, b, out: ^Matrix(f64), worker: _Rows_
 	}
 	job := _Rows_Job{worker, a, b, out, 0, 0}
 	util.parallel_for(rows, &job, proc(data: rawptr, begin, end: int) {
-		j := (^_Rows_Job)(data)
-		j.worker(j.a, j.b, j.out, begin, end)
-	}, n)
+			j := (^_Rows_Job)(data)
+			j.worker(j.a, j.b, j.out, begin, end)
+		}, n)
 }
 
 // matmul_nn_acc_simd: out += A @ B

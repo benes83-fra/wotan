@@ -106,7 +106,17 @@ groupby2_output_type :: proc(src: ColumnType, kind: AggregationKind) -> ColumnTy
 	case .Sum:
 		if src == .Float {return .Float}
 		return .Int if numeric else src
-	case .Mean, .Median, .Quantile, .Var, .Cov, .Corr, .EWM_Mean, .EWM_Var, .EWM_Std, .EWM_Cov, .EWM_Corr:
+	case .Mean,
+	     .Median,
+	     .Quantile,
+	     .Var,
+	     .Cov,
+	     .Corr,
+	     .EWM_Mean,
+	     .EWM_Var,
+	     .EWM_Std,
+	     .EWM_Cov,
+	     .EWM_Corr:
 		return .Float if numeric else src
 	}
 	return src
@@ -128,16 +138,42 @@ build_groupby2_schema :: proc(
 	// 2. Aggregated columns
 	for agg in aggs {
 		src := column(gb.df, agg.column)
-		if (agg.kind == .Cov || agg.kind == .Corr || agg.kind == .EWM_Cov || agg.kind == .EWM_Corr) && agg.other == "" {
-			panic(fmt.tprintf("groupby2: %v aggregation %q needs a second column (other)", agg.kind, agg.name))
+		if (agg.kind == .Cov ||
+			   agg.kind == .Corr ||
+			   agg.kind == .EWM_Cov ||
+			   agg.kind == .EWM_Corr) &&
+		   agg.other == "" {
+			panic(
+				fmt.tprintf(
+					"groupby2: %v aggregation %q needs a second column (other)",
+					agg.kind,
+					agg.name,
+				),
+			)
 		}
 		if agg.kind == .Quantile && !(agg.quantile >= 0 && agg.quantile <= 1) {
-			panic(fmt.tprintf("groupby2: quantile %v of %q is outside [0, 1]", agg.quantile, agg.name))
+			panic(
+				fmt.tprintf(
+					"groupby2: quantile %v of %q is outside [0, 1]",
+					agg.quantile,
+					agg.name,
+				),
+			)
 		}
-		if (agg.kind == .EWM_Mean || agg.kind == .EWM_Var || agg.kind == .EWM_Std || agg.kind == .EWM_Cov || agg.kind == .EWM_Corr) && !(agg.alpha > 0 && agg.alpha <= 1) {
-			panic(fmt.tprintf("groupby2: EWM alpha %v of %q must be in (0, 1]", agg.alpha, agg.name))
+		if (agg.kind == .EWM_Mean ||
+			   agg.kind == .EWM_Var ||
+			   agg.kind == .EWM_Std ||
+			   agg.kind == .EWM_Cov ||
+			   agg.kind == .EWM_Corr) &&
+		   !(agg.alpha > 0 && agg.alpha <= 1) {
+			panic(
+				fmt.tprintf("groupby2: EWM alpha %v of %q must be in (0, 1]", agg.alpha, agg.name),
+			)
 		}
-		add_column(&out, column_new(agg.name, groupby2_output_type(src.type, agg.kind), 0, allocator))
+		add_column(
+			&out,
+			column_new(agg.name, groupby2_output_type(src.type, agg.kind), 0, allocator),
+		)
 	}
 
 	return out
@@ -214,7 +250,13 @@ groupby2_agg :: proc(
 
 	out.rows = len(gb.index.ordered_keys)
 	for c in out.columns {
-		fmt.assertf(c.len == out.rows, "groupby2_agg: column %q has %d rows, expected %d", c.name, c.len, out.rows)
+		fmt.assertf(
+			c.len == out.rows,
+			"groupby2_agg: column %q has %d rows, expected %d",
+			c.name,
+			c.len,
+			out.rows,
+		)
 	}
 	return out
 }
@@ -239,7 +281,7 @@ _numeric_values :: proc(src: ^Column, rows: []int) -> [dynamic]f64 {
 			v = f64(x)
 		case .Float:
 			v, _ = column_at_float(src, r)
-			if v != v {continue} // NaN is skipped like a null
+			if v != v {continue} 	// NaN is skipped like a null
 		case .Bool:
 			x, _ := column_at_bool(src, r)
 			v = 1 if x else 0

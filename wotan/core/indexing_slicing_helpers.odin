@@ -181,7 +181,11 @@ _copy_rows :: proc(src: ^Column, dst: ^Column, mapping: []int) {
 		}
 		dst.nulls[i] = false
 		c, r := column_resolve(src, m)
-		mem.copy(rawptr(uintptr(dst.data) + uintptr(i * size)), rawptr(uintptr(c.data) + uintptr(r * size)), size)
+		mem.copy(
+			rawptr(uintptr(dst.data) + uintptr(i * size)),
+			rawptr(uintptr(c.data) + uintptr(r * size)),
+			size,
+		)
 	}
 }
 insert_column_front :: proc(df: ^DataFrame, col: Column) {
@@ -191,9 +195,9 @@ insert_column_front :: proc(df: ^DataFrame, col: Column) {
 		df.columns[i] = df.columns[i - 1]
 	}
 	df.columns[0] = col
-  if df.name_to_index != nil {
-    delete (df.name_to_index)
-  }
+	if df.name_to_index != nil {
+		delete(df.name_to_index)
+	}
 	// rebuild name_to_index
 	df.name_to_index = make(map[string]int)
 	for c, i in df.columns {

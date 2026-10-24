@@ -24,7 +24,14 @@ _nice_num :: proc(x: f64, round: bool) -> f64 {
 }
 
 // Ticks at multiples of a nice (1-2-5) step inside [lo, hi], aiming for ~max_ticks
-nice_ticks :: proc(lo, hi: f64, max_ticks: int, allocator := context.temp_allocator) -> (ticks: []f64, step: f64) {
+nice_ticks :: proc(
+	lo, hi: f64,
+	max_ticks: int,
+	allocator := context.temp_allocator,
+) -> (
+	ticks: []f64,
+	step: f64,
+) {
 	n := max(max_ticks, 2)
 	step = _nice_num((hi - lo) / f64(n - 1), true)
 	first := math.ceil(lo / step - 1e-9)
@@ -59,7 +66,8 @@ format_ticks :: proc(ticks: []f64, step: f64, allocator := context.temp_allocato
 		scale := math.pow(10, e)
 		d := _decimals(step / scale)
 		for v, i in ticks {
-			labels[i] = v == 0 ? "0" : _minus(fmt.aprintf("%.*fe%d", d, v / scale, int(e), allocator = allocator), allocator)
+			labels[i] =
+				v == 0 ? "0" : _minus(fmt.aprintf("%.*fe%d", d, v / scale, int(e), allocator = allocator), allocator)
 		}
 		return labels
 	}
@@ -127,7 +135,12 @@ data_range :: proc(xs: []f64) -> (lo, hi: f64) {
 	return
 }
 
-axes_setup :: proc(img: ^Image, cfg: PlotConfig, xmin, xmax, ymin, ymax: f64, opts := Axes_Options{}) -> Axes {
+axes_setup :: proc(
+	img: ^Image,
+	cfg: PlotConfig,
+	xmin, xmax, ymin, ymax: f64,
+	opts := Axes_Options{},
+) -> Axes {
 	ax := Axes {
 		img = img,
 		cfg = cfg,
@@ -164,7 +177,10 @@ axes_setup :: proc(img: ^Image, cfg: PlotConfig, xmin, xmax, ymin, ymax: f64, op
 	ax.xmin, ax.xmax, ax.ymin, ax.ymax = x0, x1, y0, y1
 
 	// ---- vertical layout (independent of tick values)
-	ax.top = max(cfg.margin_top, pad + (line_height(ax.title_font) + pad if cfg.title != "" else pad))
+	ax.top = max(
+		cfg.margin_top,
+		pad + (line_height(ax.title_font) + pad if cfg.title != "" else pad),
+	)
 	cat_extra := 0
 	if len(ax.categories) > 0 {
 		widest := 0.0
@@ -175,7 +191,8 @@ axes_setup :: proc(img: ^Image, cfg: PlotConfig, xmin, xmax, ymin, ymax: f64, op
 			cat_extra = int(widest) - lh + ax.font.cap_bot - ax.font.cap_top
 		}
 	}
-	bottom_margin := ax.tick_len + pad / 2 + lh + cat_extra + (pad / 2 + lh if cfg.x_label != "" else 0) + pad
+	bottom_margin :=
+		ax.tick_len + pad / 2 + lh + cat_extra + (pad / 2 + lh if cfg.x_label != "" else 0) + pad
 	ax.bottom = H - max(cfg.margin_bottom, bottom_margin)
 
 	// ---- y ticks -> left margin
@@ -186,7 +203,12 @@ axes_setup :: proc(img: ^Image, cfg: PlotConfig, xmin, xmax, ymin, ymax: f64, op
 	ax.ylabels = format_ticks(ax.yticks, ystep)
 	widest_y := 0.0
 	for s in ax.ylabels {widest_y = max(widest_y, text_width(ax.font, s))}
-	left_margin := pad + (lh + pad / 2 if cfg.y_label != "" else 0) + int(math.ceil(widest_y)) + pad / 2 + ax.tick_len
+	left_margin :=
+		pad +
+		(lh + pad / 2 if cfg.y_label != "" else 0) +
+		int(math.ceil(widest_y)) +
+		pad / 2 +
+		ax.tick_len
 	ax.left = max(cfg.margin_left, left_margin)
 
 	// ---- x ticks -> right margin (last label must not be clipped)
@@ -199,7 +221,8 @@ axes_setup :: proc(img: ^Image, cfg: PlotConfig, xmin, xmax, ymin, ymax: f64, op
 			ax.xlabels = format_ticks(ax.xticks, step)
 			widest := 0.0
 			for s in ax.xlabels {widest = max(widest, text_width(ax.font, s))}
-			if f64(len(ax.xticks)) * (widest + f64(2 * pad)) <= f64(right - ax.left) || nx <= 2 {break}
+			if f64(len(ax.xticks)) * (widest + f64(2 * pad)) <= f64(right - ax.left) ||
+			   nx <= 2 {break}
 			nx -= 1
 		}
 		if len(ax.xticks) > 0 {
@@ -258,7 +281,16 @@ axes_draw_frame :: proc(ax: ^Axes) {
 	for t, i in ax.yticks {
 		py := int(math.round(axes_py(ax, t)))
 		draw_line(img, ax.left - tl, py, ax.left, py, c)
-		draw_string(img, f, f64(ax.left - tl - pad / 2), f64(py), ax.ylabels[i], c, .Right, .Middle)
+		draw_string(
+			img,
+			f,
+			f64(ax.left - tl - pad / 2),
+			f64(py),
+			ax.ylabels[i],
+			c,
+			.Right,
+			.Middle,
+		)
 	}
 	label_top := f64(ax.bottom + tl + pad / 2)
 	if len(ax.categories) > 0 {
@@ -285,7 +317,14 @@ axes_draw_frame :: proc(ax: ^Axes) {
 		draw_string(img, f, cx, f64(img.height - pad), cfg.x_label, c, .Center, .Bottom)
 	}
 	if cfg.y_label != "" {
-		draw_string_vertical(img, f, f64(pad + line_height(f) / 2), f64(ax.top + ax.bottom) / 2, cfg.y_label, c)
+		draw_string_vertical(
+			img,
+			f,
+			f64(pad + line_height(f) / 2),
+			f64(ax.top + ax.bottom) / 2,
+			cfg.y_label,
+			c,
+		)
 	}
 	if cfg.title != "" {
 		draw_string(img, ax.title_font, cx, f64(pad), cfg.title, c, .Center, .Top)
@@ -367,7 +406,14 @@ cov_polyline :: proc(cv: ^Coverage, px, py: []f64, hw: f64, style: LineStyle) {
 			if phase < on {
 				run := min(on - phase, seg - pos)
 				t0, t1 := pos / max(seg, 1e-12), (pos + run) / max(seg, 1e-12)
-				cov_segment(cv, ax + t0 * (bx - ax), ay + t0 * (by - ay), ax + t1 * (bx - ax), ay + t1 * (by - ay), hw)
+				cov_segment(
+					cv,
+					ax + t0 * (bx - ax),
+					ay + t0 * (by - ay),
+					ax + t1 * (bx - ax),
+					ay + t1 * (by - ay),
+					hw,
+				)
 				pos += run
 				phase += run
 			} else {
@@ -415,7 +461,12 @@ Legend_Entry :: struct {
 	marker: bool, // scatter-style entry (dot instead of line sample)
 }
 
-axes_draw_legend :: proc(ax: ^Axes, entries: []Legend_Entry, pts_x, pts_y: [][]f64, allocator: mem.Allocator) {
+axes_draw_legend :: proc(
+	ax: ^Axes,
+	entries: []Legend_Entry,
+	pts_x, pts_y: [][]f64,
+	allocator: mem.Allocator,
+) {
 	if len(entries) == 0 {return}
 	f, pad := ax.font, ax.pad
 	lh := line_height(f)
@@ -441,7 +492,10 @@ axes_draw_legend :: proc(ax: ^Axes, entries: []Legend_Entry, pts_x, pts_y: [][]f
 			ys := pts_y[s]
 			for i in 0 ..< len(xs) {
 				px, py := axes_px(ax, xs[i]), axes_py(ax, ys[i])
-				if px >= f64(cand[0]) && px <= f64(cand[0] + w) && py >= f64(cand[1]) && py <= f64(cand[1] + h) {n += 1}
+				if px >= f64(cand[0]) &&
+				   px <= f64(cand[0] + w) &&
+				   py >= f64(cand[1]) &&
+				   py <= f64(cand[1] + h) {n += 1}
 			}
 		}
 		if n < best_n {best, best_n = ci, n}
@@ -470,7 +524,16 @@ axes_draw_legend :: proc(ax: ^Axes, entries: []Legend_Entry, pts_x, pts_y: [][]f
 			cov_polyline(&cv, xs[:], ys[:], hw, e.style)
 		}
 		cov_flush(ax.img, &cv, e.color)
-		draw_string(ax.img, f, x0 + f64(sample + pad), cy, e.label, ax.cfg.axis_color, .Left, .Middle)
+		draw_string(
+			ax.img,
+			f,
+			x0 + f64(sample + pad),
+			cy,
+			e.label,
+			ax.cfg.axis_color,
+			.Left,
+			.Middle,
+		)
 	}
 }
 

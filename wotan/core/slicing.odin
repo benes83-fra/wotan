@@ -35,10 +35,25 @@ _index_col :: proc(df: ^DataFrame, label: string) -> ^Column {
 // Index keys as a typed slice (temp memory) + the number of leading non-null
 // keys (set_index sorts nulls last, so binary searches use that prefix)
 @(private = "file")
-_index_keys :: proc(df: ^DataFrame, $T: typeid, label: string) -> (keys: []T, n_valid: int, valid: []bool) {
+_index_keys :: proc(
+	df: ^DataFrame,
+	$T: typeid,
+	label: string,
+) -> (
+	keys: []T,
+	n_valid: int,
+	valid: []bool,
+) {
 	col := _index_col(df, label)
 	if col.type != get_column_type(T) || size_of(T) != type_size(col.type) {
-		panic(fmt.tprintf("%s: key type %v does not match index column type %v", label, typeid_of(T), col.type))
+		panic(
+			fmt.tprintf(
+				"%s: key type %v does not match index column type %v",
+				label,
+				typeid_of(T),
+				col.type,
+			),
+		)
 	}
 	keys = make([]T, df.rows, context.temp_allocator)
 	valid = make([]bool, df.rows, context.temp_allocator)
@@ -262,4 +277,3 @@ iloc_many :: proc(df: ^DataFrame, idxs: []int) -> DataFrame {
 dataframe_view_indices :: proc(base: ^DataFrame, indices: []int) -> DataFrame {
 	return df_take(base, indices)
 }
-

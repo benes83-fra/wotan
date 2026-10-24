@@ -125,7 +125,12 @@ jsonl_load :: proc(
 // `keys` in order of first appearance. A string at that depth followed by ':'
 // is a key; escaped keys are unescaped with the JSON parser.
 @(private = "file")
-_json_collect_keys :: proc(text: string, depth: int, keys: ^[dynamic]string, seen: ^map[string]bool) {
+_json_collect_keys :: proc(
+	text: string,
+	depth: int,
+	keys: ^[dynamic]string,
+	seen: ^map[string]bool,
+) {
 	d := 0
 	i := 0
 	n := len(text)
@@ -150,11 +155,17 @@ _json_collect_keys :: proc(text: string, depth: int, keys: ^[dynamic]string, see
 			i += 1
 			if d != depth {continue}
 			j := i
-			for j < n && (text[j] == ' ' || text[j] == '\t' || text[j] == '\r' || text[j] == '\n') {j += 1}
+			for j < n &&
+			    (text[j] == ' ' || text[j] == '\t' || text[j] == '\r' || text[j] == '\n') {j += 1}
 			if j >= n || text[j] != ':' {continue}
 			key := text[start + 1:end]
 			if escaped {
-				v, err := json.parse_string(text[start:end + 1], json.DEFAULT_SPECIFICATION, true, context.temp_allocator)
+				v, err := json.parse_string(
+					text[start:end + 1],
+					json.DEFAULT_SPECIFICATION,
+					true,
+					context.temp_allocator,
+				)
 				if s, ok := v.(json.String); ok && err == .None {key = s}
 			}
 			if !seen[key] {
@@ -203,7 +214,12 @@ _json_build :: proc(
 	cols := make([]w.Column, col_count, context.temp_allocator)
 	defer delete(cols, context.temp_allocator)
 	for i in 0 ..< col_count {
-		cols[i] = w.column_new(strings.clone(keys[i], allocator), types[i], len(objects), allocator)
+		cols[i] = w.column_new(
+			strings.clone(keys[i], allocator),
+			types[i],
+			len(objects),
+			allocator,
+		)
 	}
 
 	for &obj, row_i in objects {
@@ -260,7 +276,16 @@ _json_build :: proc(
 				if ok {w.append_datetime(col, dt)}
 			}
 			if !ok {
-				panic(fmt.tprintf("%s: record %d, key %q: cannot parse '%s' as %v", label, row_i + 1, key, field, types[col_i]))
+				panic(
+					fmt.tprintf(
+						"%s: record %d, key %q: cannot parse '%s' as %v",
+						label,
+						row_i + 1,
+						key,
+						field,
+						types[col_i],
+					),
+				)
 			}
 		}
 	}
@@ -298,7 +323,6 @@ json_value_to_string :: proc(v: json.Value) -> string {
 	}
 	return ""
 }
-
 
 
 extract_json_array_i64 :: proc(json: string, key: string) -> []i64 {

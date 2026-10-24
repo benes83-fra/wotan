@@ -23,7 +23,11 @@ set_index :: proc(df: ^DataFrame, colname: string, drop: bool = false) {
 
 	// 2. reorder every column (owned copies: strings cloned, nulls kept)
 	if df.index_values.type != .Invalid { 	// an earlier hidden index follows the rows
-		reordered := column_take(&df.index_values, order, df.columns[0].allocator if len(df.columns) > 0 else context.allocator)
+		reordered := column_take(
+			&df.index_values,
+			order,
+			df.columns[0].allocator if len(df.columns) > 0 else context.allocator,
+		)
 		destroy_column(&df.index_values)
 		df.index_values = reordered
 	}
@@ -155,4 +159,3 @@ reindex_date :: proc(df: ^DataFrame, new_index: []Date) -> DataFrame {
 reindex :: proc {
 	reindex_date,
 }
-

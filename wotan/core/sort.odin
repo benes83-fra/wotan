@@ -82,7 +82,11 @@ dataframe_sort_by :: proc(
 }
 
 // Stable row order of one column (nulls / NaN last)
-column_sort_order :: proc(col: ^Column, descending: bool, allocator := context.allocator) -> []int {
+column_sort_order :: proc(
+	col: ^Column,
+	descending: bool,
+	allocator := context.allocator,
+) -> []int {
 	keys := []^Column{col}
 	return _sort_order(keys, []bool{descending}, col.len, allocator)
 }
@@ -99,7 +103,12 @@ _row_less :: proc(ctx: ^_Sort_Ctx, a, b: int) -> bool {
 		c := column_compare_rows(col, a, b)
 		if c == 0 {continue}
 		// nulls stay last in both directions: only flip value comparisons
-		if k < len(ctx.desc) && ctx.desc[k] && !is_null(col, a) && !is_null(col, b) && !_is_nan(col, a) && !_is_nan(col, b) {
+		if k < len(ctx.desc) &&
+		   ctx.desc[k] &&
+		   !is_null(col, a) &&
+		   !is_null(col, b) &&
+		   !_is_nan(col, a) &&
+		   !_is_nan(col, b) {
 			c = -c
 		}
 		return c < 0

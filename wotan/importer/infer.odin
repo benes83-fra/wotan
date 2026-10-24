@@ -45,7 +45,8 @@ is_datetime :: proc(s: string) -> bool {
 // combine to Float; any other mix of kinds (e.g. numbers and booleans, dates
 // and datetimes) falls back to String, so the inferred type always parses.
 infer_column_type :: proc(samples: []string) -> w.ColumnType {
-	has_float, has_int, has_bool, has_date, has_time, has_datetime, has_string := false, false, false, false, false, false, false
+	has_float, has_int, has_bool, has_date, has_time, has_datetime, has_string :=
+		false, false, false, false, false, false, false
 
 	for raw in samples {
 		s := strings.trim(raw, " 	")
@@ -71,7 +72,13 @@ infer_column_type :: proc(samples: []string) -> w.ColumnType {
 	}
 
 	numeric := has_int || has_float
-	kinds := int(numeric) + int(has_bool) + int(has_datetime) + int(has_date) + int(has_time) + int(has_string)
+	kinds :=
+		int(numeric) +
+		int(has_bool) +
+		int(has_datetime) +
+		int(has_date) +
+		int(has_time) +
+		int(has_string)
 	switch {
 	case kinds != 1:
 		return .String

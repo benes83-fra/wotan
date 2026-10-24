@@ -74,7 +74,14 @@ datetime_from_unix :: proc(ts: i64) -> Datetime {
 	days := _floor_div(ts, 86400)
 	secs := ts - days * 86400
 	d := civil_from_days(days)
-	return Datetime{d.year, d.month, d.day, i32(secs / 3600), i32((secs % 3600) / 60), i32(secs % 60)}
+	return Datetime {
+		d.year,
+		d.month,
+		d.day,
+		i32(secs / 3600),
+		i32((secs % 3600) / 60),
+		i32(secs % 60),
+	}
 }
 
 parse_date :: proc(date_str: string) -> (Date, bool) {

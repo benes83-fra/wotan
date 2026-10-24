@@ -120,7 +120,8 @@ _extract_cells_spans :: proc(row: string) -> (cells: []string, spans: []int) {
 		close := "</th" if is_th else "</td"
 		end := len(row)
 		if j := strings.index(lower[content_start:], close); j >= 0 {end = content_start + j}
-		if j := strings.index(lower[content_start:], "</tr"); j >= 0 {end = min(end, content_start + j)}
+		if j := strings.index(lower[content_start:], "</tr");
+		   j >= 0 {end = min(end, content_start + j)}
 		nxt := next_cell(lower, content_start)
 		if nxt >= 0 {end = min(end, nxt)}
 
@@ -211,7 +212,8 @@ infer_column_types :: proc(tmp: [][]string) -> []w.ColumnType {
 
 			if _, ok := strconv.parse_int(v); !ok {all_int = false}
 			if _, ok := strconv.parse_f64(v); !ok {all_float = false}
-			if !(strings.equal_fold(v, "true") || strings.equal_fold(v, "false")) {all_bool = false}
+			if !(strings.equal_fold(v, "true") ||
+				   strings.equal_fold(v, "false")) {all_bool = false}
 			if !is_date(v) {all_date = false}
 			if !is_time(v) {all_time = false}
 			if !is_datetime(v) {all_datetime = false}

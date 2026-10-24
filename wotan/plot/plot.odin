@@ -273,7 +273,8 @@ image_encode_png :: proc(img: ^Image, allocator := context.allocator) -> []u8 {
 	if opaque {
 		rgb := make([]u8, n_px * 3, context.temp_allocator)
 		for i in 0 ..< n_px {
-			rgb[i * 3], rgb[i * 3 + 1], rgb[i * 3 + 2] = img.pixels[i * 4], img.pixels[i * 4 + 1], img.pixels[i * 4 + 2]
+			rgb[i * 3], rgb[i * 3 + 1], rgb[i * 3 + 2] =
+				img.pixels[i * 4], img.pixels[i * 4 + 1], img.pixels[i * 4 + 2]
 		}
 		src = rgb
 	}
@@ -296,9 +297,19 @@ image_encode_png :: proc(img: ^Image, allocator := context.allocator) -> []u8 {
 	}
 	append(&out, 137, 80, 78, 71, 13, 10, 26, 10)
 	ihdr := [13]u8 {
-		u8(img.width >> 24), u8(img.width >> 16), u8(img.width >> 8), u8(img.width),
-		u8(img.height >> 24), u8(img.height >> 16), u8(img.height >> 8), u8(img.height),
-		8, 2 if opaque else 6, 0, 0, 0, // 8-bit, RGB / RGBA, deflate, adaptive filters, no interlace
+		u8(img.width >> 24),
+		u8(img.width >> 16),
+		u8(img.width >> 8),
+		u8(img.width),
+		u8(img.height >> 24),
+		u8(img.height >> 16),
+		u8(img.height >> 8),
+		u8(img.height),
+		8,
+		2 if opaque else 6,
+		0,
+		0,
+		0, // 8-bit, RGB / RGBA, deflate, adaptive filters, no interlace
 	}
 	chunk(&out, "IHDR", ihdr[:])
 	chunk(&out, "IDAT", idat)
@@ -316,19 +327,18 @@ image_save_png :: proc(img: ^Image, path: string) -> bool {
 // Maps a value between 0.0 and 1.0 to a color (perceptually ordered,
 // viridis-like: dark blue -> teal -> green -> yellow)
 get_heat_color :: proc(val: f64) -> Color {
-	stops := [5][3]f64 {
-		{68, 1, 84},
-		{59, 82, 139},
-		{33, 145, 140},
-		{94, 201, 98},
-		{253, 231, 37},
-	}
+	stops := [5][3]f64{{68, 1, 84}, {59, 82, 139}, {33, 145, 140}, {94, 201, 98}, {253, 231, 37}}
 	v := clamp(val, 0, 1) if !math.is_nan(val) else 0
 	pos := v * 4
 	i := min(int(pos), 3)
 	t := pos - f64(i)
 	a, b := stops[i], stops[i + 1]
-	return Color{u8(a[0] + (b[0] - a[0]) * t), u8(a[1] + (b[1] - a[1]) * t), u8(a[2] + (b[2] - a[2]) * t), 255}
+	return Color {
+		u8(a[0] + (b[0] - a[0]) * t),
+		u8(a[1] + (b[1] - a[1]) * t),
+		u8(a[2] + (b[2] - a[2]) * t),
+		255,
+	}
 }
 
 
@@ -432,7 +442,15 @@ histogram_png :: proc(
 
 	img := _begin(config, allocator)
 	defer image_free(&img)
-	ax := axes_setup(&img, config, min_v, max_v, 0, f64(max_count), {y_from_zero = true, x_exact = true, pad_frac = 0.05})
+	ax := axes_setup(
+		&img,
+		config,
+		min_v,
+		max_v,
+		0,
+		f64(max_count),
+		{y_from_zero = true, x_exact = true, pad_frac = 0.05},
+	)
 	axes_draw_grid(&ax)
 
 	gap := 1.0 if (f64(ax.right - ax.left) / f64(bins)) > 4 else 0.0
@@ -440,7 +458,14 @@ histogram_png :: proc(
 		if counts[i] == 0 {continue}
 		x0 := axes_px(&ax, min_v + val_range * f64(i) / f64(bins))
 		x1 := axes_px(&ax, min_v + val_range * f64(i + 1) / f64(bins))
-		fill_rect_clipped(&ax, x0, axes_py(&ax, f64(counts[i])), x1 - gap, axes_py(&ax, 0), config.bar_color)
+		fill_rect_clipped(
+			&ax,
+			x0,
+			axes_py(&ax, f64(counts[i])),
+			x1 - gap,
+			axes_py(&ax, 0),
+			config.bar_color,
+		)
 	}
 
 	axes_draw_frame(&ax)
@@ -487,7 +512,15 @@ bar_png :: proc(
 
 	img := _begin(config, allocator)
 	defer image_free(&img)
-	ax := axes_setup(&img, config, 0, f64(n - 1), min(min_val, 0), max(max_val, 0), {y_from_zero = true, x_categories = labels, pad_frac = 0.05})
+	ax := axes_setup(
+		&img,
+		config,
+		0,
+		f64(n - 1),
+		min(min_val, 0),
+		max(max_val, 0),
+		{y_from_zero = true, x_categories = labels, pad_frac = 0.05},
+	)
 	axes_draw_grid(&ax)
 
 	slot := f64(ax.right - ax.left) / f64(n)
@@ -563,7 +596,8 @@ multi_line_png :: proc(
 	defer {delete(pts_x, allocator); delete(pts_y, allocator)}
 	for line, i in lines {
 		pts_x[i], pts_y[i] = line.xs, line.ys
-		if line.label != "" {append(&entries, Legend_Entry{line.label, colors[i], line.style, false})}
+		if line.label !=
+		   "" {append(&entries, Legend_Entry{line.label, colors[i], line.style, false})}
 	}
 
 	axes_draw_frame(&ax)
@@ -618,7 +652,16 @@ heatmap_png :: proc(
 	cell_h := f64(bottom - top) / f64(rows)
 
 	if config.title != "" {
-		draw_string(&img, tf, f64(left + right) / 2, f64(pad), config.title, config.axis_color, .Center, .Top)
+		draw_string(
+			&img,
+			tf,
+			f64(left + right) / 2,
+			f64(pad),
+			config.title,
+			config.axis_color,
+			.Center,
+			.Top,
+		)
 	}
 
 	// Cells with values (text colour from cell luminance)
@@ -633,24 +676,59 @@ heatmap_png :: proc(
 			y1 := int(math.round(f64(top) + f64(r + 1) * cell_h))
 			draw_rect(&img, x0, y0, x1 - x0, y1 - y0, color)
 			if show_values {
-				text := fmt.tprintf("%d", int(val)) if val == math.floor(val) && abs(val) < 1e9 else fmt.tprintf("%.2f", val)
+				text :=
+					fmt.tprintf("%d", int(val)) if val == math.floor(val) && abs(val) < 1e9 else fmt.tprintf("%.2f", val)
 				lum := 0.299 * f64(color.r) + 0.587 * f64(color.g) + 0.114 * f64(color.b)
 				tc := BLACK if lum > 140 else WHITE
-				draw_string(&img, f, f64(x0 + x1) / 2, f64(y0 + y1) / 2, text, tc, .Center, .Middle)
+				draw_string(
+					&img,
+					f,
+					f64(x0 + x1) / 2,
+					f64(y0 + y1) / 2,
+					text,
+					tc,
+					.Center,
+					.Middle,
+				)
 			}
 		}
 	}
 
 	for r in 0 ..< min(rows, len(row_labels)) {
 		cy := f64(top) + (f64(r) + 0.5) * cell_h
-		draw_string(&img, f, f64(left - pad / 2), cy, row_labels[r], config.axis_color, .Right, .Middle)
+		draw_string(
+			&img,
+			f,
+			f64(left - pad / 2),
+			cy,
+			row_labels[r],
+			config.axis_color,
+			.Right,
+			.Middle,
+		)
 	}
 	for c in 0 ..< min(cols, len(col_labels)) {
 		cx := f64(left) + (f64(c) + 0.5) * cell_w
 		if vertical_cols {
-			draw_string_vertical(&img, f, cx, f64(bottom + pad / 2) + text_width(f, col_labels[c]) / 2, col_labels[c], config.axis_color)
+			draw_string_vertical(
+				&img,
+				f,
+				cx,
+				f64(bottom + pad / 2) + text_width(f, col_labels[c]) / 2,
+				col_labels[c],
+				config.axis_color,
+			)
 		} else {
-			draw_string(&img, f, cx, f64(bottom + pad / 2), col_labels[c], config.axis_color, .Center, .Top)
+			draw_string(
+				&img,
+				f,
+				cx,
+				f64(bottom + pad / 2),
+				col_labels[c],
+				config.axis_color,
+				.Center,
+				.Top,
+			)
 		}
 	}
 
@@ -664,7 +742,16 @@ heatmap_png :: proc(
 	for t, i in cb_ticks {
 		py := int(math.round(f64(bottom - 1) - (t - min_val) / val_range * f64(bottom - top - 1)))
 		draw_line(&img, cb_x + cb_w, py, cb_x + cb_w + 3, py, config.axis_color)
-		draw_string(&img, f, f64(cb_x + cb_w + 3 + pad / 2), f64(py), cb_labels[i], config.axis_color, .Left, .Middle)
+		draw_string(
+			&img,
+			f,
+			f64(cb_x + cb_w + 3 + pad / 2),
+			f64(py),
+			cb_labels[i],
+			config.axis_color,
+			.Left,
+			.Middle,
+		)
 	}
 
 	return image_save_png(&img, path)

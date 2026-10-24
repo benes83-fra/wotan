@@ -109,7 +109,9 @@ get_days_of_the_year :: proc(year: i32) -> i32 {
 	return 365
 }
 add_day_date :: proc(date: Date, n: i32) -> Date {
-	return civil_from_days(days_from_civil(i64(date.year), i64(date.month), i64(date.day)) + i64(n))
+	return civil_from_days(
+		days_from_civil(i64(date.year), i64(date.month), i64(date.day)) + i64(n),
+	)
 }
 add_day_datetime :: proc(dt: Datetime, n: i32) -> Datetime {
 	year := dt.year

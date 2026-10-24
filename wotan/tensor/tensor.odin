@@ -2,6 +2,7 @@
 package tensor
 
 import l "../linalg"
+import "../util"
 import "base:runtime"
 import "core:fmt"
 import "core:math"
@@ -394,7 +395,12 @@ tensor_add_bias :: proc(a: ^Tensor, bias: ^Tensor) -> ^Tensor {
 				l.vec_add_simd(row_a, bias_slice, row_out)
 			}
 
-			out := _tensor_new_op(out_data, a.shape, a.requires_grad || bias.requires_grad, a.allocator)
+			out := _tensor_new_op(
+				out_data,
+				a.shape,
+				a.requires_grad || bias.requires_grad,
+				a.allocator,
+			)
 			if out.requires_grad {
 				out.op = .AddBias
 				append(&out.inputs, a)
@@ -455,7 +461,12 @@ tensor_mse_loss :: proc(
 	out_data := l.matrix_new(f64, 1, 1, pred.allocator)
 	out_data.data[0] = loss_val
 
-	out := _tensor_new_op(out_data, SCALAR_SHAPE, pred.requires_grad || target.requires_grad, pred.allocator)
+	out := _tensor_new_op(
+		out_data,
+		SCALAR_SHAPE,
+		pred.requires_grad || target.requires_grad,
+		pred.allocator,
+	)
 	// ✅ FIX: Restored the correct MSE graph recording!
 	if out.requires_grad {
 		out.op = .MSELoss
@@ -541,7 +552,12 @@ tensor_flatten :: proc(input: ^Tensor) -> ^Tensor {
 	out_data := l.matrix_new(f64, N, features, input.allocator)
 	copy(out_data.data, input.data.data)
 
-	out := _tensor_new_op(out_data, [4]int{N, features, 1, 1}, input.requires_grad, input.allocator)
+	out := _tensor_new_op(
+		out_data,
+		[4]int{N, features, 1, 1},
+		input.requires_grad,
+		input.allocator,
+	)
 
 	if out.requires_grad {
 		out.op = .Flatten
@@ -640,7 +656,12 @@ tensor_max_pool2d :: proc(input: ^Tensor, kH, kW, stride: int) -> ^Tensor {
 		}
 	}
 
-	out := _tensor_new_op(out_data, [4]int{N, C, out_h, out_w}, input.requires_grad, input.allocator)
+	out := _tensor_new_op(
+		out_data,
+		[4]int{N, C, out_h, out_w},
+		input.requires_grad,
+		input.allocator,
+	)
 
 	if out.requires_grad {
 		out.op = .MaxPool2d
@@ -690,7 +711,12 @@ tensor_avg_pool2d :: proc(input: ^Tensor, kH, kW, stride: int) -> ^Tensor {
 		}
 	}
 
-	out := _tensor_new_op(out_data, [4]int{N, C, out_h, out_w}, input.requires_grad, input.allocator)
+	out := _tensor_new_op(
+		out_data,
+		[4]int{N, C, out_h, out_w},
+		input.requires_grad,
+		input.allocator,
+	)
 
 	if out.requires_grad {
 		out.op = .AvgPool2d
@@ -769,7 +795,12 @@ tensor_conv2d :: proc(
 		}
 	}
 
-	out := _tensor_new_op(out_data, [4]int{N, C_out, out_h, out_w}, input.requires_grad || weight.requires_grad, input.allocator)
+	out := _tensor_new_op(
+		out_data,
+		[4]int{N, C_out, out_h, out_w},
+		input.requires_grad || weight.requires_grad,
+		input.allocator,
+	)
 
 	if out.requires_grad {
 		out.op = .Conv2d
@@ -814,7 +845,12 @@ tensor_matmul :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
 			out_view := _mat(N, out_features, out_data.data)
 			l.matmul_nn_acc_simd(&a_view, &b.data, &out_view)
 
-			out := _tensor_new_op(out_data, _flattened_matmul_shape(a.shape, N, in_features, out_features), a.requires_grad || b.requires_grad, a.allocator)
+			out := _tensor_new_op(
+				out_data,
+				_flattened_matmul_shape(a.shape, N, in_features, out_features),
+				a.requires_grad || b.requires_grad,
+				a.allocator,
+			)
 			if out.requires_grad {
 				out.op = .MatMul
 				append(&out.inputs, a)
@@ -835,7 +871,12 @@ tensor_matmul :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
 	}
 
 	out_data := _matmul(&a.data, &b.data, a.allocator)
-	out := _tensor_new_op(out_data, [4]int{a.data.rows, b.data.cols, 1, 1}, a.requires_grad || b.requires_grad, a.allocator)
+	out := _tensor_new_op(
+		out_data,
+		[4]int{a.data.rows, b.data.cols, 1, 1},
+		a.requires_grad || b.requires_grad,
+		a.allocator,
+	)
 	if out.requires_grad {
 		out.op = .MatMul
 		append(&out.inputs, a)
@@ -1088,9 +1129,7 @@ _validate_node :: proc(node: ^Tensor) -> bool {
 
 	return true
 }
-// tensor_batch_norm_2d performs Batch Normalization over a 4D tensor (N, C, H, W)
-// tensor_batch_norm_2d performs Batch Normalization over a 4D tensor (N, C, H, W)
-// ✅ SIMD-optimized version
+
 // tensor_batch_norm_2d performs Batch Normalization over a 4D tensor (N, C, H, W)
 // ✅ SIMD-optimized with proper memory cleanup
 tensor_batch_norm_2d :: proc(
@@ -1196,7 +1235,12 @@ tensor_batch_norm_2d :: proc(
 	delete(beta_vec, allocator)
 	delete(scaled, allocator)
 
-	out := _tensor_new_op(out_data, input.shape, input.requires_grad || weight.requires_grad, input.allocator)
+	out := _tensor_new_op(
+		out_data,
+		input.shape,
+		input.requires_grad || weight.requires_grad,
+		input.allocator,
+	)
 
 	if out.requires_grad {
 		out.op = .BatchNorm2d
@@ -1208,58 +1252,102 @@ tensor_batch_norm_2d :: proc(
 	return out
 }
 // ============================================================================
-// RNN Operations (with Checkpointing for memory efficiency)
+// Recurrent cells (RNN / GRU / LSTM)
 // ============================================================================
+//
+// The input projection x_t @ W_ih does not depend on the recurrent state, so it
+// is computed for all timesteps at once (one large, threaded matmul) before the
+// time loop. Inside the loop only h_prev @ W_hh remains. Every row of the
+// projection is computed exactly as a per-step product would be, so the
+// results are bit-identical to stepping through x_t @ W_ih one step at a time.
 
-// _rnn_step_forward performs a single RNN step without creating autograd nodes
-_rnn_step_forward :: proc(
-	x_t: []f64,
-	h_prev: []f64,
+// _gather_steps lays a [batch, seq_len, width] sequence out step-major:
+// block j (batch rows) holds timestep j, or timestep seq_len-1-j if reverse.
+_gather_steps :: proc(dst, src: []f64, batch, seq_len, width: int, reverse: bool) {
+	for j in 0 ..< seq_len {
+		s := seq_len - 1 - j if reverse else j
+		for b in 0 ..< batch {
+			off := (b * seq_len + s) * width
+			dst_off := (j * batch + b) * width
+			copy(dst[dst_off:dst_off + width], src[off:off + width])
+		}
+	}
+}
+
+// _input_projection returns xs @ W_ih for step-major xs [seq_len * batch, in_size]
+_input_projection :: proc(
+	xs: []f64,
+	rows, in_size: int,
 	w_ih: []f64,
+	G: int,
+	allocator: mem.Allocator,
+) -> []f64 {
+	proj := make([]f64, rows * G, allocator)
+	xs_mat := l.Matrix(f64) {
+		rows = rows,
+		cols = in_size,
+		data = xs,
+	}
+	w_mat := l.Matrix(f64) {
+		rows = in_size,
+		cols = G,
+		data = w_ih,
+	}
+	proj_mat := l.Matrix(f64) {
+		rows = rows,
+		cols = G,
+		data = proj,
+	}
+	l.matmul_nn_acc_simd(&xs_mat, &w_mat, &proj_mat)
+	return proj
+}
+
+// _hidden_projection: gate_hh = h_prev [batch, H] @ W_hh [H, G] (overwrites gate_hh)
+_hidden_projection :: proc(h_prev, w_hh, gate_hh: []f64, batch, H, G: int) {
+	mem.zero_slice(gate_hh)
+	h_mat := l.Matrix(f64) {
+		rows = batch,
+		cols = H,
+		data = h_prev,
+	}
+	w_mat := l.Matrix(f64) {
+		rows = H,
+		cols = G,
+		data = w_hh,
+	}
+	out_mat := l.Matrix(f64) {
+		rows = batch,
+		cols = G,
+		data = gate_hh,
+	}
+	l.matmul_nn_acc_simd(&h_mat, &w_mat, &out_mat)
+}
+
+// _scatter_step writes src [batch, width] to timestep s of a [batch, seq_len, width] sequence
+_scatter_step :: proc(dst, src: []f64, batch, seq_len, width, s: int) {
+	for b in 0 ..< batch {
+		off := (b * seq_len + s) * width
+		copy(dst[off:off + width], src[b * width:(b + 1) * width])
+	}
+}
+
+// _rnn_step_forward: h_t = tanh(h_ih + h_prev @ W_hh + b), where h_ih = x_t @ W_ih
+// is precomputed. h_hh is scratch [batch, H].
+_rnn_step_forward :: proc(
+	h_ih: []f64,
+	h_prev: []f64,
 	w_hh: []f64,
 	bias: []f64,
 	h_t: []f64,
+	h_hh: []f64,
 	batch: int,
-	in_size: int,
 	hidden_size: int,
-	allocator: mem.Allocator,
 ) {
-	// ✅ FIX: Use '=' for struct initialization in Odin
-	x_mat := l.Matrix(f64) {
-		rows = batch,
-		cols = in_size,
-		data = x_t,
-	}
-	w_ih_mat := l.Matrix(f64) {
-		rows = in_size,
-		cols = hidden_size,
-		data = w_ih,
-	}
-	h_prev_mat := l.Matrix(f64) {
-		rows = batch,
-		cols = hidden_size,
-		data = h_prev,
-	}
-	w_hh_mat := l.Matrix(f64) {
-		rows = hidden_size,
-		cols = hidden_size,
-		data = w_hh,
-	}
+	_hidden_projection(h_prev, w_hh, h_hh, batch, hidden_size, hidden_size)
 
-	// 1. h_ih = x_t @ w_ih
-	h_ih := _matmul(&x_mat, &w_ih_mat, allocator)
-	defer l.matrix_free(&h_ih)
-
-	// 2. h_hh = h_prev @ w_hh
-	h_hh := _matmul(&h_prev_mat, &w_hh_mat, allocator)
-	defer l.matrix_free(&h_hh)
-
-	// 3. h_sum = h_ih + h_hh + bias
 	for i in 0 ..< batch * hidden_size {
-		h_t[i] = h_ih.data[i] + h_hh.data[i] + bias[i % hidden_size]
+		h_t[i] = h_ih[i] + h_hh[i] + bias[i % hidden_size]
 	}
-
-	// 4. h_t = tanh(h_sum)
 	for i in 0 ..< batch * hidden_size {
 		h_t[i] = math.tanh(h_t[i])
 	}
@@ -1280,51 +1368,49 @@ tensor_rnn :: proc(
 	seq_len := x.shape[1]
 	in_size := x.shape[2]
 	hidden_size := w_ih.shape[1]
+	BH := batch * hidden_size
 
 	out_data := l.matrix_new(f64, 1, batch * seq_len * hidden_size, x.allocator)
 
-	h_t := make([]f64, batch * hidden_size, allocator)
+	xs := make([]f64, seq_len * batch * in_size, allocator)
+	_gather_steps(xs, x.data.data, batch, seq_len, in_size, false)
+	proj := _input_projection(xs, seq_len * batch, in_size, w_ih.data.data, hidden_size, allocator)
+	delete(xs, allocator)
+
+	h_t := make([]f64, BH, allocator)
+	h_next := make([]f64, BH, allocator)
+	h_hh := make([]f64, BH, allocator)
+	defer {
+		delete(proj, allocator)
+		delete(h_t, allocator)
+		delete(h_next, allocator)
+		delete(h_hh, allocator)
+	}
 	copy(h_t, h_0.data.data)
 
-	h_next := make([]f64, batch * hidden_size, allocator)
-	defer delete(h_t, allocator)
-	defer delete(h_next, allocator)
-
 	for s in 0 ..< seq_len {
-		x_t := make([]f64, batch * in_size, allocator)
-		for b in 0 ..< batch {
-			src := b * seq_len * in_size + s * in_size
-			dst := b * in_size
-			copy(x_t[dst:dst + in_size], x.data.data[src:src + in_size])
-		}
-
 		_rnn_step_forward(
-			x_t,
+			proj[s * BH:(s + 1) * BH],
 			h_t,
-			w_ih.data.data,
 			w_hh.data.data,
 			bias.data.data,
 			h_next,
+			h_hh,
 			batch,
-			in_size,
 			hidden_size,
-			allocator,
 		)
-
-		for b in 0 ..< batch {
-			src := b * hidden_size
-			dst := b * seq_len * hidden_size + s * hidden_size
-			copy(out_data.data[dst:dst + hidden_size], h_next[src:src + hidden_size])
-			copy(h_t[src:src + hidden_size], h_next[src:src + hidden_size])
-		}
-
-		delete(x_t, allocator)
+		_scatter_step(out_data.data, h_next, batch, seq_len, hidden_size, s)
+		h_t, h_next = h_next, h_t
 	}
 
 	out := _tensor_new_op(
 		out_data,
 		[4]int{batch, seq_len, hidden_size, 1},
-		x.requires_grad || h_0.requires_grad || w_ih.requires_grad || w_hh.requires_grad || bias.requires_grad,
+		x.requires_grad ||
+		h_0.requires_grad ||
+		w_ih.requires_grad ||
+		w_hh.requires_grad ||
+		bias.requires_grad,
 		x.allocator,
 	)
 
@@ -1343,67 +1429,42 @@ tensor_rnn :: proc(
 // GRU Operations
 // ============================================================================
 
+// _gru_step_forward: gates [r, z, n]. gate_ih = x_t @ W_ih is precomputed and
+// gets the bias added in place; gate_hh [batch, 3H] receives h_prev @ W_hh.
+// The r/z/n buffers can be nil if only h_t is needed.
 _gru_step_forward :: proc(
-	x_t: []f64,
+	gate_ih: []f64,
 	h_prev: []f64,
-	w_ih: []f64,
 	w_hh: []f64,
 	bias: []f64,
 	h_t: []f64,
+	gate_hh: []f64,
 	r_buf: []f64,
 	z_buf: []f64,
-	n_buf: []f64, // Can be nil if just computing h_t
+	n_buf: []f64,
 	batch: int,
-	in_size: int,
 	hidden_size: int,
-	allocator: mem.Allocator,
 ) {
 	H := hidden_size
 	H3 := 3 * H
 
-	x_mat := l.Matrix(f64) {
-		rows = batch,
-		cols = in_size,
-		data = x_t,
-	}
-	w_ih_mat := l.Matrix(f64) {
-		rows = in_size,
-		cols = H3,
-		data = w_ih,
-	}
-	h_prev_mat := l.Matrix(f64) {
-		rows = batch,
-		cols = H,
-		data = h_prev,
-	}
-	w_hh_mat := l.Matrix(f64) {
-		rows = H,
-		cols = H3,
-		data = w_hh,
-	}
-
-	// ✅ SIMD: Two large matmuls instead of 6 small ones
-	gate_ih := _matmul(&x_mat, &w_ih_mat, allocator)
-	gate_hh := _matmul(&h_prev_mat, &w_hh_mat, allocator)
-	defer l.matrix_free(&gate_ih)
-	defer l.matrix_free(&gate_hh)
+	_hidden_projection(h_prev, w_hh, gate_hh, batch, H, H3)
 
 	// Add bias
 	for b in 0 ..< batch {
 		for i in 0 ..< H3 {
-			gate_ih.data[b * H3 + i] += bias[i]
+			gate_ih[b * H3 + i] += bias[i]
 		}
 	}
 
-	// Compute gates (Auto-vectorized by Odin)
 	for b in 0 ..< batch {
 		for i in 0 ..< H {
 			idx_r := b * H3 + i
 			idx_z := b * H3 + H + i
 			idx_n := b * H3 + 2 * H + i
 
-			r_pre := gate_ih.data[idx_r] + gate_hh.data[idx_r]
-			z_pre := gate_ih.data[idx_z] + gate_hh.data[idx_z]
+			r_pre := gate_ih[idx_r] + gate_hh[idx_r]
+			z_pre := gate_ih[idx_z] + gate_hh[idx_z]
 
 			r_val := 1.0 / (1.0 + math.exp(-r_pre))
 			z_val := 1.0 / (1.0 + math.exp(-z_pre))
@@ -1411,7 +1472,7 @@ _gru_step_forward :: proc(
 			if r_buf != nil {r_buf[b * H + i] = r_val}
 			if z_buf != nil {z_buf[b * H + i] = z_val}
 
-			n_pre := gate_ih.data[idx_n] + r_val * gate_hh.data[idx_n]
+			n_pre := gate_ih[idx_n] + r_val * gate_hh[idx_n]
 			n_val := math.tanh(n_pre)
 			if n_buf != nil {n_buf[b * H + i] = n_val}
 
@@ -1435,52 +1496,53 @@ tensor_gru :: proc(
 	seq_len := x.shape[1]
 	in_size := x.shape[2]
 	hidden_size := w_ih.shape[1] / 3
+	BH := batch * hidden_size
+	BG := batch * 3 * hidden_size
 
 	out_data := l.matrix_new(f64, 1, batch * seq_len * hidden_size, x.allocator)
 
-	h_t := make([]f64, batch * hidden_size, allocator)
+	xs := make([]f64, seq_len * batch * in_size, allocator)
+	_gather_steps(xs, x.data.data, batch, seq_len, in_size, false)
+	proj := _input_projection(xs, seq_len * batch, in_size, w_ih.data.data, 3 * hidden_size, allocator)
+	delete(xs, allocator)
+
+	h_t := make([]f64, BH, allocator)
+	h_next := make([]f64, BH, allocator)
+	gate_hh := make([]f64, BG, allocator)
+	defer {
+		delete(proj, allocator)
+		delete(h_t, allocator)
+		delete(h_next, allocator)
+		delete(gate_hh, allocator)
+	}
 	copy(h_t, h_0.data.data)
-	h_next := make([]f64, batch * hidden_size, allocator)
-	defer delete(h_t, allocator)
-	defer delete(h_next, allocator)
 
 	for s in 0 ..< seq_len {
-		x_t := make([]f64, batch * in_size, allocator)
-		for b in 0 ..< batch {
-			src := b * seq_len * in_size + s * in_size
-			dst := b * in_size
-			copy(x_t[dst:dst + in_size], x.data.data[src:src + in_size])
-		}
-
 		_gru_step_forward(
-			x_t,
+			proj[s * BG:(s + 1) * BG],
 			h_t,
-			w_ih.data.data,
 			w_hh.data.data,
 			bias.data.data,
 			h_next,
+			gate_hh,
 			nil,
 			nil,
 			nil,
 			batch,
-			in_size,
 			hidden_size,
-			allocator,
 		)
-
-		for b in 0 ..< batch {
-			src := b * hidden_size
-			dst := b * seq_len * hidden_size + s * hidden_size
-			copy(out_data.data[dst:dst + hidden_size], h_next[src:src + hidden_size])
-			copy(h_t[src:src + hidden_size], h_next[src:src + hidden_size])
-		}
-		delete(x_t, allocator)
+		_scatter_step(out_data.data, h_next, batch, seq_len, hidden_size, s)
+		h_t, h_next = h_next, h_t
 	}
 
 	out := _tensor_new_op(
 		out_data,
 		[4]int{batch, seq_len, hidden_size, 1},
-		x.requires_grad || h_0.requires_grad || w_ih.requires_grad || w_hh.requires_grad || bias.requires_grad,
+		x.requires_grad ||
+		h_0.requires_grad ||
+		w_ih.requires_grad ||
+		w_hh.requires_grad ||
+		bias.requires_grad,
 		x.allocator,
 	)
 
@@ -1499,62 +1561,37 @@ tensor_gru :: proc(
 // LSTM Operations (SIMD-optimized with checkpointing)
 // ============================================================================
 
+// _lstm_step_forward: gates [i, f, g, o]. gate_ih = x_t @ W_ih is precomputed
+// and gets the bias added in place; gate_hh [batch, 4H] is scratch.
+// The gate buffers can be nil if only h_t / c_t are needed.
 _lstm_step_forward :: proc(
-	x_t: []f64,
+	gate_ih: []f64,
 	h_prev: []f64,
 	c_prev: []f64,
-	w_ih: []f64,
 	w_hh: []f64,
 	bias: []f64,
 	h_t: []f64,
 	c_t: []f64,
+	gate_hh: []f64,
 	i_buf: []f64,
 	f_buf: []f64,
 	g_buf: []f64,
 	o_buf: []f64,
 	batch: int,
-	in_size: int,
 	hidden_size: int,
-	allocator: mem.Allocator,
 ) {
 	H := hidden_size
 	H4 := 4 * H
 
-	x_mat := l.Matrix(f64) {
-		rows = batch,
-		cols = in_size,
-		data = x_t,
-	}
-	w_ih_mat := l.Matrix(f64) {
-		rows = in_size,
-		cols = H4,
-		data = w_ih,
-	}
-	h_prev_mat := l.Matrix(f64) {
-		rows = batch,
-		cols = H,
-		data = h_prev,
-	}
-	w_hh_mat := l.Matrix(f64) {
-		rows = H,
-		cols = H4,
-		data = w_hh,
-	}
-
-	// ✅ SIMD: Two massive matmuls for all 4 gates
-	gate_ih := _matmul(&x_mat, &w_ih_mat, allocator)
-	gate_hh := _matmul(&h_prev_mat, &w_hh_mat, allocator)
-	defer l.matrix_free(&gate_ih)
-	defer l.matrix_free(&gate_hh)
+	_hidden_projection(h_prev, w_hh, gate_hh, batch, H, H4)
 
 	// Add bias
 	for b in 0 ..< batch {
 		for i in 0 ..< H4 {
-			gate_ih.data[b * H4 + i] += bias[i]
+			gate_ih[b * H4 + i] += bias[i]
 		}
 	}
 
-	// Compute gates and states (Auto-vectorized by Odin)
 	for b in 0 ..< batch {
 		for i in 0 ..< H {
 			idx_i := b * H4 + i
@@ -1562,10 +1599,10 @@ _lstm_step_forward :: proc(
 			idx_g := b * H4 + 2 * H + i
 			idx_o := b * H4 + 3 * H + i
 
-			i_pre := gate_ih.data[idx_i] + gate_hh.data[idx_i]
-			f_pre := gate_ih.data[idx_f] + gate_hh.data[idx_f]
-			g_pre := gate_ih.data[idx_g] + gate_hh.data[idx_g]
-			o_pre := gate_ih.data[idx_o] + gate_hh.data[idx_o]
+			i_pre := gate_ih[idx_i] + gate_hh[idx_i]
+			f_pre := gate_ih[idx_f] + gate_hh[idx_f]
+			g_pre := gate_ih[idx_g] + gate_hh[idx_g]
+			o_pre := gate_ih[idx_o] + gate_hh[idx_o]
 
 			i_val := 1.0 / (1.0 + math.exp(-i_pre))
 			f_val := 1.0 / (1.0 + math.exp(-f_pre))
@@ -1601,58 +1638,52 @@ tensor_lstm :: proc(
 	seq_len := x.shape[1]
 	in_size := x.shape[2]
 	hidden_size := w_ih.shape[1] / 4
+	BH := batch * hidden_size
+	BG := batch * 4 * hidden_size
 
 	out_data := l.matrix_new(f64, 1, batch * seq_len * hidden_size, x.allocator)
 
-	h_t := make([]f64, batch * hidden_size, allocator)
-	c_t := make([]f64, batch * hidden_size, allocator)
-	copy(h_t, h_0.data.data)
-	copy(c_t, c_0.data.data)
+	xs := make([]f64, seq_len * batch * in_size, allocator)
+	_gather_steps(xs, x.data.data, batch, seq_len, in_size, false)
+	proj := _input_projection(xs, seq_len * batch, in_size, w_ih.data.data, 4 * hidden_size, allocator)
+	delete(xs, allocator)
 
-	h_next := make([]f64, batch * hidden_size, allocator)
-	c_next := make([]f64, batch * hidden_size, allocator)
+	h_t := make([]f64, BH, allocator)
+	c_t := make([]f64, BH, allocator)
+	h_next := make([]f64, BH, allocator)
+	c_next := make([]f64, BH, allocator)
+	gate_hh := make([]f64, BG, allocator)
 	defer {
+		delete(proj, allocator)
 		delete(h_t, allocator)
 		delete(c_t, allocator)
 		delete(h_next, allocator)
 		delete(c_next, allocator)
+		delete(gate_hh, allocator)
 	}
+	copy(h_t, h_0.data.data)
+	copy(c_t, c_0.data.data)
 
 	for s in 0 ..< seq_len {
-		x_t := make([]f64, batch * in_size, allocator)
-		for b in 0 ..< batch {
-			src := b * seq_len * in_size + s * in_size
-			dst := b * in_size
-			copy(x_t[dst:dst + in_size], x.data.data[src:src + in_size])
-		}
-
 		_lstm_step_forward(
-			x_t,
+			proj[s * BG:(s + 1) * BG],
 			h_t,
 			c_t,
-			w_ih.data.data,
 			w_hh.data.data,
 			bias.data.data,
 			h_next,
 			c_next,
+			gate_hh,
 			nil,
 			nil,
 			nil,
 			nil,
 			batch,
-			in_size,
 			hidden_size,
-			allocator,
 		)
-
-		for b in 0 ..< batch {
-			src := b * hidden_size
-			dst := b * seq_len * hidden_size + s * hidden_size
-			copy(out_data.data[dst:dst + hidden_size], h_next[src:src + hidden_size])
-			copy(h_t[src:src + hidden_size], h_next[src:src + hidden_size])
-			copy(c_t[src:src + hidden_size], c_next[src:src + hidden_size])
-		}
-		delete(x_t, allocator)
+		_scatter_step(out_data.data, h_next, batch, seq_len, hidden_size, s)
+		h_t, h_next = h_next, h_t
+		c_t, c_next = c_next, c_t
 	}
 
 	out := _tensor_new_op(
@@ -1714,7 +1745,12 @@ tensor_embedding :: proc(input: ^Tensor, weight: ^Tensor) -> ^Tensor {
 		}
 	}
 
-	out := _tensor_new_op(out_data, [4]int{batch, seq_len, embed_dim, 1}, weight.requires_grad, input.allocator)
+	out := _tensor_new_op(
+		out_data,
+		[4]int{batch, seq_len, embed_dim, 1},
+		weight.requires_grad,
+		input.allocator,
+	)
 
 	if out.requires_grad {
 		out.op = .Embedding
@@ -1807,7 +1843,12 @@ tensor_scaled_dot_product_attention :: proc(
 		l.matrix_free(&s_b)
 	}
 
-	out := _tensor_new_op(out_data, [4]int{batch, seq_q, d_v, 1}, Q.requires_grad || K.requires_grad || V.requires_grad, Q.allocator)
+	out := _tensor_new_op(
+		out_data,
+		[4]int{batch, seq_q, d_v, 1},
+		Q.requires_grad || K.requires_grad || V.requires_grad,
+		Q.allocator,
+	)
 
 	if out.requires_grad {
 		out.op = .ScaledDotProductAttention
@@ -1844,7 +1885,12 @@ tensor_permute_mha :: proc(
 		}
 	}
 
-	out := _tensor_new_op(out_data, [4]int{batch * num_heads, seq_len, head_dim, 1}, x.requires_grad, x.allocator)
+	out := _tensor_new_op(
+		out_data,
+		[4]int{batch * num_heads, seq_len, head_dim, 1},
+		x.requires_grad,
+		x.allocator,
+	)
 
 	if out.requires_grad {
 		out.op = .PermuteMHA
@@ -1881,7 +1927,12 @@ tensor_permute_mha_inverse :: proc(
 		}
 	}
 
-	out := _tensor_new_op(out_data, [4]int{batch, seq_len, d_model, 1}, x.requires_grad, x.allocator)
+	out := _tensor_new_op(
+		out_data,
+		[4]int{batch, seq_len, d_model, 1},
+		x.requires_grad,
+		x.allocator,
+	)
 
 	if out.requires_grad {
 		out.op = .PermuteMHAInverse
@@ -2094,7 +2145,12 @@ tensor_masked_scaled_dot_product_attention :: proc(
 		l.matrix_free(&s_b)
 	}
 
-	out := _tensor_new_op(out_data, [4]int{batch, seq_q, d_v, 1}, Q.requires_grad || K.requires_grad || V.requires_grad, Q.allocator)
+	out := _tensor_new_op(
+		out_data,
+		[4]int{batch, seq_q, d_v, 1},
+		Q.requires_grad || K.requires_grad || V.requires_grad,
+		Q.allocator,
+	)
 
 	if out.requires_grad {
 		out.op = .MaskedScaledDotProductAttention
@@ -2146,7 +2202,12 @@ tensor_binary_cross_entropy :: proc(pred: ^Tensor, target: ^Tensor) -> ^Tensor {
 	out_data := l.matrix_new(f64, 1, 1, pred.allocator)
 	out_data.data[0] = loss
 
-	out := _tensor_new_op(out_data, SCALAR_SHAPE, pred.requires_grad || target.requires_grad, pred.allocator)
+	out := _tensor_new_op(
+		out_data,
+		SCALAR_SHAPE,
+		pred.requires_grad || target.requires_grad,
+		pred.allocator,
+	)
 	if out.requires_grad {
 		out.op = .BinaryCrossEntropy
 		append(&out.inputs, pred)
@@ -2239,7 +2300,12 @@ tensor_kl_divergence :: proc(mu: ^Tensor, log_var: ^Tensor) -> ^Tensor {
 	out_data := l.matrix_new(f64, 1, 1, mu.allocator)
 	out_data.data[0] = kl_loss
 
-	out := _tensor_new_op(out_data, SCALAR_SHAPE, mu.requires_grad || log_var.requires_grad, mu.allocator)
+	out := _tensor_new_op(
+		out_data,
+		SCALAR_SHAPE,
+		mu.requires_grad || log_var.requires_grad,
+		mu.allocator,
+	)
 	if out.requires_grad {
 		out.op = .KLDivergence
 		append(&out.inputs, mu)
@@ -2885,41 +2951,54 @@ tensor_softplus :: proc(a: ^Tensor) -> ^Tensor {
 // Selective State Space Model (Mamba-style) Operations
 // ============================================================================
 
-_ssm_step_forward :: proc(
-	x: []f64,
-	h_prev: []f64,
-	A: []f64,
-	B: []f64,
-	C: []f64,
-	Delta: []f64,
-	D: []f64,
-	h_next: []f64,
-	y: []f64,
-	batch, d_model, d_state: int,
-) {
-	for b in 0 ..< batch {
-		for d in 0 ..< d_model {
-			idx_x := b * d_model + d
-			x_val := x[idx_x]
-			delta := Delta[idx_x]
-			D_val := D[d]
+// The scan is independent for every batch row: h[b, d, n] only ever reads
+// h[b, d, n] of the previous step. Batch rows are therefore split across
+// threads; each row is computed exactly as in a sequential run.
 
-			y_val := x_val * D_val // Skip connection
-			for n in 0 ..< d_state {
-				idx_h := (b * d_model + d) * d_state + n
-				idx_A := d * d_state + n
-				idx_BC := b * d_state + n
+// Below this many state updates per thread, a thread costs more than it saves
+SSM_MIN_WORK_PER_THREAD :: 1 << 14
 
-				A_val := A[idx_A]
-				A_bar := math.exp(delta * A_val)
-				B_bar := delta * B[idx_BC]
+// _ssm_threads: number of tasks to split `batch` rows of `work_per_row` updates into
+_ssm_threads :: proc(batch, work_per_row: int) -> int {
+	n := min(batch, batch * work_per_row / SSM_MIN_WORK_PER_THREAD)
+	if n <= 1 {return 1} // decide before asking the OS for the core count
+	return min(n, util.parallel_thread_count())
+}
 
-				h_val := A_bar * h_prev[idx_h] + B_bar * x_val
-				h_next[idx_h] = h_val
+_Ssm_Fwd_Job :: struct {
+	x, h_0, A, B, C, Delta, D: []f64,
+	out, h:                    []f64, // h: per-row running state [batch, d_model * d_state]
+	seq_len, d_model, d_state: int,
+}
 
-				y_val += C[idx_BC] * h_val
+// _ssm_forward_rows: y[b, s, d] = x*D + sum_n C*h_n with
+// h_n = exp(delta * A) * h_prev + (delta * B) * x, for batch rows [b0, b1)
+_ssm_forward_rows :: proc(data: rawptr, b0, b1: int) {
+	j := (^_Ssm_Fwd_Job)(data)
+	S, Dm, N := j.seq_len, j.d_model, j.d_state
+	DN := Dm * N
+	for b in b0 ..< b1 {
+		h := j.h[b * DN:(b + 1) * DN]
+		copy(h, j.h_0[b * DN:(b + 1) * DN])
+		for s in 0 ..< S {
+			row_x := (b * S + s) * Dm
+			row_bc := (b * S + s) * N
+			for d in 0 ..< Dm {
+				x_val := j.x[row_x + d]
+				delta := j.Delta[row_x + d]
+
+				y_val := x_val * j.D[d] // Skip connection
+				for n in 0 ..< N {
+					A_bar := math.exp(delta * j.A[d * N + n])
+					B_bar := delta * j.B[row_bc + n]
+
+					h_val := A_bar * h[d * N + n] + B_bar * x_val
+					h[d * N + n] = h_val
+
+					y_val += j.C[row_bc + n] * h_val
+				}
+				j.out[row_x + d] = y_val
 			}
-			y[idx_x] = y_val
 		}
 	}
 }
@@ -2943,63 +3022,24 @@ tensor_ssm :: proc(
 
 	out_data := l.matrix_new(f64, 1, batch * seq_len * d_model, x.allocator)
 
-	h_t := make([]f64, batch * d_model * d_state, allocator)
-	copy(h_t, h_0.data.data)
-	h_next := make([]f64, batch * d_model * d_state, allocator)
-	y_t := make([]f64, batch * d_model, allocator)
+	h := make([]f64, batch * d_model * d_state, allocator)
+	defer delete(h, allocator)
 
-	defer {
-		delete(h_t, allocator)
-		delete(h_next, allocator)
-		delete(y_t, allocator)
+	job := _Ssm_Fwd_Job {
+		x       = x.data.data,
+		h_0     = h_0.data.data,
+		A       = A.data.data,
+		B       = B.data.data,
+		C       = C.data.data,
+		Delta   = Delta.data.data,
+		D       = D.data.data,
+		out     = out_data.data,
+		h       = h,
+		seq_len = seq_len,
+		d_model = d_model,
+		d_state = d_state,
 	}
-
-	for s in 0 ..< seq_len {
-		x_s := make([]f64, batch * d_model, allocator)
-		B_s := make([]f64, batch * d_state, allocator)
-		C_s := make([]f64, batch * d_state, allocator)
-		Delta_s := make([]f64, batch * d_model, allocator)
-
-		for b in 0 ..< batch {
-			src_x := b * seq_len * d_model + s * d_model
-			copy(x_s[b * d_model:(b + 1) * d_model], x.data.data[src_x:src_x + d_model])
-			src_B := b * seq_len * d_state + s * d_state
-			copy(B_s[b * d_state:(b + 1) * d_state], B.data.data[src_B:src_B + d_state])
-			src_C := b * seq_len * d_state + s * d_state
-			copy(C_s[b * d_state:(b + 1) * d_state], C.data.data[src_C:src_C + d_state])
-			src_D := b * seq_len * d_model + s * d_model
-			copy(Delta_s[b * d_model:(b + 1) * d_model], Delta.data.data[src_D:src_D + d_model])
-		}
-
-		_ssm_step_forward(
-			x_s,
-			h_t,
-			A.data.data,
-			B_s,
-			C_s,
-			Delta_s,
-			D.data.data,
-			h_next,
-			y_t,
-			batch,
-			d_model,
-			d_state,
-		)
-
-		for b in 0 ..< batch {
-			dst_y := b * seq_len * d_model + s * d_model
-			copy(out_data.data[dst_y:dst_y + d_model], y_t[b * d_model:(b + 1) * d_model])
-			copy(
-				h_t[b * d_model * d_state:(b + 1) * d_model * d_state],
-				h_next[b * d_model * d_state:(b + 1) * d_model * d_state],
-			)
-		}
-
-		delete(x_s, allocator)
-		delete(B_s, allocator)
-		delete(C_s, allocator)
-		delete(Delta_s, allocator)
-	}
+	util.parallel_for(batch, &job, _ssm_forward_rows, _ssm_threads(batch, seq_len * d_model * d_state))
 
 	out := _tensor_new_op(
 		out_data,
@@ -3152,7 +3192,12 @@ tensor_flash_attention :: proc(
 		}
 	}
 
-	out := _tensor_new_op(out_data, [4]int{batch, seq_q, d_v, 1}, Q.requires_grad || K.requires_grad || V.requires_grad, Q.allocator)
+	out := _tensor_new_op(
+		out_data,
+		[4]int{batch, seq_q, d_v, 1},
+		Q.requires_grad || K.requires_grad || V.requires_grad,
+		Q.allocator,
+	)
 	if out.requires_grad {
 		out.op = .FlashAttention
 		append(&out.inputs, Q)
