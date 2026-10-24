@@ -96,7 +96,12 @@ gpt_moe_flash_test :: proc(allocator: mem.Allocator) {
 	)
 
 	epochs := 150
+	// One arena per training step, reused across epochs
+	scope: t.Graph_Scope
+	defer t.graph_scope_destroy(&scope)
 	for epoch in 0 ..< epochs {
+		t.graph_begin(&scope)
+		defer t.graph_end(&scope)
 		nn.adam_zero_grad(&opt)
 
 		// ✅ Pass the special tokens explicitly

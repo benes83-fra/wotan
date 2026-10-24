@@ -205,6 +205,10 @@ dispersion_trading_test :: proc(allocator: mem.Allocator) {
 		defer nn.adam_free(&opt)
 		ml_fin.ensemble_add_to_optimizer(&ensemble, &opt)
 
+		// One arena per training step / forecast, reused across them
+		scope: t.Graph_Scope
+		defer t.graph_scope_destroy(&scope)
+
 		for epoch in 0 ..< epochs {
 			epoch_loss := 0.0
 			for b in 0 ..< num_train_samples / batch_size {
@@ -227,6 +231,7 @@ dispersion_trading_test :: proc(allocator: mem.Allocator) {
 				y_batch := t.tensor_new(y_data, false, allocator)
 				y_batch.shape = [4]int{batch_size, 1, 1, 1}
 
+				t.graph_begin(&scope)
 				preds := ml_fin.lstm_volatility_forecaster_forward(&ensemble.lstm, x_batch)
 				loss := t.tensor_mse_loss(preds, y_batch)
 				t.tensor_backward(loss, allocator)
@@ -236,6 +241,7 @@ dispersion_trading_test :: proc(allocator: mem.Allocator) {
 				epoch_loss += loss.data.data[0]
 
 				t.tensor_free_graph(loss)
+				t.graph_end(&scope)
 				t.tensor_free(x_batch)
 
 				t.tensor_free(y_batch)
@@ -267,10 +273,12 @@ dispersion_trading_test :: proc(allocator: mem.Allocator) {
 		}
 		x_inf := t.tensor_new(x_inf_data, false, allocator)
 		x_inf.shape = [4]int{1, seq_len, num_features, 1}
+		t.graph_begin(&scope)
 		lstm_pred_tensor := ml_fin.lstm_volatility_forecaster_forward(&ensemble.lstm, x_inf)
 		lstm_rv_dec := lstm_pred_tensor.data.data[0]
 
 		t.tensor_free_graph(lstm_pred_tensor)
+		t.graph_end(&scope)
 		t.tensor_free(x_inf)
 
 

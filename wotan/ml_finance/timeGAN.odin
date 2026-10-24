@@ -263,6 +263,7 @@ train_embedder_recovery :: proc(
 	for b in 0 ..< batch_size {
 		tensor.graph_begin(&tg.scope)
 		defer tensor.graph_end(&tg.scope)
+		alloc := tensor.graph_allocator(&tg.scope) // per-sample inputs and targets too
 		seq_idx := rand.int_range(0, n_seqs - 1)
 		seq_start := seq_idx * tg.seq_len * tg.feature_dim
 		seq := real_data[seq_start:seq_start + tg.seq_len * tg.feature_dim]
@@ -308,6 +309,7 @@ train_supervisor :: proc(
 	for b in 0 ..< batch_size {
 		tensor.graph_begin(&tg.scope)
 		defer tensor.graph_end(&tg.scope)
+		alloc := tensor.graph_allocator(&tg.scope) // per-sample inputs and targets too
 		seq_idx := rand.int_range(0, len(real_data) / (tg.seq_len * tg.feature_dim) - 1)
 		seq_start := seq_idx * tg.seq_len * tg.feature_dim
 		seq := real_data[seq_start:seq_start + tg.seq_len * tg.feature_dim]
@@ -351,6 +353,7 @@ train_generator :: proc(
 	for b in 0 ..< batch_size {
 		tensor.graph_begin(&tg.scope)
 		defer tensor.graph_end(&tg.scope)
+		alloc := tensor.graph_allocator(&tg.scope) // per-sample inputs and targets too
 		noise := tensor.tensor_new(
 			l.matrix_new(f64, tg.seq_len, tg.latent_dim, alloc),
 			false,
@@ -430,6 +433,7 @@ train_discriminator :: proc(
 	for b in 0 ..< batch_size {
 		tensor.graph_begin(&tg.scope)
 		defer tensor.graph_end(&tg.scope)
+		alloc := tensor.graph_allocator(&tg.scope) // per-sample inputs and targets too
 		seq_idx := rand.int_range(0, len(real_data) / (tg.seq_len * tg.feature_dim) - 1)
 		seq_start := seq_idx * tg.seq_len * tg.feature_dim
 		seq := real_data[seq_start:seq_start + tg.seq_len * tg.feature_dim]
@@ -508,6 +512,7 @@ generate_synthetic_data :: proc(tg: ^TimeGAN, n_sequences: int, alloc: mem.Alloc
 	for s in 0 ..< n_sequences {
 		tensor.graph_begin(&tg.scope)
 		defer tensor.graph_end(&tg.scope)
+		alloc := tensor.graph_allocator(&tg.scope) // per-sample inputs and targets too
 		noise := tensor.tensor_new(
 			l.matrix_new(f64, tg.seq_len, tg.latent_dim, alloc),
 			false,

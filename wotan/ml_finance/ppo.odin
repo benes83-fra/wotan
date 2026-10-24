@@ -375,6 +375,8 @@ PPOAgent :: struct {
 	obs_dim:      int,
 	buffer:       ^RolloutBuffer,
 	allocator:    mem.Allocator,
+	// One arena per action selection / minibatch update, reused across them
+	scope:        tensor.Graph_Scope,
 }
 
 PPOUpdateStats :: struct {
@@ -435,17 +437,16 @@ ppo_agent_select_action :: proc(
 	log_prob: f64,
 	value: f64,
 ) {
+	// Both forward graphs live in the agent's scope and are released at once
+	tensor.graph_begin(&agent.scope)
+	defer tensor.graph_end(&agent.scope)
+
 	logits := nn.sequential_forward(agent.actor, state)
 	probs := tensor.tensor_softmax(logits)
 	action = tensor_categorical_sample(probs)
 	log_prob = tensor_categorical_log_prob(probs, action)
 	val_tensor := nn.sequential_forward(agent.critic, state)
 	value = val_tensor.data.data[0]
-
-	// ✅ FIX: probs depends on logits, so freeing probs frees logits too.
-	// val_tensor is a separate graph. Do NOT free logits separately.
-	tensor.tensor_free_graph(probs)
-	tensor.tensor_free_graph(val_tensor)
 
 	return action, log_prob, value
 }
@@ -537,21 +538,15 @@ ppo_agent_update :: proc(
 
 			nn.adam_zero_grad(&agent.optimizer)
 
-			total_policy_loss := tensor.tensor_new(
-				l.matrix_new(f64, 1, 1, agent.allocator),
-				true,
-				agent.allocator,
-			)
-			total_value_loss := tensor.tensor_new(
-				l.matrix_new(f64, 1, 1, agent.allocator),
-				true,
-				agent.allocator,
-			)
-			total_entropy := tensor.tensor_new(
-				l.matrix_new(f64, 1, 1, agent.allocator),
-				true,
-				agent.allocator,
-			)
+			// The whole minibatch graph, including its helper leaves, lives in
+			// the agent's scope and is released at once by graph_end
+			tensor.graph_begin(&agent.scope)
+			defer tensor.graph_end(&agent.scope)
+			ga := tensor.graph_allocator(&agent.scope)
+
+			total_policy_loss := tensor.tensor_new(l.matrix_new(f64, 1, 1, ga), true, ga)
+			total_value_loss := tensor.tensor_new(l.matrix_new(f64, 1, 1, ga), true, ga)
+			total_entropy := tensor.tensor_new(l.matrix_new(f64, 1, 1, ga), true, ga)
 
 			for i in 0 ..< b_len {
 				idx := indices[start + i]
@@ -590,10 +585,9 @@ ppo_agent_update :: proc(
 				// ── Critic forward ──
 				value_tensor := nn.sequential_forward(agent.critic, state)
 
-				target_data := l.matrix_new(f64, 1, 1, agent.allocator)
+				target_data := l.matrix_new(f64, 1, 1, ga)
 				target_data.data[0] = target_return
-				target_tensor := tensor.tensor_new(target_data, false, agent.allocator)
-				target_tensor.owned_by_graph = true
+				target_tensor := tensor.tensor_new(target_data, false, ga)
 
 				value_loss_tensor := tensor.tensor_mse_loss(value_tensor, target_tensor)
 				total_value_loss = tensor.tensor_add(total_value_loss, value_loss_tensor)
@@ -614,13 +608,8 @@ ppo_agent_update :: proc(
 			}
 
 			batch_len_f := f64(b_len)
-			inv_batch := tensor.tensor_new(
-				l.matrix_new(f64, 1, 1, agent.allocator),
-				false,
-				agent.allocator,
-			)
+			inv_batch := tensor.tensor_new(l.matrix_new(f64, 1, 1, ga), false, ga)
 			inv_batch.data.data[0] = 1.0 / batch_len_f
-			inv_batch.owned_by_graph = true
 
 			total_policy_loss = tensor.tensor_mul(total_policy_loss, inv_batch)
 			total_value_loss = tensor.tensor_mul(total_value_loss, inv_batch)
@@ -631,10 +620,8 @@ ppo_agent_update :: proc(
 
 			tensor.tensor_backward(total_loss)
 			nn.adam_step(&agent.optimizer)
-			tensor.tensor_free_graph(total_loss)
-
-			delete(indices, agent.allocator)
 		}
+		delete(indices, agent.allocator) // after all minibatches (it was freed after the first)
 	}
 
 	rollout_buffer_clear(agent.buffer)
@@ -653,6 +640,7 @@ ppo_agent_free :: proc(agent: ^PPOAgent) {
 	nn.sequential_free(agent.critic)
 	nn.adam_free(&agent.optimizer)
 	rollout_buffer_free(agent.buffer)
+	tensor.graph_scope_destroy(&agent.scope)
 	free(agent, agent.allocator)
 }
 
