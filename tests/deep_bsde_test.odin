@@ -57,10 +57,14 @@ deep_bsde_test :: proc(allocator: mem.Allocator = context.allocator) {
 	fmt.println("Epoch | Loss      | Estimated Y_0")
 	fmt.println("------|-----------|--------------")
 
+	// ✅ One arena per training step, reused across epochs
+	scope: t.Graph_Scope
+	defer t.graph_scope_destroy(&scope)
+
 	for epoch in 0 ..< epochs {
+		t.graph_begin(&scope)
 		nn.adam_zero_grad(&opt)
 
-		// ✅ Use the standard loss function
 		loss := ml_fin.deep_bsde_bs_loss(&model, S_0, K, r, sigma, batch_size, N, allocator)
 		t.tensor_backward(loss)
 		nn.adam_step(&opt)
@@ -70,6 +74,7 @@ deep_bsde_test :: proc(allocator: mem.Allocator = context.allocator) {
 		}
 
 		t.tensor_free_graph(loss)
+		t.graph_end(&scope) // ✅ Instantly wipes thousands of intermediate tensors
 	}
 
 	fmt.println("\n======================================================================")
@@ -109,7 +114,12 @@ deep_bsde_european_call_test :: proc(allocator: mem.Allocator = context.allocato
 
 	fmt.println("Training 1D European Call (Target: Black-Scholes Price)...")
 
+	// ✅ One arena per training step, reused across epochs
+	scope: t.Graph_Scope
+	defer t.graph_scope_destroy(&scope)
+
 	for epoch in 0 ..< epochs {
+		t.graph_begin(&scope)
 		nn.adam_zero_grad(&opt)
 
 		loss := ml_fin.deep_bsde_bs_loss(&model, S_0, K, r, sigma, batch_size, N, allocator)
@@ -126,6 +136,7 @@ deep_bsde_european_call_test :: proc(allocator: mem.Allocator = context.allocato
 		}
 
 		t.tensor_free_graph(loss)
+		t.graph_end(&scope) // ✅ Instantly wipes thousands of intermediate tensors
 	}
 
 	d1 :=
@@ -139,6 +150,7 @@ deep_bsde_european_call_test :: proc(allocator: mem.Allocator = context.allocato
 	fmt.printf("Black-Scholes Reference: $%.4f\n", bs_price)
 	fmt.printf("Error: %.4f%%\n", math.abs(model.y0.data.data[0] - bs_price) / bs_price * 100)
 }
+
 deep_bsde_100d_test :: proc(allocator: mem.Allocator = context.allocator) {
 	seed_test(#procedure)
 	fmt.println("\n=== 100D Max-Call Option (Han et al. 2018 Benchmark) ===")
@@ -175,16 +187,20 @@ deep_bsde_100d_test :: proc(allocator: mem.Allocator = context.allocator) {
 	fmt.println("Epoch | Loss      | Estimated Y_0")
 	fmt.println("------|-----------|--------------")
 
+	// ✅ One arena per training step, reused across epochs
+	scope: t.Graph_Scope
+	defer t.graph_scope_destroy(&scope)
+
 	for epoch in 0 ..< epochs {
+		t.graph_begin(&scope)
 		nn.adam_zero_grad(&opt)
 
 		loss := ml_fin.deep_bsde_bs_loss(&model, S_0, K, r, sigma, batch_size, N, allocator)
-
 		t.tensor_backward(loss)
 
 		// Gradient Clipping (Prevent exploding gradients in unrolled graph)
 		// Clip global norm to 1.0
-		nn.clip_grad_norm(&opt, 1.0) // You need to implement this helper or do it manually
+		nn.clip_grad_norm(&opt, 1.0)
 
 		nn.adam_step(&opt)
 
@@ -197,8 +213,8 @@ deep_bsde_100d_test :: proc(allocator: mem.Allocator = context.allocator) {
 			)
 		}
 
-		// Single cleanup for the entire graph
 		t.tensor_free_graph(loss)
+		t.graph_end(&scope) // ✅ Instantly wipes thousands of intermediate tensors
 	}
 
 	fmt.printf(
