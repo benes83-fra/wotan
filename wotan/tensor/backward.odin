@@ -1458,18 +1458,17 @@ _scatter_add_step :: proc(dst, src: []f64, batch, seq_len, width, s: int) {
 	}
 }
 
-// Recurrent backward passes run in three phases:
-//   1. recompute states and gates in forward order (the input projection
-//      x @ W_ih for all steps is one matmul, see _input_projection);
-//   2. backpropagate through time; only dh_prev = d_hh @ W_hh^T is sequential.
+// Recurrent backward passes read the states and gates the forward pass saved
+// in node.f64_metadata (see tensor_rnn / tensor_gru / tensor_lstm), then:
+//   1. backpropagate through time; only dh_prev = d_hh @ W_hh^T is sequential.
 //      The pre-activation gate gradients of every step are kept;
-//   3. the parameter and input gradients for all steps at once (_recurrent_grads).
+//   2. the parameter and input gradients for all steps at once (_recurrent_grads).
 // All per-step buffers are stored "reverse step-major": block p holds timestep
 // seq_len-1-p, the order in which backpropagation visits the steps. The stacked
 // products then add up their terms in exactly the order the per-step updates
 // did, so the gradients are bit-identical to accumulating step by step.
 
-// _Recurrent_Bufs: the per-step data phase 3 needs, all reverse step-major
+// _Recurrent_Bufs: the per-step data phase 2 needs, all reverse step-major
 _Recurrent_Bufs :: struct {
 	xs:     []f64, // inputs        [S*B, in_size]
 	h_prev: []f64, // states entering each step [S*B, H]
@@ -1537,6 +1536,24 @@ _hidden_backprop :: proc(d_hh, w_hh, dh_prev: []f64, batch, H, G: int) {
 	l.matmul_nt_acc_simd(&d_mat, &w_mat, &dh_mat)
 }
 
+// _saved_blocks splits a node's saved forward data into `n_states` state rows
+// of (seq_len + 1) * BH followed by `n_steps` per-step blocks of seq_len * BH
+_saved_blocks :: proc(node: ^Tensor, seq_len, BH, n_states, n_steps: int) -> (states: [2][]f64, steps: [5][]f64) {
+	saved := node.f64_metadata[:]
+	S1, SB := (seq_len + 1) * BH, seq_len * BH
+	fmt.assertf(
+		len(saved) == n_states * S1 + n_steps * SB,
+		"backward: %v node has %d saved values, expected %d",
+		node.op,
+		len(saved),
+		n_states * S1 + n_steps * SB,
+	)
+	for k in 0 ..< n_states {states[k] = saved[k * S1:(k + 1) * S1]}
+	base := n_states * S1
+	for k in 0 ..< n_steps {steps[k] = saved[base + k * SB:base + (k + 1) * SB]}
+	return
+}
+
 // _rnn_backward: h_t = tanh(x_t W_ih + h_{t-1} W_hh + b)
 _rnn_backward :: proc(node: ^Tensor, allocator: mem.Allocator) {
 	x_in, h_0_in, w_ih_in, w_hh_in, bias_in :=
@@ -1546,39 +1563,20 @@ _rnn_backward :: proc(node: ^Tensor, allocator: mem.Allocator) {
 	BH := batch * H
 
 	// hs[s] holds the state entering step s (hs[0] = h_0)
-	hs := make([]f64, (seq_len + 1) * BH, allocator)
+	states, _ := _saved_blocks(node, seq_len, BH, 1, 0)
+	hs := states[0]
+
 	xs := make([]f64, seq_len * batch * in_size, allocator)
 	h_rev := make([]f64, seq_len * BH, allocator)
 	d_all := make([]f64, seq_len * BH, allocator)
-	h_hh := make([]f64, BH, allocator)
 	dh_next := make([]f64, BH, allocator)
 	dh_prev := make([]f64, BH, allocator)
 	defer {
-		delete(hs, allocator); delete(xs, allocator); delete(h_rev, allocator)
-		delete(d_all, allocator); delete(h_hh, allocator); delete(dh_next, allocator)
-		delete(dh_prev, allocator)
+		delete(xs, allocator); delete(h_rev, allocator); delete(d_all, allocator)
+		delete(dh_next, allocator); delete(dh_prev, allocator)
 	}
 
-	// 1. Recompute and store all hidden states, in forward order
-	_gather_steps(xs, x_in.data.data, batch, seq_len, in_size, true)
-	proj := _input_projection(xs, seq_len * batch, in_size, w_ih_in.data.data, H, allocator)
-	defer delete(proj, allocator)
-	copy(hs[0:BH], h_0_in.data.data)
-	for s in 0 ..< seq_len {
-		p := seq_len - 1 - s
-		_rnn_step_forward(
-			proj[p * BH:(p + 1) * BH],
-			hs[s * BH:(s + 1) * BH],
-			w_hh_in.data.data,
-			bias_in.data.data,
-			hs[(s + 1) * BH:(s + 2) * BH],
-			h_hh,
-			batch,
-			H,
-		)
-	}
-
-	// 2. Backpropagate through time
+	// 1. Backpropagate through time
 	for s := seq_len - 1; s >= 0; s -= 1 {
 		p := seq_len - 1 - s
 		h_cur := hs[(s + 1) * BH:(s + 2) * BH]
@@ -1595,7 +1593,8 @@ _rnn_backward :: proc(node: ^Tensor, allocator: mem.Allocator) {
 		copy(dh_next, dh_prev)
 	}
 
-	// 3. Parameter and input gradients for all steps
+	// 2. Parameter and input gradients for all steps
+	_gather_steps(xs, x_in.data.data, batch, seq_len, in_size, true)
 	_reverse_states(h_rev, hs, seq_len, BH)
 	_recurrent_grads(
 		x_in,
@@ -1628,55 +1627,29 @@ _gru_backward :: proc(node: ^Tensor, allocator: mem.Allocator) {
 	BH := batch * H
 	BG := batch * H3
 
-	hs := make([]f64, (seq_len + 1) * BH, allocator)
+	states, steps := _saved_blocks(node, seq_len, BH, 1, 4)
+	hs := states[0]
+	rs, zs, ns, hh_n := steps[0], steps[1], steps[2], steps[3]
+
 	xs := make([]f64, seq_len * batch * in_size, allocator)
 	h_rev := make([]f64, seq_len * BH, allocator)
-	rs := make([]f64, seq_len * BH, allocator)
-	zs := make([]f64, seq_len * BH, allocator)
-	ns := make([]f64, seq_len * BH, allocator)
-	gate_hh := make([]f64, seq_len * BG, allocator) // h_prev @ W_hh of every step
 	d_ih := make([]f64, seq_len * BG, allocator)
 	d_hh := make([]f64, seq_len * BG, allocator)
 	dh_next := make([]f64, BH, allocator)
 	dh_prev := make([]f64, BH, allocator)
 	defer {
-		delete(hs, allocator); delete(xs, allocator); delete(h_rev, allocator)
-		delete(rs, allocator); delete(zs, allocator); delete(ns, allocator)
-		delete(gate_hh, allocator); delete(d_ih, allocator); delete(d_hh, allocator)
-		delete(dh_next, allocator); delete(dh_prev, allocator)
+		delete(xs, allocator); delete(h_rev, allocator); delete(d_ih, allocator)
+		delete(d_hh, allocator); delete(dh_next, allocator); delete(dh_prev, allocator)
 	}
 
-	// 1. Recompute and store states and gates, in forward order
-	//    (rs, zs, ns and gate_hh are indexed by the forward step s)
-	_gather_steps(xs, x_in.data.data, batch, seq_len, in_size, true)
-	proj := _input_projection(xs, seq_len * batch, in_size, w_ih_in.data.data, H3, allocator)
-	defer delete(proj, allocator)
-	copy(hs[0:BH], h_0_in.data.data)
-	for s in 0 ..< seq_len {
-		p := seq_len - 1 - s
-		_gru_step_forward(
-			proj[p * BG:(p + 1) * BG],
-			hs[s * BH:(s + 1) * BH],
-			w_hh_in.data.data,
-			bias_in.data.data,
-			hs[(s + 1) * BH:(s + 2) * BH],
-			gate_hh[s * BG:(s + 1) * BG],
-			rs[s * BH:(s + 1) * BH],
-			zs[s * BH:(s + 1) * BH],
-			ns[s * BH:(s + 1) * BH],
-			batch,
-			H,
-		)
-	}
-
-	// 2. Backpropagate through time
+	// 1. Backpropagate through time
 	for s := seq_len - 1; s >= 0; s -= 1 {
 		p := seq_len - 1 - s
 		h_prev := hs[s * BH:(s + 1) * BH]
 		r := rs[s * BH:(s + 1) * BH]
 		z := zs[s * BH:(s + 1) * BH]
 		n := ns[s * BH:(s + 1) * BH]
-		g_hh := gate_hh[s * BG:(s + 1) * BG]
+		hn := hh_n[s * BH:(s + 1) * BH]
 		d_ih_p := d_ih[p * BG:(p + 1) * BG]
 		d_hh_p := d_hh[p * BG:(p + 1) * BG]
 
@@ -1688,7 +1661,7 @@ _gru_backward :: proc(node: ^Tensor, allocator: mem.Allocator) {
 
 				dz := dh * (h_prev[idx] - n[idx])
 				dn_pre := dh * (1.0 - z[idx]) * (1.0 - n[idx] * n[idx])
-				dr := dn_pre * g_hh[b * H3 + 2 * H + i]
+				dr := dn_pre * hn[idx]
 
 				dr_pre := dr * r[idx] * (1.0 - r[idx])
 				dz_pre := dz * z[idx] * (1.0 - z[idx])
@@ -1709,7 +1682,8 @@ _gru_backward :: proc(node: ^Tensor, allocator: mem.Allocator) {
 		l.vec_add_simd(dh_next, dh_prev, dh_next)
 	}
 
-	// 3. Parameter and input gradients for all steps
+	// 2. Parameter and input gradients for all steps
+	_gather_steps(xs, x_in.data.data, batch, seq_len, in_size, true)
 	_reverse_states(h_rev, hs, seq_len, BH)
 	_recurrent_grads(
 		x_in,
@@ -1741,62 +1715,30 @@ _lstm_backward :: proc(node: ^Tensor, allocator: mem.Allocator) {
 	BH := batch * H
 	BG := batch * H4
 
-	hs := make([]f64, (seq_len + 1) * BH, allocator)
-	cs := make([]f64, (seq_len + 1) * BH, allocator)
+	states, steps := _saved_blocks(node, seq_len, BH, 2, 5)
+	hs, cs := states[0], states[1]
+	i_all, f_all, g_all, o_all, tc_all := steps[0], steps[1], steps[2], steps[3], steps[4]
+
 	xs := make([]f64, seq_len * batch * in_size, allocator)
 	h_rev := make([]f64, seq_len * BH, allocator)
-	i_all := make([]f64, seq_len * BH, allocator)
-	f_all := make([]f64, seq_len * BH, allocator)
-	g_all := make([]f64, seq_len * BH, allocator)
-	o_all := make([]f64, seq_len * BH, allocator)
-	gate_hh := make([]f64, BG, allocator)
 	d_gate := make([]f64, seq_len * BG, allocator)
 	dh_next := make([]f64, BH, allocator)
 	dc_next := make([]f64, BH, allocator)
 	dh_prev := make([]f64, BH, allocator)
 	defer {
-		delete(hs, allocator); delete(cs, allocator); delete(xs, allocator)
-		delete(h_rev, allocator); delete(i_all, allocator); delete(f_all, allocator)
-		delete(g_all, allocator); delete(o_all, allocator); delete(gate_hh, allocator)
-		delete(d_gate, allocator); delete(dh_next, allocator); delete(dc_next, allocator)
-		delete(dh_prev, allocator)
+		delete(xs, allocator); delete(h_rev, allocator); delete(d_gate, allocator)
+		delete(dh_next, allocator); delete(dc_next, allocator); delete(dh_prev, allocator)
 	}
 
-	// 1. Recompute and store states and gates, in forward order
-	_gather_steps(xs, x_in.data.data, batch, seq_len, in_size, true)
-	proj := _input_projection(xs, seq_len * batch, in_size, w_ih_in.data.data, H4, allocator)
-	defer delete(proj, allocator)
-	copy(hs[0:BH], h_0_in.data.data)
-	copy(cs[0:BH], c_0_in.data.data)
-	for s in 0 ..< seq_len {
-		p := seq_len - 1 - s
-		_lstm_step_forward(
-			proj[p * BG:(p + 1) * BG],
-			hs[s * BH:(s + 1) * BH],
-			cs[s * BH:(s + 1) * BH],
-			w_hh_in.data.data,
-			bias_in.data.data,
-			hs[(s + 1) * BH:(s + 2) * BH],
-			cs[(s + 1) * BH:(s + 2) * BH],
-			gate_hh,
-			i_all[s * BH:(s + 1) * BH],
-			f_all[s * BH:(s + 1) * BH],
-			g_all[s * BH:(s + 1) * BH],
-			o_all[s * BH:(s + 1) * BH],
-			batch,
-			H,
-		)
-	}
-
-	// 2. Backpropagate through time
+	// 1. Backpropagate through time
 	for s := seq_len - 1; s >= 0; s -= 1 {
 		p := seq_len - 1 - s
 		c_prev := cs[s * BH:(s + 1) * BH]
-		c_cur := cs[(s + 1) * BH:(s + 2) * BH]
 		ig := i_all[s * BH:(s + 1) * BH]
 		fg := f_all[s * BH:(s + 1) * BH]
 		gg := g_all[s * BH:(s + 1) * BH]
 		og := o_all[s * BH:(s + 1) * BH]
+		tcs := tc_all[s * BH:(s + 1) * BH]
 		dg := d_gate[p * BG:(p + 1) * BG]
 
 		for b in 0 ..< batch {
@@ -1804,7 +1746,7 @@ _lstm_backward :: proc(node: ^Tensor, allocator: mem.Allocator) {
 			for i in 0 ..< H {
 				idx := b * H + i
 				dh := node.grad.data[off + i] + dh_next[idx]
-				tc := math.tanh(c_cur[idx])
+				tc := tcs[idx]
 
 				d_o := dh * tc
 				dc := dh * og[idx] * (1.0 - tc * tc) + dc_next[idx]
@@ -1822,7 +1764,8 @@ _lstm_backward :: proc(node: ^Tensor, allocator: mem.Allocator) {
 		copy(dh_next, dh_prev)
 	}
 
-	// 3. Parameter and input gradients for all steps
+	// 2. Parameter and input gradients for all steps
+	_gather_steps(xs, x_in.data.data, batch, seq_len, in_size, true)
 	_reverse_states(h_rev, hs, seq_len, BH)
 	_recurrent_grads(
 		x_in,
@@ -1850,38 +1793,39 @@ _lstm_backward :: proc(node: ^Tensor, allocator: mem.Allocator) {
 // touches its own slices, so rows can run on different threads.
 _Ssm_Bwd_Job :: struct {
 	x, h_0, A, B, C, Delta, D, dy: []f64,
-	// [batch, seq_len, d_model * d_state]: hs holds the state entering each
-	// step and is overwritten with that step's dA term once it is consumed;
-	// abar holds exp(delta * A) of each step
-	hs, abar:                      []f64,
+	// [batch, seq_len, d_model * d_state]: abar = exp(delta * A) of each step,
+	// saved by the forward pass. hs receives the state entering each step and
+	// is overwritten with that step's dA term once it is consumed.
+	abar, hs:                      []f64,
 	dh:                            []f64, // [batch, d_model * d_state], ends as dL/dh_0
 	dx, dB, dC, dDelta:            []f64, // zeroed, same layout as the inputs
 	seq_len, d_model, d_state:     int,
 }
 
-// _ssm_backward_rows recomputes the states of batch rows [b0, b1) and
-// backpropagates through them. dA terms are left in hs for an ordered reduction.
-_ssm_backward_rows :: proc(data: rawptr, b0, b1: int) {
+// _ssm_backward_rows recomputes the states of batch rows [b0, b1) from the
+// saved exp(delta * A) and backpropagates through them. dA terms are left in
+// hs for an ordered reduction.
+_ssm_backward_rows :: proc(data: rawptr, b0, b1: int) #no_bounds_check {
 	j := (^_Ssm_Bwd_Job)(data)
 	S, Dm, N := j.seq_len, j.d_model, j.d_state
 	DN := Dm * N
+	// Local copies: stores through the slices cannot alias the job struct
+	X, A, Bm, C, Dl, D, dy := j.x, j.A, j.B, j.C, j.Delta, j.D, j.dy
+	hs, abar := j.hs, j.abar
+	dx, dB, dC, dDelta := j.dx, j.dB, j.dC, j.dDelta
 	for b in b0 ..< b1 {
-		// 1. Recompute the states entering every step (checkpointing)
-		if S > 0 {copy(j.hs[b * S * DN:(b * S + 1) * DN], j.h_0[b * DN:(b + 1) * DN])}
-		for s in 0 ..< S {
+		// 1. States entering every step (same expression as the forward scan)
+		if S > 0 {copy(hs[b * S * DN:(b * S + 1) * DN], j.h_0[b * DN:(b + 1) * DN])}
+		for s in 0 ..< S - 1 {
 			row_x := (b * S + s) * Dm
 			row_bc := (b * S + s) * N
 			st := (b * S + s) * DN
 			for d in 0 ..< Dm {
-				x_val := j.x[row_x + d]
-				delta := j.Delta[row_x + d]
+				x_val := X[row_x + d]
+				delta := Dl[row_x + d]
 				for n in 0 ..< N {
-					A_bar := math.exp(delta * j.A[d * N + n])
-					j.abar[st + d * N + n] = A_bar
-					if s + 1 < S {
-						B_bar := delta * j.B[row_bc + n]
-						j.hs[st + DN + d * N + n] = A_bar * j.hs[st + d * N + n] + B_bar * x_val
-					}
+					B_bar := delta * Bm[row_bc + n]
+					hs[st + DN + d * N + n] = abar[st + d * N + n] * hs[st + d * N + n] + B_bar * x_val
 				}
 			}
 		}
@@ -1893,29 +1837,33 @@ _ssm_backward_rows :: proc(data: rawptr, b0, b1: int) {
 			row_bc := (b * S + s) * N
 			st := (b * S + s) * DN
 			for d in 0 ..< Dm {
-				x_val := j.x[row_x + d]
-				delta := j.Delta[row_x + d]
-				dy_val := j.dy[row_x + d]
+				x_val := X[row_x + d]
+				delta := Dl[row_x + d]
+				dy_val := dy[row_x + d]
 
-				j.dx[row_x + d] += dy_val * j.D[d]
+				// dx / dDelta accumulate in registers, in the same order of terms
+				dx_acc := dx[row_x + d] + dy_val * D[d]
+				dDelta_acc := dDelta[row_x + d]
 
 				for n in 0 ..< N {
-					A_val := j.A[d * N + n]
-					A_bar := j.abar[st + d * N + n]
-					B_val := j.B[row_bc + n]
+					A_val := A[d * N + n]
+					A_bar := abar[st + d * N + n]
+					B_val := Bm[row_bc + n]
 					B_bar := delta * B_val
 
-					h_prev_val := j.hs[st + d * N + n]
-					dh_n := dh[d * N + n] + dy_val * j.C[row_bc + n]
+					h_prev_val := hs[st + d * N + n]
+					dh_n := dh[d * N + n] + dy_val * C[row_bc + n]
 
 					h_n := A_bar * h_prev_val + B_bar * x_val
-					j.dC[row_bc + n] += dy_val * h_n
+					dC[row_bc + n] += dy_val * h_n
 					dh[d * N + n] = dh_n * A_bar
-					j.hs[st + d * N + n] = dh_n * h_prev_val * delta * A_bar // dA term
-					j.dB[row_bc + n] += dh_n * x_val * delta
-					j.dx[row_x + d] += dh_n * B_bar
-					j.dDelta[row_x + d] += dh_n * (h_prev_val * A_val * A_bar + x_val * B_val)
+					hs[st + d * N + n] = dh_n * h_prev_val * delta * A_bar // dA term
+					dB[row_bc + n] += dh_n * x_val * delta
+					dx_acc += dh_n * B_bar
+					dDelta_acc += dh_n * (h_prev_val * A_val * A_bar + x_val * B_val)
 				}
+				dx[row_x + d] = dx_acc
+				dDelta[row_x + d] = dDelta_acc
 			}
 		}
 	}
@@ -1929,16 +1877,16 @@ _Ssm_Reduce_Job :: struct {
 	batch, seq_len, DN:     int,
 }
 
-_ssm_reduce_dA :: proc(data: rawptr, e0, e1: int) {
+_ssm_reduce_dA :: proc(data: rawptr, e0, e1: int) #no_bounds_check {
 	j := (^_Ssm_Reduce_Job)(data)
-	for e in e0 ..< e1 {
-		acc := j.dA[e]
-		for s := j.seq_len - 1; s >= 0; s -= 1 {
-			for b in 0 ..< j.batch {
-				acc += j.terms[(b * j.seq_len + s) * j.DN + e]
-			}
+	terms, dA := j.terms, j.dA[e0:e1]
+	// Sweep contiguous rows of terms; each element still adds its terms in
+	// (step descending, batch row ascending) order
+	for s := j.seq_len - 1; s >= 0; s -= 1 {
+		for b in 0 ..< j.batch {
+			row := terms[(b * j.seq_len + s) * j.DN + e0:][:e1 - e0]
+			for e in 0 ..< len(dA) {dA[e] += row[e]}
 		}
-		j.dA[e] = acc
 	}
 }
 
@@ -1967,13 +1915,22 @@ _ssm_backward :: proc(node: ^Tensor, allocator: mem.Allocator) {
 	dDelta := make([]f64, len(Delta_in.data.data), allocator)
 	dD := make([]f64, len(D_in.data.data), allocator)
 	dh := make([]f64, batch * DN, allocator)
-	hs := make([]f64, batch * seq_len * DN, allocator)
-	abar := make([]f64, batch * seq_len * DN, allocator)
+	// States, then dA terms: every element is written, so no zeroing
+	hs_buf := make([dynamic]f64, 0, allocator)
+	non_zero_resize(&hs_buf, batch * seq_len * DN)
 	defer {
 		delete(dx, allocator); delete(dA, allocator); delete(dB, allocator)
 		delete(dC, allocator); delete(dDelta, allocator); delete(dD, allocator)
-		delete(dh, allocator); delete(hs, allocator); delete(abar, allocator)
+		delete(dh, allocator); delete(hs_buf)
 	}
+
+	// exp(delta * A) saved by tensor_ssm
+	fmt.assertf(
+		len(node.f64_metadata) == batch * seq_len * DN,
+		"backward: SSM node has %d saved values, expected %d",
+		len(node.f64_metadata),
+		batch * seq_len * DN,
+	)
 
 	job := _Ssm_Bwd_Job {
 		x       = x_in.data.data,
@@ -1984,8 +1941,8 @@ _ssm_backward :: proc(node: ^Tensor, allocator: mem.Allocator) {
 		Delta   = Delta_in.data.data,
 		D       = D_in.data.data,
 		dy      = node.grad.data,
-		hs      = hs,
-		abar    = abar,
+		abar    = node.f64_metadata[:],
+		hs      = hs_buf[:],
 		dh      = dh,
 		dx      = dx,
 		dB      = dB,
@@ -1995,9 +1952,9 @@ _ssm_backward :: proc(node: ^Tensor, allocator: mem.Allocator) {
 		d_model = d_model,
 		d_state = d_state,
 	}
-	util.parallel_for(batch, &job, _ssm_backward_rows, _ssm_threads(batch, 2 * seq_len * DN))
+	util.parallel_for(batch, &job, _ssm_backward_rows, _ssm_threads(batch, seq_len * DN))
 
-	red := _Ssm_Reduce_Job{hs, dA, batch, seq_len, DN}
+	red := _Ssm_Reduce_Job{hs_buf[:], dA, batch, seq_len, DN}
 	util.parallel_for(DN, &red, _ssm_reduce_dA, _ssm_threads(DN, batch * seq_len))
 
 	// dD[d] = sum of dy * x, in the same (step, batch row) order

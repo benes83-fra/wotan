@@ -75,7 +75,9 @@ range_to_string :: proc(r: range) -> string {
 // Yahoo Crumb & Cookie Fetcher (Using your existing vendor:curl patterns)
 // ============================================================================
 
-// Global cache for crumb and cookie
+// Global cache for crumb and cookie. Both live for the whole process on the
+// heap, independent of the caller's allocator (which may be an arena that is
+// reset between uses).
 global_crumb: string = ""
 global_cookie: string = ""
 
@@ -153,11 +155,9 @@ yahoo_get_crumb_and_cookie :: proc(allocator: mem.Allocator) -> (string, string,
 		raw_cookie := header_str[start:start + end]
 		// Take only the first part before ';' (e.g., "B=abc123; expires=...")
 		semi_pos := strings.index(raw_cookie, ";")
-		if semi_pos >= 0 {
-			global_cookie = strings.trim_space(raw_cookie[:semi_pos])
-		} else {
-			global_cookie = strings.trim_space(raw_cookie)
-		}
+		if semi_pos >= 0 {raw_cookie = raw_cookie[:semi_pos]}
+		// Copy out of header_buf, which is freed on return
+		global_cookie = strings.clone(strings.trim_space(raw_cookie), runtime.heap_allocator())
 	}
 
 	if global_cookie == "" {
@@ -170,8 +170,9 @@ yahoo_get_crumb_and_cookie :: proc(allocator: mem.Allocator) -> (string, string,
 	if !ok || len(crumb_text) == 0 {
 		return "", "", false
 	}
+	defer delete(crumb_text, allocator)
 
-	global_crumb = strings.trim_space(crumb_text)
+	global_crumb = strings.clone(strings.trim_space(crumb_text), runtime.heap_allocator())
 
 	return global_crumb, global_cookie, true
 }
