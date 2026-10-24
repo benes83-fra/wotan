@@ -364,7 +364,7 @@ transfer_learning_test :: proc(allocator: mem.Allocator) {
 	fmt.println("Phase 2: Saving checkpoint")
 	fmt.println("--------------------------")
 
-	checkpoint_path := "task_a_checkpoint.bin"
+	checkpoint_path := "model_checkpoints/task_a_checkpoint.bin"
 	dummy_opt := nn.adam_new(0.001, allocator = allocator)
 	defer nn.adam_free(&dummy_opt)
 	save_ok := nn.save_checkpoint(model_a, &dummy_opt, checkpoint_path, 30, allocator)

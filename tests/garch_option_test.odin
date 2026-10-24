@@ -150,8 +150,8 @@ garch_options_test :: proc(allocator: mem.Allocator) {
 	config.y_label = "Annualized Volatility (%)"
 	config.show_grid = true
 
-	p.multi_line_png(lines, "garch_vol_term_structure.png", config, allocator)
-	fmt.printf("✓ Saved: garch_vol_term_structure.png\n")
+	p.multi_line_png(lines, "plots/garch_vol_term_structure.png", config, allocator)
+	fmt.printf("✓ Saved: plots/garch_vol_term_structure.png\n")
 
 	fmt.println("\n✓ GARCH Option Pricing test completed!")
 }

@@ -346,7 +346,7 @@ plot_prospect_curves :: proc(market_params: bfin.Prospect_Params, allocator: mem
 	val_config.height = 600
 	val_config.show_grid = true
 
-	if plot.multi_line_png(val_lines, "prospect_value_curve.png", val_config, allocator) {
+	if plot.multi_line_png(val_lines, "plots/prospect_value_curve.png", val_config, allocator) {
 		fmt.println("Saved: prospect_value_curve.png")
 	} else {
 		fmt.println("Failed to save value curve PNG.")
@@ -408,7 +408,12 @@ plot_prospect_curves :: proc(market_params: bfin.Prospect_Params, allocator: mem
 	prob_config.height = 600
 	prob_config.show_grid = true
 
-	if plot.multi_line_png(prob_lines, "prospect_weighting_curve.png", prob_config, allocator) {
+	if plot.multi_line_png(
+		prob_lines,
+		"plots/prospect_weighting_curve.png",
+		prob_config,
+		allocator,
+	) {
 		fmt.println("Saved: prospect_weighting_curve.png")
 	} else {
 		fmt.println("Failed to save weighting curve PNG.")

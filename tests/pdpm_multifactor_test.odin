@@ -263,8 +263,8 @@ pdpm_multifactor_test :: proc(allocator: mem.Allocator) {
 	config.y_label = "SDF Value M"
 	config.show_grid = true
 
-	p.multi_line_png(lines, "sdf_comparison.png", config, allocator)
-	fmt.println("✓ SDF comparison plot saved to: sdf_comparison.png")
+	p.multi_line_png(lines, "plots/sdf_comparison.png", config, allocator)
+	fmt.println("✓ SDF comparison plot saved to: plots/sdf_comparison.png")
 
 	fmt.println("\n✓ PDPM Multi-Factor test completed!")
 }

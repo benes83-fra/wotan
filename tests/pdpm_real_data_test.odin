@@ -308,8 +308,8 @@ pdpm_real_data_test :: proc(allocator: mem.Allocator) {
 	config.y_label = "SDF Value M"
 	config.show_grid = true
 
-	p.multi_line_png(lines, "sdf_vs_returns.png", config, allocator)
-	fmt.println("✓ SDF plot saved to: sdf_vs_returns.png")
+	p.multi_line_png(lines, "plots/sdf_vs_returns.png", config, allocator)
+	fmt.println("✓ SDF plot saved to: plots/sdf_vs_returns.png")
 
 
 	fmt.println("\n✓ PDPM Real Market Data test completed!")

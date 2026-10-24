@@ -12,9 +12,9 @@ dataset_test :: proc(allocator: mem.Allocator) {
 	fmt.println("\n=== Testing DataFrame Bridge ===")
 
 	// 1. Load your CSVs into your DataFrames (using your existing CSV reader)
-	df_train := importer.csv_load("train.csv")
+	df_train := importer.csv_load("demo_files/train.csv")
 	defer w.destroy_dataframe(&df_train)
-	df_test := importer.csv_load("test.csv")
+	df_test := importer.csv_load("demo_files/test.csv")
 	defer w.destroy_dataframe(&df_test)
 
 

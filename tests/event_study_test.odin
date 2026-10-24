@@ -455,7 +455,7 @@ event_study_tokenizer_nlp_test :: proc(allocator: mem.Allocator) {
 	// 1. Fetch or Load Real WordPiece Vocabulary
 	// ========================================================================
 	fmt.println("\nLoading WordPiece Tokenizer Vocabulary...")
-	vocab_path := "bert_vocab.txt"
+	vocab_path := "model_checkpoints/bert_vocab.txt"
 
 	_, err := os.read_entire_file(vocab_path, allocator)
 	if err != nil {
@@ -496,7 +496,7 @@ event_study_tokenizer_nlp_test :: proc(allocator: mem.Allocator) {
 	// 2. Load Pre-trained FinBERT Model (or fallback to random)
 	// ========================================================================
 	fmt.println("\nLoading FinBERT Model...")
-	checkpoint_path := "finbert_checkpoint.bin"
+	checkpoint_path := "model_checkpoints/finbert_checkpoint.bin"
 
 	bert_model: ^nn.BERTModel
 	ok_load := false
@@ -509,7 +509,7 @@ event_study_tokenizer_nlp_test :: proc(allocator: mem.Allocator) {
 			"⚠ Checkpoint not found or invalid. Initializing random model for demonstration...",
 		)
 		fmt.println(
-			"  (To see real sentiment, place a valid finbert_checkpoint.bin in the directory)",
+			"  (To see real sentiment, place a valid model_checkpoints/finbert_checkpoint.bin in the directory)",
 		)
 
 		// Fallback to random initialization
@@ -739,7 +739,7 @@ event_study_tokenizer_nlp_test :: proc(allocator: mem.Allocator) {
 	plot_config.height = 600
 
 	// Generate the PNG
-	if p.bar_png(car_labels, car_vals, "car_results.png", plot_config, allocator) {
+	if p.bar_png(car_labels, car_vals, "plots/car_results.png", plot_config, allocator) {
 		fmt.println("✓ Successfully saved CAR visualization to 'car_results.png'")
 	} else {
 		fmt.println("⚠ Failed to save CAR visualization.")

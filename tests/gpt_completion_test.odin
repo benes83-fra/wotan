@@ -16,7 +16,7 @@ gpt_completion_test :: proc(allocator: mem.Allocator) {
 
 	// 1. Load the converted DistilGPT-2 model
 	fmt.println("\nLoading DistilGPT-2 Model...")
-	checkpoint_path := "distilgpt2_checkpoint.bin"
+	checkpoint_path := "model_checkpoints/distilgpt2_checkpoint.bin"
 
 	gpt_model: ^nn.GPTModel
 	ok_load := false
@@ -29,8 +29,8 @@ gpt_completion_test :: proc(allocator: mem.Allocator) {
 	fmt.println("✓ Pre-trained DistilGPT-2 model loaded successfully!")
 
 	// 2. Download or Load GPT-2 Tokenizer Files
-	vocab_path := "vocab.json"
-	merges_path := "merges.txt"
+	vocab_path := "model_checkpoints/vocab.json"
+	merges_path := "model_checkpoints/merges.txt"
 
 	_, err_vocab := os.read_entire_file(vocab_path, allocator)
 	if err_vocab != nil {

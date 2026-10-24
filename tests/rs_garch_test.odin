@@ -113,7 +113,7 @@ rs_garch_test :: proc(allocator: mem.Allocator) {
 	config.y_label = "Daily Return / Regime State"
 	config.show_grid = true
 
-	p.multi_line_png(lines, "rs_garch_regimes.png", config, allocator)
+	p.multi_line_png(lines, "plots/rs_garch_regimes.png", config, allocator)
 	fmt.printf("✓ Saved: rs_garch_regimes.png\n")
 
 	fmt.println("\n✓ RS-GARCH test completed!")

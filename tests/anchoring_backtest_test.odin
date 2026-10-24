@@ -266,7 +266,7 @@ anchoring_backtest_test :: proc(allocator: mem.Allocator) {
 	config.y_label = "Normalized Value"
 	config.show_grid = true
 
-	if plot.multi_line_png(lines, "anchoring_backtest.png", config, allocator) {
+	if plot.multi_line_png(lines, "plots/anchoring_backtest.png", config, allocator) {
 		fmt.println("Saved: anchoring_backtest.png")
 	}
 

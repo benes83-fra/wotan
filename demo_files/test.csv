@@ -1,0 +1,5 @@
+age,income,credit_score,city,target
+30,60000,680,NewYork,0
+48,130000,760,Chicago,1
+22,25000,580,LosAngeles,0
+38,85000,710,NewYork,1

@@ -1,0 +1,5 @@
+
+    {"name": "Alice", "age": 30, "active": true},
+    {"name": "Bob", "age": 20, "active": false},
+    {"name": "Charlie", "age": null, "active": true},
+    {"name": "Dora", "age": 40, "active": null}

@@ -756,7 +756,7 @@ garch_real_data_test :: proc(allocator: mem.Allocator) {
 	fmt.println("\n--- Generating Visualizations ---")
 
 	// Plot 1: Returns with GARCH volatility bands
-	plot_returns_with_vol(dates, returns, garch_vol, "garch_returns_vol.png", allocator)
+	plot_returns_with_vol(dates, returns, garch_vol, "plots/garch_returns_vol.png", allocator)
 
 	// Plot 2: Volatility comparison
 	plot_volatility_comparison(
@@ -764,10 +764,10 @@ garch_real_data_test :: proc(allocator: mem.Allocator) {
 		rolling_vol,
 		ewma_vol,
 		garch_vol,
-		"garch_vol_comparison.png",
+		"plots/garch_vol_comparison.png",
 		allocator,
 	)
-	plot_var_comparison(dates, returns, var_95, var_95_hist, "var_comparison.png", allocator)
+	plot_var_comparison(dates, returns, var_95, var_95_hist, "plots/var_comparison.png", allocator)
 
 	fmt.println("\n✓ GARCH Real Data test completed!")
 	// 10. Portfolio Optimization with Advanced Risk Models

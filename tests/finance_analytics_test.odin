@@ -160,25 +160,34 @@ finance_analytics_test :: proc(allocator: mem.Allocator) {
 	ok1 := fin.plot_cumulative_returns(
 		&df,
 		[]string{"price", "benchmark"},
-		"cumulative_returns.png",
+		"plots/cumulative_returns.png",
 		allocator,
 	)
 	fmt.printf("  cumulative_returns.png: %v\n", ok1)
 
 	// Test drawdown plot
 	fmt.println("Generating drawdown plot...")
-	ok2 := fin.plot_drawdown(&df, "price", "drawdown.png", allocator)
-	fmt.printf("  drawdown.png: %v\n", ok2)
+	ok2 := fin.plot_drawdown(&df, "price", "plots/drawdown.png", allocator)
+	fmt.printf("  plots/drawdown.png: %v\n", ok2)
 
 	// Test risk decomposition plot
 	fmt.println("Generating risk decomposition plot...")
 	asset_names := []string{"Asset 1", "Asset 2", "Asset 3"}
-	ok3 := fin.plot_risk_decomposition(decomp, asset_names, "risk_decomposition.png", allocator)
-	fmt.printf("  risk_decomposition.png: %v\n", ok3)
+	ok3 := fin.plot_risk_decomposition(
+		decomp,
+		asset_names,
+		"plots/risk_decomposition.png",
+		allocator,
+	)
+	fmt.printf("  plots/risk_decomposition.png: %v\n", ok3)
 
 	// Verify files exist
 	fmt.println("\nVerifying generated files:")
-	files := []string{"cumulative_returns.png", "drawdown.png", "risk_decomposition.png"}
+	files := []string {
+		"plots/cumulative_returns.png",
+		"plots/drawdown.png",
+		"plots/srisk_decomposition.png",
+	}
 	for file in files {
 		_, err := os.stat(file, allocator)
 		if err == nil {

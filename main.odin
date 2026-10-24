@@ -62,14 +62,13 @@ main :: proc() {
 
 	w.destroy_dataframe(&df)
 	types := []w.ColumnType{.Int, .String}
-	df2 := csv.csv_load("people.csv", types)
+	df2 := csv.csv_load("demo_files/people.csv", types)
 
-	fmt.println("Here not here yet")
 	w.dataframe_print(&df2)
 	w.df_head(&df2, 5)
 	w.destroy_dataframe(&df2)
 
-	df3 := csv.csv_load("people_dates.csv")
+	df3 := csv.csv_load("demo_files/people_dates.csv")
 	w.dataframe_print(&df3)
 	w.df_head(&df3, 10)
 	w.dataframe_pretty_print(&df3)
@@ -101,7 +100,7 @@ main :: proc() {
 
 	fmt.println("Showing Boolean filtering:")
 	fmt.println("Without filter:")
-	df6 := csv.csv_load("people_dates.csv")
+	df6 := csv.csv_load("demo_files/people_dates.csv")
 	w.dataframe_pretty_print(&df6, 20)
 	fmt.println("With filter:")
 	// assume "active" is Bool
@@ -111,7 +110,7 @@ main :: proc() {
 	w.destroy_dataframe(&df6)
 	w.destroy_dataframe(&df_active)
 	fmt.println("Showing column filtering:")
-	df7 := csv.csv_load("people_dates.csv")
+	df7 := csv.csv_load("demo_files/people_dates.csv")
 
 	df_active2 := w.filter(&df7, "active")
 	w.dataframe_pretty_print(&df_active2, 20)
@@ -120,7 +119,7 @@ main :: proc() {
 	w.destroy_dataframe(&df_active2)
 
 	fmt.println("Filtering more complex booleans")
-	df8 := csv.csv_load("people_dates.csv")
+	df8 := csv.csv_load("demo_files/people_dates.csv")
 	c_mask := (w.column_lt(w.column(&df8, "age"), 31))
 	bmask := w.column_mask(&c_mask)
 	mask2 := w.column_mask(w.column(&df8, "active"))
@@ -639,9 +638,12 @@ main :: proc() {
 	free_all(context.temp_allocator)
 	test.augmentation_test(context.temp_allocator)
 	free_all(context.temp_allocator)
-	// test.mnist_cnn_test(context.temp_allocator)
-	// test.test_both_models(context.temp_allocator)
-	// test.test_augmented_model(context.temp_allocator)
+	test.mnist_cnn_test(context.temp_allocator)
+	free_all(context.temp_allocator)
+	test.test_both_models(context.temp_allocator)
+	free_all(context.temp_allocator)
+	test.test_augmented_model(context.temp_allocator)
+	free_all(context.temp_allocator)
 	test.run_all_batchnorm_tests(context.temp_allocator)
 	free_all(context.temp_allocator)
 	test.rnn_simple_test(context.temp_allocator)
@@ -728,7 +730,8 @@ main :: proc() {
 	// test.gan_test_v2(context.temp_allocator)
 	// test.wgan_test(context.temp_allocator)
 	// test.vae_test(context.temp_allocator)
-	// test.transfer_learning_test(context.temp_allocator)
+	test.transfer_learning_test(context.temp_allocator)
+	free_all(context.temp_allocator)
 	test.derivatives_test(context.temp_allocator)
 	free_all(context.temp_allocator)
 	test.portfolio_test(context.temp_allocator)

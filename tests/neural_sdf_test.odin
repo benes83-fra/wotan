@@ -260,7 +260,7 @@ neural_sdf_test :: proc(allocator: mem.Allocator = context.allocator) {
 	// 8. Model Persistence
 	// ========================================================================
 	fmt.println("7. Testing Model Persistence (Save/Load)...")
-	save_path := "neural_sdf_model.bin"
+	save_path := "model_checkpoints/neural_sdf_model.bin"
 	save_ok := ml_fin.neural_sdf_save(model, save_path)
 	if save_ok {
 		fmt.printf("   [OK] Model saved to %s\n", save_path)

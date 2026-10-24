@@ -230,8 +230,8 @@ kalman_pairs_real_data_test :: proc(allocator: mem.Allocator = context.allocator
 		z_config.x_label = "Time Step"
 		z_config.y_label = "Z-Score"
 		z_config.show_grid = true
-		plot.multi_line_png(z_lines, "kalman_zscore.png", z_config, allocator)
-		fmt.println("✓ Saved: kalman_zscore.png")
+		plot.multi_line_png(z_lines, "plots/kalman_zscore.png", z_config, allocator)
+		fmt.println("✓ Saved: plotskalman_zscore.png")
 
 		// --- Plot 2: Equity Curve ---
 		equity := make([]f64, n_steps, allocator)
@@ -256,8 +256,8 @@ kalman_pairs_real_data_test :: proc(allocator: mem.Allocator = context.allocator
 		eq_config.x_label = "Time Step"
 		eq_config.y_label = "Portfolio Value"
 		eq_config.show_grid = true
-		plot.multi_line_png(eq_lines, "kalman_equity.png", eq_config, allocator)
-		fmt.println("✓ Saved: kalman_equity.png")
+		plot.multi_line_png(eq_lines, "plots/kalman_equity.png", eq_config, allocator)
+		fmt.println("✓ Saved: plots/kalman_equity.png")
 
 		// Cleanup plot arrays
 		delete(xs, allocator)
@@ -428,7 +428,7 @@ kalman_pairs_real_data_grid_test :: proc(allocator: mem.Allocator = context.allo
 		z_config.x_label = "Time Step"
 		z_config.y_label = "Z-Score"
 		z_config.show_grid = true
-		plot.multi_line_png(z_lines, "kalman_grid_zscore.png", z_config, allocator)
+		plot.multi_line_png(z_lines, "plots/kalman_grid_zscore.png", z_config, allocator)
 		fmt.println("✓ Saved: kalman_grid_zscore.png")
 
 		// Plot 2: Equity Curve
@@ -452,7 +452,7 @@ kalman_pairs_real_data_grid_test :: proc(allocator: mem.Allocator = context.allo
 		eq_config.x_label = "Time Step"
 		eq_config.y_label = "Portfolio Value"
 		eq_config.show_grid = true
-		plot.multi_line_png(eq_lines, "kalman_grid_equity.png", eq_config, allocator)
+		plot.multi_line_png(eq_lines, "plots/kalman_grid_equity.png", eq_config, allocator)
 		fmt.println("✓ Saved: kalman_grid_equity.png")
 
 		delete(xs, allocator)
@@ -672,7 +672,7 @@ kalman_pairs_semiconductor_test :: proc(allocator: mem.Allocator = context.alloc
 		z_config.x_label = "Time Step"
 		z_config.y_label = "Z-Score"
 		z_config.show_grid = true
-		plot.multi_line_png(z_lines, "kalman_zscore_semiconductor.png", z_config, allocator)
+		plot.multi_line_png(z_lines, "plots/kalman_zscore_semiconductor.png", z_config, allocator)
 		fmt.println("✓ Saved: kalman_zscore_semiconductor.png")
 
 		// --- Plot 2: Equity Curve ---
@@ -698,8 +698,13 @@ kalman_pairs_semiconductor_test :: proc(allocator: mem.Allocator = context.alloc
 		eq_config.x_label = "Time Step"
 		eq_config.y_label = "Portfolio Value"
 		eq_config.show_grid = true
-		plot.multi_line_png(eq_lines, "kalman_equity_semiconductor.png", eq_config, allocator)
-		fmt.println("✓ Saved: kalman_equity_semiconductor.png")
+		plot.multi_line_png(
+			eq_lines,
+			"plots/kalman_equity_semiconductor.png",
+			eq_config,
+			allocator,
+		)
+		fmt.println("✓ Saved: plots/kalman_equity_semiconductor.png")
 
 		// Cleanup plot arrays
 		delete(xs, allocator)
@@ -1001,11 +1006,11 @@ kalman_pairs_semiconductor_adf_test :: proc(allocator: mem.Allocator = context.a
 		z_config.show_grid = true
 		plot.multi_line_png(
 			z_lines,
-			fmt.tprintf("kalman_zscore_%s_%s.png", sym_a, sym_b),
+			fmt.tprintf("plots/kalman_zscore_%s_%s.png", sym_a, sym_b),
 			z_config,
 			allocator,
 		)
-		fmt.printf("✓ Saved: kalman_zscore_%s_%s.png\n", sym_a, sym_b)
+		fmt.printf("✓ Saved: plots/kalman_zscore_%s_%s.png\n", sym_a, sym_b)
 
 		equity := make([]f64, n_steps, allocator)
 		cum := 1.0
@@ -1031,7 +1036,7 @@ kalman_pairs_semiconductor_adf_test :: proc(allocator: mem.Allocator = context.a
 		eq_config.show_grid = true
 		plot.multi_line_png(
 			eq_lines,
-			fmt.tprintf("kalman_equity_%s_%s.png", sym_a, sym_b),
+			fmt.tprintf("plots/kalman_equity_%s_%s.png", sym_a, sym_b),
 			eq_config,
 			allocator,
 		)
@@ -1362,7 +1367,11 @@ kalman_pairs_auto_select_test :: proc(allocator: mem.Allocator = context.allocat
 		z_config.y_label = "Z-Score"
 		z_config.show_grid = true
 
-		z_filename := fmt.tprintf("kalman_auto_zscore_%s_%s.png", selected_sym1, selected_sym2)
+		z_filename := fmt.tprintf(
+			"plots/kalman_auto_zscore_%s_%s.png",
+			selected_sym1,
+			selected_sym2,
+		)
 		plot.multi_line_png(z_lines, z_filename, z_config, allocator)
 		fmt.printf("✓ Saved: %s\n", z_filename)
 
@@ -1394,7 +1403,11 @@ kalman_pairs_auto_select_test :: proc(allocator: mem.Allocator = context.allocat
 		eq_config.y_label = "Portfolio Value"
 		eq_config.show_grid = true
 
-		eq_filename := fmt.tprintf("kalman_auto_equity_%s_%s.png", selected_sym1, selected_sym2)
+		eq_filename := fmt.tprintf(
+			"plots/kalman_auto_equity_%s_%s.png",
+			selected_sym1,
+			selected_sym2,
+		)
 		plot.multi_line_png(eq_lines, eq_filename, eq_config, allocator)
 		fmt.printf("✓ Saved: %s\n", eq_filename)
 

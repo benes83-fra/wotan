@@ -194,7 +194,7 @@ mnist_cnn_test :: proc(allocator: mem.Allocator) {
 	}
 
 	// Save final augmented model
-	nn.save_checkpoint(model, &opt, "mnist_augmented.bin", 5, allocator)
+	nn.save_checkpoint(model, &opt, "model_checkpoints/mnist_augmented.bin", 5, allocator)
 	fmt.println("✓ Augmented model saved to mnist_augmented.bin")
 }
 
@@ -307,7 +307,7 @@ test_both_models :: proc(allocator: mem.Allocator) {
 
 	// Load non-augmented model
 	fmt.println("\nLoading non-augmented model...")
-	model1, opt1, epoch1, ok1 := nn.load_checkpoint("mnist_98_91.bin", allocator)
+	model1, opt1, epoch1, ok1 := nn.load_checkpoint("model_checkpoints/mnist_98_91.bin", allocator)
 	if !ok1 {
 		fmt.println("Failed to load non-augmented model")
 		return
@@ -320,7 +320,10 @@ test_both_models :: proc(allocator: mem.Allocator) {
 
 	// Load augmented model
 	fmt.println("\nLoading augmented model...")
-	model2, opt2, epoch2, ok2 := nn.load_checkpoint("mnist_augmented.bin", allocator)
+	model2, opt2, epoch2, ok2 := nn.load_checkpoint(
+		"model_checkpoints/mnist_augmented.bin",
+		allocator,
+	)
 	if !ok2 {
 		fmt.println("Failed to load augmented model")
 		return

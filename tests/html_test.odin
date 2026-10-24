@@ -9,7 +9,7 @@ html_basic_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
 	seed_test(#procedure)
 	fmt.println("=== HTML load test ===")
 
-	df := importer.html_load("example_table.html", allocator)
+	df := importer.html_load("demo_files/example_table.html", allocator)
 	w.dataframe_pretty_print(&df, 20)
 	w.df_head(&df, 5)
 
@@ -20,7 +20,7 @@ html_basic_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
 
 
 test_extract_tables :: proc() {
-	contents, _ := importer.read_file("test_multi.html")
+	contents, _ := importer.read_file("demo_files/test_multi.html")
 	html := string(contents)
 	defer delete(contents)
 
@@ -35,9 +35,9 @@ test_extract_tables :: proc() {
 
 
 test_index :: proc(allocator: mem.Allocator) {
-	df0 := importer.html_load_table_index("test_multi.html", 0, allocator)
-	df1 := importer.html_load_table_index("test_multi.html", 1, allocator)
-	df2 := importer.html_load_table_index("test_multi.html", 2, allocator)
+	df0 := importer.html_load_table_index("demo_files/test_multi.html", 0, allocator)
+	df1 := importer.html_load_table_index("demo_files/test_multi.html", 1, allocator)
+	df2 := importer.html_load_table_index("demo_files/test_multi.html", 2, allocator)
 	defer {
 		w.destroy_dataframe(&df0)
 		w.destroy_dataframe(&df1)
@@ -53,14 +53,14 @@ test_index :: proc(allocator: mem.Allocator) {
 	w.dataframe_pretty_print(&df2, 10)
 }
 test_id :: proc(allocator: mem.Allocator) {
-	df := importer.html_load_table_id("test_multi.html", "second", allocator)
+	df := importer.html_load_table_id("demo_files/test_multi.html", "second", allocator)
 	defer w.destroy_dataframe(&df)
 	fmt.println("=== TABLE second ===")
 	w.dataframe_pretty_print(&df, 10)
 }
 
 test_all :: proc(allocator: mem.Allocator) {
-	dfs := importer.html_load_all("test_multi.html", allocator)
+	dfs := importer.html_load_all("demo_files/test_multi.html", allocator)
 
 	fmt.println("dfs.len =", len(dfs))
 
@@ -81,7 +81,7 @@ html_extended_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
 
 html_tags_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
 	seed_test(#procedure)
-	df := importer.html_load_table_id("tag_table.html", "test", allocator)
+	df := importer.html_load_table_id("demo_files/tag_table.html", "test", allocator)
 	defer w.destroy_dataframe(&df)
 	w.dataframe_pretty_print(&df, 20)
 
@@ -125,11 +125,11 @@ html_export_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
 	w.dataframe_pretty_print(&df, 20)
 
 	// Export to HTML
-	exporter.html_write(&df, "export_test.html", allocator)
+	exporter.html_write(&df, "demo_files/export_test.html", allocator)
 	fmt.println("Wrote export_test.html")
 
 	// Import again
-	df2 := importer.html_load("export_test.html", allocator)
+	df2 := importer.html_load("demo_files/export_test.html", allocator)
 	fmt.println("Re-imported DF:")
 	w.dataframe_pretty_print(&df2, 20)
 

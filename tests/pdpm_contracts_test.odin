@@ -30,8 +30,18 @@ pdpm_contracts_test :: proc(allocator: mem.Allocator) {
 	hi_c := fin._fine_grid_point(2.0, 0.5, -5, 5, 10, 11)
 	lo_e := fin._fine_grid_point(4.8, 0.5, -5, 5, 0, 11)
 	hi_e := fin._fine_grid_point(4.8, 0.5, -5, 5, 10, 11)
-	expect(&passed, &total, lo_c == 1.5 && hi_c == 2.5 && lo_e == 4.3 && hi_e == 5.0,
-		fmt.tprintf("fine window [%.2f, %.2f] around 2.0, clipped [%.2f, %.2f] near the edge", lo_c, hi_c, lo_e, hi_e))
+	expect(
+		&passed,
+		&total,
+		lo_c == 1.5 && hi_c == 2.5 && lo_e == 4.3 && hi_e == 5.0,
+		fmt.tprintf(
+			"fine window [%.2f, %.2f] around 2.0, clipped [%.2f, %.2f] near the edge",
+			lo_c,
+			hi_c,
+			lo_e,
+			hi_e,
+		),
+	)
 
 	// Synthetic states: gross returns R ~ 1 + N(0.01, 0.05), squared-shock second factor
 	n := 400
@@ -66,7 +76,8 @@ pdpm_contracts_test :: proc(allocator: mem.Allocator) {
 			p := 0.0
 			for i in 0 ..< len(rets) {
 				ST := spot * (1.0 + rets[i])
-				pay := max(ST - chain.strikes[k], 0) if chain.option_types[k] == "call" else max(chain.strikes[k] - ST, 0)
+				pay :=
+					max(ST - chain.strikes[k], 0) if chain.option_types[k] == "call" else max(chain.strikes[k] - ST, 0)
 				p += m[i] * pay
 			}
 			chain.market_prices[k] = p / f64(len(rets))
@@ -91,8 +102,17 @@ pdpm_contracts_test :: proc(allocator: mem.Allocator) {
 	fill_prices(&chain, m, rets, spot)
 	ex := fin.calibrate_sdf_exponential(rets, rf, &chain, spot, allocator)
 	defer free_cal(&ex)
-	expect(&passed, &total, abs(ex.sdf.risk_aversion - 2.0) < 5e-3 && ex.converged && ex.rmse < 1e-2,
-		fmt.tprintf("exponential recovers gamma = %.4f (truth 2), converged = %v, RMSE %.1e", ex.sdf.risk_aversion, ex.converged, ex.rmse))
+	expect(
+		&passed,
+		&total,
+		abs(ex.sdf.risk_aversion - 2.0) < 5e-3 && ex.converged && ex.rmse < 1e-2,
+		fmt.tprintf(
+			"exponential recovers gamma = %.4f (truth 2), converged = %v, RMSE %.1e",
+			ex.sdf.risk_aversion,
+			ex.converged,
+			ex.rmse,
+		),
+	)
 
 	// 3. power utility, gamma = 3 (range [0.5, 10]): E[M] pinned to 1/(1+rf)
 	for i in 0 ..< n {m[i] = math.pow(1.0 + rets[i], -3.0)}
@@ -100,8 +120,19 @@ pdpm_contracts_test :: proc(allocator: mem.Allocator) {
 	fill_prices(&chain, m, rets, spot)
 	pw := fin.calibrate_sdf_power_utility(rets, rf, &chain, spot, allocator)
 	defer free_cal(&pw)
-	expect(&passed, &total, abs(pw.sdf.risk_aversion - 3.0) < 5e-3 && pw.converged && abs(pw.sdf.mean / rf_d - 1.0) < 1e-12,
-		fmt.tprintf("power utility recovers gamma = %.4f (truth 3), E[M] = %.6f (1/(1+rf) = %.6f)", pw.sdf.risk_aversion, pw.sdf.mean, rf_d))
+	expect(
+		&passed,
+		&total,
+		abs(pw.sdf.risk_aversion - 3.0) < 5e-3 &&
+		pw.converged &&
+		abs(pw.sdf.mean / rf_d - 1.0) < 1e-12,
+		fmt.tprintf(
+			"power utility recovers gamma = %.4f (truth 3), E[M] = %.6f (1/(1+rf) = %.6f)",
+			pw.sdf.risk_aversion,
+			pw.sdf.mean,
+			rf_d,
+		),
+	)
 
 	// 4. 2-factor exponential, weights (1.3, -0.7) (range ±5)
 	for i in 0 ..< n {m[i] = math.exp(1.3 * rets[i] - 0.7 * vol[i])}
@@ -110,8 +141,17 @@ pdpm_contracts_test :: proc(allocator: mem.Allocator) {
 	mf := fin.calibrate_sdf_multifactor_2d(rets, vol, rf, &chain, spot, allocator)
 	defer free_cal(&mf)
 	w := mf.sdf.parameters
-	expect(&passed, &total, abs(w[0] - 1.3) < 0.06 && abs(w[1] + 0.7) < 0.06 && mf.converged,
-		fmt.tprintf("2-factor recovers weights (%.3f, %.3f) (truth 1.3, -0.7), converged = %v", w[0], w[1], mf.converged))
+	expect(
+		&passed,
+		&total,
+		abs(w[0] - 1.3) < 0.06 && abs(w[1] + 0.7) < 0.06 && mf.converged,
+		fmt.tprintf(
+			"2-factor recovers weights (%.3f, %.3f) (truth 1.3, -0.7), converged = %v",
+			w[0],
+			w[1],
+			mf.converged,
+		),
+	)
 
 	// 5. truth outside the range: exponential gamma = 8 > 5 is pinned to the edge
 	for i in 0 ..< n {m[i] = math.exp(-8.0 * (1.0 + rets[i]))}
@@ -119,8 +159,16 @@ pdpm_contracts_test :: proc(allocator: mem.Allocator) {
 	fill_prices(&chain, m, rets, spot)
 	edge := fin.calibrate_sdf_exponential(rets, rf, &chain, spot, allocator)
 	defer free_cal(&edge)
-	expect(&passed, &total, edge.sdf.risk_aversion == 5.0 && !edge.converged,
-		fmt.tprintf("edge optimum gamma = %.4f reported as not converged (%v)", edge.sdf.risk_aversion, edge.converged))
+	expect(
+		&passed,
+		&total,
+		edge.sdf.risk_aversion == 5.0 && !edge.converged,
+		fmt.tprintf(
+			"edge optimum gamma = %.4f reported as not converged (%v)",
+			edge.sdf.risk_aversion,
+			edge.converged,
+		),
+	)
 
 	// 6. horizon mapping: identity at T = period, log-variance scales with T / period
 	dt := 1.0 / 252.0
@@ -141,22 +189,41 @@ pdpm_contracts_test :: proc(allocator: mem.Allocator) {
 	worst := 0.0
 	for v, i in same {worst = max(worst, abs(v - daily[i]))}
 	ratio := log_var(month) / log_var(daily)
-	expect(&passed, &total, worst < 1e-15 && abs(ratio / 21.0 - 1.0) < 1e-9,
-		fmt.tprintf("horizon states: identity at T = period (%.1e), log-variance x%.6f at 21 periods", worst, ratio))
+	expect(
+		&passed,
+		&total,
+		worst < 1e-15 && abs(ratio / 21.0 - 1.0) < 1e-9,
+		fmt.tprintf(
+			"horizon states: identity at T = period (%.1e), log-variance x%.6f at 21 periods",
+			worst,
+			ratio,
+		),
+	)
 
 	// 7. returns_period: daily states price a Black-Scholes chain with 7d / 30d / 3m
 	//    expiries; one-period pricing cannot (it prices every option as 1-day)
 	bs_r, bs_sigma := 0.03, 0.2
 	Ts := []f64{7.0 / 365.0, 30.0 / 365.0, 0.25}
 	n_bs := 10 * len(Ts)
-	bs := fin.OptionChain{make([]f64, n_bs), make([]f64, n_bs), make([]f64, n_bs), make([]f64, n_bs), make([]string, n_bs), n_bs}
-	defer {delete(bs.strikes); delete(bs.expiries); delete(bs.implied_vols); delete(bs.market_prices); delete(bs.option_types)}
+	bs := fin.OptionChain {
+		make([]f64, n_bs),
+		make([]f64, n_bs),
+		make([]f64, n_bs),
+		make([]f64, n_bs),
+		make([]string, n_bs),
+		n_bs,
+	}
+	defer {delete(bs.strikes); delete(bs.expiries); delete(bs.implied_vols)
+		delete(bs.market_prices)
+		delete(bs.option_types)}
 	Ncdf :: proc(x: f64) -> f64 {return 0.5 * (1 + math.erf(x / math.sqrt_f64(2)))}
 	for T, t in Ts {
 		for k in 0 ..< 10 {
 			idx := 10 * t + k
 			K := spot * math.exp(bs_sigma * math.sqrt(T) * (f64(k / 2) - 2.0)) // -2 .. +2 sd
-			d1 := (math.ln(spot / K) + (bs_r + 0.5 * bs_sigma * bs_sigma) * T) / (bs_sigma * math.sqrt(T))
+			d1 :=
+				(math.ln(spot / K) + (bs_r + 0.5 * bs_sigma * bs_sigma) * T) /
+				(bs_sigma * math.sqrt(T))
 			d2 := d1 - bs_sigma * math.sqrt(T)
 			call := spot * Ncdf(d1) - K * math.exp(-bs_r * T) * Ncdf(d2)
 			bs.strikes[idx], bs.expiries[idx], bs.implied_vols[idx] = K, T, bs_sigma
@@ -169,8 +236,19 @@ pdpm_contracts_test :: proc(allocator: mem.Allocator) {
 	defer free_cal(&legacy)
 	hz := fin.calibrate_sdf_power_utility(daily, bs_r, &bs, spot, allocator, dt)
 	defer free_cal(&hz)
-	expect(&passed, &total, hz.rmse < 0.1 && legacy.rmse > 10 * hz.rmse && abs(hz.sdf.mean / math.exp(-bs_r * dt) - 1.0) < 1e-12,
-		fmt.tprintf("returns_period prices 7d/30d/3m BS chain: RMSE $%.4f (one-period $%.4f, gamma %.2f)", hz.rmse, legacy.rmse, hz.sdf.risk_aversion))
+	expect(
+		&passed,
+		&total,
+		hz.rmse < 0.1 &&
+		legacy.rmse > 10 * hz.rmse &&
+		abs(hz.sdf.mean / math.exp(-bs_r * dt) - 1.0) < 1e-12,
+		fmt.tprintf(
+			"returns_period prices 7d/30d/3m BS chain: RMSE $%.4f (one-period $%.4f, gamma %.2f)",
+			hz.rmse,
+			legacy.rmse,
+			hz.sdf.risk_aversion,
+		),
+	)
 
 	fmt.printf("PDPM contracts summary: %d/%d passed\n", passed, total)
 	record_failures(total - passed)

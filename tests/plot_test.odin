@@ -40,11 +40,11 @@ plot_test :: proc(allocator: mem.Allocator) {
 	w.add_column(&df, y_col)
 
 	// 2. Generate Scatter Plot
-	ok1 := plot.scatter_png(&df, "x", "y", "test_scatter.png", my_config, allocator)
+	ok1 := plot.scatter_png(&df, "x", "y", "plots/test_scatter.png", my_config, allocator)
 	fmt.printf("Scatter Plot Saved: %v\n", ok1)
 
 	// 3. Generate Histogram
-	ok2 := plot.histogram_png(&df, "y", "test_hist.png", 15, my_config, allocator)
+	ok2 := plot.histogram_png(&df, "y", "plots/test_hist.png", 15, my_config, allocator)
 	fmt.printf("Histogram Saved: %v\n", ok2)
 }
 line_plot_test :: proc(allocator: mem.Allocator) {
@@ -74,7 +74,7 @@ line_plot_test :: proc(allocator: mem.Allocator) {
 	config1.axis_color = plot.WHITE
 	config1.line_style = .Solid
 
-	ok1 := plot.line_png(xs, ys, "line_solid.png", config1, allocator)
+	ok1 := plot.line_png(xs, ys, "plots/line_solid.png", config1, allocator)
 	fmt.printf("Solid line plot: %v\n", ok1)
 
 	// Test 2: Dashed line
@@ -82,7 +82,7 @@ line_plot_test :: proc(allocator: mem.Allocator) {
 	config2.title = "Sine Wave - Dashed Line"
 	config2.line_style = .Dashed
 
-	ok2 := plot.line_png(xs, ys, "line_dashed.png", config2, allocator)
+	ok2 := plot.line_png(xs, ys, "plots/line_dashed.png", config2, allocator)
 	fmt.printf("Dashed line plot: %v\n", ok2)
 
 	// Test 3: Dotted line (exponential decay)
@@ -96,7 +96,7 @@ line_plot_test :: proc(allocator: mem.Allocator) {
 		ys[i] = math.exp(-f64(i) / 20.0)
 	}
 
-	ok3 := plot.line_png(xs, ys, "line_dotted.png", config3, allocator)
+	ok3 := plot.line_png(xs, ys, "plots/line_dotted.png", config3, allocator)
 	fmt.printf("Dotted line plot: %v\n", ok3)
 
 	// Test 4: Training curve example (multiple lines would need separate calls)
@@ -123,7 +123,7 @@ line_plot_test :: proc(allocator: mem.Allocator) {
 	config4.axis_color = plot.WHITE
 	config4.line_style = .Solid
 
-	ok4 := plot.line_png(train_xs, train_ys, "training_curve.png", config4, allocator)
+	ok4 := plot.line_png(train_xs, train_ys, "plots/training_curve.png", config4, allocator)
 	fmt.printf("Training curve: %v\n", ok4)
 }
 
@@ -143,7 +143,7 @@ bar_chart_test :: proc(allocator: mem.Allocator) {
 	config1.bg_color = plot.Color{20, 20, 20, 255}
 	config1.axis_color = plot.WHITE
 
-	ok1 := plot.bar_png(labels1, values1, "bar_simple.png", config1, allocator)
+	ok1 := plot.bar_png(labels1, values1, "plots/bar_simple.png", config1, allocator)
 	fmt.printf("Simple bar chart: %v\n", ok1)
 
 	// Test 2: Model coefficients (feature importance)
@@ -155,7 +155,7 @@ bar_chart_test :: proc(allocator: mem.Allocator) {
 	config2.y_label = "Coefficient"
 	config2.bar_color = plot.Color{0, 255, 150, 255} // Green
 
-	ok2 := plot.bar_png(labels2, values2, "bar_coefficients.png", config2, allocator)
+	ok2 := plot.bar_png(labels2, values2, "plots/bar_coefficients.png", config2, allocator)
 	fmt.printf("Coefficients bar chart: %v\n", ok2)
 
 	// Test 3: Confusion matrix style (multiple categories)
@@ -167,7 +167,7 @@ bar_chart_test :: proc(allocator: mem.Allocator) {
 	config3.y_label = "Count"
 	config3.bar_color = plot.Color{255, 150, 0, 255} // Orange
 
-	ok3 := plot.bar_png(labels3, values3, "bar_pets.png", config3, allocator)
+	ok3 := plot.bar_png(labels3, values3, "plots/bar_pets.png", config3, allocator)
 	fmt.printf("Pet distribution: %v\n", ok3)
 
 	// Test 4: Performance comparison
@@ -179,7 +179,7 @@ bar_chart_test :: proc(allocator: mem.Allocator) {
 	config4.y_label = "Accuracy"
 	config4.bar_color = plot.Color{200, 0, 255, 255} // Purple
 
-	ok4 := plot.bar_png(labels4, values4, "bar_accuracy.png", config4, allocator)
+	ok4 := plot.bar_png(labels4, values4, "plots/bar_accuracy.png", config4, allocator)
 	fmt.printf("Model comparison: %v\n", ok4)
 }
 multi_line_test :: proc(allocator: mem.Allocator) {
@@ -234,7 +234,7 @@ multi_line_test :: proc(allocator: mem.Allocator) {
 	config.show_grid = true
 	config.grid_color = plot.Color{60, 60, 60, 255}
 
-	ok := plot.multi_line_png(lines, "multi_line_test.png", config, allocator)
+	ok := plot.multi_line_png(lines, "plots/multi_line_test.png", config, allocator)
 	fmt.printf("Multi-line plot: %v\n", ok)
 }
 heatmap_test :: proc(allocator: mem.Allocator) {
@@ -256,6 +256,15 @@ heatmap_test :: proc(allocator: mem.Allocator) {
 	config.font_scale = 2 // Bigger font for numbers
 
 	// Note: We pass 'labels' for both rows and cols
-	ok := plot.heatmap_png(data, 3, 3, "confusion_matrix.png", labels, labels, config, allocator)
+	ok := plot.heatmap_png(
+		data,
+		3,
+		3,
+		"plots/confusion_matrix.png",
+		labels,
+		labels,
+		config,
+		allocator,
+	)
 	fmt.printf("Heatmap saved: %v\n", ok)
 }

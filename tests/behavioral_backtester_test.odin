@@ -216,8 +216,8 @@ behavioral_backtester_test :: proc(allocator: mem.Allocator) {
 	config.y_label = "Normalized Value (Start = 1.0)"
 	config.show_grid = true
 
-	if plot.multi_line_png(lines, "behavioral_backtest_equity.png", config, allocator) {
-		fmt.println("Saved: behavioral_backtest_equity.png")
+	if plot.multi_line_png(lines, "plots/behavioral_backtest_equity.png", config, allocator) {
+		fmt.println("Saved: plots/behavioral_backtest_equity.png")
 	}
 
 	fmt.println("\n=== Behavioral Alpha Backtester Complete ===\n")
@@ -574,7 +574,7 @@ historical_gamma_backtest_test :: proc(allocator: mem.Allocator) {
 	eq_cfg.x_label = "Trading Day"
 	eq_cfg.y_label = "Normalized Value"
 	eq_cfg.show_grid = true
-	if plot.multi_line_png(equity_lines, "hist_gamma_equity.png", eq_cfg, allocator) {
+	if plot.multi_line_png(equity_lines, "plots/hist_gamma_equity.png", eq_cfg, allocator) {
 		fmt.println("Saved: hist_gamma_equity.png")
 	}
 
@@ -593,8 +593,8 @@ historical_gamma_backtest_test :: proc(allocator: mem.Allocator) {
 	g_cfg.x_label = "Trading Day"
 	g_cfg.y_label = "Level"
 	g_cfg.show_grid = true
-	if plot.multi_line_png(gamma_lines, "hist_gamma_vs_vix.png", g_cfg, allocator) {
-		fmt.println("Saved: hist_gamma_vs_vix.png")
+	if plot.multi_line_png(gamma_lines, "plots/hist_gamma_vs_vix.png", g_cfg, allocator) {
+		fmt.println("Saved: plots/hist_gamma_vs_vix.png")
 	}
 
 	fmt.println("\n=== Historical Gamma Backtest Complete ===\n")

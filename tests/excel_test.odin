@@ -13,7 +13,7 @@ excel_basic_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
 	seed_test(#procedure)
 	fmt.println("=== EXCEL LOAD TEST ===")
 
-	df := importer.xlsx_load("example.xlsx", allocator)
+	df := importer.xlsx_load("demo_files/example.xlsx", allocator)
 	w.dataframe_pretty_print(&df, 20)
 	w.df_head(&df, 10)
 
@@ -26,7 +26,7 @@ excel_basic_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
 zip_smoke_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
 	seed_test(#procedure)
 	fmt.println("=== ZIP SMOKE TEST ===")
-	bytes, ok := zm.zip_read_file("example.xlsx", "xl/workbook.xml", allocator)
+	bytes, ok := zm.zip_read_file("demo_files/example.xlsx", "xl/workbook.xml", allocator)
 	fmt.println("ok:", ok, "len:", len(bytes))
 	if ok {
 		s := string(bytes)
@@ -40,7 +40,7 @@ excel_date_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
 	seed_test(#procedure)
 	fmt.println("=== EXCEL DATE TEST ===")
 
-	df := importer.xlsx_load("datetime.xlsx", allocator)
+	df := importer.xlsx_load("demo_files/datetime.xlsx", allocator)
 
 	w.dataframe_pretty_print(&df, 20)
 	w.df_head(&df, 10)
@@ -81,11 +81,11 @@ excel_export_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
 	df.rows = 3
 
 	// 2) Save to Excel
-	ok := exporter.xlsx_save(&df, "export_test.xlsx", allocator)
+	ok := exporter.xlsx_save(&df, "demo_files/export_test.xlsx", allocator)
 	fmt.println("xlsx_save ok:", ok)
 
 	// 3) Load back
-	df2 := importer.xlsx_load("export_test.xlsx", allocator)
+	df2 := importer.xlsx_load("demo_files/export_test.xlsx", allocator)
 
 	// 4) Print both
 	fmt.println("--- Original DF ---")

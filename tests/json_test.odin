@@ -11,7 +11,11 @@ json_basic_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
 	seed_test(#procedure)
 	fmt.println("=== JSON load test ===")
 
-	df_json := importer.json_load("example_data.json", importer.DEFAULT_NULL_TOKEN, allocator)
+	df_json := importer.json_load(
+		"demo_files/example_data.json",
+		importer.DEFAULT_NULL_TOKEN,
+		allocator,
+	)
 	w.dataframe_pretty_print(&df_json, 20)
 	w.df_head(&df_json, 5)
 
@@ -25,7 +29,11 @@ jsonl_basic_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
 	seed_test(#procedure)
 	fmt.println("=== JSONL load test ===")
 
-	df_jsonl := importer.jsonl_load("example_data2.jsonl", importer.DEFAULT_NULL_TOKEN, allocator)
+	df_jsonl := importer.jsonl_load(
+		"demo_files/example_data2.jsonl",
+		importer.DEFAULT_NULL_TOKEN,
+		allocator,
+	)
 	w.dataframe_pretty_print(&df_jsonl, 20)
 	w.df_head(&df_jsonl, 5)
 
@@ -69,16 +77,16 @@ json_export_test :: proc(allocator: mem.Allocator) {
 	w.add_column(&df, col_score)
 
 	// Write JSON array
-	exporter.json_write(&df, "out.json", allocator)
+	exporter.json_write(&df, "demo_files/out.json", allocator)
 
 	// Write NDJSON
-	exporter.jsonl_write(&df, "out.jsonl", allocator)
+	exporter.jsonl_write(&df, "demo_files/out.jsonl", allocator)
 
-	fmt.println("Wrote out.json and out.jsonl")
+	fmt.println("Wrote demo_files/out.json and demo_files/out.jsonl")
 
 	// Read back and print for verification
-	contents_json, _ := importer.read_file("out.json")
-	contents_jsonl, _ := importer.read_file("out.jsonl")
+	contents_json, _ := importer.read_file("demo_files/out.json")
+	contents_jsonl, _ := importer.read_file("demo_files/out.jsonl")
 	defer delete(contents_json)
 	defer delete(contents_jsonl)
 	fmt.println("--- out.json ---")

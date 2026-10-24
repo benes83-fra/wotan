@@ -113,7 +113,7 @@ pdpm_test :: proc(allocator: mem.Allocator) {
 		&sdf_linear,
 		market_returns,
 		"Linear SDF Analysis",
-		"pdpm_linear_sdf",
+		"plots/pdpm_linear_sdf",
 		allocator,
 	)
 	if ok1 {
@@ -130,7 +130,7 @@ pdpm_test :: proc(allocator: mem.Allocator) {
 		strike,
 		"call",
 		&sdf_linear,
-		"pdpm_call_payoff.png",
+		"plots/pdpm_call_payoff.png",
 		allocator,
 	)
 
@@ -139,14 +139,14 @@ pdpm_test :: proc(allocator: mem.Allocator) {
 		strike,
 		"put",
 		&sdf_linear,
-		"pdpm_put_payoff.png",
+		"plots/pdpm_put_payoff.png",
 		allocator,
 	)
 
 	if ok2 && ok3 {
 		fmt.println("✓ Generated option payoff profiles:")
-		fmt.println("  - pdpm_call_payoff.png")
-		fmt.println("  - pdpm_put_payoff.png")
+		fmt.println("  - plots/pdpm_call_payoff.png")
+		fmt.println("  - plots/pdpm_put_payoff.png")
 	}
 	fmt.println("\n✓ Dybvig PDPM test completed!")
 }

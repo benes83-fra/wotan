@@ -65,7 +65,7 @@ plot_behavioral_heston_curves :: proc(
 	val_config.height = 600
 	val_config.show_grid = true
 
-	if plot.multi_line_png(val_lines, "b_heston_value_curve.png", val_config, allocator) {
+	if plot.multi_line_png(val_lines, "plots/b_heston_value_curve.png", val_config, allocator) {
 		fmt.println("Saved: b_heston_value_curve.png")
 	}
 
@@ -124,8 +124,13 @@ plot_behavioral_heston_curves :: proc(
 	prob_config.height = 600
 	prob_config.show_grid = true
 
-	if plot.multi_line_png(prob_lines, "b_heston_weighting_curve.png", prob_config, allocator) {
-		fmt.println("Saved: b_heston_weighting_curve.png")
+	if plot.multi_line_png(
+		prob_lines,
+		"plots/b_heston_weighting_curve.png",
+		prob_config,
+		allocator,
+	) {
+		fmt.println("Saved: plots/b_heston_weighting_curve.png")
 	}
 }
 

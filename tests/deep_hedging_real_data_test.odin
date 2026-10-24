@@ -247,11 +247,11 @@ deep_hedging_real_data_test :: proc(allocator: mem.Allocator) {
 	ok1 := ml_fin.deep_hedging_plot_pnl_distribution(
 		pnl_values,
 		"Deep Hedging: Terminal PnL Distribution",
-		"deep_hedging_pnl_dist.png",
+		"plots/deep_hedging_pnl_dist.png",
 		allocator,
 	)
 	if ok1 {
-		fmt.println("  [OK] Saved: deep_hedging_pnl_dist.png")
+		fmt.println("  [OK] Saved: plots/deep_hedging_pnl_dist.png")
 	} else {
 		fmt.println("  [FAIL] Could not save PnL distribution plot.")
 	}
@@ -262,11 +262,11 @@ deep_hedging_real_data_test :: proc(allocator: mem.Allocator) {
 		spot_prices,
 		pnl_values,
 		"Deep Hedging: PnL vs Terminal Spot Price",
-		"deep_hedging_pnl_vs_spot.png",
+		"plots/deep_hedging_pnl_vs_spot.png",
 		allocator,
 	)
 	if ok2 {
-		fmt.println("  [OK] Saved: deep_hedging_pnl_vs_spot.png")
+		fmt.println("  [OK] Saved: plots/deep_hedging_pnl_vs_spot.png")
 	} else {
 		fmt.println("  [FAIL] Could not save PnL vs Spot plot.")
 	}
