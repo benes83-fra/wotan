@@ -104,6 +104,67 @@ matmul_kernels_test :: proc(allocator: mem.Allocator) {
 		}
 	}
 
+	// The register-blocked kernels must reproduce the plain vector primitives
+	// bit for bit: nn / tn as a sequence of axpy_simd updates in reduction
+	// order (including its skip of zero coefficients), nt as dot_simd per
+	// element. A has ~20% exact zeros; sizes cover full blocks and all tails.
+	exact_shapes := [][3]int{{1, 1, 1}, {2, 8, 3}, {3, 17, 5}, {5, 9, 130}, {33, 31, 129}, {64, 40, 300}}
+	for sh in exact_shapes {
+		M, N, K := sh[0], sh[1], sh[2]
+		for kind, ki in kinds {
+			a_t := ki == 2
+			b_t := ki == 1
+			A := a_t ? l.matrix_new(f64, K, M, allocator) : l.matrix_new(f64, M, K, allocator)
+			B := b_t ? l.matrix_new(f64, N, K, allocator) : l.matrix_new(f64, K, N, allocator)
+			out := l.matrix_new(f64, M, N, allocator)
+			expected := l.matrix_new(f64, M, N, allocator)
+			defer {
+				l.matrix_free(&A); l.matrix_free(&B)
+				l.matrix_free(&out); l.matrix_free(&expected)
+			}
+			gcl_fill(A.data, u64(M * 13 + K + ki))
+			for i in 0 ..< len(A.data) {if (i * 7) % 5 == 0 {A.data[i] = 0}}
+			gcl_fill(B.data, u64(N * 11 + K + ki))
+			gcl_fill(out.data, u64(M + N + K + ki))
+			copy(expected.data, out.data)
+
+			switch ki {
+			case 0:
+				l.matmul_nn_acc_simd(&A, &B, &out)
+				for i in 0 ..< M {
+					for k in 0 ..< K {
+						l.axpy_simd(A.data[i * K + k], B.data[k * N:(k + 1) * N], expected.data[i * N:(i + 1) * N])
+					}
+				}
+			case 1:
+				l.matmul_nt_acc_simd(&A, &B, &out)
+				for i in 0 ..< M {
+					for j in 0 ..< N {
+						expected.data[i * N + j] += l.dot_simd(A.data[i * K:(i + 1) * K], B.data[j * K:(j + 1) * K])
+					}
+				}
+			case 2:
+				// A: [K, M], B: [K, N], out: [M, N] += A^T @ B
+				l.matmul_tn_acc_simd(&A, &B, &out)
+				for i in 0 ..< K {
+					for r in 0 ..< M {
+						l.axpy_simd(A.data[i * M + r], B.data[i * N:(i + 1) * N], expected.data[r * N:(r + 1) * N])
+					}
+				}
+			}
+			identical := true
+			for i in 0 ..< len(out.data) {
+				identical &&= transmute(u64)out.data[i] == transmute(u64)expected.data[i]
+			}
+			total += 1
+			if identical {
+				passed += 1
+			} else {
+				fmt.printf("FAIL %s M=%d N=%d K=%d differs from the axpy/dot reference\n", kind, M, N, K)
+			}
+		}
+	}
+
 	fmt.printf("MatMul kernel summary: %d/%d passed\n", passed, total)
 	record_failures(total - passed)
 }

@@ -190,9 +190,35 @@ _parallel_rows :: proc(rows, flops: int, a, b, out: ^Matrix(f64), worker: _Rows_
 		}, n)
 }
 
+// Register-blocked micro-kernels: a block of _MK_ROWS output rows x _MK_LANES
+// columns is held in vector registers over a run of the reduction and written
+// back once. Every output element still adds its terms one at a time in
+// ascending reduction order, as y + a*x with the zero-a skip of axpy_simd, so
+// the results are bit-identical to a sequence of axpy_simd updates.
+
+@(private = "file")
+_MK_ROWS :: 2
+@(private = "file")
+_MK_LANES :: 8
+@(private = "file")
+_MK_V :: simd.f64x8
+// Reduction run per register block, so the touched rows of B stay in cache
+@(private = "file")
+_MK_RUN :: 128
+
+@(private = "file")
+_mk_load :: #force_inline proc "contextless" (p: ^f64) -> _MK_V {
+	return intrinsics.unaligned_load((^_MK_V)(p))
+}
+
+@(private = "file")
+_mk_store :: #force_inline proc "contextless" (p: ^f64, v: _MK_V) {
+	intrinsics.unaligned_store((^_MK_V)(p), v)
+}
+
 // matmul_nn_acc_simd: out += A @ B
 // A: [M, K], B: [K, N], out: [M, N]
-// i-k-j order: each step is an axpy of a contiguous row of B into a row of out.
+// out[i, :] += A[i, k] * B[k, :] for k in order; threads split the rows of A.
 matmul_nn_acc_simd :: proc(a, b, out: ^Matrix(f64)) {
 	if a.cols != b.rows || out.rows != a.rows || out.cols != b.cols {
 		panic("matmul_nn_acc_simd: dimension mismatch")
@@ -201,17 +227,47 @@ matmul_nn_acc_simd :: proc(a, b, out: ^Matrix(f64)) {
 }
 
 @(private = "file")
-_nn_rows :: proc(a, b, out: ^Matrix(f64), r0, r1: int) {
+_nn_rows :: proc(a, b, out: ^Matrix(f64), r0, r1: int) #no_bounds_check {
 	K, N := a.cols, b.cols
-	tile := tile_for_matmul()
+	A, B, O := a.data, b.data, out.data
+	Nv := N - N % _MK_LANES
 
-	for kk := 0; kk < K; kk += tile {
-		k_end := min(kk + tile, K)
-		for i in r0 ..< r1 {
-			row_out := out.data[i * N:(i + 1) * N]
-			row_a := a.data[i * K:(i + 1) * K]
-			for k in kk ..< k_end {
-				axpy_simd(row_a[k], b.data[k * N:(k + 1) * N], row_out)
+	for kk := 0; kk < K; kk += _MK_RUN {
+		k_end := min(kk + _MK_RUN, K)
+		i := r0
+		for ; i + _MK_ROWS <= r1; i += _MK_ROWS {
+			for j := 0; j < Nv; j += _MK_LANES {
+				c: [_MK_ROWS]_MK_V
+				#unroll for r in 0 ..< _MK_ROWS {c[r] = _mk_load(&O[(i + r) * N + j])}
+				for k in kk ..< k_end {
+					bv := _mk_load(&B[k * N + j])
+					#unroll for r in 0 ..< _MK_ROWS {
+						av := A[(i + r) * K + k]
+						if av != 0 {c[r] = c[r] + _MK_V(av) * bv}
+					}
+				}
+				#unroll for r in 0 ..< _MK_ROWS {_mk_store(&O[(i + r) * N + j], c[r])}
+			}
+		}
+		for ; i < r1; i += 1 {
+			for j := 0; j < Nv; j += _MK_LANES {
+				c := _mk_load(&O[i * N + j])
+				for k in kk ..< k_end {
+					av := A[i * K + k]
+					if av != 0 {c = c + _MK_V(av) * _mk_load(&B[k * N + j])}
+				}
+				_mk_store(&O[i * N + j], c)
+			}
+		}
+		// Columns past the last full vector
+		for i2 in r0 ..< r1 {
+			for j in Nv ..< N {
+				c := O[i2 * N + j]
+				for k in kk ..< k_end {
+					av := A[i2 * K + k]
+					if av != 0 {c += av * B[k * N + j]}
+				}
+				O[i2 * N + j] = c
 			}
 		}
 	}
@@ -219,7 +275,8 @@ _nn_rows :: proc(a, b, out: ^Matrix(f64), r0, r1: int) {
 
 // matmul_nt_acc_simd: out += A @ B^T
 // A: [M, K], B: [N, K], out: [M, N]
-// Every output element is a dot product of two contiguous rows.
+// Every output element is a dot product of two contiguous rows, computed
+// exactly as dot_simd does it (see _nt_rows).
 matmul_nt_acc_simd :: proc(a, b, out: ^Matrix(f64)) {
 	if a.cols != b.cols || out.rows != a.rows || out.cols != b.rows {
 		panic("matmul_nt_acc_simd: dimension mismatch")
@@ -227,17 +284,85 @@ matmul_nt_acc_simd :: proc(a, b, out: ^Matrix(f64)) {
 	_parallel_rows(a.rows, a.rows * a.cols * b.rows, a, b, out, _nt_rows)
 }
 
+// Lane type of dot_simd's accumulator for this build target (same selection)
+when intrinsics.has_target_feature("avx") {
+	@(private = "file")
+	_DOT_V :: simd.f64x8
+} else when intrinsics.has_target_feature("sse2") {
+	@(private = "file")
+	_DOT_V :: simd.f64x4
+} else {
+	@(private = "file")
+	_DOT_V :: simd.f64x2
+}
 @(private = "file")
-_nt_rows :: proc(a, b, out: ^Matrix(f64), r0, r1: int) {
-	K, N := a.cols, b.rows
-	tile := tile_for_matmul()
+_DOT_LANES :: len(_DOT_V)
 
-	for jj := 0; jj < N; jj += tile {
-		j_end := min(jj + tile, N)
+// _nt_rows computes 2 x 2 dot products at a time. Each keeps dot_simd's lane
+// layout, its pairwise lane reduction and its scalar tail, so every element
+// is bit-identical to dot_simd(A[i, :], B[j, :]).
+@(private = "file")
+_nt_rows :: proc(a, b, out: ^Matrix(f64), r0, r1: int) #no_bounds_check {
+	K, N := a.cols, b.rows
+	A, B, O := a.data, b.data, out.data
+
+	when !simd.HAS_HARDWARE_SIMD {
 		for i in r0 ..< r1 {
-			row_a := a.data[i * K:(i + 1) * K]
-			for j in jj ..< j_end {
-				out.data[i * N + j] += dot_simd(row_a, b.data[j * K:(j + 1) * K])
+			for j in 0 ..< N {
+				O[i * N + j] += dot_simd(A[i * K:(i + 1) * K], B[j * K:(j + 1) * K])
+			}
+		}
+	} else {
+		Kv := K - K % _DOT_LANES
+		ld :: #force_inline proc "contextless" (p: ^f64) -> _DOT_V {
+			return intrinsics.unaligned_load((^_DOT_V)(p))
+		}
+		// one dot product: lanes, pairwise reduction, then the tail in order
+		finish :: #force_inline proc "contextless" (acc: _DOT_V, x, y: []f64, Kv: int) -> f64 {
+			sum := intrinsics.simd_reduce_add_pairs(acc)
+			for k in Kv ..< len(x) {sum += x[k] * y[k]}
+			return sum
+		}
+
+		i := r0
+		for ; i + 2 <= r1; i += 2 {
+			a0, a1 := A[i * K:(i + 1) * K], A[(i + 1) * K:(i + 2) * K]
+			j := 0
+			for ; j + 2 <= N; j += 2 {
+				b0, b1 := B[j * K:(j + 1) * K], B[(j + 1) * K:(j + 2) * K]
+				c00, c01, c10, c11: _DOT_V
+				for k := 0; k < Kv; k += _DOT_LANES {
+					va0, va1 := ld(&a0[k]), ld(&a1[k])
+					vb0, vb1 := ld(&b0[k]), ld(&b1[k])
+					c00 = c00 + va0 * vb0
+					c01 = c01 + va0 * vb1
+					c10 = c10 + va1 * vb0
+					c11 = c11 + va1 * vb1
+				}
+				O[i * N + j] += finish(c00, a0, b0, Kv)
+				O[i * N + j + 1] += finish(c01, a0, b1, Kv)
+				O[(i + 1) * N + j] += finish(c10, a1, b0, Kv)
+				O[(i + 1) * N + j + 1] += finish(c11, a1, b1, Kv)
+			}
+			for ; j < N; j += 1 {
+				bj := B[j * K:(j + 1) * K]
+				c0, c1: _DOT_V
+				for k := 0; k < Kv; k += _DOT_LANES {
+					vb := ld(&bj[k])
+					c0 = c0 + ld(&a0[k]) * vb
+					c1 = c1 + ld(&a1[k]) * vb
+				}
+				O[i * N + j] += finish(c0, a0, bj, Kv)
+				O[(i + 1) * N + j] += finish(c1, a1, bj, Kv)
+			}
+		}
+		for ; i < r1; i += 1 {
+			ai := A[i * K:(i + 1) * K]
+			for j in 0 ..< N {
+				bj := B[j * K:(j + 1) * K]
+				c: _DOT_V
+				for k := 0; k < Kv; k += _DOT_LANES {c = c + ld(&ai[k]) * ld(&bj[k])}
+				O[i * N + j] += finish(c, ai, bj, Kv)
 			}
 		}
 	}
@@ -245,8 +370,8 @@ _nt_rows :: proc(a, b, out: ^Matrix(f64), r0, r1: int) {
 
 // matmul_tn_acc_simd: out += A^T @ B
 // A: [M, K], B: [M, N], out: [K, N]
-// Sum of rank-1 updates: out[k, :] += A[i, k] * B[i, :]. Blocked over k so
-// the touched rows of `out` stay in cache. Threads split the K output rows.
+// Sum of rank-1 updates: out[k, :] += A[i, k] * B[i, :] for i in order.
+// Threads split the K output rows.
 matmul_tn_acc_simd :: proc(a, b, out: ^Matrix(f64)) {
 	if a.rows != b.rows || out.rows != a.cols || out.cols != b.cols {
 		panic("matmul_tn_acc_simd: dimension mismatch")
@@ -255,16 +380,47 @@ matmul_tn_acc_simd :: proc(a, b, out: ^Matrix(f64)) {
 }
 
 @(private = "file")
-_tn_rows :: proc(a, b, out: ^Matrix(f64), r0, r1: int) {
+_tn_rows :: proc(a, b, out: ^Matrix(f64), r0, r1: int) #no_bounds_check {
 	M, K, N := a.rows, a.cols, b.cols
-	tile := tile_for_matmul()
+	A, B, O := a.data, b.data, out.data
+	Nv := N - N % _MK_LANES
 
-	for kk := r0; kk < r1; kk += tile {
-		k_end := min(kk + tile, r1)
-		for i in 0 ..< M {
-			row_b := b.data[i * N:(i + 1) * N]
-			for k in kk ..< k_end {
-				axpy_simd(a.data[i * K + k], row_b, out.data[k * N:(k + 1) * N])
+	for ii := 0; ii < M; ii += _MK_RUN {
+		i_end := min(ii + _MK_RUN, M)
+		k := r0
+		for ; k + _MK_ROWS <= r1; k += _MK_ROWS {
+			for j := 0; j < Nv; j += _MK_LANES {
+				c: [_MK_ROWS]_MK_V
+				#unroll for r in 0 ..< _MK_ROWS {c[r] = _mk_load(&O[(k + r) * N + j])}
+				for i in ii ..< i_end {
+					bv := _mk_load(&B[i * N + j])
+					#unroll for r in 0 ..< _MK_ROWS {
+						av := A[i * K + k + r]
+						if av != 0 {c[r] = c[r] + _MK_V(av) * bv}
+					}
+				}
+				#unroll for r in 0 ..< _MK_ROWS {_mk_store(&O[(k + r) * N + j], c[r])}
+			}
+		}
+		for ; k < r1; k += 1 {
+			for j := 0; j < Nv; j += _MK_LANES {
+				c := _mk_load(&O[k * N + j])
+				for i in ii ..< i_end {
+					av := A[i * K + k]
+					if av != 0 {c = c + _MK_V(av) * _mk_load(&B[i * N + j])}
+				}
+				_mk_store(&O[k * N + j], c)
+			}
+		}
+		// Columns past the last full vector
+		for k2 in r0 ..< r1 {
+			for j in Nv ..< N {
+				c := O[k2 * N + j]
+				for i in ii ..< i_end {
+					av := A[i * K + k2]
+					if av != 0 {c += av * B[i * N + j]}
+				}
+				O[k2 * N + j] = c
 			}
 		}
 	}
