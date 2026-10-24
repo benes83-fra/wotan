@@ -133,6 +133,7 @@ tensor_new :: proc(
 	t.inputs = make([dynamic]^Tensor, 0, allocator)
 	t.int_metadata = make([dynamic]int, 0, allocator)
 	t.f64_metadata = make([dynamic]f64, 0, allocator)
+	_scope_note_new(allocator)
 	// Default logical shape is the matrix itself; callers override it for 3D/4D data
 	t.shape = [4]int{data.rows, data.cols, 1, 1}
 	// Initialize gradients to zero
@@ -169,6 +170,7 @@ _tensor_new_op :: proc(
 	t.inputs = make([dynamic]^Tensor, 0, allocator)
 	t.int_metadata = make([dynamic]int, 0, allocator)
 	t.f64_metadata = make([dynamic]f64, 0, allocator)
+	_scope_note_new(allocator)
 	global_tensors_created += 1
 	return t
 }
@@ -225,7 +227,8 @@ tensor_free :: proc(t: ^Tensor) {
 	delete(t.int_metadata)
 	delete(t.f64_metadata)
 	if t.dropout_mask != nil {delete(t.dropout_mask, t.allocator)}
-	global_tensors_freed += 1 // ✅ ADD THIS
+	global_tensors_freed += 1
+	_scope_note_free(t.allocator)
 	free(t, t.allocator)
 
 }
@@ -248,11 +251,11 @@ tensor_dropout :: proc(a: ^Tensor, drop_prob: f64, training: bool) -> ^Tensor {
 		return a
 	}
 
-	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
+	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
 	n := len(a.data.data)
 
 	// Allocate the mask to remember what we dropped for the backward pass
-	mask := make([]f64, n, a.allocator)
+	mask := make([]f64, n, _op_alloc(a))
 	scale := 1.0 / (1.0 - drop_prob)
 
 	for i in 0 ..< n {
@@ -265,7 +268,7 @@ tensor_dropout :: proc(a: ^Tensor, drop_prob: f64, training: bool) -> ^Tensor {
 		}
 	}
 
-	out := _tensor_new_op(out_data, a.shape, a.requires_grad, a.allocator)
+	out := _tensor_new_op(out_data, a.shape, a.requires_grad, _op_alloc(a))
 	out.dropout_mask = mask
 
 	if out.requires_grad {
@@ -281,11 +284,11 @@ tensor_sum :: proc(a: ^Tensor) -> ^Tensor {
 	total := l.sum_simd(a.data.data)
 
 	// Create a 1x1 matrix for the scalar output
-	out_data := l.matrix_new(f64, 1, 1, a.allocator)
+	out_data := l.matrix_new(f64, 1, 1, _op_alloc(a))
 	out_data.data[0] = total
 
 	// 2. Create output tensor
-	out := _tensor_new_op(out_data, SCALAR_SHAPE, a.requires_grad, a.allocator)
+	out := _tensor_new_op(out_data, SCALAR_SHAPE, a.requires_grad, _op_alloc(a))
 	// 3. Record graph
 	if out.requires_grad {
 		out.op = .Sum
@@ -306,11 +309,11 @@ tensor_add :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
 	}
 
 	// 1. Perform the forward pass using your existing SIMD add!
-	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
+	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
 	l.vec_add_simd(a.data.data, b.data.data, out_data.data)
 
 	// 2. Create the output tensor
-	out := _tensor_new_op(out_data, a.shape, a.requires_grad || b.requires_grad, a.allocator)
+	out := _tensor_new_op(out_data, a.shape, a.requires_grad || b.requires_grad, _op_alloc(a))
 	// 3. Record the graph
 	if out.requires_grad {
 		out.op = .Add
@@ -325,11 +328,11 @@ tensor_add :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
 tensor_relu :: proc(a: ^Tensor) -> ^Tensor {
 
 	// 1. Forward pass
-	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
+	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
 	l.vec_relu_simd(a.data.data, out_data.data) // ✅ SIMD ReLU
 
 	// 2. Create output tensor
-	out := _tensor_new_op(out_data, a.shape, a.requires_grad, a.allocator)
+	out := _tensor_new_op(out_data, a.shape, a.requires_grad, _op_alloc(a))
 	// 3. Record graph
 	if out.requires_grad {
 		out.op = .Relu
@@ -361,11 +364,11 @@ tensor_mul :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
 	}
 
 	// 1. Forward pass using SIMD
-	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
+	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
 	l.vec_mul_simd(a.data.data, b.data.data, out_data.data)
 
 	// 2. Create output tensor
-	out := _tensor_new_op(out_data, a.shape, a.requires_grad || b.requires_grad, a.allocator)
+	out := _tensor_new_op(out_data, a.shape, a.requires_grad || b.requires_grad, _op_alloc(a))
 	// 3. Record graph
 	if out.requires_grad {
 		out.op = .Mul
@@ -387,7 +390,7 @@ tensor_add_bias :: proc(a: ^Tensor, bias: ^Tensor) -> ^Tensor {
 	if a.data.rows == 1 && a.data.cols != D {
 		if a.data.cols % D == 0 {
 			N := a.data.cols / D
-			out_data := l.matrix_new(f64, 1, a.data.cols, a.allocator)
+			out_data := l.matrix_new(f64, 1, a.data.cols, _op_alloc(a))
 
 			for i in 0 ..< N {
 				row_out := out_data.data[i * D:(i + 1) * D]
@@ -399,7 +402,7 @@ tensor_add_bias :: proc(a: ^Tensor, bias: ^Tensor) -> ^Tensor {
 				out_data,
 				a.shape,
 				a.requires_grad || bias.requires_grad,
-				a.allocator,
+				_op_alloc(a),
 			)
 			if out.requires_grad {
 				out.op = .AddBias
@@ -418,7 +421,7 @@ tensor_add_bias :: proc(a: ^Tensor, bias: ^Tensor) -> ^Tensor {
 	}
 
 	N := a.data.rows
-	out_data := l.matrix_new(f64, N, D, a.allocator)
+	out_data := l.matrix_new(f64, N, D, _op_alloc(a))
 
 	for i in 0 ..< N {
 		row_out := out_data.data[i * D:(i + 1) * D]
@@ -426,7 +429,7 @@ tensor_add_bias :: proc(a: ^Tensor, bias: ^Tensor) -> ^Tensor {
 		l.vec_add_simd(row_a, bias_slice, row_out)
 	}
 
-	out := _tensor_new_op(out_data, a.shape, a.requires_grad || bias.requires_grad, a.allocator)
+	out := _tensor_new_op(out_data, a.shape, a.requires_grad || bias.requires_grad, _op_alloc(a))
 	if out.requires_grad {
 		out.op = .AddBias
 		append(&out.inputs, a)
@@ -445,6 +448,7 @@ tensor_mse_loss :: proc(
 	target: ^Tensor,
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
+	allocator := _scope_or(allocator) // the active graph scope, if any
 	if pred.data.rows != target.data.rows || pred.data.cols != target.data.cols {
 		panic("tensor_mse_loss: shape mismatch")
 	}
@@ -458,14 +462,14 @@ tensor_mse_loss :: proc(
 
 	loss_val := squared_sum / n
 
-	out_data := l.matrix_new(f64, 1, 1, pred.allocator)
+	out_data := l.matrix_new(f64, 1, 1, _op_alloc(pred))
 	out_data.data[0] = loss_val
 
 	out := _tensor_new_op(
 		out_data,
 		SCALAR_SHAPE,
 		pred.requires_grad || target.requires_grad,
-		pred.allocator,
+		_op_alloc(pred),
 	)
 	// ✅ FIX: Restored the correct MSE graph recording!
 	if out.requires_grad {
@@ -523,10 +527,10 @@ tensor_cross_entropy_loss :: proc(logits: ^Tensor, target_indices: []int) -> ^Te
 
 	loss /= f64(N)
 
-	out_data := l.matrix_new(f64, 1, 1, logits.allocator)
+	out_data := l.matrix_new(f64, 1, 1, _op_alloc(logits))
 	out_data.data[0] = loss
 
-	out := _tensor_new_op(out_data, SCALAR_SHAPE, logits.requires_grad, logits.allocator)
+	out := _tensor_new_op(out_data, SCALAR_SHAPE, logits.requires_grad, _op_alloc(logits))
 
 	if out.requires_grad {
 		out.op = .CrossEntropy
@@ -549,14 +553,14 @@ tensor_flatten :: proc(input: ^Tensor) -> ^Tensor {
 	features := input.shape[1] * input.shape[2] * input.shape[3]
 
 	// Just create a new tensor with the same data but different shape
-	out_data := l.matrix_new(f64, N, features, input.allocator)
+	out_data := l.matrix_new(f64, N, features, _op_alloc(input))
 	copy(out_data.data, input.data.data)
 
 	out := _tensor_new_op(
 		out_data,
 		[4]int{N, features, 1, 1},
 		input.requires_grad,
-		input.allocator,
+		_op_alloc(input),
 	)
 
 	if out.requires_grad {
@@ -623,10 +627,10 @@ tensor_max_pool2d :: proc(input: ^Tensor, kH, kW, stride: int) -> ^Tensor {
 	out_h := (H - kH) / stride + 1
 	out_w := (W - kW) / stride + 1
 
-	out_data := l.matrix_new(f64, 1, N * C * out_h * out_w, input.allocator)
+	out_data := l.matrix_new(f64, 1, N * C * out_h * out_w, _op_alloc(input))
 
 	// We need to store the indices of the max values for the backward pass
-	indices := make([]int, N * C * out_h * out_w, input.allocator)
+	indices := make([]int, N * C * out_h * out_w, _op_alloc(input))
 
 	for n in 0 ..< N {
 		for c in 0 ..< C {
@@ -660,7 +664,7 @@ tensor_max_pool2d :: proc(input: ^Tensor, kH, kW, stride: int) -> ^Tensor {
 		out_data,
 		[4]int{N, C, out_h, out_w},
 		input.requires_grad,
-		input.allocator,
+		_op_alloc(input),
 	)
 
 	if out.requires_grad {
@@ -674,7 +678,7 @@ tensor_max_pool2d :: proc(input: ^Tensor, kH, kW, stride: int) -> ^Tensor {
 		}
 	}
 
-	delete(indices, input.allocator)
+	delete(indices, _op_alloc(input))
 	return out
 }
 // tensor_avg_pool2d performs average pooling.
@@ -688,7 +692,7 @@ tensor_avg_pool2d :: proc(input: ^Tensor, kH, kW, stride: int) -> ^Tensor {
 	out_h := (H - kH) / stride + 1
 	out_w := (W - kW) / stride + 1
 
-	out_data := l.matrix_new(f64, 1, N * C * out_h * out_w, input.allocator)
+	out_data := l.matrix_new(f64, 1, N * C * out_h * out_w, _op_alloc(input))
 	pool_size := f64(kH * kW)
 
 	for n in 0 ..< N {
@@ -715,7 +719,7 @@ tensor_avg_pool2d :: proc(input: ^Tensor, kH, kW, stride: int) -> ^Tensor {
 		out_data,
 		[4]int{N, C, out_h, out_w},
 		input.requires_grad,
-		input.allocator,
+		_op_alloc(input),
 	)
 
 	if out.requires_grad {
@@ -739,6 +743,7 @@ tensor_conv2d :: proc(
 	pad: int = 0,
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
+	allocator := _scope_or(allocator) // the active graph scope, if any
 	_check_shape(input)
 	_check_shape(weight)
 	N := input.shape[0]
@@ -756,7 +761,7 @@ tensor_conv2d :: proc(
 	// ✅ FIX: Use context.allocator for temporary im2col
 	col, _, _ := _im2col(input.data.data, N, C_in, H, W, kH, kW, stride, pad, allocator)
 
-	out_data := l.matrix_new(f64, 1, N * C_out * out_h * out_w, input.allocator)
+	out_data := l.matrix_new(f64, 1, N * C_out * out_h * out_w, _op_alloc(input))
 	col_w := C_in * kH * kW
 	col_h := out_h * out_w
 
@@ -799,7 +804,7 @@ tensor_conv2d :: proc(
 		out_data,
 		[4]int{N, C_out, out_h, out_w},
 		input.requires_grad || weight.requires_grad,
-		input.allocator,
+		_op_alloc(input),
 	)
 
 	if out.requires_grad {
@@ -841,7 +846,7 @@ tensor_matmul :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
 			}
 			// Result stays flattened as 1 x (N * out_features) to match framework
 			// conventions; compute it in place through an [N, out_features] view.
-			out_data := l.matrix_new(f64, 1, N * out_features, a.allocator)
+			out_data := l.matrix_new(f64, 1, N * out_features, _op_alloc(a))
 			out_view := _mat(N, out_features, out_data.data)
 			l.matmul_nn_acc_simd(&a_view, &b.data, &out_view)
 
@@ -849,7 +854,7 @@ tensor_matmul :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
 				out_data,
 				_flattened_matmul_shape(a.shape, N, in_features, out_features),
 				a.requires_grad || b.requires_grad,
-				a.allocator,
+				_op_alloc(a),
 			)
 			if out.requires_grad {
 				out.op = .MatMul
@@ -870,12 +875,12 @@ tensor_matmul :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
 		panic("tensor_matmul: dimension mismatch")
 	}
 
-	out_data := _matmul(&a.data, &b.data, a.allocator)
+	out_data := _matmul(&a.data, &b.data, _op_alloc(a))
 	out := _tensor_new_op(
 		out_data,
 		[4]int{a.data.rows, b.data.cols, 1, 1},
 		a.requires_grad || b.requires_grad,
-		a.allocator,
+		_op_alloc(a),
 	)
 	if out.requires_grad {
 		out.op = .MatMul
@@ -939,6 +944,7 @@ tensor_free_graph :: proc(root: ^Tensor, allocator: mem.Allocator = context.allo
 			delete(node.int_metadata)
 			delete(node.f64_metadata)
 			if node.dropout_mask != nil {delete(node.dropout_mask, node.allocator)}
+			_scope_note_free(node.allocator)
 			free(node, node.allocator)
 			freed_in_graph += 1
 			global_tensors_freed += 1
@@ -1143,6 +1149,7 @@ tensor_batch_norm_2d :: proc(
 	eps: f64 = 1e-5,
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
+	allocator := _scope_or(allocator) // the active graph scope, if any
 	_check_shape(input)
 	N := input.shape[0]
 	C := input.shape[1]
@@ -1151,7 +1158,7 @@ tensor_batch_norm_2d :: proc(
 	N_hw := f64(N * H * W)
 	channel_size := N * H * W
 
-	out_data := l.matrix_new(f64, 1, N * C * H * W, input.allocator)
+	out_data := l.matrix_new(f64, 1, N * C * H * W, _op_alloc(input))
 
 	// ✅ Allocate buffers ONCE outside the loop for reuse
 	channel_buf := make([]f64, channel_size, allocator)
@@ -1239,7 +1246,7 @@ tensor_batch_norm_2d :: proc(
 		out_data,
 		input.shape,
 		input.requires_grad || weight.requires_grad,
-		input.allocator,
+		_op_alloc(input),
 	)
 
 	if out.requires_grad {
@@ -1405,6 +1412,7 @@ tensor_rnn :: proc(
 	bias: ^Tensor,
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
+	allocator := _scope_or(allocator) // the active graph scope, if any
 	_check_shape(x)
 	_check_shape(w_ih)
 	batch := x.shape[0]
@@ -1418,7 +1426,7 @@ tensor_rnn :: proc(
 		w_hh.requires_grad ||
 		bias.requires_grad
 
-	out_data := l.matrix_new(f64, 1, batch * seq_len * hidden_size, x.allocator)
+	out_data := l.matrix_new(f64, 1, batch * seq_len * hidden_size, _op_alloc(x))
 
 	proj := _step_projection(x, w_ih, hidden_size, false, allocator)
 	h_hh := make([]f64, BH, allocator)
@@ -1427,7 +1435,7 @@ tensor_rnn :: proc(
 		delete(h_hh, allocator)
 	}
 
-	saved := make([dynamic]f64, ((seq_len + 1) if rg else 2) * BH, x.allocator)
+	saved := make([dynamic]f64, ((seq_len + 1) if rg else 2) * BH, _op_alloc(x))
 	hs := _Recurrent_State{saved[:], BH, rg}
 	copy(_state_row(hs, 0), h_0.data.data)
 
@@ -1446,7 +1454,7 @@ tensor_rnn :: proc(
 		_scatter_step(out_data.data, h_next, batch, seq_len, hidden_size, s)
 	}
 
-	out := _tensor_new_op(out_data, [4]int{batch, seq_len, hidden_size, 1}, rg, x.allocator)
+	out := _tensor_new_op(out_data, [4]int{batch, seq_len, hidden_size, 1}, rg, _op_alloc(x))
 	_keep_saved(out, saved)
 
 	if out.requires_grad {
@@ -1530,6 +1538,7 @@ tensor_gru :: proc(
 	bias: ^Tensor,
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
+	allocator := _scope_or(allocator) // the active graph scope, if any
 	_check_shape(x)
 	_check_shape(w_ih)
 	batch := x.shape[0]
@@ -1544,7 +1553,7 @@ tensor_gru :: proc(
 		w_hh.requires_grad ||
 		bias.requires_grad
 
-	out_data := l.matrix_new(f64, 1, batch * seq_len * hidden_size, x.allocator)
+	out_data := l.matrix_new(f64, 1, batch * seq_len * hidden_size, _op_alloc(x))
 
 	proj := _step_projection(x, w_ih, 3 * hidden_size, false, allocator)
 	gate_hh := make([]f64, BG, allocator)
@@ -1555,7 +1564,7 @@ tensor_gru :: proc(
 
 	n_states := (seq_len + 1) if rg else 2
 	SBH := seq_len * BH
-	saved := make([dynamic]f64, n_states * BH + (4 * SBH if rg else 0), x.allocator)
+	saved := make([dynamic]f64, n_states * BH + (4 * SBH if rg else 0), _op_alloc(x))
 	hs := _Recurrent_State{saved[0:n_states * BH], BH, rg}
 	rs, zs, ns, hh_n: []f64
 	if rg {
@@ -1583,7 +1592,7 @@ tensor_gru :: proc(
 		_scatter_step(out_data.data, h_next, batch, seq_len, hidden_size, s)
 	}
 
-	out := _tensor_new_op(out_data, [4]int{batch, seq_len, hidden_size, 1}, rg, x.allocator)
+	out := _tensor_new_op(out_data, [4]int{batch, seq_len, hidden_size, 1}, rg, _op_alloc(x))
 	_keep_saved(out, saved)
 
 	if out.requires_grad {
@@ -1677,6 +1686,7 @@ tensor_lstm :: proc(
 	bias: ^Tensor,
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
+	allocator := _scope_or(allocator) // the active graph scope, if any
 	_check_shape(x)
 	_check_shape(w_ih)
 	batch := x.shape[0]
@@ -1692,7 +1702,7 @@ tensor_lstm :: proc(
 		w_hh.requires_grad ||
 		bias.requires_grad
 
-	out_data := l.matrix_new(f64, 1, batch * seq_len * hidden_size, x.allocator)
+	out_data := l.matrix_new(f64, 1, batch * seq_len * hidden_size, _op_alloc(x))
 
 	proj := _step_projection(x, w_ih, 4 * hidden_size, false, allocator)
 	gate_hh := make([]f64, BG, allocator)
@@ -1703,7 +1713,7 @@ tensor_lstm :: proc(
 
 	n_states := (seq_len + 1) if rg else 2
 	SBH := seq_len * BH
-	saved := make([dynamic]f64, 2 * n_states * BH + (5 * SBH if rg else 0), x.allocator)
+	saved := make([dynamic]f64, 2 * n_states * BH + (5 * SBH if rg else 0), _op_alloc(x))
 	hs := _Recurrent_State{saved[0:n_states * BH], BH, rg}
 	cs := _Recurrent_State{saved[n_states * BH:2 * n_states * BH], BH, rg}
 	ig, fg, gg, og, tc: []f64
@@ -1737,7 +1747,7 @@ tensor_lstm :: proc(
 		_scatter_step(out_data.data, h_next, batch, seq_len, hidden_size, s)
 	}
 
-	out := _tensor_new_op(out_data, [4]int{batch, seq_len, hidden_size, 1}, rg, x.allocator)
+	out := _tensor_new_op(out_data, [4]int{batch, seq_len, hidden_size, 1}, rg, _op_alloc(x))
 	_keep_saved(out, saved)
 
 	if out.requires_grad {
@@ -1765,7 +1775,7 @@ tensor_embedding :: proc(input: ^Tensor, weight: ^Tensor) -> ^Tensor {
 	vocab_size := weight.shape[0]
 	embed_dim := weight.shape[1]
 
-	out_data := l.matrix_new(f64, 1, batch * seq_len * embed_dim, input.allocator)
+	out_data := l.matrix_new(f64, 1, batch * seq_len * embed_dim, _op_alloc(input))
 
 	for b in 0 ..< batch {
 		for s in 0 ..< seq_len {
@@ -1791,7 +1801,7 @@ tensor_embedding :: proc(input: ^Tensor, weight: ^Tensor) -> ^Tensor {
 		out_data,
 		[4]int{batch, seq_len, embed_dim, 1},
 		weight.requires_grad,
-		input.allocator,
+		_op_alloc(input),
 	)
 
 	if out.requires_grad {
@@ -1812,6 +1822,7 @@ tensor_scaled_dot_product_attention :: proc(
 	V: ^Tensor,
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
+	allocator := _scope_or(allocator) // the active graph scope, if any
 	_check_shape(Q)
 	_check_shape(K)
 	_check_shape(V)
@@ -1821,7 +1832,7 @@ tensor_scaled_dot_product_attention :: proc(
 	d_k := Q.shape[2]
 	d_v := V.shape[2]
 
-	out_data := l.matrix_new(f64, 1, batch * seq_q * d_v, Q.allocator)
+	out_data := l.matrix_new(f64, 1, batch * seq_q * d_v, _op_alloc(Q))
 	scale := 1.0 / math.sqrt(f64(d_k))
 
 	for b in 0 ..< batch {
@@ -1889,7 +1900,7 @@ tensor_scaled_dot_product_attention :: proc(
 		out_data,
 		[4]int{batch, seq_q, d_v, 1},
 		Q.requires_grad || K.requires_grad || V.requires_grad,
-		Q.allocator,
+		_op_alloc(Q),
 	)
 
 	if out.requires_grad {
@@ -1913,7 +1924,7 @@ tensor_permute_mha :: proc(
 	head_dim: int,
 ) -> ^Tensor {
 	d_model := num_heads * head_dim
-	out_data := l.matrix_new(f64, 1, batch * num_heads * seq_len * head_dim, x.allocator)
+	out_data := l.matrix_new(f64, 1, batch * num_heads * seq_len * head_dim, _op_alloc(x))
 
 	for b in 0 ..< batch {
 		for s in 0 ..< seq_len {
@@ -1931,7 +1942,7 @@ tensor_permute_mha :: proc(
 		out_data,
 		[4]int{batch * num_heads, seq_len, head_dim, 1},
 		x.requires_grad,
-		x.allocator,
+		_op_alloc(x),
 	)
 
 	if out.requires_grad {
@@ -1955,7 +1966,7 @@ tensor_permute_mha_inverse :: proc(
 	head_dim: int,
 ) -> ^Tensor {
 	d_model := num_heads * head_dim
-	out_data := l.matrix_new(f64, 1, batch * seq_len * d_model, x.allocator)
+	out_data := l.matrix_new(f64, 1, batch * seq_len * d_model, _op_alloc(x))
 
 	for b in 0 ..< batch {
 		for s in 0 ..< seq_len {
@@ -1973,7 +1984,7 @@ tensor_permute_mha_inverse :: proc(
 		out_data,
 		[4]int{batch, seq_len, d_model, 1},
 		x.requires_grad,
-		x.allocator,
+		_op_alloc(x),
 	)
 
 	if out.requires_grad {
@@ -1994,6 +2005,7 @@ tensor_layer_norm :: proc(
 	eps: f64 = 1e-5,
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
+	allocator := _scope_or(allocator) // the active graph scope, if any
 	d_model := gamma.data.cols
 	if beta.data.cols != d_model {
 		panic("tensor_layer_norm: beta dimension mismatch")
@@ -2033,7 +2045,7 @@ tensor_layer_norm :: proc(
 		}
 	}
 
-	out_data := l.matrix_new(f64, input.data.rows, input.data.cols, input.allocator)
+	out_data := l.matrix_new(f64, input.data.rows, input.data.cols, _op_alloc(input))
 
 	// Temporary buffers for SIMD operations (reused across rows)
 	centered := make([]f64, d_model, allocator)
@@ -2079,7 +2091,7 @@ tensor_layer_norm :: proc(
 		out_data,
 		input.shape,
 		input.requires_grad || gamma.requires_grad || beta.requires_grad,
-		input.allocator,
+		_op_alloc(input),
 	)
 
 	if out.requires_grad {
@@ -2105,6 +2117,7 @@ tensor_masked_scaled_dot_product_attention :: proc(
 	mask: []f64,
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
+	allocator := _scope_or(allocator) // the active graph scope, if any
 	_check_shape(Q)
 	_check_shape(K)
 	_check_shape(V)
@@ -2114,7 +2127,7 @@ tensor_masked_scaled_dot_product_attention :: proc(
 	d_k := Q.shape[2]
 	d_v := V.shape[2]
 
-	out_data := l.matrix_new(f64, 1, batch * seq_q * d_v, Q.allocator)
+	out_data := l.matrix_new(f64, 1, batch * seq_q * d_v, _op_alloc(Q))
 	scale := 1.0 / math.sqrt(f64(d_k))
 
 	for b in 0 ..< batch {
@@ -2191,7 +2204,7 @@ tensor_masked_scaled_dot_product_attention :: proc(
 		out_data,
 		[4]int{batch, seq_q, d_v, 1},
 		Q.requires_grad || K.requires_grad || V.requires_grad,
-		Q.allocator,
+		_op_alloc(Q),
 	)
 
 	if out.requires_grad {
@@ -2241,14 +2254,14 @@ tensor_binary_cross_entropy :: proc(pred: ^Tensor, target: ^Tensor) -> ^Tensor {
 	}
 	loss /= n
 
-	out_data := l.matrix_new(f64, 1, 1, pred.allocator)
+	out_data := l.matrix_new(f64, 1, 1, _op_alloc(pred))
 	out_data.data[0] = loss
 
 	out := _tensor_new_op(
 		out_data,
 		SCALAR_SHAPE,
 		pred.requires_grad || target.requires_grad,
-		pred.allocator,
+		_op_alloc(pred),
 	)
 	if out.requires_grad {
 		out.op = .BinaryCrossEntropy
@@ -2287,10 +2300,10 @@ tensor_sub :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
 		panic("tensor_sub: dimension mismatch")
 	}
 
-	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
+	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
 	l.vec_sub_simd(a.data.data, b.data.data, out_data.data)
 
-	out := _tensor_new_op(out_data, a.shape, a.requires_grad || b.requires_grad, a.allocator)
+	out := _tensor_new_op(out_data, a.shape, a.requires_grad || b.requires_grad, _op_alloc(a))
 	if out.requires_grad {
 		out.op = .Sub
 		append(&out.inputs, a)
@@ -2305,10 +2318,10 @@ tensor_mean :: proc(a: ^Tensor) -> ^Tensor {
 	sum := l.sum_simd(a.data.data)
 	mean_val := sum / n
 
-	out_data := l.matrix_new(f64, 1, 1, a.allocator)
+	out_data := l.matrix_new(f64, 1, 1, _op_alloc(a))
 	out_data.data[0] = mean_val
 
-	out := _tensor_new_op(out_data, SCALAR_SHAPE, a.requires_grad, a.allocator)
+	out := _tensor_new_op(out_data, SCALAR_SHAPE, a.requires_grad, _op_alloc(a))
 	if out.requires_grad {
 		out.op = .Mean
 		append(&out.inputs, a)
@@ -2339,14 +2352,14 @@ tensor_kl_divergence :: proc(mu: ^Tensor, log_var: ^Tensor) -> ^Tensor {
 
 	kl_loss := -0.5 * kl_sum / n
 
-	out_data := l.matrix_new(f64, 1, 1, mu.allocator)
+	out_data := l.matrix_new(f64, 1, 1, _op_alloc(mu))
 	out_data.data[0] = kl_loss
 
 	out := _tensor_new_op(
 		out_data,
 		SCALAR_SHAPE,
 		mu.requires_grad || log_var.requires_grad,
-		mu.allocator,
+		_op_alloc(mu),
 	)
 	if out.requires_grad {
 		out.op = .KLDivergence
@@ -2357,9 +2370,9 @@ tensor_kl_divergence :: proc(mu: ^Tensor, log_var: ^Tensor) -> ^Tensor {
 }
 
 tensor_sigmoid :: proc(a: ^Tensor) -> ^Tensor {
-	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
+	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
 	l.vec_sigmoid_simd(a.data.data, out_data.data) // ✅ SIMD
-	out := _tensor_new_op(out_data, a.shape, a.requires_grad, a.allocator)
+	out := _tensor_new_op(out_data, a.shape, a.requires_grad, _op_alloc(a))
 	if out.requires_grad {
 		out.op = .Sigmoid
 		append(&out.inputs, a)
@@ -2368,9 +2381,9 @@ tensor_sigmoid :: proc(a: ^Tensor) -> ^Tensor {
 }
 
 tensor_tanh :: proc(a: ^Tensor) -> ^Tensor {
-	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
+	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
 	l.vec_tanh_simd(a.data.data, out_data.data) // ✅ SIMD
-	out := _tensor_new_op(out_data, a.shape, a.requires_grad, a.allocator)
+	out := _tensor_new_op(out_data, a.shape, a.requires_grad, _op_alloc(a))
 	if out.requires_grad {
 		out.op = .Tanh
 		append(&out.inputs, a)
@@ -2379,9 +2392,9 @@ tensor_tanh :: proc(a: ^Tensor) -> ^Tensor {
 }
 
 tensor_leaky_relu :: proc(a: ^Tensor, alpha: f64 = 0.01) -> ^Tensor {
-	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
+	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
 	l.vec_leaky_relu_simd(a.data.data, alpha, out_data.data) // ✅ SIMD
-	out := _tensor_new_op(out_data, a.shape, a.requires_grad, a.allocator)
+	out := _tensor_new_op(out_data, a.shape, a.requires_grad, _op_alloc(a))
 	if out.requires_grad {
 		out.op = .LeakyReLU
 		append(&out.inputs, a)
@@ -2391,9 +2404,9 @@ tensor_leaky_relu :: proc(a: ^Tensor, alpha: f64 = 0.01) -> ^Tensor {
 }
 
 tensor_neg :: proc(a: ^Tensor) -> ^Tensor {
-	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
+	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
 	l.vec_neg_simd(a.data.data, out_data.data) // ✅ SIMD
-	out := _tensor_new_op(out_data, a.shape, a.requires_grad, a.allocator)
+	out := _tensor_new_op(out_data, a.shape, a.requires_grad, _op_alloc(a))
 	if out.requires_grad {
 		out.op = .Neg
 		append(&out.inputs, a)
@@ -2402,9 +2415,9 @@ tensor_neg :: proc(a: ^Tensor) -> ^Tensor {
 }
 
 tensor_scale :: proc(a: ^Tensor, scalar: f64) -> ^Tensor {
-	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
+	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
 	l.vec_scale_simd(a.data.data, scalar, out_data.data) // ✅ SIMD
-	out := _tensor_new_op(out_data, a.shape, a.requires_grad, a.allocator)
+	out := _tensor_new_op(out_data, a.shape, a.requires_grad, _op_alloc(a))
 	if out.requires_grad {
 		out.op = .Scale
 		append(&out.inputs, a)
@@ -2417,11 +2430,11 @@ tensor_scale :: proc(a: ^Tensor, scalar: f64) -> ^Tensor {
 // Backward: grad_a = grad_out * exp(a) = grad_out * out
 // ============================================================================
 tensor_exp :: proc(a: ^Tensor) -> ^Tensor {
-	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
+	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
 	for i in 0 ..< len(a.data.data) {
 		out_data.data[i] = math.exp(a.data.data[i])
 	}
-	out := _tensor_new_op(out_data, a.shape, a.requires_grad, a.allocator)
+	out := _tensor_new_op(out_data, a.shape, a.requires_grad, _op_alloc(a))
 	if out.requires_grad {
 		out.op = .Exp
 		append(&out.inputs, a)
@@ -2434,11 +2447,11 @@ tensor_exp :: proc(a: ^Tensor) -> ^Tensor {
 // Backward: grad_a = grad_out / (2 * sqrt(a)) = grad_out / (2 * out)
 // ============================================================================
 tensor_sqrt :: proc(a: ^Tensor) -> ^Tensor {
-	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
+	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
 	for i in 0 ..< len(a.data.data) {
 		out_data.data[i] = math.sqrt(a.data.data[i])
 	}
-	out := _tensor_new_op(out_data, a.shape, a.requires_grad, a.allocator)
+	out := _tensor_new_op(out_data, a.shape, a.requires_grad, _op_alloc(a))
 	if out.requires_grad {
 		out.op = .Sqrt
 		append(&out.inputs, a)
@@ -2451,11 +2464,11 @@ tensor_sqrt :: proc(a: ^Tensor) -> ^Tensor {
 // Backward: grad_a = grad_out / a
 // ============================================================================
 tensor_log :: proc(a: ^Tensor) -> ^Tensor {
-	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
+	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
 	for i in 0 ..< len(a.data.data) {
 		out_data.data[i] = math.ln_f64(a.data.data[i])
 	}
-	out := _tensor_new_op(out_data, a.shape, a.requires_grad, a.allocator)
+	out := _tensor_new_op(out_data, a.shape, a.requires_grad, _op_alloc(a))
 	if out.requires_grad {
 		out.op = .Log
 		append(&out.inputs, a)
@@ -2472,11 +2485,11 @@ tensor_div :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
 	if a.data.rows != b.data.rows || a.data.cols != b.data.cols {
 		panic("tensor_div: dimension mismatch")
 	}
-	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
+	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
 	for i in 0 ..< len(a.data.data) {
 		out_data.data[i] = a.data.data[i] / b.data.data[i]
 	}
-	out := _tensor_new_op(out_data, a.shape, a.requires_grad || b.requires_grad, a.allocator)
+	out := _tensor_new_op(out_data, a.shape, a.requires_grad || b.requires_grad, _op_alloc(a))
 	if out.requires_grad {
 		out.op = .Div
 		append(&out.inputs, a)
@@ -2491,7 +2504,7 @@ tensor_div :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
 // Backward: grad_a = grad_out * φ(a) where φ is the standard normal PDF
 // ============================================================================
 tensor_norm_cdf :: proc(a: ^Tensor) -> ^Tensor {
-	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
+	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
 
 	// Hastings approximation coefficients
 	p := 0.2316419
@@ -2528,7 +2541,7 @@ tensor_norm_cdf :: proc(a: ^Tensor) -> ^Tensor {
 		out_data.data[i] = cdf
 	}
 
-	out := _tensor_new_op(out_data, a.shape, a.requires_grad, a.allocator)
+	out := _tensor_new_op(out_data, a.shape, a.requires_grad, _op_alloc(a))
 	if out.requires_grad {
 		out.op = .NormCDF
 		append(&out.inputs, a)
@@ -2540,7 +2553,7 @@ tensor_sum_dim1 :: proc(a: ^Tensor) -> ^Tensor {
 	batch_size := a.shape[0]
 	num_assets := a.shape[1]
 
-	out_data := l.matrix_new(f64, batch_size, 1, a.allocator)
+	out_data := l.matrix_new(f64, batch_size, 1, _op_alloc(a))
 	for b in 0 ..< batch_size {
 		sum := 0.0
 		for asset in 0 ..< num_assets {
@@ -2549,7 +2562,7 @@ tensor_sum_dim1 :: proc(a: ^Tensor) -> ^Tensor {
 		out_data.data[b] = sum
 	}
 
-	out := _tensor_new_op(out_data, [4]int{batch_size, 1, 1, 1}, a.requires_grad, a.allocator)
+	out := _tensor_new_op(out_data, [4]int{batch_size, 1, 1, 1}, a.requires_grad, _op_alloc(a))
 	if out.requires_grad {
 		out.op = .SumDim1
 		append(&out.inputs, a)
@@ -2560,14 +2573,14 @@ tensor_sum_dim1 :: proc(a: ^Tensor) -> ^Tensor {
 
 // tensor_clamp: element-wise clamp to [lo, hi]
 tensor_clamp :: proc(a: ^Tensor, lo: f64, hi: f64) -> ^Tensor {
-	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
+	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
 	for i in 0 ..< len(a.data.data) {
 		v := a.data.data[i]
 		if v < lo {v = lo}
 		if v > hi {v = hi}
 		out_data.data[i] = v
 	}
-	out := _tensor_new_op(out_data, a.shape, a.requires_grad, a.allocator)
+	out := _tensor_new_op(out_data, a.shape, a.requires_grad, _op_alloc(a))
 	if out.requires_grad {
 		out.op = .Clamp // add .Clamp to the Op enum
 		append(&out.inputs, a)
@@ -2580,9 +2593,10 @@ tensor_clamp :: proc(a: ^Tensor, lo: f64, hi: f64) -> ^Tensor {
 // tensor_softmax applies a numerically stable softmax independently to each row
 // of a [N, C] matrix (normalizes over the last dim). A [1, C] tensor is a single row.
 tensor_softmax :: proc(logits: ^Tensor, allocator: mem.Allocator = context.allocator) -> ^Tensor {
+	allocator := _scope_or(allocator) // the active graph scope, if any
 	N := logits.data.rows
 	C := logits.data.cols
-	out_data := l.matrix_new(f64, N, C, logits.allocator)
+	out_data := l.matrix_new(f64, N, C, _op_alloc(logits))
 
 	for r in 0 ..< N {
 		row_in := logits.data.data[r * C:(r + 1) * C]
@@ -2603,7 +2617,7 @@ tensor_softmax :: proc(logits: ^Tensor, allocator: mem.Allocator = context.alloc
 		}
 	}
 
-	out := _tensor_new_op(out_data, logits.shape, logits.requires_grad, logits.allocator)
+	out := _tensor_new_op(out_data, logits.shape, logits.requires_grad, _op_alloc(logits))
 	if out.requires_grad {
 		out.op = .Softmax
 		append(&out.inputs, logits)
@@ -2620,9 +2634,9 @@ tensor_entropy :: proc(a: ^Tensor) -> ^Tensor {
 			entropy_val += -p * math.ln_f64(p)
 		}
 	}
-	out_data := l.matrix_new(f64, 1, 1, a.allocator)
+	out_data := l.matrix_new(f64, 1, 1, _op_alloc(a))
 	out_data.data[0] = entropy_val
-	out := _tensor_new_op(out_data, SCALAR_SHAPE, a.requires_grad, a.allocator)
+	out := _tensor_new_op(out_data, SCALAR_SHAPE, a.requires_grad, _op_alloc(a))
 	if out.requires_grad {
 		out.op = .Entropy
 		append(&out.inputs, a)
@@ -2658,13 +2672,13 @@ tensor_bce_loss :: proc(prediction: ^Tensor, target: ^Tensor) -> ^Tensor {
 	avg_loss := loss_sum / f64(n)
 
 	// Create output tensor
-	out_data := l.matrix_new(f64, 1, 1, prediction.allocator)
+	out_data := l.matrix_new(f64, 1, 1, _op_alloc(prediction))
 	out_data.data[0] = avg_loss
 	out := _tensor_new_op(
 		out_data,
 		SCALAR_SHAPE,
 		prediction.requires_grad || target.requires_grad,
-		prediction.allocator,
+		_op_alloc(prediction),
 	)
 
 	if out.requires_grad {
@@ -2684,6 +2698,7 @@ tensor_concat :: proc(
 	dim: int,
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
+	allocator := _scope_or(allocator) // the active graph scope, if any
 	for x in tensors {_check_shape(x)}
 	if len(tensors) == 0 {
 		panic("tensor_concat: empty tensor slice")
@@ -2772,6 +2787,7 @@ tensor_permute_lob :: proc(
 	batch, c_out, t_out, l_out: int,
 	alloc: mem.Allocator,
 ) -> ^Tensor {
+	alloc := _scope_or(alloc) // the active graph scope, if any
 	feat_dim := c_out * l_out
 	out_data := l.matrix_new(f64, 1, batch * t_out * feat_dim, alloc)
 
@@ -2810,6 +2826,7 @@ tensor_sharpe_loss :: proc(
 	risk_free_rate: f64 = 0.0,
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
+	allocator := _scope_or(allocator) // the active graph scope, if any
 	n := f64(len(returns.data.data))
 	if n == 0 {
 		panic("tensor_sharpe_loss: empty returns tensor")
@@ -2864,6 +2881,7 @@ tensor_normalize_time :: proc(
 	eps: f64 = 1e-8,
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
+	allocator := _scope_or(allocator) // the active graph scope, if any
 	_check_shape(input)
 	N := input.shape[0]
 	C := input.shape[1]
@@ -2939,6 +2957,7 @@ tensor_logsumexp_dim1 :: proc(
 	num_actions: int,
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
+	allocator := _scope_or(allocator) // the active graph scope, if any
 	_check_shape(q)
 	batch := q.shape[0]
 	out_data := l.matrix_new(f64, batch, 1, allocator)
@@ -2970,7 +2989,7 @@ tensor_logsumexp_dim1 :: proc(
 // Backward: grad_a = grad_out * sigmoid(x)
 // ============================================================================
 tensor_softplus :: proc(a: ^Tensor) -> ^Tensor {
-	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, a.allocator)
+	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
 	for i in 0 ..< len(a.data.data) {
 		x := a.data.data[i]
 		// ✅ FIX: Correct numerically stable softplus
@@ -2982,7 +3001,7 @@ tensor_softplus :: proc(a: ^Tensor) -> ^Tensor {
 			out_data.data[i] = math.ln_f64(1.0 + math.exp(x))
 		}
 	}
-	out := _tensor_new_op(out_data, a.shape, a.requires_grad, a.allocator)
+	out := _tensor_new_op(out_data, a.shape, a.requires_grad, _op_alloc(a))
 	if out.requires_grad {
 		out.op = .Softplus
 		append(&out.inputs, a)
@@ -3064,6 +3083,7 @@ tensor_ssm :: proc(
 	D: ^Tensor, // [1, d_model]
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
+	allocator := _scope_or(allocator) // the active graph scope, if any
 	_check_shape(x)
 	_check_shape(A)
 	batch := x.shape[0]
@@ -3079,14 +3099,14 @@ tensor_ssm :: proc(
 		Delta.requires_grad ||
 		D.requires_grad
 
-	out_data := l.matrix_new(f64, 1, batch * seq_len * d_model, x.allocator)
+	out_data := l.matrix_new(f64, 1, batch * seq_len * d_model, _op_alloc(x))
 
 	h := make([]f64, batch * d_model * d_state, allocator)
 	defer delete(h, allocator)
 
 	// Saved for backward (f64_metadata): exp(delta * A), see _Ssm_Fwd_Job.
 	// Every element is written by the scan, so the buffer is not zeroed first.
-	saved := make([dynamic]f64, 0, x.allocator)
+	saved := make([dynamic]f64, 0, _op_alloc(x))
 	if rg {non_zero_resize(&saved, batch * seq_len * d_model * d_state)}
 
 	job := _Ssm_Fwd_Job {
@@ -3106,7 +3126,7 @@ tensor_ssm :: proc(
 	}
 	util.parallel_for(batch, &job, _ssm_forward_rows, _ssm_threads(batch, seq_len * d_model * d_state))
 
-	out := _tensor_new_op(out_data, [4]int{batch, seq_len, d_model, 1}, rg, x.allocator)
+	out := _tensor_new_op(out_data, [4]int{batch, seq_len, d_model, 1}, rg, _op_alloc(x))
 	_keep_saved(out, saved)
 
 	if out.requires_grad {
@@ -3139,6 +3159,7 @@ tensor_flash_attention :: proc(
 	causal: bool = false,
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
+	allocator := _scope_or(allocator) // the active graph scope, if any
 	_check_shape(Q)
 	_check_shape(K)
 	_check_shape(V)
@@ -3148,7 +3169,7 @@ tensor_flash_attention :: proc(
 	d_k := Q.shape[2]
 	d_v := V.shape[2]
 
-	out_data := l.matrix_new(f64, 1, batch * seq_q * d_v, Q.allocator)
+	out_data := l.matrix_new(f64, 1, batch * seq_q * d_v, _op_alloc(Q))
 	scale := 1.0 / math.sqrt(f64(d_k))
 
 	// Block size for K and V tiling (chosen to fit in L1/L2 cache)
@@ -3252,7 +3273,7 @@ tensor_flash_attention :: proc(
 		out_data,
 		[4]int{batch, seq_q, d_v, 1},
 		Q.requires_grad || K.requires_grad || V.requires_grad,
-		Q.allocator,
+		_op_alloc(Q),
 	)
 	if out.requires_grad {
 		out.op = .FlashAttention
@@ -3326,6 +3347,7 @@ tensor_gate_mul :: proc(
 	gate: ^Tensor,
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
+	allocator := _scope_or(allocator) // the active graph scope, if any
 	_check_shape(x)
 	N := x.shape[0]
 	D := x.shape[1]
@@ -3353,6 +3375,7 @@ tensor_reshape :: proc(
 	new_shape: [4]int,
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
+	allocator := _scope_or(allocator) // the active graph scope, if any
 	old_total := len(input.data.data)
 	new_total := new_shape[0] * new_shape[1] * new_shape[2] * new_shape[3]
 
@@ -3384,6 +3407,7 @@ tensor_slice_gate :: proc(
 	expert_idx: int,
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
+	allocator := _scope_or(allocator) // the active graph scope, if any
 	N := gates.data.rows
 	E := gates.data.cols
 
@@ -3416,6 +3440,7 @@ tensor_prospect_value :: proc(
 	lambda: f64 = 2.25,
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
+	allocator := _scope_or(allocator) // the active graph scope, if any
 	out_data := l.matrix_new(f64, returns.data.rows, returns.data.cols, allocator)
 
 	for i in 0 ..< len(returns.data.data) {
@@ -3449,6 +3474,7 @@ tensor_prob_weighting :: proc(
 	gamma: f64 = 0.61,
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
+	allocator := _scope_or(allocator) // the active graph scope, if any
 	eps := 1e-7
 	out_data := l.matrix_new(f64, p.data.rows, p.data.cols, allocator)
 
@@ -3482,6 +3508,7 @@ tensor_prospect_utility :: proc(
 	lambda: f64 = 2.25,
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
+	allocator := _scope_or(allocator) // the active graph scope, if any
 	n := f64(len(returns.data.data))
 	if n == 0 {
 		panic("tensor_prospect_utility: empty returns tensor")

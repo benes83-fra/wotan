@@ -627,6 +627,8 @@ main :: proc() {
 	free_all(context.temp_allocator)
 	test.recurrent_scan_test(context.temp_allocator)
 	free_all(context.temp_allocator)
+	test.graph_scope_test(context.temp_allocator)
+	free_all(context.temp_allocator)
 	test.sequential_test(context.temp_allocator)
 	free_all(context.temp_allocator)
 	test.mnist_loader_test(context.temp_allocator)

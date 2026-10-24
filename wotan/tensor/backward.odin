@@ -55,6 +55,8 @@ tensor_backward_with_grad :: proc(
 
 // _backward_from_root runs the reverse pass once root.grad holds the seed.
 _backward_from_root :: proc(root: ^Tensor, allocator: mem.Allocator) {
+	// Scratch memory comes from the active graph scope, if any
+	allocator := _scope_or(allocator)
 	// 1. Build the topological sort
 	topo := make([dynamic]^Tensor, 0, root.allocator)
 	defer delete(topo) // ✅ FIX: Removed allocator
