@@ -262,14 +262,19 @@ wotan/
 ├── plot/               PNG chart rendering
 └── data/               dataset loaders (MNIST)
 tests/                  runnable examples and regression tests
+scripts/                scripts to download model Data or Models (ie. MNIST, finBert, distilgpt2)
+demo_file/              files used in tests and demo
+docs/                   Markdown Documentation
+plots/                  plots that get generate during the demo
+model_checkpoints/      Neural Network Checkpoints that are either imported from HuggingFaces (so far finBERT and distilgpt2) or are generate by the demo
 main.odin               demo and test driver
 ```
 
 ## Tests
 
-`tests/` contains over 100 test procedures, one per area: DataFrame operations, I/O, linear algebra, every ML model, the deep learning stack, and the finance modules. Each is a plain `proc(allocator: mem.Allocator)` called from `main.odin`. Most print results next to known reference values. Some write PNG charts to the working directory.
+`tests/` contains over 100 test procedures, one per area: DataFrame operations, I/O, linear algebra, every ML model, the deep learning stack, and the finance modules. Each is a plain `proc(allocator: mem.Allocator)` called from `main.odin`. Most print results next to known reference values. Some write PNG charts to the plots/ directory.
 
-Tests whose names contain `real_data` fetch live data from Yahoo Finance and need network access. [`test_catalog.md`](test_catalog.md) gives an overview of what each test covers.
+Tests whose names contain `real_data` fetch live data from Yahoo Finance and need network access. [`test_catalog.md`](docs/test_catalog.md) gives an overview of what each test covers.
 
 Run with `-debug` to turn on the tracking allocator. It reports any leaked allocation when the program exits.
 
