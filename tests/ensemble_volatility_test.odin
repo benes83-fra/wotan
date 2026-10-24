@@ -205,6 +205,10 @@ ensemble_volatility_test :: proc(allocator: mem.Allocator) {
 	// ✅ Delegated optimizer registration (works for any backend)
 	ml_fin.ensemble_add_to_optimizer(&ensemble, &opt)
 
+	// One arena per training step / forecast, reused across iterations
+	scope: t.Graph_Scope
+	defer t.graph_scope_destroy(&scope)
+
 	for epoch in 0 ..< epochs {
 		epoch_loss := 0.0
 		for b in 0 ..< num_train_samples / batch_size {
@@ -227,6 +231,7 @@ ensemble_volatility_test :: proc(allocator: mem.Allocator) {
 			y_batch.shape = [4]int{batch_size, 1, 1, 1}
 
 			// ✅ NEW API: no h_0 / c_0 — sequential_forward zero-inits states internally
+			t.graph_begin(&scope)
 			preds := ml_fin.lstm_volatility_forecaster_forward(&ensemble.lstm, x_batch)
 			loss := t.tensor_mse_loss(preds, y_batch)
 			t.tensor_backward(loss, allocator)
@@ -234,7 +239,8 @@ ensemble_volatility_test :: proc(allocator: mem.Allocator) {
 			nn.adam_zero_grad(&opt)
 			epoch_loss += loss.data.data[0]
 
-			t.tensor_free_graph(loss)
+			t.tensor_free_graph(loss) // frees heap-owned helper leaves
+			t.graph_end(&scope)
 			t.tensor_free(x_batch)
 			t.tensor_free(y_batch)
 		}
@@ -272,10 +278,12 @@ ensemble_volatility_test :: proc(allocator: mem.Allocator) {
 		x_batch.shape = [4]int{1, seq_len, input_size, 1}
 
 		// ✅ NEW API: 2-arg forward
+		t.graph_begin(&scope)
 		preds := ml_fin.lstm_volatility_forecaster_forward(&ensemble.lstm, x_batch)
 		lstm_val_forecasts[i] = preds.data.data[0]
 
 		t.tensor_free_graph(preds)
+		t.graph_end(&scope)
 		t.tensor_free(x_batch)
 
 		garch_idx := sample_idx + seq_len
@@ -559,6 +567,9 @@ vrp_signal_test :: proc(allocator: mem.Allocator) {
 	ml_fin.ensemble_add_to_optimizer(&ensemble, &opt)
 
 	fmt.println("Training Ensemble for Inference...")
+	// One arena per training step, reused across iterations
+	scope: t.Graph_Scope
+	defer t.graph_scope_destroy(&scope)
 	for epoch in 0 ..< epochs {
 		for b in 0 ..< num_train_samples / batch_size {
 			batch_start := b * batch_size
@@ -580,6 +591,7 @@ vrp_signal_test :: proc(allocator: mem.Allocator) {
 			y_batch.shape = [4]int{batch_size, 1, 1, 1}
 
 			// ✅ NEW API: 2-arg forward, no h_0 / c_0
+			t.graph_begin(&scope)
 			preds := ml_fin.lstm_volatility_forecaster_forward(&ensemble.lstm, x_batch)
 			loss := t.tensor_mse_loss(preds, y_batch)
 			t.tensor_backward(loss, allocator)
@@ -587,6 +599,7 @@ vrp_signal_test :: proc(allocator: mem.Allocator) {
 			nn.adam_zero_grad(&opt)
 
 			t.tensor_free_graph(loss)
+			t.graph_end(&scope)
 			t.tensor_free(x_batch)
 			t.tensor_free(y_batch)
 		}
@@ -817,7 +830,9 @@ vrp_backtest_test :: proc(allocator: mem.Allocator) {
 			Y_seq[i] = targets[i + seq_len]
 		}
 
-		// Training loop
+		// Training loop (one arena per step, reused across steps)
+		scope: t.Graph_Scope
+		defer t.graph_scope_destroy(&scope)
 		for epoch in 0 ..< epochs {
 			for b in 0 ..< num_samples / batch_size {
 				batch_start := b * batch_size
@@ -849,6 +864,7 @@ vrp_backtest_test :: proc(allocator: mem.Allocator) {
 				y_batch := t.tensor_new(y_data, false, allocator)
 				y_batch.shape = [4]int{batch_size, 1, 1, 1}
 
+				t.graph_begin(&scope)
 				preds := ml_fin.lstm_volatility_forecaster_forward(&forecaster.lstm, x_batch)
 				loss := t.tensor_mse_loss(preds, y_batch)
 				t.tensor_backward(loss, allocator)
@@ -856,6 +872,7 @@ vrp_backtest_test :: proc(allocator: mem.Allocator) {
 				nn.adam_zero_grad(opt)
 
 				t.tensor_free_graph(loss)
+				t.graph_end(&scope)
 				t.tensor_free(x_batch)
 				t.tensor_free(y_batch)
 			}
@@ -909,6 +926,9 @@ vrp_backtest_test :: proc(allocator: mem.Allocator) {
 	prev_vrp := 0.0
 	prev_position := 0.0
 
+	// One arena per daily forecast, reused across days
+	inf_scope: t.Graph_Scope
+	defer t.graph_scope_destroy(&inf_scope)
 	for day in backtest_start ..< num_days - 1 {
 		bt_idx := day - backtest_start
 
@@ -977,9 +997,11 @@ vrp_backtest_test :: proc(allocator: mem.Allocator) {
 		x_inf := t.tensor_new(x_inf_data, true, main_alloc)
 		x_inf.shape = [4]int{1, seq_len, num_features, 1}
 
+		t.graph_begin(&inf_scope)
 		lstm_pred := ml_fin.lstm_volatility_forecaster_forward(&forecaster.lstm, x_inf)
 		lstm_rv := lstm_pred.data.data[0]
 		t.tensor_free_graph(lstm_pred)
+		t.graph_end(&inf_scope)
 		t.tensor_free(x_inf)
 		delete(inf_features, main_alloc)
 

@@ -27,6 +27,8 @@ TimeGAN :: struct {
 	feature_dim:   int,
 	latent_dim:    int,
 	allocator:     mem.Allocator,
+	// One arena per training sample / generated sequence, reused across them
+	scope:         tensor.Graph_Scope,
 }
 
 new_timegan :: proc(
@@ -99,6 +101,7 @@ timegan_free :: proc(tg: ^TimeGAN) {
 	nn.adam_free(&tg.optimizer_g)
 	nn.adam_free(&tg.optimizer_d)
 	nn.adam_free(&tg.optimizer_s)
+	tensor.graph_scope_destroy(&tg.scope)
 	free(tg, tg.allocator)
 }
 
@@ -258,6 +261,8 @@ train_embedder_recovery :: proc(
 	}
 
 	for b in 0 ..< batch_size {
+		tensor.graph_begin(&tg.scope)
+		defer tensor.graph_end(&tg.scope)
 		seq_idx := rand.int_range(0, n_seqs - 1)
 		seq_start := seq_idx * tg.seq_len * tg.feature_dim
 		seq := real_data[seq_start:seq_start + tg.seq_len * tg.feature_dim]
@@ -301,6 +306,8 @@ train_supervisor :: proc(
 	total_loss := 0.0
 
 	for b in 0 ..< batch_size {
+		tensor.graph_begin(&tg.scope)
+		defer tensor.graph_end(&tg.scope)
 		seq_idx := rand.int_range(0, len(real_data) / (tg.seq_len * tg.feature_dim) - 1)
 		seq_start := seq_idx * tg.seq_len * tg.feature_dim
 		seq := real_data[seq_start:seq_start + tg.seq_len * tg.feature_dim]
@@ -342,6 +349,8 @@ train_generator :: proc(
 	total_loss := 0.0
 
 	for b in 0 ..< batch_size {
+		tensor.graph_begin(&tg.scope)
+		defer tensor.graph_end(&tg.scope)
 		noise := tensor.tensor_new(
 			l.matrix_new(f64, tg.seq_len, tg.latent_dim, alloc),
 			false,
@@ -419,6 +428,8 @@ train_discriminator :: proc(
 	total_loss := 0.0
 
 	for b in 0 ..< batch_size {
+		tensor.graph_begin(&tg.scope)
+		defer tensor.graph_end(&tg.scope)
 		seq_idx := rand.int_range(0, len(real_data) / (tg.seq_len * tg.feature_dim) - 1)
 		seq_start := seq_idx * tg.seq_len * tg.feature_dim
 		seq := real_data[seq_start:seq_start + tg.seq_len * tg.feature_dim]
@@ -495,6 +506,8 @@ generate_synthetic_data :: proc(tg: ^TimeGAN, n_sequences: int, alloc: mem.Alloc
 	output := make([]f64, n_sequences * tg.seq_len * tg.feature_dim, alloc)
 
 	for s in 0 ..< n_sequences {
+		tensor.graph_begin(&tg.scope)
+		defer tensor.graph_end(&tg.scope)
 		noise := tensor.tensor_new(
 			l.matrix_new(f64, tg.seq_len, tg.latent_dim, alloc),
 			false,

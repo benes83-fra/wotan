@@ -239,7 +239,12 @@ deeplob_real_data_test :: proc(allocator: mem.Allocator) {
 	fmt.println("------|---------|----------|-------------------------")
 
 	epochs := 15
+	// One arena per training step, reused across epochs
+	scope: t.Graph_Scope
+	defer t.graph_scope_destroy(&scope)
 	for epoch in 0 ..< epochs {
+		t.graph_begin(&scope)
+		defer t.graph_end(&scope)
 		nn.adam_zero_grad(&opt)
 		logits := ml_fin.deeplob_forward(model, features_tensor)
 		loss := t.tensor_cross_entropy_loss(logits, window_labels)
@@ -371,7 +376,12 @@ deeplob_real_data_sharpe_test :: proc(allocator: mem.Allocator) {
 	fmt.println("------|-------------------|------------------|-------------------------")
 
 	epochs := 15
+	// One arena per training step, reused across epochs
+	scope: t.Graph_Scope
+	defer t.graph_scope_destroy(&scope)
 	for epoch in 0 ..< epochs {
+		t.graph_begin(&scope)
+		defer t.graph_end(&scope)
 		nn.adam_zero_grad(&opt)
 		logits := ml_fin.deeplob_forward(model, features_tensor)
 

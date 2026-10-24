@@ -123,7 +123,12 @@ deeplob_talkative_test :: proc(allocator: mem.Allocator) {
 	fmt.println("Epoch | Loss    | Accuracy | Status")
 	fmt.println("------|---------|----------|-------------------------")
 
+	// One arena per training step, reused across epochs
+	scope: t.Graph_Scope
+	defer t.graph_scope_destroy(&scope)
 	for epoch in 0 ..< epochs {
+		t.graph_begin(&scope)
+		defer t.graph_end(&scope)
 		nn.adam_zero_grad(&opt)
 
 		// Forward pass
