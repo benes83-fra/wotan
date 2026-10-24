@@ -34,6 +34,8 @@ DeepHedger :: struct {
 	network:   ^nn.Sequential,
 	config:    DeepHedgerConfig,
 	allocator: mem.Allocator,
+	// One arena per training step / evaluated time step, reused across them
+	scope:     t.Graph_Scope,
 }
 
 // ============================================================================
@@ -66,6 +68,7 @@ deep_hedger_free :: proc(hedger: ^DeepHedger) {
 	if hedger.network != nil {
 		nn.sequential_free(hedger.network)
 	}
+	t.graph_scope_destroy(&hedger.scope)
 	free(hedger, hedger.allocator)
 }
 
@@ -286,13 +289,16 @@ deep_hedging_evaluate :: proc(
 	pnl_values = make([]f64, batch_size, allocator)
 	spot_prices = make([]f64, batch_size, allocator)
 
-	state_data := l.matrix_new(f64, batch_size, state_size, allocator)
-	defer l.matrix_free(&state_data)
-
 	prev_delta_data := make([]f64, batch_size, allocator)
 	defer delete(prev_delta_data, allocator)
 
 	for t_step in 0 ..< seq_len {
+		// The forward graph of this time step lives in the hedger's scope
+		t.graph_begin(&hedger.scope)
+		defer t.graph_end(&hedger.scope)
+		ga := t.graph_allocator(&hedger.scope)
+
+		state_data := l.matrix_new(f64, batch_size, state_size, ga)
 		for b in 0 ..< batch_size {
 			for s in 0 ..< state_size {
 				src_idx := b * (seq_len * state_size) + t_step * state_size + s
@@ -301,9 +307,8 @@ deep_hedging_evaluate :: proc(
 			}
 		}
 
-		state := t.tensor_new(state_data, false, allocator)
+		state := t.tensor_new(state_data, false, ga)
 		delta := nn.sequential_forward(hedger.network, state)
-		t.tensor_free(state)
 
 		if t_step > 0 {
 			for b in 0 ..< batch_size {
@@ -325,7 +330,6 @@ deep_hedging_evaluate :: proc(
 		for b in 0 ..< batch_size {
 			prev_delta_data[b] = delta.data.data[b]
 		}
-		t.tensor_free(delta)
 	}
 
 	for b in 0 ..< batch_size {
@@ -365,38 +369,39 @@ compute_hedging_loss :: proc(
 	mean_l := t.tensor_mean(loss_tensor)
 
 	// 3. Std(L) = sqrt(Mean((L - Mean(L))^2))
-	centered := t.tensor_sub(loss_tensor, mean_l)
+	// (tensor_sub does not broadcast; subtracting a scalar from the [batch, 1]
+	// vector is an add_bias of its negative)
+	centered := t.tensor_add_bias(loss_tensor, t.tensor_neg(mean_l))
 	centered_sq := t.tensor_mul(centered, centered)
 	var_l := t.tensor_mean(centered_sq)
 
 	// Smooth sqrt to prevent NaN gradients
+	// The scalar constants are graph inputs: they must live until backward,
+	// so the graph owns them (freed with the graph, not here)
 	eps := t.tensor_new(l.matrix_new(f64, 1, 1, alloc), false, alloc)
+	eps.owned_by_graph = true
 	eps.data.data[0] = 1e-6
 	std_l := t.tensor_sqrt(t.tensor_add(var_l, eps))
 
 	// 4. Threshold = Mean(L) + 2 * Std(L)
 	two := t.tensor_new(l.matrix_new(f64, 1, 1, alloc), false, alloc)
+	two.owned_by_graph = true
 	two.data.data[0] = 2.0
 	two_std := t.tensor_mul(two, std_l)
 	threshold := t.tensor_add(mean_l, two_std)
 
 	// 5. Relu(L - Threshold)
-	excess_loss := t.tensor_sub(loss_tensor, threshold)
+	excess_loss := t.tensor_add_bias(loss_tensor, t.tensor_neg(threshold))
 	excess_positive := t.tensor_relu(excess_loss)
 	mean_excess := t.tensor_mean(excess_positive)
 
 	// 6. CVaR = Mean(L) + (1/alpha) * Mean(Excess)
 	inv_alpha := t.tensor_new(l.matrix_new(f64, 1, 1, alloc), false, alloc)
+	inv_alpha.owned_by_graph = true
 	inv_alpha.data.data[0] = 1.0 / cvar_alpha
 
 	scaled_excess := t.tensor_mul(mean_excess, inv_alpha)
 	cvar_loss := t.tensor_add(mean_l, scaled_excess)
-
-	// Cleanup temporary scalars
-	t.tensor_free(eps)
-	t.tensor_free(two)
-	t.tensor_free(inv_alpha)
-
 	return cvar_loss
 }
 // ============================================================================
@@ -412,13 +417,16 @@ deep_hedger_train_step :: proc(
 	batch_size := paths.shape[0]
 	seq_len := paths.shape[1]
 	state_size := paths.shape[2]
-	alloc := hedger.allocator
+	// The whole step (graph, helper leaves, backward scratch) lives in the
+	// hedger's scope and is released at once when the step returns
+	t.graph_begin(&hedger.scope)
+	defer t.graph_end(&hedger.scope)
+	alloc := t.graph_allocator(&hedger.scope)
 
 	pnl_data := l.matrix_new(f64, batch_size, 1, alloc)
 	for i in 0 ..< batch_size {pnl_data.data[i] = 0.0}
 	pnl := t.tensor_new(pnl_data, false, alloc)
 	pnl.shape = [4]int{batch_size, 1, 1, 1}
-	pnl.owned_by_graph = true // Ensure cleanup
 
 	prev_delta: ^t.Tensor = nil
 
@@ -433,7 +441,6 @@ deep_hedger_train_step :: proc(
 			}
 		}
 		state := t.tensor_new(state_data, false, alloc)
-		state.owned_by_graph = true
 
 		delta := nn.sequential_forward(hedger.network, state)
 
@@ -448,9 +455,7 @@ deep_hedger_train_step :: proc(
 			}
 
 			s_t := t.tensor_new(s_t_data, false, alloc)
-			s_t.owned_by_graph = true
 			s_prev := t.tensor_new(s_prev_data, false, alloc)
-			s_prev.owned_by_graph = true
 
 			ds := t.tensor_sub(s_t, s_prev)
 			product := t.tensor_mul(delta, ds)
@@ -475,7 +480,6 @@ deep_hedger_train_step :: proc(
 			prev_delta_data.data[i] = delta.data.data[i]
 		}
 		prev_delta = t.tensor_new(prev_delta_data, false, alloc)
-		prev_delta.owned_by_graph = true
 	}
 
 	pnl = t.tensor_sub(pnl, payoffs)
@@ -486,8 +490,6 @@ deep_hedger_train_step :: proc(
 	nn.adam_step(opt)
 	loss_val := loss.data.data[0]
 
-	// This will now safely free the loss graph AND all the leaf nodes we marked as owned_by_graph
-	t.tensor_free_graph(loss)
 
 	return loss_val
 }
@@ -506,13 +508,16 @@ deep_hedger_train_step_multi :: proc(
 	seq_len := paths.shape[1]
 	state_size := paths.shape[2]
 	num_assets := hedger.config.num_assets
-	alloc := hedger.allocator
+	// The whole step (graph, helper leaves, backward scratch) lives in the
+	// hedger's scope and is released at once when the step returns
+	t.graph_begin(&hedger.scope)
+	defer t.graph_end(&hedger.scope)
+	alloc := t.graph_allocator(&hedger.scope)
 
 	pnl_data := l.matrix_new(f64, batch_size, 1, alloc)
 	for i in 0 ..< batch_size {pnl_data.data[i] = 0.0}
 	pnl := t.tensor_new(pnl_data, false, alloc)
 	pnl.shape = [4]int{batch_size, 1, 1, 1}
-	pnl.owned_by_graph = true
 
 	prev_delta: ^t.Tensor = nil
 
@@ -527,7 +532,6 @@ deep_hedger_train_step_multi :: proc(
 			}
 		}
 		state := t.tensor_new(state_data, false, alloc)
-		state.owned_by_graph = true
 
 		delta := nn.sequential_forward(hedger.network, state)
 
@@ -549,11 +553,9 @@ deep_hedger_train_step_multi :: proc(
 
 			ds := t.tensor_new(ds_data, false, alloc)
 			ds.shape = [4]int{batch_size, num_assets, 1, 1}
-			ds.owned_by_graph = true
 
 			s_t := t.tensor_new(s_t_data, false, alloc)
 			s_t.shape = [4]int{batch_size, num_assets, 1, 1}
-			s_t.owned_by_graph = true
 
 			product := t.tensor_mul(delta, ds)
 			pnl_increment := t.tensor_sum_dim1(product)
@@ -581,7 +583,6 @@ deep_hedger_train_step_multi :: proc(
 		}
 		prev_delta = t.tensor_new(prev_delta_data, false, alloc)
 		prev_delta.shape = [4]int{batch_size, num_assets, 1, 1}
-		prev_delta.owned_by_graph = true
 	}
 
 	pnl = t.tensor_sub(pnl, payoffs)
@@ -591,7 +592,6 @@ deep_hedger_train_step_multi :: proc(
 	nn.adam_step(opt)
 	loss_val := loss.data.data[0]
 
-	t.tensor_free_graph(loss)
 
 	return loss_val
 }
