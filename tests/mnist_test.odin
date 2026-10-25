@@ -78,6 +78,7 @@ mnist_loader_test :: proc(allocator: mem.Allocator) {
 
 	fmt.printf("\nLoaded %d test samples\n", test_set.num_samples)
 }
+
 mnist_cnn_test :: proc(allocator: mem.Allocator) {
 	seed_test(#procedure)
 	fmt.println("\n=== Training CNN on MNIST with Augmentation ===")
@@ -113,7 +114,6 @@ mnist_cnn_test :: proc(allocator: mem.Allocator) {
 	defer nn.adam_free(&opt)
 	nn.sequential_add_to_opt(model, &opt)
 
-	// ✅ NEW: Augmentation configuration
 	aug_config := nn.AugmentationConfig {
 		rotation_range    = 15.0, // ±15 degrees
 		translation_range = 2, // ±2 pixels
@@ -125,13 +125,19 @@ mnist_cnn_test :: proc(allocator: mem.Allocator) {
 	epochs := 5
 	num_batches := train_set.num_samples / batch_size
 
+	// ✅ One arena per training step, reused across batches and epochs
+	scope: t.Graph_Scope
+	defer t.graph_scope_destroy(&scope)
+
 	for epoch in 0 ..< epochs {
 		epoch_loss := 0.0
 		correct := 0
 		total := 0
 
 		for i in 0 ..< num_batches {
-			// Get batch
+			t.graph_begin(&scope)
+
+			// Get batch (images tensor goes to arena, labels slice goes to heap)
 			batch_imgs, batch_labs := data.mnist_get_batch(
 				&train_set,
 				i * batch_size,
@@ -139,7 +145,7 @@ mnist_cnn_test :: proc(allocator: mem.Allocator) {
 				allocator,
 			)
 
-			// ✅ NEW: Apply augmentation
+			// Apply augmentation (augmented tensor goes to arena)
 			augmented_imgs := nn.augment_batch(batch_imgs, aug_config, allocator)
 
 			// Forward pass (use augmented images)
@@ -167,9 +173,7 @@ mnist_cnn_test :: proc(allocator: mem.Allocator) {
 			// Backward pass
 			if !t.tensor_validate_graph(loss) {
 				fmt.println("ERROR: Invalid computation graph detected!")
-				t.tensor_free_graph(loss)
-				t.tensor_free(augmented_imgs)
-				t.tensor_free(batch_imgs)
+				t.graph_end(&scope)
 				delete(batch_labs, allocator)
 				continue
 			}
@@ -177,10 +181,11 @@ mnist_cnn_test :: proc(allocator: mem.Allocator) {
 			t.tensor_backward(loss)
 			nn.adam_step(&opt)
 
-			// ✅ CRITICAL: Free in reverse order
-			t.tensor_free_graph(loss)
-			t.tensor_free(augmented_imgs) // ✅ Free augmented batch
-			t.tensor_free(batch_imgs) // Free original batch
+			// ✅ Wipe the arena: instantly frees batch_imgs, augmented_imgs, output, loss,
+			// and all intermediate Conv2D/ReLU/MaxPool feature maps without calling free()
+			t.graph_end(&scope)
+
+			// Free the labels slice which lives on the standard heap
 			delete(batch_labs, allocator)
 
 			if i % 100 == 0 {
@@ -198,14 +203,17 @@ mnist_cnn_test :: proc(allocator: mem.Allocator) {
 	fmt.println("✓ Augmented model saved to mnist_augmented.bin")
 }
 
-
 augmentation_test :: proc(allocator: mem.Allocator) {
 	seed_test(#procedure)
 	fmt.println("\n=== Testing Data Augmentation ===")
 
+	// Single scope for the isolated test
+	scope: t.Graph_Scope
+	defer t.graph_scope_destroy(&scope)
+	t.graph_begin(&scope)
+
 	// Create a simple test image (4x4 for easy visualization)
 	test_img := t.tensor_new_4d(1, 1, 4, 4, false, allocator)
-	defer t.tensor_free(test_img)
 
 	// Fill with a simple pattern
 	for i in 0 ..< 16 {
@@ -229,7 +237,6 @@ augmentation_test :: proc(allocator: mem.Allocator) {
 	}
 
 	augmented := nn.augment_batch(test_img, config, allocator)
-	defer t.tensor_free(augmented)
 
 	fmt.println("\nAugmented image (4x4):")
 	for y in 0 ..< 4 {
@@ -239,9 +246,9 @@ augmentation_test :: proc(allocator: mem.Allocator) {
 		fmt.println("")
 	}
 
+	t.graph_end(&scope)
 	fmt.println("\n✓ Augmentation test passed!")
 }
-
 
 evaluate_on_test_set :: proc(
 	model: ^nn.Sequential,
@@ -253,7 +260,13 @@ evaluate_on_test_set :: proc(
 	correct := 0
 	total := 0
 
+	// ✅ One arena per evaluation batch
+	scope: t.Graph_Scope
+	defer t.graph_scope_destroy(&scope)
+
 	for i in 0 ..< num_batches {
+		t.graph_begin(&scope)
+
 		batch_imgs, batch_labs := data.mnist_get_batch(
 			test_set,
 			i * batch_size,
@@ -280,8 +293,7 @@ evaluate_on_test_set :: proc(
 			total += 1
 		}
 
-		t.tensor_free_graph(output)
-		t.tensor_free(batch_imgs)
+		t.graph_end(&scope)
 		delete(batch_labs, allocator)
 	}
 
@@ -345,6 +357,7 @@ test_both_models :: proc(allocator: mem.Allocator) {
 		fmt.println("  3. Augmentation parameters might need tuning")
 	}
 }
+
 test_augmented_model :: proc(allocator: mem.Allocator) {
 	seed_test(#procedure)
 	fmt.println("\n=== Testing Augmented Model ===")
@@ -363,7 +376,11 @@ test_augmented_model :: proc(allocator: mem.Allocator) {
 
 	// Load augmented model
 	fmt.println("Loading augmented model...")
-	model, opt, epoch, ok2 := nn.load_checkpoint("mnist_augmented.bin", allocator)
+	// Fixed path to match the save location
+	model, opt, epoch, ok2 := nn.load_checkpoint(
+		"model_checkpoints/mnist_augmented.bin",
+		allocator,
+	)
 	if !ok2 {
 		fmt.println("Failed to load augmented model")
 		return
@@ -379,7 +396,13 @@ test_augmented_model :: proc(allocator: mem.Allocator) {
 	correct := 0
 	total := 0
 
+	// ✅ One arena per evaluation batch
+	scope: t.Graph_Scope
+	defer t.graph_scope_destroy(&scope)
+
 	for i in 0 ..< num_batches {
+		t.graph_begin(&scope)
+
 		batch_imgs, batch_labs := data.mnist_get_batch(
 			&test_set,
 			i * batch_size,
@@ -406,8 +429,7 @@ test_augmented_model :: proc(allocator: mem.Allocator) {
 			total += 1
 		}
 
-		t.tensor_free_graph(output)
-		t.tensor_free(batch_imgs)
+		t.graph_end(&scope)
 		delete(batch_labs, allocator)
 	}
 

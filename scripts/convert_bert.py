@@ -63,7 +63,7 @@ def write_tensor(f, tensor, name="unknown"):
 
 def convert_hf_bert_to_wotan(hf_model_path, output_path):
     print(f"Loading model from '{hf_model_path}'...")
-    output_path = "model_checkpoints/" + os.path.basename(output_path)  # Save to model_checkpoints directory
+    output_path = "../model_checkpoints/" + os.path.basename(output_path)  # Save to model_checkpoints directory
     from transformers import AutoModelForSequenceClassification, AutoModel, AutoConfig
 
     config = AutoConfig.from_pretrained(hf_model_path)

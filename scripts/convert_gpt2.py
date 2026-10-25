@@ -101,4 +101,4 @@ def convert_distilgpt2(output_path):
     print(f"✓ Successfully wrote {output_path}")
 
 if __name__ == "__main__":
-    convert_distilgpt2("model_checkpoints/distilgpt2_checkpoint.bin")
+    convert_distilgpt2("../model_checkpoints/distilgpt2_checkpoint.bin")
