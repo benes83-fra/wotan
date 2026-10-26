@@ -2,6 +2,7 @@ package analytics
 
 import w "../core"
 import "core:fmt"
+import "core:math"
 import "core:mem"
 
 // ============================================================================
@@ -25,7 +26,8 @@ VolatilityModel :: struct {
 	conditional_var: []f64,
 }
 
-// Create rolling variance model
+// Create rolling variance model (variance of the last `window` values, as computed
+// by the rolling "var" aggregator; no annualisation). Warm-up rows are NaN
 create_rolling_volatility :: proc(
 	df: ^w.DataFrame,
 	column: string,
@@ -36,14 +38,12 @@ create_rolling_volatility :: proc(
 	agg := w.make_var("var", column)
 	var_col := rolling_apply(rw, agg, allocator)
 
-	// Extract variance values
+	// Extract variance values; warm-up rows (fewer than `window` points) are NaN, not 0
 	n := var_col.len
 	cond_var := make([]f64, n, allocator)
 	for i in 0 ..< n {
 		v, is_null := w.column_at_float(&var_col, i)
-		if !is_null {
-			cond_var[i] = v
-		}
+		cond_var[i] = math.nan_f64() if is_null else v
 	}
 
 	w.destroy_column(&var_col)
@@ -51,7 +51,10 @@ create_rolling_volatility :: proc(
 	return VolatilityModel{model_type = .Rolling, window = window, conditional_var = cond_var}
 }
 
-// Create EWMA variance model
+// Create EWMA variance model. `alpha` is the pandas smoothing weight on the newest
+// observation (RiskMetrics λ = 1 - alpha); the variance matches
+// pandas ewm(alpha=alpha, adjust=False, min_periods=min_periods).var(bias=False),
+// i.e. it is taken around the EW mean, not the zero-mean RiskMetrics σ²
 create_ewma_volatility :: proc(
 	df: ^w.DataFrame,
 	column: string,
@@ -67,9 +70,7 @@ create_ewma_volatility :: proc(
 	cond_var := make([]f64, n, allocator)
 	for i in 0 ..< n {
 		v, is_null := w.column_at_float(&var_col, i)
-		if !is_null {
-			cond_var[i] = v
-		}
+		cond_var[i] = math.nan_f64() if is_null else v
 	}
 
 	w.destroy_column(&var_col)

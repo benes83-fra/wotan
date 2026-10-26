@@ -150,11 +150,16 @@ kalman_update :: proc(kf: ^KalmanFilter($N, $M), z: [M]f64) {
 	new_x_mat := x_mat + (K * y_mat)
 	kf.x = transmute([N]f64)new_x_mat
 
-	// 6. Update covariance: P = (I - K*H) * P
+	// 6. Update covariance: P = (I - K*H) * P  (standard form; algebraically equal to the
+	//    Joseph form (I-KH) P (I-KH)ᵀ + K R Kᵀ for the optimal gain, less robust to round-off)
 	I := linalg.identity(matrix[N, N]f64)
 	kf.P = (I - (K * kf.H)) * kf.P
 }
 
+// RTS smoother. xp[t] must be the PREDICTED state x_{t|t-1}, P_{t|t-1} (stored after
+// kalman_predict, before kalman_update), not the previous filtered state.
+//   C_k = P_{k|k} Fᵀ P_{k+1|k}⁻¹,  x_s[k] = x_{k|k} + C_k (x_s[k+1] - x_{k+1|k}),
+//   P_s[k] = P_{k|k} + C_k (P_s[k+1] - P_{k+1|k}) C_kᵀ
 rts_smooth :: proc(
 	F: matrix[$N, N]f64,
 	xf: []KalmanState(N), // filtered
@@ -192,6 +197,10 @@ rts_smooth :: proc(
 	return smoothed
 }
 
+// Convention (same as the forward pass kalman_predict_control → kalman_update):
+//   xp[t] = predicted state x_{t|t-1}, P_{t|t-1} (stored AFTER predict, before update),
+//   u[t]  = control used in the predict step that produced xp[t]:  x_t = F x_{t-1} + B u[t].
+// Hence the transition k → k+1 uses u[k+1].
 rts_smooth_control :: proc(
 	F: matrix[$N, N]f64,
 	B: matrix[N, $U]f64,
@@ -222,9 +231,9 @@ rts_smooth_control :: proc(
 		Pp_inv := linalg.inverse(Pp_k1)
 		Ck := Pf_k * Ft * Pp_inv
 
-		// Compute controlled prediction: x_pred = F * xf[k] + B * u[k]
+		// Controlled prediction x_{k+1|k} = F * xf[k] + B * u[k+1]  (== xp[k+1].x)
 		xk_mat := transmute(matrix[N, 1]f64)xf[k].x
-		uk_mat := transmute(matrix[U, 1]f64)u[k]
+		uk_mat := transmute(matrix[U, 1]f64)u[k + 1]
 
 		x_pred := F * xk_mat + B * uk_mat
 		x_pred_vec := transmute([N]f64)x_pred
@@ -271,10 +280,9 @@ kalman_forward_tv_control :: proc(
 	x := x0
 	P := P0
 
+	// Step t: predict x_{t|t-1} = F_t x_{t-1|t-1} + B_t u_t, P_{t|t-1} = F_t P Fᵀ_t + Q_t,
+	// then update with z_t (H_t, R_t). x0/P0 is the state at t = -1.
 	for t in 0 ..< T {
-		xp[t].x = x
-		xp[t].P = P
-
 		F := F_seq[t]
 		B := B_seq[t]
 		Q := Q_seq[t]
@@ -286,6 +294,10 @@ kalman_forward_tv_control :: proc(
 		x = transmute([N]f64)x_pred
 
 		P = (F * P * linalg.transpose(F)) + Q
+
+		// predicted state x_{t|t-1}, P_{t|t-1} (what the RTS smoother needs)
+		xp[t].x = x
+		xp[t].P = P
 
 		H := H_seq[t]
 		R := R_seq[t]
@@ -335,9 +347,11 @@ rts_smooth_tv_control :: proc(
 	// last smoothed = last filtered
 	smoothed[T - 1] = xf[T - 1]
 
+	// F_seq[t], B_seq[t], u[t] are the ones that produced xp[t] (see kalman_forward_tv_control),
+	// so the transition k → k+1 uses index k+1.
 	for k := T - 2; k >= 0; k -= 1 {
-		F := F_seq[k]
-		B := B_seq[k]
+		F := F_seq[k + 1]
+		B := B_seq[k + 1]
 		Ft := linalg.transpose(F)
 
 		Pf_k := xf[k].P
@@ -347,9 +361,9 @@ rts_smooth_tv_control :: proc(
 		Pp_inv := linalg.inverse(Pp_k1)
 		Ck := Pf_k * Ft * Pp_inv
 
-		// controlled prediction: x_pred = F * xf[k] + B * u[k]
+		// controlled prediction x_{k+1|k} = F_{k+1} * xf[k] + B_{k+1} * u[k+1]  (== xp[k+1].x)
 		xk_mat := transmute(matrix[N, 1]f64)xf[k].x
-		uk_mat := transmute(matrix[U, 1]f64)u[k]
+		uk_mat := transmute(matrix[U, 1]f64)u[k + 1]
 
 		x_pred := F * xk_mat + B * uk_mat
 		x_pred_vec := transmute([N]f64)x_pred
@@ -491,8 +505,11 @@ ekf_update_control :: proc(
 
 	return
 }
-// EKF RTS smoother (time-varying, no explicit control)
-// Uses the linearized F_k (Jacobians) from the EKF forward pass.
+// EKF RTS smoother (time-varying, no explicit control; also valid for ekf_predict_control).
+// Uses the linearized F_k (Jacobians) from the EKF forward pass. Convention:
+//   xp[t]    = predicted x_{t|t-1}, P_{t|t-1} (output of ekf_predict at step t),
+//   F_seq[t] = Jacobian used in that predict step, i.e. F_jac(xf[t-1]) (F_jac(x0) for t = 0).
+// The transition k → k+1 is therefore linearized by F_seq[k+1] (F_seq[0] is unused).
 ekf_rts_smooth :: proc(
 	F_seq: []matrix[$N, N]f64, // Jacobians F_k at each step
 	xf: []KalmanState(N), // filtered states
@@ -512,7 +529,7 @@ ekf_rts_smooth :: proc(
 	smoothed[T - 1] = xf[T - 1]
 
 	for k := T - 2; k >= 0; k -= 1 {
-		F := F_seq[k]
+		F := F_seq[k + 1]
 		Ft := linalg.transpose(F)
 
 		Pf_k := xf[k].P
@@ -776,9 +793,21 @@ cholesky :: proc "contextless" (A: $M/matrix[$N, N]$T) -> (L: M) where intrinsic
 
 	return
 }
+// Unscented RTS smoother (Särkkä 2008, "Unscented Rauch-Tung-Striebel Smoother").
+// Inputs from the forward pass (step t: ukf_predict from xf[t-1], then ukf_update):
+//   Xi_filt[t] = ukf_sigma_points(xf[t].x, xf[t].P)          (sigma points of the FILTERED state)
+//   Xi_pred[t] = f(sigma points of xf[t-1])                   (PROPAGATED sigma points that
+//                produced xp[t]; for t = 0 propagated from x0/P0, unused by the smoother)
+//   Wc_seq[t]  = covariance weights of Xi_filt[t]
+//   xp[t]      = predicted x_{t|t-1}, P_{t|t-1} (output of ukf_predict, includes Q)
+// Backward recursion for k = T-2 .. 0:
+//   D_{k+1} = Σ Wc_i (Xi_filt[k]_i - xf[k].x)(Xi_pred[k+1]_i - xp[k+1].x)ᵀ
+//   G_k     = D_{k+1} P_{k+1|k}⁻¹
+//   x_s[k]  = xf[k].x + G_k (x_s[k+1] - xp[k+1].x)
+//   P_s[k]  = xf[k].P + G_k (P_s[k+1] - xp[k+1].P) G_kᵀ
 ukf_rts_smooth :: proc(
-	Xi_pred: []([]([$N]f64)), // sigma points BEFORE update (prediction)
-	Xi_filt: []([]([N]f64)), // sigma points AFTER update (filtered)
+	Xi_pred: []([]([$N]f64)), // propagated sigma points f(X_{t-1}) per step
+	Xi_filt: []([]([N]f64)), // sigma points of the filtered state per step
 	Wc_seq: []([]f64), // covariance weights per step
 	xf: []KalmanState(N), // filtered states
 	xp: []KalmanState(N), // predicted states
@@ -799,52 +828,41 @@ ukf_rts_smooth :: proc(
 	smoothed[T - 1] = xf[T - 1]
 
 	for k := T - 2; k >= 0; k -= 1 {
-		// predicted and filtered sigma points
-		Xi_p := Xi_pred[k]
-		Xi_f := Xi_filt[k]
-
+		Xi_f := Xi_filt[k] // sigma points of xf[k]
+		Xi_p := Xi_pred[k + 1] // f(Xi_f): propagated to k+1
 		Wc := Wc_seq[k]
+		assert(len(Xi_f) == len(Xi_p) && len(Xi_f) == len(Wc))
 
-		// predicted mean and covariance
-		x_pred := xp[k].x
-		P_pred := xp[k].P
-
-		// filtered mean and covariance
 		x_filt := xf[k].x
 		P_filt := xf[k].P
+		x_pred := xp[k + 1].x
+		P_pred := xp[k + 1].P
 
-		// cross-covariance Pxf
-		Pxf := matrix[N, N]f64{}
-
-		L := len(Xi_p)
-		for i in 0 ..< L {
-			dx_p := [N]f64{}
-			dx_f := [N]f64{}
-
+		// cross-covariance D_{k+1} between x_k and x_{k+1}
+		D := matrix[N, N]f64{}
+		// (deviations filled straight into matrices: transmuting the [N]f64 temporaries
+		// here crashed the -debug build)
+		for i in 0 ..< len(Xi_f) {
+			dxf_mat := matrix[N, 1]f64{}
+			dxp_t := matrix[1, N]f64{}
 			for j in 0 ..< N {
-				dx_p[j] = Xi_p[i][j] - x_pred[j]
-				dx_f[j] = Xi_f[i][j] - x_filt[j]
+				dxf_mat[j, 0] = Xi_f[i][j] - x_filt[j]
+				dxp_t[0, j] = Xi_p[i][j] - x_pred[j]
 			}
-
-			dxp_mat := transmute(matrix[N, 1]f64)dx_p
-			dxf_t := linalg.transpose(transmute(matrix[N, 1]f64)dx_f)
-
-			Pxf += Wc[i] * (dxp_mat * dxf_t)
+			D += Wc[i] * (dxf_mat * dxp_t)
 		}
 
-		// smoother gain Gk = Pxf * inv(P_filt)
-		P_filt_inv := linalg.inverse(P_filt)
-		Gk := Pxf * P_filt_inv
+		// smoother gain G_k = D_{k+1} * inv(P_{k+1|k})
+		Gk := D * linalg.inverse(P_pred)
 
 		// smoothed state
-		diff_x := smoothed[k + 1].x - x_filt
-		dx_mat := transmute(matrix[N, 1]f64)diff_x
-		corr := Gk * dx_mat
-		smoothed[k].x = x_pred + transmute([N]f64)corr
+		diff_x := smoothed[k + 1].x - x_pred
+		corr := Gk * transmute(matrix[N, 1]f64)diff_x
+		smoothed[k].x = x_filt + transmute([N]f64)corr
 
 		// smoothed covariance
-		diff_P := smoothed[k + 1].P - P_filt
-		smoothed[k].P = P_pred + Gk * diff_P * linalg.transpose(Gk)
+		diff_P := smoothed[k + 1].P - P_pred
+		smoothed[k].P = P_filt + Gk * diff_P * linalg.transpose(Gk)
 	}
 
 	return smoothed
@@ -970,73 +988,17 @@ ukf_update_control :: proc(
 	return
 }
 
+// UKF RTS smoother for a controlled model x' = f(x, u). Same inputs/convention as
+// ukf_rts_smooth: Xi_pred[t] are the sigma points propagated through f(·, u_t) (the ones
+// that produced xp[t] in ukf_predict_control), so the control enters only through them.
 ukf_rts_smooth_control :: proc(
-	Xi_pred: []([]([$N]f64)), // sigma points BEFORE update (prediction, with control)
-	Xi_filt: []([]([N]f64)), // sigma points AFTER update (filtered)
+	Xi_pred: []([]([$N]f64)), // propagated sigma points f(X_{t-1}, u_t) per step
+	Xi_filt: []([]([N]f64)), // sigma points of the filtered state per step
 	Wc_seq: []([]f64), // covariance weights per step
 	xf: []KalmanState(N), // filtered states
 	xp: []KalmanState(N), // predicted states (from ukf_predict_control)
 ) -> []KalmanState(N) {
-
-	T := len(xf)
-	assert(T == len(xp))
-	assert(T == len(Xi_pred))
-	assert(T == len(Xi_filt))
-	assert(T == len(Wc_seq))
-
-	smoothed := make([]KalmanState(N), T)
-	if T == 0 {
-		return smoothed
-	}
-
-	// last smoothed = last filtered
-	smoothed[T - 1] = xf[T - 1]
-
-	for k := T - 2; k >= 0; k -= 1 {
-		Xi_p := Xi_pred[k]
-		Xi_f := Xi_filt[k]
-		Wc := Wc_seq[k]
-
-		x_pred := xp[k].x
-		P_pred := xp[k].P
-
-		x_filt := xf[k].x
-		P_filt := xf[k].P
-
-		Pxf := matrix[N, N]f64{}
-
-		L := len(Xi_p)
-		for i in 0 ..< L {
-			dx_p := [N]f64{}
-			dx_f := [N]f64{}
-
-			for j in 0 ..< N {
-				dx_p[j] = Xi_p[i][j] - x_pred[j]
-				dx_f[j] = Xi_f[i][j] - x_filt[j]
-			}
-
-			dxp_mat := transmute(matrix[N, 1]f64)dx_p
-			dxf_t := linalg.transpose(transmute(matrix[N, 1]f64)dx_f)
-
-			Pxf += Wc[i] * (dxp_mat * dxf_t)
-		}
-
-		// smoother gain
-		P_filt_inv := linalg.inverse(P_filt)
-		Gk := Pxf * P_filt_inv
-
-		// smoothed state
-		diff_x := smoothed[k + 1].x - x_filt
-		dx_mat := transmute(matrix[N, 1]f64)diff_x
-		corr := Gk * dx_mat
-		smoothed[k].x = x_pred + transmute([N]f64)corr
-
-		// smoothed covariance
-		diff_P := smoothed[k + 1].P - P_filt
-		smoothed[k].P = P_pred + Gk * diff_P * linalg.transpose(Gk)
-	}
-
-	return smoothed
+	return ukf_rts_smooth(Xi_pred, Xi_filt, Wc_seq, xf, xp)
 }
 kalman_loglik_scalar :: proc(
 	y: []f64,
@@ -1049,8 +1011,11 @@ kalman_loglik_scalar :: proc(
 	T := len(y)
 	if T == 0 {return 0.0}
 
-	burn_in := 20
-	if burn_in >= T {burn_in = 0}
+	// Conventions: x0/P0 is the state BEFORE the first observation (each step predicts,
+	// then updates), and the Gaussian log-likelihood
+	//   sum_t -0.5 (ln 2π + ln S_t + v_t² / S_t)
+	// sums over all T observations: with a proper (e.g. stationary) P0 this is the exact
+	// Gaussian likelihood (statsmodels' llf); no burn-in is dropped.
 
 	// Convert flat arrays to dynamic matrices for optimized linalg
 	F_mat := _matrix_from_flat(F, N, N, context.temp_allocator)
@@ -1111,9 +1076,7 @@ kalman_loglik_scalar :: proc(
 		S := l.dot_simd(HP, H_vec) + R_scalar
 		delete(HP, context.temp_allocator)
 
-		if t >= burn_in {
-			loglik += -0.5 * (math.ln(two_pi) + math.ln(S) + (v * v) / S)
-		}
+		loglik += -0.5 * (math.ln(two_pi) + math.ln(S) + (v * v) / S)
 
 		// K = P_pred * Hᵀ / S
 		K := make([]f64, N, context.temp_allocator)
@@ -1291,7 +1254,7 @@ kalman_filter_residuals :: proc(
 	H_vec := make([]f64, N, context.temp_allocator)
 	copy(H_vec, H)
 	R_scalar := R[0]
-	x_vec := make([]f64, N, allocator)
+	x_vec := make([]f64, N, context.temp_allocator) // working state, not returned
 	copy(x_vec, x0)
 
 	defer {
@@ -1299,7 +1262,7 @@ kalman_filter_residuals :: proc(
 		l.matrix_free(&Q_mat)
 		l.matrix_free(&P_mat)
 		delete(H_vec, context.temp_allocator)
-		// x_vec and P_mat are returned/used, so don't free here
+		delete(x_vec, context.temp_allocator)
 	}
 
 	for t in 0 ..< T {

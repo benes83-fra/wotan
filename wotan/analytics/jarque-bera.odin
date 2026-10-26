@@ -62,11 +62,8 @@ jarque_bera :: proc(
 	// Jarque–Bera statistic
 	JB = (f64(n) / 6.0) * (S * S + 0.25 * (K - 3.0) * (K - 3.0))
 
-	// p-value = 1 - CDF_chi2(JB; df=2)
-	a := 1.0 // df/2 = 2/2
-	x := JB / 2.0
-	cdf := gamma_inc_lower_regularized(a, x)
-	p_value = 1.0 - cdf
+	// p-value = P(chi2(2) > JB)
+	p_value = chi2_sf(JB, 2.0)
 
 	return
 }

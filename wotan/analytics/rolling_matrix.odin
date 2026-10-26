@@ -164,44 +164,23 @@ ewm_cov_matrix :: proc(
 		return out
 	}
 
-	// For each pair (i, j) with i <= j
+	// Full n x n matrix in (i, j) order, like rolling_cov_matrix: consumers
+	// (extract_cov_matrix_row, pca_from_cov) read both triangles.
+	// pandas: df[cols].ewm(alpha=alpha, adjust=adjust, min_periods=min_periods).cov(bias=bias),
+	// each pair over its pairwise-complete rows, ignore_na=False.
 	for i in 0 ..< n_cols {
 		name_i := cols[i]
 		col_x := w.column(df, name_i)
+		if col_x.type != .Float && col_x.type != .Int do continue // unsupported types are skipped
 
-		for j in i ..< n_cols {
+		for j in 0 ..< n_cols {
 			name_j := cols[j]
 			col_y := w.column(df, name_j)
+			if col_y.type != .Float && col_y.type != .Int do continue
 
-			// Build a RollingWindow on X; EWM ignores window size
+			// EWM ignores window size
 			rw := rolling_window(df, name_i, 0, min_periods)
-
-			agg := make_ewm_cov("ewm_cov_tmp", name_i, alpha, bias)
-
-			// Choose implementation based on type + adjust flag
-			cov_series: w.Column
-			switch col_x.type {
-			case .Float:
-				if adjust {
-					cov_series = rolling_apply_float_ewm_cov(rw, col_y, agg, allocator)
-				} else {
-					cov_series = rolling_apply_float_ewm_cov_adjust_false(
-						rw,
-						col_y,
-						agg,
-						allocator,
-					)
-				}
-			case .Int:
-				if adjust {
-					cov_series = rolling_apply_int_ewm_cov(rw, col_y, agg, allocator)
-				} else {
-					cov_series = rolling_apply_int_ewm_cov_adjust_false(rw, col_y, agg, allocator)
-				}
-			case .Invalid, .Bool, .String, .Date, .Time, .Datetime:
-				// For now: skip unsupported types
-				continue
-			}
+			cov_series := ewm_cov_column(rw, col_y, alpha, adjust, bias, false, "ewm_cov_tmp")
 
 			// Emit long-form rows
 			for r in 0 ..< cov_series.len {
@@ -227,6 +206,10 @@ ewm_cov_matrix :: proc(
 }
 
 
+// PCA (eigh, eigenvalues descending) of the EWM covariance matrix at every row,
+// i.e. numpy.linalg.eigh(df[cols].ewm(...).cov().loc[r]). Convention: entries
+// that are still null (fewer than min_periods observations, or the first
+// observation with bias=false) are taken as 0 rather than propagating NaN.
 ewm_pca :: proc(
 	df: ^w.DataFrame,
 	cols: []string,
@@ -246,6 +229,8 @@ ewm_pca :: proc(
 	for r in 0 ..< n_rows {
 		cov := extract_cov_matrix_row(&cov_df, cols, r, allocator)
 		results[r] = pca_from_cov(cov, allocator)
+		for row in cov do delete(row, allocator)
+		delete(cov, allocator)
 
 	}
 
@@ -253,6 +238,7 @@ ewm_pca :: proc(
 }
 
 
+// ewm_pca at the last row only
 ewm_pca_last :: proc(
 	df: ^w.DataFrame,
 	cols: []string,
@@ -268,7 +254,10 @@ ewm_pca_last :: proc(
 
 	last_row := df.rows - 1
 	cov := extract_cov_matrix_row(&cov_df, cols, last_row, allocator)
-
+	defer {
+		for row in cov do delete(row, allocator)
+		delete(cov, allocator)
+	}
 
 	return pca_from_cov(cov, allocator)
 }

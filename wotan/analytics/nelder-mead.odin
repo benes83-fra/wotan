@@ -44,10 +44,11 @@ nelder_mead :: proc(
 	max_iter: int,
 	tol: f64,
 	allocator: mem.Allocator,
+	xtol: f64 = 0, // > 0: also require the simplex diameter (max |x_i - x_best|) below xtol
 ) -> (
 	best_x: []f64,
 	best_f: f64,
-	converged: bool, // value spread fell below tol before max_iter
+	converged: bool, // value spread (and simplex size, if xtol > 0) fell below tol before max_iter
 ) {
 	n := len(x0)
 	if n == 0 {
@@ -119,8 +120,23 @@ nelder_mead :: proc(
 		fmin := values[0]
 		fmax := values[n]
 		if math.abs(fmax - fmin) < tol {
-			converged = true
-			break
+			// A flat value spread alone can stop on a ridge far from the optimum
+			// (e.g. a poorly scaled log-likelihood); optionally require a small simplex too.
+			small := true
+			if xtol > 0 {
+				outer: for i in 1 ..< n + 1 {
+					for j in 0 ..< n {
+						if math.abs(simplex[i][j] - simplex[0][j]) >= xtol {
+							small = false
+							break outer
+						}
+					}
+				}
+			}
+			if small {
+				converged = true
+				break
+			}
 		}
 
 		// centroid of all but worst

@@ -1,7 +1,6 @@
 package analytics
 
 import w "../core"
-import l "../linalg"
 import "core:math"
 import "base:runtime"
 import "core:mem"
@@ -42,6 +41,10 @@ SarimaForecastResult :: struct {
 	upper: []f64,
 }
 
+// Forecast h steps ahead on the original scale of y: exactly h values with (1 - alpha)
+// Gaussian prediction intervals, as statsmodels' SARIMAX get_forecast(h).conf_int(alpha).
+// The integration (1 - L)^d (1 - L^s)^D is carried in the forecast state, so the
+// interval width accumulates the psi-weights of the integrated process.
 sarima_forecast :: proc(
 	y: []f64,
 	phi: []f64, // non-seasonal AR
@@ -64,148 +67,16 @@ sarima_forecast :: proc(
 		return SarimaForecastResult{mean = mean, lower = lower, upper = upper}
 	}
 
-	// 1) build differenced series z_t
-	y_ns := difference(y, d, allocator)
-	z := seasonal_difference(y_ns, D, s, allocator)
-
-	// 2) state-space for SARIMA ARMA part
-	F, Q, P0, H, R, x0, N := sarima_state_space(phi, theta, Phi, Theta, s, sigma2, allocator)
-
-	// 3) filter to get last state
-	xT, PT := kalman_filter_last_scalar(z, F, Q, P0, H, R, x0, N, allocator)
-
-	// 4) forecasting on differenced scale
-	mean_d := make([]f64, h, allocator)
-	lower_d := make([]f64, h, allocator)
-	upper_d := make([]f64, h, allocator)
-
-	z_state := make([]f64, N, allocator)
-	P := make([]f64, N * N, allocator)
-	copy(z_state, xT)
-	copy(P, PT)
-
-	// crude z for alpha (same as arima_forecast)
-	z_alpha := 1.96
-	_ = alpha // keep signature; you can plug proper quantile later
-
-	for step in 0 ..< h {
-		// --- Optimized Predict Step: x_pred = F*x, P_pred = F*P*Fᵀ + Q ---
-		if _kalman_use_optimized(N) {
-			// x = F x,  P = F P Fᵀ + Q  (row-major flat arrays, in place)
-			_kalman_predict_flat(F, Q, z_state, P, N)
-		} else {
-			// Built-in Odin ops for small N (≤8) - keep original manual loops
-			// x_pred = F * x
-			x_pred := make([]f64, N, allocator)
-			for i in 0 ..< N {
-				sv := 0.0
-				for j in 0 ..< N {
-					sv += F[i * N + j] * z_state[j]
-				}
-				x_pred[i] = sv
-			}
-
-			// P_pred = F * P * Fᵀ + Q
-			P_pred := make([]f64, N * N, allocator)
-			temp := make([]f64, N * N, allocator)
-			for i in 0 ..< N {
-				for j in 0 ..< N {
-					sv := 0.0
-					for k in 0 ..< N {
-						sv += F[i * N + k] * P[k * N + j]
-					}
-					temp[i * N + j] = sv
-				}
-			}
-			for i in 0 ..< N {
-				for j in 0 ..< N {
-					sv := 0.0
-					for k in 0 ..< N {
-						sv += temp[i * N + k] * F[j * N + k]
-					}
-					P_pred[i * N + j] = sv + Q[i * N + j]
-				}
-			}
-
-			// Copy results back
-			copy(z_state, x_pred)
-			copy(P, P_pred)
-
-			// Clean up
-			delete(x_pred, allocator)
-			delete(P_pred, allocator)
-			delete(temp, allocator)
-		}
-
-		// --- observation mean/variance on differenced scale ---
-		// (unchanged: this is O(N) and not a bottleneck)
-		mu := 0.0
-		for j in 0 ..< N {
-			mu += H[j] * z_state[j]
-		}
-
-		Sv := 0.0
-		for i in 0 ..< N {
-			for j in 0 ..< N {
-				Sv += H[i] * P[i * N + j] * H[j]
-			}
-		}
-		Sv += R[0]
-
-		sd := math.sqrt_f64(Sv)
-
-		mean_d[step] = mu
-		lower_d[step] = mu - z_alpha * sd
-		upper_d[step] = mu + z_alpha * sd
+	// scratch is freed explicitly (no temp guard: `allocator` may be the temp allocator)
+	ar, ma := sarima_expand_to_arma(phi, Phi, theta, Theta, s, context.temp_allocator)
+	c := _arima_diff_poly(d, D, s, context.temp_allocator)
+	defer {
+		delete(ar, context.temp_allocator)
+		delete(ma, context.temp_allocator)
+		delete(c, context.temp_allocator)
 	}
-
-	// 5) build histories for inverse differencing
-
-	// non-seasonal history: last d values of original y
-	hist_ns := make([]f64, d, allocator)
-	for i in 0 ..< d {
-		if d == 0 {
-			break
-		}
-		hist_ns[i] = y[len(y) - d + i]
-	}
-
-	// seasonal history: last min(D*s, len(y_ns)) values of non-seasonally differenced series
-	hist_s_len := D * s
-	if hist_s_len > len(y_ns) {
-		hist_s_len = len(y_ns)
-	}
-	hist_s := make([]f64, hist_s_len, allocator)
-	for i in 0 ..< hist_s_len {
-		hist_s[i] = y_ns[len(y_ns) - hist_s_len + i]
-	}
-
-	// 6) invert differencing back to original scale
-	mean_full := sarima_inverse_difference(mean_d, hist_ns, hist_s, d, D, s, allocator)
-	lower_full := sarima_inverse_difference(lower_d, hist_ns, hist_s, d, D, s, allocator)
-	upper_full := sarima_inverse_difference(upper_d, hist_ns, hist_s, d, D, s, allocator)
-
-	// keep only the forecast horizon (drop the history prefix)
-	start_idx := len(hist_ns) + len(hist_s) // prefix length in reconstruction
-	if start_idx > len(mean_full) {
-		start_idx = len(mean_full)
-	}
-
-	out_mean := make([]f64, h, allocator)
-	out_lower := make([]f64, h, allocator)
-	out_upper := make([]f64, h, allocator)
-
-	for i in 0 ..< h {
-		idx := start_idx + i
-		if idx >= len(mean_full) {
-			break
-		}
-		out_mean[i] = mean_full[idx]
-		out_lower[i] = lower_full[idx]
-		out_upper[i] = upper_full[idx]
-	}
-
-	return SarimaForecastResult{mean = out_mean, lower = out_lower, upper = out_upper}
+	mean, lower, upper := _arima_forecast_core(y, ar, ma, sigma2, c, h, alpha, allocator)
+	return SarimaForecastResult{mean = mean, lower = lower, upper = upper}
 }
 
 simulate_sarima_pdqPDQ :: proc(
@@ -260,9 +131,12 @@ SarimaAutoResult :: struct {
 	p, d, q: int,
 	P, D, Q: int,
 	s:       int,
-	fit:     ArimaFitResult,
+	fit:     SarimaFitResult,
 }
 
+// Grid search over (p, q, P, Q) by AIC/BIC with d (ADF + KPSS) and D (stationarity
+// test on the seasonal difference) chosen first: information criteria are only
+// comparable between models fitted to the same differenced series.
 sarima_auto_with_tests :: proc(
 	y: []f64,
 	max_p: int,
@@ -277,12 +151,12 @@ sarima_auto_with_tests :: proc(
 ) -> SarimaAutoResult {
 
 	// --- 1) Determine non-seasonal differencing d ---
-	d := auto_arima_d_from_tests(y, allocator)
+	d := min(auto_arima_d_from_tests(y, allocator), max(max_d, 0))
 
 	// --- 2) Determine seasonal differencing D ---
-	// Simple rule: if KPSS rejects on seasonal lag s, set D=1
+	// Simple rule: if the seasonal difference still tests as difference-stationary, D = 1
 	D := 0
-	if len(y) > 2 * s {
+	if s > 0 && max_D > 0 && len(y) > 2 * s {
 		y_lag := make([]f64, len(y) - s, allocator)
 		for i in s ..< len(y) {
 			y_lag[i - s] = y[i] - y[i - s]
@@ -295,60 +169,42 @@ sarima_auto_with_tests :: proc(
 
 	best: SarimaAutoResult
 	best_score := math.INF_F64
+	n_diff := len(y) - d - D * s
 
-	// --- 3) Full grid search ---
+	// --- 3) Grid search at fixed (d, D) ---
 	for p in 0 ..= max_p {
 		for q in 0 ..= max_q {
 			for P in 0 ..= max_P {
 				for Q in 0 ..= max_Q {
-					for D_try in 0 ..= max_D {
+					// skip trivial model
+					if p == 0 && q == 0 && P == 0 && Q == 0 {
+						continue
+					}
+					if n_diff < (p + q + P + Q + 5) {
+						continue
+					}
 
-						// skip trivial model
-						if p == 0 && q == 0 && P == 0 && Q == 0 {
-							continue
-						}
+					fit := sarima_fit(y, p, d, q, P, D, Q, s, allocator)
+					if !fit.converged {
+						continue
+					}
 
-						// 3a) difference the data
-						y_d := sarima_difference(y, d, D_try, s, allocator)
+					score := fit.aic
+					if criterion == "bic" {
+						score = fit.bic
+					}
 
-						if len(y_d) < (p + q + P + Q + 5) {
-							continue
-						}
-
-						// 3b) expand SARIMA to ARMA
-						ar, ma := sarima_expand_to_arma(
-							make([]f64, p, allocator),
-							make([]f64, P, allocator),
-							make([]f64, q, allocator),
-							make([]f64, Q, allocator),
-							s,
-							allocator,
-						)
-
-						// 3c) fit ARMA on differenced data
-						fit := arima_fit(y_d, len(ar), 0, len(ma), allocator)
-						if !fit.converged {
-							continue
-						}
-
-						// 3d) compute score
-						score := fit.aic
-						if criterion == "bic" {
-							score = fit.bic
-						}
-
-						if score < best_score {
-							best_score = score
-							best = SarimaAutoResult {
-								p   = p,
-								d   = d,
-								q   = q,
-								P   = P,
-								D   = D_try,
-								Q   = Q,
-								s   = s,
-								fit = fit,
-							}
+					if score < best_score {
+						best_score = score
+						best = SarimaAutoResult {
+							p   = p,
+							d   = d,
+							q   = q,
+							P   = P,
+							D   = D,
+							Q   = Q,
+							s   = s,
+							fit = fit,
 						}
 					}
 				}
@@ -365,6 +221,29 @@ SarimaObjectiveCtx :: struct {
 	P, D, Q:   int,
 	s:         int,
 	allocator: mem.Allocator,
+}
+
+// Unpack [x_phi(p), x_theta(q), x_Phi(P), x_Theta(Q), log sigma2]: each AR block is
+// mapped to a stationary and each MA block to an invertible polynomial (statsmodels
+// SARIMAX transform). Slices are allocated in `allocator`.
+_sarima_unpack :: proc(
+	params: []f64,
+	p, q, P, Q: int,
+	allocator: mem.Allocator,
+) -> (
+	phi, theta, Phi, Theta: []f64,
+	sigma2: f64,
+) {
+	phi = make([]f64, p, allocator)
+	theta = make([]f64, q, allocator)
+	Phi = make([]f64, P, allocator)
+	Theta = make([]f64, Q, allocator)
+	_arima_constrain(params[0:p], phi, false)
+	_arima_constrain(params[p:p + q], theta, true)
+	_arima_constrain(params[p + q:p + q + P], Phi, false)
+	_arima_constrain(params[p + q + P:p + q + P + Q], Theta, true)
+	sigma2 = math.exp_f64(params[p + q + P + Q])
+	return
 }
 
 sarima_neg_loglik_obj :: proc(params: []f64, ctx: rawptr) -> f64 {
@@ -384,47 +263,23 @@ sarima_neg_loglik_obj :: proc(params: []f64, ctx: rawptr) -> f64 {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	allocator := context.temp_allocator
 
-	// unpack parameters
-	phi := make([]f64, p, allocator)
-	theta := make([]f64, q, allocator)
-	Phi := make([]f64, P, allocator)
-	Theta := make([]f64, Q, allocator)
-
-	idx := 0
-	for i in 0 ..< p {
-		phi[i] = 0.95 * math.tanh(params[idx])
-		idx += 1
-	}
-	for i in 0 ..< q {
-		theta[i] = 0.95 * math.tanh(params[idx])
-		idx += 1
-	}
-	for i in 0 ..< P {
-		Phi[i] = 0.95 * math.tanh(params[idx])
-		idx += 1
-	}
-	for i in 0 ..< Q {
-		Theta[i] = 0.95 * math.tanh(params[idx])
-		idx += 1
-	}
-
-	log_sig2 := params[idx]
-	sigma2 := math.exp_f64(log_sig2)
-	if sigma2 <= 0.0 || sigma2 > 1e3 {
-		return 1e9
+	phi, theta, Phi, Theta, sigma2 := _sarima_unpack(params, p, q, P, Q, allocator)
+	if !(sigma2 > 0.0) || math.is_inf(sigma2) {
+		return 1e12
 	}
 
 	// differenced series is precomputed by sarima_fit
 	y2 := data.y_diff
 	if len(y2) < (p + q + P + Q + 5) {
-		return 1e9
+		return 1e12
 	}
 
-
-	// state-space
-	F, Qm, P0, H, R, x0, N := sarima_state_space(phi, theta, Phi, Theta, data.s, sigma2, allocator)
-
-	ll := kalman_loglik_scalar(y2, F, Qm, P0, H, R, x0, N)
+	// exact likelihood of the expanded ARMA
+	ar, ma := sarima_expand_to_arma(phi, Phi, theta, Theta, data.s, allocator)
+	ll := arima_loglik(y2, ar, ma, 0, sigma2, allocator)
+	if math.is_nan(ll) || math.is_inf(ll) {
+		return 1e12
+	}
 
 	return -ll
 }
@@ -437,6 +292,9 @@ SarimaFitResult :: struct {
 	bic:        f64,
 	converged:  bool,
 }
+// Exact-Gaussian MLE of SARIMA(p,d,q)(P,D,Q)_s with stationary / invertible
+// polynomials (statsmodels SARIMAX / ARIMA with trend = 'n'). AIC/BIC count sigma2 and
+// use n = len(y) - d - D*s.
 sarima_fit :: proc(
 	y: []f64,
 	p, d, q: int,
@@ -445,8 +303,15 @@ sarima_fit :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> SarimaFitResult {
 
-	y1 := difference(y, d, allocator)
-	y2 := seasonal_difference(y1, D, s, allocator)
+	y1 := difference(y, d, context.temp_allocator)
+	y2 := seasonal_difference(y1, D, s, context.temp_allocator)
+	defer {
+		delete(y1, context.temp_allocator)
+		delete(y2, context.temp_allocator)
+	}
+	// without a season length there are no seasonal terms
+	P := P if s > 0 else 0
+	Q := Q if s > 0 else 0
 
 	ctx := SarimaObjectiveCtx {
 		y         = y,
@@ -461,16 +326,9 @@ sarima_fit :: proc(
 		allocator = allocator,
 	}
 
-	n_params := p + q + P + Q + 1
-	best_params := make([]f64, n_params, allocator)
-	best_f := math.INF_F64
-
-	max_iter := 800
-	tol := 1e-6
-
 	// sigma2 starts at the sample variance of the differenced series (scale-free);
 	// deterministic starts so the fit does not depend on the global RNG state.
-	// Each start is {phi, theta, Phi, Theta}, scaled by 1/(k+1) across lags.
+	// Each start is the first-lag {phi, theta, Phi, Theta}.
 	mean2, var2 := 0.0, 0.0
 	for v in y2 {mean2 += v}
 	mean2 /= f64(max(len(y2), 1))
@@ -485,73 +343,22 @@ sarima_fit :: proc(
 		{0.5, -0.5, 0.3, -0.3},
 		{-0.5, 0.5, -0.3, 0.3},
 	}
-	x_start := make([]f64, n_params, context.temp_allocator)
-	defer delete(x_start, context.temp_allocator)
-	for st in starts {
-		idx := 0
-		counts := [4]int{p, q, P, Q}
-		for g in 0 ..< 4 {
-			for k in 0 ..< counts[g] {
-				x_start[idx] = math.atanh(st[g] / (0.95 * f64(k + 1)))
-				idx += 1
-			}
-		}
-		x_start[idx] = log_sig2_0
+	best_params, best_f, converged := _arima_nm_fit(
+		sarima_neg_loglik_obj,
+		&ctx,
+		{p, q, P, Q},
+		{false, true, false, true},
+		starts,
+		log_sig2_0,
+		context.temp_allocator,
+	)
+	defer delete(best_params, context.temp_allocator)
 
-		x_opt, f_opt, _ := nelder_mead(sarima_neg_loglik_obj, &ctx, x_start, max_iter, tol, context.temp_allocator)
-		if f_opt < best_f {
-			best_f = f_opt
-			copy(best_params, x_opt)
-		}
-		delete(x_opt, context.temp_allocator)
-	}
+	phi, theta, Phi, Theta, sigma2 := _sarima_unpack(best_params, p, q, P, Q, allocator)
+	ll := -best_f
 
-	// Polish: restart from the best vertex with a fresh simplex
-	{
-		x_opt, f_opt, _ := nelder_mead(sarima_neg_loglik_obj, &ctx, best_params, max_iter, tol, context.temp_allocator)
-		if f_opt <= best_f {
-			best_f = f_opt
-			copy(best_params, x_opt)
-		}
-		delete(x_opt, context.temp_allocator)
-	}
-
-	// unpack best parameters
-	idx := 0
-	phi := make([]f64, p, allocator)
-	theta := make([]f64, q, allocator)
-	Phi := make([]f64, P, allocator)
-	Theta := make([]f64, Q, allocator)
-
-	for i in 0 ..< p {
-		phi[i] = 0.95 * math.tanh(best_params[idx])
-		idx += 1
-	}
-	for i in 0 ..< q {
-		theta[i] = 0.95 * math.tanh(best_params[idx])
-		idx += 1
-	}
-	for i in 0 ..< P {
-		Phi[i] = 0.95 * math.tanh(best_params[idx])
-		idx += 1
-	}
-	for i in 0 ..< Q {
-		Theta[i] = 0.95 * math.tanh(best_params[idx])
-		idx += 1
-	}
-
-	sigma2 := math.exp_f64(best_params[idx])
-
-	// compute loglik
-	// y1 := difference(y, d, allocator)
-	// y2 := seasonal_difference(y1, D, s, allocator)
-
-	F, Qm, P0, H, R, x0, N := sarima_state_space(phi, theta, Phi, Theta, s, sigma2, allocator)
-
-	ll := kalman_loglik_scalar(y2, F, Qm, P0, H, R, x0, N)
-
-	// AIC/BIC
-	k := n_params
+	// AIC/BIC (k counts sigma2, as statsmodels)
+	k := p + q + P + Q + 1
 	n := len(y2)
 
 	aic := -2.0 * ll + 2.0 * f64(k)
@@ -566,11 +373,15 @@ sarima_fit :: proc(
 		loglik = ll,
 		aic = aic,
 		bic = bic,
-		converged = true,
+		converged = converged,
 	}
 }
 
 
+// One-step-ahead innovations v_t = z_t - E[z_t | z_<t] of the differenced series
+// z = (1-L)^d (1-L^s)^D y under the given SARIMA parameters (exact Kalman filter,
+// stationary initialisation). One value per differenced observation, as statsmodels'
+// `resid` after its d + D*s burn-in; the first few have variance above sigma2.
 sarima_innovations :: proc(
 	y: []f64,
 	phi: []f64,
@@ -583,117 +394,23 @@ sarima_innovations :: proc(
 	sigma2: f64,
 	allocator: mem.Allocator = context.allocator,
 ) -> []f64 {
-	// 1) differenced series
-	y1 := difference(y, d, allocator)
-	z := seasonal_difference(y1, D, s, allocator)
-
-	// 2) state-space
-	F, Q, P0, H, R, x0, N := sarima_state_space(phi, theta, Phi, Theta, s, sigma2, allocator)
-
-	T := len(z)
-	if T == 0 {
-		return make([]f64, 0, allocator)
+	y1 := difference(y, d, context.temp_allocator)
+	z := seasonal_difference(y1, D, s, context.temp_allocator)
+	defer {
+		delete(y1, context.temp_allocator)
+		delete(z, context.temp_allocator)
 	}
 
-	burn_in := 20
-	if burn_in >= T {
-		burn_in = 0
+	v := make([]f64, len(z), allocator)
+	if len(z) == 0 {
+		return v
 	}
 
-	// state
-	x := make([]f64, N, allocator)
-	P := make([]f64, N * N, allocator)
-	for i in 0 ..< N {
-		x[i] = x0[i]
-	}
-	for i in 0 ..< N * N {
-		P[i] = P0[i]
-	}
-
-	// store innovations after burn-in
-	out_len := T - burn_in
-	if out_len < 0 {
-		out_len = 0
-	}
-	v_out := make([]f64, out_len, allocator)
-	idx := 0
-
-	for t in 0 ..< T {
-		// --- Predict ---
-		x_pred := make([]f64, N, allocator)
-		for i in 0 ..< N {
-			ssum := 0.0
-			for j in 0 ..< N {
-				ssum += F[i * N + j] * x[j]
-			}
-			x_pred[i] = ssum
-		}
-
-		P_pred := make([]f64, N * N, allocator)
-		temp := make([]f64, N * N, allocator)
-		for i in 0 ..< N {
-			for j in 0 ..< N {
-				ssum := 0.0
-				for k in 0 ..< N {
-					ssum += F[i * N + k] * P[k * N + j]
-				}
-				temp[i * N + j] = ssum
-			}
-		}
-		for i in 0 ..< N {
-			for j in 0 ..< N {
-				ssum := 0.0
-				for k in 0 ..< N {
-					ssum += temp[i * N + k] * F[j * N + k]
-				}
-				P_pred[i * N + j] = ssum + Q[i * N + j]
-			}
-		}
-
-		// --- Innovation ---
-		y_pred := 0.0
-		for j in 0 ..< N {
-			y_pred += H[j] * x_pred[j]
-		}
-		v := z[t] - y_pred
-
-		// S = H P_pred Hᵀ + R
-		S := 0.0
-		for i in 0 ..< N {
-			for j in 0 ..< N {
-				S += H[i] * P_pred[i * N + j] * H[j]
-			}
-		}
-		S += R[0]
-
-		// store innovation (raw, not standardized) after burn-in
-		if t >= burn_in && idx < out_len {
-			v_out[idx] = v
-			idx += 1
-		}
-
-		// --- Update ---
-		K := make([]f64, N, allocator)
-		for i in 0 ..< N {
-			ssum := 0.0
-			for j in 0 ..< N {
-				ssum += P_pred[i * N + j] * H[j]
-			}
-			K[i] = ssum / S
-		}
-
-		for i in 0 ..< N {
-			x[i] = x_pred[i] + K[i] * v
-		}
-
-		for i in 0 ..< N {
-			for j in 0 ..< N {
-				P[i * N + j] = P_pred[i * N + j] - K[i] * S * K[j]
-			}
-		}
-	}
-
-	return v_out[:idx]
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	ar, ma := sarima_expand_to_arma(phi, Phi, theta, Theta, s, context.temp_allocator)
+	F, Q, P0, _, _, x0, N := arma_pq_fundamental_state_space(ar, ma, sigma2, context.temp_allocator)
+	_arma_filter(z, F, Q, N, x0, P0, v)
+	return v
 }
 
 SarimaDiagResult :: struct {
@@ -769,6 +486,7 @@ df_sarima_residual_diagnostics :: proc(
 	df_out.rows = 1
 	return df_out
 }
+// Residuals of a fixed SARIMA: the one-step innovations (see sarima_innovations).
 sarima_residuals :: proc(
 	y: []f64,
 	phi: []f64,
@@ -781,113 +499,5 @@ sarima_residuals :: proc(
 	sigma2: f64,
 	allocator: mem.Allocator = context.allocator,
 ) -> []f64 {
-	// 1) differenced series
-	y1 := difference(y, d, allocator)
-	y2 := seasonal_difference(y1, D, s, allocator)
-
-	if len(y2) == 0 {
-		return make([]f64, 0, allocator)
-	}
-
-	// 2) state-space
-	F, Q, P0, H, R, x0, N := sarima_state_space(phi, theta, Phi, Theta, s, sigma2, allocator)
-
-	T := len(y2)
-	burn_in := 20
-	if burn_in >= T {
-		burn_in = 0
-	}
-
-	// state
-	x := make([]f64, N, allocator)
-	P := make([]f64, N * N, allocator)
-	for i in 0 ..< N {
-		x[i] = x0[i]
-	}
-	for i in 0 ..< N * N {
-		P[i] = P0[i]
-	}
-
-	// residuals after burn-in
-	out_len := T - burn_in
-	if out_len < 0 {
-		out_len = 0
-	}
-	res := make([]f64, out_len, allocator)
-	idx := 0
-
-	for t in 0 ..< T {
-		// --- Predict ---
-		x_pred := make([]f64, N, allocator)
-		for i in 0 ..< N {
-			ssum := 0.0
-			for j in 0 ..< N {
-				ssum += F[i * N + j] * x[j]
-			}
-			x_pred[i] = ssum
-		}
-
-		P_pred := make([]f64, N * N, allocator)
-		temp := make([]f64, N * N, allocator)
-		for i in 0 ..< N {
-			for j in 0 ..< N {
-				ssum := 0.0
-				for k in 0 ..< N {
-					ssum += F[i * N + k] * P[k * N + j]
-				}
-				temp[i * N + j] = ssum
-			}
-		}
-		for i in 0 ..< N {
-			for j in 0 ..< N {
-				ssum := 0.0
-				for k in 0 ..< N {
-					ssum += temp[i * N + k] * F[j * N + k]
-				}
-				P_pred[i * N + j] = ssum + Q[i * N + j]
-			}
-		}
-
-		// --- Innovation ---
-		y_pred := 0.0
-		for j in 0 ..< N {
-			y_pred += H[j] * x_pred[j]
-		}
-		v := y2[t] - y_pred
-
-		if t >= burn_in && idx < out_len {
-			res[idx] = v
-			idx += 1
-		}
-
-		// S and Kalman gain
-		S := 0.0
-		for i in 0 ..< N {
-			for j in 0 ..< N {
-				S += H[i] * P_pred[i * N + j] * H[j]
-			}
-		}
-		S += R[0]
-
-		K := make([]f64, N, allocator)
-		for i in 0 ..< N {
-			ssum := 0.0
-			for j in 0 ..< N {
-				ssum += P_pred[i * N + j] * H[j]
-			}
-			K[i] = ssum / S
-		}
-
-		// update
-		for i in 0 ..< N {
-			x[i] = x_pred[i] + K[i] * v
-		}
-		for i in 0 ..< N {
-			for j in 0 ..< N {
-				P[i * N + j] = P_pred[i * N + j] - K[i] * S * K[j]
-			}
-		}
-	}
-
-	return res
+	return sarima_innovations(y, phi, theta, Phi, Theta, d, D, s, sigma2, allocator)
 }

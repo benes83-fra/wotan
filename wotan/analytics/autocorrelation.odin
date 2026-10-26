@@ -1,7 +1,6 @@
 package analytics
 
 import w "../core"
-import "core:math"
 import "core:mem"
 acf :: proc(y: []f64, max_lag: int, allocator := context.allocator) -> []f64 {
 	max_lag := max(max_lag, 0)

@@ -507,7 +507,9 @@ var_garch :: proc(
 
 	z_score: f64
 	if model_type == .StudentT && nu > 2.0 {
-		z_score = t_quantile(confidence, nu)
+		// GARCH-t errors have unit variance: quantile of t(ν)·sqrt((ν-2)/ν)
+		tp := a.GARCH_Params{model_type = .StudentT, nu = nu}
+		z_score = a.garch_std_quantile(&tp, confidence)
 	} else if model_type == .GED && shape > 0.0 {
 		z_score = ged_quantile(confidence, shape)
 	} else {
@@ -748,8 +750,9 @@ garch_risk_metrics :: proc(
 
 		z_95, z_99: f64
 		if model_type == .StudentT && garch_result.params.nu > 2.0 {
-			z_95 = t_quantile(0.95, garch_result.params.nu)
-			z_99 = t_quantile(0.99, garch_result.params.nu)
+			// unit-variance t quantiles (not the raw t(ν) ones)
+			z_95 = a.garch_std_quantile(&garch_result.params, 0.95)
+			z_99 = a.garch_std_quantile(&garch_result.params, 0.99)
 		} else if model_type == .GED && garch_result.params.shape > 0.0 {
 			z_95 = ged_quantile(0.95, garch_result.params.shape)
 			z_99 = ged_quantile(0.99, garch_result.params.shape)
@@ -1070,8 +1073,10 @@ rolling_beta_df :: proc(
 	cov_agg := w.make_cov("cov", returns_col, benchmark_col)
 	cov_col := a.rolling_apply(rw, cov_agg)
 
+	// beta = cov(r, b) / var(b): the variance window must run over the benchmark
+	rw_b := a.rolling_window(df, benchmark_col, window, min_periods)
 	var_agg := w.make_var("var", benchmark_col)
-	var_col := a.rolling_apply(rw, var_agg)
+	var_col := a.rolling_apply(rw_b, var_agg)
 
 	out := w.column_new("beta", .Float, cov_col.len)
 	for i in 0 ..< cov_col.len {
@@ -1806,13 +1811,16 @@ cvar_garch_series :: proc(
 	// Pre-compute the standard CVaR multiplier based on the model
 	std_cvar_mult: f64
 	if model_type == .StudentT && nu > 2.0 {
-		// Student-t CVaR multiplier
-		z := t_quantile(confidence, nu)
+		// Student-t CVaR multiplier: ES of the raw t(ν), rescaled to the
+		// unit-variance errors GARCH-t uses (factor sqrt((ν-2)/ν))
+		scale := math.sqrt_f64((nu - 2.0) / nu)
+		tp := a.GARCH_Params{model_type = .StudentT, nu = nu}
+		z := a.garch_std_quantile(&tp, confidence) / scale
 		lg1, _ := math.lgamma((nu + 1.0) / 2.0)
 		lg2, _ := math.lgamma(nu / 2.0)
 		coef := math.exp_f64(lg1 - lg2 - 0.5 * math.ln_f64(nu * math.PI))
 		pdf := coef * math.pow(1.0 + (z * z) / nu, -(nu + 1.0) / 2.0)
-		std_cvar_mult = (pdf / (1.0 - confidence)) * (nu + z * z) / (nu - 1.0)
+		std_cvar_mult = scale * (pdf / (1.0 - confidence)) * (nu + z * z) / (nu - 1.0)
 	} else if model_type == .GED && shape > 0.0 {
 		// GED CVaR multiplier (using existing function)
 		std_cvar_mult = -ged_cvar(confidence, shape) // ged_cvar returns negative, we want positive magnitude

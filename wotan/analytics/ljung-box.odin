@@ -34,6 +34,9 @@ ljung_box :: proc(
 		return 0.0, 0, 1.0
 	}
 
+	// r_k needs n-k > 0 terms (k = n would divide 0 by 0)
+	max_lag := min(max_lag, n - 1)
+
 	// Compute ACF of residuals
 	ac := acf(v, max_lag, allocator)
 
@@ -44,19 +47,15 @@ ljung_box :: proc(
 	}
 	Q *= f64(n) * (f64(n) + 2.0)
 
-	// degrees of freedom
+	// degrees of freedom (statsmodels acorr_ljungbox: lags - model_df, with a
+	// NaN p-value when that is <= 0; we clamp to 1 instead)
 	df = max_lag - dof_adj
 	if df < 1 {
 		df = 1
 	}
 
-	// p-value = 1 - CDF_chi2(Q; df)
-	// chi-square CDF via regularized gamma
-	// CDF = gammainc(df/2, Q/2)
-	x := Q / 2.0
-	a := f64(df) / 2.0
-	cdf := gamma_inc_lower_regularized(a, x) // lower incomplete gamma normalized
-	p_value = 1.0 - cdf
+	// p-value = P(chi2(df) > Q)
+	p_value = chi2_sf(Q, f64(df))
 
 	return
 }
@@ -84,9 +83,30 @@ df_ljung_box :: proc(
 // Needed for chi-square CDF
 // ------------------------------------------------------------
 gamma_inc_lower_regularized :: proc(a, x: f64) -> f64 {
-	if x < 0 || a <= 0 {
-		return 0.0
+	P, _ := _gamma_inc_regularized(a, x)
+	return P
+}
+
+// Chi-square survival function P(X > x), X ~ chi2(df). Returned from Q(a, x)
+// directly (not 1 - P) so tiny p-values keep their relative precision.
+chi2_sf :: proc(x, df: f64) -> f64 {
+	_, Q := _gamma_inc_regularized(df / 2.0, x / 2.0)
+	return Q
+}
+
+// P(a, x) and Q(a, x) = 1 - P(a, x): series for x < a+1, Lentz continued
+// fraction otherwise (Numerical Recipes gser / gcf). The prefactor uses
+// lgamma (gamma(a) overflows for a > 171, i.e. df > 342) and the iteration
+// cap grows with a (both expansions need O(sqrt(a)) terms).
+_gamma_inc_regularized :: proc(a, x: f64) -> (P: f64, Q: f64) {
+	if x <= 0 || a <= 0 {
+		return 0.0, 1.0
 	}
+
+	eps := 1e-15
+	max_iter := 200 + int(10.0 * math.sqrt(a))
+	lg, _ := math.lgamma(a)
+	prefactor := math.exp(-x + a * math.ln(x) - lg)
 
 	// Series expansion for x < a+1
 	if x < a + 1.0 {
@@ -94,21 +114,21 @@ gamma_inc_lower_regularized :: proc(a, x: f64) -> f64 {
 		term := sum
 		ap := a
 
-		for i in 1 ..= 100 {
+		for _ in 1 ..= max_iter {
 			ap += 1.0
 			term *= x / ap
 			sum += term
-			if abs(term) < 1e-14 {
+			if abs(term) < abs(sum) * eps {
 				break
 			}
 		}
 
-		return sum * math.exp(-x + a * math.ln(x) - math.ln(math.gamma_f64(a)))
+		P = sum * prefactor
+		return P, 1.0 - P
 	}
 
 	// Continued fraction for x >= a+1
 	// Lentz’s algorithm
-	eps := 1e-14
 	FPMIN := 1e-300
 
 	b := x + 1.0 - a
@@ -116,7 +136,7 @@ gamma_inc_lower_regularized :: proc(a, x: f64) -> f64 {
 	d := 1.0 / b
 	h := d
 
-	for i in 1 ..= 100 {
+	for i in 1 ..= max_iter {
 		an := -f64(i) * (f64(i) - a)
 		b += 2.0
 		d = an * d + b
@@ -134,6 +154,6 @@ gamma_inc_lower_regularized :: proc(a, x: f64) -> f64 {
 		}
 	}
 
-	cf := h * math.exp(-x + a * math.ln(x) - math.ln(math.gamma_f64(a)))
-	return 1.0 - cf
+	Q = h * prefactor
+	return 1.0 - Q, Q
 }

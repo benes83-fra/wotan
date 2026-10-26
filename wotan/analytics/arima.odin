@@ -1,11 +1,19 @@
 package analytics
 
 import w "../core"
-import l "../linalg"
 import "core:math"
 import "core:math/rand"
 import "base:runtime"
 import "core:mem"
+
+// Conventions (match statsmodels.tsa.arima.model.ARIMA / SARIMAX with trend = 'n'):
+//   δ(L) y_t = z_t,  δ(L) = (1 - L)^d (1 - L^s)^D
+//   z_t = Σ phi_i z_{t-i} + e_t + Σ theta_j e_{t-j},  e_t ~ N(0, sigma2)
+// (MA terms enter with a + sign). There is no mean / constant term. The likelihood is
+// the exact Gaussian likelihood of the differenced series z (stationary initial state),
+// which equals the exact-diffuse likelihood of y; statsmodels' approximate-diffuse
+// (1e6) initialisation of the integrated states differs from it by ~1e-5 for d > 0.
+// sigma2 is a free parameter (not concentrated out) and counts in AIC/BIC.
 
 arima_state_space :: proc(
 	phi, theta: []f64,
@@ -86,6 +94,46 @@ difference_with_history :: proc(
 	diff = difference(series, d, allocator)
 	return
 }
+
+// Coefficients c[0..m] of the differencing polynomial (1 - L)^d (1 - L^s)^D, c[0] = 1,
+// m = d + D*s. The seasonal factor is dropped when s <= 0.
+_arima_diff_poly :: proc(d, D, s: int, allocator: mem.Allocator) -> []f64 {
+	d := max(d, 0)
+	D := max(D, 0) if s > 0 else 0
+	c := make([]f64, d + D * s + 1, allocator)
+	c[0] = 1.0
+	deg := 0
+	for _ in 0 ..< d { 	// multiply by (1 - L), in place (descending index reads old values)
+		for i := deg + 1; i >= 1; i -= 1 {c[i] -= c[i - 1]}
+		deg += 1
+	}
+	for _ in 0 ..< D { 	// multiply by (1 - L^s)
+		for i := deg + s; i >= s; i -= 1 {c[i] -= c[i - s]}
+		deg += s
+	}
+	return c
+}
+
+// Undo δ(L) y_t = z_t given the first len(history) original values:
+// y_t = z_t - Σ_{k>=1} c_k y_{t-k} (lags before the history count as 0).
+// Returns history followed by the reconstructed values.
+_arima_undifference :: proc(diff, history, c: []f64, allocator: mem.Allocator) -> []f64 {
+	nh := len(history)
+	out := make([]f64, len(diff) + nh, allocator)
+	copy(out, history)
+	for i in 0 ..< len(diff) {
+		t := nh + i
+		v := diff[i]
+		for k in 1 ..< len(c) {
+			if t - k >= 0 {v -= c[k] * out[t - k]}
+		}
+		out[t] = v
+	}
+	return out
+}
+
+// Inverse of `difference`: history = the first d original values (see
+// difference_with_history); returns history followed by the reconstructed series.
 inverse_difference :: proc(
 	diff: []f64,
 	history: []f64,
@@ -101,26 +149,111 @@ inverse_difference :: proc(
 		return out
 	}
 
-	// Start with the first d original values
-	out := make([]f64, len(diff) + d, allocator)
-	for i in 0 ..< d {
-		out[i] = history[i]
-	}
+	c := _arima_diff_poly(d, 0, 0, context.temp_allocator)
+	defer delete(c, context.temp_allocator)
+	return _arima_undifference(diff, history, c, allocator)
+}
 
-	// First integration
-	for i in 0 ..< len(diff) {
-		out[d + i] = out[d + i - 1] + diff[i]
+// Stationary state covariance: solves P = F P Fᵀ + Q (P = Σ_k F^k Q F'^k) by the
+// doubling algorithm. Returns false (P unspecified) if F is not stable.
+_arima_stationary_cov :: proc(F, Q: []f64, N: int, P: []f64) -> bool {
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	A := make([]f64, N * N, context.temp_allocator)
+	T1 := make([]f64, N * N, context.temp_allocator)
+	copy(A, F)
+	copy(P, Q)
+	for _ in 0 ..< 100 {
+		// P += A P Aᵀ
+		for i in 0 ..< N {
+			for j in 0 ..< N {
+				s := 0.0
+				for k in 0 ..< N {s += A[i * N + k] * P[k * N + j]}
+				T1[i * N + j] = s
+			}
+		}
+		incr, scale := 0.0, 0.0
+		for i in 0 ..< N {
+			for j in 0 ..< N {
+				s := 0.0
+				for k in 0 ..< N {s += T1[i * N + k] * A[j * N + k]}
+				P[i * N + j] += s
+				incr = max(incr, abs(s))
+				scale = max(scale, abs(P[i * N + j]))
+			}
+		}
+		if math.is_nan(incr) || math.is_inf(incr) || scale > 1e300 {return false}
+		if incr <= 1e-17 * scale {return true}
+		// A = A A
+		for i in 0 ..< N {
+			for j in 0 ..< N {
+				s := 0.0
+				for k in 0 ..< N {s += A[i * N + k] * A[k * N + j]}
+				T1[i * N + j] = s
+			}
+		}
+		copy(A, T1)
 	}
+	return false
+}
 
-	// Higher-order integration
-	for k in 1 ..< d {
-		for i in d ..< len(out) {
-			out[i] = out[i] + out[i - 1]
+// Fill P0 with the stationary covariance, or an approximate-diffuse 1e6·I when F has a
+// unit / explosive root (only reachable with user-supplied parameters).
+_arima_init_P0 :: proc(F, Q: []f64, N: int, P0: []f64) {
+	if !_arima_stationary_cov(F, Q, N, P0) {
+		for i in 0 ..< N * N {P0[i] = 0.0}
+		for i in 0 ..< N {P0[i * N + i] = 1e6}
+	}
+}
+
+// Exact Gaussian Kalman filter for the Harvey ARMA form of
+// arma_pq_fundamental_state_space (F = AR coefficients in column 0 and ones on the
+// superdiagonal, H = e_0, R = 0), O(N²) per step. On entry a, P hold the predicted
+// state for the first observation (x0 = 0, stationary P0); on return the filtered
+// state a_{T|T}, P_{T|T}. v_out / S_out (optional, length len(z)) receive the
+// innovations and their variances. Returns the log-likelihood.
+_arma_filter :: proc(z: []f64, F, Q: []f64, N: int, a, P: []f64, v_out: []f64 = nil, S_out: []f64 = nil) -> f64 {
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	col := make([]f64, N, context.temp_allocator)
+	TP := make([]f64, N * N, context.temp_allocator)
+	ll := 0.0
+	ln_2pi := math.ln_f64(2.0 * math.PI)
+	for t in 0 ..< len(z) {
+		if t > 0 {
+			// a = F a
+			a0 := a[0]
+			for i in 0 ..< N - 1 {a[i] = F[i * N] * a0 + a[i + 1]}
+			a[N - 1] = F[(N - 1) * N] * a0
+			// TP = F P
+			for i in 0 ..< N {
+				fi := F[i * N]
+				for j in 0 ..< N {
+					TP[i * N + j] = fi * P[j] + (P[(i + 1) * N + j] if i + 1 < N else 0.0)
+				}
+			}
+			// P = TP Fᵀ + Q,  (TP Fᵀ)_ij = TP_i0 F_j0 + TP_i,j+1
+			for i in 0 ..< N {
+				for j in 0 ..< N {
+					P[i * N + j] = TP[i * N] * F[j * N] + (TP[i * N + j + 1] if j + 1 < N else 0.0) + Q[i * N + j]
+				}
+			}
+		}
+		S := P[0]
+		v := z[t] - a[0]
+		if v_out != nil {v_out[t] = v}
+		if S_out != nil {S_out[t] = S}
+		if !(S > 0.0) {return math.inf_f64(-1)}
+		ll += -0.5 * (ln_2pi + math.ln_f64(S) + v * v / S)
+		for i in 0 ..< N {col[i] = P[i * N]}
+		for i in 0 ..< N {a[i] += col[i] / S * v}
+		for i in 0 ..< N {
+			for j in 0 ..< N {P[i * N + j] -= col[i] * col[j] / S}
 		}
 	}
-
-	return out
+	return ll
 }
+
+// Exact Gaussian log-likelihood of the (already differenced) series y under
+// ARMA(phi, theta, sigma2). `d` is ignored: differencing is handled outside.
 arima_loglik :: proc(
 	y: []f64,
 	phi, theta: []f64,
@@ -128,14 +261,69 @@ arima_loglik :: proc(
 	sigma2: f64,
 	allocator := context.allocator,
 ) -> f64 {
-	// differencing is handled outside the SS form
-	if d == 0 && len(phi) == 1 && len(theta) == 1 {
-		F, Q, P0, H, R, x0, N := arma11_state_space(phi[0], theta[0], sigma2, allocator)
-		return kalman_loglik_scalar(y, F, Q, P0, H, R, x0, N)
-	}
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	F, Q, P0, _, _, x0, N := arma_pq_fundamental_state_space(phi, theta, sigma2, context.temp_allocator)
+	return _arma_filter(y, F, Q, N, x0, P0)
+}
 
-	F, Q, P0, H, R, x0, N := arima_state_space(phi, theta, d, sigma2, allocator)
-	return kalman_loglik_scalar(y, F, Q, P0, H, R, x0, N)
+// statsmodels' constrain_stationary_univariate (Jones 1980 / Monahan 1984): maps
+// unconstrained x to a stationary AR polynomial through the partial autocorrelations
+// r_k = x_k / sqrt(1 + x_k²). negate = true gives an invertible MA polynomial
+// (theta = -phi), as SARIMAX does with enforce_stationarity / enforce_invertibility.
+_arima_constrain :: proc(x: []f64, out: []f64, negate: bool) {
+	n := len(x)
+	if n == 0 {return}
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	y := make([]f64, n * n, context.temp_allocator)
+	for k in 0 ..< n {
+		r := x[k] / math.sqrt_f64(1.0 + x[k] * x[k])
+		for i in 0 ..< k {
+			y[k * n + i] = y[(k - 1) * n + i] + r * y[(k - 1) * n + k - i - 1]
+		}
+		y[k * n + k] = r
+	}
+	for i in 0 ..< n {out[i] = y[(n - 1) * n + i] if negate else -y[(n - 1) * n + i]}
+}
+
+// Inverse of _arima_constrain; false if c is not stationary (invertible for MA).
+_arima_unconstrain :: proc(c: []f64, out: []f64, negate: bool) -> bool {
+	n := len(c)
+	if n == 0 {return true}
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	y := make([]f64, n * n, context.temp_allocator)
+	for i in 0 ..< n {y[(n - 1) * n + i] = c[i] if negate else -c[i]}
+	for k := n - 1; k > 0; k -= 1 {
+		rk := y[k * n + k]
+		den := 1.0 - rk * rk
+		if !(den > 0.0) {return false}
+		for i in 0 ..< k {
+			y[(k - 1) * n + i] = (y[k * n + i] - rk * y[k * n + k - i - 1]) / den
+		}
+	}
+	for k in 0 ..< n {
+		r := y[k * n + k]
+		if !(abs(r) < 1.0) {return false}
+		out[k] = r / math.sqrt_f64(1.0 - r * r)
+	}
+	return true
+}
+
+// Optimiser coordinates [x_phi(p), x_theta(q), log sigma2] of an ARMA(p,q) parameter
+// set (the inverse of what arima_neg_loglik_obj applies). ok = false if phi is not
+// stationary or theta not invertible.
+arima_unconstrain_params :: proc(
+	phi, theta: []f64,
+	sigma2: f64,
+	allocator := context.allocator,
+) -> (
+	x: []f64,
+	ok: bool,
+) {
+	p, q := len(phi), len(theta)
+	x = make([]f64, p + q + 1, allocator)
+	ok = _arima_unconstrain(phi, x[:p], false) && _arima_unconstrain(theta, x[p:p + q], true) && sigma2 > 0.0
+	x[p + q] = math.ln_f64(sigma2) if sigma2 > 0.0 else 0.0
+	return
 }
 
 
@@ -158,21 +346,15 @@ arima_neg_loglik_obj :: proc(params: []f64, ctx: rawptr) -> f64 {
 		return 1e12
 	}
 
-	// unpack params: [phi_0..phi_{p-1}, theta_0..theta_{q-1}, log_sigma2]
+	// unpack params: [x_phi(p), x_theta(q), log_sigma2] -> stationary phi, invertible theta
 	phi := make([]f64, p, scratch)
 	theta := make([]f64, q, scratch)
+	_arima_constrain(params[:p], phi, false)
+	_arima_constrain(params[p:p + q], theta, true)
 
-	for i in 0 ..< p {
-		phi[i] = 0.95 * math.tanh(params[i])
-	}
-	for j in 0 ..< q {
-		theta[j] = 0.95 * math.tanh(params[p + j])
-	}
-
-	log_sig2 := params[p + q]
-	sigma2 := math.exp_f64(log_sig2)
-	if sigma2 <= 0.0 || sigma2 > 1e3 {
-		return 1e9
+	sigma2 := math.exp_f64(params[p + q])
+	if !(sigma2 > 0.0) || math.is_inf(sigma2) {
+		return 1e12
 	}
 
 	// differencing if needed
@@ -180,11 +362,14 @@ arima_neg_loglik_obj :: proc(params: []f64, ctx: rawptr) -> f64 {
 	if data.d > 0 {
 		y_eff = difference(data.y, data.d, scratch)
 		if len(y_eff) < (p + q + 5) {
-			return 1e9
+			return 1e12
 		}
 	}
 
 	ll := arima_loglik(y_eff, phi, theta, data.d, sigma2, scratch)
+	if math.is_nan(ll) || math.is_inf(ll) {
+		return 1e12
+	}
 
 	// minimize negative log-likelihood
 	return -ll
@@ -199,6 +384,74 @@ ArimaFitResult :: struct {
 	bic:       f64,
 	converged: bool,
 }
+
+// Multi-start Nelder-Mead on a negative log-likelihood, then restarts from the best
+// point until it stops improving. Parameter groups (in params order) have sizes
+// counts[g] and are MA blocks if is_ma[g]; each start gives the constrained first-lag
+// value of every group (higher lags start at 0). Returns the best optimiser point.
+_arima_nm_fit :: proc(
+	obj: ObjectiveWithCtx,
+	ctx: rawptr,
+	counts: []int,
+	is_ma: []bool,
+	starts: [][4]f64,
+	log_sig2_0: f64,
+	allocator: mem.Allocator,
+) -> (
+	best_params: []f64,
+	best_f: f64,
+	converged: bool,
+) {
+	n_params := 1
+	for c in counts {n_params += c}
+	best_params = make([]f64, n_params, allocator)
+	best_f = math.INF_F64
+
+	max_iter := 2000 + 500 * n_params
+	tol := 1e-10 // objective spread
+	xtol := 1e-7 // simplex size (optimiser coordinates)
+
+	x0 := make([]f64, n_params, context.temp_allocator)
+	defer delete(x0, context.temp_allocator)
+	for st in starts {
+		idx := 0
+		for g in 0 ..< len(counts) {
+			if counts[g] > 0 {
+				c := make([]f64, counts[g], context.temp_allocator)
+				c[0] = st[g]
+				if !_arima_unconstrain(c, x0[idx:idx + counts[g]], is_ma[g]) {
+					for k in 0 ..< counts[g] {x0[idx + k] = 0.0}
+				}
+				delete(c, context.temp_allocator)
+			}
+			idx += counts[g]
+		}
+		x0[n_params - 1] = log_sig2_0
+
+		x_s, f_s, conv := nelder_mead(obj, ctx, x0, max_iter, tol, context.temp_allocator, xtol)
+		if f_s < best_f {
+			best_f = f_s
+			copy(best_params, x_s)
+			converged = conv
+		}
+		delete(x_s, context.temp_allocator)
+	}
+
+	// Polish: restart from the best vertex with a fresh simplex until no gain
+	for _ in 0 ..< 10 {
+		x_s, f_s, conv := nelder_mead(obj, ctx, best_params, max_iter, tol, context.temp_allocator, xtol)
+		gain := best_f - f_s
+		if f_s <= best_f {
+			best_f = f_s
+			copy(best_params, x_s)
+			converged = conv
+		}
+		delete(x_s, context.temp_allocator)
+		if gain < 1e-9 {break}
+	}
+	return
+}
+
 arima_fit :: proc(y: []f64, p, d, q: int, allocator := context.allocator) -> ArimaFitResult {
 	ctx := ArimaObjectiveCtx {
 		y         = y,
@@ -207,15 +460,6 @@ arima_fit :: proc(y: []f64, p, d, q: int, allocator := context.allocator) -> Ari
 		d         = d,
 		allocator = allocator,
 	}
-
-	n_params := p + q + 1
-	current_best_f := math.INF_F64 // Changed name to avoid collision
-	best_params := make([]f64, n_params, context.temp_allocator)
-	defer delete(best_params, context.temp_allocator)
-	best_converged := false
-
-	max_iter := 800
-	tol := 1e-6
 
 	// sigma2 starts at the sample variance of the (differenced) series, so the
 	// fit is scale-free (returns ~1e-4 vs unit-variance data)
@@ -230,50 +474,29 @@ arima_fit :: proc(y: []f64, p, d, q: int, allocator := context.allocator) -> Ari
 	if d > 0 {delete(y_eff, context.temp_allocator)}
 	log_sig2_0 := math.ln_f64(var_eff) if var_eff > 0.0 else 0.0
 
-	// Deterministic starts (phi_k, theta_k scaled by 1/(k+1) across lags)
-	starts := [][2]f64{{0.0, 0.0}, {0.5, 0.0}, {0.0, 0.5}, {0.5, -0.5}, {-0.5, 0.5}}
-	x0 := make([]f64, n_params, context.temp_allocator)
-	defer delete(x0, context.temp_allocator)
-	for st in starts {
-		for i in 0 ..< p {x0[i] = math.atanh(st[0] / (0.95 * f64(i + 1)))}
-		for j in 0 ..< q {x0[p + j] = math.atanh(st[1] / (0.95 * f64(j + 1)))}
-		x0[p + q] = log_sig2_0
-
-		x_s, f_s, conv := nelder_mead(arima_neg_loglik_obj, &ctx, x0, max_iter, tol, context.temp_allocator)
-		if f_s < current_best_f {
-			current_best_f = f_s
-			copy(best_params, x_s)
-			best_converged = conv
-		}
-		delete(x_s, context.temp_allocator)
-	}
-
-	// Polish: restart from the best vertex with a fresh simplex
-	{
-		x_s, f_s, conv := nelder_mead(arima_neg_loglik_obj, &ctx, best_params, max_iter, tol, context.temp_allocator)
-		if f_s <= current_best_f {
-			current_best_f = f_s
-			copy(best_params, x_s)
-			best_converged = conv
-		}
-		delete(x_s, context.temp_allocator)
-	}
+	// Deterministic starts: first-lag (phi_1, theta_1), higher lags 0
+	starts := [][4]f64{{0.0, 0.0, 0, 0}, {0.5, 0.0, 0, 0}, {0.0, 0.5, 0, 0}, {0.5, -0.5, 0, 0}, {-0.5, 0.5, 0, 0}}
+	best_params, best_f, converged := _arima_nm_fit(
+		arima_neg_loglik_obj,
+		&ctx,
+		{p, q},
+		{false, true},
+		starts,
+		log_sig2_0,
+		context.temp_allocator,
+	)
+	defer delete(best_params, context.temp_allocator)
 
 	res: ArimaFitResult
 	res.phi = make([]f64, p, allocator)
 	res.theta = make([]f64, q, allocator)
-
-	for i in 0 ..< p {
-		res.phi[i] = 0.95 * math.tanh(best_params[i])
-	}
-	for j in 0 ..< q {
-		res.theta[j] = 0.95 * math.tanh(best_params[p + j])
-	}
+	_arima_constrain(best_params[:p], res.phi, false)
+	_arima_constrain(best_params[p:p + q], res.theta, true)
 
 	res.sigma2 = math.exp_f64(best_params[p + q])
-	res.loglik = -current_best_f
-	res.converged = best_converged
-	// compute AIC and BIC
+	res.loglik = -best_f
+	res.converged = converged
+	// AIC / BIC as statsmodels: k counts sigma2, n = observations after differencing
 	k := p + q + 1
 	n := n_eff
 
@@ -301,6 +524,128 @@ _nan_forecast :: proc(h: int, allocator: mem.Allocator) -> (mean, lower, upper: 
 	return
 }
 
+// Standard normal quantile: Acklam's rational approximation refined by one Halley
+// step on erfc (full double precision).
+_arima_norm_ppf :: proc(p: f64) -> f64 {
+	if p <= 0.0 {return math.inf_f64(-1)}
+	if p >= 1.0 {return math.inf_f64(1)}
+	a := [6]f64{-3.969683028665376e+01, 2.209460984245205e+02, -2.759285104469687e+02, 1.383577518672690e+02, -3.066479806614716e+01, 2.506628277459239e+00}
+	b := [5]f64{-5.447609879822406e+01, 1.615858368580409e+02, -1.556989798598866e+02, 6.680131188771972e+01, -1.328068155288572e+01}
+	c := [6]f64{-7.784894002430293e-03, -3.223964580411365e-01, -2.400758277161838e+00, -2.549732539343734e+00, 4.374664141464968e+00, 2.938163982698783e+00}
+	d := [4]f64{7.784695709041462e-03, 3.224671290700398e-01, 2.445134137142996e+00, 3.754408661907416e+00}
+	x: f64
+	if p < 0.02425 || p > 1.0 - 0.02425 {
+		q := math.sqrt_f64(-2.0 * math.ln_f64(p if p < 0.5 else 1.0 - p))
+		x = (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0)
+		if p > 0.5 {x = -x}
+	} else {
+		q := p - 0.5
+		r := q * q
+		x = (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * q / (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1.0)
+	}
+	e := 0.5 * math.erfc(-x / math.SQRT_TWO) - p
+	u := e * math.sqrt_f64(2.0 * math.PI) * math.exp_f64(0.5 * x * x)
+	return x - u / (1.0 + 0.5 * x * u)
+}
+
+// h-step forecasts on the original scale of y for ARMA(ar, ma, sigma2) on the
+// differenced series δ(L) y (c = coefficients of δ, see _arima_diff_poly).
+// The integration is carried in the state, [α_t (N) | y_t, y_{t-1}, …], with
+// y_t = α_t[0] - Σ_{k>=1} c_k y_{t-k}; the observed lags are known exactly at T, so the
+// forecast variance accumulates the psi-weights of the integrated process (as
+// statsmodels' ARIMA / SARIMAX get_forecast). Intervals: mean ± z_{1-alpha/2}·sd.
+// Requires len(y) > len(c) - 1 (or no differencing).
+_arima_forecast_core :: proc(
+	y, ar, ma: []f64,
+	sigma2: f64,
+	c: []f64,
+	h: int,
+	alpha: f64,
+	allocator: mem.Allocator,
+) -> (
+	mean, lower, upper: []f64,
+) {
+	mean = make([]f64, h, allocator)
+	lower = make([]f64, h, allocator)
+	upper = make([]f64, h, allocator)
+
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	scratch := context.temp_allocator
+	m := len(c) - 1
+	n := len(y)
+
+	// 1) differenced series z_t = Σ c_k y_{t-k}, then filter it
+	z := make([]f64, max(n - m, 0), scratch)
+	for t in m ..< n {
+		s := 0.0
+		for k in 0 ..= m {s += c[k] * y[t - k]}
+		z[t - m] = s
+	}
+	F, Q, P, _, _, a, N := arma_pq_fundamental_state_space(ar, ma, sigma2, scratch)
+	_arma_filter(z, F, Q, N, a, P)
+
+	// 2) augmented state [α | y_t, …, y_{t-L+1}]
+	L := max(m, 1)
+	M := N + L
+	G := make([]f64, M * M, scratch)
+	Qa := make([]f64, M * M, scratch)
+	xa := make([]f64, M, scratch)
+	Pa := make([]f64, M * M, scratch)
+	T1 := make([]f64, M * M, scratch)
+	xn := make([]f64, M, scratch)
+	for i in 0 ..< N {
+		for j in 0 ..< N {
+			G[i * M + j] = F[i * N + j]
+			Qa[i * M + j] = Q[i * N + j]
+			Pa[i * M + j] = P[i * N + j]
+		}
+		// y_{t+1} = α_{t+1}[0] - Σ c_k y_{t+1-k} = F[0,:] α_t + η_0 - Σ c_k y_{t+1-k}
+		G[N * M + i] = F[i]
+		Qa[N * M + i] = Q[i]
+		Qa[i * M + N] = Q[i]
+		xa[i] = a[i]
+	}
+	Qa[N * M + N] = Q[0]
+	for k in 0 ..< m {G[N * M + N + k] = -c[k + 1]}
+	for k in 1 ..< L {G[(N + k) * M + N + k - 1] = 1.0}
+	for k in 0 ..< m {xa[N + k] = y[n - 1 - k]}
+
+	al := alpha if alpha > 0.0 && alpha < 1.0 else 0.05
+	zq := _arima_norm_ppf(1.0 - 0.5 * al)
+
+	for step in 0 ..< h {
+		for i in 0 ..< M {
+			s := 0.0
+			for j in 0 ..< M {s += G[i * M + j] * xa[j]}
+			xn[i] = s
+		}
+		copy(xa, xn)
+		for i in 0 ..< M {
+			for j in 0 ..< M {
+				s := 0.0
+				for k in 0 ..< M {s += G[i * M + k] * Pa[k * M + j]}
+				T1[i * M + j] = s
+			}
+		}
+		for i in 0 ..< M {
+			for j in 0 ..< M {
+				s := 0.0
+				for k in 0 ..< M {s += T1[i * M + k] * G[j * M + k]}
+				Pa[i * M + j] = s + Qa[i * M + j]
+			}
+		}
+		mu := xa[N]
+		sd := math.sqrt_f64(max(Pa[N * M + N], 0.0))
+		mean[step] = mu
+		lower[step] = mu - zq * sd
+		upper[step] = mu + zq * sd
+	}
+	return
+}
+
+// Forecast h steps ahead on the original scale of y: exactly h values (none for
+// h <= 0) with (1 - alpha) Gaussian prediction intervals, as statsmodels'
+// get_forecast(h).conf_int(alpha). p and q are implied by fit.phi / fit.theta.
 arima_forecast :: proc(
 	y: []f64,
 	fit: ArimaFitResult,
@@ -315,112 +660,10 @@ arima_forecast :: proc(
 		mean, lower, upper := _nan_forecast(h, allocator)
 		return ArimaForecastResult{mean = mean, lower = lower, upper = upper}
 	}
-
-	// 1) differencing if needed
-	y_eff := y
-	if d > 0 {
-		y_eff = difference(y, d, allocator)
-	}
-
-	// 2) build state-space from fitted params
-	F, Q, P0, H, R, x0, N := arima_state_space(fit.phi, fit.theta, d, fit.sigma2, allocator)
-
-	// 3) run filter to get last state
-	xT, PT := kalman_filter_last_scalar(y_eff, F, Q, P0, H, R, x0, N, allocator)
-
-	// 4) forecasting loop
-	mean := make([]f64, h, allocator)
-	lower := make([]f64, h, allocator)
-	upper := make([]f64, h, allocator)
-
-	z := 1.96 // for 95% PI
-
-	// Current state and covariance as flat arrays
-	x := make([]f64, N, allocator)
-	P := make([]f64, N * N, allocator)
-	copy(x, xT)
-	copy(P, PT)
-
-	for step in 0 ..< h {
-		// --- Optimized Predict Step: x_pred = F*x, P_pred = F*P*Fᵀ + Q ---
-		if _kalman_use_optimized(N) {
-			// x = F x,  P = F P Fᵀ + Q  (row-major flat arrays, in place)
-			_kalman_predict_flat(F, Q, x, P, N)
-		} else {
-			// Built-in Odin ops for small N (≤8) - keep original manual loops
-			// x_pred = F * x
-			x_pred := make([]f64, N, allocator)
-			for i in 0 ..< N {
-				s := 0.0
-				for j in 0 ..< N {
-					s += F[i * N + j] * x[j]
-				}
-				x_pred[i] = s
-			}
-
-			// P_pred = F * P * Fᵀ + Q
-			P_pred := make([]f64, N * N, allocator)
-			temp := make([]f64, N * N, allocator)
-			for i in 0 ..< N {
-				for j in 0 ..< N {
-					s := 0.0
-					for k in 0 ..< N {
-						s += F[i * N + k] * P[k * N + j]
-					}
-					temp[i * N + j] = s
-				}
-			}
-			for i in 0 ..< N {
-				for j in 0 ..< N {
-					s := 0.0
-					for k in 0 ..< N {
-						s += temp[i * N + k] * F[j * N + k]
-					}
-					P_pred[i * N + j] = s + Q[i * N + j]
-				}
-			}
-
-			// Copy results back
-			copy(x, x_pred)
-			copy(P, P_pred)
-		}
-
-		// --- Forecast mean and variance on observation scale ---
-		// (unchanged: this is O(N) and not a bottleneck)
-		mu := 0.0
-		for j in 0 ..< N {
-			mu += H[j] * x[j]
-		}
-
-		S := 0.0
-		for i in 0 ..< N {
-			for j in 0 ..< N {
-				S += H[i] * P[i * N + j] * H[j]
-			}
-		}
-		S += R[0]
-
-		sd := math.sqrt_f64(S)
-
-		mean[step] = mu
-		lower[step] = mu - z * sd
-		upper[step] = mu + z * sd
-	}
-
-	// If d > 0, integrate forecasts back to original scale
-	if d > 0 {
-		history := make([]f64, d, allocator)
-		for i in 0 ..< d {
-			history[i] = y[len(y) - d + i]
-		}
-
-		mean = inverse_difference(mean, history, d, allocator)
-		lower = inverse_difference(lower, history, d, allocator)
-		upper = inverse_difference(upper, history, d, allocator)
-	}
-
+	c := _arima_diff_poly(d, 0, 0, context.temp_allocator)
+	defer delete(c, context.temp_allocator)
+	mean, lower, upper := _arima_forecast_core(y, fit.phi, fit.theta, fit.sigma2, c, h, alpha, allocator)
 	return ArimaForecastResult{mean = mean, lower = lower, upper = upper}
-
 }
 arma11_state_space :: proc(
 	phi: f64,
@@ -465,13 +708,17 @@ arma11_state_space :: proc(
 	// No measurement noise
 	R[0] = 0.0
 
-	// Diffuse initial state
-	P0[0] = 1e6
-	P0[3] = 1e6
+	// Stationary initial covariance (approximate diffuse only if |φ| >= 1)
+	_arima_init_P0(F, Q, N, P0)
 
 	return
 }
 
+// ARMA(p,q) in Harvey's state-space form (the one statsmodels uses):
+//   N = max(p, q + 1),  y_t = α_t[0]  (H = e_0, R = 0),
+//   α_{t+1} = F α_t + g e_{t+1},  F = [phi | I_{N-1}; 0 … 0]  (phi zero-padded to N),
+//   g = [1, theta_1, …, theta_{N-1}],  Q = sigma2 g gᵀ,
+//   x0 = 0, P0 = stationary covariance (P0 = F P0 Fᵀ + Q).
 arma_pq_fundamental_state_space :: proc(
 	phi, theta: []f64,
 	sigma2: f64,
@@ -485,94 +732,7 @@ arma_pq_fundamental_state_space :: proc(
 ) {
 	p := len(phi)
 	q := len(theta)
-
-	// --- Special cases: pure AR or pure MA ---
-
-	if q == 0 {
-		// Pure AR(p): standard companion form, noise directly in y_t
-		N = max(p, 1)
-
-		F = make([]f64, N * N, allocator)
-		Q = make([]f64, N * N, allocator)
-		P0 = make([]f64, N * N, allocator)
-		H = make([]f64, N, allocator)
-		R = make([]f64, 1, allocator)
-		x0 = make([]f64, N, allocator)
-
-		// First row: AR coeffs
-		for i in 0 ..< p {
-			F[0 * N + i] = phi[i]
-		}
-		// Shift y-lags
-		for i in 1 ..< p {
-			F[i * N + (i - 1)] = 1.0
-		}
-
-		// Observation: y_t = state[0]
-		H[0] = 1.0
-
-		// Noise: innovation enters y_t directly
-		G := make([]f64, N, allocator)
-		G[0] = 1.0
-		for i in 0 ..< N {
-			for j in 0 ..< N {
-				Q[i * N + j] = sigma2 * G[i] * G[j]
-			}
-		}
-
-		R[0] = 0.0
-		for i in 0 ..< N {
-			P0[i * N + i] = 1e6
-		}
-		return
-	}
-
-	if p == 0 {
-		// Pure MA(q): state = [ε_t, ε_{t-1}, ..., ε_{t-q+1}]
-		N = q
-
-		F = make([]f64, N * N, allocator)
-		Q = make([]f64, N * N, allocator)
-		P0 = make([]f64, N * N, allocator)
-		H = make([]f64, N, allocator)
-		R = make([]f64, 1, allocator)
-		x0 = make([]f64, N, allocator)
-
-		// ε_{t+1} = η_{t+1}
-		// shift ε-lags
-		for j in 1 ..< q {
-			F[j * N + (j - 1)] = 1.0
-		}
-
-		// Observation: y_t = ε_t + θ_1 ε_{t-1} + ... + θ_q ε_{t-q}
-		// state[0] = ε_t, state[1] = ε_{t-1}, ...
-		H[0] = 1.0
-		for j in 0 ..< q {
-			// θ_j corresponds to ε_{t-j-1} in state index j+1
-			if j + 1 < N {
-				H[j + 1] += theta[j]
-			}
-		}
-
-		// Noise: innovation only in ε_{t+1} (next state[0])
-		G := make([]f64, N, allocator)
-		G[0] = 1.0
-		for i in 0 ..< N {
-			for j in 0 ..< N {
-				Q[i * N + j] = sigma2 * G[i] * G[j]
-			}
-		}
-
-		R[0] = 0.0
-		for i in 0 ..< N {
-			P0[i * N + i] = 1e6
-		}
-		return
-	}
-
-	// --- General ARMA(p,q) ---
-
-	N = p + q
+	N = max(p, q + 1)
 
 	F = make([]f64, N * N, allocator)
 	Q = make([]f64, N * N, allocator)
@@ -581,68 +741,27 @@ arma_pq_fundamental_state_space :: proc(
 	R = make([]f64, 1, allocator)
 	x0 = make([]f64, N, allocator)
 
-	// State layout:
-	// [ y_t, y_{t-1}, ..., y_{t-p+1}, ε_t, ε_{t-1}, ..., ε_{t-q+1} ]
-	// indices: 0 .. p-1 for y-lags, p .. p+q-1 for ε-lags
+	for i in 0 ..< p {F[i * N] = phi[i]}
+	for i in 0 ..< N - 1 {F[i * N + i + 1] = 1.0}
 
-	// --- Transition for y_{t+1} (row 0) ---
-
-	// AR part on y-lags
-	for i in 0 ..< p {
-		F[0 * N + i] = phi[i]
-	}
-
-	// MA part on ε-lags: θ_1 ε_t + ... + θ_q ε_{t-q+1}
-	// ε_t is state[p + 0], ε_{t-1} is state[p + 1], ...
-	for j in 0 ..< q {
-		F[0 * N + (p + j)] = theta[j]
-	}
-	// The current innovation ε_{t+1} = η_{t+1} will enter via G[0] = 1.0
-
-	// --- Shift y-lags ---
-	// y_{t} -> y_{t+1-1}, y_{t-1} -> y_{t+1-2}, ...
-	for i in 1 ..< p {
-		F[i * N + (i - 1)] = 1.0
-	}
-
-	// --- ε_{t+1} dynamics and shifts ---
-	// ε_{t+1} = η_{t+1}  (no dependence on previous state)
-	// so row p is all zeros; noise will enter via G[p] = 1.0
-
-	// shift ε-lags: ε_t -> ε_{t+1-1}, ε_{t-1} -> ε_{t+1-2}, ...
-	for j in 1 ..< q {
-		row := p + j
-		col := p + j - 1
-		F[row * N + col] = 1.0
-	}
-
-	// --- Observation matrix ---
-	// y_t = state[0]
-	H[0] = 1.0
-
-	// --- Process noise: η_{t+1} = ε_{t+1} ---
-	// enters ε_{t+1} (state index p) and y_{t+1} with coefficient 1
-	G := make([]f64, N, allocator)
-	G[0] = 1.0 // innovation contributes directly to y_{t+1}
-	G[p] = 1.0 // and defines ε_{t+1}
-
+	g :: proc(theta: []f64, i: int) -> f64 {return 1.0 if i == 0 else (theta[i - 1] if i - 1 < len(theta) else 0.0)}
 	for i in 0 ..< N {
 		for j in 0 ..< N {
-			Q[i * N + j] = sigma2 * G[i] * G[j]
+			Q[i * N + j] = sigma2 * g(theta, i) * g(theta, j)
 		}
 	}
 
-	// No measurement noise
+	H[0] = 1.0
 	R[0] = 0.0
-
-	// Diffuse initial covariance
-	for i in 0 ..< N {
-		P0[i * N + i] = 1e6
-	}
-
+	_arima_init_P0(F, Q, N, P0)
 	return
 }
 
+// Simulate T values of the general ARMA(p,q)
+//   y_t = Σ phi_i y_{t-i} + e_t + Σ theta_j e_{t-j},  e_t ~ N(0, sigma2)
+// (any p, q despite the name). The initial state is drawn from the stationary
+// distribution, so the path is stationary from t = 0; for non-stationary phi it
+// starts from zero pre-sample values instead.
 arma22_simulate :: proc(
 	phi: []f64,
 	theta: []f64,
@@ -650,39 +769,60 @@ arma22_simulate :: proc(
 	T: int,
 	allocator: mem.Allocator,
 ) -> []f64 {
-	y := make([]f64, T, allocator)
-	e_prev := make([]f64, len(theta) + 1, allocator) // e_t, e_{t-1}, ...
-	y_prev := make([]f64, len(phi) + 1, allocator) // y_t, y_{t-1}, ...
+	y := make([]f64, max(T, 0), allocator)
+	if T <= 0 {return y}
+	sigma := math.sqrt_f64(max(sigma2, 0.0))
 
-	sigma := math.sqrt_f64(sigma2)
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	scratch := context.temp_allocator
+	// Harvey form: y_t = α_t[0], α_{t+1} = F α_t + g e_{t+1}, g = [1, theta…]
+	F, _, _, _, _, a, N := arma_pq_fundamental_state_space(phi, theta, 1.0, scratch)
+	P := make([]f64, N * N, scratch)
+	Qs := make([]f64, N * N, scratch)
+	g := make([]f64, N, scratch)
+	g[0] = 1.0
+	for j in 0 ..< len(theta) {if j + 1 < N {g[j + 1] = theta[j]}}
+	for i in 0 ..< N {for j in 0 ..< N {Qs[i * N + j] = sigma2 * g[i] * g[j]}}
+
+	stationary := _arima_stationary_cov(F, Qs, N, P)
+	if stationary {
+		// α_0 ~ N(0, P): Cholesky factor (pivots that are numerically 0 are skipped,
+		// P is singular when q + 1 < p or p < q + 1)
+		Lc := make([]f64, N * N, scratch)
+		scale := 0.0
+		for i in 0 ..< N {scale = max(scale, P[i * N + i])}
+		for j in 0 ..< N {
+			s := P[j * N + j]
+			for k in 0 ..< j {s -= Lc[j * N + k] * Lc[j * N + k]}
+			if s <= 1e-13 * scale {continue}
+			Lc[j * N + j] = math.sqrt_f64(s)
+			for i in j + 1 ..< N {
+				v := P[i * N + j]
+				for k in 0 ..< j {v -= Lc[i * N + k] * Lc[j * N + k]}
+				Lc[i * N + j] = v / Lc[j * N + j]
+			}
+		}
+		u := make([]f64, N, scratch)
+		for i in 0 ..< N {u[i] = rand.float64_normal(0.0, 1.0)}
+		for i in 0 ..< N {
+			s := 0.0
+			for k in 0 ..= i {s += Lc[i * N + k] * u[k]}
+			a[i] = s
+		}
+	}
 
 	for t in 0 ..< T {
-		e := rand.float64_normal(0.0, sigma)
-
-		// AR part
-		ar := 0.0
-		for i in 0 ..< len(phi) {
-			ar += phi[i] * y_prev[i]
+		if t > 0 {
+			e := rand.float64_normal(0.0, sigma)
+			a0 := a[0]
+			for i in 0 ..< N - 1 {a[i] = F[i * N] * a0 + a[i + 1] + g[i] * e}
+			a[N - 1] = F[(N - 1) * N] * a0 + g[N - 1] * e
+		} else if !stationary {
+			// non-stationary: zero pre-sample, first value is the first shock
+			e := rand.float64_normal(0.0, sigma)
+			for i in 0 ..< N {a[i] = g[i] * e}
 		}
-
-		// MA part
-		ma := e
-		for j in 0 ..< len(theta) {
-			ma += theta[j] * e_prev[j]
-		}
-
-		y[t] = ar + ma
-
-		// shift histories
-		for i := len(y_prev) - 1; i > 0; i -= 1 {
-			y_prev[i] = y_prev[i - 1]
-		}
-		y_prev[0] = y[t]
-
-		for j := len(e_prev) - 1; j > 0; j -= 1 {
-			e_prev[j] = e_prev[j - 1]
-		}
-		e_prev[0] = e
+		y[t] = a[0]
 	}
 
 	return y
@@ -716,6 +856,10 @@ ArimaAutoResult :: struct {
 	fit:     ArimaFitResult,
 }
 
+// Order selection by AIC/BIC over p <= max_p, q <= max_q. AIC/BIC are only comparable
+// between models of the same differenced series (a d = 1 likelihood is a density of
+// n - 1 differences, a d = 0 one of n levels), so d is fixed first by the ADF + KPSS
+// rule of auto_arima_d_from_tests (capped at max_d), as pmdarima / R auto.arima do.
 arima_auto :: proc(
 	y: []f64,
 	max_p: int,
@@ -727,9 +871,10 @@ arima_auto :: proc(
 
 	best: ArimaAutoResult
 	best_score := math.INF_F64
+	d_sel := min(auto_arima_d_from_tests(y, allocator), max(max_d, 0))
 
 	for p in 0 ..= max_p {
-		for d in 0 ..= max_d {
+		for d in d_sel ..= d_sel {
 			for q in 0 ..= max_q {
 
 				// skip the trivial (0,0,0)
@@ -872,9 +1017,9 @@ sarima_expand_to_arma :: proc(
 	ma: []f64,
 ) {
 	p := len(phi)
-	P := len(Phi)
+	P := len(Phi) if s > 0 else 0 // no seasonal terms without a season length
 	q := len(theta)
-	Q := len(Theta)
+	Q := len(Theta) if s > 0 else 0
 
 	// --- AR polynomial: (1 - φ(L)) (1 - Φ(L^s)) ---
 	// poly_ar(k) corresponds to coefficient of L^k
@@ -995,7 +1140,7 @@ seasonal_difference :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> []f64 {
 
-	if D <= 0 {
+	if D <= 0 || s <= 0 { 	// s <= 0: no seasonal differencing
 		out := make([]f64, len(series), allocator)
 		for i in 0 ..< len(series) {
 			out[i] = series[i]
@@ -1070,24 +1215,9 @@ seasonal_inverse_difference :: proc(
 		return out
 	}
 
-	// Start with stored history
-	out := make([]f64, len(diff) + len(history), allocator)
-	for i in 0 ..< len(history) {
-		out[i] = history[i]
-	}
-
-	// First seasonal integration (lags before the stored history count as 0)
-	for i in 0 ..< len(diff) {
-		j := len(history) + i - s
-		out[len(history) + i] = diff[i] + (out[j] if j >= 0 else 0)
-	}
-
-	// Higher-order seasonal integration
-	for d in 1 ..< D {
-		for i in len(history) ..< len(out) {
-			if i - s >= 0 do out[i] = out[i] + out[i - s]
-		}
-	}
-
-	return out
+	// history = the first D*s original values; y_t = z_t - Σ c_k y_{t-k} with
+	// c = (1 - L^s)^D (lags before the stored history count as 0)
+	c := _arima_diff_poly(0, D, s, context.temp_allocator)
+	defer delete(c, context.temp_allocator)
+	return _arima_undifference(diff, history, c, allocator)
 }

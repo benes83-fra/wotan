@@ -110,8 +110,8 @@ analytics_edge_cases_test :: proc(allocator: mem.Allocator) {
 	qv, _ := w.column_at_float(&q, 4)
 	expect(&passed, &total, qv == 5, "rolling quantile above 1 clamps to the max")
 	imean := ts.rolling_apply(ts.rolling_window(&df, "i", 3, 1), w.Aggregator{name = "m", kind = .Mean})
-	iv, _ := w.column_at_int(&imean, 4)
-	expect(&passed, &total, iv == 4, "rolling int Mean uses the window (mean of 3,4,5)")
+	iv, _ := w.column_at_float(&imean, 4)
+	expect(&passed, &total, imean.type == .Float && iv == 4, "rolling int Mean uses the window (mean of 3,4,5)")
 	none := ts.rolling_apply_many(ts.rolling_window(&df, "x", 3, 1), {})
 	expect(&passed, &total, none.rows == 0, "rolling_apply_many with no aggregators")
 	many := ts.rolling_apply_many(

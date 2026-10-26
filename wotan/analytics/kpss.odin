@@ -81,14 +81,21 @@ kpss_test :: proc(
 		S[t] = S[t - 1] + u[t]
 	}
 
-	// 3) Long-run variance (Newey–West)
+	// 3) Long-run variance (Newey–West, Bartlett kernel)
+	// nw_lags < 0: data-dependent bandwidth of Hobijn et al. (1998), the
+	// default of statsmodels kpss (nlags="auto"); capped at T-1 like statsmodels.
 	lags := nw_lags
 	if lags < 0 {
-		lags = int(math.floor(4.0 * math.pow(f64(T) / 100.0, 1.0 / 4.0)))
+		lags = kpss_autolag(u)
 	}
+	lags = min(lags, T - 1)
 
-
-	eta := kpss_long_run_variance(u, nw_lags)
+	eta := kpss_long_run_variance(u, lags)
+	crit_10, crit_5, crit_2_5, crit_1 = kpss_critical_values(kind)
+	if !(eta > 0) {
+		// constant series: no deviations from the fitted level/trend
+		return 0, 0.10, crit_10, crit_5, crit_2_5, crit_1
+	}
 
 	// 4) KPSS statistic
 	sum_sq := 0.0
@@ -98,20 +105,22 @@ kpss_test :: proc(
 
 	kpss_stat = sum_sq / (f64(T * T) * eta)
 
-	// 5) Critical values
-	crit_10, crit_5, crit_2_5, crit_1 = kpss_critical_values(kind)
-
-	// 6) p-value (piecewise interpolation)
-	if kpss_stat < crit_10 {
-		p_value = 0.10
-	} else if kpss_stat < crit_5 {
-		p_value = 0.05
-	} else if kpss_stat < crit_2_5 {
-		p_value = 0.025
-	} else if kpss_stat < crit_1 {
-		p_value = 0.01
+	// 5) p-value: linear interpolation in the KPSS (1992) table, clamped to
+	// [0.01, 0.10] outside it (as statsmodels: np.interp(stat, crit, pvals))
+	crits := [4]f64{crit_10, crit_5, crit_2_5, crit_1}
+	pvals := [4]f64{0.10, 0.05, 0.025, 0.01}
+	if kpss_stat <= crits[0] {
+		p_value = pvals[0]
+	} else if kpss_stat >= crits[3] {
+		p_value = pvals[3]
 	} else {
-		p_value = 0.005
+		for i in 0 ..< 3 {
+			if kpss_stat <= crits[i + 1] {
+				w := (kpss_stat - crits[i]) / (crits[i + 1] - crits[i])
+				p_value = pvals[i] + w * (pvals[i + 1] - pvals[i])
+				break
+			}
+		}
 	}
 
 	return
@@ -164,4 +173,39 @@ kpss_long_run_variance :: proc(u: []f64, lag: int) -> f64 {
 	}
 
 	return s
+}
+
+// Hobijn, Franses & Ooms (1998) automatic Bartlett bandwidth, as in
+// statsmodels _kpss_autolag: n = floor(T^(2/9)) autocovariances give
+// s_hat = s1/s0 and lags = floor(1.1447 * (s_hat^2 * T)^(1/3)).
+// (The fixed alternatives are statsmodels nlags="legacy",
+// ceil(12 (T/100)^(1/4)), or the KPSS paper's l4 = floor(4 (T/100)^(1/4));
+// pass them via nw_lags >= 0.)
+kpss_autolag :: proc(u: []f64) -> int {
+	T := len(u)
+	if T <= 1 {
+		return 0
+	}
+	cov_lags := int(math.pow(f64(T), 2.0 / 9.0))
+	s0 := 0.0
+	for v in u {
+		s0 += v * v
+	}
+	s0 /= f64(T)
+	s1 := 0.0
+	for i in 1 ..= cov_lags {
+		prod := 0.0
+		for t in i ..< T {
+			prod += u[t] * u[t - i]
+		}
+		prod /= f64(T) / 2.0
+		s0 += prod
+		s1 += f64(i) * prod
+	}
+	if s0 == 0 {
+		return 0
+	}
+	s_hat := s1 / s0
+	gamma_hat := 1.1447 * math.pow(s_hat * s_hat, 1.0 / 3.0)
+	return max(int(gamma_hat * math.pow(f64(T), 1.0 / 3.0)), 0)
 }

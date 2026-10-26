@@ -122,6 +122,13 @@ _garch_variance_at :: proc(params: ^GARCH_Params, residuals, cond_var: []f64, t:
 	return variance
 }
 
+// Negative log-likelihood. Conventions (checked against a numpy reference):
+// - variance initialisation: σ²_t = mean(ε²) (uncentred sample variance) for
+//   t < max(p, q); those first max(p, q) observations only seed the recursion
+//   and are not part of the likelihood (conditional MLE)
+// - StudentT: standardized t with unit variance,
+//   log f = lnΓ((ν+1)/2) - lnΓ(ν/2) - ½ln((ν-2)π) - ½ln σ² - (ν+1)/2 · ln(1 + z²/(ν-2))
+// - GED: unit-variance GED, f(z) = p / (2 λ Γ(1/p)) exp(-|z/λ|^p), λ = sqrt(Γ(1/p)/Γ(3/p))
 _garch_neg_log_likelihood :: proc(
 	params: ^GARCH_Params,
 	residuals: []f64,
@@ -267,6 +274,7 @@ garch_fit :: proc(
 
 	prev_loss := math.F64_MAX
 	converged := false
+	n_iter := 0
 
 	for iter in 0 ..< max_iter {
 		unpack_params(param_vec, &params)
@@ -279,6 +287,7 @@ garch_fit :: proc(
 
 		// 4. Convergence check inside the loop
 		if iter > 100 && math.abs(prev_loss - loss) < tolerance {
+			n_iter = iter + 1
 			fmt.printf(
 				"GARCH converged at iteration %d (loss change: %.8f)\n",
 				iter,
@@ -299,8 +308,7 @@ garch_fit :: proc(
 		}
 
 		prev_loss = loss
-
-		prev_loss = loss
+		n_iter = iter + 1
 
 		// Numerical gradient
 		eps := 1e-5
@@ -350,6 +358,28 @@ garch_fit :: proc(
 		}
 	}
 
+	// Adam with a fixed step stalls ~1e-2 log-likelihood units short of the
+	// optimum: polish the best point with Nelder-Mead (restarted once)
+	_Garch_NM_Ctx :: struct {
+		params:    ^GARCH_Params,
+		residuals: []f64,
+		allocator: mem.Allocator,
+	}
+	nm_obj :: proc(x: []f64, ctx: rawptr) -> f64 {
+		c := (^_Garch_NM_Ctx)(ctx)
+		unpack_params(x, c.params)
+		return _garch_neg_log_likelihood(c.params, c.residuals, c.allocator)
+	}
+	nm_ctx := _Garch_NM_Ctx{&params, residuals, allocator}
+	for _ in 0 ..< 2 {
+		x_nm, f_nm, _ := nelder_mead(nm_obj, &nm_ctx, best_params, 2000, 1e-10, allocator)
+		if f_nm < best_loss {
+			best_loss = f_nm
+			copy(best_params, x_nm)
+		}
+		delete(x_nm, allocator)
+	}
+
 	// Unpack best parameters
 	unpack_params(best_params, &params)
 
@@ -391,7 +421,7 @@ garch_fit :: proc(
 		conditional_var = cond_var,
 		standardized_resid = std_resid,
 		converged = converged,
-		n_iterations = max_iter,
+		n_iterations = n_iter, // Adam iterations (the Nelder-Mead polish is not counted)
 		persistence = persistence,
 	}
 }
@@ -459,7 +489,9 @@ garch_forecast :: proc(
 
 	forecast_std := math.sqrt_f64(forecast_var)
 
-	confidence_95 := [2]f64{-1.96 * forecast_std, 1.96 * forecast_std}
+	// 95% interval of ε_{n+h} under the fitted standardized error distribution
+	z_975 := garch_std_quantile(params, 0.975)
+	confidence_95 := [2]f64{-z_975 * forecast_std, z_975 * forecast_std}
 
 	return GARCH_Forecast {
 		variance_forecast = forecast_var,
@@ -506,8 +538,10 @@ garch_var_series :: proc(
 	var_95 = make([]f64, n, allocator)
 	var_99 = make([]f64, n, allocator)
 
-	z_95 := 1.6448536269514722
-	z_99 := 2.3263478740408408
+	// Quantiles of the fitted standardized (unit-variance) error distribution:
+	// normal, Student-t scaled by sqrt((ν-2)/ν), or GED
+	z_95 := garch_std_quantile(&result.params, 0.95)
+	z_99 := garch_std_quantile(&result.params, 0.99)
 
 	for i in 0 ..< n {
 		std := math.sqrt_f64(result.conditional_var[i])
@@ -516,4 +550,135 @@ garch_var_series :: proc(
 	}
 
 	return var_95, var_99
+}
+
+// ============================================================================
+// Standardized Error Quantiles
+// ============================================================================
+
+// Quantile of the unit-variance error distribution of a fitted model:
+// N(0,1); Student-t(ν)·sqrt((ν-2)/ν); GED(p) with λ = sqrt(Γ(1/p)/Γ(3/p))
+garch_std_quantile :: proc(params: ^GARCH_Params, prob: f64) -> f64 {
+	if prob <= 0.0 {return -math.INF_F64}
+	if prob >= 1.0 {return math.INF_F64}
+	cdf: proc(x, shape: f64) -> f64
+	shape := 0.0
+	scale := 1.0
+	switch {
+	case params.model_type == .StudentT && params.nu > 2.0:
+		shape, scale = params.nu, math.sqrt_f64((params.nu - 2.0) / params.nu)
+		cdf = proc(x, nu: f64) -> f64 {
+			// F(x) = 1 - ½ I_{ν/(ν+x²)}(ν/2, ½) for x ≥ 0; near 0 use the
+			// complement 1 - I_{x²/(ν+x²)}(½, ν/2) to avoid cancellation
+			tail: f64
+			if x * x < nu {
+				tail = 0.5 - 0.5 * _garch_reg_inc_beta(0.5, 0.5 * nu, x * x / (nu + x * x))
+			} else {
+				tail = 0.5 * _garch_reg_inc_beta(0.5 * nu, 0.5, nu / (nu + x * x))
+			}
+			return 1.0 - tail if x >= 0.0 else tail
+		}
+	case params.model_type == .GED && params.shape > 0.0:
+		lg1, _ := math.lgamma(1.0 / params.shape)
+		lg3, _ := math.lgamma(3.0 / params.shape)
+		shape, scale = params.shape, math.exp_f64(0.5 * (lg1 - lg3))
+		cdf = proc(x, p: f64) -> f64 {
+			// F(x) = ½ + ½ sign(x) P(1/p, |x|^p) for the λ = 1 density
+			half := 0.5 * _garch_reg_lower_gamma(1.0 / p, math.pow(math.abs(x), p))
+			return 0.5 + half if x >= 0.0 else 0.5 - half
+		}
+	case:
+		cdf = proc(x, _: f64) -> f64 {return 0.5 * math.erfc(-x / math.SQRT_TWO)}
+	}
+
+	// Bisection on the (λ = 1 / unscaled) CDF, then rescale to unit variance
+	lo, hi := -1.0, 1.0
+	for cdf(lo, shape) > prob && lo > -1e12 {lo *= 2.0}
+	for cdf(hi, shape) < prob && hi < 1e12 {hi *= 2.0}
+	for _ in 0 ..< 200 {
+		mid := 0.5 * (lo + hi)
+		if mid == lo || mid == hi {break}
+		if cdf(mid, shape) < prob {lo = mid} else {hi = mid}
+	}
+	return scale * 0.5 * (lo + hi)
+}
+
+// Regularized incomplete beta I_x(a, b) (continued fraction, Numerical Recipes betacf)
+_garch_reg_inc_beta :: proc(a, b, x: f64) -> f64 {
+	if x <= 0.0 {return 0.0}
+	if x >= 1.0 {return 1.0}
+	lab, _ := math.lgamma(a + b)
+	la, _ := math.lgamma(a)
+	lb, _ := math.lgamma(b)
+	front := math.exp_f64(lab - la - lb + a * math.ln_f64(x) + b * math.ln_f64(1.0 - x))
+	// Use the symmetry I_x(a,b) = 1 - I_{1-x}(b,a) where the fraction converges fast
+	if x > (a + 1.0) / (a + b + 2.0) {
+		return 1.0 - front * _garch_betacf(b, a, 1.0 - x) / b
+	}
+	return front * _garch_betacf(a, b, x) / a
+}
+
+_garch_betacf :: proc(a, b, x: f64) -> f64 {
+	TINY :: 1e-300
+	qab, qap, qam := a + b, a + 1.0, a - 1.0
+	c, d := 1.0, 1.0 - qab * x / qap
+	if math.abs(d) < TINY {d = TINY}
+	d = 1.0 / d
+	h := d
+	for m in 1 ..= 300 {
+		fm := f64(m)
+		m2 := 2.0 * fm
+		aa := fm * (b - fm) * x / ((qam + m2) * (a + m2))
+		d = 1.0 + aa * d
+		if math.abs(d) < TINY {d = TINY}
+		c = 1.0 + aa / c
+		if math.abs(c) < TINY {c = TINY}
+		d = 1.0 / d
+		h *= d * c
+		aa = -(a + fm) * (qab + fm) * x / ((a + m2) * (qap + m2))
+		d = 1.0 + aa * d
+		if math.abs(d) < TINY {d = TINY}
+		c = 1.0 + aa / c
+		if math.abs(c) < TINY {c = TINY}
+		d = 1.0 / d
+		del := d * c
+		h *= del
+		if math.abs(del - 1.0) < 1e-15 {break}
+	}
+	return h
+}
+
+// Regularized lower incomplete gamma P(a, x) (series for x < a+1, else continued fraction)
+_garch_reg_lower_gamma :: proc(a, x: f64) -> f64 {
+	if x <= 0.0 {return 0.0}
+	lga, _ := math.lgamma(a)
+	if x < a + 1.0 {
+		ap, sum := a, 1.0 / a
+		del := sum
+		for _ in 0 ..< 1000 {
+			ap += 1.0
+			del *= x / ap
+			sum += del
+			if math.abs(del) < math.abs(sum) * 1e-16 {break}
+		}
+		return sum * math.exp_f64(-x + a * math.ln_f64(x) - lga)
+	}
+	TINY :: 1e-300
+	b := x + 1.0 - a
+	c := 1.0 / TINY
+	d := 1.0 / b
+	h := d
+	for i in 1 ..= 1000 {
+		an := -f64(i) * (f64(i) - a)
+		b += 2.0
+		d = an * d + b
+		if math.abs(d) < TINY {d = TINY}
+		c = b + an / c
+		if math.abs(c) < TINY {c = TINY}
+		d = 1.0 / d
+		del := d * c
+		h *= del
+		if math.abs(del - 1.0) < 1e-16 {break}
+	}
+	return 1.0 - math.exp_f64(-x + a * math.ln_f64(x) - lga) * h
 }

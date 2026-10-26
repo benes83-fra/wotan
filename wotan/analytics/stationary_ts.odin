@@ -32,7 +32,11 @@ stationarity_test :: proc(
 	// --- Run KPSS ---
 	kpss_stat, kpss_p, _, _, _, _ = kpss_test(y, kpss_type, -1, allocator)
 
-	// --- Decision matrix ---
+	// --- Decision matrix (5% level; ADF H0 = unit root, KPSS H0 = stationary) ---
+	// Labels are this library's convention (used by auto_arima_d_from_tests):
+	// both rejecting is called TrendStationary and both not rejecting
+	// Inconclusive. The statsmodels user guide reads these two cases the other
+	// way round ("difference stationary" / "trend stationary").
 	adf_reject := adf_p < 0.05
 	kpss_reject := kpss_p < 0.05
 

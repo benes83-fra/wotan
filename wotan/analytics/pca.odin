@@ -52,9 +52,16 @@ _from_linalg_matrix :: proc(
 	}
 	return out
 }
+// eigenvalues: descending covariance eigenvalues (ddof = 1, = sklearn explained_variance_)
+// eigenvectors: one row per component (= sklearn components_); sign convention: the
+//   largest-|.| loading of each component is positive (sklearn >= 1.5
+//   svd_flip(u_based_decision=False); sklearn 1.2 fixes signs from the scores instead)
+// mean: column means of the fitted data (nil when built from a covariance only);
+//   pca_transform subtracts it and pca_inverse_transform adds it back
 PCAResult :: struct {
 	eigenvalues:  []f64,
 	eigenvectors: [][]f64,
+	mean:         []f64,
 }
 JacobiResult :: struct {
 	eigenvalues:  []f64,
@@ -65,8 +72,18 @@ JacobiResult :: struct {
 pca_dataframe :: proc(df: ^w.DataFrame, cols: []string, allocator: mem.Allocator) -> PCAResult {
 
 	data := extract_numeric_matrix(df, cols, allocator)
+	defer destroy_matrix(data, allocator)
 	cov := covariance_matrix(data, allocator)
-	return pca_from_cov(cov, allocator)
+	defer destroy_matrix(cov, allocator)
+	res := pca_from_cov(cov, allocator)
+	if len(res.eigenvalues) > 0 {
+		res.mean = make([]f64, len(cols), allocator)
+		for row in data {
+			for v, j in row {res.mean[j] += v}
+		}
+		for j in 0 ..< len(cols) {res.mean[j] /= f64(len(data))}
+	}
+	return res
 }
 
 rolling_pca :: proc(
@@ -77,12 +94,40 @@ rolling_pca :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> []PCAResult {
 
+	// One PCA per DataFrame row (cov_df is long-format with k² entries per row).
+	// Rows whose window has fewer than min_periods points give an empty PCAResult.
 	cov_df := rolling_cov_matrix(df, cols, window, min_periods, allocator)
 	defer w.destroy_dataframe(&cov_df)
-	results := make([]PCAResult, cov_df.rows, allocator)
+	k := len(cols)
+	n := df.rows
+	results := make([]PCAResult, n, allocator)
+	if k == 0 || n == 0 {return results}
 
-	for r in 0 ..< cov_df.rows {
-		cov := extract_cov_matrix_row(&cov_df, cols, r, allocator)
+	covs := make([]f64, n * k * k, context.temp_allocator)
+	defer delete(covs, context.temp_allocator)
+	valid := make([]int, n, context.temp_allocator) // count of non-null entries per row
+	defer delete(valid, context.temp_allocator)
+
+	col_row := w.column(&cov_df, "row")
+	col_i := w.column(&cov_df, "col_i")
+	col_j := w.column(&cov_df, "col_j")
+	col_cov := w.column(&cov_df, "cov")
+	for idx in 0 ..< cov_df.rows {
+		r, _ := w.column_at_int(col_row, idx)
+		v, is_null := w.column_at_float(col_cov, idx)
+		if r < 0 || r >= n || is_null {continue}
+		i_name, _ := w.column_at_string(col_i, idx)
+		j_name, _ := w.column_at_string(col_j, idx)
+		i_idx, j_idx := index_of_string(cols, i_name), index_of_string(cols, j_name)
+		covs[r * k * k + i_idx * k + j_idx] = v
+		valid[r] += 1
+	}
+
+	cov := make([][]f64, k, context.temp_allocator)
+	defer delete(cov, context.temp_allocator)
+	for r in 0 ..< n {
+		if valid[r] < k * k {continue}
+		for i in 0 ..< k {cov[i] = covs[r * k * k + i * k:r * k * k + (i + 1) * k]}
 		results[r] = pca_from_cov(cov, allocator)
 	}
 
@@ -128,7 +173,8 @@ extract_numeric_matrix :: proc(
 		for r in 0 ..< rows {
 			v, is_null := w.column_at_float(col, r)
 			if is_null {
-				out[r][c_idx] = 0 // or NaN, but 0 is fine for covariance
+				// Convention: nulls become 0 (biases mean/covariance; drop null rows first if that matters)
+				out[r][c_idx] = 0
 			} else {
 				out[r][c_idx] = v
 			}
@@ -137,6 +183,7 @@ extract_numeric_matrix :: proc(
 
 	return out
 }
+// Sample covariance with ddof = 1 (numpy.cov(data, rowvar=False))
 covariance_matrix :: proc(data: [][]f64, allocator: mem.Allocator = context.allocator) -> [][]f64 {
 	rows := len(data)
 	if rows == 0 {
@@ -213,12 +260,11 @@ extract_cov_matrix_row :: proc(
 		i_idx := index_of_string(cols, i_name)
 		j_idx := index_of_string(cols, j_name)
 
+		// Mirror the entry: some producers (ewm_cov_matrix) only emit i <= j
 		v, is_null := w.column_at_float(col_cov, idx)
-		if is_null {
-			out[i_idx][j_idx] = 0
-		} else {
-			out[i_idx][j_idx] = v
-		}
+		if is_null {v = 0}
+		out[i_idx][j_idx] = v
+		out[j_idx][i_idx] = v
 	}
 
 	return out
@@ -262,6 +308,14 @@ pca_transform :: proc(data: [][]f64, pca: PCAResult) -> [][]f64 {
 	for i in 0 ..< comps {
 		for j in 0 ..< dims {
 			evecs_linalg.data[i * dims + j] = pca.eigenvectors[i][j]
+		}
+	}
+
+	// Centre with the fitted mean (sklearn PCA.transform); without a stored mean
+	// (pca_from_cov) the data are taken as already centred
+	if len(pca.mean) == dims {
+		for r in 0 ..< rows {
+			for j in 0 ..< dims {data_linalg.data[r * dims + j] -= pca.mean[j]}
 		}
 	}
 
@@ -341,11 +395,12 @@ pca_inverse_transform :: proc(scores: [][]f64, pca: PCAResult) -> [][]f64 {
 			evec_col[c] = pca.eigenvectors[c][d]
 		}
 
-		// Compute out[:,d] = scores @ evec_col
+		// Compute out[:,d] = scores @ evec_col (+ mean[d], undoing pca_transform's centring)
+		mean_d := pca.mean[d] if len(pca.mean) == dims else 0.0
 		k := scores_linalg.cols
 		for r in 0 ..< rows {
 			row := scores_linalg.data[r * k:r * k + comps]
-			out[r][d] = l.dot_simd(row, evec_col)
+			out[r][d] = l.dot_simd(row, evec_col) + mean_d
 		}
 		delete(evec_col, context.temp_allocator)
 	}
@@ -448,8 +503,16 @@ pca_from_cov :: proc(cov: [][]f64, allocator: mem.Allocator = context.allocator)
 		// and store as row i in sorted_vecs (API compatibility)
 		sorted_vecs[i] = make([]f64, n, allocator)
 		for j in 0 ..< n {
-			// eigenvectors_linalg is column-major: col=src_idx, row=j
+			// eigenvectors_linalg is row-major with eigenvectors in columns: (row=j, col=src_idx)
 			sorted_vecs[i][j] = eigenvectors_linalg.data[j * n + src_idx]
+		}
+		// Deterministic sign: largest-|.| loading positive
+		big := 0
+		for j in 1 ..< n {
+			if math.abs(sorted_vecs[i][j]) > math.abs(sorted_vecs[i][big]) {big = j}
+		}
+		if sorted_vecs[i][big] < 0.0 {
+			for j in 0 ..< n {sorted_vecs[i][j] = -sorted_vecs[i][j]}
 		}
 	}
 
@@ -472,6 +535,7 @@ destroy_pca_result :: proc(res: PCAResult, allocator := context.allocator) {
 	// 2. Delete the outer slice holding the eigenvector pointers
 	delete(res.eigenvectors, allocator)
 
-	// 3. Delete the eigenvalue slice
+	// 3. Delete the eigenvalue slice (and the mean, if any)
 	delete(res.eigenvalues, allocator)
+	delete(res.mean, allocator)
 }
