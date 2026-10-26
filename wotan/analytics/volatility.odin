@@ -103,6 +103,10 @@ destroy_garch_volatility :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) {
 	if model.model_type == .GARCH {
+		// conditional_var aliases garch_result.conditional_var: free it once
+		if raw_data(model.conditional_var) == raw_data(model.garch_result.conditional_var) {
+			model.conditional_var = nil
+		}
 		// Free GARCH result internals
 		delete(model.garch_result.params.alpha, allocator)
 		delete(model.garch_result.params.beta, allocator)

@@ -4,10 +4,12 @@ import w "../core"
 import "core:math"
 import "core:mem"
 acf :: proc(y: []f64, max_lag: int, allocator := context.allocator) -> []f64 {
+	max_lag := max(max_lag, 0)
 
 	n := len(y)
 	if n == 0 {
-		return make([]f64, 0, allocator)
+		// Always return max_lag+1 entries so callers can index every lag.
+		return make([]f64, max_lag + 1, allocator)
 	}
 
 	mean := 0.0
@@ -42,6 +44,7 @@ acf :: proc(y: []f64, max_lag: int, allocator := context.allocator) -> []f64 {
 
 pacf :: proc(y: []f64, max_lag: int, allocator := context.allocator) -> []f64 {
 
+	max_lag := max(max_lag, 0)
 	ac := acf(y, max_lag, allocator)
 	pac := make([]f64, max_lag + 1, allocator)
 
@@ -57,7 +60,9 @@ pacf :: proc(y: []f64, max_lag: int, allocator := context.allocator) -> []f64 {
 		phi[k] = make([]f64, k + 1, allocator)
 	}
 
-	phi[1][1] = ac[1]
+	if max_lag >= 1 {
+		phi[1][1] = ac[1]
+	}
 
 	for k in 2 ..= max_lag {
 		// compute φ_{k,k}
@@ -81,6 +86,27 @@ pacf :: proc(y: []f64, max_lag: int, allocator := context.allocator) -> []f64 {
 
 	return pac
 }
+// Non-null values of an Int or Float column as f64 (column_at_float does not
+// check the type, so reading other column types would run past the buffer).
+_numeric_column_values :: proc(c: ^w.Column, allocator: mem.Allocator) -> [dynamic]f64 {
+	y := make([dynamic]f64, 0, allocator)
+	#partial switch c.type {
+	case .Float:
+		for i in 0 ..< c.len {
+			v, is_null := w.column_at_float(c, i)
+			if !is_null do append(&y, v)
+		}
+	case .Int:
+		for i in 0 ..< c.len {
+			v, is_null := w.column_at_int(c, i)
+			if !is_null do append(&y, f64(v))
+		}
+	case:
+		panic("acf/pacf: column must be Int or Float")
+	}
+	return y
+}
+
 df_acf :: proc(
 	df: ^w.DataFrame,
 	col: string,
@@ -88,16 +114,9 @@ df_acf :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> w.Column {
 
+	max_lag := max(max_lag, 0)
 	c := w.column(df, col)
-
-	// Extract float slice (ignoring NULLs)
-	y := make([dynamic]f64, 0, allocator)
-	for i in 0 ..< c.len {
-		v, is_null := w.column_at_float(c, i)
-		if !is_null {
-			append(&y, v)
-		}
-	}
+	y := _numeric_column_values(c, allocator)
 
 	// Compute ACF
 	ac := acf(y[:], max_lag, allocator)
@@ -118,16 +137,9 @@ df_pacf :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> w.Column {
 
+	max_lag := max(max_lag, 0)
 	c := w.column(df, col)
-
-	// Extract float slice (ignoring NULLs)
-	y := make([dynamic]f64, 0, allocator)
-	for i in 0 ..< c.len {
-		v, is_null := w.column_at_float(c, i)
-		if !is_null {
-			append(&y, v)
-		}
-	}
+	y := _numeric_column_values(c, allocator)
 
 	// Compute PACF
 	pc := pacf(y[:], max_lag, allocator)

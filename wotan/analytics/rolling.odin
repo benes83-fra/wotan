@@ -31,6 +31,7 @@ rolling_apply :: proc(
 	agg: w.Aggregator,
 	allocator: mem.Allocator = context.allocator,
 ) -> w.Column {
+	if r.window < 0 do panic("rolling_apply: window must be >= 0")
 	src := w.column(r.df, r.column)
 	switch src.type {
 	case .Int:
@@ -59,6 +60,27 @@ rolling_apply_int :: proc(
 	agg: w.Aggregator,
 	allocator: mem.Allocator,
 ) -> w.Column {
+	#partial switch agg.kind {
+	case .EWM_Mean:
+		return rolling_apply_int_ewm(r, agg, allocator)
+	case .EWM_Var:
+		return rolling_apply_int_ewm_var(r, agg, allocator)
+	case .EWM_Std:
+		return rolling_apply_int_ewm_std(r, agg, allocator)
+	case .EWM_Cov:
+		other := w.column(r.df, agg.other)
+		return rolling_apply_int_ewm_cov(r, other, agg, allocator)
+	case .EWM_Corr:
+		return rolling_apply_int_ewm_corr(r, agg, allocator)
+	case .Corr:
+		return rolling_apply_int_corr(r, agg, allocator)
+	case .Var:
+		return rolling_apply_int_var(r, agg, allocator)
+	case .Cov:
+		other := w.column(r.df, agg.other)
+		return rolling_apply_int_cov(r, other, agg, allocator)
+	}
+
 	src := w.column(r.df, r.column)
 	out := w.column_new(agg.name, src.type, 0)
 
@@ -71,32 +93,12 @@ rolling_apply_int :: proc(
 		if !is_null do append(&values, v)
 
 		// Shrink window if too large
-		if len(values) > r.min_periods {
+		if len(values) > r.window {
 			ordered_remove(&values, 0)
 		}
 		// Compute aggregation
 		rolling_agg_int_into(&out, values[:], agg)
 	}
-	if agg.kind == .EWM_Mean {
-		return rolling_apply_int_ewm(r, agg, allocator)
-	}
-	if agg.kind == .EWM_Var {
-		return rolling_apply_int_ewm_var(r, agg, allocator)
-	}
-	if agg.kind == .EWM_Corr {
-		return rolling_apply_int_ewm_corr(r, agg, allocator)
-	}
-	if agg.kind == .Corr {
-		return rolling_apply_int_corr(r, agg, allocator)
-	}
-	if agg.kind == .Var {
-		return rolling_apply_int_var(r, agg, allocator)
-	}
-	if agg.kind == .Cov {
-		other := w.column(r.df, agg.other)
-		return rolling_apply_int_cov(r, other, agg, allocator)
-	}
-
 
 	return out
 }
@@ -106,6 +108,27 @@ rolling_apply_float :: proc(
 	agg: w.Aggregator,
 	allocator: mem.Allocator,
 ) -> w.Column {
+	#partial switch agg.kind {
+	case .EWM_Mean:
+		return rolling_apply_float_ewm(r, agg, allocator)
+	case .EWM_Var:
+		return rolling_apply_float_ewm_var(r, agg, allocator)
+	case .EWM_Std:
+		return rolling_apply_float_ewm_std(r, agg, allocator)
+	case .EWM_Cov:
+		other := w.column(r.df, agg.other)
+		return rolling_apply_float_ewm_cov(r, other, agg, allocator)
+	case .EWM_Corr:
+		return rolling_apply_float_ewm_corr(r, agg, allocator)
+	case .Corr:
+		return rolling_apply_float_corr(r, agg, allocator)
+	case .Var:
+		return rolling_apply_float_var(r, agg, allocator)
+	case .Cov:
+		other := w.column(r.df, agg.other)
+		return rolling_apply_float_cov(r, other, agg, allocator)
+	}
+
 	src := w.column(r.df, r.column)
 	out := w.column_new(agg.name, src.type, 0)
 
@@ -124,25 +147,6 @@ rolling_apply_float :: proc(
 		// Compute aggregation
 		rolling_agg_float_into(&out, values[:], agg)
 	}
-	if agg.kind == .EWM_Mean {
-		return rolling_apply_float_ewm(r, agg, allocator)
-	}
-	if agg.kind == .EWM_Var {
-		return rolling_apply_float_ewm_var(r, agg, allocator)
-	}
-	if agg.kind == .EWM_Corr {
-		return rolling_apply_float_ewm_corr(r, agg, allocator)
-	}
-	if agg.kind == .Corr {
-		return rolling_apply_float_corr(r, agg, allocator)
-	}
-	if agg.kind == .Var {
-		return rolling_apply_float_var(r, agg, allocator)
-	}
-	if agg.kind == .Cov {
-		other := w.column(r.df, agg.other)
-		return rolling_apply_float_cov(r, other, agg, allocator)
-	}
 
 	return out
 }
@@ -154,7 +158,10 @@ rolling_apply_bool :: proc(
 	allocator: mem.Allocator,
 ) -> w.Column {
 	src := w.column(r.df, r.column)
-	out := w.column_new(agg.name, src.type, 0)
+	out_type := src.type
+	if agg.kind == .Count do out_type = .Int
+	if agg.kind == .Mean do out_type = .Float // ratio of true
+	out := w.column_new(agg.name, out_type, 0)
 
 	values := make([dynamic]bool, 0, r.window, allocator)
 	defer delete(values)
@@ -165,7 +172,7 @@ rolling_apply_bool :: proc(
 		if !is_null do append(&values, v)
 
 		// Shrink window if too large
-		if len(values) > r.min_periods {
+		if len(values) > r.window {
 			ordered_remove(&values, 0)
 		}
 		// Compute aggregation
@@ -180,7 +187,7 @@ rolling_apply_date :: proc(
 	allocator: mem.Allocator,
 ) -> w.Column {
 	src := w.column(r.df, r.column)
-	out := w.column_new(agg.name, src.type, 0)
+	out := w.column_new(agg.name, .Int if agg.kind == .Count else src.type, 0)
 
 	values := make([dynamic]w.Date, 0, r.window, allocator)
 	defer delete(values)
@@ -191,7 +198,7 @@ rolling_apply_date :: proc(
 		if !is_null do append(&values, v)
 
 		// Shrink window if too large
-		if len(values) > r.min_periods {
+		if len(values) > r.window {
 			ordered_remove(&values, 0)
 		}
 		// Compute aggregation
@@ -206,7 +213,7 @@ rolling_apply_time :: proc(
 	allocator: mem.Allocator,
 ) -> w.Column {
 	src := w.column(r.df, r.column)
-	out := w.column_new(agg.name, src.type, 0)
+	out := w.column_new(agg.name, .Int if agg.kind == .Count else src.type, 0)
 
 	values := make([dynamic]w.Time, 0, r.window, allocator)
 	defer delete(values)
@@ -217,7 +224,7 @@ rolling_apply_time :: proc(
 		if !is_null do append(&values, v)
 
 		// Shrink window if too large
-		if len(values) > r.min_periods {
+		if len(values) > r.window {
 			ordered_remove(&values, 0)
 		}
 		// Compute aggregation
@@ -231,7 +238,7 @@ rolling_apply_datetime :: proc(
 	allocator: mem.Allocator,
 ) -> w.Column {
 	src := w.column(r.df, r.column)
-	out := w.column_new(agg.name, src.type, 0)
+	out := w.column_new(agg.name, .Int if agg.kind == .Count else src.type, 0)
 
 	values := make([dynamic]w.Datetime, 0, r.window, allocator)
 	defer delete(values)
@@ -242,7 +249,7 @@ rolling_apply_datetime :: proc(
 		if !is_null do append(&values, v)
 
 		// Shrink window if too large
-		if len(values) > r.min_periods {
+		if len(values) > r.window {
 			ordered_remove(&values, 0)
 		}
 		// Compute aggregation
@@ -256,7 +263,7 @@ rolling_apply_string :: proc(
 	allocator: mem.Allocator,
 ) -> w.Column {
 	src := w.column(r.df, r.column)
-	out := w.column_new(agg.name, src.type, 0)
+	out := w.column_new(agg.name, .Int if agg.kind == .Count else src.type, 0)
 
 	values := make([dynamic]string, 0, r.window, allocator)
 	defer delete(values)
@@ -267,7 +274,7 @@ rolling_apply_string :: proc(
 		if !is_null do append(&values, v)
 
 		// Shrink window if too large
-		if len(values) > r.min_periods {
+		if len(values) > r.window {
 			ordered_remove(&values, 0)
 		}
 		// Compute aggregation
@@ -289,7 +296,7 @@ rolling_apply_many :: proc(
 		w.add_column(&out, col)
 	}
 
-	out.rows = out.columns[0].len
+	out.rows = out.columns[0].len if len(out.columns) > 0 else 0
 	return out
 }
 
@@ -333,6 +340,8 @@ rolling_agg_int_into :: proc(out: ^w.Column, values: []int, agg: w.Aggregator) {
 		q := agg.quantile
 		if kind == .Median do q = 0.5
 
+		if math.is_nan(q) do q = 0.5
+		q = clamp(q, 0, 1)
 		idx := int(q * f64(len(tmp) - 1))
 		w.append_int(out, tmp[idx])
 		delete(tmp)
@@ -382,6 +391,8 @@ rolling_agg_float_into :: proc(out: ^w.Column, values: []f64, agg: w.Aggregator)
 		q := agg.quantile
 		if kind == .Median do q = 0.5
 
+		if math.is_nan(q) do q = 0.5
+		q = clamp(q, 0, 1)
 		idx := int(q * f64(len(tmp) - 1))
 		w.append_float(out, tmp[idx])
 		delete(tmp)
@@ -938,6 +949,7 @@ rolling_apply_float_ewm_cov :: proc(
 	allocator: mem.Allocator,
 ) -> w.Column {
 	src := w.column(r.df, r.column)
+	if other.type != src.type do panic("rolling ewm cov: `other` column must have the same type as the source column")
 	out := w.column_new(agg.name, .Float, 0)
 
 	alpha := agg.alpha
@@ -1042,6 +1054,7 @@ rolling_apply_int_ewm_cov :: proc(
 	allocator: mem.Allocator,
 ) -> w.Column {
 	src := w.column(r.df, r.column)
+	if other.type != src.type do panic("rolling ewm cov: `other` column must have the same type as the source column")
 	out := w.column_new(agg.name, .Float, 0)
 
 	alpha := agg.alpha
@@ -1344,6 +1357,7 @@ rolling_apply_float_ewm_cov_adjust_false :: proc(
 	allocator: mem.Allocator,
 ) -> w.Column {
 	src := w.column(r.df, r.column)
+	if other.type != src.type do panic("rolling ewm cov: `other` column must have the same type as the source column")
 	out := w.column_new(agg.name, .Float, 0)
 
 	alpha := agg.alpha
@@ -1446,6 +1460,7 @@ rolling_apply_int_ewm_cov_adjust_false :: proc(
 	allocator: mem.Allocator,
 ) -> w.Column {
 	src := w.column(r.df, r.column)
+	if other.type != src.type do panic("rolling ewm cov: `other` column must have the same type as the source column")
 	out := w.column_new(agg.name, .Float, 0)
 
 	alpha := agg.alpha
@@ -1802,6 +1817,7 @@ rolling_apply_float_cov :: proc(
 	allocator: mem.Allocator,
 ) -> w.Column {
 	src := w.column(r.df, r.column)
+	if other.type != src.type do panic("rolling cov: `other` column must have the same type as the source column")
 	out := w.column_new(agg.name, .Float, 0)
 
 	xs := make([dynamic]f64, 0, r.window, allocator)
@@ -1858,6 +1874,7 @@ rolling_apply_int_cov :: proc(
 	allocator: mem.Allocator,
 ) -> w.Column {
 	src := w.column(r.df, r.column)
+	if other.type != src.type do panic("rolling cov: `other` column must have the same type as the source column")
 	out := w.column_new(agg.name, .Float, 0)
 
 	xs := make([dynamic]f64, 0, r.window, allocator)

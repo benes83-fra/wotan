@@ -177,6 +177,15 @@ adf_pvalue_interp :: proc(stat: f64, reg_type: RegressionType) -> f64 {
 // ------------------------------------------------------------
 // Core ADF regression for given lag order p and regression type
 // ------------------------------------------------------------
+// True if X'X is (numerically) positive definite, i.e. the Cholesky solves
+// below will not panic. Works on a temp copy; A is unchanged.
+_adf_spd_ok :: proc(A: ^l.Matrix(f64)) -> bool {
+	tmp := l.matrix_new(f64, A.rows, A.cols, context.temp_allocator)
+	defer l.matrix_free(&tmp)
+	copy(tmp.data, A.data)
+	return l.cholesky_try(&tmp)
+}
+
 adf_core :: proc(
 	y: []f64,
 	p: int,
@@ -191,8 +200,8 @@ adf_core :: proc(
 	sigma2: f64,
 ) {
 	n := len(y)
-	if n < 10 {
-		return 0.0, inf_f64(1), inf_f64(1), p, 0, 0.0
+	if n < 10 || p < 0 {
+		return 0.0, inf_f64(1), inf_f64(1), max(p, 0), 0, 0.0
 	}
 
 	// Δy
@@ -298,6 +307,11 @@ adf_core :: proc(
 
 		XtX_mat := l.matrix_from_flat(XtX, k, k, allocator)
 		defer l.matrix_free(&XtX_mat)
+
+		// Singular X'X (constant/all-zero/NaN series): no valid regression
+		if !_adf_spd_ok(&XtX_mat) {
+			return 0.0, inf_f64(1), inf_f64(1), 0, T, 0.0
+		}
 
 		// Solve XtX * beta = XtY using Cholesky (XtX is SPD)
 		beta := l.solve_spd_cholesky(&XtX_mat, XtY, .Blocked, allocator)
@@ -446,7 +460,10 @@ adf_core :: proc(
 	// Solve using Cholesky (XtX is SPD)
 	XtX_mat := l.matrix_from_flat(XtX, k, k, allocator)
 	defer l.matrix_free(&XtX_mat)
-	// DEBUG: Print dimensions before solve
+	// Singular X'X (constant/all-zero/NaN series, exact trend): no valid regression
+	if !_adf_spd_ok(&XtX_mat) {
+		return 0.0, inf_f64(1), inf_f64(1), p, T, 0.0
+	}
 
 	beta := l.solve_spd_cholesky(&XtX_mat, XtY, .Blocked, allocator)
 	XtX_inv_mat := l.spd_inverse(&XtX_mat, .Blocked, allocator)

@@ -35,6 +35,10 @@ difference :: proc(series: []f64, d: int, allocator := context.allocator) -> []f
 		return out
 	}
 
+	if len(series) == 0 {
+		return make([]f64, 0, allocator)
+	}
+
 	// First-order difference
 	diff := make([]f64, len(series) - 1, allocator)
 	for i in 1 ..< len(series) {
@@ -73,9 +77,9 @@ difference_with_history :: proc(
 		return
 	}
 
-	// Save last d values for inverse differencing
-	history = make([]f64, d, allocator)
-	for i in 0 ..< d {
+	// Save first d values for inverse differencing (fewer if the series is shorter)
+	history = make([]f64, min(d, len(series)), allocator)
+	for i in 0 ..< len(history) {
 		history[i] = series[i]
 	}
 
@@ -284,6 +288,19 @@ ArimaForecastResult :: struct {
 	upper: []f64,
 }
 
+// NaN-filled forecast arrays, returned when the series is too short to forecast.
+_nan_forecast :: proc(h: int, allocator: mem.Allocator) -> (mean, lower, upper: []f64) {
+	mean = make([]f64, h, allocator)
+	lower = make([]f64, h, allocator)
+	upper = make([]f64, h, allocator)
+	for i in 0 ..< h {
+		mean[i] = math.nan_f64()
+		lower[i] = math.nan_f64()
+		upper[i] = math.nan_f64()
+	}
+	return
+}
+
 arima_forecast :: proc(
 	y: []f64,
 	fit: ArimaFitResult,
@@ -292,6 +309,13 @@ arima_forecast :: proc(
 	alpha: f64, // e.g. 0.05 for 95% PI
 	allocator := context.allocator,
 ) -> ArimaForecastResult {
+	h := max(h, 0)
+	// Integrating back needs the last d observations: too short to forecast.
+	if d > 0 && len(y) <= d {
+		mean, lower, upper := _nan_forecast(h, allocator)
+		return ArimaForecastResult{mean = mean, lower = lower, upper = upper}
+	}
+
 	// 1) differencing if needed
 	y_eff := y
 	if d > 0 {
@@ -302,7 +326,7 @@ arima_forecast :: proc(
 	F, Q, P0, H, R, x0, N := arima_state_space(fit.phi, fit.theta, d, fit.sigma2, allocator)
 
 	// 3) run filter to get last state
-	xT, PT := kalman_filter_last_scalar(y_eff, F, Q, P0, H, R, x0, N)
+	xT, PT := kalman_filter_last_scalar(y_eff, F, Q, P0, H, R, x0, N, allocator)
 
 	// 4) forecasting loop
 	mean := make([]f64, h, allocator)
@@ -1052,15 +1076,16 @@ seasonal_inverse_difference :: proc(
 		out[i] = history[i]
 	}
 
-	// First seasonal integration
+	// First seasonal integration (lags before the stored history count as 0)
 	for i in 0 ..< len(diff) {
-		out[len(history) + i] = diff[i] + out[len(history) + i - s]
+		j := len(history) + i - s
+		out[len(history) + i] = diff[i] + (out[j] if j >= 0 else 0)
 	}
 
 	// Higher-order seasonal integration
 	for d in 1 ..< D {
 		for i in len(history) ..< len(out) {
-			out[i] = out[i] + out[i - s]
+			if i - s >= 0 do out[i] = out[i] + out[i - s]
 		}
 	}
 

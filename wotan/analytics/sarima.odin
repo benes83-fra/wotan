@@ -56,6 +56,13 @@ sarima_forecast :: proc(
 	alpha: f64 = 0.05,
 	allocator: mem.Allocator = context.allocator,
 ) -> SarimaForecastResult {
+	if s < 0 do panic("sarima_forecast: season length s must be >= 0")
+	h := max(h, 0)
+	// Integrating back needs d + D*s observations: too short to forecast.
+	if len(y) <= max(d, 0) + max(D, 0) * s && (d > 0 || (D > 0 && s > 0)) {
+		mean, lower, upper := _nan_forecast(h, allocator)
+		return SarimaForecastResult{mean = mean, lower = lower, upper = upper}
+	}
 
 	// 1) build differenced series z_t
 	y_ns := difference(y, d, allocator)
@@ -65,7 +72,7 @@ sarima_forecast :: proc(
 	F, Q, P0, H, R, x0, N := sarima_state_space(phi, theta, Phi, Theta, s, sigma2, allocator)
 
 	// 3) filter to get last state
-	xT, PT := kalman_filter_last_scalar(z, F, Q, P0, H, R, x0, N)
+	xT, PT := kalman_filter_last_scalar(z, F, Q, P0, H, R, x0, N, allocator)
 
 	// 4) forecasting on differenced scale
 	mean_d := make([]f64, h, allocator)

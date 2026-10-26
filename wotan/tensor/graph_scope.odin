@@ -139,7 +139,14 @@ _scope_note_free :: #force_inline proc(allocator: mem.Allocator) {
 
 // _arena_alloc bumps `size` bytes; zeroes them unless non_zeroed. Holds scope.mutex.
 @(private = "file")
-_arena_alloc :: proc(s: ^Graph_Scope, size, alignment: int, non_zeroed: bool) -> ([]byte, mem.Allocator_Error) {
+_arena_alloc :: proc(
+	s: ^Graph_Scope,
+	size, alignment: int,
+	non_zeroed: bool,
+) -> (
+	[]byte,
+	mem.Allocator_Error,
+) {
 	align := max(alignment, 16)
 	for {
 		if s.cur < len(s.chunks) {

@@ -1367,7 +1367,7 @@ sarima_light_demo :: proc(allocator: mem.Allocator = context.allocator) {
 	)
 
 	// --- 4) Filter once to get last state ---
-	xT, PT := analytic.kalman_filter_last_scalar(z, F, Q, P0, H, R, x0, N)
+	xT, PT := analytic.kalman_filter_last_scalar(z, F, Q, P0, H, R, x0, N, allocator)
 
 	// --- 5) Forecast using the existing SARIMA forecast helper ---
 	fc := analytic.sarima_forecast(

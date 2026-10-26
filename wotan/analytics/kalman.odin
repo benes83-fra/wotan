@@ -1151,15 +1151,15 @@ kalman_filter_last_scalar :: proc(
 	R: []f64,
 	x0: []f64,
 	N: int,
+	allocator := context.allocator,
 ) -> (
 	xT: []f64,
 	PT: []f64,
 ) {
 	T := len(y)
-	xT = make([]f64, N)
-	defer delete(xT)
-	PT = make([]f64, N * N)
-	defer delete(PT)
+	// Returned to the caller, who owns them (allocated in `allocator`).
+	xT = make([]f64, N, allocator)
+	PT = make([]f64, N * N, allocator)
 
 	if T == 0 {
 		for i in 0 ..< N {xT[i] = x0[i]}

@@ -337,6 +337,8 @@ main :: proc() {
 	free_all(context.temp_allocator)
 	test.arima_contracts_test(context.temp_allocator)
 	free_all(context.temp_allocator)
+	test.analytics_edge_cases_test(context.temp_allocator)
+	free_all(context.temp_allocator)
 	// mc_arima_arma22(context.temp_allocator, 200, 300)
 	// mc_arima_arma_pq([]f64{0.6, -0.1, 0.2}, []f64{0.5}, 0.1, 200, 300, context.temp_allocator)
 	//mc_arima_pdq_test(context.temp_allocator)

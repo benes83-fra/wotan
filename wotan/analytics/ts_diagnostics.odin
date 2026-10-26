@@ -80,6 +80,7 @@ df_residual_acf :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> w.DataFrame {
 
+	max_lag := max(max_lag, 0)
 	ac := acf(residuals, max_lag, allocator)
 
 	out := w.dataframe_new()
@@ -104,6 +105,7 @@ df_residual_pacf :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> w.DataFrame {
 
+	max_lag := max(max_lag, 0)
 	pc := pacf(residuals, max_lag, allocator)
 
 	out := w.dataframe_new()

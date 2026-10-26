@@ -22,6 +22,7 @@ _to_linalg_matrix :: proc(
 
 	m := l.matrix_new(f64, rows, cols, allocator)
 	for i in 0 ..< rows {
+		if len(data[i]) != cols do panic("pca: all rows must have the same length")
 		for j in 0 ..< cols {
 			m.data[i * cols + j] = data[i][j]
 		}
@@ -246,6 +247,9 @@ pca_transform :: proc(data: [][]f64, pca: PCAResult) -> [][]f64 {
 	if dims == 0 {
 		return [][]f64{}
 	}
+	if dims != len(pca.eigenvectors[0]) {
+		panic("pca_transform: data column count does not match the fitted PCA")
+	}
 
 	// Convert data to linalg format for optimized matvec
 	data_linalg := _to_linalg_matrix(data, context.temp_allocator)
@@ -298,7 +302,8 @@ pca_inverse_transform :: proc(scores: [][]f64, pca: PCAResult) -> [][]f64 {
 	if rows == 0 {
 		return [][]f64{}
 	}
-	comps := len(pca.eigenvectors)
+	// Scores may keep only the top-k components: reconstruct from those
+	comps := min(len(pca.eigenvectors), len(scores[0]))
 	if comps == 0 {
 		return [][]f64{}
 	}
@@ -337,8 +342,9 @@ pca_inverse_transform :: proc(scores: [][]f64, pca: PCAResult) -> [][]f64 {
 		}
 
 		// Compute out[:,d] = scores @ evec_col
+		k := scores_linalg.cols
 		for r in 0 ..< rows {
-			row := scores_linalg.data[r * comps:r * comps + comps]
+			row := scores_linalg.data[r * k:r * k + comps]
 			out[r][d] = l.dot_simd(row, evec_col)
 		}
 		delete(evec_col, context.temp_allocator)
@@ -396,6 +402,10 @@ index_of_string :: proc(list: []string, s: string) -> int {
 // 	return PCAResult{eigenvalues = sorted_vals, eigenvectors = sorted_vecs}
 // }
 pca_from_cov :: proc(cov: [][]f64, allocator: mem.Allocator = context.allocator) -> PCAResult {
+	// Empty input (e.g. a 0-row DataFrame) has no components; eigh needs a square matrix
+	if len(cov) == 0 || len(cov[0]) != len(cov) {
+		return PCAResult{}
+	}
 	// Convert covariance to linalg format for optimized eigensolver
 	cov_linalg := _to_linalg_matrix(cov, context.temp_allocator)
 	defer l.matrix_free(&cov_linalg)
@@ -446,21 +456,22 @@ pca_from_cov :: proc(cov: [][]f64, allocator: mem.Allocator = context.allocator)
 	return PCAResult{eigenvalues = sorted_vals, eigenvectors = sorted_vecs}
 }
 // Example of how to properly delete your [][]f64 "matrices"
-destroy_matrix :: proc(mat: [][]f64) {
+destroy_matrix :: proc(mat: [][]f64, allocator := context.allocator) {
 	for row in mat {
-		delete(row)
+		delete(row, allocator)
 	}
-	delete(mat)
+	delete(mat, allocator)
 }
-destroy_pca_result :: proc(res: PCAResult) {
+// Pass the allocator the PCA was computed with (pca_from_cov, pca_dataframe, ...)
+destroy_pca_result :: proc(res: PCAResult, allocator := context.allocator) {
 	// 1. Delete each individual eigenvector row
 	for vec in res.eigenvectors {
-		delete(vec)
+		delete(vec, allocator)
 	}
 
 	// 2. Delete the outer slice holding the eigenvector pointers
-	delete(res.eigenvectors)
+	delete(res.eigenvectors, allocator)
 
 	// 3. Delete the eigenvalue slice
-	delete(res.eigenvalues)
+	delete(res.eigenvalues, allocator)
 }

@@ -208,6 +208,11 @@ garch_fit :: proc(
 		q          = q,
 	}
 
+	// Need at least one observation beyond the lag order to fit anything
+	if p < 0 || q < 0 || n <= max(p, q) {
+		return GARCH_Result{params = params}
+	}
+
 	params.alpha = make([]f64, p, allocator)
 	params.beta = make([]f64, q, allocator)
 
@@ -405,6 +410,13 @@ garch_forecast :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> GARCH_Forecast {
 	n := len(residuals)
+	if n == 0 || len(result.conditional_var) == 0 {
+		nan := math.nan_f64()
+		return GARCH_Forecast{variance_forecast = nan, std_forecast = nan, confidence_95 = {nan, nan}}
+	}
+	if len(result.conditional_var) < n {
+		panic("garch_forecast: residuals are longer than the fitted conditional variance")
+	}
 	params := &result.params
 	p, q := params.p, params.q
 	is_gjr := params.model_type == .GJR_GARCH
@@ -490,7 +502,7 @@ garch_var_series :: proc(
 	var_95: []f64,
 	var_99: []f64,
 ) {
-	n := len(residuals)
+	n := min(len(residuals), len(result.conditional_var))
 	var_95 = make([]f64, n, allocator)
 	var_99 = make([]f64, n, allocator)
 
