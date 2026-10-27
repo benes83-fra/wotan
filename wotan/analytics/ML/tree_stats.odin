@@ -85,10 +85,10 @@ tree_compute_metrics :: proc(
 		ss_tot += dy * dy
 	}
 
-	if ss_tot > 1e-10 {
+	if ss_tot > 0.0 {
 		r2 = 1.0 - sse / ss_tot
 	} else {
-		r2 = 0.0
+		r2 = 1.0 if sse == 0.0 else 0.0 // constant y, as sklearn r2_score
 	}
 
 	if n > n_features + 1 {
@@ -104,87 +104,10 @@ tree_compute_metrics :: proc(
 // FIXED: Standalone helper procs (no nested captures)
 // ============================================================================
 
-// Helper for feature importance traversal (standalone, all params explicit)
-_traverse_for_importance_helper :: proc(
-	tree: ^DecisionTree,
-	X: ^l.Matrix(f64),
-	y: []f64,
-	node_idx: int,
-	samples: []int,
-	importance: []f64,
-	allocator: mem.Allocator,
-) {
-	node := &tree.nodes[node_idx] // ✅ Now tree is explicit param
-	n := len(samples)
-
-	if node.left_idx < 0 {
-		return
-	}
-
-	// Compute impurity
-	sum_y := 0.0
-	sum_y2 := 0.0
-	for idx in samples {
-		val := y[idx] // ✅ y is explicit param
-		sum_y += val
-		sum_y2 += val * val
-	}
-	mean_y := sum_y / f64(n)
-	node_impurity := (sum_y2 / f64(n)) - (mean_y * mean_y)
-
-	// Partition samples
-	left_samples := make([dynamic]int, 0, allocator)
-	right_samples := make([dynamic]int, 0, allocator)
-	defer {
-		delete(left_samples) // ✅ [dynamic] delete: no allocator
-		delete(right_samples)
-	}
-
-	feature := node.feature_idx
-	threshold := node.threshold
-	for idx in samples {
-		if X.data[idx * X.cols + feature] <= threshold { 	// ✅ X is explicit
-			append(&left_samples, idx)
-		} else {
-			append(&right_samples, idx)
-		}
-	}
-
-	n_left := len(left_samples)
-	n_right := len(right_samples)
-
-	if n_left > 0 && n_right > 0 {
-		// Simplified gain calculation
-		gain := node_impurity // Placeholder - expand as needed
-		if feature >= 0 && feature < len(importance) {
-			importance[feature] += f64(n) * gain // ✅ importance is explicit
-		}
-	}
-
-	if n_left > 0 {
-		_traverse_for_importance_helper(
-			tree,
-			X,
-			y,
-			node.left_idx,
-			left_samples[:],
-			importance,
-			allocator,
-		)
-	}
-	if n_right > 0 {
-		_traverse_for_importance_helper(
-			tree,
-			X,
-			y,
-			node.right_idx,
-			right_samples[:],
-			importance,
-			allocator,
-		)
-	}
-}
-
+// Impurity-based feature importance (sklearn feature_importances_): every split
+// adds n_node·imp_node - n_left·imp_left - n_right·imp_right to its feature,
+// using the training statistics stored in the nodes; normalised to sum 1.
+// X / y / indices are kept for API compatibility; only X.cols is used.
 _tree_feature_importance :: proc(
 	tree: ^DecisionTree,
 	X: ^l.Matrix(f64),
@@ -193,15 +116,24 @@ _tree_feature_importance :: proc(
 	allocator: mem.Allocator,
 ) -> []f64 {
 	n_features := X.cols
-	importance := make([]f64, n_features, allocator) // ✅ Fixed: slice make
+	importance := make([]f64, n_features, allocator)
 
-	if tree.root_idx >= 0 {
-		_traverse_for_importance_helper(tree, X, y, tree.root_idx, indices, importance, allocator)
+	for &node in tree.nodes {
+		if node.left_idx < 0 do continue
+		left := &tree.nodes[node.left_idx]
+		right := &tree.nodes[node.right_idx]
+		dec :=
+			f64(node.sample_count) * node.impurity -
+			f64(left.sample_count) * left.impurity -
+			f64(right.sample_count) * right.impurity
+		if node.feature_idx >= 0 && node.feature_idx < n_features {
+			importance[node.feature_idx] += dec
+		}
 	}
 
 	total := 0.0
 	for val in importance {total += val}
-	if total > 1e-10 {
+	if total > 0.0 {
 		for i in 0 ..< n_features {
 			importance[i] /= total
 		}
@@ -254,6 +186,7 @@ _traverse_stats_helper :: proc(
 _tree_structure_stats :: proc(
 	tree: ^DecisionTree,
 	n_features: int,
+	allocator: mem.Allocator = context.allocator,
 ) -> (
 	n_nodes: int,
 	n_leaves: int,
@@ -261,7 +194,7 @@ _tree_structure_stats :: proc(
 	max_depth: int,
 	splits_per_feature: []int,
 ) {
-	splits_per_feature = make([]int, n_features, context.temp_allocator) // ✅ Fixed
+	splits_per_feature = make([]int, n_features, allocator)
 
 	if tree.root_idx < 0 {
 		return 0, 0, 0.0, 0, splits_per_feature
@@ -304,26 +237,22 @@ rf_compute_stats :: proc(
 		allocator,
 	)
 
+	// Mean of the per-tree normalised importances over trees with at least one
+	// split (sklearn RandomForest feature_importances_), renormalised
 	avg_importance := make([]f64, n_features, allocator)
-
-	// ✅ FIXED: Use index-based loop to get pointer to tree element
+	n_split_trees := 0
 	for t in 0 ..< n_trees {
-		tree_ptr := &forest.trees[t] // ✅ Get pointer to element in array
-
-		all_indices := make([]int, n_samples, allocator)
-		for i in 0 ..< n_samples {all_indices[i] = i}
-
-		imp := _tree_feature_importance(tree_ptr, X, y, all_indices, allocator)
-
+		tree_ptr := &forest.trees[t]
+		if len(tree_ptr.nodes) <= 1 do continue
+		imp := _tree_feature_importance(tree_ptr, X, y, nil, allocator)
 		for i in 0 ..< n_features {
 			avg_importance[i] += imp[i]
 		}
 		delete(imp, allocator)
-		delete(all_indices, allocator)
+		n_split_trees += 1
 	}
-
 	for i in 0 ..< n_features {
-		avg_importance[i] /= f64(n_trees)
+		avg_importance[i] /= f64(max(n_split_trees, 1))
 	}
 	total := 0.0
 	for val in avg_importance {total += val}
@@ -338,10 +267,12 @@ rf_compute_stats :: proc(
 	total_depth := 0.0
 	max_depth := 0
 
-	// ✅ FIXED: Index-based loop for tree pointers
+	splits := make([]int, n_features, allocator)
 	for t in 0 ..< n_trees {
 		tree_ptr := &forest.trees[t]
-		n_n, n_l, avg_d, max_d_t, _ := _tree_structure_stats(tree_ptr, n_features)
+		n_n, n_l, avg_d, max_d_t, sp := _tree_structure_stats(tree_ptr, n_features, context.temp_allocator)
+		for v, i in sp {splits[i] += v}
+		delete(sp, context.temp_allocator)
 		total_nodes += n_n
 		total_leaves += n_l
 		total_depth += avg_d
@@ -370,7 +301,7 @@ rf_compute_stats :: proc(
 		feature_importance = avg_importance,
 		avg_depth          = avg_depth,
 		max_depth          = max_depth,
-		splits_per_feature = make([]int, n_features, allocator),
+		splits_per_feature = splits,
 		total_memory_bytes = memory_bytes,
 	}
 
@@ -410,6 +341,7 @@ dt_compute_stats :: proc(
 	n_nodes, n_leaves, avg_depth, max_depth, splits_per_feat := _tree_structure_stats(
 		tree,
 		n_features,
+		allocator,
 	)
 
 	// Memory estimate

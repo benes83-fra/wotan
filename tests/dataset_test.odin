@@ -37,7 +37,7 @@ dataset_test :: proc(allocator: mem.Allocator) {
 	ml.pipeline_add_standard_scaler(&pipe)
 	ml.pipeline_set_logistic(
 		&pipe,
-		{C = 1.0, max_iter = 100, learning_rate = 1.0, optimizer_type = .LBFGS},
+		{C = 1.0, max_iter = 100, learning_rate = 1.0, fit_intercept = true, optimizer_type = .LBFGS},
 	)
 
 	// Fit on the prepared Matrix and Target

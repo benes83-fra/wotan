@@ -31,12 +31,20 @@ GBParams :: struct {
 // Public API
 // ============================================================================
 
+// Least-squares gradient boosting (sklearn GradientBoostingRegressor,
+// loss="squared_error"): F₀ = mean(y), each tree fits the residuals y - F and
+// F += learning_rate · tree. subsample < 1 fits each tree on
+// int(subsample · n) rows drawn without replacement (stochastic GB).
 gb_fit :: proc(
 	X: ^l.Matrix(f64),
 	y: []f64,
 	params: GBParams,
 	allocator: mem.Allocator = context.allocator,
 ) -> GradientBoosting {
+	n_samples := len(y)
+	if X.rows != n_samples do panic("gb_fit: y length mismatch")
+	if n_samples == 0 do panic("gb_fit: no samples")
+
 	model: GradientBoosting
 	model.allocator = allocator
 	model.n_estimators = params.n_estimators
@@ -47,66 +55,56 @@ gb_fit :: proc(
 	// Initial prediction: mean of y
 	model.initial_pred = 0.0
 	for val in y {model.initial_pred += val}
-	model.initial_pred /= f64(len(y))
+	model.initial_pred /= f64(n_samples)
 
-	model.trees = make([dynamic]DecisionTree, 0, params.n_estimators, allocator)
-
-	n_samples := len(y)
+	model.trees = make([dynamic]DecisionTree, 0, max(params.n_estimators, 0), allocator)
 
 	// Current predictions (start with initial_pred)
 	preds := make([]f64, n_samples, allocator)
 	defer delete(preds, allocator)
 	for i in 0 ..< n_samples {preds[i] = model.initial_pred}
 
-	// Residuals buffer
 	residuals := make([]f64, n_samples, allocator)
 	defer delete(residuals, allocator)
 
-	// Train trees sequentially
-	for t in 0 ..< params.n_estimators {
-		// 1. Compute residuals: y - preds
-		// Use SIMD if available for large n
-		if n_samples >= 8 {
-			// residuals = y - preds using vectorized subtraction
-			// (Odin doesn't have vec sub, so manual loop with potential SIMD future)
-			l.vec_sub_simd(y, preds, residuals) // residuals = y - preds
-		} else {
-			for i in 0 ..< n_samples {
-				residuals[i] = y[i] - preds[i]
+	// Row subsample size and a permutation buffer for sampling without replacement
+	n_sub := n_samples
+	if params.subsample > 0.0 && params.subsample < 1.0 {
+		n_sub = max(1, int(f64(n_samples) * params.subsample))
+	}
+	perm := make([]int, n_samples, allocator)
+	defer delete(perm, allocator)
+	for i in 0 ..< n_samples {perm[i] = i}
+
+	tree_params := TreeParams {
+		max_depth   = params.max_depth,
+		min_samples = params.min_samples,
+	}
+
+	for _ in 0 ..< params.n_estimators {
+		// 1. Residuals (negative gradient of ½(y - F)²)
+		for i in 0 ..< n_samples {
+			residuals[i] = y[i] - preds[i]
+		}
+
+		// 2. Optional subsampling: partial Fisher-Yates over perm
+		if n_sub < n_samples {
+			for i in 0 ..< n_sub {
+				j := rand.int_range(i, n_samples)
+				perm[i], perm[j] = perm[j], perm[i]
 			}
 		}
 
-		// 2. Optional subsampling (stochastic gradient boosting)
-		sample_indices: []int
-		if params.subsample < 1.0 && params.subsample > 0.0 {
-			n_sub := int(f64(n_samples) * params.subsample)
-			sample_indices = _bootstrap_sample(n_samples, allocator)
-			// Keep only first n_sub unique-ish indices (simple approach)
-			// For production: proper sampling without replacement
-			defer delete(sample_indices, allocator)
-		} else {
-			sample_indices = make([]int, n_samples, allocator)
-			for i in 0 ..< n_samples {sample_indices[i] = i}
-			defer delete(sample_indices, allocator)
-		}
-
 		// 3. Train tree on residuals
-		tree_params := TreeParams {
-			max_depth   = params.max_depth,
-			min_samples = params.min_samples,
-		}
-
-		tree := _fit_tree_on_residuals(X, residuals, sample_indices, tree_params, allocator)
-
+		tree := _fit_tree_on_residuals(X, residuals, perm[:n_sub], tree_params, allocator)
 		append(&model.trees, tree)
 
-		// 4. Update predictions: preds += learning_rate * tree_pred
-		tree_pred := dt_predict(&tree, X, allocator)
-		defer delete(tree_pred, allocator)
-
+		// 4. Update predictions on all rows: F += learning_rate · tree(x)
+		tree_pred := dt_predict(&model.trees[len(model.trees) - 1], X, allocator)
 		for i in 0 ..< n_samples {
 			preds[i] += params.learning_rate * tree_pred[i]
 		}
+		delete(tree_pred, allocator)
 	}
 
 	return model
@@ -176,7 +174,7 @@ _fit_tree_on_residuals :: proc(
 	X_sub := l.matrix_new(f64, n_samples, X.cols, allocator)
 	y_sub := make([]f64, n_samples, allocator)
 
-	for i, idx in sample_indices {
+	for idx, i in sample_indices {
 		for j in 0 ..< X.cols {
 			X_sub.data[i * X_sub.cols + j] = X.data[idx * X.cols + j]
 		}
@@ -192,11 +190,11 @@ _fit_tree_on_residuals :: proc(
 	return tree
 }
 
-// Bootstrap sample (reuse from random_forests.odin)
+// Bootstrap sample (n draws with replacement from [0, n))
 _bootstrap_sample_gb :: proc(n: int, allocator: mem.Allocator) -> []int {
 	indices := make([]int, n, allocator)
 	for i in 0 ..< n {
-		indices[i] = rand.int_range(0, n - 1)
+		indices[i] = rand.int_max(n)
 	}
 	return indices
 }

@@ -14,12 +14,13 @@ RandomForest :: struct {
 	n_trees:      int,
 	max_features: int,
 	bootstrap:    bool,
+	oob_score:    f64, // out-of-bag R² (NaN unless params.oob_score && bootstrap)
 	allocator:    mem.Allocator,
 }
 
 RFParams :: struct {
 	n_trees:      int,
-	max_features: int, // 0 = auto (sqrt(n_features))
+	max_features: int, // features tried per split; 0 = auto (sqrt(n_features))
 	min_samples:  int,
 	max_depth:    int,
 	bootstrap:    bool,
@@ -36,37 +37,51 @@ rf_fit :: proc(
 	params: RFParams,
 	allocator: mem.Allocator = context.allocator,
 ) -> RandomForest {
+	n_samples := X.rows
+	if len(y) != n_samples do panic("rf_fit: y length mismatch")
+	if n_samples == 0 do panic("rf_fit: no samples")
+
 	forest: RandomForest
 	forest.allocator = allocator
 	forest.n_trees = params.n_trees
 	forest.max_features = params.max_features
-	if forest.max_features == 0 {
-		forest.max_features = int(math.sqrt_f64(f64(X.cols)))
+	if forest.max_features <= 0 {
+		forest.max_features = max(1, int(math.sqrt_f64(f64(X.cols))))
 	}
 	forest.bootstrap = params.bootstrap
+	forest.oob_score = math.nan_f64()
 
-	forest.trees = make([dynamic]DecisionTree, 0, params.n_trees, allocator)
+	forest.trees = make([dynamic]DecisionTree, 0, max(params.n_trees, 0), allocator)
 
-	n_samples := X.rows
+	// Out-of-bag accumulators
+	want_oob := params.oob_score && params.bootstrap
+	oob_sum := make([]f64, n_samples if want_oob else 0, context.temp_allocator)
+	oob_cnt := make([]f64, n_samples if want_oob else 0, context.temp_allocator)
+	in_bag := make([]bool, n_samples if want_oob else 0, context.temp_allocator)
+	defer {
+		delete(oob_sum, context.temp_allocator)
+		delete(oob_cnt, context.temp_allocator)
+		delete(in_bag, context.temp_allocator)
+	}
 
-	for t in 0 ..< params.n_trees {
-		// Bootstrap sample
-		sample_indices: []int
+	tree_params := TreeParams {
+		max_depth    = params.max_depth,
+		min_samples  = params.min_samples,
+		max_features = forest.max_features,
+	}
+
+	sample_indices := make([]int, n_samples, allocator)
+	defer delete(sample_indices, allocator)
+
+	for _ in 0 ..< params.n_trees {
+		// Bootstrap sample (n draws with replacement) or all rows
 		if params.bootstrap {
-			sample_indices = _bootstrap_sample(n_samples, allocator)
-			defer delete(sample_indices, allocator)
+			for i in 0 ..< n_samples {sample_indices[i] = rand.int_max(n_samples)}
 		} else {
-			sample_indices = make([]int, n_samples, allocator)
 			for i in 0 ..< n_samples {sample_indices[i] = i}
-			defer delete(sample_indices, allocator)
 		}
 
-		// Train tree with feature subsampling
-		tree_params := TreeParams {
-			max_depth   = params.max_depth,
-			min_samples = params.min_samples,
-		}
-
+		// Train tree; feature subsampling happens at every split
 		tree := _fit_tree_with_feature_subsampling(
 			X,
 			y,
@@ -75,8 +90,37 @@ rf_fit :: proc(
 			tree_params,
 			allocator,
 		)
-
 		append(&forest.trees, tree)
+
+		if want_oob {
+			for i in 0 ..< n_samples {in_bag[i] = false}
+			for idx in sample_indices {in_bag[idx] = true}
+			last := &forest.trees[len(forest.trees) - 1]
+			for i in 0 ..< n_samples {
+				if in_bag[i] do continue
+				oob_sum[i] += dt_predict_single(last, X, i)
+				oob_cnt[i] += 1
+			}
+		}
+	}
+
+	if want_oob {
+		// R² over the samples that were out of bag at least once
+		mean, cnt := 0.0, 0.0
+		for i in 0 ..< n_samples {
+			if oob_cnt[i] > 0 {mean += y[i]; cnt += 1}
+		}
+		if cnt > 0 {
+			mean /= cnt
+			sse, sst := 0.0, 0.0
+			for i in 0 ..< n_samples {
+				if oob_cnt[i] == 0 do continue
+				e := y[i] - oob_sum[i] / oob_cnt[i]
+				sse += e * e
+				sst += (y[i] - mean) * (y[i] - mean)
+			}
+			forest.oob_score = 1.0 - sse / sst
+		}
 	}
 
 	return forest
@@ -146,14 +190,16 @@ rf_free :: proc(forest: ^RandomForest) {
 // Internal Helpers
 // ============================================================================
 
+// Bootstrap sample: n draws with replacement from [0, n)
 _bootstrap_sample :: proc(n: int, allocator: mem.Allocator) -> []int {
 	indices := make([]int, n, allocator)
 	for i in 0 ..< n {
-		indices[i] = rand.int_range(0, n - 1)
+		indices[i] = rand.int_max(n)
 	}
 	return indices
 }
 
+// k distinct features drawn uniformly from [0, n_features)
 _sample_features :: proc(n_features: int, k: int, allocator: mem.Allocator) -> []int {
 	if k >= n_features {
 		out := make([]int, n_features, allocator)
@@ -161,15 +207,13 @@ _sample_features :: proc(n_features: int, k: int, allocator: mem.Allocator) -> [
 		return out
 	}
 
-	// Fisher-Yates shuffle for first k
+	// Partial Fisher-Yates shuffle for the first k
 	features := make([]int, n_features, allocator)
 	for i in 0 ..< n_features {features[i] = i}
 
 	for i in 0 ..< k {
-		j := rand.int_range(i, n_features - 1)
-		tmp := features[i]
-		features[i] = features[j]
-		features[j] = tmp
+		j := rand.int_range(i, n_features)
+		features[i], features[j] = features[j], features[i]
 	}
 
 	out := make([]int, k, allocator)
@@ -191,18 +235,17 @@ _fit_tree_with_feature_subsampling :: proc(
 	X_sub := l.matrix_new(f64, n_samples, X.cols, allocator)
 	y_sub := make([]f64, n_samples, allocator)
 
-	for i, idx in sample_indices {
+	for idx, i in sample_indices {
 		for j in 0 ..< X.cols {
 			X_sub.data[i * X_sub.cols + j] = X.data[idx * X.cols + j]
 		}
 		y_sub[i] = y[idx]
 	}
 
-	// Train tree normally (feature subsampling happens inside dt_build_node)
-	// For now, we pass max_features and handle it in the tree builder
-	// (You can extend dt_build_node to accept max_features and sample features at each split)
-
-	tree := dt_fit(&X_sub, y_sub, params, allocator)
+	// Feature subsampling happens at every split inside dt_build_node
+	tree_params := params
+	tree_params.max_features = max_features
+	tree := dt_fit(&X_sub, y_sub, tree_params, allocator)
 
 	l.matrix_free(&X_sub)
 	delete(y_sub, allocator)

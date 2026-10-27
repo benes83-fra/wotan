@@ -137,15 +137,19 @@ pipeline_comprehensive_test :: proc(allocator: mem.Allocator) {
 	ml.pipeline_add_standard_scaler(&pipe1)
 	ml.pipeline_set_logistic(
 		&pipe1,
-		{C = 1.0, max_iter = 100, learning_rate = 1.0, optimizer_type = .LBFGS},
+		{C = 1.0, max_iter = 100, learning_rate = 1.0, fit_intercept = true, optimizer_type = .LBFGS},
 	)
-	run_cls("Logistic (Binary)*", &pipe1, &X_cls, y_cls, allocator) // Renamed to indicate expected failure
+	// binary logistic needs 0/1 labels: class 0 vs the rest
+	y_bin := make([]f64, n_cls, allocator)
+	defer delete(y_bin, allocator)
+	for v, i in y_cls do y_bin[i] = 0.0 if v == 0 else 1.0
+	run_cls("Logistic (class 0 vs rest)", &pipe1, &X_cls, y_bin, allocator)
 
 	pipe2 := ml.pipeline_new(allocator); defer ml.pipeline_free(&pipe2)
 	ml.pipeline_add_standard_scaler(&pipe2)
 	ml.pipeline_set_ovr_logistic(
 		&pipe2,
-		{C = 1.0, max_iter = 500, learning_rate = 1.0, optimizer_type = .LBFGS}, // ✅ Increased max_iter
+		{C = 1.0, max_iter = 500, learning_rate = 1.0, fit_intercept = true, optimizer_type = .LBFGS}, // ✅ Increased max_iter
 	)
 	run_cls("OvR Logistic", &pipe2, &X_cls, y_cls, allocator)
 

@@ -2,6 +2,7 @@ package ML
 
 import l "../../linalg"
 import "core:math"
+import "core:math/rand"
 import "core:mem"
 import "core:slice"
 
@@ -32,9 +33,15 @@ Node :: struct {
 	sample_count: int,
 }
 
+// Regression tree (MSE criterion, mean leaves), as sklearn DecisionTreeRegressor:
+// split at the midpoint of consecutive distinct sorted values, x <= t goes left.
+// Equal-gain splits go to the lowest feature index / first threshold (sklearn
+// breaks such ties by its random feature order, so deep trees can differ there).
 TreeParams :: struct {
-	max_depth:   int,
-	min_samples: int,
+	max_depth:    int, // a node at this depth becomes a leaf (0 = single leaf)
+	min_samples:  int, // min samples to split a node (sklearn min_samples_split)
+	max_features: int, // features drawn per split (0 or >= n_features = all), like sklearn:
+	// if none of them gives a valid split, the remaining features are tried too
 }
 
 // ============================================================================
@@ -48,6 +55,8 @@ dt_fit :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> DecisionTree {
 	n_samples := X.rows
+	if len(y) != n_samples do panic("dt_fit: y length mismatch")
+	if n_samples == 0 do panic("dt_fit: no samples")
 
 	tree: DecisionTree
 	tree.allocator = allocator
@@ -95,65 +104,66 @@ dt_build_node :: proc(
 ) -> int {
 	n := len(indices)
 
-	// Create new node
+	// Create new node (index, not pointer: the recursion appends to tree.nodes)
 	node_idx := len(tree.nodes)
-	append(&tree.nodes, Node{}) // Odin: append to [dynamic] works
-	node := &tree.nodes[node_idx]
+	append(&tree.nodes, Node{})
 
-	// --- 1. Compute node statistics ---
-	// In dt_build_node, replace the statistics loop:
+	// --- 1. Node statistics (two-pass: mean, then variance) ---
 	sum_y := 0.0
-	sum_y2 := 0.0
-
-	// For large nodes, use SIMD for sum of squares
-	if n >= 8 {
-		// Gather y values into contiguous buffer
-		y_buf := make([]f64, n, allocator)
-		for k in 0 ..< n {
-			y_buf[k] = y[indices[k]]
-		}
-		// SIMD dot product for Σy²
-		sum_y2 = l.dot_simd(y_buf, y_buf)
-		delete(y_buf, allocator)
-	} else {
-		// Scalar fallback for small nodes
-		for k in 0 ..< n {
-			val := y[indices[k]]
-			sum_y2 += val * val
-		}
-	}
-
-	// Σy still needs scalar gather (or pre-permute y for full SIMD)
 	for k in 0 ..< n {
 		sum_y += y[indices[k]]
 	}
 	mean_y := sum_y / f64(n)
-	variance := (sum_y2 / f64(n)) - (mean_y * mean_y)
+	variance := 0.0
+	scale := 0.0
+	for k in 0 ..< n {
+		d := y[indices[k]] - mean_y
+		variance += d * d
+		scale += y[indices[k]] * y[indices[k]]
+	}
+	variance /= f64(n)
+	scale /= f64(n)
 
-	node.impurity = variance
-	node.sample_count = n
-	node.value = mean_y
-	node.left_idx = -1
-	node.right_idx = -1
+	tree.nodes[node_idx] = Node {
+		impurity     = variance,
+		sample_count = n,
+		value        = mean_y,
+		feature_idx  = -1,
+		left_idx     = -1,
+		right_idx    = -1,
+	}
 
-	// --- 2. Stopping criteria ---
-	if depth >= params.max_depth || n < params.min_samples || variance < 1e-10 {
+	// --- 2. Stopping criteria (pure node: variance at rounding level of y²) ---
+	if depth >= params.max_depth || n < params.min_samples || n < 2 || variance <= 1e-14 * scale {
 		return node_idx
 	}
 
-	// --- 3. Find best split ---
+	// --- 3. Find best split (on y centered at the node mean: no cancellation) ---
 	best_feature := -1
 	best_threshold := 0.0
-	best_gain := -1.0
+	best_gain := 0.0
 	n_features := X.cols
 
-	for f in 0 ..< n_features {
+	order := make([]int, n_features, allocator)
+	defer delete(order, allocator)
+	for f in 0 ..< n_features {order[f] = f}
+	k_feat := n_features
+	if params.max_features > 0 && params.max_features < n_features {
+		k_feat = params.max_features
+		rand.shuffle(order)
+	}
+
+	for fi in 0 ..< n_features {
+		// past the first k_feat features only keep looking while no split was found
+		if fi >= k_feat && best_feature >= 0 do break
+		f := order[fi]
 		sorted := _sort_indices_by_feature(X, f, indices, allocator)
 		defer delete(sorted, allocator)
 
-		gain, threshold := _find_best_split_on_feature(X, y, sorted, f, sum_y, sum_y2, n, variance)
+		gain, threshold, ok := _find_best_split_on_feature(X, y, sorted, f, mean_y, n, variance)
 
-		if gain > best_gain {
+		// any valid split beats none, even at ~zero gain (sklearn: XOR-like data)
+		if ok && (best_feature < 0 || gain > best_gain) {
 			best_gain = gain
 			best_feature = f
 			best_threshold = threshold
@@ -161,12 +171,12 @@ dt_build_node :: proc(
 	}
 
 	// --- 4. Split or leaf ---
-	if best_feature < 0 || best_gain <= 0.0 {
+	if best_feature < 0 {
 		return node_idx
 	}
 
-	node.feature_idx = best_feature
-	node.threshold = best_threshold
+	tree.nodes[node_idx].feature_idx = best_feature
+	tree.nodes[node_idx].threshold = best_threshold
 
 	// Partition indices
 	left_idx, right_idx := _partition_indices(X, best_feature, best_threshold, indices, allocator)
@@ -175,8 +185,10 @@ dt_build_node :: proc(
 		delete(right_idx, allocator)
 	}
 
-	node.left_idx = dt_build_node(tree, X, y, left_idx, params, depth + 1, allocator)
-	node.right_idx = dt_build_node(tree, X, y, right_idx, params, depth + 1, allocator)
+	l_child := dt_build_node(tree, X, y, left_idx, params, depth + 1, allocator)
+	r_child := dt_build_node(tree, X, y, right_idx, params, depth + 1, allocator)
+	tree.nodes[node_idx].left_idx = l_child
+	tree.nodes[node_idx].right_idx = r_child
 
 	return node_idx
 }
@@ -190,63 +202,57 @@ _find_best_split_on_feature :: proc(
 	y: []f64,
 	sorted_indices: []int,
 	feature: int,
-	total_sum_y: f64,
-	total_sum_y2: f64,
+	node_mean: f64,
 	n: int,
 	parent_variance: f64,
 ) -> (
 	gain: f64,
 	threshold: f64,
+	found: bool,
 ) {
+	// Running sums of y - node_mean (sums over the node are 0 and n·variance)
+	total_sum := 0.0
+	total_sum2 := 0.0
+	for idx in sorted_indices {
+		d := y[idx] - node_mean
+		total_sum += d
+		total_sum2 += d * d
+	}
 
-	best_gain := -1.0
+	best_gain := 0.0
 	best_thresh := 0.0
 
-	left_sum_y := 0.0
-	left_sum_y2 := 0.0
-	left_count := 0
-
-	right_sum_y := total_sum_y
-	right_sum_y2 := total_sum_y2
-	right_count := n
-
+	left_sum, left_sum2 := 0.0, 0.0
 	for k in 0 ..< n - 1 {
 		idx := sorted_indices[k]
-		val := y[idx]
+		d := y[idx] - node_mean
+		left_sum += d
+		left_sum2 += d * d
 
-		left_sum_y += val
-		left_sum_y2 += val * val
-		left_count += 1
-
-		right_sum_y -= val
-		right_sum_y2 -= val * val
-		right_count -= 1
-
-		if left_count < 1 || right_count < 1 {continue}
-
-		// Skip identical feature values
+		// Only split between distinct feature values
 		curr_val := X.data[idx * X.cols + feature]
-		next_idx := sorted_indices[k + 1]
-		next_val := X.data[next_idx * X.cols + feature]
+		next_val := X.data[sorted_indices[k + 1] * X.cols + feature]
 		if curr_val == next_val {continue}
 
-		// Compute variances
-		left_mean := left_sum_y / f64(left_count)
-		left_var := (left_sum_y2 / f64(left_count)) - (left_mean * left_mean)
+		n_l := f64(k + 1)
+		n_r := f64(n - k - 1)
+		right_sum := total_sum - left_sum
+		right_sum2 := total_sum2 - left_sum2
+		// n·impurity of each child = Σd² - (Σd)²/count
+		weighted_impurity := ((left_sum2 - left_sum * left_sum / n_l) + (right_sum2 - right_sum * right_sum / n_r)) / f64(n)
+		g := parent_variance - weighted_impurity
 
-		right_mean := right_sum_y / f64(right_count)
-		right_var := (right_sum_y2 / f64(right_count)) - (right_mean * right_mean)
-
-		weighted_impurity := (f64(left_count) * left_var + f64(right_count) * right_var) / f64(n)
-		gain := parent_variance - weighted_impurity
-
-		if gain > best_gain {
-			best_gain = gain
-			best_thresh = (curr_val + next_val) / 2.0
+		if !found || g > best_gain {
+			found = true
+			best_gain = g
+			// midpoint, but never rounded up onto next_val (it must go right)
+			t := curr_val + (next_val - curr_val) / 2.0
+			if t >= next_val do t = curr_val
+			best_thresh = t
 		}
 	}
 
-	return best_gain, best_thresh
+	return best_gain, best_thresh, found
 }
 
 // ============================================================================
