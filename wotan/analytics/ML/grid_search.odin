@@ -84,9 +84,9 @@ rf_cv_evaluator :: proc(
 
 	model := rf_fit(&X_train, y_train, params^, allocator); defer rf_free(&model)
 	preds := rf_predict(&model, &X_val, allocator); defer delete(preds, allocator)
-	// The forest is a regressor (mean of trees): round to the nearest class
-	// label before scoring accuracy, as gb_cv_evaluator does
-	for &p in preds do p = math.round(p)
+	// A regression forest (mean of trees): round to the nearest class label
+	// before scoring accuracy; a classification forest already predicts labels
+	if params.criterion == .MSE {for &p in preds do p = math.round(p)}
 	return metrics_accuracy(y_val, preds)
 }
 
@@ -313,10 +313,12 @@ gb_cv_evaluator :: proc(
 	model := gb_fit(&X_train, y_train, params^, allocator); defer gb_free(&model)
 	preds := gb_predict(&model, &X_val, allocator); defer delete(preds, allocator)
 
-	// ✅ FIX: If GB is a regressor, it outputs continuous values.
-	// Round them to the nearest class label to compute classification accuracy.
-	for i in 0 ..< len(preds) {
-		preds[i] = math.round(preds[i])
+	// A squared-error GB outputs continuous values: round them to the nearest
+	// class label to compute classification accuracy (Log_Loss predicts labels)
+	if params.loss == .Squared_Error {
+		for i in 0 ..< len(preds) {
+			preds[i] = math.round(preds[i])
+		}
 	}
 
 	return metrics_accuracy(y_val, preds)
@@ -339,7 +341,7 @@ dt_cv_evaluator :: proc(
 	model := dt_fit(&X_train, y_train, params^, allocator); defer dt_free(&model)
 	preds := dt_predict(&model, &X_val, allocator); defer delete(preds, allocator)
 	// Regression tree (leaf = mean label): round to the nearest class label
-	for &p in preds do p = math.round(p)
+	if params.criterion == .MSE {for &p in preds do p = math.round(p)}
 	return metrics_accuracy(y_val, preds)
 }
 
