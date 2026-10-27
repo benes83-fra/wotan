@@ -105,6 +105,29 @@ grid_search :: proc(
 	best_params: P,
 	best_score: f64,
 ) {
+	cv := CVSplitter {
+		kind         = .KFold,
+		n_splits     = n_splits,
+		shuffle      = true,
+		random_state = 42,
+	}
+	return grid_search_cv(X, y, cv, evaluator, param_grid, allocator)
+}
+
+// Grid search with any splitter (e.g. Time_Series for walk-forward validation of
+// financial models, Stratified_KFold for imbalanced classes): the parameter set
+// with the highest mean score over the splits
+grid_search_cv :: proc(
+	X: ^l.Matrix(f64),
+	y: []f64,
+	cv: CVSplitter,
+	evaluator: ModelEvaluator,
+	param_grid: []$P,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	best_params: P,
+	best_score: f64,
+) {
 	best_score = -math.F64_MAX
 
 	if len(param_grid) == 0 {
@@ -112,16 +135,7 @@ grid_search :: proc(
 	}
 
 	for i in 0 ..< len(param_grid) {
-		scores := cross_val_score(
-			X,
-			y,
-			n_splits,
-			evaluator,
-			rawptr(&param_grid[i]),
-			true,
-			42,
-			allocator,
-		)
+		scores := cross_val_score_cv(X, y, cv, evaluator, rawptr(&param_grid[i]), allocator)
 
 		mean_score := 0.0
 		for s in scores {mean_score += s}

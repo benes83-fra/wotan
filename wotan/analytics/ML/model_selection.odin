@@ -140,47 +140,13 @@ cross_val_score :: proc(
 	random_state: int = 42,
 	allocator: mem.Allocator = context.allocator,
 ) -> []f64 {
-	n := X.rows
-	if n_splits < 2 || n_splits > n do panic("cross_val_score: need 2 <= n_splits <= n")
-	if len(y) != n do panic("cross_val_score: y length mismatch")
-	scores := make([]f64, n_splits, allocator)
-
-	// 1. Generate and shuffle indices
-	indices := make([]int, n, context.temp_allocator)
-	for i in 0 ..< n {indices[i] = i}
-
-	if shuffle {
-		_shuffle_indices(indices, random_state)
+	if n_splits < 2 || n_splits > X.rows do panic("cross_val_score: need 2 <= n_splits <= n")
+	// KFold: contiguous folds of the shuffled samples, first n % n_splits folds larger
+	cv := CVSplitter {
+		kind         = .KFold,
+		n_splits     = n_splits,
+		shuffle      = shuffle,
+		random_state = random_state,
 	}
-
-	// 2. Split into K folds
-	fold_size := n / n_splits
-	remainder := n % n_splits
-
-	for k in 0 ..< n_splits {
-		// Calculate val bounds for this fold
-		val_start := k * fold_size + math.min(k, remainder)
-
-		val_end := val_start + fold_size
-		if k < remainder {
-			val_end += 1
-		}
-
-		// Build train and val indices for this fold
-		val_idx := make([]int, val_end - val_start, context.temp_allocator)
-		copy(val_idx, indices[val_start:val_end])
-
-		train_idx := make([]int, n - len(val_idx), context.temp_allocator)
-		copy(train_idx[0:val_start], indices[0:val_start])
-		copy(train_idx[val_start:n - len(val_idx)], indices[val_end:n])
-
-		// 3. Evaluate
-		scores[k] = evaluator(X, y, train_idx, val_idx, user_data, allocator)
-
-		delete(val_idx, context.temp_allocator)
-		delete(train_idx, context.temp_allocator)
-	}
-
-	delete(indices, context.temp_allocator)
-	return scores
+	return cross_val_score_cv(X, y, cv, evaluator, user_data, allocator)
 }

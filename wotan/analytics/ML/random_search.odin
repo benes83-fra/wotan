@@ -21,6 +21,29 @@ random_search :: proc(
 	best_params: P,
 	best_score: f64,
 ) {
+	cv := CVSplitter {
+		kind         = .KFold,
+		n_splits     = n_splits,
+		shuffle      = true,
+		random_state = 42,
+	}
+	return random_search_cv(X, y, cv, evaluator, n_iter, sampler, seed, allocator)
+}
+
+// Random search with any splitter (see grid_search_cv)
+random_search_cv :: proc(
+	X: ^l.Matrix(f64),
+	y: []f64,
+	cv: CVSplitter,
+	evaluator: ModelEvaluator,
+	n_iter: int,
+	sampler: proc(seed: u64) -> $P,
+	seed: u64 = 42,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	best_params: P,
+	best_score: f64,
+) {
 	best_score = -math.F64_MAX
 
 	if n_iter <= 0 {
@@ -32,9 +55,8 @@ random_search :: proc(
 		current_seed := seed + u64(i)
 		params := sampler(current_seed)
 
-		// ✅ Keep the CV seed constant (42) so every parameter set is evaluated
-		// on the EXACT same folds. This ensures a fair comparison!
-		scores := cross_val_score(X, y, n_splits, evaluator, rawptr(&params), true, 42, allocator)
+		// the same splits for every parameter set (cv is fixed): a fair comparison
+		scores := cross_val_score_cv(X, y, cv, evaluator, rawptr(&params), allocator)
 
 		mean_score := 0.0
 		for s in scores {mean_score += s}
