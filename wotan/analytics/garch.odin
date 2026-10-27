@@ -10,6 +10,8 @@ import "core:mem"
 // GARCH Model Structures
 // ============================================================================
 
+// Legacy model selector (garch_fit): mixes the variance equation and the error
+// distribution. garch_fit_spec chooses them independently (GARCH_Spec).
 GARCH_Model_Type :: enum {
 	ARCH,
 	GARCH,
@@ -18,16 +20,40 @@ GARCH_Model_Type :: enum {
 	GED,
 }
 
+// Variance equation
+GARCH_Variance :: enum {
+	GARCH, // σ²_t = ω + Σ α_i ε²_{t-i} + Σ β_j σ²_{t-j}  (q = 0: ARCH)
+	GJR, // + γ Σ_i ε²_{t-i} 1[ε_{t-i} < 0]  (leverage effect)
+	EGARCH, // ln σ²_t = ω + Σ α_i (|z_{t-i}| - √(2/π)) + Σ γ_i z_{t-i} + Σ β_j ln σ²_{t-j}
+}
+
+// Standardised (unit-variance) error distribution
+GARCH_Dist :: enum {
+	Normal,
+	StudentT, // ν > 2 degrees of freedom
+	GED, // shape p (2 = normal)
+}
+
+GARCH_Spec :: struct {
+	variance: GARCH_Variance,
+	dist:     GARCH_Dist,
+	p:        int, // ARCH order (≤ 0: 1)
+	q:        int, // GARCH order (< 0: 1; 0 = ARCH)
+}
+
 GARCH_Params :: struct {
-	omega:      f64,
-	alpha:      []f64,
-	beta:       []f64,
-	gamma:      f64,
-	nu:         f64,
-	shape:      f64,
-	model_type: GARCH_Model_Type,
-	p:          int,
-	q:          int,
+	omega:        f64,
+	alpha:        []f64,
+	beta:         []f64,
+	gamma:        f64, // GJR leverage coefficient (all ARCH lags)
+	egarch_gamma: []f64, // EGARCH asymmetry coefficient per ARCH lag
+	nu:           f64,
+	shape:        f64,
+	model_type:   GARCH_Model_Type, // legacy; variance / dist take precedence when set
+	variance:     GARCH_Variance,
+	dist:         GARCH_Dist,
+	p:            int,
+	q:            int,
 }
 
 GARCH_Result :: struct {
@@ -39,7 +65,7 @@ GARCH_Result :: struct {
 	standardized_resid: []f64,
 	converged:          bool,
 	n_iterations:       int,
-	persistence:        f64, // α + β (+ γ/2 for GJR): volatility persistence
+	persistence:        f64, // α + β (+ γ/2 for GJR); Σ β for EGARCH (log-variance persistence)
 }
 
 GARCH_Forecast :: struct {
@@ -48,62 +74,114 @@ GARCH_Forecast :: struct {
 	confidence_95:     [2]f64,
 }
 
+// Effective variance equation / distribution: the explicit fields, or the
+// legacy model_type for parameters built by hand
+_garch_variance_kind :: proc(params: ^GARCH_Params) -> GARCH_Variance {
+	if params.variance != .GARCH do return params.variance
+	return .GJR if params.model_type == .GJR_GARCH else .GARCH
+}
+
+_garch_dist_kind :: proc(params: ^GARCH_Params) -> GARCH_Dist {
+	if params.dist != .Normal do return params.dist
+	#partial switch params.model_type {
+	case .StudentT:
+		return .StudentT
+	case .GED:
+		return .GED
+	}
+	return .Normal
+}
+
+// Number of free parameters of a spec
+_garch_n_params :: proc(variance: GARCH_Variance, dist: GARCH_Dist, p, q: int) -> int {
+	n := 1 + p + q
+	if variance == .GJR do n += 1
+	if variance == .EGARCH do n += p
+	if dist != .Normal do n += 1
+	return n
+}
+
+_EGARCH_EABS :: 0.7978845608028654 // E|z| = √(2/π) for N(0, 1), as the arch package
+
 // ============================================================================
-// Parameter Transformation (Fixed: allows α+β < 1)
+// Parameter Transformation (unconstrained x → model parameters)
 // ============================================================================
+// GARCH / GJR: ω = exp(x₀ - 10); α, β, γ = sigmoid, rescaled so that the
+// persistence α + β (+ γ/2) stays below 0.999.
+// EGARCH: ω, α, γ unconstrained; β = tanh, rescaled so Σ|β| < 0.999.
+// Then ν = 2 + exp(x) (Student-t) or shape = exp(x) (GED).
 
 unpack_params :: proc(x: []f64, params: ^GARCH_Params) {
-	// Omega: use exp to ensure positivity
-	params.omega = math.exp(x[0] - 10.0)
-
-	// Alpha and Beta: use sigmoid to constrain to (0, 1)
-	// Then scale to ensure sum < 1
-	sum_raw := 0.0
-	for i in 0 ..< params.p {
-		val := 1.0 / (1.0 + math.exp(-x[1 + i])) // sigmoid
-		params.alpha[i] = val
-		sum_raw += val
+	p, q := params.p, params.q
+	vk := _garch_variance_kind(params)
+	idx := 1 + p + q
+	if vk == .EGARCH {
+		params.omega = x[0]
+		for i in 0 ..< p {params.alpha[i] = x[1 + i]}
+		sum_abs := 0.0
+		for j in 0 ..< q {
+			params.beta[j] = math.tanh(x[1 + p + j])
+			sum_abs += math.abs(params.beta[j])
+		}
+		if sum_abs > 0.999 {
+			for j in 0 ..< q {params.beta[j] *= 0.999 / sum_abs}
+		}
+		for i in 0 ..< p {params.egarch_gamma[i] = x[idx + i]}
+		idx += p
+	} else {
+		params.omega = math.exp(x[0] - 10.0)
+		sum_raw := 0.0
+		for i in 0 ..< p {
+			params.alpha[i] = 1.0 / (1.0 + math.exp(-x[1 + i]))
+			sum_raw += params.alpha[i]
+		}
+		for j in 0 ..< q {
+			params.beta[j] = 1.0 / (1.0 + math.exp(-x[1 + p + j]))
+			sum_raw += params.beta[j]
+		}
+		// GJR: with symmetric shocks the leverage term adds γ/2 to the persistence
+		if vk == .GJR {
+			params.gamma = 1.0 / (1.0 + math.exp(-x[idx]))
+			sum_raw += 0.5 * params.gamma
+			idx += 1
+		}
+		if sum_raw > 0.999 {
+			scale := 0.999 / sum_raw
+			for i in 0 ..< p {params.alpha[i] *= scale}
+			for j in 0 ..< q {params.beta[j] *= scale}
+			if vk == .GJR {params.gamma *= scale}
+		}
 	}
-	for j in 0 ..< params.q {
-		val := 1.0 / (1.0 + math.exp(-x[1 + params.p + j])) // sigmoid
-		params.beta[j] = val
-		sum_raw += val
-	}
-
-	// Gamma for GJR-GARCH: sigmoid keeps it in (0, 1); with symmetric shocks
-	// the leverage term adds γ/2 to the persistence
-	is_gjr := params.model_type == .GJR_GARCH && len(x) > 1 + params.p + params.q
-	if is_gjr {
-		params.gamma = 1.0 / (1.0 + math.exp(-x[1 + params.p + params.q]))
-		sum_raw += 0.5 * params.gamma
-	}
-
-	// Scale to ensure persistence < 0.999 (leave room for stationarity)
-	if sum_raw > 0.999 {
-		scale := 0.999 / sum_raw
-		for i in 0 ..< params.p {params.alpha[i] *= scale}
-		for j in 0 ..< params.q {params.beta[j] *= scale}
-		if is_gjr {params.gamma *= scale}
-	}
-	if params.model_type == .StudentT {
-		nu_idx := 1 + params.p + params.q
-		if params.model_type == .GJR_GARCH {nu_idx += 1}
-		params.nu = 2.0 + math.exp(x[nu_idx])
-	}
-	if params.model_type == .GED {
-		shape_idx := 1 + params.p + params.q
-		if params.model_type == .GJR_GARCH {shape_idx += 1}
-		params.shape = math.exp(x[shape_idx])
+	switch _garch_dist_kind(params) {
+	case .Normal:
+	case .StudentT:
+		params.nu = 2.0 + math.exp(x[idx])
+	case .GED:
+		params.shape = math.exp(x[idx])
 	}
 }
 
 // ============================================================================
-// GARCH Log-Likelihood Function
+// Conditional variance and log-likelihood
 // ============================================================================
 
-// Conditional variance at t from residuals and cond_var before t:
+// Conditional variance at t from residuals and cond_var before t (GARCH / GJR):
 // ω + Σ α_i ε²_{t-i} + Σ β_j σ²_{t-j} (+ γ Σ ε²_{t-i} 1[ε_{t-i} < 0] for GJR)
 _garch_variance_at :: proc(params: ^GARCH_Params, residuals, cond_var: []f64, t: int) -> f64 {
+	if _garch_variance_kind(params) == .EGARCH {
+		// ln σ²_t = ω + Σ α_i (|z| - E|z|) + Σ γ_i z + Σ β_j ln σ²_{t-j}
+		lv := params.omega
+		for i in 0 ..< params.p {
+			if t - i - 1 >= 0 {
+				z := residuals[t - i - 1] / math.sqrt(cond_var[t - i - 1])
+				lv += params.alpha[i] * (math.abs(z) - _EGARCH_EABS) + params.egarch_gamma[i] * z
+			}
+		}
+		for j in 0 ..< params.q {
+			if t - j - 1 >= 0 {lv += params.beta[j] * math.ln(cond_var[t - j - 1])}
+		}
+		return math.exp(math.clamp(lv, -50, 50))
+	}
 	variance := params.omega
 	for i in 0 ..< params.p {
 		if t - i - 1 >= 0 {variance += params.alpha[i] * residuals[t - i - 1] * residuals[t - i - 1]}
@@ -111,7 +189,7 @@ _garch_variance_at :: proc(params: ^GARCH_Params, residuals, cond_var: []f64, t:
 	for j in 0 ..< params.q {
 		if t - j - 1 >= 0 {variance += params.beta[j] * cond_var[t - j - 1]}
 	}
-	if params.model_type == .GJR_GARCH && params.gamma != 0.0 {
+	if _garch_variance_kind(params) == .GJR && params.gamma != 0.0 {
 		for i in 0 ..< params.p {
 			if t - i - 1 >= 0 && residuals[t - i - 1] < 0.0 {
 				variance += params.gamma * residuals[t - i - 1] * residuals[t - i - 1]
@@ -120,6 +198,30 @@ _garch_variance_at :: proc(params: ^GARCH_Params, residuals, cond_var: []f64, t:
 	}
 	if variance < 1e-8 {variance = 1e-8}
 	return variance
+}
+
+// Log density of a standardised residual z with variance σ² under the fitted distribution
+_garch_log_density :: proc(params: ^GARCH_Params, z, var: f64) -> f64 {
+	switch _garch_dist_kind(params) {
+	case .StudentT:
+		nu := params.nu
+		if nu > 2.0 {
+			t1, _ := math.lgamma((nu + 1.0) / 2.0)
+			t2, _ := math.lgamma(nu / 2.0)
+			return t1 - t2 - 0.5 * math.ln_f64((nu - 2.0) * math.PI) - 0.5 * math.ln_f64(var) - ((nu + 1.0) / 2.0) * math.ln_f64(1.0 + (z * z) / (nu - 2.0))
+		}
+	case .GED:
+		shape := params.shape
+		if shape > 0.0 {
+			// unit-variance GED: f(z) = p / (2 λ Γ(1/p)) exp(-|z/λ|^p), λ = sqrt(Γ(1/p)/Γ(3/p))
+			lg1, _ := math.lgamma(1.0 / shape)
+			lg3, _ := math.lgamma(3.0 / shape)
+			lambda := math.exp_f64(0.5 * (lg1 - lg3))
+			return math.ln_f64(shape) - math.ln_f64(2.0) - lg1 - math.ln_f64(lambda) - 0.5 * math.ln_f64(var) - math.pow(math.abs(z / lambda), shape)
+		}
+	case .Normal:
+	}
+	return -0.5 * (math.ln_f64(2.0 * math.PI) + math.ln_f64(var) + z * z)
 }
 
 // Negative log-likelihood. Conventions (checked against a numpy reference):
@@ -135,8 +237,7 @@ _garch_neg_log_likelihood :: proc(
 	allocator: mem.Allocator,
 ) -> f64 {
 	n := len(residuals)
-	p := params.p
-	q := params.q
+	m := max(params.p, params.q)
 
 	cond_var := make([]f64, n, allocator)
 	defer delete(cond_var, allocator)
@@ -145,74 +246,98 @@ _garch_neg_log_likelihood :: proc(
 	for i in 0 ..< n {uncond_var += residuals[i] * residuals[i]}
 	uncond_var /= f64(n)
 
-	for i in 0 ..< max(p, q) {cond_var[i] = uncond_var}
-
-	for t in max(p, q) ..< n {cond_var[t] = _garch_variance_at(params, residuals, cond_var, t)}
+	for i in 0 ..< m {cond_var[i] = uncond_var}
+	for t in m ..< n {cond_var[t] = _garch_variance_at(params, residuals, cond_var, t)}
 
 	log_lik := 0.0
-	is_student_t := params.model_type == .StudentT
-	is_ged := params.model_type == .GED
-	nu := params.nu
-	shape := params.shape
-
-	for t in max(p, q) ..< n {
+	for t in m ..< n {
 		z := residuals[t] / math.sqrt_f64(cond_var[t])
-
-		if is_student_t && nu > 2.0 {
-			// Change math.ln_gamma to math.lgamma
-			term1, _ := math.lgamma((nu + 1.0) / 2.0)
-			term2, _ := math.lgamma(nu / 2.0)
-			term3 := 0.5 * math.ln_f64((nu - 2.0) * math.PI)
-			term4 := 0.5 * math.ln_f64(cond_var[t])
-			term5 := ((nu + 1.0) / 2.0) * math.ln_f64(1.0 + (z * z) / (nu - 2.0))
-
-			log_lik += term1 - term2 - term3 - term4 - term5
-		} else if is_ged && shape > 0.0 {
-			// GED log-likelihood
-			// λ_p = sqrt(Γ(1/p) / Γ(3/p))
-			lg1_p, _ := math.lgamma(1.0 / shape)
-			lg3_p, _ := math.lgamma(3.0 / shape)
-			lambda_p := math.exp_f64(0.5 * (lg1_p - lg3_p))
-
-			// Standardized residual
-			u := z / lambda_p
-
-			// log f = log(p) - log(2) - log(Γ(1/p)) - log(λ_p) - log(σ_t) - |u|^p
-			log_p := math.ln_f64(shape)
-			log_2 := math.ln_f64(2.0)
-			log_gamma, _ := math.lgamma(1.0 / shape)
-			log_lambda := math.ln_f64(lambda_p)
-			log_sigma := 0.5 * math.ln_f64(cond_var[t])
-			power_term := math.pow(math.abs(u), shape)
-
-			log_lik += log_p - log_2 - log_gamma - log_lambda - log_sigma - power_term
-		} else {
-			log_lik += -0.5 * (math.ln_f64(2.0 * math.PI) + math.ln_f64(cond_var[t]) + z * z)
-		}
+		log_lik += _garch_log_density(params, z, cond_var[t])
 	}
-
 	return -log_lik
 }
 
 // ============================================================================
-// GARCH Parameter Estimation (Fixed convergence and optimizer)
+// GARCH Parameter Estimation
 // ============================================================================
 
+// Legacy entry point: model_type selects variance equation and distribution
+// (ARCH / GARCH → GARCH + normal, GJR_GARCH → GJR + normal, StudentT → GARCH +
+// Student-t, GED → GARCH + GED). Use garch_fit_spec to combine them freely.
 garch_fit :: proc(
 	residuals: []f64,
 	model_type: GARCH_Model_Type = .GARCH,
 	p: int = 1,
 	q: int = 1,
-	max_iter: int = 2000, // Increased from 1000
-	tolerance: f64 = 1e-4, // Relaxed from 1e-6
+	max_iter: int = 2000,
+	tolerance: f64 = 1e-4,
 	allocator: mem.Allocator = context.allocator,
 ) -> GARCH_Result {
+	spec := GARCH_Spec {
+		p = p,
+		q = q,
+	}
+	#partial switch model_type {
+	case .GJR_GARCH:
+		spec.variance = .GJR
+	case .StudentT:
+		spec.dist = .StudentT
+	case .GED:
+		spec.dist = .GED
+	}
+	res := _garch_fit_impl(residuals, spec, max_iter, tolerance, allocator, true)
+	res.params.model_type = model_type
+	return res
+}
+
+// Fit any combination of variance equation (GARCH, GJR, EGARCH) and error
+// distribution (normal, Student-t, GED) by conditional maximum likelihood:
+// Adam on the unconstrained parameters, then a Nelder-Mead polish.
+// Free the result with garch_result_free.
+garch_fit_spec :: proc(
+	residuals: []f64,
+	spec: GARCH_Spec,
+	max_iter: int = 2000,
+	tolerance: f64 = 1e-4,
+	allocator: mem.Allocator = context.allocator,
+	verbose := false,
+) -> GARCH_Result {
+	s := spec
+	if s.p <= 0 do s.p = 1
+	if s.q < 0 do s.q = 1
+	return _garch_fit_impl(residuals, s, max_iter, tolerance, allocator, verbose)
+}
+
+garch_result_free :: proc(res: ^GARCH_Result, allocator: mem.Allocator = context.allocator) {
+	delete(res.params.alpha, allocator)
+	delete(res.params.beta, allocator)
+	delete(res.params.egarch_gamma, allocator)
+	delete(res.conditional_var, allocator)
+	delete(res.standardized_resid, allocator)
+}
+
+_garch_fit_impl :: proc(
+	residuals: []f64,
+	spec: GARCH_Spec,
+	max_iter: int,
+	tolerance: f64,
+	allocator: mem.Allocator,
+	verbose: bool,
+) -> GARCH_Result {
 	n := len(residuals)
+	p, q := spec.p, spec.q
 
 	params := GARCH_Params {
-		model_type = model_type,
-		p          = p,
-		q          = q,
+		variance = spec.variance,
+		dist     = spec.dist,
+		p        = p,
+		q        = q,
+	}
+	#partial switch spec.variance {
+	case .GJR:
+		params.model_type = .GJR_GARCH
+	case:
+		params.model_type = .GARCH
 	}
 
 	// Need at least one observation beyond the lag order to fit anything
@@ -222,14 +347,9 @@ garch_fit :: proc(
 
 	params.alpha = make([]f64, p, allocator)
 	params.beta = make([]f64, q, allocator)
+	if spec.variance == .EGARCH do params.egarch_gamma = make([]f64, p, allocator)
 
-	n_params := 1 + p + q
-	if model_type == .GJR_GARCH {
-		n_params += 1
-	}
-	if model_type == .StudentT {n_params += 1}
-	if model_type == .GED {n_params += 1}
-	// 1. Initialize optimizer with higher learning rate
+	n_params := _garch_n_params(spec.variance, spec.dist, p, q)
 	opt_config := opt.optimizer_default_config(.Adam)
 	opt_config.learning_rate = 0.05
 	opt_config.beta1 = 0.9
@@ -246,24 +366,35 @@ garch_fit :: proc(
 	}
 
 	// Initial values in unconstrained space
-	param_vec[0] = -5.0
-	for i in 1 ..< 1 + p + q {
-		param_vec[i] = 0.0
+	idx := 1 + p + q
+	if spec.variance == .EGARCH {
+		// ln σ² ≈ ln var(ε): ω = (1 - Σβ) ln var, α = 0.1, β = 0.9 / q, γ = 0
+		v := 0.0
+		for e in residuals {v += e * e}
+		v = max(v / f64(n), 1e-300)
+		b := 0.9 / f64(max(q, 1))
+		param_vec[0] = (1 - 0.9 * f64(min(q, 1))) * math.ln(v)
+		for i in 0 ..< p {param_vec[1 + i] = 0.1}
+		for j in 0 ..< q {param_vec[1 + p + j] = math.atanh(b)}
+		idx += p // γ_i start at 0
+	} else {
+		param_vec[0] = -5.0
+		if spec.variance == .GJR {
+			param_vec[idx] = math.ln_f64(0.05 / 0.95) // gamma = 0.05
+			idx += 1
+		}
 	}
-	gamma_idx := 1 + p + q
-	if model_type == .GJR_GARCH {
-		param_vec[gamma_idx] = math.ln_f64(0.05 / 0.95) // gamma = 0.05
-		gamma_idx += 1
-	}
-	if model_type == .StudentT {
-		param_vec[gamma_idx] = math.ln_f64(3.0) // Initial nu = 2 + exp(ln(3)) = 5.0
-	}
-	if model_type == .GED {
-		param_vec[gamma_idx] = math.ln_f64(2.0) // shape = 2 (Normal)
+	switch spec.dist {
+	case .Normal:
+	case .StudentT:
+		param_vec[idx] = math.ln_f64(3.0) // ν = 2 + 3 = 5
+	case .GED:
+		param_vec[idx] = math.ln_f64(2.0) // shape = 2 (normal)
 	}
 	best_loss := math.F64_MAX
 	best_params := make([]f64, n_params, allocator)
 	defer delete(best_params, allocator)
+	copy(best_params, param_vec)
 
 	param_vec_plus := make([]f64, n_params, context.temp_allocator)
 	param_vec_minus := make([]f64, n_params, context.temp_allocator)
@@ -285,26 +416,16 @@ garch_fit :: proc(
 			copy(best_params, param_vec)
 		}
 
-		// 4. Convergence check inside the loop
 		if iter > 100 && math.abs(prev_loss - loss) < tolerance {
 			n_iter = iter + 1
-			fmt.printf(
-				"GARCH converged at iteration %d (loss change: %.8f)\n",
-				iter,
-				math.abs(prev_loss - loss),
-			)
+			if verbose do fmt.printf("GARCH converged at iteration %d (loss change: %.8f)\n", iter, math.abs(prev_loss - loss))
 			converged = true
 			break
 		}
-
-		// 5. Early stopping if loss INCREASES (becomes less negative)
-		// Since loss is negative, "increasing" means loss > prev_loss
-		if iter > 100 && loss > prev_loss {
-			// Only stop if it's been increasing for a while
-			if loss > prev_loss + 1.0 { 	// Increased by more than 1.0
-				fmt.println("Loss increasing, stopping early")
-				break
-			}
+		// stop if the loss keeps increasing markedly
+		if iter > 100 && loss > prev_loss + 1.0 {
+			if verbose do fmt.println("Loss increasing, stopping early")
+			break
 		}
 
 		prev_loss = loss
@@ -315,51 +436,25 @@ garch_fit :: proc(
 		for i in 0 ..< n_params {
 			copy(param_vec_plus, param_vec)
 			copy(param_vec_minus, param_vec)
-
 			param_vec_plus[i] += eps
 			param_vec_minus[i] -= eps
-
 			unpack_params(param_vec_plus, &params)
 			loss_plus := _garch_neg_log_likelihood(&params, residuals, allocator)
-
 			unpack_params(param_vec_minus, &params)
 			loss_minus := _garch_neg_log_likelihood(&params, residuals, allocator)
-
 			gradient[i] = (loss_plus - loss_minus) / (2.0 * eps)
 		}
 
 		opt.optimizer_step(&optimizer, param_vec, gradient, loss)
 
-		if iter % 100 == 0 {
+		if verbose && iter % 100 == 0 {
 			unpack_params(param_vec, &params)
-			persistence := 0.0
-			for i in 0 ..< p {persistence += params.alpha[i]}
-			for j in 0 ..< q {persistence += params.beta[j]}
-
-			alpha_0: f64 = 0.0
-			if p > 0 {
-				alpha_0 = params.alpha[0]
-			}
-
-			beta_0: f64 = 0.0
-			if q > 0 {
-				beta_0 = params.beta[0]
-			}
-
-			fmt.printf(
-				"GARCH iter %d: loss=%.4f, ω=%.6f, α=%.4f, β=%.4f, α+β=%.4f\n",
-				iter,
-				loss,
-				params.omega,
-				alpha_0,
-				beta_0,
-				persistence,
-			)
+			fmt.printf("GARCH iter %d: loss=%.4f, ω=%.6f\n", iter, loss, params.omega)
 		}
 	}
 
 	// Adam with a fixed step stalls ~1e-2 log-likelihood units short of the
-	// optimum: polish the best point with Nelder-Mead (restarted once)
+	// optimum: polish the best point with Nelder-Mead (restarted)
 	_Garch_NM_Ctx :: struct {
 		params:    ^GARCH_Params,
 		residuals: []f64,
@@ -371,8 +466,9 @@ garch_fit :: proc(
 		return _garch_neg_log_likelihood(c.params, c.residuals, c.allocator)
 	}
 	nm_ctx := _Garch_NM_Ctx{&params, residuals, allocator}
-	for _ in 0 ..< 2 {
-		x_nm, f_nm, _ := nelder_mead(nm_obj, &nm_ctx, best_params, 2000, 1e-10, allocator)
+	n_restarts := 2 if spec.variance != .EGARCH && spec.dist == .Normal else 4
+	for _ in 0 ..< n_restarts {
+		x_nm, f_nm, _ := nelder_mead(nm_obj, &nm_ctx, best_params, 2000 * max(n_params / 4, 1), 1e-10, allocator)
 		if f_nm < best_loss {
 			best_loss = f_nm
 			copy(best_params, x_nm)
@@ -380,25 +476,20 @@ garch_fit :: proc(
 		delete(x_nm, allocator)
 	}
 
-	// Unpack best parameters
 	unpack_params(best_params, &params)
 
-	// Compute final conditional variances
+	// Final conditional variances
+	m := max(p, q)
 	cond_var := make([]f64, n, allocator)
 	std_resid := make([]f64, n, allocator)
-
 	uncond_var := 0.0
-	for i in 0 ..< n {
-		uncond_var += residuals[i] * residuals[i]
-	}
+	for i in 0 ..< n {uncond_var += residuals[i] * residuals[i]}
 	uncond_var /= f64(n)
-
-	for i in 0 ..< max(p, q) {
+	for i in 0 ..< m {
 		cond_var[i] = uncond_var
 		std_resid[i] = residuals[i] / math.sqrt_f64(cond_var[i])
 	}
-
-	for t in max(p, q) ..< n {
+	for t in m ..< n {
 		cond_var[t] = _garch_variance_at(&params, residuals, cond_var, t)
 		std_resid[t] = residuals[t] / math.sqrt_f64(cond_var[t])
 	}
@@ -409,9 +500,9 @@ garch_fit :: proc(
 	bic := k * math.ln_f64(f64(n)) - 2.0 * log_lik
 
 	persistence := 0.0
-	for i in 0 ..< p {persistence += params.alpha[i]}
+	if spec.variance != .EGARCH {for i in 0 ..< p {persistence += params.alpha[i]}}
 	for j in 0 ..< q {persistence += params.beta[j]}
-	if model_type == .GJR_GARCH {persistence += 0.5 * params.gamma}
+	if spec.variance == .GJR {persistence += 0.5 * params.gamma}
 
 	return GARCH_Result {
 		params = params,
@@ -433,6 +524,8 @@ garch_fit :: proc(
 // h-step-ahead conditional variance. The first step uses the observed lagged
 // residuals and variances; later steps replace ε² by its expectation σ² (and
 // ε² 1[ε < 0] by σ²/2 for GJR), so the forecast reverts to ω / (1 - persistence).
+// EGARCH: the log variance is forecast (E|z| - √(2/π) = 0 and E z = 0 for future
+// shocks) and exponentiated, exact for h = 1 and exp(E ln σ²) ≤ E σ² beyond.
 garch_forecast :: proc(
 	result: ^GARCH_Result,
 	residuals: []f64,
@@ -449,7 +542,8 @@ garch_forecast :: proc(
 	}
 	params := &result.params
 	p, q := params.p, params.q
-	is_gjr := params.model_type == .GJR_GARCH
+	vk := _garch_variance_kind(params)
+	is_gjr := vk == .GJR
 
 	// Timeline: index k < n is observed, k >= n is forecast
 	total := n + max(horizon, 1)
@@ -469,15 +563,30 @@ garch_forecast :: proc(
 
 	forecast_var := result.conditional_var[n - 1]
 	for k in n ..< n + horizon {
-		v := params.omega
-		for i in 0 ..< p {
-			if k - i - 1 >= 0 {
-				v += params.alpha[i] * sq[k - i - 1]
-				if is_gjr {v += params.gamma * neg_sq[k - i - 1]}
+		v: f64
+		if vk == .EGARCH {
+			lv := params.omega
+			for i in 0 ..< p {
+				if k - i - 1 >= 0 && k - i - 1 < n {
+					z := residuals[k - i - 1] / math.sqrt(s2[k - i - 1])
+					lv += params.alpha[i] * (math.abs(z) - _EGARCH_EABS) + params.egarch_gamma[i] * z
+				}
 			}
-		}
-		for j in 0 ..< q {
-			if k - j - 1 >= 0 {v += params.beta[j] * s2[k - j - 1]}
+			for j in 0 ..< q {
+				if k - j - 1 >= 0 {lv += params.beta[j] * math.ln(s2[k - j - 1])}
+			}
+			v = math.exp(math.clamp(lv, -50, 50))
+		} else {
+			v = params.omega
+			for i in 0 ..< p {
+				if k - i - 1 >= 0 {
+					v += params.alpha[i] * sq[k - i - 1]
+					if is_gjr {v += params.gamma * neg_sq[k - i - 1]}
+				}
+			}
+			for j in 0 ..< q {
+				if k - j - 1 >= 0 {v += params.beta[j] * s2[k - j - 1]}
+			}
 		}
 		s2[k], sq[k], neg_sq[k] = v, v, 0.5 * v
 		forecast_var = v
@@ -564,8 +673,9 @@ garch_std_quantile :: proc(params: ^GARCH_Params, prob: f64) -> f64 {
 	cdf: proc(x, shape: f64) -> f64
 	shape := 0.0
 	scale := 1.0
+	dk := _garch_dist_kind(params)
 	switch {
-	case params.model_type == .StudentT && params.nu > 2.0:
+	case dk == .StudentT && params.nu > 2.0:
 		shape, scale = params.nu, math.sqrt_f64((params.nu - 2.0) / params.nu)
 		cdf = proc(x, nu: f64) -> f64 {
 			// F(x) = 1 - ½ I_{ν/(ν+x²)}(ν/2, ½) for x ≥ 0; near 0 use the
@@ -578,7 +688,7 @@ garch_std_quantile :: proc(params: ^GARCH_Params, prob: f64) -> f64 {
 			}
 			return 1.0 - tail if x >= 0.0 else tail
 		}
-	case params.model_type == .GED && params.shape > 0.0:
+	case dk == .GED && params.shape > 0.0:
 		lg1, _ := math.lgamma(1.0 / params.shape)
 		lg3, _ := math.lgamma(3.0 / params.shape)
 		shape, scale = params.shape, math.exp_f64(0.5 * (lg1 - lg3))
