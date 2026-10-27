@@ -3,6 +3,7 @@ package ML
 import l "../../linalg"
 import "core:math"
 import "core:mem"
+import "core:slice"
 
 // ============================================================================
 // Standard Scaler (Z-score normalization)
@@ -245,4 +246,97 @@ minmax_scaler_free :: proc(scaler: ^MinMaxScaler) {
 	if len(scaler.data_max) > 0 {delete(scaler.data_max, scaler.allocator)}
 	if len(scaler.scale) > 0 {delete(scaler.scale, scaler.allocator)}
 	if len(scaler.min_val) > 0 {delete(scaler.min_val, scaler.allocator)}
+}
+
+// ============================================================================
+// Robust Scaler (median / interquantile range)
+// ============================================================================
+
+RobustScaler :: struct {
+	center:     []f64, // per-feature median
+	scale:      []f64, // per-feature q_hi - q_lo (1 where that is 0)
+	n_features: int,
+	allocator:  mem.Allocator,
+}
+
+// As sklearn RobustScaler(quantile_range=(25, 75)): x' = (x - median) / IQR,
+// percentiles with linear interpolation (numpy's default), NaNs ignored when
+// fitting and passed through. Robust to outliers and heavy tails (returns).
+robust_scaler_fit :: proc(
+	X: ^l.Matrix(f64),
+	quantile_range := [2]f64{25, 75},
+	allocator: mem.Allocator = context.allocator,
+) -> RobustScaler {
+	n, p := X.rows, X.cols
+	if n == 0 do panic("robust_scaler_fit: no samples")
+	lo, hi := quantile_range[0], quantile_range[1]
+	if !(0 <= lo && lo <= hi && hi <= 100) do panic("robust_scaler_fit: need 0 <= q_lo <= q_hi <= 100")
+	s := RobustScaler {
+		center     = make([]f64, p, allocator),
+		scale      = make([]f64, p, allocator),
+		n_features = p,
+		allocator  = allocator,
+	}
+	col := make([dynamic]f64, 0, n, context.temp_allocator)
+	defer delete(col)
+	for j in 0 ..< p {
+		clear(&col)
+		for i in 0 ..< n {
+			v := X.data[i * p + j]
+			if !math.is_nan(v) do append(&col, v)
+		}
+		if len(col) == 0 {
+			s.center[j], s.scale[j] = math.nan_f64(), 1
+			continue
+		}
+		slice.sort(col[:])
+		s.center[j] = _percentile_sorted(col[:], 50)
+		iqr := _percentile_sorted(col[:], hi) - _percentile_sorted(col[:], lo)
+		s.scale[j] = iqr if iqr != 0 else 1
+	}
+	return s
+}
+
+robust_scaler_transform :: proc(
+	s: ^RobustScaler,
+	X: ^l.Matrix(f64),
+	allocator: mem.Allocator = context.allocator,
+) -> l.Matrix(f64) {
+	if X.cols != s.n_features do panic("robust_scaler_transform: X has the wrong number of columns")
+	out := l.matrix_new(f64, X.rows, X.cols, allocator)
+	for i in 0 ..< X.rows {
+		for j in 0 ..< X.cols {
+			out.data[i * X.cols + j] = (X.data[i * X.cols + j] - s.center[j]) / s.scale[j]
+		}
+	}
+	return out
+}
+
+robust_scaler_inverse_transform :: proc(
+	s: ^RobustScaler,
+	X: ^l.Matrix(f64),
+	allocator: mem.Allocator = context.allocator,
+) -> l.Matrix(f64) {
+	if X.cols != s.n_features do panic("robust_scaler_inverse_transform: X has the wrong number of columns")
+	out := l.matrix_new(f64, X.rows, X.cols, allocator)
+	for i in 0 ..< X.rows {
+		for j in 0 ..< X.cols {
+			out.data[i * X.cols + j] = X.data[i * X.cols + j] * s.scale[j] + s.center[j]
+		}
+	}
+	return out
+}
+
+robust_scaler_free :: proc(s: ^RobustScaler) {
+	delete(s.center, s.allocator)
+	delete(s.scale, s.allocator)
+	s.center, s.scale = nil, nil
+}
+
+// q-th percentile (0..100) of sorted values, linear interpolation (numpy "linear")
+_percentile_sorted :: proc(v: []f64, q: f64) -> f64 {
+	h := f64(len(v) - 1) * q / 100
+	lo := int(math.floor(h))
+	if lo >= len(v) - 1 do return v[len(v) - 1]
+	return v[lo] + (h - f64(lo)) * (v[lo + 1] - v[lo])
 }

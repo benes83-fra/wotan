@@ -69,3 +69,12 @@ student_t_ppf :: proc(p, df: f64) -> f64 {
 	}
 	return 0.5 * (lo + hi)
 }
+
+// F distribution survival function P(F > x), F ~ F(d1, d2):
+// I_{d2/(d2 + d1 x)}(d2/2, d1/2)
+f_dist_sf :: proc(x, d1, d2: f64) -> f64 {
+	if math.is_nan(x) || d1 <= 0 || d2 <= 0 do return math.nan_f64()
+	if x <= 0 do return 1.0
+	if math.is_inf(x) do return 0.0
+	return _reg_inc_beta(0.5 * d2, 0.5 * d1, d2 / (d2 + d1 * x))
+}
