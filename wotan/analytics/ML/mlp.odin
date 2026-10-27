@@ -5,6 +5,7 @@ import optim "../../optimize"
 import "core:fmt"
 import "core:math"
 import "core:math/rand"
+import "base:runtime"
 import "core:mem"
 
 // ============================================================================
@@ -31,7 +32,8 @@ MLPParams :: struct {
 	learning_rate:     f64,
 	max_iter:          int,
 	batch_size:        int,
-	optimizer_type:    optim.OptimizerType,
+	optimizer_type:    optim.OptimizerType, // .Adam, anything else = plain SGD
+	verbose:           bool, // print the epoch loss every 100 iterations
 }
 
 MLP :: struct {
@@ -86,7 +88,114 @@ _apply_activation_derivative :: proc(z: []f64, act: Activation, out: []f64) {
 }
 
 // ============================================================================
+// Internal: Forward + Backward Pass
+// Loss (consistent with the gradients):
+//   BinaryClassification with Sigmoid output: mean BCE = mean(softplus(z) - y z)
+//   otherwise:                                 mean ½(a - y)²
+// Returns the loss on (Xb, yb) and fills dW / db with its exact gradients.
+// All scratch memory comes from the temp allocator.
+// ============================================================================
+
+_mlp_forward_backward :: proc(
+	weights: []l.Matrix(f64),
+	biases: [][]f64,
+	activations: []Activation,
+	task: MLPTask,
+	output_activation: Activation,
+	Xb: []f64,
+	yb: []f64,
+	dW: []l.Matrix(f64),
+	db: [][]f64,
+) -> f64 {
+	n_layers := len(weights)
+	B := len(yb)
+
+	// --- Forward ---
+	A := make([][]f64, n_layers + 1, context.temp_allocator)
+	Z := make([][]f64, n_layers, context.temp_allocator)
+	A[0] = Xb
+	for i in 0 ..< n_layers {
+		fan_in, fan_out := weights[i].rows, weights[i].cols
+		A_prev := l.Matrix(f64) {
+			rows = B,
+			cols = fan_in,
+			data = A[i],
+		}
+		Zm := l.matmul_dyn_simd(&A_prev, &weights[i], context.temp_allocator)
+		for r in 0 ..< B {
+			for c in 0 ..< fan_out {Zm.data[r * fan_out + c] += biases[i][c]}
+		}
+		Z[i] = Zm.data
+		a := make([]f64, len(Zm.data), context.temp_allocator)
+		copy(a, Zm.data)
+		_apply_activation(a, activations[i])
+		A[i + 1] = a
+	}
+
+	// --- Loss and output gradient dL/da (without the 1/B, applied below) ---
+	bce := task == .BinaryClassification && output_activation == .Sigmoid
+	out := A[n_layers]
+	z_out := Z[n_layers - 1]
+	loss := 0.0
+	dA := make([]f64, len(out), context.temp_allocator)
+	for s in 0 ..< B {
+		if bce {
+			z := z_out[s]
+			loss += math.max(z, 0.0) + math.ln_f64(1.0 + math.exp(-math.abs(z))) - yb[s] * z
+		} else {
+			d := out[s] - yb[s]
+			loss += 0.5 * d * d
+		}
+		dA[s] = out[s] - yb[s]
+	}
+	loss /= f64(B)
+
+	// --- Backward (propagate through the weights *before* they are updated) ---
+	for i := n_layers - 1; i >= 0; i -= 1 {
+		fan_in, fan_out := weights[i].rows, weights[i].cols
+		dZ := make([]f64, len(Z[i]), context.temp_allocator)
+		if i == n_layers - 1 && bce {
+			copy(dZ, dA) // d BCE / dz = σ(z) - y
+		} else {
+			_apply_activation_derivative(Z[i], activations[i], dZ)
+			for j in 0 ..< len(dZ) {dZ[j] *= dA[j]}
+		}
+
+		A_prev := A[i]
+		for r in 0 ..< fan_in {
+			for c in 0 ..< fan_out {
+				sum := 0.0
+				for s in 0 ..< B {sum += A_prev[s * fan_in + r] * dZ[s * fan_out + c]}
+				dW[i].data[r * fan_out + c] = sum / f64(B)
+			}
+		}
+		for c in 0 ..< fan_out {
+			sum := 0.0
+			for s in 0 ..< B {sum += dZ[s * fan_out + c]}
+			db[i][c] = sum / f64(B)
+		}
+
+		if i > 0 {
+			dA = make([]f64, len(A_prev), context.temp_allocator)
+			W := weights[i]
+			for s in 0 ..< B {
+				for r in 0 ..< fan_in {
+					sum := 0.0
+					for c in 0 ..< fan_out {sum += dZ[s * fan_out + c] * W.data[r * fan_out + c]}
+					dA[s * fan_in + r] = sum
+				}
+			}
+		}
+	}
+	return loss
+}
+
+// ============================================================================
 // Public API: Fit MLP
+// One iteration = one epoch over the data in mini-batches of batch_size
+// (≤ 0 or ≥ n: full batch), reshuffled every epoch; Adam (bias-corrected,
+// β = 0.9 / 0.999, ε = 1e-8, step count per batch) or plain SGD for every
+// other optimizer_type. Weights: He-normal for ReLU layers, 1/fan_in otherwise.
 // ============================================================================
 
 mlp_fit :: proc(
@@ -98,8 +207,14 @@ mlp_fit :: proc(
 	n_samples := X.rows
 	n_features := X.cols
 	n_outputs := 1
+	if len(y) != n_samples do panic("mlp_fit: y length mismatch")
+	if n_samples == 0 do panic("mlp_fit: no samples")
+	for h in params.hidden_layers {
+		if h < 1 do panic("mlp_fit: hidden layer sizes must be >= 1")
+	}
 
-	layer_sizes := make([]int, len(params.hidden_layers) + 2, allocator)
+	layer_sizes := make([]int, len(params.hidden_layers) + 2, context.temp_allocator)
+	defer delete(layer_sizes, context.temp_allocator)
 	layer_sizes[0] = n_features
 	for h, i in params.hidden_layers {layer_sizes[i + 1] = h}
 	layer_sizes[len(layer_sizes) - 1] = n_outputs
@@ -116,206 +231,115 @@ mlp_fit :: proc(
 
 		weights[i] = l.matrix_new(f64, fan_in, fan_out, allocator)
 		biases[i] = make([]f64, fan_out, allocator)
-
-		tmp: Activation
-		if i < n_layers - 1 {
-			tmp = params.activation
-		} else {
-			tmp = params.output_activation
-		}
-		act := tmp
+		act := params.activation if i < n_layers - 1 else params.output_activation
 		activations[i] = act
 
-		scale := 1.0
-		if act == .ReLU {
-			scale = math.sqrt(2.0 / f64(fan_in))
-		} else {
-			scale = math.sqrt(1.0 / f64(fan_in))
-		}
-
+		scale := math.sqrt(2.0 / f64(fan_in)) if act == .ReLU else math.sqrt(1.0 / f64(fan_in))
 		for r in 0 ..< fan_in {
 			for c in 0 ..< fan_out {
 				weights[i].data[r * fan_out + c] = rand.float64_normal(0, scale)
 			}
 		}
-		for c in 0 ..< fan_out {biases[i][c] = 0.0}
 	}
 
 	batch_size := params.batch_size
-	if batch_size <= 0 {batch_size = n_samples}
+	if batch_size <= 0 || batch_size > n_samples {batch_size = n_samples}
 
-	m_w := make([]l.Matrix(f64), n_layers, allocator)
-	v_w := make([]l.Matrix(f64), n_layers, allocator)
-	m_b := make([][]f64, n_layers, allocator)
-	v_b := make([][]f64, n_layers, allocator)
-
+	// Gradient buffers and Adam moments
+	dW := make([]l.Matrix(f64), n_layers, context.temp_allocator)
+	db := make([][]f64, n_layers, context.temp_allocator)
+	m_w := make([]l.Matrix(f64), n_layers, context.temp_allocator)
+	v_w := make([]l.Matrix(f64), n_layers, context.temp_allocator)
+	m_b := make([][]f64, n_layers, context.temp_allocator)
+	v_b := make([][]f64, n_layers, context.temp_allocator)
 	for i in 0 ..< n_layers {
+		dW[i] = l.matrix_new(f64, layer_sizes[i], layer_sizes[i + 1], allocator)
 		m_w[i] = l.matrix_new(f64, layer_sizes[i], layer_sizes[i + 1], allocator)
 		v_w[i] = l.matrix_new(f64, layer_sizes[i], layer_sizes[i + 1], allocator)
+		db[i] = make([]f64, layer_sizes[i + 1], allocator)
 		m_b[i] = make([]f64, layer_sizes[i + 1], allocator)
 		v_b[i] = make([]f64, layer_sizes[i + 1], allocator)
 	}
+	defer {
+		for i in 0 ..< n_layers {
+			l.matrix_free(&dW[i]); l.matrix_free(&m_w[i]); l.matrix_free(&v_w[i])
+			delete(db[i], allocator); delete(m_b[i], allocator); delete(v_b[i], allocator)
+		}
+		delete(dW, context.temp_allocator); delete(db, context.temp_allocator)
+		delete(m_w, context.temp_allocator); delete(v_w, context.temp_allocator)
+		delete(m_b, context.temp_allocator); delete(v_b, context.temp_allocator)
+	}
+
+	perm := make([]int, n_samples, allocator)
+	defer delete(perm, allocator)
+	for i in 0 ..< n_samples {perm[i] = i}
+	Xb := make([]f64, batch_size * n_features, allocator)
+	defer delete(Xb, allocator)
+	yb := make([]f64, batch_size, allocator)
+	defer delete(yb, allocator)
 
 	beta1 := 0.9
 	beta2 := 0.999
 	epsilon := 1e-8
 	t := 0
+	lr := params.learning_rate
 
 	for iter in 0 ..< params.max_iter {
-		t += 1
-		lr := params.learning_rate
+		if batch_size < n_samples do rand.shuffle(perm)
+		epoch_loss := 0.0
 
-		// --- Forward Pass ---
-		activations_fwd := make([][]f64, n_layers + 1, context.temp_allocator)
-		z_vals := make([][]f64, n_layers, context.temp_allocator)
-
-		activations_fwd[0] = X.data
-
-		for i in 0 ..< n_layers {
-			A_prev := activations_fwd[i]
-			W := weights[i]
-			b := biases[i]
-			fan_out := layer_sizes[i + 1]
-
-			Z := make([]f64, n_samples * fan_out, context.temp_allocator)
-			z_vals[i] = Z
-
-			A_prev_mat := l.Matrix(f64) {
-				rows = n_samples,
-				cols = layer_sizes[i],
-				data = A_prev,
+		for start := 0; start < n_samples; start += batch_size {
+			runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+			bs := min(batch_size, n_samples - start)
+			for k in 0 ..< bs {
+				src := perm[start + k]
+				copy(Xb[k * n_features:(k + 1) * n_features], X.data[src * n_features:(src + 1) * n_features])
+				yb[k] = y[src]
 			}
-			Z_mat := l.matmul_dyn_simd(&A_prev_mat, &W, context.temp_allocator)
+			loss := _mlp_forward_backward(
+				weights,
+				biases,
+				activations,
+				params.task,
+				params.output_activation,
+				Xb[:bs * n_features],
+				yb[:bs],
+				dW,
+				db,
+			)
+			epoch_loss += loss * f64(bs)
 
-			// ✅ FIX 1: Removed 'defer'. Free explicitly to prevent temp_allocator exhaustion!
-			for r in 0 ..< n_samples {
-				for c in 0 ..< fan_out {
-					idx := r * fan_out + c
-					Z[idx] = Z_mat.data[idx] + b[c]
-				}
-			}
-			l.matrix_free(&Z_mat) // <--- Explicit free here!
-
-			A_curr := make([]f64, len(Z), context.temp_allocator)
-			copy(A_curr, Z)
-			_apply_activation(A_curr, activations[i])
-			activations_fwd[i + 1] = A_curr
-		}
-
-		// --- Backward Pass ---
-		dA := make([]f64, len(activations_fwd[n_layers]), context.temp_allocator)
-
-		A_out := activations_fwd[n_layers]
-		for i in 0 ..< n_samples {
-			dA[i] = A_out[i] - y[i]
-		}
-
-		// ✅ DEBUG PRINTS: See exactly what the network is doing every 100 epochs
-		if iter % 100 == 0 {
-			loss := 0.0
-			out_mean := 0.0
-			for i in 0 ..< n_samples {
-				diff := A_out[i] - y[i]
-				loss += diff * diff
-				out_mean += A_out[i]
-			}
-			loss /= f64(n_samples)
-			out_mean /= f64(n_samples)
-			fmt.printf("[Iter %v] Loss: %.4f | Output Mean: %.4f\n", iter, loss, out_mean)
-		}
-
-		for i := n_layers - 1; i >= 0; i -= 1 {
-			Z_prev := z_vals[i]
-			A_prev := activations_fwd[i]
-			W := weights[i]
-			b := biases[i]
-			fan_in := layer_sizes[i]
-			fan_out := layer_sizes[i + 1]
-
-			dZ := make([]f64, len(Z_prev), context.temp_allocator)
-
-			// ✅ FIX 2: BCE Gradient Shortcut.
-			// If this is the output layer + Sigmoid + Binary Classification,
-			// the derivative of BCE w.r.t Z is simply (A - y).
-			// We SKIP the sigmoid derivative to prevent vanishing gradients!
-			if i == n_layers - 1 &&
-			   params.task == .BinaryClassification &&
-			   params.output_activation == .Sigmoid {
-				copy(dZ, dA)
-			} else {
-				_apply_activation_derivative(Z_prev, activations[i], dZ)
-				for j in 0 ..< len(dZ) {dZ[j] *= dA[j]}
-			}
-
-			dW := make([]f64, fan_in * fan_out, context.temp_allocator)
-			db := make([]f64, fan_out, context.temp_allocator)
-
-			for r in 0 ..< fan_in {
-				for c in 0 ..< fan_out {
-					sum := 0.0
-					for s in 0 ..< n_samples {
-						sum += A_prev[s * fan_in + r] * dZ[s * fan_out + c]
-					}
-					dW[r * fan_out + c] = sum / f64(n_samples)
-				}
-			}
-			for c in 0 ..< fan_out {
-				sum := 0.0
-				for s in 0 ..< n_samples {
-					sum += dZ[s * fan_out + c]
-				}
-				db[c] = sum / f64(n_samples)
-			}
-
-			for r in 0 ..< fan_in {
-				for c in 0 ..< fan_out {
-					idx := r * fan_out + c
-					grad := dW[idx]
-
+			t += 1
+			bc1 := 1.0 - math.pow(beta1, f64(t))
+			bc2 := 1.0 - math.pow(beta2, f64(t))
+			for i in 0 ..< n_layers {
+				for idx in 0 ..< len(weights[i].data) {
+					g := dW[i].data[idx]
 					if params.optimizer_type == .Adam {
-						m_w[i].data[idx] = beta1 * m_w[i].data[idx] + (1.0 - beta1) * grad
-						v_w[i].data[idx] = beta2 * v_w[i].data[idx] + (1.0 - beta2) * grad * grad
-
-						m_hat := m_w[i].data[idx] / (1.0 - math.pow(beta1, f64(t)))
-						v_hat := v_w[i].data[idx] / (1.0 - math.pow(beta2, f64(t)))
-
-						W.data[idx] -= lr * m_hat / (math.sqrt(v_hat) + epsilon)
+						m_w[i].data[idx] = beta1 * m_w[i].data[idx] + (1.0 - beta1) * g
+						v_w[i].data[idx] = beta2 * v_w[i].data[idx] + (1.0 - beta2) * g * g
+						weights[i].data[idx] -= lr * (m_w[i].data[idx] / bc1) / (math.sqrt(v_w[i].data[idx] / bc2) + epsilon)
 					} else {
-						W.data[idx] -= lr * grad
+						weights[i].data[idx] -= lr * g
+					}
+				}
+				for c in 0 ..< len(biases[i]) {
+					g := db[i][c]
+					if params.optimizer_type == .Adam {
+						m_b[i][c] = beta1 * m_b[i][c] + (1.0 - beta1) * g
+						v_b[i][c] = beta2 * v_b[i][c] + (1.0 - beta2) * g * g
+						biases[i][c] -= lr * (m_b[i][c] / bc1) / (math.sqrt(v_b[i][c] / bc2) + epsilon)
+					} else {
+						biases[i][c] -= lr * g
 					}
 				}
 			}
-			for c in 0 ..< fan_out {
-				grad := db[c]
-				if params.optimizer_type == .Adam {
-					m_b[i][c] = beta1 * m_b[i][c] + (1.0 - beta1) * grad
-					v_b[i][c] = beta2 * v_b[i][c] + (1.0 - beta2) * grad * grad
+		}
 
-					m_hat := m_b[i][c] / (1.0 - math.pow(beta1, f64(t)))
-					v_hat := v_b[i][c] / (1.0 - math.pow(beta2, f64(t)))
-
-					b[c] -= lr * m_hat / (math.sqrt(v_hat) + epsilon)
-				} else {
-					b[c] -= lr * grad
-				}
-			}
-
-			if i > 0 {
-				dA = make([]f64, len(A_prev), context.temp_allocator)
-				for r in 0 ..< fan_in {
-					for s in 0 ..< n_samples {
-						sum := 0.0
-						for c in 0 ..< fan_out {
-							sum += dZ[s * fan_out + c] * W.data[r * fan_out + c]
-						}
-						dA[s * fan_in + r] = sum
-					}
-				}
-			}
+		if params.verbose && iter % 100 == 0 {
+			fmt.printf("[Iter %v] Loss: %.6f\n", iter, epoch_loss / f64(n_samples))
 		}
 	}
-
-	fmt.println("[Training Complete]")
 
 	return MLP {
 		weights = weights,
@@ -336,38 +360,32 @@ mlp_predict :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> []f64 {
 	n_samples := X.rows
-	current_A := X.data
-
-	for i in 0 ..< model.n_layers {
-		fan_in := model.weights[i].rows
-		fan_out := model.weights[i].cols
-
-		Z := make([]f64, n_samples * fan_out, context.temp_allocator)
-
-		A_prev_mat := l.Matrix(f64) {
-			rows = n_samples,
-			cols = fan_in,
-			data = current_A,
-		}
-		Z_mat := l.matmul_dyn_simd(&A_prev_mat, &model.weights[i], context.temp_allocator)
-		defer l.matrix_free(&Z_mat)
-		// ✅ FIX 1: Removed 'defer'. Free explicitly!
-		for r in 0 ..< n_samples {
-			for c in 0 ..< fan_out {
-				idx := r * fan_out + c
-				Z[idx] = Z_mat.data[idx] + model.biases[i][c]
-			}
-		}
-		l.matrix_free(&Z_mat) // <--- Explicit free here!
-
-		current_A = make([]f64, len(Z), context.temp_allocator)
-		copy(current_A, Z)
-		_apply_activation(current_A, model.activations[i])
-	}
-
+	if model.n_layers > 0 && X.cols != model.weights[0].rows do panic("mlp_predict: X has the wrong number of columns")
+	// Result first: `allocator` may be the temp allocator the guard below rewinds
 	out := make([]f64, n_samples, allocator)
-	for i in 0 ..< n_samples {
-		out[i] = current_A[i]
+	{
+		runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+		current_A := X.data
+
+		for i in 0 ..< model.n_layers {
+			fan_in := model.weights[i].rows
+			fan_out := model.weights[i].cols
+
+			A_prev_mat := l.Matrix(f64) {
+				rows = n_samples,
+				cols = fan_in,
+				data = current_A,
+			}
+			Z_mat := l.matmul_dyn_simd(&A_prev_mat, &model.weights[i], context.temp_allocator)
+			for r in 0 ..< n_samples {
+				for c in 0 ..< fan_out {
+					Z_mat.data[r * fan_out + c] += model.biases[i][c]
+				}
+			}
+			_apply_activation(Z_mat.data, model.activations[i])
+			current_A = Z_mat.data
+		}
+		copy(out, current_A[:n_samples])
 	}
 	return out
 }

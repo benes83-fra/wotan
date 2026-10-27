@@ -16,12 +16,15 @@ StandardScaler :: struct {
 	allocator:  mem.Allocator,
 }
 
+// As sklearn StandardScaler: mean and population std (ddof = 0); a constant
+// feature (std = 0) gets scale 1, so it is only centered.
 standard_scaler_fit :: proc(
 	X: ^l.Matrix(f64),
 	allocator: mem.Allocator = context.allocator,
 ) -> StandardScaler {
 	n_samples := X.rows
 	n_features := X.cols
+	if n_samples == 0 do panic("standard_scaler_fit: no samples")
 
 	mean := make([]f64, n_features, allocator)
 	sum_sq := make([]f64, n_features, allocator)
@@ -61,7 +64,9 @@ standard_scaler_fit :: proc(
 
 	for j in 0 ..< n_features {
 		variance := sum_sq[j] * inv_n
-		std[j] = math.sqrt(variance) + 1e-8
+		std[j] = math.sqrt(variance)
+		// constant feature: scale 1 (sklearn); also guards rounding-level std
+		if !(std[j] > 1e-15 * math.max(math.abs(mean[j]), 1e-300)) do std[j] = 1.0
 		inv_std[j] = 1.0 / std[j] // ✅ Precompute inverse for fast transforms
 	}
 
@@ -83,6 +88,7 @@ standard_scaler_transform :: proc(
 ) -> l.Matrix(f64) {
 	n_samples := X.rows
 	n_features := X.cols
+	if n_features != scaler.n_features do panic("standard_scaler_transform: X has the wrong number of columns")
 	out := l.matrix_new(f64, n_samples, n_features, allocator)
 
 	temp := make([]f64, n_features, context.temp_allocator)
@@ -106,6 +112,7 @@ standard_scaler_inverse_transform :: proc(
 ) -> l.Matrix(f64) {
 	n_samples := X.rows
 	n_features := X.cols
+	if n_features != scaler.n_features do panic("standard_scaler_inverse_transform: X has the wrong number of columns")
 	out := l.matrix_new(f64, n_samples, n_features, allocator)
 
 	temp := make([]f64, n_features, context.temp_allocator)
@@ -149,6 +156,7 @@ minmax_scaler_fit :: proc(
 ) -> MinMaxScaler {
 	n_samples := X.rows
 	n_features := X.cols
+	if n_samples == 0 do panic("minmax_scaler_fit: no samples")
 
 	data_min := make([]f64, n_features, allocator)
 	data_max := make([]f64, n_features, allocator)
@@ -197,6 +205,7 @@ minmax_scaler_transform :: proc(
 ) -> l.Matrix(f64) {
 	n_samples := X.rows
 	n_features := X.cols
+	if n_features != scaler.n_features do panic("minmax_scaler_transform: X has the wrong number of columns")
 	out := l.matrix_new(f64, n_samples, n_features, allocator)
 
 	temp := make([]f64, n_features, context.temp_allocator)
@@ -209,6 +218,24 @@ minmax_scaler_transform :: proc(
 		// ✅ SIMD: out = x * scale + min_val
 		l.vec_mul_simd(x_row, scaler.scale, temp)
 		l.vec_add_simd(temp, scaler.min_val, out_row)
+	}
+	return out
+}
+
+// x = (x_scaled - min_val) / scale
+minmax_scaler_inverse_transform :: proc(
+	scaler: ^MinMaxScaler,
+	X: ^l.Matrix(f64),
+	allocator: mem.Allocator = context.allocator,
+) -> l.Matrix(f64) {
+	n_samples := X.rows
+	n_features := X.cols
+	if n_features != scaler.n_features do panic("minmax_scaler_inverse_transform: X has the wrong number of columns")
+	out := l.matrix_new(f64, n_samples, n_features, allocator)
+	for i in 0 ..< n_samples {
+		for j in 0 ..< n_features {
+			out.data[i * n_features + j] = (X.data[i * n_features + j] - scaler.min_val[j]) / scaler.scale[j]
+		}
 	}
 	return out
 }

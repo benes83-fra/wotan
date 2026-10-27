@@ -69,15 +69,17 @@ pcr_fit :: proc(
 		total_var := 0.0
 		for v in eigenvalues {total_var += v}
 
-		if total_var < 1e-12 {
+		if !(total_var > 0) {
 			n_comp = 1 // Fallback if data has zero variance
 		} else {
+			// smallest k whose cumulative variance ratio exceeds the threshold
+			// (sklearn PCA(n_components=float))
 			cum_var := 0.0
 			n_comp = 0
 			for i in 0 ..< len(eigenvalues) {
 				cum_var += eigenvalues[len(eigenvalues) - 1 - i] // Iterate descending
 				n_comp += 1
-				if cum_var / total_var >= params.variance_threshold {break}
+				if cum_var / total_var > params.variance_threshold {break}
 			}
 		}
 	}
@@ -126,7 +128,8 @@ pcr_fit :: proc(
 			ztz += z_val * z_val
 		}
 
-		if ztz > 1e-12 {
+		// null component: ||z||² at rounding level of the largest component
+		if ztz > 1e-12 * eigenvalues[len(eigenvalues) - 1] * f64(n_samples - 1) {
 			betas[c] = zty / ztz
 		} else {
 			betas[c] = 0.0 // Prevent division by zero for null components
@@ -156,6 +159,7 @@ pcr_predict :: proc(
 	n_samples := X.rows
 	n_features := X.cols
 	n_comp := model.n_components
+	if n_features != len(model.means) do panic("pcr_predict: X has the wrong number of columns")
 
 	preds := make([]f64, n_samples, allocator)
 	if n_samples == 0 {return preds}

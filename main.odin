@@ -553,6 +553,8 @@ main :: proc() {
 	free_all(context.temp_allocator)
 	test.ml_svm_cluster_reference_test(context.temp_allocator)
 	free_all(context.temp_allocator)
+	test.ml_prep_mlp_reference_test(context.temp_allocator)
+	free_all(context.temp_allocator)
 	test.knn_test(context.temp_allocator)
 	free_all(context.temp_allocator)
 	test.pcr_test(context.temp_allocator)

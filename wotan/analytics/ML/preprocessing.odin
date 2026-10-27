@@ -46,13 +46,13 @@ ohe_fit :: proc(
 		}
 	}
 
-	// 3. Extract unique values
+	// 3. Extract unique values (cloned: the encoder must not borrow the input)
 	enc.categories = make([]string, unique_count, allocator)
-	enc.categories[0] = sorted_data[0]
+	enc.categories[0] = strings.clone(sorted_data[0], allocator)
 	idx := 1
 	for i in 1 ..< len(sorted_data) {
 		if sorted_data[i] != sorted_data[i - 1] {
-			enc.categories[idx] = sorted_data[i]
+			enc.categories[idx] = strings.clone(sorted_data[i], allocator)
 			idx += 1
 		}
 	}
@@ -110,6 +110,7 @@ _binary_search :: proc(arr: []string, target: string) -> int {
 }
 
 ohe_free :: proc(enc: ^OneHotEncoder) {
+	for c in enc.categories {delete(c, enc.allocator)}
 	if len(enc.categories) > 0 {
 		delete(enc.categories, enc.allocator)
 	}
@@ -156,6 +157,7 @@ le_transform :: proc(
 }
 
 le_free :: proc(le: ^LabelEncoder) {
+	for c in le.classes {delete(c, le.allocator)}
 	if len(le.classes) > 0 {
 		delete(le.classes, le.allocator)
 	}

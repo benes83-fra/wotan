@@ -10,7 +10,8 @@ import "core:mem"
 // Mean Squared Error
 metrics_mse :: proc(y_true: []f64, y_pred: []f64) -> f64 {
 	n := len(y_true)
-	if n == 0 || n != len(y_pred) {return 0.0}
+	if n != len(y_pred) do panic("metrics_mse: length mismatch")
+	if n == 0 do return math.nan_f64()
 
 	sum_sq := 0.0
 	for i in 0 ..< n {
@@ -23,7 +24,8 @@ metrics_mse :: proc(y_true: []f64, y_pred: []f64) -> f64 {
 // Mean Absolute Error
 metrics_mae :: proc(y_true: []f64, y_pred: []f64) -> f64 {
 	n := len(y_true)
-	if n == 0 || n != len(y_pred) {return 0.0}
+	if n != len(y_pred) do panic("metrics_mae: length mismatch")
+	if n == 0 do return math.nan_f64()
 
 	sum_abs := 0.0
 	for i in 0 ..< n {
@@ -35,7 +37,8 @@ metrics_mae :: proc(y_true: []f64, y_pred: []f64) -> f64 {
 // R-squared (Coefficient of Determination)
 metrics_r2 :: proc(y_true: []f64, y_pred: []f64) -> f64 {
 	n := len(y_true)
-	if n == 0 || n != len(y_pred) {return 0.0}
+	if n != len(y_pred) do panic("metrics_r2: length mismatch")
+	if n == 0 do return math.nan_f64()
 
 	// Pass 1: Compute mean of y_true
 	mean_y := 0.0
@@ -54,8 +57,8 @@ metrics_r2 :: proc(y_true: []f64, y_pred: []f64) -> f64 {
 		ss_tot += deviation * deviation
 	}
 
-	if ss_tot < 1e-12 {
-		return 1.0 // Perfect prediction if variance is zero
+	if ss_tot == 0 {
+		return 1.0 if ss_res == 0 else 0.0 // constant y_true (sklearn r2_score)
 	}
 
 	return 1.0 - (ss_res / ss_tot)
@@ -68,7 +71,8 @@ metrics_r2 :: proc(y_true: []f64, y_pred: []f64) -> f64 {
 // Accuracy
 metrics_accuracy :: proc(y_true: []f64, y_pred: []f64) -> f64 {
 	n := len(y_true)
-	if n == 0 || n != len(y_pred) {return 0.0}
+	if n != len(y_pred) do panic("metrics_accuracy: length mismatch")
+	if n == 0 do return math.nan_f64()
 
 	correct := 0
 	for i in 0 ..< n {
