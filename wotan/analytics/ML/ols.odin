@@ -20,10 +20,12 @@ OLSResult :: struct {
 	r2:        f64,
 	r2_adj:    f64,
 	fstat:     f64,
+	f_pvalue:  f64, // P(F > fstat)
 	ci_low:    []f64,
-	ci_high:   []f64, // 95% t-interval
+	ci_high:   []f64, // 95% t-interval (z-interval for robust cov_type without use_t)
 	df_resid:  int, // n - rank
 	rank:      int,
+	cov_type:  CovType, // .NonRobust unless ols_set_robust_cov was applied
 }
 OLSMethod :: enum {
 	Cholesky,
@@ -212,6 +214,7 @@ _ols_core :: proc(
 	if df_model > 0 && df_resid > 0 {
 		fstat = ((tss - ssr) / f64(df_model)) / (ssr / f64(df_resid))
 	}
+	res.f_pvalue = f_dist_sf(fstat, f64(df_model), f64(df_resid)) if df_model > 0 && df_resid > 0 else math.nan_f64()
 
 	res.beta = beta
 	res.vcov = vcov
@@ -297,6 +300,7 @@ _penalized_summary :: proc(
 	if df_model > 0 && df_resid > 0 {
 		fstat = ((tss - ssr) / df_model) / (ssr / df_resid)
 	}
+	res.f_pvalue = f_dist_sf(fstat, df_model, df_resid) if df_model > 0 && df_resid > 0 else math.nan_f64()
 
 	res.beta = beta
 	res.vcov = vcov
