@@ -67,7 +67,8 @@ TrainTestSplit :: struct {
 	y_test:  []f64,
 }
 
-// Contract: 0.0 < test_size < 1.0
+// Contract: 0.0 < test_size < 1.0. As sklearn: n_test = ceil(test_size · n),
+// n_train = n - n_test; both must be >= 1.
 train_test_split :: proc(
 	X: ^l.Matrix(f64),
 	y: []f64,
@@ -77,11 +78,15 @@ train_test_split :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> TrainTestSplit {
 	n := X.rows
-	test_count := math.max(1, int(f64(n) * test_size))
+	if len(y) != n do panic("train_test_split: y length mismatch")
+	if !(test_size > 0 && test_size < 1) do panic("train_test_split: test_size must be in (0, 1)")
+	test_count := int(math.ceil(f64(n) * test_size))
 	train_count := n - test_count
+	if test_count < 1 || train_count < 1 do panic("train_test_split: too few samples for this test_size")
 
 	// 1. Generate indices
 	indices := make([]int, n, context.temp_allocator)
+	defer delete(indices, context.temp_allocator)
 	for i in 0 ..< n {indices[i] = i}
 
 	// 2. Shuffle if requested
@@ -136,6 +141,8 @@ cross_val_score :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> []f64 {
 	n := X.rows
+	if n_splits < 2 || n_splits > n do panic("cross_val_score: need 2 <= n_splits <= n")
+	if len(y) != n do panic("cross_val_score: y length mismatch")
 	scores := make([]f64, n_splits, allocator)
 
 	// 1. Generate and shuffle indices

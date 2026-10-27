@@ -21,6 +21,8 @@ cv_folds :: proc(
 	seed: u64 = 0, // random seed for reproducibility
 	allocator: mem.Allocator = context.allocator,
 ) -> []int {
+	// every fold must be non-empty (sklearn KFold: 2 <= k <= n)
+	if k < 2 || k > n do panic("cv_folds: need 2 <= k <= n")
 	folds := make([]int, n, allocator)
 
 	// Initialize: assign each sample to a fold (balanced)

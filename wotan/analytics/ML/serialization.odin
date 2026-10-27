@@ -9,6 +9,8 @@ import "core:os"
 // Binary Writer
 // ============================================================================
 
+_MODEL_FORMAT_VERSION :: 2
+
 ModelWriter :: struct {
 	file: ^os.File,
 	err:  bool,
@@ -23,8 +25,8 @@ model_writer_open :: proc(path: string) -> (ModelWriter, bool) {
 	}
 	// Write magic number "WOTAN" (5 bytes)
 	write_bytes(&w, []u8{'W', 'O', 'T', 'A', 'N'})
-	// Write version
-	write_u32(&w, 1)
+	// Write version (2: gradient boosting also stores initial_pred / learning_rate)
+	write_u32(&w, _MODEL_FORMAT_VERSION)
 	return w, true
 }
 
@@ -96,6 +98,8 @@ ModelReader :: struct {
 	file:      ^os.File,
 	err:       bool,
 	allocator: mem.Allocator,
+	remaining: i64, // bytes left in the file: bounds every length read from it
+	version:   u32,
 }
 
 model_reader_open :: proc(
@@ -112,6 +116,12 @@ model_reader_open :: proc(
 		file      = f,
 		allocator = allocator,
 	}
+	size, size_err := os.file_size(f)
+	if size_err != nil {
+		os.close(f)
+		return ModelReader{}, false
+	}
+	r.remaining = size
 
 	// Read magic number
 	magic := make([]u8, 5, allocator)
@@ -130,7 +140,8 @@ model_reader_open :: proc(
 
 	// Read version
 	version := read_u32(&r)
-	if version != 1 {
+	r.version = version
+	if version < 1 || version > _MODEL_FORMAT_VERSION {
 		r.err = true
 		os.close(f)
 		return r, false
@@ -141,8 +152,27 @@ model_reader_open :: proc(
 
 read_bytes :: proc(r: ^ModelReader, data: []u8) {
 	if r.err {return}
+	if i64(len(data)) > r.remaining {r.err = true; return}
 	n, err := os.read(r.file, data)
-	if err != nil || n != len(data) {r.err = true}
+	if err != nil || n != len(data) {r.err = true; return}
+	r.remaining -= i64(n)
+}
+
+// A length read from the file is only accepted if that many elements of
+// elem_size bytes can still follow (corrupt / truncated files fail cleanly)
+_read_len :: proc(r: ^ModelReader, elem_size: int) -> int {
+	n := read_i64(r)
+	if r.err do return 0
+	if n < 0 || n > r.remaining / i64(max(elem_size, 1)) {r.err = true; return 0}
+	return int(n)
+}
+
+// Enum value read from the file, checked against the enum's range
+_read_enum :: proc(r: ^ModelReader, $E: typeid) -> E {
+	v := read_u32(r)
+	if r.err do return E(0)
+	if int(v) < int(min(E)) || int(v) > int(max(E)) {r.err = true; return E(0)}
+	return E(v)
 }
 
 read_u32 :: proc(r: ^ModelReader) -> u32 {
@@ -171,7 +201,7 @@ read_bool :: proc(r: ^ModelReader) -> bool {
 }
 
 read_slice_f64 :: proc(r: ^ModelReader) -> []f64 {
-	n := int(read_i64(r))
+	n := _read_len(r, size_of(f64))
 	if n <= 0 {return nil}
 
 	data := make([]f64, n, r.allocator)
@@ -182,7 +212,7 @@ read_slice_f64 :: proc(r: ^ModelReader) -> []f64 {
 }
 
 read_slice_int :: proc(r: ^ModelReader) -> []int {
-	n := int(read_i64(r))
+	n := _read_len(r, size_of(i64))
 	if n <= 0 {return nil}
 
 	data := make([]int, n, r.allocator)
@@ -193,9 +223,10 @@ read_slice_int :: proc(r: ^ModelReader) -> []int {
 }
 
 read_matrix :: proc(r: ^ModelReader) -> l.Matrix(f64) {
-	rows := int(read_i64(r))
-	cols := int(read_i64(r))
+	rows := _read_len(r, 1)
+	cols := _read_len(r, 1)
 	if rows <= 0 || cols <= 0 {return l.Matrix(f64){}}
+	if i64(rows) > r.remaining / i64(cols * size_of(f64)) {r.err = true; return l.Matrix(f64){}}
 
 	mat := l.matrix_new(f64, rows, cols, r.allocator)
 	byte_len := len(mat.data) * size_of(f64)
@@ -299,6 +330,8 @@ pipeline_save :: proc(pipe: ^Pipeline, path: string) -> bool {
 
 	case .GradientBoosting:
 		// ⚠️ ADJUST: If your GB uses a different field name for trees (like 'estimators'), change it here
+		write_f64(&w, pipe.model.gb.initial_pred)
+		write_f64(&w, pipe.model.gb.learning_rate)
 		write_i64(&w, i64(len(pipe.model.gb.trees)))
 		for &tree in pipe.model.gb.trees {
 			write_decision_tree(&w, &tree)
@@ -345,7 +378,7 @@ pipeline_load :: proc(
 	defer model_reader_close(&r)
 
 	pipe := pipeline_new(allocator)
-	pipe.model.type = cast(PipelineModelType)read_u32(&r)
+	pipe.model.type = _read_enum(&r, PipelineModelType)
 	pipe.is_fitted = read_bool(&r)
 
 	if !pipe.is_fitted {
@@ -353,9 +386,10 @@ pipeline_load :: proc(
 	}
 
 	// 1. Read Steps
-	n_steps := int(read_i64(&r))
+	n_steps := _read_len(&r, 4)
 	for i in 0 ..< n_steps {
-		step_type := cast(PipelineStepType)read_u32(&r)
+		step_type := _read_enum(&r, PipelineStepType)
+		if r.err do break
 		switch step_type {
 		case .StandardScaler:
 			step := PipelineStep {
@@ -397,7 +431,7 @@ pipeline_load :: proc(
 		pipe.model.kernel_svm.alpha = read_slice_f64(&r)
 		pipe.model.kernel_svm.sv_labels = read_slice_f64(&r)
 		pipe.model.kernel_svm.bias = read_f64(&r)
-		pipe.model.kernel_svm.kernel_type = cast(SVMKernelType)read_u32(&r)
+		pipe.model.kernel_svm.kernel_type = _read_enum(&r, SVMKernelType)
 		pipe.model.kernel_svm.gamma = read_f64(&r)
 		pipe.model.kernel_svm.degree = int(read_i64(&r))
 		pipe.model.kernel_svm.coef0 = read_f64(&r)
@@ -407,7 +441,7 @@ pipeline_load :: proc(
 		pipe.model.knn.X_train = read_matrix(&r)
 		pipe.model.knn.y_train = read_slice_f64(&r)
 		pipe.model.knn.k = int(read_i64(&r))
-		pipe.model.knn.weights = cast(KNNWeights)read_u32(&r)
+		pipe.model.knn.weights = _read_enum(&r, KNNWeights)
 		pipe.model.knn.allocator = allocator
 	case .Ridge, .Lasso, .OLS:
 		beta := read_slice_f64(&r)
@@ -422,7 +456,7 @@ pipeline_load :: proc(
 		pipe.model.svr.sv_data = read_matrix(&r)
 		pipe.model.svr.alpha_diff = read_slice_f64(&r)
 		pipe.model.svr.bias = read_f64(&r)
-		pipe.model.svr.kernel_type = cast(SVMKernelType)read_u32(&r)
+		pipe.model.svr.kernel_type = _read_enum(&r, SVMKernelType)
 		pipe.model.svr.gamma = read_f64(&r)
 		pipe.model.svr.degree = int(read_i64(&r))
 		pipe.model.svr.coef0 = read_f64(&r)
@@ -433,7 +467,7 @@ pipeline_load :: proc(
 		pipe.model.dt = read_decision_tree(&r, allocator)
 
 	case .RandomForest:
-		n_trees := int(read_i64(&r))
+		n_trees := _read_len(&r, 8)
 		pipe.model.rf.trees = make([dynamic]DecisionTree, 0, n_trees, allocator)
 		pipe.model.rf.allocator = allocator
 		for t in 0 ..< n_trees {
@@ -442,7 +476,11 @@ pipeline_load :: proc(
 		}
 
 	case .GradientBoosting:
-		n_trees := int(read_i64(&r))
+		// version 1 files did not store F₀ and the learning rate: unusable
+		if r.version < 2 {r.err = true; break}
+		pipe.model.gb.initial_pred = read_f64(&r)
+		pipe.model.gb.learning_rate = read_f64(&r)
+		n_trees := _read_len(&r, 8)
 		// ⚠️ ADJUST: If your GB uses a different field name for trees, change it here
 		pipe.model.gb.trees = make([dynamic]DecisionTree, 0, n_trees, allocator)
 		pipe.model.gb.allocator = allocator
@@ -451,7 +489,7 @@ pipeline_load :: proc(
 			append(&pipe.model.gb.trees, tree)
 		}
 	case .MLP:
-		n_layers := int(read_i64(&r))
+		n_layers := _read_len(&r, 16)
 		pipe.model.mlp.n_layers = n_layers
 		pipe.model.mlp.weights = make([]l.Matrix(f64), n_layers, allocator)
 		pipe.model.mlp.biases = make([][]f64, n_layers, allocator)
@@ -461,7 +499,7 @@ pipeline_load :: proc(
 		for i in 0 ..< n_layers {
 			pipe.model.mlp.weights[i] = read_matrix(&r)
 			pipe.model.mlp.biases[i] = read_slice_f64(&r)
-			pipe.model.mlp.activations[i] = cast(Activation)read_u32(&r)
+			pipe.model.mlp.activations[i] = _read_enum(&r, Activation)
 		}
 
 	case .GaussianNB:
@@ -478,7 +516,7 @@ pipeline_load :: proc(
 
 		ovr_ptr.classes = read_slice_f64(&r)
 		ovr_ptr.allocator = allocator
-		n_models := int(read_i64(&r))
+		n_models := _read_len(&r, 4)
 		ovr_ptr.models = make([]BinaryClassifier, n_models, allocator)
 		for i in 0 ..< n_models {
 			ovr_ptr.models[i] = read_binary_classifier(&r, allocator)
@@ -512,7 +550,7 @@ read_decision_tree :: proc(r: ^ModelReader, allocator: mem.Allocator) -> Decisio
 	tree.allocator = allocator
 	tree.root_idx = int(read_i64(r))
 
-	n_nodes := int(read_i64(r))
+	n_nodes := _read_len(r, 7 * 8)
 	tree.nodes = make([dynamic]Node, 0, n_nodes, allocator)
 
 	for i in 0 ..< n_nodes {
@@ -525,6 +563,21 @@ read_decision_tree :: proc(r: ^ModelReader, allocator: mem.Allocator) -> Decisio
 		node.impurity = read_f64(r)
 		node.sample_count = int(read_i64(r))
 		append(&tree.nodes, node)
+	}
+
+	// Structural check: children must be valid nodes (or both -1 for a leaf),
+	// otherwise prediction would index out of bounds
+	if tree.root_idx < 0 || tree.root_idx >= max(n_nodes, 1) do r.err = true
+	for node in tree.nodes {
+		leaf := node.left_idx < 0 && node.right_idx < 0
+		inner := node.left_idx > 0 && node.left_idx < n_nodes && node.right_idx > 0 && node.right_idx < n_nodes && node.feature_idx >= 0
+		if !leaf && !inner do r.err = true
+	}
+	if r.err {
+		// keep the result safe to traverse
+		clear(&tree.nodes)
+		append(&tree.nodes, Node{feature_idx = -1, left_idx = -1, right_idx = -1})
+		tree.root_idx = 0
 	}
 
 	return tree
@@ -561,7 +614,7 @@ write_binary_classifier :: proc(w: ^ModelWriter, clf: ^BinaryClassifier) {
 read_binary_classifier :: proc(r: ^ModelReader, allocator: mem.Allocator) -> BinaryClassifier {
 	clf: BinaryClassifier
 	clf.allocator = allocator
-	clf.type = cast(BinaryClassifierType)read_u32(r)
+	clf.type = _read_enum(r, BinaryClassifierType)
 	switch clf.type {
 	case .Logistic:
 		clf.logistic.weights = read_slice_f64(r)
@@ -577,7 +630,7 @@ read_binary_classifier :: proc(r: ^ModelReader, allocator: mem.Allocator) -> Bin
 		clf.kernel_svm.alpha = read_slice_f64(r)
 		clf.kernel_svm.sv_labels = read_slice_f64(r)
 		clf.kernel_svm.bias = read_f64(r)
-		clf.kernel_svm.kernel_type = cast(SVMKernelType)read_u32(r)
+		clf.kernel_svm.kernel_type = _read_enum(r, SVMKernelType)
 		clf.kernel_svm.gamma = read_f64(r)
 		clf.kernel_svm.degree = int(read_i64(r))
 		clf.kernel_svm.coef0 = read_f64(r)

@@ -4,6 +4,7 @@ import w "../../core"
 import l "../../linalg"
 import "core:fmt"
 import "core:mem"
+import "core:strings"
 
 // ============================================================================
 // Dataset Structures
@@ -116,7 +117,8 @@ prepare_dataset :: proc(
 			continue
 		}
 
-		feature_names[feat_idx] = col.name
+		// cloned: the dataset must stay valid after the DataFrame is freed
+		feature_names[feat_idx] = strings.clone(col.name, allocator)
 
 		#partial switch col.type {
 		case .Float:
@@ -158,13 +160,13 @@ prepare_dataset :: proc(
 
 				if _, ok := class_map[v]; !ok {
 					class_map[v] = len(classes)
-					append(&classes, v)
+					append(&classes, strings.clone(v, allocator))
 				}
 			}
 
 			// ✅ Use the renamed struct
 			encoder := ColumnLabelEncoder {
-				col_name  = col.name,
+				col_name  = feature_names[feat_idx],
 				col_index = feat_idx,
 				classes   = classes[:],
 				n_classes = len(classes),
@@ -272,7 +274,8 @@ transform_dataset :: proc(
 				v, is_null := w.column_at_string(col, i)
 				if is_null {v = "NULL"}
 
-				class_val := 0.0
+				// categories unseen in training get -1 (not the code of class 0)
+				class_val := -1.0
 				for c_name, c_idx in enc.classes {
 					if c_name == v {
 						class_val = f64(c_idx)
@@ -328,8 +331,10 @@ transform_dataset :: proc(
 dataset_free :: proc(ds: ^MLDataset) {
 	l.matrix_free(&ds.X)
 	delete(ds.y, ds.allocator)
+	for name in ds.feature_names {delete(name, ds.allocator)}
 	delete(ds.feature_names, ds.allocator)
 	for enc in ds.encoders {
+		for c in enc.classes {delete(c, enc.allocator)}
 		delete(enc.classes, enc.allocator)
 	}
 	delete(ds.encoders, ds.allocator)

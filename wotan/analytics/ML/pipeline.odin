@@ -172,6 +172,12 @@ pipeline_fit :: proc(pipe: ^Pipeline, X: ^l.Matrix(f64), y: []f64) {
 	if pipe.model.type == .None {
 		panic("pipeline_fit: No model set in pipeline")
 	}
+	if len(y) != X.rows do panic("pipeline_fit: y length mismatch")
+	// Refit: release the previously fitted scalers and model first
+	if pipe.is_fitted {
+		_pipeline_free_fitted(pipe)
+		pipe.is_fitted = false
+	}
 
 	current_X := X^
 	owns_X := false
@@ -222,16 +228,22 @@ pipeline_fit :: proc(pipe: ^Pipeline, X: ^l.Matrix(f64), y: []f64) {
 	case .KNN:
 		pipe.model.knn = knn_fit(&current_X, y, pipe.model.knn_params, pipe.allocator)
 	case .Ridge:
+		// Linear models get an (unpenalised) intercept column, like sklearn's
+		// fit_intercept=True: β[0] is the intercept
+		Xi := _with_intercept(&current_X, pipe.allocator)
+		defer l.matrix_free(&Xi)
 		pipe.model.ridge = ridge_fit(
-			&current_X,
+			&Xi,
 			y,
 			pipe.model.ridge_params.lambda,
 			pipe.model.ridge_params.method,
 			pipe.allocator,
 		)
 	case .Lasso:
+		Xi := _with_intercept(&current_X, pipe.allocator)
+		defer l.matrix_free(&Xi)
 		pipe.model.lasso = lasso_fit(
-			&current_X,
+			&Xi,
 			y,
 			pipe.model.lasso_params.lambda,
 			pipe.model.lasso_params.max_iter,
@@ -241,7 +253,9 @@ pipeline_fit :: proc(pipe: ^Pipeline, X: ^l.Matrix(f64), y: []f64) {
 	case .SVR:
 		pipe.model.svr = svr_fit(&current_X, y, pipe.model.svr_params, pipe.allocator)
 	case .OLS:
-		pipe.model.ols = ols_fit(&current_X, y, pipe.model.ols_method, pipe.allocator)
+		Xi := _with_intercept(&current_X, pipe.allocator)
+		defer l.matrix_free(&Xi)
+		pipe.model.ols = ols_fit(&Xi, y, pipe.model.ols_method, pipe.allocator)
 	case .DecisionTree:
 		pipe.model.dt = dt_fit(&current_X, y, pipe.model.dt_params, pipe.allocator)
 	case .RandomForest:
@@ -346,13 +360,13 @@ pipeline_predict :: proc(
 	case .KNN:
 		preds = knn_predict(&pipe.model.knn, &current_X, allocator)
 	case .Ridge:
-		preds = l.matvec_dyn_simd(&current_X, pipe.model.ridge.beta, allocator)
+		preds = _linear_predict(&current_X, pipe.model.ridge.beta, allocator)
 	case .Lasso:
-		preds = l.matvec_dyn_simd(&current_X, pipe.model.lasso.beta, allocator)
+		preds = _linear_predict(&current_X, pipe.model.lasso.beta, allocator)
 	case .SVR:
 		preds = svr_predict(&pipe.model.svr, &current_X, allocator)
 	case .OLS:
-		preds = l.matvec_dyn_simd(&current_X, pipe.model.ols.beta, allocator)
+		preds = _linear_predict(&current_X, pipe.model.ols.beta, allocator)
 	case .DecisionTree:
 		preds = dt_predict(&pipe.model.dt, &current_X, allocator)
 	case .RandomForest:
@@ -380,6 +394,38 @@ pipeline_predict :: proc(
 // ============================================================================
 
 pipeline_free :: proc(pipe: ^Pipeline) {
+	if pipe.is_fitted do _pipeline_free_fitted(pipe)
+	delete(pipe.steps)
+}
+
+// [1, X]: X with a leading column of ones
+_with_intercept :: proc(X: ^l.Matrix(f64), allocator: mem.Allocator) -> l.Matrix(f64) {
+	n, p := X.rows, X.cols
+	out := l.matrix_new(f64, n, p + 1, allocator)
+	for i in 0 ..< n {
+		out.data[i * (p + 1)] = 1.0
+		copy(out.data[i * (p + 1) + 1:(i + 1) * (p + 1)], X.data[i * p:(i + 1) * p])
+	}
+	return out
+}
+
+// X·β, with β[0] as intercept when β has one entry more than X has columns
+// (pipelines saved before the intercept was added have exactly X.cols entries)
+_linear_predict :: proc(X: ^l.Matrix(f64), beta: []f64, allocator: mem.Allocator) -> []f64 {
+	n, p := X.rows, X.cols
+	if len(beta) != p && len(beta) != p + 1 do panic("pipeline_predict: X does not match the fitted linear model")
+	off := len(beta) - p
+	out := make([]f64, n, allocator)
+	for i in 0 ..< n {
+		s := beta[0] if off == 1 else 0.0
+		for j in 0 ..< p {s += X.data[i * p + j] * beta[j + off]}
+		out[i] = s
+	}
+	return out
+}
+
+// Free fitted scaler state and the fitted model (the steps themselves stay)
+_pipeline_free_fitted :: proc(pipe: ^Pipeline) {
 	// Free steps
 	for i in 0 ..< len(pipe.steps) {
 		step := &pipe.steps[i]
@@ -389,8 +435,9 @@ pipeline_free :: proc(pipe: ^Pipeline) {
 		case .MinMaxScaler:
 			minmax_scaler_free(&step.minmax_scaler)
 		}
+		step.standard_scaler = {}
+		step.minmax_scaler = {}
 	}
-	delete(pipe.steps)
 
 	// Free model
 	#partial switch pipe.model.type {
