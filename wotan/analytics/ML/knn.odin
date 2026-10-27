@@ -7,6 +7,10 @@ import "core:mem"
 // ============================================================================
 // K-Nearest Neighbors (Lazy Learner)
 // ============================================================================
+// Classifier as sklearn KNeighborsClassifier(algorithm="brute"): Euclidean
+// distance, uniform or 1/distance votes, ties between classes → smallest label.
+// Neighbours tied at the k-th distance are taken in index order (sklearn's
+// choice there is unspecified).
 
 KNNWeights :: enum {
 	Uniform, // Standard majority vote
@@ -33,6 +37,8 @@ knn_fit :: proc(
 	params: KNNParams,
 	allocator: mem.Allocator = context.allocator,
 ) -> KNN {
+	if len(y) != X.rows do panic("knn_fit: y length mismatch")
+	if params.k < 1 do panic("knn_fit: k must be >= 1")
 	// Copy data to ensure lifetime safety
 	X_copy := l.matrix_new(f64, X.rows, X.cols, allocator)
 	copy(X_copy.data, X.data)
@@ -58,6 +64,7 @@ knn_predict :: proc(
 	n_test := X.rows
 	n_train := model.X_train.rows
 	n_features := X.cols
+	if n_train > 0 && n_features != model.X_train.cols do panic("knn_predict: X has the wrong number of columns")
 	k := math.min(model.k, n_train)
 
 	preds := make([]f64, n_test, allocator)
@@ -113,35 +120,26 @@ knn_predict :: proc(
 			}
 		}
 
-		// 3. Majority vote or distance weighting
-		if model.weights == .Uniform {
-			best_class := model.y_train[indices[0]]
-			max_count := 0
-
-			// O(K^2) counting is extremely fast for small K
-			for c in 0 ..< k {
-				current_class := model.y_train[indices[c]]
-				count := 0
-				for c2 in 0 ..< k {
-					if model.y_train[indices[c2]] == current_class {
-						count += 1
-					}
-				}
-				if count > max_count {
-					max_count = count
-					best_class = current_class
-				}
-			}
-			preds[i] = best_class
-		} else {
-			// Distance weighting
-			// ✅ Reset logical length for this sample (keeps backing array, zero allocation!)
+		// 3. (Weighted) vote, as sklearn KNeighborsClassifier: uniform weights, or
+		//    1/distance where neighbours at distance 0 get all the weight; ties go
+		//    to the smallest class label
+		any_zero := false
+		if model.weights == .Distance {
+			for c in 0 ..< k {if dists[c] == 0 {any_zero = true; break}}
+		}
+		{
 			num_unique := 0
 
 			for c in 0 ..< k {
 				cls := model.y_train[indices[c]]
-				dist := dists[c]
-				weight := 1.0 / (math.sqrt(dist) + 1e-10) // Use actual distance, not squared
+				weight := 1.0
+				if model.weights == .Distance {
+					if any_zero {
+						weight = 1.0 if dists[c] == 0 else 0.0
+					} else {
+						weight = 1.0 / math.sqrt(dists[c])
+					}
+				}
 
 				found_idx := -1
 				for u_idx in 0 ..< num_unique {
@@ -163,8 +161,9 @@ knn_predict :: proc(
 			best_class := unique_classes[0]
 			max_weight := class_weights[0]
 			for u_idx in 1 ..< num_unique {
-				if class_weights[u_idx] > max_weight {
-					max_weight = class_weights[u_idx]
+				w := class_weights[u_idx]
+				if w > max_weight || (w == max_weight && unique_classes[u_idx] < best_class) {
+					max_weight = w
 					best_class = unique_classes[u_idx]
 				}
 			}

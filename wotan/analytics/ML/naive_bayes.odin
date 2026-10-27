@@ -3,6 +3,7 @@ package ML
 import l "../../linalg"
 import "core:math"
 import "core:mem"
+import "core:slice"
 
 // ============================================================================
 // Gaussian Naive Bayes Structures
@@ -20,14 +21,30 @@ GaussianNB :: struct {
 // Public API: Fit Gaussian Naive Bayes
 // ============================================================================
 
+// Gaussian NB as sklearn GaussianNB: per-class means and (biased) variances,
+// priors = class frequencies, variances smoothed by
+// epsilon · max_j Var(X_j) (sklearn var_smoothing; absolute if all Var = 0).
 gnb_fit :: proc(
 	X: ^l.Matrix(f64),
 	y: []f64,
-	epsilon: f64 = 1e-9, // Smoothing term to prevent division by zero
+	epsilon: f64 = 1e-9, // var_smoothing (relative to the largest feature variance)
 	allocator: mem.Allocator = context.allocator,
 ) -> GaussianNB {
 	n_samples := X.rows
 	n_features := X.cols
+	if len(y) != n_samples do panic("gnb_fit: y length mismatch")
+	if n_samples == 0 do panic("gnb_fit: no samples")
+
+	// sklearn: epsilon_ = var_smoothing * max(var(X, axis=0))
+	max_var := 0.0
+	for j in 0 ..< n_features {
+		m, v := 0.0, 0.0
+		for i in 0 ..< n_samples {m += X.data[i * n_features + j]}
+		m /= f64(n_samples)
+		for i in 0 ..< n_samples {d := X.data[i * n_features + j] - m; v += d * d}
+		max_var = math.max(max_var, v / f64(n_samples))
+	}
+	eps := epsilon * max_var if max_var > 0 else epsilon
 
 	// 1. Find unique classes
 	unique_classes := make([dynamic]f64, 0, allocator)
@@ -38,6 +55,7 @@ gnb_fit :: proc(
 		}
 		if !found {append(&unique_classes, val)}
 	}
+	slice.sort(unique_classes[:]) // sorted like sklearn's classes_
 	n_classes := len(unique_classes)
 
 	classes := make([]f64, n_classes, allocator)
@@ -86,7 +104,7 @@ gnb_fit :: proc(
 					sum_sq_diff += diff * diff
 				}
 			}
-			var := (sum_sq_diff / f64(count)) + epsilon
+			var := (sum_sq_diff / f64(count)) + eps
 
 			// Precompute inverse variance for fast prediction
 			inv_sigma.data[k * n_features + j] = 1.0 / (2.0 * var)
@@ -120,6 +138,7 @@ gnb_predict :: proc(
 	n_samples := X.rows
 	n_features := X.cols
 	n_classes := len(model.classes)
+	if n_features != model.theta.cols do panic("gnb_predict: X has the wrong number of columns")
 
 	preds := make([]f64, n_samples, allocator)
 	if n_samples == 0 {return preds}

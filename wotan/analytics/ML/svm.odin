@@ -28,47 +28,13 @@ SVMParams :: struct {
 	optimizer_type: optim.OptimizerType,
 }
 // ============================================================================
-// Internal: Context & Objective for Linear SVM L-BFGS Line Search
-// ============================================================================
-
-_LinearSVM_Context :: struct {
-	X:          ^l.Matrix(f64),
-	y:          []f64,
-	C:          f64,
-	n_samples:  int,
-	n_features: int,
-}
-
-// The objective function: 0.5 * ||w||^2 + C * sum(max(0, 1 - y * (w.x + b)))
-// We divide by N to match the averaged gradient!
-_linear_svm_loss :: proc(params_vec: []f64, user_data: rawptr) -> f64 {
-	ctx := cast(^_LinearSVM_Context)(user_data)
-	w := params_vec[0:ctx.n_features]
-	b := params_vec[ctx.n_features]
-
-	// Regularization term: 0.5 * ||w||^2
-	reg := 0.0
-	for f in 0 ..< ctx.n_features {
-		reg += w[f] * w[f]
-	}
-	reg *= 0.5
-
-	// Hinge loss term: C * sum(max(0, 1 - y * (w.x + b)))
-	hinge := 0.0
-	for i in 0 ..< ctx.n_samples {
-		x_row := ctx.X.data[i * ctx.n_features:i * ctx.n_features + ctx.n_features]
-		score := b + l.dot_simd(w, x_row)
-		margin := ctx.y[i] * score
-		if margin < 1.0 {
-			hinge += 1.0 - margin
-		}
-	}
-
-	// Average the loss to perfectly match the averaged gradient!
-	return (reg + ctx.C * hinge) / f64(ctx.n_samples)
-}
-// ============================================================================
-// Public API: Fit Linear SVM (Full-Batch for L-BFGS compatibility)
+// Public API: Fit Linear SVM
+// Primal: min ½||w||² + C Σ max(0, 1 - y_i (w·x_i + b)), labels y ∈ {-1, +1};
+// b is not penalised (= sklearn SVC(kernel="linear", C)). Solved exactly in the
+// dual by SMO (fit_intercept) or dual coordinate descent (no intercept, b = 0).
+// tol: KKT tolerance (≤ 0: 1e-3, sklearn's default); max_iter: passes over the
+// data (≤ 0: no limit), i.e. at most max_iter·n SMO updates.
+// learning_rate / optimizer_type are not used by the exact solver.
 // ============================================================================
 svm_fit_linear :: proc(
 	X: ^l.Matrix(f64),
@@ -78,88 +44,56 @@ svm_fit_linear :: proc(
 ) -> LinearSVM {
 	n_samples := X.rows
 	n_features := X.cols
+	_svm_check_labels(y, n_samples, "svm_fit_linear")
 
-	params_vec := make([]f64, n_features + 1, allocator)
-	defer delete(params_vec, allocator)
+	k := _smo_kernel_init(X, .Linear, 0, 0, 0, context.temp_allocator)
+	defer _smo_kernel_free(&k)
+	alpha := make([]f64, n_samples, context.temp_allocator)
+	defer delete(alpha, context.temp_allocator)
+	p := make([]f64, n_samples, context.temp_allocator)
+	defer delete(p, context.temp_allocator)
+	for i in 0 ..< n_samples {p[i] = -1.0}
 
-	// Setup unified optimizer
-	opt_config := optim.optimizer_default_config(params.optimizer_type)
-	opt_config.learning_rate = params.learning_rate
-	opt := optim.optimizer_init(opt_config, n_features + 1, allocator)
-	defer optim.optimizer_free(&opt)
+	rho, converged, n_iter := _smo_solve(
+		&k,
+		p,
+		y,
+		params.C,
+		params.tol,
+		params.max_iter * max(n_samples, 1),
+		params.fit_intercept,
+		alpha,
+	)
 
-	// Allocate full_grad ONCE outside the loop
-	full_grad := make([]f64, n_features + 1, allocator)
-	defer delete(full_grad, allocator)
-	ctx := _LinearSVM_Context {
-		X          = X,
-		y          = y,
-		C          = params.C,
-		n_samples  = n_samples,
-		n_features = n_features,
-	}
-	converged := false
-	n_iter := 0
-	initial_lr := params.learning_rate
-
-	for iter in 0 ..< params.max_iter {
-		n_iter = iter + 1
-
-		// Disable LR decay for L-BFGS
-		if params.optimizer_type != .LBFGS {
-			lr := math.max(
-				initial_lr * (1.0 - f64(iter) / f64(params.max_iter)),
-				initial_lr * 0.01,
-			)
-			optim.optimizer_set_learning_rate(&opt, lr)
-		}
-
-		// ✅ 1. Zero out the full batch gradient
-		// ✅ 1. Zero out the full batch gradient
-		for f in 0 ..< n_features + 1 {
-			full_grad[f] = 0.0
-		}
-
-		// ✅ 2. Accumulate ONLY the hinge loss gradients over ALL samples
-		for i in 0 ..< n_samples {
-			x_row := X.data[i * n_features:i * n_features + n_features]
-			w := params_vec[0:n_features]
-
-			score := params_vec[n_features] + l.dot_simd(w, x_row)
-
-			if y[i] * score < 1.0 {
-				for f in 0 ..< n_features {
-					full_grad[f] -= params.C * y[i] * x_row[f]
-				}
-				full_grad[n_features] -= params.C * y[i]
-			}
-		}
-
-		// ✅ 3. Add regularization gradient (w) and average EVERYTHING by 1/N
-		// This perfectly matches the derivative of the averaged loss function!
-		inv_n := 1.0 / f64(n_samples)
-		for f in 0 ..< n_features {
-			full_grad[f] = (params_vec[f] + full_grad[f]) * inv_n
-		}
-		full_grad[n_features] *= inv_n
-
-		loss := _linear_svm_loss(params_vec, &ctx)
-
-		// ✅ 4. Single optimizer step per epoch WITH line search!
-		optim.optimizer_step(&opt, params_vec, full_grad, loss, _linear_svm_loss, &ctx)
-	}
-
+	// w = Σ α_i y_i x_i, b = -ρ
 	w := make([]f64, n_features, allocator)
-	copy(w, params_vec[0:n_features])
-	b := params_vec[n_features]
+	sv := make([dynamic]int, 0, allocator)
+	for i in 0 ..< n_samples {
+		if alpha[i] <= 0 do continue
+		append(&sv, i)
+		for f in 0 ..< n_features {
+			w[f] += alpha[i] * y[i] * X.data[i * n_features + f]
+		}
+	}
+	sv_final := make([]int, len(sv), allocator)
+	copy(sv_final, sv[:])
+	delete(sv)
 
 	return LinearSVM {
 		weights = w,
-		bias = b,
-		support_vectors = make([]int, 0, allocator),
+		bias = -rho,
+		support_vectors = sv_final,
 		n_iter = n_iter,
 		converged = converged,
 		allocator = allocator,
+	}
+}
+
+_svm_check_labels :: proc(y: []f64, n: int, name: string) {
+	if len(y) != n do panic("svm: y length mismatch")
+	if n == 0 do panic("svm: no samples")
+	for v in y {
+		if v != 1.0 && v != -1.0 do panic("svm: labels must be -1 or +1")
 	}
 }
 // ============================================================================
@@ -172,6 +106,7 @@ svm_predict_linear :: proc(
 ) -> []f64 {
 	n := X.rows
 	n_features := len(model.weights)
+	if X.cols != n_features do panic("svm_predict_linear: X has the wrong number of columns")
 	preds := make([]f64, n, allocator)
 
 	for i in 0 ..< n {
@@ -223,15 +158,17 @@ KernelSVMParams :: struct {
 }
 
 // ============================================================================
-// Kernel Functions (SIMD-Accelerated)
+// Kernel Functions: K(x,z) = x·z | exp(-γ||x-z||²) | (γ x·z + coef0)^degree
+// (sklearn's definitions; gamma ≤ 0 in the fit params means sklearn's "scale")
 // ============================================================================
 
 _kernel_rbf_simd :: proc(x1, x2: []f64, gamma: f64) -> f64 {
-	n := len(x1)
-	diff := make([]f64, n, context.temp_allocator)
-	defer delete(diff, context.temp_allocator)
-	l.vec_sub_simd(x1, x2, diff)
-	return math.exp(-gamma * l.dot_simd(diff, diff))
+	d2 := 0.0
+	for i in 0 ..< len(x1) {
+		d := x1[i] - x2[i]
+		d2 += d * d
+	}
+	return math.exp(-gamma * d2)
 }
 
 _kernel_linear_simd :: proc(x1, x2: []f64) -> f64 {return l.dot_simd(x1, x2)}
@@ -258,47 +195,12 @@ _kernel_eval :: proc(
 	return 0.0
 }
 
-
 // ============================================================================
-// Internal: Context & Objective for Kernel SVM L-BFGS Line Search
-// ============================================================================
-
-// ✅ FIX: Removed Q_alpha. The loss function must compute it dynamically!
-_KernelSVM_Context :: struct {
-	y:         []f64,
-	K:         [][]f64,
-	n_samples: int,
-}
-
-// ✅ FIX: Computes Q * alpha dynamically for the trial 'alpha' passed by L-BFGS!
-_kernel_svm_loss :: proc(alpha: []f64, user_data: rawptr) -> f64 {
-	ctx := cast(^_KernelSVM_Context)(user_data)
-	n := ctx.n_samples
-
-	// Quadratic term: 0.5 * alpha^T Q alpha
-	// Q_ij = y_i * y_j * K_ij
-	quad_term := 0.0
-	for i in 0 ..< n {
-		if alpha[i] == 0.0 {continue}
-		sum := 0.0
-		for j in 0 ..< n {
-			sum += alpha[j] * ctx.y[j] * ctx.K[i][j]
-		}
-		quad_term += alpha[i] * ctx.y[i] * sum
-	}
-	quad_term *= 0.5
-
-	// Linear term: -sum(alpha)
-	lin_term := 0.0
-	for i in 0 ..< n {
-		lin_term -= alpha[i]
-	}
-
-	return quad_term + lin_term
-}
-
-// ============================================================================
-// Public API: Fit Kernel SVM (HEAVILY OPTIMIZED)
+// Public API: Fit Kernel SVM (C-SVC dual, solved exactly by SMO)
+//   min ½ αᵀQα - Σα, 0 ≤ α ≤ C, yᵀα = 0, Q_ij = y_i y_j K(x_i, x_j)
+//   decision(x) = Σ α_i y_i K(x_i, x) + b,  b = -ρ  (= sklearn SVC)
+// tol: KKT tolerance (≤ 0: 1e-3); max_iter: passes over the data (≤ 0: no
+// limit). learning_rate / optimizer_type are not used by the exact solver.
 // ============================================================================
 kernel_svm_fit :: proc(
 	X: ^l.Matrix(f64),
@@ -308,145 +210,33 @@ kernel_svm_fit :: proc(
 ) -> KernelSVM {
 	n_samples := X.rows
 	n_features := X.cols
+	_svm_check_labels(y, n_samples, "kernel_svm_fit")
 
-	alpha := make([]f64, n_samples, allocator)
-	grad := make([]f64, n_samples, allocator)
-	defer delete(grad, allocator)
-	// ✅ Allocate Q_alpha and Context for L-BFGS line search
-	Q_alpha := make([]f64, n_samples, allocator)
+	gamma := params.gamma if params.gamma > 0 else _svm_gamma_scale(X)
+	k := _smo_kernel_init(X, params.kernel_type, gamma, params.degree, params.coef0, context.temp_allocator)
+	defer _smo_kernel_free(&k)
+	alpha := make([]f64, n_samples, context.temp_allocator)
+	defer delete(alpha, context.temp_allocator)
+	p := make([]f64, n_samples, context.temp_allocator)
+	defer delete(p, context.temp_allocator)
+	for i in 0 ..< n_samples {p[i] = -1.0}
 
-	// Precompute kernel matrix
-	K := make([][]f64, n_samples, allocator)
-	defer {
-		for row in K {delete(row, allocator)}
-		delete(K, allocator)
-	}
-	for i in 0 ..< n_samples {
-		K[i] = make([]f64, n_samples, allocator)
-		for j in 0 ..< n_samples {
-			x_i := X.data[i * n_features:i * n_features + n_features]
-			x_j := X.data[j * n_features:j * n_features + n_features]
-			K[i][j] = _kernel_eval(
-				x_i,
-				x_j,
-				params.kernel_type,
-				params.gamma,
-				params.degree,
-				params.coef0,
-			)
-		}
-	}
-	defer delete(Q_alpha, allocator)
+	rho, _, _ := _smo_solve(&k, p, y, params.C, params.tol, params.max_iter * n_samples, true, alpha)
 
-	ctx := _KernelSVM_Context {
-		y         = y,
-		K         = K,
-		n_samples = n_samples,
-	}
-	opt_config := optim.optimizer_default_config(params.optimizer_type)
-	opt_config.learning_rate = params.learning_rate
-	opt := optim.optimizer_init(opt_config, n_samples, allocator)
-	defer optim.optimizer_free(&opt)
-
-	// ✅ Pre-allocate alpha_y for SIMD dot products
-	alpha_y := make([]f64, n_samples, allocator)
-	defer delete(alpha_y, allocator)
-	old_alpha := make([]f64, n_samples, allocator)
-	defer delete(old_alpha, allocator)
-
-	converged := false
-	n_iter := 0
-	initial_lr := params.learning_rate
-
-	for iter in 0 ..< params.max_iter {
-		n_iter = iter + 1
-
-		if params.optimizer_type != .LBFGS {
-			lr := math.max(
-				initial_lr * (1.0 - f64(iter) / f64(params.max_iter)),
-				initial_lr * 0.01,
-			)
-			optim.optimizer_set_learning_rate(&opt, lr)
-		}
-
-
-		// ✅ 1. Precompute alpha_y and Q_alpha ONCE per epoch
-		for j in 0 ..< n_samples {alpha_y[j] = alpha[j] * y[j]}
-
-		// 2. Compute gradients and Q_alpha using SIMD dot products
-		for i in 0 ..< n_samples {
-			sum_term := l.dot_simd(alpha_y, K[i])
-			grad[i] = y[i] * sum_term - 1.0 // Gradient of dual objective
-		}
-
-		copy(old_alpha, alpha)
-
-		// ✅ 3. Compute loss and pass to optimizer for line search!
-		loss := _kernel_svm_loss(alpha, &ctx)
-		optim.optimizer_step(&opt, alpha, grad, loss, _kernel_svm_loss, &ctx)
-
-		// 3. Project onto box constraint [0, C]
-		max_update := 0.0
-		for i in 0 ..< n_samples {
-			alpha[i] = math.clamp(alpha[i], 0.0, params.C)
-			update := math.abs(alpha[i] - old_alpha[i])
-			if update > max_update {max_update = update}
-		}
-
-		if max_update < params.tol {
-			converged = true
-			break
-		}
-	}
-
-	// Extract support vectors and compute bias (unchanged)
+	// Support vectors: α > 0
 	sv_indices := make([dynamic]int, 0, allocator)
-	for i in 0 ..< n_samples {if alpha[i] > 1e-5 {append(&sv_indices, i)}}
-
-	bias := 0.0
-	bias_count := 0
-	for idx in sv_indices[:] {
-		if alpha[idx] > 1e-5 && alpha[idx] < params.C - 1e-5 {
-			score := 0.0
-			for j in 0 ..< n_samples {
-				if alpha[j] > 1e-5 {
-					x_idx := X.data[idx * n_features:idx * n_features + n_features]
-					x_j := X.data[j * n_features:j * n_features + n_features]
-					score +=
-						alpha[j] *
-						y[j] *
-						_kernel_eval(
-							x_idx,
-							x_j,
-							params.kernel_type,
-							params.gamma,
-							params.degree,
-							params.coef0,
-						)
-				}
-			}
-			bias += y[idx] - score
-			bias_count += 1
-		}
-	}
-	if bias_count > 0 {bias /= f64(bias_count)}
-
-	// Copy support vector DATA to output
-	sv_final := make([]int, len(sv_indices), allocator)
-	copy(sv_final, sv_indices[:])
-
-	// ✅ Allocate and copy the actual feature data for the support vectors
+	for i in 0 ..< n_samples {if alpha[i] > 0 {append(&sv_indices, i)}}
 	n_sv := len(sv_indices)
+
+	sv_final := make([]int, n_sv, allocator)
+	copy(sv_final, sv_indices[:])
 	sv_data := l.matrix_new(f64, n_sv, n_features, allocator)
+	alpha_final := make([]f64, n_sv, allocator)
+	sv_label_final := make([]f64, n_sv, allocator)
 	for idx, i in sv_indices[:] {
 		for j in 0 ..< n_features {
 			sv_data.data[i * n_features + j] = X.data[idx * n_features + j]
 		}
-	}
-
-	alpha_final := make([]f64, len(sv_indices), allocator)
-	sv_label_final := make([]f64, len(sv_indices), allocator)
-	for idx, i in sv_indices[:] {
 		alpha_final[i] = alpha[idx]
 		sv_label_final[i] = y[idx]
 	}
@@ -454,12 +244,12 @@ kernel_svm_fit :: proc(
 
 	return KernelSVM {
 		support_vectors = sv_final,
-		sv_data         = sv_data, // ✅ Assign the new field
+		sv_data         = sv_data,
 		alpha           = alpha_final,
-		bias            = bias,
+		bias            = -rho,
 		sv_labels       = sv_label_final,
 		kernel_type     = params.kernel_type,
-		gamma           = params.gamma,
+		gamma           = gamma,
 		degree          = params.degree,
 		coef0           = params.coef0,
 		C               = params.C,

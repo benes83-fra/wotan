@@ -18,7 +18,7 @@ serialization_test :: proc(allocator: mem.Allocator) {
 	for i in 0 ..< n {
 		X.data[i * 2 + 0] = rand.float64_normal(0, 1)
 		X.data[i * 2 + 1] = rand.float64_normal(0, 1)
-		y[i] = f64(i / 50) // 2 classes
+		y[i] = -1.0 if i < 50 else 1.0 // 2 classes (SVM labels are ±1)
 	}
 
 	// 2. Train a Pipeline
