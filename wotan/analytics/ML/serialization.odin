@@ -9,7 +9,7 @@ import "core:os"
 // Binary Writer
 // ============================================================================
 
-_MODEL_FORMAT_VERSION :: 3
+_MODEL_FORMAT_VERSION :: 4
 
 ModelWriter :: struct {
 	file: ^os.File,
@@ -26,7 +26,8 @@ model_writer_open :: proc(path: string) -> (ModelWriter, bool) {
 	// Write magic number "WOTAN" (5 bytes)
 	write_bytes(&w, []u8{'W', 'O', 'T', 'A', 'N'})
 	// Write version (2: gradient boosting also stores initial_pred / learning_rate;
-	// 3: trees store classes + class fractions, forests / boosting their classes)
+	// 3: trees store classes + class fractions, forests / boosting their classes;
+	// 4: trees store the weighted node sizes)
 	write_u32(&w, _MODEL_FORMAT_VERSION)
 	return w, true
 }
@@ -569,6 +570,10 @@ write_decision_tree :: proc(w: ^ModelWriter, tree: ^DecisionTree) {
 	}
 	write_slice_f64(w, tree.classes)
 	write_slice_f64(w, tree.proba[:])
+	weights := make([]f64, len(tree.nodes), context.temp_allocator)
+	defer delete(weights, context.temp_allocator)
+	for node, i in tree.nodes {weights[i] = node.weight}
+	write_slice_f64(w, weights)
 }
 
 // Read a single DecisionTree
@@ -598,6 +603,15 @@ read_decision_tree :: proc(r: ^ModelReader, allocator: mem.Allocator) -> Decisio
 		if len(proba) != n_nodes * len(tree.classes) do r.err = true
 		tree.proba = make([dynamic]f64, 0, len(proba), allocator)
 		append(&tree.proba, ..proba)
+	}
+	if r.version >= 4 {
+		weights := read_slice_f64(r)
+		defer delete(weights, r.allocator)
+		if len(weights) != n_nodes {
+			r.err = true
+		} else {
+			for &node, i in tree.nodes {node.weight = weights[i]}
+		}
 	}
 
 	// Structural check: children must be valid nodes (or both -1 for a leaf),

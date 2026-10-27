@@ -99,7 +99,7 @@ _smo_solve :: proc(
 	k: ^_SMOKernel,
 	p: []f64,
 	y: []f64,
-	C: f64,
+	Cs: []f64, // upper bound of every variable (C, or C · weight; LIBSVM C_i)
 	tol: f64,
 	max_iter: int,
 	equality: bool,
@@ -124,6 +124,7 @@ _smo_solve :: proc(
 		for t in 0 ..< L {G[t] += y[t] * y[s] * row[t % n] * alpha[s]}
 	}
 
+	if len(Cs) != L do panic("_smo_solve: need one bound per variable")
 	upper :: proc(a, C: f64) -> bool {return a >= C}
 	lower :: proc(a: f64) -> bool {return a <= 0}
 
@@ -135,14 +136,14 @@ _smo_solve :: proc(
 				g := G[t]
 				pg := g
 				if lower(alpha[t]) do pg = math.min(g, 0)
-				else if upper(alpha[t], C) do pg = math.max(g, 0)
+				else if upper(alpha[t], Cs[t]) do pg = math.max(g, 0)
 				if math.abs(pg) > best_v {best_v = math.abs(pg); best = t}
 			}
 			if best < 0 || best_v < eps {converged = true; break}
 			i := best
 			qii := math.max(k.diag[i % n], _SMO_TAU)
 			old := alpha[i]
-			alpha[i] = math.clamp(old - G[i] / qii, 0, C)
+			alpha[i] = math.clamp(old - G[i] / qii, 0, Cs[i])
 			d := alpha[i] - old
 			row := _smo_kernel_row(k, i % n, 0)
 			for t in 0 ..< L {G[t] += y[t] * y[i] * row[t % n] * d}
@@ -155,7 +156,7 @@ _smo_solve :: proc(
 		i := -1
 		for t in 0 ..< L {
 			if y[t] > 0 {
-				if !upper(alpha[t], C) && -G[t] >= Gmax {Gmax = -G[t]; i = t}
+				if !upper(alpha[t], Cs[t]) && -G[t] >= Gmax {Gmax = -G[t]; i = t}
 			} else {
 				if !lower(alpha[t]) && G[t] >= Gmax {Gmax = G[t]; i = t}
 			}
@@ -177,7 +178,7 @@ _smo_solve :: proc(
 					}
 				}
 			} else {
-				if !upper(alpha[t], C) {
+				if !upper(alpha[t], Cs[t]) {
 					grad_diff := Gmax - G[t]
 					if -G[t] >= Gmax2 do Gmax2 = -G[t]
 					if grad_diff > 0 {
@@ -192,6 +193,7 @@ _smo_solve :: proc(
 		if Gmax + Gmax2 < eps || j < 0 {converged = true; break}
 
 		// ---- two-variable update (LIBSVM Solver::Solve) ----
+		Ci, Cj := Cs[i], Cs[j]
 		Kj := _smo_kernel_row(k, j % n, 1)
 		Kij := Ki[j % n]
 		Qij := y[i] * y[j] * Kij
@@ -208,10 +210,10 @@ _smo_solve :: proc(
 			} else {
 				if alpha[i] < 0 {alpha[i] = 0; alpha[j] = -diff}
 			}
-			if diff > 0 {
-				if alpha[i] > C {alpha[i] = C; alpha[j] = C - diff}
+			if diff > Ci - Cj {
+				if alpha[i] > Ci {alpha[i] = Ci; alpha[j] = Ci - diff}
 			} else {
-				if alpha[j] > C {alpha[j] = C; alpha[i] = C + diff}
+				if alpha[j] > Cj {alpha[j] = Cj; alpha[i] = Cj + diff}
 			}
 		} else {
 			quad := k.diag[i % n] + k.diag[j % n] - 2.0 * Qij
@@ -220,13 +222,13 @@ _smo_solve :: proc(
 			sum := alpha[i] + alpha[j]
 			alpha[i] -= delta
 			alpha[j] += delta
-			if sum > C {
-				if alpha[i] > C {alpha[i] = C; alpha[j] = sum - C}
+			if sum > Ci {
+				if alpha[i] > Ci {alpha[i] = Ci; alpha[j] = sum - Ci}
 			} else {
 				if alpha[j] < 0 {alpha[j] = 0; alpha[i] = sum}
 			}
-			if sum > C {
-				if alpha[j] > C {alpha[j] = C; alpha[i] = sum - C}
+			if sum > Cj {
+				if alpha[j] > Cj {alpha[j] = Cj; alpha[i] = sum - Cj}
 			} else {
 				if alpha[i] < 0 {alpha[i] = 0; alpha[j] = sum}
 			}
@@ -242,10 +244,10 @@ _smo_solve :: proc(
 
 	// Snap rounding-level values onto the bounds, so an α of ~1e-17 is not
 	// mistaken for a free support vector (it would pin ρ, LIBSVM gets exact 0)
-	snap := 1e-12 * C
 	for t in 0 ..< L {
+		snap := 1e-12 * Cs[t]
 		if alpha[t] <= snap do alpha[t] = 0
-		else if alpha[t] >= C - snap do alpha[t] = C
+		else if alpha[t] >= Cs[t] - snap do alpha[t] = Cs[t]
 	}
 
 	if !equality do return 0, converged, n_iter
@@ -255,7 +257,7 @@ _smo_solve :: proc(
 	nr_free, sum_free := 0, 0.0
 	for t in 0 ..< L {
 		yG := y[t] * G[t]
-		if upper(alpha[t], C) {
+		if upper(alpha[t], Cs[t]) {
 			if y[t] < 0 {ub = math.min(ub, yG)} else {lb = math.max(lb, yG)}
 		} else if lower(alpha[t]) {
 			if y[t] > 0 {ub = math.min(ub, yG)} else {lb = math.max(lb, yG)}

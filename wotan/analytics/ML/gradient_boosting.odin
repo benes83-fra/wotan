@@ -46,16 +46,22 @@ GBParams :: struct {
 // loss="squared_error"): F₀ = mean(y), each tree fits the residuals y - F and
 // F += learning_rate · tree. subsample < 1 fits each tree on
 // int(subsample · n) rows drawn without replacement (stochastic GB).
+// sample_weight (optional, sklearn sample_weight): F₀ / class priors are
+// weighted, every tree is fitted with the weights, and the log-loss Newton
+// leaf values use weighted sums.
 gb_fit :: proc(
 	X: ^l.Matrix(f64),
 	y: []f64,
 	params: GBParams,
 	allocator: mem.Allocator = context.allocator,
+	sample_weight: []f64 = nil,
 ) -> GradientBoosting {
 	n_samples := len(y)
 	if X.rows != n_samples do panic("gb_fit: y length mismatch")
 	if n_samples == 0 do panic("gb_fit: no samples")
-	if params.loss == .Log_Loss do return _gb_fit_classifier(X, y, params, allocator)
+	sw := _effective_weights(y, sample_weight, .None, "gb_fit", allocator)
+	defer delete(sw, allocator)
+	if params.loss == .Log_Loss do return _gb_fit_classifier(X, y, params, allocator, sw)
 
 	model: GradientBoosting
 	model.trees_per_stage = 1
@@ -65,10 +71,19 @@ gb_fit :: proc(
 	model.max_depth = params.max_depth
 	model.min_samples = params.min_samples
 
-	// Initial prediction: mean of y
+	// Initial prediction: (weighted) mean of y
 	model.initial_pred = 0.0
-	for val in y {model.initial_pred += val}
-	model.initial_pred /= f64(n_samples)
+	if sw == nil {
+		for val in y {model.initial_pred += val}
+		model.initial_pred /= f64(n_samples)
+	} else {
+		w_sum := 0.0
+		for val, i in y {
+			model.initial_pred += sw[i] * val
+			w_sum += sw[i]
+		}
+		model.initial_pred /= w_sum
+	}
 
 	model.trees = make([dynamic]DecisionTree, 0, max(params.n_estimators, 0), allocator)
 
@@ -109,7 +124,7 @@ gb_fit :: proc(
 		}
 
 		// 3. Train tree on residuals
-		tree := _fit_tree_on_residuals(X, residuals, perm[:n_sub], tree_params, allocator)
+		tree := _fit_tree_on_residuals(X, residuals, perm[:n_sub], tree_params, allocator, sw)
 		append(&model.trees, tree)
 
 		// 4. Update predictions on all rows: F += learning_rate · tree(x)
@@ -233,6 +248,7 @@ _gb_fit_classifier :: proc(
 	y: []f64,
 	params: GBParams,
 	allocator: mem.Allocator,
+	sw: []f64, // sample weights (nil = 1)
 ) -> GradientBoosting {
 	n := X.rows
 	model: GradientBoosting
@@ -256,8 +272,14 @@ _gb_fit_classifier :: proc(
 	model.init_raw = make([]f64, C, allocator)
 	prior := make([]f64, K, allocator)
 	defer delete(prior, allocator)
-	for c in codes {prior[c] += 1}
-	for &v in prior {v = math.clamp(v / f64(n), EPS, 1 - EPS)}
+	w_total := 0.0
+	for c, i in codes {
+		wi := 1.0
+		if sw != nil do wi = sw[i]
+		prior[c] += wi
+		w_total += wi
+	}
+	for &v in prior {v = math.clamp(v / w_total, EPS, 1 - EPS)}
 	if K == 2 {
 		model.init_raw[0] = math.ln(prior[1] / (1 - prior[1]))
 	} else {
@@ -313,8 +335,8 @@ _gb_fit_classifier :: proc(
 				yk[i] = 1 if codes[i] == cls else 0
 				resid[i] = yk[i] - P[i * K + cls]
 			}
-			tree := _fit_tree_on_residuals(X, resid, rows, tree_params, allocator)
-			_gb_newton_leaves(&tree, X, yk, resid, rows, scale, allocator)
+			tree := _fit_tree_on_residuals(X, resid, rows, tree_params, allocator, sw)
+			_gb_newton_leaves(&tree, X, yk, resid, rows, scale, allocator, sw)
 			append(&model.trees, tree)
 
 			last := &model.trees[len(model.trees) - 1]
@@ -335,6 +357,7 @@ _gb_newton_leaves :: proc(
 	rows: []int,
 	scale: f64,
 	allocator: mem.Allocator,
+	sw: []f64 = nil,
 ) {
 	num := make([]f64, len(tree.nodes), allocator)
 	den := make([]f64, len(tree.nodes), allocator)
@@ -344,8 +367,10 @@ _gb_newton_leaves :: proc(
 	}
 	for i in rows {
 		leaf := _dt_leaf_index(tree, X, i)
-		num[leaf] += resid[i]
-		den[leaf] += (y[i] - resid[i]) * (1 - y[i] + resid[i])
+		wi := 1.0
+		if sw != nil do wi = sw[i]
+		num[leaf] += wi * resid[i]
+		den[leaf] += wi * (y[i] - resid[i]) * (1 - y[i] + resid[i])
 	}
 	for &node, j in tree.nodes {
 		if node.left_idx >= 0 do continue
@@ -383,22 +408,26 @@ _fit_tree_on_residuals :: proc(
 	sample_indices: []int,
 	params: TreeParams,
 	allocator: mem.Allocator,
+	weights: []f64 = nil, // per row of X (nil = 1)
 ) -> DecisionTree {
 	n_samples := len(sample_indices)
 
 	// Create subsampled views
 	X_sub := l.matrix_new(f64, n_samples, X.cols, allocator)
 	y_sub := make([]f64, n_samples, allocator)
+	w_sub := make([]f64, n_samples if weights != nil else 0, allocator)
+	defer delete(w_sub, allocator)
 
 	for idx, i in sample_indices {
 		for j in 0 ..< X.cols {
 			X_sub.data[i * X_sub.cols + j] = X.data[idx * X.cols + j]
 		}
 		y_sub[i] = residuals[idx]
+		if weights != nil do w_sub[i] = weights[idx]
 	}
 
 	// Train regression tree on residuals
-	tree := dt_fit(&X_sub, y_sub, params, allocator)
+	tree := dt_fit(&X_sub, y_sub, params, allocator, w_sub if weights != nil else nil)
 
 	l.matrix_free(&X_sub)
 	delete(y_sub, allocator)

@@ -31,8 +31,9 @@ Node :: struct {
 	right_idx:    int, // -1 if leaf
 
 	// Statistics
-	impurity:     f64,
-	sample_count: int,
+	impurity:     f64, // weighted impurity of the node's training samples
+	sample_count: int, // number of training samples (unweighted)
+	weight:       f64, // total sample weight (= sample_count without weights)
 }
 
 // Split criterion. The zero value MSE keeps existing TreeParams literals regression trees.
@@ -54,7 +55,13 @@ TreeParams :: struct {
 	max_features: int, // features drawn per split (0 or >= n_features = all), like sklearn:
 	// if none of them gives a valid split, the remaining features are tried too
 	criterion:    TreeCriterion,
+	class_weight: ClassWeight, // classification only (sklearn class_weight)
 }
+
+// Sample weights (dt_fit / rf_fit / gb_fit `sample_weight`, see weights.odin)
+// enter as in sklearn: weighted impurity, weighted mean / class fractions in the
+// leaves; min_samples and max_depth still count samples, not weight. A split
+// that leaves zero weight on one side is not considered.
 
 // ============================================================================
 // Public API
@@ -65,17 +72,21 @@ dt_fit :: proc(
 	y: []f64,
 	params: TreeParams,
 	allocator: mem.Allocator = context.allocator,
+	sample_weight: []f64 = nil, // optional, one weight >= 0 per row
 ) -> DecisionTree {
 	n_samples := X.rows
 	if len(y) != n_samples do panic("dt_fit: y length mismatch")
 	if n_samples == 0 do panic("dt_fit: no samples")
+	if params.criterion == .MSE && params.class_weight != .None do panic("dt_fit: class_weight needs a classification criterion")
+	w := _effective_weights(y, sample_weight, params.class_weight, "dt_fit", allocator)
+	defer delete(w, allocator)
 
 	if params.criterion != .MSE {
 		classes, codes := _tree_encode_classes(y, allocator)
 		defer delete(codes, allocator)
-		return _dt_fit_codes(X, y, codes, classes, params, allocator)
+		return _dt_fit_codes(X, y, codes, classes, params, allocator, w)
 	}
-	return _dt_fit_codes(X, y, nil, nil, params, allocator)
+	return _dt_fit_codes(X, y, nil, nil, params, allocator, w)
 }
 
 dt_predict :: proc(
@@ -144,8 +155,16 @@ _dt_fit_codes :: proc(
 	classes: []f64,
 	params: TreeParams,
 	allocator: mem.Allocator,
+	sample_weight: []f64 = nil, // nil = all 1
 ) -> DecisionTree {
 	n_samples := X.rows
+	// unit weights give exactly the unweighted sums (1·x = x, Σ1 = n)
+	sw := sample_weight
+	if sw == nil {
+		sw = make([]f64, n_samples, allocator)
+		for &v in sw {v = 1}
+	}
+	defer if sample_weight == nil do delete(sw, allocator)
 	tree: DecisionTree
 	tree.allocator = allocator
 	tree.nodes = make([dynamic]Node, 0, 2 * n_samples, allocator) // len=0, cap=2*n
@@ -159,7 +178,7 @@ _dt_fit_codes :: proc(
 	defer delete(indices, allocator)
 	for i in 0 ..< n_samples {indices[i] = i}
 
-	tree.root_idx = _dt_build(&tree, X, y, codes, indices, params, 0, allocator)
+	tree.root_idx = _dt_build(&tree, X, y, sw, codes, indices, params, 0, allocator)
 	return tree
 }
 
@@ -173,13 +192,17 @@ dt_build_node :: proc(
 	depth: int,
 	allocator: mem.Allocator,
 ) -> int {
-	return _dt_build(tree, X, y, nil, indices, params, depth, allocator)
+	ones := make([]f64, len(y), allocator)
+	defer delete(ones, allocator)
+	for &v in ones {v = 1}
+	return _dt_build(tree, X, y, ones, nil, indices, params, depth, allocator)
 }
 
 _dt_build :: proc(
 	tree: ^DecisionTree,
 	X: ^l.Matrix(f64),
 	y: []f64,
+	sw: []f64, // sample weights (never nil)
 	codes: []int, // nil: regression
 	indices: []int,
 	params: TreeParams,
@@ -196,39 +219,46 @@ _dt_build :: proc(
 
 	// --- 1. Node statistics ---
 	impurity, mean_y := 0.0, 0.0
+	W := 0.0 // total weight of the node
 	pure := false
 	if classify {
-		counts := make([]int, K, allocator)
+		counts := make([]f64, K, allocator) // weighted class counts
 		defer delete(counts, allocator)
-		for idx in indices {counts[codes[idx]] += 1}
+		for idx in indices {counts[codes[idx]] += sw[idx]}
+		for c in counts {W += c}
 		base := len(tree.proba)
 		resize(&tree.proba, base + K)
-		best_k := 0
+		best_k, n_present := 0, 0
 		for c, k in counts {
-			tree.proba[base + k] = f64(c) / f64(n)
+			tree.proba[base + k] = c / W
 			if c > counts[best_k] do best_k = k
+			if c > 0 do n_present += 1
 		}
-		impurity = _class_impurity(counts, n, params.criterion)
+		impurity = _class_impurity(counts, W, params.criterion)
 		tree.nodes[node_idx].value = tree.classes[best_k]
-		pure = counts[best_k] == n
+		pure = n_present <= 1
 	} else {
-		// two-pass: mean, then variance
+		// two-pass: weighted mean, then weighted variance
 		sum_y := 0.0
-		for idx in indices {sum_y += y[idx]}
-		mean_y = sum_y / f64(n)
+		for idx in indices {
+			W += sw[idx]
+			sum_y += sw[idx] * y[idx]
+		}
+		mean_y = sum_y / W
 		scale := 0.0
 		for idx in indices {
 			d := y[idx] - mean_y
-			impurity += d * d
-			scale += y[idx] * y[idx]
+			impurity += sw[idx] * d * d
+			scale += sw[idx] * y[idx] * y[idx]
 		}
-		impurity /= f64(n)
-		scale /= f64(n)
+		impurity /= W
+		scale /= W
 		tree.nodes[node_idx].value = mean_y
 		// pure node: variance at rounding level of y²
 		pure = impurity <= 1e-14 * scale
 	}
 	tree.nodes[node_idx].impurity = impurity
+	tree.nodes[node_idx].weight = W
 
 	// --- 2. Stopping criteria ---
 	if depth >= params.max_depth || n < params.min_samples || n < 2 || pure {
@@ -260,10 +290,10 @@ _dt_build :: proc(
 		gain, threshold: f64
 		ok: bool
 		if classify {
-			gain, threshold, ok = _find_best_class_split(X, codes, sorted, f, K, impurity, params.criterion, allocator)
+			gain, threshold, ok = _find_best_class_split(X, codes, sw, sorted, f, K, impurity, params.criterion, allocator)
 		} else {
 			// on y centred at the node mean: no cancellation
-			gain, threshold, ok = _find_best_split_on_feature(X, y, sorted, f, mean_y, n, impurity)
+			gain, threshold, ok = _find_best_split_weighted(X, y, sw, sorted, f, mean_y, impurity)
 		}
 
 		// any valid split beats none, even at ~zero gain (sklearn: XOR-like data)
@@ -289,8 +319,8 @@ _dt_build :: proc(
 		delete(right_idx, allocator)
 	}
 
-	l_child := _dt_build(tree, X, y, codes, left_idx, params, depth + 1, allocator)
-	r_child := _dt_build(tree, X, y, codes, right_idx, params, depth + 1, allocator)
+	l_child := _dt_build(tree, X, y, sw, codes, left_idx, params, depth + 1, allocator)
+	r_child := _dt_build(tree, X, y, sw, codes, right_idx, params, depth + 1, allocator)
 	tree.nodes[node_idx].left_idx = l_child
 	tree.nodes[node_idx].right_idx = r_child
 
@@ -356,10 +386,65 @@ _find_best_split_on_feature :: proc(
 	return best_gain, best_thresh, found
 }
 
-// Gini / entropy split: gain = impurity(node) - (n_l·imp_l + n_r·imp_r) / n
+// Weighted MSE split: with W_l, W_r the child weights and d = y - node_mean,
+// W_c·impurity_c = Σ w d² - (Σ w d)² / W_c; gain = impurity(node) - Σ_c W_c·imp_c / W
+_find_best_split_weighted :: proc(
+	X: ^l.Matrix(f64),
+	y: []f64,
+	sw: []f64,
+	sorted_indices: []int,
+	feature: int,
+	node_mean: f64,
+	parent_variance: f64,
+) -> (
+	gain: f64,
+	threshold: f64,
+	found: bool,
+) {
+	n := len(sorted_indices)
+	total_w, total_sum, total_sum2 := 0.0, 0.0, 0.0
+	for idx in sorted_indices {
+		d := y[idx] - node_mean
+		total_w += sw[idx]
+		total_sum += sw[idx] * d
+		total_sum2 += sw[idx] * d * d
+	}
+
+	left_w, left_sum, left_sum2 := 0.0, 0.0, 0.0
+	for k in 0 ..< n - 1 {
+		idx := sorted_indices[k]
+		d := y[idx] - node_mean
+		left_w += sw[idx]
+		left_sum += sw[idx] * d
+		left_sum2 += sw[idx] * d * d
+
+		curr_val := X.data[idx * X.cols + feature]
+		next_val := X.data[sorted_indices[k + 1] * X.cols + feature]
+		if curr_val == next_val {continue}
+
+		right_w := total_w - left_w
+		if left_w <= 0 || right_w <= 0 do continue
+		right_sum := total_sum - left_sum
+		right_sum2 := total_sum2 - left_sum2
+		weighted_impurity :=
+			((left_sum2 - left_sum * left_sum / left_w) + (right_sum2 - right_sum * right_sum / right_w)) / total_w
+		g := parent_variance - weighted_impurity
+
+		if !found || g > gain {
+			found = true
+			gain = g
+			threshold = _split_threshold(curr_val, next_val)
+		}
+	}
+	return
+}
+
+// Gini / entropy split: gain = impurity(node) - (W_l·imp_l + W_r·imp_r) / W
+// (weighted class counts; right = total - left, as sklearn)
 _find_best_class_split :: proc(
 	X: ^l.Matrix(f64),
 	codes: []int,
+	sw: []f64,
 	sorted_indices: []int,
 	feature: int,
 	n_classes: int,
@@ -372,28 +457,32 @@ _find_best_class_split :: proc(
 	found: bool,
 ) {
 	n := len(sorted_indices)
-	left := make([]int, n_classes, allocator)
-	right := make([]int, n_classes, allocator)
+	total := make([]f64, n_classes, allocator)
+	left := make([]f64, n_classes, allocator)
+	right := make([]f64, n_classes, allocator)
 	defer {
+		delete(total, allocator)
 		delete(left, allocator)
 		delete(right, allocator)
 	}
-	for idx in sorted_indices {right[codes[idx]] += 1}
+	W := 0.0
+	for idx in sorted_indices {total[codes[idx]] += sw[idx]}
+	for c in total {W += c}
 
+	w_l := 0.0
 	for k in 0 ..< n - 1 {
 		idx := sorted_indices[k]
-		left[codes[idx]] += 1
-		right[codes[idx]] -= 1
+		left[codes[idx]] += sw[idx]
+		w_l += sw[idx]
 
 		curr_val := X.data[idx * X.cols + feature]
 		next_val := X.data[sorted_indices[k + 1] * X.cols + feature]
 		if curr_val == next_val {continue}
 
-		n_l := k + 1
-		n_r := n - n_l
-		weighted :=
-			(f64(n_l) * _class_impurity(left, n_l, criterion) + f64(n_r) * _class_impurity(right, n_r, criterion)) /
-			f64(n)
+		w_r := W - w_l
+		if w_l <= 0 || w_r <= 0 do continue
+		for c in 0 ..< n_classes {right[c] = total[c] - left[c]}
+		weighted := (w_l * _class_impurity(left, w_l, criterion) + w_r * _class_impurity(right, w_r, criterion)) / W
 		g := parent_impurity - weighted
 
 		if !found || g > gain {
@@ -405,12 +494,13 @@ _find_best_class_split :: proc(
 	return
 }
 
-_class_impurity :: proc(counts: []int, n: int, criterion: TreeCriterion) -> f64 {
+// impurity of (weighted) class counts with total W
+_class_impurity :: proc(counts: []f64, W: f64, criterion: TreeCriterion) -> f64 {
 	if criterion == .Entropy {
 		h := 0.0
 		for c in counts {
 			if c > 0 {
-				p := f64(c) / f64(n)
+				p := c / W
 				h -= p * math.log2(p)
 			}
 		}
@@ -418,7 +508,7 @@ _class_impurity :: proc(counts: []int, n: int, criterion: TreeCriterion) -> f64 
 	}
 	s := 0.0
 	for c in counts {
-		p := f64(c) / f64(n)
+		p := c / W
 		s += p * p
 	}
 	return 1 - s

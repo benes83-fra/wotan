@@ -122,10 +122,10 @@ _tree_feature_importance :: proc(
 		if node.left_idx < 0 do continue
 		left := &tree.nodes[node.left_idx]
 		right := &tree.nodes[node.right_idx]
-		dec :=
-			f64(node.sample_count) * node.impurity -
-			f64(left.sample_count) * left.impurity -
-			f64(right.sample_count) * right.impurity
+		// weighted node sizes (sklearn weighted_n_node_samples); trees loaded
+		// from files older than format 3 have no weights: use the counts
+		nw :: proc(nd: ^Node) -> f64 {return nd.weight if nd.weight > 0 else f64(nd.sample_count)}
+		dec := nw(&node) * node.impurity - nw(left) * left.impurity - nw(right) * right.impurity
 		if node.feature_idx >= 0 && node.feature_idx < n_features {
 			importance[node.feature_idx] += dec
 		}

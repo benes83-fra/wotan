@@ -168,11 +168,20 @@ pipeline_set_mlp :: proc(pipe: ^Pipeline, params: MLPParams) {
 // Public API: Fit
 // ============================================================================
 
-pipeline_fit :: proc(pipe: ^Pipeline, X: ^l.Matrix(f64), y: []f64) {
+// sample_weight (optional) goes to the final model, as sklearn's
+// pipeline.fit(X, y, model__sample_weight=w); the scalers are unweighted.
+// Supported by Logistic, LinearSVM, KernelSVM, SVR, DecisionTree, RandomForest
+// and GradientBoosting; other models panic when weights are given.
+pipeline_fit :: proc(pipe: ^Pipeline, X: ^l.Matrix(f64), y: []f64, sample_weight: []f64 = nil) {
 	if pipe.model.type == .None {
 		panic("pipeline_fit: No model set in pipeline")
 	}
 	if len(y) != X.rows do panic("pipeline_fit: y length mismatch")
+	#partial switch pipe.model.type {
+	case .Logistic, .LinearSVM, .KernelSVM, .SVR, .DecisionTree, .RandomForest, .GradientBoosting:
+	case:
+		if sample_weight != nil do panic("pipeline_fit: this model does not support sample_weight")
+	}
 	// Refit: release the previously fitted scalers and model first
 	if pipe.is_fitted {
 		_pipeline_free_fitted(pipe)
@@ -210,6 +219,7 @@ pipeline_fit :: proc(pipe: ^Pipeline, X: ^l.Matrix(f64), y: []f64) {
 			y,
 			pipe.model.logistic_params,
 			pipe.allocator,
+			sample_weight,
 		)
 	case .LinearSVM:
 		pipe.model.linear_svm = svm_fit_linear(
@@ -217,6 +227,7 @@ pipeline_fit :: proc(pipe: ^Pipeline, X: ^l.Matrix(f64), y: []f64) {
 			y,
 			pipe.model.lsvm_params,
 			pipe.allocator,
+			sample_weight,
 		)
 	case .KernelSVM:
 		pipe.model.kernel_svm = kernel_svm_fit(
@@ -224,6 +235,7 @@ pipeline_fit :: proc(pipe: ^Pipeline, X: ^l.Matrix(f64), y: []f64) {
 			y,
 			pipe.model.ksvm_params,
 			pipe.allocator,
+			sample_weight,
 		)
 	case .KNN:
 		pipe.model.knn = knn_fit(&current_X, y, pipe.model.knn_params, pipe.allocator)
@@ -251,17 +263,17 @@ pipeline_fit :: proc(pipe: ^Pipeline, X: ^l.Matrix(f64), y: []f64) {
 			pipe.allocator,
 		)
 	case .SVR:
-		pipe.model.svr = svr_fit(&current_X, y, pipe.model.svr_params, pipe.allocator)
+		pipe.model.svr = svr_fit(&current_X, y, pipe.model.svr_params, pipe.allocator, sample_weight)
 	case .OLS:
 		Xi := _with_intercept(&current_X, pipe.allocator)
 		defer l.matrix_free(&Xi)
 		pipe.model.ols = ols_fit(&Xi, y, pipe.model.ols_method, pipe.allocator)
 	case .DecisionTree:
-		pipe.model.dt = dt_fit(&current_X, y, pipe.model.dt_params, pipe.allocator)
+		pipe.model.dt = dt_fit(&current_X, y, pipe.model.dt_params, pipe.allocator, sample_weight)
 	case .RandomForest:
-		pipe.model.rf = rf_fit(&current_X, y, pipe.model.rf_params, pipe.allocator)
+		pipe.model.rf = rf_fit(&current_X, y, pipe.model.rf_params, pipe.allocator, sample_weight)
 	case .GradientBoosting:
-		pipe.model.gb = gb_fit(&current_X, y, pipe.model.gb_params, pipe.allocator)
+		pipe.model.gb = gb_fit(&current_X, y, pipe.model.gb_params, pipe.allocator, sample_weight)
 	case .GaussianNB:
 		pipe.model.gnb = gnb_fit(&current_X, y, pipe.model.gnb_epsilon, pipe.allocator)
 	case .OvR_Logistic:

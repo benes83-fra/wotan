@@ -45,17 +45,23 @@ SVRParams :: struct {
 // gamma ≤ 0 means sklearn's "scale"; tol: KKT tolerance (≤ 0: 1e-3);
 // max_iter: passes over the data (≤ 0: no limit). learning_rate /
 // optimizer_type are not used by the exact solver.
+// sample_weight (optional): α_i, α*_i ≤ C · sample_weight[i]; samples with
+// weight 0 are removed before training (sklearn SVR).
 // ============================================================================
 svr_fit :: proc(
-	X: ^l.Matrix(f64),
-	y: []f64,
+	X_in: ^l.Matrix(f64),
+	y_in: []f64,
 	params: SVRParams,
 	allocator: mem.Allocator = context.allocator,
+	sample_weight: []f64 = nil,
 ) -> SupportVectorRegression {
+	if len(y_in) != X_in.rows do panic("svr_fit: y length mismatch")
+	if X_in.rows == 0 do panic("svr_fit: no samples")
+	sub := _svm_weighted_subset(X_in, y_in, sample_weight, .None, params.C, 2)
+	defer _svm_subset_free(&sub)
+	X, y := &sub.X, sub.y
 	n_samples := X.rows
 	n_features := X.cols
-	if len(y) != n_samples do panic("svr_fit: y length mismatch")
-	if n_samples == 0 do panic("svr_fit: no samples")
 
 	gamma := params.gamma if params.gamma > 0 else _svm_gamma_scale(X)
 	k := _smo_kernel_init(X, params.kernel_type, gamma, params.degree, params.coef0, context.temp_allocator)
@@ -74,7 +80,7 @@ svr_fit :: proc(
 		p[i + n_samples], sgn[i + n_samples] = params.epsilon + y[i], -1.0
 	}
 
-	rho, converged, n_iter := _smo_solve(&k, p, sgn, params.C, params.tol, params.max_iter * L, true, v)
+	rho, converged, n_iter := _smo_solve(&k, p, sgn, sub.Cs, params.tol, params.max_iter * L, true, v)
 
 	// Support vectors: α_i - α*_i ≠ 0
 	sv_indices := make([dynamic]int, 0, allocator)
@@ -83,7 +89,7 @@ svr_fit :: proc(
 	}
 	n_sv := len(sv_indices)
 	sv_final := make([]int, n_sv, allocator)
-	copy(sv_final, sv_indices[:])
+	for idx, i in sv_indices {sv_final[i] = sub.rows[idx]} // index into the caller's X
 	sv_data := l.matrix_new(f64, n_sv, n_features, allocator)
 	alpha_diff_slice := make([]f64, n_sv, allocator)
 	for idx, i in sv_indices[:] {

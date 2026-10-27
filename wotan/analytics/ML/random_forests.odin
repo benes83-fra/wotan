@@ -32,6 +32,8 @@ RFParams :: struct {
 	// forest (sklearn RandomForestClassifier: average of the trees' class
 	// probabilities, predict = class with the highest average)
 	criterion:    TreeCriterion,
+	class_weight: ClassWeight, // classification only; computed on the full y
+	// (sklearn class_weight="balanced", not "balanced_subsample")
 }
 
 // ============================================================================
@@ -43,10 +45,14 @@ rf_fit :: proc(
 	y: []f64,
 	params: RFParams,
 	allocator: mem.Allocator = context.allocator,
+	sample_weight: []f64 = nil, // optional; a bootstrap copy of a row carries its weight
 ) -> RandomForest {
 	n_samples := X.rows
 	if len(y) != n_samples do panic("rf_fit: y length mismatch")
 	if n_samples == 0 do panic("rf_fit: no samples")
+	if params.criterion == .MSE && params.class_weight != .None do panic("rf_fit: class_weight needs a classification criterion")
+	sw := _effective_weights(y, sample_weight, params.class_weight, "rf_fit", allocator)
+	defer delete(sw, allocator)
 
 	forest: RandomForest
 	forest.allocator = allocator
@@ -110,6 +116,7 @@ rf_fit :: proc(
 			allocator,
 			codes,
 			forest.classes,
+			sw,
 		)
 		append(&forest.trees, tree)
 
@@ -308,12 +315,18 @@ _fit_tree_with_feature_subsampling :: proc(
 	allocator: mem.Allocator,
 	codes: []int = nil, // classification: class index per row of X (into classes)
 	classes: []f64 = nil,
+	weights: []f64 = nil, // per row of X (nil = 1)
 ) -> DecisionTree {
 	// Create subsampled X and y
 	n_samples := len(sample_indices)
 	X_sub := l.matrix_new(f64, n_samples, X.cols, allocator)
 	y_sub := make([]f64, n_samples, allocator)
 	codes_sub := make([]int, n_samples if codes != nil else 0, allocator)
+	w_sub := make([]f64, n_samples if weights != nil else 0, allocator)
+	defer delete(w_sub, allocator)
+	for idx, i in sample_indices {
+		if weights != nil do w_sub[i] = weights[idx]
+	}
 
 	for idx, i in sample_indices {
 		for j in 0 ..< X.cols {
@@ -329,9 +342,9 @@ _fit_tree_with_feature_subsampling :: proc(
 	tree: DecisionTree
 	if codes != nil {
 		// every tree owns a copy of the forest's classes
-		tree = _dt_fit_codes(&X_sub, y_sub, codes_sub, slice.clone(classes, allocator), tree_params, allocator)
+		tree = _dt_fit_codes(&X_sub, y_sub, codes_sub, slice.clone(classes, allocator), tree_params, allocator, w_sub if weights != nil else nil)
 	} else {
-		tree = _dt_fit_codes(&X_sub, y_sub, nil, nil, tree_params, allocator)
+		tree = _dt_fit_codes(&X_sub, y_sub, nil, nil, tree_params, allocator, w_sub if weights != nil else nil)
 	}
 
 	l.matrix_free(&X_sub)

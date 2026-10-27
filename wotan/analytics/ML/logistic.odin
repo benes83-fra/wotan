@@ -25,6 +25,7 @@ LogisticParams :: struct {
 	learning_rate:  f64, // Initial learning rate / max step size
 	fit_intercept:  bool,
 	optimizer_type: optim.OptimizerType, // .SGD, .Adam, .RMSProp, or .LBFGS
+	class_weight:   ClassWeight, // weight of class c in the loss (sklearn class_weight)
 }
 
 // ============================================================================
@@ -34,6 +35,7 @@ LogisticParams :: struct {
 _LogisticContext :: struct {
 	X:          ^l.Matrix(f64),
 	y:          []f64, // Expected to be 0.0 or 1.0
+	w:          []f64, // per-sample weights (nil = 1)
 	C:          f64,
 	fit_bias:   bool,
 	n_samples:  int,
@@ -55,7 +57,7 @@ _safe_log :: proc(x: f64) -> f64 {
 }
 
 // Objective (sklearn LogisticRegression, L2 penalty), divided by n·C:
-//   (1/n) Σ log-loss_i + 1/(2nC) ||w||²   (bias not penalised)
+//   (1/n) Σ s_i log-loss_i + 1/(2nC) ||w||²   (bias not penalised, s_i = sample weight)
 // The log-loss is evaluated as softplus(z) - y·z, exact for any z.
 _logistic_loss :: proc(params_vec: []f64, user_data: rawptr) -> f64 {
 	ctx := cast(^_LogisticContext)(user_data)
@@ -74,7 +76,9 @@ _logistic_loss :: proc(params_vec: []f64, user_data: rawptr) -> f64 {
 		z := b + l.dot_simd(w, x_i)
 
 		// Binary cross-entropy: log(1 + e^z) - y z
-		loss += math.max(z, 0.0) + math.ln_f64(1.0 + math.exp(-math.abs(z))) - ctx.y[i] * z
+		li := math.max(z, 0.0) + math.ln_f64(1.0 + math.exp(-math.abs(z))) - ctx.y[i] * z
+		if ctx.w != nil do li *= ctx.w[i]
+		loss += li
 	}
 
 	lambda := 1.0 / (f64(ctx.n_samples) * ctx.C)
@@ -98,6 +102,7 @@ _logistic_gradient :: proc(params_vec: []f64, user_data: rawptr, grad: []f64) {
 		z := b + l.dot_simd(w, x_i)
 		y_hat := _sigmoid(z)
 		err := y_hat - ctx.y[i]
+		if ctx.w != nil do err *= ctx.w[i]
 
 		// Accumulate gradients
 		for f in 0 ..< ctx.n_features {
@@ -123,6 +128,7 @@ logistic_fit :: proc(
 	y: []f64, // Labels: 0.0 or 1.0
 	params: LogisticParams,
 	allocator: mem.Allocator = context.allocator,
+	sample_weight: []f64 = nil, // optional, one weight >= 0 per row (sklearn sample_weight)
 ) -> LogisticRegression {
 	n_features := X.cols
 	n_params := n_features + 1
@@ -139,9 +145,13 @@ logistic_fit :: proc(
 	grad := make([]f64, n_params, allocator)
 	defer delete(grad, allocator)
 
+	w := _effective_weights(y, sample_weight, params.class_weight, "logistic_fit", allocator)
+	defer delete(w, allocator)
+
 	ctx := _LogisticContext {
 		X          = X,
 		y          = y,
+		w          = w,
 		C          = params.C,
 		fit_bias   = params.fit_intercept,
 		n_samples  = X.rows,
@@ -177,12 +187,12 @@ logistic_fit :: proc(
 	}
 
 	// Extract final weights and bias
-	w := make([]f64, n_features, allocator)
-	copy(w, params_vec[0:n_features])
+	coef := make([]f64, n_features, allocator)
+	copy(coef, params_vec[0:n_features])
 	b := params_vec[n_features]
 
 	return LogisticRegression {
-		weights = w,
+		weights = coef,
 		bias = b,
 		n_iter = n_iter,
 		converged = converged,

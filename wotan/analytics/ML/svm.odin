@@ -26,6 +26,7 @@ SVMParams :: struct {
 	learning_rate:  f64,
 	fit_intercept:  bool,
 	optimizer_type: optim.OptimizerType,
+	class_weight:   ClassWeight, // C of class c is C · class_weight[c] (sklearn class_weight)
 }
 // ============================================================================
 // Public API: Fit Linear SVM
@@ -35,16 +36,22 @@ SVMParams :: struct {
 // tol: KKT tolerance (≤ 0: 1e-3, sklearn's default); max_iter: passes over the
 // data (≤ 0: no limit), i.e. at most max_iter·n SMO updates.
 // learning_rate / optimizer_type are not used by the exact solver.
+// sample_weight (optional): C_i = C · sample_weight[i] · class_weight[y_i], as
+// LIBSVM / sklearn; samples with weight 0 are removed before training.
 // ============================================================================
 svm_fit_linear :: proc(
-	X: ^l.Matrix(f64),
-	y: []f64,
+	X_in: ^l.Matrix(f64),
+	y_in: []f64,
 	params: SVMParams,
 	allocator: mem.Allocator = context.allocator,
+	sample_weight: []f64 = nil,
 ) -> LinearSVM {
+	_svm_check_labels(y_in, X_in.rows, "svm_fit_linear")
+	sub := _svm_weighted_subset(X_in, y_in, sample_weight, params.class_weight, params.C, 1)
+	defer _svm_subset_free(&sub)
+	X, y := &sub.X, sub.y
 	n_samples := X.rows
 	n_features := X.cols
-	_svm_check_labels(y, n_samples, "svm_fit_linear")
 
 	k := _smo_kernel_init(X, .Linear, 0, 0, 0, context.temp_allocator)
 	defer _smo_kernel_free(&k)
@@ -58,7 +65,7 @@ svm_fit_linear :: proc(
 		&k,
 		p,
 		y,
-		params.C,
+		sub.Cs,
 		params.tol,
 		params.max_iter * max(n_samples, 1),
 		params.fit_intercept,
@@ -70,7 +77,7 @@ svm_fit_linear :: proc(
 	sv := make([dynamic]int, 0, allocator)
 	for i in 0 ..< n_samples {
 		if alpha[i] <= 0 do continue
-		append(&sv, i)
+		append(&sv, sub.rows[i]) // index into the caller's X
 		for f in 0 ..< n_features {
 			w[f] += alpha[i] * y[i] * X.data[i * n_features + f]
 		}
@@ -87,6 +94,61 @@ svm_fit_linear :: proc(
 		converged = converged,
 		allocator = allocator,
 	}
+}
+
+// Rows with non-zero effective weight and their bounds C_i = C · weight
+// (repeated `copies` times: ε-SVR has two dual variables per sample).
+// Without weights it is a plain view of X / y with C_i = C.
+_SVMSubset :: struct {
+	X:     l.Matrix(f64),
+	y:     []f64,
+	Cs:    []f64,
+	rows:  []int, // original row of every kept sample
+	owned: bool,
+}
+
+_svm_weighted_subset :: proc(
+	X: ^l.Matrix(f64),
+	y: []f64,
+	sample_weight: []f64,
+	class_weight: ClassWeight,
+	C: f64,
+	copies: int,
+) -> _SVMSubset {
+	n := X.rows
+	w := _effective_weights(y, sample_weight, class_weight, "svm", context.temp_allocator)
+	defer delete(w, context.temp_allocator)
+	s: _SVMSubset
+	kept := 0
+	for i in 0 ..< n {if w == nil || w[i] > 0 do kept += 1}
+	s.rows = make([]int, kept, context.temp_allocator)
+	s.Cs = make([]f64, kept * copies, context.temp_allocator)
+	j := 0
+	for i in 0 ..< n {
+		if w != nil && w[i] <= 0 do continue
+		s.rows[j] = i
+		wi := 1.0
+		if w != nil do wi = w[i]
+		for c in 0 ..< copies {s.Cs[c * kept + j] = C * wi}
+		j += 1
+	}
+	if kept == n {
+		s.X, s.y = X^, y
+	} else {
+		s.owned = true
+		s.X = subset_matrix(X, s.rows, context.temp_allocator)
+		s.y = subset_slice(y, s.rows, context.temp_allocator)
+	}
+	return s
+}
+
+_svm_subset_free :: proc(s: ^_SVMSubset) {
+	if s.owned {
+		l.matrix_free(&s.X)
+		delete(s.y, context.temp_allocator)
+	}
+	delete(s.rows, context.temp_allocator)
+	delete(s.Cs, context.temp_allocator)
 }
 
 _svm_check_labels :: proc(y: []f64, n: int, name: string) {
@@ -155,6 +217,7 @@ KernelSVMParams :: struct {
 	tol:            f64,
 	learning_rate:  f64,
 	optimizer_type: optim.OptimizerType,
+	class_weight:   ClassWeight, // C of class c is C · class_weight[c] (sklearn class_weight)
 }
 
 // ============================================================================
@@ -201,16 +264,23 @@ _kernel_eval :: proc(
 //   decision(x) = Σ α_i y_i K(x_i, x) + b,  b = -ρ  (= sklearn SVC)
 // tol: KKT tolerance (≤ 0: 1e-3); max_iter: passes over the data (≤ 0: no
 // limit). learning_rate / optimizer_type are not used by the exact solver.
+// sample_weight (optional): C_i = C · sample_weight[i] · class_weight[y_i];
+// samples with weight 0 are removed before training (gamma="scale" is then
+// computed on the remaining rows, as sklearn).
 // ============================================================================
 kernel_svm_fit :: proc(
-	X: ^l.Matrix(f64),
-	y: []f64,
+	X_in: ^l.Matrix(f64),
+	y_in: []f64,
 	params: KernelSVMParams,
 	allocator: mem.Allocator = context.allocator,
+	sample_weight: []f64 = nil,
 ) -> KernelSVM {
+	_svm_check_labels(y_in, X_in.rows, "kernel_svm_fit")
+	sub := _svm_weighted_subset(X_in, y_in, sample_weight, params.class_weight, params.C, 1)
+	defer _svm_subset_free(&sub)
+	X, y := &sub.X, sub.y
 	n_samples := X.rows
 	n_features := X.cols
-	_svm_check_labels(y, n_samples, "kernel_svm_fit")
 
 	gamma := params.gamma if params.gamma > 0 else _svm_gamma_scale(X)
 	k := _smo_kernel_init(X, params.kernel_type, gamma, params.degree, params.coef0, context.temp_allocator)
@@ -221,7 +291,7 @@ kernel_svm_fit :: proc(
 	defer delete(p, context.temp_allocator)
 	for i in 0 ..< n_samples {p[i] = -1.0}
 
-	rho, _, _ := _smo_solve(&k, p, y, params.C, params.tol, params.max_iter * n_samples, true, alpha)
+	rho, _, _ := _smo_solve(&k, p, y, sub.Cs, params.tol, params.max_iter * n_samples, true, alpha)
 
 	// Support vectors: α > 0
 	sv_indices := make([dynamic]int, 0, allocator)
@@ -229,7 +299,7 @@ kernel_svm_fit :: proc(
 	n_sv := len(sv_indices)
 
 	sv_final := make([]int, n_sv, allocator)
-	copy(sv_final, sv_indices[:])
+	for idx, i in sv_indices {sv_final[i] = sub.rows[idx]} // index into the caller's X
 	sv_data := l.matrix_new(f64, n_sv, n_features, allocator)
 	alpha_final := make([]f64, n_sv, allocator)
 	sv_label_final := make([]f64, n_sv, allocator)
