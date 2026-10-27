@@ -2,6 +2,7 @@ package ML
 
 import l "../../linalg"
 import "core:mem"
+import "core:slice"
 
 // ============================================================================
 // Binary Classifier Tagged Union
@@ -141,6 +142,8 @@ _ovr_fit_internal :: proc(
 		}
 	}
 
+	// sorted like sklearn's np.unique (fixes class order and argmax tie-breaking)
+	slice.sort(unique_classes[:])
 	n_classes := len(unique_classes)
 
 	// 2. Train one model per class

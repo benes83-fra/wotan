@@ -19,7 +19,7 @@ LogisticRegression :: struct {
 }
 
 LogisticParams :: struct {
-	C:              f64, // Inverse of regularization strength (smaller = stronger regularization)
+	C:              f64, // Inverse of regularization strength, as in sklearn (math.INF_F64 = no penalty)
 	max_iter:       int,
 	tol:            f64, // Convergence tolerance (gradient norm)
 	learning_rate:  f64, // Initial learning rate / max step size
@@ -35,6 +35,7 @@ _LogisticContext :: struct {
 	X:          ^l.Matrix(f64),
 	y:          []f64, // Expected to be 0.0 or 1.0
 	C:          f64,
+	fit_bias:   bool,
 	n_samples:  int,
 	n_features: int,
 }
@@ -53,6 +54,9 @@ _safe_log :: proc(x: f64) -> f64 {
 	return math.ln_f64(math.max(x, 1e-15))
 }
 
+// Objective (sklearn LogisticRegression, L2 penalty), divided by n·C:
+//   (1/n) Σ log-loss_i + 1/(2nC) ||w||²   (bias not penalised)
+// The log-loss is evaluated as softplus(z) - y·z, exact for any z.
 _logistic_loss :: proc(params_vec: []f64, user_data: rawptr) -> f64 {
 	ctx := cast(^_LogisticContext)(user_data)
 	w := params_vec[0:ctx.n_features]
@@ -68,14 +72,12 @@ _logistic_loss :: proc(params_vec: []f64, user_data: rawptr) -> f64 {
 	for i in 0 ..< ctx.n_samples {
 		x_i := ctx.X.data[i * ctx.n_features:i * ctx.n_features + ctx.n_features]
 		z := b + l.dot_simd(w, x_i)
-		y_hat := _sigmoid(z)
 
-		// Binary Cross-Entropy
-		loss += -(ctx.y[i] * _safe_log(y_hat) + (1.0 - ctx.y[i]) * _safe_log(1.0 - y_hat))
+		// Binary cross-entropy: log(1 + e^z) - y z
+		loss += math.max(z, 0.0) + math.ln_f64(1.0 + math.exp(-math.abs(z))) - ctx.y[i] * z
 	}
 
-	// Average loss + L2 regularization (lambda = 1/C)
-	lambda := 1.0 / ctx.C
+	lambda := 1.0 / (f64(ctx.n_samples) * ctx.C)
 	return (loss / f64(ctx.n_samples)) + 0.5 * lambda * reg_term
 }
 
@@ -89,7 +91,7 @@ _logistic_gradient :: proc(params_vec: []f64, user_data: rawptr, grad: []f64) {
 		grad[i] = 0.0
 	}
 
-	lambda := 1.0 / ctx.C
+	lambda := 1.0 / (f64(ctx.n_samples) * ctx.C)
 
 	for i in 0 ..< ctx.n_samples {
 		x_i := ctx.X.data[i * ctx.n_features:i * ctx.n_features + ctx.n_features]
@@ -109,6 +111,7 @@ _logistic_gradient :: proc(params_vec: []f64, user_data: rawptr, grad: []f64) {
 		grad[f] = (grad[f] / f64(ctx.n_samples)) + lambda * w[f]
 	}
 	grad[ctx.n_features] /= f64(ctx.n_samples)
+	if !ctx.fit_bias do grad[ctx.n_features] = 0.0
 }
 
 // ============================================================================
@@ -123,6 +126,12 @@ logistic_fit :: proc(
 ) -> LogisticRegression {
 	n_features := X.cols
 	n_params := n_features + 1
+	if len(y) != X.rows do panic("logistic_fit: y length mismatch")
+	if X.rows == 0 do panic("logistic_fit: no samples")
+	if !(params.C > 0.0) do panic("logistic_fit: C must be > 0 (use math.INF_F64 for no penalty)")
+	for v in y {
+		if v != 0.0 && v != 1.0 do panic("logistic_fit: labels must be 0 or 1")
+	}
 
 	params_vec := make([]f64, n_params, allocator)
 	defer delete(params_vec, allocator)
@@ -134,6 +143,7 @@ logistic_fit :: proc(
 		X          = X,
 		y          = y,
 		C          = params.C,
+		fit_bias   = params.fit_intercept,
 		n_samples  = X.rows,
 		n_features = n_features,
 	}
@@ -191,6 +201,7 @@ logistic_predict_proba :: proc(
 ) -> []f64 {
 	n := X.rows
 	n_features := len(model.weights)
+	if X.cols != n_features do panic("logistic_predict_proba: X has the wrong number of columns")
 	probs := make([]f64, n, allocator)
 
 	for i in 0 ..< n {
@@ -213,6 +224,7 @@ logistic_predict :: proc(
 ) -> []f64 {
 	n := X.rows
 	n_features := len(model.weights)
+	if X.cols != n_features do panic("logistic_predict: X has the wrong number of columns")
 	preds := make([]f64, n, allocator)
 
 	for i in 0 ..< n {

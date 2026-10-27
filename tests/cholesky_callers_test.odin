@@ -100,15 +100,25 @@ cholesky_callers_test :: proc(allocator: mem.Allocator) {
 		for v, i in XtXi.data {ref[i] = v * o.sigma2}
 		err_ols := vrel(o.vcov.data, ref)
 
+		// ridge: A = XᵀX + λM (intercept column unpenalised), vcov = σ² A⁻¹ XᵀX A⁻¹
 		lam := 5.0
 		r := ml.ridge_fit(&X, y, lam, .Cholesky, allocator)
-		for i in 0 ..< p {XtX.data[i * p + i] += lam}
-		XtXli := inverse(&XtX)
-		defer l.matrix_free(&XtXli)
-		for v, i in XtXli.data {ref[i] = v * r.sigma2}
+		A := l.matrix_new(f64, p, p)
+		defer l.matrix_free(&A)
+		copy(A.data, XtX.data)
+		for i in 1 ..< p {A.data[i * p + i] += lam}
+		Ai := inverse(&A)
+		defer l.matrix_free(&Ai)
+		for i in 0 ..< p {
+			for j in 0 ..< p {
+				s := 0.0
+				for k in 0 ..< p {for m in 0 ..< p {s += at(Ai, i, k) * at(XtX, k, m) * at(Ai, m, j)}}
+				ref[i * p + j] = s * r.sigma2
+			}
+		}
 		err_ridge := vrel(r.vcov.data, ref)
 		expect(&passed, &total, err_ols < 1e-12 && err_ridge < 1e-12,
-			fmt.tprintf("OLS / ridge vcov match σ²(XᵀX [+λI])⁻¹ (%.1e / %.1e)", err_ols, err_ridge))
+			fmt.tprintf("OLS / ridge vcov match σ²(XᵀX)⁻¹ / σ²A⁻¹XᵀXA⁻¹ (%.1e / %.1e)", err_ols, err_ridge))
 	}
 
 	// 3. GLS with AR(1) errors

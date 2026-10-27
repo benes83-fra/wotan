@@ -27,20 +27,11 @@ gls_fit :: proc(
 	L := l.matrix_new(f64, n, n, allocator)
 	copy(L.data, Omega.data)
 
-	// Check SPD before decomposing
-	is_spd := true
-	for j in 0 ..< n {
-		if L.data[j * L.cols + j] <= 0.0 {
-			is_spd = false
-			break
-		}
-	}
-	if !is_spd {
+	// In-place: L now contains the lower triangle
+	if !l.cholesky_try(&L) {
 		l.matrix_free(&L)
 		panic("gls_fit: Omega is not positive definite")
 	}
-
-	l.cholesky_decompose(&L) // In-place: L now contains lower triangle
 
 	// =====================================================================
 	// 2. Transform y: y_star = L⁻¹ y (forward substitution)
@@ -74,9 +65,14 @@ gls_fit :: proc(
 	}
 
 	// =====================================================================
-	// 4. Solve standard OLS on transformed data: (X_star, y_star)
+	// 4. Solve OLS on the whitened data; residuals on the original scale
 	// =====================================================================
-	result := ols_fit_full(&X_star, y_star, method, allocator)
+	ones := make([]f64, n, context.temp_allocator)
+	defer delete(ones, context.temp_allocator)
+	for i in 0 ..< n {ones[i] = 1.0}
+	iota_star := l.forward_substitute_simd(&L, ones, context.temp_allocator)
+	defer delete(iota_star, context.temp_allocator)
+	result := _ols_core(&X_star, y_star, X, y, iota_star, method, allocator)
 
 	// =====================================================================
 	// 5. Cleanup temporary matrices
@@ -108,13 +104,13 @@ gls_fit_kron :: proc(
 	// Cholesky decompose factors
 	L_A := l.matrix_new(f64, m, m, allocator)
 	copy(L_A.data, Omega_A.data)
-	l.cholesky_decompose(&L_A)
 	defer l.matrix_free(&L_A)
+	if !l.cholesky_try(&L_A) do panic("gls_fit_kron: Omega_A is not positive definite")
 
 	L_B := l.matrix_new(f64, k, k, allocator)
 	copy(L_B.data, Omega_B.data)
-	l.cholesky_decompose(&L_B)
 	defer l.matrix_free(&L_B)
+	if !l.cholesky_try(&L_B) do panic("gls_fit_kron: Omega_B is not positive definite")
 
 	// Transform y: y_star = (L_A ⊗ L_B)⁻¹ y
 	y_star := _kron_solve_lower(&L_A, &L_B, y, allocator)
@@ -133,8 +129,13 @@ gls_fit_kron :: proc(
 		delete(x_star_col, context.temp_allocator)
 	}
 
-	// Solve OLS on transformed data
-	result := ols_fit_full(&X_star, y_star, method, allocator)
+	// Solve OLS on the whitened data; residuals on the original scale
+	ones := make([]f64, n, context.temp_allocator)
+	defer delete(ones, context.temp_allocator)
+	for i in 0 ..< n {ones[i] = 1.0}
+	iota_star := _kron_solve_lower(&L_A, &L_B, ones, context.temp_allocator)
+	defer delete(iota_star, context.temp_allocator)
+	result := _ols_core(&X_star, y_star, X, y, iota_star, method, allocator)
 
 	// Cleanup
 	l.matrix_free(&X_star)

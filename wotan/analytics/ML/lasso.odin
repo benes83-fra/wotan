@@ -25,14 +25,18 @@ soft_threshold :: proc(z, gamma: f64) -> f64 {
 
 // ============================================================================
 // Lasso Regression (L1 Regularization) via Coordinate Descent
-// Solves: min ||y - Xβ||² + λ||β||₁
+// Solves: min ½||y - Xβ||² + λ Σ_j m_j |β_j|, m_j = 0 for a constant (intercept)
+// column of X and 1 otherwise. Equivalent to sklearn Lasso(alpha=λ/n,
+// fit_intercept=True) when X = [1, features].
+// df = number of non-zero coefficients (Zou, Hastie & Tibshirani 2007); there
+// is no valid closed-form covariance, so stderr / t / p / CI are NaN.
 // ============================================================================
 lasso_fit :: proc(
 	X: ^l.Matrix(f64),
 	y: []f64,
 	lambda: f64, // regularization strength (λ ≥ 0)
 	max_iter: int = 1000,
-	tol: f64 = 1e-4, // convergence tolerance
+	tol: f64 = 1e-4, // convergence tolerance on max |Δβ_j|
 	allocator: mem.Allocator = context.allocator,
 ) -> OLSResult {
 	n, p := X.rows, X.cols
@@ -41,184 +45,63 @@ lasso_fit :: proc(
 	if len(y) != n do panic("lasso_fit: y length mismatch")
 	if lambda < 0.0 do panic("lasso_fit: lambda must be non-negative")
 
-	// =====================================================================
-	// 1. Precompute XᵀX diagonal and Xᵀy for efficiency
-	// =====================================================================
-	XtX_diag := make([]f64, p, allocator) // diagonal of XᵀX
-	Xty := make([]f64, p, allocator) // Xᵀy
+	mask := _penalty_mask(X, context.temp_allocator)
+	defer delete(mask, context.temp_allocator)
 
+	// =====================================================================
+	// 1. Precompute ||X[:,j]||²
+	// =====================================================================
+	XtX_diag := make([]f64, p, context.temp_allocator)
+	defer delete(XtX_diag, context.temp_allocator)
 	for j in 0 ..< p {
-		// XᵀX[j,j] = ||X[:,j]||²
 		col_norm := 0.0
 		for i in 0 ..< n {
 			val := X.data[i * X.cols + j]
 			col_norm += val * val
 		}
 		XtX_diag[j] = col_norm
-
-		// Xᵀy[j] = X[:,j]ᵀ y
-		sum := 0.0
-		for i in 0 ..< n {
-			sum += X.data[i * X.cols + j] * y[i]
-		}
-		Xty[j] = sum
 	}
-	// defer delete(XtX_diag)
-	// defer delete(Xty)
 
 	// =====================================================================
-	// 2. Initialize β = 0, residuals = y
+	// 2. Initialize β = 0, r = y
 	// =====================================================================
 	beta := make([]f64, p, allocator)
-	residuals := make([]f64, n, allocator)
-	for i in 0 ..< n {residuals[i] = y[i]}
+	r := make([]f64, n, context.temp_allocator)
+	defer delete(r, context.temp_allocator)
+	copy(r, y)
 
 	// =====================================================================
-	// 3. Coordinate descent loop
+	// 3. Coordinate descent: β_j = S(x_jᵀ r_j, λ m_j) / ||x_j||²
 	// =====================================================================
-	for iter in 0 ..< max_iter {
-		beta_old := make([]f64, p, context.temp_allocator)
-		copy(beta_old, beta)
-
+	for _ in 0 ..< max_iter {
 		max_change := 0.0
-
-		// Cycle through coefficients
 		for j in 0 ..< p {
-			if XtX_diag[j] == 0.0 {continue} 	// Skip zero-variance features
+			if XtX_diag[j] == 0.0 {continue} 	// all-zero column: β_j stays 0
 
-			// Compute partial residual: r_j = y - Xβ + X[:,j]*β[j]
-			// = residuals + X[:,j]*β[j]
-			for i in 0 ..< n {
-				residuals[i] += X.data[i * X.cols + j] * beta[j]
-			}
-
-			// Compute rho_j = X[:,j]ᵀ * r_j
+			// rho = x_jᵀ (r + x_j β_j)
 			rho := 0.0
 			for i in 0 ..< n {
-				rho += X.data[i * X.cols + j] * residuals[i]
+				rho += X.data[i * X.cols + j] * r[i]
 			}
+			rho += XtX_diag[j] * beta[j]
 
-			// Soft-thresholding update
-			z := rho / XtX_diag[j]
-			gamma := lambda / XtX_diag[j]
-			beta[j] = soft_threshold(z, gamma)
-
-			// Update residuals: r = r - X[:,j]*β[j]
-			for i in 0 ..< n {
-				residuals[i] -= X.data[i * X.cols + j] * beta[j]
+			new_b := soft_threshold(rho, lambda * mask[j]) / XtX_diag[j]
+			delta := new_b - beta[j]
+			if delta != 0.0 {
+				for i in 0 ..< n {
+					r[i] -= X.data[i * X.cols + j] * delta
+				}
+				beta[j] = new_b
 			}
-
-			// Track max change for convergence
-			change := math.abs(beta[j] - beta_old[j])
-			if change > max_change {max_change = change}
+			if math.abs(delta) > max_change {max_change = math.abs(delta)}
 		}
-
-		// delete(beta_old)
-
-		// Check convergence
 		if max_change < tol {break}
 	}
 
-	// =====================================================================
-	// 4. Fitted values
-	// =====================================================================
-	fitted := l.matvec_dyn_simd(X, beta, allocator)
+	df_fit := 0.0
+	for j in 0 ..< p {if beta[j] != 0.0 {df_fit += 1.0}}
 
-	// =====================================================================
-	// 5. σ² = RSS / (n - df)  (approximate; true df requires active set size)
-	// =====================================================================
-	rss := l.dot_simd(residuals, residuals)
-	// Approximate degrees of freedom: count non-zero coefficients
-	df := 0.0
-	for j in 0 ..< p {if beta[j] != 0.0 {df += 1.0}}
-	sigma2 := rss / f64(f64(n) - df)
-
-	// =====================================================================
-	// 6. vcov = σ² * (X_activeᵀ X_active)⁻¹  (approximate; Lasso bias not captured)
-	// =====================================================================
-	vcov := l.matrix_new(f64, p, p, allocator)
-	// For simplicity, zero out vcov (Lasso inference is complex)
-	for i in 0 ..< p * p {vcov.data[i] = 0.0}
-
-	// =====================================================================
-	// 7. Standard errors (approximate; interpret with caution)
-	// =====================================================================
-	stderr := make([]f64, p, allocator)
-	for j in 0 ..< p {
-		// Use OLS-style stderr for non-zero coefficients
-		if beta[j] != 0.0 && XtX_diag[j] > 0.0 {
-			stderr[j] = math.sqrt(sigma2 / XtX_diag[j])
-		} else {
-			stderr[j] = 0.0
-		}
-	}
-
-	// =====================================================================
-	// 8. t-values (approximate)
-	// =====================================================================
-	tvalues := make([]f64, p, allocator)
-	for j in 0 ..< p {
-		if stderr[j] > 0.0 {
-			tvalues[j] = beta[j] / stderr[j]
-		} else {
-			tvalues[j] = 0.0
-		}
-	}
-
-	// =====================================================================
-	// 9. R² and adjusted R²
-	// =====================================================================
-	mean_y := 0.0
-	for i in 0 ..< n {mean_y += y[i]}
-	mean_y /= f64(n)
-
-	tss := 0.0
-	for i in 0 ..< n {
-		dy := y[i] - mean_y
-		tss += dy * dy
-	}
-
-	r2 := 1.0 - rss / tss
-	r2_adj := 1.0 - (1.0 - r2) * (f64(n - 1) / f64(f64(n) - df))
-
-	// =====================================================================
-	// 10. F-statistic (approximate)
-	// =====================================================================
-	fstat := f64(0.0)
-	if r2 < 1.0 && f64(n) > df {
-		fstat = (r2 / df) / ((1.0 - r2) / f64(f64(n) - df))
-	}
-
-	// =====================================================================
-	// 11. Confidence intervals (approximate; Lasso is biased)
-	// =====================================================================
-	tcrit := f64(1.96)
-	ci_low := make([]f64, p, allocator)
-	ci_high := make([]f64, p, allocator)
-	for j in 0 ..< p {
-		delta := tcrit * stderr[j]
-		ci_low[j] = beta[j] - delta
-		ci_high[j] = beta[j] + delta
-	}
-
-	// =====================================================================
-	// 12. Package result
-	// =====================================================================
-	res := OLSResult{}
-	res.beta = beta
-	res.vcov = vcov
-	res.stderr = stderr
-	res.tvalues = tvalues
-	res.sigma2 = sigma2
-	res.residuals = residuals
-	res.fitted = fitted
-	res.r2 = r2
-	res.r2_adj = r2_adj
-	res.fstat = fstat
-	res.ci_low = ci_low
-	res.ci_high = ci_high
-
-	return res
+	return _penalized_summary(X, y, beta, df_fit, nil, allocator)
 }
 // ============================================================================
 // Lasso Regression with K-Fold Cross-Validation
@@ -239,6 +122,7 @@ lasso_cv :: proc(
 	cv_errors: []f64,
 ) {
 	n := X.rows
+	if len(lambdas) == 0 do panic("lasso_cv: lambdas is empty")
 
 	// Generate fold assignments
 	folds := cv_folds(n, k, seed, context.temp_allocator)

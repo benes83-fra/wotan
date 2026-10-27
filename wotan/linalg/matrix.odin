@@ -145,13 +145,17 @@ matrix_from_df :: proc(
 		}
 
 		col := &df.columns[idx]
-		// assume f64 backing for .Float
-		base := cast([^]f64)col.data
-
 		// respect view offset
 		start := col.offset
-		for i in 0 ..< df.rows {
-			m.data[i * m.cols + j] = base[start + i]
+		#partial switch col.type {
+		case .Float:
+			base := cast([^]f64)col.data
+			for i in 0 ..< df.rows {m.data[i * m.cols + j] = base[start + i]}
+		case .Int:
+			base := cast([^]int)col.data
+			for i in 0 ..< df.rows {m.data[i * m.cols + j] = f64(base[start + i])}
+		case:
+			panic(strings.concatenate({"matrix_from_df: column is not Int or Float: ", name}))
 		}
 	}
 
@@ -170,13 +174,18 @@ vector_from_df :: proc(
 	}
 
 	col := &df.columns[idx]
-	base := cast([^]f64)col.data
-
 	out := make([]f64, df.rows, allocator)
 	start := col.offset
 
-	for i in 0 ..< df.rows {
-		out[i] = base[start + i]
+	#partial switch col.type {
+	case .Float:
+		base := cast([^]f64)col.data
+		for i in 0 ..< df.rows {out[i] = base[start + i]}
+	case .Int:
+		base := cast([^]int)col.data
+		for i in 0 ..< df.rows {out[i] = f64(base[start + i])}
+	case:
+		panic(strings.concatenate({"vector_from_df: column is not Int or Float: ", colname}))
 	}
 
 	return out

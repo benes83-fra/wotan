@@ -547,6 +547,8 @@ main :: proc() {
 	free_all(context.temp_allocator)
 	test.multiclass_test(context.temp_allocator)
 	free_all(context.temp_allocator)
+	test.ml_linear_reference_test(context.temp_allocator)
+	free_all(context.temp_allocator)
 	test.knn_test(context.temp_allocator)
 	free_all(context.temp_allocator)
 	test.pcr_test(context.temp_allocator)
