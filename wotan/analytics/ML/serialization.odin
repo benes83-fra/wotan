@@ -9,7 +9,7 @@ import "core:os"
 // Binary Writer
 // ============================================================================
 
-_MODEL_FORMAT_VERSION :: 2
+_MODEL_FORMAT_VERSION :: 3
 
 ModelWriter :: struct {
 	file: ^os.File,
@@ -25,7 +25,8 @@ model_writer_open :: proc(path: string) -> (ModelWriter, bool) {
 	}
 	// Write magic number "WOTAN" (5 bytes)
 	write_bytes(&w, []u8{'W', 'O', 'T', 'A', 'N'})
-	// Write version (2: gradient boosting also stores initial_pred / learning_rate)
+	// Write version (2: gradient boosting also stores initial_pred / learning_rate;
+	// 3: trees store classes + class fractions, forests / boosting their classes)
 	write_u32(&w, _MODEL_FORMAT_VERSION)
 	return w, true
 }
@@ -327,6 +328,7 @@ pipeline_save :: proc(pipe: ^Pipeline, path: string) -> bool {
 		for &tree in pipe.model.rf.trees {
 			write_decision_tree(&w, &tree)
 		}
+		write_slice_f64(&w, pipe.model.rf.classes)
 
 	case .GradientBoosting:
 		// ⚠️ ADJUST: If your GB uses a different field name for trees (like 'estimators'), change it here
@@ -336,6 +338,9 @@ pipeline_save :: proc(pipe: ^Pipeline, path: string) -> bool {
 		for &tree in pipe.model.gb.trees {
 			write_decision_tree(&w, &tree)
 		}
+		write_u32(&w, u32(pipe.model.gb.loss))
+		write_slice_f64(&w, pipe.model.gb.classes)
+		write_slice_f64(&w, pipe.model.gb.init_raw)
 	case .MLP:
 		write_i64(&w, i64(pipe.model.mlp.n_layers))
 		for i in 0 ..< pipe.model.mlp.n_layers {
@@ -474,6 +479,11 @@ pipeline_load :: proc(
 			tree := read_decision_tree(&r, allocator)
 			append(&pipe.model.rf.trees, tree)
 		}
+		if r.version >= 3 do pipe.model.rf.classes = read_slice_f64(&r)
+		// every tree must be a classifier over the forest's classes, or all regressors
+		for &tree in pipe.model.rf.trees {
+			if len(tree.classes) != len(pipe.model.rf.classes) do r.err = true
+		}
 
 	case .GradientBoosting:
 		// version 1 files did not store F₀ and the learning rate: unusable
@@ -487,6 +497,21 @@ pipeline_load :: proc(
 		for t in 0 ..< n_trees {
 			tree := read_decision_tree(&r, allocator)
 			append(&pipe.model.gb.trees, tree)
+		}
+		pipe.model.gb.trees_per_stage = 1
+		if r.version >= 3 {
+			gb := &pipe.model.gb
+			gb.loss = _read_enum(&r, GBLoss)
+			gb.classes = read_slice_f64(&r)
+			gb.init_raw = read_slice_f64(&r)
+			if gb.loss == .Log_Loss {
+				K := len(gb.classes)
+				gb.trees_per_stage = 1 if K == 2 else K
+				if K < 2 || len(gb.init_raw) != gb.trees_per_stage || n_trees % gb.trees_per_stage != 0 do r.err = true
+			}
+		}
+		for &tree in pipe.model.gb.trees {
+			if len(tree.classes) != 0 do r.err = true // boosting trees are regression trees
 		}
 	case .MLP:
 		n_layers := _read_len(&r, 16)
@@ -542,6 +567,8 @@ write_decision_tree :: proc(w: ^ModelWriter, tree: ^DecisionTree) {
 		write_f64(w, node.impurity)
 		write_i64(w, i64(node.sample_count))
 	}
+	write_slice_f64(w, tree.classes)
+	write_slice_f64(w, tree.proba[:])
 }
 
 // Read a single DecisionTree
@@ -564,6 +591,14 @@ read_decision_tree :: proc(r: ^ModelReader, allocator: mem.Allocator) -> Decisio
 		node.sample_count = int(read_i64(r))
 		append(&tree.nodes, node)
 	}
+	if r.version >= 3 {
+		tree.classes = read_slice_f64(r)
+		proba := read_slice_f64(r)
+		defer delete(proba, r.allocator)
+		if len(proba) != n_nodes * len(tree.classes) do r.err = true
+		tree.proba = make([dynamic]f64, 0, len(proba), allocator)
+		append(&tree.proba, ..proba)
+	}
 
 	// Structural check: children must be valid nodes (or both -1 for a leaf),
 	// otherwise prediction would index out of bounds
@@ -574,7 +609,10 @@ read_decision_tree :: proc(r: ^ModelReader, allocator: mem.Allocator) -> Decisio
 		if !leaf && !inner do r.err = true
 	}
 	if r.err {
-		// keep the result safe to traverse
+		// keep the result safe to traverse (as a regression leaf)
+		delete(tree.classes, r.allocator)
+		tree.classes = nil
+		clear(&tree.proba)
 		clear(&tree.nodes)
 		append(&tree.nodes, Node{feature_idx = -1, left_idx = -1, right_idx = -1})
 		tree.root_idx = 0
