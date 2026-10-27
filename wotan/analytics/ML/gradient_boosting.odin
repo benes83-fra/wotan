@@ -4,6 +4,7 @@ import l "../../linalg"
 import "core:math"
 import "core:math/rand"
 import "core:mem"
+import "core:slice"
 
 // ============================================================================
 // Gradient Boosting Structures
@@ -11,7 +12,7 @@ import "core:mem"
 
 GradientBoosting :: struct {
 	trees:           [dynamic]DecisionTree, // Log_Loss: stage s, column k at trees[s·trees_per_stage + k]
-	n_estimators:    int,
+	n_estimators:    int, // stages fitted (< params.n_estimators after early stopping)
 	learning_rate:   f64,
 	initial_pred:    f64, // F₀ (Squared_Error)
 	max_depth:       int,
@@ -34,8 +35,16 @@ GBParams :: struct {
 	learning_rate: f64,
 	max_depth:     int,
 	min_samples:   int,
-	subsample:     f64, // 1.0 = use all data, <1.0 = stochastic GB
-	loss:          GBLoss,
+	subsample:           f64, // 1.0 = use all data, <1.0 = stochastic GB
+	loss:                GBLoss,
+	// Early stopping (sklearn n_iter_no_change / validation_fraction / tol):
+	// n_iter_no_change > 0 holds out validation_fraction of the rows (stratified
+	// for Log_Loss, holdout_split with random_state) and stops after a stage whose
+	// validation loss is not tol below any of the last n_iter_no_change losses.
+	n_iter_no_change:    int,
+	validation_fraction: f64, // ≤ 0: 0.1
+	tol:                 f64, // ≤ 0: 1e-4
+	random_state:        int, // seed of the validation split
 }
 
 // ============================================================================
@@ -61,8 +70,54 @@ gb_fit :: proc(
 	if n_samples == 0 do panic("gb_fit: no samples")
 	sw := _effective_weights(y, sample_weight, .None, "gb_fit", allocator)
 	defer delete(sw, allocator)
-	if params.loss == .Log_Loss do return _gb_fit_classifier(X, y, params, allocator, sw)
 
+	if params.n_iter_no_change > 0 {
+		frac := params.validation_fraction if params.validation_fraction > 0 else 0.1
+		tr, va := holdout_split(n_samples, y, frac, params.loss == .Log_Loss, params.random_state, context.temp_allocator)
+		X_tr := subset_matrix(X, tr, allocator)
+		y_tr := subset_slice(y, tr, allocator)
+		val: _GBValidation
+		val.X = subset_matrix(X, va, allocator)
+		val.y = subset_slice(y, va, allocator)
+		w_tr: []f64
+		if sw != nil {
+			w_tr = subset_slice(sw, tr, allocator)
+			val.w = subset_slice(sw, va, allocator)
+		}
+		val.tol = params.tol if params.tol > 0 else 1e-4
+		val.history = make([]f64, params.n_iter_no_change, allocator)
+		for &h in val.history {h = math.inf_f64(1)}
+		val.allocator = allocator
+		defer {
+			l.matrix_free(&X_tr)
+			delete(y_tr, allocator)
+			delete(w_tr, allocator)
+			l.matrix_free(&val.X)
+			delete(val.y, allocator)
+			delete(val.w, allocator)
+			delete(val.history, allocator)
+			delete(val.F, allocator)
+			delete(val.codes, allocator)
+			delete(tr, context.temp_allocator)
+			delete(va, context.temp_allocator)
+		}
+		if params.loss == .Log_Loss do return _gb_fit_classifier(&X_tr, y_tr, params, allocator, w_tr, &val)
+		return _gb_fit_regressor(&X_tr, y_tr, params, allocator, w_tr, &val)
+	}
+	if params.loss == .Log_Loss do return _gb_fit_classifier(X, y, params, allocator, sw)
+	return _gb_fit_regressor(X, y, params, allocator, sw)
+}
+
+// Squared-error boosting on X / y (see gb_fit); val != nil: early stopping
+_gb_fit_regressor :: proc(
+	X: ^l.Matrix(f64),
+	y: []f64,
+	params: GBParams,
+	allocator: mem.Allocator,
+	sw: []f64,
+	val: ^_GBValidation = nil,
+) -> GradientBoosting {
+	n_samples := len(y)
 	model: GradientBoosting
 	model.trees_per_stage = 1
 	model.allocator = allocator
@@ -108,8 +163,9 @@ gb_fit :: proc(
 		max_depth   = params.max_depth,
 		min_samples = params.min_samples,
 	}
+	if val != nil do _gb_val_init(val, {model.initial_pred}, nil)
 
-	for _ in 0 ..< params.n_estimators {
+	for stage in 0 ..< params.n_estimators {
 		// 1. Residuals (negative gradient of ½(y - F)²)
 		for i in 0 ..< n_samples {
 			residuals[i] = y[i] - preds[i]
@@ -133,7 +189,12 @@ gb_fit :: proc(
 			preds[i] += params.learning_rate * tree_pred[i]
 		}
 		delete(tree_pred, allocator)
+
+		if val != nil && _gb_val_stage(val, model.trees[len(model.trees) - 1:], params.learning_rate, stage) {
+			break
+		}
 	}
+	model.n_estimators = len(model.trees)
 
 	return model
 }
@@ -249,6 +310,7 @@ _gb_fit_classifier :: proc(
 	params: GBParams,
 	allocator: mem.Allocator,
 	sw: []f64, // sample weights (nil = 1)
+	val: ^_GBValidation = nil,
 ) -> GradientBoosting {
 	n := X.rows
 	model: GradientBoosting
@@ -315,8 +377,9 @@ _gb_fit_classifier :: proc(
 		min_samples = params.min_samples,
 	}
 	scale := 1.0 if K == 2 else f64(K - 1) / f64(K)
+	if val != nil do _gb_val_init(val, model.init_raw, model.classes)
 
-	for _ in 0 ..< params.n_estimators {
+	for stage in 0 ..< params.n_estimators {
 		// probabilities at the start of the stage (shared by all K trees)
 		for i in 0 ..< n {_gb_link(F[i * C:(i + 1) * C], P[i * K:(i + 1) * K])}
 
@@ -344,8 +407,95 @@ _gb_fit_classifier :: proc(
 				F[i * C + k] += params.learning_rate * dt_predict_single(last, X, i)
 			}
 		}
+		if val != nil && _gb_val_stage(val, model.trees[len(model.trees) - C:], params.learning_rate, stage) {
+			break
+		}
 	}
+	model.n_estimators = len(model.trees) / C
 	return model
+}
+
+// ============================================================================
+// Early stopping
+// ============================================================================
+
+_GBValidation :: struct {
+	X:         l.Matrix(f64),
+	y:         []f64,
+	w:         []f64, // nil = 1
+	codes:     []int, // classification: class index of every validation row
+	F:         []f64, // raw scores, n_val × C
+	C:         int, // raw-score columns
+	K:         int, // classes (0 = regression)
+	history:   []f64, // the last n_iter_no_change validation losses (+Inf at start)
+	tol:       f64,
+	allocator: mem.Allocator,
+}
+
+_gb_val_init :: proc(v: ^_GBValidation, init_raw: []f64, classes: []f64) {
+	n := v.X.rows
+	v.C = len(init_raw)
+	v.K = len(classes)
+	v.F = make([]f64, n * v.C, v.allocator)
+	for i in 0 ..< n {
+		for k in 0 ..< v.C {v.F[i * v.C + k] = init_raw[k]}
+	}
+	if v.K > 0 {
+		v.codes = make([]int, n, v.allocator)
+		for yv, i in v.y {
+			k, found := slice.binary_search(classes, yv)
+			if !found do panic("gb_fit: a validation label does not occur in the training rows")
+			v.codes[i] = k
+		}
+	}
+}
+
+// Add a stage's trees to the validation scores; true = stop (sklearn rule:
+// continue while loss + tol < some loss in the history, which then records it)
+_gb_val_stage :: proc(v: ^_GBValidation, trees: []DecisionTree, lr: f64, stage: int) -> bool {
+	n := v.X.rows
+	for &tree, k in trees {
+		for i in 0 ..< n {v.F[i * v.C + k] += lr * dt_predict_single(&tree, &v.X, i)}
+	}
+	loss := _gb_val_loss(v)
+	for h in v.history {
+		if loss + v.tol < h {
+			v.history[stage % len(v.history)] = loss
+			return false
+		}
+	}
+	return true
+}
+
+// sklearn's loss values: mean (y - F)²; binary deviance -2·mean(y F - log(1 + e^F));
+// multinomial mean(logsumexp(F) - F_true); all weighted averages with v.w
+_gb_val_loss :: proc(v: ^_GBValidation) -> f64 {
+	s, ws := 0.0, 0.0
+	for i in 0 ..< v.X.rows {
+		wi := 1.0
+		if v.w != nil do wi = v.w[i]
+		li := 0.0
+		if v.K == 0 {
+			d := v.y[i] - v.F[i]
+			li = d * d
+		} else if v.C == 1 {
+			z := v.F[i]
+			t := 1.0 if v.codes[i] == 1 else 0.0
+			// log(1 + e^z), stable
+			lse := max(z, 0) + math.ln(1 + math.exp(-math.abs(z)))
+			li = -2 * (t * z - lse)
+		} else {
+			row := v.F[i * v.C:(i + 1) * v.C]
+			m := row[0]
+			for z in row {m = max(m, z)}
+			se := 0.0
+			for z in row {se += math.exp(z - m)}
+			li = m + math.ln(se) - row[v.codes[i]]
+		}
+		s += wi * li
+		ws += wi
+	}
+	return s / ws
 }
 
 // Replace every leaf value by  scale · Σ r / Σ (y - r)(1 - y + r)  over the rows

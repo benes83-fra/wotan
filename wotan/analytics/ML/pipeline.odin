@@ -10,12 +10,14 @@ import "core:mem"
 PipelineStepType :: enum {
 	StandardScaler,
 	MinMaxScaler,
+	RobustScaler, // appended: saved files keep their step codes
 }
 
 PipelineStep :: struct {
 	type:            PipelineStepType,
 	standard_scaler: StandardScaler,
 	minmax_scaler:   MinMaxScaler,
+	robust_scaler:   RobustScaler,
 }
 
 PipelineModelType :: enum {
@@ -40,6 +42,8 @@ PipelineModelType :: enum {
 	OvR_KernelSVM,
 	// Ensembles
 	RandomForest,
+	// appended (saved files keep their model codes)
+	ElasticNet,
 }
 
 PipelineModel :: struct {
@@ -54,6 +58,7 @@ PipelineModel :: struct {
 	knn_params:          KNNParams,
 	ridge_params:        RidgeParams,
 	lasso_params:        LassoParams,
+	elastic_net_params:  ElasticNetParams,
 	svr_params:          SVRParams,
 	ols_method:          OLSMethod,
 	dt_params:           TreeParams,
@@ -71,6 +76,7 @@ PipelineModel :: struct {
 	knn:                 KNN,
 	ridge:               OLSResult,
 	lasso:               OLSResult,
+	elastic_net:         OLSResult,
 	svr:                 SupportVectorRegression,
 	ols:                 OLSResult,
 	dt:                  DecisionTree,
@@ -108,6 +114,11 @@ pipeline_add_standard_scaler :: proc(pipe: ^Pipeline) {
 	append(&pipe.steps, step)
 }
 
+// RobustScaler with the default quantile range (25, 75)
+pipeline_add_robust_scaler :: proc(pipe: ^Pipeline) {
+	append(&pipe.steps, PipelineStep{type = .RobustScaler})
+}
+
 pipeline_add_minmax_scaler :: proc(pipe: ^Pipeline) {
 	step := PipelineStep {
 		type = .MinMaxScaler,
@@ -133,6 +144,9 @@ pipeline_set_ridge :: proc(pipe: ^Pipeline, params: RidgeParams) {
 }
 pipeline_set_lasso :: proc(pipe: ^Pipeline, params: LassoParams) {
 	pipe.model.type = .Lasso; pipe.model.lasso_params = params
+}
+pipeline_set_elastic_net :: proc(pipe: ^Pipeline, params: ElasticNetParams) {
+	pipe.model.type = .ElasticNet; pipe.model.elastic_net_params = params
 }
 pipeline_set_svr :: proc(pipe: ^Pipeline, params: SVRParams) {
 	pipe.model.type = .SVR; pipe.model.svr_params = params
@@ -208,6 +222,13 @@ pipeline_fit :: proc(pipe: ^Pipeline, X: ^l.Matrix(f64), y: []f64, sample_weight
 			if owns_X {l.matrix_free(&current_X)}
 			current_X = new_X
 			owns_X = true
+
+		case .RobustScaler:
+			step.robust_scaler = robust_scaler_fit(&current_X, allocator = pipe.allocator)
+			new_X := robust_scaler_transform(&step.robust_scaler, &current_X, pipe.allocator)
+			if owns_X {l.matrix_free(&current_X)}
+			current_X = new_X
+			owns_X = true
 		}
 	}
 
@@ -260,6 +281,19 @@ pipeline_fit :: proc(pipe: ^Pipeline, X: ^l.Matrix(f64), y: []f64, sample_weight
 			pipe.model.lasso_params.lambda,
 			pipe.model.lasso_params.max_iter,
 			pipe.model.lasso_params.tol,
+			pipe.allocator,
+		)
+	case .ElasticNet:
+		Xi := _with_intercept(&current_X, pipe.allocator)
+		defer l.matrix_free(&Xi)
+		ep := pipe.model.elastic_net_params
+		pipe.model.elastic_net = elastic_net_fit(
+			&Xi,
+			y,
+			ep.lambda,
+			ep.l1_ratio,
+			ep.max_iter if ep.max_iter > 0 else 1000,
+			ep.tol if ep.tol > 0 else 1e-4,
 			pipe.allocator,
 		)
 	case .SVR:
@@ -336,6 +370,12 @@ pipeline_predict :: proc(
 			if owns_X {l.matrix_free(&current_X)}
 			current_X = new_X
 			owns_X = true
+
+		case .RobustScaler:
+			new_X := robust_scaler_transform(&step.robust_scaler, &current_X, pipe.allocator)
+			if owns_X {l.matrix_free(&current_X)}
+			current_X = new_X
+			owns_X = true
 		}
 	}
 
@@ -375,6 +415,8 @@ pipeline_predict :: proc(
 		preds = _linear_predict(&current_X, pipe.model.ridge.beta, allocator)
 	case .Lasso:
 		preds = _linear_predict(&current_X, pipe.model.lasso.beta, allocator)
+	case .ElasticNet:
+		preds = _linear_predict(&current_X, pipe.model.elastic_net.beta, allocator)
 	case .SVR:
 		preds = svr_predict(&pipe.model.svr, &current_X, allocator)
 	case .OLS:
@@ -446,9 +488,12 @@ _pipeline_free_fitted :: proc(pipe: ^Pipeline) {
 			standard_scaler_free(&step.standard_scaler)
 		case .MinMaxScaler:
 			minmax_scaler_free(&step.minmax_scaler)
+		case .RobustScaler:
+			robust_scaler_free(&step.robust_scaler)
 		}
 		step.standard_scaler = {}
 		step.minmax_scaler = {}
+		step.robust_scaler = {}
 	}
 
 	// Free model
@@ -465,6 +510,8 @@ _pipeline_free_fitted :: proc(pipe: ^Pipeline) {
 		_ols_result_free(&pipe.model.ridge, pipe.allocator)
 	case .Lasso:
 		_ols_result_free(&pipe.model.lasso, pipe.allocator)
+	case .ElasticNet:
+		_ols_result_free(&pipe.model.elastic_net, pipe.allocator)
 	case .SVR:
 		svr_free(&pipe.model.svr)
 	case .OLS:

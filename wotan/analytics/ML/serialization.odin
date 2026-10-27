@@ -277,6 +277,10 @@ pipeline_save :: proc(pipe: ^Pipeline, path: string) -> bool {
 			write_slice_f64(&w, step.minmax_scaler.scale)
 			write_slice_f64(&w, step.minmax_scaler.min_val)
 			write_i64(&w, i64(step.minmax_scaler.n_features))
+		case .RobustScaler:
+			write_slice_f64(&w, step.robust_scaler.center)
+			write_slice_f64(&w, step.robust_scaler.scale)
+			write_i64(&w, i64(step.robust_scaler.n_features))
 		}
 	}
 
@@ -304,10 +308,14 @@ pipeline_save :: proc(pipe: ^Pipeline, path: string) -> bool {
 		write_slice_f64(&w, pipe.model.knn.y_train)
 		write_i64(&w, i64(pipe.model.knn.k))
 		write_u32(&w, u32(pipe.model.knn.weights))
-	case .Ridge, .Lasso, .OLS:
+	case .Ridge, .Lasso, .OLS, .ElasticNet:
 		res: OLSResult
-		if pipe.model.type ==
-		   .Ridge {res = pipe.model.ridge} else if pipe.model.type == .Lasso {res = pipe.model.lasso} else {res = pipe.model.ols}
+		#partial switch pipe.model.type {
+		case .Ridge: res = pipe.model.ridge
+		case .Lasso: res = pipe.model.lasso
+		case .ElasticNet: res = pipe.model.elastic_net
+		case: res = pipe.model.ols
+		}
 
 		write_slice_f64(&w, res.beta)
 	case .SVR:
@@ -418,6 +426,17 @@ pipeline_load :: proc(
 			step.minmax_scaler.n_features = int(read_i64(&r))
 			step.minmax_scaler.allocator = allocator
 			append(&pipe.steps, step)
+		case .RobustScaler:
+			step := PipelineStep {
+				type = .RobustScaler,
+			}
+			step.robust_scaler.center = read_slice_f64(&r)
+			step.robust_scaler.scale = read_slice_f64(&r)
+			step.robust_scaler.n_features = int(read_i64(&r))
+			step.robust_scaler.allocator = allocator
+			rs := &step.robust_scaler
+			if len(rs.center) != rs.n_features || len(rs.scale) != rs.n_features do r.err = true
+			append(&pipe.steps, step)
 		}
 	}
 
@@ -449,14 +468,17 @@ pipeline_load :: proc(
 		pipe.model.knn.k = int(read_i64(&r))
 		pipe.model.knn.weights = _read_enum(&r, KNNWeights)
 		pipe.model.knn.allocator = allocator
-	case .Ridge, .Lasso, .OLS:
+	case .Ridge, .Lasso, .OLS, .ElasticNet:
 		beta := read_slice_f64(&r)
-		// ✅ FIX: Removed allocator field from OLSResult literal
 		res := OLSResult {
 			beta = beta,
 		}
-		if pipe.model.type ==
-		   .Ridge {pipe.model.ridge = res} else if pipe.model.type == .Lasso {pipe.model.lasso = res} else {pipe.model.ols = res}
+		#partial switch pipe.model.type {
+		case .Ridge: pipe.model.ridge = res
+		case .Lasso: pipe.model.lasso = res
+		case .ElasticNet: pipe.model.elastic_net = res
+		case: pipe.model.ols = res
+		}
 	case .SVR:
 		pipe.model.svr.support_vectors = read_slice_int(&r)
 		pipe.model.svr.sv_data = read_matrix(&r)

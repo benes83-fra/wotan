@@ -32,16 +32,28 @@ MLPParams :: struct {
 	learning_rate:     f64,
 	max_iter:          int,
 	batch_size:        int,
-	optimizer_type:    optim.OptimizerType, // .Adam, anything else = plain SGD
-	verbose:           bool, // print the epoch loss every 100 iterations
+	optimizer_type:      optim.OptimizerType, // .Adam, anything else = plain SGD
+	verbose:             bool, // print the epoch loss every 100 iterations
+	// Early stopping (sklearn early_stopping=True): hold out validation_fraction of
+	// the rows (stratified for BinaryClassification, holdout_split with
+	// random_state), score them after every epoch (R² / accuracy), stop when the
+	// score has not improved by tol for more than n_iter_no_change epochs and
+	// return the weights of the best epoch.
+	early_stopping:      bool,
+	validation_fraction: f64, // ≤ 0: 0.1
+	n_iter_no_change:    int, // ≤ 0: 10
+	tol:                 f64, // ≤ 0: 1e-4
+	random_state:        int, // seed of the validation split
 }
 
 MLP :: struct {
-	weights:     []l.Matrix(f64),
-	biases:      [][]f64,
-	activations: []Activation,
-	n_layers:    int,
-	allocator:   mem.Allocator,
+	weights:               []l.Matrix(f64),
+	biases:                [][]f64,
+	activations:           []Activation,
+	n_layers:              int,
+	n_iter:                int, // epochs run
+	best_validation_score: f64, // early stopping: validation score of the returned weights (else NaN)
+	allocator:             mem.Allocator,
 }
 
 // ============================================================================
@@ -199,16 +211,39 @@ _mlp_forward_backward :: proc(
 // ============================================================================
 
 mlp_fit :: proc(
-	X: ^l.Matrix(f64),
-	y: []f64,
+	X_in: ^l.Matrix(f64),
+	y_in: []f64,
 	params: MLPParams,
 	allocator: mem.Allocator = context.allocator,
 ) -> MLP {
+	if len(y_in) != X_in.rows do panic("mlp_fit: y length mismatch")
+	if X_in.rows == 0 do panic("mlp_fit: no samples")
+
+	// Early stopping: train on the training part, score the validation part
+	X, y := X_in, y_in
+	X_tr, X_val: l.Matrix(f64)
+	y_tr, y_val: []f64
+	if params.early_stopping {
+		frac := params.validation_fraction if params.validation_fraction > 0 else 0.1
+		tr, va := holdout_split(X_in.rows, y_in, frac, params.task == .BinaryClassification, params.random_state, context.temp_allocator)
+		X_tr = subset_matrix(X_in, tr, allocator)
+		y_tr = subset_slice(y_in, tr, allocator)
+		X_val = subset_matrix(X_in, va, allocator)
+		y_val = subset_slice(y_in, va, allocator)
+		delete(tr, context.temp_allocator)
+		delete(va, context.temp_allocator)
+		X, y = &X_tr, y_tr
+	}
+	defer if params.early_stopping {
+		l.matrix_free(&X_tr)
+		l.matrix_free(&X_val)
+		delete(y_tr, allocator)
+		delete(y_val, allocator)
+	}
+
 	n_samples := X.rows
 	n_features := X.cols
 	n_outputs := 1
-	if len(y) != n_samples do panic("mlp_fit: y length mismatch")
-	if n_samples == 0 do panic("mlp_fit: no samples")
 	for h in params.hidden_layers {
 		if h < 1 do panic("mlp_fit: hidden layer sizes must be >= 1")
 	}
@@ -284,7 +319,29 @@ mlp_fit :: proc(
 	t := 0
 	lr := params.learning_rate
 
+	// early-stopping state: best score / weights, epochs without improvement
+	n_no_change := params.n_iter_no_change if params.n_iter_no_change > 0 else 10
+	es_tol := params.tol if params.tol > 0 else 1e-4
+	best_score := -math.INF_F64
+	no_improve := 0
+	best_w := make([]l.Matrix(f64), n_layers if params.early_stopping else 0, allocator)
+	best_b := make([][]f64, n_layers if params.early_stopping else 0, allocator)
+	for i in 0 ..< len(best_w) {
+		best_w[i] = l.matrix_new(f64, layer_sizes[i], layer_sizes[i + 1], allocator)
+		best_b[i] = make([]f64, layer_sizes[i + 1], allocator)
+	}
+	defer {
+		for i in 0 ..< len(best_w) {
+			l.matrix_free(&best_w[i])
+			delete(best_b[i], allocator)
+		}
+		delete(best_w, allocator)
+		delete(best_b, allocator)
+	}
+	n_iter := 0
+
 	for iter in 0 ..< params.max_iter {
+		n_iter = iter + 1
 		if batch_size < n_samples do rand.shuffle(perm)
 		epoch_loss := 0.0
 
@@ -339,6 +396,33 @@ mlp_fit :: proc(
 		if params.verbose && iter % 100 == 0 {
 			fmt.printf("[Iter %v] Loss: %.6f\n", iter, epoch_loss / f64(n_samples))
 		}
+
+		if params.early_stopping {
+			// sklearn _update_no_improvement_count (early_stopping=True)
+			view := MLP {
+				weights     = weights,
+				biases      = biases,
+				activations = activations,
+				n_layers    = n_layers,
+			}
+			score := _mlp_score(&view, &X_val, y_val, params.task)
+			if score < best_score + es_tol {no_improve += 1} else {no_improve = 0}
+			if score > best_score {
+				best_score = score
+				for i in 0 ..< n_layers {
+					copy(best_w[i].data, weights[i].data)
+					copy(best_b[i], biases[i])
+				}
+			}
+			if no_improve > n_no_change do break
+		}
+	}
+
+	if params.early_stopping {
+		for i in 0 ..< n_layers {
+			copy(weights[i].data, best_w[i].data)
+			copy(biases[i], best_b[i])
+		}
 	}
 
 	return MLP {
@@ -346,8 +430,19 @@ mlp_fit :: proc(
 		biases = biases,
 		activations = activations,
 		n_layers = n_layers,
+		n_iter = n_iter,
+		best_validation_score = best_score if params.early_stopping else math.nan_f64(),
 		allocator = allocator,
 	}
+}
+
+// Validation score: R² (regression) or accuracy of output ≥ 0.5 (binary)
+_mlp_score :: proc(model: ^MLP, X: ^l.Matrix(f64), y: []f64, task: MLPTask) -> f64 {
+	pred := mlp_predict(model, X, context.temp_allocator)
+	defer delete(pred, context.temp_allocator)
+	if task == .Regression do return metrics_r2(y, pred)
+	for &p in pred {p = 1 if p >= 0.5 else 0}
+	return metrics_accuracy(y, pred)
 }
 
 // ============================================================================

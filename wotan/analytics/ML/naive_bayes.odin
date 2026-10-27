@@ -184,3 +184,38 @@ gnb_free :: proc(model: ^GaussianNB) {
 	if model.inv_sigma.data != nil {l.matrix_free(&model.inv_sigma)}
 	if len(model.joint_bias) > 0 {delete(model.joint_bias, model.allocator)}
 }
+
+// Class probabilities (n × n_classes, model.classes order), as sklearn
+// GaussianNB.predict_proba: softmax of the joint log-likelihoods
+// log P(c) + Σ_j log N(x_j | θ_cj, σ²_cj)
+gnb_predict_proba :: proc(
+	model: ^GaussianNB,
+	X: ^l.Matrix(f64),
+	allocator: mem.Allocator = context.allocator,
+) -> l.Matrix(f64) {
+	n_features := X.cols
+	K := len(model.classes)
+	if n_features != model.theta.cols do panic("gnb_predict_proba: X has the wrong number of columns")
+	out := l.matrix_new(f64, X.rows, K, allocator)
+	for i in 0 ..< X.rows {
+		x_row := X.data[i * n_features:(i + 1) * n_features]
+		row := out.data[i * K:(i + 1) * K]
+		m := -math.INF_F64
+		for k in 0 ..< K {
+			sum := 0.0
+			for j in 0 ..< n_features {
+				d := x_row[j] - model.theta.data[k * n_features + j]
+				sum += d * d * model.inv_sigma.data[k * n_features + j]
+			}
+			row[k] = model.joint_bias[k] - sum
+			m = max(m, row[k])
+		}
+		total := 0.0
+		for &v in row {
+			v = math.exp(v - m)
+			total += v
+		}
+		for &v in row {v /= total}
+	}
+	return out
+}

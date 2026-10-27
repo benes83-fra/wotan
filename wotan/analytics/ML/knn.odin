@@ -3,6 +3,7 @@ package ML
 import l "../../linalg"
 import "core:math"
 import "core:mem"
+import "core:slice"
 
 // ============================================================================
 // K-Nearest Neighbors (Lazy Learner)
@@ -25,6 +26,7 @@ KNNParams :: struct {
 KNN :: struct {
 	X_train:   l.Matrix(f64),
 	y_train:   []f64,
+	classes:   []f64, // sorted distinct labels (columns of knn_predict_proba)
 	k:         int,
 	weights:   KNNWeights,
 	allocator: mem.Allocator,
@@ -49,6 +51,7 @@ knn_fit :: proc(
 	return KNN {
 		X_train = X_copy,
 		y_train = y_copy,
+		classes = _knn_classes(y_copy, allocator),
 		k = params.k,
 		weights = params.weights,
 		allocator = allocator,
@@ -179,4 +182,75 @@ knn_free :: proc(model: ^KNN) {
 	if len(model.y_train) > 0 {
 		delete(model.y_train, model.allocator)
 	}
+	delete(model.classes, model.allocator)
+	model.classes = nil
+}
+
+_knn_classes :: proc(y: []f64, allocator: mem.Allocator) -> []f64 {
+	if len(y) == 0 do return nil
+	classes, codes := _tree_encode_classes(y, allocator)
+	delete(codes, allocator)
+	return classes
+}
+
+// Class probabilities (n × n_classes, model.classes order), as sklearn
+// KNeighborsClassifier.predict_proba: the (uniform or 1/distance) vote weights
+// of the k nearest neighbours per class, normalised to sum 1; neighbours at
+// distance 0 take all the weight. knn_predict = class with the largest entry.
+knn_predict_proba :: proc(
+	model: ^KNN,
+	X: ^l.Matrix(f64),
+	allocator: mem.Allocator = context.allocator,
+) -> l.Matrix(f64) {
+	n_train := model.X_train.rows
+	n_features := X.cols
+	if n_train == 0 do panic("knn_predict_proba: empty model")
+	if n_features != model.X_train.cols do panic("knn_predict_proba: X has the wrong number of columns")
+	if model.classes == nil do model.classes = _knn_classes(model.y_train, model.allocator)
+	K := len(model.classes)
+	k := math.min(model.k, n_train)
+	out := l.matrix_new(f64, X.rows, K, allocator)
+
+	dists := make([]f64, n_train, context.temp_allocator)
+	indices := make([]int, n_train, context.temp_allocator)
+	diff := make([]f64, n_features, context.temp_allocator)
+	defer {
+		delete(dists, context.temp_allocator)
+		delete(indices, context.temp_allocator)
+		delete(diff, context.temp_allocator)
+	}
+	for i in 0 ..< X.rows {
+		x_test := X.data[i * n_features:(i + 1) * n_features]
+		for j in 0 ..< n_train {
+			l.vec_sub_simd(x_test, model.X_train.data[j * n_features:(j + 1) * n_features], diff)
+			dists[j] = l.dot_simd(diff, diff)
+			indices[j] = j
+		}
+		// the same neighbour selection as knn_predict
+		for c in 0 ..< k {
+			min_idx := c
+			for j in c + 1 ..< n_train {if dists[j] < dists[min_idx] do min_idx = j}
+			if min_idx != c {
+				dists[c], dists[min_idx] = dists[min_idx], dists[c]
+				indices[c], indices[min_idx] = indices[min_idx], indices[c]
+			}
+		}
+		any_zero := false
+		if model.weights == .Distance {
+			for c in 0 ..< k {if dists[c] == 0 {any_zero = true; break}}
+		}
+		row := out.data[i * K:(i + 1) * K]
+		total := 0.0
+		for c in 0 ..< k {
+			weight := 1.0
+			if model.weights == .Distance {
+				if any_zero {weight = 1.0 if dists[c] == 0 else 0.0} else {weight = 1.0 / math.sqrt(dists[c])}
+			}
+			ci, _ := slice.binary_search(model.classes, model.y_train[indices[c]])
+			row[ci] += weight
+			total += weight
+		}
+		for &v in row {v /= total}
+	}
+	return out
 }

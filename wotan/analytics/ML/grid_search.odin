@@ -262,6 +262,42 @@ lasso_cv_evaluator :: proc(
 	return metrics_r2(y_val, preds)
 }
 
+// Elastic net (X gets an unpenalised intercept column, as in the pipeline); R² on the validation rows
+elastic_net_cv_evaluator :: proc(
+	X: ^l.Matrix(f64),
+	y: []f64,
+	train_idx: []int,
+	val_idx: []int,
+	user_data: rawptr,
+	allocator: mem.Allocator,
+) -> f64 {
+	params := cast(^ElasticNetParams)user_data
+	X_train := subset_matrix(X, train_idx, allocator); defer l.matrix_free(&X_train)
+	y_train := subset_slice(y, train_idx, allocator); defer delete(y_train, allocator)
+	X_val := subset_matrix(X, val_idx, allocator); defer l.matrix_free(&X_val)
+	y_val := subset_slice(y, val_idx, allocator); defer delete(y_val, allocator)
+
+	Xi := _with_intercept(&X_train, allocator); defer l.matrix_free(&Xi)
+	model := elastic_net_fit(&Xi, y_train, params.lambda, params.l1_ratio, params.max_iter if params.max_iter > 0 else 1000, params.tol if params.tol > 0 else 1e-4, allocator)
+	defer _ols_result_free(&model, allocator)
+	preds := _linear_predict(&X_val, model.beta, allocator)
+	defer delete(preds, allocator)
+	return metrics_r2(y_val, preds)
+}
+
+grid_search_elastic_net :: proc(
+	X: ^l.Matrix(f64),
+	y: []f64,
+	n_splits: int,
+	param_grid: []ElasticNetParams,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	ElasticNetParams,
+	f64,
+) {
+	return grid_search(X, y, n_splits, elastic_net_cv_evaluator, param_grid, allocator)
+}
+
 linear_svm_cv_evaluator :: proc(
 	X: ^l.Matrix(f64),
 	y: []f64,

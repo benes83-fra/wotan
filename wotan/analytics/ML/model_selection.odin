@@ -150,3 +150,83 @@ cross_val_score :: proc(
 	}
 	return cross_val_score_cv(X, y, cv, evaluator, user_data, allocator)
 }
+
+// ============================================================================
+// Hold-out split (validation sets for early stopping)
+// ============================================================================
+
+// Shuffled train / validation split with n_val = ceil(fraction · n) (as sklearn
+// train_test_split), shuffled by _shuffle_indices(seed). stratify: every class
+// gets its share of the validation rows (largest remainder), taken in shuffled
+// order. Both index sets are returned ascending. Needs 1 <= n_val < n.
+holdout_split :: proc(
+	n: int,
+	y: []f64,
+	fraction: f64,
+	stratify: bool,
+	seed: int,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	train: []int,
+	val: []int,
+) {
+	if !(fraction > 0 && fraction < 1) do panic("holdout_split: fraction must be in (0, 1)")
+	n_val := int(math.ceil(fraction * f64(n)))
+	if n_val < 1 || n_val >= n do panic("holdout_split: too few samples for this fraction")
+	if stratify && len(y) != n do panic("holdout_split: stratify needs y of length n")
+
+	order := make([]int, n, context.temp_allocator)
+	defer delete(order, context.temp_allocator)
+	for i in 0 ..< n {order[i] = i}
+	_shuffle_indices(order, seed)
+
+	in_val := make([]bool, n, context.temp_allocator)
+	defer delete(in_val, context.temp_allocator)
+	if !stratify {
+		for i in 0 ..< n_val {in_val[order[i]] = true}
+	} else {
+		classes, codes := _tree_encode_classes(y, context.temp_allocator)
+		defer {
+			delete(classes, context.temp_allocator)
+			delete(codes, context.temp_allocator)
+		}
+		K := len(classes)
+		count := make([]int, K, context.temp_allocator)
+		quota := make([]int, K, context.temp_allocator)
+		rem := make([]f64, K, context.temp_allocator)
+		defer {
+			delete(count, context.temp_allocator)
+			delete(quota, context.temp_allocator)
+			delete(rem, context.temp_allocator)
+		}
+		for c in codes {count[c] += 1}
+		assigned := 0
+		for k in 0 ..< K {
+			exact := f64(n_val) * f64(count[k]) / f64(n)
+			quota[k] = int(math.floor(exact))
+			rem[k] = exact - f64(quota[k])
+			assigned += quota[k]
+		}
+		// remaining rows to the classes with the largest remainders (lowest class first on ties)
+		for assigned < n_val {
+			best := -1
+			for k in 0 ..< K {
+				if quota[k] < count[k] && (best < 0 || rem[k] > rem[best]) do best = k
+			}
+			quota[best] += 1
+			rem[best] = -1
+			assigned += 1
+		}
+		for i in order {
+			c := codes[i]
+			if quota[c] > 0 {in_val[i] = true; quota[c] -= 1}
+		}
+	}
+	train = make([]int, n - n_val, allocator)
+	val = make([]int, n_val, allocator)
+	a, b := 0, 0
+	for i in 0 ..< n {
+		if in_val[i] {val[b] = i; b += 1} else {train[a] = i; a += 1}
+	}
+	return
+}

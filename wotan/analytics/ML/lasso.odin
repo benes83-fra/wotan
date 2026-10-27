@@ -10,6 +10,13 @@ LassoParams :: struct {
 	max_iter: int,
 	tol:      f64,
 }
+
+ElasticNetParams :: struct {
+	lambda:   f64, // overall penalty strength (λ ≥ 0)
+	l1_ratio: f64, // ρ ∈ [0, 1]: 1 = lasso, 0 = ridge
+	max_iter: int, // ≤ 0: 1000
+	tol:      f64, // ≤ 0: 1e-4
+}
 // ============================================================================
 // Soft-thresholding operator for Lasso
 // S(z, γ) = sign(z) * max(|z| - γ, 0)
@@ -39,11 +46,35 @@ lasso_fit :: proc(
 	tol: f64 = 1e-4, // convergence tolerance on max |Δβ_j|
 	allocator: mem.Allocator = context.allocator,
 ) -> OLSResult {
+	return elastic_net_fit(X, y, lambda, 1, max_iter, tol, allocator)
+}
+
+// ============================================================================
+// Elastic Net via Coordinate Descent
+// Solves: min ½||y - Xβ||² + λ Σ_j m_j (ρ |β_j| + (1-ρ)/2 β_j²), m_j = 0 for a
+// constant (intercept) column of X. Equivalent to sklearn ElasticNet(alpha=λ/n,
+// l1_ratio=ρ, fit_intercept=True) when X = [1, features]; ρ = 1 is lasso_fit.
+// Update: β_j = S(x_jᵀ r_j, λρ m_j) / (||x_j||² + λ(1-ρ) m_j).
+// df: number of non-zero coefficients for ρ = 1; otherwise
+// tr[(X_AᵀX_A + λ(1-ρ)M)⁻¹ X_AᵀX_A] over the active set A (Zou & Hastie 2005).
+// ============================================================================
+elastic_net_fit :: proc(
+	X: ^l.Matrix(f64),
+	y: []f64,
+	lambda: f64,
+	l1_ratio: f64,
+	max_iter: int = 1000,
+	tol: f64 = 1e-4, // convergence tolerance on max |Δβ_j|
+	allocator: mem.Allocator = context.allocator,
+) -> OLSResult {
 	n, p := X.rows, X.cols
 
 	// Validate
-	if len(y) != n do panic("lasso_fit: y length mismatch")
-	if lambda < 0.0 do panic("lasso_fit: lambda must be non-negative")
+	if len(y) != n do panic("elastic_net_fit: y length mismatch")
+	if lambda < 0.0 do panic("elastic_net_fit: lambda must be non-negative")
+	if !(l1_ratio >= 0 && l1_ratio <= 1) do panic("elastic_net_fit: l1_ratio must be in [0, 1]")
+	l1 := lambda * l1_ratio
+	l2 := lambda * (1 - l1_ratio)
 
 	mask := _penalty_mask(X, context.temp_allocator)
 	defer delete(mask, context.temp_allocator)
@@ -85,7 +116,7 @@ lasso_fit :: proc(
 			}
 			rho += XtX_diag[j] * beta[j]
 
-			new_b := soft_threshold(rho, lambda * mask[j]) / XtX_diag[j]
+			new_b := soft_threshold(rho, l1 * mask[j]) / (XtX_diag[j] + l2 * mask[j])
 			delta := new_b - beta[j]
 			if delta != 0.0 {
 				for i in 0 ..< n {
@@ -100,8 +131,40 @@ lasso_fit :: proc(
 
 	df_fit := 0.0
 	for j in 0 ..< p {if beta[j] != 0.0 {df_fit += 1.0}}
+	if l2 > 0 && df_fit > 0 do df_fit = _elastic_net_df(X, beta, mask, l2)
 
 	return _penalized_summary(X, y, beta, df_fit, nil, allocator)
+}
+
+// tr[(X_AᵀX_A + l2·M_A)⁻¹ X_AᵀX_A] for the active set A = {j : β_j ≠ 0}
+_elastic_net_df :: proc(X: ^l.Matrix(f64), beta: []f64, mask: []f64, l2: f64) -> f64 {
+	p := X.cols
+	active := make([dynamic]int, 0, p, context.temp_allocator)
+	defer delete(active)
+	for j in 0 ..< p {if beta[j] != 0 do append(&active, j)}
+	a := len(active)
+	G := l.matrix_new(f64, a, a, context.temp_allocator)
+	M := l.matrix_new(f64, a, a, context.temp_allocator)
+	Minv := l.matrix_new(f64, a, a, context.temp_allocator)
+	defer {
+		l.matrix_free(&G)
+		l.matrix_free(&M)
+		l.matrix_free(&Minv)
+	}
+	for r, ri in active {
+		for c, ci in active {
+			s := 0.0
+			for i in 0 ..< X.rows {s += X.data[i * p + r] * X.data[i * p + c]}
+			G.data[ri * a + ci] = s
+			M.data[ri * a + ci] = s + (l2 * mask[r] if ri == ci else 0)
+		}
+	}
+	_ols_inverse(&M, &Minv)
+	tr := 0.0
+	for i in 0 ..< a {
+		for k in 0 ..< a {tr += Minv.data[i * a + k] * G.data[k * a + i]}
+	}
+	return tr
 }
 // ============================================================================
 // Lasso Regression with K-Fold Cross-Validation
