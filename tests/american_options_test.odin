@@ -333,8 +333,8 @@ american_finite_difference_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("   %-20s | %13.4f\n", "Delta", bin_result.delta)
 	fmt.printf("   %-20s | %13.4f\n", "Gamma", bin_result.gamma)
 
-	// 2. Finite Difference (Fully Implicit)
-	fmt.println("\n2. Finite Difference (Fully Implicit, 200x200 grid)")
+	// 2. Finite Difference (Crank-Nicolson + Rannacher, Brennan-Schwartz)
+	fmt.println("\n2. Finite Difference (Crank-Nicolson, Brennan-Schwartz, 200x200 grid)")
 	fmt.println("   ----------------------------------------------------------------------")
 	fd_result := fin.fd_american_put(S, K, T, r, sigma, 200, 200, allocator)
 
@@ -365,10 +365,12 @@ american_finite_difference_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("   %-25s | $%10.4f\n", "Binomial Early Ex. Prem.", bin_deep.early_exercise_premium)
 
 	fmt.println("\n💡 Key Insights:")
-	fmt.println("   • Fully Implicit FD is strictly monotonic (no oscillations)")
-	fmt.println("   • The projection step (V = max(V, intrinsic)) perfectly captures")
-	fmt.println("     the free-boundary early exercise feature.")
-	fmt.println("   • With the corrected S=0 boundary condition (V=K), the FD price")
-	fmt.println("     now perfectly matches the Binomial Tree (~$20.00 for Deep ITM).")
+	fmt.println("   • Crank-Nicolson is second order in time; two implicit half steps at")
+	fmt.println("     the start (Rannacher) damp the oscillations from the payoff kink.")
+	fmt.println("   • Brennan-Schwartz applies the early-exercise constraint inside the")
+	fmt.println("     tridiagonal solve, from the exercise side of the grid.")
+	fmt.println(
+		"   • At the low-S boundary the American put is worth its intrinsic value K - S_min.",
+	)
 	fmt.println("======================================================================\n")
 }

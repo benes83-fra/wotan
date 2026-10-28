@@ -113,6 +113,7 @@ _lstsq_auto_select :: proc(X: ^Matrix(f64)) -> LstsqMethod {
 // ============================================================================
 _lstsq_qr :: proc(X: ^Matrix(f64), y: []f64, allocator: mem.Allocator) -> LstsqResult {
 	m, n := X.rows, X.cols
+	if m >= n {return _lstsq_householder(X, y, allocator)}
 
 	Q, R := qr_decompose(X, .Blocked, allocator)
 	defer matrix_free(&Q)
@@ -170,6 +171,84 @@ _lstsq_qr :: proc(X: ^Matrix(f64), y: []f64, allocator: mem.Allocator) -> LstsqR
 	result.method_used = .QR
 	result.success = cond < f64(1e12)
 	return result
+}
+
+// Householder QR least squares for m ≥ n: the reflections are applied to a copy
+// of X and to y as they are formed, so Q (m×m) is never built. O(m·n²) time and
+// O(m·n) memory, against O(m²·n) and O(m²) for forming Q, which made tall
+// problems (thousands of rows) impractical.
+@(private = "file")
+_lstsq_householder :: proc(X: ^Matrix(f64), y: []f64, allocator: mem.Allocator) -> LstsqResult {
+	m, n := X.rows, X.cols
+	R := make([]f64, m * n, context.temp_allocator) // row-major copy, becomes R
+	defer delete(R, context.temp_allocator)
+	for i in 0 ..< m {copy(R[i * n:][:n], X.data[i * X.cols:][:n])}
+	qty := make([]f64, m, context.temp_allocator) // becomes Qᵀy
+	defer delete(qty, context.temp_allocator)
+	copy(qty, y)
+	v := make([]f64, m, context.temp_allocator)
+	defer delete(v, context.temp_allocator)
+
+	for k in 0 ..< n {
+		norm := 0.0
+		for i in k ..< m {norm += R[i * n + k] * R[i * n + k]}
+		norm = math.sqrt(norm)
+		if norm == 0 {continue}
+		alpha := -norm if R[k * n + k] >= 0 else norm
+		// v = x − alpha·e_1, H = I − 2vvᵀ/(vᵀv)
+		vv := 0.0
+		for i in k ..< m {
+			v[i] = R[i * n + k]
+			if i == k {v[i] -= alpha}
+			vv += v[i] * v[i]
+		}
+		if vv == 0 {continue}
+		for j in k ..< n {
+			s := 0.0
+			for i in k ..< m {s += v[i] * R[i * n + j]}
+			s *= 2.0 / vv
+			for i in k ..< m {R[i * n + j] -= s * v[i]}
+		}
+		s := 0.0
+		for i in k ..< m {s += v[i] * qty[i]}
+		s *= 2.0 / vv
+		for i in k ..< m {qty[i] -= s * v[i]}
+	}
+
+	// Back substitution R[:n, :n]·beta = (Qᵀy)[:n]
+	beta := make([]f64, n, allocator)
+	for i := n - 1; i >= 0; i -= 1 {
+		s := qty[i]
+		for j in i + 1 ..< n {s -= R[i * n + j] * beta[j]}
+		beta[i] = s / R[i * n + i]
+	}
+
+	residuals := make([]f64, m, allocator)
+	for i in 0 ..< m {
+		pred := 0.0
+		for j in 0 ..< n {pred += X.data[i * X.cols + j] * beta[j]}
+		residuals[i] = y[i] - pred
+	}
+
+	rank := 0
+	eps := 1e-12 * abs(R[0])
+	max_d, min_d := 0.0, f64(1e308)
+	for j in 0 ..< n {
+		d := abs(R[j * n + j])
+		if d > eps {rank += 1}
+		max_d = max(max_d, d)
+		if d > 0 {min_d = min(min_d, d)}
+	}
+	cond := max_d / min_d if min_d < 1e308 else f64(1e308)
+
+	return LstsqResult {
+		beta = beta,
+		residuals = residuals,
+		rank = rank,
+		condition_estimate = cond,
+		method_used = .QR,
+		success = cond < 1e12,
+	}
 }
 
 // ============================================================================
