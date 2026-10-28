@@ -264,7 +264,7 @@ train_embedder_recovery :: proc(
 		tensor.graph_begin(&tg.scope)
 		defer tensor.graph_end(&tg.scope)
 		alloc := tensor.graph_allocator(&tg.scope) // per-sample inputs and targets too
-		seq_idx := rand.int_range(0, n_seqs - 1)
+		seq_idx := rand.int_max(n_seqs) // uniform over [0, n_seqs): int_range(0, n - 1) never drew the last one
 		seq_start := seq_idx * tg.seq_len * tg.feature_dim
 		seq := real_data[seq_start:seq_start + tg.seq_len * tg.feature_dim]
 
@@ -305,12 +305,14 @@ train_supervisor :: proc(
 	nn.adam_zero_grad(&tg.optimizer_s)
 
 	total_loss := 0.0
+	n_seqs := len(real_data) / (tg.seq_len * tg.feature_dim)
+	if n_seqs == 0 do return 0.0 // no complete sequence (see train_embedder_recovery)
 
 	for b in 0 ..< batch_size {
 		tensor.graph_begin(&tg.scope)
 		defer tensor.graph_end(&tg.scope)
 		alloc := tensor.graph_allocator(&tg.scope) // per-sample inputs and targets too
-		seq_idx := rand.int_range(0, len(real_data) / (tg.seq_len * tg.feature_dim) - 1)
+		seq_idx := rand.int_max(n_seqs)
 		seq_start := seq_idx * tg.seq_len * tg.feature_dim
 		seq := real_data[seq_start:seq_start + tg.seq_len * tg.feature_dim]
 
@@ -349,6 +351,8 @@ train_generator :: proc(
 	nn.adam_zero_grad(&tg.optimizer_g)
 
 	total_loss := 0.0
+	n_seqs := len(real_data) / (tg.seq_len * tg.feature_dim)
+	if n_seqs == 0 do return 0.0 // no complete sequence (see train_embedder_recovery)
 
 	for b in 0 ..< batch_size {
 		tensor.graph_begin(&tg.scope)
@@ -379,7 +383,7 @@ train_generator :: proc(
 
 		adv_loss := tensor.tensor_bce_loss(y_hat_fake, target_real)
 
-		seq_idx := rand.int_range(0, len(real_data) / (tg.seq_len * tg.feature_dim) - 1)
+		seq_idx := rand.int_max(n_seqs)
 		seq_start := seq_idx * tg.seq_len * tg.feature_dim
 		seq := real_data[seq_start:seq_start + tg.seq_len * tg.feature_dim]
 
@@ -429,12 +433,14 @@ train_discriminator :: proc(
 	nn.adam_zero_grad(&tg.optimizer_d)
 
 	total_loss := 0.0
+	n_seqs := len(real_data) / (tg.seq_len * tg.feature_dim)
+	if n_seqs == 0 do return 0.0 // no complete sequence (see train_embedder_recovery)
 
 	for b in 0 ..< batch_size {
 		tensor.graph_begin(&tg.scope)
 		defer tensor.graph_end(&tg.scope)
 		alloc := tensor.graph_allocator(&tg.scope) // per-sample inputs and targets too
-		seq_idx := rand.int_range(0, len(real_data) / (tg.seq_len * tg.feature_dim) - 1)
+		seq_idx := rand.int_max(n_seqs)
 		seq_start := seq_idx * tg.seq_len * tg.feature_dim
 		seq := real_data[seq_start:seq_start + tg.seq_len * tg.feature_dim]
 

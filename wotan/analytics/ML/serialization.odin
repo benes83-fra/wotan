@@ -9,7 +9,7 @@ import "core:os"
 // Binary Writer
 // ============================================================================
 
-_MODEL_FORMAT_VERSION :: 4
+_MODEL_FORMAT_VERSION :: 5
 
 ModelWriter :: struct {
 	file: ^os.File,
@@ -27,7 +27,8 @@ model_writer_open :: proc(path: string) -> (ModelWriter, bool) {
 	write_bytes(&w, []u8{'W', 'O', 'T', 'A', 'N'})
 	// Write version (2: gradient boosting also stores initial_pred / learning_rate;
 	// 3: trees store classes + class fractions, forests / boosting their classes;
-	// 4: trees store the weighted node sizes)
+	// 4: trees store the weighted node sizes;
+	// 5: linear models store their inference: stderr, t, p, CI, vcov, σ², R², F, df)
 	write_u32(&w, _MODEL_FORMAT_VERSION)
 	return w, true
 }
@@ -318,6 +319,21 @@ pipeline_save :: proc(pipe: ^Pipeline, path: string) -> bool {
 		}
 
 		write_slice_f64(&w, res.beta)
+		// inference (format 5); residuals / fitted values are not stored
+		write_slice_f64(&w, res.stderr)
+		write_slice_f64(&w, res.tvalues)
+		write_slice_f64(&w, res.pvalues)
+		write_slice_f64(&w, res.ci_low)
+		write_slice_f64(&w, res.ci_high)
+		write_matrix(&w, &res.vcov)
+		write_f64(&w, res.sigma2)
+		write_f64(&w, res.r2)
+		write_f64(&w, res.r2_adj)
+		write_f64(&w, res.fstat)
+		write_f64(&w, res.f_pvalue)
+		write_i64(&w, i64(res.df_resid))
+		write_i64(&w, i64(res.rank))
+		write_u32(&w, u32(res.cov_type))
 	case .SVR:
 		write_slice_int(&w, pipe.model.svr.support_vectors)
 		write_matrix(&w, &pipe.model.svr.sv_data)
@@ -472,6 +488,27 @@ pipeline_load :: proc(
 		beta := read_slice_f64(&r)
 		res := OLSResult {
 			beta = beta,
+		}
+		if r.version >= 5 {
+			k := len(beta)
+			res.stderr = read_slice_f64(&r)
+			res.tvalues = read_slice_f64(&r)
+			res.pvalues = read_slice_f64(&r)
+			res.ci_low = read_slice_f64(&r)
+			res.ci_high = read_slice_f64(&r)
+			res.vcov = read_matrix(&r)
+			res.sigma2 = read_f64(&r)
+			res.r2 = read_f64(&r)
+			res.r2_adj = read_f64(&r)
+			res.fstat = read_f64(&r)
+			res.f_pvalue = read_f64(&r)
+			res.df_resid = int(read_i64(&r))
+			res.rank = int(read_i64(&r))
+			res.cov_type = _read_enum(&r, CovType)
+			for v in ([][]f64{res.stderr, res.tvalues, res.pvalues, res.ci_low, res.ci_high}) {
+				if len(v) != 0 && len(v) != k do r.err = true
+			}
+			if res.vcov.data != nil && (res.vcov.rows != k || res.vcov.cols != k) do r.err = true
 		}
 		#partial switch pipe.model.type {
 		case .Ridge: pipe.model.ridge = res

@@ -63,10 +63,6 @@ PCAResult :: struct {
 	eigenvectors: [][]f64,
 	mean:         []f64,
 }
-JacobiResult :: struct {
-	eigenvalues:  []f64,
-	eigenvectors: [][]f64, // columns are eigenvectors
-}
 
 
 pca_dataframe :: proc(df: ^w.DataFrame, cols: []string, allocator: mem.Allocator) -> PCAResult {
@@ -437,25 +433,6 @@ index_of_string :: proc(list: []string, s: string) -> int {
 	return -1
 }
 
-// pca_from_cov :: proc(cov: [][]f64, allocator: mem.Allocator = context.allocator) -> PCAResult {
-// 	jr := jacobi_eigen_symmetric(cov, allocator)
-// 	// defer destroy_matrix(jr.eigenvectors)
-// 	// defer delete(jr.eigenvalues)
-// 	idx := argsort_descending(jr.eigenvalues)
-// 	n := len(idx)
-// 	defer delete(idx)
-// 	sorted_vals := make([]f64, n)
-// 	sorted_vecs := make([][]f64, n)
-
-// 	for i, j in idx {
-// 		sorted_vals[i] = jr.eigenvalues[j]
-// 		// sorted_vecs[i] = jr.eigenvectors[j][:]
-// 		sorted_vecs[i] = make([]f64, len(jr.eigenvectors[j]))
-// 		copy(sorted_vecs[i], jr.eigenvectors[j])
-// 	}
-
-// 	return PCAResult{eigenvalues = sorted_vals, eigenvectors = sorted_vecs}
-// }
 pca_from_cov :: proc(cov: [][]f64, allocator: mem.Allocator = context.allocator) -> PCAResult {
 	// Empty input (e.g. a 0-row DataFrame) has no components; eigh needs a square matrix
 	if len(cov) == 0 || len(cov[0]) != len(cov) {

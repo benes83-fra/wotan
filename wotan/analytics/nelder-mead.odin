@@ -6,32 +6,37 @@ import "core:mem"
 
 ObjectiveWithCtx :: proc(x: []f64, ctx: rawptr) -> f64
 
-vec_copy :: proc(dst, src: []f64) {
+@(private = "file")
+_nm_vec_copy :: proc(dst, src: []f64) {
 	for i in 0 ..< len(dst) {
 		dst[i] = src[i]
 	}
 }
 
-vec_add_scaled :: proc(out, a, b: []f64, alpha: f64) {
+@(private = "file")
+_nm_vec_add_scaled :: proc(out, a, b: []f64, alpha: f64) {
 	// out = a + alpha * b
 	for i in 0 ..< len(out) {
 		out[i] = a[i] + alpha * b[i]
 	}
 }
 
-vec_add :: proc(out, a, b: []f64) {
+@(private = "file")
+_nm_vec_add :: proc(out, a, b: []f64) {
 	for i in 0 ..< len(out) {
 		out[i] = a[i] + b[i]
 	}
 }
 
-vec_sub :: proc(out, a, b: []f64) {
+@(private = "file")
+_nm_vec_sub :: proc(out, a, b: []f64) {
 	for i in 0 ..< len(out) {
 		out[i] = a[i] - b[i]
 	}
 }
 
-vec_scale :: proc(out, a: []f64, alpha: f64) {
+@(private = "file")
+_nm_vec_scale :: proc(out, a: []f64, alpha: f64) {
 	for i in 0 ..< len(out) {
 		out[i] = alpha * a[i]
 	}
@@ -77,7 +82,7 @@ nelder_mead :: proc(
 		simplex[0][j] = x0[j]
 	}
 	for i in 1 ..< n + 1 {
-		vec_copy(simplex[i], simplex[0])
+		_nm_vec_copy(simplex[i], simplex[0])
 		simplex[i][i - 1] += 0.05 // small perturbation
 	}
 
@@ -160,7 +165,7 @@ nelder_mead :: proc(
 
 		if fr >= values[0] && fr < values[n - 1] {
 			// accept reflection
-			vec_copy(simplex[n], xr)
+			_nm_vec_copy(simplex[n], xr)
 			values[n] = fr
 			continue
 		}
@@ -172,10 +177,10 @@ nelder_mead :: proc(
 			}
 			fe := f(xe, ctx)
 			if fe < fr {
-				vec_copy(simplex[n], xe)
+				_nm_vec_copy(simplex[n], xe)
 				values[n] = fe
 			} else {
-				vec_copy(simplex[n], xr)
+				_nm_vec_copy(simplex[n], xr)
 				values[n] = fr
 			}
 			continue
@@ -188,7 +193,7 @@ nelder_mead :: proc(
 		fc := f(xc, ctx)
 
 		if fc < values[n] {
-			vec_copy(simplex[n], xc)
+			_nm_vec_copy(simplex[n], xc)
 			values[n] = fc
 			continue
 		}
@@ -205,7 +210,7 @@ nelder_mead :: proc(
 	// the last step may have placed a new best vertex anywhere
 	sort_simplex(simplex, values)
 	best_x = make([]f64, n, allocator)
-	vec_copy(best_x, simplex[0])
+	_nm_vec_copy(best_x, simplex[0])
 	best_f = values[0]
 	return
 }
