@@ -2500,45 +2500,13 @@ tensor_div :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
 
 // ============================================================================
 // Standard Normal CDF: out = N(a) = P(Z ≤ a) where Z ~ N(0,1)
-// Uses Hastings approximation (accurate to ~10^-7)
+// N(x) = erfc(−x/√2)/2: full double precision, also deep in the lower tail
 // Backward: grad_a = grad_out * φ(a) where φ is the standard normal PDF
 // ============================================================================
 tensor_norm_cdf :: proc(a: ^Tensor) -> ^Tensor {
 	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
-
-	// Hastings approximation coefficients
-	p := 0.2316419
-	b1 := 0.319381530
-	b2 := -0.356563782
-	b3 := 1.781477937
-	b4 := -1.821255978
-	b5 := 1.330274429
-	inv_sqrt_2pi := 0.3989422804014327 // 1/√(2π)
-
-	for i in 0 ..< len(a.data.data) {
-		x := a.data.data[i]
-		sign := 1.0
-		ax := x
-		if x < 0.0 {
-			sign = -1.0
-			ax = -x
-		}
-
-		t := 1.0 / (1.0 + p * ax)
-		t2 := t * t
-		t3 := t2 * t
-		t4 := t3 * t
-		t5 := t4 * t
-
-		poly := b1 * t + b2 * t2 + b3 * t3 + b4 * t4 + b5 * t5
-		phi := math.exp(-0.5 * ax * ax) * inv_sqrt_2pi
-		cdf := 1.0 - phi * poly
-
-		if sign < 0.0 {
-			cdf = 1.0 - cdf
-		}
-
-		out_data.data[i] = cdf
+	for x, i in a.data.data {
+		out_data.data[i] = 0.5 * math.erfc(-x / math.SQRT_TWO)
 	}
 
 	out := _tensor_new_op(out_data, a.shape, a.requires_grad, _op_alloc(a))

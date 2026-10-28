@@ -115,10 +115,12 @@ _scalar_tensor :: proc(val: f64, allocator: mem.Allocator) -> ^t.Tensor {
 	return t
 }
 // ============================================================================
-// Compute All Greeks via Autograd
+// Closed-form Black-Scholes Price and Greeks
 // ============================================================================
-// Creates S, K, T, r, σ as tensors, computes price, and reads off gradients.
-// For gamma, we use a finite difference on delta (since autograd gives first order).
+// Analytic price, delta, gamma, vega, theta and rho. Vega and rho are per 1%
+// move, theta per calendar day (−∂V/∂T / 365). At T ≤ 0 the option is worth its
+// payoff; with σ ≤ 0 the forward is certain and the option is worth the
+// discounted payoff of the forward.
 // ============================================================================
 compute_greeks :: proc(
 	S: f64,
@@ -129,102 +131,82 @@ compute_greeks :: proc(
 	opt: OptionType,
 	allocator: mem.Allocator = context.allocator,
 ) -> Greeks {
-	// Create parameter tensors with requires_grad = true
-	S_t := _make_param(S, allocator)
-	K_t := _make_param(K, allocator)
-	T_t := _make_param(T, allocator)
-	r_t := _make_param(r, allocator)
-	sig_t := _make_param(sigma, allocator)
-
-	// Compute price
-	price_t := black_scholes_price(S_t, K_t, T_t, r_t, sig_t, opt, allocator)
-
-	// Backward pass
-	t.tensor_backward(price_t)
-
-	// Read off Greeks
-	price := price_t.data.data[0]
-	delta := S_t.grad.data[0]
-	vega := sig_t.grad.data[0]
-	rho := r_t.grad.data[0]
-	theta := T_t.grad.data[0]
-
-	// Gamma via finite difference on delta
-	h := 0.01 * S // 1% bump
-	delta_up := _compute_delta(S + h, K, T, r, sigma, opt, allocator)
-	delta_dn := _compute_delta(S - h, K, T, r, sigma, opt, allocator)
-	gamma := (delta_up - delta_dn) / (2.0 * h)
-
-	// Convert theta to per-day (divide by 365)
-	theta_per_day := -theta / 365.0
-
-	// Convert vega and rho to per-1% (divide by 100)
-	vega_per_pct := vega / 100.0
-	rho_per_pct := rho / 100.0
-	price_t.op = .None
-	// ✅ FIX: Free the graph AND the explicitly created leaf nodes
-	t.tensor_free_graph(price_t)
-	t.tensor_free(price_t)
-	t.tensor_free(S_t)
-	t.tensor_free(K_t)
-	t.tensor_free(T_t)
-	t.tensor_free(r_t)
-	t.tensor_free(sig_t)
-
-	return Greeks {
-		price = price,
-		delta = delta,
-		gamma = gamma,
-		vega = vega_per_pct,
-		theta = theta_per_day,
-		rho = rho_per_pct,
+	call := opt == .Call
+	if T <= 0.0 {
+		if call {return Greeks{price = max(S - K, 0), delta = 1 if S > K else 0}}
+		return Greeks{price = max(K - S, 0), delta = -1 if S < K else 0}
 	}
+	D := math.exp(-r * T)
+	if sigma <= 0.0 {
+		itm := S > K * D if call else S < K * D
+		if !itm {return Greeks{}}
+		sgn := 1.0 if call else -1.0
+		return Greeks {
+			price = sgn * (S - K * D),
+			delta = sgn,
+			theta = -sgn * r * K * D / 365.0,
+			rho = sgn * K * T * D / 100.0,
+		}
+	}
+
+	sqrt_T := math.sqrt(T)
+	sig_sqrt_T := sigma * sqrt_T
+	d1 := (math.ln(S / K) + (r + 0.5 * sigma * sigma) * T) / sig_sqrt_T
+	d2 := d1 - sig_sqrt_T
+	pdf_d1 := _bs_pdf(d1)
+	decay := S * pdf_d1 * sigma / (2.0 * sqrt_T) // −∂V/∂T of the volatility term
+
+	g := Greeks {
+		gamma = pdf_d1 / (S * sig_sqrt_T),
+		vega  = S * pdf_d1 * sqrt_T / 100.0,
+	}
+	if call {
+		Nd1, Nd2 := _bs_cdf(d1), _bs_cdf(d2)
+		g.price = S * Nd1 - K * D * Nd2
+		g.delta = Nd1
+		g.theta = (-decay - r * K * D * Nd2) / 365.0
+		g.rho = K * T * D * Nd2 / 100.0
+	} else {
+		Nm1, Nm2 := _bs_cdf(-d1), _bs_cdf(-d2)
+		g.price = K * D * Nm2 - S * Nm1
+		g.delta = -Nm1
+		g.theta = (-decay + r * K * D * Nm2) / 365.0
+		g.rho = -K * T * D * Nm2 / 100.0
+	}
+	return g
 }
 
-// Helper: create a parameter tensor
-_make_param :: proc(val: f64, allocator: mem.Allocator) -> ^t.Tensor {
-	data := l.matrix_new(f64, 1, 1, allocator)
-	data.data[0] = val
-	return t.tensor_new(data, true, allocator)
+// Standard normal CDF, PDF and quantile at full double precision
+@(private = "file")
+_bs_cdf :: #force_inline proc(x: f64) -> f64 {
+	return 0.5 * math.erfc(-x / math.SQRT_TWO)
 }
 
-// Helper: compute delta at a specific S (for gamma finite difference)
-_compute_delta :: proc(
-	S: f64,
-	K: f64,
-	T: f64,
-	r: f64,
-	sigma: f64,
-	opt: OptionType,
-	allocator: mem.Allocator,
-) -> f64 {
-	S_t := _make_param(S, allocator)
-	K_t := _make_param(K, allocator)
-	T_t := _make_param(T, allocator)
-	r_t := _make_param(r, allocator)
-	sig_t := _make_param(sigma, allocator)
+@(private = "file")
+_bs_pdf :: #force_inline proc(x: f64) -> f64 {
+	return math.exp(-0.5 * x * x) * 0.3989422804014327
+}
 
-	price_t := black_scholes_price(S_t, K_t, T_t, r_t, sig_t, opt, allocator)
-	t.tensor_backward(price_t)
-	delta := S_t.grad.data[0]
-	price_t.op = .None
-	// ✅ FIX: Free the graph AND the leaf nodes
-	t.tensor_free_graph(price_t)
-	t.tensor_free(price_t)
-	t.tensor_free(S_t)
-	t.tensor_free(K_t)
-	t.tensor_free(T_t)
-	t.tensor_free(r_t)
-	t.tensor_free(sig_t)
-
-	return delta
+@(private = "file")
+_bs_ppf :: proc(p: f64) -> f64 {
+	x := norm_inv(p) // Acklam, ~1e-9 relative
+	// One Halley step on Φ(x) − p
+	u := (_bs_cdf(x) - p) * 2.5066282746310002 * math.exp(0.5 * x * x)
+	return x - u / (1.0 + 0.5 * x * u)
 }
 
 // ============================================================================
-// Implied Volatility via Newton-Raphson
+// Implied Volatility
 // ============================================================================
-// Uses autograd to compute vega (the derivative) at each step.
-// Converges in 3-6 iterations typically.
+// Newton steps on the log of the closed-form price, safeguarded by a bracket:
+// the price increases in σ, so every evaluation narrows [lo, hi], and a step
+// that leaves the bracket is replaced by bisection. Starts at the inflection
+// point of the price in σ, √(2|ln(S/(K·e^{-rT}))|/T) (Manaster & Koehler).
+// Converged when the price error is below `tol` and the
+// next step would change σ by less than 1e-10 relative (or the bracket has
+// shrunk to rounding). Prices outside the no-arbitrage bounds (intrinsic value
+// below; S for a call, K·e^{-rT} for a put above) have no implied volatility and
+// return (0, false, 0).
 // ============================================================================
 implied_volatility :: proc(
 	market_price: f64,
@@ -241,57 +223,44 @@ implied_volatility :: proc(
 	converged: bool,
 	iterations: int,
 ) {
-	// Initial guess: Brenner-Subrahmanyam approximation for ATM
-	sigma = math.sqrt(2.0 * math.PI / T) * market_price / S
-	if sigma <= 0.0 || sigma > 5.0 {
-		sigma = 0.2 // fallback: 20% vol
+	if !(T > 0.0 && S > 0.0 && K > 0.0) {return 0, false, 0}
+	KD := K * math.exp(-r * T)
+	lower := max(S - KD, 0) if opt == .Call else max(KD - S, 0)
+	upper := S if opt == .Call else KD
+	if !(market_price > lower && market_price < upper) {return 0, false, 0}
+
+	// Solve on the out-of-the-money option, whose price is the time value of the
+	// in-the-money one (put-call parity): the errors are the same in price units
+	otm := OptionType.Call if S < KD else OptionType.Put
+	target := market_price - lower
+	ln_target := math.ln(target)
+
+	lo, hi := 0.0, 10.0
+	for compute_greeks(S, K, T, r, hi, otm).price < target {
+		lo, hi = hi, 2.0 * hi
+		if hi > 1e6 {return lo, false, 0}
 	}
 
-	for iter in 0 ..< max_iter {
-		// Compute price and vega at current sigma
-		S_t := _make_param(S, allocator)
-		K_t := _make_param(K, allocator)
-		T_t := _make_param(T, allocator)
-		r_t := _make_param(r, allocator)
-		sig_t := _make_param(sigma, allocator)
+	sigma = math.sqrt(2.0 * math.abs(math.ln(S / KD)) / T)
+	if sigma <= 0.0 {sigma = math.sqrt(2.0 * math.PI / T) * market_price / S} 	// at the money forward
+	if !(sigma > lo && sigma < hi) {sigma = 0.5 * (lo + hi)}
 
-		price_t := black_scholes_price(S_t, K_t, T_t, r_t, sig_t, opt, allocator)
-		t.tensor_backward(price_t)
-
-		model_price := price_t.data.data[0]
-		vega := sig_t.grad.data[0] // dV/dσ
-
-		// ✅ FIX: Free the graph AND the leaf nodes inside the loop!
-		t.tensor_free_graph(price_t)
-		t.tensor_free(S_t)
-		t.tensor_free(K_t)
-		t.tensor_free(T_t)
-		t.tensor_free(r_t)
-		t.tensor_free(sig_t)
-
-		// Check convergence
-		err := model_price - market_price
-		if math.abs(err) < tol {
-			return sigma, true, iter + 1
+	for iter in 1 ..= max_iter {
+		g := compute_greeks(S, K, T, r, sigma, otm)
+		err := g.price - target
+		if err > 0 {hi = sigma} else {lo = sigma}
+		// Newton on ln V: close to linear in 1/σ², where V itself is far too
+		// steep for Newton when the price is small
+		vega := 100.0 * g.vega
+		step := (math.ln(g.price) - ln_target) * g.price / vega if vega > 0 && g.price > 0 else math.INF_F64
+		if err == 0 ||
+		   math.abs(err) <= tol && (math.abs(step) <= 1e-10 * sigma || hi - lo <= 1e-14 * hi) {
+			return sigma, true, iter
 		}
-
-		// Newton step: σ_new = σ - (price - market) / vega
-		if math.abs(vega) < 1e-12 {
-			// Vega too small, can't continue
-			return sigma, false, iter + 1
-		}
-
-		sigma = sigma - err / vega
-
-		// Bounds check
-		if sigma <= 0.0 {
-			sigma = 0.001
-		}
-		if sigma > 10.0 {
-			sigma = 10.0
-		}
+		next := sigma - step
+		if !(next > lo && next < hi) {next = 0.5 * (lo + hi)}
+		sigma = next
 	}
-
 	return sigma, false, max_iter
 }
 
@@ -375,21 +344,26 @@ garch_price_and_greeks :: proc(
 	return price_and_greeks(S, K, T_years, r, sigma_garch, opt, allocator)
 }
 // ============================================================================
-// Advanced Derivatives: Differentiable Monte Carlo
+// Monte Carlo Pricers with Pathwise Greeks
+// ============================================================================
+// Geometric Brownian motion under the risk-neutral measure on the grid
+// t_i = i·T/n_steps, i = 1..n_steps. Averages and barrier monitoring use
+// S_1..S_n (not S_0); the lookback maximum includes S_0.
+//
+// Delta (∂V/∂S_0) and vega (∂V/∂σ) are exact pathwise derivatives of each
+// simulated payoff, accumulated path by path, so memory is O(1) in paths and
+// steps. Normals are drawn path by path, step by step.
+//
+// Barrier options use one-step survival (Glasserman & Staum 2001): every step is
+// drawn conditional on staying below the barrier and the path carries the
+// product of the survival probabilities as its weight. This is unbiased for the
+// discretely monitored barrier and has lower variance. The weighted payoff is
+// smooth in S_0 and σ, so its pathwise Greeks include the effect of knock-outs,
+// which differentiating a 0/1 knock-out indicator misses. These pricers need
+// σ > 0 and T > 0.
 // ============================================================================
 
-// Helper: Create a tensor of standard normal random variables (constant, no grad)
-_tensor_randn :: proc(rows, cols: int, allocator: mem.Allocator) -> ^t.Tensor {
-	data := l.matrix_new(f64, rows, cols, allocator)
-	for i in 0 ..< len(data.data) {
-		data.data[i] = rand.float64_normal(0.0, 1.0)
-	}
-	// requires_grad = false because randomness is not a parameter we optimize
-	return t.tensor_new(data, false, allocator)
-}
-
-
-// Price an Asian Call Option and compute exact Greeks via Autograd
+// Price an arithmetic-average Asian call: max(mean(S_1..S_n) − K, 0)
 monte_carlo_asian_option :: proc(
 	S_0: f64,
 	K: f64,
@@ -404,125 +378,34 @@ monte_carlo_asian_option :: proc(
 	delta: f64,
 	vega: f64,
 ) {
+	if n_paths <= 0 || n_steps <= 0 {return}
 	dt := T / f64(n_steps)
-	sqrt_dt := math.sqrt_f64(dt)
+	sqrt_dt := math.sqrt(dt)
+	drift := (r - 0.5 * sigma * sigma) * dt
+	inv_n := 1.0 / f64(n_steps)
 
-	// 1. Initialize current_S and sigma_tensor as n_paths×1 column vectors
-	S_broadcast_data := l.matrix_new(f64, n_paths, 1, allocator)
-	sigma_broadcast_data := l.matrix_new(f64, n_paths, 1, allocator)
-	for p in 0 ..< n_paths {
-		S_broadcast_data.data[p] = S_0
-		sigma_broadcast_data.data[p] = sigma
-	}
-
-	current_S := t.tensor_new(S_broadcast_data, true, allocator)
-	initial_S := current_S
-	sigma_tensor := t.tensor_new(sigma_broadcast_data, true, allocator)
-
-	// 2. Generate random paths (constant tensor, no grad)
-	Z := _tensor_randn(n_paths, n_steps, allocator)
-
-	// Pre-allocate constant n_paths×1 tensor for r*dt
-	r_dt_data := l.matrix_new(f64, n_paths, 1, allocator)
-	for p in 0 ..< n_paths {
-		r_dt_data.data[p] = r * dt
-	}
-	r_dt_tensor := t.tensor_new(r_dt_data, false, allocator)
-
-	// 3. Simulate paths
-	sum_S: ^t.Tensor = nil
-
-	for step in 0 ..< n_steps {
-		// Extract column of Z for this step (n_paths×1)
-		z_col_data := l.matrix_new(f64, n_paths, 1, allocator)
-		for p in 0 ..< n_paths {
-			z_col_data.data[p] = Z.data.data[p * n_steps + step]
+	for _ in 0 ..< n_paths {
+		S, W := S_0, 0.0
+		sum, dsum := 0.0, 0.0 // Σ S_i and Σ ∂S_i/∂σ
+		for i in 1 ..= n_steps {
+			z := rand.float64_normal(0.0, 1.0)
+			S *= math.exp(drift + sigma * sqrt_dt * z)
+			W += sqrt_dt * z
+			sum += S
+			dsum += S * (W - sigma * f64(i) * dt)
 		}
-		z_step := t.tensor_new(z_col_data, false, allocator)
-
-		// vol_term = sigma_tensor * z_step
-		vol_term := t.tensor_mul(sigma_tensor, z_step)
-		vol_term_scaled := t.tensor_scale(vol_term, sqrt_dt)
-		// ✅ DO NOT FREE vol_term or z_step. They are part of the graph.
-
-		// drift_tensor = r*dt - 0.5 * dt * sigma_tensor^2
-		sigma_sq := t.tensor_mul(sigma_tensor, sigma_tensor)
-		sigma_sq_scaled := t.tensor_scale(sigma_sq, -0.5 * dt)
-		// ✅ DO NOT FREE sigma_sq.
-
-		drift_tensor := t.tensor_add(r_dt_tensor, sigma_sq_scaled)
-		// ✅ DO NOT FREE sigma_sq_scaled.
-
-		// exponent = drift_tensor + vol_term_scaled
-		exponent := t.tensor_add(drift_tensor, vol_term_scaled)
-		// ✅ DO NOT FREE drift_tensor or vol_term_scaled.
-
-		// growth = exp(exponent)
-		growth := t.tensor_exp(exponent)
-		// ✅ DO NOT FREE exponent.
-
-		// next_S = current_S * growth
-		next_S := t.tensor_mul(current_S, growth)
-		// ✅ DO NOT FREE growth.
-
-		// Accumulate sum safely.
-		// We DO NOT free current_S or sum_S here. They are part of the active
-		// computation graph needed for the backward pass!
-		if step == 0 {
-			sum_S = next_S
-		} else {
-			sum_S = t.tensor_add(sum_S, next_S)
+		A := sum * inv_n
+		if A > K {
+			price += A - K
+			delta += A / S_0
+			vega += dsum * inv_n
 		}
-
-		current_S = next_S
 	}
-
-	// 4. Calculate Asian Average (n_paths×1)
-	avg_S := t.tensor_scale(sum_S, 1.0 / f64(n_steps))
-
-	// 5. Payoff = ReLU(avg_S - K) (n_paths×1)
-	K_data := l.matrix_new(f64, n_paths, 1, allocator)
-	for p in 0 ..< n_paths {
-		K_data.data[p] = K
-	}
-	K_tensor := t.tensor_new(K_data, false, allocator)
-
-	payoff_diff := t.tensor_sub(avg_S, K_tensor)
-	payoff := t.tensor_relu(payoff_diff)
-
-	// 6. Discount (n_paths×1)
-	discount_factor := math.exp(-r * T)
-	discounted_payoff := t.tensor_scale(payoff, discount_factor)
-
-	// 7. Mean over paths (scalar)
-	price_tensor := t.tensor_mean(discounted_payoff)
-
-	// 8. Backward pass
-	t.tensor_backward(price_tensor)
-
-	// 9. Extract results
-	price = price_tensor.data.data[0]
-
-	delta_sum := 0.0
-	vega_sum := 0.0
-	for p in 0 ..< n_paths {
-		delta_sum += initial_S.grad.data[p]
-		vega_sum += sigma_tensor.grad.data[p]
-	}
-
-	delta = delta_sum
-	vega = vega_sum
-
-	// 10. Cleanup: ONE CALL TO RULE THEM ALL
-	// tensor_free_graph recursively frees the ENTIRE computation graph,
-	// including current_S, sigma_tensor, r_dt_tensor, K_tensor, and ALL intermediate nodes.
-	// We only manually free 'Z' because it was never attached to the grad graph.
-	t.tensor_free_graph(price_tensor)
-	t.tensor_free(Z)
-
-	return price, delta, vega
+	scale := math.exp(-r * T) / f64(n_paths)
+	return price * scale, delta * scale, vega * scale
 }
-// Up-and-Out Call: Pays max(S_avg - K, 0) but knocks out if S_t > barrier at any time
+
+// Up-and-Out Asian Call: pays max(mean(S_1..S_n) − K, 0) unless some S_i > barrier
 monte_carlo_barrier_asian_option :: proc(
 	S_0: f64,
 	K: f64,
@@ -538,128 +421,32 @@ monte_carlo_barrier_asian_option :: proc(
 	delta: f64,
 	vega: f64,
 ) {
-	dt := T / f64(n_steps)
-	sqrt_dt := math.sqrt_f64(dt)
+	if n_paths <= 0 || n_steps <= 0 || !(sigma > 0 && T > 0 && barrier > 0) {return}
+	m := _oss_model(S_0, T, r, sigma, barrier, n_steps)
+	inv_n := 1.0 / f64(n_steps)
 
-	// Initialize tensors
-	S_broadcast_data := l.matrix_new(f64, n_paths, 1, allocator)
-	sigma_broadcast_data := l.matrix_new(f64, n_paths, 1, allocator)
-	for p in 0 ..< n_paths {
-		S_broadcast_data.data[p] = S_0
-		sigma_broadcast_data.data[p] = sigma
-	}
-
-	initial_S := t.tensor_new(S_broadcast_data, true, allocator)
-	current_S := initial_S
-	sigma_tensor := t.tensor_new(sigma_broadcast_data, true, allocator)
-
-	// Generate random paths
-	Z := _tensor_randn(n_paths, n_steps, allocator)
-
-	// Pre-allocate r*dt tensor
-	r_dt_data := l.matrix_new(f64, n_paths, 1, allocator)
-	for p in 0 ..< n_paths {
-		r_dt_data.data[p] = r * dt
-	}
-	r_dt_tensor := t.tensor_new(r_dt_data, false, allocator)
-
-	// Simulate paths with barrier check
-	sum_S: ^t.Tensor = nil
-	alive_mask := t.tensor_new(l.matrix_new(f64, n_paths, 1, allocator), false, allocator)
-	for p in 0 ..< n_paths {
-		alive_mask.data.data[p] = 1.0 // All paths start alive
-	}
-
-	for step in 0 ..< n_steps {
-		z_col_data := l.matrix_new(f64, n_paths, 1, allocator)
-		for p in 0 ..< n_paths {
-			z_col_data.data[p] = Z.data.data[p * n_steps + step]
+	for _ in 0 ..< n_paths {
+		p := _oss_start(&m)
+		sum: f64
+		dsum: [2]f64
+		for _ in 0 ..< n_steps {
+			if !_oss_step(&m, &p) {break}
+			S := math.exp(p.x)
+			sum += S
+			dsum += S * p.dx
 		}
-		z_step := t.tensor_new(z_col_data, false, allocator)
-
-		vol_term := t.tensor_mul(sigma_tensor, z_step)
-		vol_term_scaled := t.tensor_scale(vol_term, sqrt_dt)
-
-		sigma_sq := t.tensor_mul(sigma_tensor, sigma_tensor)
-		sigma_sq_scaled := t.tensor_scale(sigma_sq, -0.5 * dt)
-
-		drift_tensor := t.tensor_add(r_dt_tensor, sigma_sq_scaled)
-		exponent := t.tensor_add(drift_tensor, vol_term_scaled)
-		growth := t.tensor_exp(exponent)
-
-		next_S := t.tensor_mul(current_S, growth)
-
-		// Check barrier: if next_S > barrier, mark path as dead
-		// We use a simple approach: multiply by mask
-		barrier_check := t.tensor_new(l.matrix_new(f64, n_paths, 1, allocator), false, allocator)
-		for p in 0 ..< n_paths {
-			if next_S.data.data[p] > barrier {
-				barrier_check.data.data[p] = 0.0 // Knock out
-			} else {
-				barrier_check.data.data[p] = 1.0 // Stay alive
-			}
-		}
-
-		// Update alive mask
-		alive_mask = t.tensor_mul(alive_mask, barrier_check)
-		t.tensor_free(barrier_check)
-
-		// Accumulate sum (only for alive paths)
-		masked_S := t.tensor_mul(next_S, alive_mask)
-
-		if step == 0 {
-			sum_S = masked_S
-		} else {
-			sum_S = t.tensor_add(sum_S, masked_S)
-		}
-
-		current_S = next_S
+		A := sum * inv_n
+		if p.w == 0 || A <= K {continue}
+		f := A - K
+		price += p.w * f
+		delta += p.w * (p.dlw[0] * f + dsum[0] * inv_n)
+		vega += p.w * (p.dlw[1] * f + dsum[1] * inv_n)
 	}
-
-	// Calculate average
-	avg_S := t.tensor_scale(sum_S, 1.0 / f64(n_steps))
-
-	// Payoff with barrier condition
-	K_data := l.matrix_new(f64, n_paths, 1, allocator)
-	for p in 0 ..< n_paths {
-		K_data.data[p] = K
-	}
-	K_tensor := t.tensor_new(K_data, false, allocator)
-
-	payoff_diff := t.tensor_sub(avg_S, K_tensor)
-	payoff_raw := t.tensor_relu(payoff_diff)
-
-	// Apply alive mask to payoff
-	payoff := t.tensor_mul(payoff_raw, alive_mask)
-
-	// Discount
-	discount_factor := math.exp(-r * T)
-	discounted_payoff := t.tensor_scale(payoff, discount_factor)
-
-	// Mean
-	price_tensor := t.tensor_mean(discounted_payoff)
-
-	// Backward pass
-	t.tensor_backward(price_tensor)
-
-	price = price_tensor.data.data[0]
-
-	delta_sum := 0.0
-	vega_sum := 0.0
-	for p in 0 ..< n_paths {
-		delta_sum += initial_S.grad.data[p]
-		vega_sum += sigma_tensor.grad.data[p]
-	}
-
-	delta = delta_sum
-	vega = vega_sum
-
-	t.tensor_free_graph(price_tensor)
-	t.tensor_free(Z)
-
-	return price, delta, vega
+	scale := math.exp(-r * T) / f64(n_paths)
+	return price * scale, delta * scale, vega * scale
 }
-// 2-Asset Basket Call: Pays max(w1*S1_avg + w2*S2_avg - K, 0)
+
+// 2-Asset Basket Call: pays max(w1·mean(S1) + w2·mean(S2) − K, 0)
 monte_carlo_basket_option :: proc(
 	S1_0: f64,
 	S2_0: f64,
@@ -681,154 +468,43 @@ monte_carlo_basket_option :: proc(
 	vega1: f64,
 	vega2: f64,
 ) {
+	if n_paths <= 0 || n_steps <= 0 || !(math.abs(corr) <= 1) {return}
 	dt := T / f64(n_steps)
-	sqrt_dt := math.sqrt_f64(dt)
+	sqrt_dt := math.sqrt(dt)
+	drift1 := (r - 0.5 * sigma1 * sigma1) * dt
+	drift2 := (r - 0.5 * sigma2 * sigma2) * dt
+	corr_perp := math.sqrt(1.0 - corr * corr) // Cholesky factor of [[1, ρ], [ρ, 1]]
+	inv_n := 1.0 / f64(n_steps)
 
-	// Cholesky decomposition for correlation
-	// L = [[1, 0], [corr, sqrt(1-corr^2)]]
-	cholesky_21 := corr
-	cholesky_22 := math.sqrt_f64(1.0 - corr * corr)
-
-	// Initialize asset 1
-	S1_broadcast := l.matrix_new(f64, n_paths, 1, allocator)
-	sigma1_broadcast := l.matrix_new(f64, n_paths, 1, allocator)
-	for p in 0 ..< n_paths {
-		S1_broadcast.data[p] = S1_0
-		sigma1_broadcast.data[p] = sigma1
-	}
-
-	initial_S1 := t.tensor_new(S1_broadcast, true, allocator)
-	current_S1 := initial_S1
-	sigma1_tensor := t.tensor_new(sigma1_broadcast, true, allocator)
-
-	// Initialize asset 2
-	S2_broadcast := l.matrix_new(f64, n_paths, 1, allocator)
-	sigma2_broadcast := l.matrix_new(f64, n_paths, 1, allocator)
-	for p in 0 ..< n_paths {
-		S2_broadcast.data[p] = S2_0
-		sigma2_broadcast.data[p] = sigma2
-	}
-
-	initial_S2 := t.tensor_new(S2_broadcast, true, allocator)
-	current_S2 := initial_S2
-	sigma2_tensor := t.tensor_new(sigma2_broadcast, true, allocator)
-
-	// Generate independent random paths
-	Z1 := _tensor_randn(n_paths, n_steps, allocator)
-	Z2 := _tensor_randn(n_paths, n_steps, allocator)
-
-	// Pre-allocate drift tensors
-	r_dt_data := l.matrix_new(f64, n_paths, 1, allocator)
-	for p in 0 ..< n_paths {
-		r_dt_data.data[p] = r * dt
-	}
-	r_dt_tensor := t.tensor_new(r_dt_data, false, allocator)
-
-	// Simulate correlated paths
-	sum_S1: ^t.Tensor = nil
-	sum_S2: ^t.Tensor = nil
-
-	for step in 0 ..< n_steps {
-		// Extract Z columns
-		z1_col_data := l.matrix_new(f64, n_paths, 1, allocator)
-		z2_col_data := l.matrix_new(f64, n_paths, 1, allocator)
-		for p in 0 ..< n_paths {
-			z1_col_data.data[p] = Z1.data.data[p * n_steps + step]
-			z2_col_data.data[p] = Z2.data.data[p * n_steps + step]
+	for _ in 0 ..< n_paths {
+		S1, S2, W1, W2 := S1_0, S2_0, 0.0, 0.0
+		sum1, sum2, dsum1, dsum2: f64
+		for i in 1 ..= n_steps {
+			z1 := rand.float64_normal(0.0, 1.0)
+			z2 := corr * z1 + corr_perp * rand.float64_normal(0.0, 1.0)
+			S1 *= math.exp(drift1 + sigma1 * sqrt_dt * z1)
+			S2 *= math.exp(drift2 + sigma2 * sqrt_dt * z2)
+			W1 += sqrt_dt * z1
+			W2 += sqrt_dt * z2
+			t_i := f64(i) * dt
+			sum1 += S1
+			sum2 += S2
+			dsum1 += S1 * (W1 - sigma1 * t_i)
+			dsum2 += S2 * (W2 - sigma2 * t_i)
 		}
-		z1_step := t.tensor_new(z1_col_data, false, allocator)
-		z2_step := t.tensor_new(z2_col_data, false, allocator)
-
-		// Apply Cholesky to create correlated paths
-		// Z2_corr = cholesky_21 * Z1 + cholesky_22 * Z2
-		z2_corr_1 := t.tensor_scale(z1_step, cholesky_21)
-		z2_corr_2 := t.tensor_scale(z2_step, cholesky_22)
-		z2_corr := t.tensor_add(z2_corr_1, z2_corr_2)
-
-		// Asset 1 dynamics
-		vol1_term := t.tensor_mul(sigma1_tensor, z1_step)
-		vol1_scaled := t.tensor_scale(vol1_term, sqrt_dt)
-		sigma1_sq := t.tensor_mul(sigma1_tensor, sigma1_tensor)
-		sigma1_sq_scaled := t.tensor_scale(sigma1_sq, -0.5 * dt)
-		drift1 := t.tensor_add(r_dt_tensor, sigma1_sq_scaled)
-		exponent1 := t.tensor_add(drift1, vol1_scaled)
-		growth1 := t.tensor_exp(exponent1)
-		next_S1 := t.tensor_mul(current_S1, growth1)
-
-		// Asset 2 dynamics
-		vol2_term := t.tensor_mul(sigma2_tensor, z2_corr)
-		vol2_scaled := t.tensor_scale(vol2_term, sqrt_dt)
-		sigma2_sq := t.tensor_mul(sigma2_tensor, sigma2_tensor)
-		sigma2_sq_scaled := t.tensor_scale(sigma2_sq, -0.5 * dt)
-		drift2 := t.tensor_add(r_dt_tensor, sigma2_sq_scaled)
-		exponent2 := t.tensor_add(drift2, vol2_scaled)
-		growth2 := t.tensor_exp(exponent2)
-		next_S2 := t.tensor_mul(current_S2, growth2)
-
-		// Accumulate sums
-		if step == 0 {
-			sum_S1 = next_S1
-			sum_S2 = next_S2
-		} else {
-			sum_S1 = t.tensor_add(sum_S1, next_S1)
-			sum_S2 = t.tensor_add(sum_S2, next_S2)
+		basket := (w1 * sum1 + w2 * sum2) * inv_n
+		if basket > K {
+			price += basket - K
+			delta1 += w1 * sum1 * inv_n / S1_0
+			delta2 += w2 * sum2 * inv_n / S2_0
+			vega1 += w1 * dsum1 * inv_n
+			vega2 += w2 * dsum2 * inv_n
 		}
-
-		current_S1 = next_S1
-		current_S2 = next_S2
 	}
-
-	// Calculate basket average
-	avg_S1 := t.tensor_scale(sum_S1, 1.0 / f64(n_steps))
-	avg_S2 := t.tensor_scale(sum_S2, 1.0 / f64(n_steps))
-
-	// Weighted basket
-	weighted_S1 := t.tensor_scale(avg_S1, w1)
-	weighted_S2 := t.tensor_scale(avg_S2, w2)
-	basket_value := t.tensor_add(weighted_S1, weighted_S2)
-
-	// Payoff
-	K_data := l.matrix_new(f64, n_paths, 1, allocator)
-	for p in 0 ..< n_paths {
-		K_data.data[p] = K
-	}
-	K_tensor := t.tensor_new(K_data, false, allocator)
-
-	payoff_diff := t.tensor_sub(basket_value, K_tensor)
-	payoff := t.tensor_relu(payoff_diff)
-
-	// Discount and mean
-	discount_factor := math.exp(-r * T)
-	discounted_payoff := t.tensor_scale(payoff, discount_factor)
-	price_tensor := t.tensor_mean(discounted_payoff)
-
-	// Backward pass
-	t.tensor_backward(price_tensor)
-
-	price = price_tensor.data.data[0]
-
-	delta1_sum := 0.0
-	delta2_sum := 0.0
-	vega1_sum := 0.0
-	vega2_sum := 0.0
-	for p in 0 ..< n_paths {
-		delta1_sum += initial_S1.grad.data[p]
-		delta2_sum += initial_S2.grad.data[p]
-		vega1_sum += sigma1_tensor.grad.data[p]
-		vega2_sum += sigma2_tensor.grad.data[p]
-	}
-
-	delta1 = delta1_sum
-	delta2 = delta2_sum
-	vega1 = vega1_sum
-	vega2 = vega2_sum
-
-	t.tensor_free_graph(price_tensor)
-	t.tensor_free(Z1)
-	t.tensor_free(Z2)
-
-	return price, delta1, delta2, vega1, vega2
+	scale := math.exp(-r * T) / f64(n_paths)
+	return price * scale, delta1 * scale, delta2 * scale, vega1 * scale, vega2 * scale
 }
+
 // ============================================================================
 // Lookback Options
 // ============================================================================
@@ -847,20 +523,25 @@ tensor_smooth_max :: proc(a: ^t.Tensor, b: ^t.Tensor, allocator: mem.Allocator) 
 		eps_data.data[i] = 1e-6
 	}
 	eps_tensor := t.tensor_new(eps_data, false, allocator)
+	eps_tensor.owned_by_graph = true // an input of the graph: tensor_free_graph frees it
 
 	diff_sq_eps := t.tensor_add(diff_sq, eps_tensor)
-	t.tensor_free(eps_tensor) // Clean up intermediate
-
 	sqrt_diff := t.tensor_sqrt(diff_sq_eps)
 	a_plus_b := t.tensor_add(a, b)
-
 	num := t.tensor_add(a_plus_b, sqrt_diff)
 
 	// Use tensor_scale for division by 2 to avoid 1x1 tensor multiplication
-	return t.tensor_scale(num, 0.5)
+	out := t.tensor_scale(num, 0.5)
+	if !out.requires_grad {
+		// No graph was recorded, so nothing reachable from out holds the intermediates
+		for x in ([]^t.Tensor{diff, diff_sq, eps_tensor, diff_sq_eps, sqrt_diff, a_plus_b, num}) {
+			t.tensor_free(x)
+		}
+	}
+	return out
 }
 
-// Fixed Strike Lookback Call: Pays max(S_max - K, 0)
+// Fixed Strike Lookback Call: Pays max(max(S_0, S_1..S_n) − K, 0)
 monte_carlo_lookback_call_option :: proc(
 	S_0: f64,
 	K: f64,
@@ -875,101 +556,43 @@ monte_carlo_lookback_call_option :: proc(
 	delta: f64,
 	vega: f64,
 ) {
+	if n_paths <= 0 || n_steps <= 0 {return}
 	dt := T / f64(n_steps)
-	sqrt_dt := math.sqrt_f64(dt)
+	sqrt_dt := math.sqrt(dt)
+	drift := (r - 0.5 * sigma * sigma) * dt
 
-	// Initialize tensors
-	S_broadcast_data := l.matrix_new(f64, n_paths, 1, allocator)
-	sigma_broadcast_data := l.matrix_new(f64, n_paths, 1, allocator)
-	for p in 0 ..< n_paths {
-		S_broadcast_data.data[p] = S_0
-		sigma_broadcast_data.data[p] = sigma
-	}
-
-	initial_S := t.tensor_new(S_broadcast_data, true, allocator)
-	current_S := initial_S
-	sigma_tensor := t.tensor_new(sigma_broadcast_data, true, allocator)
-
-	// Generate random paths
-	Z := _tensor_randn(n_paths, n_steps, allocator)
-
-	// Pre-allocate r*dt tensor
-	r_dt_data := l.matrix_new(f64, n_paths, 1, allocator)
-	for p in 0 ..< n_paths {
-		r_dt_data.data[p] = r * dt
-	}
-	r_dt_tensor := t.tensor_new(r_dt_data, false, allocator)
-
-	// Track running maximum (initialize with S_0)
-	S_max_data := l.matrix_new(f64, n_paths, 1, allocator)
-	for p in 0 ..< n_paths {
-		S_max_data.data[p] = S_0
-	}
-	S_max := t.tensor_new(S_max_data, false, allocator)
-
-	for step in 0 ..< n_steps {
-		z_col_data := l.matrix_new(f64, n_paths, 1, allocator)
-		for p in 0 ..< n_paths {
-			z_col_data.data[p] = Z.data.data[p * n_steps + step]
+	for _ in 0 ..< n_paths {
+		S, W := S_0, 0.0
+		M, dM := S_0, 0.0 // running maximum and its ∂/∂σ
+		for i in 1 ..= n_steps {
+			z := rand.float64_normal(0.0, 1.0)
+			S *= math.exp(drift + sigma * sqrt_dt * z)
+			W += sqrt_dt * z
+			if S > M {
+				M = S
+				dM = S * (W - sigma * f64(i) * dt)
+			}
 		}
-		z_step := t.tensor_new(z_col_data, false, allocator)
-
-		vol_term := t.tensor_mul(sigma_tensor, z_step)
-		vol_term_scaled := t.tensor_scale(vol_term, sqrt_dt)
-
-		sigma_sq := t.tensor_mul(sigma_tensor, sigma_tensor)
-		sigma_sq_scaled := t.tensor_scale(sigma_sq, -0.5 * dt)
-
-		drift_tensor := t.tensor_add(r_dt_tensor, sigma_sq_scaled)
-		exponent := t.tensor_add(drift_tensor, vol_term_scaled)
-		growth := t.tensor_exp(exponent)
-
-		next_S := t.tensor_mul(current_S, growth)
-
-		// Update running maximum using smooth differentiable max
-		S_max = tensor_smooth_max(S_max, next_S, allocator)
-
-		current_S = next_S
+		if M > K {
+			price += M - K
+			delta += M / S_0 // every S_i scales with S_0
+			vega += dM
+		} else if M == K {
+			// M = S_0 = K: paths that never rise above S_0 have the kink of the
+			// payoff at S_0 itself (a positive fraction under discrete
+			// monitoring), so the price has a kink at K = S_0. Count the
+			// symmetric derivative, ½·M/S_0.
+			delta += 0.5
+		}
 	}
-
-	// Payoff = max(S_max - K, 0)
-	K_data := l.matrix_new(f64, n_paths, 1, allocator)
-	for p in 0 ..< n_paths {
-		K_data.data[p] = K
-	}
-	K_tensor := t.tensor_new(K_data, false, allocator)
-
-	payoff_diff := t.tensor_sub(S_max, K_tensor)
-	payoff := t.tensor_relu(payoff_diff)
-
-	// Discount and mean
-	discount_factor := math.exp(-r * T)
-	discounted_payoff := t.tensor_scale(payoff, discount_factor)
-	price_tensor := t.tensor_mean(discounted_payoff)
-
-	// Backward pass
-	t.tensor_backward(price_tensor)
-
-	price = price_tensor.data.data[0]
-
-	delta_sum := 0.0
-	vega_sum := 0.0
-	for p in 0 ..< n_paths {
-		delta_sum += initial_S.grad.data[p]
-		vega_sum += sigma_tensor.grad.data[p]
-	}
-
-	delta = delta_sum
-	vega = vega_sum
-
-	t.tensor_free_graph(price_tensor)
-	t.tensor_free(Z)
-
-	return price, delta, vega
+	scale := math.exp(-r * T) / f64(n_paths)
+	return price * scale, delta * scale, vega * scale
 }
+
 // ============================================================================
-// Black-Scholes Monte Carlo: Up-and-Out Call Option (Tensor-based with Autograd)
+// Black-Scholes Monte Carlo: Up-and-Out Call Option
 // ============================================================================
+// Pays max(S_n − K, 0) unless some S_i ≥ barrier
 monte_carlo_barrier_call_bs :: proc(
 	S_0: f64,
 	K: f64,
@@ -985,109 +608,98 @@ monte_carlo_barrier_call_bs :: proc(
 	delta: f64,
 	vega: f64,
 ) {
+	if n_paths <= 0 || n_steps <= 0 || !(sigma > 0 && T > 0 && barrier > 0) {return}
+	m := _oss_model(S_0, T, r, sigma, barrier, n_steps)
+
+	for _ in 0 ..< n_paths {
+		p := _oss_start(&m)
+		for _ in 0 ..< n_steps {
+			if !_oss_step(&m, &p) {break}
+		}
+		if p.w == 0 {continue}
+		S := math.exp(p.x)
+		if S <= K {continue}
+		f := S - K
+		price += p.w * f
+		delta += p.w * (p.dlw[0] * f + S * p.dx[0])
+		vega += p.w * (p.dlw[1] * f + S * p.dx[1])
+	}
+	scale := math.exp(-r * T) / f64(n_paths)
+	return price * scale, delta * scale, vega * scale
+}
+
+// ----------------------------------------------------------------------------
+// One-step survival below an up barrier, in log-price x = ln S, with tangents
+// with respect to θ = (S_0, σ). Per step: a = (ln B − x − μ)/s with μ = (r −
+// σ²/2)·dt and s = σ·√dt, survival p = Φ(a), z = Φ⁻¹(U·p) for U ~ U(0,1), so
+// x + μ + s·z < ln B, and the weight is multiplied by p. Differentiating with U
+// held fixed: ∂z = (U·p/φ(z))·∂ln p.
+// ----------------------------------------------------------------------------
+@(private = "file")
+_OSS_Model :: struct {
+	lb, mu, s: f64, // log barrier, drift and volatility per step
+	dmu, ds:   [2]f64, // ∂μ/∂θ, ∂s/∂θ
+	x0:        f64,
+	dx0:       [2]f64,
+}
+
+@(private = "file")
+_OSS_Path :: struct {
+	x:   f64, // log-price
+	dx:  [2]f64, // ∂x/∂θ
+	w:   f64, // survival weight Π p_i
+	dlw: [2]f64, // ∂ln w/∂θ
+}
+
+@(private = "file")
+_oss_model :: proc(S_0, T, r, sigma, barrier: f64, n_steps: int) -> _OSS_Model {
 	dt := T / f64(n_steps)
-	sqrt_dt := math.sqrt_f64(dt)
-
-	// 1. Initialize S and sigma as n_paths×1 column vectors with requires_grad = true
-	S_broadcast_data := l.matrix_new(f64, n_paths, 1, allocator)
-	sigma_broadcast_data := l.matrix_new(f64, n_paths, 1, allocator)
-	for p in 0 ..< n_paths {
-		S_broadcast_data.data[p] = S_0
-		sigma_broadcast_data.data[p] = sigma
+	sqrt_dt := math.sqrt(dt)
+	return _OSS_Model {
+		lb = math.ln(barrier),
+		mu = (r - 0.5 * sigma * sigma) * dt,
+		s = sigma * sqrt_dt,
+		dmu = {0, -sigma * dt},
+		ds = {0, sqrt_dt},
+		x0 = math.ln(S_0),
+		dx0 = {1.0 / S_0, 0},
 	}
+}
 
-	initial_S := t.tensor_new(S_broadcast_data, true, allocator)
-	current_S := initial_S
-	sigma_tensor := t.tensor_new(sigma_broadcast_data, true, allocator)
+@(private = "file")
+_oss_start :: #force_inline proc(m: ^_OSS_Model) -> _OSS_Path {
+	return _OSS_Path{x = m.x0, dx = m.dx0, w = 1}
+}
 
-	// 2. Generate random paths (constant tensor, no grad)
-	Z := _tensor_randn(n_paths, n_steps, allocator)
-
-	// Pre-allocate constant n_paths×1 tensors for drift
-	drift_data := l.matrix_new(f64, n_paths, 1, allocator)
-	for p in 0 ..< n_paths {
-		drift_data.data[p] = (r - 0.5 * sigma * sigma) * dt
+// Advances one step; false (and weight 0) once survival is negligible
+@(private = "file")
+_oss_step :: proc(m: ^_OSS_Model, p: ^_OSS_Path) -> bool {
+	a := (m.lb - p.x - m.mu) / m.s
+	surv := _bs_cdf(a)
+	if surv == 1 {
+		// Far from the barrier (a > 8.3): Φ⁻¹(U) is a plain normal draw and
+		// ∂ln p is below 1e-15
+		z := rand.float64_normal(0.0, 1.0)
+		p.dx += m.dmu + m.ds * z
+		p.x += m.mu + m.s * z
+		return true
 	}
-	drift_tensor := t.tensor_new(drift_data, false, allocator)
-
-	// Alive mask: 1.0 if alive, 0.0 if knocked out
-	alive_mask := t.tensor_new(l.matrix_new(f64, n_paths, 1, allocator), false, allocator)
-	for p in 0 ..< n_paths {
-		alive_mask.data.data[p] = 1.0
+	if surv < 1e-280 {
+		p.w = 0
+		return false
 	}
-
-	// 3. Simulate paths
-	for step in 0 ..< n_steps {
-		// Extract column of Z for this step (n_paths×1)
-		z_col_data := l.matrix_new(f64, n_paths, 1, allocator)
-		for p in 0 ..< n_paths {
-			z_col_data.data[p] = Z.data.data[p * n_steps + step]
-		}
-		z_step := t.tensor_new(z_col_data, false, allocator)
-
-		// vol_term = sigma_tensor * z_step * sqrt_dt
-		vol_term := t.tensor_mul(sigma_tensor, z_step)
-		vol_term_scaled := t.tensor_scale(vol_term, sqrt_dt)
-
-		// exponent = drift + vol_term_scaled
-		exponent := t.tensor_add(drift_tensor, vol_term_scaled)
-
-		// growth = exp(exponent)
-		growth := t.tensor_exp(exponent)
-
-		// next_S = current_S * growth
-		next_S := t.tensor_mul(current_S, growth)
-
-		// Check barrier: if next_S >= barrier, mark path as dead
-		barrier_check := t.tensor_new(l.matrix_new(f64, n_paths, 1, allocator), false, allocator)
-		for p in 0 ..< n_paths {
-			if next_S.data.data[p] >= barrier {
-				barrier_check.data.data[p] = 0.0 // Knock out
-			} else {
-				barrier_check.data.data[p] = 1.0 // Stay alive
-			}
-		}
-
-		// Update alive mask
-		alive_mask = t.tensor_mul(alive_mask, barrier_check)
-		t.tensor_free(barrier_check)
-
-		current_S = next_S
+	u := rand.float64()
+	if u <= 0 {u = 5.551115123125783e-17} // 2^-54
+	v := u * surv
+	z := _bs_ppf(v)
+	hazard := _bs_pdf(a) / surv // ∂ln p/∂a
+	dz_dlnp := v / _bs_pdf(z)
+	for k in 0 ..< 2 {
+		dlnp := hazard * (-p.dx[k] - m.dmu[k] - a * m.ds[k]) / m.s
+		p.dx[k] += m.dmu[k] + m.ds[k] * z + m.s * dz_dlnp * dlnp
+		p.dlw[k] += dlnp
 	}
-
-	// 4. Payoff = ReLU(S_T - K) * alive_mask
-	K_data := l.matrix_new(f64, n_paths, 1, allocator)
-	for p in 0 ..< n_paths {
-		K_data.data[p] = K
-	}
-	K_tensor := t.tensor_new(K_data, false, allocator)
-
-	payoff_diff := t.tensor_sub(current_S, K_tensor)
-	payoff_raw := t.tensor_relu(payoff_diff)
-
-	// Apply alive mask to payoff
-	payoff := t.tensor_mul(payoff_raw, alive_mask)
-
-	// 5. Discount and mean
-	discount_factor := math.exp(-r * T)
-	discounted_payoff := t.tensor_scale(payoff, discount_factor)
-	price_tensor := t.tensor_mean(discounted_payoff)
-
-	// 6. Backward pass for Autograd
-	t.tensor_backward(price_tensor)
-
-	price = price_tensor.data.data[0]
-
-	delta_sum := 0.0
-	vega_sum := 0.0
-	for p in 0 ..< n_paths {
-		delta_sum += initial_S.grad.data[p]
-		vega_sum += sigma_tensor.grad.data[p]
-	}
-
-	// 7. Cleanup: Match your existing graph-based pattern
-	t.tensor_free_graph(price_tensor)
-	t.tensor_free(Z)
-
-	return price, delta_sum, vega_sum
+	p.x += m.mu + m.s * z
+	p.w *= surv
+	return true
 }
