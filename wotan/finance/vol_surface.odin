@@ -38,51 +38,40 @@ SABR_Params :: struct {
 	nu:    f64, // vol of vol
 }
 
+// Hagan's lognormal implied volatility:
+//   σ_B = α / [(FK)^{(1−β)/2}·(1 + (1−β)²/24·ℓ² + (1−β)⁴/1920·ℓ⁴)] · z/x(z)
+//         · (1 + [(1−β)²/24·α²/(FK)^{1−β} + ρβνα/(4(FK)^{(1−β)/2}) + (2−3ρ²)/24·ν²]·T)
+// with ℓ = ln(F/K), z = ν/α·(FK)^{(1−β)/2}·ℓ, x(z) = ln((√(1−2ρz+z²) + z − ρ)/(1−ρ)).
+// One expression covers the money too: z/x(z) → 1 as z → 0.
 sabr_implied_vol :: proc(F: f64, K: f64, T: f64, params: SABR_Params) -> f64 {
 	alpha := params.alpha
 	beta := params.beta
 	rho := params.rho
 	nu := params.nu
 
-	if alpha <= 0.0 || T <= 0.0 {return 0.0}
+	if alpha <= 0.0 || T <= 0.0 || F <= 0.0 || K <= 0.0 {return 0.0}
 
-	if math.abs(F - K) < 1e-10 {
-		F_beta := math.pow(F, 1.0 - beta)
-		F_2beta := math.pow(F, 2.0 - 2.0 * beta)
-		term1 := (1.0 - beta) * (1.0 - beta) / (24.0 * F_2beta)
-		term2 := rho * beta * nu * alpha / (4.0 * F_beta)
-		term3 := (2.0 - 3.0 * rho * rho) * nu * nu / 24.0
-		return alpha * (1.0 + (term1 + term2 + term3) * T) / F_beta
-	}
-
-	FK := F * K
-	FK_mid := math.pow(FK, (1.0 - beta) / 2.0)
+	omb := 1.0 - beta
 	log_FK := math.ln(F / K)
+	FK_mid := math.pow(F * K, 0.5 * omb)
 
+	// x(z) = log1p((√(1−2ρz+z²) − 1 + z)/(1−ρ)), with √(1−2ρz+z²) − 1 written as
+	// (z² − 2ρz)/(√(1−2ρz+z²) + 1): accurate for small z, where z/x(z) → 1
 	z := (nu / alpha) * FK_mid * log_FK
-	x_z := 0.0
-
-	if math.abs(z) < 1e-10 {
-		x_z = 1.0
-	} else {
-		sqrt_term := math.sqrt_f64(1.0 - 2.0 * rho * z + z * z)
-		x_z = math.ln((sqrt_term + z - rho) / (1.0 - rho))
+	z_over_x := 1.0
+	if z != 0.0 {
+		q := math.sqrt_f64(1.0 - 2.0 * rho * z + z * z)
+		z_over_x = z / math.log1p(((z * z - 2.0 * rho * z) / (q + 1.0) + z) / (1.0 - rho))
 	}
 
-	if math.abs(x_z) < 1e-10 {return 0.0}
-
-	z_over_x := z / x_z
-	term1 := (1.0 - beta) * (1.0 - beta) / 24.0 * log_FK * log_FK
-	term2 :=
-		(1.0 - beta) * (1.0 - beta) * (1.0 - beta) * (1.0 - beta) / 1920.0 * math.pow(log_FK, 4)
-	denom := FK_mid * (1.0 + term1 + term2)
-
-	sigma := alpha * z_over_x / denom
-	corr1 := (1.0 - beta) * (1.0 - beta) / 24.0 * alpha * alpha / (FK_mid * FK_mid)
+	l2 := log_FK * log_FK
+	omb2 := omb * omb
+	denom := FK_mid * (1.0 + omb2 / 24.0 * l2 + omb2 * omb2 / 1920.0 * l2 * l2)
+	corr1 := omb2 / 24.0 * alpha * alpha / (FK_mid * FK_mid)
 	corr2 := 0.25 * rho * beta * nu * alpha / FK_mid
 	corr3 := (2.0 - 3.0 * rho * rho) / 24.0 * nu * nu
 
-	return sigma * (1.0 + (corr1 + corr2 + corr3) * T)
+	return alpha / denom * z_over_x * (1.0 + (corr1 + corr2 + corr3) * T)
 }
 
 // ============================================================================
@@ -110,6 +99,7 @@ SABR_CalibrationResult :: struct {
 Heston_CalibrationResult :: struct {
 	params:        Heston_Params,
 	rmse:          f64, // pricing RMSE (excludes any Feller penalty)
+	iv_rmse:       f64, // implied-volatility RMSE (what is minimized)
 	converged:     bool,
 	iterations:    int,
 	feller_margin: f64, // 2*kappa*theta - sigma^2; > 0 means the Feller condition holds
@@ -138,23 +128,22 @@ compute_heston_rmse :: proc(
 	r: f64,
 	params: Heston_Params,
 ) -> f64 {
+	n := len(market_data)
+	if n == 0 {return 0}
+	model := make([]f64, n, context.temp_allocator)
+	defer delete(model, context.temp_allocator)
+	_heston_model_prices(market_data, S, r, params, model)
 	rmse := 0.0
-	for point in market_data {
-		model_price := heston_price(S, point.strike, point.expiry, r, params, .Call, 50)
-		bs_price := black_scholes_call(S, point.strike, point.expiry, r, point.implied_vol)
-		err := model_price - bs_price
+	for point, i in market_data {
+		err := model[i] - black_scholes_call(S, point.strike, point.expiry, r, point.implied_vol)
 		rmse += err * err
 	}
-	return math.sqrt_f64(rmse / f64(len(market_data)))
+	return math.sqrt_f64(rmse / f64(n))
 }
 
+// Black-Scholes call at full precision (also deep out of the money)
 black_scholes_call :: proc(S: f64, K: f64, T: f64, r: f64, sigma: f64) -> f64 {
-	if T <= 0.0 {return math.max(S - K, 0.0)}
-	d1 := (math.ln(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt_f64(T))
-	d2 := d1 - sigma * math.sqrt_f64(T)
-	N_d1 := 0.5 * (1.0 + math.erf(d1 / math.sqrt_f64(2.0)))
-	N_d2 := 0.5 * (1.0 + math.erf(d2 / math.sqrt_f64(2.0)))
-	return S * N_d1 - K * math.exp(-r * T) * N_d2
+	return compute_greeks(S, K, T, r, sigma, .Call).price
 }
 
 /// Complex helpers
@@ -204,7 +193,10 @@ Heston_CalibrationContext :: struct {
 	market_data:   []VolSurfacePoint,
 	S:             f64,
 	r:             f64,
-	feller_weight: f64, // penalty per unit of Feller violation (0 = not enforced)
+	feller_weight: f64, // heston_objective_fn: penalty per unit of Feller violation (0 = none)
+	// Used by calibrate_heston's residuals: market prices and vegas of the quotes
+	market_prices: []f64,
+	vegas:         []f64,
 }
 
 sabr_objective_fn :: proc(x: []f64, user_data: rawptr) -> f64 {
@@ -303,109 +295,194 @@ _heston_model_prices :: proc(
 	}
 }
 
-// Calibrate SABR using Adam (with FIXED deep copies for gradients)
+// Residuals of the SABR fit: model minus market implied volatility
+_sabr_residuals :: proc(x: []f64, res: []f64, user_data: rawptr) {
+	ctx := (^SABR_CalibrationContext)(user_data)
+	params := SABR_Params {
+		alpha = x[0],
+		beta  = x[1],
+		rho   = x[2],
+		nu    = x[3],
+	}
+	for point, i in ctx.market_data {
+		F := ctx.S * math.exp(ctx.r * point.expiry)
+		res[i] = sabr_implied_vol(F, point.strike, point.expiry, params) - point.implied_vol
+	}
+}
+
+// Calibrate one SABR parameter set to all quotes by Levenberg-Marquardt on the
+// implied-volatility errors. Starts from β = 0.7, ρ = −0.3, ν = 0.4 and the α
+// that reproduces the at-the-money volatility of the shortest expiry. (β and ρ
+// both tilt the smile and are only weakly identified jointly; fix β by setting
+// equal bounds if it is known.)
 calibrate_sabr :: proc(
 	market_data: []VolSurfacePoint,
 	S: f64,
 	r: f64,
 	allocator: mem.Allocator = context.allocator,
 ) -> SABR_CalibrationResult {
+	if len(market_data) == 0 {return {}}
 	ctx := SABR_CalibrationContext {
 		market_data = market_data,
 		S           = S,
 		r           = r,
 	}
 
+	beta0 := 0.7
+	atm, T_atm := _atm_vol(market_data, S, r, true)
+	F_atm := S * math.exp(r * T_atm)
+	alpha0 := atm * math.pow(F_atm, 1.0 - beta0)
+
 	inf := math.inf_f64(1)
 	params := []opt.Calibration_Param {
-		{"alpha", 0.2, 0.01, inf, .Linear},
-		{"beta", 0.7, 0.0, 1.0, .Linear},
-		{"rho", -0.3, -0.99, 0.99, .Linear},
-		{"nu", 0.4, 0.01, inf, .Linear},
+		{"alpha", alpha0, 1e-6, inf, .Linear},
+		{"beta", beta0, 0.0, 1.0, .Linear},
+		{"rho", -0.3, -0.999, 0.999, .Linear},
+		{"nu", 0.4, 1e-6, inf, .Linear},
 	}
-	config := opt.Calibration_Config {
-		optimizer = {
-			type = .Adam,
-			learning_rate = 0.1,
-			beta1 = 0.9,
-			beta2 = 0.999,
-			epsilon = 1e-8,
-		},
-		max_iter = 300,
-		loss_threshold = 1e-6,
-		fd_step = 1e-5,
-	}
-	res := opt.calibrate(params, sabr_objective_fn, &ctx, config, allocator)
-	defer opt.calibration_result_free(&res)
+	res := opt.least_squares(
+		params,
+		_sabr_residuals,
+		len(market_data),
+		&ctx,
+		{max_iter = 200},
+		allocator,
+	)
+	defer opt.least_squares_result_free(&res)
 
 	return SABR_CalibrationResult {
 		params = SABR_Params{alpha = res.x[0], beta = res.x[1], rho = res.x[2], nu = res.x[3]},
-		rmse = res.loss,
+		rmse = res.rms,
 		converged = res.converged,
 		iterations = res.iterations,
 	}
 }
 
-// Calibrate Heston using Adam
+// At-the-money implied volatility (strike closest to the forward) of the
+// shortest (or longest) expiry, and that expiry
+@(private = "file")
+_atm_vol :: proc(market_data: []VolSurfacePoint, S, r: f64, shortest: bool) -> (vol, T: f64) {
+	T = market_data[0].expiry
+	for p in market_data {
+		if shortest ? p.expiry < T : p.expiry > T {T = p.expiry}
+	}
+	best := math.inf_f64(1)
+	F := S * math.exp(r * T)
+	for p in market_data {
+		if p.expiry != T || !(p.implied_vol > 0) {continue}
+		if d := abs(math.ln(p.strike / F)); d < best {best, vol = d, p.implied_vol}
+	}
+	return
+}
+
+// Heston parameters from the optimizer variables. With the Feller condition
+// enforced, x[3] is σ/√(2κθ) ∈ (0, 1) instead of σ.
+@(private = "file")
+_heston_from_x :: proc(x: []f64, enforce_feller: bool) -> Heston_Params {
+	p := Heston_Params {
+		v0    = x[0],
+		kappa = x[1],
+		theta = x[2],
+		sigma = x[3],
+		rho   = x[4],
+	}
+	if enforce_feller {p.sigma = x[3] * math.sqrt(2.0 * p.kappa * p.theta)}
+	return p
+}
+
+// Implied-volatility errors of the model prices (QuantLib's ImpliedVolError).
+// A model price outside the no-arbitrage bounds has no implied volatility; it
+// contributes its vega-weighted price error (model − market)/vega instead.
+_heston_residuals :: proc(x: []f64, res: []f64, user_data: rawptr) {
+	ctx := (^Heston_CalibrationContext)(user_data)
+	params := _heston_from_x(x, ctx.feller_weight > 0)
+	model := make([]f64, len(ctx.market_data), context.temp_allocator)
+	defer delete(model, context.temp_allocator)
+	_heston_model_prices(ctx.market_data, ctx.S, ctx.r, params, model)
+	for p, i in ctx.market_data {
+		iv, ok, _ := implied_volatility(
+			model[i],
+			ctx.S,
+			p.strike,
+			p.expiry,
+			ctx.r,
+			.Call,
+			tol = 1e-12,
+		)
+		res[i] = iv - p.implied_vol if ok else (model[i] - ctx.market_prices[i]) / ctx.vegas[i]
+	}
+}
+
+// Calibrate Heston by Levenberg-Marquardt on implied-volatility errors (so
+// cheap wings and short expiries count as much as expensive options). v0 and θ
+// start from the at-the-money implied variance of the shortest and longest
+// expiry (true_sigma² if there is none), κ = 2, σ = 0.5, ρ = −0.5.
 calibrate_heston :: proc(
 	market_data: []VolSurfacePoint,
 	S: f64,
 	r: f64,
-	true_sigma: f64 = 0.16, // historical vol, seeds v0 and theta
+	true_sigma: f64 = 0.16, // fallback seed for v0 and θ
 	allocator: mem.Allocator = context.allocator,
-	// Penalty weight for violating the Feller condition (0 = not enforced).
-	// Use e.g. 50 when the parameters feed a Monte Carlo simulation.
+	// > 0 enforces the Feller condition 2κθ > σ² exactly (σ is fitted as a
+	// fraction of √(2κθ)); use it when the parameters feed a Monte Carlo
+	// simulation of the variance. 0 = unconstrained.
 	feller_weight: f64 = 0.0,
 ) -> Heston_CalibrationResult {
+	n := len(market_data)
+	if n == 0 {return {}}
 	ctx := Heston_CalibrationContext {
 		market_data   = market_data,
 		S             = S,
 		r             = r,
 		feller_weight = feller_weight,
+		market_prices = make([]f64, n, allocator),
+		vegas         = make([]f64, n, allocator),
+	}
+	defer {
+		delete(ctx.market_prices, allocator)
+		delete(ctx.vegas, allocator)
+	}
+	for p, i in market_data {
+		g := compute_greeks(S, p.strike, p.expiry, r, p.implied_vol, .Call)
+		ctx.market_prices[i] = g.price
+		// Floor at 0.1% of the at-the-money vega so far wings cannot dominate
+		ctx.vegas[i] = max(100.0 * g.vega, 4e-4 * S * math.sqrt(max(p.expiry, 1e-8)))
 	}
 
-	// Seeded with realistic equity dynamics: v0 and theta near the historical
-	// variance, strongly negative rho (leverage effect / skew).
-	v_hist := true_sigma * true_sigma
+	short_vol, _ := _atm_vol(market_data, S, r, true)
+	long_vol, _ := _atm_vol(market_data, S, r, false)
+	v0 := short_vol * short_vol if short_vol > 0 else true_sigma * true_sigma
+	theta := long_vol * long_vol if long_vol > 0 else true_sigma * true_sigma
+
+	enforce := feller_weight > 0.0
 	params := []opt.Calibration_Param {
-		{"v0", v_hist, 0.001, 0.2, .Linear},
-		{"kappa", 2.0, 0.1, 10.0, .Linear}, // mean reversion speed
-		{"theta", v_hist, 0.001, 0.2, .Linear}, // long-run variance
-		{"sigma", 0.4, 0.01, 1.5, .Linear}, // vol of vol
-		{"rho", -0.7, -0.99, -0.1, .Linear}, // strictly negative for equities
+		{"v0", v0, 1e-4, 1.0, .Linear},
+		{"kappa", 2.0, 0.01, 20.0, .Linear}, // mean reversion speed
+		{"theta", theta, 1e-4, 1.0, .Linear}, // long-run variance
+		{"sigma", 0.5, 0.01, 3.0, .Linear}, // vol of vol
+		{"rho", -0.5, -0.999, 0.999, .Linear},
 	}
-	config := opt.Calibration_Config {
-		optimizer = {
-			type = .Adam,
-			learning_rate = 0.05,
-			beta1 = 0.9,
-			beta2 = 0.999,
-			epsilon = 1e-8,
-		},
-		max_iter = 300,
-		loss_threshold = 0.50, // $0.50 RMSE is excellent for Heston
-		fd_step = 1e-3, // large enough to step over complex branch-cut noise
-		parallel = true, // heston_objective_fn only uses context.temp_allocator scratch
+	if enforce {
+		params[3] = {"sigma/sqrt(2*kappa*theta)", 0.5, 0.01, 0.999, .Linear}
 	}
-	res := opt.calibrate(params, heston_objective_fn, &ctx, config, allocator)
-	defer opt.calibration_result_free(&res)
+	res := opt.least_squares(
+		params,
+		_heston_residuals,
+		n,
+		&ctx,
+		{max_iter = 200, parallel = true},
+		allocator,
+	)
+	defer opt.least_squares_result_free(&res)
 
-	// With the penalty active the loss is RMSE + penalty; report the pure pricing RMSE
-	rmse := res.loss
-	if feller_weight > 0.0 {
-		ctx.feller_weight = 0.0
-		rmse = heston_objective_fn(res.x, &ctx)
-	}
-	p := Heston_Params {
-		v0    = res.x[0],
-		kappa = res.x[1],
-		theta = res.x[2],
-		sigma = res.x[3],
-		rho   = res.x[4],
-	}
+	p := _heston_from_x(res.x, enforce)
+	// Report the pure pricing RMSE (no penalty)
+	ctx.feller_weight = 0.0
+	rmse := heston_objective_fn([]f64{p.v0, p.kappa, p.theta, p.sigma, p.rho}, &ctx)
 	return Heston_CalibrationResult {
 		params = p,
 		rmse = rmse,
+		iv_rmse = res.rms,
 		converged = res.converged,
 		iterations = res.iterations,
 		feller_margin = 2.0 * p.kappa * p.theta - p.sigma * p.sigma,
@@ -442,7 +519,9 @@ heston_char_func :: proc(
 		d = -d
 	}
 
-	g := (b - d) / (b + d + complex(1e-10, 0.0))
+	// "Little Heston trap" form (Albrecher et al. 2007): with Re(d) ≥ 0 and
+	// Re(b) = κ > 0, |g·e^{-dT}| < 1, so no denominator below can vanish
+	g := (b - d) / (b + d)
 
 	exp_dT := cmath_exp(-d * complex(T, 0.0))
 
@@ -450,12 +529,12 @@ heston_char_func :: proc(
 		(b - d) /
 		complex(params.sigma * params.sigma, 0.0) *
 		(complex(1.0, 0.0) - exp_dT) /
-		(complex(1.0, 0.0) - g * exp_dT + complex(1e-10, 0.0))
+		(complex(1.0, 0.0) - g * exp_dT)
 
 	C_part1 := complex(r, 0.0) * i * u_complex * complex(T, 0.0)
 
-	log_num := complex(1.0, 0.0) - g * exp_dT + complex(1e-12, 0.0)
-	log_den := complex(1.0, 0.0) - g + complex(1e-12, 0.0)
+	log_num := complex(1.0, 0.0) - g * exp_dT
+	log_den := complex(1.0, 0.0) - g
 	log_arg := log_num / log_den
 
 	C_part2 :=
@@ -527,10 +606,25 @@ heston_prices_same_expiry :: proc(
 	// To get the true characteristic function (magnitude <= 1), we must divide by E[S_T] = S * e^{rT}.
 	normalization_P1 := S * math.exp(r * T)
 
+	// Integration range: the integrands are bounded by |φ(u)|/u, which decays like
+	// exp(−½u²·∫v dt) and, for large vol of vol, like exp(−c·u). u = 200 is ample
+	// from a few months on, but a week at 10% volatility needs u ≈ 1500. Double
+	// u_max until both characteristic functions are negligible there.
 	u_max := 200.0
-	du := u_max / f64(n_points)
+	for u_max < 1e6 {
+		phi1 :=
+			cmath_abs(heston_char_func(complex(u_max, -1.0), S, r, T, params)) / normalization_P1
+		phi2 := cmath_abs(heston_char_func(complex(u_max, 0.0), S, r, T, params))
+		if max(phi1, phi2) < 1e-15 * u_max {break}
+		u_max *= 2
+	}
+	// Midpoint rule, which converges exponentially for these smooth integrands
+	// while the step stays well below the width of their analyticity strip: at
+	// least n_points nodes and du ≤ 0.2
+	n_nodes := max(n_points, int(math.ceil(u_max / 0.2)))
+	du := u_max / f64(n_nodes)
 
-	for i in 0 ..< n_points {
+	for i in 0 ..< n_nodes {
 		u := (f64(i) + 0.5) * du
 
 		// P1 uses stock measure: evaluate at u - i, then normalize
@@ -625,9 +719,9 @@ debug_heston :: proc() {
 	// 4. Final Price Check
 	price := heston_price(S, K, T, r, params, .Call, 4000)
 	fmt.printf("\nCalculated Call Price: $%.4f\n", price)
-	fmt.printf("Expected Call Price:   $~10.50\n")
+	fmt.printf("Expected Call Price:   $10.3687 (QuantLib AnalyticHestonEngine)\n")
 
-	if math.abs(price - 10.50) < 0.2 {
+	if math.abs(price - 10.368686) < 1e-4 {
 		fmt.printf("Status: PASS ✅ \n\n")
 	} else {
 		fmt.printf("Status: FAIL ❌\n\n")
