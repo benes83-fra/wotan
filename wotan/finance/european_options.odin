@@ -176,18 +176,19 @@ compute_greeks :: proc(
 	return g
 }
 
-// Standard normal CDF, PDF and quantile at full double precision
-@(private = "file")
+// Standard normal CDF, PDF and quantile at full double precision (also used by
+// the Monte Carlo pricers in calib_exotics.odin)
+@(private)
 _bs_cdf :: #force_inline proc(x: f64) -> f64 {
 	return 0.5 * math.erfc(-x / math.SQRT_TWO)
 }
 
-@(private = "file")
+@(private)
 _bs_pdf :: #force_inline proc(x: f64) -> f64 {
 	return math.exp(-0.5 * x * x) * 0.3989422804014327
 }
 
-@(private = "file")
+@(private)
 _bs_ppf :: proc(p: f64) -> f64 {
 	x := norm_inv(p) // Acklam, ~1e-9 relative
 	// One Halley step on Φ(x) − p
@@ -252,7 +253,8 @@ implied_volatility :: proc(
 		// Newton on ln V: close to linear in 1/σ², where V itself is far too
 		// steep for Newton when the price is small
 		vega := 100.0 * g.vega
-		step := (math.ln(g.price) - ln_target) * g.price / vega if vega > 0 && g.price > 0 else math.INF_F64
+		step :=
+			(math.ln(g.price) - ln_target) * g.price / vega if vega > 0 && g.price > 0 else math.INF_F64
 		if err == 0 ||
 		   math.abs(err) <= tol && (math.abs(step) <= 1e-10 * sigma || hi - lo <= 1e-14 * hi) {
 			return sigma, true, iter
@@ -689,7 +691,7 @@ _oss_step :: proc(m: ^_OSS_Model, p: ^_OSS_Path) -> bool {
 		return false
 	}
 	u := rand.float64()
-	if u <= 0 {u = 5.551115123125783e-17} // 2^-54
+	if u <= 0 {u = 5.551115123125783e-17} 	// 2^-54
 	v := u * surv
 	z := _bs_ppf(v)
 	hazard := _bs_pdf(a) / surv // ∂ln p/∂a
