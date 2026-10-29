@@ -753,6 +753,8 @@ historical_volatility_rolling :: proc(
 	return out
 }
 
+// Annualized EWM volatility of a column: pandas ewm(alpha, adjust=False).var(bias),
+// i.e. demeaned and recursively weighted (ewma_volatility is the zero-mean RiskMetrics form)
 ewma_volatility_df :: proc(
 	df: ^w.DataFrame,
 	returns_col: string,
@@ -779,95 +781,63 @@ ewma_volatility_df :: proc(
 	return out
 }
 
+// Annualized sample standard deviation (n - 1)
 historical_volatility :: proc(returns: []f64, periods_per_year: f64 = 252.0) -> f64 {
 	if len(returns) < 2 {return 0.0}
-
-	mean := 0.0
-	for r in returns {mean += r}
-	mean /= f64(len(returns))
-
-	variance := 0.0
-	for r in returns {
-		diff := r - mean
-		variance += diff * diff
-	}
-	variance /= f64(len(returns) - 1)
-
-	return math.sqrt_f64(variance * periods_per_year)
+	_, std := _mean_std(returns)
+	return std * math.sqrt(periods_per_year)
 }
 
+// RiskMetrics EWMA volatility (zero mean, σ²_0 = r_0²): σ²_t = λσ²_{t-1} + (1-λ)r_t²,
+// annualized. ewma_volatility_df instead gives the demeaned (pandas ewm) variance.
 ewma_volatility :: proc(returns: []f64, lambda: f64 = 0.94, periods_per_year: f64 = 252.0) -> f64 {
 	if len(returns) < 2 {return 0.0}
-
 	ewma_var := returns[0] * returns[0]
-	alpha := 1.0 - lambda
-
-	for i in 1 ..< len(returns) {
-		r := returns[i]
-		ewma_var = (1.0 - alpha) * ewma_var + alpha * r * r
-	}
-
-	return math.sqrt_f64(ewma_var * periods_per_year)
+	for r in returns[1:] {ewma_var = lambda * ewma_var + (1.0 - lambda) * r * r}
+	return math.sqrt(ewma_var * periods_per_year)
 }
 
 // ============================================================================
 // Drawdown Analysis
 // ============================================================================
+// Wealth W_0 = 1, W_t = W_{t-1}(1 + r_t); drawdown_t = W_t / max_{s≤t} W_s - 1 ≤ 0
+// (the starting wealth counts as a peak, so a loss on day one is a drawdown).
 
-drawdown_series :: proc(returns: []f64) -> []f64 {
-	if len(returns) == 0 {return []f64{}}
-
-	wealth := make([]f64, len(returns) + 1, context.temp_allocator)
-	wealth[0] = 1.0
-
-	for i in 0 ..< len(returns) {
-		wealth[i + 1] = wealth[i] * (1.0 + returns[i])
+// Drawdown after each return (allocated with `allocator`, the temp allocator by default)
+drawdown_series :: proc(returns: []f64, allocator: mem.Allocator = context.temp_allocator) -> []f64 {
+	drawdowns := make([]f64, len(returns), allocator)
+	wealth, peak := 1.0, 1.0
+	for r, i in returns {
+		wealth *= 1.0 + r
+		peak = max(peak, wealth)
+		drawdowns[i] = wealth / peak - 1.0
 	}
-
-	running_max := make([]f64, len(wealth), context.temp_allocator)
-	running_max[0] = wealth[0]
-
-	for i in 1 ..< len(wealth) {
-		if wealth[i] > running_max[i - 1] {
-			running_max[i] = wealth[i]
-		} else {
-			running_max[i] = running_max[i - 1]
-		}
-	}
-
-	drawdowns := make([]f64, len(returns), context.temp_allocator)
-	for i in 0 ..< len(returns) {
-		drawdowns[i] = (wealth[i + 1] - running_max[i + 1]) / running_max[i + 1]
-	}
-
 	return drawdowns
 }
 
+// Largest drawdown (≤ 0)
 max_drawdown :: proc(returns: []f64) -> f64 {
-	if len(returns) == 0 {return 0.0}
-
-	drawdowns := drawdown_series(returns)
-	max_dd := 0.0
-	for dd in drawdowns {
-		if dd < max_dd {max_dd = dd}
+	wealth, peak, max_dd := 1.0, 1.0, 0.0
+	for r in returns {
+		wealth *= 1.0 + r
+		peak = max(peak, wealth)
+		max_dd = min(max_dd, wealth / peak - 1.0)
 	}
-
 	return max_dd
 }
 
+// Mean drawdown over the periods spent below the running peak (≤ 0)
 avg_drawdown :: proc(returns: []f64) -> f64 {
-	if len(returns) == 0 {return 0.0}
-
-	drawdowns := drawdown_series(returns)
-	sum := 0.0
+	wealth, peak, sum := 1.0, 1.0, 0.0
 	count := 0
-	for dd in drawdowns {
-		if dd < 0.0 {
+	for r in returns {
+		wealth *= 1.0 + r
+		peak = max(peak, wealth)
+		if dd := wealth / peak - 1.0; dd < 0.0 {
 			sum += dd
 			count += 1
 		}
 	}
-
 	if count == 0 {return 0.0}
 	return sum / f64(count)
 }
@@ -875,82 +845,52 @@ avg_drawdown :: proc(returns: []f64) -> f64 {
 // ============================================================================
 // Risk-Adjusted Performance Metrics
 // ============================================================================
+// Conventions as in empyrical: excess returns over rf / periods_per_year, the
+// mean annualized by periods_per_year and the deviation by its square root.
+// Degenerate denominators (no dispersion, no downside, no drawdown) give 0.
 
+// mean(excess) / std(excess, n - 1) · sqrt(periods_per_year)
 sharpe_ratio_from_returns :: proc(
 	returns: []f64,
 	risk_free_rate: f64 = 0.0,
 	periods_per_year: f64 = 252.0,
 ) -> f64 {
 	if len(returns) < 2 {return 0.0}
-
-	excess_returns := make([]f64, len(returns), context.temp_allocator)
-	for i in 0 ..< len(returns) {
-		excess_returns[i] = returns[i] - risk_free_rate / periods_per_year
-	}
-
-	mean_excess := 0.0
-	for r in excess_returns {mean_excess += r}
-	mean_excess /= f64(len(excess_returns))
-
-	variance := 0.0
-	for r in excess_returns {
-		diff := r - mean_excess
-		variance += diff * diff
-	}
-	variance /= f64(len(excess_returns) - 1)
-	std_dev := math.sqrt_f64(variance)
-
-	if std_dev == 0.0 {return 0.0}
-
-	return (mean_excess * periods_per_year) / (std_dev * math.sqrt_f64(periods_per_year))
+	mean, std := _mean_std(returns) // the excess has the same dispersion
+	if std == 0.0 {return 0.0}
+	return (mean - risk_free_rate / periods_per_year) / std * math.sqrt(periods_per_year)
 }
 
+// mean(excess) / DD · sqrt(periods_per_year), downside deviation
+// DD = sqrt((1/n) Σ min(excess, 0)²) over all n periods (Sortino & Price; the
+// periods without a shortfall count as zero, they are not dropped)
 sortino_ratio_from_returns :: proc(
 	returns: []f64,
 	risk_free_rate: f64 = 0.0,
 	periods_per_year: f64 = 252.0,
 ) -> f64 {
 	if len(returns) < 2 {return 0.0}
-
-	excess_returns := make([]f64, len(returns), context.temp_allocator)
-	for i in 0 ..< len(returns) {
-		excess_returns[i] = returns[i] - risk_free_rate / periods_per_year
+	mar := risk_free_rate / periods_per_year
+	mean_excess, down := 0.0, 0.0
+	for r in returns {
+		e := r - mar
+		mean_excess += e
+		if e < 0.0 {down += e * e}
 	}
-
-	mean_excess := 0.0
-	for r in excess_returns {mean_excess += r}
-	mean_excess /= f64(len(excess_returns))
-
-	downside_variance := 0.0
-	count := 0
-	for r in excess_returns {
-		if r < 0.0 {
-			downside_variance += r * r
-			count += 1
-		}
-	}
-
-	if count == 0 {return 0.0}
-
-	downside_variance /= f64(count)
-	downside_dev := math.sqrt_f64(downside_variance)
-
-	if downside_dev == 0.0 {return 0.0}
-
-	return (mean_excess * periods_per_year) / (downside_dev * math.sqrt_f64(periods_per_year))
+	n := f64(len(returns))
+	mean_excess /= n
+	if down == 0.0 {return 0.0}
+	return mean_excess / math.sqrt(down / n) * math.sqrt(periods_per_year)
 }
 
+// Compound annual growth rate / |max drawdown|
 calmar_ratio :: proc(returns: []f64, periods_per_year: f64 = 252.0) -> f64 {
 	if len(returns) == 0 {return 0.0}
-
-	cumulative_return := 1.0
-	for r in returns {cumulative_return *= (1.0 + r)}
-	annualized_return := math.pow(cumulative_return, periods_per_year / f64(len(returns))) - 1.0
-
+	growth := 1.0
+	for r in returns {growth *= 1.0 + r}
 	max_dd := max_drawdown(returns)
 	if max_dd == 0.0 {return 0.0}
-
-	return annualized_return / math.abs(max_dd)
+	return (math.pow(growth, periods_per_year / f64(len(returns))) - 1.0) / math.abs(max_dd)
 }
 
 // ============================================================================
@@ -1003,84 +943,55 @@ rolling_beta_df :: proc(
 	return out
 }
 
+// cov(r, b) / var(b)
 beta :: proc(returns: []f64, benchmark_returns: []f64) -> f64 {
-	if len(returns) != len(benchmark_returns) || len(returns) < 2 {return 0.0}
-
-	n := len(returns)
-	mean_r := 0.0
-	mean_b := 0.0
-	for i in 0 ..< n {
-		mean_r += returns[i]
-		mean_b += benchmark_returns[i]
-	}
-	mean_r /= f64(n)
-	mean_b /= f64(n)
-
-	covariance := 0.0
-	benchmark_var := 0.0
-	for i in 0 ..< n {
-		diff_r := returns[i] - mean_r
-		diff_b := benchmark_returns[i] - mean_b
-		covariance += diff_r * diff_b
-		benchmark_var += diff_b * diff_b
-	}
-
-	if benchmark_var == 0.0 {return 0.0}
-	return covariance / benchmark_var
+	cov, _, var_b := _cov_var(returns, benchmark_returns)
+	if var_b == 0.0 {return 0.0}
+	return cov / var_b
 }
 
+// Pearson correlation
 correlation :: proc(returns: []f64, benchmark_returns: []f64) -> f64 {
-	if len(returns) != len(benchmark_returns) || len(returns) < 2 {return 0.0}
-
-	n := len(returns)
-	mean_r := 0.0
-	mean_b := 0.0
-	for i in 0 ..< n {
-		mean_r += returns[i]
-		mean_b += benchmark_returns[i]
-	}
-	mean_r /= f64(n)
-	mean_b /= f64(n)
-
-	covariance := 0.0
-	var_r := 0.0
-	var_b := 0.0
-	for i in 0 ..< n {
-		diff_r := returns[i] - mean_r
-		diff_b := benchmark_returns[i] - mean_b
-		covariance += diff_r * diff_b
-		var_r += diff_r * diff_r
-		var_b += diff_b * diff_b
-	}
-
-	std_r := math.sqrt_f64(var_r / f64(n - 1))
-	std_b := math.sqrt_f64(var_b / f64(n - 1))
-
-	if std_r == 0.0 || std_b == 0.0 {return 0.0}
-
-	return (covariance / f64(n - 1)) / (std_r * std_b)
+	cov, var_r, var_b := _cov_var(returns, benchmark_returns)
+	if var_r == 0.0 || var_b == 0.0 {return 0.0}
+	return cov / math.sqrt(var_r * var_b)
 }
 
+// Centered cross and square sums (all zero unless the lengths match and n ≥ 2)
+@(private = "file")
+_cov_var :: proc(x, y: []f64) -> (cov, var_x, var_y: f64) {
+	n := len(x)
+	if n != len(y) || n < 2 {return}
+	mx, my := 0.0, 0.0
+	for i in 0 ..< n {
+		mx += x[i]
+		my += y[i]
+	}
+	mx /= f64(n)
+	my /= f64(n)
+	for i in 0 ..< n {
+		dx, dy := x[i] - mx, y[i] - my
+		cov += dx * dy
+		var_x += dx * dx
+		var_y += dy * dy
+	}
+	return
+}
+
+// Per-period (not annualized) standard deviation (n - 1) of the active returns
+// r - b; multiply by sqrt(periods_per_year) for the annual figure
 tracking_error :: proc(returns: []f64, benchmark_returns: []f64) -> f64 {
-	if len(returns) != len(benchmark_returns) || len(returns) < 2 {return 0.0}
-
-	active_returns := make([]f64, len(returns), context.temp_allocator)
-	for i in 0 ..< len(returns) {
-		active_returns[i] = returns[i] - benchmark_returns[i]
+	n := len(returns)
+	if n != len(benchmark_returns) || n < 2 {return 0.0}
+	mean := 0.0
+	for i in 0 ..< n {mean += returns[i] - benchmark_returns[i]}
+	mean /= f64(n)
+	ss := 0.0
+	for i in 0 ..< n {
+		d := returns[i] - benchmark_returns[i] - mean
+		ss += d * d
 	}
-
-	mean_active := 0.0
-	for r in active_returns {mean_active += r}
-	mean_active /= f64(len(active_returns))
-
-	variance := 0.0
-	for r in active_returns {
-		diff := r - mean_active
-		variance += diff * diff
-	}
-	variance /= f64(len(active_returns) - 1)
-
-	return math.sqrt_f64(variance)
+	return math.sqrt(ss / f64(n - 1))
 }
 
 // ============================================================================
@@ -1096,6 +1007,7 @@ win_rate :: proc(returns: []f64) -> f64 {
 	return f64(wins) / f64(len(returns))
 }
 
+// Gross profit / gross loss; 0 when there are no losses
 profit_factor :: proc(returns: []f64) -> f64 {
 	if len(returns) == 0 {return 0.0}
 
@@ -1189,6 +1101,8 @@ calculate_risk_metrics :: proc(
 // DataFrame Integration (Using Analytics Module)
 // ============================================================================
 
+// Risk metrics of a returns column; with a benchmark column, rows where either
+// value is null are dropped from both, so the pairs stay aligned
 risk_metrics_from_df :: proc(
 	df: ^w.DataFrame,
 	column_name: string,
@@ -1197,30 +1111,26 @@ risk_metrics_from_df :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> RiskMetrics {
 	returns_col := w.column(df, column_name)
-	returns := make([dynamic]f64, 0, allocator)
+	benchmark_col := w.column(df, benchmark_column) if benchmark_column != "" else nil
+	returns := make([dynamic]f64, 0, df.rows, allocator)
+	bench := make([dynamic]f64, 0, df.rows if benchmark_col != nil else 0, allocator)
+	defer {
+		delete(returns)
+		delete(bench)
+	}
 
 	for i in 0 ..< df.rows {
 		val, is_null := w.column_at_float(returns_col, i)
-		if !is_null {
-			append(&returns, val)
+		if is_null {continue}
+		if benchmark_col != nil {
+			b, b_null := w.column_at_float(benchmark_col, i)
+			if b_null {continue}
+			append(&bench, b)
 		}
+		append(&returns, val)
 	}
 
-	benchmark_returns: []f64 = nil
-	if benchmark_column != "" {
-		benchmark_col := w.column(df, benchmark_column)
-		bench_dyn := make([dynamic]f64, 0, allocator)
-
-		for i in 0 ..< df.rows {
-			val, is_null := w.column_at_float(benchmark_col, i)
-			if !is_null {
-				append(&bench_dyn, val)
-			}
-		}
-		benchmark_returns = bench_dyn[:]
-	}
-
-	return calculate_risk_metrics(returns[:], benchmark_returns, risk_free_rate)
+	return calculate_risk_metrics(returns[:], bench[:] if benchmark_col != nil else nil, risk_free_rate)
 }
 
 rolling_risk_metrics_df :: proc(
