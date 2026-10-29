@@ -2,6 +2,7 @@
 package finance
 
 import a "../analytics"
+import ml "../analytics/ML"
 import w "../core"
 import l "../linalg"
 import opt "../optimize"
@@ -381,26 +382,65 @@ norm_inv :: proc(p: f64) -> f64 {
 }
 
 
-// Add a helper for the Student-t quantile (Inverse CDF)
-// This is a robust approximation for the inverse t-distribution
+// Student-t quantile (inverse CDF) for nu ≥ 1: Hill's approximation (CACM
+// algorithm 396, as in R's qt), refined by Halley steps on the exact upper tail
+// (regularized incomplete beta). ~1e-14 relative also deep in the tails.
 t_quantile :: proc(p: f64, nu: f64) -> f64 {
-	if nu <= 0.0 {return 0.0}
+	if math.is_nan(p) || !(nu > 0.0) {return math.nan_f64()}
+	if p <= 0.0 {return -math.INF_F64}
+	if p >= 1.0 {return math.INF_F64}
+	if p == 0.5 {return 0.0}
+	if nu > 1e7 {return _bs_ppf(p)}
 
-	// For high degrees of freedom, it approaches Normal
-	if nu > 100.0 {return norm_inv(p)}
+	P := 2.0 * min(p, 1.0 - p) // two-sided tail probability
+	q: f64
+	if math.abs(nu - 2.0) < 1e-12 {
+		q = math.sqrt(2.0 / (P * (2.0 - P)) - 2.0)
+	} else if nu < 1.0 + 1e-12 {
+		q = 1.0 / math.tan(P * math.PI / 2.0) // Cauchy
+	} else {
+		a := 1.0 / (nu - 0.5)
+		b := 48.0 / (a * a)
+		c := ((20700.0 * a / b - 98.0) * a - 16.0) * a + 96.36
+		d := ((94.5 / (b + c) - 3.0) / b + 1.0) * math.sqrt(a * math.PI / 2.0) * nu
+		log_y := 2.0 / nu * math.ln(d * P)
+		y := math.exp(log_y)
+		if y > 0.05 + a {
+			// Asymptotic inverse expansion about the normal
+			x := _bs_ppf(0.5 * P)
+			y = x * x
+			if nu < 5.0 {c += 0.3 * (nu - 4.5) * (x + 0.6)}
+			c = (((0.05 * d * x - 5.0) * x - 7.0) * x - 2.0) * x + b + c
+			y = (((((0.4 * y + 6.3) * y + 36.0) * y + 94.5) / c - y - 3.0) / b + 1.0) * x
+			q = math.sqrt_f64(nu * _expm1(a * y * y))
+		} else if y > 1e-300 {
+			y =
+				((1.0 / (((nu + 6.0) / (nu * y) - 0.089 * d - 0.822) * (nu + 2.0) * 3.0) +
+							0.5 / (nu + 4.0)) *
+						y -
+					1.0) *
+					(nu + 1.0) /
+					(nu + 2.0) +
+				1.0 / y
+			q = math.sqrt(nu * y)
+		} else {
+			q = math.sqrt(nu) * math.exp(-0.5 * log_y) // leading term, y underflows
+		}
+	}
 
-	// Cornish-Fisher expansion approximation for Student-t quantile
-	z := norm_inv(p)
-	g1 := (z * z * z + z) / 4.0
-	g2 := (5.0 * z * z * z * z * z + 16.0 * z * z * z + 3.0 * z) / 96.0
-	g3 :=
-		(3.0 * z * z * z * z * z * z * z +
-			19.0 * z * z * z * z * z +
-			17.0 * z * z * z -
-			15.0 * z) /
-		384.0
-
-	return z + g1 / nu + g2 / (nu * nu) + g3 / (nu * nu * nu)
+	// Halley steps on the upper tail: P(T > q) = P/2
+	lg1, _ := math.lgamma(0.5 * (nu + 1.0))
+	lg2, _ := math.lgamma(0.5 * nu)
+	log_c := lg1 - lg2 - 0.5 * math.ln(nu * math.PI)
+	for _ in 0 ..< 10 {
+		dens := math.exp(log_c - 0.5 * (nu + 1.0) * math.log1p(q * q / nu))
+		if !(dens > 0.0) {break}
+		x := (0.5 * ml.student_t_sf2(q, nu) - 0.5 * P) / dens
+		if math.is_nan(x) || math.is_inf(x) {break}
+		q += x * (1.0 + x * q * (nu + 1.0) / (2.0 * (q * q + nu)))
+		if math.abs(x) <= 1e-14 * math.abs(q) {break}
+	}
+	return q if p > 0.5 else -q
 }
 
 // ============================================================================

@@ -1,5 +1,6 @@
 package tests
 
+import ml "../wotan/analytics/ML"
 import fin "../wotan/finance"
 import "core:fmt"
 import "core:math"
@@ -137,8 +138,9 @@ generate_student_t_data :: proc(
 	u2 := make([]f64, n_obs, allocator)
 
 	nu_int := int(math.round_f64(nu_true))
-	sqrt_rho := math.sqrt_f64(rho_true)
-	sqrt_1_minus_rho := math.sqrt_f64(1.0 - rho_true)
+	// Pairwise correlation rho_true, the rho of the one-factor pricer
+	// (X_i = sqrt(rho) M + sqrt(1 - rho) e_i gives corr(X_i, X_j) = rho)
+	sqrt_1_minus_rho_sq := math.sqrt_f64(1.0 - rho_true * rho_true)
 
 	for i in 0 ..< n_obs {
 		// Generate Chi-Squared variable
@@ -152,16 +154,15 @@ generate_student_t_data :: proc(
 		// Generate correlated normals
 		Z1 := rand.float64_normal(0.0, 1.0)
 		Z2_indep := rand.float64_normal(0.0, 1.0)
-		Z2 := sqrt_rho * Z1 + sqrt_1_minus_rho * Z2_indep
+		Z2 := rho_true * Z1 + sqrt_1_minus_rho_sq * Z2_indep
 
 		// Transform to Student-t
 		T1 := Z1 / sqrt_V_over_nu
 		T2 := Z2 / sqrt_V_over_nu
 
-		// Map to Uniform [0, 1] (Using a simple approximation for the test)
-		// In production, you would use your exact t_quantile inverse or math library CDF
-		u1[i] = 0.5 * (1.0 + math.erf(T1 / math.sqrt_f64(2.0 + (T1 * T1) / nu_true))) // Approx t-CDF
-		u2[i] = 0.5 * (1.0 + math.erf(T2 / math.sqrt_f64(2.0 + (T2 * T2) / nu_true)))
+		// Map to uniforms with the exact t CDF (V has nu_int degrees of freedom)
+		u1[i] = ml.student_t_cdf(T1, f64(nu_int))
+		u2[i] = ml.student_t_cdf(T2, f64(nu_int))
 	}
 
 	return u1, u2
