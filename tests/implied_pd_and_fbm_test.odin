@@ -229,18 +229,20 @@ rough_volatility_pd_test :: proc(allocator: mem.Allocator) {
 	rbergomi_prices := make([]f64, n_strikes, allocator)
 
 	fmt.println("Generating Option Surface (Monte Carlo)...")
-	fmt.println("(This may take a few seconds for 17 strikes × 5,000 paths)")
+	fmt.println("(17 strikes priced from one set of 20,000 paths)")
 	for i in 0 ..< n_strikes {
-		// ✅ FIX: Strikes from 40 to 200 (ensures we integrate the left tail properly)
+		// Strikes from 40 to 200
 		K := 40.0 + f64(i) * 10.0
 		strikes[i] = K
 
 		// Black-Scholes price (using flat 20% vol)
 		bs_prices[i] = fin._bs_call_price(S, K, T, r, 0.20)
-
-		// rBergomi price (5,000 paths for reasonable speed/accuracy trade-off)
-		rbergomi_prices[i] = fin.rbergomi_mc_call(S, K, T, r, params, 5000, 100, allocator)
 	}
+	// rBergomi prices from one set of paths, so the finite differences across
+	// strikes are not swamped by independent Monte Carlo noise
+	rb := fin.rbergomi_mc_calls(S, strikes, T, r, params, 20000, 100, allocator)
+	copy(rbergomi_prices, rb)
+	delete(rb, allocator)
 
 	fmt.println("\n1. Implied Default Probability Comparison")
 	fmt.println("   ----------------------------------------------------------------------")
@@ -250,7 +252,7 @@ rough_volatility_pd_test :: proc(allocator: mem.Allocator) {
 	fmt.println()
 
 	// Compute PD for Black-Scholes
-	bs_pd_result := fin.implied_default_probability(strikes, bs_prices, r, T, K_default, allocator)
+	bs_pd_result := fin.implied_default_probability(strikes, bs_prices, r, T, K_default, allocator, spot = S)
 	defer {
 		delete(bs_pd_result.rnd_strikes, allocator)
 		delete(bs_pd_result.rnd_values, allocator)
@@ -264,6 +266,7 @@ rough_volatility_pd_test :: proc(allocator: mem.Allocator) {
 		T,
 		K_default,
 		allocator,
+		spot = S,
 	)
 	defer {
 		delete(rbergomi_pd_result.rnd_strikes, allocator)
