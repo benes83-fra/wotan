@@ -393,6 +393,8 @@ main :: proc() {
 	free_all(context.temp_allocator)
 	test.implied_default_prob_reference_test(context.temp_allocator)
 	free_all(context.temp_allocator)
+	test.finance_analytics_reference_test(context.temp_allocator)
+	free_all(context.temp_allocator)
 	//auto_arima_stationarity_test(context.temp_allocator)
 	//mc_arima_pdq_test(context.temp_allocator)
 	// sarima_mc_test(

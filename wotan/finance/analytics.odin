@@ -15,44 +15,35 @@ import "core:mem"
 
 // RiskDecomp holds the breakdown of portfolio risk into individual asset contributions.
 RiskDecomp :: struct {
-	weights:    []f64, // Original weights
-	mctr:       []f64, // Marginal Contribution to Risk
-	ctr:        []f64, // Component Contribution to Risk (sums to total risk)
-	total_risk: f64, // Total portfolio volatility
+	weights:    []f64, // The caller's weights (not copied)
+	mctr:       []f64, // Marginal contribution to risk ∂σ/∂w_i = (Σw)_i / σ
+	ctr:        []f64, // Component contribution w_i · MCTR_i (sums to total_risk)
+	total_risk: f64, // Portfolio volatility sqrt(wᵀΣw)
 }
 
-// risk_decomposition calculates how much each asset contributes to the total portfolio risk.
-// Uses SIMD-optimized matrix-vector multiplication.
+// Euler decomposition of portfolio volatility; MCTR and CTR are 0 when the
+// portfolio variance is 0
 risk_decomposition :: proc(
 	weights: []f64,
 	cov: ^l.Matrix(f64),
 	allocator: mem.Allocator = context.allocator,
 ) -> RiskDecomp {
 	n := len(weights)
+	assert(cov.rows == n && cov.cols == n, "risk_decomposition: covariance must be n x n")
 
-	// 1. Calculate Sigma * w (SIMD)
 	sigma_w := l.matvec_dyn_simd(cov, weights, allocator)
 	defer delete(sigma_w, allocator)
-
-	// 2. Calculate portfolio variance: w^T * (Sigma * w)
 	port_var := l.dot_simd(weights, sigma_w)
-	port_vol := math.sqrt(port_var)
+	port_vol := math.sqrt(math.max(port_var, 0.0))
 
-	// 3. Calculate Marginal Contribution to Risk (MCTR) = (Sigma * w) / port_vol
 	mctr := make([]f64, n, allocator)
-	if port_vol > 1e-10 {
-		inv_vol := 1.0 / port_vol
+	ctr := make([]f64, n, allocator)
+	if port_vol > 0.0 {
 		for i in 0 ..< n {
-			mctr[i] = sigma_w[i] * inv_vol
+			mctr[i] = sigma_w[i] / port_vol
+			ctr[i] = weights[i] * mctr[i]
 		}
 	}
-
-	// 4. Calculate Component Contribution to Risk (CTR) = w_i * MCTR_i
-	ctr := make([]f64, n, allocator)
-	for i in 0 ..< n {
-		ctr[i] = weights[i] * mctr[i]
-	}
-
 	return RiskDecomp{weights = weights, mctr = mctr, ctr = ctr, total_risk = port_vol}
 }
 
@@ -60,8 +51,9 @@ risk_decomposition :: proc(
 // 2. Rolling Analytics
 // ============================================================================
 
-// rolling_volatility calculates the annualized standard deviation over a rolling window.
-// Assumes the input column contains simple returns (not prices).
+// Annualised rolling sample volatility of a returns column (pandas
+// rolling(window, min_periods).std() · sqrt(periods_per_year)); same as
+// historical_volatility_rolling
 rolling_volatility :: proc(
 	df: ^w.DataFrame,
 	col: string,
@@ -70,33 +62,14 @@ rolling_volatility :: proc(
 	periods_per_year: f64 = 252.0,
 	allocator: mem.Allocator = context.allocator,
 ) -> w.Column {
-	rw := ana.rolling_window(df, col, window, min_periods)
-	agg := w.Aggregator {
-		name   = "variance",
-		column = col,
-		kind   = .Var,
-	}
-
-	var_col := ana.rolling_apply_float_var(rw, agg, allocator)
-	defer w.destroy_column(&var_col)
-
-	// Convert variance to volatility (sqrt) and annualize
-	out := w.column_new("volatility", .Float, 0)
-	for i in 0 ..< var_col.len {
-		v, is_null := w.column_at_float(&var_col, i)
-		if is_null {
-			w.append_null(&out)
-		} else {
-			// sqrt(variance * periods_per_year)
-			vol := math.sqrt(v * periods_per_year)
-			w.append_float(&out, vol)
-		}
-	}
-
-	return out
+	context.allocator = allocator
+	return historical_volatility_rolling(df, col, window, min_periods, periods_per_year)
 }
 
-// rolling_sharpe calculates the rolling Sharpe ratio.
+// Rolling annualised Sharpe ratio of a returns column: mean / sample std of the
+// excess returns r - rf_annual/periods over the non-null values of each window.
+// The first window - 1 rows are null, as are windows with fewer than 2 values or
+// a constant excess return
 rolling_sharpe :: proc(
 	df: ^w.DataFrame,
 	col: string,
@@ -106,52 +79,49 @@ rolling_sharpe :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> w.Column {
 	src := w.column(df, col)
-	out := w.column_new(fmt.tprintf("rolling_sharpe_%d", window), .Float, src.len)
-	rf_daily := rf_annual / periods
+	out := w.column_new(fmt.tprintf("rolling_sharpe_%d", window), .Float, src.len, allocator)
+	rf := rf_annual / periods
+	ann := math.sqrt(periods)
 
 	for i in 0 ..< src.len {
 		if i < window - 1 {
 			w.append_null(&out)
 			continue
 		}
-
-		sum_ret := 0.0
-		sum_excess_sq := 0.0
-		count := 0
-
-		for j in i - window + 1 ..= i {
-			v, is_null := w.column_at_float(src, j)
-			if !is_null {
-				excess := v - rf_daily
-				sum_ret += excess
-				sum_excess_sq += excess * excess
+		lo := max(i - window + 1, 0)
+		sum, count := 0.0, 0
+		for j in lo ..= i {
+			if v, is_null := w.column_at_float(src, j); !is_null {
+				sum += v - rf
 				count += 1
 			}
 		}
-
 		if count < 2 {
 			w.append_null(&out)
 			continue
 		}
-
-		mean_excess := sum_ret / f64(count)
-		variance :=
-			(sum_excess_sq / f64(count - 1)) -
-			(mean_excess * mean_excess * f64(count) / f64(count - 1))
-
-		if variance < 0.0 {variance = 0.0} 	// Numerical stability
-		std_dev := math.sqrt(variance)
-
-		if std_dev > 1e-10 {
-			sharpe := (mean_excess / std_dev) * math.sqrt(periods)
-			w.append_float(&out, sharpe)
-		} else {
+		mean := sum / f64(count)
+		ss, scale := 0.0, 0.0
+		for j in lo ..= i {
+			if v, is_null := w.column_at_float(src, j); !is_null {
+				d := v - rf - mean
+				ss += d * d
+				scale = math.max(scale, math.abs(v - rf))
+			}
+		}
+		std := math.sqrt(ss / f64(count - 1))
+		// a constant series leaves only rounding noise in std
+		if std <= 1e-13 * scale {
 			w.append_null(&out)
+		} else {
+			w.append_float(&out, mean / std * ann)
 		}
 	}
-
 	return out
 }
+
+// Annualised EWM volatility (pandas ewm(alpha, adjust=False).var(bias)); same as
+// ewma_volatility_df
 ewma_rolling_volatility :: proc(
 	df: ^w.DataFrame,
 	col: string,
@@ -161,27 +131,70 @@ ewma_rolling_volatility :: proc(
 	periods_per_year: f64 = 252.0,
 	allocator: mem.Allocator = context.allocator,
 ) -> w.Column {
-	rw := ana.rolling_window(df, col, 0, min_periods) // EWM ignores window
-	agg := ana.make_ewm_var("ewm_var", col, alpha, bias)
+	context.allocator = allocator
+	return ewma_volatility_df(df, col, alpha, min_periods, bias, periods_per_year)
+}
 
-	var_col := ana.rolling_apply_float_ewm_var(rw, agg, allocator)
-	defer w.destroy_column(&var_col)
+// Rolling OLS beta cov(r, b) / var(b) over the rows of each window where both
+// columns are non-null, so both moments use the same observations. With
+// full_window the first window - 1 rows are null; results need ≥ max(min_obs, 2)
+// pairs and a non-constant benchmark
+@(private)
+_rolling_pair_beta :: proc(
+	df: ^w.DataFrame,
+	port_col, bench_col: string,
+	window, min_obs: int,
+	full_window: bool,
+	name: string,
+	allocator: mem.Allocator,
+) -> w.Column {
+	src_p := w.column(df, port_col)
+	src_b := w.column(df, bench_col)
+	out := w.column_new(name, .Float, df.rows, allocator)
 
-	// Convert variance to volatility and annualize
-	out := w.column_new("ewma_volatility", .Float, 0)
-	for i in 0 ..< var_col.len {
-		v, is_null := w.column_at_float(&var_col, i)
-		if is_null {
+	for i in 0 ..< df.rows {
+		if full_window && i < window - 1 {
+			w.append_null(&out)
+			continue
+		}
+		lo := max(i - window + 1, 0)
+		sp, sb, count := 0.0, 0.0, 0
+		for j in lo ..= i {
+			pv, np := w.column_at_float(src_p, j)
+			bv, nb := w.column_at_float(src_b, j)
+			if !np && !nb {
+				sp += pv
+				sb += bv
+				count += 1
+			}
+		}
+		if count < max(min_obs, 2) {
+			w.append_null(&out)
+			continue
+		}
+		mp, mb := sp / f64(count), sb / f64(count)
+		sxy, syy, scale := 0.0, 0.0, 0.0
+		for j in lo ..= i {
+			pv, np := w.column_at_float(src_p, j)
+			bv, nb := w.column_at_float(src_b, j)
+			if !np && !nb {
+				sxy += (pv - mp) * (bv - mb)
+				syy += (bv - mb) * (bv - mb)
+				scale = math.max(scale, math.abs(bv))
+			}
+		}
+		// a constant benchmark leaves only rounding noise in syy
+		if syy <= 1e-26 * scale * scale * f64(count) {
 			w.append_null(&out)
 		} else {
-			vol := math.sqrt(v * periods_per_year)
-			w.append_float(&out, vol)
+			w.append_float(&out, sxy / syy)
 		}
 	}
-
 	return out
 }
-// rolling_beta calculates the rolling beta of a portfolio against a benchmark.
+
+// Rolling beta of a portfolio against a benchmark over the last `window` rows
+// (pairwise-complete rows; the first window - 1 rows are null)
 rolling_beta :: proc(
 	df: ^w.DataFrame,
 	port_col: string,
@@ -189,62 +202,9 @@ rolling_beta :: proc(
 	window: int,
 	allocator: mem.Allocator = context.allocator,
 ) -> w.Column {
-	src_port := w.column(df, port_col)
-	src_bench := w.column(df, bench_col)
-	out := w.column_new(fmt.tprintf("rolling_beta_%d", window), .Float, src_port.len)
-
-	for i in 0 ..< src_port.len {
-		if i < window - 1 {
-			w.append_null(&out)
-			continue
-		}
-
-		sum_port := 0.0
-		sum_bench := 0.0
-		sum_prod := 0.0
-		sum_bench_sq := 0.0
-		count := 0
-
-		for j in i - window + 1 ..= i {
-			p, np := w.column_at_float(src_port, j)
-			b, nb := w.column_at_float(src_bench, j)
-
-			if !np && !nb {
-				sum_port += p
-				sum_bench += b
-				sum_prod += p * b
-				sum_bench_sq += b * b
-				count += 1
-			}
-		}
-
-		if count < 2 {
-			w.append_null(&out)
-			continue
-		}
-
-		mean_port := sum_port / f64(count)
-		mean_bench := sum_bench / f64(count)
-
-		// Covariance
-		cov := (sum_prod / f64(count)) - (mean_port * mean_bench)
-		// Variance of benchmark
-		var_bench := (sum_bench_sq / f64(count)) - (mean_bench * mean_bench)
-
-		if var_bench > 1e-10 {
-			beta := cov / var_bench
-			w.append_float(&out, beta)
-		} else {
-			w.append_null(&out)
-		}
-	}
-
-	return out
+	return _rolling_pair_beta(df, port_col, bench_col, window, 2, true, fmt.tprintf("rolling_beta_%d", window), allocator)
 }
 
-// ============================================================================
-// 3. Visualizations (Leveraging wotan/plot)
-// ============================================================================
 rolling_corr_matrix :: proc(
 	df: ^w.DataFrame,
 	cols: []string,
@@ -265,7 +225,6 @@ rolling_cov_matrix :: proc(
 	return ana.rolling_cov_matrix(df, cols, window, min_periods, allocator)
 }
 
-// EWMA covariance matrix (already exists!)
 ewm_cov_matrix :: proc(
 	df: ^w.DataFrame,
 	cols: []string,
@@ -278,7 +237,12 @@ ewm_cov_matrix :: proc(
 	return ana.ewm_cov_matrix(df, cols, alpha, min_periods, bias, adjust, allocator)
 }
 
-// plot_cumulative_returns takes price columns, normalizes them to start at 100, and plots them.
+// ============================================================================
+// 3. Visualizations (Leveraging wotan/plot)
+// ============================================================================
+
+// Price columns rebased to 100 at their first positive value; a null repeats the
+// previous point. Columns without a positive price are skipped
 plot_cumulative_returns :: proc(
 	df: ^w.DataFrame,
 	cols: []string,
@@ -287,19 +251,18 @@ plot_cumulative_returns :: proc(
 ) -> bool {
 	if len(cols) == 0 {return false}
 
-	lines := make([]p.LineData, len(cols), allocator)
-	defer delete(lines, allocator)
-
-	// Generate distinct colors for the lines
+	lines := make([dynamic]p.LineData, 0, len(cols), allocator)
+	defer {
+		for ln in lines {
+			delete(ln.xs, allocator)
+			delete(ln.ys, allocator)
+		}
+		delete(lines)
+	}
 	colors := []p.Color{p.RED, p.BLUE, p.Color{0, 150, 0, 255}, p.Color{200, 100, 0, 255}}
 
-	for col_name, c_idx in cols {
+	for col_name in cols {
 		src := w.column(df, col_name)
-
-		xs := make([]f64, src.len, allocator)
-		ys := make([]f64, src.len, allocator)
-
-		// Find first valid price to normalize
 		base_price := 0.0
 		for i in 0 ..< src.len {
 			v, is_null := w.column_at_float(src, i)
@@ -308,32 +271,19 @@ plot_cumulative_returns :: proc(
 				break
 			}
 		}
+		if base_price == 0.0 {continue}
 
-		if base_price == 0.0 {
-			delete(xs, allocator)
-			delete(ys, allocator)
-			continue
-		}
-
+		xs := make([]f64, src.len, allocator)
+		ys := make([]f64, src.len, allocator)
+		last := 100.0
 		for i in 0 ..< src.len {
-			v, is_null := w.column_at_float(src, i)
 			xs[i] = f64(i)
-			if is_null {
-				ys[i] = 0.0 // Or handle nulls differently
-			} else {
-				ys[i] = (v / base_price) * 100.0 // Normalize to 100
-			}
+			if v, is_null := w.column_at_float(src, i); !is_null {last = v / base_price * 100.0}
+			ys[i] = last
 		}
-
-		color_idx := c_idx % len(colors)
-		lines[c_idx] = p.LineData {
-			xs    = xs,
-			ys    = ys,
-			color = colors[color_idx],
-			style = .Solid,
-			label = col_name,
-		}
+		append(&lines, p.LineData{xs = xs, ys = ys, color = colors[len(lines) % len(colors)], style = .Solid, label = col_name})
 	}
+	if len(lines) == 0 {return false}
 
 	config := p.DEFAULT_PLOT_CONFIG
 	config.title = "Cumulative Returns (Base = 100)"
@@ -341,10 +291,11 @@ plot_cumulative_returns :: proc(
 	config.x_label = "Time"
 	config.show_grid = true
 
-	return p.multi_line_png(lines, path, config, allocator)
+	return p.multi_line_png(lines[:], path, config, allocator)
 }
 
-// plot_drawdown calculates and plots the drawdown series for a given price column.
+// Drawdown (%) of a price column from its running peak; a null or non-positive
+// price repeats the previous point
 plot_drawdown :: proc(
 	df: ^w.DataFrame,
 	col: string,
@@ -358,20 +309,14 @@ plot_drawdown :: proc(
 	defer delete(xs, allocator)
 	defer delete(ys, allocator)
 
-	peak := -math.F64_MAX
+	peak, last := 0.0, 0.0
 	for i in 0 ..< src.len {
-		v, is_null := w.column_at_float(src, i)
 		xs[i] = f64(i)
-
-		if is_null {
-			ys[i] = 0.0
-			continue
+		if v, is_null := w.column_at_float(src, i); !is_null && v > 0.0 {
+			peak = math.max(peak, v)
+			last = (v - peak) / peak * 100.0
 		}
-
-		if v > peak {peak = v}
-
-		// Drawdown is negative percentage from peak
-		ys[i] = ((v - peak) / peak) * 100.0
+		ys[i] = last
 	}
 
 	lines := []p.LineData {
@@ -396,17 +341,17 @@ plot_risk_decomposition :: proc(
 ) -> bool {
 	if len(decomp.ctr) != len(asset_names) {return false}
 
-	// Convert CTR to percentages for better readability
+	// CTR in volatility percentage points (the bars sum to the portfolio vol)
 	values := make([]f64, len(decomp.ctr), allocator)
 	defer delete(values, allocator)
 
 	for i in 0 ..< len(decomp.ctr) {
-		values[i] = decomp.ctr[i] * 100.0 // Percentage contribution
+		values[i] = decomp.ctr[i] * 100.0
 	}
 
 	config := p.DEFAULT_PLOT_CONFIG
 	config.title = "Risk Decomposition (Component Contribution to Risk)"
-	config.y_label = "Risk Contribution (%)"
+	config.y_label = "Contribution to volatility (% pts)"
 	config.bar_color = p.BLUE
 
 	return p.bar_png(asset_names, values, path, config, allocator)

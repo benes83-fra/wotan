@@ -71,6 +71,7 @@ finance_analytics_test :: proc(allocator: mem.Allocator) {
 	returns_col := w.column_new("returns", .Float, n_days)
 	price_col := w.column_new("price", .Float, n_days)
 	benchmark_col := w.column_new("benchmark", .Float, n_days)
+	benchmark_price_col := w.column_new("benchmark_price", .Float, n_days)
 
 	// Generate random returns with mean ~0.001 (10% annual) and vol ~0.02 (20% annual)
 	price := 100.0
@@ -86,11 +87,13 @@ finance_analytics_test :: proc(allocator: mem.Allocator) {
 		benchmark_price *= (1.0 + bench_ret)
 
 		w.append_float(&price_col, price)
+		w.append_float(&benchmark_price_col, benchmark_price)
 	}
 
 	w.add_column(&df, returns_col)
 	w.add_column(&df, price_col)
 	w.add_column(&df, benchmark_col)
+	w.add_column(&df, benchmark_price_col)
 	df.rows = n_days
 
 	// Test rolling volatility
@@ -159,7 +162,7 @@ finance_analytics_test :: proc(allocator: mem.Allocator) {
 	fmt.println("Generating cumulative returns plot...")
 	ok1 := fin.plot_cumulative_returns(
 		&df,
-		[]string{"price", "benchmark"},
+		[]string{"price", "benchmark_price"},
 		"plots/cumulative_returns.png",
 		allocator,
 	)
@@ -186,7 +189,7 @@ finance_analytics_test :: proc(allocator: mem.Allocator) {
 	files := []string {
 		"plots/cumulative_returns.png",
 		"plots/drawdown.png",
-		"plots/srisk_decomposition.png",
+		"plots/risk_decomposition.png",
 	}
 	for file in files {
 		_, err := os.stat(file, allocator)

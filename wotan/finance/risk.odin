@@ -916,31 +916,9 @@ rolling_beta_df :: proc(
 	window: int = 252,
 	min_periods: int = 20,
 ) -> w.Column {
-	rw := a.rolling_window(df, returns_col, window, min_periods)
-
-	cov_agg := w.make_cov("cov", returns_col, benchmark_col)
-	cov_col := a.rolling_apply(rw, cov_agg)
-
-	// beta = cov(r, b) / var(b): the variance window must run over the benchmark
-	rw_b := a.rolling_window(df, benchmark_col, window, min_periods)
-	var_agg := w.make_var("var", benchmark_col)
-	var_col := a.rolling_apply(rw_b, var_agg)
-
-	out := w.column_new("beta", .Float, cov_col.len)
-	for i in 0 ..< cov_col.len {
-		cv, n1 := w.column_at_float(&cov_col, i)
-		v, n2 := w.column_at_float(&var_col, i)
-
-		if n1 || n2 || v <= 0 {
-			w.append_null(&out)
-		} else {
-			w.append_float(&out, cv / v)
-		}
-	}
-
-	w.destroy_column(&cov_col)
-	w.destroy_column(&var_col)
-	return out
+	// Both moments over the same pairwise-complete rows (pandas' cov / var would
+	// also count rows where only the returns are null in var(b))
+	return _rolling_pair_beta(df, returns_col, benchmark_col, window, min_periods, false, "beta", context.allocator)
 }
 
 // cov(r, b) / var(b)
