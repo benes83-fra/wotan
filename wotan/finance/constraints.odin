@@ -4,19 +4,24 @@ package finance
 import l "../linalg"
 import "core:math"
 import "core:mem"
+import "core:slice"
 
 // ============================================================================
 // Portfolio Constraints
 // ============================================================================
+// The feasible set is C = {Σw = 1, lo ≤ w_i ≤ hi} ∩ {Σ_{i∈g} w_i ≤ max_g}, with
+// lo = 0 for no_short_selling (raised to min_weight when that is > 0) and
+// hi = max_weight when > 0. min_weight applies to every asset; there is no
+// "only if included" (semi-continuous) handling, which would make C non-convex.
 PortfolioConstraints :: struct {
 	no_short_selling: bool, // weights >= 0
 	max_weight:       f64, // weights <= max_weight (0 = no limit)
-	min_weight:       f64, // weights >= min_weight if included (0 = no limit)
+	min_weight:       f64, // weights >= min_weight for every asset (0 = no limit)
 	group_limits:     []GroupLimit, // sector/asset class limits
 }
 
 GroupLimit :: struct {
-	asset_indices: []int, // indices of assets in this group
+	asset_indices: []int, // indices of assets in this group (no duplicates)
 	max_weight:    f64, // sum of weights in group <= max_weight
 }
 
@@ -24,63 +29,28 @@ GroupLimit :: struct {
 // Projection Operators
 // ============================================================================
 
-// Project onto simplex: weights sum to 1, weights >= 0
-// Uses Duchi et al. algorithm (O(n log n))
+// Euclidean projection onto the simplex {w ≥ 0, Σw = 1} (Duchi et al. 2008)
 project_simplex :: proc(weights: []f64, allocator: mem.Allocator) -> []f64 {
 	n := len(weights)
 	result := make([]f64, n, allocator)
-	copy(result, weights)
+	if n == 0 {return result}
+	sorted := slice.clone(weights, context.temp_allocator)
+	defer delete(sorted, context.temp_allocator)
+	slice.sort(sorted)
+	slice.reverse(sorted)
 
-	// Sort in descending order
-	sorted := make([]f64, n, allocator)
-	defer delete(sorted, allocator) // FIX: Add defer to ensure cleanup
-	copy(sorted, result)
-
-	// Simple insertion sort for small n
-	for i in 1 ..< n {
-		key := sorted[i]
-		j := i - 1
-		for j >= 0 && sorted[j] < key {
-			sorted[j + 1] = sorted[j]
-			j -= 1
-		}
-		sorted[j + 1] = key
-	}
-
-	// Find rho
-	cumsum := 0.0
-	rho := -1
+	cumsum, theta := 0.0, 0.0
 	for j in 0 ..< n {
 		cumsum += sorted[j]
-		if sorted[j] + (1.0 - cumsum) / f64(j + 1) > 0.0 {
-			rho = j
-		} else {
-			break
-		}
+		t := (cumsum - 1.0) / f64(j + 1)
+		if sorted[j] - t > 0.0 {theta = t}
 	}
-
-	if rho < 0 {
-		// All weights should be zero (shouldn't happen with sum=1)
-		for i in 0 ..< n {result[i] = 1.0 / f64(n)}
-		return result // sorted will be deleted by defer
-	}
-
-	// Compute theta
-	cumsum = 0.0
-	for j in 0 ..= rho {
-		cumsum += sorted[j]
-	}
-	theta := (cumsum - 1.0) / f64(rho + 1)
-
-	// Project
-	for i in 0 ..< n {
-		result[i] = math.max(weights[i] - theta, 0.0)
-	}
-
-	return result // sorted will be deleted by defer
+	for i in 0 ..< n {result[i] = math.max(weights[i] - theta, 0.0)}
+	return result
 }
 
-// Project onto box constraints: min_weight <= weights <= max_weight
+// Clip to min_weight <= w <= max_weight in place (max_w = 0: no upper limit).
+// A clip, not a projection onto the budget: the sum changes
 project_box :: proc(weights: []f64, min_w: f64, max_w: f64) {
 	for i in 0 ..< len(weights) {
 		if weights[i] < min_w {
@@ -92,18 +62,15 @@ project_box :: proc(weights: []f64, min_w: f64, max_w: f64) {
 	}
 }
 
-// Project onto group constraints
+// Scale each over-limit group down to its limit in place (the sum changes)
 project_groups :: proc(weights: []f64, groups: []GroupLimit) {
 	for group in groups {
-		// Sum current weights in group
 		sum := 0.0
 		for idx in group.asset_indices {
 			if idx >= 0 && idx < len(weights) {
 				sum += weights[idx]
 			}
 		}
-
-		// If sum exceeds limit, scale down proportionally
 		if sum > group.max_weight && sum > 1e-10 {
 			scale := group.max_weight / sum
 			for idx in group.asset_indices {
@@ -115,412 +82,32 @@ project_groups :: proc(weights: []f64, groups: []GroupLimit) {
 	}
 }
 
-// Combined projection: apply all constraints iteratively
+// Nearest point of the feasible set (see PortfolioConstraints), as a new slice;
+// the input is not modified
 project_constraints :: proc(
 	weights: []f64,
 	constraints: PortfolioConstraints,
 	allocator: mem.Allocator,
 ) -> []f64 {
-	result := weights
-
-	// Project onto simplex first (ensures sum=1, >=0 if no_short_selling)
-	if constraints.no_short_selling {
-		result = project_simplex(result, allocator)
-	} else {
-		// Just ensure sum=1
-		sum := 0.0
-		for w in result {sum += w}
-		if math.abs(sum) > 1e-10 {
-			for i in 0 ..< len(result) {
-				result[i] /= sum
-			}
-		}
-	}
-
-	// Apply box constraints
-	if constraints.max_weight > 0.0 || constraints.min_weight > 0.0 {
-		project_box(result, constraints.min_weight, constraints.max_weight)
-	}
-
-	// Apply group constraints
-	if len(constraints.group_limits) > 0 {
-		project_groups(result, constraints.group_limits)
-	}
-
-	// Re-normalize if needed
-	sum := 0.0
-	for w in result {sum += w}
-	if math.abs(sum - 1.0) > 1e-6 {
-		for i in 0 ..< len(result) {
-			result[i] /= sum
-		}
-	}
-
+	result := slice.clone(weights, allocator)
+	_project_constraints_exact(result, constraints)
 	return result
 }
 
-// ============================================================================
-// Constrained Portfolio Optimization
-// ============================================================================
-
-// Compute portfolio variance: w' Σ w
-portfolio_variance :: proc(weights: []f64, cov: ^l.Matrix(f64)) -> f64 {
-	n := len(weights)
-	var := 0.0
-
-	for i in 0 ..< n {
-		for j in 0 ..< n {
-			var += weights[i] * weights[j] * cov.data[i * cov.cols + j]
-		}
-	}
-
-	return var
-}
-
-// Compute portfolio variance gradient: 2 Σ w
-portfolio_variance_gradient :: proc(
-	weights: []f64,
-	cov: ^l.Matrix(f64),
-	allocator: mem.Allocator,
-) -> []f64 {
-	n := len(weights)
-	grad := make([]f64, n, allocator)
-
-	for i in 0 ..< n {
-		for j in 0 ..< n {
-			grad[i] += 2.0 * cov.data[i * cov.cols + j] * weights[j]
-		}
-	}
-
-	return grad
-}
-
-// Compute negative Sharpe ratio
-negative_sharpe :: proc(weights: []f64, returns: []f64, cov: ^l.Matrix(f64), rf: f64) -> f64 {
-	port_return := 0.0
-	for i in 0 ..< len(weights) {
-		port_return += weights[i] * returns[i]
-	}
-
-	port_var := portfolio_variance(weights, cov)
-	port_vol := math.sqrt(port_var)
-
-	if port_vol < 1e-10 {
-		return 1e10 // Avoid division by zero
-	}
-
-	return -(port_return - rf) / port_vol
-}
-
-// Compute negative Sharpe gradient
-negative_sharpe_gradient :: proc(
-	weights: []f64,
-	returns: []f64,
-	cov: ^l.Matrix(f64),
-	rf: f64,
-	allocator: mem.Allocator,
-) -> []f64 {
-	n := len(weights)
-
-	port_return := 0.0
-	for i in 0 ..< n {
-		port_return += weights[i] * returns[i]
-	}
-
-	port_var := portfolio_variance(weights, cov)
-	port_vol := math.sqrt(port_var)
-
-	if port_vol < 1e-10 {
-		grad := make([]f64, n, allocator)
-		return grad
-	}
-
-	// Gradient of -(μ - rf) / σ
-	// = -[σ * μ - (μ - rf) * (Σw)/σ] / σ²
-	grad := make([]f64, n, allocator)
-
-	var_grad := portfolio_variance_gradient(weights, cov, allocator)
-
-	for i in 0 ..< n {
-		grad[i] =
-			-(returns[i] * port_vol - (port_return - rf) * var_grad[i] / port_vol) /
-			(port_vol * port_vol)
-	}
-
-	delete(var_grad, allocator)
-	return grad
-}
-
-// Constrained minimum variance portfolio
-constrained_min_variance_portfolio :: proc(
-	cov: ^l.Matrix(f64),
-	constraints: PortfolioConstraints,
-	allocator: mem.Allocator,
-	max_iter: int = 1000,
-	tol: f64 = 1e-6,
-) -> []f64 {
-	n := cov.rows
-
-	// Initialize with equal weights
-	weights := make([]f64, n, allocator)
-	for i in 0 ..< n {
-		weights[i] = 1.0 / f64(n)
-	}
-
-	// Project initial weights
-	old_weights := weights
-	weights = project_constraints(weights, constraints, allocator)
-	delete(old_weights, allocator)
-	// Projected gradient descent
-	lr := 0.01
-	prev_var := portfolio_variance(weights, cov)
-
-	for iter in 0 ..< max_iter {
-		// Compute gradient
-		grad := portfolio_variance_gradient(weights, cov, allocator)
-
-		// Gradient step
-		for i in 0 ..< n {
-			weights[i] -= lr * grad[i]
-		}
-
-		// Project onto constraints
-		old_weights := weights
-		weights = project_constraints(weights, constraints, allocator)
-		delete(old_weights, allocator)
-		// Check convergence
-		var := portfolio_variance(weights, cov)
-		if math.abs(var - prev_var) < tol {
-			delete(grad, allocator)
-			break
-		}
-		prev_var = var
-
-		delete(grad, allocator)
-	}
-
-	return weights
-}
-
-// Constrained maximum Sharpe ratio portfolio
-constrained_max_sharpe_portfolio :: proc(
-	returns: []f64,
-	cov: ^l.Matrix(f64),
-	rf: f64,
-	constraints: PortfolioConstraints,
-	allocator: mem.Allocator,
-	max_iter: int = 1000,
-	tol: f64 = 1e-6,
-) -> []f64 {
-	n := len(returns)
-
-	// Initialize with equal weights
-	weights := make([]f64, n, allocator)
-	for i in 0 ..< n {
-		weights[i] = 1.0 / f64(n)
-	}
-
-	// Project initial weights
-	old_weights := weights
-	weights = project_constraints(weights, constraints, allocator)
-	delete(old_weights, allocator)
-	// Projected gradient descent
-	lr := 0.01
-	prev_sharpe := negative_sharpe(weights, returns, cov, rf)
-
-	for iter in 0 ..< max_iter {
-		// Compute gradient
-		grad := negative_sharpe_gradient(weights, returns, cov, rf, allocator)
-
-		// Gradient step
-		for i in 0 ..< n {
-			weights[i] -= lr * grad[i]
-		}
-
-		// Project onto constraints
-		old_weights := weights
-		weights = project_constraints(weights, constraints, allocator)
-		delete(old_weights, allocator)
-		// Check convergence
-		sharpe := negative_sharpe(weights, returns, cov, rf)
-		if math.abs(sharpe - prev_sharpe) < tol {
-			delete(grad, allocator)
-			break
-		}
-		prev_sharpe = sharpe
-
-		delete(grad, allocator)
-	}
-
-	return weights
-}
-
-// Constrained mean-variance portfolio (target return)
-constrained_mean_variance_portfolio :: proc(
-	returns: []f64,
-	cov: ^l.Matrix(f64),
-	target_return: f64,
-	constraints: PortfolioConstraints,
-	allocator: mem.Allocator,
-	max_iter: int = 1000,
-	tol: f64 = 1e-6,
-) -> []f64 {
-	n := len(returns)
-
-	// Initialize with equal weights
-	weights := make([]f64, n, allocator)
-	for i in 0 ..< n {
-		weights[i] = 1.0 / f64(n)
-	}
-
-	// Project initial weights
-	old_weights := weights
-	weights = project_constraints(weights, constraints, allocator)
-	delete(old_weights, allocator)
-	// Projected gradient descent with penalty for target return
-	lr := 0.01
-	penalty := 10.0
-	prev_obj := 0.0
-
-	for iter in 0 ..< max_iter {
-		// Compute variance gradient
-		var_grad := portfolio_variance_gradient(weights, cov, allocator)
-
-		// Compute return gradient
-		ret_grad := make([]f64, n, allocator)
-		for i in 0 ..< n {
-			ret_grad[i] = returns[i]
-		}
-
-		// Combined gradient with penalty
-		current_return := 0.0
-		for i in 0 ..< n {
-			current_return += weights[i] * returns[i]
-		}
-
-		return_error := current_return - target_return
-
-		for i in 0 ..< n {
-			weights[i] -= lr * (var_grad[i] + penalty * return_error * ret_grad[i])
-		}
-
-		// Project onto constraints
-		old_weights := weights
-		weights = project_constraints(weights, constraints, allocator)
-		delete(old_weights, allocator)
-
-		// Check convergence
-		obj := portfolio_variance(weights, cov) + penalty * return_error * return_error
-		if math.abs(obj - prev_obj) < tol {
-			delete(var_grad, allocator)
-			delete(ret_grad, allocator)
-			break
-		}
-		prev_obj = obj
-
-		delete(var_grad, allocator)
-		delete(ret_grad, allocator)
-	}
-
-	return weights
-}
-// ============================================================================
-// Strict Constraint Enforcement
-// ============================================================================
-
-// enforce_constraints strictly applies all constraints to the weights
-// Call this AFTER the optimization solver returns
-// Replace the enforce_constraints function with this corrected version:
-enforce_constraints :: proc(
-	weights: []f64,
-	constraints: PortfolioConstraints,
-	allocator: mem.Allocator,
-) -> []f64 {
-	out := make([]f64, len(weights), allocator)
-	copy(out, weights)
-
-	// 1. Hard clip individual bounds
-	if constraints.no_short_selling {
-		for i in 0 ..< len(out) {
-			if out[i] < 0.0 {out[i] = 0.0}
-		}
-	}
-	if constraints.max_weight > 0.0 {
-		for i in 0 ..< len(out) {
-			if out[i] > constraints.max_weight {out[i] = constraints.max_weight}
-		}
-	}
-
-	// 2. Hard clip group/sector limits (Proportional Scaling)
-	for group in constraints.group_limits {
-		group_sum := 0.0
-		for idx in group.asset_indices {
-			group_sum += out[idx]
-		}
-		// If the group exceeds the limit, scale them down proportionally
-		if group_sum > group.max_weight + 1e-8 {
-			scale := group.max_weight / group_sum
-			for idx in group.asset_indices {
-				out[idx] *= scale
-			}
-		}
-	}
-
-	// 3. Re-normalize to sum to 1.0 (Iterative projection)
-	// Clipping can cause the sum to drop below 1.0. We distribute the remainder
-	// to assets that haven't hit their max constraints.
-	for _ in 0 ..< 5 { 	// Max 5 iterations to converge
-		sum := 0.0
-		for w in out {sum += w}
-		if math.abs(sum - 1.0) < 1e-6 {break}
-
-		// Find how many assets can still accept more weight
-		adjustable_count := 0
-		for i in 0 ..< len(out) {
-			can_adjust := true
-			if constraints.no_short_selling && out[i] <= 0.0 {can_adjust = false}
-			if constraints.max_weight > 0.0 &&
-			   out[i] >= constraints.max_weight {can_adjust = false}
-			if can_adjust {adjustable_count += 1}
-		}
-
-		if adjustable_count == 0 {break} 	// Prevent division by zero
-
-		diff := (1.0 - sum) / f64(adjustable_count)
-		for i in 0 ..< len(out) {
-			can_adjust := true
-			if constraints.no_short_selling && out[i] <= 0.0 {can_adjust = false}
-			if constraints.max_weight > 0.0 &&
-			   out[i] >= constraints.max_weight {can_adjust = false}
-
-			if can_adjust {
-				out[i] += diff
-				// Re-apply hard limits just in case
-				if constraints.max_weight > 0.0 && out[i] > constraints.max_weight {
-					out[i] = constraints.max_weight
-				}
-				if constraints.no_short_selling && out[i] < 0.0 {
-					out[i] = 0.0
-				}
-			}
-		}
-	}
-
-	return out
-}
-
-// ============================================================================
-// Exact Euclidean projection onto the constraint set
-// ============================================================================
-// C = {Σw = 1, lo ≤ w_i ≤ hi} ∩ {Σ_{i∈g} w_i ≤ max_g for each group}, with
-// lo = 0 for no_short_selling (raised to min_weight when that is set, as
-// project_box does) and hi = max_weight when > 0. The box-and-budget part is
-// w_i = clamp(v_i - θ, lo, hi) with θ found by bisection; group limits are added
-// with Dykstra's alternating projections, so the result is the nearest feasible
-// point (unlike project_constraints, which applies the pieces one after another).
-// If the box cannot hold a budget of 1 the weights end at the nearest bound.
+// Exact Euclidean projection onto C in place. If the box cannot hold a budget of
+// 1 the weights end at the nearest bound
 @(private)
 _project_constraints_exact :: proc(v: []f64, c: PortfolioConstraints) {
+	_project_feasible(v, c, nil, 0)
+}
+
+// Projection onto C, intersected with {μᵀw = target} when mu is given.
+// Box, budget and target: w_i = clamp(v_i - θ - φ μ_i, lo, hi), θ and φ by nested
+// bisection (μᵀw is monotone in φ). Group limits are added with Dykstra's
+// alternating projections, that set last so the result meets the budget, bounds
+// and target exactly
+@(private = "file")
+_project_feasible :: proc(v: []f64, c: PortfolioConstraints, mu: []f64, target: f64) {
 	n := len(v)
 	if n == 0 {return}
 	lo := -math.F64_MAX
@@ -528,28 +115,27 @@ _project_constraints_exact :: proc(v: []f64, c: PortfolioConstraints) {
 	if c.min_weight > 0.0 {lo = math.max(lo, c.min_weight)}
 	hi := c.max_weight if c.max_weight > 0.0 else math.F64_MAX
 
-	if len(c.group_limits) == 0 {
-		_project_box_budget(v, lo, hi)
+	m := len(c.group_limits)
+	if m == 0 {
+		_project_box_budget_target(v, lo, hi, mu, target)
 		return
 	}
+	n_sets := m
 
-	// Dykstra: halfspaces first, the box-and-budget set last, so the result
-	// satisfies the budget and bounds exactly
-	m := len(c.group_limits)
-	inc := make([]f64, (m + 1) * n, context.temp_allocator)
+	inc := make([]f64, (n_sets + 1) * n, context.temp_allocator)
 	defer delete(inc, context.temp_allocator)
 	prev := make([]f64, n, context.temp_allocator)
 	defer delete(prev, context.temp_allocator)
-	for _ in 0 ..< 10_000 {
+	for _ in 0 ..< 20_000 {
 		copy(prev, v)
-		for g, k in c.group_limits {
+		for k in 0 ..< n_sets {
 			p := inc[k * n:(k + 1) * n]
-			for i in 0 ..< n {v[i] += p[i]}
+			for i in 0 ..< n {v[i] += p[i]; p[i] = v[i]}
+			g := c.group_limits[k]
 			s, cnt := 0.0, 0
 			for idx in g.asset_indices {
 				if idx >= 0 && idx < n {s += v[idx]; cnt += 1}
 			}
-			for i in 0 ..< n {p[i] = v[i]}
 			if s > g.max_weight && cnt > 0 {
 				shift := (s - g.max_weight) / f64(cnt)
 				for idx in g.asset_indices {
@@ -558,15 +144,51 @@ _project_constraints_exact :: proc(v: []f64, c: PortfolioConstraints) {
 			}
 			for i in 0 ..< n {p[i] -= v[i]}
 		}
-		p := inc[m * n:]
+		p := inc[n_sets * n:]
 		for i in 0 ..< n {v[i] += p[i]; p[i] = v[i]}
-		_project_box_budget(v, lo, hi)
+		_project_box_budget_target(v, lo, hi, mu, target)
 		for i in 0 ..< n {p[i] -= v[i]}
 
 		change := 0.0
 		for i in 0 ..< n {change = math.max(change, math.abs(v[i] - prev[i]))}
-		if change < 1e-15 {break}
+		if change < 1e-16 {break}
 	}
+}
+
+// w_i = clamp(v_i - θ - φ μ_i, lo, hi) with Σw = 1 and μᵀw = target (φ = 0
+// without mu). μᵀw(φ) is non-increasing in φ, so φ is found by bisection. A
+// target outside the attainable range ends at the nearest attainable return
+@(private = "file")
+_project_box_budget_target :: proc(v: []f64, lo, hi: f64, mu: []f64, target: f64) {
+	if mu == nil {
+		_project_box_budget(v, lo, hi)
+		return
+	}
+	orig := slice.clone(v, context.temp_allocator)
+	defer delete(orig, context.temp_allocator)
+	at :: proc(v, orig, mu: []f64, phi, lo, hi: f64) -> f64 {
+		for i in 0 ..< len(v) {v[i] = orig[i] - phi * mu[i]}
+		_project_box_budget(v, lo, hi)
+		return l.dot_simd(mu, v)
+	}
+	// scale φ to the data: one unit of φ moves the weights by about |μ|
+	mu_max := 0.0
+	for x in mu {mu_max = math.max(mu_max, math.abs(x))}
+	if mu_max == 0 {
+		_project_box_budget(v, lo, hi)
+		return
+	}
+	step := 1.0 / mu_max
+	a, b := 0.0, 0.0
+	for at(v, orig, mu, a, lo, hi) < target && step < 1e300 {a -= step; step *= 2}
+	step = 1.0 / mu_max
+	for at(v, orig, mu, b, lo, hi) > target && step < 1e300 {b += step; step *= 2}
+	for _ in 0 ..< 200 {
+		mid := 0.5 * (a + b)
+		if mid <= a || mid >= b {break}
+		if at(v, orig, mu, mid, lo, hi) > target {a = mid} else {b = mid}
+	}
+	at(v, orig, mu, 0.5 * (a + b), lo, hi)
 }
 
 // w_i = clamp(v_i - θ, lo, hi) with Σw = 1
@@ -594,4 +216,245 @@ _project_box_budget :: proc(v: []f64, lo, hi: f64) {
 	}
 	theta := 0.5 * (a + b)
 	for &x in v {x = math.clamp(x - theta, lo, hi)}
+}
+
+// ============================================================================
+// Objectives
+// ============================================================================
+
+// Compute portfolio variance: w' Σ w
+portfolio_variance :: proc(weights: []f64, cov: ^l.Matrix(f64)) -> f64 {
+	n := len(weights)
+	var := 0.0
+	for i in 0 ..< n {
+		var += weights[i] * l.dot_simd(cov.data[i * cov.cols:i * cov.cols + n], weights)
+	}
+	return var
+}
+
+// Compute portfolio variance gradient: 2 Σ w
+portfolio_variance_gradient :: proc(
+	weights: []f64,
+	cov: ^l.Matrix(f64),
+	allocator: mem.Allocator,
+) -> []f64 {
+	n := len(weights)
+	grad := make([]f64, n, allocator)
+	for i in 0 ..< n {
+		grad[i] = 2.0 * l.dot_simd(cov.data[i * cov.cols:i * cov.cols + n], weights)
+	}
+	return grad
+}
+
+// Negative Sharpe ratio -(μᵀw - rf) / σ(w); 1e10 for a zero-volatility portfolio
+negative_sharpe :: proc(weights: []f64, returns: []f64, cov: ^l.Matrix(f64), rf: f64) -> f64 {
+	port_return := l.dot_simd(weights, returns)
+	port_vol := math.sqrt(math.max(portfolio_variance(weights, cov), 0.0))
+	if port_vol < 1e-10 {
+		return 1e10 // Avoid division by zero
+	}
+	return -(port_return - rf) / port_vol
+}
+
+// Gradient of the negative Sharpe ratio: -(μ σ - (μᵀw - rf) Σw / σ) / σ²
+negative_sharpe_gradient :: proc(
+	weights: []f64,
+	returns: []f64,
+	cov: ^l.Matrix(f64),
+	rf: f64,
+	allocator: mem.Allocator,
+) -> []f64 {
+	n := len(weights)
+	grad := make([]f64, n, allocator)
+	port_return := l.dot_simd(weights, returns)
+	port_vol := math.sqrt(math.max(portfolio_variance(weights, cov), 0.0))
+	if port_vol < 1e-10 {
+		return grad
+	}
+	excess := port_return - rf
+	for i in 0 ..< n {
+		sigma_w := l.dot_simd(cov.data[i * cov.cols:i * cov.cols + n], weights)
+		grad[i] = -(returns[i] * port_vol - excess * sigma_w / port_vol) / (port_vol * port_vol)
+	}
+	return grad
+}
+
+// ============================================================================
+// Constrained Portfolio Optimization
+// ============================================================================
+// All three solve min f(w) over the feasible set by spectral projected gradient
+// (Birgin, Martínez & Raydan 2000): Barzilai-Borwein steps, a non-monotone
+// Armijo line search and the exact projection. Variance is convex and the
+// negative Sharpe ratio is pseudoconvex where the excess return is positive, so
+// a stationary point is the global optimum. Iteration stops when the projected
+// gradient step ‖P(w - ∇f) - w‖∞ falls below tol (f scaled to O(1)).
+
+@(private = "file")
+_Objective :: struct {
+	cov:    ^l.Matrix(f64),
+	mu:     []f64,
+	rf:     f64,
+	scale:  f64, // the objective is multiplied by this
+	sharpe: bool,
+}
+
+@(private = "file")
+_obj_value :: proc(o: ^_Objective, w: []f64) -> f64 {
+	if o.sharpe {return o.scale * negative_sharpe(w, o.mu, o.cov, o.rf)}
+	return o.scale * portfolio_variance(w, o.cov)
+}
+
+@(private = "file")
+_obj_grad :: proc(o: ^_Objective, w, g: []f64) {
+	n := len(w)
+	if o.sharpe {
+		gs := negative_sharpe_gradient(w, o.mu, o.cov, o.rf, context.temp_allocator)
+		for i in 0 ..< n {g[i] = o.scale * gs[i]}
+		delete(gs, context.temp_allocator)
+		return
+	}
+	for i in 0 ..< n {
+		g[i] = 2.0 * o.scale * l.dot_simd(o.cov.data[i * o.cov.cols:i * o.cov.cols + n], w)
+	}
+}
+
+@(private = "file")
+_spg_minimize :: proc(
+	o: ^_Objective,
+	c: PortfolioConstraints,
+	target_mu: []f64,
+	target: f64,
+	n: int,
+	max_iter: int,
+	tol: f64,
+	allocator: mem.Allocator,
+) -> []f64 {
+	MEMORY :: 10
+	ALPHA_MIN, ALPHA_MAX :: 1e-30, 1e30
+	w := make([]f64, n, allocator)
+	if n == 0 {return w}
+	buf := make([]f64, 5 * n, context.temp_allocator)
+	defer delete(buf, context.temp_allocator)
+	g, d, wn, gn, pg := buf[0:n], buf[n:2 * n], buf[2 * n:3 * n], buf[3 * n:4 * n], buf[4 * n:5 * n]
+
+	for i in 0 ..< n {w[i] = 1.0 / f64(n)}
+	_project_feasible(w, c, target_mu, target)
+	f := _obj_value(o, w)
+	_obj_grad(o, w, g)
+	history: [MEMORY]f64
+	for &h in history {h = f}
+
+	pg_norm :: proc(w, g, pg: []f64, c: PortfolioConstraints, mu: []f64, target: f64) -> f64 {
+		for i in 0 ..< len(w) {pg[i] = w[i] - g[i]}
+		_project_feasible(pg, c, mu, target)
+		r := 0.0
+		for i in 0 ..< len(w) {r = math.max(r, math.abs(pg[i] - w[i]))}
+		return r
+	}
+	alpha := 1.0
+	if r := pg_norm(w, g, pg, c, target_mu, target); r > 0 {alpha = math.clamp(1.0 / r, ALPHA_MIN, ALPHA_MAX)}
+
+	for k in 0 ..< max_iter {
+		if pg_norm(w, g, pg, c, target_mu, target) < tol {break}
+		for i in 0 ..< n {d[i] = w[i] - alpha * g[i]}
+		_project_feasible(d, c, target_mu, target)
+		gd := 0.0
+		for i in 0 ..< n {
+			d[i] -= w[i]
+			gd += g[i] * d[i]
+		}
+		if gd >= 0 {break} // no descent left at round-off level
+
+		f_max := history[0]
+		for h in history {f_max = math.max(f_max, h)}
+		lambda := 1.0
+		fn: f64
+		for _ in 0 ..< 60 {
+			for i in 0 ..< n {wn[i] = w[i] + lambda * d[i]}
+			fn = _obj_value(o, wn)
+			if fn <= f_max + 1e-4 * lambda * gd {break}
+			// safeguarded quadratic interpolation
+			lt := -0.5 * lambda * lambda * gd / (fn - f - lambda * gd)
+			lambda = math.clamp(lt, 0.1 * lambda, 0.5 * lambda)
+		}
+		_obj_grad(o, wn, gn)
+		sy, ss := 0.0, 0.0
+		for i in 0 ..< n {
+			s := wn[i] - w[i]
+			sy += s * (gn[i] - g[i])
+			ss += s * s
+		}
+		alpha = ALPHA_MAX if sy <= 0 else math.clamp(ss / sy, ALPHA_MIN, ALPHA_MAX)
+		copy(w, wn)
+		copy(g, gn)
+		f = fn
+		history[k % MEMORY] = f
+	}
+	return w
+}
+
+// Mean of the covariance diagonal, to scale the variance objective to O(1)
+@(private = "file")
+_variance_scale :: proc(cov: ^l.Matrix(f64)) -> f64 {
+	n := cov.rows
+	s := 0.0
+	for i in 0 ..< n {s += cov.data[i * cov.cols + i]}
+	return f64(n) / s if s > 0 else 1.0
+}
+
+// Constrained minimum variance portfolio: min wᵀΣw over the feasible set
+constrained_min_variance_portfolio :: proc(
+	cov: ^l.Matrix(f64),
+	constraints: PortfolioConstraints,
+	allocator: mem.Allocator,
+	max_iter: int = 10_000,
+	tol: f64 = 1e-12,
+) -> []f64 {
+	o := _Objective{cov = cov, scale = _variance_scale(cov)}
+	return _spg_minimize(&o, constraints, nil, 0, cov.rows, max_iter, tol, allocator)
+}
+
+// Constrained maximum Sharpe ratio portfolio: max (μᵀw - rf)/σ(w) over the
+// feasible set. Global when some feasible portfolio beats rf
+constrained_max_sharpe_portfolio :: proc(
+	returns: []f64,
+	cov: ^l.Matrix(f64),
+	rf: f64,
+	constraints: PortfolioConstraints,
+	allocator: mem.Allocator,
+	max_iter: int = 10_000,
+	tol: f64 = 1e-12,
+) -> []f64 {
+	o := _Objective{cov = cov, mu = returns, rf = rf, scale = 1.0, sharpe = true}
+	return _spg_minimize(&o, constraints, nil, 0, len(returns), max_iter, tol, allocator)
+}
+
+// Constrained mean-variance portfolio: min wᵀΣw over the feasible set with
+// μᵀw = target_return exactly (the target is part of the projection). The
+// target must be attainable under the constraints
+constrained_mean_variance_portfolio :: proc(
+	returns: []f64,
+	cov: ^l.Matrix(f64),
+	target_return: f64,
+	constraints: PortfolioConstraints,
+	allocator: mem.Allocator,
+	max_iter: int = 10_000,
+	tol: f64 = 1e-12,
+) -> []f64 {
+	o := _Objective{cov = cov, scale = _variance_scale(cov)}
+	return _spg_minimize(&o, constraints, returns, target_return, len(returns), max_iter, tol, allocator)
+}
+
+// ============================================================================
+// Strict Constraint Enforcement
+// ============================================================================
+
+// The nearest feasible weights (exact projection, new slice). The optimizers
+// above already return feasible weights; this is for weights from elsewhere
+enforce_constraints :: proc(
+	weights: []f64,
+	constraints: PortfolioConstraints,
+	allocator: mem.Allocator,
+) -> []f64 {
+	return project_constraints(weights, constraints, allocator)
 }
