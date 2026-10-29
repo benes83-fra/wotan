@@ -28,11 +28,17 @@ RotationMethod :: enum {
 // ============================================================================
 // Factor Analysis via Principal Axis Method
 // ============================================================================
+// Principal axis factoring of the correlation matrix (psych::fa(fm = "pa")):
+// start from the squared multiple correlations 1 - 1/(R⁻¹)_ii, replace the
+// diagonal of R by the communalities, take the top n_factors eigenpairs
+// (loadings = eigenvector·sqrt(eigenvalue)) and iterate until the communalities
+// change by less than tol. Communalities are clamped to [0, 1] (Heywood cases).
+// loadings[f][v]; eigenvalues are the sums of squared loadings per factor
 factor_analysis :: proc(
 	data: [][]f64,
 	n_factors: int,
-	max_iter: int = 50,
-	tol: f64 = 1e-6,
+	max_iter: int = 1000,
+	tol: f64 = 1e-9,
 	allocator: mem.Allocator = context.allocator,
 ) -> FactorAnalysisResult {
 	n_factors := n_factors
@@ -62,16 +68,30 @@ factor_analysis :: proc(
 	corr := _matrix_to_slice(&corr_mat, allocator)
 	defer _destroy_matrix(corr, allocator)
 
-	// Step 2: Initial communalities
-	pca := ana.pca_from_cov(corr, allocator)
-	defer _destroy_pca_result(pca, allocator)
-
+	// Step 2: Initial communalities: squared multiple correlations
 	communalities := make([]f64, n_vars, allocator)
-	for i in 0 ..< n_vars {
-		if i < len(pca.eigenvalues) {
-			communalities[i] = min(0.99, pca.eigenvalues[0] / f64(n_vars))
+	{
+		R := l.matrix_new(f64, n_vars, n_vars, context.temp_allocator)
+		defer l.matrix_free(&R)
+		copy(R.data, corr_mat.data)
+		if l.cholesky_try(&R) {
+			e := make([]f64, n_vars, context.temp_allocator)
+			defer delete(e, context.temp_allocator)
+			for i in 0 ..< n_vars {
+				// (R⁻¹)_ii = ‖L⁻¹ e_i‖²
+				for k in 0 ..< n_vars {e[k] = 0}
+				e[i] = 1
+				z := l.forward_substitute_simd(&R, e, context.temp_allocator)
+				communalities[i] = math.clamp(1.0 - 1.0 / l.dot_simd(z, z), 0.0, 1.0)
+				delete(z, context.temp_allocator)
+			}
 		} else {
-			communalities[i] = 0.5
+			// singular R: fall back to the largest absolute correlation
+			for i in 0 ..< n_vars {
+				for j in 0 ..< n_vars {
+					if i != j {communalities[i] = max(communalities[i], math.abs(corr[i][j]))}
+				}
+			}
 		}
 	}
 
@@ -151,17 +171,34 @@ factor_analysis :: proc(
 // ============================================================================
 // Varimax Rotation (SIMD OPTIMIZED)
 // ============================================================================
+// Kaiser's varimax by pairwise planar rotations: each pair of factors is turned
+// by the angle that maximises the varimax criterion for that pair, sweeping
+// until the rotations fall below tol. With normalize (Kaiser normalisation, the
+// default of R's varimax) each variable's loadings are scaled to unit length
+// during the rotation. Reaches the same maximum as R's SVD algorithm
 varimax_rotation :: proc(
 	loadings: [][]f64,
 	max_iter: int = 100,
 	tol: f64 = 1e-6,
 	allocator: mem.Allocator = context.allocator,
+	normalize: bool = true,
 ) -> [][]f64 {
 	n_factors := len(loadings)
 	if n_factors < 2 {return _copy_matrix(loadings, allocator)}
 	n_vars := len(loadings[0])
 
 	L := _copy_matrix(loadings, allocator)
+	row_norm := make([]f64, n_vars, context.temp_allocator)
+	defer delete(row_norm, context.temp_allocator)
+	for r in 0 ..< n_vars {
+		row_norm[r] = 1.0
+		if normalize {
+			ss := 0.0
+			for f in 0 ..< n_factors {ss += L[f][r] * L[f][r]}
+			if ss > 0 {row_norm[r] = math.sqrt(ss)}
+			for f in 0 ..< n_factors {L[f][r] /= row_norm[r]}
+		}
+	}
 
 	u := make([]f64, n_vars, allocator)
 	v := make([]f64, n_vars, allocator)
@@ -210,7 +247,8 @@ varimax_rotation :: proc(
 				cos_phi := math.cos(phi)
 				sin_phi := math.sin(phi)
 
-				l.rotate_pair_simd(cos_phi, sin_phi, Li, Lj, n_vars)
+				// Li' = c Li + s Lj, Lj' = -s Li + c Lj (rotate_pair_simd turns by -s)
+				l.rotate_pair_simd(cos_phi, -sin_phi, Li, Lj, n_vars)
 
 				delta += math.abs(sin_phi) + math.abs(1.0 - cos_phi)
 			}
@@ -219,12 +257,21 @@ varimax_rotation :: proc(
 		if delta < tol {break}
 	}
 
+	if normalize {
+		for f in 0 ..< n_factors {
+			for r in 0 ..< n_vars {L[f][r] *= row_norm[r]}
+		}
+	}
 	return L
 }
 
 // ============================================================================
 // Factor Scoring (SIMD Optimized)
 // ============================================================================
+// Regression (Thurstone) factor scores F = Z R⁻¹ Λ, with Z the data standardised
+// by the sample (n - 1) standard deviations and R their correlation matrix (the
+// default of psych::factor.scores and factor_analyzer). Also valid for rotated
+// loadings (put them in fa.loadings). scores[obs][f]
 compute_factor_scores :: proc(
 	data: [][]f64,
 	fa: ^FactorAnalysisResult,
@@ -238,24 +285,51 @@ compute_factor_scores :: proc(
 	std_data := _standardize_data(data, allocator)
 	defer _destroy_matrix(std_data, allocator)
 
+	// R = ZᵀZ / (n - 1), factored once; W = R⁻¹ Λ one factor at a time
+	R := l.matrix_new(f64, n_vars, n_vars, context.temp_allocator)
+	defer l.matrix_free(&R)
+	for row in std_data {
+		for i in 0 ..< n_vars {
+			for j in 0 ..= i {R.data[i * n_vars + j] += row[i] * row[j]}
+		}
+	}
+	for i in 0 ..< n_vars {
+		for j in 0 ..= i {
+			v := R.data[i * n_vars + j] / f64(n_obs - 1)
+			R.data[i * n_vars + j] = v
+			R.data[j * n_vars + i] = v
+		}
+	}
+	if !l.cholesky_try(&R) {
+		panic("compute_factor_scores: correlation matrix is singular")
+	}
+	W := make([][]f64, n_factors, context.temp_allocator)
+	defer {
+		for col in W {delete(col, context.temp_allocator)}
+		delete(W, context.temp_allocator)
+	}
+	for f in 0 ..< n_factors {
+		z := l.forward_substitute_simd(&R, fa.loadings[f], context.temp_allocator)
+		W[f] = l.backward_substitute_simd(&R, z, context.temp_allocator)
+		delete(z, context.temp_allocator)
+	}
+
 	scores := make([][]f64, n_obs, allocator)
 	for obs in 0 ..< n_obs {
 		scores[obs] = make([]f64, n_factors, allocator)
 		for f in 0 ..< n_factors {
-			sum := l.dot_simd(std_data[obs], fa.loadings[f])
-			var_sum := l.dot_simd(fa.loadings[f], fa.loadings[f])
-			if var_sum > 1e-10 {
-				scores[obs][f] = sum / var_sum
-			}
+			scores[obs][f] = l.dot_simd(std_data[obs], W[f])
 		}
 	}
-
 	return scores
 }
 
 // ============================================================================
 // Market Factor Extraction (SIMD Optimized)
 // ============================================================================
+// First principal component of the correlation matrix: scores of the
+// standardised returns on it, signed so that it loads positively on the average
+// asset, and the fraction of the total variance it explains
 extract_market_factor :: proc(
 	returns_data: [][]f64,
 	allocator: mem.Allocator = context.allocator,
@@ -263,6 +337,7 @@ extract_market_factor :: proc(
 	[]f64,
 	f64,
 ) {
+	if len(returns_data) == 0 || len(returns_data[0]) == 0 {return []f64{}, 0.0}
 	data_flat := make([]f64, len(returns_data) * len(returns_data[0]), allocator)
 	idx := 0
 	for r in 0 ..< len(returns_data) {
@@ -292,8 +367,9 @@ extract_market_factor :: proc(
 
 	market_scores := make([]f64, n_obs, allocator)
 	ev0 := pca.eigenvectors[0]
+	sign := 1.0 if math.sum(ev0) >= 0 else -1.0
 	for obs in 0 ..< n_obs {
-		market_scores[obs] = l.dot_simd(std_data[obs], ev0)
+		market_scores[obs] = sign * l.dot_simd(std_data[obs], ev0)
 	}
 
 	total_var := 0.0
@@ -316,12 +392,16 @@ RiskDecomposition :: struct {
 	factor_exposure:   [][]f64,
 }
 
+// Factor decomposition of each asset's STANDARDISED variance (principal axis on
+// the correlation matrix): factor_variance = communality, idiosyncratic_var =
+// uniqueness, total_variance = 1, factor_exposure = loadings. Multiply by an
+// asset's variance for return-variance units
 decompose_risk :: proc(
 	returns_data: [][]f64,
 	n_factors: int,
 	allocator: mem.Allocator = context.allocator,
 ) -> RiskDecomposition {
-	fa := factor_analysis(returns_data, n_factors, 50, 1e-6, allocator)
+	fa := factor_analysis(returns_data, n_factors, allocator = allocator)
 	n_assets := len(returns_data[0])
 
 	total_variance := make([]f64, n_assets, allocator)
@@ -423,7 +503,7 @@ factor_analysis_df :: proc(
 ) -> FactorAnalysisResult {
 	data := ana.extract_numeric_matrix(df, cols, allocator)
 	defer ana.destroy_matrix(data)
-	return factor_analysis(data, n_factors, 50, 1e-6, allocator)
+	return factor_analysis(data, n_factors, allocator = allocator)
 }
 
 compute_factor_scores_df :: proc(
@@ -449,6 +529,9 @@ FactorModelCovariance :: struct {
 	sample_cov:        [][]f64,
 }
 
+// Time-series factor model: per-asset OLS betas β = Σ_f⁻¹ cov(f, r), residual
+// variance var(r) - βᵀcov(f, r) with the n - 1 denominator (so the diagonal of
+// reconstructed_cov equals the sample variances), and Σ = B Σ_f Bᵀ + D
 factor_model_covariance :: proc(
 	assets_data: [][]f64,
 	factors_data: [][]f64,
