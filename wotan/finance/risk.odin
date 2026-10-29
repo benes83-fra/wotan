@@ -444,130 +444,142 @@ t_quantile :: proc(p: f64, nu: f64) -> f64 {
 }
 
 // ============================================================================
-// Value at Risk (VaR)
+// Value at Risk (VaR) and Expected Shortfall (ES)
 // ============================================================================
+// Sign conventions (historical, kept for compatibility):
+//   return level, negative = loss: var_historical, var_parametric,
+//     var_monte_carlo, value_at_risk, var_garch_single, conditional_var,
+//     expected_shortfall, cvar_garch
+//   positive loss magnitude: var_garch, cvar_garch_series,
+//     historical_var_rolling, historical_cvar_rolling, GARCH_RiskMetrics.current_*
+// With α = 1 - confidence, the empirical VaR is the inverse empirical CDF at α
+// (numpy quantile(method="inverted_cdf")): the k-th smallest return, k = ⌈αn⌉.
+// The empirical ES is the Acerbi-Tasche estimator, the mean of the worst αn
+// returns with the boundary observation weighted by the fractional part:
+// (Σ_{i≤⌊αn⌋} x_(i) + (αn - ⌊αn⌋)·x_(⌊αn⌋+1)) / (αn).
+
+// 0-based index of the inverse-ECDF α-quantile in a sorted sample of size n
+@(private = "file")
+_ecdf_index :: proc(alpha: f64, n: int) -> int {
+	// tolerance: (1 - 0.95)·100 = 5.000000000000004 must give k = 5
+	k := int(math.ceil(alpha * f64(n) - 1e-9))
+	return clamp(k - 1, 0, n - 1)
+}
+
+// Acerbi-Tasche tail mean of an ascending sample (a return level)
+@(private = "file")
+_tail_mean_sorted :: proc(sorted: []f64, alpha: f64) -> f64 {
+	n := len(sorted)
+	m := clamp(alpha * f64(n), 0.0, f64(n))
+	k := min(int(math.floor(m + 1e-9)), n)
+	frac := max(m - f64(k), 0.0)
+	if k == 0 && frac == 0.0 {return sorted[0]}
+	s := 0.0
+	for i in 0 ..< k {s += sorted[i]}
+	if k < n {s += frac * sorted[k]}
+	return s / (f64(k) + frac)
+}
+
+// Sample mean and standard deviation (n - 1)
+@(private = "file")
+_mean_std :: proc(x: []f64) -> (mean: f64, std: f64) {
+	n := len(x)
+	for v in x {mean += v}
+	mean /= f64(n)
+	ss := 0.0
+	for v in x {ss += (v - mean) * (v - mean)}
+	return mean, math.sqrt(ss / f64(n - 1))
+}
+
+// Quantile of the unit-variance error distribution of a GARCH model type
+@(private = "file")
+_std_quantile :: proc(model_type: a.GARCH_Model_Type, nu, shape, prob: f64) -> f64 {
+	if model_type == .StudentT && nu > 2.0 {
+		tp := a.GARCH_Params {
+			model_type = .StudentT,
+			nu         = nu,
+		}
+		return a.garch_std_quantile(&tp, prob)
+	} else if model_type == .GED && shape > 0.0 {
+		return ged_quantile(prob, shape)
+	}
+	return _bs_ppf(prob)
+}
+
+// ES multiplier of the unit-variance error distribution: E[-Z | Z < -z_c] > 0
+@(private = "file")
+_std_es :: proc(model_type: a.GARCH_Model_Type, nu, shape, confidence: f64) -> f64 {
+	alpha := 1.0 - confidence
+	if model_type == .StudentT && nu > 2.0 {
+		// ES of the raw t(ν), rescaled to the unit-variance errors GARCH-t uses
+		scale := math.sqrt((nu - 2.0) / nu)
+		z := _std_quantile(.StudentT, nu, 0, confidence) / scale
+		lg1, _ := math.lgamma((nu + 1.0) / 2.0)
+		lg2, _ := math.lgamma(nu / 2.0)
+		pdf := math.exp(lg1 - lg2 - 0.5 * math.ln(nu * math.PI) - 0.5 * (nu + 1.0) * math.log1p(z * z / nu))
+		return scale * (pdf / alpha) * (nu + z * z) / (nu - 1.0)
+	} else if model_type == .GED && shape > 0.0 {
+		return -ged_cvar(confidence, shape)
+	}
+	z := _bs_ppf(confidence)
+	return 0.3989422804014327 * math.exp(-0.5 * z * z) / alpha
+}
 
 var_historical :: proc(returns: []f64, confidence: f64 = 0.95) -> f64 {
 	if len(returns) == 0 {return 0.0}
-
-	sorted := make([]f64, len(returns), context.temp_allocator)
-	copy(sorted, returns)
+	sorted := slice.clone(returns, context.temp_allocator)
+	defer delete(sorted, context.temp_allocator)
 	slice.sort(sorted)
-
-	index := int((1.0 - confidence) * f64(len(sorted)))
-	if index < 0 {index = 0}
-	if index >= len(sorted) {index = len(sorted) - 1}
-
-	return sorted[index]
+	return sorted[_ecdf_index(1.0 - confidence, len(sorted))]
 }
 
+// Normal VaR: μ - z_c·s
 var_parametric :: proc(returns: []f64, confidence: f64 = 0.95) -> f64 {
-	if len(returns) == 0 {return 0.0}
-
-	n := len(returns)
-
-	// SIMD sum for mean
-	mean := l.sum_simd(returns) / f64(n)
-
-	// SIMD variance calculation
-	ones := make([]f64, n, context.temp_allocator)
-	defer delete(ones, context.temp_allocator)
-	for i in 0 ..< n {ones[i] = 1.0}
-
-	mean_vec := make([]f64, n, context.temp_allocator)
-	defer delete(mean_vec, context.temp_allocator)
-	l.vec_scale_simd(ones, mean, mean_vec)
-
-	diff := make([]f64, n, context.temp_allocator)
-	defer delete(diff, context.temp_allocator)
-	l.vec_sub_simd(returns, mean_vec, diff)
-
-	diff_sq := make([]f64, n, context.temp_allocator)
-	defer delete(diff_sq, context.temp_allocator)
-	l.vec_mul_simd(diff, diff, diff_sq)
-
-	variance := l.sum_simd(diff_sq) / f64(n - 1)
-	std_dev := math.sqrt_f64(variance)
-
-	z_score := norm_inv(confidence)
-	return mean - z_score * std_dev
+	if len(returns) < 2 {return 0.0}
+	mean, std := _mean_std(returns)
+	return mean - _bs_ppf(confidence) * std
 }
 
+// Simulated normal VaR of the `horizon`-period sum of returns
 var_monte_carlo :: proc(
 	returns: []f64,
 	confidence: f64 = 0.95,
 	n_simulations: int = 10000,
 	horizon: int = 1,
 ) -> f64 {
-	if len(returns) == 0 {return 0.0}
+	if len(returns) < 2 || n_simulations < 1 {return 0.0}
+	mean, std := _mean_std(returns)
 
-	mean := 0.0
-	for r in returns {mean += r}
-	mean /= f64(len(returns))
-
-	variance := 0.0
-	for r in returns {
-		diff := r - mean
-		variance += diff * diff
-	}
-	variance /= f64(len(returns) - 1)
-	std_dev := math.sqrt_f64(variance)
-
-	simulated_returns := make([]f64, n_simulations, context.temp_allocator)
-
+	simulated := make([]f64, n_simulations, context.temp_allocator)
+	defer delete(simulated, context.temp_allocator)
 	for sim in 0 ..< n_simulations {
-		total_return := 0.0
-		for day in 0 ..< horizon {
-			daily_return := mean + std_dev * rand.float64_normal(0.0, 1.0)
-			total_return += daily_return
-		}
-		simulated_returns[sim] = total_return
+		total := 0.0
+		for _ in 0 ..< horizon {total += mean + std * rand.float64_normal(0.0, 1.0)}
+		simulated[sim] = total
 	}
-
-	slice.sort(simulated_returns)
-
-	index := int((1.0 - confidence) * f64(n_simulations))
-	if index < 0 {index = 0}
-	if index >= n_simulations {index = n_simulations - 1}
-
-	return simulated_returns[index]
+	slice.sort(simulated)
+	return simulated[_ecdf_index(1.0 - confidence, n_simulations)]
 }
 
-
-// Returns negative value (loss is positive when negated)
+// VaR series from GARCH conditional variances: z_c·σ_t, a positive loss
+// magnitude (mean ≈ 0), z_c from the model's unit-variance error distribution
 var_garch :: proc(
 	cond_var: []f64,
 	confidence: f64 = 0.95,
 	model_type: a.GARCH_Model_Type = .GARCH,
 	nu: f64 = 0.0,
 	shape: f64 = 0.0,
+	allocator: mem.Allocator = context.allocator,
 ) -> []f64 {
-	n := len(cond_var)
-	var_series := make([]f64, n, context.allocator)
-
-	z_score: f64
-	if model_type == .StudentT && nu > 2.0 {
-		// GARCH-t errors have unit variance: quantile of t(ν)·sqrt((ν-2)/ν)
-		tp := a.GARCH_Params{model_type = .StudentT, nu = nu}
-		z_score = a.garch_std_quantile(&tp, confidence)
-	} else if model_type == .GED && shape > 0.0 {
-		z_score = ged_quantile(confidence, shape)
-	} else {
-		z_score = norm_inv(confidence)
-	}
-
-	for i in 0 ..< n {
-		std := math.sqrt_f64(cond_var[i])
-		var_series[i] = z_score * std // Positive value representing loss magnitude
-	}
-
+	var_series := make([]f64, len(cond_var), allocator)
+	z := _std_quantile(model_type, nu, shape, confidence)
+	for v, i in cond_var {var_series[i] = z * math.sqrt(v)}
 	return var_series
 }
 
-// ✅ NEW: Single-point GARCH VaR
+// Normal VaR for one conditional variance (return level, negative)
 var_garch_single :: proc(cond_variance: f64, confidence: f64 = 0.95) -> f64 {
-	z_score := norm_inv(confidence)
-	return -z_score * math.sqrt_f64(cond_variance)
+	return -_bs_ppf(confidence) * math.sqrt(cond_variance)
 }
 
 value_at_risk :: proc(
@@ -585,7 +597,7 @@ value_at_risk :: proc(
 	case .MonteCarlo:
 		return var_monte_carlo(returns, confidence, n_simulations, horizon)
 	case .GARCH:
-		// For single-point GARCH, use unconditional variance
+		// Single point: zero-mean normal VaR with the unconditional variance
 		if len(returns) == 0 {return 0.0}
 		variance := 0.0
 		for r in returns {variance += r * r}
@@ -599,54 +611,32 @@ value_at_risk :: proc(
 // Conditional Value at Risk (CVaR) - Expected Shortfall
 // ============================================================================
 
+// Empirical ES (Acerbi-Tasche), a return level (negative = loss)
 conditional_var :: proc(returns: []f64, confidence: f64 = 0.95) -> f64 {
 	if len(returns) == 0 {return 0.0}
-
-	sorted := make([]f64, len(returns), context.temp_allocator)
-	copy(sorted, returns)
+	sorted := slice.clone(returns, context.temp_allocator)
+	defer delete(sorted, context.temp_allocator)
 	slice.sort(sorted)
-
-	cutoff_index := int((1.0 - confidence) * f64(len(sorted)))
-	if cutoff_index < 1 {cutoff_index = 1}
-
-	// SIMD sum of tail
-	sum := l.sum_simd(sorted[:cutoff_index])
-
-	return sum / f64(cutoff_index)
+	return _tail_mean_sorted(sorted, 1.0 - confidence)
 }
 
 expected_shortfall :: proc(returns: []f64, confidence: f64 = 0.95) -> f64 {
 	return conditional_var(returns, confidence)
 }
 
-// ✅ NEW: GARCH-based CVaR (Expected Shortfall)
-// Under normal distribution: CVaR_α = -μ + σ * φ(z_α) / (1-α)
+// Normal ES series -σ_t·φ(z_c)/(1-c) (return level, negative); see
+// cvar_garch_series for Student-t / GED errors
 cvar_garch :: proc(cond_var: []f64, confidence: f64 = 0.95) -> []f64 {
-	n := len(cond_var)
-	cvar_series := make([]f64, n, context.allocator)
-
-	z_score := norm_inv(confidence)
-	// Standard normal PDF at z_score: φ(z) = (1/√(2π)) * exp(-z²/2)
-	inv_sqrt_2pi := 0.3989422804014327
-	phi_z := inv_sqrt_2pi * math.exp_f64(-0.5 * z_score * z_score)
-	scale := phi_z / (1.0 - confidence)
-
-	for i in 0 ..< n {
-		std := math.sqrt_f64(cond_var[i])
-		cvar_series[i] = -std * scale // Negative = expected loss
-	}
-
+	cvar_series := make([]f64, len(cond_var), context.allocator)
+	mult := _std_es(.GARCH, 0, 0, confidence)
+	for v, i in cond_var {cvar_series[i] = -mult * math.sqrt(v)}
 	return cvar_series
 }
 
 // ============================================================================
-// ✅ NEW: VaR Backtesting (Kupiec POF Test)
+// VaR Backtesting (Kupiec POF Test)
 // ============================================================================
-// Backtest VaR: count breaches and compute Kupiec test statistic
-// A breach occurs when actual loss exceeds VaR
-// var_series contains POSITIVE values (magnitude of loss)
-// So we check if return < -var_series (return is more negative than the loss threshold)
-// PUBLIC API: User calls this, SIMD is automatic
+// A breach is a return below -VaR (var_series holds positive loss magnitudes)
 backtest_var :: proc(
 	returns: []f64,
 	var_series: []f64,
@@ -656,100 +646,53 @@ backtest_var :: proc(
 	if n == 0 {return VaR_BacktestResult{}}
 
 	n_breaches := 0
-	i := 0
-
-	// SIMD comparison (8 at a time)
-	if intrinsics.has_target_feature("avx") {
-		for ; i + 8 <= n; i += 8 {
-			vret := simd.f64x8 {
-				returns[i],
-				returns[i + 1],
-				returns[i + 2],
-				returns[i + 3],
-				returns[i + 4],
-				returns[i + 5],
-				returns[i + 6],
-				returns[i + 7],
-			}
-			vvar := simd.f64x8 {
-				var_series[i],
-				var_series[i + 1],
-				var_series[i + 2],
-				var_series[i + 3],
-				var_series[i + 4],
-				var_series[i + 5],
-				var_series[i + 6],
-				var_series[i + 7],
-			}
-
-			zero_vec := simd.f64x8{0, 0, 0, 0, 0, 0, 0, 0}
-			neg_var := intrinsics.simd_sub(zero_vec, vvar)
-
-			// Extract and count
-			ret_arr := transmute([8]f64)vret
-			var_arr := transmute([8]f64)neg_var
-			for j := 0; j < 8; j += 1 {
-				if ret_arr[j] < var_arr[j] {
-					n_breaches += 1
-				}
-			}
-		}
+	for i in 0 ..< n {
+		if returns[i] < -var_series[i] {n_breaches += 1}
 	}
 
-	// Scalar tail
-	for ; i < n; i += 1 {
-		if returns[i] < -var_series[i] {
-			n_breaches += 1
-		}
-	}
-
-	expected := f64(n) * (1.0 - confidence)
-	breach_rate := f64(n_breaches) / f64(n)
 	kupiec_stat := _kupiec_pof_test(n, n_breaches, 1.0 - confidence)
 	p_value := _chi_squared_pvalue_1df(kupiec_stat)
-
 	return VaR_BacktestResult {
 		n_obs = n,
 		n_breaches = n_breaches,
-		expected_breaches = expected,
-		breach_rate = breach_rate,
+		expected_breaches = f64(n) * (1.0 - confidence),
+		breach_rate = f64(n_breaches) / f64(n),
 		kupiec_stat = kupiec_stat,
 		kupiec_pvalue = p_value,
 		passes_test = p_value > 0.05,
 	}
 }
 
-// Kupiec Proportion of Failures (POF) test statistic
-// Tests H0: actual breach rate = expected breach rate
-// Statistic follows chi-squared(1) under H0
+// Kupiec proportion-of-failures likelihood ratio for k breaches in n with
+// breach probability p: LR = 2[ℓ(k/n) - ℓ(p)], ℓ(π) = k ln π + (n-k) ln(1-π),
+// χ²(1) under H0. k = 0 or k = n are the most extreme outcomes (0·ln 0 = 0),
+// not a perfect fit.
 _kupiec_pof_test :: proc(n: int, k: int, p: f64) -> f64 {
-	if k == 0 || k == n || n == 0 {
-		return 0.0
-	}
-
-	p_hat := f64(k) / f64(n)
-
-	// LR = 2 * [k * ln(p_hat/p) + (n-k) * ln((1-p_hat)/(1-p))]
-	term1 := f64(k) * math.ln_f64(p_hat / p)
-	term2 := f64(n - k) * math.ln_f64((1.0 - p_hat) / (1.0 - p))
-
-	return 2.0 * (term1 + term2)
+	if n == 0 || !(p > 0.0 && p < 1.0) {return 0.0}
+	kf, mf := f64(k), f64(n - k)
+	p_hat := kf / f64(n)
+	ll0 := kf * math.ln(p) + mf * math.log1p(-p)
+	ll1 := 0.0
+	if k > 0 {ll1 += kf * math.ln(p_hat)}
+	if k < n {ll1 += mf * math.log1p(-p_hat)}
+	return max(2.0 * (ll1 - ll0), 0.0)
 }
 
-// Chi-squared p-value for df=1
-// Uses relationship: P(χ²(1) > x) = erfc(sqrt(x/2))
+// P(χ²(1) > x) = erfc(sqrt(x/2))
 _chi_squared_pvalue_1df :: proc(x: f64) -> f64 {
-	if x <= 0.0 {
-		return 1.0
-	}
-	return math.erfc_f64(math.sqrt_f64(x / 2.0))
+	if x <= 0.0 {return 1.0}
+	return math.erfc(math.sqrt(x / 2.0))
 }
 
 // ============================================================================
-// ✅ NEW: Comprehensive GARCH Risk Analysis
+// Comprehensive GARCH Risk Analysis
 // ============================================================================
 
-// Fit GARCH and compute comprehensive risk metrics
+// Fits a GARCH model to the demeaned returns. current_vol is the one-step-ahead
+// forecast σ_{n+1|n}; current VaR / CVaR are positive loss magnitudes from the
+// model's unit-variance error distribution (mean ≈ 0); long_run_vol is the
+// per-period unconditional σ = sqrt(ω / (1 - persistence)). The backtests are
+// in sample (parameters fitted on all data), skipping the first 100 points.
 garch_risk_metrics :: proc(
 	returns: []f64,
 	model_type: a.GARCH_Model_Type = .GARCH,
@@ -760,6 +703,8 @@ garch_risk_metrics :: proc(
 ) -> GARCH_RiskMetrics {
 	metrics: GARCH_RiskMetrics
 	metrics.base = calculate_risk_metrics(returns, nil, risk_free_rate)
+	n := len(returns)
+	if n < 2 {return metrics}
 
 	residuals := a.extract_residuals(returns, allocator)
 	defer delete(residuals, allocator)
@@ -771,89 +716,38 @@ garch_risk_metrics :: proc(
 		delete(garch_result.conditional_var, allocator)
 		delete(garch_result.standardized_resid, allocator)
 	}
+	prm := &garch_result.params
 
+	metrics.garch_omega = prm.omega
+	if len(prm.alpha) > 0 {metrics.garch_alpha = prm.alpha[0]}
+	if len(prm.beta) > 0 {metrics.garch_beta = prm.beta[0]}
+	if model_type == .StudentT {metrics.garch_nu = prm.nu}
+	if model_type == .GED {metrics.garch_shape = prm.shape}
 	metrics.garch_persistence = garch_result.persistence
-
-	if model_type == .StudentT {
-		metrics.garch_nu = garch_result.params.nu
-	}
-	if model_type == .GED {
-		metrics.garch_shape = garch_result.params.shape
-	}
-
-	// ... (keep existing long-run vol calculation) ...
-
-	n := len(returns)
-	if n > 0 {
-		last_var := garch_result.conditional_var[n - 1]
-		std := math.sqrt_f64(last_var)
-
-		z_95, z_99: f64
-		if model_type == .StudentT && garch_result.params.nu > 2.0 {
-			// unit-variance t quantiles (not the raw t(ν) ones)
-			z_95 = a.garch_std_quantile(&garch_result.params, 0.95)
-			z_99 = a.garch_std_quantile(&garch_result.params, 0.99)
-		} else if model_type == .GED && garch_result.params.shape > 0.0 {
-			z_95 = ged_quantile(0.95, garch_result.params.shape)
-			z_99 = ged_quantile(0.99, garch_result.params.shape)
-		} else {
-			z_95 = norm_inv(0.95)
-			z_99 = norm_inv(0.99)
-		}
-
-		metrics.current_var_95 = z_95 * std
-		metrics.current_var_99 = z_99 * std
-
-		// CVaR calculation
-		if model_type == .StudentT && garch_result.params.nu > 2.0 {
-			// ... (keep existing Student-t CVaR) ...
-		} else if model_type == .GED && garch_result.params.shape > 0.0 {
-			// GED CVaR
-			cvar_95_std := ged_cvar(0.95, garch_result.params.shape)
-			cvar_99_std := ged_cvar(0.99, garch_result.params.shape)
-			metrics.current_cvar_95 = std * cvar_95_std
-			metrics.current_cvar_99 = std * cvar_99_std
-		} else {
-			// Normal CVaR
-			inv_sqrt_2pi := 0.3989422804014327
-			phi_95 := inv_sqrt_2pi * math.exp_f64(-0.5 * z_95 * z_95)
-			phi_99 := inv_sqrt_2pi * math.exp_f64(-0.5 * z_99 * z_99)
-			metrics.current_cvar_95 = std * phi_95 / 0.05
-			metrics.current_cvar_99 = std * phi_99 / 0.01
-		}
+	metrics.converged = garch_result.converged
+	metrics.n_iterations = garch_result.n_iterations
+	if garch_result.persistence < 1.0 && prm.omega > 0.0 {
+		metrics.long_run_vol = math.sqrt(prm.omega / (1.0 - garch_result.persistence))
+	} else {
+		metrics.long_run_vol = math.INF_F64
 	}
 
-	// Backtesting
+	fc := a.garch_forecast(&garch_result, residuals, 1, allocator)
+	metrics.current_vol = fc.std_forecast
+	metrics.current_var_95 = _std_quantile(model_type, prm.nu, prm.shape, 0.95) * fc.std_forecast
+	metrics.current_var_99 = _std_quantile(model_type, prm.nu, prm.shape, 0.99) * fc.std_forecast
+	metrics.current_cvar_95 = _std_es(model_type, prm.nu, prm.shape, 0.95) * fc.std_forecast
+	metrics.current_cvar_99 = _std_es(model_type, prm.nu, prm.shape, 0.99) * fc.std_forecast
+
 	warmup := min(100, n - 1)
-	if n > warmup {
-		returns_bt := returns[warmup:]
-
-		var_95_series := var_garch(
-			garch_result.conditional_var,
-			0.95,
-			model_type,
-			garch_result.params.nu,
-			garch_result.params.shape,
-		)
-		var_99_series := var_garch(
-			garch_result.conditional_var,
-			0.99,
-			model_type,
-			garch_result.params.nu,
-			garch_result.params.shape,
-		)
-		defer {
-			delete(var_95_series, allocator)
-			delete(var_99_series, allocator)
-		}
-
-		var_95_bt := var_95_series[warmup:]
-		var_99_bt := var_99_series[warmup:]
-
-		metrics.backtest_95 = backtest_var(returns_bt, var_95_bt, 0.95)
-		metrics.backtest_99 = backtest_var(returns_bt, var_99_bt, 0.99)
+	var_95 := var_garch(garch_result.conditional_var, 0.95, model_type, prm.nu, prm.shape, allocator)
+	var_99 := var_garch(garch_result.conditional_var, 0.99, model_type, prm.nu, prm.shape, allocator)
+	defer {
+		delete(var_95, allocator)
+		delete(var_99, allocator)
 	}
-
+	metrics.backtest_95 = backtest_var(returns[warmup:], var_95[warmup:], 0.95)
+	metrics.backtest_99 = backtest_var(returns[warmup:], var_99[warmup:], 0.99)
 	return metrics
 }
 // ============================================================================
@@ -1423,8 +1317,8 @@ returns_stationarity_test :: proc(
 // Historical Simulation (Rolling Window)
 // ============================================================================
 
-// Compute rolling historical VaR using a fixed window
-// Returns a series of VaR estimates (one per observation after warmup)
+// Rolling historical VaR as a positive loss magnitude: entry i uses the
+// `window` returns before i (returns[i-window:i]); the first `window` entries are 0
 historical_var_rolling :: proc(
 	returns: []f64,
 	confidence: f64 = 0.95,
@@ -1433,36 +1327,20 @@ historical_var_rolling :: proc(
 ) -> []f64 {
 	n := len(returns)
 	var_series := make([]f64, n, allocator)
-
-	// Fill with zeros for the warmup period
-	for i in 0 ..< min(window, n) {
-		var_series[i] = 0.0
-	}
-
-	// Compute rolling VaR
-	window_buf := make([]f64, window, context.temp_allocator)
-	defer delete(window_buf, context.temp_allocator)
-
+	if window < 1 {return var_series}
+	buf := make([]f64, window, context.temp_allocator)
+	defer delete(buf, context.temp_allocator)
+	idx := _ecdf_index(1.0 - confidence, window)
 	for i in window ..< n {
-		// Copy current window
-		copy(window_buf, returns[i - window:i])
-
-		// Sort the window
-		slice.sort(window_buf)
-
-		// VaR is the (1-confidence) quantile
-		index := int((1.0 - confidence) * f64(window))
-		if index < 0 {index = 0}
-		if index >= window {index = window - 1}
-
-		var_series[i] = -window_buf[index] // Negative = loss
+		copy(buf, returns[i - window:i])
+		slice.sort(buf)
+		var_series[i] = -buf[idx]
 	}
-
 	return var_series
 }
 
-// Compute rolling historical CVaR (Expected Shortfall)
-// Returns a series of CVaR estimates (one per observation after warmup)
+// Rolling historical ES (Acerbi-Tasche) as a positive loss magnitude, same
+// windows as historical_var_rolling
 historical_cvar_rolling :: proc(
 	returns: []f64,
 	confidence: f64 = 0.95,
@@ -1471,190 +1349,71 @@ historical_cvar_rolling :: proc(
 ) -> []f64 {
 	n := len(returns)
 	cvar_series := make([]f64, n, allocator)
-
-	// Fill with zeros for the warmup period
-	for i in 0 ..< min(window, n) {
-		cvar_series[i] = 0.0
-	}
-
-	// Compute rolling CVaR
-	window_buf := make([]f64, window, context.temp_allocator)
-	defer delete(window_buf, context.temp_allocator)
-
+	if window < 1 {return cvar_series}
+	buf := make([]f64, window, context.temp_allocator)
+	defer delete(buf, context.temp_allocator)
 	for i in window ..< n {
-		// Copy current window
-		copy(window_buf, returns[i - window:i])
-
-		// Sort the window
-		slice.sort(window_buf)
-
-		// CVaR is the average of losses beyond VaR
-		cutoff := int((1.0 - confidence) * f64(window))
-		if cutoff < 1 {cutoff = 1}
-
-		sum := 0.0
-		for j in 0 ..< cutoff {
-			sum += -window_buf[j] // Negative = loss
-		}
-
-		cvar_series[i] = sum / f64(cutoff)
+		copy(buf, returns[i - window:i])
+		slice.sort(buf)
+		cvar_series[i] = -_tail_mean_sorted(buf, 1.0 - confidence)
 	}
-
 	return cvar_series
 }
 // ============================================================================
 // GED (Generalized Error Distribution) Functions
 // ============================================================================
+// Unit-variance GED with shape p (p = 2: normal, p = 1: Laplace):
+// f(z) = p / (2·Γ(1/p)·λ) · exp(-|z/λ|^p),  λ = sqrt(Γ(1/p) / Γ(3/p))
+// (the parameterization of the GARCH-GED likelihood). With t = (|z|/λ)^p,
+// P(|Z| > |z|) = Q(1/p, t) and ∫_{|z|}^∞ x f(x) dx = λ·Γ(2/p)·Q(2/p, t) / (2Γ(1/p)),
+// Q the regularized upper incomplete gamma, so CDF and ES are closed form.
 
-// GED PDF: f(z) = p / (2 * Γ(1/p) * λ_p) * exp(-|z/λ_p|^p)
-// where λ_p = sqrt(Γ(1/p) / Γ(3/p))
-ged_pdf :: proc(z: f64, shape: f64) -> f64 {
-	if shape <= 0.0 {return 0.0}
-
-	lg1_p, _ := math.lgamma(1.0 / shape)
-	lg3_p, _ := math.lgamma(3.0 / shape)
-	lambda_p := math.exp_f64(0.5 * (lg1_p - lg3_p))
-
-	log_gamma, _ := math.lgamma(1.0 / shape)
-	u := z / lambda_p
-
-	log_pdf :=
-		math.ln_f64(shape) -
-		math.ln_f64(2.0) -
-		log_gamma -
-		math.ln_f64(lambda_p) -
-		math.pow(math.abs(u), shape)
-
-	return math.exp_f64(log_pdf)
+@(private = "file")
+_ged_lambda :: proc(shape: f64) -> f64 {
+	lg1, _ := math.lgamma(1.0 / shape)
+	lg3, _ := math.lgamma(3.0 / shape)
+	return math.exp(0.5 * (lg1 - lg3))
 }
 
-// GED CDF using numerical integration (Simpson's rule)
+ged_pdf :: proc(z: f64, shape: f64) -> f64 {
+	if shape <= 0.0 {return 0.0}
+	lambda := _ged_lambda(shape)
+	lg1, _ := math.lgamma(1.0 / shape)
+	return math.exp(
+		math.ln(shape) - math.LN2 - lg1 - math.ln(lambda) - math.pow(math.abs(z) / lambda, shape),
+	)
+}
+
 ged_cdf :: proc(z: f64, shape: f64) -> f64 {
 	if shape <= 0.0 {return 0.5}
 	if z == 0.0 {return 0.5}
-
-	abs_z := math.abs(z)
-	n := 1000
-	h := abs_z / f64(n)
-
-	// Allocate arrays for SIMD integration
-	x_vals := make([]f64, n, context.temp_allocator)
-	defer delete(x_vals, context.temp_allocator)
-	pdf_vals := make([]f64, n, context.temp_allocator)
-	defer delete(pdf_vals, context.temp_allocator)
-	weights := make([]f64, n, context.temp_allocator)
-	defer delete(weights, context.temp_allocator)
-
-	// Fill x values and weights
-	for i in 0 ..< n {
-		x_vals[i] = f64(i) * h
-		if i % 2 == 0 {
-			weights[i] = 2.0
-		} else {
-			weights[i] = 4.0
-		}
-	}
-
-	// Calculate PDF values (scalar, unavoidable)
-	for i in 0 ..< n {
-		pdf_vals[i] = ged_pdf(x_vals[i], shape)
-	}
-
-	// SIMD weighted sum
-	weighted := make([]f64, n, context.temp_allocator)
-	defer delete(weighted, context.temp_allocator)
-	l.vec_mul_simd(pdf_vals, weights, weighted)
-
-	sum := l.sum_simd(weighted)
-	sum += ged_pdf(0.0, shape) + ged_pdf(abs_z, shape)
-
-	integral := sum * h / 3.0
-
-	if z > 0.0 {
-		return 0.5 + integral
-	} else {
-		return 0.5 - integral
-	}
+	_, Q := a._gamma_inc_regularized(1.0 / shape, math.pow(math.abs(z) / _ged_lambda(shape), shape))
+	tail := 0.5 * Q // P(Z < -|z|)
+	return 1.0 - tail if z > 0.0 else tail
 }
 
-// GED Quantile (Inverse CDF) using bisection method
 ged_quantile :: proc(prob: f64, shape: f64) -> f64 {
 	if shape <= 0.0 {return 0.0}
 	if prob <= 0.0 {return -math.INF_F64}
 	if prob >= 1.0 {return math.INF_F64}
 	if prob == 0.5 {return 0.0}
-
-	// Bisection method
-	low := -10.0
-	high := 10.0
-	tol := 1e-8
-	max_iter := 100
-
-	// Expand bounds if needed
-	for i in 0 ..< 20 {
-		if ged_cdf(low, shape) > prob {
-			low *= 2.0
-		}
-		if ged_cdf(high, shape) < prob {
-			high *= 2.0
-		}
+	tp := a.GARCH_Params {
+		model_type = .GED,
+		shape      = shape,
 	}
-
-	for iter in 0 ..< max_iter {
-		mid := (low + high) / 2.0
-		cdf_mid := ged_cdf(mid, shape)
-
-		if math.abs(cdf_mid - prob) < tol {
-			return mid
-		}
-
-		if cdf_mid < prob {
-			low = mid
-		} else {
-			high = mid
-		}
-	}
-
-	return (low + high) / 2.0
+	return a.garch_std_quantile(&tp, prob)
 }
 
-// GED CVaR using numerical integration
+// Lower-tail ES E[Z | Z < z_{1-c}] of the unit-variance GED (negative)
 ged_cvar :: proc(confidence: f64, shape: f64) -> f64 {
 	if shape <= 0.0 {return 0.0}
-
-	z_alpha := ged_quantile(1.0 - confidence, shape)
-
-	low := z_alpha - 10.0
-	high := z_alpha
-
-	n := 1000
-	h := (high - low) / f64(n)
-
-	// Allocate arrays for SIMD
-	x_vals := make([]f64, n, context.temp_allocator)
-	defer delete(x_vals, context.temp_allocator)
-	pdf_vals := make([]f64, n, context.temp_allocator)
-	defer delete(pdf_vals, context.temp_allocator)
-	weighted := make([]f64, n, context.temp_allocator)
-	defer delete(weighted, context.temp_allocator)
-
-	// Fill x values
-	for i in 0 ..< n {
-		x_vals[i] = low + f64(i) * h
-	}
-
-	// Calculate PDF (scalar)
-	for i in 0 ..< n {
-		pdf_vals[i] = ged_pdf(x_vals[i], shape)
-	}
-
-	// SIMD: x * pdf(x)
-	l.vec_mul_simd(x_vals, pdf_vals, weighted)
-
-	integral := l.sum_simd(weighted) * h
-	cvar := integral / (1.0 - confidence)
-
-	return cvar
+	alpha := 1.0 - confidence
+	lambda := _ged_lambda(shape)
+	q := -ged_quantile(alpha, shape)
+	_, Q2 := a._gamma_inc_regularized(2.0 / shape, math.pow(q / lambda, shape))
+	lg1, _ := math.lgamma(1.0 / shape)
+	lg2, _ := math.lgamma(2.0 / shape)
+	return -lambda * math.exp(lg2 - lg1) * Q2 / (2.0 * alpha)
 }
 // Fit GARCH-EVT Hybrid Model
 garch_evt_fit :: proc(
@@ -1760,22 +1519,28 @@ garch_evt_fit :: proc(
 	return result
 }
 // ============================================================================
-// ✅ NEW: Expected Shortfall (CVaR) Backtesting (Acerbi-Szekely Test)
+// Expected Shortfall (CVaR) Backtesting
 // ============================================================================
 
 ES_BacktestResult :: struct {
-	n_obs:            int,
-	n_violations:     int,
-	violation_rate:   f64,
-	mean_excess_loss: f64, // Average of (Actual Loss - Predicted ES) during violations
-	z_statistic:      f64, // Acerbi-Szekely Z-score
-	p_value:          f64,
-	passes_test:      bool, // True if p-value > 0.05 (Z < 1.645)
+	n_obs:             int,
+	n_violations:      int,
+	violation_rate:    f64,
+	mean_excess_loss:  f64, // mean of (loss - predicted ES) over the VaR violations
+	z_statistic:       f64, // exceedance-residual t statistic (McNeil & Frey 2000)
+	p_value:           f64, // one-sided, H1: ES too small
+	passes_test:       bool, // p_value > 0.05
+	acerbi_szekely_z2: f64, // Acerbi & Szekely (2014) Z2; ≈ 0 under H0, 5% critical value ≈ -0.70
 }
 
-// Backtest Expected Shortfall using the Acerbi-Szekely (2008) unconditional test.
-// Tests H0: E[(L_t - ES_t) * I_t] = 0, where L_t is actual loss, ES_t is predicted ES,
-// and I_t is the VaR violation indicator.
+// Expected Shortfall backtest. Losses L_t = -r_t; var_series / es_series hold
+// positive loss magnitudes and a violation is L_t > VaR_t.
+//  - Exceedance residuals e_t = L_t - ES_t over the k violations have mean 0
+//    under a correct ES; z = ē / (s/√k) with the sample standard deviation s,
+//    one-sided normal p-value (needs k ≥ 2, else z = 0).
+//  - Z2 = 1 - Σ_t L_t·1[violation] / (T·α·ES_t), α = 1 - confidence: negative
+//    when ES is underestimated or violations are too frequent. Its critical
+//    values depend only weakly on the distribution (≈ -0.70 at 5%, ≈ -1.8 at 0.01%).
 backtest_es :: proc(
 	returns: []f64,
 	var_series: []f64,
@@ -1786,57 +1551,50 @@ backtest_es :: proc(
 	if n == 0 {
 		return ES_BacktestResult{}
 	}
+	alpha := 1.0 - confidence
 
-	n_violations := 0
-	sum_excess_loss := 0.0
-	sum_squared_excess_loss := 0.0
-
+	k := 0
+	sum_e, as_sum := 0.0, 0.0
 	for i in 0 ..< n {
-		actual_loss := -returns[i] // Loss is positive when return is negative
-
-		// Check for VaR violation
-		if actual_loss > var_series[i] {
-			n_violations += 1
-
-			// Excess loss: how much worse was the actual loss than the predicted ES?
-			excess_loss := actual_loss - es_series[i]
-			sum_excess_loss += excess_loss
-			sum_squared_excess_loss += excess_loss * excess_loss
+		loss := -returns[i]
+		if loss > var_series[i] {
+			k += 1
+			sum_e += loss - es_series[i]
+			as_sum += loss / es_series[i]
 		}
 	}
 
-	violation_rate := f64(n_violations) / f64(n)
-
-	// Acerbi-Szekely Z-statistic:
-	// Z = (1/N * sum(excess_loss)) / sqrt(1/N * sum(excess_loss^2))
-	// Which simplifies to: Z = sum(excess_loss) / sqrt(N * sum(excess_loss^2))
-	z_stat := 0.0
-	mean_excess := 0.0
-
-	if n_violations > 0 && sum_squared_excess_loss > 0.0 {
-		mean_excess = sum_excess_loss / f64(n_violations)
-		denominator := math.sqrt_f64(f64(n) * sum_squared_excess_loss)
-		if denominator > 1e-10 {
-			z_stat = sum_excess_loss / denominator
+	mean_e := sum_e / f64(k) if k > 0 else 0.0
+	z := 0.0
+	if k >= 2 {
+		ss := 0.0
+		for i in 0 ..< n {
+			loss := -returns[i]
+			if loss > var_series[i] {
+				d := loss - es_series[i] - mean_e
+				ss += d * d
+			}
+		}
+		if sd := math.sqrt(ss / f64(k - 1)); sd > 0.0 {
+			z = mean_e / (sd / math.sqrt(f64(k)))
 		}
 	}
-
-	// P-value for one-sided test (we only care if Z is significantly > 0,
-	// meaning actual losses are worse than predicted)
-	// P(Z > z) = 1 - CDF(z) = 0.5 * erfc(z / sqrt(2))
-	p_value := 0.5 * math.erfc_f64(z_stat / math.sqrt_f64(2.0))
+	p_value := 0.5 * math.erfc(z / math.SQRT_TWO)
 
 	return ES_BacktestResult {
-		n_obs            = n,
-		n_violations     = n_violations,
-		violation_rate   = violation_rate,
-		mean_excess_loss = mean_excess,
-		z_statistic      = z_stat,
-		p_value          = p_value,
-		passes_test      = p_value > 0.05, // Fail if Z > 1.645 (p < 0.05)
+		n_obs = n,
+		n_violations = k,
+		violation_rate = f64(k) / f64(n),
+		mean_excess_loss = mean_e,
+		z_statistic = z,
+		p_value = p_value,
+		passes_test = p_value > 0.05,
+		acerbi_szekely_z2 = 1.0 - as_sum / (f64(n) * alpha),
 	}
 }
-// Generate GARCH-based CVaR series
+
+// ES series σ_t·ES_c(Z) from GARCH conditional variances, a positive loss
+// magnitude, for normal, Student-t (unit variance) or GED errors
 cvar_garch_series :: proc(
 	cond_var: []f64,
 	confidence: f64 = 0.95,
@@ -1845,37 +1603,8 @@ cvar_garch_series :: proc(
 	shape: f64 = 0.0,
 	allocator: mem.Allocator = context.allocator,
 ) -> []f64 {
-	n := len(cond_var)
-	cvar_series := make([]f64, n, allocator)
-
-	// Pre-compute the standard CVaR multiplier based on the model
-	std_cvar_mult: f64
-	if model_type == .StudentT && nu > 2.0 {
-		// Student-t CVaR multiplier: ES of the raw t(ν), rescaled to the
-		// unit-variance errors GARCH-t uses (factor sqrt((ν-2)/ν))
-		scale := math.sqrt_f64((nu - 2.0) / nu)
-		tp := a.GARCH_Params{model_type = .StudentT, nu = nu}
-		z := a.garch_std_quantile(&tp, confidence) / scale
-		lg1, _ := math.lgamma((nu + 1.0) / 2.0)
-		lg2, _ := math.lgamma(nu / 2.0)
-		coef := math.exp_f64(lg1 - lg2 - 0.5 * math.ln_f64(nu * math.PI))
-		pdf := coef * math.pow(1.0 + (z * z) / nu, -(nu + 1.0) / 2.0)
-		std_cvar_mult = scale * (pdf / (1.0 - confidence)) * (nu + z * z) / (nu - 1.0)
-	} else if model_type == .GED && shape > 0.0 {
-		// GED CVaR multiplier (using existing function)
-		std_cvar_mult = -ged_cvar(confidence, shape) // ged_cvar returns negative, we want positive magnitude
-	} else {
-		// Normal CVaR multiplier
-		z := norm_inv(confidence)
-		inv_sqrt_2pi := 0.3989422804014327
-		phi := inv_sqrt_2pi * math.exp_f64(-0.5 * z * z)
-		std_cvar_mult = phi / (1.0 - confidence)
-	}
-
-	for i in 0 ..< n {
-		std := math.sqrt_f64(cond_var[i])
-		cvar_series[i] = std_cvar_mult * std // Positive value representing expected loss magnitude
-	}
-
+	cvar_series := make([]f64, len(cond_var), allocator)
+	mult := _std_es(model_type, nu, shape, confidence)
+	for v, i in cond_var {cvar_series[i] = mult * math.sqrt(v)}
 	return cvar_series
 }
