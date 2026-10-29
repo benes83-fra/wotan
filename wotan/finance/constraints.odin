@@ -508,3 +508,90 @@ enforce_constraints :: proc(
 
 	return out
 }
+
+// ============================================================================
+// Exact Euclidean projection onto the constraint set
+// ============================================================================
+// C = {Σw = 1, lo ≤ w_i ≤ hi} ∩ {Σ_{i∈g} w_i ≤ max_g for each group}, with
+// lo = 0 for no_short_selling (raised to min_weight when that is set, as
+// project_box does) and hi = max_weight when > 0. The box-and-budget part is
+// w_i = clamp(v_i - θ, lo, hi) with θ found by bisection; group limits are added
+// with Dykstra's alternating projections, so the result is the nearest feasible
+// point (unlike project_constraints, which applies the pieces one after another).
+// If the box cannot hold a budget of 1 the weights end at the nearest bound.
+@(private)
+_project_constraints_exact :: proc(v: []f64, c: PortfolioConstraints) {
+	n := len(v)
+	if n == 0 {return}
+	lo := -math.F64_MAX
+	if c.no_short_selling {lo = 0.0}
+	if c.min_weight > 0.0 {lo = math.max(lo, c.min_weight)}
+	hi := c.max_weight if c.max_weight > 0.0 else math.F64_MAX
+
+	if len(c.group_limits) == 0 {
+		_project_box_budget(v, lo, hi)
+		return
+	}
+
+	// Dykstra: halfspaces first, the box-and-budget set last, so the result
+	// satisfies the budget and bounds exactly
+	m := len(c.group_limits)
+	inc := make([]f64, (m + 1) * n, context.temp_allocator)
+	defer delete(inc, context.temp_allocator)
+	prev := make([]f64, n, context.temp_allocator)
+	defer delete(prev, context.temp_allocator)
+	for _ in 0 ..< 10_000 {
+		copy(prev, v)
+		for g, k in c.group_limits {
+			p := inc[k * n:(k + 1) * n]
+			for i in 0 ..< n {v[i] += p[i]}
+			s, cnt := 0.0, 0
+			for idx in g.asset_indices {
+				if idx >= 0 && idx < n {s += v[idx]; cnt += 1}
+			}
+			for i in 0 ..< n {p[i] = v[i]}
+			if s > g.max_weight && cnt > 0 {
+				shift := (s - g.max_weight) / f64(cnt)
+				for idx in g.asset_indices {
+					if idx >= 0 && idx < n {v[idx] -= shift}
+				}
+			}
+			for i in 0 ..< n {p[i] -= v[i]}
+		}
+		p := inc[m * n:]
+		for i in 0 ..< n {v[i] += p[i]; p[i] = v[i]}
+		_project_box_budget(v, lo, hi)
+		for i in 0 ..< n {p[i] -= v[i]}
+
+		change := 0.0
+		for i in 0 ..< n {change = math.max(change, math.abs(v[i] - prev[i]))}
+		if change < 1e-15 {break}
+	}
+}
+
+// w_i = clamp(v_i - θ, lo, hi) with Σw = 1
+@(private = "file")
+_project_box_budget :: proc(v: []f64, lo, hi: f64) {
+	n := len(v)
+	excess :: proc(v: []f64, theta, lo, hi: f64) -> f64 {
+		s := 0.0
+		for x in v {s += math.clamp(x - theta, lo, hi)}
+		return s - 1.0
+	}
+	// bracket the root of the decreasing excess(θ), starting from the unclamped θ
+	mean := 0.0
+	for x in v {mean += x}
+	a := (mean - 1.0) / f64(n)
+	b := a
+	step := 1.0
+	for excess(v, a, lo, hi) < 0 && step < 1e300 {a -= step; step *= 2}
+	step = 1.0
+	for excess(v, b, lo, hi) > 0 && step < 1e300 {b += step; step *= 2}
+	for _ in 0 ..< 200 {
+		mid := 0.5 * (a + b)
+		if mid <= a || mid >= b {break}
+		if excess(v, mid, lo, hi) > 0 {a = mid} else {b = mid}
+	}
+	theta := 0.5 * (a + b)
+	for &x in v {x = math.clamp(x - theta, lo, hi)}
+}
