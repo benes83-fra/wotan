@@ -296,7 +296,8 @@ _set_info :: proc(r: ^CopulaResult, ll: f64, k: f64) {
 
 // Maximizes f on [lo, hi]: grid scan, then Brent's method (parabolic steps with
 // golden-section fallback) on the bracket around the best grid point down to `tol`.
-@(private = "file")
+// Shared by the copula fits and gpd_fit (risk.odin).
+@(private)
 _maximize_1d :: proc(
 	f: proc(x: f64, data: rawptr) -> f64,
 	data: rawptr,

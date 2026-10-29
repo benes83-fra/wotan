@@ -5,7 +5,6 @@ import a "../analytics"
 import ml "../analytics/ML"
 import w "../core"
 import l "../linalg"
-import opt "../optimize"
 import "base:intrinsics"
 import "core:math"
 import "core:math/rand"
@@ -106,7 +105,12 @@ GARCH_EVT_Result :: struct {
 	evt_beta:      f64,
 	evt_threshold: f64,
 	n_exceedances: int,
-	// Dynamic VaR series
+	// Standardized loss quantiles and ES (VaR_t = σ_t·q - μ, ES_t = σ_t·es_q - μ)
+	q_95:          f64,
+	q_99:          f64,
+	es_q_95:       f64,
+	es_q_99:       f64,
+	// Dynamic VaR series (positive loss magnitudes)
 	var_95_series: []f64,
 	var_99_series: []f64,
 	// Backtesting results
@@ -114,91 +118,63 @@ GARCH_EVT_Result :: struct {
 	backtest_99:   VaR_BacktestResult,
 }
 
-// GPD (Generalized Pareto Distribution) PDF
-// f(y) = (1/β) * (1 + ξ*y/β)^(-1/ξ - 1) for ξ ≠ 0
-// f(y) = (1/β) * exp(-y/β) for ξ = 0 (Exponential)
+// GPD (Generalized Pareto Distribution) with shape ξ and scale β, y ≥ 0
+// (0 ≤ y ≤ -β/ξ for ξ < 0):
+//   f(y) = (1/β)(1 + ξy/β)^(-1/ξ-1),  F(y) = 1 - (1 + ξy/β)^(-1/ξ),
+//   Q(p) = (β/ξ)[(1-p)^(-ξ) - 1];  ξ = 0: the exponential distribution.
+// Written with log1p / expm1, so they stay accurate as ξ → 0.
+@(private = "file")
+GPD_XI_EPS :: 1e-12
+
 gpd_pdf :: proc(y: f64, xi: f64, beta: f64) -> f64 {
-	if beta <= 0.0 {return 0.0}
-	if y < 0.0 {return 0.0}
-
-	if math.abs(xi) < 1e-10 {
-		// Exponential case (ξ → 0)
-		return (1.0 / beta) * math.exp_f64(-y / beta)
-	}
-
-	term := 1.0 + xi * y / beta
-	if term <= 0.0 {return 0.0}
-
-	return (1.0 / beta) * math.pow(term, -1.0 / xi - 1.0)
+	if beta <= 0.0 || y < 0.0 {return 0.0}
+	if math.abs(xi) < GPD_XI_EPS {return math.exp(-y / beta) / beta}
+	t := xi * y / beta
+	if t <= -1.0 {return 0.0}
+	return math.exp(-(1.0 / xi + 1.0) * math.log1p(t)) / beta
 }
 
-// GPD CDF
-// F(y) = 1 - (1 + ξ*y/β)^(-1/ξ) for ξ ≠ 0
-// F(y) = 1 - exp(-y/β) for ξ = 0
 gpd_cdf :: proc(y: f64, xi: f64, beta: f64) -> f64 {
-	if beta <= 0.0 {return 0.0}
-	if y < 0.0 {return 0.0}
-
-	if math.abs(xi) < 1e-10 {
-		// Exponential case
-		return 1.0 - math.exp_f64(-y / beta)
-	}
-
-	term := 1.0 + xi * y / beta
-	if term <= 0.0 {return 1.0}
-
-	return 1.0 - math.pow(term, -1.0 / xi)
+	if beta <= 0.0 || y <= 0.0 {return 0.0}
+	if math.abs(xi) < GPD_XI_EPS {return -_expm1(-y / beta)}
+	t := xi * y / beta
+	if t <= -1.0 {return 1.0}
+	return -_expm1(-math.log1p(t) / xi)
 }
 
-// GPD Quantile (Inverse CDF)
-// Q(p) = (β/ξ) * [(1-p)^(-ξ) - 1] for ξ ≠ 0
-// Q(p) = -β * ln(1-p) for ξ = 0
 gpd_quantile :: proc(p: f64, xi: f64, beta: f64) -> f64 {
-	if beta <= 0.0 {return 0.0}
-	if p <= 0.0 {return 0.0}
-	if p >= 1.0 {return math.INF_F64}
-
-	if math.abs(xi) < 1e-10 {
-		// Exponential case
-		return -beta * math.ln_f64(1.0 - p)
-	}
-
-	return (beta / xi) * (math.pow(1.0 - p, -xi) - 1.0)
+	if beta <= 0.0 || p <= 0.0 {return 0.0}
+	if p >= 1.0 {return -beta / xi if xi < 0.0 else math.INF_F64}
+	l := math.log1p(-p)
+	if math.abs(xi) < GPD_XI_EPS {return -beta * l}
+	return beta / xi * _expm1(-xi * l)
 }
 
-// GPD Negative Log-Likelihood for MLE
+// GPD negative log-likelihood per observation, params = {ξ, β}
 _gpd_neg_log_likelihood :: proc(params: []f64, exceedances: []f64) -> f64 {
-	xi := params[0]
-	beta := params[1]
-
+	xi, beta := params[0], params[1]
 	if beta <= 0.0 {return math.INF_F64}
-
-	n := f64(len(exceedances))
-	log_lik := 0.0
-
+	s := 0.0
 	for y in exceedances {
 		if y < 0.0 {return math.INF_F64}
-
-		if math.abs(xi) < 1e-10 {
-			// Exponential case
-			log_lik += -math.ln_f64(beta) - y / beta
+		if math.abs(xi) < GPD_XI_EPS {
+			s += y / beta
 		} else {
-			term := 1.0 + xi * y / beta
-			if term <= 0.0 {return math.INF_F64}
-			log_lik += -math.ln_f64(beta) - (1.0 / xi + 1.0) * math.ln_f64(term)
+			t := xi * y / beta
+			if t <= -1.0 {return math.INF_F64}
+			s += (1.0 / xi + 1.0) * math.log1p(t)
 		}
 	}
-
-	return -log_lik / n // Negative for minimization
+	return math.ln(beta) + s / f64(len(exceedances))
 }
 
-_gpd_objective :: proc(x: []f64, user_data: rawptr) -> f64 {
-	return _gpd_neg_log_likelihood(x, (^[]f64)(user_data)^)
-}
-
-// Fit GPD by maximum likelihood. beta is optimised on log scale (it spans
-// orders of magnitude with the data units); `converged` reports that the
-// likelihood stopped improving, not that the iteration budget ran out.
+// GPD maximum likelihood by the profile in θ = ξ/β (Grimshaw 1993): for fixed θ
+// the likelihood is maximized by ξ(θ) = mean ln(1 + θy), β = ξ/θ, leaving
+//   ℓ(θ)/n = -ln(ξ(θ)/θ) - 1 - ξ(θ)
+// to a 1-D search over θ ∈ (-1/y_max, ∞), written θ = (e^s - 1)/y_max. The
+// MLE does not exist for ξ < -1 (the likelihood is unbounded there), so the
+// search is restricted to ξ ≥ -1. `converged` is false for fewer than 10
+// exceedances, negative data, or an optimum on the boundary.
 gpd_fit :: proc(
 	exceedances: []f64,
 	allocator: mem.Allocator = context.allocator,
@@ -209,117 +185,115 @@ gpd_fit :: proc(
 ) {
 	n := len(exceedances)
 	if n < 10 {return 0.0, 0.0, false}
-
-	mean_exc := 0.0
-	for y in exceedances {mean_exc += y}
-	mean_exc /= f64(n)
-	if !(mean_exc > 0.0) {return 0.0, 0.0, false}
-
-	params := []opt.Calibration_Param {
-		{"xi", 0.1, -0.9, 2.0, .Linear},
-		{"beta", mean_exc, 1e-6 * mean_exc, 1e3 * mean_exc, .Log},
+	y_max, mean := 0.0, 0.0
+	for y in exceedances {
+		if !(y >= 0.0) {return 0.0, 0.0, false}
+		y_max = max(y_max, y)
+		mean += y
 	}
-	config := opt.Calibration_Config {
-		optimizer      = {type = .Adam, learning_rate = 0.02, beta1 = 0.9, beta2 = 0.999, epsilon = 1e-8},
-		max_iter       = 2000,
-		loss_threshold = math.inf_f64(-1),
-		fd_step        = 1e-6,
-		stall_iters    = 100,
-		stall_rel_tol  = 1e-10,
+	mean /= f64(n)
+	if !(mean > 0.0) {return 0.0, 0.0, false}
+
+	Ctx :: struct {
+		y:           []f64,
+		y_max, mean: f64,
 	}
-	data := exceedances
-	res := opt.calibrate(params, _gpd_objective, &data, config, allocator)
-	defer opt.calibration_result_free(&res)
-	return res.x[0], res.x[1], res.converged
+	params :: proc(s: f64, c: ^Ctx) -> (xi, beta: f64) {
+		theta := _expm1(s) / c.y_max
+		if theta == 0.0 {return 0.0, c.mean}
+		for y in c.y {xi += math.log1p(theta * y)}
+		xi /= f64(len(c.y))
+		return xi, xi / theta
+	}
+	profile :: proc(s: f64, data: rawptr) -> f64 {
+		xi, beta := params(s, (^Ctx)(data))
+		if xi < -1.0 || !(beta > 0.0) {return -math.INF_F64}
+		return -math.ln(beta) - 1.0 - xi
+	}
+	ctx := Ctx{exceedances, y_max, mean}
+	LO :: -30.0
+	HI :: 12.0
+	s, ll := _maximize_1d(profile, &ctx, LO, HI, 42, 1e-13)
+	xi, beta = params(s, &ctx)
+	converged = !math.is_inf(ll) && !math.is_nan(ll) && s > LO + 1e-6 && s < HI - 1e-6 && xi > -1.0 + 1e-9
+	return
 }
 
 // Left-tail EVT VaR (as a return) at confidence p from a GPD fitted to the
 // N_u exceedances below threshold u out of n observations:
 //   VaR = u - (β/ξ) [((n/N_u)(1-p))^(-ξ) - 1],  ξ → 0: u + β ln((n/N_u)(1-p))
 _evt_tail_var :: proc(threshold, xi, beta: f64, n, n_exceedances: int, p: f64) -> f64 {
-	ratio := f64(n) / f64(n_exceedances) * (1.0 - p)
-	if math.abs(xi) > 1e-10 {
-		return threshold - (beta / xi) * (math.pow(ratio, -xi) - 1.0)
-	}
-	return threshold + beta * math.ln_f64(ratio)
+	l := math.ln(f64(n) / f64(n_exceedances) * (1.0 - p))
+	if math.abs(xi) < GPD_XI_EPS {return threshold + beta * l}
+	return threshold - beta / xi * _expm1(-xi * l)
 }
 
-// Fit EVT model using Peak-over-Threshold method
+// Number of tail observations for a threshold percentile: ⌊(1 - pct)·n⌋, with a
+// tolerance so (1 - 0.9)·1000 = 99.99999999999997 counts as 100
+@(private = "file")
+_tail_size :: proc(pct: f64, n: int) -> int {
+	return clamp(int(math.floor((1.0 - pct) * f64(n) + 1e-9)), 0, n - 1)
+}
+
+// VaR and ES (returns, negative = loss) at confidence p from a fitted EVT model.
+// ES = VaR/(1-ξ) - (β + ξu)/(1-ξ); infinite (-Inf) for ξ ≥ 1. Valid in the tail,
+// (1-p)·n ≤ N_u; evt_fit uses the empirical estimates for levels inside the body.
+evt_var_es :: proc(r: ^EVT_Result, p: f64) -> (var_p: f64, es_p: f64) {
+	if r.n_exceedances == 0 {return math.nan_f64(), math.nan_f64()}
+	var_p = _evt_tail_var(r.threshold, r.xi, r.beta, r.n_total, r.n_exceedances, p)
+	if r.xi >= 1.0 {return var_p, -math.INF_F64}
+	es_p = (var_p - r.beta - r.xi * r.threshold) / (1.0 - r.xi)
+	return
+}
+
+// EVT (peaks over threshold) for the left tail: the threshold u is the
+// ⌊(1-pct)·n⌋+1-th smallest return, the exceedances u - r over the returns
+// below it are fitted with a GPD. 95% / 99% VaR and ES come from the GPD tail,
+// or empirically (inverse ECDF, Acerbi-Tasche) when the level lies more than
+// one observation inside the body.
 evt_fit :: proc(
 	returns: []f64,
-	threshold_percentile: f64 = 0.95, // Use 95th percentile as threshold
+	threshold_percentile: f64 = 0.95,
 	allocator: mem.Allocator = context.allocator,
 ) -> EVT_Result {
 	n := len(returns)
 	if n < 100 {return EVT_Result{}}
 
-	// Sort returns to find threshold (left tail)
-	sorted := make([]f64, n, context.temp_allocator)
-	copy(sorted, returns)
+	sorted := slice.clone(returns, context.temp_allocator)
+	defer delete(sorted, context.temp_allocator)
 	slice.sort(sorted)
+	threshold := sorted[_tail_size(threshold_percentile, n)]
 
-	// Threshold is the (1-threshold_percentile) quantile
-	threshold_idx := int((1.0 - threshold_percentile) * f64(n))
-	if threshold_idx < 0 {threshold_idx = 0}
-	threshold := sorted[threshold_idx]
-
-	// Extract exceedances (positive values: how much returns fall below threshold)
-	exceedances := make([dynamic]f64, 0, allocator)
+	exceedances := make([dynamic]f64, 0, n / 10 + 1, context.temp_allocator)
 	defer delete(exceedances)
-
 	for r in returns {
-		if r < threshold {
-			// Y = u - X, where X is the return and u is threshold
-			// This gives positive exceedances
-			append(&exceedances, threshold - r)
+		if r < threshold {append(&exceedances, threshold - r)}
+	}
+	n_exc := len(exceedances)
+	if n_exc < 10 {return EVT_Result{}}
+
+	xi, beta, converged := gpd_fit(exceedances[:])
+	res := EVT_Result {
+		threshold     = threshold,
+		xi            = xi,
+		beta          = beta,
+		n_exceedances = n_exc,
+		n_total       = n,
+		converged     = converged,
+	}
+	levels := [2]f64{0.95, 0.99}
+	out: [2][2]f64
+	for p, k in levels {
+		if (1.0 - p) * f64(n) > f64(n_exc + 1) {
+			out[k] = {var_historical(returns, p), conditional_var(returns, p)}
+		} else {
+			v, e := evt_var_es(&res, p)
+			out[k] = {v, e}
 		}
 	}
-
-	n_exceedances := len(exceedances)
-	if n_exceedances < 10 {
-		return EVT_Result{}
-	}
-
-	// Fit GPD to exceedances
-	xi, beta, converged := gpd_fit(exceedances[:], allocator)
-
-	// Calculate VaR using EVT formula for left tail
-	// VaR_p = u - (β/ξ) * [(n/N_u * (1-p))^(-ξ) - 1]
-	// Note the negative sign because we're modeling the left tail
-	p_95 := 0.95
-	p_99 := 0.99
-
-	var_95 := _evt_tail_var(threshold, xi, beta, n, n_exceedances, p_95)
-	var_99 := _evt_tail_var(threshold, xi, beta, n, n_exceedances, p_99)
-
-	// Calculate CVaR (Expected Shortfall)
-	// In losses L = -r (threshold u_L = -u, VaR_L = -VaR):
-	//   ES_L = VaR_L / (1-ξ) + (β - ξ u_L) / (1-ξ)
-	// so for returns: CVaR = VaR / (1-ξ) - (β + ξ u) / (1-ξ)
-	cvar_95 := 0.0
-	cvar_99 := 0.0
-
-	if xi < 1.0 { 	// Finite mean condition
-		cvar_95 = var_95 / (1.0 - xi) - (beta + xi * threshold) / (1.0 - xi)
-		cvar_99 = var_99 / (1.0 - xi) - (beta + xi * threshold) / (1.0 - xi)
-	} else {
-		// Infinite mean - use VaR as proxy with safety margin
-		cvar_95 = var_95 * 1.2
-		cvar_99 = var_99 * 1.2
-	}
-
-	return EVT_Result {
-		threshold = threshold,
-		xi = xi,
-		beta = beta,
-		n_exceedances = n_exceedances,
-		n_total = n,
-		var_95 = var_95,
-		var_99 = var_99,
-		cvar_95 = cvar_95,
-		cvar_99 = cvar_99,
-		converged = converged,
-	}
+	res.var_95, res.cvar_95 = out[0][0], out[0][1]
+	res.var_99, res.cvar_99 = out[1][0], out[1][1]
+	return res
 }
 // ============================================================================
 // Helper: Inverse Normal CDF (Quantile Function)
@@ -1415,20 +1389,25 @@ ged_cvar :: proc(confidence: f64, shape: f64) -> f64 {
 	lg2, _ := math.lgamma(2.0 / shape)
 	return -lambda * math.exp(lg2 - lg1) * Q2 / (2.0 * alpha)
 }
-// Fit GARCH-EVT Hybrid Model
+// GARCH-EVT (McNeil & Frey 2000): GARCH(1,1)-t on the demeaned returns, then a
+// GPD on the largest standardized losses -z_t beyond the ⌊(1-pct)·n⌋+1-th
+// largest. q_p is the standardized loss quantile (empirical when the level lies
+// more than one observation inside the body) and es_q_p the standardized ES;
+// VaR_t = σ_t·q_p - μ is a positive loss magnitude (the ES series is
+// σ_t·es_q_p - μ). In sample: the parameters are fitted on all returns and the
+// backtests skip the first 100 points.
 garch_evt_fit :: proc(
 	returns: []f64,
-	threshold_percentile: f64 = 0.90, // Threshold for EVT on standardized residuals
+	threshold_percentile: f64 = 0.90,
 	allocator: mem.Allocator = context.allocator,
 ) -> GARCH_EVT_Result {
 	result: GARCH_EVT_Result
-
 	n := len(returns)
 	if n < 100 {return result}
 
-	// 1. Fit GARCH(1,1) to capture volatility clustering
 	residuals := a.extract_residuals(returns, allocator)
 	defer delete(residuals, allocator)
+	mu := returns[0] - residuals[0]
 
 	garch_res := a.garch_fit(residuals, .StudentT, 1, 1, 2000, 1e-4, allocator)
 	defer {
@@ -1437,85 +1416,67 @@ garch_evt_fit :: proc(
 		delete(garch_res.conditional_var, allocator)
 		delete(garch_res.standardized_resid, allocator)
 	}
-
 	result.garch_omega = garch_res.params.omega
 	result.garch_alpha = garch_res.params.alpha[0]
 	result.garch_beta = garch_res.params.beta[0]
 
-	// 2. Extract standardized residuals and focus on the left tail (losses)
-	// We model losses as positive numbers: L_t = -Z_t
+	// Left tail of the standardized residuals as positive losses
 	losses := make([]f64, n, context.temp_allocator)
 	defer delete(losses, context.temp_allocator)
-
-	for i in 0 ..< n {
-		losses[i] = -garch_res.standardized_resid[i]
-	}
-
-	// 3. Find threshold for EVT (e.g., 90th percentile of standardized losses)
-	sorted_losses := make([]f64, n, context.temp_allocator)
-	copy(sorted_losses, losses)
-	slice.sort(sorted_losses)
-
-	threshold_idx := int(threshold_percentile * f64(n))
-	if threshold_idx >= n {threshold_idx = n - 1}
-	u := sorted_losses[threshold_idx]
+	for i in 0 ..< n {losses[i] = -garch_res.standardized_resid[i]}
+	sorted := slice.clone(losses, context.temp_allocator)
+	defer delete(sorted, context.temp_allocator)
+	slice.sort(sorted)
+	u := sorted[n - 1 - _tail_size(threshold_percentile, n)]
 	result.evt_threshold = u
 
-	// 4. Extract exceedances beyond threshold
-	exceedances := make([dynamic]f64, 0, allocator)
+	exceedances := make([dynamic]f64, 0, n / 10 + 1, context.temp_allocator)
 	defer delete(exceedances)
-
 	for l in losses {
-		if l > u {
-			append(&exceedances, l - u)
-		}
+		if l > u {append(&exceedances, l - u)}
 	}
-
 	result.n_exceedances = len(exceedances)
 	if result.n_exceedances < 10 {return result}
 
-	// 5. Fit GPD to exceedances
-	xi, beta, _ := gpd_fit(exceedances[:], allocator)
+	xi, beta, _ := gpd_fit(exceedances[:])
 	result.evt_xi = xi
 	result.evt_beta = beta
 
-	// 6. Calculate GPD quantiles for standardized residuals
-	// Formula: q_p = u + (beta/xi) * [ ((1-p) / (N_u/N))^(-xi) - 1 ]
-	N_u := f64(result.n_exceedances)
-	N := f64(n)
-	F_u := N_u / N // Empirical probability of being in the tail
-
-	calc_q :: proc(p: f64, u_val: f64, xi_val: f64, beta_val: f64, F_u_val: f64) -> f64 {
-		if math.abs(xi_val) < 1e-10 {
-			return u_val - beta_val * math.ln_f64((1.0 - p) / F_u_val)
-		}
-		return u_val + (beta_val / xi_val) * (math.pow((1.0 - p) / F_u_val, -xi_val) - 1.0)
+	// The loss tail is evt_fit's left tail of -losses: q = -VaR, es_q = -ES
+	tail := EVT_Result {
+		threshold     = -u,
+		xi            = xi,
+		beta          = beta,
+		n_exceedances = result.n_exceedances,
+		n_total       = n,
 	}
+	q, es_q: [2]f64
+	levels := [2]f64{0.95, 0.99}
+	for p, k in levels {
+		if (1.0 - p) * f64(n) > f64(result.n_exceedances + 1) {
+			neg := make([]f64, n, context.temp_allocator)
+			defer delete(neg, context.temp_allocator)
+			for l, i in losses {neg[i] = -l}
+			q[k], es_q[k] = -var_historical(neg, p), -conditional_var(neg, p)
+		} else {
+			v, e := evt_var_es(&tail, p)
+			q[k], es_q[k] = -v, -e
+		}
+	}
+	result.q_95, result.q_99 = q[0], q[1]
+	result.es_q_95, result.es_q_99 = es_q[0], es_q[1]
 
-	q_95 := calc_q(0.95, u, xi, beta, F_u)
-	q_99 := calc_q(0.99, u, xi, beta, F_u)
-
-	// 7. Generate dynamic VaR series: VaR_t = sigma_t * q_p
 	result.var_95_series = make([]f64, n, allocator)
 	result.var_99_series = make([]f64, n, allocator)
-
 	for i in 0 ..< n {
-		sigma_t := math.sqrt_f64(garch_res.conditional_var[i])
-		result.var_95_series[i] = sigma_t * q_95
-		result.var_99_series[i] = sigma_t * q_99
+		sigma := math.sqrt(garch_res.conditional_var[i])
+		result.var_95_series[i] = sigma * q[0] - mu
+		result.var_99_series[i] = sigma * q[1] - mu
 	}
 
-	// 8. Backtest the hybrid model
 	warmup := min(100, n - 1)
-	if n > warmup {
-		returns_bt := returns[warmup:]
-		var_95_bt := result.var_95_series[warmup:]
-		var_99_bt := result.var_99_series[warmup:]
-
-		result.backtest_95 = backtest_var(returns_bt, var_95_bt, 0.95)
-		result.backtest_99 = backtest_var(returns_bt, var_99_bt, 0.99)
-	}
-
+	result.backtest_95 = backtest_var(returns[warmup:], result.var_95_series[warmup:], 0.95)
+	result.backtest_99 = backtest_var(returns[warmup:], result.var_99_series[warmup:], 0.99)
 	return result
 }
 // ============================================================================

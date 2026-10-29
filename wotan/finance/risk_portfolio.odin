@@ -126,8 +126,10 @@ portfolio_cvar_evt :: proc(
 	confidence: f64 = 0.95,
 	allocator: mem.Allocator,
 ) -> f64 {
+	// Threshold at the confidence level, ES from the GPD tail at that level
 	evt_result := evt_fit(portfolio_returns, confidence, allocator)
-	return -evt_result.cvar_95 // Convert to positive loss
+	_, es := evt_var_es(&evt_result, confidence)
+	return -es // positive loss
 }
 
 // ============================================================================
