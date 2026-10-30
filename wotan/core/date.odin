@@ -452,3 +452,18 @@ now_unix :: proc() -> i64 {
 	dt := now()
 	return datetime_to_unix(dt)
 }
+
+// Day of the week (1970-01-01 was a Thursday)
+date_weekday :: proc(d: Date) -> Days {
+	n := days_from_civil(i64(d.year), i64(d.month), i64(d.day))
+	return Days((n + 3) %% 7)
+}
+
+// Last calendar day of d's month
+date_end_of_month :: proc(d: Date) -> Date {
+	return Date{d.year, d.month, get_days_in_month(d.year, Months(d.month))}
+}
+
+date_is_end_of_month :: proc(d: Date) -> bool {
+	return d.day == get_days_in_month(d.year, Months(d.month))
+}

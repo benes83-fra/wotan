@@ -1,5 +1,6 @@
 package finance
 
+import w "../core"
 import "core:math"
 import "core:mem"
 
@@ -21,7 +22,11 @@ DayCountConvention :: enum {
 	ACT_360, // Actual/360 (money market standard)
 	ACT_365, // Actual/365 Fixed (UK gilts)
 	ACT_ACT, // Actual/Actual (ISDA)
-	THIRTY_360, // 30/360 (US corporate bonds)
+	THIRTY_360, // 30/360 Bond Basis
+	ACT_ACT_ICMA, // Actual/Actual (ICMA): per coupon reference period (bonds)
+	THIRTY_360_US, // 30/360 US, with the end-of-February rules
+	THIRTY_E_360, // 30E/360 (Eurobond basis)
+	THIRTY_E_360_ISDA, // 30E/360 ISDA (German)
 }
 
 SwapLeg :: struct {
@@ -55,17 +60,13 @@ SwapValuationResult :: struct {
 	convexity:         f64,
 }
 
-SwapCashFlow :: struct {
-	payment_date: f64, // Years from today
-	amount:       f64, // Cash flow amount
-}
-
 // ============================================================================
 // DAY COUNT FRACTION CALCULATIONS
 // ============================================================================
 
 // Times are ACT/365 year fractions, so ACT/360 scales them by 365/360 and the
-// other conventions use them as they are
+// other conventions use them as they are (see year_fraction for the exact
+// conventions on dates)
 day_count_fraction :: proc(t1: f64, t2: f64, convention: DayCountConvention) -> f64 {
 	dt := t2 - t1
 	if dt <= 0.0 {
@@ -75,7 +76,7 @@ day_count_fraction :: proc(t1: f64, t2: f64, convention: DayCountConvention) -> 
 	switch convention {
 	case .ACT_360:
 		return dt * 365.0 / 360.0
-	case .ACT_365, .ACT_ACT, .THIRTY_360:
+	case .ACT_365, .ACT_ACT, .THIRTY_360, .ACT_ACT_ICMA, .THIRTY_360_US, .THIRTY_E_360, .THIRTY_E_360_ISDA:
 		return dt
 	}
 
@@ -100,78 +101,78 @@ _swap_schedule :: proc(effective, maturity, frequency: f64, allocator: mem.Alloc
 // SWAP LEG VALUATION (CURVE-AWARE)
 // ============================================================================
 
-// Fixed leg: Σ N · K · dcf_k · DF(d_k); also returns the annuity Σ dcf_k DF(d_k)
+// One accrual period on the curve's time axis, paid at its end
+@(private = "file")
+_SwapPeriod :: struct {
+	start, end: f64, // years from the curve's t = 0
+	accrual:    f64, // day-count fraction
+}
+
+@(private = "file")
+_time_periods :: proc(effective, maturity: f64, leg: SwapLeg, allocator: mem.Allocator) -> []_SwapPeriod {
+	dates := _swap_schedule(effective, maturity, leg.payment_frequency, context.temp_allocator)
+	defer delete(dates, context.temp_allocator)
+	periods := make([]_SwapPeriod, max(len(dates) - 1, 0), allocator)
+	for k in 1 ..< len(dates) {
+		periods[k - 1] = {dates[k - 1], dates[k], day_count_fraction(dates[k - 1], dates[k], leg.day_count)}
+	}
+	return periods
+}
+
+// Fixed leg: Σ N · K · dcf_k · DF(t_k); also returns the annuity Σ dcf_k DF(t_k)
 // and Σ t·dcf·DF, Σ t²·dcf·DF for the duration and convexity
 @(private = "file")
-_valuate_fixed_leg :: proc(
-	leg: SwapLeg,
-	notional: f64,
-	effective_date: f64,
-	maturity: f64,
-	curve: ^YieldCurve,
-	allocator: mem.Allocator,
-) -> (
-	pv: f64,
-	cashflows: []SwapCashFlow,
-	annuity, t1, t2: f64,
-) {
-	dates := _swap_schedule(
-		effective_date,
-		maturity,
-		leg.payment_frequency,
-		context.temp_allocator,
-	)
-	defer delete(dates, context.temp_allocator)
-	cashflows = make([]SwapCashFlow, max(len(dates) - 1, 0), allocator)
-	for k in 1 ..< len(dates) {
-		dcf := day_count_fraction(dates[k - 1], dates[k], leg.day_count)
-		df := yield_curve_discount_factor(curve, dates[k])
-		cashflows[k - 1] = SwapCashFlow {
-			payment_date = dates[k],
-			amount       = notional * leg.fixed_rate * dcf,
-		}
-		annuity += dcf * df
-		t1 += dates[k] * dcf * df
-		t2 += dates[k] * dates[k] * dcf * df
+_fixed_leg_pv :: proc(periods: []_SwapPeriod, notional, rate: f64, curve: ^YieldCurve) -> (pv, annuity, t1, t2: f64) {
+	for p in periods {
+		df := yield_curve_discount_factor(curve, p.end)
+		annuity += p.accrual * df
+		t1 += p.end * p.accrual * df
+		t2 += p.end * p.end * p.accrual * df
 	}
-	pv = notional * leg.fixed_rate * annuity
+	pv = notional * rate * annuity
 	return
 }
 
-// Floating leg (single curve): each coupon's forward makes it worth
-// N (DF(d_{k−1}) − DF(d_k)), plus the spread N · s · dcf_k · DF(d_k)
+// Floating leg (single curve): the forward (DF(s)/DF(e) − 1)/dcf makes each
+// coupon worth N (DF(s) − DF(e)), plus the spread N · spread · dcf · DF(e)
 @(private = "file")
-_valuate_floating_leg :: proc(
-	leg: SwapLeg,
-	notional: f64,
-	effective_date: f64,
-	maturity: f64,
-	curve: ^YieldCurve,
-	allocator: mem.Allocator,
-) -> (
-	pv: f64,
-	cashflows: []SwapCashFlow,
-) {
-	dates := _swap_schedule(
-		effective_date,
-		maturity,
-		leg.payment_frequency,
-		context.temp_allocator,
-	)
-	defer delete(dates, context.temp_allocator)
-	cashflows = make([]SwapCashFlow, max(len(dates) - 1, 0), allocator)
-	for k in 1 ..< len(dates) {
-		dcf := day_count_fraction(dates[k - 1], dates[k], leg.day_count)
-		df_start := yield_curve_discount_factor(curve, dates[k - 1])
-		df_end := yield_curve_discount_factor(curve, dates[k])
-		pv += notional * (df_start - df_end + leg.floating_spread * dcf * df_end)
-		fwd := (df_start / df_end - 1.0) / dcf if dcf > 1e-12 else 0.0
-		cashflows[k - 1] = SwapCashFlow {
-			payment_date = dates[k],
-			amount       = notional * (fwd + leg.floating_spread) * dcf,
-		}
+_float_leg_pv :: proc(periods: []_SwapPeriod, notional, spread: f64, curve: ^YieldCurve) -> (pv: f64) {
+	for p in periods {
+		df_end := yield_curve_discount_factor(curve, p.end)
+		pv += notional * (yield_curve_discount_factor(curve, p.start) - df_end + spread * p.accrual * df_end)
 	}
 	return
+}
+
+// Values a fixed leg against another leg (floating, or fixed at other_rate)
+@(private = "file")
+_swap_result :: proc(
+	fixed, other: []_SwapPeriod,
+	notional, fixed_rate, other_rate: f64,
+	other_is_floating, fixed_is_payer: bool,
+	curve: ^YieldCurve,
+) -> SwapValuationResult {
+	pv_fixed, annuity, t1, t2 := _fixed_leg_pv(fixed, notional, fixed_rate, curve)
+	pv_other: f64
+	if other_is_floating {
+		pv_other = _float_leg_pv(other, notional, other_rate, curve)
+	} else {
+		pv_other, _, _, _ = _fixed_leg_pv(other, notional, other_rate, curve)
+	}
+	dur, conv := 0.0, 0.0
+	if annuity > 0.0 {
+		dur = t1 / annuity
+		conv = t2 / annuity
+	}
+	return SwapValuationResult {
+		pv_fixed_leg = pv_fixed,
+		pv_floating_leg = pv_other,
+		npv = pv_other - pv_fixed if fixed_is_payer else pv_fixed - pv_other,
+		par_swap_rate = pv_other / (notional * annuity) if annuity > 0.0 && notional != 0.0 else 0.0,
+		pv01 = annuity * notional * 0.0001,
+		modified_duration = dur,
+		convexity = conv,
+	}
 }
 
 // ============================================================================
@@ -187,57 +188,145 @@ price_swap :: proc(
 ) -> SwapValuationResult {
 	fixed_is_payer := swap.payer_leg.leg_type == .Fixed
 	fixed := swap.payer_leg if fixed_is_payer else swap.receiver_leg
-	float := swap.receiver_leg if fixed_is_payer else swap.payer_leg
+	other := swap.receiver_leg if fixed_is_payer else swap.payer_leg
 
-	pv_fixed, cf_fixed, annuity, t1, t2 := _valuate_fixed_leg(
-		fixed,
+	fixed_periods := _time_periods(swap.effective_date, swap.maturity, fixed, allocator)
+	defer delete(fixed_periods, allocator)
+	other_periods := _time_periods(swap.effective_date, swap.maturity, other, allocator)
+	defer delete(other_periods, allocator)
+	other_is_floating := other.leg_type == .Floating
+	return _swap_result(
+		fixed_periods,
+		other_periods,
 		swap.notional,
-		swap.effective_date,
-		swap.maturity,
+		fixed.fixed_rate,
+		other.floating_spread if other_is_floating else other.fixed_rate,
+		other_is_floating,
+		fixed_is_payer,
 		curve,
-		allocator,
 	)
-	defer delete(cf_fixed, allocator)
-	pv_float: f64
-	cf_float: []SwapCashFlow
-	if float.leg_type == .Floating {
-		pv_float, cf_float = _valuate_floating_leg(
-			float,
-			swap.notional,
-			swap.effective_date,
-			swap.maturity,
-			curve,
-			allocator,
-		)
-	} else {
-		pv_float, cf_float, _, _, _ = _valuate_fixed_leg(
-			float,
-			swap.notional,
-			swap.effective_date,
-			swap.maturity,
-			curve,
-			allocator,
-		)
-	}
-	defer delete(cf_float, allocator)
+}
 
-	npv := pv_float - pv_fixed if fixed_is_payer else pv_fixed - pv_float
-	par := pv_float / (swap.notional * annuity) if annuity > 0.0 && swap.notional != 0.0 else 0.0
-	dur, conv := 0.0, 0.0
-	if annuity > 0.0 {
-		dur = t1 / annuity
-		conv = t2 / annuity
-	}
+// ============================================================================
+// DATED SWAPS
+// ============================================================================
 
-	return SwapValuationResult {
-		pv_fixed_leg = pv_fixed,
-		pv_floating_leg = pv_float,
-		npv = npv,
-		par_swap_rate = par,
-		pv01 = annuity * swap.notional * 0.0001,
-		modified_duration = dur,
-		convexity = conv,
+// Market conventions of a vanilla fixed-float swap (the deposits of a dated
+// curve bootstrap use the floating leg's), e.g. EUR: TARGET, 2 days, fixed 1Y
+// 30/360 modified following, float 6M ACT/360 modified following
+SwapConventions :: struct {
+	calendar:         Calendar,
+	settlement_days:  int,
+	fixed_tenor:      Period,
+	fixed_convention: BusinessDayConvention,
+	fixed_day_count:  DayCountConvention,
+	float_tenor:      Period,
+	float_convention: BusinessDayConvention,
+	float_day_count:  DayCountConvention,
+	end_of_month:     bool,
+}
+
+// Swap on real dates. Coupons are paid on the (adjusted) accrual end dates; the
+// floating coupons are projected over their accrual periods on the same curve
+// (no fixing lag); times are ACT/365F from the curve's reference_date.
+DatedSwap :: struct {
+	notional:        f64,
+	direction:       SwapDirection, // Payer = pay fixed
+	fixed_rate:      f64,
+	fixed_schedule:  Schedule,
+	fixed_day_count: DayCountConvention,
+	float_spread:    f64,
+	float_schedule:  Schedule,
+	float_day_count: DayCountConvention,
+}
+
+// Spot date: settlement_days business days after the trade date (moved to a
+// business day first)
+swap_spot_date :: proc(conv: SwapConventions, trade_date: w.Date) -> w.Date {
+	return calendar_advance(conv.calendar, calendar_adjust(conv.calendar, trade_date), conv.settlement_days, .Days)
+}
+
+// Maturity of a swap starting on `start`: start + tenor, unadjusted (the
+// schedules adjust it), or the end-of-month advance under the end-of-month rule
+swap_maturity_date :: proc(conv: SwapConventions, start: w.Date, tenor: Period) -> w.Date {
+	if conv.end_of_month {
+		return calendar_advance_period(conv.calendar, start, tenor, .ModifiedFollowing, true)
 	}
+	return date_add_period(start, tenor)
+}
+
+// Swap from `start` (usually swap_spot_date) for `tenor` under the conventions;
+// free with free_dated_swap
+make_dated_swap :: proc(
+	conv: SwapConventions,
+	start: w.Date,
+	tenor: Period,
+	fixed_rate: f64,
+	notional: f64 = 1.0,
+	direction: SwapDirection = .Payer,
+	float_spread: f64 = 0.0,
+	allocator := context.allocator,
+) -> DatedSwap {
+	end := swap_maturity_date(conv, start, tenor)
+	fixed := make_schedule(
+		start,
+		end,
+		conv.fixed_tenor,
+		conv.calendar,
+		conv.fixed_convention,
+		conv.fixed_convention,
+		end_of_month = conv.end_of_month,
+		allocator = allocator,
+	)
+	float := make_schedule(
+		start,
+		end,
+		conv.float_tenor,
+		conv.calendar,
+		conv.float_convention,
+		conv.float_convention,
+		end_of_month = conv.end_of_month,
+		allocator = allocator,
+	)
+	return DatedSwap {
+		notional = notional,
+		direction = direction,
+		fixed_rate = fixed_rate,
+		fixed_schedule = fixed,
+		fixed_day_count = conv.fixed_day_count,
+		float_spread = float_spread,
+		float_schedule = float,
+		float_day_count = conv.float_day_count,
+	}
+}
+
+free_dated_swap :: proc(swap: ^DatedSwap, allocator := context.allocator) {
+	free_schedule(&swap.fixed_schedule, allocator)
+	free_schedule(&swap.float_schedule, allocator)
+}
+
+@(private = "file")
+_dated_periods :: proc(s: Schedule, dc: DayCountConvention, reference: w.Date, allocator: mem.Allocator) -> []_SwapPeriod {
+	periods := make([]_SwapPeriod, max(len(s.dates) - 1, 0), allocator)
+	for k in 0 ..< len(periods) {
+		rs, re := schedule_reference_period(s, k)
+		periods[k] = {
+			date_to_time(reference, s.dates[k]),
+			date_to_time(reference, s.dates[k + 1]),
+			year_fraction(dc, s.dates[k], s.dates[k + 1], rs, re, s.dates[len(s.dates) - 1]),
+		}
+	}
+	return periods
+}
+
+// Leg values, NPV for the direction, par rate, PV01 and fixed-leg duration /
+// convexity as price_swap, on a curve with a reference_date
+price_dated_swap :: proc(swap: DatedSwap, curve: ^YieldCurve, allocator := context.allocator) -> SwapValuationResult {
+	fixed := _dated_periods(swap.fixed_schedule, swap.fixed_day_count, curve.reference_date, allocator)
+	defer delete(fixed, allocator)
+	float := _dated_periods(swap.float_schedule, swap.float_day_count, curve.reference_date, allocator)
+	defer delete(float, allocator)
+	return _swap_result(fixed, float, swap.notional, swap.fixed_rate, swap.float_spread, true, swap.direction == .Payer, curve)
 }
 
 // ============================================================================

@@ -419,6 +419,10 @@ main :: proc() {
 	free_all(context.temp_allocator)
 	test.monte_carlo_reference_test(context.temp_allocator)
 	free_all(context.temp_allocator)
+	test.dates_reference_test(context.temp_allocator)
+	free_all(context.temp_allocator)
+	test.dated_instruments_reference_test(context.temp_allocator)
+	free_all(context.temp_allocator)
 	//auto_arima_stationarity_test(context.temp_allocator)
 	//mc_arima_pdq_test(context.temp_allocator)
 	// sarima_mc_test(
