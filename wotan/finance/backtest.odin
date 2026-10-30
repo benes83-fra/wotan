@@ -1,11 +1,9 @@
 // wotan/finance/backtest.odin
 package finance
 
-import ana "../analytics"
 import w "../core"
 import l "../linalg"
 import p "../plot"
-import "core:fmt"
 import "core:math"
 import "core:mem"
 
@@ -62,15 +60,19 @@ FilledOrder :: struct {
 // Position Tracking
 // ============================================================================
 
+// quantity is signed (< 0 = short); avg_price is the average entry price of the
+// open quantity. A round trip runs from flat back to flat (a fill that flips
+// the position closes one trip and opens the next).
 Position :: struct {
 	symbol:         string,
 	quantity:       f64,
 	avg_price:      f64,
 	unrealized_pnl: f64,
-	realized_pnl:   f64,
+	realized_pnl:   f64, // price P&L of closed quantity, before commissions
 	round_trips:    int,
-	winning_trades: int,
-	is_short:       bool, // ← ADD THIS
+	winning_trades: int, // round trips with positive P&L net of commissions
+	is_short:       bool,
+	trade_pnl:      f64, // P&L of the open round trip so far, net of its commissions
 }
 
 // ============================================================================
@@ -83,6 +85,7 @@ Portfolio :: struct {
 	equity_curve: [dynamic]f64,
 	trades:       [dynamic]FilledOrder,
 	current_bar:  int,
+	trade_pnls:   [dynamic]f64, // net P&L of each closed round trip
 }
 
 portfolio_init :: proc(capital: f64, allocator: mem.Allocator) -> Portfolio {
@@ -92,19 +95,24 @@ portfolio_init :: proc(capital: f64, allocator: mem.Allocator) -> Portfolio {
 		equity_curve = make([dynamic]f64, 0, allocator),
 		trades = make([dynamic]FilledOrder, 0, allocator),
 		current_bar = 0,
+		trade_pnls = make([dynamic]f64, 0, allocator),
 	}
 }
 
+@(private = "file")
+_portfolio_destroy :: proc(p: ^Portfolio) {
+	delete(p.positions)
+	delete(p.equity_curve)
+	delete(p.trades)
+	delete(p.trade_pnls)
+}
+
+// Cash plus signed position values (positions without a price count as 0)
 portfolio_total_value :: proc(p: ^Portfolio, prices: map[string]f64) -> f64 {
 	total := p.cash
 	for symbol, pos in p.positions {
 		if price, ok := prices[symbol]; ok {
-			if pos.is_short {
-				// Short position: profit when price drops
-				total += pos.quantity * price // quantity is negative
-			} else {
-				total += pos.quantity * price
-			}
+			total += pos.quantity * price
 		}
 	}
 	return total
@@ -114,12 +122,9 @@ portfolio_update :: proc(p: ^Portfolio, prices: map[string]f64) {
 	for symbol, &pos in p.positions {
 		if price, ok := prices[symbol]; ok {
 			pos.unrealized_pnl = (price - pos.avg_price) * pos.quantity
-			p.positions[symbol] = pos
 		}
 	}
-
-	equity := portfolio_total_value(p, prices)
-	append(&p.equity_curve, equity)
+	append(&p.equity_curve, portfolio_total_value(p, prices))
 }
 
 // ============================================================================
@@ -131,6 +136,7 @@ StrategyContext :: struct {
 	data:        ^w.DataFrame,
 	current_bar: int,
 	symbols:     []string,
+	config:      BacktestConfig, // commission and slippage applied to fills (set by the runners)
 }
 
 context_get_price :: proc(ctx: ^StrategyContext, symbol: string) -> f64 {
@@ -151,112 +157,70 @@ context_get_prices :: proc(
 	return prices
 }
 
+// Fills a market order at the current bar's price moved against the trader by
+// config.slippage_rate, charging config.commission_rate on the fill notional.
+// Buys reduce or cover a short before going long; sells reduce a long before
+// going short. Orders with a non-positive quantity or price are ignored.
 context_submit_order :: proc(ctx: ^StrategyContext, order: Order) {
-	if order.order_type == .Market {
-		price := context_get_price(ctx, order.symbol)
-
-		// Apply slippage
-		if order.side == .Buy {
-			price *= 1.0005
-		} else {
-			price *= 0.9995
-		}
-
-		notional := order.quantity * price
-		commission := notional * 0.001
-
-		// Check if this is a short sell (selling without existing long position)
-		is_short_sell := false
-		if order.side == .Sell {
-			if pos, ok := ctx.portfolio^.positions[order.symbol]; ok {
-				if pos.quantity < 0.0001 {
-					is_short_sell = true
-				}
-			} else {
-				is_short_sell = true
-			}
-		}
-
-		if is_short_sell {
-			// Open short position
-			ctx.portfolio^.cash += (notional - commission) // Receive cash from short sale
-			ctx.portfolio^.positions[order.symbol] = Position {
-				symbol    = order.symbol,
-				quantity  = -order.quantity, // Negative quantity = short
-				avg_price = price,
-				is_short  = true,
-			}
-		} else if order.side == .Buy {
-			// Regular buy or cover short
-			if pos, ok := ctx.portfolio^.positions[order.symbol]; ok {
-				if pos.is_short && pos.quantity < 0 {
-					// Covering short position
-					cover_qty := min(order.quantity, -pos.quantity)
-					realized := (pos.avg_price - price) * cover_qty
-					pos.realized_pnl += realized
-					pos.quantity += cover_qty
-
-					if pos.quantity >= -0.0001 {
-						pos.quantity = 0.0
-						pos.round_trips += 1
-						if realized > 0 {
-							pos.winning_trades += 1
-						}
-					}
-					ctx.portfolio^.cash -= (notional + commission)
-					ctx.portfolio^.positions[order.symbol] = pos
-				} else {
-					// Adding to long position
-					ctx.portfolio^.cash -= (notional + commission)
-					total_qty := pos.quantity + order.quantity
-					avg_price :=
-						(pos.avg_price * pos.quantity + price * order.quantity) / total_qty
-					pos.quantity = total_qty
-					pos.avg_price = avg_price
-					ctx.portfolio^.positions[order.symbol] = pos
-				}
-			} else {
-				// New long position
-				ctx.portfolio^.cash -= (notional + commission)
-				ctx.portfolio^.positions[order.symbol] = Position {
-					symbol    = order.symbol,
-					quantity  = order.quantity,
-					avg_price = price,
-					is_short  = false,
-				}
-			}
-		} else {
-			// Regular sell (close long position)
-			ctx.portfolio^.cash += (notional - commission)
-			if pos, ok := ctx.portfolio^.positions[order.symbol]; ok {
-				realized := (price - pos.avg_price) * order.quantity
-				pos.realized_pnl += realized
-				pos.quantity -= order.quantity
-
-				if pos.quantity <= 0.0001 {
-					pos.quantity = 0.0
-					pos.round_trips += 1
-					if realized > 0 {
-						pos.winning_trades += 1
-					}
-					ctx.portfolio^.positions[order.symbol] = pos
-				} else {
-					ctx.portfolio^.positions[order.symbol] = pos
-				}
-			}
-		}
-
-		// Record trade
-		append(
-			&ctx.portfolio^.trades,
-			FilledOrder {
-				order = order,
-				fill_price = price,
-				fill_time = ctx.current_bar,
-				commission = commission,
-			},
-		)
+	if order.order_type != .Market {return}
+	price := context_get_price(ctx, order.symbol)
+	if !(order.quantity > 0.0) || !(price > 0.0) || math.is_inf(price) || math.is_inf(order.quantity) {
+		return
 	}
+
+	slip := ctx.config.slippage_rate
+	price *= (1.0 + slip) if order.side == .Buy else (1.0 - slip)
+	commission := order.quantity * price * ctx.config.commission_rate
+	q := order.quantity if order.side == .Buy else -order.quantity
+
+	pf := ctx.portfolio
+	pf.cash -= q * price + commission
+
+	pos, _ := pf.positions[order.symbol]
+	pos.symbol = order.symbol
+	Q := pos.quantity
+	eps := 1e-9 * max(abs(Q), abs(q))
+
+	if abs(Q) <= eps || (Q > 0.0) == (q > 0.0) {
+		// Open or add: average the entry price
+		if abs(Q) <= eps {
+			Q = 0.0
+			pos.trade_pnl = 0.0
+		}
+		pos.avg_price = (pos.avg_price * abs(Q) + price * abs(q)) / (abs(Q) + abs(q))
+		pos.quantity = Q + q
+		pos.trade_pnl -= commission
+	} else {
+		// Reduce, close, or flip
+		close_qty := min(abs(q), abs(Q))
+		sgn := 1.0 if Q > 0.0 else -1.0
+		realized := (price - pos.avg_price) * close_qty * sgn
+		close_comm := commission * close_qty / abs(q)
+		pos.realized_pnl += realized
+		pos.trade_pnl += realized - close_comm
+		pos.quantity = Q - sgn * close_qty
+
+		if abs(pos.quantity) <= eps {
+			pos.quantity = 0.0
+			pos.round_trips += 1
+			if pos.trade_pnl > 0.0 {pos.winning_trades += 1}
+			append(&pf.trade_pnls, pos.trade_pnl)
+			pos.trade_pnl = 0.0
+			if rest := abs(q) - close_qty; rest > eps {
+				// Flip: the remainder opens a new trip in the order's direction
+				pos.quantity = rest if q > 0.0 else -rest
+				pos.avg_price = price
+				pos.trade_pnl = -(commission - close_comm)
+			}
+		}
+	}
+	pos.is_short = pos.quantity < 0.0
+	pf.positions[order.symbol] = pos
+
+	append(
+		&pf.trades,
+		FilledOrder{order = order, fill_price = price, fill_time = ctx.current_bar, commission = commission},
+	)
 }
 
 StrategyFn :: proc(ctx: ^StrategyContext)
@@ -265,16 +229,21 @@ StrategyFn :: proc(ctx: ^StrategyContext)
 // Backtest Engine
 // ============================================================================
 
+// Returns are bar-to-bar returns of the equity curve, the first one measured
+// from initial_capital; 252 bars per year. win_rate and profit_factor are over
+// closed round trips, net of commissions (open positions are not counted);
+// profit_factor is +Inf when there are winning trips but no losing ones.
 BacktestResult :: struct {
 	equity_curve:  []f64,
 	trades:        []FilledOrder,
 	total_return:  f64,
-	annual_return: f64,
+	annual_return: f64, // geometric, n_bars / 252 years
 	sharpe_ratio:  f64,
-	max_drawdown:  f64,
+	max_drawdown:  f64, // ≤ 0
 	win_rate:      f64,
 	profit_factor: f64,
-	total_trades:  int,
+	total_trades:  int, // fills
+	round_trips:   int, // closed round trips (win_rate / profit_factor sample)
 }
 
 
@@ -292,55 +261,46 @@ _calculate_backtest_metrics :: proc(
 	copy(result.trades, portfolio.trades[:])
 	result.total_trades = len(portfolio.trades)
 
-	if len(portfolio.equity_curve) < 2 {
+	n := len(portfolio.equity_curve)
+	if n == 0 || !(config.initial_capital > 0.0) {
 		return result
 	}
 
-	n := len(portfolio.equity_curve)
-	returns := make([]f64, n - 1, allocator)
+	returns := make([]f64, n, allocator)
 	defer delete(returns, allocator)
-
-	for i in 0 ..< n - 1 {
-		returns[i] =
-			(portfolio.equity_curve[i + 1] - portfolio.equity_curve[i]) / portfolio.equity_curve[i]
+	prev := config.initial_capital
+	for i in 0 ..< n {
+		e := portfolio.equity_curve[i]
+		returns[i] = (e - prev) / prev
+		prev = e
 	}
 
-	result.total_return =
-		(portfolio.equity_curve[n - 1] - config.initial_capital) / config.initial_capital
-
+	result.total_return = portfolio.equity_curve[n - 1] / config.initial_capital - 1.0
 	n_years := f64(n) / 252.0
-	result.annual_return = math.pow(1.0 + result.total_return, 1.0 / n_years) - 1.0
+	result.annual_return =
+		math.pow(1.0 + result.total_return, 1.0 / n_years) - 1.0 if result.total_return > -1.0 else -1.0
 
 	result.sharpe_ratio = sharpe_ratio_from_returns(returns, config.risk_free_rate, 252.0)
 	result.max_drawdown = max_drawdown(returns)
 
-	// Calculate win rate from realized P&L
 	wins := 0
-	total_round_trips := 0
-	gross_profit := 0.0
-	gross_loss := 0.0
-
-	for symbol, pos in portfolio.positions {
-		if pos.round_trips > 0 {
-			total_round_trips += pos.round_trips
-			wins += pos.winning_trades
-
-			if pos.realized_pnl > 0 {
-				gross_profit += pos.realized_pnl
-			} else if pos.realized_pnl < 0 {
-				gross_loss += math.abs(pos.realized_pnl)
-			}
+	gross_profit, gross_loss := 0.0, 0.0
+	for pnl in portfolio.trade_pnls {
+		if pnl > 0.0 {
+			wins += 1
+			gross_profit += pnl
+		} else {
+			gross_loss -= pnl
 		}
 	}
-
-	if total_round_trips > 0 {
-		result.win_rate = f64(wins) / f64(total_round_trips)
+	result.round_trips = len(portfolio.trade_pnls)
+	if len(portfolio.trade_pnls) > 0 {
+		result.win_rate = f64(wins) / f64(len(portfolio.trade_pnls))
 	}
-
-	if gross_loss > 0 {
+	if gross_loss > 0.0 {
 		result.profit_factor = gross_profit / gross_loss
-	} else if gross_profit > 0 {
-		result.profit_factor = 100.0
+	} else if gross_profit > 0.0 {
+		result.profit_factor = math.INF_F64
 	}
 
 	return result
@@ -754,7 +714,8 @@ pairs_trading_full :: proc(
 	col2 := w.column(ctx.data, symbol2)
 
 	// Calculate spread
-	spreads := make([]f64, lookback)
+	spreads := make([]f64, lookback, context.temp_allocator)
+	defer delete(spreads, context.temp_allocator)
 	for i in 0 ..< lookback {
 		price1, _ := w.column_at_float(col1, ctx.current_bar - lookback + 1 + i)
 		price2, _ := w.column_at_float(col2, ctx.current_bar - lookback + 1 + i)
@@ -886,6 +847,7 @@ backtest_run :: proc(
 		data        = data,
 		current_bar = 0,
 		symbols     = symbols,
+		config      = config,
 	}
 
 	n_bars := data.rows
@@ -898,15 +860,11 @@ backtest_run :: proc(
 
 		portfolio_update(&portfolio, prices)
 
-		delete(prices) // ← ADD allocator parameter
+		delete(prices)
 	}
 
 	result := _calculate_backtest_metrics(&portfolio, config, allocator)
-
-	delete(portfolio.positions)
-	delete(portfolio.equity_curve)
-	delete(portfolio.trades)
-
+	_portfolio_destroy(&portfolio)
 	return result
 }
 
@@ -925,6 +883,7 @@ backtest_portfolio_run :: proc(
 		data        = data,
 		current_bar = 0,
 		symbols     = symbols,
+		config      = config,
 	}
 
 	n_bars := data.rows
@@ -938,59 +897,43 @@ backtest_portfolio_run :: proc(
 
 			total_value := portfolio_total_value(&portfolio, prices)
 
-			for sym in symbols {
-				target_w := 0.0
-				if w, ok := target_weights[sym]; ok {
-					target_w = w
-				}
+			// Sells first so the buys are funded by their proceeds; drifts below
+			// 1% of the portfolio value are not traded. Weights < 0 only sell
+			// down to flat (no shorting).
+			for pass in 0 ..< 2 {
+				for sym in symbols {
+					target_w := target_weights[sym] or_else 0.0
+					current_price := prices[sym]
+					if !(current_price > 0.0) {continue}
+					current_qty := 0.0
+					if pos, ok := portfolio.positions[sym]; ok {current_qty = pos.quantity}
 
-				current_price := prices[sym]
-				target_value := total_value * target_w
-				current_value := 0.0
+					delta_value := total_value * max(target_w, 0.0) - current_qty * current_price
+					if abs(delta_value) <= total_value * 0.01 {continue}
+					is_sell := delta_value < 0.0
+					if is_sell != (pass == 0) {continue}
 
-				if pos, ok := portfolio.positions[sym]; ok {
-					current_value = pos.quantity * current_price
-				}
-
-				delta_value := target_value - current_value
-
-				if math.abs(delta_value) > (total_value * 0.01) {
-					qty := math.abs(delta_value) / current_price
-					side := OrderSide.Buy
-
-					if delta_value < 0 {
-						side = .Sell
-						if pos, ok := portfolio.positions[sym]; ok {
-							qty = min(qty, pos.quantity)
-						}
-					}
-
-					if qty > 0.0001 {
-						order := Order {
-							symbol     = sym,
-							side       = side,
-							quantity   = qty,
-							order_type = .Market,
-						}
-						context_submit_order(&ctx, order)
+					qty := abs(delta_value) / current_price
+					if is_sell {qty = min(qty, max(current_qty, 0.0))}
+					if qty > 1e-9 {
+						context_submit_order(
+							&ctx,
+							Order{symbol = sym, side = .Sell if is_sell else .Buy, quantity = qty, order_type = .Market},
+						)
 					}
 				}
 			}
 
-			delete(target_weights) // ← ADD allocator parameter
+			delete(target_weights)
 		}
 
 		portfolio_update(&portfolio, prices)
 
-		delete(prices) // ← ADD allocator parameter
+		delete(prices)
 	}
 
 	result := _calculate_backtest_metrics(&portfolio, config, allocator)
-
-	delete(portfolio.positions)
-	delete(portfolio.equity_curve)
-	delete(portfolio.trades)
-
+	_portfolio_destroy(&portfolio)
 	return result
 }
 // ============================================================================
@@ -1090,40 +1033,37 @@ portfolio_min_variance :: proc(
 		return weights
 	}
 
-	// 1. Extract returns matrix
-	returns_data := make([][]f64, n_assets, context.temp_allocator)
-	defer {
-		for row in returns_data {
-			delete(row, context.temp_allocator)
-		}
-		delete(returns_data, context.temp_allocator)
-	}
-
+	// 1. Returns over the last `lookback` bars, ending at the current bar
+	//    (observations × assets)
+	R := make([]f64, lookback * n_assets, context.temp_allocator)
+	defer delete(R, context.temp_allocator)
 	for i in 0 ..< n_assets {
-		returns_data[i] = make([]f64, lookback - 1, context.temp_allocator)
 		col := w.column(ctx.data, ctx.symbols[i])
-
-		for j in 0 ..< lookback - 1 {
-			p1, _ := w.column_at_float(col, ctx.current_bar - lookback + j)
-			p2, _ := w.column_at_float(col, ctx.current_bar - lookback + j + 1)
-			if p1 > 0 {
-				returns_data[i][j] = (p2 - p1) / p1
-			} else {
-				returns_data[i][j] = 0.0
-			}
+		for j in 0 ..< lookback {
+			bar := ctx.current_bar - lookback + 1 + j
+			p1, _ := w.column_at_float(col, bar - 1)
+			p2, _ := w.column_at_float(col, bar)
+			R[j * n_assets + i] = (p2 - p1) / p1 if p1 > 0 else 0.0
 		}
 	}
 
-	// 2. Compute Covariance Matrix
-	cov_matrix := ana.covariance_matrix(returns_data, context.allocator)
-	defer ana.destroy_matrix(cov_matrix)
-
-	// Convert to linalg Matrix
+	// 2. Sample covariance between assets
 	cov_linalg := l.matrix_new(f64, n_assets, n_assets, context.temp_allocator)
 	defer l.matrix_free(&cov_linalg)
+	means := make([]f64, n_assets, context.temp_allocator)
+	defer delete(means, context.temp_allocator)
+	for j in 0 ..< lookback {
+		for i in 0 ..< n_assets {means[i] += R[j * n_assets + i] / f64(lookback)}
+	}
 	for i in 0 ..< n_assets {
-		for j in 0 ..< n_assets {
-			cov_linalg.data[i * n_assets + j] = cov_matrix[i][j]
+		for k in i ..< n_assets {
+			c := 0.0
+			for j in 0 ..< lookback {
+				c += (R[j * n_assets + i] - means[i]) * (R[j * n_assets + k] - means[k])
+			}
+			c /= f64(max(lookback - 1, 1))
+			cov_linalg.data[i * n_assets + k] = c
+			cov_linalg.data[k * n_assets + i] = c
 		}
 	}
 
