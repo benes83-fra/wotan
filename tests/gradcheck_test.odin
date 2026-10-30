@@ -81,70 +81,70 @@ gradcheck_test :: proc(allocator: mem.Allocator) {
 	x := gc_mk([]f64{1, 2, 3, 4}, 1, 4, true, allocator) // N=2, D=2
 	defer t.tensor_free(x)
 	gc_check("matmul flattened, fan-out (QKV pattern)", x, proc(x: ^t.Tensor) -> ^t.Tensor {
-		a := t.tensor_matmul(x, gc_W1)
-		b := t.tensor_matmul(x, gc_W2)
-		return t.tensor_sum(t.tensor_add(a, b))
-	}, allocator)
+			a := t.tensor_matmul(x, gc_W1)
+			b := t.tensor_matmul(x, gc_W2)
+			return t.tensor_sum(t.tensor_add(a, b))
+		}, allocator)
 
 	// 1b. Flattened matmul + residual add
 	gc_check("matmul flattened + residual add", x, proc(x: ^t.Tensor) -> ^t.Tensor {
-		W := gc_mk([]f64{0.1, -0.2, 0.3, 0.4}, 2, 2, false, context.allocator)
-		W.owned_by_graph = true
-		a := t.tensor_matmul(x, W)
-		return t.tensor_sum(t.tensor_mul(t.tensor_add(a, x), t.tensor_add(a, x)))
-	}, allocator)
+			W := gc_mk([]f64{0.1, -0.2, 0.3, 0.4}, 2, 2, false, context.allocator)
+			W.owned_by_graph = true
+			a := t.tensor_matmul(x, W)
+			return t.tensor_sum(t.tensor_mul(t.tensor_add(a, x), t.tensor_add(a, x)))
+		}, allocator)
 
 	// 2. KL divergence wrt log_var
 	lv := gc_mk([]f64{0.5, -0.3, 1.2}, 1, 3, true, allocator)
 	defer t.tensor_free(lv)
 	gc_check("kl_divergence d/dlog_var", lv, proc(lv: ^t.Tensor) -> ^t.Tensor {
-		mu := gc_mk([]f64{0.1, 0.2, 0.3}, 1, 3, false, context.allocator)
-		mu.owned_by_graph = true
-		return t.tensor_kl_divergence(mu, lv)
-	}, allocator)
+			mu := gc_mk([]f64{0.1, 0.2, 0.3}, 1, 3, false, context.allocator)
+			mu.owned_by_graph = true
+			return t.tensor_kl_divergence(mu, lv)
+		}, allocator)
 
 	// 3. Div with constant numerator
 	d := gc_mk([]f64{1.5, 2.0, 3.0}, 1, 3, true, allocator)
 	defer t.tensor_free(d)
 	gc_check("div(const, x)", d, proc(x: ^t.Tensor) -> ^t.Tensor {
-		one := gc_mk([]f64{1, 1, 1}, 1, 3, false, context.allocator)
-		one.owned_by_graph = true
-		return t.tensor_sum(t.tensor_div(one, x))
-	}, allocator)
+			one := gc_mk([]f64{1, 1, 1}, 1, 3, false, context.allocator)
+			one.owned_by_graph = true
+			return t.tensor_sum(t.tensor_div(one, x))
+		}, allocator)
 
 	// 4. Scale (large and small scalars)
 	s := gc_mk([]f64{1, 2, 3}, 1, 3, true, allocator)
 	defer t.tensor_free(s)
 	gc_check("scale(x, 0.33)", s, proc(x: ^t.Tensor) -> ^t.Tensor {
-		return t.tensor_sum(t.tensor_scale(x, 0.33))
-	}, allocator)
+			return t.tensor_sum(t.tensor_scale(x, 0.33))
+		}, allocator)
 	gc_check("scale(x, 1/(252*10000))", s, proc(x: ^t.Tensor) -> ^t.Tensor {
-		return t.tensor_scale(t.tensor_sum(x), 1.0 / (252.0 * 10000.0))
-	}, allocator)
+			return t.tensor_scale(t.tensor_sum(x), 1.0 / (252.0 * 10000.0))
+		}, allocator)
 
 	// 5. LeakyReLU alpha != 0.01
 	lr := gc_mk([]f64{-1, 2, -3}, 1, 3, true, allocator)
 	defer t.tensor_free(lr)
 	gc_check("leaky_relu alpha=0.2", lr, proc(x: ^t.Tensor) -> ^t.Tensor {
-		return t.tensor_sum(t.tensor_leaky_relu(x, 0.2))
-	}, allocator)
+			return t.tensor_sum(t.tensor_leaky_relu(x, 0.2))
+		}, allocator)
 
 	// 6. Sharpe loss with realistic daily returns
 	r := gc_mk([]f64{0.0012, -0.0007, 0.00031, 0.0009, -0.00045}, 1, 5, true, allocator)
 	defer t.tensor_free(r)
 	gc_check("sharpe_loss daily returns", r, proc(x: ^t.Tensor) -> ^t.Tensor {
-		return t.tensor_sharpe_loss(x, 0.0000159, context.allocator)
-	}, allocator)
+			return t.tensor_sharpe_loss(x, 0.0000159, context.allocator)
+		}, allocator)
 
 	// 7. Flatten with fan-out (flatten output + original 4D input both used)
 	f := gc_mk([]f64{1, 2, 3, 4}, 1, 4, true, allocator)
 	defer t.tensor_free(f)
 	f.shape = [4]int{1, 1, 2, 2}
 	gc_check("flatten fan-out", f, proc(x: ^t.Tensor) -> ^t.Tensor {
-		fl := t.tensor_flatten(x)
-		y := t.tensor_mul(fl, fl)
-		return t.tensor_add(t.tensor_sum(y), t.tensor_sum(t.tensor_mul(x, x)))
-	}, allocator)
+			fl := t.tensor_flatten(x)
+			y := t.tensor_mul(fl, fl)
+			return t.tensor_add(t.tensor_sum(y), t.tensor_sum(t.tensor_mul(x, x)))
+		}, allocator)
 
 	// 8. Softmax on a [2,3] batch: each row must be normalized independently
 	lg := gc_mk([]f64{1, 2, 3, 1, 1, 1}, 2, 3, false, allocator)
@@ -154,62 +154,84 @@ gradcheck_test :: proc(allocator: mem.Allocator) {
 	row0 := p.data.data[0] + p.data.data[1] + p.data.data[2]
 	row1 := p.data.data[3] + p.data.data[4] + p.data.data[5]
 	gc_total += 1
-	if abs(row0 - 1.0) < 1e-12 && abs(row1 - 1.0) < 1e-12 && abs(p.data.data[3] - 1.0 / 3.0) < 1e-12 {
+	if abs(row0 - 1.0) < 1e-12 &&
+	   abs(row1 - 1.0) < 1e-12 &&
+	   abs(p.data.data[3] - 1.0 / 3.0) < 1e-12 {
 		gc_passed += 1
-		fmt.printf("OK   %-40s rows=%.4f %.4f\n\n", "softmax [2,3] per-row normalization", row0, row1)
+		fmt.printf(
+			"OK   %-40s rows=%.4f %.4f\n\n",
+			"softmax [2,3] per-row normalization",
+			row0,
+			row1,
+		)
 	} else {
-		fmt.printf("FAIL %-40s rows=%.4f %.4f\n\n", "softmax [2,3] per-row normalization", row0, row1)
+		fmt.printf(
+			"FAIL %-40s rows=%.4f %.4f\n\n",
+			"softmax [2,3] per-row normalization",
+			row0,
+			row1,
+		)
 	}
 
 	// 8b. Softmax backward on a batch (weighted sum, otherwise the gradient is 0)
 	sm := gc_mk([]f64{0.5, -1.0, 2.0, 0.1, 0.3, -0.4}, 2, 3, true, allocator)
 	defer t.tensor_free(sm)
 	gc_check("softmax [2,3] backward", sm, proc(x: ^t.Tensor) -> ^t.Tensor {
-		return t.tensor_sum(t.tensor_mul(t.tensor_softmax(x), gc_SW))
-	}, allocator)
+			return t.tensor_sum(t.tensor_mul(t.tensor_softmax(x), gc_SW))
+		}, allocator)
 
 	// 8c. Single-row softmax (PPO policy head path)
 	sm1 := gc_mk([]f64{0.2, 1.5, -0.3, 0.9}, 1, 4, true, allocator)
 	defer t.tensor_free(sm1)
 	gc_check("softmax [1,4] backward", sm1, proc(x: ^t.Tensor) -> ^t.Tensor {
-		W := gc_mk([]f64{1.0, -2.0, 0.5, 3.0}, 1, 4, false, context.allocator)
-		W.owned_by_graph = true
-		return t.tensor_sum(t.tensor_mul(t.tensor_softmax(x), W))
-	}, allocator)
+			W := gc_mk([]f64{1.0, -2.0, 0.5, 3.0}, 1, 4, false, context.allocator)
+			W.owned_by_graph = true
+			return t.tensor_sum(t.tensor_mul(t.tensor_softmax(x), W))
+		}, allocator)
 
 	// 9. Clamp with a tiny bound (old int*1e6 encoding rounded lo=-2.5e-7 to 0).
 	// x[0] = -1e-7 is inside [lo, hi], so its gradient must be 1.
 	cl := gc_mk([]f64{-1e-7, 0.3, 2.0}, 1, 3, true, allocator)
 	defer t.tensor_free(cl)
 	gc_check("clamp(x, -2.5e-7, 1.5)", cl, proc(x: ^t.Tensor) -> ^t.Tensor {
-		return t.tensor_sum(t.tensor_clamp(x, -2.5e-7, 1.5))
-	}, allocator, 1e-9)
+			return t.tensor_sum(t.tensor_clamp(x, -2.5e-7, 1.5))
+		}, allocator, 1e-9)
 
 	// 10. Prospect theory ops with non-round parameters
 	pv := gc_mk([]f64{0.02, -0.015, 0.3, -0.4}, 1, 4, true, allocator)
 	defer t.tensor_free(pv)
 	gc_check("prospect_value(a=0.8812345)", pv, proc(x: ^t.Tensor) -> ^t.Tensor {
-		return t.tensor_sum(t.tensor_prospect_value(x, 0.8812345, 0.8712345, 2.2512345, context.allocator))
-	}, allocator)
+			return t.tensor_sum(
+				t.tensor_prospect_value(x, 0.8812345, 0.8712345, 2.2512345, context.allocator),
+			)
+		}, allocator)
 	gc_check("prospect_utility(a=0.8812345)", pv, proc(x: ^t.Tensor) -> ^t.Tensor {
-		return t.tensor_prospect_utility(x, 0.8812345, 0.8712345, 2.2512345, context.allocator)
-	}, allocator)
+			return t.tensor_prospect_utility(x, 0.8812345, 0.8712345, 2.2512345, context.allocator)
+		}, allocator)
 
 	pw := gc_mk([]f64{0.1, 0.35, 0.6, 0.9}, 1, 4, true, allocator)
 	defer t.tensor_free(pw)
 	gc_check("prob_weighting(gamma=0.6123457)", pw, proc(x: ^t.Tensor) -> ^t.Tensor {
-		return t.tensor_sum(t.tensor_prob_weighting(x, 0.6123457, context.allocator))
-	}, allocator)
+			return t.tensor_sum(t.tensor_prob_weighting(x, 0.6123457, context.allocator))
+		}, allocator)
 
 	// 11. Time-dimension z-score (eps passed through f64_metadata)
 	nt := gc_mk([]f64{0.5, -1.0, 2.0, 0.3, -0.7, 1.1, 0.0, 0.9}, 1, 8, true, allocator)
 	defer t.tensor_free(nt)
 	nt.shape = [4]int{1, 1, 4, 2} // [N, C, T, L]
 	gc_check("normalize_time [1,1,4,2]", nt, proc(x: ^t.Tensor) -> ^t.Tensor {
-		W := gc_mk([]f64{0.3, -1.2, 0.8, 2.0, 0.5, -0.7, 1.4, -0.2}, 1, 8, false, context.allocator)
-		W.owned_by_graph = true
-		return t.tensor_sum(t.tensor_mul(t.tensor_normalize_time(x, 1e-8, context.allocator), W))
-	}, allocator)
+			W := gc_mk(
+				[]f64{0.3, -1.2, 0.8, 2.0, 0.5, -0.7, 1.4, -0.2},
+				1,
+				8,
+				false,
+				context.allocator,
+			)
+			W.owned_by_graph = true
+			return t.tensor_sum(
+				t.tensor_mul(t.tensor_normalize_time(x, 1e-8, context.allocator), W),
+			)
+		}, allocator)
 
 	fmt.printf("Gradcheck summary: %d/%d passed\n", gc_passed, gc_total)
 	record_failures(gc_total - gc_passed)

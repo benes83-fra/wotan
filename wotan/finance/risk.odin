@@ -215,7 +215,8 @@ gpd_fit :: proc(
 	HI :: 12.0
 	s, ll := _maximize_1d(profile, &ctx, LO, HI, 42, 1e-13)
 	xi, beta = params(s, &ctx)
-	converged = !math.is_inf(ll) && !math.is_nan(ll) && s > LO + 1e-6 && s < HI - 1e-6 && xi > -1.0 + 1e-9
+	converged =
+		!math.is_inf(ll) && !math.is_nan(ll) && s > LO + 1e-6 && s < HI - 1e-6 && xi > -1.0 + 1e-9
 	return
 }
 
@@ -390,9 +391,9 @@ t_quantile :: proc(p: f64, nu: f64) -> f64 {
 		} else if y > 1e-300 {
 			y =
 				((1.0 / (((nu + 6.0) / (nu * y) - 0.089 * d - 0.822) * (nu + 2.0) * 3.0) +
-							0.5 / (nu + 4.0)) *
-						y -
-					1.0) *
+								0.5 / (nu + 4.0)) *
+							y -
+						1.0) *
 					(nu + 1.0) /
 					(nu + 2.0) +
 				1.0 / y
@@ -490,7 +491,9 @@ _std_es :: proc(model_type: a.GARCH_Model_Type, nu, shape, confidence: f64) -> f
 		z := _std_quantile(.StudentT, nu, 0, confidence) / scale
 		lg1, _ := math.lgamma((nu + 1.0) / 2.0)
 		lg2, _ := math.lgamma(nu / 2.0)
-		pdf := math.exp(lg1 - lg2 - 0.5 * math.ln(nu * math.PI) - 0.5 * (nu + 1.0) * math.log1p(z * z / nu))
+		pdf := math.exp(
+			lg1 - lg2 - 0.5 * math.ln(nu * math.PI) - 0.5 * (nu + 1.0) * math.log1p(z * z / nu),
+		)
 		return scale * (pdf / alpha) * (nu + z * z) / (nu - 1.0)
 	} else if model_type == .GED && shape > 0.0 {
 		return -ged_cvar(confidence, shape)
@@ -714,8 +717,22 @@ garch_risk_metrics :: proc(
 	metrics.current_cvar_99 = _std_es(model_type, prm.nu, prm.shape, 0.99) * fc.std_forecast
 
 	warmup := min(100, n - 1)
-	var_95 := var_garch(garch_result.conditional_var, 0.95, model_type, prm.nu, prm.shape, allocator)
-	var_99 := var_garch(garch_result.conditional_var, 0.99, model_type, prm.nu, prm.shape, allocator)
+	var_95 := var_garch(
+		garch_result.conditional_var,
+		0.95,
+		model_type,
+		prm.nu,
+		prm.shape,
+		allocator,
+	)
+	var_99 := var_garch(
+		garch_result.conditional_var,
+		0.99,
+		model_type,
+		prm.nu,
+		prm.shape,
+		allocator,
+	)
 	defer {
 		delete(var_95, allocator)
 		delete(var_99, allocator)
@@ -804,7 +821,10 @@ ewma_volatility :: proc(returns: []f64, lambda: f64 = 0.94, periods_per_year: f6
 // (the starting wealth counts as a peak, so a loss on day one is a drawdown).
 
 // Drawdown after each return (allocated with `allocator`, the temp allocator by default)
-drawdown_series :: proc(returns: []f64, allocator: mem.Allocator = context.temp_allocator) -> []f64 {
+drawdown_series :: proc(
+	returns: []f64,
+	allocator: mem.Allocator = context.temp_allocator,
+) -> []f64 {
 	drawdowns := make([]f64, len(returns), allocator)
 	wealth, peak := 1.0, 1.0
 	for r, i in returns {
@@ -918,7 +938,16 @@ rolling_beta_df :: proc(
 ) -> w.Column {
 	// Both moments over the same pairwise-complete rows (pandas' cov / var would
 	// also count rows where only the returns are null in var(b))
-	return _rolling_pair_beta(df, returns_col, benchmark_col, window, min_periods, false, "beta", context.allocator)
+	return _rolling_pair_beta(
+		df,
+		returns_col,
+		benchmark_col,
+		window,
+		min_periods,
+		false,
+		"beta",
+		context.allocator,
+	)
 }
 
 // cov(r, b) / var(b)
@@ -1108,7 +1137,11 @@ risk_metrics_from_df :: proc(
 		append(&returns, val)
 	}
 
-	return calculate_risk_metrics(returns[:], bench[:] if benchmark_col != nil else nil, risk_free_rate)
+	return calculate_risk_metrics(
+		returns[:],
+		bench[:] if benchmark_col != nil else nil,
+		risk_free_rate,
+	)
 }
 
 rolling_risk_metrics_df :: proc(
@@ -1249,7 +1282,10 @@ ged_pdf :: proc(z: f64, shape: f64) -> f64 {
 ged_cdf :: proc(z: f64, shape: f64) -> f64 {
 	if shape <= 0.0 {return 0.5}
 	if z == 0.0 {return 0.5}
-	_, Q := a._gamma_inc_regularized(1.0 / shape, math.pow(math.abs(z) / _ged_lambda(shape), shape))
+	_, Q := a._gamma_inc_regularized(
+		1.0 / shape,
+		math.pow(math.abs(z) / _ged_lambda(shape), shape),
+	)
 	tail := 0.5 * Q // P(Z < -|z|)
 	return 1.0 - tail if z > 0.0 else tail
 }

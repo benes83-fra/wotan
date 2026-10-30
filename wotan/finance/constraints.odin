@@ -335,7 +335,8 @@ _spg_minimize :: proc(
 	if n == 0 {return w}
 	buf := make([]f64, 5 * n, context.temp_allocator)
 	defer delete(buf, context.temp_allocator)
-	g, d, wn, gn, pg := buf[0:n], buf[n:2 * n], buf[2 * n:3 * n], buf[3 * n:4 * n], buf[4 * n:5 * n]
+	g, d, wn, gn, pg :=
+		buf[0:n], buf[n:2 * n], buf[2 * n:3 * n], buf[3 * n:4 * n], buf[4 * n:5 * n]
 
 	for i in 0 ..< n {w[i] = 1.0 / f64(n)}
 	_project_feasible(w, c, target_mu, target)
@@ -352,7 +353,8 @@ _spg_minimize :: proc(
 		return r
 	}
 	alpha := 1.0
-	if r := pg_norm(w, g, pg, c, target_mu, target); r > 0 {alpha = math.clamp(1.0 / r, ALPHA_MIN, ALPHA_MAX)}
+	if r := pg_norm(w, g, pg, c, target_mu, target);
+	   r > 0 {alpha = math.clamp(1.0 / r, ALPHA_MIN, ALPHA_MAX)}
 
 	for k in 0 ..< max_iter {
 		if pg_norm(w, g, pg, c, target_mu, target) < tol {break}
@@ -363,7 +365,7 @@ _spg_minimize :: proc(
 			d[i] -= w[i]
 			gd += g[i] * d[i]
 		}
-		if gd >= 0 {break} // no descent left at round-off level
+		if gd >= 0 {break} 	// no descent left at round-off level
 
 		f_max := history[0]
 		for h in history {f_max = math.max(f_max, h)}
@@ -410,7 +412,10 @@ constrained_min_variance_portfolio :: proc(
 	max_iter: int = 10_000,
 	tol: f64 = 1e-12,
 ) -> []f64 {
-	o := _Objective{cov = cov, scale = _variance_scale(cov)}
+	o := _Objective {
+		cov   = cov,
+		scale = _variance_scale(cov),
+	}
 	return _spg_minimize(&o, constraints, nil, 0, cov.rows, max_iter, tol, allocator)
 }
 
@@ -425,7 +430,13 @@ constrained_max_sharpe_portfolio :: proc(
 	max_iter: int = 10_000,
 	tol: f64 = 1e-12,
 ) -> []f64 {
-	o := _Objective{cov = cov, mu = returns, rf = rf, scale = 1.0, sharpe = true}
+	o := _Objective {
+		cov    = cov,
+		mu     = returns,
+		rf     = rf,
+		scale  = 1.0,
+		sharpe = true,
+	}
 	return _spg_minimize(&o, constraints, nil, 0, len(returns), max_iter, tol, allocator)
 }
 
@@ -441,8 +452,20 @@ constrained_mean_variance_portfolio :: proc(
 	max_iter: int = 10_000,
 	tol: f64 = 1e-12,
 ) -> []f64 {
-	o := _Objective{cov = cov, scale = _variance_scale(cov)}
-	return _spg_minimize(&o, constraints, returns, target_return, len(returns), max_iter, tol, allocator)
+	o := _Objective {
+		cov   = cov,
+		scale = _variance_scale(cov),
+	}
+	return _spg_minimize(
+		&o,
+		constraints,
+		returns,
+		target_return,
+		len(returns),
+		max_iter,
+		tol,
+		allocator,
+	)
 }
 
 // ============================================================================

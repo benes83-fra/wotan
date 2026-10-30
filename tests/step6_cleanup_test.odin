@@ -40,7 +40,13 @@ step6_cleanup_test :: proc(allocator: mem.Allocator) {
 	}
 	path := "step6_cleanup_test_model.wotan"
 	defer os.remove(path)
-	check :: proc(pipe: ^ml.Pipeline, X: ^l.Matrix(f64), y: []f64, path: string, get: proc(p: ^ml.Pipeline) -> ^ml.OLSResult) -> bool {
+	check :: proc(
+		pipe: ^ml.Pipeline,
+		X: ^l.Matrix(f64),
+		y: []f64,
+		path: string,
+		get: proc(p: ^ml.Pipeline) -> ^ml.OLSResult,
+	) -> bool {
 		ml.pipeline_fit(pipe, X, y)
 		if !ml.pipeline_save(pipe, path) do return false
 		ld, ok := ml.pipeline_load(path)
@@ -70,20 +76,41 @@ step6_cleanup_test :: proc(allocator: mem.Allocator) {
 		p := ml.pipeline_new()
 		ml.pipeline_add_standard_scaler(&p)
 		ml.pipeline_set_ols(&p)
-		expect(&passed, &total, check(&p, &X, y, path, proc(p: ^ml.Pipeline) -> ^ml.OLSResult {return &p.model.ols}), "OLS pipeline: stderr / t / p / CI / vcov / σ² / R² / F / df survive save → load")
+		expect(
+			&passed,
+			&total,
+			check(&p, &X, y, path, proc(p: ^ml.Pipeline) -> ^ml.OLSResult {return &p.model.ols}),
+			"OLS pipeline: stderr / t / p / CI / vcov / σ² / R² / F / df survive save → load",
+		)
 		ml.pipeline_free(&p)
 	}
 	{
 		p := ml.pipeline_new()
 		ml.pipeline_set_ridge(&p, {lambda = 2})
-		expect(&passed, &total, check(&p, &X, y, path, proc(p: ^ml.Pipeline) -> ^ml.OLSResult {return &p.model.ridge}), "Ridge pipeline: inference survives save → load")
+		expect(
+			&passed,
+			&total,
+			check(&p, &X, y, path, proc(p: ^ml.Pipeline) -> ^ml.OLSResult {return &p.model.ridge}),
+			"Ridge pipeline: inference survives save → load",
+		)
 		ml.pipeline_free(&p)
 	}
 	{
 		p := ml.pipeline_new()
 		ml.pipeline_add_robust_scaler(&p)
 		ml.pipeline_set_elastic_net(&p, {lambda = 1, l1_ratio = 0.5})
-		expect(&passed, &total, check(&p, &X, y, path, proc(p: ^ml.Pipeline) -> ^ml.OLSResult {return &p.model.elastic_net}), "ElasticNet pipeline: inference survives save → load")
+		expect(
+			&passed,
+			&total,
+			check(
+				&p,
+				&X,
+				y,
+				path,
+				proc(p: ^ml.Pipeline) -> ^ml.OLSResult {return &p.model.elastic_net},
+			),
+			"ElasticNet pipeline: inference survives save → load",
+		)
 		ml.pipeline_free(&p)
 	}
 
@@ -99,10 +126,29 @@ step6_cleanup_test :: proc(allocator: mem.Allocator) {
 		ld := ml_finance.train_discriminator(tg, one, 2, allocator)
 		lg := ml_finance.train_generator(tg, one, 2, allocator)
 		finite :: proc(v: f64) -> bool {return !math.is_nan(v) && !math.is_inf(v)}
-		expect(&passed, &total, finite(le) && finite(ls) && finite(ld) && finite(lg) && ls > 0 && ld > 0, fmt.tprintf("TimeGAN trains on a single sequence (losses %.3g %.3g %.3g %.3g)", le, ls, ld, lg))
+		expect(
+			&passed,
+			&total,
+			finite(le) && finite(ls) && finite(ld) && finite(lg) && ls > 0 && ld > 0,
+			fmt.tprintf(
+				"TimeGAN trains on a single sequence (losses %.3g %.3g %.3g %.3g)",
+				le,
+				ls,
+				ld,
+				lg,
+			),
+		)
 		short := one[:5] // no complete sequence
-		z := ml_finance.train_supervisor(tg, short, 2, allocator) + ml_finance.train_discriminator(tg, short, 2, allocator) + ml_finance.train_generator(tg, short, 2, allocator)
-		expect(&passed, &total, z == 0, "TimeGAN training steps return 0 without a complete sequence")
+		z :=
+			ml_finance.train_supervisor(tg, short, 2, allocator) +
+			ml_finance.train_discriminator(tg, short, 2, allocator) +
+			ml_finance.train_generator(tg, short, 2, allocator)
+		expect(
+			&passed,
+			&total,
+			z == 0,
+			"TimeGAN training steps return 0 without a complete sequence",
+		)
 	}
 
 	l.matrix_free(&X)

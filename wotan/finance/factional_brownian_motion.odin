@@ -55,7 +55,11 @@ _lower_matvec :: proc(L: ^l.Matrix(f64), z, y: []f64) {
 
 // Cholesky factor of the fBm covariance at the given times (t ≥ 0). Build it once
 // and call fbm_path_from_cholesky per path: the factorisation is O(n³), a path O(n²)
-fbm_cholesky :: proc(times: []f64, H: f64, allocator: mem.Allocator = context.allocator) -> l.Matrix(f64) {
+fbm_cholesky :: proc(
+	times: []f64,
+	H: f64,
+	allocator: mem.Allocator = context.allocator,
+) -> l.Matrix(f64) {
 	assert(H > 0.0 && H < 1.0, "fbm_cholesky: H must be in (0, 1)")
 	n := len(times)
 	L := l.matrix_new(f64, n, n, allocator)
@@ -71,7 +75,10 @@ fbm_cholesky :: proc(times: []f64, H: f64, allocator: mem.Allocator = context.al
 }
 
 // One fBm path from a factor built by fbm_cholesky (B^H = 0 exactly where t = 0)
-fbm_path_from_cholesky :: proc(L: ^l.Matrix(f64), allocator: mem.Allocator = context.allocator) -> []f64 {
+fbm_path_from_cholesky :: proc(
+	L: ^l.Matrix(f64),
+	allocator: mem.Allocator = context.allocator,
+) -> []f64 {
 	n := L.rows
 	z := make([]f64, n, allocator)
 	for i in 0 ..< n {z[i] = rand.float64_normal(0.0, 1.0)}
@@ -83,7 +90,11 @@ fbm_path_from_cholesky :: proc(L: ^l.Matrix(f64), allocator: mem.Allocator = con
 
 // One fBm path at the given times; caller deletes it. For many paths on the same
 // grid use fbm_cholesky + fbm_path_from_cholesky instead
-generate_fbm_path :: proc(times: []f64, H: f64, allocator: mem.Allocator = context.allocator) -> []f64 {
+generate_fbm_path :: proc(
+	times: []f64,
+	H: f64,
+	allocator: mem.Allocator = context.allocator,
+) -> []f64 {
 	L := fbm_cholesky(times, H, context.temp_allocator)
 	defer l.matrix_free(&L)
 	return fbm_path_from_cholesky(&L, allocator)
@@ -198,8 +209,15 @@ _volterra_head :: proc(k, a: f64) -> f64 {
 //   variables 0 .. n-1:    ΔW_i = W_{t_{i+1}} - W_{t_i}
 //   variables n .. 2n-2:   Ṽ_{t_j}, j = 1 .. n-1   (Ṽ_0 = 0; Ṽ_{t_n} is never used)
 // with Cov(Ṽ_u, Ṽ_v) = 2H ∫₀ᵘ (u-s)^{H-½} (v-s)^{H-½} ds (u ≤ v), so Var(Ṽ_t) = t^{2H}
-rbergomi_covariance :: proc(n_steps: int, T, H: f64, allocator: mem.Allocator = context.allocator) -> l.Matrix(f64) {
-	assert(H > 0.0 && H < 1.0 && n_steps >= 1, "rbergomi_covariance: need 0 < H < 1 and n_steps ≥ 1")
+rbergomi_covariance :: proc(
+	n_steps: int,
+	T, H: f64,
+	allocator: mem.Allocator = context.allocator,
+) -> l.Matrix(f64) {
+	assert(
+		H > 0.0 && H < 1.0 && n_steps >= 1,
+		"rbergomi_covariance: need 0 < H < 1 and n_steps ≥ 1",
+	)
 	n := n_steps
 	dim := 2 * n - 1
 	C := l.matrix_new(f64, dim, dim, allocator)
@@ -217,7 +235,12 @@ rbergomi_covariance :: proc(n_steps: int, T, H: f64, allocator: mem.Allocator = 
 	cross := math.sqrt(2.0 * H) / alpha * math.pow_f64(dt, alpha)
 	for j in 1 ..< n {
 		for i in 0 ..< j {
-			set(&C, n + j - 1, i, cross * (math.pow_f64(f64(j - i), alpha) - math.pow_f64(f64(j - i - 1), alpha)))
+			set(
+				&C,
+				n + j - 1,
+				i,
+				cross * (math.pow_f64(f64(j - i), alpha) - math.pow_f64(f64(j - i - 1), alpha)),
+			)
 		}
 	}
 
@@ -250,7 +273,16 @@ rbergomi_mc_call :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> f64 {
 	strikes := [1]f64{K}
-	prices := rbergomi_mc_calls(S_0, strikes[:], T, r, params, n_paths, n_steps, context.temp_allocator)
+	prices := rbergomi_mc_calls(
+		S_0,
+		strikes[:],
+		T,
+		r,
+		params,
+		n_paths,
+		n_steps,
+		context.temp_allocator,
+	)
 	price := prices[0]
 	delete(prices, context.temp_allocator)
 	return price

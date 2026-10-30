@@ -44,7 +44,7 @@ CallableBondResult :: struct {
 // curve, so it serves as both the OAS and the effective-duration bump.
 
 // (1 − e^{−k t}) / k, → t as k → 0
-@(private = "file")
+@(private)
 _hw_b :: proc(k, t: f64) -> f64 {
 	x := k * t
 	if abs(x) < 1e-5 {return t * (1.0 - x * (0.5 - x / 6.0))}
@@ -52,7 +52,7 @@ _hw_b :: proc(k, t: f64) -> f64 {
 }
 
 // ∫_0^t B(a,u)² du = (t − 2 B(a,t) + B(2a,t)) / a²
-@(private = "file")
+@(private)
 _hw_k :: proc(a, t: f64) -> f64 {
 	x := a * t
 	if abs(x) < 1e-3 {return t * t * t * (1.0 / 3.0 - x / 4.0 + 7.0 * x * x / 60.0)}

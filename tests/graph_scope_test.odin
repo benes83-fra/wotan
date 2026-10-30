@@ -18,11 +18,11 @@ import "core:mem"
 
 @(private = "file")
 _Model :: struct {
-	x, w, b, head:         ^t.Tensor, // dense: relu(x @ w + b) . head
-	lx, h0, c0:            ^t.Tensor, // LSTM inputs (leaves without gradients)
-	w_ih, w_hh, l_bias:    ^t.Tensor, // LSTM parameters
-	sx, sh0, sA, sB, sC:   ^t.Tensor, // SSM inputs
-	sDelta, sD:            ^t.Tensor,
+	x, w, b, head:       ^t.Tensor, // dense: relu(x @ w + b) . head
+	lx, h0, c0:          ^t.Tensor, // LSTM inputs (leaves without gradients)
+	w_ih, w_hh, l_bias:  ^t.Tensor, // LSTM parameters
+	sx, sh0, sA, sB, sC: ^t.Tensor, // SSM inputs
+	sDelta, sD:          ^t.Tensor,
 }
 
 @(private = "file")
@@ -33,7 +33,9 @@ _params :: proc(m: ^_Model) -> [8]^t.Tensor {
 // Scalar loss over a dense layer, an LSTM and an SSM
 @(private = "file")
 _loss :: proc(m: ^_Model) -> ^t.Tensor {
-	dense := t.tensor_sum(t.tensor_mul(t.tensor_relu(t.tensor_add_bias(t.tensor_matmul(m.x, m.w), m.b)), m.head))
+	dense := t.tensor_sum(
+		t.tensor_mul(t.tensor_relu(t.tensor_add_bias(t.tensor_matmul(m.x, m.w), m.b)), m.head),
+	)
 	lstm := t.tensor_sum(t.tensor_lstm(m.lx, m.h0, m.c0, m.w_ih, m.w_hh, m.l_bias))
 	ssm := t.tensor_sum(t.tensor_ssm(m.sx, m.sh0, m.sA, m.sB, m.sC, m.sDelta, m.sD))
 	return t.tensor_add(t.tensor_add(dense, lstm), ssm)
@@ -125,7 +127,13 @@ graph_scope_test :: proc(allocator: mem.Allocator) {
 	// Without a scope, op outputs keep their input's allocator
 	{
 		y := t.tensor_relu(m.w)
-		expect(&passed, &total, y.allocator.procedure == m.w.allocator.procedure && y.allocator.data == m.w.allocator.data, "without a scope, op outputs use their input's allocator")
+		expect(
+			&passed,
+			&total,
+			y.allocator.procedure == m.w.allocator.procedure &&
+			y.allocator.data == m.w.allocator.data,
+			"without a scope, op outputs use their input's allocator",
+		)
 		t.tensor_free(y)
 	}
 
@@ -137,13 +145,19 @@ graph_scope_test :: proc(allocator: mem.Allocator) {
 	live_before := live()
 	t.graph_begin(&scope)
 	r1, root1 := _step(&m, allocator)
-	in_scope := root1.allocator.data == rawptr(&scope) && root1.inputs[0].allocator.data == rawptr(&scope)
+	in_scope :=
+		root1.allocator.data == rawptr(&scope) && root1.inputs[0].allocator.data == rawptr(&scope)
 	param_owned := m.w.allocator.data == pa.data && m.w.grad.allocator.data == pa.data
 	t.graph_end(&scope)
 	_, reserved1 := t.graph_scope_bytes(&scope)
 	expect(&passed, &total, in_scope, "op outputs inside a scope come from the scope's arena")
 	expect(&passed, &total, param_owned, "parameters and their gradients keep their own allocator")
-	expect(&passed, &total, _bits_equal(ref, r1), "loss and parameter gradients bit-identical to running without a scope")
+	expect(
+		&passed,
+		&total,
+		_bits_equal(ref, r1),
+		"loss and parameter gradients bit-identical to running without a scope",
+	)
 	expect(&passed, &total, live() == live_before, "tensor counters balanced after graph_end")
 
 	// Iteration 2: same results, no new arena memory, nothing from the parameters' allocator;
@@ -154,10 +168,37 @@ graph_scope_test :: proc(allocator: mem.Allocator) {
 	t.tensor_free_graph(root2)
 	t.graph_end(&scope)
 	_, reserved2 := t.graph_scope_bytes(&scope)
-	expect(&passed, &total, _bits_equal(ref, r2), "second iteration bit-identical (memory reused after reset)")
-	expect(&passed, &total, reserved1 > 0 && reserved2 == reserved1, fmt.tprintf("second iteration reuses the arena (reserved %d -> %d bytes)", reserved1, reserved2))
-	expect(&passed, &total, track.total_allocation_count == allocs_before, fmt.tprintf("no allocations from the parameters' allocator in a scoped iteration (%d)", track.total_allocation_count - allocs_before))
-	expect(&passed, &total, live() == live_before, "tensor counters balanced with tensor_free_graph inside the scope")
+	expect(
+		&passed,
+		&total,
+		_bits_equal(ref, r2),
+		"second iteration bit-identical (memory reused after reset)",
+	)
+	expect(
+		&passed,
+		&total,
+		reserved1 > 0 && reserved2 == reserved1,
+		fmt.tprintf(
+			"second iteration reuses the arena (reserved %d -> %d bytes)",
+			reserved1,
+			reserved2,
+		),
+	)
+	expect(
+		&passed,
+		&total,
+		track.total_allocation_count == allocs_before,
+		fmt.tprintf(
+			"no allocations from the parameters' allocator in a scoped iteration (%d)",
+			track.total_allocation_count - allocs_before,
+		),
+	)
+	expect(
+		&passed,
+		&total,
+		live() == live_before,
+		"tensor counters balanced with tensor_free_graph inside the scope",
+	)
 
 	// Nesting: the inner scope is released, the outer one keeps working
 	{
@@ -173,7 +214,12 @@ graph_scope_test :: proc(allocator: mem.Allocator) {
 		ok := in_inner && c.allocator.data == rawptr(&scope) && t.graph_active_scope() == &scope
 		ok &&= c.data.data[0] == a.data.data[0] * a.data.data[0]
 		t.graph_end(&scope)
-		expect(&passed, &total, ok && t.graph_active_scope() == nil, "scopes nest: inner graph_end leaves the outer scope active")
+		expect(
+			&passed,
+			&total,
+			ok && t.graph_active_scope() == nil,
+			"scopes nest: inner graph_end leaves the outer scope active",
+		)
 	}
 
 	fmt.printf("Graph scope contracts: %d/%d passed\n", passed, total)

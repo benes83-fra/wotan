@@ -22,27 +22,182 @@ CS_TARGET :: 0.0012703177711262355
 @(private = "file")
 CS_OLD_ITERS :: 1
 @(private = "file")
-CS_MU := [?]f64{0.0006705628859470906, 0.000844174663324006, 0.0012882408965508806, 0.0015916487099226849, 0.0011090096423044316, 0.0018406107756621303, 0.0007794057898862659, 0.00014740797251180284}
+CS_MU := [?]f64 {
+	0.0006705628859470906,
+	0.000844174663324006,
+	0.0012882408965508806,
+	0.0015916487099226849,
+	0.0011090096423044316,
+	0.0018406107756621303,
+	0.0007794057898862659,
+	0.00014740797251180284,
+}
 @(private = "file")
-CS_COV := [?]f64{0.00028605492622368976, 0.000130893829647723, 0.00013789164525778217, 0.00015746049050781964, 9.682165447655165e-05, 0.00011499849551881126, 0.00011219240801971164, 0.00015745696585652932, 0.000130893829647723, 0.0003068989737457669, 0.000156534002857008, 0.0001728092641983506, 0.00011161265405003817, 0.00012053236247881989, 0.00012134802085198231, 0.00017050600598822235, 0.00013789164525778217, 0.000156534002857008, 0.0002636398675496364, 0.00017557189796273083, 0.0001221989953516419, 0.00012069764748913676, 0.0001248988784408756, 0.00018913877246709514, 0.00015746049050781964, 0.0001728092641983506, 0.00017557189796273083, 0.0003318621155392069, 0.00011903402031406434, 0.00012669653166780828, 0.0001487135943767263, 0.00020216293455693835, 9.682165447655165e-05, 0.00011161265405003817, 0.0001221989953516419, 0.00011903402031406434, 0.0001333370354503726, 8.640093887934805e-05, 8.087714897582723e-05, 0.0001272022948480067, 0.00011499849551881126, 0.00012053236247881989, 0.00012069764748913676, 0.00012669653166780828, 8.640093887934805e-05, 0.00020560328844144906, 9.828551288598314e-05, 0.00014910591595340483, 0.00011219240801971164, 0.00012134802085198231, 0.0001248988784408756, 0.0001487135943767263, 8.087714897582723e-05, 9.828551288598314e-05, 0.00016326888104834186, 0.00015678089472465005, 0.00015745696585652932, 0.00017050600598822235, 0.00018913877246709514, 0.00020216293455693835, 0.0001272022948480067, 0.00014910591595340483, 0.00015678089472465005, 0.00035652914963214463}
+CS_COV := [?]f64 {
+	0.00028605492622368976,
+	0.000130893829647723,
+	0.00013789164525778217,
+	0.00015746049050781964,
+	9.682165447655165e-05,
+	0.00011499849551881126,
+	0.00011219240801971164,
+	0.00015745696585652932,
+	0.000130893829647723,
+	0.0003068989737457669,
+	0.000156534002857008,
+	0.0001728092641983506,
+	0.00011161265405003817,
+	0.00012053236247881989,
+	0.00012134802085198231,
+	0.00017050600598822235,
+	0.00013789164525778217,
+	0.000156534002857008,
+	0.0002636398675496364,
+	0.00017557189796273083,
+	0.0001221989953516419,
+	0.00012069764748913676,
+	0.0001248988784408756,
+	0.00018913877246709514,
+	0.00015746049050781964,
+	0.0001728092641983506,
+	0.00017557189796273083,
+	0.0003318621155392069,
+	0.00011903402031406434,
+	0.00012669653166780828,
+	0.0001487135943767263,
+	0.00020216293455693835,
+	9.682165447655165e-05,
+	0.00011161265405003817,
+	0.0001221989953516419,
+	0.00011903402031406434,
+	0.0001333370354503726,
+	8.640093887934805e-05,
+	8.087714897582723e-05,
+	0.0001272022948480067,
+	0.00011499849551881126,
+	0.00012053236247881989,
+	0.00012069764748913676,
+	0.00012669653166780828,
+	8.640093887934805e-05,
+	0.00020560328844144906,
+	9.828551288598314e-05,
+	0.00014910591595340483,
+	0.00011219240801971164,
+	0.00012134802085198231,
+	0.0001248988784408756,
+	0.0001487135943767263,
+	8.087714897582723e-05,
+	9.828551288598314e-05,
+	0.00016326888104834186,
+	0.00015678089472465005,
+	0.00015745696585652932,
+	0.00017050600598822235,
+	0.00018913877246709514,
+	0.00020216293455693835,
+	0.0001272022948480067,
+	0.00014910591595340483,
+	0.00015678089472465005,
+	0.00035652914963214463,
+}
 @(private = "file")
-CS_W_MV := [?]f64{0.13014061368868526, 0.06728515160351756, 0.052574234707797186, 0.0, 0.25, 0.25, 0.25, 0.0}
+CS_W_MV := [?]f64 {
+	0.13014061368868526,
+	0.06728515160351756,
+	0.052574234707797186,
+	0.0,
+	0.25,
+	0.25,
+	0.25,
+	0.0,
+}
 @(private = "file")
-CS_W_GRP := [?]f64{0.02629973447097931, 0.0, 2.062631105682628e-17, 0.0, 0.5166716521339354, 0.15537596742874418, 0.30165264596634117, 1.4340161917896898e-17}
+CS_W_GRP := [?]f64 {
+	0.02629973447097931,
+	0.0,
+	2.062631105682628e-17,
+	0.0,
+	0.5166716521339354,
+	0.15537596742874418,
+	0.30165264596634117,
+	1.4340161917896898e-17,
+}
 @(private = "file")
-CS_W_TGT := [?]f64{0.02419298213513418, 2.2327119416830075e-17, 0.12381733026512405, 0.10198968759974181, 0.24999999999999997, 0.25, 0.25, 0.0}
+CS_W_TGT := [?]f64 {
+	0.02419298213513418,
+	2.2327119416830075e-17,
+	0.12381733026512405,
+	0.10198968759974181,
+	0.24999999999999997,
+	0.25,
+	0.25,
+	0.0,
+}
 @(private = "file")
-CS_W_SR := [?]f64{3.3858233142622124e-17, 0.0, 0.24827589539875952, 0.25, 0.25, 0.25, 0.0017241046012401561, 0.0}
+CS_W_SR := [?]f64 {
+	3.3858233142622124e-17,
+	0.0,
+	0.24827589539875952,
+	0.25,
+	0.25,
+	0.25,
+	0.0017241046012401561,
+	0.0,
+}
 @(private = "file")
-CS_W0 := [?]f64{0.1652651688740529, 0.02871782090738546, 0.2987949505818893, 0.059815798923595384, 0.046202552383484134, 0.06339360198882646, 0.24207876096972877, 0.09573134537103772}
+CS_W0 := [?]f64 {
+	0.1652651688740529,
+	0.02871782090738546,
+	0.2987949505818893,
+	0.059815798923595384,
+	0.046202552383484134,
+	0.06339360198882646,
+	0.24207876096972877,
+	0.09573134537103772,
+}
 @(private = "file")
-CS_G0 := [?]f64{0.017039453381086055, -0.0012183034030534203, -0.022156937421569076, -0.0491766601153648, -0.04050579558615465, -0.09226455769778844, -0.0020804816816972983, 0.07312868941445527}
+CS_G0 := [?]f64 {
+	0.017039453381086055,
+	-0.0012183034030534203,
+	-0.022156937421569076,
+	-0.0491766601153648,
+	-0.04050579558615465,
+	-0.09226455769778844,
+	-0.0020804816816972983,
+	0.07312868941445527,
+}
 @(private = "file")
-CS_V := [?]f64{0.0008428683020572092, 0.2700021973075387, -0.5189526399742901, -0.031257196026310025, 0.44880459504071746, 0.15590342329953583, 0.13447559697482658, 0.2957444561475784}
+CS_V := [?]f64 {
+	0.0008428683020572092,
+	0.2700021973075387,
+	-0.5189526399742901,
+	-0.031257196026310025,
+	0.44880459504071746,
+	0.15590342329953583,
+	0.13447559697482658,
+	0.2957444561475784,
+}
 @(private = "file")
-CS_PROJ := [?]f64{0.0, 0.24987512482894172, 0.0, 6.23613256451335e-17, 0.24999999999999994, 0.1357763507647114, 0.1143485244063474, 0.2499999999999999}
+CS_PROJ := [?]f64 {
+	0.0,
+	0.24987512482894172,
+	0.0,
+	6.23613256451335e-17,
+	0.24999999999999994,
+	0.1357763507647114,
+	0.1143485244063474,
+	0.2499999999999999,
+}
 @(private = "file")
-CS_OLD_MV := [?]f64{0.1250000233370221, 0.12499977992527633, 0.12499978133379244, 0.12499942198593807, 0.125000814051205, 0.12500045196132759, 0.12500049184971257, 0.12499923555572581}
+CS_OLD_MV := [?]f64 {
+	0.1250000233370221,
+	0.12499977992527633,
+	0.12499978133379244,
+	0.12499942198593807,
+	0.125000814051205,
+	0.12500045196132759,
+	0.12500049184971257,
+	0.12499923555572581,
+}
 
 @(private = "file")
 _cs_maxdiff :: proc(a, b: []f64) -> f64 {
@@ -53,7 +208,9 @@ _cs_maxdiff :: proc(a, b: []f64) -> f64 {
 
 constraints_reference_test :: proc(allocator: mem.Allocator) {
 	seed_test(#procedure)
-	fmt.println("\n=== Constrained portfolios: projection, min variance, max Sharpe, target return (KKT / scipy reference) ===")
+	fmt.println(
+		"\n=== Constrained portfolios: projection, min variance, max Sharpe, target return (KKT / scipy reference) ===",
+	)
 	context.allocator = allocator
 	passed, total := 0, 0
 	expect :: proc(passed, total: ^int, ok: bool, name: string) {
@@ -64,10 +221,23 @@ constraints_reference_test :: proc(allocator: mem.Allocator) {
 	cov := l.matrix_new(f64, CS_N, CS_N)
 	defer l.matrix_free(&cov)
 	copy(cov.data, CS_COV[:])
-	grp := fin.GroupLimit{asset_indices = []int{0, 1, 2}, max_weight = CS_GMAX}
-	capped := fin.PortfolioConstraints{no_short_selling = true, max_weight = CS_CAP}
-	grouped := fin.PortfolioConstraints{no_short_selling = true, group_limits = []fin.GroupLimit{grp}}
-	both := fin.PortfolioConstraints{no_short_selling = true, max_weight = CS_CAP, group_limits = []fin.GroupLimit{grp}}
+	grp := fin.GroupLimit {
+		asset_indices = []int{0, 1, 2},
+		max_weight    = CS_GMAX,
+	}
+	capped := fin.PortfolioConstraints {
+		no_short_selling = true,
+		max_weight       = CS_CAP,
+	}
+	grouped := fin.PortfolioConstraints {
+		no_short_selling = true,
+		group_limits     = []fin.GroupLimit{grp},
+	}
+	both := fin.PortfolioConstraints {
+		no_short_selling = true,
+		max_weight       = CS_CAP,
+		group_limits     = []fin.GroupLimit{grp},
+	}
 
 	// 1. Projection: nearest feasible point, input untouched
 	{
@@ -75,7 +245,18 @@ constraints_reference_test :: proc(allocator: mem.Allocator) {
 		p := fin.project_constraints(v[:], both, allocator)
 		defer delete(p)
 		untouched := _cs_maxdiff(v[:], CS_V[:]) == 0
-		expect(&passed, &total, _cs_maxdiff(p, CS_PROJ[:]) < 1e-8 && untouched, fmt.tprintf("project_constraints (long-only, cap %.0f%%, group ≤ %.0f%%) vs SLSQP projection: max diff %.1e; input unchanged %v (it used to be modified and returned as the result when shorting was allowed)", 100 * CS_CAP, 100 * CS_GMAX, _cs_maxdiff(p, CS_PROJ[:]), untouched))
+		expect(
+			&passed,
+			&total,
+			_cs_maxdiff(p, CS_PROJ[:]) < 1e-8 && untouched,
+			fmt.tprintf(
+				"project_constraints (long-only, cap %.0f%%, group ≤ %.0f%%) vs SLSQP projection: max diff %.1e; input unchanged %v (it used to be modified and returned as the result when shorting was allowed)",
+				100 * CS_CAP,
+				100 * CS_GMAX,
+				_cs_maxdiff(p, CS_PROJ[:]),
+				untouched,
+			),
+		)
 	}
 
 	// 2. Negative Sharpe gradient
@@ -84,15 +265,39 @@ constraints_reference_test :: proc(allocator: mem.Allocator) {
 		defer delete(g)
 		worst := 0.0
 		for i in 0 ..< CS_N {worst = max(worst, abs(g[i] - CS_G0[i]) / abs(CS_G0[i]))}
-		expect(&passed, &total, worst < 1e-12, fmt.tprintf("negative_sharpe_gradient vs the analytic gradient: max rel err %.1e (the σ term was doubled before)", worst))
+		expect(
+			&passed,
+			&total,
+			worst < 1e-12,
+			fmt.tprintf(
+				"negative_sharpe_gradient vs the analytic gradient: max rel err %.1e (the σ term was doubled before)",
+				worst,
+			),
+		)
 	}
 
 	// 3. Minimum variance, long-only with a cap: exact KKT solution
 	{
 		w := fin.constrained_min_variance_portfolio(&cov, capped, allocator)
 		defer delete(w)
-		v, v_ref, v_old := fin.portfolio_variance(w, &cov), fin.portfolio_variance(CS_W_MV[:], &cov), fin.portfolio_variance(CS_OLD_MV[:], &cov)
-		expect(&passed, &total, _cs_maxdiff(w, CS_W_MV[:]) < 1e-9, fmt.tprintf("constrained_min_variance_portfolio (cap %.0f%%) vs exact KKT enumeration: max weight diff %.1e, vol %.5f%% vs %.5f%% (old: stopped after %d steps near equal weights, vol %.5f%%)", 100 * CS_CAP, _cs_maxdiff(w, CS_W_MV[:]), 100 * math.sqrt(v), 100 * math.sqrt(v_ref), CS_OLD_ITERS, 100 * math.sqrt(v_old)))
+		v, v_ref, v_old :=
+			fin.portfolio_variance(w, &cov),
+			fin.portfolio_variance(CS_W_MV[:], &cov),
+			fin.portfolio_variance(CS_OLD_MV[:], &cov)
+		expect(
+			&passed,
+			&total,
+			_cs_maxdiff(w, CS_W_MV[:]) < 1e-9,
+			fmt.tprintf(
+				"constrained_min_variance_portfolio (cap %.0f%%) vs exact KKT enumeration: max weight diff %.1e, vol %.5f%% vs %.5f%% (old: stopped after %d steps near equal weights, vol %.5f%%)",
+				100 * CS_CAP,
+				_cs_maxdiff(w, CS_W_MV[:]),
+				100 * math.sqrt(v),
+				100 * math.sqrt(v_ref),
+				CS_OLD_ITERS,
+				100 * math.sqrt(v_old),
+			),
+		)
 	}
 
 	// 4. Minimum variance with a group limit, and with an exact target return
@@ -104,15 +309,46 @@ constraints_reference_test :: proc(allocator: mem.Allocator) {
 		vt, vt_ref := fin.portfolio_variance(wt, &cov), fin.portfolio_variance(CS_W_TGT[:], &cov)
 		miss := abs(fin.portfolio_return(wt, CS_MU[:]) - CS_TARGET)
 		gsum := wg[0] + wg[1] + wg[2]
-		expect(&passed, &total, (vg - vg_ref) / vg_ref < 1e-9 && (vt - vt_ref) / vt_ref < 1e-9 && miss < 1e-13 && gsum <= CS_GMAX + 1e-12 && _cs_maxdiff(wg, CS_W_GRP[:]) < 1e-5 && _cs_maxdiff(wt, CS_W_TGT[:]) < 1e-5, fmt.tprintf("group limit: variance vs SLSQP rel %+.1e, group weight %.6f; target return (cap %.0f%%): variance vs SLSQP rel %+.1e, return misses the target by %.1e (the old penalty method only approached it)", (vg - vg_ref) / vg_ref, gsum, 100 * CS_CAP, (vt - vt_ref) / vt_ref, miss))
+		expect(
+			&passed,
+			&total,
+			(vg - vg_ref) / vg_ref < 1e-9 &&
+			(vt - vt_ref) / vt_ref < 1e-9 &&
+			miss < 1e-13 &&
+			gsum <= CS_GMAX + 1e-12 &&
+			_cs_maxdiff(wg, CS_W_GRP[:]) < 1e-5 &&
+			_cs_maxdiff(wt, CS_W_TGT[:]) < 1e-5,
+			fmt.tprintf(
+				"group limit: variance vs SLSQP rel %+.1e, group weight %.6f; target return (cap %.0f%%): variance vs SLSQP rel %+.1e, return misses the target by %.1e (the old penalty method only approached it)",
+				(vg - vg_ref) / vg_ref,
+				gsum,
+				100 * CS_CAP,
+				(vt - vt_ref) / vt_ref,
+				miss,
+			),
+		)
 	}
 
 	// 5. Maximum Sharpe with a cap and a group limit
 	{
 		w := fin.constrained_max_sharpe_portfolio(CS_MU[:], &cov, CS_RF, both, allocator)
 		defer delete(w)
-		s, s_ref := -fin.negative_sharpe(w, CS_MU[:], &cov, CS_RF), -fin.negative_sharpe(CS_W_SR[:], CS_MU[:], &cov, CS_RF)
-		expect(&passed, &total, s >= s_ref - 1e-12 && _cs_maxdiff(w, CS_W_SR[:]) < 1e-5, fmt.tprintf("constrained_max_sharpe_portfolio (cap %.0f%%, group ≤ %.0f%%): Sharpe %.8f vs best of 20 SLSQP starts %.8f, max weight diff %.1e", 100 * CS_CAP, 100 * CS_GMAX, s, s_ref, _cs_maxdiff(w, CS_W_SR[:])))
+		s, s_ref :=
+			-fin.negative_sharpe(w, CS_MU[:], &cov, CS_RF),
+			-fin.negative_sharpe(CS_W_SR[:], CS_MU[:], &cov, CS_RF)
+		expect(
+			&passed,
+			&total,
+			s >= s_ref - 1e-12 && _cs_maxdiff(w, CS_W_SR[:]) < 1e-5,
+			fmt.tprintf(
+				"constrained_max_sharpe_portfolio (cap %.0f%%, group ≤ %.0f%%): Sharpe %.8f vs best of 20 SLSQP starts %.8f, max weight diff %.1e",
+				100 * CS_CAP,
+				100 * CS_GMAX,
+				s,
+				s_ref,
+				_cs_maxdiff(w, CS_W_SR[:]),
+			),
+		)
 	}
 
 	fmt.printf("Constraints summary: %d/%d passed\n", passed, total)

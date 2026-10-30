@@ -202,7 +202,16 @@ rolling_beta :: proc(
 	window: int,
 	allocator: mem.Allocator = context.allocator,
 ) -> w.Column {
-	return _rolling_pair_beta(df, port_col, bench_col, window, 2, true, fmt.tprintf("rolling_beta_%d", window), allocator)
+	return _rolling_pair_beta(
+		df,
+		port_col,
+		bench_col,
+		window,
+		2,
+		true,
+		fmt.tprintf("rolling_beta_%d", window),
+		allocator,
+	)
 }
 
 rolling_corr_matrix :: proc(
@@ -281,7 +290,16 @@ plot_cumulative_returns :: proc(
 			if v, is_null := w.column_at_float(src, i); !is_null {last = v / base_price * 100.0}
 			ys[i] = last
 		}
-		append(&lines, p.LineData{xs = xs, ys = ys, color = colors[len(lines) % len(colors)], style = .Solid, label = col_name})
+		append(
+			&lines,
+			p.LineData {
+				xs = xs,
+				ys = ys,
+				color = colors[len(lines) % len(colors)],
+				style = .Solid,
+				label = col_name,
+			},
+		)
 	}
 	if len(lines) == 0 {return false}
 

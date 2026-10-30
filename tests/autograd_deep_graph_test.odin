@@ -45,8 +45,18 @@ autograd_deep_graph_test :: proc(allocator: mem.Allocator) {
 	before := t.global_tensors_freed
 	t.tensor_free_graph(y)
 	freed := t.global_tensors_freed - before
-	expect(&passed, &total, valid && dx == 1.0 && freed == N,
-		fmt.tprintf("chain of %d ops: validate %v, dy/dx = %v, freed %d intermediate nodes", N, valid, dx, freed))
+	expect(
+		&passed,
+		&total,
+		valid && dx == 1.0 && freed == N,
+		fmt.tprintf(
+			"chain of %d ops: validate %v, dy/dx = %v, freed %d intermediate nodes",
+			N,
+			valid,
+			dx,
+			freed,
+		),
+	)
 	t.tensor_free(x)
 	t.tensor_free(c)
 	t.tensor_free(k)
@@ -76,8 +86,19 @@ autograd_deep_graph_test :: proc(allocator: mem.Allocator) {
 	av, bv := 2.0, 3.0
 	ga := (bv + 1) * (av * bv * bv) + (av * bv + av) * bv * bv + bv
 	gb := av * (av * bv * bv) + (av * bv + av) * 2 * av * bv + av
-	expect(&passed, &total, ordered && len(topo) == 7 && a.grad.data[0] == ga && b.grad.data[0] == gb,
-		fmt.tprintf("diamond graph: %d nodes in topological order, grads %v / %v (analytic %v / %v)", len(topo), a.grad.data[0], b.grad.data[0], ga, gb))
+	expect(
+		&passed,
+		&total,
+		ordered && len(topo) == 7 && a.grad.data[0] == ga && b.grad.data[0] == gb,
+		fmt.tprintf(
+			"diamond graph: %d nodes in topological order, grads %v / %v (analytic %v / %v)",
+			len(topo),
+			a.grad.data[0],
+			b.grad.data[0],
+			ga,
+			gb,
+		),
+	)
 	t.tensor_free_graph(out)
 	t.tensor_free(a)
 	t.tensor_free(b)

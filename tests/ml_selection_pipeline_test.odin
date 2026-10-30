@@ -44,22 +44,54 @@ ml_selection_pipeline_test :: proc(allocator: mem.Allocator) {
 	for v in f do cnt[v] += 1
 	expect(&passed, &total, cnt == {4, 3, 3}, "cv_folds sizes = sklearn KFold (4, 3, 3)")
 	sp := ml.train_test_split(&X, y, 0.3)
-	expect(&passed, &total, sp.X_train.rows == 5 && sp.X_test.rows == 3, "train_test_split: n_test = ceil(0.3 · 8) = 3")
+	expect(
+		&passed,
+		&total,
+		sp.X_train.rows == 5 && sp.X_test.rows == 3,
+		"train_test_split: n_test = ceil(0.3 · 8) = 3",
+	)
 
 	// --- pipelines (intercept) ---
 	p := ml.pipeline_new()
 	ml.pipeline_add_standard_scaler(&p)
 	ml.pipeline_set_ols(&p)
 	ml.pipeline_fit(&p, &X, y)
-	expect(&passed, &total, close(ml.pipeline_predict(&p, &X)[:3], {11.720685643761568, 14.294821876187441, 11.244263434171335}, 1e-12), "Pipeline(StandardScaler, OLS) = sklearn, with intercept")
+	expect(
+		&passed,
+		&total,
+		close(
+			ml.pipeline_predict(&p, &X)[:3],
+			{11.720685643761568, 14.294821876187441, 11.244263434171335},
+			1e-12,
+		),
+		"Pipeline(StandardScaler, OLS) = sklearn, with intercept",
+	)
 	ml.pipeline_fit(&p, &X, y)
-	expect(&passed, &total, close(ml.pipeline_predict(&p, &X)[:3], {11.720685643761568, 14.294821876187441, 11.244263434171335}, 1e-12), "Pipeline refit gives the same model")
+	expect(
+		&passed,
+		&total,
+		close(
+			ml.pipeline_predict(&p, &X)[:3],
+			{11.720685643761568, 14.294821876187441, 11.244263434171335},
+			1e-12,
+		),
+		"Pipeline refit gives the same model",
+	)
 	ml.pipeline_free(&p)
 	pr := ml.pipeline_new()
 	ml.pipeline_add_minmax_scaler(&pr)
 	ml.pipeline_set_ridge(&pr, {lambda = 1.5})
 	ml.pipeline_fit(&pr, &X, y)
-	expect(&passed, &total, close(ml.pipeline_predict(&pr, &X)[:3], {13.019321596471395, 14.107485020177503, 12.60439075796313}, 1e-12), "Pipeline(MinMaxScaler, Ridge(1.5)) = sklearn")
+	expect(
+		&passed,
+		&total,
+		close(
+			ml.pipeline_predict(&pr, &X)[:3],
+			{13.019321596471395, 14.107485020177503, 12.60439075796313},
+			1e-12,
+		),
+		"Pipeline(MinMaxScaler, Ridge(1.5)) = sklearn",
+	)
 	ml.pipeline_free(&pr)
 
 	// --- serialization ---
@@ -77,13 +109,26 @@ ml_selection_pipeline_test :: proc(allocator: mem.Allocator) {
 		return true
 	}
 	gb := ml.pipeline_new()
-	ml.pipeline_set_gradient_boosting(&gb, {n_estimators = 10, learning_rate = 0.1, max_depth = 2, min_samples = 2, subsample = 1})
-	expect(&passed, &total, roundtrip(&gb, &X, y, path), "Gradient boosting save/load is bit-exact (F₀ and learning rate stored)")
+	ml.pipeline_set_gradient_boosting(
+		&gb,
+		{n_estimators = 10, learning_rate = 0.1, max_depth = 2, min_samples = 2, subsample = 1},
+	)
+	expect(
+		&passed,
+		&total,
+		roundtrip(&gb, &X, y, path),
+		"Gradient boosting save/load is bit-exact (F₀ and learning rate stored)",
+	)
 	ml.pipeline_free(&gb)
 	ol := ml.pipeline_new()
 	ml.pipeline_add_standard_scaler(&ol)
 	ml.pipeline_set_ols(&ol)
-	expect(&passed, &total, roundtrip(&ol, &X, y, path), "OLS pipeline (with intercept) save/load is bit-exact")
+	expect(
+		&passed,
+		&total,
+		roundtrip(&ol, &X, y, path),
+		"OLS pipeline (with intercept) save/load is bit-exact",
+	)
 	data, _ := os.read_entire_file(path, context.allocator)
 	_ = os.write_entire_file(path, data[:len(data) / 2])
 	bad, bad_ok := ml.pipeline_load(path)
@@ -106,10 +151,23 @@ ml_selection_pipeline_test :: proc(allocator: mem.Allocator) {
 	)
 	ds, ok := ml.prepare_dataset(&df, "target")
 	w.destroy_dataframe(&df)
-	expect(&passed, &total, ok && ds.feature_names[1] == "c" && ds.encoders[0].classes[2] == "green", "prepare_dataset owns its strings (valid after the DataFrame is freed)")
-	df2 := w.df_from(w.column_from_floats("x", []f64{5, 6}), w.column_from_strings("c", []string{"blue", "purple"}))
+	expect(
+		&passed,
+		&total,
+		ok && ds.feature_names[1] == "c" && ds.encoders[0].classes[2] == "green",
+		"prepare_dataset owns its strings (valid after the DataFrame is freed)",
+	)
+	df2 := w.df_from(
+		w.column_from_floats("x", []f64{5, 6}),
+		w.column_from_strings("c", []string{"blue", "purple"}),
+	)
 	Xt, yt, tok := ml.transform_dataset(&df2, &ds)
-	expect(&passed, &total, tok && close(Xt.data, {5, 1, 6, -1}, 0), "transform_dataset: unseen category → -1")
+	expect(
+		&passed,
+		&total,
+		tok && close(Xt.data, {5, 1, 6, -1}, 0),
+		"transform_dataset: unseen category → -1",
+	)
 	l.matrix_free(&Xt)
 	delete(yt)
 	w.destroy_dataframe(&df2)

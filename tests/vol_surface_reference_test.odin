@@ -12,7 +12,9 @@ import "core:mem"
 //   Levenberg-Marquardt solver (scipy.optimize.least_squares).
 vol_surface_reference_test :: proc(allocator: mem.Allocator) {
 	seed_test(#procedure)
-	fmt.println("\n=== Volatility surface: Heston, SABR, calibration (QuantLib / scipy reference) ===")
+	fmt.println(
+		"\n=== Volatility surface: Heston, SABR, calibration (QuantLib / scipy reference) ===",
+	)
 	context.allocator = allocator
 	passed, total := 0, 0
 	expect :: proc(passed, total: ^int, ok: bool, name: string) {
@@ -23,13 +25,13 @@ vol_surface_reference_test :: proc(allocator: mem.Allocator) {
 	r := 0.03
 
 	// --- Heston prices: pset, days, K, call, put ---
-	PSETS := [?]fin.Heston_Params{
+	PSETS := [?]fin.Heston_Params {
 		{v0 = 0.04, kappa = 2.0, theta = 0.04, sigma = 0.3, rho = -0.5},
 		{v0 = 0.09, kappa = 1.5, theta = 0.06, sigma = 0.9, rho = -0.8},
 		{v0 = 0.01, kappa = 3.0, theta = 0.01, sigma = 0.2, rho = -0.3},
 		{v0 = 0.04, kappa = 1.0, theta = 0.04, sigma = 0.001, rho = 0.0},
 	}
-	HESTON := [?][5]f64{
+	HESTON := [?][5]f64 {
 		{0.0, 7.0, 50.0, 50.028758849400695, 0.0},
 		{0.0, 7.0, 80.0, 20.04601415904656, 5.446728147619192e-12},
 		{0.0, 7.0, 95.0, 5.09630734125752, 0.04166552739619551},
@@ -202,12 +204,25 @@ vol_surface_reference_test :: proc(allocator: mem.Allocator) {
 			worst = max(worst, abs(c - row[3]), abs(put - row[4]))
 			worst50 = max(worst50, abs(c50 - row[3]))
 		}
-		expect(&passed, &total, worst < 1e-9, fmt.tprintf("Heston calls and puts on 160 options (T = 1 week..5 years, K = 0.5..2 S, vol of vol up to 0.9) match QuantLib: max error %.1e (was 3.9e-3 for a week at 10%% vol)", worst))
-		expect(&passed, &total, worst50 < 1e-9, fmt.tprintf("Heston with n_points = 50 is as accurate (%.1e; was 6.2)", worst50))
+		expect(
+			&passed,
+			&total,
+			worst < 1e-9,
+			fmt.tprintf(
+				"Heston calls and puts on 160 options (T = 1 week..5 years, K = 0.5..2 S, vol of vol up to 0.9) match QuantLib: max error %.1e (was 3.9e-3 for a week at 10%% vol)",
+				worst,
+			),
+		)
+		expect(
+			&passed,
+			&total,
+			worst50 < 1e-9,
+			fmt.tprintf("Heston with n_points = 50 is as accurate (%.1e; was 6.2)", worst50),
+		)
 	}
 
 	// --- SABR: beta, rho, nu, T, K, alpha, QuantLib vol ---
-	SABR := [?][7]f64{
+	SABR := [?][7]f64 {
 		{0.0, -0.5, 1e-09, 0.25, 50.0, 20.0, 0.2774900151358734},
 		{0.0, -0.5, 1e-09, 0.25, 80.0, 20.0, 0.2232597720548384},
 		{0.0, -0.5, 1e-09, 0.25, 95.0, 20.0, 0.2052631657988089},
@@ -536,17 +551,35 @@ vol_surface_reference_test :: proc(allocator: mem.Allocator) {
 	{
 		worst, worst_atm := 0.0, 0.0
 		for row in SABR {
-			v := fin.sabr_implied_vol(100, row[4], row[3], fin.SABR_Params{alpha = row[5], beta = row[0], rho = row[1], nu = row[2]})
+			v := fin.sabr_implied_vol(
+				100,
+				row[4],
+				row[3],
+				fin.SABR_Params{alpha = row[5], beta = row[0], rho = row[1], nu = row[2]},
+			)
 			worst = max(worst, abs(v - row[6]))
 			if abs(row[4] - 100) < 1e-6 {worst_atm = max(worst_atm, abs(v - row[6]))}
 		}
-		expect(&passed, &total, worst < 1e-12, fmt.tprintf("SABR implied vols on 324 points match QuantLib: max error %.1e", worst))
-		expect(&passed, &total, worst_atm < 1e-12, fmt.tprintf("SABR at and within 1e-9 of the money, also for nu -> 0 (%.1e; was 0.235: vol 0 next to the money, alpha^2 missing at it)", worst_atm))
+		expect(
+			&passed,
+			&total,
+			worst < 1e-12,
+			fmt.tprintf("SABR implied vols on 324 points match QuantLib: max error %.1e", worst),
+		)
+		expect(
+			&passed,
+			&total,
+			worst_atm < 1e-12,
+			fmt.tprintf(
+				"SABR at and within 1e-9 of the money, also for nu -> 0 (%.1e; was 0.235: vol 0 next to the money, alpha^2 missing at it)",
+				worst_atm,
+			),
+		)
 	}
 
 	// --- calibration round trips ---
 	{
-		Q := [?][3]f64{
+		Q := [?][3]f64 {
 			{70.0, 0.09863013698630137, 0.338777152693489},
 			{80.0, 0.09863013698630137, 0.3018161522935616},
 			{90.0, 0.09863013698630137, 0.2633641431182509},
@@ -594,65 +627,201 @@ vol_surface_reference_test :: proc(allocator: mem.Allocator) {
 			{130.0, 2.0, 0.20423007421505865},
 		}
 		quotes: [len(Q)]fin.VolSurfacePoint
-		for q, i in Q {quotes[i] = {strike = q[0], expiry = q[1], implied_vol = q[2], market_price = fin.black_scholes_call(100, q[0], q[1], r, q[2])}}
+		for q, i in Q {quotes[i] = {
+				strike       = q[0],
+				expiry       = q[1],
+				implied_vol  = q[2],
+				market_price = fin.black_scholes_call(100, q[0], q[1], r, q[2]),
+			}}
 		true_p := [5]f64{0.05, 1.8, 0.07, 0.6, -0.65}
 		h := fin.calibrate_heston(quotes[:], 100, r, allocator = allocator)
 		got := [5]f64{h.params.v0, h.params.kappa, h.params.theta, h.params.sigma, h.params.rho}
 		worst := 0.0
 		for v, i in got {worst = max(worst, abs(v - true_p[i]) / abs(true_p[i]))}
-		expect(&passed, &total, h.converged && worst < 1e-6 && h.iv_rmse < 1e-9, fmt.tprintf("Heston calibration to a QuantLib surface (5 expiries x 9 strikes) recovers v0, kappa, theta, sigma, rho to %.1e in %d iterations, like QuantLib (the Adam fit stopped at a 0.35 price RMSE)", worst, h.iterations))
+		expect(
+			&passed,
+			&total,
+			h.converged && worst < 1e-6 && h.iv_rmse < 1e-9,
+			fmt.tprintf(
+				"Heston calibration to a QuantLib surface (5 expiries x 9 strikes) recovers v0, kappa, theta, sigma, rho to %.1e in %d iterations, like QuantLib (the Adam fit stopped at a 0.35 price RMSE)",
+				worst,
+				h.iterations,
+			),
+		)
 		fe := fin.calibrate_heston(quotes[:], 100, r, allocator = allocator, feller_weight = 1)
-		expect(&passed, &total, fe.feller_margin > 0 && fe.params.sigma > 0, fmt.tprintf("feller_weight > 0 enforces 2*kappa*theta > sigma^2 (margin %.4f; this surface violates it: %.4f)", fe.feller_margin, h.feller_margin))
+		expect(
+			&passed,
+			&total,
+			fe.feller_margin > 0 && fe.params.sigma > 0,
+			fmt.tprintf(
+				"feller_weight > 0 enforces 2*kappa*theta > sigma^2 (margin %.4f; this surface violates it: %.4f)",
+				fe.feller_margin,
+				h.feller_margin,
+			),
+		)
 
-		SQ := [?][2]f64{{60.0, 0.39188551138154193}, {70.0, 0.35027409852456665}, {80.0, 0.314873720509995}, {90.0, 0.28514612699366326}, {95.0, 0.2724408253706492}, {100.0, 0.26126176435993864}, {105.0, 0.25169506617418724}, {110.0, 0.24381422181878376}, {120.0, 0.2331605531884168}, {135.0, 0.2282919916681788}, {150.0, 0.2319856966162458}}
+		SQ := [?][2]f64 {
+			{60.0, 0.39188551138154193},
+			{70.0, 0.35027409852456665},
+			{80.0, 0.314873720509995},
+			{90.0, 0.28514612699366326},
+			{95.0, 0.2724408253706492},
+			{100.0, 0.26126176435993864},
+			{105.0, 0.25169506617418724},
+			{110.0, 0.24381422181878376},
+			{120.0, 0.2331605531884168},
+			{135.0, 0.2282919916681788},
+			{150.0, 0.2319856966162458},
+		}
 		sq: [len(SQ)]fin.VolSurfacePoint
-		for q, i in SQ {sq[i] = {strike = q[0], expiry = 1, implied_vol = q[1]}}
+		for q, i in SQ {sq[i] = {
+				strike      = q[0],
+				expiry      = 1,
+				implied_vol = q[1],
+			}}
 		s := fin.calibrate_sabr(sq[:], 100, r, allocator)
 		sp := [4]f64{1.596436109512329, 0.6, -0.4, 0.7}
 		sg := [4]f64{s.params.alpha, s.params.beta, s.params.rho, s.params.nu}
 		worst = 0
 		for v, i in sg {worst = max(worst, abs(v - sp[i]) / abs(sp[i]))}
-		expect(&passed, &total, worst < 1e-6 && s.rmse < 1e-10, fmt.tprintf("SABR calibration to a QuantLib smile recovers alpha, beta, rho, nu to %.1e (vol RMSE %.1e)", worst, s.rmse))
+		expect(
+			&passed,
+			&total,
+			worst < 1e-6 && s.rmse < 1e-10,
+			fmt.tprintf(
+				"SABR calibration to a QuantLib smile recovers alpha, beta, rho, nu to %.1e (vol RMSE %.1e)",
+				worst,
+				s.rmse,
+			),
+		)
 
-		ctx := fin.Heston_CalibrationContext{market_data = quotes[:], S = 100, r = r}
+		ctx := fin.Heston_CalibrationContext {
+			market_data = quotes[:],
+			S           = 100,
+			r           = r,
+		}
 		p := h.params
 		a := fin.compute_heston_rmse(quotes[:], 100, r, p)
 		b := fin.heston_objective_fn([]f64{p.v0, p.kappa, p.theta, p.sigma, p.rho}, &ctx)
-		expect(&passed, &total, a == b && a == h.rmse && a < 1e-8, fmt.tprintf("compute_heston_rmse == heston_objective_fn == reported rmse (%.1e)", a))
+		expect(
+			&passed,
+			&total,
+			a == b && a == h.rmse && a < 1e-8,
+			fmt.tprintf("compute_heston_rmse == heston_objective_fn == reported rmse (%.1e)", a),
+		)
 	}
 
 	// --- Levenberg-Marquardt against scipy.optimize.least_squares ---
 	{
-		Exp_Fit :: struct {t, y: []f64}
-		T_ := [?]f64{0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0, 3.25, 3.5, 3.75, 4.0, 4.25, 4.5, 4.75}
-		Y_ := [?]f64{3.483961371494931, 2.9918838823950593, 2.6090970367142354, 2.283074997861756, 2.0124768420240216, 1.7527801870219613, 1.5387603009227415, 1.365577493863713, 1.2547658072395114, 1.1537183189026294, 1.0267772058682298, 0.9129606972880668, 0.8482039806502241, 0.8403911070858414, 0.7629384083082837, 0.6826765742539627, 0.6807562640193134, 0.6298777825435683, 0.6159706187198895, 0.5981574397947519}
+		Exp_Fit :: struct {
+			t, y: []f64,
+		}
+		T_ := [?]f64 {
+			0.0,
+			0.25,
+			0.5,
+			0.75,
+			1.0,
+			1.25,
+			1.5,
+			1.75,
+			2.0,
+			2.25,
+			2.5,
+			2.75,
+			3.0,
+			3.25,
+			3.5,
+			3.75,
+			4.0,
+			4.25,
+			4.5,
+			4.75,
+		}
+		Y_ := [?]f64 {
+			3.483961371494931,
+			2.9918838823950593,
+			2.6090970367142354,
+			2.283074997861756,
+			2.0124768420240216,
+			1.7527801870219613,
+			1.5387603009227415,
+			1.365577493863713,
+			1.2547658072395114,
+			1.1537183189026294,
+			1.0267772058682298,
+			0.9129606972880668,
+			0.8482039806502241,
+			0.8403911070858414,
+			0.7629384083082837,
+			0.6826765742539627,
+			0.6807562640193134,
+			0.6298777825435683,
+			0.6159706187198895,
+			0.5981574397947519,
+		}
 		data := Exp_Fit{T_[:], Y_[:]}
 		inf := math.inf_f64(1)
-		res := opt.least_squares([]opt.Calibration_Param{{"a", 1, -inf, inf, .Linear}, {"b", 0.1, -inf, inf, .Linear}, {"c", 0, -inf, inf, .Linear}},
+		res := opt.least_squares(
+			[]opt.Calibration_Param {
+				{"a", 1, -inf, inf, .Linear},
+				{"b", 0.1, -inf, inf, .Linear},
+				{"c", 0, -inf, inf, .Linear},
+			},
 			proc(x, res: []f64, ud: rawptr) {
 				d := (^Exp_Fit)(ud)
 				for ti, i in d.t {res[i] = x[0] * math.exp(-x[1] * ti) + x[2] - d.y[i]}
-			}, len(T_), &data)
+			},
+			len(T_),
+			&data,
+		)
 		defer opt.least_squares_result_free(&res)
 		REF := [3]f64{3.0009261127725586, 0.6808122020366059, 0.475383670255171}
 		worst := 0.0
 		for v, i in res.x {worst = max(worst, abs(v - REF[i]))}
-		expect(&passed, &total, res.converged && worst < 1e-8, fmt.tprintf("least_squares: exponential fit equals scipy (lm) to %.1e", worst))
+		expect(
+			&passed,
+			&total,
+			res.converged && worst < 1e-8,
+			fmt.tprintf("least_squares: exponential fit equals scipy (lm) to %.1e", worst),
+		)
 
-		ros := opt.least_squares([]opt.Calibration_Param{{"x1", -1, -2, 0.5, .Linear}, {"x2", 1, -1, 2, .Linear}},
-			proc(x, res: []f64, _: rawptr) {res[0] = 10 * (x[1] - x[0] * x[0]); res[1] = 1 - x[0]}, 2, nil)
+		ros := opt.least_squares(
+			[]opt.Calibration_Param{{"x1", -1, -2, 0.5, .Linear}, {"x2", 1, -1, 2, .Linear}},
+			proc(x, res: []f64, _: rawptr) {res[0] = 10 * (x[1] - x[0] * x[0]); res[1] = 1 - x[0]},
+			2,
+			nil,
+		)
 		defer opt.least_squares_result_free(&ros)
 		RR := [2]f64{0.49999999999999994, 0.25}
 		gap := max(abs(ros.x[0] - RR[0]), abs(ros.x[1] - RR[1]))
-		expect(&passed, &total, gap < 1e-6, fmt.tprintf("least_squares: bounded Rosenbrock ends on the bound x1 = 0.5 like scipy (trf) (%.1e)", gap))
+		expect(
+			&passed,
+			&total,
+			gap < 1e-6,
+			fmt.tprintf(
+				"least_squares: bounded Rosenbrock ends on the bound x1 = 0.5 like scipy (trf) (%.1e)",
+				gap,
+			),
+		)
 	}
 
 	// --- black_scholes_call deep out of the money (was 1 + erf, cancelling) ---
 	{
-		BS := [?][4]f64{{200.0, 0.25, 0.1, 2.158502028608907e-43}, {300.0, 1.0, 0.2, 2.729865752663375e-07}, {150.0, 0.05, 0.15, 3.5104523324832246e-34}, {100.0, 1.0, 0.2, 9.413403383853016}}
+		BS := [?][4]f64 {
+			{200.0, 0.25, 0.1, 2.158502028608907e-43},
+			{300.0, 1.0, 0.2, 2.729865752663375e-07},
+			{150.0, 0.05, 0.15, 3.5104523324832246e-34},
+			{100.0, 1.0, 0.2, 9.413403383853016},
+		}
 		worst := 0.0
 		for row in BS {worst = max(worst, abs(fin.black_scholes_call(100, row[0], row[1], r, row[2]) - row[3]) / row[3])}
-		expect(&passed, &total, worst < 1e-10, fmt.tprintf("black_scholes_call relative error down to prices of 1e-30: %.1e", worst))
+		expect(
+			&passed,
+			&total,
+			worst < 1e-10,
+			fmt.tprintf("black_scholes_call relative error down to prices of 1e-30: %.1e", worst),
+		)
 	}
 
 	fmt.printf("Volatility surface summary: %d/%d passed\n", passed, total)

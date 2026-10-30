@@ -155,11 +155,7 @@ _bond_yield_pv :: proc(times, amounts: []f64, settle, y, freq: f64) -> (p, dp, d
 
 // Accrued interest, clean price, yield and risk measures from a dirty price at settlement
 @(private = "file")
-_bond_finish :: proc(
-	bond: Bond,
-	dirty_price: f64,
-	allocator: mem.Allocator,
-) -> BondPriceResult {
+_bond_finish :: proc(bond: Bond, dirty_price: f64, allocator: mem.Allocator) -> BondPriceResult {
 	accrued := calculate_accrued_interest(bond)
 	clean := dirty_price - accrued
 	ytm := solve_ytm(bond, clean, allocator)

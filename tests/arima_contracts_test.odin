@@ -41,39 +41,96 @@ arima_contracts_test :: proc(allocator: mem.Allocator) {
 	fit_small := ts.arima_fit(y_small, 1, 0, 1, allocator)
 
 	// 1. scale invariance
-	expect(&passed, &total,
-		abs(fit.phi[0] - fit_small.phi[0]) < 1e-3 && abs(fit.theta[0] - fit_small.theta[0]) < 1e-3 &&
+	expect(
+		&passed,
+		&total,
+		abs(fit.phi[0] - fit_small.phi[0]) < 1e-3 &&
+		abs(fit.theta[0] - fit_small.theta[0]) < 1e-3 &&
 		abs(fit_small.sigma2 / (1e-4 * fit.sigma2) - 1.0) < 1e-3,
-		fmt.tprintf("scale-free: phi %.4f / %.4f, theta %.4f / %.4f, sigma2 ratio %.6f",
-			fit.phi[0], fit_small.phi[0], fit.theta[0], fit_small.theta[0], fit_small.sigma2 / fit.sigma2))
+		fmt.tprintf(
+			"scale-free: phi %.4f / %.4f, theta %.4f / %.4f, sigma2 ratio %.6f",
+			fit.phi[0],
+			fit_small.phi[0],
+			fit.theta[0],
+			fit_small.theta[0],
+			fit_small.sigma2 / fit.sigma2,
+		),
+	)
 
 	// 2. MLE: a long run started at the truth finds no better likelihood
-	ctx := ts.ArimaObjectiveCtx{y = y_small, p = 1, q = 1, d = 0, allocator = allocator}
+	ctx := ts.ArimaObjectiveCtx {
+		y         = y_small,
+		p         = 1,
+		q         = 1,
+		d         = 0,
+		allocator = allocator,
+	}
 	x_true, x_ok := ts.arima_unconstrain_params([]f64{0.6}, []f64{0.3}, 1e-4, allocator)
 	defer delete(x_true)
-	x_ref, f_ref, _ := ts.nelder_mead(ts.arima_neg_loglik_obj, &ctx, x_true, 5000, 1e-12, allocator)
+	x_ref, f_ref, _ := ts.nelder_mead(
+		ts.arima_neg_loglik_obj,
+		&ctx,
+		x_true,
+		5000,
+		1e-12,
+		allocator,
+	)
 	defer delete(x_ref)
 	gap := -f_ref - fit_small.loglik
-	expect(&passed, &total, x_ok && gap < 1e-4, fmt.tprintf("return-scale fit is the MLE (loglik %.4f, reference gap %.1e)", fit_small.loglik, gap))
+	expect(
+		&passed,
+		&total,
+		x_ok && gap < 1e-4,
+		fmt.tprintf(
+			"return-scale fit is the MLE (loglik %.4f, reference gap %.1e)",
+			fit_small.loglik,
+			gap,
+		),
+	)
 
 	// 3. allocations and convergence flag
-	expect(&passed, &total, live == 2 && fit.converged && fit_small.converged,
-		fmt.tprintf("only phi/theta stay allocated (%d live), converged = %v", live, fit.converged))
+	expect(
+		&passed,
+		&total,
+		live == 2 && fit.converged && fit_small.converged,
+		fmt.tprintf(
+			"only phi/theta stay allocated (%d live), converged = %v",
+			live,
+			fit.converged,
+		),
+	)
 
 	// 4. nelder_mead hands back its best vertex when the budget runs out
-	bowl :: proc(x: []f64, _: rawptr) -> f64 {return (x[0] - 3) * (x[0] - 3) + 10 * (x[1] + 1) * (x[1] + 1)}
+	bowl :: proc(x: []f64, _: rawptr) -> f64 {return(
+			(x[0] - 3) * (x[0] - 3) +
+			10 * (x[1] + 1) * (x[1] + 1) \
+		)}
 	x_nm, f_nm, conv_nm := ts.nelder_mead(bowl, nil, []f64{0, 0}, 7, 1e-12, allocator)
 	defer delete(x_nm)
-	expect(&passed, &total, f_nm == bowl(x_nm, nil) && f_nm < bowl([]f64{0, 0}, nil) && !conv_nm,
-		fmt.tprintf("Nelder-Mead budget stop returns a consistent best point (f = %.4f)", f_nm))
+	expect(
+		&passed,
+		&total,
+		f_nm == bowl(x_nm, nil) && f_nm < bowl([]f64{0, 0}, nil) && !conv_nm,
+		fmt.tprintf("Nelder-Mead budget stop returns a consistent best point (f = %.4f)", f_nm),
+	)
 
 	// 5. SARIMA(1,0,0)(1,0,0)_4 fit is independent of the global RNG state
 	ys := ts.simulate_sarima_pdqPDQ([]f64{0.5}, 0, nil, []f64{0.4}, 0, nil, 4, 1.0, 240, allocator)
 	fit_a := ts.sarima_fit(ys, 1, 0, 0, 1, 0, 0, 4, allocator)
 	for _ in 0 ..< 1000 {_ = rand.float64()}
 	fit_b := ts.sarima_fit(ys, 1, 0, 0, 1, 0, 0, 4, allocator)
-	expect(&passed, &total, fit_a.phi[0] == fit_b.phi[0] && fit_a.Phi[0] == fit_b.Phi[0] && fit_a.loglik == fit_b.loglik,
-		fmt.tprintf("SARIMA fit is deterministic (phi %.4f, Phi %.4f)", fit_a.phi[0], fit_a.Phi[0]))
+	expect(
+		&passed,
+		&total,
+		fit_a.phi[0] == fit_b.phi[0] &&
+		fit_a.Phi[0] == fit_b.Phi[0] &&
+		fit_a.loglik == fit_b.loglik,
+		fmt.tprintf(
+			"SARIMA fit is deterministic (phi %.4f, Phi %.4f)",
+			fit_a.phi[0],
+			fit_a.Phi[0],
+		),
+	)
 
 	// 6. statsmodels 0.13.5 reference values (ARIMA / SARIMAX, trend = 'n')
 	arima_statsmodels_checks(&passed, &total, allocator)
@@ -148,62 +205,171 @@ arima_statsmodels_checks :: proc(passed, total: ^int, allocator: mem.Allocator) 
 
 	// --- ARMA(1,1): exact loglik at fixed params, MLE, AIC/BIC, 90% forecast ---
 	ll := ts.arima_loglik(A, {0.6}, {0.3}, 0, 1.0)
-	expect(passed, total, abs(ll - -285.02074235129413) < 1e-7, fmt.tprintf("ARMA(1,1) exact loglik vs statsmodels (err %.1e)", ll - -285.02074235129413))
+	expect(
+		passed,
+		total,
+		abs(ll - -285.02074235129413) < 1e-7,
+		fmt.tprintf("ARMA(1,1) exact loglik vs statsmodels (err %.1e)", ll - -285.02074235129413),
+	)
 	fit := ts.arima_fit(A, 1, 0, 1)
 	sm_fit := []f64{0.61667688633452966, 0.30646535366913735, 1.0070149717878563}
 	got_fit := []f64{fit.phi[0], fit.theta[0], fit.sigma2}
-	expect(passed, total, max_err(got_fit, sm_fit) < 1e-3 && fit.loglik >= -284.94915615901402 - 1e-6 &&
-		abs(fit.aic - (-2 * fit.loglik + 6)) < 1e-9 && abs(fit.aic - 575.89831231802805) < 1e-4 &&
+	expect(
+		passed,
+		total,
+		max_err(got_fit, sm_fit) < 1e-3 &&
+		fit.loglik >= -284.94915615901402 - 1e-6 &&
+		abs(fit.aic - (-2 * fit.loglik + 6)) < 1e-9 &&
+		abs(fit.aic - 575.89831231802805) < 1e-4 &&
 		abs(fit.bic - 585.79326441767216) < 1e-4,
-		fmt.tprintf("ARMA(1,1) MLE vs statsmodels (params err %.1e, loglik %.6f, aic %.4f, bic %.4f)",
-			max_err(got_fit, sm_fit), fit.loglik, fit.aic, fit.bic))
-	fixed := ts.ArimaFitResult{phi = {0.6}, theta = {0.3}, sigma2 = 1.0}
+		fmt.tprintf(
+			"ARMA(1,1) MLE vs statsmodels (params err %.1e, loglik %.6f, aic %.4f, bic %.4f)",
+			max_err(got_fit, sm_fit),
+			fit.loglik,
+			fit.aic,
+			fit.bic,
+		),
+	)
+	fixed := ts.ArimaFitResult {
+		phi    = {0.6},
+		theta  = {0.3},
+		sigma2 = 1.0,
+	}
 	fcA := ts.arima_forecast(A, fixed, 1, 0, 1, 4, 0.1)
-	errA := fc_err(fcA.mean, fcA.lower, fcA.upper,
+	errA := fc_err(
+		fcA.mean,
+		fcA.lower,
+		fcA.upper,
 		{0.84574181620274058, 0.50744508972164437, 0.30446705383298661, 0.18268023229979197},
 		{-0.79911181091740335, -1.7054791412705632, -2.0800601788063959, -2.2606755037300501},
-		{2.4905954433228845, 2.7203693207138522, 2.6889942864723695, 2.6260359683296337})
-	expect(passed, total, errA < 1e-8, fmt.tprintf("ARMA(1,1) forecast + 90%% interval vs statsmodels (err %.1e)", errA))
+		{2.4905954433228845, 2.7203693207138522, 2.6889942864723695, 2.6260359683296337},
+	)
+	expect(
+		passed,
+		total,
+		errA < 1e-8,
+		fmt.tprintf("ARMA(1,1) forecast + 90%% interval vs statsmodels (err %.1e)", errA),
+	)
 
 	// --- ARIMA(1,1,1): h values on the level scale, integrated-variance 80% interval ---
 	fcB := ts.arima_forecast(B, fixed, 1, 1, 1, 4, 0.2)
-	errB := fc_err(fcB.mean, fcB.lower, fcB.upper,
+	errB := fc_err(
+		fcB.mean,
+		fcB.lower,
+		fcB.upper,
 		{27.672123831913346, 28.179568921634992, 28.484035975467979, 28.66671620776777},
 		{26.390572266237328, 25.42796101811695, 24.318776514981685, 23.198935339500107},
-		{28.953675397589365, 30.931176825153035, 32.649295435954272, 34.13449707603543})
-	expect(passed, total, len(fcB.mean) == 4 && errB < 1e-7, fmt.tprintf("ARIMA(1,1,1) forecast (len %d) + 80%% interval vs statsmodels (err %.1e)", len(fcB.mean), errB))
+		{28.953675397589365, 30.931176825153035, 32.649295435954272, 34.13449707603543},
+	)
+	expect(
+		passed,
+		total,
+		len(fcB.mean) == 4 && errB < 1e-7,
+		fmt.tprintf(
+			"ARIMA(1,1,1) forecast (len %d) + 80%% interval vs statsmodels (err %.1e)",
+			len(fcB.mean),
+			errB,
+		),
+	)
 	fc0 := ts.arima_forecast(B, fixed, 1, 1, 1, 0, 0.05)
 	expect(passed, total, len(fc0.mean) == 0, "arima_forecast with h = 0 returns no values")
 
 	// --- ARIMA(0,2,1): MA(1) likelihood (the state carries theta) and d = 2 forecast ---
 	Cd := ts.difference(C, 2)
 	llC := ts.arima_loglik(Cd, {}, {0.5}, 2, 1.0)
-	expect(passed, total, abs(llC - -202.59772728457321) < 1e-7, fmt.tprintf("MA(1) exact loglik vs statsmodels (err %.1e)", llC - -202.59772728457321))
+	expect(
+		passed,
+		total,
+		abs(llC - -202.59772728457321) < 1e-7,
+		fmt.tprintf("MA(1) exact loglik vs statsmodels (err %.1e)", llC - -202.59772728457321),
+	)
 	fcC := ts.arima_forecast(C, ts.ArimaFitResult{theta = {0.5}, sigma2 = 1.0}, 0, 2, 1, 4, 0.05)
-	errC := fc_err(fcC.mean, fcC.lower, fcC.upper,
+	errC := fc_err(
+		fcC.mean,
+		fcC.lower,
+		fcC.upper,
 		{-104.08837266555487, -116.08439557410081, -128.08041848264676, -140.0764413911927},
 		{-106.04833665026605, -121.36176011075314, -137.53102256848041, -154.41234202274944},
-		{-102.12840868084369, -110.80703103744848, -118.62981439681312, -125.74054075963598})
-	expect(passed, total, errC < 1e-7, fmt.tprintf("ARIMA(0,2,1) forecast + 95%% interval vs statsmodels (err %.1e)", errC))
+		{-102.12840868084369, -110.80703103744848, -118.62981439681312, -125.74054075963598},
+	)
+	expect(
+		passed,
+		total,
+		errC < 1e-7,
+		fmt.tprintf("ARIMA(0,2,1) forecast + 95%% interval vs statsmodels (err %.1e)", errC),
+	)
 
 	// --- SARIMA(0,1,1)(0,1,1)_4: forecast, exact loglik, innovations, MLE ---
 	sfc := ts.sarima_forecast(D, {}, {-0.4}, {}, {-0.5}, 1, 1, 4, 6, 0.25, 0.05)
-	errD := fc_err(sfc.mean, sfc.lower, sfc.upper,
-		{31.482902779328338, 31.082774341441144, 30.107369211884084, 31.349759205404098, 29.837760350561137, 29.437631912673936},
-		{30.502920786562765, 29.939928769962325, 28.822134877471598, 29.936409075716188, 28.060234011952016, 27.453319614580671},
-		{32.462884772093915, 32.22561991291996, 31.39260354629657, 32.763109335092011, 31.615286689170258, 31.421944210767201})
-	expect(passed, total, len(sfc.mean) == 6 && errD < 1e-7, fmt.tprintf("SARIMA(0,1,1)(0,1,1)_4 forecast + 95%% interval vs statsmodels (err %.1e)", errD))
+	errD := fc_err(
+		sfc.mean,
+		sfc.lower,
+		sfc.upper,
+		{
+			31.482902779328338,
+			31.082774341441144,
+			30.107369211884084,
+			31.349759205404098,
+			29.837760350561137,
+			29.437631912673936,
+		},
+		{
+			30.502920786562765,
+			29.939928769962325,
+			28.822134877471598,
+			29.936409075716188,
+			28.060234011952016,
+			27.453319614580671,
+		},
+		{
+			32.462884772093915,
+			32.22561991291996,
+			31.39260354629657,
+			32.763109335092011,
+			31.615286689170258,
+			31.421944210767201,
+		},
+	)
+	expect(
+		passed,
+		total,
+		len(sfc.mean) == 6 && errD < 1e-7,
+		fmt.tprintf(
+			"SARIMA(0,1,1)(0,1,1)_4 forecast + 95%% interval vs statsmodels (err %.1e)",
+			errD,
+		),
+	)
 	z := ts.sarima_difference(D, 1, 1, 4)
 	ar, ma := ts.sarima_expand_to_arma({}, {}, {-0.4}, {-0.5}, 4)
 	llD := ts.arima_loglik(z, ar, ma, 0, 0.25)
 	innov := ts.sarima_innovations(D, {}, {-0.4}, {}, {-0.5}, 1, 1, 4, 0.25)
 	errI := max_err(innov[:3], {-0.57963602661986613, -0.84565056861475207, 0.37292571175730382})
-	expect(passed, total, abs(llD - -78.51445819739115) < 1e-7 && len(innov) == len(z) && errI < 1e-10,
-		fmt.tprintf("SARIMA exact loglik (err %.1e) and innovations (err %.1e) vs statsmodels", llD - -78.51445819739115, errI))
+	expect(
+		passed,
+		total,
+		abs(llD - -78.51445819739115) < 1e-7 && len(innov) == len(z) && errI < 1e-10,
+		fmt.tprintf(
+			"SARIMA exact loglik (err %.1e) and innovations (err %.1e) vs statsmodels",
+			llD - -78.51445819739115,
+			errI,
+		),
+	)
 	sfit := ts.sarima_fit(D, 0, 1, 1, 0, 1, 1, 4)
 	sm_s := []f64{-0.48179387407895008, -0.47813484191536221, 0.22377779628657049}
 	got_s := []f64{sfit.theta[0], sfit.Theta[0], sfit.sigma2}
-	expect(passed, total, max_err(got_s, sm_s) < 1e-3 && sfit.loglik >= -77.770514611504623 - 1e-6 &&
-		abs(sfit.aic - 161.54102922300925) < 1e-4 && abs(sfit.bic - 169.77582560809901) < 1e-4 && sfit.converged,
-		fmt.tprintf("SARIMA MLE vs statsmodels (params err %.1e, loglik %.6f, aic %.4f)", max_err(got_s, sm_s), sfit.loglik, sfit.aic))
+	expect(
+		passed,
+		total,
+		max_err(got_s, sm_s) < 1e-3 &&
+		sfit.loglik >= -77.770514611504623 - 1e-6 &&
+		abs(sfit.aic - 161.54102922300925) < 1e-4 &&
+		abs(sfit.bic - 169.77582560809901) < 1e-4 &&
+		sfit.converged,
+		fmt.tprintf(
+			"SARIMA MLE vs statsmodels (params err %.1e, loglik %.6f, aic %.4f)",
+			max_err(got_s, sm_s),
+			sfit.loglik,
+			sfit.aic,
+		),
+	)
 }

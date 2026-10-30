@@ -10,15 +10,43 @@ import "core:math"
 import "core:mem"
 
 @(private = "file")
-BD_B1 :: [6]f64{108.41575764256149, 2.083333333333326, 106.33242430922816, 0.040222964480895594, 6.198800108051236, 46.34931600387755}
+BD_B1 :: [6]f64 {
+	108.41575764256149,
+	2.083333333333326,
+	106.33242430922816,
+	0.040222964480895594,
+	6.198800108051236,
+	46.34931600387755,
+}
 @(private = "file")
-BD_B2 :: [6]f64{113.33905679941503, 0.49999999999998934, 112.83905679941505, 0.0396517148085127, 5.982717158143267, 43.06364991414488}
+BD_B2 :: [6]f64 {
+	113.33905679941503,
+	0.49999999999998934,
+	112.83905679941505,
+	0.0396517148085127,
+	5.982717158143267,
+	43.06364991414488,
+}
 @(private = "file")
 BD_Z :: [4]f64{98.48470936547967, 0.03100882995698151, 0.48496189894015, 0.7055641302709088}
 @(private = "file")
-BD_CALL :: [7]f64{104.75163439651008, 0.6597817197773296, 107.41219779954082, 6.220413136913124, -38.69638012983362, 102.11165817358486, 104.75134425981688}
+BD_CALL :: [7]f64 {
+	104.75163439651008,
+	0.6597817197773296,
+	107.41219779954082,
+	6.220413136913124,
+	-38.69638012983362,
+	102.11165817358486,
+	104.75134425981688,
+}
 @(private = "file")
-BD_PUT :: [5]f64{100.18071824563884, 0.8611228035133489, 90.98069930140446, 98.53043334456596, 100.18079133686975}
+BD_PUT :: [5]f64 {
+	100.18071824563884,
+	0.8611228035133489,
+	90.98069930140446,
+	98.53043334456596,
+	100.18079133686975,
+}
 @(private = "file")
 BD_ZCB :: 0.8825197491894619
 @(private = "file")
@@ -36,7 +64,9 @@ _bd_df :: proc(t: f64, user_data: rawptr) -> f64 {return _bd_p0(t)}
 
 bonds_reference_test :: proc(allocator: mem.Allocator) {
 	seed_test(#procedure)
-	fmt.println("\n=== Bonds: yield, duration, convexity, schedules; Hull-White callable / puttable (QuantLib / exact reference) ===")
+	fmt.println(
+		"\n=== Bonds: yield, duration, convexity, schedules; Hull-White callable / puttable (QuantLib / exact reference) ===",
+	)
 	context.allocator = allocator
 	passed, total := 0, 0
 	expect :: proc(passed, total: ^int, ok: bool, name: string) {
@@ -48,31 +78,95 @@ bonds_reference_test :: proc(allocator: mem.Allocator) {
 
 	// 1. Seasoned fixed bond, forward settlement: price, yield, duration, convexity
 	{
-		b := fin.Bond{face_value = 100, coupon_rate = 0.05, maturity = 10, issue_date = -27.0 / 12.0, settlement_date = 2.0 / 12.0, bond_type = .Fixed, coupon_frequency = .SemiAnnual}
+		b := fin.Bond {
+			face_value       = 100,
+			coupon_rate      = 0.05,
+			maturity         = 10,
+			issue_date       = -27.0 / 12.0,
+			settlement_date  = 2.0 / 12.0,
+			bond_type        = .Fixed,
+			coupon_frequency = .SemiAnnual,
+		}
 		r := fin.price_bond_from_curve(b, _bd_df, nil)
 		ref := BD_B1
-		ok := rel(r.dirty_price, ref[0]) < 1e-13 && abs(r.accrued_interest - ref[1]) < 1e-12 && abs(r.yield_to_maturity - ref[3]) < 1e-12 && rel(r.modified_duration, ref[4]) < 1e-10 && rel(r.convexity, ref[5]) < 1e-10
-		expect(&passed, &total, ok, fmt.tprintf("5%% bond issued 2.25y ago, settling in 2 months, vs QuantLib: dirty %.6f (%.6f), accrued %.6f, YTM %.8f%% (%.8f%%), mod. duration %.6f (%.6f), convexity %.4f (%.4f; the old one was divided by the price twice: 0.43)", r.dirty_price, ref[0], r.accrued_interest, 100 * r.yield_to_maturity, 100 * ref[3], r.modified_duration, ref[4], r.convexity, ref[5]))
+		ok :=
+			rel(r.dirty_price, ref[0]) < 1e-13 &&
+			abs(r.accrued_interest - ref[1]) < 1e-12 &&
+			abs(r.yield_to_maturity - ref[3]) < 1e-12 &&
+			rel(r.modified_duration, ref[4]) < 1e-10 &&
+			rel(r.convexity, ref[5]) < 1e-10
+		expect(
+			&passed,
+			&total,
+			ok,
+			fmt.tprintf(
+				"5%% bond issued 2.25y ago, settling in 2 months, vs QuantLib: dirty %.6f (%.6f), accrued %.6f, YTM %.8f%% (%.8f%%), mod. duration %.6f (%.6f), convexity %.4f (%.4f; the old one was divided by the price twice: 0.43)",
+				r.dirty_price,
+				ref[0],
+				r.accrued_interest,
+				100 * r.yield_to_maturity,
+				100 * ref[3],
+				r.modified_duration,
+				ref[4],
+				r.convexity,
+				ref[5],
+			),
+		)
 	}
 
 	// 2. Irregular schedule and a short zero-coupon bond
 	{
-		b := fin.Bond{face_value = 100, coupon_rate = 0.06, maturity = 89.0 / 12.0, issue_date = -1.0 / 12.0, bond_type = .Fixed, coupon_frequency = .SemiAnnual}
+		b := fin.Bond {
+			face_value       = 100,
+			coupon_rate      = 0.06,
+			maturity         = 89.0 / 12.0,
+			issue_date       = -1.0 / 12.0,
+			bond_type        = .Fixed,
+			coupon_frequency = .SemiAnnual,
+		}
 		r := fin.price_bond_from_curve(b, _bd_df, nil)
 		z := fin.price_bond_from_curve(fin.create_zero_coupon_bond(100, 0.5), _bd_df, nil)
 		ref, rz := BD_B2, BD_Z
-		ok := rel(r.dirty_price, ref[0]) < 1e-13 && abs(r.accrued_interest - ref[1]) < 1e-12 && abs(r.yield_to_maturity - ref[3]) < 1e-12 && rel(r.convexity, ref[5]) < 1e-10
-		ok &&= rel(z.clean_price, rz[0]) < 1e-13 && abs(z.yield_to_maturity - rz[1]) < 1e-12 && rel(z.modified_duration, rz[2]) < 1e-12 && rel(z.convexity, rz[3]) < 1e-12
-		expect(&passed, &total, ok, fmt.tprintf("89-month 6%% bond (5-month first stub) vs QuantLib: dirty %.6f (%.6f; old schedule ran forward from issue: 112.88), YTM %.8f%% (%.8f%%); 6-month zero: price %.6f (%.6f; old 0, no flow before year 1), YTM %.6f%%", r.dirty_price, ref[0], 100 * r.yield_to_maturity, 100 * ref[3], z.clean_price, rz[0], 100 * z.yield_to_maturity))
+		ok :=
+			rel(r.dirty_price, ref[0]) < 1e-13 &&
+			abs(r.accrued_interest - ref[1]) < 1e-12 &&
+			abs(r.yield_to_maturity - ref[3]) < 1e-12 &&
+			rel(r.convexity, ref[5]) < 1e-10
+		ok &&=
+			rel(z.clean_price, rz[0]) < 1e-13 &&
+			abs(z.yield_to_maturity - rz[1]) < 1e-12 &&
+			rel(z.modified_duration, rz[2]) < 1e-12 &&
+			rel(z.convexity, rz[3]) < 1e-12
+		expect(
+			&passed,
+			&total,
+			ok,
+			fmt.tprintf(
+				"89-month 6%% bond (5-month first stub) vs QuantLib: dirty %.6f (%.6f; old schedule ran forward from issue: 112.88), YTM %.8f%% (%.8f%%); 6-month zero: price %.6f (%.6f; old 0, no flow before year 1), YTM %.6f%%",
+				r.dirty_price,
+				ref[0],
+				100 * r.yield_to_maturity,
+				100 * ref[3],
+				z.clean_price,
+				rz[0],
+				100 * z.yield_to_maturity,
+			),
+		)
 	}
 
 	call := fin.CallableBond {
-		face_value = 100, coupon_rate = 0.05, coupon_frequency = 2, maturity = 10,
-		call_schedule = []fin.CallDate{{5, 102}, {6, 101.5}, {7, 101}, {8, 100.5}, {9, 100}},
+		face_value       = 100,
+		coupon_rate      = 0.05,
+		coupon_frequency = 2,
+		maturity         = 10,
+		call_schedule    = []fin.CallDate{{5, 102}, {6, 101.5}, {7, 101}, {8, 100.5}, {9, 100}},
 	}
 	put := fin.PuttableBond {
-		face_value = 100, coupon_rate = 0.03, coupon_frequency = 2, maturity = 10,
-		put_schedule = []fin.PutDate{{3, 100}, {5, 100}, {7, 100}},
+		face_value       = 100,
+		coupon_rate      = 0.03,
+		coupon_frequency = 2,
+		maturity         = 10,
+		put_schedule     = []fin.PutDate{{3, 100}, {5, 100}, {7, 100}},
 	}
 	N :: 65536
 
@@ -81,16 +175,50 @@ bonds_reference_test :: proc(allocator: mem.Allocator) {
 		zcb := fin._hw1f_zero_coupon_bond(0.04, 5, 8, 0.1, 0.01, _bd_p0)
 		r := fin.callable_bond_lsm_hw1f(call, 0.1, 0.01, 0.03, _bd_p0, N)
 		ref := BD_CALL
-		ok := rel(zcb, BD_ZCB) < 1e-9 && rel(r.straight_bond_price, ref[2]) < 1e-9 && abs(r.price - ref[0]) < 0.05 && abs(r.call_probability - ref[1]) < 0.01
-		expect(&passed, &total, ok, fmt.tprintf("callable 10y 5%% (calls 5y–9y, HW a=0.1 σ=1%%) vs exact backward induction: price %.4f (%.4f, QuantLib tree %.4f; old 109.83, above the straight bond), straight %.6f, call probability %.4f (%.4f); HW P(5,8) %.8f (%.8f; old 0.88091)", r.price, ref[0], ref[6], r.straight_bond_price, r.call_probability, ref[1], zcb, BD_ZCB))
+		ok :=
+			rel(zcb, BD_ZCB) < 1e-9 &&
+			rel(r.straight_bond_price, ref[2]) < 1e-9 &&
+			abs(r.price - ref[0]) < 0.05 &&
+			abs(r.call_probability - ref[1]) < 0.01
+		expect(
+			&passed,
+			&total,
+			ok,
+			fmt.tprintf(
+				"callable 10y 5%% (calls 5y–9y, HW a=0.1 σ=1%%) vs exact backward induction: price %.4f (%.4f, QuantLib tree %.4f; old 109.83, above the straight bond), straight %.6f, call probability %.4f (%.4f); HW P(5,8) %.8f (%.8f; old 0.88091)",
+				r.price,
+				ref[0],
+				ref[6],
+				r.straight_bond_price,
+				r.call_probability,
+				ref[1],
+				zcb,
+				BD_ZCB,
+			),
+		)
 	}
 
 	// 4. Bermudan puttable bond
 	{
 		r := fin.puttable_bond_lsm_hw1f(put, 0.05, 0.012, 0.03, _bd_p0, N)
 		ref := BD_PUT
-		ok := rel(r.straight_bond_price, ref[2]) < 1e-9 && abs(r.price - ref[0]) < 0.03 && abs(r.put_probability - ref[1]) < 0.01
-		expect(&passed, &total, ok, fmt.tprintf("puttable 10y 3%% (puts 3y/5y/7y at par, HW a=0.05 σ=1.2%%) vs exact: price %.4f (%.4f, QuantLib tree %.4f; old 92.68), put probability %.4f (%.4f)", r.price, ref[0], ref[4], r.put_probability, ref[1]))
+		ok :=
+			rel(r.straight_bond_price, ref[2]) < 1e-9 &&
+			abs(r.price - ref[0]) < 0.03 &&
+			abs(r.put_probability - ref[1]) < 0.01
+		expect(
+			&passed,
+			&total,
+			ok,
+			fmt.tprintf(
+				"puttable 10y 3%% (puts 3y/5y/7y at par, HW a=0.05 σ=1.2%%) vs exact: price %.4f (%.4f, QuantLib tree %.4f; old 92.68), put probability %.4f (%.4f)",
+				r.price,
+				ref[0],
+				ref[4],
+				r.put_probability,
+				ref[1],
+			),
+		)
 	}
 
 	// 5. Effective duration / convexity (±50 bp) and OAS round trips
@@ -99,8 +227,26 @@ bonds_reference_test :: proc(allocator: mem.Allocator) {
 		ref := BD_CALL
 		oc := fin.callable_bond_oas(call, 0.1, 0.01, 0.03, _bd_p0, ref[5], N)
 		op := fin.puttable_bond_oas(put, 0.05, 0.012, 0.03, _bd_p0, BD_PUT[3], N)
-		ok := abs(r.effective_duration - ref[3]) < 0.02 && abs(r.effective_convexity - ref[4]) < 2.5 && abs(oc - BD_OAS) < 1e-4 && abs(op - BD_OAS) < 1e-4
-		expect(&passed, &total, ok, fmt.tprintf("callable effective duration %.4f (%.4f), convexity %.2f (%.2f); OAS from the exact price at +%.0f bp: callable %.2f bp, puttable %.2f bp (old: r0 bumps off the curve, convexity −872)", r.effective_duration, ref[3], r.effective_convexity, ref[4], 1e4 * BD_OAS, 1e4 * oc, 1e4 * op))
+		ok :=
+			abs(r.effective_duration - ref[3]) < 0.02 &&
+			abs(r.effective_convexity - ref[4]) < 2.5 &&
+			abs(oc - BD_OAS) < 1e-4 &&
+			abs(op - BD_OAS) < 1e-4
+		expect(
+			&passed,
+			&total,
+			ok,
+			fmt.tprintf(
+				"callable effective duration %.4f (%.4f), convexity %.2f (%.2f); OAS from the exact price at +%.0f bp: callable %.2f bp, puttable %.2f bp (old: r0 bumps off the curve, convexity −872)",
+				r.effective_duration,
+				ref[3],
+				r.effective_convexity,
+				ref[4],
+				1e4 * BD_OAS,
+				1e4 * oc,
+				1e4 * op,
+			),
+		)
 	}
 
 	fmt.printf("Bonds summary: %d/%d passed\n", passed, total)

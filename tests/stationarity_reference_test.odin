@@ -42,66 +42,139 @@ stationarity_reference_test :: proc(allocator: mem.Allocator) {
 		if !close(pc[k], pacf_ref[k - 1], 1e-12) do ok_pc = false
 	}
 	expect(&passed, &total, ok_ac, fmt.tprintf("acf matches statsmodels (r1 = %.12f)", ac[1]))
-	expect(&passed, &total, ok_pc, fmt.tprintf("pacf matches statsmodels ldb (phi22 = %.12f)", pc[2]))
+	expect(
+		&passed,
+		&total,
+		ok_pc,
+		fmt.tprintf("pacf matches statsmodels ldb (phi22 = %.12f)", pc[2]),
+	)
 
 	// --- Ljung-Box (10 lags, model_df 2): tiny p-value keeps relative precision ---
 	Q, df, p_lb := ts.ljung_box(y, 10, 2)
-	expect(&passed, &total,
+	expect(
+		&passed,
+		&total,
 		close(Q, 242.45790160995) && df == 8 && abs(p_lb / 6.82958468748923e-48 - 1) < 1e-8,
-		fmt.tprintf("ljung_box Q = %.10f, df = %d, p = %.6e", Q, df, p_lb))
+		fmt.tprintf("ljung_box Q = %.10f, df = %d, p = %.6e", Q, df, p_lb),
+	)
 	Q_long, _, p_long := ts.ljung_box(y[:12], 20, 0)
-	expect(&passed, &total, Q_long == Q_long && p_long == p_long, "ljung_box with max_lag >= n stays finite")
+	expect(
+		&passed,
+		&total,
+		Q_long == Q_long && p_long == p_long,
+		"ljung_box with max_lag >= n stays finite",
+	)
 
 	// --- Jarque-Bera and chi-square tail ---
 	JB, p_jb := ts.jarque_bera(y)
-	expect(&passed, &total, close(JB, 2.72963397568836) && close(p_jb, 0.255427418033196),
-		fmt.tprintf("jarque_bera JB = %.10f, p = %.10f", JB, p_jb))
-	expect(&passed, &total,
-		close(ts.chi2_sf(1000, 1000), 0.49405285382924) && close(ts.chi2_sf(300, 400), 0.999942903114258) &&
+	expect(
+		&passed,
+		&total,
+		close(JB, 2.72963397568836) && close(p_jb, 0.255427418033196),
+		fmt.tprintf("jarque_bera JB = %.10f, p = %.10f", JB, p_jb),
+	)
+	expect(
+		&passed,
+		&total,
+		close(ts.chi2_sf(1000, 1000), 0.49405285382924) &&
+		close(ts.chi2_sf(300, 400), 0.999942903114258) &&
 		abs(ts.chi2_sf(150, 10) / 3.7274850550625e-27 - 1) < 1e-10,
-		"chi2_sf for large df and tiny tails")
+		"chi2_sf for large df and tiny tails",
+	)
 
 	// --- ADF ---
 	{
 		s, p, lags, nobs, c1, c5, c10 := ts.adf_test(y, 2, .Constant, .Fixed)
-		expect(&passed, &total,
-			close(s, -1.93640198829787) && close(p, 0.315134917907817) && lags == 2 && nobs == 77 &&
-			close(c1, -3.51828113466058) && close(c5, -2.89987818519143) && close(c10, -2.58722299375949),
-			fmt.tprintf("adf c, fixed lag 2: stat %.10f, p %.10f, crit %.6f", s, p, c5))
+		expect(
+			&passed,
+			&total,
+			close(s, -1.93640198829787) &&
+			close(p, 0.315134917907817) &&
+			lags == 2 &&
+			nobs == 77 &&
+			close(c1, -3.51828113466058) &&
+			close(c5, -2.89987818519143) &&
+			close(c10, -2.58722299375949),
+			fmt.tprintf("adf c, fixed lag 2: stat %.10f, p %.10f, crit %.6f", s, p, c5),
+		)
 	}
 	{
 		s, p, lags, nobs, c1, c5, c10 := ts.adf_test(y, 6, .ConstantTrend, .AIC)
-		expect(&passed, &total,
-			close(s, -2.9076334420339) && close(p, 0.159759708001583) && lags == 1 && nobs == 78 &&
-			close(c1, -4.07979066664981) && close(c5, -3.46835800097776) && close(c10, -3.16089101299752),
-			fmt.tprintf("adf ct, AIC <= 6: stat %.10f, p %.10f, lag %d, nobs %d", s, p, lags, nobs))
+		expect(
+			&passed,
+			&total,
+			close(s, -2.9076334420339) &&
+			close(p, 0.159759708001583) &&
+			lags == 1 &&
+			nobs == 78 &&
+			close(c1, -4.07979066664981) &&
+			close(c5, -3.46835800097776) &&
+			close(c10, -3.16089101299752),
+			fmt.tprintf(
+				"adf ct, AIC <= 6: stat %.10f, p %.10f, lag %d, nobs %d",
+				s,
+				p,
+				lags,
+				nobs,
+			),
+		)
 	}
 	{
 		s, p, lags, nobs, _, c5, _ := ts.adf_test(y, 6, .None, .BIC)
-		expect(&passed, &total,
-			close(s, -2.29877554529116) && close(p, 0.0207098725452723) && lags == 1 && nobs == 78 &&
+		expect(
+			&passed,
+			&total,
+			close(s, -2.29877554529116) &&
+			close(p, 0.0207098725452723) &&
+			lags == 1 &&
+			nobs == 78 &&
 			close(c5, -1.94493088512955),
-			fmt.tprintf("adf n, BIC <= 6: stat %.10f, p %.10f, lag %d", s, p, lags))
+			fmt.tprintf("adf n, BIC <= 6: stat %.10f, p %.10f, lag %d", s, p, lags),
+		)
 	}
 	{
 		// 20 points: maxlag 12 is capped at 20/2 - 1 - 1 = 8 (statsmodels maxlag=8)
 		s, p, lags, nobs, _, _, _ := ts.adf_test(y[:20], 12, .Constant, .AIC)
-		expect(&passed, &total,
+		expect(
+			&passed,
+			&total,
 			close(s, -2.69817112796952) && close(p, 0.074355278811514) && lags == 8 && nobs == 11,
-			fmt.tprintf("adf c, AIC on a short series: stat %.10f, lag %d, nobs %d", s, lags, nobs))
+			fmt.tprintf(
+				"adf c, AIC on a short series: stat %.10f, lag %d, nobs %d",
+				s,
+				lags,
+				nobs,
+			),
+		)
 	}
 
 	// --- KPSS ---
 	{
 		s, p, _, _, _, _ := ts.kpss_test(y, .Level, -1)
-		expect(&passed, &total, close(s, 0.445939393587291) && close(p, 0.0573537096606505),
-			fmt.tprintf("kpss level, auto lags (5): stat %.10f, p %.10f", s, p))
+		expect(
+			&passed,
+			&total,
+			close(s, 0.445939393587291) && close(p, 0.0573537096606505),
+			fmt.tprintf("kpss level, auto lags (5): stat %.10f, p %.10f", s, p),
+		)
 		s, p, _, _, _, _ = ts.kpss_test(y, .Trend, 4)
-		expect(&passed, &total, close(s, 0.12646322902656) && close(p, 0.0861792055063702),
-			fmt.tprintf("kpss trend, 4 lags: stat %.10f, p %.10f", s, p))
+		expect(
+			&passed,
+			&total,
+			close(s, 0.12646322902656) && close(p, 0.0861792055063702),
+			fmt.tprintf("kpss trend, 4 lags: stat %.10f, p %.10f", s, p),
+		)
 		s, p, _, _, _, _ = ts.kpss_test(y, .Level, 12)
-		expect(&passed, &total, close(s, 0.292075756605375) && p == 0.10,
-			fmt.tprintf("kpss level, 12 lags (statsmodels legacy): stat %.10f, p clamped %.2f", s, p))
+		expect(
+			&passed,
+			&total,
+			close(s, 0.292075756605375) && p == 0.10,
+			fmt.tprintf(
+				"kpss level, 12 lags (statsmodels legacy): stat %.10f, p clamped %.2f",
+				s,
+				p,
+			),
+		)
 	}
 
 	fmt.printf("Stationarity reference: %d/%d passed\n", passed, total)

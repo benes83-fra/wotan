@@ -80,12 +80,15 @@ ir_derivatives_2f_test :: proc(allocator: mem.Allocator) {
 
 		sigma_P := math.sqrt_f64(term1 + term2 + term3)
 
-		d1 := (math.ln(F_arr[i] / K_arr[i]) + 0.5 * sigma_P * sigma_P) / sigma_P
+		// caplet = P(0,T_e) [(1+δF) N(d1) − (1+δK) N(d2)], an option on P(T_s, T_e)
+		gF := 1.0 + (T_end_arr[i] - T_start_arr[i]) * F_arr[i]
+		gK := 1.0 + (T_end_arr[i] - T_start_arr[i]) * K_arr[i]
+		d1 := (math.ln(gF / gK) + 0.5 * sigma_P * sigma_P) / sigma_P
 		d2 := d1 - sigma_P
 		N_d1 := 0.5 * (1.0 + math.erf(d1 / math.sqrt_f64(2.0)))
 		N_d2 := 0.5 * (1.0 + math.erf(d2 / math.sqrt_f64(2.0)))
 
-		true_price := P_arr[i] * (F_arr[i] * N_d1 - K_arr[i] * N_d2)
+		true_price := P_arr[i] * (gF * N_d1 - gK * N_d2)
 		market_prices[i] = true_price * noise
 	}
 
@@ -240,11 +243,14 @@ ir_derivatives_2f_swaption_test :: proc(allocator: mem.Allocator) {
 			(1.0 - math.exp_f64(-(true_a + true_b) * T_start_arr[i])) /
 			(true_a + true_b)
 		sigma_P := math.sqrt_f64(math.max(term1 + term2 + term3, 1e-12))
-		d1 := (math.ln(F_arr[i] / K_arr[i]) + 0.5 * sigma_P * sigma_P) / sigma_P
+		// caplet = P(0,T_e) [(1+δF) N(d1) − (1+δK) N(d2)], an option on P(T_s, T_e)
+		gF := 1.0 + (T_end_arr[i] - T_start_arr[i]) * F_arr[i]
+		gK := 1.0 + (T_end_arr[i] - T_start_arr[i]) * K_arr[i]
+		d1 := (math.ln(gF / gK) + 0.5 * sigma_P * sigma_P) / sigma_P
 		d2 := d1 - sigma_P
 		N_d1 := 0.5 * (1.0 + math.erf(d1 / math.sqrt_f64(2.0)))
 		N_d2 := 0.5 * (1.0 + math.erf(d2 / math.sqrt_f64(2.0)))
-		cap_market[i] = P_arr[i] * (F_arr[i] * N_d1 - K_arr[i] * N_d2) * noise
+		cap_market[i] = P_arr[i] * (gF * N_d1 - gK * N_d2) * noise
 	}
 
 	// =====================================================================
@@ -278,7 +284,13 @@ ir_derivatives_2f_swaption_test :: proc(allocator: mem.Allocator) {
 		// Generate true price using the HW2F swaption pricer (Bachelier on the
 		// G2++ swap-rate variance; validated against the exact price in
 		// hull_white_contracts_test)
-		true_prices := fin.hw2f_swaption_price_strip(true_params, swaption_specs[i:i + 1], 1, r0, allocator)
+		true_prices := fin.hw2f_swaption_price_strip(
+			true_params,
+			swaption_specs[i:i + 1],
+			1,
+			r0,
+			allocator,
+		)
 		true_price := true_prices[0]
 		delete(true_prices, allocator)
 

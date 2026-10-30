@@ -252,7 +252,15 @@ rough_volatility_pd_test :: proc(allocator: mem.Allocator) {
 	fmt.println()
 
 	// Compute PD for Black-Scholes
-	bs_pd_result := fin.implied_default_probability(strikes, bs_prices, r, T, K_default, allocator, spot = S)
+	bs_pd_result := fin.implied_default_probability(
+		strikes,
+		bs_prices,
+		r,
+		T,
+		K_default,
+		allocator,
+		spot = S,
+	)
 	defer {
 		delete(bs_pd_result.rnd_strikes, allocator)
 		delete(bs_pd_result.rnd_values, allocator)

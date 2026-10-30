@@ -74,8 +74,16 @@ cholesky_callers_test :: proc(allocator: mem.Allocator) {
 		normalise(ref_ms)
 		w_ms := fin.max_sharpe_portfolio(mu, &S, 0.02, allocator)
 		defer delete(w_ms, allocator)
-		expect(&passed, &total, vrel(w_mv, ref_mv) < 1e-12 && vrel(w_ms, ref_ms) < 1e-12,
-			fmt.tprintf("portfolio weights match Σ⁻¹ references (min-var %.1e, max-Sharpe %.1e)", vrel(w_mv, ref_mv), vrel(w_ms, ref_ms)))
+		expect(
+			&passed,
+			&total,
+			vrel(w_mv, ref_mv) < 1e-12 && vrel(w_ms, ref_ms) < 1e-12,
+			fmt.tprintf(
+				"portfolio weights match Σ⁻¹ references (min-var %.1e, max-Sharpe %.1e)",
+				vrel(w_mv, ref_mv),
+				vrel(w_ms, ref_ms),
+			),
+		)
 	}
 
 	// 2. OLS and ridge covariance of beta
@@ -88,7 +96,12 @@ cholesky_callers_test :: proc(allocator: mem.Allocator) {
 		for i in 0 ..< N {
 			X.data[i * p] = 1
 			for j in 1 ..< p {X.data[i * p + j] = rand.norm_float64() * f64(j)}
-			y[i] = 1 + 0.5 * at(X, i, 1) - 0.2 * at(X, i, 2) + 0.1 * at(X, i, 3) + 0.3 * rand.norm_float64()
+			y[i] =
+				1 +
+				0.5 * at(X, i, 1) -
+				0.2 * at(X, i, 2) +
+				0.1 * at(X, i, 3) +
+				0.3 * rand.norm_float64()
 		}
 		XtX := gram(X)
 		defer l.matrix_free(&XtX)
@@ -117,8 +130,16 @@ cholesky_callers_test :: proc(allocator: mem.Allocator) {
 			}
 		}
 		err_ridge := vrel(r.vcov.data, ref)
-		expect(&passed, &total, err_ols < 1e-12 && err_ridge < 1e-12,
-			fmt.tprintf("OLS / ridge vcov match σ²(XᵀX)⁻¹ / σ²A⁻¹XᵀXA⁻¹ (%.1e / %.1e)", err_ols, err_ridge))
+		expect(
+			&passed,
+			&total,
+			err_ols < 1e-12 && err_ridge < 1e-12,
+			fmt.tprintf(
+				"OLS / ridge vcov match σ²(XᵀX)⁻¹ / σ²A⁻¹XᵀXA⁻¹ (%.1e / %.1e)",
+				err_ols,
+				err_ridge,
+			),
+		)
 	}
 
 	// 3. GLS with AR(1) errors
@@ -159,8 +180,16 @@ cholesky_callers_test :: proc(allocator: mem.Allocator) {
 		ref := matvec(Ai, bv)
 		defer delete(ref)
 		g := ml.gls_fit(&X, y, &Om, .Cholesky, allocator)
-		expect(&passed, &total, vrel(g.beta, ref) < 1e-10,
-			fmt.tprintf("GLS beta %v matches (XᵀΩ⁻¹X)⁻¹XᵀΩ⁻¹y (rel err %.1e)", g.beta, vrel(g.beta, ref)))
+		expect(
+			&passed,
+			&total,
+			vrel(g.beta, ref) < 1e-10,
+			fmt.tprintf(
+				"GLS beta %v matches (XᵀΩ⁻¹X)⁻¹XᵀΩ⁻¹y (rel err %.1e)",
+				g.beta,
+				vrel(g.beta, ref),
+			),
+		)
 	}
 
 	fmt.printf("Cholesky callers summary: %d/%d passed\n", passed, total)

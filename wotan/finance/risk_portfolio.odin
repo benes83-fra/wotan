@@ -216,7 +216,10 @@ min_cvar_portfolio :: proc(
 		return f
 	}
 
-	project :: proc(z: []f64, n: int, c: PortfolioConstraints) {_project_constraints_exact(z[:n], c)}
+	project :: proc(z: []f64, n: int, c: PortfolioConstraints) {_project_constraints_exact(
+			z[:n],
+			c,
+		)}
 
 	// Lipschitz estimate of the smoothed gradient: ‖(r_t, 1)‖² / (4 μ α T) summed
 	row_sq := 0.0

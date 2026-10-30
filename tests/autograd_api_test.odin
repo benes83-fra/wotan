@@ -51,7 +51,10 @@ autograd_api_test :: proc(allocator: mem.Allocator) {
 	defer t.tensor_free(x_flat)
 	y_flat := t.tensor_matmul(x_flat, W)
 	defer t.tensor_free(y_flat)
-	api_expect(y_flat.shape == [4]int{6, 5, 1, 1}, "flattened matmul with plain [1,24] shape -> [6,5]")
+	api_expect(
+		y_flat.shape == [4]int{6, 5, 1, 1},
+		"flattened matmul with plain [1,24] shape -> [6,5]",
+	)
 
 	// Feature dim of size 1 (e.g. a scalar time series embedded by Linear(1, d))
 	W1 := gcl_rand(1, 24, {1, 24, 1, 1}, 206, false, allocator)
@@ -60,7 +63,10 @@ autograd_api_test :: proc(allocator: mem.Allocator) {
 	defer t.tensor_free(x1)
 	y1 := t.tensor_matmul(x1, W1)
 	defer t.tensor_free(y1)
-	api_expect(y1.shape == [4]int{32, 16, 24, 1}, "flattened matmul [32,16,1]@[1,24] -> [32,16,24]")
+	api_expect(
+		y1.shape == [4]int{32, 16, 24, 1},
+		"flattened matmul [32,16,1]@[1,24] -> [32,16,24]",
+	)
 
 	// 4. Shape-preserving ops keep the logical shape
 	sc := t.tensor_scale(x3, 0.5)

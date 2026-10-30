@@ -78,7 +78,12 @@ analytics_edge_cases_test :: proc(allocator: mem.Allocator) {
 	expect(&passed, &total, !gempty.converged, "garch_fit on an empty series")
 	gfit := ts.garch_fit(ys)
 	gfc := ts.garch_forecast(&gfit, []f64{}, 3)
-	expect(&passed, &total, math.is_nan(gfc.variance_forecast), "garch_forecast from empty residuals")
+	expect(
+		&passed,
+		&total,
+		math.is_nan(gfc.variance_forecast),
+		"garch_forecast from empty residuals",
+	)
 	vm := ts.create_garch_volatility(ys)
 	ts.destroy_garch_volatility(&vm)
 	expect(&passed, &total, vm.conditional_var == nil, "destroy_garch_volatility frees once")
@@ -92,7 +97,12 @@ analytics_edge_cases_test :: proc(allocator: mem.Allocator) {
 	top2 := make([][]f64, len(scores))
 	for r, i in scores do top2[i] = r[:2]
 	recon := ts.pca_inverse_transform(top2, pca)
-	expect(&passed, &total, len(recon) == 4 && len(recon[0]) == 3, "pca_inverse_transform from top-2 scores")
+	expect(
+		&passed,
+		&total,
+		len(recon) == 4 && len(recon[0]) == 3,
+		"pca_inverse_transform from top-2 scores",
+	)
 
 	// --- rolling ---
 	df := w.df_from(
@@ -100,18 +110,40 @@ analytics_edge_cases_test :: proc(allocator: mem.Allocator) {
 		w.column_from_bools("b", []bool{true, false, true, true, false}),
 		w.column_from_ints("i", []int{1, 2, 3, 4, 5}),
 	)
-	cnt := ts.rolling_apply(ts.rolling_window(&df, "b", 3, 1), w.Aggregator{name = "n", kind = .Count})
+	cnt := ts.rolling_apply(
+		ts.rolling_window(&df, "b", 3, 1),
+		w.Aggregator{name = "n", kind = .Count},
+	)
 	expect(&passed, &total, cnt.type == .Int && cnt.len == 5, "rolling Count on a Bool column")
-	bmean := ts.rolling_apply(ts.rolling_window(&df, "b", 3, 1), w.Aggregator{name = "m", kind = .Mean})
-	expect(&passed, &total, bmean.type == .Float && bmean.len == 5, "rolling Mean on a Bool column")
-	bmax := ts.rolling_apply(ts.rolling_window(&df, "b", 3, -1), w.Aggregator{name = "mx", kind = .Max})
+	bmean := ts.rolling_apply(
+		ts.rolling_window(&df, "b", 3, 1),
+		w.Aggregator{name = "m", kind = .Mean},
+	)
+	expect(
+		&passed,
+		&total,
+		bmean.type == .Float && bmean.len == 5,
+		"rolling Mean on a Bool column",
+	)
+	bmax := ts.rolling_apply(
+		ts.rolling_window(&df, "b", 3, -1),
+		w.Aggregator{name = "mx", kind = .Max},
+	)
 	expect(&passed, &total, bmax.len == 5, "rolling Max with negative min_periods")
 	q := ts.rolling_apply(ts.rolling_window(&df, "x", 3, 1), w.make_quantile_agg("q", "x", 1.5))
 	qv, _ := w.column_at_float(&q, 4)
 	expect(&passed, &total, qv == 5, "rolling quantile above 1 clamps to the max")
-	imean := ts.rolling_apply(ts.rolling_window(&df, "i", 3, 1), w.Aggregator{name = "m", kind = .Mean})
+	imean := ts.rolling_apply(
+		ts.rolling_window(&df, "i", 3, 1),
+		w.Aggregator{name = "m", kind = .Mean},
+	)
 	iv, _ := w.column_at_float(&imean, 4)
-	expect(&passed, &total, imean.type == .Float && iv == 4, "rolling int Mean uses the window (mean of 3,4,5)")
+	expect(
+		&passed,
+		&total,
+		imean.type == .Float && iv == 4,
+		"rolling int Mean uses the window (mean of 3,4,5)",
+	)
 	none := ts.rolling_apply_many(ts.rolling_window(&df, "x", 3, 1), {})
 	expect(&passed, &total, none.rows == 0, "rolling_apply_many with no aggregators")
 	many := ts.rolling_apply_many(

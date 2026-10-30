@@ -54,12 +54,15 @@ ir_derivatives_test :: proc(allocator: mem.Allocator) {
 		var_factor := (1.0 - math.exp_f64(-2.0 * true_a * T_start_arr[i])) / (2.0 * true_a)
 		sigma_P := true_sigma * b_delta * math.sqrt_f64(var_factor)
 
-		d1 := (math.ln(F_arr[i] / K_arr[i]) + 0.5 * sigma_P * sigma_P) / sigma_P
+		// caplet = P(0,T_e) [(1+δF) N(d1) − (1+δK) N(d2)], an option on P(T_s, T_e)
+		gF := 1.0 + (T_end_arr[i] - T_start_arr[i]) * F_arr[i]
+		gK := 1.0 + (T_end_arr[i] - T_start_arr[i]) * K_arr[i]
+		d1 := (math.ln(gF / gK) + 0.5 * sigma_P * sigma_P) / sigma_P
 		d2 := d1 - sigma_P
 		N_d1 := 0.5 * (1.0 + math.erf(d1 / math.sqrt_f64(2.0)))
 		N_d2 := 0.5 * (1.0 + math.erf(d2 / math.sqrt_f64(2.0)))
 
-		true_price := P_arr[i] * (F_arr[i] * N_d1 - K_arr[i] * N_d2)
+		true_price := P_arr[i] * (gF * N_d1 - gK * N_d2)
 		market_prices[i] = true_price * noise
 	}
 

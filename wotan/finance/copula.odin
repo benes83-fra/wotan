@@ -251,8 +251,8 @@ fit_student_t_copula :: proc(
 	}
 
 	Ctx :: struct {
-		u1, u2, x1, x2:  []f64,
-		nu, rho:         f64,
+		u1, u2, x1, x2: []f64,
+		nu, rho:        f64,
 	}
 	ctx := Ctx {
 		u1 = u1,
@@ -276,7 +276,14 @@ fit_student_t_copula :: proc(
 		return ll
 	}
 
-	s, best_ll := _maximize_1d(outer, &ctx, math.ln(T_COPULA_NU_MIN), math.ln(T_COPULA_NU_MAX), 10, 1e-8)
+	s, best_ll := _maximize_1d(
+		outer,
+		&ctx,
+		math.ln(T_COPULA_NU_MIN),
+		math.ln(T_COPULA_NU_MAX),
+		10,
+		1e-8,
+	)
 	outer(s, &ctx) // ρ̂ at the chosen ν
 
 	result.parameters = make([]f64, 2, allocator)
@@ -542,7 +549,7 @@ clayton_copula_loglik :: proc(u1: []f64, u2: []f64, theta: f64) -> f64 {
 			log_s = m + math.ln(math.exp(a - m) + math.exp(b - m) - math.exp(-m))
 		} else {
 			s := math.exp(a) + math.exp(b) - 1.0
-			if s <= 0.0 {return -math.INF_F64} // outside the support
+			if s <= 0.0 {return -math.INF_F64} 	// outside the support
 			log_s = math.ln(s)
 		}
 		ll += math.log1p(theta) - (1.0 + theta) * (l1 + l2) - (2.0 + 1.0 / theta) * log_s
@@ -611,7 +618,9 @@ frank_copula_loglik :: proc(u1: []f64, u2: []f64, theta: f64) -> f64 {
 	for i in 0 ..< min(len(u1), len(u2)) {
 		u, v := u1[i], u2[i]
 		if !_in_unit(u, v) {continue}
-		D := -math.exp(-theta * u) * _expm1(-theta * v) - math.exp(-theta * v) * _expm1(-theta * (1.0 - v))
+		D :=
+			-math.exp(-theta * u) * _expm1(-theta * v) -
+			math.exp(-theta * v) * _expm1(-theta * (1.0 - v))
 		ll += log_num - theta * (u + v) - 2.0 * math.ln(math.abs(D))
 	}
 	return ll

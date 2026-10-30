@@ -164,7 +164,10 @@ context_get_prices :: proc(
 context_submit_order :: proc(ctx: ^StrategyContext, order: Order) {
 	if order.order_type != .Market {return}
 	price := context_get_price(ctx, order.symbol)
-	if !(order.quantity > 0.0) || !(price > 0.0) || math.is_inf(price) || math.is_inf(order.quantity) {
+	if !(order.quantity > 0.0) ||
+	   !(price > 0.0) ||
+	   math.is_inf(price) ||
+	   math.is_inf(order.quantity) {
 		return
 	}
 
@@ -219,7 +222,12 @@ context_submit_order :: proc(ctx: ^StrategyContext, order: Order) {
 
 	append(
 		&pf.trades,
-		FilledOrder{order = order, fill_price = price, fill_time = ctx.current_bar, commission = commission},
+		FilledOrder {
+			order = order,
+			fill_price = price,
+			fill_time = ctx.current_bar,
+			commission = commission,
+		},
 	)
 }
 
@@ -918,7 +926,12 @@ backtest_portfolio_run :: proc(
 					if qty > 1e-9 {
 						context_submit_order(
 							&ctx,
-							Order{symbol = sym, side = .Sell if is_sell else .Buy, quantity = qty, order_type = .Market},
+							Order {
+								symbol = sym,
+								side = .Sell if is_sell else .Buy,
+								quantity = qty,
+								order_type = .Market,
+							},
 						)
 					}
 				}
