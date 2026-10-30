@@ -94,7 +94,7 @@ bonds_test :: proc(allocator: mem.Allocator) {
 	fmt.println("\n💡 Key Insights:")
 	fmt.println("   • Bonds are now priced using a realistic, bootstrapped zero-coupon curve.")
 	fmt.println(
-		"   • The 10Y 5% bond trades at a premium because its coupon > market zero rates.",
+		"   • The 10Y 5% bond trades close to par: its coupon is near the 10Y par yield.",
 	)
 	fmt.println(
 		"   • Parallel shifts demonstrate the portfolio's interest rate risk (Duration).",

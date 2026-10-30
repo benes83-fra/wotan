@@ -9,7 +9,7 @@ import "core:mem"
 
 BondType :: enum {
 	Fixed,
-	Floating,
+	Floating, // priced like Fixed with coupon_rate as the (projected) coupon
 	ZeroCoupon,
 }
 
@@ -20,162 +20,154 @@ CouponFrequency :: enum {
 	Monthly,
 }
 
+// Times are year fractions; the day_count field is informational (accrual is
+// linear in time within each coupon period).
 Bond :: struct {
 	face_value:       f64,
 	coupon_rate:      f64, // Annual coupon rate (e.g., 0.05 for 5%)
 	maturity:         f64, // Years from issuance
-	issue_date:       f64, // Years from today (0 = issued today)
+	issue_date:       f64, // Years from today (0 = issued today, < 0 = issued in the past)
 	settlement_date:  f64, // Years from today (when bond is purchased)
 	bond_type:        BondType,
 	coupon_frequency: CouponFrequency,
 	day_count:        DayCountConvention,
 }
 
+// Prices are values at the settlement date. Yield, duration and convexity use
+// the street convention P(y) = Σ cf (1 + y/f)^(−f τ), τ = years from settlement.
 BondPriceResult :: struct {
 	clean_price:       f64, // Price excluding accrued interest
 	dirty_price:       f64, // Price including accrued interest
 	accrued_interest:  f64, // Interest accrued since last coupon
-	yield_to_maturity: f64, // YTM (annualized)
-	modified_duration: f64,
-	convexity:         f64,
+	yield_to_maturity: f64, // YTM (annualized, compounded at the coupon frequency)
+	modified_duration: f64, // −P'(y) / P
+	convexity:         f64, // P''(y) / P
 }
 
 // ============================================================================
 // COUPON SCHEDULING
 // ============================================================================
 
-get_coupon_dates :: proc(bond: Bond, allocator: mem.Allocator) -> []f64 {
-	freq: f64
-	switch bond.coupon_frequency {
+@(private = "file")
+_bond_freq :: proc(f: CouponFrequency) -> f64 {
+	switch f {
 	case .Annual:
-		freq = 1.0
+		return 1.0
 	case .SemiAnnual:
-		freq = 2.0
+		return 2.0
 	case .Quarterly:
-		freq = 4.0
+		return 4.0
 	case .Monthly:
-		freq = 12.0
+		return 12.0
 	}
+	return 1.0
+}
 
-	n_coupons := int(bond.maturity * freq)
-	dates := make([]f64, n_coupons, allocator)
+// Coupon dates (years from today), generated backwards from maturity: when the
+// maturity is not a whole number of periods the first period is a short stub.
+get_coupon_dates :: proc(bond: Bond, allocator: mem.Allocator) -> []f64 {
+	freq := _bond_freq(bond.coupon_frequency)
+	m := bond.maturity * freq
+	n := int(math.round(m))
+	if abs(m - f64(n)) > 1e-9 * max(1.0, m) {n = int(math.ceil(m))}
+	n = max(n, 1)
 
-	for i in 0 ..< n_coupons {
-		dates[i] = bond.issue_date + f64(i + 1) / freq
+	end := bond.issue_date + bond.maturity
+	dates := make([]f64, n, allocator)
+	for i in 0 ..< n {
+		dates[i] = end - f64(n - 1 - i) / freq
 	}
-
 	return dates
+}
+
+// Payment times and amounts (coupon plus redemption). A short first stub pays a
+// pro-rata coupon; a zero-coupon bond pays the face value at maturity only.
+@(private = "file")
+_bond_cashflows :: proc(bond: Bond, allocator: mem.Allocator) -> (times: []f64, amounts: []f64) {
+	if bond.bond_type == .ZeroCoupon {
+		times = make([]f64, 1, allocator)
+		amounts = make([]f64, 1, allocator)
+		times[0] = bond.issue_date + bond.maturity
+		amounts[0] = bond.face_value
+		return
+	}
+	freq := _bond_freq(bond.coupon_frequency)
+	times = get_coupon_dates(bond, allocator)
+	amounts = make([]f64, len(times), allocator)
+	coupon := bond.face_value * bond.coupon_rate / freq
+	for i in 0 ..< len(times) {amounts[i] = coupon}
+	stub := (times[0] - bond.issue_date) * freq
+	if abs(stub - 1.0) > 1e-9 {amounts[0] = coupon * stub}
+	amounts[len(amounts) - 1] += bond.face_value
+	return
 }
 
 // ============================================================================
 // ACCRUED INTEREST CALCULATION
 // ============================================================================
 
+// Coupon of the current period × elapsed fraction of the period; zero before
+// issue, on a coupon date and after maturity.
 calculate_accrued_interest :: proc(bond: Bond) -> f64 {
 	if bond.bond_type == .ZeroCoupon {
 		return 0.0
 	}
-
-	freq: f64
-	switch bond.coupon_frequency {
-	case .Annual:
-		freq = 1.0
-	case .SemiAnnual:
-		freq = 2.0
-	case .Quarterly:
-		freq = 4.0
-	case .Monthly:
-		freq = 12.0
-	}
-
-	coupon_payment := bond.face_value * bond.coupon_rate / freq
-
-	coupon_dates := get_coupon_dates(bond, context.temp_allocator)
-	defer delete(coupon_dates, context.temp_allocator)
-
-	last_coupon := bond.issue_date
-	next_coupon := bond.issue_date + 1.0 / freq
-
-	for i in 0 ..< len(coupon_dates) {
-		if coupon_dates[i] <= bond.settlement_date {
-			last_coupon = coupon_dates[i]
-			if i + 1 < len(coupon_dates) {
-				next_coupon = coupon_dates[i + 1]
-			}
-		}
-	}
-
-	days_elapsed := bond.settlement_date - last_coupon
-	days_in_period := next_coupon - last_coupon
-
-	if days_in_period <= 0.0 {
+	s := bond.settlement_date
+	if s <= bond.issue_date || s >= bond.issue_date + bond.maturity {
 		return 0.0
 	}
 
-	fraction := days_elapsed / days_in_period
-	return coupon_payment * fraction
+	freq := _bond_freq(bond.coupon_frequency)
+	dates := get_coupon_dates(bond, context.temp_allocator)
+	defer delete(dates, context.temp_allocator)
+
+	last := bond.issue_date
+	for d, i in dates {
+		if d <= s {
+			last = d
+			continue
+		}
+		coupon := bond.face_value * bond.coupon_rate / freq
+		if i == 0 {coupon *= (d - bond.issue_date) * freq}
+		return coupon * (s - last) / (d - last)
+	}
+	return 0.0
 }
 
 // ============================================================================
-// BOND PRICING FROM YIELD CURVE STRUCT (Production Standard)
+// PRICE / YIELD KERNEL
 // ============================================================================
-// Prices a bond using a bootstrapped YieldCurve instead of a flat rate callback.
-// This directly leverages the yield_curve_discount_factor function.
 
-price_bond_from_yield_curve :: proc(
+// P(y) and its first two derivatives for the flows after settlement
+@(private = "file")
+_bond_yield_pv :: proc(times, amounts: []f64, settle, y, freq: f64) -> (p, dp, d2p: f64) {
+	g := 1.0 + y / freq
+	for t, i in times {
+		if t <= settle {continue}
+		tau := t - settle
+		pv := amounts[i] * math.pow_f64(g, -tau * freq)
+		p += pv
+		dp -= tau * pv / g
+		d2p += tau * (tau + 1.0 / freq) * pv / (g * g)
+	}
+	return
+}
+
+// Accrued interest, clean price, yield and risk measures from a dirty price at settlement
+@(private = "file")
+_bond_finish :: proc(
 	bond: Bond,
-	curve: ^YieldCurve,
-	allocator: mem.Allocator = context.allocator,
+	dirty_price: f64,
+	allocator: mem.Allocator,
 ) -> BondPriceResult {
-
-	coupon_dates := get_coupon_dates(bond, allocator)
-	defer delete(coupon_dates, allocator)
-
-	freq: f64
-	switch bond.coupon_frequency {
-	case .Annual:
-		freq = 1.0
-	case .SemiAnnual:
-		freq = 2.0
-	case .Quarterly:
-		freq = 4.0
-	case .Monthly:
-		freq = 12.0
-	}
-
-	coupon_payment := bond.face_value * bond.coupon_rate / freq
-	dirty_price := 0.0
-
-	for i in 0 ..< len(coupon_dates) {
-		t := coupon_dates[i]
-		if t <= bond.settlement_date {
-			continue
-		}
-
-		// ✅ Use the bootstrapped yield curve discount factor
-		df := yield_curve_discount_factor(curve, t)
-
-		if bond.bond_type != .ZeroCoupon {
-			dirty_price += coupon_payment * df
-		}
-
-		if i == len(coupon_dates) - 1 {
-			dirty_price += bond.face_value * df
-		}
-	}
-
-	accrued_interest := calculate_accrued_interest(bond)
-	clean_price := dirty_price - accrued_interest
-
-	// YTM, Duration, and Convexity are still calculated relative to a flat yield
-	// that equates to the clean price, as is standard market practice.
-	ytm := solve_ytm(bond, clean_price, allocator)
+	accrued := calculate_accrued_interest(bond)
+	clean := dirty_price - accrued
+	ytm := solve_ytm(bond, clean, allocator)
 	mod_duration, conv := calculate_duration_convexity(bond, ytm, allocator)
-
 	return BondPriceResult {
-		clean_price = clean_price,
+		clean_price = clean,
 		dirty_price = dirty_price,
-		accrued_interest = accrued_interest,
+		accrued_interest = accrued,
 		yield_to_maturity = ytm,
 		modified_duration = mod_duration,
 		convexity = conv,
@@ -183,10 +175,33 @@ price_bond_from_yield_curve :: proc(
 }
 
 // ============================================================================
+// BOND PRICING FROM YIELD CURVE STRUCT (Production Standard)
+// ============================================================================
+// Prices a bond using a bootstrapped YieldCurve. The dirty price is the value at
+// the settlement date: Σ cf DF(t) / DF(settlement) over flows after settlement.
+
+price_bond_from_yield_curve :: proc(
+	bond: Bond,
+	curve: ^YieldCurve,
+	allocator: mem.Allocator = context.allocator,
+) -> BondPriceResult {
+	times, amounts := _bond_cashflows(bond, allocator)
+	defer {delete(times, allocator); delete(amounts, allocator)}
+
+	dirty := 0.0
+	for t, i in times {
+		if t <= bond.settlement_date {continue}
+		dirty += amounts[i] * yield_curve_discount_factor(curve, t)
+	}
+	dirty /= yield_curve_discount_factor(curve, bond.settlement_date)
+	return _bond_finish(bond, dirty, allocator)
+}
+
+// ============================================================================
 // BOND PRICING FROM YIELD CURVE CALLBACK (Legacy / Custom Curves)
 // ============================================================================
-// Kept for backward compatibility or for pricing against custom curve implementations
-// that don't use the standard YieldCurve struct.
+// `yield_curve(t, user_data)` must return the discount factor to time t (years
+// from today).
 
 price_bond_from_curve :: proc(
 	bond: Bond,
@@ -194,123 +209,73 @@ price_bond_from_curve :: proc(
 	user_data: rawptr,
 	allocator: mem.Allocator = context.allocator,
 ) -> BondPriceResult {
+	times, amounts := _bond_cashflows(bond, allocator)
+	defer {delete(times, allocator); delete(amounts, allocator)}
 
-	coupon_dates := get_coupon_dates(bond, allocator)
-	defer delete(coupon_dates, allocator)
-
-	freq: f64
-	switch bond.coupon_frequency {
-	case .Annual:
-		freq = 1.0
-	case .SemiAnnual:
-		freq = 2.0
-	case .Quarterly:
-		freq = 4.0
-	case .Monthly:
-		freq = 12.0
+	dirty := 0.0
+	for t, i in times {
+		if t <= bond.settlement_date {continue}
+		dirty += amounts[i] * yield_curve(t, user_data)
 	}
-
-	coupon_payment := bond.face_value * bond.coupon_rate / freq
-	dirty_price := 0.0
-
-	for i in 0 ..< len(coupon_dates) {
-		t := coupon_dates[i]
-		if t <= bond.settlement_date {
-			continue
-		}
-
-		df := yield_curve(t, user_data)
-
-		if bond.bond_type != .ZeroCoupon {
-			dirty_price += coupon_payment * df
-		}
-
-		if i == len(coupon_dates) - 1 {
-			dirty_price += bond.face_value * df
-		}
+	if bond.settlement_date > 0.0 {
+		dirty /= yield_curve(bond.settlement_date, user_data)
 	}
-
-	accrued_interest := calculate_accrued_interest(bond)
-	clean_price := dirty_price - accrued_interest
-	ytm := solve_ytm(bond, clean_price, allocator)
-	mod_duration, conv := calculate_duration_convexity(bond, ytm, allocator)
-
-	return BondPriceResult {
-		clean_price = clean_price,
-		dirty_price = dirty_price,
-		accrued_interest = accrued_interest,
-		yield_to_maturity = ytm,
-		modified_duration = mod_duration,
-		convexity = conv,
-	}
+	return _bond_finish(bond, dirty, allocator)
 }
 
 // ============================================================================
 // YIELD TO MATURITY SOLVER
 // ============================================================================
 
+// Yield y with P(y) = clean_price + accrued interest. Safeguarded Newton on a
+// bracket (P is decreasing for y > −f); NaN when no flows remain or the dirty
+// price is not positive.
 solve_ytm :: proc(bond: Bond, clean_price: f64, allocator: mem.Allocator) -> f64 {
-	ytm := bond.coupon_rate
+	freq := _bond_freq(bond.coupon_frequency)
+	times, amounts := _bond_cashflows(bond, allocator)
+	defer {delete(times, allocator); delete(amounts, allocator)}
 
-	coupon_dates := get_coupon_dates(bond, allocator)
-	defer delete(coupon_dates, allocator)
-
-	freq: f64
-	switch bond.coupon_frequency {
-	case .Annual:
-		freq = 1.0
-	case .SemiAnnual:
-		freq = 2.0
-	case .Quarterly:
-		freq = 4.0
-	case .Monthly:
-		freq = 12.0
+	target := clean_price + calculate_accrued_interest(bond)
+	s := bond.settlement_date
+	if !(target > 0.0) || times[len(times) - 1] <= s {
+		return math.QNAN_F64
 	}
 
-	coupon_payment := bond.face_value * bond.coupon_rate / freq
-
-	for iter in 0 ..< 100 {
-		price := 0.0
-		deriv := 0.0
-
-		for i in 0 ..< len(coupon_dates) {
-			t := coupon_dates[i]
-			if t <= bond.settlement_date {
-				continue
-			}
-
-			time_to_payment := t - bond.settlement_date
-			df := math.pow_f64(1.0 + ytm / freq, -time_to_payment * freq)
-
-			if bond.bond_type != .ZeroCoupon {
-				price += coupon_payment * df
-				deriv -= coupon_payment * time_to_payment * df / (1.0 + ytm / freq)
-			}
-
-			if i == len(coupon_dates) - 1 {
-				price += bond.face_value * df
-				deriv -= bond.face_value * time_to_payment * df / (1.0 + ytm / freq)
-			}
-		}
-
-		error := price - clean_price
-		if math.abs(error) < 1e-8 {
-			return ytm
-		}
-
-		ytm -= error / deriv
-
-		if ytm < -0.5 {ytm = -0.5}
-		if ytm > 2.0 {ytm = 2.0}
+	// Bracket: P(lo) > target > P(hi)
+	lo := -freq * (1.0 - 1e-9)
+	hi := 1.0
+	for _ in 0 ..< 60 {
+		p, _, _ := _bond_yield_pv(times, amounts, s, hi, freq)
+		if p < target {break}
+		hi *= 2.0
+	}
+	for _ in 0 ..< 60 {
+		p, _, _ := _bond_yield_pv(times, amounts, s, lo, freq)
+		if p > target {break}
+		lo = -freq + (lo + freq) * 1e-3
 	}
 
-	return ytm
+	y := bond.coupon_rate if bond.coupon_rate > lo && bond.coupon_rate < hi else 0.5 * (lo + hi)
+	for _ in 0 ..< 200 {
+		p, dp, _ := _bond_yield_pv(times, amounts, s, y, freq)
+		err := p - target
+		if err > 0.0 {lo = y} else {hi = y}
+		if abs(err) <= 1e-14 * target {return y}
+
+		y_new := y - err / dp
+		if !(y_new > lo && y_new < hi) {y_new = 0.5 * (lo + hi)}
+		if abs(y_new - y) <= 1e-15 * max(1.0, abs(y)) {return y_new}
+		y = y_new
+	}
+	return y
 }
 
 // ============================================================================
 // DURATION AND CONVEXITY
 // ============================================================================
 
+// Modified duration −P'(y)/P and convexity P''(y)/P of the dirty price at
+// settlement, at the yield `ytm` (compounded at the coupon frequency).
 calculate_duration_convexity :: proc(
 	bond: Bond,
 	ytm: f64,
@@ -319,61 +284,15 @@ calculate_duration_convexity :: proc(
 	modified_duration: f64,
 	convexity: f64,
 ) {
+	freq := _bond_freq(bond.coupon_frequency)
+	times, amounts := _bond_cashflows(bond, allocator)
+	defer {delete(times, allocator); delete(amounts, allocator)}
 
-	coupon_dates := get_coupon_dates(bond, allocator)
-	defer delete(coupon_dates, allocator)
-
-	freq: f64
-	switch bond.coupon_frequency {
-	case .Annual:
-		freq = 1.0
-	case .SemiAnnual:
-		freq = 2.0
-	case .Quarterly:
-		freq = 4.0
-	case .Monthly:
-		freq = 12.0
-	}
-
-	coupon_payment := bond.face_value * bond.coupon_rate / freq
-	price := 0.0
-	mac_duration := 0.0
-	convexity_sum := 0.0
-
-	for i in 0 ..< len(coupon_dates) {
-		t := coupon_dates[i]
-		if t <= bond.settlement_date {
-			continue
-		}
-
-		time_to_payment := t - bond.settlement_date
-		df := math.pow_f64(1.0 + ytm / freq, -time_to_payment * freq)
-
-		cf := coupon_payment
-		if bond.bond_type == .ZeroCoupon {
-			cf = 0.0
-		}
-		if i == len(coupon_dates) - 1 {
-			cf += bond.face_value
-		}
-
-		pv := cf * df
-		price += pv
-		mac_duration += time_to_payment * pv
-		convexity_sum += time_to_payment * (time_to_payment + 1.0 / freq) * pv
-	}
-
-	if price <= 0.0 {
+	p, dp, d2p := _bond_yield_pv(times, amounts, bond.settlement_date, ytm, freq)
+	if !(p > 0.0) {
 		return 0.0, 0.0
 	}
-
-	mac_duration /= price
-	convexity_sum /= price
-
-	modified_duration = mac_duration / (1.0 + ytm / freq)
-	convexity = convexity_sum / (price * (1.0 + ytm / freq) * (1.0 + ytm / freq))
-
-	return modified_duration, convexity
+	return -dp / p, d2p / p
 }
 
 // ============================================================================

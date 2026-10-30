@@ -50,15 +50,15 @@ callable_bond_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("   %-25s | %10.2f%%\n", "Call Probability", result.call_probability * 100.0)
 
 	// 2. OAS Solver
-	// Let's assume the market is pricing this bond at $115.50 (cheaper than the model's $116.73)
+	// Let's assume the market is pricing this bond at $108.50 (cheaper than the model's ~$110.1)
 	// This implies the market demands extra yield (OAS) for the call risk.
-	market_price := 115.50
+	market_price := 108.50
 	fmt.println("\n2. Option-Adjusted Spread (OAS) Solver")
 	fmt.println("   ----------------------------------------------------------------------")
 	fmt.printf("   %-25s | $%10.2f\n", "Target Market Price", market_price)
 
-	// Note: OAS solving is computationally heavier (runs MC ~15 times).
-	// We use 2,000 paths here for a fast demo. In production, use 5,000-10,000.
+	// Note: OAS solving reprices the bond ~10 times on the same paths.
+	// We use 2,000 paths here for a fast demo. In production, use 10,000 or more.
 	oas_decimal := fin.callable_bond_oas(
 		bond,
 		a,
@@ -80,7 +80,7 @@ callable_bond_test :: proc(allocator: mem.Allocator) {
 	fmt.println("     the model price equal the market price.")
 	fmt.println("   • A positive OAS means the market prices the call risk higher")
 	fmt.println("     than our base Hull-White calibration assumes.")
-	fmt.println("   • Bisection method guarantees convergence in ~15 iterations.")
+	fmt.println("   • The spread is solved by bracketed regula falsi on common random numbers.")
 	fmt.println("======================================================================\n")
 }
 
@@ -137,8 +137,9 @@ puttable_bond_test :: proc(allocator: mem.Allocator) {
 
 	// 2. OAS Solver
 	// Puttable bonds trade at a PREMIUM to straight bonds (investor has the option)
-	// Let's assume market price is $96.00 (above the straight bond price of ~$84)
-	market_price := 96.00
+	// Let's assume market price is $86.00 (above the straight bond price of ~$76,
+	// below the model's ~$87.7)
+	market_price := 86.00
 	fmt.println("\n2. Option-Adjusted Spread (OAS) Solver")
 	fmt.println("   ----------------------------------------------------------------------")
 	fmt.printf("   %-25s | $%10.2f\n", "Target Market Price", market_price)
@@ -164,7 +165,7 @@ puttable_bond_test :: proc(allocator: mem.Allocator) {
 		"   • Puttable bonds are worth MORE than straight bonds (investor has the option)",
 	)
 	fmt.println("   • Because the coupon (2%) < market rate (5%), the straight bond trades at a")
-	fmt.println("     deep discount (~$84). The put option guarantees the investor can get $100.")
+	fmt.println("     deep discount (~$76). The put option guarantees the investor can get $100.")
 	fmt.println("   • When rates rise further, the investor is highly likely to put the bond")
 	fmt.println("     and reinvest at higher rates.")
 	fmt.println("   • The embedded put option provides massive downside protection.")
