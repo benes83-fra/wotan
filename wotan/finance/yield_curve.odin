@@ -16,9 +16,13 @@ YieldCurve :: struct {
 // YIELD CURVE BOOTSTRAPPING
 // ============================================================================
 
-// Bootstrap a yield curve from a set of market par swap rates.
-// This iteratively solves for the zero rate at each tenor such that a swap
-// priced with these zero rates would have an NPV of exactly 0 (i.e., it's at par).
+// Bootstrap a yield curve from market par swap rates (spot-starting swaps paying
+// fixed every payment_frequency years, coupon dates backwards from each tenor
+// with a short first period, floating leg worth 1 − DF(T)). Tenor by tenor the
+// zero rate z_i is solved so that the par swap reprices exactly on the final
+// curve, i.e. with the linear zero-rate interpolation between z_{i−1} and z_i
+// used for its intermediate coupons; a tenor shorter than one period is a
+// deposit, DF(T) = 1 / (1 + S · dcf(0, T)). Tenors must be increasing.
 bootstrap_yield_curve_from_swaps :: proc(
 	tenors: []f64,
 	par_swap_rates: []f64,
@@ -26,7 +30,7 @@ bootstrap_yield_curve_from_swaps :: proc(
 	day_count: DayCountConvention = .ACT_360,
 	allocator: mem.Allocator = context.allocator,
 ) -> YieldCurve {
-	n := len(tenors)
+	n := min(len(tenors), len(par_swap_rates))
 	if n == 0 {
 		return YieldCurve{}
 	}
@@ -35,44 +39,37 @@ bootstrap_yield_curve_from_swaps :: proc(
 		tenors     = make([]f64, n, allocator),
 		zero_rates = make([]f64, n, allocator),
 	}
+	copy(curve.tenors, tenors[:n])
+
+	// Par swap value per unit notional with z at pillar i: S·A − (1 − DF(T)),
+	// decreasing in z
+	par_pv :: proc(c: ^YieldCurve, i: int, z, S, freq: f64, dc: DayCountConvention) -> f64 {
+		c.zero_rates[i] = z
+		sub := YieldCurve{c.tenors[:i + 1], c.zero_rates[:i + 1]}
+		T := c.tenors[i]
+		dates := _swap_schedule(0.0, T, freq, context.temp_allocator)
+		defer delete(dates, context.temp_allocator)
+		annuity := 0.0
+		for k in 1 ..< len(dates) {
+			annuity +=
+				day_count_fraction(dates[k - 1], dates[k], dc) *
+				yield_curve_discount_factor(&sub, dates[k])
+		}
+		return S * annuity - (1.0 - yield_curve_discount_factor(&sub, T))
+	}
 
 	for i in 0 ..< n {
-		curve.tenors[i] = tenors[i]
-		T := tenors[i]
-		par_rate := par_swap_rates[i]
-
-		// 1. Calculate the annuity (PV01) using already bootstrapped zero rates
-		annuity := 0.0
-		n_payments := int(T / payment_frequency)
-		for j in 1 ..< n_payments + 1 {
-			t_j := f64(j) * payment_frequency
-			if t_j > T {t_j = T}
-
-			// Interpolate zero rate for t_j using only previously bootstrapped points
-			r_j := _interpolate_zero_rate(curve.tenors[:i], curve.zero_rates[:i], t_j)
-			df_j := math.exp_f64(-r_j * t_j)
-
-			dcf := day_count_fraction(t_j - payment_frequency, t_j, day_count)
-			annuity += dcf * df_j
+		S := par_swap_rates[i]
+		lo, hi := -1.0, 1.0
+		for par_pv(&curve, i, hi, S, payment_frequency, day_count) > 0.0 && hi < 100.0 {hi *= 2.0}
+		for par_pv(&curve, i, lo, S, payment_frequency, day_count) < 0.0 && lo > -100.0 {lo *= 2.0}
+		for _ in 0 ..< 200 {
+			mid := 0.5 * (lo + hi)
+			if mid == lo || mid == hi {break}
+			if par_pv(&curve, i, mid, S, payment_frequency, day_count) >
+			   0.0 {lo = mid} else {hi = mid}
 		}
-
-		// 2. Solve for the final discount factor.
-		// Par swap formula: par_rate = (1.0 - DF_T) / annuity
-		// => DF_T = 1.0 - par_rate * annuity
-		df_T := 1.0 - par_rate * annuity
-
-		// Safety clamp to prevent log errors from bad market data
-		if df_T <= 1e-10 {
-			df_T = 1e-10
-		}
-
-		// 3. Convert discount factor to continuously compounded zero rate:
-		// DF_T = exp(-r_T * T)  =>  r_T = -ln(DF_T) / T
-		if T > 1e-10 {
-			curve.zero_rates[i] = -math.ln_f64(df_T) / T
-		} else {
-			curve.zero_rates[i] = par_rate // Fallback for very short tenor (e.g., O/N)
-		}
+		curve.zero_rates[i] = 0.5 * (lo + hi)
 	}
 
 	return curve

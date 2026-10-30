@@ -41,12 +41,16 @@ InterestRateSwap :: struct {
 	direction:      SwapDirection,
 }
 
+// Sensitivities are to a parallel shift of the continuously compounded zero
+// curve: modified_duration = −(1/P) ∂P/∂z and convexity = (1/P) ∂²P/∂z² of the
+// fixed leg's coupons (for continuous compounding they are Σ t·cf·DF / P and
+// Σ t²·cf·DF / P).
 SwapValuationResult :: struct {
-	pv_fixed_leg:      f64,
-	pv_floating_leg:   f64,
+	pv_fixed_leg:      f64, // PV of the fixed coupons (positive)
+	pv_floating_leg:   f64, // PV of the floating leg incl. spread (positive)
 	npv:               f64, // Net present value (receiver - payer)
 	par_swap_rate:     f64, // Fixed rate that makes NPV = 0
-	pv01:              f64, // PV of 1bp shift (in currency units)
+	pv01:              f64, // notional × fixed-leg annuity × 1bp
 	modified_duration: f64,
 	convexity:         f64,
 }
@@ -60,6 +64,8 @@ SwapCashFlow :: struct {
 // DAY COUNT FRACTION CALCULATIONS
 // ============================================================================
 
+// Times are ACT/365 year fractions, so ACT/360 scales them by 365/360 and the
+// other conventions use them as they are
 day_count_fraction :: proc(t1: f64, t2: f64, convention: DayCountConvention) -> f64 {
 	dt := t2 - t1
 	if dt <= 0.0 {
@@ -69,23 +75,34 @@ day_count_fraction :: proc(t1: f64, t2: f64, convention: DayCountConvention) -> 
 	switch convention {
 	case .ACT_360:
 		return dt * 365.0 / 360.0
-	case .ACT_365:
+	case .ACT_365, .ACT_ACT, .THIRTY_360:
 		return dt
-	case .ACT_ACT:
-		return dt
-	case .THIRTY_360:
-		months := dt * 12.0
-		return months / 12.0
 	}
 
 	return dt
+}
+
+// Accrual dates effective = d_0 < d_1 < … < d_n = maturity, generated backwards
+// from maturity every `frequency` years (a short first period if the length is
+// not a whole number of periods)
+@(private)
+_swap_schedule :: proc(effective, maturity, frequency: f64, allocator: mem.Allocator) -> []f64 {
+	length := maturity - effective
+	if length <= 0.0 || frequency <= 0.0 {return make([]f64, 0, allocator)}
+	n := max(1, int(math.ceil(length / frequency - 1e-9)))
+	dates := make([]f64, n + 1, allocator)
+	dates[0] = effective
+	for k in 1 ..= n {dates[k] = maturity - f64(n - k) * frequency}
+	return dates
 }
 
 // ============================================================================
 // SWAP LEG VALUATION (CURVE-AWARE)
 // ============================================================================
 
-// Value a fixed leg using the yield curve
+// Fixed leg: Σ N · K · dcf_k · DF(d_k); also returns the annuity Σ dcf_k DF(d_k)
+// and Σ t·dcf·DF, Σ t²·dcf·DF for the duration and convexity
+@(private = "file")
 _valuate_fixed_leg :: proc(
 	leg: SwapLeg,
 	notional: f64,
@@ -96,37 +113,34 @@ _valuate_fixed_leg :: proc(
 ) -> (
 	pv: f64,
 	cashflows: []SwapCashFlow,
+	annuity, t1, t2: f64,
 ) {
-	pv = 0.0
-	n_payments := int((maturity - effective_date) / leg.payment_frequency)
-
-	cashflows = make([]SwapCashFlow, n_payments, allocator)
-
-	for i in 0 ..< n_payments {
-		t_start := effective_date + f64(i) * leg.payment_frequency
-		t_end := t_start + leg.payment_frequency
-		if t_end > maturity {
-			t_end = maturity
+	dates := _swap_schedule(
+		effective_date,
+		maturity,
+		leg.payment_frequency,
+		context.temp_allocator,
+	)
+	defer delete(dates, context.temp_allocator)
+	cashflows = make([]SwapCashFlow, max(len(dates) - 1, 0), allocator)
+	for k in 1 ..< len(dates) {
+		dcf := day_count_fraction(dates[k - 1], dates[k], leg.day_count)
+		df := yield_curve_discount_factor(curve, dates[k])
+		cashflows[k - 1] = SwapCashFlow {
+			payment_date = dates[k],
+			amount       = notional * leg.fixed_rate * dcf,
 		}
-
-		dcf := day_count_fraction(t_start, t_end, leg.day_count)
-		payment := notional * leg.fixed_rate * dcf
-
-		cashflows[i] = SwapCashFlow {
-			payment_date = t_end,
-			amount       = payment,
-		}
-
-		// ✅ UPGRADE: Use curve discount factor instead of flat rate
-		df := yield_curve_discount_factor(curve, t_end)
-		pv += payment * df
+		annuity += dcf * df
+		t1 += dates[k] * dcf * df
+		t2 += dates[k] * dates[k] * dcf * df
 	}
-
-	return pv, cashflows
+	pv = notional * leg.fixed_rate * annuity
+	return
 }
 
-// Value a floating leg using the yield curve
-// ✅ UPGRADE: Uses the exact no-arbitrage identity: PV_float = N * (DF_start - DF_end)
+// Floating leg (single curve): each coupon's forward makes it worth
+// N (DF(d_{k−1}) − DF(d_k)), plus the spread N · s · dcf_k · DF(d_k)
+@(private = "file")
 _valuate_floating_leg :: proc(
 	leg: SwapLeg,
 	notional: f64,
@@ -138,181 +152,92 @@ _valuate_floating_leg :: proc(
 	pv: f64,
 	cashflows: []SwapCashFlow,
 ) {
-	pv = 0.0
-	n_payments := int((maturity - effective_date) / leg.payment_frequency)
-
-	cashflows = make([]SwapCashFlow, n_payments, allocator)
-
-	for i in 0 ..< n_payments {
-		t_start := effective_date + f64(i) * leg.payment_frequency
-		t_end := t_start + leg.payment_frequency
-		if t_end > maturity {
-			t_end = maturity
-		}
-
-		dcf := day_count_fraction(t_start, t_end, leg.day_count)
-
-		// ✅ UPGRADE: Exact no-arbitrage PV of floating leg
-		df_start := yield_curve_discount_factor(curve, t_start)
-		df_end := yield_curve_discount_factor(curve, t_end)
-
-		// PV of the floating rate payment (without spread)
-		pv += notional * (df_start - df_end)
-
-		// PV of the floating spread payment
-		pv += notional * leg.floating_spread * dcf * df_end
-
-		// For reporting: calculate the implied forward rate
-		fwd_rate := 0.0
-		if dcf > 1e-10 {
-			fwd_rate = (df_start / df_end - 1.0) / dcf
-		}
-		payment := notional * (fwd_rate + leg.floating_spread) * dcf
-
-		cashflows[i] = SwapCashFlow {
-			payment_date = t_end,
-			amount       = payment,
-		}
-	}
-
-	return pv, cashflows
-}
-
-// ============================================================================
-// INTERNAL PRICING HELPER
-// ============================================================================
-
-_price_swap_internal :: proc(
-	swap: InterestRateSwap,
-	curve: ^YieldCurve,
-	allocator: mem.Allocator,
-) -> SwapValuationResult {
-	// Value payer leg
-	pv_payer: f64
-	cashflows_payer: []SwapCashFlow
-	if swap.payer_leg.leg_type == .Fixed {
-		pv_payer, cashflows_payer = _valuate_fixed_leg(
-			swap.payer_leg,
-			swap.notional,
-			swap.effective_date,
-			swap.maturity,
-			curve,
-			allocator,
-		)
-	} else {
-		pv_payer, cashflows_payer = _valuate_floating_leg(
-			swap.payer_leg,
-			swap.notional,
-			swap.effective_date,
-			swap.maturity,
-			curve,
-			allocator,
-		)
-	}
-	defer delete(cashflows_payer, allocator)
-
-	// Value receiver leg
-	pv_receiver: f64
-	cashflows_receiver: []SwapCashFlow
-	if swap.receiver_leg.leg_type == .Fixed {
-		pv_receiver, cashflows_receiver = _valuate_fixed_leg(
-			swap.receiver_leg,
-			swap.notional,
-			swap.effective_date,
-			swap.maturity,
-			curve,
-			allocator,
-		)
-	} else {
-		pv_receiver, cashflows_receiver = _valuate_floating_leg(
-			swap.receiver_leg,
-			swap.notional,
-			swap.effective_date,
-			swap.maturity,
-			curve,
-			allocator,
-		)
-	}
-	defer delete(cashflows_receiver, allocator)
-
-	// NPV = Receiver - Payer
-	npv := pv_receiver - pv_payer
-
-	// Par swap rate
-	annuity := _compute_swap_annuity(
-		swap.receiver_leg.payment_frequency,
-		swap.effective_date,
-		swap.maturity,
-		swap.receiver_leg.day_count,
-		curve,
+	dates := _swap_schedule(
+		effective_date,
+		maturity,
+		leg.payment_frequency,
+		context.temp_allocator,
 	)
-
-	par_swap_rate := 0.0
-	if annuity > 1e-10 {
-		if swap.receiver_leg.leg_type == .Floating {
-			par_swap_rate = pv_receiver / (swap.notional * annuity)
-		} else {
-			par_swap_rate = pv_payer / (swap.notional * annuity)
+	defer delete(dates, context.temp_allocator)
+	cashflows = make([]SwapCashFlow, max(len(dates) - 1, 0), allocator)
+	for k in 1 ..< len(dates) {
+		dcf := day_count_fraction(dates[k - 1], dates[k], leg.day_count)
+		df_start := yield_curve_discount_factor(curve, dates[k - 1])
+		df_end := yield_curve_discount_factor(curve, dates[k])
+		pv += notional * (df_start - df_end + leg.floating_spread * dcf * df_end)
+		fwd := (df_start / df_end - 1.0) / dcf if dcf > 1e-12 else 0.0
+		cashflows[k - 1] = SwapCashFlow {
+			payment_date = dates[k],
+			amount       = notional * (fwd + leg.floating_spread) * dcf,
 		}
 	}
-
-	// PV01 (per 1bp shift)
-	pv01 := annuity * swap.notional * 0.0001
-
-	// Modified Duration of the fixed leg
-	mac_duration := 0.0
-	pv_fixed_unit := 0.0
-
-	fixed_leg: SwapLeg
-	if swap.payer_leg.leg_type == .Fixed {
-		fixed_leg = swap.payer_leg
-	} else {
-		fixed_leg = swap.receiver_leg
-	}
-
-	n_payments := int((swap.maturity - swap.effective_date) / fixed_leg.payment_frequency)
-	for i in 0 ..< n_payments {
-		t_start := swap.effective_date + f64(i) * fixed_leg.payment_frequency
-		t_end := t_start + fixed_leg.payment_frequency
-		if t_end > swap.maturity {
-			t_end = swap.maturity
-		}
-		dcf := day_count_fraction(t_start, t_end, fixed_leg.day_count)
-		df := yield_curve_discount_factor(curve, t_end)
-
-		pv_cf := dcf * df
-		pv_fixed_unit += pv_cf
-		mac_duration += t_end * pv_cf
-	}
-
-	modified_duration := 0.0
-	if pv_fixed_unit > 1e-10 {
-		mac_duration /= pv_fixed_unit
-		// Approximate modified duration
-		modified_duration = mac_duration / (1.0 + par_swap_rate * fixed_leg.payment_frequency)
-	}
-
-	return SwapValuationResult {
-		pv_fixed_leg      = 0.0, // Can be populated if needed
-		pv_floating_leg   = 0.0,
-		npv               = npv,
-		par_swap_rate     = par_swap_rate,
-		pv01              = pv01,
-		modified_duration = modified_duration,
-		convexity         = 0.0, // Can be added via finite differences if needed
-	}
+	return
 }
 
 // ============================================================================
 // MAIN SWAP PRICING FUNCTION
 // ============================================================================
 
+// Values both legs on the curve. The par rate and the PV01 use the fixed leg's
+// schedule and day count (the payer leg if both legs are of the same type).
 price_swap :: proc(
 	swap: InterestRateSwap,
 	curve: ^YieldCurve,
 	allocator: mem.Allocator = context.allocator,
 ) -> SwapValuationResult {
-	return _price_swap_internal(swap, curve, allocator)
+	fixed_is_payer := swap.payer_leg.leg_type == .Fixed
+	fixed := swap.payer_leg if fixed_is_payer else swap.receiver_leg
+	float := swap.receiver_leg if fixed_is_payer else swap.payer_leg
+
+	pv_fixed, cf_fixed, annuity, t1, t2 := _valuate_fixed_leg(
+		fixed,
+		swap.notional,
+		swap.effective_date,
+		swap.maturity,
+		curve,
+		allocator,
+	)
+	defer delete(cf_fixed, allocator)
+	pv_float: f64
+	cf_float: []SwapCashFlow
+	if float.leg_type == .Floating {
+		pv_float, cf_float = _valuate_floating_leg(
+			float,
+			swap.notional,
+			swap.effective_date,
+			swap.maturity,
+			curve,
+			allocator,
+		)
+	} else {
+		pv_float, cf_float, _, _, _ = _valuate_fixed_leg(
+			float,
+			swap.notional,
+			swap.effective_date,
+			swap.maturity,
+			curve,
+			allocator,
+		)
+	}
+	defer delete(cf_float, allocator)
+
+	npv := pv_float - pv_fixed if fixed_is_payer else pv_fixed - pv_float
+	par := pv_float / (swap.notional * annuity) if annuity > 0.0 && swap.notional != 0.0 else 0.0
+	dur, conv := 0.0, 0.0
+	if annuity > 0.0 {
+		dur = t1 / annuity
+		conv = t2 / annuity
+	}
+
+	return SwapValuationResult {
+		pv_fixed_leg = pv_fixed,
+		pv_floating_leg = pv_float,
+		npv = npv,
+		par_swap_rate = par,
+		pv01 = annuity * swap.notional * 0.0001,
+		modified_duration = dur,
+		convexity = conv,
+	}
 }
 
 // ============================================================================
@@ -326,24 +251,18 @@ _compute_swap_annuity :: proc(
 	day_count: DayCountConvention,
 	curve: ^YieldCurve,
 ) -> f64 {
+	dates := _swap_schedule(effective_date, maturity, payment_frequency, context.temp_allocator)
+	defer delete(dates, context.temp_allocator)
 	annuity := 0.0
-	n_payments := int((maturity - effective_date) / payment_frequency)
-
-	for i in 0 ..< n_payments {
-		t_start := effective_date + f64(i) * payment_frequency
-		t_end := t_start + payment_frequency
-		if t_end > maturity {
-			t_end = maturity
-		}
-
-		dcf := day_count_fraction(t_start, t_end, day_count)
-		df := yield_curve_discount_factor(curve, t_end)
-		annuity += dcf * df
+	for k in 1 ..< len(dates) {
+		annuity +=
+			day_count_fraction(dates[k - 1], dates[k], day_count) *
+			yield_curve_discount_factor(curve, dates[k])
 	}
-
 	return annuity
 }
 
+// Par rate (1 − DF(T)) / A of a spot-starting swap
 compute_par_swap_rate :: proc(
 	maturity: f64,
 	curve: ^YieldCurve,
@@ -371,21 +290,27 @@ compute_swap_pv01 :: proc(
 	return annuity * notional * 0.0001
 }
 
+// Duration of the fixed side of a spot-starting par swap seen as a par bond
+// (coupons at the par rate plus the notional at maturity, worth 1):
+//   D = S Σ t_k dcf_k DF(t_k) + T DF(T),  the parallel-zero-shift duration
 compute_swap_duration :: proc(
 	maturity: f64,
 	curve: ^YieldCurve,
 	payment_frequency: f64 = 0.25,
 	day_count: DayCountConvention = .ACT_360,
 ) -> f64 {
-	df_maturity := yield_curve_discount_factor(curve, maturity)
-	annuity := _compute_swap_annuity(payment_frequency, 0.0, maturity, day_count, curve)
-	par_rate := compute_par_swap_rate(maturity, curve, payment_frequency, day_count)
-
-	if par_rate * annuity > 1e-10 {
-		return (1.0 - df_maturity) / (par_rate * annuity)
+	S := compute_par_swap_rate(maturity, curve, payment_frequency, day_count)
+	dates := _swap_schedule(0.0, maturity, payment_frequency, context.temp_allocator)
+	defer delete(dates, context.temp_allocator)
+	d := maturity * yield_curve_discount_factor(curve, maturity)
+	for k in 1 ..< len(dates) {
+		d +=
+			S *
+			dates[k] *
+			day_count_fraction(dates[k - 1], dates[k], day_count) *
+			yield_curve_discount_factor(curve, dates[k])
 	}
-
-	return maturity / 2.0
+	return d
 }
 
 // ============================================================================
