@@ -190,6 +190,8 @@ _bs_pdf :: #force_inline proc(x: f64) -> f64 {
 
 @(private)
 _bs_ppf :: proc(p: f64) -> f64 {
+	if p <= 0.0 {return math.inf_f64(-1)}
+	if p >= 1.0 {return math.inf_f64(1)}
 	x := norm_inv(p) // Acklam, ~1e-9 relative
 	// One Halley step on Φ(x) − p
 	u := (_bs_cdf(x) - p) * 2.5066282746310002 * math.exp(0.5 * x * x)

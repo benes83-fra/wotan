@@ -176,6 +176,13 @@ cmath_arg :: proc(z: complex128) -> f64 {
 
 cmath_polar :: proc(r: f64, theta: f64) -> complex128 {
 	return complex(r * math.cos(theta), r * math.sin(theta))
+}
+
+// ln(1 + z), accurate for small |z| (Kahan: the rounding of 1 + z is undone)
+cmath_log1p :: proc(z: complex128) -> complex128 {
+	w := complex(1.0, 0.0) + z
+	if w == complex(1.0, 0.0) {return z}
+	return cmath_log(w) * z / (w - complex(1.0, 0.0))
 } // ============================================================================
 // Calibration Context (for ObjectiveFunc)
 // ============================================================================
@@ -257,7 +264,7 @@ heston_objective_fn :: proc(x: []f64, user_data: rawptr) -> f64 {
 	return math.sqrt_f64(rmse / f64(n)) + feller_penalty
 }
 
-// _heston_model_prices fills out[i] with the 1000-node Heston call price of
+// _heston_model_prices fills out[i] with the Heston call price (COS) of
 // market_data[i]. Options are grouped by expiry so the characteristic function
 // is evaluated once per (expiry, node) instead of once per option.
 _heston_model_prices :: proc(
@@ -290,7 +297,7 @@ _heston_model_prices :: proc(
 				m += 1
 			}
 		}
-		heston_prices_same_expiry(S, strikes[:m], T, r, params, .Call, prices[:m], 1000)
+		heston_prices_cos(S, strikes[:m], T, r, params, .Call, prices[:m])
 		for k in 0 ..< m {out[members[k]] = prices[k]}
 	}
 }
@@ -503,47 +510,34 @@ heston_char_func :: proc(
 	params: Heston_Params,
 ) -> complex128 {
 	i := complex(0.0, 1.0)
+	u := u_complex
+	s2 := complex(params.sigma * params.sigma, 0.0)
+	one := complex(1.0, 0.0)
 
-	b := complex(params.kappa, 0.0) - complex(params.rho * params.sigma, 0.0) * i * u_complex
+	b := complex(params.kappa, 0.0) - complex(params.rho * params.sigma, 0.0) * i * u
+	q := u * u + i * u // u² + iu (u² − iu at u − i)
+	d := cmath_sqrt(b * b + s2 * q)
+	if real(d) < 0.0 {d = -d}
 
-	// d = sqrt( b^2 + sigma^2 * (u^2 + i*u) )
-	// Note: u_complex * u_complex + i * u_complex is exactly u^2 + i*u for real u,
-	// and u^2 - i*u for u_complex = u - i.
-	u_term := u_complex * u_complex + i * u_complex
-	d_squared := b * b + complex(params.sigma * params.sigma, 0.0) * u_term
+	// "Little Heston trap" form (Albrecher et al. 2007) with Re(d) ≥ 0, written
+	// without the cancellation of b − d for small σ: b − d = −σ² q / (b + d), so
+	//   D = −q/(b + d) · (1 − e^{−dT}) / (1 − g e^{−dT}),  g = (b − d)/(b + d),
+	//   C = iurT + κθ [−qT/(b + d) − 2 ln(1 + y)/σ²],  y = g(1 − e^{−dT})/(1 − g),
+	// and y = σ²·Y, so ln(1 + y)/σ² = Y·ln(1 + y)/y stays exact as σ → 0 (the
+	// Black-Scholes limit)
+	bd := b + d
+	g := -s2 * q / (bd * bd)
+	e := cmath_exp(-d * complex(T, 0.0))
+	D := -q / bd * (one - e) / (one - g * e)
+	Y := -q / (bd * bd) * (one - e) / (one - g)
+	y := s2 * Y
+	log_term := Y if y == complex(0.0, 0.0) else Y * cmath_log1p(y) / y
+	C :=
+		complex(r * T, 0.0) * i * u +
+		complex(params.kappa * params.theta, 0.0) *
+			(-q * complex(T, 0.0) / bd - complex(2.0, 0.0) * log_term)
 
-	d := cmath_sqrt(d_squared)
-
-	// Enforce Re(d) > 0
-	if real(d) < 0.0 {
-		d = -d
-	}
-
-	// "Little Heston trap" form (Albrecher et al. 2007): with Re(d) ≥ 0 and
-	// Re(b) = κ > 0, |g·e^{-dT}| < 1, so no denominator below can vanish
-	g := (b - d) / (b + d)
-
-	exp_dT := cmath_exp(-d * complex(T, 0.0))
-
-	D :=
-		(b - d) /
-		complex(params.sigma * params.sigma, 0.0) *
-		(complex(1.0, 0.0) - exp_dT) /
-		(complex(1.0, 0.0) - g * exp_dT)
-
-	C_part1 := complex(r, 0.0) * i * u_complex * complex(T, 0.0)
-
-	log_num := complex(1.0, 0.0) - g * exp_dT
-	log_den := complex(1.0, 0.0) - g
-	log_arg := log_num / log_den
-
-	C_part2 :=
-		complex(params.kappa * params.theta / (params.sigma * params.sigma), 0.0) *
-		((b - d) * complex(T, 0.0) - complex(2.0, 0.0) * cmath_log(log_arg))
-
-	C := C_part1 + C_part2
-
-	return cmath_exp(C + D * complex(params.v0, 0.0) + i * u_complex * cmath_log(complex(S, 0.0)))
+	return cmath_exp(C + D * complex(params.v0, 0.0) + i * u * cmath_log(complex(S, 0.0)))
 }
 
 heston_price :: proc(
@@ -553,7 +547,7 @@ heston_price :: proc(
 	r: f64,
 	params: Heston_Params,
 	opt: OptionType,
-	n_points: int = 1000,
+	n_points: int = 64,
 ) -> f64 {
 	strikes := [1]f64{K}
 	price: [1]f64
@@ -562,10 +556,11 @@ heston_price :: proc(
 }
 
 // heston_prices_same_expiry prices options that share S, T, r and the Heston
-// parameters, writing one price per strike into `out`. The characteristic
-// function does not depend on the strike, so it is evaluated once per
-// integration node and reused for every strike; each strike's integral is
-// accumulated exactly as for a single heston_price call.
+// parameters, writing one price per strike into `out`, by the COS method
+// (fourier.odin): the characteristic function is evaluated once per cosine
+// term for all strikes. n_points is the minimum number of terms; the count
+// grows until the characteristic function has decayed, so any value gives
+// full accuracy (~1e-12 relative to the price scale).
 heston_prices_same_expiry :: proc(
 	S: f64,
 	strikes: []f64,
@@ -574,93 +569,13 @@ heston_prices_same_expiry :: proc(
 	params: Heston_Params,
 	opt: OptionType,
 	out: []f64,
-	n_points: int = 1000,
+	n_points: int = 64,
 ) {
 	assert(
 		len(out) == len(strikes),
 		"heston_prices_same_expiry: out must have one slot per strike",
 	)
-	if T <= 0.0 {
-		for K, k in strikes {
-			out[k] = opt == .Call ? math.max(S - K, 0.0) : math.max(K - S, 0.0)
-		}
-		return
-	}
-
-	// Per-strike accumulators; on the stack for typical chain sizes
-	stack_P: [128]f64
-	P1, P2: []f64
-	if len(strikes) <= 64 {
-		P1, P2 = stack_P[:len(strikes)], stack_P[64:64 + len(strikes)]
-	} else {
-		P1 = make([]f64, len(strikes), context.temp_allocator)
-		P2 = make([]f64, len(strikes), context.temp_allocator)
-	}
-	defer if len(strikes) > 64 {
-		delete(P1, context.temp_allocator)
-		delete(P2, context.temp_allocator)
-	}
-
-	// ✅ CRITICAL FIX: Normalization factor for P1.
-	// heston_char_func(u - i) computes E[S_T * e^{iu ln S_T}].
-	// To get the true characteristic function (magnitude <= 1), we must divide by E[S_T] = S * e^{rT}.
-	normalization_P1 := S * math.exp(r * T)
-
-	// Integration range: the integrands are bounded by |φ(u)|/u, which decays like
-	// exp(−½u²·∫v dt) and, for large vol of vol, like exp(−c·u). u = 200 is ample
-	// from a few months on, but a week at 10% volatility needs u ≈ 1500. Double
-	// u_max until both characteristic functions are negligible there.
-	u_max := 200.0
-	for u_max < 1e6 {
-		phi1 :=
-			cmath_abs(heston_char_func(complex(u_max, -1.0), S, r, T, params)) / normalization_P1
-		phi2 := cmath_abs(heston_char_func(complex(u_max, 0.0), S, r, T, params))
-		if max(phi1, phi2) < 1e-15 * u_max {break}
-		u_max *= 2
-	}
-	// Midpoint rule, which converges exponentially for these smooth integrands
-	// while the step stays well below the width of their analyticity strip: at
-	// least n_points nodes and du ≤ 0.2
-	n_nodes := max(n_points, int(math.ceil(u_max / 0.2)))
-	du := u_max / f64(n_nodes)
-
-	for i in 0 ..< n_nodes {
-		u := (f64(i) + 0.5) * du
-
-		// P1 uses stock measure: evaluate at u - i, then normalize
-		u1 := complex(u, -1.0)
-		phi1_raw := heston_char_func(u1, S, r, T, params)
-		phi1 := phi1_raw / complex(normalization_P1, 0.0)
-
-		// P2 uses risk-neutral measure: evaluate at u (already normalized)
-		u2 := complex(u, 0.0)
-		phi2 := heston_char_func(u2, S, r, T, params)
-
-		for K, k in strikes {
-			e_k := cmath_exp(-complex(0.0, u * math.ln(K))) // e^{-iu ln K}, shared by both integrals
-			integrand1 := real(e_k * phi1 / complex(0.0, u))
-			P1[k] += integrand1 * du
-			integrand2 := real(e_k * phi2 / complex(0.0, u))
-			P2[k] += integrand2 * du
-		}
-	}
-
-	for K, k in strikes {
-		p1 := 0.5 + P1[k] / math.PI
-		p2 := 0.5 + P2[k] / math.PI
-		call_price := S * p1 - K * math.exp(-r * T) * p2
-
-		if opt == .Call {
-			intrinsic := math.max(S - K * math.exp(-r * T), 0.0)
-			if call_price < intrinsic {call_price = intrinsic}
-			out[k] = call_price
-		} else {
-			put_price := call_price - S + K * math.exp(-r * T)
-			intrinsic := math.max(K * math.exp(-r * T) - S, 0.0)
-			if put_price < intrinsic {put_price = intrinsic}
-			out[k] = put_price
-		}
-	}
+	heston_prices_cos(S, strikes, T, r, params, opt, out, n_points)
 }
 debug_heston :: proc() {
 	fmt.println("\n=== HESTON COMPLEX MATH DEBUG ===")

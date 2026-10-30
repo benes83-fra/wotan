@@ -32,17 +32,6 @@ _n :: proc(x: f64) -> f64 {
 	return math.exp_f64(-0.5 * x * x) / math.sqrt_f64(2.0 * math.PI)
 }
 
-// Standard normal quantile: Acklam's rational approximation refined by one
-// Halley step (full double precision); ±Inf outside (0, 1)
-_N_inv :: proc(p: f64) -> f64 {
-	if p <= 0.0 {return math.inf_f64(-1)}
-	if p >= 1.0 {return math.inf_f64(1)}
-	x := norm_inv(p)
-	e := _N(x) - p
-	u := e * math.sqrt_f64(2.0 * math.PI) * math.exp_f64(0.5 * x * x)
-	return x - u / (1.0 + 0.5 * x * u)
-}
-
 // Garman-Kohlhagen price; σ = 0 gives the discounted forward intrinsic value
 fx_gk_price :: proc(
 	S: f64,
@@ -148,9 +137,9 @@ fx_strike_from_delta :: proc(
 	df_f := math.exp_f64(-r_f * T)
 	d1: f64
 	if opt == .Call {
-		d1 = _N_inv(delta_target / df_f)
+		d1 = _bs_ppf(delta_target / df_f)
 	} else {
-		d1 = -_N_inv(-delta_target / df_f)
+		d1 = -_bs_ppf(-delta_target / df_f)
 	}
 	sqrt_T := math.sqrt_f64(T)
 	return S * math.exp_f64(-d1 * sigma * sqrt_T + (r_d - r_f + 0.5 * sigma * sigma) * T)

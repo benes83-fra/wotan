@@ -173,7 +173,7 @@ _cdo_tranche_mc :: proc(
 	defer delete(thr, allocator)
 	for k in 1 ..= n {
 		pd := 1.0 - math.exp_f64(-params.lambda * times[k])
-		thr[k] = ml.student_t_ppf(pd, nu) if nu > 0.0 else _N_inv(pd)
+		thr[k] = ml.student_t_ppf(pd, nu) if nu > 0.0 else _bs_ppf(pd)
 	}
 
 	sr, s1r := math.sqrt_f64(params.rho), math.sqrt_f64(1.0 - params.rho)
