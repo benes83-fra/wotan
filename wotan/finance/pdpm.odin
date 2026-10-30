@@ -6,11 +6,12 @@ import w "../core"
 import l "../linalg"
 import opt "../optimize"
 import p "../plot"
+import "base:runtime"
 import "core:fmt"
 import "core:math"
 import "core:math/rand"
-import "base:runtime"
 import "core:mem"
+import "core:slice"
 
 // ============================================================================
 // Core Structures
@@ -46,10 +47,24 @@ PayoffDistribution :: struct {
 	max_payoff:    f64,
 }
 
+// On a uniform grid of states: q(s) = E[M | R = s] f(s), the state-price
+// density (∫ q ds = E[M]), and f(s), the physical density of the states.
+// Free with free_state_price_density.
 StatePriceDensity :: struct {
 	states:    []f64, // State values (e.g., market returns)
-	densities: []f64, // State price densities (Arrow-Debreu prices)
+	densities: []f64, // State price densities (Arrow-Debreu prices per unit of state)
 	n_points:  int,
+	physical:  []f64, // Physical density of the states (nil: unknown)
+}
+
+free_state_price_density :: proc(
+	spd: ^StatePriceDensity,
+	allocator: mem.Allocator = context.allocator,
+) {
+	delete(spd.states, allocator)
+	delete(spd.densities, allocator)
+	delete(spd.physical, allocator)
+	spd^ = {}
 }
 
 PDPMResult :: struct {
@@ -157,234 +172,135 @@ sdf_exponential_utility :: proc(
 	}
 }
 
-// Create SDF from linear factor model: M = a + b*R_m
+// Create SDF from linear factor model: M = a + b R, R = 1 + r the gross market
+// return, with a and b solving E[M] = 1/(1+rf) and E[M R] = 1 (sample moments)
 sdf_linear_factor :: proc(
 	market_returns: []f64,
 	risk_free_rate: f64,
 	allocator: mem.Allocator = context.allocator,
 ) -> StochasticDiscountFactor {
-	n := len(market_returns)
-
-	// Debug: Print the actual length
-	fmt.printf("sdf_linear_factor: n = %d\n", n)
-
-	// Convert to gross returns: R = 1 + r
-	gross_returns := make([]f64, n, allocator)
-	for i in 0 ..< n {
-		gross_returns[i] = 1.0 + market_returns[i]
-	}
-
-	// Compute statistics
-	mean_R := 0.0
-	mean_R2 := 0.0
-	for r in gross_returns {
-		mean_R += r
-		mean_R2 += r * r
-	}
-	mean_R /= f64(n)
-	mean_R2 /= f64(n)
-
-	var_R := mean_R2 - mean_R * mean_R
-
-	rf_discount := 1.0 / (1.0 + risk_free_rate)
-
-	det := var_R
-
-	a: f64
-	b: f64
-
-	if math.abs(det) < 1e-10 {
-		a = rf_discount
-		b = 0.0
-	} else {
-		a = (rf_discount * mean_R2 - mean_R) / det
-		b = (1.0 - rf_discount * mean_R) / det
-	}
-
-	values := make([]f64, n, allocator)
-	parameters := make([]f64, 2, allocator)
-
-	// Debug: Print loop bounds
-	fmt.printf("Creating values array with n = %d\n", n)
-	for i in 0 ..< n {
-		values[i] = a + b * gross_returns[i]
-	}
-
-	// Verify constraints
-	mean := 0.0
-	for v in values {mean += v}
-	mean /= f64(n)
-
-	// Debug: Print verification loop bounds
-	fmt.printf("Verifying E[M*R_m] with n = %d\n", n)
-	pricing_check := 0.0
-	for i in 0 ..< n {
-		pricing_check += values[i] * gross_returns[i]
-	}
-	pricing_check /= f64(n)
-
-	variance := 0.0
-	for v in values {
-		diff := v - mean
-		variance += diff * diff
-	}
-	variance /= f64(n - 1)
-
-	parameters[0] = a
-	parameters[1] = b
-
-	fmt.printf("Linear SDF Calibration Check: E[M*R_m] = %.4f (Target: 1.0)\n", pricing_check)
-
-	delete(gross_returns, allocator)
-
-	return StochasticDiscountFactor {
-		model_type = .Linear_Factor,
-		values = values,
-		parameters = parameters,
-		risk_aversion = 0.0,
-		discount_factor = rf_discount,
-		mean = mean,
-		variance = variance,
-	}
+	sdf := sdf_quadratic(market_returns, risk_free_rate, allocator, 0.0)
+	a, b, _ := _sdf_quadratic_coefficients(market_returns, risk_free_rate, 0.0)
+	delete(sdf.parameters, allocator)
+	sdf.parameters = make([]f64, 2, allocator)
+	sdf.parameters[0], sdf.parameters[1] = a, b
+	sdf.model_type = .Linear_Factor
+	return sdf
 }
 
-// Create SDF from quadratic model: M = a + b*R_m + c*R_m²
+// Create SDF from quadratic model: M = a + b R + c R², R = 1 + r the gross market
+// return. For the given curvature c, a and b solve E[M] = 1/(1+rf) and
+// E[M R] = 1 (sample moments), so the SDF prices the bond and the market; c = 0
+// is sdf_linear_factor. (Two assets cannot identify c; calibrate_sdf_quadratic
+// fits it to option prices.) parameters = [a, b, c].
 sdf_quadratic :: proc(
 	market_returns: []f64,
 	risk_free_rate: f64,
 	allocator: mem.Allocator = context.allocator,
+	c: f64 = 0.0,
 ) -> StochasticDiscountFactor {
+	a, b, d := _sdf_quadratic_coefficients(market_returns, risk_free_rate, c)
 	n := len(market_returns)
-
-	// Compute moments
-	mean_rm := 0.0
-	mean_rm2 := 0.0
-	mean_rm3 := 0.0
-	mean_rm4 := 0.0
-
-	for r in market_returns {
-		r2 := r * r
-		mean_rm += r
-		mean_rm2 += r2
-		mean_rm3 += r2 * r
-		mean_rm4 += r2 * r2
-	}
-
-	mean_rm /= f64(n)
-	mean_rm2 /= f64(n)
-	mean_rm3 /= f64(n)
-	mean_rm4 /= f64(n)
-
-	// Solve for quadratic SDF parameters using GMM
-	// This is a simplified version - full implementation would use optimization
-	a := 1.0 / (1.0 + risk_free_rate)
-	b := -0.5 * mean_rm
-	c := 0.1
-
 	values := make([]f64, n, allocator)
-	parameters := make([]f64, 3, allocator)
-
-	for i in 0 ..< n {
-		r := market_returns[i]
-		values[i] = a + b * r + c * r * r
+	for r, i in market_returns {
+		R := 1.0 + r
+		values[i] = a + b * R + c * R * R
 	}
-
 	mean := 0.0
-	for v in values {mean += v}
-	mean /= f64(n)
-
+	for x in values {mean += x}
+	mean /= f64(max(n, 1))
 	variance := 0.0
-	for v in values {
-		diff := v - mean
-		variance += diff * diff
-	}
-	variance /= f64(n - 1)
+	for x in values {variance += (x - mean) * (x - mean)}
+	variance /= f64(max(n - 1, 1))
 
-	parameters[0] = a
-	parameters[1] = b
-	parameters[2] = c
-
+	parameters := make([]f64, 3, allocator)
+	parameters[0], parameters[1], parameters[2] = a, b, c
 	return StochasticDiscountFactor {
 		model_type = .Quadratic,
 		values = values,
 		parameters = parameters,
 		risk_aversion = 0.0,
-		discount_factor = 1.0 / (1.0 + risk_free_rate),
+		discount_factor = d,
 		mean = mean,
 		variance = variance,
 	}
+}
+
+// a, b of M = a + b R + c R² with E[M] = d = 1/(1+rf) and E[M R] = 1
+@(private = "file")
+_sdf_quadratic_coefficients :: proc(
+	market_returns: []f64,
+	risk_free_rate, c: f64,
+) -> (
+	a, b, d: f64,
+) {
+	n := f64(max(len(market_returns), 1))
+	m1, m2, m3 := 0.0, 0.0, 0.0
+	for r in market_returns {
+		R := 1.0 + r
+		m1 += R
+		m2 += R * R
+		m3 += R * R * R
+	}
+	m1 /= n
+	m2 /= n
+	m3 /= n
+	// a + b m1 = d − c m2,  a m1 + b m2 = 1 − c m3
+	d = 1.0 / (1.0 + risk_free_rate)
+	u, v := d - c * m2, 1.0 - c * m3
+	det := m2 - m1 * m1
+	if abs(det) < 1e-14 * max(m2, 1e-300) {
+		return u, 0.0, d
+	}
+	b = (v - m1 * u) / det
+	a = u - b * m1
+	return
 }
 
 // ============================================================================
 // Payoff Distribution Analysis
 // ============================================================================
 
-// Compute distribution metrics for a payoff
+// Probability-weighted (population) moments of a payoff: mean, variance,
+// skewness and excess kurtosis. With probabilities = nil the states are
+// equally likely and `probabilities` in the result is nil.
 analyze_payoff_distribution :: proc(
 	payoffs: []f64,
 	probabilities: []f64 = nil, // nil = uniform
 	allocator: mem.Allocator = context.allocator,
 ) -> PayoffDistribution {
 	n := len(payoffs)
+	if n == 0 {return {}}
+	wt :: #force_inline proc(probs: []f64, i, n: int) -> f64 {return(
+			probs[i] if probs != nil else 1.0 / f64(n) \
+		)}
 
-	// Use uniform probabilities if not provided
-	probs := probabilities
-	if probs == nil {
-		probs = make([]f64, n, context.temp_allocator)
-		uniform_prob := 1.0 / f64(n)
-		for i in 0 ..< n {
-			probs[i] = uniform_prob
-		}
-	}
-
-	// Compute mean
 	mean := 0.0
+	for i in 0 ..< n {mean += wt(probabilities, i, n) * payoffs[i]}
+	m2, m3, m4 := 0.0, 0.0, 0.0
 	for i in 0 ..< n {
-		mean += probs[i] * payoffs[i]
+		d := payoffs[i] - mean
+		q := wt(probabilities, i, n)
+		m2 += q * d * d
+		m3 += q * d * d * d
+		m4 += q * d * d * d * d
 	}
-
-	// Compute variance
-	variance := 0.0
-	for i in 0 ..< n {
-		diff := payoffs[i] - mean
-		variance += probs[i] * diff * diff
+	skewness, kurtosis := 0.0, 0.0
+	if m2 > 1e-300 {
+		skewness = m3 / math.pow(m2, 1.5)
+		kurtosis = m4 / (m2 * m2) - 3.0
 	}
-
-	// Compute skewness
-	skewness := 0.0
-	if variance > 1e-10 {
-		std_dev := math.sqrt(variance)
-		for i in 0 ..< n {
-			diff := payoffs[i] - mean
-			skewness += probs[i] * math.pow(diff / std_dev, 3)
-		}
+	min_payoff, max_payoff := payoffs[0], payoffs[0]
+	for x in payoffs {
+		min_payoff = min(min_payoff, x)
+		max_payoff = max(max_payoff, x)
 	}
-
-	// Compute kurtosis
-	kurtosis := 0.0
-	if variance > 1e-10 {
-		std_dev := math.sqrt(variance)
-		for i in 0 ..< n {
-			diff := payoffs[i] - mean
-			kurtosis += probs[i] * math.pow(diff / std_dev, 4)
-		}
-		kurtosis -= 3.0 // Excess kurtosis
-	}
-
-	// Find min/max
-	min_payoff := payoffs[0]
-	max_payoff := payoffs[0]
-	for p in payoffs {
-		if p < min_payoff {min_payoff = p}
-		if p > max_payoff {max_payoff = p}
-	}
-
 	return PayoffDistribution {
 		payoffs = payoffs,
-		probabilities = probs,
+		probabilities = probabilities,
 		n_states = n,
 		mean = mean,
-		variance = variance,
+		variance = m2,
 		skewness = skewness,
 		kurtosis = kurtosis,
 		min_payoff = min_payoff,
@@ -396,7 +312,9 @@ analyze_payoff_distribution :: proc(
 // State Price Density Estimation
 // ============================================================================
 
-// Estimate state price density using kernel density estimation
+// Gaussian-kernel estimates on a uniform grid spanning the observed returns ± 10%
+// of their range: q(s) = (1/n) Σ M_j K_h(s − r_j) and f(s) = (1/n) Σ K_h(s − r_j).
+// q is floored at 0 (a linear SDF can be negative in extreme states).
 estimate_state_price_density :: proc(
 	sdf: ^StochasticDiscountFactor,
 	market_returns: []f64,
@@ -420,6 +338,7 @@ estimate_state_price_density :: proc(
 	// Create grid points
 	states := make([]f64, n_points, allocator)
 	densities := make([]f64, n_points, allocator)
+	physical := make([]f64, n_points, allocator)
 
 	step := (max_r - min_r) / f64(n_points - 1)
 	for i in 0 ..< n_points {
@@ -432,7 +351,7 @@ estimate_state_price_density :: proc(
 
 	for i in 0 ..< n_points {
 		state := states[i]
-		density := 0.0
+		density, phys := 0.0, 0.0
 
 		for j in 0 ..< n_obs {
 			// Gaussian kernel
@@ -441,9 +360,11 @@ estimate_state_price_density :: proc(
 
 			// Weight by SDF
 			density += sdf.values[j] * kernel
+			phys += kernel
 		}
 
 		densities[i] = density / f64(n_obs)
+		physical[i] = phys / f64(n_obs)
 
 		// Enforce non-negativity (critical for no-arbitrage)
 		if densities[i] < 0.0 {
@@ -451,15 +372,22 @@ estimate_state_price_density :: proc(
 		}
 	}
 
-	return StatePriceDensity{states = states, densities = densities, n_points = n_points}
+	return StatePriceDensity {
+		states = states,
+		densities = densities,
+		n_points = n_points,
+		physical = physical,
+	}
 }
 
 // ============================================================================
 // Core PDPM Pricing
 // ============================================================================
 
-// Price a payoff using the stochastic discount factor
-// This is the fundamental pricing equation: P = E[M * X]
+// Price a payoff using the stochastic discount factor: P = E[M X] = Σ p_i M_i X_i.
+// risk_premium = P − E[X] E[M] = Cov(M, X) (the price of the payoff's risk),
+// certainty_equivalent = P / E[M] (the risk-neutral expected payoff); all
+// moments under `probabilities` (nil = uniform).
 price_payoff :: proc(
 	payoff: []f64,
 	sdf: ^StochasticDiscountFactor,
@@ -467,117 +395,79 @@ price_payoff :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> PDPMResult {
 	n := len(payoff)
+	wt :: #force_inline proc(probs: []f64, i, n: int) -> f64 {return(
+			probs[i] if probs != nil else 1.0 / f64(n) \
+		)}
 
-	// Use uniform probabilities if not provided
-	probs := probabilities
-	if probs == nil {
-		probs = make([]f64, n, context.temp_allocator)
-		uniform_prob := 1.0 / f64(n)
-		for i in 0 ..< n {
-			probs[i] = uniform_prob
-		}
-	}
-
-	// Compute expected payoff: E[X]
-	expected_payoff := 0.0
+	expected_payoff, mean_sdf, price := 0.0, 0.0, 0.0
 	for i in 0 ..< n {
-		expected_payoff += probs[i] * payoff[i]
+		q := wt(probabilities, i, n)
+		expected_payoff += q * payoff[i]
+		mean_sdf += q * sdf.values[i]
+		price += q * sdf.values[i] * payoff[i]
 	}
 
-	// Compute price: P = E[M * X]
-	price := 0.0
+	cov, var_payoff, var_sdf := 0.0, 0.0, 0.0
 	for i in 0 ..< n {
-		price += probs[i] * sdf.values[i] * payoff[i]
+		q := wt(probabilities, i, n)
+		dx := payoff[i] - expected_payoff
+		dm := sdf.values[i] - mean_sdf
+		cov += q * dx * dm
+		var_payoff += q * dx * dx
+		var_sdf += q * dm * dm
 	}
-
-	// Compute correlation between payoff and SDF
-	mean_payoff := expected_payoff
-	mean_sdf := sdf.mean
-
-	cov := 0.0
-	var_payoff := 0.0
-	var_sdf := 0.0
-
-	for i in 0 ..< n {
-		diff_payoff := payoff[i] - mean_payoff
-		diff_sdf := sdf.values[i] - mean_sdf
-
-		cov += probs[i] * diff_payoff * diff_sdf
-		var_payoff += probs[i] * diff_payoff * diff_payoff
-		var_sdf += probs[i] * diff_sdf * diff_sdf
-	}
-
 	correlation := 0.0
-	if var_payoff > 1e-10 && var_sdf > 1e-10 {
-		correlation = cov / (math.sqrt(var_payoff) * math.sqrt(var_sdf))
+	if var_payoff > 0.0 && var_sdf > 0.0 {
+		correlation = cov / math.sqrt(var_payoff * var_sdf)
 	}
 
-	// Risk premium = Price - Expected payoff (discounted)
-	risk_premium := price - expected_payoff * sdf.mean
-
-	// Certainty equivalent: CE such that U(CE) = E[U(X)]
-	// For simplicity, use: CE = Price / E[M]
-	certainty_equivalent := price / sdf.mean
-
-	// Compute state prices (Arrow-Debreu prices)
 	state_prices := make([]f64, n, allocator)
-	for i in 0 ..< n {
-		state_prices[i] = probs[i] * sdf.values[i]
-	}
+	for i in 0 ..< n {state_prices[i] = wt(probabilities, i, n) * sdf.values[i]}
 
 	return PDPMResult {
 		price = price,
 		expected_payoff = expected_payoff,
-		risk_premium = risk_premium,
+		risk_premium = price - expected_payoff * mean_sdf,
 		state_prices = state_prices,
 		correlation_with_sdf = correlation,
-		certainty_equivalent = certainty_equivalent,
+		certainty_equivalent = price / mean_sdf,
 	}
 }
 
-// Price a payoff using state price density (continuous states)
+// Price a payoff on a state-price density: P = ∫ X(s) q(s) ds by the trapezoidal
+// rule. E[X] uses the physical density when the SPD has one (otherwise the
+// risk-neutral density q / ∫q); risk_premium = P − E[X] ∫q, as in price_payoff.
+// state_prices are the Arrow-Debreu prices of the grid cells, q_i · w_i.
 price_payoff_continuous :: proc(
 	payoff_function: proc(state: f64) -> f64,
 	spd: ^StatePriceDensity,
 	allocator: mem.Allocator = context.allocator,
 ) -> PDPMResult {
 	n := spd.n_points
-
-	// Compute price using trapezoidal rule
-	price := 0.0
-	expected_payoff := 0.0
-
-	for i in 0 ..< n {
-		payoff := payoff_function(spd.states[i])
-		price += spd.densities[i] * payoff
-
-		// For expected payoff, we need the physical density, not state prices
-		// This is a simplification - in practice you'd need separate physical density
-		expected_payoff += payoff / f64(n)
-	}
-
-	// Trapezoidal integration
-	if n > 1 {
-		step := spd.states[1] - spd.states[0]
-		price *= step
-		expected_payoff *= (spd.states[n - 1] - spd.states[0])
-	}
-
-	// Compute state prices
 	state_prices := make([]f64, n, allocator)
-	for i in 0 ..< n {
-		state_prices[i] = spd.densities[i]
-	}
+	if n < 2 {return PDPMResult{state_prices = state_prices}}
 
-	risk_premium := price - expected_payoff
+	step := spd.states[1] - spd.states[0]
+	price, bond, ex, mass := 0.0, 0.0, 0.0, 0.0
+	for i in 0 ..< n {
+		w := step * (0.5 if i == 0 || i == n - 1 else 1.0)
+		x := payoff_function(spd.states[i])
+		state_prices[i] = spd.densities[i] * w
+		price += x * state_prices[i]
+		bond += state_prices[i]
+		f := spd.physical[i] if spd.physical != nil else spd.densities[i]
+		ex += x * f * w
+		mass += f * w
+	}
+	expected_payoff := ex / mass if mass > 0.0 else 0.0
 
 	return PDPMResult {
 		price = price,
 		expected_payoff = expected_payoff,
-		risk_premium = risk_premium,
+		risk_premium = price - expected_payoff * bond,
 		state_prices = state_prices,
 		correlation_with_sdf = 0.0,
-		certainty_equivalent = price,
+		certainty_equivalent = price / bond if bond > 0.0 else 0.0,
 	}
 }
 
@@ -585,8 +475,13 @@ price_payoff_continuous :: proc(
 // Dybvig's Distributional Pricing
 // ============================================================================
 
-// Dybvig's key insight: price depends on the joint distribution of payoff and SDF
-// This function implements the full distributional pricing approach
+// Dybvig's (1988) payoff distribution pricing model: with equally likely states
+// the cheapest payoff having the same distribution as X pays its order
+// statistics in the reverse order of the SDF, so the distributional price is
+//   P_D = (1/n) Σ_i X_(i) M_(n+1−i)   (X ascending, M descending)
+// and P − P_D ≥ 0 is the efficiency loss of the actual payoff. Result: price =
+// P_D, certainty_equivalent = P_D / E[M], risk_premium = P_D − E[X] E[M].
+// n_quantiles is unused (kept for compatibility).
 dybvig_distributional_price :: proc(
 	payoff: []f64,
 	sdf: ^StochasticDiscountFactor,
@@ -594,84 +489,35 @@ dybvig_distributional_price :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> PDPMResult {
 	n := len(payoff)
+	xs := make([]f64, n, context.temp_allocator)
+	ms := make([]f64, n, context.temp_allocator)
+	defer {delete(xs, context.temp_allocator); delete(ms, context.temp_allocator)}
+	copy(xs, payoff)
+	copy(ms, sdf.values[:n])
+	slice.sort(xs)
+	slice.sort(ms)
 
-	// Sort payoffs and corresponding SDF values
-	sorted_payoffs := make([]f64, n, context.temp_allocator)
-	sorted_sdf := make([]f64, n, context.temp_allocator)
-	indices := make([]int, n, context.temp_allocator)
-
+	price, expected_payoff, mean_sdf := 0.0, 0.0, 0.0
 	for i in 0 ..< n {
-		sorted_payoffs[i] = payoff[i]
-		sorted_sdf[i] = sdf.values[i]
-		indices[i] = i
+		price += xs[i] * ms[n - 1 - i]
+		expected_payoff += xs[i]
+		mean_sdf += ms[i]
 	}
+	inv := 1.0 / f64(max(n, 1))
+	price *= inv
+	expected_payoff *= inv
+	mean_sdf *= inv
 
-	// Simple bubble sort (replace with quicksort for large n)
-	for i in 0 ..< n - 1 {
-		for j in 0 ..< n - i - 1 {
-			if sorted_payoffs[j] > sorted_payoffs[j + 1] {
-				sorted_payoffs[j], sorted_payoffs[j + 1] = sorted_payoffs[j + 1], sorted_payoffs[j]
-				sorted_sdf[j], sorted_sdf[j + 1] = sorted_sdf[j + 1], sorted_sdf[j]
-			}
-		}
-	}
-
-	// Compute quantile-based pricing
-	// Dybvig showed that price depends on how payoff quantiles align with SDF quantiles
-	quantile_size := n / n_quantiles
-	quantile_prices := make([]f64, n_quantiles, allocator)
-
-	for q in 0 ..< n_quantiles {
-		start_idx := q * quantile_size
-		end_idx := min((q + 1) * quantile_size, n)
-
-		// Average payoff and SDF in this quantile
-		avg_payoff := 0.0
-		avg_sdf := 0.0
-		count := 0
-
-		for i in start_idx ..< end_idx {
-			avg_payoff += sorted_payoffs[i]
-			avg_sdf += sorted_sdf[i]
-			count += 1
-		}
-
-		avg_payoff /= f64(count)
-		avg_sdf /= f64(count)
-
-		// Price contribution from this quantile
-		quantile_prices[q] = avg_payoff * avg_sdf * f64(count) / f64(n)
-	}
-
-	// Total price
-	price := 0.0
-	for qp in quantile_prices {
-		price += qp
-	}
-
-	// Expected payoff
-	expected_payoff := 0.0
-	for p in payoff {
-		expected_payoff += p
-	}
-	expected_payoff /= f64(n)
-
-	// Risk premium
-	risk_premium := price - expected_payoff * sdf.mean
-
-	// State prices
 	state_prices := make([]f64, n, allocator)
-	for i in 0 ..< n {
-		state_prices[i] = sdf.values[i] / f64(n)
-	}
+	for i in 0 ..< n {state_prices[i] = sdf.values[i] * inv}
 
 	return PDPMResult {
 		price = price,
 		expected_payoff = expected_payoff,
-		risk_premium = risk_premium,
+		risk_premium = price - expected_payoff * mean_sdf,
 		state_prices = state_prices,
 		correlation_with_sdf = 0.0,
-		certainty_equivalent = price / sdf.mean,
+		certainty_equivalent = price / mean_sdf,
 	}
 }
 
@@ -776,84 +622,53 @@ simulate_terminal_prices :: proc(
 // Utility Functions
 // ============================================================================
 
-// Compute distribution metrics
+// Sample distribution metrics: mean, unbiased variance (n − 1), population
+// skewness m3/m2^1.5 and excess kurtosis m4/m2² − 3 (scipy.stats defaults),
+// VaR_α as the lower empirical α-quantile x_(⌈αn⌉) and ES_95 as the mean of
+// the ⌈0.05 n⌉ smallest values (both in the units of `values`, ≤ 0 for losses).
 compute_distribution_metrics :: proc(
 	values: []f64,
 	allocator: mem.Allocator = context.allocator,
 ) -> DistributionMetrics {
 	n := len(values)
-
-	// Mean
+	if n == 0 {return {}}
 	mean := 0.0
 	for v in values {mean += v}
 	mean /= f64(n)
-
-	// Variance
-	variance := 0.0
+	m2, m3, m4 := 0.0, 0.0, 0.0
 	for v in values {
-		diff := v - mean
-		variance += diff * diff
+		d := v - mean
+		m2 += d * d
+		m3 += d * d * d
+		m4 += d * d * d * d
 	}
-	variance /= f64(n - 1)
-
-	// Skewness
-	skewness := 0.0
-	if variance > 1e-10 {
-		std_dev := math.sqrt(variance)
-		for v in values {
-			diff := v - mean
-			skewness += math.pow(diff / std_dev, 3)
-		}
-		skewness /= f64(n)
-	}
-
-	// Kurtosis (excess)
-	kurtosis := 0.0
-	if variance > 1e-10 {
-		std_dev := math.sqrt(variance)
-		for v in values {
-			diff := v - mean
-			kurtosis += math.pow(diff / std_dev, 4)
-		}
-		kurtosis /= f64(n)
-		kurtosis -= 3.0
+	variance := m2 / f64(max(n - 1, 1))
+	m2 /= f64(n)
+	m3 /= f64(n)
+	m4 /= f64(n)
+	skewness, kurtosis := 0.0, 0.0
+	if m2 > 1e-300 {
+		skewness = m3 / math.pow(m2, 1.5)
+		kurtosis = m4 / (m2 * m2) - 3.0
 	}
 
-	// Sort for VaR
 	sorted := make([]f64, n, context.temp_allocator)
+	defer delete(sorted, context.temp_allocator)
 	copy(sorted, values)
-
-	// Simple bubble sort (replace with quicksort for large n)
-	for i in 0 ..< n - 1 {
-		for j in 0 ..< n - i - 1 {
-			if sorted[j] > sorted[j + 1] {
-				sorted[j], sorted[j + 1] = sorted[j + 1], sorted[j]
-			}
-		}
-	}
-
-	// VaR (95% and 99%)
-	idx_95 := int(0.05 * f64(n))
-	idx_99 := int(0.01 * f64(n))
-
-	value_at_risk_95 := sorted[idx_95]
-	value_at_risk_99 := sorted[idx_99]
-
-	// Expected Shortfall (95%)
-	expected_shortfall_95 := 0.0
-	for i in 0 ..= idx_95 {
-		expected_shortfall_95 += sorted[i]
-	}
-	expected_shortfall_95 /= f64(idx_95 + 1)
+	slice.sort(sorted)
+	k95 := clamp(int(math.ceil(0.05 * f64(n) - 1e-9)), 1, n)
+	k99 := clamp(int(math.ceil(0.01 * f64(n) - 1e-9)), 1, n)
+	es := 0.0
+	for i in 0 ..< k95 {es += sorted[i]}
 
 	return DistributionMetrics {
 		mean = mean,
 		variance = variance,
 		skewness = skewness,
 		kurtosis = kurtosis,
-		value_at_risk_95 = value_at_risk_95,
-		value_at_risk_99 = value_at_risk_99,
-		expected_shortfall_95 = expected_shortfall_95,
+		value_at_risk_95 = sorted[k95 - 1],
+		value_at_risk_99 = sorted[k99 - 1],
+		expected_shortfall_95 = es / f64(k95),
 	}
 }
 
@@ -925,10 +740,7 @@ plot_pdpm_analysis :: proc(
 	// Plot 3: State Price Density
 	// ========================================================================
 	spd := estimate_state_price_density(sdf, market_returns, 0.02, 100, context.temp_allocator)
-	defer {
-		delete(spd.states, context.temp_allocator)
-		delete(spd.densities, context.temp_allocator)
-	}
+	defer free_state_price_density(&spd, context.temp_allocator)
 
 	// ========================================================================
 	// Plot 4: Risk-Neutral Distribution (SDF-weighted)
@@ -1214,13 +1026,22 @@ _calibration_loss :: proc(
 	// pricing scratch (payoffs, state prices) lives only for this evaluation
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	if horizon.returns_period > 0.0 {
-		Ctx :: struct {b, spot: f64, allocator: mem.Allocator}
+		Ctx :: struct {
+			b, spot:   f64,
+			allocator: mem.Allocator,
+		}
 		ctx := Ctx{b, spot_price, allocator}
-		return _horizon_mse(market_returns, option_chain, horizon, proc(rets: []f64, disc: f64, sub: ^OptionChain, ud: rawptr) -> f64 {
-			c := (^Ctx)(ud)
-			mean_R, _ := _mean_gross(rets)
-			return _calibration_loss(c.b, mean_R, disc, rets, sub, c.spot, c.allocator)
-		}, &ctx)
+		return _horizon_mse(
+			market_returns,
+			option_chain,
+			horizon,
+			proc(rets: []f64, disc: f64, sub: ^OptionChain, ud: rawptr) -> f64 {
+				c := (^Ctx)(ud)
+				mean_R, _ := _mean_gross(rets)
+				return _calibration_loss(c.b, mean_R, disc, rets, sub, c.spot, c.allocator)
+			},
+			&ctx,
+		)
 	}
 	n := len(market_returns)
 
@@ -1499,7 +1320,12 @@ pdpm_horizon_returns :: proc(
 
 // Option-count-weighted MSE over the distinct expiries of the chain: `eval` is a
 // one-period loss called with the horizon states and e^(-r T) for each expiry group
-_Horizon_Eval :: proc(horizon_returns: []f64, discount: f64, sub: ^OptionChain, user_data: rawptr) -> f64
+_Horizon_Eval :: proc(
+	horizon_returns: []f64,
+	discount: f64,
+	sub: ^OptionChain,
+	user_data: rawptr,
+) -> f64
 
 _horizon_mse :: proc(
 	market_returns: []f64,
@@ -1534,11 +1360,17 @@ _horizon_mse :: proc(
 		for j, q in idx {
 			sub.strikes[q] = option_chain.strikes[j]
 			sub.expiries[q] = T
-			sub.implied_vols[q] = option_chain.implied_vols[j] if len(option_chain.implied_vols) > j else 0.0
+			sub.implied_vols[q] =
+				option_chain.implied_vols[j] if len(option_chain.implied_vols) > j else 0.0
 			sub.market_prices[q] = option_chain.market_prices[j]
 			sub.option_types[q] = option_chain.option_types[j]
 		}
-		rets := pdpm_horizon_returns(market_returns, horizon.returns_period, T, context.temp_allocator)
+		rets := pdpm_horizon_returns(
+			market_returns,
+			horizon.returns_period,
+			T,
+			context.temp_allocator,
+		)
 		total += f64(m) * eval(rets, math.exp(-horizon.risk_free_rate * T), &sub, user_data)
 	}
 	return total / f64(n_opt)
@@ -1674,12 +1506,28 @@ _calibration_loss_power_utility :: proc(
 	// pricing scratch (payoffs, state prices) lives only for this evaluation
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	if horizon.returns_period > 0.0 {
-		Ctx :: struct {gamma, spot: f64, allocator: mem.Allocator}
+		Ctx :: struct {
+			gamma, spot: f64,
+			allocator:   mem.Allocator,
+		}
 		ctx := Ctx{gamma, spot_price, allocator}
-		return _horizon_mse(market_returns, option_chain, horizon, proc(rets: []f64, disc: f64, sub: ^OptionChain, ud: rawptr) -> f64 {
-			c := (^Ctx)(ud)
-			return _calibration_loss_power_utility(c.gamma, disc, rets, sub, c.spot, c.allocator)
-		}, &ctx)
+		return _horizon_mse(
+			market_returns,
+			option_chain,
+			horizon,
+			proc(rets: []f64, disc: f64, sub: ^OptionChain, ud: rawptr) -> f64 {
+				c := (^Ctx)(ud)
+				return _calibration_loss_power_utility(
+					c.gamma,
+					disc,
+					rets,
+					sub,
+					c.spot,
+					c.allocator,
+				)
+			},
+			&ctx,
+		)
 	}
 	n := len(market_returns)
 
@@ -1913,13 +1761,32 @@ _calibration_loss_quadratic :: proc(
 	// pricing scratch (payoffs, state prices) lives only for this evaluation
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	if horizon.returns_period > 0.0 {
-		Ctx :: struct {b, c, spot: f64, allocator: mem.Allocator}
+		Ctx :: struct {
+			b, c, spot: f64,
+			allocator:  mem.Allocator,
+		}
 		ctx := Ctx{b, c, spot_price, allocator}
-		return _horizon_mse(market_returns, option_chain, horizon, proc(rets: []f64, disc: f64, sub: ^OptionChain, ud: rawptr) -> f64 {
-			q := (^Ctx)(ud)
-			mean_R, mean_R2 := _mean_gross(rets)
-			return _calibration_loss_quadratic(q.b, q.c, mean_R, mean_R2, disc, rets, sub, q.spot, q.allocator)
-		}, &ctx)
+		return _horizon_mse(
+			market_returns,
+			option_chain,
+			horizon,
+			proc(rets: []f64, disc: f64, sub: ^OptionChain, ud: rawptr) -> f64 {
+				q := (^Ctx)(ud)
+				mean_R, mean_R2 := _mean_gross(rets)
+				return _calibration_loss_quadratic(
+					q.b,
+					q.c,
+					mean_R,
+					mean_R2,
+					disc,
+					rets,
+					sub,
+					q.spot,
+					q.allocator,
+				)
+			},
+			&ctx,
+		)
 	}
 	n := len(market_returns)
 
@@ -2167,7 +2034,11 @@ calibrate_sdf_quadratic :: proc(
 		rmse         = best_rmse,
 		max_error    = 0.0,
 		n_iterations = 800, // 20*20 coarse + 20*20 fine
-		converged    = _grid_interior(best_b, -b_range, b_range) && _grid_interior(best_c, -c_range, c_range),
+		converged    = _grid_interior(
+			best_b,
+			-b_range,
+			b_range,
+		) && _grid_interior(best_c, -c_range, c_range),
 	}
 }
 
@@ -2190,12 +2061,21 @@ _calibration_loss_exponential :: proc(
 	// pricing scratch (payoffs, state prices) lives only for this evaluation
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	if horizon.returns_period > 0.0 {
-		Ctx :: struct {gamma, spot: f64, allocator: mem.Allocator}
+		Ctx :: struct {
+			gamma, spot: f64,
+			allocator:   mem.Allocator,
+		}
 		ctx := Ctx{gamma, spot_price, allocator}
-		return _horizon_mse(market_returns, option_chain, horizon, proc(rets: []f64, disc: f64, sub: ^OptionChain, ud: rawptr) -> f64 {
-			c := (^Ctx)(ud)
-			return _calibration_loss_exponential(c.gamma, disc, rets, sub, c.spot, c.allocator)
-		}, &ctx)
+		return _horizon_mse(
+			market_returns,
+			option_chain,
+			horizon,
+			proc(rets: []f64, disc: f64, sub: ^OptionChain, ud: rawptr) -> f64 {
+				c := (^Ctx)(ud)
+				return _calibration_loss_exponential(c.gamma, disc, rets, sub, c.spot, c.allocator)
+			},
+			&ctx,
+		)
 	}
 	n := len(market_returns)
 
@@ -2467,15 +2347,26 @@ _calibration_loss_multifactor :: proc(
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	if horizon.returns_period > 0.0 {
 		// only the market factor (factors[0], the terminal-price driver) is mapped to the horizon
-		Ctx :: struct {weights: []f64, factors: [][]f64, spot: f64, allocator: mem.Allocator}
+		Ctx :: struct {
+			weights:   []f64,
+			factors:   [][]f64,
+			spot:      f64,
+			allocator: mem.Allocator,
+		}
 		ctx := Ctx{weights, factors, spot_price, allocator}
-		return _horizon_mse(factors[0], option_chain, horizon, proc(rets: []f64, disc: f64, sub: ^OptionChain, ud: rawptr) -> f64 {
-			c := (^Ctx)(ud)
-			fT := make([][]f64, len(c.factors), context.temp_allocator)
-			copy(fT, c.factors)
-			fT[0] = rets
-			return _calibration_loss_multifactor(c.weights, fT, disc, sub, c.spot, c.allocator)
-		}, &ctx)
+		return _horizon_mse(
+			factors[0],
+			option_chain,
+			horizon,
+			proc(rets: []f64, disc: f64, sub: ^OptionChain, ud: rawptr) -> f64 {
+				c := (^Ctx)(ud)
+				fT := make([][]f64, len(c.factors), context.temp_allocator)
+				copy(fT, c.factors)
+				fT[0] = rets
+				return _calibration_loss_multifactor(c.weights, fT, disc, sub, c.spot, c.allocator)
+			},
+			&ctx,
+		)
 	}
 	n := len(factors[0])
 	n_factors := len(factors)
@@ -2743,7 +2634,11 @@ calibrate_sdf_multifactor_2d :: proc(
 		rmse         = best_rmse,
 		max_error    = 0.0,
 		n_iterations = 800, // 20*20 coarse + 20*20 fine
-		converged    = _grid_interior(best_weights[0], -range1, range1) && _grid_interior(best_weights[1], -range2, range2),
+		converged    = _grid_interior(
+			best_weights[0],
+			-range1,
+			range1,
+		) && _grid_interior(best_weights[1], -range2, range2),
 	}
 }
 // ============================================================================
@@ -2814,15 +2709,33 @@ _calibration_loss_multifactor_4d :: proc(
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	if horizon.returns_period > 0.0 {
 		// only the market factor (factors[0], the terminal-price driver) is mapped to the horizon
-		Ctx :: struct {weights: []f64, factors: [][]f64, spot: f64, allocator: mem.Allocator}
+		Ctx :: struct {
+			weights:   []f64,
+			factors:   [][]f64,
+			spot:      f64,
+			allocator: mem.Allocator,
+		}
 		ctx := Ctx{weights, factors, spot_price, allocator}
-		return _horizon_mse(factors[0], option_chain, horizon, proc(rets: []f64, disc: f64, sub: ^OptionChain, ud: rawptr) -> f64 {
-			c := (^Ctx)(ud)
-			fT := make([][]f64, len(c.factors), context.temp_allocator)
-			copy(fT, c.factors)
-			fT[0] = rets
-			return _calibration_loss_multifactor_4d(c.weights, fT, disc, sub, c.spot, c.allocator)
-		}, &ctx)
+		return _horizon_mse(
+			factors[0],
+			option_chain,
+			horizon,
+			proc(rets: []f64, disc: f64, sub: ^OptionChain, ud: rawptr) -> f64 {
+				c := (^Ctx)(ud)
+				fT := make([][]f64, len(c.factors), context.temp_allocator)
+				copy(fT, c.factors)
+				fT[0] = rets
+				return _calibration_loss_multifactor_4d(
+					c.weights,
+					fT,
+					disc,
+					sub,
+					c.spot,
+					c.allocator,
+				)
+			},
+			&ctx,
+		)
 	}
 	n := len(factors[0])
 	n_factors := len(factors)
@@ -3112,10 +3025,11 @@ calibrate_sdf_multifactor_4d :: proc(
 		rmse         = best_rmse,
 		max_error    = 0.0,
 		n_iterations = 20000, // 10^4 coarse + 10^4 fine
-		converged    = _grid_interior(best_weights[0], -weight_range, weight_range) &&
-			_grid_interior(best_weights[1], -weight_range, weight_range) &&
-			_grid_interior(best_weights[2], -weight_range, weight_range) &&
-			_grid_interior(best_weights[3], -weight_range, weight_range),
+		converged    = _grid_interior(
+			best_weights[0],
+			-weight_range,
+			weight_range,
+		) && _grid_interior(best_weights[1], -weight_range, weight_range) && _grid_interior(best_weights[2], -weight_range, weight_range) && _grid_interior(best_weights[3], -weight_range, weight_range),
 	}
 } // ============================================================================
 // SDF Surface Visualization (Using Your Plot Package)

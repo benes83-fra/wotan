@@ -378,10 +378,7 @@ pdpm2_test :: proc(allocator: mem.Allocator) {
 		50, // 50 grid points
 		allocator,
 	)
-	defer {
-		delete(spd.states, allocator)
-		delete(spd.densities, allocator)
-	}
+	defer fin.free_state_price_density(&spd, allocator)
 
 	fmt.printf("State Price Density (first 5 states):\n")
 	for i in 0 ..< min(5, spd.n_points) {
@@ -409,9 +406,9 @@ pdpm2_test :: proc(allocator: mem.Allocator) {
 	// ========================================================================
 	fmt.println("\n--- Test 10: Continuous Pricing ---")
 
-	// Define a call option payoff function
+	// Call struck at 105 on a 100 spot; the SPD states are market returns
 	call_payoff_fn :: proc(state: f64) -> f64 {
-		return math.max(state - 105.0, 0.0)
+		return math.max(100.0 * (1.0 + state) - 105.0, 0.0)
 	}
 
 	continuous_result := fin.price_payoff_continuous(call_payoff_fn, &spd, allocator)
