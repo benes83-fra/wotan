@@ -58,57 +58,43 @@ mc_generate_gbm_paths :: proc(
 	return S_paths
 }
 
-// GBM with Antithetic Variates
-// First half: original paths, Second half: negated Z's
+// GBM with Antithetic Variates: paths 0 ..< h use the normals, paths h ..< n_paths
+// their negatives, h = ceil(n_paths / 2) (an odd count drops the last mirror)
 mc_generate_gbm_paths_antithetic :: proc(
 	S_0: f64,
 	r: f64,
 	sigma: f64,
 	T: f64,
-	n_paths: int, // Must be even
+	n_paths: int,
 	n_steps: int,
-	norm_data: []f64, // Length: (n_paths/2) * n_steps
+	norm_data: []f64, // Length: ceil(n_paths/2) * n_steps
 	allocator: mem.Allocator,
 ) -> []f64 {
-	half_paths := n_paths / 2
+	half_paths := (n_paths + 1) / 2
 	dt := T / f64(n_steps)
 	sqrt_dt := math.sqrt_f64(dt)
 	drift := (r - 0.5 * sigma * sigma) * dt
 
 	S_paths := make([]f64, n_paths * (n_steps + 1), allocator)
-
-	// Original paths
-	rand_idx := 0
-	for path in 0 ..< half_paths {
-		S_paths[path * (n_steps + 1) + 0] = S_0
+	for path in 0 ..< n_paths {
+		base := path if path < half_paths else path - half_paths
+		sgn := 1.0 if path < half_paths else -1.0
+		row := path * (n_steps + 1)
+		S_paths[row] = S_0
 		for step in 1 ..< n_steps + 1 {
-			Z := norm_data[rand_idx]
-			rand_idx += 1
-			S_paths[path * (n_steps + 1) + step] =
-				S_paths[path * (n_steps + 1) + (step - 1)] *
-				math.exp_f64(drift + sigma * sqrt_dt * Z)
+			Z := sgn * norm_data[base * n_steps + step - 1]
+			S_paths[row + step] =
+				S_paths[row + step - 1] * math.exp_f64(drift + sigma * sqrt_dt * Z)
 		}
 	}
-
-	// Antithetic paths (negate Z's)
-	rand_idx = 0
-	for path in half_paths ..< n_paths {
-		antithetic_path := path - half_paths
-		S_paths[path * (n_steps + 1) + 0] = S_0
-		for step in 1 ..< n_steps + 1 {
-			Z := -norm_data[rand_idx] // ← NEGATED
-			rand_idx += 1
-			S_paths[path * (n_steps + 1) + step] =
-				S_paths[path * (n_steps + 1) + (step - 1)] *
-				math.exp_f64(drift + sigma * sqrt_dt * Z)
-		}
-	}
-
 	return S_paths
 }
 
-// Heston Stochastic Volatility Path Generation
-// Returns both S_paths and V_paths (variance paths)
+// Heston Stochastic Volatility Path Generation, full-truncation Euler (Lord,
+// Koekkoek & van Dijk 2010): with v⁺ = max(v, 0) from the start of the step,
+//   v ← v + κ(θ − v⁺)Δt + σ √v⁺ √Δt Z_v
+//   S ← S exp((r − v⁺/2)Δt + √v⁺ √Δt Z_s),  Z_s = ρ Z_v + √(1−ρ²) Z_⊥
+// so the discounted stock is a martingale step by step. V_paths holds v⁺.
 mc_generate_heston_paths :: proc(
 	S_0: f64,
 	r: f64,
@@ -116,7 +102,7 @@ mc_generate_heston_paths :: proc(
 	params: Heston_Params,
 	n_paths: int,
 	n_steps: int,
-	norm_data: []f64, // Length: n_paths * n_steps * 2
+	norm_data: []f64, // Length: n_paths * n_steps * 2 (Z_v, Z_⊥ per step)
 	allocator: mem.Allocator,
 ) -> (
 	S_paths: []f64,
@@ -124,45 +110,37 @@ mc_generate_heston_paths :: proc(
 ) {
 	dt := T / f64(n_steps)
 	sqrt_dt := math.sqrt_f64(dt)
+	rho_c := math.sqrt_f64(max(1.0 - params.rho * params.rho, 0.0))
 
 	S_paths = make([]f64, n_paths * (n_steps + 1), allocator)
 	V_paths = make([]f64, n_paths * (n_steps + 1), allocator)
 
 	rand_idx := 0
 	for path in 0 ..< n_paths {
-		S_paths[path * (n_steps + 1) + 0] = S_0
-		V_paths[path * (n_steps + 1) + 0] = params.v0
-
+		row := path * (n_steps + 1)
+		S, v := S_0, params.v0
+		S_paths[row] = S
+		V_paths[row] = max(v, 0.0)
 		for step in 1 ..< n_steps + 1 {
 			Z_v := norm_data[rand_idx]
-			Z_indep := norm_data[rand_idx + 1]
+			Z_s := params.rho * Z_v + rho_c * norm_data[rand_idx + 1]
 			rand_idx += 2
-
-			v_prev := V_paths[path * (n_steps + 1) + (step - 1)]
-			S_prev := S_paths[path * (n_steps + 1) + (step - 1)]
-
-			v_sqrt := math.sqrt_f64(math.max(0.0, v_prev))
-			Z_s := params.rho * Z_v + math.sqrt_f64(1.0 - params.rho * params.rho) * Z_indep
-
-			// Euler-Maruyama for variance
-			v_new :=
-				v_prev +
-				params.kappa * (params.theta - v_prev) * dt +
-				params.sigma * v_sqrt * sqrt_dt * Z_v
-			v_new = math.max(0.0, v_new)
-
-			// Log-Euler for stock
-			S_new := S_prev * math.exp_f64((r - 0.5 * v_new) * dt + v_sqrt * sqrt_dt * Z_s)
-
-			V_paths[path * (n_steps + 1) + step] = v_new
-			S_paths[path * (n_steps + 1) + step] = S_new
+			vp := max(v, 0.0)
+			sv := math.sqrt_f64(vp)
+			S *= math.exp_f64((r - 0.5 * vp) * dt + sv * sqrt_dt * Z_s)
+			v += params.kappa * (params.theta - vp) * dt + params.sigma * sv * sqrt_dt * Z_v
+			S_paths[row + step] = S
+			V_paths[row + step] = max(v, 0.0)
 		}
 	}
 
 	return S_paths, V_paths
 }
 
-// Merton Jump Diffusion Path Generation
+// Merton Jump Diffusion Path Generation, exact on the grid: per step the
+// number of jumps is Poisson(λΔt) (inverse CDF of the uniform) and their total
+// log size N μ_J + σ_J √N Z_J; the drift r − λκ − σ²/2, κ = e^{μ_J + σ_J²/2} − 1,
+// makes the discounted stock a martingale.
 mc_generate_mjd_paths :: proc(
 	S_0: f64,
 	r: f64,
@@ -170,7 +148,7 @@ mc_generate_mjd_paths :: proc(
 	params: MJD_Params,
 	n_paths: int,
 	n_steps: int,
-	norm_data: []f64, // Length: n_paths * n_steps * 2
+	norm_data: []f64, // Length: n_paths * n_steps * 2 (diffusion, jump size per step)
 	unif_data: []f64, // Length: n_paths * n_steps
 	allocator: mem.Allocator,
 ) -> []f64 {
@@ -179,39 +157,44 @@ mc_generate_mjd_paths :: proc(
 	kappa := math.exp_f64(params.mu_j + 0.5 * params.sigma_j * params.sigma_j) - 1.0
 	drift := r - params.lambda * kappa - 0.5 * params.sigma * params.sigma
 	lambda_dt := params.lambda * dt
+	p0 := math.exp_f64(-lambda_dt)
 
 	S_paths := make([]f64, n_paths * (n_steps + 1), allocator)
 
 	norm_idx := 0
 	unif_idx := 0
 	for path in 0 ..< n_paths {
-		S_paths[path * (n_steps + 1) + 0] = S_0
-
+		row := path * (n_steps + 1)
+		S_paths[row] = S_0
 		for step in 1 ..< n_steps + 1 {
 			Z := norm_data[norm_idx]
-			norm_idx += 1
+			Z_J := norm_data[norm_idx + 1]
+			norm_idx += 2
 			U := unif_data[unif_idx]
 			unif_idx += 1
-			Z_J := norm_data[norm_idx]
-			norm_idx += 1
 
-			S_prev := S_paths[path * (n_steps + 1) + (step - 1)]
-			S_new := S_prev * math.exp_f64(drift * dt + params.sigma * sqrt_dt * Z)
-
-			// Jump
-			if U < lambda_dt {
-				jump_multiplier := math.exp_f64(params.mu_j + params.sigma_j * Z_J)
-				S_new = S_new * jump_multiplier
+			// N = smallest k with P(N ≤ k) ≥ U
+			n_jumps := 0
+			pk, cdf := p0, p0
+			for cdf < U && n_jumps < 1000 {
+				n_jumps += 1
+				pk *= lambda_dt / f64(n_jumps)
+				cdf += pk
 			}
-
-			S_paths[path * (n_steps + 1) + step] = S_new
+			log_jump :=
+				f64(n_jumps) * params.mu_j + params.sigma_j * math.sqrt_f64(f64(n_jumps)) * Z_J
+			S_paths[row + step] =
+				S_paths[row + step - 1] *
+				math.exp_f64(drift * dt + params.sigma * sqrt_dt * Z + log_jump)
 		}
 	}
 
 	return S_paths
 }
 
-// Hull-White 1F Short Rate Path Generation
+// Hull-White 1F short-rate paths fitted to the flat curve e^{−r0 t}, sampled
+// exactly: r(t) = x(t) + α(t), x an OU process from 0,
+//   x_{k+1} = x_k e^{−aΔ} + σ √((1 − e^{−2aΔ})/(2a)) Z,  α(t) = r0 + σ²/(2a²)(1 − e^{−at})²
 mc_generate_hw1f_paths :: proc(
 	r0: f64,
 	T: f64,
@@ -222,32 +205,27 @@ mc_generate_hw1f_paths :: proc(
 	allocator: mem.Allocator,
 ) -> []f64 {
 	dt := T / f64(n_steps)
-	sqrt_dt := math.sqrt_f64(dt)
+	a, sigma := params.a, params.sigma
+	decay := math.exp_f64(-a * dt)
+	sd := sigma * math.sqrt_f64(_hw_b(2.0 * a, dt))
 
 	r_paths := make([]f64, n_paths * (n_steps + 1), allocator)
-
-	// Calibrate theta(t) for flat initial curve
-	theta := make([]f64, n_steps + 1, allocator)
-	defer delete(theta, allocator)
+	alpha := make([]f64, n_steps + 1, allocator)
+	defer delete(alpha, allocator)
 	for i in 0 ..< n_steps + 1 {
-		t_i := f64(i) * dt
-		theta[i] =
-			params.a * r0 +
-			(params.sigma * params.sigma / (2.0 * params.a)) *
-				(1.0 - math.exp_f64(-2.0 * params.a * t_i))
+		b := _hw_b(a, f64(i) * dt)
+		alpha[i] = r0 + 0.5 * sigma * sigma * b * b
 	}
 
 	rand_idx := 0
 	for path in 0 ..< n_paths {
-		r_paths[path * (n_steps + 1) + 0] = r0
-
+		row := path * (n_steps + 1)
+		x := 0.0
+		r_paths[row] = r0
 		for step in 1 ..< n_steps + 1 {
-			r_prev := r_paths[path * (n_steps + 1) + (step - 1)]
-			Z := norm_data[rand_idx]
+			x = x * decay + sd * norm_data[rand_idx]
 			rand_idx += 1
-
-			dr := (theta[step] - params.a * r_prev) * dt + params.sigma * sqrt_dt * Z
-			r_paths[path * (n_steps + 1) + step] = r_prev + dr
+			r_paths[row + step] = x + alpha[step]
 		}
 	}
 
@@ -267,16 +245,21 @@ mc_compute_asian_average :: proc(S_paths: []f64, path: int, n_steps: int) -> f64
 	return sum / f64(n_steps)
 }
 
-// Asian with Running Average (for early exercise)
-mc_compute_asian_average_to_step :: proc(S_paths: []f64, path: int, step: int) -> f64 {
-	sum := S_paths[path * (step + 1) + 0] // Include S_0
-	for s in 1 ..< step + 1 {
-		sum += S_paths[path * (step + 1) + s]
-	}
+// Running average of S_0 … S_step on a path of n_steps steps (for early exercise)
+mc_compute_asian_average_to_step :: proc(
+	S_paths: []f64,
+	path: int,
+	step: int,
+	n_steps: int,
+) -> f64 {
+	row := path * (n_steps + 1)
+	sum := 0.0
+	for s in 0 ..= step {sum += S_paths[row + s]}
 	return sum / f64(step + 1)
 }
 
-// Barrier Check (returns true if barrier is breached)
+// Barrier Check: true if the barrier is touched at any grid date 1 … n_steps
+// (discrete monitoring)
 mc_check_barrier_breached :: proc(
 	S_paths: []f64,
 	path: int,
@@ -344,8 +327,11 @@ mc_compute_lookback_min :: proc(S_paths: []f64, path: int, n_steps: int) -> f64 
 // 3. SHARED LSM PRIMITIVES
 // ============================================================================
 
-// LSM Regression Step (updates cashflows in-place)
-// Used in: American vanilla, Asian, callable/puttable bonds, Bermudan swaptions
+// One Longstaff–Schwartz step (updates cashflows in place). S_paths holds the
+// spot at the exercise dates, stride n_exercise_dates + 1 (index 0 = S_0);
+// cashflows are time-0 values. In-the-money paths regress the cashflow carried
+// to t_ex on powers 0 … poly_degree of the moneyness S/S_0 − 1 and exercise
+// when the payoff beats the fitted continuation value.
 mc_lsm_regression_step :: proc(
 	S_paths: []f64,
 	cashflows: []f64,
@@ -391,15 +377,10 @@ mc_lsm_regression_step :: proc(
 
 		if is_itm {
 			x_moneyness := (S_ex / S_0) - 1.0
-			X[itm_idx * (poly_degree + 1) + 0] = 1.0
-			if poly_degree >= 1 {
-				X[itm_idx * (poly_degree + 1) + 1] = x_moneyness
-			}
-			if poly_degree >= 2 {
-				X[itm_idx * (poly_degree + 1) + 2] = x_moneyness * x_moneyness
-			}
-			if poly_degree >= 3 {
-				X[itm_idx * (poly_degree + 1) + 3] = x_moneyness * x_moneyness * x_moneyness
+			pw := 1.0
+			for q in 0 ..= poly_degree {
+				X[itm_idx * (poly_degree + 1) + q] = pw
+				pw *= x_moneyness
 			}
 
 			// Bring time-0 cashflow forward to t_ex for regression
@@ -431,16 +412,8 @@ mc_lsm_regression_step :: proc(
 			}
 
 			x_moneyness := (S_ex / S_0) - 1.0
-			cont_val := beta[0]
-			if poly_degree >= 1 {
-				cont_val += beta[1] * x_moneyness
-			}
-			if poly_degree >= 2 {
-				cont_val += beta[2] * x_moneyness * x_moneyness
-			}
-			if poly_degree >= 3 {
-				cont_val += beta[3] * x_moneyness * x_moneyness * x_moneyness
-			}
+			cont_val := 0.0
+			for q := poly_degree; q >= 0; q -= 1 {cont_val = cont_val * x_moneyness + beta[q]}
 
 			if exercise_val > cont_val {
 				cashflows[path] = exercise_val * math.exp_f64(-r * t_ex)
@@ -520,8 +493,9 @@ mc_apply_control_variate :: proc(
 // 5. SHARED GREEKS (CRN - Common Random Numbers)
 // ============================================================================
 
-// CRN Delta/Gamma via finite differences
-// price_fn: function that computes price given S_0 (must reuse same norm_data)
+// CRN Delta/Gamma by central differences with h = 1% of S_0:
+//   Δ = (P(S+h) − P(S−h)) / 2h,  Γ = (P(S+h) − 2P(S) + P(S−h)) / h²
+// price_fn must reuse the same random numbers for every call
 mc_compute_crn_delta_gamma :: proc(
 	S_0: f64,
 	price_fn: proc(_: f64) -> f64,
@@ -529,16 +503,10 @@ mc_compute_crn_delta_gamma :: proc(
 	delta: f64,
 	gamma: f64,
 ) {
-	h_S := 0.01 * S_0
-	price_up := price_fn(S_0 + h_S)
-	price_dn := price_fn(S_0 - h_S)
-	delta = (price_up - price_dn) / (2.0 * h_S)
-
-	h_S2 := 0.02 * S_0
-	delta_up := (price_fn(S_0 + h_S2) - price_dn) / (2.0 * h_S2)
-	delta_dn := (price_up - price_fn(S_0 - h_S2)) / (2.0 * h_S2)
-	gamma = (delta_up - delta_dn) / (2.0 * h_S2)
-
+	h := 0.01 * S_0
+	up, mid, dn := price_fn(S_0 + h), price_fn(S_0), price_fn(S_0 - h)
+	delta = (up - dn) / (2.0 * h)
+	gamma = (up - 2.0 * mid + dn) / (h * h)
 	return delta, gamma
 }
 
