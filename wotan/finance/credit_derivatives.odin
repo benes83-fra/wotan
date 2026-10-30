@@ -1,9 +1,11 @@
 package finance
 
 import ml "../analytics/ML"
+import w "../core"
 import "core:math"
 import rand "core:math/rand"
 import "core:mem"
+import "core:slice"
 
 // ============================================================================
 // CDS LEG ENGINE (piecewise-constant hazard, flat continuous rate)
@@ -258,10 +260,11 @@ price_cdo_tranche_t_copula_mc :: proc(
 // ============================================================================
 
 CDS_Curve :: struct {
-	tenors:   []f64, // e.g., [1.0, 3.0, 5.0, 7.0, 10.0]
-	hazards:  []f64, // piecewise constant hazard rates; hazards[i] applies up to tenors[i]
-	recovery: f64,
-	r:        f64,
+	tenors:         []f64, // e.g., [1.0, 3.0, 5.0, 7.0, 10.0]
+	hazards:        []f64, // piecewise constant hazard rates; hazards[i] applies up to tenors[i]
+	recovery:       f64,
+	r:              f64, // flat rate of the year-fraction pricers (dated pricers use a YieldCurve)
+	reference_date: w.Date, // dated curves: tenors are ACT/365F years from this date
 }
 
 CDS_Price_Result :: struct {
@@ -369,4 +372,324 @@ price_cds_full :: proc(
 		premium_leg_pv = fixed_coupon * annuity * notional,
 		protection_pv = protection * notional,
 	}
+}
+
+// ============================================================================
+// STANDARD CDS ON DATES (ISDA STANDARD MODEL)
+// ============================================================================
+// Post-2009 standard contract: quarterly coupons on the IMM 20th (CDS / CDS2015
+// schedule, weekends-only calendar, following), ACT/360 accrual with the last
+// period including its end date, full first coupon with the accrued part
+// rebated to the buyer at cash settlement, protection from the step-in date
+// (trade + 1). Valued as QuantLib's IsdaCdsEngine (ISDA CDS Standard Model:
+// flat forwards and hazards between the nodes of both curves, Taylor fix,
+// half-day accrual bias, piecewise forwards within coupon periods).
+
+CDSSide :: enum u8 {
+	Buyer, // buys protection, pays the coupons
+	Seller,
+}
+
+DatedCDS :: struct {
+	side:             CDSSide,
+	notional:         f64,
+	coupon:           f64, // running coupon, e.g. 0.01 (100bp)
+	upfront:          f64, // paid by the buyer on upfront_date, fraction of notional
+	trade_date:       w.Date,
+	protection_start: w.Date,
+	upfront_date:     w.Date, // cash settlement: trade date + 3 business days
+	schedule:         Schedule,
+}
+
+DatedCDSResult :: struct {
+	npv:            f64, // to the side
+	protection_leg: f64, // PV of (1 − R) × notional paid at default (positive)
+	premium_leg:    f64, // PV of the coupons plus the premium accrued at default (positive)
+	accrual_rebate: f64, // PV of the accrued coupon returned to the buyer (positive)
+	upfront_pv:     f64, // PV of the upfront payment (positive for a positive upfront)
+	fair_spread:    f64, // running coupon with zero value and no upfront
+	fair_upfront:   f64, // upfront (fraction of notional) with zero value at this coupon; NaN once the upfront date has passed
+	risky_annuity:  f64, // premium leg per unit notional and unit coupon
+}
+
+// Standard CDS traded on trade_date for `tenor` (maturity cds_maturity_date);
+// free with free_dated_cds
+make_standard_cds :: proc(
+	trade_date: w.Date,
+	tenor: Period,
+	coupon: f64,
+	notional: f64 = 1.0,
+	side: CDSSide = .Buyer,
+	upfront: f64 = 0.0,
+	rule: DateGenerationRule = .CDS2015,
+	cash_settlement_days: int = 3,
+	allocator := context.allocator,
+) -> DatedCDS {
+	cal := Calendar{.Weekends}
+	end := cds_maturity_date(trade_date, tenor, rule)
+	return DatedCDS {
+		side = side,
+		notional = notional,
+		coupon = coupon,
+		upfront = upfront,
+		trade_date = trade_date,
+		protection_start = trade_date,
+		upfront_date = calendar_advance(cal, trade_date, cash_settlement_days, .Days),
+		schedule = make_schedule(
+			trade_date,
+			end,
+			{3, .Months},
+			cal,
+			.Following,
+			.Unadjusted,
+			rule,
+			allocator = allocator,
+		),
+	}
+}
+
+free_dated_cds :: proc(cds: ^DatedCDS, allocator := context.allocator) {
+	free_schedule(&cds.schedule, allocator)
+}
+
+// Coupon k: accrual dates, payment date and amount (the last period counts its
+// end date too)
+@(private = "file")
+_cds_coupon :: proc(cds: DatedCDS, k: int) -> (start, end, pay: i64, amount: f64) {
+	s := cds.schedule
+	start, end = _dn(s.dates[k]), _dn(s.dates[k + 1])
+	pay = _dn(calendar_adjust(s.calendar, s.dates[k + 1], .Following))
+	days := end - start + (1 if k == len(s.dates) - 2 else 0)
+	amount = cds.notional * cds.coupon * f64(days) / 360.0
+	return
+}
+
+// Node dates (day numbers) of both curves, sorted and unique
+@(private = "file")
+_cds_nodes :: proc(hazard: ^CDS_Curve, discount: ^YieldCurve, allocator: mem.Allocator) -> []i64 {
+	nodes := make([dynamic]i64, 0, len(hazard.tenors) + len(discount.tenors) + 2, allocator)
+	add :: proc(nodes: ^[dynamic]i64, ref: w.Date, t: f64) {
+		append(nodes, _dn(ref) + i64(math.round(t * 365.0)))
+	}
+	add(&nodes, discount.reference_date, 0)
+	for t in discount.tenors {add(&nodes, discount.reference_date, t)}
+	add(&nodes, hazard.reference_date, 0)
+	for t in hazard.tenors {add(&nodes, hazard.reference_date, t)}
+	slice.sort(nodes[:])
+	k := 0
+	for n, i in nodes {
+		if i == 0 || n != nodes[k - 1] {nodes[k] = n; k += 1}
+	}
+	resize(&nodes, k)
+	return nodes[:]
+}
+
+// ∫ over (t0, t1] of D(u) dF(u) with flat forward f and hazard h, given the
+// values at both ends (ISDA's closed form, Taylor-expanded when f + h is small)
+@(private = "file")
+_isda_protection_piece :: proc(P0, Q0, P1, Q1: f64) -> f64 {
+	fhat := math.ln(P0) - math.ln(P1)
+	hhat := math.ln(Q0) - math.ln(Q1)
+	x := fhat + hhat
+	if x < 1e-4 {
+		x2 := x * x
+		return P0 * Q0 * hhat * (1.0 - 0.5 * x + x2 / 6.0 - x2 * x / 24.0 + x2 * x2 / 120.0)
+	}
+	return hhat / x * (P0 * Q0 - P1 * Q1)
+}
+
+// ∫ over (t0, t1] of (u − t_start) D(u) dF(u), the accrued premium at default
+@(private = "file")
+_isda_accrual_piece :: proc(t0, t1, tstart, P0, Q0, P1, Q1: f64) -> f64 {
+	fhat := math.ln(P0) - math.ln(P1)
+	hhat := math.ln(Q0) - math.ln(Q1)
+	x := fhat + hhat
+	if x < 1e-4 {
+		x2 := x * x
+		return(
+			hhat *
+			P0 *
+			Q0 *
+			((t0 - tstart) * (1.0 - 0.5 * x + x2 / 6.0 - x2 * x / 24.0) +
+					(t1 - t0) * (0.5 - x / 3.0 + x2 / 8.0 - x2 * x / 30.0)) \
+		)
+	}
+	return(
+		(hhat / x) *
+		((t1 - t0) * ((P0 * Q0 - P1 * Q1) / x - P1 * Q1) + (t0 - tstart) * (P0 * Q0 - P1 * Q1)) \
+	)
+}
+
+// Values the CDS on a hazard curve and a discount curve sharing the valuation
+// date as reference_date
+price_dated_cds :: proc(
+	cds: DatedCDS,
+	hazard: ^CDS_Curve,
+	discount: ^YieldCurve,
+) -> DatedCDSResult {
+	ref := _dn(discount.reference_date)
+	href := _dn(hazard.reference_date)
+	P :: proc(c: ^YieldCurve, ref, n: i64) -> f64 {return yield_curve_discount_factor(
+			c,
+			f64(n - ref) / 365.0,
+		)}
+	Q :: proc(c: ^CDS_Curve, ref, n: i64) -> f64 {return get_survival_prob(
+			f64(n - ref) / 365.0,
+			c^,
+		)}
+	T :: proc(ref, n: i64) -> f64 {return f64(n - ref) / 365.0}
+
+	nodes := _cds_nodes(hazard, discount, context.temp_allocator)
+	defer delete(nodes, context.temp_allocator)
+	eps := max(_dn(cds.protection_start), ref + 1) // step-in date
+	sd := cds.schedule.dates
+	maturity := _dn(sd[len(sd) - 1])
+
+	// protection leg from step-in to maturity
+	protection := 0.0
+	d0 := eps - 1
+	P0, Q0 := P(discount, ref, d0), Q(hazard, href, d0)
+	for n in nodes {
+		if n <= eps {continue}
+		d1 := min(n, maturity)
+		P1, Q1 := P(discount, ref, d1), Q(hazard, href, d1)
+		protection += _isda_protection_piece(P0, Q0, P1, Q1)
+		d0, P0, Q0 = d1, P1, Q1
+		if d1 == maturity {break}
+	}
+	if d0 < maturity { 	// curves ending before maturity: last piece to maturity
+		protection += _isda_protection_piece(
+			P0,
+			Q0,
+			P(discount, ref, maturity),
+			Q(hazard, href, maturity),
+		)
+	}
+	protection *= cds.notional * (1.0 - hazard.recovery)
+
+	// premium leg: coupons (survival to the day before payment) and the premium
+	// accrued at default within each period
+	coupons, accrual := 0.0, 0.0
+	for k in 0 ..< len(sd) - 1 {
+		start, end, pay, amount := _cds_coupon(cds, k)
+		if pay >= eps {
+			coupons += amount * P(discount, ref, pay) * Q(hazard, href, pay - 1)
+		}
+		if end <= eps {continue}
+		a := max(start, eps) - 1
+		b := pay - 1
+		tstart := T(ref, start - 1) - 1.0 / 730.0 // half-day bias
+		t0, Pa, Qa := T(ref, a), P(discount, ref, a), Q(hazard, href, a)
+		piece := 0.0
+		for n in nodes {
+			if n <= a || n >= b {continue}
+			t1, Pn, Qn := T(ref, n), P(discount, ref, n), Q(hazard, href, n)
+			piece += _isda_accrual_piece(t0, t1, tstart, Pa, Qa, Pn, Qn)
+			t0, Pa, Qa = t1, Pn, Qn
+		}
+		piece += _isda_accrual_piece(
+			t0,
+			T(ref, b),
+			tstart,
+			Pa,
+			Qa,
+			P(discount, ref, b),
+			Q(hazard, href, b),
+		)
+		accrual += piece * cds.notional * cds.coupon * 365.0 / 360.0
+	}
+	premium := coupons + accrual
+
+	// accrued coupon from the start of the current period to step-in (trade + 1),
+	// rebated with the upfront at cash settlement
+	up := _dn(cds.upfront_date)
+	rebate, upfront_pv := 0.0, 0.0
+	trade := _dn(cds.trade_date)
+	if up >= ref {
+		df_up := P(discount, ref, up)
+		upfront_pv = cds.upfront * cds.notional * df_up
+		if trade >= _dn(sd[0]) {
+			step_in := trade + 1
+			for k in 0 ..< len(sd) - 1 {
+				start, end, pay, _ := _cds_coupon(cds, k)
+				if step_in > pay {continue}
+				if step_in < pay && step_in > start {
+					days := min(step_in, end) - start + (1 if k == len(sd) - 2 else 0)
+					rebate = cds.notional * cds.coupon * f64(days) / 360.0 * df_up
+				}
+				break
+			}
+		}
+	}
+
+	buyer := protection - premium - upfront_pv + rebate
+	risky := premium / (cds.notional * cds.coupon) if cds.coupon != 0.0 else 0.0
+	df_up := P(discount, ref, up)
+	return DatedCDSResult {
+		npv = buyer if cds.side == .Buyer else -buyer,
+		protection_leg = protection,
+		premium_leg = premium,
+		accrual_rebate = rebate,
+		upfront_pv = upfront_pv,
+		fair_spread = protection * cds.coupon / (premium - rebate) if premium - rebate != 0.0 else 0.0,
+		fair_upfront = (protection - premium + rebate) / (cds.notional * df_up) if up >= ref else math.QNAN_F64,
+		risky_annuity = risky,
+	}
+}
+
+// Bootstraps piecewise-flat hazard rates from par spreads of standard CDS
+// traded on the discount curve's reference date (QuantLib SpreadCdsHelper with
+// the ISDA model: each pillar is the maturity's payment date + 1 day, hazards
+// flat in ACT/365F time and solved so that every quote is the fair spread).
+// Tenors must be increasing.
+bootstrap_cds_curve_dated :: proc(
+	tenors: []Period,
+	spreads: []f64,
+	recovery: f64,
+	discount: ^YieldCurve,
+	rule: DateGenerationRule = .CDS2015,
+	allocator: mem.Allocator = context.allocator,
+) -> CDS_Curve {
+	n := min(len(tenors), len(spreads))
+	ref := discount.reference_date
+	curve := CDS_Curve {
+		tenors         = make([]f64, n, allocator),
+		hazards        = make([]f64, n, allocator),
+		recovery       = recovery,
+		reference_date = ref,
+	}
+	for i in 0 ..< n {
+		cds := make_standard_cds(
+			ref,
+			tenors[i],
+			spreads[i],
+			rule = rule,
+			allocator = context.temp_allocator,
+		)
+		defer free_dated_cds(&cds, context.temp_allocator)
+		mat := cds.schedule.dates[len(cds.schedule.dates) - 1]
+		pillar := _dn(calendar_adjust(cds.schedule.calendar, mat, .Following)) + 1
+		curve.tenors[i] = f64(pillar - _dn(ref)) / 365.0
+		// fair spread − quote, increasing in the hazard
+		f :: proc(c: ^CDS_Curve, i: int, h: f64, cds: DatedCDS, discount: ^YieldCurve) -> f64 {
+			c.hazards[i] = h
+			sub := CDS_Curve {
+				c.tenors[:i + 1],
+				c.hazards[:i + 1],
+				c.recovery,
+				c.r,
+				c.reference_date,
+			}
+			return price_dated_cds(cds, &sub, discount).fair_spread - cds.coupon
+		}
+		lo, hi := 0.0, 1.0
+		for f(&curve, i, hi, cds, discount) < 0.0 && hi < 1e3 {hi *= 2.0}
+		for _ in 0 ..< 200 {
+			mid := 0.5 * (lo + hi)
+			if mid == lo || mid == hi {break}
+			if f(&curve, i, mid, cds, discount) < 0.0 {lo = mid} else {hi = mid}
+		}
+		curve.hazards[i] = 0.5 * (lo + hi)
+	}
+	return curve
 }

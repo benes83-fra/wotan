@@ -57,22 +57,10 @@ excel_col_name :: proc(col_idx: int, allocator: mem.Allocator) -> string {
 	return strings.clone(string(buf[i:]), allocator)
 }
 
-// Days since 1970-01-01 of a proleptic Gregorian date (H. Hinnant)
-@(private = "file")
-_days_from_civil :: proc(y, m, d: int) -> int {
-	y := y - (1 if m <= 2 else 0)
-	era := (y if y >= 0 else y - 399) / 400
-	yoe := y - era * 400
-	mp := (m + 9) % 12
-	doy := (153 * mp + 2) / 5 + d - 1
-	doe := yoe * 365 + yoe / 4 - yoe / 100 + doy
-	return era * 146097 + doe - 719468
-}
-
 // Excel serial day number (1900 date system, including Excel's fictitious
 // 1900-02-29 so that serials before March 1900 match Excel)
 excel_serial_from_date :: proc(y, m, d: int) -> int {
-	n := _days_from_civil(y, m, d) - _days_from_civil(1899, 12, 30)
+	n := int(w.days_from_civil(i64(y), i64(m), i64(d)) - w.days_from_civil(1899, 12, 30))
 	if n < 61 {n -= 1}
 	return n
 }
@@ -163,7 +151,11 @@ worksheet_xml_from_df :: proc(df: ^w.DataFrame, allocator: mem.Allocator) -> str
 			case .Date:
 				v, _ := w.column_at_date(col, r)
 				open_cell(&b, col_names[c], row_idx)
-				serial_cell(&b, XLSX_STYLE_DATE, f64(excel_serial_from_date(int(v.year), int(v.month), int(v.day))))
+				serial_cell(
+					&b,
+					XLSX_STYLE_DATE,
+					f64(excel_serial_from_date(int(v.year), int(v.month), int(v.day))),
+				)
 			case .Datetime:
 				v, _ := w.column_at_datetime(col, r)
 				open_cell(&b, col_names[c], row_idx)
@@ -173,7 +165,11 @@ worksheet_xml_from_df :: proc(df: ^w.DataFrame, allocator: mem.Allocator) -> str
 			case .Time:
 				v, _ := w.column_at_time(col, r)
 				open_cell(&b, col_names[c], row_idx)
-				serial_cell(&b, XLSX_STYLE_TIME, f64(v.hour * 3600 + v.minute * 60 + v.second) / 86400.0)
+				serial_cell(
+					&b,
+					XLSX_STYLE_TIME,
+					f64(v.hour * 3600 + v.minute * 60 + v.second) / 86400.0,
+				)
 			case .Invalid:
 			}
 		}

@@ -413,7 +413,11 @@ dated_bond_accrued_interest :: proc(bond: DatedBond, settlement: w.Date) -> f64 
 		if !w.date_less(start, settlement) || !w.date_less(settlement, pay) {continue}
 		rs, re := schedule_reference_period(s, k)
 		until := settlement if w.date_less(settlement, end) else end
-		return bond.face_value * bond.coupon_rate * year_fraction(bond.day_count, start, until, rs, re, last)
+		return(
+			bond.face_value *
+			bond.coupon_rate *
+			year_fraction(bond.day_count, start, until, rs, re, last) \
+		)
 	}
 	return 0.0
 }
@@ -429,7 +433,13 @@ _dated_bond_freq :: proc(bond: DatedBond) -> f64 {
 // count as QuantLib's CashFlows::npv with an InterestRate (−1 for flows paid on
 // or before settlement); also returns the amounts
 @(private = "file")
-_dated_bond_taus :: proc(bond: DatedBond, settlement: w.Date, allocator: mem.Allocator) -> (taus, amounts: []f64) {
+_dated_bond_taus :: proc(
+	bond: DatedBond,
+	settlement: w.Date,
+	allocator: mem.Allocator,
+) -> (
+	taus, amounts: []f64,
+) {
 	flows := dated_bond_cashflows(bond, context.temp_allocator)
 	defer delete(flows, context.temp_allocator)
 	taus = make([]f64, len(flows), allocator)
@@ -445,7 +455,8 @@ _dated_bond_taus :: proc(bond: DatedBond, settlement: w.Date, allocator: mem.All
 		}
 		rs, re := f.ref_start, f.ref_end
 		if f.accrual_start == {} {
-			rs = date_add_period(f.payment_date, Period{-1, .Years}) if last == settlement else last
+			rs =
+				date_add_period(f.payment_date, Period{-1, .Years}) if last == settlement else last
 			re = f.payment_date
 		}
 		tau += year_fraction(bond.day_count, last, f.payment_date, rs, re, termination)
@@ -465,7 +476,10 @@ dated_bond_dirty_price :: proc(bond: DatedBond, yield: f64, settlement: w.Date) 
 }
 
 dated_bond_clean_price :: proc(bond: DatedBond, yield: f64, settlement: w.Date) -> f64 {
-	return dated_bond_dirty_price(bond, yield, settlement) - dated_bond_accrued_interest(bond, settlement)
+	return(
+		dated_bond_dirty_price(bond, yield, settlement) -
+		dated_bond_accrued_interest(bond, settlement) \
+	)
 }
 
 // Yield (compounded at the coupon frequency) of a clean price at settlement
@@ -494,7 +508,11 @@ dated_bond_duration_convexity :: proc(
 
 // Prices on a curve with a reference_date: dirty = Σ cf DF(pay) / DF(settlement)
 // over the flows after settlement, with the yield and risk measures implied
-price_dated_bond :: proc(bond: DatedBond, curve: ^YieldCurve, settlement: w.Date) -> BondPriceResult {
+price_dated_bond :: proc(
+	bond: DatedBond,
+	curve: ^YieldCurve,
+	settlement: w.Date,
+) -> BondPriceResult {
 	flows := dated_bond_cashflows(bond, context.temp_allocator)
 	defer delete(flows, context.temp_allocator)
 	dirty := 0.0

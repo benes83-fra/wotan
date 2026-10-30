@@ -23,7 +23,8 @@ Period :: struct {
 	unit: TimeUnit,
 }
 
-@(private = "file")
+// Day number of a date (days since 1970-01-01), shared within the package
+@(private)
 _dn :: proc(d: w.Date) -> i64 {
 	return w.days_from_civil(i64(d.year), i64(d.month), i64(d.day))
 }
@@ -118,13 +119,16 @@ _is_bd :: proc(cal: Calendar, n: i64) -> bool {
 _is_target_holiday :: proc(y, m, d, doy, em: int) -> bool {
 	return(
 		(d == 1 && m == 1) ||
-		(doy == em - 3 && y >= 2000) || // Good Friday
-		(doy == em && y >= 2000) || // Easter Monday
-		(d == 1 && m == 5 && y >= 2000) || // Labour Day
+		(doy == em - 3 && y >= 2000) ||
+		(doy == em && y >= 2000) ||
+		(d == 1 && m == 5 && y >= 2000) ||
 		(d == 25 && m == 12) ||
 		(d == 26 && m == 12 && y >= 2000) ||
 		(d == 31 && m == 12 && (y == 1998 || y == 1999 || y == 2001)) \
-	)
+	) // Good Friday
+	// Easter Monday
+	// Labour Day
+
 }
 
 // Federal holidays shared by the US calendars; a Saturday holiday moves to
@@ -145,7 +149,11 @@ _us_memorial :: proc(y, m, d: int, wd: w.Days) -> bool {
 }
 @(private = "file")
 _us_juneteenth :: proc(y, m, d: int, wd: w.Days) -> bool {
-	return (d == 19 || (d == 20 && wd == .Monday) || (d == 18 && wd == .Friday)) && m == 6 && y >= 2022
+	return(
+		(d == 19 || (d == 20 && wd == .Monday) || (d == 18 && wd == .Friday)) &&
+		m == 6 &&
+		y >= 2022 \
+	)
 }
 @(private = "file")
 _us_independence :: proc(m, d: int, wd: w.Days) -> bool {
@@ -163,7 +171,9 @@ _us_columbus :: proc(y, m, d: int, wd: w.Days) -> bool {
 _us_veterans :: proc(y, m, d: int, wd: w.Days, saturday_to_friday: bool) -> bool {
 	if y <= 1970 || y >= 1978 {
 		return(
-			(d == 11 || (d == 12 && wd == .Monday) || (saturday_to_friday && d == 10 && wd == .Friday)) &&
+			(d == 11 ||
+				(d == 12 && wd == .Monday) ||
+				(saturday_to_friday && d == 10 && wd == .Friday)) &&
 			m == 11 \
 		)
 	}
@@ -182,7 +192,7 @@ _us_christmas :: proc(m, d: int, wd: w.Days) -> bool {
 _is_us_settlement_holiday :: proc(y, m, d: int, wd: w.Days) -> bool {
 	return(
 		((d == 1 || (d == 2 && wd == .Monday)) && m == 1) ||
-		(d == 31 && wd == .Friday && m == 12) || // New Year's Day on a Saturday
+		(d == 31 && wd == .Friday && m == 12) ||
 		_us_mlk(y, m, d, wd) ||
 		_us_washington(y, m, d, wd) ||
 		_us_memorial(y, m, d, wd) ||
@@ -191,7 +201,7 @@ _is_us_settlement_holiday :: proc(y, m, d: int, wd: w.Days) -> bool {
 		_us_labor(m, d, wd) ||
 		_us_columbus(y, m, d, wd) ||
 		_us_veterans(y, m, d, wd, true) ||
-		_us_thanksgiving(m, d, wd) ||
+		_us_thanksgiving(m, d, wd) ||// New Year's Day on a Saturday
 		_us_christmas(m, d, wd) \
 	)
 }
@@ -215,31 +225,29 @@ _is_us_gov_bond_holiday :: proc(y, m, d: int, wd: w.Days, doy, em: int) -> bool 
 		_us_veterans(y, m, d, wd, false) ||
 		_us_thanksgiving(m, d, wd) ||
 		_us_christmas(m, d, wd) ||
-		(y == 2004 && m == 6 && d == 11) || // President Reagan's funeral
-		(y == 2012 && m == 10 && d == 30) || // Hurricane Sandy
+		(y == 2004 && m == 6 && d == 11) ||
+		(y == 2012 && m == 10 && d == 30) ||
 		(y == 2018 && m == 12 && d == 5) \
-	) // President Bush's funeral
+	) // President Reagan's funeral
+	// Hurricane Sandy
+	// President Bush's funeral
 }
 
 @(private = "file")
 _is_uk_settlement_holiday :: proc(y, m, d: int, wd: w.Days, doy, em: int) -> bool {
 	bank :=
-		// Early May bank holiday, first Monday of May (May 8th in 1995 and 2020, VE day)
 		(d <= 7 && wd == .Monday && m == 5 && y != 1995 && y != 2020) ||
 		(d == 8 && m == 5 && (y == 1995 || y == 2020)) ||
-		// Spring bank holiday, last Monday of May (moved for the jubilees)
 		(d >= 25 && wd == .Monday && m == 5 && y != 2002 && y != 2012 && y != 2022) ||
 		(d == 4 && m == 6 && (y == 2002 || y == 2012)) ||
 		(d == 2 && m == 6 && y == 2022) ||
-		// Summer bank holiday, last Monday of August
 		(d >= 25 && wd == .Monday && m == 8) ||
-		// one-offs: jubilees, royal wedding, state funeral, coronation
 		(d == 3 && m == 6 && y == 2002) ||
 		(d == 5 && m == 6 && y == 2012) ||
-		(d == 3 && m == 6 && y == 2022) ||
+		(d == 3 && m == 6 && y == 2022) ||// Early May bank holiday, first Monday of May (May 8th in 1995 and 2020, VE day)
 		(d == 29 && m == 4 && y == 2011) ||
-		(d == 19 && m == 9 && y == 2022) ||
-		(d == 8 && m == 5 && y == 2023)
+		(d == 19 && m == 9 && y == 2022) ||// Spring bank holiday, last Monday of May (moved for the jubilees)
+		(d == 8 && m == 5 && y == 2023) // Summer bank holiday, last Monday of August // one-offs: jubilees, royal wedding, state funeral, coronation
 	return(
 		((d == 1 || ((d == 2 || d == 3) && wd == .Monday)) && m == 1) ||
 		doy == em - 3 ||
@@ -265,7 +273,11 @@ BusinessDayConvention :: enum u8 {
 	Nearest, // nearest business day, following on a tie
 }
 
-calendar_adjust :: proc(cal: Calendar, d: w.Date, bdc: BusinessDayConvention = .Following) -> w.Date {
+calendar_adjust :: proc(
+	cal: Calendar,
+	d: w.Date,
+	bdc: BusinessDayConvention = .Following,
+) -> w.Date {
 	return w.civil_from_days(_adjust(cal, _dn(d), bdc))
 }
 
@@ -346,7 +358,14 @@ calendar_advance_period :: proc(
 }
 
 @(private = "file")
-_advance :: proc(cal: Calendar, n: i64, k: int, unit: TimeUnit, bdc: BusinessDayConvention, eom: bool) -> i64 {
+_advance :: proc(
+	cal: Calendar,
+	n: i64,
+	k: int,
+	unit: TimeUnit,
+	bdc: BusinessDayConvention,
+	eom: bool,
+) -> i64 {
 	if k == 0 {return _adjust(cal, n, bdc)}
 	switch unit {
 	case .Days:
@@ -417,7 +436,8 @@ day_count_days :: proc(dc: DayCountConvention, d1, d2: w.Date, termination := w.
 	case .THIRTY_360, .THIRTY_360_US, .THIRTY_E_360, .THIRTY_E_360_ISDA:
 		dd1, dd2 := int(d1.day), int(d2.day)
 		#partial switch dc {
-		case .THIRTY_360: // Bond Basis (ISDA 2006 4.16(f))
+		case .THIRTY_360:
+			// Bond Basis (ISDA 2006 4.16(f))
 			if dd1 == 31 {dd1 = 30}
 			if dd2 == 31 && dd1 == 30 {dd2 = 30}
 		case .THIRTY_360_US:
@@ -425,10 +445,12 @@ day_count_days :: proc(dc: DayCountConvention, d1, d2: w.Date, termination := w.
 			if _is_last_of_february(d1) {dd1 = 30}
 			if dd2 == 31 && dd1 >= 30 {dd2 = 30}
 			if dd1 == 31 {dd1 = 30}
-		case .THIRTY_E_360: // Eurobond basis
+		case .THIRTY_E_360:
+			// Eurobond basis
 			dd1 = min(dd1, 30)
 			dd2 = min(dd2, 30)
-		case .THIRTY_E_360_ISDA: // German
+		case .THIRTY_E_360_ISDA:
+			// German
 			if dd1 == 31 {dd1 = 30}
 			if dd2 == 31 {dd2 = 30}
 			if _is_last_of_february(d1) {dd1 = 30}
@@ -496,7 +518,10 @@ _act_act_icma :: proc(d1, d2, ref_start, ref_end: i64, has_start, has_end: bool)
 		// long first coupon: the notional period before rs
 		prev := _add(rs, Period{-months, .Months})
 		if d2 > rs {
-			return _act_act_icma(d1, rs, prev, rs, true, true) + _act_act_icma(rs, d2, rs, re, true, true)
+			return(
+				_act_act_icma(d1, rs, prev, rs, true, true) +
+				_act_act_icma(rs, d2, rs, re, true, true) \
+			)
 		}
 		return _act_act_icma(d1, d2, prev, rs, true, true)
 	}
@@ -516,6 +541,81 @@ _act_act_icma :: proc(d1, d2, ref_start, ref_end: i64, has_start, has_end: bool)
 }
 
 // ============================================================================
+// IMM AND CDS DATES
+// ============================================================================
+
+// Third Wednesday of the month
+@(private = "file")
+_third_wednesday :: proc(y, m: int) -> i64 {
+	first := w.days_from_civil(i64(y), i64(m), 1)
+	return first + (i64(w.Days.Wednesday) - (first + 3) %% 7) %% 7 + 14
+}
+
+// IMM dates: third Wednesdays of March, June, September and December (of any
+// month when main_cycle is false)
+is_imm_date :: proc(d: w.Date, main_cycle := true) -> bool {
+	if main_cycle && d.month % 3 != 0 {return false}
+	return _dn(d) == _third_wednesday(int(d.year), int(d.month))
+}
+
+// First IMM date strictly after d
+imm_next_date :: proc(d: w.Date, main_cycle := true) -> w.Date {
+	step := 3 if main_cycle else 1
+	y, m := int(d.year), int(d.month)
+	m = ((m + step - 1) / step) * step // this month if in the cycle, else the next cycle month
+	if m > 12 {m -= 12; y += 1}
+	for {
+		t := _third_wednesday(y, m)
+		if t > _dn(d) {return w.civil_from_days(t)}
+		m += step
+		if m > 12 {m -= 12; y += 1}
+	}
+}
+
+// The IMM 20th (Mar/Jun/Sep/Dec 20) on or before / on or after a day
+@(private = "file")
+_previous_twentieth :: proc(n: i64) -> i64 {
+	d := w.civil_from_days(n)
+	r := w.days_from_civil(i64(d.year), i64(d.month), 20)
+	if r > n {r = _add(r, Period{-1, .Months})}
+	m := int(w.civil_from_days(r).month)
+	if m % 3 != 0 {r = _add(r, Period{-(m % 3), .Months})}
+	return r
+}
+
+@(private = "file")
+_next_twentieth :: proc(n: i64) -> i64 {
+	d := w.civil_from_days(n)
+	r := w.days_from_civil(i64(d.year), i64(d.month), 20)
+	if r < n {r = _add(r, Period{1, .Months})}
+	m := int(w.civil_from_days(r).month)
+	if m % 3 != 0 {r = _add(r, Period{3 - m % 3, .Months})}
+	return r
+}
+
+// Scheduled termination of a standard CDS traded on trade_date for `tenor`
+// (whole years or multiples of 3 months; QuantLib cdsMaturity): the IMM 20th
+// on or before the trade date + tenor + 3 months. Under CDS2015 maturities
+// roll only on Jun 20 and Dec 20: a trade between Mar 20 and Jun 19 (Sep 20 and
+// Dec 19) still matures on a Dec 20 (Jun 20). A zero tenor is only defined
+// before the June / December roll (else returns the zero date).
+cds_maturity_date :: proc(
+	trade_date: w.Date,
+	tenor: Period,
+	rule: DateGenerationRule = .CDS2015,
+) -> w.Date {
+	anchor := _previous_twentieth(_dn(trade_date))
+	if rule == .CDS2015 {
+		m := w.civil_from_days(anchor).month
+		if m == 6 || m == 12 {
+			if tenor.n == 0 {return {}}
+			anchor = _add(anchor, Period{-3, .Months})
+		}
+	}
+	return w.civil_from_days(_add(_add(anchor, tenor), Period{3, .Months}))
+}
+
+// ============================================================================
 // SCHEDULES
 // ============================================================================
 
@@ -523,6 +623,8 @@ DateGenerationRule :: enum u8 {
 	Backward, // from the termination date back (stub at the front)
 	Forward, // from the effective date forward (stub at the back)
 	Zero, // effective and termination dates only
+	CDS, // standard CDS: quarterly roll on Mar/Jun/Sep/Dec 20, from the IMM 20th before the effective date
+	CDS2015, // CDS dates as CDS; maturities roll semi-annually (see cds_maturity_date)
 }
 
 // dates[0] = effective … dates[n] = termination, adjusted; is_regular[k] says
@@ -563,7 +665,8 @@ make_schedule :: proc(
 	}
 	r := rule
 	if tenor.n == 0 {r = .Zero}
-	eom := end_of_month && (tenor.unit == .Months || tenor.unit == .Years)
+	cds := r == .CDS || r == .CDS2015
+	eom := end_of_month && !cds && (tenor.unit == .Months || tenor.unit == .Years)
 	s.end_of_month = eom
 	eff, term := _dn(effective), _dn(termination)
 	first := _dn(first_date) if first_date != {} else 0
@@ -595,7 +698,9 @@ make_schedule :: proc(
 		for {
 			temp := step(seed, -periods, tenor, convention, eom)
 			if temp < exit {
-				if has_first && _adjust(calendar, dates[0], convention) != _adjust(calendar, first, convention) {
+				if has_first &&
+				   _adjust(calendar, dates[0], convention) !=
+					   _adjust(calendar, first, convention) {
 					inject_at(&dates, 0, first)
 					inject_at(&reg, 0, false)
 				}
@@ -611,27 +716,47 @@ make_schedule :: proc(
 			inject_at(&dates, 0, eff)
 			inject_at(&reg, 0, false)
 		}
-	case .Forward:
-		append(&dates, eff)
-		seed = eff
+	case .Forward, .CDS, .CDS2015:
+		if cds {
+			// start on the IMM 20th on or before the effective date (one roll
+			// earlier if that 20th only becomes a business day after it)
+			prev20 := _previous_twentieth(eff)
+			if _adjust(calendar, prev20, convention) > eff {
+				append(&dates, _add(prev20, Period{-3, .Months}))
+				append(&reg, true)
+			}
+			append(&dates, prev20)
+		} else {
+			append(&dates, eff)
+		}
+		seed = dates[len(dates) - 1]
 		periods := 1
 		if has_first {
 			append(&dates, first)
 			append(&reg, step(seed, periods, tenor, convention, eom) == first)
 			seed = first
+		} else if cds {
+			next20 := _next_twentieth(eff)
+			if next20 != eff {
+				append(&dates, next20)
+				append(&reg, true)
+				seed = next20
+			}
 		}
 		exit := ntl if has_ntl else term
 		for {
 			temp := step(seed, periods, tenor, convention, eom)
 			if temp > exit {
 				if has_ntl &&
-				   _adjust(calendar, dates[len(dates) - 1], convention) != _adjust(calendar, ntl, convention) {
+				   _adjust(calendar, dates[len(dates) - 1], convention) !=
+					   _adjust(calendar, ntl, convention) {
 					append(&dates, ntl)
 					append(&reg, false)
 				}
 				break
 			}
-			if _adjust(calendar, dates[len(dates) - 1], convention) != _adjust(calendar, temp, convention) {
+			if _adjust(calendar, dates[len(dates) - 1], convention) !=
+			   _adjust(calendar, temp, convention) {
 				append(&dates, temp)
 				append(&reg, true)
 			}
@@ -639,13 +764,14 @@ make_schedule :: proc(
 		}
 		if _adjust(calendar, dates[len(dates) - 1], termination_convention) !=
 		   _adjust(calendar, term, termination_convention) {
-			append(&dates, term)
-			append(&reg, false)
+			append(&dates, _next_twentieth(term) if cds else term)
+			append(&reg, cds)
 		}
 	}
 
 	// intermediate dates (rolled to the month end under the end-of-month rule),
-	// then the effective date and, unless unadjusted, the termination date
+	// then the effective date and, unless unadjusted or a CDS rule, the
+	// termination date
 	n := len(dates)
 	roll := eom && _is_eom(calendar, seed)
 	for i in 1 ..< n - 1 {
@@ -653,7 +779,7 @@ make_schedule :: proc(
 		dates[i] = _adjust(calendar, dates[i], convention)
 	}
 	dates[0] = _adjust(calendar, dates[0], convention)
-	if termination_convention != .Unadjusted {
+	if termination_convention != .Unadjusted && !cds {
 		dates[n - 1] = _adjust(calendar, dates[n - 1], termination_convention)
 	}
 
@@ -695,9 +821,23 @@ schedule_reference_period :: proc(s: Schedule, k: int) -> (ref_start, ref_end: w
 	ref_start, ref_end = s.dates[k], s.dates[k + 1]
 	if s.is_regular[k] || s.tenor.n == 0 {return}
 	if k == 0 {
-		ref_start = calendar_advance(s.calendar, ref_end, -s.tenor.n, s.tenor.unit, s.convention, s.end_of_month)
+		ref_start = calendar_advance(
+			s.calendar,
+			ref_end,
+			-s.tenor.n,
+			s.tenor.unit,
+			s.convention,
+			s.end_of_month,
+		)
 	} else if k == len(s.dates) - 2 {
-		ref_end = calendar_advance(s.calendar, ref_start, s.tenor.n, s.tenor.unit, s.convention, s.end_of_month)
+		ref_end = calendar_advance(
+			s.calendar,
+			ref_start,
+			s.tenor.n,
+			s.tenor.unit,
+			s.convention,
+			s.end_of_month,
+		)
 	}
 	return
 }
