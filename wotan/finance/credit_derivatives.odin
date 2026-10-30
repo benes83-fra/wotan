@@ -637,6 +637,78 @@ price_dated_cds :: proc(
 	}
 }
 
+// Hazard bootstrap shared by the spread and upfront quotes: pillar i is the
+// payment date of the i-th maturity + 1 day, and its hazard is solved so that
+// the CDS reprices the quote (fair spread, or fair upfront at `coupon`)
+@(private = "file")
+_bootstrap_cds_dated :: proc(
+	tenors: []Period,
+	quotes: []f64,
+	coupon: f64, // running coupon of upfront quotes
+	by_upfront: bool,
+	recovery: f64,
+	discount: ^YieldCurve,
+	rule: DateGenerationRule,
+	upfront_settlement_days: int,
+	allocator: mem.Allocator,
+) -> CDS_Curve {
+	n := min(len(tenors), len(quotes))
+	ref := discount.reference_date
+	curve := CDS_Curve {
+		tenors         = make([]f64, n, allocator),
+		hazards        = make([]f64, n, allocator),
+		recovery       = recovery,
+		reference_date = ref,
+	}
+	Quote :: struct {
+		cds:        DatedCDS,
+		value:      f64,
+		by_upfront: bool,
+		discount:   ^YieldCurve,
+	}
+	for i in 0 ..< n {
+		q := Quote {
+			make_standard_cds(
+				ref,
+				tenors[i],
+				coupon if by_upfront else quotes[i],
+				rule = rule,
+				cash_settlement_days = upfront_settlement_days,
+				allocator = context.temp_allocator,
+			),
+			quotes[i],
+			by_upfront,
+			discount,
+		}
+		defer free_dated_cds(&q.cds, context.temp_allocator)
+		mat := q.cds.schedule.dates[len(q.cds.schedule.dates) - 1]
+		pillar := _dn(calendar_adjust(q.cds.schedule.calendar, mat, .Following)) + 1
+		curve.tenors[i] = f64(pillar - _dn(ref)) / 365.0
+		// implied quote − quote, increasing in the hazard
+		f :: proc(c: ^CDS_Curve, i: int, h: f64, q: ^Quote) -> f64 {
+			c.hazards[i] = h
+			sub := CDS_Curve {
+				c.tenors[:i + 1],
+				c.hazards[:i + 1],
+				c.recovery,
+				c.r,
+				c.reference_date,
+			}
+			r := price_dated_cds(q.cds, &sub, q.discount)
+			return (r.fair_upfront if q.by_upfront else r.fair_spread) - q.value
+		}
+		lo, hi := 0.0, 1.0
+		for f(&curve, i, hi, &q) < 0.0 && hi < 1e3 {hi *= 2.0}
+		for _ in 0 ..< 200 {
+			mid := 0.5 * (lo + hi)
+			if mid == lo || mid == hi {break}
+			if f(&curve, i, mid, &q) < 0.0 {lo = mid} else {hi = mid}
+		}
+		curve.hazards[i] = 0.5 * (lo + hi)
+	}
+	return curve
+}
+
 // Bootstraps piecewise-flat hazard rates from par spreads of standard CDS
 // traded on the discount curve's reference date (QuantLib SpreadCdsHelper with
 // the ISDA model: each pillar is the maturity's payment date + 1 day, hazards
@@ -650,46 +722,149 @@ bootstrap_cds_curve_dated :: proc(
 	rule: DateGenerationRule = .CDS2015,
 	allocator: mem.Allocator = context.allocator,
 ) -> CDS_Curve {
-	n := min(len(tenors), len(spreads))
+	return _bootstrap_cds_dated(
+		tenors,
+		spreads,
+		0.0,
+		false,
+		recovery,
+		discount,
+		rule,
+		3,
+		allocator,
+	)
+}
+
+// As bootstrap_cds_curve_dated from upfront quotes (fraction of notional paid
+// by the protection buyer, settled upfront_settlement_days business days after
+// trade) at a common running coupon (QuantLib UpfrontCdsHelper, ISDA model)
+bootstrap_cds_curve_dated_upfront :: proc(
+	tenors: []Period,
+	upfronts: []f64,
+	coupon: f64,
+	recovery: f64,
+	discount: ^YieldCurve,
+	rule: DateGenerationRule = .CDS2015,
+	upfront_settlement_days: int = 3,
+	allocator: mem.Allocator = context.allocator,
+) -> CDS_Curve {
+	return _bootstrap_cds_dated(
+		tenors,
+		upfronts,
+		coupon,
+		true,
+		recovery,
+		discount,
+		rule,
+		upfront_settlement_days,
+		allocator,
+	)
+}
+
+// ============================================================================
+// QUOTED SPREAD <-> UPFRONT AND CDS INDICES
+// ============================================================================
+
+// Points upfront of a standard CDS with running `coupon` quoted at a (flat)
+// spread: the ISDA convention values it on the flat hazard curve that makes
+// the quoted spread the par spread of the contract's maturity. Trade date =
+// the discount curve's reference date.
+cds_upfront_from_quoted_spread :: proc(
+	tenor: Period,
+	coupon, quoted_spread, recovery: f64,
+	discount: ^YieldCurve,
+	rule: DateGenerationRule = .CDS2015,
+) -> f64 {
+	tenors := [1]Period{tenor}
+	spreads := [1]f64{quoted_spread}
+	flat := bootstrap_cds_curve_dated(
+		tenors[:],
+		spreads[:],
+		recovery,
+		discount,
+		rule,
+		context.temp_allocator,
+	)
+	defer {delete(flat.tenors, context.temp_allocator)
+		delete(flat.hazards, context.temp_allocator)}
+	cds := make_standard_cds(
+		discount.reference_date,
+		tenor,
+		coupon,
+		rule = rule,
+		allocator = context.temp_allocator,
+	)
+	defer free_dated_cds(&cds, context.temp_allocator)
+	return price_dated_cds(cds, &flat, discount).fair_upfront
+}
+
+// Inverse of cds_upfront_from_quoted_spread: the par spread of the flat hazard
+// curve that reprices the upfront at the running coupon
+cds_quoted_spread_from_upfront :: proc(
+	tenor: Period,
+	coupon, upfront, recovery: f64,
+	discount: ^YieldCurve,
+	rule: DateGenerationRule = .CDS2015,
+) -> f64 {
+	tenors := [1]Period{tenor}
+	upfronts := [1]f64{upfront}
+	flat := bootstrap_cds_curve_dated_upfront(
+		tenors[:],
+		upfronts[:],
+		coupon,
+		recovery,
+		discount,
+		rule,
+		allocator = context.temp_allocator,
+	)
+	defer {delete(flat.tenors, context.temp_allocator)
+		delete(flat.hazards, context.temp_allocator)}
+	cds := make_standard_cds(
+		discount.reference_date,
+		tenor,
+		coupon,
+		rule = rule,
+		allocator = context.temp_allocator,
+	)
+	defer free_dated_cds(&cds, context.temp_allocator)
+	return price_dated_cds(cds, &flat, discount).fair_spread
+}
+
+// Intrinsic value of a CDS index position (CDX / iTraxx): the index contract
+// (common coupon and maturity) valued name by name on each constituent's
+// hazard curve with notional × weight and summed. Defaulted names are left out,
+// so the weights of the remaining names add up to the index factor; the
+// upfront is paid on the remaining notional. Fair spread, fair upfront and
+// risky annuity refer to the remaining notional.
+price_cds_index_intrinsic :: proc(
+	index: DatedCDS,
+	constituents: []^CDS_Curve,
+	weights: []f64,
+	discount: ^YieldCurve,
+) -> DatedCDSResult {
+	res: DatedCDSResult
+	factor := 0.0
+	for curve, i in constituents {
+		name := index
+		name.notional = index.notional * weights[i]
+		r := price_dated_cds(name, curve, discount)
+		res.npv += r.npv
+		res.protection_leg += r.protection_leg
+		res.premium_leg += r.premium_leg
+		res.accrual_rebate += r.accrual_rebate
+		res.upfront_pv += r.upfront_pv
+		factor += weights[i]
+	}
+	live := index.notional * factor
+	res.fair_spread = res.protection_leg * index.coupon / (res.premium_leg - res.accrual_rebate)
+	res.risky_annuity = res.premium_leg / (live * index.coupon) if index.coupon != 0.0 else 0.0
 	ref := discount.reference_date
-	curve := CDS_Curve {
-		tenors         = make([]f64, n, allocator),
-		hazards        = make([]f64, n, allocator),
-		recovery       = recovery,
-		reference_date = ref,
+	if w.date_less(index.upfront_date, ref) {
+		res.fair_upfront = math.QNAN_F64
+	} else {
+		df_up := yield_curve_discount_factor_date(discount, index.upfront_date)
+		res.fair_upfront =
+			(res.protection_leg - res.premium_leg + res.accrual_rebate) / (live * df_up)
 	}
-	for i in 0 ..< n {
-		cds := make_standard_cds(
-			ref,
-			tenors[i],
-			spreads[i],
-			rule = rule,
-			allocator = context.temp_allocator,
-		)
-		defer free_dated_cds(&cds, context.temp_allocator)
-		mat := cds.schedule.dates[len(cds.schedule.dates) - 1]
-		pillar := _dn(calendar_adjust(cds.schedule.calendar, mat, .Following)) + 1
-		curve.tenors[i] = f64(pillar - _dn(ref)) / 365.0
-		// fair spread − quote, increasing in the hazard
-		f :: proc(c: ^CDS_Curve, i: int, h: f64, cds: DatedCDS, discount: ^YieldCurve) -> f64 {
-			c.hazards[i] = h
-			sub := CDS_Curve {
-				c.tenors[:i + 1],
-				c.hazards[:i + 1],
-				c.recovery,
-				c.r,
-				c.reference_date,
-			}
-			return price_dated_cds(cds, &sub, discount).fair_spread - cds.coupon
-		}
-		lo, hi := 0.0, 1.0
-		for f(&curve, i, hi, cds, discount) < 0.0 && hi < 1e3 {hi *= 2.0}
-		for _ in 0 ..< 200 {
-			mid := 0.5 * (lo + hi)
-			if mid == lo || mid == hi {break}
-			if f(&curve, i, mid, cds, discount) < 0.0 {lo = mid} else {hi = mid}
-		}
-		curve.hazards[i] = 0.5 * (lo + hi)
-	}
-	return curve
+	return res
 }

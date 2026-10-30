@@ -844,6 +844,107 @@ DI_MSW := [?]f64 {
 	6316.716754620171,
 }
 @(private = "file")
+DI_OISV := [?]f64 {
+	2.0,
+	0.0,
+	0.0,
+	648071.1583561618,
+	651382.3355420452,
+	3311.1771858833963,
+	0.022614958806177008,
+	2.0,
+	0.0,
+	1.0,
+	648071.1583561618,
+	651333.0491057348,
+	3261.890749573009,
+	0.022613247659487815,
+	0.0,
+	2.0,
+	0.0,
+	648071.1583561618,
+	651549.6002068275,
+	3478.441850665724,
+	0.02262076596933969,
+	2.0,
+	3.0,
+	1.0,
+	648071.1583561618,
+	651335.7737194446,
+	3264.61536328285,
+	0.022613342253742907,
+	5.0,
+	0.0,
+	0.0,
+	648071.1583561618,
+	651122.3803368991,
+	3051.2219807372894,
+	0.022605933574857313,
+}
+@(private = "file")
+DI_OISLB := [?]f64 {
+	45743.0,
+	45771.0,
+	45828.0,
+	45922.0,
+	46013.0,
+	46101.0,
+	46287.0,
+	46468.0,
+	46834.0,
+	47562.0,
+	48295.0,
+	49389.0,
+	51216.0,
+	53043.0,
+	56695.0,
+	0.02655712477328266,
+	0.02609718868376143,
+	0.025527020428037762,
+	0.024519969905326216,
+	0.023656167565868302,
+	0.02291761444392943,
+	0.022175921057279075,
+	0.021737746587208878,
+	0.02185837669246523,
+	0.022896378515221343,
+	0.023944338047645744,
+	0.025330644899721713,
+	0.02664143765131736,
+	0.026680072464011776,
+	0.02512667994246772,
+	45743.0,
+	45771.0,
+	45828.0,
+	45922.0,
+	46013.0,
+	46101.0,
+	46287.0,
+	46468.0,
+	46834.0,
+	47562.0,
+	48295.0,
+	49389.0,
+	51216.0,
+	53043.0,
+	56695.0,
+	0.026557676768080237,
+	0.02615735770926995,
+	0.02552212538472118,
+	0.024523491600682477,
+	0.023659610310368964,
+	0.02292045349174882,
+	0.022174897021293632,
+	0.02174094872849096,
+	0.021859972717997146,
+	0.022894988887800848,
+	0.023943335886141354,
+	0.025329868421245343,
+	0.026640416043619403,
+	0.02668057349157845,
+	0.025127883560661753,
+}
+@(private = "file")
 DI_EVAL :: 45730
 
 @(private = "file")
@@ -1169,6 +1270,58 @@ dated_instruments_reference_test :: proc(allocator: mem.Allocator) {
 				100 * DI_MSW[3],
 				worst_s,
 				100 * single.par_swap_rate,
+			),
+		)
+	}
+
+	// 8. Overnight coupons with lookback / lockout / observation shift
+	{
+		spot := fin.swap_spot_date(ois_conv, eval)
+		start := fin.calendar_advance(ois_conv.calendar, spot, 6, .Months, .ModifiedFollowing)
+		worst := 0.0
+		for k in 0 ..< len(DI_OISV) / 7 {
+			v := DI_OISV[7 * k:7 * k + 7]
+			c := ois_conv
+			c.lookback_days, c.lockout_days, c.observation_shift = int(v[0]), int(v[1]), v[2] != 0
+			sw := fin.make_dated_swap(c, start, {3, .Years}, 0.0225, 1e7, .Payer, 0.001)
+			defer fin.free_dated_swap(&sw)
+			r := fin.price_dated_swap(sw, &ois)
+			got := [4]f64{r.pv_fixed_leg, r.pv_floating_leg, r.npv, r.par_swap_rate}
+			for j in 0 ..< 4 {worst = max(worst, abs(got[j] - v[3 + j]) / (1e7 if j == 2 else abs(v[3 + j])))}
+		}
+		expect(
+			&passed,
+			&total,
+			worst < 1e-11,
+			fmt.tprintf(
+				"6M-forward 3Y €STR swaps (+10bp) with lookback 2 (with / without observation shift), lockout 2, lookback 2 + lockout 3 + shift, lookback 5 vs QuantLib OvernightIndexedSwap: legs, NPV, fair rate max rel diff %.1e",
+				worst,
+			),
+		)
+	}
+
+	// 9. OIS bootstraps with a 2-day lookback (payment lag 2): with observation
+	// shift (telescoping) and without (daily compounding inside the bootstrap)
+	{
+		worst_z := 0.0
+		pillars_ok := true
+		for sh in 0 ..< 2 {
+			c := ois_conv
+			c.payment_lag, c.lookback_days, c.observation_shift = 2, 2, sh == 0
+			cv := fin.bootstrap_yield_curve_dated(eval, ois_quotes[:], c)
+			defer fin.free_yield_curve(&cv, allocator)
+			base := sh * 30
+			for t, i in cv.tenors {pillars_ok &&= abs(t - fin.date_to_time(eval, _di_date(i32(DI_OISLB[base + i])))) < 1e-15}
+			for z, i in cv.zero_rates {worst_z = max(worst_z, abs(z - DI_OISLB[base + 15 + i]))}
+		}
+		expect(
+			&passed,
+			&total,
+			pillars_ok && worst_z < 1e-11,
+			fmt.tprintf(
+				"€STR curves with 2-day lookback and payment lag 2, with and without observation shift, vs QuantLib OISRateHelper: pillar dates %v, max zero-rate diff %.1e",
+				pillars_ok,
+				worst_z,
 			),
 		)
 	}

@@ -136,6 +136,8 @@ CD_CI := [?]i32 {
 	0,
 }
 @(private = "file")
+CD_UPFP := [?]i32{46196, 46560, 46925, 47655, 48387, 49481}
+@(private = "file")
 CD_DEP := [?]f64{0.0262, 0.0258, 0.0251}
 @(private = "file")
 CD_SWP := [?]f64{0.0243, 0.0236, 0.0238, 0.0249, 0.0258, 0.027, 0.0281}
@@ -330,6 +332,67 @@ CD_CF := [?]f64 {
 	-3105.485559691204,
 }
 @(private = "file")
+CD_UPFQ := [?]f64{-0.0312, -0.0405, -0.0391, -0.0158, 0.0127, 0.0476}
+@(private = "file")
+CD_UPFH := [?]f64 {
+	0.0378282602225843,
+	0.06710370475574037,
+	0.08724462217261304,
+	0.11349698314698219,
+	0.13241278841843374,
+	0.14380446491381754,
+}
+@(private = "file")
+CD_CONV := [?]f64 {
+	5.0,
+	0.01,
+	0.025,
+	0.0663420915899262,
+	0.0412,
+	0.01909146852466199,
+	3.0,
+	0.05,
+	0.018,
+	-0.09411411571661903,
+	-0.087,
+	0.02024657520404515,
+	10.0,
+	0.01,
+	0.0075,
+	-0.021306274905499755,
+	-0.015,
+	0.008229678878115387,
+}
+@(private = "file")
+CD_NAMES := [?]f64 {
+	0.006,
+	0.0085,
+	0.011,
+	0.4,
+	0.015,
+	0.019,
+	0.023,
+	0.4,
+	0.0045,
+	0.0062,
+	0.0081,
+	0.25,
+	0.03,
+	0.033,
+	0.035,
+	0.35,
+}
+@(private = "file")
+CD_IDX := [?]f64 {
+	1517288.5527404614,
+	6021144.644487556,
+	3779569.6165523157,
+	799825.5554298146,
+	75539.08023503565,
+	0.016255656062906163,
+	0.028970243479218324,
+}
+@(private = "file")
 CD_EVAL :: 45769
 @(private = "file")
 CD_R :: 0.4
@@ -342,7 +405,7 @@ _cd_date :: proc(serial: i32) -> w.Date {
 dated_cds_reference_test :: proc(allocator: mem.Allocator) {
 	seed_test(#procedure)
 	fmt.println(
-		"\n=== Flat-forward curve, CDS2015 contracts, ISDA engine and hazard bootstrap (QuantLib reference) ===",
+		"\n=== Flat-forward curve, CDS2015 contracts, ISDA engine, hazard bootstraps, upfront conversion, index (QuantLib reference) ===",
 	)
 	context.allocator = allocator
 	passed, total := 0, 0
@@ -508,6 +571,110 @@ dated_cds_reference_test :: proc(allocator: mem.Allocator) {
 				f[3],
 				1e4 * f[8],
 				100 * f[9],
+			),
+		)
+	}
+
+	// 4. Hazard curve from upfront quotes
+	{
+		ten := [6]fin.Period {
+			{1, .Years},
+			{2, .Years},
+			{3, .Years},
+			{5, .Years},
+			{7, .Years},
+			{10, .Years},
+		}
+		uc := fin.bootstrap_cds_curve_dated_upfront(ten[:], CD_UPFQ[:], 0.05, CD_R, &disc)
+		defer {delete(uc.tenors); delete(uc.hazards)}
+		pillars_ok := true
+		for t, i in uc.tenors {pillars_ok &&= abs(t - fin.date_to_time(eval, _cd_date(CD_UPFP[i]))) < 1e-15}
+		worst_h, worst_q := 0.0, 0.0
+		for h, i in uc.hazards {worst_h = max(worst_h, rel(h, CD_UPFH[i]))}
+		for t, i in ten {
+			cds := fin.make_standard_cds(eval, t, 0.05)
+			worst_q = max(
+				worst_q,
+				abs(fin.price_dated_cds(cds, &uc, &disc).fair_upfront - CD_UPFQ[i]),
+			)
+			fin.free_dated_cds(&cds)
+		}
+		expect(
+			&passed,
+			&total,
+			pillars_ok && worst_h < 1e-9 && worst_q < 1e-14,
+			fmt.tprintf(
+				"hazard curve from 6 upfront quotes (−3.12%% … +4.76%%) at a 500bp running coupon vs QuantLib UpfrontCdsHelper (ISDA): pillar dates %v, max hazard rel diff %.1e, quotes reprice to %.1e",
+				pillars_ok,
+				worst_h,
+				worst_q,
+			),
+		)
+	}
+
+	// 5. Quoted spread <-> points upfront (flat-curve convention)
+	{
+		worst := 0.0
+		for k in 0 ..< len(CD_CONV) / 6 {
+			c := CD_CONV[6 * k:6 * k + 6]
+			t := fin.Period{int(c[0]), .Years}
+			up := fin.cds_upfront_from_quoted_spread(t, c[1], c[2], CD_R, &disc)
+			sp := fin.cds_quoted_spread_from_upfront(t, c[1], c[4], CD_R, &disc)
+			back := fin.cds_quoted_spread_from_upfront(t, c[1], up, CD_R, &disc)
+			worst = max(worst, abs(up - c[3]), abs(sp - c[5]), abs(back - c[2]))
+		}
+		c := CD_CONV[0:6]
+		expect(
+			&passed,
+			&total,
+			worst < 1e-12,
+			fmt.tprintf(
+				"quoted spread <-> upfront for 5Y/100bp, 3Y/500bp, 10Y/100bp vs QuantLib (flat SpreadCdsHelper / UpfrontCdsHelper curve + IsdaCdsEngine): max diff %.1e; 5Y 250bp quoted = %.6f%% upfront (%.6f%%), round trip exact",
+				worst,
+				100 * fin.cds_upfront_from_quoted_spread({5, .Years}, c[1], c[2], CD_R, &disc),
+				100 * c[3],
+			),
+		)
+	}
+
+	// 6. Index intrinsic value: 4 live names (a fifth defaulted), own curves and recoveries
+	{
+		curves: [4]fin.CDS_Curve
+		ptrs: [4]^fin.CDS_Curve
+		weights := [4]f64{0.2, 0.2, 0.2, 0.2}
+		ten := [3]fin.Period{{3, .Years}, {5, .Years}, {7, .Years}}
+		for k in 0 ..< 4 {
+			nm := CD_NAMES[4 * k:4 * k + 4]
+			curves[k] = fin.bootstrap_cds_curve_dated(ten[:], nm[:3], nm[3], &disc)
+			ptrs[k] = &curves[k]
+		}
+		defer for &c in curves {delete(c.tenors); delete(c.hazards)}
+		index := fin.make_standard_cds(eval, {5, .Years}, 0.01, 1e8, .Buyer, 0.01)
+		defer fin.free_dated_cds(&index)
+		r := fin.price_cds_index_intrinsic(index, ptrs[:], weights[:], &disc)
+		got := [7]f64 {
+			r.npv,
+			r.protection_leg,
+			r.premium_leg,
+			r.upfront_pv,
+			r.accrual_rebate,
+			r.fair_spread,
+			r.fair_upfront,
+		}
+		worst := 0.0
+		for j in 0 ..< 7 {worst = max(worst, abs(got[j] - CD_IDX[j]) / (1e8 if j < 5 else 1.0))}
+		expect(
+			&passed,
+			&total,
+			worst < 1e-12,
+			fmt.tprintf(
+				"5Y index (100bp, 1%% upfront, factor 0.8 after one default) on 4 constituent curves vs QuantLib IsdaCdsEngine name by name: NPV %.2f (%.2f), intrinsic spread %.4f bp (%.4f), fair upfront %.6f%%, max diff %.1e",
+				r.npv,
+				CD_IDX[0],
+				1e4 * r.fair_spread,
+				1e4 * CD_IDX[5],
+				100 * r.fair_upfront,
+				worst,
 			),
 		)
 	}

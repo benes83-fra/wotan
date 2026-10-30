@@ -117,6 +117,8 @@ _SwapPeriod :: struct {
 	pay:                f64,
 	accrual:            f64, // day-count fraction of the accrual period
 	fwd_accrual:        f64, // day-count fraction of the forward period
+	rate:               f64, // projected floating rate when has_rate (daily compounding)
+	has_rate:           bool,
 }
 
 @(private = "file")
@@ -130,7 +132,7 @@ _time_periods :: proc(
 	periods := make([]_SwapPeriod, max(len(dates) - 1, 0), allocator)
 	for k in 1 ..< len(dates) {
 		dcf := day_count_fraction(dates[k - 1], dates[k], leg.day_count)
-		periods[k - 1] = {dates[k - 1], dates[k], dates[k], dcf, dcf}
+		periods[k - 1] = {dates[k - 1], dates[k], dates[k], dcf, dcf, 0.0, false}
 	}
 	return periods
 }
@@ -173,6 +175,7 @@ _float_leg_pv :: proc(
 			yield_curve_discount_factor(forecast, p.fwd_start) /
 			yield_curve_discount_factor(forecast, p.fwd_end)
 		coupon := (growth - 1.0) * p.accrual / p.fwd_accrual if p.fwd_accrual > 0.0 else 0.0
+		if p.has_rate {coupon = p.rate * p.accrual}
 		pv +=
 			notional * (coupon + spread * p.accrual) * yield_curve_discount_factor(discount, p.pay)
 	}
@@ -254,22 +257,32 @@ price_swap :: proc(
 //                   modified following, fixing_days 2, indexed_coupons
 //   €STR OIS:       TARGET, 2 days, fixed and float 1Y ACT/360, payment_lag 1
 SwapConventions :: struct {
-	calendar:         Calendar,
-	settlement_days:  int,
-	fixed_tenor:      Period,
-	fixed_convention: BusinessDayConvention,
-	fixed_day_count:  DayCountConvention,
-	float_tenor:      Period, // also the index tenor of indexed coupons
-	float_convention: BusinessDayConvention,
-	float_day_count:  DayCountConvention,
-	end_of_month:     bool,
-	payment_lag:      int, // business days from accrual end to payment (both legs)
-	fixing_days:      int, // index fixing lag in business days (indexed coupons)
+	calendar:          Calendar,
+	settlement_days:   int,
+	fixed_tenor:       Period,
+	fixed_convention:  BusinessDayConvention,
+	fixed_day_count:   DayCountConvention,
+	float_tenor:       Period, // also the index tenor of indexed coupons
+	float_convention:  BusinessDayConvention,
+	float_day_count:   DayCountConvention,
+	end_of_month:      bool,
+	payment_lag:       int, // business days from accrual end to payment (both legs)
+	fixing_days:       int, // index fixing lag in business days (indexed coupons)
 	// Projection period of a floating coupon: false = its accrual period (par
 	// coupons; the compounded overnight rate of an OIS leg); true = the index
 	// period from the value date fixing_days after the fixing, which is
 	// fixing_days before the accrual start (QuantLib's indexed Ibor coupons)
-	indexed_coupons:  bool,
+	indexed_coupons:   bool,
+	// Overnight legs (indexed_coupons false), compounded daily over the
+	// business days of the accrual period with the float day count, as
+	// QuantLib's OvernightIndexedCoupon: each day's rate is observed
+	// lookback_days business days earlier; with observation_shift the day
+	// weights (and the year fraction dividing the compounded growth) follow the
+	// observation dates instead of the interest dates; the last lockout_days
+	// rates repeat the one observed lockout_days days before the end.
+	lookback_days:     int,
+	lockout_days:      int,
+	observation_shift: bool,
 }
 
 // Swap on real dates; times are ACT/365F from the curves' reference_date
@@ -353,7 +366,18 @@ _swap_payment_date :: proc(conv: SwapConventions, end: w.Date) -> w.Date {
 // Forward period of the floating coupon accruing from `start` to `end`
 @(private = "file")
 _swap_forward_period :: proc(conv: SwapConventions, start, end: w.Date) -> (w.Date, w.Date) {
-	if !conv.indexed_coupons {return start, end}
+	if !conv.indexed_coupons {
+		if conv.observation_shift && conv.lookback_days > 0 {
+			return calendar_advance(
+				conv.calendar,
+				start,
+				-conv.lookback_days,
+				.Days,
+				.Preceding,
+			), calendar_advance(conv.calendar, end, -conv.lookback_days, .Days, .Preceding)
+		}
+		return start, end
+	}
 	fixing := calendar_advance(conv.calendar, start, -conv.fixing_days, .Days, .Preceding)
 	value := calendar_advance(conv.calendar, fixing, conv.fixing_days, .Days)
 	return value, calendar_advance_period(
@@ -369,27 +393,70 @@ _swap_forward_period :: proc(conv: SwapConventions, start, end: w.Date) -> (w.Da
 _dated_periods :: proc(
 	swap: DatedSwap,
 	floating: bool,
-	reference: w.Date,
+	forecast: ^YieldCurve,
 	allocator: mem.Allocator,
 ) -> []_SwapPeriod {
+	conv := swap.conventions
+	reference := forecast.reference_date
 	s := swap.float_schedule if floating else swap.fixed_schedule
-	dc := swap.conventions.float_day_count if floating else swap.conventions.fixed_day_count
+	dc := conv.float_day_count if floating else conv.fixed_day_count
 	last := s.dates[len(s.dates) - 1]
+	// overnight compounding that does not telescope into one forward period
+	daily :=
+		floating &&
+		!conv.indexed_coupons &&
+		(conv.lockout_days > 0 || (conv.lookback_days > 0 && !conv.observation_shift))
 	periods := make([]_SwapPeriod, max(len(s.dates) - 1, 0), allocator)
 	for k in 0 ..< len(periods) {
 		start, end := s.dates[k], s.dates[k + 1]
 		rs, re := schedule_reference_period(s, k)
 		fs, fe := start, end
-		if floating {fs, fe = _swap_forward_period(swap.conventions, start, end)}
+		if floating {fs, fe = _swap_forward_period(conv, start, end)}
 		periods[k] = {
 			fwd_start   = date_to_time(reference, fs),
 			fwd_end     = date_to_time(reference, fe),
-			pay         = date_to_time(reference, _swap_payment_date(swap.conventions, end)),
+			pay         = date_to_time(reference, _swap_payment_date(conv, end)),
 			accrual     = year_fraction(dc, start, end, rs, re, last),
 			fwd_accrual = year_fraction(dc, fs, fe, rs, re, last) if floating else 0.0,
 		}
+		if daily {
+			periods[k].rate = _overnight_rate(conv, start, end, forecast)
+			periods[k].has_rate = true
+		}
 	}
 	return periods
+}
+
+// Compounded overnight rate of the accrual period [start, end] projected on
+// the curve: Π (1 + r_i τ_i) − 1 over the business days, divided by the year
+// fraction spanned by the weight dates (see SwapConventions)
+@(private = "file")
+_overnight_rate :: proc(conv: SwapConventions, start, end: w.Date, curve: ^YieldCurve) -> f64 {
+	cal, dc := conv.calendar, conv.float_day_count
+	interest := make([dynamic]w.Date, 0, 400, context.temp_allocator)
+	defer delete(interest)
+	for d := start;
+	    !w.date_less(end, d);
+	    d = calendar_advance(cal, d, 1, .Days) {append(&interest, d)}
+	n := len(interest) - 1
+	if n < 1 {return 0.0}
+	observed := make([]w.Date, n + 1, context.temp_allocator)
+	defer delete(observed, context.temp_allocator)
+	for d, i in interest {observed[i] = calendar_advance(cal, d, -conv.lookback_days, .Days, .Preceding)}
+	weights := observed if conv.observation_shift else interest[:]
+	lock := n - 1 - conv.lockout_days if conv.lockout_days > 0 && conv.lockout_days < n else n
+	growth := 1.0
+	for i in 0 ..< n {
+		f := observed[min(i, lock)]
+		next := calendar_advance(cal, f, 1, .Days)
+		r :=
+			(yield_curve_discount_factor_date(curve, f) /
+					yield_curve_discount_factor_date(curve, next) -
+				1.0) /
+			year_fraction(dc, f, next)
+		growth *= 1.0 + r * year_fraction(dc, weights[i], weights[i + 1])
+	}
+	return (growth - 1.0) / year_fraction(dc, weights[0], weights[n])
 }
 
 // Last date the swap depends on: final payment or end of the last forward period
@@ -414,9 +481,10 @@ price_dated_swap :: proc(
 	forecast: ^YieldCurve = nil,
 	allocator := context.allocator,
 ) -> SwapValuationResult {
-	fixed := _dated_periods(swap, false, discount.reference_date, allocator)
+	fc := forecast if forecast != nil else discount
+	fixed := _dated_periods(swap, false, fc, allocator)
 	defer delete(fixed, allocator)
-	float := _dated_periods(swap, true, discount.reference_date, allocator)
+	float := _dated_periods(swap, true, fc, allocator)
 	defer delete(float, allocator)
 	return _swap_result(
 		fixed,
