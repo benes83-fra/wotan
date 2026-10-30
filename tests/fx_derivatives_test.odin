@@ -81,7 +81,7 @@ fx_derivatives_test :: proc(allocator: mem.Allocator) {
 
 	// BS price with ATM vol
 	bs_price := fin.fx_digital_call_price(S, K_digital, T, r_d, r_f, vols.vol_atm)
-	vanna_dig, volga_dig := fin.fx_digital_call_sensitivities(
+	vanna_dig, volga_dig, vega_dig := fin.fx_digital_call_sensitivities(
 		S,
 		K_digital,
 		T,
@@ -111,6 +111,7 @@ fx_derivatives_test :: proc(allocator: mem.Allocator) {
 		mkt_atm,
 		mkt_25d_call,
 		allocator,
+		vega_dig,
 	)
 
 	fmt.printf("   %-25s | %10.6f\n", "BS Price (ATM vol)", bs_price)
@@ -141,7 +142,7 @@ fx_derivatives_test :: proc(allocator: mem.Allocator) {
 		r_f,
 		vols.vol_atm,
 	)
-	vanna_do, volga_do := fin.fx_down_and_out_digital_call_sensitivities(
+	vanna_do, volga_do, vega_do := fin.fx_down_and_out_digital_call_sensitivities(
 		S,
 		K_do_digital,
 		L_barrier,
@@ -164,6 +165,7 @@ fx_derivatives_test :: proc(allocator: mem.Allocator) {
 		mkt_atm,
 		mkt_25d_call,
 		allocator,
+		vega_do,
 	)
 
 	fmt.printf("   Barriers/Strike:     L = %.4f, K = %.4f\n", L_barrier, K_do_digital)
@@ -180,8 +182,10 @@ fx_derivatives_test :: proc(allocator: mem.Allocator) {
 	fmt.println("   • Garman-Kohlhagen is the FX Black-Scholes (r_f acts as dividend yield)")
 	fmt.println("   • The FX volatility smile is quoted via ATM, Risk Reversal, Butterfly")
 	fmt.println("   • Vanna-Volga adjusts exotic prices to match the market smile")
-	fmt.println("   • For the Digital, the smile adjustment is ~5-15% of the BS price")
-	fmt.println("   • For Barriers, the smile adjustment is typically 20-40% due to high Volga")
+	fmt.println(
+		"   • A negative risk reversal makes the digital call dearer than at the ATM vol",
+	)
+	fmt.println("   • Barrier adjustments are driven by their (large) vanna and volga")
 	fmt.println("   • Analytical formulas are used for barrier Greeks to avoid MC noise")
 	fmt.println("======================================================================\n")
 	// ========================================================================
@@ -194,13 +198,13 @@ fx_derivatives_test :: proc(allocator: mem.Allocator) {
 	// A 1.05 to 1.15 band is only ~0.5 standard deviations, making survival
 	// probability extremely low (~1.7%), which causes wild % adjustments in Vanna-Volga.
 	// Wider barriers (0.95 to 1.25) give a realistic survival probability and
-	// a well-behaved Volga, resulting in a typical 20-40% smile adjustment.
+	// a well-behaved Volga.
 	L_barrier_dnt := 0.95 // Lower barrier (~13.6% below spot)
 	U_barrier_dnt := 1.25 // Upper barrier (~13.6% above spot)
 
 	// PDE price with ATM vol
 	bs_dnt := fin.fx_dnt_pde_price(S, L_barrier_dnt, U_barrier_dnt, T, r_d, r_f, vols.vol_atm)
-	vanna_dnt, volga_dnt := fin.fx_dnt_pde_sensitivities(
+	vanna_dnt, volga_dnt, vega_dnt := fin.fx_dnt_pde_sensitivities(
 		S,
 		L_barrier_dnt,
 		U_barrier_dnt,
@@ -223,6 +227,7 @@ fx_derivatives_test :: proc(allocator: mem.Allocator) {
 		mkt_atm,
 		mkt_25d_call,
 		allocator,
+		vega_dnt,
 	)
 
 	fmt.printf("   Barriers:            L = %.4f, U = %.4f\n", L_barrier_dnt, U_barrier_dnt)
