@@ -21,12 +21,15 @@ credit_derivatives_2008_test :: proc(allocator: mem.Allocator) {
 		r        = 0.04,
 	}
 
-	// Market spread for this name is ~100 bps (0.0100)
+	// Running spread of 100 bps against a fair spread of about λ(1 − R) = 90 bps
 	market_spread := 0.0100
 	cds_pv := fin.price_cds(10_000_000.0, market_spread, 5.0, cds_params, 0.25)
+	// fair spread: the PV is linear in the spread
+	pv0 := fin.price_cds(1.0, 0.0, 5.0, cds_params, 0.25)
+	fair := pv0 / (pv0 - fin.price_cds(1.0, 1.0, 5.0, cds_params, 0.25))
 
-	fmt.printf("   5Y CDS Fair Spread: ~100 bps\n")
-	fmt.printf("   PV of Protection (Notional $10M): $%.2f\n\n", cds_pv)
+	fmt.printf("   5Y CDS Fair Spread: %.1f bps\n", fair * 10000.0)
+	fmt.printf("   PV to the protection buyer at 100 bps (Notional $10M): $%.2f\n\n", cds_pv)
 
 	// 2. CDO Setup (The 2008 Machine)
 	fmt.println("2. Pricing a 5Y Synthetic CDO (100 Names, 40% Recovery)...")

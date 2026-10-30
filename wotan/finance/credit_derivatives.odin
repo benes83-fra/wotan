@@ -1,12 +1,20 @@
 package finance
 
+import ml "../analytics/ML"
 import "core:math"
 import rand "core:math/rand"
 import "core:mem"
 
 // ============================================================================
-// CREDIT DEFAULT SWAP (CDS) - Constant Hazard Rate Model
+// CDS LEG ENGINE (piecewise-constant hazard, flat continuous rate)
 // ============================================================================
+// Coupon dates run backwards from maturity every payment_freq years (a short
+// first period if maturity is not a multiple). Per unit notional:
+//   premium annuity = Σ Δ_k S(t_k) D(t_k) + ∫ (u − t_{k−1}) dF(u) D(u)
+//                     (coupons plus the premium accrued up to default),
+//   protection      = (1 − R) ∫_0^T D(u) dF(u)    (paid at default),
+// with S(t) = e^{−∫λ}, D(t) = e^{−r t}; both integrals are exact on each piece
+// where λ is constant (coupon periods are split at the hazard knots).
 
 CDS_Params :: struct {
 	lambda:   f64, // Hazard rate (default intensity)
@@ -14,7 +22,61 @@ CDS_Params :: struct {
 	r:        f64, // Risk-free rate
 }
 
-// Analytical CDS Pricing: Returns PV to the protection buyer
+@(private = "file")
+_cds_n_periods :: proc(maturity, freq: f64) -> int {
+	return max(1, int(math.ceil(maturity / freq - 1e-9)))
+}
+
+// (1 − e^{−kL}) / k and (1 − e^{−kL}(1 + kL)) / k², stable as k → 0
+@(private = "file")
+_cds_e1_e2 :: proc(k, L: f64) -> (e1, e2: f64) {
+	x := k * L
+	if abs(x) < 1e-6 {
+		return L * (1.0 - 0.5 * x), 0.5 * L * L * (1.0 - 2.0 * x / 3.0)
+	}
+	E := math.exp_f64(-x)
+	return (1.0 - E) / k, (1.0 - E * (1.0 + x)) / (k * k)
+}
+
+// Annuity (per unit spread, including accrual on default) and protection leg
+// (per unit notional) to `maturity` on the curve's hazards
+@(private = "file")
+_cds_legs :: proc(
+	tenors, hazards: []f64,
+	recovery, r, maturity, freq: f64,
+) -> (
+	annuity, protection: f64,
+) {
+	if maturity <= 0.0 || len(hazards) == 0 {return 0.0, 0.0}
+	n := _cds_n_periods(maturity, freq)
+	last := len(hazards) - 1
+	S := 1.0 // survival at the running time
+	j := 0 // hazard piece of the running time
+	prev := 0.0
+	for k in 1 ..= n {
+		tk := maturity - f64(n - k) * freq
+		a := prev
+		for a < tk {
+			for j < last && tenors[j] <= a {j += 1}
+			b := tk
+			if j < last && tenors[j] < b {b = tenors[j]}
+			h := hazards[j]
+			L := b - a
+			D := math.exp_f64(-r * a)
+			e1, e2 := _cds_e1_e2(h + r, L)
+			protection += (1.0 - recovery) * h * S * D * e1
+			annuity += h * S * D * ((a - prev) * e1 + e2)
+			S *= math.exp_f64(-h * L)
+			a = b
+		}
+		annuity += (tk - prev) * S * math.exp_f64(-r * tk)
+		prev = tk
+	}
+	return
+}
+
+// Analytical CDS Pricing: PV to the protection buyer, notional × (protection −
+// spread × annuity), constant hazard and rate (premium accrued on default included)
 price_cds :: proc(
 	notional: f64,
 	spread: f64, // Running spread (e.g., 0.0100 for 100bps)
@@ -22,35 +84,31 @@ price_cds :: proc(
 	params: CDS_Params,
 	payment_freq: f64, // e.g., 0.25 for quarterly
 ) -> f64 {
-	lambda := params.lambda
-	R := params.recovery
-	r := params.r
-
-	// 1. PV of Premium Leg (Annuity)
-	premium_pv := 0.0
-	t := payment_freq
-	for t <= maturity {
-		survival_prob := math.exp_f64(-lambda * t)
-		disc_factor := math.exp_f64(-r * t)
-		premium_pv += payment_freq * survival_prob * disc_factor
-		t += payment_freq
-	}
-	premium_pv *= notional * spread
-
-	// 2. PV of Protection Leg (Expected Loss)
-	// Analytical solution for constant hazard rate
-	prot_pv :=
-		notional *
-		(1.0 - R) *
-		(lambda / (lambda + r)) *
-		(1.0 - math.exp_f64(-(lambda + r) * maturity))
-
-	return prot_pv - premium_pv
+	tenors := []f64{maturity}
+	hazards := []f64{params.lambda}
+	annuity, protection := _cds_legs(
+		tenors,
+		hazards,
+		params.recovery,
+		params.r,
+		maturity,
+		payment_freq,
+	)
+	return notional * (protection - spread * annuity)
 }
 
 // ============================================================================
-// COLLATERALIZED DEBT OBLIGATION (CDO) - Gaussian Copula Model (2008 Era)
+// COLLATERALIZED DEBT OBLIGATION (CDO) - One-Factor Copulas
 // ============================================================================
+// Homogeneous pool of N names with default times τ_i = −ln(1 − U_i)/λ, where the
+// U_i come from a one-factor Gaussian or Student-t copula. On each path the
+// tranche loss TL(t) = (min(L, d) − min(L, a)) / (d − a) of the portfolio loss
+// L(t) = (1 − R) · #defaults(t) / N is tracked at every coupon date, and per
+// unit tranche notional
+//   protection = Σ_k (TL_k − TL_{k−1}) D((t_{k−1} + t_k)/2)   (mid-period settlement)
+//   premium    = spread Σ_k Δ_k D(t_k) (1 − (TL_{k−1} + TL_k)/2)
+// tranche_pv = E[protection − premium] (to the protection buyer),
+// expected_loss_pct = E[TL(T)].
 
 CDO_Tranche :: struct {
 	name:   string,
@@ -59,12 +117,101 @@ CDO_Tranche :: struct {
 }
 
 CDO_Params :: struct {
-	N:        int, // Number of names in portfolio
-	lambda:   f64, // Homogeneous hazard rate for all names
-	recovery: f64, // Homogeneous recovery rate
-	r:        f64, // Risk-free rate
-	rho:      f64, // Gaussian Copula correlation (the "magic" number)
-	maturity: f64, // CDO maturity
+	N:            int, // Number of names in portfolio
+	lambda:       f64, // Homogeneous hazard rate for all names
+	recovery:     f64, // Homogeneous recovery rate
+	r:            f64, // Risk-free rate
+	rho:          f64, // Copula correlation (factor loading²)
+	maturity:     f64, // CDO maturity
+	payment_freq: f64, // Coupon period in years (0 = quarterly)
+}
+
+// Gamma(shape, 1) by Marsaglia & Tsang (2000); shape < 1 via the boost U^{1/shape}
+@(private = "file")
+_cdo_gamma :: proc(shape: f64) -> f64 {
+	if shape < 1.0 {
+		return _cdo_gamma(shape + 1.0) * math.pow(rand.float64(), 1.0 / shape)
+	}
+	d := shape - 1.0 / 3.0
+	c := 1.0 / math.sqrt_f64(9.0 * d)
+	for {
+		x := rand.float64_normal(0.0, 1.0)
+		v := 1.0 + c * x
+		if v <= 0.0 {continue}
+		v = v * v * v
+		u := rand.float64()
+		if math.ln(u) < 0.5 * x * x + d - d * v + d * math.ln(v) {return d * v}
+	}
+}
+
+@(private = "file")
+_cdo_tranche_mc :: proc(
+	tranche: CDO_Tranche,
+	params: CDO_Params,
+	nu: f64, // ≤ 0: Gaussian copula
+	spread: f64,
+	n_paths: int,
+	allocator: mem.Allocator,
+) -> (
+	tranche_pv: f64,
+	expected_loss_pct: f64,
+) {
+	N, T := params.N, params.maturity
+	if N <= 0 || n_paths <= 0 || T <= 0.0 || tranche.detach <= tranche.attach {return 0.0, 0.0}
+	freq := params.payment_freq if params.payment_freq > 0.0 else 0.25
+	n := _cds_n_periods(T, freq)
+	times := make([]f64, n + 1, allocator)
+	counts := make([]int, n + 1, allocator)
+	defer {delete(times, allocator); delete(counts, allocator)}
+	for k in 1 ..= n {times[k] = T - f64(n - k) * freq}
+
+	// A name has defaulted by t_k iff its latent X ≤ c_k = F⁻¹(1 − e^{−λ t_k}),
+	// F the copula's marginal (Φ or t_ν); c_k increases with k
+	thr := make([]f64, n + 1, allocator)
+	defer delete(thr, allocator)
+	for k in 1 ..= n {
+		pd := 1.0 - math.exp_f64(-params.lambda * times[k])
+		thr[k] = ml.student_t_ppf(pd, nu) if nu > 0.0 else _N_inv(pd)
+	}
+
+	sr, s1r := math.sqrt_f64(params.rho), math.sqrt_f64(1.0 - params.rho)
+	lgd := (1.0 - params.recovery) / f64(N)
+	width := tranche.detach - tranche.attach
+	tl :: #force_inline proc(L, a, d, w: f64) -> f64 {return (min(L, d) - min(L, a)) / w}
+
+	sum_pv, sum_el := 0.0, 0.0
+	for _ in 0 ..< n_paths {
+		zm := rand.float64_normal(0.0, 1.0)
+		scale := 1.0
+		if nu > 0.0 {scale = 1.0 / math.sqrt_f64(2.0 * _cdo_gamma(0.5 * nu) / nu)} 	// 1/√(χ²_ν/ν)
+		for k in 0 ..= n {counts[k] = 0}
+		for _ in 0 ..< N {
+			x := (sr * zm + s1r * rand.float64_normal(0.0, 1.0)) * scale
+			if !(x <= thr[n]) {continue} 	// survives to T
+			lo, hi := 1, n // first k with x ≤ thr[k]
+			for lo < hi {
+				mid := (lo + hi) / 2
+				if x <= thr[mid] {hi = mid} else {lo = mid + 1}
+			}
+			counts[lo] += 1
+		}
+		prot, prem := 0.0, 0.0
+		defaults := 0
+		tl_prev := 0.0
+		for k in 1 ..= n {
+			defaults += counts[k]
+			tlk := tl(lgd * f64(defaults), tranche.attach, tranche.detach, width)
+			prot += (tlk - tl_prev) * math.exp_f64(-params.r * 0.5 * (times[k - 1] + times[k]))
+			prem +=
+				(times[k] - times[k - 1]) *
+				math.exp_f64(-params.r * times[k]) *
+				(1.0 - 0.5 * (tl_prev + tlk))
+			tl_prev = tlk
+		}
+		sum_pv += prot - spread * prem
+		sum_el += tl_prev
+	}
+	return sum_pv / f64(n_paths), sum_el / f64(n_paths)
 }
 
 // Single-Factor Gaussian Copula Monte Carlo for CDO Tranche Pricing
@@ -78,129 +225,20 @@ price_cdo_tranche_mc :: proc(
 	tranche_pv: f64,
 	expected_loss_pct: f64,
 ) {
-
-	N := params.N
-	lambda := params.lambda
-	R := params.recovery
-	r := params.r
-	rho := params.rho
-	T := params.maturity
-
-	sqrt_rho := math.sqrt_f64(rho)
-	sqrt_1_minus_rho := math.sqrt_f64(1.0 - rho)
-
-	// 1 market factor + N idiosyncratic factors per path
-	rand_count := n_paths * (1 + N)
-	norm_data := make([]f64, rand_count, allocator)
-	defer delete(norm_data, allocator)
-	for i in 0 ..< rand_count {
-		norm_data[i] = rand.float64_normal(0.0, 1.0)
-	}
-
-	total_tranche_pv := 0.0
-	total_expected_loss := 0.0
-	rand_idx := 0
-
-	for path in 0 ..< n_paths {
-		Z_market := norm_data[rand_idx]
-		rand_idx += 1
-
-		defaults_count := 0
-		for i in 0 ..< N {
-			Z_i := norm_data[rand_idx]
-			rand_idx += 1
-
-			// Single-factor Gaussian Copula
-			Z_total := sqrt_rho * Z_market + sqrt_1_minus_rho * Z_i
-
-			// Map to uniform [0, 1] via standard normal CDF
-			U := 0.5 * (1.0 + math.erf(Z_total / math.sqrt_f64(2.0)))
-
-			// Map to default time: tau = -ln(1 - U) / lambda
-			tau := -math.ln_f64(1.0 - U) / lambda
-
-			if tau <= T {
-				defaults_count += 1
-			}
-		}
-
-		// Portfolio Loss at maturity (simplified to maturity for PV approximation)
-		portfolio_loss_pct := f64(defaults_count) / f64(N) * (1.0 - R)
-
-		// Tranche Loss calculation
-		loss_min_det := math.min(portfolio_loss_pct, tranche.detach)
-		loss_min_att := math.min(portfolio_loss_pct, tranche.attach)
-
-		tranche_loss_pct := (loss_min_det - loss_min_att) / (tranche.detach - tranche.attach)
-		tranche_loss_pct = math.max(0.0, math.min(1.0, tranche_loss_pct)) // Clamp to [0, 1]
-
-		total_expected_loss += tranche_loss_pct
-
-		// Simplified Tranche PV: PV(Protection) - PV(Premium)
-		// Annuity factor approximation
-		annuity_approx := (1.0 - math.exp_f64(-(r + lambda) * T)) / (r + lambda)
-
-		// Tranched survival probability approximation
-		running_avg_loss := total_expected_loss / f64(path + 1)
-		tranche_survival := 1.0 - running_avg_loss
-
-		premium_pv := spread * annuity_approx * math.max(0.1, tranche_survival)
-		prot_pv := tranche_loss_pct * math.exp_f64(-r * T * 0.5) // Mid-point discounting
-
-		total_tranche_pv += prot_pv - premium_pv
-	}
-
-	return (total_tranche_pv / f64(n_paths)), (total_expected_loss / f64(n_paths))
+	return _cdo_tranche_mc(tranche, params, 0.0, spread, n_paths, allocator)
 }
+
 // ============================================================================
-// THE "CORRECT" MODEL: STUDENT-T COPULA CDO PRICER
+// STUDENT-T COPULA CDO PRICER
 // ============================================================================
-// Fast, numerically stable Student-t CDF using Simpson's Rule and math.lgamma
+
+// Student-t CDF (exact, regularized incomplete beta)
 student_t_cdf :: proc(x: f64, nu: f64) -> f64 {
-	if x == 0.0 {return 0.5}
-	// For large nu, it converges to the Normal distribution
-	if nu > 50.0 {return 0.5 * (1.0 + math.erf(x / math.sqrt_f64(2.0)))}
-
-	abs_x := math.abs(x)
-
-	// ✅ FIXED: math.lgamma returns (value, sign). We only need the value.
-	lg1, _ := math.lgamma((nu + 1.0) / 2.0)
-	lg2, _ := math.lgamma(nu / 2.0)
-
-	// Precompute the log-constant of the t-PDF for speed
-	log_const := lg1 - lg2 - 0.5 * math.ln_f64(nu * math.PI)
-
-	// 50 steps of Simpson's rule is highly accurate and very fast in Odin
-	n := 50
-	h := abs_x / f64(n)
-	sum := 0.0
-
-	for i in 0 ..= n {
-		t_val := f64(i) * h
-		// PDF at t_val
-		pdf_val := math.exp_f64(
-			log_const - ((nu + 1.0) / 2.0) * math.ln_f64(1.0 + (t_val * t_val) / nu),
-		)
-
-		if i == 0 || i == n {
-			sum += pdf_val
-		} else if i % 2 == 1 {
-			sum += 4.0 * pdf_val
-		} else {
-			sum += 2.0 * pdf_val
-		}
-	}
-
-	integral := sum * h / 3.0
-
-	if x < 0.0 {
-		return 0.5 - integral
-	} else {
-		return 0.5 + integral
-	}
+	return ml.student_t_cdf(x, nu)
 }
 
-// Student-t Copula Monte Carlo for CDO Tranche Pricing
+// Student-t Copula Monte Carlo for CDO Tranche Pricing: X_i = (√ρ Z + √(1−ρ) ε_i)/√(W/ν)
+// with one W ~ χ²_ν per path (any real ν > 0), U_i = t_ν(X_i)
 price_cdo_tranche_t_copula_mc :: proc(
 	tranche: CDO_Tranche,
 	params: CDO_Params,
@@ -212,115 +250,29 @@ price_cdo_tranche_t_copula_mc :: proc(
 	tranche_pv: f64,
 	expected_loss_pct: f64,
 ) {
-
-	N := params.N
-	lambda := params.lambda
-	R := params.recovery
-	r := params.r
-	rho := params.rho
-	T := params.maturity
-
-	// Round nu to nearest integer for Chi-Squared generation
-	nu_int := int(math.round_f64(nu))
-	if nu_int < 1 {nu_int = 1}
-
-	// Normals needed per path: 1 (market) + N (idiosyncratic) + nu_int (shared chi-squared)
-	norms_per_path := 1 + N + nu_int
-	rand_count := n_paths * norms_per_path
-
-	norm_data := make([]f64, rand_count, allocator)
-	defer delete(norm_data, allocator)
-	for i in 0 ..< rand_count {
-		norm_data[i] = rand.float64_normal(0.0, 1.0)
-	}
-
-	total_tranche_pv := 0.0
-	total_expected_loss := 0.0
-	rand_idx := 0
-
-	sqrt_rho := math.sqrt_f64(rho)
-	sqrt_1_minus_rho := math.sqrt_f64(1.0 - rho)
-
-	for path in 0 ..< n_paths {
-		Z_market := norm_data[rand_idx]
-		rand_idx += 1
-
-		// 🔑 THE FIX: A SINGLE shared Chi-Squared variable for the entire path.
-		// This is what creates tail dependence. When V is small, ALL T_i scale up.
-		V := 0.0
-		for i in 0 ..< nu_int {
-			z_chi := norm_data[rand_idx]
-			rand_idx += 1
-			V += z_chi * z_chi
-		}
-		sqrt_V_over_nu := math.sqrt_f64(V / f64(nu_int))
-
-		T_market := Z_market / sqrt_V_over_nu
-
-		defaults_count := 0
-		for i in 0 ..< N {
-			Z_i := norm_data[rand_idx]
-			rand_idx += 1
-
-			T_i := Z_i / sqrt_V_over_nu
-
-			// Single-factor Student-t Copula
-			T_total := sqrt_rho * T_market + sqrt_1_minus_rho * T_i
-
-			// Map to uniform [0, 1] via Student-t CDF
-			U := student_t_cdf(T_total, nu)
-
-			// Map to default time
-			tau := -math.ln_f64(1.0 - U) / lambda
-
-			if tau <= T {
-				defaults_count += 1
-			}
-		}
-
-		portfolio_loss_pct := f64(defaults_count) / f64(N) * (1.0 - R)
-
-		// Tranche Loss calculation
-		loss_min_det := math.min(portfolio_loss_pct, tranche.detach)
-		loss_min_att := math.min(portfolio_loss_pct, tranche.attach)
-
-		tranche_loss_pct := (loss_min_det - loss_min_att) / (tranche.detach - tranche.attach)
-		tranche_loss_pct = math.max(0.0, math.min(1.0, tranche_loss_pct))
-
-		total_expected_loss += tranche_loss_pct
-
-		// Simplified Tranche PV
-		annuity_approx := (1.0 - math.exp_f64(-(r + lambda) * T)) / (r + lambda)
-		running_avg_loss := total_expected_loss / f64(path + 1)
-		tranche_survival := 1.0 - running_avg_loss
-
-		premium_pv := spread * annuity_approx * math.max(0.1, tranche_survival)
-		prot_pv := tranche_loss_pct * math.exp_f64(-r * T * 0.5)
-
-		total_tranche_pv += prot_pv - premium_pv
-	}
-
-	return (total_tranche_pv / f64(n_paths)), (total_expected_loss / f64(n_paths))
+	return _cdo_tranche_mc(tranche, params, max(nu, 1e-6), spread, n_paths, allocator)
 }
+
 // ============================================================================
-// PROFESSIONAL CDS CURVE BOOTSTRAPPING & PRICING
+// CDS CURVE BOOTSTRAPPING & PRICING
 // ============================================================================
 
 CDS_Curve :: struct {
 	tenors:   []f64, // e.g., [1.0, 3.0, 5.0, 7.0, 10.0]
-	hazards:  []f64, // piecewise constant hazard rates for each tenor bucket
+	hazards:  []f64, // piecewise constant hazard rates; hazards[i] applies up to tenors[i]
 	recovery: f64,
 	r:        f64,
 }
 
 CDS_Price_Result :: struct {
-	upfront_pct:    f64, // Upfront payment as a percentage of notional
-	rpv01:          f64, // Risky PV01 (present value of 1 basis point)
-	premium_leg_pv: f64,
+	upfront_pct:    f64, // Upfront to the protection buyer per unit notional (0.01 = 1%)
+	rpv01:          f64, // PV of 1bp running (incl. accrual on default) per $1M notional
+	premium_leg_pv: f64, // coupon × annuity × notional
 	protection_pv:  f64,
 }
 
-// Helper: Calculate survival probability at time t given the piecewise curve
+// Survival probability e^{−∫_0^t λ} on the piecewise-constant curve (the last
+// hazard extends beyond the last tenor)
 get_survival_prob :: proc(t: f64, curve: CDS_Curve) -> f64 {
 	if t <= 0.0 {return 1.0}
 
@@ -339,7 +291,7 @@ get_survival_prob :: proc(t: f64, curve: CDS_Curve) -> f64 {
 	prev_T := 0.0
 	for i in 0 ..= bucket {
 		end_T := curve.tenors[i]
-		if t < end_T {end_T = t}
+		if t < end_T || i == bucket {end_T = t}
 
 		cum_hazard += curve.hazards[i] * (end_T - prev_T)
 		prev_T = curve.tenors[i]
@@ -348,7 +300,8 @@ get_survival_prob :: proc(t: f64, curve: CDS_Curve) -> f64 {
 	return math.exp_f64(-cum_hazard)
 }
 
-// Bootstrap piecewise constant hazard rates from market CDS spreads
+// Bootstrap piecewise constant hazard rates so that each par CDS (running
+// spread = market spread) has zero PV under _cds_legs; tenors ascending
 bootstrap_cds_curve :: proc(
 	tenors: []f64,
 	market_spreads: []f64, // in decimal (e.g., 0.0100 for 100bps)
@@ -365,60 +318,36 @@ bootstrap_cds_curve :: proc(
 		recovery = recovery,
 		r        = r,
 	}
+	copy(curve.tenors, tenors[:n])
 
 	for i in 0 ..< n {
-		curve.tenors[i] = tenors[i]
-		target_spread := market_spreads[i]
-
-		// Bisection search for the hazard rate in this bucket
-		low := 0.0001
-		high := 0.5000
-		best_lambda := 0.01
-
-		for iter in 0 ..< 50 { 	// 50 iterations is more than enough for 1e-15 precision
-			mid := (low + high) / 2.0
-			curve.hazards[i] = mid
-
-			// Calculate PV of Premium and Protection legs up to tenors[i]
-			prem_pv := 0.0
-			prot_pv := 0.0
-
-			t := payment_freq
-			for t <= tenors[i] {
-				// Survival prob at payment date
-				S_t := get_survival_prob(t, curve)
-				disc := math.exp_f64(-r * t)
-
-				// Premium leg: spread * dt * S(t) * D(t)
-				prem_pv += target_spread * payment_freq * S_t * disc
-
-				// Protection leg: (1-R) * (S(t-dt) - S(t)) * D(t)
-				// (assuming default occurs at the end of the period for simplicity)
-				S_prev := get_survival_prob(t - payment_freq, curve)
-				prot_pv += (1.0 - recovery) * (S_prev - S_t) * disc
-
-				t += payment_freq
-			}
-
-			// If prem_pv > prot_pv, our hazard rate is too low (not enough default risk priced in)
-			if prem_pv > prot_pv {
-				low = mid
-			} else {
-				high = mid
-			}
-			best_lambda = mid
-
-			if math.abs(prem_pv - prot_pv) < 1e-10 {
-				break
-			}
+		s := market_spreads[i]
+		pv :: proc(c: ^CDS_Curve, i: int, h, s, freq: f64) -> f64 {
+			c.hazards[i] = h
+			ann, prot := _cds_legs(
+				c.tenors[:i + 1],
+				c.hazards[:i + 1],
+				c.recovery,
+				c.r,
+				c.tenors[i],
+				freq,
+			)
+			return prot - s * ann // increasing in h
 		}
-		curve.hazards[i] = best_lambda
+		lo, hi := 0.0, 1.0
+		for pv(&curve, i, hi, s, payment_freq) < 0.0 && hi < 1e6 {hi *= 2.0}
+		for _ in 0 ..< 200 {
+			mid := 0.5 * (lo + hi)
+			if mid == lo || mid == hi {break}
+			if pv(&curve, i, mid, s, payment_freq) < 0.0 {lo = mid} else {hi = mid}
+		}
+		curve.hazards[i] = 0.5 * (lo + hi)
 	}
 
 	return curve
 }
 
-// Price a CDS using a bootstrapped curve, returning Upfront and RPV01
+// Price a CDS paying fixed_coupon on a bootstrapped curve
 price_cds_full :: proc(
 	notional: f64,
 	fixed_coupon: f64, // Standardized coupon (e.g., 0.0100 for 100bps or 0.0500 for 500bps)
@@ -426,35 +355,18 @@ price_cds_full :: proc(
 	curve: CDS_Curve,
 	payment_freq: f64,
 ) -> CDS_Price_Result {
-
-	prem_pv_per_unit := 0.0
-	prot_pv_per_unit := 0.0
-
-	t := payment_freq
-	for t <= maturity {
-		S_t := get_survival_prob(t, curve)
-		disc := math.exp_f64(-curve.r * t)
-
-		// Premium leg uses the FIXED coupon
-		prem_pv_per_unit += fixed_coupon * payment_freq * S_t * disc
-
-		// Protection leg
-		S_prev := get_survival_prob(t - payment_freq, curve)
-		prot_pv_per_unit += (1.0 - curve.recovery) * (S_prev - S_t) * disc
-
-		t += payment_freq
-	}
-
-	// RPV01 per unit notional (PV of 1bp annuity)
-	rpv01_per_unit := prem_pv_per_unit / (fixed_coupon / 0.0001)
-
-	// Upfront per unit notional
-	upfront_per_unit := prot_pv_per_unit - prem_pv_per_unit
-
+	annuity, protection := _cds_legs(
+		curve.tenors,
+		curve.hazards,
+		curve.recovery,
+		curve.r,
+		maturity,
+		payment_freq,
+	)
 	return CDS_Price_Result {
-		upfront_pct    = upfront_per_unit, // Already per unit notional (e.g., -0.002 = -0.2%)
-		rpv01          = rpv01_per_unit * 1_000_000.0, // Per $1M notional in dollars
-		premium_leg_pv = prem_pv_per_unit * notional, // Dollar amount
-		protection_pv  = prot_pv_per_unit * notional, // Dollar amount
+		upfront_pct = protection - fixed_coupon * annuity,
+		rpv01 = annuity * 1e-4 * 1_000_000.0,
+		premium_leg_pv = fixed_coupon * annuity * notional,
+		protection_pv = protection * notional,
 	}
 }
