@@ -123,6 +123,59 @@ fx_gk_put :: proc(S: f64, K: f64, T: f64, r_d: f64, r_f: f64, sigma: f64) -> FXG
 	return fx_gk_greeks(S, K, T, r_d, r_f, sigma, .Put)
 }
 
+// ============================================================================
+// QUANTO OPTIONS
+// ============================================================================
+// An option on an asset quoted in a foreign currency (foreign rate r_f,
+// dividend yield q, volatility σ) whose payoff is paid in the domestic currency
+// at a fixed exchange rate. Under the domestic measure the asset drifts at
+// r_f − q − ρσσ_X (ρ: correlation of the asset with the exchange rate, quoted
+// as domestic per foreign; σ_X its volatility), so the option is the
+// Garman-Kohlhagen option with domestic rate r_d and the quanto yield
+// q_Q = q + r_d − r_f + ρσσ_X, scaled by the fixed rate (QuantLib QuantoEngine).
+
+QuantoResult :: struct {
+	price:        f64,
+	delta:        f64,
+	gamma:        f64,
+	vega:         f64, // dP/dσ, including σ's effect through the quanto yield
+	theta:        f64, // dP/dt
+	rho:          f64, // dP/dr_d, including r_d's effect through the quanto yield
+	dividend_rho: f64, // dP/dq
+	qvega:        f64, // dP/dσ_X
+	qrho:         f64, // dP/dr_f
+	qlambda:      f64, // dP/dρ
+}
+
+// Forward of the asset under the domestic measure, the quanto-adjusted forward
+quanto_forward :: proc(S, T, r_f, q, sigma, sigma_fx, rho: f64) -> f64 {
+	return S * math.exp_f64((r_f - q - rho * sigma * sigma_fx) * T)
+}
+
+quanto_option :: proc(
+	S, K, T: f64,
+	r_d, r_f, q: f64,
+	sigma, sigma_fx, rho: f64,
+	opt: OptionType,
+	fixed_fx: f64 = 1.0,
+) -> QuantoResult {
+	q_quanto := q + r_d - r_f + rho * sigma * sigma_fx
+	g := fx_gk_greeks(S, K, T, r_d, q_quanto, sigma, .Call if opt == .Call else .Put)
+	div_rho := g.rho_f // ∂/∂q_Q
+	return QuantoResult {
+		price = fixed_fx * g.price,
+		delta = fixed_fx * g.delta,
+		gamma = fixed_fx * g.gamma,
+		vega = fixed_fx * (g.vega + rho * sigma_fx * div_rho),
+		theta = fixed_fx * g.theta,
+		rho = fixed_fx * (g.rho_d + div_rho),
+		dividend_rho = fixed_fx * div_rho,
+		qvega = fixed_fx * rho * sigma * div_rho,
+		qrho = -fixed_fx * div_rho,
+		qlambda = fixed_fx * sigma * sigma_fx * div_rho,
+	}
+}
+
 // Strike with the given spot delta (call Δ ∈ (0, e^{−r_f T}), put Δ ∈ (−e^{−r_f T}, 0)),
 // not premium-adjusted
 fx_strike_from_delta :: proc(
