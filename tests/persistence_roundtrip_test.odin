@@ -72,7 +72,8 @@ persistence_roundtrip_test :: proc(allocator: mem.Allocator) {
 		return f
 	}
 
-	// 1. Every layer type with Adam state: load + re-save gives the same bytes
+	// 1. Every layer type with Adam state: load + re-save gives the same bytes;
+	// attention flags of the MHA, encoder and GAT layers are restored
 	{
 		adj := t.tensor_new(l.matrix_new(f64, 4, 4), false)
 		for &v in adj.data.data {v = rand.float64()}
@@ -103,6 +104,11 @@ persistence_roundtrip_test :: proc(allocator: mem.Allocator) {
 			nn.mamba_layer_new(4, 3),
 			nn.moe_layer_new(4, 6, 3, 2),
 		)
+		mha := &seq.layers[13].(nn.MultiHeadAttentionLayer)
+		mha.use_flash, mha.is_causal = true, true
+		(&seq.layers[16].(nn.TransformerEncoderBlock)).mha.is_causal = true
+		(&seq.layers[17].(nn.TransformerEncoder)).blocks[1].mha.use_flash = true
+		(&seq.layers[18].(nn.GATLayer)).mha.use_flash = true
 		ps := nn.sequential_parameters(seq)
 		_pr_randomize(ps[:])
 		opt := nn.adam_new(0.01, allocator = allocator, weight_decay = 0.1)
@@ -121,14 +127,24 @@ persistence_roundtrip_test :: proc(allocator: mem.Allocator) {
 		conv := seq2.layers[1].(nn.Conv2dLayer)
 		bn2 := seq2.layers[6].(nn.BatchNorm2dLayer)
 		ok &&= conv.weight.shape == [4]int{3, 2, 3, 3} && !bn2.running_var.requires_grad
+		mha2 := seq2.layers[13].(nn.MultiHeadAttentionLayer)
+		enc2 := seq2.layers[17].(nn.TransformerEncoder)
+		flags_ok :=
+			mha2.use_flash &&
+			mha2.is_causal &&
+			seq2.layers[16].(nn.TransformerEncoderBlock).mha.is_causal &&
+			!enc2.blocks[0].mha.use_flash &&
+			enc2.blocks[1].mha.use_flash &&
+			seq2.layers[18].(nn.GATLayer).mha.use_flash
 		expect(
 			&passed,
 			&total,
-			ok,
+			ok && flags_ok,
 			fmt.tprintf(
-				"checkpoint with all 21 layer types and Adam state (%d parameters): load + re-save gives the same bytes; Conv2d weights keep shape %v, BatchNorm running statistics stay non-trainable",
+				"checkpoint with all 21 layer types and Adam state (%d parameters): load + re-save gives the same bytes; Conv2d weights keep shape %v, BatchNorm running statistics stay non-trainable; attention flags restored: %v",
 				len(ps),
 				conv.weight.shape,
+				flags_ok,
 			),
 		)
 		nn.sequential_free(seq2)
@@ -189,7 +205,9 @@ persistence_roundtrip_test :: proc(allocator: mem.Allocator) {
 	}
 
 	// 3. GPT: dense / MoE × standard / FlashAttention, a model with mixed blocks
-	// (dense + FlashAttention, MoE + non-causal); BERT with a replaced head
+	// (dense + FlashAttention, MoE + non-causal); logits with the causal mask
+	// and without it (then is_causal decides). BERT: standard, FlashAttention,
+	// mixed blocks; with a replaced head
 	{
 		ids := _pr_input({2, 5, 1, 1}, 13)
 		segs := _pr_input({2, 5, 1, 1}, 2)
@@ -234,13 +252,15 @@ persistence_roundtrip_test :: proc(allocator: mem.Allocator) {
 					b.mha.is_causal == b2.mha.is_causal
 				if b.use_moe {flags_ok &&= b2.moe.num_experts == b.moe.num_experts && b2.moe.top_k == b.moe.top_k}
 			}
-			d_gpt = max(
-				d_gpt,
-				_pr_max_diff(
-					nn.gpt_model_forward(&gpt, ids, mask, false),
-					nn.gpt_model_forward(gpt2, ids, mask, false),
-				),
-			)
+			for m in ([][]f64{mask, nil}) {
+				d_gpt = max(
+					d_gpt,
+					_pr_max_diff(
+						nn.gpt_model_forward(&gpt, ids, m, false),
+						nn.gpt_model_forward(gpt2, ids, m, false),
+					),
+				)
+			}
 			nn.gpt_model_free(gpt2)
 		}
 		expect(
@@ -255,23 +275,43 @@ persistence_roundtrip_test :: proc(allocator: mem.Allocator) {
 			),
 		)
 
-		bert := nn.bert_model_new(13, 8, 2, 16, 2, 8)
-		nn.bert_replace_nsp_head(&bert, 3, allocator)
-		bps := nn.bert_model_parameters(&bert)
-		_pr_randomize(bps[:])
-		fb := file(&files, "bert")
-		ok := nn.save_bert_model(&bert, fb)
-		bert2, ok_b := nn.load_bert_model(fb)
-		_, nsp := nn.bert_model_forward(&bert, ids, segs, false)
-		_, nsp2 := nn.bert_model_forward(bert2, ids, segs, false)
-		d_bert := _pr_max_diff(nsp, nsp2)
+		d_bert := 0.0
+		bert_ok := true
+		for v in 0 ..< 3 {
+			bert := nn.bert_model_new(13, 8, 2, 16, 2, 8, use_flash = v == 1)
+			nn.bert_replace_nsp_head(&bert, 3, allocator)
+			if v == 2 {
+				bert.encoder_blocks[0].mha.use_flash = true
+				bert.encoder_blocks[1].mha.is_causal = true
+			}
+			bps := nn.bert_model_parameters(&bert)
+			_pr_randomize(bps[:])
+			fb := file(&files, fmt.tprintf("bert%d", v))
+			saved := nn.save_bert_model(&bert, fb)
+			bert2, loaded := nn.load_bert_model(fb)
+			bert_ok &&= saved && loaded
+			if !loaded {continue}
+			bert_ok &&= bert2.nsp_head.out_features == 3
+			for &b, i in bert.encoder_blocks {
+				b2 := &bert2.encoder_blocks[i]
+				bert_ok &&=
+					b.mha.use_flash == b2.mha.use_flash && b.mha.is_causal == b2.mha.is_causal
+			}
+			mlm, nsp := nn.bert_model_forward(&bert, ids, segs, false)
+			mlm2, nsp2 := nn.bert_model_forward(bert2, ids, segs, false)
+			d_bert = max(d_bert, _pr_max_diff(mlm, mlm2), _pr_max_diff(nsp, nsp2))
+			nn.bert_model_free(bert2)
+		}
 		expect(
 			&passed,
 			&total,
-			ok && ok_b && bert2.nsp_head.out_features == 3 && d_bert == 0,
-			fmt.tprintf("BERT with a 3-class head: logits after loading max diff %.1e", d_bert),
+			bert_ok && d_bert == 0,
+			fmt.tprintf(
+				"BERT [standard, flash, mixed] with a 3-class head: use_flash / is_causal of every block restored: %v, MLM and NSP logits after loading max diff %.1e",
+				bert_ok,
+				d_bert,
+			),
 		)
-		nn.bert_model_free(bert2)
 	}
 
 	// 4. Partial loading: matching layers load, others are skipped, also after

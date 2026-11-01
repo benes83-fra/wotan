@@ -13465,7 +13465,8 @@ layers_reference_test :: proc(allocator: mem.Allocator) {
 	}
 
 	// 5. Multi-head self-attention: plain, key padding, causal, causal + padding;
-	// FlashAttention for the plain and causal cases
+	// FlashAttention for the plain and causal cases; the masked forward without
+	// a mask (causal only by is_causal), with and without FlashAttention
 	{
 		cases := [4]_LtCase {
 			{
@@ -13502,37 +13503,50 @@ layers_reference_test :: proc(allocator: mem.Allocator) {
 			},
 		}
 		pad := _lt_tensor(LT_MHA_PAD[:], {3, 5, 1, 1}, false)
-		names := [6]string {
-			"plain",
-			"key padding",
-			"causal",
-			"causal + padding",
-			"flash",
-			"flash causal",
+		// runs: name, reference case, use_flash, masked forward (no explicit
+		// mask: is_causal alone decides)
+		Run :: struct {
+			name:   string,
+			k:      int,
+			flash:  bool,
+			masked: bool,
+		}
+		runs := [?]Run {
+			{"plain", 0, false, false},
+			{"key padding", 1, false, false},
+			{"causal", 2, false, false},
+			{"causal + padding", 3, false, false},
+			{"flash", 0, true, false},
+			{"flash causal", 2, true, false},
+			{"masked fwd", 0, false, true},
+			{"masked fwd causal", 2, false, true},
+			{"masked fwd flash", 0, true, true},
+			{"masked fwd flash causal", 2, true, true},
 		}
 		msg := ""
 		ok := true
-		for run in 0 ..< 6 {
-			k := run if run < 4 else (run - 4) * 2
+		for r, run in runs {
+			k := r.k
 			c := cases[k]
 			layer := nn.multi_head_attention_layer_new(
 				8,
 				2,
-				use_flash = run >= 4,
+				use_flash = r.flash,
 				is_causal = k >= 2,
 			)
 			ps := _lt_params(layer)
 			_lt_load(ps, c.p)
 			x := _lt_tensor(c.x, {3, 5, 8, 1}, true)
 			mask := pad if k == 1 || k == 3 else nil
-			out := nn.multi_head_attention_layer_forward(&layer, x, mask)
+			out :=
+				nn.masked_multi_head_attention_layer_forward(&layer, x, nil) if r.masked else nn.multi_head_attention_layer_forward(&layer, x, mask)
 			do_, dx, dp := _lt_check(c, out, x, ps)
 			ok &&= max(do_, dx, dp) < TOL
 			msg = fmt.tprintf(
 				"%s%s%s %.1e",
 				msg,
 				", " if run > 0 else "",
-				names[run],
+				r.name,
 				max(do_, dx, dp),
 			)
 		}
@@ -13585,37 +13599,45 @@ layers_reference_test :: proc(allocator: mem.Allocator) {
 			LT_DEC_P[:],
 			LT_DEC_DP[:],
 		}
-		block := nn.transformer_decoder_block_new(8, 2, 16)
-		psd := make([dynamic]^t.Tensor)
-		m := &block.masked_mha
-		_lt_mha_params(&psd, &m.q_proj, &m.k_proj, &m.v_proj, &m.out_proj)
-		cr := &block.cross_attn
-		_lt_mha_params(&psd, &cr.q_proj, &cr.k_proj, &cr.v_proj, &cr.out_proj)
-		_lt_linear(&psd, &block.ffn.fc1)
-		_lt_linear(&psd, &block.ffn.fc2)
-		for norm in ([]^nn.LayerNormLayer{&block.ln1, &block.ln2, &block.ln3}) {append(&psd, norm.gamma, norm.beta)}
-		ps := psd[:]
-		_lt_load(ps, c.p)
-		x := _lt_tensor(c.x, {3, 5, 8, 1}, true)
-		enc := _lt_tensor(LT_DEC_E0[:], {3, 6, 8, 1}, true)
-		mask := nn.create_causal_mask(5, allocator)
-		do_, dx, dp := _lt_check(
-			c,
-			nn.transformer_decoder_block_forward(&block, x, enc, mask),
-			x,
-			ps,
-		)
-		d_enc := _lt_diff(enc.grad.data, LT_DEC_DE0[:])
+		// with the causal mask, without it (the self-attention is causal by
+		// is_causal), and with FlashAttention
+		names := [3]string{"causal mask", "no mask", "flash"}
+		worst: [3]f64
+		for run in 0 ..< 3 {
+			block := nn.transformer_decoder_block_new(8, 2, 16, use_flash = run == 2)
+			psd := make([dynamic]^t.Tensor)
+			m := &block.masked_mha
+			_lt_mha_params(&psd, &m.q_proj, &m.k_proj, &m.v_proj, &m.out_proj)
+			cr := &block.cross_attn
+			_lt_mha_params(&psd, &cr.q_proj, &cr.k_proj, &cr.v_proj, &cr.out_proj)
+			_lt_linear(&psd, &block.ffn.fc1)
+			_lt_linear(&psd, &block.ffn.fc2)
+			for norm in ([]^nn.LayerNormLayer{&block.ln1, &block.ln2, &block.ln3}) {append(&psd, norm.gamma, norm.beta)}
+			ps := psd[:]
+			_lt_load(ps, c.p)
+			x := _lt_tensor(c.x, {3, 5, 8, 1}, true)
+			enc := _lt_tensor(LT_DEC_E0[:], {3, 6, 8, 1}, true)
+			mask := nil if run == 1 else nn.create_causal_mask(5, allocator)
+			do_, dx, dp := _lt_check(
+				c,
+				nn.transformer_decoder_block_forward(&block, x, enc, mask),
+				x,
+				ps,
+			)
+			worst[run] = max(do_, dx, dp, _lt_diff(enc.grad.data, LT_DEC_DE0[:]))
+		}
 		expect(
 			&passed,
 			&total,
-			max(do_, dx, dp, d_enc) < TOL,
+			max(worst[0], worst[1], worst[2]) < TOL,
 			fmt.tprintf(
-				"TransformerDecoderLayer (causal self-attention, cross-attention to 6 encoder steps): output %.1e, input grad %.1e, encoder-output grad %.1e, all 26 parameter grads %.1e",
-				do_,
-				dx,
-				d_enc,
-				dp,
+				"TransformerDecoderLayer (causal self-attention, cross-attention to 6 encoder steps), max diff of output, input, encoder-output and all 26 parameter grads: %s %.1e, %s %.1e, %s %.1e",
+				names[0],
+				worst[0],
+				names[1],
+				worst[1],
+				names[2],
+				worst[2],
 			),
 		)
 	}

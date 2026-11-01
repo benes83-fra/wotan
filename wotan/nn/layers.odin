@@ -824,7 +824,8 @@ transformer_encoder_forward :: proc(encoder: ^TransformerEncoder, x: ^t.Tensor) 
 // ============================================================================
 
 // Self-attention with an additive [seq_len, seq_len] mask (e.g. from
-// create_causal_mask). With use_flash the mask is taken to be causal and the
+// create_causal_mask, or nil); is_causal hides future positions in addition.
+// With use_flash and is_causal the mask is taken to be causal and the
 // FlashAttention kernel applies it itself.
 masked_multi_head_attention_layer_forward :: proc(
 	layer: ^MultiHeadAttentionLayer,
@@ -841,8 +842,8 @@ masked_multi_head_attention_layer_forward :: proc(
 		x,
 		x,
 		layer.use_flash,
-		layer.use_flash,
-		nil if layer.use_flash else mask,
+		layer.is_causal,
+		nil if layer.use_flash && layer.is_causal else mask,
 	)
 }
 
@@ -955,6 +956,7 @@ transformer_decoder_block_new :: proc(
 		d_model,
 		num_heads,
 		use_flash = use_flash,
+		is_causal = true,
 		allocator = allocator,
 	)
 	block.cross_attn = cross_attention_layer_new(

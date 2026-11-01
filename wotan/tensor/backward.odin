@@ -1108,7 +1108,8 @@ _backward_from_root :: proc(root: ^Tensor, allocator: mem.Allocator) {
 			}
 
 			batch := Q_in.shape[0]
-			seq_len := Q_in.shape[1]
+			seq_q := Q_in.shape[1]
+			seq_k := K_in.shape[1]
 			d_k := Q_in.shape[2]
 			d_v := V_in.shape[2]
 			scale := 1.0 / math.sqrt(f64(d_k))
@@ -1118,7 +1119,7 @@ _backward_from_root :: proc(root: ^Tensor, allocator: mem.Allocator) {
 			if V_in.requires_grad {tensor_ensure_grad(V_in)}
 
 			Bc := 64
-			if seq_len < Bc {Bc = seq_len}
+			if seq_k < Bc {Bc = seq_k}
 
 			s_tile := make([]f64, Bc, allocator)
 			p_tile := make([]f64, Bc, allocator)
@@ -1128,11 +1129,11 @@ _backward_from_root :: proc(root: ^Tensor, allocator: mem.Allocator) {
 			}
 
 			for b in 0 ..< batch {
-				for i in 0 ..< seq_len {
-					q_offset := (b * seq_len + i) * d_k
+				for i in 0 ..< seq_q {
+					q_offset := (b * seq_q + i) * d_k
 					q_row := Q_in.data.data[q_offset:q_offset + d_k]
 
-					dO_offset := (b * seq_len + i) * d_v
+					dO_offset := (b * seq_q + i) * d_v
 					dO_row := node.grad.data[dO_offset:dO_offset + d_v]
 
 					// Pass 1: Recompute Softmax stats (m_i, l_i) and D_i
@@ -1140,10 +1141,10 @@ _backward_from_root :: proc(root: ^Tensor, allocator: mem.Allocator) {
 					l_i: f64 = 0.0
 					D_i: f64 = 0.0
 
-					for j_start := 0; j_start < seq_len; j_start += Bc {
+					for j_start := 0; j_start < seq_k; j_start += Bc {
 						if is_causal && j_start > i {break}
 						j_end := j_start + Bc
-						if j_end > seq_len {j_end = seq_len}
+						if j_end > seq_k {j_end = seq_k}
 						curr_Bc := j_end - j_start
 
 						block_max := -math.F64_MAX
@@ -1152,7 +1153,7 @@ _backward_from_root :: proc(root: ^Tensor, allocator: mem.Allocator) {
 							if is_causal && j_idx > i {
 								s_tile[x] = -math.F64_MAX
 							} else {
-								k_offset := (b * seq_len + j_idx) * d_k
+								k_offset := (b * seq_k + j_idx) * d_k
 								k_row := K_in.data.data[k_offset:k_offset + d_k]
 								s_val := l.dot_simd(q_row, k_row) * scale
 								s_tile[x] = s_val
@@ -1174,7 +1175,7 @@ _backward_from_root :: proc(root: ^Tensor, allocator: mem.Allocator) {
 
 							if !(is_causal && j_idx > i) {
 								block_sum += p_val
-								v_offset := (b * seq_len + j_idx) * d_v
+								v_offset := (b * seq_k + j_idx) * d_v
 								v_row := V_in.data.data[v_offset:v_offset + d_v]
 								block_D += p_val * l.dot_simd(dO_row, v_row)
 							}
@@ -1189,25 +1190,26 @@ _backward_from_root :: proc(root: ^Tensor, allocator: mem.Allocator) {
 					// Pass 2: Compute dQ_i, and scatter dK_j, dV_j
 					inv_l := 1.0 / l_i
 					D_i *= inv_l // ✅ FIX: Normalize D_i by the softmax denominator
-					dQ_row := Q_in.grad.data[q_offset:q_offset + d_k]
+					dQ_row :=
+						Q_in.grad.data[q_offset:q_offset + d_k] if Q_in.requires_grad else nil
 
-					for j_start := 0; j_start < seq_len; j_start += Bc {
+					for j_start := 0; j_start < seq_k; j_start += Bc {
 						if is_causal && j_start > i {break}
 						j_end := j_start + Bc
-						if j_end > seq_len {j_end = seq_len}
+						if j_end > seq_k {j_end = seq_k}
 						curr_Bc := j_end - j_start
 
 						for x in 0 ..< curr_Bc {
 							j_idx := j_start + x
 							if is_causal && j_idx > i {continue}
 
-							k_offset := (b * seq_len + j_idx) * d_k
+							k_offset := (b * seq_k + j_idx) * d_k
 							k_row := K_in.data.data[k_offset:k_offset + d_k]
 
 							s_val := l.dot_simd(q_row, k_row) * scale
 							p_val := math.exp(s_val - m_i) * inv_l
 
-							v_offset := (b * seq_len + j_idx) * d_v
+							v_offset := (b * seq_k + j_idx) * d_v
 							v_row := V_in.data.data[v_offset:v_offset + d_v]
 
 							dot_dO_V := l.dot_simd(dO_row, v_row)

@@ -16,8 +16,11 @@ import "core:os"
 //   Sequential checkpoint: magic, epoch, layer count, per layer its type id,
 //     configuration and tensors, then the Adam state (type 1 with the
 //     hyperparameters; type 0 without them is still read).
-//   GPT (28; older: 27 without the attention flags, 17 also without MoE), BERT (18), Generator (19), Discriminator (20),
-//     VAE encoder (21) and decoder (22): magic, type id, configuration, tensors.
+//   GPT (28; older: 27 without the attention flags, 17 also without MoE),
+//     BERT (29; older: 18 without the attention flags), Generator (19),
+//     Discriminator (20), VAE encoder (21) and decoder (22): magic, type id,
+//     configuration, tensors.
+// Attention layers store use_flash and is_causal before their projections.
 // A file is built in memory and written at once. Reading checks every access,
 // so a truncated or foreign file fails instead of panicking. Loading builds
 // each layer from its configuration and reads the stored values into its
@@ -30,38 +33,46 @@ CHECKPOINT_MAGIC :: []u8{'W', 'O', 'T', 'A', 'N', '_', 'C', 'K', 'P', 'T'}
 
 @(private = "file")
 _Layer_Id :: enum {
-	Linear       = 0,
-	Conv2d       = 1,
-	MaxPool2d    = 2,
-	Activation   = 3,
-	Flatten      = 4,
-	BatchNorm2d  = 5,
-	AvgPool2d    = 6,
-	Dropout      = 7,
-	RNN          = 8,
-	GRU          = 9,
-	LSTM         = 10,
-	Embedding    = 11,
-	MHA          = 12,
-	LayerNorm    = 13,
-	FFN          = 14,
-	EncoderBlock = 15,
-	Encoder      = 16,
-	GAT          = 24,
-	Mamba        = 25,
-	MoE          = 26,
+	Linear         = 0,
+	Conv2d         = 1,
+	MaxPool2d      = 2,
+	Activation     = 3,
+	Flatten        = 4,
+	BatchNorm2d    = 5,
+	AvgPool2d      = 6,
+	Dropout        = 7,
+	RNN            = 8,
+	GRU            = 9,
+	LSTM           = 10,
+	Embedding      = 11,
+	LayerNorm      = 13,
+	FFN            = 14,
+	Mamba          = 25,
+	MoE            = 26,
+	// layers with attention: use_flash and is_causal of every attention
+	// sublayer are stored with its projections
+	MHA            = 27,
+	EncoderBlock   = 28,
+	Encoder        = 29,
+	GAT            = 30,
+	// the same without the attention flags (read only)
+	MHA_0          = 12,
+	EncoderBlock_0 = 15,
+	Encoder_0      = 16,
+	GAT_0          = 24,
 }
 
 @(private = "file")
 _File_Id :: enum {
 	GPT_Dense     = 17, // no MoE or attention flags (read only)
-	BERT          = 18,
+	BERT_0        = 18, // no attention flags (read only)
 	Generator     = 19,
 	Discriminator = 20,
 	VAE_Encoder   = 21,
 	VAE_Decoder   = 22,
 	GPT_MoE       = 27, // MoE flags, no attention flags (read only)
 	GPT           = 28, // per block: MoE, use_flash and is_causal flags
+	BERT          = 29, // per block: use_flash and is_causal flags
 }
 
 // ============================================================================
@@ -266,12 +277,17 @@ _sync_linear :: proc(lin: ^LinearLayer) {
 	   nil {lin.in_features, lin.out_features = lin.weights.data.rows, lin.weights.data.cols}
 }
 
+// The flags (if stored) and the projections
 @(private = "file")
-_io_mha :: proc(io: ^_Io, q, k, v, o: ^LinearLayer) {
-	_io_linear(io, q)
-	_io_linear(io, k)
-	_io_linear(io, v)
-	_io_linear(io, o)
+_io_mha :: proc(io: ^_Io, mha: ^MultiHeadAttentionLayer, flags: bool) {
+	if flags {
+		mha.use_flash = _io_flag(io, mha.use_flash)
+		mha.is_causal = _io_flag(io, mha.is_causal)
+	}
+	_io_linear(io, &mha.q_proj)
+	_io_linear(io, &mha.k_proj)
+	_io_linear(io, &mha.v_proj)
+	_io_linear(io, &mha.out_proj)
 }
 
 @(private = "file")
@@ -287,8 +303,9 @@ _io_block :: proc(
 	mha: ^MultiHeadAttentionLayer,
 	ffn: ^FFNLayer,
 	ln1, ln2: ^LayerNormLayer,
+	flags: bool,
 ) {
-	_io_mha(io, &mha.q_proj, &mha.k_proj, &mha.v_proj, &mha.out_proj)
+	_io_mha(io, mha, flags)
 	_io_linear(io, &ffn.fc1)
 	_io_linear(io, &ffn.fc2)
 	_io_norm(io, ln1)
@@ -304,9 +321,10 @@ _io_moe :: proc(io: ^_Io, moe: ^MoELayer) {
 	}
 }
 
-// The tensors of a layer in file order (written, or read into the layer)
+// The tensors of a layer in file order (written, or read into the layer);
+// flags: the attention flags are stored (not in the older layer ids)
 @(private = "file")
-_io_layer :: proc(io: ^_Io, layer: ^Layer) {
+_io_layer :: proc(io: ^_Io, layer: ^Layer, flags: bool) {
 	switch &l in layer {
 	case LinearLayer:
 		_io_tensor(io, &l.weights)
@@ -335,21 +353,21 @@ _io_layer :: proc(io: ^_Io, layer: ^Layer) {
 	case EmbeddingLayer:
 		_io_tensor(io, &l.weight)
 	case MultiHeadAttentionLayer:
-		_io_mha(io, &l.q_proj, &l.k_proj, &l.v_proj, &l.out_proj)
+		_io_mha(io, &l, flags)
 	case LayerNormLayer:
 		_io_norm(io, &l)
 	case FFNLayer:
 		_io_linear(io, &l.fc1)
 		_io_linear(io, &l.fc2)
 	case TransformerEncoderBlock:
-		_io_block(io, &l.mha, &l.ffn, &l.ln1, &l.ln2)
+		_io_block(io, &l.mha, &l.ffn, &l.ln1, &l.ln2, flags)
 	case TransformerEncoder:
-		for &b in l.blocks {_io_block(io, &b.mha, &b.ffn, &b.ln1, &b.ln2)}
+		for &b in l.blocks {_io_block(io, &b.mha, &b.ffn, &b.ln1, &b.ln2, flags)}
 	case GATLayer:
 		_io_tensor(io, &l.linear.weights)
 		if l.linear.bias != nil {_io_tensor(io, &l.linear.bias)}
 		_sync_linear(&l.linear)
-		_io_mha(io, &l.mha.q_proj, &l.mha.k_proj, &l.mha.v_proj, &l.mha.out_proj)
+		_io_mha(io, &l.mha, flags)
 		_io_tensor(io, &l.adjacency)
 		if l.adjacency != nil {l.adjacency.requires_grad = false}
 	case MambaLayer:
@@ -438,10 +456,21 @@ _write_layer_header :: proc(io: ^_Io, layer: ^Layer) {
 }
 
 // Reads a type id and configuration and builds the layer (its tensors are
-// read next, by _io_layer)
+// read next, by _io_layer, with the attention flags if `flags`)
 @(private = "file")
-_read_layer_header :: proc(io: ^_Io, alloc: mem.Allocator) -> (layer: Layer, ok: bool) {
+_read_layer_header :: proc(
+	io: ^_Io,
+	alloc: mem.Allocator,
+) -> (
+	layer: Layer,
+	flags: bool,
+	ok: bool,
+) {
 	id := _get_i32(io)
+	#partial switch _Layer_Id(id) {
+	case .MHA, .EncoderBlock, .Encoder, .GAT:
+		flags = true
+	}
 	switch _Layer_Id(id) {
 	case .Linear:
 		in_f, out_f, has_bias := _get_size(io), _get_size(io), _get_i32(io) != 0
@@ -492,7 +521,7 @@ _read_layer_header :: proc(io: ^_Io, alloc: mem.Allocator) -> (layer: Layer, ok:
 		n, dim := _get_size(io), _get_size(io)
 		if !io.ok {return}
 		layer = embedding_layer_new(n, dim, alloc)
-	case .MHA:
+	case .MHA, .MHA_0:
 		d, heads := _get_size(io), _get_size(io)
 		if !io.ok || heads == 0 {return}
 		layer = multi_head_attention_layer_new(d, heads, allocator = alloc)
@@ -505,15 +534,15 @@ _read_layer_header :: proc(io: ^_Io, alloc: mem.Allocator) -> (layer: Layer, ok:
 		d, d_ff := _get_size(io), _get_size(io)
 		if !io.ok {return}
 		layer = ffn_layer_new(d, d_ff, alloc)
-	case .EncoderBlock:
+	case .EncoderBlock, .EncoderBlock_0:
 		d, heads, d_ff := _get_size(io), _get_size(io), _get_size(io)
 		if !io.ok || heads == 0 {return}
 		layer = transformer_encoder_block_new(d, heads, d_ff, alloc)
-	case .Encoder:
+	case .Encoder, .Encoder_0:
 		n, d, heads, d_ff := _get_size(io), _get_size(io), _get_size(io), _get_size(io)
 		if !io.ok || heads == 0 {return}
 		layer = transformer_encoder_new(n, d, heads, d_ff, alloc)
-	case .GAT:
+	case .GAT, .GAT_0:
 		in_f, hidden, heads := _get_size(io), _get_size(io), _get_size(io)
 		has_bias := _get_i32(io) != 0
 		if !io.ok || heads == 0 {return}
@@ -535,7 +564,7 @@ _read_layer_header :: proc(io: ^_Io, alloc: mem.Allocator) -> (layer: Layer, ok:
 		fmt.printf("Unknown layer type %d\n", id)
 		io.ok = false
 	}
-	return layer, io.ok
+	return layer, flags, io.ok
 }
 
 // ============================================================================
@@ -555,7 +584,7 @@ save_checkpoint :: proc(
 	_put_i32(&io, len(model.layers))
 	for &layer in model.layers {
 		_write_layer_header(&io, &layer)
-		_io_layer(&io, &layer)
+		_io_layer(&io, &layer, true)
 	}
 
 	_put_i32(&io, 1) // optimizer type: Adam with hyperparameters
@@ -593,10 +622,10 @@ load_checkpoint :: proc(
 	model = sequential_new(allocator)
 	model.training = false // loaded models start in evaluation mode (sequential_train to resume)
 	for _ in 0 ..< n_layers {
-		layer, layer_ok := _read_layer_header(&io, allocator)
+		layer, flags, layer_ok := _read_layer_header(&io, allocator)
 		if !layer_ok {break}
 		append(&model.layers, layer)
-		_io_layer(&io, &model.layers[len(model.layers) - 1])
+		_io_layer(&io, &model.layers[len(model.layers) - 1], flags)
 	}
 
 	// Optimizer
@@ -670,22 +699,24 @@ sequential_load_partial :: proc(
 	_ = _get_i32(&io) // epoch
 	n_layers := _get_size(&io)
 	for i in 0 ..< min(n_layers, len(seq.layers)) {
-		start := io.pos
-		stored, layer_ok := _read_layer_header(&io, allocator)
+		stored, flags, layer_ok := _read_layer_header(&io, allocator)
 		if !layer_ok {break}
 		defer layer_free(&stored)
 
-		// same type and configuration: the target's header has the same bytes
-		target := _writer(context.temp_allocator)
-		_write_layer_header(&target, &seq.layers[i])
-		same := string(target.buf[len(CHECKPOINT_MAGIC):]) == string(io.data[start:io.pos])
-		delete(target.buf)
+		// same type and configuration: the headers written for both layers
+		// have the same bytes (also for files of an older layer id)
+		headers := _writer(context.temp_allocator)
+		_write_layer_header(&headers, &stored)
+		mid := len(headers.buf)
+		_write_layer_header(&headers, &seq.layers[i])
+		same := string(headers.buf[len(CHECKPOINT_MAGIC):mid]) == string(headers.buf[mid:])
+		delete(headers.buf)
 
 		if same {
-			_io_layer(&io, &seq.layers[i])
+			_io_layer(&io, &seq.layers[i], flags)
 			loaded += 1
 		} else {
-			_io_layer(&io, &stored)
+			_io_layer(&io, &stored, flags)
 			skipped += 1
 		}
 	}
@@ -765,11 +796,7 @@ _io_gpt :: proc(io: ^_Io, model: ^GPTModel, version: _File_Id) {
 	_io_tensor(io, &model.pos_emb.weight)
 	for &block in model.blocks {
 		is_moe := version != .GPT_Dense && _io_flag(io, block.use_moe)
-		if version == .GPT {
-			block.mha.use_flash = _io_flag(io, block.mha.use_flash)
-			block.mha.is_causal = _io_flag(io, block.mha.is_causal)
-		}
-		_io_mha(io, &block.mha.q_proj, &block.mha.k_proj, &block.mha.v_proj, &block.mha.out_proj)
+		_io_mha(io, &block.mha, version == .GPT)
 		if is_moe {
 			num_experts, top_k := block.moe.num_experts, block.moe.top_k
 			if io.writing {
@@ -806,11 +833,13 @@ save_bert_model :: proc(model: ^BERTModel, path: string) -> bool {
 	for v in ([]int{model.vocab_size, model.d_model, model.num_heads, model.d_ff, model.num_layers, model.max_seq_len}) {
 		_put_i32(&io, v)
 	}
-	_io_bert(&io, model)
+	_io_bert(&io, model, .BERT)
 	return _save(&io, path)
 }
 
-// Loads a BERT model (heads of another size, e.g. after bert_replace_nsp_head, are restored)
+// Loads a BERT model (heads of another size, e.g. after bert_replace_nsp_head,
+// and the attention flags of every block are restored). use_flash applies to
+// older files that don't store it.
 load_bert_model :: proc(
 	path: string,
 	allocator: mem.Allocator = context.allocator,
@@ -824,7 +853,8 @@ load_bert_model :: proc(
 	io := _reader(path, allocator) or_return
 	defer delete(io.data, allocator)
 
-	if _File_Id(_get_i32(&io)) != .BERT {
+	file_id := _File_Id(_get_i32(&io))
+	if file_id != .BERT && file_id != .BERT_0 {
 		fmt.printf("%s is not a BERT model\n", path)
 		return nil, false
 	}
@@ -836,7 +866,7 @@ load_bert_model :: proc(
 	}
 	model = new(BERTModel, allocator)
 	model^ = bert_model_new(cfg[0], cfg[1], cfg[2], cfg[3], cfg[4], cfg[5], use_flash, allocator)
-	_io_bert(&io, model)
+	_io_bert(&io, model, file_id)
 	if !io.ok {
 		fmt.printf("%s: corrupt or truncated model\n", path)
 		bert_model_free(model)
@@ -847,12 +877,14 @@ load_bert_model :: proc(
 }
 
 @(private = "file")
-_io_bert :: proc(io: ^_Io, model: ^BERTModel) {
+_io_bert :: proc(io: ^_Io, model: ^BERTModel, version: _File_Id) {
 	_io_tensor(io, &model.token_emb.weight)
 	_io_tensor(io, &model.pos_emb.weight)
 	_io_tensor(io, &model.segment_emb.weight)
 	_io_norm(io, &model.emb_ln)
-	for &b in model.encoder_blocks {_io_block(io, &b.mha, &b.ffn, &b.ln1, &b.ln2)}
+	for &b in model.encoder_blocks {
+		_io_block(io, &b.mha, &b.ffn, &b.ln1, &b.ln2, version == .BERT)
+	}
 	_io_linear(io, &model.pooler)
 	_io_linear(io, &model.mlm_head)
 	_io_linear(io, &model.nsp_head)
