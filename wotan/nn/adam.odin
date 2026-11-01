@@ -1,6 +1,7 @@
 package nn
 
 import l "../linalg"
+import optim "../optimize"
 import t "../tensor"
 import "core:math"
 import "core:mem"
@@ -8,37 +9,22 @@ import "core:mem"
 // ============================================================================
 // 1. Adam Optimizer
 // ============================================================================
+// torch.optim.Adam / AdamW (decoupled weight decay) over registered tensors;
+// the update itself is optimize.adam_update. Gradients are used as they are:
+// clip them with clip_grad_norm before adam_step if needed.
 
 Adam :: struct {
 	parameters:     [dynamic]^t.Tensor,
 	moment_1:       [dynamic][]f64,
 	moment_2:       [dynamic][]f64,
 	learning_rate:  f64,
-	learning_rates: [dynamic]f64,
+	learning_rates: [dynamic]Maybe(f64), // per-parameter override of learning_rate
 	beta_1:         f64,
 	beta_2:         f64,
 	epsilon:        f64,
+	weight_decay:   f64, // decoupled (AdamW); 0 is plain Adam
 	timestep:       int,
 	allocator:      mem.Allocator,
-	grad_sq:        []f64, // ✅ Pre-allocated temp buffer
-	max_param_size: int, // Track max size needed
-}
-
-
-adam_add_param_with_lr :: proc(opt: ^Adam, param: ^t.Tensor, lr: f64) {
-	append(&opt.parameters, param)
-	append(&opt.learning_rates, lr) // Custom LR for this param
-
-	n := len(param.data.data)
-	m := make([]f64, n, opt.allocator)
-	v := make([]f64, n, opt.allocator)
-
-	append(&opt.moment_1, m)
-	append(&opt.moment_2, v)
-
-	if n > opt.max_param_size {
-		opt.max_param_size = n
-	}
 }
 
 adam_new :: proc(
@@ -47,134 +33,67 @@ adam_new :: proc(
 	beta_2: f64 = 0.999,
 	epsilon: f64 = 1e-8,
 	allocator: mem.Allocator = context.allocator,
+	weight_decay: f64 = 0.0,
 ) -> Adam {
 	return Adam {
-		parameters     = make([dynamic]^t.Tensor, 0, allocator),
-		moment_1       = make([dynamic][]f64, 0, allocator),
-		moment_2       = make([dynamic][]f64, 0, allocator),
-		learning_rate  = learning_rate,
-		beta_1         = beta_1,
-		beta_2         = beta_2,
-		epsilon        = epsilon,
-		timestep       = 0,
-		allocator      = allocator,
-		grad_sq        = nil, // Will be allocated on first use
-		max_param_size = 0,
+		parameters = make([dynamic]^t.Tensor, 0, allocator),
+		moment_1 = make([dynamic][]f64, 0, allocator),
+		moment_2 = make([dynamic][]f64, 0, allocator),
+		learning_rates = make([dynamic]Maybe(f64), 0, allocator),
+		learning_rate = learning_rate,
+		beta_1 = beta_1,
+		beta_2 = beta_2,
+		epsilon = epsilon,
+		weight_decay = weight_decay,
+		allocator = allocator,
 	}
 }
 
 adam_add_param :: proc(opt: ^Adam, param: ^t.Tensor) {
-	append(&opt.parameters, param)
+	_adam_register(opt, param, nil)
+}
 
+// Registers a parameter with its own learning rate
+adam_add_param_with_lr :: proc(opt: ^Adam, param: ^t.Tensor, lr: f64) {
+	_adam_register(opt, param, lr)
+}
+
+@(private = "file")
+_adam_register :: proc(opt: ^Adam, param: ^t.Tensor, lr: Maybe(f64)) {
 	n := len(param.data.data)
-	m := make([]f64, n, opt.allocator)
-	v := make([]f64, n, opt.allocator)
-
-	append(&opt.moment_1, m)
-	append(&opt.moment_2, v)
-
-	// Track max parameter size for temp buffer
-	if n > opt.max_param_size {
-		opt.max_param_size = n
-	}
+	append(&opt.parameters, param)
+	append(&opt.learning_rates, lr)
+	append(&opt.moment_1, make([]f64, n, opt.allocator))
+	append(&opt.moment_2, make([]f64, n, opt.allocator))
 }
 
 adam_step :: proc(opt: ^Adam) {
 	opt.timestep += 1
-	t := f64(opt.timestep)
-
-	// ✅ Allocate temp buffer once, reuse for all parameters
-	if opt.grad_sq == nil && opt.max_param_size > 0 {
-		opt.grad_sq = make([]f64, opt.max_param_size, opt.allocator)
-	}
-
-	for i in 0 ..< len(opt.parameters) {
-		param := opt.parameters[i]
-		if !param.requires_grad || param.grad.data == nil {
-			continue
-		}
-		lr := opt.learning_rate
-		if i < len(opt.learning_rates) {
-			lr = opt.learning_rates[i]
-		}
-		grad_norm := 0.0
-		for j in 0 ..< len(param.grad.data) {
-			grad_norm += param.grad.data[j] * param.grad.data[j]
-		}
-		grad_norm = math.sqrt(grad_norm)
-
-		max_grad_norm := 1.0
-		if grad_norm > max_grad_norm {
-			scale := max_grad_norm / grad_norm
-			for j in 0 ..< len(param.grad.data) {
-				param.grad.data[j] *= scale
-			}
-		}
-		m := opt.moment_1[i]
-		v := opt.moment_2[i]
-		grad := param.grad.data
-		data := param.data.data
-		n := len(data)
-
-		// Update biased first moment: m = beta_1 * m + (1 - beta_1) * grad
-		for j in 0 ..< n {
-			m[j] *= opt.beta_1
-		}
-		l.axpy_simd(1.0 - opt.beta_1, grad, m)
-
-		// ✅ Reuse pre-allocated grad_sq buffer
-		l.vec_mul_simd(grad, grad, opt.grad_sq[:n])
-
-		// Update biased second moment: v = beta_2 * v + (1 - beta_2) * grad^2
-		for j in 0 ..< n {
-			v[j] *= opt.beta_2
-		}
-		l.axpy_simd(1.0 - opt.beta_2, opt.grad_sq[:n], v)
-
-		// Bias correction
-		bias_correction_1 := 1.0 - math.pow(opt.beta_1, t)
-		bias_correction_2 := 1.0 - math.pow(opt.beta_2, t)
-
-		m_hat_scale := 1.0 / bias_correction_1
-		v_hat_scale := 1.0 / bias_correction_2
-
-		// Update parameters
-		for j in 0 ..< n {
-			m_hat := m[j] * m_hat_scale
-			v_hat := v[j] * v_hat_scale
-			data[j] -= lr * m_hat / (math.sqrt(v_hat) + opt.epsilon)
-		}
+	for param, i in opt.parameters {
+		if !param.requires_grad || param.grad.data == nil {continue}
+		lr := opt.learning_rates[i].? or_else opt.learning_rate
+		optim.adam_update(
+			param.data.data,
+			param.grad.data,
+			opt.moment_1[i],
+			opt.moment_2[i],
+			lr,
+			opt.beta_1,
+			opt.beta_2,
+			opt.epsilon,
+			opt.weight_decay,
+			opt.timestep,
+		)
 	}
 }
 
 adam_free :: proc(opt: ^Adam) {
-	// Free all parameter moment arrays
-	for i in 0 ..< len(opt.moment_1) {
-		delete(opt.moment_1[i], opt.allocator)
-	}
-	for i in 0 ..< len(opt.moment_2) {
-		delete(opt.moment_2[i], opt.allocator)
-	}
-
-	// ✅ FIX: Free the grad_sq buffer
-	if opt.grad_sq != nil {
-		delete(opt.grad_sq, opt.allocator)
-		opt.grad_sq = nil
-	}
-
-	// ✅ FIX: Free the learning_rates array
-	if len(opt.learning_rates) > 0 {
-		delete(opt.learning_rates)
-	}
-
-	// ✅ FIX: Free the parameters array
-	if len(opt.parameters) > 0 {
-		delete(opt.parameters)
-	}
-
-	// Free the moment arrays themselves
+	for m in opt.moment_1 {delete(m, opt.allocator)}
+	for v in opt.moment_2 {delete(v, opt.allocator)}
 	delete(opt.moment_1)
 	delete(opt.moment_2)
+	delete(opt.learning_rates)
+	delete(opt.parameters)
 }
 
 adam_zero_grad :: proc(opt: ^Adam) {
@@ -182,169 +101,35 @@ adam_zero_grad :: proc(opt: ^Adam) {
 		t.tensor_zero_grad(param)
 	}
 }
-// Helper: Add only trainable parameters
-// Helper: Add only trainable parameters
-sequential_add_trainable_to_adam :: proc(seq: ^Sequential, opt: ^Adam) {
-	for layer in seq.layers {
-		switch l in layer {
-		case LinearLayer:
-			if l.weights.requires_grad {adam_add_param(opt, l.weights)}
-			if l.bias != nil && l.bias.requires_grad {adam_add_param(opt, l.bias)}
-		case Conv2dLayer:
-			if l.weight.requires_grad {adam_add_param(opt, l.weight)}
-			if l.bias != nil && l.bias.requires_grad {adam_add_param(opt, l.bias)}
-		case BatchNorm2dLayer:
-			if l.weight.requires_grad {adam_add_param(opt, l.weight)}
-			if l.bias.requires_grad {adam_add_param(opt, l.bias)}
-		case LayerNormLayer:
-			if l.gamma.requires_grad {adam_add_param(opt, l.gamma)}
-			if l.beta.requires_grad {adam_add_param(opt, l.beta)}
-		case EmbeddingLayer:
-			if l.weight.requires_grad {adam_add_param(opt, l.weight)}
-		case MultiHeadAttentionLayer:
-			if l.q_proj.weights.requires_grad {adam_add_param(opt, l.q_proj.weights)}
-			if l.q_proj.bias != nil &&
-			   l.q_proj.bias.requires_grad {adam_add_param(opt, l.q_proj.bias)}
-			if l.k_proj.weights.requires_grad {adam_add_param(opt, l.k_proj.weights)}
-			if l.k_proj.bias != nil &&
-			   l.k_proj.bias.requires_grad {adam_add_param(opt, l.k_proj.bias)}
-			if l.v_proj.weights.requires_grad {adam_add_param(opt, l.v_proj.weights)}
-			if l.v_proj.bias != nil &&
-			   l.v_proj.bias.requires_grad {adam_add_param(opt, l.v_proj.bias)}
-			if l.out_proj.weights.requires_grad {adam_add_param(opt, l.out_proj.weights)}
-			if l.out_proj.bias != nil &&
-			   l.out_proj.bias.requires_grad {adam_add_param(opt, l.out_proj.bias)}
-		case FFNLayer:
-			if l.fc1.weights.requires_grad {adam_add_param(opt, l.fc1.weights)}
-			if l.fc1.bias != nil && l.fc1.bias.requires_grad {adam_add_param(opt, l.fc1.bias)}
-			if l.fc2.weights.requires_grad {adam_add_param(opt, l.fc2.weights)}
-			if l.fc2.bias != nil && l.fc2.bias.requires_grad {adam_add_param(opt, l.fc2.bias)}
-		case RNNLayer:
-			if l.w_ih.requires_grad {adam_add_param(opt, l.w_ih)}
-			if l.w_hh.requires_grad {adam_add_param(opt, l.w_hh)}
-			if l.bias.requires_grad {adam_add_param(opt, l.bias)}
-		case GRULayer:
-			if l.w_ih.requires_grad {adam_add_param(opt, l.w_ih)}
-			if l.w_hh.requires_grad {adam_add_param(opt, l.w_hh)}
-			if l.bias.requires_grad {adam_add_param(opt, l.bias)}
-		case LSTMLayer:
-			if l.w_ih.requires_grad {adam_add_param(opt, l.w_ih)}
-			if l.w_hh.requires_grad {adam_add_param(opt, l.w_hh)}
-			if l.bias.requires_grad {adam_add_param(opt, l.bias)}
-		case TransformerEncoderBlock:
-			if l.ln1.gamma.requires_grad {adam_add_param(opt, l.ln1.gamma)}
-			if l.ln1.beta.requires_grad {adam_add_param(opt, l.ln1.beta)}
-			if l.mha.q_proj.weights.requires_grad {adam_add_param(opt, l.mha.q_proj.weights)}
-			if l.mha.q_proj.bias != nil &&
-			   l.mha.q_proj.bias.requires_grad {adam_add_param(opt, l.mha.q_proj.bias)}
-			if l.mha.k_proj.weights.requires_grad {adam_add_param(opt, l.mha.k_proj.weights)}
-			if l.mha.k_proj.bias != nil &&
-			   l.mha.k_proj.bias.requires_grad {adam_add_param(opt, l.mha.k_proj.bias)}
-			if l.mha.v_proj.weights.requires_grad {adam_add_param(opt, l.mha.v_proj.weights)}
-			if l.mha.v_proj.bias != nil &&
-			   l.mha.v_proj.bias.requires_grad {adam_add_param(opt, l.mha.v_proj.bias)}
-			if l.mha.out_proj.weights.requires_grad {adam_add_param(opt, l.mha.out_proj.weights)}
-			if l.mha.out_proj.bias != nil &&
-			   l.mha.out_proj.bias.requires_grad {adam_add_param(opt, l.mha.out_proj.bias)}
-			if l.ln2.gamma.requires_grad {adam_add_param(opt, l.ln2.gamma)}
-			if l.ln2.beta.requires_grad {adam_add_param(opt, l.ln2.beta)}
-			if l.ffn.fc1.weights.requires_grad {adam_add_param(opt, l.ffn.fc1.weights)}
-			if l.ffn.fc1.bias != nil &&
-			   l.ffn.fc1.bias.requires_grad {adam_add_param(opt, l.ffn.fc1.bias)}
-			if l.ffn.fc2.weights.requires_grad {adam_add_param(opt, l.ffn.fc2.weights)}
-			if l.ffn.fc2.bias != nil &&
-			   l.ffn.fc2.bias.requires_grad {adam_add_param(opt, l.ffn.fc2.bias)}
-		case TransformerEncoder:
-			for i in 0 ..< len(l.blocks) {
-				block := &l.blocks[i]
-				if block.ln1.gamma.requires_grad {adam_add_param(opt, block.ln1.gamma)}
-				if block.ln1.beta.requires_grad {adam_add_param(opt, block.ln1.beta)}
-				if block.mha.q_proj.weights.requires_grad {adam_add_param(opt, block.mha.q_proj.weights)}
-				if block.mha.q_proj.bias != nil &&
-				   block.mha.q_proj.bias.requires_grad {adam_add_param(opt, block.mha.q_proj.bias)}
-				if block.mha.k_proj.weights.requires_grad {adam_add_param(opt, block.mha.k_proj.weights)}
-				if block.mha.k_proj.bias != nil &&
-				   block.mha.k_proj.bias.requires_grad {adam_add_param(opt, block.mha.k_proj.bias)}
-				if block.mha.v_proj.weights.requires_grad {adam_add_param(opt, block.mha.v_proj.weights)}
-				if block.mha.v_proj.bias != nil &&
-				   block.mha.v_proj.bias.requires_grad {adam_add_param(opt, block.mha.v_proj.bias)}
-				if block.mha.out_proj.weights.requires_grad {adam_add_param(opt, block.mha.out_proj.weights)}
-				if block.mha.out_proj.bias != nil &&
-				   block.mha.out_proj.bias.requires_grad {adam_add_param(opt, block.mha.out_proj.bias)}
-				if block.ln2.gamma.requires_grad {adam_add_param(opt, block.ln2.gamma)}
-				if block.ln2.beta.requires_grad {adam_add_param(opt, block.ln2.beta)}
-				if block.ffn.fc1.weights.requires_grad {adam_add_param(opt, block.ffn.fc1.weights)}
-				if block.ffn.fc1.bias != nil &&
-				   block.ffn.fc1.bias.requires_grad {adam_add_param(opt, block.ffn.fc1.bias)}
-				if block.ffn.fc2.weights.requires_grad {adam_add_param(opt, block.ffn.fc2.weights)}
-				if block.ffn.fc2.bias != nil &&
-				   block.ffn.fc2.bias.requires_grad {adam_add_param(opt, block.ffn.fc2.bias)}
-			}
-		case GATLayer:
-			if l.linear.weights.requires_grad {adam_add_param(opt, l.linear.weights)}
-			if l.linear.bias != nil &&
-			   l.linear.bias.requires_grad {adam_add_param(opt, l.linear.bias)}
-			if l.mha.q_proj.weights.requires_grad {adam_add_param(opt, l.mha.q_proj.weights)}
-			if l.mha.k_proj.weights.requires_grad {adam_add_param(opt, l.mha.k_proj.weights)}
-			if l.mha.v_proj.weights.requires_grad {adam_add_param(opt, l.mha.v_proj.weights)}
-			if l.mha.out_proj.weights.requires_grad {adam_add_param(opt, l.mha.out_proj.weights)}
-		case MambaLayer:
-			if l.proj_x.weights.requires_grad {adam_add_param(opt, l.proj_x.weights)}
-			if l.proj_x.bias != nil &&
-			   l.proj_x.bias.requires_grad {adam_add_param(opt, l.proj_x.bias)}
-			if l.proj_B.weights.requires_grad {adam_add_param(opt, l.proj_B.weights)}
-			if l.proj_B.bias != nil &&
-			   l.proj_B.bias.requires_grad {adam_add_param(opt, l.proj_B.bias)}
-			if l.proj_C.weights.requires_grad {adam_add_param(opt, l.proj_C.weights)}
-			if l.proj_C.bias != nil &&
-			   l.proj_C.bias.requires_grad {adam_add_param(opt, l.proj_C.bias)}
-			if l.proj_Delta.weights.requires_grad {adam_add_param(opt, l.proj_Delta.weights)}
-			if l.proj_Delta.bias != nil &&
-			   l.proj_Delta.bias.requires_grad {adam_add_param(opt, l.proj_Delta.bias)}
-			if l.proj_out.weights.requires_grad {adam_add_param(opt, l.proj_out.weights)}
-			if l.proj_out.bias != nil &&
-			   l.proj_out.bias.requires_grad {adam_add_param(opt, l.proj_out.bias)}
-			if l.A.requires_grad {adam_add_param(opt, l.A)}
-			if l.D.requires_grad {adam_add_param(opt, l.D)}
-		case MoELayer:
-			if l.router.weights.requires_grad {adam_add_param(opt, l.router.weights)}
-			if l.router.bias != nil &&
-			   l.router.bias.requires_grad {adam_add_param(opt, l.router.bias)}
-			for i in 0 ..< l.num_experts {
-				if l.experts[i].fc1.weights.requires_grad {adam_add_param(opt, l.experts[i].fc1.weights)}
-				if l.experts[i].fc1.bias != nil &&
-				   l.experts[i].fc1.bias.requires_grad {adam_add_param(opt, l.experts[i].fc1.bias)}
-				if l.experts[i].fc2.weights.requires_grad {adam_add_param(opt, l.experts[i].fc2.weights)}
-				if l.experts[i].fc2.bias != nil &&
-				   l.experts[i].fc2.bias.requires_grad {adam_add_param(opt, l.experts[i].fc2.bias)}
-			}
-		case MaxPool2dLayer, AvgPool2dLayer, DropoutLayer, Activation, FlattenLayer:
-		// No trainable parameters
+
+// Clips the global norm of all gradients as torch.nn.utils.clip_grad_norm_:
+// when ‖g‖ > max_norm every gradient is scaled by max_norm / (‖g‖ + 1e-6).
+// Returns the norm before clipping.
+clip_grad_norm_params :: proc(params: []^t.Tensor, max_norm: f64) -> f64 {
+	total_sq := 0.0
+	for param in params {
+		if param.grad.data != nil {total_sq += l.dot_simd(param.grad.data, param.grad.data)}
+	}
+	total := math.sqrt(total_sq)
+	coef := max_norm / (total + 1e-6)
+	if coef < 1.0 {
+		for param in params {
+			if param.grad.data != nil {l.vec_scale_simd(param.grad.data, coef, param.grad.data)}
 		}
 	}
+	return total
 }
-// clip_grad_norm clips the global norm of all gradients in the optimizer.
-// If the total norm exceeds max_norm, all gradients are scaled down so that
-// the total norm equals max_norm.
-clip_grad_norm :: proc(opt: ^Adam, max_norm: f64) {
-	if max_norm <= 0.0 {return}
 
-	total_norm_sq := 0.0
-	for param in opt.parameters {
-		if param.grad.data != nil && len(param.grad.data) > 0 {
-			// Use SIMD dot product for efficient squared sum
-			total_norm_sq += l.dot_simd(param.grad.data, param.grad.data)
-		}
-	}
+clip_grad_norm_adam :: proc(opt: ^Adam, max_norm: f64) -> f64 {
+	return clip_grad_norm_params(opt.parameters[:], max_norm)
+}
 
-	total_norm := math.sqrt(total_norm_sq)
-	if total_norm > max_norm {
-		scale := max_norm / (total_norm + 1e-6) // Add epsilon for stability
-		for param in opt.parameters {
-			if param.grad.data != nil && len(param.grad.data) > 0 {
-				// Scale gradient in-place using SIMD
-				l.vec_scale_simd(param.grad.data, scale, param.grad.data)
-			}
-		}
-	}
+clip_grad_norm_sgd :: proc(opt: ^SGD, max_norm: f64) -> f64 {
+	return clip_grad_norm_params(opt.parameters[:], max_norm)
+}
+
+clip_grad_norm :: proc {
+	clip_grad_norm_params,
+	clip_grad_norm_adam,
+	clip_grad_norm_sgd,
 }

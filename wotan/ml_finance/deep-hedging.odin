@@ -486,6 +486,7 @@ deep_hedger_train_step :: proc(
 	pnl_sq := t.tensor_mul(pnl, pnl)
 	loss := t.tensor_mean(pnl_sq)
 
+	nn.adam_zero_grad(opt) // gradients accumulate otherwise
 	t.tensor_backward(loss)
 	nn.adam_step(opt)
 	loss_val := loss.data.data[0]
@@ -588,6 +589,7 @@ deep_hedger_train_step_multi :: proc(
 	pnl = t.tensor_sub(pnl, payoffs)
 	loss := compute_hedging_loss(pnl, hedger.config.risk_measure, hedger.config.cvar_alpha, alloc)
 
+	nn.adam_zero_grad(opt) // gradients accumulate otherwise
 	t.tensor_backward(loss)
 	nn.adam_step(opt)
 	loss_val := loss.data.data[0]

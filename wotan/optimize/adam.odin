@@ -87,38 +87,29 @@ optimizer_adam_free :: proc(opt: ^OptimizerAdam) {
 	if opt.v_mat.data != nil {l.matrix_free(&opt.v_mat)}
 }
 
+// One Adam step on a block of parameters with its moment buffers (t ≥ 1), as
+// torch.optim.Adam / AdamW. Weight decay is decoupled (AdamW, Loshchilov &
+// Hutter): w ← (1 − lr·λ) w before the update. Shared with nn.Adam.
+adam_update :: proc(w, g, m, v: []f64, lr, beta1, beta2, epsilon, weight_decay: f64, t: int) {
+	step := lr / (1.0 - math.pow(beta1, f64(t)))
+	sqrt_bc2 := math.sqrt(1.0 - math.pow(beta2, f64(t)))
+	decay := 1.0 - lr * weight_decay
+	for i in 0 ..< len(w) {
+		gi := g[i]
+		m[i] = beta1 * m[i] + (1.0 - beta1) * gi
+		v[i] = beta2 * v[i] + (1.0 - beta2) * gi * gi
+		w[i] = w[i] * decay - step * m[i] / (math.sqrt(v[i]) / sqrt_bc2 + epsilon)
+	}
+}
+
 // ============================================================================
 // Slice API
 // ============================================================================
 optimizer_adam_step :: proc(opt: ^OptimizerAdam, weights: []f64, gradient: []f64) {
 	n := len(weights)
 	if n == 0 || n != len(gradient) {return}
-
 	opt.t += 1
-
-	// AdamW-style weight decay
-	if opt.weight_decay > 0.0 {
-		for i in 0 ..< n {
-			weights[i] *= 1.0 - opt.learning_rate * opt.weight_decay
-		}
-	}
-
-	// Update moments
-	for i in 0 ..< n {
-		opt.m[i] = opt.beta1 * opt.m[i] + (1.0 - opt.beta1) * gradient[i]
-		opt.v[i] = opt.beta2 * opt.v[i] + (1.0 - opt.beta2) * gradient[i] * gradient[i]
-	}
-
-	// Bias correction
-	m_hat_scale := 1.0 / (1.0 - math.pow(opt.beta1, f64(opt.t)))
-	v_hat_scale := 1.0 / (1.0 - math.pow(opt.beta2, f64(opt.t)))
-
-	// Update weights
-	for i in 0 ..< n {
-		m_hat := opt.m[i] * m_hat_scale
-		v_hat := opt.v[i] * v_hat_scale
-		weights[i] -= opt.learning_rate * m_hat / (math.sqrt(v_hat) + opt.epsilon)
-	}
+	adam_update(weights, gradient, opt.m, opt.v, opt.learning_rate, opt.beta1, opt.beta2, opt.epsilon, opt.weight_decay, opt.t)
 }
 
 // ============================================================================
@@ -131,32 +122,6 @@ optimizer_adam_step_mat :: proc(
 ) {
 	if weights.rows != gradient.rows || weights.cols != gradient.cols {return}
 	if weights.rows == 0 || weights.cols == 0 {return}
-
 	opt.t += 1
-	n := weights.rows * weights.cols
-
-	// AdamW weight decay
-	if opt.weight_decay > 0.0 {
-		for i in 0 ..< n {
-			weights.data[i] *= 1.0 - opt.learning_rate * opt.weight_decay
-		}
-	}
-
-	// Update moments (element-wise, SIMD-ready via loops)
-	for i in 0 ..< n {
-		opt.m_mat.data[i] = opt.beta1 * opt.m_mat.data[i] + (1.0 - opt.beta1) * gradient.data[i]
-		opt.v_mat.data[i] =
-			opt.beta2 * opt.v_mat.data[i] + (1.0 - opt.beta2) * gradient.data[i] * gradient.data[i]
-	}
-
-	// Bias correction
-	m_hat_scale := 1.0 / (1.0 - math.pow(opt.beta1, f64(opt.t)))
-	v_hat_scale := 1.0 / (1.0 - math.pow(opt.beta2, f64(opt.t)))
-
-	// Update weights
-	for i in 0 ..< n {
-		m_hat := opt.m_mat.data[i] * m_hat_scale
-		v_hat := opt.v_mat.data[i] * v_hat_scale
-		weights.data[i] -= opt.learning_rate * m_hat / (math.sqrt(v_hat) + opt.epsilon)
-	}
+	adam_update(weights.data, gradient.data, opt.m_mat.data, opt.v_mat.data, opt.learning_rate, opt.beta1, opt.beta2, opt.epsilon, opt.weight_decay, opt.t)
 }

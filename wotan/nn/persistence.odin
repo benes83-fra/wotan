@@ -408,9 +408,15 @@ save_checkpoint :: proc(
 
 	}
 
-	// Save optimizer state
-	write_i32(file, 0) // optimizer type (Adam)
+	// Save optimizer state (type 1: Adam with hyperparameters; type 0, without
+	// them, is still read)
+	write_i32(file, 1)
 	write_i64(file, i64(opt.timestep))
+	write_f64(file, opt.learning_rate)
+	write_f64(file, opt.beta_1)
+	write_f64(file, opt.beta_2)
+	write_f64(file, opt.epsilon)
+	write_f64(file, opt.weight_decay)
 	write_i32(file, i32(len(opt.parameters)))
 
 	for i in 0 ..< len(opt.parameters) {
@@ -1027,54 +1033,58 @@ load_checkpoint :: proc(
 	// Optimizer
 	opt_type: i32
 	opt_type, offset = read_i32(data, offset)
-	if opt_type != 0 {
+	if opt_type != 0 && opt_type != 1 {
 		fmt.println("Unsupported optimizer type")
 		return nil, nil, 0, false
 	}
 
 	opt = new(Adam, allocator)
+	opt^ = adam_new(allocator = allocator)
 	timestep_i64: i64
 	timestep_i64, offset = read_i64(data, offset)
 	opt.timestep = int(timestep_i64)
+	if opt_type == 1 {
+		opt.learning_rate, offset = read_f64(data, offset)
+		opt.beta_1, offset = read_f64(data, offset)
+		opt.beta_2, offset = read_f64(data, offset)
+		opt.epsilon, offset = read_f64(data, offset)
+		opt.weight_decay, offset = read_f64(data, offset)
+	}
 
-	opt.learning_rate = 0.001
-	opt.beta_1 = 0.9
-	opt.beta_2 = 0.999
-	opt.epsilon = 1e-8
-	opt.allocator = allocator
-
+	// Moments belong to the model's trainable parameters in the order of
+	// sequential_parameters; if they don't fit, training restarts from zero
+	// moments.
+	params := sequential_parameters(model, context.temp_allocator)
+	defer delete(params)
 	num_params_i32: i32
 	num_params_i32, offset = read_i32(data, offset)
-
-	opt.parameters = make([dynamic]^t.Tensor, 0, allocator)
-	opt.moment_1 = make([dynamic][]f64, 0, allocator)
-	opt.moment_2 = make([dynamic][]f64, 0, allocator)
-
-	for i in 0 ..< int(num_params_i32) {
-		// moment_1
-		m1_count_i32: i32
-		m1_count_i32, offset = read_i32(data, offset)
-		m1_count := int(m1_count_i32)
-		m1 := make([]f64, m1_count, allocator)
-		for j in 0 ..< m1_count {
-			val: f64
-			val, offset = read_f64(data, offset)
-			m1[j] = val
+	fits := int(num_params_i32) == len(params)
+	moments := make([dynamic][]f64, 0, 2 * int(num_params_i32), context.temp_allocator)
+	defer delete(moments)
+	for i in 0 ..< 2 * int(num_params_i32) {
+		count_i32: i32
+		count_i32, offset = read_i32(data, offset)
+		count := int(count_i32)
+		fits = fits && count == len(params[i / 2].data.data)
+		m := make([]f64, count, allocator)
+		for j in 0 ..< count {
+			m[j], offset = read_f64(data, offset)
 		}
-		append(&opt.moment_1, m1)
-
-		// moment_2
-		m2_count_i32: i32
-		m2_count_i32, offset = read_i32(data, offset)
-		m2_count := int(m2_count_i32)
-		m2 := make([]f64, m2_count, allocator)
-		for j in 0 ..< m2_count {
-			val: f64
-			val, offset = read_f64(data, offset)
-			m2[j] = val
-		}
-		append(&opt.moment_2, m2)
+		append(&moments, m)
 	}
+	for p in params {adam_add_param(opt, p)}
+	if fits {
+		for i in 0 ..< len(params) {
+			copy(opt.moment_1[i], moments[2 * i])
+			copy(opt.moment_2[i], moments[2 * i + 1])
+		}
+	} else {
+		if num_params_i32 > 0 {
+			fmt.println("load_checkpoint: optimizer state does not match the model; moments reset")
+		}
+		opt.timestep = 0
+	}
+	for m in moments {delete(m, allocator)}
 
 	return model, opt, epoch, true
 }

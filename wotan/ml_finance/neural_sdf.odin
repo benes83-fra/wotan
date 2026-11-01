@@ -136,7 +136,8 @@ neural_sdf_train_step :: proc(
 	// Total loss = Euler loss + Regularization
 	total_loss := t.tensor_add(euler_loss, reg_loss)
 
-	// 4. Backward pass
+	// 4. Backward pass (gradients accumulate otherwise)
+	nn.adam_zero_grad(opt)
 	t.tensor_backward(total_loss)
 	nn.adam_step(opt)
 

@@ -70,42 +70,37 @@ optimizer_sgd_free :: proc(opt: ^OptimizerSGD) {
 	}
 }
 
-// ============================================================================
-// Slice API: Single parameter vector update
-// Contract: len(weights) == len(gradient) > 0
-// Updates: weights -= lr * (gradient + weight_decay * weights)
-// If momentum > 0: uses velocity buffer
-// ============================================================================
-optimizer_sgd_step :: proc(opt: ^OptimizerSGD, weights: []f64, gradient: []f64) {
-	n := len(weights)
-	if n == 0 || n != len(gradient) {return}
-
-	if opt.momentum > 0.0 {
-		// Momentum: v = μ*v + g + λ*w; then w -= lr * v
-		for i in 0 ..< n {
-			opt.velocity[i] =
-				opt.momentum * opt.velocity[i] + gradient[i] + opt.weight_decay * weights[i]
+// One SGD step on a block of parameters, as torch.optim.SGD (dampening 0):
+// d = g + λw; with momentum μ > 0, v ← μv + d and d = v (Nesterov: d + μv);
+// w ← w − lr·d. `velocity` may be nil when μ = 0. Shared with nn.SGD.
+sgd_update :: proc(
+	w, g, velocity: []f64,
+	lr, momentum, weight_decay: f64,
+	nesterov: bool = false,
+) {
+	for i in 0 ..< len(w) {
+		d := g[i] + weight_decay * w[i]
+		if momentum > 0.0 {
+			velocity[i] = momentum * velocity[i] + d
+			d = d + momentum * velocity[i] if nesterov else velocity[i]
 		}
-		// SIMD: weights -= lr * velocity
-		l.axpy_simd(-opt.learning_rate, opt.velocity, weights)
-	} else {
-		if opt.weight_decay > 0.0 {
-			// weights = (1 - lr*λ)*weights - lr*gradient
-			decay_factor := 1.0 - opt.learning_rate * opt.weight_decay
-			for i in 0 ..< n {weights[i] *= decay_factor}
-			l.axpy_simd(-opt.learning_rate, gradient, weights)
-		} else {
-			// Simple: weights -= lr * gradient (SIMD)
-			l.axpy_simd(-opt.learning_rate, gradient, weights)
-		}
+		w[i] -= lr * d
 	}
 }
 
 // ============================================================================
-// Matrix API: Batched parameter matrix update (rows = batch, cols = params)
+// Slice API: Single parameter vector update
+// Contract: len(weights) == len(gradient) > 0
+// ============================================================================
+optimizer_sgd_step :: proc(opt: ^OptimizerSGD, weights: []f64, gradient: []f64) {
+	n := len(weights)
+	if n == 0 || n != len(gradient) {return}
+	sgd_update(weights, gradient, opt.velocity, opt.learning_rate, opt.momentum, opt.weight_decay)
+}
+
+// ============================================================================
+// Matrix API: Batched parameter matrix update
 // Contract: weights.rows == gradient.rows, weights.cols == gradient.cols
-// Updates each row independently: weights[i] -= lr * (gradient[i] + λ*weights[i])
-// If momentum > 0: uses velocity_mat buffer
 // ============================================================================
 optimizer_sgd_step_mat :: proc(
 	opt: ^OptimizerSGD,
@@ -114,38 +109,7 @@ optimizer_sgd_step_mat :: proc(
 ) {
 	if weights.rows != gradient.rows || weights.cols != gradient.cols {return}
 	if weights.rows == 0 || weights.cols == 0 {return}
-
-	n := weights.rows * weights.cols
-
-	if opt.momentum > 0.0 {
-		// Momentum update per element (SIMD via axpy on flattened view)
-		// v = μ*v + g + λ*w  →  v = μ*v + (g + λ*w)
-		if opt.weight_decay > 0.0 {
-			// First: temp = g + λ*w (SIMD)
-			temp := make([]f64, n, context.temp_allocator)
-			defer delete(temp, context.temp_allocator)
-			for i in 0 ..< n {temp[i] = gradient.data[i] + opt.weight_decay * weights.data[i]}
-			// Then: v = μ*v + temp (SIMD)
-			l.axpy_simd(opt.momentum, opt.velocity_mat.data, opt.velocity_mat.data) // v *= μ
-			l.axpy_simd(1.0, temp, opt.velocity_mat.data) // v += temp
-		} else {
-			// v = μ*v + g (SIMD)
-			l.axpy_simd(opt.momentum, opt.velocity_mat.data, opt.velocity_mat.data)
-			l.axpy_simd(1.0, gradient.data, opt.velocity_mat.data)
-		}
-		// weights -= lr * v (SIMD)
-		l.axpy_simd(-opt.learning_rate, opt.velocity_mat.data, weights.data)
-	} else {
-		if opt.weight_decay > 0.0 {
-			// weights = (1 - lr*λ)*weights - lr*gradient
-			decay_factor := 1.0 - opt.learning_rate * opt.weight_decay
-			for i in 0 ..< n {weights.data[i] *= decay_factor}
-			l.axpy_simd(-opt.learning_rate, gradient.data, weights.data)
-		} else {
-			// weights -= lr * gradient (SIMD)
-			l.axpy_simd(-opt.learning_rate, gradient.data, weights.data)
-		}
-	}
+	sgd_update(weights.data, gradient.data, opt.velocity_mat.data, opt.learning_rate, opt.momentum, opt.weight_decay)
 }
 
 // ============================================================================
@@ -167,20 +131,7 @@ optimizer_sgd_step_row :: proc(
 
 	w_row := weights.data[row * n:row * n + n]
 	g_row := gradient.data[row * n:row * n + n]
-
-	if opt.momentum > 0.0 {
-		v_row := opt.velocity_mat.data[row * n:row * n + n]
-		for i in 0 ..< n {
-			v_row[i] = opt.momentum * v_row[i] + g_row[i] + opt.weight_decay * w_row[i]
-		}
-		l.axpy_simd(-opt.learning_rate, v_row, w_row)
-	} else {
-		if opt.weight_decay > 0.0 {
-			decay_factor := 1.0 - opt.learning_rate * opt.weight_decay
-			for i in 0 ..< n {w_row[i] *= decay_factor}
-			l.axpy_simd(-opt.learning_rate, g_row, w_row)
-		} else {
-			l.axpy_simd(-opt.learning_rate, g_row, w_row)
-		}
-	}
+	v_row: []f64
+	if opt.momentum > 0.0 {v_row = opt.velocity_mat.data[row * n:row * n + n]}
+	sgd_update(w_row, g_row, v_row, opt.learning_rate, opt.momentum, opt.weight_decay)
 }

@@ -229,317 +229,114 @@ sequential_forward :: proc(s: ^Sequential, input: ^t.Tensor) -> ^t.Tensor {
 	}
 	return x
 }
-// sequential_add_to_sgd registers all parameters with SGD optimizer
-// sequential_add_to_sgd registers all parameters with SGD optimizer
-sequential_add_to_sgd :: proc(seq: ^Sequential, opt: ^SGD) {
-	for layer in seq.layers {
-		switch l in layer {
-		case LinearLayer:
-			sgd_add_param(opt, l.weights)
-			sgd_add_param(opt, l.bias)
-		case Conv2dLayer:
-			sgd_add_param(opt, l.weight)
-			if l.bias != nil {sgd_add_param(opt, l.bias)}
-		case BatchNorm2dLayer:
-			sgd_add_param(opt, l.weight)
-			sgd_add_param(opt, l.bias)
+// ============================================================================
+// Parameters
+// ============================================================================
+// Trainable tensors (requires_grad) of a layer in a fixed order; checkpoints
+// store optimizer moments in this order.
 
-		// ✅ FIX: Added missing case for RNN
-		case RNNLayer:
-			sgd_add_param(opt, l.w_ih)
-			sgd_add_param(opt, l.w_hh)
-			sgd_add_param(opt, l.bias)
+layer_parameters :: proc(layer: ^Layer, out: ^[dynamic]^t.Tensor) {
+	add :: proc(out: ^[dynamic]^t.Tensor, p: ^t.Tensor) {
+		if p != nil && p.requires_grad {append(out, p)}
+	}
+	add_linear :: proc(out: ^[dynamic]^t.Tensor, lin: ^LinearLayer) {
+		add(out, lin.weights)
+		add(out, lin.bias)
+	}
+	add_mha :: proc(out: ^[dynamic]^t.Tensor, mha: ^MultiHeadAttentionLayer) {
+		add_linear(out, &mha.q_proj)
+		add_linear(out, &mha.k_proj)
+		add_linear(out, &mha.v_proj)
+		add_linear(out, &mha.out_proj)
+	}
+	add_ffn :: proc(out: ^[dynamic]^t.Tensor, ffn: ^FFNLayer) {
+		add_linear(out, &ffn.fc1)
+		add_linear(out, &ffn.fc2)
+	}
+	add_block :: proc(out: ^[dynamic]^t.Tensor, b: ^TransformerEncoderBlock) {
+		add(out, b.ln1.gamma)
+		add(out, b.ln1.beta)
+		add_mha(out, &b.mha)
+		add(out, b.ln2.gamma)
+		add(out, b.ln2.beta)
+		add_ffn(out, &b.ffn)
+	}
 
-		case MaxPool2dLayer:
-		case AvgPool2dLayer:
-		case DropoutLayer:
-		case Activation:
-		case FlattenLayer:
-
-		case GRULayer:
-			sgd_add_param(opt, l.w_ih) // or sgd_add_param
-			sgd_add_param(opt, l.w_hh)
-			sgd_add_param(opt, l.bias)
-		case LSTMLayer:
-			sgd_add_param(opt, l.w_ih)
-			sgd_add_param(opt, l.w_hh)
-			sgd_add_param(opt, l.bias)
-		case EmbeddingLayer:
-			sgd_add_param(opt, l.weight) // or sgd_add_param
-		case MultiHeadAttentionLayer:
-			sgd_add_param(opt, l.q_proj.weights)
-			sgd_add_param(opt, l.q_proj.bias)
-			sgd_add_param(opt, l.k_proj.weights)
-			sgd_add_param(opt, l.k_proj.bias)
-			sgd_add_param(opt, l.v_proj.weights)
-			sgd_add_param(opt, l.v_proj.bias)
-			sgd_add_param(opt, l.out_proj.weights)
-			sgd_add_param(opt, l.out_proj.bias)
-		case LayerNormLayer:
-			sgd_add_param(opt, l.gamma)
-			sgd_add_param(opt, l.beta)
-		case FFNLayer:
-			sgd_add_param(opt, l.fc1.weights)
-			sgd_add_param(opt, l.fc1.bias)
-			sgd_add_param(opt, l.fc2.weights)
-			sgd_add_param(opt, l.fc2.bias)
-		case TransformerEncoderBlock:
-			// MHA parameters
-			sgd_add_param(opt, l.mha.q_proj.weights)
-			sgd_add_param(opt, l.mha.q_proj.bias)
-			sgd_add_param(opt, l.mha.k_proj.weights)
-			sgd_add_param(opt, l.mha.k_proj.bias)
-			sgd_add_param(opt, l.mha.v_proj.weights)
-			sgd_add_param(opt, l.mha.v_proj.bias)
-			sgd_add_param(opt, l.mha.out_proj.weights)
-			sgd_add_param(opt, l.mha.out_proj.bias)
-
-			// FFN parameters
-			sgd_add_param(opt, l.ffn.fc1.weights)
-			sgd_add_param(opt, l.ffn.fc1.bias)
-			sgd_add_param(opt, l.ffn.fc2.weights)
-			sgd_add_param(opt, l.ffn.fc2.bias)
-
-			// LayerNorm parameters
-			sgd_add_param(opt, l.ln1.gamma)
-			sgd_add_param(opt, l.ln1.beta)
-			sgd_add_param(opt, l.ln2.gamma)
-			sgd_add_param(opt, l.ln2.beta)
-		case TransformerEncoder:
-			// Register all parameters from all blocks
-			for i in 0 ..< len(l.blocks) {
-				block := &l.blocks[i]
-				// MHA parameters
-				sgd_add_param(opt, block.mha.q_proj.weights)
-				sgd_add_param(opt, block.mha.q_proj.bias)
-				sgd_add_param(opt, block.mha.k_proj.weights)
-				sgd_add_param(opt, block.mha.k_proj.bias)
-				sgd_add_param(opt, block.mha.v_proj.weights)
-				sgd_add_param(opt, block.mha.v_proj.bias)
-				sgd_add_param(opt, block.mha.out_proj.weights)
-				sgd_add_param(opt, block.mha.out_proj.bias)
-
-				// FFN parameters
-				sgd_add_param(opt, block.ffn.fc1.weights)
-				sgd_add_param(opt, block.ffn.fc1.bias)
-				sgd_add_param(opt, block.ffn.fc2.weights)
-				sgd_add_param(opt, block.ffn.fc2.bias)
-
-				// LayerNorm parameters
-				sgd_add_param(opt, block.ln1.gamma)
-				sgd_add_param(opt, block.ln1.beta)
-				sgd_add_param(opt, block.ln2.gamma)
-				sgd_add_param(opt, block.ln2.beta)
-			}
-		case GATLayer:
-			if l.linear.weights.requires_grad {sgd_add_param(opt, l.linear.weights)}
-			if l.linear.bias != nil &&
-			   l.linear.bias.requires_grad {sgd_add_param(opt, l.linear.bias)}
-			if l.mha.q_proj.weights.requires_grad {sgd_add_param(opt, l.mha.q_proj.weights)}
-			if l.mha.k_proj.weights.requires_grad {sgd_add_param(opt, l.mha.k_proj.weights)}
-			if l.mha.v_proj.weights.requires_grad {sgd_add_param(opt, l.mha.v_proj.weights)}
-			if l.mha.out_proj.weights.requires_grad {sgd_add_param(opt, l.mha.out_proj.weights)}
-		case MoELayer:
-			sgd_add_param(opt, l.router.weights)
-			if l.router.bias != nil {sgd_add_param(opt, l.router.bias)}
-			for i in 0 ..< l.num_experts {
-				sgd_add_param(opt, l.experts[i].fc1.weights)
-				if l.experts[i].fc1.bias != nil {sgd_add_param(opt, l.experts[i].fc1.bias)}
-				sgd_add_param(opt, l.experts[i].fc2.weights)
-				if l.experts[i].fc2.bias != nil {sgd_add_param(opt, l.experts[i].fc2.bias)}
-			}
-		case MambaLayer:
-			sgd_add_param(opt, l.proj_x.weights)
-			if l.proj_x.bias != nil {sgd_add_param(opt, l.proj_x.bias)}
-			sgd_add_param(opt, l.proj_B.weights)
-			if l.proj_B.bias != nil {sgd_add_param(opt, l.proj_B.bias)}
-			sgd_add_param(opt, l.proj_C.weights)
-			if l.proj_C.bias != nil {sgd_add_param(opt, l.proj_C.bias)}
-			sgd_add_param(opt, l.proj_Delta.weights)
-			if l.proj_Delta.bias != nil {sgd_add_param(opt, l.proj_Delta.bias)}
-			sgd_add_param(opt, l.proj_out.weights)
-			if l.proj_out.bias != nil {sgd_add_param(opt, l.proj_out.bias)}
-			sgd_add_param(opt, l.A)
-			sgd_add_param(opt, l.D)
-		}
+	switch &l in layer {
+	case LinearLayer:
+		add_linear(out, &l)
+	case Conv2dLayer:
+		add(out, l.weight)
+		add(out, l.bias)
+	case BatchNorm2dLayer:
+		add(out, l.weight)
+		add(out, l.bias)
+	case LayerNormLayer:
+		add(out, l.gamma)
+		add(out, l.beta)
+	case EmbeddingLayer:
+		add(out, l.weight)
+	case RNNLayer:
+		add(out, l.w_ih)
+		add(out, l.w_hh)
+		add(out, l.bias)
+	case GRULayer:
+		add(out, l.w_ih)
+		add(out, l.w_hh)
+		add(out, l.bias)
+	case LSTMLayer:
+		add(out, l.w_ih)
+		add(out, l.w_hh)
+		add(out, l.bias)
+	case MultiHeadAttentionLayer:
+		add_mha(out, &l)
+	case FFNLayer:
+		add_ffn(out, &l)
+	case TransformerEncoderBlock:
+		add_block(out, &l)
+	case TransformerEncoder:
+		for &block in l.blocks {add_block(out, &block)}
+	case GATLayer:
+		add_linear(out, &l.linear)
+		add_mha(out, &l.mha)
+	case MambaLayer:
+		add_linear(out, &l.proj_x)
+		add_linear(out, &l.proj_B)
+		add_linear(out, &l.proj_C)
+		add_linear(out, &l.proj_Delta)
+		add_linear(out, &l.proj_out)
+		add(out, l.A)
+		add(out, l.D)
+	case MoELayer:
+		add_linear(out, &l.router)
+		for i in 0 ..< l.num_experts {add_ffn(out, &l.experts[i])}
+	case MaxPool2dLayer, AvgPool2dLayer, DropoutLayer, Activation, FlattenLayer:
+	// No trainable parameters
 	}
 }
 
-// sequential_add_to_adam registers all parameters with Adam optimizer
+// All trainable tensors of the model, layer by layer
+sequential_parameters :: proc(
+	seq: ^Sequential,
+	allocator: mem.Allocator = context.allocator,
+) -> [dynamic]^t.Tensor {
+	params := make([dynamic]^t.Tensor, 0, 16, allocator)
+	for &layer in seq.layers {layer_parameters(&layer, &params)}
+	return params
+}
+
+// sequential_add_to_sgd registers all trainable parameters with SGD
+sequential_add_to_sgd :: proc(seq: ^Sequential, opt: ^SGD) {
+	params := sequential_parameters(seq, context.temp_allocator)
+	defer delete(params)
+	for p in params {sgd_add_param(opt, p)}
+}
+
+// sequential_add_to_adam registers all trainable parameters with Adam
 sequential_add_to_adam :: proc(seq: ^Sequential, opt: ^Adam) {
-	for layer in seq.layers {
-		switch l in layer {
-		case LinearLayer:
-			if l.weights.requires_grad {
-				adam_add_param(opt, l.weights)
-			}
-			if l.bias != nil && l.bias.requires_grad {
-				adam_add_param(opt, l.bias)
-			}
-		case Conv2dLayer:
-			if l.weight.requires_grad {
-				adam_add_param(opt, l.weight)
-			}
-			if l.bias != nil && l.bias.requires_grad {
-				adam_add_param(opt, l.bias)
-			}
-		case BatchNorm2dLayer:
-			if l.weight.requires_grad {
-				adam_add_param(opt, l.weight)
-			}
-			if l.bias.requires_grad {
-				adam_add_param(opt, l.bias)
-			}
-		case LayerNormLayer:
-			if l.gamma.requires_grad {
-				adam_add_param(opt, l.gamma)
-			}
-			if l.beta.requires_grad {
-				adam_add_param(opt, l.beta)
-			}
-		case EmbeddingLayer:
-			if l.weight.requires_grad {
-				adam_add_param(opt, l.weight)
-			}
-		case RNNLayer:
-			if l.w_ih.requires_grad {
-				adam_add_param(opt, l.w_ih)
-			}
-			if l.w_hh.requires_grad {
-				adam_add_param(opt, l.w_hh)
-			}
-			if l.bias.requires_grad {
-				adam_add_param(opt, l.bias)
-			}
-		case GRULayer:
-			if l.w_ih.requires_grad {
-				adam_add_param(opt, l.w_ih)
-			}
-			if l.w_hh.requires_grad {
-				adam_add_param(opt, l.w_hh)
-			}
-			if l.bias.requires_grad {
-				adam_add_param(opt, l.bias)
-			}
-		case LSTMLayer:
-			if l.w_ih.requires_grad {
-				adam_add_param(opt, l.w_ih)
-			}
-			if l.w_hh.requires_grad {
-				adam_add_param(opt, l.w_hh)
-			}
-			if l.bias.requires_grad {
-				adam_add_param(opt, l.bias)
-			}
-		case MultiHeadAttentionLayer:
-			if l.q_proj.weights.requires_grad {adam_add_param(opt, l.q_proj.weights)}
-			if l.q_proj.bias != nil &&
-			   l.q_proj.bias.requires_grad {adam_add_param(opt, l.q_proj.bias)}
-			if l.k_proj.weights.requires_grad {adam_add_param(opt, l.k_proj.weights)}
-			if l.k_proj.bias != nil &&
-			   l.k_proj.bias.requires_grad {adam_add_param(opt, l.k_proj.bias)}
-			if l.v_proj.weights.requires_grad {adam_add_param(opt, l.v_proj.weights)}
-			if l.v_proj.bias != nil &&
-			   l.v_proj.bias.requires_grad {adam_add_param(opt, l.v_proj.bias)}
-			if l.out_proj.weights.requires_grad {adam_add_param(opt, l.out_proj.weights)}
-			if l.out_proj.bias != nil &&
-			   l.out_proj.bias.requires_grad {adam_add_param(opt, l.out_proj.bias)}
-		case FFNLayer:
-			if l.fc1.weights.requires_grad {adam_add_param(opt, l.fc1.weights)}
-			if l.fc1.bias != nil && l.fc1.bias.requires_grad {adam_add_param(opt, l.fc1.bias)}
-			if l.fc2.weights.requires_grad {adam_add_param(opt, l.fc2.weights)}
-			if l.fc2.bias != nil && l.fc2.bias.requires_grad {adam_add_param(opt, l.fc2.bias)}
-		case TransformerEncoderBlock:
-			if l.ln1.gamma.requires_grad {adam_add_param(opt, l.ln1.gamma)}
-			if l.ln1.beta.requires_grad {adam_add_param(opt, l.ln1.beta)}
-			if l.mha.q_proj.weights.requires_grad {adam_add_param(opt, l.mha.q_proj.weights)}
-			if l.mha.q_proj.bias != nil &&
-			   l.mha.q_proj.bias.requires_grad {adam_add_param(opt, l.mha.q_proj.bias)}
-			if l.mha.k_proj.weights.requires_grad {adam_add_param(opt, l.mha.k_proj.weights)}
-			if l.mha.k_proj.bias != nil &&
-			   l.mha.k_proj.bias.requires_grad {adam_add_param(opt, l.mha.k_proj.bias)}
-			if l.mha.v_proj.weights.requires_grad {adam_add_param(opt, l.mha.v_proj.weights)}
-			if l.mha.v_proj.bias != nil &&
-			   l.mha.v_proj.bias.requires_grad {adam_add_param(opt, l.mha.v_proj.bias)}
-			if l.mha.out_proj.weights.requires_grad {adam_add_param(opt, l.mha.out_proj.weights)}
-			if l.mha.out_proj.bias != nil &&
-			   l.mha.out_proj.bias.requires_grad {adam_add_param(opt, l.mha.out_proj.bias)}
-			if l.ln2.gamma.requires_grad {adam_add_param(opt, l.ln2.gamma)}
-			if l.ln2.beta.requires_grad {adam_add_param(opt, l.ln2.beta)}
-			if l.ffn.fc1.weights.requires_grad {adam_add_param(opt, l.ffn.fc1.weights)}
-			if l.ffn.fc1.bias != nil &&
-			   l.ffn.fc1.bias.requires_grad {adam_add_param(opt, l.ffn.fc1.bias)}
-			if l.ffn.fc2.weights.requires_grad {adam_add_param(opt, l.ffn.fc2.weights)}
-			if l.ffn.fc2.bias != nil &&
-			   l.ffn.fc2.bias.requires_grad {adam_add_param(opt, l.ffn.fc2.bias)}
-		case TransformerEncoder:
-			for i in 0 ..< len(l.blocks) {
-				block := &l.blocks[i]
-				if block.ln1.gamma.requires_grad {adam_add_param(opt, block.ln1.gamma)}
-				if block.ln1.beta.requires_grad {adam_add_param(opt, block.ln1.beta)}
-				if block.mha.q_proj.weights.requires_grad {adam_add_param(opt, block.mha.q_proj.weights)}
-				if block.mha.q_proj.bias != nil &&
-				   block.mha.q_proj.bias.requires_grad {adam_add_param(opt, block.mha.q_proj.bias)}
-				if block.mha.k_proj.weights.requires_grad {adam_add_param(opt, block.mha.k_proj.weights)}
-				if block.mha.k_proj.bias != nil &&
-				   block.mha.k_proj.bias.requires_grad {adam_add_param(opt, block.mha.k_proj.bias)}
-				if block.mha.v_proj.weights.requires_grad {adam_add_param(opt, block.mha.v_proj.weights)}
-				if block.mha.v_proj.bias != nil &&
-				   block.mha.v_proj.bias.requires_grad {adam_add_param(opt, block.mha.v_proj.bias)}
-				if block.mha.out_proj.weights.requires_grad {adam_add_param(opt, block.mha.out_proj.weights)}
-				if block.mha.out_proj.bias != nil &&
-				   block.mha.out_proj.bias.requires_grad {adam_add_param(opt, block.mha.out_proj.bias)}
-				if block.ln2.gamma.requires_grad {adam_add_param(opt, block.ln2.gamma)}
-				if block.ln2.beta.requires_grad {adam_add_param(opt, block.ln2.beta)}
-				if block.ffn.fc1.weights.requires_grad {adam_add_param(opt, block.ffn.fc1.weights)}
-				if block.ffn.fc1.bias != nil &&
-				   block.ffn.fc1.bias.requires_grad {adam_add_param(opt, block.ffn.fc1.bias)}
-				if block.ffn.fc2.weights.requires_grad {adam_add_param(opt, block.ffn.fc2.weights)}
-				if block.ffn.fc2.bias != nil &&
-				   block.ffn.fc2.bias.requires_grad {adam_add_param(opt, block.ffn.fc2.bias)}
-			}
-		case GATLayer:
-			if l.linear.weights.requires_grad {adam_add_param(opt, l.linear.weights)}
-			if l.linear.bias != nil &&
-			   l.linear.bias.requires_grad {adam_add_param(opt, l.linear.bias)}
-			if l.mha.q_proj.weights.requires_grad {adam_add_param(opt, l.mha.q_proj.weights)}
-			if l.mha.k_proj.weights.requires_grad {adam_add_param(opt, l.mha.k_proj.weights)}
-			if l.mha.v_proj.weights.requires_grad {adam_add_param(opt, l.mha.v_proj.weights)}
-			if l.mha.out_proj.weights.requires_grad {adam_add_param(opt, l.mha.out_proj.weights)}
-		case MambaLayer:
-			if l.proj_x.weights.requires_grad {adam_add_param(opt, l.proj_x.weights)}
-			if l.proj_x.bias != nil &&
-			   l.proj_x.bias.requires_grad {adam_add_param(opt, l.proj_x.bias)}
-			if l.proj_B.weights.requires_grad {adam_add_param(opt, l.proj_B.weights)}
-			if l.proj_B.bias != nil &&
-			   l.proj_B.bias.requires_grad {adam_add_param(opt, l.proj_B.bias)}
-			if l.proj_C.weights.requires_grad {adam_add_param(opt, l.proj_C.weights)}
-			if l.proj_C.bias != nil &&
-			   l.proj_C.bias.requires_grad {adam_add_param(opt, l.proj_C.bias)}
-			if l.proj_Delta.weights.requires_grad {adam_add_param(opt, l.proj_Delta.weights)}
-			if l.proj_Delta.bias != nil &&
-			   l.proj_Delta.bias.requires_grad {adam_add_param(opt, l.proj_Delta.bias)}
-			if l.proj_out.weights.requires_grad {adam_add_param(opt, l.proj_out.weights)}
-			if l.proj_out.bias != nil &&
-			   l.proj_out.bias.requires_grad {adam_add_param(opt, l.proj_out.bias)}
-			if l.A.requires_grad {adam_add_param(opt, l.A)}
-			if l.D.requires_grad {adam_add_param(opt, l.D)}
-		case MoELayer:
-			if l.router.weights.requires_grad {adam_add_param(opt, l.router.weights)}
-			if l.router.bias != nil &&
-			   l.router.bias.requires_grad {adam_add_param(opt, l.router.bias)}
-			for i in 0 ..< l.num_experts {
-				if l.experts[i].fc1.weights.requires_grad {adam_add_param(opt, l.experts[i].fc1.weights)}
-				if l.experts[i].fc1.bias != nil &&
-				   l.experts[i].fc1.bias.requires_grad {adam_add_param(opt, l.experts[i].fc1.bias)}
-				if l.experts[i].fc2.weights.requires_grad {adam_add_param(opt, l.experts[i].fc2.weights)}
-				if l.experts[i].fc2.bias != nil &&
-				   l.experts[i].fc2.bias.requires_grad {adam_add_param(opt, l.experts[i].fc2.bias)}
-			}
-		case MaxPool2dLayer, AvgPool2dLayer, DropoutLayer, Activation, FlattenLayer:
-		// No trainable parameters
-		}
-	}
+	params := sequential_parameters(seq, context.temp_allocator)
+	defer delete(params)
+	for p in params {adam_add_param(opt, p)}
 }
 
 // sequential_free cleans up all layers
