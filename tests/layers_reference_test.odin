@@ -13102,15 +13102,16 @@ LT_DEC_DE0 := [?]f64 {
 	0.2874053176769148,
 	-0.39813552827446236,
 }
+// Shared with models_reference_test.odin.
 // One torch case: input, loss weights R, output, input gradient, parameters
 // and their gradients (in nn.layer_parameters' order)
-@(private = "file")
+@(private)
 _LtCase :: struct {
 	x, r, out, dx, p, dp: []f64,
 }
 
 // Tensor [1, n] with a logical 3D / 4D shape
-@(private = "file")
+@(private)
 _lt_tensor :: proc(data: []f64, shape: [4]int, grad: bool) -> ^t.Tensor {
 	m := l.matrix_new(f64, 1, len(data))
 	copy(m.data, data)
@@ -13119,7 +13120,7 @@ _lt_tensor :: proc(data: []f64, shape: [4]int, grad: bool) -> ^t.Tensor {
 	return x
 }
 
-@(private = "file")
+@(private)
 _lt_load :: proc(params: []^t.Tensor, src: []f64) {
 	k := 0
 	for p in params {
@@ -13130,7 +13131,7 @@ _lt_load :: proc(params: []^t.Tensor, src: []f64) {
 	assert(k == len(src), "parameter count differs from torch")
 }
 
-@(private = "file")
+@(private)
 _lt_diff :: proc(a, b: []f64) -> f64 {
 	assert(len(a) == len(b), "length differs from torch")
 	worst := 0.0
@@ -13140,7 +13141,7 @@ _lt_diff :: proc(a, b: []f64) -> f64 {
 
 // Back-propagates Σ out ⊙ R and returns the max deviations of the output, the
 // input gradient (x may be nil) and the parameter gradients
-@(private = "file")
+@(private)
 _lt_check :: proc(c: _LtCase, out, x: ^t.Tensor, params: []^t.Tensor) -> (d_out, d_x, d_p: f64) {
 	r := t.tensor_new(l.matrix_new(f64, out.data.rows, out.data.cols), false)
 	copy(r.data.data, c.r)
@@ -13160,7 +13161,7 @@ _lt_check :: proc(c: _LtCase, out, x: ^t.Tensor, params: []^t.Tensor) -> (d_out,
 	return
 }
 
-@(private = "file")
+@(private)
 _lt_params :: proc(layer: nn.Layer) -> []^t.Tensor {
 	lay := layer
 	ps := make([dynamic]^t.Tensor)
@@ -13168,12 +13169,12 @@ _lt_params :: proc(layer: nn.Layer) -> []^t.Tensor {
 	return ps[:]
 }
 
-@(private = "file")
+@(private)
 _lt_linear :: proc(ps: ^[dynamic]^t.Tensor, lin: ^nn.LinearLayer) {
 	append(ps, lin.weights, lin.bias)
 }
 
-@(private = "file")
+@(private)
 _lt_mha_params :: proc(ps: ^[dynamic]^t.Tensor, q, k, v, o: ^nn.LinearLayer) {
 	_lt_linear(ps, q)
 	_lt_linear(ps, k)

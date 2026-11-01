@@ -56,8 +56,6 @@ wgan_test :: proc(allocator: mem.Allocator) {
 	defer nn.discriminator_free(&critic)
 
 	// Initialize weights
-	nn.initialize_generator_weights(&gen, allocator)
-	nn.initialize_discriminator_weights(&critic, allocator)
 
 	opt_g := nn.adam_new(learning_rate, allocator = allocator)
 	defer nn.adam_free(&opt_g)

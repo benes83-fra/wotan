@@ -58,7 +58,7 @@ bert_encoder_block_forward :: proc(
 	attention_mask: ^t.Tensor = nil,
 	training: bool,
 ) -> ^t.Tensor {
-	// Pre-LayerNorm
+	// Post-LayerNorm, as in the original BERT
 	attn_out := multi_head_attention_layer_forward(&block.mha, x, attention_mask)
 
 	// Dropout if training
@@ -68,9 +68,6 @@ bert_encoder_block_forward :: proc(
 	x1 := t.tensor_add(x, attn_out)
 
 	x1_norm := layer_norm_layer_forward(&block.ln1, x1)
-
-
-	//x1_norm := layer_norm_layer_forward(&block.ln2, x1)
 	ffn_out := ffn_layer_forward(&block.ffn, x1_norm)
 
 	if training {
@@ -187,113 +184,74 @@ bert_model_forward :: proc(
 ) {
 	batch := input_ids.shape[0]
 	seq_len := input_ids.shape[1]
+	alloc := input_ids.allocator
 
-	// Token embeddings
+	// Token + position + segment embeddings, LayerNorm
 	token_emb := embedding_layer_forward(&model.token_emb, input_ids)
-
-	// Positional embeddings
-	pos_ids_data := l.matrix_new(f64, 1, batch * seq_len, model.allocator)
-	for b in 0 ..< batch {
-		for s in 0 ..< seq_len {
-			pos_ids_data.data[b * seq_len + s] = f64(s)
-		}
-	}
-	pos_ids := t.tensor_new(pos_ids_data, false, model.allocator)
-	pos_ids.shape = [4]int{batch, seq_len, 1, 1}
-
+	pos_ids := _position_ids(batch, seq_len, alloc)
 	pos_emb := embedding_layer_forward(&model.pos_emb, pos_ids)
-
-	// Segment embeddings
+	_constant_done(pos_ids, pos_emb)
 	segment_emb := embedding_layer_forward(&model.segment_emb, segment_ids)
-
-	// Sum all embeddings
-	x := t.tensor_add(token_emb, pos_emb)
-	x = t.tensor_add(x, segment_emb)
-
-	// LayerNorm
+	x := t.tensor_add(t.tensor_add(token_emb, pos_emb), segment_emb)
 	x = layer_norm_layer_forward(&model.emb_ln, x)
-	attention_mask: ^t.Tensor = nil
-	if true { 	// Always create it to be safe
-		mask_data := l.matrix_new(f64, 1, batch * seq_len, model.allocator)
-		for i in 0 ..< batch * seq_len {
-			// If the token ID is 0, it's a padding token
-			if input_ids.data.data[i] == 0.0 {
-				mask_data.data[i] = 0.0
-			} else {
-				mask_data.data[i] = 1.0
-			}
-		}
-		attention_mask = t.tensor_new(mask_data, false, model.allocator)
-		attention_mask.shape = [4]int{batch, seq_len, 1, 1}
+
+	// Token id 0 is padding: no attention to it (read during the forward pass only)
+	attention_mask := _constant(batch * seq_len, {batch, seq_len, 1, 1}, alloc)
+	for i in 0 ..< batch * seq_len {
+		attention_mask.data.data[i] = 0.0 if input_ids.data.data[i] == 0.0 else 1.0
 	}
-	// Pass through encoder blocks
 	for i in 0 ..< len(model.encoder_blocks) {
 		x = bert_encoder_block_forward(&model.encoder_blocks[i], x, attention_mask, training)
 	}
+	t.tensor_free(attention_mask)
 
 	// MLM head (applied to all positions)
 	mlm_logits = linear_forward(&model.mlm_head, x)
 
-	// NSP head (applied to [CLS] token only - first position)
-	// Extract [CLS] token representation
-	cls_data := l.matrix_new(f64, 1, batch * model.d_model, model.allocator)
-	for b in 0 ..< batch {
-		for d in 0 ..< model.d_model {
-			cls_data.data[b * model.d_model + d] = x.data.data[b * seq_len * model.d_model + d]
-		}
-	}
-	cls_tensor := t.tensor_new(cls_data, false, model.allocator)
-	cls_tensor.shape = [4]int{batch, 1, model.d_model, 1}
+	// NSP head on [CLS] (position 0), gathered with an embedding lookup into the
+	// [batch * seq_len, d_model] rows of x so that gradients reach the encoder
+	rows := t.tensor_reshape(x, [4]int{batch * seq_len, model.d_model, 1, 1}, alloc)
+	cls_ids := _constant(batch, {batch, 1, 1, 1}, alloc)
+	for b in 0 ..< batch {cls_ids.data.data[b] = f64(b * seq_len)}
+	cls := t.tensor_embedding(cls_ids, rows)
+	_constant_done(cls_ids, cls)
 
-	// Pool and predict
-	pooled := linear_forward(&model.pooler, cls_tensor)
-	pooled = t.tensor_tanh(pooled)
+	pooled := t.tensor_tanh(linear_forward(&model.pooler, cls))
 	nsp_logits = linear_forward(&model.nsp_head, pooled)
-
-	// Cleanup temporary tensors
-	t.tensor_free(pos_ids)
-	t.tensor_free(cls_tensor)
-	if attention_mask != nil {
-		t.tensor_free(attention_mask) // ✅ Don't forget to free the new mask!
-	}
-
 	return mlm_logits, nsp_logits
+}
+
+// All trainable BERT parameters (the order of the optimizer state)
+bert_model_parameters :: proc(
+	model: ^BERTModel,
+	allocator: mem.Allocator = context.allocator,
+) -> [dynamic]^t.Tensor {
+	ps := make([dynamic]^t.Tensor, 0, 16, allocator)
+	add :: proc(ps: ^[dynamic]^t.Tensor, layer: Layer) {
+		lay := layer
+		layer_parameters(&lay, ps)
+	}
+	add(&ps, model.token_emb)
+	add(&ps, model.pos_emb)
+	add(&ps, model.segment_emb)
+	add(&ps, model.emb_ln)
+	for &block in model.encoder_blocks {
+		add(&ps, block.ln1)
+		add(&ps, block.mha)
+		add(&ps, block.ln2)
+		add(&ps, block.ffn)
+	}
+	add(&ps, model.pooler)
+	add(&ps, model.mlm_head)
+	add(&ps, model.nsp_head)
+	return ps
 }
 
 // Register all BERT parameters with optimizer
 bert_model_add_to_optimizer :: proc(model: ^BERTModel, opt: ^Adam) {
-	adam_add_param(opt, model.token_emb.weight)
-	adam_add_param(opt, model.pos_emb.weight)
-	adam_add_param(opt, model.segment_emb.weight)
-	adam_add_param(opt, model.emb_ln.gamma)
-	adam_add_param(opt, model.emb_ln.beta)
-
-	for i in 0 ..< len(model.encoder_blocks) {
-		block := &model.encoder_blocks[i]
-		adam_add_param(opt, block.ln1.gamma)
-		adam_add_param(opt, block.ln1.beta)
-		adam_add_param(opt, block.mha.q_proj.weights)
-		adam_add_param(opt, block.mha.q_proj.bias)
-		adam_add_param(opt, block.mha.k_proj.weights)
-		adam_add_param(opt, block.mha.k_proj.bias)
-		adam_add_param(opt, block.mha.v_proj.weights)
-		adam_add_param(opt, block.mha.v_proj.bias)
-		adam_add_param(opt, block.mha.out_proj.weights)
-		adam_add_param(opt, block.mha.out_proj.bias)
-		adam_add_param(opt, block.ln2.gamma)
-		adam_add_param(opt, block.ln2.beta)
-		adam_add_param(opt, block.ffn.fc1.weights)
-		adam_add_param(opt, block.ffn.fc1.bias)
-		adam_add_param(opt, block.ffn.fc2.weights)
-		adam_add_param(opt, block.ffn.fc2.bias)
-	}
-
-	adam_add_param(opt, model.pooler.weights)
-	adam_add_param(opt, model.pooler.bias)
-	adam_add_param(opt, model.mlm_head.weights)
-	adam_add_param(opt, model.mlm_head.bias)
-	adam_add_param(opt, model.nsp_head.weights)
-	adam_add_param(opt, model.nsp_head.bias)
+	ps := bert_model_parameters(model, context.temp_allocator)
+	defer delete(ps)
+	for p in ps {adam_add_param(opt, p)}
 }
 
 

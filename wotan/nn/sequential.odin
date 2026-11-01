@@ -99,19 +99,22 @@ sequential_forward :: proc(s: ^Sequential, input: ^t.Tensor) -> ^t.Tensor {
 				l.eps,
 			)
 		case RNNLayer:
-			h_0 := _zero_state(x, x.shape[0] * l.hidden_size, l.w_ih, l.w_hh, l.bias)
+			n := x.shape[0] * l.hidden_size
+			h_0 := _constant(n, {1, n, 1, 1}, x.allocator)
 			x = rnn_layer_forward(&l, x, h_0)
-			_release_state(h_0)
+			_constant_done(h_0, x)
 		case GRULayer:
-			h_0 := _zero_state(x, x.shape[0] * l.hidden_size, l.w_ih, l.w_hh, l.bias)
+			n := x.shape[0] * l.hidden_size
+			h_0 := _constant(n, {1, n, 1, 1}, x.allocator)
 			x = gru_layer_forward(&l, x, h_0)
-			_release_state(h_0)
+			_constant_done(h_0, x)
 		case LSTMLayer:
-			h_0 := _zero_state(x, x.shape[0] * l.hidden_size, l.w_ih, l.w_hh, l.bias)
-			c_0 := _zero_state(x, x.shape[0] * l.hidden_size, l.w_ih, l.w_hh, l.bias)
+			n := x.shape[0] * l.hidden_size
+			h_0 := _constant(n, {1, n, 1, 1}, x.allocator)
+			c_0 := _constant(n, {1, n, 1, 1}, x.allocator)
 			x = lstm_layer_forward(&l, x, h_0, c_0)
-			_release_state(h_0)
-			_release_state(c_0)
+			_constant_done(h_0, x)
+			_constant_done(c_0, x)
 		case EmbeddingLayer:
 			x = embedding_layer_forward(&l, x)
 		case MultiHeadAttentionLayer:
@@ -130,40 +133,16 @@ sequential_forward :: proc(s: ^Sequential, input: ^t.Tensor) -> ^t.Tensor {
 			x = moe_layer_forward(&l, x, x.allocator)
 		case MambaLayer:
 			batch, d_model := x.shape[0], x.shape[2]
-			h_0 := _zero_state(
-				x,
+			h_0 := _constant(
 				batch * d_model * l.d_state,
-				l.proj_x.weights,
-				l.proj_B.weights,
-				l.proj_C.weights,
-				l.proj_Delta.weights,
-				l.proj_out.weights,
-				l.A,
-				l.D,
+				{batch, d_model, l.d_state, 1},
+				x.allocator,
 			)
-			h_0.shape = [4]int{batch, d_model, l.d_state, 1}
 			x = mamba_layer_forward(&l, x, h_0)
-			_release_state(h_0)
+			_constant_done(h_0, x)
 		}
 	}
 	return x
-}
-
-// Zero initial state [1, n] for a recurrent layer. It joins the graph (and is
-// freed with it) when the output will need gradients.
-@(private = "file")
-_zero_state :: proc(x: ^t.Tensor, n: int, params: ..^t.Tensor) -> ^t.Tensor {
-	h := t.tensor_new(la.matrix_new(f64, 1, n, x.allocator), false, x.allocator)
-	needs_grad := x.requires_grad
-	for p in params {needs_grad ||= p != nil && p.requires_grad}
-	h.owned_by_graph = needs_grad
-	return h
-}
-
-// Frees a zero state after the forward pass unless the graph owns it
-@(private = "file")
-_release_state :: proc(h: ^t.Tensor) {
-	if !h.owned_by_graph {t.tensor_free(h)}
 }
 
 // ============================================================================

@@ -223,25 +223,26 @@ bert_test :: proc(allocator: mem.Allocator) {
 			}
 		}
 
+		// MLM loss on the masked positions: their logit rows are gathered with an
+		// embedding lookup, so the loss stays connected to the model
 		mlm_loss: ^t.Tensor
 		if num_masked > 0 {
-			masked_logits_data := l.matrix_new(f64, num_masked, vocab_size, allocator)
+			pos_data := l.matrix_new(f64, 1, num_masked, allocator)
 			masked_labels := make([]int, num_masked, allocator)
-
 			masked_idx := 0
 			for i in 0 ..< batch_size * seq_len {
 				if mlm_labels[i] != -1 {
-					for v in 0 ..< vocab_size {
-						masked_logits_data.data[masked_idx * vocab_size + v] =
-							mlm_logits.data.data[i * vocab_size + v]
-					}
+					pos_data.data[masked_idx] = f64(i)
 					masked_labels[masked_idx] = mlm_labels[i]
 					masked_idx += 1
 				}
 			}
-
-			masked_logits := t.tensor_new(masked_logits_data, true, allocator)
-			mlm_loss = t.tensor_cross_entropy_loss(masked_logits, masked_labels)
+			positions := t.tensor_new(pos_data, false, allocator)
+			positions.shape = [4]int{num_masked, 1, 1, 1}
+			positions.owned_by_graph = true
+			rows := t.tensor_reshape(mlm_logits, [4]int{batch_size * seq_len, vocab_size, 1, 1})
+			masked := nn.as_matrix(t.tensor_embedding(positions, rows), num_masked, vocab_size)
+			mlm_loss = t.tensor_cross_entropy_loss(masked, masked_labels)
 			delete(masked_labels, allocator)
 		} else {
 			zero_data := l.matrix_new(f64, 1, 1, allocator)
@@ -249,14 +250,11 @@ bert_test :: proc(allocator: mem.Allocator) {
 			mlm_loss = t.tensor_new(zero_data, true, allocator)
 		}
 
-		// Compute NSP loss
-		nsp_logits_2d := l.matrix_new(f64, batch_size, 2, allocator)
-		for b in 0 ..< batch_size {
-			nsp_logits_2d.data[b * 2 + 0] = nsp_logits.data.data[b * 2 + 0]
-			nsp_logits_2d.data[b * 2 + 1] = nsp_logits.data.data[b * 2 + 1]
-		}
-		nsp_logits_tensor := t.tensor_new(nsp_logits_2d, true, allocator)
-		nsp_loss := t.tensor_cross_entropy_loss(nsp_logits_tensor, nsp_labels)
+		// NSP loss
+		nsp_loss := t.tensor_cross_entropy_loss(
+			nn.as_matrix(nsp_logits, batch_size, 2),
+			nsp_labels,
+		)
 
 		// Combined loss
 		total_loss := t.tensor_add(mlm_loss, nsp_loss)
@@ -283,6 +281,7 @@ bert_test :: proc(allocator: mem.Allocator) {
 
 		// Optimizer step
 		nn.adam_step(&opt)
+		nn.adam_zero_grad(&opt)
 
 		// Cleanup
 		t.tensor_free_graph(total_loss)

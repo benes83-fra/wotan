@@ -189,7 +189,7 @@ batch_norm_2d_layer_new :: proc(
 	layer.running_mean = t.tensor_new(rm_data, false, allocator)
 
 	rv_data := l.matrix_new(f64, 1, num_features, allocator)
-	for i in 0 ..< num_features {rv_data.data[i] = 1.0} // as torch, before any batch
+	for i in 0 ..< num_features {rv_data.data[i] = 1.0} 	// as torch, before any batch
 	layer.running_var = t.tensor_new(rv_data, false, allocator)
 
 	return layer
@@ -469,17 +469,12 @@ positional_encoding_forward :: proc(pe: ^PositionalEncoding, x: ^t.Tensor) -> ^t
 
 	// The encoding as a constant tensor laid out like x
 	n := seq_len * embed_dim
-	pe_data := l.matrix_new(f64, x.data.rows, x.data.cols, x.allocator)
-	for b in 0 ..< batch {copy(pe_data.data[b * n:(b + 1) * n], pe.pe[:n])}
-	pe_t := t.tensor_new(pe_data, false, x.allocator)
-	pe_t.shape = x.shape
+	pe_t := _constant(batch * n, x.shape, x.allocator)
+	pe_t.data.rows, pe_t.data.cols = x.data.rows, x.data.cols
+	for b in 0 ..< batch {copy(pe_t.data.data[b * n:(b + 1) * n], pe.pe[:n])}
 
 	out := t.tensor_add(x, pe_t)
-	if out.requires_grad {
-		pe_t.owned_by_graph = true // freed with the graph
-	} else {
-		t.tensor_free(pe_t)
-	}
+	_constant_done(pe_t, out)
 	return out
 }
 // ============================================================================
@@ -613,7 +608,7 @@ _attention :: proc(
 }
 
 // Additive score of a hidden position (its weight underflows to exactly 0)
-@(private = "file")
+@(private)
 _MASKED :: -1e9
 
 // ============================================================================

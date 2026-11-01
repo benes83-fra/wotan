@@ -83,13 +83,6 @@ mamba_layer_forward :: proc(layer: ^MambaLayer, x: ^t.Tensor, h_0: ^t.Tensor) ->
 	C_proj := linear_forward(&layer.proj_C, x)
 	delta_raw := linear_forward(&layer.proj_Delta, x)
 	Delta := t.tensor_softplus(delta_raw)
-	if layer.proj_x.weights.requires_grad {
-		x_proj.requires_grad = true
-		B_proj.requires_grad = true
-		C_proj.requires_grad = true
-		delta_raw.requires_grad = true
-		Delta.requires_grad = true
-	}
 	// 2. ✅ REPARAMETERIZE A: A = -exp(theta_A)
 	// This mathematically guarantees A is ALWAYS negative, preventing explosions!
 	A_pos := t.tensor_exp(layer.A)
@@ -108,7 +101,4 @@ mamba_layer_forward :: proc(layer: ^MambaLayer, x: ^t.Tensor, h_0: ^t.Tensor) ->
 	out := linear_forward(&layer.proj_out, ssm_out)
 
 	return out
-}
-mamba_layer_constrain :: proc(layer: ^MambaLayer) {
-	t.tensor_clip_weights(layer.A, -8.0, -0.05)
 }

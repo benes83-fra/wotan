@@ -7,6 +7,7 @@ import t "../tensor"
 import "core:math"
 import "core:math/rand"
 import "core:mem"
+import "core:slice"
 
 // ============================================================================
 // GPT Block (Pre-LayerNorm, no cross-attention)
@@ -75,6 +76,7 @@ gpt_block_forward :: proc(
 	x: ^t.Tensor,
 	mask: []f64,
 	training: bool,
+	aux_loss: bool = false,
 ) -> ^t.Tensor {
 	// Pre-LayerNorm
 	x_norm := layer_norm_layer_forward(&block.ln1, x)
@@ -90,7 +92,7 @@ gpt_block_forward :: proc(
 	x1_norm := layer_norm_layer_forward(&block.ln2, x1)
 	ffn_out: ^t.Tensor
 	if block.use_moe {
-		ffn_out = moe_layer_forward(&block.moe, x1_norm, x1_norm.allocator)
+		ffn_out = moe_layer_forward(&block.moe, x1_norm, x1_norm.allocator, aux_loss)
 	} else {
 		ffn_out = ffn_layer_forward(&block.ffn, x1_norm)
 	}
@@ -119,7 +121,8 @@ GPTModel :: struct {
 	blocks:         [dynamic]GPTBlock,
 	final_ln:       LayerNormLayer,
 	output_proj:    LinearLayer,
-	total_aux_loss: f64,
+	total_aux_loss: f64, // MoE load-balancing loss of the last forward pass
+	aux_loss:       ^t.Tensor, // the same in the graph (forward with aux_loss = true), else nil
 	allocator:      mem.Allocator,
 }
 
@@ -189,43 +192,37 @@ gpt_model_free :: proc(model: ^GPTModel) {
 	linear_layer_free(&model.output_proj)
 }
 
+// Logits [batch, seq_len, vocab_size]. With MoE blocks and aux_loss = true,
+// model.aux_loss is the summed load-balancing loss as part of the graph.
 gpt_model_forward :: proc(
 	model: ^GPTModel,
 	input_ids: ^t.Tensor,
 	mask: []f64,
 	training: bool,
+	aux_loss: bool = false,
 ) -> ^t.Tensor {
 	batch := input_ids.shape[0]
 	seq_len := input_ids.shape[1]
 	model.total_aux_loss = 0.0
-	// Token embeddings
+	model.aux_loss = nil
+
+	// Token + learned positional embeddings
 	token_emb := embedding_layer_forward(&model.token_emb, input_ids)
-
-	// ✅ FIX: Create positional embeddings directly, without creating pos_ids tensor
-	pos_emb_data := l.matrix_new(f64, 1, batch * seq_len * model.d_model, input_ids.allocator)
-	for b in 0 ..< batch {
-		for s in 0 ..< seq_len {
-			// Copy the s-th row of pos_emb.weight to the appropriate position
-			src_offset := s * model.d_model
-			dst_offset := (b * seq_len + s) * model.d_model
-			copy(
-				pos_emb_data.data[dst_offset:dst_offset + model.d_model],
-				model.pos_emb.weight.data.data[src_offset:src_offset + model.d_model],
-			)
-		}
-	}
-	pos_emb := t.tensor_new(pos_emb_data, false, input_ids.allocator)
-	pos_emb.shape = [4]int{batch, seq_len, model.d_model, 1}
-	pos_emb.owned_by_graph = true
-
-	// Add token and positional embeddings
+	pos_ids := _position_ids(batch, seq_len, input_ids.allocator)
+	pos_emb := embedding_layer_forward(&model.pos_emb, pos_ids)
+	_constant_done(pos_ids, pos_emb)
 	x := t.tensor_add(token_emb, pos_emb)
 
 	// Pass through GPT blocks
 	for i in 0 ..< len(model.blocks) {
-		x = gpt_block_forward(&model.blocks[i], x, mask, training)
-		if model.blocks[i].use_moe {
-			model.total_aux_loss += model.blocks[i].moe.aux_loss_val
+		block := &model.blocks[i]
+		x = gpt_block_forward(block, x, mask, training, aux_loss)
+		if block.use_moe {
+			model.total_aux_loss += block.moe.aux_loss_val
+			if block.moe.aux_loss != nil {
+				model.aux_loss =
+					block.moe.aux_loss if model.aux_loss == nil else t.tensor_add(model.aux_loss, block.moe.aux_loss)
+			}
 		}
 	}
 
@@ -237,58 +234,103 @@ gpt_model_forward :: proc(
 
 	return logits
 }
+// All trainable GPT parameters (the order of the optimizer state)
+gpt_model_parameters :: proc(
+	model: ^GPTModel,
+	allocator: mem.Allocator = context.allocator,
+) -> [dynamic]^t.Tensor {
+	ps := make([dynamic]^t.Tensor, 0, 16, allocator)
+	add :: proc(ps: ^[dynamic]^t.Tensor, layer: Layer) {
+		lay := layer
+		layer_parameters(&lay, ps)
+	}
+	add(&ps, model.token_emb)
+	add(&ps, model.pos_emb)
+	for &block in model.blocks {
+		add(&ps, block.ln1)
+		add(&ps, block.mha)
+		add(&ps, block.ln2)
+		if block.use_moe {add(&ps, block.moe)} else {add(&ps, block.ffn)}
+	}
+	add(&ps, model.final_ln)
+	add(&ps, model.output_proj)
+	return ps
+}
+
 // Register all GPT parameters with optimizer
 gpt_model_add_to_optimizer :: proc(model: ^GPTModel, opt: ^Adam) {
-	adam_add_param(opt, model.token_emb.weight)
-	adam_add_param(opt, model.pos_emb.weight)
-
-	for i in 0 ..< len(model.blocks) {
-		block := &model.blocks[i]
-		adam_add_param(opt, block.ln1.gamma)
-		adam_add_param(opt, block.ln1.beta)
-		adam_add_param(opt, block.mha.q_proj.weights)
-		adam_add_param(opt, block.mha.q_proj.bias)
-		adam_add_param(opt, block.mha.k_proj.weights)
-		adam_add_param(opt, block.mha.k_proj.bias)
-		adam_add_param(opt, block.mha.v_proj.weights)
-		adam_add_param(opt, block.mha.v_proj.bias)
-		adam_add_param(opt, block.mha.out_proj.weights)
-		adam_add_param(opt, block.mha.out_proj.bias)
-		adam_add_param(opt, block.ln2.gamma)
-		adam_add_param(opt, block.ln2.beta)
-
-		// ✅ FIX: Register either MoE or FFN parameters
-		if block.use_moe {
-			adam_add_param(opt, block.moe.router.weights)
-			if block.moe.router.bias != nil {adam_add_param(opt, block.moe.router.bias)}
-			for e in 0 ..< block.moe.num_experts {
-				adam_add_param(opt, block.moe.experts[e].fc1.weights)
-				if block.moe.experts[e].fc1.bias !=
-				   nil {adam_add_param(opt, block.moe.experts[e].fc1.bias)}
-				adam_add_param(opt, block.moe.experts[e].fc2.weights)
-				if block.moe.experts[e].fc2.bias !=
-				   nil {adam_add_param(opt, block.moe.experts[e].fc2.bias)}
-			}
-		} else {
-			adam_add_param(opt, block.ffn.fc1.weights)
-			if block.ffn.fc1.bias != nil {adam_add_param(opt, block.ffn.fc1.bias)}
-			adam_add_param(opt, block.ffn.fc2.weights)
-			if block.ffn.fc2.bias != nil {adam_add_param(opt, block.ffn.fc2.bias)}
-		}
-	}
-
-	adam_add_param(opt, model.final_ln.gamma)
-	adam_add_param(opt, model.final_ln.beta)
-	adam_add_param(opt, model.output_proj.weights)
-	adam_add_param(opt, model.output_proj.bias)
+	ps := gpt_model_parameters(model, context.temp_allocator)
+	defer delete(ps)
+	for p in ps {adam_add_param(opt, p)}
 }
 
 // ============================================================================
 // Sampling Functions
 // ============================================================================
+// A repetition penalty > 1 divides positive logits of recently seen tokens by
+// `penalty` and multiplies negative ones (once per distinct token, as in CTRL).
+// A temperature <= 0 means greedy decoding.
 
-// Temperature sampling
-// Add repetition penalty to temperature sampling
+// Logits with the repetition penalty applied (temp allocator)
+@(private = "file")
+_penalized :: proc(logits: []f64, recent_tokens: []int, penalty: f64) -> []f64 {
+	out := make([]f64, len(logits), context.temp_allocator)
+	copy(out, logits)
+	if penalty > 1.0 {
+		seen := make([]bool, len(logits), context.temp_allocator)
+		defer delete(seen, context.temp_allocator)
+		for tok in recent_tokens {
+			if tok < 0 || tok >= len(out) || seen[tok] {continue}
+			seen[tok] = true
+			out[tok] = out[tok] / penalty if out[tok] > 0 else out[tok] * penalty
+		}
+	}
+	return out
+}
+
+@(private = "file")
+_argmax :: proc(v: []f64) -> int {
+	best := 0
+	for x, i in v {if x > v[best] {best = i}}
+	return best
+}
+
+// Samples index idx[i] with probability ∝ exp(v[idx[i]] / temperature)
+@(private = "file")
+_sample_softmax :: proc(v: []f64, idx: []int, temperature: f64) -> int {
+	max_val := v[idx[0]]
+	for i in idx {max_val = max(max_val, v[i])}
+	w := make([]f64, len(idx), context.temp_allocator)
+	defer delete(w, context.temp_allocator)
+	sum := 0.0
+	for i, k in idx {
+		w[k] = math.exp((v[i] - max_val) / temperature)
+		sum += w[k]
+	}
+	r := rand.float64() * sum
+	for k in 0 ..< len(idx) {
+		r -= w[k]
+		if r < 0 {return idx[k]}
+	}
+	return idx[len(idx) - 1]
+}
+
+// Indices 0..n-1 sorted by v descending (temp allocator)
+@(private = "file")
+_by_value_desc :: proc(v: []f64) -> []int {
+	idx := make([]int, len(v), context.temp_allocator)
+	for &i, k in idx {i = k}
+	Ctx :: struct {
+		v: []f64,
+	}
+	context.user_ptr = &Ctx{v}
+	slice.sort_by(idx, proc(a, b: int) -> bool {
+		v := (^Ctx)(context.user_ptr).v
+		return v[a] > v[b]
+	})
+	return idx
+}
+
 // Temperature sampling with repetition penalty
 gpt_sample_temperature :: proc(
 	logits: []f64,
@@ -296,88 +338,13 @@ gpt_sample_temperature :: proc(
 	recent_tokens: []int,
 	penalty: f64,
 ) -> int {
-	if temperature <= 0.0 {
-		// Greedy decoding with penalty
-		max_idx := 0
-		max_val := logits[0]
-
-		// Apply penalty to recent tokens
-		val := logits[0]
-		if penalty > 1.0 {
-			for recent in recent_tokens {
-				if 0 == recent {
-					if val > 0 {val /= penalty} else {val *= penalty}
-				}
-			}
-		}
-		max_val = val
-
-		for i in 1 ..< len(logits) {
-			val = logits[i]
-			if penalty > 1.0 {
-				for recent in recent_tokens {
-					if i == recent {
-						if val > 0 {val /= penalty} else {val *= penalty}
-					}
-				}
-			}
-			if val > max_val {
-				max_val = val
-				max_idx = i
-			}
-		}
-		return max_idx
-	}
-
-	// Find max for numerical stability
-	max_val := logits[0]
-	for i in 1 ..< len(logits) {
-		if logits[i] > max_val {
-			max_val = logits[i]
-		}
-	}
-
-	// Apply temperature and repetition penalty
-	scaled := make([]f64, len(logits), context.temp_allocator)
-	defer delete(scaled, context.temp_allocator)
-
-	sum_exp := 0.0
-	for i in 0 ..< len(logits) {
-		val := logits[i]
-
-		// Apply repetition penalty
-		if penalty > 1.0 {
-			for recent in recent_tokens {
-				if i == recent {
-					if val > 0 {
-						val /= penalty
-					} else {
-						val *= penalty
-					}
-				}
-			}
-		}
-
-		scaled[i] = math.exp((val - max_val) / temperature)
-		sum_exp += scaled[i]
-	}
-
-	// Normalize
-	for i in 0 ..< len(logits) {
-		scaled[i] /= sum_exp
-	}
-
-	// Sample
-	r := rand.float64()
-	cum_prob := 0.0
-	for i in 0 ..< len(logits) {
-		cum_prob += scaled[i]
-		if r < cum_prob {
-			return i
-		}
-	}
-
-	return len(logits) - 1
+	v := _penalized(logits, recent_tokens, penalty)
+	defer delete(v, context.temp_allocator)
+	if temperature <= 0.0 {return _argmax(v)}
+	idx := make([]int, len(v), context.temp_allocator)
+	defer delete(idx, context.temp_allocator)
+	for &i, k in idx {i = k}
+	return _sample_softmax(v, idx, temperature)
 }
 
 // Top-k sampling with repetition penalty
@@ -391,91 +358,16 @@ gpt_sample_top_k :: proc(
 	if k <= 0 || k >= len(logits) {
 		return gpt_sample_temperature(logits, temperature, recent_tokens, penalty)
 	}
-
-	// Find top-k logits with penalty applied
-	top_k_indices := make([]int, k, context.temp_allocator)
-	top_k_logits := make([]f64, k, context.temp_allocator)
-	defer {
-		delete(top_k_indices, context.temp_allocator)
-		delete(top_k_logits, context.temp_allocator)
-	}
-
-	// Initialize with minimum values
-	for i in 0 ..< k {
-		top_k_indices[i] = -1
-		top_k_logits[i] = -math.F64_MAX
-	}
-
-	// Find top-k with penalty
-	for i in 0 ..< len(logits) {
-		val := logits[i]
-
-		// Apply repetition penalty
-		if penalty > 1.0 {
-			for recent in recent_tokens {
-				if i == recent {
-					if val > 0 {val /= penalty} else {val *= penalty}
-				}
-			}
-		}
-
-		// Check if this should be in top-k
-		if val > top_k_logits[k - 1] {
-			// Insert in sorted position
-			for j in 0 ..< k {
-				if val > top_k_logits[j] {
-					// Shift down
-					for m := k - 1; m > j; m -= 1 {
-						top_k_indices[m] = top_k_indices[m - 1]
-						top_k_logits[m] = top_k_logits[m - 1]
-					}
-					top_k_indices[j] = i
-					top_k_logits[j] = val
-					break
-				}
-			}
-		}
-	}
-
-	// Apply temperature
-	if temperature > 0.0 {
-		for i in 0 ..< k {
-			top_k_logits[i] /= temperature
-		}
-	}
-
-	// Softmax over top-k
-	max_val := top_k_logits[0]
-	for i in 1 ..< k {
-		if top_k_logits[i] > max_val {
-			max_val = top_k_logits[i]
-		}
-	}
-
-	sum_exp := 0.0
-	for i in 0 ..< k {
-		top_k_logits[i] = math.exp(top_k_logits[i] - max_val)
-		sum_exp += top_k_logits[i]
-	}
-
-	for i in 0 ..< k {
-		top_k_logits[i] /= sum_exp
-	}
-
-	// Sample
-	r := rand.float64()
-	cum_prob := 0.0
-	for i in 0 ..< k {
-		cum_prob += top_k_logits[i]
-		if r < cum_prob {
-			return top_k_indices[i]
-		}
-	}
-
-	return top_k_indices[k - 1]
+	v := _penalized(logits, recent_tokens, penalty)
+	defer delete(v, context.temp_allocator)
+	if temperature <= 0.0 {return _argmax(v)}
+	idx := _by_value_desc(v)
+	defer delete(idx, context.temp_allocator)
+	return _sample_softmax(v, idx[:k], temperature)
 }
 
-// Top-p (nucleus) sampling with repetition penalty
+// Top-p (nucleus) sampling with repetition penalty: the smallest set of most
+// likely tokens whose probability reaches p
 gpt_sample_top_p :: proc(
 	logits: []f64,
 	p: f64,
@@ -486,138 +378,29 @@ gpt_sample_top_p :: proc(
 	if p >= 1.0 {
 		return gpt_sample_temperature(logits, temperature, recent_tokens, penalty)
 	}
-
-	// Apply temperature, penalty and softmax
-	scaled := make([]f64, len(logits), context.temp_allocator)
-	defer delete(scaled, context.temp_allocator)
-
-	// Find max with penalty
-	max_val := -math.F64_MAX
-	for i in 0 ..< len(logits) {
-		val := logits[i]
-		if penalty > 1.0 {
-			for recent in recent_tokens {
-				if i == recent {
-					if val > 0 {val /= penalty} else {val *= penalty}
-				}
-			}
-		}
-		if val > max_val {
-			max_val = val
-		}
+	v := _penalized(logits, recent_tokens, penalty)
+	defer delete(v, context.temp_allocator)
+	if temperature <= 0.0 {return _argmax(v)}
+	idx := _by_value_desc(v)
+	defer delete(idx, context.temp_allocator)
+	// probabilities at this temperature, in descending order
+	max_val := v[idx[0]]
+	sum := 0.0
+	for i in idx {sum += math.exp((v[i] - max_val) / temperature)}
+	cum, size := 0.0, 0
+	for i in idx {
+		cum += math.exp((v[i] - max_val) / temperature) / sum
+		size += 1
+		if cum >= p {break}
 	}
-
-	sum_exp := 0.0
-	for i in 0 ..< len(logits) {
-		val := logits[i]
-		if penalty > 1.0 {
-			for recent in recent_tokens {
-				if i == recent {
-					if val > 0 {val /= penalty} else {val *= penalty}
-				}
-			}
-		}
-		scaled[i] = math.exp((val - max_val) / temperature)
-		sum_exp += scaled[i]
-	}
-
-	for i in 0 ..< len(logits) {
-		scaled[i] /= sum_exp
-	}
-
-	// Sort by probability (descending)
-	indices := make([]int, len(logits), context.temp_allocator)
-	probs := make([]f64, len(logits), context.temp_allocator)
-	defer {
-		delete(indices, context.temp_allocator)
-		delete(probs, context.temp_allocator)
-	}
-
-	for i in 0 ..< len(logits) {
-		indices[i] = i
-		probs[i] = scaled[i]
-	}
-
-	// Simple bubble sort
-	for i in 0 ..< len(probs) - 1 {
-		for j in 0 ..< len(probs) - i - 1 {
-			if probs[j] < probs[j + 1] {
-				temp_prob := probs[j]
-				probs[j] = probs[j + 1]
-				probs[j + 1] = temp_prob
-
-				temp_idx := indices[j]
-				indices[j] = indices[j + 1]
-				indices[j + 1] = temp_idx
-			}
-		}
-	}
-
-	// Find nucleus
-	cum_prob := 0.0
-	nucleus_size := 0
-	for i in 0 ..< len(probs) {
-		cum_prob += probs[i]
-		nucleus_size += 1
-		if cum_prob >= p {
-			break
-		}
-	}
-
-	// Normalize probabilities within nucleus
-	sum_nucleus := 0.0
-	for i in 0 ..< nucleus_size {
-		sum_nucleus += probs[i]
-	}
-
-	for i in 0 ..< nucleus_size {
-		probs[i] /= sum_nucleus
-	}
-
-	// Sample from nucleus
-	r := rand.float64()
-	cum_prob = 0.0
-	for i in 0 ..< nucleus_size {
-		cum_prob += probs[i]
-		if r < cum_prob {
-			return indices[i]
-		}
-	}
-
-	return indices[nucleus_size - 1]
+	return _sample_softmax(v, idx[:size], temperature)
 }
 
-// Helper: softmax and sample
+// Samples from softmax(logits) (logits are left unchanged)
 gpt_softmax_sample :: proc(logits: []f64) -> int {
-	max_val := logits[0]
-	for i in 1 ..< len(logits) {
-		if logits[i] > max_val {
-			max_val = logits[i]
-		}
-	}
-
-	sum_exp := 0.0
-	for i in 0 ..< len(logits) {
-		logits[i] = math.exp(logits[i] - max_val)
-		sum_exp += logits[i]
-	}
-
-	for i in 0 ..< len(logits) {
-		logits[i] /= sum_exp
-	}
-
-	r := rand.float64()
-	cum_prob := 0.0
-	for i in 0 ..< len(logits) {
-		cum_prob += logits[i]
-		if r < cum_prob {
-			return i
-		}
-	}
-
-	return len(logits) - 1
+	return gpt_sample_temperature(logits, 1.0, nil, 1.0)
 }
-// In gpt.odin
+
 gpt_replace_output_head :: proc(model: ^GPTModel, new_vocab_size: int, allocator: mem.Allocator) {
 	linear_layer_free(&model.output_proj)
 	model.output_proj = linear_layer_new(model.d_model, new_vocab_size, allocator)

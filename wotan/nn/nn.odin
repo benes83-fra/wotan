@@ -7,6 +7,61 @@ import "core:math/rand"
 import "core:mem"
 
 // ============================================================================
+// Constant op inputs
+// ============================================================================
+// Forward passes create constant tensors (zero states, position ids, masks)
+// as op inputs. When the op output is part of a graph the backward pass may
+// still read them, so the graph owns and frees them; otherwise they are freed
+// right away.
+
+// Constant [1, len(values)] tensor with the given logical shape (zeros if values is nil)
+@(private)
+_constant :: proc(n: int, shape: [4]int, alloc: mem.Allocator, values: []f64 = nil) -> ^t.Tensor {
+	m := l.matrix_new(f64, 1, n, alloc)
+	if values != nil {copy(m.data, values)}
+	c := t.tensor_new(m, false, alloc)
+	c.shape = shape
+	return c
+}
+
+// Hands a constant input of `out` to the graph, or frees it if there is none
+@(private)
+_constant_done :: proc(c, out: ^t.Tensor) {
+	if out.requires_grad {
+		c.owned_by_graph = true
+	} else {
+		t.tensor_free(c)
+	}
+}
+
+// x as a true [rows, cols] matrix: row-wise ops (softmax, cross-entropy, a
+// standard matmul) work on data rows, while sequence tensors are stored flat.
+// Gradients flow back to x.
+as_matrix :: proc(
+	x: ^t.Tensor,
+	rows, cols: int,
+	allocator: mem.Allocator = context.allocator,
+) -> ^t.Tensor {
+	assert(rows * cols == len(x.data.data), "as_matrix: size mismatch")
+	m := t.tensor_new(l.matrix_new(f64, rows, cols, allocator), x.requires_grad, allocator)
+	copy(m.data.data, x.data.data)
+	m.shape = [4]int{rows, cols, 1, 1}
+	if m.requires_grad {
+		m.op = .Reshape
+		append(&m.inputs, x)
+	}
+	return m
+}
+
+// Position ids 0..seq_len-1 for each sequence, shaped [batch, seq_len] for an embedding lookup
+@(private)
+_position_ids :: proc(batch, seq_len: int, alloc: mem.Allocator) -> ^t.Tensor {
+	ids := _constant(batch * seq_len, {batch, seq_len, 1, 1}, alloc)
+	for i in 0 ..< batch * seq_len {ids.data.data[i] = f64(i % seq_len)}
+	return ids
+}
+
+// ============================================================================
 // 1. Linear Layer (Dense Layer)
 // ============================================================================
 

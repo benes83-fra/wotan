@@ -2,8 +2,6 @@ package nn
 
 import l "../linalg"
 import t "../tensor"
-import "core:fmt"
-import "core:math"
 import "core:mem"
 
 // ============================================================================
@@ -18,7 +16,8 @@ MoELayer :: struct {
 	experts:      []FFNLayer,
 	router:       LinearLayer, // Maps d_model -> num_experts
 	allocator:    mem.Allocator,
-	aux_loss_val: f64,
+	aux_loss_val: f64, // load-balancing loss of the last forward pass
+	aux_loss:     ^t.Tensor, // the same as part of the graph (forward with aux_loss = true), else nil
 }
 
 moe_layer_new :: proc(
@@ -59,164 +58,84 @@ moe_layer_free :: proc(layer: ^MoELayer) {
 	layer.num_experts = 0
 }
 
-// moe_layer_forward performs Sparse MoE routing using Gated Dense Routing.
+// moe_layer_forward routes every token to its top_k experts:
+//   gates = softmax of the router logits over the top_k experts (others 0)
+//   out   = Σ_e gate_e · FFN_e(x)
+// Experts run on all tokens; one that no token selects is skipped. The
+// load-balancing loss E · Σ_e f_e P_e (Switch Transformer; f_e share of the
+// top-k assignments, P_e mean router probability) is kept in aux_loss_val,
+// and with aux_loss = true also as layer.aux_loss in the graph: add it to the
+// training loss so that it trains the router.
 moe_layer_forward :: proc(
 	layer: ^MoELayer,
 	x: ^t.Tensor,
 	allocator: mem.Allocator = context.allocator,
-) -> ^t.Tensor {
-	batch := x.shape[0]
-	seq_len := x.shape[1]
-	N := batch * seq_len
-
-	// 1. Flatten to [N, d_model] for routing
-	// ✅ FIX: Manually create a true 2D matrix (rows=N, cols=d_model).
-	// This forces tensor_matmul to use the clean Standard 2D path, bypassing
-	// the sequence-model hack that mutates shape[2] and breaks the router dimensions.
-	x_flat_data := l.matrix_new(f64, N, layer.d_model, allocator)
-	copy(x_flat_data.data, x.data.data)
-	x_flat := t.tensor_new(x_flat_data, x.requires_grad, allocator)
-	x_flat.shape = [4]int{N, layer.d_model, 1, 1}
-	if x_flat.requires_grad {
-		x_flat.op = .Reshape
-		append(&x_flat.inputs, x)
-	}
-	// 2. Router Logits & Softmax
-	logits := linear_forward(&layer.router, x_flat)
-	probs := t.tensor_softmax(logits) // [N, num_experts]
-
-	// 3. Top-K Masking
-	mask := t.tensor_top_k_mask(probs, layer.top_k, allocator)
-
-	// 4. Gates = probs * mask (Straight-Through Estimator)
-	gates := t.tensor_mul(probs, mask)
-
-	// 5. Renormalize gates so they sum to 1 for each token
-	for n in 0 ..< N {
-		sum_g: f64 = 0.0
-		for e in 0 ..< layer.num_experts {
-			sum_g += gates.data.data[n * layer.num_experts + e]
-		}
-		if sum_g > 1e-8 {
-			for e in 0 ..< layer.num_experts {
-				gates.data.data[n * layer.num_experts + e] /= sum_g
-			}
-		}
-	}
-	load := make([]f64, layer.num_experts, allocator)
-	importance := make([]f64, layer.num_experts, allocator)
-
-	for n in 0 ..< N {
-		for e in 0 ..< layer.num_experts {
-			load[e] += mask.data.data[n * layer.num_experts + e]
-			importance[e] += probs.data.data[n * layer.num_experts + e]
-		}
-	}
-
-	aux_loss_val := 0.0
-	for e in 0 ..< layer.num_experts {
-		f_i := load[e] / f64(N)
-		P_i := importance[e] / f64(N)
-		aux_loss_val += f_i * P_i
-	}
-	layer.aux_loss_val = aux_loss_val * f64(layer.num_experts)
-
-	delete(load, allocator)
-	delete(importance, allocator)
-	// 6. Initialize Accumulator
-	//out_data := l.matrix_new(f64, N, layer.d_model, allocator)
-	out_flat: ^t.Tensor
-
-
-	// 7. Route through Experts
-	for i in 0 ..< layer.num_experts {
-		// ✅ FIX: Use the graph-preserving slice operation.
-		// gate_i is now a legitimate child of `gates`. The DAG is unbroken.
-		gate_i := t.tensor_slice_gate(gates, i, allocator)
-
-		x_gated := t.tensor_gate_mul(x_flat, gate_i, allocator)
-		e_out := ffn_layer_forward(&layer.experts[i], x_gated)
-
-		if out_flat == nil {
-			out_flat = e_out
-		} else {
-			if out_flat.data.rows != e_out.data.rows || out_flat.data.cols != e_out.data.cols {
-				e_out = t.tensor_reshape(e_out, out_flat.shape)
-			}
-			out_flat = t.tensor_add(out_flat, e_out)
-		}
-	}
-
-	// 8. Reshape back
-	out := t.tensor_reshape(out_flat, [4]int{batch, seq_len, layer.d_model, 1}, allocator)
-	return out
-
-}
-// moe_layer_aux_loss computes the load-balancing loss to prevent expert collapse.
-// It encourages the router to distribute tokens evenly across all experts.
-moe_layer_aux_loss :: proc(
-	layer: ^MoELayer,
-	x: ^t.Tensor,
-	allocator: mem.Allocator = context.allocator,
+	aux_loss: bool = false,
 ) -> ^t.Tensor {
 	batch := x.shape[0]
 	seq_len := x.shape[1]
 	N := batch * seq_len
 	E := layer.num_experts
 
+	// 1. Tokens as a true [N, d_model] matrix (the router softmax works on rows)
+	x_flat := as_matrix(x, N, layer.d_model, allocator)
+	logits := linear_forward(&layer.router, x_flat) // [N, E]
 
-	// 1. Recompute router probabilities (very cheap, just one Linear layer)
-	// ✅ FIX: Use true 2D matrix to bypass the sequence hack
-	x_flat_data := l.matrix_new(f64, N, layer.d_model, allocator)
-	copy(x_flat_data.data, x.data.data)
-	x_flat := t.tensor_new(x_flat_data, false, allocator) // Detached from graph
-	x_flat.shape = [4]int{N, layer.d_model, 1, 1}
-	logits := linear_forward(&layer.router, x_flat)
+	// 2. Top-k gates: the other experts get -inf before the softmax
+	hide := _constant(N * E, {N, E, 1, 1}, allocator)
+	hide.data.rows, hide.data.cols = N, E
+	load := make([]f64, E, context.temp_allocator)
+	defer delete(load, context.temp_allocator)
+	for n in 0 ..< N {
+		row := logits.data.data[n * E:(n + 1) * E]
+		h := hide.data.data[n * E:(n + 1) * E]
+		for &v in h {v = _MASKED}
+		for _ in 0 ..< min(layer.top_k, E) {
+			best := -1
+			for e in 0 ..< E {
+				if h[e] != 0 && (best < 0 || row[e] > row[best]) {best = e}
+			}
+			h[best] = 0
+			load[best] += 1
+		}
+	}
+	masked := t.tensor_add(logits, hide)
+	_constant_done(hide, masked)
+	gates := t.tensor_softmax(masked)
+
+	// 3. Load balancing: E Σ_e f_e P_e = Σ_n Σ_e probs[n, e] · E f_e / N
 	probs := t.tensor_softmax(logits)
-	mask := t.tensor_top_k_mask(probs, layer.top_k)
-
-	// 2. Compute Load (fraction of tokens routed to each expert)
-	// load[e] = sum(mask[:, e]) / N
-	load := make([]f64, E, allocator)
-	for n in 0 ..< N {
-		for e in 0 ..< E {
-			load[e] += mask.data.data[n * E + e]
-		}
-	}
-	for e in 0 ..< E {load[e] /= f64(N)}
-
-	// 3. Compute Importance (average router probability for each expert)
-	// importance[e] = sum(probs[:, e]) / N
-	importance := make([]f64, E, allocator)
-	for n in 0 ..< N {
-		for e in 0 ..< E {
-			importance[e] += probs.data.data[n * E + e]
-		}
-	}
-	for e in 0 ..< E {importance[e] /= f64(N)}
-
-	// 4. Aux Loss = E * sum(load * importance)
-	aux_loss_val := 0.0
+	aux := 0.0
 	for e in 0 ..< E {
-		aux_loss_val += load[e] * importance[e]
+		P_e := 0.0
+		for n in 0 ..< N {P_e += probs.data.data[n * E + e]}
+		aux += (load[e] / f64(N)) * (P_e / f64(N))
 	}
-	aux_loss_val *= f64(E)
+	layer.aux_loss_val = f64(E) * aux
+	layer.aux_loss = nil
+	if aux_loss {
+		w := _constant(N * E, {N, E, 1, 1}, allocator)
+		w.data.rows, w.data.cols = N, E
+		for n in 0 ..< N {
+			for e in 0 ..< E {w.data.data[n * E + e] = f64(E) * load[e] / (f64(N) * f64(N))}
+		}
+		weighted := t.tensor_mul(probs, w)
+		_constant_done(w, weighted)
+		layer.aux_loss = t.tensor_sum(weighted)
+	} else if !probs.requires_grad {
+		t.tensor_free(probs)
+	}
 
-	// 5. Wrap in a scalar tensor
-	out_data := l.matrix_new(f64, 1, 1, allocator)
-	out_data.data[0] = aux_loss_val
-
-	// Note: We don't attach this to the autograd graph because the routing mask
-	// is non-differentiable. The gradients for the router flow through the
-	// Straight-Through Estimator in the main forward pass.
-	out := t.tensor_new(out_data, false, allocator)
-
-	delete(load, allocator)
-	delete(importance, allocator)
-	t.tensor_free(x_flat)
-	t.tensor_free(logits)
-	t.tensor_free_graph(probs)
-	t.tensor_free_graph(mask)
-
-	return out
+	// 4. Weighted sum of the experts
+	out_flat: ^t.Tensor
+	for e in 0 ..< E {
+		if load[e] == 0 {continue}
+		y := t.tensor_gate_mul(
+			ffn_layer_forward(&layer.experts[e], x_flat),
+			t.tensor_slice_gate(gates, e, allocator),
+			allocator,
+		)
+		out_flat = y if out_flat == nil else t.tensor_add(out_flat, y)
+	}
+	return t.tensor_reshape(out_flat, [4]int{batch, seq_len, layer.d_model, 1}, allocator)
 }
