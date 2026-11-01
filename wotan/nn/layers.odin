@@ -189,6 +189,7 @@ batch_norm_2d_layer_new :: proc(
 	layer.running_mean = t.tensor_new(rm_data, false, allocator)
 
 	rv_data := l.matrix_new(f64, 1, num_features, allocator)
+	for i in 0 ..< num_features {rv_data.data[i] = 1.0} // as torch, before any batch
 	layer.running_var = t.tensor_new(rv_data, false, allocator)
 
 	return layer
@@ -423,21 +424,17 @@ positional_encoding_new :: proc(
 
 	// Precompute the denominator: 10000^(2i / embed_dim)
 	// Using log/exp for numerical stability and efficiency
-	div_term := make([]f64, embed_dim / 2, allocator)
-	for i in 0 ..< embed_dim / 2 {
+	div_term := make([]f64, (embed_dim + 1) / 2, allocator)
+	for i in 0 ..< len(div_term) {
 		div_term[i] = math.exp(-f64(2 * i) * math.ln_f64(10000.0) / f64(embed_dim))
 	}
 
+	// PE(pos, 2i) = sin(pos / 10000^(2i/d)), PE(pos, 2i+1) = cos(...)
 	for pos in 0 ..< max_seq_len {
 		pos_f := f64(pos)
-		for i in 0 ..< embed_dim / 2 {
-			pe_idx_even := pos * embed_dim + 2 * i
-			pe_idx_odd := pos * embed_dim + 2 * i + 1
-
-			pe[pe_idx_even] = math.sin(pos_f * div_term[i])
-			if 2 * i + 1 < embed_dim {
-				pe[pe_idx_odd] = math.cos(pos_f * div_term[i])
-			}
+		for i in 0 ..< embed_dim {
+			angle := pos_f * div_term[i / 2]
+			pe[pos * embed_dim + i] = math.sin(angle) if i % 2 == 0 else math.cos(angle)
 		}
 	}
 	delete(div_term, allocator)
@@ -457,37 +454,32 @@ positional_encoding_free :: proc(pe: ^PositionalEncoding) {
 }
 
 // positional_encoding_forward adds the precomputed PE to the input embeddings
-// ✅ SIMD-optimized using vec_add_simd
+// x [batch, seq_len, embed_dim]; gradients flow through to x
 positional_encoding_forward :: proc(pe: ^PositionalEncoding, x: ^t.Tensor) -> ^t.Tensor {
 	batch := x.shape[0]
 	seq_len := x.shape[1]
 	embed_dim := x.shape[2]
 
 	if seq_len > pe.max_seq_len {
-		panic(fmt.aprintf("Sequence length %d exceeds max_seq_len %d", seq_len, pe.max_seq_len))
+		panic(fmt.tprintf("Sequence length %d exceeds max_seq_len %d", seq_len, pe.max_seq_len))
 	}
 	if embed_dim != pe.embed_dim {
-		panic(fmt.aprintf("Embed dim %d does not match PE embed_dim %d", embed_dim, pe.embed_dim))
+		panic(fmt.tprintf("Embed dim %d does not match PE embed_dim %d", embed_dim, pe.embed_dim))
 	}
 
-	out_data := l.matrix_new(f64, 1, batch * seq_len * embed_dim, x.allocator)
+	// The encoding as a constant tensor laid out like x
+	n := seq_len * embed_dim
+	pe_data := l.matrix_new(f64, x.data.rows, x.data.cols, x.allocator)
+	for b in 0 ..< batch {copy(pe_data.data[b * n:(b + 1) * n], pe.pe[:n])}
+	pe_t := t.tensor_new(pe_data, false, x.allocator)
+	pe_t.shape = x.shape
 
-	// 1. Copy input embeddings to output
-	copy(out_data.data, x.data.data)
-
-	// 2. ✅ SIMD-optimized addition of PE to each batch element
-	pe_slice := pe.pe[0:seq_len * embed_dim]
-	for b in 0 ..< batch {
-		batch_offset := b * seq_len * embed_dim
-		l.vec_add_simd(
-			out_data.data[batch_offset:batch_offset + seq_len * embed_dim],
-			pe_slice,
-			out_data.data[batch_offset:batch_offset + seq_len * embed_dim],
-		)
+	out := t.tensor_add(x, pe_t)
+	if out.requires_grad {
+		pe_t.owned_by_graph = true // freed with the graph
+	} else {
+		t.tensor_free(pe_t)
 	}
-
-	out := t.tensor_new(out_data, x.requires_grad, x.allocator)
-	out.shape = x.shape
 	return out
 }
 // ============================================================================
@@ -534,90 +526,96 @@ multi_head_attention_layer_free :: proc(layer: ^MultiHeadAttentionLayer) {
 	linear_layer_free(&layer.v_proj)
 	linear_layer_free(&layer.out_proj)
 }
+// Self-attention over x [batch, seq_len, d_model]. attention_mask [batch,
+// seq_len] is 1 at real tokens and 0 at padding; padded keys get no attention
+// (key_padding_mask in torch). is_causal hides future positions.
 multi_head_attention_layer_forward :: proc(
 	layer: ^MultiHeadAttentionLayer,
 	x: ^t.Tensor,
 	attention_mask: ^t.Tensor = nil,
 ) -> ^t.Tensor {
-	batch := x.shape[0]
-	seq_len := x.shape[1]
+	return _attention(
+		&layer.q_proj,
+		&layer.k_proj,
+		&layer.v_proj,
+		&layer.out_proj,
+		layer.num_heads,
+		layer.head_dim,
+		x,
+		x,
+		layer.use_flash,
+		layer.is_causal,
+		key_padding = attention_mask,
+	)
+}
 
-	// 1. Projections
-	q := linear_forward(&layer.q_proj, x)
-	k := linear_forward(&layer.k_proj, x)
-	v := linear_forward(&layer.v_proj, x)
+// Multi-head attention: projections, split into heads, scaled dot-product
+// attention (FlashAttention when requested and no explicit mask is given),
+// merge and output projection. Queries come from x_q [batch, seq_q, d_model],
+// keys and values from x_kv [batch, seq_k, d_model]. mask is an additive
+// [seq_q, seq_k] mask shared by all sequences; key_padding [batch, seq_k] is 0
+// at padded keys; causal hides keys after the query position.
+@(private = "file")
+_attention :: proc(
+	q_proj, k_proj, v_proj, out_proj: ^LinearLayer,
+	num_heads, head_dim: int,
+	x_q, x_kv: ^t.Tensor,
+	use_flash, causal: bool,
+	mask: []f64 = nil,
+	key_padding: ^t.Tensor = nil,
+) -> ^t.Tensor {
+	batch := x_q.shape[0]
+	seq_q := x_q.shape[1]
+	seq_k := x_kv.shape[1]
 
-	// 2. Permute to [batch * num_heads, seq_len, head_dim]
-	q_perm := t.tensor_permute_mha(q, batch, seq_len, layer.num_heads, layer.head_dim)
-	k_perm := t.tensor_permute_mha(k, batch, seq_len, layer.num_heads, layer.head_dim)
-	v_perm := t.tensor_permute_mha(v, batch, seq_len, layer.num_heads, layer.head_dim)
+	q := linear_forward(q_proj, x_q)
+	k := linear_forward(k_proj, x_kv)
+	v := linear_forward(v_proj, x_kv)
 
-	// 3. Scaled Dot-Product Attention
+	// [batch * num_heads, seq, head_dim]
+	q_perm := t.tensor_permute_mha(q, batch, seq_q, num_heads, head_dim)
+	k_perm := t.tensor_permute_mha(k, batch, seq_k, num_heads, head_dim)
+	v_perm := t.tensor_permute_mha(v, batch, seq_k, num_heads, head_dim)
+
 	att: ^t.Tensor
-
-	if layer.use_flash {
-		// ✅ FlashAttention path: Fused kernel, O(N) memory
-		if attention_mask != nil && !layer.is_causal {
-			fmt.println(
-				"WARNING: FlashAttention does not support arbitrary padding masks yet. Falling back to standard attention.",
-			)
-
-			mask_data := make([]f64, seq_len * seq_len, x.allocator)
-			defer delete(mask_data, x.allocator)
-			for b in 0 ..< batch {
-				for i in 0 ..< seq_len {
-					for j in 0 ..< seq_len {
-						val_i := attention_mask.data.data[b * seq_len + i]
-						val_j := attention_mask.data.data[b * seq_len + j]
-						if val_i == 0.0 || val_j == 0.0 {
-							mask_data[i * seq_len + j] = -10000.0
-						} else {
-							mask_data[i * seq_len + j] = 0.0
-						}
-					}
-				}
-			}
-			att = t.tensor_masked_scaled_dot_product_attention(q_perm, k_perm, v_perm, mask_data)
-		} else {
-			// Native FlashAttention (Standard or Causal)
-			att = t.tensor_flash_attention(q_perm, k_perm, v_perm, causal = layer.is_causal)
-		}
-	} else {
-		// ✅ Standard Attention path
-		if layer.is_causal {
-			causal_mask := create_causal_mask(seq_len, x.allocator)
-			defer delete(causal_mask, x.allocator)
-			att = t.tensor_masked_scaled_dot_product_attention(q_perm, k_perm, v_perm, causal_mask)
-		} else if attention_mask != nil {
-			mask_data := make([]f64, seq_len * seq_len, x.allocator)
-			defer delete(mask_data, x.allocator)
-			for b in 0 ..< batch {
-				for i in 0 ..< seq_len {
-					for j in 0 ..< seq_len {
-						val_i := attention_mask.data.data[b * seq_len + i]
-						val_j := attention_mask.data.data[b * seq_len + j]
-						if val_i == 0.0 || val_j == 0.0 {
-							mask_data[i * seq_len + j] = -10000.0
-						} else {
-							mask_data[i * seq_len + j] = 0.0
-						}
-					}
-				}
-			}
-			att = t.tensor_masked_scaled_dot_product_attention(q_perm, k_perm, v_perm, mask_data)
+	if mask == nil && key_padding == nil && (use_flash || !causal) {
+		if use_flash {
+			att = t.tensor_flash_attention(q_perm, k_perm, v_perm, causal = causal)
 		} else {
 			att = t.tensor_scaled_dot_product_attention(q_perm, k_perm, v_perm)
 		}
+	} else {
+		// FlashAttention takes no explicit masks: those use the standard kernel.
+		// With padding the mask is per sequence [batch * num_heads, seq_q, seq_k].
+		n := seq_q * seq_k
+		blocks := batch * num_heads if key_padding != nil else 1
+		m := make([]f64, blocks * n, x_q.allocator)
+		defer delete(m, x_q.allocator)
+		for blk in 0 ..< blocks {
+			mb := m[blk * n:(blk + 1) * n]
+			if mask != nil {copy(mb, mask)}
+			for i in 0 ..< seq_q {
+				for j in 0 ..< seq_k {
+					hidden := causal && j > i
+					if key_padding != nil {
+						hidden ||= key_padding.data.data[(blk / num_heads) * seq_k + j] == 0
+					}
+					if hidden {mb[i * seq_k + j] += _MASKED}
+				}
+			}
+		}
+		att = t.tensor_masked_scaled_dot_product_attention(q_perm, k_perm, v_perm, m)
 	}
 
-	// 4. Inverse permute back to [batch, seq_len, d_model]
-	att_inv := t.tensor_permute_mha_inverse(att, batch, seq_len, layer.num_heads, layer.head_dim)
-
-	// 5. Output projection
-	out := linear_forward(&layer.out_proj, att_inv)
-
-	return out
+	// [batch, seq_q, d_model]
+	att_inv := t.tensor_permute_mha_inverse(att, batch, seq_q, num_heads, head_dim)
+	return linear_forward(out_proj, att_inv)
 }
+
+// Additive score of a hidden position (its weight underflows to exactly 0)
+@(private = "file")
+_MASKED :: -1e9
+
 // ============================================================================
 // Layer Normalization Layer
 // ============================================================================
@@ -681,7 +679,7 @@ ffn_layer_new :: proc(
 	layer.d_model = d_model
 	layer.d_ff = d_ff
 
-	// Standard FFN: Linear -> ReLU -> Linear
+	// Linear -> GELU (exact, erf) -> Linear
 	layer.fc1 = linear_layer_new(d_model, d_ff, allocator)
 	layer.fc2 = linear_layer_new(d_ff, d_model, allocator)
 
@@ -830,52 +828,37 @@ transformer_encoder_forward :: proc(encoder: ^TransformerEncoder, x: ^t.Tensor) 
 // Masked Multi-Head Attention (for Decoder self-attention)
 // ============================================================================
 
+// Self-attention with an additive [seq_len, seq_len] mask (e.g. from
+// create_causal_mask). With use_flash the mask is taken to be causal and the
+// FlashAttention kernel applies it itself.
 masked_multi_head_attention_layer_forward :: proc(
 	layer: ^MultiHeadAttentionLayer,
 	x: ^t.Tensor,
 	mask: []f64,
 ) -> ^t.Tensor {
-	batch := x.shape[0]
-	seq_len := x.shape[1]
-
-	// 1. Projections
-	q := linear_forward(&layer.q_proj, x)
-	k := linear_forward(&layer.k_proj, x)
-	v := linear_forward(&layer.v_proj, x)
-
-	// 2. Permute to [batch * num_heads, seq_len, head_dim]
-	q_perm := t.tensor_permute_mha(q, batch, seq_len, layer.num_heads, layer.head_dim)
-	k_perm := t.tensor_permute_mha(k, batch, seq_len, layer.num_heads, layer.head_dim)
-	v_perm := t.tensor_permute_mha(v, batch, seq_len, layer.num_heads, layer.head_dim)
-
-	// 3. Masked Scaled Dot-Product Attention
-	att: ^t.Tensor
-	if layer.use_flash {
-		// ✅ FlashAttention handles causal masking natively, ignoring the explicit `mask` array
-		// This saves massive amounts of memory bandwidth by not reading the mask from RAM.
-		att = t.tensor_flash_attention(q_perm, k_perm, v_perm, causal = true)
-	} else {
-		att = t.tensor_masked_scaled_dot_product_attention(q_perm, k_perm, v_perm, mask)
-	}
-
-	// 4. Inverse permute back to [batch, seq_len, d_model]
-	att_inv := t.tensor_permute_mha_inverse(att, batch, seq_len, layer.num_heads, layer.head_dim)
-
-	// 5. Output projection
-	out := linear_forward(&layer.out_proj, att_inv)
-
-	return out
+	return _attention(
+		&layer.q_proj,
+		&layer.k_proj,
+		&layer.v_proj,
+		&layer.out_proj,
+		layer.num_heads,
+		layer.head_dim,
+		x,
+		x,
+		layer.use_flash,
+		layer.use_flash,
+		nil if layer.use_flash else mask,
+	)
 }
 
 // Helper to create causal mask
 create_causal_mask :: proc(seq_len: int, allocator: mem.Allocator) -> []f64 {
 	mask := make([]f64, seq_len * seq_len, allocator)
-	neg_inf: f64 = -1e9 // Large negative value instead of -inf for numerical stability
 
 	for i in 0 ..< seq_len {
 		for j in 0 ..< seq_len {
 			if j > i {
-				mask[i * seq_len + j] = neg_inf
+				mask[i * seq_len + j] = _MASKED
 			} else {
 				mask[i * seq_len + j] = 0.0
 			}
@@ -926,65 +909,24 @@ cross_attention_layer_free :: proc(layer: ^CrossAttentionLayer) {
 	linear_layer_free(&layer.out_proj)
 }
 
+// Decoder queries attend to the encoder output (no mask)
 cross_attention_layer_forward :: proc(
 	layer: ^CrossAttentionLayer,
 	decoder_input: ^t.Tensor,
 	encoder_output: ^t.Tensor,
 ) -> ^t.Tensor {
-	decoder_batch := decoder_input.shape[0]
-	decoder_seq_len := decoder_input.shape[1]
-	encoder_batch := encoder_output.shape[0]
-	encoder_seq_len := encoder_output.shape[1]
-
-	// Q from decoder, K and V from encoder
-	q := linear_forward(&layer.q_proj, decoder_input)
-	k := linear_forward(&layer.k_proj, encoder_output)
-	v := linear_forward(&layer.v_proj, encoder_output)
-
-	// Permute
-	q_perm := t.tensor_permute_mha(
-		q,
-		decoder_batch,
-		decoder_seq_len,
+	return _attention(
+		&layer.q_proj,
+		&layer.k_proj,
+		&layer.v_proj,
+		&layer.out_proj,
 		layer.num_heads,
 		layer.head_dim,
+		decoder_input,
+		encoder_output,
+		layer.use_flash,
+		false,
 	)
-	k_perm := t.tensor_permute_mha(
-		k,
-		encoder_batch,
-		encoder_seq_len,
-		layer.num_heads,
-		layer.head_dim,
-	)
-	v_perm := t.tensor_permute_mha(
-		v,
-		encoder_batch,
-		encoder_seq_len,
-		layer.num_heads,
-		layer.head_dim,
-	)
-
-	// Standard attention (no mask for cross-attention)
-	att: ^t.Tensor
-	if layer.use_flash {
-
-		att = t.tensor_flash_attention(q_perm, k_perm, v_perm, causal = false)
-	} else {
-		att = t.tensor_scaled_dot_product_attention(q_perm, k_perm, v_perm)
-	}
-	// Inverse permute
-	att_inv := t.tensor_permute_mha_inverse(
-		att,
-		decoder_batch,
-		decoder_seq_len,
-		layer.num_heads,
-		layer.head_dim,
-	)
-
-	// Output projection
-	out := linear_forward(&layer.out_proj, att_inv)
-
-	return out
 }
 // ============================================================================
 // Transformer Decoder Block

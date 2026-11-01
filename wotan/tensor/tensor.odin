@@ -1169,6 +1169,11 @@ tensor_batch_norm_2d :: proc(
 	gamma_vec := make([]f64, channel_size, allocator)
 	beta_vec := make([]f64, channel_size, allocator)
 	scaled := make([]f64, channel_size, allocator)
+	// statistics used per channel (batch in training, running in eval), kept for backward
+	used_mean := make([]f64, C, allocator)
+	used_inv_std := make([]f64, C, allocator)
+	defer delete(used_mean, allocator)
+	defer delete(used_inv_std, allocator)
 
 	for c in 0 ..< C {
 		// 1. Extract channel to contiguous buffer
@@ -1194,7 +1199,10 @@ tensor_batch_norm_2d :: proc(
 		if training {
 			running_mean.data.data[c] =
 				(1.0 - momentum) * running_mean.data.data[c] + momentum * mean
-			running_var.data.data[c] = (1.0 - momentum) * running_var.data.data[c] + momentum * var
+			// the running variance is unbiased, as in torch.nn.BatchNorm2d
+			unbiased := var * N_hw / (N_hw - 1.0) if N_hw > 1 else var
+			running_var.data.data[c] =
+				(1.0 - momentum) * running_var.data.data[c] + momentum * unbiased
 		}
 
 		current_mean := mean
@@ -1202,6 +1210,7 @@ tensor_batch_norm_2d :: proc(
 		if !training {
 			current_mean = running_mean.data.data[c]
 			current_var = running_var.data.data[c]
+			for i in 0 ..< channel_size {centered[i] = channel_buf[i] - current_mean}
 		}
 
 		// 5. Normalize and scale using SIMD
@@ -1209,6 +1218,7 @@ tensor_batch_norm_2d :: proc(
 		gamma := weight.data.data[c]
 		beta := bias.data.data[c]
 		inv_std := 1.0 / std
+		used_mean[c], used_inv_std[c] = current_mean, inv_std
 
 		for i in 0 ..< channel_size {inv_std_vec[i] = inv_std}
 		l.vec_mul_simd(centered, inv_std_vec, normalized)
@@ -1254,6 +1264,10 @@ tensor_batch_norm_2d :: proc(
 		append(&out.inputs, input)
 		append(&out.inputs, weight)
 		append(&out.inputs, bias)
+		// [training, mean_0..C-1, inv_std_0..C-1]
+		append(&out.f64_metadata, 1.0 if training else 0.0)
+		append(&out.f64_metadata, ..used_mean)
+		append(&out.f64_metadata, ..used_inv_std)
 	}
 
 	return out
@@ -2110,6 +2124,13 @@ tensor_layer_norm :: proc(
 // Masked Scaled Dot-Product Attention (for Decoder self-attention)
 // ============================================================================
 
+// An additive attention mask is either shared by all sequences [seq_q, seq_k]
+// or given per sequence [batch, seq_q, seq_k]; this is the block of sequence b
+_mask_block :: proc(mask: []f64, b, n: int) -> []f64 {
+	if mask == nil || len(mask) == n {return mask}
+	return mask[b * n:(b + 1) * n]
+}
+
 tensor_masked_scaled_dot_product_attention :: proc(
 	Q: ^Tensor,
 	K: ^Tensor,
@@ -2161,13 +2182,10 @@ tensor_masked_scaled_dot_product_attention :: proc(
 			p_b.data[i] *= scale
 		}
 
-		// ✅ Apply causal mask: add -inf to future positions
-		for i in 0 ..< seq_q {
-			for j in 0 ..< seq_k {
-				if mask[i * seq_k + j] != 0.0 {
-					p_b.data[i * seq_k + j] += mask[i * seq_k + j]
-				}
-			}
+		// Additive mask (shared or per sequence)
+		mb := _mask_block(mask, b, seq_q * seq_k)
+		for i in 0 ..< seq_q * seq_k {
+			p_b.data[i] += mb[i]
 		}
 
 		// 3. Numerically stable softmax

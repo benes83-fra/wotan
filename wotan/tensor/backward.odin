@@ -851,7 +851,10 @@ _backward_from_root :: proc(root: ^Tensor, allocator: mem.Allocator) {
 			W := input_in.shape[3]
 			N_hw := f64(N * H * W)
 			channel_size := N * H * W
-			eps := 1e-5
+			// statistics the forward used: batch (training) or running (eval)
+			training := node.f64_metadata[0] != 0
+			used_mean := node.f64_metadata[1:1 + C]
+			used_inv_std := node.f64_metadata[1 + C:1 + 2 * C]
 
 			// Contiguous per-channel buffers, allocated once for all channels
 			x_buf := make([]f64, channel_size, allocator)
@@ -880,15 +883,8 @@ _backward_from_root :: proc(root: ^Tensor, allocator: mem.Allocator) {
 					}
 				}
 
-				// 2. Compute mean (SIMD sum)
-				mean := l.sum_simd(x_buf) / N_hw
-
-				// 3. Compute variance (SIMD)
+				mean, inv_std := used_mean[c], used_inv_std[c]
 				for i in 0 ..< channel_size {centered[i] = x_buf[i] - mean}
-
-				var := l.dot_simd(centered, centered) / N_hw
-				std := math.sqrt(var + eps)
-				inv_std := 1.0 / std
 				gamma := weight_in.data.data[c]
 
 				// 4. Compute x_hat
@@ -906,8 +902,17 @@ _backward_from_root :: proc(root: ^Tensor, allocator: mem.Allocator) {
 					bias_in.grad.data[c] += dbeta
 				}
 
-				// 7. Compute input gradient
-				if input_in.requires_grad && len(input_in.grad.data) > 0 {
+				// 7. Compute input gradient (eval: the statistics are constants)
+				if input_in.requires_grad && len(input_in.grad.data) > 0 && !training {
+					for n in 0 ..< N {
+						for h in 0 ..< H {
+							for w in 0 ..< W {
+								idx := n * (C * H * W) + c * (H * W) + h * W + w
+								input_in.grad.data[idx] += node.grad.data[idx] * gamma * inv_std
+							}
+						}
+					}
+				} else if input_in.requires_grad && len(input_in.grad.data) > 0 {
 					for i in 0 ..< channel_size {dout_gamma[i] = dout_buf[i] * gamma}
 
 					// Precompute sums (SIMD)
@@ -915,7 +920,7 @@ _backward_from_root :: proc(root: ^Tensor, allocator: mem.Allocator) {
 					sum_dout_gamma_x_hat := l.dot_simd(dout_gamma, x_hat)
 
 					// dx = (N_hw * dout_gamma - sum_dout_gamma - x_hat * sum_dout_gamma_x_hat) / (N_hw * std)
-					inv_denom := 1.0 / (N_hw * std)
+					inv_denom := inv_std / N_hw
 					for n in 0 ..< N {
 						for h in 0 ..< H {
 							for w in 0 ..< W {
@@ -1402,9 +1407,10 @@ _attention_backward :: proc(node: ^Tensor, mask: []f64, allocator: mem.Allocator
 		P := _mat(seq_q, seq_k, p_buf)
 		mem.zero_slice(p_buf)
 		l.matmul_nt_acc_simd(&q_b, &k_b, &P)
+		mb := _mask_block(mask, b, seq_q * seq_k)
 		for i in 0 ..< seq_q * seq_k {
 			p_buf[i] *= scale
-			if mask != nil {p_buf[i] += mask[i]}
+			if mb != nil {p_buf[i] += mb[i]}
 		}
 		for i in 0 ..< seq_q {
 			row := p_buf[i * seq_k:(i + 1) * seq_k]
@@ -1515,7 +1521,14 @@ _recurrent_grads :: proc(
 		l.matmul_nt_acc_simd(&d_ih_mat, &w_ih_mat, &dxs_mat)
 		BI := batch * in_size
 		for p in 0 ..< seq_len {
-			_scatter_add_step(x_in.grad.data, dxs[p * BI:(p + 1) * BI], batch, seq_len, in_size, seq_len - 1 - p)
+			_scatter_add_step(
+				x_in.grad.data,
+				dxs[p * BI:(p + 1) * BI],
+				batch,
+				seq_len,
+				in_size,
+				seq_len - 1 - p,
+			)
 		}
 	}
 }
@@ -1540,7 +1553,13 @@ _hidden_backprop :: proc(d_hh, w_hh, dh_prev: []f64, batch, H, G: int) {
 
 // _saved_blocks splits a node's saved forward data into `n_states` state rows
 // of (seq_len + 1) * BH followed by `n_steps` per-step blocks of seq_len * BH
-_saved_blocks :: proc(node: ^Tensor, seq_len, BH, n_states, n_steps: int) -> (states: [2][]f64, steps: [5][]f64) {
+_saved_blocks :: proc(
+	node: ^Tensor,
+	seq_len, BH, n_states, n_steps: int,
+) -> (
+	states: [2][]f64,
+	steps: [5][]f64,
+) {
 	saved := node.f64_metadata[:]
 	S1, SB := (seq_len + 1) * BH, seq_len * BH
 	fmt.assertf(
@@ -1827,7 +1846,8 @@ _ssm_backward_rows :: proc(data: rawptr, b0, b1: int) #no_bounds_check {
 				delta := Dl[row_x + d]
 				for n in 0 ..< N {
 					B_bar := delta * Bm[row_bc + n]
-					hs[st + DN + d * N + n] = abar[st + d * N + n] * hs[st + d * N + n] + B_bar * x_val
+					hs[st + DN + d * N + n] =
+						abar[st + d * N + n] * hs[st + d * N + n] + B_bar * x_val
 				}
 			}
 		}
@@ -1875,8 +1895,8 @@ _ssm_backward_rows :: proc(data: rawptr, b0, b1: int) #no_bounds_check {
 // in the order a sequential backward pass adds them: steps last to first,
 // batch rows in order.
 _Ssm_Reduce_Job :: struct {
-	terms, dA:              []f64,
-	batch, seq_len, DN:     int,
+	terms, dA:          []f64,
+	batch, seq_len, DN: int,
 }
 
 _ssm_reduce_dA :: proc(data: rawptr, e0, e1: int) #no_bounds_check {

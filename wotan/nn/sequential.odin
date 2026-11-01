@@ -43,9 +43,6 @@ Sequential :: struct {
 	layers:    [dynamic]Layer,
 	training:  bool, // ✅ ADD THIS: Controls BatchNorm and Dropout behavior
 	allocator: mem.Allocator,
-	rnn_h0:    ^t.Tensor,
-	rnn_c0:    ^t.Tensor,
-	gru_h0:    ^t.Tensor,
 }
 
 sequential_new :: proc(allocator: mem.Allocator = context.allocator) -> ^Sequential {
@@ -70,44 +67,24 @@ sequential_add :: proc(s: ^Sequential, layers: ..Layer) {
 	}
 }
 
-// sequential_forward applies all layers in sequence
-// sequential_forward applies all layers in sequence
+// sequential_forward applies all layers in sequence. Recurrent and Mamba
+// layers start from a zero state.
 sequential_forward :: proc(s: ^Sequential, input: ^t.Tensor) -> ^t.Tensor {
 	x := input
 	for &layer in s.layers {
-		// ✅ FIX: Use '&l' to get a pointer to the layer variant
 		switch &l in layer {
 		case LinearLayer:
-			x = t.tensor_matmul(x, l.weights)
-			if l.bias != nil {
-				x = t.tensor_add_bias(x, l.bias)
-			}
+			x = linear_forward(&l, x)
 		case Conv2dLayer:
-			x = t.tensor_conv2d(x, l.weight, l.bias, l.stride, l.padding)
+			x = conv2d_layer_forward(&l, x)
 		case MaxPool2dLayer:
-			x = t.tensor_max_pool2d(x, l.kernel_size, l.kernel_size, l.stride)
+			x = maxpool2d_layer_forward(&l, x)
 		case AvgPool2dLayer:
 			x = t.tensor_avg_pool2d(x, l.kernel_size, l.kernel_size, l.stride)
 		case FlattenLayer:
 			x = t.tensor_flatten(x)
 		case Activation:
-			#partial switch l {
-			case .ReLU:
-				x = t.tensor_relu(x)
-			case .Gelu:
-				x = t.tensor_gelu(x)
-			case .Sigmoid:
-				x = t.tensor_sigmoid(x)
-			case .Tanh:
-				x = t.tensor_tanh(x)
-			case .LeakyReLU:
-				x = t.tensor_leaky_relu(x, 0.01)
-			case .Softmax:
-				x = t.tensor_softmax(x)
-			case .Softplus:
-				x = t.tensor_softplus(x)
-			}
-		// ... other activations ...
+			x = apply_activation(x, l)
 		case DropoutLayer:
 			x = t.tensor_dropout(x, l.drop_prob, s.training)
 		case BatchNorm2dLayer:
@@ -122,68 +99,19 @@ sequential_forward :: proc(s: ^Sequential, input: ^t.Tensor) -> ^t.Tensor {
 				l.eps,
 			)
 		case RNNLayer:
-			batch := x.shape[0]
-			hidden := l.hidden_size
-
-			h_0_data := la.matrix_new(f64, 1, batch * hidden, x.allocator)
-			h_0 := t.tensor_new(h_0_data, false, x.allocator)
-
-			needs_grad :=
-				x.requires_grad ||
-				l.w_ih.requires_grad ||
-				l.w_hh.requires_grad ||
-				(l.bias != nil && l.bias.requires_grad)
-			if needs_grad {
-				h_0.owned_by_graph = true // ✅ tensor_free_graph will clean this up
-			} else {
-				defer t.tensor_free(h_0) // ✅ Pure inference: clean up immediately
-			}
-
+			h_0 := _zero_state(x, x.shape[0] * l.hidden_size, l.w_ih, l.w_hh, l.bias)
 			x = rnn_layer_forward(&l, x, h_0)
-
+			_release_state(h_0)
 		case GRULayer:
-			batch := x.shape[0]
-			hidden := l.hidden_size
-			h_0_data := la.matrix_new(f64, 1, batch * hidden, x.allocator)
-			h_0 := t.tensor_new(h_0_data, false, x.allocator)
-
-			needs_grad :=
-				x.requires_grad ||
-				l.w_ih.requires_grad ||
-				l.w_hh.requires_grad ||
-				(l.bias != nil && l.bias.requires_grad)
-			if needs_grad {
-				h_0.owned_by_graph = true
-			} else {
-				defer t.tensor_free(h_0)
-			}
-
+			h_0 := _zero_state(x, x.shape[0] * l.hidden_size, l.w_ih, l.w_hh, l.bias)
 			x = gru_layer_forward(&l, x, h_0)
-
+			_release_state(h_0)
 		case LSTMLayer:
-			batch := x.shape[0]
-			hidden := l.hidden_size
-			h_0_data := la.matrix_new(f64, 1, batch * hidden, x.allocator)
-			c_0_data := la.matrix_new(f64, 1, batch * hidden, x.allocator)
-			h_0 := t.tensor_new(h_0_data, false, x.allocator)
-			c_0 := t.tensor_new(c_0_data, false, x.allocator)
-
-
-			needs_grad :=
-				x.requires_grad ||
-				l.w_ih.requires_grad ||
-				l.w_hh.requires_grad ||
-				(l.bias != nil && l.bias.requires_grad)
-			if needs_grad {
-				h_0.owned_by_graph = true
-				c_0.owned_by_graph = true
-			} else {
-				defer t.tensor_free(h_0)
-				defer t.tensor_free(c_0)
-			}
-
+			h_0 := _zero_state(x, x.shape[0] * l.hidden_size, l.w_ih, l.w_hh, l.bias)
+			c_0 := _zero_state(x, x.shape[0] * l.hidden_size, l.w_ih, l.w_hh, l.bias)
 			x = lstm_layer_forward(&l, x, h_0, c_0)
-
+			_release_state(h_0)
+			_release_state(c_0)
 		case EmbeddingLayer:
 			x = embedding_layer_forward(&l, x)
 		case MultiHeadAttentionLayer:
@@ -197,38 +125,47 @@ sequential_forward :: proc(s: ^Sequential, input: ^t.Tensor) -> ^t.Tensor {
 		case TransformerEncoder:
 			x = transformer_encoder_forward(&l, x)
 		case GATLayer:
-			// ✅ Use the stored adjacency matrix
 			x = gat_layer_forward(&l, x, l.adjacency)
 		case MoELayer:
 			x = moe_layer_forward(&l, x, x.allocator)
 		case MambaLayer:
-			batch := x.shape[0]
-			seq_len := x.shape[1]
-			d_model := x.shape[2]
-			d_state := l.d_state
-			h_0_data := la.matrix_new(f64, 1, batch * d_model * d_state, x.allocator)
-			h_0 := t.tensor_new(h_0_data, false, x.allocator)
-			h_0.shape = [4]int{batch, d_model, d_state, 1}
-			needs_grad :=
-				x.requires_grad ||
-				l.proj_x.weights.requires_grad ||
-				l.proj_B.weights.requires_grad ||
-				l.proj_C.weights.requires_grad ||
-				l.proj_Delta.weights.requires_grad ||
-				l.proj_out.weights.requires_grad ||
-				l.A.requires_grad ||
-				l.D.requires_grad
-			if needs_grad {
-				h_0.owned_by_graph = true
-			} else {
-				defer t.tensor_free(h_0)
-			}
+			batch, d_model := x.shape[0], x.shape[2]
+			h_0 := _zero_state(
+				x,
+				batch * d_model * l.d_state,
+				l.proj_x.weights,
+				l.proj_B.weights,
+				l.proj_C.weights,
+				l.proj_Delta.weights,
+				l.proj_out.weights,
+				l.A,
+				l.D,
+			)
+			h_0.shape = [4]int{batch, d_model, l.d_state, 1}
 			x = mamba_layer_forward(&l, x, h_0)
-
+			_release_state(h_0)
 		}
 	}
 	return x
 }
+
+// Zero initial state [1, n] for a recurrent layer. It joins the graph (and is
+// freed with it) when the output will need gradients.
+@(private = "file")
+_zero_state :: proc(x: ^t.Tensor, n: int, params: ..^t.Tensor) -> ^t.Tensor {
+	h := t.tensor_new(la.matrix_new(f64, 1, n, x.allocator), false, x.allocator)
+	needs_grad := x.requires_grad
+	for p in params {needs_grad ||= p != nil && p.requires_grad}
+	h.owned_by_graph = needs_grad
+	return h
+}
+
+// Frees a zero state after the forward pass unless the graph owns it
+@(private = "file")
+_release_state :: proc(h: ^t.Tensor) {
+	if !h.owned_by_graph {t.tensor_free(h)}
+}
+
 // ============================================================================
 // Parameters
 // ============================================================================
@@ -386,9 +323,6 @@ sequential_free :: proc(seq: ^Sequential) {
 		}
 
 	}
-	if seq.rnn_h0 != nil {t.tensor_free(seq.rnn_h0)}
-	if seq.rnn_c0 != nil {t.tensor_free(seq.rnn_c0)}
-	if seq.gru_h0 != nil {t.tensor_free(seq.gru_h0)}
 
 	delete(seq.layers)
 	free(seq, seq.allocator)
