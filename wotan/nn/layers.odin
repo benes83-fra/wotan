@@ -221,20 +221,17 @@ rnn_layer_new :: proc(
 	w_ih_data := l.matrix_new(f64, input_size, hidden_size, allocator)
 	xavier_uniform(w_ih_data.data, input_size, hidden_size)
 	layer.w_ih = t.tensor_new(w_ih_data, true, allocator)
-	// ✅ FIX: Set shape so shape[0]=input_size, shape[1]=hidden_size
 	layer.w_ih.shape = [4]int{input_size, hidden_size, 1, 1}
 
 	// Orthogonal/Xavier initialization for w_hh
 	w_hh_data := l.matrix_new(f64, hidden_size, hidden_size, allocator)
 	xavier_uniform(w_hh_data.data, hidden_size, hidden_size)
 	layer.w_hh = t.tensor_new(w_hh_data, true, allocator)
-	// ✅ FIX: Set shape so shape[0]=hidden_size, shape[1]=hidden_size
 	layer.w_hh.shape = [4]int{hidden_size, hidden_size, 1, 1}
 
 	// Zero bias
 	bias_data := l.matrix_new(f64, 1, hidden_size, allocator)
 	layer.bias = t.tensor_new(bias_data, true, allocator)
-	// ✅ FIX: Set shape so shape[1]=hidden_size
 	layer.bias.shape = [4]int{1, hidden_size, 1, 1}
 
 	return layer
@@ -463,15 +460,15 @@ MultiHeadAttentionLayer :: struct {
 	k_proj:    LinearLayer,
 	v_proj:    LinearLayer,
 	out_proj:  LinearLayer,
-	use_flash: bool, // ✅ NEW: Toggle for FlashAttention kernel
-	is_causal: bool, // ✅ NEW: Toggle for Causal Masking (Decoder-style)
+	use_flash: bool, // FlashAttention kernel
+	is_causal: bool, // causal masking (decoder-style)
 }
 
 multi_head_attention_layer_new :: proc(
 	d_model: int,
 	num_heads: int,
-	use_flash: bool = false, // ✅ NEW
-	is_causal: bool = false, // ✅ NEW
+	use_flash: bool = false,
+	is_causal: bool = false,
 	allocator: mem.Allocator = context.allocator,
 ) -> MultiHeadAttentionLayer {
 	layer: MultiHeadAttentionLayer
@@ -670,9 +667,6 @@ ffn_layer_forward :: proc(layer: ^FFNLayer, x: ^t.Tensor) -> ^t.Tensor {
 	// 3. Project back down to d_model
 	out := linear_forward(&layer.fc2, x2)
 
-	// ✅ CRITICAL: Do NOT free x1 or x2 here!
-	// They are needed for the backward pass and are kept alive by the autograd graph.
-
 	return out
 }
 // ============================================================================
@@ -733,9 +727,6 @@ transformer_encoder_block_forward :: proc(
 	// 4. Residual Connection + LayerNorm
 	x2 := t.tensor_add(x1_norm, ffn_out)
 	out := layer_norm_layer_forward(&block.ln2, x2)
-
-	// ✅ CRITICAL: Do NOT free intermediates! They're needed for backward pass.
-	// The autograd graph keeps them alive.
 
 	return out
 }

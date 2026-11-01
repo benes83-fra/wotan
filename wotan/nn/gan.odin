@@ -99,8 +99,7 @@ discriminator_add_to_optimizer :: proc(d: ^Discriminator, opt: ^Adam) {
 	adam_add_param(opt, d.fc3.bias)
 }
 
-
-// Add to nn.odin
+// Discriminator without the sigmoid: the raw score of a WGAN critic
 discriminator_forward_no_sigmoid :: proc(d: ^Discriminator, data: ^t.Tensor) -> ^t.Tensor {
 	x := linear_forward(&d.fc1, data)
 	x = t.tensor_relu(x)

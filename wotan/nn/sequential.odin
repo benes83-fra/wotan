@@ -16,9 +16,9 @@ Layer :: union {
 	LinearLayer,
 	Conv2dLayer,
 	MaxPool2dLayer,
-	AvgPool2dLayer, // ✅ ADDED
-	DropoutLayer, // ✅ ADDED
-	BatchNorm2dLayer, // ✅ ADDED
+	AvgPool2dLayer,
+	DropoutLayer,
+	BatchNorm2dLayer,
 	Activation,
 	FlattenLayer,
 	RNNLayer,
@@ -41,7 +41,7 @@ Layer :: union {
 
 Sequential :: struct {
 	layers:    [dynamic]Layer,
-	training:  bool, // ✅ ADD THIS: Controls BatchNorm and Dropout behavior
+	training:  bool, // BatchNorm and Dropout behavior
 	allocator: mem.Allocator,
 }
 
@@ -53,7 +53,7 @@ sequential_new :: proc(allocator: mem.Allocator = context.allocator) -> ^Sequent
 	return s
 }
 
-// ✅ ADD: Methods to switch modes
+// Training / evaluation mode
 sequential_train :: proc(s: ^Sequential) {
 	s.training = true
 }

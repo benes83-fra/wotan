@@ -6,14 +6,14 @@ import "core:mem"
 
 MLP :: struct {
 	layers:      [dynamic]LinearLayer,
-	activations: [dynamic]Activation, // ✅ ADD THIS
+	activations: [dynamic]Activation,
 	allocator:   mem.Allocator,
 }
 
 // mlp_new creates an MLP with configurable activations
 mlp_new :: proc(
 	sizes: []int,
-	activation: Activation = .ReLU, // ✅ Configurable!
+	activation: Activation = .ReLU,
 	allocator: mem.Allocator = context.allocator,
 ) -> MLP {
 	net: MLP

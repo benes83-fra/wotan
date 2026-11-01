@@ -227,6 +227,7 @@ persistence_roundtrip_test :: proc(allocator: mem.Allocator) {
 				use_moe = v % 2 == 1 || v == 4,
 				num_experts = 3,
 				top_k = 2,
+				dropout = 0.05 * f64(v),
 			)
 			if v == 4 {
 				b0 := &gpt.blocks[0] // dense with FlashAttention
@@ -244,6 +245,7 @@ persistence_roundtrip_test :: proc(allocator: mem.Allocator) {
 			gpt2, loaded := nn.load_gpt_model(f)
 			flags_ok &&= saved && loaded
 			if !loaded {continue}
+			flags_ok &&= gpt2.dropout == gpt.dropout
 			for &b, i in gpt.blocks {
 				b2 := &gpt2.blocks[i]
 				flags_ok &&=
@@ -268,7 +270,7 @@ persistence_roundtrip_test :: proc(allocator: mem.Allocator) {
 			&total,
 			flags_ok && d_gpt == 0,
 			fmt.tprintf(
-				"GPT %v: MoE / use_flash / is_causal of every block restored: %v, logits after loading max diff %.1e",
+				"GPT %v: dropout rate and MoE / use_flash / is_causal of every block restored: %v, logits after loading max diff %.1e",
 				names,
 				flags_ok,
 				d_gpt,
@@ -278,7 +280,16 @@ persistence_roundtrip_test :: proc(allocator: mem.Allocator) {
 		d_bert := 0.0
 		bert_ok := true
 		for v in 0 ..< 3 {
-			bert := nn.bert_model_new(13, 8, 2, 16, 2, 8, use_flash = v == 1)
+			bert := nn.bert_model_new(
+				13,
+				8,
+				2,
+				16,
+				2,
+				8,
+				use_flash = v == 1,
+				dropout = 0.15 * f64(v),
+			)
 			nn.bert_replace_nsp_head(&bert, 3, allocator)
 			if v == 2 {
 				bert.encoder_blocks[0].mha.use_flash = true
@@ -291,7 +302,7 @@ persistence_roundtrip_test :: proc(allocator: mem.Allocator) {
 			bert2, loaded := nn.load_bert_model(fb)
 			bert_ok &&= saved && loaded
 			if !loaded {continue}
-			bert_ok &&= bert2.nsp_head.out_features == 3
+			bert_ok &&= bert2.nsp_head.out_features == 3 && bert2.dropout == bert.dropout
 			for &b, i in bert.encoder_blocks {
 				b2 := &bert2.encoder_blocks[i]
 				bert_ok &&=
@@ -307,7 +318,7 @@ persistence_roundtrip_test :: proc(allocator: mem.Allocator) {
 			&total,
 			bert_ok && d_bert == 0,
 			fmt.tprintf(
-				"BERT [standard, flash, mixed] with a 3-class head: use_flash / is_causal of every block restored: %v, MLM and NSP logits after loading max diff %.1e",
+				"BERT [standard, flash, mixed] with a 3-class head: dropout rate and use_flash / is_causal of every block restored: %v, MLM and NSP logits after loading max diff %.1e",
 				bert_ok,
 				d_bert,
 			),

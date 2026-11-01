@@ -30,9 +30,9 @@ gpt_block_new :: proc(
 	num_heads: int,
 	d_ff: int,
 	use_flash: bool = true,
-	use_moe: bool = false, // ✅ NEW
-	num_experts: int = 8, // ✅ NEW
-	top_k: int = 2, // ✅ NEW
+	use_moe: bool = false,
+	num_experts: int = 8,
+	top_k: int = 2,
 	allocator: mem.Allocator = context.allocator,
 ) -> GPTBlock {
 	block: GPTBlock
@@ -76,17 +76,13 @@ gpt_block_forward :: proc(
 	x: ^t.Tensor,
 	mask: []f64,
 	training: bool,
+	dropout: f64,
 	aux_loss: bool = false,
 ) -> ^t.Tensor {
 	// Pre-LayerNorm
 	x_norm := layer_norm_layer_forward(&block.ln1, x)
 	attn_out := masked_multi_head_attention_layer_forward(&block.mha, x_norm, mask)
-
-	// Add dropout if training
-	if training {
-		attn_out = t.tensor_dropout(attn_out, 0.1, true)
-	}
-
+	attn_out = t.tensor_dropout(attn_out, dropout, training)
 	x1 := t.tensor_add(x, attn_out)
 
 	x1_norm := layer_norm_layer_forward(&block.ln2, x1)
@@ -96,10 +92,7 @@ gpt_block_forward :: proc(
 	} else {
 		ffn_out = ffn_layer_forward(&block.ffn, x1_norm)
 	}
-	if training {
-		ffn_out = t.tensor_dropout(ffn_out, 0.1, true)
-	}
-
+	ffn_out = t.tensor_dropout(ffn_out, dropout, training)
 	out := t.tensor_add(x1, ffn_out)
 
 	return out
@@ -116,6 +109,7 @@ GPTModel :: struct {
 	d_ff:           int,
 	num_layers:     int,
 	max_seq_len:    int,
+	dropout:        f64, // on the attention and FFN outputs of every block (training only)
 	token_emb:      EmbeddingLayer,
 	pos_emb:        EmbeddingLayer, // Learned positional embeddings
 	blocks:         [dynamic]GPTBlock,
@@ -137,6 +131,7 @@ gpt_model_new :: proc(
 	use_moe: bool = false,
 	num_experts: int = 8,
 	top_k: int = 2,
+	dropout: f64 = 0.1,
 	allocator: mem.Allocator = context.allocator,
 ) -> GPTModel {
 	model: GPTModel
@@ -146,6 +141,7 @@ gpt_model_new :: proc(
 	model.d_ff = d_ff
 	model.num_layers = num_layers
 	model.max_seq_len = max_seq_len
+	model.dropout = dropout
 	model.allocator = allocator
 
 	// Token embeddings
@@ -216,7 +212,7 @@ gpt_model_forward :: proc(
 	// Pass through GPT blocks
 	for i in 0 ..< len(model.blocks) {
 		block := &model.blocks[i]
-		x = gpt_block_forward(block, x, mask, training, aux_loss)
+		x = gpt_block_forward(block, x, mask, training, model.dropout, aux_loss)
 		if block.use_moe {
 			model.total_aux_loss += block.moe.aux_loss_val
 			if block.moe.aux_loss != nil {

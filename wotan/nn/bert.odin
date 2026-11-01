@@ -57,23 +57,16 @@ bert_encoder_block_forward :: proc(
 	x: ^t.Tensor,
 	attention_mask: ^t.Tensor = nil,
 	training: bool,
+	dropout: f64,
 ) -> ^t.Tensor {
 	// Post-LayerNorm, as in the original BERT
 	attn_out := multi_head_attention_layer_forward(&block.mha, x, attention_mask)
-
-	// Dropout if training
-	if training {
-		attn_out = t.tensor_dropout(attn_out, 0.1, true)
-	}
+	attn_out = t.tensor_dropout(attn_out, dropout, training)
 	x1 := t.tensor_add(x, attn_out)
 
 	x1_norm := layer_norm_layer_forward(&block.ln1, x1)
 	ffn_out := ffn_layer_forward(&block.ffn, x1_norm)
-
-	if training {
-		ffn_out = t.tensor_dropout(ffn_out, 0.1, true)
-	}
-
+	ffn_out = t.tensor_dropout(ffn_out, dropout, training)
 	x2 := t.tensor_add(x1_norm, ffn_out)
 	out := layer_norm_layer_forward(&block.ln2, x2)
 	return out
@@ -90,6 +83,7 @@ BERTModel :: struct {
 	d_ff:           int,
 	num_layers:     int,
 	max_seq_len:    int,
+	dropout:        f64, // on the attention and FFN outputs of every block (training only)
 	token_emb:      EmbeddingLayer,
 	pos_emb:        EmbeddingLayer,
 	segment_emb:    EmbeddingLayer, // Sentence A vs B
@@ -109,6 +103,7 @@ bert_model_new :: proc(
 	num_layers: int,
 	max_seq_len: int,
 	use_flash: bool = false,
+	dropout: f64 = 0.1,
 	allocator: mem.Allocator = context.allocator,
 ) -> BERTModel {
 	model: BERTModel
@@ -118,6 +113,7 @@ bert_model_new :: proc(
 	model.d_ff = d_ff
 	model.num_layers = num_layers
 	model.max_seq_len = max_seq_len
+	model.dropout = dropout
 	model.allocator = allocator
 
 	// Token embeddings
@@ -201,7 +197,13 @@ bert_model_forward :: proc(
 		attention_mask.data.data[i] = 0.0 if input_ids.data.data[i] == 0.0 else 1.0
 	}
 	for i in 0 ..< len(model.encoder_blocks) {
-		x = bert_encoder_block_forward(&model.encoder_blocks[i], x, attention_mask, training)
+		x = bert_encoder_block_forward(
+			&model.encoder_blocks[i],
+			x,
+			attention_mask,
+			training,
+			model.dropout,
+		)
 	}
 	t.tensor_free(attention_mask)
 

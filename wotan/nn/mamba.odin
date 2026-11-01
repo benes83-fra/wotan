@@ -1,7 +1,4 @@
-
-
 package nn
-
 
 import l "../linalg"
 import t "../tensor"
@@ -18,7 +15,7 @@ MambaLayer :: struct {
 	proj_B:     LinearLayer,
 	proj_C:     LinearLayer,
 	proj_Delta: LinearLayer,
-	A:          ^t.Tensor, // ✅ CHANGED: Trainable theta_A (was A)
+	A:          ^t.Tensor, // θ_A, trainable; A = −exp(θ_A)
 	D:          ^t.Tensor,
 	proj_out:   LinearLayer,
 }
@@ -38,7 +35,7 @@ mamba_layer_new :: proc(
 	layer.proj_Delta = linear_layer_new(d_model, d_model, allocator)
 	layer.proj_out = linear_layer_new(d_model, d_model, allocator)
 
-	// ✅ Initialize A_param (theta_A)
+	// Initialize θ_A
 	// We want the actual A to be in [-0.5, -4.0] for stable decay.
 	// Since A = -exp(theta_A), theta_A = log(-A).
 	A_param_data := l.matrix_new(f64, d_model, d_state, allocator)
@@ -55,7 +52,6 @@ mamba_layer_new :: proc(
 	// Initialize D (Skip connection)
 	D_data := l.matrix_new(f64, 1, d_model, allocator)
 	for i in 0 ..< d_model {D_data.data[i] = 1.0}
-	// ✅ UNFROZEN: Safe to train now that softplus is fixed!
 	layer.D = t.tensor_new(D_data, true, allocator)
 
 	if layer.proj_Delta.bias != nil {
@@ -83,18 +79,17 @@ mamba_layer_forward :: proc(layer: ^MambaLayer, x: ^t.Tensor, h_0: ^t.Tensor) ->
 	C_proj := linear_forward(&layer.proj_C, x)
 	delta_raw := linear_forward(&layer.proj_Delta, x)
 	Delta := t.tensor_softplus(delta_raw)
-	// 2. ✅ REPARAMETERIZE A: A = -exp(theta_A)
-	// This mathematically guarantees A is ALWAYS negative, preventing explosions!
+	// 2. A = −exp(θ_A) is always negative, so the state decays
 	A_pos := t.tensor_exp(layer.A)
 	A := t.tensor_neg(A_pos)
 
 	// 3. Selective SSM
 	ssm_out := t.tensor_ssm(x_proj, h_0, A, B_proj, C_proj, Delta, layer.D)
 
-	// Clean up A intermediates if we aren't building an autograd graph
+	// With θ_A frozen, A is a constant input of the scan (its backward reads it)
 	if !layer.A.requires_grad {
 		t.tensor_free(A_pos)
-		t.tensor_free(A)
+		_constant_done(A, ssm_out)
 	}
 
 	// 4. Output projection

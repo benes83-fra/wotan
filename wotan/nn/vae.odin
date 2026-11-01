@@ -134,7 +134,7 @@ reparameterize :: proc(mu: ^t.Tensor, log_var: ^t.Tensor, allocator: mem.Allocat
 
 	z := t.tensor_new(z_data, true, allocator)
 
-	// ✅ CRITICAL: Record the reparameterization operation for backprop
+	// Record the reparameterization for backprop
 	z.op = .Reparameterize
 	append(&z.inputs, mu)
 	append(&z.inputs, log_var)

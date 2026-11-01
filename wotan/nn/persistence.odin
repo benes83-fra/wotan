@@ -16,10 +16,11 @@ import "core:os"
 //   Sequential checkpoint: magic, epoch, layer count, per layer its type id,
 //     configuration and tensors, then the Adam state (type 1 with the
 //     hyperparameters; type 0 without them is still read).
-//   GPT (28; older: 27 without the attention flags, 17 also without MoE),
-//     BERT (29; older: 18 without the attention flags), Generator (19),
+//   GPT (31; older: 28 without the dropout rate, 27 also without the
+//     attention flags, 17 also without MoE), BERT (32; older: 29 without the
+//     dropout rate, 18 also without the attention flags), Generator (19),
 //     Discriminator (20), VAE encoder (21) and decoder (22): magic, type id,
-//     configuration, tensors.
+//     configuration, tensors. Files without the dropout rate load with 0.1.
 // Attention layers store use_flash and is_causal before their projections.
 // A file is built in memory and written at once. Reading checks every access,
 // so a truncated or foreign file fails instead of panicking. Loading builds
@@ -71,8 +72,10 @@ _File_Id :: enum {
 	VAE_Encoder   = 21,
 	VAE_Decoder   = 22,
 	GPT_MoE       = 27, // MoE flags, no attention flags (read only)
-	GPT           = 28, // per block: MoE, use_flash and is_causal flags
-	BERT          = 29, // per block: use_flash and is_causal flags
+	GPT_1         = 28, // no dropout rate (read only)
+	BERT_1        = 29, // no dropout rate (read only)
+	GPT           = 31, // dropout rate; per block: MoE, use_flash and is_causal flags
+	BERT          = 32, // dropout rate; per block: use_flash and is_causal flags
 }
 
 // ============================================================================
@@ -737,6 +740,7 @@ save_gpt_model :: proc(model: ^GPTModel, path: string) -> bool {
 	for v in ([]int{model.vocab_size, model.d_model, model.num_heads, model.d_ff, model.num_layers, model.max_seq_len}) {
 		_put_i32(&io, v)
 	}
+	_put_f64(&io, model.dropout)
 	_io_gpt(&io, model, .GPT)
 	return _save(&io, path)
 }
@@ -757,12 +761,13 @@ load_gpt_model :: proc(
 	defer delete(io.data, allocator)
 
 	file_id := _File_Id(_get_i32(&io))
-	if file_id != .GPT && file_id != .GPT_MoE && file_id != .GPT_Dense {
+	if file_id != .GPT && file_id != .GPT_1 && file_id != .GPT_MoE && file_id != .GPT_Dense {
 		fmt.printf("%s is not a GPT model\n", path)
 		return nil, false
 	}
 	cfg: [6]int // vocab, d_model, heads, d_ff, layers, max_seq_len
 	for &v in cfg {v = _get_size(&io)}
+	dropout := _get_f64(&io) if file_id == .GPT else 0.1
 	if !io.ok || cfg[2] == 0 {
 		fmt.printf("%s: corrupt or truncated model\n", path)
 		return nil, false
@@ -776,6 +781,7 @@ load_gpt_model :: proc(
 		cfg[4],
 		cfg[5],
 		use_flash = use_flash,
+		dropout = dropout,
 		allocator = allocator,
 	)
 	_io_gpt(&io, model, file_id)
@@ -796,7 +802,7 @@ _io_gpt :: proc(io: ^_Io, model: ^GPTModel, version: _File_Id) {
 	_io_tensor(io, &model.pos_emb.weight)
 	for &block in model.blocks {
 		is_moe := version != .GPT_Dense && _io_flag(io, block.use_moe)
-		_io_mha(io, &block.mha, version == .GPT)
+		_io_mha(io, &block.mha, version == .GPT || version == .GPT_1)
 		if is_moe {
 			num_experts, top_k := block.moe.num_experts, block.moe.top_k
 			if io.writing {
@@ -833,6 +839,7 @@ save_bert_model :: proc(model: ^BERTModel, path: string) -> bool {
 	for v in ([]int{model.vocab_size, model.d_model, model.num_heads, model.d_ff, model.num_layers, model.max_seq_len}) {
 		_put_i32(&io, v)
 	}
+	_put_f64(&io, model.dropout)
 	_io_bert(&io, model, .BERT)
 	return _save(&io, path)
 }
@@ -854,18 +861,29 @@ load_bert_model :: proc(
 	defer delete(io.data, allocator)
 
 	file_id := _File_Id(_get_i32(&io))
-	if file_id != .BERT && file_id != .BERT_0 {
+	if file_id != .BERT && file_id != .BERT_1 && file_id != .BERT_0 {
 		fmt.printf("%s is not a BERT model\n", path)
 		return nil, false
 	}
 	cfg: [6]int // vocab, d_model, heads, d_ff, layers, max_seq_len
 	for &v in cfg {v = _get_size(&io)}
+	dropout := _get_f64(&io) if file_id == .BERT else 0.1
 	if !io.ok || cfg[2] == 0 {
 		fmt.printf("%s: corrupt or truncated model\n", path)
 		return nil, false
 	}
 	model = new(BERTModel, allocator)
-	model^ = bert_model_new(cfg[0], cfg[1], cfg[2], cfg[3], cfg[4], cfg[5], use_flash, allocator)
+	model^ = bert_model_new(
+		cfg[0],
+		cfg[1],
+		cfg[2],
+		cfg[3],
+		cfg[4],
+		cfg[5],
+		use_flash,
+		dropout,
+		allocator,
+	)
 	_io_bert(&io, model, file_id)
 	if !io.ok {
 		fmt.printf("%s: corrupt or truncated model\n", path)
@@ -883,7 +901,7 @@ _io_bert :: proc(io: ^_Io, model: ^BERTModel, version: _File_Id) {
 	_io_tensor(io, &model.segment_emb.weight)
 	_io_norm(io, &model.emb_ln)
 	for &b in model.encoder_blocks {
-		_io_block(io, &b.mha, &b.ffn, &b.ln1, &b.ln2, version == .BERT)
+		_io_block(io, &b.mha, &b.ffn, &b.ln1, &b.ln2, version != .BERT_0)
 	}
 	_io_linear(io, &model.pooler)
 	_io_linear(io, &model.mlm_head)

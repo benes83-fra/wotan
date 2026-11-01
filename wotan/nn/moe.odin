@@ -52,7 +52,7 @@ moe_layer_free :: proc(layer: ^MoELayer) {
 		ffn_layer_free(&layer.experts[i])
 	}
 	if layer.experts != nil {
-		delete(layer.experts, layer.allocator) // ✅ USE IT HERE
+		delete(layer.experts, layer.allocator)
 		layer.experts = nil
 	}
 	layer.num_experts = 0
