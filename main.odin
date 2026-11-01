@@ -823,6 +823,8 @@ main :: proc() {
 	free_all(context.temp_allocator)
 	test.deep_hedging_test(context.temp_allocator)
 	free_all(context.temp_allocator)
+	test.deep_hedging_seed_sweep_test(context.temp_allocator)
+	free_all(context.temp_allocator)
 	test.deep_hedging_exotic_test(context.temp_allocator)
 	free_all(context.temp_allocator)
 	test.transformer_encoder_block_test(context.temp_allocator)

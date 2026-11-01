@@ -10,6 +10,7 @@ import "core:math"
 import "core:math/rand"
 import "core:mem"
 import "core:os"
+import "core:slice"
 // Generate Geometric Brownian Motion paths for testing
 _generate_gbm_paths :: proc(
 	S_0: f64,
@@ -60,6 +61,126 @@ _generate_gbm_paths :: proc(
 	return paths, payoffs
 }
 
+// Test parameters
+@(private = "file")
+DH_S_0 :: 100.0
+@(private = "file")
+DH_K :: 100.0
+@(private = "file")
+DH_T :: 1.0
+@(private = "file")
+DH_R :: 0.05
+@(private = "file")
+DH_SIGMA :: 0.20
+@(private = "file")
+DH_PATHS :: 1024
+@(private = "file")
+DH_STEPS :: 50
+@(private = "file")
+DH_EPOCHS :: 100
+
+// One training run: the trained hedger (free with deep_hedger_free), its
+// training loss E[PnL²] (without the premium) at the first and last epoch, and
+// the terminal PnL variance on the training paths of the deep hedge, of no
+// hedge and of the static delta hedge
+@(private = "file")
+_Deep_Hedging_Run :: struct {
+	hedger:                             ^ml_fin.DeepHedger,
+	initial_loss, final_loss:           f64,
+	deep_var, unhedged_var, static_var: f64,
+	delta_bs:                           f64,
+}
+
+@(private = "file")
+_deep_hedging_run :: proc(allocator: mem.Allocator, verbose: bool) -> (run: _Deep_Hedging_Run) {
+	S_0, K, T, r, sigma := DH_S_0, DH_K, DH_T, DH_R, DH_SIGMA
+	n_paths, n_steps, epochs := DH_PATHS, DH_STEPS, DH_EPOCHS
+
+	// ========================================================================
+	// 2. Generate Training Data
+	// ========================================================================
+	if verbose {fmt.println("\n2. Generating GBM Training Data...")}
+	paths, payoffs := _generate_gbm_paths(S_0, K, T, r, sigma, n_paths, n_steps, allocator)
+	defer t.tensor_free(paths)
+	defer t.tensor_free(payoffs)
+	if verbose {fmt.printf("   [OK] Generated %d paths with %d time steps\n", n_paths, n_steps)}
+
+	// ========================================================================
+	// 3. Create Deep Hedger
+	// ========================================================================
+	if verbose {fmt.println("\n3. Initializing Deep Hedger...")}
+	config := ml_fin.DeepHedgerConfig {
+		state_size       = 3,
+		hidden_size      = 64,
+		num_layers       = 2,
+		risk_measure     = .CVaR,
+		cvar_alpha       = 0.05,
+		transaction_cost = 0.001,
+		num_assets       = 1,
+	}
+	run.hedger = ml_fin.deep_hedger_new(config, allocator)
+
+	opt := nn.adam_new(0.001, allocator = allocator)
+	defer nn.adam_free(&opt)
+
+	nn.sequential_add_to_adam(run.hedger.network, &opt)
+
+	if verbose {
+		fmt.println("   [OK] Created MLP with 2 hidden layers (64 units each)")
+		fmt.printf("   [OK] Transaction Cost: %.2f%% per trade\n", config.transaction_cost * 100)
+	}
+	// ========================================================================
+	// 4. Training Loop
+	// ========================================================================
+	if verbose {
+		fmt.println("\n4. Training Deep Hedger...")
+		fmt.println("   ----------------------------------------------------------------------")
+		fmt.println("   Epoch    | Loss E[PnL²]")
+		fmt.println("   ----------------------------------------------------------------------")
+	}
+
+	for epoch in 0 ..< epochs {
+		loss := ml_fin.deep_hedger_train_step(run.hedger, paths, payoffs, &opt)
+
+		if epoch == 0 {
+			run.initial_loss = loss
+		}
+		run.final_loss = loss
+
+		// Print progress every 10 epochs (Fixed Odin formatting)
+		if verbose && (epoch % 10 == 0 || epoch == epochs - 1) {
+			fmt.printf("   %3d      | $%.4f\n", epoch, loss)
+		}
+	}
+
+	// PnL variance of the trained hedge, no hedge and the static delta hedge
+	pnl, spots := ml_fin.deep_hedging_evaluate(run.hedger, paths, payoffs, allocator)
+	run.deep_var = _variance(pnl)
+	delete(pnl, allocator)
+	delete(spots, allocator)
+	run.unhedged_var = _unhedged_variance(payoffs, n_paths)
+	run.static_var, run.delta_bs = _static_delta_variance(
+		S_0,
+		K,
+		T,
+		r,
+		sigma,
+		paths,
+		payoffs,
+		n_paths,
+		n_steps,
+		allocator,
+	)
+	return run
+}
+
+// Deep vs static hedge: PnL variance reduction of the deep hedge relative to
+// the static delta hedge in percent
+@(private = "file")
+_deep_vs_static :: proc(run: _Deep_Hedging_Run) -> f64 {
+	return (1.0 - run.deep_var / run.static_var) * 100.0 if run.static_var > 1e-10 else 0.0
+}
+
 // Main test procedure
 deep_hedging_test :: proc(allocator: mem.Allocator) {
 	seed_test(#procedure)
@@ -69,17 +190,8 @@ deep_hedging_test :: proc(allocator: mem.Allocator) {
 	fmt.println("======================================================================")
 	fmt.println("")
 
-	// ========================================================================
-	// Test Parameters
-	// ========================================================================
-	S_0 := 100.0
-	K := 100.0
-	T := 1.0
-	r := 0.05
-	sigma := 0.20
-	n_paths := 1024
-	n_steps := 50
-	epochs := 100
+	S_0, K, T, r, sigma := DH_S_0, DH_K, DH_T, DH_R, DH_SIGMA
+	n_paths, n_steps, epochs := DH_PATHS, DH_STEPS, DH_EPOCHS
 
 	fmt.printf("Option Parameters:\n")
 	fmt.printf("  S_0 = %.2f, K = %.2f, T = %.2f\n", S_0, K, T)
@@ -97,62 +209,10 @@ deep_hedging_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("   BS Gamma:      %.4f\n", bs_greeks.gamma)
 	fmt.printf("   BS Vega:       %.4f\n", bs_greeks.vega)
 
-	// ========================================================================
-	// 2. Generate Training Data
-	// ========================================================================
-	fmt.println("\n2. Generating GBM Training Data...")
-	paths, payoffs := _generate_gbm_paths(S_0, K, T, r, sigma, n_paths, n_steps, allocator)
-	defer t.tensor_free(paths)
-	defer t.tensor_free(payoffs)
-	fmt.printf("   [OK] Generated %d paths with %d time steps\n", n_paths, n_steps)
-
-	// ========================================================================
-	// 3. Create Deep Hedger
-	// ========================================================================
-	fmt.println("\n3. Initializing Deep Hedger...")
-	config := ml_fin.DeepHedgerConfig {
-		state_size       = 3,
-		hidden_size      = 64,
-		num_layers       = 2,
-		risk_measure     = .CVaR,
-		cvar_alpha       = 0.05,
-		transaction_cost = 0.001,
-		num_assets       = 1,
-	}
-	hedger := ml_fin.deep_hedger_new(config, allocator)
+	run := _deep_hedging_run(allocator, true)
+	hedger := run.hedger
 	defer ml_fin.deep_hedger_free(hedger)
-
-	opt := nn.adam_new(0.001, allocator = allocator)
-	defer nn.adam_free(&opt)
-
-	nn.sequential_add_to_adam(hedger.network, &opt)
-
-	fmt.println("   [OK] Created MLP with 2 hidden layers (64 units each)")
-	fmt.printf("   [OK] Transaction Cost: %.2f%% per trade\n", config.transaction_cost * 100)
-	// ========================================================================
-	// 4. Training Loop
-	// ========================================================================
-	fmt.println("\n4. Training Deep Hedger...")
-	fmt.println("   ----------------------------------------------------------------------")
-	fmt.println("   Epoch    | Loss (PnL Var)")
-	fmt.println("   ----------------------------------------------------------------------")
-
-	initial_loss := 0.0
-	final_loss := 0.0
-
-	for epoch in 0 ..< epochs {
-		loss := ml_fin.deep_hedger_train_step(hedger, paths, payoffs, &opt)
-
-		if epoch == 0 {
-			initial_loss = loss
-		}
-		final_loss = loss
-
-		// Print progress every 10 epochs (Fixed Odin formatting)
-		if epoch % 10 == 0 || epoch == epochs - 1 {
-			fmt.printf("   %3d      | $%.4f\n", epoch, loss)
-		}
-	}
+	initial_loss, final_loss := run.initial_loss, run.final_loss
 
 	fmt.println("   ----------------------------------------------------------------------")
 	loss_reduction := (1.0 - final_loss / initial_loss) * 100.0
@@ -164,23 +224,8 @@ deep_hedging_test :: proc(allocator: mem.Allocator) {
 	fmt.println("\n5. Computing True Baselines...")
 	fmt.println("   ----------------------------------------------------------------------")
 
-	// True unhedged variance
-	true_unhedged_var := _unhedged_variance(payoffs, n_paths)
+	true_unhedged_var, static_var, delta_bs := run.unhedged_var, run.static_var, run.delta_bs
 	fmt.printf("   True Unhedged Variance:  $%.4f\n", true_unhedged_var)
-
-	// Static delta baseline
-	static_var, delta_bs := _static_delta_variance(
-		S_0,
-		K,
-		T,
-		r,
-		sigma,
-		paths,
-		payoffs,
-		n_paths,
-		n_steps,
-		allocator,
-	)
 	fmt.printf("   BS Delta (t=0):          %.4f\n", delta_bs)
 	fmt.printf("   Static Hedge Variance:   $%.4f\n", static_var)
 
@@ -192,17 +237,15 @@ deep_hedging_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("   %-30s | $%.4f\n", "Black-Scholes Price", bs_price)
 	fmt.printf("   %-30s | $%.4f\n", "True Unhedged Variance", true_unhedged_var)
 	fmt.printf("   %-30s | $%.4f\n", "Static Delta Variance", static_var)
-	fmt.printf("   %-30s | $%.4f\n", "Deep Hedge Variance (epoch 0)", initial_loss)
-	fmt.printf("   %-30s | $%.4f\n", "Deep Hedge Variance (final)", final_loss)
+	fmt.printf("   %-30s | $%.4f\n", "Loss E[PnL^2], epoch 0", initial_loss)
+	fmt.printf("   %-30s | $%.4f\n", "Loss E[PnL^2], final", final_loss)
+	fmt.printf("   %-30s | $%.4f\n", "Deep Hedge Variance", run.deep_var)
 	fmt.println("   ----------------------------------------------------------------------")
 
 	// Improvement metrics
 	static_improvement := (1.0 - static_var / true_unhedged_var) * 100.0
-	deep_improvement := (1.0 - final_loss / true_unhedged_var) * 100.0
-	deep_vs_static := 0.0
-	if static_var > 1e-10 {
-		deep_vs_static = (1.0 - final_loss / static_var) * 100.0
-	}
+	deep_improvement := (1.0 - run.deep_var / true_unhedged_var) * 100.0
+	deep_vs_static := _deep_vs_static(run)
 
 	fmt.printf("   %-30s | %.2f%%\n", "Static vs Unhedged", static_improvement)
 	fmt.printf("   %-30s | %.2f%%\n", "Deep vs Unhedged", deep_improvement)
@@ -260,15 +303,50 @@ deep_hedging_test :: proc(allocator: mem.Allocator) {
 }
 // Compute TRUE unhedged variance (variance of -payoff)
 _unhedged_variance :: proc(payoffs: ^t.Tensor, n_paths: int) -> f64 {
-	sum := 0.0
-	sq_sum := 0.0
-	for i in 0 ..< n_paths {
-		p := -payoffs.data.data[i] // Loss = -payoff
-		sum += p
-		sq_sum += p * p
-	}
-	mean := sum / f64(n_paths)
-	return (sq_sum / f64(n_paths)) - mean * mean
+	return _variance(payoffs.data.data[:n_paths])
+}
+
+// Population variance
+@(private = "file")
+_variance :: proc(xs: []f64) -> f64 {
+	mean := math.sum(xs) / f64(len(xs))
+	ss := 0.0
+	for x in xs {ss += (x - mean) * (x - mean)}
+	return ss / f64(len(xs))
+}
+
+// deep_hedging_test over several seeds: mean ± std of its results, to tell a
+// change of the training from seed noise (run 0 is deep_hedging_test itself)
+deep_hedging_seed_sweep_test :: proc(allocator: mem.Allocator, n_seeds := 5) {
+	fmt.printf("\n=== Deep hedging over %d seeds ===\n", n_seeds)
+	stats := seed_sweep(
+		"deep_hedging_test",
+		n_seeds,
+		{"deep vs static (%)", "deep vs unhedged (%)", "deep PnL variance", "static PnL variance"},
+		proc(allocator: mem.Allocator) -> []f64 {
+			run := _deep_hedging_run(allocator, false)
+			ml_fin.deep_hedger_free(run.hedger)
+			return slice.clone(
+				[]f64 {
+					_deep_vs_static(run),
+					(1.0 - run.deep_var / run.unhedged_var) * 100.0,
+					run.deep_var,
+					run.static_var,
+				},
+				allocator,
+			)
+		},
+		allocator,
+	)
+	seed_sweep_print(stats)
+	// Dynamic hedging must beat the static delta hedge with every seed
+	ok := stats[0].min > 0
+	fmt.printf(
+		"%s deep hedge PnL variance below the static delta hedge's with every seed (worst seed %.1f%% lower)\n",
+		"OK  " if ok else "FAIL",
+		stats[0].min,
+	)
+	record_failures(0 if ok else 1)
 }
 
 // Compute static delta variance (corrected)
