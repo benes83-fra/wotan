@@ -395,7 +395,7 @@ deeplob_real_data_sharpe_test :: proc(allocator: mem.Allocator) {
 		strategy_returns := t.tensor_mul(expected_returns, actual_returns)
 
 		// 6. Calculate Sharpe Loss (Minimizing negative Sharpe = Maximizing Sharpe)
-		loss := t.tensor_sharpe_loss(strategy_returns, 0.0, allocator)
+		loss := t.tensor_sharpe_loss(strategy_returns, 0.0)
 
 		t.tensor_backward(loss)
 		nn.adam_step(&opt)

@@ -24,7 +24,7 @@ prospect_theory_test :: proc(allocator: mem.Allocator) {
 	returns_tensor := t.tensor_new(returns_data, true, allocator)
 	defer t.tensor_free(returns_tensor)
 
-	v := t.tensor_prospect_value(returns_tensor, 0.88, 0.88, 2.25, allocator)
+	v := t.tensor_prospect_value(returns_tensor, 0.88, 0.88, 2.25)
 
 	fmt.println(" Return | v(x)    | Expected Property")
 	fmt.println(" -------|---------|------------------")
@@ -78,7 +78,7 @@ prospect_theory_test :: proc(allocator: mem.Allocator) {
 	probs_tensor := t.tensor_new(probs_data, true, allocator)
 	defer t.tensor_free(probs_tensor)
 
-	w := t.tensor_prob_weighting(probs_tensor, 0.61, allocator)
+	w := t.tensor_prob_weighting(probs_tensor, 0.61)
 
 	fmt.println(" p     | w(p)  | Property")
 	fmt.println(" ------|-------|----------")
@@ -110,7 +110,7 @@ prospect_theory_test :: proc(allocator: mem.Allocator) {
 	defer t.tensor_free(rl_tensor)
 
 	// Compute prospect utility (negated for minimization)
-	loss := t.tensor_prospect_utility(rl_tensor, 0.88, 0.88, 2.25, allocator)
+	loss := t.tensor_prospect_utility(rl_tensor, 0.88, 0.88, 2.25)
 
 	fmt.printf("Prospect Utility Loss: %.6f\n", loss.data.data[0])
 

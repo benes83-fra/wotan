@@ -133,7 +133,7 @@ gradcheck_test :: proc(allocator: mem.Allocator) {
 	r := gc_mk([]f64{0.0012, -0.0007, 0.00031, 0.0009, -0.00045}, 1, 5, true, allocator)
 	defer t.tensor_free(r)
 	gc_check("sharpe_loss daily returns", r, proc(x: ^t.Tensor) -> ^t.Tensor {
-			return t.tensor_sharpe_loss(x, 0.0000159, context.allocator)
+			return t.tensor_sharpe_loss(x, 0.0000159)
 		}, allocator)
 
 	// 7. Flatten with fan-out (flatten output + original 4D input both used)
@@ -149,7 +149,7 @@ gradcheck_test :: proc(allocator: mem.Allocator) {
 	// 8. Softmax on a [2,3] batch: each row must be normalized independently
 	lg := gc_mk([]f64{1, 2, 3, 1, 1, 1}, 2, 3, false, allocator)
 	defer t.tensor_free(lg)
-	p := t.tensor_softmax(lg, allocator)
+	p := t.tensor_softmax(lg)
 	defer t.tensor_free(p)
 	row0 := p.data.data[0] + p.data.data[1] + p.data.data[2]
 	row1 := p.data.data[3] + p.data.data[4] + p.data.data[5]
@@ -201,18 +201,16 @@ gradcheck_test :: proc(allocator: mem.Allocator) {
 	pv := gc_mk([]f64{0.02, -0.015, 0.3, -0.4}, 1, 4, true, allocator)
 	defer t.tensor_free(pv)
 	gc_check("prospect_value(a=0.8812345)", pv, proc(x: ^t.Tensor) -> ^t.Tensor {
-			return t.tensor_sum(
-				t.tensor_prospect_value(x, 0.8812345, 0.8712345, 2.2512345, context.allocator),
-			)
+			return t.tensor_sum(t.tensor_prospect_value(x, 0.8812345, 0.8712345, 2.2512345))
 		}, allocator)
 	gc_check("prospect_utility(a=0.8812345)", pv, proc(x: ^t.Tensor) -> ^t.Tensor {
-			return t.tensor_prospect_utility(x, 0.8812345, 0.8712345, 2.2512345, context.allocator)
+			return t.tensor_prospect_utility(x, 0.8812345, 0.8712345, 2.2512345)
 		}, allocator)
 
 	pw := gc_mk([]f64{0.1, 0.35, 0.6, 0.9}, 1, 4, true, allocator)
 	defer t.tensor_free(pw)
 	gc_check("prob_weighting(gamma=0.6123457)", pw, proc(x: ^t.Tensor) -> ^t.Tensor {
-			return t.tensor_sum(t.tensor_prob_weighting(x, 0.6123457, context.allocator))
+			return t.tensor_sum(t.tensor_prob_weighting(x, 0.6123457))
 		}, allocator)
 
 	// 11. Time-dimension z-score (eps passed through f64_metadata)

@@ -123,7 +123,7 @@ cql_loss :: proc(
 	td_loss := t.tensor_mse_loss(q_taken, target)
 
 	// 5. CQL Regularization: alpha * (logsumexp(q_values) - q_taken)
-	lse_q := t.tensor_logsumexp_dim1(q_values, num_actions, allocator)
+	lse_q := t.tensor_logsumexp_dim1(q_values, num_actions)
 	diff := t.tensor_sub(lse_q, q_taken)
 	cql_reg := t.tensor_mean(diff)
 

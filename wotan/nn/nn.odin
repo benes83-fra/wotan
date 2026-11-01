@@ -72,8 +72,19 @@ LinearLayer :: struct {
 	out_features: int,
 }
 
-// linear_layer_new creates a new linear layer.
-// For now, we initialize weights to small random values and bias to zero.
+// Fills data with U(-limit, limit)
+init_uniform :: proc(data: []f64, limit: f64) {
+	for &v in data {v = (rand.float64() * 2.0 - 1.0) * limit}
+}
+
+// Xavier/Glorot uniform initialization: U(-a, a) with a = sqrt(6 / (fan_in +
+// fan_out)), i.e. variance 2 / (fan_in + fan_out)
+xavier_uniform :: proc(data: []f64, fan_in, fan_out: int) {
+	init_uniform(data, math.sqrt(6.0 / f64(fan_in + fan_out)))
+}
+
+// linear_layer_new creates a linear layer with Xavier-uniform weights and a
+// zero bias.
 linear_layer_new :: proc(
 	in_features: int,
 	out_features: int,
@@ -83,20 +94,10 @@ linear_layer_new :: proc(
 	layer.in_features = in_features
 	layer.out_features = out_features
 
-	// Initialize Weights (Xavier/Glorot initialization simplified)
-	// We use a small uniform random distribution
 	w_data := l.matrix_new(f64, in_features, out_features, allocator)
-	limit := math.sqrt(2.0 / f64(in_features + out_features))
-	for i in 0 ..< len(w_data.data) {
-		// Random between -limit and limit
-		w_data.data[i] = (rand.float64() * 2.0 - 1.0) * limit
-	}
+	xavier_uniform(w_data.data, in_features, out_features)
 	layer.weights = t.tensor_new(w_data, true, allocator)
-
-	// Initialize Bias to zeros
-	b_data := l.matrix_new(f64, 1, out_features, allocator)
-	// (matrix_new usually zeroes memory, but let's be explicit if needed)
-	layer.bias = t.tensor_new(b_data, true, allocator)
+	layer.bias = t.tensor_new(l.matrix_new(f64, 1, out_features, allocator), true, allocator)
 
 	return layer
 }

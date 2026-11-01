@@ -544,20 +544,16 @@ generate_synthetic_data :: proc(tg: ^TimeGAN, n_sequences: int, alloc: mem.Alloc
 
 	return output
 }
-// timegan_init_weights applies Xavier/He initialization to all Linear and LSTM layers in the TimeGAN
-// This directly adapts the logic from your nn/gan.odin module for sequential networks.
+// timegan_init_weights re-initializes the Linear and LSTM layers of all five
+// TimeGAN networks: Xavier-uniform weights (fans = matrix rows and columns),
+// zero biases.
 timegan_init_weights :: proc(tg: ^TimeGAN) {
-	// Helper to initialize a single weight matrix
 	init_weights :: proc(weights: ^tensor.Tensor) {
-		if weights == nil || weights.data.data == nil {return}
-		fan_in := f64(weights.data.rows)
-		fan_out := f64(weights.data.cols)
-		// He initialization (perfect for ReLU/Tanh activations used in GANs)
-		scale := math.sqrt(2.0 / (fan_in + fan_out))
-
-		for i in 0 ..< len(weights.data.data) {
-			weights.data.data[i] = (rand.float64() * 2.0 - 1.0) * scale
-		}
+		if weights == nil {return}
+		nn.xavier_uniform(weights.data.data, weights.data.rows, weights.data.cols)
+	}
+	zero :: proc(bias: ^tensor.Tensor) {
+		if bias != nil {for &v in bias.data.data {v = 0}}
 	}
 
 	// Helper to iterate through a Sequential network's layers
@@ -566,12 +562,11 @@ timegan_init_weights :: proc(tg: ^TimeGAN) {
 			#partial switch l in layer {
 			case nn.LinearLayer:
 				init_weights(l.weights)
-				if l.bias != nil {init_weights(l.bias)}
+				zero(l.bias)
 			case nn.LSTMLayer:
-				// Initialize both input-hidden and hidden-hidden weights
 				init_weights(l.w_ih)
 				init_weights(l.w_hh)
-				if l.bias != nil {init_weights(l.bias)}
+				zero(l.bias)
 			}
 		}
 	}

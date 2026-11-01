@@ -54,7 +54,7 @@ prospect_vol_smile_test :: proc(allocator: mem.Allocator) {
 	// gamma = 0.50 creates a strong inverse-S curve.
 	// Investors overweight the tails (small probabilities of extreme events).
 	gamma := 0.50
-	distorted_cdf := t.tensor_prob_weighting(true_cdf, gamma, allocator)
+	distorted_cdf := t.tensor_prob_weighting(true_cdf, gamma)
 
 	// 4. Extract Distorted PDF via finite differences
 	// f_w(S) = d(w(F(S))) / dS

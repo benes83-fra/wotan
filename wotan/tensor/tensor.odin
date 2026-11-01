@@ -1328,7 +1328,12 @@ _input_projection :: proc(
 }
 
 // _step_projection gathers x into step-major order and projects it with W_ih
-_step_projection :: proc(x, w_ih: ^Tensor, G: int, reverse: bool, allocator: mem.Allocator) -> []f64 {
+_step_projection :: proc(
+	x, w_ih: ^Tensor,
+	G: int,
+	reverse: bool,
+	allocator: mem.Allocator,
+) -> []f64 {
 	batch, seq_len, in_size := x.shape[0], x.shape[1], x.shape[2]
 	xs := make([]f64, seq_len * batch * in_size, allocator)
 	defer delete(xs, allocator)
@@ -2578,8 +2583,7 @@ tensor_clamp :: proc(a: ^Tensor, lo: f64, hi: f64) -> ^Tensor {
 }
 // tensor_softmax applies a numerically stable softmax independently to each row
 // of a [N, C] matrix (normalizes over the last dim). A [1, C] tensor is a single row.
-tensor_softmax :: proc(logits: ^Tensor, allocator: mem.Allocator = context.allocator) -> ^Tensor {
-	allocator := _scope_or(allocator) // the active graph scope, if any
+tensor_softmax :: proc(logits: ^Tensor) -> ^Tensor {
 	N := logits.data.rows
 	C := logits.data.cols
 	out_data := l.matrix_new(f64, N, C, _op_alloc(logits))
@@ -2679,16 +2683,12 @@ tensor_bce_loss :: proc(prediction: ^Tensor, target: ^Tensor) -> ^Tensor {
 // Tensor Concatenation (Multi-dimensional)
 // ============================================================================
 
-tensor_concat :: proc(
-	tensors: []^Tensor,
-	dim: int,
-	allocator: mem.Allocator = context.allocator,
-) -> ^Tensor {
-	allocator := _scope_or(allocator) // the active graph scope, if any
+tensor_concat :: proc(tensors: []^Tensor, dim: int) -> ^Tensor {
 	for x in tensors {_check_shape(x)}
 	if len(tensors) == 0 {
 		panic("tensor_concat: empty tensor slice")
 	}
+	allocator := _op_alloc(tensors[0]) // the active graph scope, else the input's
 	if dim < 0 || dim >= 4 {
 		panic("tensor_concat: dim out of bounds (0-3)")
 	}
@@ -2807,12 +2807,8 @@ tensor_permute_lob :: proc(
 // Optimizing this loss maximizes the risk-adjusted return.
 // returns: 1D or 2D tensor of periodic returns.
 // risk_free_rate: scalar f64 (e.g., 0.0).
-tensor_sharpe_loss :: proc(
-	returns: ^Tensor,
-	risk_free_rate: f64 = 0.0,
-	allocator: mem.Allocator = context.allocator,
-) -> ^Tensor {
-	allocator := _scope_or(allocator) // the active graph scope, if any
+tensor_sharpe_loss :: proc(returns: ^Tensor, risk_free_rate: f64 = 0.0) -> ^Tensor {
+	allocator := _op_alloc(returns) // the active graph scope, else the input's
 	n := f64(len(returns.data.data))
 	if n == 0 {
 		panic("tensor_sharpe_loss: empty returns tensor")
@@ -2865,7 +2861,7 @@ tensor_sharpe_loss :: proc(
 tensor_normalize_time :: proc(
 	input: ^Tensor,
 	eps: f64 = 1e-8,
-	allocator: mem.Allocator = context.allocator,
+	allocator: mem.Allocator = context.allocator, // temporary buffers
 ) -> ^Tensor {
 	allocator := _scope_or(allocator) // the active graph scope, if any
 	_check_shape(input)
@@ -2874,7 +2870,7 @@ tensor_normalize_time :: proc(
 	T := input.shape[2]
 	L := input.shape[3]
 
-	out_data := l.matrix_new(f64, 1, N * C * T * L, allocator)
+	out_data := l.matrix_new(f64, 1, N * C * T * L, _op_alloc(input))
 
 	// Temporary contiguous buffers for SIMD operations (allocated once)
 	time_buf := make([]f64, T, allocator)
@@ -2921,7 +2917,7 @@ tensor_normalize_time :: proc(
 		}
 	}
 
-	out := _tensor_new_op(out_data, input.shape, input.requires_grad, allocator)
+	out := _tensor_new_op(out_data, input.shape, input.requires_grad, _op_alloc(input))
 
 	if out.requires_grad {
 		out.op = .NormalizeTime
@@ -2938,12 +2934,8 @@ tensor_normalize_time :: proc(
 // ============================================================================
 // LogSumExp over Dimension 1 (Core Math Primitive)
 // ============================================================================
-tensor_logsumexp_dim1 :: proc(
-	q: ^Tensor,
-	num_actions: int,
-	allocator: mem.Allocator = context.allocator,
-) -> ^Tensor {
-	allocator := _scope_or(allocator) // the active graph scope, if any
+tensor_logsumexp_dim1 :: proc(q: ^Tensor, num_actions: int) -> ^Tensor {
+	allocator := _op_alloc(q) // the active graph scope, else the input's
 	_check_shape(q)
 	batch := q.shape[0]
 	out_data := l.matrix_new(f64, batch, 1, allocator)
@@ -3008,7 +3000,7 @@ SSM_MIN_WORK_PER_THREAD :: 1 << 14
 // _ssm_threads: number of tasks to split `batch` rows of `work_per_row` updates into
 _ssm_threads :: proc(batch, work_per_row: int) -> int {
 	n := min(batch, batch * work_per_row / SSM_MIN_WORK_PER_THREAD)
-	if n <= 1 {return 1} // decide before asking the OS for the core count
+	if n <= 1 {return 1} 	// decide before asking the OS for the core count
 	return min(n, util.parallel_thread_count())
 }
 
@@ -3110,7 +3102,12 @@ tensor_ssm :: proc(
 		d_model = d_model,
 		d_state = d_state,
 	}
-	util.parallel_for(batch, &job, _ssm_forward_rows, _ssm_threads(batch, seq_len * d_model * d_state))
+	util.parallel_for(
+		batch,
+		&job,
+		_ssm_forward_rows,
+		_ssm_threads(batch, seq_len * d_model * d_state),
+	)
 
 	out := _tensor_new_op(out_data, [4]int{batch, seq_len, d_model, 1}, rg, _op_alloc(x))
 	_keep_saved(out, saved)
@@ -3328,12 +3325,8 @@ tensor_top_k_mask :: proc(
 // ============================================================================
 // Gate Multiply: out[n, d] = x[n, d] * gate[n, 0]
 // ============================================================================
-tensor_gate_mul :: proc(
-	x: ^Tensor,
-	gate: ^Tensor,
-	allocator: mem.Allocator = context.allocator,
-) -> ^Tensor {
-	allocator := _scope_or(allocator) // the active graph scope, if any
+tensor_gate_mul :: proc(x: ^Tensor, gate: ^Tensor) -> ^Tensor {
+	allocator := _op_alloc(x) // the active graph scope, else the input's
 	_check_shape(x)
 	N := x.shape[0]
 	D := x.shape[1]
@@ -3356,12 +3349,8 @@ tensor_gate_mul :: proc(
 }
 
 // tensor_reshape changes the logical shape of the tensor without altering the flat memory layout.
-tensor_reshape :: proc(
-	input: ^Tensor,
-	new_shape: [4]int,
-	allocator: mem.Allocator = context.allocator,
-) -> ^Tensor {
-	allocator := _scope_or(allocator) // the active graph scope, if any
+tensor_reshape :: proc(input: ^Tensor, new_shape: [4]int) -> ^Tensor {
+	allocator := _op_alloc(input) // the active graph scope, else the input's
 	old_total := len(input.data.data)
 	new_total := new_shape[0] * new_shape[1] * new_shape[2] * new_shape[3]
 
@@ -3388,12 +3377,8 @@ tensor_reshape :: proc(
 	return out
 }
 // tensor_slice_gate extracts a single expert's gate column while preserving the autograd graph.
-tensor_slice_gate :: proc(
-	gates: ^Tensor,
-	expert_idx: int,
-	allocator: mem.Allocator = context.allocator,
-) -> ^Tensor {
-	allocator := _scope_or(allocator) // the active graph scope, if any
+tensor_slice_gate :: proc(gates: ^Tensor, expert_idx: int) -> ^Tensor {
+	allocator := _op_alloc(gates) // the active graph scope, else the input's
 	N := gates.data.rows
 	E := gates.data.cols
 
@@ -3424,9 +3409,8 @@ tensor_prospect_value :: proc(
 	alpha: f64 = 0.88,
 	beta: f64 = 0.88,
 	lambda: f64 = 2.25,
-	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
-	allocator := _scope_or(allocator) // the active graph scope, if any
+	allocator := _op_alloc(returns) // the active graph scope, else the input's
 	out_data := l.matrix_new(f64, returns.data.rows, returns.data.cols, allocator)
 
 	for i in 0 ..< len(returns.data.data) {
@@ -3455,12 +3439,8 @@ tensor_prospect_value :: proc(
 // w(p) = p^γ / (p^γ + (1-p)^γ)^(1/γ)
 // Calibrated: γ_gain = 0.61, γ_loss = 0.69
 
-tensor_prob_weighting :: proc(
-	p: ^Tensor,
-	gamma: f64 = 0.61,
-	allocator: mem.Allocator = context.allocator,
-) -> ^Tensor {
-	allocator := _scope_or(allocator) // the active graph scope, if any
+tensor_prob_weighting :: proc(p: ^Tensor, gamma: f64 = 0.61) -> ^Tensor {
+	allocator := _op_alloc(p) // the active graph scope, else the input's
 	eps := 1e-7
 	out_data := l.matrix_new(f64, p.data.rows, p.data.cols, allocator)
 
@@ -3492,9 +3472,8 @@ tensor_prospect_utility :: proc(
 	alpha: f64 = 0.88,
 	beta: f64 = 0.88,
 	lambda: f64 = 2.25,
-	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
-	allocator := _scope_or(allocator) // the active graph scope, if any
+	allocator := _op_alloc(returns) // the active graph scope, else the input's
 	n := f64(len(returns.data.data))
 	if n == 0 {
 		panic("tensor_prospect_utility: empty returns tensor")

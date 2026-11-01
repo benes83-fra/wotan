@@ -132,10 +132,9 @@ moe_layer_forward :: proc(
 		if load[e] == 0 {continue}
 		y := t.tensor_gate_mul(
 			ffn_layer_forward(&layer.experts[e], x_flat),
-			t.tensor_slice_gate(gates, e, allocator),
-			allocator,
+			t.tensor_slice_gate(gates, e),
 		)
 		out_flat = y if out_flat == nil else t.tensor_add(out_flat, y)
 	}
-	return t.tensor_reshape(out_flat, [4]int{batch, seq_len, layer.d_model, 1}, allocator)
+	return t.tensor_reshape(out_flat, [4]int{batch, seq_len, layer.d_model, 1})
 }

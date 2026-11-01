@@ -69,11 +69,7 @@ inception_block_free :: proc(block: ^InceptionBlock) {
 	nn.conv2d_layer_free(&block.b3_5x5)
 }
 
-inception_block_forward :: proc(
-	block: ^InceptionBlock,
-	x: ^t.Tensor,
-	alloc: mem.Allocator,
-) -> ^t.Tensor {
+inception_block_forward :: proc(block: ^InceptionBlock, x: ^t.Tensor) -> ^t.Tensor {
 	b1 := t.tensor_conv2d(
 		x,
 		block.b1_1x1.weight,
@@ -122,7 +118,7 @@ inception_block_forward :: proc(
 	branches[1] = b2
 	branches[2] = b3
 
-	out := t.tensor_concat(branches[:], 1, alloc)
+	out := t.tensor_concat(branches[:], 1)
 
 	// NOTE: Do NOT free b1, b2, or b3 here! They are required for the
 	// backward pass. The final t.tensor_free_graph(loss) call in the
@@ -199,7 +195,7 @@ deeplob_forward :: proc(model: ^DeepLOB, input: ^t.Tensor) -> ^t.Tensor {
 	batch := input.shape[0]
 
 	cnn_out := nn.sequential_forward(model.cnn, input)
-	inception_out := inception_block_forward(&model.inception, cnn_out, alloc)
+	inception_out := inception_block_forward(&model.inception, cnn_out)
 
 	c_out := inception_out.shape[1]
 	t_out := inception_out.shape[2]

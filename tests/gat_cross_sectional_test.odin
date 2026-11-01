@@ -18,7 +18,6 @@ gat_cross_sectional_test :: proc(allocator: mem.Allocator) {
 	batch_size := 32
 	num_assets := 10
 	time_steps := 20
-	feature_dim := 5
 	hidden_dim := 16
 	num_heads := 2
 
@@ -63,7 +62,8 @@ gat_cross_sectional_test :: proc(allocator: mem.Allocator) {
 
 	// 2. Initialize GAT Model
 	fmt.println("Initializing GAT Layer...")
-	gat := nn.gat_layer_new(feature_dim, hidden_dim, num_heads, adjacency, allocator)
+	// the input features of an asset are its time_steps returns
+	gat := nn.gat_layer_new(time_steps, hidden_dim, num_heads, adjacency, allocator)
 	defer nn.gat_layer_free(&gat)
 
 	// Final prediction head

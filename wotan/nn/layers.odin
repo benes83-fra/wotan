@@ -76,16 +76,11 @@ conv2d_layer_new :: proc(
 	layer.stride = stride
 	layer.padding = padding
 
-	// Initialize weights with Xavier initialization
-	col_w := in_channels * kernel_size * kernel_size
-	w_data := l.matrix_new(f64, out_channels, col_w, allocator)
+	// Xavier initialization
 	fan_in := in_channels * kernel_size * kernel_size
 	fan_out := out_channels * kernel_size * kernel_size
-	limit := math.sqrt(6.0 / f64(fan_in + fan_out))
-
-	for i in 0 ..< len(w_data.data) {
-		w_data.data[i] = (rand.float64() * 2.0 - 1.0) * limit
-	}
+	w_data := l.matrix_new(f64, out_channels, fan_in, allocator)
+	xavier_uniform(w_data.data, fan_in, fan_out)
 
 	layer.weight = t.tensor_new(w_data, true, allocator)
 	layer.weight.shape = [4]int{out_channels, in_channels, kernel_size, kernel_size}
@@ -224,20 +219,14 @@ rnn_layer_new :: proc(
 
 	// Xavier initialization for w_ih
 	w_ih_data := l.matrix_new(f64, input_size, hidden_size, allocator)
-	limit_ih := math.sqrt(6.0 / f64(input_size + hidden_size))
-	for i in 0 ..< len(w_ih_data.data) {
-		w_ih_data.data[i] = (rand.float64() * 2.0 - 1.0) * limit_ih
-	}
+	xavier_uniform(w_ih_data.data, input_size, hidden_size)
 	layer.w_ih = t.tensor_new(w_ih_data, true, allocator)
 	// ✅ FIX: Set shape so shape[0]=input_size, shape[1]=hidden_size
 	layer.w_ih.shape = [4]int{input_size, hidden_size, 1, 1}
 
 	// Orthogonal/Xavier initialization for w_hh
 	w_hh_data := l.matrix_new(f64, hidden_size, hidden_size, allocator)
-	limit_hh := math.sqrt(6.0 / f64(hidden_size + hidden_size))
-	for i in 0 ..< len(w_hh_data.data) {
-		w_hh_data.data[i] = (rand.float64() * 2.0 - 1.0) * limit_hh
-	}
+	xavier_uniform(w_hh_data.data, hidden_size, hidden_size)
 	layer.w_hh = t.tensor_new(w_hh_data, true, allocator)
 	// ✅ FIX: Set shape so shape[0]=hidden_size, shape[1]=hidden_size
 	layer.w_hh.shape = [4]int{hidden_size, hidden_size, 1, 1}
@@ -278,18 +267,12 @@ gru_layer_new :: proc(
 	H3 := 3 * hidden_size
 
 	w_ih_data := l.matrix_new(f64, input_size, H3, allocator)
-	limit_ih := math.sqrt(6.0 / f64(input_size + hidden_size))
-	for i in 0 ..< len(w_ih_data.data) {
-		w_ih_data.data[i] = (rand.float64() * 2.0 - 1.0) * limit_ih
-	}
+	xavier_uniform(w_ih_data.data, input_size, hidden_size)
 	layer.w_ih = t.tensor_new(w_ih_data, true, allocator)
 	layer.w_ih.shape = [4]int{input_size, H3, 1, 1}
 
 	w_hh_data := l.matrix_new(f64, hidden_size, H3, allocator)
-	limit_hh := math.sqrt(6.0 / f64(hidden_size + hidden_size))
-	for i in 0 ..< len(w_hh_data.data) {
-		w_hh_data.data[i] = (rand.float64() * 2.0 - 1.0) * limit_hh
-	}
+	xavier_uniform(w_hh_data.data, hidden_size, hidden_size)
 	layer.w_hh = t.tensor_new(w_hh_data, true, allocator)
 	layer.w_hh.shape = [4]int{hidden_size, H3, 1, 1}
 
@@ -328,18 +311,12 @@ lstm_layer_new :: proc(
 	H4 := 4 * hidden_size
 
 	w_ih_data := l.matrix_new(f64, input_size, H4, allocator)
-	limit_ih := math.sqrt(6.0 / f64(input_size + hidden_size))
-	for i in 0 ..< len(w_ih_data.data) {
-		w_ih_data.data[i] = (rand.float64() * 2.0 - 1.0) * limit_ih
-	}
+	xavier_uniform(w_ih_data.data, input_size, hidden_size)
 	layer.w_ih = t.tensor_new(w_ih_data, true, allocator)
 	layer.w_ih.shape = [4]int{input_size, H4, 1, 1}
 
 	w_hh_data := l.matrix_new(f64, hidden_size, H4, allocator)
-	limit_hh := math.sqrt(6.0 / f64(hidden_size + hidden_size))
-	for i in 0 ..< len(w_hh_data.data) {
-		w_hh_data.data[i] = (rand.float64() * 2.0 - 1.0) * limit_hh
-	}
+	xavier_uniform(w_hh_data.data, hidden_size, hidden_size)
 	layer.w_hh = t.tensor_new(w_hh_data, true, allocator)
 	layer.w_hh.shape = [4]int{hidden_size, H4, 1, 1}
 
@@ -386,10 +363,7 @@ embedding_layer_new :: proc(
 	w_data := l.matrix_new(f64, num_embeddings, embedding_dim, allocator)
 
 	// Standard embedding initialization: Uniform(-1/sqrt(dim), 1/sqrt(dim))
-	limit := 1.0 / math.sqrt(f64(embedding_dim))
-	for i in 0 ..< len(w_data.data) {
-		w_data.data[i] = (rand.float64() * 2.0 - 1.0) * limit
-	}
+	init_uniform(w_data.data, 1.0 / math.sqrt(f64(embedding_dim)))
 
 	layer.weight = t.tensor_new(w_data, true, allocator)
 	layer.weight.shape = [4]int{num_embeddings, embedding_dim, 1, 1}
@@ -550,7 +524,7 @@ multi_head_attention_layer_forward :: proc(
 // keys and values from x_kv [batch, seq_k, d_model]. mask is an additive
 // [seq_q, seq_k] mask shared by all sequences; key_padding [batch, seq_k] is 0
 // at padded keys; causal hides keys after the query position.
-@(private = "file")
+@(private)
 _attention :: proc(
 	q_proj, k_proj, v_proj, out_proj: ^LinearLayer,
 	num_heads, head_dim: int,

@@ -90,7 +90,7 @@ gradcheck_ops_test :: proc(allocator: mem.Allocator) {
 		allocator,
 	)
 	gcl_check("reshape", 1, proc() -> ^t.Tensor {
-			return gcl_weighted_sum(t.tensor_reshape(gcl_in[0], {2, 6, 1, 1}, context.allocator))
+			return gcl_weighted_sum(t.tensor_reshape(gcl_in[0], {2, 6, 1, 1}))
 		}, allocator)
 	gcl_check(
 		"dropout (training, fixed seed)",
@@ -175,17 +175,17 @@ gradcheck_ops_test :: proc(allocator: mem.Allocator) {
 		allocator,
 	)
 	gcl_check("logsumexp_dim1 [3,4]", 1, proc() -> ^t.Tensor {
-			return gcl_weighted_sum(t.tensor_logsumexp_dim1(gcl_in[0], 4, context.allocator))
+			return gcl_weighted_sum(t.tensor_logsumexp_dim1(gcl_in[0], 4))
 		}, allocator)
 	gcl_check("slice_gate [3,4] expert 2", 1, proc() -> ^t.Tensor {
-			return gcl_weighted_sum(t.tensor_slice_gate(gcl_in[0], 2, context.allocator))
+			return gcl_weighted_sum(t.tensor_slice_gate(gcl_in[0], 2))
 		}, allocator)
 	gcl_free_inputs(1)
 
 	gcl_in[0] = gcl_rand(3, 4, {3, 4, 1, 1}, 109, true, allocator)
 	gcl_in[1] = gcl_rand(3, 1, {3, 1, 1, 1}, 110, true, allocator)
 	gcl_check("gate_mul [3,4]*[3,1]", 2, proc() -> ^t.Tensor {
-			return gcl_weighted_sum(t.tensor_gate_mul(gcl_in[0], gcl_in[1], context.allocator))
+			return gcl_weighted_sum(t.tensor_gate_mul(gcl_in[0], gcl_in[1]))
 		}, allocator)
 	gcl_free_inputs(2)
 
@@ -336,14 +336,14 @@ gradcheck_ops_test :: proc(allocator: mem.Allocator) {
 	gcl_in[1] = gcl_rand(1, 2 * 1 * 2 * 1, {2, 1, 2, 1}, 131, true, allocator)
 	gcl_check("concat dim=1", 2, proc() -> ^t.Tensor {
 			ts := []^t.Tensor{gcl_in[0], gcl_in[1]}
-			return gcl_weighted_sum(t.tensor_concat(ts, 1, context.allocator))
+			return gcl_weighted_sum(t.tensor_concat(ts, 1))
 		}, allocator)
 	gcl_free_inputs(2)
 	gcl_in[0] = gcl_rand(1, 2 * 3 * 2 * 1, {2, 3, 2, 1}, 132, true, allocator)
 	gcl_in[1] = gcl_rand(1, 2 * 3 * 4 * 1, {2, 3, 4, 1}, 133, true, allocator)
 	gcl_check("concat dim=2", 2, proc() -> ^t.Tensor {
 			ts := []^t.Tensor{gcl_in[0], gcl_in[1]}
-			return gcl_weighted_sum(t.tensor_concat(ts, 2, context.allocator))
+			return gcl_weighted_sum(t.tensor_concat(ts, 2))
 		}, allocator)
 	gcl_free_inputs(2)
 

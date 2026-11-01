@@ -18,7 +18,7 @@ apply_prospect_value :: proc(reward: f64, alloc: mem.Allocator) -> f64 {
 	t := tensor.tensor_new(data, false, alloc)
 
 	// α=0.88, β=0.88, λ=2.25 (Tversky & Kahneman 1992 calibration)
-	v := tensor.tensor_prospect_value(t, 0.88, 0.88, 2.25, alloc)
+	v := tensor.tensor_prospect_value(t, 0.88, 0.88, 2.25)
 
 	out := v.data.data[0]
 	tensor.tensor_free(t)

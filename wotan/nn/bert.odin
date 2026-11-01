@@ -210,7 +210,7 @@ bert_model_forward :: proc(
 
 	// NSP head on [CLS] (position 0), gathered with an embedding lookup into the
 	// [batch * seq_len, d_model] rows of x so that gradients reach the encoder
-	rows := t.tensor_reshape(x, [4]int{batch * seq_len, model.d_model, 1, 1}, alloc)
+	rows := t.tensor_reshape(x, [4]int{batch * seq_len, model.d_model, 1, 1})
 	cls_ids := _constant(batch, {batch, 1, 1, 1}, alloc)
 	for b in 0 ..< batch {cls_ids.data.data[b] = f64(b * seq_len)}
 	cls := t.tensor_embedding(cls_ids, rows)
