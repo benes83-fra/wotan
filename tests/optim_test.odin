@@ -226,30 +226,23 @@ test_rmsprop_slice :: proc(allocator: mem.Allocator) -> bool {
 test_schedulers :: proc() -> bool {
 	fmt.println("Testing learning rate schedulers...")
 
-	// Linear decay
-	sched_lin := optim.scheduler_linear_decay_init(0.1, 100)
-	for i in 0 ..< 100 {
-		optim.scheduler_linear_decay_step(&sched_lin)
-	}
-	if math.abs(sched_lin.current_lr) > 1e-6 {
-		fmt.printf("  ❌ Linear decay failed: got %.6f, expected ~0.0\n", sched_lin.current_lr)
+	// Linear decay (stays at 0 after total_steps)
+	lin := optim.lr_linear_decay(0.1, 100)
+	lr_lin := optim.lr_schedule_at(lin, 100)
+	if math.abs(lr_lin) > 1e-6 || optim.lr_schedule_at(lin, 150) != lr_lin {
+		fmt.printf("  ❌ Linear decay failed: got %.6f, expected ~0.0\n", lr_lin)
 		return false
 	}
-	fmt.printf("  Linear decay: 0.1 -> %.6f ✅\n", sched_lin.current_lr)
+	fmt.printf("  Linear decay: 0.1 -> %.6f ✅\n", lr_lin)
 
 	// Cosine annealing
-	sched_cos := optim.scheduler_cosine_annealing_init(0.1, 0.001, 100)
-	for i in 0 ..< 100 {
-		optim.scheduler_cosine_annealing_step(&sched_cos)
-	}
-	if math.abs(sched_cos.current_lr - 0.001) > 1e-4 {
-		fmt.printf(
-			"  ❌ Cosine annealing failed: got %.6f, expected ~0.001\n",
-			sched_cos.current_lr,
-		)
+	cos := optim.lr_cosine(0.1, 100, 0.001)
+	lr_cos := optim.lr_schedule_at(cos, 100)
+	if math.abs(lr_cos - 0.001) > 1e-4 {
+		fmt.printf("  ❌ Cosine annealing failed: got %.6f, expected ~0.001\n", lr_cos)
 		return false
 	}
-	fmt.printf("  Cosine annealing: 0.1 -> %.6f ✅\n", sched_cos.current_lr)
+	fmt.printf("  Cosine annealing: 0.1 -> %.6f ✅\n", lr_cos)
 
 	fmt.println("  ✅ Scheduler tests passed")
 	return true

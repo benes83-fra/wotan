@@ -634,6 +634,231 @@ OP_TRAIN := [?]f64 {
 	0.2766145217433881,
 }
 @(private = "file")
+OP_SCHED_CASES := [?]f64 {
+	0.0,
+	0.1,
+	0.1,
+	0.0,
+	0.0,
+	1.0,
+	5.0,
+	0.1,
+	1.0,
+	0.1,
+	0.0,
+	0.0,
+	7.0,
+	0.5,
+	4.0,
+	0.25,
+	2.0,
+	0.1,
+	0.01,
+	30.0,
+	0.0,
+	1.0,
+	6.0,
+	0.1,
+	3.0,
+	0.1,
+	0.001,
+	30.0,
+	0.0,
+	1.0,
+	5.0,
+	0.1,
+	3.0,
+	0.1,
+	0.0,
+	30.0,
+	0.0,
+	1.0,
+	0.0,
+	0.1,
+}
+@(private = "file")
+OP_SCHED := [?]f64 {
+	0.010000000000000002,
+	0.028000000000000004,
+	0.046000000000000006,
+	0.064,
+	0.082,
+	0.1,
+	0.1,
+	0.1,
+	0.1,
+	0.1,
+	0.1,
+	0.1,
+	0.1,
+	0.1,
+	0.1,
+	0.1,
+	0.1,
+	0.1,
+	0.1,
+	0.1,
+	0.1,
+	0.1,
+	0.1,
+	0.1,
+	0.1,
+	0.1,
+	0.1,
+	0.1,
+	0.1,
+	0.1,
+	0.025,
+	0.043750000000000004,
+	0.06250000000000001,
+	0.08125000000000002,
+	0.1,
+	0.1,
+	0.1,
+	0.1,
+	0.1,
+	0.1,
+	0.1,
+	0.05,
+	0.05,
+	0.05,
+	0.05,
+	0.05,
+	0.05,
+	0.05,
+	0.025,
+	0.025,
+	0.025,
+	0.025,
+	0.025,
+	0.025,
+	0.025,
+	0.0125,
+	0.0125,
+	0.0125,
+	0.0125,
+	0.0125,
+	0.010000000000000002,
+	0.025000000000000005,
+	0.04000000000000001,
+	0.05500000000000001,
+	0.07,
+	0.085,
+	0.1,
+	0.09625,
+	0.0925,
+	0.08875,
+	0.085,
+	0.08125000000000002,
+	0.07750000000000001,
+	0.07375000000000001,
+	0.07,
+	0.06625,
+	0.0625,
+	0.05875,
+	0.055,
+	0.05125,
+	0.047499999999999994,
+	0.04374999999999999,
+	0.03999999999999999,
+	0.03624999999999999,
+	0.032499999999999994,
+	0.028749999999999994,
+	0.024999999999999994,
+	0.021249999999999995,
+	0.017499999999999995,
+	0.013749999999999995,
+	0.010000000000000002,
+	0.028000000000000004,
+	0.046000000000000006,
+	0.064,
+	0.082,
+	0.1,
+	0.09960967771506667,
+	0.09844486647586725,
+	0.09652393605146846,
+	0.09387718066217127,
+	0.09054634122155993,
+	0.08658394705735989,
+	0.08205248749256015,
+	0.07702342635146034,
+	0.0715760749324711,
+	0.0657963412215599,
+	0.05977537507199339,
+	0.05360813071670103,
+	0.047391869283299,
+	0.04122462492800664,
+	0.035203658778440124,
+	0.029423925067528906,
+	0.023976573648539657,
+	0.018947512507439857,
+	0.014416052942640138,
+	0.010453658778440105,
+	0.007122819337828752,
+	0.004476063948531558,
+	0.002555133524132767,
+	0.0013903222849333506,
+	0.1,
+	0.09972609476841367,
+	0.09890738003669028,
+	0.09755282581475767,
+	0.09567727288213003,
+	0.09330127018922194,
+	0.09045084971874737,
+	0.0871572412738697,
+	0.0834565303179429,
+	0.07938926261462365,
+	0.07499999999999998,
+	0.07033683215379001,
+	0.06545084971874737,
+	0.06039558454088796,
+	0.05522642316338268,
+	0.05000000000000001,
+	0.04477357683661733,
+	0.03960441545911203,
+	0.03454915028125263,
+	0.029663167846209995,
+	0.025000000000000015,
+	0.020610737385376353,
+	0.01654346968205711,
+	0.0128427587261303,
+	0.009549150281252639,
+	0.006698729810778069,
+	0.004322727117869954,
+	0.0024471741852423253,
+	0.0010926199633097165,
+	0.00027390523158633015,
+}
+@(private = "file")
+OP_SCHED_RUN := [?]f64 {
+	0.09417820988596562,
+	1.3716072117049174,
+	1.211783102972688,
+	-0.5439854466795686,
+	-0.2789314748874436,
+	-0.5497152493807319,
+	0.5461932188756025,
+	-0.04759604105435966,
+	0.6797414881783499,
+	-2.0394509863576453,
+	1.477810348502203,
+	0.034909011843805425,
+	0.49121470765086084,
+	11.589704613817918,
+	5.82671496919666,
+	-3.348847396951725,
+	-2.3428745544275302,
+	1.5556745279152517,
+	-6.06710314245527,
+	-3.5265438821507034,
+	0.09697174489778028,
+	-8.591500254276617,
+	-8.65077065293914,
+	-5.470178548086901,
+	8.188586470683406,
+	-4.886413907168435,
+}
+@(private = "file")
 OP_SIZES :: [3]int{6, 3, 4}
 
 @(private = "file")
@@ -912,6 +1137,84 @@ optimizers_reference_test :: proc(allocator: mem.Allocator) {
 				OP_LOSS[14],
 				worst_p,
 				ok,
+			),
+		)
+	}
+
+	// 7. Learning-rate schedules (warmup + constant / step / linear / cosine)
+	// vs torch.optim.lr_scheduler, then driving Adam (one parameter at its own
+	// rate, scaled alike) and SGD with momentum on the gradient sequence
+	{
+		N :: 30
+		d_lr := 0.0
+		after_ok := true
+		for k in 0 ..< len(OP_SCHED_CASES) / 8 {
+			c := OP_SCHED_CASES[k * 8:][:8]
+			s := optim.LR_Schedule {
+				decay        = optim.LR_Decay(int(c[0])),
+				base_lr      = c[1],
+				final_lr     = c[2],
+				total_steps  = int(c[3]),
+				step_size    = int(c[4]),
+				gamma        = c[5],
+				warmup_steps = int(c[6]),
+				warmup_start = c[7],
+			}
+			for it in 0 ..< N {d_lr = max(d_lr, abs(optim.lr_schedule_at(s, it) - OP_SCHED[k * N + it]))}
+			// Linear and cosine stay at final_lr after total_steps
+			if s.decay == .Linear || s.decay == .Cosine {
+				for it in s.total_steps ..< s.total_steps + 20 {after_ok &&= optim.lr_schedule_at(s, it) == s.final_lr}
+			}
+		}
+		// The constructors build the same schedules
+		made := [5]optim.LR_Schedule {
+			optim.lr_constant(0.1, warmup_steps = 5),
+			optim.lr_step_decay(0.1, 7, 0.5, warmup_steps = 4, warmup_start = 0.25),
+			optim.lr_linear_decay(0.1, 30, 0.01, warmup_steps = 6),
+			optim.lr_cosine(0.1, 30, 0.001, warmup_steps = 5),
+			optim.lr_cosine(0.1, 30),
+		}
+		d_made := 0.0
+		for s, k in made {
+			for it in 0 ..< N {d_made = max(d_made, abs(optim.lr_schedule_at(s, it) - OP_SCHED[k * N + it]))}
+		}
+
+		ps := _op_params(allocator)
+		adam := nn.adam_new(0.01, allocator = allocator)
+		defer nn.adam_free(&adam)
+		nn.adam_add_param(&adam, ps[0])
+		nn.adam_add_param(&adam, ps[1])
+		nn.adam_add_param_with_lr(&adam, ps[2], 0.05)
+		cos := optim.lr_cosine(0.01, T, warmup_steps = 5)
+		for s in 0 ..< T {
+			adam.learning_rate = optim.lr_schedule_at(cos, s)
+			_op_set_grads(ps, s)
+			nn.adam_step(&adam)
+		}
+		d_adam := _op_diff_free(ps, OP_SCHED_RUN[0:13])
+
+		ps = _op_params(allocator)
+		sgd := nn.sgd_new(0.05, allocator, momentum = 0.9)
+		for p in ps {nn.sgd_add_param(&sgd, p)}
+		steps := optim.lr_step_decay(0.05, 5, 0.5, warmup_steps = 3, warmup_start = 0.2)
+		for s in 0 ..< T {
+			sgd.learning_rate = optim.lr_schedule_at(steps, s)
+			_op_set_grads(ps, s)
+			nn.sgd_step(&sgd)
+		}
+		nn.sgd_free(&sgd)
+		d_sgd := _op_diff_free(ps, OP_SCHED_RUN[13:26])
+		expect(
+			&passed,
+			&total,
+			d_lr < 1e-15 && d_made < 1e-15 && after_ok && d_adam < 1e-14 && d_sgd < 1e-12,
+			fmt.tprintf(
+				"LR schedules (5 kinds, 30 steps) vs lr_scheduler %.1e, constructors %.1e, final_lr kept after total_steps %v; Adam + warmup/cosine (both rates scaled) %.1e, SGD momentum + warmup/step decay %.1e",
+				d_lr,
+				d_made,
+				after_ok,
+				d_adam,
+				d_sgd,
 			),
 		)
 	}

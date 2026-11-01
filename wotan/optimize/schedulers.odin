@@ -3,108 +3,95 @@ package optimize
 import "core:math"
 
 // ============================================================================
-// Linear Decay Scheduler
+// Learning-rate schedules
 // ============================================================================
+// The learning rate of step 0, 1, 2, … as a closed form (so training can resume
+// at any step): an optional linear warmup from warmup_start·base_lr to base_lr
+// over warmup_steps, then
+//   Constant: base_lr
+//   Step:     base_lr·gamma^⌊t / step_size⌋
+//   Linear:   base_lr → final_lr over the remaining steps up to total_steps
+//   Cosine:   base_lr → final_lr along a half cosine up to total_steps
+// where t counts the steps after the warmup; Linear and Cosine stay at
+// final_lr after total_steps. As torch.optim.lr_scheduler: SequentialLR of
+// LinearLR(warmup_start, 1, warmup_steps) and ConstantLR(1) / StepLR /
+// LinearLR / CosineAnnealingLR(eta_min = final_lr). Set the optimizer's
+// learning rate before each step:
+//   for it in 0 ..< n {opt.learning_rate = lr_schedule_at(s, it); …; adam_step(&opt)}
 
-LinearDecayScheduler :: struct {
-	initial_lr:  f64,
-	current_lr:  f64,
+LR_Decay :: enum {
+	Constant,
+	Step,
+	Linear,
+	Cosine,
+}
+
+LR_Schedule :: struct {
+	decay:        LR_Decay,
+	base_lr:      f64,
+	final_lr:     f64, // Linear, Cosine
+	total_steps:  int, // Linear, Cosine: including the warmup
+	step_size:    int, // Step
+	gamma:        f64, // Step
+	warmup_steps: int,
+	warmup_start: f64, // fraction of base_lr at step 0 of the warmup
+}
+
+lr_constant :: proc(base_lr: f64, warmup_steps := 0, warmup_start := 0.1) -> LR_Schedule {
+	return {.Constant, base_lr, base_lr, 0, 0, 1, warmup_steps, warmup_start}
+}
+
+// Multiplies the learning rate by gamma every step_size steps
+lr_step_decay :: proc(
+	base_lr: f64,
+	step_size: int,
+	gamma: f64,
+	warmup_steps := 0,
+	warmup_start := 0.1,
+) -> LR_Schedule {
+	assert(step_size > 0, "lr_step_decay: step_size must be positive")
+	return {.Step, base_lr, 0, 0, step_size, gamma, warmup_steps, warmup_start}
+}
+
+lr_linear_decay :: proc(
+	base_lr: f64,
 	total_steps: int,
-	step:        int,
+	final_lr := 0.0,
+	warmup_steps := 0,
+	warmup_start := 0.1,
+) -> LR_Schedule {
+	assert(total_steps > warmup_steps, "lr_linear_decay: total_steps must exceed warmup_steps")
+	return {.Linear, base_lr, final_lr, total_steps, 0, 1, warmup_steps, warmup_start}
 }
 
-// Contract: start_lr > 0, total_steps >= 0
-scheduler_linear_decay_init :: proc(start_lr: f64, total_steps: int) -> LinearDecayScheduler {
-	return LinearDecayScheduler {
-		initial_lr = start_lr,
-		current_lr = start_lr,
-		total_steps = total_steps,
-		step = 0,
-	}
-}
-
-// Contract: sched initialized via scheduler_linear_decay_init
-// Updates sched.current_lr = initial_lr * (1 - step/total_steps)
-scheduler_linear_decay_step :: proc(sched: ^LinearDecayScheduler) {
-	sched.step += 1
-	if sched.total_steps > 0 {
-		progress := f64(sched.step) / f64(sched.total_steps)
-		sched.current_lr = sched.initial_lr * (1.0 - progress)
-	}
-}
-
-// ============================================================================
-// Cosine Annealing Scheduler
-// ============================================================================
-
-CosineAnnealingScheduler :: struct {
-	initial_lr:  f64,
-	min_lr:      f64,
+lr_cosine :: proc(
+	base_lr: f64,
 	total_steps: int,
-	step:        int,
-	current_lr:  f64,
+	final_lr := 0.0,
+	warmup_steps := 0,
+	warmup_start := 0.1,
+) -> LR_Schedule {
+	assert(total_steps > warmup_steps, "lr_cosine: total_steps must exceed warmup_steps")
+	return {.Cosine, base_lr, final_lr, total_steps, 0, 1, warmup_steps, warmup_start}
 }
 
-// Contract: start_lr >= min_lr >= 0, total_steps >= 0
-scheduler_cosine_annealing_init :: proc(
-	start_lr: f64,
-	min_lr: f64,
-	total_steps: int,
-) -> CosineAnnealingScheduler {
-	return CosineAnnealingScheduler {
-		initial_lr = start_lr,
-		min_lr = min_lr,
-		total_steps = total_steps,
-		step = 0,
-		current_lr = start_lr,
+// The learning rate of step `step` (0-based)
+lr_schedule_at :: proc(s: LR_Schedule, step: int) -> f64 {
+	if step < s.warmup_steps {
+		frac := f64(step) / f64(s.warmup_steps)
+		return s.base_lr * (s.warmup_start + (1.0 - s.warmup_start) * frac)
 	}
-}
-
-// Contract: sched initialized via scheduler_cosine_annealing_init
-// Updates sched.current_lr using cosine annealing formula
-scheduler_cosine_annealing_step :: proc(sched: ^CosineAnnealingScheduler) {
-	sched.step += 1
-	if sched.total_steps > 0 {
-		progress := f64(sched.step) / f64(sched.total_steps)
-		// lr = min_lr + 0.5*(max-min)*(1 + cos(π*progress))
-		sched.current_lr =
-			sched.min_lr +
-			0.5 * (sched.initial_lr - sched.min_lr) * (1.0 + math.cos(math.PI * progress))
+	t := step - s.warmup_steps
+	switch s.decay {
+	case .Constant:
+		return s.base_lr
+	case .Step:
+		return s.base_lr * math.pow(s.gamma, f64(t / s.step_size))
+	case .Linear, .Cosine:
+		frac := f64(t) / f64(s.total_steps - s.warmup_steps)
+		if frac >= 1.0 {return s.final_lr}
+		if s.decay == .Linear {return s.base_lr + (s.final_lr - s.base_lr) * frac}
+		return s.final_lr + 0.5 * (s.base_lr - s.final_lr) * (1.0 + math.cos(math.PI * frac))
 	}
-}
-
-// ============================================================================
-// Step Decay Scheduler
-// ============================================================================
-
-StepDecayScheduler :: struct {
-	initial_lr:     f64,
-	drop_factor:    f64, // e.g., 0.1 for 10x drop
-	steps_per_drop: int,
-	step:           int,
-	current_lr:     f64,
-}
-
-// Contract: start_lr > 0, drop_factor in (0,1], steps_per_drop >= 0
-scheduler_step_decay_init :: proc(
-	start_lr: f64,
-	drop_factor: f64,
-	steps_per_drop: int,
-) -> StepDecayScheduler {
-	return StepDecayScheduler {
-		initial_lr = start_lr,
-		drop_factor = drop_factor,
-		steps_per_drop = steps_per_drop,
-		step = 0,
-		current_lr = start_lr,
-	}
-}
-
-// Contract: sched initialized via scheduler_step_decay_init
-// Drops LR by drop_factor every steps_per_drop steps
-scheduler_step_decay_step :: proc(sched: ^StepDecayScheduler) {
-	sched.step += 1
-	if sched.steps_per_drop > 0 && sched.step % sched.steps_per_drop == 0 {
-		sched.current_lr *= sched.drop_factor
-	}
+	return s.base_lr
 }

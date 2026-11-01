@@ -11,20 +11,22 @@ import "core:mem"
 // ============================================================================
 // torch.optim.Adam / AdamW (decoupled weight decay) over registered tensors;
 // the update itself is optimize.adam_update. Gradients are used as they are:
-// clip them with clip_grad_norm before adam_step if needed.
+// clip them with clip_grad_norm before adam_step if needed. A parameter with
+// its own learning rate keeps its ratio to learning_rate, so a learning-rate
+// schedule (optimize.lr_schedule_at) scales it as well.
 
 Adam :: struct {
-	parameters:     [dynamic]^t.Tensor,
-	moment_1:       [dynamic][]f64,
-	moment_2:       [dynamic][]f64,
-	learning_rate:  f64,
-	learning_rates: [dynamic]Maybe(f64), // per-parameter override of learning_rate
-	beta_1:         f64,
-	beta_2:         f64,
-	epsilon:        f64,
-	weight_decay:   f64, // decoupled (AdamW); 0 is plain Adam
-	timestep:       int,
-	allocator:      mem.Allocator,
+	parameters:    [dynamic]^t.Tensor,
+	moment_1:      [dynamic][]f64,
+	moment_2:      [dynamic][]f64,
+	learning_rate: f64,
+	lr_scales:     [dynamic]f64, // per parameter: its learning rate / learning_rate
+	beta_1:        f64,
+	beta_2:        f64,
+	epsilon:       f64,
+	weight_decay:  f64, // decoupled (AdamW); 0 is plain Adam
+	timestep:      int,
+	allocator:     mem.Allocator,
 }
 
 adam_new :: proc(
@@ -39,7 +41,7 @@ adam_new :: proc(
 		parameters = make([dynamic]^t.Tensor, 0, allocator),
 		moment_1 = make([dynamic][]f64, 0, allocator),
 		moment_2 = make([dynamic][]f64, 0, allocator),
-		learning_rates = make([dynamic]Maybe(f64), 0, allocator),
+		lr_scales = make([dynamic]f64, 0, allocator),
 		learning_rate = learning_rate,
 		beta_1 = beta_1,
 		beta_2 = beta_2,
@@ -50,19 +52,24 @@ adam_new :: proc(
 }
 
 adam_add_param :: proc(opt: ^Adam, param: ^t.Tensor) {
-	_adam_register(opt, param, nil)
+	_adam_register(opt, param, 1.0)
 }
 
-// Registers a parameter with its own learning rate
+// Registers a parameter with its own learning rate (relative to the current
+// learning_rate from then on)
 adam_add_param_with_lr :: proc(opt: ^Adam, param: ^t.Tensor, lr: f64) {
-	_adam_register(opt, param, lr)
+	assert(
+		opt.learning_rate > 0,
+		"adam_add_param_with_lr: the optimizer's learning rate must be positive",
+	)
+	_adam_register(opt, param, lr / opt.learning_rate)
 }
 
 @(private = "file")
-_adam_register :: proc(opt: ^Adam, param: ^t.Tensor, lr: Maybe(f64)) {
+_adam_register :: proc(opt: ^Adam, param: ^t.Tensor, lr_scale: f64) {
 	n := len(param.data.data)
 	append(&opt.parameters, param)
-	append(&opt.learning_rates, lr)
+	append(&opt.lr_scales, lr_scale)
 	append(&opt.moment_1, make([]f64, n, opt.allocator))
 	append(&opt.moment_2, make([]f64, n, opt.allocator))
 }
@@ -71,13 +78,12 @@ adam_step :: proc(opt: ^Adam) {
 	opt.timestep += 1
 	for param, i in opt.parameters {
 		if !param.requires_grad || param.grad.data == nil {continue}
-		lr := opt.learning_rates[i].? or_else opt.learning_rate
 		optim.adam_update(
 			param.data.data,
 			param.grad.data,
 			opt.moment_1[i],
 			opt.moment_2[i],
-			lr,
+			opt.learning_rate * opt.lr_scales[i],
 			opt.beta_1,
 			opt.beta_2,
 			opt.epsilon,
@@ -92,7 +98,7 @@ adam_free :: proc(opt: ^Adam) {
 	for v in opt.moment_2 {delete(v, opt.allocator)}
 	delete(opt.moment_1)
 	delete(opt.moment_2)
-	delete(opt.learning_rates)
+	delete(opt.lr_scales)
 	delete(opt.parameters)
 }
 
