@@ -1,8 +1,6 @@
 package nn
 
-import l "../linalg"
 import t "../tensor"
-import "core:fmt"
 import "core:math"
 import "core:math/rand"
 import "core:mem"
@@ -19,66 +17,54 @@ AugmentationConfig :: struct {
 }
 
 // ============================================================================
-// Affine Transformation Helpers
+// Affine Transformation
 // ============================================================================
 
-// _apply_affine_transform applies rotation, translation, and scaling to a single image
-// Input: (1, 28, 28) image as flat array
-// Output: transformed image as flat array
-_apply_affine_transform :: proc(
+// Rotates one [height, width] image by angle_deg (counter-clockwise), scales
+// it by `scale` about its center and shifts it by (tx, ty) pixels, as
+// torchvision.transforms.functional.affine: every output pixel samples the
+// input bilinearly at its inverse-mapped position, with zeros outside the
+// image (torch grid_sample, padding "zeros", align_corners = False).
+affine_transform_image :: proc(
 	input: []f64,
 	output: []f64,
 	width: int,
 	height: int,
-	angle_rad: f64,
+	angle_deg: f64,
 	tx: int,
 	ty: int,
 	scale: f64,
 ) {
-	center_x := f64(width) / 2.0
-	center_y := f64(height) / 2.0
+	cx := f64(width - 1) / 2.0
+	cy := f64(height - 1) / 2.0
+	angle := angle_deg * math.PI / 180.0
+	cos_a := math.cos(angle) / scale
+	sin_a := math.sin(angle) / scale
 
-	cos_a := math.cos(angle_rad)
-	sin_a := math.sin(angle_rad)
+	pixel :: proc(img: []f64, width, height, x, y: int) -> f64 {
+		return img[y * width + x] if x >= 0 && x < width && y >= 0 && y < height else 0.0
+	}
 
-	// Apply transformation to each output pixel
 	for y in 0 ..< height {
 		for x in 0 ..< width {
-			// Translate to center
-			x_centered := f64(x) - center_x - f64(tx)
-			y_centered := f64(y) - center_y - f64(ty)
+			// Position relative to the center before the shift, then the
+			// inverse rotation and scaling
+			dx := f64(x) - cx - f64(tx)
+			dy := f64(y) - cy - f64(ty)
+			x_src := cos_a * dx - sin_a * dy + cx
+			y_src := sin_a * dx + cos_a * dy + cy
 
-			// Apply inverse rotation and scaling
-			x_rot := (x_centered * cos_a + y_centered * sin_a) / scale
-			y_rot := (-x_centered * sin_a + y_centered * cos_a) / scale
-
-			// Translate back
-			x_src := x_rot + center_x
-			y_src := y_rot + center_y
-
-			// Bilinear interpolation
-			out_idx := y * width + x
-			if x_src >= 0 && x_src < f64(width - 1) && y_src >= 0 && y_src < f64(height - 1) {
-				x0 := int(x_src)
-				y0 := int(y_src)
-				x1 := x0 + 1
-				y1 := y0 + 1
-
-				fx := x_src - f64(x0)
-				fy := y_src - f64(y0)
-
-				v00 := input[y0 * width + x0]
-				v01 := input[y0 * width + x1]
-				v10 := input[y1 * width + x0]
-				v11 := input[y1 * width + x1]
-
-				// Bilinear interpolation
-				v0 := v00 * (1.0 - fx) + v01 * fx
-				v1 := v10 * (1.0 - fx) + v11 * fx
-				output[out_idx] = v0 * (1.0 - fy) + v1 * fy
-			} else {
-				output[out_idx] = 0.0 // Zero padding
-			}
+			x0 := int(math.floor(x_src))
+			y0 := int(math.floor(y_src))
+			fx := x_src - f64(x0)
+			fy := y_src - f64(y0)
+			v0 :=
+				pixel(input, width, height, x0, y0) * (1.0 - fx) +
+				pixel(input, width, height, x0 + 1, y0) * fx
+			v1 :=
+				pixel(input, width, height, x0, y0 + 1) * (1.0 - fx) +
+				pixel(input, width, height, x0 + 1, y0 + 1) * fx
+			output[y * width + x] = v0 * (1.0 - fy) + v1 * fy
 		}
 	}
 }
@@ -87,9 +73,10 @@ _apply_affine_transform :: proc(
 // Batch Augmentation
 // ============================================================================
 
-// augment_batch applies random augmentations to a batch of images
-// Input: (N, 1, 28, 28) tensor
-// Output: augmented (N, 1, 28, 28) tensor
+// A random affine transformation per image of an [N, C, H, W] batch (the same
+// for all its channels): angle uniform in ±rotation_range, integer shifts
+// uniform in ±translation_range, scale uniform in 1 ± scale_range. Returns the
+// batch itself if !config.apply.
 augment_batch :: proc(
 	batch: ^t.Tensor,
 	config: AugmentationConfig,
@@ -104,26 +91,30 @@ augment_batch :: proc(
 	H := batch.shape[2]
 	W := batch.shape[3]
 
-	// Create output tensor
 	output := t.tensor_new_4d(N, C, H, W, false, allocator)
+	shift :: proc(r: int) -> int {
+		return int(math.floor(rand.float64() * f64(2 * r + 1))) - r
+	}
 
 	for n in 0 ..< N {
-		// Generate random transformation parameters
 		angle_deg := (rand.float64() * 2.0 - 1.0) * config.rotation_range
-		angle_rad := angle_deg * math.PI / 180.0
-
-		tx := int((rand.float64() * 2.0 - 1.0) * f64(config.translation_range))
-		ty := int((rand.float64() * 2.0 - 1.0) * f64(config.translation_range))
-
+		tx := shift(config.translation_range)
+		ty := shift(config.translation_range)
 		scale := 1.0 + (rand.float64() * 2.0 - 1.0) * config.scale_range
 
-		// Get input and output slices for this image
-		img_offset := n * C * H * W
-		input_slice := batch.data.data[img_offset:img_offset + C * H * W]
-		output_slice := output.data.data[img_offset:img_offset + C * H * W]
-
-		// Apply transformation
-		_apply_affine_transform(input_slice, output_slice, W, H, angle_rad, tx, ty, scale)
+		for c in 0 ..< C {
+			off := (n * C + c) * H * W
+			affine_transform_image(
+				batch.data.data[off:off + H * W],
+				output.data.data[off:off + H * W],
+				W,
+				H,
+				angle_deg,
+				tx,
+				ty,
+				scale,
+			)
+		}
 	}
 
 	return output
