@@ -45,17 +45,9 @@ vae_encoder_forward :: proc(
 	h := linear_forward(&enc.fc1, x)
 	h = t.tensor_relu(h)
 
-	mu = linear_forward(&enc.fc_mu, h)
-	log_var = linear_forward(&enc.fc_logvar, h)
-
-	// ✅ CRITICAL: Clamp mu and log_var to prevent explosion and tanh saturation
-	for i in 0 ..< len(mu.data.data) {
-		mu.data.data[i] = max(-5.0, min(5.0, mu.data.data[i]))
-	}
-	for i in 0 ..< len(log_var.data.data) {
-		log_var.data.data[i] = max(-5.0, min(5.0, log_var.data.data[i]))
-	}
-
+	// Clamped to [-5, 5] against explosion and tanh saturation (zero gradient outside)
+	mu = t.tensor_clamp(linear_forward(&enc.fc_mu, h), -5.0, 5.0)
+	log_var = t.tensor_clamp(linear_forward(&enc.fc_logvar, h), -5.0, 5.0)
 	return mu, log_var
 }
 
@@ -133,21 +125,10 @@ reparameterize :: proc(mu: ^t.Tensor, log_var: ^t.Tensor, allocator: mem.Allocat
 		for d in 0 ..< latent_dim {
 			mu_val := mu.data.data[b * latent_dim + d]
 			log_var_val := log_var.data.data[b * latent_dim + d]
-
-			// ✅ Clamp log_var to prevent numerical issues
-			log_var_val = max(-5.0, min(5.0, log_var_val))
-
 			std := math.exp(0.5 * log_var_val)
-
-			// Sample from standard normal
 			epsilon := rand.norm_float64()
-
-			z_val := mu_val + std * epsilon
-
-			// ✅ Clamp z to prevent decoder saturation
-			z_val = max(-5.0, min(5.0, z_val))
-
-			z_data.data[b * latent_dim + d] = z_val
+			// the backward pass recovers ε from z: ∂z/∂log_var = (z − mu) / 2
+			z_data.data[b * latent_dim + d] = mu_val + std * epsilon
 		}
 	}
 

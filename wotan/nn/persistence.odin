@@ -2,145 +2,547 @@ package nn
 
 import l "../linalg"
 import t "../tensor"
+import "core:encoding/endian"
 import "core:fmt"
+import "core:math/rand"
 import "core:mem"
 import "core:os"
 
-// Magic bytes for checkpoint validation
+// ============================================================================
+// Model files
+// ============================================================================
+// Little-endian binary files that begin with CHECKPOINT_MAGIC. A tensor is
+// stored as rows, cols (i32) and rows·cols f64 values, a nil tensor as 0, 0.
+//   Sequential checkpoint: magic, epoch, layer count, per layer its type id,
+//     configuration and tensors, then the Adam state (type 1 with the
+//     hyperparameters; type 0 without them is still read).
+//   GPT (28; older: 27 without the attention flags, 17 also without MoE), BERT (18), Generator (19), Discriminator (20),
+//     VAE encoder (21) and decoder (22): magic, type id, configuration, tensors.
+// A file is built in memory and written at once. Reading checks every access,
+// so a truncated or foreign file fails instead of panicking. Loading builds
+// each layer from its configuration and reads the stored values into its
+// tensors (keeping their shapes); a stored tensor of another size replaces
+// the layer's tensor (e.g. a classification head of another size). The
+// random initialization of these layers uses a private generator, so loading
+// leaves the caller's random sequence unchanged.
+
 CHECKPOINT_MAGIC :: []u8{'W', 'O', 'T', 'A', 'N', '_', 'C', 'K', 'P', 'T'}
 
+@(private = "file")
+_Layer_Id :: enum {
+	Linear       = 0,
+	Conv2d       = 1,
+	MaxPool2d    = 2,
+	Activation   = 3,
+	Flatten      = 4,
+	BatchNorm2d  = 5,
+	AvgPool2d    = 6,
+	Dropout      = 7,
+	RNN          = 8,
+	GRU          = 9,
+	LSTM         = 10,
+	Embedding    = 11,
+	MHA          = 12,
+	LayerNorm    = 13,
+	FFN          = 14,
+	EncoderBlock = 15,
+	Encoder      = 16,
+	GAT          = 24,
+	Mamba        = 25,
+	MoE          = 26,
+}
+
+@(private = "file")
+_File_Id :: enum {
+	GPT_Dense     = 17, // no MoE or attention flags (read only)
+	BERT          = 18,
+	Generator     = 19,
+	Discriminator = 20,
+	VAE_Encoder   = 21,
+	VAE_Decoder   = 22,
+	GPT_MoE       = 27, // MoE flags, no attention flags (read only)
+	GPT           = 28, // per block: MoE, use_flash and is_causal flags
+}
+
 // ============================================================================
-// Simple Binary I/O Helpers
+// Reader / writer
 // ============================================================================
 
-write_i32 :: proc(file: ^os.File, val: i32) {
-	bytes := [4]u8 {
-		u8(val & 0xFF),
-		u8((val >> 8) & 0xFF),
-		u8((val >> 16) & 0xFF),
-		u8((val >> 24) & 0xFF),
+@(private = "file")
+_Io :: struct {
+	writing: bool,
+	buf:     [dynamic]u8, // writing
+	data:    []u8, // reading
+	pos:     int,
+	ok:      bool,
+	alloc:   mem.Allocator,
+}
+
+@(private = "file")
+_writer :: proc(alloc: mem.Allocator) -> _Io {
+	io := _Io {
+		writing = true,
+		buf     = make([dynamic]u8, 0, 4096, alloc),
+		ok      = true,
+		alloc   = alloc,
 	}
-	os.write(file, bytes[:])
+	append(&io.buf, ..CHECKPOINT_MAGIC)
+	return io
 }
 
-write_i64 :: proc(file: ^os.File, val: i64) {
-	bytes := [8]u8 {
-		u8(val & 0xFF),
-		u8((val >> 8) & 0xFF),
-		u8((val >> 16) & 0xFF),
-		u8((val >> 24) & 0xFF),
-		u8((val >> 32) & 0xFF),
-		u8((val >> 40) & 0xFF),
-		u8((val >> 48) & 0xFF),
-		u8((val >> 56) & 0xFF),
+// Writes the file and releases the buffer
+@(private = "file")
+_save :: proc(io: ^_Io, path: string) -> bool {
+	defer delete(io.buf)
+	if err := os.write_entire_file(path, io.buf[:]); err != nil {
+		fmt.printf("Failed to write %s: %v\n", path, err)
+		return false
 	}
-	os.write(file, bytes[:])
+	return true
 }
 
-write_f64 :: proc(file: ^os.File, val: f64) {
-	val_i64 := transmute(i64)val
-	bytes := [8]u8 {
-		u8(val_i64 & 0xFF),
-		u8((val_i64 >> 8) & 0xFF),
-		u8((val_i64 >> 16) & 0xFF),
-		u8((val_i64 >> 24) & 0xFF),
-		u8((val_i64 >> 32) & 0xFF),
-		u8((val_i64 >> 40) & 0xFF),
-		u8((val_i64 >> 48) & 0xFF),
-		u8((val_i64 >> 56) & 0xFF),
+// Reads a file and checks the magic bytes
+@(private = "file")
+_reader :: proc(path: string, alloc: mem.Allocator) -> (io: _Io, ok: bool) {
+	data, err := os.read_entire_file(path, alloc)
+	if err != nil {
+		fmt.printf("Failed to read %s: %v\n", path, err)
+		return {}, false
 	}
-	os.write(file, bytes[:])
+	io = _Io {
+		data  = data,
+		ok    = true,
+		alloc = alloc,
+	}
+	magic := _take(&io, len(CHECKPOINT_MAGIC))
+	if magic == nil || mem.compare(magic, CHECKPOINT_MAGIC) != 0 {
+		fmt.printf("%s is not a wotan model file\n", path)
+		delete(data, alloc)
+		return {}, false
+	}
+	return io, true
 }
 
-read_i32 :: proc(data: []u8, offset: int) -> (i32, int) {
-	val :=
-		i32(data[offset]) |
-		(i32(data[offset + 1]) << 8) |
-		(i32(data[offset + 2]) << 16) |
-		(i32(data[offset + 3]) << 24)
-	return val, offset + 4
+// The next n bytes, or nil (and !ok) past the end
+@(private = "file")
+_take :: proc(io: ^_Io, n: int) -> []u8 {
+	if !io.ok || n < 0 || n > len(io.data) - io.pos {
+		io.ok = false
+		return nil
+	}
+	defer io.pos += n
+	return io.data[io.pos:io.pos + n]
 }
 
-read_i64 :: proc(data: []u8, offset: int) -> (i64, int) {
-	val :=
-		i64(data[offset]) |
-		(i64(data[offset + 1]) << 8) |
-		(i64(data[offset + 2]) << 16) |
-		(i64(data[offset + 3]) << 24) |
-		(i64(data[offset + 4]) << 32) |
-		(i64(data[offset + 5]) << 40) |
-		(i64(data[offset + 6]) << 48) |
-		(i64(data[offset + 7]) << 56)
-	return val, offset + 8
+@(private = "file")
+_put_i32 :: proc(io: ^_Io, v: int) {
+	b: [4]u8
+	endian.put_i32(b[:], .Little, i32(v))
+	append(&io.buf, ..b[:])
 }
 
-read_f64 :: proc(data: []u8, offset: int) -> (f64, int) {
-	val_i64 :=
-		i64(data[offset]) |
-		(i64(data[offset + 1]) << 8) |
-		(i64(data[offset + 2]) << 16) |
-		(i64(data[offset + 3]) << 24) |
-		(i64(data[offset + 4]) << 32) |
-		(i64(data[offset + 5]) << 40) |
-		(i64(data[offset + 6]) << 48) |
-		(i64(data[offset + 7]) << 56)
-	return transmute(f64)val_i64, offset + 8
+@(private = "file")
+_put_i64 :: proc(io: ^_Io, v: int) {
+	b: [8]u8
+	endian.put_i64(b[:], .Little, i64(v))
+	append(&io.buf, ..b[:])
 }
 
-// ============================================================================
-// Tensor I/O
-// ============================================================================
+@(private = "file")
+_put_f64 :: proc(io: ^_Io, v: f64) {
+	b: [8]u8
+	endian.put_f64(b[:], .Little, v)
+	append(&io.buf, ..b[:])
+}
 
-write_tensor :: proc(file: ^os.File, tensor: ^t.Tensor) {
-	if tensor == nil {
-		write_i32(file, 0) // rows
-		write_i32(file, 0) // cols
+@(private = "file")
+_get_i32 :: proc(io: ^_Io) -> int {
+	b := _take(io, 4)
+	if b == nil {return 0}
+	v, _ := endian.get_i32(b, .Little)
+	return int(v)
+}
+
+@(private = "file")
+_get_i64 :: proc(io: ^_Io) -> int {
+	b := _take(io, 8)
+	if b == nil {return 0}
+	v, _ := endian.get_i64(b, .Little)
+	return int(v)
+}
+
+@(private = "file")
+_get_f64 :: proc(io: ^_Io) -> f64 {
+	b := _take(io, 8)
+	if b == nil {return 0}
+	v, _ := endian.get_f64(b, .Little)
+	return v
+}
+
+// A size or count: non-negative and no larger than the rest of the file
+@(private = "file")
+_get_size :: proc(io: ^_Io) -> int {
+	v := _get_i32(io)
+	if v < 0 || v > len(io.data) - io.pos {io.ok = false}
+	return v if io.ok else 0
+}
+
+// A flag stored as i32 (written from `on`, or read)
+@(private = "file")
+_io_flag :: proc(io: ^_Io, on: bool) -> bool {
+	if io.writing {
+		_put_i32(io, int(on))
+		return on
+	}
+	return _get_i32(io) != 0
+}
+
+// A tensor (written from x^, or read into it)
+@(private = "file")
+_io_tensor :: proc(io: ^_Io, x: ^^t.Tensor) {
+	if io.writing {
+		if x^ == nil {
+			_put_i32(io, 0)
+			_put_i32(io, 0)
+			return
+		}
+		m := x^.data
+		_put_i32(io, m.rows)
+		_put_i32(io, m.cols)
+		start := len(io.buf)
+		resize(&io.buf, start + 8 * len(m.data))
+		for v, i in m.data {endian.put_f64(io.buf[start + 8 * i:], .Little, v)}
 		return
 	}
-
-	write_i32(file, i32(tensor.data.rows))
-	write_i32(file, i32(tensor.data.cols))
-
-	count := tensor.data.rows * tensor.data.cols
-	for i in 0 ..< count {
-		write_f64(file, tensor.data.data[i])
-	}
-}
-
-read_tensor :: proc(data: []u8, offset: int, allocator: mem.Allocator) -> (^t.Tensor, int) {
-	curr_offset := offset
-
-	rows_i32: i32
-	cols_i32: i32
-	rows_i32, curr_offset = read_i32(data, curr_offset)
-	cols_i32, curr_offset = read_i32(data, curr_offset)
-
-	rows := int(rows_i32)
-	cols := int(cols_i32)
-
-	// Handle nil tensor
+	rows, cols := _get_size(io), _get_size(io)
+	if !io.ok {return}
 	if rows == 0 && cols == 0 {
-		return nil, curr_offset
+		if x^ != nil {t.tensor_free(x^)}
+		x^ = nil
+		return
 	}
-
-	count := rows * cols
-	m := l.matrix_new(f64, rows, cols, allocator)
-
-	for i in 0 ..< count {
-		val: f64
-		val, curr_offset = read_f64(data, curr_offset)
-		m.data[i] = val
+	bytes := _take(io, 8 * rows * cols) if rows <= len(io.data) / max(cols, 1) else nil
+	if bytes == nil {
+		io.ok = false
+		return
 	}
-
-	tensor := t.tensor_new(m, true, allocator)
-	tensor.shape = [4]int{rows, cols, 1, 1}
-	return tensor, curr_offset
+	n := rows * cols
+	if x^ == nil || len(x^.data.data) != n {
+		requires_grad := x^ == nil || x^.requires_grad
+		if x^ != nil {t.tensor_free(x^)}
+		x^ = t.tensor_new(l.matrix_new(f64, rows, cols, io.alloc), requires_grad, io.alloc)
+	}
+	for &v, i in x^.data.data {v, _ = endian.get_f64(bytes[8 * i:], .Little)}
 }
 
 // ============================================================================
-// Save Checkpoint
+// Layers
 // ============================================================================
 
+// Weights and bias (a nil bias is stored as an empty tensor)
+@(private = "file")
+_io_linear :: proc(io: ^_Io, lin: ^LinearLayer) {
+	_io_tensor(io, &lin.weights)
+	_io_tensor(io, &lin.bias)
+	_sync_linear(lin)
+}
+
+// Bias flag, weights and the bias if present
+@(private = "file")
+_io_linear_flagged :: proc(io: ^_Io, lin: ^LinearLayer) {
+	if !_io_flag(io, lin.bias != nil) && lin.bias != nil {
+		t.tensor_free(lin.bias)
+		lin.bias = nil
+	}
+	_io_tensor(io, &lin.weights)
+	if lin.bias != nil {_io_tensor(io, &lin.bias)}
+	_sync_linear(lin)
+}
+
+// in/out features follow the weights (which may have been replaced)
+@(private = "file")
+_sync_linear :: proc(lin: ^LinearLayer) {
+	if lin.weights !=
+	   nil {lin.in_features, lin.out_features = lin.weights.data.rows, lin.weights.data.cols}
+}
+
+@(private = "file")
+_io_mha :: proc(io: ^_Io, q, k, v, o: ^LinearLayer) {
+	_io_linear(io, q)
+	_io_linear(io, k)
+	_io_linear(io, v)
+	_io_linear(io, o)
+}
+
+@(private = "file")
+_io_norm :: proc(io: ^_Io, ln: ^LayerNormLayer) {
+	_io_tensor(io, &ln.gamma)
+	_io_tensor(io, &ln.beta)
+}
+
+// Encoder block in file order: attention, feed-forward, norms
+@(private = "file")
+_io_block :: proc(
+	io: ^_Io,
+	mha: ^MultiHeadAttentionLayer,
+	ffn: ^FFNLayer,
+	ln1, ln2: ^LayerNormLayer,
+) {
+	_io_mha(io, &mha.q_proj, &mha.k_proj, &mha.v_proj, &mha.out_proj)
+	_io_linear(io, &ffn.fc1)
+	_io_linear(io, &ffn.fc2)
+	_io_norm(io, ln1)
+	_io_norm(io, ln2)
+}
+
+@(private = "file")
+_io_moe :: proc(io: ^_Io, moe: ^MoELayer) {
+	_io_linear_flagged(io, &moe.router)
+	for &e in moe.experts {
+		_io_linear_flagged(io, &e.fc1)
+		_io_linear_flagged(io, &e.fc2)
+	}
+}
+
+// The tensors of a layer in file order (written, or read into the layer)
+@(private = "file")
+_io_layer :: proc(io: ^_Io, layer: ^Layer) {
+	switch &l in layer {
+	case LinearLayer:
+		_io_tensor(io, &l.weights)
+		if l.bias != nil {_io_tensor(io, &l.bias)}
+		_sync_linear(&l)
+	case Conv2dLayer:
+		_io_tensor(io, &l.weight)
+		if l.bias != nil {_io_tensor(io, &l.bias)}
+	case BatchNorm2dLayer:
+		_io_tensor(io, &l.weight)
+		_io_tensor(io, &l.bias)
+		_io_tensor(io, &l.running_mean)
+		_io_tensor(io, &l.running_var)
+	case RNNLayer:
+		_io_tensor(io, &l.w_ih)
+		_io_tensor(io, &l.w_hh)
+		_io_tensor(io, &l.bias)
+	case GRULayer:
+		_io_tensor(io, &l.w_ih)
+		_io_tensor(io, &l.w_hh)
+		_io_tensor(io, &l.bias)
+	case LSTMLayer:
+		_io_tensor(io, &l.w_ih)
+		_io_tensor(io, &l.w_hh)
+		_io_tensor(io, &l.bias)
+	case EmbeddingLayer:
+		_io_tensor(io, &l.weight)
+	case MultiHeadAttentionLayer:
+		_io_mha(io, &l.q_proj, &l.k_proj, &l.v_proj, &l.out_proj)
+	case LayerNormLayer:
+		_io_norm(io, &l)
+	case FFNLayer:
+		_io_linear(io, &l.fc1)
+		_io_linear(io, &l.fc2)
+	case TransformerEncoderBlock:
+		_io_block(io, &l.mha, &l.ffn, &l.ln1, &l.ln2)
+	case TransformerEncoder:
+		for &b in l.blocks {_io_block(io, &b.mha, &b.ffn, &b.ln1, &b.ln2)}
+	case GATLayer:
+		_io_tensor(io, &l.linear.weights)
+		if l.linear.bias != nil {_io_tensor(io, &l.linear.bias)}
+		_sync_linear(&l.linear)
+		_io_mha(io, &l.mha.q_proj, &l.mha.k_proj, &l.mha.v_proj, &l.mha.out_proj)
+		_io_tensor(io, &l.adjacency)
+		if l.adjacency != nil {l.adjacency.requires_grad = false}
+	case MambaLayer:
+		_io_linear(io, &l.proj_x)
+		_io_linear(io, &l.proj_B)
+		_io_linear(io, &l.proj_C)
+		_io_linear(io, &l.proj_Delta)
+		_io_linear(io, &l.proj_out)
+		_io_tensor(io, &l.A)
+		_io_tensor(io, &l.D)
+	case MoELayer:
+		_io_moe(io, &l)
+	case MaxPool2dLayer, AvgPool2dLayer, DropoutLayer, Activation, FlattenLayer:
+	}
+}
+
+// Type id and configuration of a layer
+@(private = "file")
+_write_layer_header :: proc(io: ^_Io, layer: ^Layer) {
+	ints :: proc(io: ^_Io, id: _Layer_Id, vals: ..int) {
+		_put_i32(io, int(id))
+		for v in vals {_put_i32(io, v)}
+	}
+	switch l in layer {
+	case LinearLayer:
+		ints(io, .Linear, l.in_features, l.out_features, int(l.bias != nil))
+	case Conv2dLayer:
+		ints(
+			io,
+			.Conv2d,
+			l.in_channels,
+			l.out_channels,
+			l.kernel_size,
+			l.stride,
+			l.padding,
+			int(l.bias != nil),
+		)
+	case MaxPool2dLayer:
+		ints(io, .MaxPool2d, l.kernel_size, l.stride)
+	case Activation:
+		ints(io, .Activation, int(l))
+	case FlattenLayer:
+		ints(io, .Flatten)
+	case BatchNorm2dLayer:
+		ints(io, .BatchNorm2d, l.num_features)
+		_put_f64(io, l.eps)
+		_put_f64(io, l.momentum)
+	case AvgPool2dLayer:
+		ints(io, .AvgPool2d, l.kernel_size, l.stride)
+	case DropoutLayer:
+		ints(io, .Dropout)
+		_put_f64(io, l.drop_prob)
+	case RNNLayer:
+		ints(io, .RNN, l.input_size, l.hidden_size)
+	case GRULayer:
+		ints(io, .GRU, l.input_size, l.hidden_size)
+	case LSTMLayer:
+		ints(io, .LSTM, l.input_size, l.hidden_size)
+	case EmbeddingLayer:
+		ints(io, .Embedding, l.num_embeddings, l.embedding_dim)
+	case MultiHeadAttentionLayer:
+		ints(io, .MHA, l.d_model, l.num_heads)
+	case LayerNormLayer:
+		ints(io, .LayerNorm, l.d_model)
+		_put_f64(io, l.eps)
+	case FFNLayer:
+		ints(io, .FFN, l.d_model, l.d_ff)
+	case TransformerEncoderBlock:
+		ints(io, .EncoderBlock, l.d_model, l.num_heads, l.d_ff)
+	case TransformerEncoder:
+		ints(io, .Encoder, l.num_layers, l.d_model, l.num_heads, l.d_ff)
+	case GATLayer:
+		ints(
+			io,
+			.GAT,
+			l.linear.in_features,
+			l.linear.out_features,
+			l.num_heads,
+			int(l.linear.bias != nil),
+		)
+	case MambaLayer:
+		ints(io, .Mamba, l.d_model, l.d_state)
+	case MoELayer:
+		ints(io, .MoE, l.num_experts, l.top_k, l.d_model, l.d_ff)
+	}
+}
+
+// Reads a type id and configuration and builds the layer (its tensors are
+// read next, by _io_layer)
+@(private = "file")
+_read_layer_header :: proc(io: ^_Io, alloc: mem.Allocator) -> (layer: Layer, ok: bool) {
+	id := _get_i32(io)
+	switch _Layer_Id(id) {
+	case .Linear:
+		in_f, out_f, has_bias := _get_size(io), _get_size(io), _get_i32(io) != 0
+		if !io.ok {return}
+		lin := linear_layer_new(in_f, out_f, alloc)
+		if !has_bias {
+			t.tensor_free(lin.bias)
+			lin.bias = nil
+		}
+		layer = lin
+	case .Conv2d:
+		c_in, c_out, k, stride, pad :=
+			_get_size(io), _get_size(io), _get_size(io), _get_size(io), _get_size(io)
+		has_bias := _get_i32(io) != 0
+		if !io.ok {return}
+		layer = conv2d_layer_new(c_in, c_out, k, stride, pad, has_bias, alloc)
+	case .MaxPool2d:
+		k, s := _get_size(io), _get_size(io)
+		layer = maxpool2d_layer_new(k, s)
+	case .Activation:
+		act := _get_i32(io)
+		if act < 0 || act > int(max(Activation)) {io.ok = false}
+		layer = Activation(act)
+	case .Flatten:
+		layer = FlattenLayer{}
+	case .BatchNorm2d:
+		n := _get_size(io)
+		eps, momentum := _get_f64(io), _get_f64(io)
+		if !io.ok {return}
+		layer = batch_norm_2d_layer_new(n, eps, momentum, alloc)
+	case .AvgPool2d:
+		k, s := _get_size(io), _get_size(io)
+		layer = avgpool2d_layer_new(k, s)
+	case .Dropout:
+		layer = dropout_layer_new(_get_f64(io))
+	case .RNN, .GRU, .LSTM:
+		in_size, hidden := _get_size(io), _get_size(io)
+		if !io.ok {return}
+		#partial switch _Layer_Id(id) {
+		case .RNN:
+			layer = rnn_layer_new(in_size, hidden, alloc)
+		case .GRU:
+			layer = gru_layer_new(in_size, hidden, alloc)
+		case .LSTM:
+			layer = lstm_layer_new(in_size, hidden, alloc)
+		}
+	case .Embedding:
+		n, dim := _get_size(io), _get_size(io)
+		if !io.ok {return}
+		layer = embedding_layer_new(n, dim, alloc)
+	case .MHA:
+		d, heads := _get_size(io), _get_size(io)
+		if !io.ok || heads == 0 {return}
+		layer = multi_head_attention_layer_new(d, heads, allocator = alloc)
+	case .LayerNorm:
+		d := _get_size(io)
+		eps := _get_f64(io)
+		if !io.ok {return}
+		layer = layer_norm_layer_new(d, eps, alloc)
+	case .FFN:
+		d, d_ff := _get_size(io), _get_size(io)
+		if !io.ok {return}
+		layer = ffn_layer_new(d, d_ff, alloc)
+	case .EncoderBlock:
+		d, heads, d_ff := _get_size(io), _get_size(io), _get_size(io)
+		if !io.ok || heads == 0 {return}
+		layer = transformer_encoder_block_new(d, heads, d_ff, alloc)
+	case .Encoder:
+		n, d, heads, d_ff := _get_size(io), _get_size(io), _get_size(io), _get_size(io)
+		if !io.ok || heads == 0 {return}
+		layer = transformer_encoder_new(n, d, heads, d_ff, alloc)
+	case .GAT:
+		in_f, hidden, heads := _get_size(io), _get_size(io), _get_size(io)
+		has_bias := _get_i32(io) != 0
+		if !io.ok || heads == 0 {return}
+		gat := gat_layer_new(in_f, hidden, heads, nil, alloc) // the adjacency is read with the tensors
+		if !has_bias {
+			t.tensor_free(gat.linear.bias)
+			gat.linear.bias = nil
+		}
+		layer = gat
+	case .Mamba:
+		d, n := _get_size(io), _get_size(io)
+		if !io.ok || n < 2 {return}
+		layer = mamba_layer_new(d, n, alloc)
+	case .MoE:
+		e, k, d, d_ff := _get_size(io), _get_size(io), _get_size(io), _get_size(io)
+		if !io.ok {return}
+		layer = moe_layer_new(d, d_ff, e, k, alloc)
+	case:
+		fmt.printf("Unknown layer type %d\n", id)
+		io.ok = false
+	}
+	return layer, io.ok
+}
+
+// ============================================================================
+// Sequential checkpoints
+// ============================================================================
+
+// Saves a Sequential model with its Adam state and the epoch
 save_checkpoint :: proc(
 	model: ^Sequential,
 	opt: ^Adam,
@@ -148,300 +550,30 @@ save_checkpoint :: proc(
 	epoch: int,
 	allocator: mem.Allocator = context.allocator,
 ) -> bool {
-	file, err := os.create(path)
-	if err != nil {
-		fmt.printf("Failed to create file: %v\n", err)
-		return false
-	}
-	defer os.close(file)
-
-	// Magic header
-	os.write(file, CHECKPOINT_MAGIC)
-
-	// Epoch and layer count
-	write_i32(file, i32(epoch))
-	write_i32(file, i32(len(model.layers)))
-
-	// Save each layer
-	for layer in model.layers {
-		switch l in layer {
-		case LinearLayer:
-			write_i32(file, 0) // type
-			write_i32(file, i32(l.in_features))
-			write_i32(file, i32(l.out_features))
-			write_i32(file, i32(bool(l.bias != nil)))
-			write_tensor(file, l.weights)
-			if l.bias != nil {
-				write_tensor(file, l.bias)
-			}
-
-		case Conv2dLayer:
-			write_i32(file, 1) // type
-			write_i32(file, i32(l.in_channels))
-			write_i32(file, i32(l.out_channels))
-			write_i32(file, i32(l.kernel_size))
-			write_i32(file, i32(l.stride))
-			write_i32(file, i32(l.padding))
-			write_i32(file, i32(bool(l.bias != nil)))
-			write_tensor(file, l.weight)
-			if l.bias != nil {
-				write_tensor(file, l.bias)
-			}
-
-		case MaxPool2dLayer:
-			write_i32(file, 2) // type
-			write_i32(file, i32(l.kernel_size))
-			write_i32(file, i32(l.stride))
-
-		case Activation:
-			write_i32(file, 3) // type
-			write_i32(file, i32(l))
-
-		case FlattenLayer:
-			write_i32(file, 4) // type
-		case BatchNorm2dLayer:
-			write_i32(file, 5) // Type 5
-			write_i32(file, i32(l.num_features))
-			write_f64(file, l.eps)
-			write_f64(file, l.momentum)
-			write_tensor(file, l.weight)
-			write_tensor(file, l.bias)
-			write_tensor(file, l.running_mean)
-			write_tensor(file, l.running_var)
-		case AvgPool2dLayer:
-			write_i32(file, 6) // Type 6
-			write_i32(file, i32(l.kernel_size))
-			write_i32(file, i32(l.stride))
-
-		case DropoutLayer:
-			write_i32(file, 7) // Type 7
-			write_f64(file, l.drop_prob)
-		case RNNLayer:
-			write_i32(file, 8) // Type 8
-			write_i32(file, i32(l.input_size))
-			write_i32(file, i32(l.hidden_size))
-			write_tensor(file, l.w_ih)
-			write_tensor(file, l.w_hh)
-			write_tensor(file, l.bias)
-		case GRULayer:
-			write_i32(file, 9) // Type 9
-			write_i32(file, i32(l.input_size))
-			write_i32(file, i32(l.hidden_size))
-			write_tensor(file, l.w_ih)
-			write_tensor(file, l.w_hh)
-			write_tensor(file, l.bias)
-		case LSTMLayer:
-			write_i32(file, 10) // Type 10
-			write_i32(file, i32(l.input_size))
-			write_i32(file, i32(l.hidden_size))
-			write_tensor(file, l.w_ih)
-			write_tensor(file, l.w_hh)
-			write_tensor(file, l.bias)
-		case EmbeddingLayer:
-			write_i32(file, 11) // Type 11
-			write_i32(file, i32(l.num_embeddings))
-			write_i32(file, i32(l.embedding_dim))
-			write_tensor(file, l.weight)
-		case MultiHeadAttentionLayer:
-			write_i32(file, 12) // Type 12
-			write_i32(file, i32(l.d_model))
-			write_i32(file, i32(l.num_heads))
-			write_tensor(file, l.q_proj.weights)
-			write_tensor(file, l.q_proj.bias)
-			write_tensor(file, l.k_proj.weights)
-			write_tensor(file, l.k_proj.bias)
-			write_tensor(file, l.v_proj.weights)
-			write_tensor(file, l.v_proj.bias)
-			write_tensor(file, l.out_proj.weights)
-			write_tensor(file, l.out_proj.bias)
-		case LayerNormLayer:
-			write_i32(file, 13)
-			write_i32(file, i32(l.d_model))
-			write_f64(file, l.eps)
-			write_tensor(file, l.gamma)
-			write_tensor(file, l.beta)
-		case FFNLayer:
-			write_i32(file, 14) // Type 14
-			write_i32(file, i32(l.d_model))
-			write_i32(file, i32(l.d_ff))
-			write_tensor(file, l.fc1.weights)
-			write_tensor(file, l.fc1.bias)
-			write_tensor(file, l.fc2.weights)
-			write_tensor(file, l.fc2.bias)
-		case TransformerEncoderBlock:
-			write_i32(file, 15) // Type 15
-			write_i32(file, i32(l.d_model))
-			write_i32(file, i32(l.num_heads))
-			write_i32(file, i32(l.d_ff))
-
-			// Save MHA
-			write_tensor(file, l.mha.q_proj.weights)
-			write_tensor(file, l.mha.q_proj.bias)
-			write_tensor(file, l.mha.k_proj.weights)
-			write_tensor(file, l.mha.k_proj.bias)
-			write_tensor(file, l.mha.v_proj.weights)
-			write_tensor(file, l.mha.v_proj.bias)
-			write_tensor(file, l.mha.out_proj.weights)
-			write_tensor(file, l.mha.out_proj.bias)
-
-			// Save FFN
-			write_tensor(file, l.ffn.fc1.weights)
-			write_tensor(file, l.ffn.fc1.bias)
-			write_tensor(file, l.ffn.fc2.weights)
-			write_tensor(file, l.ffn.fc2.bias)
-
-			// Save LayerNorms
-			write_tensor(file, l.ln1.gamma)
-			write_tensor(file, l.ln1.beta)
-			write_tensor(file, l.ln2.gamma)
-			write_tensor(file, l.ln2.beta)
-		case TransformerEncoder:
-			write_i32(file, 16) // Type 16
-			write_i32(file, i32(l.num_layers))
-			write_i32(file, i32(l.d_model))
-			write_i32(file, i32(l.num_heads))
-			write_i32(file, i32(l.d_ff))
-
-			// Save each block
-			for i in 0 ..< len(l.blocks) {
-				block := &l.blocks[i]
-
-				// Save MHA
-				write_tensor(file, block.mha.q_proj.weights)
-				write_tensor(file, block.mha.q_proj.bias)
-				write_tensor(file, block.mha.k_proj.weights)
-				write_tensor(file, block.mha.k_proj.bias)
-				write_tensor(file, block.mha.v_proj.weights)
-				write_tensor(file, block.mha.v_proj.bias)
-				write_tensor(file, block.mha.out_proj.weights)
-				write_tensor(file, block.mha.out_proj.bias)
-
-				// Save FFN
-				write_tensor(file, block.ffn.fc1.weights)
-				write_tensor(file, block.ffn.fc1.bias)
-				write_tensor(file, block.ffn.fc2.weights)
-				write_tensor(file, block.ffn.fc2.bias)
-
-				// Save LayerNorms
-				write_tensor(file, block.ln1.gamma)
-				write_tensor(file, block.ln1.beta)
-				write_tensor(file, block.ln2.gamma)
-				write_tensor(file, block.ln2.beta)
-			}
-		case GATLayer:
-			write_i32(file, 24) // Type 24
-			write_i32(file, i32(l.linear.in_features))
-			write_i32(file, i32(l.linear.out_features))
-			write_i32(file, i32(l.num_heads))
-			write_i32(file, i32(bool(l.linear.bias != nil)))
-
-			// Save Linear weights
-			write_tensor(file, l.linear.weights)
-			if l.linear.bias != nil {write_tensor(file, l.linear.bias)}
-
-			// Save MHA weights (same pattern as MultiHeadAttentionLayer)
-			write_tensor(file, l.mha.q_proj.weights)
-			write_tensor(file, l.mha.q_proj.bias)
-			write_tensor(file, l.mha.k_proj.weights)
-			write_tensor(file, l.mha.k_proj.bias)
-			write_tensor(file, l.mha.v_proj.weights)
-			write_tensor(file, l.mha.v_proj.bias)
-			write_tensor(file, l.mha.out_proj.weights)
-			write_tensor(file, l.mha.out_proj.bias)
-
-			// Save Adjacency Matrix
-			write_tensor(file, l.adjacency)
-		case MambaLayer:
-			write_i32(file, 25) // Type 25
-			write_i32(file, i32(l.d_model))
-			write_i32(file, i32(l.d_state))
-
-			// Save Linear projections
-			write_tensor(
-				file,
-				l.proj_x.weights,
-			); if l.proj_x.bias != nil {write_tensor(file, l.proj_x.bias)}
-			write_tensor(
-				file,
-				l.proj_B.weights,
-			); if l.proj_B.bias != nil {write_tensor(file, l.proj_B.bias)}
-			write_tensor(
-				file,
-				l.proj_C.weights,
-			); if l.proj_C.bias != nil {write_tensor(file, l.proj_C.bias)}
-			write_tensor(
-				file,
-				l.proj_Delta.weights,
-			); if l.proj_Delta.bias != nil {write_tensor(file, l.proj_Delta.bias)}
-			write_tensor(
-				file,
-				l.proj_out.weights,
-			); if l.proj_out.bias != nil {write_tensor(file, l.proj_out.bias)}
-
-			// Save SSM parameters
-			write_tensor(file, l.A)
-			write_tensor(file, l.D)
-		case MoELayer:
-			write_i32(file, 26) // Type 26
-			write_i32(file, i32(l.num_experts))
-			write_i32(file, i32(l.top_k))
-			write_i32(file, i32(l.d_model))
-			write_i32(file, i32(l.d_ff))
-
-			// Save Router
-			write_i32(file, i32(bool(l.router.bias != nil)))
-			write_tensor(file, l.router.weights)
-			if l.router.bias != nil {write_tensor(file, l.router.bias)}
-
-			// Save Experts
-			for i in 0 ..< l.num_experts {
-				exp := l.experts[i]
-				write_i32(file, i32(bool(exp.fc1.bias != nil)))
-				write_tensor(file, exp.fc1.weights)
-				if exp.fc1.bias != nil {write_tensor(file, exp.fc1.bias)}
-
-				write_i32(file, i32(bool(exp.fc2.bias != nil)))
-				write_tensor(file, exp.fc2.weights)
-				if exp.fc2.bias != nil {write_tensor(file, exp.fc2.bias)}
-			}
-		}
-
+	io := _writer(allocator)
+	_put_i32(&io, epoch)
+	_put_i32(&io, len(model.layers))
+	for &layer in model.layers {
+		_write_layer_header(&io, &layer)
+		_io_layer(&io, &layer)
 	}
 
-	// Save optimizer state (type 1: Adam with hyperparameters; type 0, without
-	// them, is still read)
-	write_i32(file, 1)
-	write_i64(file, i64(opt.timestep))
-	write_f64(file, opt.learning_rate)
-	write_f64(file, opt.beta_1)
-	write_f64(file, opt.beta_2)
-	write_f64(file, opt.epsilon)
-	write_f64(file, opt.weight_decay)
-	write_i32(file, i32(len(opt.parameters)))
-
+	_put_i32(&io, 1) // optimizer type: Adam with hyperparameters
+	_put_i64(&io, opt.timestep)
+	for v in ([]f64{opt.learning_rate, opt.beta_1, opt.beta_2, opt.epsilon, opt.weight_decay}) {_put_f64(&io, v)}
+	_put_i32(&io, len(opt.parameters))
 	for i in 0 ..< len(opt.parameters) {
-		// moment_1
-		m1_count := len(opt.moment_1[i])
-		write_i32(file, i32(m1_count))
-		for j in 0 ..< m1_count {
-			write_f64(file, opt.moment_1[i][j])
-		}
-
-		// moment_2
-		m2_count := len(opt.moment_2[i])
-		write_i32(file, i32(m2_count))
-		for j in 0 ..< m2_count {
-			write_f64(file, opt.moment_2[i][j])
+		for m in ([][]f64{opt.moment_1[i], opt.moment_2[i]}) {
+			_put_i32(&io, len(m))
+			for v in m {_put_f64(&io, v)}
 		}
 	}
-
-	return true
+	return _save(&io, path)
 }
 
-// ============================================================================
-// Load Checkpoint
-// ============================================================================
-
+// Loads a Sequential model (in evaluation mode), its Adam optimizer (with the
+// parameters attached and their moments restored) and the epoch. Free with
+// sequential_free, adam_free and free(opt).
 load_checkpoint :: proc(
 	path: string,
 	allocator: mem.Allocator = context.allocator,
@@ -451,604 +583,34 @@ load_checkpoint :: proc(
 	epoch: int,
 	ok: bool,
 ) {
-	data, err := os.read_entire_file(path, allocator)
-	if err != nil {
-		fmt.printf("Failed to read file: %v\n", err)
-		return nil, nil, 0, false
-	}
-	defer delete(data, allocator)
-
-	offset := 0
-
-	// Magic header
-	if offset + 10 > len(data) {
-		fmt.println("File too small")
-		return nil, nil, 0, false
-	}
-	magic := CHECKPOINT_MAGIC
-	for i in 0 ..< 10 {
-		if data[offset + i] != magic[i] {
-			fmt.println("Invalid magic bytes")
-			return nil, nil, 0, false
-		}
-	}
-	offset += 10
-
-	// Epoch
-	ep_i32: i32
-	ep_i32, offset = read_i32(data, offset)
-	epoch = int(ep_i32)
-
-	// Model
-	model = new(Sequential, allocator)
-	model.allocator = allocator
-	model.layers = make([dynamic]Layer, 0, allocator)
-
-	num_layers_i32: i32
-	num_layers_i32, offset = read_i32(data, offset)
-
-	for _ in 0 ..< int(num_layers_i32) {
-		layer_type: i32
-		layer_type, offset = read_i32(data, offset)
-
-		if layer_type == 0 { 	// Linear
-			in_f: i32
-			out_f: i32
-			has_bias: i32
-			in_f, offset = read_i32(data, offset)
-			out_f, offset = read_i32(data, offset)
-			has_bias, offset = read_i32(data, offset)
-
-			layer := linear_layer_new(int(in_f), int(out_f), allocator)
-
-			// Read weights
-			layer.weights, offset = read_tensor(data, offset, allocator)
-
-			// Read or discard bias
-			if has_bias != 0 {
-				layer.bias, offset = read_tensor(data, offset, allocator)
-			} else {
-				// Free the bias that was created by linear_layer_new
-				if layer.bias != nil {
-					t.tensor_free(layer.bias)
-					layer.bias = nil
-				}
-			}
-
-			append(&model.layers, layer)
-
-		} else if layer_type == 1 { 	// Conv2d
-			in_c: i32
-			out_c: i32
-			k: i32
-			stride: i32
-			pad: i32
-			has_bias: i32
-			in_c, offset = read_i32(data, offset)
-			out_c, offset = read_i32(data, offset)
-			k, offset = read_i32(data, offset)
-			stride, offset = read_i32(data, offset)
-			pad, offset = read_i32(data, offset)
-			has_bias, offset = read_i32(data, offset)
-
-			layer := conv2d_layer_new(
-				int(in_c),
-				int(out_c),
-				int(k),
-				int(stride),
-				int(pad),
-				has_bias != 0,
-				allocator,
-			)
-
-			// Free default weight and load saved
-			if layer.weight != nil {
-				t.tensor_free(layer.weight)
-			}
-			layer.weight, offset = read_tensor(data, offset, allocator)
-
-			// Set the shape field for Conv2d weights
-			layer.weight.shape = [4]int{int(out_c), int(in_c), int(k), int(k)}
-
-			// Read or discard bias
-			if has_bias != 0 {
-				layer.bias, offset = read_tensor(data, offset, allocator)
-			} else {
-				if layer.bias != nil {
-					t.tensor_free(layer.bias)
-					layer.bias = nil
-				}
-			}
-
-			append(&model.layers, layer)
-
-		} else if layer_type == 2 { 	// MaxPool
-			k: i32
-			s: i32
-			k, offset = read_i32(data, offset)
-			s, offset = read_i32(data, offset)
-			append(&model.layers, maxpool2d_layer_new(int(k), int(s)))
-
-		} else if layer_type == 3 { 	// Activation
-			act: i32
-			act, offset = read_i32(data, offset)
-			append(&model.layers, Activation(act))
-
-		} else if layer_type == 4 { 	// Flatten
-			append(&model.layers, FlattenLayer{})
-		} else if layer_type == 5 { 	// BatchNorm2d
-			num_features: i32
-			eps: f64
-			momentum: f64
-			num_features, offset = read_i32(data, offset)
-			eps, offset = read_f64(data, offset)
-			momentum, offset = read_f64(data, offset)
-
-			layer := batch_norm_2d_layer_new(int(num_features), eps, momentum, allocator)
-
-			// Free defaults and load saved
-			if layer.weight != nil {t.tensor_free(layer.weight)}
-			layer.weight, offset = read_tensor(data, offset, allocator)
-
-			if layer.bias != nil {t.tensor_free(layer.bias)}
-			layer.bias, offset = read_tensor(data, offset, allocator)
-
-			if layer.running_mean != nil {t.tensor_free(layer.running_mean)}
-			layer.running_mean, offset = read_tensor(data, offset, allocator)
-
-			if layer.running_var != nil {t.tensor_free(layer.running_var)}
-			layer.running_var, offset = read_tensor(data, offset, allocator)
-
-			append(&model.layers, layer)
-
-		} else if layer_type == 6 { 	// AvgPool2d
-			k: i32
-			s: i32
-			k, offset = read_i32(data, offset)
-			s, offset = read_i32(data, offset)
-			append(&model.layers, avgpool2d_layer_new(int(k), int(s)))
-
-		} else if layer_type == 7 { 	// Dropout
-			drop_prob: f64
-			drop_prob, offset = read_f64(data, offset)
-			append(&model.layers, dropout_layer_new(drop_prob))
-		} else if layer_type == 8 { 	// RNN
-			in_size: i32
-			hidden_size: i32
-			in_size, offset = read_i32(data, offset)
-			hidden_size, offset = read_i32(data, offset)
-
-			layer := rnn_layer_new(int(in_size), int(hidden_size), allocator)
-
-			// Free the randomly initialized defaults and load the saved weights
-			if layer.w_ih != nil {t.tensor_free(layer.w_ih)}
-			layer.w_ih, offset = read_tensor(data, offset, allocator)
-
-			if layer.w_hh != nil {t.tensor_free(layer.w_hh)}
-			layer.w_hh, offset = read_tensor(data, offset, allocator)
-
-			if layer.bias != nil {t.tensor_free(layer.bias)}
-			layer.bias, offset = read_tensor(data, offset, allocator)
-
-			append(&model.layers, layer)
-		} else if layer_type == 9 { 	// GRU
-			in_size: i32
-			hidden_size: i32
-			in_size, offset = read_i32(data, offset)
-			hidden_size, offset = read_i32(data, offset)
-
-			layer := gru_layer_new(int(in_size), int(hidden_size), allocator)
-
-			// Free the randomly initialized defaults and load the saved weights
-			if layer.w_ih != nil {t.tensor_free(layer.w_ih)}
-			layer.w_ih, offset = read_tensor(data, offset, allocator)
-
-			if layer.w_hh != nil {t.tensor_free(layer.w_hh)}
-			layer.w_hh, offset = read_tensor(data, offset, allocator)
-
-			if layer.bias != nil {t.tensor_free(layer.bias)}
-			layer.bias, offset = read_tensor(data, offset, allocator)
-
-			append(&model.layers, layer)
-		} else if layer_type == 10 { 	// LSTM
-			in_size: i32
-			hidden_size: i32
-			in_size, offset = read_i32(data, offset)
-			hidden_size, offset = read_i32(data, offset)
-
-			layer := lstm_layer_new(int(in_size), int(hidden_size), allocator)
-
-			// Free the randomly initialized defaults and load the saved weights
-			if layer.w_ih != nil {t.tensor_free(layer.w_ih)}
-			layer.w_ih, offset = read_tensor(data, offset, allocator)
-
-			if layer.w_hh != nil {t.tensor_free(layer.w_hh)}
-			layer.w_hh, offset = read_tensor(data, offset, allocator)
-
-			if layer.bias != nil {t.tensor_free(layer.bias)}
-			layer.bias, offset = read_tensor(data, offset, allocator)
-
-			append(&model.layers, layer)
-		} else if layer_type == 11 { 	// Embedding
-			num_embeddings: i32
-			embedding_dim: i32
-			num_embeddings, offset = read_i32(data, offset)
-			embedding_dim, offset = read_i32(data, offset)
-
-			layer := embedding_layer_new(int(num_embeddings), int(embedding_dim), allocator)
-
-			if layer.weight != nil {t.tensor_free(layer.weight)}
-			layer.weight, offset = read_tensor(data, offset, allocator)
-
-			append(&model.layers, layer)
-		} else if layer_type == 12 { 	// MultiHeadAttention
-			d_model: i32
-			num_heads: i32
-			d_model, offset = read_i32(data, offset)
-			num_heads, offset = read_i32(data, offset)
-
-			layer := multi_head_attention_layer_new(
-				int(d_model),
-				int(num_heads),
-				allocator = allocator,
-			)
-
-			// Load q_proj
-			if layer.q_proj.weights != nil {t.tensor_free(layer.q_proj.weights)}
-			layer.q_proj.weights, offset = read_tensor(data, offset, allocator)
-			if layer.q_proj.bias != nil {t.tensor_free(layer.q_proj.bias)}
-			layer.q_proj.bias, offset = read_tensor(data, offset, allocator)
-
-			// Load k_proj
-			if layer.k_proj.weights != nil {t.tensor_free(layer.k_proj.weights)}
-			layer.k_proj.weights, offset = read_tensor(data, offset, allocator)
-			if layer.k_proj.bias != nil {t.tensor_free(layer.k_proj.bias)}
-			layer.k_proj.bias, offset = read_tensor(data, offset, allocator)
-
-			// Load v_proj
-			if layer.v_proj.weights != nil {t.tensor_free(layer.v_proj.weights)}
-			layer.v_proj.weights, offset = read_tensor(data, offset, allocator)
-			if layer.v_proj.bias != nil {t.tensor_free(layer.v_proj.bias)}
-			layer.v_proj.bias, offset = read_tensor(data, offset, allocator)
-
-			// Load out_proj
-			if layer.out_proj.weights != nil {t.tensor_free(layer.out_proj.weights)}
-			layer.out_proj.weights, offset = read_tensor(data, offset, allocator)
-			if layer.out_proj.bias != nil {t.tensor_free(layer.out_proj.bias)}
-			layer.out_proj.bias, offset = read_tensor(data, offset, allocator)
-
-			append(&model.layers, layer)
-		} else if layer_type == 13 { 	// LayerNorm
-			d_model: i32
-			eps: f64
-			d_model, offset = read_i32(data, offset)
-			eps, offset = read_f64(data, offset)
-
-			layer := layer_norm_layer_new(int(d_model), eps, allocator)
-
-			if layer.gamma != nil {t.tensor_free(layer.gamma)}
-			layer.gamma, offset = read_tensor(data, offset, allocator)
-
-			if layer.beta != nil {t.tensor_free(layer.beta)}
-			layer.beta, offset = read_tensor(data, offset, allocator)
-
-			append(&model.layers, layer)
-		} else if layer_type == 14 { 	// FFN
-			d_model: i32
-			d_ff: i32
-			d_model, offset = read_i32(data, offset)
-			d_ff, offset = read_i32(data, offset)
-
-			layer := ffn_layer_new(int(d_model), int(d_ff), allocator)
-
-			// Load fc1
-			if layer.fc1.weights != nil {t.tensor_free(layer.fc1.weights)}
-			layer.fc1.weights, offset = read_tensor(data, offset, allocator)
-			if layer.fc1.bias != nil {t.tensor_free(layer.fc1.bias)}
-			layer.fc1.bias, offset = read_tensor(data, offset, allocator)
-
-			// Load fc2
-			if layer.fc2.weights != nil {t.tensor_free(layer.fc2.weights)}
-			layer.fc2.weights, offset = read_tensor(data, offset, allocator)
-			if layer.fc2.bias != nil {t.tensor_free(layer.fc2.bias)}
-			layer.fc2.bias, offset = read_tensor(data, offset, allocator)
-
-			append(&model.layers, layer)
-		} else if layer_type == 15 { 	// TransformerEncoderBlock
-			d_model: i32
-			num_heads: i32
-			d_ff: i32
-			d_model, offset = read_i32(data, offset)
-			num_heads, offset = read_i32(data, offset)
-			d_ff, offset = read_i32(data, offset)
-
-			block := transformer_encoder_block_new(
-				int(d_model),
-				int(num_heads),
-				int(d_ff),
-				allocator,
-			)
-
-			// Load MHA q_proj
-			if block.mha.q_proj.weights != nil {t.tensor_free(block.mha.q_proj.weights)}
-			block.mha.q_proj.weights, offset = read_tensor(data, offset, allocator)
-			if block.mha.q_proj.bias != nil {t.tensor_free(block.mha.q_proj.bias)}
-			block.mha.q_proj.bias, offset = read_tensor(data, offset, allocator)
-
-			// Load MHA k_proj
-			if block.mha.k_proj.weights != nil {t.tensor_free(block.mha.k_proj.weights)}
-			block.mha.k_proj.weights, offset = read_tensor(data, offset, allocator)
-			if block.mha.k_proj.bias != nil {t.tensor_free(block.mha.k_proj.bias)}
-			block.mha.k_proj.bias, offset = read_tensor(data, offset, allocator)
-
-			// Load MHA v_proj
-			if block.mha.v_proj.weights != nil {t.tensor_free(block.mha.v_proj.weights)}
-			block.mha.v_proj.weights, offset = read_tensor(data, offset, allocator)
-			if block.mha.v_proj.bias != nil {t.tensor_free(block.mha.v_proj.bias)}
-			block.mha.v_proj.bias, offset = read_tensor(data, offset, allocator)
-
-			// Load MHA out_proj
-			if block.mha.out_proj.weights != nil {t.tensor_free(block.mha.out_proj.weights)}
-			block.mha.out_proj.weights, offset = read_tensor(data, offset, allocator)
-			if block.mha.out_proj.bias != nil {t.tensor_free(block.mha.out_proj.bias)}
-			block.mha.out_proj.bias, offset = read_tensor(data, offset, allocator)
-
-			// Load FFN fc1
-			if block.ffn.fc1.weights != nil {t.tensor_free(block.ffn.fc1.weights)}
-			block.ffn.fc1.weights, offset = read_tensor(data, offset, allocator)
-			if block.ffn.fc1.bias != nil {t.tensor_free(block.ffn.fc1.bias)}
-			block.ffn.fc1.bias, offset = read_tensor(data, offset, allocator)
-
-			// Load FFN fc2
-			if block.ffn.fc2.weights != nil {t.tensor_free(block.ffn.fc2.weights)}
-			block.ffn.fc2.weights, offset = read_tensor(data, offset, allocator)
-			if block.ffn.fc2.bias != nil {t.tensor_free(block.ffn.fc2.bias)}
-			block.ffn.fc2.bias, offset = read_tensor(data, offset, allocator)
-
-			// Load LayerNorms
-			if block.ln1.gamma != nil {t.tensor_free(block.ln1.gamma)}
-			block.ln1.gamma, offset = read_tensor(data, offset, allocator)
-			if block.ln1.beta != nil {t.tensor_free(block.ln1.beta)}
-			block.ln1.beta, offset = read_tensor(data, offset, allocator)
-
-			if block.ln2.gamma != nil {t.tensor_free(block.ln2.gamma)}
-			block.ln2.gamma, offset = read_tensor(data, offset, allocator)
-			if block.ln2.beta != nil {t.tensor_free(block.ln2.beta)}
-			block.ln2.beta, offset = read_tensor(data, offset, allocator)
-
-			append(&model.layers, block)
-		} else if layer_type == 16 { 	// TransformerEncoder
-			num_layers: i32
-			d_model: i32
-			num_heads: i32
-			d_ff: i32
-			num_layers, offset = read_i32(data, offset)
-			d_model, offset = read_i32(data, offset)
-			num_heads, offset = read_i32(data, offset)
-			d_ff, offset = read_i32(data, offset)
-
-			encoder := transformer_encoder_new(
-				int(num_layers),
-				int(d_model),
-				int(num_heads),
-				int(d_ff),
-				allocator,
-			)
-
-			// Load each block
-			for i in 0 ..< int(num_layers) {
-				block := &encoder.blocks[i]
-
-				// Load MHA
-				if block.mha.q_proj.weights != nil {t.tensor_free(block.mha.q_proj.weights)}
-				block.mha.q_proj.weights, offset = read_tensor(data, offset, allocator)
-				if block.mha.q_proj.bias != nil {t.tensor_free(block.mha.q_proj.bias)}
-				block.mha.q_proj.bias, offset = read_tensor(data, offset, allocator)
-
-				if block.mha.k_proj.weights != nil {t.tensor_free(block.mha.k_proj.weights)}
-				block.mha.k_proj.weights, offset = read_tensor(data, offset, allocator)
-				if block.mha.k_proj.bias != nil {t.tensor_free(block.mha.k_proj.bias)}
-				block.mha.k_proj.bias, offset = read_tensor(data, offset, allocator)
-
-				if block.mha.v_proj.weights != nil {t.tensor_free(block.mha.v_proj.weights)}
-				block.mha.v_proj.weights, offset = read_tensor(data, offset, allocator)
-				if block.mha.v_proj.bias != nil {t.tensor_free(block.mha.v_proj.bias)}
-				block.mha.v_proj.bias, offset = read_tensor(data, offset, allocator)
-
-				if block.mha.out_proj.weights != nil {t.tensor_free(block.mha.out_proj.weights)}
-				block.mha.out_proj.weights, offset = read_tensor(data, offset, allocator)
-				if block.mha.out_proj.bias != nil {t.tensor_free(block.mha.out_proj.bias)}
-				block.mha.out_proj.bias, offset = read_tensor(data, offset, allocator)
-
-				// Load FFN
-				if block.ffn.fc1.weights != nil {t.tensor_free(block.ffn.fc1.weights)}
-				block.ffn.fc1.weights, offset = read_tensor(data, offset, allocator)
-				if block.ffn.fc1.bias != nil {t.tensor_free(block.ffn.fc1.bias)}
-				block.ffn.fc1.bias, offset = read_tensor(data, offset, allocator)
-
-				if block.ffn.fc2.weights != nil {t.tensor_free(block.ffn.fc2.weights)}
-				block.ffn.fc2.weights, offset = read_tensor(data, offset, allocator)
-				if block.ffn.fc2.bias != nil {t.tensor_free(block.ffn.fc2.bias)}
-				block.ffn.fc2.bias, offset = read_tensor(data, offset, allocator)
-
-				// Load LayerNorms
-				if block.ln1.gamma != nil {t.tensor_free(block.ln1.gamma)}
-				block.ln1.gamma, offset = read_tensor(data, offset, allocator)
-				if block.ln1.beta != nil {t.tensor_free(block.ln1.beta)}
-				block.ln1.beta, offset = read_tensor(data, offset, allocator)
-
-				if block.ln2.gamma != nil {t.tensor_free(block.ln2.gamma)}
-				block.ln2.gamma, offset = read_tensor(data, offset, allocator)
-				if block.ln2.beta != nil {t.tensor_free(block.ln2.beta)}
-				block.ln2.beta, offset = read_tensor(data, offset, allocator)
-			}
-
-			append(&model.layers, encoder)
-
-		} else if layer_type == 24 { 	// GATLayer
-			in_f: i32; out_f: i32; num_heads: i32; has_bias: i32
-			in_f, offset = read_i32(data, offset)
-			out_f, offset = read_i32(data, offset)
-			num_heads, offset = read_i32(data, offset)
-			has_bias, offset = read_i32(data, offset)
-
-			// We need to read adjacency first to pass it to the constructor
-			adj_tensor, new_offset := read_tensor(data, offset, allocator)
-
-			layer := gat_layer_new(int(in_f), int(out_f), int(num_heads), adj_tensor, allocator)
-
-			// Overwrite default weights with saved ones
-			if layer.linear.weights != nil {t.tensor_free(layer.linear.weights)}
-			layer.linear.weights, offset = read_tensor(data, new_offset, allocator)
-
-			if has_bias != 0 {
-				if layer.linear.bias != nil {t.tensor_free(layer.linear.bias)}
-				layer.linear.bias, offset = read_tensor(data, offset, allocator)
-			}
-
-			// Load MHA weights (simplified for brevity, follow the MultiHeadAttentionLayer pattern)
-			if layer.mha.q_proj.weights != nil {t.tensor_free(layer.mha.q_proj.weights)}
-			layer.mha.q_proj.weights, offset = read_tensor(data, offset, allocator)
-			if layer.mha.q_proj.bias != nil {t.tensor_free(layer.mha.q_proj.bias)}
-			layer.mha.q_proj.bias, offset = read_tensor(data, offset, allocator)
-
-			// Load k_proj
-			if layer.mha.k_proj.weights != nil {t.tensor_free(layer.mha.k_proj.weights)}
-			layer.mha.k_proj.weights, offset = read_tensor(data, offset, allocator)
-			if layer.mha.k_proj.bias != nil {t.tensor_free(layer.mha.k_proj.bias)}
-			layer.mha.k_proj.bias, offset = read_tensor(data, offset, allocator)
-
-			// Load v_proj
-			if layer.mha.v_proj.weights != nil {t.tensor_free(layer.mha.v_proj.weights)}
-			layer.mha.v_proj.weights, offset = read_tensor(data, offset, allocator)
-			if layer.mha.v_proj.bias != nil {t.tensor_free(layer.mha.v_proj.bias)}
-			layer.mha.v_proj.bias, offset = read_tensor(data, offset, allocator)
-
-			// Load out_proj
-			if layer.mha.out_proj.weights != nil {t.tensor_free(layer.mha.out_proj.weights)}
-			layer.mha.out_proj.weights, offset = read_tensor(data, offset, allocator)
-			if layer.mha.out_proj.bias != nil {t.tensor_free(layer.mha.out_proj.bias)}
-			layer.mha.out_proj.bias, offset = read_tensor(data, offset, allocator)
-			append(&model.layers, layer)
-		} else if layer_type == 25 { 	// Mamba
-			d_model: i32; d_state: i32
-			d_model, offset = read_i32(data, offset)
-			d_state, offset = read_i32(data, offset)
-
-			layer := mamba_layer_new(int(d_model), int(d_state), allocator)
-
-			// Load Linear projections (free defaults first)
-			if layer.proj_x.weights != nil {t.tensor_free(layer.proj_x.weights)}
-			layer.proj_x.weights, offset = read_tensor(data, offset, allocator)
-			if layer.proj_x.bias != nil {t.tensor_free(layer.proj_x.bias)}
-			layer.proj_x.bias, offset = read_tensor(data, offset, allocator)
-
-			if layer.proj_B.weights != nil {t.tensor_free(layer.proj_B.weights)}
-			layer.proj_B.weights, offset = read_tensor(data, offset, allocator)
-			if layer.proj_B.bias != nil {t.tensor_free(layer.proj_B.bias)}
-			layer.proj_B.bias, offset = read_tensor(data, offset, allocator)
-
-			if layer.proj_C.weights != nil {t.tensor_free(layer.proj_C.weights)}
-			layer.proj_C.weights, offset = read_tensor(data, offset, allocator)
-			if layer.proj_C.bias != nil {t.tensor_free(layer.proj_C.bias)}
-			layer.proj_C.bias, offset = read_tensor(data, offset, allocator)
-
-			if layer.proj_Delta.weights != nil {t.tensor_free(layer.proj_Delta.weights)}
-			layer.proj_Delta.weights, offset = read_tensor(data, offset, allocator)
-			if layer.proj_Delta.bias != nil {t.tensor_free(layer.proj_Delta.bias)}
-			layer.proj_Delta.bias, offset = read_tensor(data, offset, allocator)
-
-			if layer.proj_out.weights != nil {t.tensor_free(layer.proj_out.weights)}
-			layer.proj_out.weights, offset = read_tensor(data, offset, allocator)
-			if layer.proj_out.bias != nil {t.tensor_free(layer.proj_out.bias)}
-			layer.proj_out.bias, offset = read_tensor(data, offset, allocator)
-
-			// Load SSM parameters
-			if layer.A != nil {t.tensor_free(layer.A)}
-			layer.A, offset = read_tensor(data, offset, allocator)
-			if layer.D != nil {t.tensor_free(layer.D)}
-			layer.D, offset = read_tensor(data, offset, allocator)
-
-			append(&model.layers, layer)
-		} else if layer_type == 26 { 	// MoE
-			num_experts: i32; top_k: i32; d_model: i32; d_ff: i32
-			num_experts, offset = read_i32(data, offset)
-			top_k, offset = read_i32(data, offset)
-			d_model, offset = read_i32(data, offset)
-			d_ff, offset = read_i32(data, offset)
-
-			layer := moe_layer_new(
-				int(d_model),
-				int(d_ff),
-				int(num_experts),
-				int(top_k),
-				allocator,
-			)
-
-			// Load Router
-			has_bias_router: i32
-			has_bias_router, offset = read_i32(data, offset)
-			if layer.router.weights != nil {t.tensor_free(layer.router.weights)}
-			layer.router.weights, offset = read_tensor(data, offset, allocator)
-			if has_bias_router != 0 {
-				if layer.router.bias != nil {t.tensor_free(layer.router.bias)}
-				layer.router.bias, offset = read_tensor(data, offset, allocator)
-			} else {
-				if layer.router.bias !=
-				   nil {t.tensor_free(layer.router.bias); layer.router.bias = nil}
-			}
-
-			// Load Experts
-			for i in 0 ..< int(num_experts) {
-				has_bias_fc1: i32
-				has_bias_fc1, offset = read_i32(data, offset)
-				if layer.experts[i].fc1.weights !=
-				   nil {t.tensor_free(layer.experts[i].fc1.weights)}
-				layer.experts[i].fc1.weights, offset = read_tensor(data, offset, allocator)
-				if has_bias_fc1 != 0 {
-					if layer.experts[i].fc1.bias != nil {t.tensor_free(layer.experts[i].fc1.bias)}
-					layer.experts[i].fc1.bias, offset = read_tensor(data, offset, allocator)
-				} else {
-					if layer.experts[i].fc1.bias !=
-					   nil {t.tensor_free(layer.experts[i].fc1.bias); layer.experts[i].fc1.bias = nil}
-				}
-
-				has_bias_fc2: i32
-				has_bias_fc2, offset = read_i32(data, offset)
-				if layer.experts[i].fc2.weights !=
-				   nil {t.tensor_free(layer.experts[i].fc2.weights)}
-				layer.experts[i].fc2.weights, offset = read_tensor(data, offset, allocator)
-				if has_bias_fc2 != 0 {
-					if layer.experts[i].fc2.bias != nil {t.tensor_free(layer.experts[i].fc2.bias)}
-					layer.experts[i].fc2.bias, offset = read_tensor(data, offset, allocator)
-				} else {
-					if layer.experts[i].fc2.bias !=
-					   nil {t.tensor_free(layer.experts[i].fc2.bias); layer.experts[i].fc2.bias = nil}
-				}
-			}
-			append(&model.layers, layer)
-		}
+	rng: rand.Default_Random_State
+	context.random_generator = rand.default_random_generator(&rng)
+	io := _reader(path, allocator) or_return
+	defer delete(io.data, allocator)
+
+	epoch = _get_i32(&io)
+	n_layers := _get_size(&io)
+	model = sequential_new(allocator)
+	model.training = false // loaded models start in evaluation mode (sequential_train to resume)
+	for _ in 0 ..< n_layers {
+		layer, layer_ok := _read_layer_header(&io, allocator)
+		if !layer_ok {break}
+		append(&model.layers, layer)
+		_io_layer(&io, &model.layers[len(model.layers) - 1])
 	}
 
 	// Optimizer
-	opt_type: i32
-	opt_type, offset = read_i32(data, offset)
-	if opt_type != 0 && opt_type != 1 {
+	opt_type := _get_i32(&io)
+	if io.ok && opt_type != 0 && opt_type != 1 {
 		fmt.println("Unsupported optimizer type")
-		return nil, nil, 0, false
+		io.ok = false
 	}
-
 	opt = new(Adam, allocator)
 	opt^ = adam_new(allocator = allocator)
-	timestep_i64: i64
-	timestep_i64, offset = read_i64(data, offset)
-	opt.timestep = int(timestep_i64)
+	opt.timestep = _get_i64(&io)
 	if opt_type == 1 {
-		opt.learning_rate, offset = read_f64(data, offset)
-		opt.beta_1, offset = read_f64(data, offset)
-		opt.beta_2, offset = read_f64(data, offset)
-		opt.epsilon, offset = read_f64(data, offset)
-		opt.weight_decay, offset = read_f64(data, offset)
+		opt.learning_rate, opt.beta_1, opt.beta_2 = _get_f64(&io), _get_f64(&io), _get_f64(&io)
+		opt.epsilon, opt.weight_decay = _get_f64(&io), _get_f64(&io)
 	}
 
 	// Moments belong to the model's trainable parameters in the order of
@@ -1056,890 +618,41 @@ load_checkpoint :: proc(
 	// moments.
 	params := sequential_parameters(model, context.temp_allocator)
 	defer delete(params)
-	num_params_i32: i32
-	num_params_i32, offset = read_i32(data, offset)
-	fits := int(num_params_i32) == len(params)
-	moments := make([dynamic][]f64, 0, 2 * int(num_params_i32), context.temp_allocator)
-	defer delete(moments)
-	for i in 0 ..< 2 * int(num_params_i32) {
-		count_i32: i32
-		count_i32, offset = read_i32(data, offset)
-		count := int(count_i32)
-		fits = fits && count == len(params[i / 2].data.data)
-		m := make([]f64, count, allocator)
-		for j in 0 ..< count {
-			m[j], offset = read_f64(data, offset)
-		}
-		append(&moments, m)
-	}
 	for p in params {adam_add_param(opt, p)}
-	if fits {
-		for i in 0 ..< len(params) {
-			copy(opt.moment_1[i], moments[2 * i])
-			copy(opt.moment_2[i], moments[2 * i + 1])
-		}
-	} else {
-		if num_params_i32 > 0 {
+	n_saved := _get_size(&io)
+	fits := n_saved == len(params)
+	for i in 0 ..< 2 * n_saved {
+		count := _get_size(&io)
+		fits = fits && count == len(params[i / 2].data.data)
+		values := _take(&io, 8 * count)
+		if !fits || values == nil {continue}
+		m := opt.moment_1[i / 2] if i % 2 == 0 else opt.moment_2[i / 2]
+		for &v, j in m {v, _ = endian.get_f64(values[8 * j:], .Little)}
+	}
+	if !fits {
+		if n_saved > 0 {
 			fmt.println("load_checkpoint: optimizer state does not match the model; moments reset")
+		}
+		for i in 0 ..< len(params) {
+			mem.zero_slice(opt.moment_1[i])
+			mem.zero_slice(opt.moment_2[i])
 		}
 		opt.timestep = 0
 	}
-	for m in moments {delete(m, allocator)}
 
+	if !io.ok {
+		fmt.printf("%s: corrupt or truncated checkpoint\n", path)
+		sequential_free(model)
+		adam_free(opt)
+		free(opt, allocator)
+		return nil, nil, 0, false
+	}
 	return model, opt, epoch, true
 }
-// ============================================================================
-// GPT Model Persistence
-// ============================================================================
 
-
-save_gpt_model :: proc(model: ^GPTModel, path: string) -> bool {
-	file, err := os.create(path)
-	if err != nil {
-		fmt.printf("Failed to create file: %v\n", err)
-		return false
-	}
-	defer os.close(file)
-
-	// Magic header
-	os.write(file, CHECKPOINT_MAGIC)
-
-	// Model type and hyperparameters
-	write_i32(file, 27) // GPT type ID
-	write_i32(file, i32(model.vocab_size))
-	write_i32(file, i32(model.d_model))
-	write_i32(file, i32(model.num_heads))
-	write_i32(file, i32(model.d_ff))
-	write_i32(file, i32(model.num_layers))
-	write_i32(file, i32(model.max_seq_len))
-
-	// Save embeddings
-	write_tensor(file, model.token_emb.weight)
-	write_tensor(file, model.pos_emb.weight)
-
-	// Save each decoder block
-	// Save each decoder block
-	for i in 0 ..< len(model.blocks) {
-		block := &model.blocks[i]
-
-		// ✅ Save the use_moe flag
-		write_i32(file, i32(block.use_moe))
-
-		// Save MHA (unchanged)
-		write_tensor(file, block.mha.q_proj.weights)
-		write_tensor(file, block.mha.q_proj.bias)
-		write_tensor(file, block.mha.k_proj.weights)
-		write_tensor(file, block.mha.k_proj.bias)
-		write_tensor(file, block.mha.v_proj.weights)
-		write_tensor(file, block.mha.v_proj.bias)
-		write_tensor(file, block.mha.out_proj.weights)
-		write_tensor(file, block.mha.out_proj.bias)
-
-		// ✅ Save FFN or MoE conditionally
-		if block.use_moe {
-			write_i32(file, i32(block.moe.num_experts))
-			write_i32(file, i32(block.moe.top_k))
-
-			// Router
-			write_i32(file, i32(bool(block.moe.router.bias != nil)))
-			write_tensor(file, block.moe.router.weights)
-			if block.moe.router.bias != nil {write_tensor(file, block.moe.router.bias)}
-
-			// Experts
-			for e in 0 ..< block.moe.num_experts {
-				exp := block.moe.experts[e]
-				write_i32(file, i32(bool(exp.fc1.bias != nil)))
-				write_tensor(file, exp.fc1.weights)
-				if exp.fc1.bias != nil {write_tensor(file, exp.fc1.bias)}
-
-				write_i32(file, i32(bool(exp.fc2.bias != nil)))
-				write_tensor(file, exp.fc2.weights)
-				if exp.fc2.bias != nil {write_tensor(file, exp.fc2.bias)}
-			}
-		} else {
-			write_tensor(file, block.ffn.fc1.weights)
-			if block.ffn.fc1.bias != nil {write_tensor(file, block.ffn.fc1.bias)}
-			write_tensor(file, block.ffn.fc2.weights)
-			if block.ffn.fc2.bias != nil {write_tensor(file, block.ffn.fc2.bias)}
-		}
-
-		// Save LayerNorms (unchanged)
-		write_tensor(file, block.ln1.gamma)
-		write_tensor(file, block.ln1.beta)
-		write_tensor(file, block.ln2.gamma)
-		write_tensor(file, block.ln2.beta)
-	}
-
-	// Save final layer norm
-	write_tensor(file, model.final_ln.gamma)
-	write_tensor(file, model.final_ln.beta)
-
-	// Save output projection
-	write_tensor(file, model.output_proj.weights)
-	write_tensor(file, model.output_proj.bias)
-
-	return true
-}
-
-load_gpt_model :: proc(
-	path: string,
-	use_flash: bool = false,
-	use_moe: bool = false,
-	num_experts: int = 8,
-	top_k: int = 2,
-	allocator: mem.Allocator = context.allocator,
-) -> (
-	^GPTModel,
-	bool,
-) {
-	data, err := os.read_entire_file(path, allocator)
-	if err != nil {
-		fmt.printf("Failed to read file: %v\n", err)
-		return nil, false
-	}
-	defer delete(data, allocator)
-
-	offset := 0
-
-	// Magic header
-	if offset + 10 > len(data) {
-		fmt.println("File too small")
-		return nil, false
-	}
-	magic := CHECKPOINT_MAGIC
-	for i in 0 ..< 10 {
-		if data[offset + i] != magic[i] {
-			fmt.println("Invalid magic bytes")
-			return nil, false
-		}
-	}
-	offset += 10
-
-	// Model type
-	// Model type
-	model_type: i32
-	model_type, offset = read_i32(data, offset)
-
-	is_moe_aware := false
-	if model_type == 27 {
-		is_moe_aware = true
-	} else if model_type == 17 {
-		is_moe_aware = false // ✅ Old FFN-only format (backwards compatible)
-	} else {
-		fmt.println("Not a GPT model")
-		return nil, false
-	}
-
-	// Hyperparameters
-	vocab_size: i32
-	d_model: i32
-	num_heads: i32
-	d_ff: i32
-	num_layers: i32
-	max_seq_len: i32
-	vocab_size, offset = read_i32(data, offset)
-	d_model, offset = read_i32(data, offset)
-	num_heads, offset = read_i32(data, offset)
-	d_ff, offset = read_i32(data, offset)
-	num_layers, offset = read_i32(data, offset)
-	max_seq_len, offset = read_i32(data, offset)
-
-	model_ptr := new(GPTModel, allocator)
-	model_ptr^ = gpt_model_new(
-		int(vocab_size),
-		int(d_model),
-		int(num_heads),
-		int(d_ff),
-		int(num_layers),
-		int(max_seq_len),
-		use_flash = use_flash,
-		use_moe = use_moe,
-		num_experts = num_experts,
-		top_k = top_k,
-		allocator = allocator,
-	)
-
-	// Load embeddings (unchanged)
-	if model_ptr.token_emb.weight != nil {t.tensor_free(model_ptr.token_emb.weight)}
-	model_ptr.token_emb.weight, offset = read_tensor(data, offset, allocator)
-
-	if model_ptr.pos_emb.weight != nil {t.tensor_free(model_ptr.pos_emb.weight)}
-	model_ptr.pos_emb.weight, offset = read_tensor(data, offset, allocator)
-
-	// Load each decoder block
-	for i in 0 ..< int(num_layers) {
-		block := &model_ptr.blocks[i]
-
-		// ✅ Only read the use_moe flag if it's the new format
-		block_is_moe := false
-		if is_moe_aware {
-			block_moe_i32: i32
-			block_moe_i32, offset = read_i32(data, offset)
-			block_is_moe = block_moe_i32 != 0
-		}
-
-		// Load MHA (unchanged)
-		if block.mha.q_proj.weights != nil {t.tensor_free(block.mha.q_proj.weights)}
-		block.mha.q_proj.weights, offset = read_tensor(data, offset, allocator)
-		if block.mha.q_proj.bias != nil {t.tensor_free(block.mha.q_proj.bias)}
-		block.mha.q_proj.bias, offset = read_tensor(data, offset, allocator)
-
-		if block.mha.k_proj.weights != nil {t.tensor_free(block.mha.k_proj.weights)}
-		block.mha.k_proj.weights, offset = read_tensor(data, offset, allocator)
-		if block.mha.k_proj.bias != nil {t.tensor_free(block.mha.k_proj.bias)}
-		block.mha.k_proj.bias, offset = read_tensor(data, offset, allocator)
-
-		if block.mha.v_proj.weights != nil {t.tensor_free(block.mha.v_proj.weights)}
-		block.mha.v_proj.weights, offset = read_tensor(data, offset, allocator)
-		if block.mha.v_proj.bias != nil {t.tensor_free(block.mha.v_proj.bias)}
-		block.mha.v_proj.bias, offset = read_tensor(data, offset, allocator)
-
-		if block.mha.out_proj.weights != nil {t.tensor_free(block.mha.out_proj.weights)}
-		block.mha.out_proj.weights, offset = read_tensor(data, offset, allocator)
-		if block.mha.out_proj.bias != nil {t.tensor_free(block.mha.out_proj.bias)}
-		block.mha.out_proj.bias, offset = read_tensor(data, offset, allocator)
-
-		// ✅ Load FFN or MoE conditionally
-		if block_is_moe {
-			ckpt_num_experts: i32
-			ckpt_top_k: i32
-			ckpt_num_experts, offset = read_i32(data, offset)
-			ckpt_top_k, offset = read_i32(data, offset)
-
-			// Router
-			has_bias_r: i32
-			has_bias_r, offset = read_i32(data, offset)
-			if block.moe.router.weights != nil {t.tensor_free(block.moe.router.weights)}
-			block.moe.router.weights, offset = read_tensor(data, offset, allocator)
-			if has_bias_r != 0 {
-				if block.moe.router.bias != nil {t.tensor_free(block.moe.router.bias)}
-				block.moe.router.bias, offset = read_tensor(data, offset, allocator)
-			}
-
-			// Experts
-			for e in 0 ..< int(ckpt_num_experts) {
-				has_bias_1: i32
-				has_bias_1, offset = read_i32(data, offset)
-				if block.moe.experts[e].fc1.weights !=
-				   nil {t.tensor_free(block.moe.experts[e].fc1.weights)}
-				block.moe.experts[e].fc1.weights, offset = read_tensor(data, offset, allocator)
-				if has_bias_1 != 0 {
-					if block.moe.experts[e].fc1.bias !=
-					   nil {t.tensor_free(block.moe.experts[e].fc1.bias)}
-					block.moe.experts[e].fc1.bias, offset = read_tensor(data, offset, allocator)
-				}
-
-				has_bias_2: i32
-				has_bias_2, offset = read_i32(data, offset)
-				if block.moe.experts[e].fc2.weights !=
-				   nil {t.tensor_free(block.moe.experts[e].fc2.weights)}
-				block.moe.experts[e].fc2.weights, offset = read_tensor(data, offset, allocator)
-				if has_bias_2 != 0 {
-					if block.moe.experts[e].fc2.bias !=
-					   nil {t.tensor_free(block.moe.experts[e].fc2.bias)}
-					block.moe.experts[e].fc2.bias, offset = read_tensor(data, offset, allocator)
-				}
-			}
-		} else {
-			// Old format or explicitly non-MoE: Load standard FFN
-			if block.ffn.fc1.weights != nil {t.tensor_free(block.ffn.fc1.weights)}
-			block.ffn.fc1.weights, offset = read_tensor(data, offset, allocator)
-			if block.ffn.fc1.bias != nil {t.tensor_free(block.ffn.fc1.bias)}
-			block.ffn.fc1.bias, offset = read_tensor(data, offset, allocator)
-
-			if block.ffn.fc2.weights != nil {t.tensor_free(block.ffn.fc2.weights)}
-			block.ffn.fc2.weights, offset = read_tensor(data, offset, allocator)
-			if block.ffn.fc2.bias != nil {t.tensor_free(block.ffn.fc2.bias)}
-			block.ffn.fc2.bias, offset = read_tensor(data, offset, allocator)
-		}
-
-		// Load LayerNorms (unchanged)
-		if block.ln1.gamma != nil {t.tensor_free(block.ln1.gamma)}
-		block.ln1.gamma, offset = read_tensor(data, offset, allocator)
-		if block.ln1.beta != nil {t.tensor_free(block.ln1.beta)}
-		block.ln1.beta, offset = read_tensor(data, offset, allocator)
-
-		if block.ln2.gamma != nil {t.tensor_free(block.ln2.gamma)}
-		block.ln2.gamma, offset = read_tensor(data, offset, allocator)
-		if block.ln2.beta != nil {t.tensor_free(block.ln2.beta)}
-		block.ln2.beta, offset = read_tensor(data, offset, allocator)
-	}
-
-	// Load final layer norm (unchanged)
-	if model_ptr.final_ln.gamma != nil {t.tensor_free(model_ptr.final_ln.gamma)}
-	model_ptr.final_ln.gamma, offset = read_tensor(data, offset, allocator)
-	if model_ptr.final_ln.beta != nil {t.tensor_free(model_ptr.final_ln.beta)}
-	model_ptr.final_ln.beta, offset = read_tensor(data, offset, allocator)
-
-	// Load output projection (unchanged)
-	if model_ptr.output_proj.weights != nil {t.tensor_free(model_ptr.output_proj.weights)}
-	model_ptr.output_proj.weights, offset = read_tensor(data, offset, allocator)
-	if model_ptr.output_proj.bias != nil {t.tensor_free(model_ptr.output_proj.bias)}
-	model_ptr.output_proj.bias, offset = read_tensor(data, offset, allocator)
-
-	return model_ptr, true
-}
-
-// ============================================================================
-// BERT Model Persistence
-// ============================================================================
-
-save_bert_model :: proc(model: ^BERTModel, path: string) -> bool {
-	file, err := os.create(path)
-	if err != nil {
-		fmt.printf("Failed to create file: %v\n", err)
-		return false
-	}
-	defer os.close(file)
-
-	os.write(file, CHECKPOINT_MAGIC)
-
-	write_i32(file, 18) // BERT type ID
-	write_i32(file, i32(model.vocab_size))
-	write_i32(file, i32(model.d_model))
-	write_i32(file, i32(model.num_heads))
-	write_i32(file, i32(model.d_ff))
-	write_i32(file, i32(model.num_layers))
-	write_i32(file, i32(model.max_seq_len))
-
-	write_tensor(file, model.token_emb.weight)
-	write_tensor(file, model.pos_emb.weight)
-	write_tensor(file, model.segment_emb.weight)
-
-	write_tensor(file, model.emb_ln.gamma)
-	write_tensor(file, model.emb_ln.beta)
-
-	for i in 0 ..< len(model.encoder_blocks) {
-		block := &model.encoder_blocks[i]
-
-		write_tensor(file, block.mha.q_proj.weights)
-		write_tensor(file, block.mha.q_proj.bias)
-		write_tensor(file, block.mha.k_proj.weights)
-		write_tensor(file, block.mha.k_proj.bias)
-		write_tensor(file, block.mha.v_proj.weights)
-		write_tensor(file, block.mha.v_proj.bias)
-		write_tensor(file, block.mha.out_proj.weights)
-		write_tensor(file, block.mha.out_proj.bias)
-
-		write_tensor(file, block.ffn.fc1.weights)
-		write_tensor(file, block.ffn.fc1.bias)
-		write_tensor(file, block.ffn.fc2.weights)
-		write_tensor(file, block.ffn.fc2.bias)
-
-		write_tensor(file, block.ln1.gamma)
-		write_tensor(file, block.ln1.beta)
-		write_tensor(file, block.ln2.gamma)
-		write_tensor(file, block.ln2.beta)
-	}
-
-	write_tensor(file, model.pooler.weights)
-	write_tensor(file, model.pooler.bias)
-
-	write_tensor(file, model.mlm_head.weights)
-	write_tensor(file, model.mlm_head.bias)
-
-	write_tensor(file, model.nsp_head.weights)
-	write_tensor(file, model.nsp_head.bias)
-
-	return true
-}
-
-load_bert_model :: proc(
-	path: string,
-	allocator: mem.Allocator = context.allocator,
-	use_flash: bool = false,
-) -> (
-	^BERTModel,
-	bool,
-) {
-	data, err := os.read_entire_file(path, allocator)
-	if err != nil {
-		fmt.printf("Failed to read file: %v\n", err)
-		return nil, false
-	}
-	defer delete(data, allocator)
-
-	offset := 0
-
-	if offset + 10 > len(data) {
-		fmt.println("File too small")
-		return nil, false
-	}
-	magic := CHECKPOINT_MAGIC
-	for i in 0 ..< 10 {
-		if data[offset + i] != magic[i] {
-			fmt.println("Invalid magic bytes")
-			return nil, false
-		}
-	}
-	offset += 10
-
-	model_type: i32
-	model_type, offset = read_i32(data, offset)
-	if model_type != 18 {
-		fmt.println("Not a BERT model")
-		return nil, false
-	}
-
-	vocab_size: i32
-	d_model: i32
-	num_heads: i32
-	d_ff: i32
-	num_layers: i32
-	max_seq_len: i32
-	vocab_size, offset = read_i32(data, offset)
-	d_model, offset = read_i32(data, offset)
-	num_heads, offset = read_i32(data, offset)
-	d_ff, offset = read_i32(data, offset)
-	num_layers, offset = read_i32(data, offset)
-	max_seq_len, offset = read_i32(data, offset)
-
-	model_ptr := new(BERTModel, allocator)
-	model_ptr^ = bert_model_new(
-		int(vocab_size),
-		int(d_model),
-		int(num_heads),
-		int(d_ff),
-		int(num_layers),
-		int(max_seq_len),
-		use_flash = use_flash,
-		allocator = allocator,
-	)
-
-	if model_ptr.token_emb.weight != nil {t.tensor_free(model_ptr.token_emb.weight)}
-	model_ptr.token_emb.weight, offset = read_tensor(data, offset, allocator)
-
-
-	if model_ptr.pos_emb.weight != nil {t.tensor_free(model_ptr.pos_emb.weight)}
-	model_ptr.pos_emb.weight, offset = read_tensor(data, offset, allocator)
-
-
-	if model_ptr.segment_emb.weight != nil {t.tensor_free(model_ptr.segment_emb.weight)}
-	model_ptr.segment_emb.weight, offset = read_tensor(data, offset, allocator)
-
-
-	if model_ptr.emb_ln.gamma != nil {t.tensor_free(model_ptr.emb_ln.gamma)}
-	model_ptr.emb_ln.gamma, offset = read_tensor(data, offset, allocator)
-	if model_ptr.emb_ln.beta != nil {t.tensor_free(model_ptr.emb_ln.beta)}
-	model_ptr.emb_ln.beta, offset = read_tensor(data, offset, allocator)
-
-	for i in 0 ..< int(num_layers) {
-		block := &model_ptr.encoder_blocks[i]
-
-		if block.mha.q_proj.weights != nil {t.tensor_free(block.mha.q_proj.weights)}
-		block.mha.q_proj.weights, offset = read_tensor(data, offset, allocator)
-		if block.mha.q_proj.bias != nil {t.tensor_free(block.mha.q_proj.bias)}
-		block.mha.q_proj.bias, offset = read_tensor(data, offset, allocator)
-
-		if block.mha.k_proj.weights != nil {t.tensor_free(block.mha.k_proj.weights)}
-		block.mha.k_proj.weights, offset = read_tensor(data, offset, allocator)
-		if block.mha.k_proj.bias != nil {t.tensor_free(block.mha.k_proj.bias)}
-		block.mha.k_proj.bias, offset = read_tensor(data, offset, allocator)
-
-		if block.mha.v_proj.weights != nil {t.tensor_free(block.mha.v_proj.weights)}
-		block.mha.v_proj.weights, offset = read_tensor(data, offset, allocator)
-		if block.mha.v_proj.bias != nil {t.tensor_free(block.mha.v_proj.bias)}
-		block.mha.v_proj.bias, offset = read_tensor(data, offset, allocator)
-
-		if block.mha.out_proj.weights != nil {t.tensor_free(block.mha.out_proj.weights)}
-		block.mha.out_proj.weights, offset = read_tensor(data, offset, allocator)
-		if block.mha.out_proj.bias != nil {t.tensor_free(block.mha.out_proj.bias)}
-		block.mha.out_proj.bias, offset = read_tensor(data, offset, allocator)
-
-		if block.ffn.fc1.weights != nil {t.tensor_free(block.ffn.fc1.weights)}
-		block.ffn.fc1.weights, offset = read_tensor(data, offset, allocator)
-		if block.ffn.fc1.bias != nil {t.tensor_free(block.ffn.fc1.bias)}
-		block.ffn.fc1.bias, offset = read_tensor(data, offset, allocator)
-
-		if block.ffn.fc2.weights != nil {t.tensor_free(block.ffn.fc2.weights)}
-		block.ffn.fc2.weights, offset = read_tensor(data, offset, allocator)
-		if block.ffn.fc2.bias != nil {t.tensor_free(block.ffn.fc2.bias)}
-		block.ffn.fc2.bias, offset = read_tensor(data, offset, allocator)
-
-		if block.ln1.gamma != nil {t.tensor_free(block.ln1.gamma)}
-		block.ln1.gamma, offset = read_tensor(data, offset, allocator)
-		if block.ln1.beta != nil {t.tensor_free(block.ln1.beta)}
-		block.ln1.beta, offset = read_tensor(data, offset, allocator)
-
-		if block.ln2.gamma != nil {t.tensor_free(block.ln2.gamma)}
-		block.ln2.gamma, offset = read_tensor(data, offset, allocator)
-		if block.ln2.beta != nil {t.tensor_free(block.ln2.beta)}
-		block.ln2.beta, offset = read_tensor(data, offset, allocator)
-	}
-
-	if model_ptr.pooler.weights != nil {t.tensor_free(model_ptr.pooler.weights)}
-	model_ptr.pooler.weights, offset = read_tensor(data, offset, allocator)
-	if model_ptr.pooler.bias != nil {t.tensor_free(model_ptr.pooler.bias)}
-	model_ptr.pooler.bias, offset = read_tensor(data, offset, allocator)
-
-	if model_ptr.mlm_head.weights != nil {t.tensor_free(model_ptr.mlm_head.weights)}
-	model_ptr.mlm_head.weights, offset = read_tensor(data, offset, allocator)
-	if model_ptr.mlm_head.bias != nil {t.tensor_free(model_ptr.mlm_head.bias)}
-	model_ptr.mlm_head.bias, offset = read_tensor(data, offset, allocator)
-
-	if model_ptr.nsp_head.weights != nil {t.tensor_free(model_ptr.nsp_head.weights)}
-	model_ptr.nsp_head.weights, offset = read_tensor(data, offset, allocator)
-	if model_ptr.nsp_head.bias != nil {t.tensor_free(model_ptr.nsp_head.bias)}
-	model_ptr.nsp_head.bias, offset = read_tensor(data, offset, allocator)
-
-	if model_ptr.nsp_head.weights != nil {
-		model_ptr.nsp_head.out_features = model_ptr.nsp_head.weights.data.cols
-	}
-
-	return model_ptr, true
-}
-// ============================================================================
-// Generator Persistence
-// ============================================================================
-
-save_generator :: proc(gen: ^Generator, path: string) -> bool {
-	file, err := os.create(path)
-	if err != nil {
-		fmt.printf("Failed to create file: %v\n", err)
-		return false
-	}
-	defer os.close(file)
-
-	os.write(file, CHECKPOINT_MAGIC)
-	write_i32(file, 19) // Generator type ID
-
-	write_tensor(file, gen.fc1.weights)
-	write_tensor(file, gen.fc1.bias)
-	write_tensor(file, gen.fc2.weights)
-	write_tensor(file, gen.fc2.bias)
-	write_tensor(file, gen.fc3.weights)
-	write_tensor(file, gen.fc3.bias)
-
-	return true
-}
-
-load_generator :: proc(
-	path: string,
-	allocator: mem.Allocator = context.allocator,
-) -> (
-	^Generator,
-	bool,
-) {
-	data, err := os.read_entire_file(path, allocator)
-	if err != nil {
-		fmt.printf("Failed to read file: %v\n", err)
-		return nil, false
-	}
-	defer delete(data, allocator)
-
-	offset := 0
-
-	if offset + 10 > len(data) {
-		fmt.println("File too small")
-		return nil, false
-	}
-	magic := CHECKPOINT_MAGIC
-	for i in 0 ..< 10 {
-		if data[offset + i] != magic[i] {
-			fmt.println("Invalid magic bytes")
-			return nil, false
-		}
-	}
-	offset += 10
-
-	model_type: i32
-	model_type, offset = read_i32(data, offset)
-	if model_type != 19 {
-		fmt.println("Not a Generator")
-		return nil, false
-	}
-
-	gen_ptr := new(Generator, allocator)
-
-	// Load fc1
-	gen_ptr.fc1 = linear_layer_new(1, 1, allocator)
-	if gen_ptr.fc1.weights != nil {t.tensor_free(gen_ptr.fc1.weights)}
-	gen_ptr.fc1.weights, offset = read_tensor(data, offset, allocator)
-	if gen_ptr.fc1.bias != nil {t.tensor_free(gen_ptr.fc1.bias)}
-	gen_ptr.fc1.bias, offset = read_tensor(data, offset, allocator)
-
-	// Load fc2
-	if gen_ptr.fc2.weights != nil {t.tensor_free(gen_ptr.fc2.weights)}
-	gen_ptr.fc2.weights, offset = read_tensor(data, offset, allocator)
-	if gen_ptr.fc2.bias != nil {t.tensor_free(gen_ptr.fc2.bias)}
-	gen_ptr.fc2.bias, offset = read_tensor(data, offset, allocator)
-
-	// Load fc3
-	if gen_ptr.fc3.weights != nil {t.tensor_free(gen_ptr.fc3.weights)}
-	gen_ptr.fc3.weights, offset = read_tensor(data, offset, allocator)
-	if gen_ptr.fc3.bias != nil {t.tensor_free(gen_ptr.fc3.bias)}
-	gen_ptr.fc3.bias, offset = read_tensor(data, offset, allocator)
-
-	return gen_ptr, true
-}
-
-// ============================================================================
-// Discriminator Persistence
-// ============================================================================
-
-save_discriminator :: proc(disc: ^Discriminator, path: string) -> bool {
-	file, err := os.create(path)
-	if err != nil {
-		fmt.printf("Failed to create file: %v\n", err)
-		return false
-	}
-	defer os.close(file)
-
-	os.write(file, CHECKPOINT_MAGIC)
-	write_i32(file, 20) // Discriminator type ID
-
-	write_tensor(file, disc.fc1.weights)
-	write_tensor(file, disc.fc1.bias)
-	write_tensor(file, disc.fc2.weights)
-	write_tensor(file, disc.fc2.bias)
-	write_tensor(file, disc.fc3.weights)
-	write_tensor(file, disc.fc3.bias)
-
-	return true
-}
-
-load_discriminator :: proc(
-	path: string,
-	allocator: mem.Allocator = context.allocator,
-) -> (
-	^Discriminator,
-	bool,
-) {
-	data, err := os.read_entire_file(path, allocator)
-	if err != nil {
-		fmt.printf("Failed to read file: %v\n", err)
-		return nil, false
-	}
-	defer delete(data, allocator)
-
-	offset := 0
-
-	if offset + 10 > len(data) {
-		fmt.println("File too small")
-		return nil, false
-	}
-	magic := CHECKPOINT_MAGIC
-	for i in 0 ..< 10 {
-		if data[offset + i] != magic[i] {
-			fmt.println("Invalid magic bytes")
-			return nil, false
-		}
-	}
-	offset += 10
-
-	model_type: i32
-	model_type, offset = read_i32(data, offset)
-	if model_type != 20 {
-		fmt.println("Not a Discriminator")
-		return nil, false
-	}
-
-	disc_ptr := new(Discriminator, allocator)
-
-	disc_ptr.fc1 = linear_layer_new(1, 1, allocator)
-	if disc_ptr.fc1.weights != nil {t.tensor_free(disc_ptr.fc1.weights)}
-	disc_ptr.fc1.weights, offset = read_tensor(data, offset, allocator)
-	if disc_ptr.fc1.bias != nil {t.tensor_free(disc_ptr.fc1.bias)}
-	disc_ptr.fc1.bias, offset = read_tensor(data, offset, allocator)
-
-	if disc_ptr.fc2.weights != nil {t.tensor_free(disc_ptr.fc2.weights)}
-	disc_ptr.fc2.weights, offset = read_tensor(data, offset, allocator)
-	if disc_ptr.fc2.bias != nil {t.tensor_free(disc_ptr.fc2.bias)}
-	disc_ptr.fc2.bias, offset = read_tensor(data, offset, allocator)
-
-	if disc_ptr.fc3.weights != nil {t.tensor_free(disc_ptr.fc3.weights)}
-	disc_ptr.fc3.weights, offset = read_tensor(data, offset, allocator)
-	if disc_ptr.fc3.bias != nil {t.tensor_free(disc_ptr.fc3.bias)}
-	disc_ptr.fc3.bias, offset = read_tensor(data, offset, allocator)
-
-	return disc_ptr, true
-}
-
-// ============================================================================
-// VAE Encoder Persistence
-// ============================================================================
-
-save_vae_encoder :: proc(enc: ^VAEEncoder, path: string) -> bool {
-	file, err := os.create(path)
-	if err != nil {
-		fmt.printf("Failed to create file: %v\n", err)
-		return false
-	}
-	defer os.close(file)
-
-	os.write(file, CHECKPOINT_MAGIC)
-	write_i32(file, 21) // VAEEncoder type ID
-
-	write_tensor(file, enc.fc1.weights)
-	write_tensor(file, enc.fc1.bias)
-	write_tensor(file, enc.fc_mu.weights)
-	write_tensor(file, enc.fc_mu.bias)
-	write_tensor(file, enc.fc_logvar.weights)
-	write_tensor(file, enc.fc_logvar.bias)
-
-	return true
-}
-
-load_vae_encoder :: proc(
-	path: string,
-	allocator: mem.Allocator = context.allocator,
-) -> (
-	^VAEEncoder,
-	bool,
-) {
-	data, err := os.read_entire_file(path, allocator)
-	if err != nil {
-		fmt.printf("Failed to read file: %v\n", err)
-		return nil, false
-	}
-	defer delete(data, allocator)
-
-	offset := 0
-
-	if offset + 10 > len(data) {
-		fmt.println("File too small")
-		return nil, false
-	}
-	magic := CHECKPOINT_MAGIC
-	for i in 0 ..< 10 {
-		if data[offset + i] != magic[i] {
-			fmt.println("Invalid magic bytes")
-			return nil, false
-		}
-	}
-	offset += 10
-
-	model_type: i32
-	model_type, offset = read_i32(data, offset)
-	if model_type != 21 {
-		fmt.println("Not a VAE Encoder")
-		return nil, false
-	}
-
-	enc_ptr := new(VAEEncoder, allocator)
-
-	enc_ptr.fc1 = linear_layer_new(1, 1, allocator)
-	if enc_ptr.fc1.weights != nil {t.tensor_free(enc_ptr.fc1.weights)}
-	enc_ptr.fc1.weights, offset = read_tensor(data, offset, allocator)
-	if enc_ptr.fc1.bias != nil {t.tensor_free(enc_ptr.fc1.bias)}
-	enc_ptr.fc1.bias, offset = read_tensor(data, offset, allocator)
-
-	if enc_ptr.fc_mu.weights != nil {t.tensor_free(enc_ptr.fc_mu.weights)}
-	enc_ptr.fc_mu.weights, offset = read_tensor(data, offset, allocator)
-	if enc_ptr.fc_mu.bias != nil {t.tensor_free(enc_ptr.fc_mu.bias)}
-	enc_ptr.fc_mu.bias, offset = read_tensor(data, offset, allocator)
-
-	if enc_ptr.fc_logvar.weights != nil {t.tensor_free(enc_ptr.fc_logvar.weights)}
-	enc_ptr.fc_logvar.weights, offset = read_tensor(data, offset, allocator)
-	if enc_ptr.fc_logvar.bias != nil {t.tensor_free(enc_ptr.fc_logvar.bias)}
-	enc_ptr.fc_logvar.bias, offset = read_tensor(data, offset, allocator)
-
-	return enc_ptr, true
-}
-
-// ============================================================================
-// VAE Decoder Persistence
-// ============================================================================
-
-save_vae_decoder :: proc(dec: ^VAEDecoder, path: string) -> bool {
-	file, err := os.create(path)
-	if err != nil {
-		fmt.printf("Failed to create file: %v\n", err)
-		return false
-	}
-	defer os.close(file)
-
-	os.write(file, CHECKPOINT_MAGIC)
-	write_i32(file, 22) // VAEDecoder type ID
-
-	write_tensor(file, dec.fc1.weights)
-	write_tensor(file, dec.fc1.bias)
-	write_tensor(file, dec.fc2.weights)
-	write_tensor(file, dec.fc2.bias)
-	write_tensor(file, dec.fc3.weights)
-	write_tensor(file, dec.fc3.bias)
-
-	return true
-}
-
-load_vae_decoder :: proc(
-	path: string,
-	allocator: mem.Allocator = context.allocator,
-) -> (
-	^VAEDecoder,
-	bool,
-) {
-	data, err := os.read_entire_file(path, allocator)
-	if err != nil {
-		fmt.printf("Failed to read file: %v\n", err)
-		return nil, false
-	}
-	defer delete(data, allocator)
-
-	offset := 0
-
-	if offset + 10 > len(data) {
-		fmt.println("File too small")
-		return nil, false
-	}
-	magic := CHECKPOINT_MAGIC
-	for i in 0 ..< 10 {
-		if data[offset + i] != magic[i] {
-			fmt.println("Invalid magic bytes")
-			return nil, false
-		}
-	}
-	offset += 10
-
-	model_type: i32
-	model_type, offset = read_i32(data, offset)
-	if model_type != 22 {
-		fmt.println("Not a VAE Decoder")
-		return nil, false
-	}
-
-	dec_ptr := new(VAEDecoder, allocator)
-
-	dec_ptr.fc1 = linear_layer_new(1, 1, allocator)
-	if dec_ptr.fc1.weights != nil {t.tensor_free(dec_ptr.fc1.weights)}
-	dec_ptr.fc1.weights, offset = read_tensor(data, offset, allocator)
-	if dec_ptr.fc1.bias != nil {t.tensor_free(dec_ptr.fc1.bias)}
-	dec_ptr.fc1.bias, offset = read_tensor(data, offset, allocator)
-
-	if dec_ptr.fc2.weights != nil {t.tensor_free(dec_ptr.fc2.weights)}
-	dec_ptr.fc2.weights, offset = read_tensor(data, offset, allocator)
-	if dec_ptr.fc2.bias != nil {t.tensor_free(dec_ptr.fc2.bias)}
-	dec_ptr.fc2.bias, offset = read_tensor(data, offset, allocator)
-
-	if dec_ptr.fc3.weights != nil {t.tensor_free(dec_ptr.fc3.weights)}
-	dec_ptr.fc3.weights, offset = read_tensor(data, offset, allocator)
-	if dec_ptr.fc3.bias != nil {t.tensor_free(dec_ptr.fc3.bias)}
-	dec_ptr.fc3.bias, offset = read_tensor(data, offset, allocator)
-
-	return dec_ptr, true
-}
-
-// ============================================================================
-// Skip tensor data without loading (for partial loading)
-// ============================================================================
-skip_tensor :: proc(data: []u8, offset: int) -> int {
-	rows_i32, new_offset := read_i32(data, offset)
-	cols_i32, newer_offset := read_i32(data, new_offset) // ✅ Use = not :=
-
-	rows := int(rows_i32)
-	cols := int(cols_i32)
-
-	if rows == 0 && cols == 0 {
-		return newer_offset
-	}
-
-	count := rows * cols
-	return newer_offset + count * 8
-}
-
-// ============================================================================
-// Partial Weight Loading for Sequential Models
-// ============================================================================
+// Loads the layers of a checkpoint into `seq` where they match: a layer is
+// loaded when its type and configuration equal the checkpoint's at the same
+// position, and skipped otherwise (e.g. a new output head).
 sequential_load_partial :: proc(
 	seq: ^Sequential,
 	path: string,
@@ -1949,818 +662,308 @@ sequential_load_partial :: proc(
 	skipped: int,
 	ok: bool,
 ) {
-	data, err := os.read_entire_file(path, allocator)
-	if err != nil {
-		fmt.printf("Failed to read file: %v\n", err)
-		return 0, 0, false
-	}
-	defer delete(data, allocator)
+	rng: rand.Default_Random_State
+	context.random_generator = rand.default_random_generator(&rng)
+	io := _reader(path, allocator) or_return
+	defer delete(io.data, allocator)
 
-	offset := 10
-	epoch_i32: i32
-	epoch_i32, offset = read_i32(data, offset)
+	_ = _get_i32(&io) // epoch
+	n_layers := _get_size(&io)
+	for i in 0 ..< min(n_layers, len(seq.layers)) {
+		start := io.pos
+		stored, layer_ok := _read_layer_header(&io, allocator)
+		if !layer_ok {break}
+		defer layer_free(&stored)
 
-	num_layers_i32: i32
-	num_layers_i32, offset = read_i32(data, offset)
-	ckpt_layers := int(num_layers_i32)
+		// same type and configuration: the target's header has the same bytes
+		target := _writer(context.temp_allocator)
+		_write_layer_header(&target, &seq.layers[i])
+		same := string(target.buf[len(CHECKPOINT_MAGIC):]) == string(io.data[start:io.pos])
+		delete(target.buf)
 
-	model_layers := len(seq.layers)
-	loaded = 0
-	skipped = 0
-
-	layers_to_process := min(ckpt_layers, model_layers)
-
-	for i in 0 ..< layers_to_process {
-		layer_type: i32
-		layer_type, offset = read_i32(data, offset)
-
-		model_layer := &seq.layers[i]
-
-		types_match := false
-		switch l in model_layer {
-		case LinearLayer:
-			if layer_type == 0 {types_match = true}
-		case Conv2dLayer:
-			if layer_type == 1 {types_match = true}
-		case MaxPool2dLayer:
-			if layer_type == 2 {types_match = true}
-		case Activation:
-			if layer_type == 3 {types_match = true}
-		case FlattenLayer:
-			if layer_type == 4 {types_match = true}
-		case BatchNorm2dLayer:
-			if layer_type == 5 {types_match = true}
-		case AvgPool2dLayer:
-			if layer_type == 6 {types_match = true}
-		case DropoutLayer:
-			if layer_type == 7 {types_match = true}
-		case RNNLayer:
-			if layer_type == 8 {types_match = true}
-		case GRULayer:
-			if layer_type == 9 {types_match = true}
-		case LSTMLayer:
-			if layer_type == 10 {types_match = true}
-		case EmbeddingLayer:
-			if layer_type == 11 {types_match = true}
-		case MultiHeadAttentionLayer:
-			if layer_type == 12 {types_match = true}
-		case LayerNormLayer:
-			if layer_type == 13 {types_match = true}
-		case FFNLayer:
-			if layer_type == 14 {types_match = true}
-		case TransformerEncoderBlock:
-			if layer_type == 15 {types_match = true}
-		case TransformerEncoder:
-			if layer_type == 16 {types_match = true}
-		case GATLayer:
-			if layer_type == 24 {types_match = true}
-		case MambaLayer:
-			if layer_type == 25 {types_match = true}
-		case MoELayer:
-			if layer_type == 26 {types_match = true}
-		}
-
-		if !types_match {
-			switch layer_type {
-			case 0:
-				_, offset = read_i32(data, offset)
-				_, offset = read_i32(data, offset)
-				has_bias: i32
-				has_bias, offset = read_i32(data, offset)
-				offset = skip_tensor(data, offset)
-				if has_bias != 0 {
-					offset = skip_tensor(data, offset)
-				}
-			case 1:
-				_, offset = read_i32(data, offset)
-				_, offset = read_i32(data, offset)
-				_, offset = read_i32(data, offset)
-				_, offset = read_i32(data, offset)
-				_, offset = read_i32(data, offset)
-				has_bias: i32
-				has_bias, offset = read_i32(data, offset)
-				offset = skip_tensor(data, offset)
-				if has_bias != 0 {
-					offset = skip_tensor(data, offset)
-				}
-			case 2:
-				_, offset = read_i32(data, offset)
-				_, offset = read_i32(data, offset)
-			case 3:
-				_, offset = read_i32(data, offset)
-			case 4:
-			case 5:
-				_, offset = read_i32(data, offset)
-				_, offset = read_f64(data, offset)
-				_, offset = read_f64(data, offset)
-				offset = skip_tensor(data, offset)
-				offset = skip_tensor(data, offset)
-				offset = skip_tensor(data, offset)
-				offset = skip_tensor(data, offset)
-			case 6:
-				_, offset = read_i32(data, offset)
-				_, offset = read_i32(data, offset)
-			case 7:
-				_, offset = read_f64(data, offset)
-			case 8, 9, 10:
-				_, offset = read_i32(data, offset)
-				_, offset = read_i32(data, offset)
-				offset = skip_tensor(data, offset)
-				offset = skip_tensor(data, offset)
-				offset = skip_tensor(data, offset)
-			case 11:
-				_, offset = read_i32(data, offset)
-				_, offset = read_i32(data, offset)
-				offset = skip_tensor(data, offset)
-			case 12:
-				_, offset = read_i32(data, offset)
-				_, offset = read_i32(data, offset)
-				offset = skip_tensor(data, offset)
-				offset = skip_tensor(data, offset)
-				offset = skip_tensor(data, offset)
-				offset = skip_tensor(data, offset)
-				offset = skip_tensor(data, offset)
-				offset = skip_tensor(data, offset)
-				offset = skip_tensor(data, offset)
-				offset = skip_tensor(data, offset)
-			case 13:
-				_, offset = read_i32(data, offset)
-				_, offset = read_f64(data, offset)
-				offset = skip_tensor(data, offset)
-				offset = skip_tensor(data, offset)
-			case 14:
-				_, offset = read_i32(data, offset)
-				_, offset = read_i32(data, offset)
-				offset = skip_tensor(data, offset)
-				offset = skip_tensor(data, offset)
-				offset = skip_tensor(data, offset)
-				offset = skip_tensor(data, offset)
-			case 15:
-				_, offset = read_i32(data, offset)
-				_, offset = read_i32(data, offset)
-				_, offset = read_i32(data, offset)
-				for _ in 0 ..< 12 {
-					offset = skip_tensor(data, offset)
-				}
-			case 16:
-				num_layers_skip: i32
-				num_layers_skip, offset = read_i32(data, offset)
-				_, offset = read_i32(data, offset)
-				_, offset = read_i32(data, offset)
-				_, offset = read_i32(data, offset)
-				for _ in 0 ..< int(num_layers_skip) * 12 {
-					offset = skip_tensor(data, offset)
-				}
-			case 24:
-				_, offset = read_i32(data, offset) // in_f
-				_, offset = read_i32(data, offset) // out_f
-				_, offset = read_i32(data, offset) // num_heads
-				has_bias: i32; has_bias, offset = read_i32(data, offset)
-				offset = skip_tensor(data, offset) // adjacency
-				offset = skip_tensor(data, offset) // linear.weights
-				if has_bias != 0 {offset = skip_tensor(data, offset)} 	// linear.bias
-				for _ in 0 ..< 8 {offset = skip_tensor(data, offset)} 	// MHA weights/biases
-			case 25:
-				_, offset = read_i32(data, offset) // d_model
-				_, offset = read_i32(data, offset) // d_state
-				for _ in 0 ..< 12 { 	// 5 linear layers (w+b) + A + D = 12 tensors
-					offset = skip_tensor(data, offset)
-				}
-			case 26:
-				num_exp_skip: i32
-				num_exp_skip, offset = read_i32(data, offset)
-				_, offset = read_i32(data, offset) // top_k
-				_, offset = read_i32(data, offset) // d_model
-				_, offset = read_i32(data, offset) // d_ff
-
-				has_bias_r: i32
-				has_bias_r, offset = read_i32(data, offset)
-				offset = skip_tensor(data, offset)
-				if has_bias_r != 0 {offset = skip_tensor(data, offset)}
-
-				for _ in 0 ..< int(num_exp_skip) {
-					has_bias_1: i32
-					has_bias_1, offset = read_i32(data, offset)
-					offset = skip_tensor(data, offset)
-					if has_bias_1 != 0 {offset = skip_tensor(data, offset)}
-
-					has_bias_2: i32
-					has_bias_2, offset = read_i32(data, offset)
-					offset = skip_tensor(data, offset)
-					if has_bias_2 != 0 {offset = skip_tensor(data, offset)}
-				}
-			}
-			skipped += 1
-			continue
-		}
-
-		// Types match - load the layer
-		switch &l in model_layer {
-		case LinearLayer:
-			in_f: i32
-			out_f: i32
-			has_bias: i32
-			in_f, offset = read_i32(data, offset)
-			out_f, offset = read_i32(data, offset)
-			has_bias, offset = read_i32(data, offset)
-
-			if int(in_f) == l.in_features && int(out_f) == l.out_features {
-				if l.weights != nil {t.tensor_free(l.weights)}
-				l.weights, offset = read_tensor(data, offset, allocator)
-				if has_bias != 0 && l.bias != nil {
-					t.tensor_free(l.bias)
-					l.bias, offset = read_tensor(data, offset, allocator)
-				} else if has_bias != 0 {
-					offset = skip_tensor(data, offset)
-				}
-				loaded += 1
-			} else {
-				offset = skip_tensor(data, offset)
-				if has_bias != 0 {
-					offset = skip_tensor(data, offset)
-				}
-				skipped += 1
-			}
-		case Conv2dLayer:
-			in_c: i32
-			out_c: i32
-			k: i32
-			stride: i32
-			pad: i32
-			has_bias: i32
-			in_c, offset = read_i32(data, offset)
-			out_c, offset = read_i32(data, offset)
-			k, offset = read_i32(data, offset)
-			stride, offset = read_i32(data, offset)
-			pad, offset = read_i32(data, offset)
-			has_bias, offset = read_i32(data, offset)
-
-			if int(in_c) == l.in_channels &&
-			   int(out_c) == l.out_channels &&
-			   int(k) == l.kernel_size {
-				if l.weight != nil {t.tensor_free(l.weight)}
-				l.weight, offset = read_tensor(data, offset, allocator)
-				l.weight.shape = [4]int{int(out_c), int(in_c), int(k), int(k)}
-				if has_bias != 0 && l.bias != nil {
-					t.tensor_free(l.bias)
-					l.bias, offset = read_tensor(data, offset, allocator)
-				} else if has_bias != 0 {
-					offset = skip_tensor(data, offset)
-				}
-				loaded += 1
-			} else {
-				offset = skip_tensor(data, offset)
-				if has_bias != 0 {
-					offset = skip_tensor(data, offset)
-				}
-				skipped += 1
-			}
-		case BatchNorm2dLayer:
-			num_features: i32
-			eps: f64
-			momentum: f64
-			num_features, offset = read_i32(data, offset)
-			eps, offset = read_f64(data, offset)
-			momentum, offset = read_f64(data, offset)
-
-			if int(num_features) == l.num_features {
-				if l.weight != nil {t.tensor_free(l.weight)}
-				l.weight, offset = read_tensor(data, offset, allocator)
-				if l.bias != nil {t.tensor_free(l.bias)}
-				l.bias, offset = read_tensor(data, offset, allocator)
-				if l.running_mean != nil {t.tensor_free(l.running_mean)}
-				l.running_mean, offset = read_tensor(data, offset, allocator)
-				if l.running_var != nil {t.tensor_free(l.running_var)}
-				l.running_var, offset = read_tensor(data, offset, allocator)
-				loaded += 1
-			} else {
-				offset = skip_tensor(data, offset)
-				offset = skip_tensor(data, offset)
-				offset = skip_tensor(data, offset)
-				offset = skip_tensor(data, offset)
-				skipped += 1
-			}
-		case RNNLayer:
-			in_size: i32
-			hidden_size: i32
-			in_size, offset = read_i32(data, offset)
-			hidden_size, offset = read_i32(data, offset)
-
-			if int(in_size) == l.input_size && int(hidden_size) == l.hidden_size {
-				if l.w_ih != nil {t.tensor_free(l.w_ih)}
-				l.w_ih, offset = read_tensor(data, offset, allocator)
-				if l.w_hh != nil {t.tensor_free(l.w_hh)}
-				l.w_hh, offset = read_tensor(data, offset, allocator)
-				if l.bias != nil {t.tensor_free(l.bias)}
-				l.bias, offset = read_tensor(data, offset, allocator)
-				loaded += 1
-			} else {
-				offset = skip_tensor(data, offset)
-				offset = skip_tensor(data, offset)
-				offset = skip_tensor(data, offset)
-				skipped += 1
-			}
-		case GRULayer:
-			in_size: i32
-			hidden_size: i32
-			in_size, offset = read_i32(data, offset)
-			hidden_size, offset = read_i32(data, offset)
-
-			if int(in_size) == l.input_size && int(hidden_size) == l.hidden_size {
-				if l.w_ih != nil {t.tensor_free(l.w_ih)}
-				l.w_ih, offset = read_tensor(data, offset, allocator)
-				if l.w_hh != nil {t.tensor_free(l.w_hh)}
-				l.w_hh, offset = read_tensor(data, offset, allocator)
-				if l.bias != nil {t.tensor_free(l.bias)}
-				l.bias, offset = read_tensor(data, offset, allocator)
-				loaded += 1
-			} else {
-				offset = skip_tensor(data, offset)
-				offset = skip_tensor(data, offset)
-				offset = skip_tensor(data, offset)
-				skipped += 1
-			}
-		case LSTMLayer:
-			in_size: i32
-			hidden_size: i32
-			in_size, offset = read_i32(data, offset)
-			hidden_size, offset = read_i32(data, offset)
-
-			if int(in_size) == l.input_size && int(hidden_size) == l.hidden_size {
-				if l.w_ih != nil {t.tensor_free(l.w_ih)}
-				l.w_ih, offset = read_tensor(data, offset, allocator)
-				if l.w_hh != nil {t.tensor_free(l.w_hh)}
-				l.w_hh, offset = read_tensor(data, offset, allocator)
-				if l.bias != nil {t.tensor_free(l.bias)}
-				l.bias, offset = read_tensor(data, offset, allocator)
-				loaded += 1
-			} else {
-				offset = skip_tensor(data, offset)
-				offset = skip_tensor(data, offset)
-				offset = skip_tensor(data, offset)
-				skipped += 1
-			}
-		case MultiHeadAttentionLayer:
-			d_model: i32
-			num_heads: i32
-			d_model, offset = read_i32(data, offset)
-			num_heads, offset = read_i32(data, offset)
-
-			if int(d_model) == l.d_model && int(num_heads) == l.num_heads {
-				if l.q_proj.weights != nil {t.tensor_free(l.q_proj.weights)}
-				l.q_proj.weights, offset = read_tensor(data, offset, allocator)
-				if l.q_proj.bias != nil {t.tensor_free(l.q_proj.bias)}
-				l.q_proj.bias, offset = read_tensor(data, offset, allocator)
-				if l.k_proj.weights != nil {t.tensor_free(l.k_proj.weights)}
-				l.k_proj.weights, offset = read_tensor(data, offset, allocator)
-				if l.k_proj.bias != nil {t.tensor_free(l.k_proj.bias)}
-				l.k_proj.bias, offset = read_tensor(data, offset, allocator)
-				if l.v_proj.weights != nil {t.tensor_free(l.v_proj.weights)}
-				l.v_proj.weights, offset = read_tensor(data, offset, allocator)
-				if l.v_proj.bias != nil {t.tensor_free(l.v_proj.bias)}
-				l.v_proj.bias, offset = read_tensor(data, offset, allocator)
-				if l.out_proj.weights != nil {t.tensor_free(l.out_proj.weights)}
-				l.out_proj.weights, offset = read_tensor(data, offset, allocator)
-				if l.out_proj.bias != nil {t.tensor_free(l.out_proj.bias)}
-				l.out_proj.bias, offset = read_tensor(data, offset, allocator)
-				loaded += 1
-			} else {
-				for _ in 0 ..< 8 {
-					offset = skip_tensor(data, offset)
-				}
-				skipped += 1
-			}
-		case FFNLayer:
-			d_model: i32
-			d_ff: i32
-			d_model, offset = read_i32(data, offset)
-			d_ff, offset = read_i32(data, offset)
-
-			if int(d_model) == l.d_model && int(d_ff) == l.d_ff {
-				if l.fc1.weights != nil {t.tensor_free(l.fc1.weights)}
-				l.fc1.weights, offset = read_tensor(data, offset, allocator)
-				if l.fc1.bias != nil {t.tensor_free(l.fc1.bias)}
-				l.fc1.bias, offset = read_tensor(data, offset, allocator)
-				if l.fc2.weights != nil {t.tensor_free(l.fc2.weights)}
-				l.fc2.weights, offset = read_tensor(data, offset, allocator)
-				if l.fc2.bias != nil {t.tensor_free(l.fc2.bias)}
-				l.fc2.bias, offset = read_tensor(data, offset, allocator)
-				loaded += 1
-			} else {
-				for _ in 0 ..< 4 {
-					offset = skip_tensor(data, offset)
-				}
-				skipped += 1
-			}
-		case TransformerEncoderBlock:
-			d_model: i32
-			num_heads: i32
-			d_ff: i32
-			d_model, offset = read_i32(data, offset)
-			num_heads, offset = read_i32(data, offset)
-			d_ff, offset = read_i32(data, offset)
-
-			if int(d_model) == l.d_model && int(num_heads) == l.num_heads && int(d_ff) == l.d_ff {
-				if l.ln1.gamma != nil {t.tensor_free(l.ln1.gamma)}
-				l.ln1.gamma, offset = read_tensor(data, offset, allocator)
-				if l.ln1.beta != nil {t.tensor_free(l.ln1.beta)}
-				l.ln1.beta, offset = read_tensor(data, offset, allocator)
-				if l.mha.q_proj.weights != nil {t.tensor_free(l.mha.q_proj.weights)}
-				l.mha.q_proj.weights, offset = read_tensor(data, offset, allocator)
-				if l.mha.q_proj.bias != nil {t.tensor_free(l.mha.q_proj.bias)}
-				l.mha.q_proj.bias, offset = read_tensor(data, offset, allocator)
-				if l.mha.k_proj.weights != nil {t.tensor_free(l.mha.k_proj.weights)}
-				l.mha.k_proj.weights, offset = read_tensor(data, offset, allocator)
-				if l.mha.k_proj.bias != nil {t.tensor_free(l.mha.k_proj.bias)}
-				l.mha.k_proj.bias, offset = read_tensor(data, offset, allocator)
-				if l.mha.v_proj.weights != nil {t.tensor_free(l.mha.v_proj.weights)}
-				l.mha.v_proj.weights, offset = read_tensor(data, offset, allocator)
-				if l.mha.v_proj.bias != nil {t.tensor_free(l.mha.v_proj.bias)}
-				l.mha.v_proj.bias, offset = read_tensor(data, offset, allocator)
-				if l.mha.out_proj.weights != nil {t.tensor_free(l.mha.out_proj.weights)}
-				l.mha.out_proj.weights, offset = read_tensor(data, offset, allocator)
-				if l.mha.out_proj.bias != nil {t.tensor_free(l.mha.out_proj.bias)}
-				l.mha.out_proj.bias, offset = read_tensor(data, offset, allocator)
-				if l.ln2.gamma != nil {t.tensor_free(l.ln2.gamma)}
-				l.ln2.gamma, offset = read_tensor(data, offset, allocator)
-				if l.ln2.beta != nil {t.tensor_free(l.ln2.beta)}
-				l.ln2.beta, offset = read_tensor(data, offset, allocator)
-				if l.ffn.fc1.weights != nil {t.tensor_free(l.ffn.fc1.weights)}
-				l.ffn.fc1.weights, offset = read_tensor(data, offset, allocator)
-				if l.ffn.fc1.bias != nil {t.tensor_free(l.ffn.fc1.bias)}
-				l.ffn.fc1.bias, offset = read_tensor(data, offset, allocator)
-				if l.ffn.fc2.weights != nil {t.tensor_free(l.ffn.fc2.weights)}
-				l.ffn.fc2.weights, offset = read_tensor(data, offset, allocator)
-				if l.ffn.fc2.bias != nil {t.tensor_free(l.ffn.fc2.bias)}
-				l.ffn.fc2.bias, offset = read_tensor(data, offset, allocator)
-				loaded += 1
-			} else {
-				for _ in 0 ..< 12 {
-					offset = skip_tensor(data, offset)
-				}
-				skipped += 1
-			}
-		case TransformerEncoder:
-			num_layers_ckpt: i32
-			d_model: i32
-			num_heads: i32
-			d_ff: i32
-			num_layers_ckpt, offset = read_i32(data, offset)
-			d_model, offset = read_i32(data, offset)
-			num_heads, offset = read_i32(data, offset)
-			d_ff, offset = read_i32(data, offset)
-
-			if int(num_layers_ckpt) == len(l.blocks) &&
-			   int(d_model) == l.d_model &&
-			   int(num_heads) == l.num_heads &&
-			   int(d_ff) == l.d_ff {
-				for block_idx in 0 ..< int(num_layers_ckpt) {
-					block := &l.blocks[block_idx]
-					if block.ln1.gamma != nil {t.tensor_free(block.ln1.gamma)}
-					block.ln1.gamma, offset = read_tensor(data, offset, allocator)
-					if block.ln1.beta != nil {t.tensor_free(block.ln1.beta)}
-					block.ln1.beta, offset = read_tensor(data, offset, allocator)
-					if block.mha.q_proj.weights != nil {t.tensor_free(block.mha.q_proj.weights)}
-					block.mha.q_proj.weights, offset = read_tensor(data, offset, allocator)
-					if block.mha.q_proj.bias != nil {t.tensor_free(block.mha.q_proj.bias)}
-					block.mha.q_proj.bias, offset = read_tensor(data, offset, allocator)
-					if block.mha.k_proj.weights != nil {t.tensor_free(block.mha.k_proj.weights)}
-					block.mha.k_proj.weights, offset = read_tensor(data, offset, allocator)
-					if block.mha.k_proj.bias != nil {t.tensor_free(block.mha.k_proj.bias)}
-					block.mha.k_proj.bias, offset = read_tensor(data, offset, allocator)
-					if block.mha.v_proj.weights != nil {t.tensor_free(block.mha.v_proj.weights)}
-					block.mha.v_proj.weights, offset = read_tensor(data, offset, allocator)
-					if block.mha.v_proj.bias != nil {t.tensor_free(block.mha.v_proj.bias)}
-					block.mha.v_proj.bias, offset = read_tensor(data, offset, allocator)
-					if block.mha.out_proj.weights !=
-					   nil {t.tensor_free(block.mha.out_proj.weights)}
-					block.mha.out_proj.weights, offset = read_tensor(data, offset, allocator)
-					if block.mha.out_proj.bias != nil {t.tensor_free(block.mha.out_proj.bias)}
-					block.mha.out_proj.bias, offset = read_tensor(data, offset, allocator)
-					if block.ln2.gamma != nil {t.tensor_free(block.ln2.gamma)}
-					block.ln2.gamma, offset = read_tensor(data, offset, allocator)
-					if block.ln2.beta != nil {t.tensor_free(block.ln2.beta)}
-					block.ln2.beta, offset = read_tensor(data, offset, allocator)
-					if block.ffn.fc1.weights != nil {t.tensor_free(block.ffn.fc1.weights)}
-					block.ffn.fc1.weights, offset = read_tensor(data, offset, allocator)
-					if block.ffn.fc1.bias != nil {t.tensor_free(block.ffn.fc1.bias)}
-					block.ffn.fc1.bias, offset = read_tensor(data, offset, allocator)
-					if block.ffn.fc2.weights != nil {t.tensor_free(block.ffn.fc2.weights)}
-					block.ffn.fc2.weights, offset = read_tensor(data, offset, allocator)
-					if block.ffn.fc2.bias != nil {t.tensor_free(block.ffn.fc2.bias)}
-					block.ffn.fc2.bias, offset = read_tensor(data, offset, allocator)
-				}
-				loaded += 1
-			} else {
-				for _ in 0 ..< int(num_layers_ckpt) * 12 {
-					offset = skip_tensor(data, offset)
-				}
-				skipped += 1
-			}
-		case EmbeddingLayer:
-			num_emb: i32
-			emb_dim: i32
-			num_emb, offset = read_i32(data, offset)
-			emb_dim, offset = read_i32(data, offset)
-
-			if int(num_emb) == l.num_embeddings && int(emb_dim) == l.embedding_dim {
-				if l.weight != nil {t.tensor_free(l.weight)}
-				l.weight, offset = read_tensor(data, offset, allocator)
-				loaded += 1
-			} else {
-				offset = skip_tensor(data, offset)
-				skipped += 1
-			}
-		case LayerNormLayer:
-			d_model: i32
-			eps: f64
-			d_model, offset = read_i32(data, offset)
-			eps, offset = read_f64(data, offset)
-
-			if int(d_model) == l.d_model {
-				if l.gamma != nil {t.tensor_free(l.gamma)}
-				l.gamma, offset = read_tensor(data, offset, allocator)
-				if l.beta != nil {t.tensor_free(l.beta)}
-				l.beta, offset = read_tensor(data, offset, allocator)
-				loaded += 1
-			} else {
-				offset = skip_tensor(data, offset)
-				offset = skip_tensor(data, offset)
-				skipped += 1
-			}
-		case GATLayer:
-			in_f: i32; out_f: i32; num_heads: i32; has_bias: i32
-			in_f, offset = read_i32(data, offset)
-			out_f, offset = read_i32(data, offset)
-			num_heads, offset = read_i32(data, offset)
-			has_bias, offset = read_i32(data, offset)
-
-			if int(in_f) == l.linear.in_features && int(out_f) == l.linear.out_features {
-				// Skip adjacency in partial load (or load it if you prefer)
-				offset = skip_tensor(data, offset)
-
-				if l.linear.weights != nil {t.tensor_free(l.linear.weights)}
-				l.linear.weights, offset = read_tensor(data, offset, allocator)
-
-				if has_bias != 0 && l.linear.bias != nil {
-					t.tensor_free(l.linear.bias)
-					l.linear.bias, offset = read_tensor(data, offset, allocator)
-				} else if has_bias != 0 {
-					offset = skip_tensor(data, offset)
-				}
-
-				// Skip MHA weights for partial load (or load them if you want full GAT partial loading)
-				for _ in 0 ..< 8 {offset = skip_tensor(data, offset)}
-
-				loaded += 1
-			} else {
-				offset = skip_tensor(data, offset) // adjacency
-				offset = skip_tensor(data, offset) // weights
-				if has_bias != 0 {offset = skip_tensor(data, offset)}
-				for _ in 0 ..< 8 {offset = skip_tensor(data, offset)}
-				skipped += 1
-			}
-		case MambaLayer:
-			d_model: i32; d_state: i32
-			d_model, offset = read_i32(data, offset)
-			d_state, offset = read_i32(data, offset)
-
-			if int(d_model) == l.d_model && int(d_state) == l.d_state {
-				if l.proj_x.weights != nil {t.tensor_free(l.proj_x.weights)}
-				l.proj_x.weights, offset = read_tensor(data, offset, allocator)
-				if l.proj_x.bias != nil {t.tensor_free(l.proj_x.bias)}
-				l.proj_x.bias, offset = read_tensor(data, offset, allocator)
-
-				if l.proj_B.weights != nil {t.tensor_free(l.proj_B.weights)}
-				l.proj_B.weights, offset = read_tensor(data, offset, allocator)
-				if l.proj_B.bias != nil {t.tensor_free(l.proj_B.bias)}
-				l.proj_B.bias, offset = read_tensor(data, offset, allocator)
-
-				if l.proj_C.weights != nil {t.tensor_free(l.proj_C.weights)}
-				l.proj_C.weights, offset = read_tensor(data, offset, allocator)
-				if l.proj_C.bias != nil {t.tensor_free(l.proj_C.bias)}
-				l.proj_C.bias, offset = read_tensor(data, offset, allocator)
-
-				if l.proj_Delta.weights != nil {t.tensor_free(l.proj_Delta.weights)}
-				l.proj_Delta.weights, offset = read_tensor(data, offset, allocator)
-				if l.proj_Delta.bias != nil {t.tensor_free(l.proj_Delta.bias)}
-				l.proj_Delta.bias, offset = read_tensor(data, offset, allocator)
-
-				if l.proj_out.weights != nil {t.tensor_free(l.proj_out.weights)}
-				l.proj_out.weights, offset = read_tensor(data, offset, allocator)
-				if l.proj_out.bias != nil {t.tensor_free(l.proj_out.bias)}
-				l.proj_out.bias, offset = read_tensor(data, offset, allocator)
-
-				if l.A != nil {t.tensor_free(l.A)}
-				l.A, offset = read_tensor(data, offset, allocator)
-				if l.D != nil {t.tensor_free(l.D)}
-				l.D, offset = read_tensor(data, offset, allocator)
-
-				loaded += 1
-
-			} else {
-				for _ in 0 ..< 12 {
-					offset = skip_tensor(data, offset)
-				}
-				skipped += 1
-			}
-		case MaxPool2dLayer, AvgPool2dLayer, Activation, FlattenLayer, DropoutLayer:
-			switch layer_type {
-			case 2:
-				_, offset = read_i32(data, offset)
-				_, offset = read_i32(data, offset)
-			case 3:
-				_, offset = read_i32(data, offset)
-			case 6:
-				_, offset = read_i32(data, offset)
-				_, offset = read_i32(data, offset)
-			case 7:
-				_, offset = read_f64(data, offset)
-			}
+		if same {
+			_io_layer(&io, &seq.layers[i])
 			loaded += 1
-		case MoELayer:
-			num_experts: i32; top_k: i32; d_model: i32; d_ff: i32
-			num_experts, offset = read_i32(data, offset)
-			top_k, offset = read_i32(data, offset)
-			d_model, offset = read_i32(data, offset)
-			d_ff, offset = read_i32(data, offset)
-
-			if int(num_experts) == l.num_experts &&
-			   int(d_model) == l.d_model &&
-			   int(d_ff) == l.d_ff {
-				has_bias_r: i32
-				has_bias_r, offset = read_i32(data, offset)
-				if l.router.weights != nil {t.tensor_free(l.router.weights)}
-				l.router.weights, offset = read_tensor(data, offset, allocator)
-				if has_bias_r != 0 && l.router.bias != nil {
-					t.tensor_free(l.router.bias)
-					l.router.bias, offset = read_tensor(data, offset, allocator)
-				} else if has_bias_r != 0 {
-					offset = skip_tensor(data, offset)
-				}
-
-				for i in 0 ..< int(num_experts) {
-					has_bias_1: i32
-					has_bias_1, offset = read_i32(data, offset)
-					if l.experts[i].fc1.weights != nil {t.tensor_free(l.experts[i].fc1.weights)}
-					l.experts[i].fc1.weights, offset = read_tensor(data, offset, allocator)
-					if has_bias_1 != 0 && l.experts[i].fc1.bias != nil {
-						t.tensor_free(l.experts[i].fc1.bias)
-						l.experts[i].fc1.bias, offset = read_tensor(data, offset, allocator)
-					} else if has_bias_1 != 0 {
-						offset = skip_tensor(data, offset)
-					}
-
-					has_bias_2: i32
-					has_bias_2, offset = read_i32(data, offset)
-					if l.experts[i].fc2.weights != nil {t.tensor_free(l.experts[i].fc2.weights)}
-					l.experts[i].fc2.weights, offset = read_tensor(data, offset, allocator)
-					if has_bias_2 != 0 && l.experts[i].fc2.bias != nil {
-						t.tensor_free(l.experts[i].fc2.bias)
-						l.experts[i].fc2.bias, offset = read_tensor(data, offset, allocator)
-					} else if has_bias_2 != 0 {
-						offset = skip_tensor(data, offset)
-					}
-				}
-				loaded += 1
-			} else {
-				// Skip router
-				has_bias_r: i32
-				has_bias_r, offset = read_i32(data, offset)
-				offset = skip_tensor(data, offset)
-				if has_bias_r != 0 {offset = skip_tensor(data, offset)}
-				// Skip experts
-				for _ in 0 ..< int(num_experts) {
-					has_bias_1: i32
-					has_bias_1, offset = read_i32(data, offset)
-					offset = skip_tensor(data, offset)
-					if has_bias_1 != 0 {offset = skip_tensor(data, offset)}
-					has_bias_2: i32
-					has_bias_2, offset = read_i32(data, offset)
-					offset = skip_tensor(data, offset)
-					if has_bias_2 != 0 {offset = skip_tensor(data, offset)}
-				}
-				skipped += 1
-			}
+		} else {
+			_io_layer(&io, &stored)
+			skipped += 1
 		}
 	}
-
-	// Skip remaining checkpoint layers
-	for i in layers_to_process ..< ckpt_layers {
-		layer_type: i32
-		layer_type, offset = read_i32(data, offset)
-		switch layer_type {
-		case 0:
-			_, offset = read_i32(data, offset)
-			_, offset = read_i32(data, offset)
-			has_bias: i32
-			has_bias, offset = read_i32(data, offset)
-			offset = skip_tensor(data, offset)
-			if has_bias != 0 {offset = skip_tensor(data, offset)}
-		case 1:
-			_, offset = read_i32(data, offset)
-			_, offset = read_i32(data, offset)
-			_, offset = read_i32(data, offset)
-			_, offset = read_i32(data, offset)
-			_, offset = read_i32(data, offset)
-			has_bias: i32
-			has_bias, offset = read_i32(data, offset)
-			offset = skip_tensor(data, offset)
-			if has_bias != 0 {offset = skip_tensor(data, offset)}
-		case 2:
-			_, offset = read_i32(data, offset)
-			_, offset = read_i32(data, offset)
-		case 3:
-			_, offset = read_i32(data, offset)
-		case 4:
-		case 5:
-			_, offset = read_i32(data, offset)
-			_, offset = read_f64(data, offset)
-			_, offset = read_f64(data, offset)
-			offset = skip_tensor(data, offset)
-			offset = skip_tensor(data, offset)
-			offset = skip_tensor(data, offset)
-			offset = skip_tensor(data, offset)
-		case 6:
-			_, offset = read_i32(data, offset)
-			_, offset = read_i32(data, offset)
-		case 7:
-			_, offset = read_f64(data, offset)
-		case 8, 9, 10:
-			_, offset = read_i32(data, offset)
-			_, offset = read_i32(data, offset)
-			offset = skip_tensor(data, offset)
-			offset = skip_tensor(data, offset)
-			offset = skip_tensor(data, offset)
-		case 11:
-			_, offset = read_i32(data, offset)
-			_, offset = read_i32(data, offset)
-			offset = skip_tensor(data, offset)
-		case 12:
-			_, offset = read_i32(data, offset)
-			_, offset = read_i32(data, offset)
-			for _ in 0 ..< 8 {
-				offset = skip_tensor(data, offset)
-			}
-		case 13:
-			_, offset = read_i32(data, offset)
-			_, offset = read_f64(data, offset)
-			offset = skip_tensor(data, offset)
-			offset = skip_tensor(data, offset)
-		case 14:
-			_, offset = read_i32(data, offset)
-			_, offset = read_i32(data, offset)
-			for _ in 0 ..< 4 {
-				offset = skip_tensor(data, offset)
-			}
-		case 15:
-			_, offset = read_i32(data, offset)
-			_, offset = read_i32(data, offset)
-			_, offset = read_i32(data, offset)
-			for _ in 0 ..< 12 {
-				offset = skip_tensor(data, offset)
-			}
-		case 16:
-			num_layers_skip: i32
-			num_layers_skip, offset = read_i32(data, offset)
-			_, offset = read_i32(data, offset)
-			_, offset = read_i32(data, offset)
-			_, offset = read_i32(data, offset)
-			for _ in 0 ..< int(num_layers_skip) * 12 {
-				offset = skip_tensor(data, offset)
-			}
-		case 25:
-			_, offset = read_i32(data, offset)
-			_, offset = read_i32(data, offset)
-			for _ in 0 ..< 12 {
-				offset = skip_tensor(data, offset)
-			}
-		case 26:
-			num_exp_skip: i32
-			num_exp_skip, offset = read_i32(data, offset)
-			_, offset = read_i32(data, offset) // top_k
-			_, offset = read_i32(data, offset) // d_model
-			_, offset = read_i32(data, offset) // d_ff
-
-			has_bias_r: i32
-			has_bias_r, offset = read_i32(data, offset)
-			offset = skip_tensor(data, offset)
-			if has_bias_r != 0 {offset = skip_tensor(data, offset)}
-
-			for _ in 0 ..< int(num_exp_skip) {
-				has_bias_1: i32
-				has_bias_1, offset = read_i32(data, offset)
-				offset = skip_tensor(data, offset)
-				if has_bias_1 != 0 {offset = skip_tensor(data, offset)}
-
-				has_bias_2: i32
-				has_bias_2, offset = read_i32(data, offset)
-				offset = skip_tensor(data, offset)
-				if has_bias_2 != 0 {offset = skip_tensor(data, offset)}
-			}
-		}
-		skipped += 1
+	if !io.ok {
+		fmt.printf("%s: corrupt or truncated checkpoint\n", path)
+		return loaded, skipped, false
 	}
-
 	return loaded, skipped, true
+}
+
+// ============================================================================
+// GPT
+// ============================================================================
+
+save_gpt_model :: proc(model: ^GPTModel, path: string) -> bool {
+	io := _writer(context.allocator)
+	_put_i32(&io, int(_File_Id.GPT))
+	for v in ([]int{model.vocab_size, model.d_model, model.num_heads, model.d_ff, model.num_layers, model.max_seq_len}) {
+		_put_i32(&io, v)
+	}
+	_io_gpt(&io, model, .GPT)
+	return _save(&io, path)
+}
+
+// Loads a GPT model with its blocks as stored (MoE or dense, FlashAttention,
+// causal). use_flash applies to older files that don't store it.
+load_gpt_model :: proc(
+	path: string,
+	use_flash: bool = false,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	model: ^GPTModel,
+	ok: bool,
+) {
+	rng: rand.Default_Random_State
+	context.random_generator = rand.default_random_generator(&rng)
+	io := _reader(path, allocator) or_return
+	defer delete(io.data, allocator)
+
+	file_id := _File_Id(_get_i32(&io))
+	if file_id != .GPT && file_id != .GPT_MoE && file_id != .GPT_Dense {
+		fmt.printf("%s is not a GPT model\n", path)
+		return nil, false
+	}
+	cfg: [6]int // vocab, d_model, heads, d_ff, layers, max_seq_len
+	for &v in cfg {v = _get_size(&io)}
+	if !io.ok || cfg[2] == 0 {
+		fmt.printf("%s: corrupt or truncated model\n", path)
+		return nil, false
+	}
+	model = new(GPTModel, allocator)
+	model^ = gpt_model_new(
+		cfg[0],
+		cfg[1],
+		cfg[2],
+		cfg[3],
+		cfg[4],
+		cfg[5],
+		use_flash = use_flash,
+		allocator = allocator,
+	)
+	_io_gpt(&io, model, file_id)
+	if !io.ok {
+		fmt.printf("%s: corrupt or truncated model\n", path)
+		gpt_model_free(model)
+		free(model, allocator)
+		return nil, false
+	}
+	return model, true
+}
+
+// GPT tensors in file order; each block starts with its flags (none in the
+// oldest version)
+@(private = "file")
+_io_gpt :: proc(io: ^_Io, model: ^GPTModel, version: _File_Id) {
+	_io_tensor(io, &model.token_emb.weight)
+	_io_tensor(io, &model.pos_emb.weight)
+	for &block in model.blocks {
+		is_moe := version != .GPT_Dense && _io_flag(io, block.use_moe)
+		if version == .GPT {
+			block.mha.use_flash = _io_flag(io, block.mha.use_flash)
+			block.mha.is_causal = _io_flag(io, block.mha.is_causal)
+		}
+		_io_mha(io, &block.mha.q_proj, &block.mha.k_proj, &block.mha.v_proj, &block.mha.out_proj)
+		if is_moe {
+			num_experts, top_k := block.moe.num_experts, block.moe.top_k
+			if io.writing {
+				_put_i32(io, num_experts)
+				_put_i32(io, top_k)
+			} else {
+				num_experts, top_k = _get_size(io), _get_size(io)
+				if !io.ok {return}
+				ffn_layer_free(&block.ffn)
+				block.ffn = {}
+				block.moe = moe_layer_new(model.d_model, model.d_ff, num_experts, top_k, io.alloc)
+				block.use_moe = true
+			}
+			_io_moe(io, &block.moe)
+		} else {
+			_io_linear(io, &block.ffn.fc1)
+			_io_linear(io, &block.ffn.fc2)
+		}
+		_io_norm(io, &block.ln1)
+		_io_norm(io, &block.ln2)
+	}
+	_io_norm(io, &model.final_ln)
+	_io_linear(io, &model.output_proj)
+	model.vocab_size = model.output_proj.out_features
+}
+
+// ============================================================================
+// BERT
+// ============================================================================
+
+save_bert_model :: proc(model: ^BERTModel, path: string) -> bool {
+	io := _writer(context.allocator)
+	_put_i32(&io, int(_File_Id.BERT))
+	for v in ([]int{model.vocab_size, model.d_model, model.num_heads, model.d_ff, model.num_layers, model.max_seq_len}) {
+		_put_i32(&io, v)
+	}
+	_io_bert(&io, model)
+	return _save(&io, path)
+}
+
+// Loads a BERT model (heads of another size, e.g. after bert_replace_nsp_head, are restored)
+load_bert_model :: proc(
+	path: string,
+	allocator: mem.Allocator = context.allocator,
+	use_flash: bool = false,
+) -> (
+	model: ^BERTModel,
+	ok: bool,
+) {
+	rng: rand.Default_Random_State
+	context.random_generator = rand.default_random_generator(&rng)
+	io := _reader(path, allocator) or_return
+	defer delete(io.data, allocator)
+
+	if _File_Id(_get_i32(&io)) != .BERT {
+		fmt.printf("%s is not a BERT model\n", path)
+		return nil, false
+	}
+	cfg: [6]int // vocab, d_model, heads, d_ff, layers, max_seq_len
+	for &v in cfg {v = _get_size(&io)}
+	if !io.ok || cfg[2] == 0 {
+		fmt.printf("%s: corrupt or truncated model\n", path)
+		return nil, false
+	}
+	model = new(BERTModel, allocator)
+	model^ = bert_model_new(cfg[0], cfg[1], cfg[2], cfg[3], cfg[4], cfg[5], use_flash, allocator)
+	_io_bert(&io, model)
+	if !io.ok {
+		fmt.printf("%s: corrupt or truncated model\n", path)
+		bert_model_free(model)
+		free(model, allocator)
+		return nil, false
+	}
+	return model, true
+}
+
+@(private = "file")
+_io_bert :: proc(io: ^_Io, model: ^BERTModel) {
+	_io_tensor(io, &model.token_emb.weight)
+	_io_tensor(io, &model.pos_emb.weight)
+	_io_tensor(io, &model.segment_emb.weight)
+	_io_norm(io, &model.emb_ln)
+	for &b in model.encoder_blocks {_io_block(io, &b.mha, &b.ffn, &b.ln1, &b.ln2)}
+	_io_linear(io, &model.pooler)
+	_io_linear(io, &model.mlm_head)
+	_io_linear(io, &model.nsp_head)
+	model.vocab_size = model.mlm_head.out_features
+}
+
+// ============================================================================
+// GAN and VAE networks (three linear layers each)
+// ============================================================================
+
+@(private = "file")
+_save_linears :: proc(path: string, id: _File_Id, layers: ..^LinearLayer) -> bool {
+	io := _writer(context.allocator)
+	_put_i32(&io, int(id))
+	for lin in layers {_io_linear(&io, lin)}
+	return _save(&io, path)
+}
+
+@(private = "file")
+_load_linears :: proc(
+	path: string,
+	id: _File_Id,
+	alloc: mem.Allocator,
+	layers: ..^LinearLayer,
+) -> bool {
+	io := _reader(path, alloc) or_return
+	defer delete(io.data, alloc)
+	if _File_Id(_get_i32(&io)) != id {
+		fmt.printf("%s is not a %v\n", path, id)
+		return false
+	}
+	for lin in layers {_io_linear(&io, lin)}
+	if !io.ok {
+		fmt.printf("%s: corrupt or truncated model\n", path)
+		for lin in layers {linear_layer_free(lin)}
+	}
+	return io.ok
+}
+
+save_generator :: proc(gen: ^Generator, path: string) -> bool {
+	return _save_linears(path, .Generator, &gen.fc1, &gen.fc2, &gen.fc3)
+}
+
+load_generator :: proc(
+	path: string,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	^Generator,
+	bool,
+) {
+	gen := new(Generator, allocator)
+	if !_load_linears(path, .Generator, allocator, &gen.fc1, &gen.fc2, &gen.fc3) {
+		free(gen, allocator)
+		return nil, false
+	}
+	return gen, true
+}
+
+save_discriminator :: proc(disc: ^Discriminator, path: string) -> bool {
+	return _save_linears(path, .Discriminator, &disc.fc1, &disc.fc2, &disc.fc3)
+}
+
+load_discriminator :: proc(
+	path: string,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	^Discriminator,
+	bool,
+) {
+	disc := new(Discriminator, allocator)
+	if !_load_linears(path, .Discriminator, allocator, &disc.fc1, &disc.fc2, &disc.fc3) {
+		free(disc, allocator)
+		return nil, false
+	}
+	return disc, true
+}
+
+save_vae_encoder :: proc(enc: ^VAEEncoder, path: string) -> bool {
+	return _save_linears(path, .VAE_Encoder, &enc.fc1, &enc.fc_mu, &enc.fc_logvar)
+}
+
+load_vae_encoder :: proc(
+	path: string,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	^VAEEncoder,
+	bool,
+) {
+	enc := new(VAEEncoder, allocator)
+	if !_load_linears(path, .VAE_Encoder, allocator, &enc.fc1, &enc.fc_mu, &enc.fc_logvar) {
+		free(enc, allocator)
+		return nil, false
+	}
+	return enc, true
+}
+
+save_vae_decoder :: proc(dec: ^VAEDecoder, path: string) -> bool {
+	return _save_linears(path, .VAE_Decoder, &dec.fc1, &dec.fc2, &dec.fc3)
+}
+
+load_vae_decoder :: proc(
+	path: string,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	^VAEDecoder,
+	bool,
+) {
+	dec := new(VAEDecoder, allocator)
+	if !_load_linears(path, .VAE_Decoder, allocator, &dec.fc1, &dec.fc2, &dec.fc3) {
+		free(dec, allocator)
+		return nil, false
+	}
+	return dec, true
 }

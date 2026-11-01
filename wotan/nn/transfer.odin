@@ -1,607 +1,87 @@
 package nn
 
 import t "../tensor"
-import "core:mem"
 
 // ============================================================================
 // Freeze/Unfreeze Utilities
 // ============================================================================
+// A frozen parameter has requires_grad = false: it gets no gradient and the
+// optimizers leave it unchanged. Unfreezing restores its gradient buffer.
 
 tensor_set_requires_grad :: proc(tensor: ^t.Tensor, requires_grad: bool) {
 	if tensor == nil {return}
 	tensor.requires_grad = requires_grad
+	if requires_grad {t.tensor_ensure_grad(tensor)}
+}
+
+@(private = "file")
+_set_requires_grad :: proc(params: []^t.Tensor, requires_grad: bool) {
+	for p in params {tensor_set_requires_grad(p, requires_grad)}
+}
+
+// Layers [start, end) of a Sequential model (clamped to the model)
+@(private = "file")
+_sequential_set :: proc(seq: ^Sequential, start, end: int, requires_grad: bool) {
+	ps := make([dynamic]^t.Tensor, context.temp_allocator)
+	defer delete(ps)
+	n := len(seq.layers)
+	for i in clamp(start, 0, n) ..< clamp(end, 0, n) {layer_parameters(&seq.layers[i], &ps, all = true)}
+	_set_requires_grad(ps[:], requires_grad)
 }
 
 sequential_freeze_all :: proc(seq: ^Sequential) {
-	for layer in seq.layers {
-		switch l in layer {
-		case LinearLayer:
-			l.weights.requires_grad = false
-			if l.bias != nil {l.bias.requires_grad = false}
-		case Conv2dLayer:
-			l.weight.requires_grad = false
-			if l.bias != nil {l.bias.requires_grad = false}
-		case BatchNorm2dLayer:
-			l.weight.requires_grad = false
-			l.bias.requires_grad = false
-		case LayerNormLayer:
-			l.gamma.requires_grad = false
-			l.beta.requires_grad = false
-		case EmbeddingLayer:
-			l.weight.requires_grad = false
-		case MultiHeadAttentionLayer:
-			l.q_proj.weights.requires_grad = false
-			l.q_proj.bias.requires_grad = false
-			l.k_proj.weights.requires_grad = false
-			l.k_proj.bias.requires_grad = false
-			l.v_proj.weights.requires_grad = false
-			l.v_proj.bias.requires_grad = false
-			l.out_proj.weights.requires_grad = false
-			l.out_proj.bias.requires_grad = false
-		case FFNLayer:
-			l.fc1.weights.requires_grad = false
-			l.fc1.bias.requires_grad = false
-			l.fc2.weights.requires_grad = false
-			l.fc2.bias.requires_grad = false
-		case RNNLayer:
-			l.w_ih.requires_grad = false
-			l.w_hh.requires_grad = false
-			l.bias.requires_grad = false
-		case GRULayer:
-			l.w_ih.requires_grad = false
-			l.w_hh.requires_grad = false
-			l.bias.requires_grad = false
-		case LSTMLayer:
-			l.w_ih.requires_grad = false
-			l.w_hh.requires_grad = false
-			l.bias.requires_grad = false
-		case TransformerEncoderBlock:
-			l.ln1.gamma.requires_grad = false
-			l.ln1.beta.requires_grad = false
-			l.mha.q_proj.weights.requires_grad = false
-			l.mha.q_proj.bias.requires_grad = false
-			l.mha.k_proj.weights.requires_grad = false
-			l.mha.k_proj.bias.requires_grad = false
-			l.mha.v_proj.weights.requires_grad = false
-			l.mha.v_proj.bias.requires_grad = false
-			l.mha.out_proj.weights.requires_grad = false
-			l.mha.out_proj.bias.requires_grad = false
-			l.ln2.gamma.requires_grad = false
-			l.ln2.beta.requires_grad = false
-			l.ffn.fc1.weights.requires_grad = false
-			l.ffn.fc1.bias.requires_grad = false
-			l.ffn.fc2.weights.requires_grad = false
-			l.ffn.fc2.bias.requires_grad = false
-		case TransformerEncoder:
-			for i in 0 ..< len(l.blocks) {
-				block := &l.blocks[i]
-				block.ln1.gamma.requires_grad = false
-				block.ln1.beta.requires_grad = false
-				block.mha.q_proj.weights.requires_grad = false
-				block.mha.q_proj.bias.requires_grad = false
-				block.mha.k_proj.weights.requires_grad = false
-				block.mha.k_proj.bias.requires_grad = false
-				block.mha.v_proj.weights.requires_grad = false
-				block.mha.v_proj.bias.requires_grad = false
-				block.mha.out_proj.weights.requires_grad = false
-				block.mha.out_proj.bias.requires_grad = false
-				block.ln2.gamma.requires_grad = false
-				block.ln2.beta.requires_grad = false
-				block.ffn.fc1.weights.requires_grad = false
-				block.ffn.fc1.bias.requires_grad = false
-				block.ffn.fc2.weights.requires_grad = false
-				block.ffn.fc2.bias.requires_grad = false
-			}
-		case GATLayer:
-			l.linear.weights.requires_grad = false // (or true for unfreeze)
-			if l.linear.bias != nil {l.linear.bias.requires_grad = false} 	// (or true)
-			l.mha.q_proj.weights.requires_grad = false // (or true)
-			l.mha.q_proj.bias.requires_grad = false // (or true)
-			l.mha.k_proj.weights.requires_grad = false // (or true)
-			l.mha.k_proj.bias.requires_grad = false // (or true)
-			l.mha.v_proj.weights.requires_grad = false // (or true)
-			l.mha.v_proj.bias.requires_grad = false // (or true)
-			l.mha.out_proj.weights.requires_grad = false // (or true)
-			l.mha.out_proj.bias.requires_grad = false // (or true)
-		case MambaLayer:
-			l.proj_x.weights.requires_grad = false // (or true for unfreeze)
-			if l.proj_x.bias != nil {l.proj_x.bias.requires_grad = false}
-			l.proj_B.weights.requires_grad = false
-			if l.proj_B.bias != nil {l.proj_B.bias.requires_grad = false}
-			l.proj_C.weights.requires_grad = false
-			if l.proj_C.bias != nil {l.proj_C.bias.requires_grad = false}
-			l.proj_Delta.weights.requires_grad = false
-			if l.proj_Delta.bias != nil {l.proj_Delta.bias.requires_grad = false}
-			l.proj_out.weights.requires_grad = false
-			if l.proj_out.bias != nil {l.proj_out.bias.requires_grad = false}
-			l.A.requires_grad = false
-			l.D.requires_grad = false
-		case MoELayer:
-			l.router.weights.requires_grad = false
-			if l.router.bias != nil {l.router.bias.requires_grad = false}
-			for i in 0 ..< l.num_experts {
-				l.experts[i].fc1.weights.requires_grad = false
-				if l.experts[i].fc1.bias != nil {l.experts[i].fc1.bias.requires_grad = false}
-				l.experts[i].fc2.weights.requires_grad = false
-				if l.experts[i].fc2.bias != nil {l.experts[i].fc2.bias.requires_grad = false}
-			}
-		case MaxPool2dLayer, AvgPool2dLayer, DropoutLayer, Activation, FlattenLayer:
-		// No trainable parameters
-		}
-	}
+	_sequential_set(seq, 0, len(seq.layers), false)
 }
 
 sequential_unfreeze_all :: proc(seq: ^Sequential) {
-	for layer in seq.layers {
-		switch l in layer {
-		case LinearLayer:
-			l.weights.requires_grad = true
-			if l.bias != nil {l.bias.requires_grad = true}
-		case Conv2dLayer:
-			l.weight.requires_grad = true
-			if l.bias != nil {l.bias.requires_grad = true}
-		case BatchNorm2dLayer:
-			l.weight.requires_grad = true
-			l.bias.requires_grad = true
-		case LayerNormLayer:
-			l.gamma.requires_grad = true
-			l.beta.requires_grad = true
-		case EmbeddingLayer:
-			l.weight.requires_grad = true
-		case MultiHeadAttentionLayer:
-			l.q_proj.weights.requires_grad = true
-			l.q_proj.bias.requires_grad = true
-			l.k_proj.weights.requires_grad = true
-			l.k_proj.bias.requires_grad = true
-			l.v_proj.weights.requires_grad = true
-			l.v_proj.bias.requires_grad = true
-			l.out_proj.weights.requires_grad = true
-			l.out_proj.bias.requires_grad = true
-		case FFNLayer:
-			l.fc1.weights.requires_grad = true
-			l.fc1.bias.requires_grad = true
-			l.fc2.weights.requires_grad = true
-			l.fc2.bias.requires_grad = true
-		case RNNLayer:
-			l.w_ih.requires_grad = true
-			l.w_hh.requires_grad = true
-			l.bias.requires_grad = true
-		case GRULayer:
-			l.w_ih.requires_grad = true
-			l.w_hh.requires_grad = true
-			l.bias.requires_grad = true
-		case LSTMLayer:
-			l.w_ih.requires_grad = true
-			l.w_hh.requires_grad = true
-			l.bias.requires_grad = true
-		case TransformerEncoderBlock:
-			l.ln1.gamma.requires_grad = true
-			l.ln1.beta.requires_grad = true
-			l.mha.q_proj.weights.requires_grad = true
-			l.mha.q_proj.bias.requires_grad = true
-			l.mha.k_proj.weights.requires_grad = true
-			l.mha.k_proj.bias.requires_grad = true
-			l.mha.v_proj.weights.requires_grad = true
-			l.mha.v_proj.bias.requires_grad = true
-			l.mha.out_proj.weights.requires_grad = true
-			l.mha.out_proj.bias.requires_grad = true
-			l.ln2.gamma.requires_grad = true
-			l.ln2.beta.requires_grad = true
-			l.ffn.fc1.weights.requires_grad = true
-			l.ffn.fc1.bias.requires_grad = true
-			l.ffn.fc2.weights.requires_grad = true
-			l.ffn.fc2.bias.requires_grad = true
-		case TransformerEncoder:
-			for i in 0 ..< len(l.blocks) {
-				block := &l.blocks[i]
-				block.ln1.gamma.requires_grad = true
-				block.ln1.beta.requires_grad = true
-				block.mha.q_proj.weights.requires_grad = true
-				block.mha.q_proj.bias.requires_grad = true
-				block.mha.k_proj.weights.requires_grad = true
-				block.mha.k_proj.bias.requires_grad = true
-				block.mha.v_proj.weights.requires_grad = true
-				block.mha.v_proj.bias.requires_grad = true
-				block.mha.out_proj.weights.requires_grad = true
-				block.mha.out_proj.bias.requires_grad = true
-				block.ln2.gamma.requires_grad = true
-				block.ln2.beta.requires_grad = true
-				block.ffn.fc1.weights.requires_grad = true
-				block.ffn.fc1.bias.requires_grad = true
-				block.ffn.fc2.weights.requires_grad = true
-				block.ffn.fc2.bias.requires_grad = true
-			}
-		case GATLayer:
-			l.linear.weights.requires_grad = true // (or true for unfreeze)
-			if l.linear.bias != nil {l.linear.bias.requires_grad = true} 	// (or true)
-			l.mha.q_proj.weights.requires_grad = true // (or true)
-			l.mha.q_proj.bias.requires_grad = true // (or true)
-			l.mha.k_proj.weights.requires_grad = true // (or true)
-			l.mha.k_proj.bias.requires_grad = true // (or true)
-			l.mha.v_proj.weights.requires_grad = true // (or true)
-			l.mha.v_proj.bias.requires_grad = true // (or true)
-			l.mha.out_proj.weights.requires_grad = true // (or true)
-			l.mha.out_proj.bias.requires_grad = true // (or true)
-		case MambaLayer:
-			l.proj_x.weights.requires_grad = true // (or true for unfreeze)
-			if l.proj_x.bias != nil {l.proj_x.bias.requires_grad = true}
-			l.proj_B.weights.requires_grad = true
-			if l.proj_B.bias != nil {l.proj_B.bias.requires_grad = true}
-			l.proj_C.weights.requires_grad = true
-			if l.proj_C.bias != nil {l.proj_C.bias.requires_grad = true}
-			l.proj_Delta.weights.requires_grad = true
-			if l.proj_Delta.bias != nil {l.proj_Delta.bias.requires_grad = true}
-			l.proj_out.weights.requires_grad = true
-			if l.proj_out.bias != nil {l.proj_out.bias.requires_grad = true}
-			l.A.requires_grad = true
-			l.D.requires_grad = true
-		case MoELayer:
-			l.router.weights.requires_grad = true
-			if l.router.bias != nil {l.router.bias.requires_grad = true}
-			for i in 0 ..< l.num_experts {
-				l.experts[i].fc1.weights.requires_grad = true
-				if l.experts[i].fc1.bias != nil {l.experts[i].fc1.bias.requires_grad = true}
-				l.experts[i].fc2.weights.requires_grad = true
-				if l.experts[i].fc2.bias != nil {l.experts[i].fc2.bias.requires_grad = true}
-			}
-		case MaxPool2dLayer, AvgPool2dLayer, DropoutLayer, Activation, FlattenLayer:
-		// No trainable parameters
-		}
-	}
+	_sequential_set(seq, 0, len(seq.layers), true)
 }
 
+// Freezes layers [start, end)
 sequential_freeze_range :: proc(seq: ^Sequential, start: int, end: int) {
-	start := start
-	end := end
-	n := len(seq.layers)
-	start = max(0, min(start, n))
-	end = max(0, min(end, n))
-
-	for i in start ..< end {
-		layer := &seq.layers[i]
-		switch l in layer {
-		case LinearLayer:
-			l.weights.requires_grad = false
-			if l.bias != nil {l.bias.requires_grad = false}
-		case Conv2dLayer:
-			l.weight.requires_grad = false
-			if l.bias != nil {l.bias.requires_grad = false}
-		case BatchNorm2dLayer:
-			l.weight.requires_grad = false
-			l.bias.requires_grad = false
-		case LayerNormLayer:
-			l.gamma.requires_grad = false
-			l.beta.requires_grad = false
-		case EmbeddingLayer:
-			l.weight.requires_grad = false
-		case MultiHeadAttentionLayer:
-			l.q_proj.weights.requires_grad = false
-			l.q_proj.bias.requires_grad = false
-			l.k_proj.weights.requires_grad = false
-			l.k_proj.bias.requires_grad = false
-			l.v_proj.weights.requires_grad = false
-			l.v_proj.bias.requires_grad = false
-			l.out_proj.weights.requires_grad = false
-			l.out_proj.bias.requires_grad = false
-		case FFNLayer:
-			l.fc1.weights.requires_grad = false
-			l.fc1.bias.requires_grad = false
-			l.fc2.weights.requires_grad = false
-			l.fc2.bias.requires_grad = false
-		case RNNLayer:
-			l.w_ih.requires_grad = false
-			l.w_hh.requires_grad = false
-			l.bias.requires_grad = false
-		case GRULayer:
-			l.w_ih.requires_grad = false
-			l.w_hh.requires_grad = false
-			l.bias.requires_grad = false
-		case LSTMLayer:
-			l.w_ih.requires_grad = false
-			l.w_hh.requires_grad = false
-			l.bias.requires_grad = false
-		case TransformerEncoderBlock:
-			l.ln1.gamma.requires_grad = false
-			l.ln1.beta.requires_grad = false
-			l.mha.q_proj.weights.requires_grad = false
-			l.mha.q_proj.bias.requires_grad = false
-			l.mha.k_proj.weights.requires_grad = false
-			l.mha.k_proj.bias.requires_grad = false
-			l.mha.v_proj.weights.requires_grad = false
-			l.mha.v_proj.bias.requires_grad = false
-			l.mha.out_proj.weights.requires_grad = false
-			l.mha.out_proj.bias.requires_grad = false
-			l.ln2.gamma.requires_grad = false
-			l.ln2.beta.requires_grad = false
-			l.ffn.fc1.weights.requires_grad = false
-			l.ffn.fc1.bias.requires_grad = false
-			l.ffn.fc2.weights.requires_grad = false
-			l.ffn.fc2.bias.requires_grad = false
-		case TransformerEncoder:
-			for i in 0 ..< len(l.blocks) {
-				block := &l.blocks[i]
-				block.ln1.gamma.requires_grad = false
-				block.ln1.beta.requires_grad = false
-				block.mha.q_proj.weights.requires_grad = false
-				block.mha.q_proj.bias.requires_grad = false
-				block.mha.k_proj.weights.requires_grad = false
-				block.mha.k_proj.bias.requires_grad = false
-				block.mha.v_proj.weights.requires_grad = false
-				block.mha.v_proj.bias.requires_grad = false
-				block.mha.out_proj.weights.requires_grad = false
-				block.mha.out_proj.bias.requires_grad = false
-				block.ln2.gamma.requires_grad = false
-				block.ln2.beta.requires_grad = false
-				block.ffn.fc1.weights.requires_grad = false
-				block.ffn.fc1.bias.requires_grad = false
-				block.ffn.fc2.weights.requires_grad = false
-				block.ffn.fc2.bias.requires_grad = false
-			}
-		case GATLayer:
-			l.linear.weights.requires_grad = false // (or true for unfreeze)
-			if l.linear.bias != nil {l.linear.bias.requires_grad = false} 	// (or true)
-			l.mha.q_proj.weights.requires_grad = false // (or true)
-			l.mha.q_proj.bias.requires_grad = false // (or true)
-			l.mha.k_proj.weights.requires_grad = false // (or true)
-			l.mha.k_proj.bias.requires_grad = false // (or true)
-			l.mha.v_proj.weights.requires_grad = false // (or true)
-			l.mha.v_proj.bias.requires_grad = false // (or true)
-			l.mha.out_proj.weights.requires_grad = false // (or true)
-			l.mha.out_proj.bias.requires_grad = false // (or true)
-		case MambaLayer:
-			l.proj_x.weights.requires_grad = false
-			if l.proj_x.bias != nil {l.proj_x.bias.requires_grad = false}
-			l.proj_B.weights.requires_grad = false
-			if l.proj_B.bias != nil {l.proj_B.bias.requires_grad = false}
-			l.proj_C.weights.requires_grad = false
-			if l.proj_C.bias != nil {l.proj_C.bias.requires_grad = false}
-			l.proj_Delta.weights.requires_grad = false
-			if l.proj_Delta.bias != nil {l.proj_Delta.bias.requires_grad = false}
-			l.proj_out.weights.requires_grad = false
-			if l.proj_out.bias != nil {l.proj_out.bias.requires_grad = false}
-			l.A.requires_grad = false
-			l.D.requires_grad = false
-		case MoELayer:
-			l.router.weights.requires_grad = false
-			if l.router.bias != nil {l.router.bias.requires_grad = false}
-			for i in 0 ..< l.num_experts {
-				l.experts[i].fc1.weights.requires_grad = false
-				if l.experts[i].fc1.bias != nil {l.experts[i].fc1.bias.requires_grad = false}
-				l.experts[i].fc2.weights.requires_grad = false
-				if l.experts[i].fc2.bias != nil {l.experts[i].fc2.bias.requires_grad = false}
-			}
-		case MaxPool2dLayer, AvgPool2dLayer, DropoutLayer, Activation, FlattenLayer:
-		// No trainable parameters
-		}
-	}
+	_sequential_set(seq, start, end, false)
 }
 
 // GPT model freeze/unfreeze
 gpt_freeze_all :: proc(model: ^GPTModel) {
-	model.token_emb.weight.requires_grad = false
-	model.pos_emb.weight.requires_grad = false
-
-	for i in 0 ..< len(model.blocks) {
-		block := &model.blocks[i]
-		block.ln1.gamma.requires_grad = false
-		block.ln1.beta.requires_grad = false
-		block.mha.q_proj.weights.requires_grad = false
-		block.mha.q_proj.bias.requires_grad = false
-		block.mha.k_proj.weights.requires_grad = false
-		block.mha.k_proj.bias.requires_grad = false
-		block.mha.v_proj.weights.requires_grad = false
-		block.mha.v_proj.bias.requires_grad = false
-		block.mha.out_proj.weights.requires_grad = false
-		block.mha.out_proj.bias.requires_grad = false
-		block.ln2.gamma.requires_grad = false
-		block.ln2.beta.requires_grad = false
-		// Replace the unconditional FFN block:
-		if block.use_moe {
-			block.moe.router.weights.requires_grad = false // or true for unfreeze
-			if block.moe.router.bias != nil {block.moe.router.bias.requires_grad = false}
-			for e in 0 ..< block.moe.num_experts {
-				block.moe.experts[e].fc1.weights.requires_grad = false
-				if block.moe.experts[e].fc1.bias !=
-				   nil {block.moe.experts[e].fc1.bias.requires_grad = false}
-				block.moe.experts[e].fc2.weights.requires_grad = false
-				if block.moe.experts[e].fc2.bias !=
-				   nil {block.moe.experts[e].fc2.bias.requires_grad = false}
-			}
-		} else {
-			block.ffn.fc1.weights.requires_grad = false
-			if block.ffn.fc1.bias != nil {block.ffn.fc1.bias.requires_grad = false}
-			block.ffn.fc2.weights.requires_grad = false
-			if block.ffn.fc2.bias != nil {block.ffn.fc2.bias.requires_grad = false}
-		}
-	}
-
-	model.final_ln.gamma.requires_grad = false
-	model.final_ln.beta.requires_grad = false
-	model.output_proj.weights.requires_grad = false
-	model.output_proj.bias.requires_grad = false
+	ps := gpt_model_parameters(model, context.temp_allocator, all = true)
+	defer delete(ps)
+	_set_requires_grad(ps[:], false)
 }
 
 gpt_unfreeze_all :: proc(model: ^GPTModel) {
-	model.token_emb.weight.requires_grad = true
-	model.pos_emb.weight.requires_grad = true
-
-	for i in 0 ..< len(model.blocks) {
-		block := &model.blocks[i]
-		block.ln1.gamma.requires_grad = true
-		block.ln1.beta.requires_grad = true
-		block.mha.q_proj.weights.requires_grad = true
-		block.mha.q_proj.bias.requires_grad = true
-		block.mha.k_proj.weights.requires_grad = true
-		block.mha.k_proj.bias.requires_grad = true
-		block.mha.v_proj.weights.requires_grad = true
-		block.mha.v_proj.bias.requires_grad = true
-		block.mha.out_proj.weights.requires_grad = true
-		block.mha.out_proj.bias.requires_grad = true
-		block.ln2.gamma.requires_grad = true
-		block.ln2.beta.requires_grad = true
-		// Replace the unconditional FFN block:
-		if block.use_moe {
-			block.moe.router.weights.requires_grad = true // or false for freeze
-			if block.moe.router.bias != nil {block.moe.router.bias.requires_grad = true}
-			for e in 0 ..< block.moe.num_experts {
-				block.moe.experts[e].fc1.weights.requires_grad = true
-				if block.moe.experts[e].fc1.bias !=
-				   nil {block.moe.experts[e].fc1.bias.requires_grad = true}
-				block.moe.experts[e].fc2.weights.requires_grad = true
-				if block.moe.experts[e].fc2.bias !=
-				   nil {block.moe.experts[e].fc2.bias.requires_grad = true}
-			}
-		} else {
-			block.ffn.fc1.weights.requires_grad = true
-			if block.ffn.fc1.bias != nil {block.ffn.fc1.bias.requires_grad = true}
-			block.ffn.fc2.weights.requires_grad = true
-			if block.ffn.fc2.bias != nil {block.ffn.fc2.bias.requires_grad = true}
-		}
-	}
-
-	model.final_ln.gamma.requires_grad = true
-	model.final_ln.beta.requires_grad = true
-	model.output_proj.weights.requires_grad = true
-	model.output_proj.bias.requires_grad = true
+	ps := gpt_model_parameters(model, context.temp_allocator, all = true)
+	defer delete(ps)
+	_set_requires_grad(ps[:], true)
 }
 
+// Freezes blocks [start, end)
 gpt_freeze_blocks :: proc(model: ^GPTModel, start: int, end: int) {
-	start := start
-	end := end
+	ps := make([dynamic]^t.Tensor, context.temp_allocator)
+	defer delete(ps)
 	n := len(model.blocks)
-	start = max(0, min(start, n))
-	end = max(0, min(end, n))
-
-	for i in start ..< end {
-		block := &model.blocks[i]
-		block.ln1.gamma.requires_grad = false
-		block.ln1.beta.requires_grad = false
-		block.mha.q_proj.weights.requires_grad = false
-		block.mha.q_proj.bias.requires_grad = false
-		block.mha.k_proj.weights.requires_grad = false
-		block.mha.k_proj.bias.requires_grad = false
-		block.mha.v_proj.weights.requires_grad = false
-		block.mha.v_proj.bias.requires_grad = false
-		block.mha.out_proj.weights.requires_grad = false
-		block.mha.out_proj.bias.requires_grad = false
-		block.ln2.gamma.requires_grad = false
-		block.ln2.beta.requires_grad = false
-		// Replace the unconditional FFN block:
-		if block.use_moe {
-			block.moe.router.weights.requires_grad = false // or true for unfreeze
-			if block.moe.router.bias != nil {block.moe.router.bias.requires_grad = false}
-			for e in 0 ..< block.moe.num_experts {
-				block.moe.experts[e].fc1.weights.requires_grad = false
-				if block.moe.experts[e].fc1.bias !=
-				   nil {block.moe.experts[e].fc1.bias.requires_grad = false}
-				block.moe.experts[e].fc2.weights.requires_grad = false
-				if block.moe.experts[e].fc2.bias !=
-				   nil {block.moe.experts[e].fc2.bias.requires_grad = false}
-			}
-		} else {
-			block.ffn.fc1.weights.requires_grad = false
-			if block.ffn.fc1.bias != nil {block.ffn.fc1.bias.requires_grad = false}
-			block.ffn.fc2.weights.requires_grad = false
-			if block.ffn.fc2.bias != nil {block.ffn.fc2.bias.requires_grad = false}
-		}
-	}
+	for i in clamp(start, 0, n) ..< clamp(end, 0, n) {gpt_block_parameters(&model.blocks[i], &ps, all = true)}
+	_set_requires_grad(ps[:], false)
 }
 
 // BERT model freeze/unfreeze
 bert_freeze_all :: proc(model: ^BERTModel) {
-	model.token_emb.weight.requires_grad = false
-	model.pos_emb.weight.requires_grad = false
-	model.segment_emb.weight.requires_grad = false
-	model.emb_ln.gamma.requires_grad = false
-	model.emb_ln.beta.requires_grad = false
-
-	for i in 0 ..< len(model.encoder_blocks) {
-		block := &model.encoder_blocks[i]
-		block.ln1.gamma.requires_grad = false
-		block.ln1.beta.requires_grad = false
-		block.mha.q_proj.weights.requires_grad = false
-		block.mha.q_proj.bias.requires_grad = false
-		block.mha.k_proj.weights.requires_grad = false
-		block.mha.k_proj.bias.requires_grad = false
-		block.mha.v_proj.weights.requires_grad = false
-		block.mha.v_proj.bias.requires_grad = false
-		block.mha.out_proj.weights.requires_grad = false
-		block.mha.out_proj.bias.requires_grad = false
-		block.ln2.gamma.requires_grad = false
-		block.ln2.beta.requires_grad = false
-		block.ffn.fc1.weights.requires_grad = false
-		block.ffn.fc1.bias.requires_grad = false
-		block.ffn.fc2.weights.requires_grad = false
-		block.ffn.fc2.bias.requires_grad = false
-	}
-
-	model.pooler.weights.requires_grad = false
-	model.pooler.bias.requires_grad = false
-	model.mlm_head.weights.requires_grad = false
-	model.mlm_head.bias.requires_grad = false
-	model.nsp_head.weights.requires_grad = false
-	model.nsp_head.bias.requires_grad = false
+	ps := bert_model_parameters(model, context.temp_allocator, all = true)
+	defer delete(ps)
+	_set_requires_grad(ps[:], false)
 }
 
 bert_unfreeze_all :: proc(model: ^BERTModel) {
-	model.token_emb.weight.requires_grad = true
-	model.pos_emb.weight.requires_grad = true
-	model.segment_emb.weight.requires_grad = true
-	model.emb_ln.gamma.requires_grad = true
-	model.emb_ln.beta.requires_grad = true
-
-	for i in 0 ..< len(model.encoder_blocks) {
-		block := &model.encoder_blocks[i]
-		block.ln1.gamma.requires_grad = true
-		block.ln1.beta.requires_grad = true
-		block.mha.q_proj.weights.requires_grad = true
-		block.mha.q_proj.bias.requires_grad = true
-		block.mha.k_proj.weights.requires_grad = true
-		block.mha.k_proj.bias.requires_grad = true
-		block.mha.v_proj.weights.requires_grad = true
-		block.mha.v_proj.bias.requires_grad = true
-		block.mha.out_proj.weights.requires_grad = true
-		block.mha.out_proj.bias.requires_grad = true
-		block.ln2.gamma.requires_grad = true
-		block.ln2.beta.requires_grad = true
-		block.ffn.fc1.weights.requires_grad = true
-		block.ffn.fc1.bias.requires_grad = true
-		block.ffn.fc2.weights.requires_grad = true
-		block.ffn.fc2.bias.requires_grad = true
-	}
-
-	model.pooler.weights.requires_grad = true
-	model.pooler.bias.requires_grad = true
-	model.mlm_head.weights.requires_grad = true
-	model.mlm_head.bias.requires_grad = true
-	model.nsp_head.weights.requires_grad = true
-	model.nsp_head.bias.requires_grad = true
+	ps := bert_model_parameters(model, context.temp_allocator, all = true)
+	defer delete(ps)
+	_set_requires_grad(ps[:], true)
 }
 
+// Freezes encoder blocks [start, end)
 bert_freeze_blocks :: proc(model: ^BERTModel, start: int, end: int) {
-	start := start
-	end := end
+	ps := make([dynamic]^t.Tensor, context.temp_allocator)
+	defer delete(ps)
 	n := len(model.encoder_blocks)
-	start = max(0, min(start, n))
-	end = max(0, min(end, n))
-
-	for i in start ..< end {
-		block := &model.encoder_blocks[i]
-		block.ln1.gamma.requires_grad = false
-		block.ln1.beta.requires_grad = false
-		block.mha.q_proj.weights.requires_grad = false
-		block.mha.q_proj.bias.requires_grad = false
-		block.mha.k_proj.weights.requires_grad = false
-		block.mha.k_proj.bias.requires_grad = false
-		block.mha.v_proj.weights.requires_grad = false
-		block.mha.v_proj.bias.requires_grad = false
-		block.mha.out_proj.weights.requires_grad = false
-		block.mha.out_proj.bias.requires_grad = false
-		block.ln2.gamma.requires_grad = false
-		block.ln2.beta.requires_grad = false
-		block.ffn.fc1.weights.requires_grad = false
-		block.ffn.fc1.bias.requires_grad = false
-		block.ffn.fc2.weights.requires_grad = false
-		block.ffn.fc2.bias.requires_grad = false
-	}
+	for i in clamp(start, 0, n) ..< clamp(end, 0, n) {bert_block_parameters(&model.encoder_blocks[i], &ps, all = true)}
+	_set_requires_grad(ps[:], false)
 }

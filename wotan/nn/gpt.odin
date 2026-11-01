@@ -234,27 +234,37 @@ gpt_model_forward :: proc(
 
 	return logits
 }
-// All trainable GPT parameters (the order of the optimizer state)
+// All trainable GPT parameters (the order of the optimizer state; all:
+// frozen ones too)
 gpt_model_parameters :: proc(
 	model: ^GPTModel,
 	allocator: mem.Allocator = context.allocator,
+	all: bool = false,
 ) -> [dynamic]^t.Tensor {
 	ps := make([dynamic]^t.Tensor, 0, 16, allocator)
-	add :: proc(ps: ^[dynamic]^t.Tensor, layer: Layer) {
-		lay := layer
-		layer_parameters(&lay, ps)
-	}
-	add(&ps, model.token_emb)
-	add(&ps, model.pos_emb)
-	for &block in model.blocks {
-		add(&ps, block.ln1)
-		add(&ps, block.mha)
-		add(&ps, block.ln2)
-		if block.use_moe {add(&ps, block.moe)} else {add(&ps, block.ffn)}
-	}
-	add(&ps, model.final_ln)
-	add(&ps, model.output_proj)
+	_add_layer_parameters(&ps, all, model.token_emb, model.pos_emb)
+	for &block in model.blocks {gpt_block_parameters(&block, &ps, all)}
+	_add_layer_parameters(&ps, all, model.final_ln, model.output_proj)
 	return ps
+}
+
+// Parameters of one GPT block, appended to out
+gpt_block_parameters :: proc(block: ^GPTBlock, out: ^[dynamic]^t.Tensor, all: bool = false) {
+	_add_layer_parameters(out, all, block.ln1, block.mha, block.ln2)
+	if block.use_moe {
+		_add_layer_parameters(out, all, block.moe)
+	} else {
+		_add_layer_parameters(out, all, block.ffn)
+	}
+}
+
+// layer_parameters of each layer (copies of layer structs share their tensors)
+@(private)
+_add_layer_parameters :: proc(out: ^[dynamic]^t.Tensor, all: bool, layers: ..Layer) {
+	for layer in layers {
+		lay := layer
+		layer_parameters(&lay, out, all)
+	}
 }
 
 // Register all GPT parameters with optimizer

@@ -221,30 +221,34 @@ bert_model_forward :: proc(
 	return mlm_logits, nsp_logits
 }
 
-// All trainable BERT parameters (the order of the optimizer state)
+// All trainable BERT parameters (the order of the optimizer state; all:
+// frozen ones too)
 bert_model_parameters :: proc(
 	model: ^BERTModel,
 	allocator: mem.Allocator = context.allocator,
+	all: bool = false,
 ) -> [dynamic]^t.Tensor {
 	ps := make([dynamic]^t.Tensor, 0, 16, allocator)
-	add :: proc(ps: ^[dynamic]^t.Tensor, layer: Layer) {
-		lay := layer
-		layer_parameters(&lay, ps)
-	}
-	add(&ps, model.token_emb)
-	add(&ps, model.pos_emb)
-	add(&ps, model.segment_emb)
-	add(&ps, model.emb_ln)
-	for &block in model.encoder_blocks {
-		add(&ps, block.ln1)
-		add(&ps, block.mha)
-		add(&ps, block.ln2)
-		add(&ps, block.ffn)
-	}
-	add(&ps, model.pooler)
-	add(&ps, model.mlm_head)
-	add(&ps, model.nsp_head)
+	_add_layer_parameters(
+		&ps,
+		all,
+		model.token_emb,
+		model.pos_emb,
+		model.segment_emb,
+		model.emb_ln,
+	)
+	for &block in model.encoder_blocks {bert_block_parameters(&block, &ps, all)}
+	_add_layer_parameters(&ps, all, model.pooler, model.mlm_head, model.nsp_head)
 	return ps
+}
+
+// Parameters of one BERT encoder block, appended to out
+bert_block_parameters :: proc(
+	block: ^BERTEncoderBlock,
+	out: ^[dynamic]^t.Tensor,
+	all: bool = false,
+) {
+	_add_layer_parameters(out, all, block.ln1, block.mha, block.ln2, block.ffn)
 }
 
 // Register all BERT parameters with optimizer

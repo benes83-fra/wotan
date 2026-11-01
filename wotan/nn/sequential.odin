@@ -149,11 +149,23 @@ sequential_forward :: proc(s: ^Sequential, input: ^t.Tensor) -> ^t.Tensor {
 // Parameters
 // ============================================================================
 // Trainable tensors (requires_grad) of a layer in a fixed order; checkpoints
-// store optimizer moments in this order.
+// store optimizer moments in this order. With all = true frozen parameters
+// are included too.
 
-layer_parameters :: proc(layer: ^Layer, out: ^[dynamic]^t.Tensor) {
+layer_parameters :: proc(layer: ^Layer, out: ^[dynamic]^t.Tensor, all: bool = false) {
+	start := len(out)
+	defer if !all {
+		k := start
+		for i in start ..< len(out) {
+			if out[i].requires_grad {
+				out[k] = out[i]
+				k += 1
+			}
+		}
+		resize(out, k)
+	}
 	add :: proc(out: ^[dynamic]^t.Tensor, p: ^t.Tensor) {
-		if p != nil && p.requires_grad {append(out, p)}
+		if p != nil {append(out, p)}
 	}
 	add_linear :: proc(out: ^[dynamic]^t.Tensor, lin: ^LinearLayer) {
 		add(out, lin.weights)
@@ -231,13 +243,14 @@ layer_parameters :: proc(layer: ^Layer, out: ^[dynamic]^t.Tensor) {
 	}
 }
 
-// All trainable tensors of the model, layer by layer
+// All trainable tensors of the model, layer by layer (all: frozen ones too)
 sequential_parameters :: proc(
 	seq: ^Sequential,
 	allocator: mem.Allocator = context.allocator,
+	all: bool = false,
 ) -> [dynamic]^t.Tensor {
 	params := make([dynamic]^t.Tensor, 0, 16, allocator)
-	for &layer in seq.layers {layer_parameters(&layer, &params)}
+	for &layer in seq.layers {layer_parameters(&layer, &params, all)}
 	return params
 }
 
@@ -255,54 +268,47 @@ sequential_add_to_adam :: proc(seq: ^Sequential, opt: ^Adam) {
 	for p in params {adam_add_param(opt, p)}
 }
 
+// layer_free releases the tensors of a layer
+layer_free :: proc(layer: ^Layer) {
+	switch &l in layer {
+	case LinearLayer:
+		linear_layer_free(&l)
+	case Conv2dLayer:
+		conv2d_layer_free(&l)
+	case BatchNorm2dLayer:
+		batch_norm_2d_layer_free(&l)
+	case GRULayer:
+		gru_layer_free(&l)
+	case RNNLayer:
+		rnn_layer_free(&l)
+	case LSTMLayer:
+		lstm_layer_free(&l)
+	case EmbeddingLayer:
+		embedding_layer_free(&l)
+	case MultiHeadAttentionLayer:
+		multi_head_attention_layer_free(&l)
+	case LayerNormLayer:
+		layer_norm_layer_free(&l)
+	case FFNLayer:
+		ffn_layer_free(&l)
+	case TransformerEncoderBlock:
+		transformer_encoder_block_free(&l)
+	case TransformerEncoder:
+		transformer_encoder_free(&l)
+	case GATLayer:
+		gat_layer_free(&l)
+	case MoELayer:
+		moe_layer_free(&l)
+	case MambaLayer:
+		mamba_layer_free(&l)
+	case MaxPool2dLayer, AvgPool2dLayer, DropoutLayer, Activation, FlattenLayer:
+	// No heap allocations
+	}
+}
+
 // sequential_free cleans up all layers
 sequential_free :: proc(seq: ^Sequential) {
-	for &layer in seq.layers {
-		switch &l in layer {
-		case LinearLayer:
-			linear_layer_free(&l)
-		case Conv2dLayer:
-			conv2d_layer_free(&l)
-		case BatchNorm2dLayer:
-			batch_norm_2d_layer_free(&l)
-		case MaxPool2dLayer:
-		// No heap allocations
-		case AvgPool2dLayer:
-		// No heap allocations
-		case DropoutLayer:
-		// No heap allocations
-		case Activation:
-		// No heap allocations
-		case FlattenLayer:
-		case GRULayer:
-			gru_layer_free(&l)
-		// No heap allocations
-		case RNNLayer:
-			rnn_layer_free(&l)
-		case LSTMLayer:
-			lstm_layer_free(&l)
-		case EmbeddingLayer:
-			embedding_layer_free(&l)
-		case MultiHeadAttentionLayer:
-			multi_head_attention_layer_free(&l)
-		case LayerNormLayer:
-			layer_norm_layer_free(&l)
-		case FFNLayer:
-			ffn_layer_free(&l)
-		case TransformerEncoderBlock:
-			transformer_encoder_block_free(&l)
-		case TransformerEncoder:
-			transformer_encoder_free(&l)
-		case GATLayer:
-			gat_layer_free(&l)
-		case MoELayer:
-			moe_layer_free(&l)
-		case MambaLayer:
-			mamba_layer_free(&l)
-		}
-
-	}
-
+	for &layer in seq.layers {layer_free(&layer)}
 	delete(seq.layers)
 	free(seq, seq.allocator)
 }
