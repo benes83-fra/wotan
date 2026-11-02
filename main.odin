@@ -982,6 +982,8 @@ main :: proc() {
 	free_all(context.temp_allocator)
 	test.deeplob_test(context.temp_allocator)
 	free_all(context.temp_allocator)
+	test.deeplob_gradient_test(context.temp_allocator)
+	free_all(context.temp_allocator)
 	test.deeplob_talkative_test(context.temp_allocator)
 	free_all(context.temp_allocator)
 	test.deeplob_real_data_test(context.temp_allocator)

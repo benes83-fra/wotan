@@ -43,6 +43,7 @@ as_matrix :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> ^t.Tensor {
 	assert(rows * cols == len(x.data.data), "as_matrix: size mismatch")
+	allocator := t._scope_or(allocator) // an op output: in the active scope, if any
 	m := t.tensor_new(
 		l.matrix_new(f64, rows, cols, allocator),
 		x.requires_grad && t.grad_enabled(),
@@ -55,6 +56,22 @@ as_matrix :: proc(
 		append(&m.inputs, x)
 	}
 	return m
+}
+
+// Position `step` of every sequence of x [batch, seq_len, width] as
+// [batch, 1, width] (e.g. BERT's [CLS] token, the last step of an RNN),
+// gathered with an embedding lookup into the [batch * seq_len, width] rows of x
+// so that gradients reach x
+sequence_step :: proc(x: ^t.Tensor, step: int, alloc: mem.Allocator) -> ^t.Tensor {
+	batch, seq_len, width := x.shape[0], x.shape[1], x.shape[2]
+	assert(x.shape[3] == 1, "sequence_step: x must be [batch, seq_len, width]")
+	assert(step >= 0 && step < seq_len, "sequence_step: step out of range")
+	rows := t.tensor_reshape(x, [4]int{batch * seq_len, width, 1, 1})
+	ids := _constant(batch, {batch, 1, 1, 1}, alloc)
+	for b in 0 ..< batch {ids.data.data[b] = f64(b * seq_len + step)}
+	out := t.tensor_embedding(ids, rows)
+	_constant_done(ids, out)
+	return out
 }
 
 // Position ids 0..seq_len-1 for each sequence, shaped [batch, seq_len] for an embedding lookup

@@ -208,22 +208,16 @@ deeplob_forward :: proc(model: ^DeepLOB, input: ^t.Tensor) -> ^t.Tensor {
 	// sequential_forward automatically handles zero-initialization of h0/c0 internally.
 	seq_out := nn.sequential_forward(model.seq_layer, lstm_in)
 
-	// Extract the last time step (identical indexing for LSTM, GRU, and Mamba)
-	hidden_dim := model.config.hidden_dim
-	last_step_data := l.matrix_new(f64, batch, hidden_dim, alloc)
-
-	for b: int = 0; b < batch; b += 1 {
-		src_idx := b * (t_out * hidden_dim) + (t_out - 1) * hidden_dim
-		dst_idx := b * hidden_dim
-		copy(
-			last_step_data.data[dst_idx:dst_idx + hidden_dim],
-			seq_out.data.data[src_idx:src_idx + hidden_dim],
-		)
-	}
-
-	last_step := t.tensor_new(last_step_data, true, alloc)
-	last_step.shape = [4]int{batch, hidden_dim, 1, 1}
-	last_step.owned_by_graph = true
+	// The last time step (the same layout for LSTM, GRU and Mamba), as a graph
+	// op so that gradients reach the sequence layer, inception block and CNN
+	// (a plain copy cut the graph here: only fc_head trained)
+	// [batch, hidden] rows, so the logits are a [batch, num_classes] matrix
+	last_step := nn.as_matrix(
+		nn.sequence_step(seq_out, t_out - 1, alloc),
+		batch,
+		model.config.hidden_dim,
+		alloc,
+	)
 
 	if model.training && model.config.dropout_prob > 0.0 {
 		last_step = t.tensor_dropout(last_step, model.config.dropout_prob, model.training)

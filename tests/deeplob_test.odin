@@ -187,3 +187,100 @@ deeplob_talkative_test :: proc(allocator: mem.Allocator) {
 	t.tensor_free(x_tensor)
 	delete(y_targets, allocator)
 }
+
+// DeepLOB gradients against central finite differences, for every sequence
+// backend: every parameter (CNN, inception block, sequence layer, head) gets a
+// gradient, and it matches. The last time step used to be copied out of the
+// sequence layer without a graph link, so only the head was trained.
+deeplob_gradient_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
+	fmt.println("\n=== DeepLOB gradients vs finite differences ===")
+	context.allocator = allocator
+	passed, total := 0, 0
+
+	@(static) R: []f64 // weights of the scalar loss Σ R ⊙ logits
+	loss :: proc(model: ^ml_fin.DeepLOB, x: ^t.Tensor) -> ^t.Tensor {
+		logits := ml_fin.deeplob_forward(model, x)
+		alloc := t._scope_or(context.allocator) // the active scope
+		w := t.tensor_new(
+			l.matrix_new(f64, logits.data.rows, logits.data.cols, alloc),
+			false,
+			alloc,
+		)
+		w.shape = logits.shape
+		copy(w.data.data, R)
+		return t.tensor_sum(t.tensor_mul(logits, w))
+	}
+
+	for backend in nn.SeqBackend {
+		config := ml_fin.DeepLOBConfig {
+			time_steps   = 8,
+			price_levels = 4,
+			num_classes  = 3,
+			hidden_dim   = 4,
+			seq_backend  = backend,
+		}
+		model := ml_fin.deeplob_new(config)
+		defer ml_fin.deeplob_free(model)
+		ml_fin.deeplob_eval(model) // no dropout
+		opt := nn.adam_new(0.001)
+		defer nn.adam_free(&opt)
+		ml_fin.deeplob_add_to_adam(model, &opt)
+
+		B := 2
+		xd := l.matrix_new(f64, B, 3 * 8 * 4)
+		for &v in xd.data {v = rand.float64_range(-1, 1)}
+		x := t.tensor_new(xd, false)
+		x.shape = {B, 3, 8, 4}
+		defer t.tensor_free(x)
+		R = make([]f64, B * 3)
+		defer delete(R)
+		for &v in R {v = rand.float64_range(-1, 1)}
+
+		scope: t.Graph_Scope
+		defer t.graph_scope_destroy(&scope)
+		value :: proc(model: ^ml_fin.DeepLOB, x: ^t.Tensor, scope: ^t.Graph_Scope) -> f64 {
+			t.graph_begin(scope, no_grad = true)
+			defer t.graph_end(scope)
+			return loss(model, x).data.data[0]
+		}
+
+		nn.adam_zero_grad(&opt)
+		t.graph_begin(&scope)
+		t.tensor_backward(loss(model, x))
+		t.graph_end(&scope)
+
+		with_grad, max_err := 0, 0.0
+		h := 1e-6
+		for p in opt.parameters {
+			nonzero := false
+			for g in p.grad.data {nonzero ||= g != 0}
+			if nonzero {with_grad += 1}
+			n := len(p.data.data)
+			for i in ([]int{0, n / 2, n - 1}) {
+				x0 := p.data.data[i]
+				p.data.data[i] = x0 + h
+				up := value(model, x, &scope)
+				p.data.data[i] = x0 - h
+				down := value(model, x, &scope)
+				p.data.data[i] = x0
+				fd := (up - down) / (2 * h)
+				max_err = max(max_err, abs(fd - p.grad.data[i]) / max(1, abs(fd)))
+			}
+		}
+		n_params := len(opt.parameters)
+		ok := with_grad == n_params && max_err < 1e-6
+		total += 1
+		if ok {passed += 1}
+		fmt.printf(
+			"%s DeepLOB with %v: %d/%d parameters get a gradient, max error vs finite differences %.1e\n",
+			"OK  " if ok else "FAIL",
+			backend,
+			with_grad,
+			n_params,
+			max_err,
+		)
+	}
+	fmt.printf("DeepLOB gradients: %d/%d passed\n", passed, total)
+	record_failures(total - passed)
+}

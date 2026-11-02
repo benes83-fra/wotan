@@ -210,13 +210,8 @@ bert_model_forward :: proc(
 	// MLM head (applied to all positions)
 	mlm_logits = linear_forward(&model.mlm_head, x)
 
-	// NSP head on [CLS] (position 0), gathered with an embedding lookup into the
-	// [batch * seq_len, d_model] rows of x so that gradients reach the encoder
-	rows := t.tensor_reshape(x, [4]int{batch * seq_len, model.d_model, 1, 1})
-	cls_ids := _constant(batch, {batch, 1, 1, 1}, alloc)
-	for b in 0 ..< batch {cls_ids.data.data[b] = f64(b * seq_len)}
-	cls := t.tensor_embedding(cls_ids, rows)
-	_constant_done(cls_ids, cls)
+	// NSP head on [CLS] (position 0)
+	cls := sequence_step(x, 0, alloc)
 
 	pooled := t.tensor_tanh(linear_forward(&model.pooler, cls))
 	nsp_logits = linear_forward(&model.nsp_head, pooled)
