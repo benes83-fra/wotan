@@ -115,10 +115,33 @@ cvar_gradient :: proc(
 
 	port := portfolio_returns(weights, returns_data, context.temp_allocator)
 	defer delete(port, context.temp_allocator)
+	tail := cvar_scenario_weights(port, confidence, context.temp_allocator)
+	defer delete(tail, context.temp_allocator)
+	for wt, s in tail {
+		if wt == 0 {continue}
+		row := returns_data.data[s * n:(s + 1) * n]
+		for i in 0 ..< n {grad[i] -= wt * row[i]}
+	}
+	return grad
+}
+
+// Weight of each scenario in the historical CVaR (Acerbi-Tasche): the worst
+// (1 - confidence)·n returns weigh 1 / ((1 - confidence)·n) each, the boundary
+// return the fractional rest, all others 0, so the weights sum to 1 and
+// -Σ weight_s·returns_s = portfolio_cvar_historical(returns, confidence). They are
+// the CVaR's gradient with respect to the returns (exact where they have no ties)
+cvar_scenario_weights :: proc(
+	returns: []f64,
+	confidence: f64,
+	allocator := context.allocator,
+) -> []f64 {
+	T := len(returns)
+	tail := make([]f64, T, allocator)
+	if T == 0 {return tail}
 	order := make([]int, T, context.temp_allocator)
 	defer delete(order, context.temp_allocator)
 	for i in 0 ..< T {order[i] = i}
-	_sort_scenarios(order, port)
+	_sort_scenarios(order, returns)
 
 	m := clamp((1.0 - confidence) * f64(T), 0.0, f64(T))
 	k := min(int(math.floor(m + 1e-9)), T)
@@ -126,13 +149,9 @@ cvar_gradient :: proc(
 	denom := f64(k) + frac
 	if denom == 0 {k, frac, denom = 1, 0, 1}
 	for s in 0 ..< min(k + 1, T) {
-		wt := 1.0 if s < k else frac
-		if wt == 0 {continue}
-		row := returns_data.data[order[s] * n:(order[s] + 1) * n]
-		for i in 0 ..< n {grad[i] -= wt * row[i]}
+		tail[order[s]] = (1.0 if s < k else frac) / denom
 	}
-	for &g in grad {g /= denom}
-	return grad
+	return tail
 }
 
 // Scenario indices sorted by ascending portfolio return

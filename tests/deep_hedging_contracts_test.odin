@@ -1,5 +1,6 @@
 package tests
 
+import fin "../wotan/finance"
 import l "../wotan/linalg"
 import ml_fin "../wotan/ml_finance"
 import nn "../wotan/nn"
@@ -14,17 +15,27 @@ import "core:mem"
 // - training steps (single asset; multi asset with CVaR and transaction costs)
 //   allocate nothing from the hedger's allocator once warmed up, and the
 //   hedger's graph scope reuses its memory
-// - the CVaR loss gradient matches finite differences, and freeing its graph
-//   (with a real allocator, no scope) releases everything it allocated
+// - the single-asset step minimizes the configured risk measure: its loss is
+//   Mean(PnL²) or the CVaR of the evaluated PnL
+// - the CVaR loss equals the Acerbi-Tasche CVaR of finance, its gradient
+//   matches finite differences, and freeing its graph (with a real allocator,
+//   no scope) releases everything it allocated
 
 @(private = "file")
-_paths :: proc(n_paths, n_steps, state_size: int, seed: u64, allocator: mem.Allocator) -> (paths, payoffs: ^t.Tensor) {
+_paths :: proc(
+	n_paths, n_steps, state_size: int,
+	seed: u64,
+	allocator: mem.Allocator,
+) -> (
+	paths, payoffs: ^t.Tensor,
+) {
 	pd := l.matrix_new(f64, n_paths * (n_steps + 1), state_size, allocator)
 	gcl_fill(pd.data, seed)
 	// positive "spot" columns around 100, other features in [-1, 1]
 	for i in 0 ..< n_paths * (n_steps + 1) {
 		for a in 0 ..< state_size {
-			if a < state_size - 1 {pd.data[i * state_size + a] = 100 + 5 * pd.data[i * state_size + a]}
+			if a <
+			   state_size - 1 {pd.data[i * state_size + a] = 100 + 5 * pd.data[i * state_size + a]}
 		}
 	}
 	paths = t.tensor_new(pd, false, allocator)
@@ -38,7 +49,11 @@ _paths :: proc(n_paths, n_steps, state_size: int, seed: u64, allocator: mem.Allo
 
 // Reference for deep_hedging_evaluate: forward the network at every step, no scope
 @(private = "file")
-_evaluate_ref :: proc(h: ^ml_fin.DeepHedger, paths, payoffs: ^t.Tensor, allocator: mem.Allocator) -> []f64 {
+_evaluate_ref :: proc(
+	h: ^ml_fin.DeepHedger,
+	paths, payoffs: ^t.Tensor,
+	allocator: mem.Allocator,
+) -> []f64 {
 	B, S, F := paths.shape[0], paths.shape[1], paths.shape[2]
 	pnl := make([]f64, B, allocator)
 	prev := make([]f64, B, allocator)
@@ -114,15 +129,59 @@ deep_hedging_contracts_test :: proc(allocator: mem.Allocator) {
 		for i in 0 ..< len(pnl) {same &&= transmute(u64)pnl[i] == transmute(u64)ref[i]}
 		expect(&passed, &total, same, "deep_hedging_evaluate equals the step-by-step reference")
 
+		// The step's loss is the risk measure of the PnL before its update
+		// (it used to be Mean(PnL²) whatever the configuration)
+		h.config.risk_measure, h.config.cvar_alpha = .CVaR, 0.25
+		loss_cvar := ml_fin.deep_hedger_train_step(h, paths, payoffs, &opt)
+		want_cvar := fin.portfolio_cvar_historical(pnl, 0.75)
+		h.config.risk_measure = .Variance
+		pnl_v, spots_v := ml_fin.deep_hedging_evaluate(h, paths, payoffs, allocator)
 		loss0 := ml_fin.deep_hedger_train_step(h, paths, payoffs, &opt) // warm-up: gradients, Adam state
+		want_var := 0.0
+		for v in pnl_v {want_var += v * v / f64(len(pnl_v))}
+		expect(
+			&passed,
+			&total,
+			abs(loss_cvar - want_cvar) < 1e-10 * abs(want_cvar),
+			fmt.tprintf(
+				"single-asset step with CVaR: loss %.10f = CVaR 75%% of the PnL %.10f",
+				loss_cvar,
+				want_cvar,
+			),
+		)
+		expect(
+			&passed,
+			&total,
+			abs(loss0 - want_var) < 1e-10 * want_var,
+			fmt.tprintf(
+				"single-asset step with Variance: loss %.10f = Mean(PnL²) %.10f",
+				loss0,
+				want_var,
+			),
+		)
+		delete(pnl_v, allocator)
+		delete(spots_v, allocator)
 		allocs := track.total_allocation_count
 		_, reserved1 := t.graph_scope_bytes(&h.scope)
 		loss1 := ml_fin.deep_hedger_train_step(h, paths, payoffs, &opt)
 		loss2 := ml_fin.deep_hedger_train_step(h, paths, payoffs, &opt)
 		_, reserved2 := t.graph_scope_bytes(&h.scope)
 		finite := !math.is_nan(loss0) && !math.is_nan(loss1) && !math.is_nan(loss2)
-		expect(&passed, &total, finite && track.total_allocation_count == allocs, fmt.tprintf("single-asset training steps allocate nothing from the hedger's allocator (%d)", track.total_allocation_count - allocs))
-		expect(&passed, &total, reserved1 > 0 && reserved2 == reserved1, "single-asset training steps reuse the hedger's scope")
+		expect(
+			&passed,
+			&total,
+			finite && track.total_allocation_count == allocs,
+			fmt.tprintf(
+				"single-asset training steps allocate nothing from the hedger's allocator (%d)",
+				track.total_allocation_count - allocs,
+			),
+		)
+		expect(
+			&passed,
+			&total,
+			reserved1 > 0 && reserved2 == reserved1,
+			"single-asset training steps reuse the hedger's scope",
+		)
 	}
 
 	// --- Multi asset with CVaR and transaction costs ----------------------------
@@ -152,7 +211,15 @@ deep_hedging_contracts_test :: proc(allocator: mem.Allocator) {
 		loss1 := ml_fin.deep_hedger_train_step_multi(h, paths, payoffs, &opt)
 		loss2 := ml_fin.deep_hedger_train_step_multi(h, paths, payoffs, &opt)
 		finite := !math.is_nan(loss0) && !math.is_nan(loss1) && !math.is_nan(loss2)
-		expect(&passed, &total, finite && track.total_allocation_count == allocs, fmt.tprintf("multi-asset CVaR training steps allocate nothing from the hedger's allocator (%d)", track.total_allocation_count - allocs))
+		expect(
+			&passed,
+			&total,
+			finite && track.total_allocation_count == allocs,
+			fmt.tprintf(
+				"multi-asset CVaR training steps allocate nothing from the hedger's allocator (%d)",
+				track.total_allocation_count - allocs,
+			),
+		)
 	}
 
 	// --- CVaR loss: gradient and cleanup without a scope --------------------------
@@ -172,6 +239,9 @@ deep_hedging_contracts_test :: proc(allocator: mem.Allocator) {
 		pnl.shape = {N, 1, 1, 1}
 
 		loss := ml_fin.compute_hedging_loss(pnl, .CVaR, 0.2, ca)
+		// 0.2·12 = 2.4 worst losses: the boundary one weighs 0.4
+		want := fin.portfolio_cvar_historical(pd.data, 0.8)
+		value_err := abs(loss.data.data[0] - want)
 		t.tensor_backward(loss)
 		grad := make([]f64, N, allocator)
 		copy(grad, pnl.grad.data)
@@ -196,8 +266,31 @@ deep_hedging_contracts_test :: proc(allocator: mem.Allocator) {
 		}
 		t.tensor_free(pnl)
 		context.allocator = allocator
-		expect(&passed, &total, max_err < 1e-6, fmt.tprintf("CVaR loss gradient matches finite differences (max err %.1e)", max_err))
-		expect(&passed, &total, len(ct.allocation_map) == 0 && len(ct.bad_free_array) == 0, fmt.tprintf("CVaR loss graph frees everything it allocated (%d leaked, %d bad frees)", len(ct.allocation_map), len(ct.bad_free_array)))
+		expect(
+			&passed,
+			&total,
+			value_err < 1e-12,
+			fmt.tprintf(
+				"CVaR loss equals the Acerbi-Tasche CVaR of finance (err %.1e)",
+				value_err,
+			),
+		)
+		expect(
+			&passed,
+			&total,
+			max_err < 1e-6,
+			fmt.tprintf("CVaR loss gradient matches finite differences (max err %.1e)", max_err),
+		)
+		expect(
+			&passed,
+			&total,
+			len(ct.allocation_map) == 0 && len(ct.bad_free_array) == 0,
+			fmt.tprintf(
+				"CVaR loss graph frees everything it allocated (%d leaked, %d bad frees)",
+				len(ct.allocation_map),
+				len(ct.bad_free_array),
+			),
+		)
 	}
 
 	fmt.printf("Deep hedging contracts: %d/%d passed\n", passed, total)

@@ -1,6 +1,7 @@
 package ml_finance
 
 import w "../core"
+import fin "../finance"
 import l "../linalg"
 import nn "../nn"
 import p "../plot"
@@ -341,7 +342,13 @@ deep_hedging_evaluate :: proc(
 	return pnl_values, spot_prices
 }
 
-// compute_hedging_loss computes either Variance or a smooth CVaR proxy
+// compute_hedging_loss is the training loss of the terminal PnL [batch, 1]:
+//   Variance: Mean(PnL^2)
+//   CVaR:     the empirical CVaR at level cvar_alpha of the loss -PnL (mean of
+//             the worst cvar_alpha·batch losses, Acerbi-Tasche), as
+//             -Σ c_b·PnL_b with the tail weights c of fin.cvar_scenario_weights.
+//             The weights are constants of the graph (the sort is not
+//             differentiated), so the gradient is exactly the CVaR's, -c
 compute_hedging_loss :: proc(
 	pnl: ^t.Tensor,
 	risk_measure: RiskMeasure,
@@ -349,60 +356,19 @@ compute_hedging_loss :: proc(
 	alloc: mem.Allocator,
 ) -> ^t.Tensor {
 	if risk_measure == .Variance {
-		// Variance proxy: Mean(PnL^2)
 		pnl_sq := t.tensor_mul(pnl, pnl)
 		return t.tensor_mean(pnl_sq)
 	}
 
-	// ✅ Smooth Differentiable CVaR Proxy
-	// CVaR is the average of the worst alpha% losses.
-	// Sorting breaks the autograd graph, so we use a smooth proxy:
-	// CVaR_proxy = Mean(L) + (1/alpha) * Mean(Relu(L - Mean(L) - 2*Std(L)))
-	// where L = -PnL (Loss)
-
-	batch_size_f := f64(pnl.shape[0])
-
-	// 1. L = -PnL
-	loss_tensor := t.tensor_scale(pnl, -1.0)
-
-	// 2. Mean(L)
-	mean_l := t.tensor_mean(loss_tensor)
-
-	// 3. Std(L) = sqrt(Mean((L - Mean(L))^2))
-	// (tensor_sub does not broadcast; subtracting a scalar from the [batch, 1]
-	// vector is an add_bias of its negative)
-	centered := t.tensor_add_bias(loss_tensor, t.tensor_neg(mean_l))
-	centered_sq := t.tensor_mul(centered, centered)
-	var_l := t.tensor_mean(centered_sq)
-
-	// Smooth sqrt to prevent NaN gradients
-	// The scalar constants are graph inputs: they must live until backward,
-	// so the graph owns them (freed with the graph, not here)
-	eps := t.tensor_new(l.matrix_new(f64, 1, 1, alloc), false, alloc)
-	eps.owned_by_graph = true
-	eps.data.data[0] = 1e-6
-	std_l := t.tensor_sqrt(t.tensor_add(var_l, eps))
-
-	// 4. Threshold = Mean(L) + 2 * Std(L)
-	two := t.tensor_new(l.matrix_new(f64, 1, 1, alloc), false, alloc)
-	two.owned_by_graph = true
-	two.data.data[0] = 2.0
-	two_std := t.tensor_mul(two, std_l)
-	threshold := t.tensor_add(mean_l, two_std)
-
-	// 5. Relu(L - Threshold)
-	excess_loss := t.tensor_add_bias(loss_tensor, t.tensor_neg(threshold))
-	excess_positive := t.tensor_relu(excess_loss)
-	mean_excess := t.tensor_mean(excess_positive)
-
-	// 6. CVaR = Mean(L) + (1/alpha) * Mean(Excess)
-	inv_alpha := t.tensor_new(l.matrix_new(f64, 1, 1, alloc), false, alloc)
-	inv_alpha.owned_by_graph = true
-	inv_alpha.data.data[0] = 1.0 / cvar_alpha
-
-	scaled_excess := t.tensor_mul(mean_excess, inv_alpha)
-	cvar_loss := t.tensor_add(mean_l, scaled_excess)
-	return cvar_loss
+	assert(cvar_alpha > 0 && cvar_alpha <= 1, "compute_hedging_loss: cvar_alpha must be in (0, 1]")
+	tail := fin.cvar_scenario_weights(pnl.data.data, 1.0 - cvar_alpha, context.temp_allocator)
+	defer delete(tail, context.temp_allocator)
+	// A graph input: it must live until backward, so the graph owns it
+	neg_c := t.tensor_new(l.matrix_new(f64, pnl.data.rows, pnl.data.cols, alloc), false, alloc)
+	neg_c.owned_by_graph = true
+	neg_c.shape = pnl.shape
+	for c, b in tail {neg_c.data.data[b] = -c}
+	return t.tensor_sum(t.tensor_mul(pnl, neg_c))
 }
 // ============================================================================
 // Training Step (Single Asset)
@@ -483,8 +449,7 @@ deep_hedger_train_step :: proc(
 	}
 
 	pnl = t.tensor_sub(pnl, payoffs)
-	pnl_sq := t.tensor_mul(pnl, pnl)
-	loss := t.tensor_mean(pnl_sq)
+	loss := compute_hedging_loss(pnl, hedger.config.risk_measure, hedger.config.cvar_alpha, alloc)
 
 	nn.adam_zero_grad(opt) // gradients accumulate otherwise
 	t.tensor_backward(loss)
