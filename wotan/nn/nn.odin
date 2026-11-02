@@ -43,7 +43,11 @@ as_matrix :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> ^t.Tensor {
 	assert(rows * cols == len(x.data.data), "as_matrix: size mismatch")
-	m := t.tensor_new(l.matrix_new(f64, rows, cols, allocator), x.requires_grad, allocator)
+	m := t.tensor_new(
+		l.matrix_new(f64, rows, cols, allocator),
+		x.requires_grad && t.grad_enabled(),
+		allocator,
+	)
 	copy(m.data.data, x.data.data)
 	m.shape = [4]int{rows, cols, 1, 1}
 	if m.requires_grad {

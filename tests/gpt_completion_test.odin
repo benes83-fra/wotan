@@ -113,8 +113,12 @@ gpt_completion_test :: proc(allocator: mem.Allocator) {
 
 	// 6. Run Forward Pass
 	fmt.println("\nRunning Forward Pass...")
+	// Inference only: no graph, everything freed at graph_end
+	inference: t.Graph_Scope
+	defer t.graph_scope_destroy(&inference)
+	t.graph_begin(&inference, no_grad = true)
+	defer t.graph_end(&inference)
 	logits := nn.gpt_model_forward(gpt_model, input_ids, causal_mask, false)
-	defer t.tensor_free(logits)
 
 	// 7. Extract Top-5 Predictions for the Next Token
 	last_token_idx := seq_len - 1

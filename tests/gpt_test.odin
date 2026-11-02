@@ -282,6 +282,9 @@ gpt_full_test :: proc(allocator: mem.Allocator) {
 		recent_tokens := make([dynamic]int, 0, allocator)
 		defer delete(recent_tokens)
 
+		// Each forward pass records no graph and is released at once after sampling
+		gen_scope: t.Graph_Scope
+		defer t.graph_scope_destroy(&gen_scope)
 		for i in 0 ..< 200 {
 			// Prepare input sequence
 			gen_input := l.matrix_new(f64, 1, seq_len, allocator)
@@ -299,7 +302,8 @@ gpt_full_test :: proc(allocator: mem.Allocator) {
 			gen_ids := t.tensor_new(gen_input, false, allocator)
 			gen_ids.shape = [4]int{1, seq_len, 1, 1}
 
-			// Forward pass with training=false (no dropout)
+			// Forward pass with training=false (no dropout), without a graph
+			t.graph_begin(&gen_scope, no_grad = true)
 			gen_logits := nn.gpt_model_forward(&model, gen_ids, mask, false)
 
 			// Get logits for last position
@@ -307,6 +311,7 @@ gpt_full_test :: proc(allocator: mem.Allocator) {
 			for v in 0 ..< vocab_size {
 				last_logits[v] = gen_logits.data.data[(seq_len - 1) * vocab_size + v]
 			}
+			t.graph_end(&gen_scope)
 
 			// Sample based on method with repetition penalty
 			// Sample based on method with repetition penalty
@@ -357,11 +362,9 @@ gpt_full_test :: proc(allocator: mem.Allocator) {
 				recent_tokens = new_tokens
 			}
 
-			// Clean up
-			l.matrix_free(&gen_input)
+			// Clean up (gen_ids owns gen_input)
 			delete(last_logits, allocator)
 			t.tensor_free(gen_ids)
-			t.tensor_free(gen_logits)
 		}
 
 		fmt.printf("%.*s\n", len(generated), generated[:])
@@ -774,6 +777,9 @@ And borrowing dulls the edge of husbandry.
 		// Generate 300 characters (longer for more diverse text)
 		recent_tokens := make([dynamic]int, 0, allocator)
 
+		// Each forward pass records no graph and is released at once after sampling
+		gen_scope: t.Graph_Scope
+		defer t.graph_scope_destroy(&gen_scope)
 		for i in 0 ..< 300 {
 			// Prepare input sequence
 			gen_input := l.matrix_new(f64, 1, seq_len, allocator)
@@ -791,7 +797,8 @@ And borrowing dulls the edge of husbandry.
 			gen_ids := t.tensor_new(gen_input, false, allocator)
 			gen_ids.shape = [4]int{1, seq_len, 1, 1}
 
-			// Forward pass with training=false (no dropout)
+			// Forward pass with training=false (no dropout), without a graph
+			t.graph_begin(&gen_scope, no_grad = true)
 			gen_logits := nn.gpt_model_forward(&model, gen_ids, mask, false)
 
 			// Get logits for last position
@@ -799,6 +806,7 @@ And borrowing dulls the edge of husbandry.
 			for v in 0 ..< vocab_size {
 				last_logits[v] = gen_logits.data.data[(seq_len - 1) * vocab_size + v]
 			}
+			t.graph_end(&gen_scope)
 
 			// Sample based on method with repetition penalty
 			next_char_idx := 0
@@ -841,11 +849,9 @@ And borrowing dulls the edge of husbandry.
 				recent_tokens = new_tokens
 			}
 
-			// Clean up
-			l.matrix_free(&gen_input)
+			// Clean up (gen_ids owns gen_input)
 			delete(last_logits, allocator)
 			t.tensor_free(gen_ids)
-			t.tensor_free(gen_logits)
 		}
 
 		fmt.printf("%.*s\n", len(generated), generated[:])

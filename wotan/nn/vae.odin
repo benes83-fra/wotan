@@ -115,6 +115,8 @@ vae_decoder_add_to_optimizer :: proc(dec: ^VAEDecoder, opt: ^Adam) {
 reparameterize :: proc(mu: ^t.Tensor, log_var: ^t.Tensor, allocator: mem.Allocator) -> ^t.Tensor {
 	// z = mu + sigma * epsilon, where epsilon ~ N(0, 1)
 	// sigma = exp(0.5 * log_var)
+	// z is an op output: it lives in the active graph scope, if any
+	allocator := t._scope_or(allocator)
 
 	batch_size := mu.data.rows
 	latent_dim := mu.data.cols
@@ -132,12 +134,14 @@ reparameterize :: proc(mu: ^t.Tensor, log_var: ^t.Tensor, allocator: mem.Allocat
 		}
 	}
 
-	z := t.tensor_new(z_data, true, allocator)
+	z := t.tensor_new(z_data, t.grad_enabled(), allocator)
 
 	// Record the reparameterization for backprop
-	z.op = .Reparameterize
-	append(&z.inputs, mu)
-	append(&z.inputs, log_var)
+	if z.requires_grad {
+		z.op = .Reparameterize
+		append(&z.inputs, mu)
+		append(&z.inputs, log_var)
+	}
 
 	return z
 }

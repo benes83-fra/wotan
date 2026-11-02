@@ -164,7 +164,7 @@ _tensor_new_op :: proc(
 	t.data = data
 	t.shape = shape
 	_check_shape(t, loc)
-	t.requires_grad = requires_grad
+	t.requires_grad = requires_grad && grad_enabled()
 	t.op = .None
 	t.allocator = allocator
 	t.inputs = make([dynamic]^Tensor, 0, allocator)
@@ -2256,8 +2256,9 @@ tensor_validate :: proc(t: ^Tensor, ctx: string) {
 		)
 		return
 	}
-	if t.requires_grad && (t.grad.data == nil || len(t.grad.data) == 0) {
-		fmt.printf("ERROR: %s - tensor requires grad but has empty gradient\n", ctx)
+	// Only leaves own a gradient buffer up front; op outputs get theirs in tensor_backward
+	if t.op == .None && t.requires_grad && (t.grad.data == nil || len(t.grad.data) == 0) {
+		fmt.printf("ERROR: %s - leaf tensor requires grad but has empty gradient\n", ctx)
 		return
 	}
 }

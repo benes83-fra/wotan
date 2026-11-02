@@ -34,6 +34,19 @@ import "core:sync"
 //   cost nothing (frees are no-ops in the arena).
 // - Without an active scope everything behaves exactly as before.
 // - Scopes nest: graph_end releases only the innermost scope.
+//
+// No-grad (inference) scopes: graph_begin(&scope, no_grad = true) records no
+// graph. Op outputs made in it do not require gradients and keep no inputs, so
+// nothing can be back-propagated through them and nothing links them for
+// tensor_free_graph: graph_end is what frees them. Copy out what must outlive
+// the scope (logits, predictions) before graph_end. Gradient recording follows
+// the innermost scope, so a scope begun with no_grad = false inside turns it
+// back on.
+//
+//     t.graph_begin(&scope, no_grad = true)
+//     logits := model_forward(...)
+//     next := argmax(logits.data.data[...])
+//     t.graph_end(&scope)
 
 // Arena chunks are reserved and committed in units of at least this size
 GRAPH_CHUNK_SIZE :: 64 * mem.Megabyte
@@ -53,6 +66,7 @@ Graph_Scope :: struct {
 	prev:    ^Graph_Scope,
 	mutex:   sync.Mutex,
 	active:  bool,
+	no_grad: bool, // while active: op outputs record no graph
 	created: int, // tensors created in the scope since graph_begin
 	freed:   int, // ... and explicitly freed (counted again at graph_end)
 }
@@ -61,11 +75,18 @@ Graph_Scope :: struct {
 _active_scope: ^Graph_Scope
 
 // graph_begin makes `scope` the active scope of the calling thread
-graph_begin :: proc(scope: ^Graph_Scope, loc := #caller_location) {
+graph_begin :: proc(scope: ^Graph_Scope, no_grad := false, loc := #caller_location) {
 	assert(!scope.active, "graph_begin: scope is already active", loc)
 	scope.prev = _active_scope
 	scope.active = true
+	scope.no_grad = no_grad
 	_active_scope = scope
+}
+
+// grad_enabled: whether op outputs created now record a graph (false inside a
+// no-grad scope)
+grad_enabled :: #force_inline proc() -> bool {
+	return _active_scope == nil || !_active_scope.no_grad
 }
 
 // graph_end deactivates `scope` and releases every allocation made in it.
@@ -75,6 +96,7 @@ graph_end :: proc(scope: ^Graph_Scope, loc := #caller_location) {
 	_active_scope = scope.prev
 	scope.prev = nil
 	scope.active = false
+	scope.no_grad = false
 
 	// Tensors released by the reset count as freed in the global counters
 	global_tensors_freed += scope.created - scope.freed
