@@ -104,6 +104,8 @@ persistence_roundtrip_test :: proc(allocator: mem.Allocator) {
 			nn.mamba_layer_new(4, 3),
 			nn.moe_layer_new(4, 6, 3, 2),
 			nn.rms_norm_layer_new(4, 1e-6),
+			nn.conv1d_layer_new(4, 4, 3, dilation = 2, causal = true),
+			nn.tcn_block_new(4, 6, 3, 2, dropout = 0.1),
 		)
 		mha := &seq.layers[13].(nn.MultiHeadAttentionLayer)
 		mha.use_flash, mha.is_causal = true, true
@@ -121,7 +123,7 @@ persistence_roundtrip_test :: proc(allocator: mem.Allocator) {
 		seq2, opt2, epoch, loaded := nn.load_checkpoint(a)
 		ok &&= loaded && nn.save_checkpoint(seq2, opt2, b, epoch) && _pr_same_file(a, b)
 		ok &&=
-			len(seq2.layers) == 22 &&
+			len(seq2.layers) == 24 &&
 			epoch == 3 &&
 			opt2.timestep == 7 &&
 			len(opt2.parameters) == len(ps)
@@ -139,6 +141,15 @@ persistence_roundtrip_test :: proc(allocator: mem.Allocator) {
 			seq2.layers[18].(nn.GATLayer).mha.use_flash
 		rms2 := seq2.layers[21].(nn.LayerNormLayer)
 		flags_ok &&= rms2.rms && rms2.beta == nil && rms2.eps == 1e-6
+		conv1d2 := seq2.layers[22].(nn.Conv1dLayer)
+		tcn2 := seq2.layers[23].(nn.TCNBlock)
+		flags_ok &&=
+			conv1d2.dilation == 2 &&
+			conv1d2.pad_left == 4 &&
+			conv1d2.pad_right == 0 &&
+			tcn2.dropout == 0.1 &&
+			tcn2.conv2.dilation == 2 &&
+			tcn2.downsample.weight != nil
 		expect(
 			&passed,
 			&total,

@@ -439,6 +439,8 @@ main :: proc() {
 	free_all(context.temp_allocator)
 	test.layers_reference_test(context.temp_allocator)
 	free_all(context.temp_allocator)
+	test.tcn_reference_test(context.temp_allocator)
+	free_all(context.temp_allocator)
 	test.models_reference_test(context.temp_allocator)
 	free_all(context.temp_allocator)
 	test.augmentation_reference_test(context.temp_allocator)

@@ -76,6 +76,7 @@ Op :: enum {
 	SliceGate,
 	RMSNorm,
 	Transpose,
+	Conv1d,
 	ProspectValue,
 	ProbWeighting,
 	ProspectUtility,
@@ -3410,6 +3411,63 @@ tensor_rms_norm :: proc(input: ^Tensor, gamma: ^Tensor, eps: f64 = 1e-6) -> ^Ten
 		append(&out.inputs, input, gamma)
 		append(&out.int_metadata, N, d_model)
 		append(&out.f64_metadata, eps)
+	}
+	return out
+}
+
+// tensor_conv1d: 1-D convolution of a channels-last sequence x [batch, T, C_in]
+// with weight [C_out, C_in, K] (torch's layout), bias [1, C_out] or nil, a
+// dilation and zero padding pad_left / pad_right:
+//   out[b, t, o] = bias[o] + Σ_{c, k} w[o, c, k] · x[b, t + k·dilation - pad_left, c]
+// for t in 0 ..< T + pad_left + pad_right - dilation·(K - 1), as [batch, T_out,
+// C_out] (stored flat like other sequences). Causal: pad_left = dilation·(K - 1),
+// pad_right = 0, so out[t] sees x[t - dilation·(K - 1)] .. x[t].
+tensor_conv1d :: proc(
+	x: ^Tensor,
+	weight: ^Tensor,
+	bias: ^Tensor,
+	dilation := 1,
+	pad_left := 0,
+	pad_right := 0,
+) -> ^Tensor {
+	B, T, C_in := x.shape[0], x.shape[1], x.shape[2]
+	C_out, K := weight.shape[0], weight.shape[2]
+	assert(
+		x.shape[3] == 1 && len(x.data.data) == B * T * C_in,
+		"tensor_conv1d: x must be [batch, T, C_in]",
+	)
+	assert(weight.shape[1] == C_in, "tensor_conv1d: weight must be [C_out, C_in, K]")
+	assert(bias == nil || len(bias.data.data) == C_out, "tensor_conv1d: bias must be [1, C_out]")
+	assert(dilation >= 1, "tensor_conv1d: dilation must be at least 1")
+	T_out := T + pad_left + pad_right - dilation * (K - 1)
+	assert(T_out >= 1, "tensor_conv1d: sequence shorter than the receptive field")
+
+	out_data := l.matrix_new(f64, 1, B * T_out * C_out, _op_alloc(x))
+	xs, ws, ys := x.data.data, weight.data.data, out_data.data
+	for b in 0 ..< B {
+		for t in 0 ..< T_out {
+			y := ys[(b * T_out + t) * C_out:][:C_out]
+			if bias != nil {copy(y, bias.data.data[:C_out])}
+			for k in 0 ..< K {
+				src := t + k * dilation - pad_left
+				if src < 0 || src >= T {continue}
+				xr := xs[(b * T + src) * C_in:][:C_in]
+				for o in 0 ..< C_out {
+					w := ws[o * C_in * K:]
+					s := 0.0
+					for c in 0 ..< C_in {s += w[c * K + k] * xr[c]}
+					y[o] += s
+				}
+			}
+		}
+	}
+	rg := x.requires_grad || weight.requires_grad || (bias != nil && bias.requires_grad)
+	out := _tensor_new_op(out_data, {B, T_out, C_out, 1}, rg, _op_alloc(x))
+	if out.requires_grad {
+		out.op = .Conv1d
+		append(&out.inputs, x, weight)
+		if bias != nil {append(&out.inputs, bias)}
+		append(&out.int_metadata, B, T, C_in, C_out, K, dilation, pad_left, T_out)
 	}
 	return out
 }

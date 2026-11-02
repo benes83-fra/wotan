@@ -1281,6 +1281,42 @@ _backward_from_root :: proc(root: ^Tensor, allocator: mem.Allocator) {
 					for j in 0 ..< d {gamma_in.grad.data[j] += dy[j] * x[j] * r}
 				}
 			}
+		case .Conv1d:
+			// dx[b, s, c] += w[o, c, k]·dy[b, t, o], dw[o, c, k] += x[b, s, c]·dy[b, t, o]
+			// with s = t + k·dilation - pad_left; db[o] += dy[b, t, o]
+			x_in, w_in := node.inputs[0], node.inputs[1]
+			b_in := node.inputs[2] if len(node.inputs) > 2 else nil
+			m := node.int_metadata
+			B, T, C_in, C_out, K, dilation, pad_left, T_out :=
+				m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7]
+			if x_in.requires_grad {tensor_ensure_grad(x_in)}
+			if w_in.requires_grad {tensor_ensure_grad(w_in)}
+			if b_in != nil && b_in.requires_grad {tensor_ensure_grad(b_in)}
+			xs, ws := x_in.data.data, w_in.data.data
+			for b in 0 ..< B {
+				for t in 0 ..< T_out {
+					dy := node.grad.data[(b * T_out + t) * C_out:][:C_out]
+					if b_in != nil && b_in.requires_grad {
+						for o in 0 ..< C_out {b_in.grad.data[o] += dy[o]}
+					}
+					for k in 0 ..< K {
+						src := t + k * dilation - pad_left
+						if src < 0 || src >= T {continue}
+						xr := xs[(b * T + src) * C_in:][:C_in]
+						for o in 0 ..< C_out {
+							if dy[o] == 0 {continue}
+							if x_in.requires_grad {
+								dx := x_in.grad.data[(b * T + src) * C_in:][:C_in]
+								for c in 0 ..< C_in {dx[c] += ws[(o * C_in + c) * K + k] * dy[o]}
+							}
+							if w_in.requires_grad {
+								dw := w_in.grad.data[o * C_in * K:]
+								for c in 0 ..< C_in {dw[c * K + k] += xr[c] * dy[o]}
+							}
+						}
+					}
+				}
+			}
 		case .Transpose:
 			a_in := node.inputs[0]
 			if a_in.requires_grad {

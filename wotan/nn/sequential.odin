@@ -33,6 +33,8 @@ Layer :: union {
 	GATLayer,
 	MambaLayer,
 	MoELayer,
+	Conv1dLayer,
+	TCNBlock,
 }
 
 // ============================================================================
@@ -140,6 +142,10 @@ sequential_forward :: proc(s: ^Sequential, input: ^t.Tensor) -> ^t.Tensor {
 			)
 			x = mamba_layer_forward(&l, x, h_0)
 			_constant_done(h_0, x)
+		case Conv1dLayer:
+			x = conv1d_layer_forward(&l, x)
+		case TCNBlock:
+			x = tcn_block_forward(&l, x, s.training)
 		}
 	}
 	return x
@@ -238,6 +244,14 @@ layer_parameters :: proc(layer: ^Layer, out: ^[dynamic]^t.Tensor, all: bool = fa
 	case MoELayer:
 		add_linear(out, &l.router)
 		for i in 0 ..< l.num_experts {add_ffn(out, &l.experts[i])}
+	case Conv1dLayer:
+		add(out, l.weight)
+		add(out, l.bias)
+	case TCNBlock:
+		for c in ([]^Conv1dLayer{&l.conv1, &l.conv2, &l.downsample}) {
+			add(out, c.weight)
+			add(out, c.bias)
+		}
 	case MaxPool2dLayer, AvgPool2dLayer, DropoutLayer, Activation, FlattenLayer:
 	// No trainable parameters
 	}
@@ -301,6 +315,10 @@ layer_free :: proc(layer: ^Layer) {
 		moe_layer_free(&l)
 	case MambaLayer:
 		mamba_layer_free(&l)
+	case Conv1dLayer:
+		conv1d_layer_free(&l)
+	case TCNBlock:
+		tcn_block_free(&l)
 	case MaxPool2dLayer, AvgPool2dLayer, DropoutLayer, Activation, FlattenLayer:
 	// No heap allocations
 	}
@@ -327,41 +345,7 @@ sequential_replace_last_layer :: proc(
 	last_idx := len(seq.layers) - 1
 	old_layer := &seq.layers[last_idx]
 
-	// Re-use the exact same cleanup logic from sequential_free to prevent memory leaks
-	switch &l in old_layer {
-	case LinearLayer:
-		linear_layer_free(&l)
-	case Conv2dLayer:
-		conv2d_layer_free(&l)
-	case BatchNorm2dLayer:
-		batch_norm_2d_layer_free(&l)
-	case GRULayer:
-		gru_layer_free(&l)
-	case RNNLayer:
-		rnn_layer_free(&l)
-	case LSTMLayer:
-		lstm_layer_free(&l)
-	case EmbeddingLayer:
-		embedding_layer_free(&l)
-	case MultiHeadAttentionLayer:
-		multi_head_attention_layer_free(&l)
-	case LayerNormLayer:
-		layer_norm_layer_free(&l)
-	case FFNLayer:
-		ffn_layer_free(&l)
-	case TransformerEncoderBlock:
-		transformer_encoder_block_free(&l)
-	case TransformerEncoder:
-		transformer_encoder_free(&l)
-	case GATLayer:
-		gat_layer_free(&l)
-	case MambaLayer:
-		mamba_layer_free(&l)
-	case MoELayer:
-		moe_layer_free(&l)
-	case MaxPool2dLayer, AvgPool2dLayer, DropoutLayer, Activation, FlattenLayer:
-	// No heap allocations to free for these marker/stateless layers
-	}
+	layer_free(old_layer)
 
 	// Replace with new layer
 	seq.layers[last_idx] = new_layer

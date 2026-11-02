@@ -18,15 +18,7 @@ ensemble_volatility_test :: proc(allocator: mem.Allocator) {
 
 	// ✅ Sequence backend switch: .LSTM (default), .GRU, or .Mamba
 	seq_backend: nn.SeqBackend = .Mamba
-	backend_name := "LSTM"
-	switch seq_backend {
-	case .LSTM:
-		backend_name = "LSTM"
-	case .GRU:
-		backend_name = "GRU"
-	case .Mamba:
-		backend_name = "Mamba"
-	}
+	backend_name := fmt.tprintf("%v", seq_backend)
 	fmt.printf("--- Sequence Backend: %s ---\n", backend_name)
 
 	// ----------------------------------------------------------------

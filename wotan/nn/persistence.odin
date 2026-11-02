@@ -49,6 +49,8 @@ _Layer_Id :: enum {
 	Embedding      = 11,
 	LayerNorm      = 13,
 	RMSNorm        = 31,
+	Conv1d         = 32,
+	TCNBlock       = 33,
 	FFN            = 14,
 	Mamba          = 25,
 	MoE            = 26,
@@ -339,6 +341,15 @@ _io_layer :: proc(io: ^_Io, layer: ^Layer, flags: bool) {
 	case Conv2dLayer:
 		_io_tensor(io, &l.weight)
 		if l.bias != nil {_io_tensor(io, &l.bias)}
+	case Conv1dLayer:
+		_io_tensor(io, &l.weight)
+		if l.bias != nil {_io_tensor(io, &l.bias)}
+	case TCNBlock:
+		for c in ([]^Conv1dLayer{&l.conv1, &l.conv2, &l.downsample}) {
+			if c.weight == nil {continue}
+			_io_tensor(io, &c.weight)
+			_io_tensor(io, &c.bias)
+		}
 	case BatchNorm2dLayer:
 		_io_tensor(io, &l.weight)
 		_io_tensor(io, &l.bias)
@@ -456,6 +467,28 @@ _write_layer_header :: proc(io: ^_Io, layer: ^Layer) {
 		)
 	case MambaLayer:
 		ints(io, .Mamba, l.d_model, l.d_state)
+	case Conv1dLayer:
+		ints(
+			io,
+			.Conv1d,
+			l.in_channels,
+			l.out_channels,
+			l.kernel_size,
+			l.dilation,
+			l.pad_left,
+			l.pad_right,
+			int(l.bias != nil),
+		)
+	case TCNBlock:
+		ints(
+			io,
+			.TCNBlock,
+			l.conv1.in_channels,
+			l.conv1.out_channels,
+			l.conv1.kernel_size,
+			l.conv1.dilation,
+		)
+		_put_f64(io, l.dropout)
 	case MoELayer:
 		ints(io, .MoE, l.num_experts, l.top_k, l.d_model, l.d_ff)
 	}
@@ -493,6 +526,24 @@ _read_layer_header :: proc(
 		has_bias := _get_i32(io) != 0
 		if !io.ok {return}
 		layer = conv2d_layer_new(c_in, c_out, k, stride, pad, has_bias, alloc)
+	case .Conv1d:
+		c_in, c_out, k, dilation, pad_left, pad_right :=
+			_get_size(io),
+			_get_size(io),
+			_get_size(io),
+			_get_size(io),
+			_get_size(io),
+			_get_size(io)
+		has_bias := _get_i32(io) != 0
+		if !io.ok || k == 0 || dilation == 0 {return}
+		conv := conv1d_layer_new(c_in, c_out, k, dilation, use_bias = has_bias, allocator = alloc)
+		conv.pad_left, conv.pad_right = pad_left, pad_right
+		layer = conv
+	case .TCNBlock:
+		c_in, c_out, k, dilation := _get_size(io), _get_size(io), _get_size(io), _get_size(io)
+		dropout := _get_f64(io)
+		if !io.ok || k == 0 || dilation == 0 {return}
+		layer = tcn_block_new(c_in, c_out, k, dilation, dropout, alloc)
 	case .MaxPool2d:
 		k, s := _get_size(io), _get_size(io)
 		layer = maxpool2d_layer_new(k, s)

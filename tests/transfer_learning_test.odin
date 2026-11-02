@@ -224,7 +224,7 @@ save_weights_snapshot :: proc(model: ^nn.Sequential, allocator: mem.Allocator) -
 	// ✅ Only snapshot first 5 layers (frozen feature extractor)
 	for i in 0 ..< 5 {
 		layer := &model.layers[i]
-		switch l in layer {
+		#partial switch l in layer {
 		case nn.Conv2dLayer:
 			snapshot := make([]f64, len(l.weight.data.data), allocator)
 			copy(snapshot, l.weight.data.data)
@@ -267,7 +267,7 @@ verify_weights_unchanged :: proc(model: ^nn.Sequential, snapshots: [dynamic][]f6
 	// ✅ Only verify first 5 layers (frozen feature extractor)
 	for i in 0 ..< 5 {
 		layer := &model.layers[i]
-		switch l in layer {
+		#partial switch l in layer {
 		case nn.Conv2dLayer:
 			if idx >= len(snapshots) {
 				return false
@@ -469,7 +469,7 @@ transfer_learning_test :: proc(allocator: mem.Allocator) {
 	// Add trainable head with normal LR
 	for i in 5 ..< len(model_b.layers) {
 		layer := &model_b.layers[i]
-		switch &l in layer {
+		#partial switch &l in layer {
 		case nn.LinearLayer:
 			nn.adam_add_param(&opt, l.weights)
 			if l.bias != nil {
