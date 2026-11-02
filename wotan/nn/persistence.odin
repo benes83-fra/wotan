@@ -16,7 +16,8 @@ import "core:os"
 //   Sequential checkpoint: magic, epoch, layer count, per layer its type id,
 //     configuration and tensors, then the Adam state (type 1 with the
 //     hyperparameters; type 0 without them is still read).
-//   GPT (31; older: 28 without the dropout rate, 27 also without the
+//   GPT (33; older: 31 without the norm and weight-tying flags, 28 also
+//     without the dropout rate, 27 also without the
 //     attention flags, 17 also without MoE), BERT (32; older: 29 without the
 //     dropout rate, 18 also without the attention flags), Generator (19),
 //     Discriminator (20), VAE encoder (21) and decoder (22): magic, type id,
@@ -47,6 +48,7 @@ _Layer_Id :: enum {
 	LSTM           = 10,
 	Embedding      = 11,
 	LayerNorm      = 13,
+	RMSNorm        = 31,
 	FFN            = 14,
 	Mamba          = 25,
 	MoE            = 26,
@@ -74,7 +76,8 @@ _File_Id :: enum {
 	GPT_MoE       = 27, // MoE flags, no attention flags (read only)
 	GPT_1         = 28, // no dropout rate (read only)
 	BERT_1        = 29, // no dropout rate (read only)
-	GPT           = 31, // dropout rate; per block: MoE, use_flash and is_causal flags
+	GPT_2         = 31, // no norm or weight-tying flags (read only)
+	GPT           = 33, // dropout rate, RMSNorm and tied-embedding flags; per block: MoE, use_flash and is_causal flags
 	BERT          = 32, // dropout rate; per block: use_flash and is_causal flags
 }
 
@@ -434,7 +437,7 @@ _write_layer_header :: proc(io: ^_Io, layer: ^Layer) {
 	case MultiHeadAttentionLayer:
 		ints(io, .MHA, l.d_model, l.num_heads)
 	case LayerNormLayer:
-		ints(io, .LayerNorm, l.d_model)
+		ints(io, .RMSNorm if l.rms else .LayerNorm, l.d_model)
 		_put_f64(io, l.eps)
 	case FFNLayer:
 		ints(io, .FFN, l.d_model, l.d_ff)
@@ -528,11 +531,15 @@ _read_layer_header :: proc(
 		d, heads := _get_size(io), _get_size(io)
 		if !io.ok || heads == 0 {return}
 		layer = multi_head_attention_layer_new(d, heads, allocator = alloc)
-	case .LayerNorm:
+	case .LayerNorm, .RMSNorm:
 		d := _get_size(io)
 		eps := _get_f64(io)
 		if !io.ok {return}
-		layer = layer_norm_layer_new(d, eps, alloc)
+		layer = (rms_norm_layer_new if _Layer_Id(id) == .RMSNorm else layer_norm_layer_new)(
+			d,
+			eps,
+			alloc,
+		)
 	case .FFN:
 		d, d_ff := _get_size(io), _get_size(io)
 		if !io.ok {return}
@@ -741,6 +748,8 @@ save_gpt_model :: proc(model: ^GPTModel, path: string) -> bool {
 		_put_i32(&io, v)
 	}
 	_put_f64(&io, model.dropout)
+	_put_i32(&io, int(model.rms_norm))
+	_put_i32(&io, int(model.tie_embeddings))
 	_io_gpt(&io, model, .GPT)
 	return _save(&io, path)
 }
@@ -761,13 +770,19 @@ load_gpt_model :: proc(
 	defer delete(io.data, allocator)
 
 	file_id := _File_Id(_get_i32(&io))
-	if file_id != .GPT && file_id != .GPT_1 && file_id != .GPT_MoE && file_id != .GPT_Dense {
+	if file_id != .GPT &&
+	   file_id != .GPT_2 &&
+	   file_id != .GPT_1 &&
+	   file_id != .GPT_MoE &&
+	   file_id != .GPT_Dense {
 		fmt.printf("%s is not a GPT model\n", path)
 		return nil, false
 	}
 	cfg: [6]int // vocab, d_model, heads, d_ff, layers, max_seq_len
 	for &v in cfg {v = _get_size(&io)}
-	dropout := _get_f64(&io) if file_id == .GPT else 0.1
+	dropout := _get_f64(&io) if file_id == .GPT || file_id == .GPT_2 else 0.1
+	rms_norm := file_id == .GPT && _get_i32(&io) != 0
+	tie_embeddings := file_id == .GPT && _get_i32(&io) != 0
 	if !io.ok || cfg[2] == 0 {
 		fmt.printf("%s: corrupt or truncated model\n", path)
 		return nil, false
@@ -782,6 +797,8 @@ load_gpt_model :: proc(
 		cfg[5],
 		use_flash = use_flash,
 		dropout = dropout,
+		rms_norm = rms_norm,
+		tie_embeddings = tie_embeddings,
 		allocator = allocator,
 	)
 	_io_gpt(&io, model, file_id)
@@ -802,7 +819,7 @@ _io_gpt :: proc(io: ^_Io, model: ^GPTModel, version: _File_Id) {
 	_io_tensor(io, &model.pos_emb.weight)
 	for &block in model.blocks {
 		is_moe := version != .GPT_Dense && _io_flag(io, block.use_moe)
-		_io_mha(io, &block.mha, version == .GPT || version == .GPT_1)
+		_io_mha(io, &block.mha, version == .GPT || version == .GPT_2 || version == .GPT_1)
 		if is_moe {
 			num_experts, top_k := block.moe.num_experts, block.moe.top_k
 			if io.writing {

@@ -33,6 +33,7 @@ gpt_block_new :: proc(
 	use_moe: bool = false,
 	num_experts: int = 8,
 	top_k: int = 2,
+	rms_norm: bool = false,
 	allocator: mem.Allocator = context.allocator,
 ) -> GPTBlock {
 	block: GPTBlock
@@ -41,7 +42,8 @@ gpt_block_new :: proc(
 	block.d_ff = d_ff
 	block.use_moe = use_moe
 
-	block.ln1 = layer_norm_layer_new(d_model, 1e-5, allocator)
+	norm_new := rms_norm_layer_new if rms_norm else layer_norm_layer_new
+	block.ln1 = norm_new(d_model, 1e-5, allocator)
 	block.mha = multi_head_attention_layer_new(
 		d_model,
 		num_heads,
@@ -49,7 +51,7 @@ gpt_block_new :: proc(
 		is_causal = true,
 		allocator = allocator,
 	)
-	block.ln2 = layer_norm_layer_new(d_model, 1e-5, allocator)
+	block.ln2 = norm_new(d_model, 1e-5, allocator)
 
 	if use_moe {
 		block.moe = moe_layer_new(d_model, d_ff, num_experts, top_k, allocator)
@@ -119,6 +121,10 @@ GPTModel :: struct {
 	num_layers:     int,
 	max_seq_len:    int,
 	dropout:        f64, // on the attention and FFN outputs of every block (training only)
+	rms_norm:       bool, // RMSNorm instead of LayerNorm (blocks and final norm)
+	// The output projection reuses the token embedding: logits = x·Eᵀ + b
+	// (output_proj.weights is nil, output_proj.bias is used)
+	tie_embeddings: bool,
 	token_emb:      EmbeddingLayer,
 	pos_emb:        EmbeddingLayer, // Learned positional embeddings
 	blocks:         [dynamic]GPTBlock,
@@ -141,6 +147,8 @@ gpt_model_new :: proc(
 	num_experts: int = 8,
 	top_k: int = 2,
 	dropout: f64 = 0.1,
+	rms_norm: bool = false,
+	tie_embeddings: bool = false,
 	allocator: mem.Allocator = context.allocator,
 ) -> GPTModel {
 	model: GPTModel
@@ -151,6 +159,8 @@ gpt_model_new :: proc(
 	model.num_layers = num_layers
 	model.max_seq_len = max_seq_len
 	model.dropout = dropout
+	model.rms_norm = rms_norm
+	model.tie_embeddings = tie_embeddings
 	model.allocator = allocator
 
 	// Token embeddings
@@ -170,16 +180,25 @@ gpt_model_new :: proc(
 			use_moe = use_moe,
 			num_experts = num_experts,
 			top_k = top_k,
+			rms_norm = rms_norm,
 			allocator = allocator,
 		)
 		append(&model.blocks, block)
 	}
 
-	// Final LayerNorm
-	model.final_ln = layer_norm_layer_new(d_model, 1e-5, allocator)
+	// Final norm
+	model.final_ln = (rms_norm_layer_new if rms_norm else layer_norm_layer_new)(
+		d_model,
+		1e-5,
+		allocator,
+	)
 
-	// Output projection (tied with token embeddings would be ideal, but separate for now)
+	// Output projection; tied: only its bias, the weights are the token embedding's
 	model.output_proj = linear_layer_new(d_model, vocab_size, allocator)
+	if tie_embeddings {
+		t.tensor_free(model.output_proj.weights)
+		model.output_proj.weights = nil
+	}
 
 	return model
 }
@@ -240,10 +259,15 @@ _gpt_embed :: proc(model: ^GPTModel, input_ids: ^t.Tensor, start: int) -> ^t.Ten
 	return t.tensor_add(token_emb, pos_emb)
 }
 
-// Final LayerNorm and output projection: logits [batch, seq_len, vocab_size]
+// Final norm and output projection: logits [batch, seq_len, vocab_size]
 @(private = "file")
 _gpt_head :: proc(model: ^GPTModel, x: ^t.Tensor) -> ^t.Tensor {
-	return linear_forward(&model.output_proj, layer_norm_layer_forward(&model.final_ln, x))
+	x := layer_norm_layer_forward(&model.final_ln, x)
+	if !model.tie_embeddings {return linear_forward(&model.output_proj, x)}
+	// Tied: x·Eᵀ with the token embedding E [vocab, d_model]; its gradient
+	// collects both uses
+	e_t := t.tensor_transpose(model.token_emb.weight)
+	return t.tensor_add_bias(t.tensor_matmul(x, e_t), model.output_proj.bias)
 }
 
 // ============================================================================
@@ -557,8 +581,12 @@ gpt_softmax_sample :: proc(logits: []f64) -> int {
 	return gpt_sample_temperature(logits, 1.0, nil, 1.0)
 }
 
+// A new output projection for another vocabulary. With tied embeddings the
+// tie is dropped: the new head has its own weights (the token embedding keeps
+// the old vocabulary)
 gpt_replace_output_head :: proc(model: ^GPTModel, new_vocab_size: int, allocator: mem.Allocator) {
 	linear_layer_free(&model.output_proj)
 	model.output_proj = linear_layer_new(model.d_model, new_vocab_size, allocator)
 	model.vocab_size = new_vocab_size
+	model.tie_embeddings = false
 }

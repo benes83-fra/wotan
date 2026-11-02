@@ -577,7 +577,7 @@ _backward_from_root :: proc(root: ^Tensor, allocator: mem.Allocator) {
 			// ✅ FIX: Use stored metadata
 			N := node.int_metadata[0]
 			d_model := node.int_metadata[1]
-			eps := 1e-5
+			eps := node.f64_metadata[0] // (was fixed at 1e-5: wrong gradients for any other eps)
 
 			// ✅ FIX: Ensure gradient matrices are allocated before accumulating
 			if input_in.requires_grad {tensor_ensure_grad(input_in)}
@@ -1255,6 +1255,39 @@ _backward_from_root :: proc(root: ^Tensor, allocator: mem.Allocator) {
 						sum_d += node.grad.data[idx] * x_in.data.data[idx]
 					}
 					gate_in.grad.data[n] += sum_d
+				}
+			}
+		case .RMSNorm:
+			// y = x·r·γ, r = (mean(x²) + eps)^(-1/2); with a = γ ⊙ dy per row:
+			// dx = r·a - x·r³·(a·x)/d, dγ += dy ⊙ x·r
+			input_in, gamma_in := node.inputs[0], node.inputs[1]
+			N, d := node.int_metadata[0], node.int_metadata[1]
+			eps := node.f64_metadata[0]
+			if input_in.requires_grad {tensor_ensure_grad(input_in)}
+			if gamma_in.requires_grad {tensor_ensure_grad(gamma_in)}
+			gamma := gamma_in.data.data
+			for i in 0 ..< N {
+				x := input_in.data.data[i * d:(i + 1) * d]
+				dy := node.grad.data[i * d:(i + 1) * d]
+				r := 1.0 / math.sqrt(l.dot_simd(x, x) / f64(d) + eps)
+				if input_in.requires_grad {
+					ax := 0.0
+					for j in 0 ..< d {ax += gamma[j] * dy[j] * x[j]}
+					c := r * r * r * ax / f64(d)
+					dx := input_in.grad.data[i * d:(i + 1) * d]
+					for j in 0 ..< d {dx[j] += r * gamma[j] * dy[j] - c * x[j]}
+				}
+				if gamma_in.requires_grad {
+					for j in 0 ..< d {gamma_in.grad.data[j] += dy[j] * x[j] * r}
+				}
+			}
+		case .Transpose:
+			a_in := node.inputs[0]
+			if a_in.requires_grad {
+				tensor_ensure_grad(a_in)
+				rows, cols := a_in.data.rows, a_in.data.cols
+				for i in 0 ..< rows {
+					for j in 0 ..< cols {a_in.grad.data[i * cols + j] += node.grad.data[j * rows + i]}
 				}
 			}
 		case .Reshape:

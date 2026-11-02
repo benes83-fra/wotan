@@ -12,7 +12,8 @@ import "core:time"
 // GPT KV cache (gpt_model_forward_cached):
 // - the logits of a sequence fed in pieces (a prefill, then token by token)
 //   equal those of gpt_model_forward over the whole sequence, for standard,
-//   FlashAttention and MoE blocks; after gpt_kv_cache_reset the cache is reused
+//   FlashAttention and MoE blocks and with RMSNorm and tied embeddings; after
+//   gpt_kv_cache_reset the cache is reused
 // - greedy generation with the cache yields the same tokens as recomputing the
 //   whole prefix for every token, and is faster
 // - the cache and every forward pass release all their memory
@@ -87,7 +88,7 @@ gpt_kv_cache_test :: proc(allocator: mem.Allocator) {
 	B, L, V :: 2, 8, 11
 	ids := make([]int, B * L)
 	for &id in ids {id = rand.int_max(V)}
-	for variant in 0 ..< 3 {
+	for variant in 0 ..< 4 {
 		model := nn.gpt_model_new(
 			V,
 			8,
@@ -99,6 +100,8 @@ gpt_kv_cache_test :: proc(allocator: mem.Allocator) {
 			use_moe = variant == 2,
 			num_experts = 4,
 			top_k = 2,
+			rms_norm = variant == 3,
+			tie_embeddings = variant == 3,
 		)
 		defer nn.gpt_model_free(&model)
 		cache := nn.gpt_kv_cache_new(&model, B)
@@ -131,7 +134,12 @@ gpt_kv_cache_test :: proc(allocator: mem.Allocator) {
 		t.graph_end(&scope)
 		delete(mask, context.temp_allocator)
 
-		names := [?]string{"standard attention", "FlashAttention", "top-2-of-4 MoE"}
+		names := [?]string {
+			"standard attention",
+			"FlashAttention",
+			"top-2-of-4 MoE",
+			"RMSNorm and tied embeddings",
+		}
 		name := names[variant]
 		expect(
 			&passed,

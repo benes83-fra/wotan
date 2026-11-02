@@ -614,11 +614,14 @@ _MASKED :: -1e9
 // Layer Normalization Layer
 // ============================================================================
 
+// LayerNorm, or with rms = true RMSNorm: x / sqrt(mean(x²) + eps) · gamma
+// (no centering, beta nil)
 LayerNormLayer :: struct {
 	d_model: int,
 	eps:     f64,
 	gamma:   ^t.Tensor, // [1, d_model] (scale)
-	beta:    ^t.Tensor, // [1, d_model] (shift)
+	beta:    ^t.Tensor, // [1, d_model] (shift); nil for RMSNorm
+	rms:     bool,
 }
 
 layer_norm_layer_new :: proc(
@@ -644,12 +647,26 @@ layer_norm_layer_new :: proc(
 	return layer
 }
 
+// RMSNorm (Zhang & Sennrich 2019): a LayerNormLayer with rms = true
+rms_norm_layer_new :: proc(
+	d_model: int,
+	eps: f64 = 1e-5,
+	allocator: mem.Allocator = context.allocator,
+) -> LayerNormLayer {
+	layer := layer_norm_layer_new(d_model, eps, allocator)
+	t.tensor_free(layer.beta)
+	layer.beta = nil
+	layer.rms = true
+	return layer
+}
+
 layer_norm_layer_free :: proc(layer: ^LayerNormLayer) {
 	if layer.gamma != nil {t.tensor_free(layer.gamma)}
 	if layer.beta != nil {t.tensor_free(layer.beta)}
 }
 
 layer_norm_layer_forward :: proc(layer: ^LayerNormLayer, x: ^t.Tensor) -> ^t.Tensor {
+	if layer.rms {return t.tensor_rms_norm(x, layer.gamma, layer.eps)}
 	return t.tensor_layer_norm(x, layer.gamma, layer.beta, layer.eps)
 }
 

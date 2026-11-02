@@ -103,6 +103,7 @@ persistence_roundtrip_test :: proc(allocator: mem.Allocator) {
 			nn.gat_layer_new(3, 4, 2, adj),
 			nn.mamba_layer_new(4, 3),
 			nn.moe_layer_new(4, 6, 3, 2),
+			nn.rms_norm_layer_new(4, 1e-6),
 		)
 		mha := &seq.layers[13].(nn.MultiHeadAttentionLayer)
 		mha.use_flash, mha.is_causal = true, true
@@ -120,7 +121,7 @@ persistence_roundtrip_test :: proc(allocator: mem.Allocator) {
 		seq2, opt2, epoch, loaded := nn.load_checkpoint(a)
 		ok &&= loaded && nn.save_checkpoint(seq2, opt2, b, epoch) && _pr_same_file(a, b)
 		ok &&=
-			len(seq2.layers) == 21 &&
+			len(seq2.layers) == 22 &&
 			epoch == 3 &&
 			opt2.timestep == 7 &&
 			len(opt2.parameters) == len(ps)
@@ -136,6 +137,8 @@ persistence_roundtrip_test :: proc(allocator: mem.Allocator) {
 			!enc2.blocks[0].mha.use_flash &&
 			enc2.blocks[1].mha.use_flash &&
 			seq2.layers[18].(nn.GATLayer).mha.use_flash
+		rms2 := seq2.layers[21].(nn.LayerNormLayer)
+		flags_ok &&= rms2.rms && rms2.beta == nil && rms2.eps == 1e-6
 		expect(
 			&passed,
 			&total,
@@ -214,8 +217,15 @@ persistence_roundtrip_test :: proc(allocator: mem.Allocator) {
 		mask := nn.create_causal_mask(5, allocator)
 		d_gpt := 0.0
 		flags_ok := true
-		names := [5]string{"dense", "MoE", "dense + flash", "MoE + flash", "mixed"}
-		for v in 0 ..< 5 {
+		names := [6]string {
+			"dense",
+			"MoE",
+			"dense + flash",
+			"MoE + flash",
+			"mixed",
+			"RMSNorm + tied embeddings",
+		}
+		for v in 0 ..< 6 {
 			gpt := nn.gpt_model_new(
 				13,
 				8,
@@ -228,6 +238,8 @@ persistence_roundtrip_test :: proc(allocator: mem.Allocator) {
 				num_experts = 3,
 				top_k = 2,
 				dropout = 0.05 * f64(v),
+				rms_norm = v == 5,
+				tie_embeddings = v == 5,
 			)
 			if v == 4 {
 				b0 := &gpt.blocks[0] // dense with FlashAttention
@@ -246,12 +258,19 @@ persistence_roundtrip_test :: proc(allocator: mem.Allocator) {
 			flags_ok &&= saved && loaded
 			if !loaded {continue}
 			flags_ok &&= gpt2.dropout == gpt.dropout
+			flags_ok &&=
+				gpt2.rms_norm == gpt.rms_norm &&
+				gpt2.final_ln.rms == gpt.rms_norm &&
+				gpt2.tie_embeddings == gpt.tie_embeddings &&
+				(gpt2.output_proj.weights == nil) == gpt.tie_embeddings
 			for &b, i in gpt.blocks {
 				b2 := &gpt2.blocks[i]
 				flags_ok &&=
 					b.use_moe == b2.use_moe &&
 					b.mha.use_flash == b2.mha.use_flash &&
-					b.mha.is_causal == b2.mha.is_causal
+					b.mha.is_causal == b2.mha.is_causal &&
+					b2.ln1.rms == gpt.rms_norm &&
+					b2.ln2.rms == gpt.rms_norm
 				if b.use_moe {flags_ok &&= b2.moe.num_experts == b.moe.num_experts && b2.moe.top_k == b.moe.top_k}
 			}
 			for m in ([][]f64{mask, nil}) {
@@ -270,7 +289,7 @@ persistence_roundtrip_test :: proc(allocator: mem.Allocator) {
 			&total,
 			flags_ok && d_gpt == 0,
 			fmt.tprintf(
-				"GPT %v: dropout rate and MoE / use_flash / is_causal of every block restored: %v, logits after loading max diff %.1e",
+				"GPT %v: dropout rate, RMSNorm / tied embeddings and MoE / use_flash / is_causal of every block restored: %v, logits after loading max diff %.1e",
 				names,
 				flags_ok,
 				d_gpt,

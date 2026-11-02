@@ -74,6 +74,8 @@ Op :: enum {
 	Softplus,
 	SSM,
 	SliceGate,
+	RMSNorm,
+	Transpose,
 	ProspectValue,
 	ProbWeighting,
 	ProspectUtility,
@@ -2121,6 +2123,7 @@ tensor_layer_norm :: proc(
 		// ✅ Store metadata for backward pass
 		append(&out.int_metadata, N)
 		append(&out.int_metadata, d_model)
+		append(&out.f64_metadata, eps)
 	}
 
 	return out
@@ -3377,6 +3380,55 @@ tensor_reshape :: proc(input: ^Tensor, new_shape: [4]int) -> ^Tensor {
 	}
 	return out
 }
+// tensor_rms_norm: RMS normalization of every d_model-wide row of input,
+// y = x / sqrt(mean(x²) + eps) · gamma (gamma [1, d_model]; no centering, no
+// shift). Rows as in tensor_layer_norm: input [N, d_model] or a flattened
+// [1, N·d_model] sequence.
+tensor_rms_norm :: proc(input: ^Tensor, gamma: ^Tensor, eps: f64 = 1e-6) -> ^Tensor {
+	d_model := gamma.data.cols
+	assert(len(gamma.data.data) == d_model, "tensor_rms_norm: gamma must be [1, d_model]")
+	assert(
+		len(input.data.data) % d_model == 0,
+		"tensor_rms_norm: input size not divisible by d_model",
+	)
+	N := len(input.data.data) / d_model
+	out_data := l.matrix_new(f64, input.data.rows, input.data.cols, _op_alloc(input))
+	for i in 0 ..< N {
+		row := input.data.data[i * d_model:(i + 1) * d_model]
+		inv_rms := 1.0 / math.sqrt(l.dot_simd(row, row) / f64(d_model) + eps)
+		out_row := out_data.data[i * d_model:(i + 1) * d_model]
+		for j in 0 ..< d_model {out_row[j] = row[j] * inv_rms * gamma.data.data[j]}
+	}
+	out := _tensor_new_op(
+		out_data,
+		input.shape,
+		input.requires_grad || gamma.requires_grad,
+		_op_alloc(input),
+	)
+	if out.requires_grad {
+		out.op = .RMSNorm
+		append(&out.inputs, input, gamma)
+		append(&out.int_metadata, N, d_model)
+		append(&out.f64_metadata, eps)
+	}
+	return out
+}
+
+// tensor_transpose: the transpose [cols, rows] of a matrix a [rows, cols]
+tensor_transpose :: proc(a: ^Tensor) -> ^Tensor {
+	rows, cols := a.data.rows, a.data.cols
+	out_data := l.matrix_new(f64, cols, rows, _op_alloc(a))
+	for i in 0 ..< rows {
+		for j in 0 ..< cols {out_data.data[j * rows + i] = a.data.data[i * cols + j]}
+	}
+	out := _tensor_new_op(out_data, {cols, rows, 1, 1}, a.requires_grad, _op_alloc(a))
+	if out.requires_grad {
+		out.op = .Transpose
+		append(&out.inputs, a)
+	}
+	return out
+}
+
 // tensor_slice_gate extracts a single expert's gate column while preserving the autograd graph.
 tensor_slice_gate :: proc(gates: ^Tensor, expert_idx: int) -> ^Tensor {
 	allocator := _op_alloc(gates) // the active graph scope, else the input's
