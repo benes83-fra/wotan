@@ -530,13 +530,41 @@ _attention :: proc(
 	mask: []f64 = nil,
 	key_padding: ^t.Tensor = nil,
 ) -> ^t.Tensor {
-	batch := x_q.shape[0]
-	seq_q := x_q.shape[1]
-	seq_k := x_kv.shape[1]
-
 	q := linear_forward(q_proj, x_q)
 	k := linear_forward(k_proj, x_kv)
 	v := linear_forward(v_proj, x_kv)
+	return _attend(
+		out_proj,
+		num_heads,
+		head_dim,
+		q,
+		k,
+		v,
+		x_q.shape[0],
+		x_q.shape[1],
+		x_kv.shape[1],
+		use_flash,
+		causal,
+		mask,
+		key_padding,
+	)
+}
+
+// The attention of projected queries q [batch, seq_q, d_model] over projected
+// keys and values k, v [batch, seq_k, d_model] (masks as in _attention),
+// merged and passed through out_proj. The KV cache of GPT calls it with the
+// cached keys and values. The sizes are passed in: a projection of a single
+// position comes back from tensor_matmul as a plain [1, d_model] matrix.
+@(private)
+_attend :: proc(
+	out_proj: ^LinearLayer,
+	num_heads, head_dim: int,
+	q, k, v: ^t.Tensor,
+	batch, seq_q, seq_k: int,
+	use_flash, causal: bool,
+	mask: []f64 = nil,
+	key_padding: ^t.Tensor = nil,
+) -> ^t.Tensor {
 
 	// [batch * num_heads, seq, head_dim]
 	q_perm := t.tensor_permute_mha(q, batch, seq_q, num_heads, head_dim)
@@ -555,8 +583,8 @@ _attention :: proc(
 		// With padding the mask is per sequence [batch * num_heads, seq_q, seq_k].
 		n := seq_q * seq_k
 		blocks := batch * num_heads if key_padding != nil else 1
-		m := make([]f64, blocks * n, x_q.allocator)
-		defer delete(m, x_q.allocator)
+		m := make([]f64, blocks * n, context.temp_allocator)
+		defer delete(m, context.temp_allocator)
 		for blk in 0 ..< blocks {
 			mb := m[blk * n:(blk + 1) * n]
 			if mask != nil {copy(mb, mask)}

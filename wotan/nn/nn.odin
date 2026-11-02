@@ -74,11 +74,12 @@ sequence_step :: proc(x: ^t.Tensor, step: int, alloc: mem.Allocator) -> ^t.Tenso
 	return out
 }
 
-// Position ids 0..seq_len-1 for each sequence, shaped [batch, seq_len] for an embedding lookup
+// Position ids start..start+seq_len-1 for each sequence, shaped [batch, seq_len]
+// for an embedding lookup
 @(private)
-_position_ids :: proc(batch, seq_len: int, alloc: mem.Allocator) -> ^t.Tensor {
+_position_ids :: proc(batch, seq_len: int, alloc: mem.Allocator, start := 0) -> ^t.Tensor {
 	ids := _constant(batch * seq_len, {batch, seq_len, 1, 1}, alloc)
-	for i in 0 ..< batch * seq_len {ids.data.data[i] = f64(i % seq_len)}
+	for i in 0 ..< batch * seq_len {ids.data.data[i] = f64(start + i % seq_len)}
 	return ids
 }
 

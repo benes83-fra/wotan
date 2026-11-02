@@ -82,8 +82,19 @@ gpt_block_forward :: proc(
 	// Pre-LayerNorm
 	x_norm := layer_norm_layer_forward(&block.ln1, x)
 	attn_out := masked_multi_head_attention_layer_forward(&block.mha, x_norm, mask)
-	attn_out = t.tensor_dropout(attn_out, dropout, training)
-	x1 := t.tensor_add(x, attn_out)
+	return _gpt_block_rest(block, x, attn_out, training, dropout, aux_loss)
+}
+
+// The block after its attention: residual, LayerNorm, FFN / MoE, residual
+@(private = "file")
+_gpt_block_rest :: proc(
+	block: ^GPTBlock,
+	x, attn_out: ^t.Tensor,
+	training: bool,
+	dropout: f64,
+	aux_loss: bool,
+) -> ^t.Tensor {
+	x1 := t.tensor_add(x, t.tensor_dropout(attn_out, dropout, training))
 
 	x1_norm := layer_norm_layer_forward(&block.ln2, x1)
 	ffn_out: ^t.Tensor
@@ -93,9 +104,7 @@ gpt_block_forward :: proc(
 		ffn_out = ffn_layer_forward(&block.ffn, x1_norm)
 	}
 	ffn_out = t.tensor_dropout(ffn_out, dropout, training)
-	out := t.tensor_add(x1, ffn_out)
-
-	return out
+	return t.tensor_add(x1, ffn_out)
 }
 
 // ============================================================================
@@ -197,17 +206,10 @@ gpt_model_forward :: proc(
 	training: bool,
 	aux_loss: bool = false,
 ) -> ^t.Tensor {
-	batch := input_ids.shape[0]
-	seq_len := input_ids.shape[1]
 	model.total_aux_loss = 0.0
 	model.aux_loss = nil
 
-	// Token + learned positional embeddings
-	token_emb := embedding_layer_forward(&model.token_emb, input_ids)
-	pos_ids := _position_ids(batch, seq_len, input_ids.allocator)
-	pos_emb := embedding_layer_forward(&model.pos_emb, pos_ids)
-	_constant_done(pos_ids, pos_emb)
-	x := t.tensor_add(token_emb, pos_emb)
+	x := _gpt_embed(model, input_ids, 0)
 
 	// Pass through GPT blocks
 	for i in 0 ..< len(model.blocks) {
@@ -222,13 +224,161 @@ gpt_model_forward :: proc(
 		}
 	}
 
-	// Final LayerNorm
-	x = layer_norm_layer_forward(&model.final_ln, x)
+	return _gpt_head(model, x)
+}
 
-	// Output projection
-	logits := linear_forward(&model.output_proj, x)
+// Token + learned positional embeddings of input_ids [batch, seq_len] at
+// positions start ..< start + seq_len
+@(private = "file")
+_gpt_embed :: proc(model: ^GPTModel, input_ids: ^t.Tensor, start: int) -> ^t.Tensor {
+	batch, seq_len := input_ids.shape[0], input_ids.shape[1]
+	assert(start + seq_len <= model.max_seq_len, "GPT: more positions than max_seq_len")
+	token_emb := embedding_layer_forward(&model.token_emb, input_ids)
+	pos_ids := _position_ids(batch, seq_len, input_ids.allocator, start)
+	pos_emb := embedding_layer_forward(&model.pos_emb, pos_ids)
+	_constant_done(pos_ids, pos_emb)
+	return t.tensor_add(token_emb, pos_emb)
+}
 
-	return logits
+// Final LayerNorm and output projection: logits [batch, seq_len, vocab_size]
+@(private = "file")
+_gpt_head :: proc(model: ^GPTModel, x: ^t.Tensor) -> ^t.Tensor {
+	return linear_forward(&model.output_proj, layer_norm_layer_forward(&model.final_ln, x))
+}
+
+// ============================================================================
+// KV cache (generation)
+// ============================================================================
+// Generating token by token with gpt_model_forward recomputes the whole prefix
+// for every new token. The cache keeps every block's attention keys and values
+// of the positions seen so far, so each call only computes the new positions:
+//
+//     cache := nn.gpt_kv_cache_new(&model, batch = 1)
+//     defer nn.gpt_kv_cache_free(&cache)
+//     scope: t.Graph_Scope
+//     defer t.graph_scope_destroy(&scope)
+//     ids := prompt                                   // [1, n] token ids
+//     for step in 0 ..< n_new {
+//         t.graph_begin(&scope, no_grad = true)
+//         logits := nn.gpt_model_forward_cached(&model, &cache, ids)
+//         next := sample(last row of logits)
+//         t.graph_end(&scope)
+//         ids = [1, 1] tensor of next
+//     }
+//
+// Positions are absolute (learned positional embeddings), so a sequence holds
+// at most max_seq_len tokens: when cache.length reaches it, reset the cache and
+// prefill it again with the last tokens (gpt_kv_cache_reset).
+
+GPT_KV_Cache :: struct {
+	keys, values: [][]f64, // per block [batch, capacity, d_model]
+	batch:        int,
+	length:       int, // positions cached so far
+	capacity:     int, // model.max_seq_len
+	allocator:    mem.Allocator,
+}
+
+gpt_kv_cache_new :: proc(
+	model: ^GPTModel,
+	batch: int,
+	allocator := context.allocator,
+) -> GPT_KV_Cache {
+	cache := GPT_KV_Cache {
+		batch     = batch,
+		capacity  = model.max_seq_len,
+		allocator = allocator,
+		keys      = make([][]f64, len(model.blocks), allocator),
+		values    = make([][]f64, len(model.blocks), allocator),
+	}
+	for i in 0 ..< len(model.blocks) {
+		cache.keys[i] = make([]f64, batch * cache.capacity * model.d_model, allocator)
+		cache.values[i] = make([]f64, batch * cache.capacity * model.d_model, allocator)
+	}
+	return cache
+}
+
+gpt_kv_cache_free :: proc(cache: ^GPT_KV_Cache) {
+	for i in 0 ..< len(cache.keys) {
+		delete(cache.keys[i], cache.allocator)
+		delete(cache.values[i], cache.allocator)
+	}
+	delete(cache.keys, cache.allocator)
+	delete(cache.values, cache.allocator)
+	cache^ = {}
+}
+
+// Forgets all positions (the buffers are kept)
+gpt_kv_cache_reset :: proc(cache: ^GPT_KV_Cache) {
+	cache.length = 0
+}
+
+// Logits [batch, n, vocab_size] of the n new tokens input_ids [batch, n] at
+// positions cache.length ..< cache.length + n, attending to all cached
+// positions and causally among themselves; their keys and values are appended
+// to the cache. Equal to the last n positions of gpt_model_forward over the
+// whole sequence (inference: no dropout, no MoE aux loss). Call it in a
+// no-grad scope: nothing is back-propagated through the cache.
+gpt_model_forward_cached :: proc(
+	model: ^GPTModel,
+	cache: ^GPT_KV_Cache,
+	input_ids: ^t.Tensor,
+) -> ^t.Tensor {
+	assert(!t.grad_enabled(), "gpt_model_forward_cached: call it in a no-grad scope")
+	batch, n := input_ids.shape[0], input_ids.shape[1]
+	assert(batch == cache.batch, "gpt_model_forward_cached: batch differs from the cache's")
+	assert(
+		cache.length + n <= cache.capacity,
+		"gpt_model_forward_cached: cache is full (max_seq_len)",
+	)
+	start, total, d := cache.length, cache.length + n, model.d_model
+	alloc := t._scope_or(input_ids.allocator)
+
+	// New queries see every cached position and the new ones up to their own
+	mask := make([]f64, n * total, context.temp_allocator)
+	defer delete(mask, context.temp_allocator)
+	for i in 0 ..< n {
+		for j in start + i + 1 ..< total {mask[i * total + j] = _MASKED}
+	}
+
+	x := _gpt_embed(model, input_ids, start)
+	for &block, i in model.blocks {
+		mha := &block.mha
+		x_norm := layer_norm_layer_forward(&block.ln1, x)
+		q := linear_forward(&mha.q_proj, x_norm)
+		k_new := linear_forward(&mha.k_proj, x_norm)
+		v_new := linear_forward(&mha.v_proj, x_norm)
+
+		// Append the new keys and values; attend over positions 0 ..< total
+		k := _constant(batch * total * d, {batch, total, d, 1}, alloc)
+		v := _constant(batch * total * d, {batch, total, d, 1}, alloc)
+		for b in 0 ..< batch {
+			row := cache.keys[i][b * cache.capacity * d:]
+			copy(row[start * d:total * d], k_new.data.data[b * n * d:(b + 1) * n * d])
+			copy(k.data.data[b * total * d:(b + 1) * total * d], row[:total * d])
+			row = cache.values[i][b * cache.capacity * d:]
+			copy(row[start * d:total * d], v_new.data.data[b * n * d:(b + 1) * n * d])
+			copy(v.data.data[b * total * d:(b + 1) * total * d], row[:total * d])
+		}
+		attn_out := _attend(
+			&mha.out_proj,
+			mha.num_heads,
+			mha.head_dim,
+			q,
+			k,
+			v,
+			batch,
+			n,
+			total,
+			false,
+			false,
+			mask,
+		)
+		_constant_done(k, attn_out)
+		_constant_done(v, attn_out)
+		x = _gpt_block_rest(&block, x, attn_out, false, 0, false)
+	}
+	cache.length = total
+	return _gpt_head(model, x)
 }
 // All trainable GPT parameters (the order of the optimizer state; all:
 // frozen ones too)

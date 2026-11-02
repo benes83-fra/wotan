@@ -445,6 +445,8 @@ main :: proc() {
 	free_all(context.temp_allocator)
 	test.no_grad_test(context.temp_allocator)
 	free_all(context.temp_allocator)
+	test.gpt_kv_cache_test(context.temp_allocator)
+	free_all(context.temp_allocator)
 	test.persistence_roundtrip_test(context.temp_allocator)
 	free_all(context.temp_allocator)
 	//auto_arima_stationarity_test(context.temp_allocator)
