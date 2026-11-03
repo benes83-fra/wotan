@@ -8,7 +8,7 @@ import "core:strings"
 
 Group :: struct {
 	key_values:  []string, // Switched to slice for easier arena management
-	row_indices: [dynamic]int,
+	row_indices: []int, // in the arena; rows in their order in df
 }
 
 GroupedDataFrame :: struct {
@@ -81,10 +81,16 @@ groupby :: proc(df: ^DataFrame, keys: []string) -> GroupedDataFrame {
 	groups_map := make(map[string]int)
 	defer delete(groups_map)
 
+	// pass 1: each row's group (groups in order of first appearance) and the group sizes
+	group_of := make([]int, df.rows, context.temp_allocator)
+	defer delete(group_of, context.temp_allocator)
+	sizes := make([dynamic]int, context.temp_allocator)
+	defer delete(sizes)
 	for row in 0 ..< df.rows {
 		key := make_composite_key_string(key_cols, row, context.temp_allocator)
 		if idx, exists := groups_map[key]; exists {
-			append(&gdf.groups[idx].row_indices, row)
+			group_of[row] = idx
+			sizes[idx] += 1
 			delete(key, context.temp_allocator)
 			continue
 		}
@@ -93,14 +99,22 @@ groupby :: proc(df: ^DataFrame, keys: []string) -> GroupedDataFrame {
 		for col, i in key_cols {
 			parts[i] = strings.clone(column_value_string(col, row), allocator)
 		}
-		g := Group {
-			key_values  = parts,
-			row_indices = make([dynamic]int, allocator),
-		}
-		append(&g.row_indices, row)
-		append(&gdf.groups, g)
+		append(&gdf.groups, Group{key_values = parts})
+		append(&sizes, 1)
+		group_of[row] = len(gdf.groups) - 1
 		groups_map[strings.clone(key, allocator)] = len(gdf.groups) - 1
 		delete(key, context.temp_allocator)
+	}
+	// pass 2: the row lists, as slices (no dynamic arrays holding the arena's
+	// allocator, which points at this procedure's gdf, not at the returned copy)
+	for &g, i in gdf.groups {
+		g.row_indices = make([]int, sizes[i], allocator)
+		sizes[i] = 0
+	}
+	for gi, row in group_of {
+		g := &gdf.groups[gi]
+		g.row_indices[sizes[gi]] = row
+		sizes[gi] += 1
 	}
 
 	return gdf

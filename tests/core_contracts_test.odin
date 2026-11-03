@@ -276,6 +276,37 @@ core_contracts_test :: proc(allocator: mem.Allocator) {
 		w.destroy_dataframe(&res)
 		w.destroy_grouped_dataframe(&gdf)
 
+		// two keys, groups interleaved: groups in order of first appearance,
+		// each with its rows in order
+		df2 := frame(ints("g", {2, 1, 2, 3, 1, 2}), ints("h", {0, 0, 1, 0, 0, 0}))
+		defer w.destroy_dataframe(&df2)
+		gdf2 := w.groupby(&df2, {"g", "h"})
+		defer w.destroy_grouped_dataframe(&gdf2)
+		want_keys := [][2]string{{"2", "0"}, {"1", "0"}, {"2", "1"}, {"3", "0"}}
+		want_rows := [][]int{{0, 5}, {1, 4}, {2}, {3}}
+		groups_ok := len(gdf2.groups) == len(want_keys)
+		for g, i in gdf2.groups {
+			if !groups_ok {break}
+			groups_ok &&=
+				len(g.key_values) == 2 &&
+				g.key_values[0] == want_keys[i][0] &&
+				g.key_values[1] == want_keys[i][1]
+			groups_ok &&= len(g.row_indices) == len(want_rows[i])
+			for r, j in g.row_indices {groups_ok &&= j < len(want_rows[i]) && r == want_rows[i][j]}
+		}
+		cnt := w.agg(&gdf2, {w.count("n")})
+		defer w.destroy_dataframe(&cnt)
+		for want, i in ([]int{2, 2, 1, 1}) {
+			n, _ := w.column_at_int(w.column(&cnt, "n"), i)
+			groups_ok &&= n == want
+		}
+		expect(
+			&passed,
+			&total,
+			groups_ok,
+			"groupby on 2 keys, interleaved: groups in order of first appearance, their rows and counts",
+		)
+
 		gb := w.groupby2(&df, {"g"})
 		defer w.destroy_groupby2(&gb)
 		out := w.groupby2_agg(

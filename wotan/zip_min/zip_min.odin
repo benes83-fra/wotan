@@ -1,8 +1,6 @@
 package zip_min
 
-import "core:bytes"
-import "core:compress"
-import "core:compress/zlib"
+import "core:compress/deflate"
 import "core:fmt"
 import "core:mem"
 import "core:os"
@@ -171,26 +169,18 @@ read_local_and_inflate :: proc(
 
 	// deflate
 	if compression_method == 8 {
-		buf := bytes.Buffer{}
-		backing := make_slice([]u8, 0, allocator)
-		bytes.buffer_init(&buf, backing)
-
-		ctx := compress.Context_Memory_Input {
-			input_data = comp,
-			output     = &buf,
-		}
-		err := zlib.inflate_raw(
-			&ctx,
+		buf := make([dynamic]u8, 0, max(uncompressed_size, 0), allocator)
+		err := deflate.inflate_raw(
+			&buf,
+			comp,
 			expected_output_size = uncompressed_size,
 			allocator = allocator,
 		)
 		if err != nil {
-			bytes.buffer_destroy(&buf)
+			delete(buf)
 			return nil, false
 		}
-
-		out := bytes.buffer_to_bytes(&buf)
-		// do not destroy buf – backing is now owned by `out`
+		out := buf[:] // owns buf's memory
 		return out, true
 	}
 
