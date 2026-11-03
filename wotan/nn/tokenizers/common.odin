@@ -134,10 +134,12 @@ _split_special :: proc(
 	data: rawptr,
 	piece: proc(text: string, out: ^[dynamic]int, data: rawptr),
 ) {
+	first: [256]bool // the bytes a special token can start with
+	for s in specials {if len(s) > 0 {first[s[0]] = true}}
 	start, i := 0, 0
 	for i < len(text) {
 		best, best_id := 0, 0
-		if text[i] == '<' || text[i] == '[' {
+		if first[text[i]] {
 			for s, id in specials {
 				if len(s) > best && strings.has_prefix(text[i:], s) {best, best_id = len(s), id}
 			}

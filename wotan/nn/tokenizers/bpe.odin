@@ -81,31 +81,14 @@ bpe_tokenizer_new :: proc(
 		return tok, false
 	}
 
-	max_id := -1
 	for _, id in tok.vocab {
 		if id < 0 {
 			fmt.println("Invalid vocab.json: negative token id")
 			bpe_tokenizer_free(&tok)
 			return tok, false
 		}
-		max_id = max(max_id, id)
 	}
-	tok.ids_to_tokens = make([]string, max_id + 1, allocator)
-	tok.specials = make(map[string]int, allocator)
-	for token, id in tok.vocab {
-		tok.ids_to_tokens[id] = token
-		is_special := strings.has_prefix(token, "<|") && strings.has_suffix(token, "|>")
-		switch token {
-		case "[CLS]", "[SEP]", "[PAD]", "[UNK]", "[MASK]":
-			is_special = true
-		}
-		if is_special {tok.specials[token] = id}
-	}
-	for r, b in tok.byte_runes {
-		buf, n := utf8.encode_rune(r)
-		id, ok := tok.vocab[string(buf[:n])]
-		tok.byte_ids[b] = id if ok else -1
-	}
+	_bpe_index(&tok, nil)
 
 	merges_data, err2 := os.read_entire_file(merges_path, allocator)
 	if err2 != nil {
@@ -132,6 +115,32 @@ bpe_tokenizer_new :: proc(
 		rank += 1
 	}
 
+	return tok, true
+}
+
+// From tok.vocab: ids_to_tokens, the special tokens (<|…|>, the BERT ones in
+// brackets and `extra`), the bytes' ids and the ids of [PAD] / [UNK] (else
+// <|endoftext|>) / [CLS] / [SEP]
+_bpe_index :: proc(tok: ^BPETokenizer, extra: []string) {
+	max_id := -1
+	for _, id in tok.vocab {max_id = max(max_id, id)}
+	tok.ids_to_tokens = make([]string, max_id + 1, tok.allocator)
+	tok.specials = make(map[string]int, tok.allocator)
+	for token, id in tok.vocab {
+		tok.ids_to_tokens[id] = token
+		is_special := strings.has_prefix(token, "<|") && strings.has_suffix(token, "|>")
+		switch token {
+		case "[CLS]", "[SEP]", "[PAD]", "[UNK]", "[MASK]":
+			is_special = true
+		}
+		if is_special {tok.specials[token] = id}
+	}
+	for s in extra {tok.specials[tok.ids_to_tokens[tok.vocab[s]]] = tok.vocab[s]}
+	for r, b in tok.byte_runes {
+		buf, n := utf8.encode_rune(r)
+		id, ok := tok.vocab[string(buf[:n])]
+		tok.byte_ids[b] = id if ok else -1
+	}
 	if id, ok := tok.vocab["[PAD]"]; ok {tok.pad_id = id}
 	if id, ok := tok.vocab["[UNK]"]; ok {
 		tok.unk_id = id
@@ -140,8 +149,6 @@ bpe_tokenizer_new :: proc(
 	}
 	if id, ok := tok.vocab["[CLS]"]; ok {tok.cls_id = id}
 	if id, ok := tok.vocab["[SEP]"]; ok {tok.sep_id = id}
-
-	return tok, true
 }
 
 bpe_tokenizer_free :: proc(tok: ^BPETokenizer) {
@@ -185,7 +192,6 @@ _bpe_piece :: proc(tok: ^BPETokenizer, piece: string, out: ^[dynamic]int) {
 }
 
 // GPT-2's pre-tokenizer: the end of the piece starting at text[i:]
-@(private = "file")
 _gpt2_piece_end :: proc(text: string, i: int) -> int {
 	Class :: enum {
 		Letter,
