@@ -1,15 +1,30 @@
 package tokenizers
 
-import l "../../linalg"
 import t "../../tensor"
 import "core:fmt"
 import "core:mem"
 import "core:os"
+import "core:slice"
 import "core:strings"
+import "core:unicode"
+import "core:unicode/utf8"
+
+// ============================================================================
+// WordPiece (BERT, uncased), as Hugging Face's BertTokenizer
+// ============================================================================
+// vocab.txt: one token per line, the id is the line number. Encoding: the text
+// is split at special tokens ([CLS], [SEP], [PAD], [UNK], [MASK]); control
+// and format characters are removed, whitespace becomes spaces and CJK
+// ideographs get spaces around them; each word is lowercased, its accents
+// stripped (NFD without nonspacing marks, unicode_tables.odin) and its
+// punctuation split off; each piece is matched greedily longest-first
+// against the vocabulary (continuations as ##…). A piece that cannot be
+// matched completely, or has more than 100 characters, becomes [UNK].
 
 WordPieceTokenizer :: struct {
 	vocab:         map[string]int,
 	ids_to_tokens: []string,
+	specials:      map[string]int,
 	unk_token:     string,
 	unk_id:        int,
 	cls_id:        int,
@@ -18,6 +33,8 @@ WordPieceTokenizer :: struct {
 	max_len:       int,
 	allocator:     mem.Allocator,
 }
+
+WORDPIECE_MAX_CHARS :: 100 // longer words become [UNK]
 
 wordpiece_tokenizer_new :: proc(
 	vocab_path: string,
@@ -32,8 +49,6 @@ wordpiece_tokenizer_new :: proc(
 	tok.max_len = max_len
 	tok.unk_token = "[UNK]"
 
-	tok.vocab = make(map[string]int, allocator)
-
 	data, err := os.read_entire_file(vocab_path, allocator)
 	if err != nil {
 		fmt.printf("Error reading vocab file: %v\n", err)
@@ -41,21 +56,24 @@ wordpiece_tokenizer_new :: proc(
 	}
 	defer delete(data, allocator)
 
-	lines := strings.split(string(data), "\n", allocator)
+	tok.vocab = make(map[string]int, allocator)
+	tok.specials = make(map[string]int, allocator)
+	lines := strings.split_lines(string(data), allocator)
 	defer delete(lines, allocator)
-
 	tok.ids_to_tokens = make([]string, len(lines), allocator)
-
 	for line, i in lines {
-		trimmed := strings.trim_space(line)
-		if len(trimmed) == 0 {continue}
-
-		owned_token := strings.clone(trimmed, allocator)
-		tok.vocab[owned_token] = i
-		tok.ids_to_tokens[i] = owned_token
+		token := strings.trim_right(line, "\r")
+		if len(token) == 0 {continue}
+		// a repeated token: the later line's id (as HF), both ids decode to it
+		key, id, just_inserted, _ := map_entry(&tok.vocab, token)
+		if just_inserted {key^ = strings.clone(token, allocator)}
+		id^ = i
+		tok.ids_to_tokens[i] = key^
+	}
+	for s in ([]string{"[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]"}) {
+		if id, ok := tok.vocab[s]; ok {tok.specials[s] = id}
 	}
 
-	// ✅ DYNAMIC LOOKUP: Fixes the 101 vs 2 mismatch by reading directly from your file
 	if id, ok := tok.vocab["[PAD]"]; ok {tok.pad_id = id}
 	if id, ok := tok.vocab["[UNK]"]; ok {tok.unk_id = id}
 	if id, ok := tok.vocab["[CLS]"]; ok {tok.cls_id = id}
@@ -65,16 +83,209 @@ wordpiece_tokenizer_new :: proc(
 }
 
 wordpiece_tokenizer_free :: proc(tok: ^WordPieceTokenizer) {
-	// ✅ FIX PANIC: Must explicitly pass tok.allocator to match how strings were cloned
-	for token, _ in tok.ids_to_tokens {
-		if len(token) > 0 {
-			delete(token, tok.allocator)
-		}
-	}
+	for token in tok.vocab {delete(token, tok.allocator)}
 	delete(tok.ids_to_tokens, tok.allocator)
 	delete(tok.vocab)
+	delete(tok.specials)
 }
 
+// BERT's character classes (BasicTokenizer)
+@(private = "file")
+_is_bert_whitespace :: proc(r: rune) -> bool {
+	switch r {
+	case ' ', '\t', '\n', '\r', 0xA0, 0x1680, 0x2000 ..= 0x200A, 0x202F, 0x205F, 0x3000:
+		return true // and the space separators (Zs)
+	}
+	return false
+}
+
+@(private = "file")
+_is_bert_control :: proc(r: rune) -> bool {
+	if r == '\t' || r == '\n' || r == '\r' {return false}
+	if r < 0x20 || (r >= 0x7F && r <= 0x9F) {return true} 	// Cc
+	for rg in _FORMAT_RANGES {if r >= rg[0] && r <= rg[1] {return true}} 	// Cf
+	return false
+}
+
+@(private = "file")
+_is_bert_punct :: proc(r: rune) -> bool {
+	// all non-alphanumeric ASCII counts, also $ + < = > ^ ` | ~
+	if (r >= 33 && r <= 47) ||
+	   (r >= 58 && r <= 64) ||
+	   (r >= 91 && r <= 96) ||
+	   (r >= 123 && r <= 126) {
+		return true
+	}
+	return unicode.is_punct(r)
+}
+
+@(private = "file")
+_is_cjk :: proc(r: rune) -> bool {
+	switch r {
+	case 0x4E00 ..=
+	     0x9FFF,
+	     0x3400 ..=
+	     0x4DBF,
+	     0x20000 ..=
+	     0x2A6DF,
+	     0x2A700 ..=
+	     0x2B73F,
+	     0x2B740 ..=
+	     0x2B81F,
+	     0x2B820 ..=
+	     0x2CEAF,
+	     0xF900 ..=
+	     0xFAFF,
+	     0x2F800 ..=
+	     0x2FA1F:
+		return true
+	}
+	return false
+}
+
+// r without accents (NFD without nonspacing marks) appended to b
+@(private = "file")
+_write_stripped :: proc(b: ^strings.Builder, r: rune) {
+	if unicode.is_nonspacing_mark(r) {return}
+	if r >= 0xAC00 && r <= 0xD7A3 { 	// Hangul syllable → its jamo
+		s := r - 0xAC00
+		strings.write_rune(b, 0x1100 + s / 588)
+		strings.write_rune(b, 0x1161 + (s % 588) / 28)
+		if s % 28 != 0 {strings.write_rune(b, 0x11A7 + s % 28)}
+		return
+	}
+	i, found := slice.binary_search_by(_ACCENT_STRIP[:], r, proc(e: struct {
+			cp:   rune,
+			base: [3]rune,
+		}, r: rune) -> slice.Ordering {return slice.cmp(e.cp, r)})
+	if !found {
+		strings.write_rune(b, r)
+		return
+	}
+	for base in _ACCENT_STRIP[i].base {if base != 0 {strings.write_rune(b, base)}}
+}
+
+// Greedy longest-match-first WordPiece of one piece (no whitespace, no punctuation)
+@(private = "file")
+_wordpiece :: proc(
+	tok: ^WordPieceTokenizer,
+	piece: string,
+	key: ^strings.Builder,
+	out: ^[dynamic]int,
+) {
+	if utf8.rune_count_in_string(piece) > WORDPIECE_MAX_CHARS {
+		append(out, tok.unk_id)
+		return
+	}
+	first := len(out)
+	start := 0
+	for start < len(piece) {
+		end := len(piece)
+		found := false
+		for end > start {
+			strings.builder_reset(key)
+			if start > 0 {strings.write_string(key, "##")}
+			strings.write_string(key, piece[start:end])
+			if id, ok := tok.vocab[strings.to_string(key^)]; ok {
+				append(out, id)
+				found = true
+				break
+			}
+			end -= 1
+			for end > start && !utf8.rune_start(piece[end]) {end -= 1} 	// whole characters only
+		}
+		if !found {
+			resize(out, first)
+			append(out, tok.unk_id) // the whole piece is unknown
+			return
+		}
+		start = end
+	}
+}
+
+@(private = "file")
+_wordpiece_text :: proc(text: string, out: ^[dynamic]int, data: rawptr) {
+	tok := (^WordPieceTokenizer)(data)
+	clean := strings.builder_make(0, len(text) + 16, context.temp_allocator)
+	word := strings.builder_make(context.temp_allocator)
+	key := strings.builder_make(context.temp_allocator)
+	defer strings.builder_destroy(&clean)
+	defer strings.builder_destroy(&word)
+	defer strings.builder_destroy(&key)
+	for r in text {
+		switch {
+		case r == 0 || r == 0xFFFD || _is_bert_control(r):
+		case _is_bert_whitespace(r):
+			strings.write_byte(&clean, ' ')
+		case _is_cjk(r):
+			strings.write_byte(&clean, ' ')
+			strings.write_rune(&clean, r)
+			strings.write_byte(&clean, ' ')
+		case:
+			strings.write_rune(&clean, r)
+		}
+	}
+	rest := strings.to_string(clean)
+	for w in strings.fields_iterator(&rest) {
+		strings.builder_reset(&word)
+		for r in w {_write_stripped(&word, unicode.to_lower(r))}
+		// split off punctuation
+		normalized := strings.to_string(word)
+		start := 0
+		for r, i in normalized {
+			if !_is_bert_punct(r) {continue}
+			if i > start {_wordpiece(tok, normalized[start:i], &key, out)}
+			n := utf8.rune_size(r)
+			_wordpiece(tok, normalized[i:i + n], &key, out)
+			start = i + n
+		}
+		if start < len(normalized) {_wordpiece(tok, normalized[start:], &key, out)}
+	}
+}
+
+// Token ids of text (no special tokens added, no padding)
+wordpiece_encode :: proc(
+	tok: ^WordPieceTokenizer,
+	text: string,
+	allocator := context.allocator,
+) -> []int {
+	out := make([dynamic]int, 0, len(text) / 3 + 1, allocator)
+	_split_special(text, tok.specials, &out, tok, _wordpiece_text)
+	return out[:]
+}
+
+// Text of token ids as Hugging Face's decode: tokens joined by spaces, ##
+// continuations attached, spaces before . , ! ? and English contractions removed
+wordpiece_decode :: proc(
+	tok: ^WordPieceTokenizer,
+	ids: []int,
+	allocator := context.allocator,
+	skip_special_tokens := false,
+) -> string {
+	b := strings.builder_make(allocator)
+	for id in ids {
+		if id < 0 || id >= len(tok.ids_to_tokens) {continue}
+		token := tok.ids_to_tokens[id]
+		if skip_special_tokens && token in tok.specials {continue}
+		if strings.has_prefix(token, "##") {
+			strings.write_string(&b, token[2:])
+		} else {
+			if strings.builder_len(b) > 0 {strings.write_byte(&b, ' ')}
+			strings.write_string(&b, token)
+		}
+	}
+	s := strings.to_string(b)
+	for pair in ([][2]string{{" .", "."}, {" ?", "?"}, {" !", "!"}, {" ,", ","}, {" ' ", "'"}, {" n't", "n't"}, {" 'm", "'m"}, {" 's", "'s"}, {" 've", "'ve"}, {" 're", "'re"}}) {
+		replaced, was_alloc := strings.replace_all(s, pair[0], pair[1], allocator)
+		if was_alloc {
+			delete(s, allocator)
+			s = replaced
+		}
+	}
+	return s
+}
+
+// max_len ids: [CLS] tokens [SEP], truncated or padded, and the attention mask
 tokenize :: proc(
 	tok: ^WordPieceTokenizer,
 	text: string,
@@ -83,98 +294,12 @@ tokenize :: proc(
 	input_ids: []int,
 	attention_mask: []int,
 ) {
-	lower_text := strings.to_lower(text, allocator)
-	defer delete(lower_text, allocator)
-
-	words := strings.split(lower_text, " ", allocator)
-	defer delete(words, allocator)
-	tokens := make([dynamic]string, allocator)
-
-	for word in words {
-		if len(word) == 0 {continue}
-
-		start := 0
-		word_len := len(word)
-
-		for start < word_len {
-			end := word_len
-			found := false
-
-			for end > start {
-				sub := word[start:end]
-				allocated_sub := false
-
-				if start > 0 {
-					sub = fmt.aprintf("##%s", sub, allocator = allocator)
-					allocated_sub = true
-				}
-
-				if id, ok := tok.vocab[sub]; ok {
-					append(&tokens, sub)
-					start = end
-					found = true
-					break
-				}
-
-				// Free immediately if it didn't match to prevent leaks
-				if allocated_sub {
-					delete(sub, allocator)
-				}
-				end -= 1
-			}
-
-			if !found {
-				append(&tokens, tok.unk_token)
-				break
-			}
-		}
-	}
-
-	actual_len := len(tokens)
-	total_len := actual_len + 2
-
-	if total_len > tok.max_len {
-		total_len = tok.max_len
-		actual_len = total_len - 2
-	}
-
-	input_ids = make([]int, tok.max_len, allocator)
-	attention_mask = make([]int, tok.max_len, allocator)
-
-	input_ids[0] = tok.cls_id
-	attention_mask[0] = 1
-
-	for i in 0 ..< actual_len {
-		token_str := tokens[i]
-		if id, ok := tok.vocab[token_str]; ok {
-			input_ids[i + 1] = id
-		} else {
-			input_ids[i + 1] = tok.unk_id
-		}
-		attention_mask[i + 1] = 1
-	}
-
-	if total_len > 1 {
-		input_ids[actual_len + 1] = tok.sep_id
-		attention_mask[actual_len + 1] = 1
-	}
-
-	for i in total_len ..< tok.max_len {
-		input_ids[i] = tok.pad_id
-		attention_mask[i] = 0
-	}
-
-	// Clean up dynamically allocated "##" subwords safely
-	for t_str, _ in tokens {
-		if strings.has_prefix(t_str, "##") {
-			delete(t_str, allocator)
-		}
-	}
-	delete(tokens)
-
-	return input_ids, attention_mask
+	raw := wordpiece_encode(tok, text, allocator)
+	defer delete(raw, allocator)
+	return _pack(raw, tok.max_len, tok.cls_id, tok.sep_id, tok.pad_id, true, allocator)
 }
 
+// tokenize's ids and segment ids as [1, max_len] tensors
 tokenize_to_tensors :: proc(
 	tok: ^WordPieceTokenizer,
 	text: string,
@@ -184,27 +309,7 @@ tokenize_to_tensors :: proc(
 	segment_ids_tensor: ^t.Tensor,
 ) {
 	ids, mask := tokenize(tok, text, allocator)
-	defer {
-		delete(ids, allocator)
-		delete(mask, allocator)
-	}
-
-	batch := 1
-	seq_len := tok.max_len
-
-	ids_data := l.matrix_new(f64, 1, batch * seq_len, allocator)
-	seg_data := l.matrix_new(f64, 1, batch * seq_len, allocator)
-
-	for i in 0 ..< seq_len {
-		ids_data.data[i] = f64(ids[i])
-		seg_data.data[i] = 0.0
-	}
-
-	in_tensor := t.tensor_new(ids_data, false, allocator)
-	in_tensor.shape = [4]int{batch, seq_len, 1, 1}
-
-	seg_tensor := t.tensor_new(seg_data, false, allocator)
-	seg_tensor.shape = [4]int{batch, seq_len, 1, 1}
-
-	return in_tensor, seg_tensor
+	defer delete(ids, allocator)
+	defer delete(mask, allocator)
+	return _to_tensors(ids, allocator)
 }

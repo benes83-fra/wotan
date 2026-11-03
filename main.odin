@@ -823,6 +823,8 @@ main :: proc() {
 	free_all(context.temp_allocator)
 	test.tokenizer_bpe_test(context.temp_allocator)
 	free_all(context.temp_allocator)
+	test.tokenizer_reference_test(context.temp_allocator)
+	free_all(context.temp_allocator)
 	test.gpt_completion_test(context.temp_allocator)
 	free_all(context.temp_allocator)
 	test.gpt_moe_flash_test(context.temp_allocator)

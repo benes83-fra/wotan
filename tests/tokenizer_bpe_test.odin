@@ -5,133 +5,64 @@ import t "../wotan/tensor"
 import "core:fmt"
 import "core:mem"
 import "core:os"
+import "core:slice"
 
+// BPE on a toy vocabulary (merges a b → ab, ab c → abc): merging by priority,
+// the [CLS] … [SEP] input with padding, the tensors. tokenizer_reference_test
+// compares with Hugging Face on the GPT-2 vocabulary.
 tokenizer_bpe_test :: proc(allocator: mem.Allocator) {
 	seed_test(#procedure)
 	fmt.println("\n=== BPE Tokenizer Isolated Test ===")
+	context.allocator = allocator
+	passed, total := 0, 0
+	expect :: proc(passed, total: ^int, ok: bool, name: string) {
+		total^ += 1
+		if ok {passed^ += 1}
+		fmt.printf("%s %s\n", "OK  " if ok else "FAIL", name)
+	}
 
+	vocab_path, merges_path := "temp_bpe_vocab.json", "temp_bpe_merges.txt"
 	vocab_json := `{"a": 0, "b": 1, "c": 2, "ab": 3, "abc": 4, "[PAD]": 100, "[UNK]": 101, "[CLS]": 102, "[SEP]": 103}`
-	vocab_path := "temp_bpe_vocab.json"
-
-	file, err := os.create(vocab_path)
-	if err != nil {
-		fmt.printf("Failed to create vocab file: %v\n", err)
-		return
-	}
-	os.write(file, transmute([]u8)vocab_json)
-	os.close(file)
+	merges_txt := "#version: 0.2\na b\nab c"
+	_ = os.write_entire_file(vocab_path, transmute([]u8)vocab_json)
+	_ = os.write_entire_file(merges_path, transmute([]u8)merges_txt)
 	defer os.remove(vocab_path)
-
-	merges_txt := `#version: 0.2
-a b
-ab c`
-	merges_path := "temp_bpe_merges.txt"
-
-	file2, err2 := os.create(merges_path)
-	if err2 != nil {
-		fmt.printf("Failed to create merges file: %v\n", err2)
-		return
-	}
-	os.write(file2, transmute([]u8)merges_txt)
-	os.close(file2)
 	defer os.remove(merges_path)
 
-	fmt.println("✓ Temporary vocab and merges files created.")
-
-	max_len := 16
-	tok_inst, ok := tok.bpe_tokenizer_new(vocab_path, merges_path, max_len, allocator)
+	tok_inst, ok := tok.bpe_tokenizer_new(vocab_path, merges_path, 16, allocator)
+	expect(&passed, &total, ok, "BPE tokenizer loads a vocab.json / merges.txt")
 	if !ok {
-		fmt.println("Failed to load BPE tokenizer.")
+		record_failures(total - passed)
 		return
 	}
 	defer tok.bpe_tokenizer_free(&tok_inst)
-	fmt.println("✓ BPE Tokenizer loaded successfully.")
 
-	test_text := "abc"
-	fmt.printf("\nTest 1: Tokenizing '%s'\n", test_text)
-
-	input_ids, attention_mask := tok.bpe_tokenize(&tok_inst, test_text, allocator)
-	defer {
-		delete(input_ids, allocator)
-		delete(attention_mask, allocator)
-	}
-
-	fmt.printf("Input IDs: %v\n", input_ids)
-
-	expected_1 := []int {
-		102,
-		4,
-		103,
-		100,
-		100,
-		100,
-		100,
-		100,
-		100,
-		100,
-		100,
-		100,
-		100,
-		100,
-		100,
-		100,
-	}
-	match_1 := true
-	for i in 0 ..< len(expected_1) {
-		if input_ids[i] != expected_1[i] {
-			match_1 = false
-			fmt.printf(
-				"  ❌ Mismatch at index %d: got %d, expected %d\n",
-				i,
-				input_ids[i],
-				expected_1[i],
-			)
+	PAD :: 100
+	check :: proc(tk: ^tok.BPETokenizer, text: string, want: []int) -> bool {
+		ids, mask := tok.bpe_tokenize(tk, text)
+		defer delete(ids)
+		defer delete(mask)
+		for v, i in ids {
+			if v != (want[i] if i < len(want) else PAD) || mask[i] != (1 if i < len(want) else 0) {return false}
 		}
+		return true
 	}
+	expect(&passed, &total, check(&tok_inst, "abc", {102, 4, 103}), "'abc' merges to one token: [CLS] abc [SEP] + padding")
+	expect(&passed, &total, check(&tok_inst, "ac", {102, 0, 2, 103}), "'ac' stays two tokens (no merge a c)")
+	raw := tok.bpe_encode(&tok_inst, "abcab")
+	defer delete(raw)
+	expect(&passed, &total, slice.equal(raw, []int{4, 3}), fmt.tprintf("'abcab' encodes to abc ab: %v", raw))
 
-	if match_1 {
-		fmt.println("✓ Test 1 passed: 'abc' correctly merged to single token")
-	}
-
-	test_text_2 := "ac"
-	fmt.printf("\nTest 2: Tokenizing '%s'\n", test_text_2)
-
-	input_ids_2, _ := tok.bpe_tokenize(&tok_inst, test_text_2, allocator)
-	defer delete(input_ids_2, allocator)
-
-	fmt.printf("Input IDs: %v\n", input_ids_2)
-
-	expected_2 := []int{102, 0, 2, 103, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100}
-	match_2 := true
-	for i in 0 ..< len(expected_2) {
-		if input_ids_2[i] != expected_2[i] {
-			match_2 = false
-			fmt.printf(
-				"  ❌ Mismatch at index %d: got %d, expected %d\n",
-				i,
-				input_ids_2[i],
-				expected_2[i],
-			)
-		}
-	}
-
-	if match_2 {
-		fmt.println("✓ Test 2 passed: 'ac' correctly kept as separate tokens")
-	}
-
-	fmt.println("\nTest 3: Tensor conversion")
 	input_tensor, segment_tensor := tok.bpe_tokenize_to_tensors(&tok_inst, "abc", allocator)
-	defer {
-		t.tensor_free(input_tensor)
-		t.tensor_free(segment_tensor)
-	}
+	defer t.tensor_free(input_tensor)
+	defer t.tensor_free(segment_tensor)
+	expect(
+		&passed,
+		&total,
+		input_tensor.shape == {1, 16, 1, 1} && segment_tensor.shape == {1, 16, 1, 1} && input_tensor.data.data[0] == 4,
+		fmt.tprintf("tensors [1, 16] (no special tokens): shape %v", input_tensor.shape),
+	)
 
-	fmt.printf("Input Tensor Shape: %v\n", input_tensor.shape)
-	fmt.printf("Segment Tensor Shape: %v\n", segment_tensor.shape)
-
-	if input_tensor.shape[0] == 1 && input_tensor.shape[1] == 16 {
-		fmt.println("✓ Test 3 passed: Tensor shapes correct")
-	}
-
-	fmt.println("\n✓ BPE Tokenizer Test Complete!")
+	fmt.printf("BPE tokenizer: %d/%d passed\n", passed, total)
+	record_failures(total - passed)
 }

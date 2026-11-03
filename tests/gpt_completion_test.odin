@@ -92,7 +92,7 @@ gpt_completion_test :: proc(allocator: mem.Allocator) {
 	prompt_text := "The Federal Reserve announced a"
 	fmt.printf("\nPrompt: \"%s\"\n", prompt_text)
 
-	input_ids_slice := gpt_encode(&tokenizer, prompt_text, allocator)
+	input_ids_slice := tok.bpe_encode(&tokenizer, prompt_text, allocator) // GPT-2: no [CLS] / [SEP], no padding
 	defer delete(input_ids_slice, allocator)
 
 	seq_len := len(input_ids_slice)
@@ -157,50 +157,13 @@ gpt_completion_test :: proc(allocator: mem.Allocator) {
 	}
 
 	for k in 0 ..< top_k {
-		decoded_token := ""
-		if top_ids[k] >= 0 && top_ids[k] < len(tokenizer.ids_to_tokens) {
-			decoded_token = tokenizer.ids_to_tokens[top_ids[k]]
-		}
+		decoded_token := tok.bpe_decode(&tokenizer, top_ids[k:k + 1], context.temp_allocator)
 		fmt.printf(
-			"  Token ID: %-6d | Logit: %8.4f | Text: \"%s\"\n",
+			"  Token ID: %6d | Logit: %8.4f | Text: \"%s\"\n",
 			top_ids[k],
 			top_probs[k],
 			decoded_token,
 		)
 	}
 	fmt.println("\n✓ GPT Completion Test Complete!")
-}
-
-// GPT-2 does not use [CLS] or [SEP] tokens, and we want to strip padding.
-// This helper returns ONLY the actual text tokens.
-gpt_encode :: proc(toki: ^tok.BPETokenizer, text: string, allocator: mem.Allocator) -> []int {
-	ids, _ := tok.bpe_tokenize(toki, text, allocator, false)
-
-	start := 0
-	for start < len(ids) {
-		if ids[start] == 0 || ids[start] == 50256 {
-			start += 1
-		} else {
-			break
-		}
-	}
-
-	end := len(ids) - 1
-	for end >= 0 {
-		if ids[end] == 0 || ids[end] == 50256 {
-			end -= 1
-		} else {
-			break
-		}
-	}
-
-	if start > end {
-		return make([]int, 0, allocator)
-	}
-
-	result := make([]int, end - start + 1, allocator)
-	for i in 0 ..< len(result) {
-		result[i] = ids[start + i]
-	}
-	return result
 }
