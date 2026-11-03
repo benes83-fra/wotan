@@ -648,7 +648,7 @@ save_checkpoint :: proc(
 		_io_layer(&io, &layer, true)
 	}
 
-	_put_i32(&io, 1) // optimizer type: Adam with hyperparameters
+	_put_i32(&io, 2) // optimizer type: Adam with hyperparameters and per-parameter steps
 	_put_i64(&io, opt.timestep)
 	for v in ([]f64{opt.learning_rate, opt.beta_1, opt.beta_2, opt.epsilon, opt.weight_decay}) {_put_f64(&io, v)}
 	_put_i32(&io, len(opt.parameters))
@@ -658,6 +658,7 @@ save_checkpoint :: proc(
 			for v in m {_put_f64(&io, v)}
 		}
 	}
+	for n in opt.steps {_put_i64(&io, n)}
 	return _save(&io, path)
 }
 
@@ -691,14 +692,14 @@ load_checkpoint :: proc(
 
 	// Optimizer
 	opt_type := _get_i32(&io)
-	if io.ok && opt_type != 0 && opt_type != 1 {
+	if io.ok && (opt_type < 0 || opt_type > 2) {
 		fmt.println("Unsupported optimizer type")
 		io.ok = false
 	}
 	opt = new(Adam, allocator)
 	opt^ = adam_new(allocator = allocator)
 	opt.timestep = _get_i64(&io)
-	if opt_type == 1 {
+	if opt_type >= 1 {
 		opt.learning_rate, opt.beta_1, opt.beta_2 = _get_f64(&io), _get_f64(&io), _get_f64(&io)
 		opt.epsilon, opt.weight_decay = _get_f64(&io), _get_f64(&io)
 	}
@@ -719,6 +720,11 @@ load_checkpoint :: proc(
 		m := opt.moment_1[i / 2] if i % 2 == 0 else opt.moment_2[i / 2]
 		for &v, j in m {v, _ = endian.get_f64(values[8 * j:], .Little)}
 	}
+	// per-parameter steps (type 2); older checkpoints had one shared count
+	for i in 0 ..< n_saved {
+		n := _get_i64(&io) if opt_type == 2 else opt.timestep
+		if fits {opt.steps[i] = n}
+	}
 	if !fits {
 		if n_saved > 0 {
 			fmt.println("load_checkpoint: optimizer state does not match the model; moments reset")
@@ -726,6 +732,7 @@ load_checkpoint :: proc(
 		for i in 0 ..< len(params) {
 			mem.zero_slice(opt.moment_1[i])
 			mem.zero_slice(opt.moment_2[i])
+			opt.steps[i] = 0
 		}
 		opt.timestep = 0
 	}

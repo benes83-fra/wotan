@@ -117,6 +117,7 @@ persistence_roundtrip_test :: proc(allocator: mem.Allocator) {
 		opt := nn.adam_new(0.01, allocator = allocator, weight_decay = 0.1)
 		nn.sequential_add_to_adam(seq, &opt)
 		opt.timestep = 7
+		for &n, i in opt.steps {n = 1 + i % 7} 	// per-parameter counts differ from timestep
 		for m in opt.moment_1 {for &v in m {v = rand.float64()}}
 		a, b := file(&files, "all_a"), file(&files, "all_b")
 		ok := nn.save_checkpoint(seq, &opt, a, 3)
@@ -127,6 +128,33 @@ persistence_roundtrip_test :: proc(allocator: mem.Allocator) {
 			epoch == 3 &&
 			opt2.timestep == 7 &&
 			len(opt2.parameters) == len(ps)
+		steps_ok := len(opt2.steps) == len(opt.steps)
+		for n, i in opt2.steps {steps_ok &&= n == opt.steps[i]}
+		// a checkpoint of the former format (optimizer type 1, one shared step
+		// count): every parameter continues from timestep
+		old_ok := false
+		{
+			data, _ := os.read_entire_file(a, context.allocator)
+			defer delete(data)
+			tail := 4 + 8 + 5 * 8 + 4 + 8 * len(ps) // type, timestep, hyperparameters, count, steps
+			for p in ps {tail += 2 * (4 + 8 * len(p.data.data))}
+			old := data[:len(data) - 8 * len(ps)]
+			type_at := len(data) - tail
+			old_type := old[type_at]
+			old[type_at] = 1
+			c := file(&files, "all_old")
+			_ = os.write_entire_file(c, old)
+			seq3, opt3, _, loaded3 := nn.load_checkpoint(c)
+			if loaded3 {
+				old_ok = old_type == 2 && opt3.timestep == 7 && len(opt3.steps) == len(ps)
+				for n in opt3.steps {old_ok &&= n == 7}
+				for m, i in opt3.moment_1 {old_ok &&= mem.compare_ptrs(raw_data(m), raw_data(opt2.moment_1[i]), 8 * len(m)) == 0}
+				nn.sequential_free(seq3)
+				nn.adam_free(opt3)
+				free(opt3)
+			}
+		}
+		ok &&= steps_ok && old_ok
 		conv := seq2.layers[1].(nn.Conv2dLayer)
 		bn2 := seq2.layers[6].(nn.BatchNorm2dLayer)
 		ok &&= conv.weight.shape == [4]int{3, 2, 3, 3} && !bn2.running_var.requires_grad
@@ -155,8 +183,10 @@ persistence_roundtrip_test :: proc(allocator: mem.Allocator) {
 			&total,
 			ok && flags_ok,
 			fmt.tprintf(
-				"checkpoint with all 21 layer types and Adam state (%d parameters): load + re-save gives the same bytes; Conv2d weights keep shape %v, BatchNorm running statistics stay non-trainable; attention flags restored: %v",
+				"checkpoint with all 21 layer types and Adam state (%d parameters): load + re-save gives the same bytes, per-parameter step counts restored %v, former format (one shared count) still loads %v; Conv2d weights keep shape %v, BatchNorm running statistics stay non-trainable; attention flags restored: %v",
 				len(ps),
+				steps_ok,
+				old_ok,
 				conv.weight.shape,
 				flags_ok,
 			),

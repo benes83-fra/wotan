@@ -63,26 +63,33 @@ optimizer_rmsprop_free :: proc(opt: ^OptimizerRMSProp) {
 	if opt.cache_mat.data != nil {l.matrix_free(&opt.cache_mat)}
 }
 
+// One RMSprop step on a block of parameters with its square average, as
+// torch.optim.RMSprop (no momentum, not centered): weight decay is an L2 term
+// of the gradient (as torch, not decoupled), d = g + λw;
+// v ← αv + (1 − α)d², w ← w − lr·d / (√v + ε).
+rmsprop_update :: proc(w, g, v: []f64, lr, alpha, epsilon, weight_decay: f64) {
+	for i in 0 ..< len(w) {
+		d := g[i] + weight_decay * w[i]
+		v[i] = alpha * v[i] + (1.0 - alpha) * d * d
+		w[i] -= lr * d / (math.sqrt(v[i]) + epsilon)
+	}
+}
+
 // ============================================================================
 // Slice API
 // ============================================================================
 optimizer_rmsprop_step :: proc(opt: ^OptimizerRMSProp, weights: []f64, gradient: []f64) {
 	n := len(weights)
 	if n == 0 || n != len(gradient) {return}
-
-	if opt.weight_decay > 0.0 {
-		for i in 0 ..< n {
-			weights[i] *= 1.0 - opt.learning_rate * opt.weight_decay
-		}
-	}
-
-	for i in 0 ..< n {
-		opt.cache[i] = opt.alpha * opt.cache[i] + (1.0 - opt.alpha) * gradient[i] * gradient[i]
-	}
-
-	for i in 0 ..< n {
-		weights[i] -= opt.learning_rate * gradient[i] / (math.sqrt(opt.cache[i]) + opt.epsilon)
-	}
+	rmsprop_update(
+		weights,
+		gradient,
+		opt.cache,
+		opt.learning_rate,
+		opt.alpha,
+		opt.epsilon,
+		opt.weight_decay,
+	)
 }
 
 // ============================================================================
@@ -95,23 +102,13 @@ optimizer_rmsprop_step_mat :: proc(
 ) {
 	if weights.rows != gradient.rows || weights.cols != gradient.cols {return}
 	if weights.rows == 0 || weights.cols == 0 {return}
-
-	n := weights.rows * weights.cols
-
-	if opt.weight_decay > 0.0 {
-		for i in 0 ..< n {
-			weights.data[i] *= 1.0 - opt.learning_rate * opt.weight_decay
-		}
-	}
-
-	for i in 0 ..< n {
-		opt.cache_mat.data[i] =
-			opt.alpha * opt.cache_mat.data[i] +
-			(1.0 - opt.alpha) * gradient.data[i] * gradient.data[i]
-	}
-
-	for i in 0 ..< n {
-		weights.data[i] -=
-			opt.learning_rate * gradient.data[i] / (math.sqrt(opt.cache_mat.data[i]) + opt.epsilon)
-	}
+	rmsprop_update(
+		weights.data,
+		gradient.data,
+		opt.cache_mat.data,
+		opt.learning_rate,
+		opt.alpha,
+		opt.epsilon,
+		opt.weight_decay,
+	)
 }

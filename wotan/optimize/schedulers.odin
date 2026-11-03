@@ -18,6 +18,8 @@ import "core:math"
 // LinearLR / CosineAnnealingLR(eta_min = final_lr). Set the optimizer's
 // learning rate before each step:
 //   for it in 0 ..< n {opt.learning_rate = lr_schedule_at(s, it); …; adam_step(&opt)}
+// With per-parameter rates use nn.adam_step_scheduled(&opt, s, it): each one
+// is scheduled as its own torch param group.
 
 LR_Decay :: enum {
 	Constant,
@@ -75,23 +77,32 @@ lr_cosine :: proc(
 	return {.Cosine, base_lr, final_lr, total_steps, 0, 1, warmup_steps, warmup_start}
 }
 
-// The learning rate of step `step` (0-based)
-lr_schedule_at :: proc(s: LR_Schedule, step: int) -> f64 {
+// The learning rate of step `step` (0-based).
+// base_lr > 0: the rate of a parameter group with its own base rate, as torch
+// schedules each param group: warmup, Constant, Step and Linear scale it like
+// s.base_lr (LinearLR / StepLR are factors), Cosine runs from it to the same
+// absolute final_lr (CosineAnnealingLR's eta_min).
+lr_schedule_at :: proc(s: LR_Schedule, step: int, base_lr := 0.0) -> f64 {
+	base := base_lr if base_lr > 0 else s.base_lr
 	if step < s.warmup_steps {
 		frac := f64(step) / f64(s.warmup_steps)
-		return s.base_lr * (s.warmup_start + (1.0 - s.warmup_start) * frac)
+		return base * (s.warmup_start + (1.0 - s.warmup_start) * frac)
 	}
 	t := step - s.warmup_steps
 	switch s.decay {
 	case .Constant:
-		return s.base_lr
+		return base
 	case .Step:
-		return s.base_lr * math.pow(s.gamma, f64(t / s.step_size))
-	case .Linear, .Cosine:
+		return base * math.pow(s.gamma, f64(t / s.step_size))
+	case .Linear:
+		final := s.final_lr if base == s.base_lr else s.final_lr * base / s.base_lr
+		frac := f64(t) / f64(s.total_steps - s.warmup_steps)
+		if frac >= 1.0 {return final}
+		return base + (final - base) * frac
+	case .Cosine:
 		frac := f64(t) / f64(s.total_steps - s.warmup_steps)
 		if frac >= 1.0 {return s.final_lr}
-		if s.decay == .Linear {return s.base_lr + (s.final_lr - s.base_lr) * frac}
-		return s.final_lr + 0.5 * (s.base_lr - s.final_lr) * (1.0 + math.cos(math.PI * frac))
+		return s.final_lr + 0.5 * (base - s.final_lr) * (1.0 + math.cos(math.PI * frac))
 	}
-	return s.base_lr
+	return base
 }

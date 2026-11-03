@@ -859,6 +859,107 @@ OP_SCHED_RUN := [?]f64 {
 	-4.886413907168435,
 }
 @(private = "file")
+OP_ADAM_STEPS := [?]f64 {
+	0.13161879393407108,
+	1.4245923989982117,
+	1.1679986373376083,
+	-0.5394447698341907,
+	-0.29953276678110036,
+	-0.5488595016815003,
+	0.5888022538779241,
+	-0.07282527661191014,
+	0.6700766457771006,
+	-1.851445805382108,
+	1.5370781469836514,
+	-0.09273568660397433,
+	0.6529601053753943,
+}
+@(private = "file")
+OP_RMS_WD := [?]f64 {
+	0.15642668701121498,
+	1.4138508046697527,
+	1.1411343331154433,
+	-0.5242089431825875,
+	-0.3398927434397272,
+	-0.468831756069278,
+	0.5456350215908571,
+	-0.09406850008879789,
+	0.6011498879358693,
+	-1.8207558238550559,
+	1.5021104634470528,
+	-0.09147511838805292,
+	0.6635555773989464,
+}
+@(private = "file")
+OP_GROUP_LR := [?]f64 {
+	0.005000000000000001,
+	0.014000000000000002,
+	0.023000000000000003,
+	0.032,
+	0.041,
+	0.05,
+	0.04970452017428331,
+	0.048825356391083694,
+	0.047384156580520836,
+	0.04541640786499875,
+	0.04297056274847715,
+	0.040106846055019366,
+	0.03689577199374913,
+	0.03341640786499875,
+	0.029754427160965546,
+	0.026000000000000002,
+	0.022245572839034465,
+	0.018583592135001263,
+	0.015104228006250876,
+	0.011893153944980646,
+	0.00902943725152286,
+	0.006583592135001263,
+	0.0046158434194791724,
+	0.003174643608916315,
+	0.002295479825716696,
+	0.010000000000000002,
+	0.020000000000000004,
+	0.030000000000000006,
+	0.04000000000000001,
+	0.05,
+	0.0480952380952381,
+	0.04619047619047619,
+	0.04428571428571429,
+	0.04238095238095239,
+	0.040476190476190485,
+	0.038571428571428576,
+	0.036666666666666674,
+	0.034761904761904765,
+	0.03285714285714286,
+	0.030952380952380957,
+	0.02904761904761905,
+	0.02714285714285715,
+	0.025238095238095243,
+	0.023333333333333338,
+	0.021428571428571432,
+	0.019523809523809527,
+	0.01761904761904762,
+	0.015714285714285715,
+	0.01380952380952381,
+	0.011904761904761904,
+}
+@(private = "file")
+OP_FLOOR_RUN := [?]f64 {
+	0.09740015123424554,
+	1.3798669715344125,
+	1.203731311048838,
+	-0.538687992160568,
+	-0.2849436345891139,
+	-0.5534014087969179,
+	0.5471376256921666,
+	-0.05303019032271083,
+	0.6724125145908566,
+	-2.03900753265047,
+	1.4757382823057708,
+	0.03685979755625757,
+	0.4915015828185467,
+}
+@(private = "file")
 OP_SIZES :: [3]int{6, 3, 4}
 
 @(private = "file")
@@ -1215,6 +1316,90 @@ optimizers_reference_test :: proc(allocator: mem.Allocator) {
 				after_ok,
 				d_adam,
 				d_sgd,
+			),
+		)
+	}
+
+	// torch conventions: Adam's step count per parameter, RMSprop's L2 weight
+	// decay, per-parameter rates under a schedule (cosine floor)
+	{
+		T :: 25
+		// Adam: the second parameter has no gradient on steps 3, 4, 7, the third
+		// is added at step 10 (its bias correction starts there)
+		ps := _op_params(allocator)
+		adam := nn.adam_new(0.01, allocator = allocator)
+		nn.adam_add_param(&adam, ps[0])
+		nn.adam_add_param(&adam, ps[1])
+		for s in 0 ..< T {
+			if s == 10 {nn.adam_add_param(&adam, ps[2])}
+			_op_set_grads(ps, s)
+			saved := ps[1].grad.data
+			if s == 3 || s == 4 || s == 7 {ps[1].grad.data = nil}
+			nn.adam_step(&adam)
+			ps[1].grad.data = saved
+		}
+		steps_ok := adam.steps[0] == T && adam.steps[1] == T - 3 && adam.steps[2] == T - 10
+		nn.adam_free(&adam)
+		d_steps := _op_diff_free(ps, OP_ADAM_STEPS[:])
+
+		// RMSprop with weight decay, slice and matrix API
+		d_rms := 0.0
+		for use_mat in ([]bool{false, true}) {
+			W := l.matrix_new(f64, 1, 13, allocator)
+			Gm := l.matrix_new(f64, 1, 13, allocator)
+			copy(W.data, OP_P0[:])
+			rms :=
+				optim.optimizer_rmsprop_init_mat(1, 13, 0.01, 0.9, 1e-8, 0.1, allocator) if use_mat else optim.optimizer_rmsprop_init(13, 0.01, 0.9, 1e-8, 0.1, allocator)
+			for s in 0 ..< T {
+				copy(Gm.data, OP_G[s * 13:(s + 1) * 13])
+				if use_mat {
+					optim.optimizer_rmsprop_step_mat(&rms, &W, &Gm)
+				} else {
+					optim.optimizer_rmsprop_step(&rms, W.data, Gm.data)
+				}
+			}
+			for v, i in W.data {d_rms = max(d_rms, abs(v - OP_RMS_WD[i]))}
+			optim.optimizer_rmsprop_free(&rms)
+			l.matrix_free(&W)
+			l.matrix_free(&Gm)
+		}
+
+		// rate of a group with base 0.05 when the schedule's base is 0.01
+		floor_cases := [2]optim.LR_Schedule {
+			optim.lr_cosine(0.01, T, 0.002, warmup_steps = 5),
+			optim.lr_linear_decay(0.01, T, 0.002, warmup_steps = 4, warmup_start = 0.2),
+		}
+		d_group := 0.0
+		for s, k in floor_cases {
+			for it in 0 ..< T {
+				d_group = max(
+					d_group,
+					abs(optim.lr_schedule_at(s, it, 0.05) - OP_GROUP_LR[k * T + it]),
+				)
+			}
+		}
+		ps = _op_params(allocator)
+		adam = nn.adam_new(0.01, allocator = allocator)
+		nn.adam_add_param(&adam, ps[0])
+		nn.adam_add_param(&adam, ps[1])
+		nn.adam_add_param_with_lr(&adam, ps[2], 0.05)
+		for s in 0 ..< T {
+			_op_set_grads(ps, s)
+			nn.adam_step_scheduled(&adam, floor_cases[0], s)
+		}
+		nn.adam_free(&adam)
+		d_floor := _op_diff_free(ps, OP_FLOOR_RUN[:])
+		expect(
+			&passed,
+			&total,
+			steps_ok && d_steps < 1e-14 && d_rms < 1e-14 && d_group < 1e-15 && d_floor < 1e-14,
+			fmt.tprintf(
+				"Adam with a parameter added at step 10 and one without gradients on 3 steps vs torch %.1e (steps counted per parameter %v); RMSprop with L2 weight decay (slice, matrix) %.1e; rate of a 5× param group under cosine (eta_min 0.002) / linear decay %.1e, Adam with it (adam_step_scheduled) %.1e",
+				d_steps,
+				steps_ok,
+				d_rms,
+				d_group,
+				d_floor,
 			),
 		)
 	}
