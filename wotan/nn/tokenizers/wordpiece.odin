@@ -10,16 +10,21 @@ import "core:unicode"
 import "core:unicode/utf8"
 
 // ============================================================================
-// WordPiece (BERT, uncased), as Hugging Face's BertTokenizer
+// WordPiece (BERT), as Hugging Face's BertTokenizer
 // ============================================================================
 // vocab.txt: one token per line, the id is the line number. Encoding: the text
 // is split at special tokens ([CLS], [SEP], [PAD], [UNK], [MASK]); control
 // and format characters are removed, whitespace becomes spaces and CJK
-// ideographs get spaces around them; each word is lowercased, its accents
-// stripped (NFD without nonspacing marks, unicode_tables.odin) and its
-// punctuation split off; each piece is matched greedily longest-first
-// against the vocabulary (continuations as ##…). A piece that cannot be
-// matched completely, or has more than 100 characters, becomes [UNK].
+// ideographs get spaces around them; each word is lowercased and its accents
+// stripped (NFD without nonspacing marks, unicode_tables.odin) unless the
+// tokenizer is cased (lowercase = false, for cased models such as
+// bert-base-cased: do_lower_case = False), then its punctuation is split off;
+// each piece is matched greedily longest-first against the vocabulary
+// (continuations as ##…). A piece that cannot be matched completely, or has
+// more than 100 characters, becomes [UNK].
+// Model input: tokenize ([CLS] text [SEP]), tokenize_pair ([CLS] a [SEP] b
+// [SEP] with segment ids 0 / 1), tokenize_batch_to_tensors (several texts or
+// pairs as one padded batch).
 
 WordPieceTokenizer :: struct {
 	vocab:         map[string]int,
@@ -31,6 +36,7 @@ WordPieceTokenizer :: struct {
 	sep_id:        int,
 	pad_id:        int,
 	max_len:       int,
+	lowercase:     bool, // uncased model: lowercase and strip accents
 	allocator:     mem.Allocator,
 }
 
@@ -40,6 +46,7 @@ wordpiece_tokenizer_new :: proc(
 	vocab_path: string,
 	max_len: int,
 	allocator: mem.Allocator = context.allocator,
+	lowercase := true,
 ) -> (
 	WordPieceTokenizer,
 	bool,
@@ -47,6 +54,7 @@ wordpiece_tokenizer_new :: proc(
 	tok: WordPieceTokenizer
 	tok.allocator = allocator
 	tok.max_len = max_len
+	tok.lowercase = lowercase
 	tok.unk_token = "[UNK]"
 
 	data, err := os.read_entire_file(vocab_path, allocator)
@@ -228,7 +236,11 @@ _wordpiece_text :: proc(text: string, out: ^[dynamic]int, data: rawptr) {
 	rest := strings.to_string(clean)
 	for w in strings.fields_iterator(&rest) {
 		strings.builder_reset(&word)
-		for r in w {_write_stripped(&word, unicode.to_lower(r))}
+		if tok.lowercase {
+			for r in w {_write_stripped(&word, unicode.to_lower(r))}
+		} else {
+			strings.write_string(&word, w)
+		}
 		// split off punctuation
 		normalized := strings.to_string(word)
 		start := 0
@@ -296,7 +308,19 @@ tokenize :: proc(
 ) {
 	raw := wordpiece_encode(tok, text, allocator)
 	defer delete(raw, allocator)
-	return _pack(raw, tok.max_len, tok.cls_id, tok.sep_id, tok.pad_id, true, allocator)
+	segments: []int
+	input_ids, attention_mask, segments = _pack(
+		raw,
+		nil,
+		tok.max_len,
+		tok.cls_id,
+		tok.sep_id,
+		tok.pad_id,
+		true,
+		allocator,
+	)
+	delete(segments, allocator)
+	return
 }
 
 // tokenize's ids and segment ids as [1, max_len] tensors
@@ -311,5 +335,91 @@ tokenize_to_tensors :: proc(
 	ids, mask := tokenize(tok, text, allocator)
 	defer delete(ids, allocator)
 	defer delete(mask, allocator)
-	return _to_tensors(ids, allocator)
+	input_ids_tensor, segment_ids_tensor, _ = _to_tensors(ids, nil, nil, 1, allocator)
+	return
+}
+
+// max_len ids of a sentence pair: [CLS] a [SEP] b [SEP], segment ids 0 for
+// [CLS] a [SEP] and 1 for b [SEP] (question answering, entailment, next
+// sentence prediction); too long: the longer text is cut first (HF's
+// longest_first), then padding
+tokenize_pair :: proc(
+	tok: ^WordPieceTokenizer,
+	text_a, text_b: string,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	input_ids: []int,
+	attention_mask: []int,
+	segment_ids: []int,
+) {
+	a := wordpiece_encode(tok, text_a, allocator)
+	b := wordpiece_encode(tok, text_b, allocator)
+	defer delete(a, allocator)
+	defer delete(b, allocator)
+	return _pack(a, b, tok.max_len, tok.cls_id, tok.sep_id, tok.pad_id, true, allocator)
+}
+
+// tokenize_pair's ids and segment ids as [1, max_len] tensors
+tokenize_pair_to_tensors :: proc(
+	tok: ^WordPieceTokenizer,
+	text_a, text_b: string,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	input_ids_tensor: ^t.Tensor,
+	segment_ids_tensor: ^t.Tensor,
+) {
+	ids, mask, segments := tokenize_pair(tok, text_a, text_b, allocator)
+	defer delete(ids, allocator)
+	defer delete(mask, allocator)
+	defer delete(segments, allocator)
+	input_ids_tensor, segment_ids_tensor, _ = _to_tensors(ids, segments, nil, 1, allocator)
+	return
+}
+
+// Several texts (or pairs texts[i], pairs[i]) as one batch [len(texts), L] of
+// ids, segment ids and attention mask, each as tokenize / tokenize_pair;
+// L = the longest input (pad_to_longest) or max_len
+tokenize_batch_to_tensors :: proc(
+	tok: ^WordPieceTokenizer,
+	texts: []string,
+	allocator: mem.Allocator = context.allocator,
+	pairs: []string = nil,
+	pad_to_longest := true,
+) -> (
+	input_ids: ^t.Tensor,
+	segment_ids: ^t.Tensor,
+	attention_mask: ^t.Tensor,
+) {
+	assert(
+		pairs == nil || len(pairs) == len(texts),
+		"tokenize_batch_to_tensors: one pair text per text",
+	)
+	Batch :: struct {
+		tok:          ^WordPieceTokenizer,
+		texts, pairs: []string,
+	}
+	batch := Batch{tok, texts, pairs}
+	return _batch_to_tensors(
+		len(texts),
+		tok.max_len,
+		pad_to_longest,
+		&batch,
+		proc(i: int, data: rawptr, allocator: mem.Allocator) -> (ids, mask, segments: []int) {
+			b := (^Batch)(data)
+			if b.pairs != nil {return tokenize_pair(b.tok, b.texts[i], b.pairs[i], allocator)}
+			raw := wordpiece_encode(b.tok, b.texts[i], allocator)
+			defer delete(raw, allocator)
+			return _pack(
+				raw,
+				nil,
+				b.tok.max_len,
+				b.tok.cls_id,
+				b.tok.sep_id,
+				b.tok.pad_id,
+				true,
+				allocator,
+			)
+		},
+		allocator,
+	)
 }

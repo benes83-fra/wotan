@@ -4,6 +4,7 @@ package tests
 // ids of texts on the GPT-2 and bert-base-uncased vocabularies.
 
 import tok "../wotan/nn/tokenizers"
+import t "../wotan/tensor"
 import "core:fmt"
 import "core:mem"
 import "core:os"
@@ -12,192 +13,293 @@ import "core:strings"
 
 @(private = "file")
 TK_CASES := [?]struct {
-	text, bpe, wp, wp_decoded: string,
+	text, bpe, wp, wp_decoded, wp_cased: string,
 } {
 	{
 		text = "The Federal Reserve announced a",
 		bpe = "464 5618 12224 3414 257",
 		wp = "1996 2976 3914 2623 1037",
 		wp_decoded = "the federal reserve announced a",
+		wp_cased = "100 100 100 2623 1037",
 	},
 	{
 		text = "Hello, world! It's 2024.",
 		bpe = "15496 11 995 0 632 338 48609 13",
 		wp = "7592 1010 2088 999 2009 1005 1055 16798 2549 1012",
 		wp_decoded = "hello, world! it's 2024.",
+		wp_cased = "100 1010 2088 999 100 1005 1055 16798 2549 1012",
 	},
 	{
 		text = "a  b\n\ncafé",
 		bpe = "64 220 275 198 198 66 1878 2634",
 		wp = "1037 1038 7668",
 		wp_decoded = "a b cafe",
+		wp_cased = "1037 1038 100",
 	},
 	{
 		text = "don't   stop",
 		bpe = "9099 470 220 220 2245",
 		wp = "2123 1005 1056 2644",
 		wp_decoded = "don't stop",
+		wp_cased = "2123 1005 1056 2644",
 	},
 	{
 		text = "I'm sure they've said we'll go, haven't they? He'd've.",
 		bpe = "40 1101 1654 484 1053 531 356 1183 467 11 4398 470 484 30 679 1549 1053 13",
 		wp = "1045 1005 1049 2469 2027 1005 2310 2056 2057 1005 2222 2175 1010 4033 1005 1056 2027 1029 2002 1005 1040 1005 2310 1012",
 		wp_decoded = "i'm sure they've said we'll go, haven't they? he'd've.",
+		wp_cased = "100 1005 1049 2469 2027 1005 2310 2056 2057 1005 2222 2175 1010 4033 1005 1056 2027 1029 100 1005 1040 1005 2310 1012",
 	},
 	{
 		text = "Prices rose 3.5% to $1,234.56 (vs. €1.2bn) — a 12-month high!!",
 		bpe = "6836 1063 8278 513 13 20 4 284 720 16 11 24409 13 3980 357 14259 13 10432 16 13 17 9374 8 851 257 1105 12 8424 1029 3228",
 		wp = "7597 3123 1017 1012 1019 1003 2000 1002 1015 1010 22018 1012 5179 1006 5443 1012 1574 2487 1012 1016 24700 1007 1517 1037 2260 1011 3204 2152 999 999",
 		wp_decoded = "prices rose 3. 5 % to $ 1, 234. 56 ( vs. €1. 2bn ) — a 12 - month high!!",
+		wp_cased = "100 3123 1017 1012 1019 1003 2000 1002 1015 1010 22018 1012 5179 1006 5443 1012 1574 2487 1012 1016 24700 1007 1517 1037 2260 1011 3204 2152 999 999",
 	},
 	{
 		text = "  leading spaces and trailing   ",
 		bpe = "220 3756 9029 290 25462 220 220 220",
 		wp = "2877 7258 1998 12542",
 		wp_decoded = "leading spaces and trailing",
+		wp_cased = "2877 7258 1998 12542",
 	},
 	{
 		text = "tabs\tand\nnewlines\r\nmixed \t\n end",
 		bpe = "8658 82 197 392 198 3605 6615 201 198 76 2966 220 197 198 886",
 		wp = "21628 2015 1998 2047 12735 3816 2203",
 		wp_decoded = "tabs and newlines mixed end",
+		wp_cased = "21628 2015 1998 2047 12735 3816 2203",
 	},
 	{
 		text = "Ünïcödé façade naïve résumé Ångström Crème Brûlée",
 		bpe = "127 250 77 26884 66 9101 67 2634 24685 16175 671 41492 40560 16345 2634 6184 227 782 2536 9101 76 3864 14064 1326 1709 42324 75 22161",
 		wp = "27260 8508 15743 13746 17076 15687 13675 21382 7987 9307 2063",
 		wp_decoded = "unicode facade naive resume angstrom creme brulee",
+		wp_cased = "100 100 100 100 100 100 100",
 	},
 	{
 		text = "日本語のテキスト 中文字符 한국어 텍스트",
 		bpe = "33768 98 17312 105 45739 252 5641 24336 25084 43302 220 40792 23877 229 27764 245 163 105 99 220 47991 250 166 113 255 168 244 112 220 169 227 235 168 232 97 169 232 116",
 		wp = "1864 1876 1950 1671 30239 30227 30233 30240 1746 1861 100 100 1469 30006 30021 29991 30014 30020 29999 30008 1467 30009 30020 29997 30017 30003 30017",
 		wp_decoded = "日 本 語 のテキスト 中 文 [UNK] [UNK] 한국어 텍스트",
+		wp_cased = "1864 1876 1950 1671 30239 30227 30233 30240 1746 1861 100 100 100 100",
 	},
 	{
 		text = "emoji 🚀🔥 and 👍🏽 skin tones",
 		bpe = "368 31370 12520 248 222 8582 242 98 290 50169 235 8582 237 121 4168 23755",
 		wp = "7861 29147 2072 100 1998 100 3096 12623",
 		wp_decoded = "emoji [UNK] and [UNK] skin tones",
+		wp_cased = "7861 29147 2072 100 1998 100 3096 12623",
 	},
 	{
 		text = "<|endoftext|>Start<|endoftext|> and end <|endoftext|>",
 		bpe = "50256 10434 50256 290 886 220 50256",
 		wp = "1026 1064 2203 15794 10288 2102 1064 1028 2707 1026 1064 2203 15794 10288 2102 1064 1028 1998 2203 1026 1064 2203 15794 10288 2102 1064 1028",
 		wp_decoded = "< | endoftext | > start < | endoftext | > and end < | endoftext | >",
+		wp_cased = "1026 1064 2203 15794 10288 2102 1064 1028 100 1026 1064 2203 15794 10288 2102 1064 1028 1998 2203 1026 1064 2203 15794 10288 2102 1064 1028",
 	},
 	{
 		text = "[CLS] bert [SEP] style [MASK] tokens [PAD]",
 		bpe = "58 5097 50 60 275 861 685 5188 47 60 3918 685 31180 42 60 16326 685 47 2885 60",
 		wp = "101 14324 102 2806 103 19204 2015 0",
 		wp_decoded = "[CLS] bert [SEP] style [MASK] tokens [PAD]",
+		wp_cased = "101 14324 102 2806 103 19204 2015 0",
 	},
 	{
 		text = "supercalifragilisticexpialidocious antidisestablishmentarianism",
 		bpe = "16668 9948 361 22562 346 396 501 42372 498 312 32346 1885 29207 44390 3699 1042",
 		wp = "3565 9289 10128 29181 24411 4588 10288 19312 21273 10085 6313 3424 10521 4355 7875 13602 3672 12199 2964",
 		wp_decoded = "supercalifragilisticexpialidocious antidisestablishmentarianism",
+		wp_cased = "3565 9289 10128 29181 24411 4588 10288 19312 21273 10085 6313 3424 10521 4355 7875 13602 3672 12199 2964",
 	},
 	{
 		text = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx short",
 		bpe = "24223 24223 24223 24223 24223 24223 24223 24223 24223 24223 24223 24223 24223 24223 24223 1790",
 		wp = "100 2460",
 		wp_decoded = "[UNK] short",
+		wp_cased = "100 2460",
 	},
 	{
 		text = "URLs: https://example.com/path?q=1&b=2#frag e-mail: a.b@c.de",
 		bpe = "21886 82 25 3740 1378 20688 13 785 14 6978 30 80 28 16 5 65 28 17 2 8310 363 304 12 4529 25 257 13 65 31 66 13 2934",
 		wp = "24471 4877 1024 16770 1024 1013 1013 2742 1012 4012 1013 4130 1029 1053 1027 1015 1004 1038 1027 1016 1001 25312 2290 1041 1011 5653 1024 1037 1012 1038 1030 1039 1012 2139",
 		wp_decoded = "urls : https : / / example. com / path? q = 1 & b = 2 # frag e - mail : a. b @ c. de",
+		wp_cased = "100 1024 16770 1024 1013 1013 2742 1012 4012 1013 4130 1029 1053 1027 1015 1004 1038 1027 1016 1001 25312 2290 1041 1011 5653 1024 1037 1012 1038 1030 1039 1012 2139",
 	},
 	{
 		text = "Numbers 1234567890 ١٢٣ ½ ² Ⅻ 0.001",
 		bpe = "49601 17031 2231 30924 3829 18923 94 149 95 149 96 25208 1587 110 2343 227 104 657 13 8298",
 		wp = "3616 13138 19961 2575 2581 2620 21057 100 1092 1082 100 1014 1012 25604",
 		wp_decoded = "numbers 1234567890 [UNK] ½ ² [UNK] 0. 001",
+		wp_cased = "100 13138 19961 2575 2581 2620 21057 100 1092 1082 100 1014 1012 25604",
 	},
 	{
 		text = "Ellipsis… “quotes” ‘single’ «guillemets» — en–dash",
 		bpe = "30639 2419 271 1399 564 250 421 6421 447 251 564 246 29762 447 247 21110 5162 8270 76 1039 17730 851 551 1906 42460",
 		wp = "3449 15000 6190 1529 1523 16614 1524 1520 2309 1521 1077 26458 6216 11368 2015 1090 1517 4372 1516 11454",
 		wp_decoded = "ellipsis … “ quotes ” ‘ single ’ « guillemets » — en – dash",
+		wp_cased = "100 1529 1523 16614 1524 1520 2309 1521 1077 26458 6216 11368 2015 1090 1517 4372 1516 11454",
 	},
 	{
 		text = "ALL CAPS SHOUTING and MiXeD CaSe",
 		bpe = "7036 20176 50 6006 12425 2751 290 13756 55 68 35 6488 4653",
 		wp = "2035 9700 11273 1998 3816 2553",
 		wp_decoded = "all caps shouting and mixed case",
+		wp_cased = "100 100 100 1998 100 100",
 	},
 	{
 		text = "zero\u200bwidth\u200djoiner\ufeffbom soft\u00adhyphen",
 		bpe = "22570 9525 10394 447 235 7639 7274 171 119 123 65 296 2705 3907 36362 831",
 		wp = "5717 9148 11927 2232 5558 26455 5092 2213 3730 10536 8458 2368",
 		wp_decoded = "zerowidthjoinerbom softhyphen",
+		wp_cased = "5717 9148 11927 2232 5558 26455 5092 2213 3730 10536 8458 2368",
 	},
 	{
 		text = "control\x01\x02chars\x7f here \x0b\x0c",
 		bpe = "13716 189 190 354 945 221 994 220 199 200",
 		wp = "2491 7507 2869 2182",
 		wp_decoded = "controlchars here",
+		wp_cased = "2491 7507 2869 2182",
 	},
 	{
 		text = "\u00a0nbsp\u3000ideographic space\u2028line sep",
 		bpe = "1849 77 24145 5099 222 485 6826 2272 447 101 1370 41767",
 		wp = "1050 5910 2361 8909 8780 14773 2686 2240 19802",
 		wp_decoded = "nbsp ideographic space line sep",
+		wp_cased = "1050 5910 2361 8909 8780 14773 2686 2240 19802",
 	},
 	{
 		text = "İstanbul ΣΟΦΙΑ straße ﬁ ligature",
 		bpe = "128 108 24179 7377 96 138 253 138 99 138 247 138 239 3534 39683 68 27332 105 223 26106 1300",
 		wp = "9960 1173 29730 29736 27432 2358 27807 1984 8018 11244",
 		wp_decoded = "istanbul σοφια straße ﬁ ligature",
+		wp_cased = "100 100 2358 27807 1984 8018 11244",
 	},
 	{
 		text = "Ελληνικά Русский текст й ё עברית العربية",
 		bpe = "138 243 39377 39377 138 115 26180 29945 43000 138 105 12466 254 35072 21727 21727 31583 18849 140 117 220 20375 16843 31583 21727 20375 12466 117 220 141 239 14360 95 49603 37778 33951 103 28981 44690 26897 39848 22654 45632",
 		wp = "1159 29727 29727 24824 16177 18199 29726 14608 1195 29748 29747 29747 23925 15414 1197 15290 23925 29747 22919 1188 1185 1259 29789 29811 29796 29813 1270 23673 29830 17149 29816 14498 19433",
 		wp_decoded = "ελληνικα русскии текст и е עברית العربية",
+		wp_cased = "100 100 1197 15290 23925 29747 22919 100 100 1259 29789 29811 29796 29813 1270 23673 29830 17149 29816 14498 19433",
 	},
 	{
 		text = "'quoted' 's 'S 'll 'LL",
 		bpe = "6 421 5191 6 705 82 705 50 705 297 705 3069",
 		wp = "1005 9339 1005 1005 1055 1005 1055 1005 2222 1005 2222",
 		wp_decoded = "' quoted'' s's'll'll",
+		wp_cased = "1005 9339 1005 1005 1055 1005 100 1005 2222 1005 100",
 	},
-	{text = "", bpe = "", wp = "", wp_decoded = ""},
-	{text = " ", bpe = "220", wp = "", wp_decoded = ""},
-	{text = "\n", bpe = "198", wp = "", wp_decoded = ""},
-	{text = "a", bpe = "64", wp = "1037", wp_decoded = "a"},
+	{text = "", bpe = "", wp = "", wp_decoded = "", wp_cased = ""},
+	{text = " ", bpe = "220", wp = "", wp_decoded = "", wp_cased = ""},
+	{text = "\n", bpe = "198", wp = "", wp_decoded = "", wp_cased = ""},
+	{text = "a", bpe = "64", wp = "1037", wp_decoded = "a", wp_cased = "1037"},
 	{
 		text = "ü\ni?ß)本üeßa)1\t B",
 		bpe = "9116 198 72 30 39683 8 17312 105 9116 68 39683 64 8 16 197 347",
 		wp = "1057 1045 1029 1096 1007 1876 1057 2063 19310 2050 1007 1015 1038",
 		wp_decoded = "u i? ß ) 本 ueßa ) 1 b",
+		wp_cased = "100 1045 1029 1096 1007 1876 100 1007 1015 100",
 	},
 	{
 		text = ")\n\t)\"本j 本j 'a<e üc b2)ß'_\"é/i?gci[C1|_本 -]'é!\n",
 		bpe = "8 198 197 16725 17312 105 73 42164 105 73 705 64 27 68 6184 120 66 275 17 8 39683 6 62 1 2634 14 72 30 70 979 58 34 16 91 62 17312 105 532 49946 2634 0 198",
 		wp = "1007 1007 1000 1876 1046 1876 1046 1005 1037 1026 1041 15384 1038 2475 1007 1096 1005 1035 1000 1041 1013 1045 1029 1043 6895 1031 27723 1064 1035 1876 1011 1033 1005 1041 999",
 		wp_decoded = ") ) \" 本 j 本 j'a < e uc b2 ) ß'_ \" e / i? gci [ c1 | _ 本 - ]'e!",
+		wp_cased = "1007 1007 1000 1876 1046 1876 1046 1005 1037 1026 1041 100 1038 2475 1007 1096 1005 1035 1000 100 1013 1045 1029 1043 6895 1031 100 1064 1035 1876 1011 1033 1005 100 999",
 	},
 	{
 		text = "-ü ,|b2ß<> >.\néég🚀C本é23he)本)f!e-jb3_-h",
 		bpe = "12 9116 837 91 65 17 39683 27 29 1875 13 198 2634 2634 70 8582 248 222 34 17312 105 2634 1954 258 8 17312 105 8 69 0 68 12 73 65 18 22955 71",
 		wp = "1011 1057 1010 1064 1038 2475 19310 1026 1028 1028 1012 100 1876 1041 21926 5369 1007 1876 1007 1042 999 1041 1011 1046 2497 2509 1035 1011 1044",
 		wp_decoded = "- u, | b2ß < > >. [UNK] 本 e23he ) 本 ) f! e - jb3 _ - h",
+		wp_cased = "1011 100 1010 1064 1038 2475 19310 1026 1028 1028 1012 100 1876 100 1007 1876 1007 1042 999 1041 1011 1046 2497 2509 1035 1011 1044",
 	},
-	{text = "ß日c", bpe = "39683 33768 98 66", wp = "1096 1864 1039", wp_decoded = "ß 日 c"},
+	{
+		text = "ß日c",
+		bpe = "39683 33768 98 66",
+		wp = "1096 1864 1039",
+		wp_decoded = "ß 日 c",
+		wp_cased = "1096 1864 1039",
+	},
 	{
 		text = "ü,\t2]0c aegß\ncB-3日1j>c,.?",
 		bpe = "9116 11 197 17 60 15 66 257 1533 39683 198 66 33 12 18 33768 98 16 73 29 66 38508 30",
 		wp = "1057 1010 1016 1033 1014 2278 29347 2290 19310 17324 1011 1017 1864 1015 3501 1028 1039 1010 1012 1029",
 		wp_decoded = "u, 2 ] 0c aegß cb - 3 日 1j > c,.?",
+		wp_cased = "100 1010 1016 1033 1014 2278 29347 2290 19310 100 1011 1017 1864 1015 3501 1028 1039 1010 1012 1029",
 	},
 	{
 		text = "''( '🚀ß|\t",
 		bpe = "7061 7 705 8582 248 222 39683 91 197",
 		wp = "1005 1005 1006 1005 100 1064",
 		wp_decoded = "''('[UNK] |",
+		wp_cased = "1005 1005 1006 1005 100 1064",
+	},
+}
+
+@(private = "file")
+TK_PAIRS := [?]struct {
+	a, b, ids, segments, mask: string,
+} {
+	{
+		a = "Is the Fed hawkish?",
+		b = "The Federal Reserve raised rates.",
+		ids = "101 2003 1996 7349 9881 4509 1029 102 1996 2976 3914 2992 6165 1012 102 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0",
+		segments = "0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0",
+		mask = "1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0",
+	},
+	{
+		a = "Prices rose 3.5% to $1,234.56 (vs. €1.2bn) — a 12-month high!! Prices rose 3.5% to $1,234.56 (vs. €1.2bn) — a 12-month high!! ",
+		b = "Short answer.",
+		ids = "101 7597 3123 1017 1012 1019 1003 2000 1002 1015 1010 22018 1012 5179 1006 5443 1012 1574 2487 1012 1016 24700 1007 1517 1037 2260 1011 102 2460 3437 1012 102",
+		segments = "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 1 1 1",
+		mask = "1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1",
+	},
+	{
+		a = "Short question?",
+		b = "Prices rose 3.5% to $1,234.56 (vs. €1.2bn) — a 12-month high!! Prices rose 3.5% to $1,234.56 (vs. €1.2bn) — a 12-month high!! ",
+		ids = "101 2460 3160 1029 102 7597 3123 1017 1012 1019 1003 2000 1002 1015 1010 22018 1012 5179 1006 5443 1012 1574 2487 1012 1016 24700 1007 1517 1037 2260 1011 102",
+		segments = "0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1",
+		mask = "1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1",
+	},
+	{
+		a = "Prices rose 3.5% to $1,234.56 (vs. €1.2bn) — a 12-month high!! Prices rose 3.5% to $1,234.56 (vs. €1.2bn) — a 12-month high!! ",
+		b = "Prices rose 3.5% to $1,234.56 (vs. €1.2bn) — a 12-month high!! Prices rose 3.5% to $1,234.56 (vs. €1.2bn) — a 12-month high!!  more",
+		ids = "101 7597 3123 1017 1012 1019 1003 2000 1002 1015 1010 22018 1012 5179 1006 5443 102 7597 3123 1017 1012 1019 1003 2000 1002 1015 1010 22018 1012 5179 1006 102",
+		segments = "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1",
+		mask = "1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1",
+	},
+	{
+		a = "a b c d e f g h i j k l m n o p",
+		b = "q r s t u v w x y z a b c d e f",
+		ids = "101 1037 1038 1039 1040 1041 1042 1043 1044 1045 1046 1047 1048 1049 1050 1051 102 1053 1054 1055 1056 1057 1058 1059 1060 1061 1062 1037 1038 1039 1040 102",
+		segments = "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1",
+		mask = "1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1",
+	},
+}
+
+@(private = "file")
+TK_BATCH := [?]int{1, 5, 9, 26, 28}
+
+@(private = "file")
+TK_BATCH_REF := [3]struct {
+	ids, segments, mask: string,
+} {
+	{ 	// texts padded to the longest
+		ids      = "101 7592 1010 2088 999 2009 1005 1055 16798 2549 1012 102 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 101 7597 3123 1017 1012 1019 1003 2000 1002 1015 1010 22018 1012 5179 1006 5443 1012 1574 2487 1012 1016 24700 1007 1517 1037 2260 1011 3204 2152 999 999 102 101 1864 1876 1950 1671 30239 30227 30233 30240 1746 1861 100 100 1469 30006 30021 29991 30014 30020 29999 30008 1467 30009 30020 29997 30017 30003 30017 102 0 0 0 101 102 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 101 1037 102 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0",
+		segments = "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0",
+		mask     = "1 1 1 1 1 1 1 1 1 1 1 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 0 0 0 1 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 1 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0",
+	},
+	{ 	// texts padded to max_len
+		ids      = "101 7592 1010 2088 999 2009 1005 1055 16798 2549 1012 102 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 101 7597 3123 1017 1012 1019 1003 2000 1002 1015 1010 22018 1012 5179 1006 5443 1012 1574 2487 1012 1016 24700 1007 1517 1037 2260 1011 3204 2152 999 999 102 101 1864 1876 1950 1671 30239 30227 30233 30240 1746 1861 100 100 1469 30006 30021 29991 30014 30020 29999 30008 1467 30009 30020 29997 30017 30003 30017 102 0 0 0 101 102 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 101 1037 102 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0",
+		segments = "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0",
+		mask     = "1 1 1 1 1 1 1 1 1 1 1 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 0 0 0 1 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 1 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0",
+	},
+	{ 	// pairs padded to the longest
+		ids      = "101 7592 1010 2088 999 2009 1005 1055 16798 2549 1012 102 1037 102 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 101 7597 3123 1017 1012 1019 1003 2000 1002 1015 1010 22018 1012 5179 1006 5443 1012 1574 2487 1012 1016 24700 1007 1517 1037 2260 1011 3204 2152 999 102 102 101 1864 1876 1950 1671 30239 30227 30233 30240 1746 1861 100 100 1469 30006 30021 102 1864 1876 1950 1671 30239 30227 30233 30240 1746 1861 100 100 1469 30006 102 101 102 7597 3123 1017 1012 1019 1003 2000 1002 1015 1010 22018 1012 5179 1006 5443 1012 1574 2487 1012 1016 24700 1007 1517 1037 2260 1011 3204 2152 999 102 101 1037 102 7592 1010 2088 999 2009 1005 1055 16798 2549 1012 102 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0",
+		segments = "0 0 0 0 0 0 0 0 0 0 0 0 1 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 0 0 0 1 1 1 1 1 1 1 1 1 1 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0",
+		mask     = "1 1 1 1 1 1 1 1 1 1 1 1 1 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0",
 	},
 }
 
@@ -206,8 +308,11 @@ TK_CASES := [?]struct {
 // event_study_test, skipped if absent): ids of 35 texts (punctuation,
 // contractions, whitespace runs, accents, CJK / Hangul, emoji, control and
 // format characters, special tokens in the text, a 120-character word) and
-// their decoding; padding / special tokens / truncation of the fixed-length
-// input; no leaks or bad frees on a heap allocator.
+// their decoding, also cased (do_lower_case = False); sentence pairs (segment
+// ids, longest-first truncation) and batches (padded to the longest or
+// max_len, texts and pairs; GPT-2 with its mask); padding / special tokens /
+// truncation of the fixed-length input; no leaks or bad frees on a heap
+// allocator.
 tokenizer_reference_test :: proc(allocator: mem.Allocator) {
 	seed_test(#procedure)
 	fmt.println("\n=== Tokenizers vs Hugging Face ===")
@@ -293,18 +398,109 @@ tokenizer_reference_test :: proc(allocator: mem.Allocator) {
 			),
 		)
 
+		// cased: no lowercasing, no accent stripping
+		wp_cased, ok_c := tok.wordpiece_tokenizer_new(BERT_VOCAB, 32, lowercase = false)
+		cased := 0
+		for c in TK_CASES {
+			ref := parse(c.wp_cased)
+			ids := tok.wordpiece_encode(&wp_cased, c.text)
+			if same(
+				ids,
+				ref,
+			) {cased += 1} else {fmt.printf("   cased ids differ for %q: %v\n", c.text, ids)}
+			delete(ids)
+			delete(ref)
+		}
+		tok.wordpiece_tokenizer_free(&wp_cased)
+		// sentence pairs: [CLS] a [SEP] b [SEP], segment ids, longest_first truncation
+		pairs_ok := 0
+		for p in TK_PAIRS {
+			ids, mask, segments := tok.tokenize_pair(&wp, p.a, p.b)
+			r_ids, r_seg, r_mask := parse(p.ids), parse(p.segments), parse(p.mask)
+			if same(ids, r_ids) && same(segments, r_seg) && same(mask, r_mask) {pairs_ok += 1}
+			for x in ([][]int{ids, mask, segments}) {delete(x)}
+			for x in ([][dynamic]int{r_ids, r_seg, r_mask}) {delete(x)}
+		}
+		expect(
+			&passed,
+			&total,
+			ok_c && cased == N && pairs_ok == len(TK_PAIRS),
+			fmt.tprintf(
+				"cased (BertTokenizer do_lower_case = False): ids %d/%d; sentence pairs with segment ids, truncated longest-first to 32 (a, b, both cut, tie): %d/%d",
+				cased,
+				N,
+				pairs_ok,
+				len(TK_PAIRS),
+			),
+		)
+
+		// batches: texts padded to the longest / to max_len, pairs (texts, reversed)
+		texts, reversed: [len(TK_BATCH)]string
+		for i, k in TK_BATCH {texts[k], reversed[len(TK_BATCH) - 1 - k] = TK_CASES[i].text, TK_CASES[i].text}
+		batch_ok := 0
+		for ref, k in TK_BATCH_REF {
+			in_ids, seg, att := tok.tokenize_batch_to_tensors(
+				&wp,
+				texts[:],
+				pairs = reversed[:] if k == 2 else nil,
+				pad_to_longest = k != 1,
+			)
+			r_ids, r_seg, r_mask := parse(ref.ids), parse(ref.segments), parse(ref.mask)
+			L := len(r_ids) / len(TK_BATCH)
+			ok :=
+				in_ids.shape == {len(TK_BATCH), L, 1, 1} &&
+				seg.shape == in_ids.shape &&
+				att.shape == in_ids.shape
+			for v, i in r_ids {ok &&= in_ids.data.data[i] == f64(v) && seg.data.data[i] == f64(r_seg[i]) && att.data.data[i] == f64(r_mask[i])}
+			if ok {batch_ok += 1}
+			for x in ([]^t.Tensor{in_ids, seg, att}) {t.tensor_free(x)}
+			for x in ([][dynamic]int{r_ids, r_seg, r_mask}) {delete(x)}
+		}
+		// GPT-2 batch: each row its ids, then padding the mask marks
+		g_ids, g_mask := tok.bpe_tokenize_batch_to_tensors(&bpe, texts[:])
+		gpt_batch_ok := g_ids.shape[0] == len(TK_BATCH)
+		L := g_ids.shape[1]
+		longest := 0
+		for text, r in texts {
+			raw := tok.bpe_encode(&bpe, text)
+			longest = max(longest, len(raw))
+			for i in 0 ..< L {
+				real := i < len(raw)
+				gpt_batch_ok &&= g_mask.data.data[r * L + i] == (1 if real else 0)
+				gpt_batch_ok &&= g_ids.data.data[r * L + i] == f64(raw[i] if real else bpe.pad_id)
+			}
+			delete(raw)
+		}
+		gpt_batch_ok &&= L == min(longest, bpe.max_len) // the long text is cut to max_len
+		t.tensor_free(g_ids)
+		t.tensor_free(g_mask)
+		expect(
+			&passed,
+			&total,
+			batch_ok == len(TK_BATCH_REF) && gpt_batch_ok,
+			fmt.tprintf(
+				"batches of %d texts (one without tokens) vs HF: padded to the longest / to max_len / sentence pairs %d/%d (ids, segment ids, mask); GPT-2 batch padded to its longest text with the mask %v",
+				len(TK_BATCH),
+				batch_ok,
+				len(TK_BATCH_REF),
+				gpt_batch_ok,
+			),
+		)
+
 		// fixed-length input: BERT [CLS] … [SEP] truncated to max_len, GPT-2 padded
-		long := TK_CASES[13].text // 2 words of 13 + 4 pieces
+		long := strings.repeat(TK_CASES[5].text, 3) // ~90 pieces
 		ids, mask := tok.tokenize(&wp, long)
 		raw := tok.wordpiece_encode(&wp, long)
 		n_mask := 0
 		for m in mask {n_mask += m}
 		bert_ok :=
+			len(raw) > 32 &&
 			ids[0] == wp.cls_id &&
 			ids[n_mask - 1] == wp.sep_id &&
 			n_mask == min(len(raw) + 2, 32) &&
 			(n_mask == 32 || ids[n_mask] == wp.pad_id)
 		for i in 1 ..< n_mask - 1 {bert_ok &&= ids[i] == raw[i - 1]}
+		delete(long) // before the leak check below (a defer would run after it)
 		delete(ids)
 		delete(mask)
 		delete(raw)

@@ -285,8 +285,10 @@ bpe_tokenize :: proc(
 ) {
 	raw := bpe_encode(tok, text, allocator)
 	defer delete(raw, allocator)
-	return _pack(
+	segments: []int
+	input_ids, attention_mask, segments = _pack(
 		raw,
+		nil,
 		tok.max_len,
 		tok.cls_id,
 		tok.sep_id,
@@ -294,6 +296,8 @@ bpe_tokenize :: proc(
 		add_special_tokens,
 		allocator,
 	)
+	delete(segments, allocator)
+	return
 }
 
 // max_len ids without special tokens (padded) and segment ids as [1, max_len] tensors
@@ -308,5 +312,53 @@ bpe_tokenize_to_tensors :: proc(
 	ids, mask := bpe_tokenize(tok, text, allocator, false)
 	defer delete(ids, allocator)
 	defer delete(mask, allocator)
-	return _to_tensors(ids, allocator)
+	input_ids_tensor, segment_ids_tensor, _ = _to_tensors(ids, nil, nil, 1, allocator)
+	return
+}
+
+// Several texts as one batch [len(texts), L] of ids (as bpe_tokenize, padded
+// with pad_id) and attention mask: L = the longest text (pad_to_longest) or
+// max_len. With GPT-2 (no [PAD]) the padding id is 0 = "!", so the mask is
+// what tells padding apart.
+bpe_tokenize_batch_to_tensors :: proc(
+	tok: ^BPETokenizer,
+	texts: []string,
+	allocator: mem.Allocator = context.allocator,
+	add_special_tokens := false,
+	pad_to_longest := true,
+) -> (
+	input_ids: ^t.Tensor,
+	attention_mask: ^t.Tensor,
+) {
+	Batch :: struct {
+		tok:     ^BPETokenizer,
+		texts:   []string,
+		special: bool,
+	}
+	batch := Batch{tok, texts, add_special_tokens}
+	segments: ^t.Tensor
+	input_ids, segments, attention_mask = _batch_to_tensors(
+		len(texts),
+		tok.max_len,
+		pad_to_longest,
+		&batch,
+		proc(i: int, data: rawptr, allocator: mem.Allocator) -> (ids, mask, segments: []int) {
+			b := (^Batch)(data)
+			raw := bpe_encode(b.tok, b.texts[i], allocator)
+			defer delete(raw, allocator)
+			return _pack(
+				raw,
+				nil,
+				b.tok.max_len,
+				b.tok.cls_id,
+				b.tok.sep_id,
+				b.tok.pad_id,
+				b.special,
+				allocator,
+			)
+		},
+		allocator,
+	)
+	t.tensor_free(segments)
+	return
 }
