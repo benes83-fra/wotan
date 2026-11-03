@@ -278,6 +278,37 @@ prob_forecast_student_t_crps :: proc(mu, sigma, nu, y: f64) -> f64 {
 	return sigma * (fit - spread)
 }
 
+// Empirical quantiles of samples at the levels (out[j] for levels[j]),
+// linearly interpolated as numpy.quantile's default
+prob_forecast_sample_quantiles :: proc(samples: []f64, levels: []f64, out: []f64) {
+	sorted := slice.clone(samples, context.temp_allocator)
+	defer delete(sorted, context.temp_allocator)
+	slice.sort(sorted)
+	n := len(sorted)
+	for q, j in levels {
+		h := f64(n - 1) * q
+		lo := int(h)
+		hi := min(lo + 1, n - 1)
+		out[j] = sorted[lo] + (h - f64(lo)) * (sorted[hi] - sorted[lo])
+	}
+}
+
+// CRPS of an ensemble of samples for an outcome y (the forecast is their
+// empirical distribution): mean|X - y| - ½·mean|X - X'| over all pairs, as
+// properscoring.crps_ensemble; on the sorted samples in O(n log n)
+prob_forecast_sample_crps :: proc(samples: []f64, y: f64) -> f64 {
+	sorted := slice.clone(samples, context.temp_allocator)
+	defer delete(sorted, context.temp_allocator)
+	slice.sort(sorted)
+	m := f64(len(sorted))
+	fit, spread := 0.0, 0.0
+	for x, i in sorted {
+		fit += abs(x - y)
+		spread += (2 * f64(i) - m + 1) * x // Σ_{i,j} |x_i - x_j| = 2·Σ_i (2i - m + 1)·x_(i)
+	}
+	return fit / m - spread / (m * m)
+}
+
 // Mean pinball loss of quantile predictions pred [N·Q] (row-major, levels
 // quantiles) for outcomes y [N]. Several horizons: N = batch · horizon, the
 // layout of Prob_Forecast.quantiles.
