@@ -143,23 +143,238 @@ PF_CLOSED := [?]f64 {
 	0.6777118372703509,
 	2.5338978013305167,
 }
+@(private = "file")
+PF_LG_X := [?]f64{0.3, 1.0, 2.5, 7.3, 9.99, 10.0, 40.0, 123.4, -1.5, -0.2}
+@(private = "file")
+PF_LG_Y := [?]f64 {
+	1.0957979948180756,
+	0.0,
+	0.2846828704729192,
+	7.147892523022249,
+	12.779315214350193,
+	12.801827480081469,
+	106.63176026064346,
+	469.33609744219063,
+	0.860047015376481,
+	1.7614975908339379,
+}
+@(private = "file")
+PF_LG_DX := [?]f64 {
+	-3.502524222200133,
+	-0.5772156649015328,
+	0.7031566406452431,
+	1.917820335637986,
+	2.2507003728312007,
+	2.251752589066721,
+	3.6763273740348428,
+	4.8113737751162775,
+	0.7031566406452433,
+	4.034991433293862,
+}
+@(private = "file")
+PF_T_MU := [?]f64 {
+	-1.9978166924497212,
+	0.272128869412488,
+	-1.1017166275810448,
+	0.033057220158269195,
+	0.04363199256942161,
+	-1.9884297882311208,
+}
+@(private = "file")
+PF_T_RS := [?]f64 {
+	-0.23342252376577002,
+	-0.255790031399391,
+	0.9620005318430944,
+	-1.1814468079562157,
+	0.7380418978456841,
+	-1.0989727630364063,
+}
+@(private = "file")
+PF_T_RN := [?]f64 {
+	-0.6625817853998335,
+	-1.6809463368444222,
+	2.897462577843344,
+	1.1364261995765865,
+	4.863465005690425,
+	1.283832758164641,
+}
+@(private = "file")
+PF_T_Y := [?]f64 {
+	1.6899854674383508,
+	1.6813657525306802,
+	-1.2132230718191033,
+	-0.14005689327676416,
+	2.700777735489252,
+	-0.7931015303459432,
+}
+@(private = "file")
+PF_T_LOSS := [?]f64{2.8745820826876756}
+@(private = "file")
+PF_T_DMU := [?]f64 {
+	-0.1494757837612946,
+	-0.27667887226208404,
+	0.011798199662546121,
+	0.44522321887291527,
+	-0.3360609119104925,
+	-0.6957479501106074,
+}
+@(private = "file")
+PF_T_DRS := [?]f64 {
+	-0.2913847865505936,
+	-0.16989881271123833,
+	0.09305607344311553,
+	0.07860591820039418,
+	-0.43533279911115014,
+	-0.5779027509840975,
+}
+@(private = "file")
+PF_T_DRN := [?]f64 {
+	0.06177978252336228,
+	0.002462290592697314,
+	-0.0018900301374112233,
+	-0.00792801678534393,
+	0.0054385944922120755,
+	0.15068759304424487,
+}
+@(private = "file")
+PF_PIN2_P := [?]f64 {
+	0.18879953129109867,
+	-0.021223460417289796,
+	0.6092164928327407,
+	-0.3649087419473726,
+	-0.15236188875684828,
+	0.24238142867215043,
+	0.10302313848680769,
+	-0.8649727462818201,
+	0.8957830431894438,
+	-1.298481208246912,
+	-1.2011155488035266,
+	-1.282491794740462,
+	0.9669722789332148,
+	-0.36060836889927,
+	-0.9710363785210655,
+	-1.1360213941896466,
+	0.42113113746240616,
+	-1.054840662577835,
+	-1.2720782100976422,
+	0.6139930624688609,
+	-1.1967077271925706,
+	-0.32243815075139726,
+	-0.006761540346521785,
+	-0.4453353669298123,
+}
+@(private = "file")
+PF_PIN2_Y := [?]f64 {
+	-0.05409396159544828,
+	1.3387734990547715,
+	-0.516894152589275,
+	-1.2593071588782276,
+	-1.8367457051936795,
+	-0.20476611683386706,
+	-0.3522570104112305,
+	0.2650909069303235,
+}
+@(private = "file")
+PF_PIN2_LOSS := [?]f64{0.40914474131656625}
+@(private = "file")
+PF_PIN2_DP := [?]f64 {
+	0.0375,
+	0.020833333333333332,
+	0.004166666666666666,
+	-0.004166666666666667,
+	-0.020833333333333332,
+	-0.0375,
+	0.0375,
+	-0.020833333333333332,
+	0.004166666666666666,
+	-0.004166666666666667,
+	0.020833333333333332,
+	-0.0375,
+	0.0375,
+	0.020833333333333332,
+	0.004166666666666666,
+	-0.004166666666666667,
+	0.020833333333333332,
+	-0.0375,
+	-0.004166666666666667,
+	0.020833333333333332,
+	-0.0375,
+	-0.004166666666666667,
+	-0.020833333333333332,
+	-0.0375,
+}
+@(private = "file")
+PF_TCLOSED := [?]f64 {
+	0.001,
+	0.02,
+	4.0,
+	0.05,
+	-0.03,
+	-0.04163693572653301,
+	0.04163693572653301,
+	0.06305740804189747,
+	0.020071807108312953,
+	-1.7552083074872882,
+	-0.5,
+	1.3,
+	2.5,
+	0.01,
+	0.7,
+	-7.459044524940137,
+	7.459044524940137,
+	12.318761546477523,
+	0.7389899434853335,
+	1.792257216851898,
+	2.0,
+	0.4,
+	30.0,
+	0.9,
+	1.1,
+	2.5241660101565584,
+	-2.5241660101565584,
+	-1.9188445238958465,
+	0.6728645166274061,
+	2.4279690186264675,
+	0.0,
+	1.0,
+	1.5,
+	0.025,
+	-4.0,
+	-6.0166631044279315,
+	6.0166631044279315,
+	18.261429420052433,
+	3.040544465427974,
+	4.14757000085852,
+}
 
 // Probabilistic forecasting (ml_finance/prob_forecast.odin, nn/losses.odin):
-// 1. the Gaussian NLL and pinball losses and their gradients equal torch's;
-//    Gaussian quantile, VaR / ES, CRPS and NLL equal scipy's
-// 2. the gradients of the whole forecaster (Gaussian and quantile heads, on an
-//    LSTM and a TCN) match finite differences
-// 3. on simulated GARCH(1,1) returns (true conditional σ known), both
-//    forecasters (on an LSTM) trained on 2500 windows are scored on the next
-//    1000: they must beat the unconditional distribution of the training
-//    targets, and their intervals / quantiles must be calibrated to within 5
-//    points. Over 5 data seeds both beat it every time; the 90% interval
-//    covered 82.9-90.2% and the quantiles were off by at most 1.9-4.2 points
-//    (the lowest values on a seed whose test period is far more turbulent
-//    than its training period). A TCN encoder did worse here (it lost to the
-//    unconditional baseline on 1 of 5 seeds with either head): the GARCH
-//    volatility has a half-life of ~34 steps, which the LSTM's state carries
-//    more easily.
+// 1. the Gaussian / Student-t NLL and pinball losses (also over 2 horizons),
+//    lgamma and their gradients equal torch's; Gaussian and t quantile,
+//    VaR / ES, CRPS and NLL equal scipy's (t ES: mpmath)
+// 2. the gradients of the whole forecaster (Gaussian, quantile and Student-t
+//    heads; on an LSTM over 3 horizons and a TCN over 1) match finite differences
+// 3. on simulated GARCH(1,1) returns (true conditional σ known), forecasters
+//    on an LSTM trained on 2500 windows are scored on the next 1000:
+//    - one step: they must beat the unconditional distribution of the
+//      training targets, and their intervals / quantiles must be calibrated
+//      to within 5 points
+//    - 10 steps (Gaussian): beat it summed over the horizons, every horizon's
+//      90% interval calibrated to within 5 points
+//    - t(5) innovations: the Student-t head must beat the Gaussian head and
+//      learn 4 < mean ν < 8
+//    Over 5 data seeds (this run: seed 0) all beat the baseline / Gaussian
+//    every time (Student-t NLL by 0.03-0.05, ν 5.1-6.6, 1% VaR breached
+//    8-14 times vs 9-18 for the Gaussian, 10 expected). The quantiles were
+//    calibrated on all 5 (off by ≤ 4.2 points), the Gaussian 90% intervals
+//    on 4 (87.7-91.0%); on the other seed the test period is far more
+//    turbulent than the training period and they cover 82.6-84.6%. The
+//    10-step σ forecasts are within 5-8% of the expected σ(t+h) at every
+//    horizon (that seed: 13-15%), but how fast they flatten over the 10 steps
+//    is noisy (0.60-0.94 of the spread at h = 1, expected 0.83-0.87), so it
+//    is reported, not checked. A TCN encoder did worse here
+//    (it lost to the unconditional baseline on 1 of 5 seeds with either
+//    head): the GARCH volatility has a half-life of ~34 steps, which the
+//    LSTM's state carries more easily.
 prob_forecast_test :: proc(allocator: mem.Allocator) {
 	seed_test(#procedure)
 	fmt.println("\n=== Probabilistic forecasting ===")
@@ -219,16 +434,85 @@ prob_forecast_test :: proc(allocator: mem.Allocator) {
 			),
 		)
 	}
+	{
+		// lgamma and digamma vs torch
+		x := t.tensor_new(l.matrix_new(f64, 1, len(PF_LG_X)), true)
+		copy(x.data.data, PF_LG_X[:])
+		lg := t.tensor_lgamma(x)
+		t.tensor_backward(t.tensor_sum(lg))
+		d_lg := 0.0
+		for v, i in lg.data.data {
+			d_lg = max(d_lg, abs(v - PF_LG_Y[i]) / max(1, abs(PF_LG_Y[i])))
+			d_lg = max(d_lg, abs(x.grad.data[i] - PF_LG_DX[i]) / max(1, abs(PF_LG_DX[i])))
+		}
+		// Student-t NLL, σ = softplus, ν = 2 + exp
+		mat :: proc(v: []f64, rows: int, grad: bool) -> ^t.Tensor {
+			m := l.matrix_new(f64, rows, len(v) / rows)
+			copy(m.data, v)
+			x := t.tensor_new(m, grad)
+			x.shape = {rows, len(v) / rows, 1, 1}
+			return x
+		}
+		mu, rs, rn := mat(PF_T_MU[:], 3, true), mat(PF_T_RS[:], 3, true), mat(PF_T_RN[:], 3, true)
+		two := mat({2, 2}, 1, false)
+		nu := t.tensor_add_bias(t.tensor_exp(rn), two)
+		stu := nn.student_t_nll_loss(mu, t.tensor_softplus(rs), nu, mat(PF_T_Y[:], 3, false))
+		t.tensor_backward(stu)
+		d_stu := max(
+			abs(stu.data.data[0] - PF_T_LOSS[0]),
+			_lt_diff(mu.grad.data, PF_T_DMU[:]),
+			_lt_diff(rs.grad.data, PF_T_DRS[:]),
+			_lt_diff(rn.grad.data, PF_T_DRN[:]),
+		)
+		// pinball loss over 2 horizons
+		p := mat(PF_PIN2_P[:], 4, true)
+		pin := nn.quantile_loss(p, PF_PIN2_Y[:], {0.1, 0.5, 0.9})
+		t.tensor_backward(pin)
+		d_pin := max(abs(pin.data.data[0] - PF_PIN2_LOSS[0]), _lt_diff(p.grad.data, PF_PIN2_DP[:]))
+		// t quantile, VaR / ES, CRPS, NLL vs scipy
+		d_q, d_score := 0.0, 0.0
+		for i := 0; i < len(PF_TCLOSED); i += 10 {
+			c := PF_TCLOSED[i:i + 10]
+			m, s, v, a, y := c[0], c[1], c[2], c[3], c[4]
+			var, es := ml_fin.prob_forecast_student_t_var_es(m, s, v, a)
+			d_q = max(
+				d_q,
+				abs(ml_fin.prob_forecast_student_t_quantile(m, s, v, a) - c[5]) / s,
+				abs(var - c[6]) / s,
+				abs(es - c[7]) / s,
+			)
+			d_score = max(
+				d_score,
+				abs(ml_fin.prob_forecast_student_t_crps(m, s, v, y) - c[8]) / s,
+				abs(ml_fin.prob_forecast_student_t_nll(m, s, v, y) - c[9]),
+			)
+		}
+		expect(
+			&passed,
+			&total,
+			d_lg < 1e-13 && d_stu < 1e-13 && d_pin < 1e-14 && d_q < 1e-10 && d_score < 1e-10,
+			fmt.tprintf(
+				"lgamma / digamma vs torch %.1e, Student-t NLL (ν = 2 + exp) loss and grads %.1e, pinball loss over 2 horizons %.1e; t quantile / VaR / ES %.1e, CRPS / NLL %.1e vs scipy",
+				d_lg,
+				d_stu,
+				d_pin,
+				d_q,
+				d_score,
+			),
+		)
+	}
 
-	// 2. Gradients of the whole forecaster vs finite differences
-	for combo in 0 ..< 4 {
-		output := ml_fin.Prob_Output(combo % 2)
+	// 2. Gradients of the whole forecaster vs finite differences: each head on
+	//    an LSTM over 3 horizons and on a TCN over 1
+	for combo in 0 ..< 6 {
+		output := ml_fin.Prob_Output(combo % 3)
 		config := ml_fin.ProbForecasterConfig {
 			input_size  = 2,
 			hidden_size = 3,
-			seq_backend = .LSTM if combo < 2 else .TCN,
+			seq_backend = .LSTM if combo < 3 else .TCN,
 			output      = output,
 			quantiles   = {0.1, 0.5, 0.9},
+			horizon     = 3 if combo < 3 else 1,
 		}
 		model := ml_fin.prob_forecaster_new(config)
 		defer ml_fin.prob_forecaster_free(model)
@@ -238,15 +522,24 @@ prob_forecast_test :: proc(allocator: mem.Allocator) {
 		x := t.tensor_new(xd, false)
 		x.shape = {B, T, 2, 1}
 		defer t.tensor_free(x)
-		y := []f64{0.3, -0.8, 1.1}
+		ys := []f64{0.3, -0.8, 1.1, 0.5, -0.1, -1.4, 0.9, 0.2, -0.6}
+		y := ys[:B * config.horizon]
 
 		scope: t.Graph_Scope
 		defer t.graph_scope_destroy(&scope)
 		ps := ml_fin.prob_forecaster_parameters(model)
 		defer delete(ps)
 		// Away from ReLU kinks: zero biases on zero (padded / dead) inputs put a
-		// pre-activation exactly at 0, where finite differences see half a slope
-		for p in ps {for &v in p.data.data {v += rand.float64_range(-0.1, 0.1)}}
+		// pre-activation exactly at 0, where finite differences see half a slope.
+		// Biases go up (not ±): with 3 channels and only the last step read,
+		// negative biases can switch a TCN block's ReLU off for the whole batch
+		// (then its convolutions rightly get no gradient)
+		for p in ps {
+			for &v in p.data.data {
+				v +=
+					rand.float64_range(0.05, 0.15) if p.data.rows == 1 else rand.float64_range(-0.1, 0.1)
+			}
+		}
 		t.graph_begin(&scope)
 		t.tensor_backward(ml_fin.prob_forecaster_loss(model, x, y))
 		t.graph_end(&scope)
@@ -275,9 +568,10 @@ prob_forecast_test :: proc(allocator: mem.Allocator) {
 			&total,
 			worst < 1e-6 && with_grad == len(ps),
 			fmt.tprintf(
-				"%v head on %v: %d/%d parameters get a gradient, max error vs finite differences %.1e",
+				"%v head on %v, %d horizon(s): %d/%d parameters get a gradient, max error vs finite differences %.1e",
 				output,
 				config.seq_backend,
+				config.horizon,
 				with_grad,
 				len(ps),
 				worst,
@@ -287,18 +581,29 @@ prob_forecast_test :: proc(allocator: mem.Allocator) {
 
 	// 3. Calibration on GARCH(1,1) returns: σ²_t = ω + α·r²_{t-1} + β·σ²_{t-1}
 	{
+		rand.reset(1000) // data independent of the draws above
 		OMEGA, ALPHA, BETA :: 0.02, 0.1, 0.88 // unconditional variance 1
 		W, N_TRAIN, N_TEST :: 20, 2500, 1000
 		n := W + N_TRAIN + N_TEST
+		// innovations: N(0, 1), or (nu > 0) a t(ν) scaled to unit variance
+		garch :: proc(r, sig: []f64, nu: int) {
+			s2 := 1.0
+			for i in 0 ..< len(r) {
+				if i > 0 {s2 = OMEGA + ALPHA * r[i - 1] * r[i - 1] + BETA * s2}
+				sig[i] = math.sqrt(s2)
+				e := rand.norm_float64()
+				if nu > 0 {
+					chi2 := 0.0
+					for _ in 0 ..< nu {chi2 += math.pow(rand.norm_float64(), 2)}
+					e *= math.sqrt(f64(nu - 2) / chi2)
+				}
+				r[i] = sig[i] * e
+			}
+		}
 		r, sig := make([]f64, n), make([]f64, n)
 		defer delete(r)
 		defer delete(sig)
-		s2 := 1.0
-		for i in 0 ..< n {
-			if i > 0 {s2 = OMEGA + ALPHA * r[i - 1] * r[i - 1] + BETA * s2}
-			sig[i] = math.sqrt(s2)
-			r[i] = sig[i] * rand.norm_float64()
-		}
+		garch(r, sig, 0)
 		// windows of (r, |r|) for steps i - W ..< i, target r[i]
 		batch_x :: proc(r: []f64, idx: []int, alloc: mem.Allocator) -> ^t.Tensor {
 			m := l.matrix_new(f64, 1, len(idx) * W * 2, alloc)
@@ -353,8 +658,9 @@ prob_forecast_test :: proc(allocator: mem.Allocator) {
 					batch := order[b:b + BATCH]
 					t.graph_begin(&scope)
 					alloc := t.graph_allocator(&scope)
-					y := make([]f64, BATCH, alloc)
-					for i, k in batch {y[k] = r[i]}
+					H := model.config.horizon
+					y := make([]f64, BATCH * H, alloc)
+					for i, k in batch {copy(y[k * H:][:H], r[i:i + H])}
 					loss := ml_fin.prob_forecaster_loss(model, batch_x(r, batch, alloc), y)
 					nn.adam_zero_grad(&opt)
 					t.tensor_backward(loss)
@@ -365,9 +671,12 @@ prob_forecast_test :: proc(allocator: mem.Allocator) {
 				}
 			}
 		}
-		// Predictions on the test windows: [N_TEST, n_out] (μ, σ or the quantiles)
+		// Predictions on the test windows, per window: the quantiles [H·Q], or
+		// μ [H], σ [H] (and ν [H] for .StudentT)
 		predict :: proc(model: ^ml_fin.ProbForecaster, r: []f64, idx: []int) -> []f64 {
-			n_out := 2 if model.config.output == .Gaussian else len(model.config.quantiles)
+			H := model.config.horizon
+			n_out := H * len(model.config.quantiles) if model.config.output == .Quantile else 2 * H
+			if model.config.output == .StudentT {n_out = 3 * H}
 			pred := make([]f64, len(idx) * n_out)
 			scope: t.Graph_Scope
 			defer t.graph_scope_destroy(&scope)
@@ -380,11 +689,13 @@ prob_forecast_test :: proc(allocator: mem.Allocator) {
 				)
 				for k in 0 ..< len(batch) {
 					row := pred[(b + k) * n_out:][:n_out]
-					if model.config.output == .Gaussian {
-						row[0], row[1] = f.mu.data.data[k], f.sigma.data.data[k]
-					} else {
+					if model.config.output == .Quantile {
 						copy(row, f.quantiles.data.data[k * n_out:][:n_out])
+						continue
 					}
+					copy(row[:H], f.mu.data.data[k * H:][:H])
+					copy(row[H:2 * H], f.sigma.data.data[k * H:][:H])
+					if f.nu != nil {copy(row[2 * H:], f.nu.data.data[k * H:][:H])}
 				}
 				t.graph_end(&scope)
 			}
@@ -483,6 +794,147 @@ prob_forecast_test :: proc(allocator: mem.Allocator) {
 					cov,
 					levels,
 					crossed,
+					N_TEST,
+				),
+			)
+		}
+
+		// Gaussian head over H = 10 horizons: E[σ²_{t+h}] = 1 + (α + β)^h·(σ²_t - 1)
+		// reverts to the unconditional variance, the forecasts must follow it
+		{
+			H :: 10
+			model := ml_fin.prob_forecaster_new(
+				{
+					input_size = 2,
+					hidden_size = 16,
+					seq_backend = .LSTM,
+					output = .Gaussian,
+					horizon = H,
+				},
+			)
+			defer ml_fin.prob_forecaster_free(model)
+			// targets r[i ..< i + H] stay inside their period
+			train_h, test_h := train_idx[:N_TRAIN - H + 1], test_idx[:N_TEST - H + 1]
+			train(model, r, train_h)
+			pred := predict(model, r, test_h)
+			defer delete(pred)
+			nll, nll_base, coverage, sd_err: [H]f64
+			// cross-sectional spread of the predicted and the expected σ per horizon
+			sum_p, sum2_p, sum_e, sum2_e: [H]f64
+			for i, k in test_h {
+				for h in 0 ..< H {
+					m, s, y := pred[k * 2 * H + h], pred[k * 2 * H + H + h], r[i + h]
+					nll[h] += ml_fin.prob_forecast_gaussian_nll(m, s, y)
+					nll_base[h] += ml_fin.prob_forecast_gaussian_nll(base_mu, base_sd, y)
+					lo, hi :=
+						ml_fin.prob_forecast_gaussian_quantile(m, s, 0.05),
+						ml_fin.prob_forecast_gaussian_quantile(m, s, 0.95)
+					if y >= lo && y <= hi {coverage[h] += 1}
+					sd_true := math.sqrt(
+						1 + math.pow(ALPHA + BETA, f64(h)) * (sig[i] * sig[i] - 1),
+					)
+					sd_err[h] += abs(s - sd_true) / sd_true
+					sum_p[h] += s
+					sum2_p[h] += s * s
+					sum_e[h] += sd_true
+					sum2_e[h] += sd_true * sd_true
+				}
+			}
+			M := f64(len(test_h))
+			for h in 0 ..< H {
+				nll[h] /= M
+				nll_base[h] /= M
+				coverage[h] /= M
+				sd_err[h] /= M
+			}
+			spread :: proc(s, s2, M: f64) -> f64 {return math.sqrt(s2 / M - (s / M) * (s / M))}
+			// how much the σ forecasts flatten from h = 1 to h = H (expected: (α + β)^(H-1) roughly)
+			flat_p := spread(sum_p[H - 1], sum2_p[H - 1], M) / spread(sum_p[0], sum2_p[0], M)
+			flat_e := spread(sum_e[H - 1], sum2_e[H - 1], M) / spread(sum_e[0], sum2_e[0], M)
+			worst_cov := 0.0
+			for c in coverage {worst_cov = max(worst_cov, abs(c - 0.9))}
+			expect(
+				&passed,
+				&total,
+				math.sum(nll[:]) < math.sum(nll_base[:]) && worst_cov < 0.05,
+				fmt.tprintf(
+					"Gaussian / LSTM over %d horizons: NLL %.4f at h = 1 ... %.4f at h = %d (unconditional %.4f ... %.4f), 90%% coverage %.1f%% ... %.1f%%, σ off the expected σ(t+h) by %.1f%% ... %.1f%%, spread of σ(t+%d) / σ(t+1) forecasts %.2f (expected σ %.2f)",
+					H,
+					nll[0],
+					nll[H - 1],
+					H,
+					nll_base[0],
+					nll_base[H - 1],
+					100 * coverage[0],
+					100 * coverage[H - 1],
+					100 * sd_err[0],
+					100 * sd_err[H - 1],
+					H,
+					flat_p,
+					flat_e,
+				),
+			)
+		}
+
+		// Student-t vs Gaussian head on GARCH(1,1) with t(5) innovations: the
+		// conditional distribution is a t(5) with scale σ_t·√(3/5)
+		{
+			NU :: 5
+			r_t, sig_t := make([]f64, n), make([]f64, n)
+			defer delete(r_t)
+			defer delete(sig_t)
+			garch(r_t, sig_t, NU)
+			stu := ml_fin.prob_forecaster_new(
+				{input_size = 2, hidden_size = 16, seq_backend = .LSTM, output = .StudentT},
+			)
+			defer ml_fin.prob_forecaster_free(stu)
+			gau := ml_fin.prob_forecaster_new(
+				{input_size = 2, hidden_size = 16, seq_backend = .LSTM, output = .Gaussian},
+			)
+			defer ml_fin.prob_forecaster_free(gau)
+			train(stu, r_t, train_idx)
+			train(gau, r_t, train_idx)
+			p_t, p_g := predict(stu, r_t, test_idx), predict(gau, r_t, test_idx)
+			defer delete(p_t)
+			defer delete(p_g)
+			nll_t, nll_g, nll_true, nu_mean, crps_t, crps_g := 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+			breach_t, breach_g := 0, 0
+			for i, k in test_idx {
+				y := r_t[i]
+				m, s, v := p_t[3 * k], p_t[3 * k + 1], p_t[3 * k + 2]
+				nll_t += ml_fin.prob_forecast_student_t_nll(m, s, v, y) / N_TEST
+				nll_g += ml_fin.prob_forecast_gaussian_nll(p_g[2 * k], p_g[2 * k + 1], y) / N_TEST
+				nll_true +=
+					ml_fin.prob_forecast_student_t_nll(
+						0,
+						sig_t[i] * math.sqrt(f64(NU - 2) / NU),
+						NU,
+						y,
+					) /
+					N_TEST
+				nu_mean += v / N_TEST
+				crps_t += ml_fin.prob_forecast_student_t_crps(m, s, v, y) / N_TEST
+				crps_g +=
+					ml_fin.prob_forecast_gaussian_crps(p_g[2 * k], p_g[2 * k + 1], y) / N_TEST
+				var_t, _ := ml_fin.prob_forecast_student_t_var_es(m, s, v, 0.01)
+				var_g, _ := ml_fin.prob_forecast_gaussian_var_es(p_g[2 * k], p_g[2 * k + 1], 0.01)
+				if -y > var_t {breach_t += 1}
+				if -y > var_g {breach_g += 1}
+			}
+			expect(
+				&passed,
+				&total,
+				nll_t < nll_g && nu_mean > 4 && nu_mean < 8,
+				fmt.tprintf(
+					"Student-t vs Gaussian / LSTM on t(5)-GARCH: NLL %.4f vs %.4f (true distribution %.4f), CRPS %.4f vs %.4f, mean predicted ν %.1f, 1%% VaR breached %d vs %d times of %d",
+					nll_t,
+					nll_g,
+					nll_true,
+					crps_t,
+					crps_g,
+					nu_mean,
+					breach_t,
+					breach_g,
 					N_TEST,
 				),
 			)

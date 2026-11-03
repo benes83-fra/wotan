@@ -1,5 +1,6 @@
 package ml_finance
 
+import ml "../analytics/ML"
 import fin "../finance"
 import l "../linalg"
 import nn "../nn"
@@ -9,21 +10,27 @@ import "core:mem"
 import "core:slice"
 
 // ============================================================================
-// Probabilistic forecasting (DeepAR-style, one step ahead)
+// Probabilistic forecasting (DeepAR-style, direct multi-horizon)
 // ============================================================================
 // A sequence encoder (any nn.SeqBackend: LSTM, GRU, Mamba, TCN) reads a window
 // x [batch, T, input_size]; its last step feeds a linear head that predicts
-// the distribution of the next value instead of a point:
+// the distribution of each of the next `horizon` values instead of a point:
 //   .Gaussian  mean μ and standard deviation σ = softplus(raw) + min_sigma,
 //              trained with the Gaussian negative log-likelihood
+//   .StudentT  location μ, scale σ (as above) and degrees of freedom
+//              ν = 2 + exp(raw) (finite variance; starts at 10), trained
+//              with the Student-t negative log-likelihood: fat tails
 //   .Quantile  the quantiles at the configured levels, trained with the
 //              pinball loss (distribution-free)
+// Each horizon h = 1..H gets its own distribution from the same encoding
+// (direct forecasting: no feedback of predictions, no error build-up).
 // prob_forecast_* turn the predictions into quantiles, intervals, VaR / ES,
 // and score them (coverage, pinball loss, NLL, CRPS).
 
 Prob_Output :: enum {
 	Gaussian,
 	Quantile,
+	StudentT,
 }
 
 ProbForecasterConfig :: struct {
@@ -32,22 +39,26 @@ ProbForecasterConfig :: struct {
 	seq_backend: nn.SeqBackend,
 	output:      Prob_Output,
 	quantiles:   []f64, // .Quantile: levels in (0, 1), ascending (copied)
-	min_sigma:   f64, // .Gaussian: floor of σ (0: 1e-4)
+	min_sigma:   f64, // .Gaussian / .StudentT: floor of σ (0: 1e-4)
+	horizon:     int, // number of future steps predicted (0: 1)
 }
 
 ProbForecaster :: struct {
 	encoder:   ^nn.Sequential,
-	head:      nn.LinearLayer, // hidden → 2 (μ, raw σ) or len(quantiles)
+	head:      nn.LinearLayer, // hidden → horizon · (2, 3 or len(quantiles))
 	config:    ProbForecasterConfig,
 	allocator: mem.Allocator,
 }
 
-// Predicted distributions of a batch: mu, sigma [batch, 1] (.Gaussian) or
-// quantiles [batch, Q] (.Quantile); graph tensors of the forward pass
+// Predicted distributions of a batch, graph tensors of the forward pass:
+// mu, sigma (and nu for .StudentT) [batch, horizon], column h for step h + 1;
+// quantiles [batch, horizon · Q], column h·Q + j the level quantiles[j] of step h + 1
 Prob_Forecast :: struct {
-	mu, sigma: ^t.Tensor,
-	quantiles: ^t.Tensor,
+	mu, sigma, nu: ^t.Tensor,
+	quantiles:     ^t.Tensor,
 }
+
+PROB_MIN_NU :: 2.0 // ν = PROB_MIN_NU + exp(raw)
 
 prob_forecaster_new :: proc(
 	config: ProbForecasterConfig,
@@ -57,7 +68,10 @@ prob_forecaster_new :: proc(
 	model.config = config
 	model.allocator = allocator
 	if config.min_sigma == 0 {model.config.min_sigma = 1e-4}
-	n_out := 2
+	if config.horizon == 0 {model.config.horizon = 1}
+	H := model.config.horizon
+	assert(H > 0, "prob_forecaster_new: horizon must be positive")
+	n_out := (3 if config.output == .StudentT else 2) * H
 	if config.output == .Quantile {
 		assert(len(config.quantiles) > 0, "prob_forecaster_new: no quantile levels")
 		for q, i in config.quantiles {
@@ -67,7 +81,7 @@ prob_forecaster_new :: proc(
 			)
 		}
 		model.config.quantiles = slice.clone(config.quantiles, allocator)
-		n_out = len(config.quantiles)
+		n_out = len(config.quantiles) * H
 	}
 	model.encoder = nn.sequential_new(allocator)
 	nn.sequential_add_seq_block(
@@ -79,6 +93,12 @@ prob_forecaster_new :: proc(
 		allocator,
 	)
 	model.head = nn.linear_layer_new(config.hidden_size, n_out, allocator)
+	if config.output == .StudentT {
+		// ν starts at 10 (raw = log 8): moderately fat tails. On the log scale
+		// ν can still reach 3 or 100 within a few hundred Adam steps (with
+		// softplus, raw ≈ ν - 2 and ν stayed near its start value)
+		for &b in model.head.bias.data.data[2 * H:] {b = math.ln(f64(8))}
+	}
 	return model
 }
 
@@ -110,6 +130,16 @@ prob_forecaster_train :: proc(model: ^ProbForecaster, training: bool) {
 	model.encoder.training = training
 }
 
+// x + c for a [N, H] tensor x and a scalar c (c is a graph constant)
+@(private = "file")
+_add_scalar :: proc(x: ^t.Tensor, c: f64, alloc: mem.Allocator) -> ^t.Tensor {
+	row := t.tensor_new(l.matrix_new(f64, 1, x.data.cols, alloc), false, alloc)
+	for &v in row.data.data {v = c}
+	out := t.tensor_add_bias(x, row)
+	if out.requires_grad {row.owned_by_graph = true} else {t.tensor_free(row)}
+	return out
+}
+
 prob_forecaster_forward :: proc(model: ^ProbForecaster, x: ^t.Tensor) -> (f: Prob_Forecast) {
 	batch, seq_len := x.shape[0], x.shape[1]
 	alloc := t._scope_or(x.allocator)
@@ -125,25 +155,39 @@ prob_forecaster_forward :: proc(model: ^ProbForecaster, x: ^t.Tensor) -> (f: Pro
 		f.quantiles = out
 		return
 	}
-	f.mu = t.tensor_slice_gate(out, 0)
-	// σ = softplus(raw) + min_sigma
-	floor := t.tensor_new(l.matrix_new(f64, 1, 1, alloc), false, alloc)
-	floor.data.data[0] = model.config.min_sigma
-	f.sigma = t.tensor_add_bias(t.tensor_softplus(t.tensor_slice_gate(out, 1)), floor)
-	if f.sigma.requires_grad {floor.owned_by_graph = true} else {t.tensor_free(floor)}
+	// columns: μ for each horizon, then raw σ, then raw ν
+	H := model.config.horizon
+	f.mu = t.tensor_slice_cols(out, 0, H)
+	f.sigma = _add_scalar(
+		t.tensor_softplus(t.tensor_slice_cols(out, H, H)),
+		model.config.min_sigma,
+		alloc,
+	)
+	if model.config.output == .StudentT {
+		f.nu = _add_scalar(t.tensor_exp(t.tensor_slice_cols(out, 2 * H, H)), PROB_MIN_NU, alloc)
+	}
 	return
 }
 
-// Training loss of a batch: Gaussian NLL or pinball loss of the next values y
+// Training loss of a batch for the next values y [batch · horizon] (row-major:
+// y[b·H + h] is step h + 1 after window b): Gaussian or Student-t NLL, or the
+// pinball loss, averaged over the batch and the horizons
 prob_forecaster_loss :: proc(model: ^ProbForecaster, x: ^t.Tensor, y: []f64) -> ^t.Tensor {
+	H := model.config.horizon
+	assert(len(y) == x.shape[0] * H, "prob_forecaster_loss: y must be [batch · horizon]")
 	f := prob_forecaster_forward(model, x)
 	if model.config.output == .Quantile {
 		return nn.quantile_loss(f.quantiles, y, model.config.quantiles)
 	}
 	alloc := t._scope_or(x.allocator)
-	target := t.tensor_new(l.matrix_new(f64, len(y), 1, alloc), false, alloc)
+	target := t.tensor_new(l.matrix_new(f64, len(y) / H, H, alloc), false, alloc)
 	copy(target.data.data, y)
-	loss := nn.gaussian_nll_loss(f.mu, t.tensor_mul(f.sigma, f.sigma), target)
+	loss: ^t.Tensor
+	if model.config.output == .StudentT {
+		loss = nn.student_t_nll_loss(f.mu, f.sigma, f.nu, target)
+	} else {
+		loss = nn.gaussian_nll_loss(f.mu, t.tensor_mul(f.sigma, f.sigma), target)
+	}
 	if loss.requires_grad {target.owned_by_graph = true} else {t.tensor_free(target)}
 	return loss
 }
@@ -184,8 +228,59 @@ prob_forecast_gaussian_nll :: proc(mu, sigma, y: f64) -> f64 {
 	return 0.5 * z * z + math.ln(sigma) + 0.5 * math.ln(f64(2 * math.PI))
 }
 
+// Student-t (location mu, scale sigma, ν = nu degrees of freedom) negative
+// log-likelihood of y (with all constants)
+prob_forecast_student_t_nll :: proc(mu, sigma, nu, y: f64) -> f64 {
+	z := (y - mu) / sigma
+	lg_half, _ := math.lgamma(0.5 * nu)
+	lg_half1, _ := math.lgamma(0.5 * (nu + 1))
+	log_norm := lg_half - lg_half1 + 0.5 * math.ln(nu * math.PI) + math.ln(sigma)
+	return log_norm + 0.5 * (nu + 1) * math.ln(1 + z * z / nu)
+}
+
+// Density of the standard t(ν) at z
+@(private = "file")
+_t_pdf :: proc(z, nu: f64) -> f64 {return math.exp(-prob_forecast_student_t_nll(0, 1, nu, z))}
+
+// q-quantile of the location-scale t distribution
+prob_forecast_student_t_quantile :: proc(mu, sigma, nu, q: f64) -> f64 {
+	return mu + sigma * ml.student_t_ppf(q, nu)
+}
+
+// Value at risk and expected shortfall at tail level alpha of a return with a
+// location-scale t distribution (ν > 1), as positive losses:
+//   VaR = -(mu + sigma·t_alpha),
+//   ES  = -(mu - sigma·f_ν(t_alpha)·(ν + t_alpha²) / ((ν - 1)·alpha))
+prob_forecast_student_t_var_es :: proc(mu, sigma, nu, alpha: f64) -> (var, es: f64) {
+	assert(nu > 1, "prob_forecast_student_t_var_es: ES needs ν > 1")
+	q := ml.student_t_ppf(alpha, nu)
+	return -(mu + sigma * q), -(mu - sigma * _t_pdf(q, nu) * (nu + q * q) / ((nu - 1) * alpha))
+}
+
+// CRPS of the location-scale t distribution (ν > 1) for an outcome y
+// (closed form, Jordan, Krüger & Lerch 2019):
+//   σ·[z(2F_ν(z) - 1) + 2f_ν(z)(ν + z²)/(ν - 1) - 2√ν·B(½, ν - ½) / ((ν - 1)·B(½, ν/2)²)]
+prob_forecast_student_t_crps :: proc(mu, sigma, nu, y: f64) -> f64 {
+	assert(nu > 1, "prob_forecast_student_t_crps: needs ν > 1")
+	log_beta :: proc(a, b: f64) -> f64 {
+		la, _ := math.lgamma(a)
+		lb, _ := math.lgamma(b)
+		lab, _ := math.lgamma(a + b)
+		return la + lb - lab
+	}
+	z := (y - mu) / sigma
+	spread :=
+		2 *
+		math.sqrt(nu) /
+		(nu - 1) *
+		math.exp(log_beta(0.5, nu - 0.5) - 2 * log_beta(0.5, 0.5 * nu))
+	fit := z * (2 * ml.student_t_cdf(z, nu) - 1) + 2 * _t_pdf(z, nu) * (nu + z * z) / (nu - 1)
+	return sigma * (fit - spread)
+}
+
 // Mean pinball loss of quantile predictions pred [N·Q] (row-major, levels
-// quantiles) for outcomes y [N]
+// quantiles) for outcomes y [N]. Several horizons: N = batch · horizon, the
+// layout of Prob_Forecast.quantiles.
 prob_forecast_pinball :: proc(pred: []f64, y: []f64, quantiles: []f64) -> f64 {
 	Q := len(quantiles)
 	s := 0.0

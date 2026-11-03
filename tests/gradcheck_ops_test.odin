@@ -114,6 +114,12 @@ gradcheck_ops_test :: proc(allocator: mem.Allocator) {
 		proc() -> ^t.Tensor {return gcl_weighted_sum(t.tensor_sqrt(gcl_in[0]))},
 		allocator,
 	)
+	gcl_check(
+		"lgamma",
+		1,
+		proc() -> ^t.Tensor {return gcl_weighted_sum(t.tensor_lgamma(gcl_in[0]))},
+		allocator,
+	)
 	gco_remap(gcl_in[0], 0.05, 0.3) // probability-like
 	gcl_check(
 		"entropy",
@@ -179,6 +185,9 @@ gradcheck_ops_test :: proc(allocator: mem.Allocator) {
 		}, allocator)
 	gcl_check("slice_gate [3,4] expert 2", 1, proc() -> ^t.Tensor {
 			return gcl_weighted_sum(t.tensor_slice_gate(gcl_in[0], 2))
+		}, allocator)
+	gcl_check("slice_cols [3,4] columns 1 ..< 3", 1, proc() -> ^t.Tensor {
+			return gcl_weighted_sum(t.tensor_slice_cols(gcl_in[0], 1, 2))
 		}, allocator)
 	gcl_free_inputs(1)
 

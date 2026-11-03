@@ -324,6 +324,15 @@ _backward_from_root :: proc(root: ^Tensor, allocator: mem.Allocator) {
 				}
 			}
 
+		case .Lgamma:
+			a_in := node.inputs[0]
+			if a_in.requires_grad {
+				tensor_ensure_grad(a_in)
+				for i in 0 ..< len(a_in.grad.data) {
+					a_in.grad.data[i] += node.grad.data[i] * digamma(a_in.data.data[i])
+				}
+			}
+
 		case .Div:
 			a_in := node.inputs[0]
 			b_in := node.inputs[1]
@@ -1333,16 +1342,19 @@ _backward_from_root :: proc(root: ^Tensor, allocator: mem.Allocator) {
 				// Gradients flow back 1:1 because the memory layout is unchanged
 				l.vec_add_simd(node.grad.data, input_in.grad.data, input_in.grad.data)
 			}
-		case .SliceGate:
-			gates_in := node.inputs[0]
-			if gates_in.requires_grad {
-				tensor_ensure_grad(gates_in)
-				expert_idx := node.int_metadata[0]
-				E := node.int_metadata[1]
-				N := gates_in.data.rows
-				// Scatter the gradient back to the exact column it came from
-				for n in 0 ..< N {
-					gates_in.grad.data[n * E + expert_idx] += node.grad.data[n]
+		case .SliceCols:
+			a_in := node.inputs[0]
+			if a_in.requires_grad {
+				tensor_ensure_grad(a_in)
+				start, C := node.int_metadata[0], node.int_metadata[1]
+				count := node.data.cols
+				// Scatter the gradient back to the columns it came from
+				for n in 0 ..< a_in.data.rows {
+					l.vec_add_simd(
+						node.grad.data[n * count:(n + 1) * count],
+						a_in.grad.data[n * C + start:][:count],
+						a_in.grad.data[n * C + start:][:count],
+					)
 				}
 			}
 		// ============================================================================

@@ -1,6 +1,7 @@
 package nn
 
 import t "../tensor"
+import "core:math"
 
 // ============================================================================
 // Probabilistic losses
@@ -20,13 +21,47 @@ gaussian_nll_loss :: proc(mu, var, target: ^t.Tensor, eps := 1e-6) -> ^t.Tensor 
 	return t.tensor_scale(t.tensor_mean(terms), 0.5)
 }
 
+// Student-t negative log-likelihood of target under the location-scale t
+// distribution with location mu, scale sigma > 0 and ν = nu > 0 degrees of
+// freedom, as -torch.distributions.StudentT(nu, mu, sigma).log_prob(target)
+// .mean() (with all constants):
+//   mean(log Γ(ν/2) - log Γ((ν+1)/2) + ½·log(νπ) + log σ + (ν+1)/2 · log(1 + z²/ν)),
+//   z = (target - mu) / sigma
+// mu, sigma, nu, target: equal shapes; nu may be learned (ψ via tensor_lgamma).
+student_t_nll_loss :: proc(mu, sigma, nu, target: ^t.Tensor) -> ^t.Tensor {
+	alloc := t._scope_or(mu.allocator)
+	ones := _constant(len(mu.data.data), mu.shape, alloc)
+	ones.data.rows, ones.data.cols = mu.data.rows, mu.data.cols
+	for &v in ones.data.data {v = 1}
+	z := t.tensor_div(t.tensor_sub(target, mu), sigma)
+	half_nu1 := t.tensor_scale(t.tensor_add(nu, ones), 0.5)
+	log_kernel := t.tensor_log(t.tensor_add(ones, t.tensor_div(t.tensor_mul(z, z), nu)))
+	terms := t.tensor_add(
+		t.tensor_sub(t.tensor_lgamma(t.tensor_scale(nu, 0.5)), t.tensor_lgamma(half_nu1)),
+		t.tensor_add(
+			t.tensor_add(t.tensor_scale(t.tensor_log(nu), 0.5), t.tensor_log(sigma)),
+			t.tensor_mul(half_nu1, log_kernel),
+		),
+	)
+	half_log_pi := _constant(1, {1, 1, 1, 1}, alloc, {0.5 * math.ln(f64(math.PI))})
+	loss := t.tensor_add_bias(t.tensor_mean(terms), half_log_pi)
+	_constant_done(ones, loss)
+	_constant_done(half_log_pi, loss)
+	return loss
+}
+
 // Pinball (quantile) loss of predicted quantiles pred [N, Q] (column j the
 // quantile at level quantiles[j]) for targets [N]: the mean over all N·Q of
 //   ρ_q(u) = q·u for u ≥ 0, (q - 1)·u for u < 0,  u = target - prediction
 // Minimizing it per column gives the conditional q-quantile.
+// Several targets per row (e.g. horizons): pred [N, H·Q] with column h·Q + j
+// for target[n·H + h], targets [N·H] row-major.
 quantile_loss :: proc(pred: ^t.Tensor, target: []f64, quantiles: []f64) -> ^t.Tensor {
 	N, Q := len(target), len(quantiles)
-	assert(len(pred.data.data) == N * Q, "quantile_loss: pred must be [N, len(quantiles)]")
+	assert(
+		len(pred.data.data) == N * Q,
+		"quantile_loss: pred must have len(quantiles) columns per target",
+	)
 	alloc := t._scope_or(pred.allocator)
 	// targets repeated over the quantiles, and q / 1 - q per column
 	y := _constant(N * Q, {N, Q, 1, 1}, alloc)

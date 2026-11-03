@@ -57,6 +57,7 @@ Op :: enum {
 	Sqrt,
 	Clamp,
 	Log,
+	Lgamma,
 	Div,
 	NormCDF,
 	SumDim1,
@@ -73,7 +74,7 @@ Op :: enum {
 	LogSumExpDim1,
 	Softplus,
 	SSM,
-	SliceGate,
+	SliceCols,
 	RMSNorm,
 	Transpose,
 	Conv1d,
@@ -2505,6 +2506,46 @@ tensor_log :: proc(a: ^Tensor) -> ^Tensor {
 }
 
 // ============================================================================
+// Element-wise log-gamma: out = log|Γ(a)|
+// Backward: grad_a = grad_out · ψ(a) (digamma)
+// ============================================================================
+tensor_lgamma :: proc(a: ^Tensor) -> ^Tensor {
+	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
+	for i in 0 ..< len(a.data.data) {
+		out_data.data[i], _ = math.lgamma(a.data.data[i])
+	}
+	out := _tensor_new_op(out_data, a.shape, a.requires_grad, _op_alloc(a))
+	if out.requires_grad {
+		out.op = .Lgamma
+		append(&out.inputs, a)
+	}
+	return out
+}
+
+// Digamma ψ(x) = d/dx log Γ(x): recurrence ψ(x) = ψ(x + 1) - 1/x up to x ≥ 10,
+// then the asymptotic series (truncation < 1e-15); reflection for x < 0
+digamma :: proc(x: f64) -> f64 {
+	if x <= 0 && x == math.floor(x) {return math.nan_f64()} 	// poles
+	if x < 0 {return digamma(1 - x) - math.PI / math.tan(math.PI * x)}
+	x := x
+	acc := 0.0
+	for x < 10 {
+		acc -= 1 / x
+		x += 1
+	}
+	r := 1 / (x * x)
+	series :=
+		r *
+		(1.0 / 12 -
+				r *
+					(1.0 / 120 -
+							r *
+								(1.0 / 252 -
+										r * (1.0 / 240 - r * (1.0 / 132 - r * 691.0 / 32760)))))
+	return acc + math.ln(x) - 0.5 / x - series
+}
+
+// ============================================================================
 // Element-wise Division: out = a / b
 // Backward: grad_a = grad_out / b
 //           grad_b = -grad_out * a / b²
@@ -3487,26 +3528,34 @@ tensor_transpose :: proc(a: ^Tensor) -> ^Tensor {
 	return out
 }
 
-// tensor_slice_gate extracts a single expert's gate column while preserving the autograd graph.
-tensor_slice_gate :: proc(gates: ^Tensor, expert_idx: int) -> ^Tensor {
-	allocator := _op_alloc(gates) // the active graph scope, else the input's
-	N := gates.data.rows
-	E := gates.data.cols
+// tensor_slice_cols returns the columns start ..< start + count of a [N, C]
+// matrix as a [N, count] tensor (autograd: the gradient goes back to those columns)
+tensor_slice_cols :: proc(a: ^Tensor, start, count: int) -> ^Tensor {
+	allocator := _op_alloc(a) // the active graph scope, else the input's
+	N, C := a.data.rows, a.data.cols
+	assert(
+		start >= 0 && count > 0 && start + count <= C,
+		"tensor_slice_cols: columns out of range",
+	)
 
-	out_data := l.matrix_new(f64, N, 1, allocator)
+	out_data := l.matrix_new(f64, N, count, allocator)
 	for n in 0 ..< N {
-		out_data.data[n] = gates.data.data[n * E + expert_idx]
+		copy(out_data.data[n * count:(n + 1) * count], a.data.data[n * C + start:][:count])
 	}
 
-	out := _tensor_new_op(out_data, [4]int{N, 1, 1, 1}, gates.requires_grad, allocator)
+	out := _tensor_new_op(out_data, [4]int{N, count, 1, 1}, a.requires_grad, allocator)
 
 	if out.requires_grad {
-		out.op = .SliceGate
-		append(&out.inputs, gates)
-		append(&out.int_metadata, expert_idx)
-		append(&out.int_metadata, E) // Store total experts for backward pass
+		out.op = .SliceCols
+		append(&out.inputs, a)
+		append(&out.int_metadata, start, C)
 	}
 	return out
+}
+
+// tensor_slice_gate extracts a single expert's gate column while preserving the autograd graph.
+tensor_slice_gate :: proc(gates: ^Tensor, expert_idx: int) -> ^Tensor {
+	return tensor_slice_cols(gates, expert_idx, 1)
 }
 // ============================================================================
 // Prospect Theory: Value Function (Kahneman & Tversky, 1992)
