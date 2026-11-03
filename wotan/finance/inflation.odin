@@ -203,15 +203,17 @@ bootstrap_zero_inflation_curve :: proc(
 		}
 		c.months[i] = _month_start(w.add_month_date(swaps[i].maturity, i32(-lag_months)))
 	}
-	// pillar i's rate on a curve through `upto` pillars (fair rate − quote increases in it)
+	// pillar i's rate on a curve through `upto` pillars (fair rate − quote increases in it);
+	// sub (index's curve meanwhile) lives here, so index.curve never points into solve's frame
+	sub: ZeroInflationCurve
+	index.curve = &sub
 	solve :: proc(
 		c: ^ZeroInflationCurve,
 		index: ^CPIIndex,
 		sw: ZeroCouponInflationSwap,
 		i, upto: int,
 	) -> f64 {
-		sub := ZeroInflationCurve{c.base_date, c.day_count, c.months[:upto], c.rates[:upto]}
-		index.curve = &sub
+		index.curve^ = ZeroInflationCurve{c.base_date, c.day_count, c.months[:upto], c.rates[:upto]}
 		old := c.rates[i]
 		lo, hi := -0.5, 0.5
 		for _ in 0 ..< 200 {

@@ -10,7 +10,7 @@ import "core:mem"
 // attention). Uses the gcl_* helpers from gradcheck_layers_test.odin; every
 // differentiable input is checked.
 
-gco_targets: []int
+gco_targets := []int{1, 0, 3} // cross-entropy targets (a global literal: static memory)
 gco_idx, gco_rm, gco_rv: ^t.Tensor
 gco_causal: bool
 
@@ -199,7 +199,6 @@ gradcheck_ops_test :: proc(allocator: mem.Allocator) {
 	gcl_free_inputs(2)
 
 	// --- 4. Losses -----------------------------------------------------------
-	gco_targets = []int{1, 0, 3}
 	gcl_in[0] = gcl_rand(3, 4, {3, 4, 1, 1}, 111, true, allocator, 2.0)
 	gcl_check("cross_entropy [3,4]", 1, proc() -> ^t.Tensor {
 			return t.tensor_cross_entropy_loss(gcl_in[0], gco_targets)

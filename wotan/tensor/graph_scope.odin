@@ -80,7 +80,9 @@ graph_begin :: proc(scope: ^Graph_Scope, no_grad := false, loc := #caller_locati
 	scope.prev = _active_scope
 	scope.active = true
 	scope.no_grad = no_grad
-	_active_scope = scope
+	// the scope stays the active one until graph_end (the caller's contract), so it may live
+	// on the caller's stack: transmute tells the escape check that this is intended
+	_active_scope = transmute(^Graph_Scope)scope
 }
 
 // grad_enabled: whether op outputs created now record a graph (false inside a

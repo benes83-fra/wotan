@@ -49,7 +49,9 @@ parallel_for :: proc(n: int, data: rawptr, body: Parallel_Body, tasks := 0) {
 
 	sync.wait_group_add(&_pool.done, t - 1)
 	for k in 1 ..< t {
-		_pool.jobs[k - 1] = _Pool_Job{body, data, k * chunk, min(n, (k + 1) * chunk)}
+		// data is only used until wait_group_wait below, so it may be on the caller's
+		// stack: the explicit conversion tells the escape check that this is intended
+		_pool.jobs[k - 1] = _Pool_Job{body, rawptr(data), k * chunk, min(n, (k + 1) * chunk)}
 		sync.sema_post(&_pool.wake[k - 1])
 	}
 

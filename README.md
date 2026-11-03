@@ -18,7 +18,9 @@
 
 Wotan is a library for data analysis and quantitative finance in Odin. It started as a typed DataFrame and grew into a toolkit covering time series, classical ML, a small autograd and deep learning stack, and a large set of finance models. It has no Python runtime dependency. The only external library is libcurl, used for HTTP requests.
 
-> **Status:** Wotan covers a lot of ground, but it is still a work in progress. APIs can change between commits, documentation is thin in places, and some models have only been checked against the reference values in the test suite. Bug reports and feedback are very welcome.
+> **Status:** Wotan covers a lot of ground, but it is still a work in progress. APIs can change between commits and documentation is thin in places. Most modules are checked against reference implementations (QuantLib, statsmodels, SciPy, scikit-learn, PyTorch, Hugging Face) in the test suite. Bug reports and feedback are very welcome.
+>
+> **Compiler:** Wotan needs Odin **dev-2026-11 or newer**. Older compilers fail to build it. See [Requirements](#requirements).
 
 ## Contents
 
@@ -43,32 +45,43 @@ Wotan is a library for data analysis and quantitative finance in Odin. It starte
 - Date, time and datetime arithmetic
 
 **Statistics and time series** (`analytics`, `linalg`)
-- Linear algebra: LU, QR, Cholesky, SVD and eigen decompositions, with SIMD kernels
+- Linear algebra: LU, QR, Cholesky, SVD and symmetric eigen decompositions, eigenvalues of general matrices, with SIMD kernels
 - Rolling and exponentially weighted statistics, rolling covariance and PCA
-- ARMA, ARIMA, SARIMA; GARCH and regime-switching GARCH
-- Diagnostics: ACF/PACF, Ljung–Box, Jarque–Bera, ADF, KPSS
+- ARMA, ARIMA, SARIMA and ARIMAX (regression with ARIMA errors)
+- GARCH with any variance equation (GARCH, GJR, EGARCH) and error distribution (normal, Student-t, GED); regime-switching GARCH
+- VAR with impulse responses, Granger causality, Engle–Granger and Johansen cointegration
+- HP filter, classical and STL decomposition, Holt–Winters
+- Diagnostics: ACF/PACF, Ljung–Box, Jarque–Bera, ADF, KPSS, Phillips–Perron; Durbin–Watson, ARCH-LM, Breusch–Pagan, White, Breusch–Godfrey
 - Kalman filter and RTS smoother, EKF, UKF
 
 **Machine learning** (`analytics/ML`)
-- OLS, WLS, GLS, Ridge, Lasso (with cross-validation)
-- Logistic regression, naive Bayes, KNN, k-means
-- Decision trees, random forests, gradient boosting
+- OLS (with HC0–HC3, Newey–West and clustered standard errors), WLS, GLS, Ridge, Lasso, ElasticNet
+- Logistic regression, naive Bayes, KNN (with `predict_proba`), k-means
+- Decision trees, random forests, gradient boosting (with early stopping)
 - SVM, kernel SVM, SVR
-- Pipelines, grid and random search, metrics, model serialization
+- Sample weights and balanced class weights
+- Standard, min-max and robust scalers; pipelines, grid and random search
+- K-fold, stratified and time-series cross-validation
+- Metrics, including ROC AUC, average precision, log loss and Brier score; model serialization
 
 **Deep learning** (`tensor`, `nn`, `optimize`)
-- Reverse-mode autograd on tensors
-- Dense, Conv2D, pooling, dropout, batch norm, RNN/GRU/LSTM
-- Transformers (encoder/decoder, multi-head and flash attention), GPT and BERT style models, mixture-of-experts, Mamba
-- GAN, WGAN, VAE; BPE and WordPiece tokenizers
-- SGD, Adam, RMSProp, L-BFGS and learning-rate schedulers
+- Reverse-mode autograd on tensors, with per-graph memory arenas and no-grad (inference) scopes
+- Dense, Conv1D/Conv2D, pooling, dropout, batch norm, layer norm, RMSNorm, RNN/GRU/LSTM, TCN
+- Transformers (encoder/decoder, multi-head and flash attention), GPT (KV cache, weight tying) and BERT style models, mixture-of-experts, Mamba
+- GAN, WGAN, VAE
+- Tokenizers: GPT-2 BPE (including training a vocabulary), WordPiece (cased and uncased, sentence pairs), batch encoding; time-series tokenization
+- SGD, Adam, AdamW, RMSProp, L-BFGS and learning-rate schedulers
 
 **Quantitative finance** (`finance`, `ml_finance`, `behavioral_finance`)
-- European, American (LSM) and exotic options; Greeks computed with autograd; implied volatility and volatility surfaces
-- Bonds, yield curves, swaps, interest-rate, FX and credit derivatives, CDS bootstrapping
-- Portfolio optimisation with constraints, HRP, risk decomposition, VaR, factor models, backtesting
-- Monte Carlo simulation, copulas, fractional Brownian motion
-- ML methods for finance: deep hedging, deep BSDE, DeepLOB, TimeGAN, PPO and CQL agents, Kalman pairs trading, HMM regimes, neural SDF, event studies
+- European, American (trees, finite differences, LSM) and exotic options; Greeks computed with autograd; implied volatility and volatility surfaces (SABR, Heston)
+- Heston, Merton and Bates pricing with the COS method; local volatility; Sobol' sequences and Brownian bridge
+- Calendars, business-day conventions, day counts and schedules
+- Bonds, callable, puttable and convertible bonds, yield curves, swaps, interest-rate (Hull–White, G2++), FX and credit derivatives, ISDA-style CDS
+- Inflation: zero-inflation curves, zero-coupon inflation swaps, inflation-linked bonds
+- Variance swaps and quanto options
+- Portfolio optimisation with constraints, Black–Litterman, HRP, risk decomposition, VaR/ES, extreme value theory (GPD), factor models, backtesting
+- Monte Carlo simulation, copulas, fractional Brownian motion and rough volatility
+- ML methods for finance: deep hedging, deep BSDE, DeepLOB, TimeGAN, PPO and CQL agents, Kalman pairs trading, HMM regimes, neural SDF, event studies, probabilistic and token-based forecasting
 - Behavioural finance: prospect theory, anchoring, behavioural portfolio theory
 
 **Data sources and output** (`net`, `plot`)
@@ -79,7 +92,9 @@ Wotan is a library for data analysis and quantitative finance in Odin. It starte
 
 ### Requirements
 
-- A recent [Odin](https://odin-lang.org/docs/install/) compiler
+- The [Odin](https://odin-lang.org/docs/install/) compiler, version **dev-2026-11 or newer**. Check yours with `odin version`.
+  - Older compilers cannot build Wotan. The Excel reader and the PNG tests use `core:compress/deflate`, and that package only exists from dev-2026-11 onwards.
+  - With dev-2026-11, `odin check .` reports no errors or warnings.
 - libcurl, used through Odin's `vendor:curl` package. It is only needed for the `net` package (Yahoo Finance and HTTP).
 
 ### Build and run
@@ -260,34 +275,46 @@ wotan/
 ├── behavioral_finance/ prospect theory, anchoring, behavioural portfolios
 ├── net/                HTTP via libcurl, Yahoo Finance
 ├── plot/               PNG chart rendering
-└── data/               dataset loaders (MNIST)
+├── data/               dataset loaders (MNIST)
+├── util/               shared worker pool for parallel loops
+└── zip_min/            minimal ZIP reader (used by the Excel importer)
 tests/                  runnable examples and regression tests
-scripts/                scripts to download model Data or Models (ie. MNIST, finBert, distilgpt2)
-demo_file/              files used in tests and demo
-docs/                   Markdown Documentation
-plots/                  plots that get generate during the demo
-model_checkpoints/      Neural Network Checkpoints that are either imported from HuggingFaces (so far finBERT and distilgpt2) or are generate by the demo
+scripts/                scripts to download MNIST and convert Hugging Face models (FinBERT, DistilGPT-2)
+data/                   MNIST and stored SPY prices and options
+demo_files/             input files for the I/O tests and demo; export tests write here too
+docs/                   Markdown documentation
+plots/                  charts written by the demo (created on first run)
+model_checkpoints/      converted Hugging Face weights and vocabularies, and checkpoints written by the tests (created on first run)
 main.odin               demo and test driver
 ```
 
 ## Tests
 
-`tests/` contains over 100 test procedures, one per area: DataFrame operations, I/O, linear algebra, every ML model, the deep learning stack, and the finance modules. Each is a plain `proc(allocator: mem.Allocator)` called from `main.odin`. Most print results next to known reference values. Some write PNG charts to the plots/ directory.
+`tests/` holds about 200 files with close to 400 test procedures. They cover DataFrame operations, I/O, linear algebra, every ML model, the deep learning stack, and the finance modules. Each is a plain `proc(allocator: mem.Allocator)` called from `main.odin`. [`test_catalog.md`](docs/test_catalog.md) lists what each file covers.
 
-Tests whose names contain `real_data` fetch live data from Yahoo Finance and need network access. [`test_catalog.md`](docs/test_catalog.md) gives an overview of what each test covers.
+There are three kinds of test:
+
+- **Reference tests** (`*_reference_test`) compare results with values from established libraries: QuantLib 1.44, statsmodels 0.13.5, SciPy 1.10, scikit-learn 1.2.1, NumPy/pandas, PyTorch (float64), and Hugging Face `transformers` / `tokenizers`. The reference values are hard-coded in the test files.
+- **Contract tests** (`*_contracts_test`, the `gradcheck_*` tests and others) check properties instead of fixed numbers. Examples: gradients against finite differences, bit-identical results across thread counts, save/load round trips, and memory that is fully released.
+- **Examples and demos** print results, often next to textbook values, and some write PNG charts to `plots/`. Tests marked 🌐 in the catalog need network access (Yahoo Finance and other HTTP sources).
+
+Reference and contract tests print `OK` or `FAIL` for each check. Failed checks are counted, and the program exits with code 1 if any failed. Almost every test seeds the random generator from its own name, so runs are reproducible and do not depend on which other tests ran before.
 
 Run with `-debug` to turn on the tracking allocator. It reports any leaked allocation when the program exits.
 
 ## Optional: pretrained weights
 
-The FinBERT and GPT-2 examples can load Hugging Face weights. The conversion scripts need Python with `transformers` installed:
+The FinBERT and GPT-2 examples can load Hugging Face weights. The conversion scripts need Python with `transformers` installed. Run them from `scripts/`, because they write to `../model_checkpoints/`:
 
 ```sh
+cd scripts
 python convert_bert.py ProsusAI/finbert finbert_checkpoint.bin
 python convert_gpt2.py
 ```
 
-Without these checkpoints the examples still run, but with randomly initialised weights.
+Without the FinBERT checkpoint, the event-study example runs with randomly initialised weights. Without the DistilGPT-2 checkpoint, `gpt_completion_test` prints a notice and skips.
+
+The GPT-2 and BERT vocabularies (`vocab.json`, `merges.txt`, `bert_vocab.txt`) are downloaded into `model_checkpoints/` the first time `gpt_completion_test` and `event_study_test` run. `tokenizer_reference_test` skips its checks on the real vocabularies until they are there.
 
 ## Limitations
 
@@ -296,7 +323,7 @@ These are areas where Wotan is known to be incomplete:
 - **API stability:** names and signatures are still changing. There are no versioned releases yet.
 - **Documentation:** apart from this README, the tests are the main documentation.
 - **Performance:** everything runs on the CPU. Some hot paths use SIMD, but most code has not been profiled or tuned, and large deep learning models are slow.
-- **Validation:** models are tested against textbook and reference values. They have not been validated for production trading or risk use.
+- **Validation:** most modules are tested against reference libraries (see [Tests](#tests)). The ML-for-finance and behavioural finance models are mostly checked by examples rather than references. Nothing has been validated for production trading or risk use.
 - **Memory management:** ownership is explicit, as is usual in Odin. Most objects need a matching `destroy_*` or `*_free` call.
 
 ## Contributing
