@@ -980,6 +980,8 @@ main :: proc() {
 	free_all(context.temp_allocator)
 	test.kalman_pairs_auto_select_test(context.temp_allocator)
 	free_all(context.temp_allocator)
+	test.ppo_reference_test(context.temp_allocator)
+	free_all(context.temp_allocator)
 	test.ppo_trading_test(context.temp_allocator)
 	free_all(context.temp_allocator)
 	test.ppo_trading_real_data_test(context.temp_allocator)

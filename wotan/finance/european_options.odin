@@ -287,36 +287,27 @@ price_and_greeks :: proc(
 // GARCH-Powered Option Pricing
 // ============================================================================
 
-// Forecast the average annualized volatility over a given horizon using GARCH(1,1)
-// This creates a dynamic volatility term structure, replacing the flat BS assumption.
+// Average annualised volatility over the next horizon_days days from GARCH(1,1):
+//   v_1 = current_var, v_{h+1} = omega + (alpha + beta) v_h  (E[sigma^2_{t+h}], arch's analytic
+//   forecast; exact for any persistence: IGARCH gives v_h = v_1 + (h - 1) omega, and no
+//   long-run variance omega / (1 - alpha - beta) is needed)
+//   sigma = sqrt(252 mean_h v_h)
+// current_var: the one-step-ahead variance sigma^2_{t+1}. horizon_days <= 0: sqrt(252 current_var).
 garch_term_structure_vol :: proc(
 	omega: f64,
 	alpha: f64,
 	beta: f64,
-	current_var: f64, // Today's conditional variance (e.g., garch_result.conditional_var[last])
+	current_var: f64,
 	horizon_days: int,
 ) -> f64 {
-	if horizon_days <= 0 {return math.sqrt_f64(current_var) * math.sqrt_f64(252.0)}
-
+	if horizon_days <= 0 {return math.sqrt(current_var * 252.0)}
 	persistence := alpha + beta
-	if persistence >= 1.0 {persistence = 0.999} 	// Prevent explosion
-
-	long_run_var := omega / (1.0 - persistence)
-
-	// Sum of expected variances over the horizon
-	sum_var := 0.0
-	for h in 1 ..< horizon_days + 1 {
-		// E[σ²_{t+h}] = V_L + (α+β)^{h-1} * (σ²_t - V_L)
-		expected_var :=
-			long_run_var + math.pow(persistence, f64(h - 1)) * (current_var - long_run_var)
-		sum_var += expected_var
+	sum_var, v := 0.0, current_var
+	for _ in 1 ..= horizon_days {
+		sum_var += v
+		v = omega + persistence * v
 	}
-
-	// Average daily variance over the horizon
-	avg_daily_var := sum_var / f64(horizon_days)
-
-	// Annualize
-	return math.sqrt_f64(avg_daily_var * 252.0)
+	return math.sqrt(sum_var / f64(horizon_days) * 252.0)
 }
 
 // Price an option and compute Greeks using GARCH-forecasted volatility
@@ -335,8 +326,8 @@ garch_price_and_greeks :: proc(
 	price: f64,
 	greeks: Greeks,
 ) {
-	// 1. Calculate horizon in days (e.g., 0.25 years = 63 days)
-	horizon_days := int(math.max(1.0, T_years * 252.0))
+	// 1. Horizon in trading days, rounded (e.g. 0.25 years = 63 days)
+	horizon_days := max(1, int(math.round(T_years * 252.0)))
 
 	// 2. Get the GARCH-implied volatility for this specific maturity
 	sigma_garch := garch_term_structure_vol(omega, alpha, beta, current_var, horizon_days)

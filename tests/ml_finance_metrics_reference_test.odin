@@ -1,6 +1,7 @@
 package tests
 
 import ts "../wotan/analytics"
+import fin "../wotan/finance"
 import l "../wotan/linalg"
 import ml_fin "../wotan/ml_finance"
 import t "../wotan/tensor"
@@ -481,6 +482,70 @@ ml_finance_metrics_reference_test :: proc(allocator: mem.Allocator) {
 			fmt.tprintf(
 				"backtest metrics: drawdown incl. day 0, Sharpe (n - 1), 67 entries (max rel err %.1e)",
 				berr,
+			),
+		)
+	}
+	{ 	// --- GARCH term-structure vol vs arch 8.0's analytic variance forecast (63 days), the
+		// ensemble blend on that path, and the Black-Scholes call at the blended vol
+		Case :: struct {
+			omega, alpha, beta, cur:      f64,
+			garch, ensemble, call, delta: f64,
+		}
+		cases := []Case {
+			{
+				2e-6,
+				0.08,
+				0.9,
+				0.00010320628885915567,
+				0.16019260457028556,
+				0.17988491624012784,
+				1.9338367081417331,
+				0.33939974686369395,
+			},
+			// IGARCH: the old clamp of alpha + beta to 0.999 gave 0.18845
+			{
+				1e-6,
+				0.1,
+				0.9,
+				0.00011400786107394459,
+				0.19115956944561815,
+				0.2027926115361949,
+				2.3582070636691057,
+				0.3607265195615811,
+			},
+		}
+		err := 0.0
+		for c in cases {
+			g := fin.garch_term_structure_vol(c.omega, c.alpha, c.beta, c.cur, 63)
+			e := ml_fin.ensemble_term_structure_vol(0.22, c.omega, c.alpha, c.beta, c.cur, 63)
+			price, greeks := ml_fin.ensemble_price_and_greeks(
+				100,
+				105,
+				0.25,
+				0.03,
+				0.22,
+				c.omega,
+				c.alpha,
+				c.beta,
+				c.cur,
+				.Call,
+				allocator,
+			)
+			err = max(
+				err,
+				rel(g, c.garch),
+				rel(e, c.ensemble),
+				rel(price, c.call),
+				rel(greeks.delta, c.delta),
+			)
+		}
+		expect(
+			&passed,
+			&total,
+			err < 1e-12,
+			fmt.tprintf(
+				"GARCH / ensemble term-structure vol vs arch forecast (incl. IGARCH), BS call and delta (max rel err %.1e)",
+				err,
 			),
 		)
 	}

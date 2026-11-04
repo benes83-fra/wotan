@@ -26,7 +26,7 @@ Step :: struct {
 Environment :: struct {
 	action_space: int,
 	obs_dim:      int,
-	max_steps:    int,
+	max_steps:    int, // the episode ends when current_step reaches it
 	current_step: int,
 	done:         bool,
 	reset_fn:     proc(env: ^Environment) -> Observation,
@@ -47,7 +47,20 @@ env_step :: proc(env: ^Environment, action: int) -> Step {
 	return env.step_fn(env, action)
 }
 
-// TradingEnv simulates a financial market for RL agents
+// ============================================================================
+// Single-asset trading environment
+// ============================================================================
+// Actions: 0 hold, 1 buy (10 shares if cash allows, else 1), 2 sell (up to 10 of the
+// held shares; long only), at most one trade per 5 steps, up to max_position shares.
+// Step k trades at prices[k] after observing the window ending at prices[k - 1], then
+// marks the portfolio to prices[k]. The episode starts with the window prices[0 ..
+// window - 1] and ends at the last price, where any position is sold (with the fee).
+// Observation: window values each of price / first price - 1, volume / first volume - 1
+// and every indicator (indicators is row-major [day, n_indicators]), 2 + n_indicators
+// blocks of `window`.
+// Reward (shaped): change of portfolio value / initial cash, + 0.1 x the return of a
+// position when it is closed, - 2 x fee for any non-hold action, - 1e-5 per share held,
+// - 2 x the drawdown from the peak value.
 TradingEnv :: struct {
 	env:             Environment,
 	prices:          []f64,
@@ -56,14 +69,35 @@ TradingEnv :: struct {
 	n_indicators:    int,
 	window:          int,
 	cash:            f64,
-	peak_cash:       f64, // <--- ADD THIS FIELD
+	peak_cash:       f64, // peak portfolio value (for the drawdown penalty)
 	initial_cash:    f64,
 	inventory:       i32,
-	entry_price:     f64,
+	entry_price:     f64, // average cost of the position
 	cooldown:        int,
 	transaction_fee: f64,
 	max_position:    i32,
 	allocator:       mem.Allocator,
+}
+
+// Observation of the window of `window` days ending at day `last`
+@(private = "file")
+_trading_obs :: proc(t_env: ^TradingEnv, last: int) -> Observation {
+	W, K := t_env.window, t_env.n_indicators
+	obs := make([]f64, W * (2 + K), t_env.allocator)
+	start := max(0, last - W + 1)
+	base_price := t_env.prices[start] if t_env.prices[start] != 0 else 1.0
+	base_vol := t_env.volumes[start] if t_env.volumes[start] != 0 else 1.0
+	for w in 0 ..< W {
+		d := start + w
+		if d >= len(t_env.prices) {break}
+		obs[w] = t_env.prices[d] / base_price - 1.0
+		obs[W + w] = t_env.volumes[d] / base_vol - 1.0
+		for k in 0 ..< K {
+			if d * K + k <
+			   len(t_env.indicators) {obs[(2 + k) * W + w] = t_env.indicators[d * K + k]}
+		}
+	}
+	return Observation{data = obs, shape = [4]int{1, len(obs), 1, 1}}
 }
 
 trading_env_reset :: proc(env: ^Environment) -> Observation {
@@ -74,182 +108,78 @@ trading_env_reset :: proc(env: ^Environment) -> Observation {
 	t_env.inventory = 0
 	t_env.entry_price = 0.0
 	t_env.cooldown = 0
-	t_env.env.current_step = t_env.window
+	t_env.env.current_step = t_env.window - 1 // the first step trades at prices[window]
 	t_env.env.done = false
-
-	obs := make([]f64, t_env.window * (2 + t_env.n_indicators), t_env.allocator)
-
-	start := t_env.env.current_step - t_env.window
-	if start < 0 {start = 0}
-
-	// ✅ Normalize prices and volumes relative to the start of the window
-	base_price := t_env.prices[start]
-	if base_price == 0 {base_price = 1.0}
-
-	base_vol := t_env.volumes[start]
-	if base_vol == 0 {base_vol = 1.0}
-
-	idx := 0
-	for w in 0 ..< t_env.window {
-		obs[idx] = (t_env.prices[start + w] / base_price) - 1.0
-		idx += 1
-	}
-	for w in 0 ..< t_env.window {
-		obs[idx] = (t_env.volumes[start + w] / base_vol) - 1.0
-		idx += 1
-	}
-	for w in 0 ..< t_env.window {
-		idx_in_data := (start + w) * t_env.n_indicators
-		if idx_in_data < len(t_env.indicators) {
-			obs[idx] = t_env.indicators[idx_in_data] // Assumes indicators are already scaled
-		}
-		idx += 1
-	}
-
-	return Observation{data = obs, shape = [4]int{1, len(obs), 1, 1}}
+	return _trading_obs(t_env, t_env.env.current_step)
 }
 
 trading_env_step :: proc(env: ^Environment, action: int) -> Step {
 	t_env := cast(^TradingEnv)env
-	t_env.cooldown += 1
-
-	// ✅ CRITICAL FIX: If the environment is already done, liquidate and return safely.
-	if t_env.env.done {
-		if t_env.inventory != 0 {
-			price := t_env.prices[len(t_env.prices) - 1]
-			if t_env.inventory > 0 {
-				t_env.cash += price * (1.0 - t_env.transaction_fee) * f64(t_env.inventory)
-			} else {
-				t_env.cash -= price * (1.0 + t_env.transaction_fee) * f64(-t_env.inventory)
-			}
-			profit := (t_env.cash - t_env.initial_cash) / t_env.initial_cash
-			t_env.inventory = 0
-
-			obs_dim := t_env.window * (2 + t_env.n_indicators)
-			obs := make([]f64, obs_dim, t_env.allocator)
-
-			return Step {
-				observation = Observation{data = obs, shape = [4]int{1, obs_dim, 1, 1}},
-				reward = profit,
-				done = true,
-				info = "Liquidated at end",
-			}
-		}
-
-		obs_dim := t_env.window * (2 + t_env.n_indicators)
-		obs := make([]f64, obs_dim, t_env.allocator)
+	k := t_env.env.current_step
+	if k >= len(t_env.prices) {
+		// called after the end: nothing happens
 		return Step {
-			observation = Observation{data = obs, shape = [4]int{1, obs_dim, 1, 1}},
-			reward = 0.0,
+			observation = Observation {
+				data = make([]f64, t_env.env.obs_dim, t_env.allocator),
+				shape = [4]int{1, t_env.env.obs_dim, 1, 1},
+			},
 			done = true,
 			info = "Already done",
 		}
 	}
+	t_env.cooldown += 1
 
-	// 1. Calculate portfolio value BEFORE action
-	prev_price := t_env.prices[max(0, t_env.env.current_step - 1)]
-	prev_value := t_env.cash + f64(t_env.inventory) * prev_price
-
-	price := t_env.prices[t_env.env.current_step]
+	prev_value := t_env.cash + f64(t_env.inventory) * t_env.prices[k - 1]
+	price := t_env.prices[k]
 	reward := 0.0
 	info := ""
 
-	// 2. Execute action
 	if action == 1 && t_env.inventory < t_env.max_position && t_env.cooldown >= 5 {
 		cost := price * (1.0 + t_env.transaction_fee)
-
-		// ✅ FIX: Allow block trading (buy up to 10 shares at once if cash allows)
-		// This helps deploy capital faster without requiring 50 sequential 'Buy' actions
-		trade_size := 1
-		if t_env.cash > cost * 10 {trade_size = 10}
-
+		trade_size: i32 = 10 if t_env.cash > cost * 10 else 1
+		trade_size = min(trade_size, t_env.max_position - t_env.inventory)
 		if t_env.cash >= cost * f64(trade_size) {
 			t_env.cash -= cost * f64(trade_size)
-			t_env.inventory += i32(trade_size)
-			if t_env.inventory == i32(trade_size) {
-				t_env.entry_price = price
-			}
+			held := f64(t_env.inventory)
+			t_env.entry_price =
+				(t_env.entry_price * held + price * f64(trade_size)) / (held + f64(trade_size))
+			t_env.inventory += trade_size
 			info = fmt.tprintf("Bought %d", trade_size)
 			t_env.cooldown = 0
 		}
-	} else if action == 2 && t_env.inventory > -t_env.max_position && t_env.cooldown >= 5 {
-		revenue := price * (1.0 - t_env.transaction_fee)
-
-		// ✅ FIX: Sell block
+	} else if action == 2 && t_env.cooldown >= 5 {
 		trade_size := min(t_env.inventory, 10)
 		if trade_size > 0 {
-			t_env.cash += revenue * f64(trade_size)
-			t_env.inventory -= i32(trade_size)
+			t_env.cash += price * (1.0 - t_env.transaction_fee) * f64(trade_size)
+			t_env.inventory -= trade_size
 			if t_env.inventory == 0 {
 				profit := (price - t_env.entry_price) / t_env.entry_price
 				reward += profit * 0.1
 				info = fmt.tprintf("Sold %d, PnL=%.4f", trade_size, profit)
+				t_env.entry_price = 0
 			}
 			t_env.cooldown = 0
 		}
 	}
 
-	// 3. Calculate portfolio value AFTER action
+	// last price: close the position (the fee is part of the value change below)
+	if t_env.env.done && t_env.inventory != 0 {
+		t_env.cash += price * (1.0 - t_env.transaction_fee) * f64(t_env.inventory)
+		t_env.inventory = 0
+		info = "Liquidated at end"
+	}
+
 	curr_value := t_env.cash + f64(t_env.inventory) * price
-	if curr_value > t_env.peak_cash {
-		t_env.peak_cash = curr_value
-	}
+	t_env.peak_cash = max(t_env.peak_cash, curr_value)
+	drawdown := (t_env.peak_cash - curr_value) / t_env.peak_cash if t_env.peak_cash > 0 else 0.0
 
-	// Calculate drawdown (0.0 means no drawdown, 0.1 means 10% drawdown)
-	drawdown := 0.0
-	if t_env.peak_cash > 0.0 {
-		drawdown = (t_env.peak_cash - curr_value) / t_env.peak_cash
-	}
-	// 4. Reward is the normalized change in portfolio value
-	// ✅ FIX: The fee is ALREADY accounted for in curr_value vs prev_value!
-	// Do NOT subtract trade_cost again, or you penalize the agent 100x the actual fee.
-	reward += (curr_value - prev_value) / t_env.initial_cash
-
-	// ✅ FIX: Small explicit penalty to discourage excessive churn
-	if action != 0 {
-		reward -= t_env.transaction_fee * 2.0
-	}
-	// 5. Tiny penalty for holding inventory
+	reward += (curr_value - prev_value) / t_env.initial_cash // includes the fees paid
+	if action != 0 {reward -= t_env.transaction_fee * 2.0} 	// discourages churn
 	reward -= math.abs(f64(t_env.inventory)) * 0.00001
-	drawdown_penalty_weight := 2.0
-	reward -= drawdown_penalty_weight * drawdown
-	// 6. Build observation for the NEXT step
-	obs_dim := t_env.window * (2 + t_env.n_indicators)
-	obs := make([]f64, obs_dim, t_env.allocator)
-
-	start := max(0, t_env.env.current_step - t_env.window + 1)
-
-	base_price := t_env.prices[start]
-	if base_price == 0 {base_price = 1.0}
-
-	base_vol := t_env.volumes[start]
-	if base_vol == 0 {base_vol = 1.0}
-
-	idx := 0
-	for w in 0 ..< t_env.window {
-		idx_in_data := start + w
-		if idx_in_data < len(t_env.prices) {
-			obs[idx] = (t_env.prices[idx_in_data] / base_price) - 1.0
-		}
-		idx += 1
-	}
-	for w in 0 ..< t_env.window {
-		idx_in_data := start + w
-		if idx_in_data < len(t_env.volumes) {
-			obs[idx] = (t_env.volumes[idx_in_data] / base_vol) - 1.0
-		}
-		idx += 1
-	}
-	for w in 0 ..< t_env.window {
-		idx_in_data := (start + w) * t_env.n_indicators
-		if idx_in_data < len(t_env.indicators) {
-			obs[idx] = t_env.indicators[idx_in_data]
-		}
-		idx += 1
-	}
+	reward -= 2.0 * drawdown
 
 	return Step {
-		observation = Observation{data = obs, shape = [4]int{1, obs_dim, 1, 1}},
+		observation = _trading_obs(t_env, k),
 		reward = reward,
 		done = t_env.env.done,
 		info = info,
@@ -266,6 +196,10 @@ new_trading_env :: proc(
 	max_position: i32 = 10,
 	alloc: mem.Allocator = context.allocator,
 ) -> ^TradingEnv {
+	assert(
+		window >= 1 && len(prices) > window && len(volumes) == len(prices),
+		"new_trading_env: need more prices than the window",
+	)
 	env := new(TradingEnv, alloc)
 	env.prices = prices
 	env.volumes = volumes
@@ -276,7 +210,7 @@ new_trading_env :: proc(
 	env.max_position = max_position
 	env.env.action_space = 3
 	env.env.obs_dim = window * (2 + n_indicators)
-	env.env.max_steps = len(prices)
+	env.env.max_steps = len(prices) - 1 // the last step trades at the last price
 	env.initial_cash = 100000.0
 	env.env.reset_fn = trading_env_reset
 	env.env.step_fn = trading_env_step
@@ -288,7 +222,11 @@ trading_env_free :: proc(env: ^TradingEnv) {
 	free(env, env.allocator)
 }
 
-// RolloutBuffer stores experience for PPO updates
+// ============================================================================
+// Rollout buffer
+// ============================================================================
+// Transitions in order; dones[t] marks the last transition of an episode. Grows when
+// full (no data is dropped). The buffer owns the state tensors.
 RolloutBuffer :: struct {
 	states:        []^tensor.Tensor,
 	actions:       []int,
@@ -303,16 +241,23 @@ RolloutBuffer :: struct {
 
 new_rollout_buffer :: proc(capacity: int, alloc: mem.Allocator) -> ^RolloutBuffer {
 	buf := new(RolloutBuffer, alloc)
-	buf.capacity = capacity
-	buf.states = make([]^tensor.Tensor, capacity, alloc)
-	buf.actions = make([]int, capacity, alloc)
-	buf.old_log_probs = make([]f64, capacity, alloc)
-	buf.rewards = make([]f64, capacity, alloc)
-	buf.values = make([]f64, capacity, alloc)
-	buf.dones = make([]bool, capacity, alloc)
-	buf.size = 0
+	buf.capacity = max(capacity, 1)
+	buf.states = make([]^tensor.Tensor, buf.capacity, alloc)
+	buf.actions = make([]int, buf.capacity, alloc)
+	buf.old_log_probs = make([]f64, buf.capacity, alloc)
+	buf.rewards = make([]f64, buf.capacity, alloc)
+	buf.values = make([]f64, buf.capacity, alloc)
+	buf.dones = make([]bool, buf.capacity, alloc)
 	buf.allocator = alloc
 	return buf
+}
+
+@(private = "file")
+_grow :: proc(s: ^[]$T, n: int, alloc: mem.Allocator) {
+	g := make([]T, n, alloc)
+	copy(g, s^)
+	delete(s^, alloc)
+	s^ = g
 }
 
 rollout_buffer_add :: proc(
@@ -325,12 +270,14 @@ rollout_buffer_add :: proc(
 	done: bool,
 ) {
 	if buf.size >= buf.capacity {
-		for i in 0 ..< buf.capacity {
-			if buf.states[i] != nil {
-				tensor.tensor_free(buf.states[i])
-			}
-		}
-		buf.size = 0
+		n := 2 * buf.capacity
+		_grow(&buf.states, n, buf.allocator)
+		_grow(&buf.actions, n, buf.allocator)
+		_grow(&buf.old_log_probs, n, buf.allocator)
+		_grow(&buf.rewards, n, buf.allocator)
+		_grow(&buf.values, n, buf.allocator)
+		_grow(&buf.dones, n, buf.allocator)
+		buf.capacity = n
 	}
 	buf.states[buf.size] = state
 	buf.actions[buf.size] = action
@@ -345,6 +292,7 @@ rollout_buffer_clear :: proc(buf: ^RolloutBuffer) {
 	for i in 0 ..< buf.size {
 		if buf.states[i] != nil {
 			tensor.tensor_free(buf.states[i])
+			buf.states[i] = nil
 		}
 	}
 	buf.size = 0
@@ -361,7 +309,9 @@ rollout_buffer_free :: proc(buf: ^RolloutBuffer) {
 	free(buf, buf.allocator)
 }
 
-// PPOAgent implements Proximal Policy Optimization
+// ============================================================================
+// PPO (Schulman et al. 2017, clipped surrogate; conventions as CleanRL / SB3)
+// ============================================================================
 PPOAgent :: struct {
 	actor:        ^nn.Sequential,
 	critic:       ^nn.Sequential,
@@ -380,11 +330,11 @@ PPOAgent :: struct {
 }
 
 PPOUpdateStats :: struct {
-	policy_loss: f64,
-	value_loss:  f64,
+	policy_loss: f64, // mean of -min(r A, clip(r) A)
+	value_loss:  f64, // mean of (V - R)^2
 	entropy:     f64,
-	total_loss:  f64,
-	n_updates:   int,
+	total_loss:  f64, // policy + value_coef value - entropy_coef entropy
+	n_updates:   int, // samples summed over (epochs x buffer size)
 }
 
 new_ppo_agent :: proc(
@@ -420,12 +370,10 @@ new_ppo_agent :: proc(
 	nn.sequential_add(agent.critic, nn.linear_layer_new(hidden_dim, 1, alloc))
 
 	agent.optimizer = nn.adam_new(lr, 0.9, 0.999, 1e-8, alloc)
-
 	nn.sequential_add_to_adam(agent.actor, &agent.optimizer)
 	nn.sequential_add_to_adam(agent.critic, &agent.optimizer)
 
 	agent.buffer = new_rollout_buffer(2048, alloc)
-
 	return agent
 }
 
@@ -437,20 +385,28 @@ ppo_agent_select_action :: proc(
 	log_prob: f64,
 	value: f64,
 ) {
-	// Both forward graphs live in the agent's scope and are released at once
-	tensor.graph_begin(&agent.scope)
+	tensor.graph_begin(&agent.scope, no_grad = true)
 	defer tensor.graph_end(&agent.scope)
 
-	logits := nn.sequential_forward(agent.actor, state)
-	probs := tensor.tensor_softmax(logits)
+	probs := tensor.tensor_softmax(nn.sequential_forward(agent.actor, state))
 	action = tensor_categorical_sample(probs)
 	log_prob = tensor_categorical_log_prob(probs, action)
-	val_tensor := nn.sequential_forward(agent.critic, state)
-	value = val_tensor.data.data[0]
-
+	value = nn.sequential_forward(agent.critic, state).data.data[0]
 	return action, log_prob, value
 }
 
+// Critic value V(state), e.g. of the state after the last transition, to bootstrap
+// ppo_agent_update when the rollout ends inside an episode
+ppo_agent_value :: proc(agent: ^PPOAgent, state: ^tensor.Tensor) -> f64 {
+	tensor.graph_begin(&agent.scope, no_grad = true)
+	defer tensor.graph_end(&agent.scope)
+	return nn.sequential_forward(agent.critic, state).data.data[0]
+}
+
+// Generalised advantage estimation (Schulman et al. 2016), as CleanRL:
+//   delta_t = r_t + gamma V_{t+1} (1 - done_t) - V_t,  A_t = delta_t + gamma lambda (1 - done_t) A_{t+1}
+// V_{t+1} after the last transition is last_value (the value of the state the rollout
+// stopped in; without it V of the last state is used, an approximation).
 compute_gae :: proc(
 	rewards: []f64,
 	values: []f64,
@@ -458,179 +414,160 @@ compute_gae :: proc(
 	gamma: f64,
 	gae_lambda: f64,
 	alloc: mem.Allocator,
+	last_value: Maybe(f64) = nil,
 ) -> []f64 {
-	advantages := make([]f64, len(rewards), alloc)
-	last_gae := 0.0
-
-	for t := len(rewards) - 1; t >= 0; t -= 1 {
-		if dones[t] {
-			delta := rewards[t] - values[t]
-			last_gae = delta
-		} else {
-			next_value := 0.0
-			if t + 1 < len(values) {
-				next_value = values[t + 1]
-			} else {
-				next_value = values[len(values) - 1]
-			}
-
-			delta := rewards[t] + gamma * next_value - values[t]
-			last_gae = delta + gamma * gae_lambda * last_gae
-		}
-		advantages[t] = last_gae
+	n := len(rewards)
+	advantages := make([]f64, n, alloc)
+	if n == 0 {return advantages}
+	bootstrap, ok := last_value.?
+	if !ok {bootstrap = values[n - 1]}
+	gae := 0.0
+	for t := n - 1; t >= 0; t -= 1 {
+		not_done := 0.0 if dones[t] else 1.0
+		next_value := values[t + 1] if t + 1 < n else bootstrap
+		delta := rewards[t] + gamma * next_value * not_done - values[t]
+		gae = delta + gamma * gae_lambda * not_done * gae
+		advantages[t] = gae
 	}
-
 	return advantages
 }
 
+// Loss of one minibatch (buffer rows `rows`), for the advantages (already normalised)
+// and returns of the whole buffer:
+//   L = mean[-min(r A, clip(r, 1 - eps, 1 + eps) A)] + value_coef mean[(V - R)^2]
+//       - entropy_coef mean[H(pi)],   r = pi(a) / pi_old(a)
+// The returned tensor has the gradient of L (the surrogate's gradient is A r grad log pi
+// where the unclipped term is the minimum, else 0, applied through the cross entropy
+// -log pi(a)); `objective` is the value of L. Build it inside a graph scope.
+ppo_minibatch_loss :: proc(
+	agent: ^PPOAgent,
+	rows: []int,
+	advantages, returns: []f64,
+) -> (
+	loss: ^tensor.Tensor,
+	objective: f64,
+	stats: PPOUpdateStats,
+) {
+	ga := tensor._scope_or(agent.allocator)
+	total_policy := tensor.tensor_new(l.matrix_new(f64, 1, 1, ga), true, ga)
+	total_value := tensor.tensor_new(l.matrix_new(f64, 1, 1, ga), true, ga)
+	total_entropy := tensor.tensor_new(l.matrix_new(f64, 1, 1, ga), true, ga)
+
+	for idx in rows {
+		state := agent.buffer.states[idx]
+		action := agent.buffer.actions[idx]
+		advantage := advantages[idx]
+
+		logits := nn.sequential_forward(agent.actor, state)
+		probs := tensor.tensor_softmax(logits)
+		ce_loss := tensor.tensor_cross_entropy_loss(logits, []int{action}) // -log pi(a)
+
+		ratio := math.exp(math.ln(probs.data.data[action]) - agent.buffer.old_log_probs[idx])
+		surr1 := ratio * advantage
+		surr2 := clamp(ratio, 1.0 - agent.clip_epsilon, 1.0 + agent.clip_epsilon) * advantage
+		scale := advantage * ratio if surr1 <= surr2 else 0.0
+		total_policy = tensor.tensor_add(total_policy, tensor.tensor_scale(ce_loss, scale))
+
+		target_data := l.matrix_new(f64, 1, 1, ga)
+		target_data.data[0] = returns[idx]
+		value_loss := tensor.tensor_mse_loss(
+			nn.sequential_forward(agent.critic, state),
+			tensor.tensor_new(target_data, false, ga),
+		)
+		total_value = tensor.tensor_add(total_value, value_loss)
+
+		entropy := tensor.tensor_entropy(probs)
+		total_entropy = tensor.tensor_add(total_entropy, entropy)
+
+		pl := -math.min(surr1, surr2)
+		stats.policy_loss += pl
+		stats.value_loss += value_loss.data.data[0]
+		stats.entropy += entropy.data.data[0]
+		stats.n_updates += 1
+	}
+	inv := 1.0 / f64(len(rows))
+	loss = tensor.tensor_add(
+		tensor.tensor_add(
+			tensor.tensor_scale(total_policy, inv),
+			tensor.tensor_scale(total_value, agent.value_coef * inv),
+		),
+		tensor.tensor_scale(total_entropy, -agent.entropy_coef * inv),
+	)
+	stats.total_loss =
+		stats.policy_loss +
+		agent.value_coef * stats.value_loss -
+		agent.entropy_coef * stats.entropy
+	objective = stats.total_loss * inv
+	return
+}
+
+// PPO update on the buffer: GAE advantages (raw advantages + values are the critic's
+// targets; the advantages are normalised for the policy loss), then `epochs` passes over
+// shuffled minibatches of batch_size, one Adam step each. Clears the buffer.
+// last_value: V of the state after the last transition when the rollout stopped inside
+// an episode (ppo_agent_value); without it V of the last state is used.
 ppo_agent_update :: proc(
 	agent: ^PPOAgent,
 	epochs: int = 10,
 	batch_size: int = 64,
+	last_value: Maybe(f64) = nil,
 ) -> PPOUpdateStats {
 	stats: PPOUpdateStats
-	if agent.buffer.size == 0 {return stats}
+	n := agent.buffer.size
+	if n == 0 {return stats}
 
 	advantages := compute_gae(
-		agent.buffer.rewards[:agent.buffer.size],
-		agent.buffer.values[:agent.buffer.size],
-		agent.buffer.dones[:agent.buffer.size],
+		agent.buffer.rewards[:n],
+		agent.buffer.values[:n],
+		agent.buffer.dones[:n],
 		agent.gamma,
 		agent.gae_lambda,
 		agent.allocator,
+		last_value,
 	)
 	defer delete(advantages, agent.allocator)
-
-	adv_mean := 0.0
-	adv_var := 0.0
-	for a in advantages {
-		adv_mean += a
-		adv_var += a * a
-	}
-	adv_mean /= f64(len(advantages))
-	adv_var = adv_var / f64(len(advantages)) - adv_mean * adv_mean
-	adv_std := math.sqrt_f64(adv_var + 1e-8)
-	for i in 0 ..< len(advantages) {
-		advantages[i] = (advantages[i] - adv_mean) / adv_std
-	}
-
-	returns := make([]f64, len(advantages), agent.allocator)
+	returns := make([]f64, n, agent.allocator)
 	defer delete(returns, agent.allocator)
-	for i in 0 ..< len(advantages) {
-		returns[i] = advantages[i] + agent.buffer.values[i]
-	}
-	max_return := 0.01
-	for i in 0 ..< len(returns) {
-		if returns[i] > max_return {returns[i] = max_return}
-		if returns[i] < -max_return {returns[i] = -max_return}
-	}
+	for i in 0 ..< n {returns[i] = advantages[i] + agent.buffer.values[i]}
+
+	adv_mean, adv_var := 0.0, 0.0
+	for a in advantages {adv_mean += a}
+	adv_mean /= f64(n)
+	for a in advantages {adv_var += (a - adv_mean) * (a - adv_mean)}
+	adv_std := math.sqrt(adv_var / f64(n)) + 1e-8
+	for &a in advantages {a = (a - adv_mean) / adv_std}
+
+	indices := make([]int, n, agent.allocator)
+	defer delete(indices, agent.allocator)
 	for _ in 0 ..< epochs {
-		indices := make([]int, agent.buffer.size, agent.allocator)
-		for i in 0 ..< agent.buffer.size {indices[i] = i}
-		for i := agent.buffer.size - 1; i > 0; i -= 1 {
-			j := rand.int_range(0, i)
+		for i in 0 ..< n {indices[i] = i}
+		for i := n - 1; i > 0; i -= 1 {
+			j := rand.int_max(i + 1) // Fisher-Yates: j uniform in [0, i]
 			indices[i], indices[j] = indices[j], indices[i]
 		}
-
-		for start := 0; start < agent.buffer.size; start += batch_size {
-			end := min(start + batch_size, agent.buffer.size)
-			b_len := end - start
-
+		for start := 0; start < n; start += batch_size {
+			rows := indices[start:min(start + batch_size, n)]
 			nn.adam_zero_grad(&agent.optimizer)
-
-			// The whole minibatch graph, including its helper leaves, lives in
-			// the agent's scope and is released at once by graph_end
 			tensor.graph_begin(&agent.scope)
-			defer tensor.graph_end(&agent.scope)
-			ga := tensor.graph_allocator(&agent.scope)
-
-			total_policy_loss := tensor.tensor_new(l.matrix_new(f64, 1, 1, ga), true, ga)
-			total_value_loss := tensor.tensor_new(l.matrix_new(f64, 1, 1, ga), true, ga)
-			total_entropy := tensor.tensor_new(l.matrix_new(f64, 1, 1, ga), true, ga)
-
-			for i in 0 ..< b_len {
-				idx := indices[start + i]
-				state := agent.buffer.states[idx]
-				action := agent.buffer.actions[idx]
-				old_log_prob := agent.buffer.old_log_probs[idx]
-				advantage := advantages[idx]
-				target_return := returns[idx]
-
-				// ── Actor forward ──
-				logits := nn.sequential_forward(agent.actor, state)
-				probs := tensor.tensor_softmax(logits)
-
-				ce_loss := tensor.tensor_cross_entropy_loss(logits, []int{action})
-
-				new_log_prob := math.ln_f64(probs.data.data[action])
-				ratio := math.exp_f64(new_log_prob - old_log_prob)
-
-				surr1 := ratio * advantage
-				clamped_ratio := math.max(
-					1.0 - agent.clip_epsilon,
-					math.min(1.0 + agent.clip_epsilon, ratio),
-				)
-				surr2 := clamped_ratio * advantage
-
-				// ✅ CORRECT PPO GRADIENT TRICK:
-				// dL/d(logits) = A * ratio * d(ce_loss)/d(logits) when unclipped, 0 otherwise.
-				scale := 0.0
-				if surr1 <= surr2 {
-					scale = advantage * ratio
-				}
-
-				policy_loss_tensor := tensor.tensor_scale(ce_loss, scale)
-				total_policy_loss = tensor.tensor_add(total_policy_loss, policy_loss_tensor)
-
-				// ── Critic forward ──
-				value_tensor := nn.sequential_forward(agent.critic, state)
-
-				target_data := l.matrix_new(f64, 1, 1, ga)
-				target_data.data[0] = target_return
-				target_tensor := tensor.tensor_new(target_data, false, ga)
-
-				value_loss_tensor := tensor.tensor_mse_loss(value_tensor, target_tensor)
-				total_value_loss = tensor.tensor_add(total_value_loss, value_loss_tensor)
-
-				// ── Entropy ──
-				entropy_tensor := tensor.tensor_entropy(probs)
-				entropy_loss_tensor := tensor.tensor_scale(entropy_tensor, -agent.entropy_coef)
-				total_entropy = tensor.tensor_add(total_entropy, entropy_loss_tensor)
-
-				stats.policy_loss += -math.min(surr1, surr2)
-				stats.value_loss += value_loss_tensor.data.data[0]
-				stats.entropy += entropy_tensor.data.data[0]
-				stats.total_loss +=
-					-math.min(surr1, surr2) +
-					agent.value_coef * value_loss_tensor.data.data[0] -
-					agent.entropy_coef * entropy_tensor.data.data[0]
-				stats.n_updates += 1
-			}
-
-			batch_len_f := f64(b_len)
-			inv_batch := tensor.tensor_new(l.matrix_new(f64, 1, 1, ga), false, ga)
-			inv_batch.data.data[0] = 1.0 / batch_len_f
-
-			total_policy_loss = tensor.tensor_mul(total_policy_loss, inv_batch)
-			total_value_loss = tensor.tensor_mul(total_value_loss, inv_batch)
-			total_entropy = tensor.tensor_mul(total_entropy, inv_batch)
-
-			total_loss := tensor.tensor_add(total_policy_loss, total_value_loss)
-			total_loss = tensor.tensor_add(total_loss, total_entropy)
-
-			tensor.tensor_backward(total_loss)
+			loss, _, s := ppo_minibatch_loss(agent, rows, advantages, returns)
+			tensor.tensor_backward(loss)
+			tensor.graph_end(&agent.scope)
 			nn.adam_step(&agent.optimizer)
+			stats.policy_loss += s.policy_loss
+			stats.value_loss += s.value_loss
+			stats.entropy += s.entropy
+			stats.total_loss += s.total_loss
+			stats.n_updates += s.n_updates
 		}
-		delete(indices, agent.allocator) // after all minibatches (it was freed after the first)
 	}
-
 	rollout_buffer_clear(agent.buffer)
 
 	if stats.n_updates > 0 {
-		stats.policy_loss /= f64(stats.n_updates)
-		stats.value_loss /= f64(stats.n_updates)
-		stats.entropy /= f64(stats.n_updates)
-		stats.total_loss /= f64(stats.n_updates)
+		k := f64(stats.n_updates)
+		stats.policy_loss /= k
+		stats.value_loss /= k
+		stats.entropy /= k
+		stats.total_loss /= k
 	}
 	return stats
 }
@@ -648,8 +585,7 @@ tensor_categorical_sample :: proc(probs: ^tensor.Tensor) -> int {
 	r := rand.float64()
 	cum_prob := 0.0
 	for i in 0 ..< len(probs.data.data) {
-		p := probs.data.data[i]
-		cum_prob += p
+		cum_prob += probs.data.data[i]
 		if r < cum_prob {
 			return i
 		}
