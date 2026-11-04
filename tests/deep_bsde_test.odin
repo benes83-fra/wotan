@@ -1,224 +1,165 @@
 package tests
 
-import l "../wotan/linalg"
 import ml_fin "../wotan/ml_finance"
 import nn "../wotan/nn"
+import optim "../wotan/optimize"
 import t "../wotan/tensor"
 import "core:fmt"
 import "core:math"
 import "core:mem"
 
-deep_bsde_test :: proc(allocator: mem.Allocator = context.allocator) {
-	seed_test(#procedure)
-	fmt.println("\n======================================================================")
-	fmt.println("    DEEP BSDE: HIGH-DIMENSIONAL BLACK-SCHOLES PDE")
-	fmt.println("======================================================================\n")
+// Deep BSDE prices of calls on the maximum of d independent GBMs (S_0 = K = 100, r = 5%,
+// sigma = 20%, T = 1) against the exact value
+//   e^{-rT} int_K^inf (1 - F(x)^d) dx,  F the log-normal CDF of one asset
+// (scipy.integrate.quad; d = 1 is Black-Scholes, 10.4506; Monte Carlo with 200k paths
+// agrees within its standard error). The loss is the variance left after the learned
+// hedge Z; without a hedge it would be Var[payoff], so loss / Var[payoff] shows how much
+// of the risk Z replicates. In 100 dimensions this plain network (Han et al. use one
+// subnetwork per time step with batch normalisation) learns almost no hedge; Y_0 is still
+// right, as the mean of Y_T over 5000 batches.
 
-	N := 20
+@(private = "file")
+BSDE_Case :: struct {
+	name:                  string,
+	d, N, batch, epochs:   int,
+	hidden, layers:        int,
+	y0_init:               f64,
+	reference, payoff_var: f64,
+	tol:                   f64, // relative tolerance on Y_0
+	net_lr:                f64, // 0: 1e-3
+	max_loss_ratio:        f64, // loss / Var[payoff] allowed (1: the hedge is not checked)
+}
 
-	// Becker et al. 100D Max-Call parameters
-	d := 100
-	T := 1.0 / 3.0 // 4 months
-	K := 16.3
-	r := 0.0
-	sigma_val := 0.2
-	S_0_val := 1.0
+@(private = "file")
+_bsde_run :: proc(c: BSDE_Case, allocator: mem.Allocator) -> bool {
+	S0, K, r, s, T :: 100.0, 100.0, 0.05, 0.2, 1.0
+	S_0 := make([]f64, c.d, allocator)
+	sigma := make([]f64, c.d, allocator)
+	defer {delete(S_0, allocator); delete(sigma, allocator)}
+	for i in 0 ..< c.d {S_0[i], sigma[i] = S0, s}
 
-	S_0 := make([]f64, d, allocator)
-	sigma := make([]f64, d, allocator)
-	for i in 0 ..< d {
-		S_0[i] = S_0_val
-		sigma[i] = sigma_val
-	}
-
-	batch_size := 64
-	epochs := 5000
-
-	fmt.printf("Problem: %d-dimensional Max-Call Option\n", d)
-	fmt.printf(
-		"Parameters: T=%.1f, r=%.2f, σ=%.2f, K=%.1f, S_0=%.1f\n",
+	model := ml_fin.deep_bsde_model_new(
+		c.y0_init,
+		c.d,
 		T,
-		r,
-		sigma_val,
-		K,
-		S_0_val,
+		c.N,
+		c.hidden,
+		c.layers,
+		allocator = allocator,
 	)
-	fmt.printf("Training: batch_size=%d, epochs=%d, N=%d steps\n\n", batch_size, epochs, N)
-
-	model := ml_fin.deep_bsde_model_new(12.0, d, T, N, 64, 2, batch_size, allocator)
 	defer ml_fin.deep_bsde_model_free(&model)
-
-	opt := nn.adam_new(0.001, allocator = allocator)
+	net_lr := c.net_lr if c.net_lr > 0 else 1e-3
+	opt := nn.adam_new(net_lr, allocator = allocator)
 	defer nn.adam_free(&opt)
-	nn.adam_add_param(&opt, model.y0)
+	nn.adam_add_param_with_lr(&opt, model.y0, 0.1) // Y_0 moves ~ lr per step: 100x the network's
 	nn.sequential_add_to_adam(model.z_net, &opt)
+	schedule := optim.lr_step_decay(net_lr, c.epochs / 3, 0.2) // both rates x0.2 at 1/3 and 2/3
 
-	fmt.println("Training Progress:")
-	fmt.println("Epoch | Loss      | Estimated Y_0")
-	fmt.println("------|-----------|--------------")
-
-	// ✅ One arena per training step, reused across epochs
 	scope: t.Graph_Scope
 	defer t.graph_scope_destroy(&scope)
-
-	for epoch in 0 ..< epochs {
+	tail := 200 // loss averaged over the last epochs
+	loss_tail := 0.0
+	for epoch in 0 ..< c.epochs {
 		t.graph_begin(&scope)
 		nn.adam_zero_grad(&opt)
-
-		loss := ml_fin.deep_bsde_bs_loss(&model, S_0, K, r, sigma, batch_size, N, allocator)
+		loss := ml_fin.deep_bsde_bs_loss(&model, S_0, K, r, sigma, c.batch, c.N, allocator)
 		t.tensor_backward(loss)
-		nn.adam_step(&opt)
-
-		if epoch % 100 == 0 || epoch == epochs - 1 {
-			fmt.printf("%-5d | %.4f  | %.4f\n", epoch, loss.data.data[0], model.y0.data.data[0])
+		nn.adam_step_scheduled(&opt, schedule, epoch)
+		lv := loss.data.data[0]
+		t.graph_end(&scope)
+		if epoch >= c.epochs - tail {loss_tail += lv / f64(tail)}
+		if epoch % (c.epochs / 5) == 0 {
+			fmt.printf(
+				"  epoch %5d | loss %9.4f | Y_0 %.4f\n",
+				epoch,
+				lv,
+				ml_fin.deep_bsde_y0(&model),
+			)
 		}
-
-		t.tensor_free_graph(loss)
-		t.graph_end(&scope) // ✅ Instantly wipes thousands of intermediate tensors
 	}
-
-	fmt.println("\n======================================================================")
-	fmt.printf("Final Estimated Option Price (Y_0): $%.4f\n", model.y0.data.data[0])
-	fmt.println("(Reference value for 100D Max-Call is approximately $12.8 - $13.0)")
-	fmt.println("======================================================================\n")
+	y0 := ml_fin.deep_bsde_y0(&model)
+	err := abs(y0 - c.reference) / c.reference
+	ratio := loss_tail / c.payoff_var
+	ok := err < c.tol && ratio < c.max_loss_ratio
+	fmt.printf(
+		"%s %s: Y_0 %.4f vs exact %.4f (%.2f%%, tolerance %.1f%%); loss %.2f = %.1f%% of Var[payoff] %.1f%s\n",
+		"OK  " if ok else "FAIL",
+		c.name,
+		y0,
+		c.reference,
+		100 * err,
+		100 * c.tol,
+		loss_tail,
+		100 * ratio,
+		c.payoff_var,
+		c.max_loss_ratio < 1 ? fmt.tprintf(" (the hedge Z removes the rest; at most %.0f%% allowed)", 100 * c.max_loss_ratio) : " (Z learns almost no hedge here: Y_0 is in effect a Monte Carlo mean)",
+	)
+	return ok
 }
 
 deep_bsde_european_call_test :: proc(allocator: mem.Allocator = context.allocator) {
 	seed_test(#procedure)
-	fmt.println("\n=== DEEP BSDE: 1D EUROPEAN CALL VALIDATION ===")
+	fmt.println("\n=== Deep BSDE: 1D European call vs Black-Scholes ===")
+	_bsde_run(
+		{
+			name = "1D European call",
+			d = 1,
+			N = 20,
+			batch = 64,
+			epochs = 3000,
+			hidden = 32,
+			layers = 2,
+			y0_init = 5.0,
+			reference = 10.450583572185565,
+			payoff_var = 239.44727801854623,
+			tol = 0.01,
+			max_loss_ratio = 0.05,
+		},
+		allocator,
+	)
+}
 
-	d := 1
-	T := 1.0
-	N := 10
-	r := 0.05
-	sigma_val := 0.2
-	K := 100.0
-	S_0_val := 100.0
-
-	S_0 := make([]f64, d, allocator)
-	sigma := make([]f64, d, allocator)
-	for i in 0 ..< d {
-		S_0[i] = S_0_val
-		sigma[i] = sigma_val
-	}
-
-	batch_size := 64
-	epochs := 3000
-
-	model := ml_fin.deep_bsde_model_new(10.0, d, T, N, 64, 2, batch_size, allocator)
-	defer ml_fin.deep_bsde_model_free(&model)
-
-	opt := nn.adam_new(0.005, allocator = allocator)
-	defer nn.adam_free(&opt)
-	nn.adam_add_param(&opt, model.y0)
-
-	fmt.println("Training 1D European Call (Target: Black-Scholes Price)...")
-
-	// ✅ One arena per training step, reused across epochs
-	scope: t.Graph_Scope
-	defer t.graph_scope_destroy(&scope)
-
-	for epoch in 0 ..< epochs {
-		t.graph_begin(&scope)
-		nn.adam_zero_grad(&opt)
-
-		loss := ml_fin.deep_bsde_bs_loss(&model, S_0, K, r, sigma, batch_size, N, allocator)
-		t.tensor_backward(loss)
-		nn.adam_step(&opt)
-
-		if epoch % 500 == 0 {
-			fmt.printf(
-				"Epoch %d | Loss: %.4f | Y0: %.4f\n",
-				epoch,
-				loss.data.data[0],
-				model.y0.data.data[0],
-			)
-		}
-
-		t.tensor_free_graph(loss)
-		t.graph_end(&scope) // ✅ Instantly wipes thousands of intermediate tensors
-	}
-
-	d1 :=
-		(math.ln(S_0_val / K) + (r + 0.5 * sigma_val * sigma_val) * T) / (sigma_val * math.sqrt(T))
-	d2 := d1 - sigma_val * math.sqrt(T)
-	N_d1 := 0.5 * (1.0 + math.erf(d1 / math.sqrt_f64(2.0)))
-	N_d2 := 0.5 * (1.0 + math.erf(d2 / math.sqrt_f64(2.0)))
-	bs_price := S_0_val * N_d1 - K * math.exp(-r * T) * N_d2
-
-	fmt.printf("\nDeep BSDE Result: $%.4f\n", model.y0.data.data[0])
-	fmt.printf("Black-Scholes Reference: $%.4f\n", bs_price)
-	fmt.printf("Error: %.4f%%\n", math.abs(model.y0.data.data[0] - bs_price) / bs_price * 100)
+deep_bsde_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
+	fmt.println("\n=== Deep BSDE: 10D max-call vs the exact integral ===")
+	_bsde_run(
+		{
+			name = "10D max-call",
+			d = 10,
+			N = 20,
+			batch = 64,
+			epochs = 4000,
+			hidden = 128,
+			layers = 2,
+			y0_init = 20.0,
+			reference = 39.15672219310201,
+			payoff_var = 290.4870969006911,
+			tol = 0.01,
+			net_lr = 3e-3,
+			max_loss_ratio = 0.2,
+		},
+		allocator,
+	)
 }
 
 deep_bsde_100d_test :: proc(allocator: mem.Allocator = context.allocator) {
 	seed_test(#procedure)
-	fmt.println("\n=== 100D Max-Call Option (Han et al. 2018 Benchmark) ===")
-
-	d := 100
-	T := 1.0
-	N := 20
-	r := 0.05
-	sigma_val := 0.2
-	K := 100.0
-	S_0_val := 100.0
-
-	S_0 := make([]f64, d, allocator)
-	sigma := make([]f64, d, allocator)
-	for i in 0 ..< d {
-		S_0[i] = S_0_val
-		sigma[i] = sigma_val
-	}
-
-	batch_size := 64 // Increased batch size for stability
-	epochs := 5000
-
-	// Use a larger Z-network for high-dimensional problems
-	model := ml_fin.deep_bsde_model_new(12.0, d, T, N, 64, 3, batch_size, allocator)
-	defer ml_fin.deep_bsde_model_free(&model)
-
-	opt := nn.adam_new(0.005, allocator = allocator) // Standard LR for Adam
-	defer nn.adam_free(&opt)
-
-	nn.adam_add_param(&opt, model.y0)
-	nn.sequential_add_to_adam(model.z_net, &opt)
-
-	fmt.println("Training Progress:")
-	fmt.println("Epoch | Loss      | Estimated Y_0")
-	fmt.println("------|-----------|--------------")
-
-	// ✅ One arena per training step, reused across epochs
-	scope: t.Graph_Scope
-	defer t.graph_scope_destroy(&scope)
-
-	for epoch in 0 ..< epochs {
-		t.graph_begin(&scope)
-		nn.adam_zero_grad(&opt)
-
-		loss := ml_fin.deep_bsde_bs_loss(&model, S_0, K, r, sigma, batch_size, N, allocator)
-		t.tensor_backward(loss)
-
-		// Gradient Clipping (Prevent exploding gradients in unrolled graph)
-		// Clip global norm to 1.0
-		nn.clip_grad_norm(&opt, 1.0)
-
-		nn.adam_step(&opt)
-
-		if epoch % 1000 == 0 || epoch == epochs - 1 {
-			fmt.printf(
-				"Epoch %d | Loss: %.4f | Y0: %.4f\n",
-				epoch,
-				loss.data.data[0],
-				model.y0.data.data[0],
-			)
-		}
-
-		t.tensor_free_graph(loss)
-		t.graph_end(&scope) // ✅ Instantly wipes thousands of intermediate tensors
-	}
-
-	fmt.printf(
-		"Final Y0: $%.4f (Reference for these params: ~$16.5 - $17.0)\n",
-		model.y0.data.data[0],
+	fmt.println("\n=== Deep BSDE: 100D max-call vs the exact integral ===")
+	_bsde_run(
+		{
+			name = "100D max-call",
+			d = 100,
+			N = 20,
+			batch = 64,
+			epochs = 5000,
+			hidden = 64,
+			layers = 3,
+			y0_init = 40.0,
+			reference = 67.33968211811577,
+			payoff_var = 228.91318140790008,
+			tol = 0.01,
+			max_loss_ratio = 1,
+		},
+		allocator,
 	)
 }
