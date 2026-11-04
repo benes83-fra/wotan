@@ -1,17 +1,23 @@
 package ml_finance
 
-import util "../util"
 import "core:fmt"
 import "core:math"
 import "core:mem"
+import "core:slice"
+
 // ============================================================================
 // Conformal Prediction for Distribution-Free Risk Bounds
 // ============================================================================
+// Split conformal regression with absolute residuals (Lei et al. 2018, "Distribution-free
+// predictive inference for regression"; Angelopoulos & Bates 2021): with n calibration
+// scores |y_i - y_hat_i|, Q is the k-th smallest, k = ceil((n + 1)(1 - alpha)). For a new
+// point exchangeable with the calibration data, P(|y - y_hat| <= Q) >= 1 - alpha.
+// If k > n (n < 1/alpha - 1) no finite Q has the guarantee and Q = +Inf.
 
 ConformalPredictor :: struct {
-	scores:    []f64,
+	scores:    []f64, // sorted calibration scores
 	alpha:     f64,
-	quantile:  f64,
+	quantile:  f64, // Q
 	allocator: mem.Allocator,
 }
 
@@ -25,47 +31,37 @@ conformal_free :: proc(cp: ^ConformalPredictor) {
 	}
 }
 
-
+// Pairs with a NaN actual or prediction are left out. Mismatched lengths or no valid pair:
+// nothing changes.
 conformal_calibrate :: proc(
 	cp: ^ConformalPredictor,
 	actual: []f64,
 	predicted: []f64,
 	alpha: f64 = 0.05,
 ) {
-	n := len(actual)
-	if n == 0 || n != len(predicted) {
+	if len(actual) == 0 || len(actual) != len(predicted) || !(alpha > 0 && alpha < 1) {
 		return
 	}
-
+	n := 0
+	for y, i in actual {if !math.is_nan(y - predicted[i]) {n += 1}}
+	if n == 0 {return}
 	if cp.scores != nil {
 		delete(cp.scores, cp.allocator)
 	}
 	cp.scores = make([]f64, n, cp.allocator)
+	j := 0
+	for y, i in actual {
+		s := math.abs(y - predicted[i])
+		if !math.is_nan(s) {cp.scores[j] = s; j += 1}
+	}
 	cp.alpha = alpha
+	slice.sort(cp.scores)
 
-	// 1. Compute non-conformity scores: E_i = |Y_i - Y_hat_i|
-	for i in 0 ..< n {
-		cp.scores[i] = math.abs(actual[i] - predicted[i])
-	}
-
-	// 2. Sort scores using our custom quicksort
-	util.quicksort_f64(cp.scores, 0, n - 1)
-
-	// 3. Compute the conformal quantile Q
-	level := math.ceil(f64(n + 1) * (1.0 - alpha)) / f64(n)
-	if level > 1.0 {
-		level = 1.0
-	}
-
-	idx := int(level * f64(n))
-	if idx >= n {
-		idx = n - 1
-	}
-	if idx < 0 {
-		idx = 0
-	}
-
-	cp.quantile = cp.scores[idx]
+	// k = ceil((n + 1)(1 - alpha)); the tiny shift keeps an exact integer (e.g. 20 * 0.95)
+	// from rounding up past it
+	k := int(math.ceil(f64(n + 1) * (1.0 - alpha) - 1e-9))
+	k = max(k, 1)
+	cp.quantile = k > n ? math.inf_f64(1) : cp.scores[k - 1]
 }
 
 conformal_predict_interval :: proc(
@@ -89,9 +85,9 @@ print_conformal_stats :: proc(cp: ^ConformalPredictor) {
 	fmt.printf("  Conformal Quantile Q: %.4f\n", cp.quantile)
 	fmt.println("  Interpretation: For any new forecast Y_hat, the interval")
 	fmt.printf(
-		"  [Y_hat - %.4f, Y_hat + %.4f] is guaranteed to contain\n",
+		"  [Y_hat - %.4f, Y_hat + %.4f] contains the true value with probability\n",
 		cp.quantile,
 		cp.quantile,
 	)
-	fmt.println("  the true value with >= 95% probability (assuming exchangeability).")
+	fmt.printf("  >= %.1f%% (assuming exchangeability).\n", (1.0 - cp.alpha) * 100.0)
 }

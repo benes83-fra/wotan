@@ -216,5 +216,103 @@ ml_finance_metrics_reference_test :: proc(allocator: mem.Allocator) {
 			),
 		)
 	}
+
+	{ 	// --- correlation adjacency, all 30 windows pooled (np.corrcoef): two sectors (0-2, 3-4)
+		// whose shock is constant inside a window, so a single window shows only noise;
+		// asset 5 is constant (no edges but its self-loop)
+		B, A, S :: 30, 6, 5
+		xd := l.matrix_new(f64, 1, B * A * S)
+		state: u64 = 13
+		for b in 0 ..< B {
+			sa, sb := 0.02 * normal(&state), 0.02 * normal(&state)
+			for a in 0 ..< 5 {
+				for s in 0 ..< S {xd.data[(b * A + a) * S + s] = (sa if a < 3 else sb) + 0.005 * normal(&state)}
+			}
+		}
+		X := t.tensor_new(xd, false)
+		X.shape = {B, A, S, 1}
+		adj := ml_fin.compute_correlation_adjacency(X, A, S, allocator)
+		defer {t.tensor_free(X); t.tensor_free(adj)}
+		ref := []f64 {
+			0.342821611922084,
+			0.3295616852352213,
+			0.3276167028426948,
+			0.0,
+			0.0,
+			0.0,
+			0.32933459628682105,
+			0.3425853860413822,
+			0.3280800176717967,
+			0.0,
+			0.0,
+			0.0,
+			0.32802852418533657,
+			0.32871892964752003,
+			0.3432525461671434,
+			0.0,
+			0.0,
+			0.0,
+			0.0,
+			0.0,
+			0.0,
+			0.5148473590048009,
+			0.4851526409951991,
+			0.0,
+			0.0,
+			0.0,
+			0.0,
+			0.4851526409951991,
+			0.5148473590048009,
+			0.0,
+			0.0,
+			0.0,
+			0.0,
+			0.0,
+			0.0,
+			1.0,
+		}
+		err := 0.0
+		for v, i in ref {err = max(err, abs(adj.data.data[i] - v))}
+		expect(
+			&passed,
+			&total,
+			len(adj.data.data) == A * A && err < 1e-14,
+			fmt.tprintf(
+				"correlation adjacency over all windows vs np.corrcoef (max err %.1e)",
+				err,
+			),
+		)
+	}
+
+	{ 	// --- split conformal: Q = k-th smallest score, k = ceil((n + 1)(1 - alpha))
+		// (np.quantile(scores, k / n, method="inverted_cdf")); +Inf when k > n
+		N :: 100
+		y := make([]f64, N)
+		yh := make([]f64, N)
+		defer {delete(y); delete(yh)}
+		state: u64 = 17
+		for i in 0 ..< N {y[i] = normal(&state)}
+		for i in 0 ..< N {yh[i] = 0.5 * normal(&state)}
+		Case :: struct {
+			n:     int,
+			alpha: f64,
+			q:     f64,
+		}
+		cases := []Case {
+			{100, 0.05, 2.133292933842421}, // k = 96 (was the 97th: 2.2029)
+			{100, 0.1, 1.8905596136607878}, // k = 91
+			{19, 0.05, 2.3338264495059535}, // k = 19 = n exactly
+			{19, 0.1, 1.9716490169588818},
+			{10, 0.05, math.inf_f64(1)}, // k = 11 > n (was the maximum)
+		}
+		ok := true
+		for c in cases {
+			cp := ml_fin.conformal_new(allocator)
+			ml_fin.conformal_calibrate(&cp, y[:c.n], yh[:c.n], c.alpha)
+			ok = ok && cp.quantile == c.q
+			ml_fin.conformal_free(&cp)
+		}
+		expect(&passed, &total, ok, "split conformal quantile (k-th smallest, +Inf for k > n)")
+	}
 	fmt.printf("ML-finance metrics reference checks: %d/%d passed\n", passed, total)
 }

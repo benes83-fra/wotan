@@ -58,7 +58,6 @@ gat_cross_sectional_test :: proc(allocator: mem.Allocator) {
 	// 1. Compute Dynamic Adjacency Matrix (Rolling Correlation)
 	fmt.println("Computing dynamic correlation adjacency matrix...")
 	adjacency := ml_fin.compute_correlation_adjacency(features, num_assets, time_steps, allocator)
-	defer t.tensor_free(adjacency)
 
 	// 2. Initialize GAT Model
 	fmt.println("Initializing GAT Layer...")
@@ -287,7 +286,6 @@ gat_real_world_test :: proc(allocator: mem.Allocator) {
 	// 4. Compute Dynamic Correlation Adjacency Matrix
 	fmt.println("Computing real-world rolling correlation adjacency matrix...")
 	adjacency := ml_fin.compute_correlation_adjacency(features, num_assets, time_steps, allocator)
-	defer t.tensor_free(adjacency)
 
 	// 5. Initialize GAT Model
 	fmt.println("Initializing GAT Layer...")
