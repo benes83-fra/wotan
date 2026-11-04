@@ -423,9 +423,9 @@ prob_forecast_test :: proc(allocator: mem.Allocator) {
 		expect(
 			&passed,
 			&total,
-			max(d_nll, d_pin) < 1e-14 && max(d_q, d_risk) < 1e-8 && d_score < 1e-10,
+			max(d_nll, d_pin) < 1e-14 && max(d_q, d_risk) < 1e-13 && d_score < 1e-10,
 			fmt.tprintf(
-				"Gaussian NLL (σ² = softplus) loss and grads vs torch %.1e, pinball loss of 3 quantiles and grads %.1e; quantile %.1e, VaR / ES %.1e (norm_inv, in units of σ), CRPS / NLL %.1e vs scipy",
+				"Gaussian NLL (σ² = softplus) loss and grads vs torch %.1e, pinball loss of 3 quantiles and grads %.1e; quantile %.1e, VaR / ES %.1e (norm_inv, in units of σ; Acklam alone: ~1e-9), CRPS / NLL %.1e vs scipy",
 				d_nll,
 				d_pin,
 				d_q,

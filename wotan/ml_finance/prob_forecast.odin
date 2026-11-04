@@ -279,8 +279,12 @@ prob_forecast_student_t_crps :: proc(mu, sigma, nu, y: f64) -> f64 {
 }
 
 // Empirical quantiles of samples at the levels (out[j] for levels[j]),
-// linearly interpolated as numpy.quantile's default
+// linearly interpolated as numpy.quantile's default; NaN for no samples
 prob_forecast_sample_quantiles :: proc(samples: []f64, levels: []f64, out: []f64) {
+	if len(samples) == 0 {
+		for &o in out[:len(levels)] {o = math.nan_f64()}
+		return
+	}
 	sorted := slice.clone(samples, context.temp_allocator)
 	defer delete(sorted, context.temp_allocator)
 	slice.sort(sorted)

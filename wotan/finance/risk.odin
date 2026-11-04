@@ -300,7 +300,20 @@ evt_fit :: proc(
 // Helper: Inverse Normal CDF (Quantile Function)
 // ============================================================================
 
+// Standard normal quantile to full double precision: Acklam's rational approximation
+// (~1e-9 relative) refined by one Halley step on Phi(x) - p (Phi via erfc, accurate in
+// the lower tail). -Inf / +Inf for p <= 0 / p >= 1.
 norm_inv :: proc(p: f64) -> f64 {
+	if math.is_nan(p) {return p}
+	if p <= 0.0 {return -math.INF_F64}
+	if p >= 1.0 {return math.INF_F64}
+	x := _norm_inv_acklam(p)
+	u := (_bs_cdf(x) - p) * 2.5066282746310002 * math.exp(0.5 * x * x)
+	return x - u / (1.0 + 0.5 * x * u)
+}
+
+@(private = "file")
+_norm_inv_acklam :: proc(p: f64) -> f64 {
 	a1 := -3.969683028665376e+01
 	a2 := 2.209460984245205e+02
 	a3 := -2.759285104469687e+02
