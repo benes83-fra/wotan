@@ -186,5 +186,77 @@ ppo_reference_test :: proc(allocator: mem.Allocator) {
 			),
 		)
 	}
+	{ 	// --- multi-asset environment: 8 days, 2 assets, window 2, scripted episode replayed
+		// by an independent numpy implementation of the documented rules
+		D :: 8
+		P := [D][2]f64 {
+			{100, 50},
+			{101, 49},
+			{102, 48},
+			{103, 50},
+			{104, 52},
+			{105, 51},
+			{106, 53},
+			{107, 55},
+		}
+		prices := make([]f64, 2 * D)
+		volumes := make([]f64, 2 * D)
+		ind := make([]f64, 2 * D)
+		defer {delete(prices); delete(volumes); delete(ind)}
+		for d in 0 ..< D {
+			for a in 0 ..< 2 {
+				prices[d * 2 + a] = P[d][a]
+				volumes[d * 2 + a] = 1000
+				ind[d * 2 + a] = 0.01 * f64(d + 10 * a)
+			}
+		}
+		w0 := []f64{0, 0}
+		w1 := []f64{1, 0}
+		w2 := []f64{0.5, 0.5}
+		acts := []ml_fin.ActionDef{{w0}, {w1}, {w2}}
+		env := ml_fin.new_multi_asset_env(prices, volumes, ind, 2, 1, 2, acts, 0.001, allocator)
+		defer ml_fin.multi_asset_env_free(env)
+		obs := ml_fin.env_reset(&env.env)
+		// per asset, per day of the window (days 0, 1): price / first - 1, volume / first - 1, indicator; then weights, cash
+		want := []f64{0, 0, 0, 0.01, 0, 0.01, 0, 0, 0.1, -0.02, 0, 0.11, 0, 0, 1}
+		obs_ok := len(obs.data) == len(want)
+		for v, i in want {obs_ok = obs_ok && abs(obs.data[i] - v) < 1e-15}
+		delete(obs.data)
+		ref := []f64 {
+			-0.0064753475247524795,
+			-0.011650918733235972,
+			-0.00023692717800181305,
+			-0.027030423085957482,
+			0.005637656499745878,
+			0.0238480627648493,
+		}
+		script := []int{1, 2, 2, 2, 2, 2}
+		err := 0.0
+		done_steps := 0
+		for a, i in script {
+			st := ml_fin.env_step(&env.env, a)
+			delete(st.observation.data)
+			err = max(err, abs(st.reward - ref[i]))
+			if st.done {done_steps += 1}
+		}
+		flat := env.positions[0] == 0 && env.positions[1] == 0
+		ok :=
+			obs_ok &&
+			err < 1e-15 &&
+			done_steps == 1 &&
+			flat &&
+			abs(env.cash - 107664.58868252001) < 1e-8
+		expect(
+			&passed,
+			&total,
+			ok,
+			fmt.tprintf(
+				"multi-asset env: observation layout %v, 6 step rewards (market moves of the held positions included; they were fees only) max err %.1e, last day traded then sold: cash %.2f (107664.59)",
+				obs_ok,
+				err,
+				env.cash,
+			),
+		)
+	}
 	fmt.printf("PPO reference checks: %d/%d passed\n", passed, total)
 }

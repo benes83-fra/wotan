@@ -1,11 +1,6 @@
 package ml_finance
 
-import l "../linalg"
-import nn "../nn"
-import tensor "../tensor"
-import "core:fmt"
 import "core:math"
-import "core:math/rand"
 import "core:mem"
 
 // ActionDef defines a discrete portfolio allocation
@@ -15,6 +10,17 @@ ActionDef :: struct {
 	weights: []f64,
 }
 
+// Multi-asset rebalancing environment. prices / volumes are [day, asset] row-major,
+// indicators [day, asset, indicator]. Step k observes the window ending at day k - 1,
+// rebalances at day k's prices to the target weights of the chosen action (an asset is
+// traded only if its change exceeds REBALANCE_BAND of the portfolio value; fee on the
+// traded value), and marks the portfolio to day k. The first step trades on day `window`;
+// the episode ends on the last day (or below 10% of the initial cash), where everything
+// is sold with the fee.
+// Reward (shaped): change of portfolio value from day k - 1 to day k / initial cash
+// (market move of the held positions minus fees), - 0.5 x drawdown from the peak,
+// - 0.5 x the mean absolute daily return over the window of every asset held,
+// + 1e-4 x the cash share of the initial cash.
 MultiAssetEnv :: struct {
 	env:             Environment,
 	prices:          []f64, // Flattened: [day0_asset0, day0_asset1, day1_asset0...]
@@ -25,135 +31,103 @@ MultiAssetEnv :: struct {
 	window:          int,
 	cash:            f64,
 	initial_cash:    f64,
-	peak_cash:       f64,
+	peak_cash:       f64, // peak portfolio value
 	positions:       []f64, // Fractional shares per asset
 	action_defs:     []ActionDef,
 	transaction_fee: f64,
 	allocator:       mem.Allocator,
 }
 
+REBALANCE_BAND :: 0.005 // trade an asset only if its value changes by > 0.5% of the portfolio
+
 multi_asset_env_reset :: proc(env: ^Environment) -> Observation {
 	t_env := cast(^MultiAssetEnv)env
 	t_env.cash = t_env.initial_cash
 	t_env.peak_cash = t_env.initial_cash
-	for i in 0 ..< t_env.n_assets {
-		t_env.positions[i] = 0.0
-	}
-	t_env.env.current_step = t_env.window
+	for &p in t_env.positions {p = 0.0}
+	t_env.env.current_step = t_env.window - 1 // the first step trades on day `window`
 	t_env.env.done = false
 
-	curr_prices := make([]f64, t_env.n_assets, t_env.allocator)
-	defer delete(curr_prices, t_env.allocator)
-	for a in 0 ..< t_env.n_assets {
-		curr_prices[a] = t_env.prices[t_env.window * t_env.n_assets + a]
-	}
-
-	obs := build_multi_asset_obs(t_env, t_env.window, curr_prices, t_env.initial_cash)
+	day := t_env.env.current_step
+	obs := build_multi_asset_obs(
+		t_env,
+		day,
+		t_env.prices[day * t_env.n_assets:][:t_env.n_assets],
+		t_env.initial_cash,
+	)
 	return Observation{data = obs, shape = [4]int{1, len(obs), 1, 1}}
 }
 
 multi_asset_env_step :: proc(env: ^Environment, action: int) -> Step {
 	t_env := cast(^MultiAssetEnv)env
-	if t_env.env.done {
+	n := t_env.n_assets
+	k := t_env.env.current_step
+	if k >= len(t_env.prices) / n || k < 1 {
 		obs_dim := t_env.env.obs_dim
-		obs := make([]f64, obs_dim, t_env.allocator)
 		return Step {
-			observation = Observation{data = obs, shape = [4]int{1, obs_dim, 1, 1}},
-			reward = 0.0,
+			observation = Observation {
+				data = make([]f64, obs_dim, t_env.allocator),
+				shape = [4]int{1, obs_dim, 1, 1},
+			},
 			done = true,
 			info = "Already done",
 		}
 	}
-	step_idx := t_env.env.current_step
+	prev_prices := t_env.prices[(k - 1) * n:][:n]
+	curr_prices := t_env.prices[k * n:][:n]
 
-	// 1. Get current prices for all assets
-	curr_prices := make([]f64, t_env.n_assets, t_env.allocator)
-	defer delete(curr_prices, t_env.allocator)
-	for a in 0 ..< t_env.n_assets {
-		curr_prices[a] = t_env.prices[step_idx * t_env.n_assets + a]
-	}
-
-	// 2. Calculate total portfolio value BEFORE action
+	// value at the previous close (the reward measures the change from it)
 	prev_value := t_env.cash
-	for a in 0 ..< t_env.n_assets {
-		prev_value += t_env.positions[a] * curr_prices[a]
-	}
+	for a in 0 ..< n {prev_value += t_env.positions[a] * prev_prices[a]}
+	// value at today's prices before trading: the base of the target weights
+	value_now := t_env.cash
+	for a in 0 ..< n {value_now += t_env.positions[a] * curr_prices[a]}
 
-	// 3. Execute Rebalancing Action
-	total_fees_paid := 0.0
 	if action >= 0 && action < len(t_env.action_defs) {
 		target_weights := t_env.action_defs[action].weights
-
-		for a in 0 ..< t_env.n_assets {
-			target_val := prev_value * target_weights[a]
-			curr_val := t_env.positions[a] * curr_prices[a]
-			delta_val := target_val - curr_val
-
-			// ✅ FIX: Increased threshold to $500 to prevent daily micro-churning
-			if math.abs(delta_val) > 500.0 {
-				shares := delta_val / curr_prices[a]
+		for a in 0 ..< n {
+			delta_val := value_now * target_weights[a] - t_env.positions[a] * curr_prices[a]
+			if math.abs(delta_val) > REBALANCE_BAND * math.abs(value_now) {
 				fee := math.abs(delta_val) * t_env.transaction_fee
-				t_env.positions[a] += shares
+				t_env.positions[a] += delta_val / curr_prices[a]
 				t_env.cash -= delta_val + fee
-				total_fees_paid += fee
 			}
 		}
 	}
 
-	// 4. Calculate total portfolio value AFTER action
 	curr_value := t_env.cash
-	for a in 0 ..< t_env.n_assets {
-		curr_value += t_env.positions[a] * curr_prices[a]
-	}
-	if curr_value < t_env.initial_cash * 0.10 {
-		t_env.env.done = true
-		// Liquidate everything to cash for the final observation
-		for a in 0 ..< t_env.n_assets {
+	for a in 0 ..< n {curr_value += t_env.positions[a] * curr_prices[a]}
+	if curr_value < t_env.initial_cash * 0.10 {t_env.env.done = true} 	// bust
+	if t_env.env.done {
+		// last day (or bust): sell everything, the fee is part of the value change
+		for a in 0 ..< n {
 			t_env.cash += t_env.positions[a] * curr_prices[a] * (1.0 - t_env.transaction_fee)
 			t_env.positions[a] = 0.0
 		}
 		curr_value = t_env.cash
 	}
 
-	// 5. Update peak and calculate drawdown
-	if curr_value > t_env.peak_cash {
-		t_env.peak_cash = curr_value
-	}
-	drawdown := 0.0
-	if t_env.peak_cash > 0.0 {
-		drawdown = (t_env.peak_cash - curr_value) / t_env.peak_cash
-	}
+	t_env.peak_cash = max(t_env.peak_cash, curr_value)
+	drawdown := (t_env.peak_cash - curr_value) / t_env.peak_cash if t_env.peak_cash > 0 else 0.0
 
-	// 6. Reward Shaping
 	reward := (curr_value - prev_value) / t_env.initial_cash
-	reward -= drawdown * 0.5 // Drawdown penalty
-	// 7. Calculate Volatility Penalty
-	// Discourage holding risky assets during high-volatility regimes
+	reward -= drawdown * 0.5
+	// volatility penalty: mean absolute daily return over the window of each asset held
 	vol_penalty := 0.0
-	for a in 0 ..< t_env.n_assets {
-		if t_env.positions[a] != 0.0 {
-			start_idx := max(0, step_idx - t_env.window)
-			if step_idx > start_idx {
-				avg_abs_ret := 0.0
-				for d in start_idx ..< step_idx {
-					p0 := t_env.prices[d * t_env.n_assets + a]
-					p1 := t_env.prices[(d + 1) * t_env.n_assets + a]
-					if p0 > 0 {
-						avg_abs_ret += math.abs((p1 - p0) / p0)
-					}
-				}
-				avg_abs_ret /= f64(step_idx - start_idx)
-				vol_penalty += avg_abs_ret * 0.5 // Scale the penalty
-			}
+	start := max(0, k - t_env.window)
+	for a in 0 ..< n {
+		if t_env.positions[a] == 0.0 || k <= start {continue}
+		avg_abs_ret := 0.0
+		for d in start ..< k {
+			p0 := t_env.prices[d * n + a]
+			if p0 > 0 {avg_abs_ret += math.abs((t_env.prices[(d + 1) * n + a] - p0) / p0)}
 		}
+		vol_penalty += avg_abs_ret / f64(k - start) * 0.5
 	}
 	reward -= vol_penalty
-	// Cash bonus: small reward for holding cash (risk-free asset)
-	reward += (t_env.cash / t_env.initial_cash) * 0.0001
-	// 8. Build observation for the NEXT step
+	reward += (t_env.cash / t_env.initial_cash) * 0.0001 // cash bonus
 
-	obs := build_multi_asset_obs(t_env, step_idx, curr_prices, curr_value)
-
+	obs := build_multi_asset_obs(t_env, k, curr_prices, curr_value)
 	return Step {
 		observation = Observation{data = obs, shape = [4]int{1, len(obs), 1, 1}},
 		reward = reward,
@@ -215,8 +189,7 @@ build_multi_asset_obs :: proc(
 		}
 	}
 
-	// 2. Current Portfolio State (Crucial for Multi-Asset!)
-	// ✅ FIX: Prevent division by zero and NaN propagation
+	// 2. Current portfolio weights and cash share (value floored at 1 against division by 0)
 	if total_value < 1.0 {
 		total_value = 1.0
 	}
@@ -246,6 +219,15 @@ new_multi_asset_env :: proc(
 	transaction_fee: f64 = 0.001,
 	alloc: mem.Allocator = context.allocator,
 ) -> ^MultiAssetEnv {
+	assert(
+		n_assets >= 1 &&
+		len(prices) % n_assets == 0 &&
+		len(prices) / n_assets > window &&
+		window >= 1,
+		"new_multi_asset_env: need more days than the window",
+	)
+	assert(len(volumes) == len(prices), "new_multi_asset_env: volumes and prices differ in length")
+	for ad in action_defs {assert(len(ad.weights) == n_assets, "new_multi_asset_env: every action needs n_assets weights")}
 	env := new(MultiAssetEnv, alloc)
 	env.prices = prices
 	env.volumes = volumes
@@ -260,7 +242,7 @@ new_multi_asset_env :: proc(
 	env.env.action_space = len(action_defs)
 	// Obs Dim = (window * (price + vol + indicators) * n_assets) + n_assets (weights) + 1 (cash)
 	env.env.obs_dim = window * (2 + n_indicators) * n_assets + n_assets + 1
-	env.env.max_steps = len(prices) / n_assets - 1
+	env.env.max_steps = len(prices) / n_assets - 1 // the last step trades on the last day
 	env.initial_cash = 100000.0
 	env.env.reset_fn = multi_asset_env_reset
 	env.env.step_fn = multi_asset_env_step

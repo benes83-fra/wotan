@@ -252,7 +252,7 @@ Reference and contract tests print `OK` or `FAIL` for each check and end with a 
 | `ensemble_volatility_test` 🌐 | `ensemble_volatility_test`, `vrp_signal_test`, `vrp_backtest_test` | GARCH plus sequence-model ensemble, variance risk premium signal and backtest |
 | `volatility_arbitrage_test` 🌐 | `volatility_arbitrage_test` | Implied vs forecast realised volatility |
 | `dispersion_trading_test` 🌐 | `dispersion_trading_test` | Dispersion trading: realised correlation, factor risk |
-| `ppo_reference_test` | `ppo_reference_test` | GAE vs CleanRL (numpy); PPO minibatch loss gradient vs finite differences of the clipped objective; rollout buffer growth; trading environment on a scripted episode |
+| `ppo_reference_test` | `ppo_reference_test` | GAE vs CleanRL (numpy); PPO minibatch loss gradient vs finite differences of the clipped objective; rollout buffer growth; trading and multi-asset environments on scripted episodes (the multi-asset rewards vs a numpy replay) |
 | `ppo_test` 🌐 | `ppo_trading_test`, `ppo_trading_real_data_test`, `walk_forward_validation_test` | PPO trading agent on synthetic and real data, walk-forward validation |
 | `ppo_multi_asset_test` 🌐 | `ppo_multi_asset_test`, `ppo_multi_asset_wf_test` | Multi-asset PPO (SPY vs QQQ) |
 | `cql_trading_test` | `cql_trading_test` | Offline conservative Q-learning |
