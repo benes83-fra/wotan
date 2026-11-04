@@ -79,7 +79,7 @@ orchestrator_test :: proc(allocator: mem.Allocator) {
 	}
 
 	ml_fin.hmm_init_simple(&hmm, hmm_returns)
-	hmm_ll, hmm_converged := ml_fin.hmm_fit(&hmm, hmm_returns, 200, 1e-5)
+	hmm_ll, hmm_converged := ml_fin.hmm_fit(&hmm, hmm_returns, 1000, 1e-5)
 	fmt.printf("  HMM: LL=%.2f, Converged=%v\n", hmm_ll, hmm_converged)
 
 	// Decode regimes for the full history
