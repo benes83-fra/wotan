@@ -1,16 +1,16 @@
 package ml_finance
 
-import l "../linalg"
+import fin "../finance"
 import nn "../nn"
 import t "../tensor"
 import "core:fmt"
 import "core:math"
 import "core:mem"
 
-// EnsembleVolatilityForecaster combines GARCH and LSTM forecasts
-// using learned inverse-MSE weights.
+// EnsembleVolatilityForecaster combines GARCH and sequence-model forecasts with a convex
+// weight w (ensemble_predict), e.g. the MSE-optimal one from compute_optimal_weight.
 EnsembleVolatilityForecaster :: struct {
-	lstm:            LSTMVolatilityForecaster, // ✅ Stored by value
+	lstm:            LSTMVolatilityForecaster,
 	garch_omega:     f64,
 	garch_alpha:     f64,
 	garch_beta:      f64,
@@ -23,12 +23,11 @@ ensemble_volatility_new :: proc(
 	hidden_size: int,
 	seq_len: int,
 	allocator: mem.Allocator = context.allocator,
-	seq_backend: nn.SeqBackend = .LSTM, // ✅ Opt-in Mamba support!
+	seq_backend: nn.SeqBackend = .LSTM, // .LSTM, .GRU or .Mamba
 ) -> EnsembleVolatilityForecaster {
 	e: EnsembleVolatilityForecaster
 	e.allocator = allocator
 
-	// ✅ Construct the unified config
 	config := LSTMVolaConfig {
 		input_size  = input_size,
 		hidden_size = hidden_size,
@@ -45,11 +44,13 @@ ensemble_volatility_free :: proc(e: ^EnsembleVolatilityForecaster) {
 }
 
 ensemble_add_to_optimizer :: proc(e: ^EnsembleVolatilityForecaster, opt: ^nn.Adam) {
-	// ✅ Delegate to the forecaster's centralized optimizer registration
-	// This completely replaces the manual w_ih, w_hh, bias extractions!
 	lstm_volatility_add_to_optimizer(&e.lstm, opt)
 }
 
+// One-step-ahead GARCH(1,1) volatilities: out[t] = sigma_t with
+//   sigma_0^2 = mean(r^2) (the start ts.garch_fit uses), sigma_{t+1}^2 = omega + alpha r_t^2 + beta sigma_t^2,
+// so sigma_t uses returns before t only. With the residuals a fit was made on, this is the
+// square root of its conditional_var. Pass demeaned returns (ts.extract_residuals).
 garch_recursive_forecast :: proc(
 	returns: []f64,
 	omega, alpha, beta: f64,
@@ -57,28 +58,27 @@ garch_recursive_forecast :: proc(
 ) -> []f64 {
 	n := len(returns)
 	vol_series := make([]f64, n, allocator)
+	if n == 0 {return vol_series}
 
-	unconditional_var := omega / (1.0 - alpha - beta)
-	if unconditional_var <= 0.0 || unconditional_var > 1.0 {
-		unconditional_var = 0.0001 // Fallback
-	}
-
-	var_t := unconditional_var
+	var_t := 0.0
+	for r in returns {var_t += r * r}
+	var_t /= f64(n)
 	for i in 0 ..< n {
-		vol_series[i] = math.sqrt_f64(var_t)
-		var_t = omega + alpha * returns[i] * returns[i] + beta * var_t
-		if var_t < 0.0 {var_t = unconditional_var}
+		vol_series[i] = math.sqrt(var_t)
+		var_t = math.max(omega + alpha * returns[i] * returns[i] + beta * var_t, 1e-8) // floor as ts
 	}
 	return vol_series
 }
 
+// w * garch_vol + (1 - w) * lstm_vol, w = ensemble_weight clamped to [0, 1]
 ensemble_predict :: proc(e: ^EnsembleVolatilityForecaster, garch_vol, lstm_vol: f64) -> f64 {
-	w := e.ensemble_weight
-	if w < 0.0 {w = 0.0}
-	if w > 1.0 {w = 1.0}
+	w := clamp(e.ensemble_weight, 0.0, 1.0)
 	return w * garch_vol + (1.0 - w) * lstm_vol
 }
 
+// argmin over w in [0, 1] of sum (w g + (1 - w) l - y)^2, in closed form:
+//   w* = sum (g - l)(y - l) / sum (g - l)^2, clamped to [0, 1] (the objective is a convex
+// parabola in w). 0.5 when the inputs are empty, of different length, or g = l everywhere.
 compute_optimal_weight :: proc(
 	garch_forecasts: []f64,
 	lstm_forecasts: []f64,
@@ -88,36 +88,28 @@ compute_optimal_weight :: proc(
 	if n == 0 || len(garch_forecasts) != n || len(lstm_forecasts) != n {
 		return 0.5
 	}
-
-	best_weight := 0.5
-	best_mse := math.F64_MAX
-
-	for step in 0 ..= 100 {
-		w := f64(step) / 100.0
-		mse := 0.0
-		for i in 0 ..< n {
-			pred := w * garch_forecasts[i] + (1.0 - w) * lstm_forecasts[i]
-			diff := pred - actual_vols[i]
-			mse += diff * diff
-		}
-		mse /= f64(n)
-		if mse < best_mse {
-			best_mse = mse
-			best_weight = w
-		}
+	num, den := 0.0, 0.0
+	for i in 0 ..< n {
+		d := garch_forecasts[i] - lstm_forecasts[i]
+		num += d * (actual_vols[i] - lstm_forecasts[i])
+		den += d * d
 	}
-	return best_weight
+	if den == 0 {return 0.5}
+	return clamp(num / den, 0.0, 1.0)
 }
+
 VRPSignal :: struct {
 	vix_annualized: f64, // Current Implied Volatility (VIX) in %
 	rv_annualized:  f64, // Forecasted Realized Volatility in %
-	vrp:            f64, // Variance Risk Premium (IV - RV) in %
+	vrp:            f64, // IV - RV in vol points (the volatility spread, a proxy for IV^2 - RV^2)
 	z_score:        f64, // Historical Z-score of the VRP
 	signal:         f64, // Normalized trading signal [-1.0, 1.0]
 	recommendation: string, // Actionable advice
 }
 
-// compute_vrp calculates the Volatility Risk Premium and generates a trading signal.
+// compute_vrp calculates the volatility risk premium IV - RV and a trading signal. The
+// horizons should match: VIX is a 30-day implied vol, so the forecast should be the
+// average daily vol over the next ~21 trading days.
 // vix_level: Current VIX close (e.g., 15.5 for 15.5%)
 // forecast_rv_daily: The model's forecast for next-day realized volatility (decimal, e.g., 0.008)
 // hist_vrp_mean: Historical mean of the VRP (for Z-score calculation)
@@ -220,58 +212,48 @@ vrp_backtest_result_free :: proc(r: ^VRPBacktestResult) {
 	if r.actual_vol != nil {delete(r.actual_vol, r.allocator)}
 }
 
-// compute_backtest_metrics calculates Sharpe, Max Drawdown, and Win Rate
-// from a daily PnL series.
+// compute_backtest_metrics from daily_pnl, equity_curve (cumulative P&L) and positions:
+// - total_pnl: sum of the daily P&L
+// - sharpe_ratio: mean / std (n - 1) * sqrt(252) of the daily P&L (fin.sharpe_ratio_from_returns)
+// - max_drawdown: largest fall of the equity from its running peak, in P&L units; the
+//   peak starts at the equity before day 0 (equity_curve[0] - daily_pnl[0])
+// - num_trades: number of times a new non-zero position is taken (entries and flips)
+// - win_rate: share of the days with non-zero P&L that were positive
 compute_backtest_metrics :: proc(result: ^VRPBacktestResult) {
 	n := len(result.daily_pnl)
 	if n == 0 {return}
+	assert(
+		len(result.equity_curve) == n && len(result.positions) == n,
+		"compute_backtest_metrics: series differ in length",
+	)
 
-	// Total PnL
 	total := 0.0
 	for p in result.daily_pnl {total += p}
 	result.total_pnl = total
+	result.sharpe_ratio = fin.sharpe_ratio_from_returns(result.daily_pnl)
 
-	// Sharpe Ratio (annualized, assuming 252 trading days)
-	mean_pnl := total / f64(n)
-	var_sum := 0.0
-	for p in result.daily_pnl {
-		d := p - mean_pnl
-		var_sum += d * d
-	}
-	std_pnl := math.sqrt(var_sum / f64(n))
-	if std_pnl > 1e-10 {
-		result.sharpe_ratio = (mean_pnl / std_pnl) * math.sqrt_f64(252.0)
-	} else {
-		result.sharpe_ratio = 0.0
-	}
-
-	// Max Drawdown
-	peak := result.equity_curve[0]
+	peak := result.equity_curve[0] - result.daily_pnl[0]
 	max_dd := 0.0
-	for i in 0 ..< n {
-		if result.equity_curve[i] > peak {
-			peak = result.equity_curve[i]
-		}
-		dd := peak - result.equity_curve[i]
-		if dd > max_dd {max_dd = dd}
+	for e in result.equity_curve {
+		peak = math.max(peak, e)
+		max_dd = math.max(max_dd, peak - e)
 	}
 	result.max_drawdown = max_dd
 
-	// Win Rate & Trade Count
-	wins := 0
-	trades := 0
-	for i in 0 ..< n {
-		if math.abs(result.positions[i]) > 0.1 {
-			trades += 1
-			if result.daily_pnl[i] > 0.0 {wins += 1}
-		}
+	trades, prev := 0, 0.0
+	for x in result.positions {
+		if x != 0 && x != prev {trades += 1}
+		prev = x
 	}
 	result.num_trades = trades
-	if trades > 0 {
-		result.win_rate = f64(wins) / f64(trades)
-	} else {
-		result.win_rate = 0.0
+	wins, active := 0, 0
+	for p in result.daily_pnl {
+		if p != 0 {
+			active += 1
+			if p > 0 {wins += 1}
+		}
 	}
+	result.win_rate = active > 0 ? f64(wins) / f64(active) : 0.0
 	result.num_days = n
 }
 
@@ -284,11 +266,11 @@ print_backtest_result :: proc(r: ^VRPBacktestResult) {
 		"╠══════════════════════════════════════════════════╣",
 	)
 	fmt.printf("║  Trading Days:        %6d                     ║\n", r.num_days)
-	fmt.printf("║  Active Trades:       %6d                     ║\n", r.num_trades)
+	fmt.printf("║  Trades (entries):    %6d                     ║\n", r.num_trades)
 	fmt.printf("║  Total PnL:           %+8.4f (daily vol units) ║\n", r.total_pnl)
 	fmt.printf("║  Sharpe Ratio:        %+8.2f (annualized)     ║\n", r.sharpe_ratio)
 	fmt.printf("║  Max Drawdown:        %8.4f                  ║\n", r.max_drawdown)
-	fmt.printf("║  Win Rate:            %6.1f%%                   ║\n", r.win_rate * 100)
+	fmt.printf("║  Win Rate (days):     %6.1f%%                   ║\n", r.win_rate * 100)
 	fmt.println(
 		"╠══════════════════════════════════════════════════╣",
 	)

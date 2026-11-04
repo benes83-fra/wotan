@@ -5,7 +5,7 @@ import t "../tensor"
 import "core:mem"
 
 // ============================================================================
-// 1. Simple MLP Volatility Forecaster (Unchanged)
+// 1. Simple MLP Volatility Forecaster
 // ============================================================================
 
 VolatilityForecaster :: struct {
@@ -52,16 +52,15 @@ volatility_forecaster_forward :: proc(
 // 2. Unified Sequence Volatility Forecaster (LSTM / GRU / Mamba)
 // ============================================================================
 
-// ✅ NEW: Configuration struct to hold the backend switch
 LSTMVolaConfig :: struct {
 	input_size:  int,
 	hidden_size: int,
 	seq_len:     int,
-	seq_backend: nn.SeqBackend, // ✅ .LSTM, .GRU, or .Mamba
+	seq_backend: nn.SeqBackend, // .LSTM, .GRU or .Mamba
 }
 
 LSTMVolatilityForecaster :: struct {
-	seq_layer: ^nn.Sequential, // ✅ Replaces hardcoded lstm: nn.LSTMLayer
+	seq_layer: ^nn.Sequential, // the LSTM / GRU / Mamba block
 	fc1:       nn.LinearLayer,
 	fc2:       nn.LinearLayer,
 	config:    LSTMVolaConfig,
@@ -76,7 +75,6 @@ lstm_volatility_forecaster_new :: proc(
 	model.allocator = allocator
 	model.config = config
 
-	// ✅ Unified Sequence Layer (LSTM / GRU / Mamba)
 	model.seq_layer = nn.sequential_new(allocator)
 	nn.sequential_add_seq_block(
 		model.seq_layer,
@@ -102,9 +100,8 @@ lstm_volatility_forecaster_free :: proc(model: ^LSTMVolatilityForecaster) {
 	nn.linear_layer_free(&model.fc2)
 }
 
-// ✅ MASSIVE API SIMPLIFICATION:
-// We no longer need to pass h_0 and c_0! sequential_forward handles
-// zero-initialization of hidden states internally based on the backend.
+// input [batch, seq_len, input_size, 1] -> [batch, 1]: sequence block (zero initial
+// state), flatten, FC + ReLU, FC. The output is unconstrained (may be negative).
 lstm_volatility_forecaster_forward :: proc(
 	model: ^LSTMVolatilityForecaster,
 	input: ^t.Tensor,
@@ -125,9 +122,8 @@ lstm_volatility_forecaster_forward :: proc(
 	return out
 }
 
-// ✅ NEW: Centralized Optimizer Registration
+// Registers every trainable parameter with Adam
 lstm_volatility_add_to_optimizer :: proc(model: ^LSTMVolatilityForecaster, opt: ^nn.Adam) {
-	// One line replaces the manual weight extraction!
 	nn.sequential_add_to_adam(model.seq_layer, opt)
 
 	nn.adam_add_param(opt, model.fc1.weights)

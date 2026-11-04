@@ -258,7 +258,7 @@ Reference and contract tests print `OK` or `FAIL` for each check and end with a 
 | `cql_real_data_test` 🌐 | `cql_real_data_trading_test` | CQL on Yahoo OHLCV data |
 | `orchestrator_test` 🌐 | `orchestrator_test` | Closed-loop trading orchestrator combining several models |
 | `event_study_test` 🌐🖼📁 | `event_study_test`, `event_study_nlp_test`, `event_study_tokenizer_nlp_test` | Cumulative abnormal returns, FinBERT sentiment events |
-| `ml_finance_metrics_reference_test` | `ml_finance_metrics_reference_test` | Rank IC vs scipy `spearmanr` + pandas (ties, NaN assets, constant periods); trading features vs TA-Lib RSI(14) and pandas rolling volume; CARs and t vs `ttest_1samp`; GAT blocked-fold CV on a tracking allocator; correlation adjacency vs `np.corrcoef`; split conformal quantile; CBOE implied correlation and the dispersion signal |
+| `ml_finance_metrics_reference_test` | `ml_finance_metrics_reference_test` | Rank IC vs scipy `spearmanr` + pandas (ties, NaN assets, constant periods); trading features vs TA-Lib RSI(14) and pandas rolling volume; CARs and t vs `ttest_1samp`; GAT blocked-fold CV on a tracking allocator; correlation adjacency vs `np.corrcoef`; split conformal quantile; CBOE implied correlation and the dispersion signal; GARCH recursion vs `garch_fit`, optimal ensemble weight vs scipy `minimize_scalar`, VRP backtest metrics |
 | `alt_data_gdelt_pipeline_test` 🌐 | `alt_data_gdelt_pipeline_test`, `alt_data_finnhub_pipeline_test` | News sentiment (GDELT, Finnhub) to random forest to backtest; falls back to mock data |
 
 ## 11. Behavioural finance

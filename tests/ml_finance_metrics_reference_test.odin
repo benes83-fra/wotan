@@ -1,5 +1,6 @@
 package tests
 
+import ts "../wotan/analytics"
 import l "../wotan/linalg"
 import ml_fin "../wotan/ml_finance"
 import t "../wotan/tensor"
@@ -371,6 +372,115 @@ ml_finance_metrics_reference_test :: proc(allocator: mem.Allocator) {
 			fmt.tprintf(
 				"implied correlation and dispersion signal, NaN for one component (max rel err %.1e)",
 				err,
+			),
+		)
+	}
+	{ 	// --- volatility ensemble helpers
+		// GARCH recursion = the conditional variance of the fit it comes from
+		state: u64 = 41
+		NR :: 400
+		r := make([]f64, NR)
+		defer delete(r)
+		h := 1e-4
+		for i in 0 ..< NR {
+			r[i] = math.sqrt(h) * normal(&state)
+			h = 2e-6 + 0.08 * r[i] * r[i] + 0.9 * h
+		}
+		res := ts.extract_residuals(r)
+		defer delete(res)
+		fit := ts.garch_fit(res, .GARCH, 1, 1, 2000, 1e-6)
+		defer ts.garch_result_free(&fit)
+		vol := ml_fin.garch_recursive_forecast(
+			res,
+			fit.params.omega,
+			fit.params.alpha[0],
+			fit.params.beta[0],
+		)
+		defer delete(vol)
+		gerr := 0.0
+		for v, i in vol {gerr = max(gerr, rel(v * v, fit.conditional_var[i]))}
+		vol_pct := make([]f64, NR) // returns in percent: same path x 100 (no absolute fallback)
+		defer delete(vol_pct)
+		{
+			rp := make([]f64, NR)
+			defer delete(rp)
+			for x, i in res {rp[i] = 100 * x}
+			v2 := ml_fin.garch_recursive_forecast(
+				rp,
+				1e4 * fit.params.omega,
+				fit.params.alpha[0],
+				fit.params.beta[0],
+			)
+			defer delete(v2)
+			for v, i in v2 {gerr = max(gerr, rel(v, 100 * vol[i]))}
+		}
+		expect(
+			&passed,
+			&total,
+			gerr < 1e-12,
+			fmt.tprintf(
+				"GARCH recursion = ts.garch_fit conditional variance, scale-free (max rel err %.1e)",
+				gerr,
+			),
+		)
+
+		// optimal convex weight vs scipy minimize_scalar(bounded)
+		N :: 200
+		y := make([]f64, N)
+		g := make([]f64, N)
+		lv := make([]f64, N)
+		mir := make([]f64, N)
+		far := make([]f64, N)
+		defer {delete(y); delete(g); delete(lv); delete(mir); delete(far)}
+		state = 31
+		for i in 0 ..< N {y[i] = 0.15 + 0.03 * normal(&state)}
+		for i in 0 ..< N {g[i] = y[i] + 0.02 * normal(&state)}
+		for i in 0 ..< N {lv[i] = y[i] + 0.01 + 0.04 * normal(&state)}
+		for i in 0 ..< N {mir[i] = 2 * y[i] - g[i]; far[i] = y[i] + 0.5}
+		w1 := ml_fin.compute_optimal_weight(g, lv, y)
+		w2 := ml_fin.compute_optimal_weight(g, mir, y)
+		w3 := ml_fin.compute_optimal_weight(far, lv, y)
+		expect(
+			&passed,
+			&total,
+			rel(w1, 0.841757971498239) < 1e-10 && abs(w2 - 0.5) < 1e-12 && w3 == 0,
+			fmt.tprintf(
+				"optimal ensemble weight in closed form (%.12f; was a 0.01 grid), clamped at 0",
+				w1,
+			),
+		)
+
+		// backtest metrics vs numpy: first-day loss, n - 1 Sharpe, entries
+		bt: ml_fin.VRPBacktestResult
+		bt.daily_pnl = make([]f64, N)
+		bt.equity_curve = make([]f64, N)
+		bt.positions = make([]f64, N)
+		defer {delete(bt.daily_pnl); delete(bt.equity_curve); delete(bt.positions)}
+		for i in 0 ..< N {
+			z := normal(&state)
+			bt.positions[i] = z > 0.8 ? 1.0 : (z < -0.8 ? -1.0 : 0.0)
+		}
+		eq := 0.0
+		for i in 0 ..< N {
+			bt.daily_pnl[i] = (i > 0 ? bt.positions[i - 1] : 1.0) * 0.01 * normal(&state)
+			if i == 0 {bt.daily_pnl[0] = -0.05}
+			eq += bt.daily_pnl[i]
+			bt.equity_curve[i] = eq
+		}
+		ml_fin.compute_backtest_metrics(&bt)
+		berr := max(
+			rel(bt.total_pnl, -0.06230283262263201),
+			rel(bt.sharpe_ratio, -0.6498517367552993),
+			rel(bt.max_drawdown, 0.11607941309659585),
+			rel(bt.win_rate, 0.4457831325301205),
+		)
+		expect(
+			&passed,
+			&total,
+			berr < 1e-12 && bt.num_trades == 67 && bt.positions[5] == -1,
+			fmt.tprintf(
+				"backtest metrics: drawdown incl. day 0, Sharpe (n - 1), 67 entries (max rel err %.1e)",
+				berr,
 			),
 		)
 	}
