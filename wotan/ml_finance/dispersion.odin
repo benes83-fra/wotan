@@ -30,51 +30,39 @@ normalize_weights :: proc(weights: []f64, allocator: mem.Allocator = context.all
 	return out
 }
 
-// calculate_pairwise_correlation derives the average pairwise correlation
-// using proper index weights (NOT equal weights).
-//
-// σ_I² = Σᵢ wᵢ²σᵢ² + Σ_{i≠j} wᵢwⱼσᵢσⱼρ
-// Assuming constant average pairwise correlation ρ:
-// σ_I² = Σᵢ wᵢ²σᵢ² + ρ * [(Σᵢ wᵢσᵢ)² - Σᵢ wᵢ²σᵢ²]
-// Solving for ρ:
-// ρ = (σ_I² - Σᵢ wᵢ²σᵢ²) / [(Σᵢ wᵢσᵢ)² - Σᵢ wᵢ²σᵢ²]
+// Implied (or realised) average pairwise correlation, the CBOE implied-correlation formula:
+// with index weights w (normalised to sum 1) and a common correlation rho,
+//   sigma_I^2 = sum w_i^2 sigma_i^2 + rho [(sum w_i sigma_i)^2 - sum w_i^2 sigma_i^2], so
+//   rho = (sigma_I^2 - sum w_i^2 sigma_i^2) / [(sum w_i sigma_i)^2 - sum w_i^2 sigma_i^2].
+// Clamped to [-1, 1]. NaN when undefined (fewer than two components with weight and
+// variance, i.e. a zero denominator).
 calculate_pairwise_correlation :: proc(index_var: f64, comp_vars: []f64, weights: []f64) -> f64 {
 	n := len(comp_vars)
-	if n == 0 {return 0.0}
+	assert(
+		len(weights) == n,
+		"calculate_pairwise_correlation: weights and comp_vars differ in length",
+	)
+	if n == 0 {return math.nan_f64()}
 
-	// Normalize weights to sum to 1
-	w := normalize_weights(weights)
-	defer delete(w)
-
-	// Σᵢ wᵢ²σᵢ² (weighted sum of component variances)
-	weighted_comp_var := 0.0
-	for i in 0 ..< n {
-		weighted_comp_var += w[i] * w[i] * comp_vars[i]
+	sum_w := 0.0
+	for x in weights {sum_w += x}
+	w :: proc(weights: []f64, i: int, sum_w: f64, n: int) -> f64 {
+		return sum_w < 1e-12 ? 1.0 / f64(n) : weights[i] / sum_w // as normalize_weights
 	}
-
-	// (Σᵢ wᵢσᵢ)² (square of weighted sum of vols)
-	sum_w_vol := 0.0
-	for i in 0 ..< n {
-		sum_w_vol += w[i] * math.sqrt_f64(math.max(comp_vars[i], 0.0))
+	weighted_comp_var, sum_w_vol := 0.0, 0.0
+	for v, i in comp_vars {
+		wi := w(weights, i, sum_w, n)
+		weighted_comp_var += wi * wi * v
+		sum_w_vol += wi * math.sqrt(math.max(v, 0.0))
 	}
-	sum_w_vol_sq := sum_w_vol * sum_w_vol
+	denominator := sum_w_vol * sum_w_vol - weighted_comp_var
+	if !(denominator > 1e-12 * sum_w_vol * sum_w_vol) {return math.nan_f64()}
 
-	// Cross-term: (Σwᵢσᵢ)² - Σwᵢ²σᵢ²
-	denominator := sum_w_vol_sq - weighted_comp_var
-
-	if math.abs(denominator) < 1e-10 {
-		return 0.0
-	}
-
-	rho := (index_var - weighted_comp_var) / denominator
-
-	// Clamp to valid correlation bounds [-1, 1]
-	if rho > 1.0 {rho = 1.0}
-	if rho < -1.0 {rho = -1.0}
-
-	return rho
+	return clamp((index_var - weighted_comp_var) / denominator, -1.0, 1.0)
 }
 
+// Volatilities in, not variances. Signal = tanh(z / 1.5) of the z-scored premium
+// implied - realised correlation against its history; > 0.5 sells correlation.
 compute_dispersion_signal :: proc(
 	index_iv: f64,
 	index_rv: f64,
@@ -86,6 +74,14 @@ compute_dispersion_signal :: proc(
 ) -> DispersionSignal {
 	sig: DispersionSignal
 	n := len(comp_ivs)
+	assert(
+		len(comp_rvs) == n && len(weights) == n,
+		"compute_dispersion_signal: component inputs differ in length",
+	)
+	if n == 0 {
+		sig.recommendation = "NEUTRAL (no components)"
+		return sig
+	}
 
 	sig.index_iv = index_iv
 	sig.index_rv = index_rv
@@ -104,9 +100,10 @@ compute_dispersion_signal :: proc(
 	index_var_iv := index_iv * index_iv
 	index_var_rv := index_rv * index_rv
 
-	comp_vars_iv := make([]f64, n)
-	comp_vars_rv := make([]f64, n)
-	defer {delete(comp_vars_iv); delete(comp_vars_rv)}
+	comp_vars_iv := make([]f64, n, context.temp_allocator)
+	comp_vars_rv := make([]f64, n, context.temp_allocator)
+	defer {delete(comp_vars_iv, context.temp_allocator)
+		delete(comp_vars_rv, context.temp_allocator)}
 
 	for i in 0 ..< n {
 		comp_vars_iv[i] = comp_ivs[i] * comp_ivs[i]
@@ -120,7 +117,7 @@ compute_dispersion_signal :: proc(
 	// The Correlation Risk Premium (CRP)
 	sig.correlation_premium = sig.implied_corr - sig.realized_corr
 
-	// Z-Score the premium
+	// Z-Score the premium (NaN premium: signal NaN, recommendation neutral)
 	if hist_corr_std > 1e-6 {
 		z := (sig.correlation_premium - hist_corr_mean) / hist_corr_std
 		sig.signal = math.tanh(z / 1.5)

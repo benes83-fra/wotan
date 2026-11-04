@@ -265,12 +265,7 @@ dispersion_trading_test :: proc(allocator: mem.Allocator) {
 			seq_len *
 			num_features],
 		)
-		for i in 0 ..< seq_len {
-			for f in 0 ..< num_features {
-				idx := i * num_features + f
-				x_inf_data.data[idx] = (x_inf_data.data[idx] - means[f]) / stds[f]
-			}
-		}
+		// X_seq holds the features already standardised above (no second scaling)
 		x_inf := t.tensor_new(x_inf_data, false, allocator)
 		x_inf.shape = [4]int{1, seq_len, num_features, 1}
 		t.graph_begin(&scope)

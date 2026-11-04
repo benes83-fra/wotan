@@ -59,6 +59,10 @@ hrp_allocate_cov :: proc(
 	n := cov.rows
 	if n == 0 {return HRPResult{allocator = allocator}}
 	C := cov.data
+	for i in 0 ..< n {
+		// inverse-variance weights and correlations need sigma_i^2 > 0
+		assert(C[i * n + i] > 0, "hrp_allocate_cov: every asset needs a positive variance")
+	}
 
 	// 1. correlation distance
 	d := make([]f64, n * n, context.temp_allocator)

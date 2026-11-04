@@ -314,5 +314,65 @@ ml_finance_metrics_reference_test :: proc(allocator: mem.Allocator) {
 		}
 		expect(&passed, &total, ok, "split conformal quantile (k-th smallest, +Inf for k > n)")
 	}
+	{ 	// --- implied correlation (CBOE formula): an index built from a constant-correlation
+		// covariance gives that correlation back; a general one vs numpy
+		raw := []f64{3, 1, 2, 2, 2}
+		w := []f64{0.3, 0.1, 0.2, 0.2, 0.2}
+		s := []f64{0.2, 0.3, 0.25, 0.4, 0.18}
+		R2 := [5][5]f64 {
+			{1, .6, .2, .1, .4},
+			{.6, 1, .3, .2, .1},
+			{.2, .3, 1, .5, .3},
+			{.1, .2, .5, 1, .2},
+			{.4, .1, .3, .2, 1},
+		}
+		index_var :: proc(
+			w, s: []f64,
+			R: proc(i, j: int, data: rawptr) -> f64,
+			data: rawptr,
+		) -> f64 {
+			v := 0.0
+			for i in 0 ..< len(w) {for j in 0 ..< len(w) {v += w[i] * w[j] * s[i] * s[j] * R(i, j, data)}}
+			return v
+		}
+		const_r :: proc(i, j: int, _: rawptr) -> f64 {return i == j ? 1.0 : 0.37}
+		mat_r :: proc(i, j: int, data: rawptr) -> f64 {return (^[5][5]f64)(data)[i][j]}
+		vars := make([]f64, 5)
+		defer delete(vars)
+		for v, i in s {vars[i] = v * v}
+		v1 := index_var(w, s, const_r, nil)
+		v2 := index_var(w, s, mat_r, &R2)
+		r1 := ml_fin.calculate_pairwise_correlation(v1, vars, raw) // raw weights are normalised
+		r2 := ml_fin.calculate_pairwise_correlation(v2, vars, raw)
+		civ := make([]f64, 5)
+		defer delete(civ)
+		for v, i in s {civ[i] = 1.05 * v}
+		sig := ml_fin.compute_dispersion_signal(
+			math.sqrt(1.1 * v2),
+			math.sqrt(v2),
+			civ,
+			s,
+			raw,
+			0.02,
+			0.05,
+		)
+		one := ml_fin.calculate_pairwise_correlation(0.04, vars[:1], raw[:1])
+		err := max(
+			rel(r1, 0.37),
+			rel(r2, 0.28237608182533436),
+			rel(sig.implied_corr, 0.2810802999405899),
+			rel(sig.correlation_premium, -0.0012957818847444402),
+			rel(sig.signal, -0.2765511759134744),
+		)
+		expect(
+			&passed,
+			&total,
+			err < 1e-12 && math.is_nan(one),
+			fmt.tprintf(
+				"implied correlation and dispersion signal, NaN for one component (max rel err %.1e)",
+				err,
+			),
+		)
+	}
 	fmt.printf("ML-finance metrics reference checks: %d/%d passed\n", passed, total)
 }
