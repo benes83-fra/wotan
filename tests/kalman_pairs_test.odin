@@ -2,6 +2,7 @@ package tests
 
 import analytic "../wotan/analytics"
 import w "../wotan/core"
+import fin "../wotan/finance"
 import ml_fin "../wotan/ml_finance"
 import net "../wotan/net"
 import plot "../wotan/plot"
@@ -10,8 +11,211 @@ import "core:math"
 import "core:mem"
 
 
+// Kalman pairs strategy on a synthetic pair against statsmodels OLS (warmup) + pykalman
+// (filter), with the trading rules replayed in Python. y_t = 5 + beta_t x_t + s_t,
+// x a geometric random walk, beta_t a random walk, s_t an AR(1); y missing on row 250.
+kalman_pairs_reference_checks :: proc(allocator: mem.Allocator) {
+	fmt.println("\n=== Kalman Pairs Reference Checks (pykalman 0.11.2, statsmodels) ===")
+	context.allocator = allocator
+	passed, total := 0, 0
+	expect :: proc(passed, total: ^int, ok: bool, name: string) {
+		total^ += 1
+		if ok {passed^ += 1}
+		fmt.printf("%s %s\n", "OK  " if ok else "FAIL", name)
+	}
+	rel :: proc(a, b: f64) -> f64 {return abs(a - b) / max(abs(b), 1e-300)}
+
+	T :: 500
+	NULL_ROW :: 250
+	df := w.dataframe_new()
+	defer w.destroy_dataframe(&df)
+	cx := w.column_new("x", .Float, 0)
+	cy := w.column_new("y", .Float, 0)
+	state: u64 = 7
+	px, beta, s := 50.0, 1.5, 0.0
+	x499, y499 := 0.0, 0.0
+	for t in 0 ..< T {
+		dx, db, ds := garch_ref_normal(&state), garch_ref_normal(&state), garch_ref_normal(&state)
+		if t > 0 {px *= math.exp(0.01 * dx); beta += 0.002 * db}
+		s = 0.9 * s + 0.8 * ds
+		y := 5.0 + beta * px + s
+		w.append_float(&cx, px)
+		if t == NULL_ROW {w.append_null(&cy)} else {w.append_float(&cy, y)}
+		if t == T - 1 {x499, y499 = px, y}
+	}
+	w.add_column(&df, cx)
+	w.add_column(&df, cy)
+	expect(
+		&passed,
+		&total,
+		x499 == 37.17298924944827 && y499 == 60.483728378212874,
+		"series reproduced",
+	)
+
+	cfg := ml_fin.kalman_pairs_default_config()
+	cfg.entry_threshold = 1.5
+	cfg.exit_threshold = 0.3
+	cfg.stop_loss_threshold = 2.4
+	cfg.min_hold_days = 2
+	cfg.cooldown_days = 5
+	cfg.transaction_cost = 0.0005
+	cfg.process_noise = 1e-5
+	res := ml_fin.kalman_pairs_strategy(&df, "x", "y", cfg)
+	defer ml_fin.pairs_trading_result_free(&res)
+
+	// rows: z, beta, spread, return
+	Row :: struct {
+		i:                 int,
+		z, b, spread, ret: f64,
+	}
+	rows := []Row {
+		{60, 0.40522497349584985, 0.8599473064023049, 0.42785814747068684, 0.0},
+		{61, 0.16376373808468667, 0.8557837272881985, 0.17168938762715413, 0.0},
+		{100, -0.06289333875150631, 0.8708942310462999, -0.06447806710376369, 0.0},
+		{249, 0.4642961889331761, 1.464864595071462, 0.47749588902557605, 0.0},
+		{251, 0.10236271391363155, 1.4655177316642072, 0.10500273854383124, 0.0},
+		{400, -0.7016177157452479, 1.4177151353219806, -0.7256041397632345, -0.002402858802093317},
+		{499, 0.593759708327817, 1.3204940047437896, 0.6178459722301355, 0.0},
+	}
+	err := 0.0
+	for r in rows {
+		err = max(
+			err,
+			rel(res.z_scores[r.i], r.z),
+			rel(res.betas[r.i], r.b),
+			rel(res.spreads[r.i], r.spread),
+		)
+		err = max(err, abs(res.returns[r.i] - r.ret))
+	}
+	sz, sz2, sb, ssp := 0.0, 0.0, 0.0, 0.0
+	for i in 0 ..< T {
+		sz += res.z_scores[i]
+		sz2 += res.z_scores[i] * res.z_scores[i]
+		sb += res.betas[i]
+		if !math.is_nan(res.spreads[i]) {ssp += res.spreads[i]}
+	}
+	err = max(
+		err,
+		rel(sz, -30.576783626412663),
+		rel(sz2, 463.4068389200769),
+		rel(sb, 623.6586540167639),
+		rel(ssp, -31.186658996896874),
+	)
+	expect(
+		&passed,
+		&total,
+		len(res.z_scores) == T && err < 1e-9,
+		fmt.tprintf("OLS warmup + Kalman filter vs pykalman (max rel err %.1e)", err),
+	)
+
+	warm := true
+	for i in 0 ..< 60 {warm = warm && res.z_scores[i] == 0 && res.returns[i] == 0}
+	expect(
+		&passed,
+		&total,
+		warm && math.is_nan(res.spreads[NULL_ROW]) && res.z_scores[NULL_ROW] == 0,
+		"no trading on warmup rows, missing row skipped",
+	)
+
+	trades := []int {
+		83,
+		87,
+		92,
+		99,
+		104,
+		112,
+		135,
+		138,
+		142,
+		149,
+		158,
+		160,
+		183,
+		184,
+		197,
+		200,
+		212,
+		216,
+		225,
+		228,
+		231,
+		234,
+		243,
+		244,
+		252,
+		255,
+		265,
+		268,
+		272,
+		283,
+		335,
+		338,
+		348,
+		356,
+		395,
+		406,
+		412,
+		415,
+		435,
+		440,
+		452,
+		464,
+		465,
+		477,
+		482,
+		484,
+		496,
+		498,
+	}
+	same := len(res.trades) == len(trades)
+	if same {for t, k in trades {same = same && res.trades[k] == t}}
+	sum_ret := 0.0
+	for r in res.returns {sum_ret += r}
+	sharpe := fin.sharpe_ratio_from_returns(res.returns)
+	expect(
+		&passed,
+		&total,
+		same,
+		fmt.tprintf("trades incl. 5 stop losses and cooldowns (%d)", len(res.trades)),
+	)
+	expect(
+		&passed,
+		&total,
+		rel(sum_ret, 0.08817255635670887) < 1e-9 && rel(sharpe, 0.8946637964022475) < 1e-9,
+		fmt.tprintf("hedged returns and Sharpe (%.6f)", sharpe),
+	)
+
+	best, best_sharpe := ml_fin.kalman_pairs_grid_search(
+		&df,
+		"x",
+		"y",
+		{1.0, 1.5, 2.0},
+		{0.0, 0.5},
+		{1e-6, 1e-5},
+		{1, 3},
+		{0, 5},
+		0.001,
+	)
+	ok :=
+		rel(best_sharpe, 2.4411137580027025) < 1e-9 &&
+		best.entry_threshold == 1.0 &&
+		best.exit_threshold == 0.5 &&
+		best.process_noise == 1e-5 &&
+		best.min_hold_days == 3 &&
+		best.cooldown_days == 0 &&
+		best.stop_loss_threshold == 3.5
+	expect(
+		&passed,
+		&total,
+		ok,
+		fmt.tprintf("grid search keeps the default stop loss (best Sharpe %.6f)", best_sharpe),
+	)
+	fmt.printf("Kalman pairs reference checks: %d/%d passed\n", passed, total)
+}
+
 kalman_pairs_real_data_test :: proc(allocator: mem.Allocator = context.allocator) {
 	seed_test(#procedure)
+	kalman_pairs_reference_checks(allocator)
 	fmt.println("\n=== Kalman Filter Pairs Trading (Real Data) ===")
 
 	// Fetch real market data using existing yahoo infrastructure

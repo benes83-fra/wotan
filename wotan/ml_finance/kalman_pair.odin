@@ -3,104 +3,93 @@ package ml_finance
 import analytic "../analytics"
 import ml "../analytics/ML"
 import w "../core"
+import fin "../finance"
 import l "../linalg"
 import "core:math"
 import "core:mem"
 
 // ============================================================================
-// Configuration & Helpers
+// Configuration
 // ============================================================================
 KalmanPairsConfig :: struct {
 	// Kalman Filter Parameters
-	process_noise:       f64, // Q matrix diagonal (default: 1e-5)
-	measurement_noise:   f64, // R matrix initial value (default: 1e-4)
-	initial_hedge_ratio: f64, // Initial beta estimate (default: 1.0)
-	transaction_cost:    f64, // Transaction cost per trade (default: 0.001)
+	process_noise:       f64, // Q = process_noise * I, random-walk drift of (alpha, beta) per row
+	measurement_noise:   f64, // R; replaced by the OLS residual variance when the warmup is fitted
+	initial_hedge_ratio: f64, // beta_0 when there are fewer valid rows than warmup_window
+	transaction_cost:    f64, // charged on each position change, fraction of gross notional
 
 	// Trading Parameters
-	entry_threshold:     f64, // Z-score threshold to enter (default: 2.0)
-	exit_threshold:      f64, // Z-score threshold to exit (default: 0.5)
-	stop_loss_threshold: f64, // Z-score threshold for stop loss (default: 3.5)
-	min_hold_days:       int, // Minimum days to hold position (default: 3)
-	warmup_window:       int, // OLS warmup period (default: 60)
-	cooldown_days:       int,
+	entry_threshold:     f64, // enter when |z| > entry
+	exit_threshold:      f64, // exit when z is back inside +-exit (after min_hold_days)
+	stop_loss_threshold: f64, // exit (and cool down) when |z| > stop, also inside the minimum hold
+	min_hold_days:       int, // minimum holding period for a normal exit
+	warmup_window:       int, // OLS warmup rows (not traded); <= 0 means 60
+	cooldown_days:       int, // no new entry for this many rows after a stop loss
 }
 
 DEFAULT_KALMAN_PAIRS_CONFIG :: KalmanPairsConfig {
+	process_noise       = 1e-5,
+	measurement_noise   = 1e-4,
+	initial_hedge_ratio = 1.0,
+	transaction_cost    = 0.001,
 	entry_threshold     = 2.0,
 	exit_threshold      = 0.5,
-	process_noise       = 1e-4, // ✅ Increased default
-	transaction_cost    = 0.001,
 	stop_loss_threshold = 3.5,
 	min_hold_days       = 3,
-	cooldown_days       = 5, // ✅ NEW: 5 day cooldown after stop loss
 	warmup_window       = 60,
+	cooldown_days       = 5,
 }
 
-// Helper to calculate annualized Sharpe ratio from a returns slice
-calculate_sharpe :: proc(returns: []f64, risk_free_rate: f64 = 0.0) -> f64 {
-	n := len(returns)
-	if n < 2 {return 0.0}
-
-	mean_ret := 0.0
-	for r in returns {mean_ret += r}
-	mean_ret /= f64(n)
-
-	var_ret := 0.0
-	for r in returns {
-		diff := r - mean_ret
-		var_ret += diff * diff
-	}
-	var_ret /= f64(n - 1)
-	std_dev := math.sqrt(var_ret)
-
-	if std_dev < 1e-10 {return 0.0}
-
-	// Annualize: (mean / std) * sqrt(252)
-	return (mean_ret / std_dev) * math.sqrt_f64(252.0)
+kalman_pairs_default_config :: proc() -> KalmanPairsConfig {
+	return DEFAULT_KALMAN_PAIRS_CONFIG
 }
 
 // ============================================================================
 // Pairs Trading Result Structure
 // ============================================================================
 PairsTradingResult :: struct {
-	returns:  []f64,
-	trades:   []int,
-	betas:    []f64,
-	spreads:  []f64,
-	z_scores: []f64,
+	returns:  []f64, // position * (dy - beta dx) / (|y| + |beta x|) of the previous row, less costs
+	trades:   []int, // rows where the position changed
+	betas:    []f64, // filtered hedge ratio
+	spreads:  []f64, // y - alpha - beta x with the filtered state (NaN on skipped rows)
+	z_scores: []f64, // one-step-ahead innovation / sqrt(S), the trading signal (0 when not filtered)
 }
 
-// Helper to extract float column from DataFrame
+pairs_trading_result_free :: proc(
+	res: ^PairsTradingResult,
+	allocator: mem.Allocator = context.allocator,
+) {
+	delete(res.returns, allocator)
+	delete(res.trades, allocator)
+	delete(res.betas, allocator)
+	delete(res.spreads, allocator)
+	delete(res.z_scores, allocator)
+	res^ = {}
+}
+
+// Float column of a DataFrame; nulls become NaN
 extract_float_col :: proc(df: ^w.DataFrame, col_name: string, allocator: mem.Allocator) -> []f64 {
 	n := df.rows
 	out := make([]f64, n, allocator)
 	col := w.column(df, col_name)
 	for i in 0 ..< n {
 		v, is_null := w.column_at_float(col, i)
-		if !is_null {
-			out[i] = v
-		} else {
-			out[i] = 0.0
-		}
+		out[i] = is_null ? math.nan_f64() : v
 	}
 	return out
 }
-// Default configuration
-kalman_pairs_default_config :: proc() -> KalmanPairsConfig {
-	return KalmanPairsConfig {
-		process_noise = 1e-5,
-		measurement_noise = 1e-4,
-		initial_hedge_ratio = 1.0,
-		entry_threshold = 2.0,
-		exit_threshold = 0.5,
-		stop_loss_threshold = 3.5,
-		min_hold_days = 3,
-		warmup_window = 60,
-	}
-} // ============================================================================
+
+// ============================================================================
 // Kalman Filter Pairs Trading Strategy
 // ============================================================================
+// Time-varying regression y_t = alpha_t + beta_t x_t + e_t with (alpha, beta) a random walk
+// (F = I, Q = process_noise I), filtered online. With enough rows, the first warmup_window
+// valid rows give the start by OLS (state = coefficients, P = their covariance, R = residual
+// variance) and are not traded; the filter runs from the next row on, so no signal uses
+// data from its future. The signal z_t is the innovation of y_t against the prediction
+// from rows < t, over sqrt(S). The position decided on row t (+1 long y / short beta x,
+// -1 the reverse, beta fixed at entry) earns from row t to the next valid row. Rows with a
+// missing or non-positive price are skipped: no update, no trade, return 0.
 kalman_pairs_strategy :: proc(
 	df: ^w.DataFrame,
 	col_x: string,
@@ -117,100 +106,93 @@ kalman_pairs_strategy :: proc(
 	if n == 0 {
 		return PairsTradingResult{}
 	}
+	valid :: proc(v: f64) -> bool {return v > 0.0 && !math.is_inf(v)} 	// false for NaN
 
-	// Kalman Filter parameters (N=2, M=1)
 	kf: analytic.KalmanFilter(2, 1)
-
-	// Initial state
-	kf.x[0] = 0.0
-	kf.x[1] = config.initial_hedge_ratio
-
-	// Initial covariance
-	kf.P[0, 0] = 1.0
-	kf.P[0, 1] = 0.0
-	kf.P[1, 0] = 0.0
-	kf.P[1, 1] = 1.0
-
-	// Process noise (Q) - using config
-	kf.Q[0, 0] = config.process_noise
-	kf.Q[0, 1] = 0.0
-	kf.Q[1, 0] = 0.0
-	kf.Q[1, 1] = config.process_noise
-
-	// Measurement noise (R)
+	kf.F = 1 // identity: the coefficients follow a random walk
+	kf.x = {0.0, config.initial_hedge_ratio}
+	kf.P = 1
+	kf.Q = config.process_noise
 	kf.R[0, 0] = config.measurement_noise
 
-	// Initialize P and R from OLS
 	warmup := config.warmup_window
 	if warmup <= 0 {warmup = 60}
-	if n >= warmup {
-		X_mat := l.matrix_new(f64, warmup, 2, allocator)
-		y_vec := make([]f64, warmup, allocator)
-		for i in 0 ..< warmup {
-			X_mat.data[i * 2 + 0] = 1.0
-			X_mat.data[i * 2 + 1] = x_data[i]
-			y_vec[i] = y_data[i]
+	start := 0 // first row the filter runs on
+	{
+		rows := make([dynamic]int, 0, warmup, allocator)
+		defer delete(rows)
+		for i in 0 ..< n {
+			if len(rows) == warmup {break}
+			if valid(x_data[i]) && valid(y_data[i]) {append(&rows, i)}
 		}
-		ols_res := ml.ols_fit(&X_mat, y_vec, .Cholesky, allocator)
-		kf.x[0] = ols_res.beta[0]
-		kf.x[1] = ols_res.beta[1]
-		kf.R[0, 0] = math.max(ols_res.sigma2, 1e-6)
-		l.matrix_free(&X_mat)
-		delete(y_vec, allocator)
+		if len(rows) == warmup && warmup > 2 {
+			X_mat := l.matrix_new(f64, warmup, 2, allocator)
+			y_vec := make([]f64, warmup, allocator)
+			for r, j in rows {
+				X_mat.data[j * 2 + 0] = 1.0
+				X_mat.data[j * 2 + 1] = x_data[r]
+				y_vec[j] = y_data[r]
+			}
+			ols := ml.ols_fit(&X_mat, y_vec, .Cholesky, allocator)
+			if len(ols.beta) == 2 && !math.is_nan(ols.beta[1]) && ols.vcov.rows == 2 {
+				kf.x = {ols.beta[0], ols.beta[1]}
+				for a in 0 ..< 2 {for b in 0 ..< 2 {kf.P[a, b] = ols.vcov.data[a * 2 + b]}}
+				kf.R[0, 0] = math.max(ols.sigma2, 1e-12)
+				start = rows[warmup - 1] + 1
+			}
+			ml._ols_result_free(&ols, allocator)
+			l.matrix_free(&X_mat)
+			delete(y_vec, allocator)
+		}
 	}
 
-	result_returns := make([dynamic]f64, 0, allocator)
+	result_returns := make([dynamic]f64, 0, n, allocator)
 	result_trades := make([dynamic]int, 0, allocator)
-	result_betas := make([dynamic]f64, 0, allocator)
-	result_spreads := make([dynamic]f64, 0, allocator)
-	result_z_scores := make([dynamic]f64, 0, allocator)
+	result_betas := make([dynamic]f64, 0, n, allocator)
+	result_spreads := make([dynamic]f64, 0, n, allocator)
+	result_z_scores := make([dynamic]f64, 0, n, allocator)
 
 	position: i32 = 0
 	position_beta := 0.0
-	days_in_position := 0 // ✅ CRITICAL: Track holding period
-	last_stop_loss_day := -100 // ✅ NEW: Track last stop loss
+	days_in_position := 0
+	last_stop_loss_day := min(int) / 2
+	prev_px, prev_py := math.nan_f64(), math.nan_f64() // last valid prices
 
 	for i in 0 ..< n {
 		px := x_data[i]
 		py := y_data[i]
+		ok := valid(px) && valid(py)
 
-		// Update H matrix
+		// Return of the position held into this row
+		daily_ret := 0.0
+		if ok && position != 0 {
+			gross := prev_py + math.abs(position_beta) * prev_px
+			daily_ret = f64(position) * ((py - prev_py) - position_beta * (px - prev_px)) / gross
+		}
+
+		if !ok || i < start {
+			// warmup or skipped row: no filtering, no trading
+			spread := ok ? py - (kf.x[0] + kf.x[1] * px) : math.nan_f64()
+			append(&result_returns, daily_ret)
+			append(&result_betas, kf.x[1])
+			append(&result_spreads, spread)
+			append(&result_z_scores, 0.0)
+			if ok {prev_px, prev_py = px, py}
+			continue
+		}
+
 		kf.H[0, 0] = 1.0
 		kf.H[0, 1] = px
-
-		// Predict
 		analytic.kalman_predict(&kf)
-
-		// Innovation
-		innovation := py - (kf.H[0, 0] * kf.x[0] + kf.H[0, 1] * kf.x[1])
-
-		// Innovation variance S
-		H00 := kf.H[0, 0]
-		H01 := kf.H[0, 1]
-		P00 := kf.P[0, 0]
-		P01 := kf.P[0, 1]
-		P11 := kf.P[1, 1]
-		R00 := kf.R[0, 0]
-
-		S := H00 * P00 * H00 + 2.0 * H00 * P01 * H01 + H01 * P11 * H01 + R00
-		z_score := innovation / math.sqrt_f64(math.max(S, 1e-12))
-
-		// Update
-		z: [1]f64
-		z[0] = py
-		analytic.kalman_update(&kf, z)
-
+		innovation := py - (kf.x[0] + kf.x[1] * px)
+		S := kf.P[0, 0] + 2.0 * px * kf.P[0, 1] + px * px * kf.P[1, 1] + kf.R[0, 0]
+		z_score := innovation / math.sqrt(math.max(S, 1e-300))
+		analytic.kalman_update(&kf, [1]f64{py})
 		current_spread := py - (kf.x[0] + kf.x[1] * px)
 
-		// --- Trading Logic ---
-		signal: i32 = position
-
-		// ✅ Track holding period
-		if position != 0 {
-			days_in_position += 1
-		} else {
-			days_in_position = 0
-		}
+		// --- Trading logic on this row's signal ---
+		signal := position
+		if position != 0 {days_in_position += 1} else {days_in_position = 0}
 
 		if position == 0 {
 			if i - last_stop_loss_day < config.cooldown_days {
@@ -221,50 +203,18 @@ kalman_pairs_strategy :: proc(
 				signal = 1
 			}
 		} else {
-			// ✅ Enforce minimum hold days for normal exits
-			if days_in_position >= config.min_hold_days {
-				if position == 1 {
-					if z_score > -config.exit_threshold || z_score < -config.stop_loss_threshold {
-						signal = 0
-					}
-				} else if position == -1 {
-					if z_score < config.exit_threshold || z_score > config.stop_loss_threshold {
-						signal = 0
-					}
-				}
-			} else {
-				// ✅ Still in min hold period, but allow HARD stop loss
-				if position == 1 && z_score < -config.stop_loss_threshold {
-					signal = 0
-				} else if position == -1 && z_score > config.stop_loss_threshold {
-					signal = 0
-				}
+			stop :=
+				(position == 1 && z_score < -config.stop_loss_threshold) ||
+				(position == -1 && z_score > config.stop_loss_threshold)
+			back :=
+				(position == 1 && z_score > -config.exit_threshold) ||
+				(position == -1 && z_score < config.exit_threshold)
+			if stop || (back && days_in_position >= config.min_hold_days) {
+				signal = 0
+				if stop {last_stop_loss_day = i}
 			}
 		}
 
-		// Calculate daily return
-		daily_ret := 0.0
-		if i > 0 {
-			prev_px := x_data[i - 1]
-			prev_py := y_data[i - 1]
-			if prev_px != 0.0 && prev_py != 0.0 {
-				ret_x := (px / prev_px) - 1.0
-				ret_y := (py / prev_py) - 1.0
-				if position == 1 {
-					daily_ret = ret_y - position_beta * ret_x
-				} else if position == -1 {
-					daily_ret = -ret_y + position_beta * ret_x
-				}
-			}
-		}
-		// ✅ NEW: Record if this exit was a stop loss
-		if signal == 0 && position != 0 {
-			if (position == 1 && z_score < -config.stop_loss_threshold) ||
-			   (position == -1 && z_score > config.stop_loss_threshold) {
-				last_stop_loss_day = i
-			}
-		}
-		// Apply Transaction Costs
 		if signal != position && config.transaction_cost > 0.0 {
 			daily_ret -= config.transaction_cost
 		}
@@ -274,16 +224,12 @@ kalman_pairs_strategy :: proc(
 		append(&result_spreads, current_spread)
 		append(&result_z_scores, z_score)
 
-		// Update position
 		if signal != position {
 			append(&result_trades, i)
 			position = signal
-			if position != 0 {
-				position_beta = kf.x[1]
-			} else {
-				position_beta = 0.0
-			}
+			position_beta = position != 0 ? kf.x[1] : 0.0
 		}
+		prev_px, prev_py = px, py
 	}
 
 	return PairsTradingResult {
@@ -298,6 +244,8 @@ kalman_pairs_strategy :: proc(
 // ============================================================================
 // Grid Search
 // ============================================================================
+// In-sample: the grid point with the highest annualised Sharpe ratio
+// (fin.sharpe_ratio_from_returns); the other fields come from DEFAULT_KALMAN_PAIRS_CONFIG.
 kalman_pairs_grid_search :: proc(
 	df: ^w.DataFrame,
 	col_x: string,
@@ -305,8 +253,8 @@ kalman_pairs_grid_search :: proc(
 	entry_thresholds: []f64,
 	exit_thresholds: []f64,
 	process_noises: []f64,
-	min_hold_days_list: []int, // ✅ ADDED
-	cooldown_days_list: []int, // ✅ NEW
+	min_hold_days_list: []int,
+	cooldown_days_list: []int,
 	transaction_cost: f64 = 0.001,
 	allocator: mem.Allocator = context.allocator,
 ) -> (
@@ -320,24 +268,18 @@ kalman_pairs_grid_search :: proc(
 		for exit in exit_thresholds {
 			for noise in process_noises {
 				for min_hold in min_hold_days_list {
-					for cooldown in cooldown_days_list { 	// ✅ NEW
-						config := KalmanPairsConfig {
-							entry_threshold  = entry,
-							exit_threshold   = exit,
-							process_noise    = noise,
-							transaction_cost = transaction_cost,
-							min_hold_days    = min_hold,
-							cooldown_days    = cooldown,
-						}
+					for cooldown in cooldown_days_list {
+						config := DEFAULT_KALMAN_PAIRS_CONFIG
+						config.entry_threshold = entry
+						config.exit_threshold = exit
+						config.process_noise = noise
+						config.transaction_cost = transaction_cost
+						config.min_hold_days = min_hold
+						config.cooldown_days = cooldown
 
-						result := kalman_pairs_strategy(
-							df,
-							col_x,
-							col_y,
-							config,
-							context.temp_allocator,
-						)
-						sharpe := calculate_sharpe(result.returns)
+						result := kalman_pairs_strategy(df, col_x, col_y, config, allocator)
+						sharpe := fin.sharpe_ratio_from_returns(result.returns)
+						pairs_trading_result_free(&result, allocator)
 
 						if sharpe > best_sharpe {
 							best_sharpe = sharpe

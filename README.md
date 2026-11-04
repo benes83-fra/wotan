@@ -294,7 +294,7 @@ main.odin               demo and test driver
 
 There are three kinds of test:
 
-- **Reference tests** (`*_reference_test`) compare results with values from established libraries: QuantLib 1.44, statsmodels 0.13.5, SciPy 1.10, scikit-learn 1.2.1, hmmlearn 0.3.3, NumPy/pandas, PyTorch (float64), and Hugging Face `transformers` / `tokenizers`. The reference values are hard-coded in the test files.
+- **Reference tests** (`*_reference_test`) compare results with values from established libraries: QuantLib 1.44, statsmodels 0.13.5, SciPy 1.10, scikit-learn 1.2.1, hmmlearn 0.3.3, pykalman 0.11.2, NumPy/pandas, PyTorch (float64), and Hugging Face `transformers` / `tokenizers`. The reference values are hard-coded in the test files.
 - **Contract tests** (`*_contracts_test`, the `gradcheck_*` tests and others) check properties instead of fixed numbers. Examples: gradients against finite differences, bit-identical results across thread counts, save/load round trips, and memory that is fully released.
 - **Examples and demos** print results, often next to textbook values, and some write PNG charts to `plots/`. Tests marked 🌐 in the catalog need network access (Yahoo Finance and other HTTP sources).
 
