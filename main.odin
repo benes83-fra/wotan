@@ -1016,6 +1016,8 @@ main :: proc() {
 	free_all(context.temp_allocator)
 	test.event_study_test(context.temp_allocator)
 	free_all(context.temp_allocator)
+	test.ml_finance_metrics_reference_test(context.temp_allocator)
+	free_all(context.temp_allocator)
 	test.prospect_theory_test(context.temp_allocator)
 	free_all(context.temp_allocator)
 	test.prospect_ppo_test(context.temp_allocator)

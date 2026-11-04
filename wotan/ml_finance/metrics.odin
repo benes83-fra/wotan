@@ -1,5 +1,6 @@
 package ml_finance
 
+import fin "../finance"
 import l "../linalg"
 import nn "../nn"
 import t "../tensor"
@@ -10,114 +11,39 @@ import "core:mem"
 // ============================================================================
 // Cross-Sectional Rank IC (Spearman Rank Correlation)
 // ============================================================================
-// The industry-standard metric for evaluating alpha in quantitative finance.
-// Computes the Pearson correlation between ranked predictions and ranked
-// actual returns for each cross-section (e.g., each day across all assets).
+// For each cross-section (e.g. each day across all assets) the Spearman correlation
+// between predictions and realised returns (fin.spearman_rho: Pearson correlation of
+// the average ranks, as scipy.stats.spearmanr). Conventions as alphalens / Qlib:
+// assets with a NaN prediction or target are dropped from their cross-section, and a
+// cross-section whose IC is undefined (fewer than 2 assets, or constant predictions or
+// targets) is left out of the statistics instead of counting as 0.
 
-// RankICResult holds the complete IC statistics
 RankICResult :: struct {
-	mean_ic:           f64, // Average Spearman correlation across periods
-	std_ic:            f64, // Standard deviation of IC
-	icir:              f64, // Information Ratio = mean_ic / std_ic
-	positive_ic_ratio: f64, // % of periods with positive IC
-	num_periods:       int,
+	mean_ic:           f64, // mean IC over the valid periods
+	std_ic:            f64, // sample standard deviation of the IC (n - 1)
+	icir:              f64, // mean_ic / std_ic (0 when std_ic is 0)
+	positive_ic_ratio: f64, // fraction of valid periods with IC > 0
+	num_periods:       int, // valid periods
 }
 
-// compute_ranks converts values to ranks (1-based, ties averaged)
-// Uses insertion sort (O(n²) but n is small: typically 10-500 assets)
-compute_ranks :: proc(values: []f64, allocator: mem.Allocator) -> []f64 {
-	n := len(values)
-	ranks := make([]f64, n, allocator)
-
-	// Create index array for sorting
-	indices := make([]int, n, allocator)
-	for i in 0 ..< n {
-		indices[i] = i
-	}
-
-	// Insertion sort (stable, handles small n efficiently)
-	for i in 1 ..< n {
-		key := indices[i]
-		key_val := values[key]
-		j := i - 1
-		for j >= 0 && values[indices[j]] > key_val {
-			indices[j + 1] = indices[j]
-			j -= 1
-		}
-		indices[j + 1] = key
-	}
-
-	// Assign ranks, handling ties by averaging
-	i := 0
-	for i < n {
-		j := i
-		// Find all tied values
-		for j < n && values[indices[j]] == values[indices[i]] {
-			j += 1
-		}
-		// Average rank for ties (1-based)
-		avg_rank := (f64(i) + f64(j - 1)) / 2.0 + 1.0
-		for k in i ..< j {
-			ranks[indices[k]] = avg_rank
-		}
-		i = j
-	}
-
-	delete(indices, allocator)
-	return ranks
-}
-
-// pearson_correlation computes Pearson correlation between two slices
-pearson_correlation :: proc(x: []f64, y: []f64) -> f64 {
-	n := f64(len(x))
-	if n < 2.0 {
-		return 0.0
-	}
-
-	sum_x := 0.0
-	sum_y := 0.0
-	for i in 0 ..< len(x) {
-		sum_x += x[i]
-		sum_y += y[i]
-	}
-	mean_x := sum_x / n
-	mean_y := sum_y / n
-
-	cov := 0.0
-	var_x := 0.0
-	var_y := 0.0
-	for i in 0 ..< len(x) {
-		dx := x[i] - mean_x
-		dy := y[i] - mean_y
-		cov += dx * dy
-		var_x += dx * dx
-		var_y += dy * dy
-	}
-
-	denom := math.sqrt(var_x * var_y)
-	if denom < 1e-12 {
-		return 0.0
-	}
-	return cov / denom
-}
-
-// cross_sectional_rank_ic computes Rank IC across all cross-sections
-// preds:   [Batch, Num_Assets, 1, 1] - model predictions
-// targets: [Batch, Num_Assets, 1, 1] - actual returns
-//
-// For each batch element (time period), computes the Spearman rank correlation
-// between predictions and targets across the Num_Assets dimension.
+// preds, targets: [Batch, Num_Assets, 1, 1] (contiguous); one cross-section per batch row
 cross_sectional_rank_ic :: proc(
 	preds: ^t.Tensor,
 	targets: ^t.Tensor,
 	allocator: mem.Allocator,
 ) -> RankICResult {
+	assert(
+		preds.shape == targets.shape,
+		"cross_sectional_rank_ic: preds and targets differ in shape",
+	)
 	batch := preds.shape[0]
 	num_assets := preds.shape[1]
+	assert(
+		len(preds.data.data) >= batch * num_assets && len(targets.data.data) >= batch * num_assets,
+	)
 
-	ics := make([]f64, batch, allocator)
-	defer delete(ics, allocator)
-
+	ics := make([dynamic]f64, 0, batch, allocator)
+	defer delete(ics)
 	pred_row := make([]f64, num_assets, allocator)
 	targ_row := make([]f64, num_assets, allocator)
 	defer {
@@ -125,68 +51,66 @@ cross_sectional_rank_ic :: proc(
 		delete(targ_row, allocator)
 	}
 
-	positive_count := 0
-
 	for b in 0 ..< batch {
-		// Extract cross-section (all assets for this time period)
+		m := 0
 		for a in 0 ..< num_assets {
-			idx := b * num_assets + a
-			pred_row[a] = preds.data.data[idx]
-			targ_row[a] = targets.data.data[idx]
+			p := preds.data.data[b * num_assets + a]
+			y := targets.data.data[b * num_assets + a]
+			if math.is_nan(p) || math.is_nan(y) {continue}
+			pred_row[m], targ_row[m] = p, y
+			m += 1
 		}
-
-		// Compute ranks
-		pred_ranks := compute_ranks(pred_row, allocator)
-		targ_ranks := compute_ranks(targ_row, allocator)
-
-		// Compute IC (Pearson correlation of ranks = Spearman)
-		ic := pearson_correlation(pred_ranks, targ_ranks)
-		ics[b] = ic
-
-		if ic > 0.0 {
-			positive_count += 1
-		}
-
-		delete(pred_ranks, allocator)
-		delete(targ_ranks, allocator)
+		if m < 2 || _is_constant(pred_row[:m]) || _is_constant(targ_row[:m]) {continue}
+		append(&ics, fin.spearman_rho(pred_row[:m], targ_row[:m], allocator))
 	}
 
-	// Compute statistics
-	sum_ic := 0.0
+	res := RankICResult {
+		num_periods = len(ics),
+	}
+	if len(ics) == 0 {
+		res.mean_ic, res.std_ic = math.nan_f64(), math.nan_f64()
+		return res
+	}
+	positive := 0
 	for ic in ics {
-		sum_ic += ic
+		res.mean_ic += ic
+		if ic > 0 {positive += 1}
 	}
-	mean_ic := sum_ic / f64(batch)
-
-	var_sum := 0.0
-	for ic in ics {
-		d := ic - mean_ic
-		var_sum += d * d
+	res.mean_ic /= f64(len(ics))
+	res.positive_ic_ratio = f64(positive) / f64(len(ics))
+	if len(ics) > 1 {
+		ss := 0.0
+		for ic in ics {ss += (ic - res.mean_ic) * (ic - res.mean_ic)}
+		res.std_ic = math.sqrt(ss / f64(len(ics) - 1))
+	} else {
+		res.std_ic = math.nan_f64()
 	}
-	std_ic := math.sqrt(var_sum / f64(batch))
-
-	icir := 0.0
-	if std_ic > 1e-12 {
-		icir = mean_ic / std_ic
-	}
-
-	positive_ratio := f64(positive_count) / f64(batch)
-
-	return RankICResult {
-		mean_ic = mean_ic,
-		std_ic = std_ic,
-		icir = icir,
-		positive_ic_ratio = positive_ratio,
-		num_periods = batch,
-	}
+	if res.std_ic > 0 {res.icir = res.mean_ic / res.std_ic}
+	return res
 }
 
+@(private = "file")
+_is_constant :: proc(x: []f64) -> bool {
+	for v in x[1:] {if v != x[0] {return false}}
+	return true
+}
+
+// ============================================================================
+// Blocked K-Fold Cross-Validation of a GAT
+// ============================================================================
 GATFoldResult :: struct {
-	mean_ic:          f64,
-	val_loss:         f64,
-	early_stop_epoch: int,
+	mean_ic:          f64, // mean rank IC on the validation block, model of the best epoch
+	val_loss:         f64, // best validation MSE
+	early_stop_epoch: int, // epochs trained
 }
 
+// The windows are in time order, so the folds are contiguous blocks (no shuffling, which
+// would put almost identical overlapping windows into both sets). Training windows within
+// `embargo` windows of the validation block are dropped as well (purging, López de Prado
+// 2018, ch. 7); the default -1 means time_steps, enough for windows with stride >= 1 and
+// a target just after the window. Full-batch Adam on the training MSE, early stopping on
+// the validation MSE with patience 10; the parameters of the best epoch are restored
+// before the IC is measured. The adjacency is built from the training windows only.
 gat_cross_val_score :: proc(
 	features: ^t.Tensor, // [Total_Windows, Num_Assets, Time, 1]
 	targets: ^t.Tensor, // [Total_Windows, Num_Assets, 1, 1]
@@ -196,120 +120,108 @@ gat_cross_val_score :: proc(
 	epochs: int,
 	learning_rate: f64,
 	allocator: mem.Allocator = context.allocator,
+	embargo: int = -1,
 ) -> []GATFoldResult {
 	batch := features.shape[0]
 	num_assets := features.shape[1]
 	time_steps := features.shape[2]
-
-	// 1. Generate and shuffle indices
-	indices := make([]int, batch, context.temp_allocator)
-	for i in 0 ..< batch {indices[i] = i}
-
-	// LCG shuffle (deterministic, reproducible)
-	state := u32(42) | 1
-	n := batch
-	for i := n - 1; i > 0; i -= 1 {
-		state = u32(u64(state) * 1664525 + 1013904223)
-		j := int(state % u32(i + 1))
-		indices[i], indices[j] = indices[j], indices[i]
-	}
+	assert(
+		n_splits >= 2 && n_splits <= batch,
+		"gat_cross_val_score: need 2 <= n_splits <= windows",
+	)
+	gap := embargo < 0 ? time_steps : embargo
+	PATIENCE :: 10
 
 	results := make([]GATFoldResult, n_splits, allocator)
 	fold_size := batch / n_splits
 	remainder := batch % n_splits
+	scope: t.Graph_Scope
+	defer t.graph_scope_destroy(&scope)
 
 	for k in 0 ..< n_splits {
 		val_start := k * fold_size + math.min(k, remainder)
-		val_end := val_start + fold_size
-		if k < remainder {val_end += 1}
+		val_end := val_start + fold_size + (1 if k < remainder else 0)
 
-		val_count := val_end - val_start
-		train_count := batch - val_count
-
-		train_idx := make([]int, train_count, context.temp_allocator)
-		val_idx := make([]int, val_count, context.temp_allocator)
-
-		t_idx, v_idx := 0, 0
+		train_idx := make([dynamic]int, 0, batch, allocator)
+		val_idx := make([dynamic]int, 0, val_end - val_start, allocator)
 		for i in 0 ..< batch {
-			orig_idx := indices[i]
-			if orig_idx >= val_start && orig_idx < val_end {
-				val_idx[v_idx] = orig_idx
-				v_idx += 1
-			} else {
-				train_idx[t_idx] = orig_idx
-				t_idx += 1
+			if i >= val_start && i < val_end {
+				append(&val_idx, i)
+			} else if i < val_start - gap || i >= val_end + gap {
+				append(&train_idx, i)
 			}
 		}
+		if len(train_idx) == 0 {
+			results[k] = {math.nan_f64(), math.nan_f64(), 0}
+			delete(train_idx)
+			delete(val_idx)
+			continue
+		}
 
-		// Extract train and val tensors
-		train_feat := _extract_tensor_by_indices(features, train_idx, allocator)
-		train_targ := _extract_tensor_by_indices(targets, train_idx, allocator)
-		val_feat := _extract_tensor_by_indices(features, val_idx, allocator)
-		val_targ := _extract_tensor_by_indices(targets, val_idx, allocator)
+		train_feat := _extract_tensor_by_indices(features, train_idx[:], allocator)
+		train_targ := _extract_tensor_by_indices(targets, train_idx[:], allocator)
+		val_feat := _extract_tensor_by_indices(features, val_idx[:], allocator)
+		val_targ := _extract_tensor_by_indices(targets, val_idx[:], allocator)
 
-		// ✅ Compute adjacency matrix STRICTLY on training data to prevent data leakage
+		// owned by the layer from here on (gat_layer_free frees it)
 		adjacency := compute_correlation_adjacency(train_feat, num_assets, time_steps, allocator)
-
-		// Initialize Model
 		gat := nn.gat_layer_new(time_steps, hidden_dim, num_heads, adjacency, allocator)
 		pred_head := nn.linear_layer_new(hidden_dim, 1, allocator)
 		opt := nn.adam_new(learning_rate, allocator = allocator)
 
-		nn.adam_add_param(&opt, gat.linear.weights)
-		nn.adam_add_param(&opt, gat.linear.bias)
-		nn.adam_add_param(&opt, gat.mha.q_proj.weights)
-		nn.adam_add_param(&opt, gat.mha.k_proj.weights)
-		nn.adam_add_param(&opt, gat.mha.v_proj.weights)
-		nn.adam_add_param(&opt, gat.mha.out_proj.weights)
-		nn.adam_add_param(&opt, pred_head.weights)
-		nn.adam_add_param(&opt, pred_head.bias)
+		params := make([dynamic]^t.Tensor, 0, allocator)
+		layers := [2]nn.Layer{gat, pred_head}
+		for &lay in layers {nn.layer_parameters(&lay, &params)}
+		for p in params {nn.adam_add_param(&opt, p)}
+		best := make([][]f64, len(params), allocator)
+		for p, i in params {best[i] = make([]f64, len(p.data.data), allocator)}
 
-		// Training loop with early stopping
 		best_val_loss := math.F64_MAX
-		patience := 10
 		patience_counter := 0
 		last_epoch := 0
-
 		for epoch in 0 ..< epochs {
 			nn.adam_zero_grad(&opt)
-			h_gat := nn.gat_layer_forward(&gat, train_feat, adjacency)
-			preds := nn.linear_forward(&pred_head, h_gat)
-			loss := t.tensor_mse_loss(preds, train_targ)
+			t.graph_begin(&scope)
+			loss := t.tensor_mse_loss(
+				nn.linear_forward(&pred_head, nn.gat_layer_forward(&gat, train_feat, adjacency)),
+				train_targ,
+			)
 			t.tensor_backward(loss)
+			t.graph_end(&scope)
 			nn.adam_step(&opt)
-			t.tensor_free_graph(loss)
 
-			// Evaluate on validation set
-			val_h := nn.gat_layer_forward(&gat, val_feat, adjacency)
-			val_preds := nn.linear_forward(&pred_head, val_h)
-			val_loss := t.tensor_mse_loss(val_preds, val_targ)
-			val_loss_val := val_loss.data.data[0]
-			t.tensor_free_graph(val_loss)
-			t.tensor_free(val_h)
-			t.tensor_free(val_preds)
+			t.graph_begin(&scope, no_grad = true)
+			val_loss :=
+				t.tensor_mse_loss(nn.linear_forward(&pred_head, nn.gat_layer_forward(&gat, val_feat, adjacency)), val_targ).data.data[0]
+			t.graph_end(&scope)
 
-			if val_loss_val < best_val_loss {
-				best_val_loss = val_loss_val
+			last_epoch = epoch
+			if val_loss < best_val_loss {
+				best_val_loss = val_loss
 				patience_counter = 0
+				for p, i in params {copy(best[i], p.data.data)}
 			} else {
 				patience_counter += 1
+				if patience_counter >= PATIENCE {break}
 			}
-			last_epoch = epoch
-			if patience_counter >= patience {break}
+		}
+		if best_val_loss < math.F64_MAX {
+			for p, i in params {copy(p.data.data, best[i])}
 		}
 
-		// Final evaluation on val set for Rank IC
-		final_val_h := nn.gat_layer_forward(&gat, val_feat, adjacency)
-		final_val_preds := nn.linear_forward(&pred_head, final_val_h)
-
-		ic_result := cross_sectional_rank_ic(final_val_preds, val_targ, allocator)
+		t.graph_begin(&scope, no_grad = true)
+		final_preds := nn.linear_forward(
+			&pred_head,
+			nn.gat_layer_forward(&gat, val_feat, adjacency),
+		)
+		ic_result := cross_sectional_rank_ic(final_preds, val_targ, allocator)
+		t.graph_end(&scope)
 
 		results[k] = GATFoldResult {
 			mean_ic          = ic_result.mean_ic,
 			val_loss         = best_val_loss,
 			early_stop_epoch = last_epoch + 1,
 		}
-
 		fmt.printf(
 			"  Fold %d/%d: Mean IC = %+.4f, Val Loss = %.4f (stopped at epoch %d)\n",
 			k + 1,
@@ -319,10 +231,9 @@ gat_cross_val_score :: proc(
 			results[k].early_stop_epoch,
 		)
 
-		// Cleanup fold
-		t.tensor_free(final_val_h)
-		t.tensor_free(final_val_preds)
-		t.tensor_free(adjacency)
+		for b in best {delete(b, allocator)}
+		delete(best, allocator)
+		delete(params)
 		nn.gat_layer_free(&gat)
 		nn.linear_layer_free(&pred_head)
 		nn.adam_free(&opt)
@@ -330,16 +241,13 @@ gat_cross_val_score :: proc(
 		t.tensor_free(train_targ)
 		t.tensor_free(val_feat)
 		t.tensor_free(val_targ)
-		delete(train_idx, context.temp_allocator)
-		delete(val_idx, context.temp_allocator)
+		delete(train_idx)
+		delete(val_idx)
 	}
-
-	delete(indices, context.temp_allocator)
 	return results
 }
 
-// Helper: Extract rows from a 4D tensor by indices
-// ✅ FIX: Renamed parameter 'l' to 'last_dim' to avoid shadowing linalg package
+// Rows `indices` of a 4D tensor [B, C, T, L], as a new [len(indices), C, T, L] tensor
 _extract_tensor_by_indices :: proc(
 	src: ^t.Tensor,
 	indices: []int,
@@ -349,18 +257,12 @@ _extract_tensor_by_indices :: proc(
 	c := src.shape[1]
 	t_steps := src.shape[2]
 	last_dim := src.shape[3]
+	row := c * t_steps * last_dim
 
-	out_data := l.matrix_new(f64, 1, new_batch * c * t_steps * last_dim, allocator)
-
+	out_data := l.matrix_new(f64, 1, new_batch * row, allocator)
 	for orig_i, new_i in indices {
-		src_offset := orig_i * (c * t_steps * last_dim)
-		dst_offset := new_i * (c * t_steps * last_dim)
-		copy(
-			out_data.data[dst_offset:dst_offset + c * t_steps * last_dim],
-			src.data.data[src_offset:src_offset + c * t_steps * last_dim],
-		)
+		copy(out_data.data[new_i * row:][:row], src.data.data[orig_i * row:][:row])
 	}
-
 	out := t.tensor_new(out_data, false, allocator)
 	out.shape = [4]int{new_batch, c, t_steps, last_dim}
 	return out
