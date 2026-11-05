@@ -255,8 +255,9 @@ Reference and contract tests print `OK` or `FAIL` for each check and end with a 
 | `ppo_reference_test` | `ppo_reference_test` | GAE vs CleanRL (numpy); PPO minibatch loss gradient vs finite differences of the clipped objective; rollout buffer growth; trading and multi-asset environments on scripted episodes (the multi-asset rewards vs a numpy replay) |
 | `ppo_test` 🌐 | `ppo_trading_test`, `ppo_trading_real_data_test`, `walk_forward_validation_test` | PPO trading agent on synthetic and real data, walk-forward validation |
 | `ppo_multi_asset_test` 🌐 | `ppo_multi_asset_test`, `ppo_multi_asset_wf_test` | Multi-asset PPO (SPY vs QQQ) |
-| `cql_trading_test` | `cql_trading_test` | Offline conservative Q-learning |
-| `cql_real_data_test` 🌐 | `cql_real_data_trading_test` | CQL on Yahoo OHLCV data |
+| `cql_reference_test` | `cql_reference_test` | CQL(H) loss and dL/dQ vs PyTorch; gradient through the Q-network vs finite differences; trading dataset (past returns + held position, reward from the next return) vs numpy; one-state bandit trained to the scipy minimiser (the regulariser turns the greedy action away from the rarely logged one) |
+| `cql_trading_test` | `cql_trading_test` | Offline CQL on a noisy momentum log of synthetic AR(1) returns; greedy policy backtested in sample and on a fresh path |
+| `cql_real_data_test` 🌐 | `cql_real_data_trading_test` | CQL on a 3-day momentum log of AAPL adjusted closes; train on 70%, backtest on the last 30% |
 | `orchestrator_test` 🌐 | `orchestrator_test` | Closed-loop trading orchestrator combining several models |
 | `event_study_test` 🌐🖼📁 | `event_study_test`, `event_study_nlp_test`, `event_study_tokenizer_nlp_test` | Cumulative abnormal returns, FinBERT sentiment events |
 | `ml_finance_metrics_reference_test` | `ml_finance_metrics_reference_test` | Rank IC vs scipy `spearmanr` + pandas (ties, NaN assets, constant periods); trading features vs TA-Lib RSI(14) and pandas rolling volume; CARs and t vs `ttest_1samp`; GAT blocked-fold CV on a tracking allocator; correlation adjacency vs `np.corrcoef`; split conformal quantile; CBOE implied correlation and the dispersion signal; GARCH recursion vs `garch_fit`, optimal ensemble weight vs scipy `minimize_scalar`, VRP backtest metrics |
