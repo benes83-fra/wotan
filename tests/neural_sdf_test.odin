@@ -1,7 +1,6 @@
 package tests
 
 import w "../wotan/core"
-import fin "../wotan/finance"
 import l "../wotan/linalg"
 import ml_fin "../wotan/ml_finance"
 import net "../wotan/net"
@@ -9,270 +8,236 @@ import nn "../wotan/nn"
 import t "../wotan/tensor"
 import "core:fmt"
 import "core:math"
+import "core:math/rand"
 import "core:mem"
 
-// ============================================================================
-// Neural SDF Calibration Test
-// Calibrate a neural SDF to real multi-asset return data (SPY, QQQ, IWM)
-// ============================================================================
+// Neural SDF M_t = f(Z_t)² + ε trained on the Euler-equation loss
+// Σ_i (mean(M R_i) - 1)² + λ Var(M), with the standardised returns as Z_t. The loss is
+// convex in the series M and neural_sdf_optimum gives its minimiser over every series
+// (affine in R_t): the network must close most of the gap between the best constant SDF
+// and that optimum (95% on synthetic data, 80% on live data). The old test fixed λ = 1
+// (the learnt SDF was then a constant), started the network at M ~ ε and had no benchmark.
 
-neural_sdf_test :: proc(allocator: mem.Allocator = context.allocator) {
-	seed_test(#procedure)
-	fmt.println("\n======================================================================")
-	fmt.println("    NEURAL SDF CALIBRATION: LEARNING THE PRICING KERNEL")
-	fmt.println("    E[M_{t+1} · R_{i,t+1}] = 1  for all assets i")
-	fmt.println("======================================================================\n")
-
-	// ========================================================================
-	// 1. Fetch Real Multi-Asset Data
-	// ========================================================================
-	fmt.println("1. Fetching Real Market Data (SPY, QQQ, IWM)...")
-
-	symbols := []string{"SPY", "QQQ", "IWM"}
-	num_assets := len(symbols)
-
-	// Fetch 1 year of daily data for each asset
-	dfs: [3]w.DataFrame
-	for sym, i in symbols {
-		dfs[i] = net.read_yahoo(sym, .Daily, .OneYear, allocator)
-		fmt.printf("   %s: %d trading days\n", sym, dfs[i].rows)
-	}
-	defer {
-		for i in 0 ..< num_assets {
-			w.destroy_dataframe(&dfs[i])
-		}
-	}
-
-	// Use the minimum number of rows across all assets
-	T := dfs[0].rows
-	for i in 1 ..< num_assets {
-		if dfs[i].rows < T {
-			T = dfs[i].rows
-		}
-	}
-	T -= 1 // Need T-1 returns from T prices
-
-	fmt.printf("   Using %d return observations across %d assets\n", T, num_assets)
-
-	// ========================================================================
-	// 2. Compute Gross Returns and Conditioning Variables
-	// ========================================================================
-	fmt.println("\n2. Computing Gross Returns & Conditioning Variables...")
-
-	// Gross returns R_{i,t} = Close_t / Close_{t-1}  (already 1 + net return)
-	r_data := l.matrix_new(f64, T, num_assets, allocator)
-
-	// Conditioning variables Z_t: [R_market, R_market², |R_market|, 1.0]
-	// Using SPY as the market factor
-	input_size := 4
-	z_data := l.matrix_new(f64, T, input_size, allocator)
-
-	for row in 0 ..< T {
-		// Get SPY return for conditioning
-		spy_prev, _ := w.column_at_float(w.column(&dfs[0], "Close"), row)
-		spy_curr, _ := w.column_at_float(w.column(&dfs[0], "Close"), row + 1)
-		r_spy := spy_curr / spy_prev // Gross return
-
-		// Fill gross returns for all assets
-		for j in 0 ..< num_assets {
-			prev, _ := w.column_at_float(w.column(&dfs[j], "Close"), row)
-			curr, _ := w.column_at_float(w.column(&dfs[j], "Close"), row + 1)
-			if prev > 0 {
-				r_data.data[row * num_assets + j] = curr / prev
-			} else {
-				r_data.data[row * num_assets + j] = 1.0
-			}
-		}
-
-		// Conditioning variables (polynomial + absolute value basis)
-		net_ret := r_spy - 1.0
-		z_data.data[row * input_size + 0] = net_ret
-		z_data.data[row * input_size + 1] = net_ret * net_ret
-		z_data.data[row * input_size + 2] = math.abs(net_ret)
-		z_data.data[row * input_size + 3] = 1.0 // Bias feature
-	}
-
-	r := t.tensor_new(r_data, false, allocator)
-	r.shape = [4]int{T, num_assets, 1, 1}
-	defer t.tensor_free(r)
-
-	z := t.tensor_new(z_data, false, allocator)
-	z.shape = [4]int{T, input_size, 1, 1}
-	defer t.tensor_free(z)
-
-	// Print summary statistics
-	mean_ret := [3]f64{}
-	for j in 0 ..< num_assets {
-		sum := 0.0
-		for row in 0 ..< T {
-			sum += r_data.data[row * num_assets + j] - 1.0
-		}
-		mean_ret[j] = sum / f64(T) * 252.0 // Annualized
-	}
-	fmt.printf(
-		"   Annualized mean returns: SPY=%.2f%%, QQQ=%.2f%%, IWM=%.2f%%\n",
-		mean_ret[0] * 100,
-		mean_ret[1] * 100,
-		mean_ret[2] * 100,
-	)
-
-	// ========================================================================
-	// 3. Initialize Neural SDF
-	// ========================================================================
-	fmt.println("\n3. Initializing Neural SDF Model...")
-
-	config := ml_fin.NeuralSDFConfig {
-		input_size  = input_size,
-		hidden_size = 64,
-		num_layers  = 3,
-		num_assets  = num_assets,
-		epsilon     = 0.01,
-	}
-
-	model := ml_fin.neural_sdf_new(config, allocator)
-	defer ml_fin.neural_sdf_free(model)
-
-	opt := nn.adam_new(0.0005, allocator = allocator)
+// Trains on (z, r); returns the final loss
+@(private = "file")
+_sdf_train :: proc(model: ^ml_fin.NeuralSDF, z, r: ^t.Tensor, epochs: int, lr: f64) -> f64 {
+	opt := nn.adam_new(lr)
 	defer nn.adam_free(&opt)
 	nn.sequential_add_to_adam(model.network, &opt)
-
-	fmt.printf("   Architecture: %d -> 64 -> 64 -> 64 -> 1 (ReLU)\n", input_size)
-	fmt.printf("   Positivity constraint: M = f(Z)² + %.3f\n", config.epsilon)
-	fmt.printf("   Calibrating to %d assets simultaneously\n", num_assets)
-
-	// ========================================================================
-	// 4. Training Loop
-	// ========================================================================
-	fmt.println("\n4. Training Neural SDF (Euler Equation Loss)...")
-	fmt.println("   ----------------------------------------------------------------------")
-	fmt.println("   Epoch   | Loss (Σ pricing errors²)")
-	fmt.println("   ----------------------------------------------------------------------")
-
-	epochs := 500
-	initial_loss := 0.0
-	final_loss := 0.0
-
-	for epoch in 0 ..< epochs {
-		nn.adam_zero_grad(&opt)
+	for epoch in 0 ..< epochs { 	// cosine decay of the learning rate to lr / 100
+		opt.learning_rate =
+			lr * (0.01 + 0.99 * 0.5 * (1 + math.cos(math.PI * f64(epoch) / f64(epochs))))
 		loss := ml_fin.neural_sdf_train_step(model, z, r, &opt)
-
-		if epoch == 0 {
-			initial_loss = loss
-		}
-		final_loss = loss
-
-		if epoch % 50 == 0 || epoch == epochs - 1 {
-			fmt.printf("   %5d   | %.8f\n", epoch, loss)
-		}
+		if epoch % (epochs / 4) == 0 {fmt.printf("   epoch %5d  loss %.6e\n", epoch, loss)}
 	}
+	t.graph_begin(&model.scope, no_grad = true)
+	defer t.graph_end(&model.scope)
+	alloc := t.graph_allocator(&model.scope)
+	return(
+		ml_fin.neural_sdf_loss(ml_fin.neural_sdf_values(model, z, alloc), r, model.config.variance_penalty, alloc).data.data[0] \
+	)
+}
 
-	fmt.println("   ----------------------------------------------------------------------")
-	fmt.printf("   Loss reduction: %.2f%%\n", (1.0 - final_loss / initial_loss) * 100.0)
+// The loss of the best constant SDF c = Σ μ_i / Σ μ_i² (μ = mean gross returns)
+@(private = "file")
+_sdf_constant_loss :: proc(returns: []f64, N: int) -> (c, loss: f64) {
+	n := len(returns) / N
+	mu := make([]f64, N, context.temp_allocator)
+	for row in 0 ..< n {for i in 0 ..< N {mu[i] += returns[row * N + i] / f64(n)}}
+	s, s2 := 0.0, 0.0
+	for v in mu {s += v; s2 += v * v}
+	c = s / s2
+	for v in mu {loss += (c * v - 1) * (c * v - 1)}
+	return
+}
 
-	// ========================================================================
-	// 5. Evaluate Pricing Errors & SDF Variance
-	// ========================================================================
-	fmt.println("\n5. Evaluating Pricing Errors & SDF Statistics...")
-	fmt.println("   ----------------------------------------------------------------------")
+// Standardised returns (training means and std) as the state variables, and R as a tensor
+@(private = "file")
+_sdf_inputs :: proc(returns: []f64, N: int, mean, std: []f64) -> (z, r: ^t.Tensor) {
+	n := len(returns) / N
+	r = t.tensor_new(l.matrix_new(f64, n, N), false)
+	copy(r.data.data, returns)
+	z = t.tensor_new(l.matrix_new(f64, n, N), false)
+	for v, k in returns {z.data.data[k] = (v - mean[k % N]) / std[k % N]}
+	return
+}
 
-	// Get the learned SDF values to compute variance and prove it's not constant
-	raw := nn.sequential_forward(model.network, z)
+@(private = "file")
+_sdf_moments :: proc(returns: []f64, N: int) -> (mean, std: []f64) {
+	n := len(returns) / N
+	mean, std = make([]f64, N), make([]f64, N)
+	for v, k in returns {mean[k % N] += v / f64(n)}
+	for v, k in returns {std[k % N] += (v - mean[k % N]) * (v - mean[k % N]) / f64(n)}
+	for &v in std {v = math.sqrt(v)}
+	return
+}
 
-	sum_m := 0.0
-	sum_m_sq := 0.0
-	m_values := make([]f64, T, allocator)
+// Fits the network and the benchmarks; returns whether the network closed the gap
+@(private = "file")
+_sdf_fit_report :: proc(
+	returns: []f64,
+	N: int,
+	lambda: f64,
+	epochs: int,
+	min_closed: f64,
+	save_path := "",
+) -> bool {
+	mean, std := _sdf_moments(returns, N)
+	z, r := _sdf_inputs(returns, N, mean, std)
+	c, loss_c := _sdf_constant_loss(returns, N)
+	m_opt, loss_opt, min_opt, ok := ml_fin.neural_sdf_optimum(
+		returns,
+		N,
+		lambda,
+		context.allocator,
+	)
+	if !ok {fmt.println("FAIL optimum: singular system"); return false}
+	cfg := ml_fin.NeuralSDFConfig {
+		input_size       = N,
+		hidden_size      = 32,
+		num_layers       = 2,
+		num_assets       = N,
+		epsilon          = 0.01,
+		variance_penalty = lambda,
+	}
+	model := ml_fin.neural_sdf_new(cfg)
+	defer ml_fin.neural_sdf_free(model)
+	loss_net := _sdf_train(model, z, r, epochs, 1e-3)
+	m_net := ml_fin.neural_sdf_series(model, z, context.allocator)
+	err_net := ml_fin.sdf_pricing_errors(m_net, returns, N, context.allocator)
+	err_opt := ml_fin.sdf_pricing_errors(m_opt, returns, N, context.allocator)
+	dist := 0.0
+	for v, i in m_net {dist = max(dist, abs(v - m_opt[i]))}
+	closed := (loss_c - loss_net) / (loss_c - loss_opt)
+	fmt.printf("   best constant SDF %.4f: loss %.6e\n", c, loss_c)
+	fmt.printf(
+		"   optimum over all series:   loss %.6e (min M %.3f), pricing errors %.2e\n",
+		loss_opt,
+		min_opt,
+		err_opt,
+	)
+	fmt.printf("   neural SDF:                loss %.6e, pricing errors %.2e\n", loss_net, err_net)
+	fmt.printf("   max |M_net - M_opt| %.4f\n", dist)
+	ok = closed > min_closed
+	fmt.printf(
+		"%s the network closes %.1f%% of the loss gap between the constant SDF and the optimum (at least %.0f%%)\n",
+		"OK  " if ok else "FAIL",
+		100 * closed,
+		100 * min_closed,
+	)
+	if save_path != "" {
+		saved := ml_fin.neural_sdf_save(model, save_path)
+		loaded, load_ok := ml_fin.neural_sdf_load(save_path, cfg)
+		same := saved && load_ok
+		if load_ok {
+			m2 := ml_fin.neural_sdf_series(loaded, z, context.allocator)
+			for v, i in m2 {same &&= v == m_net[i]}
+			ml_fin.neural_sdf_free(loaded)
+		}
+		fmt.printf(
+			"%s saved to %s and reloaded: the same SDF series\n",
+			"OK  " if same else "FAIL",
+			save_path,
+		)
+		ok &&= same
+	}
+	return ok
+}
 
+// A synthetic one-factor market: 600 monthly-like returns of 3 assets with means 0.5%,
+// 1%, 1.5% and betas 0.5, 1, 1.5 (λ = 1e-3, where the optimum halves the constant's loss)
+neural_sdf_synthetic_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
+	context.allocator = allocator
+	fmt.println("\n=== Neural SDF on a synthetic one-factor market ===")
+	T, N :: 600, 3
+	mu := [N]f64{0.005, 0.010, 0.015}
+	beta := [N]f64{0.5, 1.0, 1.5}
+	returns := make([]f64, T * N)
 	for row in 0 ..< T {
-		raw_val := raw.data.data[row]
-		m_val := raw_val * raw_val + config.epsilon
-		m_values[row] = m_val
-		sum_m += m_val
-		sum_m_sq += m_val * m_val
+		f := rand.float64_normal(0, 0.04)
+		for i in 0 ..< N {returns[row * N + i] = 1 + mu[i] + beta[i] * f + rand.float64_normal(0, 0.02)}
 	}
-	t.tensor_free(raw)
+	ok := _sdf_fit_report(returns, N, 1e-3, 2000, 0.95)
+	record_failures(int(!ok))
+}
 
-	mean_m := sum_m / f64(T)
-	variance_m := (sum_m_sq / f64(T)) - (mean_m * mean_m)
-
-	min_m := m_values[0]
-	max_m := m_values[0]
-	for row in 1 ..< T {
-		if m_values[row] < min_m {min_m = m_values[row]}
-		if m_values[row] > max_m {max_m = m_values[row]}
+// SPY, QQQ, IWM, TLT daily gross returns (AdjClose, the last common two years): fitted on
+// the first year, the pricing errors of the second year reported next to the constant
+// SDF's (in sample the fit is a statement about the optimiser only)
+neural_sdf_test :: proc(allocator: mem.Allocator = context.allocator) {
+	seed_test(#procedure)
+	context.allocator = allocator
+	fmt.println("\n=== Neural SDF on SPY, QQQ, IWM, TLT daily returns ===")
+	symbols := []string{"SPY", "QQQ", "IWM", "TLT"}
+	N := len(symbols)
+	dfs := make([]w.DataFrame, N)
+	n := max(int)
+	for sym, i in symbols {
+		dfs[i] = net.read_yahoo(sym, .Daily, .TwoYears, allocator)
+		n = min(n, dfs[i].rows)
 	}
-	delete(m_values, allocator)
-
-	fmt.println("   Learned Neural SDF Statistics:")
-	fmt.printf("     Mean(M):     %.6f\n", mean_m)
-	fmt.printf("     Variance(M): %.8f  <-- Must be > 0 to capture risk!\n", variance_m)
-	fmt.printf("     Min(M):      %.6f\n", min_m)
-	fmt.printf("     Max(M):      %.6f\n", max_m)
-
-	pricing_errors := ml_fin.neural_sdf_evaluate(model, z, r, allocator)
-	defer delete(pricing_errors, allocator)
-
-	fmt.println("\n   Neural SDF Pricing Errors (|E[M·R] - 1|):")
-	for j in 0 ..< num_assets {
-		fmt.printf("     %s: %.6f\n", symbols[j], pricing_errors[j])
+	defer for &df in dfs {w.destroy_dataframe(&df)}
+	if n < 200 {
+		fmt.println("Not enough data (offline?): skipped")
+		return
 	}
-
-	// ========================================================================
-	// 6. Compare Against Trivial SDF (M = constant)
-	// ========================================================================
-	fmt.println("\n6. Baseline Comparison (Single Constant SDF)...")
-	fmt.println("   ----------------------------------------------------------------------")
-	fmt.println("   (A single constant SDF cannot price assets with different expected returns)")
-
-	// Calibrate a single constant SDF to the Market (SPY)
-	sum_r_spy := 0.0
-	for row in 0 ..< T {
-		sum_r_spy += r_data.data[row * num_assets + 0]
-	}
-	mean_r_spy := sum_r_spy / f64(T)
-	trivial_m := 1.0 / mean_r_spy
-
-	fmt.printf("   Trivial Constant SDF (calibrated to SPY): M = %.6f\n", trivial_m)
-
-	for j in 0 ..< num_assets {
-		sum_mr := 0.0
-		for row in 0 ..< T {
-			sum_mr += trivial_m * r_data.data[row * num_assets + j]
+	// gross returns of the last n common rows; a missing (null or 0) close counts as no move
+	returns := make([]f64, (n - 1) * N)
+	for &df, i in dfs {
+		col := w.column(&df, "AdjClose")
+		off := df.rows - n
+		prev, _ := w.column_at_float(col, off)
+		for k in 1 ..< n {
+			b, null := w.column_at_float(col, off + k)
+			good := !null && b > 0
+			returns[(k - 1) * N + i] = b / prev if good && prev > 0 else 1
+			if good {prev = b}
 		}
-		trivial_error := math.abs(sum_mr / f64(T) - 1.0)
-		fmt.printf("     %s trivial SDF error: %.6f\n", symbols[j], trivial_error)
 	}
+	n_train := (n - 1) / 2
+	train, test := returns[:n_train * N], returns[n_train * N:]
+	fmt.printf("%d daily returns: %d to fit, %d held out\n", n - 1, n_train, (n - 1) - n_train)
+	LAMBDA :: 1e-5 // daily: squared pricing errors ~1e-7, Var(M) of a pricing SDF ~1e-2
+	ok := _sdf_fit_report(train, N, LAMBDA, 20000, 0.8, "model_checkpoints/neural_sdf_model.bin")
 
-	// ========================================================================
-	// 7. Interpretation
-	// ========================================================================
-	fmt.println("\n======================================================================")
-	fmt.println("    INTERPRETATION")
-	fmt.println("======================================================================")
-	fmt.println("  • The Neural SDF learns M_{t+1} = f_θ(Z_t)² + ε")
-	fmt.println("  • Z_t = [R_mkt, R_mkt², |R_mkt|, 1] captures non-linear risk pricing")
-	fmt.println("  • The squared term ensures M > 0 (no-arbitrage requirement)")
-	fmt.println("  • E[M·R] = 1 means the SDF correctly prices each asset")
-	fmt.println("  • Low pricing error => the learned kernel is economically meaningful")
-	fmt.println("  • This replaces grid-search SDF calibration with gradient-based learning")
-	fmt.println("======================================================================\n")
-
-	// ========================================================================
-	// 8. Model Persistence
-	// ========================================================================
-	fmt.println("7. Testing Model Persistence (Save/Load)...")
-	save_path := "model_checkpoints/neural_sdf_model.bin"
-	save_ok := ml_fin.neural_sdf_save(model, save_path)
-	if save_ok {
-		fmt.printf("   [OK] Model saved to %s\n", save_path)
-	} else {
-		fmt.println("   [FAIL] Could not save model")
+	// held out: the SDF learnt as a function of the returns, applied to the second year
+	mean, std := _sdf_moments(train, N)
+	z_test, _ := _sdf_inputs(test, N, mean, std)
+	z_train, r_train := _sdf_inputs(train, N, mean, std)
+	cfg := ml_fin.NeuralSDFConfig {
+		input_size       = N,
+		hidden_size      = 32,
+		num_layers       = 2,
+		num_assets       = N,
+		epsilon          = 0.01,
+		variance_penalty = LAMBDA,
 	}
-
-	loaded, load_ok := ml_fin.neural_sdf_load(save_path, config, allocator)
+	loaded, load_ok := ml_fin.neural_sdf_load("model_checkpoints/neural_sdf_model.bin", cfg)
 	if load_ok {
-		fmt.println("   [OK] Model loaded successfully")
-		ml_fin.neural_sdf_free(loaded)
-	} else {
-		fmt.println("   [FAIL] Could not load model")
+		defer ml_fin.neural_sdf_free(loaded)
+		c, _ := _sdf_constant_loss(train, N)
+		const_m := make([]f64, len(test) / N)
+		for &v in const_m {v = c}
+		e_const := ml_fin.sdf_pricing_errors(const_m, test, N, allocator)
+		e_net := ml_fin.sdf_pricing_errors(
+			ml_fin.neural_sdf_series(loaded, z_test, allocator),
+			test,
+			N,
+			allocator,
+		)
+		e_in := ml_fin.neural_sdf_evaluate(loaded, z_train, r_train, allocator)
+		fmt.printf("   %v\n", symbols)
+		fmt.printf("   pricing errors in sample (neural):  %.2e\n", e_in)
+		fmt.printf("   held out, constant SDF:             %.2e\n", e_const)
+		fmt.printf("   held out, neural SDF:               %.2e\n", e_net)
+		fmt.println(
+			"   (a year of daily returns pins each mean return down to about 1% / sqrt(250) = 6e-4",
+		)
+		fmt.println(
+			"    a day: the in-sample fit prices that noise, and held out it does no better than",
+		)
+		fmt.println("    the constant)")
 	}
+	record_failures(int(!ok))
 }

@@ -248,7 +248,8 @@ Reference and contract tests print `OK` or `FAIL` for each check and end with a 
 | `prob_forecast_test` | `prob_forecast_test` | Gaussian, Student-t and quantile forecast heads vs PyTorch/SciPy losses and scores; an LSTM forecaster on GARCH data beats the unconditional baseline; multi-step forecasts |
 | `token_forecast_test` | `token_forecast_test` | Time-series tokenizer vs Chronos' scaling and binning; a GPT trained on AR(1) tokens forecasts with calibrated intervals (takes about 25 s) |
 | `timegan_test` 🌐 | `timegan_test` | Synthetic market data with TimeGAN |
-| `neural_sdf_test` 🌐📁 | `neural_sdf_test` | Neural stochastic discount factor (Euler equation loss) |
+| `neural_sdf_reference_test` | `neural_sdf_reference_test` | Neural SDF loss (pricing errors plus variance penalty) and its gradient vs numpy; the minimiser over all SDF series vs numpy's T x T system and BFGS; network gradients vs finite differences |
+| `neural_sdf_test` 🌐📁 | `neural_sdf_synthetic_test`, `neural_sdf_test` | Neural SDF of the returns on a synthetic one-factor market and on SPY / QQQ / IWM / TLT: share of the loss gap closed between the best constant SDF and the optimum; save / reload; held-out pricing errors vs the constant SDF |
 | `gat_cross_sectional_test` 🌐 | `gat_cross_sectional_test`, `gat_real_world_test`, `gat_real_world_cv_test` | Graph attention networks for cross-sectional returns, rank IC |
 | `hmm_regime_test` 🌐 | `hmm_regime_test` | Gaussian HMM vs hmmlearn: forward log-likelihood, one Baum–Welch step, the fit and its Viterbi path, a bad tick, rescaled returns, one state; then SPY regimes |
 | `volatility_forecasting_test` 🌐 | `volatility_forecasting_test`, `lstm_volatility_test`, `lstm_volatility_real_data_test` | Volatility forecasting with neural models and LSTMs |

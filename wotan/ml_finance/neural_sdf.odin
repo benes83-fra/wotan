@@ -3,28 +3,40 @@ package ml_finance
 import l "../linalg"
 import nn "../nn"
 import t "../tensor"
-import "core:fmt"
 import "core:math"
 import "core:mem"
 
 // ============================================================================
-// Neural SDF: M_{t+1} = f_θ(Z_t)² + ε  (positivity via squaring)
-// Euler equation: E[M_{t+1} · R_{i,t+1}] = 1  for all assets i
-// Loss: Σ_i (mean_t(M_t · R_{i,t}) - 1)²
+// Neural stochastic discount factor
+//
+//   M_t = f_θ(Z_t)² + ε   (a network of state variables Z_t observed with the returns
+//                          R_t, so M_t > 0; ε is the floor)
+//   Euler equations:  E[M_t R_{i,t}] = 1 for every asset i (gross returns)
+//   Loss:  Σ_i (mean_t(M_t R_{i,t}) - 1)²  +  λ Var_t(M)
+//
+// With few assets many SDFs price them exactly; the variance penalty λ picks among them,
+// and as λ -> 0 the loss's minimiser tends to the minimum-variance SDF that prices the
+// assets (Hansen-Jagannathan). neural_sdf_optimum gives the minimiser over every series
+// M_t: no network can reach a lower loss, and a network of the returns themselves can
+// reach it (the optimum is affine in R_t). The variance penalty used to be fixed at 1,
+// so large next to the squared pricing errors of daily returns (~1e-7) that the learnt
+// SDF was a constant, and the network started near M = ε.
 // ============================================================================
 
 NeuralSDFConfig :: struct {
-	input_size:  int, // Dimension of conditioning variables Z_t
-	hidden_size: int, // Hidden layer width
-	num_layers:  int, // Number of hidden layers
-	num_assets:  int, // Number of assets to calibrate to
-	epsilon:     f64, // Positivity floor (default 0.01)
+	input_size:       int, // Dimension of the state variables Z_t
+	hidden_size:      int, // Hidden layer width
+	num_layers:       int, // Number of hidden layers
+	num_assets:       int, // Number of assets to price
+	epsilon:          f64, // Positivity floor ε of M (e.g. 0.01)
+	variance_penalty: f64, // λ, the weight of Var(M) in the loss (0: pricing errors only)
 }
 
 NeuralSDF :: struct {
 	network:   ^nn.Sequential,
 	config:    NeuralSDFConfig,
 	allocator: mem.Allocator,
+	scope:     t.Graph_Scope, // one arena per training step / evaluation, reused
 }
 
 // ============================================================================
@@ -35,22 +47,35 @@ neural_sdf_new :: proc(
 	config: NeuralSDFConfig,
 	allocator: mem.Allocator = context.allocator,
 ) -> ^NeuralSDF {
+	assert(
+		config.input_size > 0 && config.hidden_size > 0 && config.num_assets > 0,
+		"neural_sdf_new: sizes must be positive",
+	)
+	assert(
+		config.epsilon >= 0 && config.variance_penalty >= 0,
+		"neural_sdf_new: epsilon and variance_penalty must be >= 0",
+	)
 	model := new(NeuralSDF, allocator)
 	model.config = config
 	model.allocator = allocator
 
 	seq := nn.sequential_new(allocator)
-	nn.sequential_add(seq, nn.linear_layer_new(config.input_size, config.hidden_size))
+	nn.sequential_add(seq, nn.linear_layer_new(config.input_size, config.hidden_size, allocator))
 	nn.sequential_add(seq, nn.Activation.ReLU)
-
 	for _ in 1 ..< config.num_layers {
-		nn.sequential_add(seq, nn.linear_layer_new(config.hidden_size, config.hidden_size))
+		nn.sequential_add(
+			seq,
+			nn.linear_layer_new(config.hidden_size, config.hidden_size, allocator),
+		)
 		nn.sequential_add(seq, nn.Activation.ReLU)
 	}
-
-	// Output: single scalar per time step (the raw SDF factor before squaring)
-	nn.sequential_add(seq, nn.linear_layer_new(config.hidden_size, 1))
-
+	// one output per date: the SDF before squaring, started near M = 1 (small weights,
+	// bias sqrt(1 - ε)); from a random start M ~ ε and the loss is ~N, far from the
+	// 1e-5 scale of the pricing errors the training has to resolve
+	out := nn.linear_layer_new(config.hidden_size, 1, allocator)
+	for &v in out.weights.data.data {v *= 0.01}
+	out.bias.data.data[0] = math.sqrt(max(1 - config.epsilon, 0))
+	nn.sequential_add(seq, out)
 	model.network = seq
 	return model
 }
@@ -59,131 +84,186 @@ neural_sdf_free :: proc(model: ^NeuralSDF) {
 	if model.network != nil {
 		nn.sequential_free(model.network)
 	}
+	t.graph_scope_destroy(&model.scope)
 	free(model, model.allocator)
 }
 
 // ============================================================================
-// Training Step
+// SDF and loss (graph operations)
 // ============================================================================
-// z: [T, input_size]  — conditioning variables
-// r: [T, num_assets]  — gross returns (1 + net_return)
-//
-// The SDF is M_t = (f_θ(Z_t))² + ε, ensuring M > 0.
-// Loss = Σ_i ( (1/T) Σ_t M_t · R_{i,t}  -  1 )²
+
+// A constant of the graph (it must live until backward, so the graph owns it)
+@(private = "file")
+_sdf_const :: proc(rows, cols: int, alloc: mem.Allocator) -> ^t.Tensor {
+	c := t.tensor_new(l.matrix_new(f64, rows, cols, alloc), false, alloc)
+	c.owned_by_graph = true
+	return c
+}
+
+// M = f_θ(Z)² + ε, [T, 1], for z [T, input_size]
+neural_sdf_values :: proc(model: ^NeuralSDF, z: ^t.Tensor, alloc: mem.Allocator) -> ^t.Tensor {
+	raw := nn.sequential_forward(model.network, z)
+	floor := _sdf_const(raw.data.rows, 1, alloc)
+	floor.shape = raw.shape
+	for &v in floor.data.data {v = model.config.epsilon}
+	return t.tensor_add(t.tensor_mul(raw, raw), floor)
+}
+
+// The loss Σ_i (mean_t(M_t R_{i,t}) - 1)² + λ Var(M) (population variance) of an SDF
+// series m [T, 1] and gross returns r [T, N] (row-major), as a graph scalar
+neural_sdf_loss :: proc(
+	m: ^t.Tensor,
+	r: ^t.Tensor,
+	variance_penalty: f64,
+	alloc: mem.Allocator,
+) -> ^t.Tensor {
+	n := m.data.rows
+	assert(
+		len(m.data.data) == n && r.data.rows == n,
+		"neural_sdf_loss: m must be [T, 1] and r [T, N]",
+	)
+	N := r.data.cols
+	rt := _sdf_const(N, n, alloc) // R' / T
+	for row in 0 ..< n {
+		for i in 0 ..< N {rt.data.data[i * n + row] = r.data.data[row * N + i] / f64(n)}
+	}
+	one := _sdf_const(N, 1, alloc)
+	for &v in one.data.data {v = 1}
+	e := t.tensor_sub(t.tensor_matmul(rt, m), one) // pricing errors [N, 1]
+	loss := t.tensor_sum(t.tensor_mul(e, e))
+	if variance_penalty != 0 {
+		mean := t.tensor_mean(m)
+		variance := t.tensor_sub(t.tensor_mean(t.tensor_mul(m, m)), t.tensor_mul(mean, mean))
+		loss = t.tensor_add(loss, t.tensor_scale(variance, variance_penalty))
+	}
+	return loss
+}
+
+// ============================================================================
+// Training and evaluation
+// ============================================================================
+// z: [T, input_size] state variables; r: [T, num_assets] gross returns (1 + net return).
+// One full-batch Adam step; returns the loss before the update.
 neural_sdf_train_step :: proc(
 	model: ^NeuralSDF,
 	z: ^t.Tensor,
 	r: ^t.Tensor,
 	opt: ^nn.Adam,
 ) -> f64 {
-	n := z.shape[0]
-	num_assets := model.config.num_assets
-	eps := model.config.epsilon
-	alloc := z.allocator
-
-	// 1. Forward pass: M = f(Z)² + ε
-	raw := nn.sequential_forward(model.network, z)
-	raw_sq := t.tensor_mul(raw, raw)
-
-	eps_data := l.matrix_new(f64, n, 1, alloc)
-	for i in 0 ..< n {eps_data.data[i] = eps}
-	eps_tensor := t.tensor_new(eps_data, false, alloc)
-	m := t.tensor_add(raw_sq, eps_tensor)
-
-	// 2. Euler equation loss: Σ_i (E[M·R_i] - 1)²
-	euler_loss_data := l.matrix_new(f64, 1, 1, alloc)
-	euler_loss_data.data[0] = 0.0
-	euler_loss := t.tensor_new(euler_loss_data, false, alloc)
-
-	for asset in 0 ..< num_assets {
-		r_col_data := l.matrix_new(f64, n, 1, alloc)
-		for row in 0 ..< n {
-			r_col_data.data[row] = r.data.data[row * num_assets + asset]
-		}
-		r_col := t.tensor_new(r_col_data, false, alloc)
-
-		mr := t.tensor_mul(m, r_col)
-		mean_mr := t.tensor_mean(mr)
-
-		one_data := l.matrix_new(f64, 1, 1, alloc)
-		one_data.data[0] = 1.0
-		one := t.tensor_new(one_data, false, alloc)
-
-		diff := t.tensor_sub(mean_mr, one)
-		diff_sq := t.tensor_mul(diff, diff)
-		euler_loss = t.tensor_add(euler_loss, diff_sq)
-
-
-	}
-
-	// 3. Regularization: Penalize variance of M
-	m_mean := t.tensor_mean(m)
-
-	m_mean_data := l.matrix_new(f64, n, 1, alloc)
-	mean_val := m_mean.data.data[0]
-	for i in 0 ..< n {
-		m_mean_data.data[i] = mean_val
-	}
-	m_mean_tensor := t.tensor_new(m_mean_data, false, alloc)
-
-	m_centered := t.tensor_sub(m, m_mean_tensor)
-	m_centered_sq := t.tensor_mul(m_centered, m_centered)
-	m_variance := t.tensor_mean(m_centered_sq)
-
-	reg_strength := 1.0
-	reg_loss := t.tensor_scale(m_variance, reg_strength)
-
-	// Total loss = Euler loss + Regularization
-	total_loss := t.tensor_add(euler_loss, reg_loss)
-
-	// 4. Backward pass (gradients accumulate otherwise)
+	assert(
+		r.data.cols == model.config.num_assets,
+		"neural_sdf_train_step: r must have num_assets columns",
+	)
+	t.graph_begin(&model.scope)
+	defer t.graph_end(&model.scope)
+	alloc := t.graph_allocator(&model.scope)
+	loss := neural_sdf_loss(
+		neural_sdf_values(model, z, alloc),
+		r,
+		model.config.variance_penalty,
+		alloc,
+	)
 	nn.adam_zero_grad(opt)
-	t.tensor_backward(total_loss)
+	t.tensor_backward(loss)
 	nn.adam_step(opt)
-
-	// 5. Get loss value
-	loss_val := total_loss.data.data[0]
-
-	// 6. Cleanup the ENTIRE computation graph at once
-	// This safely frees all intermediate nodes and their gradients
-	t.tensor_free_graph(total_loss)
-
-	return loss_val
+	return loss.data.data[0]
 }
-// ============================================================================
-// Evaluation: compute pricing error per asset
-// ============================================================================
 
+// The SDF series M_t (length T)
+neural_sdf_series :: proc(model: ^NeuralSDF, z: ^t.Tensor, allocator: mem.Allocator) -> []f64 {
+	t.graph_begin(&model.scope, no_grad = true)
+	defer t.graph_end(&model.scope)
+	m := neural_sdf_values(model, z, t.graph_allocator(&model.scope))
+	out := make([]f64, len(m.data.data), allocator)
+	copy(out, m.data.data)
+	return out
+}
+
+// The pricing errors |mean_t(M_t R_{i,t}) - 1| per asset
 neural_sdf_evaluate :: proc(
 	model: ^NeuralSDF,
 	z: ^t.Tensor,
 	r: ^t.Tensor,
 	allocator: mem.Allocator,
 ) -> []f64 {
-	T := z.shape[0]
-	num_assets := model.config.num_assets
-	eps := model.config.epsilon
+	m := neural_sdf_series(model, z, context.temp_allocator)
+	defer delete(m, context.temp_allocator)
+	return sdf_pricing_errors(m, r.data.data, r.data.cols, allocator)
+}
 
-	// Forward pass (no grad needed)
-	raw := nn.sequential_forward(model.network, z)
-
-	// SDF = raw² + ε
-	pricing_errors := make([]f64, num_assets, allocator)
-
-	for asset in 0 ..< num_assets {
-		sum_mr := 0.0
-		for row in 0 ..< T {
-			raw_val := raw.data.data[row]
-			m_val := raw_val * raw_val + eps
-			r_val := r.data.data[row * num_assets + asset]
-			sum_mr += m_val * r_val
-		}
-		mean_mr := sum_mr / f64(T)
-		pricing_errors[asset] = math.abs(mean_mr - 1.0)
+// |mean_t(m_t R_{i,t}) - 1| per asset, for returns [T, N] row-major
+sdf_pricing_errors :: proc(
+	m: []f64,
+	returns: []f64,
+	num_assets: int,
+	allocator: mem.Allocator,
+) -> []f64 {
+	n := len(m)
+	assert(len(returns) == n * num_assets, "sdf_pricing_errors: returns must be [T, N]")
+	out := make([]f64, num_assets, allocator)
+	for i in 0 ..< num_assets {
+		s := 0.0
+		for row in 0 ..< n {s += m[row] * returns[row * num_assets + i]}
+		out[i] = math.abs(s / f64(n) - 1)
 	}
+	return out
+}
 
-	t.tensor_free(raw)
-	return pricing_errors
+// The minimiser of the neural SDF loss over every series m_t (no network, no positivity
+// constraint), for λ > 0. The first-order conditions give m = m̄ - R e / λ with e the
+// pricing errors, so with μ = mean_t R_t and S = mean_t R_t R_t':
+//   (I + S/λ) e - m̄ μ = -1,   μ'e = 0.
+// Returns the series, its loss and its smallest value (if it is below the network's
+// floor ε, the network cannot reach it).
+neural_sdf_optimum :: proc(
+	returns: []f64,
+	num_assets: int,
+	variance_penalty: f64,
+	allocator: mem.Allocator,
+) -> (
+	m: []f64,
+	loss: f64,
+	min_m: f64,
+	ok: bool,
+) {
+	N := num_assets
+	n := len(returns) / N
+	assert(
+		variance_penalty > 0 && len(returns) == n * N && n > 0,
+		"neural_sdf_optimum: need λ > 0 and returns [T, N]",
+	)
+	A := l.matrix_new(f64, N + 1, N + 1, context.temp_allocator)
+	b := make([]f64, N + 1, context.temp_allocator)
+	for row in 0 ..< n {
+		R := returns[row * N:][:N]
+		for i in 0 ..< N {
+			for j in 0 ..< N {A.data[i * (N + 1) + j] += R[i] * R[j] / (f64(n) * variance_penalty)}
+			A.data[i * (N + 1) + N] -= R[i] / f64(n) // -m̄ μ_i
+			A.data[N * (N + 1) + i] += R[i] / f64(n) // μ'e
+		}
+	}
+	for i in 0 ..< N {
+		A.data[i * (N + 1) + i] += 1
+		b[i] = -1
+	}
+	LU, piv, _, solved := l.lu_decompose(&A, context.temp_allocator)
+	if !solved {return}
+	x := l.lu_solve(&LU, piv, b, context.temp_allocator)
+	e, m_bar := x[:N], x[N]
+	m = make([]f64, n, allocator)
+	min_m = math.INF_F64
+	mean, sq := 0.0, 0.0
+	for row in 0 ..< n {
+		v := m_bar
+		for i in 0 ..< N {v -= returns[row * N + i] * e[i] / variance_penalty}
+		m[row] = v
+		min_m = min(min_m, v)
+		mean += v / f64(n)
+		sq += v * v / f64(n)
+	}
+	for v in e {loss += v * v}
+	loss += variance_penalty * (sq - mean * mean)
+	return m, loss, min_m, true
 }
 
 // ============================================================================
@@ -197,6 +277,7 @@ neural_sdf_save :: proc(model: ^NeuralSDF, path: string) -> bool {
 	return nn.save_checkpoint(model.network, &dummy_opt, path, 0, model.allocator)
 }
 
+// The checkpoint holds the network only: pass the configuration it was trained with
 neural_sdf_load :: proc(
 	path: string,
 	config: NeuralSDFConfig,
@@ -212,7 +293,6 @@ neural_sdf_load :: proc(
 	if loaded_opt != nil {
 		nn.adam_free(loaded_opt)
 	}
-
 	model := new(NeuralSDF, allocator)
 	model.network = loaded_model
 	model.config = config
