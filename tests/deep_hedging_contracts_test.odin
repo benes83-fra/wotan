@@ -16,7 +16,7 @@ import "core:mem"
 //   allocate nothing from the hedger's allocator once warmed up, and the
 //   hedger's graph scope reuses its memory
 // - the single-asset step minimizes the configured risk measure: its loss is
-//   Mean(PnL²) or the CVaR of the evaluated PnL
+//   the variance or the CVaR of the evaluated PnL
 // - the CVaR loss equals the Acerbi-Tasche CVaR of finance, its gradient
 //   matches finite differences, and freeing its graph (with a real allocator,
 //   no scope) releases everything it allocated
@@ -58,29 +58,30 @@ _evaluate_ref :: proc(
 	pnl := make([]f64, B, allocator)
 	prev := make([]f64, B, allocator)
 	defer delete(prev, allocator)
-	for s in 0 ..< S {
+	c := h.config.transaction_cost
+	// holding delta_s, decided on the state at s, earns S_{s+1} - S_s; every trade (the
+	// opening one at 0, the closing one at S - 1) pays c |trade| S
+	for s in 0 ..< S - 1 {
 		sd := l.matrix_new(f64, B, F, allocator)
 		for b in 0 ..< B {
 			for f in 0 ..< F {sd.data[b * F + f] = paths.data.data[b * (S * F) + s * F + f]}
 		}
 		state := t.tensor_new(sd, false, allocator)
 		delta := nn.sequential_forward(h.network, state)
-		if s > 0 {
-			for b in 0 ..< B {
-				s_t := paths.data.data[b * (S * F) + s * F]
-				s_prev := paths.data.data[b * (S * F) + (s - 1) * F]
-				inc := delta.data.data[b] * (s_t - s_prev)
-				if h.config.transaction_cost > 0 {
-					inc -= h.config.transaction_cost * math.abs(delta.data.data[b] - prev[b]) * s_t
-				}
-				pnl[b] += inc
-			}
+		for b in 0 ..< B {
+			s_now := paths.data.data[b * (S * F) + s * F]
+			s_next := paths.data.data[b * (S * F) + (s + 1) * F]
+			pnl[b] += delta.data.data[b] * (s_next - s_now)
+			if c > 0 {pnl[b] -= math.abs(delta.data.data[b] - prev[b]) * s_now * c}
+			prev[b] = delta.data.data[b]
 		}
-		for b in 0 ..< B {prev[b] = delta.data.data[b]}
 		t.tensor_free_graph(delta)
 		t.tensor_free(state)
 	}
-	for b in 0 ..< B {pnl[b] -= payoffs.data.data[b]}
+	for b in 0 ..< B {
+		if c > 0 {pnl[b] -= math.abs(prev[b]) * paths.data.data[b * (S * F) + (S - 1) * F] * c}
+		pnl[b] -= payoffs.data.data[b]
+	}
 	return pnl
 }
 
@@ -130,15 +131,16 @@ deep_hedging_contracts_test :: proc(allocator: mem.Allocator) {
 		expect(&passed, &total, same, "deep_hedging_evaluate equals the step-by-step reference")
 
 		// The step's loss is the risk measure of the PnL before its update
-		// (it used to be Mean(PnL²) whatever the configuration)
+		// (it used to be Mean(PnL²) whatever the configuration, then Mean(PnL²) for Variance)
 		h.config.risk_measure, h.config.cvar_alpha = .CVaR, 0.25
 		loss_cvar := ml_fin.deep_hedger_train_step(h, paths, payoffs, &opt)
 		want_cvar := fin.portfolio_cvar_historical(pnl, 0.75)
 		h.config.risk_measure = .Variance
 		pnl_v, spots_v := ml_fin.deep_hedging_evaluate(h, paths, payoffs, allocator)
 		loss0 := ml_fin.deep_hedger_train_step(h, paths, payoffs, &opt) // warm-up: gradients, Adam state
-		want_var := 0.0
-		for v in pnl_v {want_var += v * v / f64(len(pnl_v))}
+		m_v, m2_v := 0.0, 0.0
+		for v in pnl_v {m_v += v / f64(len(pnl_v)); m2_v += v * v / f64(len(pnl_v))}
+		want_var := m2_v - m_v * m_v
 		expect(
 			&passed,
 			&total,
@@ -154,7 +156,7 @@ deep_hedging_contracts_test :: proc(allocator: mem.Allocator) {
 			&total,
 			abs(loss0 - want_var) < 1e-10 * want_var,
 			fmt.tprintf(
-				"single-asset step with Variance: loss %.10f = Mean(PnL²) %.10f",
+				"single-asset step with Variance: loss %.10f = variance of the PnL %.10f",
 				loss0,
 				want_var,
 			),

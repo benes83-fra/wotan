@@ -1,9 +1,9 @@
 package tests
 
-import fin "../wotan/finance"
 import l "../wotan/linalg"
 import ml_fin "../wotan/ml_finance"
 import nn "../wotan/nn"
+import optim "../wotan/optimize"
 import t "../wotan/tensor"
 import "core:fmt"
 import "core:math"
@@ -11,405 +11,157 @@ import "core:math/rand"
 import "core:mem"
 import "core:os"
 
-// ============================================================================
-// Exotic Option Path Generators
-// ============================================================================
-_generate_asian_paths :: proc(
-	S_0: f64,
-	K: f64,
-	T: f64,
-	r: f64,
-	sigma: f64,
-	n_paths: int,
-	n_steps: int,
-	allocator: mem.Allocator,
-) -> (
-	paths: ^t.Tensor,
-	payoffs: ^t.Tensor,
-) {
-	dt := T / f64(n_steps)
-	sqrt_dt := math.sqrt_f64(dt)
-	drift := (r - 0.5 * sigma * sigma) * dt
+// Deep hedging of path-dependent calls (arithmetic Asian, up-and-out barrier) under GBM,
+// prices in units of S_0 and discounted (the numeraire deep hedging expects). The state
+// carries what the payoff depends on: the running average for the Asian, a knocked-out
+// flag for the barrier. Compared by P&L variance with the static Black-Scholes delta of
+// the vanilla call held to maturity. Then a save / load round trip.
 
-	// 4 features: [spot, time_remaining, volatility, running_average]
-	paths_data := l.matrix_new(f64, n_paths * (n_steps + 1), 4, allocator)
-	payoffs_data := l.matrix_new(f64, n_paths, 1, allocator)
+@(private = "file")
+EX_S0, EX_K, EX_T, EX_R, EX_SIGMA :: 1.0, 1.0, 1.0, 0.05, 0.2
+@(private = "file")
+EX_PATHS, EX_STEPS, EX_EPOCHS :: 512, 25, 200
 
-	for path in 0 ..< n_paths {
-		S := S_0
-		sum_S := S_0 // Running sum for average calculation
-		for step in 0 ..< n_steps + 1 {
-			idx := (path * (n_steps + 1) + step) * 4
-			time_remaining := T - f64(step) * dt
-			current_avg := sum_S / f64(step + 1)
-
-			paths_data.data[idx + 0] = S
-			paths_data.data[idx + 1] = time_remaining
-			paths_data.data[idx + 2] = sigma
-			paths_data.data[idx + 3] = current_avg // Running average
-
-			if step < n_steps {
-				Z := rand.float64_normal(0.0, 1.0)
-				S = S * math.exp_f64(drift + sigma * sqrt_dt * Z)
-				sum_S += S
+// GBM paths, state (e^{-rt} S, time to maturity, sigma, extra), extra = running average
+// of S (Asian) or 1 once S has reached the barrier (barrier); discounted payoffs
+@(private = "file")
+_exotic_paths :: proc(asian: bool, barrier: f64) -> (paths, payoffs: ^t.Tensor) {
+	N, F := EX_STEPS, 4
+	dt := EX_T / f64(N)
+	pd := l.matrix_new(f64, EX_PATHS * (N + 1), F)
+	yd := l.matrix_new(f64, EX_PATHS, 1)
+	for p in 0 ..< EX_PATHS {
+		S, sum := EX_S0, 0.0
+		knocked := false
+		for k in 0 ..= N {
+			if k > 0 {
+				S *= math.exp(
+					(EX_R - 0.5 * EX_SIGMA * EX_SIGMA) * dt +
+					EX_SIGMA * math.sqrt(dt) * rand.float64_normal(0, 1),
+				)
 			}
+			sum += S
+			knocked ||= S >= barrier
+			row := pd.data[(p * (N + 1) + k) * F:][:F]
+			row[0] = S * math.exp(-EX_R * f64(k) * dt)
+			row[1] = EX_T - f64(k) * dt
+			row[2] = EX_SIGMA
+			row[3] = sum / f64(k + 1) if asian else (1 if knocked else 0)
 		}
-
-		// Asian Call payoff: max(avg(S) - K, 0)
-		avg_S_T := sum_S / f64(n_steps + 1)
-		payoffs_data.data[path] = math.max(avg_S_T - K, 0.0)
+		under := sum / f64(N + 1) if asian else (0 if knocked else S)
+		yd.data[p] = math.exp(-EX_R * EX_T) * max(under - EX_K, 0)
 	}
-
-	paths = t.tensor_new(paths_data, false, allocator)
-	paths.shape = [4]int{n_paths, n_steps + 1, 4, 1}
-
-	payoffs = t.tensor_new(payoffs_data, false, allocator)
-	payoffs.shape = [4]int{n_paths, 1, 1, 1}
-
-	return paths, payoffs
+	paths = t.tensor_new(pd)
+	paths.shape = {EX_PATHS, N + 1, F, 1}
+	payoffs = t.tensor_new(yd)
+	return
 }
 
-// Generate Barrier Option paths (up-and-out call)
-_generate_barrier_paths :: proc(
-	S_0: f64,
-	K: f64,
-	T: f64,
-	r: f64,
-	sigma: f64,
-	barrier: f64,
-	n_paths: int,
-	n_steps: int,
-	allocator: mem.Allocator,
-) -> (
-	paths: ^t.Tensor,
-	payoffs: ^t.Tensor,
-) {
-	dt := T / f64(n_steps)
-	sqrt_dt := math.sqrt_f64(dt)
-	drift := (r - 0.5 * sigma * sigma) * dt
-
-	paths_data := l.matrix_new(f64, n_paths * (n_steps + 1), 3, allocator)
-	payoffs_data := l.matrix_new(f64, n_paths, 1, allocator)
-
-	for path in 0 ..< n_paths {
-		S := S_0
-		knocked_out := false
-		for step in 0 ..< n_steps + 1 {
-			idx := (path * (n_steps + 1) + step) * 3
-			time_remaining := T - f64(step) * dt
-
-			paths_data.data[idx + 0] = S
-			paths_data.data[idx + 1] = time_remaining
-			paths_data.data[idx + 2] = sigma
-
-			if step < n_steps {
-				Z := rand.float64_normal(0.0, 1.0)
-				S = S * math.exp_f64(drift + sigma * sqrt_dt * Z)
-				if S >= barrier {
-					knocked_out = true
-				}
-			}
-		}
-
-		// Up-and-Out Call: max(S_T - K, 0) if not knocked out
-		if !knocked_out {
-			payoffs_data.data[path] = math.max(S - K, 0.0)
-		} else {
-			payoffs_data.data[path] = 0.0
-		}
-	}
-
-	paths = t.tensor_new(paths_data, false, allocator)
-	paths.shape = [4]int{n_paths, n_steps + 1, 3, 1}
-
-	payoffs = t.tensor_new(payoffs_data, false, allocator)
-	payoffs.shape = [4]int{n_paths, 1, 1, 1}
-
-	return paths, payoffs
+@(private = "file")
+_ex_variance :: proc(xs: []f64) -> f64 {
+	m, m2 := 0.0, 0.0
+	for x in xs {m += x / f64(len(xs)); m2 += x * x / f64(len(xs))}
+	return m2 - m * m
 }
 
-// ============================================================================
-// Static Hedge Baselines
-// ============================================================================
-
-// Compute variance of naive static hedge (delta at t=0 held constant)
-_static_delta_variance_exotic :: proc(
-	paths: ^t.Tensor,
-	payoffs: ^t.Tensor,
-	S_0: f64,
-	K: f64,
-	T: f64,
-	r: f64,
-	sigma: f64,
-	n_paths: int,
-	n_steps: int,
-) -> f64 {
-	// Use BS Delta as static hedge (suboptimal for exotics)
-	d1 := (math.ln(S_0 / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt_f64(T))
-	N_d1 := 0.5 * (1.0 + math.erf(d1 / math.sqrt_f64(2.0)))
-	delta_bs := N_d1
-
-	pnl_sum := 0.0
-	pnl_sq_sum := 0.0
-
-	for p in 0 ..< n_paths {
-		s_t_idx := p * (n_steps + 1) * 3 + n_steps * 3 + 0
-		S_T := paths.data.data[s_t_idx]
-		payoff := payoffs.data.data[p]
-
-		hedge_pnl := delta_bs * (S_T - S_0)
-		pnl := hedge_pnl - payoff
-
-		pnl_sum += pnl
-		pnl_sq_sum += pnl * pnl
+// P&L variance of the static Black-Scholes delta (vanilla call at t = 0) held to maturity
+@(private = "file")
+_ex_static_variance :: proc(paths, payoffs: ^t.Tensor) -> f64 {
+	d1 :=
+		(math.ln(EX_S0 / EX_K) + (EX_R + 0.5 * EX_SIGMA * EX_SIGMA) * EX_T) /
+		(EX_SIGMA * math.sqrt(EX_T))
+	delta := 0.5 * (1 + math.erf(d1 / math.SQRT_TWO))
+	S, F := paths.shape[1], paths.shape[2]
+	pnl := make([]f64, EX_PATHS, context.temp_allocator)
+	for p in 0 ..< EX_PATHS {
+		pnl[p] = delta * (paths.data.data[p * S * F + (S - 1) * F] - EX_S0) - payoffs.data.data[p]
 	}
-
-	mean_pnl := pnl_sum / f64(n_paths)
-	variance := (pnl_sq_sum / f64(n_paths)) - mean_pnl * mean_pnl
-
-	return variance
+	return _ex_variance(pnl)
 }
 
-// ============================================================================
-// Main Test Procedure
-// ============================================================================
+// Trains a variance-minimising hedger; returns it (free with deep_hedger_free) and its
+// P&L variance on the paths
+@(private = "file")
+_ex_train :: proc(paths, payoffs: ^t.Tensor) -> (^ml_fin.DeepHedger, f64) {
+	h := ml_fin.deep_hedger_new(
+		{
+			state_size = 4,
+			hidden_size = 64,
+			num_layers = 2,
+			risk_measure = .Variance,
+			num_assets = 1,
+		},
+	)
+	opt := nn.adam_new(3e-3)
+	defer nn.adam_free(&opt)
+	nn.sequential_add_to_adam(h.network, &opt)
+	schedule := optim.lr_cosine(3e-3, EX_EPOCHS, warmup_steps = 10)
+	for epoch in 0 ..< EX_EPOCHS {
+		opt.learning_rate = optim.lr_schedule_at(schedule, epoch)
+		loss := ml_fin.deep_hedger_train_step(h, paths, payoffs, &opt)
+		if epoch % 50 == 0 || epoch == EX_EPOCHS - 1 {
+			fmt.printf("  epoch %3d | P&L variance %.6f\n", epoch, loss)
+		}
+	}
+	pnl, spots := ml_fin.deep_hedging_evaluate(h, paths, payoffs, context.allocator)
+	defer {delete(pnl); delete(spots)}
+	return h, _ex_variance(pnl)
+}
 
 deep_hedging_exotic_test :: proc(allocator: mem.Allocator) {
 	seed_test(#procedure)
-	fmt.println("")
-	fmt.println("======================================================================")
-	fmt.println("    DEEP HEDGING: EXOTIC OPTIONS (ASIAN & BARRIER)")
-	fmt.println("    Where Static Greeks Fail and Neural Networks Shine")
-	fmt.println("======================================================================")
-	fmt.println("")
-
-	// ========================================================================
-	// Test 1: Asian Call Option
-	// ========================================================================
-	fmt.println("======================================================================")
-	fmt.println("    TEST 1: ASIAN CALL OPTION (Arithmetic Average)")
-	fmt.println("    No closed-form Greeks available - perfect for Deep Hedging")
-	fmt.println("======================================================================")
-	fmt.println("")
-
-	S_0 := 100.0
-	K := 100.0
-	T := 1.0
-	r := 0.05
-	sigma := 0.20
-	n_paths := 512
-	n_steps := 25
-	epochs := 50
-
-	fmt.printf("Option Parameters:\n")
-	fmt.printf("  S_0 = %.2f, K = %.2f, T = %.2f\n", S_0, K, T)
-	fmt.printf("  r = %.2f%%, sigma = %.2f%%\n", r * 100, sigma * 100)
-	fmt.printf("  Paths: %d, Steps: %d, Epochs: %d\n\n", n_paths, n_steps, epochs)
-
-	// Generate Asian paths
-	fmt.println("Generating Asian option paths...")
-	asian_paths, asian_payoffs := _generate_asian_paths(
-		S_0,
-		K,
-		T,
-		r,
-		sigma,
-		n_paths,
-		n_steps,
-		allocator,
+	context.allocator = allocator
+	fmt.println("\n=== Deep hedging: Asian and up-and-out barrier calls ===")
+	fmt.printf(
+		"S_0 = K = 1, T = %.0f, r = %.0f%%, sigma = %.0f%%; %d paths, %d steps, %d epochs\n",
+		EX_T,
+		100 * EX_R,
+		100 * EX_SIGMA,
+		EX_PATHS,
+		EX_STEPS,
+		EX_EPOCHS,
 	)
-	defer t.tensor_free(asian_paths)
-	defer t.tensor_free(asian_payoffs)
-
-	// Static hedge baseline
-	asian_static_var := _static_delta_variance_exotic(
-		asian_paths,
-		asian_payoffs,
-		S_0,
-		K,
-		T,
-		r,
-		sigma,
-		n_paths,
-		n_steps,
-	)
-	fmt.printf("  Static Delta Hedge Variance: $%.4f\n", asian_static_var)
-
-	// Deep Hedging
-	fmt.println("\nTraining Deep Hedger on Asian option...")
-	config := ml_fin.DeepHedgerConfig {
-		state_size   = 4,
-		hidden_size  = 64,
-		num_layers   = 2,
-		risk_measure = .Variance,
-		cvar_alpha   = 0.05,
-		num_assets   = 1,
-	}
-	hedger := ml_fin.deep_hedger_new(config, allocator)
-	defer ml_fin.deep_hedger_free(hedger)
-
-	opt := nn.adam_new(0.001, allocator = allocator)
-	defer nn.adam_free(&opt)
-	nn.sequential_add_to_adam(hedger.network, &opt)
-
-	initial_loss := 0.0
-	final_loss := 0.0
-
-	for epoch in 0 ..< epochs {
-		loss := ml_fin.deep_hedger_train_step(hedger, asian_paths, asian_payoffs, &opt)
-		if epoch == 0 {initial_loss = loss}
-		final_loss = loss
-
-		if epoch % 30 == 0 || epoch == epochs - 1 {
-			fmt.printf("  Epoch %3d | Loss: $%.4f\n", epoch, loss)
-		}
+	names := [2]string{"Asian call (arithmetic average)", "Up-and-out call, barrier 1.2"}
+	hedgers: [2]^ml_fin.DeepHedger
+	defer for h in hedgers {if h != nil {ml_fin.deep_hedger_free(h)}}
+	all_ok := true
+	paths0, payoffs0: ^t.Tensor
+	for k in 0 ..< 2 {
+		fmt.printf("\n%s\n", names[k])
+		paths, payoffs := _exotic_paths(k == 0, 1.2)
+		if k == 0 {paths0, payoffs0 = paths, payoffs}
+		unhedged := _ex_variance(payoffs.data.data)
+		static_var := _ex_static_variance(paths, payoffs)
+		deep_var: f64
+		hedgers[k], deep_var = _ex_train(paths, payoffs)
+		ok := deep_var < static_var
+		all_ok &&= ok
+		fmt.printf(
+			"%s %s: P&L variance unhedged %.5f, static delta %.5f, deep hedge %.5f (%.0f%% below static)\n",
+			"OK  " if ok else "FAIL",
+			names[k],
+			unhedged,
+			static_var,
+			deep_var,
+			100 * (1 - deep_var / static_var),
+		)
 	}
 
-	asian_improvement := (1.0 - final_loss / asian_static_var) * 100.0
-	fmt.printf("\n  Deep Hedge Variance: $%.4f\n", final_loss)
-	fmt.printf("  Improvement over Static: %.2f%%\n", asian_improvement)
-
-	// ========================================================================
-	// Test 2: Up-and-Out Barrier Call
-	// ========================================================================
-	fmt.println("\n======================================================================")
-	fmt.println("    TEST 2: UP-AND-OUT BARRIER CALL")
-	fmt.println("    Discontinuous Greeks at barrier - Deep Hedging excels here")
-	fmt.println("======================================================================")
-	fmt.println("")
-
-	barrier := 120.0
-	fmt.printf("Barrier Parameters:\n")
-	fmt.printf("  S_0 = %.2f, K = %.2f, Barrier = %.2f\n", S_0, K, barrier)
-	fmt.printf("  Paths: %d, Steps: %d, Epochs: %d\n\n", n_paths, n_steps, epochs)
-
-	// Generate Barrier paths
-	fmt.println("Generating Barrier option paths...")
-	barrier_paths, barrier_payoffs := _generate_barrier_paths(
-		S_0,
-		K,
-		T,
-		r,
-		sigma,
-		barrier,
-		n_paths,
-		n_steps,
-		allocator,
-	)
-	defer t.tensor_free(barrier_paths)
-	defer t.tensor_free(barrier_payoffs)
-
-	// Static hedge baseline
-	barrier_static_var := _static_delta_variance_exotic(
-		barrier_paths,
-		barrier_payoffs,
-		S_0,
-		K,
-		T,
-		r,
-		sigma,
-		n_paths,
-		n_steps,
-	)
-	fmt.printf("  Static Delta Hedge Variance: $%.4f\n", barrier_static_var)
-
-	// Deep Hedging
-	fmt.println("\nTraining Deep Hedger on Barrier option...")
-
-	// ✅ FIX: Barrier paths only have 3 features (spot, time, vol), not 4!
-	barrier_config := ml_fin.DeepHedgerConfig {
-		state_size   = 3,
-		hidden_size  = 64,
-		num_layers   = 2,
-		risk_measure = .Variance,
-		cvar_alpha   = 0.05,
-		num_assets   = 1,
-	}
-
-	hedger2 := ml_fin.deep_hedger_new(barrier_config, allocator)
-	defer ml_fin.deep_hedger_free(hedger2)
-
-	opt2 := nn.adam_new(0.001, allocator = allocator)
-	defer nn.adam_free(&opt2)
-	nn.sequential_add_to_adam(hedger2.network, &opt2)
-
-	initial_loss2 := 0.0
-	final_loss2 := 0.0
-
-	for epoch in 0 ..< epochs {
-		loss := ml_fin.deep_hedger_train_step(hedger2, barrier_paths, barrier_payoffs, &opt2)
-		if epoch == 0 {initial_loss2 = loss}
-		final_loss2 = loss
-
-		if epoch % 30 == 0 || epoch == epochs - 1 {
-			fmt.printf("  Epoch %3d | Loss: $%.4f\n", epoch, loss)
-		}
-	}
-
-	barrier_improvement := (1.0 - final_loss2 / barrier_static_var) * 100.0
-	fmt.printf("\n  Deep Hedge Variance: $%.4f\n", final_loss2)
-	fmt.printf("  Improvement over Static: %.2f%%\n", barrier_improvement)
-
-	// ========================================================================
-	// Summary
-	// ========================================================================
-	fmt.println("\n======================================================================")
-	fmt.println("    SUMMARY: Deep Hedging vs Static Greeks on Exotics")
-	fmt.println("======================================================================")
-	fmt.println("")
-	fmt.printf("%-30s | %-15s | %-15s\n", "Option Type", "Static Var", "Deep Var")
-	fmt.println("-------------------------------|-----------------|----------------")
-
-	// ✅ FIX: Removed width specifier (%13) to prevent Odin's zero-padding quirk
-	fmt.printf("%-30s | $%.4f | $%.4f\n", "Asian Call", asian_static_var, final_loss)
-	fmt.printf("%-30s | $%.4f | $%.4f\n", "Barrier Call", barrier_static_var, final_loss2)
-
-	fmt.println("")
-	fmt.printf("Asian Improvement:    %.2f%%\n", asian_improvement)
-	fmt.printf("Barrier Improvement:  %.2f%%\n", barrier_improvement)
-	fmt.println("")
-	fmt.println("[*] Key Insights:")
-	fmt.println("  - Asian options have NO closed-form Greeks")
-	fmt.println("  - Barrier Greeks are discontinuous at the barrier")
-	fmt.println("  - Deep Hedging learns optimal dynamic strategies end-to-end")
-	fmt.println("  - Significantly outperforms naive static hedging")
-	fmt.println("======================================================================")
-	// ========================================================================
-	// 7. Model Persistence (Save & Load)
-	// ========================================================================
-	fmt.println("\n7. Testing Model Persistence (Save/Load)...")
-	fmt.println("   ----------------------------------------------------------------------")
-
+	// save / load: the loaded hedger (given its configuration) reproduces the P&L
 	save_path := "deep_hedger_exotic_test.bin"
-
-	// Save the trained model
-	save_ok := ml_fin.deep_hedger_save(hedger, save_path)
-	if !save_ok {
-		fmt.println("   [FAIL] Could not save model to disk!")
-	} else {
-		fmt.printf("   [OK] Model saved to %s\n", save_path)
+	defer os.remove(save_path)
+	same := ml_fin.deep_hedger_save(hedgers[0], save_path)
+	loaded, load_ok := ml_fin.deep_hedger_load(save_path, allocator, hedgers[0].config)
+	if load_ok {
+		a, _ := ml_fin.deep_hedging_evaluate(hedgers[0], paths0, payoffs0, allocator)
+		b, _ := ml_fin.deep_hedging_evaluate(loaded, paths0, payoffs0, allocator)
+		for i in 0 ..< len(a) {same &&= a[i] == b[i]}
+		ml_fin.deep_hedger_free(loaded)
 	}
-
-	// Load the model back into a new DeepHedger instance
-	loaded_hedger, load_ok := ml_fin.deep_hedger_load(save_path, allocator)
-	if !load_ok {
-		fmt.println("   [FAIL] Could not load model from disk!")
-	} else {
-		fmt.println("   [OK] Model loaded successfully from disk!")
-
-		// Verify the loaded model has the correct network structure
-		if loaded_hedger.network != nil && len(loaded_hedger.network.layers) > 0 {
-			fmt.printf(
-				"   [OK] Loaded network has %d layers.\n",
-				len(loaded_hedger.network.layers),
-			)
-		}
-
-		// Clean up the loaded model to prevent memory leaks
-		ml_fin.deep_hedger_free(loaded_hedger)
-	}
-
-	// Clean up the test file
-	os.remove(save_path)
-	fmt.println("   [OK] Test file cleaned up.")
+	same &&= load_ok
+	fmt.printf(
+		"%s saved and loaded Asian hedger gives the same P&L on every path\n",
+		"OK  " if same else "FAIL",
+	)
+	record_failures(int(!all_ok) + int(!same))
 }

@@ -753,6 +753,8 @@ main :: proc() {
 	free_all(context.temp_allocator)
 	test.graph_scope_test(context.temp_allocator)
 	free_all(context.temp_allocator)
+	test.deep_hedging_reference_test(context.temp_allocator)
+	free_all(context.temp_allocator)
 	test.deep_hedging_contracts_test(context.temp_allocator)
 	free_all(context.temp_allocator)
 	test.sequential_test(context.temp_allocator)

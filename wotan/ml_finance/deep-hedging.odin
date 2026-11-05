@@ -6,10 +6,7 @@ import l "../linalg"
 import nn "../nn"
 import p "../plot"
 import t "../tensor"
-import "core:math"
-import "core:math/rand"
 import "core:mem"
-import "core:slice"
 
 // ============================================================================
 // Deep Hedging Configuration
@@ -27,10 +24,9 @@ DeepHedgerConfig :: struct {
 	risk_measure:     RiskMeasure,
 	cvar_alpha:       f64, // Alpha for CVaR (e.g., 0.05 for 95% CVaR)
 	transaction_cost: f64,
-	num_assets:       int, // Kept for config, but network outputs 1 for standard training
+	num_assets:       int, // hedging instruments = network outputs (0 counts as 1)
 }
 
-// ✅ REVERTED: Single network field to match all existing tests
 DeepHedger :: struct {
 	network:   ^nn.Sequential,
 	config:    DeepHedgerConfig,
@@ -51,16 +47,21 @@ deep_hedger_new :: proc(
 	hedger.allocator = allocator
 
 	seq := nn.sequential_new(allocator)
-	nn.sequential_add(seq, nn.linear_layer_new(config.state_size, config.hidden_size))
+	nn.sequential_add(seq, nn.linear_layer_new(config.state_size, config.hidden_size, allocator))
 	nn.sequential_add(seq, nn.Activation.ReLU)
 
 	for _ in 1 ..< config.num_layers {
-		nn.sequential_add(seq, nn.linear_layer_new(config.hidden_size, config.hidden_size))
+		nn.sequential_add(
+			seq,
+			nn.linear_layer_new(config.hidden_size, config.hidden_size, allocator),
+		)
 		nn.sequential_add(seq, nn.Activation.ReLU)
 	}
-	nn.sequential_add(seq, nn.linear_layer_new(config.hidden_size, config.num_assets))
+	nn.sequential_add(
+		seq,
+		nn.linear_layer_new(config.hidden_size, max(config.num_assets, 1), allocator),
+	)
 
-	// ✅ FIX: Output layer must predict delta for EACH asset, so size = num_assets
 	hedger.network = seq
 	return hedger
 }
@@ -74,97 +75,6 @@ deep_hedger_free :: proc(hedger: ^DeepHedger) {
 }
 
 // ============================================================================
-// Training Step (Single Asset)
-// ============================================================================
-
-// deep_hedger_train_step :: proc(
-// 	hedger: ^DeepHedger,
-// 	paths: ^t.Tensor,
-// 	payoffs: ^t.Tensor,
-// 	opt: ^nn.Adam,
-// ) -> f64 {
-// 	batch_size := paths.shape[0]
-// 	seq_len := paths.shape[1]
-// 	state_size := paths.shape[2]
-// 	alloc := hedger.allocator
-
-// 	pnl_data := l.matrix_new(f64, batch_size, 1, alloc)
-// 	for i in 0 ..< batch_size {pnl_data.data[i] = 0.0}
-// 	pnl := t.tensor_new(pnl_data, false, alloc)
-// 	pnl.shape = [4]int{batch_size, 1, 1, 1}
-
-// 	state_data := l.matrix_new(f64, batch_size, state_size, alloc)
-// 	state := t.tensor_new(state_data, false, alloc)
-
-// 	s_t_data := l.matrix_new(f64, batch_size, 1, alloc)
-// 	s_t := t.tensor_new(s_t_data, false, alloc)
-
-// 	s_prev_data := l.matrix_new(f64, batch_size, 1, alloc)
-// 	s_prev := t.tensor_new(s_prev_data, false, alloc)
-
-// 	prev_delta: ^t.Tensor = nil
-
-// 	for t_step in 0 ..< seq_len {
-// 		for b in 0 ..< batch_size {
-// 			for s in 0 ..< state_size {
-// 				src_idx := b * (seq_len * state_size) + t_step * state_size + s
-// 				dst_idx := b * state_size + s
-// 				state_data.data[dst_idx] = paths.data.data[src_idx]
-// 			}
-// 		}
-
-// 		// ✅ Uses hedger.network (single network)
-// 		delta := nn.sequential_forward(hedger.network, state)
-
-// 		if t_step > 0 {
-// 			for b in 0 ..< batch_size {
-// 				s_t_data.data[b] =
-// 					paths.data.data[b * (seq_len * state_size) + t_step * state_size + 0]
-// 				s_prev_data.data[b] =
-// 					paths.data.data[b * (seq_len * state_size) + (t_step - 1) * state_size + 0]
-// 			}
-
-// 			ds := t.tensor_sub(s_t, s_prev)
-// 			product := t.tensor_mul(delta, ds) // [batch_size, num_assets, 1, 1]
-
-// 			// ✅ FIX: Use tensor_sum_dim1 to preserve the autograd graph!
-// 			pnl_increment := t.tensor_sum_dim1(product)
-
-// 			if hedger.config.transaction_cost > 0.0 {
-// 				d_delta := t.tensor_sub(delta, prev_delta)
-// 				pos_part := t.tensor_relu(d_delta)
-// 				neg_part := t.tensor_relu(t.tensor_neg(d_delta))
-// 				abs_d_delta := t.tensor_add(pos_part, neg_part)
-// 				cost_coeff := t.tensor_scale(abs_d_delta, hedger.config.transaction_cost)
-// 				cost := t.tensor_mul(cost_coeff, s_t)
-// 				pnl_increment = t.tensor_sub(pnl_increment, cost)
-// 			}
-
-// 			pnl = t.tensor_add(pnl, pnl_increment)
-// 		}
-// 		prev_delta = delta
-// 	}
-
-// 	pnl = t.tensor_sub(pnl, payoffs)
-// 	pnl_sq := t.tensor_mul(pnl, pnl)
-// 	loss := t.tensor_mean(pnl_sq)
-
-// 	t.tensor_backward(loss)
-// 	nn.adam_step(opt)
-// 	loss_val := loss.data.data[0]
-
-// 	t.tensor_free_graph(loss)
-// 	l.matrix_free(&state_data)
-// 	t.tensor_free(state)
-// 	l.matrix_free(&s_t_data)
-// 	t.tensor_free(s_t)
-// 	l.matrix_free(&s_prev_data)
-// 	t.tensor_free(s_prev)
-
-// 	return loss_val
-// }
-
-// ============================================================================
 // Model Persistence (Save/Load)
 // ============================================================================
 
@@ -172,14 +82,16 @@ deep_hedger_save :: proc(hedger: ^DeepHedger, path: string) -> bool {
 	dummy_opt := nn.adam_new(0.001, allocator = hedger.allocator)
 	defer nn.adam_free(&dummy_opt)
 
-	// ✅ Uses hedger.network
 	nn.sequential_add_to_adam(hedger.network, &dummy_opt)
 	return nn.save_checkpoint(hedger.network, &dummy_opt, path, 0, hedger.allocator)
 }
 
+// The checkpoint holds the network only: pass the configuration it was trained with
+// (transaction cost, risk measure, number of assets)
 deep_hedger_load :: proc(
 	path: string,
 	allocator: mem.Allocator = context.allocator,
+	config: DeepHedgerConfig = {num_assets = 1},
 ) -> (
 	^DeepHedger,
 	bool,
@@ -194,8 +106,8 @@ deep_hedger_load :: proc(
 	}
 
 	hedger := new(DeepHedger, allocator)
-	// ✅ Uses hedger.network
 	hedger.network = loaded_model
+	hedger.config = config
 	hedger.allocator = allocator
 
 	return hedger, true
@@ -274,6 +186,86 @@ deep_hedging_plot_pnl_vs_spot :: proc(
 	return p.scatter_png(&df, "spot", "pnl", output_path, config, allocator)
 }
 
+// ============================================================================
+// Hedging P&L
+// ============================================================================
+// paths [batch, N + 1, state_size]: the state at the N + 1 dates t_0 .. t_N, whose first
+// num_assets columns are the prices of the hedging instruments in units of the numeraire
+// (discounted: with a rate r pass e^{-r t_k} S_k and the discounted payoff). payoffs
+// [batch, 1]: the liability paid at t_N. At each t_k, k < N, the network sees the state
+// at t_k only and sets the holdings delta_k, kept until t_{k+1}. Terminal P&L of the
+// hedger who is short the claim (premium not included; it shifts the P&L by a constant):
+//   sum_k delta_k . (S_{k+1} - S_k)  -  cost * sum_k |delta_k - delta_{k-1}| . S_k  -  Z
+// with delta_{-1} = 0 and delta_N = 0: positions are opened at t_0 and closed at t_N, and
+// every trade pays the proportional cost (Buehler, Gonon, Teichmann & Wood 2019).
+@(private = "file")
+_hedging_pnl :: proc(
+	hedger: ^DeepHedger,
+	paths: ^t.Tensor,
+	payoffs: ^t.Tensor,
+	alloc: mem.Allocator,
+) -> ^t.Tensor {
+	B, S, F := paths.shape[0], paths.shape[1], paths.shape[2]
+	A := max(hedger.config.num_assets, 1)
+	assert(
+		S >= 2 && F >= A,
+		"deep hedging: paths need 2+ dates and the prices in the first num_assets columns",
+	)
+	assert(len(payoffs.data.data) == B, "deep hedging: one payoff per path")
+	c := hedger.config.transaction_cost
+
+	pnl := t.tensor_new(l.matrix_new(f64, B, 1, alloc), false, alloc)
+	prev: ^t.Tensor = nil
+	for k in 0 ..< S - 1 {
+		sd := l.matrix_new(f64, B, F, alloc)
+		for b in 0 ..< B {copy(sd.data[b * F:][:F], paths.data.data[b * S * F + k * F:][:F])}
+		delta := nn.sequential_forward(hedger.network, t.tensor_new(sd, false, alloc))
+		assert(
+			len(delta.data.data) == B * A,
+			"deep hedging: the network must output num_assets holdings",
+		)
+		ds := _asset_prices(paths, k + 1, A, alloc)
+		p_k := _asset_prices(paths, k, A, alloc)
+		for &v, i in ds.data {v -= p_k.data[i]}
+		gain := t.tensor_mul(delta, t.tensor_new(ds, false, alloc))
+		gain.shape = {B, A, 1, 1}
+		pnl = t.tensor_add(pnl, t.tensor_sum_dim1(gain))
+		if c > 0 {
+			trade := delta if prev == nil else t.tensor_sub(delta, prev)
+			pnl = t.tensor_sub(pnl, _trade_cost(trade, p_k, c, alloc))
+		}
+		prev = delta
+	}
+	if c > 0 { 	// close the positions at t_N
+		pnl = t.tensor_sub(pnl, _trade_cost(prev, _asset_prices(paths, S - 1, A, alloc), c, alloc))
+	}
+	return t.tensor_sub(pnl, payoffs)
+}
+
+// Prices of the A hedging instruments at date k, [batch, A]
+@(private = "file")
+_asset_prices :: proc(paths: ^t.Tensor, k, A: int, alloc: mem.Allocator) -> l.Matrix(f64) {
+	B, S, F := paths.shape[0], paths.shape[1], paths.shape[2]
+	m := l.matrix_new(f64, B, A, alloc)
+	for b in 0 ..< B {copy(m.data[b * A:][:A], paths.data.data[b * S * F + k * F:][:A])}
+	return m
+}
+
+// cost * sum_a |trade_a| * price_a, [batch, 1]
+@(private = "file")
+_trade_cost :: proc(
+	trade: ^t.Tensor,
+	prices: l.Matrix(f64),
+	c: f64,
+	alloc: mem.Allocator,
+) -> ^t.Tensor {
+	abs_trade := t.tensor_add(t.tensor_relu(trade), t.tensor_relu(t.tensor_neg(trade)))
+	w := t.tensor_mul(abs_trade, t.tensor_new(prices, false, alloc))
+	w.shape = {prices.rows, prices.cols, 1, 1}
+	return t.tensor_scale(t.tensor_sum_dim1(w), c)
+}
+
+// Terminal P&L per path (see _hedging_pnl) and the terminal price of the first asset
 deep_hedging_evaluate :: proc(
 	hedger: ^DeepHedger,
 	paths: ^t.Tensor,
@@ -283,72 +275,26 @@ deep_hedging_evaluate :: proc(
 	pnl_values: []f64,
 	spot_prices: []f64,
 ) {
-	batch_size := paths.shape[0]
-	seq_len := paths.shape[1]
-	state_size := paths.shape[2]
-
-	pnl_values = make([]f64, batch_size, allocator)
-	spot_prices = make([]f64, batch_size, allocator)
-
-	prev_delta_data := make([]f64, batch_size, allocator)
-	defer delete(prev_delta_data, allocator)
-
-	for t_step in 0 ..< seq_len {
-		// The forward graph of this time step lives in the hedger's scope
-		t.graph_begin(&hedger.scope)
-		defer t.graph_end(&hedger.scope)
-		ga := t.graph_allocator(&hedger.scope)
-
-		state_data := l.matrix_new(f64, batch_size, state_size, ga)
-		for b in 0 ..< batch_size {
-			for s in 0 ..< state_size {
-				src_idx := b * (seq_len * state_size) + t_step * state_size + s
-				dst_idx := b * state_size + s
-				state_data.data[dst_idx] = paths.data.data[src_idx]
-			}
-		}
-
-		state := t.tensor_new(state_data, false, ga)
-		delta := nn.sequential_forward(hedger.network, state)
-
-		if t_step > 0 {
-			for b in 0 ..< batch_size {
-				s_t := paths.data.data[b * (seq_len * state_size) + t_step * state_size + 0]
-				s_prev :=
-					paths.data.data[b * (seq_len * state_size) + (t_step - 1) * state_size + 0]
-				delta_val := delta.data.data[b]
-				pnl_increment := delta_val * (s_t - s_prev)
-
-				if hedger.config.transaction_cost > 0.0 {
-					d_delta := delta_val - prev_delta_data[b]
-					cost := hedger.config.transaction_cost * math.abs(d_delta) * s_t
-					pnl_increment -= cost
-				}
-				pnl_values[b] += pnl_increment
-			}
-		}
-
-		for b in 0 ..< batch_size {
-			prev_delta_data[b] = delta.data.data[b]
-		}
-	}
-
-	for b in 0 ..< batch_size {
-		pnl_values[b] -= payoffs.data.data[b]
-		spot_prices[b] =
-			paths.data.data[b * (seq_len * state_size) + (seq_len - 1) * state_size + 0]
-	}
-
-	return pnl_values, spot_prices
+	B, S, F := paths.shape[0], paths.shape[1], paths.shape[2]
+	pnl_values = make([]f64, B, allocator)
+	spot_prices = make([]f64, B, allocator)
+	t.graph_begin(&hedger.scope, no_grad = true)
+	defer t.graph_end(&hedger.scope)
+	pnl := _hedging_pnl(hedger, paths, payoffs, t.graph_allocator(&hedger.scope))
+	copy(pnl_values, pnl.data.data)
+	for b in 0 ..< B {spot_prices[b] = paths.data.data[b * S * F + (S - 1) * F]}
+	return
 }
 
 // compute_hedging_loss is the training loss of the terminal PnL [batch, 1]:
-//   Variance: Mean(PnL^2)
+//   Variance: the variance of the PnL, Mean(PnL^2) - Mean(PnL)^2 (the premium does
+//             not change it)
 //   CVaR:     the empirical CVaR at level cvar_alpha of the loss -PnL (mean of
-//             the worst cvar_alpha·batch losses, Acerbi-Tasche), as
-//             -Σ c_b·PnL_b with the tail weights c of fin.cvar_scenario_weights.
+//             the worst cvar_alpha * batch losses, Acerbi-Tasche), as
+//             -sum c_b PnL_b with the tail weights c of fin.cvar_scenario_weights.
 //             The weights are constants of the graph (the sort is not
-//             differentiated), so the gradient is exactly the CVaR's, -c
+//             differentiated), so the gradient is exactly the CVaR gradient, -c. CVaR
+//             is translation equivariant: the premium lowers it by its amount
 compute_hedging_loss :: proc(
 	pnl: ^t.Tensor,
 	risk_measure: RiskMeasure,
@@ -356,8 +302,8 @@ compute_hedging_loss :: proc(
 	alloc: mem.Allocator,
 ) -> ^t.Tensor {
 	if risk_measure == .Variance {
-		pnl_sq := t.tensor_mul(pnl, pnl)
-		return t.tensor_mean(pnl_sq)
+		m := t.tensor_mean(pnl)
+		return t.tensor_sub(t.tensor_mean(t.tensor_mul(pnl, pnl)), t.tensor_mul(m, m))
 	}
 
 	assert(cvar_alpha > 0 && cvar_alpha <= 1, "compute_hedging_loss: cvar_alpha must be in (0, 1]")
@@ -370,195 +316,36 @@ compute_hedging_loss :: proc(
 	for c, b in tail {neg_c.data.data[b] = -c}
 	return t.tensor_sum(t.tensor_mul(pnl, neg_c))
 }
-// ============================================================================
-// Training Step (Single Asset)
-// ============================================================================
 
+// ============================================================================
+// Training Step
+// ============================================================================
+// One full-batch step on the configured risk measure of the P&L; returns the loss before
+// the update. One or several hedging instruments (num_assets holdings per date).
 deep_hedger_train_step :: proc(
 	hedger: ^DeepHedger,
 	paths: ^t.Tensor,
 	payoffs: ^t.Tensor,
 	opt: ^nn.Adam,
 ) -> f64 {
-	batch_size := paths.shape[0]
-	seq_len := paths.shape[1]
-	state_size := paths.shape[2]
-	// The whole step (graph, helper leaves, backward scratch) lives in the
-	// hedger's scope and is released at once when the step returns
+	// The whole step (graph, helper leaves, backward scratch) lives in the hedger's scope
 	t.graph_begin(&hedger.scope)
 	defer t.graph_end(&hedger.scope)
 	alloc := t.graph_allocator(&hedger.scope)
-
-	pnl_data := l.matrix_new(f64, batch_size, 1, alloc)
-	for i in 0 ..< batch_size {pnl_data.data[i] = 0.0}
-	pnl := t.tensor_new(pnl_data, false, alloc)
-	pnl.shape = [4]int{batch_size, 1, 1, 1}
-
-	prev_delta: ^t.Tensor = nil
-
-	for t_step in 0 ..< seq_len {
-		// ✅ FIX: Allocate fresh state buffer for this time step to preserve autograd history
-		state_data := l.matrix_new(f64, batch_size, state_size, alloc)
-		for b in 0 ..< batch_size {
-			for s in 0 ..< state_size {
-				src_idx := b * (seq_len * state_size) + t_step * state_size + s
-				dst_idx := b * state_size + s
-				state_data.data[dst_idx] = paths.data.data[src_idx]
-			}
-		}
-		state := t.tensor_new(state_data, false, alloc)
-
-		delta := nn.sequential_forward(hedger.network, state)
-
-		if t_step > 0 {
-			s_t_data := l.matrix_new(f64, batch_size, 1, alloc)
-			s_prev_data := l.matrix_new(f64, batch_size, 1, alloc)
-			for b in 0 ..< batch_size {
-				s_t_data.data[b] =
-					paths.data.data[b * (seq_len * state_size) + t_step * state_size + 0]
-				s_prev_data.data[b] =
-					paths.data.data[b * (seq_len * state_size) + (t_step - 1) * state_size + 0]
-			}
-
-			s_t := t.tensor_new(s_t_data, false, alloc)
-			s_prev := t.tensor_new(s_prev_data, false, alloc)
-
-			ds := t.tensor_sub(s_t, s_prev)
-			product := t.tensor_mul(delta, ds)
-			pnl_increment := t.tensor_sum_dim1(product)
-
-			if hedger.config.transaction_cost > 0.0 && prev_delta != nil {
-				d_delta := t.tensor_sub(delta, prev_delta)
-				pos_part := t.tensor_relu(d_delta)
-				neg_part := t.tensor_relu(t.tensor_neg(d_delta))
-				abs_d_delta := t.tensor_add(pos_part, neg_part)
-				cost_coeff := t.tensor_scale(abs_d_delta, hedger.config.transaction_cost)
-				cost := t.tensor_mul(cost_coeff, s_t)
-				pnl_increment = t.tensor_sub(pnl_increment, cost)
-			}
-
-			pnl = t.tensor_add(pnl, pnl_increment)
-		}
-
-		// Detach delta for next step's transaction cost (prevents infinite graph unrolling)
-		prev_delta_data := l.matrix_new(f64, batch_size, 1, alloc)
-		for i in 0 ..< batch_size {
-			prev_delta_data.data[i] = delta.data.data[i]
-		}
-		prev_delta = t.tensor_new(prev_delta_data, false, alloc)
-	}
-
-	pnl = t.tensor_sub(pnl, payoffs)
+	pnl := _hedging_pnl(hedger, paths, payoffs, alloc)
 	loss := compute_hedging_loss(pnl, hedger.config.risk_measure, hedger.config.cvar_alpha, alloc)
-
-	nn.adam_zero_grad(opt) // gradients accumulate otherwise
+	nn.adam_zero_grad(opt)
 	t.tensor_backward(loss)
 	nn.adam_step(opt)
-	loss_val := loss.data.data[0]
-
-
-	return loss_val
+	return loss.data.data[0]
 }
 
-// ============================================================================
-// Enhanced Multi-Asset Training Step (with Transaction Costs)
-// ============================================================================
-
+// The same step (kept for existing multi-asset callers)
 deep_hedger_train_step_multi :: proc(
 	hedger: ^DeepHedger,
 	paths: ^t.Tensor,
 	payoffs: ^t.Tensor,
 	opt: ^nn.Adam,
 ) -> f64 {
-	batch_size := paths.shape[0]
-	seq_len := paths.shape[1]
-	state_size := paths.shape[2]
-	num_assets := hedger.config.num_assets
-	// The whole step (graph, helper leaves, backward scratch) lives in the
-	// hedger's scope and is released at once when the step returns
-	t.graph_begin(&hedger.scope)
-	defer t.graph_end(&hedger.scope)
-	alloc := t.graph_allocator(&hedger.scope)
-
-	pnl_data := l.matrix_new(f64, batch_size, 1, alloc)
-	for i in 0 ..< batch_size {pnl_data.data[i] = 0.0}
-	pnl := t.tensor_new(pnl_data, false, alloc)
-	pnl.shape = [4]int{batch_size, 1, 1, 1}
-
-	prev_delta: ^t.Tensor = nil
-
-	for t_step in 0 ..< seq_len {
-		// ✅ FIX: Allocate fresh state buffer for this time step
-		state_data := l.matrix_new(f64, batch_size, state_size, alloc)
-		for b in 0 ..< batch_size {
-			for s in 0 ..< state_size {
-				src_idx := b * (seq_len * state_size) + t_step * state_size + s
-				dst_idx := b * state_size + s
-				state_data.data[dst_idx] = paths.data.data[src_idx]
-			}
-		}
-		state := t.tensor_new(state_data, false, alloc)
-
-		delta := nn.sequential_forward(hedger.network, state)
-
-		if t_step > 0 {
-			ds_data := l.matrix_new(f64, batch_size, num_assets, alloc)
-			s_t_data := l.matrix_new(f64, batch_size, num_assets, alloc)
-
-			for b in 0 ..< batch_size {
-				for asset in 0 ..< num_assets {
-					s_t_val :=
-						paths.data.data[b * (seq_len * state_size) + t_step * state_size + asset]
-					s_prev_val :=
-						paths.data.data[b * (seq_len * state_size) + (t_step - 1) * state_size + asset]
-
-					ds_data.data[b * num_assets + asset] = s_t_val - s_prev_val
-					s_t_data.data[b * num_assets + asset] = s_t_val
-				}
-			}
-
-			ds := t.tensor_new(ds_data, false, alloc)
-			ds.shape = [4]int{batch_size, num_assets, 1, 1}
-
-			s_t := t.tensor_new(s_t_data, false, alloc)
-			s_t.shape = [4]int{batch_size, num_assets, 1, 1}
-
-			product := t.tensor_mul(delta, ds)
-			pnl_increment := t.tensor_sum_dim1(product)
-
-			if hedger.config.transaction_cost > 0.0 && prev_delta != nil {
-				d_delta := t.tensor_sub(delta, prev_delta)
-				pos_part := t.tensor_relu(d_delta)
-				neg_part := t.tensor_relu(t.tensor_neg(d_delta))
-				abs_d_delta := t.tensor_add(pos_part, neg_part)
-
-				cost_coeff := t.tensor_scale(abs_d_delta, hedger.config.transaction_cost)
-				cost := t.tensor_mul(cost_coeff, s_t)
-				cost_sum := t.tensor_sum_dim1(cost)
-
-				pnl_increment = t.tensor_sub(pnl_increment, cost_sum)
-			}
-
-			pnl = t.tensor_add(pnl, pnl_increment)
-		}
-
-		// Detach delta for next step
-		prev_delta_data := l.matrix_new(f64, batch_size, num_assets, alloc)
-		for i in 0 ..< batch_size * num_assets {
-			prev_delta_data.data[i] = delta.data.data[i]
-		}
-		prev_delta = t.tensor_new(prev_delta_data, false, alloc)
-		prev_delta.shape = [4]int{batch_size, num_assets, 1, 1}
-	}
-
-	pnl = t.tensor_sub(pnl, payoffs)
-	loss := compute_hedging_loss(pnl, hedger.config.risk_measure, hedger.config.cvar_alpha, alloc)
-
-	nn.adam_zero_grad(opt) // gradients accumulate otherwise
-	t.tensor_backward(loss)
-	nn.adam_step(opt)
-	loss_val := loss.data.data[0]
-
-
-	return loss_val
+	return deep_hedger_train_step(hedger, paths, payoffs, opt)
 }

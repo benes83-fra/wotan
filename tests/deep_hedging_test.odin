@@ -12,7 +12,8 @@ import "core:math/rand"
 import "core:mem"
 import "core:os"
 import "core:slice"
-// Generate Geometric Brownian Motion paths for testing
+// GBM paths in units of the numeraire, as deep hedging expects: state (e^{-rt} S_t, time
+// to maturity, sigma) and the discounted call payoff e^{-rT} (S_T - K)^+
 _generate_gbm_paths :: proc(
 	S_0: f64,
 	K: f64,
@@ -39,7 +40,7 @@ _generate_gbm_paths :: proc(
 			idx := (path * (n_steps + 1) + step) * 3
 			time_remaining := T - f64(step) * dt
 
-			paths_data.data[idx + 0] = S
+			paths_data.data[idx + 0] = S * math.exp(-r * f64(step) * dt)
 			paths_data.data[idx + 1] = time_remaining
 			paths_data.data[idx + 2] = sigma
 
@@ -49,8 +50,7 @@ _generate_gbm_paths :: proc(
 			}
 		}
 
-		S_T := paths_data.data[(path * (n_steps + 1) + n_steps) * 3 + 0]
-		payoffs_data.data[path] = math.max(S_T - K, 0.0)
+		payoffs_data.data[path] = math.exp(-r * T) * math.max(S - K, 0.0)
 	}
 
 	paths = t.tensor_new(paths_data, false, allocator)
@@ -62,11 +62,12 @@ _generate_gbm_paths :: proc(
 	return paths, payoffs
 }
 
-// Test parameters
+// Test parameters: prices in units of S_0 (S_0 = 1, as in Buehler et al.), so the network
+// inputs are O(1); the P&L figures are fractions of the notional
 @(private = "file")
-DH_S_0 :: 100.0
+DH_S_0 :: 1.0
 @(private = "file")
-DH_K :: 100.0
+DH_K :: 1.0
 @(private = "file")
 DH_T :: 1.0
 @(private = "file")
@@ -78,7 +79,7 @@ DH_PATHS :: 1024
 @(private = "file")
 DH_STEPS :: 50
 @(private = "file")
-DH_EPOCHS :: 100
+DH_EPOCHS :: 300
 
 // One training run: the trained hedger (free with deep_hedger_free), its
 // training loss (the configured risk measure of the PnL without the premium) at
@@ -94,6 +95,7 @@ _Deep_Hedging_Run :: struct {
 	cvar_alpha:                         f64,
 	deep_cvar, static_cvar:             f64,
 	delta_bs:                           f64,
+	bs_var, bs_cvar:                    f64, // Black-Scholes delta rebalanced every step
 }
 
 @(private = "file")
@@ -125,10 +127,9 @@ _deep_hedging_run :: proc(allocator: mem.Allocator, verbose: bool) -> (run: _Dee
 	}
 	run.hedger = ml_fin.deep_hedger_new(config, allocator)
 
-	// Warmup + cosine decay. Over 5 seeds, CVaR 95% / variance below the static
-	// hedge's: 90.8% ± 5.7 / 61.7% ± 4.3 with base 3e-3, 75.0% ± 4.7 / 52.6% ±
-	// 2.0 with 1e-3 (the same without warmup); a constant 1e-3 does not converge
-	// (19.6% ± 21.5 / -115% ± 109)
+	// Warmup + cosine decay from 3e-3 over the epochs. Over 5 seeds (300 epochs) the CVaR
+	// 95% is ~74% below the static delta hedge's and ~1.5x the Black-Scholes delta
+	// hedge's (rebalanced every step); 600 epochs bring it to ~1.3x
 	schedule := optim.lr_cosine(0.003, epochs, warmup_steps = 10)
 	opt := nn.adam_new(0.001, allocator = allocator)
 	defer nn.adam_free(&opt)
@@ -191,6 +192,20 @@ _deep_hedging_run :: proc(allocator: mem.Allocator, verbose: bool) -> (run: _Dee
 	run.cvar_alpha = config.cvar_alpha
 	run.deep_cvar = fin.portfolio_cvar_historical(pnl, 1 - config.cvar_alpha)
 	run.static_cvar = fin.portfolio_cvar_historical(static_pnl, 1 - config.cvar_alpha)
+	bs_pnl := bs_delta_hedge_pnl(
+		K,
+		T,
+		r,
+		sigma,
+		config.transaction_cost,
+		paths,
+		payoffs,
+		premium,
+		allocator,
+	)
+	defer delete(bs_pnl, allocator)
+	run.bs_var = _variance(bs_pnl)
+	run.bs_cvar = fin.portfolio_cvar_historical(bs_pnl, 1 - config.cvar_alpha)
 	return run
 }
 
@@ -267,9 +282,11 @@ deep_hedging_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("   %-30s | $%.4f\n", "Loss CVaR, epoch 0", initial_loss)
 	fmt.printf("   %-30s | $%.4f\n", "Loss CVaR, final", final_loss)
 	fmt.printf("   %-30s | $%.4f\n", "Deep Hedge Variance", run.deep_var)
+	fmt.printf("   %-30s | $%.4f\n", "BS Delta (every step) Variance", run.bs_var)
 	cvar_label := fmt.tprintf("CVaR %.0f%%", (1 - run.cvar_alpha) * 100)
 	fmt.printf("   %-30s | $%.4f\n", fmt.tprintf("Static Delta %s", cvar_label), run.static_cvar)
 	fmt.printf("   %-30s | $%.4f\n", fmt.tprintf("Deep Hedge %s", cvar_label), run.deep_cvar)
+	fmt.printf("   %-30s | $%.4f\n", fmt.tprintf("BS Delta %s", cvar_label), run.bs_cvar)
 	fmt.println("   ----------------------------------------------------------------------")
 
 	// Improvement metrics
@@ -286,16 +303,18 @@ deep_hedging_test :: proc(allocator: mem.Allocator) {
 		_deep_vs_static_cvar(run),
 	)
 
-	fmt.println("\n[*] Key Insights:")
-	fmt.println("   - Static Delta removes first-order (linear) risk")
-	fmt.println("   - Deep Hedging additionally removes Gamma and higher-order risk")
-	fmt.println("   - The gap between Static and Deep = value of dynamic rebalancing")
-	if deep_vs_static > 5.0 {
-		fmt.println("   - The NN significantly outperforms static hedging!")
-	} else {
-		fmt.println("   - For vanilla European calls, static Delta is already strong.")
-		fmt.println("   - Try exotic payoffs (Asians, Barriers) to see bigger gaps.")
-	}
+	fmt.printf(
+		"   %-30s | %.2f%%\n",
+		fmt.tprintf("Deep vs BS Delta, %s", cvar_label),
+		(1 - run.deep_cvar / run.bs_cvar) * 100,
+	)
+	fmt.println(
+		"\n   The Black-Scholes delta rebalanced every step is the benchmark: in this model it",
+	)
+	fmt.println(
+		"   is the variance-optimal hedge as the steps shrink; the deep hedge optimises the",
+	)
+	fmt.println("   CVaR with the trading cost, which the delta hedge ignores.")
 	fmt.println("======================================================================")
 	// ========================================================================
 	// 7. Model Persistence (Save & Load)
@@ -314,7 +333,7 @@ deep_hedging_test :: proc(allocator: mem.Allocator) {
 	}
 
 	// Load the model back into a new DeepHedger instance
-	loaded_hedger, load_ok := ml_fin.deep_hedger_load(save_path, allocator)
+	loaded_hedger, load_ok := ml_fin.deep_hedger_load(save_path, allocator, hedger.config)
 	if !load_ok {
 		fmt.println("   [FAIL] Could not load model from disk!")
 	} else {
@@ -365,6 +384,8 @@ deep_hedging_seed_sweep_test :: proc(allocator: mem.Allocator, n_seeds := 5) {
 			"deep vs static CVaR (%)",
 			"deep CVaR",
 			"static CVaR",
+			"BS delta CVaR",
+			"deep vs BS delta CVaR (%)",
 		},
 		proc(allocator: mem.Allocator) -> []f64 {
 			run := _deep_hedging_run(allocator, false)
@@ -378,6 +399,8 @@ deep_hedging_seed_sweep_test :: proc(allocator: mem.Allocator, n_seeds := 5) {
 					_deep_vs_static_cvar(run),
 					run.deep_cvar,
 					run.static_cvar,
+					run.bs_cvar,
+					(1 - run.deep_cvar / run.bs_cvar) * 100,
 				},
 				allocator,
 			)
@@ -388,6 +411,8 @@ deep_hedging_seed_sweep_test :: proc(allocator: mem.Allocator, n_seeds := 5) {
 	// Dynamic hedging must beat the static delta hedge with every seed, in the
 	// trained risk measure (CVaR) and in variance
 	ok_cvar, ok_var := stats[4].min > 0, stats[0].min > 0
+	// ... and stay near the Black-Scholes delta hedge: its CVaR below twice the delta's
+	ok_bs := stats[8].min > -100
 	fmt.printf(
 		"%s deep hedge CVaR below the static delta hedge's with every seed (worst seed %.1f%% lower)\n",
 		"OK  " if ok_cvar else "FAIL",
@@ -398,7 +423,12 @@ deep_hedging_seed_sweep_test :: proc(allocator: mem.Allocator, n_seeds := 5) {
 		"OK  " if ok_var else "FAIL",
 		stats[0].min,
 	)
-	record_failures(int(!ok_cvar) + int(!ok_var))
+	fmt.printf(
+		"%s deep hedge CVaR within 2x the Black-Scholes delta hedge's with every seed (worst seed %.0f%% higher)\n",
+		"OK  " if ok_bs else "FAIL",
+		-stats[8].min,
+	)
+	record_failures(int(!ok_cvar) + int(!ok_var) + int(!ok_bs))
 }
 
 // Terminal PnL per path of the static delta hedge (premium received, Black-Scholes
@@ -430,7 +460,8 @@ _static_delta_pnl :: proc(
 	N_d2 := 0.5 * (1.0 + math.erf(d2 / math.sqrt_f64(2.0)))
 	call_price := S_0 * N_d1 - K * math.exp_f64(-r * T) * N_d2
 
-	// 3. Static hedge PnL for each path: call_price + delta * (S_T - S_0) - payoff
+	// 3. Static hedge PnL for each path, discounted: call_price + delta * (e^{-rT} S_T - S_0)
+	// - e^{-rT} payoff (the paths and payoffs are discounted)
 	pnl = make([]f64, n_paths, allocator)
 	for p in 0 ..< n_paths {
 		s_t_idx := p * (n_steps + 1) * 3 + n_steps * 3 + 0
@@ -438,4 +469,35 @@ _static_delta_pnl :: proc(
 		pnl[p] = call_price + delta_bs * (S_T - S_0) - payoffs.data.data[p]
 	}
 	return pnl, delta_bs, call_price
+}
+
+// Terminal P&L per path (discounted, premium received) of the Black-Scholes delta hedge
+// rebalanced at every step, with the same proportional cost as the deep hedge on every
+// trade (opening at t_0, closing at T)
+// (paths: column 0 the discounted spot; K in the same units)
+bs_delta_hedge_pnl :: proc(
+	K, T, r, sigma, cost: f64,
+	paths, payoffs: ^t.Tensor,
+	premium: f64,
+	allocator: mem.Allocator,
+) -> []f64 {
+	B, S, F := paths.shape[0], paths.shape[1], paths.shape[2]
+	N := S - 1
+	dt := T / f64(N)
+	pnl := make([]f64, B, allocator)
+	for b in 0 ..< B {
+		x := paths.data.data[b * S * F:][:S * F]
+		v := premium
+		prev := 0.0
+		for k in 0 ..< N {
+			tau := T - f64(k) * dt
+			spot := x[k * F] * math.exp(r * f64(k) * dt) // undiscounted
+			d1 := (math.ln(spot / K) + (r + 0.5 * sigma * sigma) * tau) / (sigma * math.sqrt(tau))
+			delta := 0.5 * (1 + math.erf(d1 / math.SQRT_TWO))
+			v += delta * (x[(k + 1) * F] - x[k * F]) - cost * abs(delta - prev) * x[k * F]
+			prev = delta
+		}
+		pnl[b] = v - cost * abs(prev) * x[N * F] - payoffs.data.data[b]
+	}
+	return pnl
 }

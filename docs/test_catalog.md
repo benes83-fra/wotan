@@ -233,11 +233,12 @@ Reference and contract tests print `OK` or `FAIL` for each check and end with a 
 
 | File | Procedures | Covers |
 |------|------------|--------|
-| `deep_hedging_test` 📁 | `deep_hedging_test` | Deep hedging of a European call vs the Black–Scholes delta; model save/load |
-| `deep_hedging_contracts_test` | `deep_hedging_contracts_test` | Deep hedging evaluation equals a step-by-step reference; training steps allocate nothing once warmed up; the loss is the configured risk measure (including CVaR) |
-| `deep_hedging_exotic_test` 📁 | `deep_hedging_exotic_test` | Deep hedging of Asian and barrier options |
-| `deep_hedging_portfolio_test` 🌐 | `deep_hedging_portfolio_test` | Multi-asset deep hedging with correlations from real data |
-| `deep_hedging_real_data_test` 🌐🖼 | `deep_hedging_real_data_test` | Deep hedging trained on a live option chain |
+| `deep_hedging_test` 📁 | `deep_hedging_test`, `deep_hedging_seed_sweep_test` | Deep hedging (CVaR, 10 bp costs) of a European call on discounted GBM paths vs the static delta and the Black–Scholes delta rebalanced every step, over 5 seeds; model save/load |
+| `deep_hedging_reference_test` | `deep_hedging_reference_test` | Constant hedges (1 and 2 assets, costs on opening and closing) vs the closed form; variance-loss gradient vs finite differences; one period trained to the minimum-variance hedge Cov(Z, X)/Var(X) and its residual variance |
+| `deep_hedging_contracts_test` | `deep_hedging_contracts_test` | Deep hedging evaluation equals a step-by-step reference; training steps allocate nothing once warmed up; the loss is the configured risk measure (variance or CVaR) |
+| `deep_hedging_exotic_test` 📁 | `deep_hedging_exotic_test` | Deep hedging of an Asian and an up-and-out call (running average / knocked-out flag in the state) vs the static delta; save/load reproduces the P&L |
+| `deep_hedging_portfolio_test` 🌐 | `deep_hedging_portfolio_test` | Basket call hedged with SPY and QQQ (vols and correlation estimated from a year of returns) vs the best static holdings |
+| `deep_hedging_real_data_test` 🌐🖼 | `deep_hedging_real_data_test` | Deep hedge of the at-the-money SPY call at its implied vol: price −E[P&L] and P&L std vs the Black–Scholes delta hedge with the same costs |
 | `deep_bsde_test` | `deep_bsde_test`, `deep_bsde_european_call_test`, `deep_bsde_100d_test` | Deep BSDE price vs exact values: 1-D call vs Black-Scholes, 10-D and 100-D max-calls vs the closed-form integral (scipy `quad`); hedge quality as loss / Var[payoff] |
 | `deep_calibration_reference_test` | `deep_calibration_reference_test` | Deep Heston calibration grid (forward moneyness x expiry) implied vols vs QuantLib; invariance to S and r; parameter scaling round trip; scattered quotes onto the grid vs numpy |
 | `deep_calibration_test` 🌐 | `deep_calibration_test` | MLP from a Heston implied-vol grid to the parameters: held-out parameter and surface errors next to Levenberg–Marquardt; AAPL surface (several expiries) calibrated both ways |

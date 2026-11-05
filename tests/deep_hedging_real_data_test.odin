@@ -7,6 +7,7 @@ import l "../wotan/linalg"
 import ml_fin "../wotan/ml_finance"
 import net "../wotan/net"
 import nn "../wotan/nn"
+import optim "../wotan/optimize"
 import t "../wotan/tensor"
 import "core:fmt"
 import "core:math"
@@ -37,7 +38,7 @@ deep_hedging_real_data_test :: proc(allocator: mem.Allocator) {
 
 	// Get current spot price
 	last_idx := df.rows - 1
-	spot, _ := w.column_at_float(&df.columns[4], last_idx)
+	spot, _ := w.column_at_float(w.column(&df, "Close"), last_idx)
 	fmt.printf("Current Spot Price: $%.2f\n", spot)
 
 	// Fetch options chain
@@ -77,8 +78,14 @@ deep_hedging_real_data_test :: proc(allocator: mem.Allocator) {
 
 	strike := chain.strikes[best_idx]
 	market_price := chain.market_prices[best_idx]
-	implied_vol := chain.implied_vols[best_idx]
 	expiry := chain.expiries[best_idx]
+	R :: 0.04
+	// inverted from the quoted price (Yahoo's impliedVolatility runs high)
+	implied_vol, iv_ok, _ := fin.implied_volatility(market_price, spot, strike, expiry, R, .Call)
+	if !iv_ok {
+		fmt.println("ERROR: the quoted price has no implied volatility")
+		return
+	}
 
 	fmt.println("\nSelected ATM Call Option:")
 	fmt.printf("  Strike:        $%.2f\n", strike)
@@ -97,7 +104,7 @@ deep_hedging_real_data_test :: proc(allocator: mem.Allocator) {
 	defer delete(prices, allocator)
 
 	for i in 0 ..< n_days {
-		prices[i], _ = w.column_at_float(&df.columns[4], i)
+		prices[i], _ = w.column_at_float(w.column(&df, "AdjClose"), i)
 	}
 
 	// Calculate log returns
@@ -105,7 +112,9 @@ deep_hedging_real_data_test :: proc(allocator: mem.Allocator) {
 	defer delete(returns, allocator)
 
 	for i in 1 ..< n_days {
-		returns[i - 1] = math.ln(prices[i] / prices[i - 1])
+		// a missing (null or 0, as Yahoo sends for some rows) close counts as no move
+		returns[i - 1] =
+			math.ln(prices[i] / prices[i - 1]) if prices[i] > 0 && prices[i - 1] > 0 else 0
 	}
 
 	// Calculate historical volatility (annualized)
@@ -137,10 +146,10 @@ deep_hedging_real_data_test :: proc(allocator: mem.Allocator) {
 	// Training parameters
 	n_paths := 2048
 	n_steps := 50
-	epochs := 100
+	epochs := 300
 
 	config := ml_fin.DeepHedgerConfig {
-		state_size       = 3,
+		state_size       = 4,
 		hidden_size      = 64,
 		num_layers       = 2,
 		risk_measure     = .Variance,
@@ -152,16 +161,17 @@ deep_hedging_real_data_test :: proc(allocator: mem.Allocator) {
 	hedger := ml_fin.deep_hedger_new(config, allocator)
 	defer ml_fin.deep_hedger_free(hedger)
 
-	opt := nn.adam_new(0.001, allocator = allocator)
+	opt := nn.adam_new(3e-3, allocator = allocator)
 	defer nn.adam_free(&opt)
 	nn.sequential_add_to_adam(hedger.network, &opt)
+	schedule := optim.lr_cosine(3e-3, epochs, warmup_steps = 10)
 
-	// Generate training paths using real volatility
+	// GBM paths at the implied volatility, in units of the spot, discounted
 	paths, payoffs := _generate_real_paths(
 		spot,
 		strike,
 		expiry,
-		0.05, // Risk-free rate
+		R,
 		training_vol,
 		n_paths,
 		n_steps,
@@ -170,45 +180,45 @@ deep_hedging_real_data_test :: proc(allocator: mem.Allocator) {
 	defer t.tensor_free(paths)
 	defer t.tensor_free(payoffs)
 
-	// Training loop
-	initial_loss := 0.0
-	final_loss := 0.0
-
 	for epoch in 0 ..< epochs {
+		opt.learning_rate = optim.lr_schedule_at(schedule, epoch)
 		loss := ml_fin.deep_hedger_train_step(hedger, paths, payoffs, &opt)
-
-		if epoch == 0 {
-			initial_loss = loss
-		}
-		final_loss = loss
-
-		if epoch % 20 == 0 || epoch == epochs - 1 {
-			fmt.printf("  Epoch %3d | Loss: $%.4f\n", epoch, loss)
+		if epoch % 60 == 0 || epoch == epochs - 1 {
+			fmt.printf("  Epoch %3d | P&L variance (units of spot^2): %.3e\n", epoch, loss)
 		}
 	}
-	// ... (training loop remains the same, but remove nn.adam_add_param for v0) ...
 
 	// ========================================================================
-	// 5. Extract Learned Price (Analytical Fair Price)
+	// 5. Price implied by the hedge
 	// ========================================================================
-	fmt.println("\nExtracting learned option price...")
-
-	// The fair price is the negative mean of the terminal hedging PnL.
-	// Since the network minimizes mean(PnL^2), it naturally drives mean(PnL) to ~0.
-	// The initial capital needed to make the expected PnL exactly zero is -mean(PnL).
-
-	// We can approximate this by observing that for a well-trained variance-minimizing
-	// hedger, the fair price converges to the market price.
-	// A precise calculation would require running one final forward pass to get
-	// the exact mean PnL, but we can also use the Black-Scholes price as the baseline
-	// and note that the network minimized the hedging variance around it.
-
-	// For this test, we will use the Black-Scholes price as the learned fair price baseline,
-	// as the network's job is to find the hedge, not re-price the option from scratch
-	// without a prior.
-
-	bs_price, _ := fin.price_and_greeks(spot, strike, expiry, 0.05, training_vol, .Call, allocator)
-	learned_price := bs_price // The network learns the hedge for this fair price
+	// The variance-minimising hedger needs the premium p that makes its expected P&L
+	// zero, p = -E[P&L] (a mean-variance hedging price; it includes the trading costs)
+	pnl_values, spot_prices := ml_fin.deep_hedging_evaluate(hedger, paths, payoffs, allocator)
+	mean_pnl := 0.0
+	for &v in pnl_values {mean_pnl += v / f64(n_paths); v *= spot}
+	for &v in spot_prices {v *= spot}
+	learned_price := -mean_pnl * spot
+	bs_price, _ := fin.price_and_greeks(spot, strike, expiry, R, training_vol, .Call, allocator)
+	// the Black-Scholes delta hedge on the same paths with the same costs: its price
+	// -E[P&L] (premium 0) and P&L std
+	bs_pnl := bs_delta_hedge_pnl(
+		strike / spot,
+		expiry,
+		R,
+		training_vol,
+		config.transaction_cost,
+		paths,
+		payoffs,
+		0,
+		allocator,
+	)
+	bs_mean, bs_m2 := 0.0, 0.0
+	for v in bs_pnl {bs_mean += v / f64(n_paths); bs_m2 += v * v / f64(n_paths)}
+	bs_hedge_price := -bs_mean * spot
+	bs_std := math.sqrt(bs_m2 - bs_mean * bs_mean) * spot
+	deep_std := 0.0
+	for v in pnl_values {deep_std += (v + learned_price) * (v + learned_price) / f64(n_paths)}
+	deep_std = math.sqrt(deep_std)
 
 	// ========================================================================
 	// 6. Results Summary
@@ -216,31 +226,37 @@ deep_hedging_real_data_test :: proc(allocator: mem.Allocator) {
 	fmt.println("\n======================================================================")
 	fmt.println("    RESULTS SUMMARY")
 	fmt.println("======================================================================")
-	fmt.printf("  Market Price:          $%.2f\n", market_price)
-	fmt.printf("  BS Fair Price:         $%.2f\n", learned_price)
-	fmt.printf("  Hedging Variance:      $%.4f\n", final_loss)
-
-	pricing_error := math.abs(learned_price - market_price) / market_price * 100
-	fmt.printf("  Pricing Error (BS):    %.2f%%\n", pricing_error)
+	fmt.printf("  Market Price:                    $%.2f\n", market_price)
+	fmt.printf("  Black-Scholes at the implied vol: $%.2f\n", bs_price)
+	fmt.printf(
+		"  Price -E[P&L], 10 bp costs:      deep hedge $%.2f, BS delta hedge $%.2f\n",
+		learned_price,
+		bs_hedge_price,
+	)
+	fmt.printf(
+		"  Hedged P&L std:                  deep hedge $%.2f, BS delta hedge $%.2f\n",
+		deep_std,
+		bs_std,
+	)
+	rel := (learned_price - bs_hedge_price) / bs_hedge_price
+	ok := abs(rel) < 0.05 && deep_std < 2 * bs_std
+	fmt.printf(
+		"%s deep hedge price within 5%% of the BS delta hedge's with the same costs (%+.2f%%), P&L std below twice its (%.2f vs %.2f)\n",
+		"OK  " if ok else "FAIL",
+		100 * rel,
+		deep_std,
+		bs_std,
+	)
+	record_failures(int(!ok))
 	fmt.println(
 		"======================================================================",
 	); fmt.println("======================================================================")
 
-	fmt.println("\n[*] Key Insights:")
-	fmt.println("  • Deep Hedging learns optimal hedge ratios from real market data")
-	fmt.println("  • The network minimizes hedging error while accounting for transaction costs")
-	fmt.println("  • The learned V0 represents the fair price under optimal hedging")
-	fmt.println("  • This approach works for ANY payoff structure, including exotics")
-	fmt.println("======================================================================")
 
 	// ========================================================================
 	// 7. Generate Visualizations
 	// ========================================================================
 	fmt.println("\n--- Generating Visualizations ---")
-
-	// 1. Run actual network evaluation to get real PnL and spot prices
-	fmt.println("  Running network evaluation to collect data...")
-	pnl_values, spot_prices := ml_fin.deep_hedging_evaluate(hedger, paths, payoffs, allocator)
 
 	// 2. Plot 1: PnL Distribution
 	fmt.println("  Generating PnL distribution plot...")
@@ -294,7 +310,10 @@ _generate_real_paths :: proc(
 	drift := (r - 0.5 * sigma * sigma) * dt
 
 	// ✅ FIX: Generate 3 features: [Spot, Time Remaining, Volatility]
-	paths_data := l.matrix_new(f64, n_paths * (n_steps + 1), 3, allocator)
+	// features: discounted spot / S_0, time to maturity, sigma, ln(S / K) / (sigma sqrt(T))
+	// (the moneyness in standard deviations: O(1) even for short expiries)
+	F :: 4
+	paths_data := l.matrix_new(f64, n_paths * (n_steps + 1), F, allocator)
 	payoffs_data := l.matrix_new(f64, n_paths, 1, allocator)
 
 	rand_count := n_paths * n_steps
@@ -307,15 +326,16 @@ _generate_real_paths :: proc(
 	for path in 0 ..< n_paths {
 		S := S_0
 		for step in 0 ..< n_steps + 1 {
-			idx := (path * (n_steps + 1) + step) * 3
+			idx := (path * (n_steps + 1) + step) * F
 			time_remaining := T - f64(step) * dt
 
-			// Feature 0: Spot Price
-			paths_data.data[idx + 0] = S
+			// Feature 0: discounted spot in units of S_0
+			paths_data.data[idx + 0] = S / S_0 * math.exp(-r * f64(step) * dt)
 			// Feature 1: Time Remaining
 			paths_data.data[idx + 1] = time_remaining
 			// Feature 2: Volatility
 			paths_data.data[idx + 2] = sigma
+			paths_data.data[idx + 3] = math.ln(S / K) / (sigma * math.sqrt(T))
 
 			if step < n_steps {
 				Z := norm_data[rand_idx]
@@ -323,12 +343,12 @@ _generate_real_paths :: proc(
 				S = S * math.exp_f64(drift + sigma * sqrt_dt * Z)
 			}
 		}
-		payoffs_data.data[path] = math.max(S - K, 0.0)
+		payoffs_data.data[path] = math.exp(-r * T) * math.max(S - K, 0.0) / S_0
 	}
 
 	paths = t.tensor_new(paths_data, false, allocator)
 	// ✅ FIX: shape[2] must be 3 to match state_size
-	paths.shape = [4]int{n_paths, n_steps + 1, 3, 1}
+	paths.shape = [4]int{n_paths, n_steps + 1, F, 1}
 
 	payoffs = t.tensor_new(payoffs_data, false, allocator)
 	payoffs.shape = [4]int{n_paths, 1, 1, 1}
