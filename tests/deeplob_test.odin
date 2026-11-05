@@ -32,7 +32,7 @@ deeplob_test :: proc(allocator: mem.Allocator) {
 	// ✅ FIX: Dummy input now has 3 channels (Mid-Price, Spread, OBI)
 	// Shape: [Batch=8, Channels=3, Time=100, Levels=10]
 	input_data := l.matrix_new(f64, 8, 3 * 100 * 10, allocator)
-	input_tensor := t.tensor_new(input_data, true, allocator)
+	input_tensor := t.tensor_new(input_data, false, allocator)
 	input_tensor.shape = [4]int{8, 3, 100, 10}
 
 	// Forward pass
@@ -55,137 +55,143 @@ deeplob_test :: proc(allocator: mem.Allocator) {
 
 	fmt.println("✓ DeepLOB training step complete!")
 }
+// DeepLOB on a synthetic order book with a signal: the level-1 volume imbalance I (a
+// persistent AR(1)) tilts the next mid moves, up with probability 0.25 + 0.2 I and down
+// with 0.25 - 0.2 I (one tick each, else unchanged). Windows of 20 events, labels from
+// the mean mid of the next 10 events; trained on the first 70% of the windows, scored on
+// the last 30% (after a gap, so no event is in both) against always predicting the most
+// frequent class of the training labels (4 epochs: more overfit the 4000 windows).
 deeplob_talkative_test :: proc(allocator: mem.Allocator) {
 	seed_test(#procedure)
-	fmt.println("\n=== DeepLOB (Synthetic LOB) Talkative Training Test ===")
-
-	// 1. Hyperparameters
-	batch_size := 32
-	seq_len := 100 // Time steps (e.g., 100 order book snapshots)
-	features := 40 // Features (e.g., 10 bid prices, 10 bid vols, 10 ask prices, 10 ask vols)
-	n_classes := 3 // Up, Down, Flat
-
-	// 2. Generate Synthetic "Limit Order Book" Data
-	// Shape: (batch_size, 1, seq_len, features) for Conv2d
+	fmt.println("\n=== DeepLOB on a synthetic order book with an imbalance signal ===")
+	context.allocator = allocator
+	N_EVENTS, L, T, H :: 6000, 4, 20, 10
+	TICK :: 0.01
+	book := make([]f64, N_EVENTS * 4 * L)
+	mid, imb := 100.0, 0.0
+	for r in 0 ..< N_EVENTS {
+		for lv in 0 ..< L {
+			row := book[(r * L + lv) * 4:][:4]
+			row[0] = mid + TICK / 2 + f64(lv) * TICK // ask price
+			row[2] = mid - TICK / 2 - f64(lv) * TICK // bid price
+			if lv == 0 {
+				row[1], row[3] = 100 * (1 - imb), 100 * (1 + imb)
+			} else {
+				row[1], row[3] = rand.float64_range(50, 150), rand.float64_range(50, 150)
+			}
+		}
+		u := rand.float64()
+		if u < 0.25 + 0.2 * imb {mid += TICK} else if u > 0.75 + 0.2 * imb {mid -= TICK}
+		imb = clamp(0.95 * imb + 0.3 * rand.float64_normal(0, 1), -0.9, 0.9)
+	}
+	x, labels, _ := ml_fin.deeplob_lobster_windows(book, N_EVENTS, L, T, H, 2e-5)
+	n := x.shape[0]
+	n_train := n * 7 / 10
+	test_start := n_train + T + H // no event shared with the training windows
+	W := 3 * T * L
+	split :: proc(x: ^t.Tensor, lo, hi, W: int) -> ^t.Tensor {
+		m := l.matrix_new(f64, hi - lo, W)
+		copy(m.data, x.data.data[lo * W:hi * W])
+		out := t.tensor_new(m)
+		out.shape = {hi - lo, x.shape[1], x.shape[2], x.shape[3]}
+		return out
+	}
+	x_train, x_test := split(x, 0, n_train, W), split(x, test_start, n, W)
+	nm := ml_fin.deeplob_norm_fit(x_train) // training windows only
+	ml_fin.deeplob_norm_apply(x_train, nm)
+	ml_fin.deeplob_norm_apply(x_test, nm)
+	y_train, y_test := labels[:n_train], labels[test_start:]
+	// the imbalance rule: up when the last level-1 imbalance is positive, else down
+	rule := 0
+	for v, i in y_test {
+		imb_last := x.data.data[(test_start + i) * W + 2 * T * L + (T - 1) * L]
+		if (2 if imb_last > 0 else 0) == v {rule += 1}
+	}
+	counts: [3]int
+	for v in y_train {counts[v] += 1}
+	majority := 0
+	for c in 1 ..< 3 {if counts[c] > counts[majority] {majority = c}}
+	base := 0
+	for v in y_test {if v == majority {base += 1}}
 	fmt.printf(
-		"Generating synthetic LOB data: batch=%d, seq=%d, features=%d\n",
-		batch_size,
-		seq_len,
-		features,
+		"%d windows (train %d, test %d); training labels down/flat/up %v\n",
+		n,
+		n_train,
+		len(y_test),
+		counts,
 	)
 
-	x_data := l.matrix_new(f64, batch_size, 1 * seq_len * features, allocator)
-	// Fill with random noise (simulating normalized order book imbalances)
-	for i in 0 ..< len(x_data.data) {
-		x_data.data[i] = rand.float64_normal(0.0, 1.0)
-	}
-	x_tensor := t.tensor_new(x_data, false, allocator)
-	x_tensor.shape = [4]int{batch_size, 1, seq_len, features}
-
-	// Generate random 3-class targets
-	y_targets := make([]int, batch_size, allocator)
-	for i in 0 ..< batch_size {
-		y_targets[i] = rand.int_range(0, n_classes)
-	}
-
-	// 3. Build a Mini-DeepLOB Architecture using existing NN layers
-	// Real DeepLOB uses Inception modules, but we'll use a standard CNN pipeline
-	// to demonstrate the training loop and loss reduction using your existing library.
-	fmt.println("Building Mini-DeepLOB (CNN) architecture...")
-	model := nn.sequential_new(allocator)
-	defer nn.sequential_free(model)
-
-	// Conv Block 1: Extract local temporal/feature patterns
-	nn.sequential_add(model, nn.conv2d_layer_new(1, 16, 3, 1, 1, true, allocator)) // (N, 16, 100, 40)
-	nn.sequential_add(model, nn.Activation.ReLU)
-
-	// Conv Block 2
-	nn.sequential_add(model, nn.conv2d_layer_new(16, 32, 3, 1, 1, true, allocator)) // (N, 32, 100, 40)
-	nn.sequential_add(model, nn.Activation.ReLU)
-
-	// Pooling to reduce sequence length
-	nn.sequential_add(model, nn.maxpool2d_layer_new(2, 2)) // (N, 32, 50, 20)
-
-	// Flatten and classify
-	nn.sequential_add(model, nn.FlattenLayer{})
-	nn.sequential_add(model, nn.linear_layer_new(32 * 50 * 20, 64, allocator))
-	nn.sequential_add(model, nn.Activation.ReLU)
-	nn.sequential_add(model, nn.linear_layer_new(64, n_classes, allocator))
-
-	// 4. Setup Optimizer
-	opt := nn.adam_new(0.001, allocator = allocator)
+	model := ml_fin.deeplob_new(
+		{time_steps = T, price_levels = L, num_classes = 3, hidden_dim = 16, seq_backend = .LSTM},
+	)
+	defer ml_fin.deeplob_free(model)
+	opt := nn.adam_new(1e-3)
 	defer nn.adam_free(&opt)
-	nn.sequential_add_to_adam(model, &opt)
-
-	// 5. Training Loop
-	epochs := 20
-	fmt.println("\nStarting Training...")
-	fmt.println("Epoch | Loss    | Accuracy | Status")
-	fmt.println("------|---------|----------|-------------------------")
-
-	// One arena per training step, reused across epochs
+	ml_fin.deeplob_add_to_adam(model, &opt)
 	scope: t.Graph_Scope
 	defer t.graph_scope_destroy(&scope)
-	for epoch in 0 ..< epochs {
-		t.graph_begin(&scope)
-		defer t.graph_end(&scope)
-		nn.adam_zero_grad(&opt)
-
-		// Forward pass
-		logits := nn.sequential_forward(model, x_tensor)
-
-		// Compute Cross Entropy Loss
-		loss := t.tensor_cross_entropy_loss(logits, y_targets)
-
-		// Backward pass
-		t.tensor_backward(loss)
-
-		// Optimizer step
-		nn.adam_step(&opt)
-
-		// Calculate Accuracy
-		correct := 0
-		for i in 0 ..< batch_size {
-			// Find argmax for this sample
-			max_val := -math.F64_MAX
-			max_idx := 0
-			for c in 0 ..< n_classes {
-				val := logits.data.data[i * n_classes + c]
-				if val > max_val {
-					max_val = val
-					max_idx = c
-				}
-			}
-			if max_idx == y_targets[i] {
-				correct += 1
-			}
+	EPOCHS, BATCH :: 4, 64
+	order := make([]int, n_train)
+	for &v, i in order {v = i}
+	accuracy :: proc(model: ^ml_fin.DeepLOB, x: ^t.Tensor, y: []int, scope: ^t.Graph_Scope) -> f64 {
+		ml_fin.deeplob_eval(model)
+		defer ml_fin.deeplob_train(model)
+		t.graph_begin(scope, no_grad = true)
+		defer t.graph_end(scope)
+		logits := ml_fin.deeplob_forward(model, x)
+		hit := 0
+		for v, i in y {
+			row := logits.data.data[i * 3:][:3]
+			best := 0
+			for c in 1 ..< 3 {if row[c] > row[best] {best = c}}
+			if best == v {hit += 1}
 		}
-		acc := f64(correct) / f64(batch_size) * 100.0
-
-		// Print progress
-		status := ""
-		if epoch == 0 {
-			status = "(Initial random guess ~ln(3))"
-		} else if loss.data.data[0] < 1.00 {
-			status = "(Learning! Loss < 1.0)"
-		} else if acc > 40.0 {
-			status = "(Overfitting synthetic data)"
-		}
-
-		fmt.printf(" %3d  | %.5f | %6.2f%%  | %s\n", epoch + 1, loss.data.data[0], acc, status)
-
-		// Cleanup graph for this step
-		t.tensor_free_graph(loss)
-		t.tensor_free_graph(logits)
+		return f64(hit) / f64(len(y))
 	}
-
-	fmt.println("\n✓ DeepLOB training step complete!")
-	fmt.println("Note: As expected, the loss started at ~1.0986 (ln(3)) and should have")
-	fmt.println("decreased as the CNN learned to map the synthetic noise to the targets.")
-
-	// Cleanup
-	t.tensor_free(x_tensor)
-	delete(y_targets, allocator)
+	fmt.println("Epoch | train loss | test accuracy")
+	for epoch in 0 ..< EPOCHS {
+		rand.shuffle(order)
+		loss_sum := 0.0
+		for b in 0 ..< n_train / BATCH {
+			t.graph_begin(&scope)
+			alloc := t._scope_or(allocator)
+			xb := l.matrix_new(f64, BATCH, W, alloc)
+			yb := make([]int, BATCH, alloc)
+			for k in 0 ..< BATCH {
+				i := order[b * BATCH + k]
+				copy(xb.data[k * W:][:W], x_train.data.data[i * W:][:W])
+				yb[k] = y_train[i]
+			}
+			xt := t.tensor_new(xb, false, alloc)
+			xt.shape = {BATCH, 3, T, L}
+			nn.adam_zero_grad(&opt)
+			loss := t.tensor_cross_entropy_loss(ml_fin.deeplob_forward(model, xt), yb)
+			t.tensor_backward(loss)
+			nn.adam_step(&opt)
+			loss_sum += loss.data.data[0]
+			t.graph_end(&scope)
+		}
+		fmt.printf(
+			" %3d  | %.4f     | %.1f%%\n",
+			epoch + 1,
+			loss_sum / f64(n_train / BATCH),
+			100 * accuracy(model, x_test, y_test, &scope),
+		)
+	}
+	acc := accuracy(model, x_test, y_test, &scope)
+	base_acc := f64(base) / f64(len(y_test))
+	fmt.printf(
+		"(the imbalance rule, up if the last level-1 imbalance > 0 else down: %.1f%%)\n",
+		100 * f64(rule) / f64(len(y_test)),
+	)
+	ok := acc > base_acc + 0.10
+	fmt.printf(
+		"%s held-out accuracy %.1f%% vs %.1f%% for always predicting the most frequent class (at least 10 points above)\n",
+		"OK  " if ok else "FAIL",
+		100 * acc,
+		100 * base_acc,
+	)
+	record_failures(int(!ok))
 }
 
 // DeepLOB gradients against central finite differences, for every sequence

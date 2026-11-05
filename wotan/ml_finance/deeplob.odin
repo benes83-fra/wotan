@@ -3,18 +3,25 @@ package ml_finance
 import l "../linalg"
 import nn "../nn"
 import t "../tensor"
+import "core:math"
 import "core:mem"
 
 // ============================================================================
-// DeepLOB Configuration & Structures
+// DeepLOB-style classifier of limit order book windows
 // ============================================================================
+// After Zhang, Zohren & Roberts (2019), simplified: input [batch, 3, T, levels] (mid,
+// spread and volume imbalance per level, see compute_lob_microstructure), two 3x3
+// convolutions, 2x2 max pooling (T and levels halve), an inception block (1x1, 1x1-3x3,
+// 1x1-5x5 branches), a sequence layer (LSTM, GRU or Mamba) over the T / 2 steps, and a
+// linear head on its last step: logits of down / stationary / up. The original uses 1x2
+// convolutions that pair prices with sizes and temporal (k x 1) inception branches.
 
 DeepLOBConfig :: struct {
 	time_steps:   int,
-	price_levels: int,
+	price_levels: int, // >= 2 (pooled by 2)
 	num_classes:  int,
 	hidden_dim:   int,
-	dropout_prob: f64,
+	dropout_prob: f64, // on the last step, training only; 0 means the default 0.3
 	seq_backend:  nn.SeqBackend,
 }
 
@@ -120,11 +127,7 @@ inception_block_forward :: proc(block: ^InceptionBlock, x: ^t.Tensor) -> ^t.Tens
 
 	out := t.tensor_concat(branches[:], 1)
 
-	// NOTE: Do NOT free b1, b2, or b3 here! They are required for the
-	// backward pass. The final t.tensor_free_graph(loss) call in the
-	// training loop will safely clean up the entire computation graph.
-
-	return out
+	return out // b1, b2, b3 belong to the graph
 }
 
 // ============================================================================
@@ -135,6 +138,7 @@ deeplob_new :: proc(
 	config: DeepLOBConfig,
 	allocator: mem.Allocator = context.allocator,
 ) -> ^DeepLOB {
+	assert(config.time_steps >= 2 && config.price_levels >= 2, "deeplob_new: the 2x2 pooling needs 2+ time steps and levels")
 	model := new(DeepLOB, allocator)
 	model.config = config
 	model.allocator = allocator
@@ -154,7 +158,7 @@ deeplob_new :: proc(
 	model.inception = inception_block_new(32, inception_out_channels, allocator)
 	nn.sequential_add(model.cnn, nn.maxpool2d_layer_new(2, 2))
 
-	// ✅ Unified Sequence Layer (LSTM / GRU / Mamba)
+	// sequence layer (LSTM / GRU / Mamba) over the pooled time steps
 	seq_feat_dim := inception_out_channels * (config.price_levels / 2)
 	model.seq_layer = nn.sequential_new(allocator)
 	nn.sequential_add_seq_block(
@@ -174,7 +178,7 @@ deeplob_new :: proc(
 deeplob_free :: proc(model: ^DeepLOB) {
 	if model.cnn != nil {nn.sequential_free(model.cnn)}
 	inception_block_free(&model.inception)
-	if model.seq_layer != nil {nn.sequential_free(model.seq_layer)} 	// ✅ Cleans up any backend
+	if model.seq_layer != nil {nn.sequential_free(model.seq_layer)}
 	nn.linear_layer_free(&model.fc_head)
 	free(model, model.allocator)
 }
@@ -204,8 +208,7 @@ deeplob_forward :: proc(model: ^DeepLOB, input: ^t.Tensor) -> ^t.Tensor {
 	// Permute to [Batch, Time, Features] for the sequence layer
 	lstm_in := t.tensor_permute_lob(inception_out, batch, c_out, t_out, l_out, alloc)
 
-	// ✅ Unified Sequence Forward Pass
-	// sequential_forward automatically handles zero-initialization of h0/c0 internally.
+	// zero initial states
 	seq_out := nn.sequential_forward(model.seq_layer, lstm_in)
 
 	// The last time step (the same layout for LSTM, GRU and Mamba), as a graph
@@ -226,11 +229,6 @@ deeplob_forward :: proc(model: ^DeepLOB, input: ^t.Tensor) -> ^t.Tensor {
 	logits := nn.linear_forward(&model.fc_head, last_step)
 	return logits
 }
-
-// ============================================================================
-// Custom Permute Operation for Autograd Graph
-// ============================================================================
-
 
 // ============================================================================
 // Optimizer Integration
@@ -259,6 +257,9 @@ deeplob_add_to_adam :: proc(model: ^DeepLOB, opt: ^nn.Adam) {
 		nn.adam_add_param(opt, model.fc_head.bias)
 	}
 }
+// raw_data [n_windows, 4, T, levels] (bid price, bid size, ask price, ask size) ->
+// [n_windows, 3, T, levels]: mid (ask + bid) / 2, spread ask - bid, volume imbalance
+// (bid size - ask size) / (bid size + ask size) of each level
 compute_lob_microstructure :: proc(
 	raw_data: []f64,
 	n_windows: int,
@@ -301,4 +302,107 @@ compute_lob_microstructure :: proc(
 		}
 	}
 	return out_data
+}
+
+// ============================================================================
+// Windows and labels from a LOBSTER order book
+// ============================================================================
+// book: n_rows events in LOBSTER layout, row-major [n_rows, 4 * levels]: per level
+// (ask price, ask size, bid price, bid size). Window w covers events w .. w + T - 1 and is
+// labelled with the move after it (Zhang, Zohren & Roberts 2019): m_t = level-1 mid of the
+// last event, m_+ = mean level-1 mid of the next `horizon` events, l = m_+ / m_t - 1;
+// 2 (up) if l > threshold, 0 (down) if l < -threshold, else 1. future_returns: m_{t+h} / m_t - 1
+// (h = horizon). The inputs [N, 3, T, levels] hold only events of the window: mid, spread
+// and imbalance per level (compute_lob_microstructure), not normalised; fit a
+// DeepLOBNorm on the training windows and apply it to all. Windows: n_rows - T - horizon + 1.
+deeplob_lobster_windows :: proc(
+	book: []f64,
+	n_rows, levels, time_steps, horizon: int,
+	threshold: f64,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	inputs: ^t.Tensor,
+	labels: []int,
+	future_returns: []f64,
+) {
+	L, T := levels, time_steps
+	assert(len(book) == n_rows * 4 * L, "deeplob_lobster_windows: book must be [n_rows, 4 * levels]")
+	assert(T >= 1 && horizon >= 1, "deeplob_lobster_windows: time_steps and horizon must be positive")
+	N := n_rows - T - horizon + 1
+	if N <= 0 {return}
+	mid :: proc(book: []f64, row, L: int) -> f64 {
+		return 0.5 * (book[row * 4 * L + 0] + book[row * 4 * L + 2])
+	}
+	TL := T * L
+	raw := make([]f64, N * 4 * TL, allocator)
+	defer delete(raw, allocator)
+	labels = make([]int, N, allocator)
+	future_returns = make([]f64, N, allocator)
+	for w in 0 ..< N {
+		for k in 0 ..< T {
+			r := book[(w + k) * 4 * L:][:4 * L]
+			for lv in 0 ..< L {
+				base := w * 4 * TL + k * L + lv
+				raw[base + 0 * TL] = r[4 * lv + 2] // bid price
+				raw[base + 1 * TL] = r[4 * lv + 3] // bid size
+				raw[base + 2 * TL] = r[4 * lv + 0] // ask price
+				raw[base + 3 * TL] = r[4 * lv + 1] // ask size
+			}
+		}
+		last := w + T - 1
+		m_t := mid(book, last, L)
+		m_plus := 0.0
+		for j in 1 ..= horizon {m_plus += mid(book, last + j, L) / f64(horizon)}
+		change := m_plus / m_t - 1
+		labels[w] = 2 if change > threshold else (0 if change < -threshold else 1)
+		future_returns[w] = mid(book, last + horizon, L) / m_t - 1
+	}
+	micro := compute_lob_microstructure(raw, N, T, L, allocator)
+	inputs = t.tensor_new(
+		l.Matrix(f64){rows = 1, cols = len(micro), data = micro, allocator = allocator},
+		false,
+		allocator,
+	)
+	inputs.shape = {N, 3, T, L}
+	return
+}
+
+// z-score of each channel and level with the mean and standard deviation over the
+// training windows and their time steps (as DeepLOB normalises with past data; z-scoring
+// each window over its own steps would erase a persistent imbalance)
+DeepLOBNorm :: struct {
+	mean, std: []f64, // [3 * levels], channel-major
+}
+
+deeplob_norm_fit :: proc(x: ^t.Tensor, allocator: mem.Allocator = context.allocator) -> DeepLOBNorm {
+	N, C, T, L := x.shape[0], x.shape[1], x.shape[2], x.shape[3]
+	nm := DeepLOBNorm{make([]f64, C * L, allocator), make([]f64, C * L, allocator)}
+	cnt := f64(N * T)
+	for n in 0 ..< N {for c in 0 ..< C {for k in 0 ..< T {for lv in 0 ..< L {
+		nm.mean[c * L + lv] += x.data.data[((n * C + c) * T + k) * L + lv] / cnt
+	}}}}
+	for n in 0 ..< N {for c in 0 ..< C {for k in 0 ..< T {for lv in 0 ..< L {
+		d := x.data.data[((n * C + c) * T + k) * L + lv] - nm.mean[c * L + lv]
+		nm.std[c * L + lv] += d * d / cnt
+	}}}}
+	for &s, i in nm.std { 	// a constant feature (up to rounding) is only centred
+		s = math.sqrt(s)
+		if s <= 1e-12 * max(abs(nm.mean[i]), 1) {s = 1}
+	}
+	return nm
+}
+
+// In place: x <- (x - mean) / std per channel and level
+deeplob_norm_apply :: proc(x: ^t.Tensor, nm: DeepLOBNorm) {
+	N, C, T, L := x.shape[0], x.shape[1], x.shape[2], x.shape[3]
+	assert(len(nm.mean) == C * L, "deeplob_norm_apply: fitted on another number of levels")
+	for n in 0 ..< N {for c in 0 ..< C {for k in 0 ..< T {for lv in 0 ..< L {
+		i := ((n * C + c) * T + k) * L + lv
+		x.data.data[i] = (x.data.data[i] - nm.mean[c * L + lv]) / nm.std[c * L + lv]
+	}}}}
+}
+
+deeplob_norm_free :: proc(nm: ^DeepLOBNorm, allocator: mem.Allocator = context.allocator) {
+	delete(nm.mean, allocator)
+	delete(nm.std, allocator)
 }

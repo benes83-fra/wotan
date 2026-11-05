@@ -242,8 +242,9 @@ Reference and contract tests print `OK` or `FAIL` for each check and end with a 
 | `deep_bsde_test` | `deep_bsde_test`, `deep_bsde_european_call_test`, `deep_bsde_100d_test` | Deep BSDE price vs exact values: 1-D call vs Black-Scholes, 10-D and 100-D max-calls vs the closed-form integral (scipy `quad`); hedge quality as loss / Var[payoff] |
 | `deep_calibration_reference_test` | `deep_calibration_reference_test` | Deep Heston calibration grid (forward moneyness x expiry) implied vols vs QuantLib; invariance to S and r; parameter scaling round trip; scattered quotes onto the grid vs numpy |
 | `deep_calibration_test` 🌐 | `deep_calibration_test` | MLP from a Heston implied-vol grid to the parameters: held-out parameter and surface errors next to Levenberg–Marquardt; AAPL surface (several expiries) calibrated both ways |
-| `deeplob_test` | `deeplob_test`, `deeplob_talkative_test` | DeepLOB on a synthetic limit order book |
-| `deeplob_real_data_test` 🌐📁 | `deeplob_real_data_test`, `deeplob_real_data_sharpe_test` | DeepLOB on real data, Sharpe-ratio loss |
+| `deeplob_reference_test` | `deeplob_reference_test` | DeepLOB pipeline vs numpy on a small LOBSTER book: mid / spread / imbalance channels, labels from the mean mid of the next events, future returns, the training-set normaliser; inputs hold no later event |
+| `deeplob_test` | `deeplob_test`, `deeplob_gradient_test`, `deeplob_talkative_test` | DeepLOB training step; gradients vs finite differences for every sequence backend; a synthetic order book whose imbalance drives the mid: held-out accuracy vs the majority class and the imbalance rule |
+| `deeplob_real_data_test` 🌐 | `deeplob_real_data_test`, `deeplob_real_data_sharpe_test` | DeepLOB pipeline on the 50-event LOBSTER TSLA sample (cross-entropy and Sharpe loss on the future mid return), in sample |
 | `prob_forecast_test` | `prob_forecast_test` | Gaussian, Student-t and quantile forecast heads vs PyTorch/SciPy losses and scores; an LSTM forecaster on GARCH data beats the unconditional baseline; multi-step forecasts |
 | `token_forecast_test` | `token_forecast_test` | Time-series tokenizer vs Chronos' scaling and binning; a GPT trained on AR(1) tokens forecasts with calibrated intervals (takes about 25 s) |
 | `timegan_test` 🌐 | `timegan_test` | Synthetic market data with TimeGAN |
