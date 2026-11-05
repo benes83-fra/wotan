@@ -263,7 +263,9 @@ Reference and contract tests print `OK` or `FAIL` for each check and end with a 
 | `cql_reference_test` | `cql_reference_test` | CQL(H) loss and dL/dQ vs PyTorch; gradient through the Q-network vs finite differences; trading dataset (past returns + held position, reward from the next return) vs numpy; one-state bandit trained to the scipy minimiser (the regulariser turns the greedy action away from the rarely logged one) |
 | `cql_trading_test` | `cql_trading_test` | Offline CQL on a noisy momentum log of synthetic AR(1) returns; greedy policy backtested in sample and on a fresh path |
 | `cql_real_data_test` 🌐 | `cql_real_data_trading_test` | CQL on a 3-day momentum log of AAPL adjusted closes; train on 70%, backtest on the last 30% |
-| `orchestrator_test` 🌐 | `orchestrator_test` | Closed-loop trading orchestrator combining several models |
+| `orchestrator_reference_test` | `orchestrator_reference_test` | Orchestrator rules vs hand-computed values: action, multiplier and exposure, allocation, trades from the weights held, Liquidate, mark-to-market P&L and drift, quotes; `hmm_filter` vs numpy's forward recursion |
+| `orchestrator_test` 🌐 | `orchestrator_test` | Orchestrator walked forward over the last year (filtered HMM regime, GARCH forecast, VIX-based VRP signal, trailing HRP) vs 60/40, equal weights and SPY; P&L reconciles with the weights held |
+| `sentiment_reference_test` | `sentiment_reference_test` | FinBERT (ProsusAI/finbert) vs Hugging Face: WordPiece ids, logits and labels of four sentences; the classification-only forward equals the full one (FinBERT part skips without the checkpoint) |
 | `event_study_test` 🌐🖼📁 | `event_study_test`, `event_study_nlp_test`, `event_study_tokenizer_nlp_test` | Cumulative abnormal returns, FinBERT sentiment events |
 | `ml_finance_metrics_reference_test` | `ml_finance_metrics_reference_test` | Rank IC vs scipy `spearmanr` + pandas (ties, NaN assets, constant periods); trading features vs TA-Lib RSI(14) and pandas rolling volume; CARs and t vs `ttest_1samp`; GAT blocked-fold CV on a tracking allocator; correlation adjacency vs `np.corrcoef`; split conformal quantile; CBOE implied correlation and the dispersion signal; GARCH recursion vs `garch_fit`, optimal ensemble weight vs scipy `minimize_scalar`, VRP backtest metrics |
 | `alt_data_gdelt_pipeline_test` 🌐 | `alt_data_gdelt_pipeline_test`, `alt_data_finnhub_pipeline_test` | News sentiment (GDELT, Finnhub) to random forest to backtest; falls back to mock data |
@@ -308,7 +310,7 @@ Tests marked 📁 read some of these files. Paths are relative to the repository
 | `demo_files/example_data.json`, `example_data2.jsonl`, `example.xlsx`, `datetime.xlsx`, `example_table.html`, `tag_table.html`, `test_multi.html` | Import tests | Included in the repository |
 | `data/spy_prices.csv`, `data/spy_options.csv` | `pdpm_real_data_test` | Included in the repository |
 | `data/mnist/*` | `mnist_test`, `batchnorm_test` | Included in the repository (or run `scripts/download_mnist.sh`) |
-| `model_checkpoints/finbert_checkpoint.bin` | `event_study_test` (FinBERT) | `cd scripts; python convert_bert.py ProsusAI/finbert finbert_checkpoint.bin` |
+| `model_checkpoints/finbert_checkpoint.bin` | `event_study_test`, `sentiment_reference_test` (FinBERT) | `cd scripts; python convert_bert.py ProsusAI/finbert finbert_checkpoint.bin` |
 | `model_checkpoints/distilgpt2_checkpoint.bin` | `gpt_completion_test` | `cd scripts; python convert_gpt2.py` |
 | `model_checkpoints/vocab.json`, `merges.txt` | `gpt_completion_test`, `tokenizer_reference_test` | Downloaded from Hugging Face by `gpt_completion_test` (once the DistilGPT-2 checkpoint exists) |
 | `model_checkpoints/bert_vocab.txt` | `event_study_test`, `tokenizer_reference_test` | Downloaded from Hugging Face by `event_study_test` |

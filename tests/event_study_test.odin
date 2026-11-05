@@ -308,34 +308,16 @@ event_study_nlp_test :: proc(allocator: mem.Allocator) {
 		logits := ml_fin.analyze_text(&analyzer, input_ids, segment_ids, false)
 		defer t.tensor_free(logits)
 
-		// 3. Argmax to get sentiment label
-		// Extract the 3 logits for the single batch item
-		batch_offset := 0 * (1 * 3 * 1) // batch=0, seq=0, features=3
-		neg_score := logits.data.data[batch_offset + 0]
-		neu_score := logits.data.data[batch_offset + 1]
-		pos_score := logits.data.data[batch_offset + 2]
-
-		sentiment: ml_fin.SentimentLabel
-		sentiment_str: string
-
-		if pos_score >= neg_score && pos_score >= neu_score {
-			sentiment = .Positive
-			sentiment_str = "Positive"
-		} else if neg_score >= pos_score && neg_score >= neu_score {
-			sentiment = .Negative
-			sentiment_str = "Negative"
-		} else {
-			sentiment = .Neutral
-			sentiment_str = "Neutral"
-		}
-
+		// 3. The likeliest label (logits in the order of analyzer.labels)
+		probs := ml_fin.sentiment_probabilities(&analyzer, logits)
+		sentiment, _ := ml_fin.sentiment_predict(&analyzer, logits)
 		fmt.printf(
 			"  Scores -> Neg: %.4f, Neu: %.4f, Pos: %.4f\n",
-			neg_score,
-			neu_score,
-			pos_score,
+			probs[.Negative],
+			probs[.Neutral],
+			probs[.Positive],
 		)
-		fmt.printf("  ➔ Detected Sentiment: %s\n", sentiment_str)
+		fmt.printf("  ➔ Detected Sentiment: %v\n", sentiment)
 
 		// 4. Filter: Only run Event Study on strong Positive or Negative signals
 		if sentiment == .Positive || sentiment == .Negative {
@@ -498,12 +480,7 @@ event_study_tokenizer_nlp_test :: proc(allocator: mem.Allocator) {
 	fmt.println("\nLoading FinBERT Model...")
 	checkpoint_path := "model_checkpoints/finbert_checkpoint.bin"
 
-	bert_model: ^nn.BERTModel
-	ok_load := false
-
-	// ✅ Try to load pre-trained weights using your existing persistence module
-	bert_model, ok_load = nn.load_bert_model(checkpoint_path, allocator)
-
+	analyzer, ok_load := ml_fin.sentiment_analyzer_load(checkpoint_path, allocator)
 	if !ok_load {
 		fmt.println(
 			"⚠ Checkpoint not found or invalid. Initializing random model for demonstration...",
@@ -511,34 +488,18 @@ event_study_tokenizer_nlp_test :: proc(allocator: mem.Allocator) {
 		fmt.println(
 			"  (To see real sentiment, place a valid model_checkpoints/finbert_checkpoint.bin in the directory)",
 		)
-
-		// Fallback to random initialization
-		vocab_size := len(tokenizer.ids_to_tokens)
-		d_model := 768
-		num_heads := 12
-		d_ff := 3072
-		num_layers := 2 // Keep small for quick test execution if random
-
-		bert_model = new(nn.BERTModel, allocator)
-		bert_model^ = nn.bert_model_new(
-			vocab_size,
-			d_model,
-			num_heads,
-			d_ff,
-			num_layers,
+		// 2 layers only, for a quick run with random weights
+		analyzer = ml_fin.sentiment_analyzer_new(
+			len(tokenizer.ids_to_tokens),
+			768,
+			12,
+			3072,
+			2,
 			max_seq_len,
-			allocator = allocator,
+			allocator,
 		)
-		// Replace NSP head with 3-class sentiment head
-		nn.bert_replace_nsp_head(bert_model, 3, allocator)
 	} else {
 		fmt.println("✓ Pre-trained FinBERT model loaded successfully from checkpoint!")
-
-	}
-
-	analyzer := ml_fin.SentimentAnalyzer {
-		bert      = bert_model,
-		allocator = allocator,
 	}
 	defer ml_fin.sentiment_analyzer_free(&analyzer)
 	// ... after analyzer is initialized ...
@@ -599,62 +560,15 @@ event_study_tokenizer_nlp_test :: proc(allocator: mem.Allocator) {
 		logits := ml_fin.analyze_text(&analyzer, input_ids, segment_ids, false)
 		defer t.tensor_free(logits)
 
-		batch_offset := 0 * (1 * 3 * 1) // batch=0, seq=0, features=3
-
-		// ✅ FIX: ProsusAI/finbert uses {0: positive, 1: negative, 2: neutral}
-		pos_score := logits.data.data[batch_offset + 0]
-		neg_score := logits.data.data[batch_offset + 1]
-		neu_score := logits.data.data[batch_offset + 2]
-
-		sentiment: ml_fin.SentimentLabel
-		sentiment_str: string
-
-		if pos_score >= neg_score && pos_score >= neu_score {
-			sentiment = .Positive
-			sentiment_str = "Positive"
-		} else if neg_score >= pos_score && neg_score >= neu_score {
-			sentiment = .Negative
-			sentiment_str = "Negative"
-		} else {
-			sentiment = .Neutral
-			sentiment_str = "Neutral"
-		}
+		probs := ml_fin.sentiment_probabilities(&analyzer, logits)
+		sentiment, _ := ml_fin.sentiment_predict(&analyzer, logits)
 		fmt.printf(
-			"  RAW LOGITS     -> Neg: %.4f, Neu: %.4f, Pos: %.4f\n",
-			neg_score,
-			neu_score,
-			pos_score,
+			"  Scores -> Neg: %.4f, Neu: %.4f, Pos: %.4f\n",
+			probs[.Negative],
+			probs[.Neutral],
+			probs[.Positive],
 		)
-
-		// After getting the raw logits from the classifier head
-		// Apply softmax to convert to probabilities
-		max_val := neg_score
-		if neu_score > max_val {max_val = neu_score}
-		if pos_score > max_val {max_val = pos_score}
-
-		neg_exp := math.exp(neg_score - max_val)
-		neu_exp := math.exp(neu_score - max_val)
-		pos_exp := math.exp(pos_score - max_val)
-
-		sum_exp := neg_exp + neu_exp + pos_exp
-
-		neg_prob := neg_exp / sum_exp
-		neu_prob := neu_exp / sum_exp
-		pos_prob := pos_exp / sum_exp
-
-		// if pos_score >= neg_score && pos_score >= neu_score {
-		// 	sentiment = .Positive
-		// 	sentiment_str = "Positive"
-		// } else if neg_score >= pos_score && neg_score >= neu_score {
-		// 	sentiment = .Negative
-		// 	sentiment_str = "Negative"
-		// } else {
-		// 	sentiment = .Neutral
-		// 	sentiment_str = "Neutral"
-		// }
-
-		fmt.printf("  Scores -> Neg: %.4f, Neu: %.4f, Pos: %.4f\n", neg_prob, neu_prob, pos_prob)
-		fmt.printf("  ➔ Detected Sentiment: %s\n", sentiment_str)
+		fmt.printf("  ➔ Detected Sentiment: %v\n", sentiment)
 
 		if sentiment == .Positive || sentiment == .Negative {
 			append(&nlp_filtered_dates, event.date)

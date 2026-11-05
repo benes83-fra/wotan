@@ -174,6 +174,7 @@ bert_model_forward :: proc(
 	input_ids: ^t.Tensor, // [batch, seq_len]
 	segment_ids: ^t.Tensor, // [batch, seq_len]
 	training: bool,
+	skip_mlm := false, // classification only: no MLM logits (nil), [batch, seq, vocab] saved
 ) -> (
 	mlm_logits: ^t.Tensor,
 	nsp_logits: ^t.Tensor,
@@ -208,7 +209,7 @@ bert_model_forward :: proc(
 	t.tensor_free(attention_mask)
 
 	// MLM head (applied to all positions)
-	mlm_logits = linear_forward(&model.mlm_head, x)
+	if !skip_mlm {mlm_logits = linear_forward(&model.mlm_head, x)}
 
 	// NSP head on [CLS] (position 0)
 	cls := sequence_step(x, 0, alloc)
@@ -255,6 +256,17 @@ bert_model_add_to_optimizer :: proc(model: ^BERTModel, opt: ^Adam) {
 	for p in ps {adam_add_param(opt, p)}
 }
 
+
+// The epsilon of every LayerNorm (embeddings and blocks). bert_model_new uses 1e-5;
+// Hugging Face's BERT checkpoints (bert-base, FinBERT, ...) were trained with 1e-12
+// (config.layer_norm_eps), and 1e-5 moves their logits by ~5e-4.
+bert_set_layer_norm_eps :: proc(model: ^BERTModel, eps: f64) {
+	model.emb_ln.eps = eps
+	for &block in model.encoder_blocks {
+		block.ln1.eps = eps
+		block.ln2.eps = eps
+	}
+}
 
 bert_replace_nsp_head :: proc(model: ^BERTModel, new_num_classes: int, allocator: mem.Allocator) {
 	// Free old head

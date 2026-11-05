@@ -196,6 +196,19 @@ hmm_log_likelihood :: proc(hmm: ^HMM, obs: []f64) -> f64 {
 	return ll
 }
 
+// Filtered state probabilities P(state at t | obs[0..t]) [T, N] row-major: what is known of
+// the regime at t without later observations (hmm_decode's Viterbi path and smoothed
+// posteriors use the whole sample, so they look ahead when used to trade)
+hmm_filter :: proc(hmm: ^HMM, obs: []f64, alloc: mem.Allocator = context.allocator) -> []f64 {
+	if len(obs) == 0 || hmm.n_states == 0 {return make([]f64, 0, alloc)}
+	b, log_max := _emissions(hmm, obs, context.temp_allocator)
+	alpha, scale := _forward(hmm, b, len(obs), alloc) // rows normalised to sum 1
+	delete(b, context.temp_allocator)
+	delete(log_max, context.temp_allocator)
+	delete(scale, alloc)
+	return alpha
+}
+
 // ============================================================================
 // Baum-Welch (EM Algorithm) for Training
 // ============================================================================

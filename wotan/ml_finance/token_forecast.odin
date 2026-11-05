@@ -4,6 +4,7 @@ import l "../linalg"
 import nn "../nn"
 import tk "../nn/tokenizers"
 import t "../tensor"
+import "core:math"
 import "core:mem"
 
 // ============================================================================
@@ -18,6 +19,8 @@ import "core:mem"
 // joint distribution of the future, so any statistic of them (quantiles per
 // step, the sum over the horizon, the path's minimum, …) gets a forecast.
 // Score them with prob_forecast_sample_quantiles / _sample_crps.
+// Missing values (NaN) are not supported here: the tokenizer maps them to pad_id, which
+// the GPT has no attention mask for, and as targets they would train it to predict pads.
 
 TokenForecasterConfig :: struct {
 	context_length:    int,
@@ -100,6 +103,7 @@ token_forecaster_loss :: proc(
 	alloc := t._scope_or(context.allocator)
 	inputs := l.matrix_new(f64, 1, batch * (T - 1), alloc)
 	targets := make([]int, batch * (T - 1), alloc)
+	for v in windows {assert(!math.is_nan(v), "token_forecaster_loss: missing values (NaN) are not supported")}
 	for b in 0 ..< batch {
 		w := windows[b * T:(b + 1) * T]
 		scale := tk.ts_scale(w[:C])
@@ -128,6 +132,7 @@ token_forecaster_sample :: proc(
 	allocator := context.allocator,
 ) -> []f64 {
 	H, V := model.config.prediction_length, model.config.n_tokens
+	for v in context_values {assert(!math.is_nan(v), "token_forecaster_sample: missing values (NaN) are not supported")}
 	ctx_ids, ctx_mask, scale := tk.ts_encode_context(
 		&model.tok,
 		context_values,

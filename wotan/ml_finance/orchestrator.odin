@@ -1,8 +1,6 @@
 package ml_finance
 
-import l "../linalg"
 import "core:fmt"
-import "core:math"
 import "core:mem"
 
 // ============================================================================
@@ -10,6 +8,23 @@ import "core:mem"
 // ============================================================================
 // Integrates: HMM Regime → Ensemble Vol → VRP Signal → HRP Portfolio →
 //             Almgren-Chriss Execution → Avellaneda-Stoikov Quotes
+//
+// One step (orchestrator_step), at a decision time with prices p:
+//   action      from the regime's annualised mean and vol (regime_to_action)
+//   allocation  equity_fraction(action) split over the equities by their HRP weights,
+//               the rest in the bond (by convention the last asset)
+//   exposure    clamp(position multiplier, 0, max_gross): the multiplier (action, VRP
+//               signal, confidence from the width of the vol interval) scales the whole
+//               allocation; the rest is cash
+//   trades      (target - current weight) · capital / p shares, assumed filled at p: the
+//               current weights become the targets
+//   quotes      Avellaneda-Stoikov around p with the shares held as inventory
+// orchestrator_mark_to_market then applies the next period's returns: P&L, and the
+// weights drift with prices.
+// (The multiplier used to be undone by renormalising the weights to sum 1, so only
+// Liquidate changed anything; the current weights never changed, so every day's trades
+// were computed from the initial equal weights; the P&L was never updated; the
+// quotes' inventory was weight · 100.)
 
 RegimeAction :: enum {
 	Hold, // Regime is stable, maintain current positions
@@ -156,18 +171,8 @@ compute_rebalance_trades :: proc(
 	total_capital: f64,
 	prices: []f64,
 ) {
-	n := state.n_assets
-	current_value := make([]f64, n, state.allocator)
-	target_value := make([]f64, n, state.allocator)
-	defer {
-		delete(current_value, state.allocator)
-		delete(target_value, state.allocator)
-	}
-
-	for i in 0 ..< n {
-		current_value[i] = state.current_weights[i] * total_capital
-		target_value[i] = target_weights[i] * total_capital
-		state.shares_to_trade[i] = (target_value[i] - current_value[i]) / prices[i]
+	for i in 0 ..< state.n_assets {
+		state.shares_to_trade[i] = (target_weights[i] - state.current_weights[i]) * total_capital / prices[i]
 		state.execution_complete[i] = false
 	}
 }
@@ -175,19 +180,19 @@ compute_rebalance_trades :: proc(
 // ============================================================================
 // Step 4: Generate Market Making Quotes
 // ============================================================================
-
+// Inventory: the shares held (current weight · capital / price), so as_params.sigma is
+// the mid's volatility in price units per unit of time and gamma the risk aversion per
+// share; quoted at time_fraction of the horizon as_params.T.
 generate_quotes :: proc(
 	state: ^OrchestratorState,
 	prices: []f64,
 	as_params: AvellanedaStoikovParams,
+	total_capital: f64,
+	time_fraction := 0.5,
 ) {
 	for i in 0 ..< state.n_assets {
-		// Use current portfolio weight as "inventory" proxy
-		inventory := state.current_weights[i] * 100.0 // Scale to share-equivalent
-		mid := prices[i]
-		time_fraction := 0.5 // Mid-day
-
-		quotes := avellaneda_stoikov_quote(mid, inventory, time_fraction, as_params)
+		inventory := state.current_weights[i] * total_capital / prices[i]
+		quotes := avellaneda_stoikov_quote(prices[i], inventory, time_fraction, as_params)
 		state.bid_quotes[i] = quotes.bid_quote
 		state.ask_quotes[i] = quotes.ask_quote
 	}
@@ -205,10 +210,32 @@ OrchestratorDecision :: struct {
 	vol_upper:      f64,
 	vrp_signal:     f64,
 	position_mult:  f64,
+	exposure:       f64, // sum of the target weights (the rest is cash)
 	target_weights: []f64,
 	trades:         []f64,
 	bid_quotes:     []f64,
 	ask_quotes:     []f64,
+}
+
+// Equity share of the allocation per action
+orchestrator_equity_fraction :: proc(action: RegimeAction) -> f64 {
+	switch action {
+	case .Aggressive:
+		return 0.85
+	case .Hold:
+		return 0.65
+	case .Reduce:
+		return 0.40
+	case .Liquidate:
+		return 0.10
+	}
+	return 0.6
+}
+
+// Confidence in [0.2, 1] from the width of the vol interval relative to the forecast
+orchestrator_confidence :: proc(vol_forecast, vol_lower, vol_upper: f64) -> f64 {
+	if vol_forecast <= 1e-6 {return 1}
+	return clamp(1 - (vol_upper - vol_lower) / (2 * vol_forecast + 1e-8), 0.2, 1)
 }
 
 orchestrator_step :: proc(
@@ -225,86 +252,40 @@ orchestrator_step :: proc(
 	prices: []f64,
 	total_capital: f64,
 	as_params: AvellanedaStoikovParams,
+	max_gross := 1.0, // cap on the sum of the weights (1: no leverage)
 ) -> OrchestratorDecision {
+	n := state.n_assets
+	assert(
+		n >= 2 && len(hrp_weights) == n && len(prices) == n,
+		"orchestrator_step: need n >= 2 assets (the last is the bond), n weights and n prices",
+	)
 	state.day += 1
 
-	// Step 1: Regime → Action
 	action := regime_to_action(regime, regime_mean, regime_vol)
-
-	// Step 2: Confidence from Conformal bounds
-	// Confidence is inversely proportional to interval width relative to forecast
-	interval_width := vol_upper - vol_lower
-	confidence := 1.0
-	if vol_forecast > 1e-6 {
-		confidence = math.max(
-			0.2,
-			math.min(1.0, 1.0 - interval_width / (2.0 * vol_forecast + 1e-8)),
-		)
-	}
-
-	// Step 3: Position multiplier
+	confidence := orchestrator_confidence(vol_forecast, vol_lower, vol_upper)
 	position_mult := compute_position_multiplier(action, vrp_signal, confidence)
+	exposure := clamp(position_mult, 0, max_gross)
 
-	// Step 4: Adjust target weights by position multiplier
-	n := state.n_assets
-	// In orchestrator.odin, replace the weight adjustment section:
-
-	// ✅ FIX: Regime-conditional asset allocation
-	// Layer 1: Determine equity/bond split based on regime action
-	equity_fraction := 0.6 // Default
-	switch action {
-	case .Aggressive:
-		equity_fraction = 0.85 // 85% equities in bull regime
-	case .Hold:
-		equity_fraction = 0.65 // 65% equities in neutral
-	case .Reduce:
-		equity_fraction = 0.40 // 40% equities in high-vol
-	case .Liquidate:
-		equity_fraction = 0.10 // 10% equities in crisis
-	}
-
-	// Layer 2: Apply HRP weights within each asset class
-	// Identify equity vs bond assets (by convention: last asset is bond proxy)
-	n_equity := n - 1 // All except TLT
-	n_bond := 1
-
-	// Renormalize HRP weights within equities
+	// allocation: the equity fraction over the equities by HRP weight, the rest in the bond
+	equity_fraction := orchestrator_equity_fraction(action)
+	n_equity := n - 1
 	equity_hrp_sum := 0.0
-	for i in 0 ..< n_equity {
-		equity_hrp_sum += hrp_weights[i]
+	for i in 0 ..< n_equity {equity_hrp_sum += hrp_weights[i]}
+	adjusted_weights := make([]f64, n, context.temp_allocator)
+	defer delete(adjusted_weights, context.temp_allocator)
+	if equity_hrp_sum > 1e-8 {
+		for i in 0 ..< n_equity {adjusted_weights[i] = equity_fraction * hrp_weights[i] / equity_hrp_sum}
+		adjusted_weights[n - 1] = 1 - equity_fraction
+	} else {
+		adjusted_weights[n - 1] = 1 // no equity weights: all in the bond
 	}
+	for &v in adjusted_weights {v *= exposure}
 
-	adjusted_weights := make([]f64, n, state.allocator)
-	defer delete(adjusted_weights, state.allocator)
-
-	for i in 0 ..< n_equity {
-		// Equity allocation = equity_fraction * (HRP weight within equities)
-		if equity_hrp_sum > 1e-8 {
-			adjusted_weights[i] = equity_fraction * (hrp_weights[i] / equity_hrp_sum)
-		}
-	}
-	// Bond allocation = remainder
-	adjusted_weights[n - 1] = 1.0 - equity_fraction
-
-	// Apply position multiplier and renormalize
-	weight_sum := 0.0
-	for i in 0 ..< n {
-		adjusted_weights[i] *= position_mult
-		weight_sum += adjusted_weights[i]
-	}
-	if weight_sum > 1e-8 {
-		for i in 0 ..< n {
-			adjusted_weights[i] /= weight_sum
-		}
-	}
-
-	// Step 5: Compute trades
 	compute_rebalance_trades(state, adjusted_weights, total_capital, prices)
+	copy(state.current_weights, adjusted_weights) // filled at the decision prices
+	copy(state.target_weights, adjusted_weights)
+	generate_quotes(state, prices, as_params, total_capital)
 
-	// Step 6: Generate market making quotes
-	generate_quotes(state, prices, as_params)
-
-	// Update state
 	state.current_regime = regime
 	append(&state.regime_history, regime)
 	state.index_vol_forecast = vol_forecast
@@ -320,6 +301,7 @@ orchestrator_step :: proc(
 		vol_upper      = vol_upper,
 		vrp_signal     = vrp_signal,
 		position_mult  = position_mult,
+		exposure       = exposure,
 		target_weights = make([]f64, n, state.allocator),
 		trades         = make([]f64, n, state.allocator),
 		bid_quotes     = make([]f64, n, state.allocator),
@@ -329,8 +311,20 @@ orchestrator_step :: proc(
 	copy(decision.trades, state.shares_to_trade)
 	copy(decision.bid_quotes, state.bid_quotes)
 	copy(decision.ask_quotes, state.ask_quotes)
-
 	return decision
+}
+
+// The next period: simple returns per asset (cash earns nothing). Returns the portfolio
+// return Σ w_i r_i; adds capital times that to the P&L and lets the weights drift,
+// w_i <- w_i (1 + r_i) / (1 + portfolio return).
+orchestrator_mark_to_market :: proc(state: ^OrchestratorState, returns: []f64, total_capital: f64) -> f64 {
+	assert(len(returns) == state.n_assets, "orchestrator_mark_to_market: one return per asset")
+	r_p := 0.0
+	for w, i in state.current_weights {r_p += w * returns[i]}
+	for &w, i in state.current_weights {w *= (1 + returns[i]) / (1 + r_p)}
+	state.daily_pnl = total_capital * r_p
+	state.cumulative_pnl += state.daily_pnl
+	return r_p
 }
 
 decision_free :: proc(d: ^OrchestratorDecision, allocator: mem.Allocator) {
@@ -378,9 +372,9 @@ print_decision :: proc(d: ^OrchestratorDecision, tickers: []string, day: int) {
 		d.vol_upper * 100.0,
 	)
 	fmt.printf(
-		"║  VRP Signal: %+.3f | Pos. Multiplier: %.2fx                ║\n",
+		"║  VRP Signal: %+.3f | Exposure: %3.0f%% (rest cash)          ║\n",
 		d.vrp_signal,
-		d.position_mult,
+		100 * d.exposure,
 	)
 
 	fmt.println(
