@@ -1,10 +1,8 @@
 package finance
 
-import w "../core"
 import net "../net"
 
 import "core:fmt"
-import "core:math"
 import "core:mem"
 import "core:strconv"
 import "core:strings"
@@ -48,7 +46,6 @@ _parse_json_f64 :: proc(json: string, key: string, start_pos: int) -> (f64, int)
 	return val, end_pos
 }
 
-// Extract options from a specific array (calls or puts)
 // Extract options from a specific array (calls or puts)
 _extract_options_array :: proc(
 	json: string,
@@ -111,16 +108,6 @@ _extract_options_array :: proc(
 			time_to_exp := (exp_timestamp - current_timestamp) / (365.25 * 24.0 * 3600.0)
 			if time_to_exp < 0.0 {time_to_exp = 0.0}
 
-			// ✅ DEBUG: Print exactly what this function sees for the first option
-			if strike == 110.0 {
-				fmt.printf(
-					"   DEBUG _extract: exp=%.0f, curr=%.0f, time_to_exp=%.4f\n",
-					exp_timestamp,
-					current_timestamp,
-					time_to_exp,
-				)
-			}
-
 			append(expiries, time_to_exp)
 
 			append(implied_vols, iv)
@@ -134,8 +121,27 @@ _extract_options_array :: proc(
 
 
 // ============================================================================
-// Helper to find a target expiration timestamp within a day range
+// Expiration dates
 // ============================================================================
+// The "expirationDates" of an options response (unix seconds, ascending)
+_yahoo_expiration_dates :: proc(json: string, allocator: mem.Allocator) -> []f64 {
+	out := make([dynamic]f64, allocator)
+	pos := strings.index(json, "\"expirationDates\":")
+	if pos < 0 {return out[:]}
+	start := strings.index(json[pos:], "[")
+	if start < 0 {return out[:]}
+	start += pos
+	end := strings.index(json[start:], "]")
+	if end < 0 {return out[:]}
+	block := json[start + 1:start + end]
+	for e in strings.split_iterator(&block, ",") {
+		if ts, ok := strconv.parse_f64(strings.trim_space(e)); ok {append(&out, ts)}
+	}
+	return out[:]
+}
+
+// The first expiration between min_days and max_days ahead, else the first future one
+// (0 when there is none)
 _find_target_expiration :: proc(
 	json: string,
 	current_timestamp: f64,
@@ -143,224 +149,184 @@ _find_target_expiration :: proc(
 	max_days: f64,
 	allocator: mem.Allocator,
 ) -> f64 {
-	// Find the key
-	pos := strings.index(json, "\"expirationDates\":")
-	if pos < 0 {return 0.0}
-
-	// Find the opening bracket
-	start := strings.index(json[pos:], "[")
-	if start < 0 {return 0.0}
-	start += pos
-
-	// Find the closing bracket
-	end := strings.index(json[start:], "]")
-	if end < 0 {return 0.0}
-	end += start
-
-	// Extract just the numbers, excluding the brackets
-	block := json[start + 1:end]
-
-	entries := strings.split(block, ",", allocator)
-	defer {
-		for e in entries {delete(e, allocator)}
-		delete(entries, allocator)
-	}
-
-	min_ts := current_timestamp + (min_days * 24.0 * 3600.0)
-	max_ts := current_timestamp + (max_days * 24.0 * 3600.0)
-
-	// First pass: look for ideal range (e.g., 30-90 days)
-	for e in entries {
-		clean_e := strings.trim_space(e)
-		ts, ok := strconv.parse_f64(clean_e)
-		if ok && ts >= min_ts && ts <= max_ts {
-			return ts
-		}
-	}
-
-	// Second pass: fallback to any future date if none in ideal range
-	for e in entries {
-		clean_e := strings.trim_space(e)
-		ts, ok := strconv.parse_f64(clean_e)
-		if ok && ts > current_timestamp {
-			return ts
-		}
-	}
-
+	dates := _yahoo_expiration_dates(json, allocator)
+	defer delete(dates, allocator)
+	min_ts := current_timestamp + min_days * 86400.0
+	max_ts := current_timestamp + max_days * 86400.0
+	for ts in dates {if ts >= min_ts && ts <= max_ts {return ts}}
+	for ts in dates {if ts > current_timestamp {return ts}}
 	return 0.0
 }
 
 // ============================================================================
-// Main function to fetch and parse Yahoo Options
+// Fetching
 // ============================================================================
-// ============================================================================
-// Main function to fetch and parse Yahoo Options
-// ============================================================================
-fetch_yahoo_options :: proc(
+@(private = "file")
+_Chain_Builder :: struct {
+	strikes, expiries, implied_vols, market_prices: [dynamic]f64,
+	option_types:                                   [dynamic]string,
+}
+
+// Appends the calls and puts of one expiration date; false when the request fails
+@(private = "file")
+_fetch_yahoo_expiry :: proc(
+	symbol, crumb, cookie: string,
+	exp_ts, now_ts: f64,
+	b: ^_Chain_Builder,
+	allocator: mem.Allocator,
+) -> bool {
+	url := fmt.aprintf(
+		"https://query1.finance.yahoo.com/v7/finance/options/%s?date=%d&crumb=%s",
+		symbol,
+		i64(exp_ts),
+		crumb,
+		allocator = allocator,
+	)
+	defer delete(url, allocator)
+	text, ok := net.http_get_with_cookie(url, cookie, allocator)
+	if !ok {return false}
+	defer delete(text, allocator)
+	opt_pos := strings.index(text, "\"options\":")
+	if opt_pos < 0 {return false}
+	exp_timestamp, _ := _parse_json_f64(text, "\"expirationDate\"", opt_pos)
+	if exp_timestamp <= 0 {exp_timestamp = exp_ts}
+	for side in ([2][2]string{{"\"calls\":", "call"}, {"\"puts\":", "put"}}) {
+		_extract_options_array(
+			text,
+			side[0],
+			side[1],
+			exp_timestamp,
+			now_ts,
+			&b.strikes,
+			&b.expiries,
+			&b.implied_vols,
+			&b.market_prices,
+			&b.option_types,
+		)
+	}
+	return true
+}
+
+// Crumb, cookie, the initial response (expiration dates) and the market time
+@(private = "file")
+_yahoo_options_session :: proc(
 	symbol: string,
-	allocator: mem.Allocator = context.allocator,
-) -> OptionChain {
-	// 1. Get crumb and cookie first
-	crumb, cookie, ok := net.yahoo_get_crumb_and_cookie(allocator)
+	allocator: mem.Allocator,
+) -> (
+	crumb, cookie, text: string,
+	now_ts: f64,
+	ok: bool,
+) {
+	crumb, cookie, ok = net.yahoo_get_crumb_and_cookie(allocator)
 	if !ok {
 		fmt.println("Warning: Failed to get Yahoo crumb/cookie")
-		return OptionChain{}
+		return
 	}
-
-	// 2. Initial fetch to get available expiration dates
-	url_initial := fmt.aprintf(
+	url := fmt.aprintf(
 		"https://query1.finance.yahoo.com/v7/finance/options/%s?crumb=%s",
 		symbol,
 		crumb,
 		allocator = allocator,
 	)
-
-	text_initial, ok2 := net.http_get_with_cookie(url_initial, cookie, allocator)
-	if !ok2 {
-		panic(fmt.tprintf("Failed to fetch initial options data for %s", symbol))
+	defer delete(url, allocator)
+	text, ok = net.http_get_with_cookie(url, cookie, allocator)
+	if !ok {
+		fmt.printf("Warning: Failed to fetch options data for %s\n", symbol)
+		return
 	}
-	defer delete(text_initial, allocator)
+	now_ts, _ = _parse_json_f64(text, "\"regularMarketTime\"", 0)
+	if now_ts <= 0 {now_ts = f64(time.now()._nsec) / 1e9}
+	return
+}
 
-	// Extract current market time
-	current_timestamp, _ := _parse_json_f64(text_initial, "\"regularMarketTime\"", 0)
-
-	// ✅ FIXED: If parsing failed or returned 0, use the standard library system time
-	// This bypasses any bugs in w.now_unix()
-	if current_timestamp <= 0.0 {
-		current_timestamp = f64(w.now_unix())
-		fmt.printf(
-			"   DEBUG: Parsed regularMarketTime was 0. Fallback to system time: %.0f\n",
-			current_timestamp,
-		)
-	} else {
-		fmt.printf("   DEBUG: Parsed current_timestamp = %.0f\n", current_timestamp)
-	}
-
-	// Find a target expiration date ~30-90 days out
-	target_exp := _find_target_expiration(
-		text_initial,
-		current_timestamp,
-		30.0,
-		90.0,
-		context.temp_allocator,
-	)
-
-	dte_days := (target_exp - current_timestamp) / (24.0 * 3600.0)
-	fmt.printf("   DEBUG: Found target_exp = %.0f (DTE: %.1f days)\n", target_exp, dte_days)
-
-	if target_exp == 0.0 {
-		fmt.println("   Warning: Could not find a valid future expiration date.")
-		return OptionChain{}
-	}
-
-	// 3. Fetch the specific expiration chain using the ?date= parameter
-	url := fmt.aprintf(
-		"https://query1.finance.yahoo.com/v7/finance/options/%s?date=%d&crumb=%s",
-		symbol,
-		i64(target_exp),
-		crumb,
-		allocator = allocator,
-	)
-
-	fmt.printf("   DEBUG: Requesting specific date URL: %s\n", url)
-
-	text, ok3 := net.http_get_with_cookie(url, cookie, allocator)
-	if !ok3 {
-		panic(fmt.tprintf("Failed to fetch options data for %s", symbol))
-	}
-	defer delete(text, allocator)
-
-	// ========================================================================
-	// KEEP YOUR EXISTING PARSING LOGIC EXACTLY AS IT IS BELOW THIS LINE
-	// ========================================================================
-
-	// Dynamic arrays for building the chain
-	strikes := make([dynamic]f64, allocator)
-	expiries := make([dynamic]f64, allocator)
-	implied_vols := make([dynamic]f64, allocator)
-	market_prices := make([dynamic]f64, allocator)
-	option_types := make([dynamic]string, allocator)
-
+@(private = "file")
+_chain_from_builder :: proc(b: ^_Chain_Builder, allocator: mem.Allocator) -> OptionChain {
 	defer {
-		delete(strikes)
-		delete(expiries)
-		delete(implied_vols)
-		delete(market_prices)
-		delete(option_types)
+		delete(b.strikes)
+		delete(b.expiries)
+		delete(b.implied_vols)
+		delete(b.market_prices)
+		delete(b.option_types)
 	}
-
-	// Find the options block
-	opt_pos := strings.index(text, "\"options\":")
-	if opt_pos < 0 {
-		fmt.println("Warning: No options data found in Yahoo response")
-		return OptionChain{}
+	n := len(b.strikes)
+	if n == 0 {return {}}
+	clone :: proc(v: [dynamic]$T, allocator: mem.Allocator) -> []T {
+		out := make([]T, len(v), allocator)
+		copy(out, v[:])
+		return out
 	}
-
-	// ✅ FIXED: Removed the colon from the key. _parse_json_f64 handles skipping it.
-	exp_timestamp, _ := _parse_json_f64(text, "\"expirationDate\"", opt_pos)
-	fmt.printf("   DEBUG: Parsed exp_timestamp = %.0f\n", exp_timestamp)
-
-	// ✅ FIXED: Removed the colon from the key.
-	current_timestamp, _ = _parse_json_f64(text, "\"regularMarketTime\"", opt_pos)
-	fmt.printf("   DEBUG: Parsed current_timestamp (2nd) = %.0f\n", current_timestamp)
-
-	// ✅ CRITICAL FIX: Replace w.now_unix() with this exact line
-	if current_timestamp == 0.0 {
-		current_timestamp = f64(time.now()._nsec) / 1_000_000_000.0
-	}
-
-	// Parse Calls and Puts
-	_extract_options_array(
-		text,
-		"\"calls\":",
-		"call",
-		exp_timestamp,
-		current_timestamp,
-		&strikes,
-		&expiries,
-		&implied_vols,
-		&market_prices,
-		&option_types,
-	)
-	_extract_options_array(
-		text,
-		"\"puts\":",
-		"put",
-		exp_timestamp,
-		current_timestamp,
-		&strikes,
-		&expiries,
-		&implied_vols,
-		&market_prices,
-		&option_types,
-	)
-
-	// Convert dynamic arrays to fixed slices for OptionChain
-	n := len(strikes)
-	if n == 0 {
-		return OptionChain{}
-	}
-
-	final_strikes := make([]f64, n, allocator)
-	final_expiries := make([]f64, n, allocator)
-	final_ivs := make([]f64, n, allocator)
-	final_prices := make([]f64, n, allocator)
-	final_types := make([]string, n, allocator)
-
-	for i in 0 ..< n {
-		final_strikes[i] = strikes[i]
-		final_expiries[i] = expiries[i]
-		final_ivs[i] = implied_vols[i]
-		final_prices[i] = market_prices[i]
-		final_types[i] = option_types[i]
-	}
-
 	return OptionChain {
-		strikes = final_strikes,
-		expiries = final_expiries,
-		implied_vols = final_ivs,
-		market_prices = final_prices,
-		option_types = final_types,
+		strikes = clone(b.strikes, allocator),
+		expiries = clone(b.expiries, allocator),
+		implied_vols = clone(b.implied_vols, allocator),
+		market_prices = clone(b.market_prices, allocator),
+		option_types = clone(b.option_types, allocator),
 		n_options = n,
 	}
+}
+
+// The chain of one expiration ~30-90 days out (else the first future one); expiries in
+// years from the market time
+fetch_yahoo_options :: proc(
+	symbol: string,
+	allocator: mem.Allocator = context.allocator,
+) -> OptionChain {
+	crumb, cookie, text, now_ts, ok := _yahoo_options_session(symbol, allocator)
+	if !ok {return {}}
+	defer delete(text, allocator)
+	target := _find_target_expiration(text, now_ts, 30.0, 90.0, context.temp_allocator)
+	if target == 0.0 {
+		fmt.println("   Warning: Could not find a valid future expiration date.")
+		return {}
+	}
+	b := _Chain_Builder {
+		strikes       = make([dynamic]f64, allocator),
+		expiries      = make([dynamic]f64, allocator),
+		implied_vols  = make([dynamic]f64, allocator),
+		market_prices = make([dynamic]f64, allocator),
+		option_types  = make([dynamic]string, allocator),
+	}
+	if !_fetch_yahoo_expiry(symbol, crumb, cookie, target, now_ts, &b, allocator) {
+		fmt.printf("Warning: Failed to fetch the %s chain\n", symbol)
+	}
+	return _chain_from_builder(&b, allocator)
+}
+
+// The chains of every expiration between min_days and max_days ahead (at most
+// max_expiries of them, spread evenly over the range): a volatility surface
+fetch_yahoo_option_surface :: proc(
+	symbol: string,
+	min_days: f64 = 7,
+	max_days: f64 = 800,
+	max_expiries: int = 12,
+	allocator: mem.Allocator = context.allocator,
+) -> OptionChain {
+	crumb, cookie, text, now_ts, ok := _yahoo_options_session(symbol, allocator)
+	if !ok {return {}}
+	defer delete(text, allocator)
+	dates := _yahoo_expiration_dates(text, allocator)
+	defer delete(dates, allocator)
+	in_range := make([dynamic]f64, allocator)
+	defer delete(in_range)
+	for ts in dates {
+		days := (ts - now_ts) / 86400.0
+		if days >= min_days && days <= max_days {append(&in_range, ts)}
+	}
+	b := _Chain_Builder {
+		strikes       = make([dynamic]f64, allocator),
+		expiries      = make([dynamic]f64, allocator),
+		implied_vols  = make([dynamic]f64, allocator),
+		market_prices = make([dynamic]f64, allocator),
+		option_types  = make([dynamic]string, allocator),
+	}
+	n := len(in_range)
+	picks := min(n, max_expiries)
+	for k in 0 ..< picks {
+		idx := k if picks == n else int(f64(k) * f64(n - 1) / f64(max(picks - 1, 1)) + 0.5)
+		if k > 0 &&
+		   picks < n &&
+		   idx == int(f64(k - 1) * f64(n - 1) / f64(max(picks - 1, 1)) + 0.5) {continue}
+		_fetch_yahoo_expiry(symbol, crumb, cookie, in_range[idx], now_ts, &b, allocator)
+	}
+	return _chain_from_builder(&b, allocator)
 }

@@ -1,213 +1,243 @@
 package tests
 
+import w "../wotan/core"
 import fin "../wotan/finance"
 import l "../wotan/linalg"
 import ml_fin "../wotan/ml_finance"
+import net "../wotan/net"
 import nn "../wotan/nn"
+import optim "../wotan/optimize"
 import t "../wotan/tensor"
 import "core:fmt"
+import "core:math"
+import "core:math/rand"
 import "core:mem"
+import "core:slice"
+import "core:time"
 
+// Deep Heston calibration: an MLP trained on 4000 random Heston surfaces (implied vols on
+// 5 forward moneyness x 4 expiries) maps a surface to its parameters. Scored on 200
+// held-out surfaces by the parameter error and, what matters for pricing, the implied-vol
+// error of the surface its parameters reproduce, next to Levenberg-Marquardt
+// (fin.calibrate_heston) on the same grids. Then AAPL quotes are put on the grid and
+// calibrated both ways.
 deep_calibration_test :: proc(allocator: mem.Allocator) {
 	seed_test(#procedure)
 	fmt.println("\n=== Deep Heston Calibration Test ===")
+	context.allocator = allocator
+	G :: ml_fin.DEEP_HESTON_N_GRID
+	N_TRAIN, N_TEST :: 4000, 200
 
-	num_samples := 5000 // Generate 5000 synthetic market scenarios
-	num_options := 10 // 10 different strike/maturity combinations
-	hidden_dim := 64
-
+	t0 := time.now()
+	X, Y := ml_fin.generate_heston_calibration_dataset(N_TRAIN + N_TEST, allocator)
 	fmt.printf(
-		"Generating synthetic dataset (%d samples, %d options) using finance.heston_price...\n",
-		num_samples,
-		num_options,
+		"Dataset: %d surfaces in %.1f s (%d train, %d held out)\n",
+		N_TRAIN + N_TEST,
+		time.duration_seconds(time.since(t0)),
+		N_TRAIN,
+		N_TEST,
 	)
 
-	prices, params := ml_fin.generate_heston_calibration_dataset(
-		num_samples,
-		num_options,
-		allocator,
-	)
-	defer t.tensor_free(prices)
-	defer t.tensor_free(params)
-
-	fmt.println("Dataset generated successfully.")
-
-	// 1. Initialize Deep Calibrator
-	fmt.println("Initializing Deep Calibrator MLP (Prices -> Parameters)...")
-	calibrator := ml_fin.deep_heston_calibrator_new(num_options, hidden_dim, allocator)
-	defer ml_fin.deep_heston_calibrator_free(&calibrator)
-
-	// 2. Optimizer
-	opt := nn.adam_new(0.001, allocator = allocator)
+	model := ml_fin.deep_heston_calibrator_new(128, allocator)
+	defer ml_fin.deep_heston_calibrator_free(&model)
+	opt := nn.adam_new(1e-3, allocator = allocator)
 	defer nn.adam_free(&opt)
-	ml_fin.deep_heston_calibrator_add_to_adam(&calibrator, &opt)
+	ml_fin.deep_heston_calibrator_add_to_adam(&model, &opt)
 
-	// 3. Training Loop
-	fmt.println("\nStarting Training...")
-	fmt.println("Epoch | MSE Loss   | Status")
-	fmt.println("------|------------|-------------------------")
-
-	epochs := 150
-
-	for epoch in 0 ..< epochs {
-		nn.adam_zero_grad(&opt)
-
-		// Forward pass
-		predicted_params := ml_fin.deep_heston_calibrator_forward(&calibrator, prices)
-
-		// MSE Loss between predicted parameters and true parameters
-		loss := t.tensor_mse_loss(predicted_params, params)
-
-		// Backward & Step
-		t.tensor_backward(loss)
-		nn.adam_step(&opt)
-
-		loss_val := loss.data.data[0]
-
-		status := ""
-		if epoch == 0 {
-			status = "(Initial random weights)"
-		} else if loss_val < 0.001 {
-			status = "(Highly Accurate Calibration)"
-		} else if loss_val < 0.01 {
-			status = "(Learning mapping)"
+	EPOCHS, BATCH :: 150, 128
+	steps_per_epoch := N_TRAIN / BATCH
+	schedule := optim.lr_step_decay(1e-3, EPOCHS * steps_per_epoch / 3, 0.2)
+	order := make([]int, N_TRAIN)
+	for &v, i in order {v = i}
+	scope: t.Graph_Scope
+	defer t.graph_scope_destroy(&scope)
+	step := 0
+	t0 = time.now()
+	for epoch in 0 ..< EPOCHS {
+		rand.shuffle(order)
+		epoch_loss := 0.0
+		for b in 0 ..< steps_per_epoch {
+			t.graph_begin(&scope)
+			alloc := t._scope_or(allocator)
+			xb := l.matrix_new(f64, BATCH, G, alloc)
+			yb := l.matrix_new(f64, BATCH, 5, alloc)
+			for k in 0 ..< BATCH {
+				row := order[b * BATCH + k]
+				copy(xb.data[k * G:][:G], X.data.data[row * G:][:G])
+				copy(yb.data[k * 5:][:5], Y.data.data[row * 5:][:5])
+			}
+			nn.adam_zero_grad(&opt)
+			pred := ml_fin.deep_heston_calibrator_forward(&model, t.tensor_new(xb, false, alloc))
+			loss := t.tensor_mse_loss(pred, t.tensor_new(yb, false, alloc))
+			t.tensor_backward(loss)
+			nn.adam_step_scheduled(&opt, schedule, step)
+			epoch_loss += loss.data.data[0] / f64(steps_per_epoch)
+			t.graph_end(&scope)
+			step += 1
 		}
-
-		if epoch % 15 == 0 || epoch == epochs - 1 {
-			fmt.printf(" %3d  | %.6f | %s\n", epoch + 1, loss_val, status)
+		if epoch % 30 == 0 || epoch == EPOCHS - 1 {
+			fmt.printf("  epoch %3d | scaled-parameter MSE %.5f\n", epoch + 1, epoch_loss)
 		}
-
-		t.tensor_free_graph(loss)
 	}
+	fmt.printf("Training: %.1f s\n", time.duration_seconds(time.since(t0)))
 
-	// 4. Inference / Microsecond Calibration Test
-	fmt.println("\n=== Microsecond Calibration Inference ===")
-	fmt.println("Generating a NEW unseen market price surface...")
-
-	// Generate 1 new sample
-	new_prices_data := l.matrix_new(f64, 1, num_options, allocator)
-	true_params := fin.Heston_Params {
-		v0    = 0.04,
-		kappa = 2.0,
-		theta = 0.04,
-		sigma = 0.3,
-		rho   = -0.5,
+	// --- held-out surfaces
+	names := [5]string{"v0", "kappa", "theta", "sigma", "rho"}
+	se: [5]f64
+	iv_errs := make([]f64, N_TEST)
+	lm_errs := make([dynamic]f64)
+	N_LM :: 10
+	nn_time, lm_time: time.Duration
+	for s in 0 ..< N_TEST {
+		row := N_TRAIN + s
+		x := X.data.data[row * G:][:G]
+		ivs: [G]f64
+		for v, i in x {ivs[i] = 0.25 + 0.1 * v} 	// invert deep_heston_features
+		t1 := time.now()
+		p := ml_fin.deep_heston_calibrate(&model, ivs[:])
+		nn_time += time.since(t1)
+		enc := ml_fin.deep_heston_encode(p)
+		for k in 0 ..< 5 {
+			d := enc[k] - Y.data.data[row * 5 + k]
+			se[k] += d * d / N_TEST
+		}
+		iv_errs[s] = surface_iv_rmse(p, ivs[:])
+		if s < N_LM {
+			pts := grid_points(ivs[:], 100, 0)
+			t1 = time.now()
+			res := fin.calibrate_heston(pts, 100, 0)
+			lm_time += time.since(t1)
+			append(&lm_errs, surface_iv_rmse(res.params, ivs[:]))
+		}
 	}
-
-	S0 := 100.0; r := 0.05
-	for o in 0 ..< num_options {
-		K := 80.0 + f64(o) * 5.0
-		T := 0.5 + f64(o) * 0.1
-		// Price using your existing engine
-		price := fin.heston_price(S0, K, T, r, true_params, .Call, 1000)
-		new_prices_data.data[o] = price / S0
-	}
-
-	new_prices := t.tensor_new(new_prices_data, false, allocator)
-	new_prices.shape = [4]int{1, num_options, 1, 1}
-	defer t.tensor_free(new_prices)
-
-	fmt.println("Running MLP forward pass (No iterative solver needed)...")
-
-	inference_params := ml_fin.deep_heston_calibrator_forward(&calibrator, new_prices)
-	defer t.tensor_free(inference_params)
-
+	fmt.println("Held-out parameter RMSE, scaled to [-1, 1] (predicting the box centre: 0.577):")
+	for k in 0 ..< 5 {fmt.printf("  %-5s %.3f\n", names[k], math.sqrt(se[k]))}
+	med := median_of(iv_errs)
+	p90 := quantile_of(iv_errs, 0.9)
 	fmt.printf(
-		"\nTrue Parameters:      v0=%.4f, kappa=%.2f, theta=%.4f, sigma=%.2f, rho=%.2f\n",
-		true_params.v0,
-		true_params.kappa,
-		true_params.theta,
-		true_params.sigma,
-		true_params.rho,
+		"Surface implied-vol RMSE of the predicted parameters: median %.2f vol pts, 90%% %.2f (%.0f us per calibration)\n",
+		100 * med,
+		100 * p90,
+		1e6 * time.duration_seconds(nn_time) / N_TEST,
+	)
+	fmt.printf(
+		"Levenberg-Marquardt on the first %d grids: median %.4f vol pts (%.0f ms per calibration)\n",
+		N_LM,
+		100 * median_of(lm_errs[:]),
+		1e3 * time.duration_seconds(lm_time) / N_LM,
+	)
+	ok := med < 0.005 && math.sqrt(se[0]) < 0.1 && math.sqrt(se[4]) < 0.2
+	fmt.printf(
+		"%s deep calibration: median surface error %.2f vol pts (< 0.5), v0 RMSE %.3f (< 0.1), rho RMSE %.3f (< 0.2)\n",
+		"OK  " if ok else "FAIL",
+		100 * med,
+		math.sqrt(se[0]),
+		math.sqrt(se[4]),
 	)
 
+	// --- AAPL: quotes onto the grid, then both calibrations
+	fmt.println("\n=== AAPL option chain ===")
+	chain := fin.fetch_yahoo_option_surface("AAPL", allocator = allocator)
+	df := net.read_yahoo("AAPL", .Daily, .OneMonth, allocator)
+	defer w.destroy_dataframe(&df)
+	if chain.n_options == 0 || df.rows == 0 {
+		fmt.println("No option chain or spot (offline?): skipped")
+		return
+	}
+	spot, _ := w.column_at_float(w.column(&df, "Close"), df.rows - 1)
+	r := 0.04
+	// out-of-the-money quotes (puts below the forward, calls above: the liquid side); the
+	// implied vols are inverted from the quoted prices at the same r (Yahoo's own
+	// impliedVolatility runs several vol points above them on the call side)
+	quotes := make([dynamic]fin.VolSurfacePoint)
+	for i in 0 ..< chain.n_options {
+		K, T := chain.strikes[i], chain.expiries[i]
+		F := spot * math.exp(r * T)
+		is_put := chain.option_types[i] == "put"
+		if is_put != (K < F) || T < 0.05 || K < 0.6 * F || K > 1.5 * F {continue}
+		iv, ok, _ := fin.implied_volatility(
+			chain.market_prices[i],
+			spot,
+			K,
+			T,
+			r,
+			.Put if is_put else .Call,
+		)
+		if !ok || iv < 0.05 || iv > 1.5 {continue}
+		append(&quotes, fin.VolSurfacePoint{strike = K, expiry = T, implied_vol = iv})
+	}
+	grid: [G]f64
+	if !ml_fin.deep_heston_grid_from_surface(quotes[:], spot, r, grid[:]) {
+		fmt.println("Too few quotes: skipped")
+		return
+	}
 	fmt.printf(
-		"MLP Predicted Params: v0=%.4f, kappa=%.2f, theta=%.4f, sigma=%.2f, rho=%.2f\n",
-		inference_params.data.data[0],
-		inference_params.data.data[1],
-		inference_params.data.data[2],
-		inference_params.data.data[3],
-		inference_params.data.data[4],
+		"Spot %.2f, %d OTM quotes; grid implied vols (rows: expiry 0.25, 0.5, 1, 2):\n",
+		spot,
+		len(quotes),
 	)
-	// ============================================================================
-	// 5. Real Market Data Calibration (AAPL Options Chain)
-	// ============================================================================
-	fmt.println("\n=== Real Market Data Calibration (AAPL) ===")
-	fmt.println("Fetching live AAPL options chain using finance.fetch_yahoo_options...")
+	for j in 0 ..< 4 {
+		fmt.print("  ")
+		for i in 0 ..< 5 {fmt.printf("%.3f ", grid[j * 5 + i])}
+		fmt.println()
+	}
+	p := ml_fin.deep_heston_calibrate(&model, grid[:])
+	res := fin.calibrate_heston(grid_points(grid[:], spot, r), spot, r)
+	print_p :: proc(label: string, p: fin.Heston_Params, err: f64) {
+		fmt.printf(
+			"  %-20s v0 %.4f kappa %.2f theta %.4f sigma %.2f rho %+.2f | surface RMSE %.2f vol pts\n",
+			label,
+			p.v0,
+			p.kappa,
+			p.theta,
+			p.sigma,
+			p.rho,
+			100 * err,
+		)
+	}
+	print_p("deep calibrator", p, surface_iv_rmse(p, grid[:]))
+	print_p("Levenberg-Marquardt", res.params, surface_iv_rmse(res.params, grid[:]))
+}
 
-	// ✅ REUSE: Leverage your existing, robust options fetcher!
-	chain := fin.fetch_yahoo_options("AAPL", allocator)
+// RMSE between the grid vols a parameter set gives and the target vols (1 when a vol does
+// not exist)
+@(private = "file")
+surface_iv_rmse :: proc(p: fin.Heston_Params, target: []f64) -> f64 {
+	model: [ml_fin.DEEP_HESTON_N_GRID]f64
+	if !ml_fin.deep_heston_surface(p, model[:]) {return 1}
+	s := 0.0
+	for v, i in model {s += (v - target[i]) * (v - target[i])}
+	return math.sqrt(s / f64(len(target)))
+}
 
-	if chain.n_options == 0 {
-		fmt.println("Failed to fetch real options data. Skipping real market test.")
-	} else {
-		fmt.printf("Successfully fetched %d total options.\n", chain.n_options)
-
-		// We need a fixed number of prices for the MLP input.
-		// Let's filter for CALL options and take the first `num_options` of them.
-
-		// ✅ FIX: Use [dynamic]f64 instead of []f64 so append works correctly
-		call_prices := make([dynamic]f64, 0, allocator)
-		call_strikes := make([dynamic]f64, 0, allocator)
-
-		for i in 0 ..< chain.n_options {
-			if chain.option_types[i] == "call" && chain.market_prices[i] > 0.0 {
-				append(&call_prices, chain.market_prices[i])
-				append(&call_strikes, chain.strikes[i])
+// The grid as quotes at spot S and rate r (strikes K = m S e^{rT})
+@(private = "file")
+grid_points :: proc(ivs: []f64, S, r: f64) -> []fin.VolSurfacePoint {
+	M := ml_fin.DEEP_HESTON_MONEYNESS
+	E := ml_fin.DEEP_HESTON_EXPIRIES
+	pts := make([]fin.VolSurfacePoint, ml_fin.DEEP_HESTON_N_GRID)
+	for T, j in E {
+		for m, i in M {
+			K := m * S * math.exp(r * T)
+			iv := ivs[j * len(M) + i]
+			pts[j * len(M) + i] = {
+				strike       = K,
+				expiry       = T,
+				implied_vol  = iv,
+				market_price = fin.compute_greeks(S, K, T, r, iv, .Call).price,
 			}
 		}
-
-		// Ensure we have at least `num_options` (e.g., 10)
-		actual_num := num_options
-		if len(call_prices) < num_options {
-			actual_num = len(call_prices)
-			fmt.printf(
-				"Warning: Only found %d valid call options. Adjusting input size.\n",
-				actual_num,
-			)
-		}
-		estimated_S0 := 260.0
-		// Create the input tensor for the MLP (Standard 2D layout: 1 x actual_num)
-		real_prices_data := l.matrix_new(f64, 1, actual_num, allocator)
-		for i in 0 ..< actual_num {
-			real_prices_data.data[i] = call_prices[i] / estimated_S0
-		}
-
-		real_prices_tensor := t.tensor_new(real_prices_data, false, allocator)
-		real_prices_tensor.shape = [4]int{1, actual_num, 1, 1}
-		defer t.tensor_free(real_prices_tensor)
-
-		fmt.printf("\nFeeding %d call option mid-prices into the MLP...\n", actual_num)
-		for i in 0 ..< actual_num {
-			fmt.printf("  Strike: $%7.2f, Price: $%6.2f\n", call_strikes[i], call_prices[i])
-		}
-
-		fmt.println("\nRunning MLP forward pass on REAL market prices...")
-
-		// Inference (No autograd needed)
-		real_inference_params := ml_fin.deep_heston_calibrator_forward(
-			&calibrator,
-			real_prices_tensor,
-		)
-		defer t.tensor_free(real_inference_params)
-
-		fmt.printf("\nMLP Predicted Heston Params for AAPL:\n")
-		fmt.printf("  v0 (Initial Variance):  %.4f\n", real_inference_params.data.data[0])
-		fmt.printf("  kappa (Mean Reversion): %.2f\n", real_inference_params.data.data[1])
-		fmt.printf("  theta (Long-term Var):  %.4f\n", real_inference_params.data.data[2])
-		fmt.printf("  sigma (Vol of Vol):     %.2f\n", real_inference_params.data.data[3])
-		fmt.printf("  rho (Correlation):      %.2f\n", real_inference_params.data.data[4])
-
-		fmt.println("\n✓ Real Market Calibration Complete!")
-		fmt.println(
-			"The MLP successfully calibrated to live market data in a single forward pass,",
-		)
-		fmt.println("leveraging your existing finance.fetch_yahoo_options pipeline.")
-
-		// Cleanup dynamic arrays
-		delete(call_prices)
-		delete(call_strikes)
 	}
+	return pts
+}
 
-	fmt.println("\n=== All Deep Calibration Tests Passed ===")
+@(private = "file")
+median_of :: proc(v: []f64) -> f64 {return quantile_of(v, 0.5)}
+
+@(private = "file")
+quantile_of :: proc(v: []f64, q: f64) -> f64 {
+	s := make([]f64, len(v), context.temp_allocator)
+	copy(s, v)
+	slice.sort(s)
+	return s[int(q * f64(len(s) - 1))]
 }

@@ -1010,6 +1010,8 @@ main :: proc() {
 	free_all(context.temp_allocator)
 	test.cql_real_data_trading_test(context.temp_allocator)
 	free_all(context.temp_allocator)
+	test.deep_calibration_reference_test(context.temp_allocator)
+	free_all(context.temp_allocator)
 	test.deep_calibration_test(context.temp_allocator)
 	free_all(context.temp_allocator)
 	test.gat_cross_sectional_test(context.temp_allocator)

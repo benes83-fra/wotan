@@ -239,7 +239,8 @@ Reference and contract tests print `OK` or `FAIL` for each check and end with a 
 | `deep_hedging_portfolio_test` 🌐 | `deep_hedging_portfolio_test` | Multi-asset deep hedging with correlations from real data |
 | `deep_hedging_real_data_test` 🌐🖼 | `deep_hedging_real_data_test` | Deep hedging trained on a live option chain |
 | `deep_bsde_test` | `deep_bsde_test`, `deep_bsde_european_call_test`, `deep_bsde_100d_test` | Deep BSDE price vs exact values: 1-D call vs Black-Scholes, 10-D and 100-D max-calls vs the closed-form integral (scipy `quad`); hedge quality as loss / Var[payoff] |
-| `deep_calibration_test` 🌐 | `deep_calibration_test` | Neural network Heston calibration, fast inference, AAPL data |
+| `deep_calibration_reference_test` | `deep_calibration_reference_test` | Deep Heston calibration grid (forward moneyness x expiry) implied vols vs QuantLib; invariance to S and r; parameter scaling round trip; scattered quotes onto the grid vs numpy |
+| `deep_calibration_test` 🌐 | `deep_calibration_test` | MLP from a Heston implied-vol grid to the parameters: held-out parameter and surface errors next to Levenberg–Marquardt; AAPL surface (several expiries) calibrated both ways |
 | `deeplob_test` | `deeplob_test`, `deeplob_talkative_test` | DeepLOB on a synthetic limit order book |
 | `deeplob_real_data_test` 🌐📁 | `deeplob_real_data_test`, `deeplob_real_data_sharpe_test` | DeepLOB on real data, Sharpe-ratio loss |
 | `prob_forecast_test` | `prob_forecast_test` | Gaussian, Student-t and quantile forecast heads vs PyTorch/SciPy losses and scores; an LSTM forecaster on GARCH data beats the unconditional baseline; multi-step forecasts |
