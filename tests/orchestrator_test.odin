@@ -22,7 +22,8 @@ import "core:slice"
 //   VRP signal  (VIX - forecast vol) / 10 points, clipped to [-1, 1] (was a vol threshold)
 //   weights     HRP on the trailing 252 days
 // Each decision earns the next day's returns. Reported next to 60/40 SPY/TLT, equal
-// weights and SPY; the checks are on the accounting (P&L reconciles with the weights
+// weights and SPY, each with its PSR against 0 and the minimum track record length (how
+// many years of such returns a 95% PSR would take); the checks are on the accounting (P&L reconciles with the weights
 // held, exposure within [0, 1], no short weights), not on beating the benchmarks.
 
 @(private = "file")
@@ -37,13 +38,19 @@ _orch_metrics :: proc(name: string, r: []f64) {
 		mdd = max(mdd, 1 - eq / peak)
 	}
 	vol := math.sqrt(max(m2 - m * m, 0) * 252)
+	// PSR against 0 and the years of returns the PSR would need to reach 95%
+	s := ml_fin.sharpe_stats(r)
+	psr := ml_fin.probabilistic_sharpe_ratio(s.sharpe, 0, s.n, s.skewness, s.kurtosis)
+	trl := ml_fin.min_track_record_length(s.sharpe, 0, s.skewness, s.kurtosis) / 252
 	fmt.printf(
-		"   %-22s return %+6.1f%%  vol %5.1f%%  Sharpe %5.2f  max drawdown %5.1f%%\n",
+		"   %-22s return %+6.1f%%  vol %5.1f%%  Sharpe %5.2f  max drawdown %5.1f%%  PSR %.2f  95%% needs %s\n",
 		name,
 		100 * (eq - 1),
 		100 * vol,
 		m * 252 / vol if vol > 0 else 0,
 		100 * mdd,
+		psr,
+		fmt.tprintf("%.1f years", trl) if !math.is_inf(trl) else "a positive SR",
 	)
 }
 

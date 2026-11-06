@@ -164,41 +164,19 @@ backtest_stats_test :: proc(allocator: mem.Allocator) {
 					}
 				}
 			}
-			d := ml_fin.deflated_sharpe_trials(&M)
-			p := ml_fin.backtest_overfitting(&M, 16)
-			defer ml_fin.pbo_result_free(&p)
+			d, pbo := ml_fin.print_selection_stats(&M)
 			b := d.best / 2
-			ann := math.sqrt(252.0)
 			fmt.printf(
-				"   best of %d SMA rules on %d SPY days: fast %d / slow %d %s, annual SR %.2f, PSR %.3f; SR0 %.2f annual -> DSR %.3f\n",
+				"   the best of the %d SMA rules: fast %d / slow %d, %s\n",
 				N,
-				T,
 				fasts[b / len(slows)],
 				slows[b % len(slows)],
 				"long/flat" if d.best % 2 == 0 else "long/short",
-				ann * d.stats.sharpe,
-				d.psr,
-				ann * d.expected_max,
-				d.dsr,
 			)
-			fmt.printf(
-				"   CSCV with 16 blocks: PBO %.2f, P[selected rule loses out of sample] %.2f, OOS SR = %.2f %+.2f × IS SR (annual)\n",
-				p.pbo,
-				p.prob_oos_loss,
-				ann * p.intercept,
-				p.slope,
-			)
-			ok :=
-				d.dsr <= d.psr &&
-				d.dsr >= 0 &&
-				d.psr <= 1 &&
-				p.pbo >= 0 &&
-				p.pbo <= 1 &&
-				len(p.logits) == 12870
 			check(
 				&failures,
-				ok,
-				"SPY grid: DSR <= PSR, PBO in [0, 1] over all C(16, 8) = 12870 splits",
+				d.dsr <= d.psr && d.dsr >= 0 && d.psr <= 1 && pbo >= 0 && pbo <= 1,
+				"SPY grid: DSR <= PSR, PBO in [0, 1]",
 			)
 		}
 	}

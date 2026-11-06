@@ -3,6 +3,7 @@ package tests
 import analytic "../wotan/analytics"
 import w "../wotan/core"
 import fin "../wotan/finance"
+import l "../wotan/linalg"
 import ml_fin "../wotan/ml_finance"
 import net "../wotan/net"
 import plot "../wotan/plot"
@@ -185,6 +186,7 @@ kalman_pairs_reference_checks :: proc(allocator: mem.Allocator) {
 		fmt.tprintf("hedged returns and Sharpe (%.6f)", sharpe),
 	)
 
+	trials: l.Matrix(f64)
 	best, best_sharpe := ml_fin.kalman_pairs_grid_search(
 		&df,
 		"x",
@@ -195,7 +197,10 @@ kalman_pairs_reference_checks :: proc(allocator: mem.Allocator) {
 		{1, 3},
 		{0, 5},
 		0.001,
+		allocator,
+		&trials,
 	)
+	defer l.matrix_free(&trials)
 	ok :=
 		rel(best_sharpe, 2.4411137580027025) < 1e-9 &&
 		best.entry_threshold == 1.0 &&
@@ -210,7 +215,52 @@ kalman_pairs_reference_checks :: proc(allocator: mem.Allocator) {
 		ok,
 		fmt.tprintf("grid search keeps the default stop loss (best Sharpe %.6f)", best_sharpe),
 	)
+	// the trials matrix: one column per grid point in loop order (entry, exit, noise,
+	// min hold, cooldown); the best point is entry 1.0 (0), exit 0.5 (1), noise 1e-5 (1),
+	// min hold 3 (1), cooldown 0 (0)
+	{
+		col := (((0 * 2 + 1) * 2 + 1) * 2 + 1) * 2 + 0
+		r := ml_fin.kalman_pairs_strategy(&df, "x", "y", best, allocator)
+		defer ml_fin.pairs_trading_result_free(&r, allocator)
+		same := trials.rows == len(r.returns)
+		for v, t in r.returns {same &&= trials.data[t * trials.cols + col] == v}
+		d := ml_fin.deflated_sharpe_trials(&trials)
+		expect(
+			&passed,
+			&total,
+			trials.cols == 48 &&
+			same &&
+			d.best == col &&
+			rel(math.sqrt(252.0) * d.stats.sharpe, best_sharpe) < 1e-12,
+			fmt.tprintf(
+				"grid search trials: %d x %d; the best point's column equals its strategy's returns %v; deflated_sharpe_trials picks the same point (DSR %.3f)",
+				trials.rows,
+				trials.cols,
+				same,
+				d.dsr,
+			),
+		)
+	}
 	fmt.printf("Kalman pairs reference checks: %d/%d passed\n", passed, total)
+	record_failures(total - passed)
+}
+
+// DSR and PBO of a grid search's trials; the best trial's SR must be the one the grid
+// search reported
+@(private = "file")
+_kp_selection_report :: proc(trials: ^l.Matrix(f64), best_sharpe: f64) {
+	d, pbo := ml_fin.print_selection_stats(trials)
+	ok :=
+		abs(math.sqrt(252.0) * d.stats.sharpe - best_sharpe) <= 1e-12 * max(abs(best_sharpe), 1) &&
+		d.dsr <= d.psr &&
+		pbo >= 0 &&
+		pbo <= 1
+	fmt.printf(
+		"%s selection statistics consistent with the grid search (best SR %.4f)\n",
+		"OK  " if ok else "FAIL",
+		best_sharpe,
+	)
+	record_failures(int(!ok))
 }
 
 kalman_pairs_real_data_test :: proc(allocator: mem.Allocator = context.allocator) {
@@ -544,6 +594,7 @@ kalman_pairs_real_data_grid_test :: proc(allocator: mem.Allocator = context.allo
 	// This is a realistic friction, but it demands high z-score moves to be profitable.
 	transaction_cost := 0.001
 
+	trials: l.Matrix(f64)
 	best_config, best_sharpe := ml_fin.kalman_pairs_grid_search(
 		&aligned_df,
 		"Asset_A",
@@ -555,7 +606,10 @@ kalman_pairs_real_data_grid_test :: proc(allocator: mem.Allocator = context.allo
 		cooldown_days_list,
 		transaction_cost,
 		allocator,
+		&trials,
 	)
+	defer l.matrix_free(&trials)
+	_kp_selection_report(&trials, best_sharpe)
 	fmt.printf("Best Config Found:\n")
 	fmt.printf("  Entry Threshold:  %.2f\n", best_config.entry_threshold)
 	fmt.printf("  Exit Threshold:   %.2f\n", best_config.exit_threshold)
@@ -1409,6 +1463,7 @@ kalman_pairs_auto_select_test :: proc(allocator: mem.Allocator = context.allocat
 	cooldown_days_list := []int{3, 5} // ✅ REMOVED 0 to force cooldown
 	transaction_cost := 0.0001
 
+	trials: l.Matrix(f64)
 	best_config, best_sharpe := ml_fin.kalman_pairs_grid_search(
 		&aligned_df,
 		"Asset_A",
@@ -1420,7 +1475,10 @@ kalman_pairs_auto_select_test :: proc(allocator: mem.Allocator = context.allocat
 		cooldown_days_list,
 		transaction_cost,
 		allocator,
+		&trials,
 	)
+	defer l.matrix_free(&trials)
+	_kp_selection_report(&trials, best_sharpe)
 
 	fmt.println("\n--- Best Configuration Found ---")
 	fmt.printf("  Entry Threshold:   ±%.2f\n", best_config.entry_threshold)

@@ -3,6 +3,7 @@ package ml_finance
 import ana "../analytics"
 import fin "../finance"
 import l "../linalg"
+import "core:fmt"
 import "core:math"
 import "core:mem"
 
@@ -338,4 +339,44 @@ backtest_overfitting :: proc(
 	res.slope = sxy / sxx if sxx > 0 else 0
 	res.intercept = my - res.slope * mx
 	return
+}
+
+// Selection report for a grid of N trials ([T, N] returns, one column per configuration):
+// the best trial's annualised SR with its PSR, the SR0 that N trials of no skill would
+// reach, the DSR against it, and the PBO by CSCV over n_blocks blocks
+print_selection_stats :: proc(
+	trials: ^l.Matrix(f64),
+	periods_per_year := 252.0,
+	n_blocks := 16,
+	indent := "   ",
+) -> (
+	dsr: DeflatedSharpeResult,
+	pbo: f64,
+) {
+	dsr = deflated_sharpe_trials(trials)
+	p := backtest_overfitting(trials, n_blocks, allocator = context.temp_allocator)
+	defer pbo_result_free(&p)
+	ann := math.sqrt(periods_per_year)
+	fmt.printf(
+		"%sselection over %d trials of %d periods: best trial %d, annual SR %.2f, PSR %.3f; the best of %d without skill would reach SR %.2f -> DSR %.3f\n",
+		indent,
+		trials.cols,
+		trials.rows,
+		dsr.best,
+		ann * dsr.stats.sharpe,
+		dsr.psr,
+		trials.cols,
+		ann * dsr.expected_max,
+		dsr.dsr,
+	)
+	fmt.printf(
+		"%sCSCV over %d blocks: PBO %.2f, P[the in-sample best loses out of sample] %.2f, OOS SR = %.2f %+.2f × IS SR (annual)\n",
+		indent,
+		n_blocks,
+		p.pbo,
+		p.prob_oos_loss,
+		ann * p.intercept,
+		p.slope,
+	)
+	return dsr, p.pbo
 }

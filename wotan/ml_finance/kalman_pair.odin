@@ -246,6 +246,10 @@ kalman_pairs_strategy :: proc(
 // ============================================================================
 // In-sample: the grid point with the highest annualised Sharpe ratio
 // (fin.sharpe_ratio_from_returns); the other fields come from DEFAULT_KALMAN_PAIRS_CONFIG.
+// The best of many in-sample Sharpe ratios is biased upwards: pass `trials` to get every
+// grid point's returns as the columns of a [T, N] matrix (allocated with `allocator`, the
+// grid in loop order: entry, exit, noise, min hold, cooldown, the last fastest) for
+// deflated_sharpe_trials / backtest_overfitting / print_selection_stats.
 kalman_pairs_grid_search :: proc(
 	df: ^w.DataFrame,
 	col_x: string,
@@ -257,12 +261,20 @@ kalman_pairs_grid_search :: proc(
 	cooldown_days_list: []int,
 	transaction_cost: f64 = 0.001,
 	allocator: mem.Allocator = context.allocator,
+	trials: ^l.Matrix(f64) = nil,
 ) -> (
 	best_config: KalmanPairsConfig,
 	best_sharpe: f64,
 ) {
 	best_sharpe = -math.F64_MAX
 	best_config = DEFAULT_KALMAN_PAIRS_CONFIG
+	N :=
+		len(entry_thresholds) *
+		len(exit_thresholds) *
+		len(process_noises) *
+		len(min_hold_days_list) *
+		len(cooldown_days_list)
+	j := 0
 
 	for entry in entry_thresholds {
 		for exit in exit_thresholds {
@@ -279,6 +291,16 @@ kalman_pairs_grid_search :: proc(
 
 						result := kalman_pairs_strategy(df, col_x, col_y, config, allocator)
 						sharpe := fin.sharpe_ratio_from_returns(result.returns)
+						if trials != nil {
+							T := len(result.returns)
+							if j == 0 {trials^ = l.matrix_new(f64, T, N, allocator)}
+							assert(
+								T == trials.rows,
+								"kalman_pairs_grid_search: return series of different lengths",
+							)
+							for r, t in result.returns {trials.data[t * N + j] = r}
+						}
+						j += 1
 						pairs_trading_result_free(&result, allocator)
 
 						if sharpe > best_sharpe {
