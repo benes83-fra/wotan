@@ -133,6 +133,8 @@ CVKind :: enum {
 	KFold, // contiguous folds of the (optionally shuffled) samples
 	Stratified_KFold, // every fold keeps the class proportions of y
 	Time_Series, // walk-forward: train on the past, test on the next block
+	Purged_KFold, // contiguous folds; training samples whose labels overlap the test labels are purged, an embargo follows each test block
+	Combinatorial_Purged, // CPCV: n_splits groups, every choice of n_test_groups of them as the test set, purged and embargoed
 }
 
 CVSplitter :: struct {
@@ -146,6 +148,11 @@ CVSplitter :: struct {
 	gap:            int, // samples dropped between train end and test start (purging
 	// against look-ahead from overlapping labels, e.g. multi-day returns)
 	max_train_size: int, // 0 = expanding window; > 0 = rolling window of this length
+	// Purged_KFold / Combinatorial_Purged (samples in time order, sample i observed at i)
+	label_horizon:  int, // sample i's label uses observations i ..= i + label_horizon
+	label_end:      []int, // per sample, the last observation its label uses (>= i); overrides label_horizon
+	embargo:        int, // samples after each test block's last label also kept out of training
+	n_test_groups:  int, // Combinatorial_Purged: groups per test set, 1 <= k < n_splits (0 = 2)
 }
 
 CVFold :: struct {
@@ -163,6 +170,17 @@ CVFold :: struct {
 // - Time_Series: test blocks of test_size samples at the end of the series, the
 //   training set is everything before (block start - gap), the last
 //   max_train_size samples of it if set. Indices ascending; never shuffled.
+// - Purged_KFold (López de Prado 2018, ch. 7): the KFold blocks, never shuffled. Sample
+//   i's label spans observations [i, e_i] (e_i = label_end[i], or i + label_horizon).
+//   A test block [a, b) covers [a, max e_i over the block]; a training sample is purged
+//   when its span intersects that interval (closed), and the `embargo` samples after the
+//   interval's end are dropped as well. With label_horizon = embargo = 0 it is KFold
+//   without shuffling.
+// - Combinatorial_Purged (CPCV, ch. 12): n_splits = N contiguous groups (the KFold blocks);
+//   each of the C(N, k) choices of k = n_test_groups groups (lexicographic, as
+//   itertools.combinations) is a test set, purged and embargoed around every run of
+//   adjacent test groups. cv_cpcv_paths assembles the splits into C(N-1, k-1) backtest
+//   paths. Returns C(N, k) folds, not n_splits.
 cv_make_folds :: proc(
 	cv: CVSplitter,
 	n: int,
@@ -171,19 +189,24 @@ cv_make_folds :: proc(
 ) -> []CVFold {
 	k := cv.n_splits
 	if k < 2 do panic("cv_make_folds: need n_splits >= 2")
+	if cv.kind == .Purged_KFold || cv.kind == .Combinatorial_Purged {
+		return _purged_folds(cv, n, allocator)
+	}
 	folds := make([]CVFold, k, allocator)
 
 	switch cv.kind {
+	case .Purged_KFold, .Combinatorial_Purged:
+		unreachable()
 	case .KFold:
 		if k > n do panic("cv_make_folds: KFold needs n_splits <= n_samples")
 		indices := make([]int, n, context.temp_allocator)
 		defer delete(indices, context.temp_allocator)
 		for i in 0 ..< n {indices[i] = i}
 		if cv.shuffle do _shuffle_indices(indices, cv.random_state)
-		fold_size, remainder := n / k, n % k
+		bounds := cv_block_starts(n, k, context.temp_allocator)
+		defer delete(bounds, context.temp_allocator)
 		for f in 0 ..< k {
-			start := f * fold_size + min(f, remainder)
-			end := start + fold_size + (1 if f < remainder else 0)
+			start, end := bounds[f], bounds[f + 1]
 			folds[f].test = make([]int, end - start, allocator)
 			copy(folds[f].test, indices[start:end])
 			folds[f].train = make([]int, n - (end - start), allocator)
@@ -268,6 +291,148 @@ cv_make_folds :: proc(
 		}
 	}
 	return folds
+}
+
+// Boundaries of k contiguous blocks of n samples, as numpy.array_split / KFold: block b
+// is [starts[b], starts[b + 1]), the first n % k blocks one sample longer (k + 1 entries)
+cv_block_starts :: proc(n, k: int, allocator: mem.Allocator = context.allocator) -> []int {
+	if k < 1 || k > n do panic("cv_block_starts: need 1 <= k <= n")
+	starts := make([]int, k + 1, allocator)
+	for b in 0 ..< k {starts[b + 1] = starts[b] + n / k + (1 if b < n % k else 0)}
+	return starts
+}
+
+// Number of k-element subsets of n elements
+binomial :: proc(n, k: int) -> int {
+	if k < 0 || k > n do return 0
+	c := 1
+	for i in 0 ..< min(k, n - k) {c = c * (n - i) / (i + 1)}
+	return c
+}
+
+// Purged_KFold and Combinatorial_Purged
+@(private = "file")
+_purged_folds :: proc(cv: CVSplitter, n: int, allocator: mem.Allocator) -> []CVFold {
+	N := cv.n_splits
+	if N > n do panic("cv_make_folds: purged CV needs n_splits <= n_samples")
+	if cv.shuffle do panic("cv_make_folds: purged CV keeps the time order (shuffle must be false)")
+	if cv.label_horizon < 0 || cv.embargo < 0 do panic("cv_make_folds: negative label_horizon / embargo")
+	if cv.label_end != nil && len(cv.label_end) != n do panic("cv_make_folds: label_end needs one entry per sample")
+	k := 1
+	if cv.kind == .Combinatorial_Purged {
+		k = cv.n_test_groups if cv.n_test_groups > 0 else 2
+		if k >= N do panic("cv_make_folds: need n_test_groups < n_splits")
+	}
+	label_end :: proc(cv: CVSplitter, i: int) -> int {
+		e := cv.label_end[i] if cv.label_end != nil else i + cv.label_horizon
+		if e < i do panic("cv_make_folds: label_end[i] < i")
+		return e
+	}
+	starts := cv_block_starts(n, N, context.temp_allocator)
+	defer delete(starts, context.temp_allocator)
+	folds := make([]CVFold, binomial(N, k), allocator)
+	groups := make([]int, k, context.temp_allocator)
+	defer delete(groups, context.temp_allocator)
+	for i in 0 ..< k {groups[i] = i}
+	is_test := make([]bool, N, context.temp_allocator)
+	defer delete(is_test, context.temp_allocator)
+	keep := make([]bool, n, context.temp_allocator)
+	defer delete(keep, context.temp_allocator)
+	for &fold in folds {
+		for &v in is_test {v = false}
+		for g in groups {is_test[g] = true}
+		n_test := 0
+		for g in groups {n_test += starts[g + 1] - starts[g]}
+		for &v in keep {v = true}
+		// every run of adjacent test groups [a, b): purge spans meeting [a, last label],
+		// embargo the samples after it
+		g := 0
+		for g < N {
+			if !is_test[g] {g += 1; continue}
+			h := g
+			for h < N && is_test[h] {h += 1}
+			a, b := starts[g], starts[h]
+			last := a
+			for i in a ..< b {last = max(last, label_end(cv, i))}
+			for j in 0 ..< n {
+				if j <= last && label_end(cv, j) >= a {keep[j] = false}
+				if j > last && j <= last + cv.embargo {keep[j] = false}
+			}
+			g = h
+		}
+		n_train := 0
+		for v in keep {if v do n_train += 1}
+		fold.train = make([]int, n_train, allocator)
+		fold.test = make([]int, n_test, allocator)
+		a, b := 0, 0
+		for i in 0 ..< n {
+			if keep[i] {fold.train[a] = i; a += 1}
+		}
+		for gg in groups {
+			for i in starts[gg] ..< starts[gg + 1] {fold.test[b] = i; b += 1}
+		}
+		// next combination
+		i := k - 1
+		for i >= 0 && groups[i] == N - k + i {i -= 1}
+		if i < 0 do break
+		groups[i] += 1
+		for j in i + 1 ..< k {groups[j] = groups[j - 1] + 1}
+	}
+	return folds
+}
+
+// CPCV backtest paths: every group is a test group in C(N-1, k-1) of the C(N, k) splits;
+// path p takes, for each group g, the p-th of those splits (in split order). Returns
+// paths[p * N + g] = the split whose out-of-sample values form group g of path p, and the
+// number of paths, C(N-1, k-1) (López de Prado 2018, ch. 12.4).
+cv_cpcv_paths :: proc(
+	n_groups, n_test_groups: int,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	paths: []int,
+	n_paths: int,
+) {
+	N, k := n_groups, n_test_groups
+	if k < 1 || k >= N do panic("cv_cpcv_paths: need 1 <= n_test_groups < n_groups")
+	n_paths = binomial(N - 1, k - 1)
+	paths = make([]int, n_paths * N, allocator)
+	used := make([]int, N, context.temp_allocator) // paths filled so far per group
+	defer delete(used, context.temp_allocator)
+	groups := make([]int, k, context.temp_allocator)
+	defer delete(groups, context.temp_allocator)
+	for i in 0 ..< k {groups[i] = i}
+	for s in 0 ..< binomial(N, k) {
+		for g in groups {
+			paths[used[g] * N + g] = s
+			used[g] += 1
+		}
+		i := k - 1
+		for i >= 0 && groups[i] == N - k + i {i -= 1}
+		if i < 0 do break
+		groups[i] += 1
+		for j in i + 1 ..< k {groups[j] = groups[j - 1] + 1}
+	}
+	return
+}
+
+// One CPCV backtest path: split_values[s] holds split s's out-of-sample values at its test
+// indices (length n_samples, other entries ignored); the path takes group g from split
+// paths[path * N + g]
+cv_cpcv_path :: proc(
+	split_values: [][]f64,
+	paths: []int,
+	n_groups, path: int,
+	allocator: mem.Allocator = context.allocator,
+) -> []f64 {
+	n := len(split_values[0])
+	starts := cv_block_starts(n, n_groups, context.temp_allocator)
+	defer delete(starts, context.temp_allocator)
+	out := make([]f64, n, allocator)
+	for g in 0 ..< n_groups {
+		src := split_values[paths[path * n_groups + g]]
+		copy(out[starts[g]:starts[g + 1]], src[starts[g]:starts[g + 1]])
+	}
+	return out
 }
 
 cv_folds_free :: proc(folds: []CVFold, allocator: mem.Allocator = context.allocator) {

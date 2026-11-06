@@ -1,6 +1,7 @@
 package ml_finance
 
 import ana "../analytics"
+import ml "../analytics/ML"
 import fin "../finance"
 import l "../linalg"
 import "core:fmt"
@@ -228,9 +229,8 @@ backtest_overfitting :: proc(
 	temp := context.temp_allocator
 
 	// block b holds rows starts[b] ..< starts[b + 1]
-	starts := make([]int, S + 1, temp)
+	starts := ml.cv_block_starts(T, S, temp)
 	defer delete(starts, temp)
-	for b in 0 ..< S {starts[b + 1] = starts[b] + T / S + (1 if b < T % S else 0)}
 
 	// Sharpe: per-block sums, so a combination costs N S instead of N T
 	sums1, sums2: []f64

@@ -1,5 +1,6 @@
 package ml_finance
 
+import ml "../analytics/ML"
 import fin "../finance"
 import l "../linalg"
 import nn "../nn"
@@ -107,7 +108,7 @@ GATFoldResult :: struct {
 // The windows are in time order, so the folds are contiguous blocks (no shuffling, which
 // would put almost identical overlapping windows into both sets). Training windows within
 // `embargo` windows of the validation block are dropped as well (purging, López de Prado
-// 2018, ch. 7); the default -1 means time_steps, enough for windows with stride >= 1 and
+// 2018, ch. 7: ml.CVSplitter's Purged_KFold with label_horizon = embargo); the default -1 means time_steps, enough for windows with stride >= 1 and
 // a target just after the window. Full-batch Adam on the training MSE, early stopping on
 // the validation MSE with patience 10; the parameters of the best epoch are restored
 // before the IC is measured. The adjacency is built from the training windows only.
@@ -133,35 +134,28 @@ gat_cross_val_score :: proc(
 	PATIENCE :: 10
 
 	results := make([]GATFoldResult, n_splits, allocator)
-	fold_size := batch / n_splits
-	remainder := batch % n_splits
+	// purged K-fold with a label horizon of `gap` windows: training windows within gap of
+	// the validation block are dropped
+	folds := ml.cv_make_folds(
+		ml.CVSplitter{kind = .Purged_KFold, n_splits = n_splits, label_horizon = gap},
+		batch,
+		allocator = context.temp_allocator,
+	)
+	defer ml.cv_folds_free(folds, context.temp_allocator)
 	scope: t.Graph_Scope
 	defer t.graph_scope_destroy(&scope)
 
-	for k in 0 ..< n_splits {
-		val_start := k * fold_size + math.min(k, remainder)
-		val_end := val_start + fold_size + (1 if k < remainder else 0)
-
-		train_idx := make([dynamic]int, 0, batch, allocator)
-		val_idx := make([dynamic]int, 0, val_end - val_start, allocator)
-		for i in 0 ..< batch {
-			if i >= val_start && i < val_end {
-				append(&val_idx, i)
-			} else if i < val_start - gap || i >= val_end + gap {
-				append(&train_idx, i)
-			}
-		}
+	for fold, k in folds {
+		train_idx, val_idx := fold.train, fold.test
 		if len(train_idx) == 0 {
 			results[k] = {math.nan_f64(), math.nan_f64(), 0}
-			delete(train_idx)
-			delete(val_idx)
 			continue
 		}
 
-		train_feat := _extract_tensor_by_indices(features, train_idx[:], allocator)
-		train_targ := _extract_tensor_by_indices(targets, train_idx[:], allocator)
-		val_feat := _extract_tensor_by_indices(features, val_idx[:], allocator)
-		val_targ := _extract_tensor_by_indices(targets, val_idx[:], allocator)
+		train_feat := _extract_tensor_by_indices(features, train_idx, allocator)
+		train_targ := _extract_tensor_by_indices(targets, train_idx, allocator)
+		val_feat := _extract_tensor_by_indices(features, val_idx, allocator)
+		val_targ := _extract_tensor_by_indices(targets, val_idx, allocator)
 
 		// owned by the layer from here on (gat_layer_free frees it)
 		adjacency := compute_correlation_adjacency(train_feat, num_assets, time_steps, allocator)
@@ -241,8 +235,6 @@ gat_cross_val_score :: proc(
 		t.tensor_free(train_targ)
 		t.tensor_free(val_feat)
 		t.tensor_free(val_targ)
-		delete(train_idx)
-		delete(val_idx)
 	}
 	return results
 }
