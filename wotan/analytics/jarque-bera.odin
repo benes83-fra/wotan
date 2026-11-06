@@ -4,6 +4,29 @@ import w "../core"
 import "core:math"
 import "core:mem"
 
+// Mean, population variance (divisor n), skewness m3 / m2^1.5 and kurtosis m4 / m2^2
+// (not excess: 3 for a normal), as scipy.stats.skew / kurtosis(fisher=False) with
+// bias=True. Skewness and kurtosis are 0 and 3 when the variance is 0.
+sample_moments :: proc(v: []f64) -> (mean, variance, skewness, kurtosis: f64) {
+	n := f64(len(v))
+	if len(v) == 0 {return 0, 0, 0, 3}
+	for x in v {mean += x}
+	mean /= n
+	m3, m4: f64
+	for x in v {
+		d := x - mean
+		d2 := d * d
+		variance += d2
+		m3 += d2 * d
+		m4 += d2 * d2
+	}
+	variance /= n
+	m3 /= n
+	m4 /= n
+	if variance == 0 {return mean, 0, 0, 3}
+	return mean, variance, m3 / math.pow(variance, 1.5), m4 / (variance * variance)
+}
+
 // ------------------------------------------------------------
 // Jarque–Bera normality test
 // ------------------------------------------------------------
@@ -27,37 +50,10 @@ jarque_bera :: proc(
 		return 0.0, 1.0
 	}
 
-	// mean
-	mean := 0.0
-	for x in v {
-		mean += x
-	}
-	mean /= f64(n)
-
-	// compute central moments
-	m2 := 0.0
-	m3 := 0.0
-	m4 := 0.0
-
-	for x in v {
-		d := x - mean
-		d2 := d * d
-		m2 += d2
-		m3 += d2 * d
-		m4 += d2 * d2
-	}
-
-	m2 /= f64(n)
-	m3 /= f64(n)
-	m4 /= f64(n)
-
+	_, m2, S, K := sample_moments(v)
 	if m2 == 0 {
 		return 0.0, 1.0
 	}
-
-	// sample skewness and kurtosis
-	S := m3 / math.pow(m2, 1.5)
-	K := m4 / (m2 * m2)
 
 	// Jarque–Bera statistic
 	JB = (f64(n) / 6.0) * (S * S + 0.25 * (K - 3.0) * (K - 3.0))
