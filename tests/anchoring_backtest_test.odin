@@ -1,6 +1,8 @@
 package tests
 
+import ml "../wotan/analytics/ML"
 import bfin "../wotan/behavioral_finance"
+import l "../wotan/linalg"
 import plot "../wotan/plot"
 import "core:fmt"
 import "core:math"
@@ -24,16 +26,17 @@ _nw_mean_t :: proc(x: []f64, lags: int) -> (mean, t: f64, n: int) {
 	for v in x {if !math.is_nan(v) {append(&vals, v)}}
 	n = len(vals)
 	if n < 2 {return}
-	for v in vals {mean += v / f64(n)}
-	lrv := 0.0
-	for l in 0 ..= lags {
-		g := 0.0
-		for i in l ..< n {g += (vals[i] - mean) * (vals[i - l] - mean)}
-		g /= f64(n)
-		lrv += g if l == 0 else 2 * (1 - f64(l) / f64(lags + 1)) * g
-	}
-	t = mean / math.sqrt(lrv / f64(n))
-	return
+	// the mean's Newey-West t: OLS on a constant with HAC covariance
+	ones := l.matrix_new(f64, n, 1, context.temp_allocator)
+	for &v in ones.data {v = 1}
+	fit := ml.ols_fit_robust(
+		&ones,
+		vals[:],
+		{type = .HAC, maxlags = lags},
+		.Cholesky,
+		context.temp_allocator,
+	)
+	return fit.beta[0], fit.tvalues[0], n
 }
 
 // prices [assets][days] -> monthly (21-day) George-Hwang (6, 6) returns
