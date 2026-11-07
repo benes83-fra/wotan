@@ -292,7 +292,8 @@ Reference and contract tests print `OK` or `FAIL` for each check and end with a 
 |------|------------|--------|
 | `prospect_theory_test` | `prospect_theory_test` | Prospect theory value and weighting functions as differentiable tensor ops |
 | `prospect_vol_smile_test` | `prospect_vol_smile_test` | Volatility smile produced by prospect theory preferences |
-| `prospect_portfolio_test` 🌐 | `prospect_portfolio_test` | Portfolio optimisation under prospect theory |
+| `behavioral_portfolio_reference_test` | `behavioral_portfolio_reference_test` | CPT portfolio: the CPT value vs numpy, the optimum vs the global one on a 1/600 simplex grid (TK92 with / without probability weighting); mental accounts vs Das, Markowitz, Scheid & Statman (2010) Tables 1–2 (implied γ, weights, aggregate, 44 shortfall probabilities) and their long-only case vs scipy (12.4 bp below the constrained frontier); infeasible / unbounded / max-return accounts, account universes |
+| `prospect_portfolio_test` 🌐 | `prospect_portfolio_test` | Myopic loss aversion (Benartzi & Thaler 1995): the CPT-optimal stock share rises with the evaluation period (1 / 3 / 12 / 60 months); sector ETFs: CPT portfolio vs max Sharpe (printed) |
 | `prospect_ppo_test` 🌐 | `prospect_ppo_test` | PPO agent with prospect theory rewards (disposition effect) |
 | `prospect_reference_test` | `prospect_reference_test` | CPT option prices (Versluis, Lehnert & Wolff 2010) vs Nardon & Pianca (2012): 72 writer / holder, call / put, segregated / aggregated prices (TK92, moderate, Prelec) against a scipy reference that reproduces their Tables 3–5; Table 6 holder–writer intervals around Black-Scholes; rational investor = Black-Scholes; zero prospect value at the price; behavioral Heston = Heston when rational and = log-normal CPT as vol-of-vol → 0 |
 | `market_implied_psychology_test` 🌐🖼 | `market_implied_psychology_test`, `real_market_psychology_test` | Synthetic chain from crash-fearing CPT writers: γ⁺/γ⁻ recovered with the value function fixed, all five parameters cut the RMSE >10×; live SPY calls calibrated (printed) |
@@ -300,7 +301,7 @@ Reference and contract tests print `OK` or `FAIL` for each check and end with a 
 | `behavioral_backtester_test` 🌐🖼 | `behavioral_backtester_test`, `historical_gamma_backtest_test` | Backtesting the market-implied crash-fear (γ⁻ from puts) signal; daily calibration recovers the regime γ⁻ on every day (synthetic) and on three VIX-mapped days (SPY) |
 | `anchoring_reference_test` | `anchoring_reference_test` | 52-week-high ratio vs pandas `p / p.rolling(60).max()` (NaN, zero, negative prices, a delisting); top / bottom 30% portfolios and Jegadeesh–Titman overlapping long / short / spread returns (hold 3, skip 1) vs numpy; behavioral Kalman filter: steady-state gain at α = 0, no upward updates at α = 1 |
 | `anchoring_backtest_test` 🌐🖼 | `anchoring_backtest_test` | George & Hwang (2004) (6, 6) 52-week-high strategy: significant winner − loser spread on a synthetic panel whose prices lag value above the 52-week high, none on the control panel; the 24 large caps over 10 years (printed) |
-| `bpt_test` 🌐 | `bpt_test`, `bpt_v2_test` | Behavioural portfolio theory: mental accounting layers, sleeve mandates |
+| `bpt_test` 🌐 | `bpt_test`, `bpt_v2_test` | Mental-account portfolios (long only) on 9 ETFs, without and with per-account universes: statuses consistent with the shortfall probabilities, weights inside the universes, the aggregate not above the long-only frontier |
 
 ## 12. Plotting
 

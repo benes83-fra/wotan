@@ -1,19 +1,73 @@
 package tests
 
 import bfin "../wotan/behavioral_finance"
-import w "../wotan/core"
 import fin "../wotan/finance"
 import l "../wotan/linalg"
-import net "../wotan/net"
 import "core:fmt"
 import "core:math"
+import "core:math/rand"
 import "core:mem"
+
+// CPT portfolios (TK92, reference return 0):
+//   A. myopic loss aversion (Benartzi & Thaler 1995): stocks (10% a year, 20%
+//      volatility) and bonds (5%, 6%), 500 simulated years; the stock share that
+//      maximizes the CPT value of the returns over the evaluation period rises with the
+//      period (1 < 3 < 12 < 60 months)
+//   B. 11 sector ETFs, 5 years of monthly adjusted returns: the CPT portfolio against
+//      the maximum Sharpe portfolio (printed)
 
 prospect_portfolio_test :: proc(allocator: mem.Allocator) {
 	seed_test(#procedure)
-	fmt.println("\n=== Prospect Theory Portfolio Optimization ===")
-	fmt.println("Comparing Markowitz Max-Sharpe vs Behavioral Prospect Optimization.")
+	fmt.println("\n=== Prospect Theory Portfolio Choice ===")
+	context.allocator = allocator
+	passed, total := 0, 0
+	expect :: proc(passed, total: ^int, ok: bool, name: string) {
+		total^ += 1
+		if ok {passed^ += 1}
+		fmt.printf("%s %s\n", "OK  " if ok else "FAIL", name)
+	}
 
+	// A. myopic loss aversion
+	MONTHS :: 6000
+	logr := make([]f64, 2 * MONTHS)
+	defer delete(logr)
+	for t in 0 ..< MONTHS {
+		logr[2 * t] =
+			(0.10 - 0.5 * 0.20 * 0.20) / 12 + 0.20 / math.sqrt(12.0) * rand.float64_normal(0, 1)
+		logr[2 * t + 1] =
+			(0.05 - 0.5 * 0.06 * 0.06) / 12 + 0.06 / math.sqrt(12.0) * rand.float64_normal(0, 1)
+	}
+	horizons := []int{1, 3, 12, 60}
+	shares: [4]f64
+	for h, k in horizons {
+		n := MONTHS / h
+		R := l.matrix_new(f64, n, 2)
+		defer l.matrix_free(&R)
+		for p in 0 ..< n {
+			for a in 0 ..< 2 {
+				s := 0.0
+				for t in p * h ..< (p + 1) * h {s += logr[2 * t + a]}
+				R.data[p * 2 + a] = math.exp(s) - 1
+			}
+		}
+		w := bfin.prospect_portfolio_optimize(&R, bfin.TK92_PARAMS)
+		shares[k] = w[0]
+		delete(w)
+	}
+	expect(
+		&passed,
+		&total,
+		shares[0] < shares[1] && shares[1] < shares[2] && shares[2] < shares[3],
+		fmt.tprintf(
+			"myopic loss aversion: optimal stock share %.0f%% / %.0f%% / %.0f%% / %.0f%% evaluating every 1 / 3 / 12 / 60 months",
+			100 * shares[0],
+			100 * shares[1],
+			100 * shares[2],
+			100 * shares[3],
+		),
+	)
+
+	// B. sector ETFs
 	symbols := []string {
 		"XLK",
 		"XLF",
@@ -27,132 +81,54 @@ prospect_portfolio_test :: proc(allocator: mem.Allocator) {
 		"XLU",
 		"XLC",
 	}
-	n_assets := len(symbols)
-
-	// 1. Fetch Data
-	fmt.println("- Fetching historical data...")
-	prices := make([][]f64, n_assets, allocator)
-	defer {
-		for a in 0 ..< n_assets {if prices[a] != nil {delete(prices[a], allocator)}}
-		delete(prices, allocator)
-	}
-
-	n_time := 0
-	for a in 0 ..< n_assets {
-		df := net.read_yahoo(symbols[a], .Daily, .FiveYears, allocator)
-		if df.rows >= 252 {
-			close_col := w.column(&df, "Close")
-			prices[a] = make([]f64, df.rows, allocator)
-			for i in 0 ..< df.rows {prices[a][i], _ = w.column_at_float(close_col, i)}
-			if df.rows > n_time {n_time = df.rows}
+	NA := len(symbols)
+	P, _, dates, ok := yahoo_adjclose_panel(symbols, .FiveYears, 600)
+	if !ok {
+		fmt.println("Not enough data (offline?): sector ETF comparison skipped")
+	} else {
+		M := (len(dates) - 1) / 21
+		R := l.matrix_new(f64, M, NA)
+		defer l.matrix_free(&R)
+		for m in 0 ..< M {
+			for a in 0 ..< NA {R.data[m * NA + a] = P[(21 * (m + 1)) * NA + a] / P[(21 * m) * NA + a] - 1}
 		}
-		w.destroy_dataframe(&df)
-	}
-
-	min_time := n_time
-	for a in 0 ..< n_assets {
-		if prices[a] != nil && len(prices[a]) < min_time {min_time = len(prices[a])}
-	}
-
-	// 2. Compute Daily Returns Matrix
-	returns_mat := l.matrix_new(f64, min_time - 1, n_assets, allocator)
-	defer l.matrix_free(&returns_mat)
-
-	for a in 0 ..< n_assets {
-		for t in 1 ..< min_time {
-			returns_mat.data[(t - 1) * n_assets + a] = math.ln_f64(prices[a][t] / prices[a][t - 1])
-		}
-	}
-	// 2b. Compute Monthly Returns Matrix (for Prospect Theory - Myopic Loss Aversion)
-	// Benartzi & Thaler (1995): Evaluating less frequently reduces loss-aversion penalty
-	rebalance_days := 21
-	n_months := (min_time - 1) / rebalance_days
-	monthly_returns := l.matrix_new(f64, n_months, n_assets, allocator)
-	defer l.matrix_free(&monthly_returns)
-
-	m_idx := 0
-	for t in rebalance_days ..< min_time {
-		if t % rebalance_days == 0 && m_idx < n_months {
-			for a in 0 ..< n_assets {
-				// Cumulative return over 21 days
-				monthly_returns.data[m_idx * n_assets + a] = math.ln_f64(
-					prices[a][t] / prices[a][t - rebalance_days],
-				)
-			}
-			m_idx += 1
-		}
-	}
-	// 3. Markowitz Max Sharpe
-	fmt.println("- Computing Markowitz Max-Sharpe Portfolio...")
-	mu := fin.expected_returns_from_history(&returns_mat, allocator)
-	defer delete(mu, allocator)
-
-	cov := fin.covariance_matrix(&returns_mat, allocator)
-	defer l.matrix_free(&cov)
-
-	w_sharpe := fin.max_sharpe_portfolio(mu, &cov, 0.0, allocator)
-	defer delete(w_sharpe, allocator)
-
-	metrics_sharpe := bfin.prospect_metrics(
-		w_sharpe,
-		&returns_mat,
-		bfin.ProspectPortfolioParams{0.88, 0.88, 2.25, 0.0},
-	)
-
-	// 4. Prospect Theory Optimization (Evaluated Monthly to avoid Myopic Loss Aversion)
-	fmt.println("- Computing Prospect Theory Portfolio (Loss-Averse, Monthly Evaluation)...")
-	params := bfin.ProspectPortfolioParams {
-		alpha     = 0.88,
-		beta      = 0.88,
-		lambda    = 2.25,
-		ref_point = 0.0,
-	}
-
-	w_prospect := bfin.prospect_portfolio_optimize(&monthly_returns, params, 0.1, 3000, allocator)
-	defer delete(w_prospect, allocator)
-
-	// Evaluate metrics on the monthly data
-	metrics_prospect := bfin.prospect_metrics(w_prospect, &monthly_returns, params)
-
-	// 5. Print Comparison
-	fmt.println("\n--- Asset Allocation Comparison ---")
-	fmt.printf("%-5s | %-10s | %-10s\n", "Asset", "Max Sharpe", "Prospect")
-	fmt.println("------|------------|-----------")
-	for a in 0 ..< n_assets {
+		mu := fin.expected_returns_from_history(&R)
+		defer delete(mu)
+		cov := fin.covariance_matrix(&R)
+		defer l.matrix_free(&cov)
+		w_sharpe := fin.constrained_max_sharpe_portfolio(
+			mu,
+			&cov,
+			0,
+			{no_short_selling = true},
+			allocator,
+		)
+		defer delete(w_sharpe)
+		w_cpt := bfin.prospect_portfolio_optimize(&R, bfin.TK92_PARAMS)
+		defer delete(w_cpt)
+		ms := bfin.prospect_metrics(w_sharpe, &R, bfin.TK92_PARAMS)
+		mc := bfin.prospect_metrics(w_cpt, &R, bfin.TK92_PARAMS)
+		fmt.printf("%d months. %-5s | %-10s | %-10s\n", M, "ETF", "Max Sharpe", "CPT")
+		for a in 0 ..< NA {fmt.printf("  %-5s | %9.1f%% | %9.1f%%\n", symbols[a], 100 * w_sharpe[a], 100 * w_cpt[a])}
 		fmt.printf(
-			"%-5s | %9.2f%% | %9.2f%%\n",
-			symbols[a],
-			w_sharpe[a] * 100.0,
-			w_prospect[a] * 100.0,
+			"  monthly mean %.2f%% / %.2f%%, volatility %.2f%% / %.2f%%, P(loss) %.0f%% / %.0f%%, CPT value %.5f / %.5f\n",
+			100 * ms.expected_return,
+			100 * mc.expected_return,
+			100 * ms.volatility,
+			100 * mc.volatility,
+			100 * ms.loss_probability,
+			100 * mc.loss_probability,
+			ms.cpt_value,
+			mc.cpt_value,
+		)
+		expect(
+			&passed,
+			&total,
+			mc.cpt_value >= ms.cpt_value,
+			"the CPT portfolio's CPT value is at least the max-Sharpe portfolio's",
 		)
 	}
 
-	fmt.println("\n--- Performance Metrics (Daily) ---")
-	fmt.printf(
-		"Expected Return:   %+8.4f%%  |  %+8.4f%%\n",
-		metrics_sharpe.expected_return * 100.0,
-		metrics_prospect.expected_return * 100.0,
-	)
-	fmt.printf(
-		"Volatility:        %8.4f%%  |  %8.4f%%\n",
-		metrics_sharpe.volatility * 100.0,
-		metrics_prospect.volatility * 100.0,
-	)
-	fmt.printf(
-		"Loss Probability:  %8.2f%%  |  %8.2f%%\n",
-		metrics_sharpe.loss_probability * 100.0,
-		metrics_prospect.loss_probability * 100.0,
-	)
-	fmt.printf(
-		"Prospect Utility:  %8.4f   |  %8.4f\n",
-		metrics_sharpe.prospect_utility,
-		metrics_prospect.prospect_utility,
-	)
-
-	fmt.println("\n💡 Insight: Prospect Theory heavily penalizes assets with 'fat left tails'")
-	fmt.println(
-		"(severe drawdowns), naturally shifting weight toward smoother, compounding assets.",
-	)
-
-	fmt.println("\n=== Prospect Portfolio Test Complete ===\n")
+	fmt.printf("Prospect portfolio: %d/%d passed\n", passed, total)
+	record_failures(total - passed)
 }

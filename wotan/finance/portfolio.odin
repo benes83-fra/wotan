@@ -162,6 +162,29 @@ max_sharpe_portfolio :: proc(
 }
 
 // ============================================================================
+// Mean-Variance Utility Portfolio
+// ============================================================================
+
+// Solve: max wᵀμ - (γ/2) wᵀΣw  subject to: sum(w) = 1 (short sales allowed)
+// Solution (Das, Markowitz, Scheid & Statman 2010, eq. 3):
+//   w = (1/γ) Σ⁻¹ [μ - ((1ᵀΣ⁻¹μ - γ) / 1ᵀΣ⁻¹1) 1]
+// γ → ∞ gives the minimum variance portfolio
+risk_aversion_portfolio :: proc(
+	expected_returns: []f64,
+	cov_matrix: ^l.Matrix(f64),
+	gamma: f64,
+	allocator: mem.Allocator = context.allocator,
+) -> []f64 {
+	assert(gamma > 0, "risk_aversion_portfolio: gamma must be positive")
+	c := _mv_core(expected_returns, cov_matrix, "risk_aversion_portfolio: dimension mismatch")
+	defer _mv_core_free(&c)
+	weights := make([]f64, len(expected_returns), allocator)
+	k := (c.B - gamma) / c.D
+	for i in 0 ..< len(weights) {weights[i] = (c.y[i] - k * c.x[i]) / gamma}
+	return weights
+}
+
+// ============================================================================
 // Efficient Frontier
 // ============================================================================
 

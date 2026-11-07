@@ -282,39 +282,70 @@ negative_sharpe_gradient :: proc(
 // ============================================================================
 // Constrained Portfolio Optimization
 // ============================================================================
-// All three solve min f(w) over the feasible set by spectral projected gradient
+// All solve min f(w) over the feasible set by spectral projected gradient
 // (Birgin, Martínez & Raydan 2000): Barzilai-Borwein steps, a non-monotone
-// Armijo line search and the exact projection. Variance is convex and the
-// negative Sharpe ratio is pseudoconvex where the excess return is positive, so
-// a stationary point is the global optimum. Iteration stops when the projected
-// gradient step ‖P(w - ∇f) - w‖∞ falls below tol (f scaled to O(1)).
+// Armijo line search and the exact projection. Variance and the mean-variance
+// utility are convex and the negative Sharpe ratio is pseudoconvex where the
+// excess return is positive, so a stationary point is the global optimum.
+// Iteration stops when the projected gradient step ‖P(w - ∇f) - w‖∞ falls below
+// tol (f scaled to O(1)).
+
+@(private = "file")
+_Objective_Kind :: enum {
+	Variance,
+	Sharpe,
+	Utility, // gamma/2 w'Σw - μ'w
+	Custom,
+}
 
 @(private = "file")
 _Objective :: struct {
-	cov:    ^l.Matrix(f64),
-	mu:     []f64,
-	rf:     f64,
-	scale:  f64, // the objective is multiplied by this
-	sharpe: bool,
+	kind:  _Objective_Kind,
+	cov:   ^l.Matrix(f64),
+	mu:    []f64,
+	rf:    f64,
+	gamma: f64,
+	scale: f64, // the objective is multiplied by this
+	f:     proc(w: []f64, user: rawptr) -> f64,
+	grad:  proc(w, g: []f64, user: rawptr),
+	user:  rawptr,
 }
 
 @(private = "file")
 _obj_value :: proc(o: ^_Objective, w: []f64) -> f64 {
-	if o.sharpe {return o.scale * negative_sharpe(w, o.mu, o.cov, o.rf)}
+	switch o.kind {
+	case .Sharpe:
+		return o.scale * negative_sharpe(w, o.mu, o.cov, o.rf)
+	case .Utility:
+		return o.scale * (0.5 * o.gamma * portfolio_variance(w, o.cov) - l.dot_simd(o.mu, w))
+	case .Custom:
+		return o.scale * o.f(w, o.user)
+	case .Variance:
+	}
 	return o.scale * portfolio_variance(w, o.cov)
 }
 
 @(private = "file")
 _obj_grad :: proc(o: ^_Objective, w, g: []f64) {
 	n := len(w)
-	if o.sharpe {
+	switch o.kind {
+	case .Sharpe:
 		gs := negative_sharpe_gradient(w, o.mu, o.cov, o.rf, context.temp_allocator)
 		for i in 0 ..< n {g[i] = o.scale * gs[i]}
 		delete(gs, context.temp_allocator)
-		return
-	}
-	for i in 0 ..< n {
-		g[i] = 2.0 * o.scale * l.dot_simd(o.cov.data[i * o.cov.cols:i * o.cov.cols + n], w)
+	case .Utility:
+		for i in 0 ..< n {
+			g[i] =
+				o.scale *
+				(o.gamma * l.dot_simd(o.cov.data[i * o.cov.cols:i * o.cov.cols + n], w) - o.mu[i])
+		}
+	case .Custom:
+		o.grad(w, g, o.user)
+		for i in 0 ..< n {g[i] *= o.scale}
+	case .Variance:
+		for i in 0 ..< n {
+			g[i] = 2.0 * o.scale * l.dot_simd(o.cov.data[i * o.cov.cols:i * o.cov.cols + n], w)
+		}
 	}
 }
 
@@ -328,6 +359,7 @@ _spg_minimize :: proc(
 	max_iter: int,
 	tol: f64,
 	allocator: mem.Allocator,
+	init: []f64 = nil,
 ) -> []f64 {
 	MEMORY :: 10
 	ALPHA_MIN, ALPHA_MAX :: 1e-30, 1e30
@@ -338,7 +370,7 @@ _spg_minimize :: proc(
 	g, d, wn, gn, pg :=
 		buf[0:n], buf[n:2 * n], buf[2 * n:3 * n], buf[3 * n:4 * n], buf[4 * n:5 * n]
 
-	for i in 0 ..< n {w[i] = 1.0 / f64(n)}
+	for i in 0 ..< n {w[i] = init[i] if init != nil else 1.0 / f64(n)}
 	_project_feasible(w, c, target_mu, target)
 	f := _obj_value(o, w)
 	_obj_grad(o, w, g)
@@ -386,9 +418,17 @@ _spg_minimize :: proc(
 			sy += s * (gn[i] - g[i])
 			ss += s * s
 		}
-		alpha = ALPHA_MAX if sy <= 0 else math.clamp(ss / sy, ALPHA_MIN, ALPHA_MAX)
 		copy(w, wn)
 		copy(g, gn)
+		if sy > 0 {
+			alpha = math.clamp(ss / sy, ALPHA_MIN, ALPHA_MAX)
+		} else {
+			// no positive curvature along the step (non-convex objectives): restart from
+			// the initial step rule. Birgin et al.'s ALPHA_MAX here makes the next trial
+			// point w - 1e30 g, whose projection keeps only ~1e14 of rounding noise
+			r := pg_norm(w, g, pg, c, target_mu, target)
+			alpha = math.clamp(1.0 / r, ALPHA_MIN, ALPHA_MAX) if r > 0 else 1.0
+		}
 		f = fn
 		history[k % MEMORY] = f
 	}
@@ -431,11 +471,11 @@ constrained_max_sharpe_portfolio :: proc(
 	tol: f64 = 1e-12,
 ) -> []f64 {
 	o := _Objective {
-		cov    = cov,
-		mu     = returns,
-		rf     = rf,
-		scale  = 1.0,
-		sharpe = true,
+		kind  = .Sharpe,
+		cov   = cov,
+		mu    = returns,
+		rf    = rf,
+		scale = 1.0,
 	}
 	return _spg_minimize(&o, constraints, nil, 0, len(returns), max_iter, tol, allocator)
 }
@@ -466,6 +506,52 @@ constrained_mean_variance_portfolio :: proc(
 		tol,
 		allocator,
 	)
+}
+
+// Constrained mean-variance utility portfolio: max μᵀw - (γ/2) wᵀΣw over the
+// feasible set (unconstrained: risk_aversion_portfolio)
+constrained_risk_aversion_portfolio :: proc(
+	returns: []f64,
+	cov: ^l.Matrix(f64),
+	gamma: f64,
+	constraints: PortfolioConstraints,
+	allocator: mem.Allocator,
+	max_iter: int = 10_000,
+	tol: f64 = 1e-12,
+) -> []f64 {
+	o := _Objective {
+		kind  = .Utility,
+		cov   = cov,
+		mu    = returns,
+		gamma = gamma,
+		scale = 1.0,
+	}
+	return _spg_minimize(&o, constraints, nil, 0, len(returns), max_iter, tol, allocator)
+}
+
+// min f(w) over the feasible set for a user objective and its gradient (scale both
+// to O(1): tol applies to the projected gradient step), from init (nil = equal
+// weights). Global only for convex f; for others a stationary point near init
+constrained_minimize :: proc(
+	n: int,
+	f: proc(w: []f64, user: rawptr) -> f64,
+	grad: proc(w, g: []f64, user: rawptr),
+	user: rawptr,
+	constraints: PortfolioConstraints,
+	allocator: mem.Allocator,
+	init: []f64 = nil,
+	max_iter: int = 10_000,
+	tol: f64 = 1e-12,
+) -> []f64 {
+	assert(init == nil || len(init) == n, "constrained_minimize: init must have n weights")
+	o := _Objective {
+		kind  = .Custom,
+		f     = f,
+		grad  = grad,
+		user  = user,
+		scale = 1.0,
+	}
+	return _spg_minimize(&o, constraints, nil, 0, n, max_iter, tol, allocator, init)
 }
 
 // ============================================================================

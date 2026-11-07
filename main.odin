@@ -1102,6 +1102,8 @@ main :: proc() {
 	free_all(context.temp_allocator)
 	test.anchoring_backtest_test(context.temp_allocator)
 	free_all(context.temp_allocator)
+	test.behavioral_portfolio_reference_test(context.temp_allocator)
+	free_all(context.temp_allocator)
 	test.prospect_portfolio_test(context.temp_allocator)
 	free_all(context.temp_allocator)
 	test.bpt_test(context.temp_allocator)

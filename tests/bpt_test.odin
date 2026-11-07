@@ -1,254 +1,178 @@
 package tests
 
 import bfin "../wotan/behavioral_finance"
-import w "../wotan/core"
 import fin "../wotan/finance"
 import l "../wotan/linalg"
-import net "../wotan/net"
 import "core:fmt"
 import "core:math"
 import "core:mem"
 
-bpt_test :: proc(allocator: mem.Allocator) {
-	seed_test(#procedure)
-	fmt.println("\n=== Behavioral Portfolio Theory (Mental Accounting) ===")
-	fmt.println("Building the Shefrin & Statman 3-Layer Pyramid.")
-	fmt.println("Layer 1: Safety (Min Variance)")
-	fmt.println("Layer 2: Aspiration (Max Sharpe)")
-	fmt.println("Layer 3: Speculative (Risk-Seeking Prospect)")
+// Behavioral portfolio theory with mental accounts (Das, Markowitz, Scheid & Statman
+// 2010) on 9 ETFs (bonds, gold, utilities, the market, sectors), 5 years of monthly
+// adjusted returns, annualized (x 12), long only (with short sales the in-sample
+// frontier is so steep that every account's expected return is unbounded; the
+// short-sale case is checked against DMSS in behavioral_portfolio_reference_test).
+// Accounts: safety (H -10%, alpha 5%, 40% of wealth), aspiration (-20%, 10%, 50%),
+// speculative (-35%, 20%, 10%).
+//   bpt_test     every asset in every account
+//   bpt_v2_test  each account restricted to its own assets (safety: TLT, GLD, XLU;
+//                aspiration: SPY, XLF, XLI, XLK; speculative: XLK, XLE, XLY)
+// Checked: the statuses agree with the shortfall probabilities, the weights are
+// nonnegative and inside the universes, the aggregate is not above the long-only
+// frontier (its distance printed); the portfolios are printed.
 
-	// Universe: Sectors + Bonds + Gold + Broad Market
-	symbols := []string {
-		"TLT", // Bonds (Safety)
-		"GLD", // Gold (Safety)
-		"XLU", // Utilities (Safety)
-		"SPY", // Broad Market (Aspiration)
-		"XLF", // Financials (Aspiration)
-		"XLI", // Industrials (Aspiration)
-		"XLK", // Tech (Speculative/Aspiration)
-		"XLE", // Energy (Speculative)
-		"XLY", // Discretionary (Speculative)
+@(private = "file")
+_BPT_SYMBOLS := []string{"TLT", "GLD", "XLU", "SPY", "XLF", "XLI", "XLK", "XLE", "XLY"}
+
+@(private = "file")
+_bpt_inputs :: proc() -> (mu: []f64, cov: l.Matrix(f64), ok: bool) {
+	NA := len(_BPT_SYMBOLS)
+	P, _, dates, got := yahoo_adjclose_panel(_BPT_SYMBOLS, .FiveYears, 600)
+	if !got {return}
+	M := (len(dates) - 1) / 21
+	R := l.matrix_new(f64, M, NA)
+	defer l.matrix_free(&R)
+	for m in 0 ..< M {
+		for a in 0 ..< NA {R.data[m * NA + a] = P[(21 * (m + 1)) * NA + a] / P[(21 * m) * NA + a] - 1}
 	}
-	n_assets := len(symbols)
+	mu = fin.expected_returns_from_history(&R)
+	cov = fin.covariance_matrix(&R)
+	for &v in mu {v *= 12}
+	for &v in cov.data {v *= 12}
+	return mu, cov, true
+}
 
-	// 1. Fetch Data
-	fmt.println("- Fetching historical data...")
-	prices := make([][]f64, n_assets, allocator)
-	defer {
-		for a in 0 ..< n_assets {if prices[a] != nil {delete(prices[a], allocator)}}
-		delete(prices, allocator)
-	}
-
-	n_time := 0
-	for a in 0 ..< n_assets {
-		df := net.read_yahoo(symbols[a], .Daily, .FiveYears, allocator)
-		if df.rows >= 252 {
-			close_col := w.column(&df, "Close")
-			prices[a] = make([]f64, df.rows, allocator)
-			for i in 0 ..< df.rows {prices[a][i], _ = w.column_at_float(close_col, i)}
-			if df.rows > n_time {n_time = df.rows}
-		}
-		w.destroy_dataframe(&df)
-	}
-
-	min_time := n_time
-	for a in 0 ..< n_assets {
-		if prices[a] != nil && len(prices[a]) < min_time {min_time = len(prices[a])}
-	}
-
-	// 2. Compute Monthly Returns (Avoid Myopic Loss Aversion)
-	rebalance_days := 21
-	n_months := (min_time - 1) / rebalance_days
-	monthly_returns := l.matrix_new(f64, n_months, n_assets, allocator)
-	defer l.matrix_free(&monthly_returns)
-
-	m_idx := 0
-	for t in rebalance_days ..< min_time {
-		if t % rebalance_days == 0 && m_idx < n_months {
-			for a in 0 ..< n_assets {
-				monthly_returns.data[m_idx * n_assets + a] = math.ln_f64(
-					prices[a][t] / prices[a][t - rebalance_days],
-				)
-			}
-			m_idx += 1
-		}
-	}
-
-	// 3. Run BPT Optimizer
-	// Typical retail investor allocation: 40% Safety, 50% Aspiration, 10% Speculative
-	fmt.println("- Optimizing Mental Accounting Layers...")
-	combined, w_safety, w_asp, w_spec := bfin.bpt_optimize(
-		&monthly_returns,
-		0.40,
-		0.50,
-		0.10,
-		allocator,
-	)
-	defer {
-		delete(combined, allocator)
-		delete(w_safety, allocator)
-		delete(w_asp, allocator)
-		delete(w_spec, allocator)
-	}
-
-	// 4. Print the Pyramid
-	fmt.println("\n--- The Mental Accounting Pyramid ---")
+@(private = "file")
+_bpt_print :: proc(res: ^bfin.BPT_Result, mu: []f64, cov: ^l.Matrix(f64)) {
 	fmt.printf(
-		"%-5s | %-10s | %-10s | %-10s | %-10s\n",
+		"%-5s | %8s | %10s | %11s | %9s\n",
 		"Asset",
 		"Safety",
 		"Aspiration",
 		"Speculative",
-		"COMBINED",
+		"Aggregate",
 	)
-	fmt.println("------|------------|------------|-------------|-----------")
-	for a in 0 ..< n_assets {
+	for s, a in _BPT_SYMBOLS {
 		fmt.printf(
-			"%-5s | %9.2f%% | %9.2f%% | %10.2f%% | %9.2f%%\n",
-			symbols[a],
-			w_safety[a] * 100.0,
-			w_asp[a] * 100.0,
-			w_spec[a] * 100.0,
-			combined[a] * 100.0,
+			"%-5s | %7.1f%% | %9.1f%% | %10.1f%% | %8.1f%%\n",
+			s,
+			100 * res.accounts[0].weights[a],
+			100 * res.accounts[1].weights[a],
+			100 * res.accounts[2].weights[a],
+			100 * res.aggregate[a],
 		)
 	}
-
-	// 5. Evaluate Combined Metrics
-	metrics := bfin.prospect_metrics(
-		combined,
-		&monthly_returns,
-		bfin.ProspectPortfolioParams{0.88, 0.88, 2.25, 0.0},
+	for acc, k in res.accounts {
+		fmt.printf(
+			"  account %d: %v, implied gamma %.3f, mean %.2f%%, volatility %.2f%%\n",
+			k,
+			acc.status,
+			acc.gamma,
+			100 * acc.expected_return,
+			100 * acc.volatility,
+		)
+	}
+	fmt.printf(
+		"  aggregate: mean %.2f%%, volatility %.2f%%\n",
+		100 * l.dot_simd(res.aggregate, mu),
+		100 * math.sqrt(fin.portfolio_variance(res.aggregate, cov)),
 	)
+}
 
-	fmt.println("\n--- Combined Portfolio Metrics (Monthly) ---")
-	fmt.printf("Expected Return:   %+8.4f%%\n", metrics.expected_return * 100.0)
-	fmt.printf("Volatility:        %8.4f%%\n", metrics.volatility * 100.0)
-	fmt.printf("Loss Probability:  %8.2f%%\n", metrics.loss_probability * 100.0)
-	fmt.printf("Prospect Utility:  %8.4f\n", metrics.prospect_utility)
+@(private = "file")
+_bpt_accounts :: proc(universes: [3][]bool = {}) -> [3]bfin.Mental_Account {
+	return {
+		{threshold = -0.10, probability = 0.05, share = 0.4, universe = universes[0]},
+		{threshold = -0.20, probability = 0.10, share = 0.5, universe = universes[1]},
+		{threshold = -0.35, probability = 0.20, share = 0.1, universe = universes[2]},
+	}
+}
 
-	fmt.println("\n💡 Insight: BPT perfectly separates human psychological needs.")
-	fmt.println("The Safety layer hides in Bonds/Gold, Aspiration rides the Market,")
-	fmt.println("and Speculative chases high-beta Tech/Energy without risking the core.")
+// Every account's result agrees with its status: Optimal meets P(r < H) = alpha,
+// Max_Return stays within alpha, Infeasible (the closest portfolio) misses it; the
+// weights are nonnegative and inside the account's universe
+@(private = "file")
+_bpt_check :: proc(
+	res: ^bfin.BPT_Result,
+	accounts: []bfin.Mental_Account,
+	mu: []f64,
+	cov: ^l.Matrix(f64),
+) -> int {
+	consistent, in_universe := true, true
+	for acc, k in res.accounts {
+		a := accounts[k]
+		p := bfin.shortfall_probability(acc.weights, mu, cov, a.threshold)
+		switch acc.status {
+		case .Optimal:
+			consistent &&= abs(p - a.probability) < 1e-6
+		case .Max_Return:
+			consistent &&= p <= a.probability + 1e-9
+		case .Infeasible:
+			consistent &&= p > a.probability
+		case .Unbounded:
+			consistent = false // long only
+		}
+		for v, i in acc.weights {in_universe &&= v >= 0 && (a.universe == nil || a.universe[i] || v == 0)}
+	}
+	// the aggregate against the long-only frontier at its volatility (DMSS section V)
+	lm := l.dot_simd(res.aggregate, mu)
+	ls := math.sqrt(fin.portfolio_variance(res.aggregate, cov))
+	lo, hi := lm, lm
+	for m in mu {hi = max(hi, m)}
+	for _ in 0 ..< 100 {
+		mid := 0.5 * (lo + hi)
+		wf := fin.constrained_mean_variance_portfolio(
+			mu,
+			cov,
+			mid,
+			{no_short_selling = true},
+			context.allocator,
+		)
+		if math.sqrt(fin.portfolio_variance(wf, cov)) <= ls {lo = mid} else {hi = mid}
+		delete(wf)
+	}
+	ok := consistent && in_universe && lo - lm >= -1e-9
+	fmt.printf(
+		"%s statuses consistent with P(r < H) (Optimal = alpha, Max_Return <= alpha, Infeasible > alpha), weights nonnegative and in each universe; the aggregate %.1f bp below the long-only frontier\n",
+		"OK  " if ok else "FAIL",
+		1e4 * (lo - lm),
+	)
+	return 0 if ok else 1
+}
 
-	fmt.println("\n=== Behavioral Portfolio Theory Test Complete ===\n")
+bpt_test :: proc(allocator: mem.Allocator) {
+	seed_test(#procedure)
+	fmt.println("\n=== Behavioral Portfolio Theory: Mental Accounts (long only) ===")
+	context.allocator = allocator
+	mu, cov, ok := _bpt_inputs()
+	if !ok {
+		fmt.println("Not enough data (offline?): skipped")
+		return
+	}
+	defer {delete(mu); l.matrix_free(&cov)}
+	accounts := _bpt_accounts()
+	res := bfin.bpt_optimize(mu, &cov, accounts[:], long_only = true)
+	defer bfin.bpt_result_free(&res)
+	_bpt_print(&res, mu, &cov)
+	record_failures(_bpt_check(&res, accounts[:], mu, &cov))
 }
 
 bpt_v2_test :: proc(allocator: mem.Allocator) {
 	seed_test(#procedure)
-	fmt.println("\n=== Behavioral Portfolio Theory V2 (Sleeve Mandating - FIXED) ===")
-	fmt.println("Enforcing human narrative constraints on the Mental Accounting Pyramid.")
-	fmt.println("Speculative Layer now uses Upside Variance (Lottery Ticket Hunting).")
-
-	symbols := []string{"TLT", "GLD", "XLU", "SPY", "XLF", "XLI", "XLK", "XLE", "XLY"}
-	n_assets := len(symbols)
-
-	fmt.println("- Fetching historical data...")
-	prices := make([][]f64, n_assets, allocator)
-	defer {
-		for a in 0 ..< n_assets {if prices[a] != nil {delete(prices[a], allocator)}}
-		delete(prices, allocator)
+	fmt.println("\n=== Behavioral Portfolio Theory: Mental Accounts with Mandates (long only) ===")
+	context.allocator = allocator
+	mu, cov, ok := _bpt_inputs()
+	if !ok {
+		fmt.println("Not enough data (offline?): skipped")
+		return
 	}
-
-	n_time := 0
-	for a in 0 ..< n_assets {
-		df := net.read_yahoo(symbols[a], .Daily, .FiveYears, allocator)
-		if df.rows >= 252 {
-			close_col := w.column(&df, "Close")
-			prices[a] = make([]f64, df.rows, allocator)
-			for i in 0 ..< df.rows {prices[a][i], _ = w.column_at_float(close_col, i)}
-			if df.rows > n_time {n_time = df.rows}
-		}
-		w.destroy_dataframe(&df)
-	}
-
-	min_time := n_time
-	for a in 0 ..< n_assets {
-		if prices[a] != nil && len(prices[a]) < min_time {min_time = len(prices[a])}
-	}
-
-	rebalance_days := 21
-	n_months := (min_time - 1) / rebalance_days
-	monthly_returns := l.matrix_new(f64, n_months, n_assets, allocator)
-	defer l.matrix_free(&monthly_returns)
-
-	m_idx := 0
-	for t in rebalance_days ..< min_time {
-		if t % rebalance_days == 0 && m_idx < n_months {
-			for a in 0 ..< n_assets {
-				monthly_returns.data[m_idx * n_assets + a] = math.ln_f64(
-					prices[a][t] / prices[a][t - rebalance_days],
-				)
-			}
-			m_idx += 1
-		}
-	}
-
-	safety_mask := make([]bool, n_assets, allocator)
-	safety_mask[0] = true; safety_mask[1] = true; safety_mask[2] = true
-
-	asp_mask := make([]bool, n_assets, allocator)
-	asp_mask[3] = true; asp_mask[4] = true; asp_mask[5] = true; asp_mask[6] = true
-
-	spec_mask := make([]bool, n_assets, allocator)
-	spec_mask[7] = true; spec_mask[8] = true
-
-	defer {delete(safety_mask, allocator); delete(asp_mask, allocator)
-		delete(spec_mask, allocator)}
-
-	fmt.println("- Optimizing Mandated Sleeves...")
-	combined, w_safety, w_asp, w_spec := bfin.bpt_optimize_v2(
-		&monthly_returns,
-		safety_mask,
-		asp_mask,
-		spec_mask,
-		0.40,
-		0.50,
-		0.10,
-		allocator,
-	)
-	defer {
-		delete(combined, allocator)
-		delete(w_safety, allocator)
-		delete(w_asp, allocator)
-		delete(w_spec, allocator)
-	}
-
-	fmt.println("\n--- The Mandated Mental Accounting Pyramid ---")
-	fmt.printf(
-		"%-5s | %-10s | %-10s | %-10s | %-10s\n",
-		"Asset",
-		"Safety",
-		"Aspiration",
-		"Speculative",
-		"COMBINED",
-	)
-	fmt.println("------|------------|------------|-------------|-----------")
-	for a in 0 ..< n_assets {
-		fmt.printf(
-			"%-5s | %9.2f%% | %9.2f%% | %10.2f%% | %9.2f%%\n",
-			symbols[a],
-			w_safety[a] * 100.0,
-			w_asp[a] * 100.0,
-			w_spec[a] * 100.0,
-			combined[a] * 100.0,
-		)
-	}
-
-	metrics := bfin.prospect_metrics(
-		combined,
-		&monthly_returns,
-		bfin.ProspectPortfolioParams{0.88, 0.88, 2.25, 0.0},
-	)
-
-	fmt.println("\n--- Combined Mandated Portfolio Metrics (Monthly) ---")
-	fmt.printf("Expected Return:   %+8.4f%%\n", metrics.expected_return * 100.0)
-	fmt.printf("Volatility:        %8.4f%%\n", metrics.volatility * 100.0)
-	fmt.printf("Loss Probability:  %8.2f%%\n", metrics.loss_probability * 100.0)
-	fmt.printf("Prospect Utility:  %8.4f\n", metrics.prospect_utility)
-
-	fmt.println(
-		"\n💡 Insight: The Speculative layer now actively hunts for explosive upside variance.",
-	)
-
-	fmt.println("\n=== Behavioral Portfolio Theory V2 Test Complete ===\n")
+	defer {delete(mu); l.matrix_free(&cov)}
+	safety := []bool{true, true, true, false, false, false, false, false, false}
+	aspiration := []bool{false, false, false, true, true, true, true, false, false}
+	speculative := []bool{false, false, false, false, false, false, true, true, true}
+	accounts := _bpt_accounts({safety, aspiration, speculative})
+	res := bfin.bpt_optimize(mu, &cov, accounts[:], long_only = true)
+	defer bfin.bpt_result_free(&res)
+	_bpt_print(&res, mu, &cov)
+	record_failures(_bpt_check(&res, accounts[:], mu, &cov))
 }
