@@ -2,6 +2,7 @@ package tests
 
 import w "../wotan/core"
 import "core:fmt"
+import "core:math"
 import "core:mem"
 
 // DataFrame core contracts:
@@ -66,6 +67,33 @@ core_contracts_test :: proc(allocator: mem.Allocator) {
 		w.destroy_column(&d)
 		w.destroy_column(&eq)
 		w.destroy_dataframe(&df)
+	}
+	// column_at_numeric: Int (e.g. Yahoo's Volume), Float, Bool as f64; nulls, NaN and
+	// strings are null. column_at_float on the Int column reinterprets the bits.
+	{
+		vi := ints("v", []int{51_234_567, 7, 0}, 2)
+		vf := w.column_from_f64("f", []f64{2.5, math.nan_f64()})
+		vb := w.column_from_bools("b", []bool{true})
+		vs := w.column_from_strings("s", []string{"1"})
+		defer {w.destroy_column(&vi); w.destroy_column(&vf); w.destroy_column(&vb)
+			w.destroy_column(&vs)}
+		i0, n0 := w.column_at_numeric(&vi, 0)
+		_, n2 := w.column_at_numeric(&vi, 2)
+		f0, fn0 := w.column_at_numeric(&vf, 0)
+		_, fn1 := w.column_at_numeric(&vf, 1)
+		b0, bn := w.column_at_numeric(&vb, 0)
+		_, sn := w.column_at_numeric(&vs, 0)
+		bits, _ := w.column_at_float(&vi, 0)
+		expect(
+			&passed,
+			&total,
+			i0 == 51_234_567 && !n0 && n2 && f0 == 2.5 && !fn0 && fn1 && b0 == 1 && !bn && sn,
+			fmt.tprintf(
+				"column_at_numeric reads Int / Float / Bool as f64 (Int 51234567 -> %.0f; column_at_float would give %.3g), null for nulls, NaN and strings",
+				i0,
+				bits,
+			),
+		)
 	}
 	{
 		buf := make([]u8, 1 << 15)

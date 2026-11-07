@@ -329,6 +329,23 @@ column_at_float :: proc(col: ^Column, i: int) -> (f64, bool) {
 	return (cast(^f64)_cell_ptr(c, r))^, false
 }
 
+// Any numeric cell (Int / Float / Bool) as f64; null for nulls, NaN floats and
+// non-numeric columns. (column_at_float on an Int column reinterprets the bits.)
+column_at_numeric :: proc(col: ^Column, i: int) -> (f64, bool) {
+	#partial switch col.type {
+	case .Float:
+		v, is_null := column_at_float(col, i)
+		return v, is_null || v != v
+	case .Int:
+		v, is_null := column_at_int(col, i)
+		return f64(v), is_null
+	case .Bool:
+		v, is_null := column_at_bool(col, i)
+		return (1 if v else 0), is_null
+	}
+	return 0, true
+}
+
 column_at_bool :: proc(col: ^Column, i: int) -> (bool, bool) {
 	c, r := column_resolve(col, i)
 	if _null_at(c, r) {return false, true}

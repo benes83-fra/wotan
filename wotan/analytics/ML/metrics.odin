@@ -71,18 +71,23 @@ metrics_r2 :: proc(y_true: []f64, y_pred: []f64) -> f64 {
 // ============================================================================
 
 // Accuracy
-metrics_accuracy :: proc(y_true: []f64, y_pred: []f64) -> f64 {
+// Fraction of correct predictions; with sample_weight the weighted fraction (sklearn
+// accuracy_score(sample_weight=))
+metrics_accuracy :: proc(y_true: []f64, y_pred: []f64, sample_weight: []f64 = nil) -> f64 {
 	n := len(y_true)
 	if n != len(y_pred) do panic("metrics_accuracy: length mismatch")
+	if sample_weight != nil && len(sample_weight) != n do panic("metrics_accuracy: sample_weight length mismatch")
 	if n == 0 do return math.nan_f64()
 
-	correct := 0
+	correct, total := 0.0, 0.0
 	for i in 0 ..< n {
+		wi := sample_weight[i] if sample_weight != nil else 1
+		total += wi
 		if y_true[i] == y_pred[i] {
-			correct += 1
+			correct += wi
 		}
 	}
-	return f64(correct) / f64(n)
+	return correct / total
 }
 
 // Confusion Matrix
@@ -459,12 +464,22 @@ metrics_average_precision :: proc(y_true: []f64, scores: []f64, pos_label: f64 =
 // Log loss / cross-entropy (sklearn log_loss): -mean log p(true class), with
 // probabilities clipped to [eps, 1 - eps] and every row renormalised to sum 1
 // (eps = machine epsilon, the sklearn default eps="auto"). Labels must be in `classes`.
-metrics_log_loss :: proc(y_true: []f64, proba: ^l.Matrix(f64), classes: []f64, eps := math.F64_EPSILON) -> f64 {
+// With sample_weight: the weighted mean Σ w_i l_i / Σ w_i (sklearn sample_weight=).
+metrics_log_loss :: proc(
+	y_true: []f64,
+	proba: ^l.Matrix(f64),
+	classes: []f64,
+	eps := math.F64_EPSILON,
+	sample_weight: []f64 = nil,
+) -> f64 {
 	n, K := len(y_true), len(classes)
 	if proba.rows != n || proba.cols != K do panic("metrics_log_loss: proba must be n × n_classes")
+	if sample_weight != nil && len(sample_weight) != n do panic("metrics_log_loss: sample_weight length mismatch")
 	if n == 0 do return math.nan_f64()
-	loss := 0.0
+	loss, total := 0.0, 0.0
 	for i in 0 ..< n {
+		wi := sample_weight[i] if sample_weight != nil else 1
+		total += wi
 		t := -1
 		for c, k in classes {if c == y_true[i] {t = k; break}}
 		if t < 0 do panic("metrics_log_loss: y_true contains a label that is not in classes")
@@ -474,13 +489,18 @@ metrics_log_loss :: proc(y_true: []f64, proba: ^l.Matrix(f64), classes: []f64, e
 			row_sum += p
 			if k == t do p_t = p
 		}
-		loss -= math.ln(p_t / row_sum)
+		loss -= wi * math.ln(p_t / row_sum)
 	}
-	return loss / f64(n)
+	return loss / total
 }
 
 // Binary log loss from the positive-class probability p
-metrics_log_loss_binary :: proc(y_true: []f64, p_pos: []f64, pos_label: f64 = 1, eps := math.F64_EPSILON) -> f64 {
+metrics_log_loss_binary :: proc(
+	y_true: []f64,
+	p_pos: []f64,
+	pos_label: f64 = 1,
+	eps := math.F64_EPSILON,
+) -> f64 {
 	n := len(y_true)
 	if n != len(p_pos) do panic("metrics_log_loss_binary: length mismatch")
 	if n == 0 do return math.nan_f64()
@@ -560,6 +580,19 @@ _sort_by_score :: proc(order: []int, scores: []f64, desc: bool) {
 // its cluster, b_i = smallest mean distance to another cluster; s_i = 0 for
 // singleton clusters. Needs 2 <= n_clusters <= n - 1. O(n²) distances.
 metrics_silhouette :: proc(X: ^l.Matrix(f64), labels: []int) -> f64 {
+	s := metrics_silhouette_samples(X, labels, context.temp_allocator)
+	defer delete(s, context.temp_allocator)
+	total := 0.0
+	for v in s {total += v}
+	return total / f64(len(s))
+}
+
+// The silhouette s_i of every sample (sklearn silhouette_samples, Euclidean)
+metrics_silhouette_samples :: proc(
+	X: ^l.Matrix(f64),
+	labels: []int,
+	allocator: mem.Allocator = context.allocator,
+) -> []f64 {
 	n, d := X.rows, X.cols
 	if len(labels) != n do panic("metrics_silhouette: labels length mismatch")
 	n_lab := 0
@@ -578,7 +611,7 @@ metrics_silhouette :: proc(X: ^l.Matrix(f64), labels: []int) -> f64 {
 	for c in size {if c > 0 do n_clusters += 1}
 	if n_clusters < 2 || n_clusters > n - 1 do panic("metrics_silhouette: need 2 <= n_clusters <= n - 1")
 
-	total := 0.0
+	out := make([]f64, n, allocator)
 	for i in 0 ..< n {
 		for &s in sums {s = 0}
 		for j in 0 ..< n {
@@ -598,7 +631,7 @@ metrics_silhouette :: proc(X: ^l.Matrix(f64), labels: []int) -> f64 {
 			if c == own || size[c] == 0 do continue
 			b = min(b, sums[c] / f64(size[c]))
 		}
-		if max(a, b) > 0 do total += (b - a) / max(a, b)
+		if max(a, b) > 0 do out[i] = (b - a) / max(a, b)
 	}
-	return total / f64(n)
+	return out
 }

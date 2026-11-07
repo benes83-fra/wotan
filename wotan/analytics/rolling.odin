@@ -77,23 +77,6 @@ _rolling_enough :: proc(r: RollingWindow, agg: w.Aggregator, n, rows: int) -> bo
 	return (rows if agg.kind == .Count else n) >= _rolling_min_obs(r)
 }
 
-// Numeric cell as f64; null for nulls, NaN floats and non-numeric columns
-@(private = "file")
-_numeric_at :: proc(c: ^w.Column, i: int) -> (f64, bool) {
-	#partial switch c.type {
-	case .Float:
-		v, is_null := w.column_at_float(c, i)
-		return v, is_null || math.is_nan(v)
-	case .Int:
-		v, is_null := w.column_at_int(c, i)
-		return f64(v), is_null
-	case .Bool:
-		v, is_null := w.column_at_bool(c, i)
-		return (1 if v else 0), is_null
-	}
-	return 0, true
-}
-
 // Linear interpolation between the two nearest ranks (pandas' default)
 @(private = "file")
 _quantile_linear :: proc(sorted: []f64, q: f64) -> f64 {
@@ -226,7 +209,7 @@ rolling_apply_float :: proc(
 		clear(&values)
 		start, end := rolling_bounds(r, i)
 		for j in start ..< end {
-			v, is_null := _numeric_at(src, j)
+			v, is_null := w.column_at_numeric(src, j)
 			if !is_null do append(&values, v)
 		}
 		if !_rolling_enough(r, agg, len(values), end - start) {
@@ -745,8 +728,8 @@ _ewm_core :: proc(
 	nobs := 0
 
 	for i in 0 ..< r.df.rows {
-		cur_x, nx := _numeric_at(x, i)
-		cur_y, ny := _numeric_at(y, i)
+		cur_x, nx := w.column_at_numeric(x, i)
+		cur_y, ny := w.column_at_numeric(y, i)
 		is_observation := !nx && !ny
 		if is_observation do nobs += 1
 
@@ -1063,8 +1046,8 @@ _rolling_moment :: proc(
 		clear(&ys)
 		start, end := rolling_bounds(r, i)
 		for j in start ..< end {
-			vx, nx := _numeric_at(x, j)
-			vy, ny := _numeric_at(y, j)
+			vx, nx := w.column_at_numeric(x, j)
+			vy, ny := w.column_at_numeric(y, j)
 			if !nx && !ny {
 				append(&xs, vx)
 				append(&ys, vy)
@@ -1116,7 +1099,14 @@ rolling_apply_float_corr :: proc(
 	agg: w.Aggregator,
 	allocator: mem.Allocator,
 ) -> w.Column {
-	return _rolling_moment(r, w.column(r.df, r.column), w.column(r.df, agg.other), agg.name, .Corr, allocator)
+	return _rolling_moment(
+		r,
+		w.column(r.df, r.column),
+		w.column(r.df, agg.other),
+		agg.name,
+		.Corr,
+		allocator,
+	)
 }
 
 
@@ -1125,7 +1115,14 @@ rolling_apply_int_corr :: proc(
 	agg: w.Aggregator,
 	allocator: mem.Allocator,
 ) -> w.Column {
-	return _rolling_moment(r, w.column(r.df, r.column), w.column(r.df, agg.other), agg.name, .Corr, allocator)
+	return _rolling_moment(
+		r,
+		w.column(r.df, r.column),
+		w.column(r.df, agg.other),
+		agg.name,
+		.Corr,
+		allocator,
+	)
 }
 
 // Sample variance (ddof = 1, pandas' default)

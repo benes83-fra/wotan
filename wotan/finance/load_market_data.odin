@@ -26,7 +26,7 @@ load_market_data :: proc(
 
 		dates[i], _ = w.column_at_date(date_col, i)
 		prices[i], _ = w.column_at_float(close_col, i)
-		volumes[i], _ = w.column_at_float(volume_col, i)
+		volumes[i], _ = w.column_at_numeric(volume_col, i)
 
 		if i > 0 {
 			returns[i] = (prices[i] - prices[i - 1]) / prices[i - 1]

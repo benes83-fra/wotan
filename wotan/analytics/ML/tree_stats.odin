@@ -106,16 +106,13 @@ tree_compute_metrics :: proc(
 
 // Impurity-based feature importance (sklearn feature_importances_): every split
 // adds n_node·imp_node - n_left·imp_left - n_right·imp_right to its feature,
-// using the training statistics stored in the nodes; normalised to sum 1.
-// X / y / indices are kept for API compatibility; only X.cols is used.
-_tree_feature_importance :: proc(
+// using the training statistics stored in the nodes; normalised to sum 1 (all
+// zeros for a tree without splits).
+tree_feature_importance :: proc(
 	tree: ^DecisionTree,
-	X: ^l.Matrix(f64),
-	y: []f64,
-	indices: []int,
-	allocator: mem.Allocator,
+	n_features: int,
+	allocator: mem.Allocator = context.allocator,
 ) -> []f64 {
-	n_features := X.cols
 	importance := make([]f64, n_features, allocator)
 
 	for &node in tree.nodes {
@@ -244,7 +241,7 @@ rf_compute_stats :: proc(
 	for t in 0 ..< n_trees {
 		tree_ptr := &forest.trees[t]
 		if len(tree_ptr.nodes) <= 1 do continue
-		imp := _tree_feature_importance(tree_ptr, X, y, nil, allocator)
+		imp := tree_feature_importance(tree_ptr, n_features, allocator)
 		for i in 0 ..< n_features {
 			avg_importance[i] += imp[i]
 		}
@@ -270,7 +267,11 @@ rf_compute_stats :: proc(
 	splits := make([]int, n_features, allocator)
 	for t in 0 ..< n_trees {
 		tree_ptr := &forest.trees[t]
-		n_n, n_l, avg_d, max_d_t, sp := _tree_structure_stats(tree_ptr, n_features, context.temp_allocator)
+		n_n, n_l, avg_d, max_d_t, sp := _tree_structure_stats(
+			tree_ptr,
+			n_features,
+			context.temp_allocator,
+		)
 		for v, i in sp {splits[i] += v}
 		delete(sp, context.temp_allocator)
 		total_nodes += n_n
@@ -329,13 +330,7 @@ dt_compute_stats :: proc(
 		allocator,
 	)
 
-	// Feature importance: create indices slice properly
-	indices := make([]int, n_samples, allocator)
-	for i in 0 ..< n_samples {
-		indices[i] = i
-	}
-	importance := _tree_feature_importance(tree, X, y, indices, allocator)
-	delete(indices, allocator) // Clean up temporary slice
+	importance := tree_feature_importance(tree, n_features, allocator)
 
 	// Tree structure stats
 	n_nodes, n_leaves, avg_depth, max_depth, splits_per_feat := _tree_structure_stats(

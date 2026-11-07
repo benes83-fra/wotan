@@ -273,19 +273,8 @@ destroy_groupby2 :: proc(gb: ^GroupBy2) {
 _numeric_values :: proc(src: ^Column, rows: []int) -> [dynamic]f64 {
 	vals := make([dynamic]f64, 0, len(rows), context.temp_allocator)
 	for r in rows {
-		if is_null(src, r) {continue}
-		v: f64
-		#partial switch src.type {
-		case .Int:
-			x, _ := column_at_int(src, r)
-			v = f64(x)
-		case .Float:
-			v, _ = column_at_float(src, r)
-			if v != v {continue} 	// NaN is skipped like a null
-		case .Bool:
-			x, _ := column_at_bool(src, r)
-			v = 1 if x else 0
-		}
+		v, null := column_at_numeric(src, r) // NaN is skipped like a null
+		if null {continue}
 		append(&vals, v)
 	}
 	return vals

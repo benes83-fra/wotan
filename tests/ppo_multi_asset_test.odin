@@ -39,9 +39,9 @@ ppo_multi_asset_test :: proc(allocator: mem.Allocator = context.allocator) {
 
 	for i in 0 ..< n_days {
 		spy_prices[i], _ = w.column_at_float(spy_close, i)
-		spy_vols[i], _ = w.column_at_float(spy_vol, i)
+		spy_vols[i], _ = w.column_at_numeric(spy_vol, i)
 		qqq_prices[i], _ = w.column_at_float(qqq_close, i)
-		qqq_vols[i], _ = w.column_at_float(qqq_vol, i)
+		qqq_vols[i], _ = w.column_at_numeric(qqq_vol, i)
 	}
 
 	spy_inds, _ := ml_finance.compute_trading_features(spy_prices, spy_vols, allocator)
@@ -250,9 +250,9 @@ ppo_multi_asset_wf_test :: proc(allocator: mem.Allocator = context.allocator) {
 
 	for i in 0 ..< n_days {
 		spy_prices[i], _ = w.column_at_float(spy_close, i)
-		spy_vols[i], _ = w.column_at_float(spy_vol, i)
+		spy_vols[i], _ = w.column_at_numeric(spy_vol, i)
 		qqq_prices[i], _ = w.column_at_float(qqq_close, i)
-		qqq_vols[i], _ = w.column_at_float(qqq_vol, i)
+		qqq_vols[i], _ = w.column_at_numeric(qqq_vol, i)
 	}
 
 	spy_inds, _ := ml_finance.compute_trading_features(spy_prices, spy_vols, allocator)

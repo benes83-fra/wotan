@@ -130,7 +130,7 @@ ppo_trading_real_data_test :: proc(allocator: mem.Allocator = context.allocator)
 
 	for i in 0 ..< n_days {
 		prices[i], _ = w.column_at_float(close_col, i)
-		volumes[i], _ = w.column_at_float(volume_col, i)
+		volumes[i], _ = w.column_at_numeric(volume_col, i)
 	}
 
 	// ✅ Use the new centralized feature engineering function
@@ -249,7 +249,7 @@ walk_forward_validation_test :: proc(allocator: mem.Allocator = context.allocato
 
 	for i in 0 ..< n_days {
 		all_prices[i], _ = w.column_at_float(close_col, i)
-		all_volumes[i], _ = w.column_at_float(volume_col, i)
+		all_volumes[i], _ = w.column_at_numeric(volume_col, i)
 	}
 
 	indicators, n_indicators := ml_finance.compute_trading_features(

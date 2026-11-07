@@ -45,7 +45,7 @@ prospect_ppo_test :: proc(allocator: mem.Allocator) {
 
 	for i in 0 ..< n_days {
 		prices[i], _ = w.column_at_float(close_col, i)
-		volumes[i], _ = w.column_at_float(volume_col, i)
+		volumes[i], _ = w.column_at_numeric(volume_col, i)
 	}
 
 	indicators, n_indicators := ml_finance.compute_trading_features(prices, volumes, allocator)

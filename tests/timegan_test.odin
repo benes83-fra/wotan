@@ -267,7 +267,7 @@ timegan_test :: proc(allocator: mem.Allocator = context.allocator) {
 	prices, volumes := make([]f64, n_days), make([]f64, n_days)
 	for i in 0 ..< n_days {
 		prices[i], _ = w.column_at_float(close_col, i)
-		volumes[i], _ = w.column_at_float(volume_col, i)
+		volumes[i], _ = w.column_at_numeric(volume_col, i)
 	}
 	T :: 20
 	data, n_seq, F := ml_finance.prepare_market_data(prices, volumes, nil, 0, T, allocator)
