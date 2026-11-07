@@ -4,7 +4,6 @@ import w "../wotan/core"
 import fin "../wotan/finance"
 import l "../wotan/linalg"
 import ml_fin "../wotan/ml_finance"
-import yahoo "../wotan/net"
 import "core:fmt"
 import "core:math"
 import "core:math/rand"
@@ -194,68 +193,15 @@ asset_pricing_models_test :: proc(allocator: mem.Allocator) {
 
 	// C. real data
 	{
-		tickers := []string {
-			"AAPL",
-			"MSFT",
-			"AMZN",
-			"GOOG",
-			"META",
-			"NVDA",
-			"JPM",
-			"BAC",
-			"XOM",
-			"CVX",
-			"JNJ",
-			"PFE",
-			"KO",
-			"PEP",
-			"WMT",
-			"HD",
-			"DIS",
-			"INTC",
-			"CSCO",
-			"ORCL",
-			"VZ",
-			"MRK",
-			"UNH",
-			"PG",
+		NA := len(LARGE_CAP_TICKERS)
+		P, V, dates, ok := yahoo_adjclose_panel(LARGE_CAP_TICKERS, .FiveYears, 600)
+		if !ok {
+			fmt.println("Not enough data (offline?): real-data check skipped")
+			fmt.printf("Asset pricing models: %d failure(s)\n", failures)
+			record_failures(failures)
+			return
 		}
-		NA := len(tickers)
-		price_maps := make([]map[w.Date]f64, NA)
-		dvol_maps := make([]map[w.Date]f64, NA)
-		dates := make([dynamic]w.Date)
-		for sym, k in tickers {
-			df := yahoo.read_yahoo(sym, .Daily, .FiveYears, allocator)
-			defer w.destroy_dataframe(&df)
-			if df.rows < 600 {
-				fmt.printf("Not enough %s data (offline?): real-data check skipped\n", sym)
-				fmt.printf("Asset pricing models: %d failure(s)\n", failures)
-				record_failures(failures)
-				return
-			}
-			price_maps[k] = make(map[w.Date]f64)
-			dvol_maps[k] = make(map[w.Date]f64)
-			dc, pc, vc := w.column(&df, "Date"), w.column(&df, "AdjClose"), w.column(&df, "Volume")
-			for i in 0 ..< df.rows {
-				d, dn := w.column_at_date(dc, i)
-				p, pn := w.column_at_float(pc, i)
-				v, vn := w.column_at_numeric(vc, i)
-				if dn || pn || vn || p <= 0 {continue}
-				price_maps[k][d] = p
-				dvol_maps[k][d] = p * v
-				if k == 0 {append(&dates, d)}
-			}
-		}
-		common := make([dynamic]w.Date)
-		for d in dates {
-			ok := true
-			for m in price_maps {ok &&= d in m}
-			if ok {append(&common, d)}
-		}
-		D := len(common)
-		P := make([]f64, D * NA)
-		V := make([]f64, D * NA)
-		for d, t in common {for k in 0 ..< NA {P[t * NA + k], V[t * NA + k] = price_maps[k][d], dvol_maps[k][d]}}
+		D := len(dates)
 		// months of 21 days; characteristics at the start s of each month from data up to s
 		M :: 21
 		rows := make([dynamic]f64)

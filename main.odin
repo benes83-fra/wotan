@@ -1098,6 +1098,8 @@ main :: proc() {
 	free_all(context.temp_allocator)
 	test.historical_gamma_backtest_test(context.temp_allocator)
 	free_all(context.temp_allocator)
+	test.anchoring_reference_test(context.temp_allocator)
+	free_all(context.temp_allocator)
 	test.anchoring_backtest_test(context.temp_allocator)
 	free_all(context.temp_allocator)
 	test.prospect_portfolio_test(context.temp_allocator)

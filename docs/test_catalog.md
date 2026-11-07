@@ -298,7 +298,8 @@ Reference and contract tests print `OK` or `FAIL` for each check and end with a 
 | `market_implied_psychology_test` 🌐🖼 | `market_implied_psychology_test`, `real_market_psychology_test` | Synthetic chain from crash-fearing CPT writers: γ⁺/γ⁻ recovered with the value function fixed, all five parameters cut the RMSE >10×; live SPY calls calibrated (printed) |
 | `behavioral_heston_test` 🌐🖼 | `behavioral_heston_test` | CPT parameters calibrated on top of a calibrated Heston distribution (live SPY calls, printed) |
 | `behavioral_backtester_test` 🌐🖼 | `behavioral_backtester_test`, `historical_gamma_backtest_test` | Backtesting the market-implied crash-fear (γ⁻ from puts) signal; daily calibration recovers the regime γ⁻ on every day (synthetic) and on three VIX-mapped days (SPY) |
-| `anchoring_backtest_test` 🌐🖼 | `anchoring_backtest_test` | 52-week-high anchoring anomaly (George & Hwang, 2004) |
+| `anchoring_reference_test` | `anchoring_reference_test` | 52-week-high ratio vs pandas `p / p.rolling(60).max()` (NaN, zero, negative prices, a delisting); top / bottom 30% portfolios and Jegadeesh–Titman overlapping long / short / spread returns (hold 3, skip 1) vs numpy; behavioral Kalman filter: steady-state gain at α = 0, no upward updates at α = 1 |
+| `anchoring_backtest_test` 🌐🖼 | `anchoring_backtest_test` | George & Hwang (2004) (6, 6) 52-week-high strategy: significant winner − loser spread on a synthetic panel whose prices lag value above the 52-week high, none on the control panel; the 24 large caps over 10 years (printed) |
 | `bpt_test` 🌐 | `bpt_test`, `bpt_v2_test` | Behavioural portfolio theory: mental accounting layers, sleeve mandates |
 
 ## 12. Plotting
