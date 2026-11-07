@@ -9,81 +9,111 @@ import "core:fmt"
 import "core:math"
 import "core:mem"
 
+// Synthetic chain priced by CPT writers (Versluis, Lehnert & Wolff 2010: aggregated
+// frame) who overweight crash probabilities (gamma- = 0.45; TK92 value function), calls
+// and puts K 80 .. 120, T 0.5, mu = r: calibrating the probability weighting with the
+// value function fixed recovers gamma+ / gamma-; calibrating all five parameters from
+// the TK92 start fits the prices (the parameters are only weakly identified).
 market_implied_psychology_test :: proc(allocator: mem.Allocator) {
 	seed_test(#procedure)
 	fmt.println("\n=== Market-Implied Psychology Calibration ===")
-	fmt.println("Reverse-engineering investor bias from a synthetic option chain.")
-
-	S := 100.0
-	r := 0.05
-	T := 0.5 // 6 months
-	true_sigma := 0.20 // The actual, physical volatility of the asset
-
-	// 1. Simulate a "Panicked" Market
-	// The true vol is 20%, but investors are terrified of a crash.
-	// They distort probabilities with gamma = 0.40 (extreme tail overweighting).
-	panic_params := bfin.Prospect_Params {
-		alpha  = 0.88,
-		beta   = 0.88,
-		lambda = 2.25,
-		gamma  = 0.40,
+	context.allocator = allocator
+	passed, total := 0, 0
+	expect :: proc(passed, total: ^int, ok: bool, name: string) {
+		total^ += 1
+		if ok {passed^ += 1}
+		fmt.printf("%s %s\n", "OK  " if ok else "FAIL", name)
 	}
 
-	strikes := []f64{70, 80, 90, 100, 110, 120, 130}
-	market_data := make([]fin.VolSurfacePoint, len(strikes), allocator)
-	defer delete(market_data, allocator)
-
-	fmt.println("\nGenerating synthetic 'Panicked' market prices...")
+	S, r, T, sigma := 100.0, 0.05, 0.5, 0.20
+	panic_params := bfin.TK92_PARAMS
+	panic_params.gamma_minus = 0.45
+	strikes := []f64{80, 90, 100, 110, 120, 80, 90, 100}
+	types := []fin.OptionType{.Call, .Call, .Call, .Call, .Call, .Put, .Put, .Put}
+	chain := make([]fin.VolSurfacePoint, len(strikes))
+	defer delete(chain)
 	for K, i in strikes {
-		// The market prices options using distorted probabilities
-		panicked_price := bfin.prospect_theory_price(
-			S,
-			K,
-			T,
-			r,
-			true_sigma,
-			panic_params,
-			.Call,
-			500,
-			allocator,
-		)
-
-		market_data[i] = fin.VolSurfacePoint {
+		chain[i] = {
 			strike       = K,
 			expiry       = T,
-			market_price = panicked_price,
-			implied_vol  = 0.0, // We will let the calibrator use the raw price
+			market_price = bfin.prospect_theory_price(
+				S,
+				K,
+				T,
+				r,
+				r,
+				sigma,
+				panic_params,
+				types[i],
+				n_points = 1000,
+			),
 		}
 	}
-
-	// 2. Calibrate Prospect Theory to the Market
-	fmt.println("Running Adam optimizer to extract Market-Implied Psychology...")
-	result := bfin.calibrate_prospect_theory(market_data, S, r, true_sigma, allocator)
-
-	fmt.println("\n--- Calibration Results ---")
-	fmt.printf("Converged: %v (RMSE: $%.4f)\n", result.converged, result.rmse)
-	fmt.println("\nParameter | True (TK92) | Market-Implied | Interpretation")
-	fmt.println("----------|-------------|----------------|---------------")
-	fmt.printf(
-		"Alpha     |    0.88     |      %.2f      | Gain sensitivity\n",
-		result.params.alpha,
-	)
-	fmt.printf("Beta      |    0.88     |      %.2f      | Loss sensitivity\n", result.params.beta)
-	fmt.printf("Lambda    |    2.25     |      %.2f      | Loss Aversion\n", result.params.lambda)
-	fmt.printf(
-		"Gamma     |    0.61     |      %.2f      | Probability Weighting\n",
-		result.params.gamma,
+	bs_put := fin.black_scholes_call(S, 90, T, r, sigma) + 90 * math.exp(-r * T) - S
+	expect(
+		&passed,
+		&total,
+		chain[6].market_price > 1.5 * bs_put,
+		fmt.tprintf(
+			"crash-fearing writers: the 90 put costs %.3f, Black-Scholes %.3f",
+			chain[6].market_price,
+			bs_put,
+		),
 	)
 
-	fmt.println("\n💡 Insight:")
-	if result.params.gamma < 0.55 {
-		fmt.println("The market is exhibiting EXTREME CRASHOPHOBIA.")
-		fmt.println("Investors are heavily overweighting the probability of a left-tail event.")
-	} else if result.params.gamma > 0.70 {
-		fmt.println("The market is highly rational / risk-neutral.")
-	}
+	weights := bfin.calibrate_prospect_theory(
+		chain,
+		S,
+		r,
+		r,
+		sigma,
+		{
+			init = {alpha = 0.88, beta = 0.88, lambda = 2.25, gamma = 0.8, gamma_minus = 0.8},
+			fixed = {.Alpha, .Beta, .Lambda},
+		},
+		types,
+	)
+	eg := max(abs(weights.params.gamma - 0.61), abs(weights.params.gamma_minus - 0.45))
+	expect(
+		&passed,
+		&total,
+		eg < 0.01 && weights.rmse < 2e-3,
+		fmt.tprintf(
+			"value function fixed: gamma+ %.4f (0.61), gamma- %.4f (0.45) recovered from 0.8 / 0.8, RMSE %.1e",
+			weights.params.gamma,
+			weights.params.gamma_minus,
+			weights.rmse,
+		),
+	)
 
-	fmt.println("\n=== Market-Implied Psychology Test Complete ===\n")
+	start := bfin.calibrate_prospect_theory(
+		chain,
+		S,
+		r,
+		r,
+		sigma,
+		{fixed = ~bit_set[bfin.Prospect_Param]{}},
+		types,
+	)
+	full := bfin.calibrate_prospect_theory(chain, S, r, r, sigma, {max_iter = 400}, types)
+	q := full.params
+	expect(
+		&passed,
+		&total,
+		full.rmse < start.rmse / 10,
+		fmt.tprintf(
+			"all five free from TK92: RMSE %.3f -> %.4f (alpha %.2f beta %.2f lambda %.2f gamma+ %.2f gamma- %.2f)",
+			start.rmse,
+			full.rmse,
+			q.alpha,
+			q.beta,
+			q.lambda,
+			q.gamma,
+			q.gamma_minus,
+		),
+	)
+	fmt.printf("Market-implied psychology: %d/%d passed\n", passed, total)
+	record_failures(total - passed)
 }
 
 real_market_psychology_test :: proc(allocator: mem.Allocator) {
@@ -218,7 +248,15 @@ real_market_psychology_test :: proc(allocator: mem.Allocator) {
 	// 4. Calibrate Prospect Theory to the Real Market
 	fmt.println("- Running Adam optimizer to extract Market-Implied Psychology...")
 	// Note: We pass market_data[:] to convert the dynamic array to a slice
-	result := bfin.calibrate_prospect_theory(market_data[:], S, r, true_sigma, allocator)
+	// physical drift taken as r; all five parameters free from TK92
+	result := bfin.calibrate_prospect_theory(
+		market_data[:],
+		S,
+		r,
+		r,
+		true_sigma,
+		allocator = allocator,
+	)
 
 	fmt.println("\n--- Live Market Calibration Results ---")
 	fmt.printf("Converged: %v (RMSE: $%.4f)\n", result.converged, result.rmse)
@@ -237,16 +275,17 @@ real_market_psychology_test :: proc(allocator: mem.Allocator) {
 		result.params.lambda,
 	)
 	fmt.printf(
-		"Gamma     |     0.61      |       %.2f        | Probability Weighting\n",
+		"Gamma+/-  |  0.61 / 0.69  |   %.2f / %.2f     | Probability Weighting\n",
 		result.params.gamma,
+		result.params.gamma_minus,
 	)
 
 	fmt.println("\n💡 Live Market Insight:")
-	if result.params.gamma < 0.55 {
+	if result.params.gamma_minus < 0.55 {
 		fmt.println("The options market is pricing in EXTREME CRASHOPHOBIA.")
 		fmt.println("Investors are paying a massive premium for tail protection,")
 		fmt.println("which the model interprets as heavy left-tail probability weighting.")
-	} else if result.params.gamma > 0.70 {
+	} else if result.params.gamma_minus > 0.70 {
 		fmt.println("The options market is relatively rational / close to risk-neutral.")
 		fmt.println("The volatility smile is mild.")
 	} else {
@@ -299,12 +338,7 @@ real_market_psychology_test :: proc(allocator: mem.Allocator) {
 plot_prospect_curves :: proc(market_params: bfin.Prospect_Params, allocator: mem.Allocator) {
 	fmt.println("\n=== Generating High-Res Prospect Curve PNGs ===")
 
-	tk92 := bfin.Prospect_Params {
-		alpha  = 0.88,
-		beta   = 0.88,
-		lambda = 2.25,
-		gamma  = 0.61,
-	}
+	tk92 := bfin.TK92_PARAMS
 	n_points := 200
 
 	// --- 1. Value Function v(x) ---
@@ -318,13 +352,8 @@ plot_prospect_curves :: proc(market_params: bfin.Prospect_Params, allocator: mem
 		x := -3.0 + 6.0 * f64(i) / f64(n_points - 1)
 		x_vals[i] = x
 
-		if x >= 0 {
-			y_tk92_val[i] = math.pow(x, tk92.alpha)
-			y_market_val[i] = math.pow(x, market_params.alpha)
-		} else {
-			y_tk92_val[i] = -tk92.lambda * math.pow(-x, tk92.beta)
-			y_market_val[i] = -market_params.lambda * math.pow(-x, market_params.beta)
-		}
+		y_tk92_val[i] = bfin.prospect_value(x, tk92)
+		y_market_val[i] = bfin.prospect_value(x, market_params)
 	}
 
 	val_lines := []plot.LineData {
@@ -367,13 +396,13 @@ plot_prospect_curves :: proc(market_params: bfin.Prospect_Params, allocator: mem
 		p_vals[i] = p
 		y_rational[i] = p
 
-		p_g_tk := math.pow(p, tk92.gamma)
-		q_g_tk := math.pow(1.0 - p, tk92.gamma)
-		y_tk92_prob[i] = p_g_tk / math.pow(p_g_tk + q_g_tk, 1.0 / tk92.gamma)
-
-		p_g_mk := math.pow(p, market_params.gamma)
-		q_g_mk := math.pow(1.0 - p, market_params.gamma)
-		y_market_prob[i] = p_g_mk / math.pow(p_g_mk + q_g_mk, 1.0 / market_params.gamma)
+		// loss-side weighting (gamma-): the crash probabilities
+		y_tk92_prob[i] = bfin.prospect_weight(p, bfin.prospect_gamma_minus(tk92), tk92.weighting)
+		y_market_prob[i] = bfin.prospect_weight(
+			p,
+			bfin.prospect_gamma_minus(market_params),
+			market_params.weighting,
+		)
 	}
 
 	prob_lines := []plot.LineData {

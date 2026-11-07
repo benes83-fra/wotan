@@ -164,7 +164,7 @@ Reference and contract tests print `OK` or `FAIL` for each check and end with a 
 | `calib_exotics_reference_test` | `calib_exotics_reference_test` | Heston, Merton jump-diffusion and local-volatility Monte Carlo exotics vs a 1M-path NumPy Monte Carlo and closed forms |
 | `monte_carlo_reference_test` | `monte_carlo_reference_test` | Path generators, Hull–White moments, the LSM regression step and control variates vs NumPy |
 | `fourier_qmc_reference_test` | `fourier_qmc_reference_test` | COS pricing for Heston, Bates and Merton vs QuantLib; Sobol' points, Brownian bridge, geometric Asian closed form |
-| `heston_pricing_test` | `heston_pricing_test` | Fast Heston paths (one pass per expiry, cached behavioural Heston) equal the plain pricer exactly; put-call parity |
+| `heston_pricing_test` | `heston_pricing_test` | Fast Heston paths (one pass per expiry, CPT price on a cached Heston distribution) equal the plain pricer exactly; put-call parity |
 | `mc_and_swaps_test` | `unified_mc_test`, `swaps_test` | Shared Monte Carlo engine; swap valuation on a bootstrapped curve |
 | `vol_surface_test` | `vol_surface_test` | SABR and Heston calibration to a volatility surface |
 | `vol_surface_reference_test` | `vol_surface_reference_test` | Heston and SABR prices and calibration round trips vs QuantLib; Levenberg–Marquardt vs SciPy |
@@ -294,9 +294,10 @@ Reference and contract tests print `OK` or `FAIL` for each check and end with a 
 | `prospect_vol_smile_test` | `prospect_vol_smile_test` | Volatility smile produced by prospect theory preferences |
 | `prospect_portfolio_test` 🌐 | `prospect_portfolio_test` | Portfolio optimisation under prospect theory |
 | `prospect_ppo_test` 🌐 | `prospect_ppo_test` | PPO agent with prospect theory rewards (disposition effect) |
-| `market_implied_psychology_test` 🌐🖼 | `market_implied_psychology_test`, `real_market_psychology_test` | Calibrating prospect theory parameters to option prices, including live SPY options |
-| `behavioral_heston_test` 🌐🖼 | `behavioral_heston_test` | Heston model with a behavioural residual layer |
-| `behavioral_backtester_test` 🌐🖼 | `behavioral_backtester_test`, `historical_gamma_backtest_test` | Backtesting the market-implied psychology signal |
+| `prospect_reference_test` | `prospect_reference_test` | CPT option prices (Versluis, Lehnert & Wolff 2010) vs Nardon & Pianca (2012): 72 writer / holder, call / put, segregated / aggregated prices (TK92, moderate, Prelec) against a scipy reference that reproduces their Tables 3–5; Table 6 holder–writer intervals around Black-Scholes; rational investor = Black-Scholes; zero prospect value at the price; behavioral Heston = Heston when rational and = log-normal CPT as vol-of-vol → 0 |
+| `market_implied_psychology_test` 🌐🖼 | `market_implied_psychology_test`, `real_market_psychology_test` | Synthetic chain from crash-fearing CPT writers: γ⁺/γ⁻ recovered with the value function fixed, all five parameters cut the RMSE >10×; live SPY calls calibrated (printed) |
+| `behavioral_heston_test` 🌐🖼 | `behavioral_heston_test` | CPT parameters calibrated on top of a calibrated Heston distribution (live SPY calls, printed) |
+| `behavioral_backtester_test` 🌐🖼 | `behavioral_backtester_test`, `historical_gamma_backtest_test` | Backtesting the market-implied crash-fear (γ⁻ from puts) signal; daily calibration recovers the regime γ⁻ on every day (synthetic) and on three VIX-mapped days (SPY) |
 | `anchoring_backtest_test` 🌐🖼 | `anchoring_backtest_test` | 52-week-high anchoring anomaly (George & Hwang, 2004) |
 | `bpt_test` 🌐 | `bpt_test`, `bpt_v2_test` | Behavioural portfolio theory: mental accounting layers, sleeve mandates |
 

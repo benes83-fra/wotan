@@ -18,12 +18,7 @@ plot_behavioral_heston_curves :: proc(
 ) {
 	fmt.println("\n=== Generating Behavioral Heston PNGs ===")
 
-	tk92 := bfin.Prospect_Params {
-		alpha  = 0.88,
-		beta   = 0.88,
-		lambda = 2.25,
-		gamma  = 0.61,
-	}
+	tk92 := bfin.TK92_PARAMS
 	n_points := 200
 
 	// --- 1. Value Function v(x) ---
@@ -37,13 +32,8 @@ plot_behavioral_heston_curves :: proc(
 		x := -3.0 + 6.0 * f64(i) / f64(n_points - 1)
 		x_vals[i] = x
 
-		if x >= 0 {
-			y_tk92_val[i] = math.pow(x, tk92.alpha)
-			y_market_val[i] = math.pow(x, market_params.alpha)
-		} else {
-			y_tk92_val[i] = -tk92.lambda * math.pow(-x, tk92.beta)
-			y_market_val[i] = -market_params.lambda * math.pow(-x, market_params.beta)
-		}
+		y_tk92_val[i] = bfin.prospect_value(x, tk92)
+		y_market_val[i] = bfin.prospect_value(x, market_params)
 	}
 
 	val_lines := []plot.LineData {
@@ -83,13 +73,13 @@ plot_behavioral_heston_curves :: proc(
 		p_vals[i] = p
 		y_rational[i] = p
 
-		p_g_tk := math.pow(p, tk92.gamma)
-		q_g_tk := math.pow(1.0 - p, tk92.gamma)
-		y_tk92_prob[i] = p_g_tk / math.pow(p_g_tk + q_g_tk, 1.0 / tk92.gamma)
-
-		p_g_mk := math.pow(p, market_params.gamma)
-		q_g_mk := math.pow(1.0 - p, market_params.gamma)
-		y_market_prob[i] = p_g_mk / math.pow(p_g_mk + q_g_mk, 1.0 / market_params.gamma)
+		// loss-side weighting (gamma-)
+		y_tk92_prob[i] = bfin.prospect_weight(p, bfin.prospect_gamma_minus(tk92), tk92.weighting)
+		y_market_prob[i] = bfin.prospect_weight(
+			p,
+			bfin.prospect_gamma_minus(market_params),
+			market_params.weighting,
+		)
 	}
 
 	prob_lines := []plot.LineData {
@@ -261,7 +251,7 @@ behavioral_heston_test :: proc(allocator: mem.Allocator) {
 		S,
 		r,
 		heston_result.params,
-		allocator,
+		allocator = allocator,
 	)
 
 	// 5. Print Results
@@ -286,13 +276,14 @@ behavioral_heston_test :: proc(allocator: mem.Allocator) {
 		b_heston_result.params.lambda,
 	)
 	fmt.printf(
-		"Gamma     |     0.61      |     %.2f      | Probability Weighting\n",
+		"Gamma+/-  |  0.61 / 0.69  |  %.2f / %.2f  | Probability Weighting\n",
 		b_heston_result.params.gamma,
+		b_heston_result.params.gamma_minus,
 	)
 
 	// 6. Insight
 	fmt.println("\n💡 Quant Insight:")
-	if b_heston_result.params.gamma > 0.70 {
+	if b_heston_result.params.gamma_minus > 0.70 {
 		fmt.println(
 			"SUCCESS: Heston absorbed the structural skew! The residual gamma is near rational.",
 		)
@@ -300,7 +291,7 @@ behavioral_heston_test :: proc(allocator: mem.Allocator) {
 			"The options market's skew is primarily driven by stochastic volatility (leverage effect),",
 		)
 		fmt.println("not irrational crashophobia.")
-	} else if b_heston_result.params.gamma < 0.55 {
+	} else if b_heston_result.params.gamma_minus < 0.55 {
 		fmt.println(
 			"WARNING: Even after accounting for stochastic volatility, investors are irrationally",
 		)

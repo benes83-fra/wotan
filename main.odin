@@ -1078,6 +1078,8 @@ main :: proc() {
 	free_all(context.temp_allocator)
 	test.prospect_vol_smile_test(context.temp_allocator)
 	free_all(context.temp_allocator)
+	test.prospect_reference_test(context.temp_allocator)
+	free_all(context.temp_allocator)
 	test.market_implied_psychology_test(context.temp_allocator)
 	free_all(context.temp_allocator)
 	test.real_market_psychology_test(context.temp_allocator)

@@ -68,17 +68,27 @@ behavioral_backtester_test :: proc(allocator: mem.Allocator) {
 		delete(signals, allocator)}
 
 	T_opt := 30.0 / 252.0 // 30 DTE options
-	strikes_rel := []f64{0.90, 1.00, 1.10} // Relative moneyness for calibration
+	// Puts: crash fear is the put writers' loss-side probability weighting (gamma-)
+	strikes_rel := []f64{0.90, 0.95, 1.00} // Relative moneyness for calibration
+	types := []fin.OptionType{.Put, .Put, .Put}
+	// The market: CPT writers (aggregated frame) with the TK92 value function, gamma-
+	// switching between regimes; the calibration reads gamma- back with the rest fixed
+	setup := bfin.Prospect_Calibration_Setup {
+		init = {alpha = 0.88, beta = 0.88, lambda = 2.25, gamma = 0.61, gamma_minus = 0.7},
+		fixed = {.Alpha, .Beta, .Lambda, .Gamma},
+		n_points = 400,
+		max_iter = 150,
+	}
+	recovery_err := 0.0
 
 	// Pre-allocate loop buffers to prevent memory leaks
 	chain := make([]fin.VolSurfacePoint, 3, allocator)
 	defer delete(chain, allocator)
 
-	base_params := bfin.Prospect_Params {
-		alpha  = 0.88,
-		beta   = 0.88,
-		lambda = 2.25,
-		gamma  = 0.61,
+	market_params :: proc(gamma_minus: f64) -> bfin.Prospect_Params {
+		p := bfin.TK92_PARAMS
+		p.gamma_minus = gamma_minus
+		return p
 	}
 
 	for t in 0 ..< n_days - 1 {
@@ -93,11 +103,11 @@ behavioral_backtester_test :: proc(allocator: mem.Allocator) {
 				K,
 				T_opt,
 				r,
+				r,
 				true_sigma,
-				bfin.Prospect_Params{alpha = 0.88, beta = 0.88, lambda = 2.25, gamma = gamma_true},
-				.Call,
-				100,
-				allocator,
+				market_params(gamma_true),
+				.Put,
+				n_points = 400,
 			)
 
 			chain[i] = fin.VolSurfacePoint {
@@ -109,9 +119,10 @@ behavioral_backtester_test :: proc(allocator: mem.Allocator) {
 		}
 
 		// Calibrate Wotan's Behavioral Engine to recover gamma
-		res := bfin.calibrate_prospect_theory(chain, St, r, true_sigma, allocator)
-		cal_gamma := res.params.gamma
+		res := bfin.calibrate_prospect_theory(chain, St, r, r, true_sigma, setup, types, allocator)
+		cal_gamma := res.params.gamma_minus
 		calibrated_gammas[t] = cal_gamma
+		recovery_err = max(recovery_err, abs(cal_gamma - gamma_true))
 
 		// Trade Execution (Mark-to-Market on a 5% OTM Put)
 		K_trade := St * 0.95
@@ -123,11 +134,11 @@ behavioral_backtester_test :: proc(allocator: mem.Allocator) {
 			K_trade,
 			T_trade,
 			r,
+			r,
 			true_sigma,
-			bfin.Prospect_Params{alpha = 0.88, beta = 0.88, lambda = 2.25, gamma = cal_gamma},
+			market_params(cal_gamma),
 			.Put,
-			100,
-			allocator,
+			n_points = 400,
 		)
 
 		pos_size := 100.0 // Number of contracts
@@ -155,11 +166,11 @@ behavioral_backtester_test :: proc(allocator: mem.Allocator) {
 			K_trade,
 			T_next,
 			r,
+			r,
 			true_sigma,
-			bfin.Prospect_Params{alpha = 0.88, beta = 0.88, lambda = 2.25, gamma = gamma_next},
+			market_params(gamma_next),
 			.Put,
-			100,
-			allocator,
+			n_points = 400,
 		)
 
 		if signals[t] == 1 {
@@ -184,6 +195,14 @@ behavioral_backtester_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("SPY Buy & Hold Return:  %+6.2f%%\n", spy_return)
 	fmt.printf("Behavioral Alpha Return: %+6.2f%%\n", total_return)
 	fmt.printf("Final Equity:           $%.2f\n", final_equity)
+	ok := recovery_err < 0.01
+	fmt.printf(
+		"%s daily calibration recovers the market's gamma- (0.45 / 0.90 regimes) on all %d days (max error %.4f)\n",
+		"OK  " if ok else "FAIL",
+		n_days - 1,
+		recovery_err,
+	)
+	record_failures(0 if ok else 1)
 
 	// 5. Plot Results
 	fmt.println("- Generating Backtest Plots...")
@@ -469,13 +488,15 @@ historical_gamma_backtest_test :: proc(allocator: mem.Allocator) {
 
 		chain := make([]fin.VolSurfacePoint, 3, allocator)
 		defer delete(chain, allocator)
-		strikes_rel := []f64{0.90, 1.00, 1.10}
-		base := bfin.Prospect_Params {
-			alpha  = 0.88,
-			beta   = 0.88,
-			lambda = 2.25,
-			gamma  = 0.61,
+		strikes_rel := []f64{0.90, 0.95, 1.00}
+		types := []fin.OptionType{.Put, .Put, .Put}
+		setup := bfin.Prospect_Calibration_Setup {
+			init = {alpha = 0.88, beta = 0.88, lambda = 2.25, gamma = 0.61, gamma_minus = 0.7},
+			fixed = {.Alpha, .Beta, .Lambda, .Gamma},
+			n_points = 400,
+			max_iter = 150,
 		}
+		spot_err := 0.0
 
 		for c in 0 ..< 3 {
 			t := check_days[c]
@@ -491,21 +512,18 @@ historical_gamma_backtest_test :: proc(allocator: mem.Allocator) {
 
 			for i in 0 ..< 3 {
 				K := St * strikes_rel[i]
+				mp_params := bfin.TK92_PARAMS
+				mp_params.gamma_minus = true_gamma
 				mp := bfin.prospect_theory_price(
 					St,
 					K,
 					30.0 / 252.0,
 					r,
+					r,
 					rv,
-					bfin.Prospect_Params {
-						alpha = base.alpha,
-						beta = base.beta,
-						lambda = base.lambda,
-						gamma = true_gamma,
-					},
-					.Call,
-					80,
-					allocator,
+					mp_params,
+					.Put,
+					n_points = 400,
 				)
 				chain[i] = fin.VolSurfacePoint {
 					strike       = K,
@@ -514,26 +532,24 @@ historical_gamma_backtest_test :: proc(allocator: mem.Allocator) {
 					implied_vol  = 0.0,
 				}
 			}
-			// ✅ FIX: Handle Unidentifiable Low-Vol Regimes
-			if clean_vix_spot < 14.0 {
-				fmt.printf(
-					"  %-16s | VIX=%.1f | VIX-implied γ=%.2f | Calibrator: UNIDENTIFIABLE (Low Vol Regime) \n",
-					labels[c],
-					clean_vix_spot,
-					true_gamma,
-				)
-			} else {
-				res := bfin.calibrate_prospect_theory(chain, St, r, rv, allocator)
-				fmt.printf(
-					"  %-16s | VIX=%.1f | VIX-implied γ=%.2f | Calibrator γ=%.2f | RMSE=$%.3f\n",
-					labels[c],
-					clean_vix_spot,
-					true_gamma,
-					res.params.gamma,
-					res.rmse,
-				)
-			}
+			res := bfin.calibrate_prospect_theory(chain, St, r, r, rv, setup, types, allocator)
+			spot_err = max(spot_err, abs(res.params.gamma_minus - true_gamma))
+			fmt.printf(
+				"  %-16s | VIX=%.1f | VIX-implied γ-=%.3f | Calibrator γ-=%.3f | RMSE=$%.2e\n",
+				labels[c],
+				clean_vix_spot,
+				true_gamma,
+				res.params.gamma_minus,
+				res.rmse,
+			)
 		}
+		ok := spot_err < 0.01
+		fmt.printf(
+			"%s the calibrator recovers gamma- on the 3 days (max error %.4f)\n",
+			"OK  " if ok else "FAIL",
+			spot_err,
+		)
+		record_failures(0 if ok else 1)
 	}
 
 	// 7. Plots

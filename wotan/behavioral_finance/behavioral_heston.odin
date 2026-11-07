@@ -1,225 +1,147 @@
 package behavioral_finance
 
 import fin "../finance"
-import opt "../optimize"
 import "core:math"
 import "core:mem"
 
 // ============================================================================
-// Behavioral Heston Model (Physics + Psychology)
+// Behavioral Heston: CPT option prices on a Heston distribution of S_T
 // ============================================================================
+// The CPT valuation of prospect.odin with S_T distributed as in the Heston model
+// (drift r: Heston parameters calibrated to option prices describe the risk-neutral
+// distribution). With RATIONAL_PARAMS the price is the Heston price, so the CPT
+// parameters measure what remains of the market's prices after stochastic volatility.
 
-// Fast extraction of Heston CDF on a grid using Gil-Pelaez inversion
-// Uses pure real arithmetic in the inner loop for massive speedups.
+// Heston CDF F(x) = P(S_T <= x) at each node, by Gil-Pelaez inversion of the
+// characteristic function (drift r): P(S_T > x) = 1/2 + 1/pi int_0^inf
+// Re[e^{-iu ln x} phi(u) / (iu)] du, midpoint rule with n_int points on (0, u_max].
+// phi does not depend on x: evaluated once per u.
 extract_heston_cdf_grid :: proc(
-	S: f64,
-	r: f64,
-	T: f64,
+	S, r, T: f64,
 	params: fin.Heston_Params,
-	ST_min, ST_max: f64,
-	n_grid: int,
+	nodes: []f64,
+	u_max: f64,
 	n_int: int,
-	allocator: mem.Allocator,
+	allocator := context.allocator,
 ) -> []f64 {
-	cdf := make([]f64, n_grid, allocator)
-	u_max := 100.0
 	du := u_max / f64(n_int)
-
-	for i in 0 ..< n_grid {
-		K := ST_min + (ST_max - ST_min) * f64(i) / f64(n_grid - 1)
-		if K <= 0 {
-			cdf[i] = 0.0
-			continue
-		}
-
-		P2 := 0.0
-		lnK := math.ln(K)
+	phi_r := make([]f64, n_int, context.temp_allocator)
+	phi_i := make([]f64, n_int, context.temp_allocator)
+	defer delete(phi_r, context.temp_allocator)
+	defer delete(phi_i, context.temp_allocator)
+	for j in 0 ..< n_int {
+		u := (f64(j) + 0.5) * du
+		p := fin.heston_char_func(complex(u, 0), S, r, T, params)
+		phi_r[j], phi_i[j] = real(p) / u, imag(p) / u
+	}
+	cdf := make([]f64, len(nodes), allocator)
+	for x, k in nodes {
+		if x <= 0 {continue}
+		lx := math.ln(x)
+		acc := 0.0
+		// Re[e^{-ia} (pr + i pi) / i] = pi cos a - pr sin a at a = (j + 1/2) du ln x;
+		// cos a, sin a by rotating with step du ln x
+		c, sn := math.cos(0.5 * du * lx), math.sin(0.5 * du * lx)
+		dc, ds := math.cos(du * lx), math.sin(du * lx)
 		for j in 0 ..< n_int {
-			u := (f64(j) + 0.5) * du
-			u2 := complex(u, 0.0)
-			phi2 := fin.heston_char_func(u2, S, r, T, params)
-
-			cos_u_lnK := math.cos(u * lnK)
-			sin_u_lnK := math.sin(u * lnK)
-			phi_R := real(phi2)
-			phi_I := imag(phi2)
-
-			// Re[ e^{-iu ln K} phi(u) / (iu) ] = (phi_I * cos - phi_R * sin) / u
-			integrand := (phi_I * cos_u_lnK - phi_R * sin_u_lnK) / u
-			P2 += integrand * du
+			acc += phi_i[j] * c - phi_r[j] * sn
+			c, sn = c * dc - sn * ds, sn * dc + c * ds
 		}
-		P_gt_K := 0.5 + P2 / math.PI
-		cdf[i] = 1.0 - P_gt_K // F(K) = P(S_T <= K)
+		cdf[k] = 1 - (0.5 + acc * du / math.PI)
 	}
 	return cdf
 }
 
+// The Heston distribution of S_T on a log grid of n_grid cells (the price error
+// falls as 1/n_grid^2: ~5e-6 relative at 4000), the strike a node,
+// over +-12 standard deviations of ln S_T (variance from max(v0, theta)); the CDF made
+// monotone (clipped into [0, 1], running maximum) and pinned to 0 and 1 at the ends
+behavioral_heston_precompute :: proc(
+	S, K, T, r: f64,
+	heston_params: fin.Heston_Params,
+	n_grid := 4000,
+	n_int := 2000,
+	allocator := context.allocator,
+) -> Prospect_Precomputed {
+	assert(S > 0 && K > 0 && T > 0 && n_grid >= 2, "behavioral_heston_precompute: bad inputs")
+	v := max(heston_params.v0, heston_params.theta)
+	s := math.sqrt(v * T)
+	m := math.ln(S) + (r - 0.5 * v) * T
+	HALF :: 12.0
+	h := 2 * HALF * s / f64(n_grid)
+	lK := math.ln(K)
+	j0 := int(math.ceil((m - HALF * s - lK) / h))
+	j1 := int(math.floor((m + HALF * s - lK) / h))
+	n := j1 - j0 + 1
+	nodes := make([]f64, n, allocator)
+	for j in 0 ..< n {nodes[j] = math.exp(lK + f64(j0 + j) * h)}
+	// phi decays at least like a Gaussian of variance ~ s^2 near the centre; u_max
+	// 40/s, step du = u_max / n_int (aliasing period 2 pi / du >> the grid's width)
+	cdf := extract_heston_cdf_grid(S, r, T, heston_params, nodes, 40 / s, n_int, allocator)
+	run := 0.0
+	for &F in cdf {
+		F = clamp(F, 0, 1)
+		run = max(run, F)
+		F = run
+	}
+	cdf[0], cdf[n - 1] = 0, 1
+	return {nodes = nodes, cdf = cdf, allocator = allocator}
+}
+
 behavioral_heston_price :: proc(
-	S: f64,
-	K: f64,
-	T: f64,
-	r: f64,
+	S, K, T, r: f64,
 	heston_params: fin.Heston_Params,
 	prospect_params: Prospect_Params,
 	opt_type: fin.OptionType,
-	n_grid: int = 100,
-	n_int: int = 200,
-	allocator: mem.Allocator = context.allocator,
+	side: CPT_Side = .Writer,
+	frame: CPT_Frame = .Aggregated,
+	n_grid := 4000,
+	n_int := 2000,
 ) -> f64 {
-	if T <= 0.0 {
-		if opt_type == .Call {return math.max(S - K, 0.0)}
-		return math.max(K - S, 0.0)
+	if T <= 0 {
+		return max(S - K, 0) if opt_type == .Call else max(K - S, 0)
 	}
-	pre := behavioral_heston_precompute(S, K, T, r, heston_params, opt_type, n_grid, n_int, allocator)
-	defer delete(pre.cdf, allocator)
-	return behavioral_heston_price_precomputed(&pre, K, T, r, prospect_params, opt_type, allocator)
+	pre := behavioral_heston_precompute(
+		S,
+		K,
+		T,
+		r,
+		heston_params,
+		n_grid,
+		n_int,
+		context.temp_allocator,
+	)
+	defer prospect_precomputed_free(&pre)
+	return prospect_price_precomputed(&pre, K, T, r, prospect_params, opt_type, side, frame)
 }
 
-// The part of a behavioral Heston price that depends only on the Heston
-// parameters (not on the prospect parameters): the Heston CDF of S_T on the
-// price grid and the Heston reference premium. Calibrating the prospect
-// parameters with Heston fixed computes this once per option. The valuation
-// itself is the shared prospect-theory step (prospect_theory_price_precomputed).
-BehavioralHeston_Precomputed :: Prospect_Precomputed
-
-behavioral_heston_precompute :: proc(
-	S: f64,
-	K: f64,
-	T: f64,
-	r: f64,
-	heston_params: fin.Heston_Params,
-	opt_type: fin.OptionType,
-	n_grid: int = 100,
-	n_int: int = 200,
-	allocator: mem.Allocator = context.allocator,
-) -> BehavioralHeston_Precomputed {
-	ST_min := S * 0.2
-	ST_max := S * 3.0
-	return BehavioralHeston_Precomputed {
-		// 1. Extract Heston CDF (The Physics)
-		cdf = extract_heston_cdf_grid(S, r, T, heston_params, ST_min, ST_max, n_grid, n_int, allocator),
-		// 4. Reference Premium (Anchor for Value Function)
-		premium_ref = fin.heston_price(S, K, T, r, heston_params, opt_type, 200),
-		ST_min = ST_min,
-		dS = (ST_max - ST_min) / f64(n_grid),
-		n_points = n_grid,
-	}
-}
-
-// behavioral_heston_price_precomputed applies the prospect-theory valuation
-// (probability weighting, value function, certainty equivalent) to a
-// precomputed Heston CDF.
-behavioral_heston_price_precomputed :: prospect_theory_price_precomputed
-
-// ============================================================================
-// Behavioral Heston Calibration
-// ============================================================================
-
-BehavioralHeston_CalibrationContext :: struct {
-	market_data:   []fin.VolSurfacePoint,
-	S:             f64,
-	r:             f64,
-	heston_params: fin.Heston_Params,
-	n_grid:        int,
-	n_int:         int,
-	allocator:     mem.Allocator,
-	// Optional per-option cache (same order as market_data); see calibrate_behavioral_heston
-	precomputed:   []BehavioralHeston_Precomputed,
-}
-
-behavioral_heston_objective_fn :: proc(x: []f64, user_data: rawptr) -> f64 {
-	ctx := (^BehavioralHeston_CalibrationContext)(user_data)
-	prospect_params := Prospect_Params {
-		alpha  = x[0],
-		beta   = x[1],
-		lambda = x[2],
-		gamma  = x[3],
-	}
-
-	rmse := 0.0
-	for point, idx in ctx.market_data {
-		model_price: f64
-		if ctx.precomputed != nil && point.expiry > 0.0 {
-			// Scratch from the (thread-local) temp allocator: safe for parallel probes
-			model_price = behavioral_heston_price_precomputed(
-				&ctx.precomputed[idx],
-				point.strike,
-				point.expiry,
-				ctx.r,
-				prospect_params,
-				.Call,
-				context.temp_allocator,
-			)
-		} else {
-			model_price = behavioral_heston_price(
-				ctx.S,
-				point.strike,
-				point.expiry,
-				ctx.r,
-				ctx.heston_params,
-				prospect_params,
-				.Call,
-				ctx.n_grid,
-				ctx.n_int,
-				ctx.allocator,
-			)
-		}
-
-		market_price := point.market_price
-		if market_price <= 0 {
-			market_price = fin.black_scholes_call(
-				ctx.S,
-				point.strike,
-				point.expiry,
-				ctx.r,
-				point.implied_vol,
-			)
-		}
-
-		err := model_price - market_price
-		rmse += err * err
-	}
-	return math.sqrt_f64(rmse / f64(len(ctx.market_data)))
-}
-
+// Calibrates the CPT parameters on top of fixed (already calibrated) Heston
+// parameters
 calibrate_behavioral_heston :: proc(
 	market_data: []fin.VolSurfacePoint,
-	S: f64,
-	r: f64,
+	S, r: f64,
 	heston_params: fin.Heston_Params,
-	allocator: mem.Allocator = context.allocator,
+	setup: Prospect_Calibration_Setup = {},
+	opt_types: []fin.OptionType = nil,
+	allocator := context.allocator,
 ) -> Prospect_CalibrationResult {
-	ctx := BehavioralHeston_CalibrationContext {
-		market_data   = market_data,
-		S             = S,
-		r             = r,
-		heston_params = heston_params,
-		n_grid        = 100,
-		n_int         = 200,
-		allocator     = allocator,
+	n_grid := setup.n_points if setup.n_points > 0 else 4000
+	pre := make([]Prospect_Precomputed, len(market_data), allocator)
+	defer {
+		for &p in pre {prospect_precomputed_free(&p)}
+		delete(pre, allocator)
 	}
-
-	// The Heston CDF grid and reference premium do not depend on the prospect
-	// parameters being calibrated: compute them once per option.
-	ctx.precomputed = make([]BehavioralHeston_Precomputed, len(market_data), allocator)
-	for point, idx in market_data {
-		if point.expiry <= 0.0 {continue}
-		ctx.precomputed[idx] = behavioral_heston_precompute(
+	for point, i in market_data {
+		pre[i] = behavioral_heston_precompute(
 			S,
 			point.strike,
 			point.expiry,
 			r,
 			heston_params,
-			.Call,
-			ctx.n_grid,
-			ctx.n_int,
+			n_grid,
+			2000,
 			allocator,
 		)
 	}
-	defer {
-		for pre in ctx.precomputed {delete(pre.cdf, allocator)}
-		delete(ctx.precomputed, allocator)
-	}
-
-	return _calibrate_prospect_params(&ctx, behavioral_heston_objective_fn, 100, true, allocator)
+	return _calibrate_prospect(market_data, opt_types, S, r, setup, pre, allocator)
 }
