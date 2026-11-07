@@ -65,6 +65,7 @@ orchestrator_test :: proc(allocator: mem.Allocator) {
 	// prices on the dates present for every asset and the VIX
 	symbols := []string{"SPY", "QQQ", "AAPL", "MSFT", "TLT", "^VIX"}
 	maps := make([]map[w.Date]f64, len(symbols))
+	vmaps := make([]map[w.Date]f64, len(symbols)) // traded volume (shares)
 	spy_dates := make([dynamic]w.Date)
 	for sym, k in symbols {
 		df := yahoo.read_yahoo(sym, .Daily, .FiveYears, allocator)
@@ -74,12 +75,14 @@ orchestrator_test :: proc(allocator: mem.Allocator) {
 			return
 		}
 		maps[k] = make(map[w.Date]f64)
-		dc, pc := w.column(&df, "Date"), w.column(&df, "AdjClose")
+		vmaps[k] = make(map[w.Date]f64)
+		dc, pc, vc := w.column(&df, "Date"), w.column(&df, "AdjClose"), w.column(&df, "Volume")
 		for i in 0 ..< df.rows {
 			d, dn := w.column_at_date(dc, i)
 			p, pn := w.column_at_float(pc, i)
 			if dn || pn || p <= 0 {continue}
 			maps[k][d] = p
+			if v, vn := w.column_at_int(vc, i); !vn {vmaps[k][d] = f64(v)} 	// an Int column
 			if k == 0 {append(&spy_dates, d)}
 		}
 	}
@@ -95,6 +98,14 @@ orchestrator_test :: proc(allocator: mem.Allocator) {
 	for d, t in dates {
 		for i in 0 ..< N {price[t * N + i] = maps[i][d]}
 		vix[t] = maps[N][d] / 100
+	}
+	// liquidity known at each close (trailing 20 days): daily vol and ADV per asset, [T, N]
+	liq_sigma, liq_adv := make([]f64, T * N), make([]f64, T * N)
+	for i in 0 ..< N {
+		pc, vc := make([]f64, T), make([]f64, T)
+		for d, t in dates {pc[t], vc[t] = maps[i][d], vmaps[i][d]}
+		s, a := ml_fin.liquidity_estimates(pc, vc, 20)
+		for t in 0 ..< T {liq_sigma[t * N + i], liq_adv[t * N + i] = s[t], a[t]}
 	}
 	// returns from day t-1 to t (row t, t >= 1)
 	ret := make([]f64, T * N)
@@ -174,6 +185,16 @@ orchestrator_test :: proc(allocator: mem.Allocator) {
 	strat, b6040, beq, bspy :=
 		make([]f64, TEST), make([]f64, TEST), make([]f64, TEST), make([]f64, TEST)
 	pnl_check, exposure_sum, turnover := 0.0, 0.0, 0.0
+	// costs (fraction of capital) of each day's trades at three capitals; the benchmarks
+	// rebalance to their fixed weights every day from the weights the prices drifted to
+	COST_CAPS := [3]f64{CAP, 1e9, 1e10}
+	strat_cost: [3][]f64
+	for &c in strat_cost {c = make([]f64, TEST)}
+	t6040, teq := make([]f64, N), make([]f64, N)
+	t6040[0], t6040[N - 1] = 0.6, 0.4
+	for &v in teq {v = 1 / f64(N)}
+	h6040, heq := slice.clone(t6040), slice.clone(teq) // held (drifted) weights
+	c6040, ceq := make([]f64, TEST), make([]f64, TEST)
 	bad_weights := 0
 	actions: [ml_fin.RegimeAction]int
 	for k in 0 ..< TEST {
@@ -212,6 +233,25 @@ orchestrator_test :: proc(allocator: mem.Allocator) {
 		}
 		if sw > 1 + 1e-12 {bad_weights += 1}
 		next := ret[(t + 1) * N:][:N]
+		sg_t, adv_t := liq_sigma[t * N:][:N], liq_adv[t * N:][:N]
+		for cap, c in COST_CAPS {
+			strat_cost[c][k] = ml_fin.rebalance_cost(
+				ml_fin.DEFAULT_COST_MODEL,
+				before,
+				d.target_weights,
+				cap,
+				sg_t,
+				adv_t,
+			)
+		}
+		for b in 0 ..< 2 {
+			target, held := t6040 if b == 0 else teq, h6040 if b == 0 else heq
+			cb := ml_fin.rebalance_cost(ml_fin.DEFAULT_COST_MODEL, held, target, CAP, sg_t, adv_t)
+			if b == 0 {c6040[k] = cb} else {ceq[k] = cb}
+			r_b := 0.0
+			for v, i in target {r_b += v * next[i]}
+			for v, i in target {held[i] = v * (1 + next[i]) / (1 + r_b)}
+		}
 		expected := 0.0
 		for v, i in d.target_weights {expected += v * next[i]}
 		strat[k] = ml_fin.orchestrator_mark_to_market(&state, next, CAP)
@@ -238,12 +278,29 @@ orchestrator_test :: proc(allocator: mem.Allocator) {
 	_orch_metrics("equal weights", beq)
 	_orch_metrics("SPY", bspy)
 	fmt.println(
-		"   (no transaction costs; one year, one path: not evidence of an edge either way)",
+		"   net of costs at $1m (1 bp half spread, square-root impact on trailing 20-day vol and ADV):",
 	)
+	_orch_metrics("orchestrator", ml_fin.net_of_costs(strat, strat_cost[0]))
+	_orch_metrics("60/40 SPY/TLT", ml_fin.net_of_costs(b6040, c6040))
+	_orch_metrics("equal weights", ml_fin.net_of_costs(beq, ceq))
+	costs_ok := true
+	for cap, c in COST_CAPS {
+		drag := 0.0
+		for v, k in strat_cost[c] {
+			drag += v
+			costs_ok &&= v >= 0 && (c == 0 || v >= strat_cost[c - 1][k])
+		}
+		fmt.printf(
+			"   orchestrator costs at $%.0e: %.2f%% of capital over the year\n",
+			cap,
+			100 * drag,
+		)
+	}
+	fmt.println("   (one year, one path: not evidence of an edge either way)")
 
-	ok := abs(state.cumulative_pnl - pnl_check) < 1e-6 * CAP && bad_weights == 0
+	ok := abs(state.cumulative_pnl - pnl_check) < 1e-6 * CAP && bad_weights == 0 && costs_ok
 	fmt.printf(
-		"%s P&L %.0f reconciles with the weights held times the next day's returns (%.0f); weights >= 0 and exposure <= 1 on all %d days\n",
+		"%s P&L %.0f reconciles with the weights held times the next day's returns (%.0f); weights >= 0 and exposure <= 1 on all %d days; costs >= 0 and growing with the capital\n",
 		"OK  " if ok else "FAIL",
 		state.cumulative_pnl,
 		pnl_check,
