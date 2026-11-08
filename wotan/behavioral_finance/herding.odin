@@ -211,5 +211,5 @@ cck_regression :: proc(
 	return _herding_ols(csad, am, m2, keep, nw_lags)
 }
 
-@(private = "file")
+@(private = "package")
 _finite :: #force_inline proc(x: f64) -> bool {return !math.is_nan(x) && !math.is_inf(x)}

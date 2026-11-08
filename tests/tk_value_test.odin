@@ -137,52 +137,6 @@ tk_value_reference_test :: proc(allocator: mem.Allocator) {
 	record_failures(total - passed)
 }
 
-// Monthly low-minus-high TK quintile spread and the Fama-MacBeth slope of the next
-// month's return on TK; R [stock][month], TK [stock][month] (TK[s] predicts R[s])
-@(private = "file")
-_tk_sort :: proc(
-	R, TK: [][]f64,
-	first: int,
-) -> (
-	spread_mean, spread_t, fm_coef, fm_t: f64,
-	months: int,
-) {
-	N, M := len(R), len(R[0])
-	col := make([]f64, N, context.temp_allocator)
-	spreads := make([dynamic]f64, context.temp_allocator)
-	Xs := make([dynamic]l.Matrix(f64), context.temp_allocator)
-	Ys := make([dynamic][]f64, context.temp_allocator)
-	defer {
-		delete(col, context.temp_allocator)
-		delete(spreads)
-		for i in 0 ..< len(Xs) {l.matrix_free(&Xs[i]); delete(Ys[i], context.temp_allocator)}
-		delete(Xs)
-		delete(Ys)
-	}
-	for s in first ..< M {
-		for i in 0 ..< N {col[i] = -TK[i][s]} 	// long low TK, short high TK
-		w := bfin.anchoring_portfolio(col, 0.2, context.temp_allocator)
-		sp := 0.0
-		for i in 0 ..< N {sp += w[i] * R[i][s]}
-		delete(w, context.temp_allocator)
-		append(&spreads, sp)
-		X := l.matrix_new(f64, N, 2, context.temp_allocator)
-		y := make([]f64, N, context.temp_allocator)
-		for i in 0 ..< N {X.data[2 * i], X.data[2 * i + 1], y[i] = 1, TK[i][s], R[i][s]}
-		append(&Xs, X)
-		append(&Ys, y)
-	}
-	months = len(spreads)
-	for v in spreads {spread_mean += v / f64(months)}
-	ss := 0.0
-	for v in spreads {ss += (v - spread_mean) * (v - spread_mean)}
-	spread_t = spread_mean / math.sqrt(ss / f64(months - 1) / f64(months))
-	fm := ml.fama_macbeth(Xs[:], Ys[:], allocator = context.temp_allocator)
-	fm_coef, fm_t = fm.coef[1], fm.t_stat[1]
-	ml.fama_macbeth_result_free(&fm)
-	return
-}
-
 tk_value_test :: proc(allocator: mem.Allocator) {
 	seed_test(#procedure)
 	fmt.println("\n=== Prospect Theory Value (TK) and Stock Returns ===")
@@ -237,7 +191,7 @@ tk_value_test :: proc(allocator: mem.Allocator) {
 			}
 			TK[i] = bfin.tk_value(R[i], mkt, WARM)
 		}
-		results[k][0], results[k][1], results[k][2], results[k][3], n_months = _tk_sort(
+		results[k][0], results[k][1], results[k][2], results[k][3], n_months = signal_sort(
 			R,
 			TK,
 			WARM,
@@ -292,7 +246,7 @@ tk_value_test :: proc(allocator: mem.Allocator) {
 			}
 		}
 		for i in 0 ..< NS {TK[i] = bfin.tk_value(R[i], mkt, 60)}
-		sm, st, fc, ft, nm := _tk_sort(R, TK, 60)
+		sm, st, fc, ft, nm := signal_sort(R, TK, 60)
 		fmt.printf(
 			"Large caps, %d months: low - high TK quintile %.2f%% a month (t %.2f), Fama-MacBeth slope %.3f (t %.2f)\n",
 			nm,
