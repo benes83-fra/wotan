@@ -97,3 +97,36 @@ mean_t :: proc(series: []f64, lags := 0) -> (mean, t: f64) {
 	ml._ols_result_free(&fit, context.temp_allocator)
 	return
 }
+
+// [period][asset] from [asset][period]
+transpose_panel :: proc(X: [][]f64) -> [][]f64 {
+	out := make([][]f64, len(X[0]))
+	for t in 0 ..< len(X[0]) {
+		out[t] = make([]f64, len(X))
+		for i in 0 ..< len(X) {out[t][i] = X[i][t]}
+	}
+	return out
+}
+
+// mean monthly spread of the overlapping strategy with weights W [month][asset] on
+// returns Rt [month][asset] from month `first` on, Newey-West t (`lags` lags)
+overlapping_spread_t :: proc(W, Rt: [][]f64, hold, first: int, lags := 6) -> (mean, t: f64) {
+	o := bfin.overlapping_strategy_returns(W, Rt, hold, allocator = context.temp_allocator)
+	defer bfin.overlapping_returns_free(&o)
+	return mean_t(o.spread[first:], lags)
+}
+
+// JT / DBT weights per month from a signal panel S [asset][month]: long the top
+// `fraction`, short the bottom one
+long_short_weights :: proc(S: [][]f64, fraction := 0.1) -> [][]f64 {
+	W := make([][]f64, len(S[0]))
+	col := make([]f64, len(S))
+	defer delete(col)
+	for t in 0 ..< len(S[0]) {
+		for i in 0 ..< len(S) {col[i] = S[i][t]}
+		W[t] = bfin.long_short_portfolio(col, fraction)
+	}
+	return W
+}
+
+free_panel :: proc(X: [][]f64) {for r in X {delete(r)}; delete(X)}

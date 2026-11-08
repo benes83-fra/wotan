@@ -923,40 +923,6 @@ momentum_reference_test :: proc(allocator: mem.Allocator) {
 	record_failures(total - passed)
 }
 
-// [period][asset] from [asset][period]
-@(private = "file")
-_mo_transpose :: proc(X: [][]f64) -> [][]f64 {
-	out := make([][]f64, len(X[0]))
-	for t in 0 ..< len(X[0]) {
-		out[t] = make([]f64, len(X))
-		for i in 0 ..< len(X) {out[t][i] = X[i][t]}
-	}
-	return out
-}
-
-// mean monthly spread of the overlapping strategy with weights W [month][asset] on
-// returns Rt [month][asset] from month `first` on, Newey-West t (6 lags, as DGW)
-@(private = "file")
-_mo_strategy :: proc(W, Rt: [][]f64, hold, first: int) -> (mean, t: f64) {
-	o := bfin.overlapping_strategy_returns(W, Rt, hold, allocator = context.temp_allocator)
-	defer bfin.overlapping_returns_free(&o)
-	return mean_t(o.spread[first:], 6)
-}
-
-// JT / DBT weights per month from a signal panel S [asset][month]: long the top
-// `fraction`, short the bottom one
-@(private = "file")
-_mo_weights :: proc(S: [][]f64, fraction := 0.1) -> [][]f64 {
-	W := make([][]f64, len(S[0]))
-	col := make([]f64, len(S))
-	defer delete(col)
-	for t in 0 ..< len(S[0]) {
-		for i in 0 ..< len(S) {col[i] = S[i][t]}
-		W[t] = bfin.long_short_portfolio(col, fraction)
-	}
-	return W
-}
-
 // Fama-MacBeth (DGW eq. 10) of the six-month return after month t on PRET, ID and
 // PRET x ID for months first .. M - 7, Newey-West t (6 lags): the PRET x ID slope
 @(private = "file")
@@ -993,8 +959,6 @@ _mo_fm :: proc(PRET, ID, MR: [][]f64, first: int) -> (b3, t3: f64) {
 	return fm.coef[3], fm.t_stat[3]
 }
 
-@(private = "file")
-_mo_free :: proc(X: [][]f64) {for r in X {delete(r)}; delete(X)}
 
 // FIP market (DGW's illustrative model, day by day): signals uniform on [-FIP_L,
 // FIP_L]; the FIP investors (share m) leave the part m s of each signal below FIP_K
@@ -1042,17 +1006,17 @@ momentum_test :: proc(allocator: mem.Allocator) {
 	mom_q: [2][5]f64
 	for mm, k in ([2]f64{0.5, 0}) {
 		R := _mo_fip_market(N, M * D, mm)
-		defer _mo_free(R)
+		defer free_panel(R)
 		MR := monthly_compound(R, months)
 		ID, PRET := bfin.information_discreteness(R, months)
-		MRt := _mo_transpose(MR)
-		defer {_mo_free(MR); _mo_free(MRt); bfin.signal_panel_free(ID)
+		MRt := transpose_panel(MR)
+		defer {free_panel(MR); free_panel(MRt); bfin.signal_panel_free(ID)
 			bfin.signal_panel_free(PRET)}
 		for t in 0 ..< BURN {for i in 0 ..< N {PRET[i][t + 11] = math.nan_f64()}} 	// burn-in
 		// JT: deciles of the 12-1 return, held 6 months
-		W := _mo_weights(PRET)
-		fip[k][0], fip[k][1] = _mo_strategy(W, MRt, 6, FIRST)
-		_mo_free(W)
+		W := long_short_weights(PRET)
+		fip[k][0], fip[k][1] = overlapping_spread_t(W, MRt, 6, FIRST)
+		free_panel(W)
 		// DGW: PRET quintiles, then ID quintiles; winner - loser within each ID quintile
 		sp: [5][]f64
 		col, cid := make([]f64, N), make([]f64, N)
@@ -1066,7 +1030,7 @@ momentum_test :: proc(allocator: mem.Allocator) {
 			sp[g] = o.spread
 			delete(o.long)
 			delete(o.short)
-			_mo_free(Wg)
+			free_panel(Wg)
 			mom_q[k][g], _ = mean_t(sp[g][FIRST:])
 		}
 		delete(col)
@@ -1129,7 +1093,7 @@ momentum_test :: proc(allocator: mem.Allocator) {
 		R := make([][]f64, NB)
 		X := make([]f64, NB)
 		mkt := make([]f64, MB)
-		defer {_mo_free(R); delete(X); delete(mkt)}
+		defer {free_panel(R); delete(X); delete(mkt)}
 		for i in 0 ..< NB {
 			R[i] = make([]f64, MB)
 			X[i] = rand.float64_normal(0, b * OV_S / math.sqrt(1 - OV_PHI * OV_PHI))
@@ -1144,18 +1108,18 @@ momentum_test :: proc(allocator: mem.Allocator) {
 				mkt[t] += R[i][t] / NB
 			}
 		}
-		Rt := _mo_transpose(R)
-		defer _mo_free(Rt)
+		Rt := transpose_panel(R)
+		defer free_panel(Rt)
 		CU := bfin.past_return(R, 36, market = mkt, kind = .Sum)
-		W := _mo_weights(CU)
-		m, t := _mo_strategy(W, Rt, 36, 36 + 36)
+		W := long_short_weights(CU)
+		m, t := overlapping_spread_t(W, Rt, 36, 36 + 36)
 		ov[k][0], ov[k][1] = -m, -t
-		_mo_free(W)
+		free_panel(W)
 		bfin.signal_panel_free(CU)
 		PR := bfin.past_return(R, 11, 1)
-		W = _mo_weights(PR)
-		ov[k][2], ov[k][3] = _mo_strategy(W, Rt, 6, 12 + 6)
-		_mo_free(W)
+		W = long_short_weights(PR)
+		ov[k][2], ov[k][3] = overlapping_spread_t(W, Rt, 6, 12 + 6)
+		free_panel(W)
 		bfin.signal_panel_free(PR)
 	}
 	expect(
@@ -1186,7 +1150,7 @@ momentum_test :: proc(allocator: mem.Allocator) {
 	} else {
 		MM := (len(dates) - 1) / D
 		R := make([][]f64, NS)
-		defer _mo_free(R)
+		defer free_panel(R)
 		for i in 0 ..< NS {
 			R[i] = make([]f64, MM * D)
 			for t in 0 ..< MM * D {R[i][t] = DP[(t + 1) * NS + i] / DP[t * NS + i] - 1}
@@ -1195,21 +1159,21 @@ momentum_test :: proc(allocator: mem.Allocator) {
 		defer delete(lm)
 		for k in 0 ..= MM {lm[k] = D * k}
 		MR := monthly_compound(R, lm)
-		MRt := _mo_transpose(MR)
+		MRt := transpose_panel(MR)
 		ID, PRET := bfin.information_discreteness(R, lm)
-		defer {_mo_free(MR); _mo_free(MRt); bfin.signal_panel_free(ID)
+		defer {free_panel(MR); free_panel(MRt); bfin.signal_panel_free(ID)
 			bfin.signal_panel_free(PRET)}
-		W := _mo_weights(PRET, 0.2)
-		jm, jt := _mo_strategy(W, MRt, 6, 11 + 6)
-		_mo_free(W)
+		W := long_short_weights(PRET, 0.2)
+		jm, jt := overlapping_spread_t(W, MRt, 6, 11 + 6)
+		free_panel(W)
 		b3, t3 := _mo_fm(PRET, ID, MR, 11)
 		mk := make([]f64, MM)
 		defer delete(mk)
 		for t in 0 ..< MM {for i in 0 ..< NS {mk[t] += MR[i][t] / f64(NS)}}
 		CU := bfin.past_return(MR, 36, market = mk, kind = .Sum)
-		W = _mo_weights(CU, 0.2)
-		dm, dt := _mo_strategy(W, MRt, 36, 72)
-		_mo_free(W)
+		W = long_short_weights(CU, 0.2)
+		dm, dt := overlapping_spread_t(W, MRt, 36, 72)
+		free_panel(W)
 		bfin.signal_panel_free(CU)
 		fmt.printf(
 			"Large caps, %d months: JT 12-1 quintiles %.2f%% a month (t %.2f, %d months); FM PRET x ID %.3f (t %.2f); DBT losers - winners %.2f%% (t %.2f, %d months)\n",
