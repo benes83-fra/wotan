@@ -154,19 +154,17 @@ max_daily_return :: proc(
 }
 
 // free a [asset][month] result
-lottery_measure_free :: proc(x: [][]f64, allocator := context.allocator) {
-	for r in x {delete(r, allocator)}
-	delete(x, allocator)
-}
+lottery_measure_free :: signal_panel_free
 
-@(private = "file")
+// months: increasing day bounds within the returns (shared by the monthly measures)
+@(private)
 _check_months :: proc(returns: [][]f64, months: []int) {
-	assert(len(returns) > 0 && len(months) >= 2, "lottery measures: no assets or no month")
+	assert(len(returns) > 0 && len(months) >= 2, "monthly measures: no assets or no month")
 	T := len(returns[0])
-	for r in returns {assert(len(r) == T, "lottery measures: ragged returns")}
+	for r in returns {assert(len(r) == T, "monthly measures: ragged returns")}
 	assert(
 		months[0] >= 0 && months[len(months) - 1] <= T,
-		"lottery measures: month bounds outside the days",
+		"monthly measures: month bounds outside the days",
 	)
-	for k in 1 ..< len(months) {assert(months[k] >= months[k - 1], "lottery measures: month bounds must increase")}
+	for k in 1 ..< len(months) {assert(months[k] >= months[k - 1], "monthly measures: month bounds must increase")}
 }

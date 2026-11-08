@@ -63,3 +63,37 @@ signal_sort :: proc(
 	ml.fama_macbeth_result_free(&fm)
 	return
 }
+
+// monthly compounded returns [asset][month] from daily returns [asset][day]: months[k]
+// .. months[k+1] - 1 are the days of month k
+monthly_compound :: proc(R: [][]f64, months: []int) -> [][]f64 {
+	out := make([][]f64, len(R))
+	for r, i in R {
+		out[i] = make([]f64, len(months) - 1)
+		for k in 0 ..< len(months) - 1 {
+			g := 1.0
+			for v in r[months[k]:months[k + 1]] {g *= 1 + v}
+			out[i][k] = g - 1
+		}
+	}
+	return out
+}
+
+// mean of a series and its t-statistic, Newey-West with `lags` lags (0: classical)
+// as statsmodels OLS on a constant, cov_type="HAC" without correction; NaN entries
+// are left out
+mean_t :: proc(series: []f64, lags := 0) -> (mean, t: f64) {
+	v := make([dynamic]f64, context.temp_allocator)
+	defer delete(v)
+	for x in series {if !math.is_nan(x) {append(&v, x)}}
+	T := len(v)
+	if T < 2 {return math.nan_f64(), math.nan_f64()}
+	ones := l.matrix_new(f64, T, 1, context.temp_allocator)
+	defer l.matrix_free(&ones)
+	for &o in ones.data {o = 1}
+	fit :=
+		ml.ols_fit_robust(&ones, v[:], {type = .HAC, maxlags = lags}, .Cholesky, context.temp_allocator) if lags > 0 else ml.ols_fit(&ones, v[:], .Cholesky, context.temp_allocator)
+	mean, t = fit.beta[0], fit.tvalues[0]
+	ml._ols_result_free(&fit, context.temp_allocator)
+	return
+}

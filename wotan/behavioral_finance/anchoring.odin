@@ -48,40 +48,52 @@ compute_anchoring_signal :: proc(
 	return signal
 }
 
-compute_anchoring_signal_free :: proc(signal: [][]f64, allocator := context.allocator) {
+// free a [asset][time] signal panel (PTH, past returns, ID, MAX, ST)
+signal_panel_free :: proc(signal: [][]f64, allocator := context.allocator) {
 	for s in signal {delete(s, allocator)}
 	delete(signal, allocator)
 }
 
+compute_anchoring_signal_free :: signal_panel_free
+
 // One formation date: equally weighted long the top `fraction` and short the bottom
 // `fraction` of the assets with a finite signal (k = floor(fraction n) on each side;
 // ties broken by asset index). Weights sum to +1 and -1; zero when k = 0.
-anchoring_portfolio :: proc(
+// (George & Hwang: top / bottom 30% on PTH; Jegadeesh & Titman: deciles on past returns.)
+long_short_portfolio :: proc(
 	signal: []f64,
 	fraction := 0.3,
 	allocator := context.allocator,
 ) -> []f64 {
-	assert(fraction > 0 && fraction <= 0.5, "anchoring_portfolio: fraction in (0, 0.5]")
+	assert(fraction > 0 && fraction <= 0.5, "long_short_portfolio: fraction in (0, 0.5]")
 	weights := make([]f64, len(signal), allocator)
-	idx := make([dynamic]int, 0, len(signal), context.temp_allocator)
+	idx := _ascending_order(signal)
 	defer delete(idx)
-	for v, i in signal {if !math.is_nan(v) {append(&idx, i)}}
-	k := int(math.floor(fraction * f64(len(idx))))
-	if k == 0 {return weights}
-	Ctx :: struct {
-		s: []f64,
-	}
-	context.user_ptr = &Ctx{signal}
-	slice.sort_by(idx[:], proc(a, b: int) -> bool {
-		s := (^Ctx)(context.user_ptr).s
-		return s[a] < s[b] || (s[a] == s[b] && a < b)
-	})
 	n := len(idx)
+	k := int(math.floor(fraction * f64(n)))
 	for j in 0 ..< k {
 		weights[idx[j]] = -1 / f64(k)
 		weights[idx[n - 1 - j]] = 1 / f64(k)
 	}
 	return weights
+}
+
+anchoring_portfolio :: long_short_portfolio
+
+// indices of the finite values, ascending by value, ties by index (temp allocator)
+@(private)
+_ascending_order :: proc(values: []f64) -> [dynamic]int {
+	idx := make([dynamic]int, 0, len(values), context.temp_allocator)
+	for v, i in values {if _finite(v) {append(&idx, i)}}
+	Ctx :: struct {
+		s: []f64,
+	}
+	context.user_ptr = &Ctx{values}
+	slice.sort_by(idx[:], proc(a, b: int) -> bool {
+		s := (^Ctx)(context.user_ptr).s
+		return s[a] < s[b] || (s[a] == s[b] && a < b)
+	})
+	return idx
 }
 
 Overlapping_Returns :: struct {

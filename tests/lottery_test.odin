@@ -158,21 +158,6 @@ lottery_reference_test :: proc(allocator: mem.Allocator) {
 	record_failures(total - passed)
 }
 
-// monthly compounded returns [asset][month] from daily returns
-@(private = "file")
-_lt_monthly :: proc(R: [][]f64, months: []int) -> [][]f64 {
-	out := make([][]f64, len(R))
-	for r, i in R {
-		out[i] = make([]f64, len(months) - 1)
-		for k in 0 ..< len(months) - 1 {
-			g := 1.0
-			for v in r[months[k]:months[k + 1]] {g *= 1 + v}
-			out[i][k] = g - 1
-		}
-	}
-	return out
-}
-
 // signal of month k - 1 aligned with the return of month k
 @(private = "file")
 _lt_lag :: proc(S: [][]f64) -> [][]f64 {
@@ -276,7 +261,7 @@ lottery_test :: proc(allocator: mem.Allocator) {
 				R[i][t] = day(i, m, mu, beta, vol, pu, pd)
 			}
 		}
-		MR := _lt_monthly(R, months)
+		MR := monthly_compound(R, months)
 		ST := bfin.salience_theory_value(R, months)
 		MX := bfin.max_daily_return(R, months)
 		LST, LMX := _lt_lag(ST), _lt_lag(MX)
@@ -350,7 +335,7 @@ lottery_test :: proc(allocator: mem.Allocator) {
 		}
 		lm := make([]int, MM + 1)
 		for k in 0 ..= MM {lm[k] = D * k}
-		MR := _lt_monthly(R, lm)
+		MR := monthly_compound(R, lm)
 		LST := _lt_lag(bfin.salience_theory_value(R, lm))
 		LMX := _lt_lag(bfin.max_daily_return(R, lm))
 		for S, j in ([][][]f64{LST, LMX}) {
