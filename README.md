@@ -131,7 +131,7 @@ import net   "wotan/net"
 
 ## Examples
 
-The examples below are shortened. Every one of them has a complete, runnable version in [`tests/`](tests/).
+The examples below are shortened. Every one of them has a complete, runnable version in [`tests/`](tests/). For a step-by-step introduction to DataFrames, see the [core user guide](docs/core_guide.md).
 
 ### DataFrames: load, filter, group, join
 
@@ -321,7 +321,7 @@ The GPT-2 and BERT vocabularies (`vocab.json`, `merges.txt`, `bert_vocab.txt`) a
 These are areas where Wotan is known to be incomplete:
 
 - **API stability:** names and signatures are still changing. There are no versioned releases yet.
-- **Documentation:** apart from this README, the tests are the main documentation.
+- **Documentation:** the DataFrame layer has a user guide, [`docs/core_guide.md`](docs/core_guide.md). For the other packages, the tests are the main documentation.
 - **Performance:** everything runs on the CPU. Some hot paths use SIMD, but most code has not been profiled or tuned, and large deep learning models are slow.
 - **Validation:** most modules are tested against reference libraries (see [Tests](#tests)). The ML-for-finance and behavioural finance models are mostly checked by examples rather than references. Nothing has been validated for production trading or risk use.
 - **Memory management:** ownership is explicit, as is usual in Odin. Most objects need a matching `destroy_*` or `*_free` call.

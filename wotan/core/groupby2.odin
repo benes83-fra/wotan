@@ -67,7 +67,9 @@ groupby2 :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> GroupBy2 {
 	// 1. Extract key columns
-	key_cols := make([]^Column, len(keys), allocator)
+	// only needed while the index is built (it does not keep them)
+	key_cols := make([]^Column, len(keys), context.temp_allocator)
+	defer delete(key_cols, context.temp_allocator)
 	for i in 0 ..< len(keys) {
 		key_cols[i] = column(df, keys[i])
 	}
