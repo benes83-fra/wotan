@@ -1,8 +1,8 @@
 package analytics
 
 import w "../core"
-import "core:math"
 import "base:runtime"
+import "core:math"
 import "core:mem"
 
 sarima_difference :: proc(
@@ -14,7 +14,8 @@ sarima_difference :: proc(
 ) -> []f64 {
 
 	y1 := difference(y, d, allocator)
-	y2 := seasonal_difference(y1, D, s, allocator)
+	defer delete(y1, allocator)
+	y2 := seasonal_difference(y1, D, s, allocator) // always a new slice
 	return y2
 }
 sarima_inverse_difference :: proc(
@@ -29,6 +30,7 @@ sarima_inverse_difference :: proc(
 
 	// 1) undo seasonal differencing
 	y_seasonal := seasonal_inverse_difference(diff, hist_s, D, s, allocator)
+	defer delete(y_seasonal, allocator)
 
 	// 2) undo non-seasonal differencing
 	y_full := inverse_difference(y_seasonal, hist_ns, d, allocator)
@@ -93,6 +95,10 @@ simulate_sarima_pdqPDQ :: proc(
 ) -> []f64 {
 	// 1) expand to ARMA on differenced scale
 	ar, ma := sarima_expand_to_arma(phi, Phi, theta, Theta, s, allocator)
+	defer {
+		delete(ar, allocator)
+		delete(ma, allocator)
+	}
 
 	// 2) simulate ARMA on z_t = (1-L)^d (1-L^s)^D y_t
 	extra := d + D * s
@@ -101,13 +107,17 @@ simulate_sarima_pdqPDQ :: proc(
 	}
 	z_len := T + extra
 	z := arma22_simulate(ar, ma, sigma2, z_len, allocator)
+	defer delete(z, allocator)
 
 	// 3) invert differencing to get y_t
 	hist_ns := make([]f64, d, allocator)
+	defer delete(hist_ns, allocator)
 	hist_s := make([]f64, D * s, allocator)
+	defer delete(hist_s, allocator)
 	// histories are zero-initialized
 
 	y_full := sarima_inverse_difference(z, hist_ns, hist_s, d, D, s, allocator)
+	defer delete(y_full, allocator)
 
 	// 4) drop warmup prefix
 	drop := extra
@@ -158,6 +168,7 @@ sarima_auto_with_tests :: proc(
 	D := 0
 	if s > 0 && max_D > 0 && len(y) > 2 * s {
 		y_lag := make([]f64, len(y) - s, allocator)
+		defer delete(y_lag, allocator)
 		for i in s ..< len(y) {
 			y_lag[i - s] = y[i] - y[i - s]
 		}
@@ -186,6 +197,7 @@ sarima_auto_with_tests :: proc(
 
 					fit := sarima_fit(y, p, d, q, P, D, Q, s, allocator)
 					if !fit.converged {
+						_sarima_fit_delete(&fit, allocator)
 						continue
 					}
 
@@ -194,8 +206,11 @@ sarima_auto_with_tests :: proc(
 						score = fit.bic
 					}
 
-					if score < best_score {
+					if score >= best_score {
+						_sarima_fit_delete(&fit, allocator)
+					} else {
 						best_score = score
+						_sarima_fit_delete(&best.fit, allocator) // the previous best (nil slices at first)
 						best = SarimaAutoResult {
 							p   = p,
 							d   = d,
@@ -283,6 +298,16 @@ sarima_neg_loglik_obj :: proc(params: []f64, ctx: rawptr) -> f64 {
 
 	return -ll
 }
+// Frees the coefficient slices of a fit (used for the fits an order search discards)
+@(private = "file")
+_sarima_fit_delete :: proc(fit: ^SarimaFitResult, allocator: mem.Allocator) {
+	delete(fit.phi, allocator)
+	delete(fit.theta, allocator)
+	delete(fit.Phi, allocator)
+	delete(fit.Theta, allocator)
+	fit.phi, fit.theta, fit.Phi, fit.Theta = nil, nil, nil, nil
+}
+
 SarimaFitResult :: struct {
 	phi, theta: []f64,
 	Phi, Theta: []f64,
@@ -408,7 +433,12 @@ sarima_innovations :: proc(
 
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	ar, ma := sarima_expand_to_arma(phi, Phi, theta, Theta, s, context.temp_allocator)
-	F, Q, P0, _, _, x0, N := arma_pq_fundamental_state_space(ar, ma, sigma2, context.temp_allocator)
+	F, Q, P0, _, _, x0, N := arma_pq_fundamental_state_space(
+		ar,
+		ma,
+		sigma2,
+		context.temp_allocator,
+	)
 	_arma_filter(z, F, Q, N, x0, P0, v)
 	return v
 }
@@ -438,6 +468,7 @@ sarima_residual_diagnostics :: proc(
 ) -> SarimaDiagResult {
 
 	v := sarima_innovations(y, phi, theta, Phi, Theta, d, D, s, sigma2, allocator)
+	defer delete(v, allocator) // only statistics of the innovations are returned
 
 	ac := acf(v, max_lag, allocator)
 	pc := pacf(v, max_lag, allocator)
@@ -473,6 +504,7 @@ df_sarima_residual_diagnostics :: proc(
 ) -> w.DataFrame {
 
 	v := sarima_innovations(y, phi, theta, Phi, Theta, d, D, s, sigma2, allocator)
+	defer delete(v, allocator) // only statistics of the innovations are returned
 
 	Q, df, p_lb := ljung_box(v, max_lag, len(phi) + len(theta) + len(Phi) + len(Theta), allocator)
 	JB, p_jb := jarque_bera(v, allocator)

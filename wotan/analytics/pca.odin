@@ -167,12 +167,24 @@ extract_numeric_matrix :: proc(
 		col := w.column(df, col_name)
 
 		for r in 0 ..< rows {
-			v, is_null := w.column_at_float(col, r)
-			if is_null {
+			if w.is_null(col, r) {
 				// Convention: nulls become 0 (biases mean/covariance; drop null rows first if that matters)
 				out[r][c_idx] = 0
-			} else {
-				out[r][c_idx] = v
+				continue
+			}
+			// read by the column's type (column_at_float on an Int column reinterprets the bits)
+			#partial switch col.type {
+			case .Float:
+				v, _ := w.column_at_float(col, r)
+				out[r][c_idx] = v // NaN stays NaN
+			case .Int:
+				v, _ := w.column_at_int(col, r)
+				out[r][c_idx] = f64(v)
+			case .Bool:
+				v, _ := w.column_at_bool(col, r)
+				out[r][c_idx] = 1 if v else 0
+			case:
+				panic("extract_numeric_matrix: column must be Float, Int or Bool")
 			}
 		}
 	}

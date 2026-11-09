@@ -89,10 +89,12 @@ PipelineModel :: struct {
 }
 
 Pipeline :: struct {
-	steps:     [dynamic]PipelineStep,
-	model:     PipelineModel,
-	allocator: mem.Allocator,
-	is_fitted: bool,
+	steps:                [dynamic]PipelineStep,
+	model:                PipelineModel,
+	allocator:            mem.Allocator,
+	is_fitted:            bool,
+	// hidden_layers of an MLP pipeline read by pipeline_load (owned, freed by pipeline_free)
+	loaded_hidden_layers: []int,
 }
 
 // ============================================================================
@@ -279,8 +281,8 @@ pipeline_fit :: proc(pipe: ^Pipeline, X: ^l.Matrix(f64), y: []f64, sample_weight
 			&Xi,
 			y,
 			pipe.model.lasso_params.lambda,
-			pipe.model.lasso_params.max_iter,
-			pipe.model.lasso_params.tol,
+			pipe.model.lasso_params.max_iter if pipe.model.lasso_params.max_iter > 0 else 1000,
+			pipe.model.lasso_params.tol if pipe.model.lasso_params.tol > 0 else 1e-4,
 			pipe.allocator,
 		)
 	case .ElasticNet:
@@ -297,7 +299,13 @@ pipeline_fit :: proc(pipe: ^Pipeline, X: ^l.Matrix(f64), y: []f64, sample_weight
 			pipe.allocator,
 		)
 	case .SVR:
-		pipe.model.svr = svr_fit(&current_X, y, pipe.model.svr_params, pipe.allocator, sample_weight)
+		pipe.model.svr = svr_fit(
+			&current_X,
+			y,
+			pipe.model.svr_params,
+			pipe.allocator,
+			sample_weight,
+		)
 	case .OLS:
 		Xi := _with_intercept(&current_X, pipe.allocator)
 		defer l.matrix_free(&Xi)
@@ -450,6 +458,8 @@ pipeline_predict :: proc(
 pipeline_free :: proc(pipe: ^Pipeline) {
 	if pipe.is_fitted do _pipeline_free_fitted(pipe)
 	delete(pipe.steps)
+	delete(pipe.loaded_hidden_layers, pipe.allocator)
+	pipe.loaded_hidden_layers = nil
 }
 
 // [1, X]: X with a leading column of ones

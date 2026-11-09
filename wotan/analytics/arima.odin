@@ -1,9 +1,9 @@
 package analytics
 
 import w "../core"
+import "base:runtime"
 import "core:math"
 import "core:math/rand"
-import "base:runtime"
 import "core:mem"
 
 // Conventions (match statsmodels.tsa.arima.model.ARIMA / SARIMAX with trend = 'n'):
@@ -62,6 +62,7 @@ difference :: proc(series: []f64, d: int, allocator := context.allocator) -> []f
 		for i in 1 ..< len(diff) {
 			next[i - 1] = diff[i] - diff[i - 1]
 		}
+		delete(diff, allocator) // the previous order is not returned
 		diff = next
 	}
 
@@ -211,7 +212,14 @@ _arima_init_P0 :: proc(F, Q: []f64, N: int, P0: []f64) {
 // state for the first observation (x0 = 0, stationary P0); on return the filtered
 // state a_{T|T}, P_{T|T}. v_out / S_out (optional, length len(z)) receive the
 // innovations and their variances. Returns the log-likelihood.
-_arma_filter :: proc(z: []f64, F, Q: []f64, N: int, a, P: []f64, v_out: []f64 = nil, S_out: []f64 = nil) -> f64 {
+_arma_filter :: proc(
+	z: []f64,
+	F, Q: []f64,
+	N: int,
+	a, P: []f64,
+	v_out: []f64 = nil,
+	S_out: []f64 = nil,
+) -> f64 {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	col := make([]f64, N, context.temp_allocator)
 	TP := make([]f64, N * N, context.temp_allocator)
@@ -233,7 +241,10 @@ _arma_filter :: proc(z: []f64, F, Q: []f64, N: int, a, P: []f64, v_out: []f64 = 
 			// P = TP Fᵀ + Q,  (TP Fᵀ)_ij = TP_i0 F_j0 + TP_i,j+1
 			for i in 0 ..< N {
 				for j in 0 ..< N {
-					P[i * N + j] = TP[i * N] * F[j * N] + (TP[i * N + j + 1] if j + 1 < N else 0.0) + Q[i * N + j]
+					P[i * N + j] =
+						TP[i * N] * F[j * N] +
+						(TP[i * N + j + 1] if j + 1 < N else 0.0) +
+						Q[i * N + j]
 				}
 			}
 		}
@@ -262,7 +273,12 @@ arima_loglik :: proc(
 	allocator := context.allocator,
 ) -> f64 {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
-	F, Q, P0, _, _, x0, N := arma_pq_fundamental_state_space(phi, theta, sigma2, context.temp_allocator)
+	F, Q, P0, _, _, x0, N := arma_pq_fundamental_state_space(
+		phi,
+		theta,
+		sigma2,
+		context.temp_allocator,
+	)
 	return _arma_filter(y, F, Q, N, x0, P0)
 }
 
@@ -321,7 +337,10 @@ arima_unconstrain_params :: proc(
 ) {
 	p, q := len(phi), len(theta)
 	x = make([]f64, p + q + 1, allocator)
-	ok = _arima_unconstrain(phi, x[:p], false) && _arima_unconstrain(theta, x[p:p + q], true) && sigma2 > 0.0
+	ok =
+		_arima_unconstrain(phi, x[:p], false) &&
+		_arima_unconstrain(theta, x[p:p + q], true) &&
+		sigma2 > 0.0
 	x[p + q] = math.ln_f64(sigma2) if sigma2 > 0.0 else 0.0
 	return
 }
@@ -439,7 +458,15 @@ _arima_nm_fit :: proc(
 
 	// Polish: restart from the best vertex with a fresh simplex until no gain
 	for _ in 0 ..< 10 {
-		x_s, f_s, conv := nelder_mead(obj, ctx, best_params, max_iter, tol, context.temp_allocator, xtol)
+		x_s, f_s, conv := nelder_mead(
+			obj,
+			ctx,
+			best_params,
+			max_iter,
+			tol,
+			context.temp_allocator,
+			xtol,
+		)
 		gain := best_f - f_s
 		if f_s <= best_f {
 			best_f = f_s
@@ -475,7 +502,13 @@ arima_fit :: proc(y: []f64, p, d, q: int, allocator := context.allocator) -> Ari
 	log_sig2_0 := math.ln_f64(var_eff) if var_eff > 0.0 else 0.0
 
 	// Deterministic starts: first-lag (phi_1, theta_1), higher lags 0
-	starts := [][4]f64{{0.0, 0.0, 0, 0}, {0.5, 0.0, 0, 0}, {0.0, 0.5, 0, 0}, {0.5, -0.5, 0, 0}, {-0.5, 0.5, 0, 0}}
+	starts := [][4]f64 {
+		{0.0, 0.0, 0, 0},
+		{0.5, 0.0, 0, 0},
+		{0.0, 0.5, 0, 0},
+		{0.5, -0.5, 0, 0},
+		{-0.5, 0.5, 0, 0},
+	}
 	best_params, best_f, converged := _arima_nm_fit(
 		arima_neg_loglik_obj,
 		&ctx,
@@ -529,19 +562,49 @@ _nan_forecast :: proc(h: int, allocator: mem.Allocator) -> (mean, lower, upper: 
 _arima_norm_ppf :: proc(p: f64) -> f64 {
 	if p <= 0.0 {return math.inf_f64(-1)}
 	if p >= 1.0 {return math.inf_f64(1)}
-	a := [6]f64{-3.969683028665376e+01, 2.209460984245205e+02, -2.759285104469687e+02, 1.383577518672690e+02, -3.066479806614716e+01, 2.506628277459239e+00}
-	b := [5]f64{-5.447609879822406e+01, 1.615858368580409e+02, -1.556989798598866e+02, 6.680131188771972e+01, -1.328068155288572e+01}
-	c := [6]f64{-7.784894002430293e-03, -3.223964580411365e-01, -2.400758277161838e+00, -2.549732539343734e+00, 4.374664141464968e+00, 2.938163982698783e+00}
-	d := [4]f64{7.784695709041462e-03, 3.224671290700398e-01, 2.445134137142996e+00, 3.754408661907416e+00}
+	a := [6]f64 {
+		-3.969683028665376e+01,
+		2.209460984245205e+02,
+		-2.759285104469687e+02,
+		1.383577518672690e+02,
+		-3.066479806614716e+01,
+		2.506628277459239e+00,
+	}
+	b := [5]f64 {
+		-5.447609879822406e+01,
+		1.615858368580409e+02,
+		-1.556989798598866e+02,
+		6.680131188771972e+01,
+		-1.328068155288572e+01,
+	}
+	c := [6]f64 {
+		-7.784894002430293e-03,
+		-3.223964580411365e-01,
+		-2.400758277161838e+00,
+		-2.549732539343734e+00,
+		4.374664141464968e+00,
+		2.938163982698783e+00,
+	}
+	d := [4]f64 {
+		7.784695709041462e-03,
+		3.224671290700398e-01,
+		2.445134137142996e+00,
+		3.754408661907416e+00,
+	}
 	x: f64
 	if p < 0.02425 || p > 1.0 - 0.02425 {
 		q := math.sqrt_f64(-2.0 * math.ln_f64(p if p < 0.5 else 1.0 - p))
-		x = (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0)
+		x =
+			(((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) /
+			((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0)
 		if p > 0.5 {x = -x}
 	} else {
 		q := p - 0.5
 		r := q * q
-		x = (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * q / (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1.0)
+		x =
+			(((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) *
+			q /
+			(((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1.0)
 	}
 	e := 0.5 * math.erfc(-x / math.SQRT_TWO) - p
 	u := e * math.sqrt_f64(2.0 * math.PI) * math.exp_f64(0.5 * x * x)
@@ -662,7 +725,16 @@ arima_forecast :: proc(
 	}
 	c := _arima_diff_poly(d, 0, 0, context.temp_allocator)
 	defer delete(c, context.temp_allocator)
-	mean, lower, upper := _arima_forecast_core(y, fit.phi, fit.theta, fit.sigma2, c, h, alpha, allocator)
+	mean, lower, upper := _arima_forecast_core(
+		y,
+		fit.phi,
+		fit.theta,
+		fit.sigma2,
+		c,
+		h,
+		alpha,
+		allocator,
+	)
 	return ArimaForecastResult{mean = mean, lower = lower, upper = upper}
 }
 arma11_state_space :: proc(
@@ -744,7 +816,9 @@ arma_pq_fundamental_state_space :: proc(
 	for i in 0 ..< p {F[i * N] = phi[i]}
 	for i in 0 ..< N - 1 {F[i * N + i + 1] = 1.0}
 
-	g :: proc(theta: []f64, i: int) -> f64 {return 1.0 if i == 0 else (theta[i - 1] if i - 1 < len(theta) else 0.0)}
+	g :: proc(theta: []f64, i: int) -> f64 {return(
+			1.0 if i == 0 else (theta[i - 1] if i - 1 < len(theta) else 0.0) \
+		)}
 	for i in 0 ..< N {
 		for j in 0 ..< N {
 			Q[i * N + j] = sigma2 * g(theta, i) * g(theta, j)
@@ -837,12 +911,15 @@ simulate_arima_pdq :: proc(
 ) -> []f64 {
 	// simulate ARMA(p,q) on differenced series z_t
 	z := arma22_simulate(phi, theta, sigma2, T + d, allocator) // reuse general ARMA sim
+	defer delete(z, allocator)
 	// integrate d times to get y_t
 	history := make([]f64, d, allocator)
+	defer delete(history, allocator)
 	for i in 0 ..< d {
 		history[i] = 0.0
 	}
 	y := inverse_difference(z, history, d, allocator)
+	defer delete(y, allocator)
 	// drop initial d to get length T
 	out := make([]f64, T, allocator)
 	for t in 0 ..< T {
@@ -854,6 +931,14 @@ simulate_arima_pdq :: proc(
 ArimaAutoResult :: struct {
 	p, d, q: int,
 	fit:     ArimaFitResult,
+}
+
+// Frees the coefficient slices of a fit (used for the fits an order search discards)
+@(private = "file")
+_arima_fit_delete :: proc(fit: ^ArimaFitResult, allocator: mem.Allocator) {
+	delete(fit.phi, allocator)
+	delete(fit.theta, allocator)
+	fit.phi, fit.theta = nil, nil
 }
 
 // Order selection by AIC/BIC over p <= max_p, q <= max_q. AIC/BIC are only comparable
@@ -884,6 +969,7 @@ arima_auto :: proc(
 
 				fit := arima_fit(y, p, d, q, allocator)
 				if !fit.converged {
+					_arima_fit_delete(&fit, allocator)
 					continue
 				}
 				score: f64
@@ -895,12 +981,15 @@ arima_auto :: proc(
 
 				if score < best_score {
 					best_score = score
+					_arima_fit_delete(&best.fit, allocator) // the previous best (nil slices at first)
 					best = ArimaAutoResult {
 						p   = p,
 						d   = d,
 						q   = q,
 						fit = fit,
 					}
+				} else {
+					_arima_fit_delete(&fit, allocator)
 				}
 			}
 		}
@@ -959,6 +1048,7 @@ arima_auto_with_tests :: proc(
 
 			fit := arima_fit(y, p, d, q, allocator)
 			if !fit.converged {
+				_arima_fit_delete(&fit, allocator)
 				continue
 			}
 
@@ -971,12 +1061,15 @@ arima_auto_with_tests :: proc(
 
 			if score < best_score {
 				best_score = score
+				_arima_fit_delete(&best.fit, allocator) // the previous best (nil slices at first)
 				best = ArimaAutoResult {
 					p   = p,
 					d   = d,
 					q   = q,
 					fit = fit,
 				}
+			} else {
+				_arima_fit_delete(&fit, allocator)
 			}
 		}
 	}
@@ -992,6 +1085,7 @@ df_arima_auto_with_tests :: proc(
 ) -> w.DataFrame {
 
 	result := arima_auto_with_tests(y, max_p, max_q, criterion, allocator)
+	defer _arima_fit_delete(&result.fit, allocator) // only the summary is returned
 
 	df := w.dataframe_new()
 	w.add_column(&df, w.column_from_ints("p", []int{result.p}))
@@ -1025,6 +1119,7 @@ sarima_expand_to_arma :: proc(
 	// poly_ar(k) corresponds to coefficient of L^k
 	max_ar_deg := max(p, 0) + max(P, 0) * s
 	poly_ar := make([]f64, max_ar_deg + 1, allocator)
+	defer delete(poly_ar, allocator)
 	poly_ar[0] = 1.0
 
 	// non-seasonal AR: (1 - φ_1 L - ... - φ_p L^p)
@@ -1034,6 +1129,7 @@ sarima_expand_to_arma :: proc(
 
 	// seasonal AR: (1 - Φ_1 L^s - ... - Φ_P L^{Ps})
 	poly_sar := make([]f64, max_ar_deg + 1, allocator)
+	defer delete(poly_sar, allocator)
 	poly_sar[0] = 1.0
 	for i in 0 ..< P {
 		k := (i + 1) * s
@@ -1044,6 +1140,7 @@ sarima_expand_to_arma :: proc(
 
 	// convolve poly_ar * poly_sar
 	poly_ar_full := make([]f64, max_ar_deg + 1, allocator)
+	defer delete(poly_ar_full, allocator)
 	for i in 0 ..< len(poly_ar) {
 		for j in 0 ..< len(poly_sar) {
 			k := i + j
@@ -1069,6 +1166,7 @@ sarima_expand_to_arma :: proc(
 	// --- MA polynomial: (1 + θ(L)) (1 + Θ(L^s)) ---
 	max_ma_deg := max(q, 0) + max(Q, 0) * s
 	poly_ma := make([]f64, max_ma_deg + 1, allocator)
+	defer delete(poly_ma, allocator)
 	poly_ma[0] = 1.0
 
 	// non-seasonal MA: (1 + θ_1 L + ... + θ_q L^q)
@@ -1078,6 +1176,7 @@ sarima_expand_to_arma :: proc(
 
 	// seasonal MA: (1 + Θ_1 L^s + ... + Θ_Q L^{Qs})
 	poly_sma := make([]f64, max_ma_deg + 1, allocator)
+	defer delete(poly_sma, allocator)
 	poly_sma[0] = 1.0
 	for i in 0 ..< Q {
 		k := (i + 1) * s
@@ -1088,6 +1187,7 @@ sarima_expand_to_arma :: proc(
 
 	// convolve poly_ma * poly_sma
 	poly_ma_full := make([]f64, max_ma_deg + 1, allocator)
+	defer delete(poly_ma_full, allocator)
 	for i in 0 ..< len(poly_ma) {
 		for j in 0 ..< len(poly_sma) {
 			k := i + j
@@ -1131,6 +1231,10 @@ sarima_state_space :: proc(
 	N: int,
 ) {
 	ar, ma := sarima_expand_to_arma(phi, Phi, theta, Theta, s, allocator)
+	defer {
+		delete(ar, allocator)
+		delete(ma, allocator)
+	}
 	return arma_pq_fundamental_state_space(ar, ma, sigma2, allocator)
 }
 seasonal_difference :: proc(
@@ -1159,9 +1263,17 @@ seasonal_difference :: proc(
 		for i in s ..< len(diff) {
 			next[i - s] = diff[i] - diff[i - s]
 		}
+		// free the previous order (never the caller's series)
+		if raw_data(diff) != raw_data(series) {delete(diff, allocator)}
 		diff = next
 	}
 
+	// always return a new slice, even when the series was too short to difference
+	if raw_data(diff) == raw_data(series) {
+		out := make([]f64, len(series), allocator)
+		copy(out, series)
+		return out
+	}
 	return diff
 }
 

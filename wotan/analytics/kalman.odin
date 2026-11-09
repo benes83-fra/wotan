@@ -625,11 +625,17 @@ ukf_predict :: proc(
 	P_pred: matrix[N, N]f64,
 ) {
 	Xi, Wm, Wc := ukf_sigma_points(x, P, params, allocator)
+	defer { 	// per-step scratch: only the new state is returned
+		delete(Xi, allocator)
+		delete(Wm, allocator)
+		delete(Wc, allocator)
+	}
 
 	L := len(Xi)
 
 	// propagate sigma points through f
 	Y := make([]([N]f64), L, allocator)
+	defer delete(Y, allocator)
 	for i in 0 ..< L {
 		Y[i] = f(Xi[i])
 	}
@@ -673,10 +679,16 @@ ukf_update :: proc(
 ) {
 	// sigma points from prior
 	Xi, Wm, Wc := ukf_sigma_points(x, P, params, allocator)
+	defer { 	// per-step scratch: only the new state is returned
+		delete(Xi, allocator)
+		delete(Wm, allocator)
+		delete(Wc, allocator)
+	}
 	L := len(Xi)
 
 	// propagate to measurement space
 	Zi := make([]([M]f64), L, allocator)
+	defer delete(Zi, allocator)
 	for i in 0 ..< L {
 		Zi[i] = h(Xi[i])
 	}
@@ -881,10 +893,16 @@ ukf_predict_control :: proc(
 	P_pred: matrix[N, N]f64,
 ) {
 	Xi, Wm, Wc := ukf_sigma_points(x, P, params, allocator)
+	defer { 	// per-step scratch: only the new state is returned
+		delete(Xi, allocator)
+		delete(Wm, allocator)
+		delete(Wc, allocator)
+	}
 	L := len(Xi)
 
 	// propagate sigma points through f(x,u)
 	Y := make([]([N]f64), L, allocator)
+	defer delete(Y, allocator)
 	for i in 0 ..< L {
 		Y[i] = f(Xi[i], u)
 	}
@@ -929,10 +947,16 @@ ukf_update_control :: proc(
 ) {
 	// sigma points from prior
 	Xi, Wm, Wc := ukf_sigma_points(x, P, params, allocator)
+	defer { 	// per-step scratch: only the new state is returned
+		delete(Xi, allocator)
+		delete(Wm, allocator)
+		delete(Wc, allocator)
+	}
 	L := len(Xi)
 
 	// propagate to measurement space: h(x,u)
 	Zi := make([]([M]f64), L, allocator)
+	defer delete(Zi, allocator)
 	for i in 0 ..< L {
 		Zi[i] = h(Xi[i], u)
 	}

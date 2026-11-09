@@ -253,9 +253,9 @@ extended_grid_search_test :: proc(allocator: mem.Allocator) {
 
 	// --- Decision Tree ---
 	dt_grid := []ml.TreeParams {
-		{max_depth = 3, min_samples = 2},
-		{max_depth = 5, min_samples = 2},
-		{max_depth = 10, min_samples = 2},
+		{max_depth = 3, min_samples = 2, criterion = .Gini},
+		{max_depth = 5, min_samples = 2, criterion = .Gini},
+		{max_depth = 10, min_samples = 2, criterion = .Gini},
 	}
 	best_dt, dt_score := ml.grid_search_decision_tree(&X_cls, y_cls, 3, dt_grid, allocator)
 	fmt.printf(
@@ -266,8 +266,8 @@ extended_grid_search_test :: proc(allocator: mem.Allocator) {
 
 	// --- Random Forest ---
 	rf_grid := []ml.RFParams {
-		{n_trees = 10, max_depth = 5, min_samples = 2, bootstrap = true},
-		{n_trees = 50, max_depth = 10, min_samples = 2, bootstrap = true},
+		{n_trees = 10, max_depth = 5, min_samples = 2, bootstrap = true, criterion = .Gini},
+		{n_trees = 50, max_depth = 10, min_samples = 2, bootstrap = true, criterion = .Gini},
 	}
 	best_rf, rf_score := ml.grid_search_random_forest(&X_cls, y_cls, 3, rf_grid, allocator)
 	fmt.printf(
@@ -280,8 +280,14 @@ extended_grid_search_test :: proc(allocator: mem.Allocator) {
 	// --- Gradient Boosting ---
 	// Note: Adjust field names (n_estimators, learning_rate, max_depth, min_samples) if your GBParams struct differs
 	gb_grid := []ml.GBParams {
-		{n_estimators = 50, learning_rate = 0.1, max_depth = 3, min_samples = 2},
-		{n_estimators = 100, learning_rate = 0.05, max_depth = 5, min_samples = 2},
+		{n_estimators = 50, learning_rate = 0.1, max_depth = 3, min_samples = 2, loss = .Log_Loss},
+		{
+			n_estimators = 100,
+			learning_rate = 0.05,
+			max_depth = 5,
+			min_samples = 2,
+			loss = .Log_Loss,
+		},
 	}
 	best_gb, gb_score := ml.grid_search_gradient_boosting(&X_cls, y_cls, 3, gb_grid, allocator)
 	fmt.printf(

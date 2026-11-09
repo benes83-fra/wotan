@@ -66,6 +66,15 @@ prepare_dataset :: proc(
 		fmt.printf("Error: Target column '%s' not found\n", target_col)
 		return MLDataset{}, false
 	}
+	// the target must be numeric (a String target used to become all zeros)
+	if tt := df.columns[target_idx].type; tt != .Float && tt != .Int && tt != .Bool {
+		fmt.printf(
+			"Error: Target column '%s' has type %v; encode it as Int, Float or Bool first (e.g. le_fit / le_transform)\n",
+			target_col,
+			tt,
+		)
+		return MLDataset{}, false
+	}
 
 	X := l.matrix_new(f64, n_rows, n_features, allocator)
 	y := make([]f64, n_rows, allocator)
@@ -99,12 +108,7 @@ prepare_dataset :: proc(
 				y[i] = 0.0
 			}
 		case:
-			fmt.printf(
-				"Warning: Target column '%s' has type %v. Please encode it first.\n",
-				target_col,
-				target_col_ptr.type,
-			)
-			y[i] = 0.0
+			unreachable() // non-numeric targets are rejected above
 		}
 	}
 
@@ -213,12 +217,37 @@ transform_dataset :: proc(
 	n_rows := df.rows
 	n_features := len(dataset.feature_names)
 
+	// Validate before allocating: on failure the outputs are empty (zero matrix,
+	// nil slice), so freeing them with the usual defers is harmless.
+	target_idx := -1
+	if target_col != "" {
+		idx, ok := df.name_to_index[target_col]
+		if !ok {
+			fmt.printf("Error: Target column '%s' not found in test DataFrame\n", target_col)
+			return l.Matrix(f64){}, nil, false
+		}
+		if tt := df.columns[idx].type; tt != .Float && tt != .Int && tt != .Bool {
+			fmt.printf(
+				"Error: Target column '%s' has type %v; it must be Int, Float or Bool\n",
+				target_col,
+				tt,
+			)
+			return l.Matrix(f64){}, nil, false
+		}
+		target_idx = idx
+	}
+	for feat_name in dataset.feature_names {
+		if feat_name not_in df.name_to_index {
+			fmt.printf("Error: Feature column '%s' not found in test DataFrame\n", feat_name)
+			return l.Matrix(f64){}, nil, false
+		}
+	}
+
 	X := l.matrix_new(f64, n_rows, n_features, allocator)
 	y := make([]f64, n_rows, allocator)
 
-	if target_col != "" {
-		target_idx, ok := df.name_to_index[target_col]
-		if ok {
+	if target_idx >= 0 {
+		{
 			target_col_ptr := &df.columns[target_idx]
 			for i in 0 ..< n_rows {
 				#partial switch target_col_ptr.type {
@@ -251,13 +280,7 @@ transform_dataset :: proc(
 	}
 
 	for feat_name, feat_idx in dataset.feature_names {
-		col_idx, ok := df.name_to_index[feat_name]
-		if !ok {
-			fmt.printf("Error: Feature column '%s' not found in test DataFrame\n", feat_name)
-			l.matrix_free(&X)
-			delete(y, allocator)
-			return X, y, false
-		}
+		col_idx := df.name_to_index[feat_name] // checked above
 		col := &df.columns[col_idx]
 
 		encoder_idx := -1

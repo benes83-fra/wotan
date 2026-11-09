@@ -129,6 +129,7 @@ backward_substitute_simd :: proc(
 
 		// SIMD dot
 		sum := dot_simd(tmp, x[i + 1:n])
+		delete(tmp, context.temp_allocator)
 
 		x[i] = (z[i] - sum) / L.data[i * n + i]
 	}
@@ -151,11 +152,13 @@ solve_spd_cholesky :: proc(
 	}
 
 	L := matrix_new(f64, n, n, allocator)
+	defer matrix_free(&L) // scratch factor; only x is returned
 	copy(L.data, A.data)
 
 	cholesky(&L, mode)
 
 	z := forward_substitute_simd(&L, b, context.temp_allocator)
+	defer delete(z, context.temp_allocator)
 	x := backward_substitute_simd(&L, z, allocator)
 	return x
 }
@@ -171,12 +174,14 @@ spd_inverse :: proc(
 	if A.cols != n do panic("spd_inverse: non-square")
 
 	Acopy := matrix_new(f64, n, n, allocator)
+	defer matrix_free(&Acopy) // scratch factor; only inv is returned
 	copy(Acopy.data, A.data)
 
 	cholesky(&Acopy, mode)
 
 	inv := matrix_new(f64, n, n, allocator)
 	e := make([]f64, n, context.temp_allocator)
+	defer delete(e, context.temp_allocator)
 
 	for k := 0; k < n; k += 1 {
 		for i := 0; i < n; i += 1 do e[i] = 0
@@ -188,6 +193,8 @@ spd_inverse :: proc(
 		for i := 0; i < n; i += 1 {
 			inv.data[i * n + k] = x[i]
 		}
+		delete(x, context.temp_allocator)
+		delete(z, context.temp_allocator)
 	}
 
 	return inv

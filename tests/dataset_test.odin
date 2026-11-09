@@ -37,14 +37,20 @@ dataset_test :: proc(allocator: mem.Allocator) {
 	ml.pipeline_add_standard_scaler(&pipe)
 	ml.pipeline_set_logistic(
 		&pipe,
-		{C = 1.0, max_iter = 100, learning_rate = 1.0, fit_intercept = true, optimizer_type = .LBFGS},
+		{
+			C = 1.0,
+			max_iter = 100,
+			learning_rate = 1.0,
+			fit_intercept = true,
+			optimizer_type = .LBFGS,
+		},
 	)
 
 	// Fit on the prepared Matrix and Target
 	ml.pipeline_fit(&pipe, &train_data.X, train_data.y)
 
 	// 4. Prepare Test Data (Uses saved encoders, NO LEAKAGE!)
-	test_X, test_y, ok2 := ml.transform_dataset(&df_test, &train_data, "target_column", allocator)
+	test_X, test_y, ok2 := ml.transform_dataset(&df_test, &train_data, "target", allocator)
 	defer l.matrix_free(&test_X)
 	defer delete(test_y, allocator)
 

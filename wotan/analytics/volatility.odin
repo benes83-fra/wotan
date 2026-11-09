@@ -111,6 +111,7 @@ destroy_garch_volatility :: proc(
 		// Free GARCH result internals
 		delete(model.garch_result.params.alpha, allocator)
 		delete(model.garch_result.params.beta, allocator)
+		delete(model.garch_result.params.egarch_gamma, allocator)
 		delete(model.garch_result.conditional_var, allocator)
 		delete(model.garch_result.standardized_resid, allocator)
 	}

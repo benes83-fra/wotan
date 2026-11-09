@@ -45,6 +45,7 @@ pacf :: proc(y: []f64, max_lag: int, allocator := context.allocator) -> []f64 {
 
 	max_lag := max(max_lag, 0)
 	ac := acf(y, max_lag, allocator)
+	defer delete(ac, allocator)
 	pac := make([]f64, max_lag + 1, allocator)
 
 	// φ_{1,1} = acf(1)
@@ -57,6 +58,10 @@ pacf :: proc(y: []f64, max_lag: int, allocator := context.allocator) -> []f64 {
 	phi := make([][]f64, max_lag + 1, allocator)
 	for k in 0 ..= max_lag {
 		phi[k] = make([]f64, k + 1, allocator)
+	}
+	defer {
+		for row in phi {delete(row, allocator)}
+		delete(phi, allocator)
 	}
 
 	if max_lag >= 1 {
@@ -116,9 +121,11 @@ df_acf :: proc(
 	max_lag := max(max_lag, 0)
 	c := w.column(df, col)
 	y := _numeric_column_values(c, allocator)
+	defer delete(y)
 
 	// Compute ACF
 	ac := acf(y[:], max_lag, allocator)
+	defer delete(ac, allocator)
 
 	// Return as a Column
 	out := w.column_new("acf", .Float, max_lag + 1)
@@ -139,9 +146,11 @@ df_pacf :: proc(
 	max_lag := max(max_lag, 0)
 	c := w.column(df, col)
 	y := _numeric_column_values(c, allocator)
+	defer delete(y)
 
 	// Compute PACF
 	pc := pacf(y[:], max_lag, allocator)
+	defer delete(pc, allocator)
 
 	// Return as a Column
 	out := w.column_new("pacf", .Float, max_lag + 1)

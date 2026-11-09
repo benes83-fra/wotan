@@ -82,6 +82,7 @@ df_residual_acf :: proc(
 
 	max_lag := max(max_lag, 0)
 	ac := acf(residuals, max_lag, allocator)
+	defer delete(ac, allocator)
 
 	out := w.dataframe_new()
 	col := w.column_new("residual_acf", .Float, max_lag + 1)
@@ -107,6 +108,7 @@ df_residual_pacf :: proc(
 
 	max_lag := max(max_lag, 0)
 	pc := pacf(residuals, max_lag, allocator)
+	defer delete(pc, allocator)
 
 	out := w.dataframe_new()
 	col := w.column_new("residual_pacf", .Float, max_lag + 1)
@@ -131,12 +133,25 @@ df_residuals :: proc(
 	if d > 0 {
 		y_eff = difference(y, d, allocator)
 	}
+	defer if d > 0 {delete(y_eff, allocator)}
 
 	// 2) Build state-space from fitted parameters
 	F, Q, P0, H, R, x0, N := arima_state_space(fit.phi, fit.theta, d, fit.sigma2, allocator)
+	defer {
+		delete(F, allocator)
+		delete(Q, allocator)
+		delete(P0, allocator)
+		delete(H, allocator)
+		delete(R, allocator)
+		delete(x0, allocator)
+	}
 
 	// 3) Run Kalman filter to get residuals + innovation variances
 	v, S := kalman_filter_residuals(y_eff, F, Q, P0, H, R, x0, N, allocator)
+	defer {
+		delete(v, allocator) // column_from_floats copies them
+		delete(S, allocator)
+	}
 
 	// 4) Build DataFrame
 	out := w.dataframe_new()

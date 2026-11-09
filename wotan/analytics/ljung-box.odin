@@ -39,6 +39,7 @@ ljung_box :: proc(
 
 	// Compute ACF of residuals
 	ac := acf(v, max_lag, allocator)
+	defer delete(ac, allocator)
 
 	Q = 0.0
 	for k in 1 ..= max_lag {

@@ -84,9 +84,9 @@ rf_cv_evaluator :: proc(
 
 	model := rf_fit(&X_train, y_train, params^, allocator); defer rf_free(&model)
 	preds := rf_predict(&model, &X_val, allocator); defer delete(preds, allocator)
-	// A regression forest (mean of trees): round to the nearest class label
-	// before scoring accuracy; a classification forest already predicts labels
-	if params.criterion == .MSE {for &p in preds do p = math.round(p)}
+	// regression forest (criterion .MSE): R², as the other regression evaluators;
+	// classification forest (.Gini / .Entropy): accuracy
+	if params.criterion == .MSE do return metrics_r2(y_val, preds)
 	return metrics_accuracy(y_val, preds)
 }
 
@@ -213,6 +213,21 @@ grid_search_random_forest :: proc(
 // ============================================================================
 
 
+// Training design of the linear CV evaluators: like the pipelines (and sklearn's
+// fit_intercept=True) the models get an unpenalised intercept. A column of ones
+// is prepended unless X (all rows, not just the fold) already has a constant
+// column, which then is the intercept. Predict with _linear_predict, which reads
+// β[0] as the intercept when β has one entry more than X has columns.
+_cv_linear_design :: proc(X, X_train: ^l.Matrix(f64), allocator: mem.Allocator) -> l.Matrix(f64) {
+	if _ols_has_constant(X) {
+		out := l.matrix_new(f64, X_train.rows, X_train.cols, allocator)
+		copy(out.data, X_train.data)
+		return out
+	}
+	return _with_intercept(X_train, allocator)
+}
+
+// Ridge with an unpenalised intercept (see _cv_linear_design); R² on the validation rows
 ridge_cv_evaluator :: proc(
 	X: ^l.Matrix(f64),
 	y: []f64,
@@ -227,17 +242,16 @@ ridge_cv_evaluator :: proc(
 	X_val := subset_matrix(X, val_idx, allocator); defer l.matrix_free(&X_val)
 	y_val := subset_slice(y, val_idx, allocator); defer delete(y_val, allocator)
 
-	// ✅ Ridge returns an OLSResult, not a custom RidgeModel
-	model := ridge_fit(&X_train, y_train, params.lambda, params.method, allocator)
-	defer _ols_result_free(&model, allocator) // Use the OLSResult free function
-
-	// ✅ Prediction is just a matrix-vector multiply with the beta weights
-	preds := l.matvec_dyn_simd(&X_val, model.beta, allocator)
+	Xi := _cv_linear_design(X, &X_train, allocator); defer l.matrix_free(&Xi)
+	model := ridge_fit(&Xi, y_train, params.lambda, params.method, allocator)
+	defer _ols_result_free(&model, allocator)
+	preds := _linear_predict(&X_val, model.beta, allocator)
 	defer delete(preds, allocator)
-
 	return metrics_r2(y_val, preds)
 }
 
+// Lasso with an unpenalised intercept (see _cv_linear_design); max_iter ≤ 0: 1000,
+// tol ≤ 0: 1e-4; R² on the validation rows
 lasso_cv_evaluator :: proc(
 	X: ^l.Matrix(f64),
 	y: []f64,
@@ -252,17 +266,22 @@ lasso_cv_evaluator :: proc(
 	X_val := subset_matrix(X, val_idx, allocator); defer l.matrix_free(&X_val)
 	y_val := subset_slice(y, val_idx, allocator); defer delete(y_val, allocator)
 
-	// ✅ Lasso also returns an OLSResult
-	model := lasso_fit(&X_train, y_train, params.lambda, params.max_iter, params.tol, allocator)
+	Xi := _cv_linear_design(X, &X_train, allocator); defer l.matrix_free(&Xi)
+	model := lasso_fit(
+		&Xi,
+		y_train,
+		params.lambda,
+		params.max_iter if params.max_iter > 0 else 1000,
+		params.tol if params.tol > 0 else 1e-4,
+		allocator,
+	)
 	defer _ols_result_free(&model, allocator)
-
-	preds := l.matvec_dyn_simd(&X_val, model.beta, allocator)
+	preds := _linear_predict(&X_val, model.beta, allocator)
 	defer delete(preds, allocator)
-
 	return metrics_r2(y_val, preds)
 }
 
-// Elastic net (X gets an unpenalised intercept column, as in the pipeline); R² on the validation rows
+// Elastic net with an unpenalised intercept (see _cv_linear_design); R² on the validation rows
 elastic_net_cv_evaluator :: proc(
 	X: ^l.Matrix(f64),
 	y: []f64,
@@ -277,8 +296,16 @@ elastic_net_cv_evaluator :: proc(
 	X_val := subset_matrix(X, val_idx, allocator); defer l.matrix_free(&X_val)
 	y_val := subset_slice(y, val_idx, allocator); defer delete(y_val, allocator)
 
-	Xi := _with_intercept(&X_train, allocator); defer l.matrix_free(&Xi)
-	model := elastic_net_fit(&Xi, y_train, params.lambda, params.l1_ratio, params.max_iter if params.max_iter > 0 else 1000, params.tol if params.tol > 0 else 1e-4, allocator)
+	Xi := _cv_linear_design(X, &X_train, allocator); defer l.matrix_free(&Xi)
+	model := elastic_net_fit(
+		&Xi,
+		y_train,
+		params.lambda,
+		params.l1_ratio,
+		params.max_iter if params.max_iter > 0 else 1000,
+		params.tol if params.tol > 0 else 1e-4,
+		allocator,
+	)
 	defer _ols_result_free(&model, allocator)
 	preds := _linear_predict(&X_val, model.beta, allocator)
 	defer delete(preds, allocator)
@@ -363,13 +390,8 @@ gb_cv_evaluator :: proc(
 	model := gb_fit(&X_train, y_train, params^, allocator); defer gb_free(&model)
 	preds := gb_predict(&model, &X_val, allocator); defer delete(preds, allocator)
 
-	// A squared-error GB outputs continuous values: round them to the nearest
-	// class label to compute classification accuracy (Log_Loss predicts labels)
-	if params.loss == .Squared_Error {
-		for i in 0 ..< len(preds) {
-			preds[i] = math.round(preds[i])
-		}
-	}
+	// squared-error boosting is a regressor: R²; Log_Loss boosting: accuracy
+	if params.loss == .Squared_Error do return metrics_r2(y_val, preds)
 
 	return metrics_accuracy(y_val, preds)
 }
@@ -390,8 +412,8 @@ dt_cv_evaluator :: proc(
 
 	model := dt_fit(&X_train, y_train, params^, allocator); defer dt_free(&model)
 	preds := dt_predict(&model, &X_val, allocator); defer delete(preds, allocator)
-	// Regression tree (leaf = mean label): round to the nearest class label
-	if params.criterion == .MSE {for &p in preds do p = math.round(p)}
+	// regression tree (criterion .MSE): R²; classification tree: accuracy
+	if params.criterion == .MSE do return metrics_r2(y_val, preds)
 	return metrics_accuracy(y_val, preds)
 }
 

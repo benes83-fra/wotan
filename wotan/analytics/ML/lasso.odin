@@ -7,8 +7,8 @@ import "core:mem"
 
 LassoParams :: struct {
 	lambda:   f64,
-	max_iter: int,
-	tol:      f64,
+	max_iter: int, // ≤ 0: 1000 (in pipelines and grid / random search)
+	tol:      f64, // ≤ 0: 1e-4
 }
 
 ElasticNetParams :: struct {

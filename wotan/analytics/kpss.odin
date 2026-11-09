@@ -56,6 +56,7 @@ kpss_test :: proc(
 	}
 
 	X := l.matrix_new(f64, T, X_cols, allocator)
+	defer l.matrix_free(&X)
 	Y := y
 
 	for t in 0 ..< T {
@@ -76,6 +77,7 @@ kpss_test :: proc(
 
 	// 2) Partial sum process S_t
 	S := make([]f64, T, allocator)
+	defer delete(S, allocator)
 	S[0] = u[0]
 	for t in 1 ..< T {
 		S[t] = S[t - 1] + u[t]

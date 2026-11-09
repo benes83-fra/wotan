@@ -9,7 +9,7 @@ import "core:os"
 // Binary Writer
 // ============================================================================
 
-_MODEL_FORMAT_VERSION :: 5
+_MODEL_FORMAT_VERSION :: 6
 
 ModelWriter :: struct {
 	file: ^os.File,
@@ -29,6 +29,7 @@ model_writer_open :: proc(path: string) -> (ModelWriter, bool) {
 	// 3: trees store classes + class fractions, forests / boosting their classes;
 	// 4: trees store the weighted node sizes;
 	// 5: linear models store their inference: stderr, t, p, CI, vcov, σ², R², F, df)
+	// 6: the model's hyper-parameters at the end of the file (serialization_params.odin)
 	write_u32(&w, _MODEL_FORMAT_VERSION)
 	return w, true
 }
@@ -258,6 +259,7 @@ pipeline_save :: proc(pipe: ^Pipeline, path: string) -> bool {
 	write_bool(&w, pipe.is_fitted)
 
 	if !pipe.is_fitted {
+		_write_model_params(&w, &pipe.model)
 		return !w.err
 	}
 
@@ -312,10 +314,14 @@ pipeline_save :: proc(pipe: ^Pipeline, path: string) -> bool {
 	case .Ridge, .Lasso, .OLS, .ElasticNet:
 		res: OLSResult
 		#partial switch pipe.model.type {
-		case .Ridge: res = pipe.model.ridge
-		case .Lasso: res = pipe.model.lasso
-		case .ElasticNet: res = pipe.model.elastic_net
-		case: res = pipe.model.ols
+		case .Ridge:
+			res = pipe.model.ridge
+		case .Lasso:
+			res = pipe.model.lasso
+		case .ElasticNet:
+			res = pipe.model.elastic_net
+		case:
+			res = pipe.model.ols
 		}
 
 		write_slice_f64(&w, res.beta)
@@ -393,6 +399,7 @@ pipeline_save :: proc(pipe: ^Pipeline, path: string) -> bool {
 
 	}
 
+	_write_model_params(&w, &pipe.model)
 	return !w.err
 }
 
@@ -412,6 +419,7 @@ pipeline_load :: proc(
 	pipe.is_fitted = read_bool(&r)
 
 	if !pipe.is_fitted {
+		if r.version >= 6 do _read_model_params(&r, &pipe)
 		return pipe, !r.err
 	}
 
@@ -511,10 +519,14 @@ pipeline_load :: proc(
 			if res.vcov.data != nil && (res.vcov.rows != k || res.vcov.cols != k) do r.err = true
 		}
 		#partial switch pipe.model.type {
-		case .Ridge: pipe.model.ridge = res
-		case .Lasso: pipe.model.lasso = res
-		case .ElasticNet: pipe.model.elastic_net = res
-		case: pipe.model.ols = res
+		case .Ridge:
+			pipe.model.ridge = res
+		case .Lasso:
+			pipe.model.lasso = res
+		case .ElasticNet:
+			pipe.model.elastic_net = res
+		case:
+			pipe.model.ols = res
 		}
 	case .SVR:
 		pipe.model.svr.support_vectors = read_slice_int(&r)
@@ -609,6 +621,7 @@ pipeline_load :: proc(
 
 	}
 
+	if r.version >= 6 do _read_model_params(&r, &pipe)
 	return pipe, !r.err
 }
 
@@ -678,7 +691,12 @@ read_decision_tree :: proc(r: ^ModelReader, allocator: mem.Allocator) -> Decisio
 	if tree.root_idx < 0 || tree.root_idx >= max(n_nodes, 1) do r.err = true
 	for node in tree.nodes {
 		leaf := node.left_idx < 0 && node.right_idx < 0
-		inner := node.left_idx > 0 && node.left_idx < n_nodes && node.right_idx > 0 && node.right_idx < n_nodes && node.feature_idx >= 0
+		inner :=
+			node.left_idx > 0 &&
+			node.left_idx < n_nodes &&
+			node.right_idx > 0 &&
+			node.right_idx < n_nodes &&
+			node.feature_idx >= 0
 		if !leaf && !inner do r.err = true
 	}
 	if r.err {
