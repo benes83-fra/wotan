@@ -807,7 +807,7 @@ tensor_conv2d :: proc(
 	out := _tensor_new_op(
 		out_data,
 		[4]int{N, C_out, out_h, out_w},
-		input.requires_grad || weight.requires_grad,
+		input.requires_grad || weight.requires_grad || (bias != nil && bias.requires_grad),
 		_op_alloc(input),
 	)
 
@@ -1259,7 +1259,7 @@ tensor_batch_norm_2d :: proc(
 	out := _tensor_new_op(
 		out_data,
 		input.shape,
-		input.requires_grad || weight.requires_grad,
+		input.requires_grad || weight.requires_grad || bias.requires_grad,
 		_op_alloc(input),
 	)
 
@@ -2193,9 +2193,9 @@ tensor_masked_scaled_dot_product_attention :: proc(
 		}
 
 		// Additive mask (shared or per sequence)
-		mb := _mask_block(mask, b, seq_q * seq_k)
-		for i in 0 ..< seq_q * seq_k {
-			p_b.data[i] += mb[i]
+		// (a nil mask attends everywhere, as in the backward pass)
+		if mb := _mask_block(mask, b, seq_q * seq_k); mb != nil {
+			for i in 0 ..< seq_q * seq_k {p_b.data[i] += mb[i]}
 		}
 
 		// 3. Numerically stable softmax
@@ -3117,6 +3117,7 @@ tensor_ssm :: proc(
 
 	rg :=
 		x.requires_grad ||
+		h_0.requires_grad ||
 		A.requires_grad ||
 		B.requires_grad ||
 		C.requires_grad ||
@@ -3327,43 +3328,27 @@ tensor_top_k_mask :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
 	_check_shape(probs)
+	allocator := _scope_or(allocator) // the active graph scope, if any
 	N := probs.shape[0]
 	E := probs.shape[1]
+	assert(k >= 1 && k <= E, "tensor_top_k_mask: k must be in 1 ..= number of columns")
 	mask_data := l.matrix_new(f64, N, E, allocator)
-	top_k_indices := make([]int, k, allocator)
-	defer delete(top_k_indices, allocator)
 	for n in 0 ..< N {
 		row := probs.data.data[n * E:(n + 1) * E]
-
-		// Simple insertion-sort based Top-K for each row
-		for i in 0 ..< k {top_k_indices[i] = i}
-
-		for e in 0 ..< E {
-			val := row[e]
-			// Check if it belongs in top_k
-			if val > row[top_k_indices[k - 1]] {
-				top_k_indices[k - 1] = e
-				// Bubble up to maintain sorted order
-				for j := k - 1; j > 0; j -= 1 {
-					if row[top_k_indices[j]] > row[top_k_indices[j - 1]] {
-						tmp := top_k_indices[j]
-						top_k_indices[j] = top_k_indices[j - 1]
-						top_k_indices[j - 1] = tmp
-					} else {
-						break
-					}
-				}
+		chosen := mask_data.data[n * E:(n + 1) * E]
+		// k passes of "largest not yet chosen" (ties: the lower index wins)
+		for _ in 0 ..< k {
+			best := -1
+			for e in 0 ..< E {
+				if chosen[e] == 0 && (best < 0 || row[e] > row[best]) {best = e}
 			}
-		}
-
-		for i in 0 ..< k {
-			mask_data.data[n * E + top_k_indices[i]] = 1.0
+			chosen[best] = 1.0
 		}
 	}
 
 	// Mask is NOT differentiable. It acts as a constant.
 	out := tensor_new(mask_data, false, allocator)
-	out.shape = probs.shape
+	out.shape = {N, E, 1, 1}
 	out.owned_by_graph = true
 	return out
 }

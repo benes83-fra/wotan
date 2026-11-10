@@ -264,4 +264,5 @@ linalg_memory_test :: proc(allocator: mem.Allocator) {
 	}
 
 	fmt.printf("  linalg memory tests: %d/%d passed\n", passed, total)
+	record_failures(total - passed)
 }
