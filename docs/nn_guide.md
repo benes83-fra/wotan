@@ -7,13 +7,12 @@
 - the SGD and Adam / AdamW optimisers, with per-parameter learning rates, schedules and gradient clipping;
 - complete models: GPT (with mixture of experts, RMSNorm, tied embeddings and a KV cache for generation), BERT, a GAN and a VAE;
 - image augmentation;
-- saving and loading of models and training checkpoints, partial loading, freezing layers and replacing heads for transfer learning.
-
-The tokenizers (BPE, WordPiece, time series) live in their own package, `wotan/nn/tokenizers`, and are not covered here.
+- saving and loading of models and training checkpoints, partial loading, freezing layers and replacing heads for transfer learning;
+- in the subpackage `wotan/nn/tokenizers`: WordPiece (BERT) and byte-level BPE (GPT-2) tokenizers, BPE vocabulary training, and a time-series tokenizer (section 13).
 
 The guide assumes you know the [tensor user guide](tensor_guide.md), in particular how gradients are computed and how graphs are freed (its section 11).
 
-Every example was compiled and run against the current code, and the output shown is the real output. The layers, models, losses and optimisers agree with PyTorch 2.1.0 in double precision to within 2e-15: `nn.MultiheadAttention`, `nn.TransformerEncoderLayer`, `nn.TransformerDecoderLayer`, `nn.RNN` and `nn.LSTM`, `F.conv1d`, `F.gaussian_nll_loss`, `torch.distributions.StudentT`, `torch.optim.SGD` and `AdamW`, and hand-written PyTorch versions of GPT, BERT, the TCN block, mixture of experts and Mamba. The complete example in section 12 trains a small GPT for 150 steps; replaying the same steps in PyTorch from the same initial weights gives the same losses to all 10 printed digits and the same generated tokens. A debug build with a tracking allocator reports no leaks, except for the one example in section 11 that shows a leak on purpose.
+Every example was compiled and run against the current code, and the output shown is the real output. The layers, models, losses and optimisers agree with PyTorch 2.1.0 in double precision to within 2e-15: `nn.MultiheadAttention`, `nn.TransformerEncoderLayer`, `nn.TransformerDecoderLayer`, `nn.RNN` and `nn.LSTM`, `F.conv1d`, `F.gaussian_nll_loss`, `torch.distributions.StudentT`, `torch.optim.SGD` and `AdamW`, and hand-written PyTorch versions of GPT, BERT, the TCN block, mixture of experts and Mamba. The complete example in section 12 trains a small GPT for 150 steps; replaying the same steps in PyTorch from the same initial weights gives the same losses to all 10 printed digits and the same generated tokens. The tokenizers agree with Hugging Face `transformers` 4.24 (section 13). A debug build with a tracking allocator reports no leaks, except for the one example in section 11 that shows a leak on purpose.
 
 ## Contents
 
@@ -29,7 +28,8 @@ Every example was compiled and run against the current code, and the output show
 10. [Saving and loading](#10-saving-and-loading)
 11. [Transfer learning and memory](#11-transfer-learning-and-memory)
 12. [A complete example](#12-a-complete-example)
-13. [Quick reference](#13-quick-reference)
+13. [Tokenizers](#13-tokenizers)
+14. [Quick reference](#14-quick-reference)
 
 ## 1. Setup
 
@@ -922,7 +922,201 @@ The program stops at 8 tokens because the model has 8 position embeddings (`max_
 
 To check it, the initial weights were copied into a hand-written PyTorch GPT (pre-LayerNorm, `F.scaled_dot_product_attention` with `is_causal`, exact GELU), and the same 150 steps were run with `torch.optim.Adam`, `clip_grad_norm_` and the same learning rates. PyTorch printed the same six losses to all 10 digits and generated the same tokens. Under a tracking allocator, the program ends with 0 live allocations.
 
-## 13. Quick reference
+## 13. Tokenizers
+
+The package `wotan/nn/tokenizers` turns text and time series into token ids for the models above. Import it as `import tk "wotan/nn/tokenizers"`. It has three tokenizers:
+
+| Tokenizer | Works like | Files |
+|---|---|---|
+| `WordPieceTokenizer` | Hugging Face's `BertTokenizer` (BERT, FinBERT) | `vocab.txt` |
+| `BPETokenizer` | Hugging Face's `GPT2Tokenizer`: byte-level BPE | `vocab.json`, `merges.txt` |
+| `TimeSeriesTokenizer` | Chronos' `MeanScaleUniformBins` (Ansari et al., 2024) | none |
+
+**Validation.** The WordPiece and BPE tokenizers were compared with Hugging Face `transformers` 4.24, using the real GPT-2 and bert-base-uncased vocabularies (BERT both cased and uncased). The test used 35 texts covering:
+- contractions, runs of spaces, tabs and line breaks;
+- accents, the Greek final sigma, the Turkish İ, CJK, Korean, Arabic and emoji;
+- combining marks, zero-width, format, private-use and unassigned characters;
+- special tokens, a 120-character word, URLs and punctuation.
+
+The ids, the decoded text, single and paired inputs with truncation and padding, and padded batches all equal the slow and the fast Hugging Face tokenizers. There is one exception: an unassigned code point is dropped by `BertTokenizer` and by wotan, but becomes `[UNK]` in `BertTokenizerFast`. The time-series tokens and decoded values equal Chronos' formulas, re-implemented from its source. BPE training is checked against Hugging Face's `BpeTrainer` by `tests/bpe_train_test.odin`.
+
+The examples below use the vocabularies that the tests download to `model_checkpoints/` (see the [test catalog](test_catalog.md)).
+
+### WordPiece (BERT)
+
+```odin
+wp, ok := tk.wordpiece_tokenizer_new("model_checkpoints/bert_vocab.txt", max_len = 12)
+if !ok {return}
+defer tk.wordpiece_tokenizer_free(&wp)
+
+ids := tk.wordpiece_encode(&wp, "Naïve café owners don't tokenize!")
+defer delete(ids)
+fmt.println(ids)
+for id in ids {fmt.printf("%s ", wp.ids_to_tokens[id])}
+fmt.println()
+text := tk.wordpiece_decode(&wp, ids)
+defer delete(text)
+fmt.println(text)
+
+input, mask := tk.tokenize(&wp, "The market rallied.") // [CLS] ... [SEP], padded to max_len
+defer {delete(input); delete(mask)}
+fmt.println(input)
+fmt.println(mask)
+
+pair, pair_mask, segments := tk.tokenize_pair(&wp, "Is it up?", "Yes, it rallied strongly today.")
+defer {delete(pair); delete(pair_mask); delete(segments)}
+fmt.println(pair)
+fmt.println(segments)
+
+batch_ids, batch_segments, batch_mask := tk.tokenize_batch_to_tensors(&wp, {"Rates rise.", "Stocks fell sharply on Monday."})
+defer {t.tensor_free(batch_ids); t.tensor_free(batch_segments); t.tensor_free(batch_mask)}
+fmt.println(batch_ids.shape, batch_mask.data.data[:8])
+```
+```
+[15743, 7668, 5608, 2123, 1005, 1056, 19204, 4697, 999]
+naive cafe owners don ' t token ##ize !
+naive cafe owners don't tokenize!
+[101, 1996, 3006, 24356, 1012, 102, 0, 0, 0, 0, 0, 0]
+[1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0]
+[101, 2003, 2009, 2039, 1029, 102, 2748, 1010, 2009, 24356, 6118, 102]
+[0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1]
+[2, 8, 1, 1] [1, 1, 1, 1, 1, 0, 0, 0]
+```
+
+How WordPiece encodes a text:
+1. **Cleaning.** The text is split at the special tokens `[CLS]`, `[SEP]`, `[PAD]`, `[UNK]` and `[MASK]`, which are never broken up. Control, format, private-use and unassigned characters are removed. Whitespace becomes plain spaces, and CJK ideographs get spaces around them.
+2. **Casing.** With `lowercase = true` (the default, for uncased models), each word is lowercased and its accents are stripped. Pass `lowercase = false` for cased models such as bert-base-cased.
+3. **Splitting.** Punctuation is split off.
+4. **Matching.** Each piece is matched greedily, longest first, against the vocabulary, with continuations written as `##…`. A piece that cannot be matched completely, or that is longer than 100 characters, becomes `[UNK]`.
+
+`wordpiece_decode(&wp, ids, allocator, skip_special_tokens = false)` joins the tokens as Hugging Face's `decode` does: it attaches the `##` continuations and removes the spaces before `. , ! ?` and in English contractions.
+
+The model-input helpers:
+- `tokenize(&wp, text)` returns `max_len` ids, `[CLS] text [SEP]`, truncated or padded with `[PAD]` (id 0), together with the attention mask.
+- `tokenize_pair(&wp, a, b)` returns `[CLS] a [SEP] b [SEP]` with segment ids 0 and 1. When the pair is too long, it removes the last token of the longer text until both fit, as Hugging Face's `longest_first` truncation does. In the example the second text lost "today .".
+- `tokenize_batch_to_tensors(&wp, texts, allocator, pairs = nil, pad_to_longest = true)` returns `[batch, L]` tensors of ids, segment ids and attention mask. `L` is the longest input, or `max_len` with `pad_to_longest = false`.
+- `tokenize_to_tensors` and `tokenize_pair_to_tensors` return a single input as `[1, max_len]` tensors.
+
+The ids and segment ids feed `bert_model_forward` directly. BERT treats id 0 as padding, which is `[PAD]` in BERT vocabularies.
+
+### Byte-level BPE (GPT-2)
+
+```odin
+bpe, ok := tk.bpe_tokenizer_new("model_checkpoints/vocab.json", "model_checkpoints/merges.txt", max_len = 16)
+if !ok {return}
+defer tk.bpe_tokenizer_free(&bpe)
+
+ids := tk.bpe_encode(&bpe, "Hello world, it's 2026.<|endoftext|>")
+defer delete(ids)
+fmt.println(ids)
+for id in ids {fmt.printf("%q ", bpe.ids_to_tokens[id])}
+fmt.println()
+text := tk.bpe_decode(&bpe, ids)
+defer delete(text)
+fmt.println(text)
+
+batch, mask := tk.bpe_tokenize_batch_to_tensors(&bpe, {"Short.", "A somewhat longer text."})
+defer {t.tensor_free(batch); t.tensor_free(mask)}
+fmt.println(batch.shape, batch.data.data[:6], mask.data.data[:6])
+```
+```
+[15496, 995, 11, 340, 338, 1160, 2075, 13, 50256]
+"Hello" "Ġworld" "," "Ġit" "'s" "Ġ20" "26" "." "<|endoftext|>"
+Hello world, it's 2026.<|endoftext|>
+[2, 5, 1, 1] [16438, 13, 0, 0, 0, 32] [1, 1, 0, 0, 0, 1]
+```
+
+How BPE encodes a text:
+1. **Special tokens.** Tokens of the form `<|…|>` are never split. So are `[CLS]`, `[SEP]`, `[PAD]`, `[UNK]` and `[MASK]` when the vocabulary has them.
+2. **Pre-tokenizing.** The rest is cut into pieces with GPT-2's pattern: contractions, runs of letters, digits or other characters, and whitespace. A space stays with the word after it, which is the `Ġ` in the tokens above.
+3. **Merging.** The UTF-8 bytes of each piece are merged by the priorities in `merges.txt`.
+
+`bpe_decode` maps the tokens back to their bytes. Encoding and then decoding gives back the original text byte for byte. A decoded prefix may end in an incomplete UTF-8 sequence if the ids cut a character in two.
+
+Padding: GPT-2 has no `[PAD]` token, so `bpe_tokenize_batch_to_tensors` pads with id 0, which is the token "!". The attention mask is what tells padding apart.
+
+Watch out for `bpe_tokenize(&bpe, text)`: it adds `[CLS]` / `[SEP]` by default (`add_special_tokens = true`, meant for BERT-style BPE vocabularies). With the GPT-2 vocabulary, which has neither token, those ids are 0 as well. Pass `add_special_tokens = false` for GPT-2. `bpe_tokenize_to_tensors` and the batch procedure already default to no special tokens.
+
+### Training a BPE vocabulary
+
+`bpe_train(texts, vocab_size, special_tokens = {"<|endoftext|>"}, min_frequency = 0)` learns a byte-level BPE vocabulary, as Hugging Face's `BpeTrainer` does with the byte-level pre-tokenizer:
+1. The vocabulary starts with the special tokens, then the 256 byte characters.
+2. It then repeatedly merges the most frequent pair of adjacent symbols (on a tie, the pair of smaller ids) until it has `vocab_size` tokens.
+3. It stops early when no pair occurs at least `min_frequency` times.
+
+Unlike `BpeTrainer`, the special tokens are cut out of the texts first, so `<|endoftext|>` between documents adds no merges. `bpe_save` writes `vocab.json` and `merges.txt` in Hugging Face's format.
+
+```odin
+corpus := []string {
+	"the cat sat on the mat",
+	"the dog sat on the log",
+	"the cat and the dog",
+}
+trained := tk.bpe_train(corpus, vocab_size = 270)
+defer tk.bpe_tokenizer_free(&trained)
+fmt.println("vocabulary:", len(trained.vocab), "merges:", len(trained.merges))
+ids := tk.bpe_encode(&trained, "the cat sat")
+defer delete(ids)
+for id in ids {fmt.printf("%q ", trained.ids_to_tokens[id])}
+fmt.println()
+
+ok := tk.bpe_save(&trained, "toy_vocab.json", "toy_merges.txt")
+again, ok2 := tk.bpe_tokenizer_new("toy_vocab.json", "toy_merges.txt", max_len = 32)
+defer tk.bpe_tokenizer_free(&again)
+ids2 := tk.bpe_encode(&again, "the cat sat")
+defer delete(ids2)
+fmt.println(ok, ok2, ids2)
+```
+```
+vocabulary: 270 merges: 13
+"the" "Ġcat" "Ġsat"
+true true [258, 266, 269]
+```
+
+The 270 tokens are 1 special token, 256 byte characters and 13 merges. Hugging Face's `GPT2Tokenizer` can read the saved files too.
+
+### Time series (Chronos)
+
+The time-series tokenizer turns a series into tokens in two steps, as Chronos does:
+1. **Scaling.** The series is divided by its scale s, the mean absolute value of its context. Missing values (NaN) are left out, and s = 1 if the mean is not positive.
+2. **Binning.** Each scaled value becomes the token of its bin. The bin centres are spaced evenly on `[low, high]`, and values outside that range fall into the outer bins.
+
+A token is `n_special + 1 + bin`, and decoding gives `centre[bin] · s`.
+
+The defaults are Chronos' (4096 tokens, centres on [−15, 15], a context of 512 values) but without an end-of-sequence token, which suits a decoder-only model such as GPT. `ml_finance/token_forecast.odin` trains a GPT on these tokens and forecasts by sampling paths.
+
+```odin
+ts := tk.ts_tokenizer_new() // 4096 tokens, bin centres on [-15, 15], context 512
+defer tk.ts_tokenizer_free(&ts)
+
+prices := []f64{101.2, 102.0, math.nan_f64(), 100.5, 99.8, 103.1}
+ids, mask, scale := tk.ts_encode_context(&ts, prices)
+defer {delete(ids); delete(mask)}
+fmt.printf("scale %.4f\n", scale)
+fmt.println(ids)
+fmt.println(mask)
+values := tk.ts_decode(&ts, ids, scale)
+defer delete(values)
+fmt.printf("%.3f\n", values)
+```
+```
+scale 101.3200
+[2185, 2186, 0, 2184, 2183, 2188]
+[1, 1, 0, 1, 1, 1]
+[101.023, 101.766, -1519.800, 100.280, 99.537, 103.251]
+```
+
+The details:
+- **Missing values.** A missing value becomes the padding token 0, with mask 0. Decoding a special token gives the lowest bin, as in Chronos: that is the −1519.8 above. Use the mask to ignore it.
+- **Rounding.** The decoded values are the bin centres. With the defaults a bin is 30 / 4092 ≈ 0.73 % of the scale wide, so a value comes back within half of that.
+- **Context length.** `ts_encode_context` keeps the last `context_length` values.
+- **Other procedures.** `ts_encode(&ts, values, scale)` encodes values at a given scale, for example future values with the context's scale, as training targets. `ts_encode_batch_to_tensors(&ts, series)` encodes series of different lengths as one left-padded batch and returns each series' scale.
+
+### Fixed while writing this section
+
+- **The WordPiece cleaner kept private-use and unassigned characters.** It turned them into `[UNK]`. Hugging Face's `BertTokenizer` removes them together with the other C* categories, so the two tokenizers gave different ids. A test was added to `tests/nn_fixes_test.odin`.
+
+## 14. Quick reference
 
 | Area | Procedures |
 |---|---|
@@ -938,3 +1132,4 @@ To check it, the initial weights were copied into a hand-written PyTorch GPT (pr
 | Augmentation | `AugmentationConfig`, `augment_batch`, `affine_transform_image` |
 | Files | `save_checkpoint`, `load_checkpoint`, `sequential_load_partial`, `save_gpt_model`, `load_gpt_model`, `save_bert_model`, `load_bert_model`, `save_generator`, `load_generator`, `save_discriminator`, `load_discriminator`, `save_vae_encoder`, `load_vae_encoder`, `save_vae_decoder`, `load_vae_decoder` |
 | Transfer | `sequential_freeze_all`, `sequential_unfreeze_all`, `sequential_freeze_range`, `gpt_freeze_all`, `gpt_unfreeze_all`, `gpt_freeze_blocks`, `bert_freeze_all`, `bert_unfreeze_all`, `bert_freeze_blocks`, `tensor_set_requires_grad` |
+| Tokenizers (`tk`) | `wordpiece_tokenizer_new`, `wordpiece_encode`, `wordpiece_decode`, `tokenize`, `tokenize_to_tensors`, `tokenize_pair`, `tokenize_pair_to_tensors`, `tokenize_batch_to_tensors`, `wordpiece_tokenizer_free`; `bpe_tokenizer_new`, `bpe_encode`, `bpe_decode`, `bpe_tokenize`, `bpe_tokenize_to_tensors`, `bpe_tokenize_batch_to_tensors`, `bpe_train`, `bpe_save`, `bpe_tokenizer_free`; `ts_tokenizer_new`, `ts_scale`, `ts_token`, `ts_encode`, `ts_encode_context`, `ts_decode`, `ts_encode_batch_to_tensors`, `ts_tokenizer_free` |

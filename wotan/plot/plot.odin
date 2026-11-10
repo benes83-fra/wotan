@@ -595,6 +595,7 @@ multi_line_png :: proc(
 	pts_y := make([][]f64, len(lines), allocator)
 	defer {delete(pts_x, allocator); delete(pts_y, allocator)}
 	for line, i in lines {
+		if len(line.xs) != len(line.ys) {continue} 	// not drawn: no points, no legend entry
 		pts_x[i], pts_y[i] = line.xs, line.ys
 		if line.label !=
 		   "" {append(&entries, Legend_Entry{line.label, colors[i], line.style, false})}

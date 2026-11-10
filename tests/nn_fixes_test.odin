@@ -2,6 +2,7 @@ package tests
 
 import l "../wotan/linalg"
 import nn "../wotan/nn"
+import tok "../wotan/nn/tokenizers"
 import t "../wotan/tensor"
 import "base:runtime"
 import "core:fmt"
@@ -17,7 +18,9 @@ import "core:os"
 // token matrix; the probabilistic losses leaked the intermediates computed
 // from data inputs (a fixed variance, scale or ν); a checkpoint whose layer
 // header had an invalid configuration (e.g. 0 attention heads) stopped
-// reading and could load as ok.
+// reading and could load as ok. Found with the tokenizers' part of the guide:
+// the WordPiece cleaner kept private-use and unassigned characters (as [UNK])
+// that Hugging Face's BertTokenizer removes with the other C* categories.
 // Every check runs under a Tracking_Allocator on the default heap allocator.
 
 @(private = "file")
@@ -210,6 +213,26 @@ nn_fixes_test :: proc(allocator: mem.Allocator) {
 		_ = os.remove(path)
 		nn.adam_free(&opt)
 		nn.sequential_free(s)
+	}
+
+	{ 	// WordPiece drops private-use and unassigned characters, as BertTokenizer
+		path := "model_checkpoints/nn_fixes_vocab.txt"
+		_ = os.write_entire_file(
+			path,
+			transmute([]u8)string("[PAD]\n[UNK]\n[CLS]\n[SEP]\n[MASK]\nprivate\nuse\n"),
+		)
+		wp, ok := tok.wordpiece_tokenizer_new(path, 8)
+		ids := tok.wordpiece_encode(&wp, "private  use ͸") if ok else nil
+		good := ok && len(ids) == 2 && ids[0] == 5 && ids[1] == 6 // was 5, [UNK], 6, [UNK]
+		report(
+			fmt.tprintf("WordPiece: private-use and unassigned characters dropped %v", ids),
+			good,
+			&passed,
+			&total,
+		)
+		delete(ids)
+		if ok {tok.wordpiece_tokenizer_free(&wp)}
+		_ = os.remove(path)
 	}
 
 	t.tensor_free(nf_ids_t)

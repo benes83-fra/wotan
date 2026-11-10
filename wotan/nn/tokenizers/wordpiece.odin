@@ -13,8 +13,8 @@ import "core:unicode/utf8"
 // WordPiece (BERT), as Hugging Face's BertTokenizer
 // ============================================================================
 // vocab.txt: one token per line, the id is the line number. Encoding: the text
-// is split at special tokens ([CLS], [SEP], [PAD], [UNK], [MASK]); control
-// and format characters are removed, whitespace becomes spaces and CJK
+// is split at special tokens ([CLS], [SEP], [PAD], [UNK], [MASK]); control,
+// format, private-use and unassigned characters (Unicode C*) are removed, whitespace becomes spaces and CJK
 // ideographs get spaces around them; each word is lowercased and its accents
 // stripped (NFD without nonspacing marks, unicode_tables.odin) unless the
 // tokenizer is cased (lowercase = false, for cased models such as
@@ -107,12 +107,26 @@ _is_bert_whitespace :: proc(r: rune) -> bool {
 	return false
 }
 
+// The C* categories but tab, newline and carriage return: removed by the text
+// cleaner (surrogates, Cs, cannot occur in decoded UTF-8)
 @(private = "file")
 _is_bert_control :: proc(r: rune) -> bool {
 	if r == '\t' || r == '\n' || r == '\r' {return false}
 	if r < 0x20 || (r >= 0x7F && r <= 0x9F) {return true} 	// Cc
+	if r < 0xAD {return false} 	// the first Cf, Co and Cn code points are above
 	for rg in _FORMAT_RANGES {if r >= rg[0] && r <= rg[1] {return true}} 	// Cf
-	return false
+	if (r >= 0xE000 && r <= 0xF8FF) ||
+	   (r >= 0xF0000 && r <= 0xFFFFD) ||
+	   (r >= 0x100000 && r <= 0x10FFFD) {
+		return true // Co (private use)
+	}
+	// Cn (unassigned): the last range starting at or before r
+	lo, hi := 0, len(_UNASSIGNED_RANGES)
+	for lo < hi {
+		mid := (lo + hi) / 2
+		if _UNASSIGNED_RANGES[mid][0] <= r {lo = mid + 1} else {hi = mid}
+	}
+	return lo > 0 && r <= _UNASSIGNED_RANGES[lo - 1][1]
 }
 
 @(private = "file")
