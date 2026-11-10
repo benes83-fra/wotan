@@ -112,65 +112,18 @@ _lstsq_auto_select :: proc(X: ^Matrix(f64)) -> LstsqMethod {
 // QR-based least squares
 // ============================================================================
 _lstsq_qr :: proc(X: ^Matrix(f64), y: []f64, allocator: mem.Allocator) -> LstsqResult {
-	m, n := X.rows, X.cols
-	if m >= n {return _lstsq_householder(X, y, allocator)}
-
-	Q, R := qr_decompose(X, .Blocked, allocator)
-	defer matrix_free(&Q)
-	defer matrix_free(&R)
-
-	Qty := make([]f64, n, allocator)
-	for j in 0 ..< n {
-		sum := 0.0
-		for i in 0 ..< m {
-			sum += Q.data[i * Q.cols + j] * y[i]
-		}
-		Qty[j] = sum
+	// Underdetermined systems (fewer rows than columns) have no unique solution:
+	// return the minimum-norm one from the SVD, as numpy.linalg.lstsq does
+	if X.rows < X.cols {return _lstsq_svd(X, y, allocator)}
+	res := _lstsq_householder(X, y, allocator)
+	// Rank-deficient or numerically singular X (cond(R) ≥ 1e12): the triangular
+	// solve divides by a ~0 pivot. Fall back to the SVD minimum-norm solution,
+	// as the Cholesky path does
+	if !res.success {
+		lstsq_result_free(&res, allocator)
+		return _lstsq_svd(X, y, allocator)
 	}
-
-	beta := upper_tri_solve(&R, Qty, allocator)
-
-	residuals := make([]f64, m, allocator)
-	for i in 0 ..< m {
-		pred := 0.0
-		for j in 0 ..< n {
-			pred += X.data[i * X.cols + j] * beta[j]
-		}
-		residuals[i] = y[i] - pred
-	}
-
-	rank := 0
-	eps := f64(1e-12) * math.abs(R.data[0])
-	for j in 0 ..< n {
-		if math.abs(R.data[j * R.cols + j]) > eps {
-			rank += 1
-		}
-	}
-
-	max_d := 0.0
-	min_d := f64(1e308)
-	for j in 0 ..< n {
-		d := math.abs(R.data[j * R.cols + j])
-		if d > max_d {
-			max_d = d
-		}
-		if d > 0.0 && d < min_d {
-			min_d = d
-		}
-	}
-	cond := f64(1e308)
-	if min_d < f64(1e308) {
-		cond = max_d / min_d
-	}
-
-	result := LstsqResult{}
-	result.beta = beta
-	result.residuals = residuals
-	result.rank = rank
-	result.condition_estimate = cond
-	result.method_used = .QR
-	result.success = cond < f64(1e12)
-	return result
+	return res
 }
 
 // Householder QR least squares for m ≥ n: the reflections are applied to a copy
@@ -363,6 +316,7 @@ _lstsq_svd :: proc(X: ^Matrix(f64), y: []f64, allocator: mem.Allocator) -> Lstsq
 		}
 		c[j] = sum
 	}
+	defer delete(c, allocator)
 
 	d := make([]f64, n, allocator)
 	for j in 0 ..< n {
@@ -372,6 +326,7 @@ _lstsq_svd :: proc(X: ^Matrix(f64), y: []f64, allocator: mem.Allocator) -> Lstsq
 			d[j] = 0.0
 		}
 	}
+	defer delete(d, allocator)
 
 	beta := matvec_dyn_simd(&V, d, allocator)
 

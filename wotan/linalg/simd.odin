@@ -751,6 +751,8 @@ xtx_simd :: proc(A: ^Matrix(f64), allocator: mem.Allocator = context.allocator) 
 	// This avoids O(n²) allocations in the nested loops
 	col_i := make([]f64, m, context.temp_allocator)
 	col_j := make([]f64, m, context.temp_allocator)
+	defer delete(col_j, context.temp_allocator)
+	defer delete(col_i, context.temp_allocator)
 
 	for ii in 0 ..< n {
 		// Extract column ii of A into col_i (strided access in row-major)
@@ -788,6 +790,8 @@ xtx_blocked_simd :: proc(
 	// Reusable column buffers
 	col_i := make([]f64, m, context.temp_allocator)
 	col_j := make([]f64, m, context.temp_allocator)
+	defer delete(col_j, context.temp_allocator)
+	defer delete(col_i, context.temp_allocator)
 
 	// Block size for cache efficiency
 	tile := tile_for_matmul() // 16 for AVX

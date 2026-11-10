@@ -59,6 +59,12 @@ qr_decompose_unblocked :: proc(
 	w := make([]f64, n, context.temp_allocator)
 	u := make([]f64, m, context.temp_allocator)
 	col_buf := make([]f64, m, context.temp_allocator)
+	defer {
+		delete(col_buf, context.temp_allocator)
+		delete(u, context.temp_allocator)
+		delete(w, context.temp_allocator)
+		delete(v, context.temp_allocator)
+	}
 
 	for k in 0 ..< kmax {
 		xlen := m - k

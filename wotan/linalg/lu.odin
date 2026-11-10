@@ -167,7 +167,9 @@ lu_solve :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> []f64 {
 	y_perm := apply_pivots_vec(piv, b)
-	y := forward_subst_unit_lower_simd(LU, y_perm, allocator)
+	defer delete(y_perm, context.temp_allocator)
+	y := forward_subst_unit_lower_simd(LU, y_perm, context.temp_allocator)
+	defer delete(y, context.temp_allocator)
 	x := back_subst_upper_simd(LU, y, allocator)
 	return x
 }
@@ -230,6 +232,8 @@ mat_inverse_lu :: proc(
 
 	LU, piv, sign, lok := lu_decompose(A, allocator)
 	_ = sign
+	defer matrix_free(&LU) // scratch factor; only Ainv is returned
+	defer delete(piv, allocator)
 	if !lok {
 		// Singular → return empty matrix, ok = false
 		Ainv = matrix_new(f64, 0, 0, allocator)
@@ -240,6 +244,7 @@ mat_inverse_lu :: proc(
 
 	// Solve A x_j = e_j for each column j
 	e := make([]f64, n, context.temp_allocator)
+	defer delete(e, context.temp_allocator)
 
 	for j := 0; j < n; j += 1 {
 		// e_j
@@ -254,6 +259,7 @@ mat_inverse_lu :: proc(
 		for i := 0; i < n; i += 1 {
 			Ainv.data[i * Ainv.cols + j] = x[i]
 		}
+		delete(x, context.temp_allocator)
 	}
 
 	ok = true

@@ -215,6 +215,7 @@ cholesky_decompose_blocked :: proc(A: ^Matrix(f64)) {
 		//    Use existing unblocked Cholesky as panel kernel
 		// ----------------------------------------------------
 		A11 := matrix_new(f64, b, b, context.temp_allocator)
+		defer matrix_free(&A11)
 		for i := 0; i < b; i += 1 {
 			for j := 0; j < b; j += 1 {
 				A11.data[i * A11.cols + j] = A.data[(k + i) * A.cols + (k + j)]
@@ -280,6 +281,7 @@ cholesky_decompose_blocked :: proc(A: ^Matrix(f64)) {
 					row := A.data[row_start:row_start + m]
 					axpy_simd(-v[i], v, row)
 				}
+				delete(v, context.temp_allocator)
 			}
 		}
 	}

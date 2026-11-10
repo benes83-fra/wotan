@@ -199,6 +199,7 @@ covariance :: proc(X: ^Matrix(f64), allocator: mem.Allocator = context.allocator
 
 	// 1. Compute column means
 	means := make([]f64, p, context.temp_allocator)
+	defer delete(means, context.temp_allocator)
 	for j := 0; j < p; j += 1 {
 		sum := 0.0
 		for i := 0; i < n; i += 1 {
@@ -285,6 +286,7 @@ correlation :: proc(X: ^Matrix(f64), allocator: mem.Allocator = context.allocato
 
 	// 3. Precompute standard deviations
 	sd := make([]f64, p, context.temp_allocator)
+	defer delete(sd, context.temp_allocator)
 	for i := 0; i < p; i += 1 {
 		v := C.data[i * p + i]
 		if v <= 0 {
@@ -412,7 +414,7 @@ matrix_from_flat :: proc(
 		panic(fmt.aprintf("matrix_from_flat: data too short (%v < %v)", len(data), expected_len))
 	}
 	copy(m.data, data[0:expected_len])
-	m.stride = cols // ← ADD THIS LINE: set stride for contiguous row-major layout
+	m.stride = cols // informational only: storage is always contiguous row-major
 	return m
 }
 

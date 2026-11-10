@@ -321,7 +321,7 @@ The GPT-2 and BERT vocabularies (`vocab.json`, `merges.txt`, `bert_vocab.txt`) a
 These are areas where Wotan is known to be incomplete:
 
 - **API stability:** names and signatures are still changing. There are no versioned releases yet.
-- **Documentation:** user guides cover the DataFrame layer ([`docs/core_guide.md`](docs/core_guide.md)), statistics and time series ([`docs/analytics_guide.md`](docs/analytics_guide.md)) and machine learning ([`docs/ml_guide.md`](docs/ml_guide.md)). For the other packages, the tests are the main documentation.
+- **Documentation:** user guides cover the DataFrame layer ([`docs/core_guide.md`](docs/core_guide.md)), statistics and time series ([`docs/analytics_guide.md`](docs/analytics_guide.md)), machine learning ([`docs/ml_guide.md`](docs/ml_guide.md)) and linear algebra ([`docs/linalg_guide.md`](docs/linalg_guide.md)). For the other packages, the tests are the main documentation.
 - **Performance:** everything runs on the CPU. Some hot paths use SIMD, but most code has not been profiled or tuned, and large deep learning models are slow.
 - **Validation:** most modules are tested against reference libraries (see [Tests](#tests)). The ML-for-finance and behavioural finance models are mostly checked by examples rather than references. Nothing has been validated for production trading or risk use.
 - **Memory management:** ownership is explicit, as is usual in Odin. Most objects need a matching `destroy_*` or `*_free` call.

@@ -13,7 +13,7 @@ SVDMethod :: enum {
 // ============================================================================
 svd_jacobi :: proc(
 	A: ^Matrix(f64),
-	allocator: mem.Allocator = context.temp_allocator,
+	allocator: mem.Allocator = context.allocator,
 ) -> (
 	U: Matrix(f64),
 	S: []f64,
@@ -33,6 +33,8 @@ svd_jacobi :: proc(
 	// Pre-allocate workspace ONCE (reused every iteration)
 	col_p := make([]f64, max(m, n), context.temp_allocator)
 	col_q := make([]f64, max(m, n), context.temp_allocator)
+	defer delete(col_q, context.temp_allocator)
+	defer delete(col_p, context.temp_allocator)
 
 	max_iter := 100
 	eps := 1e-12
@@ -283,6 +285,9 @@ svd_thin :: proc(
 	V_t: Matrix(f64),
 ) {
 	U_full, S_full, V_full := svd(A, method, allocator)
+	defer matrix_free(&U_full) // full factors are scratch; the truncated copies are returned
+	defer delete(S_full, allocator)
+	defer matrix_free(&V_full)
 	m, n := U_full.rows, U_full.cols
 
 	S_max := 0.0
