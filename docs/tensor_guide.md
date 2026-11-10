@@ -9,7 +9,7 @@
 - RNN, GRU and LSTM cells, embeddings, attention (plain, masked, tiled "flash", causal) and a selective state-space scan;
 - graph scopes: one arena per graph, so a training loop allocates no new memory after its first iteration.
 
-Everything works on `f64`. The `nn` package builds its layers, optimisers and models on top of this one. This guide covers the tensor level: what you need to write your own models, losses or layers.
+Everything works on `f64`. The `nn` package builds its layers, optimisers and models on top of this one (see the [nn user guide](nn_guide.md)). This guide covers the tensor level: what you need to write your own models, losses or layers.
 
 The guide assumes you know basic Odin and the `Matrix` type from the [linalg user guide](linalg_guide.md).
 

@@ -685,7 +685,10 @@ load_checkpoint :: proc(
 	model.training = false // loaded models start in evaluation mode (sequential_train to resume)
 	for _ in 0 ..< n_layers {
 		layer, flags, layer_ok := _read_layer_header(&io, allocator)
-		if !layer_ok {break}
+		if !layer_ok {
+			io.ok = false // also an invalid configuration (e.g. 0 heads): a corrupt file
+			break
+		}
 		append(&model.layers, layer)
 		_io_layer(&io, &model.layers[len(model.layers) - 1], flags)
 	}
@@ -768,7 +771,10 @@ sequential_load_partial :: proc(
 	n_layers := _get_size(&io)
 	for i in 0 ..< min(n_layers, len(seq.layers)) {
 		stored, flags, layer_ok := _read_layer_header(&io, allocator)
-		if !layer_ok {break}
+		if !layer_ok {
+			io.ok = false // also an invalid configuration (e.g. 0 heads): a corrupt file
+			break
+		}
 		defer layer_free(&stored)
 
 		// same type and configuration: the headers written for both layers

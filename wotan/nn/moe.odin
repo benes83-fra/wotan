@@ -122,8 +122,8 @@ moe_layer_forward :: proc(
 		weighted := t.tensor_mul(probs, w)
 		_constant_done(w, weighted)
 		layer.aux_loss = t.tensor_sum(weighted)
-	} else if !probs.requires_grad {
-		t.tensor_free(probs)
+	} else {
+		t.tensor_free(probs) // read above only; no graph node refers to it
 	}
 
 	// 4. Weighted sum of the experts
@@ -136,5 +136,9 @@ moe_layer_forward :: proc(
 		)
 		out_flat = y if out_flat == nil else t.tensor_add(out_flat, y)
 	}
-	return t.tensor_reshape(out_flat, [4]int{batch, seq_len, layer.d_model, 1})
+	out := t.tensor_reshape(out_flat, [4]int{batch, seq_len, layer.d_model, 1})
+	// x without gradient (e.g. the model input): x_flat is a constant copy
+	// that no graph node would free
+	if !x_flat.requires_grad {_constant_done(x_flat, out)}
+	return out
 }

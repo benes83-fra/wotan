@@ -22,9 +22,11 @@ AugmentationConfig :: struct {
 
 // Rotates one [height, width] image by angle_deg (counter-clockwise), scales
 // it by `scale` about its center and shifts it by (tx, ty) pixels, as
-// torchvision.transforms.functional.affine: every output pixel samples the
-// input bilinearly at its inverse-mapped position, with zeros outside the
-// image (torch grid_sample, padding "zeros", align_corners = False).
+// torchvision.transforms.functional.affine(img, -angle_deg, [tx, ty], scale,
+// 0) (torchvision's affine turns clockwise, its rotate counter-clockwise as
+// here): every output pixel samples the input bilinearly at its
+// inverse-mapped position, with zeros outside the image (torch grid_sample,
+// padding "zeros", align_corners = False).
 affine_transform_image :: proc(
 	input: []f64,
 	output: []f64,

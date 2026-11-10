@@ -12,11 +12,14 @@ import "core:mem"
 // Forward passes create constant tensors (zero states, position ids, masks)
 // as op inputs. When the op output is part of a graph the backward pass may
 // still read them, so the graph owns and frees them; otherwise they are freed
-// right away.
+// right away. Inside a graph scope they live in the scope's arena like the op
+// outputs that use them (graph_end frees them; on the heap they leaked once
+// per step, as graph_end does not free heap tensors).
 
 // Constant [1, len(values)] tensor with the given logical shape (zeros if values is nil)
 @(private)
 _constant :: proc(n: int, shape: [4]int, alloc: mem.Allocator, values: []f64 = nil) -> ^t.Tensor {
+	alloc := t._scope_or(alloc)
 	m := l.matrix_new(f64, 1, n, alloc)
 	if values != nil {copy(m.data, values)}
 	c := t.tensor_new(m, false, alloc)
