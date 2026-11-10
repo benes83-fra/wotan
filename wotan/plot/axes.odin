@@ -49,11 +49,12 @@ nice_ticks :: proc(
 // Fewest decimals that represent multiples of `step` exactly
 @(private = "file")
 _decimals :: proc(step: f64) -> int {
-	for d in 0 ..< 12 {
+	for d in 0 ..< 17 {
 		s := step * math.pow(10, f64(d))
-		if abs(s - math.round(s)) < 1e-6 * max(1, abs(s)) {return d}
+		// a whole number of units (≥ 1: a step below 1e-6 is not "0 decimals")
+		if r := math.round(s); r >= 1 && abs(s - r) < 1e-6 * s {return d}
 	}
-	return 12
+	return 17
 }
 
 // Tick labels with consistent precision; scientific for very large/small axes
@@ -63,6 +64,8 @@ format_ticks :: proc(ticks: []f64, step: f64, allocator := context.temp_allocato
 	for v in ticks {abs_max = max(abs_max, abs(v))}
 	if abs_max >= 1e6 || (abs_max > 0 && abs_max < 1e-3) {
 		e := math.floor(math.log10(abs_max))
+		// log10 can fall just short of a power of ten (log10(1e300) < 300)
+		if abs_max / math.pow(10, e) >= 10 * (1 - 1e-12) {e += 1}
 		scale := math.pow(10, e)
 		d := _decimals(step / scale)
 		for v, i in ticks {
@@ -490,7 +493,7 @@ axes_draw_legend :: proc(
 		n := 0
 		for xs, s in pts_x {
 			ys := pts_y[s]
-			for i in 0 ..< len(xs) {
+			for i in 0 ..< min(len(xs), len(ys)) {
 				px, py := axes_px(ax, xs[i]), axes_py(ax, ys[i])
 				if px >= f64(cand[0]) &&
 				   px <= f64(cand[0] + w) &&
