@@ -1150,6 +1150,8 @@ main :: proc() {
 	free_all(context.temp_allocator)
 	test.plot_fixes_test(context.temp_allocator)
 	free_all(context.temp_allocator)
+	test.finance_fixes_test(context.temp_allocator)
+	free_all(context.temp_allocator)
 	test.anchoring_reference_test(context.temp_allocator)
 	free_all(context.temp_allocator)
 	test.anchoring_backtest_test(context.temp_allocator)

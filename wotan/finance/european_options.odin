@@ -34,6 +34,13 @@ Greeks :: struct {
 // d2 = d1 - σ*√T
 // Call = S*N(d1) - K*exp(-r*T)*N(d2)
 // Put  = K*exp(-r*T)*N(-d2) - S*N(-d1)
+// The inputs may hold a batch of options (any equal shapes, priced
+// elementwise). Gradients reach every input that requires them. The
+// intermediates are freed with the price's graph (tensor_free_graph), also
+// those computed from inputs without gradient (e.g. e^{-rT} for a fixed r),
+// which the graph does not link; without any gradient they are freed right
+// away and the price is marked owned_by_graph, so either tensor_free or
+// tensor_free_graph frees it.
 // ============================================================================
 black_scholes_price :: proc(
 	S_t: ^t.Tensor, // requires_grad = true
@@ -44,66 +51,90 @@ black_scholes_price :: proc(
 	opt: OptionType,
 	allocator: mem.Allocator,
 ) -> ^t.Tensor {
-	// ln(S/K)
 	S_over_K := t.tensor_div(S_t, K_t)
 	ln_S_K := t.tensor_log(S_over_K)
-
-	// σ²/2
 	sigma_sq := t.tensor_mul(sigma_t, sigma_t)
-	half := _scalar_tensor(0.5, allocator)
-	half_sig := t.tensor_mul(sigma_sq, half)
-
-	// r + σ²/2
+	half_sig := t.tensor_scale(sigma_sq, 0.5)
 	r_plus_half_sig := t.tensor_add(r_t, half_sig)
-
-	// (r + σ²/2) * T
 	numer_term2 := t.tensor_mul(r_plus_half_sig, T_t)
-
-	// numerator = ln(S/K) + (r + σ²/2)*T
-	numer := t.tensor_add(ln_S_K, numer_term2)
-
-	// √T
+	numer := t.tensor_add(ln_S_K, numer_term2) // ln(S/K) + (r + σ²/2)T
 	sqrt_T := t.tensor_sqrt(T_t)
-
-	// σ * √T
 	sig_sqrt_T := t.tensor_mul(sigma_t, sqrt_T)
-
-	// d1 = numer / (σ*√T)
 	d1 := t.tensor_div(numer, sig_sqrt_T)
-
-	// d2 = d1 - σ*√T
 	d2 := t.tensor_sub(d1, sig_sqrt_T)
-
-	// N(d1), N(d2)
-
-
-	// exp(-r*T)
 	neg_r := t.tensor_neg(r_t)
 	rT := t.tensor_mul(neg_r, T_t)
 	disc := t.tensor_exp(rT)
+	K_disc := t.tensor_mul(K_t, disc) // K e^{-rT}
+	nodes := make([dynamic]^t.Tensor, context.temp_allocator)
+	defer delete(nodes)
+	append(
+		&nodes,
+		S_over_K,
+		ln_S_K,
+		sigma_sq,
+		half_sig,
+		r_plus_half_sig,
+		numer_term2,
+		numer,
+		sqrt_T,
+		sig_sqrt_T,
+		d1,
+		d2,
+		neg_r,
+		rT,
+		disc,
+		K_disc,
+	)
 
-	// K * exp(-r*T)
-	K_disc := t.tensor_mul(K_t, disc)
-
+	out: ^t.Tensor
 	if opt == .Call {
-		// C = S*N(d1) - K*exp(-r*T)*N(d2)
 		N_d1 := t.tensor_norm_cdf(d1)
 		N_d2 := t.tensor_norm_cdf(d2)
 		term1 := t.tensor_mul(S_t, N_d1)
 		term2 := t.tensor_mul(K_disc, N_d2)
-		return t.tensor_sub(term1, term2)
+		out = t.tensor_sub(term1, term2)
+		append(&nodes, N_d1, N_d2, term1, term2)
 	} else {
-		// P = K*exp(-r*T)*N(-d2) - S*N(-d1)
 		neg_d1 := t.tensor_neg(d1)
 		neg_d2 := t.tensor_neg(d2)
 		N_neg_d1 := t.tensor_norm_cdf(neg_d1)
 		N_neg_d2 := t.tensor_norm_cdf(neg_d2)
-
 		term1 := t.tensor_mul(K_disc, N_neg_d2)
 		term2 := t.tensor_mul(S_t, N_neg_d1)
-		return t.tensor_sub(term1, term2)
+		out = t.tensor_sub(term1, term2)
+		append(&nodes, neg_d1, neg_d2, N_neg_d1, N_neg_d2, term1, term2)
 	}
+	_settle_intermediates(out, nodes[:])
+	return out
 }
+
+// An op output without gradient keeps no inputs, so tensor_free_graph(out)
+// would not reach intermediates computed from constants alone. Those that an
+// op of out's graph reads (its backward may) are handed to the graph; the
+// others are freed now. Without any gradient, out itself is marked
+// owned_by_graph so tensor_free_graph frees it too.
+@(private = "file")
+_settle_intermediates :: proc(out: ^t.Tensor, nodes: []^t.Tensor) {
+	reached := make(map[^t.Tensor]bool, allocator = context.temp_allocator)
+	stack := make([dynamic]^t.Tensor, context.temp_allocator)
+	defer {delete(reached); delete(stack)}
+	append(&stack, out)
+	for len(stack) > 0 {
+		n := pop(&stack)
+		for x in n.inputs {
+			if x in reached {continue}
+			reached[x] = true
+			append(&stack, x)
+		}
+	}
+	for x in nodes {
+		if x.requires_grad {continue} 	// a node of out's graph
+		if x in reached {x.owned_by_graph = true} else {t.tensor_free(x)}
+	}
+	if !out.requires_grad {out.owned_by_graph = true}
+}
+
 // Helper: create a scalar tensor (1x1)
 _scalar_tensor :: proc(val: f64, allocator: mem.Allocator) -> ^t.Tensor {
 	data := l.matrix_new(f64, 1, 1, allocator)

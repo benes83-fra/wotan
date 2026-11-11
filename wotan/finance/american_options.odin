@@ -79,6 +79,7 @@ american_option_binomial :: proc(
 	}
 
 	f1, f2: [3]f64 // values at levels 1 and 2, j = 0.. (down to up)
+	if n == 2 {f2 = {am[0], am[1], am[2]}} 	// level 2 is the expiry level
 	for i := n - 1; i >= 0; i -= 1 {
 		for j in 0 ..= i {
 			am[j] = max(disc * (p * am[j + 1] + (1.0 - p) * am[j]), ex[2 * j - i + n])
@@ -178,7 +179,7 @@ american_option_trinomial :: proc(
 	copy(eu_next, ex)
 
 	f1: [3]f64 // level 1 at j = −1, 0, 1
-	f2_mid: f64
+	f2_mid := ex[n] // level 2 when n = 2 (expiry); otherwise set in the loop
 	for i := n - 1; i >= 0; i -= 1 {
 		for j in -i ..= i {
 			c := j + n

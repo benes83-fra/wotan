@@ -8,16 +8,15 @@ import "core:mem"
 // ============================================================================
 // UNIFIED MONTE CARLO ENGINE - SHARED PRIMITIVES
 // ============================================================================
-// These primitives eliminate the massive duplication across your MC engines:
-// - GBM path generation (used in ~15 different pricers)
-// - Heston/MJD/HW path generation
-// - Asian averaging, barrier checking, lookback max/min
-// - LSM regression steps
-// - Variance reduction (antithetic, control variate)
-// - CRN Greeks computation
-//
-// USAGE: Refactor existing MC pricers to call these primitives instead of
-// duplicating the logic. All public APIs remain unchanged.
+// Building blocks for user-written Monte Carlo pricers:
+// - path generation: GBM (plain and antithetic), Heston, Merton jump
+//   diffusion, Hull-White short rate, all from caller-supplied random numbers
+// - payoff helpers on the generated paths: Asian averages, barrier checks,
+//   lookback maximum and minimum
+// - one Longstaff-Schwartz regression step
+// - variance reduction (control variate) and common-random-number Greeks
+// Paths are flattened, path-major: S_paths[path · (n_steps + 1) + step], with
+// step 0 = the initial value.
 
 // ============================================================================
 // 1. SHARED PATH GENERATION
@@ -236,7 +235,7 @@ mc_generate_hw1f_paths :: proc(
 // 2. SHARED PAYOFF PRIMITIVES
 // ============================================================================
 
-// Asian Arithmetic Average (continuous monitoring)
+// Arithmetic average of S_1 … S_n (discrete monitoring on the grid, S_0 excluded)
 mc_compute_asian_average :: proc(S_paths: []f64, path: int, n_steps: int) -> f64 {
 	sum := 0.0
 	for step in 1 ..< n_steps + 1 {
