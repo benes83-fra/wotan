@@ -68,7 +68,8 @@ orchestrator_test :: proc(allocator: mem.Allocator) {
 	vmaps := make([]map[w.Date]f64, len(symbols)) // traded volume (shares)
 	spy_dates := make([dynamic]w.Date)
 	for sym, k in symbols {
-		df := yahoo.read_yahoo(sym, .Daily, .FiveYears, allocator)
+		df, df_ok := yahoo.read_yahoo(sym, .Daily, .FiveYears, allocator)
+		if !df_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", sym)); return}
 		defer w.destroy_dataframe(&df)
 		if df.rows < 600 {
 			fmt.printf("Not enough %s data (offline?): skipped\n", sym)

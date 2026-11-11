@@ -25,7 +25,9 @@ hrp_test :: proc(allocator: mem.Allocator) {
 	}
 
 	for i in 0 ..< n_assets {
-		dfs[i] = yahoo.read_yahoo(tickers[i], .Daily, .TwoYears, allocator)
+		yd, yd_ok := yahoo.read_yahoo(tickers[i], .Daily, .TwoYears, allocator)
+		if !yd_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", tickers[i])); return}
+		dfs[i] = yd
 		fmt.printf("Loaded %d days for %s\n", dfs[i].rows, tickers[i])
 	}
 

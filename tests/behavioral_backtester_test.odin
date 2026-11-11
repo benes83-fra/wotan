@@ -289,7 +289,8 @@ historical_gamma_backtest_test :: proc(allocator: mem.Allocator) {
 
 	// 1. Fetch real SPY history
 	fmt.printf("- Fetching %s historical data...\n", symbol)
-	spy_df := net.read_yahoo(symbol, .Daily, .FiveYears, allocator) // ✅ Swap to .TenYears to capture 2020
+	spy_df, spy_df_ok := net.read_yahoo(symbol, .Daily, .FiveYears, allocator) // ✅ Swap to .TenYears to capture 2020
+	if !spy_df_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", symbol)); return}
 	defer w.destroy_dataframe(&spy_df)
 
 	n_days := spy_df.rows
@@ -309,7 +310,8 @@ historical_gamma_backtest_test :: proc(allocator: mem.Allocator) {
 
 	// 2. Fetch real VIX history (the market's fear gauge)
 	fmt.println("- Fetching ^VIX historical data...")
-	vix_df := net.read_yahoo("^VIX", .Daily, .FiveYears, allocator)
+	vix_df, vix_df_ok := net.read_yahoo("^VIX", .Daily, .FiveYears, allocator)
+	if !vix_df_ok {fail_missing_data(#procedure, "Yahoo data for ^VIX"); return}
 	defer w.destroy_dataframe(&vix_df)
 
 	have_vix := vix_df.rows >= 150

@@ -110,7 +110,8 @@ ppo_trading_real_data_test :: proc(allocator: mem.Allocator = context.allocator)
 
 	fmt.println("\n[1/4] Fetching real market data from Yahoo Finance...")
 	symbol := "SPY"
-	spy_df := net.read_yahoo(symbol, .Daily, .FiveYears, allocator)
+	spy_df, spy_df_ok := net.read_yahoo(symbol, .Daily, .FiveYears, allocator)
+	if !spy_df_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", symbol)); return}
 	defer w.destroy_dataframe(&spy_df)
 
 	if spy_df.rows < 100 {
@@ -235,7 +236,8 @@ walk_forward_validation_test :: proc(allocator: mem.Allocator = context.allocato
 	fmt.println("    WALK-FORWARD VALIDATION: PPO TRADING AGENT")
 	fmt.println("======================================================================")
 
-	spy_df := net.read_yahoo("SPY", .Daily, .FiveYears, allocator)
+	spy_df, spy_df_ok := net.read_yahoo("SPY", .Daily, .FiveYears, allocator)
+	if !spy_df_ok {fail_missing_data(#procedure, "Yahoo data for SPY"); return}
 	defer w.destroy_dataframe(&spy_df)
 	if spy_df.rows < 400 {return}
 

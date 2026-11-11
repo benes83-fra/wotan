@@ -22,7 +22,8 @@ event_study_test :: proc(allocator: mem.Allocator) {
 	symbol := "AAPL"
 	fmt.printf("Fetching daily data for %s to establish baseline returns...\n", symbol)
 
-	df := net.read_yahoo(symbol, .Daily, .TwoYears, allocator)
+	df, df_ok := net.read_yahoo(symbol, .Daily, .TwoYears, allocator)
+	if !df_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", symbol)); return}
 	defer w.destroy_dataframe(&df)
 
 	if df.rows == 0 {
@@ -194,7 +195,8 @@ event_study_nlp_test :: proc(allocator: mem.Allocator) {
 	symbol := "AAPL"
 	fmt.printf("Fetching daily data for %s to establish baseline returns...\n", symbol)
 
-	df := net.read_yahoo(symbol, .Daily, .TwoYears, allocator)
+	df, df_ok := net.read_yahoo(symbol, .Daily, .TwoYears, allocator)
+	if !df_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", symbol)); return}
 	defer w.destroy_dataframe(&df)
 
 	if df.rows == 0 {
@@ -391,7 +393,8 @@ event_study_tokenizer_nlp_test :: proc(allocator: mem.Allocator) {
 	symbol := "AAPL"
 	fmt.printf("Fetching daily data for %s to establish baseline returns...\n", symbol)
 
-	df := net.read_yahoo(symbol, .Daily, .TwoYears, allocator)
+	df, df_ok := net.read_yahoo(symbol, .Daily, .TwoYears, allocator)
+	if !df_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", symbol)); return}
 	defer w.destroy_dataframe(&df)
 
 	if df.rows == 0 {

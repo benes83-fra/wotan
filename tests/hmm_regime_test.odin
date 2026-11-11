@@ -227,7 +227,8 @@ hmm_regime_test :: proc(allocator: mem.Allocator) {
 	main_alloc := context.allocator
 
 	fmt.println("\n--- Fetching Market Data ---")
-	spy_df := yahoo.read_yahoo("SPY", .Daily, .FiveYears, allocator)
+	spy_df, spy_df_ok := yahoo.read_yahoo("SPY", .Daily, .FiveYears, allocator)
+	if !spy_df_ok {fail_missing_data(#procedure, "Yahoo data for SPY"); return}
 	defer w.destroy_dataframe(&spy_df)
 
 	num_days := spy_df.rows - 1

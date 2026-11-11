@@ -138,7 +138,8 @@ behavioral_heston_test :: proc(allocator: mem.Allocator) {
 
 	// 1. Fetch Underlying Data for S and Historical Volatility
 	fmt.printf("- Fetching %s historical data...\n", symbol)
-	df := net.read_yahoo(symbol, .Daily, .TwoYears, allocator)
+	df, df_ok := net.read_yahoo(symbol, .Daily, .TwoYears, allocator)
+	if !df_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", symbol)); return}
 	defer w.destroy_dataframe(&df)
 
 	if df.rows < 10 {
@@ -176,7 +177,8 @@ behavioral_heston_test :: proc(allocator: mem.Allocator) {
 
 	// 2. Fetch Live Options Chain
 	fmt.printf("- Fetching %s live options chain...\n", symbol)
-	chain := fin.fetch_yahoo_options(symbol, allocator)
+	chain, chain_ok := fin.fetch_yahoo_options(symbol, allocator)
+	if !chain_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo option chain for %s", symbol)); return}
 	defer {
 		if chain.strikes != nil {delete(chain.strikes, allocator)}
 		if chain.expiries != nil {delete(chain.expiries, allocator)}

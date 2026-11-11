@@ -27,7 +27,9 @@ factor_model_test :: proc(allocator: mem.Allocator) {
 	}
 
 	for ticker, i in assets {
-		asset_dfs[i] = yahoo.read_yahoo(ticker, .Daily, .TwoYears, allocator)
+		yd, yd_ok := yahoo.read_yahoo(ticker, .Daily, .TwoYears, allocator)
+		if !yd_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", ticker)); return}
+		asset_dfs[i] = yd
 	}
 
 	fmt.println("Fetching factor proxy data...")
@@ -40,7 +42,9 @@ factor_model_test :: proc(allocator: mem.Allocator) {
 	}
 
 	for ticker, i in factors {
-		factor_dfs[i] = yahoo.read_yahoo(ticker, .Daily, .TwoYears, allocator)
+		yd, yd_ok := yahoo.read_yahoo(ticker, .Daily, .TwoYears, allocator)
+		if !yd_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", ticker)); return}
+		factor_dfs[i] = yd
 	}
 
 	// 2. Compute Log Returns and Align Data

@@ -245,10 +245,12 @@ lstm_volatility_real_data_test :: proc(allocator: mem.Allocator) {
 
 	// 1. Fetch Real Data (5 Years of SPY and VIX)
 	fmt.println("--- Fetching Market Data ---")
-	spy_df := yahoo.read_yahoo("SPY", .Daily, .FiveYears, allocator)
+	spy_df, spy_df_ok := yahoo.read_yahoo("SPY", .Daily, .FiveYears, allocator)
+	if !spy_df_ok {fail_missing_data(#procedure, "Yahoo data for SPY"); return}
 	defer w.destroy_dataframe(&spy_df)
 
-	vix_df := yahoo.read_yahoo("^VIX", .Daily, .FiveYears, allocator)
+	vix_df, vix_df_ok := yahoo.read_yahoo("^VIX", .Daily, .FiveYears, allocator)
+	if !vix_df_ok {fail_missing_data(#procedure, "Yahoo data for ^VIX"); return}
 	defer w.destroy_dataframe(&vix_df)
 
 	n_spy := spy_df.rows

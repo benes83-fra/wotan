@@ -17,7 +17,8 @@ garch_options_test :: proc(allocator: mem.Allocator) {
 
 	// 1. Fetch SPY Data and Fit GARCH
 	fmt.println("Fetching SPY data and fitting GARCH(1,1)...")
-	spy_df := yahoo.read_yahoo("SPY", .Daily, .FiveYears, allocator)
+	spy_df, spy_df_ok := yahoo.read_yahoo("SPY", .Daily, .FiveYears, allocator)
+	if !spy_df_ok {fail_missing_data(#procedure, "Yahoo data for SPY"); return}
 	defer w.destroy_dataframe(&spy_df)
 
 	n := spy_df.rows

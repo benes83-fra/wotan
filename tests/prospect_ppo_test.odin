@@ -32,7 +32,8 @@ prospect_ppo_test :: proc(allocator: mem.Allocator) {
 
 	// 1. Fetch Data
 	fmt.println("- Fetching Market Data (AAPL) -")
-	df := net.read_yahoo("AAPL", .Daily, .TwoYears, allocator)
+	df, df_ok := net.read_yahoo("AAPL", .Daily, .TwoYears, allocator)
+	if !df_ok {fail_missing_data(#procedure, "Yahoo data for AAPL"); return}
 	defer w.destroy_dataframe(&df)
 
 	n_days := df.rows - 1

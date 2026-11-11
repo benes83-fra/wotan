@@ -28,7 +28,8 @@ deep_hedging_real_data_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("Fetching real market data for %s...\n", symbol)
 
 	// Fetch historical price data
-	df := net.read_yahoo(symbol, .Daily, .OneYear, allocator)
+	df, df_ok := net.read_yahoo(symbol, .Daily, .OneYear, allocator)
+	if !df_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", symbol)); return}
 	defer w.destroy_dataframe(&df)
 
 	if df.rows == 0 {
@@ -43,7 +44,8 @@ deep_hedging_real_data_test :: proc(allocator: mem.Allocator) {
 
 	// Fetch options chain
 	fmt.println("Fetching options chain...")
-	chain := fin.fetch_yahoo_options(symbol, allocator)
+	chain, chain_ok := fin.fetch_yahoo_options(symbol, allocator)
+	if !chain_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo option chain for %s", symbol)); return}
 
 	if chain.n_options == 0 {
 		fmt.println("ERROR: Failed to fetch options chain")

@@ -12,7 +12,8 @@ import "core:mem"
 cql_real_data_trading_test :: proc(allocator: mem.Allocator) {
 	seed_test(#procedure)
 	fmt.println("\n=== Yahoo Finance Offline CQL Trading Test ===")
-	df := net.read_yahoo("AAPL", .Daily, .OneYear, allocator)
+	df, df_ok := net.read_yahoo("AAPL", .Daily, .OneYear, allocator)
+	if !df_ok {fail_missing_data(#procedure, "Yahoo data for AAPL"); return}
 	defer w.destroy_dataframe(&df)
 	if df.rows < 60 {
 		fmt.println("Aborting: not enough AAPL data (offline?)")

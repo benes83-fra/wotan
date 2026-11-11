@@ -137,8 +137,10 @@ deep_calibration_test :: proc(allocator: mem.Allocator) {
 
 	// --- AAPL: quotes onto the grid, then both calibrations
 	fmt.println("\n=== AAPL option chain ===")
-	chain := fin.fetch_yahoo_option_surface("AAPL", allocator = allocator)
-	df := net.read_yahoo("AAPL", .Daily, .OneMonth, allocator)
+	chain, chain_ok := fin.fetch_yahoo_option_surface("AAPL", allocator = allocator)
+	if !chain_ok {fail_missing_data(#procedure, "Yahoo option chain for AAPL"); return}
+	df, df_ok := net.read_yahoo("AAPL", .Daily, .OneMonth, allocator)
+	if !df_ok {fail_missing_data(#procedure, "Yahoo data for AAPL"); return}
 	defer w.destroy_dataframe(&df)
 	if chain.n_options == 0 || df.rows == 0 {
 		fmt.println("No option chain or spot (offline?): skipped")

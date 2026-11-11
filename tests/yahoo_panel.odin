@@ -2,6 +2,7 @@ package tests
 
 import w "../wotan/core"
 import yahoo "../wotan/net"
+import "core:fmt"
 
 // 24 US large caps used by the real-data panel tests
 LARGE_CAP_TICKERS := []string {
@@ -54,7 +55,8 @@ yahoo_adjclose_panel :: proc(
 	first := make([dynamic]w.Date)
 	defer delete(first)
 	for sym, k in tickers {
-		df := yahoo.read_yahoo(sym, .Daily, rng, context.allocator)
+		df, df_ok := yahoo.read_yahoo(sym, .Daily, rng, context.allocator)
+		if !df_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", sym)); return}
 		defer w.destroy_dataframe(&df)
 		if df.rows < min_rows {return}
 		price_maps[k] = make(map[w.Date]f64)

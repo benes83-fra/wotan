@@ -255,7 +255,8 @@ timegan_test :: proc(allocator: mem.Allocator = context.allocator) {
 	seed_test(#procedure)
 	context.allocator = allocator
 	fmt.println("\n=== TimeGAN on SPY daily returns and volume changes ===")
-	spy_df := net.read_yahoo("SPY", .Daily, .FiveYears, allocator)
+	spy_df, spy_df_ok := net.read_yahoo("SPY", .Daily, .FiveYears, allocator)
+	if !spy_df_ok {fail_missing_data(#procedure, "Yahoo data for SPY"); return}
 	defer w.destroy_dataframe(&spy_df)
 	if spy_df.rows < 500 {
 		fmt.println("Not enough SPY data (offline?): skipped")

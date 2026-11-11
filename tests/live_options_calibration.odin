@@ -18,7 +18,8 @@ live_options_calibration_test :: proc(allocator: mem.Allocator) {
 
 	// 1. Fetch live options chain using YOUR existing parser
 	fmt.printf("1. Fetching live options chain for %s...\n", symbol)
-	chain := fin.fetch_yahoo_options(symbol, allocator)
+	chain, chain_ok := fin.fetch_yahoo_options(symbol, allocator)
+	if !chain_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo option chain for %s", symbol)); return}
 
 	if chain.n_options == 0 {
 		fmt.println("⚠️  No options data found. Aborting.")
@@ -41,7 +42,8 @@ live_options_calibration_test :: proc(allocator: mem.Allocator) {
 
 	// 2. Fetch current spot price using your existing DataFrame ingestion
 	fmt.println("2. Fetching underlying spot price...")
-	df := net.read_yahoo(symbol, .Daily, .OneMonth, allocator)
+	df, df_ok := net.read_yahoo(symbol, .Daily, .OneMonth, allocator)
+	if !df_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", symbol)); return}
 	defer w.destroy_dataframe(&df)
 
 	if df.rows == 0 {
@@ -123,7 +125,11 @@ live_options_calibration_test :: proc(allocator: mem.Allocator) {
 	fmt.println("5. Calibrating Heston Model...")
 	heston_res := fin.calibrate_heston(surface[:], spot, r, allocator = allocator)
 	fmt.printf("   Status:   %v (Iterations: %d)\n", heston_res.converged, heston_res.iterations)
-	fmt.printf("   RMSE:     $%.4f (price), %.4f%% (vega-weighted ≈ implied vol)\n", heston_res.rmse, heston_res.iv_rmse * 100.0)
+	fmt.printf(
+		"   RMSE:     $%.4f (price), %.4f%% (vega-weighted ≈ implied vol)\n",
+		heston_res.rmse,
+		heston_res.iv_rmse * 100.0,
+	)
 	fmt.printf(
 		"   Params:   v0=%.4f, κ=%.4f, θ=%.4f, σ=%.4f, ρ=%.4f\n\n",
 		heston_res.params.v0,

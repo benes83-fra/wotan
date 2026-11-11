@@ -14,8 +14,10 @@ ppo_multi_asset_test :: proc(allocator: mem.Allocator = context.allocator) {
 	seed_test(#procedure)
 	fmt.println("\n=== Multi-Asset PPO Trading Test (SPY vs QQQ) [Optimized 25 Ep] ===")
 
-	spy_df := net.read_yahoo("SPY", .Daily, .FiveYears, allocator)
-	qqq_df := net.read_yahoo("QQQ", .Daily, .FiveYears, allocator)
+	spy_df, spy_df_ok := net.read_yahoo("SPY", .Daily, .FiveYears, allocator)
+	if !spy_df_ok {fail_missing_data(#procedure, "Yahoo data for SPY"); return}
+	qqq_df, qqq_df_ok := net.read_yahoo("QQQ", .Daily, .FiveYears, allocator)
+	if !qqq_df_ok {fail_missing_data(#procedure, "Yahoo data for QQQ"); return}
 	defer {w.destroy_dataframe(&spy_df); w.destroy_dataframe(&qqq_df)}
 
 	n_days := min(spy_df.rows, qqq_df.rows)
@@ -219,8 +221,10 @@ ppo_multi_asset_wf_test :: proc(allocator: mem.Allocator = context.allocator) {
 	fmt.println("======================================================================")
 
 	// 1. Fetch Data
-	spy_df := net.read_yahoo("SPY", .Daily, .FiveYears, allocator)
-	qqq_df := net.read_yahoo("QQQ", .Daily, .FiveYears, allocator)
+	spy_df, spy_df_ok := net.read_yahoo("SPY", .Daily, .FiveYears, allocator)
+	if !spy_df_ok {fail_missing_data(#procedure, "Yahoo data for SPY"); return}
+	qqq_df, qqq_df_ok := net.read_yahoo("QQQ", .Daily, .FiveYears, allocator)
+	if !qqq_df_ok {fail_missing_data(#procedure, "Yahoo data for QQQ"); return}
 	defer {w.destroy_dataframe(&spy_df); w.destroy_dataframe(&qqq_df)}
 
 	n_days := min(spy_df.rows, qqq_df.rows)

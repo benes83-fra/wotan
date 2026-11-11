@@ -15,10 +15,12 @@ pdpm_multifactor_test :: proc(allocator: mem.Allocator) {
 	// 1. Fetch real market data
 	fmt.println("--- Fetching Market Data from Yahoo Finance ---")
 
-	spy_df := yahoo.read_yahoo("SPY", .Daily, .OneYear, allocator)
+	spy_df, spy_df_ok := yahoo.read_yahoo("SPY", .Daily, .OneYear, allocator)
+	if !spy_df_ok {fail_missing_data(#procedure, "Yahoo data for SPY"); return}
 	defer w.destroy_dataframe(&spy_df)
 
-	vix_df := yahoo.read_yahoo("^VIX", .Daily, .OneYear, allocator)
+	vix_df, vix_df_ok := yahoo.read_yahoo("^VIX", .Daily, .OneYear, allocator)
+	if !vix_df_ok {fail_missing_data(#procedure, "Yahoo data for ^VIX"); return}
 	defer w.destroy_dataframe(&vix_df)
 
 	fmt.printf("Loaded %d days of SPY data\n", spy_df.rows)
@@ -70,7 +72,8 @@ pdpm_multifactor_test :: proc(allocator: mem.Allocator) {
 	// 3. Fetch or generate option chain
 	fmt.println("\n--- Fetching Real Option Chain ---")
 
-	option_chain := fin.fetch_yahoo_options("SPY", allocator)
+	option_chain, option_chain_ok := fin.fetch_yahoo_options("SPY", allocator)
+	if !option_chain_ok {fail_missing_data(#procedure, "Yahoo option chain for SPY"); return}
 
 	defer {
 		delete(option_chain.strikes, allocator)

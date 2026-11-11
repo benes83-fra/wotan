@@ -25,9 +25,11 @@ ensemble_volatility_test :: proc(allocator: mem.Allocator) {
 	// 1. Fetch Data
 	// ----------------------------------------------------------------
 	fmt.println("--- Fetching Market Data ---")
-	spy_df := yahoo.read_yahoo("SPY", .Daily, .FiveYears, allocator)
+	spy_df, spy_df_ok := yahoo.read_yahoo("SPY", .Daily, .FiveYears, allocator)
+	if !spy_df_ok {fail_missing_data(#procedure, "Yahoo data for SPY"); return}
 	defer w.destroy_dataframe(&spy_df)
-	vix_df := yahoo.read_yahoo("^VIX", .Daily, .FiveYears, allocator)
+	vix_df, vix_df_ok := yahoo.read_yahoo("^VIX", .Daily, .FiveYears, allocator)
+	if !vix_df_ok {fail_missing_data(#procedure, "Yahoo data for ^VIX"); return}
 	defer w.destroy_dataframe(&vix_df)
 
 	n_spy := spy_df.rows
@@ -403,9 +405,11 @@ vrp_signal_test :: proc(allocator: mem.Allocator) {
 	seq_backend: nn.SeqBackend = .Mamba
 
 	// 1. Fetch Data
-	spy_df := yahoo.read_yahoo("SPY", .Daily, .TwoYears, allocator)
+	spy_df, spy_df_ok := yahoo.read_yahoo("SPY", .Daily, .TwoYears, allocator)
+	if !spy_df_ok {fail_missing_data(#procedure, "Yahoo data for SPY"); return}
 	defer w.destroy_dataframe(&spy_df)
-	vix_df := yahoo.read_yahoo("^VIX", .Daily, .TwoYears, allocator)
+	vix_df, vix_df_ok := yahoo.read_yahoo("^VIX", .Daily, .TwoYears, allocator)
+	if !vix_df_ok {fail_missing_data(#procedure, "Yahoo data for ^VIX"); return}
 	defer w.destroy_dataframe(&vix_df)
 
 	n_common := min(spy_df.rows, vix_df.rows)
@@ -649,9 +653,11 @@ vrp_backtest_test :: proc(allocator: mem.Allocator) {
 
 	// 1. Fetch Data
 	fmt.println("\n--- Fetching Market Data ---")
-	spy_df := yahoo.read_yahoo("SPY", .Daily, .FiveYears, allocator)
+	spy_df, spy_df_ok := yahoo.read_yahoo("SPY", .Daily, .FiveYears, allocator)
+	if !spy_df_ok {fail_missing_data(#procedure, "Yahoo data for SPY"); return}
 	defer w.destroy_dataframe(&spy_df)
-	vix_df := yahoo.read_yahoo("^VIX", .Daily, .FiveYears, allocator)
+	vix_df, vix_df_ok := yahoo.read_yahoo("^VIX", .Daily, .FiveYears, allocator)
+	if !vix_df_ok {fail_missing_data(#procedure, "Yahoo data for ^VIX"); return}
 	defer w.destroy_dataframe(&vix_df)
 
 	n_common := min(spy_df.rows, vix_df.rows)

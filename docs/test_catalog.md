@@ -16,7 +16,7 @@ Reference and contract tests print `OK` or `FAIL` for each check and end with a 
 
 | Marker | Meaning |
 |--------|---------|
-| 🌐 | Needs network access (Yahoo Finance, Finnhub, GDELT or other HTTP sources) |
+| 🌐 | Needs network access (Yahoo Finance, Finnhub, GDELT or other HTTP sources). When a Yahoo loader (`net.read_yahoo`, `fin.fetch_yahoo_options`, …) returns `ok = false`, the test calls `fail_missing_data`, which prints `FAIL <test>: Yahoo data for <symbol> unavailable` and counts one failure, and returns; nothing is mocked and the rest of the suite still runs |
 | 🖼 | Writes PNG charts to `plots/` |
 | 📁 | Reads local data or checkpoint files (see [Required files](#required-files)) |
 
@@ -333,7 +333,7 @@ Reference and contract tests print `OK` or `FAIL` for each check and end with a 
 
 | File | Procedures | Covers |
 |------|------------|--------|
-| `test_support` | `seed_test`, `record_failures`, `exit_on_failures`, `seed_sweep`, `seed_sweep_print` | Seeding from the test's name, the global failure count and exit code, and runs over several seeds |
+| `test_support` | `seed_test`, `record_failures`, `exit_on_failures`, `seed_sweep`, `seed_sweep_print`, `fail_missing_data` | Seeding from the test's name, the global failure count and exit code, runs over several seeds, and reporting real data that could not be loaded as a failure of the calling test |
 
 ---
 

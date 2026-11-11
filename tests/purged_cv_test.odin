@@ -82,7 +82,8 @@ purged_cv_test :: proc(allocator: mem.Allocator) {
 
 	// B. CPCV paths on SPY
 	{
-		df := yahoo.read_yahoo("SPY", .Daily, .FiveYears, allocator)
+		df, df_ok := yahoo.read_yahoo("SPY", .Daily, .FiveYears, allocator)
+		if !df_ok {fail_missing_data(#procedure, "Yahoo data for SPY"); return}
 		defer w.destroy_dataframe(&df)
 		if df.rows < 600 {
 			fmt.println("Not enough SPY data (offline?): CPCV example skipped")

@@ -59,7 +59,8 @@ yahoo_finance_json_test :: proc(allocator: mem.Allocator = context.temp_allocato
 	seed_test(#procedure)
 	fmt.println("=== YAHOO FINANCE JSON TEST ===")
 
-	df := net.read_yahoo("GOOG", .Daily, .OneMonth, allocator)
+	df, df_ok := net.read_yahoo("GOOG", .Daily, .OneMonth, allocator)
+	if !df_ok {fail_missing_data(#procedure, "Yahoo data for GOOG"); return}
 	defer w.destroy_dataframe(&df)
 
 	fmt.println("Rows:", df.rows)
@@ -73,7 +74,8 @@ yahoo_finance_events_test :: proc(allocator: mem.Allocator = context.temp_alloca
 	seed_test(#procedure)
 	fmt.println("=== YAHOO FINANCE DIVIDENDS & SPLITS TEST ===")
 
-	df := net.read_yahoo("AAPL", .Daily, .TenYears, allocator)
+	df, df_ok := net.read_yahoo("AAPL", .Daily, .TenYears, allocator)
+	if !df_ok {fail_missing_data(#procedure, "Yahoo data for AAPL"); return}
 	defer w.destroy_dataframe(&df)
 
 	fmt.println("Rows:", df.rows)

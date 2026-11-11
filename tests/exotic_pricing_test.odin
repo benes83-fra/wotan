@@ -19,9 +19,11 @@ exotic_pricing_test :: proc(allocator: mem.Allocator) {
 
 	// 1. Fetch and Calibrate (Reusing your robust pipeline)
 	fmt.printf("1. Fetching live data and calibrating Heston for %s...\n", symbol)
-	chain := fin.fetch_yahoo_options(symbol, allocator)
+	chain, chain_ok := fin.fetch_yahoo_options(symbol, allocator)
+	if !chain_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo option chain for %s", symbol)); return}
 
-	df := net.read_yahoo(symbol, .Daily, .OneMonth, allocator)
+	df, df_ok := net.read_yahoo(symbol, .Daily, .OneMonth, allocator)
+	if !df_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", symbol)); return}
 	defer w.destroy_dataframe(&df)
 
 	last_idx := df.rows - 1

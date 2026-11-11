@@ -674,6 +674,32 @@ _chi_squared_pvalue_1df :: proc(x: f64) -> f64 {
 	return math.erfc(math.sqrt(x / 2.0))
 }
 
+// The fit of analytics.garch_fit (same specification and settings) without
+// its progress output
+@(private = "file")
+_garch_fit_quiet :: proc(
+	residuals: []f64,
+	model_type: a.GARCH_Model_Type,
+	p, q: int,
+	allocator: mem.Allocator,
+) -> a.GARCH_Result {
+	spec := a.GARCH_Spec {
+		p = p,
+		q = q,
+	}
+	#partial switch model_type {
+	case .GJR_GARCH:
+		spec.variance = .GJR
+	case .StudentT:
+		spec.dist = .StudentT
+	case .GED:
+		spec.dist = .GED
+	}
+	res := a.garch_fit_spec(residuals, spec, 2000, 1e-4, allocator)
+	res.params.model_type = model_type
+	return res
+}
+
 // ============================================================================
 // Comprehensive GARCH Risk Analysis
 // ============================================================================
@@ -699,7 +725,7 @@ garch_risk_metrics :: proc(
 	residuals := a.extract_residuals(returns, allocator)
 	defer delete(residuals, allocator)
 
-	garch_result := a.garch_fit(residuals, model_type, p, q, 2000, 1e-4, allocator)
+	garch_result := _garch_fit_quiet(residuals, model_type, p, q, allocator)
 	defer {
 		delete(garch_result.params.alpha, allocator)
 		delete(garch_result.params.beta, allocator)
@@ -1346,7 +1372,7 @@ garch_evt_fit :: proc(
 	defer delete(residuals, allocator)
 	mu := returns[0] - residuals[0]
 
-	garch_res := a.garch_fit(residuals, .StudentT, 1, 1, 2000, 1e-4, allocator)
+	garch_res := _garch_fit_quiet(residuals, .StudentT, 1, 1, allocator)
 	defer {
 		delete(garch_res.params.alpha, allocator)
 		delete(garch_res.params.beta, allocator)

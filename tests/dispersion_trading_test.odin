@@ -33,7 +33,9 @@ dispersion_trading_test :: proc(allocator: mem.Allocator) {
 	}
 
 	for i in 0 ..< n_assets {
-		dfs[i] = yahoo.read_yahoo(tickers[i], .Daily, .TwoYears, allocator)
+		yd, yd_ok := yahoo.read_yahoo(tickers[i], .Daily, .TwoYears, allocator)
+		if !yd_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", tickers[i])); return}
+		dfs[i] = yd
 		fmt.printf("Loaded %d days for %s\n", dfs[i].rows, tickers[i])
 	}
 
@@ -60,7 +62,8 @@ dispersion_trading_test :: proc(allocator: mem.Allocator) {
 	}
 
 	// Fetch VIX
-	vix_df := yahoo.read_yahoo("^VIX", .Daily, .TwoYears, allocator)
+	vix_df, vix_df_ok := yahoo.read_yahoo("^VIX", .Daily, .TwoYears, allocator)
+	if !vix_df_ok {fail_missing_data(#procedure, "Yahoo data for ^VIX"); return}
 	defer w.destroy_dataframe(&vix_df)
 	vix_levels := make([]f64, num_days, main_alloc)
 	defer delete(vix_levels, main_alloc)

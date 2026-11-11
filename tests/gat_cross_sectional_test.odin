@@ -161,7 +161,8 @@ gat_real_world_test :: proc(allocator: mem.Allocator) {
 	actual_days := max_days
 	for sym, i in symbols {
 		fmt.printf("  Fetching %s... ", sym)
-		df := net.read_yahoo(sym, .Daily, .OneYear, allocator)
+		df, df_ok := net.read_yahoo(sym, .Daily, .OneYear, allocator)
+		if !df_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", sym)); return}
 
 		if df.rows == 0 {
 			fmt.println("FAILED (Skipping)")
@@ -428,7 +429,8 @@ gat_real_world_cv_test :: proc(allocator: mem.Allocator) {
 	actual_days := max_days
 	for sym, i in symbols {
 		fmt.printf("  Fetching %s... ", sym)
-		df := net.read_yahoo(sym, .Daily, .OneYear, allocator)
+		df, df_ok := net.read_yahoo(sym, .Daily, .OneYear, allocator)
+		if !df_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", sym)); return}
 
 		if df.rows == 0 {
 			fmt.println("FAILED")

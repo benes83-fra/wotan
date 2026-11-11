@@ -203,23 +203,25 @@ yahoo_download_csv :: proc(symbol: string, allocator: mem.Allocator) -> (string,
 // 3) Convert CSV → DataFrame
 // ------------------------------
 
+// Daily history of `symbol` over its whole range. ok is false when Yahoo cannot
+// be reached or returns no rows (a rate-limited request answers with an error
+// text instead of the chart); the DataFrame is then empty
 read_yahoo_json :: proc(
 	symbol: string,
 	allocator: mem.Allocator = context.allocator,
-) -> w.DataFrame {
+) -> (
+	df: w.DataFrame,
+	ok: bool,
+) {
 	url := fmt.aprintf(
 		"https://query1.finance.yahoo.com/v8/finance/chart/%s?interval=1d&range=max",
 		symbol,
 		allocator = context.temp_allocator,
 	)
-
-	text, ok := http_get(url, context.temp_allocator)
-	if !ok {
-		panic(fmt.tprintf("Failed to GET Yahoo JSON for %s", symbol))
-	}
-
-	// TODO: parse JSON → DataFrame
-	return yahoo_json_to_dataframe(text, allocator)
+	text, got := http_get(url, context.temp_allocator)
+	if !got {return w.dataframe_new(), false}
+	df = yahoo_json_to_dataframe(text, allocator)
+	return df, df.rows > 0
 }
 yahoo_json_to_dataframe :: proc(
 	json_text: string,
@@ -314,21 +316,23 @@ build_yahoo_url :: proc(
 }
 
 
+// History of `symbol` at the interval over the range. ok is false when Yahoo
+// cannot be reached or returns no rows (a rate-limited request answers with an
+// error text instead of the chart); the DataFrame is then empty
 read_yahoo :: proc(
 	symbol: string,
 	i: interval = .Daily,
 	r: range = .Max,
 	allocator: mem.Allocator = context.allocator,
-) -> w.DataFrame {
-
+) -> (
+	df: w.DataFrame,
+	ok: bool,
+) {
 	url := build_yahoo_url(symbol, i, r, context.temp_allocator)
-
-	text, ok := http_get(url, context.temp_allocator)
-	if !ok {
-		panic(fmt.tprintf("Failed to GET Yahoo JSON for %s", symbol))
-	}
-
-	return yahoo_json_to_dataframe(text, allocator)
+	text, got := http_get(url, context.temp_allocator)
+	if !got {return w.dataframe_new(), false}
+	df = yahoo_json_to_dataframe(text, allocator)
+	return df, df.rows > 0
 }
 
 

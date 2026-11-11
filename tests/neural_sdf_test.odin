@@ -174,7 +174,9 @@ neural_sdf_test :: proc(allocator: mem.Allocator = context.allocator) {
 	dfs := make([]w.DataFrame, N)
 	n := max(int)
 	for sym, i in symbols {
-		dfs[i] = net.read_yahoo(sym, .Daily, .TwoYears, allocator)
+		yd, yd_ok := net.read_yahoo(sym, .Daily, .TwoYears, allocator)
+		if !yd_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", sym)); return}
+		dfs[i] = yd
 		n = min(n, dfs[i].rows)
 	}
 	defer for &df in dfs {w.destroy_dataframe(&df)}

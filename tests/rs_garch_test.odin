@@ -37,17 +37,36 @@ rs_garch_reference_checks :: proc(allocator: mem.Allocator) {
 		}
 		y[t] = math.sqrt_f64(v1 if s == 0 else v2) * garch_ref_normal(&state)
 	}
-	expect(&passed, &total, abs(y[999] / 0.0081514132230485863 - 1) < 1e-9, "reference series reproduced")
+	expect(
+		&passed,
+		&total,
+		abs(y[999] / 0.0081514132230485863 - 1) < 1e-9,
+		"reference series reproduced",
+	)
 
-	P := ts.RS_GARCH_Params{omega_1 = 3e-6, alpha_1 = 0.05, beta_1 = 0.88, omega_2 = 3e-5, alpha_2 = 0.12, beta_2 = 0.75, p_11 = 0.97, p_22 = 0.9}
+	P := ts.RS_GARCH_Params {
+		omega_1 = 3e-6,
+		alpha_1 = 0.05,
+		beta_1  = 0.88,
+		omega_2 = 3e-5,
+		alpha_2 = 0.12,
+		beta_2  = 0.75,
+		p_11    = 0.97,
+		p_22    = 0.9,
+	}
 	ll, probs := ts._rs_garch_hamilton_filter(P, y, allocator, true)
 	defer {for r in probs {delete(r)}; delete(probs)}
 	sums_ok := true
 	for r in probs {sums_ok &= abs(r[0] + r[1] - 1) < 1e-15 && r[0] >= 0 && r[1] >= 0}
-	expect(&passed, &total,
-		abs(ll - 3192.820761805702) < 1e-8 && abs(probs[500][0] - 0.94123712621829558) < 1e-12 &&
-		abs(probs[999][0] - 0.84442553391881348) < 1e-12 && sums_ok,
-		fmt.tprintf("Hamilton filter LL %.9f and filtered probabilities match numpy", ll))
+	expect(
+		&passed,
+		&total,
+		abs(ll - 3192.820761805702) < 1e-8 &&
+		abs(probs[500][0] - 0.94123712621829558) < 1e-12 &&
+		abs(probs[999][0] - 0.84442553391881348) < 1e-12 &&
+		sums_ok,
+		fmt.tprintf("Hamilton filter LL %.9f and filtered probabilities match numpy", ll),
+	)
 
 	path := ts._viterbi_path(P, y, probs, allocator)
 	defer delete(path)
@@ -55,8 +74,16 @@ rs_garch_reference_checks :: proc(allocator: mem.Allocator) {
 	for v, t in path {
 		if v == 1 {count += 1; if first < 0 {first = t}}
 	}
-	expect(&passed, &total, count == 231 && first == 119,
-		fmt.tprintf("Viterbi path (regime 2 on %d days from t = %d; filtered argmax: 181)", count, first))
+	expect(
+		&passed,
+		&total,
+		count == 231 && first == 119,
+		fmt.tprintf(
+			"Viterbi path (regime 2 on %d days from t = %d; filtered argmax: 181)",
+			count,
+			first,
+		),
+	)
 
 	fit := ts.rs_garch_fit(y, allocator)
 	defer {
@@ -65,10 +92,20 @@ rs_garch_reference_checks :: proc(allocator: mem.Allocator) {
 		delete(fit.most_likely_path)
 	}
 	fp := fit.params
-	expect(&passed, &total,
-		fit.log_likelihood > 3210.1868856751 - 1e-4 && abs(fp.p_11 - 0.986383537) < 5e-3 && abs(fp.p_22 - 0.9491122403) < 1e-2 &&
+	expect(
+		&passed,
+		&total,
+		fit.log_likelihood > 3210.1868856751 - 1e-4 &&
+		abs(fp.p_11 - 0.986383537) < 5e-3 &&
+		abs(fp.p_22 - 0.9491122403) < 1e-2 &&
 		fp.omega_1 / (1 - fp.alpha_1 - fp.beta_1) < fp.omega_2 / (1 - fp.alpha_2 - fp.beta_2),
-		fmt.tprintf("fit reaches the MLE (LL %.6f vs 3210.186886, p11 %.4f, p22 %.4f), regime 1 = calm", fit.log_likelihood, fp.p_11, fp.p_22))
+		fmt.tprintf(
+			"fit reaches the MLE (LL %.6f vs 3210.186886, p11 %.4f, p22 %.4f), regime 1 = calm",
+			fit.log_likelihood,
+			fp.p_11,
+			fp.p_22,
+		),
+	)
 
 	fmt.printf("RS-GARCH reference summary: %d/%d passed\n", passed, total)
 	record_failures(total - passed)
@@ -83,7 +120,8 @@ rs_garch_test :: proc(allocator: mem.Allocator) {
 
 	// 1. Fetch Data
 	fmt.println("Fetching SPY data...")
-	spy_df := yahoo.read_yahoo("SPY", .Daily, .TwoYears, allocator)
+	spy_df, spy_df_ok := yahoo.read_yahoo("SPY", .Daily, .TwoYears, allocator)
+	if !spy_df_ok {fail_missing_data(#procedure, "Yahoo data for SPY"); return}
 	defer w.destroy_dataframe(&spy_df)
 
 	n := spy_df.rows

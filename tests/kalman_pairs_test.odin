@@ -269,14 +269,16 @@ kalman_pairs_real_data_test :: proc(allocator: mem.Allocator = context.allocator
 	fmt.println("\n=== Kalman Filter Pairs Trading (Real Data) ===")
 
 	// Fetch real market data using existing yahoo infrastructure
-	df := net.read_yahoo("KO", .Daily, .TwoYears, allocator)
+	df, df_ok := net.read_yahoo("KO", .Daily, .TwoYears, allocator)
+	if !df_ok {fail_missing_data(#procedure, "Yahoo data for KO"); return}
 	if df.rows == 0 {
 		fmt.println("ERROR: Failed to fetch KO data")
 		return
 	}
 	defer w.destroy_dataframe(&df)
 
-	df2 := net.read_yahoo("PEP", .Daily, .TwoYears, allocator)
+	df2, df2_ok := net.read_yahoo("PEP", .Daily, .TwoYears, allocator)
+	if !df2_ok {fail_missing_data(#procedure, "Yahoo data for PEP"); return}
 	if df2.rows == 0 {
 		fmt.println("ERROR: Failed to fetch PEP data")
 		return
@@ -528,11 +530,13 @@ kalman_pairs_real_data_grid_test :: proc(allocator: mem.Allocator = context.allo
 	fmt.println("\n=== Kalman Filter Grid Pairs Trading (Real Data) ===")
 
 	// Fetch real market data
-	df := net.read_yahoo("KO", .Daily, .TwoYears, allocator)
+	df, df_ok := net.read_yahoo("KO", .Daily, .TwoYears, allocator)
+	if !df_ok {fail_missing_data(#procedure, "Yahoo data for KO"); return}
 	if df.rows == 0 {fmt.println("ERROR: Failed to fetch KO data"); return}
 	defer w.destroy_dataframe(&df)
 
-	df2 := net.read_yahoo("PEP", .Daily, .TwoYears, allocator)
+	df2, df2_ok := net.read_yahoo("PEP", .Daily, .TwoYears, allocator)
+	if !df2_ok {fail_missing_data(#procedure, "Yahoo data for PEP"); return}
 	if df2.rows == 0 {fmt.println("ERROR: Failed to fetch PEP data"); return}
 	defer w.destroy_dataframe(&df2)
 
@@ -721,14 +725,16 @@ kalman_pairs_semiconductor_test :: proc(allocator: mem.Allocator = context.alloc
 	fmt.println("\n=== Kalman Filter Pairs Trading (Semiconductors: NVDA & AMD) ===")
 
 	// Fetch real market data
-	df1 := net.read_yahoo("NVDA", .Daily, .TwoYears, allocator)
+	df1, df1_ok := net.read_yahoo("NVDA", .Daily, .TwoYears, allocator)
+	if !df1_ok {fail_missing_data(#procedure, "Yahoo data for NVDA"); return}
 	if df1.rows == 0 {
 		fmt.println("ERROR: Failed to fetch NVDA data")
 		return
 	}
 	defer w.destroy_dataframe(&df1)
 
-	df2 := net.read_yahoo("AMD", .Daily, .TwoYears, allocator)
+	df2, df2_ok := net.read_yahoo("AMD", .Daily, .TwoYears, allocator)
+	if !df2_ok {fail_missing_data(#procedure, "Yahoo data for AMD"); return}
 	if df2.rows == 0 {
 		fmt.println("ERROR: Failed to fetch AMD data")
 		return
@@ -978,7 +984,8 @@ kalman_pairs_semiconductor_adf_test :: proc(allocator: mem.Allocator = context.a
 	fmt.println("\n=== Kalman Filter Pairs Trading (Semiconductors with ADF Check) ===")
 
 	// 1. Fetch NVDA
-	df_nvda := net.read_yahoo("NVDA", .Daily, .TwoYears, allocator)
+	df_nvda, df_nvda_ok := net.read_yahoo("NVDA", .Daily, .TwoYears, allocator)
+	if !df_nvda_ok {fail_missing_data(#procedure, "Yahoo data for NVDA"); return}
 	if df_nvda.rows == 0 {
 		fmt.println("ERROR: Failed to fetch NVDA data")
 		return
@@ -986,7 +993,8 @@ kalman_pairs_semiconductor_adf_test :: proc(allocator: mem.Allocator = context.a
 	defer w.destroy_dataframe(&df_nvda)
 
 	// 2. Fetch AMD
-	df_amd := net.read_yahoo("AMD", .Daily, .TwoYears, allocator)
+	df_amd, df_amd_ok := net.read_yahoo("AMD", .Daily, .TwoYears, allocator)
+	if !df_amd_ok {fail_missing_data(#procedure, "Yahoo data for AMD"); return}
 	if df_amd.rows == 0 {
 		fmt.println("ERROR: Failed to fetch AMD data")
 		return
@@ -1095,7 +1103,8 @@ kalman_pairs_semiconductor_adf_test :: proc(allocator: mem.Allocator = context.a
 		fmt.println("  Switching AMD for TSM (TSMC ADR)...")
 		w.destroy_dataframe(&aligned_amd)
 
-		df_tsm := net.read_yahoo("TSM", .Daily, .TwoYears, allocator)
+		df_tsm, df_tsm_ok := net.read_yahoo("TSM", .Daily, .TwoYears, allocator)
+		if !df_tsm_ok {fail_missing_data(#procedure, "Yahoo data for TSM"); return}
 		if df_tsm.rows == 0 {
 			fmt.println("ERROR: Failed to fetch TSM data")
 			return
@@ -1334,11 +1343,13 @@ kalman_pairs_auto_select_test :: proc(allocator: mem.Allocator = context.allocat
 	for candidate in candidates {
 		fmt.printf("Testing cointegration for %s & %s...\n", candidate.sym1, candidate.sym2)
 
-		df1 := net.read_yahoo(candidate.sym1, .Daily, .TwoYears, allocator)
+		df1, df1_ok := net.read_yahoo(candidate.sym1, .Daily, .TwoYears, allocator)
+		if !df1_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", candidate.sym1)); return}
 		if df1.rows == 0 {continue}
 		defer w.destroy_dataframe(&df1)
 
-		df2 := net.read_yahoo(candidate.sym2, .Daily, .TwoYears, allocator)
+		df2, df2_ok := net.read_yahoo(candidate.sym2, .Daily, .TwoYears, allocator)
+		if !df2_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", candidate.sym2)); return}
 		if df2.rows == 0 {continue}
 		defer w.destroy_dataframe(&df2)
 
@@ -1401,10 +1412,12 @@ kalman_pairs_auto_select_test :: proc(allocator: mem.Allocator = context.allocat
 
 	// 2. Fetch full data for the selected pair
 	fmt.println("\n--- Step 2: Fetching Data ---")
-	df1 := net.read_yahoo(selected_sym1, .Daily, .TwoYears, allocator)
+	df1, df1_ok := net.read_yahoo(selected_sym1, .Daily, .TwoYears, allocator)
+	if !df1_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", selected_sym1)); return}
 	defer w.destroy_dataframe(&df1)
 
-	df2 := net.read_yahoo(selected_sym2, .Daily, .TwoYears, allocator)
+	df2, df2_ok := net.read_yahoo(selected_sym2, .Daily, .TwoYears, allocator)
+	if !df2_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", selected_sym2)); return}
 	defer w.destroy_dataframe(&df2)
 
 	// 3. Align dataframes by DATE

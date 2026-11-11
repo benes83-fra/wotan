@@ -18,7 +18,8 @@ garch_real_data_test :: proc(allocator: mem.Allocator) {
 
 	// 1. Fetch SPY data (2 years)
 	fmt.println("--- Fetching SPY Data ---")
-	spy_df := yahoo.read_yahoo("SPY", .Daily, .TwoYears, allocator)
+	spy_df, spy_df_ok := yahoo.read_yahoo("SPY", .Daily, .TwoYears, allocator)
+	if !spy_df_ok {fail_missing_data(#procedure, "Yahoo data for SPY"); return}
 	defer w.destroy_dataframe(&spy_df)
 
 	fmt.printf("Loaded %d days of SPY data\n", spy_df.rows)
@@ -364,7 +365,8 @@ garch_real_data_test :: proc(allocator: mem.Allocator) {
 
 	// Fetch VIX data for bivariate analysis
 	fmt.println("Fetching VIX data...")
-	vix_df := yahoo.read_yahoo("^VIX", .Daily, .TwoYears, allocator)
+	vix_df, vix_df_ok := yahoo.read_yahoo("^VIX", .Daily, .TwoYears, allocator)
+	if !vix_df_ok {fail_missing_data(#procedure, "Yahoo data for ^VIX"); return}
 	defer w.destroy_dataframe(&vix_df)
 
 	// Compute VIX returns
@@ -775,10 +777,12 @@ garch_real_data_test :: proc(allocator: mem.Allocator) {
 
 	// Fetch additional assets for portfolio
 	fmt.println("Fetching additional assets...")
-	qqq_df := yahoo.read_yahoo("QQQ", .Daily, .TwoYears, allocator)
+	qqq_df, qqq_df_ok := yahoo.read_yahoo("QQQ", .Daily, .TwoYears, allocator)
+	if !qqq_df_ok {fail_missing_data(#procedure, "Yahoo data for QQQ"); return}
 	defer w.destroy_dataframe(&qqq_df)
 
-	iwm_df := yahoo.read_yahoo("IWM", .Daily, .TwoYears, allocator)
+	iwm_df, iwm_df_ok := yahoo.read_yahoo("IWM", .Daily, .TwoYears, allocator)
+	if !iwm_df_ok {fail_missing_data(#procedure, "Yahoo data for IWM"); return}
 	defer w.destroy_dataframe(&iwm_df)
 
 	// Compute returns for all assets

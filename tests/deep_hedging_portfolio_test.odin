@@ -22,9 +22,11 @@ deep_hedging_portfolio_test :: proc(allocator: mem.Allocator) {
 	seed_test(#procedure)
 	context.allocator = allocator
 	fmt.println("\n=== Deep hedging: call on a SPY/QQQ basket ===")
-	spy_df := net.read_yahoo("SPY", .Daily, .OneYear, allocator)
+	spy_df, spy_df_ok := net.read_yahoo("SPY", .Daily, .OneYear, allocator)
+	if !spy_df_ok {fail_missing_data(#procedure, "Yahoo data for SPY"); return}
 	defer w.destroy_dataframe(&spy_df)
-	qqq_df := net.read_yahoo("QQQ", .Daily, .OneYear, allocator)
+	qqq_df, qqq_df_ok := net.read_yahoo("QQQ", .Daily, .OneYear, allocator)
+	if !qqq_df_ok {fail_missing_data(#procedure, "Yahoo data for QQQ"); return}
 	defer w.destroy_dataframe(&qqq_df)
 	n := min(spy_df.rows, qqq_df.rows)
 	if n < 60 {

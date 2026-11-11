@@ -144,7 +144,8 @@ alt_data_gdelt_pipeline_test :: proc(allocator: mem.Allocator = context.allocato
 	}
 
 	fmt.println("\n2. Fetching Yahoo Finance Price Data...")
-	df_yahoo := net.read_yahoo(symbol, .Daily, .OneYear, allocator)
+	df_yahoo, df_yahoo_ok := net.read_yahoo(symbol, .Daily, .OneYear, allocator)
+	if !df_yahoo_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", symbol)); return}
 	defer w.destroy_dataframe(&df_yahoo)
 	fmt.printf("Fetched %d rows of price data\n", df_yahoo.rows)
 
@@ -421,7 +422,8 @@ alt_data_finnhub_pipeline_test :: proc(allocator: mem.Allocator = context.alloca
 
 	// 3. Fetch Yahoo Finance Price Data
 	fmt.println("\n2. Fetching Yahoo Finance Price Data...")
-	df_yahoo := net.read_yahoo(symbol, .Daily, .OneYear, allocator)
+	df_yahoo, df_yahoo_ok := net.read_yahoo(symbol, .Daily, .OneYear, allocator)
+	if !df_yahoo_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", symbol)); return}
 	defer w.destroy_dataframe(&df_yahoo)
 	fmt.printf("Fetched %d rows of price data\n", df_yahoo.rows)
 

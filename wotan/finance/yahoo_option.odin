@@ -218,10 +218,7 @@ _yahoo_options_session :: proc(
 	ok: bool,
 ) {
 	crumb, cookie, ok = net.yahoo_get_crumb_and_cookie(allocator)
-	if !ok {
-		fmt.println("Warning: Failed to get Yahoo crumb/cookie")
-		return
-	}
+	if !ok {return}
 	url := fmt.aprintf(
 		"https://query1.finance.yahoo.com/v7/finance/options/%s?crumb=%s",
 		symbol,
@@ -230,10 +227,7 @@ _yahoo_options_session :: proc(
 	)
 	defer delete(url, allocator)
 	text, ok = net.http_get_with_cookie(url, cookie, allocator)
-	if !ok {
-		fmt.printf("Warning: Failed to fetch options data for %s\n", symbol)
-		return
-	}
+	if !ok {return}
 	now_ts, _ = _parse_json_f64(text, "\"regularMarketTime\"", 0)
 	if now_ts <= 0 {now_ts = f64(time.now()._nsec) / 1e9}
 	return
@@ -266,19 +260,20 @@ _chain_from_builder :: proc(b: ^_Chain_Builder, allocator: mem.Allocator) -> Opt
 }
 
 // The chain of one expiration ~30-90 days out (else the first future one); expiries in
-// years from the market time
+// years from the market time. ok is false when Yahoo cannot be reached or returns
+// no options (it rate-limits heavy use); the chain is then empty
 fetch_yahoo_options :: proc(
 	symbol: string,
 	allocator: mem.Allocator = context.allocator,
-) -> OptionChain {
-	crumb, cookie, text, now_ts, ok := _yahoo_options_session(symbol, allocator)
-	if !ok {return {}}
+) -> (
+	chain: OptionChain,
+	ok: bool,
+) {
+	crumb, cookie, text, now_ts, got := _yahoo_options_session(symbol, allocator)
+	if !got {return {}, false}
 	defer delete(text, allocator)
 	target := _find_target_expiration(text, now_ts, 30.0, 90.0, context.temp_allocator)
-	if target == 0.0 {
-		fmt.println("   Warning: Could not find a valid future expiration date.")
-		return {}
-	}
+	if target == 0.0 {return {}, false}
 	b := _Chain_Builder {
 		strikes       = make([dynamic]f64, allocator),
 		expiries      = make([dynamic]f64, allocator),
@@ -286,23 +281,26 @@ fetch_yahoo_options :: proc(
 		market_prices = make([dynamic]f64, allocator),
 		option_types  = make([dynamic]string, allocator),
 	}
-	if !_fetch_yahoo_expiry(symbol, crumb, cookie, target, now_ts, &b, allocator) {
-		fmt.printf("Warning: Failed to fetch the %s chain\n", symbol)
-	}
-	return _chain_from_builder(&b, allocator)
+	_fetch_yahoo_expiry(symbol, crumb, cookie, target, now_ts, &b, allocator)
+	chain = _chain_from_builder(&b, allocator)
+	return chain, chain.n_options > 0
 }
 
 // The chains of every expiration between min_days and max_days ahead (at most
-// max_expiries of them, spread evenly over the range): a volatility surface
+// max_expiries of them, spread evenly over the range): a volatility surface. ok is
+// false when Yahoo cannot be reached or returns no options; the chain is then empty
 fetch_yahoo_option_surface :: proc(
 	symbol: string,
 	min_days: f64 = 7,
 	max_days: f64 = 800,
 	max_expiries: int = 12,
 	allocator: mem.Allocator = context.allocator,
-) -> OptionChain {
-	crumb, cookie, text, now_ts, ok := _yahoo_options_session(symbol, allocator)
-	if !ok {return {}}
+) -> (
+	chain: OptionChain,
+	ok: bool,
+) {
+	crumb, cookie, text, now_ts, got := _yahoo_options_session(symbol, allocator)
+	if !got {return {}, false}
 	defer delete(text, allocator)
 	dates := _yahoo_expiration_dates(text, allocator)
 	defer delete(dates, allocator)
@@ -328,5 +326,6 @@ fetch_yahoo_option_surface :: proc(
 		   idx == int(f64(k - 1) * f64(n - 1) / f64(max(picks - 1, 1)) + 0.5) {continue}
 		_fetch_yahoo_expiry(symbol, crumb, cookie, in_range[idx], now_ts, &b, allocator)
 	}
-	return _chain_from_builder(&b, allocator)
+	chain = _chain_from_builder(&b, allocator)
+	return chain, chain.n_options > 0
 }

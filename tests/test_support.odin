@@ -31,6 +31,15 @@ record_failures :: proc(failed: int) {
 	check_failures += failed
 }
 
+// fail_missing_data reports that a test could not get the real data it needs
+// (a loader returned ok = false) and counts it as one failed check. Real data is
+// never replaced by synthetic data: the test returns after this call and the
+// rest of the suite still runs.
+fail_missing_data :: proc(test: string, what: string) {
+	fmt.printf("FAIL %s: %s unavailable\n", test, what)
+	record_failures(1)
+}
+
 // exit_on_failures exits with code 1 if any correctness check failed.
 // main defers it first, so it runs after all other cleanup and the leak report.
 exit_on_failures :: proc() {
