@@ -63,7 +63,7 @@ garch_adjusted_covariance :: proc(
 portfolio_returns :: proc(
 	weights: []f64,
 	returns_data: ^l.Matrix(f64),
-	allocator: mem.Allocator,
+	allocator: mem.Allocator = context.allocator,
 ) -> []f64 {
 	n_periods := returns_data.rows
 	n_assets := returns_data.cols
@@ -85,7 +85,7 @@ portfolio_cvar_historical :: proc(portfolio_returns: []f64, confidence: f64 = 0.
 portfolio_cvar_evt :: proc(
 	portfolio_returns: []f64,
 	confidence: f64 = 0.95,
-	allocator: mem.Allocator,
+	allocator: mem.Allocator = context.allocator,
 ) -> f64 {
 	// Threshold at the confidence level, ES from the GPD tail at that level
 	evt_result := evt_fit(portfolio_returns, confidence, allocator)
@@ -106,7 +106,7 @@ cvar_gradient :: proc(
 	weights: []f64,
 	returns_data: ^l.Matrix(f64),
 	confidence: f64,
-	allocator: mem.Allocator,
+	allocator: mem.Allocator = context.allocator,
 ) -> []f64 {
 	n := len(weights)
 	T := returns_data.rows
@@ -176,7 +176,7 @@ min_cvar_portfolio :: proc(
 	returns_data: ^l.Matrix(f64),
 	constraints: PortfolioConstraints,
 	confidence: f64 = 0.95,
-	allocator: mem.Allocator,
+	allocator: mem.Allocator = context.allocator,
 	max_iter: int = 5000,
 	tol: f64 = 1e-10,
 ) -> []f64 {
@@ -304,7 +304,7 @@ min_cvar_portfolio :: proc(
 risk_contributions :: proc(
 	weights: []f64,
 	cov_matrix: ^l.Matrix(f64),
-	allocator: mem.Allocator,
+	allocator: mem.Allocator = context.allocator,
 ) -> []f64 {
 	n := len(weights)
 	contrib := make([]f64, n, allocator)
@@ -325,7 +325,7 @@ risk_contributions :: proc(
 risk_parity_portfolio :: proc(
 	cov_matrix: ^l.Matrix(f64),
 	constraints: PortfolioConstraints,
-	allocator: mem.Allocator,
+	allocator: mem.Allocator = context.allocator,
 	max_iter: int = 1000,
 	tol: f64 = 1e-12,
 	budgets: []f64 = nil,
@@ -379,7 +379,7 @@ portfolio_metrics_with_cvar :: proc(
 	returns_data: ^l.Matrix(f64),
 	cov_matrix: ^l.Matrix(f64),
 	risk_free_rate: f64 = 0.0,
-	allocator: mem.Allocator,
+	allocator: mem.Allocator = context.allocator,
 ) -> PortfolioCVaR {
 	ret := portfolio_return(weights, expected_returns)
 	vol := portfolio_volatility(weights, cov_matrix)

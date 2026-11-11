@@ -168,6 +168,18 @@ factor_analysis :: proc(
 	}
 }
 
+// Frees the slices of a FactorAnalysisResult
+factor_analysis_free :: proc(
+	fa: ^FactorAnalysisResult,
+	allocator: mem.Allocator = context.allocator,
+) {
+	_destroy_matrix(fa.loadings, allocator)
+	delete(fa.communalities, allocator)
+	delete(fa.uniqueness, allocator)
+	delete(fa.eigenvalues, allocator)
+	fa^ = {}
+}
+
 // ============================================================================
 // Varimax Rotation (SIMD OPTIMIZED)
 // ============================================================================
@@ -415,6 +427,18 @@ decompose_risk :: proc(
 		total_variance = total_variance,
 		factor_exposure = fa.loadings,
 	}
+}
+
+// Frees the slices of a RiskDecomposition
+risk_decomposition_free :: proc(
+	r: ^RiskDecomposition,
+	allocator: mem.Allocator = context.allocator,
+) {
+	delete(r.factor_variance, allocator)
+	delete(r.idiosyncratic_var, allocator)
+	delete(r.total_variance, allocator)
+	_destroy_matrix(r.factor_exposure, allocator)
+	r^ = {}
 }
 
 // ============================================================================

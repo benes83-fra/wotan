@@ -30,7 +30,7 @@ GroupLimit :: struct {
 // ============================================================================
 
 // Euclidean projection onto the simplex {w ≥ 0, Σw = 1} (Duchi et al. 2008)
-project_simplex :: proc(weights: []f64, allocator: mem.Allocator) -> []f64 {
+project_simplex :: proc(weights: []f64, allocator: mem.Allocator = context.allocator) -> []f64 {
 	n := len(weights)
 	result := make([]f64, n, allocator)
 	if n == 0 {return result}
@@ -87,7 +87,7 @@ project_groups :: proc(weights: []f64, groups: []GroupLimit) {
 project_constraints :: proc(
 	weights: []f64,
 	constraints: PortfolioConstraints,
-	allocator: mem.Allocator,
+	allocator: mem.Allocator = context.allocator,
 ) -> []f64 {
 	result := slice.clone(weights, allocator)
 	_project_constraints_exact(result, constraints)
@@ -126,8 +126,16 @@ _project_feasible :: proc(v: []f64, c: PortfolioConstraints, mu: []f64, target: 
 	defer delete(inc, context.temp_allocator)
 	prev := make([]f64, n, context.temp_allocator)
 	defer delete(prev, context.temp_allocator)
+	inc_prev := make([]f64, len(inc), context.temp_allocator)
+	defer delete(inc_prev, context.temp_allocator)
+	// Dykstra has converged when neither the point nor the increments move: after
+	// a long gradient step the box clamps saturate and the point can stay put for
+	// many sweeps while the increments still drift towards the projection
+	scale := 1.0
+	for x in v {scale = math.max(scale, math.abs(x))}
 	for _ in 0 ..< 20_000 {
 		copy(prev, v)
+		copy(inc_prev, inc)
 		for k in 0 ..< n_sets {
 			p := inc[k * n:(k + 1) * n]
 			for i in 0 ..< n {v[i] += p[i]; p[i] = v[i]}
@@ -149,9 +157,10 @@ _project_feasible :: proc(v: []f64, c: PortfolioConstraints, mu: []f64, target: 
 		_project_box_budget_target(v, lo, hi, mu, target)
 		for i in 0 ..< n {p[i] -= v[i]}
 
-		change := 0.0
+		change, inc_change := 0.0, 0.0
 		for i in 0 ..< n {change = math.max(change, math.abs(v[i] - prev[i]))}
-		if change < 1e-16 {break}
+		for q, i in inc {inc_change = math.max(inc_change, math.abs(q - inc_prev[i]))}
+		if change <= 1e-15 && inc_change <= 1e-15 * scale {break}
 	}
 }
 
@@ -236,7 +245,7 @@ portfolio_variance :: proc(weights: []f64, cov: ^l.Matrix(f64)) -> f64 {
 portfolio_variance_gradient :: proc(
 	weights: []f64,
 	cov: ^l.Matrix(f64),
-	allocator: mem.Allocator,
+	allocator: mem.Allocator = context.allocator,
 ) -> []f64 {
 	n := len(weights)
 	grad := make([]f64, n, allocator)
@@ -262,7 +271,7 @@ negative_sharpe_gradient :: proc(
 	returns: []f64,
 	cov: ^l.Matrix(f64),
 	rf: f64,
-	allocator: mem.Allocator,
+	allocator: mem.Allocator = context.allocator,
 ) -> []f64 {
 	n := len(weights)
 	grad := make([]f64, n, allocator)
@@ -448,7 +457,7 @@ _variance_scale :: proc(cov: ^l.Matrix(f64)) -> f64 {
 constrained_min_variance_portfolio :: proc(
 	cov: ^l.Matrix(f64),
 	constraints: PortfolioConstraints,
-	allocator: mem.Allocator,
+	allocator: mem.Allocator = context.allocator,
 	max_iter: int = 10_000,
 	tol: f64 = 1e-12,
 ) -> []f64 {
@@ -466,7 +475,7 @@ constrained_max_sharpe_portfolio :: proc(
 	cov: ^l.Matrix(f64),
 	rf: f64,
 	constraints: PortfolioConstraints,
-	allocator: mem.Allocator,
+	allocator: mem.Allocator = context.allocator,
 	max_iter: int = 10_000,
 	tol: f64 = 1e-12,
 ) -> []f64 {
@@ -488,7 +497,7 @@ constrained_mean_variance_portfolio :: proc(
 	cov: ^l.Matrix(f64),
 	target_return: f64,
 	constraints: PortfolioConstraints,
-	allocator: mem.Allocator,
+	allocator: mem.Allocator = context.allocator,
 	max_iter: int = 10_000,
 	tol: f64 = 1e-12,
 ) -> []f64 {
@@ -515,7 +524,7 @@ constrained_risk_aversion_portfolio :: proc(
 	cov: ^l.Matrix(f64),
 	gamma: f64,
 	constraints: PortfolioConstraints,
-	allocator: mem.Allocator,
+	allocator: mem.Allocator = context.allocator,
 	max_iter: int = 10_000,
 	tol: f64 = 1e-12,
 ) -> []f64 {
@@ -538,7 +547,7 @@ constrained_minimize :: proc(
 	grad: proc(w, g: []f64, user: rawptr),
 	user: rawptr,
 	constraints: PortfolioConstraints,
-	allocator: mem.Allocator,
+	allocator: mem.Allocator = context.allocator,
 	init: []f64 = nil,
 	max_iter: int = 10_000,
 	tol: f64 = 1e-12,
@@ -563,7 +572,7 @@ constrained_minimize :: proc(
 enforce_constraints :: proc(
 	weights: []f64,
 	constraints: PortfolioConstraints,
-	allocator: mem.Allocator,
+	allocator: mem.Allocator = context.allocator,
 ) -> []f64 {
 	return project_constraints(weights, constraints, allocator)
 }

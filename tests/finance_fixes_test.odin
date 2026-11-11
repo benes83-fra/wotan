@@ -32,7 +32,11 @@ import "core:mem"
 // factor of 1) and projected the floating coupon in progress from the curve;
 // the Hull-White and G2++ caplet / floorlet tensors and the calibration losses
 // built graphs from constants only, which were never freed (62 allocations per
-// strip, 53 000 per calibration).
+// strip, 53 000 per calibration). Portfolio construction: the projection onto
+// constraints with group limits (Dykstra) stopped when the point did not move
+// for a sweep, which happens while the increments still drift after a long
+// gradient step, so the constrained optimizers returned weights breaking a
+// group limit (min variance) or stopped at the start (max Sharpe, utility).
 
 @(private = "file")
 ff_vec :: proc(v: []f64, grad: bool) -> ^t.Tensor {
@@ -271,15 +275,30 @@ finance_fixes_test :: proc(allocator: mem.Allocator) {
 			fixing_days      = 2,
 			indexed_coupons  = true,
 		}
-		sw := fin.make_dated_swap(e6_conv, {2024, 11, 13}, {5, .Years}, 0.025, 10e6, allocator = allocator)
+		sw := fin.make_dated_swap(
+			e6_conv,
+			{2024, 11, 13},
+			{5, .Years},
+			0.025,
+			10e6,
+			allocator = allocator,
+		)
 		missing := fin.price_dated_swap(sw, &ois, &e6, allocator).npv
 		sw.current_fixing = 0.0215 // fixed on 11 May 2026
 		euribor := fin.price_dated_swap(sw, &ois, &e6, allocator).npv
 		fin.free_dated_swap(&sw, allocator)
 		ois_conv := e6_conv
-		ois_conv.fixed_day_count, ois_conv.float_tenor, ois_conv.payment_lag = .ACT_360, {1, .Years}, 1
+		ois_conv.fixed_day_count, ois_conv.float_tenor, ois_conv.payment_lag =
+			.ACT_360, {1, .Years}, 1
 		ois_conv.fixing_days, ois_conv.indexed_coupons = 0, false
-		o := fin.make_dated_swap(ois_conv, {2026, 3, 2}, {3, .Years}, 0.02, 10e6, allocator = allocator)
+		o := fin.make_dated_swap(
+			ois_conv,
+			{2026, 3, 2},
+			{3, .Years},
+			0.02,
+			10e6,
+			allocator = allocator,
+		)
 		growth := 1.0 // €STR at 2% every business day since 2 Mar 2026
 		for d := (w.Date{2026, 3, 2}); w.date_less(d, today); {
 			next := fin.calendar_advance({.TARGET}, d, 1, .Days)
@@ -335,7 +354,12 @@ finance_fixes_test :: proc(allocator: mem.Allocator) {
 		Ts, Te := []f64{1, 2, 3, 4}, []f64{2, 3, 4, 5}
 		F, P, K: [4]f64
 		for i in 0 ..< 4 {F[i], P[i], K[i] = math.exp(0.03) - 1, math.exp(-0.03 * Te[i]), 0.032}
-		tS, tE, tF, tK, tP := ff_vec(Ts, false), ff_vec(Te, false), ff_vec(F[:], true), ff_vec(K[:], false), ff_vec(P[:], false)
+		tS, tE, tF, tK, tP :=
+			ff_vec(Ts, false),
+			ff_vec(Te, false),
+			ff_vec(F[:], true),
+			ff_vec(K[:], false),
+			ff_vec(P[:], false)
 		cap := fin.hull_white_caplet_price_tensor(0.1, 0.01, tS, tE, tF, tK, tP, context.allocator)
 		s := t.tensor_sum(cap)
 		t.tensor_backward(s)
@@ -343,12 +367,37 @@ finance_fixes_test :: proc(allocator: mem.Allocator) {
 		caplet := cap.data.data[0]
 		t.tensor_free_graph(s)
 		tF.requires_grad = false
-		flr := fin.hull_white_floorlet_price_tensor(0.1, 0.01, tS, tE, tF, tK, tP, context.allocator)
+		flr := fin.hull_white_floorlet_price_tensor(
+			0.1,
+			0.01,
+			tS,
+			tE,
+			tF,
+			tK,
+			tP,
+			context.allocator,
+		)
 		t.tensor_free_graph(flr)
-		g2 := fin.hull_white_2f_caplet_price_tensor({0.3, 0.05, 0.008, 0.006, -0.6}, tS, tE, tF, tK, tP, context.allocator)
+		g2 := fin.hull_white_2f_caplet_price_tensor(
+			{0.3, 0.05, 0.008, 0.006, -0.6},
+			tS,
+			tE,
+			tF,
+			tK,
+			tP,
+			context.allocator,
+		)
 		t.tensor_free_graph(g2)
 		after_prices := len(track.allocation_map) // the 5 inputs and F's gradient
-		strip := fin.hw_price_cap_floor_strip(0.03, 0.032, Ts, Te, []f64{1, 1, 1, 1}, {0.1, 0.01}, true)
+		strip := fin.hw_price_cap_floor_strip(
+			0.03,
+			0.032,
+			Ts,
+			Te,
+			[]f64{1, 1, 1, 1},
+			{0.1, 0.01},
+			true,
+		)
 		cal := fin.calibrate_hull_white(strip.leg_prices, Ts, Te, F[:], K[:], P[:], 4)
 		delete(strip.leg_prices)
 		after_cal := len(track.allocation_map)
@@ -375,6 +424,79 @@ finance_fixes_test :: proc(allocator: mem.Allocator) {
 			&passed,
 			&total,
 		)
+	}
+
+	{ 	// constrained portfolios with a group limit (SciPy SLSQP references)
+		vol := [5]f64{0.04, 0.06, 0.15, 0.18, 0.25}
+		corr := [25]f64 {
+			1,
+			.7,
+			.1,
+			0,
+			-.1,
+			.7,
+			1,
+			.2,
+			.1,
+			0,
+			.1,
+			.2,
+			1,
+			.7,
+			.6,
+			0,
+			.1,
+			.7,
+			1,
+			.7,
+			-.1,
+			0,
+			.6,
+			.7,
+			1,
+		}
+		mu := []f64{0.03, 0.04, 0.07, 0.08, 0.11}
+		cov := l.matrix_new(f64, 5, 5, allocator)
+		for i in 0 ..< 5 {for j in 0 ..< 5 {cov.data[i * 5 + j] = corr[i * 5 + j] * vol[i] * vol[j]}}
+		c := fin.PortfolioConstraints {
+			no_short_selling = true,
+			max_weight       = 0.4,
+			group_limits     = []fin.GroupLimit{{asset_indices = []int{0, 1}, max_weight = 0.5}},
+		}
+		mv := fin.constrained_min_variance_portfolio(&cov, c, allocator)
+		ms := fin.constrained_max_sharpe_portfolio(mu, &cov, 0.02, c, allocator)
+		ra := fin.constrained_risk_aversion_portfolio(mu, &cov, 4, c, allocator)
+		// a long step: [26.44, 31.77, 14.36, 9.97, 13.51]
+		pr := fin.project_constraints([]f64{26.44, 31.77, 14.36, 9.97, 13.51}, c, allocator)
+		ref_mv := [5]f64{0.4, 0.1, 0.376491, 0.123509, 0}
+		ref_ms := [5]f64{0.1, 0.4, 0.208946, 0.103195, 0.187859}
+		ref_ra := [5]f64{0.1, 0.4, 0.164315, 0.092971, 0.242714}
+		ref_pr := [5]f64{0.1, 0.4, 0.4, 0, 0.1}
+		worst := 0.0
+		for i in 0 ..< 5 {
+			worst = max(
+				worst,
+				abs(mv[i] - ref_mv[i]),
+				abs(ms[i] - ref_ms[i]),
+				abs(ra[i] - ref_ra[i]),
+				abs(pr[i] - ref_pr[i]),
+			)
+		}
+		report(
+			fmt.tprintf(
+				"constrained portfolios with bonds <= 50%%: min variance %.6f, max Sharpe %.6f, utility %.6f, projection of a long step %.6f; max diff to SciPy %.1e",
+				mv,
+				ms,
+				ra,
+				pr,
+				worst,
+			),
+			worst < 2e-6,
+			&passed,
+			&total,
+		)
+		l.matrix_free(&cov)
+		for x in ([][]f64{mv, ms, ra, pr}) {delete(x, allocator)}
 	}
 
 	{ 	// a batch of options (last: it used to panic)

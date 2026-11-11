@@ -47,6 +47,13 @@ risk_decomposition :: proc(
 	return RiskDecomp{weights = weights, mctr = mctr, ctr = ctr, total_risk = port_vol}
 }
 
+// Frees the MCTR and CTR slices (the weights belong to the caller)
+risk_decomp_free :: proc(d: ^RiskDecomp, allocator: mem.Allocator = context.allocator) {
+	delete(d.mctr, allocator)
+	delete(d.ctr, allocator)
+	d^ = {}
+}
+
 // ============================================================================
 // 2. Rolling Analytics
 // ============================================================================
