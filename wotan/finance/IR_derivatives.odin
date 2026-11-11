@@ -37,35 +37,77 @@ _ones_tensor :: proc(n: int, allocator: mem.Allocator) -> ^t.Tensor {
 	return one
 }
 
+// Intermediates of a caplet graph, recorded so that _settle_intermediates can
+// hand them to the graph or free them (ops on constants are not linked)
+@(private = "file")
+_rec :: #force_inline proc(nodes: ^[dynamic]^t.Tensor, x: ^t.Tensor) -> ^t.Tensor {
+	append(nodes, x)
+	return x
+}
+
 @(private = "file")
 _hw_capfloor_tensor :: proc(
 	v, T_start, T_end, F, K, P, one: ^t.Tensor,
 	is_cap: bool,
+	nodes: ^[dynamic]^t.Tensor,
 ) -> ^t.Tensor {
-	delta_T := t.tensor_sub(T_end, T_start)
-	gF := t.tensor_add(one, t.tensor_mul(delta_T, F))
-	gK := t.tensor_add(one, t.tensor_mul(delta_T, K))
-	sd := t.tensor_sqrt(v)
-	d1 := t.tensor_div(t.tensor_add(t.tensor_log(t.tensor_div(gF, gK)), t.tensor_scale(v, 0.5)), sd)
-	d2 := t.tensor_sub(d1, sd)
+	r :: _rec
+	delta_T := r(nodes, t.tensor_sub(T_end, T_start))
+	gF := r(nodes, t.tensor_add(one, r(nodes, t.tensor_mul(delta_T, F))))
+	gK := r(nodes, t.tensor_add(one, r(nodes, t.tensor_mul(delta_T, K))))
+	sd := r(nodes, t.tensor_sqrt(v))
+	ln := r(nodes, t.tensor_log(r(nodes, t.tensor_div(gF, gK))))
+	d1 := r(nodes, t.tensor_div(r(nodes, t.tensor_add(ln, r(nodes, t.tensor_scale(v, 0.5)))), sd))
+	d2 := r(nodes, t.tensor_sub(d1, sd))
 	value: ^t.Tensor
 	if is_cap {
-		value = t.tensor_sub(t.tensor_mul(gF, t.tensor_norm_cdf(d1)), t.tensor_mul(gK, t.tensor_norm_cdf(d2)))
+		value = r(
+			nodes,
+			t.tensor_sub(
+				r(nodes, t.tensor_mul(gF, r(nodes, t.tensor_norm_cdf(d1)))),
+				r(nodes, t.tensor_mul(gK, r(nodes, t.tensor_norm_cdf(d2)))),
+			),
+		)
 	} else {
-		value = t.tensor_sub(
-			t.tensor_mul(gK, t.tensor_norm_cdf(t.tensor_neg(d2))),
-			t.tensor_mul(gF, t.tensor_norm_cdf(t.tensor_neg(d1))),
+		value = r(
+			nodes,
+			t.tensor_sub(
+				r(
+					nodes,
+					t.tensor_mul(gK, r(nodes, t.tensor_norm_cdf(r(nodes, t.tensor_neg(d2))))),
+				),
+				r(
+					nodes,
+					t.tensor_mul(gF, r(nodes, t.tensor_norm_cdf(r(nodes, t.tensor_neg(d1))))),
+				),
+			),
 		)
 	}
-	return t.tensor_mul(P, value)
+	out := t.tensor_mul(P, value)
+	_settle_intermediates(out, nodes[:])
+	delete(nodes^)
+	return out
 }
 
 // Hull-White 1F: v = σ² B(a, δ)² (1 − e^{−2a T_s}) / (2a)
 @(private = "file")
-_hw1f_bond_var_tensor :: proc(a, sigma: f64, T_start, T_end, one: ^t.Tensor) -> ^t.Tensor {
-	B := t.tensor_scale(t.tensor_sub(one, t.tensor_exp(t.tensor_scale(t.tensor_sub(T_end, T_start), -a))), 1.0 / a)
-	vf := t.tensor_scale(t.tensor_sub(one, t.tensor_exp(t.tensor_scale(T_start, -2.0 * a))), 1.0 / (2.0 * a))
-	return t.tensor_scale(t.tensor_mul(t.tensor_mul(B, B), vf), sigma * sigma)
+_hw1f_bond_var_tensor :: proc(
+	a, sigma: f64,
+	T_start, T_end, one: ^t.Tensor,
+	nodes: ^[dynamic]^t.Tensor,
+) -> ^t.Tensor {
+	r :: _rec
+	e1 := r(
+		nodes,
+		t.tensor_exp(r(nodes, t.tensor_scale(r(nodes, t.tensor_sub(T_end, T_start)), -a))),
+	)
+	B := r(nodes, t.tensor_scale(r(nodes, t.tensor_sub(one, e1)), 1.0 / a))
+	e2 := r(nodes, t.tensor_exp(r(nodes, t.tensor_scale(T_start, -2.0 * a))))
+	vf := r(nodes, t.tensor_scale(r(nodes, t.tensor_sub(one, e2)), 1.0 / (2.0 * a)))
+	return r(
+		nodes,
+		t.tensor_scale(r(nodes, t.tensor_mul(r(nodes, t.tensor_mul(B, B)), vf)), sigma * sigma),
+	)
 }
 
 // Caplet prices (notional 1) under Hull-White 1F. F: simple forward rates over
@@ -81,9 +123,10 @@ hull_white_caplet_price_tensor :: proc(
 	P: ^t.Tensor,
 	allocator: mem.Allocator,
 ) -> ^t.Tensor {
-	one := _ones_tensor(T_start.data.rows, allocator)
-	v := _hw1f_bond_var_tensor(a, sigma, T_start, T_end, one)
-	return _hw_capfloor_tensor(v, T_start, T_end, F, K, P, one, true)
+	nodes := make([dynamic]^t.Tensor, 0, 48, context.temp_allocator)
+	one := _rec(&nodes, _ones_tensor(T_start.data.rows, allocator))
+	v := _hw1f_bond_var_tensor(a, sigma, T_start, T_end, one, &nodes)
+	return _hw_capfloor_tensor(v, T_start, T_end, F, K, P, one, true, &nodes)
 }
 
 // ============================================================================
@@ -120,15 +163,7 @@ _hw_eval_loss :: proc(
 		allocator,
 	)
 
-	d := t.tensor_sub(loss_t, market_t)
-	d_sq := t.tensor_mul(d, d)
-	mse := t.tensor_mean(d_sq)
-	r := t.tensor_sqrt(mse)
-
-	res := r.data.data[0]
-
-	t.tensor_free_graph(r)
-	return res
+	return _rmse_and_free(loss_t, market_t)
 }
 
 // ----------------------------------------------------------------------------
@@ -150,7 +185,13 @@ _hw1f_objective :: proc(x: []f64, user_data: rawptr) -> f64 {
 @(private = "file")
 _hw2f_objective :: proc(x: []f64, user_data: rawptr) -> f64 {
 	c := (^_HW_Caplet_Ctx)(user_data)
-	p := HW2_Params{a = x[0], b = x[1], sigma = x[2], eta = x[3], rho = x[4]}
+	p := HW2_Params {
+		a     = x[0],
+		b     = x[1],
+		sigma = x[2],
+		eta   = x[3],
+		rho   = x[4],
+	}
 	return _hw2_eval_loss(p, c.T_start, c.T_end, c.F, c.K, c.P, c.market, c.allocator)
 }
 
@@ -166,7 +207,13 @@ _HW2F_Joint_Ctx :: struct {
 @(private = "file")
 _hw2f_joint_objective :: proc(x: []f64, user_data: rawptr) -> f64 {
 	c := (^_HW2F_Joint_Ctx)(user_data)
-	p := HW2_Params{a = x[0], b = x[1], sigma = x[2], eta = x[3], rho = x[4]}
+	p := HW2_Params {
+		a     = x[0],
+		b     = x[1],
+		sigma = x[2],
+		eta   = x[3],
+		rho   = x[4],
+	}
 	return _hw2f_joint_loss(
 		p,
 		c.r0,
@@ -206,7 +253,13 @@ calibrate_hull_white :: proc(
 		{"sigma", 0.01, 0.001, 0.1, .Log},
 	}
 	config := opt.Calibration_Config {
-		optimizer = {type = .Adam, learning_rate = 0.05, beta1 = 0.9, beta2 = 0.999, epsilon = 1e-8},
+		optimizer = {
+			type = .Adam,
+			learning_rate = 0.05,
+			beta1 = 0.9,
+			beta2 = 0.999,
+			epsilon = 1e-8,
+		},
 		max_iter = 300,
 		loss_threshold = 1e-6,
 		fd_step = 1e-5,
@@ -227,6 +280,21 @@ calibrate_hull_white :: proc(
 		converged = res.converged,
 		iterations = res.iterations,
 	}
+}
+
+// RMSE of model − market (relative to market with `relative`) over the
+// entries, then frees the model graph
+@(private = "file")
+_rmse_and_free :: proc(model, market: ^t.Tensor, relative := false) -> f64 {
+	n := len(model.data.data)
+	sse := 0.0
+	for i in 0 ..< n {
+		e := model.data.data[i] - market.data.data[i]
+		if relative {e /= market.data.data[i]}
+		sse += e * e
+	}
+	t.tensor_free_graph(model)
+	return math.sqrt_f64(sse / f64(max(n, 1)))
 }
 
 _make_const_tensor :: proc(data: []f64, n: int, allocator: mem.Allocator) -> ^t.Tensor {
@@ -337,7 +405,10 @@ _g2_simulate :: proc(
 ) -> _G2_Paths {
 	m := len(dates)
 	half := len(z) / max(3 * m, 1)
-	ps := _G2_Paths{n = 2 * half, m = m}
+	ps := _G2_Paths {
+		n = 2 * half,
+		m = m,
+	}
 	ps.x = make([]f64, ps.n * m, allocator)
 	ps.y = make([]f64, ps.n * m, allocator)
 	ps.ld = make([]f64, ps.n * m, allocator)
@@ -438,10 +509,16 @@ _g2_capfloor_mc :: proc(
 		bonds[i] = _g2_bond(p, r0, max(T_start[i], 0.0), T_end[i])
 		idx[i] = -1
 		if T_start[i] <= 0.0 {
-			fixed += payoff(math.exp_f64(-r0 * T_end[i]) / math.exp_f64(-r0 * max(T_start[i], 0.0)), delta[i], K, is_cap)
+			fixed += payoff(
+				math.exp_f64(-r0 * T_end[i]) / math.exp_f64(-r0 * max(T_start[i], 0.0)),
+				delta[i],
+				K,
+				is_cap,
+			)
 			continue
 		}
-		if len(dates) == 0 || T_start[i] > dates[len(dates) - 1] + 1e-12 {append(&dates, T_start[i])}
+		if len(dates) == 0 ||
+		   T_start[i] > dates[len(dates) - 1] + 1e-12 {append(&dates, T_start[i])}
 		idx[i] = len(dates) - 1
 	}
 	if len(dates) == 0 {return fixed}
@@ -515,10 +592,27 @@ _G2_Pricer :: struct {
 }
 
 @(private = "file")
-_g2_price :: proc(c: ^_G2_Pricer, p: HW2_Params, r0: f64, z: []f64, allocator: mem.Allocator) -> f64 {
+_g2_price :: proc(
+	c: ^_G2_Pricer,
+	p: HW2_Params,
+	r0: f64,
+	z: []f64,
+	allocator: mem.Allocator,
+) -> f64 {
 	switch c.kind {
 	case .Cap, .Floor:
-		return _g2_capfloor_mc(p, r0, c.K, c.T_start, c.T_end, c.delta, c.n, c.kind == .Cap, z, allocator)
+		return _g2_capfloor_mc(
+			p,
+			r0,
+			c.K,
+			c.T_start,
+			c.T_end,
+			c.delta,
+			c.n,
+			c.kind == .Cap,
+			z,
+			allocator,
+		)
 	case .Swaption:
 		return _g2_swaption_mc(p, r0, c.K, c.T_exp, c.T_mat, c.dlt, c.is_payer, z, allocator)
 	}
@@ -539,7 +633,9 @@ _g2_price_greeks :: proc(
 	defer delete(z, allocator)
 	price = _g2_price(c, p, r0, z, allocator)
 	h_r := max(0.01 * abs(r0), 1e-4)
-	delta_r = (_g2_price(c, p, r0 + h_r, z, allocator) - _g2_price(c, p, r0 - h_r, z, allocator)) / (2.0 * h_r)
+	delta_r =
+		(_g2_price(c, p, r0 + h_r, z, allocator) - _g2_price(c, p, r0 - h_r, z, allocator)) /
+		(2.0 * h_r)
 	h_s := max(0.01 * p.sigma, 1e-6)
 	up, dn := p, p
 	up.sigma += h_s
@@ -584,8 +680,22 @@ hw_mc_cap_option :: proc(
 	delta_r: f64,
 	vega: f64,
 ) {
-	c := _G2_Pricer{kind = .Cap, K = K, T_start = T_start, T_end = T_end, delta = delta, n = n_caplets}
-	return _g2_price_greeks(&c, _g2_from_hw(params), r0, n_paths, _g2_count_dates(T_start, n_caplets), allocator)
+	c := _G2_Pricer {
+		kind    = .Cap,
+		K       = K,
+		T_start = T_start,
+		T_end   = T_end,
+		delta   = delta,
+		n       = n_caplets,
+	}
+	return _g2_price_greeks(
+		&c,
+		_g2_from_hw(params),
+		r0,
+		n_paths,
+		_g2_count_dates(T_start, n_caplets),
+		allocator,
+	)
 }
 
 // ============================================================================
@@ -615,21 +725,34 @@ hull_white_2f_caplet_price_tensor :: proc(
 	P: ^t.Tensor,
 	allocator: mem.Allocator,
 ) -> ^t.Tensor {
-	one := _ones_tensor(T_start.data.rows, allocator)
-	delta_T := t.tensor_sub(T_end, T_start)
-	bk :: proc(one, delta_T: ^t.Tensor, k: f64) -> ^t.Tensor {
-		return t.tensor_scale(t.tensor_sub(one, t.tensor_exp(t.tensor_scale(delta_T, -k))), 1.0 / k)
+	nodes := make([dynamic]^t.Tensor, 0, 96, context.temp_allocator)
+	r :: _rec
+	one := r(&nodes, _ones_tensor(T_start.data.rows, allocator))
+	delta_T := r(&nodes, t.tensor_sub(T_end, T_start))
+	// (1 − e^{−k x}) / k
+	bk :: proc(nodes: ^[dynamic]^t.Tensor, one, x: ^t.Tensor, k: f64) -> ^t.Tensor {
+		e := _rec(nodes, t.tensor_exp(_rec(nodes, t.tensor_scale(x, -k))))
+		return _rec(nodes, t.tensor_scale(_rec(nodes, t.tensor_sub(one, e)), 1.0 / k))
 	}
-	vk :: proc(one, T_start: ^t.Tensor, k: f64) -> ^t.Tensor {
-		return t.tensor_scale(t.tensor_sub(one, t.tensor_exp(t.tensor_scale(T_start, -k))), 1.0 / k)
+	term :: proc(nodes: ^[dynamic]^t.Tensor, B1, B2, V: ^t.Tensor, c: f64) -> ^t.Tensor {
+		return _rec(
+			nodes,
+			t.tensor_scale(_rec(nodes, t.tensor_mul(_rec(nodes, t.tensor_mul(B1, B2)), V)), c),
+		)
 	}
 	a, b := params.a, params.b
-	B_a, B_b := bk(one, delta_T, a), bk(one, delta_T, b)
-	term1 := t.tensor_scale(t.tensor_mul(t.tensor_mul(B_a, B_a), vk(one, T_start, 2.0 * a)), params.sigma * params.sigma)
-	term2 := t.tensor_scale(t.tensor_mul(t.tensor_mul(B_b, B_b), vk(one, T_start, 2.0 * b)), params.eta * params.eta)
-	term3 := t.tensor_scale(t.tensor_mul(t.tensor_mul(B_a, B_b), vk(one, T_start, a + b)), 2.0 * params.rho * params.sigma * params.eta)
-	v := t.tensor_add(t.tensor_add(term1, term2), term3)
-	return _hw_capfloor_tensor(v, T_start, T_end, F, K, P, one, true)
+	B_a, B_b := bk(&nodes, one, delta_T, a), bk(&nodes, one, delta_T, b)
+	term1 := term(&nodes, B_a, B_a, bk(&nodes, one, T_start, 2.0 * a), params.sigma * params.sigma)
+	term2 := term(&nodes, B_b, B_b, bk(&nodes, one, T_start, 2.0 * b), params.eta * params.eta)
+	term3 := term(
+		&nodes,
+		B_a,
+		B_b,
+		bk(&nodes, one, T_start, a + b),
+		2.0 * params.rho * params.sigma * params.eta,
+	)
+	v := r(&nodes, t.tensor_add(r(&nodes, t.tensor_add(term1, term2)), term3))
+	return _hw_capfloor_tensor(v, T_start, T_end, F, K, P, one, true, &nodes)
 }
 
 // ============================================================================
@@ -656,15 +779,7 @@ _hw2_eval_loss :: proc(
 ) -> f64 {
 	loss_t := hull_white_2f_caplet_price_tensor(p, T_start_t, T_end_t, F_t, K_t, P_t, allocator)
 
-	d := t.tensor_sub(loss_t, market_t)
-	d_sq := t.tensor_mul(d, d)
-	mse := t.tensor_mean(d_sq)
-	r := t.tensor_sqrt(mse)
-
-	res := r.data.data[0]
-
-	t.tensor_free_graph(r)
-	return res
+	return _rmse_and_free(loss_t, market_t)
 }
 
 calibrate_hull_white_2f :: proc(
@@ -693,7 +808,13 @@ calibrate_hull_white_2f :: proc(
 		{"rho", -0.3, -0.99, 0.99, .Linear},
 	}
 	config := opt.Calibration_Config {
-		optimizer = {type = .Adam, learning_rate = 0.02, beta1 = 0.9, beta2 = 0.999, epsilon = 1e-8},
+		optimizer = {
+			type = .Adam,
+			learning_rate = 0.02,
+			beta1 = 0.9,
+			beta2 = 0.999,
+			epsilon = 1e-8,
+		},
 		max_iter = 400,
 		loss_threshold = 1e-6,
 		fd_step = 1e-4,
@@ -709,7 +830,13 @@ calibrate_hull_white_2f :: proc(
 	t.tensor_free(market_t)
 
 	return HW2_CalibrationResult {
-		params = HW2_Params{a = res.x[0], b = res.x[1], sigma = res.x[2], eta = res.x[3], rho = res.x[4]},
+		params = HW2_Params {
+			a = res.x[0],
+			b = res.x[1],
+			sigma = res.x[2],
+			eta = res.x[3],
+			rho = res.x[4],
+		},
 		rmse = res.loss,
 		converged = res.converged,
 		iterations = res.iterations,
@@ -738,8 +865,22 @@ hw2_mc_cap_option :: proc(
 	delta_r: f64,
 	vega: f64,
 ) {
-	c := _G2_Pricer{kind = .Cap, K = K, T_start = T_start, T_end = T_end, delta = delta, n = n_caplets}
-	return _g2_price_greeks(&c, params, r0, n_paths, _g2_count_dates(T_start, n_caplets), allocator)
+	c := _G2_Pricer {
+		kind    = .Cap,
+		K       = K,
+		T_start = T_start,
+		T_end   = T_end,
+		delta   = delta,
+		n       = n_caplets,
+	}
+	return _g2_price_greeks(
+		&c,
+		params,
+		r0,
+		n_paths,
+		_g2_count_dates(T_start, n_caplets),
+		allocator,
+	)
 }
 // ============================================================================
 // SWAPTION PRICING & JOINT CALIBRATION (Caps + Swaptions)
@@ -790,11 +931,18 @@ compute_hw2f_swap_variance :: proc(
 
 	// integral_0^T (alpha + kappa e^{k t})(alpha' + kappa' e^{k' t}) dt
 	cross :: proc(al, ka, k, al2, ka2, k2, T: f64) -> f64 {
-		return al * al2 * T + al * ka2 * (math.exp_f64(k2 * T) - 1.0) / k2 + al2 * ka * (math.exp_f64(k * T) - 1.0) / k + ka * ka2 * (math.exp_f64((k + k2) * T) - 1.0) / (k + k2)
+		return(
+			al * al2 * T +
+			al * ka2 * (math.exp_f64(k2 * T) - 1.0) / k2 +
+			al2 * ka * (math.exp_f64(k * T) - 1.0) / k +
+			ka * ka2 * (math.exp_f64((k + k2) * T) - 1.0) / (k + k2) \
+		)
 	}
-	return sigma * sigma * cross(alpha_x, kappa_x, a, alpha_x, kappa_x, a, T) +
+	return(
+		sigma * sigma * cross(alpha_x, kappa_x, a, alpha_x, kappa_x, a, T) +
 		eta * eta * cross(alpha_y, kappa_y, b, alpha_y, kappa_y, b, T) +
-		2.0 * rho * sigma * eta * cross(alpha_x, kappa_x, a, alpha_y, kappa_y, b, T)
+		2.0 * rho * sigma * eta * cross(alpha_x, kappa_x, a, alpha_y, kappa_y, b, T) \
+	)
 }
 
 // Price a strip of payer swaptions under G2++ with the Bachelier (normal)
@@ -855,12 +1003,7 @@ _hw2f_joint_loss :: proc(
 	)
 	// Relative errors: caps (~1e-4) and swaptions (~1e-2) are priced on very
 	// different scales; relative RMSE lets both instruments inform the fit.
-	cap_diff := t.tensor_div(t.tensor_sub(cap_model_t, cap_market_t), cap_market_t)
-	cap_diff_sq := t.tensor_mul(cap_diff, cap_diff)
-	cap_mse := t.tensor_mean(cap_diff_sq)
-	cap_rmse := t.tensor_sqrt(cap_mse)
-	cap_loss := cap_rmse.data.data[0]
-	t.tensor_free_graph(cap_rmse)
+	cap_loss := _rmse_and_free(cap_model_t, cap_market_t, relative = true)
 
 	// 2. Swaption loss (analytical)
 	swaption_model := hw2f_swaption_price_strip(params, swaption_specs, n_swaptions, r0, allocator)
@@ -913,12 +1056,20 @@ calibrate_hull_white_2f_joint :: proc(
 	cap_P_t := _make_const_tensor(cap_P, n_caplets, allocator)
 	cap_market_t := _make_const_tensor(cap_market, n_caplets, allocator)
 
-	ctx := _HW2F_Joint_Ctx{
-		r0 = r0,
-		caps = {cap_T_start_t, cap_T_end_t, cap_F_t, cap_K_t, cap_P_t, cap_market_t, allocator},
-		swaption_specs = swaption_specs,
+	ctx := _HW2F_Joint_Ctx {
+		r0              = r0,
+		caps            = {
+			cap_T_start_t,
+			cap_T_end_t,
+			cap_F_t,
+			cap_K_t,
+			cap_P_t,
+			cap_market_t,
+			allocator,
+		},
+		swaption_specs  = swaption_specs,
 		swaption_market = swaption_market,
-		n_swaptions = n_swaptions,
+		n_swaptions     = n_swaptions,
 	}
 	// Starting point close to realistic IR parameters, with a > b enforced
 	params := []opt.Calibration_Param {
@@ -929,11 +1080,17 @@ calibrate_hull_white_2f_joint :: proc(
 		{"rho", -0.4, -0.99, 0.99, .Linear},
 	}
 	config := opt.Calibration_Config {
-		optimizer = {type = .Adam, learning_rate = 0.05, beta1 = 0.9, beta2 = 0.999, epsilon = 1e-8},
+		optimizer = {
+			type = .Adam,
+			learning_rate = 0.05,
+			beta1 = 0.9,
+			beta2 = 0.999,
+			epsilon = 1e-8,
+		},
 		max_iter = 600, // more iterations for the 5D landscape
 		loss_threshold = 1e-6,
 		fd_step = 1e-4,
-		project = proc(x: []f64) {x[1] = math.max(0.005, math.min(x[0] - 0.01, x[1]))}, // b < a
+		project = proc(x: []f64) {x[1] = math.max(0.005, math.min(x[0] - 0.01, x[1]))}, 	// b < a
 	}
 	res := opt.calibrate(params, _hw2f_joint_objective, &ctx, config, allocator)
 	defer opt.calibration_result_free(&res)
@@ -946,7 +1103,13 @@ calibrate_hull_white_2f_joint :: proc(
 	t.tensor_free(cap_market_t)
 
 	return HW2F_JointResult {
-		params = HW2_Params{a = res.x[0], b = res.x[1], sigma = res.x[2], eta = res.x[3], rho = res.x[4]},
+		params = HW2_Params {
+			a = res.x[0],
+			b = res.x[1],
+			sigma = res.x[2],
+			eta = res.x[3],
+			rho = res.x[4],
+		},
 		rmse = res.loss,
 		converged = res.converged,
 		iterations = res.iterations,
@@ -970,7 +1133,11 @@ hw2f_zero_coupon_bond :: proc(
 	if T - t <= 0.0 {return 1.0}
 	p := params
 	ba, bb := _hw_b(p.a, t), _hw_b(p.b, t)
-	phi := r0 + 0.5 * p.sigma * p.sigma * ba * ba + 0.5 * p.eta * p.eta * bb * bb + p.rho * p.sigma * p.eta * ba * bb
+	phi :=
+		r0 +
+		0.5 * p.sigma * p.sigma * ba * ba +
+		0.5 * p.eta * p.eta * bb * bb +
+		p.rho * p.sigma * p.eta * ba * bb
 	return _g2_bond_at(_g2_bond(p, r0, t, T), r_t - phi - x_t, x_t)
 }
 
@@ -997,7 +1164,9 @@ hw2f_mc_bermudan_option :: proc(
 		if d > 0.0 && d < maturity - 1e-12 {append(&dates, d)}
 	}
 	for j in 1 ..< len(dates) {
-		for q := j; q > 0 && dates[q] < dates[q - 1]; q -= 1 {dates[q], dates[q - 1] = dates[q - 1], dates[q]}
+		for q := j;
+		    q > 0 && dates[q] < dates[q - 1];
+		    q -= 1 {dates[q], dates[q - 1] = dates[q - 1], dates[q]}
 	}
 	m := len(dates)
 	if m == 0 {return 0.0}
@@ -1076,7 +1245,13 @@ hw2f_mc_bermudan_option :: proc(
 		}
 		for k in 0 ..< n_itm {
 			q := itm[k]
-			basis(X[k * nb:(k + 1) * nb], ps.x[q * m + j] / sx, ps.y[q * m + j] / sy, ev[q] * 100.0, has_y)
+			basis(
+				X[k * nb:(k + 1) * nb],
+				ps.x[q * m + j] / sx,
+				ps.y[q * m + j] / sy,
+				ev[q] * 100.0,
+				has_y,
+			)
 			yv[k] = U[q]
 		}
 		beta := _least_squares_regression(X, yv, n_itm, nb, allocator)
@@ -1110,9 +1285,10 @@ hull_white_floorlet_price_tensor :: proc(
 	P: ^t.Tensor,
 	allocator: mem.Allocator,
 ) -> ^t.Tensor {
-	one := _ones_tensor(T_start.data.rows, allocator)
-	v := _hw1f_bond_var_tensor(a, sigma, T_start, T_end, one)
-	return _hw_capfloor_tensor(v, T_start, T_end, F, K, P, one, false)
+	nodes := make([dynamic]^t.Tensor, 0, 48, context.temp_allocator)
+	one := _rec(&nodes, _ones_tensor(T_start.data.rows, allocator))
+	v := _hw1f_bond_var_tensor(a, sigma, T_start, T_end, one, &nodes)
+	return _hw_capfloor_tensor(v, T_start, T_end, F, K, P, one, false, &nodes)
 }
 
 // Hull-White Monte Carlo: Floor Option (with CRN Greeks); see hw_mc_cap_option.
@@ -1132,8 +1308,22 @@ hw_mc_floor_option :: proc(
 	delta_r: f64,
 	vega: f64,
 ) {
-	c := _G2_Pricer{kind = .Floor, K = K, T_start = T_start, T_end = T_end, delta = delta, n = n_floorlets}
-	return _g2_price_greeks(&c, _g2_from_hw(params), r0, n_paths, _g2_count_dates(T_start, n_floorlets), allocator)
+	c := _G2_Pricer {
+		kind    = .Floor,
+		K       = K,
+		T_start = T_start,
+		T_end   = T_end,
+		delta   = delta,
+		n       = n_floorlets,
+	}
+	return _g2_price_greeks(
+		&c,
+		_g2_from_hw(params),
+		r0,
+		n_paths,
+		_g2_count_dates(T_start, n_floorlets),
+		allocator,
+	)
 }
 
 // ============================================================================
@@ -1158,7 +1348,14 @@ hw_mc_swaption_option :: proc(
 	delta_r: f64,
 	vega: f64,
 ) {
-	c := _G2_Pricer{kind = .Swaption, K = K, T_exp = T_exp, T_mat = T_maturity, dlt = delta, is_payer = is_payer}
+	c := _G2_Pricer {
+		kind     = .Swaption,
+		K        = K,
+		T_exp    = T_exp,
+		T_mat    = T_maturity,
+		dlt      = delta,
+		is_payer = is_payer,
+	}
 	return _g2_price_greeks(&c, _g2_from_hw(params), r0, n_paths, 1, allocator)
 }
 

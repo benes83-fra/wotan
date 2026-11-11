@@ -114,7 +114,7 @@ black_scholes_price :: proc(
 // op of out's graph reads (its backward may) are handed to the graph; the
 // others are freed now. Without any gradient, out itself is marked
 // owned_by_graph so tensor_free_graph frees it too.
-@(private = "file")
+@(private)
 _settle_intermediates :: proc(out: ^t.Tensor, nodes: []^t.Tensor) {
 	reached := make(map[^t.Tensor]bool, allocator = context.temp_allocator)
 	stack := make([dynamic]^t.Tensor, context.temp_allocator)

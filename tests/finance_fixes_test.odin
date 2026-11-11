@@ -27,7 +27,12 @@ import "core:mem"
 // and later coupons were paid early (a 2030 bond convertible until 2028 was
 // worth 101.78 with a worthless share, above its 92.60 straight value; QuantLib
 // does the same); cpi_fixing back-cast months before the first published
-// fixing from the curve instead of returning NaN.
+// fixing from the curve instead of returning NaN. Rates and credit: swaps that
+// started before the curve date counted their paid coupons (at a discount
+// factor of 1) and projected the floating coupon in progress from the curve;
+// the Hull-White and G2++ caplet / floorlet tensors and the calibration losses
+// built graphs from constants only, which were never freed (62 allocations per
+// strip, 53 000 per calibration).
 
 @(private = "file")
 ff_vec :: proc(v: []f64, grad: bool) -> ^t.Tensor {
@@ -235,6 +240,136 @@ finance_fixes_test :: proc(allocator: mem.Allocator) {
 				"CPI fixing before the first published month: %v; a year after the base %.6f",
 				before,
 				after,
+			),
+			good,
+			&passed,
+			&total,
+		)
+	}
+
+	{ 	// seasoned swaps: paid flows left out, the coupon in progress from its fixing
+		today := w.Date{2026, 11, 11}
+		ois := fin.YieldCurve {
+			tenors         = {1},
+			zero_rates     = {0.02},
+			reference_date = today,
+		}
+		e6 := fin.YieldCurve {
+			tenors         = {1},
+			zero_rates     = {0.025},
+			reference_date = today,
+		}
+		e6_conv := fin.SwapConventions {
+			calendar         = {.TARGET},
+			settlement_days  = 2,
+			fixed_tenor      = {1, .Years},
+			fixed_convention = .ModifiedFollowing,
+			fixed_day_count  = .THIRTY_360,
+			float_tenor      = {6, .Months},
+			float_convention = .ModifiedFollowing,
+			float_day_count  = .ACT_360,
+			fixing_days      = 2,
+			indexed_coupons  = true,
+		}
+		sw := fin.make_dated_swap(e6_conv, {2024, 11, 13}, {5, .Years}, 0.025, 10e6, allocator = allocator)
+		missing := fin.price_dated_swap(sw, &ois, &e6, allocator).npv
+		sw.current_fixing = 0.0215 // fixed on 11 May 2026
+		euribor := fin.price_dated_swap(sw, &ois, &e6, allocator).npv
+		fin.free_dated_swap(&sw, allocator)
+		ois_conv := e6_conv
+		ois_conv.fixed_day_count, ois_conv.float_tenor, ois_conv.payment_lag = .ACT_360, {1, .Years}, 1
+		ois_conv.fixing_days, ois_conv.indexed_coupons = 0, false
+		o := fin.make_dated_swap(ois_conv, {2026, 3, 2}, {3, .Years}, 0.02, 10e6, allocator = allocator)
+		growth := 1.0 // €STR at 2% every business day since 2 Mar 2026
+		for d := (w.Date{2026, 3, 2}); w.date_less(d, today); {
+			next := fin.calendar_advance({.TARGET}, d, 1, .Days)
+			growth *= 1 + 0.02 * fin.year_fraction(.ACT_360, d, next)
+			d = next
+		}
+		o.current_fixing = (growth - 1) / fin.year_fraction(.ACT_360, {2026, 3, 2}, today)
+		overnight := fin.price_dated_swap(o, &ois, allocator = allocator).npv
+		fin.free_dated_swap(&o, allocator)
+		// time axis: started 0.1 years ago
+		ts := fin.create_payer_swap(1, 0.03, 4.9)
+		ts.effective_date = -0.1
+		flat := fin.YieldCurve {
+			tenors     = {1},
+			zero_rates = {0.03},
+		}
+		ts_missing := fin.price_swap(ts, &flat, allocator).npv
+		ts.current_fixing = 0.031
+		ts_npv := fin.price_swap(ts, &flat, allocator).npv
+		// current period: (0.031 − 0.03)·dcf paid at 0.15; then a forward-starting
+		// swap from 0.15: floating DF(0.15) − DF(4.9) against 3% × its annuity
+		dcf := 0.25 * 365.0 / 360.0
+		ts_expected :=
+			0.001 * dcf * math.exp(-0.03 * 0.15) +
+			(math.exp(-0.03 * 0.15) - math.exp(-0.03 * 4.9)) -
+			0.03 * fin._compute_swap_annuity(0.25, 0.15, 4.9, .ACT_360, &flat)
+		good :=
+			math.is_nan(missing) &&
+			math.abs(euribor - -131244.220046) < 1e-5 &&
+			math.abs(overnight - -278.191618) < 1e-5 &&
+			math.is_nan(ts_missing) &&
+			math.abs(ts_npv - ts_expected) < 1e-15
+		report(
+			fmt.tprintf(
+				"seasoned swaps: Euribor without the fixing %v, with it %.6f (QuantLib -131244.220046); OIS in progress %.6f (QuantLib -278.191618); time axis %v / %.12f (%.12f)",
+				missing,
+				euribor,
+				overnight,
+				ts_missing,
+				ts_npv,
+				ts_expected,
+			),
+			good,
+			&passed,
+			&total,
+		)
+	}
+	{ 	// Hull-White / G2++ caplet tensors and calibration leave nothing behind
+		track: mem.Tracking_Allocator
+		mem.tracking_allocator_init(&track, runtime.default_allocator())
+		defer mem.tracking_allocator_destroy(&track)
+		context.allocator = mem.tracking_allocator(&track)
+		Ts, Te := []f64{1, 2, 3, 4}, []f64{2, 3, 4, 5}
+		F, P, K: [4]f64
+		for i in 0 ..< 4 {F[i], P[i], K[i] = math.exp(0.03) - 1, math.exp(-0.03 * Te[i]), 0.032}
+		tS, tE, tF, tK, tP := ff_vec(Ts, false), ff_vec(Te, false), ff_vec(F[:], true), ff_vec(K[:], false), ff_vec(P[:], false)
+		cap := fin.hull_white_caplet_price_tensor(0.1, 0.01, tS, tE, tF, tK, tP, context.allocator)
+		s := t.tensor_sum(cap)
+		t.tensor_backward(s)
+		dF := tF.grad.data[0]
+		caplet := cap.data.data[0]
+		t.tensor_free_graph(s)
+		tF.requires_grad = false
+		flr := fin.hull_white_floorlet_price_tensor(0.1, 0.01, tS, tE, tF, tK, tP, context.allocator)
+		t.tensor_free_graph(flr)
+		g2 := fin.hull_white_2f_caplet_price_tensor({0.3, 0.05, 0.008, 0.006, -0.6}, tS, tE, tF, tK, tP, context.allocator)
+		t.tensor_free_graph(g2)
+		after_prices := len(track.allocation_map) // the 5 inputs and F's gradient
+		strip := fin.hw_price_cap_floor_strip(0.03, 0.032, Ts, Te, []f64{1, 1, 1, 1}, {0.1, 0.01}, true)
+		cal := fin.calibrate_hull_white(strip.leg_prices, Ts, Te, F[:], K[:], P[:], 4)
+		delete(strip.leg_prices)
+		after_cal := len(track.allocation_map)
+		for x in ([]^t.Tensor{tS, tE, tF, tK, tP}) {t.tensor_free(x)}
+		// QuantLib HullWhite(a 0.1, σ 1%) on a flat 3% curve: (1+K)·ZBP(1/(1+K), 1, 2)
+		good :=
+			after_prices == 11 &&
+			after_cal == 11 &&
+			len(track.allocation_map) == 0 &&
+			math.abs(caplet - 0.0028302761) < 1e-10 &&
+			dF > 0 &&
+			math.abs(cal.params.a - 0.1) < 1e-3 &&
+			math.abs(cal.params.sigma - 0.01) < 1e-4
+		report(
+			fmt.tprintf(
+				"HW / G2++ caplet tensors and calibrate_hull_white: live allocations %d after pricing, %d after calibrating, then %d; caplet %.10f, dV/dF %.6f",
+				after_prices,
+				after_cal,
+				len(track.allocation_map),
+				caplet,
+				dF,
 			),
 			good,
 			&passed,

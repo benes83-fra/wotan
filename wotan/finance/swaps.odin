@@ -44,6 +44,10 @@ InterestRateSwap :: struct {
 	payer_leg:      SwapLeg, // The leg you pay
 	receiver_leg:   SwapLeg, // The leg you receive
 	direction:      SwapDirection,
+	// Seasoned swaps (effective_date < 0): the floating rate of the period in
+	// progress, fixed at its start; without it the NPV is NaN. Coupons paid at
+	// or before t = 0 are left out.
+	current_fixing: Maybe(f64),
 }
 
 // Sensitivities are to a parallel shift of the continuously compounded zero
@@ -125,6 +129,7 @@ _SwapPeriod :: struct {
 _time_periods :: proc(
 	effective, maturity: f64,
 	leg: SwapLeg,
+	fixing: Maybe(f64),
 	allocator: mem.Allocator,
 ) -> []_SwapPeriod {
 	dates := _swap_schedule(effective, maturity, leg.payment_frequency, context.temp_allocator)
@@ -133,8 +138,20 @@ _time_periods :: proc(
 	for k in 1 ..< len(dates) {
 		dcf := day_count_fraction(dates[k - 1], dates[k], leg.day_count)
 		periods[k - 1] = {dates[k - 1], dates[k], dates[k], dcf, dcf, 0.0, false}
+		if dates[k] <= 0.0 {
+			periods[k - 1] = _PAID_PERIOD // paid at or before t = 0
+		} else if leg.leg_type == .Floating && dates[k - 1] < 0.0 {
+			periods[k - 1].rate = fixing.? or_else math.QNAN_F64 // fixed in the past
+			periods[k - 1].has_rate = true
+		}
 	}
 	return periods
+}
+
+// A period whose payment is in the past: contributes nothing to either leg
+@(private = "file")
+_PAID_PERIOD :: _SwapPeriod {
+	has_rate = true,
 }
 
 // Fixed leg: Σ N · K · dcf_k · DF(pay_k); also returns the annuity
@@ -228,9 +245,15 @@ price_swap :: proc(
 	fixed := swap.payer_leg if fixed_is_payer else swap.receiver_leg
 	other := swap.receiver_leg if fixed_is_payer else swap.payer_leg
 
-	fixed_periods := _time_periods(swap.effective_date, swap.maturity, fixed, allocator)
+	fixed_periods := _time_periods(swap.effective_date, swap.maturity, fixed, nil, allocator)
 	defer delete(fixed_periods, allocator)
-	other_periods := _time_periods(swap.effective_date, swap.maturity, other, allocator)
+	other_periods := _time_periods(
+		swap.effective_date,
+		swap.maturity,
+		other,
+		swap.current_fixing,
+		allocator,
+	)
 	defer delete(other_periods, allocator)
 	other_is_floating := other.leg_type == .Floating
 	return _swap_result(
@@ -294,6 +317,13 @@ DatedSwap :: struct {
 	fixed_schedule: Schedule,
 	float_schedule: Schedule,
 	conventions:    SwapConventions,
+	// Seasoned swaps: the rate of the floating coupon in progress when it is
+	// already set on the curves' reference date (an indexed coupon whose
+	// fixing date is before it; for an overnight leg, the rate compounded from
+	// the accrual start to the reference date, simple in the float day count,
+	// the rest being projected). Without it the NPV is NaN. Flows paid on or
+	// before the reference date are left out.
+	current_fixing: Maybe(f64),
 }
 
 // Spot date: settlement_days business days after the trade date (moved to a
@@ -349,7 +379,7 @@ make_dated_swap :: proc(
 		end_of_month = conv.end_of_month,
 		allocator = allocator,
 	)
-	return DatedSwap{notional, direction, fixed_rate, float_spread, fixed, float, conv}
+	return DatedSwap{notional, direction, fixed_rate, float_spread, fixed, float, conv, nil}
 }
 
 free_dated_swap :: proc(swap: ^DatedSwap, allocator := context.allocator) {
@@ -418,6 +448,29 @@ _dated_periods :: proc(
 			pay         = date_to_time(reference, _swap_payment_date(conv, end)),
 			accrual     = year_fraction(dc, start, end, rs, re, last),
 			fwd_accrual = year_fraction(dc, fs, fe, rs, re, last) if floating else 0.0,
+		}
+		if !w.date_less(reference, _swap_payment_date(conv, end)) {
+			periods[k] = _PAID_PERIOD // paid on or before the reference date
+			continue
+		}
+		if floating && conv.indexed_coupons {
+			fixing := calendar_advance(conv.calendar, start, -conv.fixing_days, .Days, .Preceding)
+			if w.date_less(fixing, reference) {
+				periods[k].rate = swap.current_fixing.? or_else math.QNAN_F64
+				periods[k].has_rate = true
+				continue
+			}
+		} else if floating && w.date_less(start, reference) {
+			// overnight coupon in progress: the compounded rate so far, then the
+			// curve from the reference date (lookback / lockout / shift unsupported)
+			plain := conv.lookback_days == 0 && conv.lockout_days == 0 && !conv.observation_shift
+			f, ok := swap.current_fixing.?
+			growth :=
+				(1.0 + f * year_fraction(dc, start, reference)) /
+				yield_curve_discount_factor(forecast, periods[k].fwd_end)
+			periods[k].rate = (growth - 1.0) / periods[k].accrual if ok && plain else math.QNAN_F64
+			periods[k].has_rate = true
+			continue
 		}
 		if daily {
 			periods[k].rate = _overnight_rate(conv, start, end, forecast)
