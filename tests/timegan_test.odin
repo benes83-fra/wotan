@@ -259,7 +259,10 @@ timegan_test :: proc(allocator: mem.Allocator = context.allocator) {
 	if !spy_df_ok {fail_missing_data(#procedure, "Yahoo data for SPY"); return}
 	defer w.destroy_dataframe(&spy_df)
 	if spy_df.rows < 500 {
-		fmt.println("Not enough SPY data (offline?): skipped")
+		fail_missing_data(
+			#procedure,
+			fmt.tprintf("500 days of Yahoo data for SPY (got %d)", spy_df.rows),
+		)
 		return
 	}
 	n_days := spy_df.rows

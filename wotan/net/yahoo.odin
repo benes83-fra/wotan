@@ -335,6 +335,92 @@ read_yahoo :: proc(
 	return df, df.rows > 0
 }
 
+// Adjusted closes (dividends and splits) and dollar volumes (adjusted close times
+// volume) of several tickers on the dates all of them have, row-major
+// [date * n_tickers + ticker]. A ticker's rows with a missing value or a price <= 0
+// are left out before the dates are matched.
+Yahoo_Panel :: struct {
+	dates:         []w.Date,
+	adj_close:     []f64,
+	dollar_volume: []f64,
+	n_tickers:     int,
+	allocator:     mem.Allocator,
+}
+
+yahoo_panel_free :: proc(p: ^Yahoo_Panel) {
+	delete(p.dates, p.allocator)
+	delete(p.adj_close, p.allocator)
+	delete(p.dollar_volume, p.allocator)
+	p^ = {}
+}
+
+// The panel of `tickers` at the interval over the range (read_yahoo per ticker). ok is
+// false when a ticker cannot be loaded (failed is its index) or the tickers share no
+// date (failed = -1); the panel is then empty.
+read_yahoo_panel :: proc(
+	tickers: []string,
+	i: interval = .Daily,
+	r: range = .Max,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	panel: Yahoo_Panel,
+	ok: bool,
+	failed: int,
+) {
+	NA := len(tickers)
+	ta := context.temp_allocator
+	prices := make([]map[w.Date]f64, NA, ta)
+	dvols := make([]map[w.Date]f64, NA, ta)
+	first := make([dynamic]w.Date, ta)
+	defer {
+		for k in 0 ..< NA {delete(prices[k]); delete(dvols[k])}
+		delete(prices, ta)
+		delete(dvols, ta)
+		delete(first)
+	}
+	for sym, k in tickers {
+		df, got := read_yahoo(sym, i, r, ta)
+		defer w.destroy_dataframe(&df)
+		if !got {return {allocator = allocator}, false, k}
+		prices[k] = make(map[w.Date]f64, ta)
+		dvols[k] = make(map[w.Date]f64, ta)
+		dc, pc, vc := w.column(&df, "Date"), w.column(&df, "AdjClose"), w.column(&df, "Volume")
+		for row in 0 ..< df.rows {
+			d, dn := w.column_at_date(dc, row)
+			p, pn := w.column_at_float(pc, row)
+			v, vn := w.column_at_numeric(vc, row)
+			if dn || pn || vn || !(p > 0) {continue}
+			prices[k][d] = p
+			dvols[k][d] = p * v
+			if k == 0 {append(&first, d)}
+		}
+	}
+	common := make([dynamic]w.Date, ta)
+	defer delete(common)
+	for d in first {
+		all := true
+		for m in prices {all &&= d in m}
+		if all {append(&common, d)}
+	}
+	D := len(common)
+	if D == 0 {return {allocator = allocator}, false, -1}
+	panel = Yahoo_Panel {
+		dates         = make([]w.Date, D, allocator),
+		adj_close     = make([]f64, D * NA, allocator),
+		dollar_volume = make([]f64, D * NA, allocator),
+		n_tickers     = NA,
+		allocator     = allocator,
+	}
+	copy(panel.dates, common[:])
+	for d, t in common {
+		for k in 0 ..< NA {
+			panel.adj_close[t * NA + k] = prices[k][d]
+			panel.dollar_volume[t * NA + k] = dvols[k][d]
+		}
+	}
+	return panel, true, -1
+}
+
 
 extract_dividends :: proc(
 	json: string,

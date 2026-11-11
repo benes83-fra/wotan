@@ -30,7 +30,10 @@ deep_hedging_portfolio_test :: proc(allocator: mem.Allocator) {
 	defer w.destroy_dataframe(&qqq_df)
 	n := min(spy_df.rows, qqq_df.rows)
 	if n < 60 {
-		fmt.println("Not enough SPY/QQQ data (offline?): skipped")
+		fail_missing_data(
+			#procedure,
+			fmt.tprintf("60 days of Yahoo data for SPY and QQQ (got %d)", n),
+		)
 		return
 	}
 	// daily log returns of the last n common rows (the same trading days)

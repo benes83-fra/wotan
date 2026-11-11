@@ -3,6 +3,7 @@ package tests
 import bfin "../wotan/behavioral_finance"
 import fin "../wotan/finance"
 import l "../wotan/linalg"
+import net "../wotan/net"
 import "core:fmt"
 import "core:math"
 import "core:math/rand"
@@ -82,9 +83,15 @@ prospect_portfolio_test :: proc(allocator: mem.Allocator) {
 		"XLC",
 	}
 	NA := len(symbols)
-	P, _, dates, ok := yahoo_adjclose_panel(symbols, .FiveYears, 600)
+	panel, ok, bad := net.read_yahoo_panel(symbols, .Daily, .FiveYears)
+	defer net.yahoo_panel_free(&panel)
+	P, dates := panel.adj_close, panel.dates
+	ok &&= len(dates) >= 600
 	if !ok {
-		fmt.println("Not enough data (offline?): sector ETF comparison skipped")
+		fail_missing_data(
+			#procedure,
+			fmt.tprintf("Yahoo data for %s", symbols[bad]) if bad >= 0 else fmt.tprintf("600 common days of Yahoo data (got %d)", len(dates)),
+		)
 	} else {
 		M := (len(dates) - 1) / 21
 		R := l.matrix_new(f64, M, NA)

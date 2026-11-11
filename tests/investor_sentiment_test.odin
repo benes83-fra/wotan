@@ -20,14 +20,6 @@ BW_URL :: "https://pages.stern.nyu.edu/~jwurgler/data/SENTIMENT.xlsx"
 @(private = "file")
 FF_SIZE_URL :: "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/Portfolios_Formed_on_ME_CSV.zip"
 
-// Download url to path; false when offline
-@(private = "file")
-_bw_download :: proc(url, path: string) -> bool {
-	body, ok := net.http_get(url, context.temp_allocator)
-	if !ok || len(body) < 1000 {return false}
-	return os.write_entire_file(path, transmute([]u8)body) == nil
-}
-
 // Value-weighted monthly returns (%) of the smallest minus the largest size decile,
 // keyed by yyyymm
 @(private = "file")
@@ -68,15 +60,15 @@ investor_sentiment_reference_test :: proc(allocator: mem.Allocator) {
 	}
 
 	XLSX :: "bw_sentiment_test.xlsx"
-	if !_bw_download(BW_URL, XLSX) {
-		fmt.println("No sentiment data (offline?): skipped")
+	if !net.download_file(BW_URL, XLSX) {
+		fail_missing_data(#procedure, "Wurgler's SENTIMENT.xlsx")
 		return
 	}
 	defer os.remove(XLSX)
 	df, found := importer.xlsx_load_sheet(XLSX, "DATA", allocator)
 	defer w.destroy_dataframe(&df)
 	if !found || df.rows < 600 {
-		fmt.println("Unexpected sentiment workbook: skipped")
+		fail_missing_data(#procedure, "the DATA sheet (600+ months) of SENTIMENT.xlsx")
 		return
 	}
 	n := df.rows
@@ -188,8 +180,8 @@ investor_sentiment_reference_test :: proc(allocator: mem.Allocator) {
 	// 3. the cross-sectional prediction on Ken French's size deciles: small minus big
 	// (value-weighted) earns less after high sentiment (previous month's SENT_ORTH)
 	ZIP :: "ff_size_test.zip"
-	if !_bw_download(FF_SIZE_URL, ZIP) {
-		fmt.println("No size portfolios (offline?): size test skipped")
+	if !net.download_file(FF_SIZE_URL, ZIP) {
+		fail_missing_data(#procedure, "Ken French's size portfolios")
 	} else {
 		defer os.remove(ZIP)
 		smb := _ff_small_minus_big(ZIP)

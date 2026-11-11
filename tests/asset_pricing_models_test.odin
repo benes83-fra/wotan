@@ -4,6 +4,7 @@ import w "../wotan/core"
 import fin "../wotan/finance"
 import l "../wotan/linalg"
 import ml_fin "../wotan/ml_finance"
+import net "../wotan/net"
 import "core:fmt"
 import "core:math"
 import "core:math/rand"
@@ -194,9 +195,15 @@ asset_pricing_models_test :: proc(allocator: mem.Allocator) {
 	// C. real data
 	{
 		NA := len(LARGE_CAP_TICKERS)
-		P, V, dates, ok := yahoo_adjclose_panel(LARGE_CAP_TICKERS, .FiveYears, 600)
+		panel, ok, bad := net.read_yahoo_panel(LARGE_CAP_TICKERS, .Daily, .FiveYears)
+		defer net.yahoo_panel_free(&panel)
+		P, V, dates := panel.adj_close, panel.dollar_volume, panel.dates
+		ok &&= len(dates) >= 600
 		if !ok {
-			fmt.println("Not enough data (offline?): real-data check skipped")
+			fail_missing_data(
+				#procedure,
+				fmt.tprintf("Yahoo data for %s", LARGE_CAP_TICKERS[bad]) if bad >= 0 else fmt.tprintf("600 common days of Yahoo data (got %d)", len(dates)),
+			)
 			fmt.printf("Asset pricing models: %d failure(s)\n", failures)
 			record_failures(failures)
 			return

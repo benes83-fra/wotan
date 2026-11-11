@@ -309,7 +309,10 @@ forecasting_models_test :: proc(allocator: mem.Allocator) {
 		if !df_ok {fail_missing_data(#procedure, "Yahoo data for SPY"); return}
 		defer w.destroy_dataframe(&df)
 		if df.rows < 600 {
-			fmt.println("Not enough SPY data (offline?): random-walk check skipped")
+			fail_missing_data(
+				#procedure,
+				fmt.tprintf("600 days of Yahoo data for SPY (got %d)", df.rows),
+			)
 		} else {
 			pc := w.column(&df, "AdjClose")
 			lp := make([dynamic]f64)

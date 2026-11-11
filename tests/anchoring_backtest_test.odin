@@ -3,6 +3,7 @@ package tests
 import ml "../wotan/analytics/ML"
 import bfin "../wotan/behavioral_finance"
 import l "../wotan/linalg"
+import net "../wotan/net"
 import plot "../wotan/plot"
 import "core:fmt"
 import "core:math"
@@ -120,9 +121,15 @@ anchoring_backtest_test :: proc(allocator: mem.Allocator) {
 
 	// B. the 24 large caps
 	NA := len(LARGE_CAP_TICKERS)
-	P, _, dates, ok := yahoo_adjclose_panel(LARGE_CAP_TICKERS, .TenYears, 1500)
+	panel, ok, bad := net.read_yahoo_panel(LARGE_CAP_TICKERS, .Daily, .TenYears)
+	defer net.yahoo_panel_free(&panel)
+	P, dates := panel.adj_close, panel.dates
+	ok &&= len(dates) >= 1500
 	if !ok {
-		fmt.println("Not enough data (offline?): real-data backtest skipped")
+		fail_missing_data(
+			#procedure,
+			fmt.tprintf("Yahoo data for %s", LARGE_CAP_TICKERS[bad]) if bad >= 0 else fmt.tprintf("1500 common days of Yahoo data (got %d)", len(dates)),
+		)
 	} else {
 		D := len(dates)
 		prices := make([][]f64, NA)

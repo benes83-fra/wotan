@@ -227,7 +227,7 @@ Mental_Account_Status :: enum {
 	Optimal, // the shortfall constraint binds at the implied gamma
 	Max_Return, // long only: even the highest-return portfolio meets the constraint
 	Unbounded, // short sales: the expected return can grow without limit
-	Infeasible, // no portfolio reaches H with probability 1 - alpha
+	Infeasible, // no portfolio reaches H with probability 1 - alpha (weights: the highest alpha-quantile)
 }
 
 Mental_Account_Portfolio :: struct {
@@ -343,7 +343,9 @@ mental_account_portfolio :: proc(
 	res := Mental_Account_Portfolio{}
 	x: f64
 	if _ma_q(&p, x_star) < H {
-		res.status, x = .Infeasible, x_star // the portfolio closest to feasible
+		// the portfolio with the highest alpha-quantile Q: the highest threshold any
+		// portfolio meets with probability 1 - alpha (not the lowest P(r < H))
+		res.status, x = .Infeasible, x_star
 	} else if _ma_q(&p, LO) >= H {
 		res.status = .Max_Return if long_only else .Unbounded
 		x = LO

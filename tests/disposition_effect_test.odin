@@ -3,6 +3,7 @@ package tests
 import ml "../wotan/analytics/ML"
 import bfin "../wotan/behavioral_finance"
 import l "../wotan/linalg"
+import net "../wotan/net"
 import "core:fmt"
 import "core:math"
 import "core:math/rand"
@@ -189,9 +190,15 @@ disposition_effect_test :: proc(allocator: mem.Allocator) {
 
 	// C. the 24 large caps
 	NS := len(LARGE_CAP_TICKERS)
-	DP, DV, dates, ok := yahoo_adjclose_panel(LARGE_CAP_TICKERS, .TenYears, 2000)
+	panel, ok, bad := net.read_yahoo_panel(LARGE_CAP_TICKERS, .Daily, .TenYears)
+	defer net.yahoo_panel_free(&panel)
+	DP, DV, dates := panel.adj_close, panel.dollar_volume, panel.dates
+	ok &&= len(dates) >= 2000
 	if !ok {
-		fmt.println("Not enough data (offline?): large-cap regressions skipped")
+		fail_missing_data(
+			#procedure,
+			fmt.tprintf("Yahoo data for %s", LARGE_CAP_TICKERS[bad]) if bad >= 0 else fmt.tprintf("2000 common days of Yahoo data (got %d)", len(dates)),
+		)
 	} else {
 		NW := len(dates) / 5
 		P := make([][]f64, NS)

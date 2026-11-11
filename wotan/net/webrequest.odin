@@ -6,6 +6,7 @@ import "base:runtime"
 import "core:c"
 import "core:fmt"
 import "core:mem"
+import "core:os"
 import "core:strings"
 import curl "vendor:curl"
 
@@ -25,10 +26,34 @@ write_cb :: proc "c" (ptr: [^]u8, size: uint, nmemb: uint, userdata: rawptr) -> 
 	return c.size_t(total)
 }
 
+// The body of a GET request; ok is false only when the request fails (any HTTP
+// status counts as a response)
 http_get :: proc(url: string, allocator: mem.Allocator = context.allocator) -> (string, bool) {
+	body, _, ok := _http_get_status(url, allocator)
+	return body, ok
+}
+
+// Saves the body of a GET request to path. ok is false when the request fails, the
+// server answers with an HTTP status outside 200 - 299 or the file cannot be written
+download_file :: proc(url, path: string) -> bool {
+	body, status, ok := _http_get_status(url, context.temp_allocator)
+	defer delete(body, context.temp_allocator)
+	if !ok || status < 200 || status > 299 {return false}
+	return os.write_entire_file(path, transmute([]u8)body) == nil
+}
+
+@(private = "file")
+_http_get_status :: proc(
+	url: string,
+	allocator: mem.Allocator,
+) -> (
+	body: string,
+	status: int,
+	ok: bool,
+) {
 	curl_handle := curl.easy_init()
 	if curl_handle == nil {
-		return "", false
+		return "", 0, false
 	}
 	defer curl.easy_cleanup(curl_handle)
 
@@ -54,10 +79,12 @@ http_get :: proc(url: string, allocator: mem.Allocator = context.allocator) -> (
 	res := curl.easy_perform(curl_handle)
 	if res != .E_OK {
 		delete(rb.data)
-		return "", false
+		return "", 0, false
 	}
+	code: c.long
+	curl.easy_getinfo(curl_handle, .RESPONSE_CODE, &code)
 
-	return string(rb.data[:]), true
+	return string(rb.data[:]), int(code), true
 }
 
 read_csv_from_url :: proc(

@@ -16,7 +16,10 @@ cql_real_data_trading_test :: proc(allocator: mem.Allocator) {
 	if !df_ok {fail_missing_data(#procedure, "Yahoo data for AAPL"); return}
 	defer w.destroy_dataframe(&df)
 	if df.rows < 60 {
-		fmt.println("Aborting: not enough AAPL data (offline?)")
+		fail_missing_data(
+			#procedure,
+			fmt.tprintf("60 days of Yahoo data for AAPL (got %d)", df.rows),
+		)
 		return
 	}
 	col := w.column(&df, "AdjClose")

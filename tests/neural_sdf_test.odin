@@ -181,7 +181,7 @@ neural_sdf_test :: proc(allocator: mem.Allocator = context.allocator) {
 	}
 	defer for &df in dfs {w.destroy_dataframe(&df)}
 	if n < 200 {
-		fmt.println("Not enough data (offline?): skipped")
+		fail_missing_data(#procedure, fmt.tprintf("200 days of Yahoo data (got %d)", n))
 		return
 	}
 	// gross returns of the last n common rows; a missing (null or 0) close counts as no move

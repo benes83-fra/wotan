@@ -3,6 +3,7 @@ package tests
 import bfin "../wotan/behavioral_finance"
 import fin "../wotan/finance"
 import l "../wotan/linalg"
+import net "../wotan/net"
 import "core:fmt"
 import "core:math"
 import "core:mem"
@@ -27,8 +28,10 @@ _BPT_SYMBOLS := []string{"TLT", "GLD", "XLU", "SPY", "XLF", "XLI", "XLK", "XLE",
 @(private = "file")
 _bpt_inputs :: proc() -> (mu: []f64, cov: l.Matrix(f64), ok: bool) {
 	NA := len(_BPT_SYMBOLS)
-	P, _, dates, got := yahoo_adjclose_panel(_BPT_SYMBOLS, .FiveYears, 600)
-	if !got {return}
+	panel, got, _ := net.read_yahoo_panel(_BPT_SYMBOLS, .Daily, .FiveYears)
+	defer net.yahoo_panel_free(&panel)
+	P, dates := panel.adj_close, panel.dates
+	if !got || len(dates) < 600 {return}
 	M := (len(dates) - 1) / 21
 	R := l.matrix_new(f64, M, NA)
 	defer l.matrix_free(&R)
@@ -146,7 +149,7 @@ bpt_test :: proc(allocator: mem.Allocator) {
 	context.allocator = allocator
 	mu, cov, ok := _bpt_inputs()
 	if !ok {
-		fmt.println("Not enough data (offline?): skipped")
+		fail_missing_data(#procedure, "600 days of Yahoo data for the 9 ETFs")
 		return
 	}
 	defer {delete(mu); l.matrix_free(&cov)}
@@ -163,7 +166,7 @@ bpt_v2_test :: proc(allocator: mem.Allocator) {
 	context.allocator = allocator
 	mu, cov, ok := _bpt_inputs()
 	if !ok {
-		fmt.println("Not enough data (offline?): skipped")
+		fail_missing_data(#procedure, "600 days of Yahoo data for the 9 ETFs")
 		return
 	}
 	defer {delete(mu); l.matrix_free(&cov)}

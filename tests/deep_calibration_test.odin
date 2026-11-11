@@ -143,7 +143,7 @@ deep_calibration_test :: proc(allocator: mem.Allocator) {
 	if !df_ok {fail_missing_data(#procedure, "Yahoo data for AAPL"); return}
 	defer w.destroy_dataframe(&df)
 	if chain.n_options == 0 || df.rows == 0 {
-		fmt.println("No option chain or spot (offline?): skipped")
+		fail_missing_data(#procedure, "Yahoo option chain or spot for AAPL")
 		return
 	}
 	spot, _ := w.column_at_float(w.column(&df, "Close"), df.rows - 1)

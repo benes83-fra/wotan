@@ -47,13 +47,28 @@ _load_lobster :: proc(allocator: mem.Allocator) -> (book: []f64, rows: int) {
 }
 
 @(private = "file")
-_lobster_windows :: proc(allocator: mem.Allocator) -> (x: ^t.Tensor, labels: []int, fut: []f64, ok: bool) {
+_lobster_windows :: proc(
+	allocator: mem.Allocator,
+) -> (
+	x: ^t.Tensor,
+	labels: []int,
+	fut: []f64,
+	ok: bool,
+) {
 	book, rows := _load_lobster(allocator)
 	if rows == 0 {
-		fmt.println("No LOBSTER data (offline?): skipped")
+		fail_missing_data(#procedure, "the LOBSTER sample order book")
 		return
 	}
-	x, labels, fut = ml_fin.deeplob_lobster_windows(book, rows, LOB_LEVELS, LOB_T, LOB_H, 1e-5, allocator)
+	x, labels, fut = ml_fin.deeplob_lobster_windows(
+		book,
+		rows,
+		LOB_LEVELS,
+		LOB_T,
+		LOB_H,
+		1e-5,
+		allocator,
+	)
 	if x == nil {return}
 	nm := ml_fin.deeplob_norm_fit(x, allocator)
 	ml_fin.deeplob_norm_apply(x, nm)
@@ -78,7 +93,13 @@ deeplob_real_data_test :: proc(allocator: mem.Allocator) {
 	if !ok {return}
 	n := x.shape[0]
 	model := ml_fin.deeplob_new(
-		{time_steps = LOB_T, price_levels = LOB_LEVELS, num_classes = 3, hidden_dim = 32, seq_backend = .Mamba},
+		{
+			time_steps = LOB_T,
+			price_levels = LOB_LEVELS,
+			num_classes = 3,
+			hidden_dim = 32,
+			seq_backend = .Mamba,
+		},
 	)
 	defer ml_fin.deeplob_free(model)
 	opt := nn.adam_new(1e-3)
@@ -102,7 +123,12 @@ deeplob_real_data_test :: proc(allocator: mem.Allocator) {
 			if best == v {hit += 1}
 		}
 		if epoch % 5 == 0 || epoch == 14 {
-			fmt.printf(" %3d  | %.5f | %5.1f%%\n", epoch + 1, loss.data.data[0], 100 * f64(hit) / f64(n))
+			fmt.printf(
+				" %3d  | %.5f | %5.1f%%\n",
+				epoch + 1,
+				loss.data.data[0],
+				100 * f64(hit) / f64(n),
+			)
 		}
 		t.graph_end(&scope)
 	}
@@ -118,7 +144,13 @@ deeplob_real_data_sharpe_test :: proc(allocator: mem.Allocator) {
 	if !ok {return}
 	n := x.shape[0]
 	model := ml_fin.deeplob_new(
-		{time_steps = LOB_T, price_levels = LOB_LEVELS, num_classes = 3, hidden_dim = 32, seq_backend = .Mamba},
+		{
+			time_steps = LOB_T,
+			price_levels = LOB_LEVELS,
+			num_classes = 3,
+			hidden_dim = 32,
+			seq_backend = .Mamba,
+		},
 	)
 	defer ml_fin.deeplob_free(model)
 	opt := nn.adam_new(1e-3)
