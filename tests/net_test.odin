@@ -14,18 +14,18 @@ http_get_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
 	url := "https://example.com"
 
 	text, ok := net.http_get(url, allocator)
-	if !ok {
-		panic("http_get_test: request failed")
-	}
+	if !ok {fail_missing_data(#procedure, url); return}
 
 	fmt.println("Received", len(text), "bytes")
 
 	// Basic sanity check
 	if !strings.contains(text, "Example Domain") {
-		panic("http_get_test: response does not contain expected marker")
+		fmt.println("FAIL http_get_test: response does not contain 'Example Domain'")
+		record_failures(1)
+		return
 	}
 
-	fmt.println("http_get_test: OK -  response contains 'Example Domain'")
+	fmt.println("OK   http_get_test: response contains 'Example Domain'")
 
 	fmt.println("=== END HTTP GET TEST ===")
 }
