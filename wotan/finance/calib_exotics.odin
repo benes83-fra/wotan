@@ -221,7 +221,7 @@ heston_mc_barrier_option :: proc(
 	return _crn_greeks(sum, n_paths, r, T, h_S, h_v)
 }
 
-// Legacy Wrapper: Keeps your existing code working perfectly
+// Up-and-out call (heston_mc_barrier_option with is_up = true, .Call)
 heston_mc_barrier_call :: proc(
 	S_0: f64,
 	K: f64,

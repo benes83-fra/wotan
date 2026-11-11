@@ -16,7 +16,12 @@ import "core:mem"
 // constant, so a batch of options (n × 1 inputs) panicked in tensor_mul; and
 // its intermediates computed from inputs without gradient (e^{−rT}, √T for
 // fixed r, T), or all of them without any gradient, were not linked into the
-// graph and leaked.
+// graph and leaked. Volatility and exotics: the FX normal CDF was
+// ½(1 + erf(x/√2)), which cancels in the left tail, so far out-of-the-money
+// Garman-Kohlhagen prices came out as 0 or negative; fx_digital_call_price
+// divided by σ, so σ = 0 with the forward at the strike gave NaN;
+// calibrate_sabr said β could be fixed by equal bounds but hard-coded its
+// bounds (now fixed_beta).
 
 @(private = "file")
 ff_vec :: proc(v: []f64, grad: bool) -> ^t.Tensor {
@@ -60,6 +65,67 @@ finance_fixes_test :: proc(allocator: mem.Allocator) {
 		)
 	}
 
+	{ 	// FX: far out-of-the-money Garman-Kohlhagen prices keep their precision
+		// S = 1.1, T = 0.5, r_d = 3%, r_f = 1%, σ = 10%; exact values (mpmath, 40 digits)
+		call := fin.fx_gk_price(1.1, 2.0, 0.5, 0.03, 0.01, 0.1, .Call)
+		put := fin.fx_gk_price(1.1, 0.605, 0.5, 0.03, 0.01, 0.1, .Put)
+		far := fin.fx_gk_price(1.1, 1.21 / 3.0, 0.5, 0.03, 0.01, 0.1, .Put)
+		good :=
+			math.abs(call / 5.65366489261909e-19 - 1) < 1e-9 &&
+			math.abs(put / 2.66807118060116e-20 - 1) < 1e-9 &&
+			math.abs(far / 2.28047185159941e-49 - 1) < 1e-9
+		report(
+			fmt.tprintf("FX far out of the money: call %.6e, put %.6e, %.6e", call, put, far),
+			good,
+			&passed,
+			&total,
+		)
+	}
+	{ 	// FX digital without volatility: S_T is the forward
+		at_fwd := fin.fx_digital_call_price(1.1, 1.1, 0.5, 0.02, 0.02, 0) // forward = strike
+		above := fin.fx_digital_call_price(1.1, 1.0, 0.5, 0.03, 0.01, 0)
+		good := at_fwd == 0 && math.abs(above - math.exp(-0.015)) < 1e-15
+		report(
+			fmt.tprintf(
+				"FX digital at sigma = 0: %v at the forward, %.12f in the money",
+				at_fwd,
+				above,
+			),
+			good,
+			&passed,
+			&total,
+		)
+	}
+	{ 	// SABR with β held fixed (calibrate_sabr's comment promised it; no way to do it)
+		p := fin.SABR_Params {
+			alpha = 1.3,
+			beta  = 0.6,
+			rho   = -0.35,
+			nu    = 0.5,
+		}
+		F := 100 * math.exp(0.03)
+		quotes: [7]fin.VolSurfacePoint
+		for &q, i in quotes {
+			K := 70 + 10 * f64(i)
+			q = {
+				strike      = K,
+				expiry      = 1,
+				implied_vol = fin.sabr_implied_vol(F, K, 1, p),
+			}
+		}
+		r := fin.calibrate_sabr(quotes[:], 100, 0.03, allocator, fixed_beta = 0.6)
+		good :=
+			r.params.beta == 0.6 &&
+			math.abs(r.params.alpha - 1.3) < 1e-8 &&
+			math.abs(r.params.rho + 0.35) < 1e-8 &&
+			math.abs(r.params.nu - 0.5) < 1e-8
+		report(
+			fmt.tprintf("calibrate_sabr with fixed_beta = 0.6: %v", r.params),
+			good,
+			&passed,
+			&total,
+		)
+	}
 	{ 	// black_scholes_price leaves nothing behind, with and without gradients
 		track: mem.Tracking_Allocator
 		mem.tracking_allocator_init(&track, runtime.default_allocator())

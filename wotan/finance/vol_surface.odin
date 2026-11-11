@@ -153,8 +153,7 @@ cmath_sqrt :: proc(z: complex128) -> complex128 {
 	return cmath_polar(math.sqrt_f64(r), theta / 2.0)
 }
 
-// ✅ CRITICAL FIX: This was literally an identity function before.
-// It must compute e^(x + iy) = e^x * (cos(y) + i*sin(y))
+// e^(x + iy) = e^x · (cos y + i sin y)
 cmath_exp :: proc(z: complex128) -> complex128 {
 	exp_x := math.exp(real(z))
 	return complex(exp_x * math.cos(imag(z)), exp_x * math.sin(imag(z)))
@@ -183,9 +182,8 @@ cmath_log1p :: proc(z: complex128) -> complex128 {
 	w := complex(1.0, 0.0) + z
 	if w == complex(1.0, 0.0) {return z}
 	return cmath_log(w) * z / (w - complex(1.0, 0.0))
-} // ============================================================================
-// Calibration Context (for ObjectiveFunc)
-// ============================================================================
+}
+
 // ============================================================================
 // Calibration Context
 // ============================================================================
@@ -194,6 +192,8 @@ SABR_CalibrationContext :: struct {
 	market_data: []VolSurfacePoint,
 	S:           f64,
 	r:           f64,
+	fix_beta:    bool, // _sabr_residuals: x = (α, ρ, ν) and β = beta
+	beta:        f64,
 }
 
 Heston_CalibrationContext :: struct {
@@ -305,12 +305,8 @@ _heston_model_prices :: proc(
 // Residuals of the SABR fit: model minus market implied volatility
 _sabr_residuals :: proc(x: []f64, res: []f64, user_data: rawptr) {
 	ctx := (^SABR_CalibrationContext)(user_data)
-	params := SABR_Params {
-		alpha = x[0],
-		beta  = x[1],
-		rho   = x[2],
-		nu    = x[3],
-	}
+	params :=
+		SABR_Params{alpha = x[0], beta = ctx.beta, rho = x[1], nu = x[2]} if ctx.fix_beta else SABR_Params{alpha = x[0], beta = x[1], rho = x[2], nu = x[3]}
 	for point, i in ctx.market_data {
 		F := ctx.S * math.exp(ctx.r * point.expiry)
 		res[i] = sabr_implied_vol(F, point.strike, point.expiry, params) - point.implied_vol
@@ -319,34 +315,41 @@ _sabr_residuals :: proc(x: []f64, res: []f64, user_data: rawptr) {
 
 // Calibrate one SABR parameter set to all quotes by Levenberg-Marquardt on the
 // implied-volatility errors. Starts from β = 0.7, ρ = −0.3, ν = 0.4 and the α
-// that reproduces the at-the-money volatility of the shortest expiry. (β and ρ
-// both tilt the smile and are only weakly identified jointly; fix β by setting
-// equal bounds if it is known.)
+// that reproduces the at-the-money volatility of the shortest expiry. β and ρ
+// both tilt the smile and are only weakly identified jointly, so noisy quotes
+// can move β far from its true value; fixed_beta ∈ [0, 1] holds β there and
+// fits α, ρ and ν only (the usual market practice, e.g. β = 0.5 or 1).
 calibrate_sabr :: proc(
 	market_data: []VolSurfacePoint,
 	S: f64,
 	r: f64,
 	allocator: mem.Allocator = context.allocator,
+	fixed_beta: f64 = -1, // < 0: fit β too
 ) -> SABR_CalibrationResult {
 	if len(market_data) == 0 {return {}}
+	fix := fixed_beta >= 0
 	ctx := SABR_CalibrationContext {
 		market_data = market_data,
 		S           = S,
 		r           = r,
+		fix_beta    = fix,
+		beta        = min(fixed_beta, 1.0),
 	}
 
-	beta0 := 0.7
+	beta0 := ctx.beta if fix else 0.7
 	atm, T_atm := _atm_vol(market_data, S, r, true)
 	F_atm := S * math.exp(r * T_atm)
 	alpha0 := atm * math.pow(F_atm, 1.0 - beta0)
 
 	inf := math.inf_f64(1)
-	params := []opt.Calibration_Param {
+	all_params := [4]opt.Calibration_Param {
 		{"alpha", alpha0, 1e-6, inf, .Linear},
 		{"beta", beta0, 0.0, 1.0, .Linear},
 		{"rho", -0.3, -0.999, 0.999, .Linear},
 		{"nu", 0.4, 1e-6, inf, .Linear},
 	}
+	free_params := [3]opt.Calibration_Param{all_params[0], all_params[2], all_params[3]}
+	params := free_params[:] if fix else all_params[:]
 	res := opt.least_squares(
 		params,
 		_sabr_residuals,
@@ -357,8 +360,10 @@ calibrate_sabr :: proc(
 	)
 	defer opt.least_squares_result_free(&res)
 
+	p :=
+		SABR_Params{alpha = res.x[0], beta = ctx.beta, rho = res.x[1], nu = res.x[2]} if fix else SABR_Params{alpha = res.x[0], beta = res.x[1], rho = res.x[2], nu = res.x[3]}
 	return SABR_CalibrationResult {
-		params = SABR_Params{alpha = res.x[0], beta = res.x[1], rho = res.x[2], nu = res.x[3]},
+		params = p,
 		rmse = res.rms,
 		converged = res.converged,
 		iterations = res.iterations,

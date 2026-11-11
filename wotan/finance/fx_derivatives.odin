@@ -24,8 +24,10 @@ FXGKResult :: struct {
 	rho_f:   f64, // dP/dr_f
 }
 
+// Standard normal CDF via erfc: accurate far in both tails (1 + erf(x/√2)
+// cancels for x ≪ 0, which made far out-of-the-money prices 0 or negative)
 _N :: proc(x: f64) -> f64 {
-	return 0.5 * (1.0 + math.erf(x / math.sqrt_f64(2.0)))
+	return _bs_cdf(x)
 }
 
 _n :: proc(x: f64) -> f64 {
@@ -353,6 +355,9 @@ _fx_fd_greeks :: proc(
 // Cash-or-nothing call: pays 1 (domestic) at T if S_T > K
 fx_digital_call_price :: proc(S: f64, K: f64, T: f64, r_d: f64, r_f: f64, sigma: f64) -> f64 {
 	if T <= 0.0 {return S > K ? 1.0 : 0.0}
+	if sigma <= 0.0 { 	// S_T is the forward
+		return math.exp_f64(-r_d * T) if S * math.exp_f64((r_d - r_f) * T) > K else 0.0
+	}
 	sqrt_T := math.sqrt_f64(T)
 	d2 := (math.ln(S / K) + (r_d - r_f - 0.5 * sigma * sigma) * T) / (sigma * sqrt_T)
 	return math.exp_f64(-r_d * T) * _N(d2)
