@@ -270,7 +270,7 @@ yield_curve_forward_rate :: proc(curve: ^YieldCurve, t1: f64, t2: f64) -> f64 {
 }
 
 // Free the yield curve memory
-free_yield_curve :: proc(curve: ^YieldCurve, allocator: mem.Allocator) {
+free_yield_curve :: proc(curve: ^YieldCurve, allocator: mem.Allocator = context.allocator) {
 	delete(curve.tenors, allocator)
 	delete(curve.zero_rates, allocator)
 }

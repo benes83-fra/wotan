@@ -67,7 +67,9 @@ zero_inflation_rate :: proc(c: ^ZeroInflationCurve, d: w.Date) -> f64 {
 	return z0 + (z1 - z0) * (t - t0) / (t1 - t0)
 }
 
-// Index level of the month of d: the published fixing, else the forecast
+// Index level of the month of d: the published fixing, else the forecast from
+// the curve after the last published month; NaN before the first one or
+// without a curve
 cpi_fixing :: proc(index: ^CPIIndex, d: w.Date) -> f64 {
 	m := _month_start(d)
 	n := len(index.months)
@@ -76,7 +78,8 @@ cpi_fixing :: proc(index: ^CPIIndex, d: w.Date) -> f64 {
 		return index.values[k]
 	}
 	c := index.curve
-	if c == nil {return math.QNAN_F64}
+	// no forecast before the first published month (QuantLib: missing fixing)
+	if c == nil || (n > 0 && w.date_less(m, index.months[0])) {return math.QNAN_F64}
 	base := cpi_fixing(&CPIIndex{index.months, index.values, nil}, c.base_date)
 	return(
 		base *
@@ -213,7 +216,12 @@ bootstrap_zero_inflation_curve :: proc(
 		sw: ZeroCouponInflationSwap,
 		i, upto: int,
 	) -> f64 {
-		index.curve^ = ZeroInflationCurve{c.base_date, c.day_count, c.months[:upto], c.rates[:upto]}
+		index.curve^ = ZeroInflationCurve {
+			c.base_date,
+			c.day_count,
+			c.months[:upto],
+			c.rates[:upto],
+		}
 		old := c.rates[i]
 		lo, hi := -0.5, 0.5
 		for _ in 0 ..< 200 {

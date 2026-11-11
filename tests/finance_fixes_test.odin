@@ -1,5 +1,6 @@
 package tests
 
+import w "../wotan/core"
 import fin "../wotan/finance"
 import l "../wotan/linalg"
 import t "../wotan/tensor"
@@ -21,7 +22,12 @@ import "core:mem"
 // Garman-Kohlhagen prices came out as 0 or negative; fx_digital_call_price
 // divided by σ, so σ = 0 with the forward at the strike gave NaN;
 // calibrate_sabr said β could be fixed by equal bounds but hard-coded its
-// bounds (now fixed_beta).
+// bounds (now fixed_beta). Fixed income: the convertible lattice ended at
+// conversion_end, so when conversion stopped before maturity the redemption
+// and later coupons were paid early (a 2030 bond convertible until 2028 was
+// worth 101.78 with a worthless share, above its 92.60 straight value; QuantLib
+// does the same); cpi_fixing back-cast months before the first published
+// fixing from the curve instead of returning NaN.
 
 @(private = "file")
 ff_vec :: proc(v: []f64, grad: bool) -> ^t.Tensor {
@@ -168,6 +174,74 @@ finance_fixes_test :: proc(allocator: mem.Allocator) {
 			&total,
 		)
 	}
+	{ 	// convertible whose conversion right ends two years before maturity
+		today := w.Date{2026, 11, 11}
+		sch := fin.make_schedule(
+			{2023, 3, 15},
+			{2030, 3, 15},
+			{6, .Months},
+			{.TARGET},
+			.Following,
+			.Following,
+			allocator = allocator,
+		)
+		bond := fin.DatedBond{100, 0.025, sch, .ACT_ACT_ICMA, .Following, 0}
+		mkt := fin.ConvertibleMarket {
+			spot          = 1e-6,
+			rate          = 0.03,
+			dividend      = 0.01,
+			volatility    = 0.3,
+			credit_spread = 0.02,
+		}
+		cb := fin.ConvertibleBond{bond, 3.5, {2023, 3, 15}, {2028, 3, 15}, nil}
+		worthless := fin.price_convertible_bond(cb, today, mkt, allocator = allocator)
+		// the straight bond: no conversion value, the full-length lattice
+		straight := cb
+		straight.conversion_ratio, straight.conversion_end = 1e-12, {2030, 3, 15}
+		floor := fin.price_convertible_bond(straight, today, mkt, allocator = allocator)
+		// no credit spread: equal to a 2028 convertible redeeming the 2028 value of
+		// the later flows, 98.9926 (QuantLib BinomialCRRConvertibleEngine, 4001 steps)
+		mkt.spot, mkt.credit_spread = 25, 0
+		short_window := fin.price_convertible_bond(cb, today, mkt, 4001, allocator)
+		good := math.abs(worthless - floor) < 1e-9 && math.abs(short_window - 107.027431) < 3e-3
+		report(
+			fmt.tprintf(
+				"convertible, conversion until 2028 of a 2030 bond: S ~ 0 %.6f (straight bond %.6f), no credit spread %.6f (QuantLib equivalent 107.027431)",
+				worthless,
+				floor,
+				short_window,
+			),
+			good,
+			&passed,
+			&total,
+		)
+		fin.free_schedule(&sch, allocator)
+	}
+	{ 	// CPI before the first published fixing: no back-cast from the curve
+		months := [3]w.Date{{2026, 7, 1}, {2026, 8, 1}, {2026, 9, 1}}
+		values := [3]f64{126.5, 126.8, 127.3}
+		curve := fin.ZeroInflationCurve {
+			base_date = {2026, 9, 1},
+			day_count = .ACT_365,
+			months    = {{2027, 9, 1}},
+			rates     = {0.02},
+		}
+		index := fin.CPIIndex{months[:], values[:], &curve}
+		before := fin.cpi_fixing(&index, {2026, 6, 1})
+		after := fin.cpi_fixing(&index, {2027, 9, 1})
+		good := math.is_nan(before) && math.abs(after - 127.3 * 1.02) < 1e-12
+		report(
+			fmt.tprintf(
+				"CPI fixing before the first published month: %v; a year after the base %.6f",
+				before,
+				after,
+			),
+			good,
+			&passed,
+			&total,
+		)
+	}
+
 	{ 	// a batch of options (last: it used to panic)
 		S, K := ff_vec({100, 100, 100}, true), ff_vec({90, 100, 110}, false)
 		T, r, sigma :=

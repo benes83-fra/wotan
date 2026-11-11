@@ -20,7 +20,11 @@ import "core:mem"
 //   up converted, rolled back as the risk-neutral average, and its value is
 //   discounted at r + (1 − p)·credit_spread (simple per step);
 // - at each node: calls / puts, then coupons, then conversion if it pays more.
-// Event dates are snapped to the nearest time step.
+// Event dates are snapped to the nearest time step. The tree runs to the later
+// of maturity and conversion_end (QuantLib stops at conversion_end, which pays
+// the redemption and later coupons early when conversion ends before
+// maturity). A soft call lets the holder convert even outside the conversion
+// window (it forces conversion), as in QuantLib.
 
 ConvertibleCallType :: enum u8 {
 	Call, // issuer redeems at the price (the holder may convert instead)
@@ -67,8 +71,9 @@ price_convertible_bond :: proc(
 ) -> f64 {
 	b := cb.bond
 	sd := b.schedule.dates
-	maturity := sd[len(sd) - 1]
-	T := date_to_time(valuation, cb.conversion_end) // the exercise's last date ends the tree
+	last :=
+		cb.conversion_end if w.date_less(sd[len(sd) - 1], cb.conversion_end) else sd[len(sd) - 1]
+	T := date_to_time(valuation, last)
 	time :: proc(valuation, d: w.Date) -> f64 {return date_to_time(valuation, d)}
 	r, q, sg := mkt.rate, mkt.dividend, mkt.volatility
 	disc :: proc(r, t: f64) -> f64 {return math.exp(-r * t)}
@@ -116,7 +121,7 @@ price_convertible_bond :: proc(
 	for dv, k in mkt.dividends {div_step[k] = snap(time(valuation, dv.date), dt, n)}
 	conv_lo :=
 		snap(time(valuation, cb.conversion_start), dt, n) if w.date_less(valuation, cb.conversion_start) else -1
-	conv_hi := snap(T, dt, n)
+	conv_hi := snap(time(valuation, cb.conversion_end), dt, n)
 
 	V := make([]f64, n + 1, allocator)
 	P := make([]f64, n + 1, allocator) // conversion probability
@@ -225,6 +230,5 @@ price_convertible_bond :: proc(
 		b.face_value,
 		convertible(0, conv_lo, conv_hi),
 	)
-	_ = maturity
 	return V[0]
 }

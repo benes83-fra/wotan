@@ -117,6 +117,8 @@ _is_bd :: proc(cal: Calendar, n: i64) -> bool {
 
 @(private = "file")
 _is_target_holiday :: proc(y, m, d, doy, em: int) -> bool {
+	// New Year, Good Friday, Easter Monday, Labour Day, Christmas, Boxing Day,
+	// and the 31 Dec closings of 1998, 1999 and 2001
 	return(
 		(d == 1 && m == 1) ||
 		(doy == em - 3 && y >= 2000) ||
@@ -125,10 +127,7 @@ _is_target_holiday :: proc(y, m, d, doy, em: int) -> bool {
 		(d == 25 && m == 12) ||
 		(d == 26 && m == 12 && y >= 2000) ||
 		(d == 31 && m == 12 && (y == 1998 || y == 1999 || y == 2001)) \
-	) // Good Friday
-	// Easter Monday
-	// Labour Day
-
+	)
 }
 
 // Federal holidays shared by the US calendars; a Saturday holiday moves to
@@ -190,6 +189,8 @@ _us_christmas :: proc(m, d: int, wd: w.Days) -> bool {
 
 @(private = "file")
 _is_us_settlement_holiday :: proc(y, m, d: int, wd: w.Days) -> bool {
+	// New Year's Day (on the Friday before when it falls on a Saturday) and the
+	// federal holidays
 	return(
 		((d == 1 || (d == 2 && wd == .Monday)) && m == 1) ||
 		(d == 31 && wd == .Friday && m == 12) ||
@@ -201,7 +202,7 @@ _is_us_settlement_holiday :: proc(y, m, d: int, wd: w.Days) -> bool {
 		_us_labor(m, d, wd) ||
 		_us_columbus(y, m, d, wd) ||
 		_us_veterans(y, m, d, wd, true) ||
-		_us_thanksgiving(m, d, wd) ||// New Year's Day on a Saturday
+		_us_thanksgiving(m, d, wd) ||
 		_us_christmas(m, d, wd) \
 	)
 }
@@ -211,6 +212,8 @@ _is_us_settlement_holiday :: proc(y, m, d: int, wd: w.Days) -> bool {
 // day, early close only); one-off closings
 @(private = "file")
 _is_us_gov_bond_holiday :: proc(y, m, d: int, wd: w.Days, doy, em: int) -> bool {
+	// the one-offs at the end: President Reagan's funeral, Hurricane Sandy,
+	// President Bush's funeral
 	good_friday := doy == em - 3 && !(y >= 1996 && m == 4 && d <= 7)
 	return(
 		((d == 1 || (d == 2 && wd == .Monday)) && m == 1) ||
@@ -228,13 +231,15 @@ _is_us_gov_bond_holiday :: proc(y, m, d: int, wd: w.Days, doy, em: int) -> bool 
 		(y == 2004 && m == 6 && d == 11) ||
 		(y == 2012 && m == 10 && d == 30) ||
 		(y == 2018 && m == 12 && d == 5) \
-	) // President Reagan's funeral
-	// Hurricane Sandy
-	// President Bush's funeral
+	)
 }
 
 @(private = "file")
 _is_uk_settlement_holiday :: proc(y, m, d: int, wd: w.Days, doy, em: int) -> bool {
+	// bank holidays: early May (first Monday; 8 May in 1995 and 2020, VE day),
+	// spring (last Monday of May, moved for the 2002 / 2012 / 2022 jubilees),
+	// summer (last Monday of August), and the one-offs: jubilees, the 2011 royal
+	// wedding, the 2022 state funeral, the 2023 coronation
 	bank :=
 		(d <= 7 && wd == .Monday && m == 5 && y != 1995 && y != 2020) ||
 		(d == 8 && m == 5 && (y == 1995 || y == 2020)) ||
@@ -244,10 +249,10 @@ _is_uk_settlement_holiday :: proc(y, m, d: int, wd: w.Days, doy, em: int) -> boo
 		(d >= 25 && wd == .Monday && m == 8) ||
 		(d == 3 && m == 6 && y == 2002) ||
 		(d == 5 && m == 6 && y == 2012) ||
-		(d == 3 && m == 6 && y == 2022) ||// Early May bank holiday, first Monday of May (May 8th in 1995 and 2020, VE day)
+		(d == 3 && m == 6 && y == 2022) ||
 		(d == 29 && m == 4 && y == 2011) ||
-		(d == 19 && m == 9 && y == 2022) ||// Spring bank holiday, last Monday of May (moved for the jubilees)
-		(d == 8 && m == 5 && y == 2023) // Summer bank holiday, last Monday of August // one-offs: jubilees, royal wedding, state funeral, coronation
+		(d == 19 && m == 9 && y == 2022) ||
+		(d == 8 && m == 5 && y == 2023)
 	return(
 		((d == 1 || ((d == 2 || d == 3) && wd == .Monday)) && m == 1) ||
 		doy == em - 3 ||
@@ -596,9 +601,10 @@ _next_twentieth :: proc(n: i64) -> i64 {
 // Scheduled termination of a standard CDS traded on trade_date for `tenor`
 // (whole years or multiples of 3 months; QuantLib cdsMaturity): the IMM 20th
 // on or before the trade date + tenor + 3 months. Under CDS2015 maturities
-// roll only on Jun 20 and Dec 20: a trade between Mar 20 and Jun 19 (Sep 20 and
-// Dec 19) still matures on a Dec 20 (Jun 20). A zero tenor is only defined
-// before the June / December roll (else returns the zero date).
+// are Jun 20 and Dec 20 only and roll on Mar 20 and Sep 20: a trade from Mar 20
+// to Sep 19 matures on a Jun 20, one from Sep 20 to Mar 19 on a Dec 20 (5Y
+// traded 1 Jul 2026: 20 Jun 2031). A zero tenor is only defined before the
+// June / December 20th (else returns the zero date).
 cds_maturity_date :: proc(
 	trade_date: w.Date,
 	tenor: Period,
