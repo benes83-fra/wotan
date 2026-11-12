@@ -4,9 +4,11 @@ import l "../wotan/linalg"
 import ml_fin "../wotan/ml_finance"
 import nn "../wotan/nn"
 import t "../wotan/tensor"
+import "base:runtime"
 import "core:fmt"
 import "core:math/rand"
 import "core:mem"
+import "core:os"
 
 // Neural SDF against numpy / scipy on 8 dates and 2 assets: the loss
 // Σ_i (mean(M R_i) - 1)² + λ Var(M) and its gradient in M; the minimiser over every
@@ -196,6 +198,69 @@ neural_sdf_reference_test :: proc(allocator: mem.Allocator) {
 				"network gradient vs finite differences: %d parameters, max relative error %.1e",
 				checked,
 				max_err,
+			),
+		)
+	}
+	// 4. save / load / free under a tracking allocator: nothing live afterwards (the loaders
+	// freed the checkpoint's optimizer contents but not the Adam struct itself)
+	{
+		track: mem.Tracking_Allocator
+		mem.tracking_allocator_init(&track, runtime.default_allocator())
+		live: [2]int
+		same: [2]bool
+		{
+			context.allocator = mem.tracking_allocator(&track)
+			path := "model_checkpoints/neural_sdf_roundtrip.bin"
+			defer os.remove(path)
+			cfg := ml_fin.NeuralSDFConfig {
+				input_size       = 3,
+				hidden_size      = 4,
+				num_layers       = 1,
+				num_assets       = 2,
+				epsilon          = 0.01,
+				variance_penalty = SDF_LAMBDA,
+			}
+			model := ml_fin.neural_sdf_new(cfg)
+			if !ml_fin.neural_sdf_save(model, path) {fmt.println("   neural_sdf_save failed")}
+			loaded, ok := ml_fin.neural_sdf_load(path, cfg)
+			if ok {
+				same[0] = true
+				for &layer, i in loaded.network.layers {
+					a, _ := layer.(nn.LinearLayer)
+					b, _ := model.network.layers[i].(nn.LinearLayer)
+					if a.weights !=
+					   nil {for v, j in a.weights.data.data {same[0] &&= v == b.weights.data.data[j]}}
+				}
+				ml_fin.neural_sdf_free(loaded)
+			}
+			ml_fin.neural_sdf_free(model)
+			live[0] = len(track.allocation_map)
+
+			hcfg := ml_fin.DeepHedgerConfig {
+				state_size  = 3,
+				hidden_size = 4,
+				num_layers  = 1,
+				num_assets  = 1,
+			}
+			hedger := ml_fin.deep_hedger_new(hcfg)
+			if !ml_fin.deep_hedger_save(hedger, path) {fmt.println("   deep_hedger_save failed")}
+			hl, hok := ml_fin.deep_hedger_load(path, context.allocator, hcfg)
+			same[1] = hok
+			if hok {ml_fin.deep_hedger_free(hl)}
+			ml_fin.deep_hedger_free(hedger)
+			live[1] = len(track.allocation_map) - live[0]
+		}
+		bad := len(track.bad_free_array)
+		mem.tracking_allocator_destroy(&track)
+		expect(
+			&passed,
+			&total,
+			same[0] && same[1] && live == {0, 0} && bad == 0,
+			fmt.tprintf(
+				"save / load / free: weights reloaded %v, live allocations afterwards %v (neural SDF, deep hedger), bad frees %d",
+				same,
+				live,
+				bad,
 			),
 		)
 	}

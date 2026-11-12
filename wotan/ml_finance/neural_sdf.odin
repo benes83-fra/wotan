@@ -292,6 +292,7 @@ neural_sdf_load :: proc(
 	}
 	if loaded_opt != nil {
 		nn.adam_free(loaded_opt)
+		free(loaded_opt, allocator) // load_checkpoint allocates the Adam struct itself
 	}
 	model := new(NeuralSDF, allocator)
 	model.network = loaded_model

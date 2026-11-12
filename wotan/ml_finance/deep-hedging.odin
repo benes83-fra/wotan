@@ -103,6 +103,7 @@ deep_hedger_load :: proc(
 
 	if loaded_opt != nil {
 		nn.adam_free(loaded_opt)
+		free(loaded_opt, allocator) // load_checkpoint allocates the Adam struct itself
 	}
 
 	hedger := new(DeepHedger, allocator)

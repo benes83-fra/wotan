@@ -3,6 +3,7 @@ package ml_finance
 import "core:fmt"
 import "core:math"
 import "core:mem"
+import "core:strings"
 
 DispersionSignal :: struct {
 	index_iv:            f64,
@@ -137,57 +138,44 @@ compute_dispersion_signal :: proc(
 	return sig
 }
 
+// A boxed summary; every row is padded to the box (a long recommendation is wrapped
+// before its parenthesis)
 print_dispersion_signal :: proc(sig: DispersionSignal) {
-	fmt.println(
-		"\n╔════════════════════════════════════════════════════════════╗",
-	)
-	fmt.println("║          CROSS-ASSET DISPERSION TRADING DASHBOARD          ║")
-	fmt.println(
-		"╠════════════════════════════════════════════════════════════╣",
-	)
-	fmt.printf(
-		"║  Index IV (VIX):        %6.2f%%                            ║\n",
-		sig.index_iv * 100.0,
-	)
-	fmt.printf(
-		"║  Index Forecast RV:     %6.2f%%                            ║\n",
-		sig.index_rv * 100.0,
-	)
-	fmt.println(
-		"╠════════════════════════════════════════════════════════════╣",
-	)
-	fmt.printf(
-		"║  Avg Component IV:      %6.2f%%                            ║\n",
-		sig.avg_comp_iv * 100.0,
-	)
-	fmt.printf(
-		"║  Avg Component RV:      %6.2f%%                            ║\n",
-		sig.avg_comp_rv * 100.0,
-	)
-	fmt.println(
-		"╠════════════════════════════════════════════════════════════╣",
-	)
-	fmt.printf(
-		"║  IMPLIED CORRELATION:   %+6.2f%% (Market Pricing)           ║\n",
-		sig.implied_corr * 100.0,
-	)
-	fmt.printf(
-		"║  REALIZED CORRELATION:  %+6.2f%% (Model Forecast)           ║\n",
-		sig.realized_corr * 100.0,
-	)
-	fmt.println(
-		"╠════════════════════════════════════════════════════════════╣",
-	)
-	fmt.printf(
-		"║  CORRELATION PREMIUM:   %+6.2f%%                           ║\n",
-		sig.correlation_premium * 100.0,
-	)
-	fmt.printf("║  NORMALIZED SIGNAL:     %+6.3f                            ║\n", sig.signal)
-	fmt.println(
-		"╠════════════════════════════════════════════════════════════╣",
-	)
-	fmt.printf("║  ACTION: %s  ║\n", sig.recommendation)
-	fmt.println(
-		"╚════════════════════════════════════════════════════════════╝",
-	)
+	W :: 58 // inner width after the two-space margin
+	row :: proc(format: string, args: ..any) {
+		fmt.printf("║  %-58s║\n", fmt.tprintf(format, ..args))
+	}
+	rule :: proc(left, right: string) {
+		fmt.print(left)
+		for _ in 0 ..< W + 2 {fmt.print("═")}
+		fmt.println(right)
+	}
+	fmt.println()
+	rule("╔", "╗")
+	row("        CROSS-ASSET DISPERSION TRADING DASHBOARD")
+	rule("╠", "╣")
+	row("Index IV:              %6.2f%%", sig.index_iv * 100.0)
+	row("Index forecast RV:     %6.2f%%", sig.index_rv * 100.0)
+	rule("╠", "╣")
+	row("Avg component IV:      %6.2f%%", sig.avg_comp_iv * 100.0)
+	row("Avg component RV:      %6.2f%%", sig.avg_comp_rv * 100.0)
+	rule("╠", "╣")
+	row("IMPLIED CORRELATION:   %+6.2f%% (market pricing)", sig.implied_corr * 100.0)
+	row("REALIZED CORRELATION:  %+6.2f%% (model forecast)", sig.realized_corr * 100.0)
+	rule("╠", "╣")
+	row("CORRELATION PREMIUM:   %+6.2f%%", sig.correlation_premium * 100.0)
+	row("NORMALIZED SIGNAL:     %+6.3f", sig.signal)
+	rule("╠", "╣")
+	action := sig.recommendation
+	if len(action) + len("ACTION: ") > W {
+		if k := strings.index(action, " ("); k > 0 {
+			row("ACTION: %s", action[:k])
+			row("        %s", action[k + 1:])
+		} else {
+			row("ACTION: %s", action)
+		}
+	} else {
+		row("ACTION: %s", action)
+	}
+	rule("╚", "╝")
 }

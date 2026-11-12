@@ -1,6 +1,6 @@
 # The `ml_finance` package, part 1: methods for financial machine learning
 
-This is the first part of the guide to `wotan/ml_finance`. It covers the tools that surround a model rather than the models themselves, mostly after López de Prado's *Advances in Financial Machine Learning* (AFML, 2018) and *Machine Learning for Asset Managers* (MLAM, 2020):
+This is the first part of the guide to `wotan/ml_finance` ([part 2](ml_finance_asset_pricing_guide.md) covers the asset-pricing models). It covers the tools that surround a model rather than the models themselves, mostly after López de Prado's *Advances in Financial Machine Learning* (AFML, 2018) and *Machine Learning for Asset Managers* (MLAM, 2020):
 - events and labels: the CUSUM filter, triple-barrier labels, meta-labels and bet sizes;
 - sample weights for overlapping labels, and the sequential bootstrap;
 - fractional differencing: stationary features that keep memory;
