@@ -1,124 +1,156 @@
-# `main.odin` — Analysis & Summary
+# Wotan documentation
 
-## Overview
+Wotan is a library for data analysis, statistics, machine learning and quantitative finance, written in [Odin](https://odin-lang.org/). This page is the entry point to its documentation. It gives an overview of the packages, says which guide covers what, and lists the conventions that all the guides share. For installation and building, see the [README](../README.md).
 
-`main.odin` is the CLI entry point / demo app for **Wotan**, a large-scale data analytics, machine learning, and finance library written in [Odin](https://odin-lang.org/). It exercises nearly every public API by constructing small DataFrames from scratch and running regression tests against each subsystem.
+## Contents
 
----
+1. [The packages at a glance](#1-the-packages-at-a-glance)
+2. [The guides](#2-the-guides)
+3. [Where to start](#3-where-to-start)
+4. [Conventions used throughout](#4-conventions-used-throughout)
+5. [Tests and validation](#5-tests-and-validation)
+6. [Packages without a guide](#6-packages-without-a-guide)
 
-## 1. Core Framework (`wotan/core`)
+## 1. The packages at a glance
 
-| Feature | Description |
-|---------|-------------|
-| **DataFrames** | Mutable, typed-tabular data structure (`ww.dataframe_new`, `w.column_new`, `w.add_column`, etc.) with columns of type Int, String, Float64, Boolean, Date, Datetime, Time. |
-| **Column slicing** | `df_series` extracts a single column as a Series; indexing returns value + null flag. |
-| **Row/col slicing** | `dataframe_slice_rows` / `dataframe_select_columns` — positional and named projection. |
-| **Filtering** | Boolean-mask filtering (`dataframe_filter_bool_column`, `filter`) and mask combinators (`mask_and`, `mask_less-than`). `wobei` applies a mask inline. |
-| **Select / expressions** | Eager expression builder supports: column reference, add/subtract/divide/round operations, boolean masking, apply-proc lambdas, type coercion (int→float, etc.). |
-| **Date/Datetime arithmetic** | `Date`, `Time`, `Datetime` structs with month/day/hour/second increment and diff helpers; `now()` constructor. |
-| **Memory tracking** | In `ODIN_DEBUG` builds, a `mem.Tracking_Allocator` wraps the default allocator; on exit it prints per-call-site leak info (`fmt.eprintf("%v leaked %v bytes\n")`). |
+The packages build on each other in layers. Lower layers do not depend on higher ones.
 
----
+```
+ applications   finance  ·  ml_finance  ·  behavioral_finance
+                     │             │
+ models         analytics (+ analytics/ML)  ·  nn (+ tokenizers)  ·  optimize
+                     │                         │
+ numerics       linalg  ─────────────────────  tensor (autograd)
+                     │
+ data           core (DataFrame)  ·  importer  ·  exporter  ·  net  ·  plot
+```
 
-## 2. Import / Export (`wotan/importer`, `wotan/exporter`)
+| Package | Import as | What it does |
+|---|---|---|
+| `core` | `w "wotan/core"` | typed columns and the `DataFrame`: selection, masks, computed columns, sorting, indexes, groupby, joins, dates |
+| `importer` / `exporter` | `io "wotan/importer"` | CSV, JSON, JSONL, HTML and Excel in and out |
+| `linalg` | `l "wotan/linalg"` | the `Matrix` type, products, LU, Cholesky, QR, least squares, eigenvalues, SVD, SIMD kernels |
+| `tensor` | `t "wotan/tensor"` | reverse-mode autograd, graph scopes, convolutions, recurrent cells, attention |
+| `nn` | `nn "wotan/nn"` | layers, sequential models, losses, optimizers, GPT, BERT, GAN, VAE, checkpoints; `nn/tokenizers` for BPE and WordPiece |
+| `optimize` | `optim "wotan/optimize"` | SGD, Adam, RMSProp, L-BFGS, least squares, learning-rate schedules |
+| `analytics` | `ts "wotan/analytics"` | rolling and EW statistics, tests, ARIMA, GARCH, VAR, cointegration, Kalman filters |
+| `analytics/ML` | `ml "wotan/analytics/ML"` | regression, classification, SVMs, trees and ensembles, k-means, scalers, metrics, cross-validation, pipelines |
+| `finance` | `fin "wotan/finance"` | option pricing and simulation, volatility models, curves and bonds, swaps and credit, portfolios, risk, backtests |
+| `ml_finance` | `mlf "wotan/ml_finance"` | machine learning for finance: labels and backtest statistics, asset pricing, forecasting, deep hedging, RL |
+| `behavioral_finance` | `bf "wotan/behavioral_finance"` | prospect theory, behavioural portfolios, sentiment, herding, heuristics |
+| `net` | `net "wotan/net"` | HTTP through libcurl, Yahoo Finance prices and option chains |
+| `plot` | `plot "wotan/plot"` | PNG charts: lines, scatter, histograms, bars, heatmaps |
 
-| Format | CSV / JSON / JSONL / HTML / Excel (`xlsx`) / ZIP — all exercised through tests. |
-|--------|-----------------------------------------------------------------------------|| Date parsing from CSV is validated via dedicated date export tests. HTTP GET support is present (`http_get_test`). Yahoo Finance JSON/Events endpoints are included, enabling market-data pull workflows.
+The aliases are the ones the guides use; any alias works.
 
-## 3. Linear Algebra & Statistics (`wotan/linalg`, `wotan/tensor`)
+## 2. The guides
 
-- **SIMD-accelerated** BLAS-like ops (vector sub, rotation).
-- **LU** decomposition: basic → singular, determinant, solve, inverse, numeric dump.
-- **SVD / Thin-SVD**: full, rank-deficient, nearly-rank-deficient, 1×1, wide/narrow matrix variants. Golub-Reinsch implementation path.
-- **EIG** diagonal & symmetric eigendecomposition; condition-number helpers (`cond2`).
-- **QR** decomposition, Kronecker product.
-- **Correlation** matrix computation.
+Each guide is a user guide for one package, or one part of a large package. They all follow the same plan:
+- **Setup** with the imports and the conventions of the package;
+- **sections** that introduce one topic each, with runnable examples;
+- **validation**: what the results were compared against;
+- **quick reference**: a table of the procedures.
 
-## 4. Classical ML (`wotan/ml`)
+Every example in the guides was compiled and run against the current code, and the output shown is the real output. Where writing a guide turned up a bug, the bug was fixed, and the guide says so.
 
-| Subsystem | Key tests exercised |
-|-----------|---------------------|
-| **OLS (Ordinary Least Squares)** | Basic + full pipeline regression. |
-| **WLS / GLS / Ridge / Lasso** | Weighted, generalized least-squares; regularised linear (RidgeCV, LassoCV cross-validation). |
-| **Decision Tree / Random Forest / Gradient Boosting** | `dt_test`, `rf_test`, `gb_test`; with tree serialization. |
-| **Logistic Regression** | Binary + real-world + multiclass variants. |
-| **KNN** — k-closest-neighbor classification. |
-| **PCR (Principal Component Regression)** | PCA + regression two-step. |
-| **Gaussian Naive Bayes** | `gnb_test`. |
-| **K-Means clustering** | `km_test`, `km` module. |
-| **SVM / Kernel SVM / SVR** | Linear and kernelised support-vector machines; regression variant. |
-| **MLP (Multilayer Perceptron)** — feedforward neural net with autograd, MSE training, classification head, Dropout. |
-| **Metrics & Model Selection** | Classification metrics, train/test splits, GridSearchCV, RandomizedSearchCV, Pipelines (serial + comprehensive). |
+### Data and numerics
 
-## 5. Deep Learning (`wotan/nn`)
+| Guide | Covers |
+|---|---|
+| [core](core_guide.md) | the data model, building and loading DataFrames, printing, selecting and filtering, computed columns, sorting, indexes, grouping, joins, dates and times, memory |
+| [linalg](linalg_guide.md) | the `Matrix` type, matrices from DataFrames, products, covariance and correlation, LU, Cholesky, QR, least squares, eigenvalues and SVD, vector kernels |
+| [tensor](tensor_guide.md) | tensors and gradients, element-wise and matrix operations, reductions and losses, normalisation, convolution, recurrent cells and attention, the backward pass, graph scopes |
+| [plot](plot_guide.md) | configuration, line charts, several series, scatter plots and histograms, bars, heatmaps, themes, axes, drawing your own charts |
 
-- **Layers**: Conv2D, Pooling, Dense with activation helpers (`ReLU`), Bias, Dropout.
-- **Network API**: `sequential`, flexible network builder.
-- **Activations / Optimizers**: ReLU, Adam optimizer (basic + classification variant).
-- **CNN demo**: MNIST CNN loader + augmentation pipeline (training / test models, augmented model path).
-- **BatchNorm + RNN family**: Simple RNN, GRU, LSTM; Embedding layer.
-- **Transformer architecture**: Positional encoding → multi-head attention → Layer Norm → FFN → encoder block → full encoder → decoder; reversal test present.
-- **Language Models**: Character-level LM, GPT (full + Shakespeare fine-tune path), BERT model.
-- **Generative models**: GAN v2, WGAN, VAE.
-- **Transfer Learning**: Generic transfer learning utilities.
+### Statistics and machine learning
 
-## 6. Time Series & Econometrics (`wotan/analytics`)
+| Guide | Covers |
+|---|---|
+| [analytics](analytics_guide.md) | rolling and exponentially weighted statistics, covariance and PCA, autocorrelation and stationarity tests, decomposition and smoothing, ARIMA, SARIMA and ARIMAX, GARCH, VAR and Granger causality, cointegration, Kalman filters, regression diagnostics |
+| [machine learning](ml_guide.md) (`analytics/ML`) | from DataFrames to model inputs, linear and regularised regression, Fama–MacBeth, classification, sample weights, SVMs, trees and ensembles, the MLP, k-means, preprocessing, metrics, cross-validation, hyper-parameter search, pipelines, saving models |
+| [neural networks](nn_guide.md) | layers, MLPs, sequential models, losses, optimizers and training loops, GPT, BERT, GAN and VAE, saving and loading, transfer learning, tokenizers |
 
-| Category | Subsystems / tests |
-|----------|--------------------|
-| **Autocorrelation** | ACF/PACF helpers; Ljung-Box test for randomness. |
-| **Normality** | Jarque-Bera normality test. |
-| **Stationarity** | ADF (Dickey-Fuller), KPSS, composite stationarity block. |
-| **ARIMA / SARIMA** | `arima_test`, fitting, auto-ARIMA, seasonal (SARIMA), MC simulation paths (ARMA(1,1), ARMA(2,2), ARIMA(p,d,q)). Residual diagnostics included. |
-| **Rolling stats** | Rolling windows / rolling matrices. |
-| **Resamplers** `residuals`, `ewm` (exponentially-weighted mean), PCA / covariance via EWMA. |
+### Finance
 
-## 7. Filtering & State Estimation (`wotan/filter`)
+The `finance` package has six parts:
 
-- **Kalman Filter** — standard, time-varying control variant.
-- **UKF (Unscented Kalman Filter)** — basic, control mode, RTS smoother.
-- **EKF (Extended Kalman Filter)** — tiny test harness and RTS smoother.
+| Guide | Covers |
+|---|---|
+| [1. options and simulation](finance_options_guide.md) | Black–Scholes, implied volatility, Greeks by autograd, Monte Carlo exotics, American options (trees, finite differences, Longstaff–Schwartz), COS pricing, quasi-Monte Carlo, rough volatility |
+| [2. volatility models, exotics and FX](finance_volatility_guide.md) | SABR, Heston pricing and calibration, exotics under Heston and Merton, local volatility, variance swaps, FX options |
+| [3. dates, curves, bonds and inflation](finance_fixed_income_guide.md) | calendars, day counters, schedules, yield curves, bonds, callable and convertible bonds, inflation |
+| [4. swaps, rate options and credit](finance_rates_credit_guide.md) | swaps, Hull–White caps, floors and swaptions, G2++ and Bermudans, CDS, CDO tranches, copulas |
+| [5. portfolio construction and risk analytics](finance_portfolio_guide.md) | mean–variance and constrained portfolios, Black–Litterman, CVaR, risk parity, factor models, rolling analytics |
+| [6. risk measurement, backtesting and market data](finance_risk_guide.md) | VaR and expected shortfall, extreme value theory, GARCH risk, performance metrics, backtesting, Yahoo Finance data |
 
-## 8. Optimisation & Portfolio (`wotan/optimalz/portfolio`, `risk`)
+The `ml_finance` package has five parts:
 
-- **Portfolio** construction, constraint optimisation, risk analytics.
-- Monte Carlo / constraint-based solvers via the optimizer module.
+| Guide | Covers |
+|---|---|
+| [1. methods](ml_finance_methods_guide.md) | triple-barrier labels, sample weights, fractional differencing, feature importance, deflated Sharpe ratio and backtest overfitting, rank IC, HRP, transaction costs, conformal intervals |
+| [2. asset pricing](ml_finance_asset_pricing_guide.md) | instrumented PCA, the conditional autoencoder, the neural SDF, event studies, implied correlation and dispersion |
+| [3. forecasting](ml_finance_forecasting_guide.md) | N-BEATS and PatchTST, probabilistic and token forecasts, volatility ensembles, hidden Markov regimes, Kalman pairs trading |
+| [4. derivatives, execution and synthetic data](ml_finance_derivatives_guide.md) | optimal execution and market making, deep BSDE, deep calibration, deep hedging, TimeGAN |
+| [5. RL, order books, text and integration](ml_finance_rl_integration_guide.md) | trading environments, PPO, offline CQL, DeepLOB, graph attention, FinBERT sentiment and the Sharpe loss, the orchestrator |
 
-## 9. Plotting / Viz (`wotan/plot`)
+And one more guide:
 
-| Chart type | Tests exercised |
-|------------|-----------------|
-| Line plot (basic, multi-line) | `line_plot_test`, `multi_line_test` |
-| Bar chart | `bar_chart_test` |
-| Heatmap | `heatmap_test` |
+| Guide | Covers |
+|---|---|
+| [behavioural finance](behavioral_finance_guide.md) | prospect theory and option prices under it, portfolio choice, cross-sectional signals, the disposition effect, herding, investor sentiment, equilibrium models, heuristics |
 
-## 10. Auto-diff Engine (`wotan/autograd`)
+The [test catalog](test_catalog.md) lists every test file and what it checks.
 
-- Back-prop through basic ops: multiplication, matmul, summation, ReLU.
-- Bias-layer gradient tracking.
+## 3. Where to start
 
----
+Every path starts with the [core guide](core_guide.md), since most of Wotan reads and writes DataFrames. After that:
 
-## How `main.odin` Works (Flow)
+- **Data analysis and statistics:** [analytics](analytics_guide.md), then [machine learning](ml_guide.md); [plot](plot_guide.md) for charts.
+- **Deep learning:** [tensor](tensor_guide.md) for autograd and graph scopes, then [neural networks](nn_guide.md).
+- **Derivatives pricing:** finance parts [1](finance_options_guide.md) and [2](finance_volatility_guide.md); for rates and credit, parts [3](finance_fixed_income_guide.md) and [4](finance_rates_credit_guide.md).
+- **Portfolios and risk:** finance parts [5](finance_portfolio_guide.md) and [6](finance_risk_guide.md), then [ml_finance part 1](ml_finance_methods_guide.md) for the statistics that keep backtests honest.
+- **Machine learning for finance:** the [tensor](tensor_guide.md) and [neural network](nn_guide.md) guides first, then the five `ml_finance` parts. Part 1 is the foundation for the others.
 
-1. **Debug allocator setup** — wraps default allocator with a leak tracker; prints leaks on exit inside `ODIN_DEBUG`.
-2. **Manual DataFrame construction** — builds tiny tables row-by-row, exercises head/print/slice/filter ops.
-3. **CSV import** — loads `people.csv` and `people_dates.csv` to validate the full ingestion pipeline (typing columns, dates).
-4. **Row slicing & boolean filter demos** — demonstrates positional slice, mask creation (`mask_lt`, `column_mask`), mask combinators (`and` via `mask_and`), and the inline `wobei`.
-5. **Select expressions** — builds derived columns with math ops, lambda applies, type coercions, boolean masks.
-6. **Date/time arithmetic demos** — increment/decrement loops for Date, Time, Datetime.
-7. **GroupBy + Aggregation** — groups by column(s), counts/sums/average via `Agg_Expr`.
-8. **Join demos** — single-key join (`join_single`) and multi-key join (`join`) with different inner/outer semantics. Plus the builder DSL `df_from`.
-9. **Test suite invocation** — calls `test.*_test()` for ~100+ individual tests across every module listed above.
-10. **Cleanup / memory drain** — explicit `destroy_dataframe` + `free_select_exprs` (guard-rails under debug allocator).
+The linear algebra guide is for when you need matrices directly. Most packages take and return slices or DataFrames.
 
----
+## 4. Conventions used throughout
 
-## Key Takeaways
+**Numbers.** Values are `f64` throughout. Rates, volatilities and returns are decimals (0.05 for 5%), and time is in years unless a guide says otherwise.
 
-- **Scope**: Wotan is a monolith covering data wrangling, classical ML, deep learning, time-series econometrics, portfolio optimization, and auto-diff.
-- **Design philosophy**: Imperative, explicit-memory model (`destroy_*` calls) with an optional debug allocator for leak detection.
-- **Column-first architecture**: DataFrames are collections of typed `Column`s; operations (filter, select, join) manipulate these columns with mask objects rather than in-place row iteration.
-- **Deep-learning stack is comprehensive**: From basic MLP/CNN → RNN/GRU/LSTM → Transformer/BERT/GPT to GAN/WGAN/VAE. The library even ships augmentation pipelines and MNIST training code.
-- **Finance focus**: ARIMA/SARIMA, Kalman/UKF/EKF state estimation, portfolio+risk analytics, Yahoo Finance import — strongly positioned for quantitative analysis workflows.
-- **No implicit memory management beyond `defer free_all(context.temp_allocator)`**; the `when ODIN_DEBUG` block is a leak-detection net that will print every orphaned allocation on exit.
+**Memory.** Ownership is explicit, as usual in Odin: whoever creates something frees it.
+- A procedure that returns a DataFrame, a model or a result struct gives you something to free, with the matching `destroy_*` or `*_free` procedure or `delete` for plain slices. Each guide has a section on the rules of its package.
+- Procedures that allocate take an `allocator` parameter, which defaults to `context.allocator`. Some use `context.temp_allocator` for scratch space. In a loop, clear it with `free_all(context.temp_allocator)`.
+- Put a `defer` right after each allocation, as the examples do.
+- Build with `-debug` and wrap `context.allocator` in a `mem.Tracking_Allocator`, and every leak is reported with the line that allocated it. The [core guide](core_guide.md#1-setup) shows the setup.
+
+**Graph scopes.** Tensor operations allocate their outputs in the active `Graph_Scope`: one arena per forward and backward pass. `graph_end` frees the whole graph at once. Parameters live outside the scope and survive it. Copy out any value you need before `graph_end`. The [tensor guide](tensor_guide.md#11-memory-management-and-graph-scopes) explains the details. Some models own a scope and use it in their training procedures; the guides show which.
+
+**Failure.** Network calls such as `net.read_yahoo` return `(value, ok)`, with `ok` false when a request fails or returns no data. Numerical procedures return NaN when a result is undefined, for example a correlation from one component, and the guides say where that happens. Many procedures check their inputs, such as matching lengths, with an `assert` that names the procedure.
+
+**Randomness.** Procedures that sample use Odin's global generator. Call `rand.reset(seed)` first for reproducible results. The guides' examples do.
+
+## 5. Tests and validation
+
+`main.odin` is the test driver. It calls the test procedures in `tests/`, about 440 of them in about 250 files. Run it with `odin run . -o:speed -debug` from the repository root. The full run takes a while. To run only some tests, comment the others out in `main.odin`, or call them from your own small `main`.
+
+There are three kinds of test:
+- **Reference tests** compare results with established libraries: QuantLib, statsmodels, SciPy, scikit-learn, PyTorch, Hugging Face, hmmlearn, pykalman, TA-Lib, NumPy and pandas. The reference values are hard-coded in the tests.
+- **Contract tests** check properties: gradients against finite differences, identical results across thread counts, save/load round trips, memory fully released.
+- **Examples and demos** print results, often next to published values. Some write charts to `plots/`.
+
+Checks print `OK` or `FAIL`. Failed checks are counted, and the program exits with code 1 if any failed. Tests that need real market data report an unreachable source as a failure. They never substitute made-up data. Almost every test seeds the random generator from its own name, so results do not depend on which tests ran before.
+
+Each guide's validation section lists what its examples and tests were compared against. The [test catalog](test_catalog.md) has the details per file; tests marked 🌐 need network access.
+
+## 6. Packages without a guide
+
+A few small packages support the others and have no guide of their own:
+
+| Package | Contents | Documented in |
+|---|---|---|
+| `importer` / `exporter` | readers and writers for CSV, JSON, JSONL, HTML, Excel | [core guide, section 5](core_guide.md#5-loading-data-from-files); the I/O tests |
+| `optimize` | optimizers and learning-rate schedules | [neural networks, section 6](nn_guide.md#6-optimisers-and-training-loops); L-BFGS and least squares in the [ML](ml_guide.md) and [portfolio](finance_portfolio_guide.md) guides |
+| `net` | HTTP and Yahoo Finance | [finance part 6, section 8](finance_risk_guide.md#8-market-data) |
+| `data` | the MNIST loader | the CNN tests; `scripts/` downloads the data |
+| `util` | the worker pool for parallel loops, quicksort | used internally |
+| `zip_min` | a minimal ZIP reader for the Excel importer | used internally |
