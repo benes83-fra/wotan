@@ -257,34 +257,37 @@ compute_backtest_metrics :: proc(result: ^VRPBacktestResult) {
 	result.num_days = n
 }
 
+// A boxed summary of the backtest metrics; every row is padded to the box. The edge
+// labels only restate the Sharpe ratio (no significance test: see probabilistic_sharpe_ratio)
 print_backtest_result :: proc(r: ^VRPBacktestResult) {
-	fmt.println(
-		"\n╔══════════════════════════════════════════════════╗",
-	)
-	fmt.println("║     WALK-FORWARD VRP BACKTEST RESULTS           ║")
-	fmt.println(
-		"╠══════════════════════════════════════════════════╣",
-	)
-	fmt.printf("║  Trading Days:        %6d                     ║\n", r.num_days)
-	fmt.printf("║  Trades (entries):    %6d                     ║\n", r.num_trades)
-	fmt.printf("║  Total PnL:           %+8.4f (daily vol units) ║\n", r.total_pnl)
-	fmt.printf("║  Sharpe Ratio:        %+8.2f (annualized)     ║\n", r.sharpe_ratio)
-	fmt.printf("║  Max Drawdown:        %8.4f                  ║\n", r.max_drawdown)
-	fmt.printf("║  Win Rate (days):     %6.1f%%                   ║\n", r.win_rate * 100)
-	fmt.println(
-		"╠══════════════════════════════════════════════════╣",
-	)
-
-	if r.sharpe_ratio > 1.5 {
-		fmt.println("║  ★ STRONG EDGE: Strategy shows significant α   ║")
-	} else if r.sharpe_ratio > 0.5 {
-		fmt.println("║  ● MODERATE EDGE: Positive expectancy           ║")
-	} else if r.sharpe_ratio > 0.0 {
-		fmt.println("║  ○ WEAK EDGE: Marginal positive expectancy      ║")
-	} else {
-		fmt.println("║  ✗ NO EDGE: Strategy needs refinement           ║")
+	W :: 48 // inner width after the two-space margin
+	row :: proc(format: string, args: ..any) {
+		fmt.printf("║  %-48s║\n", fmt.tprintf(format, ..args))
 	}
-	fmt.println(
-		"╚══════════════════════════════════════════════════╝",
-	)
+	rule :: proc(left, right: string) {
+		fmt.print(left)
+		for _ in 0 ..< W + 2 {fmt.print("═")}
+		fmt.println(right)
+	}
+	fmt.println()
+	rule("╔", "╗")
+	row("   WALK-FORWARD VRP BACKTEST RESULTS")
+	rule("╠", "╣")
+	row("Trading days:        %6d", r.num_days)
+	row("Trades (entries):    %6d", r.num_trades)
+	row("Total P&L:           %+8.4f (daily vol units)", r.total_pnl)
+	row("Sharpe ratio:        %+8.2f (annualized)", r.sharpe_ratio)
+	row("Max drawdown:        %8.4f", r.max_drawdown)
+	row("Win rate (days):     %6.1f%%", r.win_rate * 100)
+	rule("╠", "╣")
+	if r.sharpe_ratio > 1.5 {
+		row("STRONG EDGE: Sharpe ratio above 1.5")
+	} else if r.sharpe_ratio > 0.5 {
+		row("MODERATE EDGE: Sharpe ratio above 0.5")
+	} else if r.sharpe_ratio > 0.0 {
+		row("WEAK EDGE: positive Sharpe ratio")
+	} else {
+		row("NO EDGE: Sharpe ratio not positive")
+	}
+	rule("╚", "╝")
 }

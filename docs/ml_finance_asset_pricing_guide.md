@@ -1,6 +1,6 @@
 # The `ml_finance` package, part 2: machine-learning asset pricing
 
-This is the second part of the guide to `wotan/ml_finance`. [Part 1](ml_finance_methods_guide.md) covers labels, feature importance and backtest statistics. This part covers models of the cross-section of returns, and two tools for events and correlation:
+This is the second part of the guide to `wotan/ml_finance`. [Part 1](ml_finance_methods_guide.md) covers labels, feature importance and backtest statistics, and [part 3](ml_finance_forecasting_guide.md) covers forecasting. This part covers models of the cross-section of returns, and two tools for events and correlation:
 - **instrumented PCA (IPCA):** latent factors whose betas are linear in the stocks' characteristics (Kelly, Pruitt & Su 2019);
 - **the conditional autoencoder:** the same model with betas from a neural network (Gu, Kelly & Xiu 2021);
 - **the neural stochastic discount factor:** a network that prices a set of assets through the Euler equations;
