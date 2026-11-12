@@ -53,11 +53,11 @@ As in parts 3 and 4, networks train inside `t.Graph_Scope`s with `nn.Adam`. Two 
 - **Observation:** the last `window` days of price and volume relative to the window's first day, plus the indicators.
 - **Reward:** shaped. The change in portfolio value over the initial cash, plus 0.1 × the return of a position when it is closed. Minus 2 × the fee for any trade, 1e-5 per share held, and 2 × the drawdown from the peak value.
 
-**`MultiAssetEnv`** (`new_multi_asset_env(prices, volumes, indicators, n_assets, n_indicators, window, action_defs, fee)`) rebalances a portfolio:
+**`MultiAssetEnv`** (`new_multi_asset_env(prices, volumes, indicators, n_assets, n_indicators, window, action_defs, fee, alloc, risk_aversion = 2, drawdown_coef = 0.1)`) rebalances a portfolio:
 - **Data:** prices and volumes are [day, asset], row-major.
 - **Actions:** each one is an `ActionDef` of target weights; the remainder is cash.
 - **Trading:** a step rebalances at the day's prices, but trades an asset only if its value changes by more than 0.5% of the portfolio, and pays the fee on the traded value.
-- **Reward:** the value change over the initial cash, minus 0.5 × the drawdown from the peak, minus 0.5 × the mean absolute daily return over the window of each asset held, times its weight in the portfolio, plus a small bonus for cash.
+- **Reward:** mean–variance. With r the portfolio's return for the day (market moves minus fees), the reward is r − `risk_aversion`/2 × r², minus `drawdown_coef` × the *increase* in the drawdown from the peak, plus a small bonus of 1e-4 × cash / initial cash.
 
 The rewards shape behavior, and the shaping matters. Here are four fixed policies on two assets: A drifts up 0.1% a day with 1% volatility, and B has no drift and 2% volatility.
 
@@ -77,32 +77,35 @@ for a in 0 ..< 4 { // one fixed action for the whole episode
 		if s.done {break}
 	}
 	// env.cash: the final value (everything is sold on the last day)
-	// (the decomposition lines below also sum, per step, the value change and
-	// 0.5 * (env.peak_cash - value) / env.peak_cash; that bookkeeping is left out)
+	// (the decomposition below also sums, per step, the return r, the variance term
+	// env.risk_aversion / 2 * r * r and the drawdown increases times env.drawdown_coef;
+	// that bookkeeping is left out)
 }
 ```
 
 ```
 observation 43 values, 4 actions, 290 steps per episode
-  value change +0.0000, drawdown penalty 0.0000, the rest (volatility penalty, cash bonus) +0.0290
-always all cash : 290 steps, final value 100000.00, summed reward +0.0290
-  value change +0.5447, drawdown penalty 3.0237, the rest (volatility penalty, cash bonus) -1.1265
-always all A    : 290 steps, final value 154469.39, summed reward -3.6055
-  value change +0.3055, drawdown penalty 8.1845, the rest (volatility penalty, cash bonus) -2.1296
-always all B    : 290 steps, final value 130546.79, summed reward -10.0086
-  value change +0.4399, drawdown penalty 2.8424, the rest (volatility penalty, cash bonus) -1.6268
-always half each: 290 steps, final value 143990.83, summed reward -4.0293
+always all cash : final value 100000.00, summed reward +0.0290 = returns +0.0000 - variance 0.0000 - drawdown 0.0000 + cash bonus 0.0290
+always all A    : final value 154469.39, summed reward +0.3320 = returns +0.4489 - variance 0.0281 - drawdown 0.0889 + cash bonus 0.0001
+always all B    : final value 130546.79, summed reward +0.0296 = returns +0.3157 - variance 0.0982 - drawdown 0.1881 + cash bonus 0.0001
+always half each: final value 143990.83, summed reward +0.2485 = returns +0.3807 - variance 0.0323 - drawdown 0.1001 + cash bonus 0.0001
 A 95.73 -> 148.11, B 90.05 -> 117.77 (from day 10, the first trade)
 ```
 
-The policy that makes the most money, all in A (+54%), has a summed reward of −3.6. The best reward goes to holding cash, which made nothing. The decomposition shows why:
-- **The drawdown penalty** dominates. It charges 0.5 × the current drawdown on *every* step the portfolio is below its peak, so one dip is paid for again each day until a new high: 3.0 for A, 8.2 for the more volatile B.
-- **The volatility penalty** adds 1.1 for A when fully invested.
-- **The value gain** of 0.54 cannot make up for either.
+The ranking follows return per unit of risk:
+- **All in A** earns the best reward, +0.33.
+- **Half each** comes second, at +0.25.
+- **All in B** made 31% on this path, but its variance and drawdown terms are 3.5 and 2 times A's. That leaves it level with cash.
 
-An agent maximizing this reward learns to stay in cash. Check what a reward favors before training on it, and adjust the weights or write your own environment: `Environment` takes any `reset_fn` and `step_fn`.
+The two penalties are on the scale of the returns. A day with 1% volatility costs about `risk_aversion`/2 × 1e-4 in variance, against a drift of 1e-3 for A. A fall below the peak is charged once, when it happens, and not again on every day until a new high. Raise `risk_aversion` or `drawdown_coef` to make the agent more cautious.
 
-**Fixed while writing this guide:** the volatility penalty used to be charged in full for any holding, whatever its size: a $1 position paid the same as the whole portfolio. It is now weighted by each asset's share of the portfolio value, which cut "half each" from −5.66 to −4.03. The drawdown penalty is unchanged.
+Check what a reward favors before training on it. If these terms don't suit, write your own environment: `Environment` takes any `reset_fn` and `step_fn`.
+
+**Fixed while writing this guide:** the earlier reward made holding cash the best policy for any realistic asset. Its two penalties were both charged daily:
+- **Drawdown:** 0.5 × the drawdown level, so one dip was paid for again each day until a new high.
+- **Volatility:** 0.5 × each held asset's mean absolute daily return.
+
+Both scale with the volatility σ, while the gain scales with the drift. Investing would have needed a drift above about 0.4σ a day, an annual Sharpe ratio above 6. Here all in A scored −3.6 and all in B −10.0, against +0.03 for cash.
 
 ## 3. PPO
 
@@ -474,7 +477,7 @@ The tests are registered in `main.odin` and listed in [the test catalog](test_ca
 
 | Area | Reference | Test |
 |---|---|---|
-| PPO and the environments | GAE vs CleanRL (NumPy); the minibatch loss gradient vs finite differences of the clipped objective; buffer growth; both environments on scripted episodes, the multi-asset rewards vs a NumPy replay | `ppo_reference_test` |
+| PPO and the environments | GAE vs CleanRL (NumPy); the minibatch loss gradient vs finite differences of the clipped objective; buffer growth; both environments on scripted episodes, the multi-asset rewards vs an independent Python replay | `ppo_reference_test` |
 | CQL | the CQL(H) loss and dL/dQ vs PyTorch; the network gradient vs finite differences; the trading dataset vs NumPy; a one-state bandit trained to SciPy's minimizer | `cql_reference_test` |
 | DeepLOB | windows, labels, future returns and the normalizer vs NumPy on a LOBSTER book; gradients vs finite differences for every sequence backend | `deeplob_reference_test`, `deeplob_test` |
 | Graphs | the correlation adjacency vs `np.corrcoef`; GAT cross-validation on a tracking allocator; the GAT layer vs PyTorch | `ml_finance_metrics_reference_test`, `models_reference_test` |
@@ -497,7 +500,7 @@ For this guide, the GAE values were also recomputed in Python (CleanRL's recursi
 | Procedure | Purpose |
 |---|---|
 | `new_trading_env(prices, volumes, indicators, n_ind, window, fee, max_position)` / `trading_env_free` | one-asset environment |
-| `new_multi_asset_env(prices, volumes, indicators, n_assets, n_ind, window, action_defs, fee)` / `multi_asset_env_free` | portfolio environment |
+| `new_multi_asset_env(prices, volumes, indicators, n_assets, n_ind, window, action_defs, fee, alloc, risk_aversion, drawdown_coef)` / `multi_asset_env_free` | portfolio environment, mean–variance reward |
 | `env_reset(&env)` / `env_step(&env, action)` | episode (observations: caller deletes `data`) |
 | `new_ppo_agent(obs_dim, actions, hidden, gamma, lambda, clip, value_coef, entropy_coef, lr)` / `ppo_agent_free` | the agent |
 | `ppo_agent_select_action(agent, state)` / `ppo_agent_value(agent, state)` | action, log-probability, value |

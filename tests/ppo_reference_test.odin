@@ -222,14 +222,15 @@ ppo_reference_test :: proc(allocator: mem.Allocator) {
 		obs_ok := len(obs.data) == len(want)
 		for v, i in want {obs_ok = obs_ok && abs(obs.data[i] - v) < 1e-15}
 		delete(obs.data)
-		// the volatility penalty weighted by each asset's share of the portfolio value
+		// mean-variance reward: r - risk_aversion / 2 r^2 - drawdown_coef x drawdown increase
+		// + cash bonus (defaults 2 and 0.1)
 		ref := []f64 {
-			-0.0064803277525049855,
-			-0.0014386938872473882,
-			0.012410301491295864,
-			-0.017211203935942873,
-			0.015335722147566202,
-			0.0238480627648493,
+			-0.0011011,
+			0.008725328176714267,
+			0.024245886463714887,
+			-0.005327660364401148,
+			0.0237620749715182,
+			0.02214678541700596,
 		}
 		script := []int{1, 2, 2, 2, 2, 2}
 		err := 0.0
@@ -252,7 +253,7 @@ ppo_reference_test :: proc(allocator: mem.Allocator) {
 			&total,
 			ok,
 			fmt.tprintf(
-				"multi-asset env: observation layout %v, 6 step rewards (market moves of the held positions included; volatility penalty weighted by position) max err %.1e, last day traded then sold: cash %.2f (107664.59)",
+				"multi-asset env: observation layout %v, 6 step rewards (market moves of the held positions included; mean-variance reward, only new drawdown charged) max err %.1e, last day traded then sold: cash %.2f (107664.59)",
 				obs_ok,
 				err,
 				env.cash,

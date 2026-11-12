@@ -17,11 +17,14 @@ ActionDef :: struct {
 // traded value), and marks the portfolio to day k. The first step trades on day `window`;
 // the episode ends on the last day (or below 10% of the initial cash), where everything
 // is sold with the fee.
-// Reward (shaped): change of portfolio value from day k - 1 to day k / initial cash
-// (market move of the held positions minus fees), - 0.5 x drawdown from the peak,
-// - 0.5 x the mean absolute daily return over the window of every asset held, times its
-// weight |position value| / portfolio value,
-// + 1e-4 x the cash share of the initial cash.
+// Reward (mean-variance shaped): with r = the portfolio return from day k - 1 to day k
+// (market move of the held positions minus fees),
+//   r - risk_aversion / 2 x r^2 - drawdown_coef x (increase of the drawdown from the peak)
+//     + 1e-4 x cash / initial cash.
+// The variance term is on the scale of the drift (both ~1e-4 a day), so an asset with a good
+// return per risk beats cash; the drawdown term charges a fall below the peak once, not on
+// every day until a new high (the earlier reward charged 0.5 x the drawdown level daily and
+// 0.5 x each asset's mean absolute return, which no realistic asset could outearn).
 MultiAssetEnv :: struct {
 	env:             Environment,
 	prices:          []f64, // Flattened: [day0_asset0, day0_asset1, day1_asset0...]
@@ -33,9 +36,12 @@ MultiAssetEnv :: struct {
 	cash:            f64,
 	initial_cash:    f64,
 	peak_cash:       f64, // peak portfolio value
+	drawdown:        f64, // drawdown from the peak after the last step
 	positions:       []f64, // Fractional shares per asset
 	action_defs:     []ActionDef,
 	transaction_fee: f64,
+	risk_aversion:   f64, // lambda of the r^2 term
+	drawdown_coef:   f64, // weight of a drawdown increase
 	allocator:       mem.Allocator,
 }
 
@@ -45,6 +51,7 @@ multi_asset_env_reset :: proc(env: ^Environment) -> Observation {
 	t_env := cast(^MultiAssetEnv)env
 	t_env.cash = t_env.initial_cash
 	t_env.peak_cash = t_env.initial_cash
+	t_env.drawdown = 0
 	for &p in t_env.positions {p = 0.0}
 	t_env.env.current_step = t_env.window - 1 // the first step trades on day `window`
 	t_env.env.done = false
@@ -111,24 +118,10 @@ multi_asset_env_step :: proc(env: ^Environment, action: int) -> Step {
 	t_env.peak_cash = max(t_env.peak_cash, curr_value)
 	drawdown := (t_env.peak_cash - curr_value) / t_env.peak_cash if t_env.peak_cash > 0 else 0.0
 
-	reward := (curr_value - prev_value) / t_env.initial_cash
-	reward -= drawdown * 0.5
-	// volatility penalty: mean absolute daily return over the window of each asset held,
-	// weighted by the asset's share of the portfolio value (it used to be charged in full
-	// for any holding, however small, so holding cash always earned the best reward)
-	vol_penalty := 0.0
-	start := max(0, k - t_env.window)
-	for a in 0 ..< n {
-		if t_env.positions[a] == 0.0 || k <= start || curr_value <= 0 {continue}
-		avg_abs_ret := 0.0
-		for d in start ..< k {
-			p0 := t_env.prices[d * n + a]
-			if p0 > 0 {avg_abs_ret += math.abs((t_env.prices[(d + 1) * n + a] - p0) / p0)}
-		}
-		weight := t_env.positions[a] * curr_prices[a] / curr_value
-		vol_penalty += avg_abs_ret / f64(k - start) * 0.5 * math.abs(weight)
-	}
-	reward -= vol_penalty
+	r := (curr_value - prev_value) / prev_value if prev_value > 0 else 0.0
+	reward := r - 0.5 * t_env.risk_aversion * r * r
+	reward -= t_env.drawdown_coef * max(0, drawdown - t_env.drawdown) // only new drawdown
+	t_env.drawdown = drawdown
 	reward += (t_env.cash / t_env.initial_cash) * 0.0001 // cash bonus
 
 	obs := build_multi_asset_obs(t_env, k, curr_prices, curr_value)
@@ -222,6 +215,8 @@ new_multi_asset_env :: proc(
 	action_defs: []ActionDef,
 	transaction_fee: f64 = 0.001,
 	alloc: mem.Allocator = context.allocator,
+	risk_aversion: f64 = 2,
+	drawdown_coef: f64 = 0.1,
 ) -> ^MultiAssetEnv {
 	assert(
 		n_assets >= 1 &&
@@ -241,6 +236,8 @@ new_multi_asset_env :: proc(
 	env.window = window
 	env.action_defs = action_defs
 	env.transaction_fee = transaction_fee
+	env.risk_aversion = risk_aversion
+	env.drawdown_coef = drawdown_coef
 	env.positions = make([]f64, n_assets, alloc)
 
 	env.env.action_space = len(action_defs)
