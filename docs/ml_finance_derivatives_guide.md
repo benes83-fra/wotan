@@ -390,9 +390,9 @@ mlf.timegan_scale(scaled, sc)
 tg := mlf.new_timegan(12, 2, 8, 24, 1e-3) // seq_len, features, latent 8, hidden 24, learning rate
 defer mlf.timegan_free(tg)
 mlf.timegan_init_weights(tg) // Xavier-uniform, as the authors
-for _ in 0 ..< 600 {mlf.train_embedder_recovery(tg, scaled, 64, context.allocator)}
-for _ in 0 ..< 300 {mlf.train_supervisor(tg, scaled, 64, context.allocator)}
-for _ in 0 ..< 300 {mlf.timegan_train_joint_step(tg, scaled, 64, context.allocator)}
+for _ in 0 ..< 600 {mlf.train_embedder_recovery(tg, scaled, 64)}
+for _ in 0 ..< 300 {mlf.train_supervisor(tg, scaled, 64)}
+for _ in 0 ..< 300 {mlf.timegan_train_joint_step(tg, scaled, 64)}
 synth := mlf.generate_synthetic_data(tg, 2000, context.allocator) // [2000, 12, 2], scaled units
 defer delete(synth)
 mlf.timegan_unscale(synth, sc)

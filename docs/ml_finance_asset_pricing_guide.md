@@ -511,7 +511,7 @@ The application tests check the behaviour the models are for:
   - on 24 large caps, the single IPCA factor is a market factor.
 - **`neural_sdf_test`:** the network closes at least 95% of the loss gap on a synthetic market, and 80% on SPY, QQQ, IWM and TLT. It also compares held-out pricing errors with the constant SDF's.
 - **`event_study_test`:** CARs around AAPL earnings, with FinBERT sentiment.
-- **`dispersion_trading_test`:** realized correlation from forecast volatilities, and the factor risk of the components.
+- **`dispersion_trading_test`:** `compute_dispersion_signal` on SPY, AAPL, MSFT and NVDA: the VIX as index implied volatility, GARCH–LSTM forecasts as realized volatilities, and the factor risk of the components. Single-stock implied volatilities are not on Yahoo, so the components' are assumed to be 1.15 × the forecast.
 
 For this guide, the IPCA example was also refitted with an independent NumPy ALS, which reproduces every printed number. The CARs, t-statistics, implied correlations and signal were recomputed with SciPy and NumPy and agree to the printed decimals.
 

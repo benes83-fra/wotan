@@ -325,10 +325,60 @@ dispersion_trading_test :: proc(allocator: mem.Allocator) {
 		)
 		comp_rvs[i - 1] = rv
 	}
-	// 4. ✅ FIX: Compute Realized Correlation with longer window + clamp
-	fmt.println("\n--- Computing Realized Correlation from Returns ---")
+	// 4. The dispersion signal from the library. Implied side: VIX as the index implied vol;
+	// single-stock implied vols are not on Yahoo, so the components' are taken as 1.15 x
+	// their forecast (an assumed volatility risk premium). Realized side: the forecast vols
+	// of SPY and the components. Both correlations use SPY as the index of a 3-stock basket,
+	// so their levels are proxies; the premium (their difference) is what the signal uses.
+	fmt.println("\n--- Dispersion Signal ---")
+	failed := 0
+	check :: proc(failed: ^int, ok: bool, name: string) {
+		if !ok {failed^ += 1}
+		fmt.printf("%s %s\n", "OK  " if ok else "FAIL", name)
+	}
+	forecasts_ok := index_rv > 0 && index_rv < 3
+	for rv in comp_rvs {forecasts_ok = forecasts_ok && rv > 0 && rv < 3}
+	check(
+		&failed,
+		forecasts_ok,
+		fmt.tprintf(
+			"forecast vols positive and below 300%%: SPY %.4f, components %.4f",
+			index_rv,
+			comp_rvs,
+		),
+	)
 
-	pair_window := 120 // ✅ FIX: Longer window for stable estimate
+	index_iv := vix_levels[num_days - 1]
+	comp_ivs := make([]f64, n_assets - 1, main_alloc)
+	defer delete(comp_ivs, main_alloc)
+	for i in 0 ..< len(comp_rvs) {comp_ivs[i] = comp_rvs[i] * 1.15}
+
+	// premium history: mean 0.04, sd 0.03
+	sig := ml_fin.compute_dispersion_signal(
+		index_iv,
+		index_rv,
+		comp_ivs,
+		comp_rvs,
+		basket_weights,
+		0.04,
+		0.03,
+	)
+	ml_fin.print_dispersion_signal(sig)
+	in_range :: proc(x: f64) -> bool {return x >= -1 && x <= 1} 	// false for NaN
+	check(
+		&failed,
+		in_range(sig.implied_corr) && in_range(sig.realized_corr) && in_range(sig.signal),
+		fmt.tprintf(
+			"implied correlation %.4f, realized %.4f and signal %.4f defined and in [-1, 1]",
+			sig.implied_corr,
+			sig.realized_corr,
+			sig.signal,
+		),
+	)
+
+	// For comparison: the mean pairwise correlation of the components' daily returns
+	// over the last 120 days (a direct estimate, not the proxy above)
+	pair_window := 120
 	pair_start := num_days - pair_window
 	if pair_start < 0 {pair_start = 0}
 
@@ -367,76 +417,12 @@ dispersion_trading_test :: proc(allocator: mem.Allocator) {
 		}
 	}
 
-	realized_corr := 0.0
-	if corr_count > 0 {
-		realized_corr = corr_sum / f64(corr_count)
-	}
-
-	// ✅ FIX: Clamp to realistic range for mega-cap tech
-	if realized_corr < 0.05 {realized_corr = 0.05}
-	if realized_corr > 1.0 {realized_corr = 1.0}
-
-	fmt.printf("  Realized Pairwise Correlation (120-day): %.2f%%\n", realized_corr * 100.0)
-
-	// 5. Compute Dispersion Signal
-	index_iv := vix_levels[num_days - 1]
-
-	// ✅ FIX: Clamp index RV to prevent negative/zero from undertrained LSTM
-	if index_rv < 0.01 {index_rv = 0.01}
-	if index_rv > 2.0 {index_rv = 2.0}
-
-	comp_ivs := make([]f64, n_assets - 1, main_alloc)
-	defer delete(comp_ivs, main_alloc)
-	for i in 0 ..< len(comp_rvs) {
-		comp_ivs[i] = comp_rvs[i] * 1.15
-	}
-
-	// Compute implied correlation
-	comp_vars_iv := make([]f64, n_assets - 1, main_alloc)
-	defer delete(comp_vars_iv, main_alloc)
-	for i in 0 ..< n_assets - 1 {
-		comp_vars_iv[i] = comp_ivs[i] * comp_ivs[i]
-	}
-	index_var_iv := index_iv * index_iv
-
-	implied_corr := ml_fin.calculate_pairwise_correlation(
-		index_var_iv,
-		comp_vars_iv,
-		basket_weights,
+	pair_corr := corr_sum / f64(corr_count) if corr_count > 0 else math.nan_f64()
+	fmt.printf(
+		"  mean pairwise correlation of the components (120 days): %.2f%%\n",
+		pair_corr * 100.0,
 	)
-	if implied_corr < 0.0 {implied_corr = 0.0}
-	if implied_corr > 1.0 {implied_corr = 1.0}
 
-	// Build signal manually with corrected values
-	sig: ml_fin.DispersionSignal
-	sig.index_iv = index_iv
-	sig.index_rv = index_rv
-	sig.avg_comp_iv = 0.0
-	sig.avg_comp_rv = 0.0
-	for i in 0 ..< len(comp_ivs) {sig.avg_comp_iv += comp_ivs[i]}
-	for i in 0 ..< len(comp_rvs) {sig.avg_comp_rv += comp_rvs[i]}
-	sig.avg_comp_iv /= f64(len(comp_ivs))
-	sig.avg_comp_rv /= f64(len(comp_rvs))
-	sig.implied_corr = implied_corr
-	sig.realized_corr = realized_corr
-	sig.correlation_premium = implied_corr - realized_corr
-
-	if 0.03 > 1e-6 {
-		z := (sig.correlation_premium - 0.04) / 0.03
-		sig.signal = math.tanh(z / 1.5)
-	} else {
-		sig.signal = 0.0
-	}
-
-	if sig.signal > 0.5 {
-		sig.recommendation = "SHORT CORRELATION (Sell Index Vol / Buy Component Vol)"
-	} else if sig.signal < -0.5 {
-		sig.recommendation = "LONG CORRELATION (Buy Index Vol / Sell Component Vol)"
-	} else {
-		sig.recommendation = "NEUTRAL (Correlation fairly priced)"
-	}
-
-	ml_fin.print_dispersion_signal(sig)
 	// 5. Factor-Adjusted Component Selection
 	fmt.println("\n--- Factor Risk Decomposition ---")
 
@@ -480,5 +466,6 @@ dispersion_trading_test :: proc(allocator: mem.Allocator) {
 		)
 	}
 
-	fmt.println("\n✓ Cross-Asset Dispersion Trading Test Complete!")
+	record_failures(failed)
+	fmt.printf("\nCross-asset dispersion trading: %d/2 checks passed\n", 2 - failed)
 }

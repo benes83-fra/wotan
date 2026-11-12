@@ -184,7 +184,8 @@ _garch_variance_at :: proc(params: ^GARCH_Params, residuals, cond_var: []f64, t:
 	}
 	variance := params.omega
 	for i in 0 ..< params.p {
-		if t - i - 1 >= 0 {variance += params.alpha[i] * residuals[t - i - 1] * residuals[t - i - 1]}
+		if t - i - 1 >=
+		   0 {variance += params.alpha[i] * residuals[t - i - 1] * residuals[t - i - 1]}
 	}
 	for j in 0 ..< params.q {
 		if t - j - 1 >= 0 {variance += params.beta[j] * cond_var[t - j - 1]}
@@ -208,7 +209,13 @@ _garch_log_density :: proc(params: ^GARCH_Params, z, var: f64) -> f64 {
 		if nu > 2.0 {
 			t1, _ := math.lgamma((nu + 1.0) / 2.0)
 			t2, _ := math.lgamma(nu / 2.0)
-			return t1 - t2 - 0.5 * math.ln_f64((nu - 2.0) * math.PI) - 0.5 * math.ln_f64(var) - ((nu + 1.0) / 2.0) * math.ln_f64(1.0 + (z * z) / (nu - 2.0))
+			return(
+				t1 -
+				t2 -
+				0.5 * math.ln_f64((nu - 2.0) * math.PI) -
+				0.5 * math.ln_f64(var) -
+				((nu + 1.0) / 2.0) * math.ln_f64(1.0 + (z * z) / (nu - 2.0)) \
+			)
 		}
 	case .GED:
 		shape := params.shape
@@ -217,7 +224,14 @@ _garch_log_density :: proc(params: ^GARCH_Params, z, var: f64) -> f64 {
 			lg1, _ := math.lgamma(1.0 / shape)
 			lg3, _ := math.lgamma(3.0 / shape)
 			lambda := math.exp_f64(0.5 * (lg1 - lg3))
-			return math.ln_f64(shape) - math.ln_f64(2.0) - lg1 - math.ln_f64(lambda) - 0.5 * math.ln_f64(var) - math.pow(math.abs(z / lambda), shape)
+			return(
+				math.ln_f64(shape) -
+				math.ln_f64(2.0) -
+				lg1 -
+				math.ln_f64(lambda) -
+				0.5 * math.ln_f64(var) -
+				math.pow(math.abs(z / lambda), shape) \
+			)
 		}
 	case .Normal:
 	}
@@ -264,6 +278,7 @@ _garch_neg_log_likelihood :: proc(
 // Legacy entry point: model_type selects variance equation and distribution
 // (ARCH / GARCH → GARCH + normal, GJR_GARCH → GJR + normal, StudentT → GARCH +
 // Student-t, GED → GARCH + GED). Use garch_fit_spec to combine them freely.
+// verbose prints the optimizer's progress.
 garch_fit :: proc(
 	residuals: []f64,
 	model_type: GARCH_Model_Type = .GARCH,
@@ -272,6 +287,7 @@ garch_fit :: proc(
 	max_iter: int = 2000,
 	tolerance: f64 = 1e-4,
 	allocator: mem.Allocator = context.allocator,
+	verbose := false,
 ) -> GARCH_Result {
 	spec := GARCH_Spec {
 		p = p,
@@ -285,7 +301,7 @@ garch_fit :: proc(
 	case .GED:
 		spec.dist = .GED
 	}
-	res := _garch_fit_impl(residuals, spec, max_iter, tolerance, allocator, true)
+	res := _garch_fit_impl(residuals, spec, max_iter, tolerance, allocator, verbose)
 	res.params.model_type = model_type
 	return res
 }
@@ -468,7 +484,14 @@ _garch_fit_impl :: proc(
 	nm_ctx := _Garch_NM_Ctx{&params, residuals, allocator}
 	n_restarts := 2 if spec.variance != .EGARCH && spec.dist == .Normal else 4
 	for _ in 0 ..< n_restarts {
-		x_nm, f_nm, _ := nelder_mead(nm_obj, &nm_ctx, best_params, 2000 * max(n_params / 4, 1), 1e-10, allocator)
+		x_nm, f_nm, _ := nelder_mead(
+			nm_obj,
+			&nm_ctx,
+			best_params,
+			2000 * max(n_params / 4, 1),
+			1e-10,
+			allocator,
+		)
 		if f_nm < best_loss {
 			best_loss = f_nm
 			copy(best_params, x_nm)
@@ -505,15 +528,15 @@ _garch_fit_impl :: proc(
 	if spec.variance == .GJR {persistence += 0.5 * params.gamma}
 
 	return GARCH_Result {
-		params = params,
-		log_likelihood = log_lik,
-		aic = aic,
-		bic = bic,
-		conditional_var = cond_var,
+		params             = params,
+		log_likelihood     = log_lik,
+		aic                = aic,
+		bic                = bic,
+		conditional_var    = cond_var,
 		standardized_resid = std_resid,
-		converged = converged,
-		n_iterations = n_iter, // Adam iterations (the Nelder-Mead polish is not counted)
-		persistence = persistence,
+		converged          = converged,
+		n_iterations       = n_iter, // Adam iterations (the Nelder-Mead polish is not counted)
+		persistence        = persistence,
 	}
 }
 
@@ -535,7 +558,11 @@ garch_forecast :: proc(
 	n := len(residuals)
 	if n == 0 || len(result.conditional_var) == 0 {
 		nan := math.nan_f64()
-		return GARCH_Forecast{variance_forecast = nan, std_forecast = nan, confidence_95 = {nan, nan}}
+		return GARCH_Forecast {
+			variance_forecast = nan,
+			std_forecast = nan,
+			confidence_95 = {nan, nan},
+		}
 	}
 	if len(result.conditional_var) < n {
 		panic("garch_forecast: residuals are longer than the fitted conditional variance")
@@ -569,7 +596,8 @@ garch_forecast :: proc(
 			for i in 0 ..< p {
 				if k - i - 1 >= 0 && k - i - 1 < n {
 					z := residuals[k - i - 1] / math.sqrt(s2[k - i - 1])
-					lv += params.alpha[i] * (math.abs(z) - _EGARCH_EABS) + params.egarch_gamma[i] * z
+					lv +=
+						params.alpha[i] * (math.abs(z) - _EGARCH_EABS) + params.egarch_gamma[i] * z
 				}
 			}
 			for j in 0 ..< q {

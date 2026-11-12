@@ -29,7 +29,6 @@ DeepBSDEModel :: struct {
 	allocator: mem.Allocator,
 }
 
-// n_paths is not used (Y_0 is a single scalar for any batch size); kept for existing callers
 deep_bsde_model_new :: proc(
 	initial_y0: f64,
 	d: int,
@@ -37,7 +36,6 @@ deep_bsde_model_new :: proc(
 	N: int,
 	hidden_size: int,
 	num_layers: int,
-	n_paths: int = 0,
 	allocator: mem.Allocator = context.allocator,
 ) -> DeepBSDEModel {
 	model: DeepBSDEModel

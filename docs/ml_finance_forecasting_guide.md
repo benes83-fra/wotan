@@ -385,8 +385,7 @@ After 400 steps (about 15 s), the sampled forecasts score within about 12% of th
 The data are 1500 daily returns of a GARCH(1,1) with ω = 2e-6, α = 0.08 and β = 0.9. The model is fitted on the first 1000:
 
 ```odin
-g := ts.garch_fit_spec(r[:1000], {p = 1, q = 1}) // ts.garch_fit also prints its iterations
-defer ts.garch_result_free(&g)
+g := ts.garch_fit_spec(r[:1000], {p = 1, q = 1})defer ts.garch_result_free(&g)
 om, al, be := g.params.omega, g.params.alpha[0], g.params.beta[0]
 g1000 := mlf.garch_recursive_forecast(r[:1000], om, al, be) // equals sqrt(g.conditional_var)
 defer delete(g1000)

@@ -116,7 +116,7 @@ _tg_train :: proc(
 	for v in scaled {sm += v; sm2 += v * v}
 	var_scaled := sm2 / f64(len(scaled)) - (sm / f64(len(scaled))) * (sm / f64(len(scaled)))
 	for it in 0 ..< iters[0] {
-		loss := ml_finance.train_embedder_recovery(tg, scaled, BATCH, allocator)
+		loss := ml_finance.train_embedder_recovery(tg, scaled, BATCH)
 		if it % (iters[0] / 2) == 0 || it == iters[0] - 1 {
 			fmt.printf(
 				"   embedding  %5d  reconstruction MSE %.5f (%.1f%% of the variance)\n",
@@ -127,14 +127,14 @@ _tg_train :: proc(
 		}
 	}
 	for it in 0 ..< iters[1] {
-		loss := ml_finance.train_supervisor(tg, scaled, BATCH, allocator)
+		loss := ml_finance.train_supervisor(tg, scaled, BATCH)
 		if it % (iters[1] / 2) == 0 ||
 		   it ==
 			   iters[1] -
 				   1 {fmt.printf("   supervised %5d  next-step latent MSE %.6f\n", it, loss)}
 	}
 	for it in 0 ..< iters[2] {
-		g, e, d := ml_finance.timegan_train_joint_step(tg, scaled, BATCH, allocator)
+		g, e, d := ml_finance.timegan_train_joint_step(tg, scaled, BATCH)
 		if it % (iters[2] / 4) == 0 ||
 		   it ==
 			   iters[2] -

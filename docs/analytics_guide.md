@@ -799,7 +799,7 @@ t quantile 0.99: 2.3412 (normal 2.3263)
 - **Value at risk.** `garch_var_series` returns the 95 % and 99 % VaR for every observation (as positive numbers, assuming a zero mean). `garch_std_quantile` gives the quantile of the unit-variance error distribution, which is wider than the normal for Student-t errors.
 - **Model choice.** The data are normal and symmetric, so the GJR-t model finds almost no leverage (γ ≈ 0), a large ν, and a worse AIC than the plain GARCH. The fitted ν has no upper bound: on normal data it can become very large.
 
-The parameters are constrained so that the persistence stays below 0.999. `garch_fit(residuals, model_type, p, q)` is an older entry point that takes a single `GARCH_Model_Type` (`.GARCH`, `.GJR_GARCH`, `.StudentT`, `.GED`); it **prints its progress** to standard output, so prefer `garch_fit_spec`.
+The parameters are constrained so that the persistence stays below 0.999. `garch_fit(residuals, model_type, p, q)` is an older entry point that takes a single `GARCH_Model_Type` (`.GARCH`, `.GJR_GARCH`, `.StudentT`, `.GED`); with `verbose = true` it prints the optimizer's progress. Prefer `garch_fit_spec`.
 
 **Volatility helpers.** The `create_*_volatility` procedures return a `VolatilityModel` whose `conditional_var` holds one variance per row, NaN during the warm-up:
 
@@ -816,19 +816,12 @@ fmt.printf("last variance: rolling %.4f  ewma %.4f  garch %.4f\n", rv.conditiona
 ```
 
 ```
-GARCH iter 0: loss=2396.5757, ω=0.000000
-GARCH iter 100: loss=2084.9530, ω=0.000795
-GARCH iter 200: loss=2066.7968, ω=0.022240
-GARCH iter 300: loss=2064.6869, ω=0.039064
-GARCH iter 400: loss=2064.6636, ω=0.040633
-GARCH iter 500: loss=2064.6611, ω=0.041181
-GARCH converged at iteration 559 (loss change: 0.00000098)
 last variance: rolling 0.4080  ewma 0.6330  garch 0.6833
 ```
 
-`create_garch_volatility` demeans the series and calls `garch_fit`, hence the progress lines. Free the rolling and EWMA models by deleting `conditional_var`, and the GARCH model with `destroy_garch_volatility`. The EWMA `alpha` is the weight on the newest observation (RiskMetrics' λ = 1 − alpha).
+`create_garch_volatility` demeans the series and calls `garch_fit`. Free the rolling and EWMA models by deleting `conditional_var`, and the GARCH model with `destroy_garch_volatility`. The EWMA `alpha` is the weight on the newest observation (RiskMetrics' λ = 1 − alpha).
 
-**Regime-switching GARCH.** `rs_garch_fit(returns)` fits a two-regime GARCH(1,1) with a Hamilton filter. It needs at least 50 observations and, because it starts from `garch_fit`, it also prints progress lines. The example alternates calm (σ = 0.5) and turbulent (σ = 2) blocks of 100 returns:
+**Regime-switching GARCH.** `rs_garch_fit(returns)` fits a two-regime GARCH(1,1) with a Hamilton filter. It needs at least 50 observations and starts from a `garch_fit`. The example alternates calm (σ = 0.5) and turbulent (σ = 2) blocks of 100 returns:
 
 ```odin
 rand.reset(3)
@@ -851,9 +844,6 @@ fmt.println("regime at t = 50, 150, 250, 350:", res.most_likely_path[50], res.mo
 ```
 
 ```
-GARCH iter 0: loss=684.3867, ω=0.000000
-GARCH iter 100: loss=623.5683, ω=0.000760
-GARCH converged at iteration 184 (loss change: 0.00002818)
 p11 0.992  p22 0.990  loglik -596.18
 regime at t = 50, 150, 250, 350: 0 1 0 1
 ```

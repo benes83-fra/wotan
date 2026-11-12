@@ -291,7 +291,7 @@ Four epochs (8 s) give 62% held-out accuracy against 46.5% for always predicting
 - **Folds** are contiguous blocks, purged as in [part 1](ml_finance_methods_guide.md): training windows near the validation block are dropped.
 - **The adjacency** comes from the training windows only.
 - **Training** is full-batch Adam, with early stopping on the validation MSE (patience 10), keeping the best epoch.
-- **Each fold** reports the cross-sectional rank IC of the validation predictions, from `cross_sectional_rank_ic` in part 1. The procedure also prints one line per fold.
+- **Each fold** reports the cross-sectional rank IC of the validation predictions, from `cross_sectional_rank_ic` in part 1. With `verbose = true` the procedure also prints one line per fold.
 
 The example has 120 windows of 5 days for 6 assets in two sectors of 3. An asset's next return is 0.3 × its sector's last move + noise.
 
@@ -299,7 +299,7 @@ The example has 120 windows of 5 days for 6 assets in two sectors of 3. An asset
 feat.shape = {120, 6, 5, 1} // returns
 targ.shape = {120, 6, 1, 1} // the next return
 adj := mlf.compute_correlation_adjacency(feat, 6, 5, context.allocator)
-res := mlf.gat_cross_val_score(feat, targ, 4, 8, 2, 100, 0.01) // 4 folds, hidden 8, 2 heads, <= 100 epochs
+res := mlf.gat_cross_val_score(feat, targ, 4, 8, 2, 100, 0.01, verbose = true) // 4 folds, hidden 8, 2 heads, <= 100 epochs
 defer delete(res)
 ```
 
@@ -531,7 +531,7 @@ For this guide, the GAE values were also recomputed in Python (CleanRL's recursi
 | `compute_lob_microstructure(raw, n, T, levels, alloc)` | mid / spread / imbalance channels |
 | `deeplob_norm_fit` / `deeplob_norm_apply` / `deeplob_norm_free` | train-set normalization |
 | `compute_correlation_adjacency(features, n_assets, T, alloc)` | asset graph |
-| `gat_cross_val_score(features, targets, splits, hidden, heads, epochs, lr)` | purged CV of a GAT; `GATFoldResult` |
+| `gat_cross_val_score(features, targets, splits, hidden, heads, epochs, lr, alloc, embargo, verbose)` | purged CV of a GAT; `GATFoldResult` |
 | `sentiment_analyzer_load(path)` / `sentiment_analyzer_new(...)` / `sentiment_analyzer_free` | FinBERT / a new classifier |
 | `analyze_text(&a, ids, segments, training)` | logits |
 | `sentiment_probabilities` / `sentiment_predict` | by label |

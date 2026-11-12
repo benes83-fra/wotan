@@ -121,10 +121,10 @@ step6_cleanup_test :: proc(allocator: mem.Allocator) {
 		tg := ml_finance.new_timegan(seq_len, feat, 3, 4, 1e-3, allocator)
 		defer ml_finance.timegan_free(tg)
 		ml_finance.timegan_init_weights(tg)
-		le := ml_finance.train_embedder_recovery(tg, one, 2, allocator)
-		ls := ml_finance.train_supervisor(tg, one, 2, allocator)
-		ld := ml_finance.train_discriminator(tg, one, 2, allocator)
-		lg := ml_finance.train_generator(tg, one, 2, allocator)
+		le := ml_finance.train_embedder_recovery(tg, one, 2)
+		ls := ml_finance.train_supervisor(tg, one, 2)
+		ld := ml_finance.train_discriminator(tg, one, 2)
+		lg := ml_finance.train_generator(tg, one, 2)
 		finite :: proc(v: f64) -> bool {return !math.is_nan(v) && !math.is_inf(v)}
 		expect(
 			&passed,
@@ -140,9 +140,9 @@ step6_cleanup_test :: proc(allocator: mem.Allocator) {
 		)
 		short := one[:5] // no complete sequence
 		z :=
-			ml_finance.train_supervisor(tg, short, 2, allocator) +
-			ml_finance.train_discriminator(tg, short, 2, allocator) +
-			ml_finance.train_generator(tg, short, 2, allocator)
+			ml_finance.train_supervisor(tg, short, 2) +
+			ml_finance.train_discriminator(tg, short, 2) +
+			ml_finance.train_generator(tg, short, 2)
 		expect(
 			&passed,
 			&total,

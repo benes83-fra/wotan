@@ -553,6 +553,7 @@ gat_real_world_cv_test :: proc(allocator: mem.Allocator) {
 		epochs,
 		learning_rate,
 		allocator,
+		verbose = true,
 	)
 
 	// Compute aggregate statistics

@@ -392,16 +392,11 @@ timegan_discriminator_loss :: proc(
 }
 
 // ============================================================================
-// Training Steps (each on a batch of batch_size sequences of the scaled data)
+// Training Steps (each on a batch of batch_size sequences of the scaled data; temporaries live in the model's graph scope)
 // ============================================================================
 
 // Phase 1: autoencoder; returns MSE(X, R(E(X))) (the step is on 10 sqrt of it)
-train_embedder_recovery :: proc(
-	tg: ^TimeGAN,
-	real_data: []f64,
-	batch_size: int,
-	alloc: mem.Allocator,
-) -> f64 {
+train_embedder_recovery :: proc(tg: ^TimeGAN, real_data: []f64, batch_size: int) -> f64 {
 	if !_tg_check(tg, real_data) {return 0}
 	tensor.graph_begin(&tg.scope)
 	defer tensor.graph_end(&tg.scope)
@@ -420,12 +415,7 @@ train_embedder_recovery :: proc(
 }
 
 // Phase 2: the supervisor on the embeddings of real data; returns L_S
-train_supervisor :: proc(
-	tg: ^TimeGAN,
-	real_data: []f64,
-	batch_size: int,
-	alloc: mem.Allocator,
-) -> f64 {
+train_supervisor :: proc(tg: ^TimeGAN, real_data: []f64, batch_size: int) -> f64 {
 	if !_tg_check(tg, real_data) {return 0}
 	tensor.graph_begin(&tg.scope)
 	defer tensor.graph_end(&tg.scope)
@@ -439,12 +429,7 @@ train_supervisor :: proc(
 }
 
 // Joint phase, generator and supervisor; returns the generator loss
-train_generator :: proc(
-	tg: ^TimeGAN,
-	real_data: []f64,
-	batch_size: int,
-	alloc: mem.Allocator,
-) -> f64 {
+train_generator :: proc(tg: ^TimeGAN, real_data: []f64, batch_size: int) -> f64 {
 	if !_tg_check(tg, real_data) {return 0}
 	tensor.graph_begin(&tg.scope)
 	defer tensor.graph_end(&tg.scope)
@@ -464,12 +449,7 @@ train_generator :: proc(
 }
 
 // Joint phase, embedder and recovery: 10 sqrt(MSE) + 0.1 L_S; returns that loss
-train_embedder_joint :: proc(
-	tg: ^TimeGAN,
-	real_data: []f64,
-	batch_size: int,
-	alloc: mem.Allocator,
-) -> f64 {
+train_embedder_joint :: proc(tg: ^TimeGAN, real_data: []f64, batch_size: int) -> f64 {
 	if !_tg_check(tg, real_data) {return 0}
 	tensor.graph_begin(&tg.scope)
 	defer tensor.graph_end(&tg.scope)
@@ -492,12 +472,7 @@ train_embedder_joint :: proc(
 
 // Joint phase, discriminator: stepped only while its loss is above 0.15 (it would
 // otherwise overpower the generator); returns the loss
-train_discriminator :: proc(
-	tg: ^TimeGAN,
-	real_data: []f64,
-	batch_size: int,
-	alloc: mem.Allocator,
-) -> f64 {
+train_discriminator :: proc(tg: ^TimeGAN, real_data: []f64, batch_size: int) -> f64 {
 	if !_tg_check(tg, real_data) {return 0}
 	tensor.graph_begin(&tg.scope)
 	defer tensor.graph_end(&tg.scope)
@@ -521,15 +496,14 @@ timegan_train_joint_step :: proc(
 	tg: ^TimeGAN,
 	real_data: []f64,
 	batch_size: int,
-	alloc: mem.Allocator,
 ) -> (
 	g_loss, e_loss, d_loss: f64,
 ) {
 	for _ in 0 ..< 2 {
-		g_loss = train_generator(tg, real_data, batch_size, alloc)
-		e_loss = train_embedder_joint(tg, real_data, batch_size, alloc)
+		g_loss = train_generator(tg, real_data, batch_size)
+		e_loss = train_embedder_joint(tg, real_data, batch_size)
 	}
-	d_loss = train_discriminator(tg, real_data, batch_size, alloc)
+	d_loss = train_discriminator(tg, real_data, batch_size)
 	return
 }
 
