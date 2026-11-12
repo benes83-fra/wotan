@@ -112,6 +112,7 @@ GATFoldResult :: struct {
 // a target just after the window. Full-batch Adam on the training MSE, early stopping on
 // the validation MSE with patience 10; the parameters of the best epoch are restored
 // before the IC is measured. The adjacency is built from the training windows only.
+// verbose prints one line per fold.
 gat_cross_val_score :: proc(
 	features: ^t.Tensor, // [Total_Windows, Num_Assets, Time, 1]
 	targets: ^t.Tensor, // [Total_Windows, Num_Assets, 1, 1]
@@ -122,6 +123,7 @@ gat_cross_val_score :: proc(
 	learning_rate: f64,
 	allocator: mem.Allocator = context.allocator,
 	embargo: int = -1,
+	verbose := false,
 ) -> []GATFoldResult {
 	batch := features.shape[0]
 	num_assets := features.shape[1]
@@ -216,14 +218,14 @@ gat_cross_val_score :: proc(
 			val_loss         = best_val_loss,
 			early_stop_epoch = last_epoch + 1,
 		}
-		fmt.printf(
+		if verbose {fmt.printf(
 			"  Fold %d/%d: Mean IC = %+.4f, Val Loss = %.4f (stopped at epoch %d)\n",
 			k + 1,
 			n_splits,
 			results[k].mean_ic,
 			results[k].val_loss,
 			results[k].early_stop_epoch,
-		)
+		)}
 
 		for b in best {delete(b, allocator)}
 		delete(best, allocator)
