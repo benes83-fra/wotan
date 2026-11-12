@@ -19,7 +19,8 @@ ActionDef :: struct {
 // is sold with the fee.
 // Reward (shaped): change of portfolio value from day k - 1 to day k / initial cash
 // (market move of the held positions minus fees), - 0.5 x drawdown from the peak,
-// - 0.5 x the mean absolute daily return over the window of every asset held,
+// - 0.5 x the mean absolute daily return over the window of every asset held, times its
+// weight |position value| / portfolio value,
 // + 1e-4 x the cash share of the initial cash.
 MultiAssetEnv :: struct {
 	env:             Environment,
@@ -112,17 +113,20 @@ multi_asset_env_step :: proc(env: ^Environment, action: int) -> Step {
 
 	reward := (curr_value - prev_value) / t_env.initial_cash
 	reward -= drawdown * 0.5
-	// volatility penalty: mean absolute daily return over the window of each asset held
+	// volatility penalty: mean absolute daily return over the window of each asset held,
+	// weighted by the asset's share of the portfolio value (it used to be charged in full
+	// for any holding, however small, so holding cash always earned the best reward)
 	vol_penalty := 0.0
 	start := max(0, k - t_env.window)
 	for a in 0 ..< n {
-		if t_env.positions[a] == 0.0 || k <= start {continue}
+		if t_env.positions[a] == 0.0 || k <= start || curr_value <= 0 {continue}
 		avg_abs_ret := 0.0
 		for d in start ..< k {
 			p0 := t_env.prices[d * n + a]
 			if p0 > 0 {avg_abs_ret += math.abs((t_env.prices[(d + 1) * n + a] - p0) / p0)}
 		}
-		vol_penalty += avg_abs_ret / f64(k - start) * 0.5
+		weight := t_env.positions[a] * curr_prices[a] / curr_value
+		vol_penalty += avg_abs_ret / f64(k - start) * 0.5 * math.abs(weight)
 	}
 	reward -= vol_penalty
 	reward += (t_env.cash / t_env.initial_cash) * 0.0001 // cash bonus

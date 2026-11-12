@@ -172,7 +172,8 @@ compute_rebalance_trades :: proc(
 	prices: []f64,
 ) {
 	for i in 0 ..< state.n_assets {
-		state.shares_to_trade[i] = (target_weights[i] - state.current_weights[i]) * total_capital / prices[i]
+		state.shares_to_trade[i] =
+			(target_weights[i] - state.current_weights[i]) * total_capital / prices[i]
 		state.execution_complete[i] = false
 	}
 }
@@ -317,7 +318,11 @@ orchestrator_step :: proc(
 // The next period: simple returns per asset (cash earns nothing). Returns the portfolio
 // return Σ w_i r_i; adds capital times that to the P&L and lets the weights drift,
 // w_i <- w_i (1 + r_i) / (1 + portfolio return).
-orchestrator_mark_to_market :: proc(state: ^OrchestratorState, returns: []f64, total_capital: f64) -> f64 {
+orchestrator_mark_to_market :: proc(
+	state: ^OrchestratorState,
+	returns: []f64,
+	total_capital: f64,
+) -> f64 {
 	assert(len(returns) == state.n_assets, "orchestrator_mark_to_market: one return per asset")
 	r_p := 0.0
 	for w, i in state.current_weights {r_p += w * returns[i]}
@@ -338,15 +343,17 @@ decision_free :: proc(d: ^OrchestratorDecision, allocator: mem.Allocator) {
 // Pretty Print
 // ============================================================================
 
+// A boxed summary of a decision; every row is padded to the box
 print_decision :: proc(d: ^OrchestratorDecision, tickers: []string, day: int) {
-	fmt.println(
-		"\n╔══════════════════════════════════════════════════════════════╗",
-	)
-	fmt.printf("║  ORCHESTRATOR DECISION — Day %3d                              ║\n", day)
-	fmt.println(
-		"╠══════════════════════════════════════════════════════════════╣",
-	)
-
+	W :: 60 // inner width after the two-space margin
+	row :: proc(format: string, args: ..any) {
+		fmt.printf("║  %-60s║\n", fmt.tprintf(format, ..args))
+	}
+	rule :: proc(left, right: string) {
+		fmt.print(left)
+		for _ in 0 ..< W + 2 {fmt.print("═")}
+		fmt.println(right)
+	}
 	action_str := "HOLD"
 	switch d.action {
 	case .Liquidate:
@@ -358,36 +365,24 @@ print_decision :: proc(d: ^OrchestratorDecision, tickers: []string, day: int) {
 	case .Hold:
 		action_str = "HOLD"
 	}
-
-	fmt.printf(
-		"║  Regime: %d | Action: %-10s | Pos. Mult: %.2f            ║\n",
-		d.regime,
-		action_str,
-		d.position_mult,
-	)
-	fmt.printf(
-		"║  Vol Forecast: %.2f%% | CI: [%.2f%%, %.2f%%]                ║\n",
+	fmt.println()
+	rule("╔", "╗")
+	row("ORCHESTRATOR DECISION, day %d", day)
+	rule("╠", "╣")
+	row("Regime: %d | Action: %-10s | Pos. mult: %.2f", d.regime, action_str, d.position_mult)
+	row(
+		"Vol forecast: %.2f%% | CI: [%.2f%%, %.2f%%]",
 		d.vol_forecast * 100.0,
 		d.vol_lower * 100.0,
 		d.vol_upper * 100.0,
 	)
-	fmt.printf(
-		"║  VRP Signal: %+.3f | Exposure: %3.0f%% (rest cash)          ║\n",
-		d.vrp_signal,
-		100 * d.exposure,
-	)
-
-	fmt.println(
-		"╠══════════════════════════════════════════════════════════════╣",
-	)
-	fmt.println("║  Asset  | Target Wt | Trade (sh) | Bid      | Ask      ║")
-	fmt.println(
-		"╠══════════════════════════════════════════════════════════════╣",
-	)
-
+	row("VRP signal: %+.3f | Exposure: %3.0f%% (rest cash)", d.vrp_signal, 100 * d.exposure)
+	rule("╠", "╣")
+	row("%-6s | %9s | %10s | %8s | %8s", "Asset", "Target wt", "Trade (sh)", "Bid", "Ask")
+	rule("╠", "╣")
 	for i in 0 ..< len(d.target_weights) {
-		fmt.printf(
-			"║  %-5s | %7.1f%% | %+10.0f | %8.2f | %8.2f ║\n",
+		row(
+			"%-6s | %8.1f%% | %+10.0f | %8.2f | %8.2f",
 			tickers[i],
 			d.target_weights[i] * 100.0,
 			d.trades[i],
@@ -395,7 +390,5 @@ print_decision :: proc(d: ^OrchestratorDecision, tickers: []string, day: int) {
 			d.ask_quotes[i],
 		)
 	}
-	fmt.println(
-		"╚══════════════════════════════════════════════════════════════╝",
-	)
+	rule("╚", "╝")
 }

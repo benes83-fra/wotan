@@ -1,6 +1,6 @@
 # The `ml_finance` package, part 4: derivatives, execution and synthetic data
 
-This is the fourth part of the guide to `wotan/ml_finance`. [Part 1](ml_finance_methods_guide.md) covers labels, feature importance and backtest statistics, [part 2](ml_finance_asset_pricing_guide.md) asset-pricing models, and [part 3](ml_finance_forecasting_guide.md) forecasting. This part covers:
+This is the fourth part of the guide to `wotan/ml_finance`. [Part 1](ml_finance_methods_guide.md) covers labels, feature importance and backtest statistics, [part 2](ml_finance_asset_pricing_guide.md) asset-pricing models, [part 3](ml_finance_forecasting_guide.md) forecasting, and [part 5](ml_finance_rl_integration_guide.md) reinforcement learning and integration. This part covers:
 - **optimal execution:** the Almgren–Chriss liquidation schedule, and Avellaneda–Stoikov market-making quotes;
 - **the deep BSDE method:** option prices in many dimensions from a learned hedge;
 - **deep calibration:** a network that maps a Heston implied-volatility surface to the model's parameters in one forward pass;
