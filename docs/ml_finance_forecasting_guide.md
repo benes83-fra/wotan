@@ -1,6 +1,6 @@
 # The `ml_finance` package, part 3: forecasting
 
-This is the third part of the guide to `wotan/ml_finance`. [Part 1](ml_finance_methods_guide.md) covers labels, feature importance and backtest statistics, and [part 2](ml_finance_asset_pricing_guide.md) covers asset-pricing models. This part covers forecasting:
+This is the third part of the guide to `wotan/ml_finance`. [Part 1](ml_finance_methods_guide.md) covers labels, feature importance and backtest statistics, [part 2](ml_finance_asset_pricing_guide.md) covers asset-pricing models, and [part 4](ml_finance_derivatives_guide.md) derivatives and execution. This part covers forecasting:
 - **point forecasts of a series:** N-BEATS and PatchTST;
 - **probabilistic forecasts:** a sequence encoder with a Gaussian, Student-t or quantile head, and scores for any forecast distribution;
 - **token forecasting:** a small Chronos-style language model over quantized values, which forecasts by sampling paths;
