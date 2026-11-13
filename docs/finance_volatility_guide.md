@@ -426,7 +426,7 @@ The weights are the notionals of the three vanillas per unit of the digital. The
 
 | Procedure | Pays 1 domestic unit at T if | Method |
 |---|---|---|
-| `fx_digital_call_price(S, K, T, r_d, r_f, sigma)` | S_T > K | closed form |
+| `fx_digital_call_price(S, K, T, r_d, r_f, sigma)` | S_T > K | closed form; with σ = 0 it pays if the forward is above the strike |
 | `fx_down_and_out_digital_call_price(S, K, L, T, r_d, r_f, sigma)` | S_T > K and S never touched L (continuous) | method of images (Reiner & Rubinstein 1991) |
 | `fx_dnt_pde_price(S, L, U, T, r_d, r_f, sigma, n_space = 200, n_time = 1000)` | L < S_t < U throughout (double-no-touch) | Crank–Nicolson with a Rannacher start |
 
@@ -518,12 +518,12 @@ The derivatives are finite differences, so noise in the prices is amplified. Tak
 | `fx_derivatives_reference_test` | Garman–Kohlhagen, cash-or-nothing, barrier digital and double-no-touch against QuantLib; vanna-volga weights |
 | `implied_default_prob_reference_test` | default probability on a two-lognormal mixture against SciPy |
 
-**Additional checks while writing this guide:**
+**Additional checks:**
 
 | What | Reference | Agreement |
 |---|---|---|
 | `sabr_implied_vol` with β = 0, 0.5, 0.6, 1 and ρ = ±0.99, 6 strikes | QuantLib `sabrVolatility` | 1e-14 |
-| Garman–Kohlhagen prices down to 1e-49 | mpmath, 40 digits | 1e-9 relative (after the fix below) |
+| Garman–Kohlhagen prices down to 1e-49 | mpmath, 40 digits | 1e-9 relative |
 | `calibrate_heston` on a model surface (4 × 5 quotes) | the true parameters | 10 digits |
 | `calibrate_sabr`, free and with `fixed_beta`, on noise-free quotes | the true parameters | 1e-10 |
 | variance-swap integral on Heston COS prices | `heston_fair_variance` | 10 digits |
@@ -532,14 +532,6 @@ The derivatives are finite differences, so noise in the prices is amplified. Tak
 | Heston and Merton exotics at σ = 0 or λ = 0 | Black–Scholes MC | within Monte Carlo error |
 | default probability and expected loss on a skewed smile | exact derivatives of the smile | 9e-5 and 5e-4 |
 | `fx_strike_from_delta` round trip | the input delta | 1e-12 |
-
-**Fixed while writing this guide:**
-- **FX prices far out of the money.** The FX code computed N(x) as ½(1 + erf(x/√2)), which cancels in the left tail. Far out-of-the-money Garman–Kohlhagen prices came out as exactly 0, or negative (−4.9e-17 for a call worth 5.7e-19). It now uses `erfc` like the rest of the package.
-- **FX digital at σ = 0.** `fx_digital_call_price` divided by σ, so σ = 0 with the forward exactly at the strike gave NaN. With σ = 0 the digital now pays if the forward is above the strike.
-- **Fixing β in SABR.** `calibrate_sabr`'s comment said β could be fixed by setting equal bounds, but the bounds are internal, so there was no way to do it. `calibrate_sabr` now takes `fixed_beta`.
-- **Comments:** stale comments in `vol_surface.odin` and `calib_exotics.odin` were tidied ("CRITICAL FIX … identity function before", "Legacy Wrapper: Keeps your existing code working").
-
-`finance_fixes_test` checks the three code changes. The two FX checks fail on the previous code; `fixed_beta` is new.
 
 **Known limitations:**
 - `build_lv_surface_from_heston` has a fixed grid (0.6–1.4·S₀, 0.1–1 year), so longer barriers use the 1-year volatilities.

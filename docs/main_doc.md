@@ -51,7 +51,7 @@ Each guide is a user guide for one package, or one part of a large package. They
 - **validation**: what the results were compared against;
 - **quick reference**: a table of the procedures.
 
-Every example in the guides was compiled and run against the current code, and the output shown is the real output. Where writing a guide turned up a bug, the bug was fixed, and the guide says so.
+Every example in the guides was compiled and run against the current code, and the output shown is the real output.
 
 ### Data and numerics
 

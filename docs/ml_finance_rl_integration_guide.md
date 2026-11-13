@@ -101,11 +101,7 @@ The two penalties are on the scale of the returns. A day with 1% volatility cost
 
 Check what a reward favors before training on it. If these terms don't suit, write your own environment: `Environment` takes any `reset_fn` and `step_fn`.
 
-**Fixed while writing this guide:** the earlier reward made holding cash the best policy for any realistic asset. Its two penalties were both charged daily:
-- **Drawdown:** 0.5 × the drawdown level, so one dip was paid for again each day until a new high.
-- **Volatility:** 0.5 × each held asset's mean absolute daily return.
-
-Both scale with the volatility σ, while the gain scales with the drift. Investing would have needed a drift above about 0.4σ a day, an annual Sharpe ratio above 6. Here all in A scored −3.6 and all in B −10.0, against +0.03 for cash.
+**Why the penalties have this form.** A risk penalty that scales with the volatility σ, such as one charged daily on the drawdown level or on the mean absolute daily return, outweighs a gain that scales with the drift. With penalties of that kind, investing needs a drift above about 0.4σ a day, an annual Sharpe ratio above 6, so holding cash becomes the best policy for any realistic asset. The variance term r² and the drawdown charged only on its increase keep the penalties on the scale of the returns.
 
 ## 3. PPO
 
@@ -468,8 +464,6 @@ How to read the two decisions:
 The regime list for days 31–49 shows the filtered HMM switching six days after the stress begins on day 36, and holding from day 44. That lag is the price of not looking ahead.
 
 The orchestrator beat equal weights over these 49 days. That is one path of a market built to reward regime timing; it is not evidence. `orchestrator_test` walks the orchestrator forward over a year of real data, against 60/40, equal weights and SPY. It reports each strategy's PSR, its minimum track record length, and its costs.
-
-**Fixed while writing this guide:** `print_decision`'s right border was misaligned on most rows. Every row is now padded to the box.
 
 ## 9. Validation
 

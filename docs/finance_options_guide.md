@@ -694,7 +694,7 @@ With one step the variance stays at ξ₀ and the model reduces to Black–Schol
 | `monte_carlo_reference_test` | the path generators, Hull–White moments, the regression step and control variates against NumPy |
 | `fbm_reference_test` | fBm covariances, rBergomi and fractional Black–Scholes against QUADPACK and NumPy |
 
-**Additional checks while writing this guide:**
+**Additional checks:**
 
 | What | Reference | Agreement |
 |---|---|---|
@@ -712,14 +712,6 @@ With one step the variance stays at ξ₀ and the model reduces to Black–Schol
 | Monte Carlo exotics (section 5) | NumPy, 2M paths | within one standard error |
 | GBM, Heston and Merton paths | E[e^{−rT}S_T] = S₀ | within Monte Carlo error |
 | fBm covariance (H = 0.3, with t = 0 and repeated times) | the exact covariance | within Monte Carlo error |
-
-**Fixed while writing this guide:**
-- **Tree Greeks with 2 steps.** The binomial and trinomial trees read the second-level node values for gamma and theta inside the backward loop, which starts at level `n_steps − 1`. With `n_steps ≤ 2` that level is the expiry level, which the loop never visits. Gamma came out as 0 and theta as −price/(2Δt). Both trees now take level 2 from the payoffs, and the 2-step binomial gamma matches QuantLib's 2-step CRR tree.
-- **Batches in `black_scholes_price`.** It multiplied σ² by a 1 × 1 constant tensor, and `tensor_mul` doesn't broadcast, so n × 1 inputs panicked. It now scales by ½ with `tensor_scale`.
-- **Leaks in `black_scholes_price`.** The tensor engine doesn't link operations whose inputs all lack a gradient into the graph. Intermediates such as −rT, e^−rT, K·e^−rT and √T for a fixed r and T were therefore never freed. When only σ had a gradient that was 7 tensors per call; without any gradient it was all 21, the price included. They are now handed to the graph or freed at once, the same way the `nn` losses do it.
-- **Two comments in `monte_carlo.odin`:** the file header now describes the building blocks, and `mc_compute_asian_average` no longer claims continuous monitoring (it averages the grid values S₁..Sₙ).
-
-`finance_fixes_test` checks the three code fixes. Each check fails on the previous code.
 
 **Known limitations:**
 - Dividends are supported only by the trees.

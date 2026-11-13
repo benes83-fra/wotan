@@ -661,7 +661,7 @@ The file format is little-endian binary with a magic header and a type id, follo
 - **What is stored.** A model stores its full configuration, including the attention flags, MoE, RMSNorm and tied-embedding settings and the dropout rate, so a loaded model is built exactly as it was saved.
 - **Old files.** Files from older versions of the format still load.
 - **Changed heads.** A stored tensor of another size replaces the layer's tensor. A model saved after `bert_replace_nsp_head`, for example, loads with its new head.
-- **Robustness.** Reading checks every access. A truncated, corrupt or foreign file returns `ok = false` with a message, and leaks nothing.
+- **Robustness.** Reading checks every access. A truncated, corrupt or foreign file returns `ok = false` with a message, and leaks nothing. A layer header with an invalid configuration, such as 0 attention heads, counts as corrupt in both `load_checkpoint` and `sequential_load_partial`.
 - **Random numbers.** Loading uses a private random generator for the layer initialisation, so it leaves your random sequence unchanged.
 
 ```odin
@@ -801,15 +801,6 @@ graph scope: tensors left behind: 0
 ```
 
 The 9 tensors are the matrix product, the bias addition and the ReLU of the frozen first layer, in each of the 3 steps. This example deliberately leaks those 9 tensors. Layers frozen later in the model (for example GPT blocks after a trainable embedding) are not affected, because their inputs need gradients.
-
-### Fixed while writing this guide
-
-These bugs were found while writing this guide and are now covered by `tests/nn_fixes_test.odin`:
-- **Constant inputs leaked inside graph scopes.** The position ids of GPT and BERT, the ids that pick BERT's `[CLS]` token, the zero states of recurrent and Mamba layers in a `Sequential` model, the positional encoding and the MoE top-k mask were allocated on the heap even inside a graph scope. `graph_end` does not free heap tensors, so every training step leaked one tensor per constant. GPT and BERT training in a scope, which is the recommended way, leaked on every step.
-- **MoE without the auxiliary loss leaked its router softmax.** As the first layer of a model, whose input needs no gradient, it also leaked its copy of the input.
-- **The probabilistic losses leaked when an input was data.** With a fixed variance, scale or ν, every intermediate computed only from that data leaked on every call. With a data prediction, the pinball loss leaked all of its intermediates.
-- **A checkpoint with an invalid layer configuration could load as `ok`.** For example, a layer header with 0 attention heads made `load_checkpoint` stop reading layers and still report success, with a truncated model. `load_checkpoint` and `sequential_load_partial` now treat it as a corrupt file.
-- **The comment on `affine_transform_image` claimed the torchvision `affine` convention.** In fact it equals `affine` with the angle negated.
 
 ## 12. A complete example
 
@@ -1111,10 +1102,6 @@ The details:
 - **Rounding.** The decoded values are the bin centres. With the defaults a bin is 30 / 4092 ≈ 0.73 % of the scale wide, so a value comes back within half of that.
 - **Context length.** `ts_encode_context` keeps the last `context_length` values.
 - **Other procedures.** `ts_encode(&ts, values, scale)` encodes values at a given scale, for example future values with the context's scale, as training targets. `ts_encode_batch_to_tensors(&ts, series)` encodes series of different lengths as one left-padded batch and returns each series' scale.
-
-### Fixed while writing this section
-
-- **The WordPiece cleaner kept private-use and unassigned characters.** It turned them into `[UNK]`. Hugging Face's `BertTokenizer` removes them together with the other C* categories, so the two tokenizers gave different ids. A test was added to `tests/nn_fixes_test.odin`.
 
 ## 14. Quick reference
 

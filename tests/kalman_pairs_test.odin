@@ -245,26 +245,6 @@ kalman_pairs_reference_checks :: proc(allocator: mem.Allocator) {
 	record_failures(total - passed)
 }
 
-// The adjusted closes of a two-ticker Yahoo_Panel (dates both tickers have) as the
-// DataFrame kalman_pairs_strategy reads: Date, Asset_A (ticker 0), Asset_B (ticker 1)
-@(private = "file")
-_kp_pair_df :: proc(panel: ^net.Yahoo_Panel, allocator: mem.Allocator) -> w.DataFrame {
-	D := len(panel.dates)
-	col_date := w.column_new("Date", .Date, D, allocator)
-	col_a := w.column_new("Asset_A", .Float, D, allocator)
-	col_b := w.column_new("Asset_B", .Float, D, allocator)
-	for d, t in panel.dates {
-		w.append_date(&col_date, d)
-		w.append_float(&col_a, panel.adj_close[t * 2 + 0])
-		w.append_float(&col_b, panel.adj_close[t * 2 + 1])
-	}
-	df := w.dataframe_new(allocator)
-	w.add_column(&df, col_date)
-	w.add_column(&df, col_a)
-	w.add_column(&df, col_b)
-	return df
-}
-
 // DSR and PBO of a grid search's trials; the best trial's SR must be the one the grid
 // search reported
 @(private = "file")
@@ -297,7 +277,7 @@ kalman_pairs_real_data_test :: proc(allocator: mem.Allocator = context.allocator
 		fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", what))
 		return
 	}
-	aligned_df := _kp_pair_df(&panel, allocator)
+	aligned_df := net.yahoo_panel_to_dataframe(&panel, []string{"Asset_A", "Asset_B"}, allocator)
 	defer w.destroy_dataframe(&aligned_df)
 
 	fmt.printf("Loaded %d properly aligned days of real KO/PEP data\n", aligned_df.rows)
@@ -503,7 +483,7 @@ kalman_pairs_real_data_grid_test :: proc(allocator: mem.Allocator = context.allo
 		fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", what))
 		return
 	}
-	aligned_df := _kp_pair_df(&panel, allocator)
+	aligned_df := net.yahoo_panel_to_dataframe(&panel, []string{"Asset_A", "Asset_B"}, allocator)
 	defer w.destroy_dataframe(&aligned_df)
 	fmt.printf("Loaded %d properly aligned days of real KO/PEP data\n", aligned_df.rows)
 	// --- Grid Search ---
@@ -661,7 +641,7 @@ kalman_pairs_semiconductor_test :: proc(allocator: mem.Allocator = context.alloc
 		fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", what))
 		return
 	}
-	aligned_df := _kp_pair_df(&panel, allocator)
+	aligned_df := net.yahoo_panel_to_dataframe(&panel, []string{"Asset_A", "Asset_B"}, allocator)
 	defer w.destroy_dataframe(&aligned_df)
 
 	fmt.printf("Loaded %d properly aligned days of real NVDA/AMD data\n", aligned_df.rows)
@@ -882,7 +862,7 @@ kalman_pairs_semiconductor_adf_test :: proc(allocator: mem.Allocator = context.a
 		bool,
 		w.DataFrame,
 	) {
-		aligned := _kp_pair_df(panel, alloc)
+		aligned := net.yahoo_panel_to_dataframe(panel, []string{"Asset_A", "Asset_B"}, alloc)
 
 		if aligned.rows < 100 {
 			w.destroy_dataframe(&aligned)
@@ -1242,7 +1222,7 @@ kalman_pairs_auto_select_test :: proc(allocator: mem.Allocator = context.allocat
 
 	// 3. Align dataframes by DATE (the panel holds only the dates both tickers have)
 	fmt.println("\n--- Step 3: Aligning Data ---")
-	aligned_df := _kp_pair_df(&panel, allocator)
+	aligned_df := net.yahoo_panel_to_dataframe(&panel, []string{"Asset_A", "Asset_B"}, allocator)
 	defer w.destroy_dataframe(&aligned_df)
 
 	fmt.printf(

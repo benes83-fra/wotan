@@ -147,6 +147,35 @@ data_io_fixes_test :: proc(allocator: mem.Allocator) {
 		)
 	}
 
+	// 3b. A panel as a DataFrame: Date plus one adjusted-close column per ticker, with
+	// column names that are copies (the names passed in are freed before the lookup)
+	{
+		panel := net.Yahoo_Panel {
+			dates     = []w.Date{{2026, 11, 12}, {2026, 11, 13}},
+			adj_close = []f64{100, 50, 101, 49}, // [day][ticker]
+			n_tickers = 2,
+		}
+		a := fmt.aprintf("A%d", 1, allocator = allocator)
+		b := fmt.aprintf("B%d", 2, allocator = allocator)
+		df := net.yahoo_panel_to_dataframe(&panel, []string{a, b}, allocator)
+		defer w.destroy_dataframe(&df)
+		delete(a, allocator)
+		delete(b, allocator)
+		d1, _ := w.column_at_date(w.column(&df, "Date"), 1)
+		a1, _ := w.column_at_float(w.column(&df, "A1"), 1)
+		b0, _ := w.column_at_float(w.column(&df, "B2"), 0)
+		expect(
+			&passed,
+			&total,
+			df.rows == 2 &&
+			len(df.columns) == 3 &&
+			d1 == w.Date{2026, 11, 13} &&
+			a1 == 101 &&
+			b0 == 50,
+			"yahoo_panel_to_dataframe: Date and one column per ticker under its own name",
+		)
+	}
+
 	// 4. Column names outlive the importer's temporary buffers. The importers are
 	// run with a temp allocator on a local buffer, which is then overwritten.
 	{

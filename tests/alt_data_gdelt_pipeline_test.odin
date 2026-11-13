@@ -58,48 +58,32 @@ alt_data_gdelt_pipeline_test :: proc(allocator: mem.Allocator = context.allocato
 		}
 	}
 
+	fmt.println("\n2. Fetching Yahoo Finance Price Data...")
+	yahoo, yahoo_ok := net.read_yahoo_series(symbol, .Daily, .OneYear, allocator)
+	if !yahoo_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", symbol)); return}
+	defer net.yahoo_series_free(&yahoo)
+	fmt.printf("Fetched %d rows of price data\n", len(yahoo.adj_close))
+
 	if use_mock {
-		text = `Date,Series,Value
-2023-01-03,Average Tone,2.5
-2023-01-04,Average Tone,2.1
-2023-01-05,Average Tone,2.8
-2023-01-06,Average Tone,2.3
-2023-01-09,Average Tone,2.6
-2023-01-10,Average Tone,2.4
-2023-01-11,Average Tone,2.9
-2023-01-12,Average Tone,2.2
-2023-01-13,Average Tone,2.7
-2023-01-17,Average Tone,2.5
-2023-01-18,Average Tone,2.1
-2023-01-19,Average Tone,2.8
-2023-01-20,Average Tone,2.3
-2023-01-23,Average Tone,2.6
-2023-01-24,Average Tone,2.4
-2023-01-25,Average Tone,2.9
-2023-01-26,Average Tone,2.2
-2023-01-27,Average Tone,2.7
-2023-01-30,Average Tone,2.5
-2023-01-31,Average Tone,2.1
-2023-02-01,Average Tone,2.8
-2023-02-02,Average Tone,2.3
-2023-02-03,Average Tone,2.6
-2023-02-06,Average Tone,2.4
-2023-02-07,Average Tone,2.9
-2023-02-08,Average Tone,2.2
-2023-02-09,Average Tone,2.7
-2023-02-10,Average Tone,2.5
-2023-02-13,Average Tone,2.1
-2023-02-14,Average Tone,2.8
-2023-02-15,Average Tone,2.3
-2023-02-16,Average Tone,2.6
-2023-02-17,Average Tone,2.4
-2023-02-21,Average Tone,2.9
-2023-02-22,Average Tone,2.2
-2023-02-23,Average Tone,2.7
-2023-02-24,Average Tone,2.5
-2023-02-27,Average Tone,2.1
-2023-02-28,Average Tone,2.8
-2023-03-01,Average Tone,2.3`
+		// a repeating tone pattern on the last 40 trading days before the latest one, so the
+		// mock days fall inside the Yahoo history
+		pattern := [?]f64{2.5, 2.1, 2.8, 2.3, 2.6, 2.4, 2.9, 2.2, 2.7}
+		b := strings.builder_make(context.temp_allocator)
+		strings.write_string(&b, "Date,Series,Value\n")
+		n_days := len(yahoo.dates)
+		first := max(0, n_days - 41)
+		for k in first ..< n_days - 1 {
+			d := yahoo.dates[k]
+			fmt.sbprintf(
+				&b,
+				"%04d-%02d-%02d,Average Tone,%.1f\n",
+				d.year,
+				d.month,
+				d.day,
+				pattern[(k - first) % len(pattern)],
+			)
+		}
+		text = strings.to_string(b)
 	}
 
 	df_gdelt := importer.csv_load_from_string(text, allocator)
@@ -132,43 +116,58 @@ alt_data_gdelt_pipeline_test :: proc(allocator: mem.Allocator = context.allocato
 		return
 	}
 
-	// Extract tone series
-	tone_series := make([dynamic]f64, 0, allocator)
-	defer delete(tone_series)
-
-	for i in 0 ..< df_gdelt.rows {
-		series_val, _ := w.column_at_string(series_col, i)
-		if series_val == "Average Tone" {
-			val, _ := w.column_at_float(value_col, i)
-			append(&tone_series, val)
+	// The day of a GDELT row: a Date column (2025-11-14), or a string such as
+	// 20251114T000000Z or 2025-11-14T00:00:00Z
+	gdelt_day :: proc(col: ^w.Column, row: int) -> (w.Date, bool) {
+		#partial switch col.type {
+		case .Date:
+			d, is_null := w.column_at_date(col, row)
+			return d, !is_null
+		case .Datetime:
+			dt, is_null := w.column_at_datetime(col, row)
+			return w.Date{dt.year, dt.month, dt.day}, !is_null
+		case .String:
+			s, is_null := w.column_at_string(col, row)
+			if is_null {return {}, false}
+			if len(s) >= 10 && s[4] == '-' {return w.parse_date(s[:10])}
+			if len(s) >= 8 {return w.parse_date(fmt.tprintf("%s-%s-%s", s[0:4], s[4:6], s[6:8]))}
 		}
+		return {}, false
 	}
 
-	fmt.println("\n2. Fetching Yahoo Finance Price Data...")
-	yahoo, yahoo_ok := net.read_yahoo_series(symbol, .Daily, .OneYear, allocator)
-	if !yahoo_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", symbol)); return}
-	defer net.yahoo_series_free(&yahoo)
-	fmt.printf("Fetched %d rows of price data\n", len(yahoo.adj_close))
+	// Average tone per day
+	tone_on := make(map[w.Date]f64, context.temp_allocator)
+	for i in 0 ..< df_gdelt.rows {
+		series_val, _ := w.column_at_string(series_col, i)
+		if series_val != "Average Tone" {continue}
+		day, day_ok := gdelt_day(date_col, i)
+		val, val_null := w.column_at_float(value_col, i)
+		if day_ok && !val_null {tone_on[day] = val}
+	}
 
 	fmt.println("\n3. Aligning Sentiment with Daily Returns...")
+	// The tone of trading day k is known at its close and is paired, by date, with the
+	// return from day k to day k + 1. Tone on days without trading (weekends, holidays)
+	// is left out.
+	daily_returns := ts.simple_returns(yahoo.adj_close, 1, allocator)
+	defer delete(daily_returns, allocator)
+	tone_series := make([dynamic]f64, allocator)
+	returns_series := make([dynamic]f64, allocator)
+	defer {
+		delete(tone_series)
+		delete(returns_series)
+	}
+	for k in 0 ..< len(daily_returns) {
+		if tone, has_tone := tone_on[yahoo.dates[k]]; has_tone {
+			append(&tone_series, tone)
+			append(&returns_series, daily_returns[k])
+		}
+	}
 	n_tone := len(tone_series)
+	fmt.printf("   %d trading days with a tone and a next-day return\n", n_tone)
 	if n_tone < 30 {
 		fmt.printf("ERROR: Not enough tone data points (got %d, need >= 30)\n", n_tone)
 		return
-	}
-
-	returns_series := make([]f64, n_tone, allocator)
-	defer delete(returns_series, allocator)
-
-	// daily_returns[k] is the return from day k to day k + 1
-	daily_returns := ts.simple_returns(yahoo.adj_close, 1, allocator)
-	defer delete(daily_returns, allocator)
-	yahoo_rows := len(yahoo.adj_close)
-	for i in 0 ..< n_tone {
-		yahoo_idx := yahoo_rows - n_tone + i
-		if yahoo_idx > 0 {
-			returns_series[i] = daily_returns[yahoo_idx - 1]
-		}
 	}
 
 	fmt.println("\n4. Training Random Forest Model...")

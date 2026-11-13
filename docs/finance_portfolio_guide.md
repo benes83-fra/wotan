@@ -130,7 +130,7 @@ The optimizers minimize their objective by spectral projected gradient: Barzilai
 | `constrained_mean_variance_portfolio(mu, &cov, target, c)` | min wᵀΣw with wᵀμ = target, met exactly |
 | `constrained_risk_aversion_portfolio(mu, &cov, gamma, c)` | max wᵀμ − (γ/2) wᵀΣw |
 | `constrained_minimize(n, f, grad, user, c, init = nil)` | any objective with its gradient; global for convex f |
-| `project_constraints(v, c)`, `enforce_constraints` | the nearest feasible weights |
+| `project_constraints(v, c)`, `enforce_constraints` | the nearest feasible weights, by Dykstra's alternating projections onto the box, the budget and the group limits |
 
 Each takes `allocator` and accepts `max_iter` and `tol`.
 
@@ -552,7 +552,7 @@ The 60-day windows start on day 59, while the EWMA volatility needs only 20 days
 | `factors_reference_test`, `factor_model_test`, `factor_analysis_test` | principal-axis factoring, varimax, scores, factor model covariance |
 | `finance_analytics_reference_test`, `finance_analytics_test`, `analytics_edge_cases_test`, `analytics_memory_test` | rolling analytics against pandas, edge cases, memory |
 
-**Additional checks while writing this guide:**
+**Additional checks:**
 
 | What | Reference | Agreement |
 |---|---|---|
@@ -565,14 +565,6 @@ The 60-day windows start on day 59, while the EWMA volatility needs only 20 days
 | factor analysis, varimax, scores, market factor | NumPy principal-axis / R-style varimax | 1e-6; varimax 2e-5 (its default tolerance is 1e-6) |
 | factor model betas, residual variances, model covariance | NumPy / OLS | all printed digits |
 | rolling Sharpe, beta, volatility, EWMA volatility | pandas | 1e-15 relative |
-
-**Fixed while writing this guide:**
-- **Constrained portfolios with group limits.** The projection onto the constraints combines group limits with the box and budget by Dykstra's alternating projections. It stopped as soon as the point stopped moving between sweeps. After a long gradient step the box clamps saturate, so the point can stay put while Dykstra's correction terms still drift towards the true projection. The result was a wrong projection:
-  - the minimum-variance portfolio broke the group limit, putting 80% in the bonds against a 50% limit;
-  - the max-Sharpe and utility optimizers stopped at their equal-weight start.
-
-  The iteration now stops only when the correction terms have settled as well. All three match SciPy, and `min_cvar_portfolio` and `risk_parity_portfolio`, which use the same projection, are covered too. `finance_fixes_test` checks this against SciPy and fails on the previous code.
-- **API.** The constraint, CVaR and risk-parity procedures now default `allocator` to `context.allocator`, like the rest of the package. `factor_analysis_free`, `risk_decomposition_free` and `risk_decomp_free` are new; before, these results had to be freed field by field.
 
 **Known limitations:**
 - **Group limits.** Group limits are upper limits only.

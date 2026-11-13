@@ -452,13 +452,14 @@ yahoo_series_from_dataframe :: proc(
 	return s, true
 }
 
-// Adjusted closes (dividends and splits) and dollar volumes (adjusted close times
-// volume) of several tickers on the dates all of them have, row-major
-// [date * n_tickers + ticker]. A ticker's rows with a missing value or a price <= 0
-// are left out before the dates are matched.
+// Adjusted closes (dividends and splits), volumes (shares traded) and dollar volumes
+// (adjusted close times volume) of several tickers on the dates all of them have,
+// row-major [date * n_tickers + ticker]. A ticker's rows with a missing value or a
+// price <= 0 are left out before the dates are matched.
 Yahoo_Panel :: struct {
 	dates:         []w.Date,
 	adj_close:     []f64,
+	volume:        []f64,
 	dollar_volume: []f64,
 	n_tickers:     int,
 	allocator:     mem.Allocator,
@@ -467,6 +468,7 @@ Yahoo_Panel :: struct {
 yahoo_panel_free :: proc(p: ^Yahoo_Panel) {
 	delete(p.dates, p.allocator)
 	delete(p.adj_close, p.allocator)
+	delete(p.volume, p.allocator)
 	delete(p.dollar_volume, p.allocator)
 	p^ = {}
 }
@@ -487,12 +489,12 @@ read_yahoo_panel :: proc(
 	NA := len(tickers)
 	ta := context.temp_allocator
 	prices := make([]map[w.Date]f64, NA, ta)
-	dvols := make([]map[w.Date]f64, NA, ta)
+	vols := make([]map[w.Date]f64, NA, ta)
 	first := make([dynamic]w.Date, ta)
 	defer {
-		for k in 0 ..< NA {delete(prices[k]); delete(dvols[k])}
+		for k in 0 ..< NA {delete(prices[k]); delete(vols[k])}
 		delete(prices, ta)
-		delete(dvols, ta)
+		delete(vols, ta)
 		delete(first)
 	}
 	for sym, k in tickers {
@@ -500,7 +502,7 @@ read_yahoo_panel :: proc(
 		defer w.destroy_dataframe(&df)
 		if !got {return {allocator = allocator}, false, k}
 		prices[k] = make(map[w.Date]f64, ta)
-		dvols[k] = make(map[w.Date]f64, ta)
+		vols[k] = make(map[w.Date]f64, ta)
 		dc, pc, vc := w.column(&df, "Date"), w.column(&df, "AdjClose"), w.column(&df, "Volume")
 		for row in 0 ..< df.rows {
 			d, dn := w.column_at_date(dc, row)
@@ -508,7 +510,7 @@ read_yahoo_panel :: proc(
 			v, vn := w.column_at_numeric(vc, row)
 			if dn || pn || vn || !(p > 0) {continue}
 			prices[k][d] = p
-			dvols[k][d] = p * v
+			vols[k][d] = v
 			if k == 0 {append(&first, d)}
 		}
 	}
@@ -524,6 +526,7 @@ read_yahoo_panel :: proc(
 	panel = Yahoo_Panel {
 		dates         = make([]w.Date, D, allocator),
 		adj_close     = make([]f64, D * NA, allocator),
+		volume        = make([]f64, D * NA, allocator),
 		dollar_volume = make([]f64, D * NA, allocator),
 		n_tickers     = NA,
 		allocator     = allocator,
@@ -531,11 +534,39 @@ read_yahoo_panel :: proc(
 	copy(panel.dates, common[:])
 	for d, t in common {
 		for k in 0 ..< NA {
-			panel.adj_close[t * NA + k] = prices[k][d]
-			panel.dollar_volume[t * NA + k] = dvols[k][d]
+			p, v := prices[k][d], vols[k][d]
+			panel.adj_close[t * NA + k] = p
+			panel.volume[t * NA + k] = v
+			panel.dollar_volume[t * NA + k] = p * v
 		}
 	}
 	return panel, true, -1
+}
+
+// The adjusted closes of a panel as a DataFrame: a Date column, then one Float column
+// per ticker named by `names` (one name per ticker, copied into the frame). Free with
+// w.destroy_dataframe.
+yahoo_panel_to_dataframe :: proc(
+	panel: ^Yahoo_Panel,
+	names: []string,
+	allocator: mem.Allocator = context.allocator,
+) -> w.DataFrame {
+	NA := panel.n_tickers
+	if len(names) != NA {
+		panic("yahoo_panel_to_dataframe: need one column name per ticker")
+	}
+	D := len(panel.dates)
+	df := w.dataframe_new(allocator)
+	dates := w.column_new("Date", .Date, D, allocator)
+	for d in panel.dates {w.append_date(&dates, d)}
+	w.add_column(&df, dates)
+	for name, k in names {
+		col := w.column_new("", .Float, D, allocator)
+		w.column_own_name(&col, name)
+		for t in 0 ..< D {w.append_float(&col, panel.adj_close[t * NA + k])}
+		w.add_column(&df, col)
+	}
+	return df
 }
 
 

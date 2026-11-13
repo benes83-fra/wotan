@@ -536,7 +536,7 @@ SPY chain: 499 options expiring in 0.099 years
 | `pdpm_reference_test`, `pdpm_test`, `pdpm_contracts_test` | SDF construction, pricing identities, state-price densities, calibration |
 | `pdpm_real_data_test`, `pdpm_multifactor_test` | calibration on the CSV files and on live Yahoo data |
 
-**Additional checks while writing this guide:**
+**Additional checks:**
 
 | What | Reference | Agreement |
 |---|---|---|
@@ -548,10 +548,6 @@ SPY chain: 499 options expiring in 0.099 years
 | SMA, Bollinger and breakout backtests; the short-and-flip order | independent Python replay | exact (every equity value) |
 | power-utility SDF prices | Black–Scholes | 9.4170 ± 0.0072 vs 9.4134 over 10 seeds |
 | linear SDF prices of the stock and the bond | the moment conditions | 1e-12 |
-
-**Changed while writing this guide:**
-- **Yahoo failures no longer abort the suite.** `read_yahoo` and `read_yahoo_json` panicked when a request failed, so a rate limit stopped the whole test suite partway. They now return `(df, ok)`, and `ok` is also false when Yahoo answers without data. `fetch_yahoo_options` and `fetch_yahoo_option_surface` return `(chain, ok)` in the same way, without their former warning prints. The real-data tests check `ok`, report a missing download as a counted failure with `fail_missing_data`, and return. Nothing is mocked, and the suite runs to completion. With Yahoo blocked, the suite completed and reported each affected test as FAIL.
-- **Quiet GARCH fits.** `garch_risk_metrics` and `garch_evt_fit` printed the GARCH optimizer's progress lines, from `analytics.garch_fit`. They now use the quiet `garch_fit_spec` with the same specification, so their results are unchanged.
 
 **Known limitations:**
 - **Sign conventions.** VaR and ES procedures use the two conventions of section 1. `value_at_risk(.GARCH)` is not a GARCH model.

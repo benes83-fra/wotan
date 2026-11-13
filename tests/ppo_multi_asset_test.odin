@@ -37,12 +37,12 @@ ppo_multi_asset_test :: proc(allocator: mem.Allocator = context.allocator) {
 		delete(qqq_prices, allocator); delete(qqq_vols, allocator)
 	}
 
-	// adjusted closes; volume = dollar volume / adjusted close
+	// adjusted closes and volumes
 	for i in 0 ..< n_days {
 		spy_prices[i] = panel.adj_close[i * 2 + 0]
-		spy_vols[i] = panel.dollar_volume[i * 2 + 0] / spy_prices[i]
+		spy_vols[i] = panel.volume[i * 2 + 0]
 		qqq_prices[i] = panel.adj_close[i * 2 + 1]
-		qqq_vols[i] = panel.dollar_volume[i * 2 + 1] / qqq_prices[i]
+		qqq_vols[i] = panel.volume[i * 2 + 1]
 	}
 
 	spy_inds, _ := ml_finance.compute_trading_features(spy_prices, spy_vols, allocator)
@@ -250,12 +250,12 @@ ppo_multi_asset_wf_test :: proc(allocator: mem.Allocator = context.allocator) {
 		delete(qqq_prices, allocator); delete(qqq_vols, allocator)
 	}
 
-	// adjusted closes; volume = dollar volume / adjusted close
+	// adjusted closes and volumes
 	for i in 0 ..< n_days {
 		spy_prices[i] = panel.adj_close[i * 2 + 0]
-		spy_vols[i] = panel.dollar_volume[i * 2 + 0] / spy_prices[i]
+		spy_vols[i] = panel.volume[i * 2 + 0]
 		qqq_prices[i] = panel.adj_close[i * 2 + 1]
-		qqq_vols[i] = panel.dollar_volume[i * 2 + 1] / qqq_prices[i]
+		qqq_vols[i] = panel.volume[i * 2 + 1]
 	}
 
 	spy_inds, _ := ml_finance.compute_trading_features(spy_prices, spy_vols, allocator)

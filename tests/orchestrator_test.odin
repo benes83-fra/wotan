@@ -87,14 +87,12 @@ orchestrator_test :: proc(allocator: mem.Allocator) {
 		vix[t] = panel.adj_close[t * NS + N] / 100
 	}
 	// liquidity known at each close (trailing 20 days): daily vol and ADV per asset, [T, N]
-	// (liquidity_estimates takes close * volume as the dollar volume, so the volume passed
-	// is the panel's dollar volume over the adjusted close)
 	liq_sigma, liq_adv := make([]f64, T * N), make([]f64, T * N)
 	for i in 0 ..< N {
 		pc, vc := make([]f64, T), make([]f64, T)
 		for t in 0 ..< T {
 			pc[t] = panel.adj_close[t * NS + i]
-			vc[t] = panel.dollar_volume[t * NS + i] / pc[t]
+			vc[t] = panel.volume[t * NS + i]
 		}
 		s, a := ml_fin.liquidity_estimates(pc, vc, 20)
 		for t in 0 ..< T {liq_sigma[t * N + i], liq_adv[t * N + i] = s[t], a[t]}

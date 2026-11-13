@@ -689,7 +689,7 @@ The soft call costs the holder a little more than the put adds, so the bond with
 
 Every value up to "straight bond" matches QuantLib's `BinomialCRRConvertibleEngine` to the six decimals shown.
 
-The last two lines show the case fixed in this release. When the conversion right ends before maturity, the tree now runs on to maturity. With a worthless share, the bond is then worth exactly its straight value. QuantLib ends its tree at the last conversion date. That pays the redemption and every later coupon early, and values the S ≈ 0 bond at 101.78, above its straight value.
+The last two lines show a conversion right that ends before maturity. The tree runs on to maturity, with conversion allowed only inside the window, so with a worthless share the bond is worth exactly its straight value. Here wotan and QuantLib differ: QuantLib ends its tree at the last conversion date. That pays the redemption and every later coupon early, and values the S ≈ 0 bond at 101.78, above its straight value. When the window runs to maturity, the two agree.
 
 A soft call still lets the holder convert on the call date even outside the conversion window, because a call notice forces conversion. QuantLib does the same.
 
@@ -803,7 +803,7 @@ The first coupon is the real coupon 0.625 scaled by the index ratio, 1.0104. The
 | `inflation_reference_test` | Flat and Linear zero-inflation curves, HICP forecasts to 2046, zero-coupon swaps and a `CPIBond`, against QuantLib |
 | `bonds_test`, `yield_curve_test`, `callable_bond_test` | usage and consistency checks |
 
-**Additional checks while writing this guide:**
+**Additional checks:**
 
 | What | Reference | Agreement |
 |---|---|---|
@@ -818,14 +818,6 @@ The first coupon is the real coupon 0.625 scaled by the index ratio, 1.0104. The
 | convertible prices across 10 spot and ratio points, soft call plus put, and cash dividends | `BinomialCRRConvertibleEngine` | all 6 printed decimals |
 | a convertible whose conversion ends before maturity, with no credit spread | QuantLib pricing of the equivalent shorter convertible | 2e-3 at 4001 steps |
 | inflation curves, forecasts, lagged observations, swap fair rates and NPVs, inflation-linked bond flows and dirty price | QuantLib | all printed digits |
-
-**Fixed while writing this guide:**
-- **Convertibles whose conversion ends before maturity.** The lattice stopped at `conversion_end`, so it paid the redemption and every later coupon on that date. A 2030 bond convertible until 2028 was worth 101.78 with a worthless share, above its 92.60 straight value. QuantLib's engine does the same. The tree now runs to maturity, with conversion allowed only inside the window. When the window runs to maturity, the result is unchanged and still matches QuantLib.
-- **CPI fixings before the first published month.** `cpi_fixing` back-cast them from the curve. For example, it returned 126.67 for a month before the data started, where QuantLib fails with a missing fixing. It now returns NaN.
-- **`free_yield_curve`** takes `allocator = context.allocator` like the other free procedures.
-- **Comments.** The `cds_maturity_date` comment described the CDS2015 roll backwards: it said a trade from March to June matures in December. The code was right: such a trade matures in June. The holiday rules' comments had been scrambled by the formatter, and they now sit above the rules they describe.
-
-`finance_fixes_test` checks the two code changes, and both checks fail on the previous code.
 
 **Known limitations:**
 - **Linear-zero extrapolation.** Linear-zero curves hold the zero rate flat beyond the last pillar, while QuantLib extrapolates it linearly. In the section 5 example this gives a 2060 discount factor of 0.3822 against 0.3862. Flat-forward curves match QuantLib.

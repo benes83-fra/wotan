@@ -276,13 +276,6 @@ for r in ([][2]f64{{0, 1}, {0, 7.3}, {-2.5, 13}, {1e6, 5e6}, {0.0001, 0.0005}, {
 
 The ticks lie inside the given range. The charts add padding to the data range first, 3 % by default, so their ticks usually reach the data's ends. A constant series gets a range of ±10 % around its value (±0.5 around 0).
 
-### Fixed while writing this guide
-
-These bugs were found while writing this guide and are now covered by `tests/plot_fixes_test.odin`:
-- **`multi_line_png` crashed on a line whose `xs` and `ys` differ in length.** It skipped the line when drawing, but the legend placement still read the line's points. Such a line is now skipped everywhere, legend included.
-- **Ticks with a step below 10⁻⁶ all got the same label.** On an axis from 1 to 1 + 2·10⁻¹², every label read "1". The labels now have enough decimals.
-- **Scientific labels took a wrong exponent at some powers of ten.** The exponent came from log10, which falls just short of 300 for 10³⁰⁰, so ±10³⁰⁰ was labelled "10e299". It is now "1.0e300".
-
 ## 10. Drawing your own charts
 
 The chart procedures are built from apublic pieces that you can combine:

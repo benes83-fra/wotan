@@ -539,8 +539,6 @@ total 0.60, Sharpe 3.330, max drawdown 0.60, trades 4, win rate 0.667
 
 A Sharpe ratio of 3.3 from 8 days means nothing. The edge line only restates the Sharpe ratio; test it with `probabilistic_sharpe_ratio` ([part 1](ml_finance_methods_guide.md#6-backtest-statistics)). `vrp_backtest_result_free` frees the series when they were allocated with `r.allocator`. Here they are literals and temporary memory, so there is nothing to free.
 
-**Fixed while writing this guide:** `print_backtest_result`'s right border was misaligned on several rows. Every row is now padded to the box. The last line used to read "Strategy shows significant α"; it now states the Sharpe threshold it actually checks.
-
 ## 6. Regimes: the hidden Markov model
 
 `HMM` is a Gaussian hidden Markov model with N states:

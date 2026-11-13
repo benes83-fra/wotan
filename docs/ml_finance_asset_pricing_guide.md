@@ -378,8 +378,6 @@ if lok {
 saved true, reloaded true, same series true
 ```
 
-**Fixed while writing this guide:** `neural_sdf_load` and `deep_hedger_load` freed the contents of the optimizer that `nn.load_checkpoint` returns, but not the `Adam` struct itself, so every load leaked it. Both loaders now free it. `neural_sdf_reference_test` checks the save, load and free cycle of both models on a tracking allocator.
-
 ## 5. Event studies
 
 `compute_car` implements the constant-mean-return model of MacKinlay (1997). For an event on row e:
@@ -490,8 +488,6 @@ SHORT CORRELATION (Sell Index Vol / Buy Component Vol)
 ```
 
 The premium of 11.35 points is 1.6 standard deviations above its history, so tanh(1.59 / 1.5) = 0.785. The component averages in the dashboard are unweighted. `normalize_weights(w)` returns the weights scaled to sum 1, or equal weights if they sum to 0.
-
-**Fixed while writing this guide:** the dashboard's right border was misaligned on several rows, and the action line ran past the box. Every row is now padded to the box width, and a long recommendation wraps before its parenthesis.
 
 ## 7. Validation
 

@@ -474,7 +474,7 @@ R (4 x 2)
 
 The signs follow the Householder convention: the diagonal of R may be negative, as in LAPACK.
 
-Both procedures accept a `QR_Mode`, but it currently makes no difference. The former blocked variant was wrong for matrices with 32 or more columns, so both modes now use the same Householder code.
+Both procedures accept a `QR_Mode`, but it makes no difference: both modes run the same Householder code.
 
 Q is m×m, so it needs m² memory. For least squares on a tall matrix, use `lstsq` from section 9, which never builds Q.
 
@@ -667,7 +667,7 @@ singular values: [6.669079088282286, 3.4760236029181337, 1.8548973087995773]
 thin: 2 2 [9.508032000695724, 0.772869635673484] 3 2
 ```
 
-The `SVDMethod` argument accepts `.Jacobi` and `.GolubReinsch`, but both run the same one-sided Jacobi code. The name `svd_golub_reinsch` is kept for compatibility. It used to compute the SVD from the eigenvalues of AᵀA, which loses the accuracy of small singular values.
+The `SVDMethod` argument accepts `.Jacobi` and `.GolubReinsch`, but both run the same one-sided Jacobi code. The name `svd_golub_reinsch` is kept for compatibility.
 
 ### Condition numbers
 
@@ -753,13 +753,7 @@ The rules are the same as in the rest of Wotan:
 - **A matrix may live on the temp allocator.** Passing `context.temp_allocator` and never freeing is fine for short computations, as long as you call `free_all(context.temp_allocator)` regularly, for example once per loop iteration.
 - **A zero-sized matrix is safe to free.** `mat_inverse_lu` on a singular matrix returns an empty matrix, and `matrix_free` on it does nothing harmful.
 
-These leaks and bugs were fixed when this guide was written:
-- **Leaks:** `lu_solve`, `mat_inverse_lu`, `svd_thin`, `cond2_svd`, `cond2_svd_thin`, `cond2_sym` and the SVD path of `lstsq` used to leak memory.
-- **Default allocator:** `svd_jacobi` used to default to the temporary allocator. It now defaults to `context.allocator`, like every other procedure.
-- **`lstsq` crash:** `lstsq` used to read out of bounds when X had fewer rows than columns.
-- **`lstsq` QR results:** with `.Auto` or `.QR`, `lstsq` used to return useless coefficients of about 10¹³ for a rank-deficient X.
-
-[`tests/linalg_memory_test.odin`](../tests/linalg_memory_test.odin) guards against all of these.
+[`tests/linalg_memory_test.odin`](../tests/linalg_memory_test.odin) runs `lu_solve`, `mat_inverse_lu`, `svd_thin`, the `cond2_*` procedures and `lstsq` under a tracking allocator and checks that they leave nothing behind.
 
 ## 13. A complete example
 

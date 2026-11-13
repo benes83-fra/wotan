@@ -452,7 +452,7 @@ For each step it computes h ← exp(Δ·A)·h + Δ·B·x and y = C·h + D·x. Ba
   ```
 
 - **Non-differentiable helpers:**
-  - `tensor_top_k_mask(probs, k)` returns an `[N, E]` tensor with a 1 at the k largest entries of each row. It is a constant marked `owned_by_graph`.
+  - `tensor_top_k_mask(probs, k)` returns an `[N, E]` tensor with a 1 at the k largest entries of each row, the entries `torch.topk` picks; k must lie in 1 ..= E. It is a constant marked `owned_by_graph`.
   - `tensor_clip_weights(t, lo, hi)` clamps a tensor's values in place without recording anything, for example for WGAN weight clipping.
 - **Graph walks use an explicit stack.** Unrolled recurrent nets with graphs thousands of nodes deep do not overflow the call stack.
 - **Debugging aids:** `tensor_validate(t, "where")` and `tensor_validate_graph(root)` report empty data and trainable leaves without a gradient buffer.
@@ -528,14 +528,6 @@ no_grad: requires_grad false, op None, inputs 0
 ### Counters
 
 `global_tensors_created` and `global_tensors_freed` count tensors. `graph_end` counts the nodes it releases as freed, so in a program that frees everything the two numbers are equal. All the examples in this guide together create and free 3408 tensors.
-
-### Fixed while writing this guide
-
-- **`tensor_top_k_mask` chose the wrong entries.** It started from columns 0 ..< k and could select one column twice. For the rows [5, 1, 3] and [0.2, 0.9, 0.4] with k = 2, it returned {0} and {0, 1}; `torch.topk` gives {0, 2} and {1, 2}. It also ignored the active graph scope, so its mask leaked on the heap after `graph_end`. Both are fixed, and k outside 1 ..= E now fails an assertion.
-- **`tensor_masked_scaled_dot_product_attention` crashed on a `nil` mask.** It indexed the empty mask; the backward pass already handled `nil`. A `nil` mask now means no mask.
-- **Some ops recorded no graph when only certain inputs were trainable.** This happened in `tensor_batch_norm_2d` and `tensor_conv2d` when only the bias required gradients, and in `tensor_ssm` when only `h_0` did. The backward passes already computed those gradients; they were just never reached.
-
-[`tests/tensor_fixes_test.odin`](../tests/tensor_fixes_test.odin) guards against all of these.
 
 ## 12. A complete example
 

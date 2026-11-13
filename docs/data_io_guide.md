@@ -19,9 +19,8 @@ This guide covers all three. It assumes you know the `DataFrame` from the [core 
 7. [Writing files](#7-writing-files)
 8. [HTTP](#8-http)
 9. [Yahoo Finance](#9-yahoo-finance)
-10. [Fixed while writing this guide](#10-fixed-while-writing-this-guide)
-11. [Tests](#11-tests)
-12. [Quick reference](#12-quick-reference)
+10. [Tests](#10-tests)
+11. [Quick reference](#11-quick-reference)
 
 ## 1. Setup
 
@@ -306,7 +305,7 @@ There are three levels:
 |---|---|---|
 | `read_yahoo(symbol, interval, range, alloc)` | `(DataFrame, ok)`: Date, Open, High, Low, Close, AdjClose, Volume, Dividend, Split | inspecting the raw data, dividends and splits |
 | `read_yahoo_series(symbol, interval, range, alloc)` | `(Yahoo_Series, ok)`: arrays `dates`, `open`, `high`, `low`, `close`, `adj_close`, `volume` | one ticker in numeric code |
-| `read_yahoo_panel(tickers, interval, range, alloc)` | `(Yahoo_Panel, ok, failed)`: `dates`, `adj_close` and `dollar_volume`, row-major `[day * n_tickers + ticker]` | several tickers on the same days |
+| `read_yahoo_panel(tickers, interval, range, alloc)` | `(Yahoo_Panel, ok, failed)`: `dates`, `adj_close`, `volume` and `dollar_volume`, row-major `[day * n_tickers + ticker]` | several tickers on the same days |
 
 **Close or AdjClose.** `Close` is adjusted for splits only. `AdjClose` is also adjusted for dividends, so its returns are total returns. Use `AdjClose` for returns. The latest adjusted close equals the latest close, since adjustment rescales only the earlier days.
 
@@ -379,7 +378,7 @@ The adjusted close of the first day is below the close by the dividends paid sin
 
 `read_yahoo_panel` loads each ticker and keeps the dates on which all of them have a positive adjusted close. It returns:
 
-- the adjusted closes and the dollar volumes (adjusted close × volume), row-major `[day * n_tickers + ticker]`;
+- the adjusted closes, the volumes (shares traded) and the dollar volumes (adjusted close × volume), row-major `[day * n_tickers + ticker]`;
 - `ok` false and `failed` = the index of the ticker that could not be loaded, or −1 when the tickers share no date.
 
 Free the panel with `yahoo_panel_free`. The returns helpers take the number of series as a second argument and keep the same layout.
@@ -409,28 +408,45 @@ fmt.printf("correlation of daily log returns: %.3f\n", corr(spy, vix)) // Pearso
 correlation of daily log returns: -0.842
 ```
 
-SPY and the VIX move strongly against each other on the same day. Paired by row index, as several tests did before this guide, the same two years give a correlation of −0.09, because most pairs then mix different days.
+SPY and the VIX move strongly against each other on the same day. Paired by row index, the same two years give a correlation of −0.09, because most pairs then mix different days.
+
+Code that reads a DataFrame (a strategy or backtest that looks columns up by name) gets one from `yahoo_panel_to_dataframe`: a Date column, then one Float column of adjusted closes per ticker, named by the slice you pass.
+
+```odin
+tickers := []string{"KO", "PEP"}
+p, ok, _ := net.read_yahoo_panel(tickers, .Daily, .TwoYears)
+defer net.yahoo_panel_free(&p)
+if !ok {fmt.println("could not load the panel"); return}
+
+T, N := len(p.dates), p.n_tickers
+last := (T - 1) * N
+fmt.printf("KO volume %.0f shares, dollar volume %.0f\n", p.volume[last], p.dollar_volume[last])
+
+df := net.yahoo_panel_to_dataframe(&p, tickers)
+defer w.destroy_dataframe(&df)
+w.dataframe_pretty_print(&df, 4)
+```
+
+```
+KO volume 10004198 shares, dollar volume 992316424
+    Date        KO                  PEP                 
+  0 2024-11-13  59.576717376708984  152.43211364746094  
+  1 2024-11-14  59.15117263793945   152.8114776611328   
+  2 2024-11-15  58.38518142700195   146.76934814453125  
+  3 2024-11-18  58.4986686706543    146.5010223388672   
+... (498 more rows)
+```
 
 ### 9.4 More Yahoo procedures
 
 - `read_yahoo_json(symbol, alloc)` returns the daily history over the full range. Unlike `read_yahoo(symbol, .Daily, .Max)`, its request asks for no events, so the Dividend and Split columns are 0.
 - `yahoo_json_to_dataframe(text, alloc)` parses a chart answer you fetched yourself.
 - Option chains are in `finance`: `fin.fetch_yahoo_options` and `fin.fetch_yahoo_option_surface` (see the [risk guide, section 8](finance_risk_guide.md#8-market-data)).
-- `yahoo_download_csv` uses Yahoo's old CSV download endpoint. Yahoo now answers it with HTTP 401 (*User is not logged in*), so it no longer works.
+- `yahoo_download_csv` uses Yahoo's old CSV download endpoint. Yahoo answers it with HTTP 401 (*User is not logged in*), so it does not work.
 
-## 10. Fixed while writing this guide
+The DataFrames `yahoo_json_to_dataframe` builds are checked against an independent pandas parse of the same JSON text. Over five years of SPY, the VIX and AAPL and ten years of NVDA, the dates, the positions of the nulls and every value, including 40 dividends and 2 splits, agree to 1e-13.
 
-- **CSV column names were in the temp allocator.** A DataFrame from `csv_load` or `csv_load_from_string` took its column names from the parser's temporary buffers. After `free_all(context.temp_allocator)` the names were garbage and `w.column(&df, "name")` panicked. The HTML, Excel and JSON importers cloned their names, but nothing freed the copies. Columns can now own their name (`w.column_own_name`), and `destroy_column` frees it. The importers use it, and so do the procedures that copy a column (`column_take` and everything built on it, joins, reindexing), so a copy no longer borrows its name from the source. A join also leaked the names it made for clashing columns (`x_right`). On the core and I/O tests, the leak count under a tracking allocator went from 266 to 0 (the last two were a view that `io_roundtrip_test` never freed).
-- **Yahoo's adjusted close on the first day was 0.** Yahoo nests the adjusted closes as `"adjclose":[{"adjclose":[...]}]`, and the array extractor stopped at the first key. The first value it parsed was `{"adjclose":[146.41`, which failed and became 0. `read_yahoo_panel` hid this by dropping prices ≤ 0, but a test that took returns from AdjClose got an infinite first return. The extractor now skips keys whose value is not a flat array.
-- **Only one dividend and one split were read.** The events parser cut the dividends object at the first `}`, which closes the first entry. On five years of SPY it found 1 of 20 dividends; the dividend and split columns now match Yahoo's data.
-- **Missing Yahoo values were 0.** JSON `null` was parsed as 0, so the VIX had a level of 0 on holidays, with the null flag false. Missing values are now nulls in the DataFrame. Several tests paired SPY and the VIX by row index and are now matched by date (section 9.1).
-
-- **The exporters leaked the text of every number and date cell**, and `xlsx_save` leaked a small offsets table. The writers now take the cell texts from a scratch arena that is reset after each row.
-- `yahoo_json_to_dataframe` ignored its allocator, and `read_csv_from_url`, `read_html_from_url` and `read_table_from_url` panicked when a request failed. These three now return `(df, ok)`, and `csv_load` takes an allocator like the other loaders.
-
-The DataFrames `yahoo_json_to_dataframe` builds were checked against an independent pandas parse of the same JSON text. Over five years of SPY, the VIX and AAPL and ten years of NVDA, the dates, the positions of the nulls and every value, including 40 dividends and 2 splits, agree to 1e-13.
-
-## 11. Tests
+## 10. Tests
 
 | Test | What it checks |
 |---|---|
@@ -442,7 +458,7 @@ The DataFrames `yahoo_json_to_dataframe` builds were checked against an independ
 
 Most of the finance tests load their data with `read_yahoo`, `read_yahoo_series` or `read_yahoo_panel`. When Yahoo cannot be reached they count a failure and go on; they never fall back to made-up data.
 
-## 12. Quick reference
+## 11. Quick reference
 
 | Procedure | Purpose |
 |---|---|
@@ -456,5 +472,6 @@ Most of the finance tests load their data with `read_yahoo`, `read_yahoo_series`
 | `net.read_yahoo(symbol, interval, range, alloc) -> (df, ok)` | Yahoo history as a DataFrame |
 | `net.read_yahoo_series(symbol, interval, range, alloc) -> (Yahoo_Series, ok)`, `net.yahoo_series_free` | one ticker as arrays, days without a price dropped |
 | `net.read_yahoo_panel(tickers, interval, range, alloc) -> (Yahoo_Panel, ok, failed)`, `net.yahoo_panel_free` | several tickers on their common dates |
+| `net.yahoo_panel_to_dataframe(&panel, names, alloc)` | a panel's adjusted closes as a DataFrame (Date plus one column per ticker) |
 | `ts.log_returns(prices, n_series = 1, alloc)`, `ts.simple_returns(prices, n_series = 1, alloc)` | prices → returns, single series or row-major panel |
 | `w.column_own_name(&col, name)` | give a column its own copy of its name |

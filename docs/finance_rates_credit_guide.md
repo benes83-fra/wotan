@@ -636,7 +636,7 @@ SciPy (`kendalltau`, `spearmanr`, and maximum likelihood on the same log-densiti
 | `credit_derivatives_reference_test`, `cds_bootstrapping_test` | time-axis CDS legs and bootstraps, CDO tranches |
 | `copula_reference_test` | all five families, rank correlations and tail measures, against SciPy |
 
-**Additional checks while writing this guide:**
+**Additional checks:**
 
 | What | Reference | Agreement |
 |---|---|---|
@@ -650,12 +650,6 @@ SciPy (`kendalltau`, `spearmanr`, and maximum likelihood on the same log-densiti
 | time-axis CDS prices, hazard bootstrap, legs | Python numerical integration | all printed digits |
 | CDO tranches, Gaussian and t(4) | exact conditional-binomial expectation | within two standard errors |
 | copula fits, log-likelihoods, Kendall, Spearman, tail estimates, densities | SciPy | all printed digits (t density 3e-10) |
-
-**Fixed while writing this guide:**
-- **Seasoned swaps.** `price_dated_swap` and `price_swap` counted the coupons a swap had already paid, at a discount factor of 1. They also projected the floating coupon in progress from the curve, over the wrong period, though it had fixed in the past. A 5-year Euribor swap that started two years ago was valued at −489 751 per 10M instead of QuantLib's −131 244. Paid flows are now left out, and the coupon in progress uses the new `current_fixing` field; the NPV is NaN without it. The fix covers Ibor coupons and plain OIS legs.
-- **Leaks in the rate-option tensors.** `hull_white_caplet_price_tensor`, `hull_white_floorlet_price_tensor` and `hull_white_2f_caplet_price_tensor` build tensor graphs. When no input requires a gradient, the operations are not linked, so `tensor_free_graph` could not reach the intermediates. That leaked about 60 allocations per call, and every calibration objective evaluation repeated it, so `calibrate_hull_white` left 52 000 allocations behind. The intermediates are now handed to the graph or freed, as `black_scholes_price` does (part 1), and the calibration losses compute their RMSE without tensors.
-
-`finance_fixes_test` checks both fixes against QuantLib and with a tracking allocator, and both checks fail on the previous code.
 
 **Known limitations:**
 - **Flat rate-model curve.** The Hull-White and G2++ Monte Carlo pricers, `hw_price_cap_floor_strip`, `compute_hw2f_swap_variance` and `hw2f_mc_bermudan_option` take a flat initial curve r0. The tensor caplet pricers accept any curve through F and P.
