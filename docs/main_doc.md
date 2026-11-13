@@ -58,6 +58,7 @@ Every example in the guides was compiled and run against the current code, and t
 | Guide | Covers |
 |---|---|
 | [core](core_guide.md) | the data model, building and loading DataFrames, printing, selecting and filtering, computed columns, sorting, indexes, grouping, joins, dates and times, memory |
+| [data in and out](data_io_guide.md) (`importer`, `exporter`, `net`) | reading and writing CSV, JSON, JSON Lines, HTML and Excel; HTTP; Yahoo Finance histories as a DataFrame, as arrays per ticker or as a date-matched panel; prices to returns |
 | [linalg](linalg_guide.md) | the `Matrix` type, matrices from DataFrames, products, covariance and correlation, LU, Cholesky, QR, least squares, eigenvalues and SVD, vector kernels |
 | [tensor](tensor_guide.md) | tensors and gradients, element-wise and matrix operations, reductions and losses, normalisation, convolution, recurrent cells and attention, the backward pass, graph scopes |
 | [plot](plot_guide.md) | configuration, line charts, several series, scatter plots and histograms, bars, heatmaps, themes, axes, drawing your own charts |
@@ -103,7 +104,7 @@ The [test catalog](test_catalog.md) lists every test file and what it checks.
 
 ## 3. Where to start
 
-Every path starts with the [core guide](core_guide.md), since most of Wotan reads and writes DataFrames. After that:
+Every path starts with the [core guide](core_guide.md), since most of Wotan reads and writes DataFrames. To load your own files or market data, read the [data in and out guide](data_io_guide.md) next. After that:
 
 - **Data analysis and statistics:** [analytics](analytics_guide.md), then [machine learning](ml_guide.md); [plot](plot_guide.md) for charts.
 - **Deep learning:** [tensor](tensor_guide.md) for autograd and graph scopes, then [neural networks](nn_guide.md).
@@ -125,7 +126,7 @@ The linear algebra guide is for when you need matrices directly. Most packages t
 
 **Graph scopes.** Tensor operations allocate their outputs in the active `Graph_Scope`: one arena per forward and backward pass. `graph_end` frees the whole graph at once. Parameters live outside the scope and survive it. Copy out any value you need before `graph_end`. The [tensor guide](tensor_guide.md#11-memory-management-and-graph-scopes) explains the details. Some models own a scope and use it in their training procedures; the guides show which.
 
-**Failure.** Network calls such as `net.read_yahoo` return `(value, ok)`, with `ok` false when a request fails or returns no data. Numerical procedures return NaN when a result is undefined, for example a correlation from one component, and the guides say where that happens. Many procedures check their inputs, such as matching lengths, with an `assert` that names the procedure.
+**Failure.** Network calls such as `net.read_yahoo` return `(value, ok)`, with `ok` false when a request fails or returns no data. The file loaders panic when a file cannot be read, except `xlsx_load`, which returns an empty DataFrame. Numerical procedures return NaN when a result is undefined, for example a correlation from one component, and the guides say where that happens. Many procedures check their inputs, such as matching lengths, with an `assert` that names the procedure.
 
 **Randomness.** Procedures that sample use Odin's global generator. Call `rand.reset(seed)` first for reproducible results. The guides' examples do.
 
@@ -148,9 +149,7 @@ A few small packages support the others and have no guide of their own:
 
 | Package | Contents | Documented in |
 |---|---|---|
-| `importer` / `exporter` | readers and writers for CSV, JSON, JSONL, HTML, Excel | [core guide, section 5](core_guide.md#5-loading-data-from-files); the I/O tests |
 | `optimize` | optimizers and learning-rate schedules | [neural networks, section 6](nn_guide.md#6-optimisers-and-training-loops); L-BFGS and least squares in the [ML](ml_guide.md) and [portfolio](finance_portfolio_guide.md) guides |
-| `net` | HTTP and Yahoo Finance | [finance part 6, section 8](finance_risk_guide.md#8-market-data) |
 | `data` | the MNIST loader | the CNN tests; `scripts/` downloads the data |
 | `util` | the worker pool for parallel loops, quicksort | used internally |
 | `zip_min` | a minimal ZIP reader for the Excel importer | used internally |

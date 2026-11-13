@@ -354,7 +354,8 @@ html_parse_table :: proc(table: string, allocator: mem.Allocator) -> w.DataFrame
 
 	// PASS 3: create columns
 	for name, i in header {
-		col := w.column_new(strings.clone(name, allocator), inferred[i], row_count, allocator)
+		col := w.column_new("", inferred[i], row_count, allocator)
+		w.column_own_name(&col, name)
 		w.add_column(&df, col)
 	}
 

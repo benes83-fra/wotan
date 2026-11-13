@@ -2,6 +2,7 @@ package exporter
 
 import w "../core"
 import "core:mem"
+import vmem "core:mem/virtual"
 import "core:os"
 import "core:strings"
 
@@ -9,7 +10,12 @@ import "core:strings"
 // value (floats always carry a '.' or exponent so they stay floats), missing
 // and non-finite values are null, dates / times are ISO strings.
 @(private = "file")
-_json_write_row :: proc(b: ^strings.Builder, df: ^w.DataFrame, row: int, allocator: mem.Allocator) {
+_json_write_row :: proc(
+	b: ^strings.Builder,
+	df: ^w.DataFrame,
+	row: int,
+	allocator: mem.Allocator,
+) {
 	strings.write_byte(b, '{')
 	for &col, c in df.columns {
 		if c > 0 {strings.write_byte(b, ',')}
@@ -44,10 +50,15 @@ json_write :: proc(df: ^w.DataFrame, path: string, allocator: mem.Allocator) {
 	strings.builder_init(&builder, allocator)
 	defer strings.builder_destroy(&builder)
 
+	scratch: Cell_Scratch
+	cell_alloc := cell_scratch_init(&scratch)
+	defer vmem.arena_destroy(&scratch.arena)
 	strings.write_byte(&builder, '[')
 	for row in 0 ..< df.rows {
 		if row > 0 {strings.write_byte(&builder, ',')}
-		_json_write_row(&builder, df, row, allocator)
+		row_mark := vmem.arena_temp_begin(&scratch.arena)
+		_json_write_row(&builder, df, row, cell_alloc)
+		vmem.arena_temp_end(row_mark)
 	}
 	strings.write_byte(&builder, ']')
 
@@ -65,8 +76,13 @@ jsonl_write :: proc(df: ^w.DataFrame, path: string, allocator: mem.Allocator) {
 	strings.builder_init(&builder, allocator)
 	defer strings.builder_destroy(&builder)
 
+	scratch: Cell_Scratch
+	cell_alloc := cell_scratch_init(&scratch)
+	defer vmem.arena_destroy(&scratch.arena)
 	for row in 0 ..< df.rows {
-		_json_write_row(&builder, df, row, allocator)
+		row_mark := vmem.arena_temp_begin(&scratch.arena)
+		_json_write_row(&builder, df, row, cell_alloc)
+		vmem.arena_temp_end(row_mark)
 		strings.write_byte(&builder, '\n')
 	}
 

@@ -92,6 +92,7 @@ io_roundtrip_test :: proc(allocator: mem.Allocator) {
 	// 3. sliced view: rows 3..5 are exported, not rows 0..2
 	{
 		view := w.df_slice(&df, 3, 6)
+		defer w.destroy_dataframe(&view)
 		exporter.csv_save(&view, "io_view_test.csv", allocator = allocator)
 		exporter.json_write(&view, "io_view_test.json", allocator)
 		a := importer.csv_load("io_view_test.csv")

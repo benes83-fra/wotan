@@ -365,25 +365,22 @@ garch_real_data_test :: proc(allocator: mem.Allocator) {
 
 	// Fetch VIX data for bivariate analysis
 	fmt.println("Fetching VIX data...")
-	vix_df, vix_df_ok := yahoo.read_yahoo("^VIX", .Daily, .TwoYears, allocator)
-	if !vix_df_ok {fail_missing_data(#procedure, "Yahoo data for ^VIX"); return}
-	defer w.destroy_dataframe(&vix_df)
+	// SPY and the VIX matched by date: the VIX has rows on US market holidays (with
+	// no prices) that SPY does not, so pairing by row index would shift the series
+	panel, panel_ok, _ := yahoo.read_yahoo_panel({"SPY", "^VIX"}, .Daily, .TwoYears, allocator)
+	defer yahoo.yahoo_panel_free(&panel)
+	if !panel_ok {fail_missing_data(#procedure, "Yahoo data for SPY and ^VIX"); return}
+	pair_returns := ts.log_returns(panel.adj_close, 2, main_alloc) // [day][SPY, VIX]
+	defer delete(pair_returns, main_alloc)
 
-	// Compute VIX returns
-	n_vix := vix_df.rows
-	vix_returns := make([]f64, n_vix - 1, main_alloc)
-	defer delete(vix_returns, main_alloc)
-
-	for i in 1 ..< n_vix {
-		prev_close, _ := w.column_at_float(&vix_df.columns[4], i - 1)
-		curr_close, _ := w.column_at_float(&vix_df.columns[4], i)
-		vix_returns[i - 1] = math.ln_f64(curr_close / prev_close)
+	n_common := len(pair_returns) / 2
+	spy_aligned := make([]f64, n_common, main_alloc)
+	vix_aligned := make([]f64, n_common, main_alloc)
+	defer {delete(spy_aligned, main_alloc); delete(vix_aligned, main_alloc)}
+	for i in 0 ..< n_common {
+		spy_aligned[i] = pair_returns[2 * i]
+		vix_aligned[i] = pair_returns[2 * i + 1]
 	}
-
-	// Align lengths
-	n_common := min(len(returns), len(vix_returns))
-	spy_aligned := returns[:n_common]
-	vix_aligned := vix_returns[:n_common]
 
 	fmt.printf("Aligned %d observations\n", n_common)
 

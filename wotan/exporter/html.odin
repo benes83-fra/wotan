@@ -2,6 +2,7 @@ package exporter
 
 import w "../core"
 import "core:mem"
+import vmem "core:mem/virtual"
 import "core:os"
 import "core:strings"
 
@@ -27,11 +28,16 @@ html_write :: proc(df: ^w.DataFrame, path: string, allocator: mem.Allocator) {
 
 	// BODY
 	strings.write_string(&builder, "  <tbody>\n")
+	scratch: Cell_Scratch
+	cell_alloc := cell_scratch_init(&scratch)
+	defer vmem.arena_destroy(&scratch.arena)
 	for row in 0 ..< df.rows {
+		row_mark := vmem.arena_temp_begin(&scratch.arena)
+		defer vmem.arena_temp_end(row_mark)
 		strings.write_string(&builder, "    <tr>")
 		for &col in df.columns {
 			strings.write_string(&builder, "<td>")
-			text, is_null := cell_text(&col, row, allocator)
+			text, is_null := cell_text(&col, row, cell_alloc)
 			if !is_null {xml_escape_into(&builder, text)}
 			strings.write_string(&builder, "</td>")
 		}

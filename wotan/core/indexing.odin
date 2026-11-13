@@ -138,7 +138,8 @@ reindex_date :: proc(df: ^DataFrame, new_index: []Date) -> DataFrame {
 	out := dataframe_new(context.allocator)
 	for &col in df.columns {
 		if col.name == df.index_column { 	// the index column shows the requested keys
-			keys := column_new(col.name, .Date, len(new_index))
+			keys := column_new("", .Date, len(new_index))
+			column_own_name(&keys, col.name)
 			for d in new_index {append_date(&keys, d)}
 			add_column(&out, keys)
 			continue

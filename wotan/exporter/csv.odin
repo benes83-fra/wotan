@@ -2,6 +2,7 @@ package exporter
 
 import w "../core"
 import "core:mem"
+import vmem "core:mem/virtual"
 import "core:strings"
 
 // DataFrame → CSV. Round-trips through importer.csv_load: null cells are
@@ -30,10 +31,15 @@ csv_save :: proc(
 	strings.write_byte(&b, '\n')
 
 	// --- Write rows ---
+	scratch: Cell_Scratch
+	cell_alloc := cell_scratch_init(&scratch)
+	defer vmem.arena_destroy(&scratch.arena)
 	for r in 0 ..< rows {
+		row_mark := vmem.arena_temp_begin(&scratch.arena)
+		defer vmem.arena_temp_end(row_mark)
 		for c in 0 ..< cols {
 			col := &df.columns[c]
-			text, is_null := cell_text(col, r, allocator)
+			text, is_null := cell_text(col, r, cell_alloc)
 			if !is_null {
 				if col.type == .String {
 					write_csv_field(&b, text, sep)

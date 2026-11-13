@@ -184,7 +184,7 @@ neural_sdf_test :: proc(allocator: mem.Allocator = context.allocator) {
 		fail_missing_data(#procedure, fmt.tprintf("200 days of Yahoo data (got %d)", n))
 		return
 	}
-	// gross returns of the last n common rows; a missing (null or 0) close counts as no move
+	// gross returns of the last n common rows; a missing (null) close counts as no move
 	returns := make([]f64, (n - 1) * N)
 	for &df, i in dfs {
 		col := w.column(&df, "AdjClose")

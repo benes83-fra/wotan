@@ -289,49 +289,34 @@ historical_gamma_backtest_test :: proc(allocator: mem.Allocator) {
 
 	// 1. Fetch real SPY history
 	fmt.printf("- Fetching %s historical data...\n", symbol)
-	spy_df, spy_df_ok := net.read_yahoo(symbol, .Daily, .FiveYears, allocator) // ✅ Swap to .TenYears to capture 2020
-	if !spy_df_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", symbol)); return}
-	defer w.destroy_dataframe(&spy_df)
+	// 2. ... together with the VIX (the market's fear gauge), matched by date: the VIX
+	// has rows on US market holidays that SPY does not
+	fmt.println("- Fetching ^VIX historical data...")
+	panel, panel_ok, _ := net.read_yahoo_panel({symbol, "^VIX"}, .Daily, .FiveYears, allocator) // ✅ Swap to .TenYears to capture 2020
+	defer net.yahoo_panel_free(&panel)
+	if !panel_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s and ^VIX", symbol)); return}
 
-	n_days := spy_df.rows
+	n_days := len(panel.dates)
 	if n_days < 150 {
-		fmt.println("Failed to fetch sufficient SPY data.")
+		fail_missing_data(
+			#procedure,
+			fmt.tprintf("150 days of Yahoo data for %s (got %d)", symbol, n_days),
+		)
 		return
 	}
 
-	close_col := w.column(&spy_df, "Close")
 	prices := make([]f64, n_days, allocator)
-	defer delete(prices, allocator)
-	for i in 0 ..< n_days {prices[i], _ = w.column_at_float(close_col, i)}
+	vix := make([]f64, n_days, allocator)
+	defer {delete(prices, allocator); delete(vix, allocator)}
+	for i in 0 ..< n_days {
+		prices[i] = panel.adj_close[2 * i]
+		vix[i] = panel.adj_close[2 * i + 1]
+	}
+	have_vix := true
 
-	log_returns := make([]f64, n_days, allocator)
+	log_returns := make([]f64, n_days, allocator) // log_returns[0] = 0
 	defer delete(log_returns, allocator)
 	for i in 1 ..< n_days {log_returns[i] = math.ln_f64(prices[i] / prices[i - 1])}
-
-	// 2. Fetch real VIX history (the market's fear gauge)
-	fmt.println("- Fetching ^VIX historical data...")
-	vix_df, vix_df_ok := net.read_yahoo("^VIX", .Daily, .FiveYears, allocator)
-	if !vix_df_ok {fail_missing_data(#procedure, "Yahoo data for ^VIX"); return}
-	defer w.destroy_dataframe(&vix_df)
-
-	have_vix := vix_df.rows >= 150
-	vix := make([]f64, n_days, allocator)
-	defer delete(vix, allocator)
-	if have_vix {
-		vix_close := w.column(&vix_df, "Close")
-		n_vix := vix_df.rows
-		// Align from the most recent day backward
-		for i in 0 ..< n_days {
-			vix_idx := n_vix - n_days + i
-			if vix_idx >= 0 && vix_idx < n_vix {
-				vix[i], _ = w.column_at_float(vix_close, vix_idx)
-			} else {
-				vix[i] = 18.0
-			}
-		}
-	} else {
-		fmt.println("  (VIX unavailable — falling back to realized-vol regime proxy)")
-	}
 
 	// 3. Allocate result trackers
 	warmup := vol_window + 5

@@ -34,7 +34,9 @@ get_int :: proc(c: ^Column, row: int) -> int {v, _ := column_at_int(c, row); ret
 get_float :: proc(c: ^Column, row: int) -> f64 {v, _ := column_at_float(c, row); return v}
 get_date :: proc(c: ^Column, row: int) -> Date {v, _ := column_at_date(c, row); return v}
 get_time :: proc(c: ^Column, row: int) -> Time {v, _ := column_at_time(c, row); return v}
-get_datetime :: proc(c: ^Column, row: int) -> Datetime {v, _ := column_at_datetime(c, row); return v}
+get_datetime :: proc(c: ^Column, row: int) -> Datetime {v, _ := column_at_datetime(c, row); return(
+		v \
+	)}
 get_bool :: proc(c: ^Column, row: int) -> bool {v, _ := column_at_bool(c, row); return v}
 
 get_key :: proc($T: typeid, c: ^Column, row: int) -> T {
@@ -196,7 +198,16 @@ _write_key :: proc(b: ^strings.Builder, cols: []^Column, row: int) -> (has_null:
 			fmt.sbprintf(b, "t%d:%d:%d;", t.hour, t.minute, t.second)
 		case .Datetime:
 			t := get_datetime(col, row)
-			fmt.sbprintf(b, "D%d-%d-%d %d:%d:%d;", t.year, t.month, t.day, t.hour, t.minute, t.second)
+			fmt.sbprintf(
+				b,
+				"D%d-%d-%d %d:%d:%d;",
+				t.year,
+				t.month,
+				t.day,
+				t.hour,
+				t.minute,
+				t.second,
+			)
 		case .Invalid:
 			strings.write_string(b, "?;")
 		}
@@ -434,7 +445,9 @@ join_internal :: proc(
 	defer delete(taken)
 	for &src in left.columns {
 		taken[src.name] = true
-		add_column(&result, column_new(src.name, src.type, 0, allocator))
+		c := column_new("", src.type, 0, allocator)
+		column_own_name(&c, src.name)
+		add_column(&result, c)
 	}
 	for &src in right.columns {
 		if _is_key(src.name, right_keys) {continue}
@@ -442,14 +455,16 @@ join_internal :: proc(
 		suffix := 1
 		for taken[name] {
 			if suffix == 1 {
-				name = fmt.aprintf("%s_right", src.name, allocator = allocator)
+				name = fmt.tprintf("%s_right", src.name)
 			} else {
-				name = fmt.aprintf("%s_right%d", src.name, suffix, allocator = allocator)
+				name = fmt.tprintf("%s_right%d", src.name, suffix)
 			}
 			suffix += 1
 		}
 		taken[name] = true
-		add_column(&result, column_new(name, src.type, 0, allocator))
+		c := column_new("", src.type, 0, allocator)
+		column_own_name(&c, name)
+		add_column(&result, c)
 	}
 
 	// 2) key columns (types must agree pairwise)
@@ -505,4 +520,3 @@ join_internal :: proc(
 	result.rows = result.columns[0].len if len(result.columns) > 0 else 0
 	return result
 }
-

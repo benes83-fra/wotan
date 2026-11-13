@@ -47,18 +47,21 @@ infer_col_types :: proc(
 }
 
 
+// The CSV file at path as a DataFrame; panics when the file cannot be read.
+// Types are inferred per column unless given (see the null semantics above).
 csv_load :: proc(
 	path: string,
 	types: []w.ColumnType = nil,
 	sep: u8 = ',',
 	null_tokens: []string = DEFAULT_NULL_TOKEN,
+	allocator: mem.Allocator = context.allocator,
 ) -> w.DataFrame {
 	contents, err := read_file(path)
 	if err != nil {
 		panic("csv_load: failed to read file")
 	}
 	defer delete(contents)
-	return _csv_build(contents, context.allocator, types, sep, null_tokens, "csv_load")
+	return _csv_build(contents, allocator, types, sep, null_tokens, "csv_load")
 }
 
 csv_load_from_string :: proc(
@@ -105,7 +108,8 @@ _csv_build :: proc(
 	cols := make([]w.Column, n_cols)
 	defer delete(cols)
 	for i in 0 ..< n_cols {
-		cols[i] = w.column_new(header[i], types[i], len(records), allocator)
+		cols[i] = w.column_new("", types[i], len(records), allocator)
+		w.column_own_name(&cols[i], header[i]) // header[i] is a temp allocation
 	}
 
 	long_rows := 0

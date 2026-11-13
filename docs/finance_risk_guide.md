@@ -476,6 +476,7 @@ Free the slices with `delete`.
 **Yahoo.**
 - `net.read_yahoo(symbol, interval, range)` returns `(df, ok)`, where the DataFrame has Date, Open, High, Low, Close, AdjClose, Volume, Dividend and Split columns.
 - `net.read_yahoo_json(symbol)` fetches the full daily history.
+- `net.read_yahoo_series` gives one ticker as plain arrays and `net.read_yahoo_panel` several tickers on their common dates. The [data in and out guide](data_io_guide.md#9-yahoo-finance) covers them, and why tickers must be matched by date rather than by row.
 - `fin.fetch_yahoo_options(symbol)` returns `(chain, ok)` with the chain of one expiry 30–90 days out, and `fin.fetch_yahoo_option_surface(symbol, min_days, max_days, max_expiries)` returns `(chain, ok)` with several expiries.
 
 `ok` is false when Yahoo cannot be reached, or answers without data (it rate-limits heavy use). The procedures then return an empty DataFrame or an empty chain, and they never panic or print.

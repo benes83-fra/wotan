@@ -26,51 +26,36 @@ dispersion_trading_test :: proc(allocator: mem.Allocator) {
 	defer delete(basket_weights, main_alloc)
 
 	fmt.println("\n--- Fetching Market Data ---")
-	dfs := make([]w.DataFrame, n_assets, main_alloc)
-	defer {
-		for i in 0 ..< n_assets {w.destroy_dataframe(&dfs[i])}
-		delete(dfs, main_alloc)
+	// the basket and the VIX matched by date (the VIX has rows on US market holidays)
+	symbols := []string{"SPY", "AAPL", "MSFT", "NVDA", "^VIX"}
+	NS := len(symbols)
+	panel, panel_ok, bad := yahoo.read_yahoo_panel(symbols, .Daily, .TwoYears, allocator)
+	defer yahoo.yahoo_panel_free(&panel)
+	if !panel_ok {
+		what := "a common date" if bad < 0 else symbols[bad]
+		fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", what))
+		return
 	}
-
-	for i in 0 ..< n_assets {
-		yd, yd_ok := yahoo.read_yahoo(tickers[i], .Daily, .TwoYears, allocator)
-		if !yd_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", tickers[i])); return}
-		dfs[i] = yd
-		fmt.printf("Loaded %d days for %s\n", dfs[i].rows, tickers[i])
-	}
-
-	n_common := dfs[0].rows
-	for i in 1 ..< n_assets {
-		if dfs[i].rows < n_common {n_common = dfs[i].rows}
-	}
-	num_days := n_common - 1
+	num_days := len(panel.dates) - 1
+	fmt.printf("Loaded %d common days for %v\n", len(panel.dates), symbols)
 
 	// 2. Compute Returns
+	all_returns := ts.log_returns(panel.adj_close, NS, main_alloc) // [day][symbol]
+	defer delete(all_returns, main_alloc)
 	returns_matrix := make([][]f64, n_assets, main_alloc)
 	defer {
 		for i in 0 ..< n_assets {delete(returns_matrix[i], main_alloc)}
 		delete(returns_matrix, main_alloc)
 	}
-
 	for i in 0 ..< n_assets {
 		returns_matrix[i] = make([]f64, num_days, main_alloc)
-		for d in 1 ..< n_common {
-			prev_c, _ := w.column_at_float(&dfs[i].columns[4], d - 1)
-			curr_c, _ := w.column_at_float(&dfs[i].columns[4], d)
-			returns_matrix[i][d - 1] = math.ln_f64(curr_c / prev_c)
-		}
+		for d in 0 ..< num_days {returns_matrix[i][d] = all_returns[d * NS + i]}
 	}
 
-	// Fetch VIX
-	vix_df, vix_df_ok := yahoo.read_yahoo("^VIX", .Daily, .TwoYears, allocator)
-	if !vix_df_ok {fail_missing_data(#procedure, "Yahoo data for ^VIX"); return}
-	defer w.destroy_dataframe(&vix_df)
+	// VIX level at the close of each return day
 	vix_levels := make([]f64, num_days, main_alloc)
 	defer delete(vix_levels, main_alloc)
-	for d in 1 ..< min(n_common, vix_df.rows) {
-		vix_c, _ := w.column_at_float(&vix_df.columns[4], d)
-		vix_levels[d - 1] = vix_c / 100.0
-	}
+	for d in 0 ..< num_days {vix_levels[d] = panel.adj_close[(d + 1) * NS + n_assets] / 100.0}
 
 	// 3. Train Ensembles
 	fmt.println("\n--- Training Ensembles ---")
@@ -153,11 +138,14 @@ dispersion_trading_test :: proc(allocator: mem.Allocator) {
 			stds[f] = math.sqrt_f64(stds[f] / f64(train_days))
 			if stds[f] < 1e-8 {stds[f] = 1.0}
 		}
+		// standardised and winsorised at 4 sd: the Mamba layer is not normalised, and its
+		// output grows with a high power of the input (Delta, B x and C h are each linear
+		// in it), so one crash day at 10 sd sends the untrained forecast into the hundreds
 		for day in 0 ..< valid_days {
 			idx := start_idx + day
 			for f in 0 ..< num_features {
-				features[idx * num_features + f] =
-					(features[idx * num_features + f] - means[f]) / stds[f]
+				z := (features[idx * num_features + f] - means[f]) / stds[f]
+				features[idx * num_features + f] = clamp(z, -4, 4)
 			}
 		}
 

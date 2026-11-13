@@ -2,6 +2,7 @@ package importer
 
 import "core:encoding/json"
 import "core:fmt"
+import "core:math"
 import "core:mem"
 import "core:strconv"
 import "core:strings"
@@ -214,12 +215,8 @@ _json_build :: proc(
 	cols := make([]w.Column, col_count, context.temp_allocator)
 	defer delete(cols, context.temp_allocator)
 	for i in 0 ..< col_count {
-		cols[i] = w.column_new(
-			strings.clone(keys[i], allocator),
-			types[i],
-			len(objects),
-			allocator,
-		)
+		cols[i] = w.column_new("", types[i], len(objects), allocator)
+		w.column_own_name(&cols[i], keys[i])
 	}
 
 	for &obj, row_i in objects {
@@ -325,19 +322,36 @@ json_value_to_string :: proc(v: json.Value) -> string {
 }
 
 
+// Body (between the brackets) of the first flat array that follows `key`. A key
+// whose value is not a flat array (Yahoo's "adjclose":[{"adjclose":[...]}]) is
+// skipped and the search goes on after it. ok is false when there is none.
+@(private = "file")
+_json_flat_array_body :: proc(json: string, key: string) -> (body: string, ok: bool) {
+	from := 0
+	for {
+		k := strings.index(json[from:], key)
+		if k < 0 {return "", false}
+		after := from + k + len(key)
+		rest := strings.trim_left_space(json[after:])
+		if len(rest) > 0 && rest[0] == ':' {rest = strings.trim_left_space(rest[1:])}
+		if len(rest) > 0 && rest[0] == '[' {
+			inner := strings.trim_left_space(rest[1:])
+			if len(inner) > 0 && inner[0] != '{' && inner[0] != '[' {
+				end := strings.index(rest, "]")
+				if end < 0 {return "", false}
+				return rest[1:end], true
+			}
+		}
+		from = after
+	}
+}
+
+// The flat integer array after the first occurrence of `key` (quotes included,
+// e.g. "\"timestamp\""), in the temp allocator. Entries that are not integers
+// (JSON null) become 0.
 extract_json_array_i64 :: proc(json: string, key: string) -> []i64 {
-	start := strings.index(json, key)
-	if start < 0 {return []i64{}}
-
-	start = strings.index(json[start:], "[")
-	if start < 0 {return []i64{}}
-	start += strings.index(json, key) + 1
-
-	end := strings.index(json[start:], "]")
-	if end < 0 {return []i64{}}
-	end += start
-
-	slice := json[start:end]
+	slice, ok := _json_flat_array_body(json, key)
+	if !ok || len(strings.trim_space(slice)) == 0 {return []i64{}}
 	parts := strings.split(slice, ",", context.temp_allocator)
 
 	out := make([]i64, len(parts), context.temp_allocator)
@@ -348,25 +362,18 @@ extract_json_array_i64 :: proc(json: string, key: string) -> []i64 {
 	return out[:]
 }
 
+// The flat number array after the first occurrence of `key` (quotes included, e.g.
+// "\"close\""), in the temp allocator. An entry that is not a number (JSON null)
+// becomes NaN, so missing values stay distinguishable from 0.
 extract_json_array_f64 :: proc(json: string, key: string) -> []f64 {
-	start := strings.index(json, key)
-	if start < 0 {return []f64{}}
-
-	start = strings.index(json[start:], "[")
-	if start < 0 {return []f64{}}
-	start += strings.index(json, key) + 1
-
-	end := strings.index(json[start:], "]")
-	if end < 0 {return []f64{}}
-	end += start
-
-	slice := json[start:end]
+	slice, ok := _json_flat_array_body(json, key)
+	if !ok || len(strings.trim_space(slice)) == 0 {return []f64{}}
 	parts := strings.split(slice, ",", context.temp_allocator)
 
 	out := make([]f64, len(parts), context.temp_allocator)
 	for p, i in parts {
-		v, _ := strconv.parse_f64(strings.trim_space(p))
-		out[i] = v
+		v, parsed := strconv.parse_f64(strings.trim_space(p))
+		out[i] = v if parsed else math.nan_f64()
 	}
 	return out[:]
 }

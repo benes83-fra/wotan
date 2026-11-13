@@ -19,26 +19,22 @@ volatility_arbitrage_test :: proc(allocator: mem.Allocator) {
 
 	// 1. Fetch Data
 	fmt.println("\n--- Fetching Market Data ---")
-	spy_df, spy_df_ok := yahoo.read_yahoo("SPY", .Daily, .TwoYears, allocator)
-	if !spy_df_ok {fail_missing_data(#procedure, "Yahoo data for SPY"); return}
-	defer w.destroy_dataframe(&spy_df)
-	vix_df, vix_df_ok := yahoo.read_yahoo("^VIX", .Daily, .TwoYears, allocator)
-	if !vix_df_ok {fail_missing_data(#procedure, "Yahoo data for ^VIX"); return}
-	defer w.destroy_dataframe(&vix_df)
+	// SPY and the VIX matched by date (the VIX has rows on US market holidays)
+	panel, panel_ok, _ := yahoo.read_yahoo_panel({"SPY", "^VIX"}, .Daily, .TwoYears, allocator)
+	defer yahoo.yahoo_panel_free(&panel)
+	if !panel_ok {fail_missing_data(#procedure, "Yahoo data for SPY and ^VIX"); return}
 
-	n_common := min(spy_df.rows, vix_df.rows)
-	num_days := n_common - 1
+	all_returns := ts.log_returns(panel.adj_close, 2, allocator) // [day][SPY, VIX]
+	defer delete(all_returns, allocator)
+	num_days := len(panel.dates) - 1
 
 	returns := make([]f64, num_days, allocator)
 	vix_levels := make([]f64, num_days, allocator)
 	defer {delete(returns, allocator); delete(vix_levels, allocator)}
 
-	for i in 1 ..< n_common {
-		prev_c, _ := w.column_at_float(&spy_df.columns[4], i - 1)
-		curr_c, _ := w.column_at_float(&spy_df.columns[4], i)
-		returns[i - 1] = math.ln_f64(curr_c / prev_c)
-		vix_c, _ := w.column_at_float(&vix_df.columns[4], i)
-		vix_levels[i - 1] = vix_c
+	for i in 0 ..< num_days {
+		returns[i] = all_returns[i * 2] // SPY from day i to day i + 1
+		vix_levels[i] = panel.adj_close[(i + 1) * 2 + 1] // VIX at the close of day i + 1
 	}
 
 	// 2. Train Ensemble (Streamlined for Inference)

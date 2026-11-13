@@ -21,6 +21,7 @@ zip_write :: proc(path: string, entries: []ZipEntry, allocator: mem.Allocator) -
 	defer bytes.buffer_destroy(&buf)
 
 	local_offsets := make([]int, len(entries), allocator)
+	defer delete(local_offsets, allocator)
 
 	write_u16_le := proc(b: ^bytes.Buffer, x: u16) {
 		bytes.buffer_write_byte(b, u8(x))

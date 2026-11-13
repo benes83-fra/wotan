@@ -85,7 +85,7 @@ Wotan is a library for data analysis and quantitative finance in Odin. It starte
 - Behavioural finance: prospect theory, anchoring, behavioural portfolio theory
 
 **Data sources and output** (`net`, `plot`)
-- Yahoo Finance prices, dividends, splits and option chains
+- Yahoo Finance prices, dividends, splits and option chains; one ticker as arrays or several matched by date ([data in and out guide](docs/data_io_guide.md))
 - PNG charts: line, multi-line, scatter, histogram, bar and heatmap
 
 ## Getting started
@@ -193,10 +193,12 @@ See `tests/american_options_test.odin`, `tests/exotic_pricing_test.odin` and `te
 ### Market data and volatility forecasting
 
 ```odin
-df, ok := net.read_yahoo("AAPL", .Daily, .FiveYears) // ok = false: Yahoo unreachable or rate-limiting
-defer w.destroy_dataframe(&df)
+s, ok := net.read_yahoo_series("AAPL", .Daily, .FiveYears) // ok = false: Yahoo unreachable or rate-limiting
+if !ok {return}
+defer net.yahoo_series_free(&s)
 
-// ...compute log returns from the "Close" column...
+returns := ts.log_returns(s.adj_close) // daily log returns of the adjusted closes
+defer delete(returns)
 
 fit := ts.garch_fit(returns, .GARCH, p = 1, q = 1)
 fmt.printf("omega=%.6f alpha=%.4f beta=%.4f\n",

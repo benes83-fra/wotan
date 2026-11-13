@@ -2,6 +2,7 @@ package exporter
 
 import w "../core"
 import "core:mem"
+import vmem "core:mem/virtual"
 import "core:os"
 import "core:strings"
 
@@ -27,8 +28,31 @@ write_file :: proc(path: string, contents: string) -> bool {
 // Shared cell formatting (view-aware: always goes through the column accessors)
 // ------------------------------------------------------------
 
+// Scratch memory for the cell texts of a writer: cell_text allocates the text of
+// numbers and dates (not of strings and booleans), so the writers take it from
+// this arena, reset it after every row and destroy it at the end
+@(private)
+Cell_Scratch :: struct {
+	arena: vmem.Arena,
+}
+
+@(private)
+cell_scratch_init :: proc(s: ^Cell_Scratch) -> mem.Allocator {
+	if err := vmem.arena_init_growing(&s.arena); err != nil {
+		panic("exporter: cannot allocate scratch arena")
+	}
+	return vmem.arena_allocator(&s.arena)
+}
+
 // Canonical text of a cell (see w.value_as_string); `is_null` for missing values
-cell_text :: proc(col: ^w.Column, row: int, allocator: mem.Allocator) -> (text: string, is_null: bool) {
+cell_text :: proc(
+	col: ^w.Column,
+	row: int,
+	allocator: mem.Allocator,
+) -> (
+	text: string,
+	is_null: bool,
+) {
 	if w.is_null(col, row) {
 		return "", true
 	}

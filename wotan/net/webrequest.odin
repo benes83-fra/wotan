@@ -87,46 +87,56 @@ _http_get_status :: proc(
 	return string(rb.data[:]), int(code), true
 }
 
+// GET body of url when the request succeeds with an HTTP status in 200 - 299
+@(private = "file")
+_get_ok_body :: proc(url: string) -> (string, bool) {
+	body, status, ok := _http_get_status(url, context.temp_allocator)
+	return body, ok && status >= 200 && status <= 299
+}
+
+// The CSV at url as a DataFrame (see importer.csv_load_from_string). ok is false
+// when the request fails or the server answers with a status outside 200 - 299;
+// the DataFrame is then empty
 read_csv_from_url :: proc(
 	url: string,
 	allocator: mem.Allocator = context.allocator,
-) -> w.DataFrame {
-	// Use temp_allocator for the raw response text to avoid leaks
-	text, ok := http_get(url, context.temp_allocator)
-	if !ok {
-		panic(fmt.tprintf("Failed to GET %s", url))
-	}
-
-	// Now we pass the string to the importer
-	return importer.csv_load_from_string(text, allocator)
+) -> (
+	df: w.DataFrame,
+	ok: bool,
+) {
+	text, got := _get_ok_body(url)
+	if !got {return w.dataframe_new(), false}
+	return importer.csv_load_from_string(text, allocator), true
 }
+
+// The first <table> of the HTML page at url as a DataFrame (see
+// importer.html_load_from_string); ok as for read_csv_from_url
 read_html_from_url :: proc(
 	url: string,
 	allocator: mem.Allocator = context.allocator,
-) -> w.DataFrame {
-	// Fetch HTML text using your existing HTTP client
-	text, ok := http_get(url, context.temp_allocator)
-	if !ok {
-		panic(fmt.tprintf("Failed to GET %s", url))
-	}
-
-	// Pass HTML to your importer
-	return importer.html_load_from_string(text, allocator)
+) -> (
+	df: w.DataFrame,
+	ok: bool,
+) {
+	text, got := _get_ok_body(url)
+	if !got {return w.dataframe_new(), false}
+	return importer.html_load_from_string(text, allocator), true
 }
+
+// read_html_from_url when the body contains a <table>, read_csv_from_url otherwise
 read_table_from_url :: proc(
 	url: string,
 	allocator: mem.Allocator = context.allocator,
-) -> w.DataFrame {
-	text, ok := http_get(url, context.temp_allocator)
-	if !ok {
-		panic(fmt.tprintf("Failed to GET %s", url))
-	}
-
+) -> (
+	df: w.DataFrame,
+	ok: bool,
+) {
+	text, got := _get_ok_body(url)
+	if !got {return w.dataframe_new(), false}
 	if strings.contains(text, "<table") {
-		return importer.html_load_from_string(text, allocator)
+		return importer.html_load_from_string(text, allocator), true
 	}
-
-	return importer.csv_load_from_string(text, allocator)
+	return importer.csv_load_from_string(text, allocator), true
 }
 
 

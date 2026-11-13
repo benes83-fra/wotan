@@ -114,7 +114,7 @@ deep_hedging_real_data_test :: proc(allocator: mem.Allocator) {
 	defer delete(returns, allocator)
 
 	for i in 1 ..< n_days {
-		// a missing (null or 0, as Yahoo sends for some rows) close counts as no move
+		// a missing (null) close counts as no move
 		returns[i - 1] =
 			math.ln(prices[i] / prices[i - 1]) if prices[i] > 0 && prices[i - 1] > 0 else 0
 	}

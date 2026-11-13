@@ -17,6 +17,7 @@ Column :: struct {
 	is_view:   bool,
 	arena:     vmem.Arena,
 	allocator: mem.Allocator,
+	owns_name: bool, // name allocated with `allocator` (column_own_name), freed by destroy_column
 }
 
 
@@ -45,6 +46,22 @@ column_new :: proc(
 	}
 }
 
+// A column borrows its name: column_new stores the string as given, so it must
+// outlive the column (a literal does). column_own_name gives the column its own
+// copy (in the column's allocator), freed by destroy_column. The importers use it
+// for names read from a file, and the procedures that copy a column (column_take,
+// column_slice_copy, joins, reindexing) for the name of the source column, so a
+// result does not depend on its source staying alive.
+column_own_name :: proc(col: ^Column, name: string) {
+	if col.is_view {
+		panic("column_own_name: a view shares the name of its column")
+	}
+	owned := strings.clone(name, col.allocator) // before freeing: name may be col.name
+	if col.owns_name {delete(col.name, col.allocator)}
+	col.name = owned
+	col.owns_name = true
+}
+
 destroy_column :: proc(col: ^Column) {
 	if col.is_view {
 		return
@@ -60,6 +77,11 @@ destroy_column :: proc(col: ^Column) {
 	}
 	if col.type == .String && col.arena.kind != nil {
 		vmem.arena_destroy(&col.arena)
+	}
+	if col.owns_name {
+		delete(col.name, col.allocator)
+		col.name = ""
+		col.owns_name = false
 	}
 	col.len = 0.0
 	col.capacity = 0.0
@@ -379,7 +401,8 @@ column_at_datetime :: proc(col: ^Column, i: int) -> (Datetime, bool) {
 // New owned column with the given rows of `src` (view-aware; nulls kept;
 // strings cloned into the new column). A row index of -1 yields null.
 column_take :: proc(src: ^Column, rows: []int, allocator := context.allocator) -> Column {
-	out := column_new(src.name, src.type, max(len(rows), 1), allocator)
+	out := column_new("", src.type, max(len(rows), 1), allocator)
+	column_own_name(&out, src.name)
 	for r in rows {
 		if r < 0 || is_null(src, r) {
 			append_null(&out)
@@ -506,7 +529,8 @@ column_slice_copy :: proc(orig: ^Column, start: int, end: int) -> Column {
 	}
 
 	n := end - start
-	c := column_new(orig.name, orig.type, n)
+	c := column_new("", orig.type, n)
+	column_own_name(&c, orig.name)
 
 	for i in start ..< end {
 		#partial switch orig.type {

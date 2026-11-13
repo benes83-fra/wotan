@@ -6,6 +6,7 @@ import "../importer"
 import "base:runtime"
 import "core:c"
 import "core:fmt"
+import "core:math"
 import "core:mem"
 import "core:strconv"
 import "core:strings"
@@ -228,14 +229,14 @@ yahoo_json_to_dataframe :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> w.DataFrame {
 
-	df := w.dataframe_new()
+	df := w.dataframe_new(allocator)
 
 	timestamps := importer.extract_json_array_i64(json_text, "\"timestamp\"")
 	opens := importer.extract_json_array_f64(json_text, "\"open\"")
 	highs := importer.extract_json_array_f64(json_text, "\"high\"")
 	lows := importer.extract_json_array_f64(json_text, "\"low\"")
 	closes := importer.extract_json_array_f64(json_text, "\"close\"")
-	volumes := importer.extract_json_array_i64(json_text, "\"volume\"")
+	volumes := importer.extract_json_array_f64(json_text, "\"volume\"") // f64 so nulls show as NaN
 	adjclose := importer.extract_json_array_f64(json_text, "\"adjclose\"")
 
 	divs := extract_dividends(json_text)
@@ -247,15 +248,15 @@ yahoo_json_to_dataframe :: proc(
 	}
 
 	// Create columns
-	date_col := w.column_new("Date", .Date, count)
-	open_col := w.column_new("Open", .Float, count)
-	high_col := w.column_new("High", .Float, count)
-	low_col := w.column_new("Low", .Float, count)
-	close_col := w.column_new("Close", .Float, count)
-	adj_col := w.column_new("AdjClose", .Float, count)
-	vol_col := w.column_new("Volume", .Int, count)
-	div_col := w.column_new("Dividend", .Float, count)
-	split_col := w.column_new("Split", .Float, count)
+	date_col := w.column_new("Date", .Date, count, allocator)
+	open_col := w.column_new("Open", .Float, count, allocator)
+	high_col := w.column_new("High", .Float, count, allocator)
+	low_col := w.column_new("Low", .Float, count, allocator)
+	close_col := w.column_new("Close", .Float, count, allocator)
+	adj_col := w.column_new("AdjClose", .Float, count, allocator)
+	vol_col := w.column_new("Volume", .Int, count, allocator)
+	div_col := w.column_new("Dividend", .Float, count, allocator)
+	split_col := w.column_new("Split", .Float, count, allocator)
 
 	w.add_column(&df, date_col)
 	w.add_column(&df, open_col)
@@ -267,17 +268,30 @@ yahoo_json_to_dataframe :: proc(
 	w.add_column(&df, div_col)
 	w.add_column(&df, split_col)
 
-	// Fill rows
+	// Fill rows. Yahoo sends null for every field on days without a quote (^VIX on
+	// US market holidays, for example); those cells become nulls, not 0. A missing
+	// or short array (no adjclose for intraday intervals) gives nulls as well.
+	put_float :: proc(c: ^w.Column, vals: []f64, i: int) {
+		if i < len(vals) && vals[i] == vals[i] {
+			w.append_float(c, vals[i])
+		} else {
+			w.append_null(c)
+		}
+	}
 	for i in 0 ..< count {
 		ts := timestamps[i]
 
 		w.append_date(&df.columns[0], w.date_from_unix(ts))
-		w.append_float(&df.columns[1], opens[i])
-		w.append_float(&df.columns[2], highs[i])
-		w.append_float(&df.columns[3], lows[i])
-		w.append_float(&df.columns[4], closes[i])
-		w.append_float(&df.columns[5], adjclose[i])
-		w.append_int(&df.columns[6], int(volumes[i]))
+		put_float(&df.columns[1], opens, i)
+		put_float(&df.columns[2], highs, i)
+		put_float(&df.columns[3], lows, i)
+		put_float(&df.columns[4], closes, i)
+		put_float(&df.columns[5], adjclose, i)
+		if i < len(volumes) && volumes[i] == volumes[i] {
+			w.append_int(&df.columns[6], int(volumes[i]))
+		} else {
+			w.append_null(&df.columns[6])
+		}
 
 		// Dividends
 		if amt, ok := divs[ts]; ok {
@@ -333,6 +347,109 @@ read_yahoo :: proc(
 	if !got {return w.dataframe_new(), false}
 	df = yahoo_json_to_dataframe(text, allocator)
 	return df, df.rows > 0
+}
+
+// One ticker's history as plain arrays, oldest first, ready for numeric code.
+// Days on which Yahoo has no close or adjusted close (or a price <= 0) are left
+// out, so all arrays have the same length and close[i] > 0. Open, high, low and
+// volume are NaN on the rare kept day where only they are missing. adj_close is
+// adjusted for dividends and splits; close is adjusted for splits only.
+Yahoo_Series :: struct {
+	symbol:    string,
+	dates:     []w.Date,
+	open:      []f64,
+	high:      []f64,
+	low:       []f64,
+	close:     []f64,
+	adj_close: []f64,
+	volume:    []f64,
+	allocator: mem.Allocator,
+}
+
+yahoo_series_free :: proc(s: ^Yahoo_Series) {
+	delete(s.symbol, s.allocator)
+	delete(s.dates, s.allocator)
+	delete(s.open, s.allocator)
+	delete(s.high, s.allocator)
+	delete(s.low, s.allocator)
+	delete(s.close, s.allocator)
+	delete(s.adj_close, s.allocator)
+	delete(s.volume, s.allocator)
+	s^ = {}
+}
+
+// History of `symbol` at the interval over the range as a Yahoo_Series (see there
+// for which days are kept). ok is false when Yahoo cannot be reached or no day has
+// a price; the series is then empty. Free with yahoo_series_free.
+read_yahoo_series :: proc(
+	symbol: string,
+	i: interval = .Daily,
+	r: range = .Max,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	s: Yahoo_Series,
+	ok: bool,
+) {
+	df, got := read_yahoo(symbol, i, r, context.temp_allocator)
+	defer w.destroy_dataframe(&df)
+	if !got {return {allocator = allocator}, false}
+	return yahoo_series_from_dataframe(&df, symbol, allocator)
+}
+
+// The Yahoo_Series of a DataFrame with read_yahoo's columns (from
+// yahoo_json_to_dataframe, for example); ok is false when no day has a price
+yahoo_series_from_dataframe :: proc(
+	df: ^w.DataFrame,
+	symbol: string,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	s: Yahoo_Series,
+	ok: bool,
+) {
+	cols := [7]^w.Column {
+		w.column(df, "Date"),
+		w.column(df, "Open"),
+		w.column(df, "High"),
+		w.column(df, "Low"),
+		w.column(df, "Close"),
+		w.column(df, "AdjClose"),
+		w.column(df, "Volume"),
+	}
+	keep := make([dynamic]int, context.temp_allocator)
+	for row in 0 ..< df.rows {
+		c, cn := w.column_at_float(cols[4], row)
+		a, an := w.column_at_float(cols[5], row)
+		if cn || an || !(c > 0) || !(a > 0) {continue}
+		append(&keep, row)
+	}
+	n := len(keep)
+	if n == 0 {return {allocator = allocator}, false}
+
+	s = Yahoo_Series {
+		symbol    = strings.clone(symbol, allocator),
+		dates     = make([]w.Date, n, allocator),
+		open      = make([]f64, n, allocator),
+		high      = make([]f64, n, allocator),
+		low       = make([]f64, n, allocator),
+		close     = make([]f64, n, allocator),
+		adj_close = make([]f64, n, allocator),
+		volume    = make([]f64, n, allocator),
+		allocator = allocator,
+	}
+	value :: proc(c: ^w.Column, row: int) -> f64 {
+		v, is_null := w.column_at_numeric(c, row)
+		return math.nan_f64() if is_null else v
+	}
+	for row, k in keep {
+		s.dates[k], _ = w.column_at_date(cols[0], row)
+		s.open[k] = value(cols[1], row)
+		s.high[k] = value(cols[2], row)
+		s.low[k] = value(cols[3], row)
+		s.close[k] = value(cols[4], row)
+		s.adj_close[k] = value(cols[5], row)
+		s.volume[k] = value(cols[6], row)
+	}
+	return s, true
 }
 
 // Adjusted closes (dividends and splits) and dollar volumes (adjusted close times
@@ -422,6 +539,24 @@ read_yahoo_panel :: proc(
 }
 
 
+// Index of the '}' that closes the '{' at json[open] (Yahoo's event blocks hold no
+// braces inside strings); -1 when it is not closed
+@(private = "file")
+_matching_brace :: proc(json: string, open: int) -> int {
+	depth := 0
+	for i in open ..< len(json) {
+		switch json[i] {
+		case '{':
+			depth += 1
+		case '}':
+			depth -= 1
+			if depth == 0 {return i}
+		}
+	}
+	return -1
+}
+
+
 extract_dividends :: proc(
 	json: string,
 	allocator: mem.Allocator = context.temp_allocator,
@@ -437,9 +572,8 @@ extract_dividends :: proc(
 	if start < 0 {return out}
 	start += pos
 
-	end := strings.index(json[start:], "}")
+	end := _matching_brace(json, start) // the whole events object, not its first entry
 	if end < 0 {return out}
-	end += start
 
 	block := json[start:end]
 
@@ -492,9 +626,8 @@ extract_splits :: proc(
 	if start < 0 {return out}
 	start += pos
 
-	end := strings.index(json[start:], "}")
+	end := _matching_brace(json, start) // the whole events object, not its first entry
 	if end < 0 {return out}
-	end += start
 
 	block := json[start:end]
 

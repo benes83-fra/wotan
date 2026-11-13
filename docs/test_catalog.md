@@ -43,7 +43,8 @@ Reference and contract tests print `OK` or `FAIL` for each check and end with a 
 | `html_test` 📁 | `html_basic_test`, `html_extended_test`, `html_tags_test`, `html_export_test` (plus helpers `test_extract_tables`, `test_index`, `test_id`, `test_all`) | Extracting HTML tables by index or id, HTML export |
 | `excel_test` 📁 | `excel_basic_test`, `zip_smoke_test`, `excel_date_test`, `excel_export_test` | `.xlsx` reading and writing, date cells, the ZIP layer |
 | `io_roundtrip_test` | `io_roundtrip_test` | CSV, JSON, JSONL and XLSX round-trip a DataFrame exactly (types, nulls, quoted and non-ASCII strings, large integers, dates); HTML round-trips what HTML can express; exporters write sliced views; real-world input quirks |
-| `net_test` 🌐 | `http_get_test`, `yahoo_finance_csv_test`, `yahoo_finance_json_test`, `yahoo_finance_events_test` | HTTP GET via libcurl; Yahoo prices, dividends and splits |
+| `data_io_fixes_test` | `data_io_fixes_test` | Offline regressions for the data I/O guide: a Yahoo chart answer (nested adjusted closes, a day of nulls, two dividends, a split) parsed into a DataFrame and a `Yahoo_Series`; JSON null as NaN; `log_returns` / `simple_returns` on a panel; column names that outlive the importer's temp buffers; writers that free their cell texts |
+| `net_test` 🌐 | `http_get_test`, `yahoo_finance_csv_test`, `yahoo_finance_json_test`, `yahoo_finance_events_test` | HTTP GET via libcurl; Yahoo prices, dividends and splits (`yahoo_finance_csv_test` is not called: Yahoo's CSV download now answers 401) |
 
 ## 3. Linear algebra
 
@@ -255,8 +256,8 @@ Reference and contract tests print `OK` or `FAIL` for each check and end with a 
 | `hmm_regime_test` 🌐 | `hmm_regime_test` | Gaussian HMM vs hmmlearn: forward log-likelihood, one Baum–Welch step, the fit and its Viterbi path, a bad tick, rescaled returns, one state; then SPY regimes |
 | `volatility_forecasting_test` 🌐 | `volatility_forecasting_test`, `lstm_volatility_test`, `lstm_volatility_real_data_test` | Volatility forecasting with neural models and LSTMs |
 | `ensemble_volatility_test` 🌐 | `ensemble_volatility_test`, `vrp_signal_test`, `vrp_backtest_test` | GARCH plus sequence-model ensemble, variance risk premium signal and backtest |
-| `volatility_arbitrage_test` 🌐 | `volatility_arbitrage_test` | Implied vs forecast realised volatility |
-| `dispersion_trading_test` 🌐 | `dispersion_trading_test` | Dispersion trading on SPY, AAPL, MSFT, NVDA and the VIX through `compute_dispersion_signal` (forecast vols positive, correlations and signal in [-1, 1]); mean pairwise return correlation for comparison; factor risk |
+| `volatility_arbitrage_test` 🌐 | `volatility_arbitrage_test` | Implied vs forecast realised volatility (SPY and the VIX matched by date) |
+| `dispersion_trading_test` 🌐 | `dispersion_trading_test` | Dispersion trading on SPY, AAPL, MSFT, NVDA and the VIX (matched by date) through `compute_dispersion_signal` (forecast vols positive, correlations and signal in [-1, 1]); mean pairwise return correlation for comparison; factor risk |
 | `ppo_reference_test` | `ppo_reference_test` | GAE vs CleanRL (numpy); PPO minibatch loss gradient vs finite differences of the clipped objective; rollout buffer growth; trading and multi-asset environments on scripted episodes (the multi-asset mean-variance rewards vs an independent Python replay) |
 | `ppo_test` 🌐 | `ppo_trading_test`, `ppo_trading_real_data_test`, `walk_forward_validation_test` | PPO trading agent on synthetic and real data, walk-forward validation |
 | `ppo_multi_asset_test` 🌐 | `ppo_multi_asset_test`, `ppo_multi_asset_wf_test` | Multi-asset PPO (SPY vs QQQ) |

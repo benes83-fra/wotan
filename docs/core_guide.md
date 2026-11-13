@@ -189,7 +189,7 @@ DataFrame:
     volume (Int)
 ```
 
-For files on disk use `io.csv_load("path/to/file.csv")`. You can pass your own column types and separator: `io.csv_load(path, types = ..., sep = ';')`. For the other formats see `io.xlsx_load`, `io.xlsx_load_sheet` and the JSON and HTML loaders. The `exporter` package writes DataFrames back out, for example with `exporter.csv_save`.
+For files on disk use `io.csv_load("path/to/file.csv")`. You can pass your own column types and separator: `io.csv_load(path, types = ..., sep = ';')`. For the other formats see `io.xlsx_load`, `io.xlsx_load_sheet` and the JSON and HTML loaders. The `exporter` package writes DataFrames back out, for example with `exporter.csv_save`. The [data in and out guide](data_io_guide.md) covers all formats, HTTP and Yahoo Finance.
 
 ## 6. Printing
 
@@ -609,6 +609,7 @@ Wotan follows the usual Odin rule: whoever creates something frees it. In `core`
 4. **A grouping is separate from its result.** Free a `GroupedDataFrame` with `destroy_grouped_dataframe` and a `GroupBy2` with `destroy_groupby2`. The DataFrame returned by `agg` or `groupby2_agg` is independent of the grouping, so free it with `destroy_dataframe`.
 5. **Columns passed to `df_from` or `add_column` belong to the DataFrame.** Do not destroy them separately. A standalone column that you never added to a DataFrame is freed with `destroy_column`.
 6. **Strings returned by the date formatting procedures are allocated.** `date_to_string`, `time_to_string` and `datetime_to_string` return strings to free with `delete`. Strings read from a column (`column_at_string`) belong to the column and must not be freed.
+7. **A column borrows the name you give `column_new`,** so pass a string that lives at least as long as the column, such as a literal. Columns made by the importers and by the copying procedures (`column_take`, `column_clone`, `materialize`, the copying row selections, joins and reindexing) own their names, so a copy stays valid after its source is destroyed. `w.column_own_name(&col, name)` gives any column its own copy, freed by `destroy_column`.
 
 The usual pattern is to put a `defer` right after each allocation, as the examples in this guide do. Run with `-debug` and the tracking allocator from section 1, and any leak is reported with the line that allocated it.
 

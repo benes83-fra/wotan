@@ -41,7 +41,7 @@ deep_hedging_portfolio_test :: proc(allocator: mem.Allocator) {
 		col := w.column(df, "AdjClose")
 		off := df.rows - n
 		r := make([]f64, n - 1)
-		// a missing (null or 0, as Yahoo sends for some rows) close counts as no move
+		// a missing (null) close counts as no move
 		prev, _ := w.column_at_float(col, off)
 		for i in 1 ..< n {
 			b, null := w.column_at_float(col, off + i)

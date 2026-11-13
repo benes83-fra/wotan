@@ -1,5 +1,6 @@
 package tests
 
+import ts "../wotan/analytics"
 import w "../wotan/core"
 import fin "../wotan/finance"
 import yahoo "../wotan/net"
@@ -15,39 +16,28 @@ pdpm_multifactor_test :: proc(allocator: mem.Allocator) {
 	// 1. Fetch real market data
 	fmt.println("--- Fetching Market Data from Yahoo Finance ---")
 
-	spy_df, spy_df_ok := yahoo.read_yahoo("SPY", .Daily, .OneYear, allocator)
-	if !spy_df_ok {fail_missing_data(#procedure, "Yahoo data for SPY"); return}
-	defer w.destroy_dataframe(&spy_df)
+	// SPY and the VIX matched by date (the VIX has rows on US market holidays)
+	panel, panel_ok, _ := yahoo.read_yahoo_panel({"SPY", "^VIX"}, .Daily, .OneYear, allocator)
+	defer yahoo.yahoo_panel_free(&panel)
+	if !panel_ok {fail_missing_data(#procedure, "Yahoo data for SPY and ^VIX"); return}
 
-	vix_df, vix_df_ok := yahoo.read_yahoo("^VIX", .Daily, .OneYear, allocator)
-	if !vix_df_ok {fail_missing_data(#procedure, "Yahoo data for ^VIX"); return}
-	defer w.destroy_dataframe(&vix_df)
-
-	fmt.printf("Loaded %d days of SPY data\n", spy_df.rows)
-	fmt.printf("Loaded %d days of VIX data\n", vix_df.rows)
+	fmt.printf("Loaded %d days of SPY and VIX data\n", len(panel.dates))
 
 	// 2. Extract returns
 	fmt.println("\n--- Computing Returns ---")
 
-	n_days := min(spy_df.rows, vix_df.rows)
-	spy_returns := make([]f64, n_days - 1, allocator)
-	vix_returns := make([]f64, n_days - 1, allocator)
+	pair_returns := ts.simple_returns(panel.adj_close, 2, allocator) // [day][SPY, VIX]
+	defer delete(pair_returns, allocator)
+	n_ret := len(pair_returns) / 2
+	spy_returns := make([]f64, n_ret, allocator)
+	vix_returns := make([]f64, n_ret, allocator)
 	defer {
 		delete(spy_returns, allocator)
 		delete(vix_returns, allocator)
 	}
-	for i in 1 ..< n_days {
-		spy_close_prev, _ := w.column_at_float(&spy_df.columns[4], i - 1)
-		spy_close_curr, _ := w.column_at_float(&spy_df.columns[4], i)
-		vix_close_prev, _ := w.column_at_float(&vix_df.columns[4], i - 1)
-		vix_close_curr, _ := w.column_at_float(&vix_df.columns[4], i)
-		if spy_close_prev == 0.0 || vix_close_prev == 0.0 {
-			continue
-		}
-		spy_returns[i - 1] = (spy_close_curr - spy_close_prev) / spy_close_prev
-
-
-		vix_returns[i - 1] = (vix_close_curr - vix_close_prev) / vix_close_prev
+	for i in 0 ..< n_ret {
+		spy_returns[i] = pair_returns[2 * i]
+		vix_returns[i] = pair_returns[2 * i + 1]
 	}
 
 	// Compute historical volatility
@@ -66,7 +56,7 @@ pdpm_multifactor_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("SPY Mean Return: %.4f%%\n", mean_ret * 100)
 
 	// Get current spot price
-	spot_price, _ := w.column_at_float(&spy_df.columns[4], n_days - 1)
+	spot_price := panel.adj_close[(len(panel.dates) - 1) * 2] // the latest close is unadjusted
 	fmt.printf("Current SPY Price: $%.2f\n", spot_price)
 
 	// 3. Fetch or generate option chain

@@ -149,7 +149,8 @@ _xlsx_load_sheet :: proc(path: string, sheet: SheetInfo, allocator: mem.Allocato
 		}
 		type := w.ColumnType.String if any_text else infer_column_type(samples[:])
 
-		col := w.column_new(strings.clone(name, allocator), type, row_count, allocator)
+		col := w.column_new("", type, row_count, allocator)
+		w.column_own_name(&col, name)
 		for r in 1 ..< len(rows) {
 			v := cell(rows[r], c)
 			if v.kind == .Empty || v.kind == .Error {
