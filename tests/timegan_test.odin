@@ -1,6 +1,5 @@
 package tests
 
-import w "../wotan/core"
 import ml_finance "../wotan/ml_finance"
 import net "../wotan/net"
 import "core:fmt"
@@ -255,26 +254,26 @@ timegan_test :: proc(allocator: mem.Allocator = context.allocator) {
 	seed_test(#procedure)
 	context.allocator = allocator
 	fmt.println("\n=== TimeGAN on SPY daily returns and volume changes ===")
-	spy_df, spy_df_ok := net.read_yahoo("SPY", .Daily, .FiveYears, allocator)
-	if !spy_df_ok {fail_missing_data(#procedure, "Yahoo data for SPY"); return}
-	defer w.destroy_dataframe(&spy_df)
-	if spy_df.rows < 500 {
+	spy, spy_ok := net.read_yahoo_series("SPY", .Daily, .FiveYears, allocator)
+	if !spy_ok {fail_missing_data(#procedure, "Yahoo data for SPY"); return}
+	defer net.yahoo_series_free(&spy)
+	if len(spy.adj_close) < 500 {
 		fail_missing_data(
 			#procedure,
-			fmt.tprintf("500 days of Yahoo data for SPY (got %d)", spy_df.rows),
+			fmt.tprintf("500 days of Yahoo data for SPY (got %d)", len(spy.adj_close)),
 		)
 		return
 	}
-	n_days := spy_df.rows
-	close_col := w.column(&spy_df, "AdjClose")
-	volume_col := w.column(&spy_df, "Volume")
-	prices, volumes := make([]f64, n_days), make([]f64, n_days)
-	for i in 0 ..< n_days {
-		prices[i], _ = w.column_at_float(close_col, i)
-		volumes[i], _ = w.column_at_numeric(volume_col, i)
-	}
 	T :: 20
-	data, n_seq, F := ml_finance.prepare_market_data(prices, volumes, nil, 0, T, allocator)
+	// a NaN volume gives a zero volume change, like a missing volume did before
+	data, n_seq, F := ml_finance.prepare_market_data(
+		spy.adj_close,
+		spy.volume,
+		nil,
+		0,
+		T,
+		allocator,
+	)
 	fmt.printf("%d windows of %d days, features: log return, log volume change\n", n_seq, T)
 	// winsorised at 4 std: min-max scaling to [0, 1] otherwise squeezes the typical day
 	// into a sliver of the range and the autoencoder learns only the mean

@@ -1,6 +1,6 @@
 package tests
 
-import w "../wotan/core"
+import ts "../wotan/analytics"
 import l "../wotan/linalg"
 import ml_fin "../wotan/ml_finance"
 import net "../wotan/net"
@@ -171,32 +171,24 @@ neural_sdf_test :: proc(allocator: mem.Allocator = context.allocator) {
 	fmt.println("\n=== Neural SDF on SPY, QQQ, IWM, TLT daily returns ===")
 	symbols := []string{"SPY", "QQQ", "IWM", "TLT"}
 	N := len(symbols)
-	dfs := make([]w.DataFrame, N)
-	n := max(int)
-	for sym, i in symbols {
-		yd, yd_ok := net.read_yahoo(sym, .Daily, .TwoYears, allocator)
-		if !yd_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", sym)); return}
-		dfs[i] = yd
-		n = min(n, dfs[i].rows)
+	// the four symbols matched by date (only the days all of them have)
+	panel, panel_ok, failed := net.read_yahoo_panel(symbols, .Daily, .TwoYears, allocator)
+	defer net.yahoo_panel_free(&panel)
+	if !panel_ok {
+		what := "Yahoo data shared by all symbols"
+		if failed >= 0 {what = fmt.tprintf("Yahoo data for %s", symbols[failed])}
+		fail_missing_data(#procedure, what)
+		return
 	}
-	defer for &df in dfs {w.destroy_dataframe(&df)}
+	n := len(panel.dates)
 	if n < 200 {
 		fail_missing_data(#procedure, fmt.tprintf("200 days of Yahoo data (got %d)", n))
 		return
 	}
-	// gross returns of the last n common rows; a missing (null) close counts as no move
-	returns := make([]f64, (n - 1) * N)
-	for &df, i in dfs {
-		col := w.column(&df, "AdjClose")
-		off := df.rows - n
-		prev, _ := w.column_at_float(col, off)
-		for k in 1 ..< n {
-			b, null := w.column_at_float(col, off + k)
-			good := !null && b > 0
-			returns[(k - 1) * N + i] = b / prev if good && prev > 0 else 1
-			if good {prev = b}
-		}
-	}
+	// gross returns of the n common days, [day][symbol]
+	returns := ts.simple_returns(panel.adj_close, N, allocator)
+	defer delete(returns, allocator)
+	for &r in returns {r += 1}
 	n_train := (n - 1) / 2
 	train, test := returns[:n_train * N], returns[n_train * N:]
 	fmt.printf("%d daily returns: %d to fit, %d held out\n", n - 1, n_train, (n - 1) - n_train)

@@ -245,6 +245,26 @@ kalman_pairs_reference_checks :: proc(allocator: mem.Allocator) {
 	record_failures(total - passed)
 }
 
+// The adjusted closes of a two-ticker Yahoo_Panel (dates both tickers have) as the
+// DataFrame kalman_pairs_strategy reads: Date, Asset_A (ticker 0), Asset_B (ticker 1)
+@(private = "file")
+_kp_pair_df :: proc(panel: ^net.Yahoo_Panel, allocator: mem.Allocator) -> w.DataFrame {
+	D := len(panel.dates)
+	col_date := w.column_new("Date", .Date, D, allocator)
+	col_a := w.column_new("Asset_A", .Float, D, allocator)
+	col_b := w.column_new("Asset_B", .Float, D, allocator)
+	for d, t in panel.dates {
+		w.append_date(&col_date, d)
+		w.append_float(&col_a, panel.adj_close[t * 2 + 0])
+		w.append_float(&col_b, panel.adj_close[t * 2 + 1])
+	}
+	df := w.dataframe_new(allocator)
+	w.add_column(&df, col_date)
+	w.add_column(&df, col_a)
+	w.add_column(&df, col_b)
+	return df
+}
+
 // DSR and PBO of a grid search's trials; the best trial's SR must be the one the grid
 // search reported
 @(private = "file")
@@ -268,72 +288,17 @@ kalman_pairs_real_data_test :: proc(allocator: mem.Allocator = context.allocator
 	kalman_pairs_reference_checks(allocator)
 	fmt.println("\n=== Kalman Filter Pairs Trading (Real Data) ===")
 
-	// Fetch real market data using existing yahoo infrastructure
-	df, df_ok := net.read_yahoo("KO", .Daily, .TwoYears, allocator)
-	if !df_ok {fail_missing_data(#procedure, "Yahoo data for KO"); return}
-	if df.rows == 0 {
-		fmt.println("ERROR: Failed to fetch KO data")
+	// Fetch real market data: KO and PEP adjusted closes matched by DATE, not by index
+	symbols := []string{"KO", "PEP"}
+	panel, panel_ok, bad := net.read_yahoo_panel(symbols, .Daily, .TwoYears, allocator)
+	defer net.yahoo_panel_free(&panel)
+	if !panel_ok {
+		what := "a common date" if bad < 0 else symbols[bad]
+		fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", what))
 		return
 	}
-	defer w.destroy_dataframe(&df)
-
-	df2, df2_ok := net.read_yahoo("PEP", .Daily, .TwoYears, allocator)
-	if !df2_ok {fail_missing_data(#procedure, "Yahoo data for PEP"); return}
-	if df2.rows == 0 {
-		fmt.println("ERROR: Failed to fetch PEP data")
-		return
-	}
-	defer w.destroy_dataframe(&df2)
-
-	// ========================================================================
-	// CRITICAL FIX: Align dataframes by DATE, not by index!
-	// ========================================================================
-	aligned_df := w.dataframe_new()
+	aligned_df := _kp_pair_df(&panel, allocator)
 	defer w.destroy_dataframe(&aligned_df)
-
-	col_date := w.column_new("Date", .Date, 0)
-	col_ko := w.column_new("Asset_A", .Float, 0)
-	col_pep := w.column_new("Asset_B", .Float, 0)
-
-	date_col1 := w.column(&df, "Date")
-	close_col1 := w.column(&df, "Close")
-
-	date_col2 := w.column(&df2, "Date")
-	close_col2 := w.column(&df2, "Close")
-
-	// Two-pointer approach to align by date
-	i1 := 0
-	i2 := 0
-	for i1 < df.rows && i2 < df2.rows {
-		date1, _ := w.column_at_date(date_col1, i1)
-		date2, _ := w.column_at_date(date_col2, i2)
-
-		cmp := w.date_compare(date1, date2)
-		if cmp == 0 {
-			// Dates match: append to aligned dataframe
-			w.append_date(&col_date, date1)
-
-			val1, _ := w.column_at_float(close_col1, i1)
-			w.append_float(&col_ko, val1)
-
-			val2, _ := w.column_at_float(close_col2, i2)
-			w.append_float(&col_pep, val2)
-
-			i1 += 1
-			i2 += 1
-		} else if cmp < 0 {
-			// date1 is earlier, advance i1
-			i1 += 1
-		} else {
-			// date2 is earlier, advance i2
-			i2 += 1
-		}
-	}
-
-	w.add_column(&aligned_df, col_date)
-	w.add_column(&aligned_df, col_ko)
-	w.add_column(&aligned_df, col_pep)
-	aligned_df.rows = col_date.len
 
 	fmt.printf("Loaded %d properly aligned days of real KO/PEP data\n", aligned_df.rows)
 
@@ -529,54 +494,17 @@ kalman_pairs_real_data_grid_test :: proc(allocator: mem.Allocator = context.allo
 	seed_test(#procedure)
 	fmt.println("\n=== Kalman Filter Grid Pairs Trading (Real Data) ===")
 
-	// Fetch real market data
-	df, df_ok := net.read_yahoo("KO", .Daily, .TwoYears, allocator)
-	if !df_ok {fail_missing_data(#procedure, "Yahoo data for KO"); return}
-	if df.rows == 0 {fmt.println("ERROR: Failed to fetch KO data"); return}
-	defer w.destroy_dataframe(&df)
-
-	df2, df2_ok := net.read_yahoo("PEP", .Daily, .TwoYears, allocator)
-	if !df2_ok {fail_missing_data(#procedure, "Yahoo data for PEP"); return}
-	if df2.rows == 0 {fmt.println("ERROR: Failed to fetch PEP data"); return}
-	defer w.destroy_dataframe(&df2)
-
-	// Align dataframes by DATE
-	aligned_df := w.dataframe_new()
-	defer w.destroy_dataframe(&aligned_df)
-
-	col_date := w.column_new("Date", .Date, 0)
-	col_ko := w.column_new("Asset_A", .Float, 0)
-	col_pep := w.column_new("Asset_B", .Float, 0)
-
-	date_col1 := w.column(&df, "Date")
-	close_col1 := w.column(&df, "Close")
-	date_col2 := w.column(&df2, "Date")
-	close_col2 := w.column(&df2, "Close")
-
-	i1 := 0
-	i2 := 0
-	for i1 < df.rows && i2 < df2.rows {
-		date1, _ := w.column_at_date(date_col1, i1)
-		date2, _ := w.column_at_date(date_col2, i2)
-		cmp := w.date_compare(date1, date2)
-		if cmp == 0 {
-			w.append_date(&col_date, date1)
-			val1, _ := w.column_at_float(close_col1, i1)
-			w.append_float(&col_ko, val1)
-			val2, _ := w.column_at_float(close_col2, i2)
-			w.append_float(&col_pep, val2)
-			i1 += 1
-			i2 += 1
-		} else if cmp < 0 {
-			i1 += 1
-		} else {
-			i2 += 1
-		}
+	// Fetch real market data, aligned by DATE
+	symbols := []string{"KO", "PEP"}
+	panel, panel_ok, bad := net.read_yahoo_panel(symbols, .Daily, .TwoYears, allocator)
+	defer net.yahoo_panel_free(&panel)
+	if !panel_ok {
+		what := "a common date" if bad < 0 else symbols[bad]
+		fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", what))
+		return
 	}
-	w.add_column(&aligned_df, col_date)
-	w.add_column(&aligned_df, col_ko)
-	w.add_column(&aligned_df, col_pep)
-	aligned_df.rows = col_date.len
+	aligned_df := _kp_pair_df(&panel, allocator)
+	defer w.destroy_dataframe(&aligned_df)
 	fmt.printf("Loaded %d properly aligned days of real KO/PEP data\n", aligned_df.rows)
 	// --- Grid Search ---
 	fmt.println("\n--- Running Grid Search ---")
@@ -724,66 +652,17 @@ kalman_pairs_real_data_grid_test :: proc(allocator: mem.Allocator = context.allo
 kalman_pairs_semiconductor_test :: proc(allocator: mem.Allocator = context.allocator) {
 	fmt.println("\n=== Kalman Filter Pairs Trading (Semiconductors: NVDA & AMD) ===")
 
-	// Fetch real market data
-	df1, df1_ok := net.read_yahoo("NVDA", .Daily, .TwoYears, allocator)
-	if !df1_ok {fail_missing_data(#procedure, "Yahoo data for NVDA"); return}
-	if df1.rows == 0 {
-		fmt.println("ERROR: Failed to fetch NVDA data")
+	// Fetch real market data, aligned by DATE
+	symbols := []string{"NVDA", "AMD"}
+	panel, panel_ok, bad := net.read_yahoo_panel(symbols, .Daily, .TwoYears, allocator)
+	defer net.yahoo_panel_free(&panel)
+	if !panel_ok {
+		what := "a common date" if bad < 0 else symbols[bad]
+		fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", what))
 		return
 	}
-	defer w.destroy_dataframe(&df1)
-
-	df2, df2_ok := net.read_yahoo("AMD", .Daily, .TwoYears, allocator)
-	if !df2_ok {fail_missing_data(#procedure, "Yahoo data for AMD"); return}
-	if df2.rows == 0 {
-		fmt.println("ERROR: Failed to fetch AMD data")
-		return
-	}
-	defer w.destroy_dataframe(&df2)
-
-	// Align dataframes by DATE
-	aligned_df := w.dataframe_new()
+	aligned_df := _kp_pair_df(&panel, allocator)
 	defer w.destroy_dataframe(&aligned_df)
-
-	col_date := w.column_new("Date", .Date, 0)
-	col_nvda := w.column_new("Asset_A", .Float, 0)
-	col_amd := w.column_new("Asset_B", .Float, 0)
-
-	date_col1 := w.column(&df1, "Date")
-	close_col1 := w.column(&df1, "Close")
-
-	date_col2 := w.column(&df2, "Date")
-	close_col2 := w.column(&df2, "Close")
-
-	i1 := 0
-	i2 := 0
-	for i1 < df1.rows && i2 < df2.rows {
-		date1, _ := w.column_at_date(date_col1, i1)
-		date2, _ := w.column_at_date(date_col2, i2)
-
-		cmp := w.date_compare(date1, date2)
-		if cmp == 0 {
-			w.append_date(&col_date, date1)
-
-			val1, _ := w.column_at_float(close_col1, i1)
-			w.append_float(&col_nvda, val1)
-
-			val2, _ := w.column_at_float(close_col2, i2)
-			w.append_float(&col_amd, val2)
-
-			i1 += 1
-			i2 += 1
-		} else if cmp < 0 {
-			i1 += 1
-		} else {
-			i2 += 1
-		}
-	}
-
-	w.add_column(&aligned_df, col_date)
-	w.add_column(&aligned_df, col_nvda)
-	w.add_column(&aligned_df, col_amd)
-	aligned_df.rows = col_date.len
 
 	fmt.printf("Loaded %d properly aligned days of real NVDA/AMD data\n", aligned_df.rows)
 
@@ -983,28 +862,19 @@ kalman_pairs_semiconductor_adf_test :: proc(allocator: mem.Allocator = context.a
 	seed_test(#procedure)
 	fmt.println("\n=== Kalman Filter Pairs Trading (Semiconductors with ADF Check) ===")
 
-	// 1. Fetch NVDA
-	df_nvda, df_nvda_ok := net.read_yahoo("NVDA", .Daily, .TwoYears, allocator)
-	if !df_nvda_ok {fail_missing_data(#procedure, "Yahoo data for NVDA"); return}
-	if df_nvda.rows == 0 {
-		fmt.println("ERROR: Failed to fetch NVDA data")
+	// 1. Fetch NVDA and AMD, aligned by date
+	symbols := []string{"NVDA", "AMD"}
+	panel, panel_ok, bad := net.read_yahoo_panel(symbols, .Daily, .TwoYears, allocator)
+	defer net.yahoo_panel_free(&panel)
+	if !panel_ok {
+		what := "a common date" if bad < 0 else symbols[bad]
+		fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", what))
 		return
 	}
-	defer w.destroy_dataframe(&df_nvda)
-
-	// 2. Fetch AMD
-	df_amd, df_amd_ok := net.read_yahoo("AMD", .Daily, .TwoYears, allocator)
-	if !df_amd_ok {fail_missing_data(#procedure, "Yahoo data for AMD"); return}
-	if df_amd.rows == 0 {
-		fmt.println("ERROR: Failed to fetch AMD data")
-		return
-	}
-	defer w.destroy_dataframe(&df_amd)
 
 	// Helper proc to align data and run ADF test on the spread
 	test_pair_cointegration :: proc(
-		df1: ^w.DataFrame,
-		df2: ^w.DataFrame,
+		panel: ^net.Yahoo_Panel,
 		sym1: string,
 		sym2: string,
 		alloc: mem.Allocator,
@@ -1012,39 +882,7 @@ kalman_pairs_semiconductor_adf_test :: proc(allocator: mem.Allocator = context.a
 		bool,
 		w.DataFrame,
 	) {
-		aligned := w.dataframe_new()
-		col_date := w.column_new("Date", .Date, 0)
-		col_a := w.column_new("Asset_A", .Float, 0)
-		col_b := w.column_new("Asset_B", .Float, 0)
-
-		date1 := w.column(df1, "Date")
-		close1 := w.column(df1, "Close")
-		date2 := w.column(df2, "Date")
-		close2 := w.column(df2, "Close")
-
-		i1, i2 := 0, 0
-		for i1 < df1.rows && i2 < df2.rows {
-			d1, _ := w.column_at_date(date1, i1)
-			d2, _ := w.column_at_date(date2, i2)
-			cmp := w.date_compare(d1, d2)
-			if cmp == 0 {
-				w.append_date(&col_date, d1)
-				v1, _ := w.column_at_float(close1, i1)
-				v2, _ := w.column_at_float(close2, i2)
-				w.append_float(&col_a, v1)
-				w.append_float(&col_b, v2)
-				i1 += 1
-				i2 += 1
-			} else if cmp < 0 {
-				i1 += 1
-			} else {
-				i2 += 1
-			}
-		}
-		w.add_column(&aligned, col_date)
-		w.add_column(&aligned, col_a)
-		w.add_column(&aligned, col_b)
-		aligned.rows = col_date.len
+		aligned := _kp_pair_df(panel, alloc)
 
 		if aligned.rows < 100 {
 			w.destroy_dataframe(&aligned)
@@ -1083,13 +921,7 @@ kalman_pairs_semiconductor_adf_test :: proc(allocator: mem.Allocator = context.a
 	}
 
 	// Test NVDA & AMD
-	is_coin_amd, aligned_amd := test_pair_cointegration(
-		&df_nvda,
-		&df_amd,
-		"NVDA",
-		"AMD",
-		allocator,
-	)
+	is_coin_amd, aligned_amd := test_pair_cointegration(&panel, "NVDA", "AMD", allocator)
 
 	final_aligned: w.DataFrame
 	sym_a, sym_b: string
@@ -1103,21 +935,21 @@ kalman_pairs_semiconductor_adf_test :: proc(allocator: mem.Allocator = context.a
 		fmt.println("  Switching AMD for TSM (TSMC ADR)...")
 		w.destroy_dataframe(&aligned_amd)
 
-		df_tsm, df_tsm_ok := net.read_yahoo("TSM", .Daily, .TwoYears, allocator)
-		if !df_tsm_ok {fail_missing_data(#procedure, "Yahoo data for TSM"); return}
-		if df_tsm.rows == 0 {
-			fmt.println("ERROR: Failed to fetch TSM data")
-			return
-		}
-		defer w.destroy_dataframe(&df_tsm)
-
-		is_coin_tsm, aligned_tsm := test_pair_cointegration(
-			&df_nvda,
-			&df_tsm,
-			"NVDA",
-			"TSM",
+		tsm_symbols := []string{"NVDA", "TSM"}
+		panel_tsm, panel_tsm_ok, bad_tsm := net.read_yahoo_panel(
+			tsm_symbols,
+			.Daily,
+			.TwoYears,
 			allocator,
 		)
+		defer net.yahoo_panel_free(&panel_tsm)
+		if !panel_tsm_ok {
+			what := "a common date" if bad_tsm < 0 else tsm_symbols[bad_tsm]
+			fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", what))
+			return
+		}
+
+		is_coin_tsm, aligned_tsm := test_pair_cointegration(&panel_tsm, "NVDA", "TSM", allocator)
 		if is_coin_tsm {
 			fmt.println("  Proceeding with NVDA & TSM pair.")
 			final_aligned = aligned_tsm
@@ -1343,39 +1175,26 @@ kalman_pairs_auto_select_test :: proc(allocator: mem.Allocator = context.allocat
 	for candidate in candidates {
 		fmt.printf("Testing cointegration for %s & %s...\n", candidate.sym1, candidate.sym2)
 
-		df1, df1_ok := net.read_yahoo(candidate.sym1, .Daily, .TwoYears, allocator)
-		if !df1_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", candidate.sym1)); return}
-		if df1.rows == 0 {continue}
-		defer w.destroy_dataframe(&df1)
-
-		df2, df2_ok := net.read_yahoo(candidate.sym2, .Daily, .TwoYears, allocator)
-		if !df2_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", candidate.sym2)); return}
-		if df2.rows == 0 {continue}
-		defer w.destroy_dataframe(&df2)
-
-		// Extract prices for spread calculation
-		n := min(df1.rows, df2.rows)
-		if n < 100 {continue}
-
-		// Calculate log prices for cointegration test
-		ret1 := make([]f64, n, context.temp_allocator)
-		ret2 := make([]f64, n, context.temp_allocator)
-
-		for i in 1 ..< n {
-			v1, _ := w.column_at_float(w.column(&df1, "Close"), i)
-			v1_prev, _ := w.column_at_float(w.column(&df1, "Close"), i - 1)
-			v2, _ := w.column_at_float(w.column(&df2, "Close"), i)
-			v2_prev, _ := w.column_at_float(w.column(&df2, "Close"), i - 1)
-			if v1 > 0 && v2 > 0 {
-				ret1[i - 1] = math.ln_f64(v1 / v1_prev)
-				ret2[i - 1] = math.ln_f64(v2 / v2_prev)
-			}
+		symbols := []string{candidate.sym1, candidate.sym2}
+		panel, panel_ok, bad := net.read_yahoo_panel(symbols, .Daily, .TwoYears, allocator)
+		defer net.yahoo_panel_free(&panel)
+		if !panel_ok {
+			what := "a common date" if bad < 0 else symbols[bad]
+			fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", what))
+			return
 		}
 
-		// Run ADF on the spread of log prices
-		spread := make([]f64, n, context.temp_allocator)
+		// Extract prices for spread calculation (both tickers on the same dates)
+		n := len(panel.dates)
+		if n < 100 {continue}
+
+		// Calculate log returns for cointegration test, [day][sym1, sym2]
+		rets := analytic.log_returns(panel.adj_close, 2, context.temp_allocator)
+
+		// Run ADF on the spread of log returns
+		spread := make([]f64, n - 1, context.temp_allocator)
 		for i in 0 ..< n - 1 {
-			spread[i] = ret1[i] - ret2[i]
+			spread[i] = rets[i * 2 + 0] - rets[i * 2 + 1]
 		}
 
 		_, p_val, lags, n_obs, _, _, _ := analytic.adf_test(
@@ -1412,51 +1231,19 @@ kalman_pairs_auto_select_test :: proc(allocator: mem.Allocator = context.allocat
 
 	// 2. Fetch full data for the selected pair
 	fmt.println("\n--- Step 2: Fetching Data ---")
-	df1, df1_ok := net.read_yahoo(selected_sym1, .Daily, .TwoYears, allocator)
-	if !df1_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", selected_sym1)); return}
-	defer w.destroy_dataframe(&df1)
-
-	df2, df2_ok := net.read_yahoo(selected_sym2, .Daily, .TwoYears, allocator)
-	if !df2_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", selected_sym2)); return}
-	defer w.destroy_dataframe(&df2)
-
-	// 3. Align dataframes by DATE
-	fmt.println("\n--- Step 3: Aligning Data ---")
-	aligned_df := w.dataframe_new()
-	defer w.destroy_dataframe(&aligned_df)
-
-	col_date := w.column_new("Date", .Date, 0)
-	col_a := w.column_new("Asset_A", .Float, 0)
-	col_b := w.column_new("Asset_B", .Float, 0)
-
-	date_col1 := w.column(&df1, "Date")
-	close_col1 := w.column(&df1, "Close")
-	date_col2 := w.column(&df2, "Date")
-	close_col2 := w.column(&df2, "Close")
-
-	i1, i2 := 0, 0
-	for i1 < df1.rows && i2 < df2.rows {
-		date1, _ := w.column_at_date(date_col1, i1)
-		date2, _ := w.column_at_date(date_col2, i2)
-		cmp := w.date_compare(date1, date2)
-		if cmp == 0 {
-			w.append_date(&col_date, date1)
-			val1, _ := w.column_at_float(close_col1, i1)
-			w.append_float(&col_a, val1)
-			val2, _ := w.column_at_float(close_col2, i2)
-			w.append_float(&col_b, val2)
-			i1 += 1
-			i2 += 1
-		} else if cmp < 0 {
-			i1 += 1
-		} else {
-			i2 += 1
-		}
+	symbols := []string{selected_sym1, selected_sym2}
+	panel, panel_ok, bad := net.read_yahoo_panel(symbols, .Daily, .TwoYears, allocator)
+	defer net.yahoo_panel_free(&panel)
+	if !panel_ok {
+		what := "a common date" if bad < 0 else symbols[bad]
+		fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", what))
+		return
 	}
-	w.add_column(&aligned_df, col_date)
-	w.add_column(&aligned_df, col_a)
-	w.add_column(&aligned_df, col_b)
-	aligned_df.rows = col_date.len
+
+	// 3. Align dataframes by DATE (the panel holds only the dates both tickers have)
+	fmt.println("\n--- Step 3: Aligning Data ---")
+	aligned_df := _kp_pair_df(&panel, allocator)
+	defer w.destroy_dataframe(&aligned_df)
 
 	fmt.printf(
 		"✓ Loaded %d aligned days of %s/%s data\n",

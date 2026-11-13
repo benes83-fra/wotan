@@ -1,6 +1,6 @@
 package tests
 
-import w "../wotan/core"
+import ts "../wotan/analytics"
 import fin "../wotan/finance"
 import l "../wotan/linalg"
 import ml_fin "../wotan/ml_finance"
@@ -22,13 +22,16 @@ deep_hedging_portfolio_test :: proc(allocator: mem.Allocator) {
 	seed_test(#procedure)
 	context.allocator = allocator
 	fmt.println("\n=== Deep hedging: call on a SPY/QQQ basket ===")
-	spy_df, spy_df_ok := net.read_yahoo("SPY", .Daily, .OneYear, allocator)
-	if !spy_df_ok {fail_missing_data(#procedure, "Yahoo data for SPY"); return}
-	defer w.destroy_dataframe(&spy_df)
-	qqq_df, qqq_df_ok := net.read_yahoo("QQQ", .Daily, .OneYear, allocator)
-	if !qqq_df_ok {fail_missing_data(#procedure, "Yahoo data for QQQ"); return}
-	defer w.destroy_dataframe(&qqq_df)
-	n := min(spy_df.rows, qqq_df.rows)
+	// SPY and QQQ matched by date
+	symbols := []string{"SPY", "QQQ"}
+	panel, panel_ok, bad := net.read_yahoo_panel(symbols, .Daily, .OneYear, allocator)
+	defer net.yahoo_panel_free(&panel)
+	if !panel_ok {
+		what := "a common date" if bad < 0 else symbols[bad]
+		fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", what))
+		return
+	}
+	n := len(panel.dates)
 	if n < 60 {
 		fail_missing_data(
 			#procedure,
@@ -36,28 +39,18 @@ deep_hedging_portfolio_test :: proc(allocator: mem.Allocator) {
 		)
 		return
 	}
-	// daily log returns of the last n common rows (the same trading days)
-	log_returns :: proc(df: ^w.DataFrame, n: int) -> []f64 {
-		col := w.column(df, "AdjClose")
-		off := df.rows - n
-		r := make([]f64, n - 1)
-		// a missing (null) close counts as no move
-		prev, _ := w.column_at_float(col, off)
-		for i in 1 ..< n {
-			b, null := w.column_at_float(col, off + i)
-			ok := !null && b > 0
-			r[i - 1] = math.ln(b / prev) if ok && prev > 0 else 0
-			if ok {prev = b}
-		}
-		return r
-	}
 	ann_vol :: proc(r: []f64) -> f64 {
 		m, m2 := 0.0, 0.0
 		for x in r {m += x; m2 += x * x}
 		k := f64(len(r))
 		return math.sqrt((m2 - m * m / k) / (k - 1) * 252)
 	}
-	r_spy, r_qqq := log_returns(&spy_df, n), log_returns(&qqq_df, n)
+	// daily log returns of the n common days
+	rets := ts.log_returns(panel.adj_close, 2, allocator) // [day][SPY, QQQ]
+	defer delete(rets, allocator)
+	r_spy, r_qqq := make([]f64, n - 1), make([]f64, n - 1)
+	defer {delete(r_spy); delete(r_qqq)}
+	for i in 0 ..< n - 1 {r_spy[i], r_qqq[i] = rets[i * 2], rets[i * 2 + 1]}
 	corr := fin.correlation(r_spy, r_qqq)
 	sigma1, sigma2 := ann_vol(r_spy), ann_vol(r_qqq)
 	fmt.printf(

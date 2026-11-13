@@ -1,7 +1,6 @@
 package tests
 
 import ts "../wotan/analytics"
-import w "../wotan/core"
 import fin "../wotan/finance"
 import yahoo "../wotan/net"
 import p "../wotan/plot"
@@ -17,34 +16,15 @@ garch_options_test :: proc(allocator: mem.Allocator) {
 
 	// 1. Fetch SPY Data and Fit GARCH
 	fmt.println("Fetching SPY data and fitting GARCH(1,1)...")
-	spy_df, spy_df_ok := yahoo.read_yahoo("SPY", .Daily, .FiveYears, allocator)
-	if !spy_df_ok {fail_missing_data(#procedure, "Yahoo data for SPY"); return}
-	defer w.destroy_dataframe(&spy_df)
+	spy, spy_ok := yahoo.read_yahoo_series("SPY", .Daily, .FiveYears, allocator)
+	if !spy_ok {fail_missing_data(#procedure, "Yahoo data for SPY"); return}
+	defer yahoo.yahoo_series_free(&spy)
 
-	n := spy_df.rows
-	returns := make([]f64, n - 1, main_alloc)
+	returns := ts.log_returns(spy.adj_close, 1, main_alloc)
 	defer delete(returns, main_alloc)
 
-	close_prices := make([]f64, n, main_alloc)
-	defer delete(close_prices, main_alloc)
-
-	for i in 0 ..< n {
-		close_prices[i], _ = w.column_at_float(&spy_df.columns[4], i)
-		if i > 0 {
-			prev_close := close_prices[i - 1]
-			curr_close := close_prices[i]
-			if curr_close / prev_close == 0.0 || prev_close == 0 {
-				continue
-			}
-			returns[i - 1] = math.ln_f64(curr_close / prev_close)
-		}
-	}
-
-	current_price := close_prices[n - 1]
-	if current_price == 0 {
-		fmt.println("Latest Close is 0.0, taking previous as a fallback")
-		current_price = close_prices[n - 2]
-	}
+	// spot level: the latest (split-adjusted) close; the series has no close <= 0
+	current_price := spy.close[len(spy.close) - 1]
 	residuals := ts.extract_residuals(returns, main_alloc)
 	defer delete(residuals, main_alloc)
 

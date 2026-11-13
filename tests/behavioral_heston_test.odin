@@ -1,7 +1,7 @@
 package tests
 
+import ts "../wotan/analytics"
 import bfin "../wotan/behavioral_finance"
-import w "../wotan/core"
 import fin "../wotan/finance"
 import net "../wotan/net"
 import plot "../wotan/plot"
@@ -138,34 +138,22 @@ behavioral_heston_test :: proc(allocator: mem.Allocator) {
 
 	// 1. Fetch Underlying Data for S and Historical Volatility
 	fmt.printf("- Fetching %s historical data...\n", symbol)
-	df, df_ok := net.read_yahoo(symbol, .Daily, .TwoYears, allocator)
-	if !df_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", symbol)); return}
-	defer w.destroy_dataframe(&df)
+	hist, hist_ok := net.read_yahoo_series(symbol, .Daily, .TwoYears, allocator)
+	if !hist_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", symbol)); return}
+	defer net.yahoo_series_free(&hist)
 
-	if df.rows < 10 {
+	if len(hist.close) < 10 {
 		fmt.println("Failed to fetch sufficient historical data.")
 		return
 	}
 
-	close_col := w.column(&df, "Close")
-	n_days := df.rows
-	S, _ := w.column_at_float(close_col, n_days - 1)
+	n_days := len(hist.close)
+	S := hist.close[n_days - 1]
 	fmt.printf("Current Underlying Price (S): $%.2f\n", S)
 
-	// Calculate Historical Volatility
-	returns := make([]f64, n_days, allocator)
-	defer delete(returns, allocator)
-	ret_idx := 0
-	prev_close := 0.0
-	for i in 0 ..< n_days {
-		c, _ := w.column_at_float(close_col, i)
-		if i > 0 && prev_close > 0 {
-			returns[ret_idx] = math.ln_f64(c / prev_close)
-			ret_idx += 1
-		}
-		prev_close = c
-	}
-	valid_returns := returns[:ret_idx]
+	// Calculate Historical Volatility (log returns of the adjusted closes)
+	valid_returns := ts.log_returns(hist.adj_close, 1, allocator)
+	defer delete(valid_returns, allocator)
 	mean_ret := 0.0
 	for ret in valid_returns {mean_ret += ret}
 	if len(valid_returns) > 0 {mean_ret /= f64(len(valid_returns))}

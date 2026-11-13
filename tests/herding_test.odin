@@ -1,5 +1,6 @@
 package tests
 
+import ts "../wotan/analytics"
 import bfin "../wotan/behavioral_finance"
 import net "../wotan/net"
 import "core:fmt"
@@ -351,11 +352,13 @@ herding_test :: proc(allocator: mem.Allocator) {
 		)
 	} else {
 		ND := len(dates) - 1
+		SR := ts.simple_returns(DP, NS) // ND rows, row-major [t * NS + i]
+		defer delete(SR)
 		R := make([][]f64, NS)
 		defer {for r in R {delete(r)}; delete(R)}
 		for i in 0 ..< NS {
 			R[i] = make([]f64, ND)
-			for t in 0 ..< ND {R[i][t] = DP[(t + 1) * NS + i] / DP[t * NS + i] - 1}
+			for t in 0 ..< ND {R[i][t] = SR[t * NS + i]}
 		}
 		d := bfin.cross_sectional_dispersion(R)
 		defer bfin.herding_dispersion_free(&d)

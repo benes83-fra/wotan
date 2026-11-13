@@ -1,7 +1,6 @@
 package tests
 
 import ts "../wotan/analytics"
-import w "../wotan/core"
 import l "../wotan/linalg"
 import ml_fin "../wotan/ml_finance"
 import yahoo "../wotan/net"
@@ -64,61 +63,51 @@ orchestrator_test :: proc(allocator: mem.Allocator) {
 
 	// prices on the dates present for every asset and the VIX
 	symbols := []string{"SPY", "QQQ", "AAPL", "MSFT", "TLT", "^VIX"}
-	maps := make([]map[w.Date]f64, len(symbols))
-	vmaps := make([]map[w.Date]f64, len(symbols)) // traded volume (shares)
-	spy_dates := make([dynamic]w.Date)
-	for sym, k in symbols {
-		df, df_ok := yahoo.read_yahoo(sym, .Daily, .FiveYears, allocator)
-		if !df_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", sym)); return}
-		defer w.destroy_dataframe(&df)
-		if df.rows < 600 {
-			fail_missing_data(
-				#procedure,
-				fmt.tprintf("600 days of Yahoo data for %s (got %d)", sym, df.rows),
-			)
-			return
-		}
-		maps[k] = make(map[w.Date]f64)
-		vmaps[k] = make(map[w.Date]f64)
-		dc, pc, vc := w.column(&df, "Date"), w.column(&df, "AdjClose"), w.column(&df, "Volume")
-		for i in 0 ..< df.rows {
-			d, dn := w.column_at_date(dc, i)
-			p, pn := w.column_at_float(pc, i)
-			if dn || pn || p <= 0 {continue}
-			maps[k][d] = p
-			if v, vn := w.column_at_int(vc, i); !vn {vmaps[k][d] = f64(v)} 	// an Int column
-			if k == 0 {append(&spy_dates, d)}
-		}
+	NS := len(symbols)
+	panel, panel_ok, failed := yahoo.read_yahoo_panel(symbols, .Daily, .FiveYears, allocator)
+	defer yahoo.yahoo_panel_free(&panel)
+	if !panel_ok {
+		what := "Yahoo data shared by the assets and the VIX"
+		if failed >= 0 {what = fmt.tprintf("Yahoo data for %s", symbols[failed])}
+		fail_missing_data(#procedure, what)
+		return
 	}
-	dates := make([dynamic]w.Date)
-	for d in spy_dates {
-		all := true
-		for m in maps {all &&= d in m}
-		if all {append(&dates, d)}
+	if len(panel.dates) < 600 {
+		fail_missing_data(
+			#procedure,
+			fmt.tprintf("600 common days of Yahoo data (got %d)", len(panel.dates)),
+		)
+		return
 	}
-	T := len(dates)
+	T := len(panel.dates)
 	price := make([]f64, T * N)
 	vix := make([]f64, T)
-	for d, t in dates {
-		for i in 0 ..< N {price[t * N + i] = maps[i][d]}
-		vix[t] = maps[N][d] / 100
+	for t in 0 ..< T {
+		for i in 0 ..< N {price[t * N + i] = panel.adj_close[t * NS + i]}
+		vix[t] = panel.adj_close[t * NS + N] / 100
 	}
 	// liquidity known at each close (trailing 20 days): daily vol and ADV per asset, [T, N]
+	// (liquidity_estimates takes close * volume as the dollar volume, so the volume passed
+	// is the panel's dollar volume over the adjusted close)
 	liq_sigma, liq_adv := make([]f64, T * N), make([]f64, T * N)
 	for i in 0 ..< N {
 		pc, vc := make([]f64, T), make([]f64, T)
-		for d, t in dates {pc[t], vc[t] = maps[i][d], vmaps[i][d]}
+		for t in 0 ..< T {
+			pc[t] = panel.adj_close[t * NS + i]
+			vc[t] = panel.dollar_volume[t * NS + i] / pc[t]
+		}
 		s, a := ml_fin.liquidity_estimates(pc, vc, 20)
 		for t in 0 ..< T {liq_sigma[t * N + i], liq_adv[t * N + i] = s[t], a[t]}
 	}
-	// returns from day t-1 to t (row t, t >= 1)
+	// returns from day t-1 to t (row t, t >= 1; row 0 stays 0)
 	ret := make([]f64, T * N)
 	logret := make([]f64, T * N)
-	for t in 1 ..< T {
-		for i in 0 ..< N {
-			ret[t * N + i] = price[t * N + i] / price[(t - 1) * N + i] - 1
-			logret[t * N + i] = math.ln(price[t * N + i] / price[(t - 1) * N + i])
-		}
+	{
+		r := ts.simple_returns(price, N)
+		lr := ts.log_returns(price, N)
+		defer {delete(r); delete(lr)}
+		copy(ret[N:], r)
+		copy(logret[N:], lr)
 	}
 	spy := make([]f64, T)
 	for t in 0 ..< T {spy[t] = logret[t * N]}

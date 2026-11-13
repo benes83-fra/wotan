@@ -1,5 +1,6 @@
 package tests
 
+import ts "../wotan/analytics"
 import ml "../wotan/analytics/ML"
 import bfin "../wotan/behavioral_finance"
 import l "../wotan/linalg"
@@ -1156,11 +1157,13 @@ momentum_test :: proc(allocator: mem.Allocator) {
 		)
 	} else {
 		MM := (len(dates) - 1) / D
+		SR := ts.simple_returns(DP, NS) // len(dates) - 1 rows, row-major [t * NS + i]
+		defer delete(SR)
 		R := make([][]f64, NS)
 		defer free_panel(R)
 		for i in 0 ..< NS {
 			R[i] = make([]f64, MM * D)
-			for t in 0 ..< MM * D {R[i][t] = DP[(t + 1) * NS + i] / DP[t * NS + i] - 1}
+			for t in 0 ..< MM * D {R[i][t] = SR[t * NS + i]}
 		}
 		lm := make([]int, MM + 1)
 		defer delete(lm)

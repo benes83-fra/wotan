@@ -1,6 +1,5 @@
 package tests
 
-import w "../wotan/core"
 import ml_fin "../wotan/ml_finance"
 import net "../wotan/net"
 import "core:fmt"
@@ -12,24 +11,18 @@ import "core:mem"
 cql_real_data_trading_test :: proc(allocator: mem.Allocator) {
 	seed_test(#procedure)
 	fmt.println("\n=== Yahoo Finance Offline CQL Trading Test ===")
-	df, df_ok := net.read_yahoo("AAPL", .Daily, .OneYear, allocator)
-	if !df_ok {fail_missing_data(#procedure, "Yahoo data for AAPL"); return}
-	defer w.destroy_dataframe(&df)
-	if df.rows < 60 {
+	s, s_ok := net.read_yahoo_series("AAPL", .Daily, .OneYear, allocator)
+	if !s_ok {fail_missing_data(#procedure, "Yahoo data for AAPL"); return}
+	defer net.yahoo_series_free(&s)
+	closes := s.adj_close
+	if len(closes) < 60 {
 		fail_missing_data(
 			#procedure,
-			fmt.tprintf("60 days of Yahoo data for AAPL (got %d)", df.rows),
+			fmt.tprintf("60 days of Yahoo data for AAPL (got %d)", len(closes)),
 		)
 		return
 	}
-	col := w.column(&df, "AdjClose")
-	closes := make([dynamic]f64, 0, df.rows, allocator)
-	for i in 0 ..< df.rows {
-		c, is_null := w.column_at_float(col, i)
-		if !is_null && c > 0 {append(&closes, c)}
-	}
 	fmt.printf("Loaded %d adjusted closes\n", len(closes))
-	if len(closes) < 60 {return}
 
 	momentum_rule :: proc(closes: []f64, allocator: mem.Allocator) -> []int {
 		acts := make([]int, len(closes) - 1 - ml_fin.CQL_LAGS, allocator)

@@ -1,6 +1,5 @@
 package tests
 
-import w "../wotan/core"
 import fin "../wotan/finance"
 import net "../wotan/net"
 import "core:fmt"
@@ -22,16 +21,12 @@ exotic_pricing_test :: proc(allocator: mem.Allocator) {
 	chain, chain_ok := fin.fetch_yahoo_options(symbol, allocator)
 	if !chain_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo option chain for %s", symbol)); return}
 
-	df, df_ok := net.read_yahoo(symbol, .Daily, .OneMonth, allocator)
-	if !df_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", symbol)); return}
-	defer w.destroy_dataframe(&df)
+	hist, hist_ok := net.read_yahoo_series(symbol, .Daily, .OneMonth, allocator)
+	if !hist_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", symbol)); return}
+	defer net.yahoo_series_free(&hist)
 
-	last_idx := df.rows - 1
-	spot, _ := w.column_at_float(&df.columns[4], last_idx)
-	if spot == 0.0 {
-		fmt.println("Fall back, also latest Spot is 0, take previous Spot")
-		spot, _ = w.column_at_float(&df.columns[4], last_idx - 1)
-	}
+	// the last day with a close (days without one are left out of the series)
+	spot := hist.close[len(hist.close) - 1]
 	surface := make([dynamic]fin.VolSurfacePoint, 0, allocator)
 	defer delete(surface)
 

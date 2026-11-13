@@ -1,6 +1,5 @@
 package tests
 
-import w "../wotan/core"
 import ml_fin "../wotan/ml_finance"
 import yahoo "../wotan/net"
 import "core:fmt"
@@ -29,27 +28,25 @@ transaction_costs_test :: proc(allocator: mem.Allocator) {
 	seed_test(#procedure)
 	context.allocator = allocator
 	fmt.println("\n=== Transaction costs: SPY momentum, daily vs no-trade band, by capital ===")
-	df, df_ok := yahoo.read_yahoo("SPY", .Daily, .FiveYears, allocator)
-	if !df_ok {fail_missing_data(#procedure, "Yahoo data for SPY"); return}
-	defer w.destroy_dataframe(&df)
-	if df.rows < 600 {
+	spy, spy_ok := yahoo.read_yahoo_series("SPY", .Daily, .FiveYears, allocator)
+	if !spy_ok {fail_missing_data(#procedure, "Yahoo data for SPY"); return}
+	defer yahoo.yahoo_series_free(&spy)
+	if len(spy.adj_close) < 600 {
 		fail_missing_data(
 			#procedure,
-			fmt.tprintf("600 days of Yahoo data for SPY (got %d)", df.rows),
+			fmt.tprintf("600 days of Yahoo data for SPY (got %d)", len(spy.adj_close)),
 		)
 		return
 	}
-	pc, vc := w.column(&df, "AdjClose"), w.column(&df, "Volume")
 	close := make([dynamic]f64)
 	defer delete(close)
 	volume := make([dynamic]f64)
 	defer delete(volume)
-	for i in 0 ..< df.rows {
-		p, pn := w.column_at_float(pc, i)
-		v, vn := w.column_at_int(vc, i) // Volume is an Int column
-		if pn || vn || p <= 0 || v <= 0 {continue}
+	for p, i in spy.adj_close {
+		v := spy.volume[i] // NaN when Yahoo has no volume that day
+		if !(v > 0) {continue}
 		append(&close, p)
-		append(&volume, f64(v))
+		append(&volume, v)
 	}
 	sigma, adv := ml_fin.liquidity_estimates(close[:], volume[:], 20)
 	defer delete(sigma)

@@ -1,6 +1,5 @@
 package tests
 
-import w "../wotan/core"
 import l "../wotan/linalg"
 import ml_finance "../wotan/ml_finance"
 import net "../wotan/net"
@@ -14,13 +13,17 @@ ppo_multi_asset_test :: proc(allocator: mem.Allocator = context.allocator) {
 	seed_test(#procedure)
 	fmt.println("\n=== Multi-Asset PPO Trading Test (SPY vs QQQ) [Optimized 25 Ep] ===")
 
-	spy_df, spy_df_ok := net.read_yahoo("SPY", .Daily, .FiveYears, allocator)
-	if !spy_df_ok {fail_missing_data(#procedure, "Yahoo data for SPY"); return}
-	qqq_df, qqq_df_ok := net.read_yahoo("QQQ", .Daily, .FiveYears, allocator)
-	if !qqq_df_ok {fail_missing_data(#procedure, "Yahoo data for QQQ"); return}
-	defer {w.destroy_dataframe(&spy_df); w.destroy_dataframe(&qqq_df)}
+	// SPY and QQQ matched by date
+	symbols := []string{"SPY", "QQQ"}
+	panel, panel_ok, bad := net.read_yahoo_panel(symbols, .Daily, .FiveYears, allocator)
+	defer net.yahoo_panel_free(&panel)
+	if !panel_ok {
+		what := "a common date" if bad < 0 else symbols[bad]
+		fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", what))
+		return
+	}
 
-	n_days := min(spy_df.rows, qqq_df.rows)
+	n_days := len(panel.dates)
 	n_assets := 2
 	n_indicators := 2 // ✅ Reduced to Log Ret + RSI for faster convergence & less memory
 	window := 5 // ✅ Reduced from 10 to 5. Cuts obs dim from 123 to 63.
@@ -34,16 +37,12 @@ ppo_multi_asset_test :: proc(allocator: mem.Allocator = context.allocator) {
 		delete(qqq_prices, allocator); delete(qqq_vols, allocator)
 	}
 
-	spy_close := w.column(&spy_df, "Close")
-	spy_vol := w.column(&spy_df, "Volume")
-	qqq_close := w.column(&qqq_df, "Close")
-	qqq_vol := w.column(&qqq_df, "Volume")
-
+	// adjusted closes; volume = dollar volume / adjusted close
 	for i in 0 ..< n_days {
-		spy_prices[i], _ = w.column_at_float(spy_close, i)
-		spy_vols[i], _ = w.column_at_numeric(spy_vol, i)
-		qqq_prices[i], _ = w.column_at_float(qqq_close, i)
-		qqq_vols[i], _ = w.column_at_numeric(qqq_vol, i)
+		spy_prices[i] = panel.adj_close[i * 2 + 0]
+		spy_vols[i] = panel.dollar_volume[i * 2 + 0] / spy_prices[i]
+		qqq_prices[i] = panel.adj_close[i * 2 + 1]
+		qqq_vols[i] = panel.dollar_volume[i * 2 + 1] / qqq_prices[i]
 	}
 
 	spy_inds, _ := ml_finance.compute_trading_features(spy_prices, spy_vols, allocator)
@@ -221,13 +220,17 @@ ppo_multi_asset_wf_test :: proc(allocator: mem.Allocator = context.allocator) {
 	fmt.println("======================================================================")
 
 	// 1. Fetch Data
-	spy_df, spy_df_ok := net.read_yahoo("SPY", .Daily, .FiveYears, allocator)
-	if !spy_df_ok {fail_missing_data(#procedure, "Yahoo data for SPY"); return}
-	qqq_df, qqq_df_ok := net.read_yahoo("QQQ", .Daily, .FiveYears, allocator)
-	if !qqq_df_ok {fail_missing_data(#procedure, "Yahoo data for QQQ"); return}
-	defer {w.destroy_dataframe(&spy_df); w.destroy_dataframe(&qqq_df)}
+	// SPY and QQQ matched by date
+	symbols := []string{"SPY", "QQQ"}
+	panel, panel_ok, bad := net.read_yahoo_panel(symbols, .Daily, .FiveYears, allocator)
+	defer net.yahoo_panel_free(&panel)
+	if !panel_ok {
+		what := "a common date" if bad < 0 else symbols[bad]
+		fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", what))
+		return
+	}
 
-	n_days := min(spy_df.rows, qqq_df.rows)
+	n_days := len(panel.dates)
 	if n_days < 400 {
 		fmt.println("ERROR: Not enough data for walk-forward validation.")
 		return
@@ -247,16 +250,12 @@ ppo_multi_asset_wf_test :: proc(allocator: mem.Allocator = context.allocator) {
 		delete(qqq_prices, allocator); delete(qqq_vols, allocator)
 	}
 
-	spy_close := w.column(&spy_df, "Close")
-	spy_vol := w.column(&spy_df, "Volume")
-	qqq_close := w.column(&qqq_df, "Close")
-	qqq_vol := w.column(&qqq_df, "Volume")
-
+	// adjusted closes; volume = dollar volume / adjusted close
 	for i in 0 ..< n_days {
-		spy_prices[i], _ = w.column_at_float(spy_close, i)
-		spy_vols[i], _ = w.column_at_numeric(spy_vol, i)
-		qqq_prices[i], _ = w.column_at_float(qqq_close, i)
-		qqq_vols[i], _ = w.column_at_numeric(qqq_vol, i)
+		spy_prices[i] = panel.adj_close[i * 2 + 0]
+		spy_vols[i] = panel.dollar_volume[i * 2 + 0] / spy_prices[i]
+		qqq_prices[i] = panel.adj_close[i * 2 + 1]
+		qqq_vols[i] = panel.dollar_volume[i * 2 + 1] / qqq_prices[i]
 	}
 
 	spy_inds, _ := ml_finance.compute_trading_features(spy_prices, spy_vols, allocator)

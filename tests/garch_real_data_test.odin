@@ -1,7 +1,6 @@
 package tests
 
 import ts "../wotan/analytics"
-import w "../wotan/core"
 import fin "../wotan/finance"
 import l "../wotan/linalg"
 import yahoo "../wotan/net"
@@ -18,35 +17,20 @@ garch_real_data_test :: proc(allocator: mem.Allocator) {
 
 	// 1. Fetch SPY data (2 years)
 	fmt.println("--- Fetching SPY Data ---")
-	spy_df, spy_df_ok := yahoo.read_yahoo("SPY", .Daily, .TwoYears, allocator)
-	if !spy_df_ok {fail_missing_data(#procedure, "Yahoo data for SPY"); return}
-	defer w.destroy_dataframe(&spy_df)
+	spy, spy_ok := yahoo.read_yahoo_series("SPY", .Daily, .TwoYears, allocator)
+	if !spy_ok {fail_missing_data(#procedure, "Yahoo data for SPY"); return}
+	defer yahoo.yahoo_series_free(&spy)
 
-	fmt.printf("Loaded %d days of SPY data\n", spy_df.rows)
+	fmt.printf("Loaded %d days of SPY data\n", len(spy.adj_close))
 
 	// 2. Compute log returns
 	fmt.println("\n--- Computing Returns ---")
-	n := spy_df.rows
-	returns := make([]f64, n - 1, main_alloc)
+	returns := ts.log_returns(spy.adj_close, 1, main_alloc)
 	defer delete(returns, main_alloc)
 
-	dates := make([]f64, n - 1, main_alloc)
+	dates := make([]f64, len(returns), main_alloc)
 	defer delete(dates, main_alloc)
-
-	for i in 1 ..< n {
-		prev_close, _ := w.column_at_float(&spy_df.columns[4], i - 1)
-		curr_close, _ := w.column_at_float(&spy_df.columns[4], i)
-
-		if curr_close / prev_close == 0 || prev_close == 0 {
-			fmt.printf("Divion by zero detected %f", prev_close)
-			continue
-		}
-
-
-		returns[i - 1] = math.ln_f64(curr_close / prev_close)
-		dates[i - 1] = f64(i)
-	}
-	w.dataframe_pretty_print(&spy_df)
+	for &d, k in dates {d = f64(k + 1)} 	// day index of the return's end
 	// Compute mean and std
 	mean_ret := 0.0
 	for r in returns {
@@ -774,58 +758,29 @@ garch_real_data_test :: proc(allocator: mem.Allocator) {
 
 	// Fetch additional assets for portfolio
 	fmt.println("Fetching additional assets...")
-	qqq_df, qqq_df_ok := yahoo.read_yahoo("QQQ", .Daily, .TwoYears, allocator)
-	if !qqq_df_ok {fail_missing_data(#procedure, "Yahoo data for QQQ"); return}
-	defer w.destroy_dataframe(&qqq_df)
-
-	iwm_df, iwm_df_ok := yahoo.read_yahoo("IWM", .Daily, .TwoYears, allocator)
-	if !iwm_df_ok {fail_missing_data(#procedure, "Yahoo data for IWM"); return}
-	defer w.destroy_dataframe(&iwm_df)
-
-	// Compute returns for all assets
-	n_qqq := qqq_df.rows
-	qqq_returns := make([]f64, n_qqq - 1, main_alloc)
-	defer delete(qqq_returns, main_alloc)
-
-	for i in 1 ..< n_qqq {
-		prev_close, _ := w.column_at_float(&qqq_df.columns[4], i - 1)
-		curr_close, _ := w.column_at_float(&qqq_df.columns[4], i)
-		if curr_close / prev_close == 0 || prev_close == 0 {
-			fmt.printf("Divion by zero detected %f", prev_close)
-			continue
-		}
-		qqq_returns[i - 1] = math.ln_f64(curr_close / prev_close)
+	// SPY, QQQ and IWM matched by date, not paired by row index
+	port_tickers := []string{"SPY", "QQQ", "IWM"}
+	port_panel, port_ok, port_failed := yahoo.read_yahoo_panel(
+		port_tickers,
+		.Daily,
+		.TwoYears,
+		allocator,
+	)
+	defer yahoo.yahoo_panel_free(&port_panel)
+	if !port_ok {
+		what := "common dates of SPY, QQQ and IWM"
+		if port_failed >= 0 {what = fmt.tprintf("Yahoo data for %s", port_tickers[port_failed])}
+		fail_missing_data(#procedure, what)
+		return
 	}
-
-	n_iwm := iwm_df.rows
-	iwm_returns := make([]f64, n_iwm - 1, main_alloc)
-	defer delete(iwm_returns, main_alloc)
-
-	for i in 1 ..< n_iwm {
-		prev_close, _ := w.column_at_float(&iwm_df.columns[4], i - 1)
-		curr_close, _ := w.column_at_float(&iwm_df.columns[4], i)
-		if curr_close / prev_close == 0 || prev_close == 0 {
-			fmt.printf("Divion by zero detected %f", prev_close)
-			continue
-		}
-		iwm_returns[i - 1] = math.ln_f64(curr_close / prev_close)
-	}
-
-	// Align all returns
-	n_common_port := min(len(returns), min(len(qqq_returns), len(iwm_returns)))
-	spy_port := returns[:n_common_port]
-	qqq_port := qqq_returns[:n_common_port]
-	iwm_port := iwm_returns[:n_common_port]
+	port_returns := ts.log_returns(port_panel.adj_close, 3, main_alloc) // [day][SPY, QQQ, IWM]
+	defer delete(port_returns, main_alloc)
+	n_common_port := len(port_returns) / 3
 
 	// Build returns matrix (rows = time, cols = assets)
 	returns_matrix := l.matrix_new(f64, n_common_port, 3, main_alloc)
 	defer l.matrix_free(&returns_matrix)
-
-	for t in 0 ..< n_common_port {
-		returns_matrix.data[t * 3 + 0] = spy_port[t]
-		returns_matrix.data[t * 3 + 1] = qqq_port[t]
-		returns_matrix.data[t * 3 + 2] = iwm_port[t]
-	}
+	copy(returns_matrix.data, port_returns)
 
 	// Compute expected returns
 	expected_ret := fin.expected_returns_from_history(&returns_matrix, main_alloc)

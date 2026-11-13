@@ -1,7 +1,7 @@
 package tests
 
+import ts "../wotan/analytics"
 import ml "../wotan/analytics/ML"
-import w "../wotan/core"
 import fin "../wotan/finance"
 import l "../wotan/linalg"
 import ml_fin "../wotan/ml_finance"
@@ -189,26 +189,22 @@ labeling_test :: proc(allocator: mem.Allocator) {
 
 	// C. fractional differencing on SPY
 	{
-		df, df_ok := yahoo.read_yahoo("SPY", .Daily, .FiveYears, allocator)
-		if !df_ok {fail_missing_data(#procedure, "Yahoo data for SPY"); return}
-		defer w.destroy_dataframe(&df)
-		if df.rows < 600 {
+		spy, spy_ok := yahoo.read_yahoo_series("SPY", .Daily, .FiveYears, allocator)
+		if !spy_ok {fail_missing_data(#procedure, "Yahoo data for SPY"); return}
+		defer yahoo.yahoo_series_free(&spy)
+		if len(spy.adj_close) < 600 {
 			fail_missing_data(
 				#procedure,
-				fmt.tprintf("600 days of Yahoo data for SPY (got %d)", df.rows),
+				fmt.tprintf("600 days of Yahoo data for SPY (got %d)", len(spy.adj_close)),
 			)
 		} else {
-			pc := w.column(&df, "AdjClose")
-			lp := make([dynamic]f64)
+			lp := make([]f64, len(spy.adj_close))
 			defer delete(lp)
-			for i in 0 ..< df.rows {
-				if v, null := w.column_at_float(pc, i); !null && v > 0 {append(&lp, math.ln(v))}
-			}
+			for v, i in spy.adj_close {lp[i] = math.ln(v)}
 			md := ml_fin.frac_diff_min_d(lp[:], 0.05, 1, 1e-4)
 			// d = 1: the log returns
-			r := make([]f64, len(lp) - 1)
+			r := ts.log_returns(spy.adj_close)
 			defer delete(r)
-			for i in 1 ..< len(lp) {r[i - 1] = lp[i] - lp[i - 1]}
 			corr_ret := fin.correlation(lp[1:], r)
 			check(
 				&failures,

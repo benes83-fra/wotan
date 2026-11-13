@@ -1,6 +1,5 @@
 package tests
 
-import w "../wotan/core"
 import fin "../wotan/finance"
 import net "../wotan/net"
 import "core:fmt"
@@ -42,18 +41,17 @@ live_options_calibration_test :: proc(allocator: mem.Allocator) {
 
 	// 2. Fetch current spot price using your existing DataFrame ingestion
 	fmt.println("2. Fetching underlying spot price...")
-	df, df_ok := net.read_yahoo(symbol, .Daily, .OneMonth, allocator)
-	if !df_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", symbol)); return}
-	defer w.destroy_dataframe(&df)
+	hist, hist_ok := net.read_yahoo_series(symbol, .Daily, .OneMonth, allocator)
+	if !hist_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", symbol)); return}
+	defer net.yahoo_series_free(&hist)
 
-	if df.rows == 0 {
+	if len(hist.close) == 0 {
 		fmt.println("⚠️  Failed to fetch spot price. Aborting.")
 		return
 	}
 
-	// Get the last close price (Index 4 is "Close" based on your yahoo_json_to_dataframe)
-	last_idx := df.rows - 1
-	spot, _ := w.column_at_float(&df.columns[4], last_idx)
+	// Get the last close price
+	spot := hist.close[len(hist.close) - 1]
 	fmt.printf("   Live Spot Price: $%.2f\n\n", spot)
 
 

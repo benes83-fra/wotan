@@ -424,6 +424,7 @@ SPY and the VIX move strongly against each other on the same day. Paired by row 
 - **Yahoo's adjusted close on the first day was 0.** Yahoo nests the adjusted closes as `"adjclose":[{"adjclose":[...]}]`, and the array extractor stopped at the first key. The first value it parsed was `{"adjclose":[146.41`, which failed and became 0. `read_yahoo_panel` hid this by dropping prices ≤ 0, but a test that took returns from AdjClose got an infinite first return. The extractor now skips keys whose value is not a flat array.
 - **Only one dividend and one split were read.** The events parser cut the dividends object at the first `}`, which closes the first entry. On five years of SPY it found 1 of 20 dividends; the dividend and split columns now match Yahoo's data.
 - **Missing Yahoo values were 0.** JSON `null` was parsed as 0, so the VIX had a level of 0 on holidays, with the null flag false. Missing values are now nulls in the DataFrame. Several tests paired SPY and the VIX by row index and are now matched by date (section 9.1).
+
 - **The exporters leaked the text of every number and date cell**, and `xlsx_save` leaked a small offsets table. The writers now take the cell texts from a scratch arena that is reset after each row.
 - `yahoo_json_to_dataframe` ignored its allocator, and `read_csv_from_url`, `read_html_from_url` and `read_table_from_url` panicked when a request failed. These three now return `(df, ok)`, and `csv_load` takes an allocator like the other loaders.
 

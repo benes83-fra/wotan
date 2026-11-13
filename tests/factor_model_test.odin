@@ -1,6 +1,6 @@
 package tests
 
-import w "../wotan/core"
+import ts "../wotan/analytics"
 import fin "../wotan/finance"
 import yahoo "../wotan/net"
 import "core:fmt"
@@ -17,44 +17,27 @@ factor_model_test :: proc(allocator: mem.Allocator) {
 	assets := []string{"AAPL", "MSFT", "JPM", "JNJ", "XOM", "PG"}
 	factors := []string{"SPY", "IWM", "VTV", "MTUM"}
 
-	fmt.println("Fetching asset data...")
-	asset_dfs := make([]w.DataFrame, len(assets), main_alloc)
-	defer {
-		for i in 0 ..< len(assets) {
-			w.destroy_dataframe(&asset_dfs[i])
-		}
-		delete(asset_dfs, main_alloc)
+	// Assets and factor proxies in one panel, matched by date
+	fmt.println("Fetching asset and factor proxy data...")
+	tickers := make([]string, len(assets) + len(factors), main_alloc)
+	defer delete(tickers, main_alloc)
+	copy(tickers, assets)
+	copy(tickers[len(assets):], factors)
+	NT := len(tickers)
+
+	panel, panel_ok, failed := yahoo.read_yahoo_panel(tickers, .Daily, .TwoYears, allocator)
+	defer yahoo.yahoo_panel_free(&panel)
+	if !panel_ok {
+		what := "Yahoo data shared by all assets and factors"
+		if failed >= 0 {what = fmt.tprintf("Yahoo data for %s", tickers[failed])}
+		fail_missing_data(#procedure, what)
+		return
 	}
 
-	for ticker, i in assets {
-		yd, yd_ok := yahoo.read_yahoo(ticker, .Daily, .TwoYears, allocator)
-		if !yd_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", ticker)); return}
-		asset_dfs[i] = yd
-	}
-
-	fmt.println("Fetching factor proxy data...")
-	factor_dfs := make([]w.DataFrame, len(factors), main_alloc)
-	defer {
-		for i in 0 ..< len(factors) {
-			w.destroy_dataframe(&factor_dfs[i])
-		}
-		delete(factor_dfs, main_alloc)
-	}
-
-	for ticker, i in factors {
-		yd, yd_ok := yahoo.read_yahoo(ticker, .Daily, .TwoYears, allocator)
-		if !yd_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", ticker)); return}
-		factor_dfs[i] = yd
-	}
-
-	// 2. Compute Log Returns and Align Data
-	min_len := 10000
-	for i in 0 ..< len(assets) {
-		if asset_dfs[i].rows - 1 < min_len {min_len = asset_dfs[i].rows - 1}
-	}
-	for i in 0 ..< len(factors) {
-		if factor_dfs[i].rows - 1 < min_len {min_len = factor_dfs[i].rows - 1}
-	}
+	// 2. Compute Log Returns (adjusted closes) on the common dates
+	panel_returns := ts.log_returns(panel.adj_close, NT, allocator) // [day][ticker]
+	defer delete(panel_returns, allocator)
+	min_len := len(panel.dates) - 1
 
 	if min_len < 50 {
 		fmt.println("Error: Insufficient data for factor model.")
@@ -80,25 +63,13 @@ factor_model_test :: proc(allocator: mem.Allocator) {
 		factors_returns[i] = make([]f64, len(factors), main_alloc)
 	}
 
-	// Populate returns (offset by 1 to align with previous day close)
-	offset := 1
+	// Populate returns (row t is the return from common day t to day t + 1)
 	for t in 0 ..< min_len {
-		idx := t + offset
 		for a in 0 ..< len(assets) {
-			prev_close, _ := w.column_at_float(&asset_dfs[a].columns[4], idx - 1)
-			curr_close, _ := w.column_at_float(&asset_dfs[a].columns[4], idx)
-			if curr_close / prev_close == 0.0 || prev_close == 0 {
-				continue
-			}
-			assets_returns[t][a] = math.ln_f64(curr_close / prev_close)
+			assets_returns[t][a] = panel_returns[t * NT + a]
 		}
 		for f in 0 ..< len(factors) {
-			prev_close, _ := w.column_at_float(&factor_dfs[f].columns[4], idx - 1)
-			curr_close, _ := w.column_at_float(&factor_dfs[f].columns[4], idx)
-			if curr_close / prev_close == 0.0 || prev_close == 0 {
-				continue
-			}
-			factors_returns[t][f] = math.ln_f64(curr_close / prev_close)
+			factors_returns[t][f] = panel_returns[t * NT + len(assets) + f]
 		}
 	}
 

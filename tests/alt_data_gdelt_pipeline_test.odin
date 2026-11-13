@@ -1,5 +1,6 @@
 package tests
 
+import ts "../wotan/analytics"
 import ml "../wotan/analytics/ML"
 import w "../wotan/core"
 import fin "../wotan/finance"
@@ -144,10 +145,10 @@ alt_data_gdelt_pipeline_test :: proc(allocator: mem.Allocator = context.allocato
 	}
 
 	fmt.println("\n2. Fetching Yahoo Finance Price Data...")
-	df_yahoo, df_yahoo_ok := net.read_yahoo(symbol, .Daily, .OneYear, allocator)
-	if !df_yahoo_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", symbol)); return}
-	defer w.destroy_dataframe(&df_yahoo)
-	fmt.printf("Fetched %d rows of price data\n", df_yahoo.rows)
+	yahoo, yahoo_ok := net.read_yahoo_series(symbol, .Daily, .OneYear, allocator)
+	if !yahoo_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", symbol)); return}
+	defer net.yahoo_series_free(&yahoo)
+	fmt.printf("Fetched %d rows of price data\n", len(yahoo.adj_close))
 
 	fmt.println("\n3. Aligning Sentiment with Daily Returns...")
 	n_tone := len(tone_series)
@@ -159,15 +160,14 @@ alt_data_gdelt_pipeline_test :: proc(allocator: mem.Allocator = context.allocato
 	returns_series := make([]f64, n_tone, allocator)
 	defer delete(returns_series, allocator)
 
-	yahoo_rows := df_yahoo.rows
+	// daily_returns[k] is the return from day k to day k + 1
+	daily_returns := ts.simple_returns(yahoo.adj_close, 1, allocator)
+	defer delete(daily_returns, allocator)
+	yahoo_rows := len(yahoo.adj_close)
 	for i in 0 ..< n_tone {
 		yahoo_idx := yahoo_rows - n_tone + i
 		if yahoo_idx > 0 {
-			close_prev, _ := w.column_at_float(w.column(&df_yahoo, "Close"), yahoo_idx - 1)
-			close_curr, _ := w.column_at_float(w.column(&df_yahoo, "Close"), yahoo_idx)
-			if close_prev > 0 {
-				returns_series[i] = (close_curr - close_prev) / close_prev
-			}
+			returns_series[i] = daily_returns[yahoo_idx - 1]
 		}
 	}
 
@@ -422,10 +422,10 @@ alt_data_finnhub_pipeline_test :: proc(allocator: mem.Allocator = context.alloca
 
 	// 3. Fetch Yahoo Finance Price Data
 	fmt.println("\n2. Fetching Yahoo Finance Price Data...")
-	df_yahoo, df_yahoo_ok := net.read_yahoo(symbol, .Daily, .OneYear, allocator)
-	if !df_yahoo_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", symbol)); return}
-	defer w.destroy_dataframe(&df_yahoo)
-	fmt.printf("Fetched %d rows of price data\n", df_yahoo.rows)
+	yahoo, yahoo_ok := net.read_yahoo_series(symbol, .Daily, .OneYear, allocator)
+	if !yahoo_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", symbol)); return}
+	defer net.yahoo_series_free(&yahoo)
+	fmt.printf("Fetched %d rows of price data\n", len(yahoo.adj_close))
 
 	// 4. Align Data (Group sentiment by day and align with daily returns)
 	fmt.println("\n3. Aligning Sentiment with Daily Returns...")

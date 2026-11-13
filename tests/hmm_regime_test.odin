@@ -1,6 +1,6 @@
 package tests
 
-import w "../wotan/core"
+import ts "../wotan/analytics"
 import ml_fin "../wotan/ml_finance"
 import yahoo "../wotan/net"
 import "core:fmt"
@@ -227,19 +227,13 @@ hmm_regime_test :: proc(allocator: mem.Allocator) {
 	main_alloc := context.allocator
 
 	fmt.println("\n--- Fetching Market Data ---")
-	spy_df, spy_df_ok := yahoo.read_yahoo("SPY", .Daily, .FiveYears, allocator)
-	if !spy_df_ok {fail_missing_data(#procedure, "Yahoo data for SPY"); return}
-	defer w.destroy_dataframe(&spy_df)
+	spy, spy_ok := yahoo.read_yahoo_series("SPY", .Daily, .FiveYears, allocator)
+	if !spy_ok {fail_missing_data(#procedure, "Yahoo data for SPY"); return}
+	defer yahoo.yahoo_series_free(&spy)
 
-	num_days := spy_df.rows - 1
-	returns := make([]f64, num_days, main_alloc)
+	returns := ts.log_returns(spy.adj_close, 1, main_alloc)
 	defer delete(returns, main_alloc)
-
-	for i in 1 ..< spy_df.rows {
-		prev_c, _ := w.column_at_float(&spy_df.columns[4], i - 1)
-		curr_c, _ := w.column_at_float(&spy_df.columns[4], i)
-		returns[i - 1] = math.ln_f64(curr_c / prev_c)
-	}
+	num_days := len(returns)
 	fmt.printf("Loaded %d daily returns for SPY.\n", num_days)
 
 	// 1. Initialize and Train HMM (3 States: e.g., Low-Vol Bull, High-Vol Bear, Choppy)

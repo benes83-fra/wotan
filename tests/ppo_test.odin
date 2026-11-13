@@ -1,7 +1,6 @@
 // ===== ./tests/ppo_trading_test.odin =====
 package tests
 
-import w "../wotan/core"
 import l "../wotan/linalg"
 import ml_finance "../wotan/ml_finance"
 import net "../wotan/net"
@@ -110,29 +109,22 @@ ppo_trading_real_data_test :: proc(allocator: mem.Allocator = context.allocator)
 
 	fmt.println("\n[1/4] Fetching real market data from Yahoo Finance...")
 	symbol := "SPY"
-	spy_df, spy_df_ok := net.read_yahoo(symbol, .Daily, .FiveYears, allocator)
-	if !spy_df_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", symbol)); return}
-	defer w.destroy_dataframe(&spy_df)
+	spy, spy_ok := net.read_yahoo_series(symbol, .Daily, .FiveYears, allocator)
+	defer net.yahoo_series_free(&spy)
+	if !spy_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", symbol)); return}
 
-	if spy_df.rows < 100 {
+	if len(spy.dates) < 100 {
 		fmt.println("ERROR: Failed to fetch enough SPY data.")
 		return
 	}
-	fmt.printf("  Fetched %d days of %s data\n", spy_df.rows, symbol)
+	fmt.printf("  Fetched %d days of %s data\n", len(spy.dates), symbol)
 
 	fmt.println("\n[2/4] Extracting prices, volumes, and computing features...")
-	n_days := spy_df.rows
-	close_col := w.column(&spy_df, "Close")
-	volume_col := w.column(&spy_df, "Volume")
-
-	prices := make([]f64, n_days, allocator)
-	volumes := make([]f64, n_days, allocator)
-	defer {delete(prices, allocator); delete(volumes, allocator)}
-
-	for i in 0 ..< n_days {
-		prices[i], _ = w.column_at_float(close_col, i)
-		volumes[i], _ = w.column_at_numeric(volume_col, i)
-	}
+	// adjusted closes; a missing volume counts as 0
+	n_days := len(spy.dates)
+	prices := spy.adj_close
+	volumes := spy.volume
+	for &v in volumes {if math.is_nan(v) {v = 0}}
 
 	// ✅ Use the new centralized feature engineering function
 	indicators, n_indicators := ml_finance.compute_trading_features(prices, volumes, allocator)
@@ -236,23 +228,16 @@ walk_forward_validation_test :: proc(allocator: mem.Allocator = context.allocato
 	fmt.println("    WALK-FORWARD VALIDATION: PPO TRADING AGENT")
 	fmt.println("======================================================================")
 
-	spy_df, spy_df_ok := net.read_yahoo("SPY", .Daily, .FiveYears, allocator)
-	if !spy_df_ok {fail_missing_data(#procedure, "Yahoo data for SPY"); return}
-	defer w.destroy_dataframe(&spy_df)
-	if spy_df.rows < 400 {return}
+	spy, spy_ok := net.read_yahoo_series("SPY", .Daily, .FiveYears, allocator)
+	defer net.yahoo_series_free(&spy)
+	if !spy_ok {fail_missing_data(#procedure, "Yahoo data for SPY"); return}
+	if len(spy.dates) < 400 {return}
 
-	n_days := spy_df.rows
-	close_col := w.column(&spy_df, "Close")
-	volume_col := w.column(&spy_df, "Volume")
-
-	all_prices := make([]f64, n_days, allocator)
-	all_volumes := make([]f64, n_days, allocator)
-	defer {delete(all_prices, allocator); delete(all_volumes, allocator)}
-
-	for i in 0 ..< n_days {
-		all_prices[i], _ = w.column_at_float(close_col, i)
-		all_volumes[i], _ = w.column_at_numeric(volume_col, i)
-	}
+	// adjusted closes; a missing volume counts as 0
+	n_days := len(spy.dates)
+	all_prices := spy.adj_close
+	all_volumes := spy.volume
+	for &v in all_volumes {if math.is_nan(v) {v = 0}}
 
 	indicators, n_indicators := ml_finance.compute_trading_features(
 		all_prices,

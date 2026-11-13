@@ -1,6 +1,5 @@
 package tests
 
-import w "../wotan/core"
 import l "../wotan/linalg"
 import ml_fin "../wotan/ml_finance"
 import yahoo "../wotan/net"
@@ -305,22 +304,18 @@ forecasting_models_test :: proc(allocator: mem.Allocator) {
 
 	// C. SPY log prices
 	{
-		df, df_ok := yahoo.read_yahoo("SPY", .Daily, .FiveYears, allocator)
-		if !df_ok {fail_missing_data(#procedure, "Yahoo data for SPY"); return}
-		defer w.destroy_dataframe(&df)
-		if df.rows < 600 {
+		spy, spy_ok := yahoo.read_yahoo_series("SPY", .Daily, .FiveYears, allocator)
+		if !spy_ok {fail_missing_data(#procedure, "Yahoo data for SPY"); return}
+		defer yahoo.yahoo_series_free(&spy)
+		if len(spy.adj_close) < 600 {
 			fail_missing_data(
 				#procedure,
-				fmt.tprintf("600 days of Yahoo data for SPY (got %d)", df.rows),
+				fmt.tprintf("600 days of Yahoo data for SPY (got %d)", len(spy.adj_close)),
 			)
 		} else {
-			pc := w.column(&df, "AdjClose")
-			lp := make([dynamic]f64)
+			lp := make([]f64, len(spy.adj_close))
 			defer delete(lp)
-			for i in 0 ..< df.rows {
-				if v, null := w.column_at_float(pc, i);
-				   !null && v > 0 {append(&lp, 100 * math.ln(v))}
-			}
+			for v, i in spy.adj_close {lp[i] = 100 * math.ln(v)}
 			IS, HS :: 60, 5
 			cut := len(lp) * 3 / 4
 			Xa, Ya := ml_fin.forecast_windows(lp[:cut], IS, HS)

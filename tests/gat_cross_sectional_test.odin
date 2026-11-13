@@ -1,6 +1,6 @@
 package tests
 
-import w "../wotan/core"
+import ts "../wotan/analytics"
 import l "../wotan/linalg"
 import ml_fin "../wotan/ml_finance"
 import net "../wotan/net"
@@ -158,56 +158,24 @@ gat_real_world_test :: proc(allocator: mem.Allocator) {
 		delete(all_returns, allocator)
 	}
 
-	actual_days := max_days
-	for sym, i in symbols {
-		fmt.printf("  Fetching %s... ", sym)
-		df, df_ok := net.read_yahoo(sym, .Daily, .OneYear, allocator)
-		if !df_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", sym)); return}
-
-		if df.rows == 0 {
-			fmt.println("FAILED (Skipping)")
-			actual_days = 0
-			break
-		}
-		defer w.destroy_dataframe(&df)
-
-		close_col := &df.columns[5] // AdjClose
-		n_rows := df.rows
-		if n_rows < actual_days {
-			actual_days = n_rows
-		}
-
-		// Compute daily returns: (Close[t] - Close[t-1]) / Close[t-1]
-		returns := make([]f64, n_rows, allocator)
-		valid_count := 0
-
-
-		for d in 1 ..< n_rows {
-			prev_close, is_null1 := w.column_at_float(close_col, d - 1)
-			curr_close, is_null2 := w.column_at_float(close_col, d)
-
-			// ✅ FIX: We want values that are NOT null (!is_null)
-			if !is_null1 && !is_null2 && prev_close > 0.0 {
-				returns[d] = (curr_close - prev_close) / prev_close
-				valid_count += 1
-			}
-		}
-
-		all_returns[i] = returns
-		fmt.printf("OK (%d days)\n", n_rows)
-	}
-
-	if actual_days == 0 {
-		fmt.println("Aborting test due to data fetch failure.")
+	// All assets matched by date (only the days every asset has)
+	panel, panel_ok, failed := net.read_yahoo_panel(symbols, .Daily, .OneYear, allocator)
+	defer net.yahoo_panel_free(&panel)
+	if !panel_ok {
+		what := "Yahoo data shared by all assets"
+		if failed >= 0 {what = fmt.tprintf("Yahoo data for %s", symbols[failed])}
+		fail_missing_data(#procedure, what)
 		return
 	}
+	fmt.printf("  OK (%d common days)\n", len(panel.dates))
 
-	// Truncate all returns to the minimum length to ensure perfect alignment
+	// Daily simple returns from the adjusted closes, [day][asset]
+	panel_returns := ts.simple_returns(panel.adj_close, num_assets, allocator)
+	defer delete(panel_returns, allocator)
+	actual_days := min(max_days, len(panel.dates) - 1)
 	for i in 0 ..< num_assets {
-		if len(all_returns[i]) > actual_days {
-			// Just update the logical length, Odin slices handle this
-			all_returns[i] = all_returns[i][:actual_days]
-		}
+		all_returns[i] = make([]f64, actual_days, allocator)
+		for d in 0 ..< actual_days {all_returns[i][d] = panel_returns[d * num_assets + i]}
 	}
 
 	// 3. Build Volatility-Scaled Sliding Window Tensors
@@ -426,44 +394,24 @@ gat_real_world_cv_test :: proc(allocator: mem.Allocator) {
 		delete(all_returns, allocator)
 	}
 
-	actual_days := max_days
-	for sym, i in symbols {
-		fmt.printf("  Fetching %s... ", sym)
-		df, df_ok := net.read_yahoo(sym, .Daily, .OneYear, allocator)
-		if !df_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", sym)); return}
-
-		if df.rows == 0 {
-			fmt.println("FAILED")
-			actual_days = 0
-			break
-		}
-		defer w.destroy_dataframe(&df)
-
-		close_col := &df.columns[5] // AdjClose
-		n_rows := df.rows
-		if n_rows < actual_days {actual_days = n_rows}
-
-		returns := make([]f64, n_rows, allocator)
-		for d in 1 ..< n_rows {
-			prev_close, is_null1 := w.column_at_float(close_col, d - 1)
-			curr_close, is_null2 := w.column_at_float(close_col, d)
-			if !is_null1 && !is_null2 && prev_close > 0.0 {
-				returns[d] = (curr_close - prev_close) / prev_close
-			}
-		}
-		all_returns[i] = returns
-		fmt.printf("OK (%d days)\n", n_rows)
-	}
-
-	if actual_days == 0 {
-		fmt.println("Aborting test due to data fetch failure.")
+	// All assets matched by date (only the days every asset has)
+	panel, panel_ok, failed := net.read_yahoo_panel(symbols, .Daily, .OneYear, allocator)
+	defer net.yahoo_panel_free(&panel)
+	if !panel_ok {
+		what := "Yahoo data shared by all assets"
+		if failed >= 0 {what = fmt.tprintf("Yahoo data for %s", symbols[failed])}
+		fail_missing_data(#procedure, what)
 		return
 	}
+	fmt.printf("  OK (%d common days)\n", len(panel.dates))
 
+	// Daily simple returns from the adjusted closes, [day][asset]
+	panel_returns := ts.simple_returns(panel.adj_close, num_assets, allocator)
+	defer delete(panel_returns, allocator)
+	actual_days := min(max_days, len(panel.dates) - 1)
 	for i in 0 ..< num_assets {
-		if len(all_returns[i]) > actual_days {
-			all_returns[i] = all_returns[i][:actual_days]
-		}
+		all_returns[i] = make([]f64, actual_days, allocator)
+		for d in 0 ..< actual_days {all_returns[i][d] = panel_returns[d * num_assets + i]}
 	}
 
 	num_windows := actual_days - time_steps - 1

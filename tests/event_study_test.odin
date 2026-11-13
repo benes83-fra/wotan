@@ -1,5 +1,6 @@
 package tests
 
+import ts "../wotan/analytics"
 import w "../wotan/core"
 import l "../wotan/linalg"
 import ml_fin "../wotan/ml_finance"
@@ -22,52 +23,26 @@ event_study_test :: proc(allocator: mem.Allocator) {
 	symbol := "AAPL"
 	fmt.printf("Fetching daily data for %s to establish baseline returns...\n", symbol)
 
-	df, df_ok := net.read_yahoo(symbol, .Daily, .TwoYears, allocator)
-	if !df_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", symbol)); return}
-	defer w.destroy_dataframe(&df)
+	s, s_ok := net.read_yahoo_series(symbol, .Daily, .TwoYears, allocator)
+	defer net.yahoo_series_free(&s)
+	if !s_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", symbol)); return}
 
-	if df.rows == 0 {
-		fmt.println("Failed to fetch data. Aborting.")
-		return
-	}
-
-	close_col := &df.columns[5] // AdjClose
-	date_col := &df.columns[0] // Date (Type: .Date)
-
-	all_dates := make([]string, df.rows, allocator)
-	returns := make([]f64, df.rows, allocator)
+	// Simple returns from the adjusted closes; returns[i] is the return into day i + 1,
+	// so it is paired with that day's date
+	returns := ts.simple_returns(s.adj_close, 1, allocator)
+	all_dates := make([]string, len(returns), allocator)
 	defer {
+		for d in all_dates {delete(d, allocator)}
 		delete(all_dates, allocator)
 		delete(returns, allocator)
 	}
 
-	fmt.println("Extracting data using w.column_at_date...")
-
-	for i in 0 ..< df.rows {
-		// ✅ FIX: Use column_at_date (or column_at_i64) instead of column_at_string
-		date_val, is_null := w.column_at_date(date_col, i)
-		if is_null {
-			all_dates[i] = ""
-			continue
-		}
-
-		// Format the date value to a string.
-		// If w.column_at_date returns an i64 (Unix timestamp), this formats it.
-		// If it returns a w.Date struct, you may need to use w.date_to_string(date_val) here.
-		date_str := w.date_to_string(date_val, allocator = allocator)
-
-		all_dates[i] = date_str
-
-		if i > 0 {
-			prev_close, _ := w.column_at_float(close_col, i - 1)
-			curr_close, _ := w.column_at_float(close_col, i)
-			if prev_close > 0.0 {
-				returns[i] = (curr_close - prev_close) / prev_close
-			}
-		}
+	fmt.println("Extracting dates and returns...")
+	for i in 0 ..< len(returns) {
+		all_dates[i] = w.date_to_string(s.dates[i + 1], allocator)
 	}
 
-	fmt.printf("Successfully loaded %d days of data.\n", df.rows)
+	fmt.printf("Successfully loaded %d days of data.\n", len(s.dates))
 
 	fmt.println("\nSimulating NLP Sentiment Analysis on Earnings Dates...")
 
@@ -195,50 +170,25 @@ event_study_nlp_test :: proc(allocator: mem.Allocator) {
 	symbol := "AAPL"
 	fmt.printf("Fetching daily data for %s to establish baseline returns...\n", symbol)
 
-	df, df_ok := net.read_yahoo(symbol, .Daily, .TwoYears, allocator)
-	if !df_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", symbol)); return}
-	defer w.destroy_dataframe(&df)
+	s, s_ok := net.read_yahoo_series(symbol, .Daily, .TwoYears, allocator)
+	defer net.yahoo_series_free(&s)
+	if !s_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", symbol)); return}
 
-	if df.rows == 0 {
-		fmt.println("Failed to fetch data. Aborting.")
-		return
-	}
-
-	close_col := &df.columns[5] // AdjClose
-	date_col := &df.columns[0] // Date
-
-	all_dates := make([]string, df.rows, allocator)
-	returns := make([]f64, df.rows, allocator)
+	// Simple returns from the adjusted closes; returns[i] is the return into day i + 1,
+	// so it is paired with that day's date
+	returns := ts.simple_returns(s.adj_close, 1, allocator)
+	all_dates := make([]string, len(returns), allocator)
 	defer {
-		// Free the strings we allocated with fmt.aprintf
-		for i in 0 ..< df.rows {
-			if len(all_dates[i]) > 0 {
-				delete(all_dates[i], allocator)
-			}
-		}
+		for d in all_dates {delete(d, allocator)}
 		delete(all_dates, allocator)
 		delete(returns, allocator)
 	}
 
-	fmt.println("Extracting data using w.column_at_date...")
-	for i in 0 ..< df.rows {
-		date_val, is_null := w.column_at_date(date_col, i)
-		if is_null {
-			all_dates[i] = ""
-			continue
-		}
-		// Memory-safe string allocation
-		all_dates[i] = w.date_to_string(date_val, allocator)
-
-		if i > 0 {
-			prev_close, _ := w.column_at_float(close_col, i - 1)
-			curr_close, _ := w.column_at_float(close_col, i)
-			if prev_close > 0.0 {
-				returns[i] = (curr_close - prev_close) / prev_close
-			}
-		}
+	fmt.println("Extracting dates and returns...")
+	for i in 0 ..< len(returns) {
+		all_dates[i] = w.date_to_string(s.dates[i + 1], allocator)
 	}
-	fmt.printf("Successfully loaded %d days of data.\n", df.rows)
+	fmt.printf("Successfully loaded %d days of data.\n", len(s.dates))
 
 	// ========================================================================
 	// 1. Initialize FinBERT Sentiment Analyzer
@@ -393,48 +343,25 @@ event_study_tokenizer_nlp_test :: proc(allocator: mem.Allocator) {
 	symbol := "AAPL"
 	fmt.printf("Fetching daily data for %s to establish baseline returns...\n", symbol)
 
-	df, df_ok := net.read_yahoo(symbol, .Daily, .TwoYears, allocator)
-	if !df_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", symbol)); return}
-	defer w.destroy_dataframe(&df)
+	s, s_ok := net.read_yahoo_series(symbol, .Daily, .TwoYears, allocator)
+	defer net.yahoo_series_free(&s)
+	if !s_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", symbol)); return}
 
-	if df.rows == 0 {
-		fmt.println("Failed to fetch data. Aborting.")
-		return
-	}
-
-	close_col := &df.columns[5] // AdjClose
-	date_col := &df.columns[0] // Date
-
-	all_dates := make([]string, df.rows, allocator)
-	returns := make([]f64, df.rows, allocator)
+	// Simple returns from the adjusted closes; returns[i] is the return into day i + 1,
+	// so it is paired with that day's date
+	returns := ts.simple_returns(s.adj_close, 1, allocator)
+	all_dates := make([]string, len(returns), allocator)
 	defer {
-		for i in 0 ..< df.rows {
-			if len(all_dates[i]) > 0 {
-				delete(all_dates[i], allocator)
-			}
-		}
+		for d in all_dates {delete(d, allocator)}
 		delete(all_dates, allocator)
 		delete(returns, allocator)
 	}
 
-	fmt.println("Extracting data using w.column_at_date...")
-	for i in 0 ..< df.rows {
-		date_val, is_null := w.column_at_date(date_col, i)
-		if is_null {
-			all_dates[i] = ""
-			continue
-		}
-		all_dates[i] = w.date_to_string(date_val, allocator)
-
-		if i > 0 {
-			prev_close, _ := w.column_at_float(close_col, i - 1)
-			curr_close, _ := w.column_at_float(close_col, i)
-			if prev_close > 0.0 {
-				returns[i] = (curr_close - prev_close) / prev_close
-			}
-		}
+	fmt.println("Extracting dates and returns...")
+	for i in 0 ..< len(returns) {
+		all_dates[i] = w.date_to_string(s.dates[i + 1], allocator)
 	}
-	fmt.printf("Successfully loaded %d days of data.\n", df.rows)
+	fmt.printf("Successfully loaded %d days of data.\n", len(s.dates))
 
 	// ========================================================================
 	// 1. Fetch or Load Real WordPiece Vocabulary

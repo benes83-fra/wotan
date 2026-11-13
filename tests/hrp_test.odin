@@ -1,6 +1,6 @@
 package tests
 
-import w "../wotan/core"
+import ts "../wotan/analytics"
 import l "../wotan/linalg"
 import ml_fin "../wotan/ml_finance"
 import yahoo "../wotan/net"
@@ -18,39 +18,23 @@ hrp_test :: proc(allocator: mem.Allocator) {
 	n_assets := len(tickers)
 
 	fmt.println("\n--- Fetching Market Data ---")
-	dfs := make([]w.DataFrame, n_assets, main_alloc)
-	defer {
-		for i in 0 ..< n_assets {w.destroy_dataframe(&dfs[i])}
-		delete(dfs, main_alloc)
+	// All tickers matched by date (only the days every ticker has)
+	panel, panel_ok, failed := yahoo.read_yahoo_panel(tickers, .Daily, .TwoYears, allocator)
+	defer yahoo.yahoo_panel_free(&panel)
+	if !panel_ok {
+		what := "Yahoo data shared by all tickers"
+		if failed >= 0 {what = fmt.tprintf("Yahoo data for %s", tickers[failed])}
+		fail_missing_data(#procedure, what)
+		return
 	}
+	fmt.printf("Loaded %d common days for %d tickers\n", len(panel.dates), n_assets)
 
-	for i in 0 ..< n_assets {
-		yd, yd_ok := yahoo.read_yahoo(tickers[i], .Daily, .TwoYears, allocator)
-		if !yd_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", tickers[i])); return}
-		dfs[i] = yd
-		fmt.printf("Loaded %d days for %s\n", dfs[i].rows, tickers[i])
-	}
+	num_days := len(panel.dates) - 1
 
-	// Align lengths
-	n_common := dfs[0].rows
-	for i in 1 ..< n_assets {
-		if dfs[i].rows < n_common {n_common = dfs[i].rows}
-	}
-	num_days := n_common - 1
-
-	// 2. Compute Returns Matrix [T, N]
-	returns_flat := make([]f64, num_days * n_assets, main_alloc)
+	// 2. Compute Returns Matrix [T, N] (log returns of the adjusted closes;
+	// linalg expects row-major [T, N])
+	returns_flat := ts.log_returns(panel.adj_close, n_assets, main_alloc)
 	defer delete(returns_flat, main_alloc)
-
-	for d in 1 ..< n_common {
-		for i in 0 ..< n_assets {
-			prev_c, _ := w.column_at_float(&dfs[i].columns[4], d - 1)
-			curr_c, _ := w.column_at_float(&dfs[i].columns[4], d)
-			ret := math.ln_f64(curr_c / prev_c)
-			// linalg expects row-major [T, N]
-			returns_flat[(d - 1) * n_assets + i] = ret
-		}
-	}
 
 	returns_mat := l.matrix_from_flat(returns_flat, num_days, n_assets, main_alloc)
 	defer l.matrix_free(&returns_mat)

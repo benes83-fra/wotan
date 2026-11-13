@@ -1,7 +1,6 @@
 package tests
 
 import ml "../wotan/analytics/ML"
-import w "../wotan/core"
 import l "../wotan/linalg"
 import ml_fin "../wotan/ml_finance"
 import yahoo "../wotan/net"
@@ -82,21 +81,16 @@ purged_cv_test :: proc(allocator: mem.Allocator) {
 
 	// B. CPCV paths on SPY
 	{
-		df, df_ok := yahoo.read_yahoo("SPY", .Daily, .FiveYears, allocator)
-		if !df_ok {fail_missing_data(#procedure, "Yahoo data for SPY"); return}
-		defer w.destroy_dataframe(&df)
-		if df.rows < 600 {
+		spy, spy_ok := yahoo.read_yahoo_series("SPY", .Daily, .FiveYears, allocator)
+		if !spy_ok {fail_missing_data(#procedure, "Yahoo data for SPY"); return}
+		defer yahoo.yahoo_series_free(&spy)
+		if len(spy.adj_close) < 600 {
 			fail_missing_data(
 				#procedure,
-				fmt.tprintf("600 days of Yahoo data for SPY (got %d)", df.rows),
+				fmt.tprintf("600 days of Yahoo data for SPY (got %d)", len(spy.adj_close)),
 			)
 		} else {
-			pc := w.column(&df, "AdjClose")
-			px := make([dynamic]f64)
-			defer delete(px)
-			for i in 0 ..< df.rows {
-				if p, null := w.column_at_float(pc, i); !null && p > 0 {append(&px, p)}
-			}
+			px := spy.adj_close
 			lookbacks := []int{5, 10, 20, 40, 60, 120, 250}
 			WARM :: 250
 			n := len(px) - 1 - WARM // sample i: decision at the close of day WARM + i, earns the next day

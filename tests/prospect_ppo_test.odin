@@ -1,6 +1,5 @@
 package tests
 
-import w "../wotan/core"
 import l "../wotan/linalg"
 import ml_finance "../wotan/ml_finance"
 import net "../wotan/net"
@@ -32,22 +31,15 @@ prospect_ppo_test :: proc(allocator: mem.Allocator) {
 
 	// 1. Fetch Data
 	fmt.println("- Fetching Market Data (AAPL) -")
-	df, df_ok := net.read_yahoo("AAPL", .Daily, .TwoYears, allocator)
-	if !df_ok {fail_missing_data(#procedure, "Yahoo data for AAPL"); return}
-	defer w.destroy_dataframe(&df)
+	series, series_ok := net.read_yahoo_series("AAPL", .Daily, .TwoYears, allocator)
+	defer net.yahoo_series_free(&series)
+	if !series_ok {fail_missing_data(#procedure, "Yahoo data for AAPL"); return}
 
-	n_days := df.rows - 1
-	prices := make([]f64, n_days, allocator)
-	volumes := make([]f64, n_days, allocator)
-	defer {delete(prices, allocator); delete(volumes, allocator)}
-
-	close_col := w.column(&df, "Close")
-	volume_col := w.column(&df, "Volume")
-
-	for i in 0 ..< n_days {
-		prices[i], _ = w.column_at_float(close_col, i)
-		volumes[i], _ = w.column_at_numeric(volume_col, i)
-	}
+	// adjusted closes; a missing volume counts as 0
+	n_days := len(series.dates)
+	prices := series.adj_close
+	volumes := series.volume
+	for &v in volumes {if math.is_nan(v) {v = 0}}
 
 	indicators, n_indicators := ml_finance.compute_trading_features(prices, volumes, allocator)
 	defer delete(indicators, allocator)

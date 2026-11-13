@@ -1,7 +1,7 @@
 // tests/deep_hedging_real_data_test.odin
 package tests
 
-import w "../wotan/core"
+import ts "../wotan/analytics"
 import fin "../wotan/finance"
 import l "../wotan/linalg"
 import ml_fin "../wotan/ml_finance"
@@ -28,18 +28,17 @@ deep_hedging_real_data_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("Fetching real market data for %s...\n", symbol)
 
 	// Fetch historical price data
-	df, df_ok := net.read_yahoo(symbol, .Daily, .OneYear, allocator)
-	if !df_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", symbol)); return}
-	defer w.destroy_dataframe(&df)
+	hist, hist_ok := net.read_yahoo_series(symbol, .Daily, .OneYear, allocator)
+	if !hist_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo data for %s", symbol)); return}
+	defer net.yahoo_series_free(&hist)
 
-	if df.rows == 0 {
+	if len(hist.close) == 0 {
 		fmt.println("ERROR: Failed to fetch historical data")
 		return
 	}
 
 	// Get current spot price
-	last_idx := df.rows - 1
-	spot, _ := w.column_at_float(w.column(&df, "Close"), last_idx)
+	spot := hist.close[len(hist.close) - 1]
 	fmt.printf("Current Spot Price: $%.2f\n", spot)
 
 	// Fetch options chain
@@ -100,24 +99,9 @@ deep_hedging_real_data_test :: proc(allocator: mem.Allocator) {
 	// ========================================================================
 	fmt.println("\nCalculating historical volatility...")
 
-	// Extract closing prices
-	n_days := df.rows
-	prices := make([]f64, n_days, allocator)
-	defer delete(prices, allocator)
-
-	for i in 0 ..< n_days {
-		prices[i], _ = w.column_at_float(w.column(&df, "AdjClose"), i)
-	}
-
-	// Calculate log returns
-	returns := make([]f64, n_days - 1, allocator)
+	// Calculate log returns of the adjusted closes
+	returns := ts.log_returns(hist.adj_close, 1, allocator)
 	defer delete(returns, allocator)
-
-	for i in 1 ..< n_days {
-		// a missing (null) close counts as no move
-		returns[i - 1] =
-			math.ln(prices[i] / prices[i - 1]) if prices[i] > 0 && prices[i - 1] > 0 else 0
-	}
 
 	// Calculate historical volatility (annualized)
 	mean_ret := 0.0

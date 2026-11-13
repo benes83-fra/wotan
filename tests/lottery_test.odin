@@ -1,5 +1,6 @@
 package tests
 
+import ts "../wotan/analytics"
 import bfin "../wotan/behavioral_finance"
 import net "../wotan/net"
 import "core:fmt"
@@ -335,10 +336,12 @@ lottery_test :: proc(allocator: mem.Allocator) {
 	} else {
 		ND := len(dates) - 1
 		MM := ND / D
+		SR := ts.simple_returns(DP, NS) // ND rows, row-major [t * NS + i]
+		defer delete(SR)
 		R := make([][]f64, NS)
 		for i in 0 ..< NS {
 			R[i] = make([]f64, MM * D)
-			for t in 0 ..< MM * D {R[i][t] = DP[(t + 1) * NS + i] / DP[t * NS + i] - 1}
+			for t in 0 ..< MM * D {R[i][t] = SR[t * NS + i]}
 		}
 		lm := make([]int, MM + 1)
 		for k in 0 ..= MM {lm[k] = D * k}

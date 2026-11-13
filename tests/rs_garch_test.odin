@@ -1,7 +1,6 @@
 package tests
 
 import ts "../wotan/analytics"
-import w "../wotan/core"
 import yahoo "../wotan/net"
 import p "../wotan/plot"
 import "core:fmt"
@@ -120,26 +119,16 @@ rs_garch_test :: proc(allocator: mem.Allocator) {
 
 	// 1. Fetch Data
 	fmt.println("Fetching SPY data...")
-	spy_df, spy_df_ok := yahoo.read_yahoo("SPY", .Daily, .TwoYears, allocator)
-	if !spy_df_ok {fail_missing_data(#procedure, "Yahoo data for SPY"); return}
-	defer w.destroy_dataframe(&spy_df)
+	spy, spy_ok := yahoo.read_yahoo_series("SPY", .Daily, .TwoYears, allocator)
+	if !spy_ok {fail_missing_data(#procedure, "Yahoo data for SPY"); return}
+	defer yahoo.yahoo_series_free(&spy)
 
-	n := spy_df.rows
-	returns := make([]f64, n - 1, main_alloc)
+	returns := ts.log_returns(spy.adj_close, 1, main_alloc)
 	defer delete(returns, main_alloc)
 
-	dates := make([]f64, n - 1, main_alloc)
+	dates := make([]f64, len(returns), main_alloc)
 	defer delete(dates, main_alloc)
-
-	for i in 1 ..< n {
-		prev_close, _ := w.column_at_float(&spy_df.columns[4], i - 1)
-		curr_close, _ := w.column_at_float(&spy_df.columns[4], i)
-		if curr_close / prev_close == 0.0 || prev_close == 0 {
-			continue
-		}
-		returns[i - 1] = math.ln_f64(curr_close / prev_close)
-		dates[i - 1] = f64(i)
-	}
+	for &d, k in dates {d = f64(k + 1)} // day index of the return's end
 
 	// 2. Fit RS-GARCH
 	fmt.println("Fitting Regime-Switching GARCH (2 Regimes)...")
