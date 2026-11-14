@@ -168,8 +168,8 @@ extract_numeric_matrix :: proc(
 
 		for r in 0 ..< rows {
 			if w.is_null(col, r) {
-				// Convention: nulls become 0 (biases mean/covariance; drop null rows first if that matters)
-				out[r][c_idx] = 0
+				// a null is missing, not 0: NaN (drop or fill null rows first)
+				out[r][c_idx] = math.nan_f64()
 				continue
 			}
 			// read by the column's type (column_at_float on an Int column reinterprets the bits)
@@ -270,7 +270,7 @@ extract_cov_matrix_row :: proc(
 
 		// Mirror the entry: some producers (ewm_cov_matrix) only emit i <= j
 		v, is_null := w.column_at_float(col_cov, idx)
-		if is_null {v = 0}
+		if is_null {v = math.nan_f64()} 	// an undefined covariance is missing, not 0
 		out[i_idx][j_idx] = v
 		out[j_idx][i_idx] = v
 	}

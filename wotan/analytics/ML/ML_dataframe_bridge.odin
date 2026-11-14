@@ -3,6 +3,7 @@ package ML
 import w "../../core"
 import l "../../linalg"
 import "core:fmt"
+import "core:math"
 import "core:mem"
 import "core:strings"
 
@@ -87,21 +88,21 @@ prepare_dataset :: proc(
 		case .Float:
 			v, is_null := w.column_at_float(target_col_ptr, i)
 			if is_null {
-				y[i] = 0.0
+				y[i] = math.nan_f64()
 			} else {
 				y[i] = v
 			}
 		case .Int:
 			v, is_null := w.column_at_int(target_col_ptr, i)
 			if is_null {
-				y[i] = 0.0
+				y[i] = math.nan_f64()
 			} else {
 				y[i] = f64(v)
 			}
 		case .Bool:
 			v, is_null := w.column_at_bool(target_col_ptr, i)
 			if is_null {
-				y[i] = 0.0
+				y[i] = math.nan_f64()
 			} else if v {
 				y[i] = 1.0
 			} else {
@@ -129,7 +130,7 @@ prepare_dataset :: proc(
 			for i in 0 ..< n_rows {
 				v, is_null := w.column_at_float(col, i)
 				if is_null {
-					X.data[i * n_features + feat_idx] = 0.0
+					X.data[i * n_features + feat_idx] = math.nan_f64()
 				} else {
 					X.data[i * n_features + feat_idx] = v
 				}
@@ -138,7 +139,7 @@ prepare_dataset :: proc(
 			for i in 0 ..< n_rows {
 				v, is_null := w.column_at_int(col, i)
 				if is_null {
-					X.data[i * n_features + feat_idx] = 0.0
+					X.data[i * n_features + feat_idx] = math.nan_f64()
 				} else {
 					X.data[i * n_features + feat_idx] = f64(v)
 				}
@@ -147,7 +148,7 @@ prepare_dataset :: proc(
 			for i in 0 ..< n_rows {
 				v, is_null := w.column_at_bool(col, i)
 				if is_null {
-					X.data[i * n_features + feat_idx] = 0.0
+					X.data[i * n_features + feat_idx] = math.nan_f64()
 				} else if v {
 					X.data[i * n_features + feat_idx] = 1.0
 				} else {
@@ -254,21 +255,21 @@ transform_dataset :: proc(
 				case .Float:
 					v, is_null := w.column_at_float(target_col_ptr, i)
 					if is_null {
-						y[i] = 0.0
+						y[i] = math.nan_f64()
 					} else {
 						y[i] = v
 					}
 				case .Int:
 					v, is_null := w.column_at_int(target_col_ptr, i)
 					if is_null {
-						y[i] = 0.0
+						y[i] = math.nan_f64()
 					} else {
 						y[i] = f64(v)
 					}
 				case .Bool:
 					v, is_null := w.column_at_bool(target_col_ptr, i)
 					if is_null {
-						y[i] = 0.0
+						y[i] = math.nan_f64()
 					} else if v {
 						y[i] = 1.0
 					} else {
@@ -313,7 +314,7 @@ transform_dataset :: proc(
 				for i in 0 ..< n_rows {
 					v, is_null := w.column_at_float(col, i)
 					if is_null {
-						X.data[i * n_features + feat_idx] = 0.0
+						X.data[i * n_features + feat_idx] = math.nan_f64()
 					} else {
 						X.data[i * n_features + feat_idx] = v
 					}
@@ -322,7 +323,7 @@ transform_dataset :: proc(
 				for i in 0 ..< n_rows {
 					v, is_null := w.column_at_int(col, i)
 					if is_null {
-						X.data[i * n_features + feat_idx] = 0.0
+						X.data[i * n_features + feat_idx] = math.nan_f64()
 					} else {
 						X.data[i * n_features + feat_idx] = f64(v)
 					}
@@ -331,7 +332,7 @@ transform_dataset :: proc(
 				for i in 0 ..< n_rows {
 					v, is_null := w.column_at_bool(col, i)
 					if is_null {
-						X.data[i * n_features + feat_idx] = 0.0
+						X.data[i * n_features + feat_idx] = math.nan_f64()
 					} else if v {
 						X.data[i * n_features + feat_idx] = 1.0
 					} else {

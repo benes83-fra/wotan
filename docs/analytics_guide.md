@@ -284,9 +284,9 @@ explained: 0.9632 0.0368
 
 `extract_numeric_matrix` returns a `[][]f64` (one slice per row), the format that `pca_transform`, `pca_inverse_transform` and `covariance_matrix` use. Free it with `destroy_matrix`. `pca_transform` subtracts the fitted mean; `pca_inverse_transform` adds it back and also accepts scores that keep only the first k components.
 
-`pca_dataframe` and `extract_numeric_matrix` accept `Float`, `Int` and `Bool` columns (`Bool` as 0 and 1). A null cell is read as 0, which biases the mean and covariance, so drop rows with nulls first.
+`pca_dataframe` and `extract_numeric_matrix` accept `Float`, `Int` and `Bool` columns (`Bool` as 0 and 1). A null cell is read as NaN, which makes the mean, the covariance and every component NaN, so drop rows with nulls first.
 
-**Rolling and EWM versions.** `rolling_cov_matrix` computes the covariance of every pair of columns over a rolling window. It returns a long DataFrame with the columns `row`, `col_i`, `col_j` and `cov`; `extract_cov_matrix_row` turns one row back into a k × k matrix. `rolling_pca` runs a PCA for every row and returns one `PCAResult` per row, empty while the window is not full. `ewm_pca_last` runs a PCA on the EWM covariance at the last row:
+**Rolling and EWM versions.** `rolling_cov_matrix` computes the covariance of every pair of columns over a rolling window. It returns a long DataFrame with the columns `row`, `col_i`, `col_j` and `cov`; `extract_cov_matrix_row` turns one row back into a k × k matrix; a null covariance (a row before `min_periods`) becomes NaN. `rolling_pca` runs a PCA for every row and returns one `PCAResult` per row, empty while the window is not full. `ewm_pca_last` runs a PCA on the EWM covariance at the last row:
 
 ```odin
 cov := ts.rolling_cov_matrix(&df, cols, 5, 5)

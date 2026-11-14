@@ -765,7 +765,7 @@ The loaded layers are the first two linear layers and the two ReLUs. A layer wit
 5. **Use a no-grad scope for inference** (`graph_begin(&scope, no_grad = true)`). It records no graph, and `graph_end` frees every output. The KV-cached GPT forward requires one. Copy out what you need, such as logits or the chosen token, before `graph_end`.
 6. **Constant inputs are handled for you.** Forward passes create constant inputs: position ids, zero states, masks and the positional encoding. Inside a scope they live in the scope's arena. Without a scope they belong to the graph and are freed with it.
 
-**Caveat: frozen leading layers without a scope.** An op output needs a gradient only if one of its inputs does. When the first layers of a model are frozen and the input is data, those layers' outputs need no gradient, and the tensor package does not link them into the graph. Section 11 of the tensor guide calls these constant-only chains. `tensor_free_graph` therefore leaves these outputs behind, one set per step. A graph scope frees them:
+**Frozen leading layers.** An op output needs a gradient only if one of its inputs does. When the first layers of a model are frozen and the input is data, those layers' outputs need no gradient, and the tensor package does not link them into the graph (section 11 of the tensor guide calls these constant-only chains). `sequential_forward`, `gpt_model_forward` and `bert_model_forward` take care of them outside a scope: they record the constant intermediates of the pass, hand the ones the graph reads to the graph, and free the rest. So `tensor_free_graph` and a scope both leave nothing behind:
 
 ```odin
 rand.reset(13)
@@ -796,11 +796,16 @@ for _ in 0 ..< 3 {
 fmt.println("graph scope: tensors left behind:", live() - start)
 ```
 ```
-tensor_free_graph: tensors left behind: 9
+tensor_free_graph: tensors left behind: 0
 graph scope: tensors left behind: 0
 ```
 
-The 9 tensors are the matrix product, the bias addition and the ReLU of the frozen first layer, in each of the 3 steps. This example deliberately leaks those 9 tensors. Layers frozen later in the model (for example GPT blocks after a trainable embedding) are not affected, because their inputs need gradients.
+Two consequences:
+
+- **The output of a forward pass is yours.** Everything else the pass made is freed or belongs to the graph. With every layer frozen, the output is a constant: free it with `tensor_free`.
+- **Cache features with `tensor_detach`.** To compute the features of a frozen model once and reuse them in every step, detach them: `feats := t.tensor_detach(out)`, then `t.tensor_free(out)`. The copy is a leaf, so `tensor_free_graph` keeps it. An op output (such as `out` itself) that a trainable layer reads is part of that step's graph and is freed with it.
+
+Code that calls layer forwards itself, such as a custom model built from `linear_forward`, can record its pass the same way with `t.constant_record_begin()` and `t.constant_record_end(out)`.
 
 ## 12. A complete example
 

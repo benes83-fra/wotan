@@ -479,7 +479,28 @@ t.tensor_free_graph(loss)
 
 Three pitfalls:
 
-- **Constant-only op chains are not linked.** An op records its inputs only when its output requires gradients. If no input of a chain requires gradients, `tensor_free_graph` finds nothing to free and the intermediate outputs leak. Free each of them with `tensor_free`, or run the computation in a no-grad scope (below).
+- **Constant-only op chains are not linked.** An op records its inputs only when its output requires gradients. If no input of a chain requires gradients, `tensor_free_graph` finds nothing to free and the intermediate outputs leak. Run such code in a graph scope (below), or record it: between `constant_record_begin()` and `constant_record_end(results...)` every op output without gradient is noted. At the end, the ones that an op with gradient reads are handed to that graph (`owned_by_graph`), and the rest are freed, except the results you pass to `constant_record_end`. The nn model forwards record themselves.
+
+  ```odin
+  W := from_values({0.5, -0.3, 0.2, 0.8}, 2, 2) // frozen: no gradient
+  V := from_values({0.1, 0.4}, 2, 1, requires_grad = true)
+  start := live()
+  t.constant_record_begin()
+  h := t.tensor_tanh(t.tensor_matmul(X, W)) // a constant-only chain
+  loss := t.tensor_mse_loss(t.tensor_matmul(h, V), Y)
+  t.constant_record_end(loss)
+  t.tensor_backward(loss)
+  fmt.printf("dloss/dV = %.6f %.6f
+", V.grad.data[0], V.grad.data[1])
+  t.tensor_free_graph(loss)
+  fmt.println("tensors left behind:", live() - start)
+  ```
+  ```
+  dloss/dV = 0.062205 -0.022677
+  tensors left behind: 0
+  ```
+
+  Here X = [[1, 2], [3, 4]], Y = [1, 0], and `live()` is `t.global_tensors_created - t.global_tensors_freed`. The matrix product X·W is freed by `constant_record_end`; `h` is read by the second product, so `tensor_free_graph(loss)` frees it. PyTorch gives the same gradient. Record only code whose intermediates stay inside: a tensor kept elsewhere (a cache, a struct field) must be passed to `constant_record_end`.
 - **Free graphs that share nodes together**, in one `tensor_free_graph` call (above) or in one scope.
 - **`tensor_free(t)` frees exactly one tensor:** its data, its gradient and the struct.
 
@@ -629,6 +650,7 @@ The same network in PyTorch 2.1.0 (float64, the same initial weights, plain SGD)
 | Gradients | `tensor_backward(root)`, `tensor_backward_with_grad(root, g)`, `tensor_zero_grad`, `tensor_drop_grad`, `tensor_has_grad`, `tensor_ensure_grad`, `tensor_detach` |
 | Free a graph | `tensor_free_graph(root)`, `tensor_free_graph(root_a, root_b)` for shared graphs; `owned_by_graph = true` for constants |
 | Graph scopes | `graph_begin(&s, no_grad)`, `graph_end`, `graph_scope_destroy`, `graph_allocator`, `graph_scope_bytes`, `grad_enabled` |
+| Constant-only chains | `constant_record_begin()`, `constant_record_end(results...)` |
 | Arithmetic | `tensor_add`, `_sub`, `_mul`, `_div`, `_neg`, `_scale`, `_add_bias`, `_gate_mul` |
 | Element-wise math | `tensor_exp`, `_log`, `_sqrt`, `_lgamma`, `_clamp`, `_norm_cdf` |
 | Activations | `tensor_relu`, `_leaky_relu`, `_sigmoid`, `_tanh`, `_softplus`, `_gelu`, `_softmax` |

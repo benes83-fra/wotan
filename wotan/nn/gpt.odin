@@ -227,6 +227,7 @@ gpt_model_forward :: proc(
 ) -> ^t.Tensor {
 	model.total_aux_loss = 0.0
 	model.aux_loss = nil
+	recording := _forward_begin()
 
 	x := _gpt_embed(model, input_ids, 0)
 
@@ -243,7 +244,16 @@ gpt_model_forward :: proc(
 		}
 	}
 
-	return _gpt_head(model, x)
+	logits := _gpt_head(model, x)
+	if recording {
+		// the results: logits and the MoE losses kept in the model and blocks
+		keep := make([dynamic]^t.Tensor, context.temp_allocator)
+		defer delete(keep)
+		append(&keep, logits, model.aux_loss)
+		for &block in model.blocks {if block.use_moe {append(&keep, block.moe.aux_loss)}}
+		_forward_end(recording, ..keep[:])
+	}
+	return logits
 }
 
 // Token + learned positional embeddings of input_ids [batch, seq_len] at

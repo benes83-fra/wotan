@@ -72,6 +72,37 @@ ml_fixes_test :: proc(allocator: mem.Allocator) {
 			"transform_dataset: unknown target column -> ok = false",
 		)
 
+		{ 	// numeric nulls are NaN in features and target, prepare and transform
+			x := w.column_new("x", .Float, 3)
+			w.append_float(&x, 1)
+			w.append_null(&x)
+			w.append_float(&x, 3)
+			y := w.column_new("y", .Int, 3)
+			w.append_int(&y, 4)
+			w.append_int(&y, 5)
+			w.append_null(&y)
+			nd := w.df_from(x, y)
+			defer w.destroy_dataframe(&nd)
+			dn, okn := ml.prepare_dataset(&nd, "y")
+			defer ml.dataset_free(&dn)
+			Xn, yn, okt2 := ml.transform_dataset(&nd, &dn, "y")
+			defer l.matrix_free(&Xn)
+			defer delete(yn)
+			expect(
+				&passed,
+				&total,
+				okn &&
+				okt2 &&
+				dn.X.data[0] == 1 &&
+				math.is_nan(dn.X.data[1]) &&
+				math.is_nan(dn.y[2]) &&
+				dn.y[1] == 5 &&
+				math.is_nan(Xn.data[1]) &&
+				math.is_nan(yn[2]),
+				"prepare_dataset / transform_dataset: a numeric null is NaN in X and y",
+			)
+		}
+
 		Xt, yt, okt := ml.transform_dataset(&train, &ds, "target")
 		defer l.matrix_free(&Xt)
 		defer delete(yt)

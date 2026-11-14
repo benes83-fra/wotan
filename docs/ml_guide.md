@@ -182,7 +182,7 @@ defer delete(yv)
 fmt.println(X.data, yv) // [0.5, 1, -1.2, 0, 0.3, 2] [2.9, -0.8, 1.4]
 ```
 
-**Nulls.** The bridge (`prepare_dataset`, `transform_dataset`) reads a null cell as 0, without a warning. `matrix_from_df` and `vector_from_df` turn it into NaN, so `ols_from_df` (section 4) returns NaN coefficients:
+**Nulls become NaN.** The bridge (`prepare_dataset`, `transform_dataset`), `matrix_from_df` and `vector_from_df` read a null numeric cell as NaN, so a model fitted on it, such as `ols_from_df` (section 4), returns NaN coefficients. A null text cell becomes its own category, `"NULL"`:
 
 ```odin
 x := w.column_new("x", .Float, 4)
@@ -197,7 +197,7 @@ defer l.matrix_free(&X)
 fmt.println(X.data) // [1, 2, NaN, 4]
 d2, _ := ml.prepare_dataset(&df, "y")
 defer ml.dataset_free(&d2)
-fmt.println(d2.X.data) // [1, 2, 0, 4]: the bridge reads the null as 0
+fmt.println(d2.X.data) // [1, 2, NaN, 4]
 r := ml.ols_from_df(&df, "y", []string{"x"})
 fmt.println(r.beta) // [NaN, NaN]
 ```

@@ -493,7 +493,7 @@ analytics_memory_test :: proc(allocator: mem.Allocator) {
 			ts.destroy_pca_result(pi)
 			ts.destroy_pca_result(pf)
 
-			// Bool -> 0 / 1, null -> 0 (documented convention), NaN stays NaN
+			// Bool -> 0 / 1, null -> NaN, NaN stays NaN
 			c := w.column_new("f", .Float, 3)
 			w.append_float(&c, math.nan_f64())
 			w.append_null(&c)
@@ -501,7 +501,7 @@ analytics_memory_test :: proc(allocator: mem.Allocator) {
 			mixed := w.df_from(w.column_from_bools("b", []bool{true, false, true}), c)
 			m := ts.extract_numeric_matrix(&mixed, {"b", "f"})
 			bool_ok = m[0][0] == 1 && m[1][0] == 0 && m[2][0] == 1
-			nan_ok = math.is_nan(m[0][1]) && m[1][1] == 0 && m[2][1] == 2.5
+			nan_ok = math.is_nan(m[0][1]) && math.is_nan(m[1][1]) && m[2][1] == 2.5
 			ts.destroy_matrix(m)
 			w.destroy_dataframe(&mixed)
 			w.destroy_dataframe(&di)
@@ -511,7 +511,7 @@ analytics_memory_test :: proc(allocator: mem.Allocator) {
 			&passed,
 			&total,
 			_mt_end(&track, "pca") && same && bool_ok && nan_ok,
-			"pca_dataframe on Int columns = on Float columns; Bool read as 0/1, null as 0, NaN kept",
+			"pca_dataframe on Int columns = on Float columns; Bool read as 0/1, null as NaN, NaN kept",
 		)
 	}
 

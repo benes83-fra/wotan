@@ -179,6 +179,7 @@ _tensor_new_op :: proc(
 	t.f64_metadata = make([dynamic]f64, 0, allocator)
 	_scope_note_new(allocator)
 	global_tensors_created += 1
+	if len(_recordings) > 0 {_record_new(t)}
 	return t
 }
 
@@ -227,6 +228,7 @@ _flattened_matmul_shape :: proc(shape: [4]int, N, in_features, out_features: int
 
 tensor_free :: proc(t: ^Tensor) {
 	if t == nil {return}
+	if len(_recordings) > 0 {_record_forget(t)}
 	if t.data.data != nil {l.matrix_free(&t.data)}
 	if t.grad.data != nil {l.matrix_free(&t.grad)}
 
@@ -969,6 +971,7 @@ tensor_free_graph :: proc(roots: ..^Tensor, allocator: mem.Allocator = context.a
 		node := nodes[i]
 		// ✅ FIX: Free nodes that are either intermediate OR owned by the graph
 		if node.op != .None || node.owned_by_graph {
+			if len(_recordings) > 0 {_record_forget(node)}
 			if node.data.data != nil {l.matrix_free(&node.data)}
 			if node.grad.data != nil {l.matrix_free(&node.grad)}
 			delete(node.inputs)

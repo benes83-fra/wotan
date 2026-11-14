@@ -847,6 +847,95 @@ nn_fixes_test :: proc(allocator: mem.Allocator) {
 		nn.sequential_free(s) // frees the Mamba layer
 	}
 
+	{ 	// frozen leading layers without a graph scope: the forward passes free
+		// their constant intermediates (or hand them to the graph)
+		live :: proc() -> int {return t.global_tensors_created - t.global_tensors_freed}
+		allocs := len(track.allocation_map)
+		model := nn.sequential_new()
+		nn.sequential_add(
+			model,
+			nn.linear_layer_new(4, 8),
+			nn.Activation.ReLU,
+			nn.linear_layer_new(8, 8),
+			nn.Activation.ReLU,
+			nn.linear_layer_new(8, 2),
+		)
+		nn.sequential_freeze_range(model, 0, 2)
+		xm := l.matrix_new(f64, 1, 4)
+		copy(xm.data, []f64{0.1, 0.2, 0.3, 0.4})
+		x := t.tensor_new(xm, false)
+		start := live()
+		for _ in 0 ..< 3 {
+			loss := t.tensor_cross_entropy_loss(nn.sequential_forward(model, x), {1})
+			t.tensor_backward(loss)
+			t.tensor_free_graph(loss)
+		}
+		partly := live() - start
+
+		// fully frozen: the output is kept, everything before it is freed
+		nn.sequential_freeze_all(model)
+		out := nn.sequential_forward(model, x)
+		out_ok := !out.requires_grad && len(out.data.data) == 2
+		t.tensor_free(out)
+		fully := live() - start
+
+		// features of the frozen model, detached once and reused by a trainable head
+		head := nn.sequential_new()
+		nn.sequential_add(head, nn.linear_layer_new(2, 2))
+		start_cached := live()
+		o := nn.sequential_forward(model, x)
+		feats := t.tensor_detach(o)
+		t.tensor_free(o)
+		snapshot := slice.clone(feats.data.data, context.temp_allocator)
+		for _ in 0 ..< 3 {
+			loss := t.tensor_cross_entropy_loss(nn.sequential_forward(head, feats), {1})
+			t.tensor_backward(loss)
+			t.tensor_free_graph(loss)
+		}
+		cached_ok := slice.equal(feats.data.data, snapshot)
+		t.tensor_free(feats)
+		cached := live() - start_cached
+
+		// GPT with frozen embeddings and first block, no scope
+		gpt := nn.gpt_model_new(11, 8, 2, 16, 2, 6)
+		nn.tensor_set_requires_grad(gpt.token_emb.weight, false)
+		nn.tensor_set_requires_grad(gpt.pos_emb.weight, false)
+		nn.gpt_freeze_blocks(&gpt, 0, 1)
+		start_gpt := live()
+		for _ in 0 ..< 2 {
+			logits := nn.gpt_model_forward(&gpt, nf_ids_t, nil, true)
+			loss := t.tensor_cross_entropy_loss(nn.as_matrix(logits, 12, 11), NF_TARGETS)
+			t.tensor_backward(loss)
+			t.tensor_free_graph(loss)
+		}
+		gpt_left := live() - start_gpt
+		nn.gpt_model_free(&gpt)
+		nn.sequential_free(model)
+		nn.sequential_free(head)
+		t.tensor_free(x)
+		leak := len(track.allocation_map) - allocs
+		report(
+			fmt.tprintf(
+				"frozen leading layers without a scope: %d tensors left (Sequential), %d (GPT); fully frozen forward %d; detached features reused %d (intact %v); %d allocations left",
+				partly,
+				gpt_left,
+				fully,
+				cached,
+				cached_ok,
+				leak,
+			),
+			partly == 0 &&
+			gpt_left == 0 &&
+			fully == 0 &&
+			out_ok &&
+			cached == 0 &&
+			cached_ok &&
+			leak == 0,
+			&passed,
+			&total,
+		)
+	}
+
 	t.tensor_free(nf_ids_t)
 	t.tensor_free(nf_seg_t)
 	t.tensor_free(nf_x)

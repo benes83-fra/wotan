@@ -27,6 +27,22 @@ _constant :: proc(n: int, shape: [4]int, alloc: mem.Allocator, values: []f64 = n
 	return c
 }
 
+// A model forward pass outside a graph scope records its constant
+// intermediates (op outputs without gradient, e.g. the outputs of frozen
+// layers on data, which no graph links): _forward_end frees them, or hands
+// those that the graph reads to it. Inside a scope graph_end frees everything.
+@(private)
+_forward_begin :: proc() -> (recording: bool) {
+	if t.graph_active_scope() != nil {return false}
+	t.constant_record_begin()
+	return true
+}
+
+@(private)
+_forward_end :: proc(recording: bool, keep: ..^t.Tensor) {
+	if recording {t.constant_record_end(..keep)}
+}
+
 // Hands a constant input of `out` to the graph, or frees it if there is none
 @(private)
 _constant_done :: proc(c, out: ^t.Tensor) {
