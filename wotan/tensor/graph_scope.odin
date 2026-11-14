@@ -28,7 +28,7 @@ import "core:sync"
 //
 // Rules:
 // - Tensors made with tensor_new keep the allocator they are given (parameters,
-//   inputs, targets); only op outputs move into the scope.
+//   inputs, targets); only op outputs (and tensor_detach copies) move into the scope.
 // - After graph_end, nodes created in the scope must not be used or freed.
 //   tensor_free / tensor_free_graph on them inside the scope are allowed and
 //   cost nothing (frees are no-ops in the arena).

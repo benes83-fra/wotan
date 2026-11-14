@@ -65,13 +65,7 @@ pdpm_multifactor_test :: proc(allocator: mem.Allocator) {
 	option_chain, option_chain_ok := fin.fetch_yahoo_options("SPY", allocator)
 	if !option_chain_ok {fail_missing_data(#procedure, "Yahoo option chain for SPY"); return}
 
-	defer {
-		delete(option_chain.strikes, allocator)
-		delete(option_chain.expiries, allocator)
-		delete(option_chain.implied_vols, allocator)
-		delete(option_chain.market_prices, allocator)
-		delete(option_chain.option_types, allocator)
-	}
+	defer fin.free_option_chain(&option_chain, allocator)
 
 	fmt.printf("Loaded %d real options contracts\n", option_chain.n_options)
 
@@ -80,11 +74,7 @@ pdpm_multifactor_test :: proc(allocator: mem.Allocator) {
 	if option_chain.n_options == 0 {
 		fmt.println("\n⚠ Yahoo Options API blocked - generating synthetic option chain")
 
-		if option_chain.strikes != nil {delete(option_chain.strikes, allocator)}
-		if option_chain.expiries != nil {delete(option_chain.expiries, allocator)}
-		if option_chain.implied_vols != nil {delete(option_chain.implied_vols, allocator)}
-		if option_chain.market_prices != nil {delete(option_chain.market_prices, allocator)}
-		if option_chain.option_types != nil {delete(option_chain.option_types, allocator)}
+		fin.free_option_chain(&option_chain, allocator)
 
 		n_options := 12
 		syn_strikes := make([]f64, n_options, allocator)
@@ -165,8 +155,7 @@ pdpm_multifactor_test :: proc(allocator: mem.Allocator) {
 		1.0 / 252.0, // daily returns: price each option at its own expiry
 	)
 	defer {
-		delete(calibration_2f.sdf.values, allocator)
-		delete(calibration_2f.sdf.parameters, allocator)
+		fin.free_stochastic_discount_factor(&calibration_2f.sdf, allocator)
 	}
 
 	// 6. Calibrate 4-Factor Model
@@ -184,8 +173,7 @@ pdpm_multifactor_test :: proc(allocator: mem.Allocator) {
 		1.0 / 252.0, // daily returns: price each option at its own expiry
 	)
 	defer {
-		delete(calibration_4f.sdf.values, allocator)
-		delete(calibration_4f.sdf.parameters, allocator)
+		fin.free_stochastic_discount_factor(&calibration_4f.sdf, allocator)
 	}
 
 	// 7. Compare Models

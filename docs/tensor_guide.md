@@ -141,6 +141,8 @@ Three rules, all as in PyTorch:
   after 2nd backward dloss/dx[0] 0.786448
   ```
 
+  `tensor_drop_grad(t)` is the alternative that PyTorch's `zero_grad()` uses by default (`grad = None`): the tensor then has no gradient (`tensor_has_grad(t)` is false) until the next backward pass reaches it. The buffer is kept and zero-filled by that pass, so dropping allocates nothing. The nn optimisers' `zero_grad` procedures drop.
+
 - **The graph is freed by you.** Use `tensor_free_graph(root)` without a scope, or `graph_end` with one (section 11).
 
 ## 4. Element-wise operations
@@ -227,11 +229,11 @@ concat dim0 [4, 3, 1, 1]
 | `tensor_sum(a)`, `tensor_mean(a)` | scalar | over all elements |
 | `tensor_sum_dim1(a)` | `[N, 1]` | row sums of an `[N, C]` tensor |
 | `tensor_logsumexp_dim1(q, num_actions)` | `[N, 1]` | stable log Σ exp over each row |
-| `tensor_softmax(logits)` | same shape | softmax of each row of `data` |
+| `tensor_softmax(logits)` | same shape | softmax over the last dimension of `shape`, as `torch.softmax(x, dim = -1)` |
 | `tensor_mse_loss(pred, target)` | scalar | mean (pred − target)²; gradients flow to both |
 | `tensor_cross_entropy_loss(logits, targets)` | scalar | mean −log softmax(logits)[target]; `targets` is `[]int` |
 | `tensor_bce_loss(p, y)`, `tensor_binary_cross_entropy(p, y)` | scalar | mean binary cross-entropy of probabilities p (not logits), p clamped to [1e-7, 1 − 1e-7] |
-| `tensor_kl_divergence(mu, log_var)` | scalar | −½ · mean(1 + log σ² − μ² − σ²), the VAE term against N(0, 1) |
+| `tensor_kl_divergence(mu, log_var)` | scalar | −½ · Σ (1 + log σ² − μ² − σ²) over the latent dimension, averaged over the batch: the VAE term against N(0, 1) |
 | `tensor_entropy(p)` | scalar | −Σ p ln p over the entries above 1e-10 |
 | `tensor_sharpe_loss(r, risk_free_rate = 0)` | scalar | −(mean(r) − r_f) / √(var(r) + 1e-8), population variance |
 | `tensor_prospect_utility(r, alpha, beta, lambda)` | scalar | −mean of the prospect value of r |
@@ -254,9 +256,9 @@ prospect utility loss -0.000018
 
 Check these points before you use a loss:
 
-- **Softmax and cross-entropy use different rows.** `tensor_softmax` normalises each row of the `data` matrix. A flattened `1 × N·C` sequence is a single row, so its softmax runs over all N·C values. Apply it to an `[N, C]` matrix, for example the output of a 2-D `tensor_matmul`. `tensor_cross_entropy_loss` instead also accepts the flattened form: given a `1 × N·C` row and N targets, it splits the row into N rows of C.
+- **Softmax works on the last dimension of `shape`, not on the rows of `data`.** Trailing 1s in `shape` are unused dimensions, so the last dimension is C of `[N, C, 1, 1]`, F of a sequence `[B, S, F, 1]` and W of `[N, C, H, W]`. A flattened `1 × N·C` tensor with shape `[N, C, 1, 1]` therefore gets N softmaxes of C values each, like an `[N, C]` matrix. A sequence with a single feature, `[B, S, 1, 1]`, reads as `[B, S]` and is normalised over S. `tensor_cross_entropy_loss` also accepts the flattened form: given a `1 × N·C` row and N targets, it splits the row into N rows of C.
 - **The BCE losses take probabilities.** Apply `tensor_sigmoid` to logits first. The two BCE ops compute the same value; both are kept for existing callers.
-- **The KL term is a mean over elements, not a sum.** Multiply by the number of latent dimensions if you follow a paper that sums.
+- **The KL term sums over the latent dimension and averages over the batch**, the usual VAE convention (`-0.5 * torch.sum(1 + log_var - mu**2 - log_var.exp()) / batch_size`). The latent dimension is the last dimension of `mu.shape`. For `mu` of shape `[B, L]` the sum is divided by B; for a sequence `[B, S, L, 1]` it is divided by B·S. σ² = exp(log σ²) is clamped at `KL_EXP_CLAMP` (1e10). Where the clamp is active that term is constant, so its gradient is 0, as with `torch.clamp`.
 
 ## 7. Normalisation and dropout
 
@@ -289,10 +291,10 @@ batch_norm channel 0: -1.212677 -0.727606 0.727606 1.212677
 running mean 0.3500 0.5750  running var 1.466667 1.658333
 ```
 
-`tensor_dropout(x, p, training)` is inverted dropout. In training it zeroes each element with probability p and scales the others by 1/(1 − p). Otherwise, or when p ≤ 0, it **returns `x` itself** rather than a copy, so do not free the result separately from `x`.
+`tensor_dropout(x, p, training)` is inverted dropout. In training it zeroes each element with probability p and scales the others by 1/(1 − p). Otherwise, or when p ≤ 0, it returns a new tensor equal to `x` that passes gradients through unchanged. Either way the result is a new tensor, never `x` itself. If `x` requires gradients, the result is an op node that `tensor_free_graph` frees. If `x` is data without gradients, the result is a constant marked `owned_by_graph`: a graph that uses it frees it, so dropout on input data does not leak in a loop without a scope. A result that no graph uses is yours to free with `tensor_free`.
 
 ```
-dropout: every value is 0 or 2x the input: true  eval returns the input: true
+dropout: every value is 0 or 2x the input: true  eval returns an equal new tensor: true
 ```
 
 ## 8. Convolution and pooling
@@ -440,7 +442,7 @@ For each step it computes h ← exp(Δ·A)·h + Δ·B·x and y = C·h + D·x. Ba
   ```
 
 - **Op outputs get their gradient buffers lazily**, during `tensor_backward`. To read or seed an op output's gradient before that, call `tensor_ensure_grad(t)`.
-- **`tensor_detach(t)`** returns a copy of `t` without history. It is a new leaf with `requires_grad = false` and the same allocator as `t`, and it is yours to free. Use it to treat a value as a constant:
+- **`tensor_detach(t, allocator = context.allocator)`** returns a copy of `t` without history: a new leaf with `requires_grad = false` and the shape of `t`. Inside a graph scope it is allocated in the scope like an op output, and `graph_end` frees it. Outside a scope it uses `allocator`, and it is yours to free. Use it to treat a value as a constant:
 
   ```odin
   d := t.tensor_detach(x)
@@ -467,17 +469,18 @@ Every op allocates its output. You free the graph in one of two ways.
 
 `tensor_free_graph(root)` frees `root` and every op node it can reach through `inputs`. It also frees leaves marked `owned_by_graph`, which is the way to attach constants made inside a loss function. It **keeps** the other leaves: your parameters, inputs and targets. Free those with `tensor_free` when you are done.
 
+It takes any number of roots. Roots whose graphs share nodes must be freed **in one call**, such as the policy and value losses of an actor-critic model that share a network body: `tensor_free_graph(policy_loss, value_loss)` frees every shared node once. Two separate calls would free the shared nodes twice.
+
 ```odin
 loss := t.tensor_mse_loss(model(X), Y)
 t.tensor_backward(loss)
 t.tensor_free_graph(loss)
 ```
 
-Four pitfalls:
+Three pitfalls:
 
 - **Constant-only op chains are not linked.** An op records its inputs only when its output requires gradients. If no input of a chain requires gradients, `tensor_free_graph` finds nothing to free and the intermediate outputs leak. Free each of them with `tensor_free`, or run the computation in a no-grad scope (below).
-- **Do not free a shared node twice.** Calling `tensor_free_graph` on two roots that share op nodes frees the shared nodes twice. Combine the losses into one root with `tensor_add` first, or use a scope.
-- **`tensor_dropout` in evaluation mode returns its input**, not a copy (section 7).
+- **Free graphs that share nodes together**, in one `tensor_free_graph` call (above) or in one scope.
 - **`tensor_free(t)` frees exactly one tensor:** its data, its gradient and the struct.
 
 ### Graph scopes
@@ -504,7 +507,7 @@ loss after 100 steps 0.380933, one graph used 2176 bytes, 64 MB reserved
 
 The rules:
 
-- **Leaves keep their own allocator.** Tensors made with `tensor_new`, the parameters, inputs and targets, are not moved into the scope; only op outputs are. The same holds for `tensor_detach` of a leaf.
+- **Leaves keep their own allocator.** Tensors made with `tensor_new`, the parameters, inputs and targets, are not moved into the scope; only op outputs and copies made with `tensor_detach` are. To keep a detached copy after `graph_end`, make it before `graph_begin`.
 - **To put a constant in the scope**, pass `t.graph_allocator(&scope)` to `matrix_new` and `tensor_new`.
 - **Nothing made in the scope survives `graph_end`.** Do not use or free those nodes afterwards. Copy out the numbers you need first. Inside the scope, `tensor_free` and `tensor_free_graph` on its nodes are allowed and cost nothing.
 - **Scopes nest.** `graph_end` releases only the innermost scope.
@@ -527,7 +530,7 @@ no_grad: requires_grad false, op None, inputs 0
 
 ### Counters
 
-`global_tensors_created` and `global_tensors_freed` count tensors. `graph_end` counts the nodes it releases as freed, so in a program that frees everything the two numbers are equal. All the examples in this guide together create and free 3408 tensors.
+`global_tensors_created` and `global_tensors_freed` count tensors. `graph_end` counts the nodes it releases as freed, so in a program that frees everything the two numbers are equal. All the examples in this guide together create and free 3409 tensors.
 
 ## 12. A complete example
 
@@ -623,8 +626,8 @@ The same network in PyTorch 2.1.0 (float64, the same initial weights, plain SGD)
 | Task | Procedure |
 |---|---|
 | New tensor / free | `tensor_new(matrix, requires_grad)`, `tensor_new_4d(N, C, H, W)`, `tensor_free` |
-| Gradients | `tensor_backward(root)`, `tensor_backward_with_grad(root, g)`, `tensor_zero_grad`, `tensor_ensure_grad`, `tensor_detach` |
-| Free a graph | `tensor_free_graph(root)`; `owned_by_graph = true` for constants |
+| Gradients | `tensor_backward(root)`, `tensor_backward_with_grad(root, g)`, `tensor_zero_grad`, `tensor_drop_grad`, `tensor_has_grad`, `tensor_ensure_grad`, `tensor_detach` |
+| Free a graph | `tensor_free_graph(root)`, `tensor_free_graph(root_a, root_b)` for shared graphs; `owned_by_graph = true` for constants |
 | Graph scopes | `graph_begin(&s, no_grad)`, `graph_end`, `graph_scope_destroy`, `graph_allocator`, `graph_scope_bytes`, `grad_enabled` |
 | Arithmetic | `tensor_add`, `_sub`, `_mul`, `_div`, `_neg`, `_scale`, `_add_bias`, `_gate_mul` |
 | Element-wise math | `tensor_exp`, `_log`, `_sqrt`, `_lgamma`, `_clamp`, `_norm_cdf` |

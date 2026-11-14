@@ -30,8 +30,8 @@ BPETokenizer :: struct {
 	byte_runes:    [256]rune, // GPT-2's character for each byte
 	unk_token:     string,
 	unk_id:        int,
-	cls_id:        int,
-	sep_id:        int,
+	cls_id:        int, // -1 if the vocabulary has no [CLS] (GPT-2)
+	sep_id:        int, // -1 if the vocabulary has no [SEP] (GPT-2)
 	pad_id:        int,
 	max_len:       int,
 	allocator:     mem.Allocator,
@@ -120,7 +120,7 @@ bpe_tokenizer_new :: proc(
 
 // From tok.vocab: ids_to_tokens, the special tokens (<|…|>, the BERT ones in
 // brackets and `extra`), the bytes' ids and the ids of [PAD] / [UNK] (else
-// <|endoftext|>) / [CLS] / [SEP]
+// <|endoftext|>) / [CLS] / [SEP] (-1 if absent)
 _bpe_index :: proc(tok: ^BPETokenizer, extra: []string) {
 	max_id := -1
 	for _, id in tok.vocab {max_id = max(max_id, id)}
@@ -147,6 +147,7 @@ _bpe_index :: proc(tok: ^BPETokenizer, extra: []string) {
 	} else if id, ok := tok.vocab["<|endoftext|>"]; ok {
 		tok.unk_token, tok.unk_id = "<|endoftext|>", id // GPT-2's unknown token
 	}
+	tok.cls_id, tok.sep_id = -1, -1
 	if id, ok := tok.vocab["[CLS]"]; ok {tok.cls_id = id}
 	if id, ok := tok.vocab["[SEP]"]; ok {tok.sep_id = id}
 }
@@ -279,7 +280,8 @@ bpe_decode :: proc(tok: ^BPETokenizer, ids: []int, allocator := context.allocato
 }
 
 // bpe_tokenize tokenizes text to max_len ids and the attention mask.
-// add_special_tokens: If true, adds [CLS] and [SEP] (for BERT). If false, returns raw tokens (for GPT-2).
+// add_special_tokens: adds [CLS] and [SEP] where the vocabulary has them (as
+// Hugging Face: a BERT-style vocabulary gets [CLS] … [SEP], GPT-2 none).
 bpe_tokenize :: proc(
 	tok: ^BPETokenizer,
 	text: string,

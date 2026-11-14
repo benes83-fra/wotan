@@ -835,13 +835,16 @@ transformer_encoder_forward :: proc(encoder: ^TransformerEncoder, x: ^t.Tensor) 
 
 // Self-attention with an additive [seq_len, seq_len] mask (e.g. from
 // create_causal_mask, or nil); is_causal hides future positions in addition.
-// With use_flash and is_causal the mask is taken to be causal and the
-// FlashAttention kernel applies it itself.
+// FlashAttention (use_flash) runs when the mask adds nothing to is_causal
+// (nil, or 0 on and below the diagonal, as a causal mask); any other mask is
+// applied by the standard kernel.
 masked_multi_head_attention_layer_forward :: proc(
 	layer: ^MultiHeadAttentionLayer,
 	x: ^t.Tensor,
 	mask: []f64,
 ) -> ^t.Tensor {
+	mask := mask
+	if layer.use_flash && layer.is_causal && _within_causal(mask, x.shape[1]) {mask = nil}
 	return _attention(
 		&layer.q_proj,
 		&layer.k_proj,
@@ -853,8 +856,22 @@ masked_multi_head_attention_layer_forward :: proc(
 		x,
 		layer.use_flash,
 		layer.is_causal,
-		nil if layer.use_flash && layer.is_causal else mask,
+		mask,
 	)
+}
+
+// The mask hides nothing a causal mask doesn't: nil, or a [seq, seq] mask that
+// is 0 on and below the diagonal (what it adds above it is hidden anyway)
+@(private = "file")
+_within_causal :: proc(mask: []f64, seq: int) -> bool {
+	if mask == nil {return true}
+	if len(mask) != seq * seq {return false}
+	for i in 0 ..< seq {
+		for j in 0 ..= i {
+			if mask[i * seq + j] != 0 {return false}
+		}
+	}
+	return true
 }
 
 // Helper to create causal mask

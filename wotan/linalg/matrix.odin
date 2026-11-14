@@ -130,64 +130,68 @@ matmul_dyn :: proc(
 
 	return out
 }
+// Physical storage and row offset of a numeric DataFrame column (views
+// resolved); panics on an unknown name or a column that is not Int or Float
+@(private = "file")
+_df_numeric_source :: proc(
+	df: ^w.DataFrame,
+	name: string,
+	who: string,
+) -> (
+	base: ^w.Column,
+	offset: int,
+) {
+	idx, ok := df.name_to_index[name]
+	if !ok {
+		panic(strings.concatenate({who, ": unknown column name: ", name}))
+	}
+	base = &df.columns[idx]
+	for base.is_view {
+		offset += base.offset
+		base = base.orig
+	}
+	if base.type != .Float && base.type != .Int {
+		panic(strings.concatenate({who, ": column is not Int or Float: ", name}))
+	}
+	return
+}
+
+// Cell r of a physical numeric column as f64; a null cell is NaN
+@(private = "file")
+_df_numeric_at :: #force_inline proc(base: ^w.Column, r: int) -> f64 {
+	if base.nulls != nil && r < len(base.nulls) && base.nulls[r] {
+		return math.nan_f64()
+	}
+	if base.type == .Float {
+		return (cast([^]f64)base.data)[r]
+	}
+	return f64((cast([^]int)base.data)[r])
+}
+
+// Named Int / Float columns of df as an n × len(cols) matrix (row-major, in
+// the order given). A null cell becomes NaN, like pandas' df.to_numpy().
 matrix_from_df :: proc(
 	df: ^w.DataFrame,
 	cols: []string,
 	allocator: mem.Allocator = context.allocator,
 ) -> Matrix(f64) {
 	m := matrix_new(f64, df.rows, len(cols), allocator)
-
 	for name, j in cols {
-		idx, ok := df.name_to_index[name]
-		if !ok {
-			res := strings.concatenate({"matrix_from_df: unknown column name: ", name})
-			panic(res)
-		}
-
-		col := &df.columns[idx]
-		// respect view offset
-		start := col.offset
-		#partial switch col.type {
-		case .Float:
-			base := cast([^]f64)col.data
-			for i in 0 ..< df.rows {m.data[i * m.cols + j] = base[start + i]}
-		case .Int:
-			base := cast([^]int)col.data
-			for i in 0 ..< df.rows {m.data[i * m.cols + j] = f64(base[start + i])}
-		case:
-			panic(strings.concatenate({"matrix_from_df: column is not Int or Float: ", name}))
-		}
+		base, offset := _df_numeric_source(df, name, "matrix_from_df")
+		for i in 0 ..< df.rows {m.data[i * m.cols + j] = _df_numeric_at(base, offset + i)}
 	}
-
 	return m
 }
 
+// One Int / Float column of df as a []f64; a null cell becomes NaN
 vector_from_df :: proc(
 	df: ^w.DataFrame,
 	colname: string,
 	allocator: mem.Allocator = context.allocator,
 ) -> []f64 {
-	idx, ok := df.name_to_index[colname]
-	if !ok {
-		res := strings.concatenate({"vector_from_df: unknown column name: ", colname})
-		panic(res)
-	}
-
-	col := &df.columns[idx]
+	base, offset := _df_numeric_source(df, colname, "vector_from_df")
 	out := make([]f64, df.rows, allocator)
-	start := col.offset
-
-	#partial switch col.type {
-	case .Float:
-		base := cast([^]f64)col.data
-		for i in 0 ..< df.rows {out[i] = base[start + i]}
-	case .Int:
-		base := cast([^]int)col.data
-		for i in 0 ..< df.rows {out[i] = f64(base[start + i])}
-	case:
-		panic(strings.concatenate({"vector_from_df: column is not Int or Float: ", colname}))
-	}
-
+	for i in 0 ..< df.rows {out[i] = _df_numeric_at(base, offset + i)}
 	return out
 }
 
@@ -421,57 +425,45 @@ matrix_from_flat :: proc(
 
 // ============================================================================
 // SIMD-Optimized Matrix Inversion
-// Computes A^-1 by solving A * x_i = e_i using LU decomposition
+// Computes A^-1 by solving A * x_i = e_i using LU decomposition.
+// A must be square and non-empty (panics otherwise). A singular matrix (an
+// exactly zero pivot) gives ok = false and an empty 0 × 0 matrix, which is
+// safe to free. Same contract as mat_inverse_lu.
 // ============================================================================
 matrix_inverse :: proc(
 	A: ^Matrix(f64),
 	allocator: mem.Allocator = context.allocator,
-) -> Matrix(f64) {
+) -> (
+	Ainv: Matrix(f64),
+	ok: bool,
+) {
 	n := A.rows
 	if n == 0 || A.cols != n {
 		panic("matrix_inverse: matrix must be square and non-empty")
 	}
 
-	// 1. Perform LU decomposition (A = P * L * U)
-	LU, piv, sign, ok := lu_decompose(A, allocator)
-	if !ok {
-		panic("matrix_inverse: matrix is singular or LU decomposition failed")
+	// 1. LU decomposition (A = P * L * U); factor and pivots are scratch
+	LU, piv, _, lu_ok := lu_decompose(A, allocator)
+	defer matrix_free(&LU)
+	defer delete(piv, allocator)
+	if !lu_ok {
+		Ainv = matrix_new(f64, 0, 0, allocator)
+		return
 	}
 
-	// 2. Allocate the inverse matrix
-	Ainv := matrix_new(f64, n, n, allocator)
-
-	// 3. Solve A * x_i = e_i for each column i
-	// We use context.temp_allocator for the identity columns since they are short-lived
+	// 2. Solve A * x_i = e_i for each column i
+	Ainv = matrix_new(f64, n, n, allocator)
 	e := make([]f64, n, context.temp_allocator)
-
+	defer delete(e, context.temp_allocator)
 	for i in 0 ..< n {
-		// Create i-th column of identity matrix
-		for j in 0 ..< n {
-			e[j] = 0.0
-		}
+		for j in 0 ..< n {e[j] = 0.0}
 		e[i] = 1.0
-
-		// Solve using SIMD-accelerated LU forward/backward substitution
 		x := lu_solve_simd(&LU, piv, e, allocator)
-
-		// Copy the solution vector x into the i-th column of Ainv
-		// Row-major order: column i is at indices [j * n + i]
-		for j in 0 ..< n {
-			Ainv.data[j * n + i] = x[j]
-		}
-
-		// Free the temporary solution vector
+		// column i of Ainv (row-major: indices j * n + i)
+		for j in 0 ..< n {Ainv.data[j * n + i] = x[j]}
 		delete(x, allocator)
 	}
 
-	delete(e, context.temp_allocator)
-
-	// Clean up LU matrix and pivot array
-	matrix_free(&LU)
-	// Note: If lu_decompose allocated piv with context.temp_allocator,
-	// change this to delete(piv, context.temp_allocator)
-	delete(piv, allocator)
-
-	return Ainv
+	ok = true
+	return
 }

@@ -214,7 +214,8 @@ _ols_core :: proc(
 	if df_model > 0 && df_resid > 0 {
 		fstat = ((tss - ssr) / f64(df_model)) / (ssr / f64(df_resid))
 	}
-	res.f_pvalue = f_dist_sf(fstat, f64(df_model), f64(df_resid)) if df_model > 0 && df_resid > 0 else math.nan_f64()
+	res.f_pvalue =
+		f_dist_sf(fstat, f64(df_model), f64(df_resid)) if df_model > 0 && df_resid > 0 else math.nan_f64()
 
 	res.beta = beta
 	res.vcov = vcov
@@ -300,7 +301,8 @@ _penalized_summary :: proc(
 	if df_model > 0 && df_resid > 0 {
 		fstat = ((tss - ssr) / df_model) / (ssr / df_resid)
 	}
-	res.f_pvalue = f_dist_sf(fstat, df_model, df_resid) if df_model > 0 && df_resid > 0 else math.nan_f64()
+	res.f_pvalue =
+		f_dist_sf(fstat, df_model, df_resid) if df_model > 0 && df_resid > 0 else math.nan_f64()
 
 	res.beta = beta
 	res.vcov = vcov
@@ -372,10 +374,14 @@ _ols_inverse :: proc(A: ^l.Matrix(f64), out: ^l.Matrix(f64)) -> int {
 	Acopy := l.matrix_new(f64, p, p, context.temp_allocator)
 	defer l.matrix_free(&Acopy)
 	copy(Acopy.data, A.data)
-	vals, V := l.eigh(&Acopy, .Ascending, context.temp_allocator)
+	vals, V, sym_ok := l.eigh(&Acopy, .Ascending, context.temp_allocator)
 	defer {
 		delete(vals, context.temp_allocator)
 		l.matrix_free(&V)
+	}
+	if !sym_ok { 	// not symmetric: no eigen pseudo-inverse
+		for i in 0 ..< p * p {out.data[i] = math.nan_f64()}
+		return 0
 	}
 	vmax := 0.0
 	for v in vals do vmax = max(vmax, math.abs(v))

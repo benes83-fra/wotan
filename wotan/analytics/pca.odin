@@ -467,7 +467,7 @@ pca_from_cov :: proc(cov: [][]f64, allocator: mem.Allocator = context.allocator)
 
 	// Use optimized symmetric eigensolver (SIMD-accelerated Jacobi)
 	// Returns eigenvalues (sorted ascending by default) and eigenvectors (columns)
-	eigenvalues, eigenvectors_linalg := l.eigh(&cov_linalg, .Ascending, allocator)
+	eigenvalues, eigenvectors_linalg, _ := l.eigh(&cov_linalg, .Ascending, allocator) // symmetrized above
 	defer {
 		if len(eigenvalues) > 0 {delete(eigenvalues, allocator)}
 		if eigenvectors_linalg.data != nil {l.matrix_free(&eigenvectors_linalg)}

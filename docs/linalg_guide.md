@@ -111,7 +111,7 @@ A (2 x 3)
 - `matrix_from_flat` panics if the slice is shorter than `rows * cols`.
 - `matrix_at` does no bounds check beyond the slice's own.
 
-Procedures take matrices by pointer (`^Matrix(f64)`) and do not modify them, unless this guide says so. The in-place ones are `cholesky*`, `jacobi_eigen_symmetric` and the accumulating `matmul_*_acc_simd` kernels, which modify their output argument.
+Procedures take matrices by pointer (`^Matrix(f64)`) and do not modify them, unless this guide says so. The in-place ones are `cholesky*` and the accumulating `matmul_*_acc_simd` kernels, which modify their output argument.
 
 ### Fixed-size matrices
 
@@ -161,7 +161,7 @@ X (4 x 2)
 
 Both procedures panic on an unknown column name. They also panic on a column that is neither Float nor Int, such as `ticker` above.
 
-**Nulls are not checked.** A null cell is read as the value stored underneath it, which is 0:
+**A null cell becomes NaN**, as in pandas' `df.to_numpy()`:
 
 ```odin
 col := w.column_new("x", .Float, 3)
@@ -176,10 +176,10 @@ fmt.println("with null:", v2)
 ```
 
 ```
-with null: [1.5, 0, 2.5]
+with null: [1.5, NaN, 2.5]
 ```
 
-Drop or fill missing values in the DataFrame first, as the core guide describes.
+A NaN spreads through every product, covariance or solve it enters. Drop or fill the missing values in the DataFrame before you convert it, as the core guide describes.
 
 ## 4. Products, transposes and Kronecker products
 
@@ -358,7 +358,7 @@ U (3 x 3)
 
 ### Inverses
 
-There are two LU-based inverses. They differ in how they handle a singular matrix:
+`mat_inverse_lu` and `matrix_inverse` compute the inverse from an LU factorisation. Both return the inverse and an `ok` flag, which is `false` for a singular matrix:
 
 ```odin
 Ainv, inv_ok := l.mat_inverse_lu(&A)   // ok = false for a singular matrix
@@ -370,6 +370,10 @@ defer l.matrix_free(&S)
 Sinv, sok := l.mat_inverse_lu(&S)
 defer l.matrix_free(&Sinv)                       // safe: an empty matrix
 fmt.println("singular:", sok, Sinv.rows, Sinv.cols)
+
+Sinv2, sok2 := l.matrix_inverse(&S)               // same contract
+defer l.matrix_free(&Sinv2)
+fmt.println("matrix_inverse:", sok2, Sinv2.rows, Sinv2.cols)
 ```
 
 ```
@@ -378,9 +382,10 @@ A⁻¹ (3 x 3)
     -0.1163   0.3721   0.0465
     -0.1395   0.0465   0.2558
 singular: false 0 0
+matrix_inverse: false 0 0
 ```
 
-`matrix_inverse(&A)` returns the inverse directly but **panics** on a singular matrix. Use it only when you know the matrix is invertible.
+Both panic on a non-square or empty matrix. On a singular matrix they return an empty 0 × 0 matrix, which is safe to free. For a singular or rank-deficient matrix, `pinv` (section 10) gives the pseudo-inverse.
 
 To solve a system, call `lu_solve` or `solve_spd_cholesky`. Computing an inverse and multiplying by it is slower and less accurate.
 
@@ -588,25 +593,33 @@ For the exact 2-norm condition number of X, use `cond2_svd` (section 10).
 A := l.matrix_from_flat([]f64{4, 1, 2, 1, 3, 0, 2, 0, 5}, 3, 3)
 defer l.matrix_free(&A)
 
-vals, vecs := l.eigh(&A, .Descending)
+vals, vecs, ok := l.eigh(&A, .Descending)
 defer delete(vals)
 defer l.matrix_free(&vecs)
-fmt.println("eigenvalues:", vals)
+fmt.println("ok:", ok, "eigenvalues:", vals)
 fmt.printf("first eigenvector: [%.4f, %.4f, %.4f]\n", vecs.data[0], vecs.data[3], vecs.data[6])
+
+B := l.matrix_from_flat([]f64{4, 1, 2, 1.5, 3, 0, 2, 0, 5}, 3, 3) // b₀₁ ≠ b₁₀
+defer l.matrix_free(&B)
+bv, bV, b_ok := l.eigh(&B)
+defer delete(bv)
+defer l.matrix_free(&bV)
+fmt.println("not symmetric:", b_ok, len(bv), bV.rows, bV.cols)
 ```
 
 ```
-eigenvalues: [6.669079088282286, 3.4760236029181333, 1.8548973087995764]
+ok: true eigenvalues: [6.669079088282286, 3.4760236029181333, 1.8548973087995764]
 first eigenvector: [0.6312, 0.1720, 0.7563]
+not symmetric: false 0 0 0
 ```
 
-`eigh` works on a copy and leaves A unchanged.
+`eigh` works on a copy and leaves A unchanged. It panics if A is not square or is empty.
 
-It checks that A is square and symmetric (to 10⁻¹²) only in `-debug` builds. In a release build, a non-symmetric A gives meaningless results without any warning.
+It checks symmetry in every build. Each pair must satisfy |aᵢⱼ − aⱼᵢ| ≤ 10⁻¹⁰ · max|aₖₗ|, a tolerance relative to the largest finite entry (the constant `EIGH_SYM_RTOL`). If a pair is further apart, `ok` is `false` and the eigenvalues and V are empty; free them as usual. Within the tolerance, `eigh` decomposes the symmetric part (A + Aᵀ)/2, so rounding in a computed covariance matrix does no harm. The check does not look at NaN entries: a NaN in A gives NaN results with `ok = true`, as in numpy.
 
 The sign of each eigenvector is arbitrary, as in every eigen solver.
 
-`jacobi_eigen_symmetric(&A)` is the underlying routine. It **overwrites A** and returns the eigenvalues unsorted.
+`jacobi_eigen_symmetric(&A)` is the underlying routine. It works on a copy of A, does not check symmetry, and returns the eigenvalues unsorted.
 
 ### General matrices
 
@@ -668,6 +681,25 @@ thin: 2 2 [9.508032000695724, 0.772869635673484] 3 2
 ```
 
 The `SVDMethod` argument accepts `.Jacobi` and `.GolubReinsch`, but both run the same one-sided Jacobi code. The name `svd_golub_reinsch` is kept for compatibility.
+
+`pinv(&A)` is the Moore-Penrose pseudo-inverse, V·diag(1/σ)·Uᵀ over the singular values above max(m, n)·10⁻¹²·σ_max (the `svd_thin` tolerance). Pass `rtol` to set the relative cutoff yourself. For an m×n matrix it returns an n×m matrix, and for an invertible matrix it equals the inverse:
+
+```odin
+R := l.matrix_from_flat([]f64{1, 2, 3, 2, 4, 6, 1, 0, 1}, 3, 3) // rank 2
+defer l.matrix_free(&R)
+P := l.pinv(&R)
+defer l.matrix_free(&P)
+print_matrix("R⁺", &P)
+```
+
+```
+R⁺ (3 x 3)
+    -0.0333  -0.0667   0.8333
+     0.0667   0.1333  -0.6667
+     0.0333   0.0667   0.1667
+```
+
+This matches `numpy.linalg.pinv`.
 
 ### Condition numbers
 
@@ -749,11 +781,10 @@ The rules are the same as in the rest of Wotan:
 - **Delete a slice with the allocator it was allocated with.** Most procedures take an optional `allocator` argument, which defaults to `context.allocator`. If you pass another allocator, delete the returned slices with that same allocator: `delete(x, my_alloc)`.
 - **Free an `LstsqResult` with `lstsq_result_free(&res, allocator)`.** It frees `beta` and `residuals`.
 - **Internal scratch is freed inside each procedure.** Only the documented outputs are left for you to free, and a tracking allocator reports no leaks for any procedure in this guide. Some procedures use `context.temp_allocator` for short-lived buffers, and they free those too.
-- **One exception returns temporary memory.** `apply_pivots_vec` returns a slice on `context.temp_allocator`. Do not `delete` it with the default allocator; it is released by `free_all(context.temp_allocator)`.
 - **A matrix may live on the temp allocator.** Passing `context.temp_allocator` and never freeing is fine for short computations, as long as you call `free_all(context.temp_allocator)` regularly, for example once per loop iteration.
-- **A zero-sized matrix is safe to free.** `mat_inverse_lu` on a singular matrix returns an empty matrix, and `matrix_free` on it does nothing harmful.
+- **A zero-sized matrix is safe to free.** `mat_inverse_lu` and `matrix_inverse` on a singular matrix, and `eigh` on a non-symmetric one, return empty results, and `matrix_free` or `delete` on them does nothing harmful.
 
-[`tests/linalg_memory_test.odin`](../tests/linalg_memory_test.odin) runs `lu_solve`, `mat_inverse_lu`, `svd_thin`, the `cond2_*` procedures and `lstsq` under a tracking allocator and checks that they leave nothing behind.
+[`tests/linalg_memory_test.odin`](../tests/linalg_memory_test.odin) runs `lu_solve`, `mat_inverse_lu`, `matrix_inverse`, `apply_pivots_vec`, `eigh`, `jacobi_eigen_symmetric`, `pinv`, `svd_thin`, the `cond2_*` procedures and `lstsq` under a tracking allocator and checks that they leave nothing behind.
 
 ## 13. A complete example
 
@@ -836,12 +867,12 @@ The coefficients, standard errors and t-values agree with `statsmodels.OLS(y, X)
 | Transpose, Kronecker | `matrix_transpose`, `kron` / `kron_simd` |
 | Covariance, correlation | `covariance`, `correlation` |
 | LU | `lu_decompose`, `lu_solve`, `lu_det`, `lu_extract_LU` |
-| Inverse | `mat_inverse_lu` (returns ok), `matrix_inverse` (panics if singular), `spd_inverse` (SPD) |
+| Inverse | `mat_inverse_lu`, `matrix_inverse` (both return ok), `spd_inverse` (SPD), `pinv` (pseudo-inverse) |
 | Cholesky | `cholesky(&M, mode)`, `cholesky_try`, `solve_spd_cholesky`, `forward_substitute_simd`, `backward_substitute_simd` |
 | QR | `qr_decompose`, `qr_decompose_thin`, `upper_tri_solve` |
 | Least squares | `lstsq(&X, y, method)`, `lstsq_result_free` |
-| Symmetric eigen | `eigh(&A, order)`, `jacobi_eigen_symmetric` (in place, unsorted) |
+| Symmetric eigen | `eigh(&A, order)` (returns ok), `jacobi_eigen_symmetric` (unsorted, unchecked) |
 | General eigenvalues | `eigvals_general`, `eigvals_modulus_max` |
-| SVD | `svd`, `svd_thin`, `svd_jacobi` |
+| SVD | `svd`, `svd_thin`, `svd_jacobi`, `pinv` |
 | Condition number | `cond2_svd`, `cond2_svd_thin`, `cond2_sym`, `rcond2_svd`, `rcond2_sym` |
 | Vector kernels | `vec_*_simd`, `axpy_simd`, `ger_simd`, `sum_simd`, `rotate_pair_simd` |

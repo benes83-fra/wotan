@@ -131,12 +131,12 @@ A linear layer accepts a matrix `[N, in]` or a flattened sequence `[batch, steps
 Notes on individual layers:
 - **Average pooling, batch norm and dropout** have no `_forward` procedure of their own (max pooling has `maxpool2d_layer_forward`). They run inside a `Sequential` model (section 4), which passes its training flag to them. Outside a model, use the tensor ops `t.tensor_avg_pool2d`, `t.tensor_batch_norm_2d` and `t.tensor_dropout` directly.
 - **Recurrent layers** take an initial state: `rnn_layer_forward(&l, x, h_0)`, `gru_layer_forward(&l, x, h_0)`, `lstm_layer_forward(&l, x, h_0, c_0)`, each state with `batch · hidden` values. In a `Sequential` model they start from zeros. To use only the last step, take it with `nn.sequence_step(h, S - 1, allocator)`, which returns `[B, 1, hidden]`.
-- **Attention.** `multi_head_attention_layer_forward(&mha, x, attention_mask = nil)` is self-attention. `attention_mask` is a `[B, S]` tensor that is 1 at real tokens and 0 at padding: padded keys receive no attention (PyTorch's `key_padding_mask`). With `is_causal = true`, every position sees only itself and earlier positions. `masked_multi_head_attention_layer_forward(&mha, x, mask)` adds an explicit `[S, S]` mask, for example from `create_causal_mask(S, allocator)`. `use_flash = true` selects the tiled FlashAttention kernel. It gives the same result, but takes no explicit masks: with a padding mask or an explicit mask the standard kernel is used.
+- **Attention.** `multi_head_attention_layer_forward(&mha, x, attention_mask = nil)` is self-attention. `attention_mask` is a `[B, S]` tensor that is 1 at real tokens and 0 at padding: padded keys receive no attention (PyTorch's `key_padding_mask`). With `is_causal = true`, every position sees only itself and earlier positions. `masked_multi_head_attention_layer_forward(&mha, x, mask)` adds an explicit `[S, S]` mask, for example from `create_causal_mask(S, allocator)`. `use_flash = true` selects the tiled FlashAttention kernel, which gives the same result. The kernel itself applies only the causal mask, so the standard kernel runs instead when there is a padding mask, or an explicit mask that hides more than `is_causal` does. A causal mask from `create_causal_mask` together with `is_causal = true` keeps the FlashAttention kernel.
 - **The transformer blocks** are post-LayerNorm, as in the original transformer, BERT and PyTorch's default: `x = norm(x + attention(x))`, then `x = norm(x + ffn(x))`. GPT's blocks (section 7) are pre-LayerNorm.
 - **The decoder block** applies causal self-attention, then cross-attention to the encoder output, then the feed-forward network, each followed by a residual connection and a LayerNorm.
 - **Conv1d** works on channels-last sequences, so its input is a normal `[B, T, C]` sequence batch. `causal = true` pads `dilation · (k − 1)` zeros on the left only, so the output has `T` steps and step `t` depends only on inputs up to `t`. A **TCN block** (Bai, Kolter and Koltun, 2018) has two such convolutions with ReLU and dropout, and a residual connection through a 1 × 1 convolution when the widths differ. The paper's weight normalisation is not used.
 - **GAT** is multi-head attention restricted to the edges of a graph: the scores get `log A[i, j]` added, so node `i` attends only to the nodes `j` with `A[i, j] > 0`, weighted by `A[i, j]`. Every node needs at least one edge, such as a self-loop. The layer stores the adjacency and frees it in `gat_layer_free`.
-- **Mamba** here is a simplified selective state-space layer: linear projections give x, B, C and Δ = softplus(·). The parameter is θ_A, with A = −exp(θ_A) so that A is always negative. The scan is `t.tensor_ssm`, followed by an output projection. There is no convolution and no gating branch.
+- **Mamba** is a pre-norm residual block, as the Mamba-1 `Block` of state-spaces/mamba: `out = x + mixer(RMSNorm(x))`, with the RMSNorm weight `layer.norm.gamma` (eps 1e-5). The mixer is a simplified selective state-space layer: linear projections of the normalised input give x, B, C and Δ = softplus(·). The parameter is θ_A, with A = −exp(θ_A) so that A is always negative. The scan is `t.tensor_ssm`, followed by an output projection. There is no convolution and no gating branch. Because of the normalisation, the mixer's output does not grow with the scale of the input: for an input 10 times larger, only the residual is 10 times larger.
 - **Mixture of experts.** The router picks the `top_k` experts of every token. Their gates are a softmax over those `top_k` router logits, and the output is the gate-weighted sum of the experts' FFNs. This equals the top-k routing of Hugging Face's Mixtral (top-k of the router softmax, renormalised). Every forward pass stores the load-balancing loss E · Σ_e f_e · P_e in `layer.aux_loss_val`, computed as Hugging Face's `load_balancing_loss_func`. Here f_e is the fraction of tokens routed to expert e, so the f_e sum to `top_k` and the loss is `top_k` when the load is balanced. With `moe_layer_forward(&moe, x, allocator, aux_loss = true)`, the same loss is also returned in the graph as `layer.aux_loss`: add it to the training loss so that it trains the router.
 
 ### Layout compared with PyTorch
@@ -354,7 +354,7 @@ pinball loss 0.1000
 ```
 
 Two helpers prepare model outputs for losses:
-- **`as_matrix(x, rows, cols)`** turns a flattened `[B, S, V]` output into a true `[B·S, V]` matrix, and gradients flow back to `x`. Row-wise ops such as `t.tensor_softmax` need it, because they work on data rows. `t.tensor_cross_entropy_loss` recognises flattened logits by itself, so for cross-entropy `as_matrix` is optional.
+- **`as_matrix(x, rows, cols)`** turns a flattened `[B, S, V]` output into a true `[B·S, V]` matrix, and gradients flow back to `x`. Use it when you need the values as a real matrix, for example to read row `i` of `data` directly. `t.tensor_softmax` works on the last dimension of `shape` and `t.tensor_cross_entropy_loss` recognises flattened logits by itself, so for those two `as_matrix` is optional.
 - **`sequence_step(x, step, allocator)`** picks one position of every sequence (for example the last step, or BERT's `[CLS]`) as `[B, 1, width]`.
 
 ## 6. Optimisers and training loops
@@ -370,8 +370,8 @@ Two helpers prepare model outputs for losses:
 The details:
 - **SGD** is `torch.optim.SGD` with dampening 0, and its weight decay is added to the gradient.
 - **Adam** with `weight_decay > 0` is AdamW: the decay is decoupled from the gradient. Each parameter counts its own steps for the bias correction, as in PyTorch, so a parameter registered later starts its own count.
-- **Frozen parameters** are skipped by both optimisers, as are parameters without a gradient buffer.
-- **Zeroed, not dropped.** `adam_zero_grad` and `sgd_zero_grad` set the gradients to zero; they do not drop them, as PyTorch's `zero_grad()` does by default. Trainable parameters get their gradient buffer when they are created, so the optimisers update every trainable parameter in every step, with a zero gradient if the parameter was not used in that step.
+- **Frozen parameters** are skipped by both optimisers, as are parameters without a gradient.
+- **Dropped gradients.** `adam_zero_grad` and `sgd_zero_grad` drop the gradients, as PyTorch's `zero_grad()` does by default (`set_to_none = True`): afterwards `t.tensor_has_grad(p)` is false for every parameter. The buffers are kept, so a training step allocates no gradients; `tensor_backward` zero-fills the buffer of each parameter it reaches and accumulates into it. A parameter that the loss does not reach, such as a mixture-of-experts expert that no token was routed to, still has no gradient and is skipped by the step: no moment or momentum update, no weight decay, and no step count for Adam's bias correction. Code that reads gradients after `zero_grad` should ask `t.tensor_has_grad(p)` first, as `clip_grad_norm` does; a dropped buffer holds the previous step's values. A parameter that is unfrozen with `tensor_set_requires_grad` also starts without a gradient.
 - **Gradient clipping.** `clip_grad_norm(&opt, max_norm)` (or `clip_grad_norm(params, max_norm)`) scales all gradients together when their global norm exceeds `max_norm`, as `torch.nn.utils.clip_grad_norm_` does, and returns the norm before clipping. Call it between `tensor_backward` and the step.
 - **Registration helpers.** The `*_add_to_opt` / `*_add_to_optimizer` procedures of the models register their trainable parameters.
 
@@ -428,7 +428,7 @@ Section 12 is a complete program built on this loop.
 | `rms_norm` | false | RMSNorm instead of LayerNorm, in the blocks and the final norm |
 | `tie_embeddings` | false | the output projection reuses the token embedding: logits = x · Eᵀ + b |
 
-`gpt_model_forward(&model, ids, mask, training, aux_loss = false)` maps token ids `[B, S]` to logits `[B, S, vocab_size]`. The blocks are causal by themselves, so `mask` is usually `nil`. An explicit `[S, S]` mask is added to the causal one, except with `use_flash`, where it is ignored.
+`gpt_model_forward(&model, ids, mask, training, aux_loss = false)` maps token ids `[B, S]` to logits `[B, S, vocab_size]`. The blocks are causal by themselves, so `mask` is usually `nil`. An explicit `[S, S]` mask is added to the causal one. With `use_flash`, a mask that hides more than the causal one (for example padding at the start of a prompt) runs the standard attention kernel; `nil` or a causal mask keeps FlashAttention.
 
 ```odin
 rand.reset(6)
@@ -585,7 +585,7 @@ To fine-tune for classification, replace the next-sentence head with `bert_repla
 - `vae_encoder_forward(&enc, x)` returns `(mu, log_var)`, both clamped to [−5, 5].
 - `reparameterize(mu, log_var, allocator)` samples z = μ + exp(½ log σ²) · ε, and gradients reach both μ and log σ².
 - `vae_decoder_forward(&dec, z)` ends in tanh.
-- Combine the reconstruction loss with `t.tensor_kl_divergence(mu, log_var)`. That KL term is a mean over the elements; see the tensor guide.
+- Combine the reconstruction loss with `t.tensor_kl_divergence(mu, log_var)`. That KL term sums over the latent dimensions and averages over the batch; see the tensor guide.
 
 ```odin
 rand.reset(9)
@@ -612,9 +612,9 @@ for step in 0 ..< 200 {
 }
 ```
 ```
-step   0  loss 0.2105
-step 100  loss 0.0175
-step 199  loss 0.0131
+step   0  loss 0.2115
+step 100  loss 0.0511
+step 199  loss 0.0330
 ```
 
 **Image augmentation.** `augment_batch(images, config, allocator)` applies one random affine transformation per image of an `[N, C, H, W]` batch, the same for all of its channels:
@@ -659,7 +659,7 @@ Note that `load_gpt_model` and `load_bert_model` take `use_flash` and the alloca
 
 The file format is little-endian binary with a magic header and a type id, followed by each layer's configuration and tensors:
 - **What is stored.** A model stores its full configuration, including the attention flags, MoE, RMSNorm and tied-embedding settings and the dropout rate, so a loaded model is built exactly as it was saved.
-- **Old files.** Files from older versions of the format still load.
+- **Old files.** Files from older versions of the format still load. A Mamba layer from such a file has no RMSNorm weight; it loads with the weight 1, but the block (with its norm and residual) computes a different function from the layer that was saved, so train it further before use.
 - **Changed heads.** A stored tensor of another size replaces the layer's tensor. A model saved after `bert_replace_nsp_head`, for example, loads with its new head.
 - **Robustness.** Reading checks every access. A truncated, corrupt or foreign file returns `ok = false` with a message, and leaks nothing. A layer header with an invalid configuration, such as 0 attention heads, counts as corrupt in both `load_checkpoint` and `sequential_load_partial`.
 - **Random numbers.** Loading uses a private random generator for the layer initialisation, so it leaves your random sequence unchanged.
@@ -695,7 +695,7 @@ Here `small_classifier(classes)` is a helper that returns a `Sequential` model w
 What `load_checkpoint` restores and what you must free:
 - **Optimizer state.** It restores the Adam hyperparameters, the moments and each parameter's step count. Training that continues after a load is bit-for-bit identical to training without the interruption.
 - **Freeing.** The model and the optimiser are allocated: free them with `sequential_free(model)`, then `adam_free(opt)` and `free(opt)`. The same applies to the other `load_*` procedures: call `gpt_model_free(model)` (or the model's own free procedure) and then `free(model)`.
-- **Frozen layers are not stored.** After loading, every parameter is trainable again. If the model was saved with frozen layers, the stored moments no longer match its parameters, and `load_checkpoint` resets them with the message "optimizer state does not match the model; moments reset". Freeze the layers again after loading.
+- **Frozen parameters.** The checkpoint stores which parameters are frozen, and `load_checkpoint` freezes them again, so the stored moments match the trainable parameters and training resumes exactly. A checkpoint from an older version of the format has no such flags and loads with every parameter trainable: if that model had frozen layers, its stored moments no longer match, and `load_checkpoint` resets them with the message "optimizer state does not match the model; moments reset".
 
 ## 11. Transfer learning and memory
 
@@ -761,7 +761,7 @@ The loaded layers are the first two linear layers and the two ReLUs. A layer wit
 3. **A forward pass returns a node of a computation graph.** Free it in one of two ways:
    - Call `tensor_free_graph(root)` once on the single root of each graph.
    - Run the step in a graph scope. That is the recommended way, and the only practical one for transformers.
-4. **Outputs that share a graph must be freed together.** BERT's two outputs, or a VAE encoder's `mu` and `log_var`, share most of their graph. Combine them into one loss before `tensor_free_graph`, or use a scope.
+4. **Outputs that share a graph must be freed together.** BERT's two outputs, or a VAE encoder's `mu` and `log_var`, share most of their graph. Free them in one call, `tensor_free_graph(out_a, out_b)`, or combine them into one loss first, or use a scope.
 5. **Use a no-grad scope for inference** (`graph_begin(&scope, no_grad = true)`). It records no graph, and `graph_end` frees every output. The KV-cached GPT forward requires one. Copy out what you need, such as logits or the chosen token, before `graph_end`.
 6. **Constant inputs are handled for you.** Forward passes create constant inputs: position ids, zero states, masks and the positional encoding. Inside a scope they live in the scope's arena. Without a scope they belong to the graph and are freed with it.
 
@@ -1026,7 +1026,7 @@ How BPE encodes a text:
 
 Padding: GPT-2 has no `[PAD]` token, so `bpe_tokenize_batch_to_tensors` pads with id 0, which is the token "!". The attention mask is what tells padding apart.
 
-Watch out for `bpe_tokenize(&bpe, text)`: it adds `[CLS]` / `[SEP]` by default (`add_special_tokens = true`, meant for BERT-style BPE vocabularies). With the GPT-2 vocabulary, which has neither token, those ids are 0 as well. Pass `add_special_tokens = false` for GPT-2. `bpe_tokenize_to_tensors` and the batch procedure already default to no special tokens.
+`bpe_tokenize(&bpe, text)` returns `max_len` ids and the attention mask. With `add_special_tokens = true` (the default) it adds `[CLS]` and `[SEP]` only when the vocabulary has them, as Hugging Face does: a BERT-style BPE vocabulary gets `[CLS] … [SEP]`, while the GPT-2 vocabulary has neither, so GPT-2 input gets no special tokens (`bpe.cls_id` and `bpe.sep_id` are −1). `bpe_tokenize_to_tensors` and the batch procedure default to no special tokens.
 
 ### Training a BPE vocabulary
 

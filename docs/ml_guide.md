@@ -182,7 +182,7 @@ defer delete(yv)
 fmt.println(X.data, yv) // [0.5, 1, -1.2, 0, 0.3, 2] [2.9, -0.8, 1.4]
 ```
 
-**Nulls become 0.** Neither the bridge nor `matrix_from_df` (nor `ols_from_df`, section 4) skips or reports null cells; they enter the model as zeros:
+**Nulls.** The bridge (`prepare_dataset`, `transform_dataset`) reads a null cell as 0, without a warning. `matrix_from_df` and `vector_from_df` turn it into NaN, so `ols_from_df` (section 4) returns NaN coefficients:
 
 ```odin
 x := w.column_new("x", .Float, 4)
@@ -192,9 +192,14 @@ w.append_null(&x)
 w.append_float(&x, 4)
 df := w.df_from(x, w.column_from_floats("y", []f64{2, 4, 6, 8}))
 defer w.destroy_dataframe(&df)
+X := l.matrix_from_df(&df, []string{"x"})
+defer l.matrix_free(&X)
+fmt.println(X.data) // [1, 2, NaN, 4]
 d2, _ := ml.prepare_dataset(&df, "y")
 defer ml.dataset_free(&d2)
-fmt.println(d2.X.data) // [1, 2, 0, 4]: the null became 0
+fmt.println(d2.X.data) // [1, 2, 0, 4]: the bridge reads the null as 0
+r := ml.ols_from_df(&df, "y", []string{"x"})
+fmt.println(r.beta) // [NaN, NaN]
 ```
 
 Drop or fill missing values in the DataFrame before you convert it, for example with a mask and `w.filter` (see the [`core` guide](core_guide.md#9-filtering-with-masks)).
@@ -261,7 +266,7 @@ defer delete(pred)
 fmt.println(pred) // [1.382409605664371, 2.996278914571205]
 ```
 
-`ols_from_df` fits directly from DataFrame columns and adds the constant itself (`add_intercept = true` by default). Remember that nulls become zeros (section 3):
+`ols_from_df` fits directly from DataFrame columns and adds the constant itself (`add_intercept = true` by default). A null cell gives NaN coefficients (section 3):
 
 ```odin
 df := w.df_from(

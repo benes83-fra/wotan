@@ -59,7 +59,7 @@ pcr_fit :: proc(
 	for i in 0 ..< cov.rows * cov.cols {cov.data[i] *= scale}
 
 	// 3. Eigendecomposition (Ascending order)
-	eigenvalues, eigenvectors := l.eigh(&cov, .Ascending, allocator)
+	eigenvalues, eigenvectors, _ := l.eigh(&cov, .Ascending, allocator) // xtx_simd output is exactly symmetric
 	defer delete(eigenvalues, allocator)
 	defer l.matrix_free(&eigenvectors)
 

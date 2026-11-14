@@ -103,7 +103,7 @@ fmt.println(M.rows, M.cols, l.matrix_at(&M, 2, 1)^) // 6 2 1500
 acf has 3 values, lag-1 = -0.6476
 ```
 
-`vector_from_df` and `matrix_from_df` read the raw column storage, so a null cell comes back as `0`. Filter out null rows first (see the core guide, section 9) if your column has any.
+`vector_from_df` and `matrix_from_df` turn a null cell into NaN, which then spreads through every result computed from it. Filter out null rows first (see the core guide, section 9) if your column has any.
 
 Many tests have a `df_*` twin that returns its results as a one-row DataFrame, which is handy for printing or for collecting results over several series: `df_adf`, `df_kpss`, `df_stationarity`, `df_ljung_box`, `df_jarque_bera`, `df_residual_diagnostics`. `df_acf` and `df_pacf` take a DataFrame column and return a `Column`.
 

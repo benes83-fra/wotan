@@ -15,12 +15,7 @@ pdpm_real_data_test :: proc(allocator: mem.Allocator) {
 	// 1. Load historical price data
 	fmt.println("--- Loading Market Data ---")
 	market_data := fin.load_market_data("data/spy_prices.csv", allocator)
-	defer {
-		delete(market_data.dates, allocator)
-		delete(market_data.prices, allocator)
-		delete(market_data.volumes, allocator)
-		delete(market_data.returns, allocator)
-	}
+	defer fin.free_market_data(&market_data, allocator)
 
 	fmt.printf("Loaded %d days of price data\n", market_data.n_obs)
 	fmt.printf(
@@ -46,13 +41,7 @@ pdpm_real_data_test :: proc(allocator: mem.Allocator) {
 	fmt.println("--- Loading Option Chain ---")
 	current_date := market_data.dates[market_data.n_obs - 1]
 	option_chain := fin.load_option_chain("data/spy_options.csv", current_date, allocator)
-	defer {
-		delete(option_chain.strikes, allocator)
-		delete(option_chain.expiries, allocator)
-		delete(option_chain.implied_vols, allocator)
-		delete(option_chain.market_prices, allocator)
-		delete(option_chain.option_types, allocator)
-	}
+	defer fin.free_option_chain(&option_chain, allocator)
 
 	fmt.printf("Loaded %d options\n", option_chain.n_options)
 	fmt.printf(
@@ -100,8 +89,7 @@ pdpm_real_data_test :: proc(allocator: mem.Allocator) {
 		1.0 / 252.0, // daily returns: price each option at its own expiry
 	)
 	defer {
-		delete(calibration.sdf.values, allocator)
-		delete(calibration.sdf.parameters, allocator)
+		fin.free_stochastic_discount_factor(&calibration.sdf, allocator)
 	}
 
 	fmt.printf("\nCalibration Results:\n")
@@ -163,8 +151,7 @@ pdpm_real_data_test :: proc(allocator: mem.Allocator) {
 		1.0 / 252.0, // daily returns: price each option at its own expiry
 	)
 	defer {
-		delete(calibration_power.sdf.values, allocator)
-		delete(calibration_power.sdf.parameters, allocator)
+		fin.free_stochastic_discount_factor(&calibration_power.sdf, allocator)
 	}
 
 	fmt.printf("Power Utility Results:\n")
@@ -183,8 +170,7 @@ pdpm_real_data_test :: proc(allocator: mem.Allocator) {
 		1.0 / 252.0, // daily returns: price each option at its own expiry
 	)
 	defer {
-		delete(calibration_quad.sdf.values, allocator)
-		delete(calibration_quad.sdf.parameters, allocator)
+		fin.free_stochastic_discount_factor(&calibration_quad.sdf, allocator)
 	}
 
 	fmt.printf("Quadratic SDF Results:\n")
@@ -224,8 +210,7 @@ pdpm_real_data_test :: proc(allocator: mem.Allocator) {
 		1.0 / 252.0, // daily returns: price each option at its own expiry
 	)
 	defer {
-		delete(calibration_exp.sdf.values, allocator)
-		delete(calibration_exp.sdf.parameters, allocator)
+		fin.free_stochastic_discount_factor(&calibration_exp.sdf, allocator)
 	}
 
 	fmt.printf("Exponential SDF Results:\n")

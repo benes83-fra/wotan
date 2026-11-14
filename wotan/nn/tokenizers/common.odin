@@ -12,9 +12,11 @@ import "core:strings"
 // Fixed-length model input from token ids a, or the pair a, b (b != nil):
 //   one text:  [CLS] a [SEP]          (add_special; else a alone)
 //   pair:      [CLS] a [SEP] b [SEP]  segment ids 0 … 0 1 … 1
-// truncated to max_len (one text: its end; a pair as HF's longest_first: the
-// last token of the longer one, of b on a tie, until both fit), then padded
-// with pad_id (segment 0). The attention mask is 1 on the real tokens.
+// A negative cls_id / sep_id is a token the vocabulary lacks: it is left out
+// (GPT-2 gets a, or a b, alone). Truncated to max_len (one text: its end; a
+// pair as HF's longest_first: the last token of the longer one, of b on a
+// tie, until both fit), then padded with pad_id (segment 0). The attention
+// mask is 1 on the real tokens.
 _pack :: proc(
 	a, b: []int,
 	max_len, cls_id, sep_id, pad_id: int,
@@ -30,17 +32,19 @@ _pack :: proc(
 	segments = make([]int, max_len, allocator)
 	n := 0
 	put :: proc(ids, mask, segments: []int, n: ^int, id, segment: int) {
+		if id < 0 {return} // a special token the vocabulary lacks
 		ids[n^], mask[n^], segments[n^] = id, 1, segment
 		n^ += 1
 	}
+	n_cls, n_sep := int(cls_id >= 0), int(sep_id >= 0)
 	switch {
 	case b != nil:
 		assert(
-			add_special && max_len >= 3,
-			"tokenizers: a sentence pair needs [CLS] / [SEP] and max_len ≥ 3",
+			add_special && max_len >= n_cls + 2 * n_sep,
+			"tokenizers: a sentence pair needs add_special and room for [CLS] / [SEP]",
 		)
 		la, lb := len(a), len(b)
-		for la + lb > max_len - 3 {
+		for la + lb > max_len - n_cls - 2 * n_sep {
 			if la > lb {la -= 1} else {lb -= 1}
 		}
 		put(ids, mask, segments, &n, cls_id, 0)
@@ -48,9 +52,9 @@ _pack :: proc(
 		put(ids, mask, segments, &n, sep_id, 0)
 		for id in b[:lb] {put(ids, mask, segments, &n, id, 1)}
 		put(ids, mask, segments, &n, sep_id, 1)
-	case add_special && max_len >= 2:
+	case add_special && max_len >= n_cls + n_sep:
 		put(ids, mask, segments, &n, cls_id, 0)
-		for id in a[:min(len(a), max_len - 2)] {put(ids, mask, segments, &n, id, 0)}
+		for id in a[:min(len(a), max_len - n_cls - n_sep)] {put(ids, mask, segments, &n, id, 0)}
 		put(ids, mask, segments, &n, sep_id, 0)
 	case:
 		for id in a[:min(len(a), max_len)] {put(ids, mask, segments, &n, id, 0)}

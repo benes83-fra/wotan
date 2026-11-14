@@ -39,7 +39,7 @@ import "core:math/rand"
 
 Inside the Wotan repository the path is relative, for example `import fin "../wotan/finance"` from `tests/`.
 
-**Inputs.** Prices take the spot `S`, strike `K`, time to expiry `T` in years, the continuously compounded risk-free rate `r` and the volatility `sigma`, all as `f64`. An `OptionType` is `.Call` or `.Put`. Only the trees (section 6) take a continuous dividend yield `q`; everything else in this part assumes no dividends.
+**Inputs.** Prices take the spot `S`, strike `K`, time to expiry `T` in years, the continuously compounded risk-free rate `r` and the volatility `sigma`, all as `f64`. An `OptionType` is `.Call` or `.Put`. A continuous dividend yield `q` is taken by the trees (section 6, a positional argument) and, as a last parameter `q` that defaults to 0, by `compute_greeks`, `price_and_greeks`, the finite-difference pricers (section 6) and the Longstaff–Schwartz pricers (section 7). Pass it by name, as in `compute_greeks(S, K, T, r, sigma, .Call, q = 0.02)`. The other procedures in this part assume no dividends.
 
 **Greek units.** There are two conventions; check the result type before you compare numbers:
 
@@ -85,6 +85,20 @@ Greeks{price = 0, delta = 0, gamma = 0, vega = 0, theta = 0, rho = 0}
 ```
 
 `price_and_greeks` is the same calculation, with the price returned separately.
+
+**Dividends.** With a continuous dividend yield q the stock is discounted at e^{−qT} in the Black–Scholes–Merton formula, and the Greeks follow:
+
+```odin
+// a continuous dividend yield, passed by name
+d := fin.compute_greeks(100, 110, 1, 0.03, 0.25, .Call, q = 0.02)
+fmt.printf("q = 2%%: price %.6f delta %.6f gamma %.6f vega %.6f theta %.6f rho %.6f\n", d.price, d.delta, d.gamma, d.vega, d.theta, d.rho)
+```
+
+```
+q = 2%: price 6.404075 delta 0.406194 gamma 0.015280 vega 0.382006 theta -0.013669 rho 0.342154
+```
+
+QuantLib's `AnalyticEuropeanEngine` on a `BlackScholesMertonProcess` with a 2% dividend curve gives the same numbers to 15 digits (its vega and rho divided by 100, its theta by 365).
 
 The edge cases are well defined:
 - **`T ≤ 0`:** the option is worth its payoff.
@@ -261,12 +275,12 @@ Four lattice methods price American options. Each returns the price, delta, gamm
 |---|---|---|---|
 | `american_option_binomial(S, K, T, r, sigma, q, type, n_steps = 1000)` | Cox–Ross–Rubinstein tree | yes | `early_exercise_premium` |
 | `american_option_trinomial(…)` | trinomial tree in log price | yes | `early_exercise_premium` |
-| `finite_difference_american(S, K, T, r, sigma, type, n_space = 200, n_time = 200)` | Crank–Nicolson, Brennan–Schwartz | no | — |
-| `crank_nicolson_european(…)` | the same grid without early exercise | no | — |
+| `finite_difference_american(S, K, T, r, sigma, type, n_space = 200, n_time = 200, allocator, q = 0)` | Crank–Nicolson, Brennan–Schwartz | yes, by name | — |
+| `crank_nicolson_european(…)` | the same grid without early exercise | yes, by name | — |
 
 There are wrappers that fix the type:
 - `american_call_binomial`, `american_put_binomial`, `american_call_trinomial` and `american_put_trinomial`, with `q = 0` as the default;
-- `crank_nicolson_call`, `crank_nicolson_put`, `fd_american_call` and `fd_american_put`.
+- `crank_nicolson_call`, `crank_nicolson_put`, `fd_american_call` and `fd_american_put`, which also take `q` by name.
 
 ```odin
 S, K, T, r, sigma, q := 100.0, 105.0, 1.0, 0.05, 0.3, 0.0
@@ -294,12 +308,27 @@ american call with q = 6%: 10.818777 premium 0.522659
 
 QuantLib's finite-difference engine on an 800 × 800 grid gives 12.569353 for the same put.
 
+The finite-difference grid takes a dividend yield by name; the drift becomes r − q:
+
+```odin
+// American put on a stock with a 3% dividend yield: tree and finite differences
+bq := fin.american_option_binomial(100, 100, 1, 0.05, 0.25, 0.03, .Put, 2000)
+fq := fin.finite_difference_american(100, 100, 1, 0.05, 0.25, .Put, 800, 800, q = 0.03)
+fmt.printf("q = 3%%: binomial %.6f  FD %.6f delta %.6f\n", bq.price, fq.price, fq.delta)
+```
+
+```
+q = 3%: binomial 8.881985  FD 8.882341 delta -0.424331
+```
+
+QuantLib's `FdBlackScholesVanillaEngine` with the same dividend curve converges to 8.88270 (Richardson extrapolation of its 4000 and 8000 grids); a 3200 × 3200 grid here gives 8.88267.
+
 The early exercise premium is the American price minus the European price on the same tree, so the tree's discretisation error mostly cancels.
 
 **Choosing a method:**
 - **Binomial tree:** the price oscillates as `n_steps` changes. With 2000 steps the put above is 0.002 off.
 - **Trinomial tree:** smoother. With 2000 steps it is 0.0006 off.
-- **Finite differences:** the most accurate for the same work. With a 400 × 400 grid the put is 4e-6 off. They use a log-price grid centred on the spot, so the price needs no interpolation, and two implicit half steps at the start (Rannacher) damp the oscillations Crank–Nicolson produces from the payoff kink. Use them when there are no dividends.
+- **Finite differences:** the most accurate for the same work. With a 400 × 400 grid the put is 4e-6 off. They use a log-price grid centred on the spot, so the price needs no interpolation, and two implicit half steps at the start (Rannacher) damp the oscillations Crank–Nicolson produces from the payoff kink. They take a dividend yield `q` like the trees.
 
 All the trees run in O(n_steps) memory.
 
@@ -311,7 +340,7 @@ Longstaff–Schwartz Monte Carlo decides exercise by regressing the continuation
 
 | Procedure | Option | Result |
 |---|---|---|
-| `lsm_american_vanilla(S_0, K, T, r, sigma, type, n_paths = 10000, n_steps = 50, n_exercise_dates = 10, poly_degree = 3)` | call or put | `LSM_Result`: price, delta, gamma, vega, theta |
+| `lsm_american_vanilla(S_0, K, T, r, sigma, type, n_paths = 10000, n_steps = 50, n_exercise_dates = 10, poly_degree = 3, allocator, q = 0)` | call or put | `LSM_Result`: price, delta, gamma, vega, theta |
 | `lsm_american_call`, `lsm_american_put` | the same with the type fixed | `LSM_Result` |
 | `lsm_american_asian_call(…)` | exercise pays the running average (S₀ included) minus K | `LSM_Result` |
 | `lsm_american_vanilla_reduced(…)` | antithetic paths plus the European option as control variate | `VR_LSM_Result`, with `variance_reduction` |
@@ -341,7 +370,20 @@ How it works:
 - **Exercise at t = 0:** the price is never below the intrinsic value.
 - **Greeks:** central differences on the same normals, with the exercise rule of the first run held fixed. By the envelope theorem the first derivatives are the same, and the fixed rule avoids the noise of re-fitting every bumped run. Delta uses ±1 % of spot and gamma ±5 %. Gamma remains the noisiest number.
 
-The LSM pricers take no dividend yield.
+All four LSM pricers take a continuous dividend yield `q` by name: the paths drift at r − q, and the European control variate uses the same q. A call on a dividend payer then carries an early-exercise premium:
+
+```odin
+rand.reset(1)
+bc := fin.lsm_american_vanilla_reduced(100, 95, 1, 0.03, 0.3, .Call, n_paths = 50_000, n_steps = 73, n_exercise_dates = 73, q = 0.07)
+eu := fin.compute_greeks(100, 95, 1, 0.03, 0.3, .Call, q = 0.07).price
+fmt.printf("Bermudan call, q = 7%%: %.4f (European %.4f)\n", bc.price, eu)
+```
+
+```
+Bermudan call, q = 7%: 12.2524 (European 11.5863)
+```
+
+QuantLib's finite-difference price of the same Bermudan call, with 73 exercise dates on a 365-day year, is 12.2465.
 
 ## 8. Fourier pricing (COS)
 
@@ -538,7 +580,9 @@ for _ in 0 ..< 4 {
 
 `mc_generate_sobol_normals(n_paths, n_steps, n_factors = 1, brownian_bridge = true, shift_seed = 0, allocator)` turns Sobol' points into standard normals laid out for the `mc_generate_*` generators. For Heston, use `n_factors = 2`. `n_steps · n_factors` may be at most 2048.
 
-**Shift the sequence.** Without a shift, path 0 is the origin of the sequence. It maps to z ≈ −6.4 in every dimension, which is far outside the 1/n_paths tail it stands for. That biases payoffs that are large in the tail, such as puts. A random digital shift (`shift_seed ≠ 0`) moves the origin. Averaging several shifts removes the bias and gives an error estimate.
+**Unshifted and shifted points.** Without a shift (`shift_seed = 0`), the normals start at point 1 of the sequence, as QuantLib's `SobolRsg` does. Point 0 is the origin, which would map to z ≈ −6.4 in every dimension, far outside the 1/n_paths tail it stands for, and would bias payoffs that are large in the tail, such as puts. A random digital shift (`shift_seed ≠ 0`) starts at point 0, so 2^k paths form a complete shifted net. Averaging several shifts gives an unbiased estimate and an error estimate.
+
+`make_sobol` itself returns the raw sequence, origin included, so that it matches SciPy point for point; pass `skip = 1` before mapping its points through an inverse CDF.
 
 A one-step European put, three ways:
 
@@ -566,8 +610,8 @@ for n in ([]int{1024, 16384}) {
 ```
 
 ```
-n  1024  error: random +0.10138  sobol +0.04280  sobol, 8 shifts +0.00787
-n 16384  error: random +0.04625  sobol +0.00249  sobol, 8 shifts -0.00035
+n  1024  error: random +0.10138  sobol +0.01695  sobol, 8 shifts +0.00787
+n 16384  error: random +0.04625  sobol +0.00135  sobol, 8 shifts -0.00035
 ```
 
 **The Brownian bridge.** By default (`brownian_bridge = true`), each path is built terminal value first, then the successive midpoints. The first and best-distributed Sobol' dimensions then carry the largest-scale features of the path. The output is still standardised increments, i.i.d. N(0, 1), so any generator accepts it.
@@ -699,24 +743,27 @@ With one step the variance stays at ξ₀ and the model reduces to Black–Schol
 | What | Reference | Agreement |
 |---|---|---|
 | `compute_greeks`: price and all Greeks, negative rates | QuantLib `AnalyticEuropeanEngine` | every printed digit (15) |
+| `compute_greeks` with q = 2 % and 5 %, calls and puts | QuantLib `AnalyticEuropeanEngine`, `BlackScholesMertonProcess` | 2e-15 relative |
 | `black_scholes_price` gradients | finite differences of the closed form | 9 digits (the accuracy of the differences) |
 | `implied_volatility` round trips: price 6e-28, σ = 5, T = 30, negative rates | the input σ | 1e-14 |
 | binomial tree, 2000 steps, q = 4 % | QuantLib `BinomialCRRVanillaEngine` | 5e-6 |
 | American finite differences, q = 0 | QuantLib `FdBlackScholesVanillaEngine` 800 × 800 | 4e-6 |
+| American finite differences, put q = 3 %, call q = 8 %, 3200 × 3200 | QuantLib `FdBlackScholesVanillaEngine`, extrapolated from 4000 and 8000 grids | 3e-5 |
 | Longstaff–Schwartz, 50 dates | QuantLib Bermudan, finite differences | 12.561 ± 0.018 vs 12.555 |
+| Longstaff–Schwartz with q, 73 dates, 100k paths: put q = 3 %, call q = 7 % | QuantLib Bermudan, finite differences | 13.5766 vs 13.5775; 12.2419 vs 12.2465 |
 | Heston COS, 7 days to 10 years, calls and puts, strikes 50–200 | QuantLib `AnalyticHestonEngine` | 12 digits; 3e-14 absolute far out of the money |
 | Bates COS | QuantLib `BatesEngine` | 12 digits |
 | Merton COS | Merton's series of Black–Scholes prices | 12 digits |
 | Sobol' points with skip | SciPy `qmc.Sobol` | exact |
+| unshifted Sobol' normals (points 1, 2, 3) | SciPy `norm.ppf` of `qmc.Sobol` points after `fast_forward(1)`; QuantLib `SobolRsg` | 2e-16 |
 | Brownian bridge, equal and unequal steps | QuantLib `BrownianBridge` | 15 digits |
 | Monte Carlo exotics (section 5) | NumPy, 2M paths | within one standard error |
 | GBM, Heston and Merton paths | E[e^{−rT}S_T] = S₀ | within Monte Carlo error |
 | fBm covariance (H = 0.3, with t = 0 and repeated times) | the exact covariance | within Monte Carlo error |
 
 **Known limitations:**
-- Dividends are supported only by the trees.
+- Dividends are a continuous yield, taken only by the procedures listed in section 1 (not by `implied_volatility` or the Monte Carlo and Fourier pricers); discrete cash dividends are not modelled.
 - The `mc_generate_*` procedures require an allocator argument.
-- The unshifted Sobol' normals start at the origin (section 10).
 
 ## 13. Quick reference
 

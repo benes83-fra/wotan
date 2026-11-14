@@ -395,7 +395,7 @@ Both integrals are exact on each piece where the hazard is constant. Coupon date
 - **Survival.** `get_survival_prob(t, curve)` gives the survival probability; the last hazard extends beyond the last tenor.
 - **Pricing on the curve.** `price_cds_full(notional, coupon, maturity, curve, payment_freq)` returns:
   - `upfront_pct`: protection − coupon × annuity, per unit notional;
-  - `rpv01`: per 1M notional, whatever the notional argument;
+  - `rpv01`: the value of 1 bp of running coupon on the notional, annuity × 1e-4 × notional, in the same currency units as the two legs;
   - `premium_leg_pv` and `protection_pv`.
 
 ```odin
@@ -426,7 +426,7 @@ survival 1Y 0.9900868995 5Y 0.9109650433 12Y 0.7500571094
    5Y at its par spread: upfront -5.55e-17
    7Y at its par spread: upfront -4.16e-17
   10Y at its par spread: upfront -1.39e-17
-5Y with a 100bp coupon: upfront 0.00445702 rpv01 445.7024 premium 445702.4158 protection 490272.6574
+5Y with a 100bp coupon: upfront 0.00445702 rpv01 4457.0242 premium 445702.4158 protection 490272.6574
 ```
 
 With a 2% hazard and 40% recovery, the fair spread is close to λ(1 − R) = 120 bp; at 120 bp the buyer's PV is almost zero. Python numerical integration of the same legs gives the prices, the hazards and the 5-year legs above to all printed digits.
@@ -655,7 +655,7 @@ SciPy (`kendalltau`, `spearmanr`, and maximum likelihood on the same log-densiti
 - **Flat rate-model curve.** The Hull-White and G2++ Monte Carlo pricers, `hw_price_cap_floor_strip`, `compute_hw2f_swap_variance` and `hw2f_mc_bermudan_option` take a flat initial curve r0. The tensor caplet pricers accept any curve through F and P.
 - **Swaption scope.** `SwaptionSpec` and the Bermudan pricer assume annual (or `delta`-spaced) fixed payments; the Bermudan is payer only.
 - **Overnight coupons in progress.** Seasoned overnight coupons with lookback, lockout or observation shift give NaN.
-- **Ignored inputs.** `n_steps` is ignored throughout (sampling is exact), and `CDS_Price_Result.rpv01` is per 1M notional whatever the notional argument.
+- **Ignored inputs.** `n_steps` is ignored throughout (sampling is exact).
 - **CDO pools.** The CDO pricers assume a homogeneous pool.
 
 ## 11. Quick reference

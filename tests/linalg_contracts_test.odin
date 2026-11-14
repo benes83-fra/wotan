@@ -1,5 +1,6 @@
 package tests
 
+import fin "../wotan/finance"
 import l "../wotan/linalg"
 import "core:fmt"
 import "core:math"
@@ -12,6 +13,8 @@ import "core:mem"
 //   their input to machine precision with orthonormal factors
 // - lstsq agrees across QR / Cholesky / SVD, and the Cholesky path does not
 //   panic on rank-deficient data (minimum-norm solution instead)
+// - factor_model_covariance falls back to the pseudo-inverse when the factor
+//   covariance is singular (matrix_inverse returns ok = false)
 
 linalg_contracts_test :: proc(allocator: mem.Allocator) {
 	seed_test(#procedure)
@@ -91,8 +94,16 @@ linalg_contracts_test :: proc(allocator: mem.Allocator) {
 		defer l.matrix_free(&AAi)
 		inv_err := 0.0
 		for v, i in AAi.data {inv_err = max(inv_err, abs(v - I.data[i]))}
-		expect(&passed, &total, ok && ok_inv && vrel(xs, x) < 1e-10 && inv_err < 1e-10,
-			fmt.tprintf("LU n=64: solve rel err %.1e, max |A A⁻¹ - I| %.1e", vrel(xs, x), inv_err))
+		expect(
+			&passed,
+			&total,
+			ok && ok_inv && vrel(xs, x) < 1e-10 && inv_err < 1e-10,
+			fmt.tprintf(
+				"LU n=64: solve rel err %.1e, max |A A⁻¹ - I| %.1e",
+				vrel(xs, x),
+				inv_err,
+			),
+		)
 	}
 
 	// 2. eigh (n = 80: thousands of rotations)
@@ -103,7 +114,7 @@ linalg_contracts_test :: proc(allocator: mem.Allocator) {
 		S := l.matrix_new(f64, n, n)
 		defer l.matrix_free(&S)
 		for i in 0 ..< n {for j in 0 ..< n {s := 0.0; for k in 0 ..< n {s += at(B, k, i) * at(B, k, j)}; S.data[i * n + j] = s}}
-		W, V := l.eigh(&S)
+		W, V, eig_ok := l.eigh(&S)
 		defer {delete(W); l.matrix_free(&V)}
 		SV := mm(S, V)
 		defer l.matrix_free(&SV)
@@ -112,8 +123,17 @@ linalg_contracts_test :: proc(allocator: mem.Allocator) {
 		for i in 0 ..< n {for j in 0 ..< n {VW.data[i * n + j] = at(V, i, j) * W[j]}}
 		ascending := true
 		for i in 1 ..< n {if W[i] < W[i - 1] {ascending = false}}
-		expect(&passed, &total, rel(SV, VW) < 1e-12 && orth(V, n) < 1e-11 && ascending,
-			fmt.tprintf("eigh n=80: ||SV - VW||/||VW|| %.1e, ||VᵀV - I|| %.1e, ascending %v", rel(SV, VW), orth(V, n), ascending))
+		expect(
+			&passed,
+			&total,
+			eig_ok && rel(SV, VW) < 1e-12 && orth(V, n) < 1e-11 && ascending,
+			fmt.tprintf(
+				"eigh n=80: ||SV - VW||/||VW|| %.1e, ||VᵀV - I|| %.1e, ascending %v",
+				rel(SV, VW),
+				orth(V, n),
+				ascending,
+			),
+		)
 	}
 
 	// 3. QR (64×48 = three 16-wide blocks) and thin R
@@ -129,8 +149,18 @@ linalg_contracts_test :: proc(allocator: mem.Allocator) {
 		Rt := l.qr_decompose_thin(&A)
 		defer l.matrix_free(&Rt)
 		thin_same := rel(Rt, R) < 1e-14
-		expect(&passed, &total, rel(QR, A) < 1e-13 && orth(Q, Q.cols) < 1e-12 && below < 1e-12 && thin_same,
-			fmt.tprintf("QR 64x48: ||QR - A|| %.1e, ||QᵀQ - I|| %.1e, below-diag %.1e, thin R matches %v", rel(QR, A), orth(Q, Q.cols), below, thin_same))
+		expect(
+			&passed,
+			&total,
+			rel(QR, A) < 1e-13 && orth(Q, Q.cols) < 1e-12 && below < 1e-12 && thin_same,
+			fmt.tprintf(
+				"QR 64x48: ||QR - A|| %.1e, ||QᵀQ - I|| %.1e, below-diag %.1e, thin R matches %v",
+				rel(QR, A),
+				orth(Q, Q.cols),
+				below,
+				thin_same,
+			),
+		)
 	}
 
 	// 4. SVD: both methods on a square and a tall matrix
@@ -156,8 +186,16 @@ linalg_contracts_test :: proc(allocator: mem.Allocator) {
 				worst_orth = max(worst_orth, orth(U, k), orth(V, k))
 			}
 		}
-		expect(&passed, &total, worst_recon < 1e-13 && worst_orth < 1e-10,
-			fmt.tprintf("SVD (Jacobi + GolubReinsch, 50x50 / 120x40): recon %.1e, orthogonality %.1e", worst_recon, worst_orth))
+		expect(
+			&passed,
+			&total,
+			worst_recon < 1e-13 && worst_orth < 1e-10,
+			fmt.tprintf(
+				"SVD (Jacobi + GolubReinsch, 50x50 / 120x40): recon %.1e, orthogonality %.1e",
+				worst_recon,
+				worst_orth,
+			),
+		)
 	}
 
 	// 5. lstsq: methods agree (120×40 is where Auto selects Cholesky)
@@ -177,8 +215,16 @@ linalg_contracts_test :: proc(allocator: mem.Allocator) {
 			worst = max(worst, vrel(r.beta, beta))
 			if method == .Auto {auto_used = r.method_used}
 		}
-		expect(&passed, &total, worst < 1e-10,
-			fmt.tprintf("lstsq 120x40 noise-free: all methods recover beta (worst rel err %.1e, Auto used %v)", worst, auto_used))
+		expect(
+			&passed,
+			&total,
+			worst < 1e-10,
+			fmt.tprintf(
+				"lstsq 120x40 noise-free: all methods recover beta (worst rel err %.1e, Auto used %v)",
+				worst,
+				auto_used,
+			),
+		)
 	}
 
 	// 6. lstsq Cholesky on rank-deficient X: no panic, minimum-norm solution
@@ -195,8 +241,58 @@ linalg_contracts_test :: proc(allocator: mem.Allocator) {
 		r := l.lstsq(&X, y, .Cholesky)
 		defer l.lstsq_result_free(&r, allocator)
 		min_norm := []f64{1, 0, -1, 1} // argmin ||beta|| over all exact fits
-		expect(&passed, &total, r.success && r.rank == 3 && vrel(r.beta, min_norm) < 1e-10,
-			fmt.tprintf("lstsq Cholesky, rank-deficient: rank %d via %v, beta %v (minimum norm 1, 0, -1, 1)", r.rank, r.method_used, r.beta))
+		expect(
+			&passed,
+			&total,
+			r.success && r.rank == 3 && vrel(r.beta, min_norm) < 1e-10,
+			fmt.tprintf(
+				"lstsq Cholesky, rank-deficient: rank %d via %v, beta %v (minimum norm 1, 0, -1, 1)",
+				r.rank,
+				r.method_used,
+				r.beta,
+			),
+		)
+	}
+
+	// 7. matrix_inverse caller: factor_model_covariance with collinear factors
+	//    (f2 = 2·f1, singular Σ_f) uses the pseudo-inverse: minimum-norm betas,
+	//    numpy pinv(Σ_f) cov(f, r) = lstsq(F_c, R_c) minimum norm
+	{
+		f1 := []f64{0.01, -0.02, 0.015, 0.03, -0.01, 0.005}
+		r := [6][2]f64 {
+			{0.02, 0.01},
+			{-0.03, -0.01},
+			{0.02, 0.0},
+			{0.05, 0.02},
+			{-0.02, 0.01},
+			{0.01, -0.005},
+		}
+		assets := make([][]f64, 6)
+		factors := make([][]f64, 6)
+		for i in 0 ..< 6 {
+			assets[i] = make([]f64, 2)
+			assets[i][0], assets[i][1] = r[i][0], r[i][1]
+			factors[i] = make([]f64, 2)
+			factors[i][0], factors[i][1] = f1[i], 2 * f1[i]
+		}
+		fm := fin.factor_model_covariance(assets, factors)
+		ref_b := [2][2]f64{{0.325, 0.65}, {0.08125, 0.1625}}
+		ref_idio := [2]f64{1.16666666666672e-05, 7.13541666666667e-05}
+		worst := 0.0
+		for a in 0 ..< 2 {
+			for f in 0 ..< 2 {worst = max(worst, abs(fm.betas[a][f] - ref_b[a][f]))}
+			worst = max(worst, abs(fm.idiosyncratic_var[a] - ref_idio[a]) / ref_idio[a])
+		}
+		expect(
+			&passed,
+			&total,
+			worst < 1e-10,
+			fmt.tprintf(
+				"factor_model_covariance, singular Σ_f: pseudo-inverse betas %v (numpy 0.325 0.65 / 0.08125 0.1625), worst err %.1e",
+				fm.betas,
+				worst,
+			),
+		)
 	}
 
 	fmt.printf("Linear algebra summary: %d/%d passed\n", passed, total)

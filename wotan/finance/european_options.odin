@@ -148,10 +148,11 @@ _scalar_tensor :: proc(val: f64, allocator: mem.Allocator) -> ^t.Tensor {
 // ============================================================================
 // Closed-form Black-Scholes Price and Greeks
 // ============================================================================
-// Analytic price, delta, gamma, vega, theta and rho. Vega and rho are per 1%
-// move, theta per calendar day (−∂V/∂T / 365). At T ≤ 0 the option is worth its
-// payoff; with σ ≤ 0 the forward is certain and the option is worth the
-// discounted payoff of the forward.
+// Analytic price, delta, gamma, vega, theta and rho (Black-Scholes-Merton with
+// a continuous dividend yield q, passed by name: `q = 0.02`). Vega and rho are
+// per 1% move of σ and r, theta per calendar day (−∂V/∂T / 365). At T ≤ 0 the
+// option is worth its payoff; with σ ≤ 0 the forward is certain and the option
+// is worth the discounted payoff of the forward.
 // ============================================================================
 compute_greeks :: proc(
 	S: f64,
@@ -161,6 +162,7 @@ compute_greeks :: proc(
 	sigma: f64,
 	opt: OptionType,
 	allocator: mem.Allocator = context.allocator,
+	q: f64 = 0.0,
 ) -> Greeks {
 	call := opt == .Call
 	if T <= 0.0 {
@@ -168,40 +170,42 @@ compute_greeks :: proc(
 		return Greeks{price = max(K - S, 0), delta = -1 if S < K else 0}
 	}
 	D := math.exp(-r * T)
+	Dq := math.exp(-q * T)
 	if sigma <= 0.0 {
-		itm := S > K * D if call else S < K * D
+		itm := S * Dq > K * D if call else S * Dq < K * D
 		if !itm {return Greeks{}}
 		sgn := 1.0 if call else -1.0
 		return Greeks {
-			price = sgn * (S - K * D),
-			delta = sgn,
-			theta = -sgn * r * K * D / 365.0,
+			price = sgn * (S * Dq - K * D),
+			delta = sgn * Dq,
+			theta = sgn * (q * S * Dq - r * K * D) / 365.0,
 			rho = sgn * K * T * D / 100.0,
 		}
 	}
 
 	sqrt_T := math.sqrt(T)
 	sig_sqrt_T := sigma * sqrt_T
-	d1 := (math.ln(S / K) + (r + 0.5 * sigma * sigma) * T) / sig_sqrt_T
+	d1 := (math.ln(S / K) + (r - q + 0.5 * sigma * sigma) * T) / sig_sqrt_T
 	d2 := d1 - sig_sqrt_T
 	pdf_d1 := _bs_pdf(d1)
-	decay := S * pdf_d1 * sigma / (2.0 * sqrt_T) // −∂V/∂T of the volatility term
+	SDq := S * Dq
+	decay := SDq * pdf_d1 * sigma / (2.0 * sqrt_T) // −∂V/∂T of the volatility term
 
 	g := Greeks {
-		gamma = pdf_d1 / (S * sig_sqrt_T),
-		vega  = S * pdf_d1 * sqrt_T / 100.0,
+		gamma = Dq * pdf_d1 / (S * sig_sqrt_T),
+		vega  = SDq * pdf_d1 * sqrt_T / 100.0,
 	}
 	if call {
 		Nd1, Nd2 := _bs_cdf(d1), _bs_cdf(d2)
-		g.price = S * Nd1 - K * D * Nd2
-		g.delta = Nd1
-		g.theta = (-decay - r * K * D * Nd2) / 365.0
+		g.price = SDq * Nd1 - K * D * Nd2
+		g.delta = Dq * Nd1
+		g.theta = (-decay - r * K * D * Nd2 + q * SDq * Nd1) / 365.0
 		g.rho = K * T * D * Nd2 / 100.0
 	} else {
 		Nm1, Nm2 := _bs_cdf(-d1), _bs_cdf(-d2)
-		g.price = K * D * Nm2 - S * Nm1
-		g.delta = -Nm1
-		g.theta = (-decay + r * K * D * Nm2) / 365.0
+		g.price = K * D * Nm2 - SDq * Nm1
+		g.delta = -Dq * Nm1
+		g.theta = (-decay + r * K * D * Nm2 - q * SDq * Nm1) / 365.0
 		g.rho = -K * T * D * Nm2 / 100.0
 	}
 	return g
@@ -299,6 +303,7 @@ implied_volatility :: proc(
 // ============================================================================
 // Convenience: Price + Greeks in one call
 // ============================================================================
+// q: continuous dividend yield, as in compute_greeks
 price_and_greeks :: proc(
 	S: f64,
 	K: f64,
@@ -307,11 +312,12 @@ price_and_greeks :: proc(
 	sigma: f64,
 	opt: OptionType,
 	allocator: mem.Allocator = context.allocator,
+	q: f64 = 0.0,
 ) -> (
 	price: f64,
 	greeks: Greeks,
 ) {
-	greeks = compute_greeks(S, K, T, r, sigma, opt, allocator)
+	greeks = compute_greeks(S, K, T, r, sigma, opt, allocator, q)
 	return greeks.price, greeks
 }
 // ============================================================================

@@ -30,8 +30,7 @@ pdpm_test :: proc(allocator: mem.Allocator) {
 	// Linear SDF: M = a + b*R_m
 	sdf_linear := fin.sdf_linear_factor(market_returns, risk_free_rate, allocator)
 	defer {
-		delete(sdf_linear.values, allocator)
-		delete(sdf_linear.parameters, allocator)
+		fin.free_stochastic_discount_factor(&sdf_linear, allocator)
 	}
 	fmt.printf(
 		"Linear SDF: E[M] = %.4f (Target 1/(1+rf): %.4f)\n",
@@ -62,27 +61,13 @@ pdpm_test :: proc(allocator: mem.Allocator) {
 	strike := 105.0
 
 	// Price Call using Linear SDF
-	call_res := fin.price_european_call(
-		spot_price,
-		strike,
-		1.0,
-		&sdf_linear,
-		terminal_prices,
-		allocator,
-	)
-	defer delete(call_res.state_prices, allocator)
+	call_res := fin.price_european_call(strike, &sdf_linear, terminal_prices, allocator)
+	defer fin.free_pdpm_result(&call_res, allocator)
 	fmt.printf("European Call (K=%.0f) Price: $%.4f\n", strike, call_res.price)
 
 	// Price Put
-	put_res := fin.price_european_put(
-		spot_price,
-		strike,
-		1.0,
-		&sdf_linear,
-		terminal_prices,
-		allocator,
-	)
-	defer delete(put_res.state_prices, allocator)
+	put_res := fin.price_european_put(strike, &sdf_linear, terminal_prices, allocator)
+	defer fin.free_pdpm_result(&put_res, allocator)
 	fmt.printf("European Put  (K=%.0f) Price: $%.4f\n", strike, put_res.price)
 
 	// Check Put-Call Parity: C - P = S - K * E[M]
@@ -97,7 +82,7 @@ pdpm_test :: proc(allocator: mem.Allocator) {
 	fmt.println("\n--- Dybvig Distributional Pricing ---")
 
 	dybvig_res := fin.dybvig_distributional_price(terminal_prices, &sdf_linear, 50, allocator)
-	defer delete(dybvig_res.state_prices, allocator)
+	defer fin.free_pdpm_result(&dybvig_res, allocator)
 
 	fmt.printf("Dybvig Price of Underlying: $%.4f (Spot: $%.2f)\n", dybvig_res.price, spot_price)
 	fmt.printf("Expected Payoff (Physical): $%.4f\n", dybvig_res.expected_payoff)
@@ -176,8 +161,7 @@ pdpm2_test :: proc(allocator: mem.Allocator) {
 		allocator,
 	)
 	defer {
-		delete(sdf_power.values, allocator)
-		delete(sdf_power.parameters, allocator)
+		fin.free_stochastic_discount_factor(&sdf_power, allocator)
 	}
 
 	fmt.printf("Power Utility SDF:\n")
@@ -205,8 +189,7 @@ pdpm2_test :: proc(allocator: mem.Allocator) {
 		allocator,
 	)
 	defer {
-		delete(sdf_linear.values, allocator)
-		delete(sdf_linear.parameters, allocator)
+		fin.free_stochastic_discount_factor(&sdf_linear, allocator)
 	}
 
 	fmt.printf("Linear Factor SDF:\n")
@@ -251,7 +234,7 @@ pdpm2_test :: proc(allocator: mem.Allocator) {
 
 	result := fin.price_payoff(payoffs, &sdf_power, nil, allocator)
 	defer {
-		delete(result.state_prices, allocator)
+		fin.free_pdpm_result(&result, allocator)
 	}
 
 	fmt.printf("PDPM Pricing Results:\n")
@@ -283,15 +266,8 @@ pdpm2_test :: proc(allocator: mem.Allocator) {
 	defer delete(terminal_prices, allocator)
 
 	// Price European Call
-	call_result := fin.price_european_call(
-		spot_price,
-		strike_price,
-		time_to_maturity,
-		&sdf_linear,
-		terminal_prices,
-		allocator,
-	)
-	defer delete(call_result.state_prices, allocator)
+	call_result := fin.price_european_call(strike_price, &sdf_linear, terminal_prices, allocator)
+	defer fin.free_pdpm_result(&call_result, allocator)
 
 	fmt.printf(
 		"European Call Option (S=%.0f, K=%.0f, T=%.1f):\n",
@@ -304,15 +280,8 @@ pdpm2_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("  Risk Premium: %.4f\n", call_result.risk_premium)
 
 	// Price European Put
-	put_result := fin.price_european_put(
-		spot_price,
-		strike_price,
-		time_to_maturity,
-		&sdf_linear,
-		terminal_prices,
-		allocator,
-	)
-	defer delete(put_result.state_prices, allocator)
+	put_result := fin.price_european_put(strike_price, &sdf_linear, terminal_prices, allocator)
+	defer fin.free_pdpm_result(&put_result, allocator)
 
 	fmt.printf(
 		"\nEuropean Put Option (S=%.0f, K=%.0f, T=%.1f):\n",
@@ -333,14 +302,13 @@ pdpm2_test :: proc(allocator: mem.Allocator) {
 	strike_high := 110.0
 
 	bull_spread_result := fin.price_bull_spread(
-		spot_price,
 		strike_low,
 		strike_high,
 		&sdf_linear,
 		terminal_prices,
 		allocator,
 	)
-	defer delete(bull_spread_result.state_prices, allocator)
+	defer fin.free_pdpm_result(&bull_spread_result, allocator)
 
 	fmt.printf("Bull Spread (Long Call K=%.0f, Short Call K=%.0f):\n", strike_low, strike_high)
 	fmt.printf("  Price: %.4f\n", bull_spread_result.price)
@@ -358,7 +326,7 @@ pdpm2_test :: proc(allocator: mem.Allocator) {
 		50, // 50 quantiles
 		allocator,
 	)
-	defer delete(dybvig_result.state_prices, allocator)
+	defer fin.free_pdpm_result(&dybvig_result, allocator)
 
 	fmt.printf("Dybvig Distributional Pricing:\n")
 	fmt.printf("  Price: %.4f\n", dybvig_result.price)
@@ -412,7 +380,7 @@ pdpm2_test :: proc(allocator: mem.Allocator) {
 	}
 
 	continuous_result := fin.price_payoff_continuous(call_payoff_fn, &spd, allocator)
-	defer delete(continuous_result.state_prices, allocator)
+	defer fin.free_pdpm_result(&continuous_result, allocator)
 
 	fmt.printf("Continuous Call Option Pricing:\n")
 	fmt.printf("  Price: %.4f\n", continuous_result.price)

@@ -234,6 +234,7 @@ layer_parameters :: proc(layer: ^Layer, out: ^[dynamic]^t.Tensor, all: bool = fa
 		add_linear(out, &l.linear)
 		add_mha(out, &l.mha)
 	case MambaLayer:
+		add(out, l.norm.gamma)
 		add_linear(out, &l.proj_x)
 		add_linear(out, &l.proj_B)
 		add_linear(out, &l.proj_C)

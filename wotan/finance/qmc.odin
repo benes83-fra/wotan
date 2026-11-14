@@ -22,7 +22,9 @@ SobolSequence :: struct {
 }
 
 // Sequence of `dims` dimensions (at most 2048) starting at point `skip`;
-// shift_seed ≠ 0 applies a digital shift drawn from that seed
+// shift_seed ≠ 0 applies a digital shift drawn from that seed. Point 0 of the
+// unshifted sequence is the origin (as in scipy); pass skip = 1 (QuantLib's
+// SobolRsg) before mapping the points through an inverse CDF.
 make_sobol :: proc(
 	dims: int,
 	skip: u64 = 0,
@@ -214,10 +216,12 @@ brownian_bridge_transform :: proc(b: ^BrownianBridge, z, out: []f64) {
 
 // n_paths × n_steps × n_factors standard normals from a Sobol' sequence, in the
 // layout of the mc_generate_* path generators (path-major, then step, then
-// factor: e.g. Heston's (Z_v, Z_⊥) per step). Points are taken from the origin
-// on, so 2^k paths form a complete net, and each coordinate is mapped by
-// Φ⁻¹((x + ½)/2^32), finite at the origin; shift_seed ≠ 0 randomizes by a
-// digital shift (average independent shifts for an error estimate). With brownian_bridge, factor f's
+// factor: e.g. Heston's (Z_v, Z_⊥) per step). Without a shift (shift_seed = 0)
+// the points start at index 1, skipping the origin as QuantLib's SobolRsg does:
+// the origin would map to z ≈ −6.4 in every dimension. shift_seed ≠ 0
+// randomizes by a digital shift (average independent shifts for an error
+// estimate) and starts at index 0, so 2^k paths form a complete shifted net.
+// Each coordinate is mapped by Φ⁻¹((x + ½)/2^32). With brownian_bridge, factor f's
 // normals come from a bridge whose variate j uses dimension j·n_factors + f, so
 // the terminal values of all factors take the first dimensions. n_steps ·
 // n_factors ≤ 2048.
@@ -230,7 +234,7 @@ mc_generate_sobol_normals :: proc(
 ) -> []f64 {
 	dims := n_steps * n_factors
 	out := make([]f64, n_paths * dims, allocator)
-	s := make_sobol(dims, 0, shift_seed, context.temp_allocator)
+	s := make_sobol(dims, 1 if shift_seed == 0 else 0, shift_seed, context.temp_allocator)
 	defer free_sobol(&s, context.temp_allocator)
 	bb: BrownianBridge
 	if brownian_bridge {bb = make_brownian_bridge(n_steps, context.temp_allocator)}

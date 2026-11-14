@@ -130,23 +130,29 @@ persistence_roundtrip_test :: proc(allocator: mem.Allocator) {
 			len(opt2.parameters) == len(ps)
 		steps_ok := len(opt2.steps) == len(opt.steps)
 		for n, i in opt2.steps {steps_ok &&= n == opt.steps[i]}
-		// a checkpoint of the former format (optimizer type 1, one shared step
-		// count): every parameter continues from timestep
+		// a checkpoint of the former format (optimizer type 1: no frozen flags,
+		// one shared step count): every parameter continues from timestep
 		old_ok := false
 		{
 			data, _ := os.read_entire_file(a, context.allocator)
 			defer delete(data)
-			tail := 4 + 8 + 5 * 8 + 4 + 8 * len(ps) // type, timestep, hyperparameters, count, steps
+			all := nn.sequential_parameters(seq, context.temp_allocator, all = true)
+			flags := 4 + 4 * len(all) // count and one frozen flag per parameter
+			delete(all)
+			tail := 4 + flags + 8 + 5 * 8 + 4 + 8 * len(ps) // type, flags, timestep, hyperparameters, count, steps
 			for p in ps {tail += 2 * (4 + 8 * len(p.data.data))}
-			old := data[:len(data) - 8 * len(ps)]
 			type_at := len(data) - tail
-			old_type := old[type_at]
-			old[type_at] = 1
+			old_type := data[type_at]
+			old := make([dynamic]u8, context.allocator)
+			defer delete(old)
+			append(&old, ..data[:type_at])
+			append(&old, 1, 0, 0, 0)
+			append(&old, ..data[type_at + 4 + flags:len(data) - 8 * len(ps)])
 			c := file(&files, "all_old")
-			_ = os.write_entire_file(c, old)
+			_ = os.write_entire_file(c, old[:])
 			seq3, opt3, _, loaded3 := nn.load_checkpoint(c)
 			if loaded3 {
-				old_ok = old_type == 2 && opt3.timestep == 7 && len(opt3.steps) == len(ps)
+				old_ok = old_type == 3 && opt3.timestep == 7 && len(opt3.steps) == len(ps)
 				for n in opt3.steps {old_ok &&= n == 7}
 				for m, i in opt3.moment_1 {old_ok &&= mem.compare_ptrs(raw_data(m), raw_data(opt2.moment_1[i]), 8 * len(m)) == 0}
 				nn.sequential_free(seq3)

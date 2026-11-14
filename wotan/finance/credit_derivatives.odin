@@ -269,7 +269,7 @@ CDS_Curve :: struct {
 
 CDS_Price_Result :: struct {
 	upfront_pct:    f64, // Upfront to the protection buyer per unit notional (0.01 = 1%)
-	rpv01:          f64, // PV of 1bp running (incl. accrual on default) per $1M notional
+	rpv01:          f64, // PV of 1bp running (incl. accrual on default) on the notional: annuity × 1e-4 × notional
 	premium_leg_pv: f64, // coupon × annuity × notional
 	protection_pv:  f64,
 }
@@ -368,7 +368,7 @@ price_cds_full :: proc(
 	)
 	return CDS_Price_Result {
 		upfront_pct = protection - fixed_coupon * annuity,
-		rpv01 = annuity * 1e-4 * 1_000_000.0,
+		rpv01 = annuity * 1e-4 * notional,
 		premium_leg_pv = fixed_coupon * annuity * notional,
 		protection_pv = protection * notional,
 	}

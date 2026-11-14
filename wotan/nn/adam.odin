@@ -18,6 +18,10 @@ import "core:mem"
 // As torch, every parameter counts its own steps for the bias correction:
 // only steps that update it (it has a gradient) count, so a parameter added
 // later or left out of some steps starts its correction from its first update.
+// adam_zero_grad drops the gradients (torch's zero_grad(set_to_none=True)):
+// tensor_backward allocates a gradient for every parameter it reaches, and a
+// parameter without one (e.g. an MoE expert no token was routed to) is left
+// out of the step entirely, with no moment update and no weight decay.
 
 Adam :: struct {
 	parameters:    [dynamic]^t.Tensor,
@@ -101,7 +105,7 @@ adam_step_scheduled :: proc(opt: ^Adam, s: optim.LR_Schedule, step: int) {
 _adam_step :: proc(opt: ^Adam, schedule: ^optim.LR_Schedule, step: int) {
 	opt.timestep += 1
 	for param, i in opt.parameters {
-		if !param.requires_grad || param.grad.data == nil {continue}
+		if !param.requires_grad || !t.tensor_has_grad(param) {continue}
 		opt.steps[i] += 1
 		lr := opt.learning_rate * opt.lr_scales[i]
 		if schedule != nil && opt.lr_scales[i] != 1 {
@@ -132,9 +136,18 @@ adam_free :: proc(opt: ^Adam) {
 	delete(opt.parameters)
 }
 
+// Drops the gradients of all registered parameters (torch's set_to_none): a
+// parameter has no gradient until the next tensor_backward reaches it. The
+// buffers are kept and zero-filled by that backward pass, so nothing is
+// allocated per step.
 adam_zero_grad :: proc(opt: ^Adam) {
-	for param in opt.parameters {
-		t.tensor_zero_grad(param)
+	_drop_grads(opt.parameters[:])
+}
+
+@(private)
+_drop_grads :: proc(params: []^t.Tensor) {
+	for param in params {
+		t.tensor_drop_grad(param)
 	}
 }
 
@@ -144,13 +157,13 @@ adam_zero_grad :: proc(opt: ^Adam) {
 clip_grad_norm_params :: proc(params: []^t.Tensor, max_norm: f64) -> f64 {
 	total_sq := 0.0
 	for param in params {
-		if param.grad.data != nil {total_sq += l.dot_simd(param.grad.data, param.grad.data)}
+		if t.tensor_has_grad(param) {total_sq += l.dot_simd(param.grad.data, param.grad.data)}
 	}
 	total := math.sqrt(total_sq)
 	coef := max_norm / (total + 1e-6)
 	if coef < 1.0 {
 		for param in params {
-			if param.grad.data != nil {l.vec_scale_simd(param.grad.data, coef, param.grad.data)}
+			if t.tensor_has_grad(param) {l.vec_scale_simd(param.grad.data, coef, param.grad.data)}
 		}
 	}
 	return total

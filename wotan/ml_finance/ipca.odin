@@ -167,7 +167,7 @@ ipca_fit_portfolios :: proc(
 				QQ.data[a * L + b] = s
 			}
 		}
-		ev, V := l.eigh(&QQ, .Descending, context.temp_allocator)
+		ev, V, _ := l.eigh(&QQ, .Descending, context.temp_allocator) // QQ is exactly symmetric
 		defer {delete(ev, context.temp_allocator); l.matrix_free(&V)}
 		for a in 0 ..< L {for k in 0 ..< Kt {G.data[a * Kt + k] = V.data[a * L + k]}}
 		for k in 0 ..< K {
@@ -278,7 +278,7 @@ _ipca_normalise :: proc(G: ^l.Matrix(f64), F: ^l.Matrix(f64), K: int, intercept:
 			M.data[i * K + j] = s
 		}
 	}
-	ev, R2 := l.eigh(&M, .Descending, context.temp_allocator)
+	ev, R2, _ := l.eigh(&M, .Descending, context.temp_allocator) // M is exactly symmetric
 	defer {delete(ev, context.temp_allocator); l.matrix_free(&R2)}
 	// Gb R1^-1: row a solves x R1 = Gb[a] (x C' = g: forward through the columns of C')
 	tmp := make([]f64, K, context.temp_allocator)

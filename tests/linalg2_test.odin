@@ -299,7 +299,8 @@ eigh_diagonal_test :: proc(allocator: mem.Allocator = context.allocator) {
 	A := l.matrix_new(f64, 3, 3, allocator)
 	A.data = {1.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 3.0}
 
-	W, V := l.eigh(&A, .Ascending, allocator)
+	W, V, ok := l.eigh(&A, .Ascending, allocator)
+	assert(ok, "eigh rejected a symmetric matrix")
 
 	// Eigenvalues should be [1,2,3]
 	assert_close(W[0], 1.0, 1e-12, "λ0")
@@ -335,7 +336,8 @@ eigh_symmetric_test :: proc(allocator: mem.Allocator = context.allocator) {
 	A := l.matrix_new(f64, 2, 2, allocator)
 	A.data = {2.0, 1.0, 1.0, 2.0}
 
-	W, V := l.eigh(&A, .Ascending, allocator)
+	W, V, ok := l.eigh(&A, .Ascending, allocator)
+	assert(ok, "eigh rejected a symmetric matrix")
 
 	assert_close(W[0], 1.0, 1e-12, "λ_min")
 	assert_close(W[1], 3.0, 1e-12, "λ_max")

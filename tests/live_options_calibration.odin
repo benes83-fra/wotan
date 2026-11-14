@@ -19,6 +19,7 @@ live_options_calibration_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("1. Fetching live options chain for %s...\n", symbol)
 	chain, chain_ok := fin.fetch_yahoo_options(symbol, allocator)
 	if !chain_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo option chain for %s", symbol)); return}
+	defer fin.free_option_chain(&chain, allocator)
 
 	if chain.n_options == 0 {
 		fmt.println("⚠️  No options data found. Aborting.")

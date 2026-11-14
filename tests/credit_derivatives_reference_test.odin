@@ -139,20 +139,20 @@ credit_derivatives_reference_test :: proc(allocator: mem.Allocator) {
 		z := fin.price_cds_full(1e7, 0.0, 5, cv, freq)
 		ok :=
 			rel(a.upfront_pct, CR_FULL[0]) < 1e-9 &&
-			rel(a.rpv01, CR_FULL[1]) < 1e-9 &&
+			rel(a.rpv01, 10 * CR_FULL[1]) < 1e-9 &&
 			rel(b.upfront_pct, CR_FULL[2]) < 1e-9 &&
-			rel(b.rpv01, CR_FULL[3]) < 1e-9 &&
-			rel(z.rpv01, CR_FULL[1]) < 1e-9
+			rel(b.rpv01, 10 * CR_FULL[3]) < 1e-9 &&
+			rel(z.rpv01, 10 * CR_FULL[1]) < 1e-9
 		expect(
 			&passed,
 			&total,
 			ok,
 			fmt.tprintf(
-				"100bp-coupon CDS: 5Y upfront %.6f%% (%.6f%%), RPV01 $%.4f ($%.4f); 12Y upfront %.6f%% (%.6f%%; old −0.383085%%, survival stopped decaying after 10Y), RPV01 $%.4f; zero coupon RPV01 $%.4f (old: 0/0)",
+				"100bp-coupon CDS: 5Y upfront %.6f%% (%.6f%%), RPV01 on 10M $%.4f ($%.4f); 12Y upfront %.6f%% (%.6f%%; old −0.383085%%, survival stopped decaying after 10Y), RPV01 $%.4f; zero coupon RPV01 $%.4f (old: 0/0)",
 				100 * a.upfront_pct,
 				100 * CR_FULL[0],
 				a.rpv01,
-				CR_FULL[1],
+				10 * CR_FULL[1],
 				100 * b.upfront_pct,
 				100 * CR_FULL[2],
 				b.rpv01,

@@ -6,7 +6,7 @@ import csv "../importer"
 import "core:fmt"
 import "core:mem"
 
-// Load historical price data
+// Load historical price data (free with free_market_data)
 load_market_data :: proc(
 	path: string,
 	allocator: mem.Allocator = context.allocator,
@@ -45,8 +45,9 @@ load_market_data :: proc(
 		n_obs = n,
 	}
 }
-// Load option chain data
-// Load option chain data
+// Load option chain data. The Type column is read case-insensitively by its
+// first letter into the literals "call" / "put" ("" for anything else).
+// Free with free_option_chain.
 load_option_chain :: proc(
 	path: string,
 	current_date: w.Date,
@@ -82,7 +83,16 @@ load_option_chain :: proc(
 		iv_col := w.column(&df, "ImpliedVol")
 		price_col := w.column(&df, "Price")
 
-		option_types[i], _ = w.column_at_string(type_col, i)
+		// Literals, not views into the DataFrame destroyed below
+		type_str, _ := w.column_at_string(type_col, i)
+		switch {
+		case len(type_str) > 0 && (type_str[0] == 'c' || type_str[0] == 'C'):
+			option_types[i] = "call"
+		case len(type_str) > 0 && (type_str[0] == 'p' || type_str[0] == 'P'):
+			option_types[i] = "put"
+		case:
+			option_types[i] = ""
+		}
 		strikes[i], _ = w.column_at_float(strike_col, i)
 
 		// Use column_at_date for already-parsed Date

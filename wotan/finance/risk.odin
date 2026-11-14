@@ -61,9 +61,10 @@ GARCH_RiskMetrics :: struct {
 	current_var_99:    f64,
 	current_cvar_95:   f64,
 	current_cvar_99:   f64,
-	// Backtesting results
+	// Out-of-sample backtests over returns[backtest_start:] (see garch_risk_metrics)
 	backtest_95:       VaR_BacktestResult,
 	backtest_99:       VaR_BacktestResult,
+	backtest_start:    int,
 	converged:         bool,
 	n_iterations:      int,
 }
@@ -83,39 +84,40 @@ VaR_BacktestResult :: struct {
 // ============================================================================
 
 EVT_Result :: struct {
-	threshold:     f64, // Threshold u
+	threshold:     f64, // Threshold u (a return level, negative in the loss tail)
 	xi:            f64, // Shape parameter ξ
 	beta:          f64, // Scale parameter β
 	n_exceedances: int, // Number of exceedances N_u
 	n_total:       int, // Total observations n
-	var_95:        f64, // 95% VaR
+	var_95:        f64, // 95% VaR (positive loss magnitude)
 	var_99:        f64, // 99% VaR
-	cvar_95:       f64, // 95% CVaR (Expected Shortfall)
+	cvar_95:       f64, // 95% CVaR (Expected Shortfall, positive loss magnitude)
 	cvar_99:       f64, // 99% CVaR
 	converged:     bool,
 }
 
 GARCH_EVT_Result :: struct {
 	// GARCH parameters
-	garch_omega:   f64,
-	garch_alpha:   f64,
-	garch_beta:    f64,
+	garch_omega:    f64,
+	garch_alpha:    f64,
+	garch_beta:     f64,
 	// EVT parameters (fitted on standardized residuals)
-	evt_xi:        f64,
-	evt_beta:      f64,
-	evt_threshold: f64,
-	n_exceedances: int,
+	evt_xi:         f64,
+	evt_beta:       f64,
+	evt_threshold:  f64,
+	n_exceedances:  int,
 	// Standardized loss quantiles and ES (VaR_t = σ_t·q - μ, ES_t = σ_t·es_q - μ)
-	q_95:          f64,
-	q_99:          f64,
-	es_q_95:       f64,
-	es_q_99:       f64,
-	// Dynamic VaR series (positive loss magnitudes)
-	var_95_series: []f64,
-	var_99_series: []f64,
-	// Backtesting results
-	backtest_95:   VaR_BacktestResult,
-	backtest_99:   VaR_BacktestResult,
+	q_95:           f64,
+	q_99:           f64,
+	es_q_95:        f64,
+	es_q_99:        f64,
+	// Dynamic VaR series (positive loss magnitudes), one per return
+	var_95_series:  []f64,
+	var_99_series:  []f64,
+	// Out-of-sample backtests over returns[backtest_start:] (see garch_evt_fit)
+	backtest_95:    VaR_BacktestResult,
+	backtest_99:    VaR_BacktestResult,
+	backtest_start: int,
 }
 
 // GPD (Generalized Pareto Distribution) with shape ξ and scale β, y ≥ 0
@@ -220,9 +222,10 @@ gpd_fit :: proc(
 	return
 }
 
-// Left-tail EVT VaR (as a return) at confidence p from a GPD fitted to the
-// N_u exceedances below threshold u out of n observations:
-//   VaR = u - (β/ξ) [((n/N_u)(1-p))^(-ξ) - 1],  ξ → 0: u + β ln((n/N_u)(1-p))
+// Left-tail EVT quantile (a return level) at confidence p from a GPD fitted to
+// the N_u exceedances below threshold u out of n observations:
+//   x_p = u - (β/ξ) [((n/N_u)(1-p))^(-ξ) - 1],  ξ → 0: u + β ln((n/N_u)(1-p))
+// (VaR = -x_p)
 _evt_tail_var :: proc(threshold, xi, beta: f64, n, n_exceedances: int, p: f64) -> f64 {
 	l := math.ln(f64(n) / f64(n_exceedances) * (1.0 - p))
 	if math.abs(xi) < GPD_XI_EPS {return threshold + beta * l}
@@ -236,22 +239,23 @@ _tail_size :: proc(pct: f64, n: int) -> int {
 	return clamp(int(math.floor((1.0 - pct) * f64(n) + 1e-9)), 0, n - 1)
 }
 
-// VaR and ES (returns, negative = loss) at confidence p from a fitted EVT model.
-// ES = VaR/(1-ξ) - (β + ξu)/(1-ξ); infinite (-Inf) for ξ ≥ 1. Valid in the tail,
-// (1-p)·n ≤ N_u; evt_fit uses the empirical estimates for levels inside the body.
+// VaR and ES at confidence p from a fitted EVT model, as positive loss
+// magnitudes (the loss of a return x is -x). With the tail quantile x_p:
+// VaR = -x_p, ES = -(x_p - β - ξu)/(1-ξ); ES is +Inf for ξ ≥ 1. Valid in the
+// tail, (1-p)·n ≤ N_u; evt_fit uses the empirical estimates for levels inside
+// the body.
 evt_var_es :: proc(r: ^EVT_Result, p: f64) -> (var_p: f64, es_p: f64) {
 	if r.n_exceedances == 0 {return math.nan_f64(), math.nan_f64()}
-	var_p = _evt_tail_var(r.threshold, r.xi, r.beta, r.n_total, r.n_exceedances, p)
-	if r.xi >= 1.0 {return var_p, -math.INF_F64}
-	es_p = (var_p - r.beta - r.xi * r.threshold) / (1.0 - r.xi)
-	return
+	x := _evt_tail_var(r.threshold, r.xi, r.beta, r.n_total, r.n_exceedances, p)
+	if r.xi >= 1.0 {return -x, math.INF_F64}
+	return -x, -(x - r.beta - r.xi * r.threshold) / (1.0 - r.xi)
 }
 
-// EVT (peaks over threshold) for the left tail: the threshold u is the
-// ⌊(1-pct)·n⌋+1-th smallest return, the exceedances u - r over the returns
-// below it are fitted with a GPD. 95% / 99% VaR and ES come from the GPD tail,
-// or empirically (inverse ECDF, Acerbi-Tasche) when the level lies more than
-// one observation inside the body.
+// EVT (peaks over threshold) for the left tail: the threshold u (a return
+// level) is the ⌊(1-pct)·n⌋+1-th smallest return, the exceedances u - r over the
+// returns below it are fitted with a GPD. 95% / 99% VaR and ES (positive loss
+// magnitudes) come from the GPD tail, or empirically (inverse ECDF,
+// Acerbi-Tasche) when the level lies more than one observation inside the body.
 evt_fit :: proc(
 	returns: []f64,
 	threshold_percentile: f64 = 0.95,
@@ -434,12 +438,9 @@ t_quantile :: proc(p: f64, nu: f64) -> f64 {
 // ============================================================================
 // Value at Risk (VaR) and Expected Shortfall (ES)
 // ============================================================================
-// Sign conventions (historical, kept for compatibility):
-//   return level, negative = loss: var_historical, var_parametric,
-//     var_monte_carlo, value_at_risk, var_garch_single, conditional_var,
-//     expected_shortfall, cvar_garch
-//   positive loss magnitude: var_garch, cvar_garch_series,
-//     historical_var_rolling, historical_cvar_rolling, GARCH_RiskMetrics.current_*
+// Sign convention: every VaR and ES (CVaR) in this package is a positive loss
+// magnitude, the loss of a return x being -x: a 95% VaR of 0.02 means a 5%
+// chance of losing more than 2%. A breach is a return below -VaR.
 // With α = 1 - confidence, the empirical VaR is the inverse empirical CDF at α
 // (numpy quantile(method="inverted_cdf")): the k-th smallest return, k = ⌈αn⌉.
 // The empirical ES is the Acerbi-Tasche estimator, the mean of the worst αn
@@ -509,28 +510,30 @@ _std_es :: proc(model_type: a.GARCH_Model_Type, nu, shape, confidence: f64) -> f
 		)
 		return scale * (pdf / alpha) * (nu + z * z) / (nu - 1.0)
 	} else if model_type == .GED && shape > 0.0 {
-		return -ged_cvar(confidence, shape)
+		return ged_cvar(confidence, shape)
 	}
 	z := _bs_ppf(confidence)
 	return 0.3989422804014327 * math.exp(-0.5 * z * z) / alpha
 }
 
+// Empirical VaR: minus the inverse-ECDF α-quantile of the returns
 var_historical :: proc(returns: []f64, confidence: f64 = 0.95) -> f64 {
 	if len(returns) == 0 {return 0.0}
 	sorted := slice.clone(returns, context.temp_allocator)
 	defer delete(sorted, context.temp_allocator)
 	slice.sort(sorted)
-	return sorted[_ecdf_index(1.0 - confidence, len(sorted))]
+	return -sorted[_ecdf_index(1.0 - confidence, len(sorted))]
 }
 
-// Normal VaR: μ - z_c·s
+// Normal VaR: z_c·s - μ (sample mean μ and standard deviation s)
 var_parametric :: proc(returns: []f64, confidence: f64 = 0.95) -> f64 {
 	if len(returns) < 2 {return 0.0}
 	mean, std := _mean_std(returns)
-	return mean - _bs_ppf(confidence) * std
+	return _bs_ppf(confidence) * std - mean
 }
 
-// Simulated normal VaR of the `horizon`-period sum of returns
+// Simulated normal VaR of the `horizon`-period sum of returns (minus the
+// inverse-ECDF α-quantile of the simulated sums)
 var_monte_carlo :: proc(
 	returns: []f64,
 	confidence: f64 = 0.95,
@@ -548,7 +551,7 @@ var_monte_carlo :: proc(
 		simulated[sim] = total
 	}
 	slice.sort(simulated)
-	return simulated[_ecdf_index(1.0 - confidence, n_simulations)]
+	return -simulated[_ecdf_index(1.0 - confidence, n_simulations)]
 }
 
 // VaR series from GARCH conditional variances: z_c·σ_t, a positive loss
@@ -567,11 +570,17 @@ var_garch :: proc(
 	return var_series
 }
 
-// Normal VaR for one conditional variance (return level, negative)
+// Zero-mean normal VaR z_c·σ for one conditional variance σ²
 var_garch_single :: proc(cond_variance: f64, confidence: f64 = 0.95) -> f64 {
-	return -_bs_ppf(confidence) * math.sqrt(cond_variance)
+	return _bs_ppf(confidence) * math.sqrt(cond_variance)
 }
 
+// VaR of the next period by `method` (positive loss magnitude):
+//  - Historical, Parametric, MonteCarlo: var_historical, var_parametric,
+//    var_monte_carlo (n_simulations, horizon);
+//  - GARCH: a normal GARCH(1,1) fitted to the returns minus their sample mean
+//    μ, then z_c·σ_{n+1} - μ with the one-step-ahead forecast σ_{n+1}
+//    (horizon is ignored; at least 10 returns, else 0).
 value_at_risk :: proc(
 	returns: []f64,
 	confidence: f64 = 0.95,
@@ -587,12 +596,18 @@ value_at_risk :: proc(
 	case .MonteCarlo:
 		return var_monte_carlo(returns, confidence, n_simulations, horizon)
 	case .GARCH:
-		// Single point: zero-mean normal VaR with the unconditional variance
-		if len(returns) == 0 {return 0.0}
-		variance := 0.0
-		for r in returns {variance += r * r}
-		variance /= f64(len(returns))
-		return var_garch_single(variance, confidence)
+		n := len(returns)
+		if n < 10 {return 0.0}
+		mu := 0.0
+		for r in returns {mu += r}
+		mu /= f64(n)
+		resid := make([]f64, n, context.temp_allocator)
+		defer delete(resid, context.temp_allocator)
+		for r, i in returns {resid[i] = r - mu}
+		fit := _garch_fit_quiet(resid, .GARCH, 1, 1, context.temp_allocator)
+		defer a.garch_result_free(&fit, context.temp_allocator)
+		fc := a.garch_forecast(&fit, resid, 1, context.temp_allocator)
+		return _bs_ppf(confidence) * fc.std_forecast - mu
 	}
 	return 0.0
 }
@@ -601,25 +616,25 @@ value_at_risk :: proc(
 // Conditional Value at Risk (CVaR) - Expected Shortfall
 // ============================================================================
 
-// Empirical ES (Acerbi-Tasche), a return level (negative = loss)
+// Empirical ES (Acerbi-Tasche): minus the mean of the worst α·n returns
 conditional_var :: proc(returns: []f64, confidence: f64 = 0.95) -> f64 {
 	if len(returns) == 0 {return 0.0}
 	sorted := slice.clone(returns, context.temp_allocator)
 	defer delete(sorted, context.temp_allocator)
 	slice.sort(sorted)
-	return _tail_mean_sorted(sorted, 1.0 - confidence)
+	return -_tail_mean_sorted(sorted, 1.0 - confidence)
 }
 
 expected_shortfall :: proc(returns: []f64, confidence: f64 = 0.95) -> f64 {
 	return conditional_var(returns, confidence)
 }
 
-// Normal ES series -σ_t·φ(z_c)/(1-c) (return level, negative); see
-// cvar_garch_series for Student-t / GED errors
+// Normal ES series σ_t·φ(z_c)/(1-c); see cvar_garch_series for Student-t /
+// GED errors
 cvar_garch :: proc(cond_var: []f64, confidence: f64 = 0.95) -> []f64 {
 	cvar_series := make([]f64, len(cond_var), context.allocator)
 	mult := _std_es(.GARCH, 0, 0, confidence)
-	for v, i in cond_var {cvar_series[i] = -mult * math.sqrt(v)}
+	for v, i in cond_var {cvar_series[i] = mult * math.sqrt(v)}
 	return cvar_series
 }
 
@@ -700,6 +715,69 @@ _garch_fit_quiet :: proc(
 	return res
 }
 
+// Minimum number of training returns for the out-of-sample GARCH backtests
+GARCH_MIN_TRAIN :: 100
+
+// First test index of an out-of-sample backtest: round(train_fraction·n),
+// or n (no test period) when that leaves fewer than GARCH_MIN_TRAIN training
+// returns or no test returns
+@(private = "file")
+_garch_split :: proc(n: int, train_fraction: f64) -> int {
+	n_train := int(math.round(clamp(train_fraction, 0.0, 1.0) * f64(n)))
+	if n_train < GARCH_MIN_TRAIN || n_train >= n {return n}
+	return n_train
+}
+
+// A GARCH model fitted on the training returns returns[:n_train] only, minus
+// their mean μ, and the conditional variances of all returns filtered forward
+// with those parameters: cond_var[t] uses returns up to t-1, so for
+// t ≥ n_train it is a genuine one-step-ahead forecast made with parameters
+// that never saw the test returns. Free with free_garch_out_of_sample.
+GARCH_OutOfSample :: struct {
+	fit:      a.GARCH_Result, // fitted on resid[:n_train]
+	resid:    []f64, // returns - μ, all n
+	cond_var: []f64, // all n
+	mu:       f64,
+}
+
+garch_out_of_sample :: proc(
+	returns: []f64,
+	n_train: int,
+	model_type: a.GARCH_Model_Type = .GARCH,
+	p: int = 1,
+	q: int = 1,
+	allocator: mem.Allocator = context.allocator,
+) -> (
+	o: GARCH_OutOfSample,
+) {
+	assert(
+		n_train >= 1 && n_train <= len(returns),
+		"garch_out_of_sample: 1 ≤ n_train ≤ len(returns)",
+	)
+	n := len(returns)
+	for r in returns[:n_train] {o.mu += r}
+	o.mu /= f64(n_train)
+	o.resid = make([]f64, n, allocator)
+	for r, i in returns {o.resid[i] = r - o.mu}
+	o.fit = _garch_fit_quiet(o.resid[:n_train], model_type, p, q, allocator)
+	o.cond_var = make([]f64, n, allocator)
+	if len(o.fit.conditional_var) < n_train {return} 	// too few returns to fit: all 0
+	copy(o.cond_var, o.fit.conditional_var[:n_train])
+	for t in n_train ..< n {
+		o.cond_var[t] = a._garch_variance_at(&o.fit.params, o.resid, o.cond_var, t)
+	}
+	return
+}
+
+free_garch_out_of_sample :: proc(
+	o: ^GARCH_OutOfSample,
+	allocator: mem.Allocator = context.allocator,
+) {
+	a.garch_result_free(&o.fit, allocator)
+	delete(o.resid, allocator)
+	delete(o.cond_var, allocator)
+}
+
 // ============================================================================
 // Comprehensive GARCH Risk Analysis
 // ============================================================================
@@ -707,8 +785,13 @@ _garch_fit_quiet :: proc(
 // Fits a GARCH model to the demeaned returns. current_vol is the one-step-ahead
 // forecast σ_{n+1|n}; current VaR / CVaR are positive loss magnitudes from the
 // model's unit-variance error distribution (mean ≈ 0); long_run_vol is the
-// per-period unconditional σ = sqrt(ω / (1 - persistence)). The backtests are
-// in sample (parameters fitted on all data), skipping the first 100 points.
+// per-period unconditional σ = sqrt(ω / (1 - persistence)). These use all
+// returns.
+// The backtests are out of sample: a second model is fitted on the first
+// round(train_fraction·n) returns only (backtest_start = that count), its
+// variance is filtered forward one step ahead over the remaining returns, and
+// VaR_t = z_c·σ_t is backtested there. With fewer than GARCH_MIN_TRAIN training
+// returns or no test returns, backtest_start = n and the backtests are empty.
 garch_risk_metrics :: proc(
 	returns: []f64,
 	model_type: a.GARCH_Model_Type = .GARCH,
@@ -716,6 +799,7 @@ garch_risk_metrics :: proc(
 	q: int = 1,
 	risk_free_rate: f64 = 0.02,
 	allocator: mem.Allocator = context.allocator,
+	train_fraction: f64 = 0.5,
 ) -> GARCH_RiskMetrics {
 	metrics: GARCH_RiskMetrics
 	metrics.base = calculate_risk_metrics(returns, nil, risk_free_rate)
@@ -755,29 +839,22 @@ garch_risk_metrics :: proc(
 	metrics.current_cvar_95 = _std_es(model_type, prm.nu, prm.shape, 0.95) * fc.std_forecast
 	metrics.current_cvar_99 = _std_es(model_type, prm.nu, prm.shape, 0.99) * fc.std_forecast
 
-	warmup := min(100, n - 1)
-	var_95 := var_garch(
-		garch_result.conditional_var,
-		0.95,
-		model_type,
-		prm.nu,
-		prm.shape,
-		allocator,
-	)
-	var_99 := var_garch(
-		garch_result.conditional_var,
-		0.99,
-		model_type,
-		prm.nu,
-		prm.shape,
-		allocator,
-	)
-	defer {
-		delete(var_95, allocator)
-		delete(var_99, allocator)
+	n_train := _garch_split(n, train_fraction)
+	metrics.backtest_start = n_train
+	if n_train < n {
+		o := garch_out_of_sample(returns, n_train, model_type, p, q, allocator)
+		defer free_garch_out_of_sample(&o, allocator)
+		op := &o.fit.params
+		test_var := o.cond_var[n_train:]
+		var_95 := var_garch(test_var, 0.95, model_type, op.nu, op.shape, allocator)
+		var_99 := var_garch(test_var, 0.99, model_type, op.nu, op.shape, allocator)
+		defer {
+			delete(var_95, allocator)
+			delete(var_99, allocator)
+		}
+		metrics.backtest_95 = backtest_var(returns[n_train:], var_95, 0.95)
+		metrics.backtest_99 = backtest_var(returns[n_train:], var_99, 0.99)
 	}
-	metrics.backtest_95 = backtest_var(returns[warmup:], var_95[warmup:], 0.95)
-	metrics.backtest_99 = backtest_var(returns[warmup:], var_99[warmup:], 0.99)
 	return metrics
 }
 // ============================================================================
@@ -1341,7 +1418,7 @@ ged_quantile :: proc(prob: f64, shape: f64) -> f64 {
 	return a.garch_std_quantile(&tp, prob)
 }
 
-// Lower-tail ES E[Z | Z < z_{1-c}] of the unit-variance GED (negative)
+// ES of the unit-variance GED as a positive loss magnitude: E[-Z | Z < z_{1-c}]
 ged_cvar :: proc(confidence: f64, shape: f64) -> f64 {
 	if shape <= 0.0 {return 0.0}
 	alpha := 1.0 - confidence
@@ -1350,40 +1427,44 @@ ged_cvar :: proc(confidence: f64, shape: f64) -> f64 {
 	_, Q2 := a._gamma_inc_regularized(2.0 / shape, math.pow(q / lambda, shape))
 	lg1, _ := math.lgamma(1.0 / shape)
 	lg2, _ := math.lgamma(2.0 / shape)
-	return -lambda * math.exp(lg2 - lg1) * Q2 / (2.0 * alpha)
+	return lambda * math.exp(lg2 - lg1) * Q2 / (2.0 * alpha)
 }
-// GARCH-EVT (McNeil & Frey 2000): GARCH(1,1)-t on the demeaned returns, then a
-// GPD on the largest standardized losses -z_t beyond the ⌊(1-pct)·n⌋+1-th
-// largest. q_p is the standardized loss quantile (empirical when the level lies
-// more than one observation inside the body) and es_q_p the standardized ES;
+// GARCH-EVT (McNeil & Frey 2000): GARCH(1,1)-t on the training returns
+// returns[:n_train] minus their mean μ, n_train = round(train_fraction·n), then
+// a GPD on the largest standardized training losses -z_t beyond the
+// ⌊(1-pct)·n_train⌋+1-th largest. q_p is the standardized loss quantile
+// (empirical when the level lies more than one observation inside the body)
+// and es_q_p the standardized ES. The variance is filtered forward with the
+// training parameters over all returns, σ_t using returns up to t-1, and
 // VaR_t = σ_t·q_p - μ is a positive loss magnitude (the ES series is
-// σ_t·es_q_p - μ). In sample: the parameters are fitted on all returns and the
-// backtests skip the first 100 points.
+// σ_t·es_q_p - μ). The backtests cover the test returns returns[n_train:]
+// (backtest_start = n_train), so they are out of sample. train_fraction = 1
+// fits all returns and leaves the backtests empty (backtest_start = n). Needs
+// at least GARCH_MIN_TRAIN training returns, else the result is empty.
 garch_evt_fit :: proc(
 	returns: []f64,
 	threshold_percentile: f64 = 0.90,
 	allocator: mem.Allocator = context.allocator,
+	train_fraction: f64 = 0.5,
 ) -> GARCH_EVT_Result {
 	result: GARCH_EVT_Result
 	n := len(returns)
-	if n < 100 {return result}
+	n_train := int(math.round(clamp(train_fraction, 0.0, 1.0) * f64(n)))
+	if n_train < GARCH_MIN_TRAIN {return result}
+	n_train = min(n_train, n)
 
-	residuals := a.extract_residuals(returns, allocator)
-	defer delete(residuals, allocator)
-	mu := returns[0] - residuals[0]
-
-	garch_res := _garch_fit_quiet(residuals, .StudentT, 1, 1, allocator)
-	defer {
-		delete(garch_res.params.alpha, allocator)
-		delete(garch_res.params.beta, allocator)
-		delete(garch_res.conditional_var, allocator)
-		delete(garch_res.standardized_resid, allocator)
-	}
+	o := garch_out_of_sample(returns, n_train, .StudentT, 1, 1, allocator)
+	defer free_garch_out_of_sample(&o, allocator)
+	mu := o.mu
+	garch_res := &o.fit
 	result.garch_omega = garch_res.params.omega
 	result.garch_alpha = garch_res.params.alpha[0]
 	result.garch_beta = garch_res.params.beta[0]
+	result.backtest_start = n_train
 
-	// Left tail of the standardized residuals as positive losses
+	// Left tail of the standardized training residuals as positive losses
+	n_all := n
+	n = n_train
 	losses := make([]f64, n, context.temp_allocator)
 	defer delete(losses, context.temp_allocator)
 	for i in 0 ..< n {losses[i] = -garch_res.standardized_resid[i]}
@@ -1405,7 +1486,7 @@ garch_evt_fit :: proc(
 	result.evt_xi = xi
 	result.evt_beta = beta
 
-	// The loss tail is evt_fit's left tail of -losses: q = -VaR, es_q = -ES
+	// The loss tail is evt_fit's left tail of -losses, so its VaR / ES are q / es_q
 	tail := EVT_Result {
 		threshold     = -u,
 		xi            = xi,
@@ -1420,26 +1501,26 @@ garch_evt_fit :: proc(
 			neg := make([]f64, n, context.temp_allocator)
 			defer delete(neg, context.temp_allocator)
 			for l, i in losses {neg[i] = -l}
-			q[k], es_q[k] = -var_historical(neg, p), -conditional_var(neg, p)
+			q[k], es_q[k] = var_historical(neg, p), conditional_var(neg, p)
 		} else {
-			v, e := evt_var_es(&tail, p)
-			q[k], es_q[k] = -v, -e
+			q[k], es_q[k] = evt_var_es(&tail, p)
 		}
 	}
 	result.q_95, result.q_99 = q[0], q[1]
 	result.es_q_95, result.es_q_99 = es_q[0], es_q[1]
 
-	result.var_95_series = make([]f64, n, allocator)
-	result.var_99_series = make([]f64, n, allocator)
-	for i in 0 ..< n {
-		sigma := math.sqrt(garch_res.conditional_var[i])
+	result.var_95_series = make([]f64, n_all, allocator)
+	result.var_99_series = make([]f64, n_all, allocator)
+	for i in 0 ..< n_all {
+		sigma := math.sqrt(o.cond_var[i])
 		result.var_95_series[i] = sigma * q[0] - mu
 		result.var_99_series[i] = sigma * q[1] - mu
 	}
 
-	warmup := min(100, n - 1)
-	result.backtest_95 = backtest_var(returns[warmup:], result.var_95_series[warmup:], 0.95)
-	result.backtest_99 = backtest_var(returns[warmup:], result.var_99_series[warmup:], 0.99)
+	if n_train < n_all {
+		result.backtest_95 = backtest_var(returns[n_train:], result.var_95_series[n_train:], 0.95)
+		result.backtest_99 = backtest_var(returns[n_train:], result.var_99_series[n_train:], 0.99)
+	}
 	return result
 }
 // ============================================================================

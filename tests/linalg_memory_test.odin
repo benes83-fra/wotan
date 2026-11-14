@@ -1,5 +1,6 @@
 package tests
 
+import w "../wotan/core"
 import l "../wotan/linalg"
 import "base:runtime"
 import "core:fmt"
@@ -62,6 +63,8 @@ LM_INV := [9]f64 {
 LM_SV := [3]f64{6.669079088282, 3.476023602918, 1.8548973088}
 @(private = "file")
 LM_COND :: 3.595389920856738
+@(private = "file")
+LM_EIGVALSH := [3]f64{1.854897308799577, 3.476023602918134, 6.669079088282288}
 
 linalg_memory_test :: proc(allocator: mem.Allocator) {
 	fmt.println("\n=== linalg memory and lstsq regression tests ===")
@@ -261,6 +264,184 @@ linalg_memory_test :: proc(allocator: mem.Allocator) {
 			&passed,
 			&total,
 		)
+	}
+
+	{ 	// matrix_inverse: ok return; singular -> ok = false (no panic), no leak
+		track: mem.Tracking_Allocator
+		a := _lm_begin(&track)
+		A := l.matrix_from_flat(LM_A[:], 3, 3, a)
+		inv, ok := l.matrix_inverse(&A, a)
+		good := ok && _lm_close(inv.data, LM_INV[:], 1e-10)
+		l.matrix_free(&inv)
+		l.matrix_free(&A)
+		S := l.matrix_from_flat([]f64{1, 2, 2, 4}, 2, 2, a)
+		sinv, sok := l.matrix_inverse(&S, a)
+		good = good && !sok && sinv.rows == 0 && sinv.cols == 0
+		l.matrix_free(&sinv)
+		l.matrix_free(&S)
+		report(
+			"matrix_inverse: numpy inverse, singular -> ok=false, no leak",
+			_lm_end(&track, "matrix_inverse") && good,
+			&passed,
+			&total,
+		)
+	}
+	{ 	// apply_pivots_vec: result from the given allocator (default context.allocator)
+		track: mem.Tracking_Allocator
+		a := _lm_begin(&track)
+		piv := []int{2, 0, 1}
+		b := []f64{10, 20, 30}
+		x := l.apply_pivots_vec(piv, b, a)
+		good := _lm_close(x, []f64{30, 10, 20}, 0) && len(track.allocation_map) == 1
+		delete(x, a)
+		{
+			context.allocator = a
+			y := l.apply_pivots_vec(piv, b)
+			good = good && len(track.allocation_map) == 1
+			delete(y)
+		}
+		report(
+			"apply_pivots_vec: caller's allocator, freed with delete",
+			_lm_end(&track, "apply_pivots_vec") && good,
+			&passed,
+			&total,
+		)
+	}
+	{ 	// jacobi_eigen_symmetric works on a copy: the input is unchanged
+		track: mem.Tracking_Allocator
+		a := _lm_begin(&track)
+		A := l.matrix_from_flat(LM_A[:], 3, 3, a)
+		vals, V := l.jacobi_eigen_symmetric(&A, a)
+		sorted := [3]f64{vals[0], vals[1], vals[2]}
+		for i in 0 ..< 3 {for j in i + 1 ..< 3 {if sorted[j] < sorted[i] {sorted[i], sorted[j] = sorted[j], sorted[i]}}}
+		good := _lm_close(A.data, LM_A[:], 0) && _lm_close(sorted[:], LM_EIGVALSH[:], 1e-10)
+		delete(vals, a)
+		l.matrix_free(&V)
+		l.matrix_free(&A)
+		report(
+			"jacobi_eigen_symmetric: input untouched, numpy eigvalsh",
+			_lm_end(&track, "jacobi_eigen_symmetric") && good,
+			&passed,
+			&total,
+		)
+	}
+	{ 	// eigh: symmetry checked in every build, tolerance relative to the scale
+		track: mem.Tracking_Allocator
+		a := _lm_begin(&track)
+		A := l.matrix_from_flat(LM_A[:], 3, 3, a)
+		W, V, ok := l.eigh(&A, .Ascending, a)
+		good := ok && _lm_close(W, LM_EIGVALSH[:], 1e-10) && _lm_close(A.data, LM_A[:], 0)
+		delete(W, a)
+		l.matrix_free(&V)
+		// clearly asymmetric: ok = false, empty outputs
+		A.data[1] += 0.5
+		W, V, ok = l.eigh(&A, .Ascending, a)
+		good = good && !ok && len(W) == 0 && V.rows == 0 && V.cols == 0
+		delete(W, a)
+		l.matrix_free(&V)
+		// scale 1e10, asymmetry 1e-2 (1.6e-13 relative): accepted, numpy eigvalsh of (A + Aᵀ)/2
+		for v, i in LM_A {A.data[i] = v * 1e10}
+		A.data[1] += 1e-2
+		W, V, ok = l.eigh(&A, .Ascending, a)
+		big := []f64{1.854897308799173e+10, 3.476023602918429e+10, 6.669079088282396e+10}
+		good = good && ok && _lm_close(W, big, 1e-3)
+		delete(W, a)
+		l.matrix_free(&V)
+		// scale 1e-6, asymmetry 1e-15 (1.6e-10 relative): rejected
+		for v, i in LM_A {A.data[i] = v * 1e-6}
+		A.data[1] += 1e-15
+		W, V, ok = l.eigh(&A, .Ascending, a)
+		good = good && !ok
+		delete(W, a)
+		l.matrix_free(&V)
+		l.matrix_free(&A)
+		report(
+			"eigh: asymmetric -> ok=false (relative tolerance), no leak",
+			_lm_end(&track, "eigh") && good,
+			&passed,
+			&total,
+		)
+	}
+	{ 	// pinv: numpy.linalg.pinv on a rank-2 square and a wide matrix
+		track: mem.Tracking_Allocator
+		a := _lm_begin(&track)
+		R := l.matrix_from_flat([]f64{1, 2, 3, 2, 4, 6, 1, 0, 1}, 3, 3, a)
+		P := l.pinv(&R, allocator = a)
+		ref_r := []f64 {
+			-0.033333333333334,
+			-0.066666666666667,
+			0.833333333333334,
+			0.066666666666667,
+			0.133333333333333,
+			-0.666666666666667,
+			0.033333333333333,
+			0.066666666666667,
+			0.166666666666667,
+		}
+		good := _lm_close(P.data, ref_r, 1e-10)
+		Wd := l.matrix_from_flat([]f64{1, 2, 3, 4, 5, 6}, 2, 3, a)
+		Pw := l.pinv(&Wd, allocator = a)
+		ref_w := []f64 {
+			-0.944444444444445,
+			0.444444444444445,
+			-0.111111111111112,
+			0.111111111111111,
+			0.722222222222223,
+			-0.222222222222223,
+		}
+		good = good && Pw.rows == 3 && Pw.cols == 2 && _lm_close(Pw.data, ref_w, 1e-10)
+		l.matrix_free(&P)
+		l.matrix_free(&R)
+		l.matrix_free(&Pw)
+		l.matrix_free(&Wd)
+		report(
+			"pinv: numpy pinv (rank-deficient 3x3, wide 2x3), no leak",
+			_lm_end(&track, "pinv") && good,
+			&passed,
+			&total,
+		)
+	}
+	{ 	// matrix_from_df / vector_from_df: null -> NaN (pandas to_numpy), views read
+		x := w.column_new("x", .Float, 4)
+		w.append_float(&x, 1.5)
+		w.append_null(&x)
+		w.append_float(&x, 2.5)
+		w.append_float(&x, 3.5)
+		k := w.column_new("k", .Int, 4)
+		w.append_int(&k, 7)
+		w.append_int(&k, 8)
+		w.append_null(&k)
+		w.append_int(&k, 9)
+		df := w.df_from(x, k)
+		defer w.destroy_dataframe(&df)
+		M := l.matrix_from_df(&df, []string{"x", "k"}, allocator)
+		v := l.vector_from_df(&df, "k", allocator)
+		good :=
+			M.data[0] == 1.5 &&
+			M.data[1] == 7 &&
+			math.is_nan(M.data[2]) &&
+			M.data[3] == 8 &&
+			M.data[4] == 2.5 &&
+			math.is_nan(M.data[5]) &&
+			M.data[6] == 3.5 &&
+			M.data[7] == 9 &&
+			v[0] == 7 &&
+			v[1] == 8 &&
+			math.is_nan(v[2]) &&
+			v[3] == 9
+		view := w.df_slice(&df, 1, 4) // rows 1..3 as views
+		defer w.destroy_dataframe(&view)
+		Mv := l.matrix_from_df(&view, []string{"x", "k"}, allocator)
+		good =
+			good &&
+			Mv.rows == 3 &&
+			math.is_nan(Mv.data[0]) &&
+			Mv.data[1] == 8 &&
+			Mv.data[2] == 2.5 &&
+			math.is_nan(Mv.data[3]) &&
+			Mv.data[4] == 3.5 &&
+			Mv.data[5] == 9
+		report("matrix_from_df / vector_from_df: null -> NaN, views", good, &passed, &total)
 	}
 
 	fmt.printf("  linalg memory tests: %d/%d passed\n", passed, total)

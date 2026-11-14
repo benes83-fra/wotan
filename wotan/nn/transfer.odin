@@ -6,12 +6,17 @@ import t "../tensor"
 // Freeze/Unfreeze Utilities
 // ============================================================================
 // A frozen parameter has requires_grad = false: it gets no gradient and the
-// optimizers leave it unchanged. Unfreezing restores its gradient buffer.
+// optimizers leave it unchanged. An unfrozen parameter gets a gradient buffer
+// but no gradient: the optimizers skip it until a backward pass reaches it.
 
 tensor_set_requires_grad :: proc(tensor: ^t.Tensor, requires_grad: bool) {
 	if tensor == nil {return}
+	was_trainable := tensor.requires_grad
 	tensor.requires_grad = requires_grad
-	if requires_grad {t.tensor_ensure_grad(tensor)}
+	if requires_grad && !was_trainable {
+		t.tensor_ensure_grad(tensor)
+		t.tensor_drop_grad(tensor)
+	}
 }
 
 @(private = "file")

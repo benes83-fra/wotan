@@ -14,8 +14,13 @@ import "core:os"
 // Little-endian binary files that begin with CHECKPOINT_MAGIC. A tensor is
 // stored as rows, cols (i32) and rows·cols f64 values, a nil tensor as 0, 0.
 //   Sequential checkpoint: magic, epoch, layer count, per layer its type id,
-//     configuration and tensors, then the Adam state (type 1 with the
-//     hyperparameters; type 0 without them is still read).
+//     configuration and tensors, then the optimizer type and the Adam state.
+//     Type 3: the count of all parameters and a frozen flag (i32) for each
+//     (order of sequential_parameters(all = true)), then the timestep,
+//     hyperparameters, moments of the trainable parameters and their step
+//     counts. Older types are still read (all parameters trainable): 2
+//     without the frozen flags, 1 also with one shared step count, 0 also
+//     without the hyperparameters.
 //   GPT (33; older: 31 without the norm and weight-tying flags, 28 also
 //     without the dropout rate, 27 also without the
 //     attention flags, 17 also without MoE), BERT (32; older: 29 without the
@@ -52,7 +57,7 @@ _Layer_Id :: enum {
 	Conv1d         = 32,
 	TCNBlock       = 33,
 	FFN            = 14,
-	Mamba          = 25,
+	Mamba          = 34, // RMSNorm weight stored after the SSM tensors
 	MoE            = 26,
 	// layers with attention: use_flash and is_causal of every attention
 	// sublayer are stored with its projections
@@ -65,6 +70,8 @@ _Layer_Id :: enum {
 	EncoderBlock_0 = 15,
 	Encoder_0      = 16,
 	GAT_0          = 24,
+	// Mamba without the pre-norm weight (read only; it loads as 1)
+	Mamba_0        = 25,
 }
 
 @(private = "file")
@@ -330,7 +337,8 @@ _io_moe :: proc(io: ^_Io, moe: ^MoELayer) {
 }
 
 // The tensors of a layer in file order (written, or read into the layer);
-// flags: the attention flags are stored (not in the older layer ids)
+// flags: the layer has its current id, not an older one (those lack the
+// attention flags, or Mamba's norm weight)
 @(private = "file")
 _io_layer :: proc(io: ^_Io, layer: ^Layer, flags: bool) {
 	switch &l in layer {
@@ -395,6 +403,7 @@ _io_layer :: proc(io: ^_Io, layer: ^Layer, flags: bool) {
 		_io_linear(io, &l.proj_out)
 		_io_tensor(io, &l.A)
 		_io_tensor(io, &l.D)
+		if flags {_io_tensor(io, &l.norm.gamma)}
 	case MoELayer:
 		_io_moe(io, &l)
 	case MaxPool2dLayer, AvgPool2dLayer, DropoutLayer, Activation, FlattenLayer:
@@ -507,7 +516,7 @@ _read_layer_header :: proc(
 ) {
 	id := _get_i32(io)
 	#partial switch _Layer_Id(id) {
-	case .MHA, .EncoderBlock, .Encoder, .GAT:
+	case .MHA, .EncoderBlock, .Encoder, .GAT, .Mamba:
 		flags = true
 	}
 	switch _Layer_Id(id) {
@@ -613,7 +622,7 @@ _read_layer_header :: proc(
 			gat.linear.bias = nil
 		}
 		layer = gat
-	case .Mamba:
+	case .Mamba, .Mamba_0:
 		d, n := _get_size(io), _get_size(io)
 		if !io.ok || n < 2 {return}
 		layer = mamba_layer_new(d, n, alloc)
@@ -648,7 +657,11 @@ save_checkpoint :: proc(
 		_io_layer(&io, &layer, true)
 	}
 
-	_put_i32(&io, 2) // optimizer type: Adam with hyperparameters and per-parameter steps
+	_put_i32(&io, 3) // optimizer type: frozen flags, Adam with hyperparameters and per-parameter steps
+	all := sequential_parameters(model, context.temp_allocator, all = true)
+	_put_i32(&io, len(all))
+	for p in all {_put_i32(&io, int(!p.requires_grad))}
+	delete(all)
 	_put_i64(&io, opt.timestep)
 	for v in ([]f64{opt.learning_rate, opt.beta_1, opt.beta_2, opt.epsilon, opt.weight_decay}) {_put_f64(&io, v)}
 	_put_i32(&io, len(opt.parameters))
@@ -662,9 +675,10 @@ save_checkpoint :: proc(
 	return _save(&io, path)
 }
 
-// Loads a Sequential model (in evaluation mode), its Adam optimizer (with the
-// parameters attached and their moments restored) and the epoch. Free with
-// sequential_free, adam_free and free(opt).
+// Loads a Sequential model (in evaluation mode, frozen parameters frozen
+// again), its Adam optimizer (with the trainable parameters attached and
+// their moments restored) and the epoch. Free with sequential_free, adam_free
+// and free(opt).
 load_checkpoint :: proc(
 	path: string,
 	allocator: mem.Allocator = context.allocator,
@@ -695,9 +709,21 @@ load_checkpoint :: proc(
 
 	// Optimizer
 	opt_type := _get_i32(&io)
-	if io.ok && (opt_type < 0 || opt_type > 2) {
+	if io.ok && (opt_type < 0 || opt_type > 3) {
 		fmt.println("Unsupported optimizer type")
 		io.ok = false
+	}
+	if opt_type == 3 {
+		all := sequential_parameters(model, context.temp_allocator, all = true)
+		defer delete(all)
+		n_flags := _get_size(&io)
+		if io.ok && n_flags != len(all) {
+			io.ok = false // the parameters don't match the layers: a corrupt file
+		}
+		for i in 0 ..< n_flags {
+			frozen := _get_i32(&io) != 0
+			if io.ok && frozen {tensor_set_requires_grad(all[i], false)}
+		}
 	}
 	opt = new(Adam, allocator)
 	opt^ = adam_new(allocator = allocator)
@@ -723,9 +749,9 @@ load_checkpoint :: proc(
 		m := opt.moment_1[i / 2] if i % 2 == 0 else opt.moment_2[i / 2]
 		for &v, j in m {v, _ = endian.get_f64(values[8 * j:], .Little)}
 	}
-	// per-parameter steps (type 2); older checkpoints had one shared count
+	// per-parameter steps (type 2 and 3); older checkpoints had one shared count
 	for i in 0 ..< n_saved {
-		n := _get_i64(&io) if opt_type == 2 else opt.timestep
+		n := _get_i64(&io) if opt_type >= 2 else opt.timestep
 		if fits {opt.steps[i] = n}
 	}
 	if !fits {

@@ -3197,7 +3197,8 @@ pdpm_reference_test :: proc(allocator: mem.Allocator) {
 			m.expected_shortfall_95,
 		}
 		worst := 0.0
-		for k in 0 ..< 7 {worst = max(worst, rel(got[k], PD_MET[k]))}
+		// the reference VaR / ES (k = 4..6) are return levels; the metrics are positive losses
+		for k in 0 ..< 7 {worst = max(worst, rel(got[k], -PD_MET[k] if k >= 4 else PD_MET[k]))}
 		a := fin.analyze_payoff_distribution(X, PD_W[:])
 		ga := [4]f64{a.mean, a.variance, a.skewness, a.kurtosis}
 		wa := 0.0

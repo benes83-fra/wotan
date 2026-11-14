@@ -104,6 +104,9 @@ Tensor :: struct {
 	conv_params:    ConvParams,
 	pool_params:    PoolParams,
 	owned_by_graph: bool, // ✅ ADD THIS
+	// The gradient was dropped (tensor_drop_grad): the buffer is kept for reuse but
+	// holds no gradient until the next backward pass zero-fills it
+	grad_dropped:   bool,
 }
 
 ConvParams :: struct {
@@ -238,6 +241,7 @@ tensor_free :: proc(t: ^Tensor) {
 }
 
 tensor_zero_grad :: proc(t: ^Tensor) {
+	t.grad_dropped = false
 	if t.grad.data != nil {
 		// Odin's compiler will auto-vectorize this simple zero loop perfectly.
 		for i in 0 ..< len(t.grad.data) {
@@ -248,38 +252,41 @@ tensor_zero_grad :: proc(t: ^Tensor) {
 
 // tensor_dropout randomly zeroes elements with probability drop_prob.
 // Uses Inverted Dropout: scales remaining elements by 1/(1-p) during training.
+// Not training, or drop_prob <= 0: the output is a new tensor equal to `a`
+// (identity in autograd: no mask), never `a` itself.
+// The output is always a distinct op output. When `a` requires no gradient the
+// output is a constant marked owned_by_graph: a graph that consumes it frees it
+// (dropout on input data, e.g. a leading DropoutLayer, does not leak per step);
+// unconsumed, it is the caller's to free with tensor_free / tensor_free_graph.
 tensor_dropout :: proc(a: ^Tensor, drop_prob: f64, training: bool) -> ^Tensor {
-	// If not training, or drop_prob is 0, just return the input tensor directly.
-	// This is safe for tensor_free_graph because 'a' will have op == .None (or its original op).
-	if !training || drop_prob <= 0.0 {
-		return a
-	}
-
 	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
-	n := len(a.data.data)
-
-	// Allocate the mask to remember what we dropped for the backward pass
-	mask := make([]f64, n, _op_alloc(a))
-	scale := 1.0 / (1.0 - drop_prob)
-
-	for i in 0 ..< n {
-		if rand.float64() > drop_prob {
-			out_data.data[i] = a.data.data[i] * scale
-			mask[i] = scale
-		} else {
-			out_data.data[i] = 0.0
-			mask[i] = 0.0
+	mask: []f64 = nil
+	if !training || drop_prob <= 0.0 {
+		copy(out_data.data, a.data.data)
+	} else {
+		// Remember what was dropped for the backward pass
+		n := len(a.data.data)
+		mask = make([]f64, n, _op_alloc(a))
+		scale := 1.0 / (1.0 - drop_prob)
+		for i in 0 ..< n {
+			if rand.float64() > drop_prob {
+				out_data.data[i] = a.data.data[i] * scale
+				mask[i] = scale
+			} else {
+				out_data.data[i] = 0.0
+				mask[i] = 0.0
+			}
 		}
 	}
 
 	out := _tensor_new_op(out_data, a.shape, a.requires_grad, _op_alloc(a))
-	out.dropout_mask = mask
-
+	out.dropout_mask = mask // nil: identity in the backward
 	if out.requires_grad {
 		out.op = .Dropout
 		append(&out.inputs, a)
+	} else {
+		out.owned_by_graph = true
 	}
-
 	return out
 }
 // tensor_sum reduces a tensor to a single scalar value (1x1 matrix)
@@ -614,9 +621,27 @@ _build_topo :: proc(node: ^Tensor, topo: ^[dynamic]^Tensor, visited: ^map[^Tenso
 }
 // tensor_ensure_grad ensures a tensor has a gradient matrix allocated
 tensor_ensure_grad :: proc(t: ^Tensor) {
-	if t.requires_grad && t.grad.data == nil {
+	if !t.requires_grad {return}
+	if t.grad.data == nil {
 		t.grad = l.matrix_new(f64, t.data.rows, t.data.cols, t.allocator)
+		t.grad_dropped = false
+	} else if t.grad_dropped {
+		for i in 0 ..< len(t.grad.data) {t.grad.data[i] = 0.0}
+		t.grad_dropped = false
 	}
+}
+
+// tensor_drop_grad marks the gradient as absent (torch's grad = None) without
+// freeing the buffer: tensor_has_grad is false until the next backward pass,
+// which zero-fills the buffer and accumulates into it again
+tensor_drop_grad :: proc(t: ^Tensor) {
+	if t.grad.data != nil {t.grad_dropped = true}
+}
+
+// tensor_has_grad reports whether the tensor holds a gradient: a buffer exists
+// and it was not dropped since the last backward pass
+tensor_has_grad :: proc(t: ^Tensor) -> bool {
+	return t.grad.data != nil && !t.grad_dropped
 }
 
 // tensor_max_pool2d performs max pooling.
@@ -926,17 +951,19 @@ _tensor_free_graph_impl :: proc(node: ^Tensor, visited: ^map[^Tensor]bool) {
 	}
 }
 
-// tensor_free_graph automatically cleans up all intermediate tensors
-// in the computation graph, starting from 'root'.
-// It protects leaf nodes (inputs/weights) from being freed.
-tensor_free_graph :: proc(root: ^Tensor, allocator: mem.Allocator = context.allocator) {
-	if root == nil {return}
+// tensor_free_graph frees every op node reachable from the given roots, and
+// the leaves marked owned_by_graph. Other leaves (inputs, weights) are kept.
+// Roots whose graphs share nodes must be freed in ONE call, e.g.
+// tensor_free_graph(policy_loss, value_loss): the call walks all roots with one
+// visited set, so a shared node is freed exactly once. nil roots are skipped.
+tensor_free_graph :: proc(roots: ..^Tensor, allocator: mem.Allocator = context.allocator) {
+	if len(roots) == 0 {return}
 
 	visited := make(map[^Tensor]bool)
 	defer delete(visited)
 
 	nodes := make([dynamic]^Tensor, 0, allocator)
-	_collect_graph_nodes(root, &nodes, &visited)
+	for root in roots {_collect_graph_nodes(root, &nodes, &visited)}
 	freed_in_graph := 0
 	for i := len(nodes) - 1; i >= 0; i -= 1 {
 		node := nodes[i]
@@ -2300,11 +2327,15 @@ tensor_binary_cross_entropy :: proc(pred: ^Tensor, target: ^Tensor) -> ^Tensor {
 	return out
 }
 
-// Add detach operation to break gradient chain:
-tensor_detach :: proc(t: ^Tensor) -> ^Tensor {
-	out_data := l.matrix_new(f64, t.data.rows, t.data.cols, t.allocator)
+// tensor_detach returns a copy of `t` without history: a new leaf with
+// requires_grad = false and t's shape. Like an op output it lives in the active
+// graph scope if there is one (freed by graph_end), otherwise in `allocator`,
+// and then it is the caller's to free.
+tensor_detach :: proc(t: ^Tensor, allocator: mem.Allocator = context.allocator) -> ^Tensor {
+	allocator := _scope_or(allocator)
+	out_data := l.matrix_new(f64, t.data.rows, t.data.cols, allocator)
 	copy(out_data.data, t.data.data)
-	out := tensor_new(out_data, false, t.allocator)
+	out := tensor_new(out_data, false, allocator)
 	out.shape = t.shape
 	return out
 }
@@ -2360,26 +2391,36 @@ tensor_mean :: proc(a: ^Tensor) -> ^Tensor {
 
 // tensor_neg computes element-wise negation: out = -a
 
-tensor_kl_divergence :: proc(mu: ^Tensor, log_var: ^Tensor) -> ^Tensor {
-	// KL(q(z|x) || p(z)) = -0.5 * sum(1 + log_var - mu^2 - exp(log_var))
-	// Returns scalar loss
+// KL_EXP_CLAMP caps exp(log_var) in tensor_kl_divergence; past it the clamped
+// term has zero gradient (as torch.clamp)
+KL_EXP_CLAMP :: 1e10
 
-	n := f64(len(mu.data.data))
+// tensor_kl_divergence: KL(N(mu, exp(log_var)) || N(0, 1)) of a VAE posterior,
+//   -0.5 * Σ_latent (1 + log_var - mu² - exp(log_var)), averaged over the batch.
+// The latent dims are the logical last dim of mu (see _last_dim): mu [B, L]
+// sums over L and divides by B; [B, S, L, 1] averages over the B·S vectors.
+// exp(log_var) is clamped at KL_EXP_CLAMP. Returns a scalar.
+tensor_kl_divergence :: proc(mu: ^Tensor, log_var: ^Tensor, loc := #caller_location) -> ^Tensor {
+	_check_shape(mu, loc)
+	fmt.assertf(
+		len(mu.data.data) == len(log_var.data.data),
+		"tensor_kl_divergence: mu has %d elements, log_var %d",
+		len(mu.data.data),
+		len(log_var.data.data),
+		loc = loc,
+	)
+	L := _last_dim(mu)
+	batch := f64(len(mu.data.data) / L) if L > 0 else 1
 	kl_sum := 0.0
 
 	for i in 0 ..< len(mu.data.data) {
 		mu_val := mu.data.data[i]
 		log_var_val := log_var.data.data[i]
-
-		exp_val := math.exp(log_var_val)
-		if exp_val > 1e10 {
-			exp_val = 1e10
-		}
-
+		exp_val := min(math.exp(log_var_val), KL_EXP_CLAMP)
 		kl_sum += 1.0 + log_var_val - mu_val * mu_val - exp_val
 	}
 
-	kl_loss := -0.5 * kl_sum / n
+	kl_loss := -0.5 * kl_sum / batch
 
 	out_data := l.matrix_new(f64, 1, 1, _op_alloc(mu))
 	out_data.data[0] = kl_loss
@@ -2394,6 +2435,7 @@ tensor_kl_divergence :: proc(mu: ^Tensor, log_var: ^Tensor) -> ^Tensor {
 		out.op = .KLDivergence
 		append(&out.inputs, mu)
 		append(&out.inputs, log_var)
+		append(&out.f64_metadata, batch)
 	}
 	return out
 }
@@ -2627,12 +2669,24 @@ tensor_clamp :: proc(a: ^Tensor, lo: f64, hi: f64) -> ^Tensor {
 	}
 	return out
 }
-// tensor_softmax applies a numerically stable softmax independently to each row
-// of a [N, C] matrix (normalizes over the last dim). A [1, C] tensor is a single row.
+// _last_dim: size of the logical last dimension of `t`, read from its shape
+// (trailing 1s are unused dims): W of [N, C, H, W], F of [B, S, F, 1], cols of
+// [rows, cols, 1, 1]. A storage-independent "dim = -1".
+_last_dim :: proc(t: ^Tensor) -> int {
+	if t.shape[3] != 1 {return t.shape[3]}
+	if t.shape[2] != 1 {return t.shape[2]}
+	return t.shape[1]
+}
+
+// tensor_softmax applies a numerically stable softmax over the logical last
+// dimension (torch.softmax(x, dim = -1)): independently to each row of a
+// [N, C] matrix, to each feature vector of a flattened [B, S, F, 1] sequence,
+// to each W-row of [N, C, H, W]. The output has the input's storage and shape.
 tensor_softmax :: proc(logits: ^Tensor) -> ^Tensor {
-	N := logits.data.rows
-	C := logits.data.cols
-	out_data := l.matrix_new(f64, N, C, _op_alloc(logits))
+	_check_shape(logits)
+	C := _last_dim(logits)
+	N := len(logits.data.data) / C if C > 0 else 0
+	out_data := l.matrix_new(f64, logits.data.rows, logits.data.cols, _op_alloc(logits))
 
 	for r in 0 ..< N {
 		row_in := logits.data.data[r * C:(r + 1) * C]

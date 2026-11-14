@@ -49,10 +49,29 @@ gpd_fit_test :: proc(allocator: mem.Allocator) {
 				worst = min(worst, fin._gpd_neg_log_likelihood(x, ex) - nll)
 			}
 		}
-		expect(&passed, &total, worst > -1e-12 && converged,
-			fmt.tprintf("xi=%.2f: fit is the MLE (min ring NLL gain %.1e, converged=%v)", xi_t, worst, converged))
-		expect(&passed, &total, abs(xi - xi_t) < 0.08 && abs(beta / beta_t - 1.0) < 0.1,
-			fmt.tprintf("xi=%.2f: recovers xi=%.4f beta=%.5f (truth beta %.3f)", xi_t, xi, beta, beta_t))
+		expect(
+			&passed,
+			&total,
+			worst > -1e-12 && converged,
+			fmt.tprintf(
+				"xi=%.2f: fit is the MLE (min ring NLL gain %.1e, converged=%v)",
+				xi_t,
+				worst,
+				converged,
+			),
+		)
+		expect(
+			&passed,
+			&total,
+			abs(xi - xi_t) < 0.08 && abs(beta / beta_t - 1.0) < 0.1,
+			fmt.tprintf(
+				"xi=%.2f: recovers xi=%.4f beta=%.5f (truth beta %.3f)",
+				xi_t,
+				xi,
+				beta,
+				beta_t,
+			),
+		)
 	}
 
 	// EVT: returns whose left tail beyond -0.02 is exactly -0.02 - GPD(0.2, 0.01)
@@ -72,18 +91,40 @@ gpd_fit_test :: proc(allocator: mem.Allocator) {
 	defer delete(sorted)
 	slice.sort(sorted)
 	k := m / 100
-	emp_var := sorted[k]
+	// positive loss magnitudes, as evt_fit reports them
+	emp_var := -sorted[k]
 	emp_es := 0.0
-	for i in 0 ..< k {emp_es += sorted[i]}
+	for i in 0 ..< k {emp_es -= sorted[i]}
 	emp_es /= f64(k)
-	expect(&passed, &total, abs(evt.var_99 / emp_var - 1.0) < 0.03 && abs(evt.cvar_99 / emp_es - 1.0) < 0.05 && evt.cvar_99 < evt.var_99,
-		fmt.tprintf("evt_fit VaR99=%.5f CVaR99=%.5f vs empirical %.5f / %.5f", evt.var_99, evt.cvar_99, emp_var, emp_es))
+	expect(
+		&passed,
+		&total,
+		abs(evt.var_99 / emp_var - 1.0) < 0.03 &&
+		abs(evt.cvar_99 / emp_es - 1.0) < 0.05 &&
+		evt.cvar_99 > evt.var_99,
+		fmt.tprintf(
+			"evt_fit VaR99=%.5f CVaR99=%.5f vs empirical %.5f / %.5f",
+			evt.var_99,
+			evt.cvar_99,
+			emp_var,
+			emp_es,
+		),
+	)
 
 	v0 := fin._evt_tail_var(-0.02, 0.0, 0.01, 1000, 50, 0.99)
 	vp := fin._evt_tail_var(-0.02, 1e-7, 0.01, 1000, 50, 0.99)
 	vm := fin._evt_tail_var(-0.02, -1e-7, 0.01, 1000, 50, 0.99)
-	expect(&passed, &total, abs(vp - v0) < 1e-8 && abs(vm - v0) < 1e-8 && v0 < -0.02,
-		fmt.tprintf("exponential VaR branch is the ξ → 0 limit (%.8f vs %.8f / %.8f)", v0, vm, vp))
+	expect(
+		&passed,
+		&total,
+		abs(vp - v0) < 1e-8 && abs(vm - v0) < 1e-8 && v0 < -0.02,
+		fmt.tprintf(
+			"exponential VaR branch is the ξ → 0 limit (%.8f vs %.8f / %.8f)",
+			v0,
+			vm,
+			vp,
+		),
+	)
 
 	fmt.printf("GPD fit summary: %d/%d passed\n", passed, total)
 	record_failures(total - passed)

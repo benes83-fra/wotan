@@ -4296,7 +4296,8 @@ evt_reference_test :: proc(allocator: mem.Allocator) {
 			r := fin.evt_fit(EVT_R[:], ref[0])
 			ok = ok && r.n_exceedances == int(ref[4]) && r.converged
 			vals := [?]f64{r.threshold, r.xi, r.beta, r.var_95, r.cvar_95, r.var_99, r.cvar_99}
-			refs := [?]f64{ref[1], ref[2], ref[3], ref[5], ref[6], ref[7], ref[8]}
+			// the reference VaR / ES are return levels; evt_fit reports positive losses
+			refs := [?]f64{ref[1], ref[2], ref[3], -ref[5], -ref[6], -ref[7], -ref[8]}
 			for v, j in vals {
 				if e := _evt_rel(v, refs[j]);
 				   e > worst {worst, at = e, fmt.tprintf("threshold %.3f field %d", ref[0], j)}
@@ -4319,7 +4320,7 @@ evt_reference_test :: proc(allocator: mem.Allocator) {
 		r := fin.evt_fit(EVT_R[:], 0.90)
 		v99, e99 := fin.evt_var_es(&r, 0.99)
 		v995, e995 := fin.evt_var_es(&r, 0.995)
-		ok := v99 == r.var_99 && e99 == r.cvar_99 && v995 < v99 && e995 < v995
+		ok := v99 == r.var_99 && e99 == r.cvar_99 && v995 > v99 && e995 > v995 && v99 > 0
 
 		heavy := make([]f64, 4000)
 		defer delete(heavy)
@@ -4329,13 +4330,13 @@ evt_reference_test :: proc(allocator: mem.Allocator) {
 				-0.01 - 0.01 / 1.5 * (math.pow(1.0 - u, -1.5) - 1.0) if i % 10 == 0 else -0.01 + 0.03 * u
 		}
 		h := fin.evt_fit(heavy, 0.95)
-		ok = ok && h.xi > 1.0 && math.is_inf(h.cvar_99, -1) && !math.is_inf(h.var_99, 0)
+		ok = ok && h.xi > 1.0 && math.is_inf(h.cvar_99, 1) && !math.is_inf(h.var_99, 0)
 		expect(
 			&passed,
 			&total,
 			ok,
 			fmt.tprintf(
-				"evt_var_es: VaR/ES at 99.5%% beyond 99%%; xi = %.2f >= 1 gives ES = -inf (was 1.2 x VaR)",
+				"evt_var_es (positive losses): VaR/ES at 99.5%% beyond 99%%; xi = %.2f >= 1 gives ES = +inf (was 1.2 x VaR)",
 				h.xi,
 			),
 		)
@@ -4350,7 +4351,7 @@ evt_reference_test :: proc(allocator: mem.Allocator) {
 		expect(
 			&passed,
 			&total,
-			c99 == -e && c99 > c95,
+			c99 == e && c99 > c95,
 			fmt.tprintf(
 				"portfolio_cvar_evt: 95%% %.5f, 99%% %.5f (99%% returned the 95%% ES before)",
 				c95,
@@ -4377,17 +4378,30 @@ evt_reference_test :: proc(allocator: mem.Allocator) {
 		h := fin.garch_evt_fit(ret, 0.90)
 		defer {delete(h.var_95_series); delete(h.var_99_series)}
 
-		resid := a.extract_residuals(ret)
+		// Out of sample: GARCH-t fitted on the first half (minus its mean), the
+		// variance filtered forward over the second half with those parameters
+		n_tr := n / 2
+		mean := 0.0
+		for v in ret[:n_tr] {mean += v}
+		mean /= f64(n_tr)
+		resid := make([]f64, n)
 		defer delete(resid)
-		g := a.garch_fit(resid, .StudentT, 1, 1, 2000, 1e-4)
+		for v, i in ret {resid[i] = v - mean}
+		g := a.garch_fit(resid[:n_tr], .StudentT, 1, 1, 2000, 1e-4)
 		defer {delete(g.params.alpha); delete(g.params.beta); delete(g.conditional_var)
 			delete(g.standardized_resid)}
-		mean := 0.0
-		for v in ret {mean += v}
-		mean /= f64(n)
+		sv := make([]f64, n)
+		defer delete(sv)
+		copy(sv, g.conditional_var)
+		for t in n_tr ..< n {
+			sv[t] =
+				g.params.omega +
+				g.params.alpha[0] * resid[t - 1] * resid[t - 1] +
+				g.params.beta[0] * sv[t - 1]
+		}
 		worst := 0.0
 		for i in 0 ..< n {
-			sig := math.sqrt(g.conditional_var[i])
+			sig := math.sqrt(sv[i])
 			worst = max(
 				worst,
 				math.abs(h.var_95_series[i] - (sig * h.q_95 - mean)),
@@ -4396,7 +4410,10 @@ evt_reference_test :: proc(allocator: mem.Allocator) {
 		}
 		ok :=
 			worst < 1e-15 &&
-			h.n_exceedances == n / 10 &&
+			h.garch_omega == g.params.omega &&
+			h.backtest_start == n_tr &&
+			h.backtest_95.n_obs == n - n_tr &&
+			h.n_exceedances == n_tr / 10 &&
 			h.es_q_99 > h.q_99 &&
 			h.q_99 > h.q_95 &&
 			h.backtest_95.passes_test &&
@@ -4406,7 +4423,7 @@ evt_reference_test :: proc(allocator: mem.Allocator) {
 			&total,
 			ok,
 			fmt.tprintf(
-				"garch_evt_fit: VaR_t = sigma_t q - mu (max err %.1e), %d exceedances, q95 %.3f q99 %.3f ES99 %.3f, breaches %.2f%% / %.2f%%",
+				"garch_evt_fit, fitted on the first half and backtested out of sample on the second: VaR_t = sigma_t q - mu with sigma_t filtered forward (max err %.1e), %d exceedances, q95 %.3f q99 %.3f ES99 %.3f, test breaches %.2f%% / %.2f%%",
 				worst,
 				h.n_exceedances,
 				h.q_95,

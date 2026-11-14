@@ -45,6 +45,7 @@ deep_hedging_real_data_test :: proc(allocator: mem.Allocator) {
 	fmt.println("Fetching options chain...")
 	chain, chain_ok := fin.fetch_yahoo_options(symbol, allocator)
 	if !chain_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo option chain for %s", symbol)); return}
+	defer fin.free_option_chain(&chain, allocator)
 
 	if chain.n_options == 0 {
 		fmt.println("ERROR: Failed to fetch options chain")

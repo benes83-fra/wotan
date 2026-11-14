@@ -78,7 +78,7 @@ portfolio_returns :: proc(
 // (1 - confidence)·n returns, the boundary return weighted by the fractional part
 // (same estimator as conditional_var / expected_shortfall)
 portfolio_cvar_historical :: proc(portfolio_returns: []f64, confidence: f64 = 0.95) -> f64 {
-	return -conditional_var(portfolio_returns, confidence)
+	return conditional_var(portfolio_returns, confidence)
 }
 
 // Compute CVaR using EVT (Peak-over-Threshold)
@@ -90,7 +90,7 @@ portfolio_cvar_evt :: proc(
 	// Threshold at the confidence level, ES from the GPD tail at that level
 	evt_result := evt_fit(portfolio_returns, confidence, allocator)
 	_, es := evt_var_es(&evt_result, confidence)
-	return -es // positive loss
+	return es // positive loss
 }
 
 // ============================================================================

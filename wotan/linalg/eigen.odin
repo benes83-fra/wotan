@@ -9,38 +9,58 @@ EighOrder :: enum {
 	Descending,
 }
 
-// Symmetric eigen-decomposition: A = V diag(W) Vᵀ
+// Symmetric eigen-decomposition: A = V diag(W) Vᵀ (W sorted by `order`,
+// eigenvectors in the columns of V). A must be square and non-empty (panics
+// otherwise). A is checked for symmetry in every build: each pair must satisfy
+// |a_ij - a_ji| <= EIGH_SYM_RTOL · max|a_kl| (largest finite entry); if not,
+// ok = false and W / V are empty (W has length 0, V is 0 × 0; freeing them is
+// still fine). Within the tolerance the decomposition is of (A + Aᵀ) / 2.
+// NaN entries are not reported by the check; they give NaN results. A is not
+// modified.
+EIGH_SYM_RTOL :: 1e-10
+
 eigh :: proc(
 	A: ^Matrix(f64),
 	order: EighOrder = .Ascending,
 	allocator: mem.Allocator = context.allocator,
 ) -> (
 	W: []f64,
-	V: Matrix(f64), // eigenvalues// eigenvectors (columns)
+	V: Matrix(f64),// eigenvalues
+	ok: bool,// eigenvectors (columns)
 ) {
-	// Optionally: debug symmetry check
-	when ODIN_DEBUG {
-		if A.rows != A.cols {
-			panic("eigh: matrix must be square")
-		}
-		n := A.rows
-		for i := 0; i < n; i += 1 {
-			for j := i + 1; j < n; j += 1 {
-				aij := A.data[i * A.cols + j]
-				aji := A.data[j * A.cols + i]
-				if math.abs(aij - aji) > 1e-12 {
-					panic("eigh: matrix not symmetric within tolerance")
-				}
+	n := A.rows
+	if n == 0 || A.cols != n {
+		panic("eigh: matrix must be square and non-empty")
+	}
+
+	scale := 0.0
+	for v in A.data[:n * n] {
+		if !math.is_inf(v) && !math.is_nan(v) {scale = max(scale, math.abs(v))}
+	}
+	tol := EIGH_SYM_RTOL * scale
+	for i in 0 ..< n {
+		for j in i + 1 ..< n {
+			if math.abs(A.data[i * n + j] - A.data[j * n + i]) > tol {
+				W = make([]f64, 0, allocator)
+				V = matrix_new(f64, 0, 0, allocator)
+				return
 			}
 		}
 	}
 
-	// Work on a copy, since jacobi_eigen_symmetric modifies in-place
-	A_copy := matrix_new(f64, A.rows, A.cols, allocator)
-	defer matrix_free(&A_copy)
-	copy(A_copy.data, A.data)
+	// Work on the symmetric part (A + Aᵀ) / 2, so the result does not depend on
+	// which triangle carries the rounding
+	A_sym := matrix_new(f64, n, n, allocator)
+	defer matrix_free(&A_sym)
+	for i in 0 ..< n {
+		A_sym.data[i * n + i] = A.data[i * n + i]
+		for j in i + 1 ..< n {
+			s := 0.5 * (A.data[i * n + j] + A.data[j * n + i])
+			A_sym.data[i * n + j], A_sym.data[j * n + i] = s, s
+		}
+	}
 
-	W, V = jacobi_eigen_symmetric(&A_copy, allocator)
+	W, V = _jacobi_eigen_inplace(&A_sym, allocator)
 
 	// Sort eigenvalues + eigenvectors
 	en := len(W)
@@ -64,6 +84,7 @@ eigh :: proc(
 		}
 	}
 
+	ok = true
 	return
 }
 // κ₂(A) = σ_max / σ_min (non-zero σ_min), returns +Inf if rank-deficient
@@ -108,11 +129,11 @@ cond2_svd_thin :: proc(A: ^Matrix(f64), allocator: mem.Allocator = context.alloc
 }
 // κ₂(A) for symmetric (ideally SPD) matrix via eigenvalues
 cond2_sym :: proc(A: ^Matrix(f64), allocator: mem.Allocator = context.allocator) -> f64 {
-	W, V := eigh(A, .Ascending, allocator)
+	W, V, ok := eigh(A, .Ascending, allocator)
 	defer delete(W, allocator)
 	defer matrix_free(&V)
 	n := len(W)
-	if n == 0 {
+	if !ok || n == 0 {
 		return math.INF_F64
 	}
 

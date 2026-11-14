@@ -138,9 +138,9 @@ dispersion_trading_test :: proc(allocator: mem.Allocator) {
 			stds[f] = math.sqrt_f64(stds[f] / f64(train_days))
 			if stds[f] < 1e-8 {stds[f] = 1.0}
 		}
-		// standardised and winsorised at 4 sd: the Mamba layer is not normalised, and its
-		// output grows with a high power of the input (Delta, B x and C h are each linear
-		// in it), so one crash day at 10 sd sends the untrained forecast into the hundreds
+		// standardised with the training statistics and winsorised at 4 sd (the Mamba
+		// block normalises its input itself; the clamp keeps single crash days from
+		// dominating the linear adapter in front of it)
 		for day in 0 ..< valid_days {
 			idx := start_idx + day
 			for f in 0 ..< num_features {

@@ -29,10 +29,21 @@ DEFAULT_BACKTEST_CONFIG :: BacktestConfig {
 // Order Management
 // ============================================================================
 
+// Market: fills at the current bar's price. Limit and Stop wait for a trigger
+// (see context_submit_order): a buy limit fills at a price <= limit_price, a
+// sell limit at a price >= limit_price; a buy stop triggers at a price >=
+// stop_price, a sell stop at a price <= stop_price.
 OrderType :: enum {
 	Market,
 	Limit,
 	Stop,
+}
+
+// Outcome of context_submit_order
+OrderStatus :: enum {
+	Filled, // filled on the current bar
+	Pending, // resting until triggered or cancelled (good till cancelled)
+	Rejected, // invalid quantity, trigger price or current price; nothing booked
 }
 
 OrderSide :: enum {
@@ -51,9 +62,17 @@ Order :: struct {
 
 FilledOrder :: struct {
 	order:      Order,
+	order_id:   int, // id returned by context_submit_order
 	fill_price: f64,
-	fill_time:  int,
+	fill_time:  int, // bar of the fill
 	commission: f64,
+}
+
+// A resting limit or stop order
+PendingOrder :: struct {
+	id:            int,
+	order:         Order,
+	submitted_bar: int,
 }
 
 // ============================================================================
@@ -80,12 +99,14 @@ Position :: struct {
 // ============================================================================
 
 Portfolio :: struct {
-	cash:         f64,
-	positions:    map[string]Position,
-	equity_curve: [dynamic]f64,
-	trades:       [dynamic]FilledOrder,
-	current_bar:  int,
-	trade_pnls:   [dynamic]f64, // net P&L of each closed round trip
+	cash:          f64,
+	positions:     map[string]Position,
+	equity_curve:  [dynamic]f64,
+	trades:        [dynamic]FilledOrder,
+	current_bar:   int,
+	trade_pnls:    [dynamic]f64, // net P&L of each closed round trip
+	pending:       [dynamic]PendingOrder, // resting limit / stop orders, oldest first
+	next_order_id: int, // ids start at 1
 }
 
 portfolio_init :: proc(capital: f64, allocator: mem.Allocator) -> Portfolio {
@@ -96,15 +117,18 @@ portfolio_init :: proc(capital: f64, allocator: mem.Allocator) -> Portfolio {
 		trades = make([dynamic]FilledOrder, 0, allocator),
 		current_bar = 0,
 		trade_pnls = make([dynamic]f64, 0, allocator),
+		pending = make([dynamic]PendingOrder, 0, allocator),
+		next_order_id = 1,
 	}
 }
 
-@(private = "file")
-_portfolio_destroy :: proc(p: ^Portfolio) {
+// Frees a Portfolio made by portfolio_init (the runners free their own)
+portfolio_destroy :: proc(p: ^Portfolio) {
 	delete(p.positions)
 	delete(p.equity_curve)
 	delete(p.trades)
 	delete(p.trade_pnls)
+	delete(p.pending)
 }
 
 // Cash plus signed position values (positions without a price count as 0)
@@ -157,20 +181,102 @@ context_get_prices :: proc(
 	return prices
 }
 
-// Fills a market order at the current bar's price moved against the trader by
-// config.slippage_rate, charging config.commission_rate on the fill notional.
-// Buys reduce or cover a short before going long; sells reduce a long before
-// going short. Orders with a non-positive quantity or price are ignored.
-context_submit_order :: proc(ctx: ^StrategyContext, order: Order) {
-	if order.order_type != .Market {return}
-	price := context_get_price(ctx, order.symbol)
-	if !(order.quantity > 0.0) ||
-	   !(price > 0.0) ||
-	   math.is_inf(price) ||
-	   math.is_inf(order.quantity) {
-		return
+// Submits an order on the current bar; returns its id (0 when rejected) and
+// what happened to it. The engine sees one price per bar (the close).
+//  - Market: fills at the current price.
+//  - Limit / Stop: fills at the current price if that already meets the
+//    trigger; otherwise it rests (good till cancelled) and the runners check it
+//    at each later bar, before calling the strategy, filling it at the first
+//    price that meets the trigger: a limit order at a price at least as good as
+//    its limit, a stop order at that price even when it gapped past the stop.
+//    context_cancel_order removes a resting order; orders still resting at the
+//    end of a run are counted in BacktestResult.open_orders.
+// Every fill moves the price against the trader by config.slippage_rate and
+// charges config.commission_rate on the fill notional. Buys reduce or cover a
+// short before going long; sells reduce a long before going short. Rejected
+// (nothing booked): a quantity that is not positive and finite, a Limit without
+// a positive finite limit_price, a Stop without a positive finite stop_price,
+// or a fill due when the symbol's price is not positive and finite.
+context_submit_order :: proc(
+	ctx: ^StrategyContext,
+	order: Order,
+) -> (
+	id: int,
+	status: OrderStatus,
+) {
+	if !_valid_px(order.quantity) {return 0, .Rejected}
+	switch order.order_type {
+	case .Market:
+	case .Limit:
+		if !_valid_px(order.limit_price) {return 0, .Rejected}
+	case .Stop:
+		if !_valid_px(order.stop_price) {return 0, .Rejected}
 	}
+	price := context_get_price(ctx, order.symbol)
+	pf := ctx.portfolio
+	if order.order_type == .Market || (_valid_px(price) && _order_triggered(order, price)) {
+		if !_valid_px(price) {return 0, .Rejected}
+		id = pf.next_order_id
+		pf.next_order_id += 1
+		_fill_order(ctx, order, id, price)
+		return id, .Filled
+	}
+	id = pf.next_order_id
+	pf.next_order_id += 1
+	append(&pf.pending, PendingOrder{id = id, order = order, submitted_bar = ctx.current_bar})
+	return id, .Pending
+}
 
+// Removes a resting order; false if no order with that id is resting
+context_cancel_order :: proc(ctx: ^StrategyContext, id: int) -> bool {
+	pf := ctx.portfolio
+	for po, i in pf.pending {
+		if po.id == id {
+			ordered_remove(&pf.pending, i)
+			return true
+		}
+	}
+	return false
+}
+
+// Fills the resting orders that trigger at the current bar's prices, oldest
+// first (the runners call this before the strategy on every bar)
+context_process_pending_orders :: proc(ctx: ^StrategyContext) {
+	pf := ctx.portfolio
+	i := 0
+	for i < len(pf.pending) {
+		po := pf.pending[i]
+		price := context_get_price(ctx, po.order.symbol)
+		if _valid_px(price) && _order_triggered(po.order, price) {
+			ordered_remove(&pf.pending, i)
+			_fill_order(ctx, po.order, po.id, price)
+		} else {
+			i += 1
+		}
+	}
+}
+
+@(private = "file")
+_valid_px :: proc(x: f64) -> bool {return x > 0.0 && !math.is_inf(x)}
+
+// Whether an order triggers at price
+@(private = "file")
+_order_triggered :: proc(order: Order, price: f64) -> bool {
+	buy := order.side == .Buy
+	switch order.order_type {
+	case .Market:
+		return true
+	case .Limit:
+		return price <= order.limit_price if buy else price >= order.limit_price
+	case .Stop:
+		return price >= order.stop_price if buy else price <= order.stop_price
+	}
+	return false
+}
+
+@(private = "file")
+_fill_order :: proc(ctx: ^StrategyContext, order: Order, id: int, bar_price: f64) {
+	price := bar_price
 	slip := ctx.config.slippage_rate
 	price *= (1.0 + slip) if order.side == .Buy else (1.0 - slip)
 	commission := order.quantity * price * ctx.config.commission_rate
@@ -224,6 +330,7 @@ context_submit_order :: proc(ctx: ^StrategyContext, order: Order) {
 		&pf.trades,
 		FilledOrder {
 			order = order,
+			order_id = id,
 			fill_price = price,
 			fill_time = ctx.current_bar,
 			commission = commission,
@@ -252,6 +359,7 @@ BacktestResult :: struct {
 	profit_factor: f64,
 	total_trades:  int, // fills
 	round_trips:   int, // closed round trips (win_rate / profit_factor sample)
+	open_orders:   int, // limit / stop orders still resting at the end (never filled)
 }
 
 
@@ -268,6 +376,7 @@ _calculate_backtest_metrics :: proc(
 	result.trades = make([]FilledOrder, len(portfolio.trades), allocator)
 	copy(result.trades, portfolio.trades[:])
 	result.total_trades = len(portfolio.trades)
+	result.open_orders = len(portfolio.pending)
 
 	n := len(portfolio.equity_curve)
 	if n == 0 || !(config.initial_capital > 0.0) {
@@ -864,6 +973,8 @@ backtest_run :: proc(
 
 		prices := context_get_prices(&ctx, symbols, allocator)
 
+		context_process_pending_orders(&ctx)
+
 		strategy(&ctx)
 
 		portfolio_update(&portfolio, prices)
@@ -872,7 +983,7 @@ backtest_run :: proc(
 	}
 
 	result := _calculate_backtest_metrics(&portfolio, config, allocator)
-	_portfolio_destroy(&portfolio)
+	portfolio_destroy(&portfolio)
 	return result
 }
 
@@ -899,6 +1010,8 @@ backtest_portfolio_run :: proc(
 		ctx.current_bar = bar
 
 		prices := context_get_prices(&ctx, symbols, allocator)
+
+		context_process_pending_orders(&ctx)
 
 		if bar % rebalance_frequency == 0 {
 			target_weights := strategy(&ctx, allocator)
@@ -946,7 +1059,7 @@ backtest_portfolio_run :: proc(
 	}
 
 	result := _calculate_backtest_metrics(&portfolio, config, allocator)
-	_portfolio_destroy(&portfolio)
+	portfolio_destroy(&portfolio)
 	return result
 }
 // ============================================================================

@@ -252,24 +252,25 @@ _backward_from_root :: proc(root: ^Tensor, allocator: mem.Allocator) {
 		case .KLDivergence:
 			mu_in := node.inputs[0]
 			log_var_in := node.inputs[1]
-
 			scalar_grad := node.grad.data[0]
-			n := f64(len(mu_in.data.data))
+			batch := node.f64_metadata[0]
 
-			// ∂KL/∂mu = -0.5 * (-2 * mu) / n = mu / n
+			// ∂KL/∂mu = mu / batch
 			if mu_in.requires_grad {
 				tensor_ensure_grad(mu_in)
 				for i in 0 ..< len(mu_in.grad.data) {
-					mu_in.grad.data[i] += scalar_grad * mu_in.data.data[i] / n
+					mu_in.grad.data[i] += scalar_grad * mu_in.data.data[i] / batch
 				}
 			}
 
-			// ∂KL/∂log_var = -0.5 * (1 - exp(log_var)) / n = (exp(log_var) - 1) / (2n)
+			// ∂KL/∂log_var = (exp(log_var) - 1) / (2 batch); where the forward clamped
+			// exp(log_var) at KL_EXP_CLAMP that term is constant: -1 / (2 batch)
 			if log_var_in.requires_grad {
 				tensor_ensure_grad(log_var_in)
 				for i in 0 ..< len(log_var_in.grad.data) {
-					log_var_in.grad.data[i] +=
-						scalar_grad * (math.exp(log_var_in.data.data[i]) - 1.0) / (2.0 * n)
+					e := math.exp(log_var_in.data.data[i])
+					if e > KL_EXP_CLAMP {e = 0}
+					log_var_in.grad.data[i] += scalar_grad * (e - 1.0) / (2.0 * batch)
 				}
 			}
 		case .MaskedScaledDotProductAttention:
@@ -502,6 +503,7 @@ _backward_from_root :: proc(root: ^Tensor, allocator: mem.Allocator) {
 			if weight_in.grad.data == nil {
 				weight_in.grad = l.matrix_new(f64, vocab_size, embed_dim, weight_in.allocator)
 			}
+			tensor_ensure_grad(weight_in)
 
 			// ✅ OPTIMIZATION: Scatter-add using SIMD vector addition
 			for b in 0 ..< batch {
@@ -790,9 +792,14 @@ _backward_from_root :: proc(root: ^Tensor, allocator: mem.Allocator) {
 		case .Dropout:
 			a_in := node.inputs[0]
 			if a_in.requires_grad {
-				// ✅ SIMD Optimization: grad_a += node.grad * mask
-				// vec_fma_inplace_simd does: c += a * b
-				l.vec_fma_inplace_simd(node.grad.data, node.dropout_mask, a_in.grad.data)
+				tensor_ensure_grad(a_in)
+				if node.dropout_mask == nil {
+					// evaluation mode / p = 0: identity
+					l.vec_add_simd(a_in.grad.data, node.grad.data, a_in.grad.data)
+				} else {
+					// grad_a += node.grad * mask (vec_fma_inplace_simd: c += a * b)
+					l.vec_fma_inplace_simd(node.grad.data, node.dropout_mask, a_in.grad.data)
+				}
 			}
 		case .Flatten:
 			a_in := node.inputs[0]

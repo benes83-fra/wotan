@@ -146,13 +146,17 @@ lu_decompose :: proc(
 	return
 }
 
-// Apply permutation P to b: Pb
-apply_pivots_vec :: proc(piv: []int, b: []f64) -> []f64 {
+// Apply permutation P to b: Pb (new slice from `allocator`)
+apply_pivots_vec :: proc(
+	piv: []int,
+	b: []f64,
+	allocator: mem.Allocator = context.allocator,
+) -> []f64 {
 	n := len(piv)
 	if len(b) != n {
 		panic("apply_pivots_vec: dimension mismatch")
 	}
-	x := make([]f64, n, context.temp_allocator)
+	x := make([]f64, n, allocator)
 	for i := 0; i < n; i += 1 {
 		x[i] = b[piv[i]]
 	}
@@ -166,7 +170,7 @@ lu_solve :: proc(
 	b: []f64,
 	allocator: mem.Allocator = context.allocator,
 ) -> []f64 {
-	y_perm := apply_pivots_vec(piv, b)
+	y_perm := apply_pivots_vec(piv, b, context.temp_allocator)
 	defer delete(y_perm, context.temp_allocator)
 	y := forward_subst_unit_lower_simd(LU, y_perm, context.temp_allocator)
 	defer delete(y, context.temp_allocator)

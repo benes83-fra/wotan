@@ -33,15 +33,15 @@ gc_check :: proc(
 	analytic := make([]f64, len(x.grad.data), allocator)
 	defer delete(analytic, allocator)
 	copy(analytic, x.grad.data)
-	t.tensor_free_graph(loss, allocator)
+	t.tensor_free_graph(loss, allocator = allocator)
 
 	max_err := 0.0
 	for i in 0 ..< len(x.data.data) {
 		orig := x.data.data[i]
 		x.data.data[i] = orig + h
-		lp := f(x); fp := lp.data.data[0]; t.tensor_free_graph(lp, allocator)
+		lp := f(x); fp := lp.data.data[0]; t.tensor_free_graph(lp, allocator = allocator)
 		x.data.data[i] = orig - h
-		lm := f(x); fm := lm.data.data[0]; t.tensor_free_graph(lm, allocator)
+		lm := f(x); fm := lm.data.data[0]; t.tensor_free_graph(lm, allocator = allocator)
 		x.data.data[i] = orig
 
 		num := (fp - fm) / (2 * h)

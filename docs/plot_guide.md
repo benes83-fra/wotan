@@ -48,7 +48,7 @@ The chart procedures:
 
 Each procedure returns `true` once the file is written. It returns `false` if the input cannot be drawn or the file cannot be written:
 - `xs` and `ys` of different lengths, or empty;
-- a non-`Float` column (a column name the DataFrame doesn't have panics, as `DataFrame.column` does);
+- a column name the DataFrame doesn't have, or a column that is not `Float`;
 - `bins <= 0`;
 - `len(data) != rows · cols`.
 
@@ -369,11 +369,11 @@ A legend entry with `marker = true` shows a dot instead of a line sample. `axes_
 - **Compression.** The rows are compressed by the package's own DEFLATE implementation: LZ77 with hash chains and lazy matching, and dynamic Huffman codes. Odin's `core:compress` can only decompress.
 - **Checks.** Pillow decodes the files to exactly the source pixels, for opaque and transparent images from 1 × 1 to 1000 × 700, and Python's `zlib` inflates the image data and verifies its checksum. The compressed size is within 1 % of zlib at level 6 on noise, and 5 % smaller on a repetitive image. `crc32_checksum` and `zlib_compress` are public as well.
 
-**Memory.** The chart procedures allocate the image buffer and their scratch space with the `allocator` argument, which defaults to `context.allocator`, and free it all before returning. Two kinds of short-lived data come from `context.temp_allocator` instead:
-- the tick values and labels;
-- the PNG bytes in `image_save_png`.
+**Memory.** The chart procedures allocate the image buffer and their scratch space with the `allocator` argument, which defaults to `context.allocator`, and free it all before returning. The tick values and labels, the cell texts of a heatmap and the PNG bytes come from `context.temp_allocator`; each chart procedure releases them before it returns, with `runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()` from `base:runtime`. A loop that writes many charts therefore does not grow the temporary allocator. `image_save_png`, `image_encode_png`, `zlib_compress`, `png_filter_rows` and `draw_line_segment` release their temporary scratch the same way; when you pass `context.temp_allocator` as the result allocator of `image_encode_png` or `zlib_compress`, the scratch stays there with the result until your next `free_all(context.temp_allocator)`.
 
-A program that writes many charts should call `free_all(context.temp_allocator)` from time to time, as `main.odin` does after each test. `nice_ticks` and `format_ticks` also default to the temporary allocator. Images you create yourself are freed with `image_free`, coverage buffers with `coverage_free`, and the result of `image_encode_png` with `delete`.
+The guard works with Odin's default temporary allocator. If you install a different `context.temp_allocator`, the scratch stays on it until you free it.
+
+When you draw your own chart (section 10), `axes_setup` stores its ticks and labels on `context.temp_allocator`, and `nice_ticks` and `format_ticks` default to it as well. Free them with `free_all(context.temp_allocator)`, or start the procedure that draws the chart with `runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()`, as the chart procedures do; it releases everything put on the temporary allocator after it, when the procedure returns. Images you create yourself are freed with `image_free`, coverage buffers with `coverage_free`, and the result of `image_encode_png` with `delete`.
 
 The fonts are embedded in the binary with `#load` and decoded once, on first use, without allocating.
 

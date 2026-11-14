@@ -280,8 +280,9 @@ _thomas_algorithm :: proc(
 	}
 }
 
-// Black-Scholes PDE in x = ln S and time to expiry τ:
-//   V_τ = ½σ²·V_xx + (r − σ²/2)·V_x − r·V
+// Black-Scholes PDE in x = ln S and time to expiry τ, continuous dividend
+// yield q:
+//   V_τ = ½σ²·V_xx + (r − q − σ²/2)·V_x − r·V
 // on a uniform x grid of N (even) intervals with S at the centre node, so the
 // price needs no interpolation. The half-width is 6σ√T plus the log-distance to
 // the strike. Crank-Nicolson time steps, the first one replaced by two fully
@@ -293,7 +294,7 @@ _thomas_algorithm :: proc(
 // last time step.
 @(private = "file")
 _fd_black_scholes :: proc(
-	S, K, T, r, sigma: f64,
+	S, K, T, r, sigma, q: f64,
 	opt: OptionType,
 	american: bool,
 	n_space, n_time: int,
@@ -328,7 +329,7 @@ _fd_black_scholes :: proc(
 
 	// L V = lo·V[i−1] + di·V[i] + up·V[i+1]
 	alpha := 0.5 * sigma * sigma
-	beta := r - 0.5 * sigma * sigma
+	beta := r - q - 0.5 * sigma * sigma
 	lo := alpha / (dx * dx) - beta / (2.0 * dx)
 	di := -2.0 * alpha / (dx * dx) - r
 	up := alpha / (dx * dx) + beta / (2.0 * dx)
@@ -337,7 +338,7 @@ _fd_black_scholes :: proc(
 	// (I − θhL)V_new = (I + (1−θ)hL)V_old
 	step :: proc(
 		V, payoff, rhs, work: []f64,
-		lo, di, up, h, theta, tau, K, r, S_min, S_max: f64,
+		lo, di, up, h, theta, tau, K, r, q, S_min, S_max: f64,
 		opt: OptionType,
 		american: bool,
 	) {
@@ -346,12 +347,15 @@ _fd_black_scholes :: proc(
 		for i in 1 ..< N {
 			rhs[i] = V[i] + e * (lo * V[i - 1] + di * V[i] + up * V[i + 1])
 		}
-		// Boundary values at the new time level
+		// Boundary values at the new time level: the discounted forward payoff,
+		// for American options at least the exercise value
 		if opt == .Call {
 			V[0] = 0
-			V[N] = S_max - K * math.exp(-r * tau)
+			V[N] = S_max * math.exp(-q * tau) - K * math.exp(-r * tau)
+			if american {V[N] = max(V[N], S_max - K)}
 		} else {
-			V[0] = (K if american else K * math.exp(-r * tau)) - S_min
+			V[0] = K * math.exp(-r * tau) - S_min * math.exp(-q * tau)
+			if american {V[0] = max(V[0], K - S_min)}
 			V[N] = 0
 		}
 		a, b, c := -theta * h * lo, 1.0 - theta * h * di, -theta * h * up
@@ -404,13 +408,14 @@ _fd_black_scholes :: proc(
 		0.5 * dt,
 		K,
 		r,
+		q,
 		S_min,
 		S_max,
 		opt,
 		american,
 	)
 	before_last, last_h := V[half], 0.5 * dt
-	step(V, payoff, rhs, work, lo, di, up, 0.5 * dt, 1.0, dt, K, r, S_min, S_max, opt, american)
+	step(V, payoff, rhs, work, lo, di, up, 0.5 * dt, 1.0, dt, K, r, q, S_min, S_max, opt, american)
 	for n in 1 ..< n_t {
 		before_last, last_h = V[half], dt
 		step(
@@ -426,6 +431,7 @@ _fd_black_scholes :: proc(
 			f64(n + 1) * dt,
 			K,
 			r,
+			q,
 			S_min,
 			S_max,
 			opt,
@@ -454,8 +460,9 @@ crank_nicolson_european :: proc(
 	n_space: int = 200,
 	n_time: int = 200,
 	allocator: mem.Allocator = context.allocator,
+	q: f64 = 0.0,
 ) -> FiniteDifferenceResult {
-	return _fd_black_scholes(S, K, T, r, sigma, opt, false, n_space, n_time, allocator)
+	return _fd_black_scholes(S, K, T, r, sigma, q, opt, false, n_space, n_time, allocator)
 }
 
 // ============================================================================
@@ -470,8 +477,9 @@ crank_nicolson_call :: proc(
 	n_space: int = 200,
 	n_time: int = 200,
 	allocator: mem.Allocator = context.allocator,
+	q: f64 = 0.0,
 ) -> FiniteDifferenceResult {
-	return crank_nicolson_european(S, K, T, r, sigma, .Call, n_space, n_time, allocator)
+	return crank_nicolson_european(S, K, T, r, sigma, .Call, n_space, n_time, allocator, q)
 }
 
 crank_nicolson_put :: proc(
@@ -483,8 +491,9 @@ crank_nicolson_put :: proc(
 	n_space: int = 200,
 	n_time: int = 200,
 	allocator: mem.Allocator = context.allocator,
+	q: f64 = 0.0,
 ) -> FiniteDifferenceResult {
-	return crank_nicolson_european(S, K, T, r, sigma, .Put, n_space, n_time, allocator)
+	return crank_nicolson_european(S, K, T, r, sigma, .Put, n_space, n_time, allocator, q)
 }
 
 // American option by Crank-Nicolson with Rannacher start-up and the
@@ -499,8 +508,9 @@ finite_difference_american :: proc(
 	n_space: int = 200,
 	n_time: int = 200,
 	allocator: mem.Allocator = context.allocator,
+	q: f64 = 0.0,
 ) -> FiniteDifferenceResult {
-	return _fd_black_scholes(S, K, T, r, sigma, opt, true, n_space, n_time, allocator)
+	return _fd_black_scholes(S, K, T, r, sigma, q, opt, true, n_space, n_time, allocator)
 }
 
 // Convenience Wrappers
@@ -513,8 +523,9 @@ fd_american_call :: proc(
 	n_space: int = 200,
 	n_time: int = 200,
 	allocator: mem.Allocator = context.allocator,
+	q: f64 = 0.0,
 ) -> FiniteDifferenceResult {
-	return finite_difference_american(S, K, T, r, sigma, .Call, n_space, n_time, allocator)
+	return finite_difference_american(S, K, T, r, sigma, .Call, n_space, n_time, allocator, q)
 }
 
 fd_american_put :: proc(
@@ -526,15 +537,17 @@ fd_american_put :: proc(
 	n_space: int = 200,
 	n_time: int = 200,
 	allocator: mem.Allocator = context.allocator,
+	q: f64 = 0.0,
 ) -> FiniteDifferenceResult {
-	return finite_difference_american(S, K, T, r, sigma, .Put, n_space, n_time, allocator)
+	return finite_difference_american(S, K, T, r, sigma, .Put, n_space, n_time, allocator, q)
 }
 
 
 // ============================================================================
 // LONGSTAFF-SCHWARTZ MONTE CARLO FOR AMERICAN OPTIONS
 // ============================================================================
-// Regression estimates of the continuation value decide exercise at
+// GBM paths with drift r − q (continuous dividend yield q, default 0, passed by
+// name). Regression estimates of the continuation value decide exercise at
 // n_exercise_dates equally spaced dates t_k = T·k/n (k = 1..n, the last one is
 // expiry; date k falls on simulation step round(k·n_steps/n)), plus exercise at
 // t = 0 if the intrinsic value exceeds the estimate. With few dates this is a
@@ -585,6 +598,7 @@ _least_squares_regression :: proc(
 @(private = "file")
 _LSM :: struct {
 	S_0, K, T, r, sigma:   f64,
+	q:                     f64, // continuous dividend yield
 	opt:                   OptionType,
 	asian:                 bool, // exercise value on the running average (S_0 included)
 	n_steps, n_ex, degree: int,
@@ -649,7 +663,7 @@ _lsm_run :: proc(
 	n_paths := c.n_base * (2 if c.antithetic else 1)
 	n_ex, nb := c.n_ex, _lsm_n_basis(c)
 	dt := c.T / f64(c.n_steps)
-	drift := (c.r - 0.5 * c.sigma * c.sigma) * dt
+	drift := (c.r - c.q - 0.5 * c.sigma * c.sigma) * dt
 	vol := c.sigma * math.sqrt(dt)
 
 	ex_step := make([]int, n_ex, allocator)
@@ -738,7 +752,7 @@ _lsm_run :: proc(
 	// with the European payoff as control variate
 	n_s := c.n_base
 	mean_y, mean_c := 0.0, 0.0
-	euro_exact := compute_greeks(c.S_0, c.K, c.T, c.r, c.sigma, c.opt).price
+	euro_exact := compute_greeks(c.S_0, c.K, c.T, c.r, c.sigma, c.opt, q = c.q).price
 	sample :: proc(c: ^_LSM, cash, S_ex: []f64, s: int, disc_T: f64) -> (y, ctrl: f64) {
 		n_ex := c.n_ex
 		y = cash[s]
@@ -855,6 +869,7 @@ lsm_american_vanilla :: proc(
 	n_exercise_dates: int = 10,
 	poly_degree: int = 3,
 	allocator: mem.Allocator = context.allocator,
+	q: f64 = 0.0,
 ) -> LSM_Result {
 	c := _LSM {
 		S_0     = S_0,
@@ -862,6 +877,7 @@ lsm_american_vanilla :: proc(
 		T       = T,
 		r       = r,
 		sigma   = sigma,
+		q       = q,
 		opt     = opt,
 		n_steps = n_steps,
 		n_ex    = n_exercise_dates,
@@ -884,6 +900,7 @@ lsm_american_call :: proc(
 	n_exercise_dates: int = 10,
 	poly_degree: int = 3,
 	allocator: mem.Allocator = context.allocator,
+	q: f64 = 0.0,
 ) -> LSM_Result {
 	return lsm_american_vanilla(
 		S_0,
@@ -897,6 +914,7 @@ lsm_american_call :: proc(
 		n_exercise_dates,
 		poly_degree,
 		allocator,
+		q,
 	)
 }
 
@@ -911,6 +929,7 @@ lsm_american_put :: proc(
 	n_exercise_dates: int = 10,
 	poly_degree: int = 3,
 	allocator: mem.Allocator = context.allocator,
+	q: f64 = 0.0,
 ) -> LSM_Result {
 	return lsm_american_vanilla(
 		S_0,
@@ -924,6 +943,7 @@ lsm_american_put :: proc(
 		n_exercise_dates,
 		poly_degree,
 		allocator,
+		q,
 	)
 }
 
@@ -942,6 +962,7 @@ lsm_american_asian_call :: proc(
 	n_exercise_dates: int = 10,
 	poly_degree: int = 3,
 	allocator: mem.Allocator = context.allocator,
+	q: f64 = 0.0,
 ) -> LSM_Result {
 	c := _LSM {
 		S_0     = S_0,
@@ -949,6 +970,7 @@ lsm_american_asian_call :: proc(
 		T       = T,
 		r       = r,
 		sigma   = sigma,
+		q       = q,
 		opt     = .Call,
 		asian   = true,
 		n_steps = n_steps,
@@ -989,6 +1011,7 @@ lsm_american_vanilla_reduced :: proc(
 	n_exercise_dates: int = 10,
 	poly_degree: int = 3,
 	allocator: mem.Allocator = context.allocator,
+	q: f64 = 0.0,
 ) -> VR_LSM_Result {
 	c := _LSM {
 		S_0        = S_0,
@@ -996,6 +1019,7 @@ lsm_american_vanilla_reduced :: proc(
 		T          = T,
 		r          = r,
 		sigma      = sigma,
+		q          = q,
 		opt        = opt,
 		n_steps    = n_steps,
 		n_ex       = n_exercise_dates,

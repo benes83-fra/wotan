@@ -611,7 +611,11 @@ factor_model_covariance :: proc(
 	}
 
 	// Now it's safe to invert because factor_cov_mat is still valid
-	inv_fcov_mat := l.matrix_inverse(&factor_cov_mat, allocator)
+	inv_fcov_mat, inv_ok := l.matrix_inverse(&factor_cov_mat, allocator)
+	if !inv_ok { 	// collinear factors: minimum-norm betas from the pseudo-inverse
+		l.matrix_free(&inv_fcov_mat)
+		inv_fcov_mat = l.pinv(&factor_cov_mat, allocator = allocator)
+	}
 	defer l.matrix_free(&inv_fcov_mat)
 
 	for a in 0 ..< n_assets {

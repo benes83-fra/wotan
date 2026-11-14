@@ -57,7 +57,7 @@ gcl_check :: proc(
 	for k in 0 ..< n_inputs {t.tensor_zero_grad(gcl_in[k])}
 	loss := f()
 	t.tensor_backward(loss, allocator)
-	t.tensor_free_graph(loss, allocator)
+	t.tensor_free_graph(loss, allocator = allocator)
 
 	max_err := 0.0
 	worst_input := -1
@@ -66,9 +66,9 @@ gcl_check :: proc(
 		for i in 0 ..< len(x.data.data) {
 			orig := x.data.data[i]
 			x.data.data[i] = orig + h
-			lp := f(); fp := lp.data.data[0]; t.tensor_free_graph(lp, allocator)
+			lp := f(); fp := lp.data.data[0]; t.tensor_free_graph(lp, allocator = allocator)
 			x.data.data[i] = orig - h
-			lm := f(); fm := lm.data.data[0]; t.tensor_free_graph(lm, allocator)
+			lm := f(); fm := lm.data.data[0]; t.tensor_free_graph(lm, allocator = allocator)
 			x.data.data[i] = orig
 
 			num := (fp - fm) / (2 * h)
@@ -109,16 +109,16 @@ gradcheck_layers_test :: proc(allocator: mem.Allocator) {
 	gcl_in[0] = gcl_rand(3, 4, {3, 4, 1, 1}, 1, true, allocator)
 	gcl_in[1] = gcl_rand(4, 2, {4, 2, 1, 1}, 2, true, allocator)
 	gcl_check("matmul 2D [3,4]@[4,2]", 2, proc() -> ^t.Tensor {
-		return gcl_weighted_sum(t.tensor_matmul(gcl_in[0], gcl_in[1]))
-	}, allocator)
+			return gcl_weighted_sum(t.tensor_matmul(gcl_in[0], gcl_in[1]))
+		}, allocator)
 	gcl_free_inputs(2)
 
 	// 2. Flattened [1, N*D] matmul, gradient wrt input and weight
 	gcl_in[0] = gcl_rand(1, 3 * 4, {1, 3, 4, 1}, 3, true, allocator)
 	gcl_in[1] = gcl_rand(4, 5, {4, 5, 1, 1}, 4, true, allocator)
 	gcl_check("matmul flattened [1,3*4]@[4,5]", 2, proc() -> ^t.Tensor {
-		return gcl_weighted_sum(t.tensor_matmul(gcl_in[0], gcl_in[1]))
-	}, allocator)
+			return gcl_weighted_sum(t.tensor_matmul(gcl_in[0], gcl_in[1]))
+		}, allocator)
 	gcl_free_inputs(2)
 
 	// 3. Scaled dot-product attention (seq_q != seq_k, d_k != d_v)
@@ -126,10 +126,15 @@ gradcheck_layers_test :: proc(allocator: mem.Allocator) {
 	gcl_in[1] = gcl_rand(1, 2 * 4 * 4, {2, 4, 4, 1}, 6, true, allocator) // K [B, Sk, dk]
 	gcl_in[2] = gcl_rand(1, 2 * 4 * 3, {2, 4, 3, 1}, 7, true, allocator) // V [B, Sk, dv]
 	gcl_check("scaled_dot_product_attention", 3, proc() -> ^t.Tensor {
-		return gcl_weighted_sum(
-			t.tensor_scaled_dot_product_attention(gcl_in[0], gcl_in[1], gcl_in[2], context.allocator),
-		)
-	}, allocator)
+			return gcl_weighted_sum(
+				t.tensor_scaled_dot_product_attention(
+					gcl_in[0],
+					gcl_in[1],
+					gcl_in[2],
+					context.allocator,
+				),
+			)
+		}, allocator)
 	gcl_free_inputs(3)
 
 	// 4. Masked (causal) attention
@@ -144,16 +149,16 @@ gradcheck_layers_test :: proc(allocator: mem.Allocator) {
 	gcl_in[1] = gcl_rand(1, 2 * 3 * 4, {2, 3, 4, 1}, 9, true, allocator)
 	gcl_in[2] = gcl_rand(1, 2 * 3 * 2, {2, 3, 2, 1}, 10, true, allocator)
 	gcl_check("masked attention (causal)", 3, proc() -> ^t.Tensor {
-		return gcl_weighted_sum(
-			t.tensor_masked_scaled_dot_product_attention(
-				gcl_in[0],
-				gcl_in[1],
-				gcl_in[2],
-				gcl_mask,
-				context.allocator,
-			),
-		)
-	}, allocator)
+			return gcl_weighted_sum(
+				t.tensor_masked_scaled_dot_product_attention(
+					gcl_in[0],
+					gcl_in[1],
+					gcl_in[2],
+					gcl_mask,
+					context.allocator,
+				),
+			)
+		}, allocator)
 	gcl_free_inputs(3)
 
 	// 5-7. Recurrent cells: x [B,S,I], h_0 [B,H], w_ih [I,kH], w_hh [H,kH], bias [1,kH]
@@ -163,10 +168,17 @@ gradcheck_layers_test :: proc(allocator: mem.Allocator) {
 	gcl_in[3] = gcl_rand(H, H, {H, H, 1, 1}, 14, true, allocator, 0.5)
 	gcl_in[4] = gcl_rand(1, H, {1, H, 1, 1}, 15, true, allocator, 0.5)
 	gcl_check("rnn", 5, proc() -> ^t.Tensor {
-		return gcl_weighted_sum(
-			t.tensor_rnn(gcl_in[0], gcl_in[1], gcl_in[2], gcl_in[3], gcl_in[4], context.allocator),
-		)
-	}, allocator)
+			return gcl_weighted_sum(
+				t.tensor_rnn(
+					gcl_in[0],
+					gcl_in[1],
+					gcl_in[2],
+					gcl_in[3],
+					gcl_in[4],
+					context.allocator,
+				),
+			)
+		}, allocator)
 	gcl_free_inputs(5)
 
 	gcl_in[0] = gcl_rand(1, B * S * I, {B, S, I, 1}, 16, true, allocator)
@@ -175,10 +187,17 @@ gradcheck_layers_test :: proc(allocator: mem.Allocator) {
 	gcl_in[3] = gcl_rand(H, 3 * H, {H, 3 * H, 1, 1}, 19, true, allocator, 0.5)
 	gcl_in[4] = gcl_rand(1, 3 * H, {1, 3 * H, 1, 1}, 20, true, allocator, 0.5)
 	gcl_check("gru", 5, proc() -> ^t.Tensor {
-		return gcl_weighted_sum(
-			t.tensor_gru(gcl_in[0], gcl_in[1], gcl_in[2], gcl_in[3], gcl_in[4], context.allocator),
-		)
-	}, allocator)
+			return gcl_weighted_sum(
+				t.tensor_gru(
+					gcl_in[0],
+					gcl_in[1],
+					gcl_in[2],
+					gcl_in[3],
+					gcl_in[4],
+					context.allocator,
+				),
+			)
+		}, allocator)
 	gcl_free_inputs(5)
 
 	gcl_in[0] = gcl_rand(1, B * S * I, {B, S, I, 1}, 21, true, allocator)
@@ -188,18 +207,18 @@ gradcheck_layers_test :: proc(allocator: mem.Allocator) {
 	gcl_in[4] = gcl_rand(H, 4 * H, {H, 4 * H, 1, 1}, 25, true, allocator, 0.5)
 	gcl_in[5] = gcl_rand(1, 4 * H, {1, 4 * H, 1, 1}, 26, true, allocator, 0.5)
 	gcl_check("lstm", 6, proc() -> ^t.Tensor {
-		return gcl_weighted_sum(
-			t.tensor_lstm(
-				gcl_in[0],
-				gcl_in[1],
-				gcl_in[2],
-				gcl_in[3],
-				gcl_in[4],
-				gcl_in[5],
-				context.allocator,
-			),
-		)
-	}, allocator)
+			return gcl_weighted_sum(
+				t.tensor_lstm(
+					gcl_in[0],
+					gcl_in[1],
+					gcl_in[2],
+					gcl_in[3],
+					gcl_in[4],
+					gcl_in[5],
+					context.allocator,
+				),
+			)
+		}, allocator)
 	gcl_free_inputs(6)
 
 	// 8. Conv2d with bias: input [N,C,H,W], weight [C_out,C_in,kH,kW]
@@ -212,17 +231,17 @@ gradcheck_layers_test :: proc(allocator: mem.Allocator) {
 		gcl_in[2] = gcl_rand(1, 3, {3, 1, 1, 1}, 29, true, allocator)
 		name := fmt.tprintf("conv2d stride=%d pad=%d", cc[0], cc[1])
 		gcl_check(name, 3, proc() -> ^t.Tensor {
-			return gcl_weighted_sum(
-				t.tensor_conv2d(
-					gcl_in[0],
-					gcl_in[1],
-					gcl_in[2],
-					gcl_conv_stride,
-					gcl_conv_pad,
-					context.allocator,
-				),
-			)
-		}, allocator)
+				return gcl_weighted_sum(
+					t.tensor_conv2d(
+						gcl_in[0],
+						gcl_in[1],
+						gcl_in[2],
+						gcl_conv_stride,
+						gcl_conv_pad,
+						context.allocator,
+					),
+				)
+			}, allocator)
 		gcl_free_inputs(3)
 	}
 

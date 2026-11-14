@@ -96,6 +96,7 @@ mamba_test :: proc(allocator: mem.Allocator) {
 		}
 	}
 
+	check_grad("norm.gamma (RMSNorm)", mamba.norm.gamma, &grad_ok)
 	check_grad("proj_x.weights", mamba.proj_x.weights, &grad_ok)
 	check_grad("proj_B.weights", mamba.proj_B.weights, &grad_ok)
 	check_grad("proj_C.weights", mamba.proj_C.weights, &grad_ok)

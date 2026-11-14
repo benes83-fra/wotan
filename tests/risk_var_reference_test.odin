@@ -2191,15 +2191,16 @@ risk_var_reference_test :: proc(allocator: mem.Allocator) {
 
 	// 1. Empirical VaR = inverse ECDF at the exact alpha (numpy's inverted_cdf takes the next
 	// order statistic when alpha*n is an integer, since 1 - 0.95 rounds up), ES = exact
-	// integral of the empirical quantile function
+	// integral of the empirical quantile function. The references are return levels;
+	// the procedures return positive loss magnitudes
 	{
 		worst_v, worst_e := 0.0, 0.0
 		for row in RISK_EMP {
 			x := RISK_R[:int(row[0])]
-			worst_v = max(worst_v, math.abs(fin.var_historical(x, row[1]) - row[2]))
-			worst_e = max(worst_e, math.abs(fin.conditional_var(x, row[1]) - row[3]))
-			worst_v = max(worst_v, math.abs(fin.value_at_risk(x, row[1], .Historical) - row[2]))
-			worst_e = max(worst_e, math.abs(fin.expected_shortfall(x, row[1]) - row[3]))
+			worst_v = max(worst_v, math.abs(fin.var_historical(x, row[1]) + row[2]))
+			worst_e = max(worst_e, math.abs(fin.conditional_var(x, row[1]) + row[3]))
+			worst_v = max(worst_v, math.abs(fin.value_at_risk(x, row[1], .Historical) + row[2]))
+			worst_e = max(worst_e, math.abs(fin.expected_shortfall(x, row[1]) + row[3]))
 		}
 		expect(
 			&passed,
@@ -2243,12 +2244,12 @@ risk_var_reference_test :: proc(allocator: mem.Allocator) {
 	// 3. Parametric VaR
 	{
 		worst := 0.0
-		for row in RISK_PAR {worst = max(worst, _risk_rel(fin.var_parametric(RISK_R[:], row[0]), row[1]))}
+		for row in RISK_PAR {worst = max(worst, _risk_rel(fin.var_parametric(RISK_R[:], row[0]), -row[1]))}
 		expect(
 			&passed,
 			&total,
 			worst < 1e-13,
-			fmt.tprintf("parametric VaR mean - z*s: max rel err %.1e", worst),
+			fmt.tprintf("parametric VaR z*s - mean (positive loss): max rel err %.1e", worst),
 		)
 	}
 
@@ -2298,7 +2299,7 @@ risk_var_reference_test :: proc(allocator: mem.Allocator) {
 			case "ppf":
 				got = fin.ged_quantile(row.x, row.p)
 			case "cvar":
-				got = fin.ged_cvar(row.x, row.p)
+				got = -fin.ged_cvar(row.x, row.p) // reference: the return level E[Z | Z < z]
 			}
 			if e := _risk_rel(got, row.ref);
 			   e >
@@ -2329,12 +2330,12 @@ risk_var_reference_test :: proc(allocator: mem.Allocator) {
 		for row in RISK_NES {
 			s := fin.cvar_garch_series(one, row[0])
 			c := fin.cvar_garch(one, row[0])
-			worst = max(worst, _risk_rel(s[0], row[1]), _risk_rel(-c[0], row[1]))
+			worst = max(worst, _risk_rel(s[0], row[1]), _risk_rel(c[0], row[1]))
 			delete(s); delete(c)
 		}
 		g := fin.cvar_garch_series(one, 0.99, .GED, 0, 1.3)
 		defer delete(g)
-		worst = max(worst, _risk_rel(g[0], -fin.ged_cvar(0.99, 1.3)))
+		worst = max(worst, _risk_rel(g[0], fin.ged_cvar(0.99, 1.3)))
 		expect(
 			&passed,
 			&total,
@@ -2399,13 +2400,14 @@ risk_var_reference_test :: proc(allocator: mem.Allocator) {
 			_risk_rel(r.current_var_99, z99 * fc.std_forecast) < 1e-12 &&
 			r.current_cvar_99 > r.current_var_99 &&
 			r.current_cvar_95 > r.current_var_95 &&
-			r.backtest_99.n_obs == len(RISK_R) - 100
+			r.backtest_start == int(math.round(0.5 * f64(len(RISK_R)))) &&
+			r.backtest_99.n_obs == len(RISK_R) - r.backtest_start
 		expect(
 			&passed,
 			&total,
 			ok,
 			fmt.tprintf(
-				"garch_risk_metrics (t): omega/alpha/beta/long-run/current vol filled, VaR99 %.4f < ES99 %.4f (t ES was 0, current used the in-sample sigma_n)",
+				"garch_risk_metrics (t): omega/alpha/beta/long-run/current vol filled, VaR99 %.4f < ES99 %.4f (t ES was 0, current used the in-sample sigma_n); backtests on the second half only",
 				r.current_var_99,
 				r.current_cvar_99,
 			),

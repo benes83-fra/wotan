@@ -81,7 +81,7 @@ autograd_api_test :: proc(allocator: mem.Allocator) {
 	reference := make([]f64, len(p.grad.data), allocator)
 	defer delete(reference, allocator)
 	copy(reference, p.grad.data)
-	t.tensor_free_graph(loss, allocator)
+	t.tensor_free_graph(loss, allocator = allocator)
 
 	t.tensor_zero_grad(p)
 	loss2 := t.tensor_sum(t.tensor_mul(p, m))
@@ -91,7 +91,7 @@ autograd_api_test :: proc(allocator: mem.Allocator) {
 	same := true
 	for i in 0 ..< len(reference) {same &&= abs(p.grad.data[i] - reference[i]) < 1e-12}
 	api_expect(same, "scalar root ignores a stale root gradient")
-	t.tensor_free_graph(loss2, allocator)
+	t.tensor_free_graph(loss2, allocator = allocator)
 
 	// 6. tensor_backward_with_grad == legacy pre-filled root.grad
 	upstream := []f64{0.5, -1.0, 2.0, 0.25, 1.5, -0.75, 3.0, 0.1, -2.0, 0.8, 1.2, -0.3}
@@ -101,7 +101,7 @@ autograd_api_test :: proc(allocator: mem.Allocator) {
 	explicit := make([]f64, len(p.grad.data), allocator)
 	defer delete(explicit, allocator)
 	copy(explicit, p.grad.data)
-	t.tensor_free_graph(out_a, allocator)
+	t.tensor_free_graph(out_a, allocator = allocator)
 
 	t.tensor_zero_grad(p)
 	out_b := t.tensor_mul(p, m)
@@ -114,7 +114,7 @@ autograd_api_test :: proc(allocator: mem.Allocator) {
 		same &&= abs(explicit[i] - upstream[i] * m.data.data[i]) < 1e-12
 	}
 	api_expect(same, "tensor_backward_with_grad matches legacy seeding and dL/dp = g * m")
-	t.tensor_free_graph(out_b, allocator)
+	t.tensor_free_graph(out_b, allocator = allocator)
 
 	fmt.printf("Autograd API summary: %d/%d passed\n", api_passed, api_total)
 	record_failures(api_total - api_passed)

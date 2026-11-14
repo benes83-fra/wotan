@@ -34,14 +34,14 @@ import net "wotan/net"   // only for Yahoo
 
 Returns are simple per-period returns in `[]f64`. Annualized figures assume 252 periods a year unless a `periods_per_year` argument says otherwise.
 
-The risk measures use two sign conventions:
+**Sign convention.** Every value at risk and expected shortfall (CVaR) in the package is a **positive loss magnitude**. The loss of a return x is −x, so "the 5% worst day loses 1.3%" is a 95% VaR of 0.013, and a VaR breach is a return below −VaR. This covers:
+- `var_historical`, `var_parametric`, `var_monte_carlo`, `value_at_risk`, `conditional_var` and `expected_shortfall`;
+- `evt_fit`'s VaR and CVaR fields and `evt_var_es`;
+- the GARCH procedures `var_garch`, `var_garch_single`, `cvar_garch`, `cvar_garch_series` and `ged_cvar`, `garch_risk_metrics` and the `garch_evt_fit` series;
+- `historical_var_rolling`, `historical_cvar_rolling`, and the inputs of `backtest_var` and `backtest_es`;
+- the VaR and CVaR fields of `RiskMetrics` and `compute_distribution_metrics`, and `portfolio_cvar_historical` (part 5).
 
-| Convention | Procedures |
-|---|---|
-| A **return quantile** (negative for a loss): "the 5% worst day loses 1.3%" is −0.013 | `var_historical`, `var_parametric`, `var_monte_carlo`, `value_at_risk`, `conditional_var`, `expected_shortfall`, `var_garch_single`, `cvar_garch`, `evt_fit`'s fields, `evt_var_es` |
-| A **positive loss magnitude**: 0.013 | `var_garch`, `cvar_garch_series`, `historical_var_rolling`, `historical_cvar_rolling`, `garch_risk_metrics`' current VaR and CVaR, the `garch_evt_fit` series, and the inputs of `backtest_var` and `backtest_es` |
-
-`portfolio_cvar_historical` (part 5) also reports a positive loss. Drawdowns are ≤ 0.
+Thresholds, such as `EVT_Result.threshold`, are return levels, and drawdowns are ≤ 0.
 
 The examples in sections 2–5 use 2000 days from a GARCH(1,1) with Student-t(6) shocks (ω = 2e-6, α = 0.08, β = 0.90), and a benchmark that shares 70% of the moves:
 
@@ -67,29 +67,33 @@ for t in 0 ..< n {
 ## 2. Value at risk and expected shortfall
 
 The VaR estimators:
-- `var_historical(returns, confidence)` is the empirical quantile: x₍⌈(1−c)n⌉₎, the lower empirical quantile.
-- `var_parametric` is mean − z_c · standard deviation, a normal fit.
+- `var_historical(returns, confidence)` is minus the lower empirical quantile: −x₍⌈(1−c)n⌉₎.
+- `var_parametric` is z_c · standard deviation − mean, a normal fit.
 - `var_monte_carlo(returns, confidence, n_simulations, horizon)` simulates normal returns with the sample mean and volatility, summed over `horizon` periods.
-- `value_at_risk(returns, confidence, method)` dispatches on a `VaRMethod`. Its `.GARCH` case is a zero-mean normal VaR from the average squared return; for a fitted GARCH use section 4.
+- `value_at_risk(returns, confidence, method)` dispatches on a `VaRMethod`. Its `.GARCH` case fits a normal GARCH(1,1) to the returns minus their mean μ and returns z_c · σ_{n+1} − μ, with the one-step-ahead volatility forecast σ_{n+1}: the VaR for the next period. Section 4 covers Student-t and GED errors and backtests.
 
-`conditional_var` (also `expected_shortfall`) is the Acerbi–Tasche mean of the worst (1 − c) share of returns, with the boundary observation weighted by its fractional part.
+`conditional_var` (also `expected_shortfall`) is minus the Acerbi–Tasche mean of the worst (1 − c) share of returns, with the boundary observation weighted by its fractional part.
 
 ```odin
-// value at risk and expected shortfall (returns: negative numbers are losses)
+// value at risk and expected shortfall, as positive loss magnitudes
 fmt.printf("VaR95 historical %.8f parametric %.8f Monte Carlo %.8f\n", fin.var_historical(r, 0.95),
 	fin.var_parametric(r, 0.95), fin.var_monte_carlo(r, 0.95, 100000))
 fmt.printf("VaR99 historical %.8f  CVaR95 %.8f CVaR99 %.8f\n", fin.var_historical(r, 0.99),
 	fin.conditional_var(r, 0.95), fin.conditional_var(r, 0.99))
+fmt.printf("VaR99 GARCH(1,1) forecast for the next day %.8f\n", fin.value_at_risk(r, 0.99, .GARCH))
 ```
 
 ```
-VaR95 historical -0.01312683 parametric -0.01375869 Monte Carlo -0.01376568
-VaR99 historical -0.02188755  CVaR95 -0.01895127 CVaR99 -0.02812172
+VaR95 historical 0.01312683 parametric 0.01375869 Monte Carlo 0.01376568
+VaR99 historical 0.02188755  CVaR95 0.01895127 CVaR99 0.02812172
+VaR99 GARCH(1,1) forecast for the next day 0.02053061
 ```
 
 At 95% the normal fit overstates the loss: a unit-variance t(6) has its 5% quantile at 1.59 standard deviations, not 1.65. The fat tails show further out, at 99% and in the expected shortfall.
 
 The Monte Carlo VaR converges to the parametric one, because it simulates the same normal distribution.
+
+The GARCH VaR is conditional: it uses the volatility expected for the next day rather than the average over the sample. Its normal errors make it smaller than the Student-t GARCH VaR of section 4.
 
 ## 3. Extreme value theory
 
@@ -97,9 +101,9 @@ The Monte Carlo VaR converges to the parametric one, because it simulates the sa
 - the threshold and the parameters;
 - the number of exceedances;
 - `converged`;
-- VaR and CVaR at 95% and 99%, which are empirical while the level lies inside the sample body.
+- VaR and CVaR at 95% and 99% as positive losses, which are empirical while the level lies inside the sample body.
 
-`evt_var_es(&result, p)` extrapolates to any level p. `gpd_pdf`, `gpd_cdf`, `gpd_quantile` and `gpd_fit` are available on their own; they stay accurate as ξ → 0.
+The threshold is a return level, negative in the loss tail. `evt_var_es(&result, p)` extrapolates VaR and ES to any level p; the ES is +Inf when ξ ≥ 1. `gpd_pdf`, `gpd_cdf`, `gpd_quantile` and `gpd_fit` are available on their own; they stay accurate as ξ → 0.
 
 ```odin
 // extreme value theory: GPD on the losses beyond the 95% threshold
@@ -112,25 +116,32 @@ fmt.printf("  GPD cdf(0.01) %.10f quantile(0.9) %.10f\n", fin.gpd_cdf(0.01, evt.
 
 ```
 EVT: threshold -0.01301539 xi 0.013421 beta 0.00585612 exceedances 100 converged true
-  VaR99 -0.02254298 CVaR99 -0.02860837  VaR99.9 -0.03653673 ES99.9 -0.04279248
+  VaR99 0.02254298 CVaR99 0.02860837  VaR99.9 0.03653673 ES99.9 0.04279248
   GPD cdf(0.01) 0.8151743696 quantile(0.9) 0.0136947223
 ```
 
 The fit is the exact maximum-likelihood estimate. SciPy's `genpareto.fit` stops slightly short of it: it gives ξ = 0.013388, at a log-likelihood 1e-7 lower. Refining SciPy's estimate with Nelder–Mead lands on ξ = 0.0134209, as here.
 
-The 99.9% VaR, −3.65%, lies beyond anything the 2000 days can measure directly; that extrapolation is what the tail fit is for.
+The 99.9% VaR, a loss of 3.65%, lies beyond anything the 2000 days can measure directly; that extrapolation is what the tail fit is for.
 
 ## 4. GARCH risk and backtests
 
-`garch_risk_metrics(returns, model_type = .GARCH, p, q, risk_free_rate)` does four things:
-- fits a GARCH model to the demeaned returns, using the `analytics` GARCH (`.GARCH`, `.GJR_GARCH`, `.StudentT` or `.GED` errors);
-- forecasts the next day's volatility;
-- turns that into the current VaR and CVaR at 95% and 99%, as positive losses from the model's error distribution;
-- backtests the fitted VaR in sample, skipping 100 warm-up days.
+**Out-of-sample backtests.** A VaR backtest only means something when the model has not seen the days it is tested on. The GARCH backtests therefore split the returns at n_train = round(`train_fraction` · n), with `train_fraction = 0.5` by default:
+- the parameters are estimated on `returns[:n_train]` only, after subtracting the mean of those returns;
+- the conditional variance is then filtered forward with those fixed parameters, so σ_t uses the returns up to t − 1 only;
+- the VaR is backtested on `returns[n_train:]`, and `backtest_start` records n_train.
+
+A split leaving fewer than `GARCH_MIN_TRAIN` (100) training returns, or no test returns, leaves the backtests empty. `garch_out_of_sample(returns, n_train, model_type, p, q)` returns the training fit (`fit`), the mean `mu`, the residuals and the forward-filtered `cond_var` for your own backtests; free it with `free_garch_out_of_sample`.
+
+`garch_risk_metrics(returns, model_type = .GARCH, p, q, risk_free_rate, allocator, train_fraction = 0.5)` does four things:
+- fits a GARCH model to all the demeaned returns, using the `analytics` GARCH (`.GARCH`, `.GJR_GARCH`, `.StudentT` or `.GED` errors);
+- forecasts the next day's volatility from that fit;
+- turns it into the current VaR and CVaR at 95% and 99%, as positive losses from the model's error distribution;
+- backtests VaR_t = z_c · σ_t out of sample, with a second fit on the training returns as above.
 
 It also fills the usual `RiskMetrics` in `base`. `long_run_vol` is √(ω / (1 − persistence)), per period.
 
-`garch_evt_fit(returns, threshold_percentile = 0.90)` is McNeil and Frey's two-step method: a GARCH(1,1)-t fit, then a GPD fitted to the standardized residuals' tail. It gives standardized loss quantiles and ES, and VaR series. Free `var_95_series` and `var_99_series`.
+`garch_evt_fit(returns, threshold_percentile = 0.90, allocator, train_fraction = 0.5)` is McNeil and Frey's two-step method: a GARCH(1,1)-t fit on the training returns, then a GPD fitted to the tail of their standardized residuals. It gives the standardized loss quantiles and ES, the GARCH and GPD parameters of that training fit, and VaR series σ_t · q − μ over all returns, with σ_t filtered forward. The backtests cover the test returns. With `train_fraction = 1` everything is fitted on all returns and the backtests stay empty. Free `var_95_series` and `var_99_series`.
 
 `var_garch` and `cvar_garch_series` turn any conditional-variance series into VaR and ES series.
 
@@ -140,15 +151,16 @@ The backtests:
 - `historical_var_rolling` and `historical_cvar_rolling(returns, confidence, window)` give rolling historical VaR and ES from the previous `window` returns.
 
 ```odin
-// GARCH risk: fit, one-day forecast, in-sample VaR backtests
+// GARCH risk: fit on all days and one-day forecast; VaR backtests out of
+// sample (fitted on the first half, tested on the second)
 g := fin.garch_risk_metrics(r, .StudentT)
 fmt.printf("GARCH-t: omega %.4e alpha %.6f beta %.6f nu %.4f persistence %.6f converged %v\n", g.garch_omega, g.garch_alpha, g.garch_beta, g.garch_nu, g.garch_persistence, g.converged)
 fmt.printf("  long-run vol %.6f current vol %.6f VaR95 %.6f VaR99 %.6f CVaR95 %.6f\n", g.long_run_vol, g.current_vol, g.current_var_95, g.current_var_99, g.current_cvar_95)
-fmt.printf("  backtest 95%%: %d breaches of %d (expected %.1f), Kupiec %.4f p %.4f pass %v\n", g.backtest_95.n_breaches, g.backtest_95.n_obs, g.backtest_95.expected_breaches, g.backtest_95.kupiec_stat, g.backtest_95.kupiec_pvalue, g.backtest_95.passes_test)
+fmt.printf("  backtest 95%% from day %d: %d breaches of %d (expected %.1f), Kupiec %.4f p %.4f pass %v\n", g.backtest_start, g.backtest_95.n_breaches, g.backtest_95.n_obs, g.backtest_95.expected_breaches, g.backtest_95.kupiec_stat, g.backtest_95.kupiec_pvalue, g.backtest_95.passes_test)
 fmt.printf("  backtest 99%%: %d breaches (expected %.1f), p %.4f\n", g.backtest_99.n_breaches, g.backtest_99.expected_breaches, g.backtest_99.kupiec_pvalue)
 ge := fin.garch_evt_fit(r, 0.90)
 defer {delete(ge.var_95_series); delete(ge.var_99_series)}
-fmt.printf("GARCH-EVT: xi %.6f q95 %.6f q99 %.6f es99 %.6f, 99%% breaches %d (expected %.1f)\n", ge.evt_xi, ge.q_95, ge.q_99, ge.es_q_99, ge.backtest_99.n_breaches, ge.backtest_99.expected_breaches)
+fmt.printf("GARCH-EVT: xi %.6f q95 %.6f q99 %.6f es99 %.6f, 99%% breaches from day %d: %d (expected %.1f)\n", ge.evt_xi, ge.q_95, ge.q_99, ge.es_q_99, ge.backtest_start, ge.backtest_99.n_breaches, ge.backtest_99.expected_breaches)
 
 // rolling historical VaR / ES (250 days) and the ES backtest
 hv := fin.historical_var_rolling(r, 0.975, 250)
@@ -162,13 +174,13 @@ fmt.printf("rolling 97.5%%: %d breaches (expected %.2f) Kupiec p %.4f; ES z %.4f
 ```
 GARCH-t: omega 3.0408e-06 alpha 0.065708 beta 0.894057 nu 6.4945 persistence 0.959765 converged true
   long-run vol 0.008694 current vol 0.009129 VaR95 0.014558 VaR99 0.023269 CVaR95 0.020107
-  backtest 95%: 90 breaches of 1900 (expected 95.0), Kupiec 0.2817 p 0.5956 pass true
-  backtest 99%: 21 breaches (expected 19.0), p 0.6502
-GARCH-EVT: xi -0.033082 q95 1.593794 q99 2.556674 es99 3.120506, 99% breaches 22 (expected 19.0)
+  backtest 95% from day 1000: 52 breaches of 1000 (expected 50.0), Kupiec 0.0832 p 0.7730 pass true
+  backtest 99%: 9 breaches (expected 10.0), p 0.7465
+GARCH-EVT: xi -0.091161 q95 1.599215 q99 2.568466 es99 3.080884, 99% breaches from day 1000: 10 (expected 10.0)
 rolling 97.5%: 49 breaches (expected 43.75) Kupiec p 0.4302; ES z 0.2139 p 0.4153 Z2 -0.1428
 ```
 
-The fit recovers the simulation: α = 0.066 and β = 0.894 against the true 0.08 and 0.90, and ν = 6.5 against 6. The breach counts are close to their expectations, and every backtest passes.
+The fit recovers the simulation: α = 0.066 and β = 0.894 against the true 0.08 and 0.90, and ν = 6.5 against 6. The GARCH backtests see only the second 1000 days, with parameters estimated on the first 1000, so they test genuine forecasts. Their breach counts are close to the expected 50 and 10, and every backtest passes. The GARCH-EVT tail parameters come from the first 1000 days too, which is why its ξ differs from a fit on all the days.
 
 The GARCH log-likelihood starts the variance recursion at the sample variance, with the first observation only seeding it. That is the convention of a conditional maximum-likelihood estimate:
 - **Same convention:** SciPy maximizing the same likelihood reproduces every parameter above to all printed digits.
@@ -193,7 +205,7 @@ The GARCH log-likelihood starts the variance recursion at the sample variance, w
 Further procedures:
 - **On a DataFrame:** `risk_metrics_from_df` and `rolling_risk_metrics_df` work on DataFrame columns. `historical_volatility_rolling`, `ewma_volatility_df`, `rolling_correlation_df` and `rolling_beta_df` give rolling columns.
 - **Tests:** `returns_normality_test` (Jarque–Bera), `returns_autocorrelation_test` and `returns_stationarity_test` wrap the analytics package's tests.
-- **GED:** `ged_pdf`, `ged_cdf`, `ged_quantile` and `ged_cvar` give the unit-variance generalized error distribution used by GARCH-GED.
+- **GED:** `ged_pdf`, `ged_cdf`, `ged_quantile` and `ged_cvar` give the unit-variance generalized error distribution used by GARCH-GED. `ged_cvar(confidence, shape)` is its expected shortfall E[−Z | Z < z₁₋c], a positive number.
 
 ```odin
 // performance ratios
@@ -223,19 +235,25 @@ The backtester steps through the rows of a `w.DataFrame` with one price column p
 - **Portfolios.** `backtest_portfolio_run(&df, symbols, strategy, rebalance_frequency, config)` calls a `PortfolioStrategyFn`, which returns target weights, every `rebalance_frequency` bars. It trades towards the targets: sells first, and drifts below 1% of the portfolio are not traded.
 - **Costs.** `BacktestConfig` holds `initial_capital`, `commission_rate`, `slippage_rate` and `risk_free_rate`. `DEFAULT_BACKTEST_CONFIG` is 100 000, 0.1%, 0.05% and 2%.
 
-**Orders.** A strategy reads prices with `context_get_price` and trades with `context_submit_order(ctx, Order{symbol, side, quantity, order_type})`:
-- Market orders fill at the bar's price moved against the trader by the slippage, and pay commission on the fill notional.
+**Orders.** A strategy reads prices with `context_get_price` and trades with `context_submit_order(ctx, Order{symbol, side, quantity, order_type, limit_price, stop_price})`, which returns `(id, status)`. The engine sees one price per bar, the close, and fills work as follows:
+- **Market** orders fill at the current bar's price.
+- **Limit** orders buy at a price ≤ `limit_price` or sell at a price ≥ `limit_price`. **Stop** orders trigger when a buy sees a price ≥ `stop_price` or a sell a price ≤ `stop_price`.
+- A limit or stop order whose trigger the current price already meets fills at once (status `.Filled`). Otherwise it rests, good till cancelled (status `.Pending`). The runners check resting orders at every later bar, oldest first and before calling the strategy, and fill an order at the first close that meets its trigger. A limit order thus fills at its limit or better; a stop order fills at that close even when the price gapped past the stop.
+- A loop of your own over a `StrategyContext` calls `context_process_pending_orders(ctx)` on each bar before the strategy, as the runners do.
+- `context_cancel_order(ctx, id)` removes a resting order and returns false when no order with that id is resting, for example because it has filled.
+- An order is `.Rejected`, with id 0 and nothing booked, when its quantity is not positive and finite, when a limit order has no positive `limit_price` or a stop order no positive `stop_price`, or when its fill falls on a bar without a valid price.
+- Every fill is moved against the trader by the slippage and pays commission on the fill notional.
 - Positions are signed, so a sell beyond the holding goes short, and a buy beyond a short flips long.
-- Limit and stop orders are accepted but not filled.
 
 **Results.** `BacktestResult` holds:
 - the equity curve and fills;
 - total and annual return;
 - Sharpe ratio and maximum drawdown;
 - `win_rate` and `profit_factor` over closed round trips, net of commissions;
-- the counts of fills and round trips.
+- the counts of fills and round trips;
+- `open_orders`, the limit and stop orders still resting when the data ends, which never filled.
 
-Free `equity_curve` and `trades`. `plot_equity_curve` and `plot_backtest_drawdown` write PNG charts.
+Each fill in `trades` carries its `order_id` and the bar of the fill (`fill_time`). Free `equity_curve` and `trades`. A `Portfolio` made with `portfolio_init` for direct use of the order API is freed with `portfolio_destroy`. `plot_equity_curve` and `plot_backtest_drawdown` write PNG charts.
 
 **Ready-made strategies.**
 - Single-asset: `sma_crossover_strategy`, `mean_reversion_strategy` (Bollinger bands), `momentum_strategy` (breakout), `pairs_trading_strategy` and `pairs_trading_full`. They take parameters, so wrap them in a `StrategyFn`.
@@ -304,7 +322,7 @@ fin.context_submit_order(&ctx, {symbol = "A", side = .Buy, quantity = 30, order_
 pos := pf.positions["A"]
 fmt.printf("after short 20 and buy 30: qty %.1f avg %.6f realized %.6f trips %d wins %d cash %.6f\n",
 	pos.quantity, pos.avg_price, pos.realized_pnl, pos.round_trips, pos.winning_trades, pf.cash)
-delete(pf.positions); delete(pf.equity_curve); delete(pf.trades); delete(pf.trade_pnls)
+fin.portfolio_destroy(&pf)
 ```
 
 ```
@@ -333,6 +351,49 @@ The last line covers a short and flip:
 
 An independent Python replay of the three single-asset strategies, with the same fill, slippage and commission rules, gives every equity value, metric and the order result exactly.
 
+Limit and stop orders, continuing with the same prices: buy 500 shares 5% below the first close, protect them with a stop 10% below the entry price, and close the position at bar 500 if the stop has not fired by then.
+
+```odin
+dip :: proc(ctx: ^fin.StrategyContext) {
+	@(static) stop_id: int
+	if ctx.current_bar == 0 {stop_id = 0} 	// a fresh run
+	switch {
+	case ctx.current_bar == 0:
+		p := fin.context_get_price(ctx, "A")
+		fin.context_submit_order(ctx, {symbol = "A", side = .Buy, quantity = 500, order_type = .Limit, limit_price = 0.95 * p})
+	case stop_id == 0:
+		if pos, ok := ctx.portfolio.positions["A"]; ok && pos.quantity > 0 {
+			stop_id, _ = fin.context_submit_order(ctx, {symbol = "A", side = .Sell, quantity = pos.quantity, order_type = .Stop, stop_price = 0.9 * pos.avg_price})
+		}
+	case ctx.current_bar == 500:
+		if fin.context_cancel_order(ctx, stop_id) {
+			fin.context_submit_order(ctx, {symbol = "A", side = .Sell, quantity = ctx.portfolio.positions["A"].quantity, order_type = .Market})
+		}
+	}
+}
+
+r := fin.backtest_run(&df, one, dip)
+defer {delete(r.equity_curve); delete(r.trades)}
+for f in r.trades {
+	fmt.printf("  order %d %v %v %.0f filled on bar %3d @ %.6f\n", f.order_id, f.order.order_type, f.order.side, f.order.quantity, f.fill_time, f.fill_price)
+}
+fmt.printf("  still open %d, final equity %.2f\n", r.open_orders, r.equity_curve[T - 1])
+pf2 := fin.portfolio_init(10_000, context.allocator)
+defer fin.portfolio_destroy(&pf2)
+ctx2 := fin.StrategyContext{portfolio = &pf2, data = &df, symbols = one}
+id, status := fin.context_submit_order(&ctx2, {symbol = "A", side = .Buy, quantity = 1, order_type = .Limit})
+fmt.printf("  a limit order without a limit price: id %d, %v\n", id, status)
+```
+
+```
+  order 1 Limit Buy 500 filled on bar  24 @ 94.010925
+  order 2 Stop Sell 500 filled on bar  83 @ 84.567403
+  still open 0, final equity 95188.95
+  a limit order without a limit price: id 0, Rejected
+```
+
+The limit order rests until bar 24, when the close first drops 5% below the first one; the fill price includes the slippage. The stop then rests until bar 83, so the cancellation at bar 500 finds nothing to cancel. `finance_fixes_test` checks the fill bars and prices of limit, stop and cancelled orders on a scripted price path against a hand calculation.
+
 ![Equity of the SMA crossover strategy](images/finance_backtest_equity.png)
 
 ## 7. Pricing with a stochastic discount factor
@@ -341,7 +402,7 @@ The PDPM ("payoff distribution pricing") procedures price a payoff X as E[M X], 
 - the SDF value in each state (`values`) and its `parameters`;
 - `mean` and `variance`.
 
-Free `values` and `parameters` with `delete`. The constructors are:
+Free it with `free_stochastic_discount_factor`. The constructors are:
 
 | Constructor | SDF |
 |---|---|
@@ -351,8 +412,8 @@ Free `values` and `parameters` with `delete`. The constructors are:
 | `sdf_quadratic(market_returns, rf, c = 0)` | M = a + b R + c R², with the same two moment conditions |
 
 The pricing procedures:
-- `price_payoff(payoff, &sdf, probabilities = nil)` returns a `PDPMResult`: the price, the expected payoff, the risk premium (price − E[X] E[M]), the state prices (free them), the correlation with the SDF, and the certainty equivalent.
-- `price_european_call`, `price_european_put` and `price_bull_spread` build the payoff from simulated terminal prices, which come from `simulate_terminal_prices`.
+- `price_payoff(payoff, &sdf, probabilities = nil)` returns a `PDPMResult`: the price, the expected payoff, the risk premium (price − E[X] E[M]), the state prices, the correlation with the SDF, and the certainty equivalent. Free it with `free_pdpm_result`.
+- `price_european_call(strike, &sdf, terminal_prices)`, `price_european_put(strike, &sdf, terminal_prices)` and `price_bull_spread(strike_low, strike_high, &sdf, terminal_prices)` build the payoff from simulated terminal prices, which come from `simulate_terminal_prices`. The SDF carries the discounting to the payoff date, so spot and maturity enter only through the terminal prices and the SDF.
 - `compare_to_black_scholes` returns the PDPM price and the Black–Scholes price.
 - `dybvig_distributional_price` gives the cheapest price at which the same payoff distribution can be bought: highest payoffs in the states with the lowest SDF.
 - `estimate_state_price_density` kernel-smooths the SDF into a state-price density on a grid; free it with `free_state_price_density`. `price_payoff_continuous` integrates a payoff function against it.
@@ -360,8 +421,6 @@ The pricing procedures:
 Under geometric Brownian motion, a power-utility SDF with γ = (μ − r)/σ², normalized so that E[M] = e^(−rT), is the Black–Scholes pricing kernel (Rubinstein 1976). So it must reproduce Black–Scholes prices:
 
 ```odin
-free_sdf :: proc(s: ^fin.StochasticDiscountFactor) {delete(s.values); delete(s.parameters)}
-
 rand.reset(1)
 S0, mu, sigma, r, T := 100.0, 0.08, 0.2, 0.03, 1.0
 ST := fin.simulate_terminal_prices(S0, mu, sigma, T, 200_000)
@@ -378,16 +437,16 @@ pw := fin.sdf_power_utility(g, gamma, beta)
 defer free_sdf(&pw)
 fmt.printf("power SDF: gamma %.4f beta %.6f mean %.6f (e^-rT %.6f)\n", gamma, beta, pw.mean, math.exp(-r * T))
 for K in ([]f64{90, 100, 110}) {
-	c := fin.price_european_call(S0, K, T, &pw, ST)
+	c := fin.price_european_call(K, &pw, ST)
 	defer delete(c.state_prices)
 	bs := fin.compute_greeks(S0, K, T, r, sigma, .Call).price
 	fmt.printf("call K %3.0f: PDPM %.4f  Black-Scholes %.4f  E[payoff] %.4f risk premium %.4f corr(payoff, M) %.4f\n",
 		K, c.price, bs, c.expected_payoff, c.risk_premium, c.correlation_with_sdf)
 }
-pt := fin.price_european_put(S0, 100, T, &pw, ST)
+pt := fin.price_european_put(100, &pw, ST)
 defer delete(pt.state_prices)
 bsp := fin.compute_greeks(S0, 100, T, r, sigma, .Put).price
-sp := fin.price_bull_spread(S0, 95, 105, &pw, ST)
+sp := fin.price_bull_spread(95, 105, &pw, ST)
 defer delete(sp.state_prices)
 c95 := fin.compute_greeks(S0, 95, T, r, sigma, .Call).price
 c105 := fin.compute_greeks(S0, 105, T, r, sigma, .Call).price
@@ -417,7 +476,7 @@ defer delete(ones)
 for &o in ones {o = 1}
 bond := fin.price_payoff(ones, &lin)
 defer delete(bond.state_prices)
-lc := fin.price_european_call(S0, 100, T, &lin, ST)
+lc := fin.price_european_call(100, &lin, ST)
 defer delete(lc.state_prices)
 neg := 0
 for v in lin.values {if v < 0 {neg += 1}}
@@ -434,7 +493,7 @@ mass := 0.0
 for p in cc.state_prices {mass += p}
 fmt.printf("SPD: total state price %.6f, call K 100 %.4f\n", mass, cc.price)
 
-dm := fin.compute_distribution_metrics(rets)
+dm := fin.compute_distribution_metrics(rets) // VaR and ES as positive losses
 fmt.printf("returns: mean %.6f var %.6f skew %.6f excess kurt %.6f VaR95 %.6f VaR99 %.6f ES95 %.6f\n",
 	dm.mean, dm.variance, dm.skewness, dm.kurtosis, dm.value_at_risk_95, dm.value_at_risk_99, dm.expected_shortfall_95)
 ```
@@ -449,7 +508,7 @@ compare_to_black_scholes: 9.3607 vs 9.4134
 put distribution, cheapest (Dybvig): 3.2322 vs the put itself 6.4965
 linear SDF a 2.108110 b -1.051198: stock 1.000000000000 bond 0.970445533549 (1/(1+rf) 0.970445533549); call K 100 9.0091; negative in 143 states
 SPD: total state price 0.970520, call K 100 9.0597
-returns: mean 0.082255 var 0.047822 skew 0.618260 excess kurt 0.679975 VaR95 -0.235853 VaR99 -0.333184 ES95 -0.295721
+returns: mean 0.082255 var 0.047822 skew 0.618260 excess kurt 0.679975 VaR95 0.235853 VaR99 0.333184 ES95 0.295721
 ```
 
 The SDF prices are Monte Carlo estimates over 200 000 states, with a standard deviation of 0.023 for the at-the-money call. This seed draws a sample whose mean SDF is 0.12% high, so its prices sit about two standard deviations from Black–Scholes. Averaged over ten seeds, the call is 9.4170 ± 0.0072 against Black–Scholes 9.4134.
@@ -469,9 +528,9 @@ The fitting procedures are:
 
 **Local files.**
 - `load_market_data(path)` reads a CSV with `Date`, `Close` and `Volume` columns into a `MarketData` (dates, prices, volumes, simple returns, with the first return 0).
-- `load_option_chain(path, current_date)` reads a CSV with columns Symbol, Type, Strike, Expiry, ImpliedVol, Price, … into an `OptionChain`, with expiries in years from `current_date`.
+- `load_option_chain(path, current_date)` reads a CSV with columns Symbol, Type, Strike, Expiry, ImpliedVol, Price, … into an `OptionChain`, with expiries in years from `current_date`. The Type column is read by its first letter, in either case, into the strings `"call"` and `"put"` (`""` for anything else).
 
-Free the slices with `delete`.
+Free a `MarketData` with `free_market_data` and an `OptionChain` with `free_option_chain`; the latter also frees the chains from Yahoo below.
 
 **Yahoo.**
 - `net.read_yahoo(symbol, interval, range)` returns `(df, ok)`, where the DataFrame has Date, Open, High, Low, Close, AdjClose, Volume, Dividend and Split columns.
@@ -484,10 +543,10 @@ Free the slices with `delete`.
 ```odin
 // local files
 md := fin.load_market_data("data/spy_prices.csv")
-defer {delete(md.dates); delete(md.prices); delete(md.volumes); delete(md.returns)}
+defer fin.free_market_data(&md)
 fmt.printf("%d days %v .. %v, last close %.2f, last return %.6f\n", md.n_obs, md.dates[0], md.dates[md.n_obs - 1], md.prices[md.n_obs - 1], md.returns[md.n_obs - 1])
 oc := fin.load_option_chain("data/spy_options.csv", md.dates[md.n_obs - 1])
-defer {delete(oc.strikes); delete(oc.expiries); delete(oc.implied_vols); delete(oc.market_prices); delete(oc.option_types)}
+defer fin.free_option_chain(&oc)
 fmt.printf("%d options; first: %s K %.0f expiry %.4f years, vol %.2f, price %.2f\n", oc.n_options, oc.option_types[0], oc.strikes[0], oc.expiries[0], oc.implied_vols[0], oc.market_prices[0])
 
 // live data from Yahoo
@@ -502,7 +561,7 @@ d1, _ := w.column_at_date(w.column(&df, "Date"), df.rows - 1)
 c1, _ := w.column_at_float(w.column(&df, "AdjClose"), df.rows - 1)
 fmt.printf("SPY: %d rows %v .. %v, columns %d, last adjusted close %.2f\n", df.rows, d0, d1, len(df.columns), c1)
 chain, chain_ok := fin.fetch_yahoo_options("SPY")
-defer {delete(chain.strikes); delete(chain.expiries); delete(chain.implied_vols); delete(chain.market_prices); delete(chain.option_types)}
+defer fin.free_option_chain(&chain)
 if !chain_ok {
 	fmt.println("no option chain")
 	return
@@ -510,13 +569,13 @@ if !chain_ok {
 fmt.printf("SPY chain: %d options expiring in %.3f years\n", chain.n_options, chain.expiries[0])
 ```
 
-Output on 11 November 2026 (live data):
+Output on 14 November 2026 (live data):
 
 ```
 30 days Date{year = 2023, month = 1, day = 3} .. Date{year = 2023, month = 2, day = 14}, last close 412.85, last return 0.003866
 12 options; first: call K 390 expiry 0.0082 years, vol 0.18, price 12.45
-SPY: 23 rows Date{year = 2026, month = 10, day = 12} .. Date{year = 2026, month = 11, day = 11}, columns 9, last adjusted close 758.55
-SPY chain: 499 options expiring in 0.099 years
+SPY: 23 rows Date{year = 2026, month = 10, day = 14} .. Date{year = 2026, month = 11, day = 13}, columns 9, last adjusted close 754.37
+SPY chain: 500 options expiring in 0.093 years
 ```
 
 **Real data in the test suite.** Several tests use Yahoo data on purpose, to check models against real markets. They call these loaders directly and never substitute synthetic data. When a loader returns `ok = false`:
@@ -531,7 +590,8 @@ SPY chain: 499 options expiring in 0.099 years
 | Test | Compares |
 |---|---|
 | `risk_var_reference_test`, `risk_metrics_reference_test`, `risk_test` | VaR, ES, ratios and drawdowns against NumPy, SciPy and empyrical conventions |
-| `evt_reference_test` | GPD functions and fits, EVT VaR and ES, GARCH-EVT |
+| `evt_reference_test` | GPD functions and fits, EVT VaR and ES, out-of-sample GARCH-EVT |
+| `finance_fixes_test` | GARCH VaR forecast against `arch`, out-of-sample GARCH backtests, limit and stop order fills, the sign convention across procedures, the free procedures |
 | `backtest_reference_test`, `backtest_stats_reference_test`, `backtest_test` | order fills, round trips and metrics against independent replays; backtest statistics |
 | `pdpm_reference_test`, `pdpm_test`, `pdpm_contracts_test` | SDF construction, pricing identities, state-price densities, calibration |
 | `pdpm_real_data_test`, `pdpm_multifactor_test` | calibration on the CSV files and on live Yahoo data |
@@ -543,6 +603,9 @@ SPY chain: 499 options expiring in 0.099 years
 | historical, parametric VaR and ES at 95% and 99% | NumPy | all printed digits |
 | GPD fit, EVT VaR and ES at 99% and 99.9% | SciPy `genpareto`, refined by Nelder–Mead | the exact MLE (SciPy's own fit is 1e-7 lower in log-likelihood) |
 | GARCH(1,1)-t fit | SciPy maximizing the same likelihood; the `arch` package | all printed digits; `arch`'s backcast convention differs by 0.06 in log-likelihood |
+| `value_at_risk(.GARCH)`, 2000 simulated GARCH(1,1) returns | `arch` 8.0, normal GARCH(1,1) on the demeaned returns, one-step forecast | 3e-4 relative (95% and 99%) |
+| out-of-sample GARCH backtests | the training fit and a hand-written forward filter; scaling the test returns leaves the fit unchanged | exact |
+| limit, stop and cancelled orders on a scripted price path | hand calculation | exact (fill bars, prices, final equity) |
 | Kupiec statistics and p-values | SciPy χ² | all printed digits |
 | volatility, EWMA, drawdowns, Sharpe, Sortino, Calmar, beta, correlation, tracking error, trade statistics, Jarque–Bera | NumPy / SciPy | all printed digits |
 | SMA, Bollinger and breakout backtests; the short-and-flip order | independent Python replay | exact (every equity value) |
@@ -550,11 +613,8 @@ SPY chain: 499 options expiring in 0.099 years
 | linear SDF prices of the stock and the bond | the moment conditions | 1e-12 |
 
 **Known limitations:**
-- **Sign conventions.** VaR and ES procedures use the two conventions of section 1. `value_at_risk(.GARCH)` is not a GARCH model.
-- **Order types.** Limit and stop orders are ignored by `context_submit_order`, and fills happen at the bar's price.
-- **In-sample backtests.** The GARCH backtests are in sample, with the parameters fitted on all data.
-- **SDF cleanup.** `StochasticDiscountFactor`, `PDPMResult`, `MarketData` and `OptionChain` have no free procedures; delete their slices.
-- **PDPM parameters.** `price_european_call` and the other PDPM payoff procedures ignore their spot and maturity arguments: the payoff comes from the terminal prices given.
+- **Bar data.** The backtester sees one price per bar, so orders fill at closes: there are no intrabar fills from highs and lows, and no stop-limit orders.
+- **GARCH backtest split.** The out-of-sample backtests estimate the parameters once, on the training returns; there is no periodic refit.
 
 ## 10. Quick reference
 
@@ -562,14 +622,14 @@ SPY chain: 499 options expiring in 0.099 years
 |---|---|---|
 | VaR and ES | `var_historical`, `var_parametric`, `var_monte_carlo`, `value_at_risk`, `conditional_var`, `expected_shortfall` | 2 |
 | Extreme value theory | `evt_fit`, `evt_var_es`, `gpd_fit`, `gpd_pdf`, `gpd_cdf`, `gpd_quantile` | 3 |
-| GARCH risk | `garch_risk_metrics`, `garch_evt_fit`, `var_garch`, `var_garch_single`, `cvar_garch`, `cvar_garch_series`, `ged_pdf`, `ged_cdf`, `ged_quantile`, `ged_cvar` | 4 |
+| GARCH risk | `garch_risk_metrics`, `garch_evt_fit`, `garch_out_of_sample`, `free_garch_out_of_sample`, `var_garch`, `var_garch_single`, `cvar_garch`, `cvar_garch_series`, `ged_pdf`, `ged_cdf`, `ged_quantile`, `ged_cvar` | 4 |
 | Backtesting risk models | `backtest_var`, `backtest_es`, `historical_var_rolling`, `historical_cvar_rolling` | 4 |
 | Performance metrics | `calculate_risk_metrics`, `historical_volatility`, `ewma_volatility`, `max_drawdown`, `avg_drawdown`, `drawdown_series`, `sharpe_ratio_from_returns`, `sortino_ratio_from_returns`, `calmar_ratio`, `beta`, `correlation`, `tracking_error`, `win_rate`, `profit_factor`, `avg_win`, `avg_loss` | 5 |
 | On DataFrames | `risk_metrics_from_df`, `rolling_risk_metrics_df`, `historical_volatility_rolling`, `ewma_volatility_df`, `rolling_correlation_df`, `rolling_beta_df` | 5 |
 | Statistical tests | `returns_normality_test`, `returns_autocorrelation_test`, `returns_stationarity_test` | 5 |
-| Strategy backtests | `backtest_run`, `backtest_portfolio_run`, `context_submit_order`, `context_get_price`, `portfolio_init`, `plot_equity_curve`, `plot_backtest_drawdown` | 6 |
+| Strategy backtests | `backtest_run`, `backtest_portfolio_run`, `context_submit_order`, `context_cancel_order`, `context_process_pending_orders`, `context_get_price`, `portfolio_init`, `portfolio_destroy`, `plot_equity_curve`, `plot_backtest_drawdown` | 6 |
 | Built-in strategies | `sma_crossover_strategy`, `mean_reversion_strategy`, `momentum_strategy`, `pairs_trading_strategy`, `pairs_trading_full`, `portfolio_equal_weight`, `portfolio_inverse_volatility`, `portfolio_min_variance` | 6 |
-| SDFs | `sdf_power_utility`, `sdf_exponential_utility`, `sdf_linear_factor`, `sdf_quadratic` | 7 |
-| SDF pricing | `price_payoff`, `price_payoff_continuous`, `price_european_call`, `price_european_put`, `price_bull_spread`, `dybvig_distributional_price`, `compare_to_black_scholes`, `estimate_state_price_density`, `simulate_terminal_prices`, `compute_distribution_metrics` | 7 |
+| SDFs | `sdf_power_utility`, `sdf_exponential_utility`, `sdf_linear_factor`, `sdf_quadratic`, `free_stochastic_discount_factor` | 7 |
+| SDF pricing | `price_payoff`, `price_payoff_continuous`, `price_european_call`, `price_european_put`, `price_bull_spread`, `dybvig_distributional_price`, `compare_to_black_scholes`, `estimate_state_price_density`, `simulate_terminal_prices`, `compute_distribution_metrics`, `free_pdpm_result` | 7 |
 | SDF calibration | `calibrate_sdf_linear`, `calibrate_sdf_power_utility`, `calibrate_sdf_quadratic`, `calibrate_sdf_exponential`, `calibrate_sdf_multifactor_2d`, `calibrate_sdf_multifactor_4d`, `pdpm_horizon_returns` | 7 |
-| Market data | `load_market_data`, `load_option_chain`, `net.read_yahoo`, `net.read_yahoo_json`, `fetch_yahoo_options`, `fetch_yahoo_option_surface` | 8 |
+| Market data | `load_market_data`, `load_option_chain`, `free_market_data`, `free_option_chain`, `net.read_yahoo`, `net.read_yahoo_json`, `fetch_yahoo_options`, `fetch_yahoo_option_surface` | 8 |

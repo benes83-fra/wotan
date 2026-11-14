@@ -1,6 +1,8 @@
 package tests
 
+import w "../wotan/core"
 import plot "../wotan/plot"
+import "base:runtime"
 import "core:fmt"
 import "core:mem"
 import "core:os"
@@ -10,7 +12,9 @@ import "core:os"
 // drawing) indexed past ys while placing the legend (bounds-check panic);
 // tick labels of a step below 1e-6 got 0 decimals (1 .. 1 + 2e-12: every
 // label "1"); scientific labels took their exponent from log10, which falls
-// just short of some powers of ten (±1e300 was labelled "10e299").
+// just short of some powers of ten (±1e300 was labelled "10e299");
+// scatter_png / histogram_png panicked on a missing column name; every chart
+// left its ticks, labels and PNG bytes on context.temp_allocator.
 
 plot_fixes_test :: proc(allocator: mem.Allocator) {
 	seed_test(#procedure)
@@ -56,6 +60,95 @@ plot_fixes_test :: proc(allocator: mem.Allocator) {
 		ok := plot.multi_line_png(lines, path, plot.DEFAULT_PLOT_CONFIG, allocator)
 		report("multi_line_png with a mismatched line: drawn, no panic", ok, &passed, &total)
 		_ = os.remove(path)
+	}
+
+	{ 	// scatter_png / histogram_png: a missing column returns false like a non-Float one
+		df := w.df_from(
+			w.column_from_floats("a", []f64{1, 2, 3}),
+			w.column_from_floats("b", []f64{2, 1, 3}),
+			w.column_from_ints("k", []int{1, 2, 3}),
+		)
+		defer w.destroy_dataframe(&df)
+		os.make_directory("plots")
+		path := "plots/plot_fixes_missing.png"
+		s_missing := plot.scatter_png(&df, "a", "nope", path, plot.DEFAULT_PLOT_CONFIG, allocator)
+		s_missing_x := plot.scatter_png(
+			&df,
+			"nope",
+			"b",
+			path,
+			plot.DEFAULT_PLOT_CONFIG,
+			allocator,
+		)
+		s_int := plot.scatter_png(&df, "a", "k", path, plot.DEFAULT_PLOT_CONFIG, allocator)
+		h_missing := plot.histogram_png(&df, "nope", path, 10, plot.DEFAULT_PLOT_CONFIG, allocator)
+		h_int := plot.histogram_png(&df, "k", path, 10, plot.DEFAULT_PLOT_CONFIG, allocator)
+		s_ok := plot.scatter_png(&df, "a", "b", path, plot.DEFAULT_PLOT_CONFIG, allocator)
+		h_ok := plot.histogram_png(&df, "a", path, 10, plot.DEFAULT_PLOT_CONFIG, allocator)
+		report(
+			"scatter_png / histogram_png: missing or non-Float column -> false, valid -> true",
+			!s_missing && !s_missing_x && !s_int && !h_missing && !h_int && s_ok && h_ok,
+			&passed,
+			&total,
+		)
+		_ = os.remove(path)
+	}
+	{ 	// 50 charts in a loop: the temp allocator does not grow (scratch released per chart)
+		if context.temp_allocator.data != &runtime.global_default_temp_allocator_data {
+			report(
+				"temp allocator steady over 50 PNGs: skipped (non-default temp allocator)",
+				true,
+				&passed,
+				&total,
+			)
+		} else {
+			arena := &runtime.global_default_temp_allocator_data.arena
+			_ = make([]u8, 16, context.temp_allocator) // the arena has a block before the loop
+			df := w.df_from(
+				w.column_from_floats("a", []f64{1, 2, 3, 4, 5}),
+				w.column_from_floats("b", []f64{2, 1, 3, 5, 4}),
+			)
+			defer w.destroy_dataframe(&df)
+			xs := []f64{0, 1, 2, 3, 4}
+			ys := []f64{1, 3, 2, 5, 4}
+			os.make_directory("plots")
+			path := "plots/plot_fixes_loop.png"
+			cfg := plot.DEFAULT_PLOT_CONFIG
+			cfg.width, cfg.height = 400, 300
+			cfg.title = "loop"
+			before := arena.total_used
+			all_ok := true
+			for i in 0 ..< 50 {
+				ok: bool
+				switch i % 6 {
+				case 0:
+					ok = plot.line_png(xs, ys, path, cfg)
+				case 1:
+					ok = plot.multi_line_png({{xs = xs, ys = ys, label = "a"}}, path, cfg)
+				case 2:
+					ok = plot.scatter_png(&df, "a", "b", path, cfg)
+				case 3:
+					ok = plot.histogram_png(&df, "a", path, 5, cfg)
+				case 4:
+					ok = plot.bar_png({"a", "b", "c"}, {1, -2, 3}, path, cfg)
+				case 5:
+					ok = plot.heatmap_png(ys[:4], 2, 2, path, {"r1", "r2"}, {"c1", "c2"}, cfg)
+				}
+				all_ok = all_ok && ok
+			}
+			after := arena.total_used
+			report(
+				fmt.tprintf(
+					"temp allocator steady over 50 PNGs: %d -> %d bytes used",
+					before,
+					after,
+				),
+				all_ok && after == before,
+				&passed,
+				&total,
+			)
+			_ = os.remove(path)
+		}
 	}
 
 	fmt.printf("plot regression tests: %d/%d passed\n", passed, total)

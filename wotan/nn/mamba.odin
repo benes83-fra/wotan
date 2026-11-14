@@ -8,9 +8,17 @@ import "core:mem"
 // ============================================================================
 // Mamba Layer (Selective State Space Model)
 // ============================================================================
+// A pre-norm residual block as the Mamba-1 Block of state-spaces/mamba:
+//   out = x + proj_out(SSM(RMSNorm(x)))
+// The selective scan (tensor_ssm) reads u = proj_x(x̂), B = proj_B(x̂),
+// C = proj_C(x̂), Δ = softplus(proj_Delta(x̂)) of the normalised input x̂ and
+// runs h_t = exp(Δ·A)·h_{t−1} + Δ·B·u, y = C·h + D·u with A = −exp(θ_A).
+// The normalisation keeps the scan in range for inputs of any scale; the
+// residual passes the input through.
 MambaLayer :: struct {
 	d_model:    int,
 	d_state:    int,
+	norm:       LayerNormLayer, // RMSNorm (eps 1e-5) of the block's input
 	proj_x:     LinearLayer,
 	proj_B:     LinearLayer,
 	proj_C:     LinearLayer,
@@ -29,6 +37,7 @@ mamba_layer_new :: proc(
 	layer.d_model = d_model
 	layer.d_state = d_state
 
+	layer.norm = rms_norm_layer_new(d_model, 1e-5, allocator)
 	layer.proj_x = linear_layer_new(d_model, d_model, allocator)
 	layer.proj_B = linear_layer_new(d_model, d_state, allocator)
 	layer.proj_C = linear_layer_new(d_model, d_state, allocator)
@@ -63,6 +72,7 @@ mamba_layer_new :: proc(
 }
 
 mamba_layer_free :: proc(layer: ^MambaLayer) {
+	layer_norm_layer_free(&layer.norm)
 	linear_layer_free(&layer.proj_x)
 	linear_layer_free(&layer.proj_B)
 	linear_layer_free(&layer.proj_C)
@@ -72,12 +82,14 @@ mamba_layer_free :: proc(layer: ^MambaLayer) {
 	if layer.D != nil {t.tensor_free(layer.D)}
 }
 
+// x [batch, seq_len, d_model], h_0 [batch, d_model, d_state] → [batch, seq_len, d_model]
 mamba_layer_forward :: proc(layer: ^MambaLayer, x: ^t.Tensor, h_0: ^t.Tensor) -> ^t.Tensor {
-	// 1. Projections
-	x_proj := linear_forward(&layer.proj_x, x)
-	B_proj := linear_forward(&layer.proj_B, x)
-	C_proj := linear_forward(&layer.proj_C, x)
-	delta_raw := linear_forward(&layer.proj_Delta, x)
+	// 1. Pre-norm and projections
+	x_norm := layer_norm_layer_forward(&layer.norm, x)
+	x_proj := linear_forward(&layer.proj_x, x_norm)
+	B_proj := linear_forward(&layer.proj_B, x_norm)
+	C_proj := linear_forward(&layer.proj_C, x_norm)
+	delta_raw := linear_forward(&layer.proj_Delta, x_norm)
 	Delta := t.tensor_softplus(delta_raw)
 	// 2. A = −exp(θ_A) is always negative, so the state decays
 	A_pos := t.tensor_exp(layer.A)
@@ -92,8 +104,6 @@ mamba_layer_forward :: proc(layer: ^MambaLayer, x: ^t.Tensor, h_0: ^t.Tensor) ->
 		_constant_done(A, ssm_out)
 	}
 
-	// 4. Output projection
-	out := linear_forward(&layer.proj_out, ssm_out)
-
-	return out
+	// 4. Output projection and residual
+	return t.tensor_add(x, linear_forward(&layer.proj_out, ssm_out))
 }

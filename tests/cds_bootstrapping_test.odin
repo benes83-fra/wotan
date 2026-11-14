@@ -65,7 +65,7 @@ cds_bootstrapping_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("   %-30s | %11.2f bps\n", "Standard Fixed Coupon", fixed_coupon * 10000.0)
 	fmt.printf("   %-30s | $%10.2f\n", "Upfront Payment", result.upfront_pct * notional)
 	fmt.printf("   %-30s | %11.4f%%\n", "Upfront (as % of Notional)", result.upfront_pct * 100.0)
-	fmt.printf("   %-30s | $%10.2f\n", "Risky PV01 (per $1M notional)", result.rpv01)
+	fmt.printf("   %-30s | $%10.2f\n", "Risky PV01 (on the notional)", result.rpv01)
 	fmt.println("   ----------------------------------------------------------------------")
 
 	if result.upfront_pct < 0.0 {

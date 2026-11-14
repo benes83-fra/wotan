@@ -533,8 +533,8 @@ lu_solve_simd :: proc(
 	}
 
 	// y = P b
-	y_perm := apply_pivots_vec(piv, b)
-	defer delete(y_perm, context.temp_allocator) // FIX: Free the pivoted vector
+	y_perm := apply_pivots_vec(piv, b, context.temp_allocator)
+	defer delete(y_perm, context.temp_allocator)
 
 	// L y = P b  (L unit lower in LU)
 	y := forward_subst_unit_lower_simd(LU, y_perm, allocator)

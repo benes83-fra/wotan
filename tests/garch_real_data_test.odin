@@ -143,12 +143,35 @@ garch_real_data_test :: proc(allocator: mem.Allocator) {
 		delete(var_99, main_alloc)
 	}
 
-	// 6. Backtest VaR using new finance API (skip first 100 for warmup)
-	fmt.println("\n--- VaR Backtesting ---")
-	start_idx := 100
+	// 6. Backtest VaR out of sample: GARCH-t fitted on the first half only, its
+	// variance filtered one step ahead over the second half
+	fmt.println(
+		"\n--- VaR Backtesting (out of sample: fit on the first half, test on the second) ---",
+	)
+	start_idx := len(returns) / 2
+	oos := fin.garch_out_of_sample(returns, start_idx, .StudentT, 1, 1, main_alloc)
+	defer fin.free_garch_out_of_sample(&oos, main_alloc)
 	returns_bt := returns[start_idx:]
-	var_95_bt := var_95[start_idx:]
-	var_99_bt := var_99[start_idx:]
+	var_95_bt := fin.var_garch(
+		oos.cond_var[start_idx:],
+		0.95,
+		.StudentT,
+		oos.fit.params.nu,
+		0,
+		main_alloc,
+	)
+	var_99_bt := fin.var_garch(
+		oos.cond_var[start_idx:],
+		0.99,
+		.StudentT,
+		oos.fit.params.nu,
+		0,
+		main_alloc,
+	)
+	defer {
+		delete(var_95_bt, main_alloc)
+		delete(var_99_bt, main_alloc)
+	}
 
 	// Use new backtest_var API (separate calls for 95% and 99%)
 	backtest_95 := fin.backtest_var(returns_bt, var_95_bt, 0.95)
@@ -282,9 +305,16 @@ garch_real_data_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("  EVT ξ (shape): %.4f\n", hybrid_result.evt_xi)
 	fmt.printf("  EVT β (scale): %.6f\n", hybrid_result.evt_beta)
 	fmt.printf("  Threshold (u): %.4f\n", hybrid_result.evt_threshold)
-	fmt.printf("  Exceedances: %d / %d\n", hybrid_result.n_exceedances, len(returns))
+	fmt.printf(
+		"  Exceedances: %d / %d training returns\n",
+		hybrid_result.n_exceedances,
+		hybrid_result.backtest_start,
+	)
 
-	fmt.printf("\nGARCH-EVT Backtesting:\n")
+	fmt.printf(
+		"\nGARCH-EVT Backtesting (out of sample, from return %d):\n",
+		hybrid_result.backtest_start,
+	)
 
 	pass_h95h := "PASS"
 	if !hybrid_result.backtest_95.passes_test {pass_h95h = "FAIL"}
@@ -568,18 +598,18 @@ garch_real_data_test :: proc(allocator: mem.Allocator) {
 
 	// Generate CVaR series for GARCH and Historical
 	cvar_95_garch := fin.cvar_garch_series(
-		garch_result.conditional_var,
+		oos.cond_var,
 		0.95,
 		.StudentT,
-		garch_result.params.nu,
+		oos.fit.params.nu,
 		0.0,
 		main_alloc,
 	)
 	cvar_99_garch := fin.cvar_garch_series(
-		garch_result.conditional_var,
+		oos.cond_var,
 		0.99,
 		.StudentT,
-		garch_result.params.nu,
+		oos.fit.params.nu,
 		0.0,
 		main_alloc,
 	)
@@ -673,10 +703,11 @@ garch_real_data_test :: proc(allocator: mem.Allocator) {
 	phi_95 := inv_sqrt_2pi * math.exp_f64(-0.5 * z_95 * z_95)
 	phi_99 := inv_sqrt_2pi * math.exp_f64(-0.5 * z_99 * z_99)
 
-	var_95_current := -z_95 * last_vol
-	var_99_current := -z_99 * last_vol
-	cvar_95_current := -last_vol * phi_95 / 0.05
-	cvar_99_current := -last_vol * phi_99 / 0.01
+	// positive loss magnitudes
+	var_95_current := z_95 * last_vol
+	var_99_current := z_99 * last_vol
+	cvar_95_current := last_vol * phi_95 / 0.05
+	cvar_99_current := last_vol * phi_99 / 0.01
 
 	fmt.printf("Latest GARCH volatility (daily): %.4f%%\n", last_vol * 100)
 	fmt.printf(
@@ -691,10 +722,10 @@ garch_real_data_test :: proc(allocator: mem.Allocator) {
 	// For $1M portfolio
 	portfolio := 1_000_000.0
 	fmt.printf("\nFor $1,000,000 portfolio:\n")
-	fmt.printf("  95%% VaR: $%.2f\n", portfolio * -var_95_current)
-	fmt.printf("  99%% VaR: $%.2f\n", portfolio * -var_99_current)
-	fmt.printf("  95%% CVaR: $%.2f\n", portfolio * -cvar_95_current)
-	fmt.printf("  99%% CVaR: $%.2f\n", portfolio * -cvar_99_current)
+	fmt.printf("  95%% VaR: $%.2f\n", portfolio * var_95_current)
+	fmt.printf("  99%% VaR: $%.2f\n", portfolio * var_99_current)
+	fmt.printf("  95%% CVaR: $%.2f\n", portfolio * cvar_95_current)
+	fmt.printf("  99%% CVaR: $%.2f\n", portfolio * cvar_99_current)
 	// 8b. Compare Current Risk Metrics (with EVT)
 	fmt.println("\n--- Current Risk Metrics Comparison ---")
 	last_idxh := len(returns) - 1

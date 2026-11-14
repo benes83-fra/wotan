@@ -35,6 +35,17 @@ StochasticDiscountFactor :: struct {
 	variance:        f64,
 }
 
+// Frees values and parameters (the sdf_* constructors and calibrators allocate
+// both with their allocator)
+free_stochastic_discount_factor :: proc(
+	sdf: ^StochasticDiscountFactor,
+	allocator: mem.Allocator = context.allocator,
+) {
+	delete(sdf.values, allocator)
+	delete(sdf.parameters, allocator)
+	sdf^ = {}
+}
+
 PayoffDistribution :: struct {
 	payoffs:       []f64, // Payoff values in each state
 	probabilities: []f64, // State probabilities (risk-neutral or physical)
@@ -74,6 +85,12 @@ PDPMResult :: struct {
 	state_prices:         []f64, // Arrow-Debreu state prices
 	correlation_with_sdf: f64, // Corr(payoff, SDF)
 	certainty_equivalent: f64, // Risk-adjusted value
+}
+
+// Frees state_prices (allocated by every pricer returning a PDPMResult)
+free_pdpm_result :: proc(r: ^PDPMResult, allocator: mem.Allocator = context.allocator) {
+	delete(r.state_prices, allocator)
+	r^ = {}
 }
 
 DistributionMetrics :: struct {
@@ -525,11 +542,12 @@ dybvig_distributional_price :: proc(
 // Applications: Option Pricing
 // ============================================================================
 
-// Price a European call option using PDPM
+// Price a European call max(S_T − K, 0) by PDPM: price_payoff over the
+// simulated terminal prices, one SDF value per state (the SDF carries the
+// discounting to the payoff date, so spot and maturity enter only through
+// terminal_prices and sdf). Free the result with free_pdpm_result.
 price_european_call :: proc(
-	spot_price: f64,
 	strike_price: f64,
-	time_to_maturity: f64,
 	sdf: ^StochasticDiscountFactor,
 	terminal_prices: []f64, // Simulated terminal prices
 	allocator: mem.Allocator = context.allocator,
@@ -546,11 +564,9 @@ price_european_call :: proc(
 	return price_payoff(payoffs, sdf, nil, allocator)
 }
 
-// Price a European put option using PDPM
+// Price a European put max(K − S_T, 0) by PDPM, as price_european_call
 price_european_put :: proc(
-	spot_price: f64,
 	strike_price: f64,
-	time_to_maturity: f64,
 	sdf: ^StochasticDiscountFactor,
 	terminal_prices: []f64,
 	allocator: mem.Allocator = context.allocator,
@@ -566,9 +582,9 @@ price_european_put :: proc(
 	return price_payoff(payoffs, sdf, nil, allocator)
 }
 
-// Price a structured product (e.g., bull spread)
+// Price a bull spread (long call at strike_low, short call at strike_high) by
+// PDPM, as price_european_call
 price_bull_spread :: proc(
-	spot_price: f64,
 	strike_low: f64,
 	strike_high: f64,
 	sdf: ^StochasticDiscountFactor,
@@ -624,8 +640,9 @@ simulate_terminal_prices :: proc(
 
 // Sample distribution metrics: mean, unbiased variance (n − 1), population
 // skewness m3/m2^1.5 and excess kurtosis m4/m2² − 3 (scipy.stats defaults),
-// VaR_α as the lower empirical α-quantile x_(⌈αn⌉) and ES_95 as the mean of
-// the ⌈0.05 n⌉ smallest values (both in the units of `values`, ≤ 0 for losses).
+// VaR_α as minus the lower empirical α-quantile, -x_(⌈αn⌉), and ES_95 as minus
+// the mean of the ⌈0.05 n⌉ smallest values: positive loss magnitudes in the
+// units of `values`, as everywhere in the package.
 compute_distribution_metrics :: proc(
 	values: []f64,
 	allocator: mem.Allocator = context.allocator,
@@ -666,9 +683,9 @@ compute_distribution_metrics :: proc(
 		variance = variance,
 		skewness = skewness,
 		kurtosis = kurtosis,
-		value_at_risk_95 = sorted[k95 - 1],
-		value_at_risk_99 = sorted[k99 - 1],
-		expected_shortfall_95 = es / f64(k95),
+		value_at_risk_95 = -sorted[k95 - 1],
+		value_at_risk_99 = -sorted[k99 - 1],
+		expected_shortfall_95 = -es / f64(k95),
 	}
 }
 
@@ -985,6 +1002,16 @@ MarketData :: struct {
 	n_obs:   int,
 }
 
+// Frees the four series of a MarketData (load_market_data)
+free_market_data :: proc(md: ^MarketData, allocator: mem.Allocator = context.allocator) {
+	delete(md.dates, allocator)
+	delete(md.prices, allocator)
+	delete(md.volumes, allocator)
+	delete(md.returns, allocator)
+	md^ = {}
+}
+
+// option_types holds the literals "call" and "put", not allocated strings
 OptionChain :: struct {
 	strikes:       []f64,
 	expiries:      []f64, // Time to expiry in years
@@ -992,6 +1019,17 @@ OptionChain :: struct {
 	market_prices: []f64,
 	option_types:  []string, // "call" or "put"
 	n_options:     int,
+}
+
+// Frees the five arrays of an OptionChain (load_option_chain,
+// fetch_yahoo_options, fetch_yahoo_option_surface); the type strings are literals
+free_option_chain :: proc(chain: ^OptionChain, allocator: mem.Allocator = context.allocator) {
+	delete(chain.strikes, allocator)
+	delete(chain.expiries, allocator)
+	delete(chain.implied_vols, allocator)
+	delete(chain.market_prices, allocator)
+	delete(chain.option_types, allocator)
+	chain^ = {}
 }
 
 
@@ -1082,9 +1120,7 @@ _calibration_loss :: proc(
 
 		if option_chain.option_types[i] == "call" {
 			result := price_european_call(
-				spot_price,
 				option_chain.strikes[i],
-				option_chain.expiries[i],
 				&sdf,
 				terminal_prices,
 				context.temp_allocator,
@@ -1093,9 +1129,7 @@ _calibration_loss :: proc(
 			delete(result.state_prices, context.temp_allocator)
 		} else {
 			result := price_european_put(
-				spot_price,
 				option_chain.strikes[i],
-				option_chain.expiries[i],
 				&sdf,
 				terminal_prices,
 				context.temp_allocator,
@@ -1236,14 +1270,7 @@ compare_to_black_scholes :: proc(
 	f64,
 ) {
 	pdpm_price: f64
-	result := price_european_call(
-		spot_price,
-		strike,
-		time_to_expiry,
-		sdf,
-		terminal_prices,
-		allocator,
-	)
+	result := price_european_call(strike, sdf, terminal_prices, allocator)
 	pdpm_price = result.price
 	delete(result.state_prices, allocator)
 
@@ -1566,9 +1593,7 @@ _calibration_loss_power_utility :: proc(
 
 		if option_chain.option_types[i] == "call" {
 			result := price_european_call(
-				spot_price,
 				option_chain.strikes[i],
-				option_chain.expiries[i],
 				&sdf,
 				terminal_prices,
 				context.temp_allocator,
@@ -1577,9 +1602,7 @@ _calibration_loss_power_utility :: proc(
 			delete(result.state_prices, context.temp_allocator)
 		} else {
 			result := price_european_put(
-				spot_price,
 				option_chain.strikes[i],
-				option_chain.expiries[i],
 				&sdf,
 				terminal_prices,
 				context.temp_allocator,
@@ -1828,9 +1851,7 @@ _calibration_loss_quadratic :: proc(
 
 		if option_chain.option_types[i] == "call" {
 			result := price_european_call(
-				spot_price,
 				option_chain.strikes[i],
-				option_chain.expiries[i],
 				&sdf,
 				terminal_prices,
 				context.temp_allocator,
@@ -1839,9 +1860,7 @@ _calibration_loss_quadratic :: proc(
 			delete(result.state_prices, context.temp_allocator)
 		} else {
 			result := price_european_put(
-				spot_price,
 				option_chain.strikes[i],
-				option_chain.expiries[i],
 				&sdf,
 				terminal_prices,
 				context.temp_allocator,
@@ -2130,9 +2149,7 @@ _calibration_loss_exponential :: proc(
 
 		if option_chain.option_types[i] == "call" {
 			result := price_european_call(
-				spot_price,
 				option_chain.strikes[i],
-				option_chain.expiries[i],
 				&sdf,
 				terminal_prices,
 				context.temp_allocator,
@@ -2141,9 +2158,7 @@ _calibration_loss_exponential :: proc(
 			delete(result.state_prices, context.temp_allocator)
 		} else {
 			result := price_european_put(
-				spot_price,
 				option_chain.strikes[i],
-				option_chain.expiries[i],
 				&sdf,
 				terminal_prices,
 				context.temp_allocator,
@@ -2430,9 +2445,7 @@ _calibration_loss_multifactor :: proc(
 
 		if option_chain.option_types[i] == "call" {
 			result := price_european_call(
-				spot_price,
 				option_chain.strikes[i],
-				option_chain.expiries[i],
 				&sdf,
 				terminal_prices,
 				context.temp_allocator,
@@ -2441,9 +2454,7 @@ _calibration_loss_multifactor :: proc(
 			delete(result.state_prices, context.temp_allocator)
 		} else {
 			result := price_european_put(
-				spot_price,
 				option_chain.strikes[i],
-				option_chain.expiries[i],
 				&sdf,
 				terminal_prices,
 				context.temp_allocator,
@@ -2796,9 +2807,7 @@ _calibration_loss_multifactor_4d :: proc(
 
 		if option_chain.option_types[i] == "call" {
 			result := price_european_call(
-				spot_price,
 				option_chain.strikes[i],
-				option_chain.expiries[i],
 				&sdf,
 				terminal_prices,
 				context.temp_allocator,
@@ -2807,9 +2816,7 @@ _calibration_loss_multifactor_4d :: proc(
 			delete(result.state_prices, context.temp_allocator)
 		} else {
 			result := price_european_put(
-				spot_price,
 				option_chain.strikes[i],
-				option_chain.expiries[i],
 				&sdf,
 				terminal_prices,
 				context.temp_allocator,

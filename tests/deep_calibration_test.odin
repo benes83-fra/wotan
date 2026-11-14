@@ -138,6 +138,7 @@ deep_calibration_test :: proc(allocator: mem.Allocator) {
 	fmt.println("\n=== AAPL option chain ===")
 	chain, chain_ok := fin.fetch_yahoo_option_surface("AAPL", allocator = allocator)
 	if !chain_ok {fail_missing_data(#procedure, "Yahoo option chain for AAPL"); return}
+	defer fin.free_option_chain(&chain, allocator)
 	hist, hist_ok := net.read_yahoo_series("AAPL", .Daily, .OneMonth, allocator)
 	if !hist_ok {fail_missing_data(#procedure, "Yahoo data for AAPL"); return}
 	defer net.yahoo_series_free(&hist)

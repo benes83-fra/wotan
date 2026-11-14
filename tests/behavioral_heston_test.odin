@@ -167,13 +167,7 @@ behavioral_heston_test :: proc(allocator: mem.Allocator) {
 	fmt.printf("- Fetching %s live options chain...\n", symbol)
 	chain, chain_ok := fin.fetch_yahoo_options(symbol, allocator)
 	if !chain_ok {fail_missing_data(#procedure, fmt.tprintf("Yahoo option chain for %s", symbol)); return}
-	defer {
-		if chain.strikes != nil {delete(chain.strikes, allocator)}
-		if chain.expiries != nil {delete(chain.expiries, allocator)}
-		if chain.implied_vols != nil {delete(chain.implied_vols, allocator)}
-		if chain.market_prices != nil {delete(chain.market_prices, allocator)}
-		if chain.option_types != nil {delete(chain.option_types, allocator)}
-	}
+	defer fin.free_option_chain(&chain, allocator)
 
 	if chain.n_options == 0 {
 		fmt.println("Failed to fetch options chain.")

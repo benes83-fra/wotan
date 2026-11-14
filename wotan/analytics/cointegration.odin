@@ -120,12 +120,19 @@ engle_granger :: proc(
 		if ml_lags < 0 do ml_lags = int(math.ceil(12 * math.pow(f64(n) / 100, 0.25)))
 		ml_lags = min(n / 2 - 1, ml_lags)
 		if ml_lags < 0 do panic("engle_granger: series too short for the ADF regression")
-		stat, _, lags, _, _, _, _ := adf_test(res.residuals, ml_lags, .None, .AIC, context.temp_allocator)
+		stat, _, lags, _, _, _, _ := adf_test(
+			res.residuals,
+			ml_lags,
+			.None,
+			.AIC,
+			context.temp_allocator,
+		)
 		res.statistic, res.lags_used = stat, lags
 	} else {
 		res.statistic = math.inf_f64(-1) // (almost) perfectly collinear: not reliable
 	}
-	res.p_value = mackinnon_pvalue(res.statistic, trend, min(m + 1, 6)) if m + 1 <= 6 else math.nan_f64()
+	res.p_value =
+		mackinnon_pvalue(res.statistic, trend, min(m + 1, 6)) if m + 1 <= 6 else math.nan_f64()
 	if trend == .None {
 		res.crit = {math.nan_f64(), math.nan_f64(), math.nan_f64()}
 	} else {
@@ -203,7 +210,8 @@ johansen_test :: proc(
 		}
 		for j in 1 ..= k_ar_diff {
 			for v in 0 ..< k {
-				z.data[r * q + (j - 1) * k + v] = x.data[(i - j + 1) * k + v] - x.data[(i - j) * k + v]
+				z.data[r * q + (j - 1) * k + v] =
+					x.data[(i - j + 1) * k + v] - x.data[(i - j) * k + v]
 			}
 		}
 	}
@@ -264,7 +272,7 @@ johansen_test :: proc(
 			C.data[a * k + b], C.data[b * k + a] = avg, avg
 		}
 	}
-	W, V := l.eigh(&C, .Descending, context.temp_allocator)
+	W, V, _ := l.eigh(&C, .Descending, context.temp_allocator) // C symmetrized above
 	defer {
 		delete(W, context.temp_allocator)
 		l.matrix_free(&V)

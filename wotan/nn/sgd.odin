@@ -8,7 +8,9 @@ import "core:mem"
 // 1. Stochastic Gradient Descent (SGD) Optimizer
 // ============================================================================
 // torch.optim.SGD (dampening 0) over registered tensors; the update itself is
-// optimize.sgd_update.
+// optimize.sgd_update. As torch, a parameter without a gradient (dropped by
+// sgd_zero_grad and not reached by the backward pass) is skipped: no momentum
+// or weight-decay update.
 
 SGD :: struct {
 	parameters:    [dynamic]^t.Tensor, // Pointers to weights and biases
@@ -48,7 +50,7 @@ sgd_add_param :: proc(opt: ^SGD, param: ^t.Tensor) {
 // sgd_step performs one step: w ← w − lr·d (see optimize.sgd_update)
 sgd_step :: proc(opt: ^SGD) {
 	for param, i in opt.parameters {
-		if !param.requires_grad || param.grad.data == nil {continue}
+		if !param.requires_grad || !t.tensor_has_grad(param) {continue}
 		if opt.momentum > 0.0 && opt.velocity[i] == nil {
 			opt.velocity[i] = make([]f64, len(param.data.data), opt.allocator)
 		}
@@ -64,11 +66,10 @@ sgd_step :: proc(opt: ^SGD) {
 	}
 }
 
-// sgd_zero_grad resets all gradients to 0.0 (required before the next backward pass)
+// sgd_zero_grad drops all gradients (as adam_zero_grad); call it before the
+// next backward pass
 sgd_zero_grad :: proc(opt: ^SGD) {
-	for param in opt.parameters {
-		t.tensor_zero_grad(param)
-	}
+	_drop_grads(opt.parameters[:])
 }
 
 // sgd_free cleans up the optimizer's internal lists

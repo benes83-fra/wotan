@@ -37,6 +37,31 @@ import "core:mem"
 // for a sweep, which happens while the increments still drift after a long
 // gradient step, so the constrained optimizers returned weights breaking a
 // group limit (min variance) or stopped at the start (max Sharpe, utility).
+// Later checks: unshifted Sobol' normals started at the origin (z ≈ −6.4 on
+// path 0); compute_greeks, the finite-difference and the Longstaff-Schwartz
+// pricers had no dividend yield; context_submit_order dropped limit and stop
+// orders; VaR / ES came with two sign conventions and value_at_risk(.GARCH)
+// was an unconditional normal VaR; the GARCH backtests were in sample;
+// CDS rpv01 was per 1M whatever the notional; the PDPM payoff procedures took
+// unused spot / maturity arguments, and four PDPM / market-data types had no
+// free procedure.
+
+// limit / stop order script state (finance_fixes_test)
+@(private = "file")
+_FF_Order :: struct {
+	id:     int,
+	status: fin.OrderStatus,
+}
+@(private = "file")
+_ff_ord: [6]_FF_Order
+@(private = "file")
+_ff_cancel: [2]bool
+
+@(private = "file")
+_ff_submit :: proc(ctx: ^fin.StrategyContext, o: fin.Order) -> _FF_Order {
+	id, st := fin.context_submit_order(ctx, o)
+	return {id, st}
+}
 
 @(private = "file")
 ff_vec :: proc(v: []f64, grad: bool) -> ^t.Tensor {
@@ -497,6 +522,472 @@ finance_fixes_test :: proc(allocator: mem.Allocator) {
 		)
 		l.matrix_free(&cov)
 		for x in ([][]f64{mv, ms, ra, pr}) {delete(x, allocator)}
+	}
+
+	{ 	// unshifted Sobol' normals skip the origin (QuantLib SobolRsg; scipy points 1..3)
+		z := fin.mc_generate_sobol_normals(3, 3, brownian_bridge = false, allocator = allocator)
+		defer delete(z, allocator)
+		// scipy.stats.norm.ppf(Sobol(3, scramble=False).fast_forward(1).random(3) + 2^-33)
+		ref := [9]f64 {
+			2.918099372916623e-10,
+			2.918099372916623e-10,
+			2.918099372916623e-10,
+			6.744897505624251e-01,
+			-6.744897498297384e-01,
+			-6.744897498297384e-01,
+			-6.744897498297384e-01,
+			6.744897505624251e-01,
+			6.744897505624251e-01,
+		}
+		worst := 0.0
+		for k in 0 ..< 9 {worst = max(worst, abs(z[k] - ref[k]))}
+		zl := fin.mc_generate_sobol_normals(1024, 4, allocator = allocator)
+		defer delete(zl, allocator)
+		lowest := 0.0
+		for v in zl {lowest = min(lowest, v)}
+		s := fin.make_sobol(3, 1, 0, allocator)
+		defer fin.free_sobol(&s, allocator)
+		pt: [3]f64
+		fin.sobol_next(&s, pt[:])
+		// one-step put, 1024 unshifted points: the origin made it +0.0428 too high
+		exact := fin.compute_greeks(100, 100, 1, 0.05, 0.2, .Put).price
+		zp := fin.mc_generate_sobol_normals(1024, 1, allocator = allocator)
+		defer delete(zp, allocator)
+		paths := fin.mc_generate_gbm_paths(100, 0.05, 0.2, 1, 1024, 1, zp, allocator)
+		defer delete(paths, allocator)
+		put := 0.0
+		for p in 0 ..< 1024 {put += max(100 - paths[p * 2 + 1], 0)}
+		put = put / 1024 * math.exp_f64(-0.05)
+		report(
+			fmt.tprintf(
+				"unshifted Sobol' normals start at point 1: first 3 points vs scipy max diff %.1e; lowest z over 1024 paths x 4 steps %.3f (was -6.4 at the origin); make_sobol(skip = 1) starts at %v like QuantLib SobolRsg; 1024-point put error %+.5f",
+				worst,
+				lowest,
+				pt,
+				put - exact,
+			),
+			worst < 1e-12 && lowest > -4 && pt == [3]f64{0.5, 0.5, 0.5} && abs(put - exact) < 0.02,
+			&passed,
+			&total,
+		)
+	}
+
+	{ 	// compute_greeks / price_and_greeks with a dividend yield vs QuantLib AnalyticEuropeanEngine
+		// (BlackScholesMertonProcess with flat dividend curve; vega, rho per 1%, theta per day)
+		Case :: struct {
+			S, K, T, r, q, sigma: f64,
+			opt:                  fin.OptionType,
+			ref:                  [6]f64,
+		}
+		cases := [4]Case {
+			{
+				100,
+				110,
+				1,
+				0.03,
+				0.02,
+				0.25,
+				.Call,
+				{
+					6.404075273732313,
+					0.4061943865601913,
+					0.015280246206286947,
+					0.3820061551571738,
+					-0.013668901555651772,
+					0.3421536338228681,
+				},
+			},
+			{
+				100,
+				110,
+				1,
+				0.03,
+				0.02,
+				0.25,
+				.Put,
+				{
+					15.13321663339267,
+					-0.5740042867465641,
+					0.015280246206286947,
+					0.3820061551571738,
+					-0.010265962064976217,
+					-0.725336453080491,
+				},
+			},
+			{
+				100,
+				95,
+				2,
+				0.01,
+				0.05,
+				0.3,
+				.Call,
+				{
+					14.139444222623252,
+					0.5043882285195465,
+					0.008420001695047146,
+					0.5052001017028289,
+					-0.004465899743744642,
+					0.7259875725866278,
+				},
+			},
+			{
+				100,
+				95,
+				2,
+				0.01,
+				0.05,
+				0.3,
+				.Put,
+				{
+					16.774576383169062,
+					-0.40044918951641295,
+					0.008420001695047146,
+					0.5052001017028289,
+					-0.014309730841110086,
+					-1.1363899066962073,
+				},
+			},
+		}
+		worst := 0.0
+		for c in cases {
+			g := fin.compute_greeks(c.S, c.K, c.T, c.r, c.sigma, c.opt, q = c.q)
+			got := [6]f64{g.price, g.delta, g.gamma, g.vega, g.theta, g.rho}
+			for k in 0 ..< 6 {worst = max(worst, abs(got[k] - c.ref[k]) / max(abs(c.ref[k]), 1e-3))}
+			pr, _ := fin.price_and_greeks(c.S, c.K, c.T, c.r, c.sigma, c.opt, q = c.q)
+			worst = max(worst, abs(pr - g.price) / g.price)
+		}
+		// σ = 0: discounted forward payoff S e^{-qT} - K e^{-rT} = -2.6351321605458082 (put ITM)
+		z := fin.compute_greeks(100, 95, 2, 0.01, 0, .Put, q = 0.05)
+		dq := math.exp_f64(-0.1)
+		zero_ok :=
+			abs(z.price - 2.6351321605458082) < 1e-12 &&
+			abs(z.delta + dq) < 1e-15 &&
+			abs(z.theta + (0.05 * 100 * dq - 0.01 * 95 * math.exp_f64(-0.02)) / 365) < 1e-15
+		report(
+			fmt.tprintf(
+				"compute_greeks with q (4 cases, price and all Greeks) vs QuantLib AnalyticEuropeanEngine: max rel err %.1e; sigma = 0 with q prices the forward (put %.10f)",
+				worst,
+				z.price,
+			),
+			worst < 1e-12 && zero_ok,
+			&passed,
+			&total,
+		)
+	}
+
+	{ 	// finite differences with a dividend yield vs QuantLib FdBlackScholesVanillaEngine:
+		// 2·V(8000 x 8000) − V(4000 x 4000) (its grid error halves with the grid),
+		// put 8.882701964, call 8.407663772; deltas from the 2000 x 2000 grid
+		ap := fin.finite_difference_american(
+			100,
+			100,
+			1,
+			0.05,
+			0.25,
+			.Put,
+			3200,
+			3200,
+			allocator,
+			q = 0.03,
+		)
+		ac := fin.fd_american_call(100, 100, 1, 0.05, 0.25, 3200, 3200, allocator, q = 0.08)
+		ec := fin.crank_nicolson_call(100, 90, 1, 0.02, 0.3, 3200, 3200, allocator, q = 0.04)
+		ac0 := fin.fd_american_call(100, 100, 1, 0.05, 0.25, 800, 800, allocator)
+		eu0 := fin.compute_greeks(100, 100, 1, 0.05, 0.25, .Call).price
+		eq := fin.compute_greeks(100, 100, 1, 0.05, 0.25, .Call, q = 0.08).price
+		e_ap, e_ac := abs(ap.price - 8.882701964), abs(ac.price - 8.407663772)
+		e_ec := abs(ec.price - 15.356039698298112) // analytic BSM
+		e_d := max(abs(ap.delta + 0.424326676484122), abs(ac.delta - 0.49820850916592013))
+		report(
+			fmt.tprintf(
+				"finite differences with q, 3200 x 3200: American put q = 3%% %.6f (QuantLib 8.882702), American call q = 8%% %.6f (8.407664, European %.6f), Crank-Nicolson European call q = 4%% %.6f (analytic 15.356040); errors %.1e / %.1e / %.1e, deltas %.1e; q = 0 call stays European (%.1e)",
+				ap.price,
+				ac.price,
+				eq,
+				ec.price,
+				e_ap,
+				e_ac,
+				e_ec,
+				e_d,
+				abs(ac0.price - eu0),
+			),
+			e_ap < 5e-5 &&
+			e_ac < 5e-5 &&
+			e_ec < 1e-5 &&
+			e_d < 1e-4 &&
+			ac.price > eq + 0.1 &&
+			abs(ac0.price - eu0) < 1e-3,
+			&passed,
+			&total,
+		)
+	}
+
+	{ 	// Longstaff-Schwartz with a dividend yield vs QuantLib Bermudan (73 dates, FD 2000 x 1000)
+		lp := fin.lsm_american_vanilla_reduced(
+			100,
+			105,
+			1,
+			0.05,
+			0.3,
+			.Put,
+			100_000,
+			73,
+			73,
+			3,
+			allocator,
+			q = 0.03,
+		)
+		lc := fin.lsm_american_vanilla_reduced(
+			100,
+			95,
+			1,
+			0.03,
+			0.3,
+			.Call,
+			100_000,
+			73,
+			73,
+			3,
+			allocator,
+			q = 0.07,
+		)
+		lw := fin.lsm_american_call(100, 95, 1, 0.03, 0.3, 20_000, 73, 73, 3, allocator, q = 0.07)
+		e_p, e_c := lp.price - 13.577545310054507, lc.price - 12.24653647239092
+		report(
+			fmt.tprintf(
+				"Longstaff-Schwartz with q: Bermudan put q = 3%% %.4f (QuantLib 13.5775), Bermudan call q = 7%% %.4f (12.2465, European 11.5863; wrapper %.4f): errors %+.4f / %+.4f",
+				lp.price,
+				lc.price,
+				lw.price,
+				e_p,
+				e_c,
+			),
+			abs(e_p) < 0.04 && abs(e_c) < 0.04 && abs(lw.price - 12.24653647239092) < 0.15,
+			&passed,
+			&total,
+		)
+	}
+
+	{ 	// limit and stop orders: pending (good till cancelled), filled at the first
+		// close meeting the trigger, cancellable; rejected orders are reported
+		prices := [8]f64{100, 98, 96, 99, 103, 105, 101, 97}
+		df := w.dataframe_new()
+		defer w.destroy_dataframe(&df)
+		col := w.column_new("A", .Float, len(prices))
+		for v in prices {w.append_float(&col, v)}
+		w.add_column(&df, col)
+		df.rows = len(prices)
+		script :: proc(ctx: ^fin.StrategyContext) {
+			o :: proc(side: fin.OrderSide, qty: f64, kind: fin.OrderType, px: f64) -> fin.Order {
+				return {
+					symbol = "A",
+					side = side,
+					quantity = qty,
+					order_type = kind,
+					limit_price = px if kind == .Limit else 0,
+					stop_price = px if kind == .Stop else 0,
+				}
+			}
+			switch ctx.current_bar {
+			case 0:
+				_ff_ord[0] = _ff_submit(ctx, o(.Buy, 10, .Limit, 97)) // rests
+				_ff_ord[1] = _ff_submit(ctx, o(.Buy, 5, .Stop, 104)) // rests
+				_ff_ord[2] = _ff_submit(ctx, o(.Buy, 1, .Limit, 101)) // marketable
+				_ff_ord[3] = _ff_submit(ctx, o(.Buy, 1, .Limit, 0)) // no limit
+			case 2:
+				_ff_ord[4] = _ff_submit(ctx, o(.Sell, 10, .Stop, 95)) // stop loss
+			case 5:
+				_ff_cancel[0] = fin.context_cancel_order(ctx, _ff_ord[4].id)
+				_ff_cancel[1] = fin.context_cancel_order(ctx, _ff_ord[4].id)
+				_ff_ord[5] = _ff_submit(ctx, o(.Sell, 5, .Limit, 110)) // never fills
+			}
+		}
+		cfg := fin.BacktestConfig {
+			initial_capital = 10_000,
+			commission_rate = 0.001,
+			slippage_rate   = 0.002,
+		}
+		res := fin.backtest_run(&df, []string{"A"}, script, cfg, allocator)
+		defer {delete(res.equity_curve, allocator); delete(res.trades, allocator)}
+		want_id := [3]int{3, 1, 2}
+		want_bar := [3]int{0, 2, 5}
+		want_px := [3]f64{100 * 1.002, 96 * 1.002, 105 * 1.002}
+		fills_ok := len(res.trades) == 3
+		cash := 10_000.0
+		if fills_ok {
+			for tr, k in res.trades {
+				fills_ok &&=
+					tr.order_id == want_id[k] &&
+					tr.fill_time == want_bar[k] &&
+					abs(tr.fill_price - want_px[k]) < 1e-12
+				cash -= tr.order.quantity * tr.fill_price * 1.001
+			}
+		}
+		st_ok :=
+			_ff_ord[0].status == .Pending &&
+			_ff_ord[1].status == .Pending &&
+			_ff_ord[2].status == .Filled &&
+			_ff_ord[3] == _FF_Order{0, .Rejected} &&
+			_ff_ord[4].status == .Pending &&
+			_ff_ord[5] == _FF_Order{5, .Pending} &&
+			_ff_cancel == [2]bool{true, false}
+		final := res.equity_curve[len(prices) - 1]
+		report(
+			fmt.tprintf(
+				"limit / stop orders on closes 100 98 96 99 103 105 101 97: buy limit 97 fills at 96 on bar 2, buy stop 104 at 105 on bar 5, marketable limit at once, sell stop cancelled, limit without a price rejected, %d order left open; equity %.4f (expected %.4f)",
+				res.open_orders,
+				final,
+				cash + 16 * 97,
+			),
+			fills_ok && st_ok && res.open_orders == 1 && abs(final - (cash + 16 * 97)) < 1e-9,
+			&passed,
+			&total,
+		)
+	}
+
+	{ 	// VaR / ES are positive loss magnitudes everywhere; value_at_risk(.GARCH) is a
+		// GARCH(1,1) one-step forecast (arch 8.0: mean='Zero' on the demeaned returns,
+		// normal errors); GARCH backtests are out of sample
+		n := 2000
+		r := make([]f64, n, allocator)
+		defer delete(r, allocator)
+		{
+			// GARCH(1,1) ω 2e-6, α 0.08, β 0.9, μ 0.0005 driven by splitmix64 normals
+			state: u64 = 42
+			s2 := 2e-6 / 0.02
+			for i in 0 ..< n {
+				state += 0x9E3779B97F4A7C15
+				x := state
+				x = (x ~ (x >> 30)) * 0xBF58476D1CE4E5B9
+				x = (x ~ (x >> 27)) * 0x94D049BB133111EB
+				x ~= x >> 31
+				u := (f64(x >> 11) + 0.5) * 1.1102230246251565e-16 // 2^-53
+				e := math.sqrt(s2) * fin.norm_inv(u)
+				r[i] = 0.0005 + e
+				s2 = 2e-6 + 0.08 * e * e + 0.9 * s2
+			}
+		}
+		h95, h99 := fin.var_historical(r, 0.95), fin.var_historical(r, 0.99)
+		p95 := fin.var_parametric(r, 0.95)
+		e95 := fin.conditional_var(r, 0.95)
+		g95 := fin.value_at_risk(r, 0.95, .GARCH)
+		g99 := fin.value_at_risk(r, 0.99, .GARCH)
+		dm := fin.compute_distribution_metrics(r, allocator)
+		ev := fin.evt_fit(r, 0.90, allocator)
+		rm := fin.calculate_risk_metrics(r)
+		signs_ok :=
+			abs(h95 - 0.015554061056235777) < 1e-15 &&
+			abs(h99 - 0.024181792528183203) < 1e-15 &&
+			abs(p95 - 0.015519341566472802) < 1e-14 &&
+			e95 > h95 &&
+			fin.expected_shortfall(r, 0.95) == e95 &&
+			fin.portfolio_cvar_historical(r, 0.95) == e95 &&
+			dm.value_at_risk_95 == h95 &&
+			dm.expected_shortfall_95 > 0 &&
+			rm.var_95 == h95 &&
+			rm.cvar_95 == e95 &&
+			ev.var_99 > 0 &&
+			ev.cvar_99 > ev.var_99 &&
+			fin.var_garch_single(1e-4, 0.99) > 0 &&
+			fin.ged_cvar(0.99, 1.5) > 0
+		g_ok :=
+			abs(g95 / 0.011344989781115655 - 1) < 1e-3 &&
+			abs(g99 / 0.016295728191681808 - 1) < 1e-3
+
+		// Out-of-sample backtests: parameters from the first half only. Changing the
+		// test half leaves the fit and σ_t up to the first test day unchanged.
+		half := n / 2
+		o := fin.garch_out_of_sample(r, half, allocator = allocator)
+		defer fin.free_garch_out_of_sample(&o, allocator)
+		r2 := make([]f64, n, allocator)
+		defer delete(r2, allocator)
+		copy(r2, r)
+		for &v in r2[half:] {v *= 3}
+		o2 := fin.garch_out_of_sample(r2, half, allocator = allocator)
+		defer fin.free_garch_out_of_sample(&o2, allocator)
+		gm := fin.garch_risk_metrics(r, allocator = allocator)
+		v99 := fin.var_garch(o.cond_var[half:], 0.99, allocator = allocator)
+		defer delete(v99, allocator)
+		bt := fin.backtest_var(r[half:], v99, 0.99)
+		oos_ok :=
+			o2.fit.params.omega == o.fit.params.omega &&
+			o2.cond_var[half] == o.cond_var[half] &&
+			o2.cond_var[half + 1] != o.cond_var[half + 1] &&
+			gm.backtest_start == half &&
+			gm.backtest_99 == bt &&
+			gm.backtest_99.n_obs == half
+		report(
+			fmt.tprintf(
+				"VaR as positive losses: historical 95%% %.6f, parametric %.6f, ES %.6f, EVT 99%% %.6f / %.6f; value_at_risk(.GARCH) 95%% %.6f / 99%% %.6f vs arch GARCH(1,1) %.6f / %.6f; out-of-sample GARCH backtest on the second half: %d breaches of 99%% VaR in %d (fit unchanged when the test half is scaled x3)",
+				h95,
+				p95,
+				e95,
+				ev.var_99,
+				ev.cvar_99,
+				g95,
+				g99,
+				0.011344989781115655,
+				0.016295728191681808,
+				gm.backtest_99.n_breaches,
+				gm.backtest_99.n_obs,
+			),
+			signs_ok && g_ok && oos_ok,
+			&passed,
+			&total,
+		)
+	}
+
+	{ 	// CDS rpv01 on the notional; PDPM payoffs without dead arguments; free procs
+		tenors := []f64{1, 3, 5, 7, 10}
+		spreads := []f64{0.0060, 0.0085, 0.0110, 0.0125, 0.0135}
+		curve := fin.bootstrap_cds_curve(tenors, spreads, 0.4, 0.03, 0.25, allocator)
+		defer {delete(curve.tenors, allocator); delete(curve.hazards, allocator)}
+		a := fin.price_cds_full(1e6, 0.01, 5, curve, 0.25)
+		b := fin.price_cds_full(1e7, 0.01, 5, curve, 0.25)
+		cds_ok :=
+			abs(b.rpv01 / a.rpv01 - 10) < 1e-12 &&
+			abs(b.rpv01 - b.premium_leg_pv / 0.01 * 1e-4) < 1e-6 &&
+			abs(a.rpv01 - 445.7024158) < 1e-6
+
+		R := []f64{-0.08, -0.03, 0.0, 0.02, 0.05, 0.09}
+		ST := make([]f64, len(R), allocator)
+		defer delete(ST, allocator)
+		for x, i in R {ST[i] = 100 * (1 + x)}
+		sdf := fin.sdf_linear_factor(R, 0.01, allocator)
+		c := fin.price_european_call(100, &sdf, ST, allocator)
+		pay := make([]f64, len(R), allocator)
+		defer delete(pay, allocator)
+		for s, i in ST {pay[i] = max(s - 100, 0)}
+		ref := fin.price_payoff(pay, &sdf, nil, allocator)
+		pdpm_ok := c.price == ref.price && c.risk_premium == ref.risk_premium
+		fin.free_pdpm_result(&c, allocator)
+		fin.free_pdpm_result(&ref, allocator)
+		fin.free_stochastic_discount_factor(&sdf, allocator)
+		md := fin.load_market_data("data/spy_prices.csv", allocator)
+		oc := fin.load_option_chain("data/spy_options.csv", md.dates[md.n_obs - 1], allocator)
+		types_ok :=
+			oc.n_options > 0 && (oc.option_types[0] == "call" || oc.option_types[0] == "put")
+		fin.free_option_chain(&oc, allocator)
+		fin.free_market_data(&md, allocator)
+		free_ok :=
+			c.state_prices == nil &&
+			sdf.values == nil &&
+			sdf.parameters == nil &&
+			oc.strikes == nil &&
+			oc.n_options == 0 &&
+			md.prices == nil &&
+			md.n_obs == 0
+		report(
+			fmt.tprintf(
+				"CDS rpv01 scales with the notional (1M %.4f, 10M %.4f); price_european_call(K, sdf, S_T) = price_payoff; free_pdpm_result / free_stochastic_discount_factor / free_option_chain / free_market_data release and zero",
+				a.rpv01,
+				b.rpv01,
+			),
+			cds_ok && pdpm_ok && types_ok && free_ok,
+			&passed,
+			&total,
+		)
 	}
 
 	{ 	// a batch of options (last: it used to panic)

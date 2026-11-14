@@ -160,11 +160,11 @@ svd_jacobi :: proc(
 }
 
 // ============================================================================
-// Symmetric Jacobi eigen - original working version + idiomatic Odin
+// Symmetric Jacobi eigen (cyclic Jacobi, SIMD rotations of the eigenvectors)
 // ============================================================================
-// ============================================================================
-// Symmetric Jacobi eigen - SIMD-optimized version
-// ============================================================================
+// Eigenvalues (unsorted, in diagonal order) and eigenvectors (columns) of a
+// symmetric matrix. Works on a copy: A is not modified. A is assumed symmetric
+// (not checked); use eigh for a checked, sorted decomposition.
 jacobi_eigen_symmetric :: proc(
 	A: ^Matrix(f64),
 	allocator: mem.Allocator = context.allocator,
@@ -176,6 +176,22 @@ jacobi_eigen_symmetric :: proc(
 	if n == 0 || A.cols != n {
 		panic("jacobi_eigen_symmetric: matrix must be square")
 	}
+	work := matrix_new(f64, n, n, allocator)
+	defer matrix_free(&work)
+	copy(work.data, A.data[:n * n])
+	return _jacobi_eigen_inplace(&work, allocator)
+}
+
+// Jacobi on A itself: A ends up (numerically) diagonal
+@(private)
+_jacobi_eigen_inplace :: proc(
+	A: ^Matrix(f64),
+	allocator: mem.Allocator,
+) -> (
+	eigenvalues: []f64,
+	eigenvectors: Matrix(f64),
+) {
+	n := A.rows
 
 	// V = I
 	eigenvectors = matrix_new(f64, n, n, allocator)
@@ -336,4 +352,43 @@ svd :: proc(
 		return svd_golub_reinsch(A, allocator)
 	}
 	return svd_jacobi(A, allocator)
+}
+
+// Moore-Penrose pseudo-inverse A⁺ (n × m for an m × n A) from the Jacobi SVD:
+// A⁺ = V diag(1/σ) Uᵀ over the singular values σ > rtol · σ_max; the others
+// count as zero. rtol < 0 (default) uses max(m, n) · 1e-12, the cutoff of
+// lstsq(.SVD). For a non-singular square A this is A⁻¹. An empty A gives an
+// empty n × m result.
+pinv :: proc(
+	A: ^Matrix(f64),
+	rtol: f64 = -1,
+	allocator: mem.Allocator = context.allocator,
+) -> Matrix(f64) {
+	m, n := A.rows, A.cols
+	if m == 0 || n == 0 {return matrix_new(f64, n, m, allocator)}
+	if m < n { 	// wide: pinv(A) = pinv(Aᵀ)ᵀ
+		At := matrix_transpose(A, allocator)
+		defer matrix_free(&At)
+		P := pinv(&At, rtol, allocator)
+		defer matrix_free(&P)
+		return matrix_transpose(&P, allocator)
+	}
+
+	U, S, V := svd_jacobi(A, allocator) // U m × n, V n × n, S descending
+	defer matrix_free(&U)
+	defer delete(S, allocator)
+	defer matrix_free(&V)
+	tol := (rtol if rtol >= 0 else f64(max(m, n)) * 1e-12) * S[0]
+
+	out := matrix_new(f64, n, m, allocator)
+	for k in 0 ..< n {
+		if !(S[k] > tol) {continue}
+		inv := 1.0 / S[k]
+		for i in 0 ..< n {
+			vik := V.data[i * V.cols + k] * inv
+			if vik == 0 {continue}
+			for j in 0 ..< m {out.data[i * m + j] += vik * U.data[j * U.cols + k]}
+		}
+	}
+	return out
 }
