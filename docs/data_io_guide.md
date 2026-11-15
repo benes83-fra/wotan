@@ -58,7 +58,7 @@ Empty fields and the tokens `NA`, `null` and `None` become nulls.
 
 **Ownership.** A loader returns a DataFrame that you free with `w.destroy_dataframe`. The DataFrame owns its column names and string values; it doesn't point into the file buffer or the temp allocator.
 
-**Failure.** File loaders panic when a file cannot be read or doesn't parse. The exception is `xlsx_load`, which returns an empty DataFrame. Everything that goes over the network returns `(value, ok)` instead, with `ok` false when the request fails or brings no data. Network failures are normal (rate limits, outages), so they are reported, not fatal.
+**Failure.** File loaders panic when a file cannot be read or doesn't parse; the panic message names the loader and the file. A sheet name that the workbook doesn't have is not an error: `xlsx_load_sheet` returns `found = false`. Everything that goes over the network returns `(value, ok)` instead, with `ok` false when the request fails or brings no data. Network failures are normal (rate limits, outages), so they are reported, not fatal.
 
 ## 3. CSV
 
@@ -167,7 +167,7 @@ tables: 3
 
 ## 6. Excel
 
-`xlsx_load(path, alloc)` reads the first worksheet of an `.xlsx` workbook, and `xlsx_load_sheet(path, name, alloc)` reads a worksheet by name and returns `(df, found)`. `xlsx_sheet_names(path, alloc)` lists the worksheets in workbook order; free each name and the slice.
+`xlsx_load(path, alloc)` reads the first worksheet of an `.xlsx` workbook, and `xlsx_load_sheet(path, name, alloc)` reads a worksheet by name and returns `(df, found)`. `xlsx_sheet_names(path, alloc)` lists the worksheets in workbook order; free each name and the slice. All three panic when the file is missing or is not an `.xlsx` workbook.
 
 The first row is the header. Cells are read with their Excel types: numbers, booleans, shared and inline strings, rich text, and errors (read as nulls). A number whose cell style is a date or time format becomes a `Date`, `Time` or `Datetime`. A custom format such as `#,##0 "USD"` is not mistaken for a date.
 

@@ -13,8 +13,8 @@ import "core:os"
 
 // Offline regression checks for the data I/O fixes (docs/data_io_guide.md, section 10):
 // Yahoo chart parsing (nested adjclose, nulls, several dividends), Yahoo_Series,
-// returns from prices, column names that outlive the importer's temp buffers, and
-// exporters that free their cell texts.
+// returns from prices, column names that outlive the importer's temp buffers,
+// exporters that free their cell texts, and the xlsx loaders' failure contract.
 
 // The shape of a Yahoo chart answer: the adjusted closes are nested in an object
 // with the same key, day 3 (2024-01-04) has no quote, there are two dividends.
@@ -246,6 +246,28 @@ data_io_fixes_test :: proc(allocator: mem.Allocator) {
 			fmt.tprintf(
 				"csv / json / jsonl / html / xlsx writers leave %d allocations",
 				len(track.allocation_map),
+			),
+		)
+	}
+
+	// 6. xlsx: an unknown sheet name is reported, not fatal. (A missing file or a
+	// file that is not a workbook panics, like the other file loaders; a panic
+	// cannot be checked in-process.)
+	{
+		df, found := io.xlsx_load_sheet("demo_files/example.xlsx", "no such sheet", allocator)
+		defer w.destroy_dataframe(&df)
+		first := io.xlsx_load("demo_files/example.xlsx", allocator)
+		defer w.destroy_dataframe(&first)
+		names := io.xlsx_sheet_names("demo_files/example.xlsx", allocator)
+		defer {for n in names {delete(n, allocator)}; delete(names, allocator)}
+		expect(
+			&passed,
+			&total,
+			!found && df.rows == 0 && first.rows > 0 && len(names) > 0,
+			fmt.tprintf(
+				"xlsx: unknown sheet -> found = false; first sheet %d rows; sheets %v",
+				first.rows,
+				names,
 			),
 		)
 	}

@@ -65,6 +65,15 @@ investor_sentiment_reference_test :: proc(allocator: mem.Allocator) {
 		return
 	}
 	defer os.remove(XLSX)
+	// the loader panics on a file that is not a workbook (an error page, say)
+	head, read_err := os.read_entire_file(XLSX, context.temp_allocator)
+	if read_err != nil || len(head) < 4 || string(head[:4]) != "PK\x03\x04" {
+		fail_missing_data(
+			#procedure,
+			"Wurgler's SENTIMENT.xlsx (download is not an .xlsx workbook)",
+		)
+		return
+	}
 	df, found := importer.xlsx_load_sheet(XLSX, "DATA", allocator)
 	defer w.destroy_dataframe(&df)
 	if !found || df.rows < 600 {

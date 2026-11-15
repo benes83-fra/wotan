@@ -126,7 +126,7 @@ The linear algebra guide is for when you need matrices directly. Most packages t
 
 **Graph scopes.** Tensor operations allocate their outputs in the active `Graph_Scope`: one arena per forward and backward pass. `graph_end` frees the whole graph at once. Parameters live outside the scope and survive it. Copy out any value you need before `graph_end`. The [tensor guide](tensor_guide.md#11-memory-management-and-graph-scopes) explains the details. Some models own a scope and use it in their training procedures; the guides show which.
 
-**Failure.** Network calls such as `net.read_yahoo` return `(value, ok)`, with `ok` false when a request fails or returns no data. The file loaders panic when a file cannot be read, except `xlsx_load`, which returns an empty DataFrame. Numerical procedures return NaN when a result is undefined, for example a correlation from one component, and the guides say where that happens. Many procedures check their inputs, such as matching lengths, with an `assert` that names the procedure.
+**Failure.** Network calls such as `net.read_yahoo` return `(value, ok)`, with `ok` false when a request fails or returns no data. The file loaders panic when a file cannot be read. Numerical procedures return NaN when a result is undefined, for example a correlation from one component, and the guides say where that happens. Many procedures check their inputs, such as matching lengths, with an `assert` that names the procedure.
 
 **Randomness.** Procedures that sample use Odin's global generator. Call `rand.reset(seed)` first for reproducible results. The guides' examples do.
 
