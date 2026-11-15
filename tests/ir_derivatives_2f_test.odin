@@ -480,7 +480,7 @@ bermudan_swaption_test :: proc(allocator: mem.Allocator) {
 		delta,
 		params_1f_mc,
 		20000,
-		allocator,
+		allocator = allocator,
 	)
 
 	price_2f := fin.hw2f_mc_bermudan_option(
@@ -491,7 +491,7 @@ bermudan_swaption_test :: proc(allocator: mem.Allocator) {
 		delta,
 		params_2f,
 		20000,
-		allocator,
+		allocator = allocator,
 	)
 
 	fmt.println("----------------------------------------------------------------------")

@@ -6,7 +6,9 @@ package tests
 import w "../wotan/core"
 import fin "../wotan/finance"
 import "core:fmt"
+import "core:math"
 import "core:mem"
+import "core:slice"
 
 @(private = "file")
 DI_PILLAR := [?]i32 {
@@ -955,6 +957,26 @@ _di_date :: proc(serial: i32) -> w.Date {
 @(private = "file")
 _DI_CALS := [5]fin.Calendar{{}, {.Weekends}, {.TARGET}, {.US_Settlement}, {.US_Government_Bond}}
 
+// QuantLib 1.44 OvernightIndexedSwap: payer 10M, 3Y annual from 2 Mar 2026, 2%, spread 10bp, payment lag 1,
+// valued 11 Nov 2026 on a ZeroCurve (linear zeros [0.0195, 0.021, 0.0225, 0.0235, 0.025] at [0.5, 1, 2, 3, 5] y, continuous, Act/365F);
+// fixings 0.019 + 0.002 sin(i/17) on the i-th TARGET business day from 2 Feb 2026
+// {lookback, lockout, shift, today fixing, fixed leg, float leg, npv}
+@(private = "file")
+DI_OIS_SEASONED := [?][7]f64 {
+	{0, 0, 0, 0, -591610.6911340796, 676701.5987279098, 85090.90759383026},
+	{2, 0, 0, 0, -591610.6911340796, 676552.8395389982, 84942.14840491861},
+	{2, 0, 1, 0, -591610.6911340796, 676448.6296313386, 84837.93849725905},
+	{0, 2, 0, 0, -591610.6911340796, 676700.4026294594, 85089.7114953798},
+	{2, 3, 1, 0, -591610.6911340796, 676442.8418901911, 84832.15075611148},
+	{5, 0, 0, 0, -591610.6911340796, 675973.0274368833, 84362.33630280371},
+	{0, 0, 0, 1, -591610.6911340796, 676652.3463021398, 85041.65516806021},
+	{2, 0, 0, 1, -591610.6911340796, 676405.0953132346, 84794.40417915501},
+	{2, 0, 1, 1, -591610.6911340796, 676399.3763572603, 84788.68522318068},
+	{0, 2, 0, 1, -591610.6911340796, 676651.1502041111, 85040.45907003153},
+	{2, 3, 1, 1, -591610.6911340796, 676393.5886161149, 84782.89748203533},
+	{5, 0, 0, 1, -591610.6911340796, 675923.7733261483, 84313.08219206869},
+}
+
 dated_instruments_reference_test :: proc(allocator: mem.Allocator) {
 	seed_test(#procedure)
 	fmt.println(
@@ -1322,6 +1344,61 @@ dated_instruments_reference_test :: proc(allocator: mem.Allocator) {
 				"€STR curves with 2-day lookback and payment lag 2, with and without observation shift, vs QuantLib OISRateHelper: pillar dates %v, max zero-rate diff %.1e",
 				pillars_ok,
 				worst_z,
+			),
+		)
+	}
+
+	// 10. Seasoned overnight swaps with past daily fixings (overnight_fixings):
+	// plain, lookback 2 (with / without shift), lockout 2, lookback 2 +
+	// lockout 3 + shift, lookback 5; without and with a fixing on the
+	// reference date; a missing past fixing gives NaN
+	{
+		today := w.Date{2026, 11, 11}
+		curve := fin.YieldCurve {
+			reference_date = today,
+			tenors         = []f64{182.0 / 365, 1, 2, 3, 5},
+			zero_rates     = []f64{0.0195, 0.021, 0.0225, 0.0235, 0.025},
+			interpolation  = .LinearZero,
+		}
+		fixings := make([dynamic]fin.Overnight_Fixing, 0, 220, allocator)
+		i := 0
+		for d := (w.Date{2026, 2, 2});
+		    !w.date_less(today, d);
+		    d = fin.calendar_advance({.TARGET}, d, 1, .Days) {
+			append(&fixings, fin.Overnight_Fixing{d, 0.019 + 0.002 * math.sin(f64(i) / 17.0)})
+			i += 1
+		}
+		worst := 0.0
+		for v in DI_OIS_SEASONED {
+			c := ois_conv
+			c.lookback_days, c.lockout_days, c.observation_shift = int(v[0]), int(v[1]), v[2] != 0
+			sw := fin.make_dated_swap(c, {2026, 3, 2}, {3, .Years}, 0.02, 10e6, .Payer, 0.001)
+			defer fin.free_dated_swap(&sw)
+			sw.overnight_fixings = fixings[:] if v[3] != 0 else fixings[:len(fixings) - 1]
+			r := fin.price_dated_swap(sw, &curve)
+			e :=
+				max(abs(r.pv_fixed_leg + v[4]), abs(r.pv_floating_leg - v[5]), abs(r.npv - v[6])) /
+				1e7
+			worst = max(worst, e) if !math.is_nan(e) else math.inf_f64(1)
+		}
+		// a fixing missing in the coupon in progress
+		c := ois_conv
+		c.lookback_days = 2
+		sw := fin.make_dated_swap(c, {2026, 3, 2}, {3, .Years}, 0.02, 10e6, .Payer, 0.001)
+		defer fin.free_dated_swap(&sw)
+		gap := slice.clone_to_dynamic(fixings[:], allocator)
+		ordered_remove(&gap, 150)
+		sw.overnight_fixings = gap[:]
+		missing := fin.price_dated_swap(sw, &curve).npv
+		expect(
+			&passed,
+			&total,
+			worst < 1e-12 && math.is_nan(missing),
+			fmt.tprintf(
+				"seasoned 3Y €STR swaps with %d past fixings (plain, lookback 2 ± shift, lockout 2, lookback 2 + lockout 3 + shift, lookback 5; today's fixing absent / present) vs QuantLib OvernightIndexedSwap: legs and NPV max rel diff %.1e; a missing past fixing gives %v",
+				len(fixings),
+				worst,
+				missing,
 			),
 		)
 	}

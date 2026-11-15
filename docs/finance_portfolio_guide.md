@@ -116,10 +116,11 @@ When rf is at or above the minimum-variance portfolio's return (3.27% here), no 
 
 ## 3. Constrained portfolios
 
-`PortfolioConstraints` describes a convex feasible set; weights always sum to 1:
+`PortfolioConstraints` describes the feasible set; weights always sum to 1:
 - `no_short_selling`: w ≥ 0;
-- `max_weight` and `min_weight`: per-asset bounds, with 0 meaning no limit. `min_weight` applies to every asset, as there is no "only if held";
-- `group_limits`: a list of `GroupLimit{asset_indices, max_weight}`, capping the sum of a group's weights.
+- `max_weight` and `min_weight`: per-asset bounds, with 0 meaning no limit;
+- `min_weight_if_held`: `min_weight` applies only to the assets held, so each weight is 0 or at least `min_weight` (see below);
+- `group_limits`: a list of `GroupLimit{asset_indices, max_weight, min_weight}`, bounding the sum of a group's weights from above and below. A 0 means no limit on that side.
 
 The optimizers minimize their objective by spectral projected gradient: Barzilai–Borwein steps with a non-monotone line search. Every step is projected exactly onto the feasible set. Variance and the utility are convex, and the negative Sharpe ratio is pseudoconvex where the excess return is positive, so a stationary point is the global optimum. The procedures:
 
@@ -130,7 +131,7 @@ The optimizers minimize their objective by spectral projected gradient: Barzilai
 | `constrained_mean_variance_portfolio(mu, &cov, target, c)` | min wᵀΣw with wᵀμ = target, met exactly |
 | `constrained_risk_aversion_portfolio(mu, &cov, gamma, c)` | max wᵀμ − (γ/2) wᵀΣw |
 | `constrained_minimize(n, f, grad, user, c, init = nil)` | any objective with its gradient; global for convex f |
-| `project_constraints(v, c)`, `enforce_constraints` | the nearest feasible weights, by Dykstra's alternating projections onto the box, the budget and the group limits |
+| `project_constraints(v, c)`, `enforce_constraints` | the nearest feasible weights, by Dykstra's alternating projections onto the box, the budget and the group limits (with `min_weight_if_held`, by branch and bound) |
 
 Each takes `allocator` and accepts `max_iter` and `tol`.
 
@@ -175,6 +176,34 @@ Binding constraints are hit exactly:
 
 SciPy's SLSQP (best of 20 starts) gives the same weights to 6 decimals.
 
+Groups can have a lower limit too, and `min_weight_if_held` turns `min_weight` into a minimum position size: each weight is either 0 or at least `min_weight`. That set is not convex, so the optimizers then search over which assets are held, by branch and bound. Each node fixes some assets out (w = 0) and others in (w ≥ `min_weight`). It solves the convex relaxation, whose value bounds every portfolio below it, and branches on an asset strictly between 0 and `min_weight`. The result is the global optimum for the convex objectives, at most 20 000 nodes. `project_constraints` searches the same way for the nearest such portfolio. `risk_parity_portfolio` holds every asset, so for it `min_weight` stays a plain lower bound.
+
+```odin
+// a lower group limit: equities (2, 3, 4) at least 55%; then, in addition,
+// every position either 0 or at least 10%
+c3 := c
+c3.group_limits = []fin.GroupLimit {
+	{asset_indices = []int{0, 1}, max_weight = 0.5},
+	{asset_indices = []int{2, 3, 4}, min_weight = 0.55},
+}
+gmin := fin.constrained_min_variance_portfolio(&cov, c3, context.allocator)
+defer delete(gmin)
+c3.min_weight, c3.min_weight_if_held = 0.10, true
+held := fin.constrained_min_variance_portfolio(&cov, c3, context.allocator)
+defer delete(held)
+for name, k in ([]string{"equities >= 55%", "and 0 or >= 10%"}) {
+	wts := ([][]f64{gmin, held})[k]
+	fmt.printf("min variance, %-16s %.6f  vol %.6f\n", name, wts, fin.portfolio_metrics(wts, mu, &cov, 0.02).volatility)
+}
+```
+
+```
+min variance, equities >= 55%  [0.400000, 0.050000, 0.400000, 0.150000, 0.000000]  vol 0.084908
+min variance, and 0 or >= 10%  [0.350000, 0.100000, 0.400000, 0.150000, 0.000000]  vol 0.085387
+```
+
+The equities' lower limit binds at exactly 55%. The relaxed portfolio holds 5% of the second bond. With a 10% minimum, holding it at 10% (and less of the first bond) beats dropping it. SciPy's SLSQP, run on every one of the 31 possible sets of held assets, finds the same portfolio.
+
 A custom objective needs a value and a gradient. The example below minimizes tracking error to an equal-weight benchmark, with each asset at most 30% and the equities at most 50%. Both the value and the gradient are scaled by 100, because `tol` applies to the projected-gradient step and the objective should be of order 1.
 
 ```odin
@@ -214,7 +243,7 @@ The building blocks are public:
 - `portfolio_variance` and `portfolio_variance_gradient`;
 - `negative_sharpe` and `negative_sharpe_gradient`;
 - `project_simplex` (the probability simplex);
-- `project_box` and `project_groups`. These are simple clips that don't keep Σw = 1.
+- `project_box` and `project_groups`. These are simple clips that don't keep Σw = 1; `project_groups` scales a group above its upper limit down, and raises one below its lower limit equally.
 
 ## 4. Black–Litterman
 
@@ -546,7 +575,7 @@ The 60-day windows start on day 59, while the EWMA volatility needs only 20 days
 | Test | Compares |
 |---|---|
 | `portfolio_reference_test` | closed-form portfolios and the frontier |
-| `constraints_reference_test`, `optimizers_reference_test` | constrained portfolios and projections against SciPy |
+| `constraints_reference_test`, `optimizers_reference_test` | constrained portfolios and projections against SciPy, including group lower limits and minimum position sizes (against an exhaustive search over the assets held) |
 | `black_litterman_hrp_reference_test`, `hrp_test` | Black–Litterman, including Idzorek confidences; hierarchical risk parity |
 | `risk_portfolio_reference_test` | CVaR estimators and gradients, minimum CVaR, risk parity |
 | `factors_reference_test`, `factor_model_test`, `factor_analysis_test` | principal-axis factoring, varimax, scores, factor model covariance |
@@ -567,8 +596,6 @@ The 60-day windows start on day 59, while the EWMA volatility needs only 20 days
 | rolling Sharpe, beta, volatility, EWMA volatility | pandas | 1e-15 relative |
 
 **Known limitations:**
-- **Group limits.** Group limits are upper limits only.
-- **min_weight.** `min_weight` applies to every asset; there is no "if held".
 - **Long-only results.** `risk_parity_portfolio` is long-only, and `efficient_frontier` stops at the highest single-asset return.
 
 ## 11. Quick reference

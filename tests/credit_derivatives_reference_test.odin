@@ -232,6 +232,68 @@ credit_derivatives_reference_test :: proc(allocator: mem.Allocator) {
 		)
 	}
 
+	// 6. Heterogeneous pool (CDO_Params.names): 40 names with different sizes,
+	// hazards, recoveries and correlations vs the exact conditional expectation
+	// (loss distribution by recursion on a common loss unit, integrated over the
+	// factor; cdo_het_exact.py)
+	{
+		names: [40]fin.CDO_Name
+		for &nm, i in names {
+			nm = fin.CDO_Name {
+				notional = 1 + f64(i % 2),
+				lambda   = 0.005 + 0.045 * f64(i) / 39,
+				recovery = 0.25 if i % 3 == 0 else 0.4,
+				rho      = 0.2 if i % 4 < 2 else 0.35,
+			}
+		}
+		c := fin.CDO_Params {
+			r            = 0.03,
+			maturity     = 5,
+			payment_freq = 0.25,
+			names        = names[:],
+		}
+		tr := [3]fin.CDO_Tranche {
+			{"equity", 0.0, 0.03},
+			{"mezz", 0.03, 0.07},
+			{"senior", 0.07, 0.15},
+		}
+		// exact {PV, EL} per tranche: Gaussian, then t(4)
+		EXACT := [3][4]f64 {
+			{0.6624822216950692, 0.8068563153389382, 0.5736916743317735, 0.7427464830561432},
+			{0.3605742576957789, 0.5617622549678368, 0.30558112902073536, 0.5106255004119119},
+			{0.06430780503081776, 0.2913500966595627, 0.061347520704058245, 0.2838072034282038},
+		}
+		NP :: 100000
+		worst := 0.0
+		msg := ""
+		for k in 0 ..< 3 {
+			g, gel := fin.price_cdo_tranche_mc(tr[k], c, 0.05, NP)
+			t4, tel := fin.price_cdo_tranche_t_copula_mc(tr[k], c, 4, 0.05, NP)
+			e := EXACT[k]
+			worst = max(worst, abs(g - e[0]), abs(gel - e[1]), abs(t4 - e[2]), abs(tel - e[3]))
+			msg = fmt.tprintf(
+				"%s; %s PV %.4f (%.4f), t(4) %.4f (%.4f)",
+				msg,
+				tr[k].name,
+				g,
+				e[0],
+				t4,
+				e[2],
+			)
+		}
+		expect(
+			&passed,
+			&total,
+			worst < 3e-3,
+			fmt.tprintf(
+				"heterogeneous 40-name pool (%d paths, spread 5%%) vs exact conditional loss distribution%s; max abs err %.4f",
+				NP,
+				msg,
+				worst,
+			),
+		)
+	}
+
 	fmt.printf("Credit derivatives summary: %d/%d passed\n", passed, total)
 	record_failures(total - passed)
 }

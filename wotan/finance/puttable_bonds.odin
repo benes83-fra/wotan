@@ -13,6 +13,7 @@ PuttableBond :: struct {
 	coupon_frequency: int, // Payments per year (e.g., 2 for semi-annual)
 	maturity:         f64, // Bond maturity in years
 	put_schedule:     []PutDate, // Put dates and prices (dates outside (0, maturity) are ignored)
+	issue_time:       f64, // issue date in years from today (≤ 0; 0 = issued today)
 }
 
 PutDate :: struct {
@@ -21,7 +22,9 @@ PutDate :: struct {
 }
 
 PuttableBondResult :: struct {
-	price:               f64,
+	price:               f64, // dirty (including accrued interest)
+	clean_price:         f64, // price − accrued_interest
+	accrued_interest:    f64,
 	straight_bond_price: f64,
 	embedded_put_value:  f64, // Puttable bonds are worth MORE than straight bonds
 	effective_duration:  f64, // −∂P/∂s / P for a parallel shift s of the initial curve
@@ -50,6 +53,7 @@ _hw_puttable_build :: proc(
 		bond.coupon_rate,
 		bond.coupon_frequency,
 		bond.maturity,
+		bond.issue_time,
 		t,
 		k,
 		false,
@@ -67,8 +71,9 @@ _hw_puttable_build :: proc(
 // OAS SOLVER FOR PUTTABLE BONDS
 // ============================================================================
 // Constant spread over the Hull-White short rate (a parallel shift of the
-// initial curve) at which the model price equals market_price; NaN if no
-// spread in [−100%, 100%] matches. user_data is passed to P0T_func.
+// initial curve) at which the model's clean price equals market_price (a clean
+// price, as quoted); NaN if no spread in [−100%, 100%] matches. user_data is
+// passed to P0T_func.
 puttable_bond_oas :: proc(
 	bond: PuttableBond,
 	a: f64,
@@ -131,6 +136,8 @@ puttable_bond_lsm_hw1f :: proc(
 
 	return PuttableBondResult {
 		price = price,
+		clean_price = price - e.accrued0,
+		accrued_interest = e.accrued0,
 		straight_bond_price = straight_price,
 		embedded_put_value = price - straight_price,
 		effective_duration = -(price_up - price_dn) / (2.0 * h * price),

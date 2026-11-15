@@ -9,20 +9,24 @@ import "core:slice"
 // ============================================================================
 // Portfolio Constraints
 // ============================================================================
-// The feasible set is C = {Σw = 1, lo ≤ w_i ≤ hi} ∩ {Σ_{i∈g} w_i ≤ max_g}, with
-// lo = 0 for no_short_selling (raised to min_weight when that is > 0) and
-// hi = max_weight when > 0. min_weight applies to every asset; there is no
-// "only if included" (semi-continuous) handling, which would make C non-convex.
+// The feasible set is C = {Σw = 1, lo ≤ w_i ≤ hi} ∩ {min_g ≤ Σ_{i∈g} w_i ≤ max_g},
+// with lo = 0 for no_short_selling (raised to min_weight when that is > 0) and
+// hi = max_weight when > 0. With min_weight_if_held, min_weight applies only to
+// the assets held: each weight is 0 or in [min_weight, hi] (and never negative).
+// That set is not convex; the optimizers and project_constraints then search
+// the assets held exactly, by branch and bound over the convex relaxations.
 PortfolioConstraints :: struct {
-	no_short_selling: bool, // weights >= 0
-	max_weight:       f64, // weights <= max_weight (0 = no limit)
-	min_weight:       f64, // weights >= min_weight for every asset (0 = no limit)
-	group_limits:     []GroupLimit, // sector/asset class limits
+	no_short_selling:   bool, // weights >= 0
+	max_weight:         f64, // weights <= max_weight (0 = no limit)
+	min_weight:         f64, // weights >= min_weight (0 = no limit)
+	min_weight_if_held: bool, // min_weight only for weights that are not 0
+	group_limits:       []GroupLimit, // sector/asset class limits
 }
 
 GroupLimit :: struct {
 	asset_indices: []int, // indices of assets in this group (no duplicates)
-	max_weight:    f64, // sum of weights in group <= max_weight
+	max_weight:    f64, // sum of weights in group <= max_weight (0 = no upper limit)
+	min_weight:    f64, // sum of weights in group >= min_weight (0 = no lower limit)
 }
 
 // ============================================================================
@@ -62,20 +66,29 @@ project_box :: proc(weights: []f64, min_w: f64, max_w: f64) {
 	}
 }
 
-// Scale each over-limit group down to its limit in place (the sum changes)
+// Scale each over-limit group down to its upper limit, and raise each group
+// below its lower limit by an equal amount per asset, in place (the sum changes)
 project_groups :: proc(weights: []f64, groups: []GroupLimit) {
 	for group in groups {
-		sum := 0.0
+		sum, cnt := 0.0, 0
 		for idx in group.asset_indices {
 			if idx >= 0 && idx < len(weights) {
 				sum += weights[idx]
+				cnt += 1
 			}
 		}
-		if sum > group.max_weight && sum > 1e-10 {
+		if group.max_weight > 0.0 && sum > group.max_weight && sum > 1e-10 {
 			scale := group.max_weight / sum
 			for idx in group.asset_indices {
 				if idx >= 0 && idx < len(weights) {
 					weights[idx] *= scale
+				}
+			}
+		} else if group.min_weight != 0.0 && sum < group.min_weight && cnt > 0 {
+			shift := (group.min_weight - sum) / f64(cnt)
+			for idx in group.asset_indices {
+				if idx >= 0 && idx < len(weights) {
+					weights[idx] += shift
 				}
 			}
 		}
@@ -89,9 +102,39 @@ project_constraints :: proc(
 	constraints: PortfolioConstraints,
 	allocator: mem.Allocator = context.allocator,
 ) -> []f64 {
+	if _semicontinuous(constraints) {
+		// nearest point of the non-convex set: min ‖w − weights‖² by branch and bound
+		o := _Objective {
+			kind  = .Distance,
+			point = weights,
+			scale = 1.0,
+		}
+		return _spg_minimize(
+			&o,
+			constraints,
+			nil,
+			0,
+			len(weights),
+			10_000,
+			1e-13,
+			allocator,
+			weights,
+		)
+	}
 	result := slice.clone(weights, allocator)
 	_project_constraints_exact(result, constraints)
 	return result
+}
+
+@(private = "file")
+_semicontinuous :: proc(c: PortfolioConstraints) -> bool {
+	return c.min_weight_if_held && c.min_weight > 0.0
+}
+
+// Per-asset bounds of a branch-and-bound node (nil: the constraints' own bounds)
+@(private = "file")
+_Bounds :: struct {
+	lo, hi: []f64,
 }
 
 // Exact Euclidean projection onto C in place. If the box cannot hold a budget of
@@ -101,19 +144,42 @@ _project_constraints_exact :: proc(v: []f64, c: PortfolioConstraints) {
 	_project_feasible(v, c, nil, 0)
 }
 
+// Bounds of every asset. relaxed: the branch-and-bound relaxation of
+// min_weight_if_held (0 ≤ w ≤ hi); otherwise min_weight is a plain lower bound
+// (projections outside the branch and bound, e.g. risk parity, which holds
+// every asset)
+@(private = "file")
+_asset_bounds :: proc(c: PortfolioConstraints, relaxed: bool) -> (lo, hi: f64) {
+	lo = -math.F64_MAX
+	if c.no_short_selling || c.min_weight_if_held {lo = 0.0}
+	if c.min_weight > 0.0 && !(relaxed && c.min_weight_if_held) {lo = math.max(lo, c.min_weight)}
+	hi = c.max_weight if c.max_weight > 0.0 else math.F64_MAX
+	return
+}
+
 // Projection onto C, intersected with {μᵀw = target} when mu is given.
 // Box, budget and target: w_i = clamp(v_i - θ - φ μ_i, lo, hi), θ and φ by nested
 // bisection (μᵀw is monotone in φ). Group limits are added with Dykstra's
 // alternating projections, that set last so the result meets the budget, bounds
 // and target exactly
 @(private = "file")
-_project_feasible :: proc(v: []f64, c: PortfolioConstraints, mu: []f64, target: f64) {
+_project_feasible :: proc(
+	v: []f64,
+	c: PortfolioConstraints,
+	mu: []f64,
+	target: f64,
+	nb: ^_Bounds = nil,
+) {
 	n := len(v)
 	if n == 0 {return}
-	lo := -math.F64_MAX
-	if c.no_short_selling {lo = 0.0}
-	if c.min_weight > 0.0 {lo = math.max(lo, c.min_weight)}
-	hi := c.max_weight if c.max_weight > 0.0 else math.F64_MAX
+	slo, shi := _asset_bounds(c, false)
+	lo := make([]f64, n, context.temp_allocator)
+	hi := make([]f64, n, context.temp_allocator)
+	defer {delete(lo, context.temp_allocator); delete(hi, context.temp_allocator)}
+	for i in 0 ..< n {
+		lo[i], hi[i] = slo, shi
+		if nb != nil {lo[i], hi[i] = nb.lo[i], nb.hi[i]}
+	}
 
 	m := len(c.group_limits)
 	if m == 0 {
@@ -139,13 +205,18 @@ _project_feasible :: proc(v: []f64, c: PortfolioConstraints, mu: []f64, target: 
 		for k in 0 ..< n_sets {
 			p := inc[k * n:(k + 1) * n]
 			for i in 0 ..< n {v[i] += p[i]; p[i] = v[i]}
+			// projection onto the slab min_g ≤ Σ_{i∈g} w_i ≤ max_g
 			g := c.group_limits[k]
 			s, cnt := 0.0, 0
 			for idx in g.asset_indices {
 				if idx >= 0 && idx < n {s += v[idx]; cnt += 1}
 			}
-			if s > g.max_weight && cnt > 0 {
-				shift := (s - g.max_weight) / f64(cnt)
+			gmax := g.max_weight if g.max_weight > 0.0 else math.F64_MAX
+			gmin := g.min_weight if g.min_weight != 0.0 else -math.F64_MAX
+			shift := 0.0
+			if s > gmax {shift = (s - gmax) / f64(max(cnt, 1))}
+			if s < gmin {shift = (s - gmin) / f64(max(cnt, 1))}
+			if shift != 0.0 && cnt > 0 {
 				for idx in g.asset_indices {
 					if idx >= 0 && idx < n {v[idx] -= shift}
 				}
@@ -168,14 +239,14 @@ _project_feasible :: proc(v: []f64, c: PortfolioConstraints, mu: []f64, target: 
 // without mu). μᵀw(φ) is non-increasing in φ, so φ is found by bisection. A
 // target outside the attainable range ends at the nearest attainable return
 @(private = "file")
-_project_box_budget_target :: proc(v: []f64, lo, hi: f64, mu: []f64, target: f64) {
+_project_box_budget_target :: proc(v: []f64, lo, hi: []f64, mu: []f64, target: f64) {
 	if mu == nil {
 		_project_box_budget(v, lo, hi)
 		return
 	}
 	orig := slice.clone(v, context.temp_allocator)
 	defer delete(orig, context.temp_allocator)
-	at :: proc(v, orig, mu: []f64, phi, lo, hi: f64) -> f64 {
+	at :: proc(v, orig, mu: []f64, phi: f64, lo, hi: []f64) -> f64 {
 		for i in 0 ..< len(v) {v[i] = orig[i] - phi * mu[i]}
 		_project_box_budget(v, lo, hi)
 		return l.dot_simd(mu, v)
@@ -200,13 +271,13 @@ _project_box_budget_target :: proc(v: []f64, lo, hi: f64, mu: []f64, target: f64
 	at(v, orig, mu, 0.5 * (a + b), lo, hi)
 }
 
-// w_i = clamp(v_i - θ, lo, hi) with Σw = 1
+// w_i = clamp(v_i - θ, lo_i, hi_i) with Σw = 1
 @(private = "file")
-_project_box_budget :: proc(v: []f64, lo, hi: f64) {
+_project_box_budget :: proc(v: []f64, lo, hi: []f64) {
 	n := len(v)
-	excess :: proc(v: []f64, theta, lo, hi: f64) -> f64 {
+	excess :: proc(v: []f64, theta: f64, lo, hi: []f64) -> f64 {
 		s := 0.0
-		for x in v {s += math.clamp(x - theta, lo, hi)}
+		for x, i in v {s += math.clamp(x - theta, lo[i], hi[i])}
 		return s - 1.0
 	}
 	// bracket the root of the decreasing excess(θ), starting from the unclamped θ
@@ -224,7 +295,7 @@ _project_box_budget :: proc(v: []f64, lo, hi: f64) {
 		if excess(v, mid, lo, hi) > 0 {a = mid} else {b = mid}
 	}
 	theta := 0.5 * (a + b)
-	for &x in v {x = math.clamp(x - theta, lo, hi)}
+	for &x, i in v {x = math.clamp(x - theta, lo[i], hi[i])}
 }
 
 // ============================================================================
@@ -305,6 +376,7 @@ _Objective_Kind :: enum {
 	Sharpe,
 	Utility, // gamma/2 w'Σw - μ'w
 	Custom,
+	Distance, // ‖w − point‖² (the projection onto a non-convex set)
 }
 
 @(private = "file")
@@ -318,6 +390,7 @@ _Objective :: struct {
 	f:     proc(w: []f64, user: rawptr) -> f64,
 	grad:  proc(w, g: []f64, user: rawptr),
 	user:  rawptr,
+	point: []f64,
 }
 
 @(private = "file")
@@ -329,6 +402,10 @@ _obj_value :: proc(o: ^_Objective, w: []f64) -> f64 {
 		return o.scale * (0.5 * o.gamma * portfolio_variance(w, o.cov) - l.dot_simd(o.mu, w))
 	case .Custom:
 		return o.scale * o.f(w, o.user)
+	case .Distance:
+		s := 0.0
+		for x, i in w {s += (x - o.point[i]) * (x - o.point[i])}
+		return o.scale * s
 	case .Variance:
 	}
 	return o.scale * portfolio_variance(w, o.cov)
@@ -351,6 +428,8 @@ _obj_grad :: proc(o: ^_Objective, w, g: []f64) {
 	case .Custom:
 		o.grad(w, g, o.user)
 		for i in 0 ..< n {g[i] *= o.scale}
+	case .Distance:
+		for i in 0 ..< n {g[i] = 2.0 * o.scale * (w[i] - o.point[i])}
 	case .Variance:
 		for i in 0 ..< n {
 			g[i] = 2.0 * o.scale * l.dot_simd(o.cov.data[i * o.cov.cols:i * o.cov.cols + n], w)
@@ -370,6 +449,147 @@ _spg_minimize :: proc(
 	allocator: mem.Allocator,
 	init: []f64 = nil,
 ) -> []f64 {
+	if _semicontinuous(c) {
+		return _bb_minimize(o, c, target_mu, target, n, max_iter, tol, allocator, init)
+	}
+	return _spg_relaxed(o, c, target_mu, target, n, max_iter, tol, allocator, init, nil)
+}
+
+// Branch and bound for min_weight_if_held: a node fixes some assets out (w = 0)
+// and some in (w ≥ min_weight); its convex relaxation, solved by SPG, bounds
+// every portfolio below it. An asset strictly between 0 and min_weight is
+// branched on (out first if it is below min_weight / 2). Depth first, at most
+// _BB_MAX_NODES nodes; the best portfolio meeting all constraints is returned.
+@(private = "file")
+_BB_MAX_NODES :: 20_000
+
+@(private = "file")
+_bb_minimize :: proc(
+	o: ^_Objective,
+	c: PortfolioConstraints,
+	target_mu: []f64,
+	target: f64,
+	n: int,
+	max_iter: int,
+	tol: f64,
+	allocator: mem.Allocator,
+	init: []f64,
+) -> []f64 {
+	Node :: struct {
+		lo, hi: []f64,
+	}
+	mw := c.min_weight
+	base_lo, base_hi := _asset_bounds(c, true)
+	stack := make([dynamic]Node, 0, 64, context.temp_allocator)
+	defer {
+		for nd in stack {delete(nd.lo, context.temp_allocator); delete(nd.hi, context.temp_allocator)}
+		delete(stack)
+	}
+	root := Node{make([]f64, n, context.temp_allocator), make([]f64, n, context.temp_allocator)}
+	for i in 0 ..< n {root.lo[i], root.hi[i] = base_lo, base_hi}
+	append(&stack, root)
+	best: []f64
+	best_f := math.inf_f64(1)
+	feas_tol := 1e-9
+
+	for nodes := 0; len(stack) > 0 && nodes < _BB_MAX_NODES; nodes += 1 {
+		nd := pop(&stack)
+		defer {delete(nd.lo, context.temp_allocator); delete(nd.hi, context.temp_allocator)}
+		b := _Bounds{nd.lo, nd.hi}
+		w := _spg_relaxed(
+			o,
+			c,
+			target_mu,
+			target,
+			n,
+			max_iter,
+			tol,
+			context.temp_allocator,
+			init,
+			&b,
+		)
+		defer delete(w, context.temp_allocator)
+		if !_bb_feasible(w, c, &b, target_mu, target, feas_tol) {continue} 	// empty node
+		f := _obj_value(o, w)
+		if f >= best_f - 1e-12 * max(1.0, abs(best_f)) {continue} 	// bound
+		// branch on the asset deepest inside (0, min_weight)
+		k, depth := -1, 0.0
+		for i in 0 ..< n {
+			if nd.lo[i] < mw && nd.hi[i] > 0.0 && w[i] > feas_tol && w[i] < mw - feas_tol {
+				d := min(w[i], mw - w[i])
+				if d > depth {k, depth = i, d}
+			}
+		}
+		if k < 0 {
+			// every weight is 0 or ≥ min_weight: snap the tiny ones and accept
+			if best != nil {delete(best, allocator)}
+			best = make([]f64, n, allocator)
+			copy(best, w)
+			best_f = f
+			continue
+		}
+		out := Node {
+			slice.clone(nd.lo, context.temp_allocator),
+			slice.clone(nd.hi, context.temp_allocator),
+		}
+		out.hi[k] = 0.0
+		in_ := Node {
+			slice.clone(nd.lo, context.temp_allocator),
+			slice.clone(nd.hi, context.temp_allocator),
+		}
+		in_.lo[k] = mw
+		// the child explored first is pushed last
+		if w[k] < 0.5 * mw {append(&stack, in_, out)} else {append(&stack, out, in_)}
+	}
+	if best == nil {
+		// no portfolio meets the constraints: the relaxation's solution
+		return _spg_relaxed(o, c, target_mu, target, n, max_iter, tol, allocator, init, nil)
+	}
+	for &x in best {if abs(x) <= feas_tol {x = 0.0}}
+	return best
+}
+
+// The relaxed solution meets the budget, the node's bounds, the group limits
+// and the target (a node whose bounds cannot hold them is empty)
+@(private = "file")
+_bb_feasible :: proc(
+	w: []f64,
+	c: PortfolioConstraints,
+	b: ^_Bounds,
+	mu: []f64,
+	target: f64,
+	tol: f64,
+) -> bool {
+	s := 0.0
+	for x, i in w {
+		s += x
+		if x < b.lo[i] - tol || x > b.hi[i] + tol {return false}
+	}
+	if abs(s - 1.0) > tol {return false}
+	for g in c.group_limits {
+		gs := 0.0
+		for idx in g.asset_indices {if idx >= 0 && idx < len(w) {gs += w[idx]}}
+		if g.max_weight > 0.0 && gs > g.max_weight + tol {return false}
+		if g.min_weight != 0.0 && gs < g.min_weight - tol {return false}
+	}
+	if mu != nil && abs(l.dot_simd(mu, w) - target) > tol * max(1.0, abs(target)) {return false}
+	return true
+}
+
+// SPG on the convex set (with per-asset bounds when nb is given)
+@(private = "file")
+_spg_relaxed :: proc(
+	o: ^_Objective,
+	c: PortfolioConstraints,
+	target_mu: []f64,
+	target: f64,
+	n: int,
+	max_iter: int,
+	tol: f64,
+	allocator: mem.Allocator,
+	init: []f64,
+	nb: ^_Bounds,
+) -> []f64 {
 	MEMORY :: 10
 	ALPHA_MIN, ALPHA_MAX :: 1e-30, 1e30
 	w := make([]f64, n, allocator)
@@ -380,27 +600,33 @@ _spg_minimize :: proc(
 		buf[0:n], buf[n:2 * n], buf[2 * n:3 * n], buf[3 * n:4 * n], buf[4 * n:5 * n]
 
 	for i in 0 ..< n {w[i] = init[i] if init != nil else 1.0 / f64(n)}
-	_project_feasible(w, c, target_mu, target)
+	_project_feasible(w, c, target_mu, target, nb)
 	f := _obj_value(o, w)
 	_obj_grad(o, w, g)
 	history: [MEMORY]f64
 	for &h in history {h = f}
 
-	pg_norm :: proc(w, g, pg: []f64, c: PortfolioConstraints, mu: []f64, target: f64) -> f64 {
+	pg_norm :: proc(
+		w, g, pg: []f64,
+		c: PortfolioConstraints,
+		mu: []f64,
+		target: f64,
+		nb: ^_Bounds,
+	) -> f64 {
 		for i in 0 ..< len(w) {pg[i] = w[i] - g[i]}
-		_project_feasible(pg, c, mu, target)
+		_project_feasible(pg, c, mu, target, nb)
 		r := 0.0
 		for i in 0 ..< len(w) {r = math.max(r, math.abs(pg[i] - w[i]))}
 		return r
 	}
 	alpha := 1.0
-	if r := pg_norm(w, g, pg, c, target_mu, target);
+	if r := pg_norm(w, g, pg, c, target_mu, target, nb);
 	   r > 0 {alpha = math.clamp(1.0 / r, ALPHA_MIN, ALPHA_MAX)}
 
 	for k in 0 ..< max_iter {
-		if pg_norm(w, g, pg, c, target_mu, target) < tol {break}
+		if pg_norm(w, g, pg, c, target_mu, target, nb) < tol {break}
 		for i in 0 ..< n {d[i] = w[i] - alpha * g[i]}
-		_project_feasible(d, c, target_mu, target)
+		_project_feasible(d, c, target_mu, target, nb)
 		gd := 0.0
 		for i in 0 ..< n {
 			d[i] -= w[i]
@@ -435,7 +661,7 @@ _spg_minimize :: proc(
 			// no positive curvature along the step (non-convex objectives): restart from
 			// the initial step rule. Birgin et al.'s ALPHA_MAX here makes the next trial
 			// point w - 1e30 g, whose projection keeps only ~1e14 of rounding noise
-			r := pg_norm(w, g, pg, c, target_mu, target)
+			r := pg_norm(w, g, pg, c, target_mu, target, nb)
 			alpha = math.clamp(1.0 / r, ALPHA_MIN, ALPHA_MAX) if r > 0 else 1.0
 		}
 		f = fn

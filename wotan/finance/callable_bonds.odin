@@ -8,15 +8,20 @@ import "core:mem"
 // CALLABLE BOND STRUCTURES
 // ============================================================================
 
-// Coupons are paid at maturity − k/coupon_frequency (a short first period pays a
-// pro-rata coupon). Call prices are clean: on a call date that is also a coupon
-// date the coupon is paid as well.
+// Coupons are paid at maturity − k/coupon_frequency. Each coupon accrues from
+// the previous coupon date, the first one from the later of that date and
+// issue_time (a short first period pays a pro-rata coupon). issue_time 0 is a
+// new issue; issue_time < 0 a bond issued in the past, whose accrued interest
+// is linear in time over the coupon period in progress. Call prices are clean:
+// exercising pays the call price plus the accrued interest, and on a call date
+// that is also a coupon date the coupon is paid as well.
 CallableBond :: struct {
 	face_value:       f64,
 	coupon_rate:      f64, // Annual coupon rate
 	coupon_frequency: int, // Payments per year (e.g., 2 for semi-annual)
 	maturity:         f64, // Bond maturity in years
 	call_schedule:    []CallDate, // Call dates and prices (dates outside (0, maturity) are ignored)
+	issue_time:       f64, // issue date in years from today (≤ 0; 0 = issued today)
 }
 
 CallDate :: struct {
@@ -25,7 +30,9 @@ CallDate :: struct {
 }
 
 CallableBondResult :: struct {
-	price:               f64,
+	price:               f64, // dirty (including accrued interest)
+	clean_price:         f64, // price − accrued_interest
+	accrued_interest:    f64,
 	straight_bond_price: f64,
 	embedded_call_value: f64,
 	effective_duration:  f64, // −∂P/∂s / P for a parallel shift s of the initial curve
@@ -127,7 +134,8 @@ _HW_Bermudan :: struct {
 	degree:     int,
 	n_paths:    int,
 	cf_t:       []f64, // flow times
-	ex_t, ex_k: []f64, // exercise dates (sorted, inside (0, maturity)) and prices
+	ex_t, ex_k: []f64, // exercise dates (sorted, inside (0, maturity)) and dirty prices
+	accrued0:   f64, // accrued interest today
 	s0_lc:      []f64, // ln(amount · P(0,t_i | x0)) per flow
 	lc, bb:     []f64, // per (date j, flow i): straight bond = Σ_{i ≥ first[j]} exp(lc − bb x − s τ)
 	first:      []int,
@@ -139,7 +147,7 @@ _HW_Bermudan :: struct {
 _hw_bermudan_build :: proc(
 	face, coupon_rate: f64,
 	freq: int,
-	maturity: f64,
+	maturity, issue_time: f64,
 	ex_t_in, ex_k_in: []f64,
 	is_call: bool,
 	a, sigma, r0: f64,
@@ -164,15 +172,27 @@ _hw_bermudan_build :: proc(
 	n_cf = max(n_cf, 1)
 	e.cf_t = make([]f64, n_cf, allocator)
 	amount := make([]f64, n_cf, allocator)
-	defer delete(amount, allocator)
+	cpn := make([]f64, n_cf, allocator) // coupon part of each flow
+	start := make([]f64, n_cf, allocator) // accrual start of each coupon
+	defer {delete(amount, allocator); delete(cpn, allocator); delete(start, allocator)}
 	coupon := face * coupon_rate / f
 	for i in 0 ..< n_cf {
 		e.cf_t[i] = maturity - f64(n_cf - 1 - i) / f
-		amount[i] = coupon
+		start[i] = e.cf_t[i] - 1.0 / f
+		cpn[i] = coupon
 	}
-	stub := e.cf_t[0] * f
-	if abs(stub - 1.0) > 1e-9 {amount[0] = coupon * stub}
+	// first coupon: from the later of the previous coupon date and the issue
+	start[0] = max(start[0], min(issue_time, 0.0))
+	stub := (e.cf_t[0] - start[0]) * f
+	if abs(stub - 1.0) > 1e-9 {cpn[0] = coupon * stub}
+	copy(amount, cpn)
 	amount[n_cf - 1] += face
+	// accrued interest at time t in the period of flow i (linear in time)
+	accrued :: proc(cpn, start, cf_t: []f64, i: int, t: f64) -> f64 {
+		if t <= start[i] {return 0.0}
+		return cpn[i] * (t - start[i]) / (cf_t[i] - start[i])
+	}
+	e.accrued0 = accrued(cpn, start, e.cf_t, 0, 0.0)
 
 	// Exercise dates inside (0, maturity), sorted
 	idx := make([dynamic]int, 0, len(ex_t_in), allocator)
@@ -185,7 +205,10 @@ _hw_bermudan_build :: proc(
 	e.ex_k = make([]f64, m, allocator)
 	for i, j in idx {
 		e.ex_t[j] = ex_t_in[i]
-		e.ex_k[j] = ex_k_in[i]
+		// clean price + the accrued interest of the coupon period in progress
+		next := 0
+		for next < n_cf - 1 && e.cf_t[next] <= ex_t_in[i] + 1e-12 {next += 1}
+		e.ex_k[j] = ex_k_in[i] + accrued(cpn, start, e.cf_t, next, ex_t_in[i])
 	}
 	// insertion sort by time (schedules are short)
 	for j in 1 ..< m {
@@ -381,10 +404,11 @@ _hw_bermudan_price :: proc(e: ^_HW_Bermudan, s: f64) -> (price: f64, ex_prob: f6
 	return price, f64(n_hit) / f64(n)
 }
 
-// Parallel shift s with model price = market_price, by Illinois regula falsi on
-// common random numbers; NaN if no s in [−1, 1] brackets the price
+// Parallel shift s with model clean price = market_clean, by Illinois regula
+// falsi on common random numbers; NaN if no s in [−1, 1] brackets the price
 @(private)
-_hw_bermudan_oas :: proc(e: ^_HW_Bermudan, market_price: f64) -> f64 {
+_hw_bermudan_oas :: proc(e: ^_HW_Bermudan, market_clean: f64) -> f64 {
+	market_price := market_clean + e.accrued0 // dirty
 	lo, hi := -0.05, 0.05
 	p_lo, _ := _hw_bermudan_price(e, lo)
 	p_hi, _ := _hw_bermudan_price(e, hi)
@@ -424,9 +448,9 @@ _hw_bermudan_oas :: proc(e: ^_HW_Bermudan, market_price: f64) -> f64 {
 // OAS SOLVER
 // ============================================================================
 // Constant spread over the Hull-White short rate (a parallel shift of the
-// initial curve) at which the model price equals market_price; NaN if no
-// spread in [−100%, 100%] matches. The paths are sampled exactly at the call
-// dates. user_data is passed to P0T_func.
+// initial curve) at which the model's clean price equals market_price (a clean
+// price, as quoted); NaN if no spread in [−100%, 100%] matches. The paths are
+// sampled exactly at the call dates. user_data is passed to P0T_func.
 callable_bond_oas :: proc(
 	bond: CallableBond,
 	a: f64,
@@ -474,6 +498,7 @@ _hw_callable_build :: proc(
 		bond.coupon_rate,
 		bond.coupon_frequency,
 		bond.maturity,
+		bond.issue_time,
 		t,
 		k,
 		true,
@@ -527,6 +552,8 @@ callable_bond_lsm_hw1f :: proc(
 
 	return CallableBondResult {
 		price = price,
+		clean_price = price - e.accrued0,
+		accrued_interest = e.accrued0,
 		straight_bond_price = straight_price,
 		embedded_call_value = straight_price - price,
 		effective_duration = -(price_up - price_dn) / (2.0 * h * price),

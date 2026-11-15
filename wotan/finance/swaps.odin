@@ -310,20 +310,33 @@ SwapConventions :: struct {
 
 // Swap on real dates; times are ACT/365F from the curves' reference_date
 DatedSwap :: struct {
-	notional:       f64,
-	direction:      SwapDirection, // Payer = pay fixed
-	fixed_rate:     f64,
-	float_spread:   f64,
-	fixed_schedule: Schedule,
-	float_schedule: Schedule,
-	conventions:    SwapConventions,
+	notional:          f64,
+	direction:         SwapDirection, // Payer = pay fixed
+	fixed_rate:        f64,
+	float_spread:      f64,
+	fixed_schedule:    Schedule,
+	float_schedule:    Schedule,
+	conventions:       SwapConventions,
 	// Seasoned swaps: the rate of the floating coupon in progress when it is
 	// already set on the curves' reference date (an indexed coupon whose
-	// fixing date is before it; for an overnight leg, the rate compounded from
-	// the accrual start to the reference date, simple in the float day count,
-	// the rest being projected). Without it the NPV is NaN. Flows paid on or
-	// before the reference date are left out.
-	current_fixing: Maybe(f64),
+	// fixing date is before it; for a plain overnight leg, the rate compounded
+	// from the accrual start to the reference date, simple in the float day
+	// count, the rest being projected). Without it the NPV is NaN. Flows paid
+	// on or before the reference date are left out.
+	current_fixing:    Maybe(f64),
+	// Past daily fixings of the overnight index (any order). When set, the
+	// overnight coupon in progress is compounded day by day as QuantLib's
+	// OvernightIndexedCoupon, with lookback, lockout and observation shift:
+	// rates observed before the reference date come from these fixings (a
+	// missing one gives NaN), a rate observed on the reference date from its
+	// fixing if present, and later ones from the curve. current_fixing is
+	// then not used for overnight coupons.
+	overnight_fixings: []Overnight_Fixing,
+}
+
+Overnight_Fixing :: struct {
+	date: w.Date,
+	rate: f64,
 }
 
 // Spot date: settlement_days business days after the trade date (moved to a
@@ -379,7 +392,7 @@ make_dated_swap :: proc(
 		end_of_month = conv.end_of_month,
 		allocator = allocator,
 	)
-	return DatedSwap{notional, direction, fixed_rate, float_spread, fixed, float, conv, nil}
+	return DatedSwap{notional, direction, fixed_rate, float_spread, fixed, float, conv, nil, nil}
 }
 
 free_dated_swap :: proc(swap: ^DatedSwap, allocator := context.allocator) {
@@ -461,8 +474,21 @@ _dated_periods :: proc(
 				continue
 			}
 		} else if floating && w.date_less(start, reference) {
-			// overnight coupon in progress: the compounded rate so far, then the
-			// curve from the reference date (lookback / lockout / shift unsupported)
+			// overnight coupon in progress
+			if len(swap.overnight_fixings) > 0 {
+				// day by day: past fixings, then the curve
+				periods[k].rate = _overnight_rate(
+					conv,
+					start,
+					end,
+					forecast,
+					swap.overnight_fixings,
+				)
+				periods[k].has_rate = true
+				continue
+			}
+			// the compounded rate so far (plain legs only), then the curve from
+			// the reference date
 			plain := conv.lookback_days == 0 && conv.lockout_days == 0 && !conv.observation_shift
 			f, ok := swap.current_fixing.?
 			growth :=
@@ -482,9 +508,21 @@ _dated_periods :: proc(
 
 // Compounded overnight rate of the accrual period [start, end] projected on
 // the curve: Π (1 + r_i τ_i) − 1 over the business days, divided by the year
-// fraction spanned by the weight dates (see SwapConventions)
+// fraction spanned by the weight dates (see SwapConventions). Rates observed
+// before the curve's reference date come from `fixings` (NaN if missing), a
+// rate observed on it from its fixing if there is one.
 @(private = "file")
-_overnight_rate :: proc(conv: SwapConventions, start, end: w.Date, curve: ^YieldCurve) -> f64 {
+_overnight_rate :: proc(
+	conv: SwapConventions,
+	start, end: w.Date,
+	curve: ^YieldCurve,
+	fixings: []Overnight_Fixing = nil,
+) -> f64 {
+	reference := curve.reference_date
+	fixing_of :: proc(fixings: []Overnight_Fixing, d: w.Date) -> (f64, bool) {
+		for f in fixings {if f.date == d {return f.rate, true}}
+		return 0, false
+	}
 	cal, dc := conv.calendar, conv.float_day_count
 	interest := make([dynamic]w.Date, 0, 400, context.temp_allocator)
 	defer delete(interest)
@@ -501,12 +539,19 @@ _overnight_rate :: proc(conv: SwapConventions, start, end: w.Date, curve: ^Yield
 	growth := 1.0
 	for i in 0 ..< n {
 		f := observed[min(i, lock)]
-		next := calendar_advance(cal, f, 1, .Days)
-		r :=
-			(yield_curve_discount_factor_date(curve, f) /
-					yield_curve_discount_factor_date(curve, next) -
-				1.0) /
-			year_fraction(dc, f, next)
+		r: f64
+		if fx, ok := fixing_of(fixings, f); ok && !w.date_less(reference, f) {
+			r = fx // observed on or before the reference date, and fixed
+		} else if w.date_less(f, reference) {
+			return math.QNAN_F64 // a past rate without its fixing
+		} else {
+			next := calendar_advance(cal, f, 1, .Days)
+			r =
+				(yield_curve_discount_factor_date(curve, f) /
+						yield_curve_discount_factor_date(curve, next) -
+					1.0) /
+				year_fraction(dc, f, next)
+		}
 		growth *= 1.0 + r * year_fraction(dc, weights[i], weights[i + 1])
 	}
 	return (growth - 1.0) / year_fraction(dc, weights[0], weights[n])

@@ -481,9 +481,9 @@ The Treasury settles on 12 November, three days before its accrual period ends. 
 
 ## 8. Callable and puttable bonds
 
-A `CallableBond` has a face value, a coupon rate, `coupon_frequency` payments a year, a `maturity` in years, and a `call_schedule` of `CallDate{time, price}`. `PuttableBond` is the same with a `put_schedule` of `PutDate`s.
+A `CallableBond` has a face value, a coupon rate, `coupon_frequency` payments a year, a `maturity` in years, a `call_schedule` of `CallDate{time, price}` and an `issue_time`. `PuttableBond` is the same with a `put_schedule` of `PutDate`s.
 
-Coupons are paid at maturity − k/f. A bond whose maturity isn't a whole number of periods gets a short first coupon from t = 0, so these are bonds issued today; there is no accrued interest. Call and put prices are clean. On an exercise date that is also a coupon date, the coupon is paid as well. Exercise dates outside (0, maturity) are ignored.
+Coupons are paid at maturity − k/f. A new issue (`issue_time` 0, the default) whose maturity isn't a whole number of periods gets a short first coupon from t = 0. Call and put prices are clean: exercising between coupon dates pays the price plus the accrued interest, and on an exercise date that is also a coupon date the coupon is paid as well. Exercise dates outside (0, maturity) are ignored. Seasoned bonds are covered at the end of this section.
 
 The model is one-factor Hull-White fitted to a discount curve `P0T_func(t, user_data)`, a `Discount_Fn`: r(t) = α(t) + x(t), dx = −a x dt + σ dW. With r0 = f(0, 0), the instantaneous forward at 0, the model reprices the curve exactly. The steps:
 - The paths of x and its integral are sampled exactly at the exercise dates, so there is no time-stepping error, and they come in antithetic pairs.
@@ -491,11 +491,11 @@ The model is one-factor Hull-White fitted to a discount curve `P0T_func(t, user_
 - Longstaff–Schwartz regresses only the option's continuation value, on powers of the standardised state.
 
 `callable_bond_lsm_hw1f(bond, a, sigma, r0, P0T_func, n_paths = 10000, poly_degree = 3, user_data = nil)` returns a `CallableBondResult`:
-- `price`, `straight_bond_price` and `embedded_call_value`;
+- `price` (dirty), `clean_price`, `accrued_interest`, `straight_bond_price` and `embedded_call_value`;
 - `call_probability`;
 - `effective_duration` and `effective_convexity`, from ±50 bp parallel shifts of the curve on the same paths.
 
-`callable_bond_oas(…, market_price, …)` finds the constant spread over the short rate (a parallel shift of the curve) at which the model price equals the market price. It returns NaN if no spread in [−100%, 100%] does. The puttable versions are `puttable_bond_lsm_hw1f` and `puttable_bond_oas`.
+`callable_bond_oas(…, market_price, …)` finds the constant spread over the short rate (a parallel shift of the curve) at which the model's clean price equals the market's clean price. It returns NaN if no spread in [−100%, 100%] does. The puttable versions are `puttable_bond_lsm_hw1f` and `puttable_bond_oas`.
 
 ```odin
 // market curve z(t) = 3% + 1.2% (1 − e^{−t/2.5}) − 0.4% t e^{−t/2.5}
@@ -589,8 +589,46 @@ fmt.printf("4.75Y callable: %.4f straight %.4f\n", rs.price, rs.straight_bond_pr
 ```
 on the swap curve (r0 = 0.030302): price 105.9187 straight 109.3507 P(call) 0.7236
 unreachable call: 107.4121977995 vs straight 107.4121977995, P(call) 0.0000
-4.75Y callable: 101.9051 straight 105.4260
+4.75Y callable: 102.8828 straight 105.4260
 ```
+
+**Seasoned bonds.** `issue_time` (in years, ≤ 0) places the issue in the past; the default 0 is a new issue. Coupons stay on the grid maturity − k/f. The first coupon accrues from the later of the previous grid date and the issue, and the others accrue over a full period. The accrued interest is linear in time over the coupon period in progress:
+- `price` is the dirty price;
+- `clean_price` and `accrued_interest` are the clean price and the accrued interest today;
+- exercise prices are clean, so exercising between coupon dates pays the price plus the accrued interest;
+- `callable_bond_oas` and `puttable_bond_oas` take the market's clean price.
+
+```odin
+curve := fin.YieldCurve {
+	tenors        = []f64{1, 2, 3, 5, 7, 10, 15},
+	zero_rates    = []f64{0.025, 0.028, 0.031, 0.034, 0.036, 0.037, 0.038},
+	interpolation = .LinearZero,
+}
+// 4.5% annual, issued 200 days ago, next coupon in 165 days, 7 coupons left;
+// the call 120 days after a coupon date pays 100.25 plus the accrued coupon
+Y :: 365.0
+seasoned := fin.CallableBond {
+	face_value       = 100,
+	coupon_rate      = 0.045,
+	coupon_frequency = 1,
+	maturity         = (165 + 365 * 6) / Y,
+	call_schedule    = []fin.CallDate{{530 / Y, 101}, {895 / Y, 100.5}, {1015 / Y, 100.25}, {1260 / Y, 100}},
+	issue_time       = -200 / Y,
+}
+rand.reset(3)
+r := fin.callable_bond_lsm_hw1f(seasoned, 0.08, 0.012, 0.025, fin.discount_fn_yield_curve, 100000, user_data = &curve)
+fmt.printf("dirty %.4f  clean %.4f  accrued %.6f  straight %.4f  P(call) %.3f\n",
+	r.price, r.clean_price, r.accrued_interest, r.straight_bond_price, r.call_probability)
+rand.reset(4)
+oas := fin.callable_bond_oas(seasoned, 0.08, 0.012, 0.025, fin.discount_fn_yield_curve, 100.8365, 50000, user_data = &curve)
+fmt.printf("OAS at a clean price of 100.8365: %.2f bp\n", 1e4 * oas)
+```
+```
+dirty 104.1586  clean 101.6928  accrued 2.465753  straight 107.7468  P(call) 0.659
+OAS at a clean price of 100.8365: 24.86 bp
+```
+
+QuantLib's `CallableFixedRateBond` gives 104.1545 dirty, 101.6887 clean and 2.465753 accrued. It used `TreeCallableFixedRateBondEngine` with 2000 steps on the same curve, with coupons 365 days apart and Actual/365 Fixed. That is within the Monte Carlo error, about 0.008 at 100 000 paths. Its clean price at a 25 bp spread is 100.8365, and the OAS solver recovers 24.86 bp from it.
 
 ## 9. Convertible bonds
 
@@ -740,6 +778,12 @@ for interp in fin.CPIInterpolation {
 		fmt.printf("  ILB base CPI %.6f; first flows %v %.6f, %v %.6f; redemption %v %.6f\n", base, flows[0].payment_date, flows[0].amount,
 			flows[1].payment_date, flows[1].amount, flows[len(flows) - 1].payment_date, flows[len(flows) - 1].amount)
 		fmt.printf("  ILB dirty at 13 Nov 2026: %.10f\n", fin.inflation_linked_bond_dirty_price(b, &index, &nominal, {2026, 11, 13}))
+		settle := w.Date{2026, 11, 13}
+		clean := fin.inflation_linked_bond_clean_price(b, &index, &nominal, settle)
+		fmt.printf("  accrued %.10f clean %.10f index ratio %.10f real yield %.10f\n",
+			fin.inflation_linked_bond_accrued_interest(b, &index, settle), clean,
+			fin.inflation_linked_bond_index_ratio(b, &index, settle),
+			fin.inflation_linked_bond_real_yield(b, &index, clean, settle))
 	}
 	fmt.printf("  before the first fixing (Jun 2023): %v\n", fin.cpi_fixing(&index, {2023, 6, 1}))
 	index.curve = nil
@@ -761,6 +805,7 @@ Linear: pillars 2027-08 0.0216739808 2028-08 0.0208404107 2029-08 0.0206167417 2
   seasoned 3Y from 3 Mar 2025 at 2.5%: fair 0.0221021419 NPV -8823.1394
   ILB base CPI 122.721733; first flows Date{year = 2025, month = 10, day = 15} 0.631499, Date{year = 2026, month = 4, day = 15} 0.638169; redemption Date{year = 2035, month = 4, day = 16} 124.162129
   ILB dirty at 13 Nov 2026: 111.3783513680
+  accrued 0.1030809596 clean 111.2752704084 index ratio 1.0350750152 real yield 0.0034485835
   before the first fixing (Jun 2023): NaN
 ```
 
@@ -779,10 +824,13 @@ The bootstrap restores the index's own `curve` field when it returns. That is wh
 The procedures:
 - `inflation_linked_bond_cashflows` gives the flows.
 - `inflation_linked_bond_dirty_price(b, index, &nominal, settlement)` discounts them on a nominal curve.
+- `inflation_linked_bond_accrued_interest(b, index, settlement)` gives the real coupon accrued over the period in progress, scaled by the index ratio at settlement, as QuantLib's `CPICoupon`. `inflation_linked_bond_clean_price` is the dirty price less this.
+- `inflation_linked_bond_index_ratio(b, index, date)` gives I(date, lagged) / base_cpi.
+- `inflation_linked_bond_real_yield(b, index, clean_price, settlement)` gives the real yield. The real clean price, clean_price / index ratio at settlement, is priced as a fixed-rate bond paying the real coupon on the same schedule. The yield is compounded at the coupon frequency in the bond's day count, as `dated_bond_yield`.
 
 The `.Linear` branch of the example above prices a 10-year linker issued 15 April 2025, with a 1.25% real coupon. Its base CPI is the lagged observation on the issue date.
 
-The first coupon is the real coupon 0.625 scaled by the index ratio, 1.0104. The forecast redemption is the face value scaled by 1.2416. QuantLib's `CPIBond` gives the same flows, and the same dirty value to 1e-10.
+The first coupon is the real coupon 0.625 scaled by the index ratio, 1.0104. The forecast redemption is the face value scaled by 1.2416. QuantLib's `CPIBond` gives the same flows, and the same dirty value to 1e-10. Its accrued interest and clean price agree too, the clean price to 1e-10. The real yield equals `BondFunctions.bondYield` of the real `FixedRateBond` at clean / ratio, 0.34486%.
 
 ## 11. Validation
 
@@ -793,9 +841,9 @@ The first coupon is the real coupon 0.625 scaled by the index ratio, 1.0104. The
 | `dates_reference_test` | holiday lists, adjust and advance, business-day counts, every day counter and schedule generation on seeded random inputs, IMM dates and CDS maturities, against QuantLib 1.44 |
 | `dated_instruments_reference_test` | `PiecewiseLinearZero` and flat-forward bootstraps, OIS and Euribor multi-curve setups, swaps and `FixedRateBond` prices, yields and risk measures, against QuantLib |
 | `swaps_yield_curve_reference_test` | the time-axis bootstrap and swap valuation |
-| `bonds_reference_test` | `Bond` yields, durations and convexities against QuantLib; the Hull-White bond price; callable and puttable bonds against exact backward induction and QuantLib's Hull-White tree; effective duration and OAS round trips |
+| `bonds_reference_test` | `Bond` yields, durations and convexities against QuantLib; the Hull-White bond price; callable and puttable bonds against exact backward induction and QuantLib's Hull-White tree; effective duration and OAS round trips; seasoned callable and puttable bonds with accrued interest against `TreeCallableFixedRateBondEngine` |
 | `convertible_bonds_reference_test` | five convertibles (soft and hard calls, puts, cash dividends, a late conversion start) against `BinomialCRRConvertibleEngine` at 801 and 2000 steps, to 1e-9 |
-| `inflation_reference_test` | Flat and Linear zero-inflation curves, HICP forecasts to 2046, zero-coupon swaps and a `CPIBond`, against QuantLib |
+| `inflation_reference_test` | Flat and Linear zero-inflation curves, HICP forecasts to 2046, zero-coupon swaps and two `CPIBond`s (flows, dirty, clean, accrued, real yield), against QuantLib |
 | `bonds_test`, `yield_curve_test`, `callable_bond_test` | usage and consistency checks |
 
 **Additional checks:**
@@ -810,14 +858,13 @@ The first coupon is the real coupon 0.625 scaled by the index ratio, 1.0104. The
 | a Bund on that curve: price, accrued, yield, duration, convexity; a Treasury: price from yield and yield from price | QuantLib `FixedRateBond`, `BondFunctions` | 1e-9 |
 | a callable bond as σ → 0 | the cheapest deterministic call | 3e-9 |
 | a callable bond with an unreachable call | the straight bond | exact |
+| seasoned callable bonds (full and short first coupon, off-cycle call) and a puttable bond: dirty, clean, accrued, OAS | QuantLib `CallableFixedRateBond`, `TreeCallableFixedRateBondEngine` | prices within 0.01; accrued exact; OAS within 0.2 bp |
 | convertible prices across 10 spot and ratio points, soft call plus put, and cash dividends | `BinomialCRRConvertibleEngine` | all 6 printed decimals |
 | a convertible whose conversion ends before maturity, with no credit spread | QuantLib pricing of the equivalent shorter convertible | 2e-3 at 4001 steps |
 | inflation curves, forecasts, lagged observations, swap fair rates and NPVs, inflation-linked bond flows and dirty price | QuantLib | all printed digits |
 
 **Known limitations:**
-- **Callable and puttable bonds.** They model newly issued bonds only, with no seasoned bonds and no accrued interest.
 - **Time-axis bonds.** Accrued interest is linear in time, and `Bond.day_count` is informational.
-- **Inflation-linked bonds.** They have a dirty price only, with no accrued interest, clean price or real yield.
 
 ## 12. Quick reference
 
@@ -835,4 +882,4 @@ The first coupon is the real coupon 0.625 scaled by the index ratio, 1.0104. The
 | Callable and puttable bonds | `callable_bond_lsm_hw1f`, `callable_bond_oas`, `puttable_bond_lsm_hw1f`, `puttable_bond_oas`, `Discount_Fn`, `discount_fn_yield_curve` | 8 |
 | Convertibles | `price_convertible_bond` | 9 |
 | CPI | `cpi_fixing`, `cpi_observation`, `zero_inflation_rate`, `bootstrap_zero_inflation_curve`, `free_zero_inflation_curve` | 10 |
-| Inflation swaps and bonds | `zcis_cashflows`, `zcis_fair_rate`, `zcis_npv`, `inflation_linked_bond_cashflows`, `inflation_linked_bond_dirty_price` | 10 |
+| Inflation swaps and bonds | `zcis_cashflows`, `zcis_fair_rate`, `zcis_npv`, `inflation_linked_bond_cashflows`, `inflation_linked_bond_dirty_price`, `inflation_linked_bond_clean_price`, `inflation_linked_bond_accrued_interest`, `inflation_linked_bond_index_ratio`, `inflation_linked_bond_real_yield` | 10 |

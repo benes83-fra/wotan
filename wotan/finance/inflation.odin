@@ -309,3 +309,58 @@ inflation_linked_bond_dirty_price :: proc(
 	}
 	return v / yield_curve_discount_factor_date(nominal, settlement)
 }
+
+// Index ratio I(date, lagged)/base_cpi of the bond
+inflation_linked_bond_index_ratio :: proc(
+	b: InflationLinkedBond,
+	index: ^CPIIndex,
+	date: w.Date,
+) -> f64 {
+	return cpi_observation(index, date, b.lag_months, b.interpolation) / b.base_cpi
+}
+
+// The real bond: the same schedule paying the real coupon and the face value,
+// without indexation
+@(private = "file")
+_real_bond :: proc(b: InflationLinkedBond) -> DatedBond {
+	return DatedBond{b.face_value, b.real_coupon, b.schedule, b.day_count, b.payment_convention, 0}
+}
+
+// Accrued interest at settlement: the real coupon accrued over the period in
+// progress, times the index ratio at settlement (QuantLib's CPICoupon)
+inflation_linked_bond_accrued_interest :: proc(
+	b: InflationLinkedBond,
+	index: ^CPIIndex,
+	settlement: w.Date,
+) -> f64 {
+	real := _real_bond(b)
+	accrued := dated_bond_accrued_interest(real, settlement)
+	if accrued == 0.0 {return 0.0}
+	return accrued * inflation_linked_bond_index_ratio(b, index, settlement)
+}
+
+// Clean value at settlement: the dirty price less the accrued interest
+inflation_linked_bond_clean_price :: proc(
+	b: InflationLinkedBond,
+	index: ^CPIIndex,
+	nominal: ^YieldCurve,
+	settlement: w.Date,
+) -> f64 {
+	return(
+		inflation_linked_bond_dirty_price(b, index, nominal, settlement) -
+		inflation_linked_bond_accrued_interest(b, index, settlement) \
+	)
+}
+
+// Real yield of a clean price: the yield of the real bond (see _real_bond) at
+// the real clean price clean_price / index ratio at settlement, compounded at
+// the coupon frequency in the bond's day count (as dated_bond_yield)
+inflation_linked_bond_real_yield :: proc(
+	b: InflationLinkedBond,
+	index: ^CPIIndex,
+	clean_price: f64,
+	settlement: w.Date,
+) -> f64 {
+	ratio := inflation_linked_bond_index_ratio(b, index, settlement)
+	return dated_bond_yield(_real_bond(b), clean_price / ratio, settlement)
+}

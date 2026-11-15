@@ -197,7 +197,7 @@ _hw2f_objective :: proc(x: []f64, user_data: rawptr) -> f64 {
 
 @(private = "file")
 _HW2F_Joint_Ctx :: struct {
-	r0:              f64,
+	curve:           Rate_Curve,
 	caps:            _HW_Caplet_Ctx,
 	swaption_specs:  []SwaptionSpec,
 	swaption_market: []f64,
@@ -216,7 +216,7 @@ _hw2f_joint_objective :: proc(x: []f64, user_data: rawptr) -> f64 {
 	}
 	return _hw2f_joint_loss(
 		p,
-		c.r0,
+		c.curve,
 		c.caps.T_start,
 		c.caps.T_end,
 		c.caps.F,
@@ -305,10 +305,69 @@ _make_const_tensor :: proc(data: []f64, n: int, allocator: mem.Allocator) -> ^t.
 	return t.tensor_new(mat, false, allocator)
 }
 // ============================================================================
-// G2++ / HULL-WHITE MONTE CARLO ENGINE (flat initial curve r0)
+// INITIAL CURVE OF THE RATE MODELS
+// ============================================================================
+// The Hull-White and G2++ pricers are fitted to an initial discount curve
+// P(0, t): a flat continuously compounded rate r0 (P = e^{−r0 t}), a
+// bootstrapped YieldCurve, or any discount function. A plain f64 argument is
+// the flat rate, so `hw_mc_cap_option(0.04, ...)` prices on a flat 4% curve.
+
+Discount_Curve :: struct {
+	fn:        Discount_Fn,
+	user_data: rawptr,
+}
+
+Rate_Curve :: union #no_nil {
+	f64, // flat continuously compounded rate r0
+	^YieldCurve,
+	Discount_Curve,
+}
+
+// P(0, t) of a rate curve
+rate_curve_discount :: proc(curve: Rate_Curve, t: f64) -> f64 {
+	return math.exp_f64(_rc_lnp(curve, t))
+}
+
+// Instantaneous forward f(0, t) = −∂ ln P(0, t)/∂t (exact for a flat rate,
+// else a central difference with step 1e-5)
+rate_curve_forward :: proc(curve: Rate_Curve, t: f64) -> f64 {
+	if r0, ok := curve.(f64); ok {return r0}
+	h := 1e-5
+	if t < h {return -(_rc_lnp(curve, t + h) - _rc_lnp(curve, t)) / h}
+	return -(_rc_lnp(curve, t + h) - _rc_lnp(curve, t - h)) / (2.0 * h)
+}
+
+@(private = "file")
+_rc_lnp :: proc(curve: Rate_Curve, t: f64) -> f64 {
+	if t <= 0.0 {return 0.0}
+	switch c in curve {
+	case f64:
+		return -c * t
+	case ^YieldCurve:
+		return math.ln_f64(yield_curve_discount_factor(c, t))
+	case Discount_Curve:
+		return math.ln_f64(c.fn(t, c.user_data))
+	}
+	return 0.0
+}
+
+// A curve shifted in parallel by `shift` (ln P(0,t) − shift·t), for the rate Greeks
+@(private = "file")
+_Ir_Curve :: struct {
+	curve: Rate_Curve,
+	shift: f64,
+}
+
+@(private = "file")
+_lnp :: proc(c: _Ir_Curve, t: f64) -> f64 {
+	return _rc_lnp(c.curve, t) - c.shift * max(t, 0.0)
+}
+
+// ============================================================================
+// G2++ / HULL-WHITE MONTE CARLO ENGINE
 // ============================================================================
 // r(t) = x(t) + y(t) + φ(t),  dx = −a x dt + σ dW1,  dy = −b y dt + η dW2,
-// d⟨W1, W2⟩ = ρ dt, with φ fitted to P(0,t) = e^{−r0 t} (Brigo–Mercurio §4.2).
+// d⟨W1, W2⟩ = ρ dt, with φ fitted to the initial curve P(0,t) (Brigo–Mercurio §4.2).
 // Hull-White 1F is the case η = 0. (x, y, ∫(x + y)) is sampled exactly between
 // event dates (it is jointly Gaussian), so there is no time-stepping error and
 // the Monte Carlo pricers need no time grid. Bonds are priced analytically on
@@ -356,11 +415,11 @@ _G2_Bond :: struct {
 }
 
 @(private = "file")
-_g2_bond :: proc(p: HW2_Params, r0, t_, T: f64) -> _G2_Bond {
+_g2_bond :: proc(p: HW2_Params, c: _Ir_Curve, t_, T: f64) -> _G2_Bond {
 	tau := T - t_
 	if tau <= 0.0 {return {}}
 	return _G2_Bond {
-		lc = -r0 * tau + 0.5 * (_g2_v(p, tau) - _g2_v(p, T) + _g2_v(p, t_)),
+		lc = _lnp(c, T) - _lnp(c, t_) + 0.5 * (_g2_v(p, tau) - _g2_v(p, T) + _g2_v(p, t_)),
 		ba = _hw_b(p.a, tau),
 		bb = _hw_b(p.b, tau),
 	}
@@ -398,7 +457,7 @@ _g2_normals :: proc(n_paths, m: int, allocator: mem.Allocator) -> []f64 {
 @(private = "file")
 _g2_simulate :: proc(
 	p: HW2_Params,
-	r0: f64,
+	c: _Ir_Curve,
 	dates: []f64,
 	z: []f64,
 	allocator: mem.Allocator,
@@ -454,7 +513,7 @@ _g2_simulate :: proc(
 			eb  = math.exp_f64(-b * dt),
 			ba  = ba,
 			bb  = bb,
-			det = -r0 * dt - 0.5 * (_g2_v(p, dates[j]) - _g2_v(p, tp)),
+			det = _lnp(c, dates[j]) - _lnp(c, tp) - 0.5 * (_g2_v(p, dates[j]) - _g2_v(p, tp)),
 			L   = {Lm[0][0], Lm[1][0], Lm[1][1], Lm[2][0], Lm[2][1], Lm[2][2]},
 		}
 		tp = dates[j]
@@ -487,7 +546,8 @@ _g2_simulate :: proc(
 @(private = "file")
 _g2_capfloor_mc :: proc(
 	p: HW2_Params,
-	r0, K: f64,
+	c: _Ir_Curve,
+	K: f64,
 	T_start, T_end, delta: []f64,
 	n: int,
 	is_cap: bool,
@@ -506,11 +566,11 @@ _g2_capfloor_mc :: proc(
 	defer delete(bonds, allocator)
 	fixed := 0.0
 	for i in 0 ..< n {
-		bonds[i] = _g2_bond(p, r0, max(T_start[i], 0.0), T_end[i])
+		bonds[i] = _g2_bond(p, c, max(T_start[i], 0.0), T_end[i])
 		idx[i] = -1
 		if T_start[i] <= 0.0 {
 			fixed += payoff(
-				math.exp_f64(-r0 * T_end[i]) / math.exp_f64(-r0 * max(T_start[i], 0.0)),
+				math.exp_f64(_lnp(c, T_end[i]) - _lnp(c, max(T_start[i], 0.0))),
 				delta[i],
 				K,
 				is_cap,
@@ -523,7 +583,7 @@ _g2_capfloor_mc :: proc(
 	}
 	if len(dates) == 0 {return fixed}
 	m := len(dates)
-	ps := _g2_simulate(p, r0, dates[:], z, allocator)
+	ps := _g2_simulate(p, c, dates[:], z, allocator)
 	defer _g2_paths_free(&ps, allocator)
 
 	total := 0.0
@@ -549,7 +609,8 @@ _g2_capfloor_mc :: proc(
 @(private = "file")
 _g2_swaption_mc :: proc(
 	p: HW2_Params,
-	r0, K, T_exp, T_maturity, delta: f64,
+	c: _Ir_Curve,
+	K, T_exp, T_maturity, delta: f64,
 	is_payer: bool,
 	z: []f64,
 	allocator: mem.Allocator,
@@ -558,8 +619,8 @@ _g2_swaption_mc :: proc(
 	if n_pay <= 0 || T_exp <= 0.0 {return 0.0}
 	bonds := make([]_G2_Bond, n_pay, allocator)
 	defer delete(bonds, allocator)
-	for j in 0 ..< n_pay {bonds[j] = _g2_bond(p, r0, T_exp, T_exp + f64(j + 1) * delta)}
-	ps := _g2_simulate(p, r0, []f64{T_exp}, z, allocator)
+	for j in 0 ..< n_pay {bonds[j] = _g2_bond(p, c, T_exp, T_exp + f64(j + 1) * delta)}
+	ps := _g2_simulate(p, c, []f64{T_exp}, z, allocator)
 	defer _g2_paths_free(&ps, allocator)
 
 	total := 0.0
@@ -575,8 +636,8 @@ _g2_swaption_mc :: proc(
 }
 
 // Price and central-difference Greeks on common random numbers: delta_r is the
-// derivative with respect to the flat rate r0 (a parallel curve shift), vega
-// with respect to σ
+// derivative with respect to a parallel shift of the continuously compounded
+// zero rates (for a flat curve: ∂/∂r0), vega with respect to σ
 @(private = "file")
 _G2_Pricer :: struct {
 	kind:                  enum {
@@ -595,7 +656,7 @@ _G2_Pricer :: struct {
 _g2_price :: proc(
 	c: ^_G2_Pricer,
 	p: HW2_Params,
-	r0: f64,
+	curve: _Ir_Curve,
 	z: []f64,
 	allocator: mem.Allocator,
 ) -> f64 {
@@ -603,7 +664,7 @@ _g2_price :: proc(
 	case .Cap, .Floor:
 		return _g2_capfloor_mc(
 			p,
-			r0,
+			curve,
 			c.K,
 			c.T_start,
 			c.T_end,
@@ -614,7 +675,7 @@ _g2_price :: proc(
 			allocator,
 		)
 	case .Swaption:
-		return _g2_swaption_mc(p, r0, c.K, c.T_exp, c.T_mat, c.dlt, c.is_payer, z, allocator)
+		return _g2_swaption_mc(p, curve, c.K, c.T_exp, c.T_mat, c.dlt, c.is_payer, z, allocator)
 	}
 	return 0.0
 }
@@ -623,7 +684,7 @@ _g2_price :: proc(
 _g2_price_greeks :: proc(
 	c: ^_G2_Pricer,
 	p: HW2_Params,
-	r0: f64,
+	curve: Rate_Curve,
 	n_paths, n_dates: int,
 	allocator: mem.Allocator,
 ) -> (
@@ -631,16 +692,19 @@ _g2_price_greeks :: proc(
 ) {
 	z := _g2_normals(n_paths, max(n_dates, 1), allocator)
 	defer delete(z, allocator)
-	price = _g2_price(c, p, r0, z, allocator)
-	h_r := max(0.01 * abs(r0), 1e-4)
+	base := _Ir_Curve{curve, 0}
+	price = _g2_price(c, p, base, z, allocator)
+	h_r := 1e-4
+	if r0, flat := curve.(f64); flat {h_r = max(0.01 * abs(r0), 1e-4)}
+	up_r, dn_r := _Ir_Curve{curve, h_r}, _Ir_Curve{curve, -h_r}
 	delta_r =
-		(_g2_price(c, p, r0 + h_r, z, allocator) - _g2_price(c, p, r0 - h_r, z, allocator)) /
-		(2.0 * h_r)
+		(_g2_price(c, p, up_r, z, allocator) - _g2_price(c, p, dn_r, z, allocator)) / (2.0 * h_r)
 	h_s := max(0.01 * p.sigma, 1e-6)
 	up, dn := p, p
 	up.sigma += h_s
 	dn.sigma -= h_s
-	vega = (_g2_price(c, up, r0, z, allocator) - _g2_price(c, dn, r0, z, allocator)) / (2.0 * h_s)
+	vega =
+		(_g2_price(c, up, base, z, allocator) - _g2_price(c, dn, base, z, allocator)) / (2.0 * h_s)
 	return
 }
 
@@ -661,11 +725,12 @@ _g2_count_dates :: proc(T_start: []f64, n: int) -> int {
 // ============================================================================
 // Hull-White Monte Carlo: Cap Option (with CRN Greeks)
 // ============================================================================
-// Cap Σ δ_i (L_i − K)⁺ under Hull-White 1F fitted to the flat curve e^{−r0 t}.
-// T_start must be non-decreasing. Matches hw_price_cap_floor_strip up to Monte
-// Carlo error (exact sampling at the fixing dates).
+// Cap Σ δ_i (L_i − K)⁺ under Hull-White 1F fitted to `curve` (a flat rate, a
+// YieldCurve or a discount function). T_start must be non-decreasing. Matches
+// hw_price_cap_floor_strip up to Monte Carlo error (exact sampling at the
+// fixing dates).
 hw_mc_cap_option :: proc(
-	r0: f64,
+	curve: Rate_Curve,
 	K: f64,
 	T_start: []f64,
 	T_end: []f64,
@@ -690,7 +755,7 @@ hw_mc_cap_option :: proc(
 	return _g2_price_greeks(
 		&c,
 		_g2_from_hw(params),
-		r0,
+		curve,
 		n_paths,
 		_g2_count_dates(T_start, n_caplets),
 		allocator,
@@ -845,11 +910,11 @@ calibrate_hull_white_2f :: proc(
 // ============================================================================
 // Hull-White 2-Factor Monte Carlo: Cap Option (with CRN Greeks)
 // ============================================================================
-// Cap under G2++ fitted to the flat curve e^{−r0 t}; vega is ∂/∂σ (first factor).
-// Matches hull_white_2f_caplet_price_tensor up to Monte Carlo error (exact
-// sampling at the fixing dates).
+// Cap under G2++ fitted to `curve`; vega is ∂/∂σ (first factor). Matches
+// hull_white_2f_caplet_price_tensor up to Monte Carlo error (exact sampling at
+// the fixing dates).
 hw2_mc_cap_option :: proc(
-	r0: f64,
+	curve: Rate_Curve,
 	K: f64,
 	T_start: []f64,
 	T_end: []f64,
@@ -874,7 +939,7 @@ hw2_mc_cap_option :: proc(
 	return _g2_price_greeks(
 		&c,
 		params,
-		r0,
+		curve,
 		n_paths,
 		_g2_count_dates(T_start, n_caplets),
 		allocator,
@@ -886,16 +951,17 @@ hw2_mc_cap_option :: proc(
 
 SwaptionSpec :: struct {
 	T_exp:       f64,
-	swap_length: int, // Number of annual payments
+	swap_length: int, // number of fixed payments, at T_exp + k·delta
 	F:           f64, // Forward swap rate
 	K:           f64, // Strike
 	annuity:     f64, // PV01 / Annuity factor
+	delta:       f64, // years between fixed payments (0 = 1, annual)
 }
 // Total normal (Bachelier) variance of the forward swap rate at expiry under
 // G2++, frozen-weights approximation (Schrager-Pelsser style).
 //
 // With bond sensitivities dP(t,T_i)/dx = -B_a(T_i - t) P frozen on today's
-// curve P(0,t) = exp(-r0 t), the swap rate responds to the factors with
+// curve P(0,t), the swap rate responds to the factors with
 //   C_x(t) = [-B_a(T0-t) P(T0) + B_a(Tn-t) P(Tn) + F sum_i B_a(Ti-t) P(Ti)] / A
 //          = alpha_x + kappa_x e^{a t}     (alpha_x = 0 when F is the par rate)
 // and the variance integrates in closed form over [0, T]. Matches the exact
@@ -903,25 +969,28 @@ SwaptionSpec :: struct {
 compute_hw2f_swap_variance :: proc(
 	spec: SwaptionSpec,
 	params: HW2_Params,
-	r0: f64, // flat continuously compounded rate for discount factors
+	curve: Rate_Curve, // initial discount curve (a flat rate r0, a YieldCurve, ...)
 ) -> f64 {
 	a, b := params.a, params.b
 	sigma, eta, rho := params.sigma, params.eta, params.rho
 	T := spec.T_exp
 	S0, A0 := spec.F, spec.annuity
+	d := spec.delta if spec.delta > 0.0 else 1.0
 
-	// Payment schedule: annual, T_i = T + i, i = 1..swap_length
-	P_T0 := math.exp_f64(-r0 * T)
-	P_Tn := math.exp_f64(-r0 * (T + f64(spec.swap_length)))
-	G_a := -P_T0 * math.exp_f64(-a * T) + P_Tn * math.exp_f64(-a * (T + f64(spec.swap_length)))
-	G_b := -P_T0 * math.exp_f64(-b * T) + P_Tn * math.exp_f64(-b * (T + f64(spec.swap_length)))
+	// Payment schedule: T_i = T + i·delta, i = 1..swap_length; the fixed
+	// coupons δ·S0 enter with their accrual δ
+	T_n := T + f64(spec.swap_length) * d
+	P_T0 := rate_curve_discount(curve, T)
+	P_Tn := rate_curve_discount(curve, T_n)
+	G_a := -P_T0 * math.exp_f64(-a * T) + P_Tn * math.exp_f64(-a * T_n)
+	G_b := -P_T0 * math.exp_f64(-b * T) + P_Tn * math.exp_f64(-b * T_n)
 	H := -P_T0 + P_Tn // level part of the numerator
 	for k in 1 ..= spec.swap_length {
-		T_i := T + f64(k)
-		P_Ti := math.exp_f64(-r0 * T_i)
-		G_a += S0 * P_Ti * math.exp_f64(-a * T_i)
-		G_b += S0 * P_Ti * math.exp_f64(-b * T_i)
-		H += S0 * P_Ti
+		T_i := T + f64(k) * d
+		P_Ti := rate_curve_discount(curve, T_i)
+		G_a += S0 * d * P_Ti * math.exp_f64(-a * T_i)
+		G_b += S0 * d * P_Ti * math.exp_f64(-b * T_i)
+		H += S0 * d * P_Ti
 	}
 	// C_x(t) = alpha_x + kappa_x e^{a t}, C_y(t) = alpha_y + kappa_y e^{b t}
 	alpha_x, kappa_x := H / (a * A0), -G_a / (a * A0)
@@ -949,14 +1018,14 @@ hw2f_swaption_price_strip :: proc(
 	params: HW2_Params,
 	swaptions: []SwaptionSpec,
 	n_swaptions: int,
-	r0: f64,
+	curve: Rate_Curve,
 	allocator: mem.Allocator,
 ) -> []f64 {
 	prices := make([]f64, n_swaptions, allocator)
 
 	for i in 0 ..< n_swaptions {
 		spec := swaptions[i]
-		swap_var := compute_hw2f_swap_variance(spec, params, r0)
+		swap_var := compute_hw2f_swap_variance(spec, params, curve)
 
 		if swap_var < 1e-18 {
 			prices[i] = spec.annuity * math.max(spec.F - spec.K, 0.0)
@@ -975,7 +1044,7 @@ hw2f_swaption_price_strip :: proc(
 // Joint loss function: Caps RMSE + Swaptions RMSE
 _hw2f_joint_loss :: proc(
 	params: HW2_Params,
-	r0: f64,
+	curve: Rate_Curve,
 	// Caplet data
 	cap_T_start_t: ^t.Tensor,
 	cap_T_end_t: ^t.Tensor,
@@ -1004,7 +1073,13 @@ _hw2f_joint_loss :: proc(
 	cap_loss := _rmse_and_free(cap_model_t, cap_market_t, relative = true)
 
 	// 2. Swaption loss (analytical)
-	swaption_model := hw2f_swaption_price_strip(params, swaption_specs, n_swaptions, r0, allocator)
+	swaption_model := hw2f_swaption_price_strip(
+		params,
+		swaption_specs,
+		n_swaptions,
+		curve,
+		allocator,
+	)
 	defer delete(swaption_model, allocator)
 
 	swaption_sse := 0.0
@@ -1042,7 +1117,7 @@ calibrate_hull_white_2f_joint :: proc(
 	swaption_specs: []SwaptionSpec,
 	swaption_market: []f64,
 	n_swaptions: int,
-	r0: f64, // <-- NEW: pass r0 for proper annuity weighting
+	curve: Rate_Curve, // initial curve for the swaption variances (a flat rate r0, a YieldCurve, ...)
 	allocator: mem.Allocator = context.allocator,
 ) -> HW2F_JointResult {
 
@@ -1055,7 +1130,7 @@ calibrate_hull_white_2f_joint :: proc(
 	cap_market_t := _make_const_tensor(cap_market, n_caplets, allocator)
 
 	ctx := _HW2F_Joint_Ctx {
-		r0              = r0,
+		curve           = curve,
 		caps            = {
 			cap_T_start_t,
 			cap_T_end_t,
@@ -1117,44 +1192,48 @@ calibrate_hull_white_2f_joint :: proc(
 // BERMUDAN SWAPTION PRICING (HW 2-FACTOR)
 // ============================================================================
 
-// G2++ zero-coupon bond P(t, T) on the flat curve e^{−r0 t}, given the short rate
-// r_t and the second factor x_t (the y factor of Brigo–Mercurio); the first factor
-// is r_t − φ(t) − x_t with φ(t) = r0 + σ²/2 B_a(t)² + η²/2 B_b(t)² + ρση B_a(t) B_b(t).
+// G2++ zero-coupon bond P(t, T) fitted to `curve`, given the short rate r_t and
+// the second factor x_t (the y factor of Brigo–Mercurio); the first factor is
+// r_t − φ(t) − x_t with φ(t) = f(0,t) + σ²/2 B_a(t)² + η²/2 B_b(t)² + ρση B_a(t) B_b(t)
+// and f(0,t) the curve's instantaneous forward (r0 on a flat curve).
 hw2f_zero_coupon_bond :: proc(
 	t: f64,
 	T: f64,
 	r_t: f64,
 	x_t: f64,
 	params: HW2_Params,
-	r0: f64,
+	curve: Rate_Curve,
 ) -> f64 {
 	if T - t <= 0.0 {return 1.0}
 	p := params
 	ba, bb := _hw_b(p.a, t), _hw_b(p.b, t)
 	phi :=
-		r0 +
+		rate_curve_forward(curve, t) +
 		0.5 * p.sigma * p.sigma * ba * ba +
 		0.5 * p.eta * p.eta * bb * bb +
 		p.rho * p.sigma * p.eta * ba * bb
-	return _g2_bond_at(_g2_bond(p, r0, t, T), r_t - phi - x_t, x_t)
+	return _g2_bond_at(_g2_bond(p, _Ir_Curve{curve, 0}, t, T), r_t - phi - x_t, x_t)
 }
 
-// Hull-White 2-Factor Monte Carlo: Bermudan payer swaption. Exercising at
+// Hull-White 2-Factor Monte Carlo: Bermudan swaption. Exercising a payer at
 // exercise_dates[i] enters a swap paying K·δ at t + δ, t + 2δ, …, maturity and
-// receiving floating (worth 1 − P(t, maturity)). Longstaff–Schwartz on exact
-// G2++ paths (flat curve e^{−r0 t}), regressing on 1, x, y, x², xy, y² and the
-// exercise value over in-the-money paths (1, x, x² and the exercise value when
-// η = 0, the Hull-White 1F case).
+// receiving floating (worth 1 − P(t, maturity)); a receiver (is_payer = false)
+// enters the opposite swap. Longstaff–Schwartz on exact G2++ paths fitted to
+// `curve`, regressing on 1, x, y, x², xy, y² and the exercise value over
+// in-the-money paths (1, x, x² and the exercise value when η = 0, the
+// Hull-White 1F case).
 hw2f_mc_bermudan_option :: proc(
-	r0: f64,
+	curve: Rate_Curve,
 	K: f64,
 	exercise_dates: []f64, // e.g., [1.0, 2.0, 3.0, 4.0, 5.0]
 	maturity: f64, // e.g., 10.0
 	delta: f64, // e.g., 1.0
 	params: HW2_Params,
 	n_paths: int,
+	is_payer: bool = true,
 	allocator: mem.Allocator = context.allocator,
 ) -> f64 {
+	ic := _Ir_Curve{curve, 0}
 	dates := make([dynamic]f64, 0, len(exercise_dates), allocator)
 	defer delete(dates)
 	for d in exercise_dates {
@@ -1182,18 +1261,19 @@ hw2f_mc_bermudan_option :: proc(
 		legs[j].bonds = make([]_G2_Bond, n_pay, allocator)
 		for k in 0 ..< n_pay {
 			Tk := min(dates[j] + f64(k + 1) * delta, maturity)
-			legs[j].bonds[k] = _g2_bond(params, r0, dates[j], Tk)
+			legs[j].bonds[k] = _g2_bond(params, ic, dates[j], Tk)
 		}
 	}
-	exercise :: proc(lg: Leg, delta, K, x, y: f64) -> f64 {
+	sign := 1.0 if is_payer else -1.0
+	exercise :: proc(lg: Leg, delta, K, sign, x, y: f64) -> f64 {
 		annuity := 0.0
 		for c in lg.bonds {annuity += delta * _g2_bond_at(c, x, y)}
-		return 1.0 - _g2_bond_at(lg.bonds[len(lg.bonds) - 1], x, y) - K * annuity
+		return sign * (1.0 - _g2_bond_at(lg.bonds[len(lg.bonds) - 1], x, y) - K * annuity)
 	}
 
 	z := _g2_normals(n_paths, m, allocator)
 	defer delete(z, allocator)
-	ps := _g2_simulate(params, r0, dates[:], z, allocator)
+	ps := _g2_simulate(params, ic, dates[:], z, allocator)
 	defer _g2_paths_free(&ps, allocator)
 	n := ps.n
 
@@ -1208,14 +1288,17 @@ hw2f_mc_bermudan_option :: proc(
 		delete(X, allocator); delete(yv, allocator)
 	}
 	for q in 0 ..< n {
-		U[q] = max(exercise(legs[m - 1], delta, K, ps.x[q * m + m - 1], ps.y[q * m + m - 1]), 0.0)
+		U[q] = max(
+			exercise(legs[m - 1], delta, K, sign, ps.x[q * m + m - 1], ps.y[q * m + m - 1]),
+			0.0,
+		)
 	}
 	for j := m - 2; j >= 0; j -= 1 {
 		n_itm := 0
 		sx, sy := 0.0, 0.0
 		for q in 0 ..< n {
 			U[q] *= math.exp_f64(ps.ld[q * m + j + 1])
-			ev[q] = exercise(legs[j], delta, K, ps.x[q * m + j], ps.y[q * m + j])
+			ev[q] = exercise(legs[j], delta, K, sign, ps.x[q * m + j], ps.y[q * m + j])
 			if ev[q] > 0.0 {
 				itm[n_itm] = q
 				n_itm += 1
@@ -1290,7 +1373,7 @@ hull_white_floorlet_price_tensor :: proc(
 
 // Hull-White Monte Carlo: Floor Option (with CRN Greeks); see hw_mc_cap_option.
 hw_mc_floor_option :: proc(
-	r0: f64,
+	curve: Rate_Curve,
 	K: f64,
 	T_start: []f64,
 	T_end: []f64,
@@ -1315,7 +1398,7 @@ hw_mc_floor_option :: proc(
 	return _g2_price_greeks(
 		&c,
 		_g2_from_hw(params),
-		r0,
+		curve,
 		n_paths,
 		_g2_count_dates(T_start, n_floorlets),
 		allocator,
@@ -1326,10 +1409,10 @@ hw_mc_floor_option :: proc(
 // 2. HULL-WHITE 1F EUROPEAN SWAPTION PRICING (Monte Carlo)
 // ============================================================================
 // Payer (receiver) swaption expiring at T_exp on a swap paying K·δ at
-// T_exp + jδ up to T_maturity, under Hull-White 1F fitted to e^{−r0 t}. Matches
+// T_exp + jδ up to T_maturity, under Hull-White 1F fitted to `curve`. Matches
 // Jamshidian's formula up to Monte Carlo error.
 hw_mc_swaption_option :: proc(
-	r0: f64,
+	curve: Rate_Curve,
 	K: f64,
 	T_exp: f64,
 	T_maturity: f64,
@@ -1351,7 +1434,7 @@ hw_mc_swaption_option :: proc(
 		dlt      = delta,
 		is_payer = is_payer,
 	}
-	return _g2_price_greeks(&c, _g2_from_hw(params), r0, n_paths, 1, allocator)
+	return _g2_price_greeks(&c, _g2_from_hw(params), curve, n_paths, 1, allocator)
 }
 
 // ============================================================================
@@ -1365,9 +1448,10 @@ CapFloorStripResult :: struct {
 	leg_prices:  []f64, // Price of each individual caplet/floorlet
 }
 
-// Price a whole strip of caplets or floorlets analytically using HW 1F
+// Price a whole strip of caplets or floorlets analytically using HW 1F fitted
+// to `curve`
 hw_price_cap_floor_strip :: proc(
-	r0: f64,
+	curve: Rate_Curve,
 	K: f64,
 	T_start: []f64,
 	T_end: []f64,
@@ -1382,14 +1466,13 @@ hw_price_cap_floor_strip :: proc(
 	T_end_t := _make_const_tensor(T_end, n, allocator)
 
 	// Forward rates F_i = (P(0, T_start) / P(0, T_end) - 1) / delta
-	// For flat curve r0: P(0, t) = exp(-r0 * t)
 	F_data := make([]f64, n, allocator)
 	P_data := make([]f64, n, allocator)
 	K_data := make([]f64, n, allocator)
 
 	for i in 0 ..< n {
-		P_start := math.exp_f64(-r0 * T_start[i])
-		P_end := math.exp_f64(-r0 * T_end[i])
+		P_start := rate_curve_discount(curve, T_start[i])
+		P_end := rate_curve_discount(curve, T_end[i])
 		F_data[i] = (P_start / P_end - 1.0) / delta[i]
 		P_data[i] = P_end
 		K_data[i] = K

@@ -6,6 +6,7 @@ package tests
 import w "../wotan/core"
 import fin "../wotan/finance"
 import "core:fmt"
+import "core:math"
 import "core:mem"
 
 @(private = "file")
@@ -380,6 +381,97 @@ inflation_reference_test :: proc(allocator: mem.Allocator) {
 				),
 			)
 		}
+	}
+
+	// 4. Inflation-linked bond: accrued interest (real coupon accrued × index
+	// ratio at settlement), clean price, index ratio and real yield (the
+	// FixedRateBond with the real coupon at clean / ratio) vs QuantLib CPIBond /
+	// BondFunctions.bondYield; the setup of the finance guide (fguide3/infl_ql.py):
+	// monthly fixings Jan 2024 – Sep 2026, linear 3M-lagged index, flat 2.5% nominal
+	{
+		today := w.Date{2026, 11, 11}
+		months: [33]w.Date
+		values: [33]f64
+		for i in 0 ..< 33 {
+			months[i] = w.add_month_date({2024, 1, 1}, i32(i))
+			values[i] =
+				math.round(
+					1000 * 120 * math.pow(1.022, f64(i) / 12) * (1 + 0.002 * math.sin(f64(i))),
+				) /
+				1000
+		}
+		index := fin.CPIIndex{months[:], values[:], nil}
+		quotes := []fin.ZCISQuote {
+			{{1, .Years}, 0.0210},
+			{{2, .Years}, 0.0205},
+			{{3, .Years}, 0.0204},
+			{{5, .Years}, 0.0210},
+			{{10, .Years}, 0.0222},
+		}
+		curve := fin.bootstrap_zero_inflation_curve(
+			&index,
+			today,
+			{2026, 8, 1},
+			quotes,
+			3,
+			.Linear,
+			{.TARGET},
+		)
+		defer fin.free_zero_inflation_curve(&curve)
+		index.curve = &curve
+		nominal := fin.YieldCurve {
+			tenors         = {1.0},
+			zero_rates     = {0.025},
+			reference_date = today,
+		}
+		sch := fin.make_schedule(
+			{2025, 4, 15},
+			{2035, 4, 15},
+			{6, .Months},
+			{.TARGET},
+			.Unadjusted,
+			.Unadjusted,
+		)
+		defer fin.free_schedule(&sch)
+		base := fin.cpi_observation(&index, {2025, 4, 15}, 3, .Linear)
+		b := fin.InflationLinkedBond{100, 0.0125, base, sch, .ACT_ACT_ICMA, .Following, 3, .Linear}
+		settle := w.Date{2026, 11, 13}
+		// QuantLib 1.44: accrued, clean, dirty, index ratio, real yield (semiannual, ACT/ACT ISMA)
+		QL :: [5]f64 {
+			0.10308095962188882,
+			111.27527040851338,
+			111.37835136813527,
+			1.0350750152377248,
+			0.0034485834895758584,
+		}
+		acc := fin.inflation_linked_bond_accrued_interest(b, &index, settle)
+		clean := fin.inflation_linked_bond_clean_price(b, &index, &nominal, settle)
+		dirty := fin.inflation_linked_bond_dirty_price(b, &index, &nominal, settle)
+		ratio := fin.inflation_linked_bond_index_ratio(b, &index, settle)
+		ry := fin.inflation_linked_bond_real_yield(b, &index, QL[1], settle)
+		ok :=
+			abs(acc - QL[0]) < 1e-12 &&
+			abs(clean - QL[1]) < 1e-9 &&
+			abs(dirty - QL[2]) < 1e-9 &&
+			abs(ratio - QL[3]) < 1e-13 &&
+			abs(ry - QL[4]) < 1e-10 &&
+			fin.inflation_linked_bond_accrued_interest(b, &index, {2026, 10, 15}) == 0
+		expect(
+			&passed,
+			&total,
+			ok,
+			fmt.tprintf(
+				"inflation-linked bond at 13 Nov 2026 vs QuantLib CPIBond: accrued %.10f (%.10f), clean %.10f (%.10f), index ratio %.10f (%.10f), real yield %.10f (BondFunctions.bondYield %.10f); no accrued on a coupon date",
+				acc,
+				QL[0],
+				clean,
+				QL[1],
+				ratio,
+				QL[3],
+				ry,
+				QL[4],
+			),
+		)
 	}
 
 	fmt.printf("Inflation summary: %d/%d passed\n", passed, total)

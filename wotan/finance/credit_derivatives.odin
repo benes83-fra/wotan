@@ -126,6 +126,17 @@ CDO_Params :: struct {
 	rho:          f64, // Copula correlation (factor loading²)
 	maturity:     f64, // CDO maturity
 	payment_freq: f64, // Coupon period in years (0 = quarterly)
+	// Heterogeneous pool: one entry per name. When set, it replaces N, lambda,
+	// recovery and rho; the pool loss is Σ notional_i (1 − recovery_i) over the
+	// defaulted names, divided by the total notional.
+	names:        []CDO_Name,
+}
+
+CDO_Name :: struct {
+	notional: f64, // relative size in the pool
+	lambda:   f64, // hazard rate
+	recovery: f64,
+	rho:      f64, // copula correlation (factor loading²)
 }
 
 // Gamma(shape, 1) by Marsaglia & Tsang (2000); shape < 1 via the boost U^{1/shape}
@@ -158,6 +169,9 @@ _cdo_tranche_mc :: proc(
 	tranche_pv: f64,
 	expected_loss_pct: f64,
 ) {
+	if len(params.names) > 0 {
+		return _cdo_tranche_mc_pool(tranche, params, nu, spread, n_paths, allocator)
+	}
 	N, T := params.N, params.maturity
 	if N <= 0 || n_paths <= 0 || T <= 0.0 || tranche.detach <= tranche.attach {return 0.0, 0.0}
 	freq := params.payment_freq if params.payment_freq > 0.0 else 0.25
@@ -203,6 +217,84 @@ _cdo_tranche_mc :: proc(
 		for k in 1 ..= n {
 			defaults += counts[k]
 			tlk := tl(lgd * f64(defaults), tranche.attach, tranche.detach, width)
+			prot += (tlk - tl_prev) * math.exp_f64(-params.r * 0.5 * (times[k - 1] + times[k]))
+			prem +=
+				(times[k] - times[k - 1]) *
+				math.exp_f64(-params.r * times[k]) *
+				(1.0 - 0.5 * (tl_prev + tlk))
+			tl_prev = tlk
+		}
+		sum_pv += prot - spread * prem
+		sum_el += tl_prev
+	}
+	return sum_pv / f64(n_paths), sum_el / f64(n_paths)
+}
+
+// Heterogeneous pool (params.names): the same copula with per-name default
+// thresholds, correlations and losses
+@(private = "file")
+_cdo_tranche_mc_pool :: proc(
+	tranche: CDO_Tranche,
+	params: CDO_Params,
+	nu: f64,
+	spread: f64,
+	n_paths: int,
+	allocator: mem.Allocator,
+) -> (
+	tranche_pv: f64,
+	expected_loss_pct: f64,
+) {
+	names, T := params.names, params.maturity
+	if n_paths <= 0 || T <= 0.0 || tranche.detach <= tranche.attach {return 0.0, 0.0}
+	freq := params.payment_freq if params.payment_freq > 0.0 else 0.25
+	n := _cds_n_periods(T, freq)
+	N := len(names)
+	times := make([]f64, n + 1, allocator)
+	loss := make([]f64, n + 1, allocator) // pool loss of the defaults in each period
+	thr := make([]f64, N * (n + 1), allocator)
+	lgd := make([]f64, N, allocator)
+	sr := make([]f64, N, allocator)
+	s1r := make([]f64, N, allocator)
+	defer {
+		delete(times, allocator); delete(loss, allocator); delete(thr, allocator)
+		delete(lgd, allocator); delete(sr, allocator); delete(s1r, allocator)
+	}
+	for k in 1 ..= n {times[k] = T - f64(n - k) * freq}
+	total := 0.0
+	for nm in names {total += nm.notional}
+	for nm, i in names {
+		lgd[i] = nm.notional * (1.0 - nm.recovery) / total
+		sr[i], s1r[i] = math.sqrt_f64(nm.rho), math.sqrt_f64(1.0 - nm.rho)
+		for k in 1 ..= n {
+			pd := 1.0 - math.exp_f64(-nm.lambda * times[k])
+			thr[i * (n + 1) + k] = ml.student_t_ppf(pd, nu) if nu > 0.0 else _bs_ppf(pd)
+		}
+	}
+	width := tranche.detach - tranche.attach
+	tl :: #force_inline proc(L, a, d, w: f64) -> f64 {return (min(L, d) - min(L, a)) / w}
+
+	sum_pv, sum_el := 0.0, 0.0
+	for _ in 0 ..< n_paths {
+		zm := rand.float64_normal(0.0, 1.0)
+		scale := 1.0
+		if nu > 0.0 {scale = 1.0 / math.sqrt_f64(2.0 * _cdo_gamma(0.5 * nu) / nu)}
+		for k in 0 ..= n {loss[k] = 0}
+		for i in 0 ..< N {
+			x := (sr[i] * zm + s1r[i] * rand.float64_normal(0.0, 1.0)) * scale
+			c := thr[i * (n + 1):(i + 1) * (n + 1)]
+			if !(x <= c[n]) {continue}
+			lo, hi := 1, n
+			for lo < hi {
+				mid := (lo + hi) / 2
+				if x <= c[mid] {hi = mid} else {lo = mid + 1}
+			}
+			loss[lo] += lgd[i]
+		}
+		prot, prem := 0.0, 0.0
+		L, tl_prev := 0.0, 0.0
+		for k in 1 ..= n {
+			L += loss[k]
+			tlk := tl(L, tranche.attach, tranche.detach, width)
 			prot += (tlk - tl_prev) * math.exp_f64(-params.r * 0.5 * (times[k - 1] + times[k]))
 			prem +=
 				(times[k] - times[k - 1]) *

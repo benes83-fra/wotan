@@ -206,6 +206,213 @@ _cs_maxdiff :: proc(a, b: []f64) -> f64 {
 	return d
 }
 
+// SciPy SLSQP / exhaustive supports: n = 8, cap 40%, group {0,1,2} <= 50%, group {3,4,6} >= 35%, min 8% if held
+@(private = "file")
+CS_SC_COV := [?]f64 {
+	0.0144,
+	0.0041322425822819505,
+	0.005347268495987664,
+	0.0007631314767852611,
+	-0.003668903280032097,
+	0.002009244846916174,
+	0.007071312504232373,
+	-0.002719482411105645,
+	0.0041322425822819505,
+	0.0225,
+	-0.0005859706828466029,
+	-0.007560292674315055,
+	0.0022605809670780646,
+	0.0022370089296039667,
+	-0.006708871278947756,
+	-0.0016000651861427574,
+	0.005347268495987664,
+	-0.0005859706828466029,
+	0.0324,
+	0.016003342828138544,
+	0.004577760114461231,
+	-0.0013715446675284907,
+	0.0006676785545723118,
+	-0.008031915538538109,
+	0.0007631314767852611,
+	-0.007560292674315055,
+	0.016003342828138544,
+	0.0484,
+	-0.006058622552572861,
+	0.0024363631745100128,
+	-0.008308315391695274,
+	-0.012382388220410833,
+	-0.003668903280032097,
+	0.0022605809670780646,
+	0.004577760114461231,
+	-0.006058622552572861,
+	0.0625,
+	-0.00952492029939895,
+	0.010419081469429364,
+	0.008097358181111658,
+	0.002009244846916174,
+	0.0022370089296039667,
+	-0.0013715446675284907,
+	0.0024363631745100128,
+	-0.00952492029939895,
+	0.010000000000000002,
+	-0.004811569373296135,
+	-0.0017819560490032124,
+	0.007071312504232373,
+	-0.006708871278947756,
+	0.0006676785545723118,
+	-0.008308315391695274,
+	0.010419081469429364,
+	-0.004811569373296135,
+	0.08999999999999998,
+	0.013593241812187391,
+	-0.002719482411105645,
+	-0.0016000651861427574,
+	-0.008031915538538109,
+	-0.012382388220410833,
+	0.008097358181111658,
+	-0.0017819560490032124,
+	0.013593241812187391,
+	0.04000000000000001,
+}
+@(private = "file")
+CS_SC_MU := [?]f64{0.05, 0.07, 0.08, 0.1, 0.11, 0.04, 0.13, 0.09}
+@(private = "file")
+CS_SC_V := [?]f64{0.3, 0.05, 0.12, 0.02, 0.25, 0.04, 0.2, 0.02}
+@(private = "file")
+CS_SC_GMIN_VAR := [?]f64 {
+	0.10108915761535518,
+	0.12508026207945944,
+	0.0013731584031007626,
+	0.15865418160064834,
+	0.12829382925850102,
+	0.3314585993259032,
+	0.06305198914085063,
+	0.09099882257618151,
+}
+@(private = "file")
+CS_SC_GMIN_MV := [?]f64 {
+	0.0,
+	0.2544662000116866,
+	0.0541157026365255,
+	0.23225351899621968,
+	0.10160760112338775,
+	0.06773482933048366,
+	0.11656338201732948,
+	0.1732587658843673,
+}
+@(private = "file")
+CS_SC_NOGMIN_VAR := [?]f64 {
+	0.13096048190314027,
+	0.1149657675480704,
+	0.0630098151415837,
+	0.08666094712341438,
+	0.0916407741818316,
+	0.364931070927466,
+	0.03112901343038993,
+	0.11670212974410377,
+}
+@(private = "file")
+CS_SC_SC_VAR := [?]f64 {
+	0.09234222272346265,
+	0.13247016708838077,
+	0.0,
+	0.15137801443765592,
+	0.11862198556234405,
+	0.33865623550297574,
+	0.08,
+	0.08653137468518088,
+}
+@(private = "file")
+CS_SC_SC_UTIL := [?]f64 {
+	0.0,
+	0.14265785615882187,
+	0.0,
+	0.3166587189731328,
+	0.17635047377757415,
+	0.0,
+	0.21381885769064504,
+	0.15051409339982613,
+}
+@(private = "file")
+CS_SC_SC_PROJ := [?]f64 {
+	0.2925000000067833,
+	0.08,
+	0.11249999999458045,
+	0.0,
+	0.24249999999990204,
+	0.08000000000000002,
+	0.19249999999873413,
+	0.0,
+}
+@(private = "file")
+CS_SC_RELAX_VAR := [?]f64 {
+	0.10108915761535518,
+	0.12508026207945944,
+	0.0013731584031007626,
+	0.15865418160064834,
+	0.12829382925850102,
+	0.3314585993259032,
+	0.06305198914085063,
+	0.09099882257618151,
+}
+
+// long SPG steps with groups {0,1,2} <= 50%, {3,4,6} >= 35%, cap 40%: eps w'Cw - mu'w (eps 1e-4); projections of far points
+@(private = "file")
+CS_LONG_LONG_LIN := [?]f64 {
+	4.442937250947501e-19,
+	4.377576912334152e-22,
+	6.0065755255708435e-21,
+	0.20000000000000093,
+	0.4,
+	2.041588642177029e-21,
+	0.4,
+	9.29172722542608e-22,
+}
+@(private = "file")
+CS_LONG_FAR_V0 := [?]f64 {
+	-115.75496471201177,
+	28.97558023277514,
+	78.08540692250985,
+	54.39736447085796,
+	-96.13826412454365,
+	107.1008665601581,
+	70.14556601104506,
+	70.49734550988194,
+}
+@(private = "file")
+CS_LONG_FAR_P0 := [?]f64 {
+	1.0862566393607475e-16,
+	7.84140445961721e-19,
+	0.25000000000000033,
+	2.86816912456771e-16,
+	1.7625437353515697e-16,
+	0.39999999999999997,
+	0.34999999999999937,
+	7.860906625098188e-19,
+}
+@(private = "file")
+CS_LONG_FAR_V1 := [?]f64 {
+	-7901.524999630146,
+	-20346.25481831873,
+	6033.017469247647,
+	7442.945298799118,
+	-3096.8679986627135,
+	3673.2137294554022,
+	17103.94291477645,
+	10607.978400658138,
+}
+@(private = "file")
+CS_LONG_FAR_P1 := [?]f64 {
+	1.318288062648889e-16,
+	1.7011116980376067e-16,
+	1.9142158083931118e-19,
+	0.19999999999999982,
+	1.789515346672274e-16,
+	6.934860588988315e-17,
+	0.3999999999999999,
+	0.4,
+}
+
 constraints_reference_test :: proc(allocator: mem.Allocator) {
 	seed_test(#procedure)
 	fmt.println(
@@ -349,6 +556,144 @@ constraints_reference_test :: proc(allocator: mem.Allocator) {
 				_cs_maxdiff(w, CS_W_SR[:]),
 			),
 		)
+	}
+
+	// Group lower limits and min_weight_if_held (semi-continuous weights, by
+	// branch and bound) vs SciPy SLSQP and an exhaustive search over all 255
+	// supports (cons_ref.py): n = 8, cap 40%, group {0,1,2} ≤ 50%,
+	// group {3,4,6} ≥ 35%, min 8% if held
+	{
+		cov := l.matrix_new(f64, 8, 8, allocator)
+		copy(cov.data, CS_SC_COV[:])
+		mu := CS_SC_MU[:]
+		groups := []fin.GroupLimit {
+			{asset_indices = {0, 1, 2}, max_weight = 0.5}, // no lower limit
+			{asset_indices = {3, 4, 6}, min_weight = 0.35}, // no upper limit
+		}
+		c := fin.PortfolioConstraints {
+			no_short_selling = true,
+			max_weight       = 0.4,
+			group_limits     = groups,
+		}
+		sc := c
+		sc.min_weight, sc.min_weight_if_held = 0.08, true
+		sc1 := sc
+		sc1.group_limits = groups[:1]
+		sp := fin.PortfolioConstraints {
+			no_short_selling   = true,
+			max_weight         = 0.4,
+			min_weight         = 0.08,
+			min_weight_if_held = true,
+		}
+		got := [5][]f64 {
+			fin.constrained_min_variance_portfolio(&cov, c, allocator),
+			fin.constrained_mean_variance_portfolio(mu, &cov, 0.09, c, allocator),
+			fin.constrained_min_variance_portfolio(&cov, sc, allocator),
+			fin.constrained_risk_aversion_portfolio(mu, &cov, 3, sc1, allocator),
+			fin.project_constraints(CS_SC_V[:], sp, allocator),
+		}
+		refs := [5][]f64 {
+			CS_SC_GMIN_VAR[:],
+			CS_SC_GMIN_MV[:],
+			CS_SC_SC_VAR[:],
+			CS_SC_SC_UTIL[:],
+			CS_SC_SC_PROJ[:],
+		}
+		objective :: proc(k: int, w: []f64, cov: ^l.Matrix(f64), mu: []f64) -> f64 {
+			switch k {
+			case 3:
+				return 1.5 * fin.portfolio_variance(w, cov) - l.dot_simd(mu, w)
+			case 4:
+				s := 0.0
+				for x, i in w {s += (x - CS_SC_V[i]) * (x - CS_SC_V[i])}
+				return s
+			}
+			return fin.portfolio_variance(w, cov)
+		}
+		worst_w, worst_f := 0.0, 0.0
+		for k in 0 ..< 5 {
+			for x, i in got[k] {worst_w = max(worst_w, abs(x - refs[k][i]))}
+			// not worse than the reference (both are optimal up to SLSQP's precision)
+			worst_f = max(
+				worst_f,
+				objective(k, got[k], &cov, mu) - objective(k, refs[k], &cov, mu),
+			)
+		}
+		// the semi-continuous results: every weight 0 or in [8%, 40%]
+		sc_ok := true
+		for k in 2 ..< 5 {
+			for x in got[k] {sc_ok &&= x == 0 || (x >= 0.08 - 1e-12 && x <= 0.4 + 1e-12)}
+		}
+		g2 := got[0][3] + got[0][4] + got[0][6]
+		expect(
+			&passed,
+			&total,
+			worst_w < 1e-7 && worst_f < 1e-12 && sc_ok && abs(g2 - 0.35) < 1e-12,
+			fmt.tprintf(
+				"group lower limit (binding: %.12f) and min 8%% if held (min variance, utility, projection; exhaustive search over supports) vs SciPy: max weight diff %.1e, objective excess %.1e; weights 0 or in [8%%, 40%%] %v",
+				g2,
+				worst_w,
+				worst_f,
+				sc_ok,
+			),
+		)
+		for w in got {delete(w, allocator)}
+	}
+
+	// Long projected-gradient steps with group limits (upper and lower): a nearly
+	// linear objective ε wᵀΣw − μᵀw (ε = 1e-4, Barzilai–Borwein steps ~1/ε) and
+	// projections of points 1e2 and 1e4 away, vs SciPy SLSQP (cons_long.py). The
+	// Dykstra projection must not stop while its increments still move.
+	{
+		cov := l.matrix_new(f64, 8, 8, allocator)
+		copy(cov.data, CS_SC_COV[:])
+		c := fin.PortfolioConstraints {
+			no_short_selling = true,
+			max_weight       = 0.4,
+			group_limits     = []fin.GroupLimit {
+				{asset_indices = {0, 1, 2}, max_weight = 0.5},
+				{asset_indices = {3, 4, 6}, min_weight = 0.35},
+			},
+		}
+		Ctx :: struct {
+			cov: ^l.Matrix(f64),
+			mu:  []f64,
+		}
+		ctx := Ctx{&cov, CS_SC_MU[:]}
+		f :: proc(w: []f64, user: rawptr) -> f64 {
+			x := (^Ctx)(user)
+			return 1e-4 * fin.portfolio_variance(w, x.cov) - l.dot_simd(x.mu, w)
+		}
+		g :: proc(w, gr: []f64, user: rawptr) {
+			x := (^Ctx)(user)
+			gv := fin.portfolio_variance_gradient(w, x.cov, context.temp_allocator)
+			for i in 0 ..< len(w) {gr[i] = 1e-4 * gv[i] - x.mu[i]}
+		}
+		lin := fin.constrained_minimize(8, f, g, &ctx, c, allocator)
+		p0 := fin.project_constraints(CS_LONG_FAR_V0[:], c, allocator)
+		p1 := fin.project_constraints(CS_LONG_FAR_V1[:], c, allocator)
+		worst := 0.0
+		for i in 0 ..< 8 {
+			worst = max(
+				worst,
+				abs(lin[i] - CS_LONG_LONG_LIN[i]),
+				abs(p0[i] - CS_LONG_FAR_P0[i]),
+				abs(p1[i] - CS_LONG_FAR_P1[i]),
+			)
+		}
+		expect(
+			&passed,
+			&total,
+			worst < 1e-9,
+			fmt.tprintf(
+				"long SPG steps with upper and lower group limits (nearly linear objective; projections of points 1e2 and 1e4 away) vs SciPy: max weight diff %.1e; %.4f",
+				worst,
+				lin,
+			),
+		)
+		delete(lin, allocator)
+		delete(p0, allocator)
+		delete(p1, allocator)
 	}
 
 	fmt.printf("Constraints summary: %d/%d passed\n", passed, total)

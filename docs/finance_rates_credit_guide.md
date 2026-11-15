@@ -37,7 +37,7 @@ The part 3 conventions carry over:
 - `YieldCurve` holds continuously compounded zero rates. Dated curves measure time in years from their `reference_date` under ACT/365F.
 - `Calendar`, `Period`, `Schedule` and `DayCountConvention` work as described there.
 
-The rate models in sections 4 and 5 take a flat initial curve: `r0` is a continuously compounded rate, and P(0, t) = e^(−r0 t). All times are in years.
+The rate models in sections 4 and 5 are fitted to an initial curve P(0, t). The examples use a flat continuously compounded rate `r0`, P(0, t) = e^(−r0 t); section 5 ends with pricing on a yield curve. All times are in years.
 
 The Monte Carlo pricers use `core:math/rand`, so `rand.reset(seed)` makes a run reproducible. The Hull-White and G2++ pricers take no time grid: they sample the Gaussian factors exactly at the dates that matter, so there is no time-stepping error.
 
@@ -183,9 +183,14 @@ QuantLib (`VanillaSwap`, `OvernightIndexedSwap`, `DiscountingSwapEngine`) gives 
 
 **Seasoned swaps.** On real dates, flows paid on or before the curves' reference date are left out. The floating coupon in progress needs `current_fixing`:
 - **Ibor coupon:** the fixing that has already been made. That applies when its fixing date is before the reference date; a fixing on the reference date itself is projected.
-- **Overnight coupon:** the rate compounded from the accrual start to the reference date, simple in the float day count. The rest of the period is projected from the curve. This works for plain OIS legs only; with lookback, lockout or observation shift, a coupon in progress gives NaN.
+- **Overnight coupon:** the rate compounded from the accrual start to the reference date, simple in the float day count. The rest of the period is projected from the curve. This shortcut works for plain OIS legs.
 
 Without `current_fixing`, the NPV is NaN, as with QuantLib's "missing fixing".
+
+Instead of `current_fixing`, an overnight leg can take the index's past daily fixings in `overnight_fixings` (a slice of `Overnight_Fixing{date, rate}`, in any order). This is QuantLib's approach, and it works with lookback, lockout and observation shift too. The coupon in progress is then compounded day by day:
+- a rate observed before the reference date comes from its fixing, and a missing one makes the NPV NaN;
+- a rate observed on the reference date comes from its fixing if there is one, and otherwise from the curve;
+- later rates come from the curve.
 
 ```odin
 // seasoned Euribor swap: 5Y from 13 Nov 2024; the coupon from 13 May 2026
@@ -209,12 +214,31 @@ for d := (w.Date{2026, 3, 2}); w.date_less(d, today); {
 s3.current_fixing = (growth - 1) / fin.year_fraction(.ACT_360, {2026, 3, 2}, today)
 z := fin.price_dated_swap(s3, &ois)
 fmt.printf("seasoned OIS (compounded so far %.10f): npv %.4f float leg %.4f\n", s3.current_fixing.?, z.npv, z.pv_floating_leg)
+
+// the same swap with a 2-day lookback, from the daily fixings
+lb_conv := ois_conv
+lb_conv.lookback_days = 2
+fixings: [dynamic]fin.Overnight_Fixing
+defer delete(fixings)
+for d := (w.Date{2026, 2, 20}); w.date_less(d, today); d = fin.calendar_advance({.TARGET}, d, 1, .Days) {
+	append(&fixings, fin.Overnight_Fixing{d, 0.02})
+}
+for shift in ([]bool{false, true}) {
+	lb_conv.observation_shift = shift
+	s3l := fin.make_dated_swap(lb_conv, {2026, 3, 2}, {3, .Years}, 0.0200, 10e6)
+	defer fin.free_dated_swap(&s3l)
+	s3l.overnight_fixings = fixings[:]
+	zl := fin.price_dated_swap(s3l, &ois)
+	fmt.printf("  lookback 2, observation shift %v: npv %.4f float leg %.4f\n", shift, zl.npv, zl.pv_floating_leg)
+}
 ```
 
 ```
 seasoned Euribor swap without the fixing: NaN
   with it: npv -197650.9544 fixed leg 969406.3834 float leg 771755.4290
 seasoned OIS (compounded so far 0.0201406903): npv 17365.1854 float leg 610239.4357
+  lookback 2, observation shift false: npv 17183.8614 float leg 610058.1117
+  lookback 2, observation shift true: npv 17263.4302 float leg 610137.6805
 ```
 
 QuantLib, given the same historical fixings, gives the same NPVs and leg values.
@@ -223,14 +247,14 @@ QuantLib, given the same historical fixings, gives the same NPVs and leg values.
 
 ## 4. Hull-White: caps, floors and swaptions
 
-Hull-White one-factor (`HW_Params{a, sigma}`) is fitted to the flat curve e^(−r0 t).
+Hull-White one-factor (`HW_Params{a, sigma}`) is fitted to the initial curve, here the flat curve e^(−r0 t).
 
 **Closed forms.** A caplet on [T_s, T_e] is (1 + δK) puts on the bond P(T_s, T_e), with strike 1/(1 + δK). In a Gaussian model it has a Black-type formula on ln P. The procedures:
-- `hw_price_cap_floor_strip(r0, K, T_start, T_end, delta, params, is_cap)` prices a strip. It returns `total_price` and `leg_prices`; free the latter.
+- `hw_price_cap_floor_strip(curve, K, T_start, T_end, delta, params, is_cap)` prices a strip. It returns `total_price` and `leg_prices`; free the latter.
 - `hull_white_caplet_price_tensor` and `hull_white_floorlet_price_tensor(a, sigma, T_start, T_end, F, K, P, allocator)` take n × 1 tensors: forward rates F, strikes K and discount factors P(0, T_e). They price on any curve you supply F and P from, and give sensitivities by automatic differentiation. Free the result with `tensor_free_graph`.
 
 **Monte Carlo.** `hw_mc_cap_option`, `hw_mc_floor_option` and `hw_mc_swaption_option` return the price and two Greeks on common random numbers:
-- `delta_r`, the derivative with respect to r0 (a parallel curve shift);
+- `delta_r`, the derivative with respect to a parallel shift of the curve (with respect to r0 on a flat curve);
 - `vega`, with respect to σ.
 
 The swaption is European, payer or receiver, on a swap paying K·δ at T_exp + jδ up to T_maturity.
@@ -320,11 +344,11 @@ The optimizer stops when the RMSE drops below 1e-6, so a lies within 2e-4 of the
 
 ## 5. G2++ and Bermudan swaptions
 
-G2++ adds a second Gaussian factor (`HW2_Params{a, b, sigma, eta, rho}`): r = x + y + φ(t), with dx = −a x dt + σ dW1, dy = −b y dt + η dW2 and correlation ρ, fitted to e^(−r0 t). Hull-White is the case η = 0. The procedures:
+G2++ adds a second Gaussian factor (`HW2_Params{a, b, sigma, eta, rho}`): r = x + y + φ(t), with dx = −a x dt + σ dW1, dy = −b y dt + η dW2 and correlation ρ, fitted to the initial curve. Hull-White is the case η = 0. The procedures:
 - **Caplets.** `hull_white_2f_caplet_price_tensor(params, T_start, T_end, F, K, P, allocator)` is the closed form, and `hw2_mc_cap_option` prices caps by Monte Carlo, with Greeks.
-- **European swaptions.** `hw2f_swaption_price_strip(params, specs, n, r0, allocator)` uses a frozen-weights approximation of the swap rate's normal variance with the Bachelier formula. Each `SwaptionSpec{T_exp, swap_length, F, K, annuity}` describes a swap with annual payments; you supply the forward swap rate F and the annuity. `compute_hw2f_swap_variance` gives the variance alone.
-- **Bermudan swaptions.** `hw2f_mc_bermudan_option(r0, K, exercise_dates, maturity, delta, params, n_paths)` prices a Bermudan payer swaption by Longstaff–Schwartz on exact G2++ paths. Each exercise enters a swap paying K·δ up to `maturity`. With a single exercise date it prices the European.
-- **Bonds.** `hw2f_zero_coupon_bond(t, T, r_t, x_t, params, r0)` gives the bond price, given the short rate and the second factor.
+- **European swaptions.** `hw2f_swaption_price_strip(params, specs, n, curve, allocator)` uses a frozen-weights approximation of the swap rate's normal variance with the Bachelier formula. Each `SwaptionSpec{T_exp, swap_length, F, K, annuity, delta}` describes a swap with `swap_length` fixed payments every `delta` years (0 means annual); you supply the forward swap rate F and the annuity. `compute_hw2f_swap_variance` gives the variance alone.
+- **Bermudan swaptions.** `hw2f_mc_bermudan_option(curve, K, exercise_dates, maturity, delta, params, n_paths, is_payer = true)` prices a Bermudan swaption by Longstaff–Schwartz on exact G2++ paths. Each exercise enters a swap paying (payer) or receiving (receiver) K·δ up to `maturity`. With a single exercise date it prices the European.
+- **Bonds.** `hw2f_zero_coupon_bond(t, T, r_t, x_t, params, curve)` gives the bond price, given the short rate and the second factor.
 
 The example continues the program of section 4, reusing `r0`, the caplet dates, F, K and P, and the `col` helper.
 
@@ -381,7 +405,52 @@ The frozen-weights approximation is within 0.03% of the exact G2 price. The sing
 
 **Calibration.**
 - `calibrate_hull_white_2f(market_prices, T_start, T_end, F, K, P, n)` fits all five parameters to caplets alone. Caplets cannot separate the two factors well, so expect several parameter sets with the same fit.
-- `calibrate_hull_white_2f_joint(caps…, swaption_specs, swaption_market, n_swaptions, r0)` fits caplets and swaptions together. It minimises the sum of the relative RMSEs of both, keeps b < a − 0.01, and returns an `HW2F_JointResult`.
+- `calibrate_hull_white_2f_joint(caps…, swaption_specs, swaption_market, n_swaptions, curve)` fits caplets and swaptions together. It minimises the sum of the relative RMSEs of both, keeps b < a − 0.01, and returns an `HW2F_JointResult`.
+
+**Pricing on a yield curve.** The pricers of sections 4 and 5 take the initial curve as a `Rate_Curve`. A plain number is a flat continuously compounded rate r0, as in the examples above. A `^YieldCurve` (bootstrapped or filled in) or a `Discount_Curve{fn, user_data}` (any `Discount_Fn`) fits the models to that curve instead. `rate_curve_discount(curve, t)` and `rate_curve_forward(curve, t)` give P(0, t) and the instantaneous forward f(0, t). `delta_r` is then the derivative with respect to a parallel shift of the continuously compounded zero rates. Swaptions can pay every `delta` years: set `SwaptionSpec.delta` (0 means annual). `hw2f_mc_bermudan_option(..., is_payer = false)` prices a receiver Bermudan.
+
+```odin
+rand.reset(7)
+curve := fin.YieldCurve {
+	tenors        = []f64{1, 2, 3, 5, 7, 10, 15},
+	zero_rates    = []f64{0.025, 0.028, 0.031, 0.034, 0.036, 0.037, 0.038},
+	interpolation = .LinearZero,
+}
+hw := fin.HW_Params{a = 0.08, sigma = 0.012}
+g2 := fin.HW2_Params{a = 0.15, b = 0.02, sigma = 0.008, eta = 0.006, rho = -0.4}
+Ts, Te, d := []f64{1, 2, 3, 4, 5}, []f64{2, 3, 4, 5, 6}, []f64{1, 1, 1, 1, 1}
+
+strip := fin.hw_price_cap_floor_strip(&curve, 0.045, Ts, Te, d, hw, true)
+defer delete(strip.leg_prices)
+p, dr, _ := fin.hw_mc_cap_option(&curve, 0.045, Ts, Te, d, 5, hw, 200000)
+fmt.printf("5Y cap at 4.5%%: analytic %.6f  MC %.6f  d/dshift %.4f\n", strip.total_price, p, dr)
+
+// 2Y x 4Y swaption paying every 0.4 years
+n, dt := 10, 0.4
+A := 0.0
+for k in 1 ..= n {A += dt * fin.rate_curve_discount(&curve, 2 + f64(k) * dt)}
+fwd := (fin.rate_curve_discount(&curve, 2) - fin.rate_curve_discount(&curve, 6)) / A
+spec := []fin.SwaptionSpec{{T_exp = 2, swap_length = n, F = fwd, K = 0.036, annuity = A, delta = dt}}
+sw := fin.hw2f_swaption_price_strip(g2, spec, 1, &curve, context.allocator)
+defer delete(sw)
+mc, _, _ := fin.hw_mc_swaption_option(&curve, 0.036, 2, 6, dt, true, hw, 200000)
+fmt.printf("2Y x 4Y every 0.4y: forward %.6f  G2 frozen weights %.6f  HW MC %.6f\n", fwd, sw[0], mc)
+
+ex := []f64{1, 2, 3, 4, 5}
+pay := fin.hw2f_mc_bermudan_option(&curve, 0.036, ex, 10, 1, g2, 200000)
+rec := fin.hw2f_mc_bermudan_option(&curve, 0.036, ex, 10, 1, g2, 200000, is_payer = false)
+fmt.printf("G2 Bermudan 1..5 into 10Y at 3.6%%: payer %.6f  receiver %.6f\n", pay, rec)
+```
+```
+5Y cap at 4.5%: analytic 0.018394  MC 0.018453  d/dshift 1.3922
+2Y x 4Y every 0.4y: forward 0.038728  G2 frozen weights 0.017295  HW MC 0.024145
+G2 Bermudan 1..5 into 10Y at 3.6%: payer 0.043184  receiver 0.016575
+```
+
+QuantLib on the same curve (a `ZeroCurve` with linear zeros, dates 365 days apart, Actual/365 Fixed) gives:
+- **Cap:** 0.018394 (`HullWhite.discountBondOption`). The parallel-shift derivative of the analytic cap is 1.3918.
+- **Swaption:** 0.017285 (`G2SwaptionEngine`) for the G2 swaption, and 0.024123 (`JamshidianSwaptionEngine`) for the Hull-White swaption.
+- **Bermudans:** 0.043152 and 0.016583 (`FdG2SwaptionEngine`).
 
 ## 6. Credit default swaps on a time axis
 
@@ -509,7 +578,7 @@ The dated hazards differ from the time-axis ones of section 6 for the same sprea
 
 ## 8. CDO tranches
 
-`price_cdo_tranche_mc(tranche, params, spread, n_paths)` and `price_cdo_tranche_t_copula_mc(tranche, params, nu, spread, n_paths)` price a tranche of a homogeneous pool (`CDO_Params{N, lambda, recovery, r, rho, maturity, payment_freq}`):
+`price_cdo_tranche_mc(tranche, params, spread, n_paths)` and `price_cdo_tranche_t_copula_mc(tranche, params, nu, spread, n_paths)` price a tranche of a pool. A homogeneous pool is `CDO_Params{N, lambda, recovery, r, rho, maturity, payment_freq}`; a heterogeneous one is described at the end of this section. The model:
 - Each name defaults when its latent variable crosses its threshold, with exponential default times.
 - The latent variables follow a one-factor Gaussian or Student-t copula with correlation `rho`.
 - The tranche loss (min(L, d) − min(L, a)) / (d − a) is tracked at each coupon date. Protection is paid mid-period, and premium is paid on the outstanding tranche notional.
@@ -545,6 +614,36 @@ The exact values (a conditional-binomial expectation over the common factor) are
 | senior | −0.061531 | −0.044943 |
 
 One run of 100 000 paths has a standard deviation of 1–2e-3, and the means of ten runs are within two standard errors of these values.
+
+**Heterogeneous pools.** Set `CDO_Params.names` to a slice of `CDO_Name{notional, lambda, recovery, rho}`, one per name. Each name then has its own size, hazard rate, recovery and correlation, and these replace `N`, `lambda`, `recovery` and `rho`. The pool loss is Σ notional_i (1 − recovery_i) over the defaulted names, divided by the total notional.
+
+```odin
+rand.reset(12)
+// 40 names: sizes 1 and 2, hazards 0.5% to 5%, recoveries 25% / 40%, correlations 0.2 / 0.35
+names: [40]fin.CDO_Name
+for &nm, i in names {
+	nm = fin.CDO_Name {
+		notional = 1 + f64(i % 2),
+		lambda   = 0.005 + 0.045 * f64(i) / 39,
+		recovery = 0.25 if i % 3 == 0 else 0.4,
+		rho      = 0.2 if i % 4 < 2 else 0.35,
+	}
+}
+pool := fin.CDO_Params{r = 0.03, maturity = 5, payment_freq = 0.25, names = names[:]}
+for tr in ([]fin.CDO_Tranche{{"equity", 0, 0.03}, {"mezzanine", 0.03, 0.07}, {"senior", 0.07, 0.15}}) {
+	pv, el := fin.price_cdo_tranche_mc(tr, pool, 0.05, 100000)
+	pvt, elt := fin.price_cdo_tranche_t_copula_mc(tr, pool, 4, 0.05, 100000)
+	fmt.printf("%-9s gaussian pv %.6f EL %.6f   t(4) pv %.6f EL %.6f\n", tr.name, pv, el, pvt, elt)
+}
+```
+
+```
+equity    gaussian pv 0.661307 EL 0.806102   t(4) pv 0.573042 EL 0.741905
+mezzanine gaussian pv 0.359341 EL 0.560727   t(4) pv 0.304690 EL 0.509592
+senior    gaussian pv 0.062814 EL 0.289808   t(4) pv 0.060057 EL 0.282428
+```
+
+The exact values (Gaussian 0.662482, 0.360574, 0.064308; t(4) 0.573692, 0.305581, 0.061348) come from the conditional loss distribution. Given the factor, the names default independently, and their losses are multiples of a common unit. The distribution then follows by recursion over the names, and is integrated over the factor.
 
 ## 9. Copulas
 
@@ -630,10 +729,10 @@ SciPy (`kendalltau`, `spearmanr`, and maximum likelihood on the same log-densiti
 | Test | Compares |
 |---|---|
 | `swaps_yield_curve_reference_test`, `swaps_test` | time-axis bootstrap and swap valuation |
-| `dated_instruments_reference_test` | dated bootstraps, OIS and Euribor multi-curve, `VanillaSwap`, overnight coupons with lookback, lockout and observation shift, against QuantLib |
-| `ir_derivatives_reference_test` and the other `ir_derivatives_…`, `hull_white_contracts_test`, `bermudan_swaption_test` | Hull-White and G2++ caplets, floorlets, swaptions and Bermudans against QuantLib and exact Gaussian integration |
+| `dated_instruments_reference_test` | dated bootstraps, OIS and Euribor multi-curve, `VanillaSwap`, overnight coupons with lookback, lockout and observation shift, seasoned overnight swaps from past daily fixings, against QuantLib |
+| `ir_derivatives_reference_test` and the other `ir_derivatives_…`, `hull_white_contracts_test`, `bermudan_swaption_test` | Hull-White and G2++ caplets, floorlets, swaptions and Bermudans against QuantLib and exact Gaussian integration, on flat curves and on a `ZeroCurve` |
 | `dated_cds_reference_test` | flat-forward curves, ISDA hazard bootstraps from spreads and upfronts, standard CDS values, quote conversions and an index, against `IsdaCdsEngine` |
-| `credit_derivatives_reference_test`, `cds_bootstrapping_test` | time-axis CDS legs and bootstraps, CDO tranches |
+| `credit_derivatives_reference_test`, `cds_bootstrapping_test` | time-axis CDS legs and bootstraps, CDO tranches of homogeneous and heterogeneous pools |
 | `copula_reference_test` | all five families, rank correlations and tail measures, against SciPy |
 
 **Additional checks:**
@@ -641,36 +740,30 @@ SciPy (`kendalltau`, `spearmanr`, and maximum likelihood on the same log-densiti
 | What | Reference | Agreement |
 |---|---|---|
 | 10Y swap on €STR and 6M Euribor curves (OIS and single-curve discounting); 5Y OIS | QuantLib `VanillaSwap` (indexed coupons), `OvernightIndexedSwap` | all printed digits |
-| seasoned Euribor swap with its fixing; seasoned OIS with past €STR fixings | QuantLib with the same fixings | all printed digits |
+| seasoned Euribor swap with its fixing; seasoned OIS with past €STR fixings, plain and with a 2-day lookback | QuantLib with the same fixings | all printed digits |
 | HW and G2++ caplets and floorlets | QuantLib `HullWhite` and `G2.discountBondOption` | 1e-10 (all printed digits) |
 | cap − floor | the forward swap | 1e-15 |
 | HW cap and European swaptions by Monte Carlo, 20 × 200 000 paths | closed form, Jamshidian | within one standard error |
 | G2++ frozen-weights swaption | `G2SwaptionEngine` | 3e-6 (0.03%) |
 | HW and G2++ Bermudans by Longstaff–Schwartz | QuantLib FD and tree engines | 2–6e-5 below (the low bias of the method) |
 | time-axis CDS prices, hazard bootstrap, legs | Python numerical integration | all printed digits |
-| CDO tranches, Gaussian and t(4) | exact conditional-binomial expectation | within two standard errors |
+| CDO tranches, Gaussian and t(4), homogeneous and heterogeneous pools | exact conditional-binomial expectation; exact conditional loss distribution | within two standard errors |
 | copula fits, log-likelihoods, Kendall, Spearman, tail estimates, densities | SciPy | all printed digits (t density 3e-10) |
-
-**Known limitations:**
-- **Flat rate-model curve.** The Hull-White and G2++ Monte Carlo pricers, `hw_price_cap_floor_strip`, `compute_hw2f_swap_variance` and `hw2f_mc_bermudan_option` take a flat initial curve r0. The tensor caplet pricers accept any curve through F and P.
-- **Swaption scope.** `SwaptionSpec` and the Bermudan pricer assume annual (or `delta`-spaced) fixed payments; the Bermudan is payer only.
-- **Overnight coupons in progress.** Seasoned overnight coupons with lookback, lockout or observation shift give NaN.
-- **CDO pools.** The CDO pricers assume a homogeneous pool.
 
 ## 11. Quick reference
 
 | Task | Procedure | Section |
 |---|---|---|
 | Time-axis swaps | `create_payer_swap`, `create_receiver_swap`, `price_swap`, `compute_par_swap_rate`, `compute_swap_pv01`, `compute_swap_duration`, `day_count_fraction` | 2 |
-| Dated swaps | `make_dated_swap`, `price_dated_swap`, `swap_spot_date`, `swap_maturity_date`, `dated_swap_last_relevant_date`, `free_dated_swap` | 3 |
+| Dated swaps | `make_dated_swap`, `price_dated_swap`, `swap_spot_date`, `swap_maturity_date`, `dated_swap_last_relevant_date`, `free_dated_swap`, `Overnight_Fixing` | 3 |
 | Hull-White caps and floors | `hw_price_cap_floor_strip`, `hull_white_caplet_price_tensor`, `hull_white_floorlet_price_tensor`, `hw_mc_cap_option`, `hw_mc_floor_option` | 4 |
 | Hull-White swaptions | `hw_mc_swaption_option` | 4 |
 | Hull-White calibration | `calibrate_hull_white` | 4 |
-| G2++ | `hull_white_2f_caplet_price_tensor`, `hw2_mc_cap_option`, `hw2f_swaption_price_strip`, `compute_hw2f_swap_variance`, `hw2f_mc_bermudan_option`, `hw2f_zero_coupon_bond` | 5 |
+| G2++ | `hull_white_2f_caplet_price_tensor`, `hw2_mc_cap_option`, `hw2f_swaption_price_strip`, `compute_hw2f_swap_variance`, `hw2f_mc_bermudan_option`, `hw2f_zero_coupon_bond`; initial curves `Rate_Curve`, `Discount_Curve`, `rate_curve_discount`, `rate_curve_forward` | 5 |
 | G2++ calibration | `calibrate_hull_white_2f`, `calibrate_hull_white_2f_joint` | 5 |
 | Time-axis CDS | `price_cds`, `bootstrap_cds_curve`, `get_survival_prob`, `price_cds_full` | 6 |
 | Standard CDS | `make_standard_cds`, `price_dated_cds`, `bootstrap_cds_curve_dated`, `bootstrap_cds_curve_dated_upfront`, `free_dated_cds` | 7 |
 | CDS quotes and indices | `cds_upfront_from_quoted_spread`, `cds_quoted_spread_from_upfront`, `price_cds_index_intrinsic` | 7 |
-| CDO tranches | `price_cdo_tranche_mc`, `price_cdo_tranche_t_copula_mc`, `student_t_cdf` | 8 |
+| CDO tranches | `price_cdo_tranche_mc`, `price_cdo_tranche_t_copula_mc`, `CDO_Params`, `CDO_Name`, `student_t_cdf` | 8 |
 | Copula fits | `fit_gaussian_copula`, `fit_student_t_copula`, `fit_clayton`, `fit_gumbel`, `fit_frank` and the `…_loglik` functions | 9 |
 | Dependence measures | `pit_empirical`, `pit_normal`, `kendall_tau`, `spearman_rho`, `lower_tail_dependence`, `upper_tail_dependence` | 9 |

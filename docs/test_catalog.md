@@ -186,27 +186,27 @@ Reference and contract tests print `OK` or `FAIL` for each check and end with a 
 | `dates_reference_test` | `dates_reference_test` | Holiday calendars, business-day adjustment, day counters and schedules vs QuantLib |
 | `yield_curve_test` | `yield_curve_test` | Bootstrapping a zero curve from par swap rates, forward rates |
 | `swaps_yield_curve_reference_test` | `swaps_yield_curve_reference_test` | Curve bootstrap and swap valuation vs an independent Python implementation |
-| `dated_instruments_reference_test` | `dated_instruments_reference_test` | Dated curve bootstrap, swaps and fixed-rate bonds vs QuantLib |
+| `dated_instruments_reference_test` | `dated_instruments_reference_test` | Dated curve bootstrap, swaps and fixed-rate bonds vs QuantLib; seasoned €STR swaps from 200 past daily fixings with lookback, lockout and observation shift (and NaN for a missing fixing) |
 | `bonds_test` | `bonds_test` | Bond pricing on a bootstrapped curve, sensitivity to curve shifts |
-| `bonds_reference_test` | `bonds_reference_test` | Bond yields, durations and convexities vs QuantLib; Hull–White zero-coupon bonds; callable and puttable bonds |
+| `bonds_reference_test` | `bonds_reference_test` | Bond yields, durations and convexities vs QuantLib; Hull–White zero-coupon bonds; callable and puttable bonds, also seasoned (accrued interest, clean prices, off-cycle calls, OAS from a clean price) vs QuantLib's tree engine |
 | `callable_bond_test` | `callable_bond_test`, `puttable_bond_test` | Callable and puttable bonds via LSM, OAS solver |
 | `convertible_bonds_reference_test` | `convertible_bonds_reference_test` | Convertible bonds vs QuantLib's binomial engine |
-| `inflation_reference_test` | `inflation_reference_test` | Zero-inflation curve bootstrap, CPI forecasts, zero-coupon inflation swaps and inflation-linked bonds vs QuantLib |
+| `inflation_reference_test` | `inflation_reference_test` | Zero-inflation curve bootstrap, CPI forecasts, zero-coupon inflation swaps and inflation-linked bonds (flows, dirty and clean prices, accrued interest, index ratio, real yield) vs QuantLib |
 | `ir_derivatives_test` | `ir_derivatives_test`, `ir_derivatives_floor_test`, `ir_derivatives_swaption_strip_test` | Hull–White calibration to caps; floors; swaptions |
 | `ir_derivatives_2f_test` | `ir_derivatives_2f_test`, `ir_derivatives_2f_swaption_test`, `bermudan_swaption_test` | Two-factor Hull–White, joint cap and swaption calibration, Bermudan swaptions |
-| `ir_derivatives_reference_test` | `ir_derivatives_reference_test` | Hull–White and G2++ caplets, floorlets, swaptions, Greeks and Bermudan swaptions vs QuantLib |
+| `ir_derivatives_reference_test` | `ir_derivatives_reference_test` | Hull–White and G2++ caplets, floorlets, swaptions, Greeks and Bermudan swaptions vs QuantLib, on a flat curve and on a `ZeroCurve` (cap strip, parallel-shift delta, swaptions with annual and 0.4-year payments, payer and receiver Bermudans) |
 | `hull_white_test` | `hull_white_contracts_test` | G2++ reduces to one-factor Hull–White; calibration recovers known parameters |
 | `cds_bootstrapping_test` | `cds_bootstrapping_test` | Bootstrapping a hazard-rate curve from CDS spreads |
 | `dated_cds_reference_test` | `dated_cds_reference_test` | ISDA-style CDS bootstrap and valuation vs QuantLib |
 | `credit_derivatives_test` | `credit_derivatives_2008_test`, `credit_derivatives_pipeline_test` | CDO tranches with Gaussian vs Student-t copula, copula fitting |
-| `credit_derivatives_reference_test` | `credit_derivatives_reference_test` | CDS legs and bootstrap, Gaussian and Student-t copula tranche losses vs SciPy |
+| `credit_derivatives_reference_test` | `credit_derivatives_reference_test` | CDS legs and bootstrap, Gaussian and Student-t copula tranche losses vs SciPy; a heterogeneous 40-name pool vs the exact conditional loss distribution |
 
 ## 9. Portfolio, risk and backtesting
 
 | File | Procedures | Covers |
 |------|------------|--------|
 | `portfolio_reference_test` | `portfolio_reference_test` | Portfolio optimisation vs NumPy |
-| `constraints_reference_test` | `constraints_reference_test` | Constrained portfolios vs exact KKT enumeration and SciPy SLSQP |
+| `constraints_reference_test` | `constraints_reference_test` | Constrained portfolios vs exact KKT enumeration and SciPy SLSQP; group lower limits and `min_weight_if_held` (branch and bound) vs SLSQP over all 255 supports; long projected-gradient steps with upper and lower group limits (a nearly linear objective, projections of far points) |
 | `black_litterman_hrp_reference_test` | `black_litterman_hrp_reference_test` | Black–Litterman and HRP vs NumPy and López de Prado's reference code |
 | `risk_test` | `risk_test` | VaR, CVaR, volatility, maximum drawdown, Sharpe ratio |
 | `risk_var_reference_test` | `risk_var_reference_test` | VaR and expected shortfall (positive losses), VaR backtests, out-of-sample GARCH backtests and the GED vs NumPy/SciPy |
