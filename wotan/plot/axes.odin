@@ -1,5 +1,6 @@
 package plot
 
+import "core:c/libc"
 import "core:fmt"
 import "core:math"
 import "core:mem"
@@ -81,8 +82,111 @@ format_ticks :: proc(ticks: []f64, step: f64, allocator := context.temp_allocato
 	return labels
 }
 
-// Typographic minus sign instead of the hyphen (also in exponents)
+// Tick labels relative to an offset when the ticks share many leading digits:
+// a tick's value is its label plus the offset. The offset follows matplotlib's
+// ScalarFormatter (offset threshold 4): with at least two ticks of one sign,
+// it is their common leading part, a multiple of a power of ten, used when it
+// saves at least 4 digits. offset_text shows it with its sign ("+1000",
+// "−1.234567e7"). Otherwise offset is 0, offset_text "" and the labels are
+// format_ticks'.
+format_ticks_offset :: proc(
+	ticks: []f64,
+	step: f64,
+	allocator := context.temp_allocator,
+) -> (
+	labels: []string,
+	offset: f64,
+	offset_text: string,
+) {
+	oom: int
+	offset, oom = _tick_offset(ticks)
+	if offset == 0 {return format_ticks(ticks, step, allocator), 0, ""}
+	shifted := make([]f64, len(ticks), context.temp_allocator)
+	for v, i in ticks {
+		// a multiple of the step (the offset is one): no rounding residue
+		shifted[i] = math.round((v - offset) / step) * step + 0
+	}
+	labels = format_ticks(shifted, step, allocator)
+	sign := "−" if offset < 0 else "+"
+	offset_text = strings.concatenate({sign, _offset_digits(abs(offset), oom)}, allocator)
+	return
+}
+
+// matplotlib's ScalarFormatter._compute_offset (offset threshold 4): the
+// offset and the power of ten it is a multiple of
 @(private = "file")
+_tick_offset :: proc(ticks: []f64) -> (offset: f64, oom: int) {
+	if len(ticks) == 0 {return}
+	lmin, lmax := math.inf_f64(1), math.inf_f64(-1)
+	for v in ticks {lmin, lmax = min(lmin, v), max(lmax, v)}
+	if !_finite(lmin) || !_finite(lmax) || lmin == lmax || (lmin <= 0 && 0 <= lmax) {return}
+	abs_min, abs_max := min(abs(lmin), abs(lmax)), max(abs(lmin), abs(lmax))
+	sign := -1.0 if lmin < 0 else 1.0
+	fdiv :: proc(a: f64, o: int) -> f64 {return _py_floordiv(a, _pow10(o))}
+	oom_max := int(math.ceil(math.log10(abs_max)))
+	// the smallest power of ten to which abs_min and abs_max agree
+	o := oom_max
+	for fdiv(abs_min, o) == fdiv(abs_max, o) && o > -330 {o -= 1}
+	oom = o + 1
+	if (abs_max - abs_min) / _pow10(oom) <= 1e-2 {
+		// straddling a multiple of a large power of ten (relative to the span):
+		// the smallest power of ten at which they are no more than 1 apart
+		o = oom_max
+		for !(fdiv(abs_max, o) - fdiv(abs_min, o) > 1) && o > -330 {o -= 1}
+		oom = o + 1
+	}
+	if fdiv(abs_max, oom) < 1000 {return 0, 0}
+	offset = sign * fdiv(abs_max, oom) * _pow10(oom)
+	return
+}
+
+// 10^o correctly rounded for |o| ≤ 22 (as Python's 10.0 ** o)
+@(private = "file")
+_pow10 :: proc(o: int) -> f64 {
+	if o >= 0 && o <= 22 {
+		p := 1.0
+		for _ in 0 ..< o {p *= 10} 	// exact up to 1e22
+		return p
+	}
+	if o < 0 && o >= -22 {return 1 / _pow10(-o)} 	// one rounding
+	return math.pow(10, f64(o))
+}
+
+// Python's float floor division a // b (CPython float_floor_div): the floor of
+// the exact quotient, which differs from floor(a / b) when a / b rounds up to
+// a whole number (1.0 // 1e-10 = 9999999999)
+@(private = "file")
+_py_floordiv :: proc(a, b: f64) -> f64 {
+	m := libc.fmod(a, b) // exact (C fmod), sign of a
+	div := (a - m) / b
+	if m != 0 && (b < 0) != (m < 0) {div -= 1}
+	if div == 0 {return 0}
+	q := math.floor(div)
+	if div - q > 0.5 {q += 1}
+	return q
+}
+
+// |offset| = a multiple of 10^k, without trailing zeros; scientific
+// ("1.0000001e6") from 10⁶ and below 10⁻³
+@(private = "file")
+_offset_digits :: proc(a: f64, k: int) -> string {
+	trim :: proc(s: string) -> string {
+		if !strings.contains_rune(s, '.') {return s}
+		s := strings.trim_right(s, "0")
+		return strings.trim_right(s, ".")
+	}
+	if a >= 1e6 || a < 1e-3 {
+		e := math.floor(math.log10(a))
+		if a / math.pow(10, e) >= 10 * (1 - 1e-12) {e += 1}
+		digits := max(0, int(e) - k)
+		mant := trim(fmt.tprintf("%.*f", digits, a / math.pow(10, e)))
+		return _minus(fmt.tprintf("%se%d", mant, int(e)), context.temp_allocator)
+	}
+	return trim(fmt.tprintf("%.*f", max(0, -k), a))
+}
+
+// Typographic minus sign instead of the hyphen (also in exponents)
+@(private)
 _minus :: proc(s: string, allocator: mem.Allocator) -> string {
 	if !strings.contains_rune(s, '-') {return s}
 	out, _ := strings.replace_all(s, "-", "−", allocator)
@@ -112,6 +216,8 @@ Axes :: struct {
 	yticks:       []f64,
 	xlabels:      []string,
 	ylabels:      []string,
+	xoffset:      string, // offset of the x labels ("" = none), see format_ticks_offset
+	yoffset:      string,
 	categories:   []string,
 	vertical_cat: bool, // category labels rotated
 }
@@ -180,11 +286,32 @@ axes_setup :: proc(
 	}
 	ax.xmin, ax.xmax, ax.ymin, ax.ymax = x0, x1, y0, y1
 
+	// The layout is computed again (at most twice more) when an axis needs a
+	// row for its offset text: above the plot box (y) or below the x labels
+	extra_top, extra_bottom := 0, 0
+	for _ in 0 ..< 3 {
+		_axes_layout(&ax, cfg, extra_top, extra_bottom)
+		need_top := lh if ax.yoffset != "" else 0
+		need_bottom := pad / 2 + lh if ax.xoffset != "" else 0
+		if need_top <= extra_top && need_bottom <= extra_bottom {break}
+		extra_top, extra_bottom = max(extra_top, need_top), max(extra_bottom, need_bottom)
+	}
+	return ax
+}
+
+// Plot box, ticks and labels for the data limits in ax, with extra room above
+// the box and below the x labels
+@(private = "file")
+_axes_layout :: proc(ax: ^Axes, cfg: PlotConfig, extra_top, extra_bottom: int) {
+	img, pad := ax.img, ax.pad
+	lh := line_height(ax.font)
+	W, H := img.width, img.height
+	x0, x1, y0, y1 := ax.xmin, ax.xmax, ax.ymin, ax.ymax
+
 	// ---- vertical layout (independent of tick values)
-	ax.top = max(
-		cfg.margin_top,
-		pad + (line_height(ax.title_font) + pad if cfg.title != "" else pad),
-	)
+	ax.top =
+		max(cfg.margin_top, pad + (line_height(ax.title_font) + pad if cfg.title != "" else pad)) +
+		extra_top
 	cat_extra := 0
 	if len(ax.categories) > 0 {
 		widest := 0.0
@@ -196,7 +323,13 @@ axes_setup :: proc(
 		}
 	}
 	bottom_margin :=
-		ax.tick_len + pad / 2 + lh + cat_extra + (pad / 2 + lh if cfg.x_label != "" else 0) + pad
+		ax.tick_len +
+		pad / 2 +
+		lh +
+		cat_extra +
+		extra_bottom +
+		(pad / 2 + lh if cfg.x_label != "" else 0) +
+		pad
 	ax.bottom = H - max(cfg.margin_bottom, bottom_margin)
 
 	// ---- y ticks -> left margin
@@ -204,7 +337,7 @@ axes_setup :: proc(
 	ny := clamp(plot_h / (3 * lh), 3, 10)
 	yticks, ystep := nice_ticks(y0, y1, ny)
 	ax.yticks = yticks
-	ax.ylabels = format_ticks(ax.yticks, ystep)
+	ax.ylabels, _, ax.yoffset = format_ticks_offset(ax.yticks, ystep)
 	widest_y := 0.0
 	for s in ax.ylabels {widest_y = max(widest_y, text_width(ax.font, s))}
 	left_margin :=
@@ -222,7 +355,7 @@ axes_setup :: proc(
 		for _ in 0 ..< 6 {
 			step: f64
 			ax.xticks, step = nice_ticks(x0, x1, nx)
-			ax.xlabels = format_ticks(ax.xticks, step)
+			ax.xlabels, _, ax.xoffset = format_ticks_offset(ax.xticks, step)
 			widest := 0.0
 			for s in ax.xlabels {widest = max(widest, text_width(ax.font, s))}
 			if f64(len(ax.xticks)) * (widest + f64(2 * pad)) <= f64(right - ax.left) ||
@@ -238,7 +371,6 @@ axes_setup :: proc(
 		}
 	}
 	ax.right = right
-	return ax
 }
 
 axes_px :: proc(ax: ^Axes, x: f64) -> f64 {
@@ -315,6 +447,14 @@ axes_draw_frame :: proc(ax: ^Axes) {
 			draw_line(img, px, ax.bottom, px, ax.bottom + tl, c)
 			draw_string(img, f, f64(px), label_top, ax.xlabels[i], c, .Center, .Top)
 		}
+	}
+	// offsets: x below the right end of its labels, y above the plot box
+	if ax.xoffset != "" {
+		y := label_top + f64(line_height(f) + pad / 2)
+		draw_string(img, f, f64(ax.right), y, ax.xoffset, c, .Right, .Top)
+	}
+	if ax.yoffset != "" {
+		draw_string(img, f, f64(ax.left), f64(ax.top - pad / 4), ax.yoffset, c, .Left, .Bottom)
 	}
 
 	cx := f64(ax.left + ax.right) / 2

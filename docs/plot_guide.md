@@ -66,7 +66,7 @@ This gives the same chart as copying `DEFAULT_PLOT_CONFIG` and setting those fou
 |---|---|---|
 | `width`, `height` | 800, 600 | image size in pixels |
 | `margin_left`, `margin_right`, `margin_top`, `margin_bottom` | 60, 20, 20, 40 | minimum margins. They grow to fit the tick labels, axis labels and title. |
-| `title`, `x_label`, `y_label` | "" | text above the plot and along the axes. Heatmaps use only the title. |
+| `title`, `x_label`, `y_label` | "" | text above the plot and along the axes. On heatmaps the axis labels go below the column labels and left of the row labels. |
 | `point_color` | `RED` | the colour of scatter points and of the line in `line_png` |
 | `bar_color` | `BLUE` | bars and histogram bars |
 | `axis_color` | dark grey | frame, ticks and text |
@@ -216,9 +216,9 @@ How the bars are laid out:
 ## 7. Heatmaps
 
 `heatmap_png` draws a `rows × cols` matrix (row-major) as cells, coloured from dark blue to yellow on a viridis-like scale, with a colour bar on the right:
-- **Labels.** `row_labels` and `col_labels` are optional (pass `nil`). Column labels are drawn vertically when they don't fit their cells.
-- **Cell values.** Each cell shows its value when the cell is large enough, as an integer if it is one and otherwise with two decimals. The text is black or white depending on the cell's brightness.
-- **Colour scale.** The scale runs from the smallest to the largest value. A constant matrix is drawn in one colour.
+- **Labels.** `row_labels` and `col_labels` are optional (pass `nil`). Column labels are drawn vertically when they don't fit their cells. `x_label` and `y_label` of the config name the two axes.
+- **Cell values.** Each cell shows its value when the cell is large enough, as an integer if it is one and otherwise with two decimals, with the typographic minus sign. The text is black or white depending on the cell's brightness.
+- **Colour scale.** The scale runs from the smallest to the largest value. A constant matrix is drawn in one colour. The colour bar's labels use an offset (section 9) when the values share many leading digits.
 
 ```odin
 names := []string{"SPX", "NDX", "Gold", "Oil", "Bonds"}
@@ -282,6 +282,44 @@ for r in ([][2]f64{{0, 1}, {0, 7.3}, {-2.5, 13}, {1e6, 5e6}, {0.0001, 0.0005}, {
 [98.2, 103.9] step 1: ["99", "100", "101", "102", "103"]
 ```
 
+When the ticks share many leading digits, as on an axis from 1000.1 to 1000.5, the labels show only what differs, and the shared part (the *offset*) is written once at the end of the axis: above the y axis, and below the right end of the x axis. A tick's value is its label plus the offset. The offset follows matplotlib's `ScalarFormatter` with its default threshold: it is used when all ticks have the same sign and it saves at least 4 digits. `format_ticks_offset` returns the labels, the offset and its text:
+
+```odin
+for r in ([][2]f64{{2000, 2020}, {1000.1, 1000.5}, {-1000.5, -1000.1}, {1e6 + 0.01, 1e6 + 0.05}, {12345678, 12345679}}) {
+	ticks, step := plot.nice_ticks(r[0], r[1], 6)
+	labels, offset, text := plot.format_ticks_offset(ticks, step)
+	fmt.printf("[%.2f, %.2f]: %v offset %v %q\n", r[0], r[1], labels, offset, text)
+}
+```
+```
+[2000.00, 2020.00]: ["2000", "2005", "2010", "2015", "2020"] offset 0 ""
+[1000.10, 1000.50]: ["0.1", "0.2", "0.3", "0.4", "0.5"] offset 1000 "+1000"
+[-1000.50, -1000.10]: ["−0.5", "−0.4", "−0.3", "−0.2", "−0.1"] offset -1000 "−1000"
+[1000000.01, 1000000.05]: ["0.01", "0.02", "0.03", "0.04", "0.05"] offset 1e+06 "+1e6"
+[12345678.00, 12345679.00]: ["8.0", "8.2", "8.4", "8.6", "8.8", "9.0"] offset 1.234567e+07 "+1.234567e7"
+```
+
+The charts use it on both axes:
+
+```odin
+xs := make([]f64, 50)
+ys := make([]f64, 50)
+defer {delete(xs); delete(ys)}
+for i in 0 ..< 50 {
+	xs[i] = 1000 + 0.01 * f64(i)
+	ys[i] = 1 + 1e-12 * math.sin(0.3 * f64(i))
+}
+cfg := plot.DEFAULT_PLOT_CONFIG
+cfg.title = "A narrow range on both axes"
+cfg.x_label = "x"
+cfg.y_label = "y"
+ok := plot.line_png(xs, ys, DIR + "plot_offset.png", cfg)
+```
+
+![A sine wave of amplitude 1e-12 around 1, with offsets +1000 on the x axis and +1.000000000001 on the y axis](images/plot_offset.png)
+
+The y offset is 1.000000000001 rather than 1, as in matplotlib: the ticks straddle 1, and the offset is cut at the first digit where the smallest and largest tick differ by more than one unit.
+
 The ticks lie inside the given range. The charts add padding to the data range first, 3 % by default, so their ticks usually reach the data's ends. A constant series gets a range of ±10 % around its value (±0.5 around 0).
 
 ## 10. Drawing your own charts
@@ -306,7 +344,7 @@ The usual steps:
    - `x_categories` (a categorical x axis at 0 … n − 1).
 2. **Draw the background.** `axes_draw_grid` draws the grid.
 3. **Draw the data.** `axes_px` and `axes_py` map data to pixels. Lines and markers are drawn into a *coverage buffer* and composited in one colour with `cov_flush`. Do one buffer pass per colour, so joints are clean and overlapping parts are not blended twice. `fill_rect_clipped` fills bars clipped to the plot box.
-4. **Draw the frame and legend.** `axes_draw_frame` draws the frame, ticks, labels and title. `axes_draw_legend` adds the legend.
+4. **Draw the frame and legend.** `axes_draw_frame` draws the frame, ticks, labels, offsets and title. `axes_draw_legend` adds the legend.
 
 This chart combines volume bars and a price line:
 
@@ -381,7 +419,7 @@ A legend entry with `marker = true` shows a dot instead of a line sample. `axes_
 
 The guard works with Odin's default temporary allocator. If you install a different `context.temp_allocator`, the scratch stays on it until you free it.
 
-When you draw your own chart (section 10), `axes_setup` stores its ticks and labels on `context.temp_allocator`, and `nice_ticks` and `format_ticks` default to it as well. Free them with `free_all(context.temp_allocator)`, or start the procedure that draws the chart with `runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()`, as the chart procedures do; it releases everything put on the temporary allocator after it, when the procedure returns. Images you create yourself are freed with `image_free`, coverage buffers with `coverage_free`, and the result of `image_encode_png` with `delete`.
+When you draw your own chart (section 10), `axes_setup` stores its ticks and labels on `context.temp_allocator`, and `nice_ticks`, `format_ticks` and `format_ticks_offset` default to it as well. Free them with `free_all(context.temp_allocator)`, or start the procedure that draws the chart with `runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()`, as the chart procedures do; it releases everything put on the temporary allocator after it, when the procedure returns. Images you create yourself are freed with `image_free`, coverage buffers with `coverage_free`, and the result of `image_encode_png` with `delete`.
 
 The fonts are embedded in the binary with `#load` and decoded once, on first use, without allocating.
 
@@ -394,7 +432,7 @@ The fonts are embedded in the binary with `#load` and decoded once, on first use
 | Images | `Image`, `image_new`, `image_clear`, `image_free`, `image_save_png`, `image_encode_png` |
 | Drawing | `draw_pixel`, `blend_pixel`, `draw_line`, `draw_line_segment`, `draw_rect`, `draw_char`, `draw_number`, `draw_text`, `draw_string`, `draw_string_vertical`, `H_Align`, `V_Align` |
 | Fonts | `Font`, `font_get`, `font_glyph`, `font_size_for_scale`, `text_width`, `line_height` |
-| Axes | `Axes`, `Axes_Options`, `axes_setup`, `axes_px`, `axes_py`, `axes_draw_grid`, `axes_draw_frame`, `axes_draw_legend`, `Legend_Entry`, `data_range`, `nice_ticks`, `format_ticks`, `grid_color_of`, `line_width_of` |
+| Axes | `Axes`, `Axes_Options`, `axes_setup`, `axes_px`, `axes_py`, `axes_draw_grid`, `axes_draw_frame`, `axes_draw_legend`, `Legend_Entry`, `data_range`, `nice_ticks`, `format_ticks`, `format_ticks_offset`, `grid_color_of`, `line_width_of` |
 | Shapes | `Coverage`, `coverage_new`, `coverage_free`, `cov_segment`, `cov_disc`, `cov_polyline`, `cov_flush`, `fill_rect_clipped` |
 | Colours | `get_heat_color` |
 | Encoding | `zlib_compress`, `png_filter_rows`, `crc32_checksum`, `crc32_update` |

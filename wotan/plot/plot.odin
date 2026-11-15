@@ -694,17 +694,22 @@ heatmap_png :: proc(
 	for s in col_labels {widest_col = max(widest_col, text_width(f, s))}
 	cb_w := max(12, size)
 	cb_ticks, cb_step := nice_ticks(min_val, max_val, 6)
-	cb_labels := format_ticks(cb_ticks, cb_step)
+	cb_labels, _, cb_offset := format_ticks_offset(cb_ticks, cb_step)
 	widest_cb := 0.0
 	for s in cb_labels {widest_cb = max(widest_cb, text_width(f, s))}
 
-	left := max(config.margin_left / 2, pad + int(math.ceil(widest_row)) + pad)
+	// y_label: vertical, left of the row labels; x_label: below the column labels;
+	// the colour bar's offset (if any) above it
+	y_label_w := lh + pad / 2 if config.y_label != "" else 0
+	x_label_h := pad / 2 + lh if config.x_label != "" else 0
+	left := max(config.margin_left / 2, pad + y_label_w + int(math.ceil(widest_row)) + pad)
 	right := config.width - (pad + cb_w + pad / 2 + int(math.ceil(widest_cb)) + 2 * pad)
-	top := pad + (line_height(tf) + pad if config.title != "" else 0)
+	top :=
+		pad + (line_height(tf) + pad if config.title != "" else 0) + (lh if cb_offset != "" else 0)
 	cell_w := f64(right - left - 2 * pad) / f64(cols)
 	vertical_cols := widest_col > cell_w - f64(pad)
 	col_h := (int(math.ceil(widest_col)) if vertical_cols else lh) if len(col_labels) > 0 else 0
-	bottom := config.height - (pad + col_h + pad)
+	bottom := config.height - (pad + col_h + x_label_h + pad)
 	right -= 2 * pad
 	cell_h := f64(bottom - top) / f64(rows)
 
@@ -733,8 +738,10 @@ heatmap_png :: proc(
 			y1 := int(math.round(f64(top) + f64(r + 1) * cell_h))
 			draw_rect(&img, x0, y0, x1 - x0, y1 - y0, color)
 			if show_values {
-				text :=
-					fmt.tprintf("%d", int(val)) if val == math.floor(val) && abs(val) < 1e9 else fmt.tprintf("%.2f", val)
+				text := _minus(
+					fmt.tprintf("%d", int(val)) if val == math.floor(val) && abs(val) < 1e9 else fmt.tprintf("%.2f", val),
+					context.temp_allocator,
+				)
 				lum := 0.299 * f64(color.r) + 0.587 * f64(color.g) + 0.114 * f64(color.b)
 				tc := BLACK if lum > 140 else WHITE
 				draw_string(
@@ -789,8 +796,43 @@ heatmap_png :: proc(
 		}
 	}
 
+	if config.x_label != "" {
+		draw_string(
+			&img,
+			f,
+			f64(left + right) / 2,
+			f64(config.height - pad),
+			config.x_label,
+			config.axis_color,
+			.Center,
+			.Bottom,
+		)
+	}
+	if config.y_label != "" {
+		draw_string_vertical(
+			&img,
+			f,
+			f64(pad + lh / 2),
+			f64(top + bottom) / 2,
+			config.y_label,
+			config.axis_color,
+		)
+	}
+
 	// Colour bar
 	cb_x := right + 2 * pad
+	if cb_offset != "" {
+		draw_string(
+			&img,
+			f,
+			f64(config.width - pad),
+			f64(top - pad / 4),
+			cb_offset,
+			config.axis_color,
+			.Right,
+			.Bottom,
+		)
+	}
 	for y in top ..< bottom {
 		t := 1 - f64(y - top) / f64(max(bottom - top - 1, 1))
 		color := get_heat_color(t)
