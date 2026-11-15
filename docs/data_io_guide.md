@@ -194,6 +194,7 @@ All writers produce text that the matching importer reads back to the same DataF
 | Writer | Output |
 |---|---|
 | `csv_save(&df, path, sep = ',', allocator) -> bool` | Header plus one line per row. Nulls are empty unquoted fields. A string is quoted when it would otherwise read back differently: empty, with outer spaces, a null token, or containing the separator, a quote or a line break. |
+| `csv_string(&df, sep = ',', allocator) -> string` | The text `csv_save` writes, as a string you free. |
 | `json_write(&df, path, alloc)` | One array of objects. Nulls and non-finite floats are `null`, and dates are ISO strings. |
 | `jsonl_write(&df, path, alloc)` | One object per line, otherwise as `json_write`. |
 | `html_write(&df, path, alloc)` | A `<table>` with `<thead>` and `<tbody>`; text is escaped, and nulls are empty cells. |
@@ -442,7 +443,20 @@ KO volume 10004198 shares, dollar volume 992316424
 - `read_yahoo_json(symbol, alloc)` returns the daily history over the full range. Unlike `read_yahoo(symbol, .Daily, .Max)`, its request asks for no events, so the Dividend and Split columns are 0.
 - `yahoo_json_to_dataframe(text, alloc)` parses a chart answer you fetched yourself.
 - Option chains are in `finance`: `fin.fetch_yahoo_options` and `fin.fetch_yahoo_option_surface` (see the [risk guide, section 8](finance_risk_guide.md#8-market-data)).
-- `yahoo_download_csv` uses Yahoo's old CSV download endpoint. Yahoo answers it with HTTP 401 (*User is not logged in*), so it does not work.
+- `yahoo_download_csv(symbol, alloc, interval = .Daily, range = .Max)` returns the history as CSV text, with the columns of `read_yahoo`. `ok` is false when the request fails, as with `read_yahoo`. The text is in `csv_save` format, so `io.csv_load_from_string` reads it back to the same DataFrame. It is built from the chart API: Yahoo's own CSV download requires a paid login.
+
+  ```odin
+  text, ok := net.yahoo_download_csv("MSFT", context.allocator, .Daily, .OneMonth)
+  defer delete(text)
+  ```
+
+  The first lines:
+
+  ```
+  Date,Open,High,Low,Close,AdjClose,Volume,Dividend,Split
+  2026-10-14,545.27001953125,545.75,532.5399780273438,533.6900024414062,533.6900024414062,22324300,0.0,0.0
+  2026-10-15,533.3200073242188,541.1300048828125,531.219970703125,539.4400024414062,539.4400024414062,24151200,0.0,0.0
+  ```
 
 The DataFrames `yahoo_json_to_dataframe` builds are checked against an independent pandas parse of the same JSON text. Over five years of SPY, the VIX and AAPL and ten years of NVDA, the dates, the positions of the nulls and every value, including 40 dividends and 2 splits, agree to 1e-13.
 
@@ -466,10 +480,11 @@ Most of the finance tests load their data with `read_yahoo`, `read_yahoo_series`
 | `io.json_load(path, null_tokens, alloc)` / `io.jsonl_load(path, null_tokens, alloc)` | JSON array / JSON Lines → DataFrame |
 | `io.html_load(path, alloc)`, `_table_index`, `_table_id`, `_all`, `io.html_load_from_string`, `io.html_load_all_from_string` | HTML tables → DataFrame(s) |
 | `io.xlsx_load(path, alloc)`, `io.xlsx_load_sheet(path, name, alloc) -> (df, found)`, `io.xlsx_sheet_names(path, alloc)` | Excel worksheets |
-| `ex.csv_save(&df, path, sep, alloc) -> bool`, `ex.json_write`, `ex.jsonl_write`, `ex.html_write`, `ex.xlsx_save -> bool` | DataFrame → file |
+| `ex.csv_save(&df, path, sep, alloc) -> bool`, `ex.csv_string(&df, sep, alloc) -> string`, `ex.json_write`, `ex.jsonl_write`, `ex.html_write`, `ex.xlsx_save -> bool` | DataFrame → file |
 | `net.http_get(url, alloc) -> (body, ok)`, `net.http_get_with_cookie`, `net.download_file(url, path) -> ok` | HTTP |
 | `net.read_csv_from_url`, `net.read_html_from_url`, `net.read_table_from_url` `-> (df, ok)` | a table from a URL |
 | `net.read_yahoo(symbol, interval, range, alloc) -> (df, ok)` | Yahoo history as a DataFrame |
+| `net.yahoo_download_csv(symbol, alloc, interval, range) -> (text, ok)` | Yahoo history as CSV text |
 | `net.read_yahoo_series(symbol, interval, range, alloc) -> (Yahoo_Series, ok)`, `net.yahoo_series_free` | one ticker as arrays, days without a price dropped |
 | `net.read_yahoo_panel(tickers, interval, range, alloc) -> (Yahoo_Panel, ok, failed)`, `net.yahoo_panel_free` | several tickers on their common dates |
 | `net.yahoo_panel_to_dataframe(&panel, names, alloc)` | a panel's adjusted closes as a DataFrame (Date plus one column per ticker) |

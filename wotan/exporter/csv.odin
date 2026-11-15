@@ -15,8 +15,18 @@ csv_save :: proc(
 	sep: u8 = ',',
 	allocator: mem.Allocator = context.allocator,
 ) -> bool {
+	text := csv_string(df, sep, allocator)
+	defer delete(text, allocator)
+	return write_file(path, text)
+}
+
+// The CSV text csv_save writes, allocated with `allocator`
+csv_string :: proc(
+	df: ^w.DataFrame,
+	sep: u8 = ',',
+	allocator: mem.Allocator = context.allocator,
+) -> string {
 	b, _ := strings.builder_make(allocator = allocator)
-	defer strings.builder_destroy(&b)
 
 	cols := len(df.columns)
 	rows := df.rows
@@ -54,7 +64,7 @@ csv_save :: proc(
 		strings.write_byte(&b, '\n')
 	}
 
-	return write_file(path, strings.to_string(b))
+	return strings.to_string(b)
 }
 
 

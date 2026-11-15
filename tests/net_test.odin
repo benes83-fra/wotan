@@ -29,28 +29,74 @@ http_get_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
 
 	fmt.println("=== END HTTP GET TEST ===")
 }
+// yahoo_download_csv: the CSV text reads back (csv_load_from_string) into the
+// DataFrame read_yahoo gives for the same request: same columns and types, same
+// dates, prices and volumes. The newest day is skipped (its quote moves between
+// the two requests while the market is open), and adjusted closes are compared
+// to 1e-6 relative (Yahoo recomputes them per request, with float32 noise).
 yahoo_finance_csv_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
+	seed_test(#procedure)
 	fmt.println("=== YAHOO FINANCE CSV TEST ===")
 
-	// TEMP: bypass crumb/cookie and just see what the endpoint does
-	url := "https://query1.finance.yahoo.com/v7/finance/download/MSFT?period1=0&period2=9999999999&interval=1d&events=history"
-	text, ok := net.http_get(url, allocator)
-	if !ok {
-		panic("Yahoo CSV download failed (raw)")
-	}
-
-	fmt.println("Downloaded", len(text), "bytes")
-	fmt.println("RAW RESPONSE:\n", text)
-
-	if !strings.contains(text, "Date,Open,High,Low,Close,Adj Close,Volume") {
-		panic("Yahoo CSV header missing or unexpected")
-	}
+	text, ok := net.yahoo_download_csv("MSFT", allocator, .Daily, .OneYear)
+	if !ok {fail_missing_data(#procedure, "Yahoo CSV for MSFT"); return}
+	defer delete(text, allocator)
+	ref, ref_ok := net.read_yahoo("MSFT", .Daily, .OneYear, allocator)
+	if !ref_ok {fail_missing_data(#procedure, "Yahoo data for MSFT"); return}
+	defer w.destroy_dataframe(&ref)
 
 	df := importer.csv_load_from_string(text, allocator)
 	defer w.destroy_dataframe(&df)
+	fmt.println(
+		"CSV:",
+		len(text),
+		"bytes,",
+		df.rows,
+		"rows; header:",
+		text[:strings.index_byte(text, '\n')],
+	)
 
-	fmt.println("--- Yahoo Finance MSFT (head) ---")
-	w.df_head(&df, 10)
+	same_shape := len(df.columns) == len(ref.columns) && abs(df.rows - ref.rows) <= 1
+	for c in 0 ..< min(len(df.columns), len(ref.columns)) {
+		same_shape &&=
+			df.columns[c].name == ref.columns[c].name && df.columns[c].type == ref.columns[c].type
+	}
+	mismatches := 0
+	n := min(df.rows, ref.rows) - 1
+	if same_shape {
+		for r in 0 ..< n {
+			for c in 0 ..< len(df.columns) {
+				a, b := &df.columns[c], &ref.columns[c]
+				if w.is_null(a, r) != w.is_null(b, r) {mismatches += 1; continue}
+				if w.is_null(a, r) {continue}
+				#partial switch a.type {
+				case .Date:
+					da, _ := w.column_at_date(a, r)
+					db, _ := w.column_at_date(b, r)
+					if da != db {mismatches += 1}
+				case:
+					va, _ := w.column_at_numeric(a, r)
+					vb, _ := w.column_at_numeric(b, r)
+					// Yahoo recomputes adjusted closes per request (float32 noise, ~1e-7)
+					tol := 1e-6 * abs(vb) if a.name == "AdjClose" else 0
+					if abs(va - vb) > tol {
+						if mismatches <
+						   5 {fmt.printf("  row %d %s: %v vs %v\n", r, a.name, va, vb)}
+						mismatches += 1
+					}
+				}
+			}
+		}
+	}
+	ok_all := same_shape && n > 200 && mismatches == 0
+	fmt.printf(
+		"%s yahoo_download_csv reads back as read_yahoo: %d rows x %d columns compared, %d mismatches\n",
+		"OK  " if ok_all else "FAIL",
+		n,
+		len(df.columns),
+		mismatches,
+	)
+	if !ok_all {record_failures(1)}
 
 	fmt.println("=== END YAHOO FINANCE CSV TEST ===")
 }

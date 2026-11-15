@@ -1,6 +1,7 @@
 package net
 
 import w "../core"
+import ex "../exporter"
 import "../importer"
 
 import "base:runtime"
@@ -178,26 +179,27 @@ yahoo_get_crumb_and_cookie :: proc(allocator: mem.Allocator) -> (string, string,
 	return global_crumb, global_cookie, true
 }
 // ------------------------------
-// 2) Download CSV using crumb + cookie
+// 2) History as CSV text
 // ------------------------------
-yahoo_download_csv :: proc(symbol: string, allocator: mem.Allocator) -> (string, bool) {
-	crumb, cookie, ok := yahoo_get_crumb_and_cookie(allocator)
-	if !ok {
-		return "", false
-	}
 
-	url := fmt.aprintf(
-		"https://query1.finance.yahoo.com/v7/finance/download/%s?period1=0&period2=9999999999&interval=1d&events=history&crumb=%s",
-		symbol,
-		crumb,
-		allocator = allocator,
-	)
-	defer delete(url)
-
-	// Use your existing http_get, but with cookie support
-	// (you’ll add http_get_with_cookie next)
-	text, ok2 := http_get_with_cookie(url, cookie, allocator)
-	return text, ok2
+// History of `symbol` as CSV text: the columns of read_yahoo (Date, Open, High,
+// Low, Close, AdjClose, Volume, Dividend, Split) in exporter.csv_save format,
+// so importer.csv_load_from_string reads it back unchanged. Yahoo's own CSV
+// download needs a paid login, so the text is built from the chart API. ok is
+// false (and the text empty) when read_yahoo fails.
+yahoo_download_csv :: proc(
+	symbol: string,
+	allocator: mem.Allocator = context.allocator,
+	i: interval = .Daily,
+	r: range = .Max,
+) -> (
+	string,
+	bool,
+) {
+	df, ok := read_yahoo(symbol, i, r, context.temp_allocator)
+	defer w.destroy_dataframe(&df)
+	if !ok {return "", false}
+	return ex.csv_string(&df, allocator = allocator), true
 }
 
 // ------------------------------

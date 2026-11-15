@@ -505,6 +505,8 @@ main :: proc() {
 	free_all(context.temp_allocator)
 	test.http_get_test(context.temp_allocator)
 	free_all(context.temp_allocator)
+	test.yahoo_finance_csv_test(context.temp_allocator)
+	free_all(context.temp_allocator)
 	test.yahoo_finance_json_test(context.temp_allocator)
 	free_all(context.temp_allocator)
 	test.yahoo_finance_events_test(context.temp_allocator)
