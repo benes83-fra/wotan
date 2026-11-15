@@ -25,8 +25,8 @@ eigh :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> (
 	W: []f64,
-	V: Matrix(f64),// eigenvalues
-	ok: bool,// eigenvectors (columns)
+	V: Matrix(f64),
+	ok: bool, // eigenvalues // eigenvectors (columns)
 ) {
 	n := A.rows
 	if n == 0 || A.cols != n {
@@ -89,7 +89,7 @@ eigh :: proc(
 }
 // κ₂(A) = σ_max / σ_min (non-zero σ_min), returns +Inf if rank-deficient
 cond2_svd :: proc(A: ^Matrix(f64), allocator: mem.Allocator = context.allocator) -> f64 {
-	U, S, V := svd_golub_reinsch(A, allocator)
+	U, S, V := svd_jacobi(A, allocator)
 	defer matrix_free(&U)
 	defer delete(S, allocator)
 	defer matrix_free(&V)
@@ -112,7 +112,7 @@ cond2_svd :: proc(A: ^Matrix(f64), allocator: mem.Allocator = context.allocator)
 	return sigma_max / sigma_min
 }
 cond2_svd_thin :: proc(A: ^Matrix(f64), allocator: mem.Allocator = context.allocator) -> f64 {
-	U_t, S_t, V_t := svd_thin(A, .GolubReinsch, allocator)
+	U_t, S_t, V_t := svd_thin(A, .Jacobi, allocator)
 	defer matrix_free(&U_t)
 	defer delete(S_t, allocator)
 	defer matrix_free(&V_t)

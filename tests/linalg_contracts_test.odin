@@ -9,7 +9,7 @@ import "core:mem"
 
 // Linear-algebra contracts at sizes beyond one SIMD tile / one Jacobi budget
 // (the sizes where the blocked LU, blocked QR, eigh and the AᵀA-SVD used to fail):
-// - LU solve / inverse, eigh, QR (full and thin), SVD (both methods) reconstruct
+// - LU solve / inverse, eigh, QR (full and thin, both modes), SVD (both methods) reconstruct
 //   their input to machine precision with orthonormal factors
 // - lstsq agrees across QR / Cholesky / SVD, and the Cholesky path does not
 //   panic on rank-deficient data (minimum-norm solution instead)
@@ -194,6 +194,81 @@ linalg_contracts_test :: proc(allocator: mem.Allocator) {
 				"SVD (Jacobi + GolubReinsch, 50x50 / 120x40): recon %.1e, orthogonality %.1e",
 				worst_recon,
 				worst_orth,
+			),
+		)
+	}
+
+	// 4b. QR modes: .Blocked (compact WY panels of l.QR_BLOCK columns) and
+	// .Unblocked give the same factors, tall and wide, over several panels
+	{
+		worst_diff, worst_recon := 0.0, 0.0
+		for shape in ([][2]int{{100, 70}, {70, 100}, {33, 33}}) {
+			A := randn(shape[0], shape[1])
+			defer l.matrix_free(&A)
+			Qb, Rb := l.qr_decompose(&A, .Blocked)
+			Qu, Ru := l.qr_decompose(&A, .Unblocked)
+			defer {l.matrix_free(&Qb); l.matrix_free(&Rb); l.matrix_free(&Qu); l.matrix_free(&Ru)}
+			QR := mm(Qb, Rb)
+			defer l.matrix_free(&QR)
+			worst_recon = max(worst_recon, rel(QR, A), orth(Qb, Qb.cols))
+			worst_diff = max(worst_diff, rel(Rb, Ru), rel(Qb, Qu))
+		}
+		expect(
+			&passed,
+			&total,
+			worst_recon < 1e-13 && worst_diff < 1e-13,
+			fmt.tprintf(
+				"QR .Blocked = .Unblocked (100x70, 70x100, 33x33): factors differ %.1e, recon / orthogonality %.1e",
+				worst_diff,
+				worst_recon,
+			),
+		)
+	}
+
+	// 4c. SVD methods agree on the singular values, also wide and rank-deficient,
+	// and both return them in descending order
+	{
+		worst_s, worst_recon := 0.0, 0.0
+		sorted := true
+		for shape in ([][3]int{{40, 120, 0}, {60, 40, 5}, {40, 60, 5}}) {
+			m, n, rank := shape[0], shape[1], shape[2]
+			A := randn(m, n)
+			defer l.matrix_free(&A)
+			if rank > 0 { 	// A = B·C with B m×rank, C rank×n
+				B, C := randn(m, rank), randn(rank, n)
+				defer {l.matrix_free(&B); l.matrix_free(&C)}
+				BC := mm(B, C)
+				defer l.matrix_free(&BC)
+				copy(A.data, BC.data)
+			}
+			Uj, Sj, Vj := l.svd(&A, .Jacobi, allocator)
+			Ug, Sg, Vg := l.svd(&A, .GolubReinsch, allocator)
+			defer {l.matrix_free(&Uj); delete(Sj); l.matrix_free(&Vj)}
+			defer {l.matrix_free(&Ug); delete(Sg); l.matrix_free(&Vg)}
+			for i in 0 ..< n {
+				worst_s = max(worst_s, abs(Sj[i] - Sg[i]) / Sj[0])
+				if i > 0 {sorted = sorted && Sj[i] <= Sj[i - 1] && Sg[i] <= Sg[i - 1]}
+			}
+			Rc := l.matrix_new(f64, m, n)
+			defer l.matrix_free(&Rc)
+			for i in 0 ..< m {
+				for j in 0 ..< n {
+					s := 0.0
+					for p in 0 ..< n {s += at(Ug, i, p) * Sg[p] * at(Vg, j, p)}
+					Rc.data[i * n + j] = s
+				}
+			}
+			worst_recon = max(worst_recon, rel(Rc, A), orth(Ug, min(m, n)), orth(Vg, n))
+		}
+		expect(
+			&passed,
+			&total,
+			worst_s < 1e-13 && worst_recon < 1e-12 && sorted,
+			fmt.tprintf(
+				"SVD GolubReinsch = Jacobi (40x120, rank 5 60x40 / 40x60): σ differ %.1e of σ_max, GR recon / orthogonality %.1e, descending %v",
+				worst_s,
+				worst_recon,
+				sorted,
 			),
 		)
 	}

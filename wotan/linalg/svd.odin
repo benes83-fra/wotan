@@ -3,6 +3,9 @@ package wotan_linalg
 import "core:math"
 import "core:mem"
 
+// .Jacobi: one-sided Jacobi, accurate to high relative precision also for small
+// singular values. .GolubReinsch: bidiagonalization + implicit QR, faster for
+// larger matrices, singular values accurate to about ε·σ_max.
 SVDMethod :: enum {
 	Jacobi,
 	GolubReinsch,
@@ -110,6 +113,17 @@ svd_jacobi :: proc(
 		}
 	}
 
+	_svd_sort_and_complete(&U, S, &V)
+	return
+}
+
+// Sorts the singular values descending (with their columns of U and V), and
+// completes the columns of U for (numerically) zero singular values to an
+// orthonormal set, so the first min(m, n) columns of U stay orthonormal for a
+// rank-deficient A
+@(private = "file")
+_svd_sort_and_complete :: proc(U: ^Matrix(f64), S: []f64, V: ^Matrix(f64)) {
+	m, n := U.rows, V.rows
 	// Sort descending (selection sort)
 	for i in 0 ..< n {
 		max_i := i
@@ -155,8 +169,9 @@ svd_jacobi :: proc(
 			}
 		}
 	}
-
-	return
+	// A wide A (m < n) has rank ≤ m: its last n − m singular values are zero
+	// (left as rounding noise they would break the descending order)
+	for j in min(m, n) ..< n {S[j] = 0}
 }
 
 // ============================================================================
@@ -272,11 +287,13 @@ _jacobi_eigen_inplace :: proc(
 }
 
 // ============================================================================
-// Golub-Reinsch SVD - unchanged (already efficient)
+// Golub-Kahan-Reinsch SVD
 // ============================================================================
-// Kept for API compatibility. Formerly the SVD from eig(AᵀA), which squares the
-// condition number (small singular values lose all accuracy); now the
-// one-sided Jacobi SVD, which is accurate to machine precision.
+// Householder bidiagonalization followed by implicitly shifted QR sweeps on the
+// bidiagonal (Golub & Reinsch 1970, the EISPACK / LINPACK algorithm). Same
+// shapes and ordering as svd_jacobi. Faster than the Jacobi SVD for larger
+// matrices; singular values are accurate to about ε·σ_max (absolute), while
+// svd_jacobi also gets small singular values to high relative accuracy.
 svd_golub_reinsch :: proc(
 	A: ^Matrix(f64),
 	allocator: mem.Allocator = context.allocator,
@@ -285,15 +302,230 @@ svd_golub_reinsch :: proc(
 	S: []f64,
 	V: Matrix(f64),
 ) {
-	return svd_jacobi(A, allocator)
+	m := A.rows
+	n := A.cols
+	if m == 0 || n == 0 {return}
+
+	U = matrix_new(f64, m, n, allocator)
+	copy(U.data, A.data)
+	V = matrix_new(f64, n, n, allocator)
+	S = make([]f64, n, allocator)
+	rv1 := make([]f64, n, context.temp_allocator)
+	defer delete(rv1, context.temp_allocator)
+	u := U.data
+	v := V.data
+	w := S
+
+	// 1. Householder reduction to bidiagonal form: diagonal in w, superdiagonal in rv1
+	g, scale, anorm := 0.0, 0.0, 0.0
+	l := 0
+	for i in 0 ..< n {
+		l = i + 1
+		rv1[i] = scale * g
+		g, scale = 0, 0
+		s := 0.0
+		if i < m {
+			for k in i ..< m {scale += abs(u[k * n + i])}
+			if scale != 0 {
+				for k in i ..< m {
+					u[k * n + i] /= scale
+					s += u[k * n + i] * u[k * n + i]
+				}
+				f := u[i * n + i]
+				g = -math.copy_sign(math.sqrt(s), f)
+				h := f * g - s
+				u[i * n + i] = f - g
+				for j in l ..< n {
+					s = 0
+					for k in i ..< m {s += u[k * n + i] * u[k * n + j]}
+					f = s / h
+					for k in i ..< m {u[k * n + j] += f * u[k * n + i]}
+				}
+				for k in i ..< m {u[k * n + i] *= scale}
+			}
+		}
+		w[i] = scale * g
+		g, scale, s = 0, 0, 0
+		if i < m && i != n - 1 {
+			for k in l ..< n {scale += abs(u[i * n + k])}
+			if scale != 0 {
+				for k in l ..< n {
+					u[i * n + k] /= scale
+					s += u[i * n + k] * u[i * n + k]
+				}
+				f := u[i * n + l]
+				g = -math.copy_sign(math.sqrt(s), f)
+				h := f * g - s
+				u[i * n + l] = f - g
+				for k in l ..< n {rv1[k] = u[i * n + k] / h}
+				for j in l ..< m {
+					s = 0
+					for k in l ..< n {s += u[j * n + k] * u[i * n + k]}
+					for k in l ..< n {u[j * n + k] += s * rv1[k]}
+				}
+				for k in l ..< n {u[i * n + k] *= scale}
+			}
+		}
+		anorm = max(anorm, abs(w[i]) + abs(rv1[i]))
+	}
+
+	// 2. accumulate the right-hand transformations in V
+	for i := n - 1; i >= 0; i -= 1 {
+		if i < n - 1 {
+			if g != 0 {
+				// double division avoids a possible underflow
+				for j in l ..< n {v[j * n + i] = (u[i * n + j] / u[i * n + l]) / g}
+				for j in l ..< n {
+					s := 0.0
+					for k in l ..< n {s += u[i * n + k] * v[k * n + j]}
+					for k in l ..< n {v[k * n + j] += s * v[k * n + i]}
+				}
+			}
+			for j in l ..< n {
+				v[i * n + j] = 0
+				v[j * n + i] = 0
+			}
+		}
+		v[i * n + i] = 1
+		g = rv1[i]
+		l = i
+	}
+
+	// 3. accumulate the left-hand transformations in U
+	for i := min(m, n) - 1; i >= 0; i -= 1 {
+		l = i + 1
+		g = w[i]
+		for j in l ..< n {u[i * n + j] = 0}
+		if g != 0 {
+			g = 1 / g
+			for j in l ..< n {
+				s := 0.0
+				for k in l ..< m {s += u[k * n + i] * u[k * n + j]}
+				f := (s / u[i * n + i]) * g
+				for k in i ..< m {u[k * n + j] += f * u[k * n + i]}
+			}
+			for j in i ..< m {u[j * n + i] *= g}
+		} else {
+			for j in i ..< m {u[j * n + i] = 0}
+		}
+		u[i * n + i] += 1
+	}
+
+	// 4. diagonalize the bidiagonal form: implicit-shift QR sweeps, one
+	// singular value at a time from the bottom
+	MAX_ITS :: 75
+	for k := n - 1; k >= 0; k -= 1 {
+		for its in 1 ..= MAX_ITS {
+			// test for splitting (rv1[0] is always zero)
+			split := false
+			nm := 0
+			for l = k; l >= 0; l -= 1 {
+				nm = l - 1
+				if abs(rv1[l]) + anorm == anorm {
+					split = true
+					break
+				}
+				if abs(w[nm]) + anorm == anorm {break}
+			}
+			if !split {
+				// cancel rv1[l] when w[l - 1] is negligible
+				c, s := 0.0, 1.0
+				for i in l ..= k {
+					f := s * rv1[i]
+					rv1[i] = c * rv1[i]
+					if abs(f) + anorm == anorm {break}
+					g = w[i]
+					h := math.hypot(f, g)
+					w[i] = h
+					h = 1 / h
+					c = g * h
+					s = -f * h
+					for j in 0 ..< m {
+						y := u[j * n + nm]
+						z := u[j * n + i]
+						u[j * n + nm] = y * c + z * s
+						u[j * n + i] = z * c - y * s
+					}
+				}
+			}
+			z := w[k]
+			if l == k { 	// converged: make the singular value non-negative
+				if z < 0 {
+					w[k] = -z
+					for j in 0 ..< n {v[j * n + k] = -v[j * n + k]}
+				}
+				break
+			}
+			if its == MAX_ITS {
+				// no convergence (not seen in practice): use the Jacobi SVD
+				matrix_free(&U)
+				matrix_free(&V)
+				delete(S, allocator)
+				return svd_jacobi(A, allocator)
+			}
+			// shift from the bottom 2×2 minor
+			x := w[l]
+			nm = k - 1
+			y := w[nm]
+			g = rv1[nm]
+			h := rv1[k]
+			f := ((y - z) * (y + z) + (g - h) * (g + h)) / (2 * h * y)
+			g = math.hypot(f, 1)
+			f = ((x - z) * (x + z) + h * ((y / (f + math.copy_sign(g, f))) - h)) / x
+			// next QR transformation
+			c, s := 1.0, 1.0
+			for j in l ..= nm {
+				i := j + 1
+				g = rv1[i]
+				y = w[i]
+				h = s * g
+				g = c * g
+				z = math.hypot(f, h)
+				rv1[j] = z
+				c = f / z
+				s = h / z
+				f = x * c + g * s
+				g = g * c - x * s
+				h = y * s
+				y *= c
+				for jj in 0 ..< n {
+					xv := v[jj * n + j]
+					zv := v[jj * n + i]
+					v[jj * n + j] = xv * c + zv * s
+					v[jj * n + i] = zv * c - xv * s
+				}
+				z = math.hypot(f, h)
+				w[j] = z
+				if z != 0 {
+					z = 1 / z
+					c = f * z
+					s = h * z
+				}
+				f = c * g + s * y
+				x = c * y - s * g
+				for jj in 0 ..< m {
+					yu := u[jj * n + j]
+					zu := u[jj * n + i]
+					u[jj * n + j] = yu * c + zu * s
+					u[jj * n + i] = zu * c - yu * s
+				}
+			}
+			rv1[l] = 0
+			rv1[k] = f
+			w[k] = x
+		}
+	}
+
+	_svd_sort_and_complete(&U, S, &V)
+	return
 }
 
 // ============================================================================
-// Thin SVD wrapper (unchanged)
+// Thin SVD
 // ============================================================================
 svd_thin :: proc(
 	A: ^Matrix(f64),
-	method: SVDMethod = .GolubReinsch,
+	method: SVDMethod = .Jacobi,
 	allocator: mem.Allocator = context.allocator,
 ) -> (
 	U_t: Matrix(f64),
@@ -334,7 +566,7 @@ svd_thin :: proc(
 }
 
 // ============================================================================
-// Dispatcher (unchanged)
+// Dispatcher
 // ============================================================================
 svd :: proc(
 	A: ^Matrix(f64),

@@ -479,7 +479,11 @@ R (4 x 2)
 
 The signs follow the Householder convention: the diagonal of R may be negative, as in LAPACK.
 
-Both procedures accept a `QR_Mode`, but it makes no difference: both modes run the same Householder code.
+Both procedures take a `QR_Mode` as their second argument:
+- `.Blocked` (the default) groups the reflections into panels of `QR_BLOCK` (32) columns. Each panel is applied to the rest of the matrix, and to Q, with matrix products, in the compact WY form that LAPACK uses.
+- `.Unblocked` applies one reflection at a time.
+
+Both modes give the same factors up to rounding. `.Blocked` is faster once the matrix has more than a few dozen columns: on the test machine, a 500×500 QR takes 27 ms blocked and 148 ms unblocked, and a 1000×1000 QR takes 0.17 s and 1.4 s. `qr_decompose_thin` skips Q, which halves the time.
 
 Q is m×m, so it needs m² memory. For least squares on a tall matrix, use `lstsq` from section 9, which never builds Q.
 
@@ -680,7 +684,25 @@ singular values: [6.669079088282286, 3.4760236029181337, 1.8548973087995773]
 thin: 2 2 [9.508032000695724, 0.772869635673484] 3 2
 ```
 
-The `SVDMethod` argument accepts `.Jacobi` and `.GolubReinsch`, but both run the same one-sided Jacobi code. The name `svd_golub_reinsch` is kept for compatibility.
+`svd` and `svd_thin` take an `SVDMethod`. Both methods return the same shapes, with the singular values in descending order:
+- `.Jacobi` (the default) is the one-sided Jacobi SVD (`svd_jacobi`). It computes small singular values to high relative accuracy.
+- `.GolubReinsch` (`svd_golub_reinsch`) reduces A to bidiagonal form with Householder reflections, then diagonalises it with implicitly shifted QR sweeps. This is the classic algorithm of LINPACK and EISPACK. Its singular values are accurate to about ε·σ_max, so a singular value far below σ_max has only a few correct digits.
+
+`.GolubReinsch` is several times faster: on the test machine, a 400×400 SVD takes 0.27 s with `.GolubReinsch` and 2.1 s with `.Jacobi`. Use it for large matrices when only the larger singular values matter. For a matrix whose columns scale from 1 down to 10⁻¹⁴, `.Jacobi` gets every singular value above the rank tolerance to 6·10⁻¹⁵ relative error, while `.GolubReinsch` gets the smallest ones only to 10⁻⁸. For the 3×3 matrix above, both methods agree to the last digit or two:
+
+```odin
+Ug, Sg, Vg := l.svd(&A, .GolubReinsch)
+defer l.matrix_free(&Ug)
+defer delete(Sg)
+defer l.matrix_free(&Vg)
+fmt.println("Golub-Reinsch:", Sg)
+```
+
+```
+Golub-Reinsch: [6.669079088282287, 3.476023602918133, 1.8548973087995766]
+```
+
+All singular values at or below max(m, n)·ε·σ_max, rounding noise, are set to exactly 0 by both methods. For a wide matrix (m < n), the last n − m singular values are always 0.
 
 `pinv(&A)` is the Moore-Penrose pseudo-inverse, V·diag(1/σ)·Uᵀ over the singular values above max(m, n)·10⁻¹²·σ_max (the `svd_thin` tolerance). Pass `rtol` to set the relative cutoff yourself. For an m×n matrix it returns an n×m matrix, and for an invertible matrix it equals the inverse:
 
