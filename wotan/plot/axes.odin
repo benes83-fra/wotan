@@ -144,6 +144,7 @@ axes_setup :: proc(
 	xmin, xmax, ymin, ymax: f64,
 	opts := Axes_Options{},
 ) -> Axes {
+	cfg := config_resolve(cfg)
 	ax := Axes {
 		img = img,
 		cfg = cfg,
@@ -252,7 +253,8 @@ axes_py :: proc(ax: ^Axes, y: f64) -> f64 {
 // Default grid colour follows the theme: a light tint of the axis colour over
 // the background (subtle on both light and dark backgrounds)
 grid_color_of :: proc(cfg: PlotConfig) -> Color {
-	if cfg.grid_color != DEFAULT_PLOT_CONFIG.grid_color {return cfg.grid_color}
+	if cfg.grid_color != (Color{}) {return cfg.grid_color}
+	cfg := config_resolve(cfg)
 	mix :: proc(a, b: u8, t: f64) -> u8 {return u8(f64(a) + (f64(b) - f64(a)) * t + 0.5)}
 	bg, fg := cfg.bg_color, cfg.axis_color
 	return Color{mix(bg.r, fg.r, 0.13), mix(bg.g, fg.g, 0.13), mix(bg.b, fg.b, 0.13), 255}

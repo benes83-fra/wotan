@@ -14,24 +14,26 @@ LineStyle :: enum {
 	Dotted,
 }
 
+// Every zero field means "the default": PlotConfig{width = 400, height = 300}
+// is a default chart of that size. config_resolve fills them in.
 PlotConfig :: struct {
-	width:         int,
-	height:        int,
-	margin_left:   int, // minimum margins; grown to fit tick / axis labels
-	margin_right:  int,
+	width:         int, // 0 = 800
+	height:        int, // 0 = 600
+	margin_left:   int, // minimum margins (0 = 60, 20, 20, 40);
+	margin_right:  int, // grown to fit tick / axis labels
 	margin_top:    int,
 	margin_bottom: int,
-	point_color:   Color, // Color for scatter points / single line plots
-	bar_color:     Color, // Color for bars and histogram bars
-	axis_color:    Color, // Color for axes and text
-	bg_color:      Color, // Background color
-	font_scale:    int, // 1 small .. 5 large (used when font_size == 0)
+	point_color:   Color, // scatter points / single line plots (zero = RED)
+	bar_color:     Color, // bars and histogram bars (zero = BLUE)
+	axis_color:    Color, // axes and text (zero = dark grey)
+	bg_color:      Color, // background (zero = WHITE)
+	font_scale:    int, // 1 small .. 5 large, used when font_size == 0 (0 = 2)
 	title:         string,
 	x_label:       string,
 	y_label:       string,
-	line_style:    LineStyle, // Line style for line plots
-	show_grid:     bool, // Show grid lines at the ticks
-	grid_color:    Color, // Color for grid lines
+	line_style:    LineStyle, // line style for line plots
+	show_grid:     bool, // grid lines at the ticks
+	grid_color:    Color, // zero = a light tint of axis_color over bg_color
 	font_size:     int, // body text size in pixels (0 = from font_scale)
 	line_width:    f64, // data line width in pixels (0 = 1.5)
 }
@@ -53,9 +55,30 @@ DEFAULT_PLOT_CONFIG :: PlotConfig {
 	y_label       = "",
 	line_style    = .Solid,
 	show_grid     = false,
-	grid_color    = Color{225, 225, 225, 255},
+	grid_color    = {}, // follows the theme (grid_color_of)
 	font_size     = 0,
 	line_width    = 1.5,
+}
+
+// cfg with every zero (or negative) field replaced by its DEFAULT_PLOT_CONFIG
+// value. The charts and axes_setup call it; call it yourself when you size an
+// image from a config (image_new(cfg.width, cfg.height)).
+config_resolve :: proc(cfg: PlotConfig) -> PlotConfig {
+	d := DEFAULT_PLOT_CONFIG
+	c := cfg
+	if c.width <= 0 {c.width = d.width}
+	if c.height <= 0 {c.height = d.height}
+	if c.margin_left <= 0 {c.margin_left = d.margin_left}
+	if c.margin_right <= 0 {c.margin_right = d.margin_right}
+	if c.margin_top <= 0 {c.margin_top = d.margin_top}
+	if c.margin_bottom <= 0 {c.margin_bottom = d.margin_bottom}
+	if c.point_color == (Color{}) {c.point_color = d.point_color}
+	if c.bar_color == (Color{}) {c.bar_color = d.bar_color}
+	if c.axis_color == (Color{}) {c.axis_color = d.axis_color}
+	if c.bg_color == (Color{}) {c.bg_color = d.bg_color}
+	if c.font_scale <= 0 {c.font_scale = d.font_scale}
+	if c.line_width <= 0 {c.line_width = d.line_width}
+	return c
 }
 // ============================================================================
 // 1. Software Rasterizer & Image Buffer
@@ -396,6 +419,7 @@ scatter_png :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> bool {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD() // scratch (ticks, labels, PNG bytes) released on return
+	config := config_resolve(config)
 	col_x, x_ok := _float_column(df, x_col)
 	col_y, y_ok := _float_column(df, y_col)
 	if !x_ok || !y_ok {return false}
@@ -441,6 +465,7 @@ histogram_png :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> bool {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD() // scratch (ticks, labels, PNG bytes) released on return
+	config := config_resolve(config)
 	col, col_ok := _float_column(df, col_name)
 	if !col_ok || bins <= 0 {return false}
 
@@ -503,6 +528,7 @@ line_png :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> bool {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD() // scratch (ticks, labels, PNG bytes) released on return
+	config := config_resolve(config)
 	if len(xs) != len(ys) || len(xs) == 0 {return false}
 	min_x, max_x := data_range(xs)
 	min_y, max_y := data_range(ys)
@@ -531,6 +557,7 @@ bar_png :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> bool {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD() // scratch (ticks, labels, PNG bytes) released on return
+	config := config_resolve(config)
 	if len(labels) != len(values) || len(labels) == 0 {return false}
 	n := len(labels)
 	min_val, max_val := data_range(values)
@@ -572,6 +599,7 @@ multi_line_png :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> bool {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD() // scratch (ticks, labels, PNG bytes) released on return
+	config := config_resolve(config)
 	if len(lines) == 0 {return false}
 
 	// 1. Global data range across all lines
@@ -643,6 +671,7 @@ heatmap_png :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> bool {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD() // scratch (ticks, labels, PNG bytes) released on return
+	config := config_resolve(config)
 	if len(data) != rows * cols || rows == 0 || cols == 0 {return false}
 
 	min_val, max_val := data_range(data)

@@ -14,7 +14,9 @@ import "core:os"
 // label "1"); scientific labels took their exponent from log10, which falls
 // just short of some powers of ten (±1e300 was labelled "10e299");
 // scatter_png / histogram_png panicked on a missing column name; every chart
-// left its ticks, labels and PNG bytes on context.temp_allocator.
+// left its ticks, labels and PNG bytes on context.temp_allocator; a
+// PlotConfig literal drew transparent black backgrounds, black text and the
+// smallest font, because its unnamed fields were zero.
 
 plot_fixes_test :: proc(allocator: mem.Allocator) {
 	seed_test(#procedure)
@@ -92,6 +94,82 @@ plot_fixes_test :: proc(allocator: mem.Allocator) {
 			&total,
 		)
 		_ = os.remove(path)
+	}
+	{ 	// a PlotConfig literal: unnamed (zero) fields take the defaults
+		report(
+			"config_resolve(PlotConfig{}) == DEFAULT_PLOT_CONFIG",
+			plot.config_resolve(plot.PlotConfig{}) == plot.DEFAULT_PLOT_CONFIG,
+			&passed,
+			&total,
+		)
+		dark := plot.PlotConfig {
+			bg_color   = plot.BLACK,
+			axis_color = plot.WHITE,
+			grid_color = plot.GREEN,
+		}
+		report(
+			"set fields are kept: explicit grid colour, dark theme",
+			plot.config_resolve(dark).bg_color == plot.BLACK &&
+			plot.grid_color_of(dark) == plot.GREEN &&
+			plot.grid_color_of(plot.PlotConfig{bg_color = plot.BLACK}) == plot.Color{5, 5, 5, 255},
+			&passed,
+			&total,
+		)
+
+		lit := plot.PlotConfig {
+			width     = 400,
+			height    = 300,
+			title     = "literal",
+			show_grid = true,
+		}
+		ref := plot.DEFAULT_PLOT_CONFIG
+		ref.width, ref.height, ref.title, ref.show_grid = 400, 300, "literal", true
+		df := w.df_from(
+			w.column_from_floats("a", []f64{1, 2, 3, 4, 5}),
+			w.column_from_floats("b", []f64{2, 1, 3, 5, 4}),
+		)
+		defer w.destroy_dataframe(&df)
+		xs := []f64{0, 1, 2, 3, 4}
+		ys := []f64{1, 3, 2, 5, 4}
+		os.make_directory("plots")
+		p_lit, p_ref := "plots/plot_fixes_lit.png", "plots/plot_fixes_ref.png"
+		same := 0
+		for i in 0 ..< 6 {
+			for k in 0 ..< 2 {
+				cfg := lit if k == 0 else ref
+				path := p_lit if k == 0 else p_ref
+				switch i {
+				case 0:
+					plot.line_png(xs, ys, path, cfg)
+				case 1:
+					plot.multi_line_png({{xs = xs, ys = ys, label = "a"}}, path, cfg)
+				case 2:
+					plot.scatter_png(&df, "a", "b", path, cfg)
+				case 3:
+					plot.histogram_png(&df, "a", path, 5, cfg)
+				case 4:
+					plot.bar_png({"a", "b", "c"}, {1, -2, 3}, path, cfg)
+				case 5:
+					plot.heatmap_png(ys[:4], 2, 2, path, {"r1", "r2"}, {"c1", "c2"}, cfg)
+				}
+			}
+			a, a_err := os.read_entire_file(p_lit, allocator)
+			b, b_err := os.read_entire_file(p_ref, allocator)
+			if a_err == nil && b_err == nil && len(a) > 0 && string(a) == string(b) {same += 1}
+			delete(a, allocator)
+			delete(b, allocator)
+		}
+		report(
+			fmt.tprintf(
+				"charts from a literal match DEFAULT_PLOT_CONFIG: %d/6 identical PNGs",
+				same,
+			),
+			same == 6,
+			&passed,
+			&total,
+		)
+		_ = os.remove(p_lit)
+		_ = os.remove(p_ref)
 	}
 	{ 	// 50 charts in a loop: the temp allocator does not grow (scratch released per chart)
 		if context.temp_allocator.data != &runtime.global_default_temp_allocator_data {

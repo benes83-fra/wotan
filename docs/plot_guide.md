@@ -54,7 +54,13 @@ Each procedure returns `true` once the file is written. It returns `false` if th
 
 ## 2. Configuration
 
-Every chart takes a `PlotConfig`. Start from `DEFAULT_PLOT_CONFIG` and change the fields you need:
+Every chart takes a `PlotConfig`. Name the fields you want to change; every field you leave out, or set to zero, takes its default:
+
+```odin
+cfg := plot.PlotConfig{width = 400, height = 300, title = "Returns", show_grid = true}
+```
+
+This gives the same chart as copying `DEFAULT_PLOT_CONFIG` and setting those four fields. `config_resolve(cfg)` returns the config with the defaults filled in.
 
 | Field | Default | Meaning |
 |---|---|---|
@@ -65,10 +71,10 @@ Every chart takes a `PlotConfig`. Start from `DEFAULT_PLOT_CONFIG` and change th
 | `bar_color` | `BLUE` | bars and histogram bars |
 | `axis_color` | dark grey | frame, ticks and text |
 | `bg_color` | `WHITE` | background |
-| `show_grid`, `grid_color` | false, light grey | grid lines at the ticks. The default grid colour follows the theme: a light tint of the axis colour over the background. |
+| `show_grid`, `grid_color` | false, zero | grid lines at the ticks. A zero `grid_color` follows the theme: a light tint of the axis colour over the background. |
 | `line_style` | `.Solid` | `.Solid`, `.Dashed` or `.Dotted`, for `line_png` |
 | `line_width` | 1.5 | line width in pixels |
-| `font_size` | 0 | body text size in pixels. 0 uses `font_scale` (1 to 5: 11, 13, 16, 20 or 24 px). Titles are 1.25 times larger and bold. |
+| `font_size`, `font_scale` | 0, 2 | body text size in pixels. 0 uses `font_scale` (1 to 5: 11, 13, 16, 20 or 24 px). Titles are 1.25 times larger and bold. |
 
 The colour constants follow matplotlib's "tab10" palette:
 - `BLUE`, `ORANGE`, `GREEN`, `RED`, `PURPLE`, `BROWN`, `PINK`, `GRAY`, `OLIVE` and `CYAN`, plus `WHITE` and `BLACK`;
@@ -77,7 +83,9 @@ The colour constants follow matplotlib's "tab10" palette:
 
 The font is DejaVu Sans, embedded at 10, 11, 13, 16, 20 and 24 px (bold at 13 to 24 px); other sizes use the closest one. It covers ASCII and the extra characters `αβγδεθλμνπρστφωΓΔΣΦΩ²³°±×÷·−–—≈≠≤≥∞√∑€£…‰`. Other characters are drawn as `?`.
 
-Don't build a `PlotConfig` from an empty literal such as `plot.PlotConfig{width = 400, height = 300}`. Every field you leave out is zero, so the background is transparent black, the text is black and the font scale is the smallest. Copy `DEFAULT_PLOT_CONFIG` and change it instead.
+Because zero means "default", a few values cannot be set exactly:
+- **Margins** are minimums, so 0 means the default. Use 1 for the smallest margin; the margins still grow to fit the labels.
+- **Colours.** The zero `Color{}` (transparent black) means the default. For a transparent background, use another colour with alpha 0, such as `Color{255, 255, 255, 0}`.
 
 ## 3. Line charts
 
@@ -278,11 +286,11 @@ The ticks lie inside the given range. The charts add padding to the data range f
 
 ## 10. Drawing your own charts
 
-The chart procedures are built from apublic pieces that you can combine:
+The chart procedures are built from public pieces that you can combine:
 
 | Piece | Procedures |
 |---|---|
-| Image | `image_new(w, h, allocator)`, `imge_clear`, `image_free`, `Image.pixels` (RGBA, row-major) |
+| Image | `image_new(w, h, allocator)`, `image_clear`, `image_free`, `Image.pixels` (RGBA, row-major) |
 | Primitives | `draw_pixel`, `blend_pixel`, `draw_line` (1 px, Bresenham), `draw_line_segment` (anti-aliased, styled), `draw_rect`, `draw_text`, `draw_string` (aligned), `draw_string_vertical` |
 | Fonts | `font_get(size_px, bold)`, `font_size_for_scale`, `text_width`, `line_height` |
 | Axes | `axes_setup(&img, cfg, xmin, xmax, ymin, ymax, opts)`, `axes_px`, `axes_py`, `axes_draw_grid`, `axes_draw_frame`, `axes_draw_legend`, `data_range` |
@@ -291,7 +299,7 @@ The chart procedures are built from apublic pieces that you can combine:
 | Output | `image_save_png`, `image_encode_png` |
 
 The usual steps:
-1. **Set up the axes.** `axes_setup` lays out the plot box. It pads the data range and computes the ticks, labels and margins. `Axes_Options` adjusts it:
+1. **Set up the axes.** `axes_setup` lays out the plot box. It fills in the zero fields of the config, pads the data range and computes the ticks, labels and margins. Size the image from `config_resolve(cfg)` when `cfg` is a literal that may leave `width` or `height` out. `Axes_Options` adjusts `axes_setup`:
    - `pad_frac` (default 0.03);
    - `y_from_zero` (include 0, no padding on that side);
    - `x_exact` (no x padding);
@@ -382,7 +390,7 @@ The fonts are embedded in the binary with `#load` and decoded once, on first use
 | Area | Procedures and types |
 |---|---|
 | Charts | `line_png`, `multi_line_png`, `scatter_png`, `histogram_png`, `bar_png`, `heatmap_png` |
-| Configuration | `PlotConfig`, `DEFAULT_PLOT_CONFIG`, `LineData`, `LineStyle`, `Color`, `PALETTE`, `WHITE`, `BLACK`, `RED`, `BLUE`, `GREEN`, `ORANGE`, `PURPLE`, `BROWN`, `PINK`, `GRAY`, `OLIVE`, `CYAN` |
+| Configuration | `PlotConfig`, `DEFAULT_PLOT_CONFIG`, `config_resolve`, `LineData`, `LineStyle`, `Color`, `PALETTE`, `WHITE`, `BLACK`, `RED`, `BLUE`, `GREEN`, `ORANGE`, `PURPLE`, `BROWN`, `PINK`, `GRAY`, `OLIVE`, `CYAN` |
 | Images | `Image`, `image_new`, `image_clear`, `image_free`, `image_save_png`, `image_encode_png` |
 | Drawing | `draw_pixel`, `blend_pixel`, `draw_line`, `draw_line_segment`, `draw_rect`, `draw_char`, `draw_number`, `draw_text`, `draw_string`, `draw_string_vertical`, `H_Align`, `V_Align` |
 | Fonts | `Font`, `font_get`, `font_glyph`, `font_size_for_scale`, `text_width`, `line_height` |
