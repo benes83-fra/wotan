@@ -329,6 +329,43 @@ linalg_contracts_test :: proc(allocator: mem.Allocator) {
 		)
 	}
 
+	// 6b. condition_estimate is cond₂(X) for every method: a 50×8 Vandermonde
+	// matrix (tᵢ = i/49), numpy.linalg.cond = 110849.71316939584. Cholesky keeps
+	// its own path here (cond² ≈ 1.2e10 < 1e12).
+	{
+		X := l.matrix_new(f64, 50, 8)
+		defer l.matrix_free(&X)
+		y := make([]f64, 50)
+		defer delete(y)
+		for i in 0 ..< 50 {
+			t := f64(i) / 49
+			for j in 0 ..< 8 {X.data[i * 8 + j] = math.pow(t, f64(j))}
+			y[i] = math.sin(3 * t)
+		}
+		REF :: 110849.71316939584
+		worst := 0.0
+		conds: [3]f64
+		used: [3]l.LstsqMethod
+		for method, k in ([]l.LstsqMethod{.QR, .Cholesky, .SVD}) {
+			r := l.lstsq(&X, y, method)
+			defer l.lstsq_result_free(&r, allocator)
+			conds[k], used[k] = r.condition_estimate, r.method_used
+			worst = max(worst, abs(r.condition_estimate - REF) / REF)
+		}
+		expect(
+			&passed,
+			&total,
+			worst < 1e-6 && used == {.QR, .Cholesky, .SVD},
+			fmt.tprintf(
+				"lstsq condition_estimate = numpy cond(X) for QR / Cholesky / SVD: %.6e %.6e %.6e (worst rel err %.1e)",
+				conds[0],
+				conds[1],
+				conds[2],
+				worst,
+			),
+		)
+	}
+
 	// 7. matrix_inverse caller: factor_model_covariance with collinear factors
 	//    (f2 = 2·f1, singular Σ_f) uses the pseudo-inverse: minimum-norm betas,
 	//    numpy pinv(Σ_f) cov(f, r) = lstsq(F_c, R_c) minimum norm

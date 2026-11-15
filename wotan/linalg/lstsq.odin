@@ -16,11 +16,16 @@ LstsqMethod :: enum {
 // ============================================================================
 // Least Squares Result
 // ============================================================================
+// condition_estimate is cond₂(X) = σ_max / σ_min for every method: exact from
+// the singular values for .SVD (over the rank part: the singular values above
+// the rank tolerance), and estimated from the triangular factor for .QR (R) and
+// .Cholesky (L, with XᵀX = LLᵀ), a lower bound usually correct to several
+// digits. +Inf for X = 0; 0 for an empty X.
 LstsqResult :: struct {
 	beta:               []f64,
 	residuals:          []f64,
 	rank:               int,
-	condition_estimate: f64,
+	condition_estimate: f64, // cond₂(X), see above
 	method_used:        LstsqMethod,
 	success:            bool,
 }
@@ -185,22 +190,16 @@ _lstsq_householder :: proc(X: ^Matrix(f64), y: []f64, allocator: mem.Allocator) 
 
 	rank := 0
 	eps := 1e-12 * abs(R[0])
-	max_d, min_d := 0.0, f64(1e308)
-	for j in 0 ..< n {
-		d := abs(R[j * n + j])
-		if d > eps {rank += 1}
-		max_d = max(max_d, d)
-		if d > 0 {min_d = min(min_d, d)}
-	}
-	cond := max_d / min_d if min_d < 1e308 else f64(1e308)
+	for j in 0 ..< n {if abs(R[j * n + j]) > eps {rank += 1}}
+	cond := _cond2_upper(R, n, n) // cond₂(R) = cond₂(X)
 
 	return LstsqResult {
-		beta = beta,
-		residuals = residuals,
-		rank = rank,
+		beta               = beta,
+		residuals          = residuals,
+		rank               = rank,
 		condition_estimate = cond,
-		method_used = .QR,
-		success = cond < 1e12,
+		method_used        = .QR,
+		success            = cond < 1e12, // larger: R is numerically singular
 	}
 }
 
@@ -248,26 +247,14 @@ _lstsq_cholesky :: proc(X: ^Matrix(f64), y: []f64, allocator: mem.Allocator) -> 
 		residuals[i] = y[i] - pred
 	}
 
-	// Condition estimate from L diagonal
-	max_d := 0.0
-	min_d := f64(1e308)
-	for j in 0 ..< n {
-		d := AtA.data[j * AtA.cols + j] // L[j,j] stored on diagonal
-		if d > max_d {
-			max_d = d
-		}
-		if d > 0.0 && d < min_d {
-			min_d = d
-		}
-	}
-	cond := f64(1e308)
-	if min_d < f64(1e308) {
-		ratio := max_d / min_d
-		cond = ratio * ratio
-	}
-	// Numerically singular normal equations (cond(X)² beyond double precision):
-	// the SVD solution is the reliable one
-	if cond >= f64(1e12) {
+	// cond₂(X) = cond₂(Lᵀ), Lᵀ upper triangular (L is the lower triangle of AtA)
+	Lt := make([]f64, n * n, context.temp_allocator)
+	defer delete(Lt, context.temp_allocator)
+	for i in 0 ..< n {for j in 0 ..= i {Lt[j * n + i] = AtA.data[i * AtA.cols + j]}}
+	cond := _cond2_upper(Lt, n, n)
+	// Numerically singular normal equations (cond(XᵀX) = cond(X)² ≥ 1e12): the
+	// SVD solution is the reliable one
+	if !(cond < f64(1e6)) {
 		delete(beta, allocator)
 		delete(residuals, allocator)
 		return _lstsq_svd(X, y, allocator)
@@ -279,7 +266,7 @@ _lstsq_cholesky :: proc(X: ^Matrix(f64), y: []f64, allocator: mem.Allocator) -> 
 	result.rank = n
 	result.condition_estimate = cond
 	result.method_used = .Cholesky
-	result.success = cond < f64(1e12)
+	result.success = true
 	return result
 }
 
@@ -339,14 +326,8 @@ _lstsq_svd :: proc(X: ^Matrix(f64), y: []f64, allocator: mem.Allocator) -> Lstsq
 		residuals[i] = y[i] - pred
 	}
 
-	cond := f64(1e308)
-	if rank > 0 {
-		max_s := S[0]
-		min_s := S[rank - 1]
-		if min_s > 0.0 {
-			cond = max_s / min_s
-		}
-	}
+	cond := math.inf_f64(1)
+	if rank > 0 {cond = S[0] / S[rank - 1]}
 
 	result := LstsqResult{}
 	result.beta = beta
@@ -356,6 +337,81 @@ _lstsq_svd :: proc(X: ^Matrix(f64), y: []f64, allocator: mem.Allocator) -> Lstsq
 	result.method_used = .SVD
 	result.success = rank > 0 && cond < f64(1e12)
 	return result
+}
+
+// ============================================================================
+// Condition number of a triangular factor
+// ============================================================================
+// cond₂(R) = σ_max / σ_min of an n×n upper triangular R (row-major, row stride
+// `stride`), estimated by power iteration on RᵀR (σ_max) and inverse iteration
+// through the triangular solves (σ_min). O(n²) per step. Both iterations
+// approach their singular value from inside, so the estimate is a lower bound
+// on cond₂(R); it is +Inf when a diagonal entry is zero. For R from X = QR (or
+// R = Lᵀ from XᵀX = LLᵀ), cond₂(R) = cond₂(X).
+@(private = "file")
+_cond2_upper :: proc(R: []f64, n, stride: int) -> f64 {
+	if n == 0 {return 0}
+	for i in 0 ..< n {if R[i * stride + i] == 0 {return math.inf_f64(1)}}
+	scratch := context.temp_allocator
+	v := make([]f64, n, scratch)
+	w := make([]f64, n, scratch)
+	defer {delete(w, scratch); delete(v, scratch)}
+
+	start :: proc(v: []f64) { 	// fixed start vector with no special structure
+		s := 0.0
+		for i in 0 ..< len(v) {v[i] = 1 + 0.5 * math.sin(f64(i + 1)); s += v[i] * v[i]}
+		s = math.sqrt(s)
+		for i in 0 ..< len(v) {v[i] /= s}
+	}
+	normalize :: proc(v: []f64) -> f64 {
+		s := math.sqrt(dot_simd(v, v))
+		if s > 0 && !math.is_inf(s) {for i in 0 ..< len(v) {v[i] /= s}}
+		return s
+	}
+	MAX_ITS :: 50
+	RTOL :: 1e-6
+
+	// σ_max²: largest eigenvalue of RᵀR
+	start(v)
+	lam_max := 0.0
+	for _ in 0 ..< MAX_ITS {
+		for i in 0 ..< n { 	// w = R·v
+			s := 0.0
+			for j in i ..< n {s += R[i * stride + j] * v[j]}
+			w[i] = s
+		}
+		for j in 0 ..< n {v[j] = 0}
+		for i in 0 ..< n { 	// v = Rᵀ·w
+			wi := w[i]
+			for j in i ..< n {v[j] += R[i * stride + j] * wi}
+		}
+		lam := normalize(v)
+		done := abs(lam - lam_max) <= RTOL * lam
+		lam_max = lam
+		if done {break}
+	}
+
+	// 1/σ_min²: largest eigenvalue of (RᵀR)⁻¹ = R⁻¹R⁻ᵀ
+	start(v)
+	mu_max := 0.0
+	for _ in 0 ..< MAX_ITS {
+		for i in 0 ..< n { 	// Rᵀ·w = v (forward substitution)
+			s := v[i]
+			for k in 0 ..< i {s -= R[k * stride + i] * w[k]}
+			w[i] = s / R[i * stride + i]
+		}
+		for i := n - 1; i >= 0; i -= 1 { 	// R·v = w (back substitution)
+			s := w[i]
+			for j in i + 1 ..< n {s -= R[i * stride + j] * v[j]}
+			v[i] = s / R[i * stride + i]
+		}
+		mu := normalize(v)
+		if math.is_inf(mu) || math.is_nan(mu) {return math.inf_f64(1)}
+		done := abs(mu - mu_max) <= RTOL * mu
+		mu_max = mu
+		if done {break}
+	}
+	return math.sqrt(lam_max * mu_max)
 }
 
 // ============================================================================
