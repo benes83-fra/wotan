@@ -8,7 +8,25 @@ import "core:mem"
 vol_surface_test :: proc(allocator: mem.Allocator) {
 	seed_test(#procedure)
 	fmt.println("\n=== Volatility Surface Calibration ===\n")
-	fin.debug_heston()
+	// Heston (1993) benchmark (v0 = θ = 0.04, κ = 2, σ = 0.3, ρ = −0.5; S = K = 100,
+	// T = 1, r = 5%): QuantLib AnalyticHestonEngine gives 10.368686
+	{
+		p := fin.Heston_Params {
+			v0    = 0.04,
+			kappa = 2.0,
+			theta = 0.04,
+			sigma = 0.3,
+			rho   = -0.5,
+		}
+		price := fin.heston_price(100, 100, 1, 0.05, p, .Call, 4000)
+		ok := abs(price - 10.368686) < 1e-4
+		fmt.printf(
+			"%s Heston benchmark call %.6f (QuantLib 10.368686)\n",
+			"OK  " if ok else "FAIL",
+			price,
+		)
+		if !ok {record_failures(1)}
+	}
 
 	S := 450.0
 	r := 0.05
@@ -105,15 +123,7 @@ vol_surface_test :: proc(allocator: mem.Allocator) {
 		heston_price_val := fin.heston_price(S, K, T_test, r, heston_result.params, .Call, 1000)
 
 		// ✅ FIX: 2. Find the implied volatility of THAT Heston price
-		heston_vol, _, _ := fin.implied_volatility(
-			heston_price_val,
-			S,
-			K,
-			T_test,
-			r,
-			.Call,
-			allocator,
-		)
+		heston_vol, _, _ := fin.implied_volatility(heston_price_val, S, K, T_test, r, .Call)
 
 		market_vol := 0.20
 		for point in market_data {

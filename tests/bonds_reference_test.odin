@@ -172,8 +172,8 @@ bonds_reference_test :: proc(allocator: mem.Allocator) {
 
 	// 3. Hull-White zero-coupon bond and Bermudan callable bond
 	{
-		zcb := fin._hw1f_zero_coupon_bond(0.04, 5, 8, 0.1, 0.01, _bd_p0)
-		r := fin.callable_bond_lsm_hw1f(call, 0.1, 0.01, 0.03, _bd_p0, N)
+		zcb := fin._hw1f_zero_coupon_bond(0.04, 5, 8, 0.1, 0.01, _bd_df)
+		r := fin.callable_bond_lsm_hw1f(call, 0.1, 0.01, 0.03, _bd_df, N)
 		ref := BD_CALL
 		ok :=
 			rel(zcb, BD_ZCB) < 1e-9 &&
@@ -200,7 +200,7 @@ bonds_reference_test :: proc(allocator: mem.Allocator) {
 
 	// 4. Bermudan puttable bond
 	{
-		r := fin.puttable_bond_lsm_hw1f(put, 0.05, 0.012, 0.03, _bd_p0, N)
+		r := fin.puttable_bond_lsm_hw1f(put, 0.05, 0.012, 0.03, _bd_df, N)
 		ref := BD_PUT
 		ok :=
 			rel(r.straight_bond_price, ref[2]) < 1e-9 &&
@@ -223,10 +223,10 @@ bonds_reference_test :: proc(allocator: mem.Allocator) {
 
 	// 5. Effective duration / convexity (±50 bp) and OAS round trips
 	{
-		r := fin.callable_bond_lsm_hw1f(call, 0.1, 0.01, 0.03, _bd_p0, N)
+		r := fin.callable_bond_lsm_hw1f(call, 0.1, 0.01, 0.03, _bd_df, N)
 		ref := BD_CALL
-		oc := fin.callable_bond_oas(call, 0.1, 0.01, 0.03, _bd_p0, ref[5], N)
-		op := fin.puttable_bond_oas(put, 0.05, 0.012, 0.03, _bd_p0, BD_PUT[3], N)
+		oc := fin.callable_bond_oas(call, 0.1, 0.01, 0.03, _bd_df, ref[5], N)
+		op := fin.puttable_bond_oas(put, 0.05, 0.012, 0.03, _bd_df, BD_PUT[3], N)
 		ok :=
 			abs(r.effective_duration - ref[3]) < 0.02 &&
 			abs(r.effective_convexity - ref[4]) < 2.5 &&

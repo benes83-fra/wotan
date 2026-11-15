@@ -311,8 +311,8 @@ _make_const_tensor :: proc(data: []f64, n: int, allocator: mem.Allocator) -> ^t.
 // d⟨W1, W2⟩ = ρ dt, with φ fitted to P(0,t) = e^{−r0 t} (Brigo–Mercurio §4.2).
 // Hull-White 1F is the case η = 0. (x, y, ∫(x + y)) is sampled exactly between
 // event dates (it is jointly Gaussian), so there is no time-stepping error and
-// the n_steps arguments of the Monte Carlo pricers are unused. Bonds are priced
-// analytically on each path and payoffs are discounted along the path.
+// the Monte Carlo pricers need no time grid. Bonds are priced analytically on
+// each path and payoffs are discounted along the path.
 
 @(private = "file")
 _g2_from_hw :: proc(p: HW_Params) -> HW2_Params {
@@ -663,7 +663,7 @@ _g2_count_dates :: proc(T_start: []f64, n: int) -> int {
 // ============================================================================
 // Cap Σ δ_i (L_i − K)⁺ under Hull-White 1F fitted to the flat curve e^{−r0 t}.
 // T_start must be non-decreasing. Matches hw_price_cap_floor_strip up to Monte
-// Carlo error. n_steps is unused (exact sampling at the fixing dates).
+// Carlo error (exact sampling at the fixing dates).
 hw_mc_cap_option :: proc(
 	r0: f64,
 	K: f64,
@@ -673,7 +673,6 @@ hw_mc_cap_option :: proc(
 	n_caplets: int,
 	params: HW_Params,
 	n_paths: int,
-	n_steps: int,
 	allocator: mem.Allocator = context.allocator,
 ) -> (
 	price: f64,
@@ -847,8 +846,8 @@ calibrate_hull_white_2f :: proc(
 // Hull-White 2-Factor Monte Carlo: Cap Option (with CRN Greeks)
 // ============================================================================
 // Cap under G2++ fitted to the flat curve e^{−r0 t}; vega is ∂/∂σ (first factor).
-// Matches hull_white_2f_caplet_price_tensor up to Monte Carlo error. n_steps is
-// unused (exact sampling at the fixing dates).
+// Matches hull_white_2f_caplet_price_tensor up to Monte Carlo error (exact
+// sampling at the fixing dates).
 hw2_mc_cap_option :: proc(
 	r0: f64,
 	K: f64,
@@ -858,7 +857,6 @@ hw2_mc_cap_option :: proc(
 	n_caplets: int,
 	params: HW2_Params,
 	n_paths: int,
-	n_steps: int,
 	allocator: mem.Allocator = context.allocator,
 ) -> (
 	price: f64,
@@ -1146,7 +1144,7 @@ hw2f_zero_coupon_bond :: proc(
 // receiving floating (worth 1 − P(t, maturity)). Longstaff–Schwartz on exact
 // G2++ paths (flat curve e^{−r0 t}), regressing on 1, x, y, x², xy, y² and the
 // exercise value over in-the-money paths (1, x, x² and the exercise value when
-// η = 0, the Hull-White 1F case). n_steps is unused.
+// η = 0, the Hull-White 1F case).
 hw2f_mc_bermudan_option :: proc(
 	r0: f64,
 	K: f64,
@@ -1155,7 +1153,6 @@ hw2f_mc_bermudan_option :: proc(
 	delta: f64, // e.g., 1.0
 	params: HW2_Params,
 	n_paths: int,
-	n_steps: int,
 	allocator: mem.Allocator = context.allocator,
 ) -> f64 {
 	dates := make([dynamic]f64, 0, len(exercise_dates), allocator)
@@ -1301,7 +1298,6 @@ hw_mc_floor_option :: proc(
 	n_floorlets: int,
 	params: HW_Params,
 	n_paths: int,
-	n_steps: int,
 	allocator: mem.Allocator = context.allocator,
 ) -> (
 	price: f64,
@@ -1331,7 +1327,7 @@ hw_mc_floor_option :: proc(
 // ============================================================================
 // Payer (receiver) swaption expiring at T_exp on a swap paying K·δ at
 // T_exp + jδ up to T_maturity, under Hull-White 1F fitted to e^{−r0 t}. Matches
-// Jamshidian's formula up to Monte Carlo error. n_steps is unused.
+// Jamshidian's formula up to Monte Carlo error.
 hw_mc_swaption_option :: proc(
 	r0: f64,
 	K: f64,
@@ -1341,7 +1337,6 @@ hw_mc_swaption_option :: proc(
 	is_payer: bool,
 	params: HW_Params,
 	n_paths: int,
-	n_steps: int,
 	allocator: mem.Allocator = context.allocator,
 ) -> (
 	price: f64,

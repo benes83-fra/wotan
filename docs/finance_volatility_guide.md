@@ -43,7 +43,7 @@ Three model parameter structs appear throughout:
 | `Heston_Params` | `v0` (initial variance), `kappa` (mean reversion speed), `theta` (long-run variance), `sigma` (volatility of variance), `rho` (correlation) |
 | `MJD_Params` | `sigma` (diffusion volatility), `lambda` (jumps per year), `mu_j` and `sigma_j` (mean and volatility of the log jump size) |
 
-Quotes for calibration are `VolSurfacePoint{strike, expiry, implied_vol, market_price}`. The calibrations read `strike`, `expiry` and `implied_vol`; `market_price` is for your own bookkeeping. The `OptionQuote` struct (bid/ask for calls and puts) is a container for raw market data; no procedure in this part reads it.
+Quotes for calibration are `VolSurfacePoint{strike, expiry, implied_vol, market_price}`. The calibrations read `strike`, `expiry` and `implied_vol`; `market_price` is for your own bookkeeping.
 
 ## 2. SABR
 
@@ -536,7 +536,6 @@ The derivatives are finite differences, so noise in the prices is amplified. Tak
 **Known limitations:**
 - `build_lv_surface_from_heston` has a fixed grid (0.6–1.4·S₀, 0.1–1 year), so longer barriers use the 1-year volatilities.
 - `fx_down_and_out_digital_call_price` and `fx_dnt_pde_price` need σ > 0.
-- `debug_heston()` prints a self-check of the Heston pricer. It is used by `vol_surface_test` and is not needed otherwise.
 
 ## 10. Quick reference
 

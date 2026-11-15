@@ -232,7 +232,7 @@ The CDS schedule starts on the 20th on or before the trade date, rolls quarterly
 ## 5. Yield curves
 
 A `YieldCurve` holds increasing pillar `tenors` (years) and continuously compounded `zero_rates`, and an `interpolation`:
-- `.LinearZero` (the default) interpolates zero rates linearly in time, and holds them flat before the first pillar and after the last.
+- `.LinearZero` (the default) interpolates zero rates linearly in time. Before the first pillar the zero rate is flat; after the last, the instantaneous forward at the last pillar is carried on, as in QuantLib.
 - `.FlatForward` gives piecewise-constant forward rates, so discount factors are log-linear. The first forward runs back to t = 0, and the last is carried beyond the last pillar.
 
 You can fill the fields yourself (`YieldCurve{tenors = {1.0}, zero_rates = {0.025}}` is a flat 2.5% curve) or bootstrap one. Free a bootstrapped curve with `free_yield_curve`.
@@ -330,12 +330,12 @@ for d in probe {
 DF Date{year = 2027, month = 11, day = 15}: 0.978732118711  0.978732118711
 DF Date{year = 2031, month = 6, day = 30}: 0.894808481341  0.894408703949
 DF Date{year = 2040, month = 1, day = 2}: 0.696022547761  0.693151058826
-DF Date{year = 2060, month = 12, day = 1}: 0.382194421968  0.385152234122
+DF Date{year = 2060, month = 12, day = 1}: 0.386190192719  0.385152234122
 ```
 
 Up to 3 years the two interpolations give the same pillars. Every date those instruments need is the spot date (before the first pillar) or the annual fixed coupon date of an earlier swap (a pillar itself). The floating legs of a self-discounting curve telescope to DF(spot) − DF(end). From 5 years on, coupons fall between pillars (the 4-year coupon of the 5-year swap), so the interpolation matters.
 
-Every number above matches QuantLib to the digits shown, with one exception: the linear-zero discount factor in 2060, beyond the last pillar. QuantLib extrapolates the last zero-rate segment linearly and gets 0.386190; here the zero rate is held flat. The flat-forward curve carries its last forward as QuantLib does, and matches.
+Every number above matches QuantLib to the digits shown, including the 2060 discount factors beyond the last pillar. Both curves carry a forward rate on from the last pillar: the flat-forward curve its last piecewise forward, the linear-zero curve the instantaneous forward at the last pillar.
 
 ## 6. Bonds on a time axis
 
@@ -485,23 +485,21 @@ A `CallableBond` has a face value, a coupon rate, `coupon_frequency` payments a 
 
 Coupons are paid at maturity − k/f. A bond whose maturity isn't a whole number of periods gets a short first coupon from t = 0, so these are bonds issued today; there is no accrued interest. Call and put prices are clean. On an exercise date that is also a coupon date, the coupon is paid as well. Exercise dates outside (0, maturity) are ignored.
 
-The model is one-factor Hull-White fitted to a discount curve `P0T_func(t)`: r(t) = α(t) + x(t), dx = −a x dt + σ dW. With r0 = f(0, 0), the instantaneous forward at 0, the model reprices the curve exactly. The steps:
+The model is one-factor Hull-White fitted to a discount curve `P0T_func(t, user_data)`, a `Discount_Fn`: r(t) = α(t) + x(t), dx = −a x dt + σ dW. With r0 = f(0, 0), the instantaneous forward at 0, the model reprices the curve exactly. The steps:
 - The paths of x and its integral are sampled exactly at the exercise dates, so there is no time-stepping error, and they come in antithetic pairs.
 - The straight bond on each exercise date is the closed-form Hull-White bond price.
 - Longstaff–Schwartz regresses only the option's continuation value, on powers of the standardised state.
 
-`callable_bond_lsm_hw1f(bond, a, sigma, r0, P0T_func, n_paths = 10000, n_steps, poly_degree = 3)` returns a `CallableBondResult`:
+`callable_bond_lsm_hw1f(bond, a, sigma, r0, P0T_func, n_paths = 10000, poly_degree = 3, user_data = nil)` returns a `CallableBondResult`:
 - `price`, `straight_bond_price` and `embedded_call_value`;
 - `call_probability`;
 - `effective_duration` and `effective_convexity`, from ±50 bp parallel shifts of the curve on the same paths.
 
 `callable_bond_oas(…, market_price, …)` finds the constant spread over the short rate (a parallel shift of the curve) at which the model price equals the market price. It returns NaN if no spread in [−100%, 100%] does. The puttable versions are `puttable_bond_lsm_hw1f` and `puttable_bond_oas`.
 
-`n_steps` is accepted but unused, because the sampling is exact. The results' `oas` field is always 0; use the OAS procedures.
-
 ```odin
 // market curve z(t) = 3% + 1.2% (1 − e^{−t/2.5}) − 0.4% t e^{−t/2.5}
-p0 :: proc(t: f64) -> f64 {
+p0 :: proc(t: f64, _: rawptr) -> f64 {
 	z := 0.03 + 0.012 * (1 - math.exp(-t / 2.5)) - 0.004 * t * math.exp(-t / 2.5)
 	return math.exp(-z * t)
 }
@@ -527,8 +525,8 @@ fmt.printf("8 runs of 10000 paths: mean %.4f sd %.4f\n", mean, math.sqrt(sd))
 // σ → 0: the cheapest deterministic call (or none)
 det := r.straight_bond_price
 for c in bond.call_schedule {
-	v := c.price * p0(c.time)
-	for k in 1 ..= int(c.time * 2 + 1e-9) {v += 2.5 * p0(f64(k) / 2)}
+	v := c.price * p0(c.time, nil)
+	for k in 1 ..= int(c.time * 2 + 1e-9) {v += 2.5 * p0(f64(k) / 2, nil)}
 	det = min(det, v)
 }
 r0 := fin.callable_bond_lsm_hw1f(bond, 0.1, 1e-7, 0.03, p0, 2000)
@@ -567,16 +565,13 @@ With σ → 0 the rates follow the forwards. The model then calls on the cheapes
 
 The OAS solver reuses one set of paths across all its trial spreads. A market price below the model price means a positive spread.
 
-`P0T_func` is a plain `proc(f64) -> f64` with no user data. To price on a bootstrapped curve, keep the curve in a package-level variable. Take r0 from the curve's short end.
+The pricers pass `user_data` to `P0T_func` unchanged. To price on a bootstrapped curve, pass `discount_fn_yield_curve` with the curve's address as `user_data`. Take r0 from the curve's short end.
 
 ```odin
-g_curve: fin.YieldCurve
-curve_df :: proc(t: f64) -> f64 {return fin.yield_curve_discount_factor(&g_curve, t)}
-
-g_curve = fin.bootstrap_yield_curve_from_swaps([]f64{1, 2, 3, 5, 7, 10}, []f64{0.030, 0.032, 0.034, 0.036, 0.037, 0.038})
-defer fin.free_yield_curve(&g_curve)
-f00 := fin.yield_curve_zero_rate(&g_curve, 1e-6)
-rc := fin.callable_bond_lsm_hw1f(bond, 0.1, 0.01, f00, curve_df, 65536)
+curve := fin.bootstrap_yield_curve_from_swaps([]f64{1, 2, 3, 5, 7, 10}, []f64{0.030, 0.032, 0.034, 0.036, 0.037, 0.038})
+defer fin.free_yield_curve(&curve)
+f00 := fin.yield_curve_zero_rate(&curve, 1e-6)
+rc := fin.callable_bond_lsm_hw1f(bond, 0.1, 0.01, f00, fin.discount_fn_yield_curve, 65536, user_data = &curve)
 fmt.printf("on the swap curve (r0 = %.6f): price %.4f straight %.4f P(call) %.4f\n", f00, rc.price, rc.straight_bond_price, rc.call_probability)
 // edge: call price far above any value -> straight bond
 never := bond
@@ -820,12 +815,7 @@ The first coupon is the real coupon 0.625 scaled by the index ratio, 1.0104. The
 | inflation curves, forecasts, lagged observations, swap fair rates and NPVs, inflation-linked bond flows and dirty price | QuantLib | all printed digits |
 
 **Known limitations:**
-- **Linear-zero extrapolation.** Linear-zero curves hold the zero rate flat beyond the last pillar, while QuantLib extrapolates it linearly. In the section 5 example this gives a 2060 discount factor of 0.3822 against 0.3862. Flat-forward curves match QuantLib.
-- **Hull-White curve input.** `P0T_func` has no user-data pointer, so a bootstrapped curve has to go through a package-level variable.
-- **Callable and puttable bonds:**
-  - they model newly issued bonds only, with no seasoned bonds and no accrued interest;
-  - `n_steps`, the `settlement` field and the results' `oas` field are unused;
-  - the private `_hw_bermudan_price_fixed` is not called anywhere.
+- **Callable and puttable bonds.** They model newly issued bonds only, with no seasoned bonds and no accrued interest.
 - **Time-axis bonds.** Accrued interest is linear in time, and `Bond.day_count` is informational.
 - **Inflation-linked bonds.** They have a dirty price only, with no accrued interest, clean price or real yield.
 
@@ -842,7 +832,7 @@ The first coupon is the real coupon 0.625 scaled by the index ratio, 1.0104. The
 | Curve queries | `yield_curve_discount_factor`, `yield_curve_discount_factor_date`, `yield_curve_zero_rate`, `yield_curve_forward_rate` | 5 |
 | Time-axis bonds | `create_fixed_bond`, `create_zero_coupon_bond`, `price_bond_from_yield_curve`, `price_bond_from_curve`, `solve_ytm`, `calculate_duration_convexity`, `calculate_accrued_interest`, `get_coupon_dates` | 6 |
 | Dated bonds | `price_dated_bond`, `dated_bond_clean_price`, `dated_bond_dirty_price`, `dated_bond_yield`, `dated_bond_duration_convexity`, `dated_bond_accrued_interest`, `dated_bond_settlement_date`, `dated_bond_cashflows` | 7 |
-| Callable and puttable bonds | `callable_bond_lsm_hw1f`, `callable_bond_oas`, `puttable_bond_lsm_hw1f`, `puttable_bond_oas` | 8 |
+| Callable and puttable bonds | `callable_bond_lsm_hw1f`, `callable_bond_oas`, `puttable_bond_lsm_hw1f`, `puttable_bond_oas`, `Discount_Fn`, `discount_fn_yield_curve` | 8 |
 | Convertibles | `price_convertible_bond` | 9 |
 | CPI | `cpi_fixing`, `cpi_observation`, `zero_inflation_rate`, `bootstrap_zero_inflation_curve`, `free_zero_inflation_curve` | 10 |
 | Inflation swaps and bonds | `zcis_cashflows`, `zcis_fair_rate`, `zcis_npv`, `inflation_linked_bond_cashflows`, `inflation_linked_bond_dirty_price` | 10 |

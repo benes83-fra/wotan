@@ -9,7 +9,8 @@ import "core:mem"
 // ============================================================================
 
 CurveInterpolation :: enum u8 {
-	LinearZero, // zero rates linear in time, flat before the first and after the last pillar
+	LinearZero, // zero rates linear in time; flat before the first pillar, and the
+	// instantaneous forward at the last pillar carried beyond it (QuantLib)
 	FlatForward, // piecewise-constant forwards (log-linear discount factors), the
 	// first forward back to t = 0 and the last one carried beyond the last pillar
 }
@@ -233,7 +234,15 @@ _interpolate_zero_rate :: proc(curve: ^YieldCurve, t: f64) -> f64 {
 	}
 	switch curve.interpolation {
 	case .LinearZero:
-		if t >= tenors[n - 1] {return z[n - 1]}
+		if t >= tenors[n - 1] {
+			// flat instantaneous forward f = d(z·t)/dt at the last pillar, as
+			// QuantLib's InterpolatedZeroCurve extrapolates
+			if n == 1 {return z[0]}
+			tn := tenors[n - 1]
+			slope := (z[n - 1] - z[n - 2]) / (tn - tenors[n - 2])
+			f := z[n - 1] + tn * slope
+			return (z[n - 1] * tn + f * (t - tn)) / t
+		}
 		wt := (t - tenors[k]) / (tenors[k + 1] - tenors[k])
 		return z[k] * (1.0 - wt) + z[k + 1] * wt
 	case .FlatForward:

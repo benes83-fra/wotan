@@ -24,9 +24,8 @@ PortfolioCVaR :: struct {
 // ============================================================================
 
 // RiskMetrics EWMA covariance (zero mean): Σ_t λ^{T-1-t} r_t r_tᵀ / Σ_t λ^{T-1-t},
-// the most recent row weighted 1. Despite the name it is not fitted by GARCH; it
-// is the IGARCH(1,1) / RiskMetrics special case with a fixed λ
-garch_adjusted_covariance :: proc(
+// the most recent row weighted 1 (the IGARCH(1,1) special case with a fixed λ)
+ewma_covariance :: proc(
 	returns_data: ^l.Matrix(f64), // rows = time, cols = assets
 	lambda: f64 = 0.94, // EWMA decay factor (RiskMetrics standard)
 	allocator: mem.Allocator = context.allocator,

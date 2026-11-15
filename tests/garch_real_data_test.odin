@@ -821,7 +821,7 @@ garch_real_data_test :: proc(allocator: mem.Allocator) {
 	cov_standard := fin.covariance_matrix(&returns_matrix, main_alloc)
 	defer l.matrix_free(&cov_standard)
 
-	cov_garch := fin.garch_adjusted_covariance(&returns_matrix, 0.94, main_alloc)
+	cov_garch := fin.ewma_covariance(&returns_matrix, 0.94, main_alloc)
 	defer l.matrix_free(&cov_garch)
 
 	// Define constraints

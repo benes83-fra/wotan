@@ -80,7 +80,7 @@ derivatives_test :: proc(allocator: mem.Allocator) {
 
 	// Given a market price, find the implied vol
 	market_call := 10.45 // approximately ATM call price
-	iv, converged, iters := fin.implied_volatility(market_call, S, K, T, r, .Call, allocator)
+	iv, converged, iters := fin.implied_volatility(market_call, S, K, T, r, .Call)
 
 	fmt.printf("  Market Call Price: %.2f\n", market_call)
 	fmt.printf("  Implied Vol:       %.4f (%.2f%%)\n", iv, iv * 100)
@@ -98,7 +98,7 @@ derivatives_test :: proc(allocator: mem.Allocator) {
 	fmt.println("\n  Vol Surface Scan:")
 	test_prices := []f64{5.0, 8.0, 10.45, 13.0, 16.0}
 	for mp in test_prices {
-		iv2, conv2, it2 := fin.implied_volatility(mp, S, K, T, r, .Call, allocator)
+		iv2, conv2, it2 := fin.implied_volatility(mp, S, K, T, r, .Call)
 		fmt.printf(
 			"    Market=%.2f  →  IV=%.4f (%.2f%%)  [%v in %d iter]\n",
 			mp,

@@ -94,8 +94,8 @@ prospect_vol_smile_test :: proc(allocator: mem.Allocator) {
 		dist_price *= math.exp(-r * T)
 
 		// Calculate Implied Volatilities using your existing finance module!
-		true_iv, _, _ := fin.implied_volatility(true_price, S0, K, T, r, .Call, allocator)
-		dist_iv, _, _ := fin.implied_volatility(dist_price, S0, K, T, r, .Call, allocator)
+		true_iv, _, _ := fin.implied_volatility(true_price, S0, K, T, r, .Call)
+		dist_iv, _, _ := fin.implied_volatility(dist_price, S0, K, T, r, .Call)
 
 		effect := ""
 		if K < S0 {

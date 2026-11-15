@@ -112,7 +112,6 @@ ir_derivatives_test :: proc(allocator: mem.Allocator) {
 		cap_n,
 		hw_res.params,
 		20000,
-		100,
 		allocator,
 	)
 
@@ -169,7 +168,6 @@ ir_derivatives_floor_test :: proc(allocator: mem.Allocator) {
 	}
 
 	n_paths := 20000
-	n_steps := 100
 
 	fmt.printf("   %-30s | %10.4f%%\n", "Initial Short Rate (r0)", r0 * 100.0)
 	fmt.printf("   %-30s | %10.4f%%\n", "Floor Strike (K)", K * 100.0)
@@ -187,7 +185,6 @@ ir_derivatives_floor_test :: proc(allocator: mem.Allocator) {
 		n_caplets,
 		params,
 		n_paths,
-		n_steps,
 		allocator,
 	)
 

@@ -7,6 +7,7 @@ import t "../wotan/tensor"
 import "base:runtime"
 import "core:fmt"
 import "core:math"
+import "core:math/rand"
 import "core:mem"
 
 // Regression tests for wotan/finance issues found while writing the finance
@@ -44,7 +45,9 @@ import "core:mem"
 // was an unconditional normal VaR; the GARCH backtests were in sample;
 // CDS rpv01 was per 1M whatever the notional; the PDPM payoff procedures took
 // unused spot / maturity arguments, and four PDPM / market-data types had no
-// free procedure.
+// free procedure; linear-zero curves held the zero rate flat beyond the last
+// pillar (QuantLib carries the last instantaneous forward); the callable and
+// puttable bond pricers took a curve callback without user data.
 
 // limit / stop order script state (finance_fixes_test)
 @(private = "file")
@@ -1015,6 +1018,72 @@ finance_fixes_test :: proc(allocator: mem.Allocator) {
 		)
 		t.tensor_free_graph(s)
 		for x in ([]^t.Tensor{S, K, T, r, sigma}) {t.tensor_free(x)}
+	}
+
+	{ 	// linear-zero curve beyond the last pillar: the instantaneous forward at the
+		// last pillar is carried on, as QuantLib's InterpolatedZeroCurve<Linear>
+		// (QuantLib 1.44 ZeroCurve, nodes 1/2/5/10 y at 3.0/3.4/3.9/3.75 %)
+		curve := fin.YieldCurve {
+			tenors        = []f64{1, 2, 5, 10},
+			zero_rates    = []f64{0.030, 0.034, 0.039, 0.0375},
+			interpolation = .LinearZero,
+		}
+		ts := []f64{0.5, 7, 10, 12, 15, 30}
+		ql := []f64{0.03, 0.0384, 0.0375, 0.037, 0.0365, 0.0355}
+		worst := 0.0
+		for tt, i in ts {worst = max(worst, abs(fin.yield_curve_zero_rate(&curve, tt) - ql[i]))}
+		df30 := fin.yield_curve_discount_factor(&curve, 30)
+		worst = max(worst, abs(df30 - 0.3447278547672202))
+		report(
+			fmt.tprintf(
+				"linear-zero extrapolation = QuantLib (z(30) %.10f, DF(30) %.12f): max err %.1e",
+				fin.yield_curve_zero_rate(&curve, 30),
+				df30,
+				worst,
+			),
+			worst < 1e-14,
+			&passed,
+			&total,
+		)
+	}
+	{ 	// callable / puttable bonds take a bootstrapped curve through user_data
+		// (discount_fn_yield_curve), no global needed: same price as a closure
+		flat := fin.YieldCurve {
+			tenors        = []f64{1, 30},
+			zero_rates    = []f64{0.03, 0.03},
+			interpolation = .LinearZero,
+		}
+		p0 :: proc(tt: f64, _: rawptr) -> f64 {return math.exp(-0.03 * tt)}
+		bond := fin.CallableBond {
+			face_value       = 100,
+			coupon_rate      = 0.05,
+			coupon_frequency = 2,
+			maturity         = 10,
+			call_schedule    = []fin.CallDate{{5, 102}, {7, 101}, {9, 100}},
+		}
+		rand.reset(11)
+		a := fin.callable_bond_lsm_hw1f(bond, 0.1, 0.01, 0.03, p0, 4000, allocator = allocator)
+		rand.reset(11)
+		b := fin.callable_bond_lsm_hw1f(
+			bond,
+			0.1,
+			0.01,
+			0.03,
+			fin.discount_fn_yield_curve,
+			4000,
+			user_data = &flat,
+			allocator = allocator,
+		)
+		report(
+			fmt.tprintf(
+				"callable bond on a YieldCurve via user_data: %.10f = %.10f (closure)",
+				b.price,
+				a.price,
+			),
+			abs(a.price - b.price) < 1e-10 * a.price && a.price > 90,
+			&passed,
+			&total,
+		)
 	}
 
 	fmt.printf("finance regression tests: %d/%d passed\n", passed, total)

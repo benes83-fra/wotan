@@ -148,7 +148,6 @@ ir_derivatives_2f_test :: proc(allocator: mem.Allocator) {
 		cap_n,
 		hw2_res.params,
 		20000,
-		100,
 		allocator,
 	)
 
@@ -481,7 +480,6 @@ bermudan_swaption_test :: proc(allocator: mem.Allocator) {
 		delta,
 		params_1f_mc,
 		20000,
-		100,
 		allocator,
 	)
 
@@ -493,7 +491,6 @@ bermudan_swaption_test :: proc(allocator: mem.Allocator) {
 		delta,
 		params_2f,
 		20000,
-		100,
 		allocator,
 	)
 

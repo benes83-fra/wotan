@@ -4656,7 +4656,7 @@ risk_portfolio_reference_test :: proc(allocator: mem.Allocator) {
 
 	// 1. EWMA covariance
 	{
-		E := fin.garch_adjusted_covariance(&X, 0.94)
+		E := fin.ewma_covariance(&X, 0.94)
 		defer l.matrix_free(&E)
 		worst := 0.0
 		for v, i in E.data {worst = max(worst, abs(v - RP_EWMA[i]) / abs(RP_EWMA[i]))}
@@ -4665,7 +4665,7 @@ risk_portfolio_reference_test :: proc(allocator: mem.Allocator) {
 			&total,
 			worst < 1e-12,
 			fmt.tprintf(
-				"garch_adjusted_covariance (RiskMetrics EWMA, λ 0.94) vs numpy: max rel err %.1e",
+				"ewma_covariance (RiskMetrics, λ 0.94) vs numpy: max rel err %.1e",
 				worst,
 			),
 		)

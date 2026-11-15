@@ -17,7 +17,6 @@ CallableBond :: struct {
 	coupon_frequency: int, // Payments per year (e.g., 2 for semi-annual)
 	maturity:         f64, // Bond maturity in years
 	call_schedule:    []CallDate, // Call dates and prices (dates outside (0, maturity) are ignored)
-	settlement:       f64, // Settlement date (usually 0; not used by the pricer)
 }
 
 CallDate :: struct {
@@ -29,7 +28,6 @@ CallableBondResult :: struct {
 	price:               f64,
 	straight_bond_price: f64,
 	embedded_call_value: f64,
-	oas:                 f64, // Always 0 here (the price is at zero spread); see callable_bond_oas
 	effective_duration:  f64, // −∂P/∂s / P for a parallel shift s of the initial curve
 	effective_convexity: f64, // ∂²P/∂s² / P
 	call_probability:    f64, // Probability of being called
@@ -59,14 +57,38 @@ _hw_k :: proc(a, t: f64) -> f64 {
 	return (t - 2.0 * _hw_b(a, t) + _hw_b(2.0 * a, t)) / (a * a)
 }
 
+// Market discount curve P(0, t). user_data is passed through unchanged, so a
+// curve can be given without a global (see discount_fn_yield_curve).
+Discount_Fn :: proc(t: f64, user_data: rawptr) -> f64
+
+// Discount_Fn of a YieldCurve: pass the curve's address as user_data
+discount_fn_yield_curve :: proc(t: f64, user_data: rawptr) -> f64 {
+	return yield_curve_discount_factor((^YieldCurve)(user_data), t)
+}
+
+// The market curve as the pricers call it
+@(private)
+_Curve :: struct {
+	fn:   Discount_Fn,
+	data: rawptr,
+}
+
+@(private)
+_df :: #force_inline proc(c: _Curve, t: f64) -> f64 {return c.fn(t, c.data)}
+
 // Instantaneous forward f(0,t) = −∂ ln P(0,t)/∂t (one-sided near 0)
 @(private = "file")
-_hw_fwd :: proc(P0T: proc(_: f64) -> f64, t: f64) -> f64 {
+_hw_fwd :: proc(P0T: _Curve, t: f64) -> f64 {
 	h := 1e-5
 	if t > h {
-		return (math.ln(P0T(t - h)) - math.ln(P0T(t + h))) / (2.0 * h)
+		return (math.ln(_df(P0T, t - h)) - math.ln(_df(P0T, t + h))) / (2.0 * h)
 	}
-	return (3.0 * math.ln(P0T(t)) - 4.0 * math.ln(P0T(t + h)) + math.ln(P0T(t + 2.0 * h))) / (2.0 * h)
+	return(
+		(3.0 * math.ln(_df(P0T, t)) -
+			4.0 * math.ln(_df(P0T, t + h)) +
+			math.ln(_df(P0T, t + 2.0 * h))) /
+		(2.0 * h) \
+	)
 }
 
 // ============================================================================
@@ -79,12 +101,14 @@ _hw1f_zero_coupon_bond :: proc(
 	T: f64, // Maturity
 	a: f64, // Mean reversion
 	sigma: f64, // Volatility
-	P0T_func: proc(_: f64) -> f64, // Market discount curve P(0,.)
+	P0T_func: Discount_Fn, // Market discount curve P(0,.)
+	user_data: rawptr = nil, // passed to P0T_func
 ) -> f64 {
 	if t >= T {return 1.0}
+	c := _Curve{P0T_func, user_data}
 	B := _hw_b(a, T - t)
 	v := 0.5 * sigma * sigma * _hw_b(2.0 * a, t)
-	return P0T_func(T) / P0T_func(t) * math.exp_f64(B * _hw_fwd(P0T_func, t) - v * B * B - B * r_t)
+	return _df(c, T) / _df(c, t) * math.exp_f64(B * _hw_fwd(c, t) - v * B * B - B * r_t)
 }
 
 // ============================================================================
@@ -119,7 +143,7 @@ _hw_bermudan_build :: proc(
 	ex_t_in, ex_k_in: []f64,
 	is_call: bool,
 	a, sigma, r0: f64,
-	P0T: proc(_: f64) -> f64,
+	P0T: _Curve,
 	n_paths, degree: int,
 	allocator: mem.Allocator,
 ) -> _HW_Bermudan {
@@ -175,7 +199,7 @@ _hw_bermudan_build :: proc(
 	x0 := r0 - _hw_fwd(P0T, 0.0)
 	e.s0_lc = make([]f64, n_cf, allocator)
 	for t, i in e.cf_t {
-		e.s0_lc[i] = math.ln(amount[i] * P0T(t)) - _hw_b(a, t) * x0
+		e.s0_lc[i] = math.ln(amount[i] * _df(P0T, t)) - _hw_b(a, t) * x0
 	}
 
 	// Straight bond coefficients at each exercise date (flows strictly after it)
@@ -188,12 +212,13 @@ _hw_bermudan_build :: proc(
 		bj := _hw_b(a, tj)
 		alpha := fj + s2 * bj * bj
 		v := s2 * _hw_b(2.0 * a, tj)
-		lp := math.ln(P0T(tj))
+		lp := math.ln(_df(P0T, tj))
 		e.first[j] = n_cf
 		for i := n_cf - 1; i >= 0 && e.cf_t[i] > tj + 1e-12; i -= 1 {e.first[j] = i}
 		for i in e.first[j] ..< n_cf {
 			B := _hw_b(a, e.cf_t[i] - tj)
-			e.lc[j * n_cf + i] = math.ln(amount[i] * P0T(e.cf_t[i])) - lp + B * fj - v * B * B - B * alpha
+			e.lc[j * n_cf + i] =
+				math.ln(amount[i] * _df(P0T, e.cf_t[i])) - lp + B * fj - v * B * B - B * alpha
 			e.bb[j * n_cf + i] = B
 		}
 	}
@@ -219,7 +244,7 @@ _hw_bermudan_build :: proc(
 				c := s2 * b * b
 				beta := c / sx if sx > 0.0 else 0.0
 				sr := math.sqrt_f64(max(sigma * sigma * _hw_k(a, dt) - beta * beta, 0.0))
-				det := math.ln(P0T(tp) / P0T(tj)) + s2 * (_hw_k(a, tj) - _hw_k(a, tp))
+				det := math.ln(_df(P0T, tp) / _df(P0T, tj)) + s2 * (_hw_k(a, tj) - _hw_k(a, tp))
 				z1, z2 := sgn * z[2 * j], sgn * z[2 * j + 1]
 				integral := xs * b + beta * z1 + sr * z2
 				xs = xs * math.exp_f64(-a * dt) + sx * z1
@@ -276,18 +301,14 @@ _hw_shift_coef :: proc(e: ^_HW_Bermudan, s: f64, allocator: mem.Allocator) -> []
 }
 
 // Price of the callable (puttable) bond and the probability of exercise, with
-// a parallel shift s of the curve (the OAS). If `stop` is given it receives
-// each path's exercise date index (len(ex_t) = never exercised).
+// a parallel shift s of the curve (the OAS)
 @(private)
-_hw_bermudan_price :: proc(e: ^_HW_Bermudan, s: f64, stop: []int = nil) -> (price: f64, ex_prob: f64) {
+_hw_bermudan_price :: proc(e: ^_HW_Bermudan, s: f64) -> (price: f64, ex_prob: f64) {
 	S0 := _hw_bermudan_straight(e, s)
 	m := len(e.ex_t)
 	n, nb := e.n_paths, e.degree + 1
 	alloc := e.allocator
-	if m == 0 {
-		for p in 0 ..< len(stop) {stop[p] = 0}
-		return S0, 0.0
-	}
+	if m == 0 {return S0, 0.0}
 
 	coef := _hw_shift_coef(e, s, alloc)
 	U := make([]f64, n, alloc)
@@ -295,11 +316,11 @@ _hw_bermudan_price :: proc(e: ^_HW_Bermudan, s: f64, stop: []int = nil) -> (pric
 	X := make([]f64, n * nb, alloc)
 	y := make([]f64, n, alloc)
 	itm := make([]int, n, alloc)
-	st := stop if stop != nil else make([]int, n, alloc)
+	st := make([]int, n, alloc) // exercise date index per path (m = never)
 	defer {
 		delete(coef, alloc); delete(U, alloc); delete(ev, alloc)
 		delete(X, alloc); delete(y, alloc); delete(itm, alloc)
-		if stop == nil {delete(st, alloc)}
+		delete(st, alloc)
 	}
 
 	for p in 0 ..< n {
@@ -360,26 +381,6 @@ _hw_bermudan_price :: proc(e: ^_HW_Bermudan, s: f64, stop: []int = nil) -> (pric
 	return price, f64(n_hit) / f64(n)
 }
 
-// Price under shift s with the exercise dates frozen at `stop`
-@(private)
-_hw_bermudan_price_fixed :: proc(e: ^_HW_Bermudan, s: f64, stop: []int) -> f64 {
-	S0 := _hw_bermudan_straight(e, s)
-	m := len(e.ex_t)
-	if m == 0 {return S0}
-	coef := _hw_shift_coef(e, s, e.allocator)
-	defer delete(coef, e.allocator)
-	opt := 0.0
-	for p in 0 ..< e.n_paths {
-		j := stop[p]
-		if j >= m {continue}
-		ld := 0.0
-		for k in 0 ..= j {ld += e.ld[p * m + k]}
-		opt += _hw_ex_value(e, coef, j, e.x[p * m + j]) * math.exp_f64(ld - s * e.ex_t[j])
-	}
-	opt /= f64(e.n_paths)
-	return S0 - opt if e.is_call else S0 + opt
-}
-
 // Parallel shift s with model price = market_price, by Illinois regula falsi on
 // common random numbers; NaN if no s in [−1, 1] brackets the price
 @(private)
@@ -424,21 +425,30 @@ _hw_bermudan_oas :: proc(e: ^_HW_Bermudan, market_price: f64) -> f64 {
 // ============================================================================
 // Constant spread over the Hull-White short rate (a parallel shift of the
 // initial curve) at which the model price equals market_price; NaN if no
-// spread in [−100%, 100%] matches. n_steps is unused: the paths are sampled
-// exactly at the call dates.
+// spread in [−100%, 100%] matches. The paths are sampled exactly at the call
+// dates. user_data is passed to P0T_func.
 callable_bond_oas :: proc(
 	bond: CallableBond,
 	a: f64,
 	sigma: f64,
 	r0: f64,
-	P0T_func: proc(_: f64) -> f64,
+	P0T_func: Discount_Fn,
 	market_price: f64,
 	n_paths: int = 5000,
-	n_steps: int = 100,
 	poly_degree: int = 3,
+	user_data: rawptr = nil,
 	allocator: mem.Allocator = context.allocator,
 ) -> f64 {
-	e := _hw_callable_build(bond, a, sigma, r0, P0T_func, n_paths, poly_degree, allocator)
+	e := _hw_callable_build(
+		bond,
+		a,
+		sigma,
+		r0,
+		{P0T_func, user_data},
+		n_paths,
+		poly_degree,
+		allocator,
+	)
 	defer _hw_bermudan_free(&e)
 	return _hw_bermudan_oas(&e, market_price)
 }
@@ -447,7 +457,7 @@ callable_bond_oas :: proc(
 _hw_callable_build :: proc(
 	bond: CallableBond,
 	a, sigma, r0: f64,
-	P0T: proc(_: f64) -> f64,
+	P0T: _Curve,
 	n_paths, degree: int,
 	allocator: mem.Allocator,
 ) -> _HW_Bermudan {
@@ -459,7 +469,22 @@ _hw_callable_build :: proc(
 		t[i] = c.time
 		k[i] = c.price
 	}
-	return _hw_bermudan_build(bond.face_value, bond.coupon_rate, bond.coupon_frequency, bond.maturity, t, k, true, a, sigma, r0, P0T, n_paths, degree, allocator)
+	return _hw_bermudan_build(
+		bond.face_value,
+		bond.coupon_rate,
+		bond.coupon_frequency,
+		bond.maturity,
+		t,
+		k,
+		true,
+		a,
+		sigma,
+		r0,
+		P0T,
+		n_paths,
+		degree,
+		allocator,
+	)
 }
 
 // ============================================================================
@@ -468,19 +493,30 @@ _hw_callable_build :: proc(
 // Price at zero spread. r0 = f(0,0) makes the model fit P0T_func exactly; another
 // r0 starts the short rate off the curve. Effective duration and convexity use
 // ±50 bp parallel shifts on the same paths (the exercise policy is re-estimated
-// for each shift; smaller shifts amplify the regression noise). n_steps is unused (exact sampling).
+// for each shift; smaller shifts amplify the regression noise). The paths are
+// sampled exactly at the call dates. user_data is passed to P0T_func.
+// For the option-adjusted spread at a market price, see callable_bond_oas.
 callable_bond_lsm_hw1f :: proc(
 	bond: CallableBond,
 	a: f64,
 	sigma: f64,
 	r0: f64,
-	P0T_func: proc(_: f64) -> f64,
+	P0T_func: Discount_Fn,
 	n_paths: int = 10000,
-	n_steps: int = 100,
 	poly_degree: int = 3,
+	user_data: rawptr = nil,
 	allocator: mem.Allocator = context.allocator,
 ) -> CallableBondResult {
-	e := _hw_callable_build(bond, a, sigma, r0, P0T_func, n_paths, poly_degree, allocator)
+	e := _hw_callable_build(
+		bond,
+		a,
+		sigma,
+		r0,
+		{P0T_func, user_data},
+		n_paths,
+		poly_degree,
+		allocator,
+	)
 	defer _hw_bermudan_free(&e)
 
 	price, call_prob := _hw_bermudan_price(&e, 0.0)
@@ -490,12 +526,11 @@ callable_bond_lsm_hw1f :: proc(
 	price_dn, _ := _hw_bermudan_price(&e, -h)
 
 	return CallableBondResult {
-		price               = price,
+		price = price,
 		straight_bond_price = straight_price,
 		embedded_call_value = straight_price - price,
-		oas                 = 0.0,
-		effective_duration  = -(price_up - price_dn) / (2.0 * h * price),
+		effective_duration = -(price_up - price_dn) / (2.0 * h * price),
 		effective_convexity = (price_up + price_dn - 2.0 * price) / (h * h * price),
-		call_probability    = call_prob,
+		call_probability = call_prob,
 	}
 }

@@ -250,7 +250,6 @@ implied_volatility :: proc(
 	T: f64,
 	r: f64,
 	opt: OptionType,
-	allocator: mem.Allocator = context.allocator,
 	max_iter: int = 50,
 	tol: f64 = 1e-8,
 ) -> (

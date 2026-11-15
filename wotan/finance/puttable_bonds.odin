@@ -13,7 +13,6 @@ PuttableBond :: struct {
 	coupon_frequency: int, // Payments per year (e.g., 2 for semi-annual)
 	maturity:         f64, // Bond maturity in years
 	put_schedule:     []PutDate, // Put dates and prices (dates outside (0, maturity) are ignored)
-	settlement:       f64, // Settlement date (usually 0; not used by the pricer)
 }
 
 PutDate :: struct {
@@ -25,7 +24,6 @@ PuttableBondResult :: struct {
 	price:               f64,
 	straight_bond_price: f64,
 	embedded_put_value:  f64, // Puttable bonds are worth MORE than straight bonds
-	oas:                 f64, // Always 0 here (the price is at zero spread); see puttable_bond_oas
 	effective_duration:  f64, // −∂P/∂s / P for a parallel shift s of the initial curve
 	effective_convexity: f64, // ∂²P/∂s² / P
 	put_probability:     f64, // Probability of being put
@@ -35,7 +33,7 @@ PuttableBondResult :: struct {
 _hw_puttable_build :: proc(
 	bond: PuttableBond,
 	a, sigma, r0: f64,
-	P0T: proc(_: f64) -> f64,
+	P0T: _Curve,
 	n_paths, degree: int,
 	allocator: mem.Allocator,
 ) -> _HW_Bermudan {
@@ -47,7 +45,22 @@ _hw_puttable_build :: proc(
 		t[i] = c.time
 		k[i] = c.price
 	}
-	return _hw_bermudan_build(bond.face_value, bond.coupon_rate, bond.coupon_frequency, bond.maturity, t, k, false, a, sigma, r0, P0T, n_paths, degree, allocator)
+	return _hw_bermudan_build(
+		bond.face_value,
+		bond.coupon_rate,
+		bond.coupon_frequency,
+		bond.maturity,
+		t,
+		k,
+		false,
+		a,
+		sigma,
+		r0,
+		P0T,
+		n_paths,
+		degree,
+		allocator,
+	)
 }
 
 // ============================================================================
@@ -55,20 +68,29 @@ _hw_puttable_build :: proc(
 // ============================================================================
 // Constant spread over the Hull-White short rate (a parallel shift of the
 // initial curve) at which the model price equals market_price; NaN if no
-// spread in [−100%, 100%] matches. n_steps is unused (exact sampling).
+// spread in [−100%, 100%] matches. user_data is passed to P0T_func.
 puttable_bond_oas :: proc(
 	bond: PuttableBond,
 	a: f64,
 	sigma: f64,
 	r0: f64,
-	P0T_func: proc(_: f64) -> f64,
+	P0T_func: Discount_Fn,
 	market_price: f64,
 	n_paths: int = 5000,
-	n_steps: int = 100,
 	poly_degree: int = 3,
+	user_data: rawptr = nil,
 	allocator: mem.Allocator = context.allocator,
 ) -> f64 {
-	e := _hw_puttable_build(bond, a, sigma, r0, P0T_func, n_paths, poly_degree, allocator)
+	e := _hw_puttable_build(
+		bond,
+		a,
+		sigma,
+		r0,
+		{P0T_func, user_data},
+		n_paths,
+		poly_degree,
+		allocator,
+	)
 	defer _hw_bermudan_free(&e)
 	return _hw_bermudan_oas(&e, market_price)
 }
@@ -83,13 +105,22 @@ puttable_bond_lsm_hw1f :: proc(
 	a: f64,
 	sigma: f64,
 	r0: f64,
-	P0T_func: proc(_: f64) -> f64,
+	P0T_func: Discount_Fn,
 	n_paths: int = 10000,
-	n_steps: int = 100,
 	poly_degree: int = 3,
+	user_data: rawptr = nil,
 	allocator: mem.Allocator = context.allocator,
 ) -> PuttableBondResult {
-	e := _hw_puttable_build(bond, a, sigma, r0, P0T_func, n_paths, poly_degree, allocator)
+	e := _hw_puttable_build(
+		bond,
+		a,
+		sigma,
+		r0,
+		{P0T_func, user_data},
+		n_paths,
+		poly_degree,
+		allocator,
+	)
 	defer _hw_bermudan_free(&e)
 
 	price, put_prob := _hw_bermudan_price(&e, 0.0)
@@ -99,12 +130,11 @@ puttable_bond_lsm_hw1f :: proc(
 	price_dn, _ := _hw_bermudan_price(&e, -h)
 
 	return PuttableBondResult {
-		price               = price,
+		price = price,
 		straight_bond_price = straight_price,
-		embedded_put_value  = price - straight_price,
-		oas                 = 0.0,
-		effective_duration  = -(price_up - price_dn) / (2.0 * h * price),
+		embedded_put_value = price - straight_price,
+		effective_duration = -(price_up - price_dn) / (2.0 * h * price),
 		effective_convexity = (price_up + price_dn - 2.0 * price) / (h * h * price),
-		put_probability     = put_prob,
+		put_probability = put_prob,
 	}
 }

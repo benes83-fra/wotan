@@ -276,7 +276,7 @@ Sections 5–9 use 750 days of simulated returns for six assets:
 The procedures:
 - `expected_returns_from_history(&R)` gives arithmetic means;
 - `covariance_matrix(&R)` gives the sample covariance, with an n − 1 denominator;
-- `garch_adjusted_covariance(&R, lambda = 0.94)` gives the RiskMetrics EWMA covariance, with zero mean and the most recent day weighted 1. Despite the name it is not fitted by GARCH: it is the RiskMetrics special case with a fixed λ.
+- `ewma_covariance(&R, lambda = 0.94)` gives the RiskMetrics EWMA covariance, with zero mean and the most recent day weighted 1. It is the IGARCH(1,1) special case with a fixed λ, not a fitted GARCH.
 
 ```odin
 T :: 750
@@ -308,7 +308,7 @@ mu := fin.expected_returns_from_history(&R)
 defer delete(mu)
 cov := fin.covariance_matrix(&R)
 defer l.matrix_free(&cov)
-ew := fin.garch_adjusted_covariance(&R, 0.94)
+ew := fin.ewma_covariance(&R, 0.94)
 defer l.matrix_free(&ew)
 fmt.printf("mean daily returns %.8f\n", mu)
 fmt.printf("annualised: return %.6f vol %.6f (asset 0)\n", fin.annualize_return(mu[0]), fin.annualize_volatility(math.sqrt(cov.data[0])))
@@ -570,7 +570,6 @@ The 60-day windows start on day 59, while the EWMA volatility needs only 20 days
 - **Group limits.** Group limits are upper limits only.
 - **min_weight.** `min_weight` applies to every asset; there is no "if held".
 - **Long-only results.** `risk_parity_portfolio` is long-only, and `efficient_frontier` stops at the highest single-asset return.
-- **Naming.** `garch_adjusted_covariance` is a RiskMetrics EWMA, not a fitted GARCH.
 
 ## 11. Quick reference
 
@@ -581,7 +580,7 @@ The 60-day windows start on day 59, while the EWMA volatility needs only 20 days
 | Constrained portfolios | `constrained_min_variance_portfolio`, `constrained_max_sharpe_portfolio`, `constrained_mean_variance_portfolio`, `constrained_risk_aversion_portfolio`, `constrained_minimize` | 3 |
 | Projections | `project_constraints`, `enforce_constraints`, `project_simplex`, `project_box`, `project_groups` | 3 |
 | Black–Litterman | `bl_market_risk_aversion`, `bl_implied_returns`, `black_litterman`, `bl_optimal_weights`, `black_litterman_result_free` | 4 |
-| Inputs from history | `expected_returns_from_history`, `covariance_matrix`, `garch_adjusted_covariance`, `annualize_return`, `annualize_volatility` | 5 |
+| Inputs from history | `expected_returns_from_history`, `covariance_matrix`, `ewma_covariance`, `annualize_return`, `annualize_volatility` | 5 |
 | CVaR | `portfolio_returns`, `portfolio_cvar_historical`, `portfolio_cvar_evt`, `cvar_gradient`, `cvar_scenario_weights`, `min_cvar_portfolio`, `portfolio_metrics_with_cvar` | 6 |
 | Risk budgeting | `risk_parity_portfolio`, `risk_contributions`, `risk_decomposition`, `risk_decomp_free` | 7 |
 | Factor models | `factor_analysis`, `varimax_rotation`, `compute_factor_scores`, `extract_market_factor`, `decompose_risk`, `factor_model_covariance`, the `…_df` variants and the free procedures | 8 |

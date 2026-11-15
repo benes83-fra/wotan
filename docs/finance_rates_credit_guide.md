@@ -39,7 +39,7 @@ The part 3 conventions carry over:
 
 The rate models in sections 4 and 5 take a flat initial curve: `r0` is a continuously compounded rate, and P(0, t) = e^(−r0 t). All times are in years.
 
-The Monte Carlo pricers use `core:math/rand`, so `rand.reset(seed)` makes a run reproducible. Several pricers accept an `n_steps` argument and ignore it: they sample the Gaussian factors exactly at the dates that matter, so there is no time-stepping error.
+The Monte Carlo pricers use `core:math/rand`, so `rand.reset(seed)` makes a run reproducible. The Hull-White and G2++ pricers take no time grid: they sample the Gaussian factors exactly at the dates that matter, so there is no time-stepping error.
 
 ## 2. Swaps on a time axis
 
@@ -257,7 +257,7 @@ fmt.printf("floor %.12f  floorlets %.10f\n", flr.total_price, flr.leg_prices)
 swap := 0.0
 for i in 0 ..< 4 {swap += math.exp(-r0 * Ts[i]) - (1 + 0.032) * math.exp(-r0 * Te[i])}
 fmt.printf("cap - floor %.15f, forward swap %.15f\n", cap.total_price - flr.total_price, swap)
-p, dr, vega := fin.hw_mc_cap_option(r0, 0.032, Ts, Te, d, 4, hw, 200000, 0)
+p, dr, vega := fin.hw_mc_cap_option(r0, 0.032, Ts, Te, d, 4, hw, 200000)
 fmt.printf("MC cap %.6f  d/dr0 %.4f  vega %.4f\n", p, dr, vega)
 
 // tensor caplets with autograd: sensitivities to the forwards
@@ -274,9 +274,9 @@ t.tensor_free_graph(s)
 for x in ([]^t.Tensor{tS, tE, tF, tK, tP}) {t.tensor_free(x)}
 
 // European swaption 2Y into 5Y, annual, K = 3%
-sp, sdr, sv := fin.hw_mc_swaption_option(r0, 0.03, 2, 7, 1, true, hw, 200000, 0)
+sp, sdr, sv := fin.hw_mc_swaption_option(r0, 0.03, 2, 7, 1, true, hw, 200000)
 fmt.printf("HW payer swaption 2x5 MC %.6f  d/dr0 %.4f  vega %.4f\n", sp, sdr, sv)
-rp, _, _ := fin.hw_mc_swaption_option(r0, 0.03, 2, 7, 1, false, hw, 200000, 0)
+rp, _, _ := fin.hw_mc_swaption_option(r0, 0.03, 2, 7, 1, false, hw, 200000)
 fmt.printf("receiver %.6f\n", rp)
 ```
 
@@ -323,7 +323,7 @@ The optimizer stops when the RMSE drops below 1e-6, so a lies within 2e-4 of the
 G2++ adds a second Gaussian factor (`HW2_Params{a, b, sigma, eta, rho}`): r = x + y + φ(t), with dx = −a x dt + σ dW1, dy = −b y dt + η dW2 and correlation ρ, fitted to e^(−r0 t). Hull-White is the case η = 0. The procedures:
 - **Caplets.** `hull_white_2f_caplet_price_tensor(params, T_start, T_end, F, K, P, allocator)` is the closed form, and `hw2_mc_cap_option` prices caps by Monte Carlo, with Greeks.
 - **European swaptions.** `hw2f_swaption_price_strip(params, specs, n, r0, allocator)` uses a frozen-weights approximation of the swap rate's normal variance with the Bachelier formula. Each `SwaptionSpec{T_exp, swap_length, F, K, annuity}` describes a swap with annual payments; you supply the forward swap rate F and the annuity. `compute_hw2f_swap_variance` gives the variance alone.
-- **Bermudan swaptions.** `hw2f_mc_bermudan_option(r0, K, exercise_dates, maturity, delta, params, n_paths, n_steps)` prices a Bermudan payer swaption by Longstaff–Schwartz on exact G2++ paths. Each exercise enters a swap paying K·δ up to `maturity`. With a single exercise date it prices the European.
+- **Bermudan swaptions.** `hw2f_mc_bermudan_option(r0, K, exercise_dates, maturity, delta, params, n_paths)` prices a Bermudan payer swaption by Longstaff–Schwartz on exact G2++ paths. Each exercise enters a swap paying K·δ up to `maturity`. With a single exercise date it prices the European.
 - **Bonds.** `hw2f_zero_coupon_bond(t, T, r_t, x_t, params, r0)` gives the bond price, given the short rate and the second factor.
 
 The example continues the program of section 4, reusing `r0`, the caplet dates, F, K and P, and the `col` helper.
@@ -338,7 +338,7 @@ g2cap := 0.0
 for v in c2.data.data {g2cap += v}
 t.tensor_free_graph(c2)
 for x in ([]^t.Tensor{tS, tE, tF, tK, tP}) {t.tensor_free(x)}
-p2, _, _ := fin.hw2_mc_cap_option(r0, 0.032, Ts, Te, d, 4, g2, 200000, 0)
+p2, _, _ := fin.hw2_mc_cap_option(r0, 0.032, Ts, Te, d, 4, g2, 200000)
 fmt.printf("G2 cap analytic %.6f  MC %.6f\n", g2cap, p2)
 // swaption 2Y x 5Y: frozen-weights Bachelier vs a one-date Bermudan (= European) by MC
 A := 0.0
@@ -347,13 +347,13 @@ fwd := (math.exp(-r0 * 2) - math.exp(-r0 * 7)) / A
 spec := []fin.SwaptionSpec{{T_exp = 2, swap_length = 5, F = fwd, K = 0.03, annuity = A}}
 sw := fin.hw2f_swaption_price_strip(g2, spec, 1, r0, context.allocator)
 defer delete(sw)
-eu := fin.hw2f_mc_bermudan_option(r0, 0.03, []f64{2}, 7, 1, g2, 200000, 0)
+eu := fin.hw2f_mc_bermudan_option(r0, 0.03, []f64{2}, 7, 1, g2, 200000)
 fmt.printf("G2 swaption: forward %.10f annuity %.10f  frozen weights %.6f  MC %.6f\n", fwd, A, sw[0], eu)
-berm := fin.hw2f_mc_bermudan_option(r0, 0.03, []f64{2, 3, 4, 5, 6}, 7, 1, g2, 200000, 0)
+berm := fin.hw2f_mc_bermudan_option(r0, 0.03, []f64{2, 3, 4, 5, 6}, 7, 1, g2, 200000)
 fmt.printf("G2 Bermudan 2..6 into 7Y: %.6f\n", berm)
 hw1 := fin.HW2_Params{a = 0.1, b = 0.1, sigma = 0.01}
-b1 := fin.hw2f_mc_bermudan_option(r0, 0.03, []f64{2, 3, 4, 5, 6}, 7, 1, hw1, 200000, 0)
-e1 := fin.hw2f_mc_bermudan_option(r0, 0.03, []f64{2}, 7, 1, hw1, 200000, 0)
+b1 := fin.hw2f_mc_bermudan_option(r0, 0.03, []f64{2, 3, 4, 5, 6}, 7, 1, hw1, 200000)
+e1 := fin.hw2f_mc_bermudan_option(r0, 0.03, []f64{2}, 7, 1, hw1, 200000)
 fmt.printf("HW Bermudan %.6f  European %.6f\n", b1, e1)
 fmt.printf("G2 zero bond P(2, 7 | r = 4%%, y = 0.002) %.10f\n", fin.hw2f_zero_coupon_bond(2, 7, 0.04, 0.002, g2, r0))
 ```
@@ -655,7 +655,6 @@ SciPy (`kendalltau`, `spearmanr`, and maximum likelihood on the same log-densiti
 - **Flat rate-model curve.** The Hull-White and G2++ Monte Carlo pricers, `hw_price_cap_floor_strip`, `compute_hw2f_swap_variance` and `hw2f_mc_bermudan_option` take a flat initial curve r0. The tensor caplet pricers accept any curve through F and P.
 - **Swaption scope.** `SwaptionSpec` and the Bermudan pricer assume annual (or `delta`-spaced) fixed payments; the Bermudan is payer only.
 - **Overnight coupons in progress.** Seasoned overnight coupons with lookback, lockout or observation shift give NaN.
-- **Ignored inputs.** `n_steps` is ignored throughout (sampling is exact).
 - **CDO pools.** The CDO pricers assume a homogeneous pool.
 
 ## 11. Quick reference

@@ -16,7 +16,6 @@ callable_bond_test :: proc(allocator: mem.Allocator) {
 		coupon_rate      = 0.05,
 		coupon_frequency = 2,
 		maturity         = 10.0,
-		settlement       = 0.0,
 		call_schedule    = []fin.CallDate {
 			{time = 5.0, price = 102.0},
 			{time = 6.0, price = 101.5},
@@ -30,7 +29,7 @@ callable_bond_test :: proc(allocator: mem.Allocator) {
 	sigma := 0.01
 	r0 := 0.03
 
-	P0T_func :: proc(t: f64) -> f64 {
+	P0T_func :: proc(t: f64, _: rawptr) -> f64 {
 		return math.exp_f64(-0.03 * t)
 	}
 
@@ -42,7 +41,16 @@ callable_bond_test :: proc(allocator: mem.Allocator) {
 	// 1. Base Pricing
 	fmt.println("\n1. Base Model Pricing (LSM, 2,000 paths)")
 	fmt.println("   ----------------------------------------------------------------------")
-	result := fin.callable_bond_lsm_hw1f(bond, a, sigma, r0, P0T_func, 2000, 50, 3, allocator)
+	result := fin.callable_bond_lsm_hw1f(
+		bond,
+		a,
+		sigma,
+		r0,
+		P0T_func,
+		2000,
+		3,
+		allocator = allocator,
+	)
 
 	fmt.printf("   %-25s | $%10.4f\n", "Model Price (Z-spread=0)", result.price)
 	fmt.printf("   %-25s | $%10.4f\n", "Straight Bond Price", result.straight_bond_price)
@@ -67,9 +75,8 @@ callable_bond_test :: proc(allocator: mem.Allocator) {
 		P0T_func,
 		market_price,
 		2000,
-		50,
 		3,
-		allocator,
+		allocator = allocator,
 	)
 	oas_bps := oas_decimal * 10000.0
 
@@ -97,7 +104,6 @@ puttable_bond_test :: proc(allocator: mem.Allocator) {
 		coupon_rate      = 0.02, // 2% annual coupon (below market rate)
 		coupon_frequency = 2,
 		maturity         = 10.0,
-		settlement       = 0.0,
 		put_schedule     = []fin.PutDate {
 			{time = 5.0, price = 100.0}, // Put at year 5 at par
 			{time = 6.0, price = 100.0}, // Put at year 6 at par
@@ -112,7 +118,7 @@ puttable_bond_test :: proc(allocator: mem.Allocator) {
 	r0 := 0.05 // 5% initial rate (higher than the 2% coupon)
 
 	// ✅ FIXED: Hardcode the rate to avoid Odin closure capture quirks
-	P0T_func :: proc(t: f64) -> f64 {
+	P0T_func :: proc(t: f64, _: rawptr) -> f64 {
 		return math.exp_f64(-0.05 * t)
 	}
 
@@ -128,7 +134,16 @@ puttable_bond_test :: proc(allocator: mem.Allocator) {
 	// 1. Base Pricing
 	fmt.println("\n1. Base Model Pricing (LSM, 5,000 paths)")
 	fmt.println("   ----------------------------------------------------------------------")
-	result := fin.puttable_bond_lsm_hw1f(bond, a, sigma, r0, P0T_func, 5000, 100, 3, allocator)
+	result := fin.puttable_bond_lsm_hw1f(
+		bond,
+		a,
+		sigma,
+		r0,
+		P0T_func,
+		5000,
+		3,
+		allocator = allocator,
+	)
 
 	fmt.printf("   %-25s | $%10.4f\n", "Model Price (Z-spread=0)", result.price)
 	fmt.printf("   %-25s | $%10.4f\n", "Straight Bond Price", result.straight_bond_price)
@@ -152,9 +167,8 @@ puttable_bond_test :: proc(allocator: mem.Allocator) {
 		P0T_func,
 		market_price,
 		5000,
-		100,
 		3,
-		allocator,
+		allocator = allocator,
 	)
 	oas_bps := oas_decimal * 10000.0
 

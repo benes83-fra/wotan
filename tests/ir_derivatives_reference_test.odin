@@ -182,8 +182,8 @@ ir_derivatives_reference_test :: proc(allocator: mem.Allocator) {
 
 	// 3. HW 1F Monte Carlo cap and floor with Greeks
 	{
-		c, cd, cv := fin.hw_mc_cap_option(r0, 0.045, ms, me, md, 5, hw, NP, 100)
-		fl, fd, fv := fin.hw_mc_floor_option(r0, 0.045, ms, me, md, 5, hw, NP, 100)
+		c, cd, cv := fin.hw_mc_cap_option(r0, 0.045, ms, me, md, 5, hw, NP)
+		fl, fd, fv := fin.hw_mc_floor_option(r0, 0.045, ms, me, md, 5, hw, NP)
 		rc, rf := IR_MC_CAP1, IR_MC_FLR1
 		ok :=
 			abs(c - rc[0]) < 3e-4 &&
@@ -217,8 +217,8 @@ ir_derivatives_reference_test :: proc(allocator: mem.Allocator) {
 
 	// 4. G2++ Monte Carlo cap, HW 1F Monte Carlo swaption, G2++ bond
 	{
-		c, cd, cv := fin.hw2_mc_cap_option(r0, 0.045, ms, me, md, 5, g2, NP, 100)
-		s, sd, sv := fin.hw_mc_swaption_option(r0, 0.042, 2, 7, 1, true, hw, NP, 100)
+		c, cd, cv := fin.hw2_mc_cap_option(r0, 0.045, ms, me, md, 5, g2, NP)
+		s, sd, sv := fin.hw_mc_swaption_option(r0, 0.042, 2, 7, 1, true, hw, NP)
 		zcb := fin.hw2f_zero_coupon_bond(3, 8, IR_SCAL[5], -0.002, g2, r0)
 		rc, rs := IR_MC_CAP2, IR_SWPT
 		ok :=
@@ -264,9 +264,8 @@ ir_derivatives_reference_test :: proc(allocator: mem.Allocator) {
 			1,
 			fin.HW2_Params{a = hw.a, b = hw.a, sigma = hw.sigma},
 			NP,
-			100,
 		)
-		b2 := fin.hw2f_mc_bermudan_option(r0, 0.0408, ex, 10, 1, g2, NP, 100)
+		b2 := fin.hw2f_mc_bermudan_option(r0, 0.0408, ex, 10, 1, g2, NP)
 		ok := abs(b1 - IR_SCAL[2]) < 3e-4 && abs(b2 - IR_SCAL[3]) < 3e-4
 		expect(
 			&passed,

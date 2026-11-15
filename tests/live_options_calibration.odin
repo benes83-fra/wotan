@@ -175,15 +175,7 @@ live_options_calibration_test :: proc(allocator: mem.Allocator) {
 
 		// Price with Heston and invert to IV for an apples-to-apples comparison
 		h_price := fin.heston_price(spot, pt.strike, pt.expiry, r, heston_res.params, .Call, 2000)
-		h_iv, conv, _ := fin.implied_volatility(
-			h_price,
-			spot,
-			pt.strike,
-			pt.expiry,
-			r,
-			.Call,
-			allocator,
-		)
+		h_iv, conv, _ := fin.implied_volatility(h_price, spot, pt.strike, pt.expiry, r, .Call)
 
 		err := math.abs(h_iv - pt.implied_vol) * 100.0
 

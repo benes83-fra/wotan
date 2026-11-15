@@ -11,15 +11,6 @@ import "core:mem"
 // Market Data Structures
 // ============================================================================
 
-OptionQuote :: struct {
-	strike:   f64,
-	expiry:   f64, // years
-	call_bid: f64,
-	call_ask: f64,
-	put_bid:  f64,
-	put_ask:  f64,
-}
-
 VolSurfacePoint :: struct {
 	strike:       f64,
 	expiry:       f64,
@@ -581,69 +572,4 @@ heston_prices_same_expiry :: proc(
 		"heston_prices_same_expiry: out must have one slot per strike",
 	)
 	heston_prices_cos(S, strikes, T, r, params, opt, out, n_points)
-}
-debug_heston :: proc() {
-	fmt.println("\n=== HESTON COMPLEX MATH DEBUG ===")
-
-	// 1. Prove cmath_exp is working
-	test_z1 := complex(0.0, math.PI)
-	fmt.printf(
-		"cmath_exp(0 + iπ)      = (%.4f, %.4f) [Expected: -1.0000,  0.0000]\n",
-		real(cmath_exp(test_z1)),
-		imag(cmath_exp(test_z1)),
-	)
-
-	test_z2 := complex(1.0, 0.0)
-	fmt.printf(
-		"cmath_exp(1 + 0i)      = (%.4f, %.4f) [Expected:  2.7183,  0.0000]\n",
-		real(cmath_exp(test_z2)),
-		imag(cmath_exp(test_z2)),
-	)
-
-	// 2. Benchmark parameters from Heston (1993), Table 1
-	params := Heston_Params {
-		v0    = 0.04,
-		kappa = 2.0,
-		theta = 0.04,
-		sigma = 0.3,
-		rho   = -0.5,
-	}
-
-	S := 100.0
-	K := 100.0
-	T := 1.0
-	r := 0.05
-	u := 1.0
-
-	// 3. Print intermediate characteristic function values
-	phi1_raw := heston_char_func(complex(u, -1.0), S, r, T, params)
-	normalization_P1 := S * math.exp(r * T)
-	phi1 := phi1_raw / complex(normalization_P1, 0.0) // ✅ Normalize
-
-	phi2 := heston_char_func(complex(u, 0.0), S, r, T, params)
-
-	fmt.printf("\nCharacteristic Function at u=1.0:\n")
-	fmt.printf(
-		"  phi1 (j=1, normalized) = (%.6f, %.6f) [Magnitude: %.6f, should be < 1]\n",
-		real(phi1),
-		imag(phi1),
-		cmath_abs(phi1),
-	)
-	fmt.printf(
-		"  phi2 (j=2)             = (%.6f, %.6f) [Magnitude: %.6f, should be < 1]\n",
-		real(phi2),
-		imag(phi2),
-		cmath_abs(phi2),
-	)
-
-	// 4. Final Price Check
-	price := heston_price(S, K, T, r, params, .Call, 4000)
-	fmt.printf("\nCalculated Call Price: $%.4f\n", price)
-	fmt.printf("Expected Call Price:   $10.3687 (QuantLib AnalyticHestonEngine)\n")
-
-	if math.abs(price - 10.368686) < 1e-4 {
-		fmt.printf("Status: PASS ✅ \n\n")
-	} else {
-		fmt.printf("Status: FAIL ❌\n\n")
-	}
 }

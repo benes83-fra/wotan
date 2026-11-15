@@ -144,7 +144,7 @@ It returns `(0, false, 0)` for prices outside the no-arbitrage bounds:
 
 It also returns `(0, false, 0)` when the time value is lost to rounding. An example is a call struck at 60 with σ = 1 %, whose price equals S − K·e^−rT in double precision. A NaN price also gives `false`.
 
-The optional `max_iter` (50) and `tol` (1e-8, the price error) come after an unused `allocator` parameter, so pass them by name: `implied_volatility(p, S, K, T, r, .Call, max_iter = 100)`.
+The optional `max_iter` (50) and `tol` (1e-8, the price error) follow the option type: `implied_volatility(p, S, K, T, r, .Call, max_iter = 100)`.
 
 ## 4. Differentiable Black–Scholes and GARCH volatility
 

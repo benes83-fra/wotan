@@ -34,7 +34,7 @@ mc_generate_gbm_paths :: proc(
 	n_paths: int,
 	n_steps: int,
 	norm_data: []f64, // Pre-generated normals (length: n_paths * n_steps)
-	allocator: mem.Allocator,
+	allocator: mem.Allocator = context.allocator,
 ) -> []f64 {
 	dt := T / f64(n_steps)
 	sqrt_dt := math.sqrt_f64(dt)
@@ -67,7 +67,7 @@ mc_generate_gbm_paths_antithetic :: proc(
 	n_paths: int,
 	n_steps: int,
 	norm_data: []f64, // Length: ceil(n_paths/2) * n_steps
-	allocator: mem.Allocator,
+	allocator: mem.Allocator = context.allocator,
 ) -> []f64 {
 	half_paths := (n_paths + 1) / 2
 	dt := T / f64(n_steps)
@@ -102,7 +102,7 @@ mc_generate_heston_paths :: proc(
 	n_paths: int,
 	n_steps: int,
 	norm_data: []f64, // Length: n_paths * n_steps * 2 (Z_v, Z_⊥ per step)
-	allocator: mem.Allocator,
+	allocator: mem.Allocator = context.allocator,
 ) -> (
 	S_paths: []f64,
 	V_paths: []f64,
@@ -149,7 +149,7 @@ mc_generate_mjd_paths :: proc(
 	n_steps: int,
 	norm_data: []f64, // Length: n_paths * n_steps * 2 (diffusion, jump size per step)
 	unif_data: []f64, // Length: n_paths * n_steps
-	allocator: mem.Allocator,
+	allocator: mem.Allocator = context.allocator,
 ) -> []f64 {
 	dt := T / f64(n_steps)
 	sqrt_dt := math.sqrt_f64(dt)
@@ -201,7 +201,7 @@ mc_generate_hw1f_paths :: proc(
 	n_paths: int,
 	n_steps: int,
 	norm_data: []f64,
-	allocator: mem.Allocator,
+	allocator: mem.Allocator = context.allocator,
 ) -> []f64 {
 	dt := T / f64(n_steps)
 	a, sigma := params.a, params.sigma
@@ -525,7 +525,7 @@ mc_compute_crn_vega :: proc(S_0: f64, sigma: f64, price_fn: proc(_: f64, _: f64)
 // ============================================================================
 
 // Generate standard normal random numbers
-mc_generate_normals :: proc(n: int, allocator: mem.Allocator) -> []f64 {
+mc_generate_normals :: proc(n: int, allocator: mem.Allocator = context.allocator) -> []f64 {
 	norm_data := make([]f64, n, allocator)
 	for i in 0 ..< n {
 		norm_data[i] = rand.float64_normal(0.0, 1.0)
@@ -534,7 +534,7 @@ mc_generate_normals :: proc(n: int, allocator: mem.Allocator) -> []f64 {
 }
 
 // Generate uniform random numbers
-mc_generate_uniforms :: proc(n: int, allocator: mem.Allocator) -> []f64 {
+mc_generate_uniforms :: proc(n: int, allocator: mem.Allocator = context.allocator) -> []f64 {
 	unif_data := make([]f64, n, allocator)
 	for i in 0 ..< n {
 		unif_data[i] = rand.float64()
