@@ -310,8 +310,8 @@ cov := mlf.prob_forecast_coverage(pred, y, 3) // y [500 * 5]: the next 5 returns
 ```
 
 ```
-quantile head (GRU), 5 steps: pinball 0.1970, coverage [0.050, 0.504, 0.938], 0 crossed rows
-  first window: 5% quantiles of steps 1..5 [-1.397, -1.457, -1.473, -1.605, -1.442]
+quantile head (GRU), 5 steps: pinball 0.1971, coverage [0.051, 0.503, 0.936], 0 crossed rows
+  first window: 5% quantiles of steps 1..5 [-1.407, -1.458, -1.467, -1.608, -1.447]
 ```
 
 ## 4. Token forecasting

@@ -40,7 +40,7 @@ bert_encoder_block_new :: proc(
 		allocator = allocator,
 	)
 	block.ln2 = layer_norm_layer_new(d_model, 1e-5, allocator)
-	block.ffn = ffn_layer_new(d_model, d_ff, allocator)
+	block.ffn = ffn_layer_new(d_model, d_ff, allocator = allocator)
 
 	return block
 }

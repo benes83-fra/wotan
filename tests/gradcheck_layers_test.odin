@@ -186,7 +186,8 @@ gradcheck_layers_test :: proc(allocator: mem.Allocator) {
 	gcl_in[2] = gcl_rand(I, 3 * H, {I, 3 * H, 1, 1}, 18, true, allocator, 0.5)
 	gcl_in[3] = gcl_rand(H, 3 * H, {H, 3 * H, 1, 1}, 19, true, allocator, 0.5)
 	gcl_in[4] = gcl_rand(1, 3 * H, {1, 3 * H, 1, 1}, 20, true, allocator, 0.5)
-	gcl_check("gru", 5, proc() -> ^t.Tensor {
+	gcl_in[5] = gcl_rand(1, H, {1, H, 1, 1}, 27, true, allocator, 0.5) // bias_hn
+	gcl_check("gru", 6, proc() -> ^t.Tensor {
 			return gcl_weighted_sum(
 				t.tensor_gru(
 					gcl_in[0],
@@ -194,11 +195,12 @@ gradcheck_layers_test :: proc(allocator: mem.Allocator) {
 					gcl_in[2],
 					gcl_in[3],
 					gcl_in[4],
+					gcl_in[5],
 					context.allocator,
 				),
 			)
 		}, allocator)
-	gcl_free_inputs(5)
+	gcl_free_inputs(6)
 
 	gcl_in[0] = gcl_rand(1, B * S * I, {B, S, I, 1}, 21, true, allocator)
 	gcl_in[1] = gcl_rand(B, H, {B, H, 1, 1}, 22, true, allocator, 0.5)

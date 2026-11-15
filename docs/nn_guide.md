@@ -111,7 +111,7 @@ A linear layer accepts a matrix `[N, in]` or a flattened sequence `[batch, steps
 | `MaxPool2dLayer`, `AvgPool2dLayer` | `maxpool2d_layer_new(k, stride = k)`, `avgpool2d_layer_new(k, stride = k)` | `[N, C, H, W]` → pooled |
 | `BatchNorm2dLayer` | `batch_norm_2d_layer_new(features, eps = 1e-5, momentum = 0.1)` | `[N, C, H, W]` → same |
 | `DropoutLayer` | `dropout_layer_new(p = 0.5)` | same shape |
-| `Activation` | an enum value: `.ReLU`, `.Sigmoid`, `.Tanh`, `.LeakyReLU` (slope 0.01), `.Gelu`, `.Softmax`, `.Softplus`, `.None` | same shape |
+| `Activation` | an enum value: `.ReLU`, `.Sigmoid`, `.Tanh`, `.LeakyReLU` (slope 0.01), `.Gelu` (exact), `.GeluTanh` (tanh approximation), `.Softmax`, `.Softplus`, `.None` | same shape |
 | `FlattenLayer` | `nn.FlattenLayer{}` | `[N, C, H, W]` → `[N, C·H·W]` |
 | `RNNLayer`, `GRULayer`, `LSTMLayer` | `rnn_layer_new(in, hidden)` (likewise `gru_`, `lstm_`) | `[B, S, in]` → `[B, S, hidden]`, every step |
 | `EmbeddingLayer` | `embedding_layer_new(count, dim)` | ids `[B, S]` → `[B, S, dim]` |
@@ -119,7 +119,7 @@ A linear layer accepts a matrix `[N, in]` or a flattened sequence `[batch, steps
 | `MultiHeadAttentionLayer` | `multi_head_attention_layer_new(d, heads, use_flash = false, is_causal = false)` | `[B, S, d]` → `[B, S, d]` |
 | `CrossAttentionLayer` | `cross_attention_layer_new(d, heads, use_flash = false)` | queries `[B, S_q, d]`, keys and values `[B, S_k, d]` → `[B, S_q, d]` |
 | `LayerNormLayer` | `layer_norm_layer_new(d, eps = 1e-5)`, `rms_norm_layer_new(d, eps = 1e-5)` | same shape, over the last dimension |
-| `FFNLayer` | `ffn_layer_new(d, d_ff)` | Linear → GELU (exact) → Linear, same shape |
+| `FFNLayer` | `ffn_layer_new(d, d_ff, gelu_tanh = false)` | Linear → GELU → Linear, same shape. GELU is exact, or its tanh approximation with `gelu_tanh` |
 | `TransformerEncoderBlock`, `TransformerEncoder` | `transformer_encoder_block_new(d, heads, d_ff)`, `transformer_encoder_new(layers, d, heads, d_ff)` | `[B, S, d]` → same |
 | `TransformerDecoderBlock` | `transformer_decoder_block_new(d, heads, d_ff, use_flash = false)` | `(x [B, S, d], encoder output [B, S_k, d], causal mask)` → `[B, S, d]` |
 | `Conv1dLayer` | `conv1d_layer_new(c_in, c_out, k, dilation = 1, padding = 0, causal = false, use_bias = true)` | channels-last `[B, T, C_in]` → `[B, T', C_out]` |
@@ -148,7 +148,8 @@ To load PyTorch weights, or to compare results with PyTorch, map the parameters 
 | `LinearLayer.weights` `[in, out]`, `bias` `[1, out]` | `nn.Linear.weight` transposed, `bias` |
 | attention `q_proj`, `k_proj`, `v_proj`, `out_proj` (linear layers) | `in_proj_weight = cat(Wq.T, Wk.T, Wv.T)`, `in_proj_bias = cat(bq, bk, bv)`, `out_proj` |
 | `Conv2dLayer.weight` `[C_out, C_in, k, k]`, `Conv1dLayer.weight` `[C_out, C_in, k]` | the same layout. For Conv1d, transpose the input from `[B, T, C]` to PyTorch's `[B, C, T]`. |
-| RNN / GRU / LSTM `w_ih` `[in, G·H]`, `w_hh` `[H, G·H]`, one `bias` | `weight_ih_l0.T`, `weight_hh_l0.T`, `bias = bias_ih + bias_hh`. The gate order is the same (LSTM i, f, g, o; GRU r, z, n). For the GRU this matches PyTorch only when the n-gate part of `bias_hh` is 0, because PyTorch adds that bias inside the reset gate. |
+| RNN / GRU / LSTM `w_ih` `[in, G·H]`, `w_hh` `[H, G·H]`, one `bias` | `weight_ih_l0.T`, `weight_hh_l0.T`, `bias = bias_ih + bias_hh`. The gate order is the same (LSTM i, f, g, o; GRU r, z, n). |
+| GRU `bias` `[1, 3H]`, `bias_hn` `[1, H]` | `bias` = `bias_ih + bias_hh` for r and z, and `bias_ih` alone for n; `bias_hn` = the n part of `bias_hh`, which PyTorch applies inside the reset gate. |
 | `EmbeddingLayer.weight` `[count, dim]` | the same |
 | `LayerNormLayer.gamma`, `beta` `[1, d]` | `weight`, `bias` |
 
@@ -427,6 +428,7 @@ Section 12 is a complete program built on this loop.
 | `dropout` | 0.1 | on the attention and FFN outputs of every block, only while `training` |
 | `rms_norm` | false | RMSNorm instead of LayerNorm, in the blocks and the final norm |
 | `tie_embeddings` | false | the output projection reuses the token embedding: logits = x · Eᵀ + b |
+| `gelu_tanh` | false | the tanh approximation of GELU in the FFNs and experts (GPT-2's `gelu_new`); otherwise the exact GELU |
 
 `gpt_model_forward(&model, ids, mask, training, aux_loss = false)` maps token ids `[B, S]` to logits `[B, S, vocab_size]`. The blocks are causal by themselves, so `mask` is usually `nil`. An explicit `[S, S]` mask is added to the causal one. With `use_flash`, a mask that hides more than the causal one (for example padding at the start of a prompt) runs the standard attention kernel; `nil` or a causal mask keeps FlashAttention.
 
@@ -571,7 +573,7 @@ To fine-tune for classification, replace the next-sentence head with `bert_repla
 2. each block: `ln1`, attention, `ln2`, FFN;
 3. the pooler, the MLM head and the next-sentence head.
 
-**Converted Hugging Face checkpoints.** `scripts/convert_bert.py <model> <output>` converts a Hugging Face BERT model (for example `ProsusAI/finbert`) to a wotan file, and `load_bert_model` reads it. Those checkpoints were trained with LayerNorm epsilon 1e-12, while `bert_model_new` uses 1e-5, which moves their logits by about 5e-4. Call `bert_set_layer_norm_eps(model, 1e-12)` after loading. `scripts/convert_gpt2.py` converts DistilGPT-2 for `load_gpt_model`. GPT-2 was trained with the tanh approximation of GELU, while wotan's FFN uses the exact GELU, so the converted model's logits are close to Hugging Face's but not equal. `tests/sentiment_reference_test.odin` and `tests/gpt_completion_test.odin` show the full workflow, with the tokenizers.
+**Converted Hugging Face checkpoints.** `scripts/convert_bert.py <model> <output>` converts a Hugging Face BERT model (for example `ProsusAI/finbert`) to a wotan file, and `load_bert_model` reads it. Those checkpoints were trained with LayerNorm epsilon 1e-12, while `bert_model_new` uses 1e-5, which moves their logits by about 5e-4. Call `bert_set_layer_norm_eps(model, 1e-12)` after loading. `scripts/convert_gpt2.py` converts DistilGPT-2 for `load_gpt_model`. The converted model uses the tanh approximation of GELU, as GPT-2 does (`gelu_tanh`), and its logits match Hugging Face's to about 1e-13. `tests/sentiment_reference_test.odin` and `tests/gpt_completion_test.odin` show the full workflow, with the tokenizers.
 
 ## 9. GAN, VAE and image augmentation
 
@@ -583,7 +585,7 @@ To fine-tune for classification, replace the next-sentence head with `bert_repla
 
 **VAE.**
 - `vae_encoder_forward(&enc, x)` returns `(mu, log_var)`, both clamped to [−5, 5].
-- `reparameterize(mu, log_var, allocator)` samples z = μ + exp(½ log σ²) · ε, and gradients reach both μ and log σ².
+- `reparameterize(mu, log_var, allocator)` samples z = μ + exp(½ log σ²) · ε, and gradients reach both μ and log σ². If neither input requires a gradient, z is a constant.
 - `vae_decoder_forward(&dec, z)` ends in tanh.
 - Combine the reconstruction loss with `t.tensor_kl_divergence(mu, log_var)`. That KL term sums over the latent dimensions and averages over the batch; see the tensor guide.
 
@@ -652,14 +654,12 @@ apply = false returns the input: true
 |---|---|
 | `save_checkpoint(model, &opt, path, epoch)`: a `Sequential` model with its Adam state | `load_checkpoint(path) -> (model, opt, epoch, ok)` |
 | `save_gpt_model(&model, path)` | `load_gpt_model(path, use_flash = false, allocator) -> (^GPTModel, ok)` |
-| `save_bert_model(&model, path)` | `load_bert_model(path, allocator, use_flash = false) -> (^BERTModel, ok)` |
+| `save_bert_model(&model, path)` | `load_bert_model(path, use_flash = false, allocator) -> (^BERTModel, ok)` |
 | `save_generator`, `save_discriminator`, `save_vae_encoder`, `save_vae_decoder` | `load_generator(path)` and the others, each returning `(^Model, ok)` |
 
-Note that `load_gpt_model` and `load_bert_model` take `use_flash` and the allocator in opposite orders. Pass them by name.
-
 The file format is little-endian binary with a magic header and a type id, followed by each layer's configuration and tensors:
-- **What is stored.** A model stores its full configuration, including the attention flags, MoE, RMSNorm and tied-embedding settings and the dropout rate, so a loaded model is built exactly as it was saved.
-- **Old files.** Files from older versions of the format still load. A Mamba layer from such a file has no RMSNorm weight; it loads with the weight 1, but the block (with its norm and residual) computes a different function from the layer that was saved, so train it further before use.
+- **What is stored.** A model stores its full configuration, including the attention flags, MoE, RMSNorm, tied-embedding and GELU settings and the dropout rate, so a loaded model is built exactly as it was saved.
+- **Old files.** Files from older versions of the format still load. A GRU layer from such a file has no `bias_hn`; it loads without one (as if it were 0) and computes the same function, and `sequential_load_partial` loads it into a new GRU with `bias_hn` = 0. FFN layers and GPT models from such files use the exact GELU. A Mamba layer from such a file has no RMSNorm weight; it loads with the weight 1, but the block (with its norm and residual) computes a different function from the layer that was saved, so train it further before use.
 - **Changed heads.** A stored tensor of another size replaces the layer's tensor. A model saved after `bert_replace_nsp_head`, for example, loads with its new head.
 - **Robustness.** Reading checks every access. A truncated, corrupt or foreign file returns `ok = false` with a message, and leaks nothing. A layer header with an invalid configuration, such as 0 attention heads, counts as corrupt in both `load_checkpoint` and `sequential_load_partial`.
 - **Random numbers.** Loading uses a private random generator for the layer initialisation, so it leaves your random sequence unchanged.

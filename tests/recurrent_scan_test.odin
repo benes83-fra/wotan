@@ -18,12 +18,21 @@ import "core:mem"
 //   the forward without gradients (nothing saved) gives the identical output
 
 @(private = "file")
-_Cell :: enum {RNN, GRU, LSTM}
+_Cell :: enum {
+	RNN,
+	GRU,
+	LSTM,
+}
 
 // Plain reference: out[b, s, :] for one cell, step by step, with naive matmuls
 // that add their terms in the same order as the matmul kernels.
 @(private = "file")
-_ref_cell :: proc(cell: _Cell, x, h_0, c_0, w_ih, w_hh, bias: []f64, B, S, I, H: int, out: []f64) {
+_ref_cell :: proc(
+	cell: _Cell,
+	x, h_0, c_0, w_ih, w_hh, bias, bias_hn: []f64,
+	B, S, I, H: int,
+	out: []f64,
+) {
 	k := 1 if cell == .RNN else (3 if cell == .GRU else 4)
 	G := k * H
 	h := make([]f64, B * H)
@@ -55,7 +64,9 @@ _ref_cell :: proc(cell: _Cell, x, h_0, c_0, w_ih, w_hh, bias: []f64, B, S, I, H:
 				case .GRU:
 					r := sig((gi[i] + bias[i]) + gh[i])
 					z := sig((gi[H + i] + bias[H + i]) + gh[H + i])
-					n := math.tanh((gi[2 * H + i] + bias[2 * H + i]) + r * gh[2 * H + i])
+					n := math.tanh(
+						(gi[2 * H + i] + bias[2 * H + i]) + r * (gh[2 * H + i] + bias_hn[i]),
+					)
 					h_new[b * H + i] = (1.0 - z) * n + z * hp
 				case .LSTM:
 					ig := sig((gi[i] + bias[i]) + gh[i])
@@ -118,20 +129,27 @@ _run_cell :: proc(cell: _Cell, ins: []^t.Tensor, allocator: mem.Allocator) -> _R
 	for x in ins {t.tensor_zero_grad(x)}
 	out: ^t.Tensor
 	switch cell {
-	case .RNN: out = t.tensor_rnn(ins[0], ins[1], ins[2], ins[3], ins[4], allocator)
-	case .GRU: out = t.tensor_gru(ins[0], ins[1], ins[2], ins[3], ins[4], allocator)
-	case .LSTM: out = t.tensor_lstm(ins[0], ins[1], ins[2], ins[3], ins[4], ins[5], allocator)
+	case .RNN:
+		out = t.tensor_rnn(ins[0], ins[1], ins[2], ins[3], ins[4], allocator)
+	case .GRU:
+		out = t.tensor_gru(ins[0], ins[1], ins[2], ins[3], ins[4], ins[5], allocator)
+	case .LSTM:
+		out = t.tensor_lstm(ins[0], ins[1], ins[2], ins[3], ins[4], ins[5], allocator)
 	}
 	r := _finish(out, ins, allocator)
 
 	for x in ins {x.requires_grad = false}
 	switch cell {
-	case .RNN: out = t.tensor_rnn(ins[0], ins[1], ins[2], ins[3], ins[4], allocator)
-	case .GRU: out = t.tensor_gru(ins[0], ins[1], ins[2], ins[3], ins[4], allocator)
-	case .LSTM: out = t.tensor_lstm(ins[0], ins[1], ins[2], ins[3], ins[4], ins[5], allocator)
+	case .RNN:
+		out = t.tensor_rnn(ins[0], ins[1], ins[2], ins[3], ins[4], allocator)
+	case .GRU:
+		out = t.tensor_gru(ins[0], ins[1], ins[2], ins[3], ins[4], ins[5], allocator)
+	case .LSTM:
+		out = t.tensor_lstm(ins[0], ins[1], ins[2], ins[3], ins[4], ins[5], allocator)
 	}
 	for x in ins {x.requires_grad = true}
-	r.no_grad_same = !out.requires_grad && len(out.f64_metadata) == 0 && _same(out.data.data, r.out)
+	r.no_grad_same =
+		!out.requires_grad && len(out.f64_metadata) == 0 && _same(out.data.data, r.out)
 	t.tensor_free(out)
 	return r
 }
@@ -145,7 +163,8 @@ _run_ssm :: proc(ins: []^t.Tensor, allocator: mem.Allocator) -> _Run {
 	for x in ins {x.requires_grad = false}
 	out = t.tensor_ssm(ins[0], ins[1], ins[2], ins[3], ins[4], ins[5], ins[6], allocator)
 	for x in ins {x.requires_grad = true}
-	r.no_grad_same = !out.requires_grad && len(out.f64_metadata) == 0 && _same(out.data.data, r.out)
+	r.no_grad_same =
+		!out.requires_grad && len(out.f64_metadata) == 0 && _same(out.data.data, r.out)
 	t.tensor_free(out)
 	return r
 }
@@ -207,22 +226,35 @@ recurrent_scan_test :: proc(allocator: mem.Allocator) {
 	// --- Recurrent cells ------------------------------------------------------
 	// {B, S, I, H}: a small odd shape, and one whose input projection is threaded
 	cell_shapes := [][4]int{{3, 5, 4, 6}, {16, 40, 64, 64}}
-	names := [_Cell]string{.RNN = "rnn", .GRU = "gru", .LSTM = "lstm"}
+	names := [_Cell]string {
+		.RNN  = "rnn",
+		.GRU  = "gru",
+		.LSTM = "lstm",
+	}
 	for cell in _Cell {
 		k := 1 if cell == .RNN else (3 if cell == .GRU else 4)
 		for sh, si in cell_shapes {
 			B, S, I, H := sh[0], sh[1], sh[2], sh[3]
 			seed := u64(400 + int(cell) * 10 + si)
-			ins := [6]^t.Tensor {
+			ins := [7]^t.Tensor {
 				gcl_rand(1, B * S * I, {B, S, I, 1}, seed, true, allocator),
 				gcl_rand(B, H, {B, H, 1, 1}, seed + 1, true, allocator, 0.5),
 				gcl_rand(B, H, {B, H, 1, 1}, seed + 2, true, allocator, 0.5),
 				gcl_rand(I, k * H, {I, k * H, 1, 1}, seed + 3, true, allocator, 0.3),
 				gcl_rand(H, k * H, {H, k * H, 1, 1}, seed + 4, true, allocator, 0.3),
 				gcl_rand(1, k * H, {1, k * H, 1, 1}, seed + 5, true, allocator, 0.3),
+				gcl_rand(1, H, {1, H, 1, 1}, seed + 6, true, allocator, 0.3), // GRU bias_hn
 			}
-			// RNN / GRU take (x, h_0, w_ih, w_hh, bias); LSTM also c_0
-			args := ins[:] if cell == .LSTM else []^t.Tensor{ins[0], ins[1], ins[3], ins[4], ins[5]}
+			// RNN takes (x, h_0, w_ih, w_hh, bias); GRU also bias_hn; LSTM also c_0
+			args: []^t.Tensor
+			switch cell {
+			case .RNN:
+				args = []^t.Tensor{ins[0], ins[1], ins[3], ins[4], ins[5]}
+			case .GRU:
+				args = []^t.Tensor{ins[0], ins[1], ins[3], ins[4], ins[5], ins[6]}
+			case .LSTM:
+				args = ins[:6]
+			}
 			n_in := len(args)
 
 			all_threads()
@@ -240,16 +272,66 @@ recurrent_scan_test :: proc(allocator: mem.Allocator) {
 				ins[3].data.data,
 				ins[4].data.data,
 				ins[5].data.data,
+				ins[6].data.data,
 				B,
 				S,
 				I,
 				H,
 				ref,
 			)
-			expect(&passed, &total, _same(r_all.out, ref), fmt.tprintf("%s B%d S%d I%d H%d: forward == step-by-step reference", names[cell], B, S, I, H))
-			expect(&passed, &total, _same_run(r_all, r_one, n_in), fmt.tprintf("%s B%d S%d I%d H%d: output and %d gradients identical on 1 and all threads", names[cell], B, S, I, H, n_in))
-			expect(&passed, &total, r_all.repeat_same, fmt.tprintf("%s B%d S%d I%d H%d: second backward on the same graph gives identical gradients", names[cell], B, S, I, H))
-			expect(&passed, &total, r_all.no_grad_same, fmt.tprintf("%s B%d S%d I%d H%d: forward without gradients saves nothing, same output", names[cell], B, S, I, H))
+			expect(
+				&passed,
+				&total,
+				_same(r_all.out, ref),
+				fmt.tprintf(
+					"%s B%d S%d I%d H%d: forward == step-by-step reference",
+					names[cell],
+					B,
+					S,
+					I,
+					H,
+				),
+			)
+			expect(
+				&passed,
+				&total,
+				_same_run(r_all, r_one, n_in),
+				fmt.tprintf(
+					"%s B%d S%d I%d H%d: output and %d gradients identical on 1 and all threads",
+					names[cell],
+					B,
+					S,
+					I,
+					H,
+					n_in,
+				),
+			)
+			expect(
+				&passed,
+				&total,
+				r_all.repeat_same,
+				fmt.tprintf(
+					"%s B%d S%d I%d H%d: second backward on the same graph gives identical gradients",
+					names[cell],
+					B,
+					S,
+					I,
+					H,
+				),
+			)
+			expect(
+				&passed,
+				&total,
+				r_all.no_grad_same,
+				fmt.tprintf(
+					"%s B%d S%d I%d H%d: forward without gradients saves nothing, same output",
+					names[cell],
+					B,
+					S,
+					I,
+					H,
+				),
+			)
 			for x in ins {t.tensor_free(x)}
 		}
 	}
@@ -293,10 +375,48 @@ recurrent_scan_test :: proc(allocator: mem.Allocator) {
 			N,
 			ref,
 		)
-		expect(&passed, &total, _same(r_all.out, ref), fmt.tprintf("ssm B%d S%d D%d N%d: forward == sequential reference", B, S, Dm, N))
-		expect(&passed, &total, _same_run(r_all, r_one, 7), fmt.tprintf("ssm B%d S%d D%d N%d: output and 7 gradients identical on 1 and all threads", B, S, Dm, N))
-		expect(&passed, &total, r_all.repeat_same, fmt.tprintf("ssm B%d S%d D%d N%d: second backward on the same graph gives identical gradients", B, S, Dm, N))
-		expect(&passed, &total, r_all.no_grad_same, fmt.tprintf("ssm B%d S%d D%d N%d: forward without gradients saves nothing, same output", B, S, Dm, N))
+		expect(
+			&passed,
+			&total,
+			_same(r_all.out, ref),
+			fmt.tprintf("ssm B%d S%d D%d N%d: forward == sequential reference", B, S, Dm, N),
+		)
+		expect(
+			&passed,
+			&total,
+			_same_run(r_all, r_one, 7),
+			fmt.tprintf(
+				"ssm B%d S%d D%d N%d: output and 7 gradients identical on 1 and all threads",
+				B,
+				S,
+				Dm,
+				N,
+			),
+		)
+		expect(
+			&passed,
+			&total,
+			r_all.repeat_same,
+			fmt.tprintf(
+				"ssm B%d S%d D%d N%d: second backward on the same graph gives identical gradients",
+				B,
+				S,
+				Dm,
+				N,
+			),
+		)
+		expect(
+			&passed,
+			&total,
+			r_all.no_grad_same,
+			fmt.tprintf(
+				"ssm B%d S%d D%d N%d: forward without gradients saves nothing, same output",
+				B,
+				S,
+				Dm,
+				N,
+			),
+		)
 		for x in ins {t.tensor_free(x)}
 	}
 

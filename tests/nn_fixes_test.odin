@@ -28,7 +28,10 @@ import "core:slice"
 // zeroed the gradients instead of dropping them, so parameters without a
 // gradient still moved (momentum, weight decay); checkpoints lost the frozen
 // flags (and with them the Adam moments); the Mamba layer had no input
-// normalisation (outputs exploded on large inputs).
+// normalisation (outputs exploded on large inputs); the GRU had no hidden-path
+// n-gate bias (PyTorch's bias_hh n part, inside the reset gate); GPT had
+// exact GELU only (GPT-2 / DistilGPT-2 use the tanh approximation);
+// reparameterize required grad even for inputs without it.
 // Every check runs under a Tracking_Allocator on the default heap allocator.
 
 @(private = "file")
@@ -338,6 +341,46 @@ nf_frozen_step :: proc(model: ^nn.Sequential, opt: ^nn.Adam, x: ^t.Tensor) {
 	t.graph_end(&scope)
 	nn.adam_step(opt)
 }
+
+// torch 2.1.0+cpu nn.GRU(3, 4, batch_first), float64, seed 7: nonzero bias_hh and h_0
+@(private = "file")
+NF_GRU_X := [?]f64{-0.042049767265182066, 0.6628209471062041, 1.3994091526870451, -1.4549862186629452, -0.9612955140847367, 0.4375438588630386, 1.7885417734026923, -0.08039804075733713, -1.5582993556390743, 0.23963139750598528, 1.7166036202837553, 2.304738112599663, 0.6534399108850214, 0.333591585431449, 1.1951147337146277, -0.4591714774219809, -1.718295141861475, 1.530735153115545, 0.9817931121202057, 0.9570286079441692, 1.1115773132932836, -0.30628264545022216, 0.006669130470473673, 1.760659506097817, 1.2669030994331536, -0.2611596401485409, 0.6226979404162903, -0.2220109975424316, 0.08503882653303346, 1.8639144412698772}
+@(private = "file")
+NF_GRU_H0 := [?]f64{-0.9343354525485523, 0.5913045579124961, -0.3063574952794949, -0.6300556586565216, -0.5738867238126416, -0.6354986068507187, 0.4322423841080601, 0.6747196427348519}
+@(private = "file")
+NF_GRU_R := [?]f64{0.4473031392366413, -0.07113676313790206, 1.5370663303415584, -0.40052933392917733, -0.16209438806403706, 1.3801062866246665, -0.6574601912545139, -0.3701440301351539, 1.7084188400263678, -1.2737445330897261, -0.23622143584532787, 0.13363296079644807, -0.3648695566463679, -0.009535434337508955, 1.4261135794673707, -0.6023430548019713, -1.2183680495720037, -0.1306189318118778, -0.7785942402415482, 0.7932068600843698, -1.3839727713862389, -0.5030873419579612, 1.6349644065547178, -0.42090529043170005, -1.027987348111354, -0.13056483319391798, 0.47873679245305145, -0.22054992437304183, -0.9621190083162122, 2.159574797483172, 1.2661520710449452, 0.9085380295939818, -0.3468836945295964, 0.6734431995848988, 0.5630489158138265, 0.7187863937323853, -1.3007230746880825, -1.8473620852928343, -1.0017227114849618, -0.47827233682150283}
+@(private = "file")
+NF_GRU_W_IH := [?]f64{0.22378830253547388, 0.4076533022320815, 0.35895795216914883, 0.03634852358943097, -0.28725921041793034, -0.2165481595746262, -0.25615594502672434, 0.5640783705073288, -0.0902467362340098, 0.2625968501784921, -0.5902093166190224, 0.3377537715448994, 0.5066989902081119, 0.43173333242163825, 0.12908360709652644, 0.16069596714793877, -0.049486857659715056, -0.1868386238670514, -0.3400588442239651, -0.21325568249590598, -0.2905118260478824, 0.3013335341730198, 0.4259834919007467, -0.3986674134204081, 0.5439499508865225, 0.2839500827833906, 0.36907605385160525, 0.03190204727072288, 0.03000621370314782, 0.017512053999478083, -0.23633033815671783, 0.07537050357255393, 0.5362363536850777, 0.5951642235394755, -0.15499374446745945, -0.3196369880246483}
+@(private = "file")
+NF_GRU_W_HH := [?]f64{-0.14269050511867654, -0.11859212889253606, -0.17012913509525962, 0.2098946423919812, 0.4489698931390892, 0.003564800029427939, 0.2065793533635636, 0.5476818734736709, -0.3784898648319287, 0.42786629707892077, -0.21721828806736693, -0.29650845910669577, -0.23993154319482463, -0.16115331128346344, -0.46027471116195906, 0.5273929273093455, 0.04196406177578227, 0.1955802228461686, 0.3904633632653549, -0.23193866839519012, -0.5911865136487663, -0.4123480667546646, -0.019802293129503545, 0.5849120879284778, -0.2842807545130134, 0.31972927008006236, 0.3938836074926698, 0.002258913688246822, 0.15531702714486384, 0.44817799375320544, -0.0638466955246838, 0.4956530824309465, -0.4967087813770705, -0.496720797985563, -0.5931738147219923, -0.27974820035945636, -0.14916321607379485, 0.4945002603319041, -0.26322871796275643, -0.2708175421297074, 0.22318976898282394, 0.2574070379153677, 0.5064151272854288, -0.21769671339992935, 0.5577302287557603, 0.2179202631176851, 0.056825998052748794, 0.1534024228464559}
+@(private = "file")
+NF_GRU_BIAS := [?]f64{0.4203729110947009, 0.08789306955618326, 0.777294411944055, -0.06567519845765302, 0.4359464710777683, 0.24100421824349116, -0.5426348718750686, 0.1869992412571032, 0.3928754645216125, 0.10906669400523583, -0.241871660255507, -0.42247180978943033}
+@(private = "file")
+NF_GRU_BIAS_HN := [?]f64{0.3098378999026229, 0.3633210476606885, 0.20118431380245838, -0.4183311423867313}
+@(private = "file")
+NF_GRU_OUT := [?]f64{-0.022174893179615296, 0.6723914820474786, 0.14706664854764062, -0.7217536276140363, 0.190430500898005, 0.353381478698383, 0.16083664308189538, -0.6774093105205234, -0.2625464653530671, -0.01828162619794571, -0.4927578569302752, -0.44726872637875176, 0.30495018364956805, 0.5886997097532618, 0.31073198152793574, -0.7228901069257903, 0.31020130486579506, 0.6800744396812229, -0.4178252944719469, -0.7280209382023217, -0.03382656829123187, -0.31264142716613874, -0.1990943832394218, 0.17439793203559262, 0.3781355790569695, 0.39117325950269977, -0.27075758128683525, -0.18157547726846013, 0.5439479401110198, 0.600733555802659, -0.18145676670400554, -0.48557057650780333, 0.4675018157234421, 0.6645521900321189, -0.6061273306534833, -0.42839828542251923, 0.6002301664805615, 0.7753187913283157, -0.23534257497295413, -0.6182515047668361}
+@(private = "file")
+NF_GRU_DX := [?]f64{-0.48624510424460865, 0.543264937341112, 0.07384432814455794, 0.19357361057984046, -0.08318634013766218, 0.2551476958311778, -0.11470023443023936, -0.30273186049742473, -0.161862010321336, -0.7047053125803386, 0.5780637116048978, -0.15071331312247385, 0.3272058423222061, 0.006545920784513451, -0.1745993752368191, -0.6824218309618997, 0.07965949938554477, -0.14216791080753918, -0.17185225703265952, 0.25453384638751814, -0.17330878709566616, -0.28617625724538603, 0.5004616579285351, -0.0645936154784589, -0.04557491349496749, 0.1274159634416143, -0.2788354295962278, 0.2014488952107556, -0.3478800125854742, -0.10344473464586705}
+@(private = "file")
+NF_GRU_DH0 := [?]f64{-0.027532652628416865, -0.06347944004895698, -0.2746430010715902, -0.24995896349314817, -1.0862246568304523, 0.2296250467982614, 0.5390718041227364, 0.24502149894398656}
+@(private = "file")
+NF_GRU_DW_IH := [?]f64{0.006656898119094076, -0.010507530425880271, 0.039909790412526396, -0.029963459919607728, 0.49123098681027755, -0.8918746970381826, -0.4272407259018289, 0.0331460555894392, -0.4572066151717432, -1.4643917797391977, 0.5061560407134469, 0.47319738096239383, 0.008408113149728957, 0.007302910830661514, 0.1782660686573723, -0.03624911944542754, -0.5891397752698434, -0.5007551456804545, -1.1489539857452622, 0.1359764637661103, -0.39257612406238773, -0.06195792574570315, 2.337037559237706, 0.23545207195480955, 0.11733585672997142, 0.02240408909771046, 0.3013770590808649, -0.022510347879742463, 1.9370595462893347, -0.3364436273053866, 0.3681905752066096, 0.07713424719994662, -2.0804197082348637, 1.348547424776628, 5.38088612391388, -0.050090111365428125}
+@(private = "file")
+NF_GRU_DW_HH := [?]f64{0.0351959435863027, 0.0023972787287664028, -0.11366220924989824, -0.009844367084863033, -0.10185016245849099, -0.059484160517627116, -0.07152383521614873, 0.11577171206668088, -0.3878709138662193, -0.11541043318065855, -1.2148942875318247, 0.1629420437680293, 0.05361691692681473, -0.01841673572632649, 0.023150132807843733, -0.0167901300931926, -0.6297654976474663, 0.10237177230133035, -0.35686779490000703, 0.059873166013555024, -0.2525617536852505, -0.08339170624783729, -0.201497371733855, -0.01585817803595481, 0.003824536030688209, 0.0043402276552678455, -0.03809298542250267, 0.009346632072948065, 0.13052080913461545, 0.08431084891881689, 0.1704504087373655, -0.043958189684779825, 0.0967835170388296, -0.052763113045694796, -0.6955161447312913, 0.013226195344603701, -0.040652261544973985, 0.022028952932800386, -0.06345489157478001, 0.01610619044777698, 0.4680883937513798, -0.015021633720650188, 0.5316670001547303, -0.030405623724329846, 0.2344400444955918, 0.1799230309049144, -0.19167098983147957, 0.030149933840126028}
+@(private = "file")
+NF_GRU_DBIAS := [?]f64{0.02663907553861166, -0.011353567388543505, 0.1794093125919875, -0.016227500007294986, 1.5838639913208155, -0.595073027749117, 0.0868406940880463, 0.07786623258199799, -0.9420504874957218, -0.2221803150043382, 2.6009170909911337, -0.06436431155033123}
+@(private = "file")
+NF_GRU_DBIAS_HN := [?]f64{-0.8439471432843575, -0.13184069850087643, 2.2482297659814545, -0.006867440711646994}
+
+// torch 2.1.0+cpu gelu(approximate="tanh"), float64
+@(private = "file")
+NF_GT_X := [?]f64{-6.0, -3.1, -1.2, -0.45, 0.0, 0.3, 0.9, 2.2, 5.5, 12.0}
+@(private = "file")
+NF_GT_W := [?]f64{0.7, -1.1, 0.4, 2.0, -0.3, 1.3, -0.8, 0.6, 1.7, -0.5}
+@(private = "file")
+NF_GT_Y := [?]f64{-8.43964897967453e-11, -0.0026266102305497474, -0.13829723086213508, -0.14687154361411522, 0.0, 0.18537092354275922, 0.7342284887097207, 2.1696785270380117, 5.499999994072359, 12.0}
+@(private = "file")
+NF_GT_DX := [?]f64{-5.396983209062729e-10, 0.009613335656392507, -0.04709045389324504, 0.3284288856530348, -0.15, 0.9519840871304424, -0.8440537638076933, 0.6389513695473311, 1.7000000795013976, -0.5}
 
 nn_fixes_test :: proc(allocator: mem.Allocator) {
 	seed_test(#procedure)
@@ -931,6 +974,259 @@ nn_fixes_test :: proc(allocator: mem.Allocator) {
 			cached == 0 &&
 			cached_ok &&
 			leak == 0,
+			&passed,
+			&total,
+		)
+	}
+
+	{ 	// GRU = torch.nn.GRU with a nonzero bias_hh: its n part acts inside the
+		// reset gate (bias_hn). Output, input / h_0 / parameter gradients; a
+		// checkpoint keeps bias_hn; a GRU without it (older files) still loads
+		gru := nn.gru_layer_new(3, 4)
+		copy(gru.w_ih.data.data, NF_GRU_W_IH[:])
+		copy(gru.w_hh.data.data, NF_GRU_W_HH[:])
+		copy(gru.bias.data.data, NF_GRU_BIAS[:])
+		copy(gru.bias_hn.data.data, NF_GRU_BIAS_HN[:])
+		mk :: proc(v: []f64, shape: [4]int, grad: bool) -> ^t.Tensor {
+			m := l.matrix_new(f64, 1, len(v))
+			copy(m.data, v)
+			x := t.tensor_new(m, grad)
+			x.shape = shape
+			return x
+		}
+		dev :: proc(a, b: []f64) -> f64 {
+			if len(a) != len(b) {return math.inf_f64(1)}
+			w := 0.0
+			for v, i in a {w = max(w, abs(v - b[i]))}
+			return w
+		}
+		x := mk(NF_GRU_X[:], {2, 5, 3, 1}, true)
+		h0 := mk(NF_GRU_H0[:], {2, 4, 1, 1}, true)
+		r := mk(NF_GRU_R[:], {2, 5, 4, 1}, false)
+		out := nn.gru_layer_forward(&gru, x, h0)
+		loss := t.tensor_sum(t.tensor_mul(out, r))
+		t.tensor_backward(loss)
+		d_out := dev(out.data.data, NF_GRU_OUT[:])
+		d_grad := max(
+			dev(x.grad.data, NF_GRU_DX[:]),
+			dev(h0.grad.data, NF_GRU_DH0[:]),
+			dev(gru.w_ih.grad.data, NF_GRU_DW_IH[:]),
+			dev(gru.w_hh.grad.data, NF_GRU_DW_HH[:]),
+			dev(gru.bias.grad.data, NF_GRU_DBIAS[:]),
+			dev(gru.bias_hn.grad.data, NF_GRU_DBIAS_HN[:]),
+		)
+		t.tensor_free_graph(loss)
+		report(
+			fmt.tprintf(
+				"GRU vs torch.nn.GRU with nonzero bias_hh and h_0: output %.1e, gradients (x, h_0, W_ih, W_hh, bias, bias_hn) %.1e",
+				d_out,
+				d_grad,
+			),
+			d_out < 1e-13 && d_grad < 1e-12,
+			&passed,
+			&total,
+		)
+
+		// checkpoint round trip: bias_hn is stored; then the same layer without
+		// bias_hn (as in files written before it existed) saves and loads
+		// without it and gives the same output as before
+		path := "model_checkpoints/nn_fixes_gru.ckpt"
+		model := nn.sequential_new()
+		nn.sequential_add(model, gru)
+		opt := nn.adam_new(0.01)
+		nn.sequential_add_to_opt(model, &opt)
+		saved := nn.save_checkpoint(model, &opt, path, 1)
+		m2, o2, _, ok := nn.load_checkpoint(path)
+		round := saved && ok
+		if ok {
+			g2 := m2.layers[0].(nn.GRULayer)
+			round &&= g2.bias_hn != nil && slice.equal(g2.bias_hn.data.data, NF_GRU_BIAS_HN[:])
+			round &&= len(nn.sequential_parameters(m2, context.temp_allocator)) == 4
+			nn.sequential_free(m2)
+			nn.adam_free(o2)
+			free(o2)
+		}
+		g := &model.layers[0].(nn.GRULayer)
+		t.tensor_free(g.bias_hn)
+		g.bias_hn = nil
+		x.requires_grad, h0.requires_grad = false, false
+		ref := nn.gru_layer_forward(g, x, h0) // bias_hn nil = 0
+		nn.adam_free(&opt)
+		opt = nn.adam_new(0.01)
+		nn.sequential_add_to_opt(model, &opt)
+		saved = nn.save_checkpoint(model, &opt, path, 1)
+		m3, o3, _, ok3 := nn.load_checkpoint(path)
+		old := saved && ok3
+		if ok3 {
+			g3 := &m3.layers[0].(nn.GRULayer)
+			old &&= g3.bias_hn == nil
+			o := nn.gru_layer_forward(g3, x, h0)
+			old &&= slice.equal(o.data.data, ref.data.data)
+			old &&= len(o3.parameters) == 3
+			t.tensor_free(o)
+			nn.sequential_free(m3)
+			nn.adam_free(o3)
+			free(o3)
+		}
+		// sequential_load_partial puts it into a new GRU with bias_hn = 0
+		fresh := nn.sequential_new()
+		nn.sequential_add(fresh, nn.gru_layer_new(3, 4))
+		fg := &fresh.layers[0].(nn.GRULayer)
+		for &v in fg.bias_hn.data.data {v = 1}
+		n_loaded, n_skipped, ok_p := nn.sequential_load_partial(fresh, path)
+		old &&= ok_p && n_loaded == 1 && n_skipped == 0
+		old &&= slice.equal(fg.w_hh.data.data, NF_GRU_W_HH[:]) && slice.equal(fg.bias.data.data, NF_GRU_BIAS[:])
+		for v in fg.bias_hn.data.data {old &&= v == 0}
+		nn.sequential_free(fresh)
+		t.tensor_free(ref)
+		_ = os.remove(path)
+		report(
+			fmt.tprintf(
+				"GRU checkpoint: bias_hn saved and loaded %v; a GRU without bias_hn saves and loads without it (same output, 3 parameters) and loads partially into a new GRU with bias_hn = 0 %v",
+				round,
+				old,
+			),
+			round && old,
+			&passed,
+			&total,
+		)
+		nn.adam_free(&opt)
+		nn.sequential_free(model)
+		t.tensor_free(x)
+		t.tensor_free(h0)
+		t.tensor_free(r)
+	}
+
+	{ 	// tanh-approximated GELU (GPT-2's gelu_new) = torch gelu(approximate="tanh"),
+		// value and gradient; FFN / GPT keep the choice in their files, and files
+		// without it (older FFN layer and GPT ids) load with exact GELU
+		xm := l.matrix_new(f64, 1, len(NF_GT_X))
+		copy(xm.data, NF_GT_X[:])
+		x := t.tensor_new(xm, true)
+		wm := l.matrix_new(f64, 1, len(NF_GT_W))
+		copy(wm.data, NF_GT_W[:])
+		w := t.tensor_new(wm, false)
+		y := t.tensor_gelu_tanh(x)
+		loss := t.tensor_sum(t.tensor_mul(y, w))
+		t.tensor_backward(loss)
+		d_y, d_dx := 0.0, 0.0
+		for v, i in y.data.data {d_y = max(d_y, abs(v - NF_GT_Y[i]) / max(1, abs(NF_GT_Y[i])))}
+		for v, i in x.grad.data {d_dx = max(d_dx, abs(v - NF_GT_DX[i]) / max(1, abs(NF_GT_DX[i])))}
+		t.tensor_free_graph(loss)
+		t.tensor_free(x)
+		t.tensor_free(w)
+		report(
+			fmt.tprintf("tensor_gelu_tanh = torch gelu(approximate=tanh), x in [-6, 12]: value %.1e, gradient %.1e", d_y, d_dx),
+			d_y < 1e-15 && d_dx < 1e-15,
+			&passed,
+			&total,
+		)
+
+		// Sequential checkpoint: FFN(gelu_tanh) and Activation.GeluTanh
+		path := "model_checkpoints/nn_fixes_gelu.ckpt"
+		model := nn.sequential_new()
+		nn.sequential_add(model, nn.ffn_layer_new(4, 8, gelu_tanh = true), nn.Activation.GeluTanh, nn.linear_layer_new(4, 2))
+		opt := nn.adam_new(0.01)
+		nn.sequential_add_to_opt(model, &opt)
+		seq_ok := nn.save_checkpoint(model, &opt, path, 1)
+		out1 := nn.sequential_forward(model, nf_x)
+		m2, o2, _, ok2 := nn.load_checkpoint(path)
+		seq_ok &&= ok2
+		if ok2 {
+			seq_ok &&= m2.layers[0].(nn.FFNLayer).gelu_tanh && m2.layers[1].(nn.Activation) == .GeluTanh
+			out2 := nn.sequential_forward(m2, nf_x)
+			seq_ok &&= slice.equal(out1.data.data, out2.data.data)
+			t.tensor_free_graph(out2)
+			nn.sequential_free(m2)
+			nn.adam_free(o2)
+			free(o2)
+		}
+		t.tensor_free_graph(out1)
+		// the same file with the older FFN layer id (14, no flag) loads with exact GELU
+		data, _ := os.read_entire_file(path, context.allocator)
+		old_ffn := slice.concatenate([][]u8{data[:18], {14, 0, 0, 0}, data[22:30], data[34:]})
+		_ = os.write_entire_file(path, old_ffn)
+		m3, o3, _, ok3 := nn.load_checkpoint(path)
+		ffn0_ok := ok3
+		if ok3 {
+			ffn0_ok &&= !m3.layers[0].(nn.FFNLayer).gelu_tanh
+			nn.sequential_free(m3)
+			nn.adam_free(o3)
+			free(o3)
+		}
+		delete(old_ffn)
+		delete(data)
+		nn.adam_free(&opt)
+		nn.sequential_free(model)
+
+		// GPT file: gelu_tanh is stored; a file of the previous GPT id (33, no
+		// GELU flag) loads with exact GELU
+		gpath := "model_checkpoints/nn_fixes_gelu.gpt"
+		gpt := nn.gpt_model_new(11, 8, 2, 16, 2, 6, gelu_tanh = true)
+		gpt_ok := nn.save_gpt_model(&gpt, gpath)
+		g2, okg := nn.load_gpt_model(gpath)
+		gpt_ok &&= okg
+		if okg {
+			gpt_ok &&= g2.gelu_tanh && g2.blocks[0].ffn.gelu_tanh
+			mask := nn.create_causal_mask(6, context.allocator)
+			a := nn.gpt_model_forward(&gpt, nf_ids_t, mask, false)
+			b := nn.gpt_model_forward(g2, nf_ids_t, mask, false)
+			gpt_ok &&= slice.equal(a.data.data, b.data.data)
+			t.tensor_free_graph(a)
+			t.tensor_free_graph(b)
+			delete(mask)
+			nn.gpt_model_free(g2)
+			free(g2)
+		}
+		gdata, _ := os.read_entire_file(gpath, context.allocator)
+		old_gpt := slice.concatenate([][]u8{gdata[:10], {33, 0, 0, 0}, gdata[14:54], gdata[58:]})
+		_ = os.write_entire_file(gpath, old_gpt)
+		g3, okg3 := nn.load_gpt_model(gpath)
+		gpt3_ok := okg3
+		if okg3 {
+			gpt3_ok &&= !g3.gelu_tanh && !g3.blocks[0].ffn.gelu_tanh
+			nn.gpt_model_free(g3)
+			free(g3)
+		}
+		delete(old_gpt)
+		delete(gdata)
+		nn.gpt_model_free(&gpt)
+		_ = os.remove(path)
+		_ = os.remove(gpath)
+		report(
+			fmt.tprintf(
+				"tanh GELU kept by checkpoints (FFN + Activation %v, GPT %v); older FFN / GPT files load with exact GELU %v %v",
+				seq_ok,
+				gpt_ok,
+				ffn0_ok,
+				gpt3_ok,
+			),
+			seq_ok && gpt_ok && ffn0_ok && gpt3_ok,
+			&passed,
+			&total,
+		)
+	}
+
+	{ 	// reparameterize requires grad only if mu or log_var does
+		mk :: proc(grad: bool) -> ^t.Tensor {
+			m := l.matrix_new(f64, 2, 3)
+			for &v, i in m.data {v = 0.1 * f64(i) - 0.2}
+			return t.tensor_new(m, grad)
+		}
+		mu0, lv0 := mk(false), mk(false)
+		z0 := nn.reparameterize(mu0, lv0, context.allocator)
+		const_ok := !z0.requires_grad && z0.op == .None && len(z0.inputs) == 0
+		t.tensor_free(z0)
+		mu1 := mk(true)
+		z1 := nn.reparameterize(mu1, lv0, context.allocator)
+		loss := t.tensor_sum(z1)
+		t.tensor_backward(loss)
+		grad_ok := z1.requires_grad && z1.op == .Reparameterize && mu1.grad.data[0] == 1
+		t.tensor_free_graph(loss)
+		for x in ([]^t.Tensor{mu0, lv0, mu1}) {t.tensor_free(x)}
+		report(
+			fmt.tprintf("reparameterize: constant from inputs without grad %v, op with gradient to mu %v", const_ok, grad_ok),
+			const_ok && grad_ok,
 			&passed,
 			&total,
 		)

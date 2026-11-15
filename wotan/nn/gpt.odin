@@ -34,6 +34,7 @@ gpt_block_new :: proc(
 	num_experts: int = 8,
 	top_k: int = 2,
 	rms_norm: bool = false,
+	gelu_tanh: bool = false,
 	allocator: mem.Allocator = context.allocator,
 ) -> GPTBlock {
 	block: GPTBlock
@@ -55,8 +56,9 @@ gpt_block_new :: proc(
 
 	if use_moe {
 		block.moe = moe_layer_new(d_model, d_ff, num_experts, top_k, allocator)
+		for &e in block.moe.experts {e.gelu_tanh = gelu_tanh}
 	} else {
-		block.ffn = ffn_layer_new(d_model, d_ff, allocator)
+		block.ffn = ffn_layer_new(d_model, d_ff, gelu_tanh, allocator)
 	}
 	return block
 }
@@ -122,6 +124,7 @@ GPTModel :: struct {
 	max_seq_len:    int,
 	dropout:        f64, // on the attention and FFN outputs of every block (training only)
 	rms_norm:       bool, // RMSNorm instead of LayerNorm (blocks and final norm)
+	gelu_tanh:      bool, // tanh-approximated GELU in the FFNs (GPT-2's gelu_new), else exact
 	// The output projection reuses the token embedding: logits = x·Eᵀ + b
 	// (output_proj.weights is nil, output_proj.bias is used)
 	tie_embeddings: bool,
@@ -149,6 +152,7 @@ gpt_model_new :: proc(
 	dropout: f64 = 0.1,
 	rms_norm: bool = false,
 	tie_embeddings: bool = false,
+	gelu_tanh: bool = false,
 	allocator: mem.Allocator = context.allocator,
 ) -> GPTModel {
 	model: GPTModel
@@ -161,6 +165,7 @@ gpt_model_new :: proc(
 	model.dropout = dropout
 	model.rms_norm = rms_norm
 	model.tie_embeddings = tie_embeddings
+	model.gelu_tanh = gelu_tanh
 	model.allocator = allocator
 
 	// Token embeddings
@@ -181,6 +186,7 @@ gpt_model_new :: proc(
 			num_experts = num_experts,
 			top_k = top_k,
 			rms_norm = rms_norm,
+			gelu_tanh = gelu_tanh,
 			allocator = allocator,
 		)
 		append(&model.blocks, block)

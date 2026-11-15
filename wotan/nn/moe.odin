@@ -40,7 +40,7 @@ moe_layer_new :: proc(
 	// Experts: Array of FFNs
 	layer.experts = make([]FFNLayer, num_experts, allocator)
 	for i in 0 ..< num_experts {
-		layer.experts[i] = ffn_layer_new(d_model, d_ff, allocator)
+		layer.experts[i] = ffn_layer_new(d_model, d_ff, allocator = allocator)
 	}
 
 	return layer

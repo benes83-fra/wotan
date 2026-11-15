@@ -104,6 +104,7 @@ gru_simple_test :: proc(allocator: mem.Allocator) {
 	nn.adam_add_param(&opt, gru_layer.w_ih)
 	nn.adam_add_param(&opt, gru_layer.w_hh)
 	nn.adam_add_param(&opt, gru_layer.bias)
+	nn.adam_add_param(&opt, gru_layer.bias_hn)
 
 	x_data := l.matrix_new(f64, 1, batch * seq_len * in_size, allocator)
 	for i in 0 ..< len(x_data.data) {x_data.data[i] = rand.float64()}
@@ -125,7 +126,14 @@ gru_simple_test :: proc(allocator: mem.Allocator) {
 	fmt.println("Training GRU to output constant 0.5...")
 	for epoch in 0 ..< epochs {
 		nn.adam_zero_grad(&opt)
-		output := t.tensor_gru(x, h_0, gru_layer.w_ih, gru_layer.w_hh, gru_layer.bias)
+		output := t.tensor_gru(
+			x,
+			h_0,
+			gru_layer.w_ih,
+			gru_layer.w_hh,
+			gru_layer.bias,
+			gru_layer.bias_hn,
+		)
 		loss := t.tensor_mse_loss(output, target)
 		t.tensor_backward(loss)
 		nn.adam_step(&opt)
@@ -643,7 +651,7 @@ ffn_simple_test :: proc(allocator: mem.Allocator) {
 	d_model := 8
 	d_ff := 32 // Standard ratio is often 4x
 
-	ffn := nn.ffn_layer_new(d_model, d_ff, allocator)
+	ffn := nn.ffn_layer_new(d_model, d_ff, allocator = allocator)
 	defer nn.ffn_layer_free(&ffn)
 
 	// Create input

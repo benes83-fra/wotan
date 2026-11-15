@@ -353,6 +353,19 @@ _backward_from_root :: proc(root: ^Tensor, allocator: mem.Allocator) {
 				}
 			}
 
+		case .GeluTanh:
+			a_in := node.inputs[0]
+			if a_in.requires_grad {
+				tensor_ensure_grad(a_in)
+				for i in 0 ..< len(a_in.grad.data) {
+					// d/dx 0.5 x (1 + tanh u) with u = c (x + 0.044715 x³)
+					x := a_in.data.data[i]
+					th := math.tanh(GELU_TANH_C * (x + 0.044715 * x * x * x))
+					du := GELU_TANH_C * (1.0 + 3.0 * 0.044715 * x * x)
+					a_in.grad.data[i] +=
+						node.grad.data[i] * (0.5 * (1.0 + th) + 0.5 * x * (1.0 - th * th) * du)
+				}
+			}
 		case .NormCDF:
 			a_in := node.inputs[0]
 			if a_in.requires_grad {
@@ -1726,7 +1739,8 @@ _rnn_backward :: proc(node: ^Tensor, allocator: mem.Allocator) {
 	}
 }
 
-// _gru_backward: gates [r, z, n]; bias is added to the input projection only.
+// _gru_backward: gates [r, z, n]; bias is added to the input projection, the
+// optional bias_hn (inputs[5]) to the hidden n projection (saved in hh_n).
 //   r = σ(ih_r + hh_r), z = σ(ih_z + hh_z), n = tanh(ih_n + r * hh_n)
 //   h = (1 - z) * n + z * h_prev
 _gru_backward :: proc(node: ^Tensor, allocator: mem.Allocator) {
@@ -1809,6 +1823,14 @@ _gru_backward :: proc(node: ^Tensor, allocator: mem.Allocator) {
 		H3,
 		allocator,
 	)
+
+	// d b_hn = sum over steps and rows of the hidden-path n-gate gradient
+	if len(node.inputs) > 5 && node.inputs[5].requires_grad {
+		db := node.inputs[5].grad.data[0:H]
+		for r in 0 ..< seq_len * batch {
+			l.vec_add_simd(db, d_hh[r * H3 + 2 * H:r * H3 + H3], db)
+		}
+	}
 
 	if h_0_in.requires_grad {
 		l.vec_add_simd(h_0_in.grad.data, dh_next, h_0_in.grad.data)

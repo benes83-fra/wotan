@@ -220,6 +220,7 @@ layer_parameters :: proc(layer: ^Layer, out: ^[dynamic]^t.Tensor, all: bool = fa
 		add(out, l.w_ih)
 		add(out, l.w_hh)
 		add(out, l.bias)
+		add(out, l.bias_hn)
 	case LSTMLayer:
 		add(out, l.w_ih)
 		add(out, l.w_hh)

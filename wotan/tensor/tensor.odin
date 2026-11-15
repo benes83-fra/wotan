@@ -81,6 +81,7 @@ Op :: enum {
 	ProspectValue,
 	ProbWeighting,
 	ProspectUtility,
+	GeluTanh,
 }
 
 PoolParams :: struct {
@@ -364,6 +365,24 @@ tensor_gelu :: proc(a: ^Tensor) -> ^Tensor {
 	}
 	return out
 }
+
+// tensor_gelu_tanh: the tanh approximation of GELU (PyTorch's
+// gelu(approximate = "tanh"), GPT-2's gelu_new):
+//   0.5 · x · (1 + tanh(√(2/π) · (x + 0.044715 · x³)))
+tensor_gelu_tanh :: proc(a: ^Tensor) -> ^Tensor {
+	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
+	for x, i in a.data.data {
+		out_data.data[i] = 0.5 * x * (1.0 + math.tanh(GELU_TANH_C * (x + 0.044715 * x * x * x)))
+	}
+	out := _tensor_new_op(out_data, a.shape, a.requires_grad, _op_alloc(a))
+	if out.requires_grad {
+		out.op = .GeluTanh
+		append(&out.inputs, a)
+	}
+	return out
+}
+
+GELU_TANH_C :: 0.7978845608028654 // √(2/π)
 
 // tensor_mul creates a new tensor C = A * B (element-wise)
 tensor_mul :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
@@ -1526,14 +1545,16 @@ tensor_rnn :: proc(
 // ============================================================================
 
 // _gru_step_forward: gates [r, z, n]. gate_ih = x_t @ W_ih is precomputed and
-// gets the bias added in place; gate_hh [batch, 3H] is scratch.
+// gets the bias added in place; gate_hh [batch, 3H] is scratch. bias_hn [H]
+// (nil = 0) is added to the hidden n projection, inside the reset gate.
 // The r / z / n / hh_n buffers can be nil if only h_t is needed
-// (hh_n_buf receives the n part of h_prev @ W_hh).
+// (hh_n_buf receives h_prev @ W_hn + b_hn, the term r multiplies).
 _gru_step_forward :: proc(
 	gate_ih: []f64,
 	h_prev: []f64,
 	w_hh: []f64,
 	bias: []f64,
+	bias_hn: []f64,
 	h_t: []f64,
 	gate_hh: []f64,
 	r_buf: []f64,
@@ -1567,11 +1588,12 @@ _gru_step_forward :: proc(
 			r_val := 1.0 / (1.0 + math.exp(-r_pre))
 			z_val := 1.0 / (1.0 + math.exp(-z_pre))
 
+			hh_n := gate_hh[idx_n] + bias_hn[i] if bias_hn != nil else gate_hh[idx_n]
 			if r_buf != nil {r_buf[b * H + i] = r_val}
 			if z_buf != nil {z_buf[b * H + i] = z_val}
-			if hh_n_buf != nil {hh_n_buf[b * H + i] = gate_hh[idx_n]}
+			if hh_n_buf != nil {hh_n_buf[b * H + i] = hh_n}
 
-			n_pre := gate_ih[idx_n] + r_val * gate_hh[idx_n]
+			n_pre := gate_ih[idx_n] + r_val * hh_n
 			n_val := math.tanh(n_pre)
 			if n_buf != nil {n_buf[b * H + i] = n_val}
 
@@ -1581,14 +1603,20 @@ _gru_step_forward :: proc(
 	}
 }
 
-// tensor_gru: saved for backward (f64_metadata), each block [seq_len * batch * H]
-// unless noted: hs [(seq_len + 1) * batch * H], r, z, n, hh_n (n part of h_prev @ W_hh)
+// tensor_gru, as PyTorch's GRU (gates r, z, n):
+//   r = σ(x W_ir + b_r + h W_hr),  z = σ(x W_iz + b_z + h W_hz)
+//   n = tanh(x W_in + b_n + r · (h W_hn + b_hn)),  h' = (1 − z) · n + z · h
+// bias [1, 3H] = bias_ih + bias_hh for r and z, bias_ih for n; bias_hn [1, H]
+// is the n part of bias_hh (nil = 0).
+// Saved for backward (f64_metadata), each block [seq_len * batch * H] unless
+// noted: hs [(seq_len + 1) * batch * H], r, z, n, hh_n (h_prev W_hn + b_hn)
 tensor_gru :: proc(
 	x: ^Tensor,
 	h_0: ^Tensor,
 	w_ih: ^Tensor,
 	w_hh: ^Tensor,
 	bias: ^Tensor,
+	bias_hn: ^Tensor,
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
 	allocator := _scope_or(allocator) // the active graph scope, if any
@@ -1599,12 +1627,21 @@ tensor_gru :: proc(
 	hidden_size := w_ih.shape[1] / 3
 	BH := batch * hidden_size
 	BG := batch * 3 * hidden_size
+	if bias_hn != nil {
+		fmt.assertf(
+			len(bias_hn.data.data) == hidden_size,
+			"tensor_gru: bias_hn has %d values, expected hidden_size = %d",
+			len(bias_hn.data.data),
+			hidden_size,
+		)
+	}
 	rg :=
 		x.requires_grad ||
 		h_0.requires_grad ||
 		w_ih.requires_grad ||
 		w_hh.requires_grad ||
-		bias.requires_grad
+		bias.requires_grad ||
+		(bias_hn != nil && bias_hn.requires_grad)
 
 	out_data := l.matrix_new(f64, 1, batch * seq_len * hidden_size, _op_alloc(x))
 
@@ -1633,6 +1670,7 @@ tensor_gru :: proc(
 			_state_row(hs, s),
 			w_hh.data.data,
 			bias.data.data,
+			bias_hn.data.data if bias_hn != nil else nil,
 			h_next,
 			gate_hh,
 			_step_block(rs, s, BH),
@@ -1655,6 +1693,7 @@ tensor_gru :: proc(
 		append(&out.inputs, w_ih)
 		append(&out.inputs, w_hh)
 		append(&out.inputs, bias)
+		if bias_hn != nil {append(&out.inputs, bias_hn)}
 	}
 
 	return out

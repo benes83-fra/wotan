@@ -21,9 +21,9 @@ import "core:os"
 //     counts. Older types are still read (all parameters trainable): 2
 //     without the frozen flags, 1 also with one shared step count, 0 also
 //     without the hyperparameters.
-//   GPT (33; older: 31 without the norm and weight-tying flags, 28 also
-//     without the dropout rate, 27 also without the
-//     attention flags, 17 also without MoE), BERT (32; older: 29 without the
+//   GPT (34; older: 33 without the GELU flag (exact GELU), 31 also without
+//     the norm and weight-tying flags, 28 also without the dropout rate, 27
+//     also without the attention flags, 17 also without MoE), BERT (32; older: 29 without the
 //     dropout rate, 18 also without the attention flags), Generator (19),
 //     Discriminator (20), VAE encoder (21) and decoder (22): magic, type id,
 //     configuration, tensors. Files without the dropout rate load with 0.1.
@@ -49,14 +49,14 @@ _Layer_Id :: enum {
 	AvgPool2d      = 6,
 	Dropout        = 7,
 	RNN            = 8,
-	GRU            = 9,
+	GRU            = 35, // with bias_hn (PyTorch's n part of bias_hh)
 	LSTM           = 10,
 	Embedding      = 11,
 	LayerNorm      = 13,
 	RMSNorm        = 31,
 	Conv1d         = 32,
 	TCNBlock       = 33,
-	FFN            = 14,
+	FFN            = 36, // with the tanh-GELU flag
 	Mamba          = 34, // RMSNorm weight stored after the SSM tensors
 	MoE            = 26,
 	// layers with attention: use_flash and is_causal of every attention
@@ -72,6 +72,11 @@ _Layer_Id :: enum {
 	GAT_0          = 24,
 	// Mamba without the pre-norm weight (read only; it loads as 1)
 	Mamba_0        = 25,
+	// GRU without bias_hn: loads with bias_hn = nil (the same function and the
+	// same parameter list); written for such layers
+	GRU_0          = 9,
+	// FFN without the GELU flag (read only; exact GELU)
+	FFN_0          = 14,
 }
 
 @(private = "file")
@@ -86,7 +91,8 @@ _File_Id :: enum {
 	GPT_1         = 28, // no dropout rate (read only)
 	BERT_1        = 29, // no dropout rate (read only)
 	GPT_2         = 31, // no norm or weight-tying flags (read only)
-	GPT           = 33, // dropout rate, RMSNorm and tied-embedding flags; per block: MoE, use_flash and is_causal flags
+	GPT_3         = 33, // no GELU flag (read only; exact GELU)
+	GPT           = 34, // dropout rate, RMSNorm, tied-embedding and tanh-GELU flags; per block: MoE, use_flash and is_causal flags
 	BERT          = 32, // dropout rate; per block: use_flash and is_causal flags
 }
 
@@ -371,6 +377,7 @@ _io_layer :: proc(io: ^_Io, layer: ^Layer, flags: bool) {
 		_io_tensor(io, &l.w_ih)
 		_io_tensor(io, &l.w_hh)
 		_io_tensor(io, &l.bias)
+		if l.bias_hn != nil {_io_tensor(io, &l.bias_hn)}
 	case LSTMLayer:
 		_io_tensor(io, &l.w_ih)
 		_io_tensor(io, &l.w_hh)
@@ -449,7 +456,7 @@ _write_layer_header :: proc(io: ^_Io, layer: ^Layer) {
 	case RNNLayer:
 		ints(io, .RNN, l.input_size, l.hidden_size)
 	case GRULayer:
-		ints(io, .GRU, l.input_size, l.hidden_size)
+		ints(io, .GRU if l.bias_hn != nil else .GRU_0, l.input_size, l.hidden_size)
 	case LSTMLayer:
 		ints(io, .LSTM, l.input_size, l.hidden_size)
 	case EmbeddingLayer:
@@ -460,7 +467,7 @@ _write_layer_header :: proc(io: ^_Io, layer: ^Layer) {
 		ints(io, .RMSNorm if l.rms else .LayerNorm, l.d_model)
 		_put_f64(io, l.eps)
 	case FFNLayer:
-		ints(io, .FFN, l.d_model, l.d_ff)
+		ints(io, .FFN, l.d_model, l.d_ff, int(l.gelu_tanh))
 	case TransformerEncoderBlock:
 		ints(io, .EncoderBlock, l.d_model, l.num_heads, l.d_ff)
 	case TransformerEncoder:
@@ -572,14 +579,19 @@ _read_layer_header :: proc(
 		layer = avgpool2d_layer_new(k, s)
 	case .Dropout:
 		layer = dropout_layer_new(_get_f64(io))
-	case .RNN, .GRU, .LSTM:
+	case .RNN, .GRU, .GRU_0, .LSTM:
 		in_size, hidden := _get_size(io), _get_size(io)
 		if !io.ok {return}
 		#partial switch _Layer_Id(id) {
 		case .RNN:
 			layer = rnn_layer_new(in_size, hidden, alloc)
-		case .GRU:
-			layer = gru_layer_new(in_size, hidden, alloc)
+		case .GRU, .GRU_0:
+			gru := gru_layer_new(in_size, hidden, alloc)
+			if _Layer_Id(id) == .GRU_0 {
+				t.tensor_free(gru.bias_hn)
+				gru.bias_hn = nil
+			}
+			layer = gru
 		case .LSTM:
 			layer = lstm_layer_new(in_size, hidden, alloc)
 		}
@@ -600,10 +612,11 @@ _read_layer_header :: proc(
 			eps,
 			alloc,
 		)
-	case .FFN:
+	case .FFN, .FFN_0:
 		d, d_ff := _get_size(io), _get_size(io)
+		gelu_tanh := _Layer_Id(id) == .FFN && _get_i32(io) != 0
 		if !io.ok {return}
-		layer = ffn_layer_new(d, d_ff, alloc)
+		layer = ffn_layer_new(d, d_ff, gelu_tanh, alloc)
 	case .EncoderBlock, .EncoderBlock_0:
 		d, heads, d_ff := _get_size(io), _get_size(io), _get_size(io)
 		if !io.ok || heads == 0 {return}
@@ -812,7 +825,24 @@ sequential_load_partial :: proc(
 		same := string(headers.buf[len(CHECKPOINT_MAGIC):mid]) == string(headers.buf[mid:])
 		delete(headers.buf)
 
-		if same {
+		// a GRU stored without bias_hn loads into a GRU of the same size with
+		// bias_hn = 0 (the same function)
+		old_gru, is_old_gru := stored.(GRULayer)
+		is_old_gru &&= old_gru.bias_hn == nil
+		new_gru, is_new_gru := &seq.layers[i].(GRULayer)
+		if !same &&
+		   is_old_gru &&
+		   is_new_gru &&
+		   new_gru.bias_hn != nil &&
+		   new_gru.input_size == old_gru.input_size &&
+		   new_gru.hidden_size == old_gru.hidden_size {
+			_io_layer(&io, &stored, flags)
+			copy(new_gru.w_ih.data.data, stored.(GRULayer).w_ih.data.data)
+			copy(new_gru.w_hh.data.data, stored.(GRULayer).w_hh.data.data)
+			copy(new_gru.bias.data.data, stored.(GRULayer).bias.data.data)
+			mem.zero_slice(new_gru.bias_hn.data.data)
+			loaded += 1
+		} else if same {
 			_io_layer(&io, &seq.layers[i], flags)
 			loaded += 1
 		} else {
@@ -840,6 +870,7 @@ save_gpt_model :: proc(model: ^GPTModel, path: string) -> bool {
 	_put_f64(&io, model.dropout)
 	_put_i32(&io, int(model.rms_norm))
 	_put_i32(&io, int(model.tie_embeddings))
+	_put_i32(&io, int(model.gelu_tanh))
 	_io_gpt(&io, model, .GPT)
 	return _save(&io, path)
 }
@@ -861,6 +892,7 @@ load_gpt_model :: proc(
 
 	file_id := _File_Id(_get_i32(&io))
 	if file_id != .GPT &&
+	   file_id != .GPT_3 &&
 	   file_id != .GPT_2 &&
 	   file_id != .GPT_1 &&
 	   file_id != .GPT_MoE &&
@@ -870,9 +902,11 @@ load_gpt_model :: proc(
 	}
 	cfg: [6]int // vocab, d_model, heads, d_ff, layers, max_seq_len
 	for &v in cfg {v = _get_size(&io)}
-	dropout := _get_f64(&io) if file_id == .GPT || file_id == .GPT_2 else 0.1
-	rms_norm := file_id == .GPT && _get_i32(&io) != 0
-	tie_embeddings := file_id == .GPT && _get_i32(&io) != 0
+	current := file_id == .GPT || file_id == .GPT_3
+	dropout := _get_f64(&io) if current || file_id == .GPT_2 else 0.1
+	rms_norm := current && _get_i32(&io) != 0
+	tie_embeddings := current && _get_i32(&io) != 0
+	gelu_tanh := file_id == .GPT && _get_i32(&io) != 0
 	if !io.ok || cfg[2] == 0 {
 		fmt.printf("%s: corrupt or truncated model\n", path)
 		return nil, false
@@ -889,6 +923,7 @@ load_gpt_model :: proc(
 		dropout = dropout,
 		rms_norm = rms_norm,
 		tie_embeddings = tie_embeddings,
+		gelu_tanh = gelu_tanh,
 		allocator = allocator,
 	)
 	_io_gpt(&io, model, file_id)
@@ -909,7 +944,11 @@ _io_gpt :: proc(io: ^_Io, model: ^GPTModel, version: _File_Id) {
 	_io_tensor(io, &model.pos_emb.weight)
 	for &block in model.blocks {
 		is_moe := version != .GPT_Dense && _io_flag(io, block.use_moe)
-		_io_mha(io, &block.mha, version == .GPT || version == .GPT_2 || version == .GPT_1)
+		_io_mha(
+			io,
+			&block.mha,
+			version == .GPT || version == .GPT_3 || version == .GPT_2 || version == .GPT_1,
+		)
 		if is_moe {
 			num_experts, top_k := block.moe.num_experts, block.moe.top_k
 			if io.writing {
@@ -921,6 +960,7 @@ _io_gpt :: proc(io: ^_Io, model: ^GPTModel, version: _File_Id) {
 				ffn_layer_free(&block.ffn)
 				block.ffn = {}
 				block.moe = moe_layer_new(model.d_model, model.d_ff, num_experts, top_k, io.alloc)
+				for &e in block.moe.experts {e.gelu_tanh = model.gelu_tanh}
 				block.use_moe = true
 			}
 			_io_moe(io, &block.moe)
@@ -956,8 +996,8 @@ save_bert_model :: proc(model: ^BERTModel, path: string) -> bool {
 // older files that don't store it.
 load_bert_model :: proc(
 	path: string,
-	allocator: mem.Allocator = context.allocator,
 	use_flash: bool = false,
+	allocator: mem.Allocator = context.allocator,
 ) -> (
 	model: ^BERTModel,
 	ok: bool,

@@ -71,10 +71,15 @@ sentiment_analyzer_load :: proc(
 	ok: bool,
 ) {
 	bert: ^nn.BERTModel
-	bert, ok = nn.load_bert_model(path, allocator)
+	bert, ok = nn.load_bert_model(path, allocator = allocator)
 	if !ok {return}
 	nn.bert_set_layer_norm_eps(bert, 1e-12) // FinBERT's layer_norm_eps
-	return SentimentAnalyzer{bert = bert, allocator = allocator, labels = SENTIMENT_FINBERT_LABELS}, true
+	return SentimentAnalyzer {
+			bert = bert,
+			allocator = allocator,
+			labels = SENTIMENT_FINBERT_LABELS,
+		},
+		true
 }
 
 sentiment_analyzer_free :: proc(analyzer: ^SentimentAnalyzer) {
@@ -94,7 +99,13 @@ analyze_text :: proc(
 	segment_ids: ^t.Tensor,
 	training: bool,
 ) -> ^t.Tensor {
-	_, logits := nn.bert_model_forward(analyzer.bert, input_ids, segment_ids, training, skip_mlm = true)
+	_, logits := nn.bert_model_forward(
+		analyzer.bert,
+		input_ids,
+		segment_ids,
+		training,
+		skip_mlm = true,
+	)
 	return logits
 }
 

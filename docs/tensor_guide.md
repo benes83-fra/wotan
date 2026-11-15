@@ -158,6 +158,7 @@ All of these return a tensor of the input's shape and are differentiable:
 | `tensor_relu`, `tensor_leaky_relu(a, alpha = 0.01)` | | |
 | `tensor_sigmoid`, `tensor_tanh`, `tensor_softplus` | | `softplus` is log(1 + eˣ), computed stably |
 | `tensor_gelu(a)` | x·Φ(x) | exact (erf-based) GELU, as `torch.nn.functional.gelu` |
+| `tensor_gelu_tanh(a)` | ½x(1 + tanh(√(2/π)(x + 0.044715x³))) | tanh approximation, as `gelu(approximate="tanh")` and GPT-2's `gelu_new` |
 | `tensor_norm_cdf(a)` | Φ(a) | standard normal CDF, accurate in the tails |
 | `tensor_clamp(a, lo, hi)` | | gradient 0 outside [lo, hi] |
 | `tensor_prospect_value(x, alpha = 0.88, beta = 0.88, lambda = 2.25)` | xᵅ for x ≥ 0, −λ(−x)ᵝ for x < 0 | Tversky–Kahneman (1992) value function; subgradient 0 at x = 0 |
@@ -339,19 +340,20 @@ conv1d [1, 4, 3, 1] t=0: 0.02 0.04 0.06  t=3: -0.31 0.23 0.77
 
 `tensor_rnn`, `tensor_gru` and `tensor_lstm` run a cell over a whole sequence `x` of shape `[batch, seq_len, input]`. They return every hidden state as `[batch, seq_len, H, 1]`.
 
-The weights are stored **transposed** compared with PyTorch, and there is **one** bias. G is the number of gates: 1 for the RNN, 3 for the GRU and 4 for the LSTM.
+The weights are stored **transposed** compared with PyTorch, and the input and hidden biases are combined into **one** bias (the GRU keeps one part apart, see below). G is the number of gates: 1 for the RNN, 3 for the GRU and 4 for the LSTM. The GRU is called as `tensor_gru(x, h_0, W_ih, W_hh, bias, bias_hn)`.
 
 | Argument | Shape | PyTorch equivalent |
 |---|---|---|
 | `W_ih` | `[input, G·H]` | `weight_ih_l0ᵀ` |
 | `W_hh` | `[H, G·H]` | `weight_hh_l0ᵀ` |
-| `bias` | `[1, G·H]` | `bias_ih_l0 + bias_hh_l0` (see the GRU note) |
+| `bias` | `[1, G·H]` | `bias_ih_l0 + bias_hh_l0`; for the GRU's n gate `bias_ih_l0` only |
+| `bias_hn` (GRU) | `[1, H]` | the n part of `bias_hh_l0`; `nil` means 0 |
 | `h_0`, `c_0` | `[batch, H]` | `h_0[0]`, `c_0[0]` |
 
 The cells are defined as follows:
 - **RNN:** h = tanh(x W_ih + h W_hh + b).
 - **LSTM:** gates are in the order i, f, g, o, as in PyTorch. c = f·c + i·g and h = o·tanh(c).
-- **GRU:** gates are in the order r, z, n, and the new state is h = (1 − z)·n + z·h. The single bias sits outside the reset gate in n = tanh(x W_in + b_n + r·(h W_hn)). This equals PyTorch's GRU when `bias_hh_l0`'s n part is zero.
+- **GRU:** gates are in the order r, z, n, as in PyTorch, and the new state is h = (1 − z)·n + z·h, with n = tanh(x W_in + b_n + r·(h W_hn + b_hn)). `bias_hn` sits inside the reset gate.
 
 ```odin
 B, S, I, H := 1, 2, 2, 2
@@ -653,7 +655,7 @@ The same network in PyTorch 2.1.0 (float64, the same initial weights, plain SGD)
 | Constant-only chains | `constant_record_begin()`, `constant_record_end(results...)` |
 | Arithmetic | `tensor_add`, `_sub`, `_mul`, `_div`, `_neg`, `_scale`, `_add_bias`, `_gate_mul` |
 | Element-wise math | `tensor_exp`, `_log`, `_sqrt`, `_lgamma`, `_clamp`, `_norm_cdf` |
-| Activations | `tensor_relu`, `_leaky_relu`, `_sigmoid`, `_tanh`, `_softplus`, `_gelu`, `_softmax` |
+| Activations | `tensor_relu`, `_leaky_relu`, `_sigmoid`, `_tanh`, `_softplus`, `_gelu`, `_gelu_tanh`, `_softmax` |
 | Products and shapes | `tensor_matmul`, `_transpose`, `_reshape`, `_flatten`, `_concat`, `_slice_cols`, `_slice_gate`, `_permute_mha`, `_permute_mha_inverse`, `_permute_lob` |
 | Reductions | `tensor_sum`, `_mean`, `_sum_dim1`, `_logsumexp_dim1` |
 | Losses | `tensor_mse_loss`, `_cross_entropy_loss`, `_bce_loss`, `_binary_cross_entropy`, `_kl_divergence`, `_entropy`, `_sharpe_loss`, `_prospect_utility` |

@@ -48,15 +48,22 @@ def convert_distilgpt2(output_path):
     print(f"✅ CONFIRMED: vocab_size = {vocab_size} (Should be 50257)")
     print(f"Writing checkpoint to {output_path}...")
     
+    # GPT-2's MLP uses gelu_new, the tanh approximation of GELU
+    assert config.activation_function == "gelu_new", config.activation_function
+
     with open(output_path, "wb") as f:
         f.write(b"WOTAN_CKPT")
-        write_i32(f, 17) # GPT type ID
+        write_i32(f, 34) # GPT file id (current format)
         write_i32(f, vocab_size)
         write_i32(f, d_model)
         write_i32(f, num_heads)
         write_i32(f, d_ff)
         write_i32(f, num_layers)
         write_i32(f, max_seq_len)
+        write_f64(f, config.resid_pdrop)  # dropout rate (training only)
+        write_i32(f, 0)  # rms_norm: GPT-2 uses LayerNorm
+        write_i32(f, 0)  # tie_embeddings: lm_head is written separately below
+        write_i32(f, 1)  # gelu_tanh: GPT-2's gelu_new
 
         # Embeddings
         write_tensor(f, state_dict["transformer.wte.weight"])
@@ -65,6 +72,9 @@ def convert_distilgpt2(output_path):
         # Blocks
         for i in range(num_layers):
             prefix = f"transformer.h.{i}."
+            write_i32(f, 0)  # use_moe
+            write_i32(f, 0)  # use_flash
+            write_i32(f, 1)  # is_causal
             c_attn_w = state_dict[f"{prefix}attn.c_attn.weight"]
             c_attn_b = state_dict[f"{prefix}attn.c_attn.bias"]
             

@@ -20,6 +20,7 @@ Activation :: enum {
 	Gelu,
 	Softmax,
 	Softplus,
+	GeluTanh, // tanh approximation (GPT-2's gelu_new)
 }
 
 // apply_activation applies an activation function to a tensor
@@ -41,6 +42,8 @@ apply_activation :: proc(x: ^t.Tensor, act: Activation) -> ^t.Tensor {
 		return t.tensor_softmax(x)
 	case .Softplus:
 		return t.tensor_softplus(x)
+	case .GeluTanh:
+		return t.tensor_gelu_tanh(x)
 	}
 
 	return x
@@ -245,12 +248,16 @@ rnn_layer_free :: proc(layer: ^RNNLayer) {
 rnn_layer_forward :: proc(layer: ^RNNLayer, x: ^t.Tensor, h_0: ^t.Tensor) -> ^t.Tensor {
 	return t.tensor_rnn(x, h_0, layer.w_ih, layer.w_hh, layer.bias)
 }
+// GRULayer: PyTorch's GRU. bias [1, 3H] = bias_ih + bias_hh for r and z and
+// bias_ih for n; bias_hn [1, H] is the n part of bias_hh, applied inside the
+// reset gate: n = tanh(x W_in + b_n + r · (h W_hn + b_hn)). Both start at 0.
 GRULayer :: struct {
 	input_size:  int,
 	hidden_size: int,
 	w_ih:        ^t.Tensor,
 	w_hh:        ^t.Tensor,
 	bias:        ^t.Tensor,
+	bias_hn:     ^t.Tensor,
 }
 
 gru_layer_new :: proc(
@@ -277,6 +284,10 @@ gru_layer_new :: proc(
 	layer.bias = t.tensor_new(bias_data, true, allocator)
 	layer.bias.shape = [4]int{1, H3, 1, 1}
 
+	bias_hn_data := l.matrix_new(f64, 1, hidden_size, allocator)
+	layer.bias_hn = t.tensor_new(bias_hn_data, true, allocator)
+	layer.bias_hn.shape = [4]int{1, hidden_size, 1, 1}
+
 	return layer
 }
 
@@ -284,10 +295,11 @@ gru_layer_free :: proc(layer: ^GRULayer) {
 	if layer.w_ih != nil {t.tensor_free(layer.w_ih)}
 	if layer.w_hh != nil {t.tensor_free(layer.w_hh)}
 	if layer.bias != nil {t.tensor_free(layer.bias)}
+	if layer.bias_hn != nil {t.tensor_free(layer.bias_hn)}
 }
 
 gru_layer_forward :: proc(layer: ^GRULayer, x: ^t.Tensor, h_0: ^t.Tensor) -> ^t.Tensor {
-	return t.tensor_gru(x, h_0, layer.w_ih, layer.w_hh, layer.bias)
+	return t.tensor_gru(x, h_0, layer.w_ih, layer.w_hh, layer.bias, layer.bias_hn)
 }
 LSTMLayer :: struct {
 	input_size:  int,
@@ -674,23 +686,27 @@ layer_norm_layer_forward :: proc(layer: ^LayerNormLayer, x: ^t.Tensor) -> ^t.Ten
 // Feed-Forward Network (FFN) Layer
 // ============================================================================
 
+// FFNLayer: Linear -> GELU -> Linear. GELU is exact (erf) unless gelu_tanh,
+// then its tanh approximation (GPT-2's gelu_new).
 FFNLayer :: struct {
-	d_model: int,
-	d_ff:    int, // Hidden dimension (usually 4 * d_model)
-	fc1:     LinearLayer,
-	fc2:     LinearLayer,
+	d_model:   int,
+	d_ff:      int, // Hidden dimension (usually 4 * d_model)
+	gelu_tanh: bool,
+	fc1:       LinearLayer,
+	fc2:       LinearLayer,
 }
 
 ffn_layer_new :: proc(
 	d_model: int,
 	d_ff: int,
+	gelu_tanh: bool = false,
 	allocator: mem.Allocator = context.allocator,
 ) -> FFNLayer {
 	layer: FFNLayer
 	layer.d_model = d_model
 	layer.d_ff = d_ff
+	layer.gelu_tanh = gelu_tanh
 
-	// Linear -> GELU (exact, erf) -> Linear
 	layer.fc1 = linear_layer_new(d_model, d_ff, allocator)
 	layer.fc2 = linear_layer_new(d_ff, d_model, allocator)
 
@@ -707,7 +723,7 @@ ffn_layer_forward :: proc(layer: ^FFNLayer, x: ^t.Tensor) -> ^t.Tensor {
 	x1 := linear_forward(&layer.fc1, x)
 
 	// 2. Apply GELU activation
-	x2 := t.tensor_gelu(x1)
+	x2 := t.tensor_gelu_tanh(x1) if layer.gelu_tanh else t.tensor_gelu(x1)
 
 	// 3. Project back down to d_model
 	out := linear_forward(&layer.fc2, x2)
@@ -741,7 +757,7 @@ transformer_encoder_block_new :: proc(
 
 	// Initialize sublayers
 	block.mha = multi_head_attention_layer_new(d_model, num_heads, allocator = allocator)
-	block.ffn = ffn_layer_new(d_model, d_ff, allocator)
+	block.ffn = ffn_layer_new(d_model, d_ff, allocator = allocator)
 	block.ln1 = layer_norm_layer_new(d_model, 1e-5, allocator)
 	block.ln2 = layer_norm_layer_new(d_model, 1e-5, allocator)
 
@@ -992,7 +1008,7 @@ transformer_decoder_block_new :: proc(
 		use_flash = use_flash,
 		allocator = allocator,
 	)
-	block.ffn = ffn_layer_new(d_model, d_ff, allocator)
+	block.ffn = ffn_layer_new(d_model, d_ff, allocator = allocator)
 	block.ln1 = layer_norm_layer_new(d_model, 1e-5, allocator)
 	block.ln2 = layer_norm_layer_new(d_model, 1e-5, allocator)
 	block.ln3 = layer_norm_layer_new(d_model, 1e-5, allocator)

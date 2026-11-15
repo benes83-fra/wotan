@@ -134,7 +134,9 @@ reparameterize :: proc(mu: ^t.Tensor, log_var: ^t.Tensor, allocator: mem.Allocat
 		}
 	}
 
-	z := t.tensor_new(z_data, t.grad_enabled(), allocator)
+	// an op output: requires grad only if mu or log_var does (and gradients are
+	// enabled); otherwise a constant, which forward recordings free
+	z := t._tensor_new_op(z_data, mu.shape, mu.requires_grad || log_var.requires_grad, allocator)
 
 	// Record the reparameterization for backprop
 	if z.requires_grad {
