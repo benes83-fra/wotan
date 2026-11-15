@@ -189,7 +189,7 @@ linalg_contracts_test :: proc(allocator: mem.Allocator) {
 		expect(
 			&passed,
 			&total,
-			worst_recon < 1e-13 && worst_orth < 1e-10,
+			worst_recon < 1e-13 && worst_orth < 1e-12,
 			fmt.tprintf(
 				"SVD (Jacobi + GolubReinsch, 50x50 / 120x40): recon %.1e, orthogonality %.1e",
 				worst_recon,

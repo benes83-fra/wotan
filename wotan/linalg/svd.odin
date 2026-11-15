@@ -39,8 +39,14 @@ svd_jacobi :: proc(
 	defer delete(col_q, context.temp_allocator)
 	defer delete(col_p, context.temp_allocator)
 
+	// Rotate a pair until its columns are orthogonal to working precision:
+	// |u_p·u_q| ≤ √m·ε·‖u_p‖‖u_q‖ (the tolerance of LAPACK's dgesvj). Columns
+	// of norm below ε·‖A‖_F are rounding noise of a rank-deficient A: they never
+	// meet a relative test, and _svd_sort_and_complete replaces them anyway.
 	max_iter := 100
-	eps := 1e-12
+	eps := math.sqrt(f64(m)) * 2.220446049250313e-16
+	fro2 := dot_simd(A.data[:m * n], A.data[:m * n])
+	tiny2 := 2.220446049250313e-16 * 2.220446049250313e-16 * fro2
 
 	for iter in 0 ..< max_iter {
 		changed := false
@@ -58,7 +64,8 @@ svd_jacobi :: proc(
 				beta := dot_simd(col_q[0:m], col_q[0:m])
 				gamma := dot_simd(col_p[0:m], col_q[0:m])
 
-				if math.abs(gamma) <= eps * math.sqrt(alpha * beta) {
+				if alpha <= tiny2 || beta <= tiny2 {continue}
+				if math.abs(gamma) <= eps * math.sqrt(alpha) * math.sqrt(beta) {
 					continue
 				}
 
