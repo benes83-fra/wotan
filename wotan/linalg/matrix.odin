@@ -10,12 +10,12 @@ import "core:strings"
 // Generic dynamic matrix
 // ------------------------------------------------------------
 
+// Contiguous row-major storage: element (i, j) is data[i * cols + j]
 Matrix :: struct($T: typeid) {
 	rows:      int,
 	cols:      int,
 	data:      []T,
 	allocator: mem.Allocator,
-	stride:    int,
 }
 
 // ------------------------------------------------------------
@@ -418,7 +418,6 @@ matrix_from_flat :: proc(
 		panic(fmt.aprintf("matrix_from_flat: data too short (%v < %v)", len(data), expected_len))
 	}
 	copy(m.data, data[0:expected_len])
-	m.stride = cols // informational only: storage is always contiguous row-major
 	return m
 }
 

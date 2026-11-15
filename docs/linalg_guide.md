@@ -80,11 +80,10 @@ Matrix :: struct($T: typeid) {
     cols:      int,
     data:      []T,           // rows * cols values, row by row
     allocator: mem.Allocator, // the allocator data came from
-    stride:    int,           // informational only, see below
 }
 ```
 
-The element in row `i` and column `j` is `data[i * cols + j]`. The storage is always contiguous, so `stride` is never used for indexing. `matrix_from_flat` sets it to `cols`, while `matrix_new` leaves it at 0. Every procedure in the package works on `Matrix(f64)`.
+The element in row `i` and column `j` is `data[i * cols + j]`: the storage is always contiguous, with no views or strides. To build a `Matrix` around a slice you already have, set `rows`, `cols`, `data` and `allocator` in a struct literal. Don't call `matrix_free` on it unless the matrix owns the slice. Every procedure in the package works on `Matrix(f64)`.
 
 `matrix_new` allocates a zero-filled matrix. `matrix_from_flat` copies a row-major slice into a new matrix. `matrix_at` returns a pointer to one element. `matrix_free` releases the data with the allocator recorded in the matrix, so you never pass the allocator again:
 

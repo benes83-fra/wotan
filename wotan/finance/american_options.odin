@@ -588,7 +588,6 @@ _least_squares_regression :: proc(
 		cols      = n_features,
 		data      = X[:n_samples * n_features],
 		allocator = allocator,
-		stride    = n_features,
 	}
 	sol := l.lstsq(&Xm, y[:n_samples], .QR, allocator)
 	delete(sol.residuals, allocator)
