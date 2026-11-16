@@ -53,7 +53,9 @@ conv1d_layer_new :: proc(
 	return layer
 }
 
-conv1d_layer_forward :: proc(layer: ^Conv1dLayer, x: ^t.Tensor) -> ^t.Tensor {
+conv1d_layer_forward :: proc(layer: ^Conv1dLayer, x: ^t.Tensor) -> (fwd_out: ^t.Tensor) {
+	rec_ := forward_record_begin()
+	defer forward_record_end(rec_, fwd_out)
 	return t.tensor_conv1d(
 		x,
 		layer.weight,
@@ -118,7 +120,9 @@ tcn_block_new :: proc(
 	return block
 }
 
-tcn_block_forward :: proc(block: ^TCNBlock, x: ^t.Tensor, training: bool) -> ^t.Tensor {
+tcn_block_forward :: proc(block: ^TCNBlock, x: ^t.Tensor, training: bool) -> (fwd_out: ^t.Tensor) {
+	rec_ := forward_record_begin()
+	defer forward_record_end(rec_, fwd_out)
 	h := t.tensor_relu(conv1d_layer_forward(&block.conv1, x))
 	h = t.tensor_dropout(h, block.dropout, training)
 	h = t.tensor_relu(conv1d_layer_forward(&block.conv2, h))

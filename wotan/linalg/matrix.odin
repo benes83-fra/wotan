@@ -425,9 +425,9 @@ matrix_from_flat :: proc(
 // ============================================================================
 // SIMD-Optimized Matrix Inversion
 // Computes A^-1 by solving A * x_i = e_i using LU decomposition.
-// A must be square and non-empty (panics otherwise). A singular matrix (an
-// exactly zero pivot) gives ok = false and an empty 0 × 0 matrix, which is
-// safe to free. Same contract as mat_inverse_lu.
+// A must be square and non-empty (panics otherwise). A singular or numerically
+// singular matrix (an exactly zero pivot, or rcond1 < ε) gives ok = false and an
+// empty 0 × 0 matrix, which is safe to free. Same contract as mat_inverse_lu.
 // ============================================================================
 matrix_inverse :: proc(
 	A: ^Matrix(f64),
@@ -463,6 +463,6 @@ matrix_inverse :: proc(
 		delete(x, allocator)
 	}
 
-	ok = true
+	ok = _inverse_accept(A, &Ainv, allocator)
 	return
 }

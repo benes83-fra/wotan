@@ -76,7 +76,9 @@ inception_block_free :: proc(block: ^InceptionBlock) {
 	nn.conv2d_layer_free(&block.b3_5x5)
 }
 
-inception_block_forward :: proc(block: ^InceptionBlock, x: ^t.Tensor) -> ^t.Tensor {
+inception_block_forward :: proc(block: ^InceptionBlock, x: ^t.Tensor) -> (fwd_out: ^t.Tensor) {
+	rec_ := nn.forward_record_begin()
+	defer nn.forward_record_end(rec_, fwd_out)
 	b1 := t.tensor_conv2d(
 		x,
 		block.b1_1x1.weight,
@@ -138,7 +140,10 @@ deeplob_new :: proc(
 	config: DeepLOBConfig,
 	allocator: mem.Allocator = context.allocator,
 ) -> ^DeepLOB {
-	assert(config.time_steps >= 2 && config.price_levels >= 2, "deeplob_new: the 2x2 pooling needs 2+ time steps and levels")
+	assert(
+		config.time_steps >= 2 && config.price_levels >= 2,
+		"deeplob_new: the 2x2 pooling needs 2+ time steps and levels",
+	)
 	model := new(DeepLOB, allocator)
 	model.config = config
 	model.allocator = allocator
@@ -194,7 +199,9 @@ deeplob_eval :: proc(model: ^DeepLOB) {
 // Forward Pass
 // ============================================================================
 
-deeplob_forward :: proc(model: ^DeepLOB, input: ^t.Tensor) -> ^t.Tensor {
+deeplob_forward :: proc(model: ^DeepLOB, input: ^t.Tensor) -> (fwd_out: ^t.Tensor) {
+	rec_ := nn.forward_record_begin()
+	defer nn.forward_record_end(rec_, fwd_out)
 	alloc := model.allocator
 	batch := input.shape[0]
 
@@ -326,8 +333,14 @@ deeplob_lobster_windows :: proc(
 	future_returns: []f64,
 ) {
 	L, T := levels, time_steps
-	assert(len(book) == n_rows * 4 * L, "deeplob_lobster_windows: book must be [n_rows, 4 * levels]")
-	assert(T >= 1 && horizon >= 1, "deeplob_lobster_windows: time_steps and horizon must be positive")
+	assert(
+		len(book) == n_rows * 4 * L,
+		"deeplob_lobster_windows: book must be [n_rows, 4 * levels]",
+	)
+	assert(
+		T >= 1 && horizon >= 1,
+		"deeplob_lobster_windows: time_steps and horizon must be positive",
+	)
 	N := n_rows - T - horizon + 1
 	if N <= 0 {return}
 	mid :: proc(book: []f64, row, L: int) -> f64 {
@@ -374,17 +387,20 @@ DeepLOBNorm :: struct {
 	mean, std: []f64, // [3 * levels], channel-major
 }
 
-deeplob_norm_fit :: proc(x: ^t.Tensor, allocator: mem.Allocator = context.allocator) -> DeepLOBNorm {
+deeplob_norm_fit :: proc(
+	x: ^t.Tensor,
+	allocator: mem.Allocator = context.allocator,
+) -> DeepLOBNorm {
 	N, C, T, L := x.shape[0], x.shape[1], x.shape[2], x.shape[3]
 	nm := DeepLOBNorm{make([]f64, C * L, allocator), make([]f64, C * L, allocator)}
 	cnt := f64(N * T)
 	for n in 0 ..< N {for c in 0 ..< C {for k in 0 ..< T {for lv in 0 ..< L {
-		nm.mean[c * L + lv] += x.data.data[((n * C + c) * T + k) * L + lv] / cnt
-	}}}}
+					nm.mean[c * L + lv] += x.data.data[((n * C + c) * T + k) * L + lv] / cnt
+				}}}}
 	for n in 0 ..< N {for c in 0 ..< C {for k in 0 ..< T {for lv in 0 ..< L {
-		d := x.data.data[((n * C + c) * T + k) * L + lv] - nm.mean[c * L + lv]
-		nm.std[c * L + lv] += d * d / cnt
-	}}}}
+					d := x.data.data[((n * C + c) * T + k) * L + lv] - nm.mean[c * L + lv]
+					nm.std[c * L + lv] += d * d / cnt
+				}}}}
 	for &s, i in nm.std { 	// a constant feature (up to rounding) is only centred
 		s = math.sqrt(s)
 		if s <= 1e-12 * max(abs(nm.mean[i]), 1) {s = 1}
@@ -397,9 +413,9 @@ deeplob_norm_apply :: proc(x: ^t.Tensor, nm: DeepLOBNorm) {
 	N, C, T, L := x.shape[0], x.shape[1], x.shape[2], x.shape[3]
 	assert(len(nm.mean) == C * L, "deeplob_norm_apply: fitted on another number of levels")
 	for n in 0 ..< N {for c in 0 ..< C {for k in 0 ..< T {for lv in 0 ..< L {
-		i := ((n * C + c) * T + k) * L + lv
-		x.data.data[i] = (x.data.data[i] - nm.mean[c * L + lv]) / nm.std[c * L + lv]
-	}}}}
+					i := ((n * C + c) * T + k) * L + lv
+					x.data.data[i] = (x.data.data[i] - nm.mean[c * L + lv]) / nm.std[c * L + lv]
+				}}}}
 }
 
 deeplob_norm_free :: proc(nm: ^DeepLOBNorm, allocator: mem.Allocator = context.allocator) {

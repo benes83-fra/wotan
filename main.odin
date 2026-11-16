@@ -407,6 +407,8 @@ main :: proc() {
 	free_all(context.temp_allocator)
 	test.backtest_reference_test(context.temp_allocator)
 	free_all(context.temp_allocator)
+	test.backtest_orders_reference_test(context.temp_allocator)
+	free_all(context.temp_allocator)
 	test.ir_derivatives_reference_test(context.temp_allocator)
 	free_all(context.temp_allocator)
 	test.fx_derivatives_reference_test(context.temp_allocator)

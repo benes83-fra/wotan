@@ -42,7 +42,11 @@ mlp_forward :: proc(
 	x: ^t.Tensor,
 	drop_prob: f64 = 0.0,
 	training: bool = true,
-) -> ^t.Tensor {
+) -> (
+	fwd_out: ^t.Tensor,
+) {
+	rec_ := forward_record_begin()
+	defer forward_record_end(rec_, fwd_out)
 	out := x
 	n_layers := len(net.layers)
 

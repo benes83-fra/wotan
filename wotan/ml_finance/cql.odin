@@ -46,7 +46,9 @@ cql_network_free :: proc(net: ^CQLNetwork) {
 }
 
 // Q-values [batch, num_actions] of states [batch, state_dim]
-cql_network_forward :: proc(net: ^CQLNetwork, states: ^t.Tensor) -> ^t.Tensor {
+cql_network_forward :: proc(net: ^CQLNetwork, states: ^t.Tensor) -> (fwd_out: ^t.Tensor) {
+	rec_ := nn.forward_record_begin()
+	defer nn.forward_record_end(rec_, fwd_out)
 	h := nn.linear_forward(&net.fc1, states)
 	h = t.tensor_relu(h)
 	return nn.linear_forward(&net.fc2, h)

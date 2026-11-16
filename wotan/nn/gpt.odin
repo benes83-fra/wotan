@@ -82,7 +82,11 @@ gpt_block_forward :: proc(
 	training: bool,
 	dropout: f64,
 	aux_loss: bool = false,
-) -> ^t.Tensor {
+) -> (
+	fwd_out: ^t.Tensor,
+) {
+	rec_ := forward_record_begin()
+	defer forward_record_end(rec_, fwd_out, block.moe.aux_loss if block.use_moe else nil)
 	// Pre-LayerNorm
 	x_norm := layer_norm_layer_forward(&block.ln1, x)
 	attn_out := masked_multi_head_attention_layer_forward(&block.mha, x_norm, mask)
@@ -233,7 +237,7 @@ gpt_model_forward :: proc(
 ) -> ^t.Tensor {
 	model.total_aux_loss = 0.0
 	model.aux_loss = nil
-	recording := _forward_begin()
+	recording := forward_record_begin()
 
 	x := _gpt_embed(model, input_ids, 0)
 
@@ -257,7 +261,7 @@ gpt_model_forward :: proc(
 		defer delete(keep)
 		append(&keep, logits, model.aux_loss)
 		for &block in model.blocks {if block.use_moe {append(&keep, block.moe.aux_loss)}}
-		_forward_end(recording, ..keep[:])
+		forward_record_end(recording, ..keep[:])
 	}
 	return logits
 }

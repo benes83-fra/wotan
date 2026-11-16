@@ -1,7 +1,7 @@
 package optimize
 
+import w "../core"
 import "../util"
-import "base:runtime"
 import "core:math"
 import "core:mem"
 
@@ -107,8 +107,12 @@ calibrate :: proc(
 		case .Linear:
 			z[i], lower[i], upper[i] = p.init, p.lower, p.upper
 		case .Log:
-			assert(p.lower > 0.0 && p.init > 0.0, "calibrate: .Log parameters need positive init and lower bound")
-			z[i], lower[i], upper[i] = math.ln_f64(p.init), math.ln_f64(p.lower), math.ln_f64(p.upper)
+			assert(
+				p.lower > 0.0 && p.init > 0.0,
+				"calibrate: .Log parameters need positive init and lower bound",
+			)
+			z[i], lower[i], upper[i] =
+				math.ln_f64(p.init), math.ln_f64(p.lower), math.ln_f64(p.upper)
 			any_log = true
 		}
 	}
@@ -220,7 +224,7 @@ _probe_range :: proc(data: rawptr, begin, end: int) {
 		_to_natural(job.params, probe, probe)
 		// Release the objective's scratch memory after each probe; this matters
 		// on pool threads, whose temp allocators are never reset otherwise.
-		runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+		w.TEMP_GUARD()
 		job.probe_loss[k] = job.objective(probe, job.user_data)
 	}
 }

@@ -1,7 +1,6 @@
 package analytics
 
 import w "../core"
-import "base:runtime"
 import "core:math"
 import "core:math/rand"
 import "core:mem"
@@ -158,7 +157,7 @@ inverse_difference :: proc(
 // Stationary state covariance: solves P = F P Fᵀ + Q (P = Σ_k F^k Q F'^k) by the
 // doubling algorithm. Returns false (P unspecified) if F is not stable.
 _arima_stationary_cov :: proc(F, Q: []f64, N: int, P: []f64) -> bool {
-	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	w.TEMP_GUARD()
 	A := make([]f64, N * N, context.temp_allocator)
 	T1 := make([]f64, N * N, context.temp_allocator)
 	copy(A, F)
@@ -220,7 +219,7 @@ _arma_filter :: proc(
 	v_out: []f64 = nil,
 	S_out: []f64 = nil,
 ) -> f64 {
-	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	w.TEMP_GUARD()
 	col := make([]f64, N, context.temp_allocator)
 	TP := make([]f64, N * N, context.temp_allocator)
 	ll := 0.0
@@ -272,7 +271,7 @@ arima_loglik :: proc(
 	sigma2: f64,
 	allocator := context.allocator,
 ) -> f64 {
-	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	w.TEMP_GUARD()
 	F, Q, P0, _, _, x0, N := arma_pq_fundamental_state_space(
 		phi,
 		theta,
@@ -289,7 +288,7 @@ arima_loglik :: proc(
 _arima_constrain :: proc(x: []f64, out: []f64, negate: bool) {
 	n := len(x)
 	if n == 0 {return}
-	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	w.TEMP_GUARD()
 	y := make([]f64, n * n, context.temp_allocator)
 	for k in 0 ..< n {
 		r := x[k] / math.sqrt_f64(1.0 + x[k] * x[k])
@@ -305,7 +304,7 @@ _arima_constrain :: proc(x: []f64, out: []f64, negate: bool) {
 _arima_unconstrain :: proc(c: []f64, out: []f64, negate: bool) -> bool {
 	n := len(c)
 	if n == 0 {return true}
-	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	w.TEMP_GUARD()
 	y := make([]f64, n * n, context.temp_allocator)
 	for i in 0 ..< n {y[(n - 1) * n + i] = c[i] if negate else -c[i]}
 	for k := n - 1; k > 0; k -= 1 {
@@ -355,7 +354,7 @@ ArimaObjectiveCtx :: struct {
 arima_neg_loglik_obj :: proc(params: []f64, ctx: rawptr) -> f64 {
 	data := (^ArimaObjectiveCtx)(ctx)
 	// Everything below is per-evaluation scratch: release it on return
-	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	w.TEMP_GUARD()
 	scratch := context.temp_allocator
 
 	p := data.p
@@ -632,7 +631,7 @@ _arima_forecast_core :: proc(
 	lower = make([]f64, h, allocator)
 	upper = make([]f64, h, allocator)
 
-	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	w.TEMP_GUARD()
 	scratch := context.temp_allocator
 	m := len(c) - 1
 	n := len(y)
@@ -847,7 +846,7 @@ arma22_simulate :: proc(
 	if T <= 0 {return y}
 	sigma := math.sqrt_f64(max(sigma2, 0.0))
 
-	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	w.TEMP_GUARD()
 	scratch := context.temp_allocator
 	// Harvey form: y_t = α_t[0], α_{t+1} = F α_t + g e_{t+1}, g = [1, theta…]
 	F, _, _, _, _, a, N := arma_pq_fundamental_state_space(phi, theta, 1.0, scratch)

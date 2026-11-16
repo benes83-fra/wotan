@@ -939,6 +939,75 @@ finance_fixes_test :: proc(allocator: mem.Allocator) {
 			&passed,
 			&total,
 		)
+
+		// Periodic refits (refit_every = 250 on the 1000 test returns: 4 fits). Each
+		// segment is exactly the single-split fit on the returns known by its start:
+		// garch_out_of_sample(r[:end], start), and for GARCH-EVT garch_evt_fit(r[:end],
+		// train_fraction = start / end); μ is the mean of r[:start]; scaling the returns
+		// from the last refit on changes nothing before it; refit_every beyond the test
+		// period is the single fit; garch_risk_metrics backtests the refitted VaR.
+		{
+			RF :: 250
+			orf := fin.garch_out_of_sample(r, half, allocator = allocator, refit_every = RF)
+			defer fin.free_garch_out_of_sample(&orf, allocator)
+			ev_rf := fin.garch_evt_fit(r, 0.90, allocator, 0.5, refit_every = RF)
+			defer {delete(ev_rf.var_95_series, allocator); delete(ev_rf.var_99_series, allocator)}
+			seg_ok := len(orf.segments) == (n - half) / RF
+			worst_mu := 0.0
+			for &seg, k in orf.segments {
+				e := n if k == len(orf.segments) - 1 else orf.segments[k + 1].start
+				seg_ok &&= seg.start == half + k * RF
+				ref := fin.garch_out_of_sample(r[:e], seg.start, allocator = allocator)
+				for t in seg.start ..< e {seg_ok &&= orf.cond_var[t] == ref.cond_var[t] && orf.resid[t] == ref.resid[t]}
+				seg_ok &&=
+					seg.fit.params.omega == ref.fit.params.omega &&
+					fin.garch_out_of_sample_segment(&orf, e - 1) == &seg
+				fin.free_garch_out_of_sample(&ref, allocator)
+				m := 0.0
+				for v in r[:seg.start] {m += v}
+				worst_mu = max(worst_mu, abs(seg.mu - m / f64(seg.start)))
+				eref := fin.garch_evt_fit(r[:e], 0.90, allocator, f64(seg.start) / f64(e))
+				for t in seg.start ..< e {seg_ok &&= ev_rf.var_99_series[t] == eref.var_99_series[t]}
+				delete(eref.var_95_series, allocator); delete(eref.var_99_series, allocator)
+			}
+			for t in 0 ..< half {seg_ok &&= orf.cond_var[t] == o.cond_var[t]}
+
+			last := orf.segments[len(orf.segments) - 1].start
+			r3 := make([]f64, n, allocator)
+			defer delete(r3, allocator)
+			copy(r3, r)
+			for &v in r3[last:] {v *= 3}
+			o3 := fin.garch_out_of_sample(r3, half, allocator = allocator, refit_every = RF)
+			defer fin.free_garch_out_of_sample(&o3, allocator)
+			causal := true
+			for t in 0 ..= last {causal &&= o3.cond_var[t] == orf.cond_var[t]}
+			causal &&= o3.cond_var[last + 1] != orf.cond_var[last + 1]
+
+			obig := fin.garch_out_of_sample(r, half, allocator = allocator, refit_every = n)
+			defer fin.free_garch_out_of_sample(&obig, allocator)
+			same := len(obig.segments) == 1
+			for t in 0 ..< n {same &&= obig.cond_var[t] == o.cond_var[t]}
+
+			gr := fin.garch_risk_metrics(r, allocator = allocator, refit_every = RF)
+			v99r := fin.var_garch(orf.cond_var[half:], 0.99, allocator = allocator)
+			defer delete(v99r, allocator)
+			btr := fin.backtest_var(r[half:], v99r, 0.99)
+			report(
+				fmt.tprintf(
+					"GARCH refits every %d test returns: %d segments, each = the single-split fit on the returns before it (GARCH and GARCH-EVT), causal %v, refit_every > test period = single fit %v; 99%% breaches %d (single fit %d) of %d",
+					RF,
+					len(orf.segments),
+					causal,
+					same,
+					gr.backtest_99.n_breaches,
+					gm.backtest_99.n_breaches,
+					gr.backtest_99.n_obs,
+				),
+				seg_ok && worst_mu < 1e-15 && causal && same && gr.backtest_99 == btr,
+				&passed,
+				&total,
+			)
+		}
 	}
 
 	{ 	// CDS rpv01 on the notional; PDPM payoffs without dead arguments; free procs

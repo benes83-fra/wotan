@@ -71,7 +71,11 @@ moe_layer_forward :: proc(
 	x: ^t.Tensor,
 	allocator: mem.Allocator = context.allocator,
 	aux_loss: bool = false,
-) -> ^t.Tensor {
+) -> (
+	fwd_out: ^t.Tensor,
+) {
+	rec_ := forward_record_begin()
+	defer forward_record_end(rec_, fwd_out, layer.aux_loss)
 	batch := x.shape[0]
 	seq_len := x.shape[1]
 	N := batch * seq_len

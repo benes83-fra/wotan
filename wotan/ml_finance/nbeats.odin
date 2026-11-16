@@ -180,7 +180,9 @@ nbeats_parameters :: proc(m: ^NBeats, allocator := context.allocator) -> [dynami
 }
 
 // Forecast [B, horizon] (graph) of windows x [B, input_size] (oldest value first)
-nbeats_forward :: proc(m: ^NBeats, x: ^t.Tensor, alloc: mem.Allocator) -> ^t.Tensor {
+nbeats_forward :: proc(m: ^NBeats, x: ^t.Tensor, alloc: mem.Allocator) -> (fwd_out: ^t.Tensor) {
+	rec_ := nn.forward_record_begin()
+	defer nn.forward_record_end(rec_, fwd_out)
 	c := m.config
 	B := x.data.rows
 	assert(x.data.cols == c.input_size, "nbeats_forward: x must be [batch, input_size]")

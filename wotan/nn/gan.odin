@@ -33,7 +33,9 @@ generator_free :: proc(g: ^Generator) {
 	linear_layer_free(&g.fc3)
 }
 
-generator_forward :: proc(g: ^Generator, noise: ^t.Tensor) -> ^t.Tensor {
+generator_forward :: proc(g: ^Generator, noise: ^t.Tensor) -> (fwd_out: ^t.Tensor) {
+	rec_ := forward_record_begin()
+	defer forward_record_end(rec_, fwd_out)
 	x := linear_forward(&g.fc1, noise)
 	x = t.tensor_relu(x)
 	x = linear_forward(&g.fc2, x)
@@ -80,7 +82,9 @@ discriminator_free :: proc(d: ^Discriminator) {
 	linear_layer_free(&d.fc3)
 }
 
-discriminator_forward :: proc(d: ^Discriminator, data: ^t.Tensor) -> ^t.Tensor {
+discriminator_forward :: proc(d: ^Discriminator, data: ^t.Tensor) -> (fwd_out: ^t.Tensor) {
+	rec_ := forward_record_begin()
+	defer forward_record_end(rec_, fwd_out)
 	x := linear_forward(&d.fc1, data)
 	x = t.tensor_relu(x)
 	x = linear_forward(&d.fc2, x)

@@ -481,7 +481,7 @@ t.tensor_free_graph(loss)
 
 Three pitfalls:
 
-- **Constant-only op chains are not linked.** An op records its inputs only when its output requires gradients. If no input of a chain requires gradients, `tensor_free_graph` finds nothing to free and the intermediate outputs leak. Run such code in a graph scope (below), or record it: between `constant_record_begin()` and `constant_record_end(results...)` every op output without gradient is noted. At the end, the ones that an op with gradient reads are handed to that graph (`owned_by_graph`), and the rest are freed, except the results you pass to `constant_record_end`. The nn model forwards record themselves.
+- **Constant-only op chains are not linked.** An op records its inputs only when its output requires gradients. If no input of a chain requires gradients, `tensor_free_graph` finds nothing to free and the intermediate outputs leak. Run such code in a graph scope (below), or record it: between `constant_record_begin()` and `constant_record_end(results...)` every op output without gradient is noted. At the end, the ones that an op with gradient reads are handed to that graph (`owned_by_graph`), and the rest are freed, except the results you pass to `constant_record_end`. Every nn layer and model forward records itself, and `nn.forward_record_begin` / `nn.forward_record_end` record a chain of layer calls (they do nothing inside a scope).
 
   ```odin
   W := from_values({0.5, -0.3, 0.2, 0.8}, 2, 2) // frozen: no gradient

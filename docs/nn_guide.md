@@ -659,7 +659,7 @@ apply = false returns the input: true
 
 The file format is little-endian binary with a magic header and a type id, followed by each layer's configuration and tensors:
 - **What is stored.** A model stores its full configuration, including the attention flags, MoE, RMSNorm, tied-embedding and GELU settings and the dropout rate, so a loaded model is built exactly as it was saved.
-- **Old files.** Files from older versions of the format still load. A GRU layer from such a file has no `bias_hn`; it loads without one (as if it were 0) and computes the same function, and `sequential_load_partial` loads it into a new GRU with `bias_hn` = 0. FFN layers and GPT models from such files use the exact GELU. A Mamba layer from such a file has no RMSNorm weight; it loads with the weight 1, but the block (with its norm and residual) computes a different function from the layer that was saved, so train it further before use.
+- **Old files.** Files from older versions of the format still load. A GRU layer from such a file has no `bias_hn`; it loads without one (as if it were 0) and computes the same function, and `sequential_load_partial` loads it into a new GRU with `bias_hn` = 0. FFN layers and GPT models from such files use the exact GELU. A Mamba layer from such a file was saved before Mamba became a pre-norm residual block. It loads as a *plain* layer (`MambaLayer.plain = true`), which computes proj_out(SSM(x)) without the norm and the residual, so it gives the outputs it was trained to give. Saved again, it stays plain. `sequential_load_partial` loads its weights into a Mamba block of the same size, with norm weight 1; the block computes a different function, so treat that as an initialisation and train further.
 - **Changed heads.** A stored tensor of another size replaces the layer's tensor. A model saved after `bert_replace_nsp_head`, for example, loads with its new head.
 - **Robustness.** Reading checks every access. A truncated, corrupt or foreign file returns `ok = false` with a message, and leaks nothing. A layer header with an invalid configuration, such as 0 attention heads, counts as corrupt in both `load_checkpoint` and `sequential_load_partial`.
 - **Random numbers.** Loading uses a private random generator for the layer initialisation, so it leaves your random sequence unchanged.
@@ -696,6 +696,7 @@ What `load_checkpoint` restores and what you must free:
 - **Optimizer state.** It restores the Adam hyperparameters, the moments and each parameter's step count. Training that continues after a load is bit-for-bit identical to training without the interruption.
 - **Freeing.** The model and the optimiser are allocated: free them with `sequential_free(model)`, then `adam_free(opt)` and `free(opt)`. The same applies to the other `load_*` procedures: call `gpt_model_free(model)` (or the model's own free procedure) and then `free(model)`.
 - **Frozen parameters.** The checkpoint stores which parameters are frozen, and `load_checkpoint` freezes them again, so the stored moments match the trainable parameters and training resumes exactly. A checkpoint from an older version of the format has no such flags and loads with every parameter trainable: if that model had frozen layers, its stored moments no longer match, and `load_checkpoint` resets them with the message "optimizer state does not match the model; moments reset".
+- **GPT and BERT files** store the frozen flags too, and `load_gpt_model` and `load_bert_model` freeze the same parameters again. Files from an older version of the format load with every parameter trainable.
 
 ## 11. Transfer learning and memory
 
@@ -765,7 +766,7 @@ The loaded layers are the first two linear layers and the two ReLUs. A layer wit
 5. **Use a no-grad scope for inference** (`graph_begin(&scope, no_grad = true)`). It records no graph, and `graph_end` frees every output. The KV-cached GPT forward requires one. Copy out what you need, such as logits or the chosen token, before `graph_end`.
 6. **Constant inputs are handled for you.** Forward passes create constant inputs: position ids, zero states, masks and the positional encoding. Inside a scope they live in the scope's arena. Without a scope they belong to the graph and are freed with it.
 
-**Frozen leading layers.** An op output needs a gradient only if one of its inputs does. When the first layers of a model are frozen and the input is data, those layers' outputs need no gradient, and the tensor package does not link them into the graph (section 11 of the tensor guide calls these constant-only chains). `sequential_forward`, `gpt_model_forward` and `bert_model_forward` take care of them outside a scope: they record the constant intermediates of the pass, hand the ones the graph reads to the graph, and free the rest. So `tensor_free_graph` and a scope both leave nothing behind:
+**Frozen leading layers.** An op output needs a gradient only if one of its inputs does. When the first layers of a model are frozen and the input is data, those layers' outputs need no gradient, and the tensor package does not link them into the graph (section 11 of the tensor guide calls these constant-only chains). Every layer and model forward of the library takes care of them outside a scope: it records the constant intermediates of its pass, hands the ones the graph reads to the graph, and frees the rest, keeping only its output. That covers the layers (`linear_forward`, `ffn_layer_forward`, the attention, recurrent, transformer, Mamba, MoE, GAT and TCN forwards), the models (`sequential_forward`, `gpt_model_forward`, `bert_model_forward`, `mlp_forward`, the GAN and VAE networks) and the ml_finance models. So `tensor_free_graph` and a scope both leave nothing behind:
 
 ```odin
 rand.reset(13)
@@ -805,7 +806,31 @@ Two consequences:
 - **The output of a forward pass is yours.** Everything else the pass made is freed or belongs to the graph. With every layer frozen, the output is a constant: free it with `tensor_free`.
 - **Cache features with `tensor_detach`.** To compute the features of a frozen model once and reuse them in every step, detach them: `feats := t.tensor_detach(out)`, then `t.tensor_free(out)`. The copy is a leaf, so `tensor_free_graph` keeps it. An op output (such as `out` itself) that a trainable layer reads is part of that step's graph and is freed with it.
 
-Code that calls layer forwards itself, such as a custom model built from `linear_forward`, can record its pass the same way with `t.constant_record_begin()` and `t.constant_record_end(out)`.
+**Chains you write yourself.** A forward's output is yours, and so is the output of a frozen layer on data: it is a constant. Code that passes such an output on to other layers by hand records the whole chain with `nn.forward_record_begin()` and `nn.forward_record_end(rec, results...)`. These do nothing inside a graph scope, so the same code works with and without one:
+
+```odin
+body := nn.linear_layer_new(4, 8) // pretrained, frozen
+head := nn.linear_layer_new(8, 2) // trained
+defer {nn.linear_layer_free(&body); nn.linear_layer_free(&head)}
+nn.tensor_set_requires_grad(body.weights, false)
+nn.tensor_set_requires_grad(body.bias, false)
+
+start := live()
+for _ in 0 ..< 3 {
+	rec := nn.forward_record_begin()
+	h := t.tensor_relu(nn.linear_forward(&body, x))
+	loss := t.tensor_cross_entropy_loss(nn.linear_forward(&head, h), {1, 0})
+	nn.forward_record_end(rec, loss)
+	t.tensor_backward(loss)
+	t.tensor_free_graph(loss)
+}
+fmt.println("recorded chain: tensors left behind:", live() - start)
+```
+```
+recorded chain: tensors left behind: 0
+```
+
+Without the two calls, the body's output and the ReLU of it, both constants, would stay behind in every step. Pass anything else the chain keeps, such as a tensor stored in a struct, to `forward_record_end` as well. `t.constant_record_begin` and `t.constant_record_end` are the tensor-level versions, which also record inside a scope.
 
 ## 12. A complete example
 
@@ -1123,5 +1148,6 @@ The details:
 | GAN / VAE | `generator_new`, `generator_forward`, `discriminator_new`, `discriminator_forward`, `discriminator_forward_no_sigmoid`, `*_add_to_optimizer`, `*_free`; `vae_encoder_new`, `vae_encoder_forward`, `vae_decoder_new`, `vae_decoder_forward`, `reparameterize` |
 | Augmentation | `AugmentationConfig`, `augment_batch`, `affine_transform_image` |
 | Files | `save_checkpoint`, `load_checkpoint`, `sequential_load_partial`, `save_gpt_model`, `load_gpt_model`, `save_bert_model`, `load_bert_model`, `save_generator`, `load_generator`, `save_discriminator`, `load_discriminator`, `save_vae_encoder`, `load_vae_encoder`, `save_vae_decoder`, `load_vae_decoder` |
+| Constant intermediates | `forward_record_begin`, `forward_record_end(rec, results...)` |
 | Transfer | `sequential_freeze_all`, `sequential_unfreeze_all`, `sequential_freeze_range`, `gpt_freeze_all`, `gpt_unfreeze_all`, `gpt_freeze_blocks`, `bert_freeze_all`, `bert_unfreeze_all`, `bert_freeze_blocks`, `tensor_set_requires_grad` |
 | Tokenizers (`tk`) | `wordpiece_tokenizer_new`, `wordpiece_encode`, `wordpiece_decode`, `tokenize`, `tokenize_to_tensors`, `tokenize_pair`, `tokenize_pair_to_tensors`, `tokenize_batch_to_tensors`, `wordpiece_tokenizer_free`; `bpe_tokenizer_new`, `bpe_encode`, `bpe_decode`, `bpe_tokenize`, `bpe_tokenize_to_tensors`, `bpe_tokenize_batch_to_tensors`, `bpe_train`, `bpe_save`, `bpe_tokenizer_free`; `ts_tokenizer_new`, `ts_scale`, `ts_token`, `ts_encode`, `ts_encode_context`, `ts_decode`, `ts_encode_batch_to_tensors`, `ts_tokenizer_free` |

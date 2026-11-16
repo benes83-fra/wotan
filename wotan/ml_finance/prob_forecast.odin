@@ -141,6 +141,8 @@ _add_scalar :: proc(x: ^t.Tensor, c: f64, alloc: mem.Allocator) -> ^t.Tensor {
 }
 
 prob_forecaster_forward :: proc(model: ^ProbForecaster, x: ^t.Tensor) -> (f: Prob_Forecast) {
+	rec_ := nn.forward_record_begin()
+	defer nn.forward_record_end(rec_, f.mu, f.sigma, f.nu, f.quantiles)
 	batch, seq_len := x.shape[0], x.shape[1]
 	alloc := t._scope_or(x.allocator)
 	h := nn.sequential_forward(model.encoder, x)

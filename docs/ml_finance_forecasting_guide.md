@@ -665,7 +665,7 @@ The application tests:
 - **`forecasting_models_test`:** every model beats the naive forecasts on trend plus seasonality, and RevIN handles channels at scales 1 and 100. On SPY log prices, no model beats the random walk.
 - **`prob_forecast_test`:** the LSTM forecaster on GARCH data beats the unconditional baseline, with calibrated intervals.
 - **`token_forecast_test`:** the GPT's CRPS stays within 20% of the true distribution's.
-- **`ensemble_volatility_test`:** the ensemble, the VRP signal and the backtest on SPY and VIX.
+- **`ensemble_volatility_test`:** the ensemble, the VRP signal and the walk-forward backtest on SPY and VIX. The sequence model learns the standardised logarithm of the realised volatility, so its forecasts stay positive and on the targets' scale, and stops early on validation days. The forecasts must lie between 3 % and 150 % annualised, with an out-of-sample error within 1.5 times GARCH's.
 - **`kalman_pairs_test`:** KO / PEP and semiconductor pairs, with the DSR and PBO of the grid searches.
 
 For this guide, the values were also recomputed independently:

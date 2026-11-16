@@ -1,8 +1,8 @@
 package optimize
 
+import w "../core"
 import l "../linalg"
 import "../util"
-import "base:runtime"
 import "core:math"
 import "core:mem"
 
@@ -119,7 +119,7 @@ least_squares :: proc(
 	mu, nu := 0.0, 2.0
 	outer: for iter in 0 ..< max_iter {
 		result.iterations = iter + 1
-		runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD() // per-iteration scratch
+		w.TEMP_GUARD() // per-iteration scratch
 
 		// Jacobian: central differences, one-sided where a bound is within h
 		for j in 0 ..< n {
@@ -283,7 +283,7 @@ _ls_probe_range :: proc(data: rawptr, begin, end: int) {
 		probe := job.probes[k * n:][:n]
 		copy(probe, job.x)
 		probe[k / 2] += job.steps[k]
-		runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+		w.TEMP_GUARD()
 		job.residual(probe, job.probe_res[k * m:][:m], job.user_data)
 	}
 }

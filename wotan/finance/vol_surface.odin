@@ -544,10 +544,11 @@ heston_price :: proc(
 	params: Heston_Params,
 	opt: OptionType,
 	n_points: int = 64,
+	q: f64 = 0.0,
 ) -> f64 {
 	strikes := [1]f64{K}
 	price: [1]f64
-	heston_prices_same_expiry(S, strikes[:], T, r, params, opt, price[:], n_points)
+	heston_prices_same_expiry(S, strikes[:], T, r, params, opt, price[:], n_points, q)
 	return price[0]
 }
 
@@ -556,7 +557,8 @@ heston_price :: proc(
 // (fourier.odin): the characteristic function is evaluated once per cosine
 // term for all strikes. n_points is the minimum number of terms; the count
 // grows until the characteristic function has decayed, so any value gives
-// full accuracy (~1e-12 relative to the price scale).
+// full accuracy (~1e-12 relative to the price scale). q: continuous dividend
+// yield, as in heston_prices_cos.
 heston_prices_same_expiry :: proc(
 	S: f64,
 	strikes: []f64,
@@ -566,10 +568,11 @@ heston_prices_same_expiry :: proc(
 	opt: OptionType,
 	out: []f64,
 	n_points: int = 64,
+	q: f64 = 0.0,
 ) {
 	assert(
 		len(out) == len(strikes),
 		"heston_prices_same_expiry: out must have one slot per strike",
 	)
-	heston_prices_cos(S, strikes, T, r, params, opt, out, n_points)
+	heston_prices_cos(S, strikes, T, r, params, opt, out, n_points, q)
 }

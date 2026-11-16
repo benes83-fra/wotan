@@ -5,6 +5,7 @@ import plot "../wotan/plot"
 import "base:runtime"
 import "core:fmt"
 import "core:mem"
+import "core:mem/virtual"
 import "core:os"
 
 // Regression tests for wotan/plot issues found while writing the plot guide:
@@ -252,30 +253,23 @@ plot_fixes_test :: proc(allocator: mem.Allocator) {
 		_ = os.remove(p_lit)
 		_ = os.remove(p_ref)
 	}
-	{ 	// 50 charts in a loop: the temp allocator does not grow (scratch released per chart)
-		if context.temp_allocator.data != &runtime.global_default_temp_allocator_data {
-			report(
-				"temp allocator steady over 50 PNGs: skipped (non-default temp allocator)",
-				true,
-				&passed,
-				&total,
-			)
-		} else {
-			arena := &runtime.global_default_temp_allocator_data.arena
-			_ = make([]u8, 16, context.temp_allocator) // the arena has a block before the loop
-			df := w.df_from(
-				w.column_from_floats("a", []f64{1, 2, 3, 4, 5}),
-				w.column_from_floats("b", []f64{2, 1, 3, 5, 4}),
-			)
-			defer w.destroy_dataframe(&df)
+	{ 	// 50 charts in a loop: the temp allocator does not grow (scratch released per
+		// chart by w.TEMP_GUARD), for four kinds of temporary allocator: Odin's global
+		// default, a runtime.Default_Temp_Allocator of our own, a core:mem Arena and a
+		// core:mem/virtual Arena
+		df := w.df_from(
+			w.column_from_floats("a", []f64{1, 2, 3, 4, 5}),
+			w.column_from_floats("b", []f64{2, 1, 3, 5, 4}),
+		)
+		defer w.destroy_dataframe(&df)
+		os.make_directory("plots")
+		path := "plots/plot_fixes_loop.png"
+		charts :: proc(df: ^w.DataFrame, path: string) -> bool {
 			xs := []f64{0, 1, 2, 3, 4}
 			ys := []f64{1, 3, 2, 5, 4}
-			os.make_directory("plots")
-			path := "plots/plot_fixes_loop.png"
 			cfg := plot.DEFAULT_PLOT_CONFIG
 			cfg.width, cfg.height = 400, 300
 			cfg.title = "loop"
-			before := arena.total_used
 			all_ok := true
 			for i in 0 ..< 50 {
 				ok: bool
@@ -285,9 +279,9 @@ plot_fixes_test :: proc(allocator: mem.Allocator) {
 				case 1:
 					ok = plot.multi_line_png({{xs = xs, ys = ys, label = "a"}}, path, cfg)
 				case 2:
-					ok = plot.scatter_png(&df, "a", "b", path, cfg)
+					ok = plot.scatter_png(df, "a", "b", path, cfg)
 				case 3:
-					ok = plot.histogram_png(&df, "a", path, 5, cfg)
+					ok = plot.histogram_png(df, "a", path, 5, cfg)
 				case 4:
 					ok = plot.bar_png({"a", "b", "c"}, {1, -2, 3}, path, cfg)
 				case 5:
@@ -295,19 +289,75 @@ plot_fixes_test :: proc(allocator: mem.Allocator) {
 				}
 				all_ok = all_ok && ok
 			}
-			after := arena.total_used
-			report(
-				fmt.tprintf(
-					"temp allocator steady over 50 PNGs: %d -> %d bytes used",
-					before,
-					after,
-				),
-				all_ok && after == before,
-				&passed,
-				&total,
-			)
-			_ = os.remove(path)
+			return all_ok
 		}
+		names := [4]string {
+			"global default",
+			"own Default_Temp_Allocator",
+			"mem.Arena",
+			"virtual.Arena",
+		}
+		used: [4][2]int
+		ok_all := true
+		saved := context.temp_allocator
+		own: runtime.Default_Temp_Allocator
+		runtime.default_temp_allocator_init(&own, 1 << 20, context.allocator)
+		defer runtime.default_temp_allocator_destroy(&own)
+		mbuf := make([]u8, 64 << 20)
+		defer delete(mbuf)
+		ma: mem.Arena
+		mem.arena_init(&ma, mbuf)
+		va: virtual.Arena
+		_ = virtual.arena_init_growing(&va)
+		defer virtual.arena_destroy(&va)
+		for k in 0 ..< 4 {
+			measure :: proc(
+				k: int,
+				own: ^runtime.Default_Temp_Allocator,
+				ma: ^mem.Arena,
+				va: ^virtual.Arena,
+			) -> int {
+				switch k {
+				// runtime.Arena: total_capacity, the memory it holds (its total_used is not
+				// lowered when a rewind frees whole blocks)
+				case 0:
+					return int(runtime.global_default_temp_allocator_data.arena.total_capacity)
+				case 1:
+					return int(own.arena.total_capacity)
+				case 2:
+					return ma.offset
+				}
+				return int(va.total_used)
+			}
+			// (a context assignment lasts to the end of its block: choose, then assign)
+			ta := saved
+			switch k {
+			case 0:
+				if saved.data != &runtime.global_default_temp_allocator_data {continue}
+			case 1:
+				ta = runtime.default_temp_allocator(&own)
+			case 2:
+				ta = mem.arena_allocator(&ma)
+			case 3:
+				ta = virtual.arena_allocator(&va)
+			}
+			context.temp_allocator = ta
+			_ = make([]u8, 16, context.temp_allocator) // the arena has a block before the loop
+			used[k][0] = measure(k, &own, &ma, &va)
+			ok_all &&= charts(&df, path)
+			used[k][1] = measure(k, &own, &ma, &va)
+			ok_all &&= used[k][0] == used[k][1] && used[k][0] > 0
+		}
+		context.temp_allocator = saved
+		desc := ""
+		for n, k in names {desc = fmt.tprintf("%s %s %d -> %d;", desc, n, used[k][0], used[k][1])}
+		report(
+			fmt.tprintf("temp allocator steady over 50 PNGs (bytes held):%s", desc),
+			ok_all,
+			&passed,
+			&total,
+		)
+		_ = os.remove(path)
 	}
 
 	{ 	// tick offsets = matplotlib's ScalarFormatter (threshold 4) on 73 tick sets

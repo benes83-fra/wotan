@@ -1,8 +1,8 @@
 package analytics
 
+import w "../core"
 import l "../linalg"
 import ml "./ML"
-import "base:runtime"
 import "core:math"
 import "core:mem"
 
@@ -55,8 +55,22 @@ arimax_fit :: proc(
 	var0 /= f64(max(len(resid0) - k, 1))
 	log_sig2_0 := math.ln_f64(var0) if var0 > 0 else 0
 
-	starts := [][4]f64{{0.0, 0.0, 0, 0}, {0.5, 0.0, 0, 0}, {0.0, 0.5, 0, 0}, {0.5, -0.5, 0, 0}, {-0.5, 0.5, 0, 0}}
-	best, best_f, converged := _arima_nm_fit(_arimax_obj, &ctx, {p, q}, {false, true}, starts, log_sig2_0, context.temp_allocator)
+	starts := [][4]f64 {
+		{0.0, 0.0, 0, 0},
+		{0.5, 0.0, 0, 0},
+		{0.0, 0.5, 0, 0},
+		{0.5, -0.5, 0, 0},
+		{-0.5, 0.5, 0, 0},
+	}
+	best, best_f, converged := _arima_nm_fit(
+		_arimax_obj,
+		&ctx,
+		{p, q},
+		{false, true},
+		starts,
+		log_sig2_0,
+		context.temp_allocator,
+	)
 	defer delete(best, context.temp_allocator)
 
 	res: ArimaxFitResult
@@ -110,7 +124,16 @@ arimax_forecast :: proc(
 	}
 	c := _arima_diff_poly(d, 0, 0, context.temp_allocator)
 	defer delete(c, context.temp_allocator)
-	mean, lower, upper := _arima_forecast_core(u, fit.phi, fit.theta, fit.sigma2, c, h, alpha, allocator)
+	mean, lower, upper := _arima_forecast_core(
+		u,
+		fit.phi,
+		fit.theta,
+		fit.sigma2,
+		c,
+		h,
+		alpha,
+		allocator,
+	)
 	for i in 0 ..< h {
 		s := 0.0
 		for j in 0 ..< k {s += X_future.data[i * k + j] * fit.beta[j]}
@@ -122,7 +145,13 @@ arimax_forecast :: proc(
 }
 
 // Exact log-likelihood of y - Xβ ~ ARIMA(φ, d, θ, σ²) at given β (no estimation)
-arimax_loglik :: proc(y: []f64, X: ^l.Matrix(f64), phi, theta, beta: []f64, d: int, sigma2: f64) -> f64 {
+arimax_loglik :: proc(
+	y: []f64,
+	X: ^l.Matrix(f64),
+	phi, theta, beta: []f64,
+	d: int,
+	sigma2: f64,
+) -> f64 {
 	ctx := _arimax_ctx(y, X, len(phi), d, len(theta))
 	defer _arimax_ctx_free(&ctx)
 	return _arimax_loglik_at(&ctx, phi, theta, sigma2, beta)
@@ -177,7 +206,7 @@ _arimax_ctx_free :: proc(ctx: ^_ArimaxCtx) {
 // Innovations of z and of every column of Xd through the ARMA Kalman filter
 // (shared variances S_t); then the GLS β and the log-likelihood at it
 _arimax_profile :: proc(ctx: ^_ArimaxCtx, phi, theta: []f64, sigma2: f64, beta_out: []f64) -> f64 {
-	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	w.TEMP_GUARD()
 	T, k := len(ctx.z), ctx.Xd.cols
 	vz := make([]f64, T, context.temp_allocator)
 	S := make([]f64, T, context.temp_allocator)
@@ -218,7 +247,7 @@ _arimax_profile :: proc(ctx: ^_ArimaxCtx, phi, theta: []f64, sigma2: f64, beta_o
 }
 
 _arimax_loglik_at :: proc(ctx: ^_ArimaxCtx, phi, theta: []f64, sigma2: f64, beta: []f64) -> f64 {
-	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	w.TEMP_GUARD()
 	T, k := len(ctx.z), ctx.Xd.cols
 	u := make([]f64, T, context.temp_allocator)
 	for t in 0 ..< T {
@@ -231,8 +260,13 @@ _arimax_loglik_at :: proc(ctx: ^_ArimaxCtx, phi, theta: []f64, sigma2: f64, beta
 
 // Kalman filter of one series under ARMA(phi, theta, sigma2): innovations and variances
 _arimax_filter :: proc(z: []f64, phi, theta: []f64, sigma2: f64, v_out, S_out: []f64) -> bool {
-	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
-	F, Q, P0, _, _, x0, N := arma_pq_fundamental_state_space(phi, theta, sigma2, context.temp_allocator)
+	w.TEMP_GUARD()
+	F, Q, P0, _, _, x0, N := arma_pq_fundamental_state_space(
+		phi,
+		theta,
+		sigma2,
+		context.temp_allocator,
+	)
 	ll := _arma_filter(z, F, Q, N, x0, P0, v_out, S_out)
 	return !math.is_inf(ll) && !math.is_nan(ll)
 }
@@ -240,7 +274,7 @@ _arimax_filter :: proc(z: []f64, phi, theta: []f64, sigma2: f64, v_out, S_out: [
 // Negative profile log-likelihood over [x_phi(p), x_theta(q), log σ²] (as arima_neg_loglik_obj)
 _arimax_obj :: proc(params: []f64, ctx_ptr: rawptr) -> f64 {
 	ctx := (^_ArimaxCtx)(ctx_ptr)
-	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	w.TEMP_GUARD()
 	p, q := ctx.p, ctx.q
 	if len(params) != p + q + 1 do return 1e12
 	phi := make([]f64, p, context.temp_allocator)

@@ -133,6 +133,36 @@ The 99.9% VaR, a loss of 3.65%, lies beyond anything the 2000 days can measure d
 
 A split leaving fewer than `GARCH_MIN_TRAIN` (100) training returns, or no test returns, leaves the backtests empty. `garch_out_of_sample(returns, n_train, model_type, p, q)` returns the training fit (`fit`), the mean `mu`, the residuals and the forward-filtered `cond_var` for your own backtests; free it with `free_garch_out_of_sample`.
 
+**Periodic refits.** `garch_out_of_sample`, `garch_risk_metrics` and `garch_evt_fit` take `refit_every` as their last parameter (0, the default, fits once). With `refit_every = k`, the model is estimated again every k test returns, on all returns before that day (an expanding window):
+- at s = n_train + j·k, the mean, the parameters and, for GARCH-EVT, the GPD tail are estimated on `returns[:s]`;
+- from day s on, the variance is filtered forward with that fit, starting from its own in-sample variances;
+- every forecast still uses only returns before its day, and parameters that saw only returns before the last refit.
+
+Each fit is a `GARCH_Segment{start, mu, fit}` in `o.segments`, with the training fit first; `garch_out_of_sample_segment(&o, t)` returns the one in force on day t. `fit` and `mu` are the training fit's. The VaR on day t uses the error distribution of the fit in force then (ν for Student t). The parameters `garch_evt_fit` reports are those of the training fit.
+
+```odin
+// refit every 250 test days on all days before them
+g1 := fin.garch_risk_metrics(r, .StudentT)
+g4 := fin.garch_risk_metrics(r, .StudentT, refit_every = 250)
+fmt.printf("99%% VaR breaches, days 1000-1999: one fit %d, refit every 250 days %d (expected %.1f), Kupiec p %.4f / %.4f\n",
+	g1.backtest_99.n_breaches, g4.backtest_99.n_breaches, g4.backtest_99.expected_breaches, g1.backtest_99.kupiec_pvalue, g4.backtest_99.kupiec_pvalue)
+o := fin.garch_out_of_sample(r, 1000, .StudentT, refit_every = 250)
+defer fin.free_garch_out_of_sample(&o)
+for seg in o.segments {
+	fmt.printf("  fit from day %4d: mu %.6f alpha %.4f beta %.4f nu %.2f\n", seg.start, seg.mu, seg.fit.params.alpha[0], seg.fit.params.beta[0], seg.fit.params.nu)
+}
+```
+
+```
+99% VaR breaches, days 1000-1999: one fit 9, refit every 250 days 9 (expected 10.0), Kupiec p 0.7465 / 0.7465
+  fit from day 1000: mu 0.000367 alpha 0.0703 beta 0.8813 nu 6.62
+  fit from day 1250: mu 0.000454 alpha 0.0744 beta 0.8898 nu 6.31
+  fit from day 1500: mu 0.000404 alpha 0.0677 beta 0.8946 nu 6.66
+  fit from day 1750: mu 0.000432 alpha 0.0649 beta 0.8965 nu 6.82
+```
+
+The simulated process never changes, so the refits move the parameters only by estimation noise, and the breach count stays at 9. On real data, whose dynamics drift, refits keep the model current. Each segment equals the single-split fit `garch_out_of_sample(returns[:end], start)` exactly; for GARCH-EVT it equals `garch_evt_fit(returns[:end], train_fraction = start / end)`.
+
 `garch_risk_metrics(returns, model_type = .GARCH, p, q, risk_free_rate, allocator, train_fraction = 0.5)` does four things:
 - fits a GARCH model to all the demeaned returns, using the `analytics` GARCH (`.GARCH`, `.GJR_GARCH`, `.StudentT` or `.GED` errors);
 - forecasts the next day's volatility from that fit;
@@ -235,13 +265,18 @@ The backtester steps through the rows of a `w.DataFrame` with one price column p
 - **Portfolios.** `backtest_portfolio_run(&df, symbols, strategy, rebalance_frequency, config)` calls a `PortfolioStrategyFn`, which returns target weights, every `rebalance_frequency` bars. It trades towards the targets: sells first, and drifts below 1% of the portfolio are not traded.
 - **Costs.** `BacktestConfig` holds `initial_capital`, `commission_rate`, `slippage_rate` and `risk_free_rate`. `DEFAULT_BACKTEST_CONFIG` is 100 000, 0.1%, 0.05% and 2%.
 
-**Orders.** A strategy reads prices with `context_get_price` and trades with `context_submit_order(ctx, Order{symbol, side, quantity, order_type, limit_price, stop_price})`, which returns `(id, status)`. The engine sees one price per bar, the close, and fills work as follows:
-- **Market** orders fill at the current bar's price.
-- **Limit** orders buy at a price ≤ `limit_price` or sell at a price ≥ `limit_price`. **Stop** orders trigger when a buy sees a price ≥ `stop_price` or a sell a price ≤ `stop_price`.
-- A limit or stop order whose trigger the current price already meets fills at once (status `.Filled`). Otherwise it rests, good till cancelled (status `.Pending`). The runners check resting orders at every later bar, oldest first and before calling the strategy, and fill an order at the first close that meets its trigger. A limit order thus fills at its limit or better; a stop order fills at that close even when the price gapped past the stop.
+**Orders.** A strategy reads prices with `context_get_price` and trades with `context_submit_order(ctx, Order{symbol, side, quantity, order_type, limit_price, stop_price})`, which returns `(id, status)`. The strategy runs at the close of each bar, and fills work as follows:
+- **Market** orders fill at the current bar's close.
+- **Limit** orders buy at a price ≤ `limit_price` or sell at a price ≥ `limit_price`. **Stop** orders trigger when a buy sees a price ≥ `stop_price` or a sell a price ≤ `stop_price`. A **StopLimit** order needs both prices: its stop triggers it, and it then becomes a limit order at `limit_price`.
+- An order that the current close already meets fills at once (status `.Filled`). Otherwise it rests, good till cancelled (status `.Pending`). A stop-limit whose stop the close meets but whose limit it doesn't also rests, as a limit order. The runners check resting orders at every later bar, oldest first and before calling the strategy.
+- **Close-only data** (the default): an order fills at the first close that meets it. A limit order thus fills at its limit or better; a stop order fills at that close even when the price gapped past the stop.
+- **Intrabar fills** (`BacktestConfig.intrabar = true`): resting orders are checked against each bar's open, high and low, from the columns `"<symbol>_Open"`, `"<symbol>_High"` and `"<symbol>_Low"`; the symbol's own column stays the close. The rules are those of backtrader's broker:
+  - a limit order fills at the open if the bar opens through the limit, otherwise at the limit if the low (buy) or high (sell) reaches it;
+  - a stop order fills at the open on a gap through the stop, otherwise at the stop if the high (buy) or low (sell) reaches it;
+  - a stop-limit that gaps through its stop is tried as a limit order on that bar. One triggered inside the bar fills at the stop if its limit allows that price. A buy limit below the stop fills at the limit only on a down bar (open > close, taken as open → high → low → close) that closes at or below the limit, and sells mirror this. A triggered order that didn't fill rests as a limit order.
 - A loop of your own over a `StrategyContext` calls `context_process_pending_orders(ctx)` on each bar before the strategy, as the runners do.
 - `context_cancel_order(ctx, id)` removes a resting order and returns false when no order with that id is resting, for example because it has filled.
-- An order is `.Rejected`, with id 0 and nothing booked, when its quantity is not positive and finite, when a limit order has no positive `limit_price` or a stop order no positive `stop_price`, or when its fill falls on a bar without a valid price.
+- An order is `.Rejected`, with id 0 and nothing booked, when its quantity is not positive and finite, when a limit or stop-limit order has no positive `limit_price`, when a stop or stop-limit order has no positive `stop_price`, or when its fill falls on a bar without a valid price.
 - Every fill is moved against the trader by the slippage and pays commission on the fill notional.
 - Positions are signed, so a sell beyond the holding goes short, and a buy beyond a short flips long.
 
@@ -393,6 +428,47 @@ fmt.printf("  a limit order without a limit price: id %d, %v\n", id, status)
 ```
 
 The limit order rests until bar 24, when the close first drops 5% below the first one; the fill price includes the slippage. The stop then rests until bar 83, so the cancellation at bar 500 finds nothing to cancel. `finance_fixes_test` checks the fill bars and prices of limit, stop and cancelled orders on a scripted price path against a hand calculation.
+
+A stop-limit entry and a sell limit on four bars, first with closes only, then with intrabar fills:
+
+```odin
+entry :: proc(ctx: ^fin.StrategyContext) {
+	if ctx.current_bar != 0 {return}
+	// buy 100 on a breakout above 102, paying at most 102.5; sell 50 at 104 or better
+	fin.context_submit_order(ctx, {symbol = "X", side = .Buy, quantity = 100, order_type = .StopLimit, stop_price = 102, limit_price = 102.5})
+	fin.context_submit_order(ctx, {symbol = "X", side = .Sell, quantity = 50, order_type = .Limit, limit_price = 104})
+}
+
+df := w.dataframe_new()
+defer w.destroy_dataframe(&df)
+cols := []string{"X", "X_Open", "X_High", "X_Low"}
+data := [][]f64 {
+	{100.0, 101.0, 103.5, 103.0}, // close
+	{100.0, 100.2, 101.6, 103.8}, // open
+	{100.5, 102.3, 104.2, 104.1}, // high
+	{99.5, 100.1, 101.4, 102.6}, // low
+}
+for name, j in cols {
+	col := w.column_new(name, .Float, 4)
+	for v in data[j] {w.append_float(&col, v)}
+	w.add_column(&df, col)
+}
+for intrabar in ([]bool{false, true}) {
+	cfg := fin.BacktestConfig{initial_capital = 100_000, intrabar = intrabar}
+	res := fin.backtest_run(&df, []string{"X"}, entry, cfg)
+	defer {delete(res.equity_curve); delete(res.trades)}
+	fmt.printf("intrabar %v:", intrabar)
+	for f in res.trades {fmt.printf("  %v %v %.0f on bar %d @ %.2f;", f.order.order_type, f.order.side, f.order.quantity, f.fill_time, f.fill_price)}
+	fmt.printf("  open %d\n", res.open_orders)
+}
+```
+
+```
+intrabar false:  open 2
+intrabar true:  StopLimit Buy 100 on bar 1 @ 102.00;  Limit Sell 50 on bar 2 @ 104.00;  open 0
+```
+
+With closes only, the stop triggers at bar 2's close of 103.5, above the 102.5 limit, so the order rests as a limit that no later close meets; no close reaches 104 either. With the bars' highs, bar 1 trades up to 102.3 from an open of 100.2, so the stop triggers inside the bar and fills at 102, within the limit. Bar 2's high of 104.2 fills the sell limit at 104. Commission and slippage are 0 in this config. `backtest_orders_reference_test` checks 400 random limit, stop and stop-limit orders on a 300-bar OHLC path against a Python transcription of backtrader's broker rules: every fill bar and price is the same.
 
 ![Equity of the SMA crossover strategy](images/finance_backtest_equity.png)
 
@@ -606,15 +682,14 @@ SPY chain: 500 options expiring in 0.093 years
 | `value_at_risk(.GARCH)`, 2000 simulated GARCH(1,1) returns | `arch` 8.0, normal GARCH(1,1) on the demeaned returns, one-step forecast | 3e-4 relative (95% and 99%) |
 | out-of-sample GARCH backtests | the training fit and a hand-written forward filter; scaling the test returns leaves the fit unchanged | exact |
 | limit, stop and cancelled orders on a scripted price path | hand calculation | exact (fill bars, prices, final equity) |
+| intrabar fills of 400 random limit, stop and stop-limit orders on an OHLC path | a Python transcription of backtrader 1.9.78's `BackBroker` rules | exact (fill bars and prices) |
+| close-only stop-limit orders | hand calculation | exact |
+| GARCH and GARCH-EVT refits | the single-split fit on the returns known at each refit | exact |
 | Kupiec statistics and p-values | SciPy χ² | all printed digits |
 | volatility, EWMA, drawdowns, Sharpe, Sortino, Calmar, beta, correlation, tracking error, trade statistics, Jarque–Bera | NumPy / SciPy | all printed digits |
 | SMA, Bollinger and breakout backtests; the short-and-flip order | independent Python replay | exact (every equity value) |
 | power-utility SDF prices | Black–Scholes | 9.4170 ± 0.0072 vs 9.4134 over 10 seeds |
 | linear SDF prices of the stock and the bond | the moment conditions | 1e-12 |
-
-**Known limitations:**
-- **Bar data.** The backtester sees one price per bar, so orders fill at closes: there are no intrabar fills from highs and lows, and no stop-limit orders.
-- **GARCH backtest split.** The out-of-sample backtests estimate the parameters once, on the training returns; there is no periodic refit.
 
 ## 10. Quick reference
 
@@ -622,7 +697,7 @@ SPY chain: 500 options expiring in 0.093 years
 |---|---|---|
 | VaR and ES | `var_historical`, `var_parametric`, `var_monte_carlo`, `value_at_risk`, `conditional_var`, `expected_shortfall` | 2 |
 | Extreme value theory | `evt_fit`, `evt_var_es`, `gpd_fit`, `gpd_pdf`, `gpd_cdf`, `gpd_quantile` | 3 |
-| GARCH risk | `garch_risk_metrics`, `garch_evt_fit`, `garch_out_of_sample`, `free_garch_out_of_sample`, `var_garch`, `var_garch_single`, `cvar_garch`, `cvar_garch_series`, `ged_pdf`, `ged_cdf`, `ged_quantile`, `ged_cvar` | 4 |
+| GARCH risk | `garch_risk_metrics`, `garch_evt_fit`, `garch_out_of_sample` (all three take `refit_every`), `garch_out_of_sample_segment`, `free_garch_out_of_sample`, `var_garch`, `var_garch_single`, `cvar_garch`, `cvar_garch_series`, `ged_pdf`, `ged_cdf`, `ged_quantile`, `ged_cvar` | 4 |
 | Backtesting risk models | `backtest_var`, `backtest_es`, `historical_var_rolling`, `historical_cvar_rolling` | 4 |
 | Performance metrics | `calculate_risk_metrics`, `historical_volatility`, `ewma_volatility`, `max_drawdown`, `avg_drawdown`, `drawdown_series`, `sharpe_ratio_from_returns`, `sortino_ratio_from_returns`, `calmar_ratio`, `beta`, `correlation`, `tracking_error`, `win_rate`, `profit_factor`, `avg_win`, `avg_loss` | 5 |
 | On DataFrames | `risk_metrics_from_df`, `rolling_risk_metrics_df`, `historical_volatility_rolling`, `ewma_volatility_df`, `rolling_correlation_df`, `rolling_beta_df` | 5 |

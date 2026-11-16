@@ -119,6 +119,10 @@ _heston_cf :: proc(u: complex128, data: rawptr) -> complex128 {
 	return heston_char_func(u, c.S, c.r, c.T, c.p)
 }
 
+// The model pricers below take a continuous dividend yield q (last parameter,
+// 0 by default): ln S_T then drifts at r − q, which is the q = 0 model on the
+// spot S·e^{−qT}, so the characteristic functions get that spot.
+
 // Heston European prices by COS for strikes sharing S, T and r
 heston_prices_cos :: proc(
 	S: f64,
@@ -129,12 +133,13 @@ heston_prices_cos :: proc(
 	opt: OptionType,
 	out: []f64,
 	min_terms: int = 64,
+	q: f64 = 0.0,
 ) {
 	if T <= 0.0 {
 		for K, k in strikes {out[k] = _payoff_intrinsic(S, K, opt)}
 		return
 	}
-	c := _Heston_CF{S, r, T, params}
+	c := _Heston_CF{S * math.exp(-q * T), r, T, params}
 	cos_option_prices(_heston_cf, &c, strikes, math.exp(-r * T), opt, out, min_terms = min_terms)
 }
 
@@ -173,12 +178,13 @@ merton_prices_cos :: proc(
 	params: MJD_Params,
 	opt: OptionType,
 	out: []f64,
+	q: f64 = 0.0,
 ) {
 	if T <= 0.0 {
 		for K, k in strikes {out[k] = _payoff_intrinsic(S, K, opt)}
 		return
 	}
-	c := _Merton_CF{S, r, T, params}
+	c := _Merton_CF{S * math.exp(-q * T), r, T, params}
 	cos_option_prices(_merton_cf, &c, strikes, math.exp(-r * T), opt, out)
 }
 
@@ -213,12 +219,13 @@ bates_prices_cos :: proc(
 	params: Bates_Params,
 	opt: OptionType,
 	out: []f64,
+	q: f64 = 0.0,
 ) {
 	if T <= 0.0 {
 		for K, k in strikes {out[k] = _payoff_intrinsic(S, K, opt)}
 		return
 	}
-	c := _Bates_CF{S, r, T, params}
+	c := _Bates_CF{S * math.exp(-q * T), r, T, params}
 	cos_option_prices(_bates_cf, &c, strikes, math.exp(-r * T), opt, out)
 }
 

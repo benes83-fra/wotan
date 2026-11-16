@@ -242,6 +242,9 @@ _bs_ppf :: proc(p: f64) -> f64 {
 // shrunk to rounding). Prices outside the no-arbitrage bounds (intrinsic value
 // below; S for a call, K·e^{-rT} for a put above) have no implied volatility and
 // return (0, false, 0).
+// q: continuous dividend yield, as in compute_greeks. The Black-Scholes-Merton
+// price with yield q is the q = 0 price on the spot S·e^{-qT}, so the solver
+// works on that spot (the bounds above then hold with S·e^{-qT} for S).
 // ============================================================================
 implied_volatility :: proc(
 	market_price: f64,
@@ -252,12 +255,14 @@ implied_volatility :: proc(
 	opt: OptionType,
 	max_iter: int = 50,
 	tol: f64 = 1e-8,
+	q: f64 = 0.0,
 ) -> (
 	sigma: f64,
 	converged: bool,
 	iterations: int,
 ) {
 	if !(T > 0.0 && S > 0.0 && K > 0.0) {return 0, false, 0}
+	S := S * math.exp(-q * T)
 	KD := K * math.exp(-r * T)
 	lower := max(S - KD, 0) if opt == .Call else max(KD - S, 0)
 	upper := S if opt == .Call else KD
@@ -375,7 +380,8 @@ garch_price_and_greeks :: proc(
 // Monte Carlo Pricers with Pathwise Greeks
 // ============================================================================
 // Geometric Brownian motion under the risk-neutral measure on the grid
-// t_i = i·T/n_steps, i = 1..n_steps. Averages and barrier monitoring use
+// t_i = i·T/n_steps, i = 1..n_steps, drifting at r − q for a continuous
+// dividend yield q (the last parameter, 0 by default; payoffs are discounted at r). Averages and barrier monitoring use
 // S_1..S_n (not S_0); the lookback maximum includes S_0.
 //
 // Delta (∂V/∂S_0) and vega (∂V/∂σ) are exact pathwise derivatives of each
@@ -401,6 +407,7 @@ monte_carlo_asian_option :: proc(
 	n_paths: int,
 	n_steps: int,
 	allocator: mem.Allocator = context.allocator,
+	q: f64 = 0.0,
 ) -> (
 	price: f64,
 	delta: f64,
@@ -409,7 +416,7 @@ monte_carlo_asian_option :: proc(
 	if n_paths <= 0 || n_steps <= 0 {return}
 	dt := T / f64(n_steps)
 	sqrt_dt := math.sqrt(dt)
-	drift := (r - 0.5 * sigma * sigma) * dt
+	drift := (r - q - 0.5 * sigma * sigma) * dt
 	inv_n := 1.0 / f64(n_steps)
 
 	for _ in 0 ..< n_paths {
@@ -444,13 +451,14 @@ monte_carlo_barrier_asian_option :: proc(
 	n_paths: int,
 	n_steps: int,
 	allocator: mem.Allocator = context.allocator,
+	q: f64 = 0.0,
 ) -> (
 	price: f64,
 	delta: f64,
 	vega: f64,
 ) {
 	if n_paths <= 0 || n_steps <= 0 || !(sigma > 0 && T > 0 && barrier > 0) {return}
-	m := _oss_model(S_0, T, r, sigma, barrier, n_steps)
+	m := _oss_model(S_0, T, r - q, sigma, barrier, n_steps)
 	inv_n := 1.0 / f64(n_steps)
 
 	for _ in 0 ..< n_paths {
@@ -489,6 +497,8 @@ monte_carlo_basket_option :: proc(
 	n_paths: int,
 	n_steps: int,
 	allocator: mem.Allocator = context.allocator,
+	q1: f64 = 0.0,
+	q2: f64 = 0.0,
 ) -> (
 	price: f64,
 	delta1: f64,
@@ -499,8 +509,8 @@ monte_carlo_basket_option :: proc(
 	if n_paths <= 0 || n_steps <= 0 || !(math.abs(corr) <= 1) {return}
 	dt := T / f64(n_steps)
 	sqrt_dt := math.sqrt(dt)
-	drift1 := (r - 0.5 * sigma1 * sigma1) * dt
-	drift2 := (r - 0.5 * sigma2 * sigma2) * dt
+	drift1 := (r - q1 - 0.5 * sigma1 * sigma1) * dt
+	drift2 := (r - q2 - 0.5 * sigma2 * sigma2) * dt
 	corr_perp := math.sqrt(1.0 - corr * corr) // Cholesky factor of [[1, ρ], [ρ, 1]]
 	inv_n := 1.0 / f64(n_steps)
 
@@ -579,6 +589,7 @@ monte_carlo_lookback_call_option :: proc(
 	n_paths: int,
 	n_steps: int,
 	allocator: mem.Allocator = context.allocator,
+	q: f64 = 0.0,
 ) -> (
 	price: f64,
 	delta: f64,
@@ -587,7 +598,7 @@ monte_carlo_lookback_call_option :: proc(
 	if n_paths <= 0 || n_steps <= 0 {return}
 	dt := T / f64(n_steps)
 	sqrt_dt := math.sqrt(dt)
-	drift := (r - 0.5 * sigma * sigma) * dt
+	drift := (r - q - 0.5 * sigma * sigma) * dt
 
 	for _ in 0 ..< n_paths {
 		S, W := S_0, 0.0
@@ -631,13 +642,14 @@ monte_carlo_barrier_call_bs :: proc(
 	n_paths: int,
 	n_steps: int,
 	allocator: mem.Allocator = context.allocator,
+	q: f64 = 0.0,
 ) -> (
 	price: f64,
 	delta: f64,
 	vega: f64,
 ) {
 	if n_paths <= 0 || n_steps <= 0 || !(sigma > 0 && T > 0 && barrier > 0) {return}
-	m := _oss_model(S_0, T, r, sigma, barrier, n_steps)
+	m := _oss_model(S_0, T, r - q, sigma, barrier, n_steps)
 
 	for _ in 0 ..< n_paths {
 		p := _oss_start(&m)
@@ -680,12 +692,12 @@ _OSS_Path :: struct {
 }
 
 @(private = "file")
-_oss_model :: proc(S_0, T, r, sigma, barrier: f64, n_steps: int) -> _OSS_Model {
+_oss_model :: proc(S_0, T, mu_rate, sigma, barrier: f64, n_steps: int) -> _OSS_Model {
 	dt := T / f64(n_steps)
 	sqrt_dt := math.sqrt(dt)
 	return _OSS_Model {
 		lb = math.ln(barrier),
-		mu = (r - 0.5 * sigma * sigma) * dt,
+		mu = (mu_rate - 0.5 * sigma * sigma) * dt,
 		s = sigma * sqrt_dt,
 		dmu = {0, -sigma * dt},
 		ds = {0, sqrt_dt},

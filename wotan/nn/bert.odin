@@ -58,7 +58,11 @@ bert_encoder_block_forward :: proc(
 	attention_mask: ^t.Tensor = nil,
 	training: bool,
 	dropout: f64,
-) -> ^t.Tensor {
+) -> (
+	fwd_out: ^t.Tensor,
+) {
+	rec_ := forward_record_begin()
+	defer forward_record_end(rec_, fwd_out)
 	// Post-LayerNorm, as in the original BERT
 	attn_out := multi_head_attention_layer_forward(&block.mha, x, attention_mask)
 	attn_out = t.tensor_dropout(attn_out, dropout, training)
@@ -182,8 +186,8 @@ bert_model_forward :: proc(
 	batch := input_ids.shape[0]
 	seq_len := input_ids.shape[1]
 	alloc := input_ids.allocator
-	recording := _forward_begin()
-	defer _forward_end(recording, mlm_logits, nsp_logits)
+	recording := forward_record_begin()
+	defer forward_record_end(recording, mlm_logits, nsp_logits)
 
 	// Token + position + segment embeddings, LayerNorm
 	token_emb := embedding_layer_forward(&model.token_emb, input_ids)

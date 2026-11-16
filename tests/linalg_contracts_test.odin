@@ -15,6 +15,8 @@ import "core:mem"
 //   panic on rank-deficient data (minimum-norm solution instead)
 // - factor_model_covariance falls back to the pseudo-inverse when the factor
 //   covariance is singular (matrix_inverse returns ok = false)
+// - inverses of numerically singular matrices (rcond1 < ε) and eigh of
+//   non-finite matrices give ok = false
 
 linalg_contracts_test :: proc(allocator: mem.Allocator) {
 	seed_test(#procedure)
@@ -405,6 +407,68 @@ linalg_contracts_test :: proc(allocator: mem.Allocator) {
 				worst,
 			),
 		)
+	}
+
+	// 8. Numerically singular inverses: ok = false when rcond1 = 1/(‖A‖₁‖A⁻¹‖₁) < ε,
+	//    the criterion of LAPACK's dgesvx / SciPy's solve (rc.py). Hilbert matrices:
+	//    numpy 1/cond(H, 1) = 3.4399e-8 (n 6), 2.9522e-11 (n 8), 2.8286e-14 (n 10),
+	//    2.63e-17 (n 12, SciPy warns), 1.71e-19 (n 14); [[1, 1], [1, 1 + 4e-16]]: 1.11e-16
+	//    (numpy inv returns ±2.25e15 without complaint). NaN input: ok = false for the
+	//    inverse (empty) and for eigh (NaN W and V of full size; numpy gives ±1.414).
+	{
+		Case :: struct {
+			n:     int,
+			numpy: f64,
+		}
+		cases := []Case {
+			{6, 3.4399394649723315e-08},
+			{8, 2.95222205134288e-11},
+			{10, 2.828556315915069e-14},
+			{12, 0},
+			{14, 0},
+		}
+		good := true
+		msg := ""
+		for c in cases {
+			H := l.matrix_new(f64, c.n, c.n)
+			for i in 0 ..< c.n {for j in 0 ..< c.n {H.data[i * c.n + j] = 1 / f64(i + j + 1)}}
+			Hi, ok1 := l.mat_inverse_lu(&H)
+			Hm, ok2 := l.matrix_inverse(&H)
+			rc := ok1 ? l.rcond1(&H, &Hi) : 0
+			if c.numpy > 0 {
+				good = good && ok1 && ok2 && abs(rc / c.numpy - 1) < 1e-3
+			} else {
+				good = good && !ok1 && !ok2 && Hi.rows == 0 && Hm.rows == 0
+			}
+			msg = fmt.tprintf("%s n %d: ok %v/%v rcond %.4e;", msg, c.n, ok1, ok2, rc)
+			l.matrix_free(&H); l.matrix_free(&Hi); l.matrix_free(&Hm)
+		}
+		N := l.matrix_from_flat([]f64{1, 1, 1, 1 + 4e-16}, 2, 2)
+		Ni, nok := l.matrix_inverse(&N)
+		F := l.matrix_from_flat([]f64{2, 1, 1, math.nan_f64()}, 2, 2)
+		Fi, fok := l.mat_inverse_lu(&F)
+		W, V, eok := l.eigh(&F)
+		Inf := l.matrix_from_flat([]f64{2, math.inf_f64(1), math.inf_f64(1), 2}, 2, 2)
+		W2, V2, iok := l.eigh(&Inf)
+		good = good && !nok && !fok && !eok && !iok && len(W) == 2 && V.rows == 2 && len(W2) == 2
+		for x in W {good = good && math.is_nan(x)}
+		for x in V.data {good = good && math.is_nan(x)}
+		expect(
+			&passed,
+			&total,
+			good,
+			fmt.tprintf(
+				"numerically singular inverses rejected at rcond1 < ε (numpy rcond 3.44e-8 / 2.95e-11 / 2.83e-14 accepted, Hilbert 12, 14 rejected):%s near-singular 2×2 ok %v; NaN inverse ok %v; eigh NaN ok %v (W %v), Inf ok %v",
+				msg,
+				nok,
+				fok,
+				eok,
+				W,
+				iok,
+			),
+		)
+		l.matrix_free(&N); l.matrix_free(&Ni); l.matrix_free(&F); l.matrix_free(&Fi)
+		delete(W); l.matrix_free(&V); l.matrix_free(&Inf); delete(W2); l.matrix_free(&V2)
 	}
 
 	fmt.printf("Linear algebra summary: %d/%d passed\n", passed, total)

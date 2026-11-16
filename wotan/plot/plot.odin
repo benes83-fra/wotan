@@ -1,7 +1,6 @@
 package plot
 
 import w "../core"
-import "base:runtime"
 import "core:fmt"
 import "core:math"
 import "core:mem"
@@ -206,7 +205,7 @@ draw_number :: proc(img: ^Image, x, y: int, val: f64, scale: int, c: Color) {
 
 // Anti-aliased line with the given style (single segment)
 draw_line_segment :: proc(img: ^Image, x0, y0, x1, y1: int, c: Color, style: LineStyle) {
-	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	w.TEMP_GUARD()
 	ax := Axes {
 		img    = img,
 		left   = -1,
@@ -290,7 +289,7 @@ png_write_chunk :: proc(f: ^os.File, chunk_type: string, data: []u8) {
 // the scratch is released before returning (kept on context.temp_allocator
 // only when that is also the result's allocator).
 image_encode_png :: proc(img: ^Image, allocator := context.allocator) -> []u8 {
-	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD(ignore = _is_temp_allocator(allocator))
+	w.TEMP_GUARD(ignore = _is_temp_allocator(allocator))
 	n_px := img.width * img.height
 	opaque := true
 	for i in 0 ..< n_px {
@@ -346,7 +345,7 @@ image_encode_png :: proc(img: ^Image, allocator := context.allocator) -> []u8 {
 }
 
 image_save_png :: proc(img: ^Image, path: string) -> bool {
-	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	w.TEMP_GUARD()
 	png := image_encode_png(img, context.temp_allocator)
 	defer delete(png, context.temp_allocator)
 	return os.write_entire_file(path, png) == nil
@@ -418,7 +417,7 @@ scatter_png :: proc(
 	config: PlotConfig = DEFAULT_PLOT_CONFIG,
 	allocator: mem.Allocator = context.allocator,
 ) -> bool {
-	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD() // scratch (ticks, labels, PNG bytes) released on return
+	w.TEMP_GUARD() // scratch (ticks, labels, PNG bytes) released on return
 	config := config_resolve(config)
 	col_x, x_ok := _float_column(df, x_col)
 	col_y, y_ok := _float_column(df, y_col)
@@ -464,7 +463,7 @@ histogram_png :: proc(
 	config: PlotConfig = DEFAULT_PLOT_CONFIG,
 	allocator: mem.Allocator = context.allocator,
 ) -> bool {
-	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD() // scratch (ticks, labels, PNG bytes) released on return
+	w.TEMP_GUARD() // scratch (ticks, labels, PNG bytes) released on return
 	config := config_resolve(config)
 	col, col_ok := _float_column(df, col_name)
 	if !col_ok || bins <= 0 {return false}
@@ -527,7 +526,7 @@ line_png :: proc(
 	config: PlotConfig = DEFAULT_PLOT_CONFIG,
 	allocator: mem.Allocator = context.allocator,
 ) -> bool {
-	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD() // scratch (ticks, labels, PNG bytes) released on return
+	w.TEMP_GUARD() // scratch (ticks, labels, PNG bytes) released on return
 	config := config_resolve(config)
 	if len(xs) != len(ys) || len(xs) == 0 {return false}
 	min_x, max_x := data_range(xs)
@@ -556,7 +555,7 @@ bar_png :: proc(
 	config: PlotConfig = DEFAULT_PLOT_CONFIG,
 	allocator: mem.Allocator = context.allocator,
 ) -> bool {
-	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD() // scratch (ticks, labels, PNG bytes) released on return
+	w.TEMP_GUARD() // scratch (ticks, labels, PNG bytes) released on return
 	config := config_resolve(config)
 	if len(labels) != len(values) || len(labels) == 0 {return false}
 	n := len(labels)
@@ -598,7 +597,7 @@ multi_line_png :: proc(
 	config: PlotConfig = DEFAULT_PLOT_CONFIG,
 	allocator: mem.Allocator = context.allocator,
 ) -> bool {
-	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD() // scratch (ticks, labels, PNG bytes) released on return
+	w.TEMP_GUARD() // scratch (ticks, labels, PNG bytes) released on return
 	config := config_resolve(config)
 	if len(lines) == 0 {return false}
 
@@ -670,7 +669,7 @@ heatmap_png :: proc(
 	config: PlotConfig = DEFAULT_PLOT_CONFIG,
 	allocator: mem.Allocator = context.allocator,
 ) -> bool {
-	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD() // scratch (ticks, labels, PNG bytes) released on return
+	w.TEMP_GUARD() // scratch (ticks, labels, PNG bytes) released on return
 	config := config_resolve(config)
 	if len(data) != rows * cols || rows == 0 || cols == 0 {return false}
 

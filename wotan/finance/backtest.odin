@@ -11,11 +11,15 @@ import "core:mem"
 // Configuration
 // ============================================================================
 
+// intrabar: resting orders are checked against each bar's open, high and low, read
+// from the columns "<symbol>_Open", "<symbol>_High" and "<symbol>_Low" (the
+// symbol's own column is the close). Off: against the close only.
 BacktestConfig :: struct {
 	initial_capital: f64,
 	commission_rate: f64,
 	slippage_rate:   f64,
 	risk_free_rate:  f64,
+	intrabar:        bool,
 }
 
 DEFAULT_BACKTEST_CONFIG :: BacktestConfig {
@@ -29,14 +33,16 @@ DEFAULT_BACKTEST_CONFIG :: BacktestConfig {
 // Order Management
 // ============================================================================
 
-// Market: fills at the current bar's price. Limit and Stop wait for a trigger
-// (see context_submit_order): a buy limit fills at a price <= limit_price, a
-// sell limit at a price >= limit_price; a buy stop triggers at a price >=
-// stop_price, a sell stop at a price <= stop_price.
+// Market: fills at the current bar's close. Limit, Stop and StopLimit wait for a
+// trigger (see context_submit_order): a buy limit fills at a price <= limit_price,
+// a sell limit at a price >= limit_price; a buy stop triggers at a price >=
+// stop_price, a sell stop at a price <= stop_price. A StopLimit becomes a limit
+// order at limit_price once its stop triggers.
 OrderType :: enum {
 	Market,
 	Limit,
 	Stop,
+	StopLimit,
 }
 
 // Outcome of context_submit_order
@@ -68,11 +74,12 @@ FilledOrder :: struct {
 	commission: f64,
 }
 
-// A resting limit or stop order
+// A resting limit, stop or stop-limit order
 PendingOrder :: struct {
 	id:            int,
 	order:         Order,
 	submitted_bar: int,
+	triggered:     bool, // a StopLimit whose stop has triggered: now a limit order
 }
 
 // ============================================================================
@@ -105,7 +112,7 @@ Portfolio :: struct {
 	trades:        [dynamic]FilledOrder,
 	current_bar:   int,
 	trade_pnls:    [dynamic]f64, // net P&L of each closed round trip
-	pending:       [dynamic]PendingOrder, // resting limit / stop orders, oldest first
+	pending:       [dynamic]PendingOrder, // resting orders, oldest first
 	next_order_id: int, // ids start at 1
 }
 
@@ -182,21 +189,35 @@ context_get_prices :: proc(
 }
 
 // Submits an order on the current bar; returns its id (0 when rejected) and
-// what happened to it. The engine sees one price per bar (the close).
-//  - Market: fills at the current price.
-//  - Limit / Stop: fills at the current price if that already meets the
-//    trigger; otherwise it rests (good till cancelled) and the runners check it
-//    at each later bar, before calling the strategy, filling it at the first
-//    price that meets the trigger: a limit order at a price at least as good as
-//    its limit, a stop order at that price even when it gapped past the stop.
-//    context_cancel_order removes a resting order; orders still resting at the
-//    end of a run are counted in BacktestResult.open_orders.
+// what happened to it. The strategy runs at the close of the bar.
+//  - Market: fills at the current close.
+//  - Limit / Stop / StopLimit: fills at the current close if that already meets
+//    the order (a StopLimit whose stop the close meets but whose limit it does
+//    not becomes a resting limit order). Otherwise it rests (good till
+//    cancelled) and the runners check it at each later bar, before calling the
+//    strategy (_order_fill: the rules of backtrader's BackBroker):
+//      Limit: at the open if the bar opens through the limit, else at the limit
+//        if the bar's low (buy) / high (sell) reaches it;
+//      Stop: at the open if the bar opens through the stop, else at the stop if
+//        the high (buy) / low (sell) reaches it;
+//      StopLimit: a gap through the stop triggers it, and it is then tried as a
+//        limit order on the same bar. A trigger inside the bar fills at the stop
+//        if the limit allows that price; with a buy limit below the stop it fills
+//        at the limit only on a down bar (open > close: path open, high, low,
+//        close) that closes at or below the limit, mirrored for sells. A
+//        triggered order that did not fill rests as a limit order.
+//    Without config.intrabar the bar is its close (open = high = low = close),
+//    so orders fill at the first close that meets them, a stop at that close
+//    even when it gapped past the stop. context_cancel_order removes a resting
+//    order; orders still resting at the end of a run are counted in
+//    BacktestResult.open_orders.
 // Every fill moves the price against the trader by config.slippage_rate and
 // charges config.commission_rate on the fill notional. Buys reduce or cover a
 // short before going long; sells reduce a long before going short. Rejected
-// (nothing booked): a quantity that is not positive and finite, a Limit without
-// a positive finite limit_price, a Stop without a positive finite stop_price,
-// or a fill due when the symbol's price is not positive and finite.
+// (nothing booked): a quantity that is not positive and finite, a Limit or
+// StopLimit without a positive finite limit_price, a Stop or StopLimit without a
+// positive finite stop_price, or a fill due when the symbol's price is not
+// positive and finite.
 context_submit_order :: proc(
 	ctx: ^StrategyContext,
 	order: Order,
@@ -211,19 +232,31 @@ context_submit_order :: proc(
 		if !_valid_px(order.limit_price) {return 0, .Rejected}
 	case .Stop:
 		if !_valid_px(order.stop_price) {return 0, .Rejected}
+	case .StopLimit:
+		if !_valid_px(order.stop_price) || !_valid_px(order.limit_price) {return 0, .Rejected}
 	}
 	price := context_get_price(ctx, order.symbol)
 	pf := ctx.portfolio
-	if order.order_type == .Market || (_valid_px(price) && _order_triggered(order, price)) {
-		if !_valid_px(price) {return 0, .Rejected}
-		id = pf.next_order_id
-		pf.next_order_id += 1
-		_fill_order(ctx, order, id, price)
-		return id, .Filled
+	if order.order_type == .Market && !_valid_px(price) {return 0, .Rejected}
+	fill_px, fill, triggered := 0.0, false, false
+	if _valid_px(price) {
+		fill_px, fill, triggered = _order_fill(order, false, _Bar{price, price, price, price})
 	}
 	id = pf.next_order_id
 	pf.next_order_id += 1
-	append(&pf.pending, PendingOrder{id = id, order = order, submitted_bar = ctx.current_bar})
+	if fill {
+		_fill_order(ctx, order, id, fill_px)
+		return id, .Filled
+	}
+	append(
+		&pf.pending,
+		PendingOrder {
+			id = id,
+			order = order,
+			submitted_bar = ctx.current_bar,
+			triggered = triggered,
+		},
+	)
 	return id, .Pending
 }
 
@@ -239,18 +272,23 @@ context_cancel_order :: proc(ctx: ^StrategyContext, id: int) -> bool {
 	return false
 }
 
-// Fills the resting orders that trigger at the current bar's prices, oldest
-// first (the runners call this before the strategy on every bar)
+// Fills the resting orders that the current bar meets, oldest first (the runners
+// call this before the strategy on every bar). With config.intrabar the bar is
+// the symbol's open, high, low and close; otherwise its close.
 context_process_pending_orders :: proc(ctx: ^StrategyContext) {
 	pf := ctx.portfolio
 	i := 0
 	for i < len(pf.pending) {
-		po := pf.pending[i]
-		price := context_get_price(ctx, po.order.symbol)
-		if _valid_px(price) && _order_triggered(po.order, price) {
+		po := &pf.pending[i]
+		bar, ok := _current_bar(ctx, po.order.symbol)
+		if !ok {i += 1; continue}
+		px, fill, triggered := _order_fill(po.order, po.triggered, bar)
+		if fill {
+			order, id := po.order, po.id
 			ordered_remove(&pf.pending, i)
-			_fill_order(ctx, po.order, po.id, price)
+			_fill_order(ctx, order, id, px)
 		} else {
+			po.triggered = triggered
 			i += 1
 		}
 	}
@@ -259,19 +297,102 @@ context_process_pending_orders :: proc(ctx: ^StrategyContext) {
 @(private = "file")
 _valid_px :: proc(x: f64) -> bool {return x > 0.0 && !math.is_inf(x)}
 
-// Whether an order triggers at price
 @(private = "file")
-_order_triggered :: proc(order: Order, price: f64) -> bool {
+_Bar :: struct {
+	open, high, low, close: f64,
+}
+
+// The symbol's bar at the current row; ok = false unless every price is valid
+@(private = "file")
+_current_bar :: proc(ctx: ^StrategyContext, symbol: string) -> (b: _Bar, ok: bool) {
+	c := context_get_price(ctx, symbol)
+	if !ctx.config.intrabar {return _Bar{c, c, c, c}, _valid_px(c)}
+	get :: proc(ctx: ^StrategyContext, symbol, suffix: string) -> f64 {
+		name := _concat(symbol, suffix)
+		v, _ := w.column_at_float(w.column(ctx.data, name), ctx.current_bar)
+		return v
+	}
+	b = _Bar{get(ctx, symbol, "_Open"), get(ctx, symbol, "_High"), get(ctx, symbol, "_Low"), c}
+	return b, _valid_px(b.open) && _valid_px(b.high) && _valid_px(b.low) && _valid_px(c)
+}
+
+@(private = "file")
+_concat :: proc(a, b: string) -> string {
+	buf := make([]u8, len(a) + len(b), context.temp_allocator)
+	copy(buf, a)
+	copy(buf[len(a):], b)
+	return string(buf)
+}
+
+// Whether and at what price an order fills on bar b (backtrader's BackBroker rules,
+// without its slippage: config.slippage_rate is applied by _fill_order). triggered
+// in: a StopLimit whose stop already triggered; out: whether it has now.
+@(private = "file")
+_order_fill :: proc(
+	order: Order,
+	triggered: bool,
+	b: _Bar,
+) -> (
+	price: f64,
+	fill: bool,
+	now_triggered: bool,
+) {
 	buy := order.side == .Buy
+	limit :: proc(buy: bool, L: f64, b: _Bar) -> (f64, bool) {
+		if buy {
+			if L >= b.open {return b.open, true}
+			if L >= b.low {return L, true}
+		} else {
+			if L <= b.open {return b.open, true}
+			if L <= b.high {return L, true}
+		}
+		return 0, false
+	}
+	S, L := order.stop_price, order.limit_price
 	switch order.order_type {
 	case .Market:
-		return true
+		return b.close, true, false
 	case .Limit:
-		return price <= order.limit_price if buy else price >= order.limit_price
+		price, fill = limit(buy, L, b)
+		return
 	case .Stop:
-		return price >= order.stop_price if buy else price <= order.stop_price
+		if buy {
+			if b.open >= S {return b.open, true, true}
+			if b.high >= S {return S, true, true}
+		} else {
+			if b.open <= S {return b.open, true, true}
+			if b.low <= S {return S, true, true}
+		}
+		return 0, false, false
+	case .StopLimit:
+		if triggered {
+			price, fill = limit(buy, L, b)
+			return price, fill, true
+		}
+		if buy {
+			if b.open >= S {
+				price, fill = limit(buy, L, b)
+				return price, fill, true
+			}
+			if b.high >= S {
+				if L >= S {return S, true, true}
+				if b.open > b.close && L >= b.close {return L, true, true}
+				return 0, false, true
+			}
+		} else {
+			if b.open <= S {
+				price, fill = limit(buy, L, b)
+				return price, fill, true
+			}
+			if b.low <= S {
+				if L <= S {return S, true, true}
+				if b.open <= b.close && L <= b.close {return L, true, true}
+				return 0, false, true
+			}
+		}
+		return 0, false, false
 	}
-	return false
+	return 0, false, false
 }
 
 @(private = "file")

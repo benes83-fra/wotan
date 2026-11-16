@@ -27,19 +27,28 @@ _constant :: proc(n: int, shape: [4]int, alloc: mem.Allocator, values: []f64 = n
 	return c
 }
 
-// A model forward pass outside a graph scope records its constant
-// intermediates (op outputs without gradient, e.g. the outputs of frozen
-// layers on data, which no graph links): _forward_end frees them, or hands
-// those that the graph reads to it. Inside a scope graph_end frees everything.
-@(private)
-_forward_begin :: proc() -> (recording: bool) {
+// A forward pass outside a graph scope records its constant intermediates (op
+// outputs without gradient, e.g. the outputs of frozen layers on data, which no
+// graph links): forward_record_end frees them, or hands those that the graph
+// reads to it, and keeps the results passed to it. Inside a graph scope both do
+// nothing (graph_end frees everything). Every layer and model forward of the
+// library records itself; code that chains layer forwards by hand records the
+// whole chain:
+//
+//	rec := nn.forward_record_begin()
+//	h := nn.linear_forward(&frozen, x)
+//	out := nn.linear_forward(&head, h)
+//	nn.forward_record_end(rec, out)
+//
+// Results that the code keeps elsewhere (a struct field, a cache) must be
+// passed to forward_record_end as well.
+forward_record_begin :: proc() -> (recording: bool) {
 	if t.graph_active_scope() != nil {return false}
 	t.constant_record_begin()
 	return true
 }
 
-@(private)
-_forward_end :: proc(recording: bool, keep: ..^t.Tensor) {
+forward_record_end :: proc(recording: bool, keep: ..^t.Tensor) {
 	if recording {t.constant_record_end(..keep)}
 }
 
@@ -63,13 +72,14 @@ as_matrix :: proc(
 ) -> ^t.Tensor {
 	assert(rows * cols == len(x.data.data), "as_matrix: size mismatch")
 	allocator := t._scope_or(allocator) // an op output: in the active scope, if any
-	m := t.tensor_new(
+	// an op output (also without gradient: a forward recording then sees it)
+	m := t._tensor_new_op(
 		l.matrix_new(f64, rows, cols, allocator),
-		x.requires_grad && t.grad_enabled(),
+		[4]int{rows, cols, 1, 1},
+		x.requires_grad,
 		allocator,
 	)
 	copy(m.data.data, x.data.data)
-	m.shape = [4]int{rows, cols, 1, 1}
 	if m.requires_grad {
 		m.op = .Reshape
 		append(&m.inputs, x)
@@ -148,7 +158,9 @@ linear_layer_new :: proc(
 // W: [in_features, out_features]
 // b: [1, out_features]
 // Y: [batch_size, out_features]
-linear_forward :: proc(layer: ^LinearLayer, x: ^t.Tensor) -> ^t.Tensor {
+linear_forward :: proc(layer: ^LinearLayer, x: ^t.Tensor) -> (fwd_out: ^t.Tensor) {
+	rec_ := forward_record_begin()
+	defer forward_record_end(rec_, fwd_out)
 	// 1. Matrix Multiplication: X @ W
 	out := t.tensor_matmul(x, layer.weights)
 

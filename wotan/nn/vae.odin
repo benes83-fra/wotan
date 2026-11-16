@@ -42,6 +42,8 @@ vae_encoder_forward :: proc(
 	mu: ^t.Tensor,
 	log_var: ^t.Tensor,
 ) {
+	rec_ := forward_record_begin()
+	defer forward_record_end(rec_, mu, log_var)
 	h := linear_forward(&enc.fc1, x)
 	h = t.tensor_relu(h)
 
@@ -89,7 +91,9 @@ vae_decoder_free :: proc(dec: ^VAEDecoder) {
 	linear_layer_free(&dec.fc3)
 }
 
-vae_decoder_forward :: proc(dec: ^VAEDecoder, z: ^t.Tensor) -> ^t.Tensor {
+vae_decoder_forward :: proc(dec: ^VAEDecoder, z: ^t.Tensor) -> (fwd_out: ^t.Tensor) {
+	rec_ := forward_record_begin()
+	defer forward_record_end(rec_, fwd_out)
 	h := linear_forward(&dec.fc1, z)
 	h = t.tensor_relu(h)
 	h = linear_forward(&dec.fc2, h)

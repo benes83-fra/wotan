@@ -1,11 +1,11 @@
 package ML
 
+import w "../../core"
 import l "../../linalg"
 import optim "../../optimize"
 import "core:fmt"
 import "core:math"
 import "core:math/rand"
-import "base:runtime"
 import "core:mem"
 
 // ============================================================================
@@ -25,13 +25,13 @@ MLPTask :: enum {
 }
 
 MLPParams :: struct {
-	hidden_layers:     []int,
-	activation:        Activation,
-	output_activation: Activation,
-	task:              MLPTask,
-	learning_rate:     f64,
-	max_iter:          int,
-	batch_size:        int,
+	hidden_layers:       []int,
+	activation:          Activation,
+	output_activation:   Activation,
+	task:                MLPTask,
+	learning_rate:       f64,
+	max_iter:            int,
+	batch_size:          int,
 	optimizer_type:      optim.OptimizerType, // .Adam, anything else = plain SGD
 	verbose:             bool, // print the epoch loss every 100 iterations
 	// Early stopping (sklearn early_stopping=True): hold out validation_fraction of
@@ -225,7 +225,14 @@ mlp_fit :: proc(
 	y_tr, y_val: []f64
 	if params.early_stopping {
 		frac := params.validation_fraction if params.validation_fraction > 0 else 0.1
-		tr, va := holdout_split(X_in.rows, y_in, frac, params.task == .BinaryClassification, params.random_state, context.temp_allocator)
+		tr, va := holdout_split(
+			X_in.rows,
+			y_in,
+			frac,
+			params.task == .BinaryClassification,
+			params.random_state,
+			context.temp_allocator,
+		)
 		X_tr = subset_matrix(X_in, tr, allocator)
 		y_tr = subset_slice(y_in, tr, allocator)
 		X_val = subset_matrix(X_in, va, allocator)
@@ -346,11 +353,14 @@ mlp_fit :: proc(
 		epoch_loss := 0.0
 
 		for start := 0; start < n_samples; start += batch_size {
-			runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+			w.TEMP_GUARD()
 			bs := min(batch_size, n_samples - start)
 			for k in 0 ..< bs {
 				src := perm[start + k]
-				copy(Xb[k * n_features:(k + 1) * n_features], X.data[src * n_features:(src + 1) * n_features])
+				copy(
+					Xb[k * n_features:(k + 1) * n_features],
+					X.data[src * n_features:(src + 1) * n_features],
+				)
 				yb[k] = y[src]
 			}
 			loss := _mlp_forward_backward(
@@ -375,7 +385,10 @@ mlp_fit :: proc(
 					if params.optimizer_type == .Adam {
 						m_w[i].data[idx] = beta1 * m_w[i].data[idx] + (1.0 - beta1) * g
 						v_w[i].data[idx] = beta2 * v_w[i].data[idx] + (1.0 - beta2) * g * g
-						weights[i].data[idx] -= lr * (m_w[i].data[idx] / bc1) / (math.sqrt(v_w[i].data[idx] / bc2) + epsilon)
+						weights[i].data[idx] -=
+							lr *
+							(m_w[i].data[idx] / bc1) /
+							(math.sqrt(v_w[i].data[idx] / bc2) + epsilon)
 					} else {
 						weights[i].data[idx] -= lr * g
 					}
@@ -385,7 +398,8 @@ mlp_fit :: proc(
 					if params.optimizer_type == .Adam {
 						m_b[i][c] = beta1 * m_b[i][c] + (1.0 - beta1) * g
 						v_b[i][c] = beta2 * v_b[i][c] + (1.0 - beta2) * g * g
-						biases[i][c] -= lr * (m_b[i][c] / bc1) / (math.sqrt(v_b[i][c] / bc2) + epsilon)
+						biases[i][c] -=
+							lr * (m_b[i][c] / bc1) / (math.sqrt(v_b[i][c] / bc2) + epsilon)
 					} else {
 						biases[i][c] -= lr * g
 					}
@@ -459,7 +473,7 @@ mlp_predict :: proc(
 	// Result first: `allocator` may be the temp allocator the guard below rewinds
 	out := make([]f64, n_samples, allocator)
 	{
-		runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+		w.TEMP_GUARD()
 		current_A := X.data
 
 		for i in 0 ..< model.n_layers {

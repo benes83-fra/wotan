@@ -39,7 +39,15 @@ import "core:math/rand"
 
 Inside the Wotan repository the path is relative, for example `import fin "../wotan/finance"` from `tests/`.
 
-**Inputs.** Prices take the spot `S`, strike `K`, time to expiry `T` in years, the continuously compounded risk-free rate `r` and the volatility `sigma`, all as `f64`. An `OptionType` is `.Call` or `.Put`. A continuous dividend yield `q` is taken by the trees (section 6, a positional argument) and, as a last parameter `q` that defaults to 0, by `compute_greeks`, `price_and_greeks`, the finite-difference pricers (section 6) and the Longstaff–Schwartz pricers (section 7). Pass it by name, as in `compute_greeks(S, K, T, r, sigma, .Call, q = 0.02)`. The other procedures in this part assume no dividends.
+**Inputs.** Prices take the spot `S`, strike `K`, time to expiry `T` in years, the continuously compounded risk-free rate `r` and the volatility `sigma`, all as `f64`. An `OptionType` is `.Call` or `.Put`. A continuous dividend yield `q` is taken by the trees (section 6, a positional argument). It is also a last parameter `q`, defaulting to 0, of:
+- `compute_greeks` and `price_and_greeks`;
+- `implied_volatility` (section 3);
+- the Monte Carlo exotics (section 5; the basket takes `q1` and `q2`);
+- the finite-difference pricers (section 6);
+- the Longstaff–Schwartz pricers (section 7);
+- the COS pricers `heston_prices_cos`, `merton_prices_cos`, `bates_prices_cos`, and `heston_price` / `heston_prices_same_expiry` (section 8).
+
+Pass it by name, as in `compute_greeks(S, K, T, r, sigma, .Call, q = 0.02)`. The path generators of section 9 take one drift rate `r`: for a dividend payer pass r − q there, and discount at r. The other procedures in this part assume no dividends.
 
 **Greek units.** There are two conventions; check the result type before you compare numbers:
 
@@ -145,6 +153,21 @@ It returns `(0, false, 0)` for prices outside the no-arbitrage bounds:
 It also returns `(0, false, 0)` when the time value is lost to rounding. An example is a call struck at 60 with σ = 1 %, whose price equals S − K·e^−rT in double precision. A NaN price also gives `false`.
 
 The optional `max_iter` (50) and `tol` (1e-8, the price error) follow the option type: `implied_volatility(p, S, K, T, r, .Call, max_iter = 100)`.
+
+**Dividends.** The last parameter `q` is a continuous dividend yield. A Black–Scholes–Merton price with yield q is the q = 0 price on the spot S·e^(−qT), so the solver works on that spot, and the bounds above hold with S·e^(−qT) in place of S. The same `q` passed to `compute_greeks` reprices the option:
+
+```odin
+iv, ok, _ := fin.implied_volatility(9.0, 100, 100, 0.75, 0.03, .Call, q = 0.025)
+fmt.printf("implied vol, q 2.5%%: %.10f %v\n", iv, ok)
+fmt.printf("check: %.10f\n", fin.compute_greeks(100, 100, 0.75, 0.03, iv, .Call, q = 0.025).price)
+```
+
+```
+implied vol, q 2.5%: 0.2610164759 true
+check: 9.0000000000
+```
+
+On five calls and puts with q = 2.5 %, from 9 months to 10 years, the volatilities agree with QuantLib's `impliedVolatility` on a `BlackScholesMertonProcess` to 1e-11.
 
 ## 4. Differentiable Black–Scholes and GARCH volatility
 
@@ -266,6 +289,23 @@ The barrier options use *one-step survival* (Glasserman & Staum 2001). Every ste
 - **Correct Greeks:** the weighted payoff is smooth in S₀ and σ, so the delta and vega include the effect of knock-outs, which pathwise derivatives of an indicator miss. That is why the up-and-out vega above is negative.
 
 Monitoring is discrete, on the simulation grid (S₁..Sₙ), so the price depends on `n_steps`. Use the number of real monitoring dates. A barrier at or below the strike makes an up-and-out call worthless, and the pricers return 0.
+
+**Dividends.** Each pricer takes a continuous dividend yield `q` as its last parameter (`q1` and `q2` for the basket). The paths then drift at r − q, and the payoff is still discounted at r:
+
+```odin
+rand.reset(1)
+p, d, v := fin.monte_carlo_asian_option(100, 105, 0.5, 0.04, 0.25, 100_000, 50, q = 0.03)
+fmt.printf("asian, q 3%%  %.4f delta %.4f vega %.4f\n", p, d, v)
+bp, d1, d2, _, _ := fin.monte_carlo_basket_option(100, 90, 95, 1, 0.03, 0.2, 0.3, -0.3, 0.6, 0.4, 100_000, 50, q1 = 0.02, q2 = 0.04)
+fmt.printf("basket, q 2%% / 4%%  %.4f delta %.4f %.4f\n", bp, d1, d2)
+```
+
+```
+asian, q 3%  2.2401 delta 0.3377 vega 15.0396
+basket, q 2% / 4%  3.6735 delta 0.3326 0.2223
+```
+
+NumPy with 1M paths on the same grid gives 2.2533 (delta 0.3378, vega 15.10) and 3.6578 (deltas 0.3323, 0.2217). Each standard error is about 0.015, so both prices are within one of them.
 
 ## 6. American options: trees and finite differences
 
@@ -396,6 +436,22 @@ The model procedures write one price per strike into `out`:
 | `heston_prices_cos(S, strikes, T, r, params, type, out)` | Heston | `Heston_Params{v0, kappa, theta, sigma, rho}` |
 | `merton_prices_cos(…)` | Merton jump diffusion (λ = 0 is Black–Scholes) | `MJD_Params{sigma, lambda, mu_j, sigma_j}` |
 | `bates_prices_cos(…)` | Heston plus Merton jumps | `Bates_Params{heston, lambda, mu_j, sigma_j}` |
+
+Each takes a continuous dividend yield `q` as its last parameter. ln S_T then drifts at r − q, which is the same model on the spot S·e^(−qT):
+
+```odin
+hp := fin.Heston_Params{v0 = 0.04, kappa = 1.5, theta = 0.05, sigma = 0.6, rho = -0.7}
+strikes := []f64{90, 100, 110}
+prices: [3]f64
+fin.heston_prices_cos(100, strikes, 1, 0.03, hp, .Call, prices[:], q = 0.025)
+fmt.printf("Heston calls, q 2.5%%: %.10f\n", prices)
+```
+
+```
+Heston calls, q 2.5%: [13.9719732901, 7.3678824510, 2.8696571822]
+```
+
+QuantLib's `AnalyticHestonEngine` with a 2.5 % dividend curve gives 13.9719732901, 7.3678824510 and 2.8696571822. With q, Heston, Merton and Bates calls and puts from K = 70 to 140 agree with QuantLib (Merton: its series) to 1e-13.
 
 ```odin
 strikes := []f64{80, 90, 100, 110, 120}
@@ -732,9 +788,9 @@ With one step the variance stays at ξ₀ and the model reduces to Black–Schol
 
 | Test | Compares |
 |---|---|
-| `european_options_reference_test` | Black–Scholes, implied volatility and the Monte Carlo exotics against SciPy closed forms and a 1M-path NumPy Monte Carlo |
+| `european_options_reference_test` | Black–Scholes, implied volatility and the Monte Carlo exotics against SciPy closed forms and a 1M-path NumPy Monte Carlo; with a dividend yield, implied volatility against QuantLib and the exotics against NumPy |
 | `american_options_reference_test` | trees, finite differences and Longstaff–Schwartz against QuantLib prices and Greeks |
-| `fourier_qmc_reference_test` | COS for Heston, Bates and Merton against QuantLib; Sobol' points against SciPy; the Brownian bridge |
+| `fourier_qmc_reference_test` | COS for Heston, Bates and Merton against QuantLib, with and without a dividend yield; Sobol' points against SciPy; the Brownian bridge |
 | `monte_carlo_reference_test` | the path generators, Hull–White moments, the regression step and control variates against NumPy |
 | `fbm_reference_test` | fBm covariances, rBergomi and fractional Black–Scholes against QUADPACK and NumPy |
 
@@ -762,8 +818,7 @@ With one step the variance stays at ξ₀ and the model reduces to Black–Schol
 | fBm covariance (H = 0.3, with t = 0 and repeated times) | the exact covariance | within Monte Carlo error |
 
 **Known limitations:**
-- Dividends are a continuous yield, taken only by the procedures listed in section 1 (not by `implied_volatility` or the Monte Carlo and Fourier pricers); discrete cash dividends are not modelled.
-- The `mc_generate_*` procedures require an allocator argument.
+- Dividends are a continuous yield, taken by the procedures listed in section 1; discrete cash dividends are not modelled.
 
 ## 13. Quick reference
 

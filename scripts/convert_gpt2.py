@@ -53,7 +53,7 @@ def convert_distilgpt2(output_path):
 
     with open(output_path, "wb") as f:
         f.write(b"WOTAN_CKPT")
-        write_i32(f, 34) # GPT file id (current format)
+        write_i32(f, 34) # GPT file id 34: the format without frozen flags (every parameter loads trainable)
         write_i32(f, vocab_size)
         write_i32(f, d_model)
         write_i32(f, num_heads)

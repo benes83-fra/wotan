@@ -37,7 +37,11 @@ volatility_forecaster_free :: proc(model: ^VolatilityForecaster) {
 volatility_forecaster_forward :: proc(
 	model: ^VolatilityForecaster,
 	input: ^t.Tensor,
-) -> ^t.Tensor {
+) -> (
+	fwd_out: ^t.Tensor,
+) {
+	rec_ := nn.forward_record_begin()
+	defer nn.forward_record_end(rec_, fwd_out)
 	h1 := nn.linear_forward(&model.fc1, input)
 	h1_act := t.tensor_relu(h1)
 
@@ -105,7 +109,11 @@ lstm_volatility_forecaster_free :: proc(model: ^LSTMVolatilityForecaster) {
 lstm_volatility_forecaster_forward :: proc(
 	model: ^LSTMVolatilityForecaster,
 	input: ^t.Tensor,
-) -> ^t.Tensor {
+) -> (
+	fwd_out: ^t.Tensor,
+) {
+	rec_ := nn.forward_record_begin()
+	defer nn.forward_record_end(rec_, fwd_out)
 	// 1. Sequence Layer: [batch, seq_len, input_size] → [batch, seq_len, hidden_size]
 	lstm_out := nn.sequential_forward(model.seq_layer, input)
 

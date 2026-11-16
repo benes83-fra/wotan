@@ -73,8 +73,8 @@ sequential_add :: proc(s: ^Sequential, layers: ..Layer) {
 // layers start from a zero state.
 sequential_forward :: proc(s: ^Sequential, input: ^t.Tensor) -> ^t.Tensor {
 	x := input
-	recording := _forward_begin()
-	defer _forward_end(recording, x)
+	recording := forward_record_begin()
+	defer forward_record_end(recording, x)
 	for &layer in s.layers {
 		switch &l in layer {
 		case LinearLayer:

@@ -56,7 +56,15 @@ gat_layer_free :: proc(layer: ^GATLayer) {
 //    weights ∝ A[i, j] · exp(q_i · k_j / √d). With equal scores this is the
 //    A-weighted mean of the neighbours (A row-normalized). Every asset needs at
 //    least one edge (e.g. a self-loop, as compute_correlation_adjacency sets).
-gat_layer_forward :: proc(layer: ^GATLayer, x: ^t.Tensor, adjacency: ^t.Tensor) -> ^t.Tensor {
+gat_layer_forward :: proc(
+	layer: ^GATLayer,
+	x: ^t.Tensor,
+	adjacency: ^t.Tensor,
+) -> (
+	fwd_out: ^t.Tensor,
+) {
+	rec_ := forward_record_begin()
+	defer forward_record_end(rec_, fwd_out)
 	n := x.shape[1]
 	assert(
 		x.shape[2] * x.shape[3] == layer.linear.in_features,

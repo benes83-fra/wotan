@@ -506,6 +506,99 @@ persistence_roundtrip_test :: proc(allocator: mem.Allocator) {
 		)
 	}
 
+	// 7. GPT and BERT files keep the frozen flags; files of the format before
+	//    (GPT id 34, BERT id 32: the same bytes without the trailing flags) load
+	//    with every parameter trainable; a flag count that doesn't match is rejected
+	{
+		flags_of :: proc(ps: [dynamic]^t.Tensor) -> []bool {
+			out := make([]bool, len(ps), context.temp_allocator)
+			for p, i in ps {out[i] = p.requires_grad}
+			delete(ps)
+			return out
+		}
+		same_flags :: proc(a, b: []bool) -> bool {
+			if len(a) != len(b) {return false}
+			for v, i in a {if v != b[i] {return false}}
+			return true
+		}
+		// the file without its trailing count and flags, under an older id
+		old_format :: proc(src, dst: string, old_id: u8, n_params: int) {
+			data, _ := os.read_entire_file(src, context.allocator)
+			defer delete(data)
+			data[len(nn.CHECKPOINT_MAGIC)] = old_id
+			_ = os.write_entire_file(dst, data[:len(data) - 4 - 4 * n_params])
+		}
+		gpt := nn.gpt_model_new(13, 8, 2, 16, 3, 8)
+		defer nn.gpt_model_free(&gpt)
+		nn.gpt_freeze_blocks(&gpt, 0, 2)
+		want_g := flags_of(nn.gpt_model_parameters(&gpt, all = true))
+		fg, fg_old, fg_bad :=
+			file(&files, "gpt_frozen"),
+			file(&files, "gpt_frozen_old"),
+			file(&files, "gpt_frozen_bad")
+		nn.save_gpt_model(&gpt, fg)
+		g2, g_ok := nn.load_gpt_model(fg)
+		got_g := flags_of(nn.gpt_model_parameters(g2, all = true)) if g_ok else nil
+		old_format(fg, fg_old, 34, len(want_g))
+		g3, g3_ok := nn.load_gpt_model(fg_old)
+		g3_trainable := len(nn.gpt_model_parameters(g3)) if g3_ok else -1
+		{
+			data, _ := os.read_entire_file(fg, context.allocator)
+			defer delete(data)
+			data[len(data) - 4 - 4 * len(want_g)] += 1 // one parameter too many
+			_ = os.write_entire_file(fg_bad, data)
+		}
+		g4, g4_ok := nn.load_gpt_model(fg_bad)
+
+		bert := nn.bert_model_new(13, 8, 2, 16, 3, 8)
+		defer nn.bert_model_free(&bert)
+		nn.bert_freeze_blocks(&bert, 1, 3)
+		want_b := flags_of(nn.bert_model_parameters(&bert, all = true))
+		fb, fb_old := file(&files, "bert_frozen"), file(&files, "bert_frozen_old")
+		nn.save_bert_model(&bert, fb)
+		b2, b_ok := nn.load_bert_model(fb)
+		got_b := flags_of(nn.bert_model_parameters(b2, all = true)) if b_ok else nil
+		old_format(fb, fb_old, 32, len(want_b))
+		b3, b3_ok := nn.load_bert_model(fb_old)
+		b3_trainable := len(nn.bert_model_parameters(b3)) if b3_ok else -1
+
+		n_frozen_g, n_frozen_b := 0, 0
+		for v in want_g {if !v {n_frozen_g += 1}}
+		for v in want_b {if !v {n_frozen_b += 1}}
+		ok :=
+			g_ok &&
+			b_ok &&
+			g3_ok &&
+			b3_ok &&
+			!g4_ok &&
+			g4 == nil &&
+			n_frozen_g > 0 &&
+			n_frozen_b > 0 &&
+			same_flags(want_g, got_g) &&
+			same_flags(want_b, got_b) &&
+			g3_trainable == len(want_g) &&
+			b3_trainable == len(want_b)
+		expect(
+			&passed,
+			&total,
+			ok,
+			fmt.tprintf(
+				"frozen flags in model files: GPT %d of %d frozen restored %v, BERT %d of %d restored %v; older files load all trainable (GPT %d, BERT %d); a wrong flag count rejected %v",
+				n_frozen_g,
+				len(want_g),
+				same_flags(want_g, got_g),
+				n_frozen_b,
+				len(want_b),
+				same_flags(want_b, got_b),
+				g3_trainable,
+				b3_trainable,
+				!g4_ok,
+			),
+		)
+		for m in ([]^nn.GPTModel{g2, g3}) {if m != nil {nn.gpt_model_free(m); free(m)}}
+		for m in ([]^nn.BERTModel{b2, b3}) {if m != nil {nn.bert_model_free(m); free(m)}}
+	}
+
 	fmt.printf("Persistence summary: %d/%d passed\n", passed, total)
 	record_failures(total - passed)
 }

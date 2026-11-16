@@ -357,7 +357,7 @@ U (3 x 3)
 
 ### Inverses
 
-`mat_inverse_lu` and `matrix_inverse` compute the inverse from an LU factorisation. Both return the inverse and an `ok` flag, which is `false` for a singular matrix:
+`mat_inverse_lu` and `matrix_inverse` compute the inverse from an LU factorisation. Both return the inverse and an `ok` flag, which is `false` for a singular or numerically singular matrix:
 
 ```odin
 Ainv, inv_ok := l.mat_inverse_lu(&A)   // ok = false for a singular matrix
@@ -386,9 +386,31 @@ matrix_inverse: false 0 0
 
 Both panic on a non-square or empty matrix. On a singular matrix they return an empty 0 × 0 matrix, which is safe to free. For a singular or rank-deficient matrix, `pinv` (section 10) gives the pseudo-inverse.
 
-To solve a system, call `lu_solve` or `solve_spd_cholesky`. Computing an inverse and multiplying by it is slower and less accurate.
+A matrix counts as singular when a pivot is exactly zero, or when it is numerically singular: its reciprocal condition number in the 1-norm, rcond₁ = 1 / (‖A‖₁·‖A⁻¹‖₁), is below machine epsilon (2.2·10⁻¹⁶). Below that, rounding errors are as large as the inverse itself, so not one digit of it is correct. This is the test LAPACK's `dgesvx` and SciPy's `solve` apply. `numpy.linalg.inv` applies no such test and returns the large, meaningless numbers. `rcond1(&A, &Ainv)` computes rcond₁ exactly from a matrix and its inverse:
 
-Singularity means an exactly zero pivot. A nearly singular matrix passes and gives large, inaccurate results. Check it first with the condition number from section 10.
+```odin
+for n in ([]int{8, 12}) {
+	H := l.matrix_new(f64, n, n) // Hilbert matrix, h_ij = 1/(i + j + 1)
+	defer l.matrix_free(&H)
+	for i in 0 ..< n {for j in 0 ..< n {H.data[i * n + j] = 1 / f64(i + j + 1)}}
+	Hinv, ok := l.matrix_inverse(&H)
+	defer l.matrix_free(&Hinv)
+	if ok {
+		fmt.printf("Hilbert %d: ok, rcond1 %.4e\n", n, l.rcond1(&H, &Hinv))
+	} else {
+		fmt.printf("Hilbert %d: numerically singular (%d x %d result)\n", n, Hinv.rows, Hinv.cols)
+	}
+}
+```
+
+```
+Hilbert 8: ok, rcond1 2.9522e-11
+Hilbert 12: numerically singular (0 x 0 result)
+```
+
+numpy gives `1/cond(H, 1)` = 2.9522·10⁻¹¹ for n = 8 and 2.6·10⁻¹⁷ for n = 12. A matrix that passes can still be badly conditioned: with rcond₁ = 3·10⁻¹¹, about 10 of the 16 digits of the inverse are lost.
+
+To solve a system, call `lu_solve` or `solve_spd_cholesky`. Computing an inverse and multiplying by it is slower and less accurate.
 
 ## 7. Cholesky: symmetric positive definite systems
 
@@ -617,7 +639,7 @@ not symmetric: false 0 0 0
 
 `eigh` works on a copy and leaves A unchanged. It panics if A is not square or is empty.
 
-It checks symmetry in every build. Each pair must satisfy |aᵢⱼ − aⱼᵢ| ≤ 10⁻¹⁰ · max|aₖₗ|, a tolerance relative to the largest finite entry (the constant `EIGH_SYM_RTOL`). If a pair is further apart, `ok` is `false` and the eigenvalues and V are empty; free them as usual. Within the tolerance, `eigh` decomposes the symmetric part (A + Aᵀ)/2, so rounding in a computed covariance matrix does no harm. The check does not look at NaN entries: a NaN in A gives NaN results with `ok = true`, as in numpy.
+It checks symmetry in every build. Each pair must satisfy |aᵢⱼ − aⱼᵢ| ≤ 10⁻¹⁰ · max|aₖₗ|, a tolerance relative to the largest finite entry (the constant `EIGH_SYM_RTOL`). If a pair is further apart, `ok` is `false` and the eigenvalues and V are empty; free them as usual. Within the tolerance, `eigh` decomposes the symmetric part (A + Aᵀ)/2, so rounding in a computed covariance matrix does no harm. A NaN or infinite entry gives `ok = false` with eigenvalues and V of full size, all NaN. SciPy's `eigh` rejects such a matrix too; numpy returns numbers that mean nothing (eigenvalues ±1.414 for [[2, 1], [1, NaN]]).
 
 The sign of each eigenvector is arbitrary, as in every eigen solver.
 
@@ -802,7 +824,7 @@ The rules are the same as in the rest of Wotan:
 - **Free an `LstsqResult` with `lstsq_result_free(&res, allocator)`.** It frees `beta` and `residuals`.
 - **Internal scratch is freed inside each procedure.** Only the documented outputs are left for you to free, and a tracking allocator reports no leaks for any procedure in this guide. Some procedures use `context.temp_allocator` for short-lived buffers, and they free those too.
 - **A matrix may live on the temp allocator.** Passing `context.temp_allocator` and never freeing is fine for short computations, as long as you call `free_all(context.temp_allocator)` regularly, for example once per loop iteration.
-- **A zero-sized matrix is safe to free.** `mat_inverse_lu` and `matrix_inverse` on a singular matrix, and `eigh` on a non-symmetric one, return empty results, and `matrix_free` or `delete` on them does nothing harmful.
+- **A zero-sized matrix is safe to free.** `mat_inverse_lu` and `matrix_inverse` on a singular or numerically singular matrix, and `eigh` on a non-symmetric one, return empty results, and `matrix_free` or `delete` on them does nothing harmful.
 
 [`tests/linalg_memory_test.odin`](../tests/linalg_memory_test.odin) runs `lu_solve`, `mat_inverse_lu`, `matrix_inverse`, `apply_pivots_vec`, `eigh`, `jacobi_eigen_symmetric`, `pinv`, `svd_thin`, the `cond2_*` procedures and `lstsq` under a tracking allocator and checks that they leave nothing behind.
 
@@ -887,12 +909,12 @@ The coefficients, standard errors and t-values agree with `statsmodels.OLS(y, X)
 | Transpose, Kronecker | `matrix_transpose`, `kron` / `kron_simd` |
 | Covariance, correlation | `covariance`, `correlation` |
 | LU | `lu_decompose`, `lu_solve`, `lu_det`, `lu_extract_LU` |
-| Inverse | `mat_inverse_lu`, `matrix_inverse` (both return ok), `spd_inverse` (SPD), `pinv` (pseudo-inverse) |
+| Inverse | `mat_inverse_lu`, `matrix_inverse` (both return ok; false also for rcond₁ < ε), `spd_inverse` (SPD), `pinv` (pseudo-inverse) |
 | Cholesky | `cholesky(&M, mode)`, `cholesky_try`, `solve_spd_cholesky`, `forward_substitute_simd`, `backward_substitute_simd` |
 | QR | `qr_decompose`, `qr_decompose_thin`, `upper_tri_solve` |
 | Least squares | `lstsq(&X, y, method)`, `lstsq_result_free` |
 | Symmetric eigen | `eigh(&A, order)` (returns ok), `jacobi_eigen_symmetric` (unsorted, unchecked) |
 | General eigenvalues | `eigvals_general`, `eigvals_modulus_max` |
 | SVD | `svd`, `svd_thin`, `svd_jacobi`, `pinv` |
-| Condition number | `cond2_svd`, `cond2_svd_thin`, `cond2_sym`, `rcond2_svd`, `rcond2_sym` |
+| Condition number | `cond2_svd`, `cond2_svd_thin`, `cond2_sym`, `rcond2_svd`, `rcond2_sym`, `rcond1(&A, &Ainv)` (1-norm, exact from the inverse) |
 | Vector kernels | `vec_*_simd`, `axpy_simd`, `ger_simd`, `sum_simd`, `rotate_pair_simd` |

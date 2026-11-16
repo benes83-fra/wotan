@@ -613,6 +613,41 @@ Wotan follows the usual Odin rule: whoever creates something frees it. In `core`
 
 The usual pattern is to put a `defer` right after each allocation, as the examples in this guide do. Run with `-debug` and the tracking allocator from section 1, and any leak is reported with the line that allocated it.
 
+**Temporary scratch.** `w.TEMP_GUARD()` marks the current position of `context.temp_allocator` and releases everything allocated on it after the mark when the enclosing procedure (or block) ends. Wotan's procedures that use temporary scratch, such as the chart procedures, the ARIMA fits and the optimizers, start with it, so a loop that calls them does not grow the temporary allocator. It rewinds:
+- `runtime.Default_Temp_Allocator`, Odin's default or one you set up yourself;
+- `runtime.Arena`;
+- `mem.Arena` from `core:mem`;
+- `virtual.Arena` from `core:mem/virtual`.
+
+Any other allocator, such as a tracking allocator, cannot be rewound to a mark; the guard then does nothing, and the memory stays until `free_all(context.temp_allocator)`. Odin's own `runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()` rewinds only the global default. `w.TEMP_GUARD(ignore = true)` does nothing, for code paths whose result itself goes on the temporary allocator. `w.temp_begin()` and `w.temp_end(mark)` are the two halves without the `defer`.
+
+```odin
+// a step that needs 64 KB of scratch space
+step :: proc() -> int {
+	w.TEMP_GUARD() // the scratch below is released when step returns
+	buf := make([]u8, 64 * 1024, context.temp_allocator)
+	buf[0] = 1
+	return len(buf)
+}
+
+main :: proc() {
+	backing := make([]u8, 1 << 20)
+	defer delete(backing)
+	arena: mem.Arena
+	mem.arena_init(&arena, backing)
+	context.temp_allocator = mem.arena_allocator(&arena)
+
+	for _ in 0 ..< 100 {_ = step()}
+	fmt.println("arena bytes in use after 100 steps:", arena.offset)
+}
+```
+
+```
+arena bytes in use after 100 steps: 0
+```
+
+Without the guard, the 1 MB arena would be full after 16 steps.
+
 ## 17. A complete example
 
 This example loads trades and sector data, computes a signed notional per trade, keeps the trades from 4 March onwards, adds the sector to each trade, and ranks sectors by net flow. It uses most of the package.
@@ -710,5 +745,6 @@ The signed column is added to `trades` (step 1) before `recent` filters it. `fil
 | Join | `join`, `join_on` with `.Inner`, `.Left`, `.Right`, `.Outer` |
 | Copy | `materialize`, `column_clone`, `column_take` |
 | Free | `destroy_dataframe`, `destroy_column`, `destroy_grouped_dataframe`, `destroy_groupby2`, `delete` (masks, strings) |
+| Temporary scratch | `TEMP_GUARD`, `temp_begin`, `temp_end` |
 
 For more examples, the tests in [`tests/`](../tests/) exercise every procedure. [`core_contracts_test.odin`](../tests/core_contracts_test.odin) in particular pins down the exact semantics of nulls, views, sorting, grouping and joins.

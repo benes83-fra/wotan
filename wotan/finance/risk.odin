@@ -733,11 +733,27 @@ _garch_split :: proc(n: int, train_fraction: f64) -> int {
 // with those parameters: cond_var[t] uses returns up to t-1, so for
 // t ≥ n_train it is a genuine one-step-ahead forecast made with parameters
 // that never saw the test returns. Free with free_garch_out_of_sample.
+//
+// refit_every > 0 re-estimates the model every refit_every test returns on an
+// expanding window: at s = n_train + k·refit_every the mean and the parameters
+// are estimated again on returns[:s], and cond_var[s ..< s + refit_every] is
+// filtered forward with that fit from its own in-sample variances. Each forecast
+// still uses returns up to t-1 only, with parameters that saw returns before the
+// last refit only. Each fit is a segment; segment k covers the test returns from
+// segments[k].start to the next segment's start. resid[t] = returns[t] minus the
+// mean of the segment covering t (the training mean before n_train).
+GARCH_Segment :: struct {
+	start: int, // first return this fit forecasts
+	mu:    f64, // mean of returns[:start]
+	fit:   a.GARCH_Result, // fitted on returns[:start] - mu
+}
+
 GARCH_OutOfSample :: struct {
-	fit:      a.GARCH_Result, // fitted on resid[:n_train]
-	resid:    []f64, // returns - μ, all n
+	fit:      a.GARCH_Result, // fitted on resid[:n_train] (= segments[0].fit)
+	resid:    []f64, // returns - μ of the covering segment, all n
 	cond_var: []f64, // all n
-	mu:       f64,
+	mu:       f64, // the training mean (= segments[0].mu)
+	segments: []GARCH_Segment, // one per fit, the training fit first
 }
 
 garch_out_of_sample :: proc(
@@ -747,6 +763,7 @@ garch_out_of_sample :: proc(
 	p: int = 1,
 	q: int = 1,
 	allocator: mem.Allocator = context.allocator,
+	refit_every: int = 0,
 ) -> (
 	o: GARCH_OutOfSample,
 ) {
@@ -755,25 +772,47 @@ garch_out_of_sample :: proc(
 		"garch_out_of_sample: 1 ≤ n_train ≤ len(returns)",
 	)
 	n := len(returns)
-	for r in returns[:n_train] {o.mu += r}
-	o.mu /= f64(n_train)
+	n_seg := 1
+	if refit_every > 0 && n > n_train {n_seg = (n - n_train + refit_every - 1) / refit_every}
+	o.segments = make([]GARCH_Segment, n_seg, allocator)
 	o.resid = make([]f64, n, allocator)
-	for r, i in returns {o.resid[i] = r - o.mu}
-	o.fit = _garch_fit_quiet(o.resid[:n_train], model_type, p, q, allocator)
 	o.cond_var = make([]f64, n, allocator)
-	if len(o.fit.conditional_var) < n_train {return} 	// too few returns to fit: all 0
-	copy(o.cond_var, o.fit.conditional_var[:n_train])
-	for t in n_train ..< n {
-		o.cond_var[t] = a._garch_variance_at(&o.fit.params, o.resid, o.cond_var, t)
+	work := make([]f64, n, context.temp_allocator) // residuals / variances of one fit
+	wvar := make([]f64, n, context.temp_allocator)
+	defer {delete(work, context.temp_allocator); delete(wvar, context.temp_allocator)}
+	for k in 0 ..< n_seg {
+		s := n_train + k * refit_every
+		e := n if k == n_seg - 1 else s + refit_every
+		seg := &o.segments[k]
+		seg.start = s
+		for r in returns[:s] {seg.mu += r}
+		seg.mu /= f64(s)
+		for r, i in returns[:e] {work[i] = r - seg.mu}
+		seg.fit = _garch_fit_quiet(work[:s], model_type, p, q, allocator)
+		lo := 0 if k == 0 else s
+		copy(o.resid[lo:e], work[lo:e])
+		if len(seg.fit.conditional_var) < s {continue} 	// too few returns to fit: 0
+		copy(wvar, seg.fit.conditional_var[:s])
+		for t in s ..< e {wvar[t] = a._garch_variance_at(&seg.fit.params, work, wvar, t)}
+		copy(o.cond_var[lo:e], wvar[lo:e])
 	}
+	o.fit, o.mu = o.segments[0].fit, o.segments[0].mu
 	return
+}
+
+// The segment whose fit forecasts return t (segment 0 for training returns)
+garch_out_of_sample_segment :: proc(o: ^GARCH_OutOfSample, t: int) -> ^GARCH_Segment {
+	k := len(o.segments) - 1
+	for k > 0 && o.segments[k].start > t {k -= 1}
+	return &o.segments[k]
 }
 
 free_garch_out_of_sample :: proc(
 	o: ^GARCH_OutOfSample,
 	allocator: mem.Allocator = context.allocator,
 ) {
-	a.garch_result_free(&o.fit, allocator)
+	for &seg in o.segments {a.garch_result_free(&seg.fit, allocator)}
+	delete(o.segments, allocator)
 	delete(o.resid, allocator)
 	delete(o.cond_var, allocator)
 }
@@ -790,8 +829,11 @@ free_garch_out_of_sample :: proc(
 // The backtests are out of sample: a second model is fitted on the first
 // round(train_fraction·n) returns only (backtest_start = that count), its
 // variance is filtered forward one step ahead over the remaining returns, and
-// VaR_t = z_c·σ_t is backtested there. With fewer than GARCH_MIN_TRAIN training
-// returns or no test returns, backtest_start = n and the backtests are empty.
+// VaR_t = z_c·σ_t is backtested there. refit_every > 0 re-estimates that model
+// every refit_every test returns on all returns before them
+// (garch_out_of_sample), and z_c comes from the fit in force on day t. With
+// fewer than GARCH_MIN_TRAIN training returns or no test returns,
+// backtest_start = n and the backtests are empty.
 garch_risk_metrics :: proc(
 	returns: []f64,
 	model_type: a.GARCH_Model_Type = .GARCH,
@@ -800,6 +842,7 @@ garch_risk_metrics :: proc(
 	risk_free_rate: f64 = 0.02,
 	allocator: mem.Allocator = context.allocator,
 	train_fraction: f64 = 0.5,
+	refit_every: int = 0,
 ) -> GARCH_RiskMetrics {
 	metrics: GARCH_RiskMetrics
 	metrics.base = calculate_risk_metrics(returns, nil, risk_free_rate)
@@ -842,15 +885,23 @@ garch_risk_metrics :: proc(
 	n_train := _garch_split(n, train_fraction)
 	metrics.backtest_start = n_train
 	if n_train < n {
-		o := garch_out_of_sample(returns, n_train, model_type, p, q, allocator)
+		o := garch_out_of_sample(returns, n_train, model_type, p, q, allocator, refit_every)
 		defer free_garch_out_of_sample(&o, allocator)
-		op := &o.fit.params
-		test_var := o.cond_var[n_train:]
-		var_95 := var_garch(test_var, 0.95, model_type, op.nu, op.shape, allocator)
-		var_99 := var_garch(test_var, 0.99, model_type, op.nu, op.shape, allocator)
+		var_95 := make([]f64, n - n_train, allocator)
+		var_99 := make([]f64, n - n_train, allocator)
 		defer {
 			delete(var_95, allocator)
 			delete(var_99, allocator)
+		}
+		for &seg, k in o.segments {
+			e := n if k == len(o.segments) - 1 else o.segments[k + 1].start
+			sp := &seg.fit.params
+			z95 := _std_quantile(model_type, sp.nu, sp.shape, 0.95)
+			z99 := _std_quantile(model_type, sp.nu, sp.shape, 0.99)
+			for t in seg.start ..< e {
+				sd := math.sqrt(o.cond_var[t])
+				var_95[t - n_train], var_99[t - n_train] = z95 * sd, z99 * sd
+			}
 		}
 		metrics.backtest_95 = backtest_var(returns[n_train:], var_95, 0.95)
 		metrics.backtest_99 = backtest_var(returns[n_train:], var_99, 0.99)
@@ -1429,6 +1480,62 @@ ged_cvar :: proc(confidence: f64, shape: f64) -> f64 {
 	lg2, _ := math.lgamma(2.0 / shape)
 	return lambda * math.exp(lg2 - lg1) * Q2 / (2.0 * alpha)
 }
+// GPD tail of standardized residuals as positive losses (McNeil & Frey): the
+// threshold u is the ⌊(1-pct)·n⌋+1-th largest loss, the GPD is fitted to the
+// exceedances (ok = false with fewer than 10), and q / es_q are the 95% / 99%
+// standardized loss quantile and ES (empirical when the level lies more than one
+// observation inside the body)
+@(private = "file")
+_EVT_Std_Tail :: struct {
+	u, xi, beta: f64,
+	n_exc:       int,
+	q, es_q:     [2]f64,
+	ok:          bool,
+}
+
+@(private = "file")
+_evt_std_tail :: proc(std_resid: []f64, threshold_percentile: f64) -> (r: _EVT_Std_Tail) {
+	n := len(std_resid)
+	losses := make([]f64, n, context.temp_allocator)
+	defer delete(losses, context.temp_allocator)
+	for i in 0 ..< n {losses[i] = -std_resid[i]}
+	sorted := slice.clone(losses, context.temp_allocator)
+	defer delete(sorted, context.temp_allocator)
+	slice.sort(sorted)
+	r.u = sorted[n - 1 - _tail_size(threshold_percentile, n)]
+
+	exceedances := make([dynamic]f64, 0, n / 10 + 1, context.temp_allocator)
+	defer delete(exceedances)
+	for l in losses {
+		if l > r.u {append(&exceedances, l - r.u)}
+	}
+	r.n_exc = len(exceedances)
+	if r.n_exc < 10 {return}
+	r.xi, r.beta, _ = gpd_fit(exceedances[:])
+
+	// The loss tail is evt_fit's left tail of -losses, so its VaR / ES are q / es_q
+	tail := EVT_Result {
+		threshold     = -r.u,
+		xi            = r.xi,
+		beta          = r.beta,
+		n_exceedances = r.n_exc,
+		n_total       = n,
+	}
+	levels := [2]f64{0.95, 0.99}
+	for p, k in levels {
+		if (1.0 - p) * f64(n) > f64(r.n_exc + 1) {
+			neg := make([]f64, n, context.temp_allocator)
+			defer delete(neg, context.temp_allocator)
+			for l, i in losses {neg[i] = -l}
+			r.q[k], r.es_q[k] = var_historical(neg, p), conditional_var(neg, p)
+		} else {
+			r.q[k], r.es_q[k] = evt_var_es(&tail, p)
+		}
+	}
+	r.ok = true
+	return
+}
+
 // GARCH-EVT (McNeil & Frey 2000): GARCH(1,1)-t on the training returns
 // returns[:n_train] minus their mean μ, n_train = round(train_fraction·n), then
 // a GPD on the largest standardized training losses -z_t beyond the
@@ -1441,11 +1548,16 @@ ged_cvar :: proc(confidence: f64, shape: f64) -> f64 {
 // (backtest_start = n_train), so they are out of sample. train_fraction = 1
 // fits all returns and leaves the backtests empty (backtest_start = n). Needs
 // at least GARCH_MIN_TRAIN training returns, else the result is empty.
+// refit_every > 0 re-estimates the GARCH model, μ and the GPD tail every
+// refit_every test returns on all returns before them (garch_out_of_sample);
+// VaR_t then uses the fit in force on day t. The reported parameters, threshold
+// and quantiles are those of the training fit.
 garch_evt_fit :: proc(
 	returns: []f64,
 	threshold_percentile: f64 = 0.90,
 	allocator: mem.Allocator = context.allocator,
 	train_fraction: f64 = 0.5,
+	refit_every: int = 0,
 ) -> GARCH_EVT_Result {
 	result: GARCH_EVT_Result
 	n := len(returns)
@@ -1453,68 +1565,38 @@ garch_evt_fit :: proc(
 	if n_train < GARCH_MIN_TRAIN {return result}
 	n_train = min(n_train, n)
 
-	o := garch_out_of_sample(returns, n_train, .StudentT, 1, 1, allocator)
+	o := garch_out_of_sample(returns, n_train, .StudentT, 1, 1, allocator, refit_every)
 	defer free_garch_out_of_sample(&o, allocator)
-	mu := o.mu
 	garch_res := &o.fit
 	result.garch_omega = garch_res.params.omega
 	result.garch_alpha = garch_res.params.alpha[0]
 	result.garch_beta = garch_res.params.beta[0]
 	result.backtest_start = n_train
 
-	// Left tail of the standardized training residuals as positive losses
+	tr := _evt_std_tail(garch_res.standardized_resid[:n_train], threshold_percentile)
+	result.evt_threshold = tr.u
+	result.n_exceedances = tr.n_exc
+	if !tr.ok {return result}
+	result.evt_xi, result.evt_beta = tr.xi, tr.beta
+	result.q_95, result.q_99 = tr.q[0], tr.q[1]
+	result.es_q_95, result.es_q_99 = tr.es_q[0], tr.es_q[1]
+
 	n_all := n
-	n = n_train
-	losses := make([]f64, n, context.temp_allocator)
-	defer delete(losses, context.temp_allocator)
-	for i in 0 ..< n {losses[i] = -garch_res.standardized_resid[i]}
-	sorted := slice.clone(losses, context.temp_allocator)
-	defer delete(sorted, context.temp_allocator)
-	slice.sort(sorted)
-	u := sorted[n - 1 - _tail_size(threshold_percentile, n)]
-	result.evt_threshold = u
-
-	exceedances := make([dynamic]f64, 0, n / 10 + 1, context.temp_allocator)
-	defer delete(exceedances)
-	for l in losses {
-		if l > u {append(&exceedances, l - u)}
-	}
-	result.n_exceedances = len(exceedances)
-	if result.n_exceedances < 10 {return result}
-
-	xi, beta, _ := gpd_fit(exceedances[:])
-	result.evt_xi = xi
-	result.evt_beta = beta
-
-	// The loss tail is evt_fit's left tail of -losses, so its VaR / ES are q / es_q
-	tail := EVT_Result {
-		threshold     = -u,
-		xi            = xi,
-		beta          = beta,
-		n_exceedances = result.n_exceedances,
-		n_total       = n,
-	}
-	q, es_q: [2]f64
-	levels := [2]f64{0.95, 0.99}
-	for p, k in levels {
-		if (1.0 - p) * f64(n) > f64(result.n_exceedances + 1) {
-			neg := make([]f64, n, context.temp_allocator)
-			defer delete(neg, context.temp_allocator)
-			for l, i in losses {neg[i] = -l}
-			q[k], es_q[k] = var_historical(neg, p), conditional_var(neg, p)
-		} else {
-			q[k], es_q[k] = evt_var_es(&tail, p)
-		}
-	}
-	result.q_95, result.q_99 = q[0], q[1]
-	result.es_q_95, result.es_q_99 = es_q[0], es_q[1]
-
 	result.var_95_series = make([]f64, n_all, allocator)
 	result.var_99_series = make([]f64, n_all, allocator)
-	for i in 0 ..< n_all {
-		sigma := math.sqrt(o.cond_var[i])
-		result.var_95_series[i] = sigma * q[0] - mu
-		result.var_99_series[i] = sigma * q[1] - mu
+	tail := tr
+	for &seg, k in o.segments {
+		if k > 0 {
+			st := _evt_std_tail(seg.fit.standardized_resid[:seg.start], threshold_percentile)
+			if st.ok {tail = st} 	// else keep the previous tail
+		}
+		lo := 0 if k == 0 else seg.start
+		e := n_all if k == len(o.segments) - 1 else o.segments[k + 1].start
+		for i in lo ..< e {
+			sigma := math.sqrt(o.cond_var[i])
+			result.var_95_series[i] = sigma * tail.q[0] - seg.mu
+			result.var_99_series[i] = sigma * tail.q[1] - seg.mu
+		}
 	}
 
 	if n_train < n_all {

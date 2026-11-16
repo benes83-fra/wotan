@@ -145,7 +145,11 @@ patchtst_forward :: proc(
 	x: ^t.Tensor,
 	channels: []int,
 	alloc: mem.Allocator,
-) -> ^t.Tensor {
+) -> (
+	fwd_out: ^t.Tensor,
+) {
+	rec_ := nn.forward_record_begin()
+	defer nn.forward_record_end(rec_, fwd_out)
 	c := m.config
 	R, L, H, np, d := x.data.rows, c.input_size, c.horizon, m.n_patches, c.d_model
 	assert(x.data.cols == L, "patchtst_forward: x must be [rows, input_size]")

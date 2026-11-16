@@ -12,11 +12,11 @@ EighOrder :: enum {
 // Symmetric eigen-decomposition: A = V diag(W) Vᵀ (W sorted by `order`,
 // eigenvectors in the columns of V). A must be square and non-empty (panics
 // otherwise). A is checked for symmetry in every build: each pair must satisfy
-// |a_ij - a_ji| <= EIGH_SYM_RTOL · max|a_kl| (largest finite entry); if not,
-// ok = false and W / V are empty (W has length 0, V is 0 × 0; freeing them is
-// still fine). Within the tolerance the decomposition is of (A + Aᵀ) / 2.
-// NaN entries are not reported by the check; they give NaN results. A is not
-// modified.
+// |a_ij - a_ji| <= EIGH_SYM_RTOL · max|a_kl|; if not, ok = false and W / V are
+// empty (W has length 0, V is 0 × 0; freeing them is still fine). Within the
+// tolerance the decomposition is of (A + Aᵀ) / 2. A NaN or infinite entry gives
+// ok = false with W and V of full size, filled with NaN (SciPy rejects such
+// input; numpy returns meaningless numbers). A is not modified.
 EIGH_SYM_RTOL :: 1e-10
 
 eigh :: proc(
@@ -35,7 +35,14 @@ eigh :: proc(
 
 	scale := 0.0
 	for v in A.data[:n * n] {
-		if !math.is_inf(v) && !math.is_nan(v) {scale = max(scale, math.abs(v))}
+		if math.is_inf(v) || math.is_nan(v) {
+			W = make([]f64, n, allocator)
+			V = matrix_new(f64, n, n, allocator)
+			for &x in W {x = math.nan_f64()}
+			for &x in V.data {x = math.nan_f64()}
+			return
+		}
+		scale = max(scale, math.abs(v))
 	}
 	tol := EIGH_SYM_RTOL * scale
 	for i in 0 ..< n {

@@ -6,7 +6,6 @@ import w "../core"
 import l "../linalg"
 import opt "../optimize"
 import p "../plot"
-import "base:runtime"
 import "core:fmt"
 import "core:math"
 import "core:math/rand"
@@ -1062,7 +1061,7 @@ _calibration_loss :: proc(
 	horizon: PDPM_Horizon = {},
 ) -> f64 {
 	// pricing scratch (payoffs, state prices) lives only for this evaluation
-	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	w.TEMP_GUARD()
 	if horizon.returns_period > 0.0 {
 		Ctx :: struct {
 			b, spot:   f64,
@@ -1531,7 +1530,7 @@ _calibration_loss_power_utility :: proc(
 	horizon: PDPM_Horizon = {},
 ) -> f64 {
 	// pricing scratch (payoffs, state prices) lives only for this evaluation
-	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	w.TEMP_GUARD()
 	if horizon.returns_period > 0.0 {
 		Ctx :: struct {
 			gamma, spot: f64,
@@ -1782,7 +1781,7 @@ _calibration_loss_quadratic :: proc(
 	horizon: PDPM_Horizon = {},
 ) -> f64 {
 	// pricing scratch (payoffs, state prices) lives only for this evaluation
-	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	w.TEMP_GUARD()
 	if horizon.returns_period > 0.0 {
 		Ctx :: struct {
 			b, c, spot: f64,
@@ -2078,7 +2077,7 @@ _calibration_loss_exponential :: proc(
 	horizon: PDPM_Horizon = {},
 ) -> f64 {
 	// pricing scratch (payoffs, state prices) lives only for this evaluation
-	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	w.TEMP_GUARD()
 	if horizon.returns_period > 0.0 {
 		Ctx :: struct {
 			gamma, spot: f64,
@@ -2359,7 +2358,7 @@ _calibration_loss_multifactor :: proc(
 	horizon: PDPM_Horizon = {},
 ) -> f64 {
 	// pricing scratch (payoffs, state prices) lives only for this evaluation
-	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	w.TEMP_GUARD()
 	if horizon.returns_period > 0.0 {
 		// only the market factor (factors[0], the terminal-price driver) is mapped to the horizon
 		Ctx :: struct {
@@ -2717,7 +2716,7 @@ _calibration_loss_multifactor_4d :: proc(
 	horizon: PDPM_Horizon = {},
 ) -> f64 {
 	// pricing scratch (payoffs, state prices) lives only for this evaluation
-	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	w.TEMP_GUARD()
 	if horizon.returns_period > 0.0 {
 		// only the market factor (factors[0], the terminal-price driver) is mapped to the horizon
 		Ctx :: struct {

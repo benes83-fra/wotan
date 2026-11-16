@@ -1,6 +1,6 @@
 package plot
 
-import "base:runtime"
+import w "../core"
 import "core:slice"
 import "core:sync"
 
@@ -456,7 +456,7 @@ _longest_match :: proc(
 // zlib stream of `data`; the result is allocated with `allocator`
 zlib_compress :: proc(data: []u8, allocator := context.allocator) -> []u8 {
 	// scratch released on return, unless the result itself lives on the temp allocator
-	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD(ignore = _is_temp_allocator(allocator))
+	w.TEMP_GUARD(ignore = _is_temp_allocator(allocator))
 	sync.once_do(&_tables_once, _build_tables)
 	scratch := context.temp_allocator
 	head := make([]i32, 1 << HASH_BITS, scratch)
@@ -536,7 +536,7 @@ png_filter_rows :: proc(
 ) -> []u8 {
 	stride := width * bpp
 	out := make([]u8, height * (stride + 1), allocator)
-	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD() // after `out`: the scratch below is released on return
+	w.TEMP_GUARD() // after `out`: the scratch below is released on return
 	cand := make([]u8, 5 * stride, context.temp_allocator)
 	defer delete(cand, context.temp_allocator)
 	zero_row := make([]u8, stride, context.temp_allocator)

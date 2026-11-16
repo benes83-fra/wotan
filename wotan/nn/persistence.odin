@@ -21,12 +21,17 @@ import "core:os"
 //     counts. Older types are still read (all parameters trainable): 2
 //     without the frozen flags, 1 also with one shared step count, 0 also
 //     without the hyperparameters.
-//   GPT (34; older: 33 without the GELU flag (exact GELU), 31 also without
-//     the norm and weight-tying flags, 28 also without the dropout rate, 27
-//     also without the attention flags, 17 also without MoE), BERT (32; older: 29 without the
-//     dropout rate, 18 also without the attention flags), Generator (19),
-//     Discriminator (20), VAE encoder (21) and decoder (22): magic, type id,
-//     configuration, tensors. Files without the dropout rate load with 0.1.
+//   GPT (38; older: 34 without the frozen flags, 33 also without the GELU
+//     flag (exact GELU), 31 also without the norm and weight-tying flags, 28
+//     also without the dropout rate, 27 also without the attention flags, 17
+//     also without MoE), BERT (39; older: 32 without the frozen flags, 29 also
+//     without the dropout rate, 18 also without the attention flags),
+//     Generator (19), Discriminator (20), VAE encoder (21) and decoder (22):
+//     magic, type id, configuration, tensors. GPT and BERT files end with the
+//     count of all parameters and a frozen flag (i32) for each, in the order of
+//     gpt_model_parameters / bert_model_parameters (all = true); older files
+//     load with every parameter trainable. Files without the dropout rate load
+//     with 0.1.
 // Attention layers store use_flash and is_causal before their projections.
 // A file is built in memory and written at once. Reading checks every access,
 // so a truncated or foreign file fails instead of panicking. Loading builds
@@ -70,7 +75,7 @@ _Layer_Id :: enum {
 	EncoderBlock_0 = 15,
 	Encoder_0      = 16,
 	GAT_0          = 24,
-	// Mamba without the pre-norm weight (read only; it loads as 1)
+	// Mamba without the pre-norm and the residual (a plain layer, MambaLayer.plain)
 	Mamba_0        = 25,
 	// GRU without bias_hn: loads with bias_hn = nil (the same function and the
 	// same parameter list); written for such layers
@@ -92,8 +97,10 @@ _File_Id :: enum {
 	BERT_1        = 29, // no dropout rate (read only)
 	GPT_2         = 31, // no norm or weight-tying flags (read only)
 	GPT_3         = 33, // no GELU flag (read only; exact GELU)
-	GPT           = 34, // dropout rate, RMSNorm, tied-embedding and tanh-GELU flags; per block: MoE, use_flash and is_causal flags
-	BERT          = 32, // dropout rate; per block: use_flash and is_causal flags
+	GPT_4         = 34, // no frozen flags (read only)
+	BERT_2        = 32, // no frozen flags (read only)
+	GPT           = 38, // dropout rate, RMSNorm, tied-embedding and tanh-GELU flags; per block: MoE, use_flash and is_causal flags; frozen flags
+	BERT          = 39, // dropout rate; per block: use_flash and is_causal flags; frozen flags
 }
 
 // ============================================================================
@@ -410,7 +417,7 @@ _io_layer :: proc(io: ^_Io, layer: ^Layer, flags: bool) {
 		_io_linear(io, &l.proj_out)
 		_io_tensor(io, &l.A)
 		_io_tensor(io, &l.D)
-		if flags {_io_tensor(io, &l.norm.gamma)}
+		if flags && !l.plain {_io_tensor(io, &l.norm.gamma)}
 	case MoELayer:
 		_io_moe(io, &l)
 	case MaxPool2dLayer, AvgPool2dLayer, DropoutLayer, Activation, FlattenLayer:
@@ -482,7 +489,7 @@ _write_layer_header :: proc(io: ^_Io, layer: ^Layer) {
 			int(l.linear.bias != nil),
 		)
 	case MambaLayer:
-		ints(io, .Mamba, l.d_model, l.d_state)
+		ints(io, .Mamba_0 if l.plain else .Mamba, l.d_model, l.d_state)
 	case Conv1dLayer:
 		ints(
 			io,
@@ -638,7 +645,9 @@ _read_layer_header :: proc(
 	case .Mamba, .Mamba_0:
 		d, n := _get_size(io), _get_size(io)
 		if !io.ok || n < 2 {return}
-		layer = mamba_layer_new(d, n, alloc)
+		m := mamba_layer_new(d, n, alloc)
+		m.plain = _Layer_Id(id) == .Mamba_0 // saved before the block form: its own function
+		layer = m
 	case .MoE:
 		e, k, d, d_ff := _get_size(io), _get_size(io), _get_size(io), _get_size(io)
 		if !io.ok {return}
@@ -825,6 +834,31 @@ sequential_load_partial :: proc(
 		same := string(headers.buf[len(CHECKPOINT_MAGIC):mid]) == string(headers.buf[mid:])
 		delete(headers.buf)
 
+		// a plain Mamba layer (an older file) loads its weights into a Mamba
+		// block of the same size (norm weight 1): an initialization, since the
+		// block computes another function
+		old_m, is_old_m := stored.(MambaLayer)
+		new_m, is_new_m := &seq.layers[i].(MambaLayer)
+		if !same &&
+		   is_old_m &&
+		   is_new_m &&
+		   old_m.plain &&
+		   !new_m.plain &&
+		   old_m.d_model == new_m.d_model &&
+		   old_m.d_state == new_m.d_state {
+			_io_layer(&io, &stored, flags)
+			src := stored.(MambaLayer)
+			for pair in ([][2]^LinearLayer{{&new_m.proj_x, &src.proj_x}, {&new_m.proj_B, &src.proj_B}, {&new_m.proj_C, &src.proj_C}, {&new_m.proj_Delta, &src.proj_Delta}, {&new_m.proj_out, &src.proj_out}}) {
+				copy(pair[0].weights.data.data, pair[1].weights.data.data)
+				if pair[0].bias != nil &&
+				   pair[1].bias != nil {copy(pair[0].bias.data.data, pair[1].bias.data.data)}
+			}
+			copy(new_m.A.data.data, src.A.data.data)
+			copy(new_m.D.data.data, src.D.data.data)
+			loaded += 1
+			continue
+		}
+
 		// a GRU stored without bias_hn loads into a GRU of the same size with
 		// bias_hn = 0 (the same function)
 		old_gru, is_old_gru := stored.(GRULayer)
@@ -857,6 +891,26 @@ sequential_load_partial :: proc(
 	return loaded, skipped, true
 }
 
+// The count of the parameters and a frozen flag (i32) for each
+@(private = "file")
+_put_frozen :: proc(io: ^_Io, ps: []^t.Tensor) {
+	_put_i32(io, len(ps))
+	for p in ps {_put_i32(io, int(!p.requires_grad))}
+}
+
+// Reads _put_frozen's flags and freezes the flagged parameters; a count that
+// doesn't match the model marks the file as corrupt
+@(private = "file")
+_get_frozen :: proc(io: ^_Io, ps: []^t.Tensor) {
+	n := _get_size(io)
+	if io.ok && n != len(ps) {io.ok = false}
+	for i in 0 ..< n {
+		frozen := _get_i32(io) != 0
+		if !io.ok {return}
+		if frozen {tensor_set_requires_grad(ps[i], false)}
+	}
+}
+
 // ============================================================================
 // GPT
 // ============================================================================
@@ -872,6 +926,9 @@ save_gpt_model :: proc(model: ^GPTModel, path: string) -> bool {
 	_put_i32(&io, int(model.tie_embeddings))
 	_put_i32(&io, int(model.gelu_tanh))
 	_io_gpt(&io, model, .GPT)
+	ps := gpt_model_parameters(model, context.temp_allocator, all = true)
+	_put_frozen(&io, ps[:])
+	delete(ps)
 	return _save(&io, path)
 }
 
@@ -892,6 +949,7 @@ load_gpt_model :: proc(
 
 	file_id := _File_Id(_get_i32(&io))
 	if file_id != .GPT &&
+	   file_id != .GPT_4 &&
 	   file_id != .GPT_3 &&
 	   file_id != .GPT_2 &&
 	   file_id != .GPT_1 &&
@@ -902,11 +960,11 @@ load_gpt_model :: proc(
 	}
 	cfg: [6]int // vocab, d_model, heads, d_ff, layers, max_seq_len
 	for &v in cfg {v = _get_size(&io)}
-	current := file_id == .GPT || file_id == .GPT_3
+	current := file_id == .GPT || file_id == .GPT_4 || file_id == .GPT_3
 	dropout := _get_f64(&io) if current || file_id == .GPT_2 else 0.1
 	rms_norm := current && _get_i32(&io) != 0
 	tie_embeddings := current && _get_i32(&io) != 0
-	gelu_tanh := file_id == .GPT && _get_i32(&io) != 0
+	gelu_tanh := (file_id == .GPT || file_id == .GPT_4) && _get_i32(&io) != 0
 	if !io.ok || cfg[2] == 0 {
 		fmt.printf("%s: corrupt or truncated model\n", path)
 		return nil, false
@@ -927,6 +985,11 @@ load_gpt_model :: proc(
 		allocator = allocator,
 	)
 	_io_gpt(&io, model, file_id)
+	if file_id == .GPT {
+		ps := gpt_model_parameters(model, context.temp_allocator, all = true)
+		_get_frozen(&io, ps[:])
+		delete(ps)
+	}
 	if !io.ok {
 		fmt.printf("%s: corrupt or truncated model\n", path)
 		gpt_model_free(model)
@@ -947,7 +1010,11 @@ _io_gpt :: proc(io: ^_Io, model: ^GPTModel, version: _File_Id) {
 		_io_mha(
 			io,
 			&block.mha,
-			version == .GPT || version == .GPT_3 || version == .GPT_2 || version == .GPT_1,
+			version == .GPT ||
+			version == .GPT_4 ||
+			version == .GPT_3 ||
+			version == .GPT_2 ||
+			version == .GPT_1,
 		)
 		if is_moe {
 			num_experts, top_k := block.moe.num_experts, block.moe.top_k
@@ -988,6 +1055,9 @@ save_bert_model :: proc(model: ^BERTModel, path: string) -> bool {
 	}
 	_put_f64(&io, model.dropout)
 	_io_bert(&io, model, .BERT)
+	ps := bert_model_parameters(model, context.temp_allocator, all = true)
+	_put_frozen(&io, ps[:])
+	delete(ps)
 	return _save(&io, path)
 }
 
@@ -1008,13 +1078,13 @@ load_bert_model :: proc(
 	defer delete(io.data, allocator)
 
 	file_id := _File_Id(_get_i32(&io))
-	if file_id != .BERT && file_id != .BERT_1 && file_id != .BERT_0 {
+	if file_id != .BERT && file_id != .BERT_2 && file_id != .BERT_1 && file_id != .BERT_0 {
 		fmt.printf("%s is not a BERT model\n", path)
 		return nil, false
 	}
 	cfg: [6]int // vocab, d_model, heads, d_ff, layers, max_seq_len
 	for &v in cfg {v = _get_size(&io)}
-	dropout := _get_f64(&io) if file_id == .BERT else 0.1
+	dropout := _get_f64(&io) if file_id == .BERT || file_id == .BERT_2 else 0.1
 	if !io.ok || cfg[2] == 0 {
 		fmt.printf("%s: corrupt or truncated model\n", path)
 		return nil, false
@@ -1032,6 +1102,11 @@ load_bert_model :: proc(
 		allocator,
 	)
 	_io_bert(&io, model, file_id)
+	if file_id == .BERT {
+		ps := bert_model_parameters(model, context.temp_allocator, all = true)
+		_get_frozen(&io, ps[:])
+		delete(ps)
+	}
 	if !io.ok {
 		fmt.printf("%s: corrupt or truncated model\n", path)
 		bert_model_free(model)

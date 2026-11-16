@@ -15,9 +15,13 @@ import "core:mem"
 // runs h_t = exp(Δ·A)·h_{t−1} + Δ·B·u, y = C·h + D·u with A = −exp(θ_A).
 // The normalisation keeps the scan in range for inputs of any scale; the
 // residual passes the input through.
+// plain: out = proj_out(SSM(x)), without the norm and the residual. Layers
+// loaded from files saved before the block form (layer id 25) are plain, so
+// they compute the function they were trained as; mamba_layer_new makes blocks.
 MambaLayer :: struct {
 	d_model:    int,
 	d_state:    int,
+	plain:      bool,
 	norm:       LayerNormLayer, // RMSNorm (eps 1e-5) of the block's input
 	proj_x:     LinearLayer,
 	proj_B:     LinearLayer,
@@ -83,9 +87,17 @@ mamba_layer_free :: proc(layer: ^MambaLayer) {
 }
 
 // x [batch, seq_len, d_model], h_0 [batch, d_model, d_state] → [batch, seq_len, d_model]
-mamba_layer_forward :: proc(layer: ^MambaLayer, x: ^t.Tensor, h_0: ^t.Tensor) -> ^t.Tensor {
-	// 1. Pre-norm and projections
-	x_norm := layer_norm_layer_forward(&layer.norm, x)
+mamba_layer_forward :: proc(
+	layer: ^MambaLayer,
+	x: ^t.Tensor,
+	h_0: ^t.Tensor,
+) -> (
+	fwd_out: ^t.Tensor,
+) {
+	rec_ := forward_record_begin()
+	defer forward_record_end(rec_, fwd_out)
+	// 1. Pre-norm (not for a plain layer) and projections
+	x_norm := x if layer.plain else layer_norm_layer_forward(&layer.norm, x)
 	x_proj := linear_forward(&layer.proj_x, x_norm)
 	B_proj := linear_forward(&layer.proj_B, x_norm)
 	C_proj := linear_forward(&layer.proj_C, x_norm)
@@ -105,5 +117,6 @@ mamba_layer_forward :: proc(layer: ^MambaLayer, x: ^t.Tensor, h_0: ^t.Tensor) ->
 	}
 
 	// 4. Output projection and residual
-	return t.tensor_add(x, linear_forward(&layer.proj_out, ssm_out))
+	out := linear_forward(&layer.proj_out, ssm_out)
+	return out if layer.plain else t.tensor_add(x, out)
 }

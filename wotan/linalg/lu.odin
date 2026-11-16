@@ -266,6 +266,38 @@ mat_inverse_lu :: proc(
 		delete(x, context.temp_allocator)
 	}
 
-	ok = true
+	ok = _inverse_accept(A, &Ainv, allocator)
 	return
+}
+
+// rcond1 returns the reciprocal 1-norm condition number 1 / (‖A‖₁·‖A⁻¹‖₁), given A
+// and its inverse (0 if either norm is 0 or not finite). LAPACK's dgecon estimates
+// the same number from the LU factors; with the inverse at hand it is exact.
+rcond1 :: proc(A, Ainv: ^Matrix(f64)) -> f64 {
+	n := A.rows
+	if n == 0 || A.cols != n || Ainv.rows != n || Ainv.cols != n {
+		panic("rcond1: A and Ainv must be non-empty, square and of the same size")
+	}
+	na, ni := 0.0, 0.0
+	for j in 0 ..< n {
+		sa, si := 0.0, 0.0
+		for i in 0 ..< n {
+			sa += math.abs(A.data[i * n + j])
+			si += math.abs(Ainv.data[i * n + j])
+		}
+		na, ni = max(na, sa), max(ni, si)
+	}
+	if na == 0 || ni == 0 || math.is_nan(na * ni) || math.is_inf(na * ni) {return 0}
+	return 1 / (na * ni)
+}
+
+// _inverse_accept frees Ainv and replaces it with an empty matrix when A is
+// numerically singular: rcond1 < ε, the criterion of LAPACK's dgesvx and SciPy's
+// solve (the inverse then has no correct digits).
+@(private)
+_inverse_accept :: proc(A, Ainv: ^Matrix(f64), allocator: mem.Allocator) -> bool {
+	if rcond1(A, Ainv) >= f64(math.F64_EPSILON) {return true}
+	matrix_free(Ainv)
+	Ainv^ = matrix_new(f64, 0, 0, allocator)
+	return false
 }

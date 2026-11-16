@@ -97,7 +97,9 @@ conv2d_layer_new :: proc(
 	return layer
 }
 
-conv2d_layer_forward :: proc(layer: ^Conv2dLayer, x: ^t.Tensor) -> ^t.Tensor {
+conv2d_layer_forward :: proc(layer: ^Conv2dLayer, x: ^t.Tensor) -> (fwd_out: ^t.Tensor) {
+	rec_ := forward_record_begin()
+	defer forward_record_end(rec_, fwd_out)
 	return t.tensor_conv2d(x, layer.weight, layer.bias, layer.stride, layer.padding)
 }
 
@@ -122,7 +124,9 @@ maxpool2d_layer_new :: proc(kernel_size: int, stride: int = 0) -> MaxPool2dLayer
 	return layer
 }
 
-maxpool2d_layer_forward :: proc(layer: ^MaxPool2dLayer, x: ^t.Tensor) -> ^t.Tensor {
+maxpool2d_layer_forward :: proc(layer: ^MaxPool2dLayer, x: ^t.Tensor) -> (fwd_out: ^t.Tensor) {
+	rec_ := forward_record_begin()
+	defer forward_record_end(rec_, fwd_out)
 	return t.tensor_max_pool2d(x, layer.kernel_size, layer.kernel_size, layer.stride)
 }
 AvgPool2dLayer :: struct {
@@ -245,7 +249,9 @@ rnn_layer_free :: proc(layer: ^RNNLayer) {
 	if layer.bias != nil {t.tensor_free(layer.bias)}
 }
 
-rnn_layer_forward :: proc(layer: ^RNNLayer, x: ^t.Tensor, h_0: ^t.Tensor) -> ^t.Tensor {
+rnn_layer_forward :: proc(layer: ^RNNLayer, x: ^t.Tensor, h_0: ^t.Tensor) -> (fwd_out: ^t.Tensor) {
+	rec_ := forward_record_begin()
+	defer forward_record_end(rec_, fwd_out)
 	return t.tensor_rnn(x, h_0, layer.w_ih, layer.w_hh, layer.bias)
 }
 // GRULayer: PyTorch's GRU. bias [1, 3H] = bias_ih + bias_hh for r and z and
@@ -298,7 +304,9 @@ gru_layer_free :: proc(layer: ^GRULayer) {
 	if layer.bias_hn != nil {t.tensor_free(layer.bias_hn)}
 }
 
-gru_layer_forward :: proc(layer: ^GRULayer, x: ^t.Tensor, h_0: ^t.Tensor) -> ^t.Tensor {
+gru_layer_forward :: proc(layer: ^GRULayer, x: ^t.Tensor, h_0: ^t.Tensor) -> (fwd_out: ^t.Tensor) {
+	rec_ := forward_record_begin()
+	defer forward_record_end(rec_, fwd_out)
 	return t.tensor_gru(x, h_0, layer.w_ih, layer.w_hh, layer.bias, layer.bias_hn)
 }
 LSTMLayer :: struct {
@@ -347,7 +355,11 @@ lstm_layer_forward :: proc(
 	x: ^t.Tensor,
 	h_0: ^t.Tensor,
 	c_0: ^t.Tensor,
-) -> ^t.Tensor {
+) -> (
+	fwd_out: ^t.Tensor,
+) {
+	rec_ := forward_record_begin()
+	defer forward_record_end(rec_, fwd_out)
 	return t.tensor_lstm(x, h_0, c_0, layer.w_ih, layer.w_hh, layer.bias)
 }
 // ============================================================================
@@ -384,7 +396,9 @@ embedding_layer_free :: proc(layer: ^EmbeddingLayer) {
 	if layer.weight != nil {t.tensor_free(layer.weight)}
 }
 
-embedding_layer_forward :: proc(layer: ^EmbeddingLayer, x: ^t.Tensor) -> ^t.Tensor {
+embedding_layer_forward :: proc(layer: ^EmbeddingLayer, x: ^t.Tensor) -> (fwd_out: ^t.Tensor) {
+	rec_ := forward_record_begin()
+	defer forward_record_end(rec_, fwd_out)
 	return t.tensor_embedding(x, layer.weight)
 }
 // ============================================================================
@@ -438,7 +452,14 @@ positional_encoding_free :: proc(pe: ^PositionalEncoding) {
 
 // positional_encoding_forward adds the precomputed PE to the input embeddings
 // x [batch, seq_len, embed_dim]; gradients flow through to x
-positional_encoding_forward :: proc(pe: ^PositionalEncoding, x: ^t.Tensor) -> ^t.Tensor {
+positional_encoding_forward :: proc(
+	pe: ^PositionalEncoding,
+	x: ^t.Tensor,
+) -> (
+	fwd_out: ^t.Tensor,
+) {
+	rec_ := forward_record_begin()
+	defer forward_record_end(rec_, fwd_out)
 	batch := x.shape[0]
 	seq_len := x.shape[1]
 	embed_dim := x.shape[2]
@@ -511,7 +532,11 @@ multi_head_attention_layer_forward :: proc(
 	layer: ^MultiHeadAttentionLayer,
 	x: ^t.Tensor,
 	attention_mask: ^t.Tensor = nil,
-) -> ^t.Tensor {
+) -> (
+	fwd_out: ^t.Tensor,
+) {
+	rec_ := forward_record_begin()
+	defer forward_record_end(rec_, fwd_out)
 	return _attention(
 		&layer.q_proj,
 		&layer.k_proj,
@@ -677,7 +702,9 @@ layer_norm_layer_free :: proc(layer: ^LayerNormLayer) {
 	if layer.beta != nil {t.tensor_free(layer.beta)}
 }
 
-layer_norm_layer_forward :: proc(layer: ^LayerNormLayer, x: ^t.Tensor) -> ^t.Tensor {
+layer_norm_layer_forward :: proc(layer: ^LayerNormLayer, x: ^t.Tensor) -> (fwd_out: ^t.Tensor) {
+	rec_ := forward_record_begin()
+	defer forward_record_end(rec_, fwd_out)
 	if layer.rms {return t.tensor_rms_norm(x, layer.gamma, layer.eps)}
 	return t.tensor_layer_norm(x, layer.gamma, layer.beta, layer.eps)
 }
@@ -718,7 +745,9 @@ ffn_layer_free :: proc(layer: ^FFNLayer) {
 	if layer.fc2.weights != nil {linear_layer_free(&layer.fc2)}
 }
 
-ffn_layer_forward :: proc(layer: ^FFNLayer, x: ^t.Tensor) -> ^t.Tensor {
+ffn_layer_forward :: proc(layer: ^FFNLayer, x: ^t.Tensor) -> (fwd_out: ^t.Tensor) {
+	rec_ := forward_record_begin()
+	defer forward_record_end(rec_, fwd_out)
 	// 1. Project up to d_ff
 	x1 := linear_forward(&layer.fc1, x)
 
@@ -774,7 +803,11 @@ transformer_encoder_block_free :: proc(block: ^TransformerEncoderBlock) {
 transformer_encoder_block_forward :: proc(
 	block: ^TransformerEncoderBlock,
 	x: ^t.Tensor,
-) -> ^t.Tensor {
+) -> (
+	fwd_out: ^t.Tensor,
+) {
+	rec_ := forward_record_begin()
+	defer forward_record_end(rec_, fwd_out)
 	// 1. Multi-Head Attention
 	attn_out := multi_head_attention_layer_forward(&block.mha, x)
 
@@ -835,7 +868,14 @@ transformer_encoder_free :: proc(encoder: ^TransformerEncoder) {
 	delete(encoder.blocks)
 }
 
-transformer_encoder_forward :: proc(encoder: ^TransformerEncoder, x: ^t.Tensor) -> ^t.Tensor {
+transformer_encoder_forward :: proc(
+	encoder: ^TransformerEncoder,
+	x: ^t.Tensor,
+) -> (
+	fwd_out: ^t.Tensor,
+) {
+	rec_ := forward_record_begin()
+	defer forward_record_end(rec_, fwd_out)
 	// Pass through each encoder block sequentially
 	current := x
 	for i in 0 ..< len(encoder.blocks) {
@@ -858,7 +898,11 @@ masked_multi_head_attention_layer_forward :: proc(
 	layer: ^MultiHeadAttentionLayer,
 	x: ^t.Tensor,
 	mask: []f64,
-) -> ^t.Tensor {
+) -> (
+	fwd_out: ^t.Tensor,
+) {
+	rec_ := forward_record_begin()
+	defer forward_record_end(rec_, fwd_out)
 	mask := mask
 	if layer.use_flash && layer.is_causal && _within_causal(mask, x.shape[1]) {mask = nil}
 	return _attention(
@@ -953,7 +997,11 @@ cross_attention_layer_forward :: proc(
 	layer: ^CrossAttentionLayer,
 	decoder_input: ^t.Tensor,
 	encoder_output: ^t.Tensor,
-) -> ^t.Tensor {
+) -> (
+	fwd_out: ^t.Tensor,
+) {
+	rec_ := forward_record_begin()
+	defer forward_record_end(rec_, fwd_out)
 	return _attention(
 		&layer.q_proj,
 		&layer.k_proj,
@@ -1030,7 +1078,11 @@ transformer_decoder_block_forward :: proc(
 	decoder_input: ^t.Tensor,
 	encoder_output: ^t.Tensor,
 	mask: []f64,
-) -> ^t.Tensor {
+) -> (
+	fwd_out: ^t.Tensor,
+) {
+	rec_ := forward_record_begin()
+	defer forward_record_end(rec_, fwd_out)
 	// 1. Masked Self-Attention
 	attn_out := masked_multi_head_attention_layer_forward(&block.masked_mha, decoder_input, mask)
 	x1 := t.tensor_add(decoder_input, attn_out)

@@ -61,7 +61,11 @@ deep_heston_calibrator_free :: proc(model: ^DeepHestonCalibrator) {
 deep_heston_calibrator_forward :: proc(
 	model: ^DeepHestonCalibrator,
 	features: ^t.Tensor,
-) -> ^t.Tensor {
+) -> (
+	fwd_out: ^t.Tensor,
+) {
+	rec_ := nn.forward_record_begin()
+	defer nn.forward_record_end(rec_, fwd_out)
 	return nn.sequential_forward(model.mlp, features)
 }
 

@@ -1,7 +1,7 @@
 package finance
 
+import w "../core"
 import l "../linalg"
-import "base:runtime"
 import "core:math"
 import "core:math/rand"
 import "core:mem"
@@ -706,7 +706,7 @@ _lsm_run :: proc(
 	basis := make([]f64, nb, allocator)
 	defer delete(basis, allocator)
 	for k := n_ex - 2; k >= 0; k -= 1 {
-		runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+		w.TEMP_GUARD()
 		t_k := f64(ex_step[k]) * dt
 		coef := policy[k * nb:][:nb]
 		if regress {

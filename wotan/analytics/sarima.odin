@@ -1,7 +1,6 @@
 package analytics
 
 import w "../core"
-import "base:runtime"
 import "core:math"
 import "core:mem"
 
@@ -275,7 +274,7 @@ sarima_neg_loglik_obj :: proc(params: []f64, ctx: rawptr) -> f64 {
 	}
 
 	// Everything below is per-evaluation scratch: release it on return
-	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	w.TEMP_GUARD()
 	allocator := context.temp_allocator
 
 	phi, theta, Phi, Theta, sigma2 := _sarima_unpack(params, p, q, P, Q, allocator)
@@ -431,7 +430,7 @@ sarima_innovations :: proc(
 		return v
 	}
 
-	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	w.TEMP_GUARD()
 	ar, ma := sarima_expand_to_arma(phi, Phi, theta, Theta, s, context.temp_allocator)
 	F, Q, P0, _, _, x0, N := arma_pq_fundamental_state_space(
 		ar,

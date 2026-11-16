@@ -1873,6 +1873,200 @@ european_options_reference_test :: proc(allocator: mem.Allocator) {
 		)
 	}
 
+	// --- Dividend yield q: implied volatility vs QuantLib 1.44 (BlackScholesMertonProcess,
+	//     q = 2.5%, r = 3%, Act365F days / 365; qlq.py) and the Monte Carlo exotics vs numpy
+	//     (1M paths, drift r − q; mcq.py) ---
+	{
+		IV := [?]f64 {
+			100,
+			273,
+			0,
+			9.0,
+			0.26137480960986176,
+			90,
+			273,
+			1,
+			2.5,
+			0.1972006899396022,
+			130,
+			273,
+			0,
+			0.8,
+			0.2167297405593128,
+			70,
+			3650,
+			1,
+			6.0,
+			0.19763050302127566,
+			150,
+			3650,
+			0,
+			30.0,
+			0.40454322239996054,
+		}
+		worst := 0.0
+		all_ok := true
+		for c := 0; c < len(IV); c += 5 {
+			o := fin.OptionType.Put if IV[c + 2] == 1 else .Call
+			iv, ok, _ := fin.implied_volatility(
+				IV[c + 3],
+				100,
+				IV[c],
+				IV[c + 1] / 365,
+				0.03,
+				o,
+				q = 0.025,
+			)
+			all_ok &&= ok
+			worst = max(worst, abs(iv - IV[c + 4]))
+		}
+		expect(
+			&passed,
+			&total,
+			all_ok && worst < 1e-9,
+			fmt.tprintf(
+				"implied_volatility with q = 2.5%% (5 calls / puts, 9 months and 10 years) vs QuantLib: max diff %.1e",
+				worst,
+			),
+		)
+	}
+	{
+		Case :: struct {
+			name:     string,
+			ref, std: [5]f64,
+			n:        int,
+		}
+		cases := [?]Case {
+			{
+				"Asian call, q 3%",
+				{2.253253975202917, 0.3378254504548951, 15.096184344064362, 0, 0},
+				{4.85008325493025, 0.5095267963932133, 27.945759748172506, 0, 0},
+				3,
+			},
+			{
+				"up-and-out Asian (B=115), q 2%",
+				{0.21162146599128434, 0.015557035596860187, -4.176365934747113, 0, 0},
+				{0.8381248169754433, 0.418789833942307, 64.47734894679263, 0, 0},
+				3,
+			},
+			{
+				"up-and-out call (B=125), q 2%",
+				{1.64875899487235, -0.0030926312065502394, -11.9507720354409, 0, 0},
+				{4.325512109383772, 1.3373615192905324, 234.94774708522638, 0, 0},
+				3,
+			},
+			{
+				"lookback call (K = S_0: the kink counts ½), q 3%",
+				{15.560134362539584, 1.0688757628591066, 76.52387386879623, 0, 0},
+				{14.242750519150741, 0.22070040859158896, 81.49337481360824, 0, 0},
+				3,
+			},
+			{
+				"basket call, q 2% / 4%",
+				{
+					3.6578054711956263,
+					0.3322533733616492,
+					0.2217463486506969,
+					8.9670849992009,
+					4.35532638057806,
+				},
+				{
+					5.1850296711007715,
+					0.31217587267050545,
+					0.2122485223663894,
+					27.224936983451194,
+					17.528203194319023,
+				},
+				5,
+			},
+		}
+		for c, k in cases {
+			got: [5]f64
+			switch k {
+			case 0:
+				got[0], got[1], got[2] = fin.monte_carlo_asian_option(
+					100,
+					105,
+					0.5,
+					0.04,
+					0.25,
+					N_MC,
+					50,
+					q = 0.03,
+				)
+			case 1:
+				got[0], got[1], got[2] = fin.monte_carlo_barrier_asian_option(
+					100,
+					100,
+					1,
+					0.03,
+					0.2,
+					115,
+					N_MC,
+					50,
+					q = 0.02,
+				)
+			case 2:
+				got[0], got[1], got[2] = fin.monte_carlo_barrier_call_bs(
+					100,
+					100,
+					1,
+					0.03,
+					0.25,
+					125,
+					N_MC,
+					50,
+					q = 0.02,
+				)
+			case 3:
+				got[0], got[1], got[2] = fin.monte_carlo_lookback_call_option(
+					100,
+					100,
+					1,
+					0.05,
+					0.2,
+					N_MC,
+					50,
+					q = 0.03,
+				)
+			case 4:
+				got[0], got[1], got[2], got[3], got[4] = fin.monte_carlo_basket_option(
+					100,
+					90,
+					95,
+					1,
+					0.03,
+					0.2,
+					0.3,
+					-0.3,
+					0.6,
+					0.4,
+					N_MC,
+					50,
+					q1 = 0.02,
+					q2 = 0.04,
+				)
+			}
+			nm :=
+				[5]string{"price", "delta", "vega", "", ""} if c.n == 3 else [5]string{"price", "delta1", "delta2", "vega1", "vega2"}
+			ok := true
+			desc := ""
+			for i in 0 ..< c.n {
+				z := (got[i] - c.ref[i]) / (c.std[i] * se_scale)
+				ok &&= abs(z) < 4
+				desc = fmt.tprintf(
+					"%s %s %.4f (ref %.4f, z %+.1f)",
+					desc,
+					nm[i],
+					got[i],
+					c.ref[i],
+					z,
+				)
+			}
+			expect(&passed, &total, ok, fmt.tprintf("%s vs numpy:%s", c.name, desc))
+		}
+	}
+
 	fmt.printf("European options summary: %d/%d passed\n", passed, total)
 	record_failures(total - passed)
 }
