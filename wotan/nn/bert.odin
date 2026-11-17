@@ -200,8 +200,9 @@ bert_model_forward :: proc(
 
 	// Token id 0 is padding: no attention to it (read during the forward pass only)
 	attention_mask := _constant(batch * seq_len, {batch, seq_len, 1, 1}, alloc)
+	ids := t.tensor_values(input_ids)
 	for i in 0 ..< batch * seq_len {
-		attention_mask.data.data[i] = 0.0 if input_ids.data.data[i] == 0.0 else 1.0
+		attention_mask.data.data[i] = 0.0 if ids[i] == 0.0 else 1.0
 	}
 	for i in 0 ..< len(model.encoder_blocks) {
 		x = bert_encoder_block_forward(

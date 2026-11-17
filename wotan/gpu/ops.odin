@@ -38,6 +38,24 @@ SUPPORTED :: bit_set[t.Op] {
 	.Transpose,
 	.SliceCols,
 	.Concat,
+	// phase 2 (ops_p2.odin)
+	.GeluTanh,
+	.NormCDF,
+	.Softmax,
+	.LogSumExpDim1,
+	.CrossEntropy,
+	.BCELoss,
+	.BinaryCrossEntropy,
+	.LayerNorm,
+	.RMSNorm,
+	.Dropout,
+	.Embedding,
+	.PermuteMHA,
+	.PermuteMHAInverse,
+	.ScaledDotProductAttention,
+	.MaskedScaledDotProductAttention,
+	.FlashAttention,
+	.GateMul,
 }
 
 @(private)
@@ -65,6 +83,10 @@ _unary_code :: proc(op: t.Op) -> (code: u32, ok: bool) {
 		return U_CLAMP, true
 	case .Softplus:
 		return U_SOFTPLUS, true
+	case .GeluTanh:
+		return U_GELU_TANH, true
+	case .NormCDF:
+		return U_NORM_CDF, true
 	}
 	return 0, false
 }
@@ -104,10 +126,10 @@ _p :: proc(u: [8]u32 = {}, f: [8]f32 = {}) -> Params {
 
 // _matmul records C[M, N] (+)= op(A) @ op(B), in row chunks of the grid limit
 @(private)
-_matmul :: proc(A, B, C: Bind, M, N, K: int, trans_a, trans_b, accumulate: bool) {
+_matmul :: proc(A, B, C: Bind, M, N, K: int, trans_a, trans_b, accumulate: bool, batch := 1) {
 	if M == 0 || N == 0 {return}
 	if K == 0 {
-		if !accumulate {_zero(C.buf, M * N)}
+		if !accumulate {_zero(C.buf, M * N * batch)}
 		return
 	}
 	gx := u32((N + 15) / 16)
@@ -115,7 +137,7 @@ _matmul :: proc(A, B, C: Bind, M, N, K: int, trans_a, trans_b, accumulate: bool)
 	for r0 := 0; r0 < M; r0 += CHUNK {
 		rows := min(CHUNK, M - r0)
 		p := _p({u32(M), u32(N), u32(K), u32(trans_a), u32(trans_b), u32(accumulate), u32(r0), 0})
-		_dispatch(.Matmul, p, {A, B, C}, gx, u32((rows + 15) / 16))
+		_dispatch(.Matmul, p, {A, B, C}, gx, u32((rows + 15) / 16), u32(batch))
 	}
 }
 
@@ -290,7 +312,7 @@ _hook_forward :: proc(op: t.Op, out: ^t.Tensor, inputs: []^t.Tensor, ints: []int
 			off += size
 		}
 	case:
-		panic("gpu: forward kernel missing")
+		_forward_p2(op, out, inputs, ints, floats)
 	}
 }
 
@@ -506,7 +528,7 @@ _hook_backward :: proc(node: ^t.Tensor, allocator: mem.Allocator) -> bool {
 			off += size
 		}
 	case:
-		return false
+		if !_backward_p2(node, dy, n) {return false}
 	}
 	for x in written[:nw] {t._grad_written_on_device(x)}
 	return true

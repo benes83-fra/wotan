@@ -316,6 +316,271 @@ op_cases := [?]Op_Case {
 			return t.tensor_mse_loss(h, x[3])
 		},
 	},
+	// ---- phase 2 ----
+	{
+		name = "gelu_tanh",
+		op = .GeluTanh,
+		shapes = {{4, 50, 1, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_gelu_tanh(
+				t.tensor_scale(x[0], 3),
+			)},
+	},
+	{
+		name = "norm_cdf (tails to ±6)",
+		op = .NormCDF,
+		shapes = {{4, 50, 1, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_norm_cdf(
+				t.tensor_scale(x[0], 6),
+			)},
+	},
+	{
+		name = "gelu (norm_cdf · x)",
+		op = .NormCDF,
+		shapes = {{4, 50, 1, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_gelu(t.tensor_scale(x[0], 3))},
+	},
+	{
+		name = "softmax [N, C]",
+		op = .Softmax,
+		shapes = {{8, 12, 1, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_softmax(t.tensor_scale(x[0], 4))},
+	},
+	{
+		name = "softmax [B, S, F] (wide rows)",
+		op = .Softmax,
+		shapes = {{2, 3, 300, 1}},
+		storage = {{1, 1800}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_softmax(t.tensor_scale(x[0], 4))},
+	},
+	{
+		name = "logsumexp_dim1",
+		op = .LogSumExpDim1,
+		shapes = {{6, 9, 1, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_logsumexp_dim1(
+				t.tensor_scale(x[0], 3),
+				9,
+			)},
+	},
+	{
+		name = "cross_entropy",
+		op = .CrossEntropy,
+		shapes = {{10, 7, 1, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_cross_entropy_loss(
+				t.tensor_scale(x[0], 3),
+				CE_TARGETS[:],
+			)},
+	},
+	{
+		name = "cross_entropy (flattened [1, N·C])",
+		op = .CrossEntropy,
+		shapes = {{1, 70, 1, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_cross_entropy_loss(
+				x[0],
+				CE_TARGETS[:],
+			)},
+	},
+	{
+		name = "bce_loss",
+		op = .BCELoss,
+		shapes = {{9, 4, 1, 1}, {9, 4, 1, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			return t.tensor_bce_loss(
+				t.tensor_sigmoid(t.tensor_scale(x[0], 3)),
+				t.tensor_sigmoid(x[1]),
+			)
+		},
+	},
+	{
+		name = "binary_cross_entropy",
+		op = .BinaryCrossEntropy,
+		shapes = {{9, 4, 1, 1}, {9, 4, 1, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			return t.tensor_binary_cross_entropy(
+				t.tensor_sigmoid(t.tensor_scale(x[0], 3)),
+				t.tensor_sigmoid(x[1]),
+			)
+		},
+	},
+	{
+		name = "layer_norm",
+		op = .LayerNorm,
+		shapes = {{6, 16, 1, 1}, {1, 16, 1, 1}, {1, 16, 1, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_layer_norm(x[0], x[1], x[2])},
+	},
+	{
+		name = "layer_norm (flattened, eps 1e-3)",
+		op = .LayerNorm,
+		shapes = {{1, 3, 16, 1}, {1, 16, 1, 1}, {1, 16, 1, 1}},
+		storage = {{1, 48}, {}, {}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_layer_norm(
+				x[0],
+				x[1],
+				x[2],
+				1e-3,
+			)},
+	},
+	{
+		name = "rms_norm",
+		op = .RMSNorm,
+		shapes = {{5, 12, 1, 1}, {1, 12, 1, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_rms_norm(x[0], x[1])},
+	},
+	{
+		name = "dropout (training)",
+		op = .Dropout,
+		shapes = {{7, 30, 1, 1}},
+		tol = 1e-6,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			rand.reset(77) // the same mask on the CPU and the GPU
+			return t.tensor_dropout(x[0], 0.3, true)
+		},
+	},
+	{
+		name = "dropout (evaluation)",
+		op = .Dropout,
+		shapes = {{7, 30, 1, 1}},
+		tol = 1e-6,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_dropout(x[0], 0.3, false)},
+	},
+	{
+		name = "embedding (repeated ids)",
+		op = .Embedding,
+		shapes = {{11, 6, 1, 1}},
+		tol = 1e-6,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			m := l.matrix_new(f64, 2, 5)
+			copy(m.data, EMB_IDS[:])
+			ids := t.tensor_new(m)
+			ids.owned_by_graph = true // freed with the graph
+			return t.tensor_embedding(ids, x[0])
+		},
+	},
+	{
+		name = "permute_mha",
+		op = .PermuteMHA,
+		shapes = {{2, 3, 8, 1}},
+		storage = {{1, 48}},
+		tol = 1e-6,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_permute_mha(x[0], 2, 3, 2, 4)},
+	},
+	{
+		name = "permute_mha_inverse",
+		op = .PermuteMHAInverse,
+		shapes = {{4, 3, 4, 1}},
+		storage = {{1, 48}},
+		tol = 1e-6,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_permute_mha_inverse(
+				x[0],
+				2,
+				3,
+				2,
+				4,
+			)},
+	},
+	{
+		name = "attention",
+		op = .ScaledDotProductAttention,
+		shapes = {{2, 5, 4, 1}, {2, 6, 4, 1}, {2, 6, 3, 1}},
+		storage = {{1, 40}, {1, 48}, {1, 36}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_scaled_dot_product_attention(
+				x[0],
+				x[1],
+				x[2],
+			)},
+	},
+	{
+		name = "masked attention (shared mask)",
+		op = .MaskedScaledDotProductAttention,
+		shapes = {{2, 5, 4, 1}, {2, 6, 4, 1}, {2, 6, 3, 1}},
+		storage = {{1, 40}, {1, 48}, {1, 36}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			return t.tensor_masked_scaled_dot_product_attention(x[0], x[1], x[2], _shared_mask())
+		},
+	},
+	{
+		name = "masked attention (per-sequence mask)",
+		op = .MaskedScaledDotProductAttention,
+		shapes = {{2, 5, 4, 1}, {2, 6, 4, 1}, {2, 6, 3, 1}},
+		storage = {{1, 40}, {1, 48}, {1, 36}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			return t.tensor_masked_scaled_dot_product_attention(x[0], x[1], x[2], _batch_mask())
+		},
+	},
+	{
+		name = "flash attention (causal)",
+		op = .FlashAttention,
+		shapes = {{3, 7, 4, 1}, {3, 7, 4, 1}, {3, 7, 5, 1}},
+		storage = {{1, 84}, {1, 84}, {1, 105}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_flash_attention(
+				x[0],
+				x[1],
+				x[2],
+				true,
+			)},
+	},
+	{
+		name = "flash attention (seq_k 70 > tile)",
+		op = .FlashAttention,
+		shapes = {{2, 5, 8, 1}, {2, 70, 8, 1}, {2, 70, 3, 1}},
+		storage = {{1, 80}, {1, 1120}, {1, 420}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_flash_attention(
+				x[0],
+				x[1],
+				x[2],
+				false,
+			)},
+	},
+	{
+		name = "chain (layer_norm, matmul, gelu_tanh, softmax, cross-entropy)",
+		op = .LayerNorm,
+		shapes = {{10, 8, 1, 1}, {1, 8, 1, 1}, {1, 8, 1, 1}, {8, 7, 1, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			h := t.tensor_gelu_tanh(t.tensor_matmul(t.tensor_layer_norm(x[0], x[1], x[2]), x[3]))
+			return t.tensor_cross_entropy_loss(h, CE_TARGETS[:])
+		},
+	},
+	{
+		name = "gate_mul",
+		op = .GateMul,
+		shapes = {{9, 6, 1, 1}, {9, 1, 1, 1}},
+		tol = 1e-6,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_gate_mul(x[0], x[1])},
+	},
+}
+
+CE_TARGETS := [10]int{3, 0, 6, 6, 1, 2, 5, 4, 0, 3}
+EMB_IDS := [10]f64{4, 1, 4, 10, 0, 4, 7, 1, 1, 9}
+
+// additive masks for [5, 6] score blocks: shared, and one block per sequence
+_shared_mask :: proc() -> []f64 {
+	m := make([]f64, 30, context.temp_allocator)
+	for i in 0 ..< 5 {for j in 0 ..< 6 {if (i + 2 * j) % 4 == 0 {m[i * 6 + j] = -1e9} else {m[i * 6 + j] = 0.1 * f64(j - i)}}}
+	return m
+}
+
+_batch_mask :: proc() -> []f64 {
+	m := make([]f64, 60, context.temp_allocator)
+	for b in 0 ..< 2 {for i in 0 ..< 5 {for j in 0 ..< 6 {if j > i + b {m[(b * 5 + i) * 6 + j] = -1e9}}}}
+	return m
 }
 
 // _compare_case: CPU vs GPU (kernel enabled), and CPU vs GPU with the op's
@@ -377,23 +642,22 @@ gpu_fallback_op_test :: proc() {
 		check(fallbacks > 0, "%s (fallback): the fallback did not run", c.name)
 	}
 	// ops without a GPU kernel at all, on device inputs
-	softmax := Op_Case {
-		name = "softmax (no kernel)",
-		op = .Softmax,
+	lgamma := Op_Case {
+		name = "lgamma (no kernel)",
+		op = .Lgamma,
 		shapes = {{8, 12, 1, 1}},
+		positive = true,
 		tol = 1e-6,
-		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_softmax(x[0])},
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_lgamma(x[0])},
 	}
-	layer_norm := Op_Case {
-		name = "layer_norm (no kernel)",
-		op = .LayerNorm,
-		shapes = {{6, 16, 1, 1}, {1, 16, 1, 1}, {1, 16, 1, 1}},
+	sharpe := Op_Case {
+		name = "sharpe_loss (no kernel)",
+		op = .SharpeLoss,
+		shapes = {{40, 1, 1, 1}},
 		tol = 1e-5,
-		run = proc(
-			x: []^t.Tensor,
-		) -> ^t.Tensor {return t.tensor_layer_norm(t.tensor_relu(x[0]), x[1], x[2])},
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_sharpe_loss(t.tensor_relu(x[0]))},
 	}
-	for c in ([]Op_Case{softmax, layer_norm}) {
+	for c in ([]Op_Case{lgamma, sharpe}) {
 		worst, fallbacks := _compare_case(c, false)
 		check(worst <= c.tol, "%s: max relative error %.2e > %.0e", c.name, worst, c.tol)
 		check(fallbacks > 0, "%s: no fallback counted", c.name)

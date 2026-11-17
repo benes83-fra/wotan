@@ -55,6 +55,8 @@ main :: proc() {
 	gpu_mlp_training_test()
 	gpu_all_fallback_training_test()
 	gpu_sgd_clip_test()
+	gpu_gpt_training_test()
+	gpu_bert_training_test()
 	gpu_scope_memory_test()
 	gpu_checkpoint_test()
 	gpu_speed_report()

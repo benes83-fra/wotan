@@ -395,12 +395,15 @@ gpt_model_forward_cached :: proc(
 		// Append the new keys and values; attend over positions 0 ..< total
 		k := _constant(batch * total * d, {batch, total, d, 1}, alloc)
 		v := _constant(batch * total * d, {batch, total, d, 1}, alloc)
+		// the cache lives on the host: new keys and values are read through
+		// tensor_values (a download when the model runs on a GPU)
+		k_vals, v_vals := t.tensor_values(k_new), t.tensor_values(v_new)
 		for b in 0 ..< batch {
 			row := cache.keys[i][b * cache.capacity * d:]
-			copy(row[start * d:total * d], k_new.data.data[b * n * d:(b + 1) * n * d])
+			copy(row[start * d:total * d], k_vals[b * n * d:(b + 1) * n * d])
 			copy(k.data.data[b * total * d:(b + 1) * total * d], row[:total * d])
 			row = cache.values[i][b * cache.capacity * d:]
-			copy(row[start * d:total * d], v_new.data.data[b * n * d:(b + 1) * n * d])
+			copy(row[start * d:total * d], v_vals[b * n * d:(b + 1) * n * d])
 			copy(v.data.data[b * total * d:(b + 1) * total * d], row[:total * d])
 		}
 		attn_out := _attend(

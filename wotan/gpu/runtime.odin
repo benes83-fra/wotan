@@ -1,10 +1,10 @@
 package gpu
 
+import t "../tensor"
 import "base:runtime"
 import "core:fmt"
 import "core:mem"
 import "core:strings"
-import t "../tensor"
 import wgpu "vendor:wgpu"
 
 // ============================================================================
@@ -58,36 +58,36 @@ Optim_State :: struct {
 
 @(private)
 State :: struct {
-	active:            bool,
-	instance:          wgpu.Instance,
-	adapter:           wgpu.Adapter,
-	device:            wgpu.Device,
-	queue:             wgpu.Queue,
-	limits:            wgpu.Limits,
-	info:              Device_Info,
+	active:         bool,
+	instance:       wgpu.Instance,
+	adapter:        wgpu.Adapter,
+	device:         wgpu.Device,
+	queue:          wgpu.Queue,
+	limits:         wgpu.Limits,
+	info:           Device_Info,
 	// command stream
-	encoder:           wgpu.CommandEncoder,
-	pass:              wgpu.ComputePassEncoder,
-	pending:           int,
+	encoder:        wgpu.CommandEncoder,
+	pass:           wgpu.ComputePassEncoder,
+	pending:        int,
 	// uniform parameters of the pending batch
-	uniform:           wgpu.Buffer,
-	uniform_off:       u64,
-	uniform_cap:       u64,
-	uniform_align:     u64,
+	uniform:        wgpu.Buffer,
+	uniform_off:    u64,
+	uniform_cap:    u64,
+	uniform_align:  u64,
 	// readback staging
-	readback:          wgpu.Buffer,
-	readback_bytes:    u64,
+	readback:       wgpu.Buffer,
+	readback_bytes: u64,
 	// buffer pool: free buffers by size bucket
-	pool:              map[u64][dynamic]^Buf,
-	bufs:              [dynamic]^Buf,
-	pool_bytes:        u64,
-	dummy:             ^Buf, // bound where a kernel needs no buffer
-	pipelines:         [Kernel]Pipeline,
-	optim:             map[rawptr]Optim_State,
-	disabled:          [t.Op]bool,
-	counters:          Counters,
-	allocator:         mem.Allocator,
-	error_message:     string,
+	pool:           map[u64][dynamic]^Buf,
+	bufs:           [dynamic]^Buf,
+	pool_bytes:     u64,
+	dummy:          ^Buf, // bound where a kernel needs no buffer
+	pipelines:      [Kernel]Pipeline,
+	optim:          map[rawptr]Optim_State,
+	disabled:       [t.Op]bool,
+	counters:       Counters,
+	allocator:      mem.Allocator,
+	error_message:  string,
 }
 
 @(private)
@@ -125,7 +125,7 @@ _adapter_rank :: proc(info: wgpu.AdapterInfo, opts: Options) -> int {
 	case .D3D12:
 		backend_rank = 2
 	case .OpenGL, .OpenGLES:
-		if opts.backend != .OpenGL {return -1} // compute on GL is limited: explicit only
+		if opts.backend != .OpenGL {return -1} 	// compute on GL is limited: explicit only
 		backend_rank = 1
 	case:
 		return -1
@@ -192,7 +192,12 @@ _open :: proc(opts: Options) -> (ok: bool, reason: string) {
 		},
 		{
 			mode = .AllowProcessEvents,
-			callback = proc "c" (s: wgpu.RequestDeviceStatus, d: wgpu.Device, m: wgpu.StringView, u1, u2: rawptr) {
+			callback = proc "c" (
+				s: wgpu.RequestDeviceStatus,
+				d: wgpu.Device,
+				m: wgpu.StringView,
+				u1, u2: rawptr,
+			) {
 				context = runtime.default_context()
 				w := (^Wait)(u1)
 				if s == .Success {w.device = d} else {w.msg = strings.clone(m)}
@@ -208,7 +213,10 @@ _open :: proc(opts: Options) -> (ok: bool, reason: string) {
 
 	G.uniform_align = u64(max(limits.minUniformBufferOffsetAlignment, PARAMS_SIZE))
 	G.uniform_cap = 4096 * G.uniform_align
-	G.uniform = wgpu.DeviceCreateBuffer(G.device, &{usage = {.Uniform, .CopyDst}, size = G.uniform_cap})
+	G.uniform = wgpu.DeviceCreateBuffer(
+		G.device,
+		&{usage = {.Uniform, .CopyDst}, size = G.uniform_cap},
+	)
 	G.pool = make(map[u64][dynamic]^Buf, G.allocator)
 	G.bufs = make([dynamic]^Buf, G.allocator)
 	G.optim = make(map[rawptr]Optim_State, G.allocator)
@@ -223,9 +231,14 @@ _on_error :: proc "c" (d: ^wgpu.Device, type: wgpu.ErrorType, m: wgpu.StringView
 }
 
 @(private)
-_on_lost :: proc "c" (d: ^wgpu.Device, reason: wgpu.DeviceLostReason, m: wgpu.StringView, u1, u2: rawptr) {
+_on_lost :: proc "c" (
+	d: ^wgpu.Device,
+	reason: wgpu.DeviceLostReason,
+	m: wgpu.StringView,
+	u1, u2: rawptr,
+) {
 	context = runtime.default_context()
-	if reason == .Destroyed || reason == .CallbackCancelled {return} // shutdown
+	if reason == .Destroyed || reason == .CallbackCancelled {return} 	// shutdown
 	panic(fmt.tprintf("gpu: device lost (%v): %s", reason, m))
 }
 
@@ -281,7 +294,13 @@ _bucket :: proc(numel: int) -> u64 {
 _acquire :: proc(numel: int) -> ^Buf {
 	bytes := _bucket(numel)
 	if bytes > G.limits.maxStorageBufferBindingSize || bytes > G.limits.maxBufferSize {
-		panic(fmt.tprintf("gpu: a tensor of %d elements exceeds the device's buffer limit (%d MB)", numel, G.limits.maxStorageBufferBindingSize >> 20))
+		panic(
+			fmt.tprintf(
+				"gpu: a tensor of %d elements exceeds the device's buffer limit (%d MB)",
+				numel,
+				G.limits.maxStorageBufferBindingSize >> 20,
+			),
+		)
 	}
 	if list, ok := &G.pool[bytes]; ok && len(list) > 0 {
 		b := pop(list)
@@ -290,7 +309,10 @@ _acquire :: proc(numel: int) -> ^Buf {
 		return b
 	}
 	b := new(Buf, G.allocator)
-	b.buffer = wgpu.DeviceCreateBuffer(G.device, &{usage = {.Storage, .CopySrc, .CopyDst}, size = bytes})
+	b.buffer = wgpu.DeviceCreateBuffer(
+		G.device,
+		&{usage = {.Storage, .CopySrc, .CopyDst}, size = bytes},
+	)
 	b.bytes = bytes
 	b.gen = 1
 	append(&G.bufs, b)
@@ -332,7 +354,7 @@ _hook_alloc :: proc(numel: int) -> t.Device_Buffer {
 @(private)
 _hook_release :: proc(h: t.Device_Buffer) {
 	b := (^Buf)(h.ptr)
-	if b == nil || !G.active || b.gen != h.gen || b.free {return} // stale handle: already reused
+	if b == nil || !G.active || b.gen != h.gen || b.free {return} 	// stale handle: already reused
 	_release_buf(b)
 }
 
@@ -397,8 +419,8 @@ _bind :: proc(h: t.Device_Buffer, numel: int) -> Bind {
 
 // _dispatch records one kernel launch over a [gx, gy] workgroup grid
 @(private)
-_dispatch :: proc(k: Kernel, p: Params, binds: []Bind, gx, gy: u32) {
-	if gx == 0 || gy == 0 {return}
+_dispatch :: proc(k: Kernel, p: Params, binds: []Bind, gx, gy: u32, gz: u32 = 1) {
+	if gx == 0 || gy == 0 || gz == 0 {return}
 	if G.uniform_off + G.uniform_align > G.uniform_cap {_flush()}
 	off := G.uniform_off
 	G.uniform_off += G.uniform_align
@@ -407,15 +429,27 @@ _dispatch :: proc(k: Kernel, p: Params, binds: []Bind, gx, gy: u32) {
 
 	pl := _pipeline(k)
 	entries: [8]wgpu.BindGroupEntry
-	entries[0] = {binding = 0, buffer = G.uniform, offset = off, size = PARAMS_SIZE}
-	for b, i in binds {
-		entries[i + 1] = {binding = u32(i + 1), buffer = b.buf.buffer, size = u64(max(b.numel, 1) * 4)}
+	entries[0] = {
+		binding = 0,
+		buffer  = G.uniform,
+		offset  = off,
+		size    = PARAMS_SIZE,
 	}
-	bg := wgpu.DeviceCreateBindGroup(G.device, &{layout = pl.layout, entryCount = uint(len(binds) + 1), entries = &entries[0]})
+	for b, i in binds {
+		entries[i + 1] = {
+			binding = u32(i + 1),
+			buffer  = b.buf.buffer,
+			size    = u64(max(b.numel, 1) * 4),
+		}
+	}
+	bg := wgpu.DeviceCreateBindGroup(
+		G.device,
+		&{layout = pl.layout, entryCount = uint(len(binds) + 1), entries = &entries[0]},
+	)
 	pass := _compute_pass()
 	wgpu.ComputePassEncoderSetPipeline(pass, pl.pipeline)
 	wgpu.ComputePassEncoderSetBindGroup(pass, 0, bg)
-	wgpu.ComputePassEncoderDispatchWorkgroups(pass, gx, gy, 1)
+	wgpu.ComputePassEncoderDispatchWorkgroups(pass, gx, gy, gz)
 	wgpu.BindGroupRelease(bg)
 	G.counters.dispatches += 1
 	G.pending += 1
@@ -456,7 +490,10 @@ _download :: proc(b: ^Buf, dst: []f64) {
 	if G.readback == nil || G.readback_bytes < bytes {
 		if G.readback != nil {wgpu.BufferRelease(G.readback)}
 		G.readback_bytes = max(bytes, 1 << 20)
-		G.readback = wgpu.DeviceCreateBuffer(G.device, &{usage = {.MapRead, .CopyDst}, size = G.readback_bytes})
+		G.readback = wgpu.DeviceCreateBuffer(
+			G.device,
+			&{usage = {.MapRead, .CopyDst}, size = G.readback_bytes},
+		)
 	}
 	_end_pass()
 	wgpu.CommandEncoderCopyBufferToBuffer(_encoder(), b.buffer, 0, G.readback, 0, bytes)
@@ -468,21 +505,15 @@ _download :: proc(b: ^Buf, dst: []f64) {
 		status: ^wgpu.MapAsyncStatus,
 	}
 	mw := Map_Wait{&done, &status}
-	wgpu.BufferMapAsync(
-		G.readback,
-		{.Read},
-		0,
-		uint(bytes),
-		{
-			mode = .AllowProcessEvents,
-			callback = proc "c" (s: wgpu.MapAsyncStatus, m: wgpu.StringView, u1, u2: rawptr) {
-				mw := (^Map_Wait)(u1)
-				mw.status^ = s
-				mw.done^ = true
-			},
-			userdata1 = &mw,
+	wgpu.BufferMapAsync(G.readback, {.Read}, 0, uint(bytes), {
+		mode = .AllowProcessEvents,
+		callback = proc "c" (s: wgpu.MapAsyncStatus, m: wgpu.StringView, u1, u2: rawptr) {
+			mw := (^Map_Wait)(u1)
+			mw.status^ = s
+			mw.done^ = true
 		},
-	)
+		userdata1 = &mw,
+	})
 	for !done {
 		wgpu.DevicePoll(G.device, true)
 		wgpu.InstanceProcessEvents(G.instance)
@@ -530,9 +561,15 @@ _pipeline :: proc(k: Kernel) -> Pipeline {
 	src := strings.concatenate({KERNEL_PRELUDE, KERNEL_SOURCES[k]}, context.temp_allocator)
 	module := wgpu.DeviceCreateShaderModule(
 		G.device,
-		&{nextInChain = &wgpu.ShaderSourceWGSL{sType = .ShaderSourceWGSL, code = src}, label = fmt.tprint(k)},
+		&{
+			nextInChain = &wgpu.ShaderSourceWGSL{sType = .ShaderSourceWGSL, code = src},
+			label = fmt.tprint(k),
+		},
 	)
-	pipe := wgpu.DeviceCreateComputePipeline(G.device, &{compute = {module = module, entryPoint = "main"}, label = fmt.tprint(k)})
+	pipe := wgpu.DeviceCreateComputePipeline(
+		G.device,
+		&{compute = {module = module, entryPoint = "main"}, label = fmt.tprint(k)},
+	)
 	wgpu.ShaderModuleRelease(module)
 	G.pipelines[k] = {pipe, wgpu.ComputePipelineGetBindGroupLayout(pipe, 0)}
 	return G.pipelines[k]

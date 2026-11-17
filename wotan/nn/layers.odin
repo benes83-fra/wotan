@@ -620,6 +620,7 @@ _attend :: proc(
 		// With padding the mask is per sequence [batch * num_heads, seq_q, seq_k].
 		n := seq_q * seq_k
 		blocks := batch * num_heads if key_padding != nil else 1
+		padding := t.tensor_values(key_padding) if key_padding != nil else nil
 		m := make([]f64, blocks * n, context.temp_allocator)
 		defer delete(m, context.temp_allocator)
 		for blk in 0 ..< blocks {
@@ -629,7 +630,7 @@ _attend :: proc(
 				for j in 0 ..< seq_k {
 					hidden := causal && j > i
 					if key_padding != nil {
-						hidden ||= key_padding.data.data[(blk / num_heads) * seq_k + j] == 0
+						hidden ||= padding[(blk / num_heads) * seq_k + j] == 0
 					}
 					if hidden {mb[i * seq_k + j] += _MASKED}
 				}

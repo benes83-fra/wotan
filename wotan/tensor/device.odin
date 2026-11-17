@@ -43,6 +43,8 @@ Device_Storage :: struct {
 	grad_where: Residency,
 	host_data:  []f64, // host data slice, parked while data_where == .Device
 	host_grad:  []f64, // host gradient slice, parked while grad_where == .Device
+	// op state the backward kernel needs (dropout mask, attention mask)
+	aux_buf:    Device_Buffer,
 }
 
 // Device_Hooks: the operations the GPU backend provides. All nil without a GPU.
@@ -307,6 +309,7 @@ _device_release :: proc(t: ^Tensor) {
 	if _device_hooks.release != nil {
 		if s.data_buf.ptr != nil {_device_hooks.release(s.data_buf)}
 		if s.grad_buf.ptr != nil {_device_hooks.release(s.grad_buf)}
+		if s.aux_buf.ptr != nil {_device_hooks.release(s.aux_buf)}
 	}
 	if t.data.data == nil {t.data.data = s.host_data}
 	if t.grad.data == nil {t.grad.data = s.host_grad}
@@ -512,6 +515,30 @@ _device_add_bias :: proc(a, bias: ^Tensor) -> ^Tensor {
 		out.op = .AddBias
 		append(&out.inputs, a, bias)
 		if flattened {append(&out.int_metadata, N, D)}
+	}
+	return out
+}
+
+// _device_attention: device version of the three attention ops (plain, with an
+// additive mask, flash with an optional causal mask), recording the metadata
+// each CPU op records
+_device_attention :: proc(op: Op, Q, K, V: ^Tensor, mask: []f64, causal: bool) -> ^Tensor {
+	_check_shape(Q)
+	_check_shape(K)
+	_check_shape(V)
+	batch, seq_q, d_v := Q.shape[0], Q.shape[1], V.shape[2]
+	rg := Q.requires_grad || K.requires_grad || V.requires_grad
+	out := _device_new_op(1, batch * seq_q * d_v, {batch, seq_q, d_v, 1}, rg, _op_alloc(Q))
+	if mask != nil {
+		out.device.aux_buf = _device_alloc(out, len(mask))
+		_device_hooks.upload(out.device.aux_buf, mask)
+	}
+	_device_forward(op, out, {Q, K, V}, {len(mask), int(causal)})
+	if out.requires_grad {
+		out.op = op
+		append(&out.inputs, Q, K, V)
+		if op == .MaskedScaledDotProductAttention {append(&out.f64_metadata, ..mask)}
+		if op == .FlashAttention {append(&out.int_metadata, int(causal))}
 	}
 	return out
 }

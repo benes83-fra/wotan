@@ -1,14 +1,14 @@
 package main
 
+import gpu "../wotan/gpu"
+import l "../wotan/linalg"
+import nn "../wotan/nn"
+import t "../wotan/tensor"
 import "core:fmt"
 import "core:math"
 import "core:math/rand"
 import "core:os"
 import "core:time"
-import gpu "../wotan/gpu"
-import l "../wotan/linalg"
-import nn "../wotan/nn"
-import t "../wotan/tensor"
 
 // ----------------------------------------------------------------------------
 // Helpers
@@ -57,7 +57,14 @@ Train_Opts :: struct {
 
 // _train runs `steps` training steps and returns the loss per step and the
 // final parameters (host copies)
-_train :: proc(model: ^nn.Sequential, x, y: ^t.Tensor, o: Train_Opts) -> (losses: []f64, params: [][]f64) {
+_train :: proc(
+	model: ^nn.Sequential,
+	x, y: ^t.Tensor,
+	o: Train_Opts,
+) -> (
+	losses: []f64,
+	params: [][]f64,
+) {
 	ps := nn.sequential_parameters(model, context.temp_allocator)
 	adam := nn.adam_new(0.01)
 	defer nn.adam_free(&adam)
@@ -93,13 +100,36 @@ _train :: proc(model: ^nn.Sequential, x, y: ^t.Tensor, o: Train_Opts) -> (losses
 	return
 }
 
-_compare_runs :: proc(name: string, ref_l, got_l: []f64, ref_p, got_p: [][]f64, tol: f64) {
+// skip: indices of parameters left out of the parameter comparison
+_compare_runs :: proc(
+	name: string,
+	ref_l, got_l: []f64,
+	ref_p, got_p: [][]f64,
+	tol: f64,
+	skip: []int = nil,
+) {
 	worst_l := _max_rel(got_l, ref_l)
 	worst_p := 0.0
-	for p, i in got_p {worst_p = max(worst_p, _max_rel(p, ref_p[i]))}
+	outer: for p, i in got_p {
+		for k in skip {if k == i {continue outer}}
+		worst_p = max(worst_p, _max_rel(p, ref_p[i]))
+	}
 	check(worst_l <= tol, "%s: losses differ from the CPU by %.2e (> %.0e)", name, worst_l, tol)
-	check(worst_p <= tol, "%s: parameters differ from the CPU by %.2e (> %.0e)", name, worst_p, tol)
-	fmt.printfln("    %-40s loss %.5f -> %.5f, max rel diff to CPU: losses %.1e, params %.1e", name, got_l[0], got_l[len(got_l) - 1], worst_l, worst_p)
+	check(
+		worst_p <= tol,
+		"%s: parameters differ from the CPU by %.2e (> %.0e)",
+		name,
+		worst_p,
+		tol,
+	)
+	fmt.printfln(
+		"    %-40s loss %.5f -> %.5f, max rel diff to CPU: losses %.1e, params %.1e",
+		name,
+		got_l[0],
+		got_l[len(got_l) - 1],
+		worst_l,
+		worst_p,
+	)
 }
 
 // ----------------------------------------------------------------------------
@@ -123,7 +153,12 @@ gpu_mlp_training_test :: proc() {
 		_compare_runs(fmt.tprintf("%v", act), ref_l, got_l, ref_p, got_p, 2e-3)
 		check(fallbacks == 0, "%v: %d CPU fallbacks in an all-kernel model", act, fallbacks)
 		check(got_l[len(got_l) - 1] < got_l[0], "%v: the loss did not fall", act)
-		check(st.auto_uploads == 0, "%v: %d automatic uploads (everything was moved explicitly)", act, st.auto_uploads)
+		check(
+			st.auto_uploads == 0,
+			"%v: %d automatic uploads (everything was moved explicitly)",
+			act,
+			st.auto_uploads,
+		)
 		nn.sequential_free(cpu_model)
 		nn.sequential_free(gpu_model)
 		t.tensor_free(x)
@@ -132,7 +167,9 @@ gpu_mlp_training_test :: proc() {
 }
 
 gpu_all_fallback_training_test :: proc() {
-	fmt.println("gpu_all_fallback_training_test: every kernel disabled, the model still trains through the CPU fallback")
+	fmt.println(
+		"gpu_all_fallback_training_test: every kernel disabled, the model still trains through the CPU fallback",
+	)
 	sizes := []int{5, 16, 1}
 	x, y := _regression_data(64, 5, 1, 3)
 	defer {t.tensor_free(x); t.tensor_free(y)}
@@ -147,12 +184,18 @@ gpu_all_fallback_training_test :: proc() {
 	for op in t.Op {gpu.set_kernel_enabled(op, true)}
 	_compare_runs("Tanh MLP, all ops on the fallback", ref_l, got_l, ref_p, got_p, 2e-3)
 	// two linear layers: two matmuls per step
-	check(st.forward_fallbacks[.MatMul] == 50, "matmul ran %d times on the fallback, want 50", st.forward_fallbacks[.MatMul])
+	check(
+		st.forward_fallbacks[.MatMul] == 50,
+		"matmul ran %d times on the fallback, want 50",
+		st.forward_fallbacks[.MatMul],
+	)
 	check(st.backward_fallbacks[.MatMul] > 0, "matmul backward never used the fallback")
 }
 
 gpu_sgd_clip_test :: proc() {
-	fmt.println("gpu_sgd_clip_test: SGD (Nesterov momentum) with clip_grad_norm on the GPU vs the CPU")
+	fmt.println(
+		"gpu_sgd_clip_test: SGD (Nesterov momentum) with clip_grad_norm on the GPU vs the CPU",
+	)
 	sizes := []int{4, 24, 3}
 	x, y := _regression_data(96, 4, 3, 9)
 	defer {t.tensor_free(x); t.tensor_free(y)}
@@ -160,7 +203,12 @@ gpu_sgd_clip_test :: proc() {
 		cpu_model := _mlp(sizes, .ReLU, 13)
 		gpu_model := _mlp(sizes, .ReLU, 13)
 		ref_l, ref_p := _train(cpu_model, x, y, {steps = 30, use_sgd = true, clip = clip})
-		got_l, got_p := _train(gpu_model, x, y, {steps = 30, use_sgd = true, clip = clip, on_gpu = true})
+		got_l, got_p := _train(
+			gpu_model,
+			x,
+			y,
+			{steps = 30, use_sgd = true, clip = clip, on_gpu = true},
+		)
 		_compare_runs(fmt.tprintf("SGD, clip %v", clip), ref_l, got_l, ref_p, got_p, 2e-3)
 		nn.sequential_free(cpu_model)
 		nn.sequential_free(gpu_model)
@@ -195,7 +243,11 @@ gpu_residency_test :: proc() {
 	t.tensor_values(x)[0] = 10
 	t.tensor_mark_host_dirty(x)
 	s2 := t.tensor_sum(x)
-	check(t.tensor_item(s2) == 12.5, "after mark_host_dirty the device sum is %v, want 12.5", t.tensor_item(s2))
+	check(
+		t.tensor_item(s2) == 12.5,
+		"after mark_host_dirty the device sum is %v, want 12.5",
+		t.tensor_item(s2),
+	)
 
 	// gradients: has_grad, values, drop
 	t.tensor_backward(s2)
@@ -208,7 +260,10 @@ gpu_residency_test :: proc() {
 
 	// detach stays on the device
 	d := t.tensor_detach(x)
-	check(t.tensor_is_on_device(d) && t.tensor_values(d)[0] == 10, "detach: not an equal device copy")
+	check(
+		t.tensor_is_on_device(d) && t.tensor_values(d)[0] == 10,
+		"detach: not an equal device copy",
+	)
 
 	// a host tensor used by a device op is uploaded automatically
 	gpu.reset_stats()
@@ -219,14 +274,19 @@ gpu_residency_test :: proc() {
 
 	// to_host brings everything back and releases the device buffers
 	gpu.to_host(x)
-	check(!t.tensor_is_on_device(x) && x.data.data != nil && x.data.data[0] == 10, "to_host: data not back on the host")
+	check(
+		!t.tensor_is_on_device(x) && x.data.data != nil && x.data.data[0] == 10,
+		"to_host: data not back on the host",
+	)
 
 	t.tensor_free_graph(sum, s, s2) // also frees y, an op node of s
 	for z in ([]^t.Tensor{x, d, h}) {t.tensor_free(z)}
 }
 
 gpu_scope_memory_test :: proc() {
-	fmt.println("gpu_scope_memory_test: graph scopes recycle device buffers (pool size flat across steps)")
+	fmt.println(
+		"gpu_scope_memory_test: graph scopes recycle device buffers (pool size flat across steps)",
+	)
 	x, y := _regression_data(64, 8, 1, 21)
 	defer {t.tensor_free(x); t.tensor_free(y)}
 	model := _mlp({8, 64, 64, 1}, .ReLU, 3)
@@ -252,9 +312,21 @@ gpu_scope_memory_test :: proc() {
 		nn.adam_zero_grad(&adam)
 		pool_after[step] = gpu.stats().pool_bytes
 	}
-	check(pool_after[39] == pool_after[2], "device pool grew from %d to %d bytes between steps 3 and 40", pool_after[2], pool_after[39])
-	check(t.global_tensors_created - t.global_tensors_freed == created, "tensors leaked by the scoped loop")
-	fmt.printfln("    pool after step 3: %d KB, after step 40: %d KB", pool_after[2] >> 10, pool_after[39] >> 10)
+	check(
+		pool_after[39] == pool_after[2],
+		"device pool grew from %d to %d bytes between steps 3 and 40",
+		pool_after[2],
+		pool_after[39],
+	)
+	check(
+		t.global_tensors_created - t.global_tensors_freed == created,
+		"tensors leaked by the scoped loop",
+	)
+	fmt.printfln(
+		"    pool after step 3: %d KB, after step 40: %d KB",
+		pool_after[2] >> 10,
+		pool_after[39] >> 10,
+	)
 	gpu.to_host(ps[:])
 	gpu.to_host(x)
 	gpu.to_host(y)
@@ -307,12 +379,19 @@ gpu_checkpoint_test :: proc() {
 
 // Not a check: step times on the CPU and the GPU for a small and a large MLP
 gpu_speed_report :: proc() {
-	fmt.println("gpu_speed_report: Adam training step, CPU vs GPU (mean of 10 steps after 2 warm-up steps)")
+	fmt.println(
+		"gpu_speed_report: Adam training step, CPU vs GPU (mean of 10 steps after 2 warm-up steps)",
+	)
 	Config :: struct {
 		sizes: []int,
 		batch: int,
 	}
-	configs := []Config{{{16, 64, 64, 1}, 64}, {{64, 256, 256, 1}, 256}, {{256, 1024, 1024, 1}, 512}, {{512, 2048, 2048, 1}, 1024}}
+	configs := []Config {
+		{{16, 64, 64, 1}, 64},
+		{{64, 256, 256, 1}, 256},
+		{{256, 1024, 1024, 1}, 512},
+		{{512, 2048, 2048, 1}, 1024},
+	}
 	for c in configs {
 		ms: [2]f64
 		for on_gpu, k in ([]bool{false, true}) {
@@ -326,6 +405,13 @@ gpu_speed_report :: proc() {
 			t.tensor_free(x)
 			t.tensor_free(y)
 		}
-		fmt.printfln("    sizes %v, batch %4d: CPU %8.2f ms   GPU %7.2f ms   (%.1fx)", c.sizes, c.batch, ms[0], ms[1], ms[0] / ms[1])
+		fmt.printfln(
+			"    sizes %v, batch %4d: CPU %8.2f ms   GPU %7.2f ms   (%.1fx)",
+			c.sizes,
+			c.batch,
+			ms[0],
+			ms[1],
+			ms[0] / ms[1],
+		)
 	}
 }

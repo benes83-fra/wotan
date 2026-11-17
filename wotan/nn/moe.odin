@@ -90,8 +90,10 @@ moe_layer_forward :: proc(
 	hide.data.rows, hide.data.cols = N, E
 	load := make([]f64, E, context.temp_allocator)
 	defer delete(load, context.temp_allocator)
+	// routing is decided on the host (a download when the model runs on a GPU)
+	logit_vals := t.tensor_values(logits)
 	for n in 0 ..< N {
-		row := logits.data.data[n * E:(n + 1) * E]
+		row := logit_vals[n * E:(n + 1) * E]
 		h := hide.data.data[n * E:(n + 1) * E]
 		for &v in h {v = _MASKED}
 		for _ in 0 ..< min(layer.top_k, E) {
@@ -110,9 +112,10 @@ moe_layer_forward :: proc(
 	// 3. Load balancing: E Σ_e f_e P_e = Σ_n Σ_e probs[n, e] · E f_e / N
 	probs := t.tensor_softmax(logits)
 	aux := 0.0
+	prob_vals := t.tensor_values(probs)
 	for e in 0 ..< E {
 		P_e := 0.0
-		for n in 0 ..< N {P_e += probs.data.data[n * E + e]}
+		for n in 0 ..< N {P_e += prob_vals[n * E + e]}
 		aux += (load[e] / f64(N)) * (P_e / f64(N))
 	}
 	layer.aux_loss_val = f64(E) * aux
