@@ -245,6 +245,7 @@ _io_tensor :: proc(io: ^_Io, x: ^^t.Tensor) {
 			_put_i32(io, 0)
 			return
 		}
+		t.tensor_values(x^) // a device tensor is saved from its host copy
 		m := x^.data
 		_put_i32(io, m.rows)
 		_put_i32(io, m.cols)
@@ -266,12 +267,14 @@ _io_tensor :: proc(io: ^_Io, x: ^^t.Tensor) {
 		return
 	}
 	n := rows * cols
-	if x^ == nil || len(x^.data.data) != n {
+	if x^ == nil || t.tensor_numel(x^) != n {
 		requires_grad := x^ == nil || x^.requires_grad
 		if x^ != nil {t.tensor_free(x^)}
 		x^ = t.tensor_new(l.matrix_new(f64, rows, cols, io.alloc), requires_grad, io.alloc)
 	}
+	t.tensor_values(x^)
 	for &v, i in x^.data.data {v, _ = endian.get_f64(bytes[8 * i:], .Little)}
+	t.tensor_mark_host_dirty(x^) // a device tensor uploads the loaded values
 }
 
 // ============================================================================
@@ -684,6 +687,7 @@ save_checkpoint :: proc(
 	_put_i32(&io, len(all))
 	for p in all {_put_i32(&io, int(!p.requires_grad))}
 	delete(all)
+	_adam_state_to_host(opt)
 	_put_i64(&io, opt.timestep)
 	for v in ([]f64{opt.learning_rate, opt.beta_1, opt.beta_2, opt.epsilon, opt.weight_decay}) {_put_f64(&io, v)}
 	_put_i32(&io, len(opt.parameters))
@@ -765,7 +769,7 @@ load_checkpoint :: proc(
 	fits := n_saved == len(params)
 	for i in 0 ..< 2 * n_saved {
 		count := _get_size(&io)
-		fits = fits && count == len(params[i / 2].data.data)
+		fits = fits && count == t.tensor_numel(params[i / 2])
 		values := _take(&io, 8 * count)
 		if !fits || values == nil {continue}
 		m := opt.moment_1[i / 2] if i % 2 == 0 else opt.moment_2[i / 2]

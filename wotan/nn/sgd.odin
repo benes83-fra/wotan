@@ -52,7 +52,23 @@ sgd_step :: proc(opt: ^SGD) {
 	for param, i in opt.parameters {
 		if !param.requires_grad || !t.tensor_has_grad(param) {continue}
 		if opt.momentum > 0.0 && opt.velocity[i] == nil {
-			opt.velocity[i] = make([]f64, len(param.data.data), opt.allocator)
+			opt.velocity[i] = make([]f64, t.tensor_numel(param), opt.allocator)
+		}
+		key := raw_data(opt.velocity[i]) // nil without momentum
+		if param.device != nil && t._device_hooks.sgd != nil {
+			t._device_hooks.sgd(
+				param,
+				key,
+				opt.velocity[i],
+				opt.learning_rate,
+				opt.momentum,
+				opt.weight_decay,
+				opt.nesterov,
+			)
+			continue
+		}
+		if key != nil && t._device_hooks.optim_sync != nil {
+			t._device_hooks.optim_sync(key, opt.velocity[i], nil, true)
 		}
 		optim.sgd_update(
 			param.data.data,
@@ -74,6 +90,9 @@ sgd_zero_grad :: proc(opt: ^SGD) {
 
 // sgd_free cleans up the optimizer's internal lists
 sgd_free :: proc(opt: ^SGD) {
+	if t._device_hooks.optim_release != nil {
+		for v in opt.velocity {if v != nil {t._device_hooks.optim_release(raw_data(v))}}
+	}
 	for v in opt.velocity {if v != nil {delete(v, opt.allocator)}}
 	delete(opt.velocity)
 	delete(opt.parameters)

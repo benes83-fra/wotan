@@ -108,6 +108,8 @@ Tensor :: struct {
 	// The gradient was dropped (tensor_drop_grad): the buffer is kept for reuse but
 	// holds no gradient until the next backward pass zero-fills it
 	grad_dropped:   bool,
+	// Device storage when the tensor is on the GPU (see device.odin); nil on the CPU
+	device:         ^Device_Storage,
 }
 
 ConvParams :: struct {
@@ -190,7 +192,9 @@ SCALAR_SHAPE :: [4]int{1, 1, 1, 1}
 // Ops call it on every input whose shape they read, and on every output.
 _check_shape :: proc(t: ^Tensor, loc := #caller_location) {
 	numel := t.shape[0] * t.shape[1] * t.shape[2] * t.shape[3]
-	if numel != len(t.data.data) {
+	stored := len(t.data.data)
+	if t.data.data == nil && t.device != nil {stored = t.data.rows * t.data.cols}
+	if numel != stored {
 		panic(
 			fmt.tprintf(
 				"tensor shape %v (%d elements) does not match its data (%d x %d = %d elements)",
@@ -230,6 +234,7 @@ _flattened_matmul_shape :: proc(shape: [4]int, N, in_features, out_features: int
 tensor_free :: proc(t: ^Tensor) {
 	if t == nil {return}
 	if len(_recordings) > 0 {_record_forget(t)}
+	if t.device != nil {_device_release(t)}
 	if t.data.data != nil {l.matrix_free(&t.data)}
 	if t.grad.data != nil {l.matrix_free(&t.grad)}
 
@@ -244,6 +249,10 @@ tensor_free :: proc(t: ^Tensor) {
 }
 
 tensor_zero_grad :: proc(t: ^Tensor) {
+	if t.device != nil && _device_on() {
+		if _grad_exists(t) {_device_zero_grad(t)}
+		return
+	}
 	t.grad_dropped = false
 	if t.grad.data != nil {
 		// Odin's compiler will auto-vectorize this simple zero loop perfectly.
@@ -262,6 +271,7 @@ tensor_zero_grad :: proc(t: ^Tensor) {
 // (dropout on input data, e.g. a leading DropoutLayer, does not leak per step);
 // unconsumed, it is the caller's to free with tensor_free / tensor_free_graph.
 tensor_dropout :: proc(a: ^Tensor, drop_prob: f64, training: bool) -> ^Tensor {
+	_host_inputs(.Dropout, a)
 	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
 	mask: []f64 = nil
 	if !training || drop_prob <= 0.0 {
@@ -294,6 +304,8 @@ tensor_dropout :: proc(a: ^Tensor, drop_prob: f64, training: bool) -> ^Tensor {
 }
 // tensor_sum reduces a tensor to a single scalar value (1x1 matrix)
 tensor_sum :: proc(a: ^Tensor) -> ^Tensor {
+	if _device_use(.Sum, a) {return _device_scalar_op(.Sum, a, nil)}
+	_host_inputs(.Sum, a)
 	// ✅ SIMD Optimization: Fast reduction sum
 	total := l.sum_simd(a.data.data)
 
@@ -323,6 +335,8 @@ tensor_add :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
 	}
 
 	// 1. Perform the forward pass using your existing SIMD add!
+	if _device_use(.Add, a, b) {return _device_elementwise(.Add, a, b)}
+	_host_inputs(.Add, a, b)
 	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
 	l.vec_add_simd(a.data.data, b.data.data, out_data.data)
 
@@ -340,6 +354,8 @@ tensor_add :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
 
 // tensor_relu applies the Rectified Linear Unit: max(0, x)
 tensor_relu :: proc(a: ^Tensor) -> ^Tensor {
+	if _device_use(.Relu, a) {return _device_elementwise(.Relu, a, nil)}
+	_host_inputs(.Relu, a)
 
 	// 1. Forward pass
 	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
@@ -370,6 +386,7 @@ tensor_gelu :: proc(a: ^Tensor) -> ^Tensor {
 // gelu(approximate = "tanh"), GPT-2's gelu_new):
 //   0.5 · x · (1 + tanh(√(2/π) · (x + 0.044715 · x³)))
 tensor_gelu_tanh :: proc(a: ^Tensor) -> ^Tensor {
+	_host_inputs(.GeluTanh, a)
 	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
 	for x, i in a.data.data {
 		out_data.data[i] = 0.5 * x * (1.0 + math.tanh(GELU_TANH_C * (x + 0.044715 * x * x * x)))
@@ -396,6 +413,8 @@ tensor_mul :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
 	}
 
 	// 1. Forward pass using SIMD
+	if _device_use(.Mul, a, b) {return _device_elementwise(.Mul, a, b)}
+	_host_inputs(.Mul, a, b)
 	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
 	l.vec_mul_simd(a.data.data, b.data.data, out_data.data)
 
@@ -413,6 +432,8 @@ tensor_mul :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
 // tensor_add_bias adds a 1xD bias vector to every row of an NxD matrix
 // a: [N, D], bias: [1, D] -> out: [N, D]
 tensor_add_bias :: proc(a: ^Tensor, bias: ^Tensor) -> ^Tensor {
+	if _device_use(.AddBias, a, bias) {return _device_add_bias(a, bias)}
+	_host_inputs(.AddBias, a, bias)
 	D := bias.data.cols
 	if bias.data.rows != 1 {
 		panic("tensor_add_bias: bias must be a 1xD row vector")
@@ -485,6 +506,9 @@ tensor_mse_loss :: proc(
 		panic("tensor_mse_loss: shape mismatch")
 	}
 
+	if _device_use(.MSELoss, pred, target) {return _device_scalar_op(.MSELoss, pred, target)}
+	_host_inputs(.MSELoss, pred, target)
+
 	n := f64(len(pred.data.data))
 
 	diff := make([]f64, len(pred.data.data), allocator)
@@ -515,6 +539,7 @@ tensor_mse_loss :: proc(
 
 // tensor_cross_entropy_loss calculates the loss for multi-class classification.
 tensor_cross_entropy_loss :: proc(logits: ^Tensor, target_indices: []int) -> ^Tensor {
+	_host_inputs(.CrossEntropy, logits)
 	// ✅ FIX: Handle flattened 3D tensor [1, N*C] where N = batch*seq_len, C = vocab_size
 	N := logits.data.rows
 	C := logits.data.cols
@@ -580,6 +605,7 @@ tensor_cross_entropy_loss :: proc(logits: ^Tensor, target_indices: []int) -> ^Te
 
 // tensor_flatten reshapes a 4D tensor (N, C, H, W) to 2D (N, C*H*W)
 tensor_flatten :: proc(input: ^Tensor) -> ^Tensor {
+	_host_inputs(.Flatten, input)
 	_check_shape(input)
 	N := input.shape[0]
 	features := input.shape[1] * input.shape[2] * input.shape[3]
@@ -643,6 +669,11 @@ _build_topo :: proc(node: ^Tensor, topo: ^[dynamic]^Tensor, visited: ^map[^Tenso
 // tensor_ensure_grad ensures a tensor has a gradient matrix allocated
 tensor_ensure_grad :: proc(t: ^Tensor) {
 	if !t.requires_grad {return}
+	if t.device != nil && _device_on() {
+		// device tensors get (or re-zero) a device gradient
+		if !_grad_exists(t) || t.grad_dropped {_device_zero_grad(t)}
+		return
+	}
 	if t.grad.data == nil {
 		t.grad = l.matrix_new(f64, t.data.rows, t.data.cols, t.allocator)
 		t.grad_dropped = false
@@ -656,18 +687,19 @@ tensor_ensure_grad :: proc(t: ^Tensor) {
 // freeing the buffer: tensor_has_grad is false until the next backward pass,
 // which zero-fills the buffer and accumulates into it again
 tensor_drop_grad :: proc(t: ^Tensor) {
-	if t.grad.data != nil {t.grad_dropped = true}
+	if _grad_exists(t) {t.grad_dropped = true}
 }
 
 // tensor_has_grad reports whether the tensor holds a gradient: a buffer exists
 // and it was not dropped since the last backward pass
 tensor_has_grad :: proc(t: ^Tensor) -> bool {
-	return t.grad.data != nil && !t.grad_dropped
+	return _grad_exists(t) && !t.grad_dropped
 }
 
 // tensor_max_pool2d performs max pooling.
 // input: (N, C, H, W) -> output: (N, C, H_out, W_out)
 tensor_max_pool2d :: proc(input: ^Tensor, kH, kW, stride: int) -> ^Tensor {
+	_host_inputs(.MaxPool2d, input)
 	_check_shape(input)
 	N := input.shape[0]
 	C := input.shape[1]
@@ -733,6 +765,7 @@ tensor_max_pool2d :: proc(input: ^Tensor, kH, kW, stride: int) -> ^Tensor {
 }
 // tensor_avg_pool2d performs average pooling.
 tensor_avg_pool2d :: proc(input: ^Tensor, kH, kW, stride: int) -> ^Tensor {
+	_host_inputs(.AvgPool2d, input)
 	_check_shape(input)
 	N := input.shape[0]
 	C := input.shape[1]
@@ -793,6 +826,7 @@ tensor_conv2d :: proc(
 	pad: int = 0,
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
+	_host_inputs(.Conv2d, input, weight, bias)
 	allocator := _scope_or(allocator) // the active graph scope, if any
 	_check_shape(input)
 	_check_shape(weight)
@@ -879,6 +913,8 @@ _matmul :: proc(a, b: ^l.Matrix(f64), allocator: mem.Allocator) -> l.Matrix(f64)
 
 // tensor_matmul creates a new tensor C = A @ B (Matrix Multiplication)
 tensor_matmul :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
+	if _device_use(.MatMul, a, b) {return _device_matmul(a, b)}
+	_host_inputs(.MatMul, a, b)
 
 
 	// ✅ NEW: Handle flattened 3D/4D tensor @ 2D weight matrix
@@ -962,6 +998,7 @@ _tensor_free_graph_impl :: proc(node: ^Tensor, visited: ^map[^Tensor]bool) {
 		}
 		n := top.node
 		pop(&stack)
+		if n.device != nil {_device_release(n)}
 		if n.data.data != nil {l.matrix_free(&n.data)}
 		if n.grad.data != nil {l.matrix_free(&n.grad)}
 		delete(n.inputs)
@@ -991,6 +1028,7 @@ tensor_free_graph :: proc(roots: ..^Tensor, allocator: mem.Allocator = context.a
 		// ✅ FIX: Free nodes that are either intermediate OR owned by the graph
 		if node.op != .None || node.owned_by_graph {
 			if len(_recordings) > 0 {_record_forget(node)}
+			if node.device != nil {_device_release(node)}
 			if node.data.data != nil {l.matrix_free(&node.data)}
 			if node.grad.data != nil {l.matrix_free(&node.grad)}
 			delete(node.inputs)
@@ -1202,6 +1240,7 @@ tensor_batch_norm_2d :: proc(
 	eps: f64 = 1e-5,
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
+	_host_inputs(.BatchNorm2d, input, weight, bias, running_mean, running_var)
 	allocator := _scope_or(allocator) // the active graph scope, if any
 	_check_shape(input)
 	N := input.shape[0]
@@ -1484,6 +1523,7 @@ tensor_rnn :: proc(
 	bias: ^Tensor,
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
+	_host_inputs(.RNN, x, h_0, w_ih, w_hh, bias)
 	allocator := _scope_or(allocator) // the active graph scope, if any
 	_check_shape(x)
 	_check_shape(w_ih)
@@ -1619,6 +1659,7 @@ tensor_gru :: proc(
 	bias_hn: ^Tensor,
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
+	_host_inputs(.GRU, x, h_0, w_ih, w_hh, bias, bias_hn)
 	allocator := _scope_or(allocator) // the active graph scope, if any
 	_check_shape(x)
 	_check_shape(w_ih)
@@ -1778,6 +1819,7 @@ tensor_lstm :: proc(
 	bias: ^Tensor,
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
+	_host_inputs(.LSTM, x, h_0, c_0, w_ih, w_hh, bias)
 	allocator := _scope_or(allocator) // the active graph scope, if any
 	_check_shape(x)
 	_check_shape(w_ih)
@@ -1859,6 +1901,7 @@ tensor_lstm :: proc(
 // ============================================================================
 
 tensor_embedding :: proc(input: ^Tensor, weight: ^Tensor) -> ^Tensor {
+	_host_inputs(.Embedding, input, weight)
 	_check_shape(input)
 	_check_shape(weight)
 
@@ -1914,6 +1957,7 @@ tensor_scaled_dot_product_attention :: proc(
 	V: ^Tensor,
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
+	_host_inputs(.ScaledDotProductAttention, Q, K, V)
 	allocator := _scope_or(allocator) // the active graph scope, if any
 	_check_shape(Q)
 	_check_shape(K)
@@ -2015,6 +2059,7 @@ tensor_permute_mha :: proc(
 	num_heads: int,
 	head_dim: int,
 ) -> ^Tensor {
+	_host_inputs(.PermuteMHA, x)
 	d_model := num_heads * head_dim
 	out_data := l.matrix_new(f64, 1, batch * num_heads * seq_len * head_dim, _op_alloc(x))
 
@@ -2057,6 +2102,7 @@ tensor_permute_mha_inverse :: proc(
 	num_heads: int,
 	head_dim: int,
 ) -> ^Tensor {
+	_host_inputs(.PermuteMHAInverse, x)
 	d_model := num_heads * head_dim
 	out_data := l.matrix_new(f64, 1, batch * seq_len * d_model, _op_alloc(x))
 
@@ -2097,6 +2143,7 @@ tensor_layer_norm :: proc(
 	eps: f64 = 1e-5,
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
+	_host_inputs(.LayerNorm, input, gamma, beta)
 	allocator := _scope_or(allocator) // the active graph scope, if any
 	d_model := gamma.data.cols
 	if beta.data.cols != d_model {
@@ -2217,6 +2264,7 @@ tensor_masked_scaled_dot_product_attention :: proc(
 	mask: []f64,
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
+	_host_inputs(.MaskedScaledDotProductAttention, Q, K, V)
 	allocator := _scope_or(allocator) // the active graph scope, if any
 	_check_shape(Q)
 	_check_shape(K)
@@ -2317,6 +2365,7 @@ tensor_masked_scaled_dot_product_attention :: proc(
 }
 // In tensor.odin, add this helper function at the top:
 tensor_validate :: proc(t: ^Tensor, ctx: string) {
+	_host_inputs(.None, t)
 	if t == nil {
 		fmt.printf("ERROR: %s - tensor is nil\n", ctx)
 		return
@@ -2337,6 +2386,7 @@ tensor_validate :: proc(t: ^Tensor, ctx: string) {
 	}
 }
 tensor_binary_cross_entropy :: proc(pred: ^Tensor, target: ^Tensor) -> ^Tensor {
+	_host_inputs(.BinaryCrossEntropy, pred, target)
 	if pred.data.rows != target.data.rows || pred.data.cols != target.data.cols {
 		panic("tensor_binary_cross_entropy: shape mismatch")
 	}
@@ -2375,6 +2425,12 @@ tensor_binary_cross_entropy :: proc(pred: ^Tensor, target: ^Tensor) -> ^Tensor {
 // and then it is the caller's to free.
 tensor_detach :: proc(t: ^Tensor, allocator: mem.Allocator = context.allocator) -> ^Tensor {
 	allocator := _scope_or(allocator)
+	if t.device != nil && _device_on() && t.device.data_where != .Host {
+		// a device copy: the detached tensor stays on the device
+		out := _device_new_op(t.data.rows, t.data.cols, t.shape, false, allocator, record = false)
+		_device_hooks.copy(out.device.data_buf, t.device.data_buf, tensor_numel(t))
+		return out
+	}
 	out_data := l.matrix_new(f64, t.data.rows, t.data.cols, allocator)
 	copy(out_data.data, t.data.data)
 	out := tensor_new(out_data, false, allocator)
@@ -2385,6 +2441,8 @@ tensor_detach :: proc(t: ^Tensor, allocator: mem.Allocator = context.allocator) 
 
 // Add this function to tensor.odin
 tensor_clip_weights :: proc(t: ^Tensor, min_val: f64, max_val: f64) {
+	_host_inputs(.None, t)
+	defer tensor_mark_host_dirty(t)
 	if t.data.data == nil {
 		return
 	}
@@ -2402,6 +2460,8 @@ tensor_sub :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
 		panic("tensor_sub: dimension mismatch")
 	}
 
+	if _device_use(.Sub, a, b) {return _device_elementwise(.Sub, a, b)}
+	_host_inputs(.Sub, a, b)
 	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
 	l.vec_sub_simd(a.data.data, b.data.data, out_data.data)
 
@@ -2416,6 +2476,8 @@ tensor_sub :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
 
 // tensor_mean computes the mean of all elements, returning a scalar tensor
 tensor_mean :: proc(a: ^Tensor) -> ^Tensor {
+	if _device_use(.Mean, a) {return _device_scalar_op(.Mean, a, nil)}
+	_host_inputs(.Mean, a)
 	n := f64(len(a.data.data))
 	sum := l.sum_simd(a.data.data)
 	mean_val := sum / n
@@ -2443,6 +2505,7 @@ KL_EXP_CLAMP :: 1e10
 // sums over L and divides by B; [B, S, L, 1] averages over the B·S vectors.
 // exp(log_var) is clamped at KL_EXP_CLAMP. Returns a scalar.
 tensor_kl_divergence :: proc(mu: ^Tensor, log_var: ^Tensor, loc := #caller_location) -> ^Tensor {
+	_host_inputs(.KLDivergence, mu, log_var)
 	_check_shape(mu, loc)
 	fmt.assertf(
 		len(mu.data.data) == len(log_var.data.data),
@@ -2483,6 +2546,8 @@ tensor_kl_divergence :: proc(mu: ^Tensor, log_var: ^Tensor, loc := #caller_locat
 }
 
 tensor_sigmoid :: proc(a: ^Tensor) -> ^Tensor {
+	if _device_use(.Sigmoid, a) {return _device_elementwise(.Sigmoid, a, nil)}
+	_host_inputs(.Sigmoid, a)
 	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
 	l.vec_sigmoid_simd(a.data.data, out_data.data) // ✅ SIMD
 	out := _tensor_new_op(out_data, a.shape, a.requires_grad, _op_alloc(a))
@@ -2494,6 +2559,8 @@ tensor_sigmoid :: proc(a: ^Tensor) -> ^Tensor {
 }
 
 tensor_tanh :: proc(a: ^Tensor) -> ^Tensor {
+	if _device_use(.Tanh, a) {return _device_elementwise(.Tanh, a, nil)}
+	_host_inputs(.Tanh, a)
 	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
 	l.vec_tanh_simd(a.data.data, out_data.data) // ✅ SIMD
 	out := _tensor_new_op(out_data, a.shape, a.requires_grad, _op_alloc(a))
@@ -2505,6 +2572,8 @@ tensor_tanh :: proc(a: ^Tensor) -> ^Tensor {
 }
 
 tensor_leaky_relu :: proc(a: ^Tensor, alpha: f64 = 0.01) -> ^Tensor {
+	if _device_use(.LeakyReLU, a) {return _device_elementwise(.LeakyReLU, a, nil, alpha)}
+	_host_inputs(.LeakyReLU, a)
 	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
 	l.vec_leaky_relu_simd(a.data.data, alpha, out_data.data) // ✅ SIMD
 	out := _tensor_new_op(out_data, a.shape, a.requires_grad, _op_alloc(a))
@@ -2517,6 +2586,8 @@ tensor_leaky_relu :: proc(a: ^Tensor, alpha: f64 = 0.01) -> ^Tensor {
 }
 
 tensor_neg :: proc(a: ^Tensor) -> ^Tensor {
+	if _device_use(.Neg, a) {return _device_elementwise(.Neg, a, nil)}
+	_host_inputs(.Neg, a)
 	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
 	l.vec_neg_simd(a.data.data, out_data.data) // ✅ SIMD
 	out := _tensor_new_op(out_data, a.shape, a.requires_grad, _op_alloc(a))
@@ -2528,6 +2599,8 @@ tensor_neg :: proc(a: ^Tensor) -> ^Tensor {
 }
 
 tensor_scale :: proc(a: ^Tensor, scalar: f64) -> ^Tensor {
+	if _device_use(.Scale, a) {return _device_elementwise(.Scale, a, nil, scalar)}
+	_host_inputs(.Scale, a)
 	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
 	l.vec_scale_simd(a.data.data, scalar, out_data.data) // ✅ SIMD
 	out := _tensor_new_op(out_data, a.shape, a.requires_grad, _op_alloc(a))
@@ -2543,6 +2616,8 @@ tensor_scale :: proc(a: ^Tensor, scalar: f64) -> ^Tensor {
 // Backward: grad_a = grad_out * exp(a) = grad_out * out
 // ============================================================================
 tensor_exp :: proc(a: ^Tensor) -> ^Tensor {
+	if _device_use(.Exp, a) {return _device_elementwise(.Exp, a, nil)}
+	_host_inputs(.Exp, a)
 	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
 	for i in 0 ..< len(a.data.data) {
 		out_data.data[i] = math.exp(a.data.data[i])
@@ -2560,6 +2635,8 @@ tensor_exp :: proc(a: ^Tensor) -> ^Tensor {
 // Backward: grad_a = grad_out / (2 * sqrt(a)) = grad_out / (2 * out)
 // ============================================================================
 tensor_sqrt :: proc(a: ^Tensor) -> ^Tensor {
+	if _device_use(.Sqrt, a) {return _device_elementwise(.Sqrt, a, nil)}
+	_host_inputs(.Sqrt, a)
 	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
 	for i in 0 ..< len(a.data.data) {
 		out_data.data[i] = math.sqrt(a.data.data[i])
@@ -2577,6 +2654,8 @@ tensor_sqrt :: proc(a: ^Tensor) -> ^Tensor {
 // Backward: grad_a = grad_out / a
 // ============================================================================
 tensor_log :: proc(a: ^Tensor) -> ^Tensor {
+	if _device_use(.Log, a) {return _device_elementwise(.Log, a, nil)}
+	_host_inputs(.Log, a)
 	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
 	for i in 0 ..< len(a.data.data) {
 		out_data.data[i] = math.ln_f64(a.data.data[i])
@@ -2594,6 +2673,7 @@ tensor_log :: proc(a: ^Tensor) -> ^Tensor {
 // Backward: grad_a = grad_out · ψ(a) (digamma)
 // ============================================================================
 tensor_lgamma :: proc(a: ^Tensor) -> ^Tensor {
+	_host_inputs(.Lgamma, a)
 	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
 	for i in 0 ..< len(a.data.data) {
 		out_data.data[i], _ = math.lgamma(a.data.data[i])
@@ -2638,6 +2718,8 @@ tensor_div :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
 	if a.data.rows != b.data.rows || a.data.cols != b.data.cols {
 		panic("tensor_div: dimension mismatch")
 	}
+	if _device_use(.Div, a, b) {return _device_elementwise(.Div, a, b)}
+	_host_inputs(.Div, a, b)
 	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
 	for i in 0 ..< len(a.data.data) {
 		out_data.data[i] = a.data.data[i] / b.data.data[i]
@@ -2657,6 +2739,7 @@ tensor_div :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
 // Backward: grad_a = grad_out * φ(a) where φ is the standard normal PDF
 // ============================================================================
 tensor_norm_cdf :: proc(a: ^Tensor) -> ^Tensor {
+	_host_inputs(.NormCDF, a)
 	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
 	for x, i in a.data.data {
 		out_data.data[i] = 0.5 * math.erfc(-x / math.SQRT_TWO)
@@ -2674,6 +2757,22 @@ tensor_sum_dim1 :: proc(a: ^Tensor) -> ^Tensor {
 	batch_size := a.shape[0]
 	num_assets := a.shape[1]
 
+	if _device_use(.SumDim1, a) {
+		out := _device_new_op(
+			batch_size,
+			1,
+			[4]int{batch_size, 1, 1, 1},
+			a.requires_grad,
+			_op_alloc(a),
+		)
+		_device_forward(.SumDim1, out, {a}, {batch_size, num_assets})
+		if out.requires_grad {
+			out.op = .SumDim1
+			append(&out.inputs, a)
+		}
+		return out
+	}
+	_host_inputs(.SumDim1, a)
 	out_data := l.matrix_new(f64, batch_size, 1, _op_alloc(a))
 	for b in 0 ..< batch_size {
 		sum := 0.0
@@ -2694,6 +2793,8 @@ tensor_sum_dim1 :: proc(a: ^Tensor) -> ^Tensor {
 
 // tensor_clamp: element-wise clamp to [lo, hi]
 tensor_clamp :: proc(a: ^Tensor, lo: f64, hi: f64) -> ^Tensor {
+	if _device_use(.Clamp, a) {return _device_elementwise(.Clamp, a, nil, lo, hi)}
+	_host_inputs(.Clamp, a)
 	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
 	for i in 0 ..< len(a.data.data) {
 		v := a.data.data[i]
@@ -2725,6 +2826,7 @@ _last_dim :: proc(t: ^Tensor) -> int {
 // [N, C] matrix, to each feature vector of a flattened [B, S, F, 1] sequence,
 // to each W-row of [N, C, H, W]. The output has the input's storage and shape.
 tensor_softmax :: proc(logits: ^Tensor) -> ^Tensor {
+	_host_inputs(.Softmax, logits)
 	_check_shape(logits)
 	C := _last_dim(logits)
 	N := len(logits.data.data) / C if C > 0 else 0
@@ -2759,6 +2861,7 @@ tensor_softmax :: proc(logits: ^Tensor) -> ^Tensor {
 }
 
 tensor_entropy :: proc(a: ^Tensor) -> ^Tensor {
+	_host_inputs(.Entropy, a)
 	entropy_val := 0.0
 	for i in 0 ..< len(a.data.data) {
 		p := a.data.data[i]
@@ -2779,6 +2882,7 @@ tensor_entropy :: proc(a: ^Tensor) -> ^Tensor {
 // Binary Cross-Entropy Loss
 // ============================================================================
 tensor_bce_loss :: proc(prediction: ^Tensor, target: ^Tensor) -> ^Tensor {
+	_host_inputs(.BCELoss, prediction, target)
 	// ✅ FIX: Use runtime assert instead of compile-time #assert
 	assert(
 		len(prediction.data.data) == len(target.data.data),
@@ -2861,6 +2965,21 @@ tensor_concat :: proc(tensors: []^Tensor, dim: int) -> ^Tensor {
 	out_shape := ref_shape
 	out_shape[dim] = total_dim_size
 
+	if _device_use(.Concat, ..tensors) {
+		total := out_shape[0] * out_shape[1] * out_shape[2] * out_shape[3]
+		out := _device_new_op(1, total, out_shape, requires_grad, allocator)
+		meta := make([]int, 1 + len(tensors), context.temp_allocator)
+		meta[0] = dim
+		for t, i in tensors {meta[1 + i] = t.shape[dim]}
+		_device_forward(.Concat, out, tensors, meta)
+		if out.requires_grad {
+			out.op = .Concat
+			for t in tensors {append(&out.inputs, t)}
+			append(&out.int_metadata, ..meta)
+		}
+		return out
+	}
+	_host_inputs(.Concat, ..tensors)
 	total_elements := out_shape[0] * out_shape[1] * out_shape[2] * out_shape[3]
 	out_data := l.matrix_new(f64, 1, total_elements, allocator)
 
@@ -2915,6 +3034,7 @@ tensor_permute_lob :: proc(
 	batch, c_out, t_out, l_out: int,
 	alloc: mem.Allocator,
 ) -> ^Tensor {
+	_host_inputs(.PermuteLOB, x)
 	alloc := _scope_or(alloc) // the active graph scope, if any
 	feat_dim := c_out * l_out
 	out_data := l.matrix_new(f64, 1, batch * t_out * feat_dim, alloc)
@@ -2950,6 +3070,7 @@ tensor_permute_lob :: proc(
 // returns: 1D or 2D tensor of periodic returns.
 // risk_free_rate: scalar f64 (e.g., 0.0).
 tensor_sharpe_loss :: proc(returns: ^Tensor, risk_free_rate: f64 = 0.0) -> ^Tensor {
+	_host_inputs(.SharpeLoss, returns)
 	allocator := _op_alloc(returns) // the active graph scope, else the input's
 	n := f64(len(returns.data.data))
 	if n == 0 {
@@ -3005,6 +3126,7 @@ tensor_normalize_time :: proc(
 	eps: f64 = 1e-8,
 	allocator: mem.Allocator = context.allocator, // temporary buffers
 ) -> ^Tensor {
+	_host_inputs(.NormalizeTime, input)
 	allocator := _scope_or(allocator) // the active graph scope, if any
 	_check_shape(input)
 	N := input.shape[0]
@@ -3077,6 +3199,7 @@ tensor_normalize_time :: proc(
 // LogSumExp over Dimension 1 (Core Math Primitive)
 // ============================================================================
 tensor_logsumexp_dim1 :: proc(q: ^Tensor, num_actions: int) -> ^Tensor {
+	_host_inputs(.LogSumExpDim1, q)
 	allocator := _op_alloc(q) // the active graph scope, else the input's
 	_check_shape(q)
 	batch := q.shape[0]
@@ -3109,6 +3232,8 @@ tensor_logsumexp_dim1 :: proc(q: ^Tensor, num_actions: int) -> ^Tensor {
 // Backward: grad_a = grad_out * sigmoid(x)
 // ============================================================================
 tensor_softplus :: proc(a: ^Tensor) -> ^Tensor {
+	if _device_use(.Softplus, a) {return _device_elementwise(.Softplus, a, nil)}
+	_host_inputs(.Softplus, a)
 	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
 	for i in 0 ..< len(a.data.data) {
 		x := a.data.data[i]
@@ -3203,6 +3328,7 @@ tensor_ssm :: proc(
 	D: ^Tensor, // [1, d_model]
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
+	_host_inputs(.SSM, x, h_0, A, B, C, Delta, D)
 	allocator := _scope_or(allocator) // the active graph scope, if any
 	_check_shape(x)
 	_check_shape(A)
@@ -3285,6 +3411,7 @@ tensor_flash_attention :: proc(
 	causal: bool = false,
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
+	_host_inputs(.FlashAttention, Q, K, V)
 	allocator := _scope_or(allocator) // the active graph scope, if any
 	_check_shape(Q)
 	_check_shape(K)
@@ -3423,6 +3550,7 @@ tensor_top_k_mask :: proc(
 	k: int,
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
+	_host_inputs(.TopKMask, probs)
 	_check_shape(probs)
 	allocator := _scope_or(allocator) // the active graph scope, if any
 	N := probs.shape[0]
@@ -3453,6 +3581,7 @@ tensor_top_k_mask :: proc(
 // Gate Multiply: out[n, d] = x[n, d] * gate[n, 0]
 // ============================================================================
 tensor_gate_mul :: proc(x: ^Tensor, gate: ^Tensor) -> ^Tensor {
+	_host_inputs(.GateMul, x, gate)
 	allocator := _op_alloc(x) // the active graph scope, else the input's
 	_check_shape(x)
 	N := x.shape[0]
@@ -3476,9 +3605,44 @@ tensor_gate_mul :: proc(x: ^Tensor, gate: ^Tensor) -> ^Tensor {
 }
 
 // tensor_reshape changes the logical shape of the tensor without altering the flat memory layout.
+// tensor_as_matrix: x as a true [rows, cols] matrix (data rows for row-wise
+// ops, while sequence tensors are stored flat). An op output (also without
+// gradient); gradients flow back to x.
+tensor_as_matrix :: proc(
+	x: ^Tensor,
+	rows, cols: int,
+	allocator: mem.Allocator = context.allocator,
+) -> ^Tensor {
+	assert(rows * cols == tensor_numel(x), "as_matrix: size mismatch")
+	allocator := _scope_or(allocator)
+	shape := [4]int{rows, cols, 1, 1}
+	if _device_use(.Reshape, x) {
+		m := _device_new_op(rows, cols, shape, x.requires_grad, allocator)
+		_device_forward(.Reshape, m, {x})
+		if m.requires_grad {
+			m.op = .Reshape
+			append(&m.inputs, x)
+		}
+		return m
+	}
+	_host_inputs(.Reshape, x)
+	m := _tensor_new_op(
+		l.matrix_new(f64, rows, cols, allocator),
+		shape,
+		x.requires_grad,
+		allocator,
+	)
+	copy(m.data.data, x.data.data)
+	if m.requires_grad {
+		m.op = .Reshape
+		append(&m.inputs, x)
+	}
+	return m
+}
+
 tensor_reshape :: proc(input: ^Tensor, new_shape: [4]int) -> ^Tensor {
 	allocator := _op_alloc(input) // the active graph scope, else the input's
-	old_total := len(input.data.data)
+	old_total := tensor_numel(input)
 	new_total := new_shape[0] * new_shape[1] * new_shape[2] * new_shape[3]
 
 	if old_total != new_total {
@@ -3491,6 +3655,16 @@ tensor_reshape :: proc(input: ^Tensor, new_shape: [4]int) -> ^Tensor {
 		)
 	}
 
+	if _device_use(.Reshape, input) {
+		out := _device_new_op(1, new_total, new_shape, input.requires_grad, allocator)
+		_device_forward(.Reshape, out, {input})
+		if out.requires_grad {
+			out.op = .Reshape
+			append(&out.inputs, input)
+		}
+		return out
+	}
+	_host_inputs(.Reshape, input)
 	// Create a new matrix container with the exact same flat data
 	out_data := l.matrix_new(f64, 1, new_total, allocator)
 	copy(out_data.data, input.data.data)
@@ -3508,6 +3682,7 @@ tensor_reshape :: proc(input: ^Tensor, new_shape: [4]int) -> ^Tensor {
 // shift). Rows as in tensor_layer_norm: input [N, d_model] or a flattened
 // [1, N·d_model] sequence.
 tensor_rms_norm :: proc(input: ^Tensor, gamma: ^Tensor, eps: f64 = 1e-6) -> ^Tensor {
+	_host_inputs(.RMSNorm, input, gamma)
 	d_model := gamma.data.cols
 	assert(len(gamma.data.data) == d_model, "tensor_rms_norm: gamma must be [1, d_model]")
 	assert(
@@ -3552,6 +3727,7 @@ tensor_conv1d :: proc(
 	pad_left := 0,
 	pad_right := 0,
 ) -> ^Tensor {
+	_host_inputs(.Conv1d, x, weight, bias)
 	B, T, C_in := x.shape[0], x.shape[1], x.shape[2]
 	C_out, K := weight.shape[0], weight.shape[2]
 	assert(
@@ -3596,6 +3772,22 @@ tensor_conv1d :: proc(
 
 // tensor_transpose: the transpose [cols, rows] of a matrix a [rows, cols]
 tensor_transpose :: proc(a: ^Tensor) -> ^Tensor {
+	if _device_use(.Transpose, a) {
+		out := _device_new_op(
+			a.data.cols,
+			a.data.rows,
+			{a.data.cols, a.data.rows, 1, 1},
+			a.requires_grad,
+			_op_alloc(a),
+		)
+		_device_forward(.Transpose, out, {a})
+		if out.requires_grad {
+			out.op = .Transpose
+			append(&out.inputs, a)
+		}
+		return out
+	}
+	_host_inputs(.Transpose, a)
 	rows, cols := a.data.rows, a.data.cols
 	out_data := l.matrix_new(f64, cols, rows, _op_alloc(a))
 	for i in 0 ..< rows {
@@ -3619,6 +3811,17 @@ tensor_slice_cols :: proc(a: ^Tensor, start, count: int) -> ^Tensor {
 		"tensor_slice_cols: columns out of range",
 	)
 
+	if _device_use(.SliceCols, a) {
+		out := _device_new_op(N, count, [4]int{N, count, 1, 1}, a.requires_grad, allocator)
+		_device_forward(.SliceCols, out, {a}, {start, C})
+		if out.requires_grad {
+			out.op = .SliceCols
+			append(&out.inputs, a)
+			append(&out.int_metadata, start, C)
+		}
+		return out
+	}
+	_host_inputs(.SliceCols, a)
 	out_data := l.matrix_new(f64, N, count, allocator)
 	for n in 0 ..< N {
 		copy(out_data.data[n * count:(n + 1) * count], a.data.data[n * C + start:][:count])
@@ -3651,6 +3854,7 @@ tensor_prospect_value :: proc(
 	beta: f64 = 0.88,
 	lambda: f64 = 2.25,
 ) -> ^Tensor {
+	_host_inputs(.ProspectValue, returns)
 	allocator := _op_alloc(returns) // the active graph scope, else the input's
 	out_data := l.matrix_new(f64, returns.data.rows, returns.data.cols, allocator)
 
@@ -3681,6 +3885,7 @@ tensor_prospect_value :: proc(
 // Calibrated: γ_gain = 0.61, γ_loss = 0.69
 
 tensor_prob_weighting :: proc(p: ^Tensor, gamma: f64 = 0.61) -> ^Tensor {
+	_host_inputs(.ProbWeighting, p)
 	allocator := _op_alloc(p) // the active graph scope, else the input's
 	eps := 1e-7
 	out_data := l.matrix_new(f64, p.data.rows, p.data.cols, allocator)
@@ -3714,6 +3919,7 @@ tensor_prospect_utility :: proc(
 	beta: f64 = 0.88,
 	lambda: f64 = 2.25,
 ) -> ^Tensor {
+	_host_inputs(.ProspectUtility, returns)
 	allocator := _op_alloc(returns) // the active graph scope, else the input's
 	n := f64(len(returns.data.data))
 	if n == 0 {

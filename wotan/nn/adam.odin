@@ -77,7 +77,7 @@ adam_add_param_with_lr :: proc(opt: ^Adam, param: ^t.Tensor, lr: f64) {
 
 @(private = "file")
 _adam_register :: proc(opt: ^Adam, param: ^t.Tensor, lr_scale: f64) {
-	n := len(param.data.data)
+	n := t.tensor_numel(param)
 	append(&opt.parameters, param)
 	append(&opt.lr_scales, lr_scale)
 	append(&opt.steps, 0)
@@ -111,6 +111,27 @@ _adam_step :: proc(opt: ^Adam, schedule: ^optim.LR_Schedule, step: int) {
 		if schedule != nil && opt.lr_scales[i] != 1 {
 			lr = optim.lr_schedule_at(schedule^, step, schedule.base_lr * opt.lr_scales[i])
 		}
+		key := raw_data(opt.moment_1[i])
+		if param.device != nil && t._device_hooks.adam != nil {
+			// device parameter: fused update kernel, moments kept on the device
+			t._device_hooks.adam(
+				param,
+				key,
+				opt.moment_1[i],
+				opt.moment_2[i],
+				lr,
+				opt.beta_1,
+				opt.beta_2,
+				opt.epsilon,
+				opt.weight_decay,
+				opt.steps[i],
+			)
+			continue
+		}
+		if t._device_hooks.optim_sync != nil {
+			// the parameter left the device: continue from its device moments
+			t._device_hooks.optim_sync(key, opt.moment_1[i], opt.moment_2[i], true)
+		}
 		optim.adam_update(
 			param.data.data,
 			param.grad.data,
@@ -127,6 +148,9 @@ _adam_step :: proc(opt: ^Adam, schedule: ^optim.LR_Schedule, step: int) {
 }
 
 adam_free :: proc(opt: ^Adam) {
+	if t._device_hooks.optim_release != nil {
+		for m in opt.moment_1 {t._device_hooks.optim_release(raw_data(m))}
+	}
 	for m in opt.moment_1 {delete(m, opt.allocator)}
 	for v in opt.moment_2 {delete(v, opt.allocator)}
 	delete(opt.moment_1)
@@ -156,17 +180,38 @@ _drop_grads :: proc(params: []^t.Tensor) {
 // Returns the norm before clipping.
 clip_grad_norm_params :: proc(params: []^t.Tensor, max_norm: f64) -> f64 {
 	total_sq := 0.0
+	on_device := make([dynamic]^t.Tensor, context.temp_allocator)
 	for param in params {
-		if t.tensor_has_grad(param) {total_sq += l.dot_simd(param.grad.data, param.grad.data)}
+		if !t.tensor_has_grad(param) {continue}
+		if param.device != nil && t._device_hooks.grad_sq_sum != nil {
+			append(&on_device, param)
+		} else {
+			total_sq += l.dot_simd(param.grad.data, param.grad.data)
+		}
 	}
+	// device gradients: one reduction kernel per parameter, one readback
+	if len(on_device) > 0 {total_sq += t._device_hooks.grad_sq_sum(on_device[:])}
 	total := math.sqrt(total_sq)
 	coef := max_norm / (total + 1e-6)
 	if coef < 1.0 {
 		for param in params {
-			if t.tensor_has_grad(param) {l.vec_scale_simd(param.grad.data, coef, param.grad.data)}
+			if !t.tensor_has_grad(param) {continue}
+			if param.device != nil && t._device_hooks.grad_scale != nil {
+				t._device_hooks.grad_scale(param, coef)
+			} else {
+				l.vec_scale_simd(param.grad.data, coef, param.grad.data)
+			}
 		}
 	}
 	return total
+}
+
+// _adam_state_to_host copies the moments of device parameters into the host
+// slices (e.g. before saving a checkpoint); they stay on the device
+@(private)
+_adam_state_to_host :: proc(opt: ^Adam) {
+	if t._device_hooks.optim_sync == nil {return}
+	for m1, i in opt.moment_1 {t._device_hooks.optim_sync(raw_data(m1), m1, opt.moment_2[i], false)}
 }
 
 clip_grad_norm_adam :: proc(opt: ^Adam, max_norm: f64) -> f64 {

@@ -59,16 +59,18 @@ _Chunk :: struct {
 }
 
 Graph_Scope :: struct {
-	chunks:  [dynamic]_Chunk,
-	cur:     int, // chunk in use
-	offset:  int, // bump offset in chunks[cur]
-	last:    rawptr, // most recent allocation, may grow in place
-	prev:    ^Graph_Scope,
-	mutex:   sync.Mutex,
-	active:  bool,
-	no_grad: bool, // while active: op outputs record no graph
-	created: int, // tensors created in the scope since graph_begin
-	freed:   int, // ... and explicitly freed (counted again at graph_end)
+	chunks:         [dynamic]_Chunk,
+	cur:            int, // chunk in use
+	offset:         int, // bump offset in chunks[cur]
+	last:           rawptr, // most recent allocation, may grow in place
+	prev:           ^Graph_Scope,
+	mutex:          sync.Mutex,
+	active:         bool,
+	no_grad:        bool, // while active: op outputs record no graph
+	created:        int, // tensors created in the scope since graph_begin
+	freed:          int, // ... and explicitly freed (counted again at graph_end)
+	// GPU buffers of tensors created in the scope, returned to the pool by graph_end
+	device_buffers: [dynamic]Device_Buffer,
 }
 
 @(private = "file", thread_local)
@@ -105,6 +107,11 @@ graph_end :: proc(scope: ^Graph_Scope, loc := #caller_location) {
 	scope.created, scope.freed = 0, 0
 
 	scope.cur, scope.offset, scope.last = 0, 0, nil
+
+	if _device_hooks.release != nil {
+		for b in scope.device_buffers {_device_hooks.release(b)}
+	}
+	clear(&scope.device_buffers)
 }
 
 // graph_scope_destroy returns the scope's memory to the OS
@@ -112,6 +119,7 @@ graph_scope_destroy :: proc(scope: ^Graph_Scope, loc := #caller_location) {
 	assert(!scope.active, "graph_scope_destroy: scope is still active", loc)
 	for c in scope.chunks {vmem.release(c.base, uint(c.size))}
 	delete(scope.chunks)
+	delete(scope.device_buffers)
 	scope^ = {}
 }
 

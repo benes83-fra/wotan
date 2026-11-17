@@ -337,6 +337,15 @@ Reference and contract tests print `OK` or `FAIL` for each check and end with a 
 |------|------------|--------|
 | `test_support` | `seed_test`, `record_failures`, `exit_on_failures`, `seed_sweep`, `seed_sweep_print`, `fail_missing_data` | Seeding from the test's name, the global failure count and exit code, runs over several seeds, and reporting real data that could not be loaded as a failure of the calling test |
 
+## 14. GPU (separate entry point)
+
+The GPU tests are their own program, [`gpu_tests/`](../gpu_tests/), not part of `main.odin`: only programs that import `wotan/gpu` need the wgpu-native library, so the main suite builds without it. Run them with `odin run gpu_tests -collection:root=. -debug`. Without a usable GPU adapter the program prints `SKIP` and exits with code 0; otherwise it exits with code 1 if any check failed.
+
+| File | Procedures | Covers |
+|------|------------|--------|
+| `gpu_tests/ops_test` | `gpu_op_parity_test`, `gpu_fallback_op_test` | Every op with a GPU kernel against the CPU engine, forward and backward with a random upstream gradient (both forms of matmul and add_bias, inputs used twice, a chained graph); the same ops through the CPU fallback with their kernel disabled; ops without a kernel (softmax, layer norm) on device inputs |
+| `gpu_tests/training_test` | `gpu_residency_test`, `gpu_mlp_training_test`, `gpu_all_fallback_training_test`, `gpu_sgd_clip_test`, `gpu_scope_memory_test`, `gpu_checkpoint_test`, `gpu_speed_report` | Host copies and sync procedures, automatic uploads, `to_host`, detach; MLP + Adam training with five activations against the CPU (losses and parameters), with no fallbacks; training with every kernel disabled; SGD with Nesterov momentum and gradient clipping; graph freeing without a scope; device pool size flat across a scoped loop; checkpoints saved from the GPU load on the CPU with identical parameters and Adam moments; step times CPU vs GPU (printed, not checked) |
+
 ---
 
 ## Required files

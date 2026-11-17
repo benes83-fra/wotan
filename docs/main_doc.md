@@ -61,6 +61,7 @@ Every example in the guides was compiled and run against the current code, and t
 | [data in and out](data_io_guide.md) (`importer`, `exporter`, `net`) | reading and writing CSV, JSON, JSON Lines, HTML and Excel; HTTP; Yahoo Finance histories as a DataFrame, as arrays per ticker or as a date-matched panel; prices to returns |
 | [linalg](linalg_guide.md) | the `Matrix` type, matrices from DataFrames, products, covariance and correlation, LU, Cholesky, QR, least squares, eigenvalues and SVD, vector kernels |
 | [tensor](tensor_guide.md) | tensors and gradients, element-wise and matrix operations, reductions and losses, normalisation, convolution, recurrent cells and attention, the backward pass, graph scopes |
+| [gpu](gpu_guide.md) | the opt-in GPU backend (WebGPU): moving tensors to the GPU, training with `nn` on the GPU, reading results, ops with GPU kernels and the CPU fallback, precision, performance |
 | [plot](plot_guide.md) | configuration, line charts, several series, scatter plots and histograms, bars, heatmaps, themes, axes, drawing your own charts |
 
 ### Statistics and machine learning

@@ -71,6 +71,7 @@ Wotan is a library for data analysis and quantitative finance in Odin. It starte
 - GAN, WGAN, VAE
 - Tokenizers: GPT-2 BPE (including training a vocabulary), WordPiece (cased and uncased, sentence pairs), batch encoding; time-series tokenization
 - SGD, Adam, AdamW, RMSProp, L-BFGS and learning-rate schedulers
+- Optional GPU backend (`gpu`, WebGPU: Vulkan, DirectX 12, Metal) for training with the same tensor and `nn` calls
 
 **Quantitative finance** (`finance`, `ml_finance`, `behavioral_finance`)
 - European, American (trees, finite differences, LSM) and exotic options; Greeks computed with autograd; implied volatility and volatility surfaces (SABR, Heston)
@@ -96,6 +97,7 @@ Wotan is a library for data analysis and quantitative finance in Odin. It starte
   - Older compilers cannot build Wotan. The Excel reader and the PNG tests use `core:compress/deflate`, and that package only exists from dev-2026-11 onwards.
   - With dev-2026-11, `odin check .` reports no errors or warnings.
 - libcurl, used through Odin's `vendor:curl` package. It is only needed for the `net` package (Yahoo Finance and HTTP).
+- Optional: the wgpu-native library, used through Odin's `vendor:wgpu` package. It is only needed by programs that import the `gpu` package; the Windows build of Odin ships it (see the [gpu guide](docs/gpu_guide.md#1-setup)).
 
 ### Build and run
 
@@ -270,6 +272,7 @@ wotan/
 ├── analytics/          time series, statistical tests, Kalman filters, GARCH
 │   └── ML/             classical machine learning
 ├── tensor/             autograd engine
+├── gpu/                optional GPU backend for tensor and nn (WebGPU)
 ├── nn/                 neural network layers and models, tokenizers
 ├── optimize/           optimizers and learning-rate schedulers
 ├── finance/            pricing, fixed income, portfolio, risk, backtesting
@@ -281,6 +284,7 @@ wotan/
 ├── util/               shared worker pool for parallel loops
 └── zip_min/            minimal ZIP reader (used by the Excel importer)
 tests/                  runnable examples and regression tests
+gpu_tests/              GPU test suite (separate program)
 scripts/                scripts to download MNIST and convert Hugging Face models (FinBERT, DistilGPT-2)
 data/                   MNIST and stored SPY prices and options
 demo_files/             input files for the I/O tests and demo; export tests write here too
@@ -304,6 +308,8 @@ Reference and contract tests print `OK` or `FAIL` for each check. Failed checks 
 
 Run with `-debug` to turn on the tracking allocator. It reports any leaked allocation when the program exits.
 
+The GPU backend has its own test program, so that the main suite builds without the wgpu library: `odin run gpu_tests -collection:root=. -debug`. It compares every GPU result with the CPU engine, and prints `SKIP` on machines without a usable GPU.
+
 ## Optional: pretrained weights
 
 The FinBERT and GPT-2 examples can load Hugging Face weights. The conversion scripts need Python with `transformers` installed. Run them from `scripts/`, because they write to `../model_checkpoints/`:
@@ -324,7 +330,7 @@ These are areas where Wotan is known to be incomplete:
 
 - **API stability:** names and signatures are still changing. There are no versioned releases yet.
 - **Documentation:** every package has a user guide, except a few small support packages. [`docs/main_doc.md`](docs/main_doc.md) is the entry point: it gives an overview of the packages, links each guide and lists the conventions they share.
-- **Performance:** everything runs on the CPU. Some hot paths use SIMD, but most code has not been profiled or tuned, and large deep learning models are slow.
+- **Performance:** most code runs on the CPU. Some hot paths use SIMD, but most code has not been profiled or tuned. Neural network training can run on a GPU (the `gpu` package), where about 25 core tensor ops have GPU kernels; the others run on the CPU automatically.
 - **Validation:** most modules are tested against reference libraries (see [Tests](#tests)). The ML-for-finance models are mostly checked by examples rather than references; the behavioural finance models reproduce their papers' published tables and examples. Nothing has been validated for production trading or risk use.
 - **Memory management:** ownership is explicit, as is usual in Odin. Most objects need a matching `destroy_*` or `*_free` call.
 

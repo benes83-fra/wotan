@@ -122,6 +122,7 @@ reparameterize :: proc(mu: ^t.Tensor, log_var: ^t.Tensor, allocator: mem.Allocat
 	// z is an op output: it lives in the active graph scope, if any
 	allocator := t._scope_or(allocator)
 
+	t._host_inputs(.Reparameterize, mu, log_var)
 	batch_size := mu.data.rows
 	latent_dim := mu.data.cols
 

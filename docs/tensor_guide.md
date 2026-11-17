@@ -9,7 +9,7 @@
 - RNN, GRU and LSTM cells, embeddings, attention (plain, masked, tiled "flash", causal) and a selective state-space scan;
 - graph scopes: one arena per graph, so a training loop allocates no new memory after its first iteration.
 
-Everything works on `f64`. The `nn` package builds its layers, optimisers and models on top of this one (see the [nn user guide](nn_guide.md)). This guide covers the tensor level: what you need to write your own models, losses or layers.
+Everything works on `f64`. An opt-in GPU backend runs the same operations on a graphics card; see the [gpu user guide](gpu_guide.md). The `nn` package builds its layers, optimisers and models on top of this one (see the [nn user guide](nn_guide.md)). This guide covers the tensor level: what you need to write your own models, losses or layers.
 
 The guide assumes you know basic Odin and the `Matrix` type from the [linalg user guide](linalg_guide.md).
 
@@ -656,7 +656,7 @@ The same network in PyTorch 2.1.0 (float64, the same initial weights, plain SGD)
 | Arithmetic | `tensor_add`, `_sub`, `_mul`, `_div`, `_neg`, `_scale`, `_add_bias`, `_gate_mul` |
 | Element-wise math | `tensor_exp`, `_log`, `_sqrt`, `_lgamma`, `_clamp`, `_norm_cdf` |
 | Activations | `tensor_relu`, `_leaky_relu`, `_sigmoid`, `_tanh`, `_softplus`, `_gelu`, `_gelu_tanh`, `_softmax` |
-| Products and shapes | `tensor_matmul`, `_transpose`, `_reshape`, `_flatten`, `_concat`, `_slice_cols`, `_slice_gate`, `_permute_mha`, `_permute_mha_inverse`, `_permute_lob` |
+| Products and shapes | `tensor_matmul`, `_transpose`, `_reshape`, `_as_matrix`, `_flatten`, `_concat`, `_slice_cols`, `_slice_gate`, `_permute_mha`, `_permute_mha_inverse`, `_permute_lob` |
 | Reductions | `tensor_sum`, `_mean`, `_sum_dim1`, `_logsumexp_dim1` |
 | Losses | `tensor_mse_loss`, `_cross_entropy_loss`, `_bce_loss`, `_binary_cross_entropy`, `_kl_divergence`, `_entropy`, `_sharpe_loss`, `_prospect_utility` |
 | Behavioural finance | `tensor_prospect_value`, `_prob_weighting`, `_prospect_utility` |
@@ -665,3 +665,4 @@ The same network in PyTorch 2.1.0 (float64, the same initial weights, plain SGD)
 | Sequences | `tensor_rnn`, `_gru`, `_lstm`, `_embedding`, `_ssm` |
 | Attention | `tensor_scaled_dot_product_attention`, `_masked_scaled_dot_product_attention`, `_flash_attention` |
 | Constants and checks | `tensor_top_k_mask`, `tensor_clip_weights`, `tensor_validate`, `tensor_validate_graph` |
+| Size and GPU residency | `tensor_numel`; for tensors on a GPU: `tensor_values`, `tensor_grad_values`, `tensor_item`, `tensor_sync_host`, `tensor_mark_host_dirty`, `tensor_is_on_device` (see the [gpu guide](gpu_guide.md)) |

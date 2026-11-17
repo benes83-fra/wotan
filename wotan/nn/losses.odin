@@ -64,7 +64,7 @@ gaussian_nll_loss :: proc(mu, var, target: ^t.Tensor, eps := 1e-6) -> ^t.Tensor 
 // mu, sigma, nu, target: equal shapes; nu may be learned (ψ via tensor_lgamma).
 student_t_nll_loss :: proc(mu, sigma, nu, target: ^t.Tensor) -> ^t.Tensor {
 	alloc := t._scope_or(mu.allocator)
-	ones := _constant(len(mu.data.data), mu.shape, alloc)
+	ones := _constant(t.tensor_numel(mu), mu.shape, alloc)
 	ones.data.rows, ones.data.cols = mu.data.rows, mu.data.cols
 	for &v in ones.data.data {v = 1}
 	resid := t.tensor_sub(target, mu)
@@ -126,7 +126,7 @@ student_t_nll_loss :: proc(mu, sigma, nu, target: ^t.Tensor) -> ^t.Tensor {
 quantile_loss :: proc(pred: ^t.Tensor, target: []f64, quantiles: []f64) -> ^t.Tensor {
 	N, Q := len(target), len(quantiles)
 	assert(
-		len(pred.data.data) == N * Q,
+		t.tensor_numel(pred) == N * Q,
 		"quantile_loss: pred must have len(quantiles) columns per target",
 	)
 	alloc := t._scope_or(pred.allocator)

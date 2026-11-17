@@ -70,21 +70,8 @@ as_matrix :: proc(
 	rows, cols: int,
 	allocator: mem.Allocator = context.allocator,
 ) -> ^t.Tensor {
-	assert(rows * cols == len(x.data.data), "as_matrix: size mismatch")
-	allocator := t._scope_or(allocator) // an op output: in the active scope, if any
 	// an op output (also without gradient: a forward recording then sees it)
-	m := t._tensor_new_op(
-		l.matrix_new(f64, rows, cols, allocator),
-		[4]int{rows, cols, 1, 1},
-		x.requires_grad,
-		allocator,
-	)
-	copy(m.data.data, x.data.data)
-	if m.requires_grad {
-		m.op = .Reshape
-		append(&m.inputs, x)
-	}
-	return m
+	return t.tensor_as_matrix(x, rows, cols, allocator)
 }
 
 // Position `step` of every sequence of x [batch, seq_len, width] as
