@@ -121,8 +121,8 @@ step  50  loss 0.01022
 step 100  loss 0.00908
 step 150  loss 0.00818
 step 199  loss 0.00695
-kernel launches 4000, submissions 208, downloads 5, CPU fallbacks 0
-```
+kernel launches 4000, submissions 50, downloads 5, CPU fallbacks 0
+```S
 
 The forward pass, the backward pass and the Adam step all ran on the GPU: 20 kernel launches per step and no CPU fallback. Ops do not wait for each other. They are recorded and submitted together, and the program waits for the GPU only when it reads a value: here, the 5 printed losses.
 
@@ -528,20 +528,36 @@ Where results need `f64` accuracy, keep those tensors on the CPU. A program can 
 
 ## 11. Performance
 
-Mean time of one Adam training step (forward, backward, update) of an MLP with ReLU, measured by the test suite on the RTX 3060 Laptop GPU and its host CPU:
+The GPU pays off when the work per step is large: wide layers, large batches, big matrix products. Small models train faster on the CPU, because every kernel launch and every read of a result has a fixed cost that a small model's arithmetic does not cover.
+
+Mean time of one Adam training step (forward, backward, update) of an MLP with ReLU, measured by the test suite on the RTX 3060 Laptop GPU and its host CPU, built with `-o:speed`:
 
 | Layer sizes | Batch | CPU | GPU | Speed-up |
 |---|---|---|---|---|
-| 16, 64, 64, 1 | 64 | 1.47 ms | 0.64 ms | 2.3× |
-| 64, 256, 256, 1 | 256 | 21.07 ms | 1.31 ms | 16.1× |
-| 256, 1024, 1024, 1 | 512 | 296.89 ms | 38.89 ms | 7.6× |
-| 512, 2048, 2048, 1 | 1024 | 1807.41 ms | 75.79 ms | 23.8× |
+| 16, 64, 64, 1 | 64 | 0.27 ms | 0.59 ms | 0.5× |
+| 64, 256, 256, 1 | 256 | 2.84 ms | 0.92 ms | 3.1× |
+| 256, 1024, 1024, 1 | 512 | 69.13 ms | 4.34 ms | 15.9× |
+| 512, 2048, 2048, 1 | 1024 | 607.78 ms | 18.96 ms | 32.1× |
 
-Timings on a laptop vary between runs with clock speeds and power state.
+The small test models of the suite are faster on the CPU in this build. A step takes 1.9 ms on the CPU and 2.6 ms on the GPU for the GPT of [section 5](#5-transformers-on-the-gpu) with 6 sequences of 12 tokens, 0.2 ms against 0.6 ms for the CNN, and 0.1 ms against 0.8 ms for the TCN. Timings on a laptop vary between runs with clock speeds and power state. Debug builds (`-debug`) slow the CPU engine several times more than the GPU path, so compare the two devices in an optimized build.
+
+**Matrix products** use a register-tiled kernel: a workgroup computes a 64×64 block of the result, each thread a 4×4 block held in registers. Products with fewer than 32 rows or columns (`gpu.MATMUL_TILED_MIN`) use a kernel with 16×16 blocks and one result per thread, which wastes less work on small shapes. `gpu.benchmark_matmul` times a product with the current choice, and `gpu.set_matmul_kernel` forces one kernel for comparisons. Measured by the test suite (square products, `-o:speed`):
+
+| Size | 16×16 kernel | Register-tiled | Speed-up |
+|---|---|---|---|
+| 256 | 0.077 ms (438 GFLOP/s) | 0.051 ms (660 GFLOP/s) | 1.5× |
+| 512 | 0.440 ms (610 GFLOP/s) | 0.149 ms (1798 GFLOP/s) | 2.9× |
+| 1024 | 3.490 ms (615 GFLOP/s) | 0.888 ms (2419 GFLOP/s) | 3.9× |
+| 2048 | 30.201 ms (569 GFLOP/s) | 5.857 ms (2933 GFLOP/s) | 5.2× |
+
+Products with a transposed operand, as in the backward pass, run at the same speed.
+
+**How the work reaches the GPU.** Ops record their kernel launches and return at once. The recorded work is submitted every 128 launches, so the GPU starts while the CPU is still recording, and whenever the host reads a value. Uploads during a step do not interrupt this: their data goes through a staging buffer and is copied into place in recorded order. The parameters of all launches of a submission are written to the GPU in one transfer, and the resource bindings of each launch are cached. A training loop with a graph scope uses the same buffers every step, so after its first step every launch finds its bindings in the cache (`gpu.stats().bind_group_hits`).
 
 **What makes it fast:**
-- **Keep tensors on the device.** Every read of a device value (`tensor_item`, `tensor_values`) waits for the GPU to finish. Read the loss every few steps, not every step, when speed matters.
+- **Keep tensors on the device.** Every read of a device value (`tensor_item`, `tensor_values`) waits for the GPU to finish all recorded work. Read the loss every few steps, not every step, when speed matters.
 - **Move reused inputs once.** `to_device` on data used every step avoids a re-upload per step.
+- **Use a graph scope.** It recycles the same device buffers every step, which keeps the binding cache warm and the memory pool flat.
 - **Check the fallbacks.** An op on the fallback costs a download and an upload. `gpu.stats()` shows which ops they are.
 
 ## 12. Choosing the adapter
@@ -567,6 +583,7 @@ odin run gpu_tests -collection:root=. -debug
 
 It compares every GPU result with the CPU engine, which is itself validated against PyTorch:
 - **every op with a kernel:** forward and backward, with a random upstream gradient, including masked and causal attention, repeated embedding ids, wide softmax rows, convolutions with stride, padding and dilation, overlapping pooling windows, and the finance and VAE ops (lgamma also below 0.5, a Sharpe ratio over more returns than one workgroup, top-k masks, seeded reparameterization). Most ops agree to 1e-7 or better and matrix products to 7e-7. The largest difference, 3.5e-6, is tanh of inputs scaled by 30, where the f32 rounding of the scaled input dominates.
+- **both matrix-product kernels:** every op built on matrix products (products, attention, convolutions) with each kernel forced, including the register-tiled kernel on products smaller than one tile, and products of 70×90 by 90×65 and larger with partial tiles.
 - **the same ops with their kernel disabled,** through the CPU fallback, and an op that has no kernel (`tensor_rnn`).
 - **training:** 40 Adam steps of MLPs with five activations, SGD with Nesterov momentum and gradient clipping, and a model with every kernel disabled. Losses and final parameters agree with the CPU to 4e-6 or better.
 - **convolutional models:** 10 steps of a CNN (convolutions with stride and padding, batch norm, max and average pooling, flatten, dropout) and of a TCN (dilated causal convolutions, dropout, residual connections). Losses and parameters, including the batch norm's running statistics, agree with the CPU to 2e-6; neither model uses a CPU fallback. Separate checks cover the running-statistics update and evaluation mode, and a backward pass on the CPU after a forward pass on the GPU (the CPU then finds the max-pool argmax and fetches the batch-norm statistics and the Sharpe ratio's mean and standard deviation from the device).
@@ -589,9 +606,11 @@ Without a usable adapter the suite prints `SKIP` and exits with code 0.
 | `gpu.to_device(x)` / `gpu.to_device(xs)` | move tensors to the GPU |
 | `gpu.to_host(x)` / `gpu.to_host(xs)` | move tensors back to the CPU |
 | `gpu.synchronize()` | wait until the GPU has finished all recorded work |
-| `gpu.stats() -> Stats` / `gpu.reset_stats()` | launches, submissions, transfers, pool size, automatic uploads, fallbacks per op |
+| `gpu.stats() -> Stats` / `gpu.reset_stats()` | launches, cached bindings, submissions, transfers, pool size, automatic uploads, fallbacks per op |
 | `gpu.has_kernel(op)` | whether an op has a GPU kernel |
 | `gpu.set_kernel_enabled(op, enabled)` | run an op through the CPU fallback (testing, comparisons) |
+| `gpu.set_matmul_kernel(k)` | `.Auto` (default), `.Tiled` or `.Simple` matrix-product kernel |
+| `gpu.benchmark_matmul(M, N, K, reps, trans_a, trans_b) -> f64` | milliseconds per product with the current kernel |
 | `t.tensor_values(x)`, `t.tensor_grad_values(x)`, `t.tensor_item(x)` | read device data on the host |
 | `t.tensor_sync_host(x)` | make `x.data.data` and `x.grad.data` current |
 | `t.tensor_mark_host_dirty(x)`, `t.tensor_mark_grad_host_dirty(x)` | after writing a synced host copy in place |

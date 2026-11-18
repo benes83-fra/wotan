@@ -149,7 +149,9 @@ _p :: proc(u: [8]u32 = {}, f: [8]f32 = {}) -> Params {
 	return {u = u, f = f}
 }
 
-// _matmul records C[M, N] (+)= op(A) @ op(B), in row chunks of the grid limit
+// _matmul records C[M, N] (+)= op(A) @ op(B), in row chunks of the grid limit.
+// Products with at least MATMUL_TILED_MIN rows and columns use the register-tiled
+// kernel; smaller ones (where a 64x64 tile would mostly idle) the 16x16 kernel.
 @(private)
 _matmul :: proc(A, B, C: Bind, M, N, K: int, trans_a, trans_b, accumulate: bool, batch := 1) {
 	if M == 0 || N == 0 {return}
@@ -157,12 +159,17 @@ _matmul :: proc(A, B, C: Bind, M, N, K: int, trans_a, trans_b, accumulate: bool,
 		if !accumulate {_zero(C.buf, M * N * batch)}
 		return
 	}
-	gx := u32((N + 15) / 16)
-	CHUNK :: 65535 * 16
-	for r0 := 0; r0 < M; r0 += CHUNK {
-		rows := min(CHUNK, M - r0)
+	tiled :=
+		G.matmul_kernel == .Tiled ||
+		(G.matmul_kernel == .Auto && M >= MATMUL_TILED_MIN && N >= MATMUL_TILED_MIN)
+	tile := 64 if tiled else 16
+	k: Kernel = .Matmul_Tiled if tiled else .Matmul
+	gx := u32((N + tile - 1) / tile)
+	chunk := 65535 * tile
+	for r0 := 0; r0 < M; r0 += chunk {
+		rows := min(chunk, M - r0)
 		p := _p({u32(M), u32(N), u32(K), u32(trans_a), u32(trans_b), u32(accumulate), u32(r0), 0})
-		_dispatch(.Matmul, p, {A, B, C}, gx, u32((rows + 15) / 16), u32(batch))
+		_dispatch(k, p, {A, B, C}, gx, u32((rows + tile - 1) / tile), u32(batch))
 	}
 }
 

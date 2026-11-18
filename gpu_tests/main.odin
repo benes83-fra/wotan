@@ -52,6 +52,7 @@ main :: proc() {
 	gpu_residency_test()
 	gpu_op_parity_test()
 	gpu_fallback_op_test()
+	gpu_matmul_kernel_test()
 	gpu_mlp_training_test()
 	gpu_all_fallback_training_test()
 	gpu_sgd_clip_test()
@@ -65,6 +66,7 @@ main :: proc() {
 	gpu_scope_memory_test()
 	gpu_checkpoint_test()
 	gpu_speed_report()
+	gpu_matmul_benchmark()
 
 	gpu.shutdown()
 	if failures > 0 {

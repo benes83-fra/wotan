@@ -21,6 +21,7 @@ upload and download. Ops without a GPU kernel run on the CPU automatically
 package gpu
 
 import t "../tensor"
+import "core:time"
 
 Backend :: enum {
 	Auto, // best available: Vulkan / Metal, then DX12
@@ -55,6 +56,7 @@ Device_Info :: struct {
 
 Stats :: struct {
 	dispatches:         int, // kernel launches
+	bind_group_hits:    int, // launches whose bind group came from the cache
 	flushes:            int, // command buffer submissions
 	uploads:            int,
 	downloads:          int, // host syncs that waited for the GPU
@@ -135,6 +137,7 @@ stats :: proc() -> Stats {
 	ds := t.device_stats
 	return Stats {
 		dispatches = G.counters.dispatches,
+		bind_group_hits = G.counters.bind_group_hits,
 		flushes = G.counters.flushes,
 		uploads = G.counters.uploads,
 		downloads = G.counters.downloads,
@@ -203,4 +206,42 @@ set_kernel_enabled :: proc(op: t.Op, enabled: bool) {
 // has_kernel: whether `op` has a GPU kernel (enabled or not)
 has_kernel :: proc(op: t.Op) -> bool {
 	return op in SUPPORTED
+}
+
+// Matmul_Kernel: which kernel computes matrix products
+Matmul_Kernel :: enum {
+	Auto, // register-tiled for products of at least MATMUL_TILED_MIN rows and columns
+	Tiled, // always the register-tiled kernel (64x64 tiles, 4x4 outputs per thread)
+	Simple, // always the 16x16-tile kernel (one output per thread)
+}
+
+// MATMUL_TILED_MIN: the smallest row and column count for which .Auto uses the
+// register-tiled kernel
+MATMUL_TILED_MIN :: 32
+
+// set_matmul_kernel chooses the matmul kernel (default .Auto). For comparisons
+// and tests; both kernels compute the same products.
+set_matmul_kernel :: proc(k: Matmul_Kernel) {
+	G.matmul_kernel = k
+}
+
+// benchmark_matmul: the mean time in milliseconds of one f32 product
+// C[M, N] = op(A) @ op(B) (op: transposed if asked; A stored [M, K] or [K, M],
+// B [K, N] or [N, K]) on the GPU with the current kernel choice. Fixed inputs;
+// `reps` products after one warm-up, timed until the GPU has finished.
+benchmark_matmul :: proc(M, N, K: int, reps := 10, trans_a := false, trans_b := false) -> f64 {
+	assert(G.active, "gpu.benchmark_matmul: call gpu.init first")
+	vals := make([]f64, max(M * K, K * N), context.temp_allocator)
+	for &v, i in vals {v = f64((i * 7919) % 1000) / 1000 - 0.5}
+	A, B, C := _acquire(M * K), _acquire(K * N), _acquire(M * N)
+	defer {_release_buf(A); _release_buf(B); _release_buf(C)}
+	_upload(A, vals[:M * K])
+	_upload(B, vals[:K * N])
+	a, b, c := Bind{A, M * K}, Bind{B, K * N}, Bind{C, M * N}
+	_matmul(a, b, c, M, N, K, trans_a, trans_b, false)
+	_wait()
+	start := time.tick_now()
+	for _ in 0 ..< reps {_matmul(a, b, c, M, N, K, trans_a, trans_b, false)}
+	_wait()
+	return time.duration_milliseconds(time.tick_since(start)) / f64(reps)
 }

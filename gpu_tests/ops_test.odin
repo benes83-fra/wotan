@@ -835,6 +835,36 @@ op_cases := [?]Op_Case {
 			return nn.reparameterize(x[0], x[1], context.allocator)
 		},
 	},
+	// ---- phase 5: products large enough for the register-tiled kernel ----
+	{
+		name = "matmul 70x90 @ 90x65 (edge tiles)",
+		op = .MatMul,
+		shapes = {{70, 90, 1, 1}, {90, 65, 1, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_matmul(x[0], x[1])},
+	},
+	{
+		name = "matmul 200x40 @ 40x130, then a second product",
+		op = .MatMul,
+		shapes = {{200, 40, 1, 1}, {40, 130, 1, 1}, {130, 33, 1, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_matmul(
+				t.tensor_tanh(t.tensor_matmul(x[0], x[1])),
+				x[2],
+			)},
+	},
+	{
+		name = "attention 3 x (40 queries, 72 keys, d 36)",
+		op = .ScaledDotProductAttention,
+		shapes = {{3, 40, 36, 1}, {3, 72, 36, 1}, {3, 72, 34, 1}},
+		storage = {{1, 4320}, {1, 7776}, {1, 7344}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_scaled_dot_product_attention(
+				x[0],
+				x[1],
+				x[2],
+			)},
+	},
 }
 
 // _const_like: a constant tensor shaped like x, freed with the graph
@@ -944,5 +974,66 @@ gpu_fallback_op_test :: proc() {
 		check(worst <= c.tol, "%s: max relative error %.2e > %.0e", c.name, worst, c.tol)
 		check(fallbacks > 0, "%s: no fallback counted", c.name)
 		fmt.printfln("    %-34s max rel err %.2e (%d fallbacks)", c.name, worst, fallbacks)
+	}
+}
+
+// every matmul-backed case (products, attention, convolutions) with each matmul
+// kernel forced: the register-tiled kernel also on products smaller than a tile
+gpu_matmul_kernel_test :: proc() {
+	fmt.println("gpu_matmul_kernel_test: matmul-backed ops with each matmul kernel forced")
+	defer gpu.set_matmul_kernel(.Auto)
+	rand.reset(4)
+	for kernel in ([]gpu.Matmul_Kernel{.Tiled, .Simple}) {
+		gpu.set_matmul_kernel(kernel)
+		worst := 0.0
+		count := 0
+		for c in op_cases {
+			#partial switch c.op {
+			case .MatMul,
+			     .ScaledDotProductAttention,
+			     .MaskedScaledDotProductAttention,
+			     .FlashAttention,
+			     .Conv2d,
+			     .Conv1d:
+			case:
+				continue
+			}
+			w, _ := _compare_case(c, false)
+			check(
+				w <= c.tol,
+				"%s (%v kernel): max relative error %.2e > %.0e",
+				c.name,
+				kernel,
+				w,
+				c.tol,
+			)
+			worst = max(worst, w)
+			count += 1
+		}
+		fmt.printfln("    %-7v kernel: %d cases, max rel err %.2e", kernel, count, worst)
+	}
+}
+
+// f32 matmul time of the two kernels (printed, not checked: timings vary)
+gpu_matmul_benchmark :: proc() {
+	fmt.println("gpu_matmul_benchmark: C = A @ B, 16x16 kernel vs register-tiled kernel")
+	defer gpu.set_matmul_kernel(.Auto)
+	for n in ([]int{256, 512, 1024, 2048}) {
+		gpu.set_matmul_kernel(.Simple)
+		a := gpu.benchmark_matmul(n, n, n)
+		gpu.set_matmul_kernel(.Tiled)
+		b := gpu.benchmark_matmul(n, n, n)
+		gf := 2 * f64(n) * f64(n) * f64(n) / 1e6
+		fmt.printfln(
+			"    %4d x %4d x %4d: 16x16 %8.3f ms (%5.0f GFLOP/s)   tiled %8.3f ms (%5.0f GFLOP/s)   %.1fx",
+			n,
+			n,
+			n,
+			a,
+			gf / a,
+			b,
+			gf / b,
+			a / b,
+		)
 	}
 }

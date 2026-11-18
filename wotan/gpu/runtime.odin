@@ -13,17 +13,30 @@ import wgpu "vendor:wgpu"
 //
 // Execution model: every op records its dispatches into one pending command
 // encoder and returns at once; nothing waits between ops. The pending work is
-// submitted (flushed) when the host needs data (a download), before a host
-// upload, when the per-batch uniform space is full, and every FLUSH_EVERY
-// dispatches so the GPU starts early on long graphs.
+// submitted (flushed) when the host needs data (a download), when the
+// per-batch uniform space is full, and every FLUSH_EVERY dispatches so the GPU
+// starts early on long graphs.
 //
 // Ordering: all device-side writes to pool buffers (kernels, clears, copies) are
-// recorded in the encoder, in program order. Host uploads (QueueWriteBuffer)
-// only happen with nothing pending, so a buffer reused from the pool is never
-// overwritten before an earlier recorded command has read it.
+// recorded in the encoder, in program order. A host upload with nothing pending
+// writes the buffer directly (QueueWriteBuffer). With work pending, a direct
+// write would land before that work runs, so the upload goes through a staging
+// buffer instead: the data is written there and a copy into the target is
+// recorded in the encoder, in program order. Staging buffers have their own
+// pool and return to it when the batch is submitted (later writes to them are
+// queued after that submission).
+//
+// Per-dispatch cost: the parameter blocks of a batch are collected on the host
+// and written to the uniform buffer in one call when the batch is submitted.
+// The parameter block is bound with a dynamic offset, so a bind group depends
+// only on the kernel and its storage buffers, and bind groups are cached (pool
+// buffers live until shutdown, so a cached bind group never refers to a
+// destroyed buffer). A training loop with a graph scope acquires the same pool
+// buffers in the same order every step, so after the first step its bind groups
+// come from the cache.
 
 @(private)
-FLUSH_EVERY :: 512
+FLUSH_EVERY :: 128
 
 @(private)
 PARAMS_SIZE :: 64
@@ -46,8 +59,9 @@ Buf :: struct {
 
 @(private)
 Pipeline :: struct {
-	pipeline: wgpu.ComputePipeline,
-	layout:   wgpu.BindGroupLayout,
+	pipeline:        wgpu.ComputePipeline,
+	layout:          wgpu.BindGroupLayout,
+	pipeline_layout: wgpu.PipelineLayout,
 }
 
 @(private)
@@ -74,6 +88,9 @@ State :: struct {
 	uniform_off:    u64,
 	uniform_cap:    u64,
 	uniform_align:  u64,
+	uniform_host:   []u8, // the batch's parameter blocks, written at submit
+	// bind group cache
+	bind_groups:    map[Bind_Key]wgpu.BindGroup,
 	// readback staging
 	readback:       wgpu.Buffer,
 	readback_bytes: u64,
@@ -81,10 +98,13 @@ State :: struct {
 	pool:           map[u64][dynamic]^Buf,
 	bufs:           [dynamic]^Buf,
 	pool_bytes:     u64,
+	staging_free:   map[u64][dynamic]wgpu.Buffer, // upload staging buffers by size
+	staging_used:   [dynamic]Staging, // staging buffers of the pending batch
 	dummy:          ^Buf, // bound where a kernel needs no buffer
 	pipelines:      [Kernel]Pipeline,
 	optim:          map[rawptr]Optim_State,
 	disabled:       [t.Op]bool,
+	matmul_kernel:  Matmul_Kernel,
 	counters:       Counters,
 	allocator:      mem.Allocator,
 	error_message:  string,
@@ -94,7 +114,28 @@ State :: struct {
 Counters :: struct {
 	dispatches, flushes, downloads, uploads: int,
 	bytes_up, bytes_down:                    u64,
+	bind_group_hits:                         int,
 }
+
+@(private)
+Staging :: struct {
+	buffer: wgpu.Buffer,
+	bytes:  u64,
+}
+
+// a bind group: the kernel and the bound storage buffers with sizes
+@(private)
+Bind_Key :: struct {
+	kernel: Kernel,
+	n:      int,
+	bufs:   [7]^Buf,
+	sizes:  [7]u64,
+}
+
+// cached bind groups beyond this count are released (a loop whose buffers change
+// every step would otherwise grow the cache without bound)
+@(private)
+BIND_CACHE_MAX :: 1 << 14
 
 @(private)
 G: State
@@ -217,6 +258,10 @@ _open :: proc(opts: Options) -> (ok: bool, reason: string) {
 		G.device,
 		&{usage = {.Uniform, .CopyDst}, size = G.uniform_cap},
 	)
+	G.uniform_host = make([]u8, G.uniform_cap, G.allocator)
+	G.bind_groups = make(map[Bind_Key]wgpu.BindGroup, G.allocator)
+	G.staging_free = make(map[u64][dynamic]wgpu.Buffer, G.allocator)
+	G.staging_used = make([dynamic]Staging, G.allocator)
 	G.pool = make(map[u64][dynamic]^Buf, G.allocator)
 	G.bufs = make([dynamic]^Buf, G.allocator)
 	G.optim = make(map[rawptr]Optim_State, G.allocator)
@@ -257,8 +302,19 @@ _close :: proc() {
 	for _, &list in G.pool {delete(list)}
 	delete(G.pool)
 	delete(G.optim)
+	for _, &list in G.staging_free {
+		for b in list {wgpu.BufferDestroy(b); wgpu.BufferRelease(b)}
+		delete(list)
+	}
+	delete(G.staging_free)
+	for st in G.staging_used {wgpu.BufferDestroy(st.buffer); wgpu.BufferRelease(st.buffer)}
+	delete(G.staging_used)
+	_clear_bind_groups()
+	delete(G.bind_groups)
+	delete(G.uniform_host, G.allocator)
 	for p in G.pipelines {
 		if p.layout != nil {wgpu.BindGroupLayoutRelease(p.layout)}
+		if p.pipeline_layout != nil {wgpu.PipelineLayoutRelease(p.pipeline_layout)}
 		if p.pipeline != nil {wgpu.ComputePipelineRelease(p.pipeline)}
 	}
 	if G.uniform != nil {wgpu.BufferRelease(G.uniform)}
@@ -388,6 +444,15 @@ _end_pass :: proc() {
 _flush :: proc() {
 	_end_pass()
 	if G.encoder != nil {
+		if G.uniform_off > 0 {
+			wgpu.QueueWriteBuffer(
+				G.queue,
+				G.uniform,
+				0,
+				raw_data(G.uniform_host),
+				uint(G.uniform_off),
+			)
+		}
 		cb := wgpu.CommandEncoderFinish(G.encoder)
 		wgpu.QueueSubmit(G.queue, {cb})
 		wgpu.CommandBufferRelease(cb)
@@ -395,6 +460,16 @@ _flush :: proc() {
 		G.encoder = nil
 		G.counters.flushes += 1
 	}
+	// the batch's staging buffers may be written again (queued after this submit)
+	for st in G.staging_used {
+		list, ok := &G.staging_free[st.bytes]
+		if !ok {
+			G.staging_free[st.bytes] = make([dynamic]wgpu.Buffer, G.allocator)
+			list = &G.staging_free[st.bytes]
+		}
+		append(list, st.buffer)
+	}
+	clear(&G.staging_used)
 	G.pending = 0
 	G.uniform_off = 0
 }
@@ -424,36 +499,63 @@ _dispatch :: proc(k: Kernel, p: Params, binds: []Bind, gx, gy: u32, gz: u32 = 1)
 	if G.uniform_off + G.uniform_align > G.uniform_cap {_flush()}
 	off := G.uniform_off
 	G.uniform_off += G.uniform_align
-	p := p
-	wgpu.QueueWriteBuffer(G.queue, G.uniform, off, &p, PARAMS_SIZE)
+	(^Params)(&G.uniform_host[off])^ = p
 
 	pl := _pipeline(k)
+	bg := _bind_group(k, pl, binds)
+	pass := _compute_pass()
+	wgpu.ComputePassEncoderSetPipeline(pass, pl.pipeline)
+	dyn := [1]u32{u32(off)}
+	wgpu.ComputePassEncoderSetBindGroup(pass, 0, bg, dyn[:])
+	wgpu.ComputePassEncoderDispatchWorkgroups(pass, gx, gy, gz)
+	G.counters.dispatches += 1
+	G.pending += 1
+	if G.pending >= FLUSH_EVERY {_flush()}
+}
+
+// _bind_group: the cached bind group of these bindings, created on first use
+@(private)
+_bind_group :: proc(k: Kernel, pl: Pipeline, binds: []Bind) -> wgpu.BindGroup {
+	key := Bind_Key {
+		kernel = k,
+		n      = len(binds),
+	}
+	for b, i in binds {
+		key.bufs[i] = b.buf
+		key.sizes[i] = u64(max(b.numel, 1) * 4)
+	}
+	if bg, ok := G.bind_groups[key]; ok {
+		G.counters.bind_group_hits += 1
+		return bg
+	}
+	if len(G.bind_groups) >= BIND_CACHE_MAX {_clear_bind_groups()}
 	entries: [8]wgpu.BindGroupEntry
 	entries[0] = {
 		binding = 0,
 		buffer  = G.uniform,
-		offset  = off,
 		size    = PARAMS_SIZE,
 	}
 	for b, i in binds {
 		entries[i + 1] = {
 			binding = u32(i + 1),
 			buffer  = b.buf.buffer,
-			size    = u64(max(b.numel, 1) * 4),
+			size    = key.sizes[i],
 		}
 	}
 	bg := wgpu.DeviceCreateBindGroup(
 		G.device,
 		&{layout = pl.layout, entryCount = uint(len(binds) + 1), entries = &entries[0]},
 	)
-	pass := _compute_pass()
-	wgpu.ComputePassEncoderSetPipeline(pass, pl.pipeline)
-	wgpu.ComputePassEncoderSetBindGroup(pass, 0, bg)
-	wgpu.ComputePassEncoderDispatchWorkgroups(pass, gx, gy, gz)
-	wgpu.BindGroupRelease(bg)
-	G.counters.dispatches += 1
-	G.pending += 1
-	if G.pending >= FLUSH_EVERY {_flush()}
+	G.bind_groups[key] = bg
+	return bg
+}
+
+// _clear_bind_groups releases the cached bind groups (wgpu keeps the ones that
+// recorded, unsubmitted commands still use alive until they finish)
+@(private)
+_clear_bind_groups :: proc() {
+	for _, bg in G.bind_groups {wgpu.BindGroupRelease(bg)}
+	clear(&G.bind_groups)
 }
 
 // _dispatch_1d: one thread per element, 256 per workgroup (kernels index with idx1)
@@ -473,14 +575,34 @@ _dispatch_1d :: proc(k: Kernel, p: Params, binds: []Bind, n: int) {
 @(private)
 _upload :: proc(b: ^Buf, src: []f64) {
 	if len(src) == 0 {return}
-	// nothing may be pending: a pooled buffer could still be read by recorded work
-	if G.pending > 0 || G.encoder != nil {_flush()}
 	tmp := make([]f32, len(src), runtime.heap_allocator())
 	defer delete(tmp, runtime.heap_allocator())
 	for v, i in src {tmp[i] = f32(v)}
-	wgpu.QueueWriteBuffer(G.queue, b.buffer, 0, raw_data(tmp), uint(len(tmp) * 4))
+	bytes := u64(len(tmp) * 4)
+	if G.pending > 0 || G.encoder != nil {
+		// recorded work may still read `b`: stage, and copy in program order
+		size := _bucket(len(src))
+		st := Staging {
+			bytes = size,
+		}
+		if list, ok := &G.staging_free[size]; ok && len(list) > 0 {
+			st.buffer = pop(list)
+		} else {
+			st.buffer = wgpu.DeviceCreateBuffer(
+				G.device,
+				&{usage = {.CopySrc, .CopyDst}, size = size},
+			)
+		}
+		append(&G.staging_used, st)
+		wgpu.QueueWriteBuffer(G.queue, st.buffer, 0, raw_data(tmp), uint(bytes))
+		_end_pass()
+		wgpu.CommandEncoderCopyBufferToBuffer(_encoder(), st.buffer, 0, b.buffer, 0, bytes)
+		G.pending += 1
+	} else {
+		wgpu.QueueWriteBuffer(G.queue, b.buffer, 0, raw_data(tmp), uint(bytes))
+	}
 	G.counters.uploads += 1
-	G.counters.bytes_up += u64(len(tmp) * 4)
+	G.counters.bytes_up += bytes
 }
 
 @(private)
@@ -555,6 +677,9 @@ _hook_copy :: proc(dst, src: t.Device_Buffer, numel: int) {_copy(_buf(dst), _buf
 // Pipelines (created on first use)
 // ----------------------------------------------------------------------------
 
+// The bind group layout is explicit: binding 0 is the parameter block with a
+// dynamic offset; the storage bindings 1, 2, ... are read from the kernel's
+// declarations (`var<storage, read>` or `var<storage, read_write>`).
 @(private)
 _pipeline :: proc(k: Kernel) -> Pipeline {
 	if G.pipelines[k].pipeline != nil {return G.pipelines[k]}
@@ -566,11 +691,44 @@ _pipeline :: proc(k: Kernel) -> Pipeline {
 			label = fmt.tprint(k),
 		},
 	)
+	entries: [8]wgpu.BindGroupLayoutEntry
+	entries[0] = {
+		binding = 0,
+		visibility = {.Compute},
+		buffer = {type = .Uniform, hasDynamicOffset = true, minBindingSize = PARAMS_SIZE},
+	}
+	n := 1
+	for binding in 1 ..< 8 {
+		decl := fmt.tprintf("@binding(%d) var<storage, ", binding)
+		at := strings.index(src, decl)
+		if at < 0 {break}
+		rest := src[at + len(decl):]
+		type: wgpu.BufferBindingType =
+			.Storage if strings.has_prefix(rest, "read_write") else .ReadOnlyStorage
+		entries[n] = {
+			binding = u32(binding),
+			visibility = {.Compute},
+			buffer = {type = type},
+		}
+		n += 1
+	}
+	layout := wgpu.DeviceCreateBindGroupLayout(
+		G.device,
+		&{entryCount = uint(n), entries = &entries[0], label = fmt.tprint(k)},
+	)
+	pl_layout := wgpu.DeviceCreatePipelineLayout(
+		G.device,
+		&{bindGroupLayoutCount = 1, bindGroupLayouts = &layout},
+	)
 	pipe := wgpu.DeviceCreateComputePipeline(
 		G.device,
-		&{compute = {module = module, entryPoint = "main"}, label = fmt.tprint(k)},
+		&{
+			layout = pl_layout,
+			compute = {module = module, entryPoint = "main"},
+			label = fmt.tprint(k),
+		},
 	)
 	wgpu.ShaderModuleRelease(module)
-	G.pipelines[k] = {pipe, wgpu.ComputePipelineGetBindGroupLayout(pipe, 0)}
+	G.pipelines[k] = {pipe, layout, pl_layout}
 	return G.pipelines[k]
 }

@@ -16,7 +16,8 @@ Kernel :: enum {
 	Unary_Bwd, // dx += dy * f'(x, y)
 	Binary, // out = a (+ - * /) b
 	Binary_Bwd, // d(a or b) += dy * ∂(a ∘ b)
-	Matmul, // C (+)= op(A) @ op(B)
+	Matmul, // C (+)= op(A) @ op(B), 16x16 tiles, one output per thread
+	Matmul_Tiled, // the same, 64x64 tiles, 4x4 outputs per thread (register tiling)
 	Reduce, // out[k] = scale * Σ x (or Σ x²), per workgroup
 	Bcast_Add, // dx += scale * s[k]
 	Mse_Bwd, // dx += scale * dy[0] * (a - b)
@@ -347,6 +348,96 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
 		let o = c0 + row * N + col;
 		if (p.u5 == 1u) { C[o] = C[o] + acc; } else { C[o] = acc; }
 	}
+}
+`,
+	// Register-tiled matmul, parameters as Matmul. A workgroup of 16x16 threads
+	// computes a 64x64 tile of C; thread (tx, ty) owns rows ty + 16i and columns
+	// tx + 16j (i, j < 4), so neighbouring threads touch neighbouring columns
+	// (coalesced global writes, no shared-memory bank conflicts). Each step of
+	// 16 along K stages a 64x16 slice of op(A) and a 16x64 slice of op(B) in
+	// workgroup memory; the 4x4 accumulators stay in registers.
+	.Matmul_Tiled     = `
+@group(0) @binding(1) var<storage, read> A: array<f32>;
+@group(0) @binding(2) var<storage, read> B: array<f32>;
+@group(0) @binding(3) var<storage, read_write> C: array<f32>;
+var<workgroup> As: array<array<f32, 64>, 16>;
+var<workgroup> Bs: array<array<f32, 64>, 16>;
+fn load_a(a0: u32, r: u32, k: u32) -> f32 {
+	if (r >= p.u0 || k >= p.u2) { return 0.0; }
+	if (p.u3 == 0u) { return A[a0 + r * p.u2 + k]; }
+	return A[a0 + k * p.u0 + r];
+}
+fn load_b(b0: u32, k: u32, c: u32) -> f32 {
+	if (k >= p.u2 || c >= p.u1) { return 0.0; }
+	if (p.u4 == 0u) { return B[b0 + k * p.u1 + c]; }
+	return B[b0 + c * p.u2 + k];
+}
+fn store(c0: u32, r: u32, col: u32, v: f32) {
+	if (r >= p.u0 || col >= p.u1) { return; }
+	let o = c0 + r * p.u1 + col;
+	if (p.u5 == 1u) { C[o] = C[o] + v; } else { C[o] = v; }
+}
+fn store_row(c0: u32, r: u32, col: u32, v: vec4<f32>) {
+	store(c0, r, col, v.x);
+	store(c0, r, col + 16u, v.y);
+	store(c0, r, col + 32u, v.z);
+	store(c0, r, col + 48u, v.w);
+}
+@compute @workgroup_size(16, 16)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+	let M = p.u0; let N = p.u1; let K = p.u2;
+	let a0 = wid.z * M * K;
+	let b0 = wid.z * K * N;
+	let c0 = wid.z * M * N;
+	let row0 = wid.y * 64u + p.u6;
+	let col0 = wid.x * 64u;
+	let tx = lid.x; let ty = lid.y;
+	let tid = ty * 16u + tx;
+	// staging coordinates: (ar, ak) walks a 16-wide index fastest, (bk, bc) a
+	// 64-wide one
+	let ak = tid % 16u; let ar = tid / 16u;
+	let bc = tid % 64u; let bk = tid / 64u;
+	var c0v = vec4<f32>(0.0); var c1v = vec4<f32>(0.0);
+	var c2v = vec4<f32>(0.0); var c3v = vec4<f32>(0.0);
+	for (var kt = 0u; kt < K; kt += 16u) {
+		// neighbouring threads read neighbouring addresses: along k for A, along
+		// the rows for Aᵀ; along the columns for B, along k for Bᵀ
+		if (p.u3 == 0u) {
+			As[ak][ar] = load_a(a0, row0 + ar, kt + ak);
+			As[ak][ar + 16u] = load_a(a0, row0 + ar + 16u, kt + ak);
+			As[ak][ar + 32u] = load_a(a0, row0 + ar + 32u, kt + ak);
+			As[ak][ar + 48u] = load_a(a0, row0 + ar + 48u, kt + ak);
+		} else {
+			As[bk][bc] = load_a(a0, row0 + bc, kt + bk);
+			As[bk + 4u][bc] = load_a(a0, row0 + bc, kt + bk + 4u);
+			As[bk + 8u][bc] = load_a(a0, row0 + bc, kt + bk + 8u);
+			As[bk + 12u][bc] = load_a(a0, row0 + bc, kt + bk + 12u);
+		}
+		if (p.u4 == 0u) {
+			Bs[bk][bc] = load_b(b0, kt + bk, col0 + bc);
+			Bs[bk + 4u][bc] = load_b(b0, kt + bk + 4u, col0 + bc);
+			Bs[bk + 8u][bc] = load_b(b0, kt + bk + 8u, col0 + bc);
+			Bs[bk + 12u][bc] = load_b(b0, kt + bk + 12u, col0 + bc);
+		} else {
+			Bs[ak][ar] = load_b(b0, kt + ak, col0 + ar);
+			Bs[ak][ar + 16u] = load_b(b0, kt + ak, col0 + ar + 16u);
+			Bs[ak][ar + 32u] = load_b(b0, kt + ak, col0 + ar + 32u);
+			Bs[ak][ar + 48u] = load_b(b0, kt + ak, col0 + ar + 48u);
+		}
+		workgroupBarrier();
+		for (var k = 0u; k < 16u; k++) {
+			let bv = vec4<f32>(Bs[k][tx], Bs[k][tx + 16u], Bs[k][tx + 32u], Bs[k][tx + 48u]);
+			c0v = fma(vec4<f32>(As[k][ty]), bv, c0v);
+			c1v = fma(vec4<f32>(As[k][ty + 16u]), bv, c1v);
+			c2v = fma(vec4<f32>(As[k][ty + 32u]), bv, c2v);
+			c3v = fma(vec4<f32>(As[k][ty + 48u]), bv, c3v);
+		}
+		workgroupBarrier();
+	}
+	store_row(c0, row0 + ty, col0 + tx, c0v);
+	store_row(c0, row0 + ty + 16u, col0 + tx, c1v);
+	store_row(c0, row0 + ty + 32u, col0 + tx, c2v);
+	store_row(c0, row0 + ty + 48u, col0 + tx, c3v);
 }
 `,
 	// u0 n, u1 0 sum / 1 sum of squares, u2 output index, f0 scale. Each
