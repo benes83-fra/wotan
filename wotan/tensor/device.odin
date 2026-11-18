@@ -45,6 +45,11 @@ Device_Storage :: struct {
 	host_grad:  []f64, // host gradient slice, parked while grad_where == .Device
 	// op state the backward kernel needs (dropout mask, attention mask)
 	aux_buf:    Device_Buffer,
+	// The device gradient is all zeros, but its buffer has not been cleared:
+	// the first backward kernel that writes the whole gradient overwrites it
+	// instead of adding to it, and every other use clears it first
+	// (_device_grad_materialize). This saves one clear command per gradient.
+	grad_zero_pending: bool,
 }
 
 // Device_Hooks: the operations the GPU backend provides. All nil without a GPU.
@@ -61,13 +66,12 @@ Device_Hooks :: struct {
 	forward:       proc(op: Op, out: ^Tensor, inputs: []^Tensor, ints: []int, floats: []f64),
 	// backward runs a node's backward kernel; false: no kernel, use the CPU fallback
 	backward:      proc(node: ^Tensor, allocator: mem.Allocator) -> bool,
-	// optimizer kernels (wotan/nn calls these for device parameters)
+	// optimizer kernels (wotan/nn calls these for device parameters); adam
+	// takes all device parameters of one step, so it can update several
+	// parameters per kernel launch
 	adam:          proc(
-		param: ^Tensor,
-		key: rawptr,
-		m, v: []f64,
-		lr, beta_1, beta_2, epsilon, weight_decay: f64,
-		step: int,
+		updates: []Device_Adam_Update,
+		beta_1, beta_2, epsilon, weight_decay: f64,
 	),
 	sgd:           proc(
 		param: ^Tensor,
@@ -86,6 +90,16 @@ Device_Hooks :: struct {
 }
 
 _device_hooks: Device_Hooks
+
+// Device_Adam_Update: one parameter's part of an Adam step on the device
+// (the arguments of optimize.adam_update; key identifies the optimizer state)
+Device_Adam_Update :: struct {
+	param: ^Tensor,
+	key:   rawptr,
+	m, v:  []f64,
+	lr:    f64,
+	step:  int,
+}
 
 // Device_Stats counts what ran where since the last reset (see gpu.stats)
 Device_Stats :: struct {
@@ -231,7 +245,7 @@ _grad_to_device :: proc(t: ^Tensor) {
 	n := tensor_numel(t)
 	if !_grad_exists(t) {
 		if s.grad_buf.ptr == nil {s.grad_buf = _device_alloc(t, n)}
-		_device_hooks.zero(s.grad_buf, n)
+		s.grad_zero_pending = true
 		t.grad.rows, t.grad.cols = t.data.rows, t.data.cols
 		if t.grad.allocator.procedure == nil {t.grad.allocator = t.data.allocator}
 		s.grad_where = .Device
@@ -241,6 +255,7 @@ _grad_to_device :: proc(t: ^Tensor) {
 	if s.grad_where != .Host {return}
 	if s.grad_buf.ptr == nil {s.grad_buf = _device_alloc(t, n)}
 	if n > 0 {_device_hooks.upload(s.grad_buf, t.grad.data)}
+	s.grad_zero_pending = false
 	s.grad_where = .Both
 }
 
@@ -260,7 +275,12 @@ _grad_to_host :: proc(t: ^Tensor) {
 	s := t.device
 	n := tensor_numel(t)
 	if s.host_grad == nil {s.host_grad = make([]f64, n, t.grad.allocator)}
-	if n > 0 && _device_hooks.download != nil {_device_hooks.download(s.grad_buf, s.host_grad)}
+	if s.grad_zero_pending {
+		// the device buffer was never written (its clear stays pending)
+		for &v in s.host_grad {v = 0}
+	} else if n > 0 && _device_hooks.download != nil {
+		_device_hooks.download(s.grad_buf, s.host_grad)
+	}
 	t.grad.data = s.host_grad
 	s.host_grad = nil
 	s.grad_where = .Both
@@ -285,12 +305,13 @@ _grad_written_on_host :: proc(t: ^Tensor) {
 	if t.device != nil && t.grad.data != nil {t.device.grad_where = .Host}
 }
 
-// _device_zero_grad: the gradient becomes a zeroed device buffer
+// _device_zero_grad: the gradient becomes a zeroed device buffer (the clear
+// itself stays pending, see Device_Storage.grad_zero_pending)
 _device_zero_grad :: proc(t: ^Tensor) {
 	s := t.device
 	n := tensor_numel(t)
 	if s.grad_buf.ptr == nil {s.grad_buf = _device_alloc(t, n)}
-	_device_hooks.zero(s.grad_buf, n)
+	s.grad_zero_pending = true
 	if t.grad.allocator.procedure == nil {t.grad.allocator = t.data.allocator}
 	t.grad.rows, t.grad.cols = t.data.rows, t.data.cols
 	if s.grad_where != .Device {
@@ -299,6 +320,25 @@ _device_zero_grad :: proc(t: ^Tensor) {
 		s.grad_where = .Device
 	}
 	t.grad_dropped = false
+}
+
+// _device_grad_materialize records the pending clear of the device gradient,
+// before a use that reads it or writes only part of it
+_device_grad_materialize :: proc(t: ^Tensor) {
+	s := t.device
+	if s == nil || !s.grad_zero_pending {return}
+	_device_hooks.zero(s.grad_buf, tensor_numel(t))
+	s.grad_zero_pending = false
+}
+
+// _device_grad_take_pending: for a kernel that writes the whole device
+// gradient. True if the clear was pending: the kernel then overwrites the
+// buffer instead of adding to it, and the clear is dropped.
+_device_grad_take_pending :: proc(t: ^Tensor) -> bool {
+	s := t.device
+	if s == nil || !s.grad_zero_pending {return false}
+	s.grad_zero_pending = false
+	return true
 }
 
 // _device_release returns the tensor's device buffers to the pool and puts
@@ -497,6 +537,23 @@ _device_matmul :: proc(a, b: ^Tensor) -> ^Tensor {
 	if out.requires_grad {
 		out.op = .MatMul
 		append(&out.inputs, a, b)
+	}
+	return out
+}
+
+// _device_linear: device tensor_linear (bias given), both paths
+_device_linear :: proc(x, w, b: ^Tensor) -> ^Tensor {
+	N, in_f, out_f, flattened := _linear_dims(x, w)
+	rg := x.requires_grad || w.requires_grad || b.requires_grad
+	shape := _flattened_matmul_shape(x.shape, N, in_f, out_f) if flattened else [4]int{N, out_f, 1, 1}
+	rows, cols := N, out_f
+	if flattened {rows, cols = 1, N * out_f}
+	out := _device_new_op(rows, cols, shape, rg, _op_alloc(x))
+	_device_forward(.Linear, out, {x, w, b}, {N, in_f, out_f})
+	if out.requires_grad {
+		out.op = .Linear
+		append(&out.inputs, x, w, b)
+		append(&out.int_metadata, N, in_f, out_f)
 	}
 	return out
 }
