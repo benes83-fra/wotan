@@ -621,3 +621,33 @@ _device_batch_norm_2d :: proc(
 	}
 	return out
 }
+
+// _device_loss: a device op with a scalar output that records its inputs and
+// `floats` as f64_metadata (KL divergence, entropy, prospect utility)
+_device_loss :: proc(op: Op, inputs: []^Tensor, floats: []f64) -> ^Tensor {
+	rg := false
+	for x in inputs {rg ||= x.requires_grad}
+	out := _device_new_op(1, 1, SCALAR_SHAPE, rg, _op_alloc(inputs[0]))
+	_device_forward(op, out, inputs, nil, floats)
+	if out.requires_grad {
+		out.op = op
+		append(&out.inputs, ..inputs)
+		append(&out.f64_metadata, ..floats)
+	}
+	return out
+}
+
+// _device_reparameterize: z = mu + exp(log_var / 2) · eps on the device, with
+// eps drawn on the host (as the CPU draws it) and kept in the aux buffer
+_device_reparameterize :: proc(mu, log_var: ^Tensor, eps: []f64, allocator: mem.Allocator) -> ^Tensor {
+	rg := mu.requires_grad || log_var.requires_grad
+	out := _device_new_op(mu.data.rows, mu.data.cols, mu.shape, rg, allocator)
+	out.device.aux_buf = _device_alloc(out, len(eps))
+	_device_hooks.upload(out.device.aux_buf, eps)
+	_device_forward(.Reparameterize, out, {mu, log_var})
+	if out.requires_grad {
+		out.op = .Reparameterize
+		append(&out.inputs, mu, log_var)
+	}
+	return out
+}
