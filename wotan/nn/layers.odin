@@ -602,19 +602,21 @@ _attend :: proc(
 	mask: []f64 = nil,
 	key_padding: ^t.Tensor = nil,
 ) -> ^t.Tensor {
-
-	// [batch * num_heads, seq, head_dim]
-	q_perm := t.tensor_permute_mha(q, batch, seq_q, num_heads, head_dim)
-	k_perm := t.tensor_permute_mha(k, batch, seq_k, num_heads, head_dim)
-	v_perm := t.tensor_permute_mha(v, batch, seq_k, num_heads, head_dim)
-
+	// per head, [batch, seq_q, d_model] again
 	att: ^t.Tensor
 	if mask == nil && key_padding == nil && (use_flash || !causal) {
-		if use_flash {
-			att = t.tensor_flash_attention(q_perm, k_perm, v_perm, causal = causal)
-		} else {
-			att = t.tensor_scaled_dot_product_attention(q_perm, k_perm, v_perm)
-		}
+		att = t.tensor_multi_head_attention(
+			q,
+			k,
+			v,
+			batch,
+			seq_q,
+			seq_k,
+			num_heads,
+			head_dim,
+			flash = use_flash,
+			causal = causal,
+		)
 	} else {
 		// FlashAttention takes no explicit masks: those use the standard kernel.
 		// With padding the mask is per sequence [batch * num_heads, seq_q, seq_k].
@@ -636,12 +638,19 @@ _attend :: proc(
 				}
 			}
 		}
-		att = t.tensor_masked_scaled_dot_product_attention(q_perm, k_perm, v_perm, m)
+		att = t.tensor_multi_head_attention(
+			q,
+			k,
+			v,
+			batch,
+			seq_q,
+			seq_k,
+			num_heads,
+			head_dim,
+			mask = m,
+		)
 	}
-
-	// [batch, seq_q, d_model]
-	att_inv := t.tensor_permute_mha_inverse(att, batch, seq_q, num_heads, head_dim)
-	return linear_forward(out_proj, att_inv)
+	return linear_forward(out_proj, att)
 }
 
 // Additive score of a hidden position (its weight underflows to exactly 0)

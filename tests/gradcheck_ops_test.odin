@@ -43,6 +43,86 @@ gco_linear_identical :: proc(name: string, allocator: mem.Allocator) {
 	}
 }
 
+// tensor_multi_head_attention on gcl_in[0..2] (q [2, 3, 2·2], k and v [2, 4, 2·2]):
+// form 0 plain, 1 masked (gco_mha_mask), 2 flash with the causal mask
+gco_mha_mask := [12]f64{0, 0.3, -1e9, 0.1, -0.2, 0, 0, -1e9, 0.5, 0, 0.2, 0}
+gco_mha_form: int
+
+gco_mha :: proc() -> ^t.Tensor {
+	switch gco_mha_form {
+	case 1:
+		return t.tensor_multi_head_attention(
+			gcl_in[0],
+			gcl_in[1],
+			gcl_in[2],
+			2,
+			3,
+			4,
+			2,
+			2,
+			mask = gco_mha_mask[:],
+		)
+	case 2:
+		return t.tensor_multi_head_attention(
+			gcl_in[0],
+			gcl_in[1],
+			gcl_in[2],
+			2,
+			3,
+			4,
+			2,
+			2,
+			flash = true,
+			causal = true,
+		)
+	}
+	return t.tensor_multi_head_attention(gcl_in[0], gcl_in[1], gcl_in[2], 2, 3, 4, 2, 2)
+}
+
+// the unfused ops the form stands for
+gco_mha_unfused :: proc() -> ^t.Tensor {
+	q := t.tensor_permute_mha(gcl_in[0], 2, 3, 2, 2)
+	k := t.tensor_permute_mha(gcl_in[1], 2, 4, 2, 2)
+	v := t.tensor_permute_mha(gcl_in[2], 2, 4, 2, 2)
+	att: ^t.Tensor
+	switch gco_mha_form {
+	case 1:
+		att = t.tensor_masked_scaled_dot_product_attention(q, k, v, gco_mha_mask[:])
+	case 2:
+		att = t.tensor_flash_attention(q, k, v, causal = true)
+	case:
+		att = t.tensor_scaled_dot_product_attention(q, k, v)
+	}
+	return t.tensor_permute_mha_inverse(att, 2, 3, 2, 2)
+}
+
+// tensor_multi_head_attention against the unfused ops: output shape, values
+// and the three gradients must be identical
+gco_mha_identical :: proc(name: string, allocator: mem.Allocator) {
+	values: [2][]f64
+	shapes: [2][4]int
+	grads: [2][3][]f64
+	for k in 0 ..< 2 {
+		for i in 0 ..< 3 {t.tensor_zero_grad(gcl_in[i])}
+		y := gco_mha() if k == 0 else gco_mha_unfused()
+		loss := gcl_weighted_sum(y)
+		t.tensor_backward(loss, allocator)
+		values[k] = slice.clone(y.data.data, context.temp_allocator)
+		shapes[k] = y.shape
+		for i in 0 ..< 3 {grads[k][i] = slice.clone(gcl_in[i].grad.data, context.temp_allocator)}
+		t.tensor_free_graph(loss, allocator = allocator)
+	}
+	ok := shapes[0] == shapes[1] && slice.equal(values[0], values[1])
+	for i in 0 ..< 3 {ok = ok && slice.equal(grads[0][i], grads[1][i])}
+	gc_total += 1
+	if ok {
+		gc_passed += 1
+		fmt.printfln("OK   %-40s identical values and gradients", name)
+	} else {
+		fmt.printfln("FAIL %-40s values, shape or gradients differ", name)
+	}
+}
+
 // Linearly rescale a tensor's values into [lo, hi], e.g. for log/sqrt/probability inputs
 gco_remap :: proc(x: ^t.Tensor, lo, hi: f64) {
 	mn, mx := x.data.data[0], x.data.data[0]
@@ -219,6 +299,50 @@ gradcheck_ops_test :: proc(allocator: mem.Allocator) {
 			return gcl_weighted_sum(t.tensor_linear(gcl_in[0], gcl_in[1], gcl_in[2]))
 		}, allocator)
 	gco_linear_identical("linear flattened = matmul + add_bias", allocator)
+	gcl_free_inputs(3)
+
+	// tensor_multi_head_attention: 2 sequences, 3 queries, 4 keys, 2 heads of
+	// width 2; gradients of the three forms, the exact values and gradients of
+	// the unfused ops, and no intermediates left behind without gradients
+	gcl_in[0] = gcl_rand(1, 2 * 3 * 4, {2, 3, 4, 1}, 166, true, allocator)
+	gcl_in[1] = gcl_rand(1, 2 * 4 * 4, {2, 4, 4, 1}, 167, true, allocator)
+	gcl_in[2] = gcl_rand(1, 2 * 4 * 4, {2, 4, 4, 1}, 168, true, allocator)
+	mha_names := [3]string{"plain", "masked", "flash causal"}
+	for form in 0 ..< 3 {
+		gco_mha_form = form
+		gcl_check(
+			fmt.tprintf("multi_head_attention %s", mha_names[form]),
+			3,
+			proc() -> ^t.Tensor {return gcl_weighted_sum(gco_mha())},
+			allocator,
+		)
+		gco_mha_identical(
+			fmt.tprintf("multi_head_attention %s = unfused ops", mha_names[form]),
+			allocator,
+		)
+	}
+	{
+		for i in 0 ..< 3 {gcl_in[i].requires_grad = false}
+		alive := t.global_tensors_created - t.global_tensors_freed
+		y := gco_mha()
+		left := t.global_tensors_created - t.global_tensors_freed - alive
+		t.tensor_free(y)
+		for i in 0 ..< 3 {gcl_in[i].requires_grad = true}
+		gc_total += 1
+		if left == 1 {
+			gc_passed += 1
+			fmt.printfln(
+				"OK   %-40s only the output is left",
+				"multi_head_attention without gradients",
+			)
+		} else {
+			fmt.printfln(
+				"FAIL %-40s %d tensors left (expected 1)",
+				"multi_head_attention without gradients",
+				left,
+			)
+		}
+	}
 	gcl_free_inputs(3)
 
 	gcl_in[0] = gcl_rand(3, 4, {3, 4, 1, 1}, 108, true, allocator)

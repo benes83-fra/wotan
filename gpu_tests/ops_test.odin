@@ -585,6 +585,55 @@ op_cases := [?]Op_Case {
 			)},
 	},
 	{
+		// q [2, 5, 2·4], k and v [2, 6, 2·4]: 2 heads of width 4
+		name = "multi-head attention",
+		op = .MultiHeadAttention,
+		shapes = {{2, 5, 8, 1}, {2, 6, 8, 1}, {2, 6, 8, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			return t.tensor_multi_head_attention(x[0], x[1], x[2], 2, 5, 6, 2, 4)
+		},
+	},
+	{
+		name = "multi-head attention (shared mask)",
+		op = .MultiHeadAttention,
+		shapes = {{2, 5, 8, 1}, {2, 6, 8, 1}, {2, 6, 8, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			return t.tensor_multi_head_attention(x[0], x[1], x[2], 2, 5, 6, 2, 4, mask = _shared_mask())
+		},
+	},
+	{
+		name = "multi-head attention (per-head mask)",
+		op = .MultiHeadAttention,
+		shapes = {{2, 5, 8, 1}, {2, 6, 8, 1}, {2, 6, 8, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			return t.tensor_multi_head_attention(x[0], x[1], x[2], 2, 5, 6, 2, 4, mask = _head_mask())
+		},
+	},
+	{
+		// 3 heads of width 2, flattened inputs
+		name = "multi-head attention (flash, causal)",
+		op = .MultiHeadAttention,
+		shapes = {{3, 7, 6, 1}, {3, 7, 6, 1}, {3, 7, 6, 1}},
+		storage = {{1, 126}, {1, 126}, {1, 126}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			return t.tensor_multi_head_attention(x[0], x[1], x[2], 3, 7, 7, 3, 2, flash = true, causal = true)
+		},
+	},
+	{
+		// every product at least 32 x 32: the register-tiled kernel, with edge tiles
+		name = "multi-head attention 40x33, head_dim 32 (register-tiled kernel)",
+		op = .MultiHeadAttention,
+		shapes = {{2, 40, 64, 1}, {2, 33, 64, 1}, {2, 33, 64, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			return t.tensor_multi_head_attention(x[0], x[1], x[2], 2, 40, 33, 2, 32)
+		},
+	},
+	{
 		name = "chain (layer_norm, matmul, gelu_tanh, softmax, cross-entropy)",
 		op = .LayerNorm,
 		shapes = {{10, 8, 1, 1}, {1, 8, 1, 1}, {1, 8, 1, 1}, {8, 7, 1, 1}},
@@ -918,6 +967,13 @@ _shared_mask :: proc() -> []f64 {
 	return m
 }
 
+// one [5, 6] block per sequence and head (2 sequences, 2 heads)
+_head_mask :: proc() -> []f64 {
+	m := make([]f64, 120, context.temp_allocator)
+	for blk in 0 ..< 4 {for i in 0 ..< 5 {for j in 0 ..< 6 {if j > i + blk % 3 {m[(blk * 5 + i) * 6 + j] = -1e9} else {m[(blk * 5 + i) * 6 + j] = 0.05 * f64(blk)}}}}
+	return m
+}
+
 _batch_mask :: proc() -> []f64 {
 	m := make([]f64, 60, context.temp_allocator)
 	for b in 0 ..< 2 {for i in 0 ..< 5 {for j in 0 ..< 6 {if j > i + b {m[(b * 5 + i) * 6 + j] = -1e9}}}}
@@ -987,7 +1043,11 @@ gpu_fallback_op_test :: proc() {
 			worst,
 			c.tol,
 		)
-		check(fallbacks > 0, "%s (fallback): the fallback did not run", c.name)
+		// without its kernel, multi-head attention runs as the unfused ops, which
+		// have kernels: there is no CPU fallback to count
+		if c.op != .MultiHeadAttention {
+			check(fallbacks > 0, "%s (fallback): the fallback did not run", c.name)
+		}
 	}
 	// an op without a GPU kernel at all (the recurrent cells stay on the CPU), on device inputs
 	rnn := Op_Case {
@@ -1025,6 +1085,7 @@ gpu_matmul_kernel_test :: proc() {
 			     .ScaledDotProductAttention,
 			     .MaskedScaledDotProductAttention,
 			     .FlashAttention,
+			     .MultiHeadAttention,
 			     .Conv2d,
 			     .Conv1d:
 			case:

@@ -301,6 +301,8 @@ _backward_node_cpu :: proc(node: ^Tensor, allocator: mem.Allocator) {
 				l.axpy_simd(1.0, node.grad.data[i * out_f:(i + 1) * out_f], b_in.grad.data)
 			}
 		}
+	case .MultiHeadAttention:
+		_multi_head_attention_backward(node, allocator)
 	case .Sum:
 		a_in := node.inputs[0]
 		if a_in.requires_grad {
@@ -1542,6 +1544,87 @@ _mat :: proc(rows, cols: int, data: []f64) -> l.Matrix(f64) {
 // _grad_view returns a [rows, cols] row-major view over a tensor's gradient
 _grad_view :: proc(t: ^Tensor, rows, cols: int) -> l.Matrix(f64) {
 	return _mat(rows, cols, t.grad.data)
+}
+
+// _multi_head_attention_backward: the CPU backward of a MultiHeadAttention node
+// (recorded on the GPU, backward on the CPU when its kernel is switched off):
+// the attention op's backward on head-layout copies of the inputs, the output
+// and its gradient, with the input gradients permuted back. The values are
+// those of the unfused ops (tensor_permute_mha, attention, inverse).
+_multi_head_attention_backward :: proc(node: ^Tensor, allocator: mem.Allocator) {
+	m := node.int_metadata
+	batch, seq_q, seq_k, H, hd := m[0], m[1], m[2], m[3], m[4]
+	kind, causal := m[5], m[6]
+	// [B, S, H·hd] -> [B·H, S, hd] (to_heads) or += back (from_heads)
+	permute :: proc(seq_layout, head_layout: []f64, B, S, H, hd: int, to_heads: bool) {
+		D := H * hd
+		for b in 0 ..< B {
+			for s in 0 ..< S {
+				for h in 0 ..< H {
+					for d in 0 ..< hd {
+						src := b * (S * D) + s * D + h * hd + d
+						dst := (b * H + h) * (S * hd) + s * hd + d
+						if to_heads {
+							head_layout[dst] = seq_layout[src]
+						} else {
+							seq_layout[src] += head_layout[dst]
+						}
+					}
+				}
+			}
+		}
+	}
+	heads_copy :: proc(src: []f64, B, S, H, hd: int, allocator: mem.Allocator) -> l.Matrix(f64) {
+		n := B * S * H * hd
+		out := _mat(1, n, make([]f64, n, allocator))
+		permute(src, out.data, B, S, H, hd, true)
+		return out
+	}
+
+	seqs := [3]int{seq_q, seq_k, seq_k}
+	parts: [3]Tensor
+	for &p, i in parts {
+		x := node.inputs[i]
+		n := batch * seqs[i] * H * hd
+		p.data = heads_copy(x.data.data, batch, seqs[i], H, hd, allocator)
+		p.shape = {batch * H, seqs[i], hd, 1}
+		p.requires_grad = x.requires_grad
+		p.allocator = allocator
+		if x.requires_grad {p.grad = _mat(1, n, make([]f64, n, allocator))}
+	}
+	inner: Tensor
+	inner.data = heads_copy(node.data.data, batch, seq_q, H, hd, allocator)
+	inner.grad = heads_copy(node.grad.data, batch, seq_q, H, hd, allocator)
+	inner.shape = {batch * H, seq_q, hd, 1}
+	inner.requires_grad = true
+	inner.allocator = allocator
+	inner.inputs = make([dynamic]^Tensor, 0, 3, allocator)
+	append(&inner.inputs, &parts[0], &parts[1], &parts[2])
+	switch kind {
+	case 1:
+		inner.op = .MaskedScaledDotProductAttention
+		inner.f64_metadata = node.f64_metadata // the mask, shared (not freed here)
+	case 2:
+		inner.op = .FlashAttention
+		inner.int_metadata = make([dynamic]int, 0, 1, allocator)
+		append(&inner.int_metadata, causal)
+	case:
+		inner.op = .ScaledDotProductAttention
+	}
+	_backward_node_cpu(&inner, allocator)
+
+	for &p, i in parts {
+		if p.requires_grad {
+			x := node.inputs[i]
+			permute(x.grad.data, p.grad.data, batch, seqs[i], H, hd, false)
+			delete(p.grad.data, allocator)
+		}
+		delete(p.data.data, allocator)
+	}
+	delete(inner.data.data, allocator)
+	delete(inner.grad.data, allocator)
+	delete(inner.inputs)
+	if kind == 2 {delete(inner.int_metadata)}
 }
 
 // _attention_backward handles both plain and masked scaled dot-product attention.

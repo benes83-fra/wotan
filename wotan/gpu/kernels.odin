@@ -24,6 +24,8 @@ Kernel :: enum {
 	Binary_Bwd, // d(a or b) += dy * ∂(a ∘ b)
 	Matmul, // C (+)= op(A) @ op(B), 16x16 tiles, one output per thread
 	Matmul_Tiled, // the same, 64x64 tiles, 4x4 outputs per thread (register tiling)
+	Matmul_Heads, // Matmul and Matmul_Tiled with operands in head layout (attention;
+	Matmul_Tiled_Heads, // generated source, see _kernel_source)
 	Reduce, // out[k] = scale * Σ x (or Σ x²), per workgroup
 	Bcast_Add, // dx += scale * s[k]
 	Mse_Bwd, // dx += scale * dy[0] * (a - b)
@@ -200,7 +202,7 @@ U_PROB_WEIGHT :: 16 // f0 γ
 
 @(private)
 KERNEL_SOURCES := [Kernel]string {
-	.Unary            = `
+	.Unary              = `
 @group(0) @binding(1) var<storage, read> x: array<f32>;
 @group(0) @binding(2) var<storage, read_write> y: array<f32>;
 @compute @workgroup_size(256)
@@ -238,7 +240,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 	y[i] = r;
 }
 `,
-	.Unary_Bwd        = `
+	.Unary_Bwd          = `
 @group(0) @binding(1) var<storage, read> x: array<f32>;
 @group(0) @binding(2) var<storage, read> y: array<f32>;
 @group(0) @binding(3) var<storage, read> dy: array<f32>;
@@ -281,7 +283,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 	dx[i] = keep(dx[i], p.u7) + d;
 }
 `,
-	.Binary           = `
+	.Binary             = `
 @group(0) @binding(1) var<storage, read> a: array<f32>;
 @group(0) @binding(2) var<storage, read> b: array<f32>;
 @group(0) @binding(3) var<storage, read_write> o: array<f32>;
@@ -302,7 +304,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 }
 `,
 	// u1: 2 mul, 3 div; u2: 0 gradient of a, 1 gradient of b
-	.Binary_Bwd       = `
+	.Binary_Bwd         = `
 @group(0) @binding(1) var<storage, read> a: array<f32>;
 @group(0) @binding(2) var<storage, read> b: array<f32>;
 @group(0) @binding(3) var<storage, read> dy: array<f32>;
@@ -322,12 +324,13 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 	dst[i] = keep(dst[i], p.u7) + d;
 }
 `,
-	// C[M, N] (+)= op(A)[M, K] @ op(B)[K, N]; u0 M, u1 N, u2 K, u3 transA, u4 transB,
-	// u5 accumulate, u6 first row of this dispatch, u7 = 1: add bias[column]
-	// (tensor_linear; the dummy buffer is bound otherwise). Workgroup z is the batch:
-	// batch z uses the z-th contiguous A, B and C blocks. 16x16 tiles in
-	// workgroup memory.
-	.Matmul           = `
+	// C[M, N] (+)= op(A)[M, K] @ op(B)[K, N]; u0 M, u1 N, u2 K, u3 bit 0 transA,
+	// u4 bit 0 transB, u5 bit 0 accumulate, u6 first row of this dispatch, u7 bit 0:
+	// add bias[column] (tensor_linear; the dummy buffer is bound otherwise).
+	// Workgroup z is the batch: batch z uses the z-th A, B and C blocks (base and
+	// stride: MATMUL_CONTIGUOUS, or MATMUL_HEADS in the _Heads kernels). 16x16
+	// tiles in workgroup memory.
+	.Matmul             = `
 @group(0) @binding(1) var<storage, read> A: array<f32>;
 @group(0) @binding(2) var<storage, read> B: array<f32>;
 @group(0) @binding(3) var<storage, read_write> C: array<f32>;
@@ -337,9 +340,11 @@ var<workgroup> Bs: array<array<f32, 16>, 16>;
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
 	let M = p.u0; let N = p.u1; let K = p.u2;
-	let a0 = g.z * M * K;
-	let b0 = g.z * K * N;
-	let c0 = g.z * M * N;
+	let ta = (p.u3 & 1u) == 1u;
+	let tb = (p.u4 & 1u) == 1u;
+	let a0 = select(base(g.z, M, K, p.u3), base(g.z, K, M, p.u3), ta);
+	let b0 = select(base(g.z, K, N, p.u4), base(g.z, N, K, p.u4), tb);
+	let c0 = base(g.z, M, N, p.u5);
 	let row = g.y + p.u6;
 	let col = g.x;
 	var acc = 0.0;
@@ -348,13 +353,13 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
 		let ak = tt * 16u + lid.x;
 		var av = 0.0;
 		if (row < M && ak < K) {
-			if (p.u3 == 0u) { av = A[a0 + row * K + ak]; } else { av = A[a0 + ak * M + row]; }
+			if (!ta) { av = A[a0 + row * stride(K, p.u3) + ak]; } else { av = A[a0 + ak * stride(M, p.u3) + row]; }
 		}
 		As[lid.y][lid.x] = av;
 		let bk = tt * 16u + lid.y;
 		var bv = 0.0;
 		if (bk < K && col < N) {
-			if (p.u4 == 0u) { bv = B[b0 + bk * N + col]; } else { bv = B[b0 + col * K + bk]; }
+			if (!tb) { bv = B[b0 + bk * stride(N, p.u4) + col]; } else { bv = B[b0 + col * stride(K, p.u4) + bk]; }
 		}
 		Bs[lid.y][lid.x] = bv;
 		workgroupBarrier();
@@ -362,10 +367,10 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
 		workgroupBarrier();
 	}
 	if (row < M && col < N) {
-		let o = c0 + row * N + col;
+		let o = c0 + row * stride(N, p.u5) + col;
 		var v = acc;
-		if (p.u7 == 1u) { v = v + bias[col]; }
-		if (p.u5 == 1u) { C[o] = C[o] + v; } else { C[o] = v; }
+		if ((p.u7 & 1u) == 1u) { v = v + bias[col]; }
+		if ((p.u5 & 1u) == 1u) { C[o] = C[o] + v; } else { C[o] = v; }
 	}
 }
 `,
@@ -375,29 +380,30 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
 	// (coalesced global writes, no shared-memory bank conflicts). Each step of
 	// 16 along K stages a 64x16 slice of op(A) and a 16x64 slice of op(B) in
 	// workgroup memory; the 4x4 accumulators stay in registers.
-	.Matmul_Tiled     = `
+	.Matmul_Tiled       = `
 @group(0) @binding(1) var<storage, read> A: array<f32>;
 @group(0) @binding(2) var<storage, read> B: array<f32>;
 @group(0) @binding(3) var<storage, read_write> C: array<f32>;
 @group(0) @binding(4) var<storage, read> bias: array<f32>;
 var<workgroup> As: array<array<f32, 64>, 16>;
 var<workgroup> Bs: array<array<f32, 64>, 16>;
+// element (r, k) of op(A) and (k, c) of op(B); 0 outside the matrix
 fn load_a(a0: u32, r: u32, k: u32) -> f32 {
 	if (r >= p.u0 || k >= p.u2) { return 0.0; }
-	if (p.u3 == 0u) { return A[a0 + r * p.u2 + k]; }
-	return A[a0 + k * p.u0 + r];
+	if ((p.u3 & 1u) == 0u) { return A[a0 + r * stride(p.u2, p.u3) + k]; }
+	return A[a0 + k * stride(p.u0, p.u3) + r];
 }
 fn load_b(b0: u32, k: u32, c: u32) -> f32 {
 	if (k >= p.u2 || c >= p.u1) { return 0.0; }
-	if (p.u4 == 0u) { return B[b0 + k * p.u1 + c]; }
-	return B[b0 + c * p.u2 + k];
+	if ((p.u4 & 1u) == 0u) { return B[b0 + k * stride(p.u1, p.u4) + c]; }
+	return B[b0 + c * stride(p.u2, p.u4) + k];
 }
 fn store(c0: u32, r: u32, col: u32, v: f32) {
 	if (r >= p.u0 || col >= p.u1) { return; }
-	let o = c0 + r * p.u1 + col;
+	let o = c0 + r * stride(p.u1, p.u5) + col;
 	var w = v;
-	if (p.u7 == 1u) { w = w + bias[col]; }
-	if (p.u5 == 1u) { C[o] = C[o] + w; } else { C[o] = w; }
+	if ((p.u7 & 1u) == 1u) { w = w + bias[col]; }
+	if ((p.u5 & 1u) == 1u) { C[o] = C[o] + w; } else { C[o] = w; }
 }
 fn store_row(c0: u32, r: u32, col: u32, v: vec4<f32>) {
 	store(c0, r, col, v.x);
@@ -408,9 +414,11 @@ fn store_row(c0: u32, r: u32, col: u32, v: vec4<f32>) {
 @compute @workgroup_size(16, 16)
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
 	let M = p.u0; let N = p.u1; let K = p.u2;
-	let a0 = wid.z * M * K;
-	let b0 = wid.z * K * N;
-	let c0 = wid.z * M * N;
+	let ta = (p.u3 & 1u) == 1u;
+	let tb = (p.u4 & 1u) == 1u;
+	let a0 = select(base(wid.z, M, K, p.u3), base(wid.z, K, M, p.u3), ta);
+	let b0 = select(base(wid.z, K, N, p.u4), base(wid.z, N, K, p.u4), tb);
+	let c0 = base(wid.z, M, N, p.u5);
 	let row0 = wid.y * 64u + p.u6;
 	let col0 = wid.x * 64u;
 	let tx = lid.x; let ty = lid.y;
@@ -424,7 +432,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
 	for (var kt = 0u; kt < K; kt += 16u) {
 		// neighbouring threads read neighbouring addresses: along k for A, along
 		// the rows for Aᵀ; along the columns for B, along k for Bᵀ
-		if (p.u3 == 0u) {
+		if (!ta) {
 			As[ak][ar] = load_a(a0, row0 + ar, kt + ak);
 			As[ak][ar + 16u] = load_a(a0, row0 + ar + 16u, kt + ak);
 			As[ak][ar + 32u] = load_a(a0, row0 + ar + 32u, kt + ak);
@@ -435,7 +443,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
 			As[bk + 8u][bc] = load_a(a0, row0 + bc, kt + bk + 8u);
 			As[bk + 12u][bc] = load_a(a0, row0 + bc, kt + bk + 12u);
 		}
-		if (p.u4 == 0u) {
+		if (!tb) {
 			Bs[bk][bc] = load_b(b0, kt + bk, col0 + bc);
 			Bs[bk + 4u][bc] = load_b(b0, kt + bk + 4u, col0 + bc);
 			Bs[bk + 8u][bc] = load_b(b0, kt + bk + 8u, col0 + bc);
@@ -462,9 +470,11 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
 	store_row(c0, row0 + ty + 48u, col0 + tx, c3v);
 }
 `,
+	.Matmul_Heads       = "", // generated (_kernel_source)
+	.Matmul_Tiled_Heads = "",
 	// u0 n, u1 0 sum / 1 sum of squares, u2 output index, f0 scale. Each
 	// workgroup writes the scaled sum of its grid-stride share to out[u2 + wg].
-	.Reduce           = `
+	.Reduce             = `
 @group(0) @binding(1) var<storage, read> x: array<f32>;
 @group(0) @binding(2) var<storage, read_write> o: array<f32>;
 var<workgroup> sh: array<f32, 256>;
@@ -489,7 +499,7 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid
 }
 `,
 	// dx[i] += f0 * s[u2]
-	.Bcast_Add        = `
+	.Bcast_Add          = `
 @group(0) @binding(1) var<storage, read> s: array<f32>;
 @group(0) @binding(2) var<storage, read_write> dx: array<f32>;
 @compute @workgroup_size(256)
@@ -500,7 +510,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 }
 `,
 	// dx[i] += f0 * dy[0] * (a[i] - b[i])
-	.Mse_Bwd          = `
+	.Mse_Bwd            = `
 @group(0) @binding(1) var<storage, read> a: array<f32>;
 @group(0) @binding(2) var<storage, read> b: array<f32>;
 @group(0) @binding(3) var<storage, read> dy: array<f32>;
@@ -513,7 +523,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 }
 `,
 	// out[i] = a[i] + bias[i % D]; u0 n, u1 D
-	.Bias_Add         = `
+	.Bias_Add           = `
 @group(0) @binding(1) var<storage, read> a: array<f32>;
 @group(0) @binding(2) var<storage, read> bias: array<f32>;
 @group(0) @binding(3) var<storage, read_write> o: array<f32>;
@@ -525,7 +535,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 }
 `,
 	// db[j] += Σ_i dy[i * D + j]; u0 N rows, u1 D
-	.Col_Sum          = `
+	.Col_Sum            = `
 @group(0) @binding(1) var<storage, read> dy: array<f32>;
 @group(0) @binding(2) var<storage, read_write> db: array<f32>;
 @compute @workgroup_size(256)
@@ -538,7 +548,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 }
 `,
 	// out[b] = Σ_j x[b * W + j]; u0 rows, u1 W
-	.Row_Sum          = `
+	.Row_Sum            = `
 @group(0) @binding(1) var<storage, read> x: array<f32>;
 @group(0) @binding(2) var<storage, read_write> o: array<f32>;
 @compute @workgroup_size(256)
@@ -551,7 +561,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 }
 `,
 	// dx[i] += dy[i / W]; u0 n, u1 W
-	.Row_Bcast_Add    = `
+	.Row_Bcast_Add      = `
 @group(0) @binding(1) var<storage, read> dy: array<f32>;
 @group(0) @binding(2) var<storage, read_write> dx: array<f32>;
 @compute @workgroup_size(256)
@@ -562,7 +572,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 }
 `,
 	// x [rows, cols] -> y [cols, rows]; u0 rows, u1 cols, u2 accumulate
-	.Transpose        = `
+	.Transpose          = `
 @group(0) @binding(1) var<storage, read> x: array<f32>;
 @group(0) @binding(2) var<storage, read_write> y: array<f32>;
 @compute @workgroup_size(256)
@@ -576,7 +586,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 }
 `,
 	// u0 rows, u1 len, u2 src stride, u3 src offset, u4 dst stride, u5 dst offset, u6 accumulate
-	.Strided_Copy     = `
+	.Strided_Copy       = `
 @group(0) @binding(1) var<storage, read> src: array<f32>;
 @group(0) @binding(2) var<storage, read_write> dst: array<f32>;
 @compute @workgroup_size(256)
@@ -590,7 +600,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 	if (p.u6 == 1u) { dst[o] = dst[o] + v; } else { dst[o] = v; }
 }
 `,
-	.Scale_Inplace    = `
+	.Scale_Inplace      = `
 @group(0) @binding(1) var<storage, read_write> y: array<f32>;
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
@@ -601,7 +611,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 `,
 	// optim.adam_update: f0 beta1, f1 beta2, f2 epsilon, f3 lr / (1 - beta1^t),
 	// f4 sqrt(1 - beta2^t), f5 1 - lr * weight_decay
-	.Adam             = `
+	.Adam               = `
 @group(0) @binding(1) var<storage, read> gr: array<f32>;
 @group(0) @binding(2) var<storage, read_write> w: array<f32>;
 @group(0) @binding(3) var<storage, read_write> m: array<f32>;
@@ -618,11 +628,11 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 	w[i] = w[i] * p.f5 - p.f3 * mi / (sqrt(vi) / p.f4 + p.f2);
 }
 `,
-	.Adam_2           = "",
-	.Adam_3           = "",
-	.Adam_4           = "",
+	.Adam_2             = "",
+	.Adam_3             = "",
+	.Adam_4             = "",
 	// optim.sgd_update: u1 momentum on, u2 nesterov; f0 lr, f1 momentum, f2 weight decay
-	.Sgd              = `
+	.Sgd                = `
 @group(0) @binding(1) var<storage, read> gr: array<f32>;
 @group(0) @binding(2) var<storage, read_write> w: array<f32>;
 @group(0) @binding(3) var<storage, read_write> vel: array<f32>;
@@ -643,7 +653,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 	// into y[r], 2 cross-entropy loss lse - x[r, target] into y[r] with the targets
 	// in aux), f0 scale applied to x first, u3 mask length (0: none; the additive
 	// mask aux[(r·C + j) % u3]), u4 causal (1: entries j > r % u5 masked out), u5 seq_q
-	.Softmax_Rows     = `
+	.Softmax_Rows       = `
 @group(0) @binding(1) var<storage, read> x: array<f32>;
 @group(0) @binding(2) var<storage, read> aux: array<f32>;
 @group(0) @binding(3) var<storage, read_write> y: array<f32>;
@@ -715,7 +725,7 @@ fn main(@builtin(local_invocation_id) l3: vec3<u32>, @builtin(workgroup_id) wid:
 }
 `,
 	// dx (+)= f0 * p * (g - Σ_j p g) per row; u0 rows, u1 C, u2 accumulate
-	.Softmax_Bwd      = `
+	.Softmax_Bwd        = `
 @group(0) @binding(1) var<storage, read> pr: array<f32>;
 @group(0) @binding(2) var<storage, read> gr: array<f32>;
 @group(0) @binding(3) var<storage, read_write> dx: array<f32>;
@@ -765,7 +775,7 @@ fn main(@builtin(local_invocation_id) l3: vec3<u32>, @builtin(workgroup_id) wid:
 	// dx[r, j] += coef_r * (softmax(x_r)[j] - [j == target_r]); u0 rows, u1 C,
 	// u2 mode (0 logsumexp: coef_r = g[r], no target; 1 cross-entropy:
 	// coef = g[0] * f0, targets in t)
-	.Row_Prob_Grad    = `
+	.Row_Prob_Grad      = `
 @group(0) @binding(1) var<storage, read> x: array<f32>;
 @group(0) @binding(2) var<storage, read> t: array<f32>;
 @group(0) @binding(3) var<storage, read> g: array<f32>;
@@ -826,12 +836,14 @@ fn main(@builtin(local_invocation_id) l3: vec3<u32>, @builtin(workgroup_id) wid:
 	}
 }
 `,
-	// u0 rows, u1 D, u2 1 = RMS norm (no centering, no beta), f0 eps
-	.Norm_Fwd         = `
+	// u0 rows, u1 D, u2 1 = RMS norm (no centering, no beta), f0 eps; u3 = 1:
+	// also keep the row statistics as Norm_Stats writes them (for the backward)
+	.Norm_Fwd           = `
 @group(0) @binding(1) var<storage, read> x: array<f32>;
 @group(0) @binding(2) var<storage, read> gamma: array<f32>;
 @group(0) @binding(3) var<storage, read> beta: array<f32>;
 @group(0) @binding(4) var<storage, read_write> y: array<f32>;
+@group(0) @binding(5) var<storage, read_write> stats: array<f32>;
 var<workgroup> sh: array<f32, 256>;
 // workgroup-wide max and sum (all 256 threads must call them)
 fn wg_max(v: f32, lid: u32) -> f32 {
@@ -874,6 +886,10 @@ fn main(@builtin(local_invocation_id) l3: vec3<u32>, @builtin(workgroup_id) wid:
 	}
 	let inv = 1.0 / sqrt(wg_sum(q, lid) / f32(D) + p.f0);
 	if (!live) { return; }
+	if (p.u3 == 1u && lid == 0u) {
+		stats[2u * r] = mean;
+		stats[2u * r + 1u] = inv;
+	}
 	for (var j = lid; j < D; j += 256u) {
 		let i = r * D + j;
 		if (rms) { y[i] = x[i] * inv * gamma[j]; } else { y[i] = (x[i] - mean) * inv * gamma[j] + beta[j]; }
@@ -881,7 +897,7 @@ fn main(@builtin(local_invocation_id) l3: vec3<u32>, @builtin(workgroup_id) wid:
 }
 `,
 	// stats[2r] = mean (0 for RMS), stats[2r + 1] = 1 / std (1 / rms)
-	.Norm_Stats       = `
+	.Norm_Stats         = `
 @group(0) @binding(1) var<storage, read> x: array<f32>;
 @group(0) @binding(2) var<storage, read_write> stats: array<f32>;
 var<workgroup> sh: array<f32, 256>;
@@ -933,7 +949,7 @@ fn main(@builtin(local_invocation_id) l3: vec3<u32>, @builtin(workgroup_id) wid:
 `,
 	// Layer norm: dx += (D·a - Σa - x̂·Σ(a x̂)) · inv / D with a = dy·γ;
 	// RMS norm: dx += r·a - x·r³·Σ(a x)/D
-	.Norm_Bwd_X       = `
+	.Norm_Bwd_X         = `
 @group(0) @binding(1) var<storage, read> x: array<f32>;
 @group(0) @binding(2) var<storage, read> gamma: array<f32>;
 @group(0) @binding(3) var<storage, read> dy: array<f32>;
@@ -1001,7 +1017,7 @@ fn main(@builtin(local_invocation_id) l3: vec3<u32>, @builtin(workgroup_id) wid:
 `,
 	// per column j: u4 = 1: dgamma[j] += Σ_r dy·x̂; u3 = 1: dbeta[j] += Σ_r dy;
 	// u6, u7: overwrite dgamma, dbeta
-	.Norm_Bwd_Param   = `
+	.Norm_Bwd_Param     = `
 @group(0) @binding(1) var<storage, read> x: array<f32>;
 @group(0) @binding(2) var<storage, read> dy: array<f32>;
 @group(0) @binding(3) var<storage, read> stats: array<f32>;
@@ -1024,7 +1040,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 }
 `,
 	// out[r, e] = W[ids[r], e] (0 for an id outside [0, u2)); u0 rows, u1 E, u2 vocab
-	.Gather_Rows      = `
+	.Gather_Rows        = `
 @group(0) @binding(1) var<storage, read> ids: array<f32>;
 @group(0) @binding(2) var<storage, read> W: array<f32>;
 @group(0) @binding(3) var<storage, read_write> o: array<f32>;
@@ -1041,7 +1057,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 }
 `,
 	// dW[ids[r], e] += dy[r, e]; rows sharing an id add atomically (compare-and-swap)
-	.Scatter_Add_Rows = `
+	.Scatter_Add_Rows   = `
 @group(0) @binding(1) var<storage, read> ids: array<f32>;
 @group(0) @binding(2) var<storage, read> dy: array<f32>;
 @group(0) @binding(3) var<storage, read_write> dW: array<atomic<u32>>;
@@ -1066,7 +1082,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 	// element (b, h, s, d): sequence layout b·S·H·hd + s·H·hd + h·hd + d, head
 	// layout (b·H + h)·S·hd + s·hd + d; u0 B, u1 S, u2 H, u3 hd, u4 0: head <-
 	// sequence, 1: sequence <- head; u5 accumulate
-	.Permute_Mha      = `
+	.Permute_Mha        = `
 @group(0) @binding(1) var<storage, read> src: array<f32>;
 @group(0) @binding(2) var<storage, read_write> dst: array<f32>;
 @compute @workgroup_size(256)
@@ -1088,7 +1104,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 `,
 	// p clamped to [1e-7, 1 - 1e-7]; u0 n, u1 mode (0 loss per element into dst,
 	// 1 dpred += f0 g[0] (-(t/p) + (1-t)/(1-p)), 2 dtarget += f0 g[0] (ln(1-p) - ln p))
-	.Bce              = `
+	.Bce                = `
 @group(0) @binding(1) var<storage, read> pr: array<f32>;
 @group(0) @binding(2) var<storage, read> tg: array<f32>;
 @group(0) @binding(3) var<storage, read> g: array<f32>;
@@ -1109,7 +1125,7 @@ fn main(@builtin(global_invocation_id) gi: vec3<u32>, @builtin(num_workgroups) n
 }
 `,
 	// u0 n, u1 D, u2 accumulate
-	.Row_Scale        = `
+	.Row_Scale          = `
 @group(0) @binding(1) var<storage, read> src: array<f32>;
 @group(0) @binding(2) var<storage, read> g: array<f32>;
 @group(0) @binding(3) var<storage, read_write> dst: array<f32>;
@@ -1122,7 +1138,7 @@ fn main(@builtin(global_invocation_id) gi: vec3<u32>, @builtin(num_workgroups) n
 }
 `,
 	// u0 rows, u1 W
-	.Row_Dot          = `
+	.Row_Dot            = `
 @group(0) @binding(1) var<storage, read> a: array<f32>;
 @group(0) @binding(2) var<storage, read> b: array<f32>;
 @group(0) @binding(3) var<storage, read_write> o: array<f32>;
@@ -1139,7 +1155,7 @@ fn main(@builtin(global_invocation_id) gi: vec3<u32>, @builtin(num_workgroups) n
 	// col[k, n·L + l] = x[n, c, oh·s + kh - pad, ow·s + kw - pad] (0 in the padding),
 	// k = (c·kH + kh)·kW + kw, l = oh·out_w + ow (the CPU _im2col order per sample).
 	// u0 N, u1 C, u2 H, u3 W, u4 kH, u5 kW, u6 stride, u7 pad
-	.Im2col_2d        = CONV2D_DIMS + `
+	.Im2col_2d          = CONV2D_DIMS + `
 @group(0) @binding(1) var<storage, read> x: array<f32>;
 @group(0) @binding(2) var<storage, read_write> col: array<f32>;
 @compute @workgroup_size(256)
@@ -1166,7 +1182,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 `,
 	// dx[n, c, ih, iw] += Σ_{kh, kw} dcol[k, n·L + l] over the outputs that read
 	// (ih, iw); parameters as Im2col_2d
-	.Col2im_2d        = CONV2D_DIMS + `
+	.Col2im_2d          = CONV2D_DIMS + `
 @group(0) @binding(1) var<storage, read> dcol: array<f32>;
 @group(0) @binding(2) var<storage, read_write> dx: array<f32>;
 @compute @workgroup_size(256)
@@ -1197,7 +1213,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 `,
 	// col[b·T_out + t, c·K + k] = x[b, t + k·dil - pad_left, c] (0 outside);
 	// u0 B, u1 T, u2 C_in, u3 K, u4 dilation, u5 pad_left, u6 T_out
-	.Im2col_1d        = `
+	.Im2col_1d          = `
 @group(0) @binding(1) var<storage, read> x: array<f32>;
 @group(0) @binding(2) var<storage, read_write> col: array<f32>;
 @compute @workgroup_size(256)
@@ -1217,7 +1233,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 `,
 	// dx[b, s, c] += Σ_k dcol[b·T_out + t, c·K + k] with t = s - k·dil + pad_left;
 	// parameters as Im2col_1d
-	.Col2im_1d        = `
+	.Col2im_1d          = `
 @group(0) @binding(1) var<storage, read> dcol: array<f32>;
 @group(0) @binding(2) var<storage, read_write> dx: array<f32>;
 @compute @workgroup_size(256)
@@ -1238,7 +1254,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 }
 `,
 	// dst[i] += b[(i / u1) % u2]; u0 n, u1 L (elements per channel block), u2 C
-	.Chan_Bias        = `
+	.Chan_Bias          = `
 @group(0) @binding(1) var<storage, read> b: array<f32>;
 @group(0) @binding(2) var<storage, read_write> dst: array<f32>;
 @compute @workgroup_size(256)
@@ -1250,7 +1266,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 `,
 	// one workgroup per channel c: db[c] += Σ_{n, l} dy[(n·C + c)·L + l];
 	// u0 C, u1 L, u2 N
-	.Chan_Sum         = WG_SUM + `
+	.Chan_Sum           = WG_SUM + `
 @group(0) @binding(1) var<storage, read> dy: array<f32>;
 @group(0) @binding(2) var<storage, read_write> db: array<f32>;
 @compute @workgroup_size(256)
@@ -1269,7 +1285,7 @@ fn main(@builtin(local_invocation_id) l3: vec3<u32>, @builtin(workgroup_id) wid:
 `,
 	// planes [u0 = N·C, H = u1, W = u2], window u3 x u4, stride u5; u6 0 max, 1 average.
 	// Max takes the first largest value of the window in row-major order (as the CPU).
-	.Pool             = POOL_DIMS + `
+	.Pool               = POOL_DIMS + `
 @group(0) @binding(2) var<storage, read_write> y: array<f32>;
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
@@ -1294,7 +1310,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 `,
 	// dx[e] += Σ over the windows containing e: dy (max: only where e is the
 	// window's argmax; average: dy / (kH·kW)); parameters as Pool
-	.Pool_Bwd         = POOL_DIMS + `
+	.Pool_Bwd           = POOL_DIMS + `
 @group(0) @binding(2) var<storage, read> dy: array<f32>;
 @group(0) @binding(3) var<storage, read_write> dx: array<f32>;
 @compute @workgroup_size(256)
@@ -1330,7 +1346,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 	// and biased variance; the running statistics are updated with momentum f0
 	// (unbiased variance, as torch). Evaluation: the running statistics.
 	// stats[2c] = mean, stats[2c + 1] = 1 / sqrt(var + eps); u0 C, u1 HW, u2 N, f1 eps
-	.Bn_Stats         = WG_SUM + `
+	.Bn_Stats           = WG_SUM + `
 @group(0) @binding(1) var<storage, read> x: array<f32>;
 @group(0) @binding(2) var<storage, read_write> rm: array<f32>;
 @group(0) @binding(3) var<storage, read_write> rv: array<f32>;
@@ -1373,7 +1389,7 @@ fn main(@builtin(local_invocation_id) l3: vec3<u32>, @builtin(workgroup_id) wid:
 }
 `,
 	// stats [means of the C channels, then 1 / std]; u0 n, u1 HW, u2 C
-	.Bn_Apply         = `
+	.Bn_Apply           = `
 @group(0) @binding(1) var<storage, read> x: array<f32>;
 @group(0) @binding(2) var<storage, read> gamma: array<f32>;
 @group(0) @binding(3) var<storage, read> beta: array<f32>;
@@ -1390,7 +1406,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 	// one workgroup per channel: sums[2c] = Σ dy, sums[2c + 1] = Σ dy·x̂;
 	// u3 = 1: dgamma[c] += Σ dy·x̂, u4 = 1: dbeta[c] += Σ dy; u0 C, u1 HW, u2 N;
 	// u5, u6: overwrite dgamma, dbeta
-	.Bn_Bwd_Sums      = WG_SUM + `
+	.Bn_Bwd_Sums        = WG_SUM + `
 @group(0) @binding(1) var<storage, read> x: array<f32>;
 @group(0) @binding(2) var<storage, read> dy: array<f32>;
 @group(0) @binding(3) var<storage, read> stats: array<f32>;
@@ -1427,7 +1443,7 @@ fn main(@builtin(local_invocation_id) l3: vec3<u32>, @builtin(workgroup_id) wid:
 `,
 	// training: dx += γ·inv / M · (M·dy - Σdy - x̂·Σ(dy·x̂)); evaluation (the
 	// statistics are constants): dx += γ·inv·dy. u0 n, u1 HW, u2 C, u3 training, u4 M
-	.Bn_Bwd_X         = `
+	.Bn_Bwd_X           = `
 @group(0) @binding(1) var<storage, read> x: array<f32>;
 @group(0) @binding(2) var<storage, read> gamma: array<f32>;
 @group(0) @binding(3) var<storage, read> dy: array<f32>;
@@ -1454,7 +1470,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 	// dst[i] = term of a scalar loss; u0 n, u1 mode: 0 KL (a mu, b log_var)
 	// 1 + b - a² - min(e^b, 1e10); 1 entropy -a·ln a (0 for a ≤ 1e-10); 2 prospect
 	// value v(a) with f1 α, f2 β, f3 λ
-	.Loss_Terms       = `
+	.Loss_Terms         = `
 @group(0) @binding(1) var<storage, read> a: array<f32>;
 @group(0) @binding(2) var<storage, read> b: array<f32>;
 @group(0) @binding(3) var<storage, read_write> dst: array<f32>;
@@ -1478,7 +1494,7 @@ fn main(@builtin(global_invocation_id) gi: vec3<u32>, @builtin(num_workgroups) n
 	// (d = e^b - 1, e^b taken as 0 above 1e10), 2 entropy (d = -(1 + ln a), 0 for
 	// a ≤ 1e-10), 3 prospect utility (d = -v'(a), f1 α, f2 β, f3 λ), 4 Sharpe
 	// (aux = [mean, std], f1 risk-free rate): d = ((mean - rf)(a - mean) - std²) / (n std³)
-	.Loss_Grad        = `
+	.Loss_Grad          = `
 @group(0) @binding(1) var<storage, read> a: array<f32>;
 @group(0) @binding(2) var<storage, read> b: array<f32>;
 @group(0) @binding(3) var<storage, read> aux: array<f32>;
@@ -1505,7 +1521,7 @@ fn main(@builtin(global_invocation_id) gi: vec3<u32>, @builtin(num_workgroups) n
 }
 `,
 	// one workgroup: o[0] = -(mean - f0) / sqrt(var + 1e-8), aux = [mean, std]; u0 n
-	.Sharpe           = WG_SUM + `
+	.Sharpe             = WG_SUM + `
 @group(0) @binding(1) var<storage, read> x: array<f32>;
 @group(0) @binding(2) var<storage, read_write> o: array<f32>;
 @group(0) @binding(3) var<storage, read_write> aux: array<f32>;
@@ -1530,7 +1546,7 @@ fn main(@builtin(local_invocation_id) l3: vec3<u32>) {
 	// u4 = 0: dst = (x - mean) / sqrt(var + eps); u4 = 1: dst += (dy - mean(dy) -
 	// y·Σ(dy·y)/T) / sqrt(var + eps) with y the forward output.
 	// u0 slices N·C·L, u1 C, u2 T, u3 L, f0 eps
-	.Norm_Time        = WG_SUM + `
+	.Norm_Time          = WG_SUM + `
 @group(0) @binding(1) var<storage, read> x: array<f32>;
 @group(0) @binding(2) var<storage, read> y: array<f32>;
 @group(0) @binding(3) var<storage, read> dy: array<f32>;
@@ -1576,7 +1592,7 @@ fn main(@builtin(local_invocation_id) l3: vec3<u32>, @builtin(workgroup_id) wid:
 `,
 	// per row r of probs [N, E]: mask 1 at the k largest entries (ties: the lower
 	// index), 0 elsewhere; u0 N, u1 E, u2 k
-	.Top_K            = `
+	.Top_K              = `
 @group(0) @binding(1) var<storage, read> pr: array<f32>;
 @group(0) @binding(2) var<storage, read_write> mask: array<f32>;
 @compute @workgroup_size(256)
@@ -1597,7 +1613,7 @@ fn main(@builtin(global_invocation_id) gi: vec3<u32>, @builtin(num_workgroups) n
 `,
 	// u1 = 0: dst = a + exp(b / 2)·c (a mu, b log_var, c eps);
 	// u1 = 1: dst += f0·c·(a - b) (a z, b mu, c dz: the log_var gradient with f0 = 1/2)
-	.Reparam          = `
+	.Reparam            = `
 @group(0) @binding(1) var<storage, read> a: array<f32>;
 @group(0) @binding(2) var<storage, read> b: array<f32>;
 @group(0) @binding(3) var<storage, read> c: array<f32>;
@@ -1682,10 +1698,43 @@ _adam_kernel :: proc(count: int) -> Kernel {
 	return .Adam
 }
 
-// _kernel_source: the WGSL body of a kernel (generated for the multi-parameter Adam)
+// Where matrix z of a batched matmul operand stored as [rows, cols] starts, and
+// its row stride (flags: u3 for A, u4 for B, u5 for C). The contiguous form is
+// the z-th block; the address arithmetic inlines to that of a plain kernel.
+@(private)
+MATMUL_CONTIGUOUS :: `
+fn base(z: u32, rows: u32, cols: u32, flags: u32) -> u32 { return z * rows * cols; }
+fn stride(cols: u32, flags: u32) -> u32 { return cols; }
+`
+
+// With flag bit 1 an operand is in head layout: the matrices of z = b·H + h
+// interleave as [B, rows, H, cols] (H = u7 >> 1), so attention reads and writes
+// [B, S, H·hd] directly. These are separate kernels so that plain products keep
+// their address arithmetic (one kernel for both forms made large register-tiled
+// products about 20% slower).
+@(private)
+MATMUL_HEADS :: `
+fn base(z: u32, rows: u32, cols: u32, flags: u32) -> u32 {
+	if ((flags & 2u) == 0u) { return z * rows * cols; }
+	let H = p.u7 >> 1u;
+	return (z / H) * rows * H * cols + (z % H) * cols;
+}
+fn stride(cols: u32, flags: u32) -> u32 {
+	return select(cols, (p.u7 >> 1u) * cols, (flags & 2u) != 0u);
+}
+`
+
+// _kernel_source: the WGSL body of a kernel (generated for the matmul address
+// forms and the multi-parameter Adam)
 @(private)
 _kernel_source :: proc(k: Kernel, allocator := context.temp_allocator) -> string {
 	#partial switch k {
+	case .Matmul, .Matmul_Tiled:
+		return strings.concatenate({MATMUL_CONTIGUOUS, KERNEL_SOURCES[k]}, allocator)
+	case .Matmul_Heads:
+		return strings.concatenate({MATMUL_HEADS, KERNEL_SOURCES[.Matmul]}, allocator)
+	case .Matmul_Tiled_Heads:
+		return strings.concatenate({MATMUL_HEADS, KERNEL_SOURCES[.Matmul_Tiled]}, allocator)
 	case .Adam_2:
 		return _adam_source(2, allocator)
 	case .Adam_3:

@@ -11,16 +11,26 @@ import "core:time"
 // Convolution, pooling and batch-norm models on the GPU against the CPU
 
 // the op cases whose forward runs on the GPU and whose backward runs on the CPU
-// (the device forward keeps the max-pool argmax, the batch-norm statistics and
-// the Sharpe mean and std on the device; the CPU backward must find or fetch them)
+// (the device forward keeps the batch-norm and layer-norm statistics and the
+// Sharpe mean and std on the device, and no max-pool argmax; the CPU backward
+// must fetch, recompute or find them. Multi-head attention is one node on the
+// GPU, whose CPU backward runs the attention backward on head-layout copies.)
 gpu_device_forward_cpu_backward_test :: proc() {
 	fmt.println(
-		"gpu_device_forward_cpu_backward_test: GPU forward, CPU backward (pooling, batch norm, conv, Sharpe)",
+		"gpu_device_forward_cpu_backward_test: GPU forward, CPU backward (pooling, norms, conv, Sharpe, multi-head attention)",
 	)
 	rand.reset(3)
 	for c in op_cases {
 		#partial switch c.op {
-		case .MaxPool2d, .AvgPool2d, .BatchNorm2d, .Conv2d, .Conv1d, .SharpeLoss:
+		case .MaxPool2d,
+		     .AvgPool2d,
+		     .BatchNorm2d,
+		     .LayerNorm,
+		     .RMSNorm,
+		     .Conv2d,
+		     .Conv1d,
+		     .SharpeLoss,
+		     .MultiHeadAttention:
 		case:
 			continue
 		}

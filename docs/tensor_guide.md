@@ -398,7 +398,7 @@ embedding [2, 2, 2, 1] [2, 2, 0, 0, 1, 1, 2, 2]
 
 ### Attention
 
-All attention ops take Q `[batch, seq_q, d_k]`, K `[batch, seq_k, d_k]` and V `[batch, seq_k, d_v]`, and return `[batch, seq_q, d_v]` = softmax(QKᵀ/√d_k + mask)·V. For several heads, permute to `[batch·heads, seq, head_dim]` first with `tensor_permute_mha`.
+All attention ops take Q `[batch, seq_q, d_k]`, K `[batch, seq_k, d_k]` and V `[batch, seq_k, d_v]`, and return `[batch, seq_q, d_v]` = softmax(QKᵀ/√d_k + mask)·V. For several heads, use `tensor_multi_head_attention` (below), or permute to `[batch·heads, seq, head_dim]` first with `tensor_permute_mha`.
 
 | Op | Mask | Memory |
 |---|---|---|
@@ -421,6 +421,35 @@ causal row 1 flash: 0.330238 0.669762  masked: 0.330238 0.669762
 ```
 
 These are the values of `torch.nn.functional.scaled_dot_product_attention`, with and without `is_causal`.
+
+**Several heads.** `tensor_multi_head_attention(q, k, v, batch, seq_q, seq_k, num_heads, head_dim, mask = nil, flash = false, causal = false)` is the attention step of multi-head attention. It takes the projected queries `[batch, seq_q, num_heads·head_dim]` and the projected keys and values `[batch, seq_k, num_heads·head_dim]`, where head h is the columns h·head_dim up to (h+1)·head_dim. Each head attends on its own, and the result `[batch, seq_q, num_heads·head_dim]` puts the heads side by side again. It stands for three steps:
+1. `tensor_permute_mha` on q, k and v;
+2. the attention op: masked attention when a mask is given (`[seq_q·seq_k]` shared, or `[batch·num_heads·seq_q·seq_k]`), flash attention when `flash` is set (optionally `causal`), plain attention otherwise;
+3. `tensor_permute_mha_inverse`.
+
+On the CPU it records exactly these ops. On the GPU it records a single node whose kernels read and write the `[batch, seq, num_heads·head_dim]` layout directly, which saves the permutes. `causal` needs `flash = true`; with the standard kernel, pass the causal mask as `mask`. The `nn` attention layers use this op.
+
+```odin
+// one sequence of 2 positions, 2 heads of width 2: [1, 2, 2·2]
+x := from_values({1, 0, 0, 1, 1, 1, 0.5, -1}, 1, 8, true)
+x.shape = {1, 2, 4, 1}
+y := t.tensor_multi_head_attention(x, x, x, 1, 2, 2, 2, 2)
+yc := t.tensor_multi_head_attention(x, x, x, 1, 2, 2, 2, 2, flash = true, causal = true)
+fmt.println("shape", y.shape)
+fmt.printfln("position 1: %.6f", t.tensor_values(y)[4:8])
+fmt.printfln("causal position 0: %.6f", t.tensor_values(yc)[0:4])
+s := t.tensor_sum(y)
+t.tensor_backward(s)
+fmt.printfln("dx position 0: %.6f", t.tensor_grad_values(x)[0:4])
+```
+```
+shape [1, 2, 4, 1]
+position 1: [1.000000, 0.669762, 0.415378, -0.661511]
+causal position 0: [1.000000, 0.000000, 0.000000, 1.000000]
+dx position 0: [0.497063, 0.850617, 0.964806, 1.325142]
+```
+
+torch gives the same values and gradients for `scaled_dot_product_attention` on the heads split as `[batch, heads, seq, head_dim]`. With the causal mask, position 0 sees only itself, so each head returns its own value row.
 
 ### Selective state-space scan
 
@@ -673,6 +702,6 @@ The same network in PyTorch 2.1.0 (float64, the same initial weights, plain SGD)
 | Normalisation | `tensor_layer_norm`, `_rms_norm`, `_batch_norm_2d`, `_normalize_time`, `_dropout` |
 | Convolution | `tensor_conv2d`, `_conv1d`, `_max_pool2d`, `_avg_pool2d` |
 | Sequences | `tensor_rnn`, `_gru`, `_lstm`, `_embedding`, `_ssm` |
-| Attention | `tensor_scaled_dot_product_attention`, `_masked_scaled_dot_product_attention`, `_flash_attention` |
+| Attention | `tensor_scaled_dot_product_attention`, `_masked_scaled_dot_product_attention`, `_flash_attention`, `_multi_head_attention` |
 | Constants and checks | `tensor_top_k_mask`, `tensor_clip_weights`, `tensor_validate`, `tensor_validate_graph` |
 | Size and GPU residency | `tensor_numel`; for tensors on a GPU: `tensor_values`, `tensor_grad_values`, `tensor_item`, `tensor_sync_host`, `tensor_mark_host_dirty`, `tensor_is_on_device` (see the [gpu guide](gpu_guide.md)) |

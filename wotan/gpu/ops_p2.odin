@@ -60,6 +60,16 @@ Attn :: struct {
 	mask:                  Bind, // dummy when mask_len == 0
 	mask_len:              int,
 	causal:                bool,
+	// > 0: Q, K, V and the output are [B, S, heads·d] and batch is B·heads
+	// (MultiHeadAttention); 0: contiguous [batch, S, d] blocks
+	heads:                 int,
+}
+
+// _hl: the head layout of a matmul in attention (none for contiguous operands)
+@(private)
+_hl :: proc(a: Attn, on_a, on_b, on_c: bool) -> Heads {
+	if a.heads == 0 {return {}}
+	return {a.heads, on_a, on_b, on_c}
 }
 
 @(private)
@@ -82,7 +92,19 @@ _attn_dims :: proc(Q, K, V: ^t.Tensor) -> Attn {
 _attn_probs :: proc(a: Attn, q, k: Bind) -> (P: Bind) {
 	n := a.batch * a.sq * a.sk
 	S := Bind{_acquire(n), n}
-	_matmul(q, k, S, a.sq, a.sk, a.dk, false, true, false, a.batch)
+	_matmul(
+		q,
+		k,
+		S,
+		a.sq,
+		a.sk,
+		a.dk,
+		false,
+		true,
+		false,
+		a.batch,
+		heads = _hl(a, true, true, false),
+	)
 	P = {_acquire(n), n}
 	u := [8]u32{u32(a.batch * a.sq), u32(a.sk), 0, u32(a.mask_len), u32(a.causal), u32(a.sq), 0, 0}
 	_dispatch_rows(
@@ -124,6 +146,36 @@ _attention_setup :: proc(
 		}
 	case:
 	}
+	return
+}
+
+// _mha_setup: the attention of a MultiHeadAttention node. m is its int_metadata
+// [batch, seq_q, seq_k, heads, head_dim, kind, causal] (kind 1: masked, 2:
+// flash); mask_len > 0 in the forward, whose mask is in the aux buffer.
+@(private)
+_mha_setup :: proc(node: ^t.Tensor, m: []int, mask_len: int) -> (a: Attn, temp_mask: bool) {
+	B, H, hd := m[0], m[3], m[4]
+	a = {
+		batch = B * H,
+		sq    = m[1],
+		sk    = m[2],
+		dk    = hd,
+		dv    = hd,
+		heads = H,
+	}
+	a.scale = f32(1.0 / math.sqrt(f64(hd)))
+	if a.batch >
+	   65535 {panic(fmt.tprintf("gpu attention: %d sequences x heads exceed the device's 65535 batch limit", a.batch))}
+	a.mask = _dummy()
+	if m[5] == 1 {
+		if mask_len > 0 {
+			a.mask, a.mask_len = _bind(node.device.aux_buf, mask_len), mask_len
+		} else {
+			a.mask, temp_mask = _aux(node, node.f64_metadata[:])
+			a.mask_len = len(node.f64_metadata)
+		}
+	}
+	a.causal = m[5] == 2 && m[6] == 1
 	return
 }
 
@@ -185,11 +237,14 @@ _forward_p2 :: proc(op: t.Op, out: ^t.Tensor, inputs: []^t.Tensor, ints: []int, 
 		rms := op == .RMSNorm
 		gamma := _data(inputs[1])
 		beta := gamma if rms else _data(inputs[2])
-		u := [8]u32{u32(N), u32(D), u32(rms), 0, 0, 0, 0, 0}
+		// the statistics go to the aux buffer when the backward will need them
+		keep := out.device.aux_buf.ptr != nil
+		stats := _bind(out.device.aux_buf, 2 * N) if keep else _dummy()
+		u := [8]u32{u32(N), u32(D), u32(rms), u32(keep), 0, 0, 0, 0}
 		_dispatch_rows(
 			.Norm_Fwd,
 			_p(u, {f32(floats[0]), 0, 0, 0, 0, 0, 0, 0}),
-			{_data(inputs[0]), gamma, beta, o},
+			{_data(inputs[0]), gamma, beta, o, stats},
 			N,
 		)
 	case .Dropout:
@@ -217,6 +272,24 @@ _forward_p2 :: proc(op: t.Op, out: ^t.Tensor, inputs: []^t.Tensor, ints: []int, 
 		a, temp := _attention_setup(out, op, Q, K, V, ints)
 		P := _attn_probs(a, _data(Q), _data(K))
 		_matmul(P, _data(V), o, a.sq, a.dv, a.sk, false, false, false, a.batch)
+		_release_buf(P.buf)
+		if temp {_release_buf(a.mask.buf)}
+	case .MultiHeadAttention:
+		a, temp := _mha_setup(out, ints[:7], ints[7])
+		P := _attn_probs(a, _data(inputs[0]), _data(inputs[1]))
+		_matmul(
+			P,
+			_data(inputs[2]),
+			o,
+			a.sq,
+			a.dv,
+			a.sk,
+			false,
+			false,
+			false,
+			a.batch,
+			heads = _hl(a, false, true, true),
+		)
 		_release_buf(P.buf)
 		if temp {_release_buf(a.mask.buf)}
 	case .GateMul:
@@ -328,7 +401,10 @@ _backward_p2 :: proc(node: ^t.Tensor, dy: Bind, n: int) -> bool {
 		u := [8]u32{u32(m[0]), u32(m[1]), u32(m[2]), u32(m[3]), dir, u32(!fresh), 0, 0}
 		_dispatch_1d(.Permute_Mha, _p(u), {dy, g}, n)
 		t._grad_written_on_device(a)
-	case .ScaledDotProductAttention, .MaskedScaledDotProductAttention, .FlashAttention:
+	case .ScaledDotProductAttention,
+	     .MaskedScaledDotProductAttention,
+	     .FlashAttention,
+	     .MultiHeadAttention:
 		_attention_backward(node, dy)
 	case .GateMul:
 		x, gate := node.inputs[0], node.inputs[1]
@@ -365,10 +441,18 @@ _norm_backward :: proc(node: ^t.Tensor, dy: Bind) {
 	N, D := node.int_metadata[0], node.int_metadata[1]
 	eps := f32(node.f64_metadata[0])
 	xd, gd := _in_data(x), _in_data(gamma)
-	stats := Bind{_acquire(2 * N), 2 * N}
 	u := [8]u32{u32(N), u32(D), u32(rms), 0, 0, 0, 0, 0}
 	f := [8]f32{eps, 0, 0, 0, 0, 0, 0, 0}
-	_dispatch_rows(.Norm_Stats, _p(u, f), {xd, stats}, N)
+	// the statistics the device forward kept; recomputed when the forward ran
+	// on the CPU
+	stats: Bind
+	kept := node.device != nil && node.device.aux_buf.ptr != nil
+	if kept {
+		stats = _bind(node.device.aux_buf, 2 * N)
+	} else {
+		stats = {_acquire(2 * N), 2 * N}
+		_dispatch_rows(.Norm_Stats, _p(u, f), {xd, stats}, N)
+	}
 	if x.requires_grad {
 		g, fresh := _out_grad(x)
 		ux := u
@@ -397,26 +481,57 @@ _norm_backward :: proc(node: ^t.Tensor, dy: Bind) {
 		if want_g {t._grad_written_on_device(gamma)}
 		if want_b {t._grad_written_on_device(beta)}
 	}
-	_release_buf(stats.buf)
+	if !kept {_release_buf(stats.buf)}
 }
 
 // attention: recompute P, then dV += Pᵀ dO, dS = scale · P ⊙ (dO Vᵀ - rowsum),
-// dQ += dS K, dK += dSᵀ Q
+// dQ += dS K, dK += dSᵀ Q (for MultiHeadAttention, Q, K, V, dO and the
+// gradients in head layout)
 @(private)
 _attention_backward :: proc(node: ^t.Tensor, dO: Bind) {
 	Q, K, V := node.inputs[0], node.inputs[1], node.inputs[2]
-	a, temp := _attention_setup(node, node.op, Q, K, V, nil)
+	a: Attn
+	temp: bool
+	if node.op == .MultiHeadAttention {
+		a, temp = _mha_setup(node, node.int_metadata[:], 0)
+	} else {
+		a, temp = _attention_setup(node, node.op, Q, K, V, nil)
+	}
 	q, k, v := _in_data(Q), _in_data(K), _in_data(V)
 	P := _attn_probs(a, q, k)
 	if V.requires_grad {
 		g, fresh := _out_grad(V)
-		_matmul(P, dO, g, a.sk, a.dv, a.sq, true, false, !fresh, a.batch)
+		_matmul(
+			P,
+			dO,
+			g,
+			a.sk,
+			a.dv,
+			a.sq,
+			true,
+			false,
+			!fresh,
+			a.batch,
+			heads = _hl(a, false, true, true),
+		)
 		t._grad_written_on_device(V)
 	}
 	if Q.requires_grad || K.requires_grad {
 		m := a.batch * a.sq * a.sk
 		dP := Bind{_acquire(m), m}
-		_matmul(dO, v, dP, a.sq, a.sk, a.dv, false, true, false, a.batch)
+		_matmul(
+			dO,
+			v,
+			dP,
+			a.sq,
+			a.sk,
+			a.dv,
+			false,
+			true,
+			false,
+			a.batch,
+			heads = _hl(a, true, true, false),
+		)
 		dS := Bind{_acquire(m), m}
 		u := [8]u32{u32(a.batch * a.sq), u32(a.sk), 0, 0, 0, 0, 0, 0}
 		_dispatch_rows(
@@ -427,12 +542,36 @@ _attention_backward :: proc(node: ^t.Tensor, dO: Bind) {
 		)
 		if Q.requires_grad {
 			g, fresh := _out_grad(Q)
-			_matmul(dS, k, g, a.sq, a.dk, a.sk, false, false, !fresh, a.batch)
+			_matmul(
+				dS,
+				k,
+				g,
+				a.sq,
+				a.dk,
+				a.sk,
+				false,
+				false,
+				!fresh,
+				a.batch,
+				heads = _hl(a, false, true, true),
+			)
 			t._grad_written_on_device(Q)
 		}
 		if K.requires_grad {
 			g, fresh := _out_grad(K)
-			_matmul(dS, q, g, a.sk, a.dk, a.sq, true, false, !fresh, a.batch)
+			_matmul(
+				dS,
+				q,
+				g,
+				a.sk,
+				a.dk,
+				a.sq,
+				true,
+				false,
+				!fresh,
+				a.batch,
+				heads = _hl(a, false, true, true),
+			)
 			t._grad_written_on_device(K)
 		}
 		_release_buf(dP.buf)

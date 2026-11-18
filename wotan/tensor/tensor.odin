@@ -83,6 +83,7 @@ Op :: enum {
 	ProspectUtility,
 	GeluTanh,
 	Linear, // x @ w + b in one node (tensor_linear)
+	MultiHeadAttention, // tensor_multi_head_attention on the GPU (one node)
 }
 
 PoolParams :: struct {
@@ -2322,6 +2323,94 @@ tensor_permute_mha_inverse :: proc(
 
 	return out
 }
+
+// tensor_multi_head_attention: the attention step of multi-head attention on
+// projected queries q [batch, seq_q, num_heads·head_dim] and projected keys and
+// values k, v [batch, seq_k, num_heads·head_dim] (any shape with these sizes);
+// head h is columns h·head_dim ..< (h + 1)·head_dim. Each head attends on its
+// own and the result [batch, seq_q, num_heads·head_dim] puts the heads side by
+// side again. It is tensor_permute_mha on q, k and v, then
+// - tensor_masked_scaled_dot_product_attention when a mask is given (additive,
+//   [seq_q, seq_k] for all sequences and heads or [batch·num_heads, seq_q, seq_k]),
+// - tensor_flash_attention when flash is set (causal hides the keys after each
+//   query; for the standard kernel pass the causal mask as `mask`),
+// - tensor_scaled_dot_product_attention otherwise,
+// then tensor_permute_mha_inverse. On the CPU it records exactly these ops. On
+// the GPU it is one node whose kernels read and write the [batch, seq,
+// num_heads·head_dim] layout directly, so the four permutes are not needed in
+// the forward or the backward pass.
+tensor_multi_head_attention :: proc(
+	q, k, v: ^Tensor,
+	batch, seq_q, seq_k, num_heads, head_dim: int,
+	mask: []f64 = nil,
+	flash := false,
+	causal := false,
+) -> ^Tensor {
+	d := num_heads * head_dim
+	for x, i in ([3]^Tensor{q, k, v}) {
+		seq := seq_q if i == 0 else seq_k
+		fmt.assertf(
+			tensor_numel(x) == batch * seq * d,
+			"tensor_multi_head_attention: input %d has %d values, expected %d x %d x %d",
+			i,
+			tensor_numel(x),
+			batch,
+			seq,
+			d,
+		)
+	}
+	assert(mask == nil || !flash, "tensor_multi_head_attention: flash attention takes no mask")
+	assert(
+		!causal || flash,
+		"tensor_multi_head_attention: causal needs flash = true (pass the causal mask as `mask` for the standard kernel)",
+	)
+	if mask != nil {
+		n := seq_q * seq_k
+		fmt.assertf(
+			len(mask) == n || len(mask) == batch * num_heads * n,
+			"tensor_multi_head_attention: the mask has %d values, expected %d or %d",
+			len(mask),
+			n,
+			batch * num_heads * n,
+		)
+	}
+	if _device_use(.MultiHeadAttention, q, k, v) {
+		return _device_multi_head_attention(
+			q,
+			k,
+			v,
+			{batch, seq_q, seq_k, num_heads, head_dim},
+			mask,
+			flash,
+			causal,
+		)
+	}
+	qh := tensor_permute_mha(q, batch, seq_q, num_heads, head_dim)
+	kh := tensor_permute_mha(k, batch, seq_k, num_heads, head_dim)
+	vh := tensor_permute_mha(v, batch, seq_k, num_heads, head_dim)
+	att: ^Tensor
+	switch {
+	case mask != nil:
+		att = tensor_masked_scaled_dot_product_attention(qh, kh, vh, mask)
+	case flash:
+		att = tensor_flash_attention(qh, kh, vh, causal = causal)
+	case:
+		att = tensor_scaled_dot_product_attention(qh, kh, vh)
+	}
+	out := tensor_permute_mha_inverse(att, batch, seq_q, num_heads, head_dim)
+	// intermediates no recorded node refers to are freed here (a graph scope
+	// releases them at graph_end)
+	if _scope_of(att.allocator) == nil {
+		if !att.requires_grad {
+			tensor_free(qh)
+			tensor_free(kh)
+			tensor_free(vh)
+		}
+		if !out.requires_grad {tensor_free(att)}
+	}
+	return out
+}
+
 tensor_layer_norm :: proc(
 	input: ^Tensor,
 	gamma: ^Tensor, // [1, d_model]
@@ -2339,6 +2428,8 @@ tensor_layer_norm :: proc(
 		N := tensor_numel(input) / d_model
 		rg := input.requires_grad || gamma.requires_grad || beta.requires_grad
 		out := _device_new_op(input.data.rows, input.data.cols, input.shape, rg, _op_alloc(input))
+		// the per-row statistics stay on the device for the backward
+		if rg {out.device.aux_buf = _device_alloc(out, 2 * N)}
 		_device_forward(.LayerNorm, out, {input, gamma, beta}, {N, d_model}, {eps})
 		if out.requires_grad {
 			out.op = .LayerNorm
@@ -4017,6 +4108,7 @@ tensor_rms_norm :: proc(input: ^Tensor, gamma: ^Tensor, eps: f64 = 1e-6) -> ^Ten
 		N := tensor_numel(input) / d_model
 		rg := input.requires_grad || gamma.requires_grad
 		out := _device_new_op(input.data.rows, input.data.cols, input.shape, rg, _op_alloc(input))
+		if rg {out.device.aux_buf = _device_alloc(out, 2 * N)} 	// statistics for the backward
 		_device_forward(.RMSNorm, out, {input, gamma}, {N, d_model}, {eps})
 		if out.requires_grad {
 			out.op = .RMSNorm

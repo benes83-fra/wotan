@@ -37,14 +37,14 @@ Device_Buffer :: struct {
 }
 
 Device_Storage :: struct {
-	data_buf:   Device_Buffer,
-	grad_buf:   Device_Buffer,
-	data_where: Residency,
-	grad_where: Residency,
-	host_data:  []f64, // host data slice, parked while data_where == .Device
-	host_grad:  []f64, // host gradient slice, parked while grad_where == .Device
+	data_buf:          Device_Buffer,
+	grad_buf:          Device_Buffer,
+	data_where:        Residency,
+	grad_where:        Residency,
+	host_data:         []f64, // host data slice, parked while data_where == .Device
+	host_grad:         []f64, // host gradient slice, parked while grad_where == .Device
 	// op state the backward kernel needs (dropout mask, attention mask)
-	aux_buf:    Device_Buffer,
+	aux_buf:           Device_Buffer,
 	// The device gradient is all zeros, but its buffer has not been cleared:
 	// the first backward kernel that writes the whole gradient overwrites it
 	// instead of adding to it, and every other use clears it first
@@ -69,10 +69,7 @@ Device_Hooks :: struct {
 	// optimizer kernels (wotan/nn calls these for device parameters); adam
 	// takes all device parameters of one step, so it can update several
 	// parameters per kernel launch
-	adam:          proc(
-		updates: []Device_Adam_Update,
-		beta_1, beta_2, epsilon, weight_decay: f64,
-	),
+	adam:          proc(updates: []Device_Adam_Update, beta_1, beta_2, epsilon, weight_decay: f64),
 	sgd:           proc(
 		param: ^Tensor,
 		key: rawptr,
@@ -545,7 +542,8 @@ _device_matmul :: proc(a, b: ^Tensor) -> ^Tensor {
 _device_linear :: proc(x, w, b: ^Tensor) -> ^Tensor {
 	N, in_f, out_f, flattened := _linear_dims(x, w)
 	rg := x.requires_grad || w.requires_grad || b.requires_grad
-	shape := _flattened_matmul_shape(x.shape, N, in_f, out_f) if flattened else [4]int{N, out_f, 1, 1}
+	shape :=
+		_flattened_matmul_shape(x.shape, N, in_f, out_f) if flattened else [4]int{N, out_f, 1, 1}
 	rows, cols := N, out_f
 	if flattened {rows, cols = 1, N * out_f}
 	out := _device_new_op(rows, cols, shape, rg, _op_alloc(x))
@@ -596,6 +594,35 @@ _device_attention :: proc(op: Op, Q, K, V: ^Tensor, mask: []f64, causal: bool) -
 		append(&out.inputs, Q, K, V)
 		if op == .MaskedScaledDotProductAttention {append(&out.f64_metadata, ..mask)}
 		if op == .FlashAttention {append(&out.int_metadata, int(causal))}
+	}
+	return out
+}
+
+// _device_multi_head_attention: device tensor_multi_head_attention as one node.
+// int_metadata: [batch, seq_q, seq_k, num_heads, head_dim, kind, causal] with
+// kind 0 plain, 1 masked (the mask in f64_metadata and the aux buffer), 2 flash;
+// the forward also gets the mask length.
+_device_multi_head_attention :: proc(
+	q, k, v: ^Tensor,
+	dims: [5]int, // batch, seq_q, seq_k, num_heads, head_dim
+	mask: []f64,
+	flash, causal: bool,
+) -> ^Tensor {
+	batch, seq_q, d := dims[0], dims[1], dims[3] * dims[4]
+	rg := q.requires_grad || k.requires_grad || v.requires_grad
+	out := _device_new_op(1, batch * seq_q * d, {batch, seq_q, d, 1}, rg, _op_alloc(q))
+	if mask != nil {
+		out.device.aux_buf = _device_alloc(out, len(mask))
+		_device_hooks.upload(out.device.aux_buf, mask)
+	}
+	kind := 1 if mask != nil else (2 if flash else 0)
+	meta := [8]int{dims[0], dims[1], dims[2], dims[3], dims[4], kind, int(causal), len(mask)}
+	_device_forward(.MultiHeadAttention, out, {q, k, v}, meta[:])
+	if out.requires_grad {
+		out.op = .MultiHeadAttention
+		append(&out.inputs, q, k, v)
+		append(&out.int_metadata, ..meta[:7])
+		append(&out.f64_metadata, ..mask)
 	}
 	return out
 }
@@ -696,7 +723,11 @@ _device_loss :: proc(op: Op, inputs: []^Tensor, floats: []f64) -> ^Tensor {
 
 // _device_reparameterize: z = mu + exp(log_var / 2) · eps on the device, with
 // eps drawn on the host (as the CPU draws it) and kept in the aux buffer
-_device_reparameterize :: proc(mu, log_var: ^Tensor, eps: []f64, allocator: mem.Allocator) -> ^Tensor {
+_device_reparameterize :: proc(
+	mu, log_var: ^Tensor,
+	eps: []f64,
+	allocator: mem.Allocator,
+) -> ^Tensor {
 	rg := mu.requires_grad || log_var.requires_grad
 	out := _device_new_op(mu.data.rows, mu.data.cols, mu.shape, rg, allocator)
 	out.device.aux_buf = _device_alloc(out, len(eps))

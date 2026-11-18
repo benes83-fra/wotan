@@ -206,7 +206,7 @@ These ops have GPU kernels for the forward and the backward pass:
 | normalisation and dropout | `tensor_layer_norm`, `tensor_rms_norm`, `tensor_batch_norm_2d`, `tensor_dropout` |
 | convolution and pooling | `tensor_conv2d`, `tensor_conv1d`, `tensor_max_pool2d`, `tensor_avg_pool2d`, `tensor_flatten` |
 | finance and VAE | `tensor_sharpe_loss`, `tensor_prospect_value`, `tensor_prob_weighting`, `tensor_prospect_utility`, `tensor_normalize_time`, `tensor_permute_lob`, `tensor_lgamma`, `tensor_entropy`, `tensor_kl_divergence`, `nn.reparameterize`, `tensor_top_k_mask` (no gradient) |
-| sequences | `tensor_embedding`, `tensor_permute_mha`, `tensor_permute_mha_inverse`, `tensor_scaled_dot_product_attention`, `tensor_masked_scaled_dot_product_attention`, `tensor_flash_attention` |
+| sequences | `tensor_embedding`, `tensor_permute_mha`, `tensor_permute_mha_inverse`, `tensor_scaled_dot_product_attention`, `tensor_masked_scaled_dot_product_attention`, `tensor_flash_attention`, `tensor_multi_head_attention` (one node; its kernels read and write the `[batch, seq, heads·head_dim]` layout directly) |
 | shape | `tensor_reshape`, `tensor_as_matrix`, `tensor_transpose`, `tensor_slice_cols`, `tensor_concat` |
 
 With these, MLPs, CNNs, TCNs, GPT (with flash attention, RMSNorm, tied embeddings or mixture-of-experts layers), BERT, VAEs and the `ml_finance` models train without any CPU fallback. Only the recurrent cells (`tensor_rnn`, `tensor_gru`, `tensor_lstm` and Mamba's `tensor_ssm`) run on the fallback: they step through time one step after another, which a GPU does not speed up at these sizes.
@@ -290,7 +290,7 @@ automatic uploads 600 (token and position ids), CPU fallbacks 0
 The token ids are host tensors, made fresh every step; they are uploaded automatically, together with the position ids GPT builds in its forward pass. Everything else ran on the GPU.
 
 How the transformer ops behave on the GPU:
-- **Attention:** plain, masked and flash attention compute the same attention as on the CPU. The scores, the masked softmax and the weighted sum are batched over all sequences and heads. Flash attention's causal mask is applied inside the softmax kernel.
+- **Attention:** plain, masked and flash attention compute the same attention as on the CPU. The scores, the masked softmax and the weighted sum are batched over all sequences and heads. Flash attention's causal mask is applied inside the softmax kernel. The `nn` attention layers call `tensor_multi_head_attention`, which records one node on the GPU: its matrix products read the heads straight out of the projected `[batch, seq, heads·head_dim]` tensors and write the result back in that layout, so no permute runs in either pass.
 - **Dropout:** masks are drawn on the CPU from `core:math/rand`, exactly as the CPU op draws them, and uploaded. With the same seed, a GPU run uses the same masks as a CPU run.
 - **Embeddings:** token ids that are still on the host are checked against the vocabulary size, as on the CPU. Ids that only exist on the device are not checked; an id outside the vocabulary gives a zero row and no gradient.
 - **Host steps inside the models:** a few model steps need values on the host and download them. The KV-cache of `gpt_model_forward_cached` lives on the host. Mixture-of-experts layers choose their top-k experts on the host. BERT builds its padding mask from host token ids. Each costs one download per forward pass.
@@ -538,7 +538,7 @@ Mean time of one Adam training step (forward, backward, update), measured by the
 | MLP 64, 256, 256, 1 | 256 | 2.40 ms | 0.44 ms (5.4×) | 0.26 ms (9.4×) |
 | MLP 256, 1024, 1024, 1 | 512 | 72.5 ms | 6.29 ms (11.5×) | 2.93 ms (24.7×) |
 | MLP 512, 2048, 2048, 1 | 1024 | 598 ms | 13.2 ms (45×) | 11.9 ms (50×) |
-| GPT of [section 5](#5-transformers-on-the-gpu) (2 blocks, width 32) | 6 × 12 tokens | 1.97 ms | 1.91 ms (1.0×) | 0.96 ms (2.0×) |
+| GPT (2 blocks, width 32, 4 heads) | 6 × 12 tokens | 1.86 ms | 1.56 ms (1.2×) | 0.86 ms (2.2×) |
 
 The training tests of the suite read the loss after every step and the GPT test also clips the gradients (another read), so their step times are close to the middle column: 1.8 ms on the CPU and 2.2 ms on the GPU for the GPT, 0.2 ms against 0.6 ms for the CNN of section 6, and 0.1 ms against 0.7 ms for the TCN. For such small models the CPU is the better choice when the loop reads a result every step. Timings on a laptop vary between runs with clock speeds and power state. Debug builds (`-debug`) slow the CPU engine several times more than the GPU path, so compare the two devices in an optimized build.
 
@@ -546,8 +546,10 @@ The training tests of the suite read the loss after every step and the GPT test 
 - `tensor_linear` (used by `nn.linear_forward`) adds the bias inside the matrix-product kernel, and its backward pass needs no copy of the output gradient.
 - A gradient buffer is not cleared before the backward pass: the first kernel that writes the gradient overwrites it, the next ones add to it.
 - One Adam launch updates up to four parameters that share the learning rate and the step count.
+- Layer norm and RMS norm keep the per-row mean and scale of the forward pass for the backward pass instead of computing them again.
+- Multi-head attention reads and writes the heads in place (see [section 5](#5-transformers-on-the-gpu)), so the permutes into and out of the per-head layout do not run.
 
-The GPT of section 5, with dropout, records 158 kernel launches per training step.
+The GPT of section 5 records 208 kernel launches per training step: 128 for the forward and backward pass, 10 for the Adam step and 70 for `clip_grad_norm`, which runs one reduction per parameter, reads the total norm and scales each gradient when the norm is above the limit. The smaller GPT of the table above, without dropout and clipping, records 137.
 
 **Matrix products** use a register-tiled kernel: a workgroup computes a 64×64 block of the result, each thread a 4×4 block held in registers. Products with fewer than 32 rows or columns (`gpu.MATMUL_TILED_MIN`) use a kernel with 16×16 blocks and one result per thread, which wastes less work on small shapes. `gpu.benchmark_matmul` times a product with the current choice, and `gpu.set_matmul_kernel` forces one kernel for comparisons. Measured by the test suite (square products, `-o:speed`):
 

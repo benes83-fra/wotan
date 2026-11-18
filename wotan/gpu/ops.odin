@@ -56,6 +56,7 @@ SUPPORTED :: bit_set[t.Op] {
 	.ScaledDotProductAttention,
 	.MaskedScaledDotProductAttention,
 	.FlashAttention,
+	.MultiHeadAttention,
 	.GateMul,
 	// phase 3 (ops_p3.odin)
 	.Flatten,
@@ -152,6 +153,15 @@ _p :: proc(u: [8]u32 = {}, f: [8]f32 = {}) -> Params {
 	return {u = u, f = f}
 }
 
+// Head layout of batched matmul operands (multi-head attention): with n heads,
+// batch z = b·n + h of an operand marked here is matrix h of sequence b in a
+// [B, rows, n·cols] tensor instead of the z-th contiguous block
+@(private)
+Heads :: struct {
+	n:       int,
+	a, b, c: bool,
+}
+
 // _matmul records C[M, N] (+)= op(A) @ op(B) (+ bias[column] if a bias is
 // given), in row chunks of the grid limit. Products with at least
 // MATMUL_TILED_MIN rows and columns use the register-tiled kernel; smaller ones
@@ -163,6 +173,7 @@ _matmul :: proc(
 	trans_a, trans_b, accumulate: bool,
 	batch := 1,
 	bias := Bind{},
+	heads := Heads{},
 ) {
 	if M == 0 || N == 0 {return}
 	if K == 0 && bias.buf == nil {
@@ -176,6 +187,7 @@ _matmul :: proc(
 		(G.matmul_kernel == .Auto && M >= MATMUL_TILED_MIN && N >= MATMUL_TILED_MIN)
 	tile := 64 if tiled else 16
 	k: Kernel = .Matmul_Tiled if tiled else .Matmul
+	if heads.n > 0 {k = .Matmul_Tiled_Heads if tiled else .Matmul_Heads}
 	gx := u32((N + tile - 1) / tile)
 	chunk := 65535 * tile
 	for r0 := 0; r0 < M; r0 += chunk {
@@ -185,11 +197,11 @@ _matmul :: proc(
 				u32(M),
 				u32(N),
 				u32(K),
-				u32(trans_a),
-				u32(trans_b),
-				u32(accumulate),
+				u32(trans_a) | u32(heads.a) << 1,
+				u32(trans_b) | u32(heads.b) << 1,
+				u32(accumulate) | u32(heads.c) << 1,
 				u32(r0),
-				u32(has_bias),
+				u32(has_bias) | u32(heads.n) << 1,
 			},
 		)
 		_dispatch(k, p, {A, B, C, bias_bind}, gx, u32((rows + tile - 1) / tile), u32(batch))
