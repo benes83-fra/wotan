@@ -1006,6 +1006,11 @@ _backward_node_cpu :: proc(node: ^Tensor, allocator: mem.Allocator) {
 		}
 	case .SharpeLoss:
 		ret_in := node.inputs[0]
+		if len(node.f64_metadata) == 1 {
+			// the device forward keeps [mean, std] on the device
+			resize(&node.f64_metadata, 3)
+			_device_hooks.download(node.device.aux_buf, node.f64_metadata[1:])
+		}
 		if ret_in.requires_grad && len(ret_in.grad.data) > 0 {
 			n := f64(node.int_metadata[0])
 			rf := node.f64_metadata[0]

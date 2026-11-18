@@ -166,7 +166,7 @@ token_forecaster_sample :: proc(
 		ids.shape = {n_samples, m, 1, 1}
 		logits := nn.gpt_model_forward_cached(&model.gpt, &cache, ids)
 		for s in 0 ..< n_samples {
-			copy(row, logits.data.data[(s * m + m - 1) * V:][:V])
+			copy(row, t.tensor_values(logits)[(s * m + m - 1) * V:][:V])
 			for &v in row[:model.tok.n_special + 1] {v = -1e300} 	// value tokens only
 			tokens[s] = nn.gpt_sample_top_k(row, top_k, temperature, nil, 1.0)
 		}

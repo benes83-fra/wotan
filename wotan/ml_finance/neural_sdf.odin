@@ -119,13 +119,14 @@ neural_sdf_loss :: proc(
 ) -> ^t.Tensor {
 	n := m.data.rows
 	assert(
-		len(m.data.data) == n && r.data.rows == n,
+		t.tensor_numel(m) == n && r.data.rows == n,
 		"neural_sdf_loss: m must be [T, 1] and r [T, N]",
 	)
 	N := r.data.cols
 	rt := _sdf_const(N, n, alloc) // R' / T
+	rv := t.tensor_values(r)
 	for row in 0 ..< n {
-		for i in 0 ..< N {rt.data.data[i * n + row] = r.data.data[row * N + i] / f64(n)}
+		for i in 0 ..< N {rt.data.data[i * n + row] = rv[row * N + i] / f64(n)}
 	}
 	one := _sdf_const(N, 1, alloc)
 	for &v in one.data.data {v = 1}
@@ -166,16 +167,16 @@ neural_sdf_train_step :: proc(
 	nn.adam_zero_grad(opt)
 	t.tensor_backward(loss)
 	nn.adam_step(opt)
-	return loss.data.data[0]
+	return t.tensor_item(loss)
 }
 
 // The SDF series M_t (length T)
 neural_sdf_series :: proc(model: ^NeuralSDF, z: ^t.Tensor, allocator: mem.Allocator) -> []f64 {
 	t.graph_begin(&model.scope, no_grad = true)
 	defer t.graph_end(&model.scope)
-	m := neural_sdf_values(model, z, t.graph_allocator(&model.scope))
-	out := make([]f64, len(m.data.data), allocator)
-	copy(out, m.data.data)
+	m := t.tensor_values(neural_sdf_values(model, z, t.graph_allocator(&model.scope)))
+	out := make([]f64, len(m), allocator)
+	copy(out, m)
 	return out
 }
 
@@ -188,7 +189,7 @@ neural_sdf_evaluate :: proc(
 ) -> []f64 {
 	m := neural_sdf_series(model, z, context.temp_allocator)
 	defer delete(m, context.temp_allocator)
-	return sdf_pricing_errors(m, r.data.data, r.data.cols, allocator)
+	return sdf_pricing_errors(m, t.tensor_values(r), r.data.cols, allocator)
 }
 
 // |mean_t(m_t R_{i,t}) - 1| per asset, for returns [T, N] row-major

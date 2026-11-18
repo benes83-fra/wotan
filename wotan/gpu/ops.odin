@@ -63,6 +63,18 @@ SUPPORTED :: bit_set[t.Op] {
 	.MaxPool2d,
 	.AvgPool2d,
 	.BatchNorm2d,
+	// phase 4 (ops_p4.odin; lgamma and the prospect transforms are unary codes)
+	.Lgamma,
+	.ProspectValue,
+	.ProbWeighting,
+	.KLDivergence,
+	.Entropy,
+	.ProspectUtility,
+	.SharpeLoss,
+	.NormalizeTime,
+	.PermuteLOB,
+	.TopKMask,
+	.Reparameterize,
 }
 
 @(private)
@@ -94,6 +106,12 @@ _unary_code :: proc(op: t.Op) -> (code: u32, ok: bool) {
 		return U_GELU_TANH, true
 	case .NormCDF:
 		return U_NORM_CDF, true
+	case .Lgamma:
+		return U_LGAMMA, true
+	case .ProspectValue:
+		return U_PROSPECT, true
+	case .ProbWeighting:
+		return U_PROB_WEIGHT, true
 	}
 	return 0, false
 }
@@ -222,10 +240,11 @@ _hook_forward :: proc(op: t.Op, out: ^t.Tensor, inputs: []^t.Tensor, ints: []int
 	o := _data(out)
 	f0 := f32(floats[0]) if len(floats) > 0 else 0
 	f1 := f32(floats[1]) if len(floats) > 1 else 0
+	f2 := f32(floats[2]) if len(floats) > 2 else 0
 	if code, ok := _unary_code(op); ok {
 		_dispatch_1d(
 			.Unary,
-			_p({u32(n), code, 0, 0, 0, 0, 0, 0}, {f0, f1, 0, 0, 0, 0, 0, 0}),
+			_p({u32(n), code, 0, 0, 0, 0, 0, 0}, {f0, f1, f2, 0, 0, 0, 0, 0}),
 			{_data(inputs[0]), o},
 			n,
 		)
@@ -370,6 +389,7 @@ _hook_backward :: proc(node: ^t.Tensor, allocator: mem.Allocator) -> bool {
 		if !a.requires_grad {return true}
 		f0 := f32(node.f64_metadata[0]) if len(node.f64_metadata) > 0 else 0
 		f1 := f32(node.f64_metadata[1]) if len(node.f64_metadata) > 1 else 0
+		f2 := f32(node.f64_metadata[2]) if len(node.f64_metadata) > 2 else 0
 		switch code {
 		case U_NEG:
 			axpy(dy, a, -1, n)
@@ -378,11 +398,11 @@ _hook_backward :: proc(node: ^t.Tensor, allocator: mem.Allocator) -> bool {
 		case:
 			x := _in_data(a)
 			y := x
-			if code == U_EXP || code == U_SQRT {y = _in_data(node)}
+			if code == U_EXP || code == U_SQRT || code == U_PROB_WEIGHT {y = _in_data(node)}
 			g := _in_grad(a)
 			_dispatch_1d(
 				.Unary_Bwd,
-				_p({u32(n), code, 0, 0, 0, 0, 0, 0}, {f0, f1, 0, 0, 0, 0, 0, 0}),
+				_p({u32(n), code, 0, 0, 0, 0, 0, 0}, {f0, f1, f2, 0, 0, 0, 0, 0}),
 				{x, y, dy, g},
 				n,
 			)

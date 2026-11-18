@@ -122,9 +122,16 @@ reparameterize :: proc(mu: ^t.Tensor, log_var: ^t.Tensor, allocator: mem.Allocat
 	// z is an op output: it lives in the active graph scope, if any
 	allocator := t._scope_or(allocator)
 
-	t._host_inputs(.Reparameterize, mu, log_var)
 	batch_size := mu.data.rows
 	latent_dim := mu.data.cols
+	if t._device_use(.Reparameterize, mu, log_var) {
+		// the noise is drawn on the host in the CPU's order, so a seeded run
+		// samples the same z on both devices
+		eps := make([]f64, batch_size * latent_dim, context.temp_allocator)
+		for &e in eps {e = rand.norm_float64()}
+		return t._device_reparameterize(mu, log_var, eps, allocator)
+	}
+	t._host_inputs(.Reparameterize, mu, log_var)
 
 	z_data := l.matrix_new(f64, batch_size, latent_dim, allocator)
 
@@ -158,7 +165,6 @@ reparameterize :: proc(mu: ^t.Tensor, log_var: ^t.Tensor, allocator: mem.Allocat
 // ============================================================================
 
 scale_linear_weights :: proc(layer: ^LinearLayer, scale: f64) {
-	for i in 0 ..< len(layer.weights.data.data) {
-		layer.weights.data.data[i] *= scale
-	}
+	for &v in t.tensor_values(layer.weights) {v *= scale}
+	t.tensor_mark_host_dirty(layer.weights)
 }

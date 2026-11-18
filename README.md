@@ -330,7 +330,7 @@ These are areas where Wotan is known to be incomplete:
 
 - **API stability:** names and signatures are still changing. There are no versioned releases yet.
 - **Documentation:** every package has a user guide, except a few small support packages. [`docs/main_doc.md`](docs/main_doc.md) is the entry point: it gives an overview of the packages, links each guide and lists the conventions they share.
-- **Performance:** most code runs on the CPU. Some hot paths use SIMD, but most code has not been profiled or tuned. Neural network training can run on a GPU (the `gpu` package): MLPs, GPT and BERT run entirely on it; convolutions, pooling, batch norm and recurrent cells still run on the CPU automatically.
+- **Performance:** most code runs on the CPU. Some hot paths use SIMD, but most code has not been profiled or tuned. Neural network training can run on a GPU (the `gpu` package): MLPs, CNNs, TCNs, GPT, BERT, VAEs and the `ml_finance` models run entirely on it; only the recurrent cells still run on the CPU automatically.
 - **Validation:** most modules are tested against reference libraries (see [Tests](#tests)). The ML-for-finance models are mostly checked by examples rather than references; the behavioural finance models reproduce their papers' published tables and examples. Nothing has been validated for production trading or risk use.
 - **Memory management:** ownership is explicit, as is usual in Odin. Most objects need a matching `destroy_*` or `*_free` call.
 

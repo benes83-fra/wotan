@@ -26,7 +26,7 @@ compute_correlation_adjacency :: proc(
 	assert(features.shape[1] == num_assets && features.shape[2] * features.shape[3] == time_steps)
 	n := num_assets
 	m := batch * time_steps // samples per asset
-	x := features.data.data
+	x := t.tensor_values(features)
 	at :: #force_inline proc(x: []f64, b, a, s, n, ts: int) -> f64 {return x[(b * n + a) * ts + s]}
 
 	mean := make([]f64, n, allocator)

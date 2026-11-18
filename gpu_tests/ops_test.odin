@@ -2,6 +2,7 @@ package main
 
 import gpu "../wotan/gpu"
 import l "../wotan/linalg"
+import nn "../wotan/nn"
 import t "../wotan/tensor"
 import "core:fmt"
 import "core:math"
@@ -596,7 +597,14 @@ op_cases := [?]Op_Case {
 		op = .Conv1d,
 		shapes = {{3, 10, 4, 1}, {5, 4, 3, 1}, {1, 5, 1, 1}},
 		tol = 1e-5,
-		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_conv1d(x[0], x[1], x[2], 2, 4, 0)},
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_conv1d(
+				x[0],
+				x[1],
+				x[2],
+				2,
+				4,
+				0,
+			)},
 	},
 	{
 		name = "conv1d padding 1 / 2, no bias",
@@ -697,6 +705,146 @@ op_cases := [?]Op_Case {
 			return t.tensor_matmul(h, x[7])
 		},
 	},
+	// ---- phase 4 ----
+	{
+		name = "lgamma (0.5 .. 2)",
+		op = .Lgamma,
+		shapes = {{8, 12, 1, 1}},
+		positive = true,
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_lgamma(x[0])},
+	},
+	{
+		name = "lgamma (1 .. 11, and 0.05 .. 0.45 by reflection)",
+		op = .Lgamma,
+		shapes = {{8, 12, 1, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			// 5·x + 6 for x in [-1, 1] covers 1 .. 11; 0.2·x + 0.25 covers 0.05 .. 0.45
+			hi := t.tensor_lgamma(t.tensor_add(t.tensor_scale(x[0], 5), _const_like(x[0], 6)))
+			lo := t.tensor_lgamma(t.tensor_add(t.tensor_scale(x[0], 0.2), _const_like(x[0], 0.25)))
+			return t.tensor_add(hi, lo)
+		},
+	},
+	{
+		name = "prospect_value",
+		op = .ProspectValue,
+		shapes = {{6, 10, 1, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_prospect_value(
+				x[0],
+				0.88,
+				0.8,
+				2.25,
+			)},
+	},
+	{
+		name = "prob_weighting",
+		op = .ProbWeighting,
+		shapes = {{6, 10, 1, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			return t.tensor_prob_weighting(t.tensor_sigmoid(t.tensor_scale(x[0], 3)), 0.69)
+		},
+	},
+	{
+		name = "kl_divergence",
+		op = .KLDivergence,
+		shapes = {{6, 4, 1, 1}, {6, 4, 1, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_kl_divergence(
+				x[0],
+				t.tensor_scale(x[1], 2),
+			)},
+	},
+	{
+		name = "entropy (of a softmax)",
+		op = .Entropy,
+		shapes = {{5, 8, 1, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_entropy(
+				t.tensor_softmax(t.tensor_scale(x[0], 3)),
+			)},
+	},
+	{
+		name = "sharpe_loss",
+		op = .SharpeLoss,
+		shapes = {{40, 1, 1, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			return t.tensor_sharpe_loss(
+				t.tensor_add(t.tensor_scale(x[0], 0.1), _const_like(x[0], 0.02)),
+				0.01,
+			)
+		},
+	},
+	{
+		name = "sharpe_loss (600 returns, > one workgroup)",
+		op = .SharpeLoss,
+		shapes = {{600, 1, 1, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_sharpe_loss(t.tensor_relu(x[0]))},
+	},
+	{
+		name = "prospect_utility",
+		op = .ProspectUtility,
+		shapes = {{30, 1, 1, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_prospect_utility(
+				t.tensor_scale(x[0], 0.1),
+			)},
+	},
+	{
+		name = "normalize_time [N, C, T, L]",
+		op = .NormalizeTime,
+		shapes = {{2, 3, 7, 4}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_normalize_time(x[0])},
+	},
+	{
+		name = "permute_lob",
+		op = .PermuteLOB,
+		shapes = {{2, 3, 5, 4}},
+		tol = 1e-6,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_permute_lob(
+				x[0],
+				2,
+				3,
+				5,
+				4,
+				context.allocator,
+			)},
+	},
+	{
+		name = "top_k_mask (probabilities · mask)",
+		op = .TopKMask,
+		shapes = {{7, 6, 1, 1}},
+		tol = 1e-6,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			probs := t.tensor_softmax(t.tensor_scale(x[0], 3))
+			return t.tensor_mul(probs, t.tensor_top_k_mask(probs, 2))
+		},
+	},
+	{
+		name = "reparameterize (seeded noise)",
+		op = .Reparameterize,
+		shapes = {{6, 5, 1, 1}, {6, 5, 1, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			rand.reset(55) // the same noise on the CPU and the GPU
+			return nn.reparameterize(x[0], x[1], context.allocator)
+		},
+	},
+}
+
+// _const_like: a constant tensor shaped like x, freed with the graph
+_const_like :: proc(x: ^t.Tensor, v: f64) -> ^t.Tensor {
+	m := l.matrix_new(f64, x.data.rows, x.data.cols)
+	for &e in m.data {e = v}
+	c := t.tensor_new(m)
+	c.shape = x.shape
+	c.owned_by_graph = true
+	return c
 }
 
 CE_TARGETS := [10]int{3, 0, 6, 6, 1, 2, 5, 4, 0, 3}
@@ -780,23 +928,18 @@ gpu_fallback_op_test :: proc() {
 		)
 		check(fallbacks > 0, "%s (fallback): the fallback did not run", c.name)
 	}
-	// ops without a GPU kernel at all, on device inputs
-	lgamma := Op_Case {
-		name = "lgamma (no kernel)",
-		op = .Lgamma,
-		shapes = {{8, 12, 1, 1}},
-		positive = true,
-		tol = 1e-6,
-		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_lgamma(x[0])},
-	}
-	sharpe := Op_Case {
-		name = "sharpe_loss (no kernel)",
-		op = .SharpeLoss,
-		shapes = {{40, 1, 1, 1}},
+	// an op without a GPU kernel at all (the recurrent cells stay on the CPU), on device inputs
+	rnn := Op_Case {
+		name = "rnn (no kernel)",
+		op = .RNN,
+		// x [batch, seq, in], h_0 [1, batch·hidden], w_ih, w_hh, bias
+		shapes = {{2, 4, 3, 1}, {1, 10, 1, 1}, {3, 5, 1, 1}, {5, 5, 1, 1}, {1, 5, 1, 1}},
 		tol = 1e-5,
-		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_sharpe_loss(t.tensor_relu(x[0]))},
+		run = proc(
+			x: []^t.Tensor,
+		) -> ^t.Tensor {return t.tensor_rnn(x[0], x[1], x[2], x[3], x[4])},
 	}
-	for c in ([]Op_Case{lgamma, sharpe}) {
+	for c in ([]Op_Case{rnn}) {
 		worst, fallbacks := _compare_case(c, false)
 		check(worst <= c.tol, "%s: max relative error %.2e > %.0e", c.name, worst, c.tol)
 		check(fallbacks > 0, "%s: no fallback counted", c.name)

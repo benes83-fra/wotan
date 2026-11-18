@@ -1,7 +1,6 @@
 package gpu
 
 import t "../tensor"
-import "core:fmt"
 
 // ============================================================================
 // Device ops, part 3: convolutions, pooling, batch norm
@@ -168,7 +167,7 @@ _forward_p3 :: proc(op: t.Op, out: ^t.Tensor, inputs: []^t.Tensor, ints: []int, 
 			t._data_written_on_device(rv)
 		}
 	case:
-		panic(fmt.tprintf("gpu: no forward kernel for %v", op))
+		_forward_p4(op, out, inputs, ints, floats)
 	}
 }
 
@@ -198,7 +197,7 @@ _backward_p3 :: proc(node: ^t.Tensor, dy: Bind, n: int) -> bool {
 	case .BatchNorm2d:
 		_batch_norm_backward(node, dy)
 	case:
-		return false
+		return _backward_p4(node, dy, n)
 	}
 	return true
 }

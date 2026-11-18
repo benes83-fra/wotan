@@ -117,7 +117,7 @@ sentiment_probabilities :: proc(
 ) -> (
 	probs: [SentimentLabel]f64,
 ) {
-	z := logits.data.data[row * 3:][:3]
+	z := t.tensor_values(logits)[row * 3:][:3]
 	m := max(z[0], z[1], z[2])
 	s := 0.0
 	for v in z {s += math.exp(v - m)}

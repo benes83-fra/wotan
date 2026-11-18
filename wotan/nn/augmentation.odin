@@ -107,7 +107,7 @@ augment_batch :: proc(
 		for c in 0 ..< C {
 			off := (n * C + c) * H * W
 			affine_transform_image(
-				batch.data.data[off:off + H * W],
+				t.tensor_values(batch)[off:off + H * W],
 				output.data.data[off:off + H * W],
 				W,
 				H,

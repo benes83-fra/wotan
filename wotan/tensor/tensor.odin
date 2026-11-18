@@ -2667,17 +2667,20 @@ KL_EXP_CLAMP :: 1e10
 // sums over L and divides by B; [B, S, L, 1] averages over the B·S vectors.
 // exp(log_var) is clamped at KL_EXP_CLAMP. Returns a scalar.
 tensor_kl_divergence :: proc(mu: ^Tensor, log_var: ^Tensor, loc := #caller_location) -> ^Tensor {
-	_host_inputs(.KLDivergence, mu, log_var)
 	_check_shape(mu, loc)
 	fmt.assertf(
-		len(mu.data.data) == len(log_var.data.data),
+		tensor_numel(mu) == tensor_numel(log_var),
 		"tensor_kl_divergence: mu has %d elements, log_var %d",
-		len(mu.data.data),
-		len(log_var.data.data),
+		tensor_numel(mu),
+		tensor_numel(log_var),
 		loc = loc,
 	)
 	L := _last_dim(mu)
-	batch := f64(len(mu.data.data) / L) if L > 0 else 1
+	batch := f64(tensor_numel(mu) / L) if L > 0 else 1
+	if _device_use(.KLDivergence, mu, log_var) {
+		return _device_loss(.KLDivergence, {mu, log_var}, {batch})
+	}
+	_host_inputs(.KLDivergence, mu, log_var)
 	kl_sum := 0.0
 
 	for i in 0 ..< len(mu.data.data) {
@@ -2835,6 +2838,7 @@ tensor_log :: proc(a: ^Tensor) -> ^Tensor {
 // Backward: grad_a = grad_out · ψ(a) (digamma)
 // ============================================================================
 tensor_lgamma :: proc(a: ^Tensor) -> ^Tensor {
+	if _device_use(.Lgamma, a) {return _device_elementwise(.Lgamma, a, nil)}
 	_host_inputs(.Lgamma, a)
 	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
 	for i in 0 ..< len(a.data.data) {
@@ -3042,6 +3046,7 @@ tensor_softmax :: proc(logits: ^Tensor) -> ^Tensor {
 }
 
 tensor_entropy :: proc(a: ^Tensor) -> ^Tensor {
+	if _device_use(.Entropy, a) {return _device_loss(.Entropy, {a}, nil)}
 	_host_inputs(.Entropy, a)
 	entropy_val := 0.0
 	for i in 0 ..< len(a.data.data) {
@@ -3222,9 +3227,26 @@ tensor_permute_lob :: proc(
 	batch, c_out, t_out, l_out: int,
 	alloc: mem.Allocator,
 ) -> ^Tensor {
-	_host_inputs(.PermuteLOB, x)
 	alloc := _scope_or(alloc) // the active graph scope, if any
 	feat_dim := c_out * l_out
+	if _device_use(.PermuteLOB, x) {
+		meta := [4]int{batch, c_out, t_out, l_out}
+		out := _device_new_op(
+			1,
+			batch * t_out * feat_dim,
+			{batch, t_out, feat_dim, 1},
+			x.requires_grad,
+			alloc,
+		)
+		_device_forward(.PermuteLOB, out, {x}, meta[:])
+		if out.requires_grad {
+			out.op = .PermuteLOB
+			append(&out.inputs, x)
+			append(&out.int_metadata, ..meta[:])
+		}
+		return out
+	}
+	_host_inputs(.PermuteLOB, x)
 	out_data := l.matrix_new(f64, 1, batch * t_out * feat_dim, alloc)
 
 	for b: int = 0; b < batch; b += 1 {
@@ -3258,12 +3280,25 @@ tensor_permute_lob :: proc(
 // returns: 1D or 2D tensor of periodic returns.
 // risk_free_rate: scalar f64 (e.g., 0.0).
 tensor_sharpe_loss :: proc(returns: ^Tensor, risk_free_rate: f64 = 0.0) -> ^Tensor {
+	if tensor_numel(returns) == 0 {
+		panic("tensor_sharpe_loss: empty returns tensor")
+	}
+	if _device_use(.SharpeLoss, returns) {
+		// mean and std stay on the device (aux buffer); f64_metadata holds [rf]
+		out := _device_new_op(1, 1, SCALAR_SHAPE, returns.requires_grad, _op_alloc(returns))
+		out.device.aux_buf = _device_alloc(out, 2)
+		_device_forward(.SharpeLoss, out, {returns}, nil, {risk_free_rate})
+		if out.requires_grad {
+			out.op = .SharpeLoss
+			append(&out.inputs, returns)
+			append(&out.int_metadata, tensor_numel(returns))
+			append(&out.f64_metadata, risk_free_rate)
+		}
+		return out
+	}
 	_host_inputs(.SharpeLoss, returns)
 	allocator := _op_alloc(returns) // the active graph scope, else the input's
 	n := f64(len(returns.data.data))
-	if n == 0 {
-		panic("tensor_sharpe_loss: empty returns tensor")
-	}
 
 	// 1. Compute mean
 	mean := 0.0
@@ -3314,13 +3349,25 @@ tensor_normalize_time :: proc(
 	eps: f64 = 1e-8,
 	allocator: mem.Allocator = context.allocator, // temporary buffers
 ) -> ^Tensor {
-	_host_inputs(.NormalizeTime, input)
 	allocator := _scope_or(allocator) // the active graph scope, if any
 	_check_shape(input)
 	N := input.shape[0]
 	C := input.shape[1]
 	T := input.shape[2]
 	L := input.shape[3]
+	if _device_use(.NormalizeTime, input) {
+		meta := [4]int{N, C, T, L}
+		out := _device_new_op(1, N * C * T * L, input.shape, input.requires_grad, _op_alloc(input))
+		_device_forward(.NormalizeTime, out, {input}, meta[:], {eps})
+		if out.requires_grad {
+			out.op = .NormalizeTime
+			append(&out.inputs, input)
+			append(&out.int_metadata, ..meta[:])
+			append(&out.f64_metadata, eps)
+		}
+		return out
+	}
+	_host_inputs(.NormalizeTime, input)
 
 	out_data := l.matrix_new(f64, 1, N * C * T * L, _op_alloc(input))
 
@@ -3753,12 +3800,19 @@ tensor_top_k_mask :: proc(
 	k: int,
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
-	_host_inputs(.TopKMask, probs)
 	_check_shape(probs)
 	allocator := _scope_or(allocator) // the active graph scope, if any
 	N := probs.shape[0]
 	E := probs.shape[1]
 	assert(k >= 1 && k <= E, "tensor_top_k_mask: k must be in 1 ..= number of columns")
+	if _device_use(.TopKMask, probs) {
+		// a constant on the device (no gradient), freed with the graph
+		out := _device_new_op(N, E, {N, E, 1, 1}, false, allocator)
+		_device_forward(.TopKMask, out, {probs}, {N, E, k})
+		out.owned_by_graph = true
+		return out
+	}
+	_host_inputs(.TopKMask, probs)
 	mask_data := l.matrix_new(f64, N, E, allocator)
 	for n in 0 ..< N {
 		row := probs.data.data[n * E:(n + 1) * E]
@@ -4105,6 +4159,9 @@ tensor_prospect_value :: proc(
 	beta: f64 = 0.88,
 	lambda: f64 = 2.25,
 ) -> ^Tensor {
+	if _device_use(.ProspectValue, returns) {
+		return _device_elementwise(.ProspectValue, returns, nil, alpha, beta, lambda)
+	}
 	_host_inputs(.ProspectValue, returns)
 	allocator := _op_alloc(returns) // the active graph scope, else the input's
 	out_data := l.matrix_new(f64, returns.data.rows, returns.data.cols, allocator)
@@ -4136,6 +4193,7 @@ tensor_prospect_value :: proc(
 // Calibrated: γ_gain = 0.61, γ_loss = 0.69
 
 tensor_prob_weighting :: proc(p: ^Tensor, gamma: f64 = 0.61) -> ^Tensor {
+	if _device_use(.ProbWeighting, p) {return _device_elementwise(.ProbWeighting, p, nil, gamma)}
 	_host_inputs(.ProbWeighting, p)
 	allocator := _op_alloc(p) // the active graph scope, else the input's
 	eps := 1e-7
@@ -4170,6 +4228,10 @@ tensor_prospect_utility :: proc(
 	beta: f64 = 0.88,
 	lambda: f64 = 2.25,
 ) -> ^Tensor {
+	if _device_use(.ProspectUtility, returns) {
+		if tensor_numel(returns) == 0 {panic("tensor_prospect_utility: empty returns tensor")}
+		return _device_loss(.ProspectUtility, {returns}, {alpha, beta, lambda})
+	}
 	_host_inputs(.ProspectUtility, returns)
 	allocator := _op_alloc(returns) // the active graph scope, else the input's
 	n := f64(len(returns.data.data))

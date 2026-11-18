@@ -66,7 +66,7 @@ deep_bsde_model_free :: proc(model: ^DeepBSDEModel) {
 
 // The current price estimate Y_0
 deep_bsde_y0 :: proc(model: ^DeepBSDEModel) -> f64 {
-	return model.y0.data.data[0]
+	return t.tensor_values(model.y0)[0]
 }
 
 // Registers Y_0 and the Z network with Adam

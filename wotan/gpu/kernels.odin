@@ -55,6 +55,13 @@ Kernel :: enum {
 	Bn_Apply, // y = (x - mean) · inv_std · γ + β
 	Bn_Bwd_Sums, // per channel: Σ dy, Σ dy·x̂ (and dγ, dβ)
 	Bn_Bwd_X, // input gradient of batch norm
+	// phase 4: finance and VAE ops
+	Loss_Terms, // per-element terms of KL divergence, entropy, prospect utility
+	Loss_Grad, // dx += g[0] · f0 · ∂term (scalar losses)
+	Sharpe, // negative Sharpe ratio (one workgroup), mean and std kept
+	Norm_Time, // z-score over the time axis of [N, C, T, L], forward and backward
+	Top_K, // per row: 1 at the k largest entries
+	Reparam, // z = mu + exp(log_var / 2) · eps, and its log_var gradient
 }
 
 @(private)
@@ -91,6 +98,48 @@ fn erfc_s(x: f32) -> f32 {
 	return select(2.0 - r, r, x >= 0.0);
 }
 const GELU_C: f32 = 0.7978845608028654;
+const PI_F: f32 = 3.14159265358979;
+// log|Γ(x)| for x > 0: shift to x ≥ 8, then Stirling's series
+fn lgamma_pos(x0: f32) -> f32 {
+	var x = x0;
+	var prod = 1.0;
+	while (x < 8.0) { prod = prod * x; x = x + 1.0; }
+	let r = 1.0 / (x * x);
+	let s = (x - 0.5) * log(x) - x + 0.91893853320467274 + (1.0 / 12.0 - r * (1.0 / 360.0 - r / 1260.0)) / x;
+	return s - log(prod);
+}
+// log|Γ(x)|, reflection below 0.5
+fn lgamma_s(x: f32) -> f32 {
+	if (x < 0.5) { return log(PI_F / abs(sin(PI_F * x))) - lgamma_pos(1.0 - x); }
+	return lgamma_pos(x);
+}
+// ψ(x) for x > 0: recurrence up to x ≥ 10, then the asymptotic series (as the CPU digamma)
+fn digamma_pos(x0: f32) -> f32 {
+	var x = x0;
+	var acc = 0.0;
+	while (x < 10.0) { acc = acc - 1.0 / x; x = x + 1.0; }
+	let r = 1.0 / (x * x);
+	let series = r * (1.0 / 12.0 - r * (1.0 / 120.0 - r * (1.0 / 252.0 - r * (1.0 / 240.0 - r / 132.0))));
+	return acc + log(x) - 0.5 / x - series;
+}
+// ψ(x): NaN at the poles (0, -1, -2, ...), reflection for x < 0
+fn digamma_s(x: f32) -> f32 {
+	if (x <= 0.0 && x == floor(x)) { return bitcast<f32>(0x7fc00000u); }
+	if (x < 0.0) { return digamma_pos(1.0 - x) - PI_F / tan(PI_F * x); }
+	return digamma_pos(x);
+}
+// prospect value v(x) = x^α (x ≥ 0), -λ(-x)^β (x < 0)
+fn prospect_v(x: f32, al: f32, be: f32, la: f32) -> f32 {
+	if (x > 0.0) { return pow(x, al); }
+	if (x < 0.0) { return -la * pow(-x, be); }
+	return 0.0;
+}
+// dv/dx, 0 within 1e-10 of 0 (as the CPU)
+fn prospect_dv(x: f32, al: f32, be: f32, la: f32) -> f32 {
+	if (x > 1e-10) { return al * pow(x, al - 1.0); }
+	if (x < -1e-10) { return la * be * pow(-x, be - 1.0); }
+	return 0.0;
+}
 // one workgroup per row over a 2D grid of workgroups
 fn row_of(wid: vec3<u32>, nw: vec3<u32>) -> u32 {
 	return wid.y * nw.x + wid.x;
@@ -126,6 +175,12 @@ U_SOFTPLUS :: 11
 U_GELU_TANH :: 12
 @(private)
 U_NORM_CDF :: 13
+@(private)
+U_LGAMMA :: 14
+@(private)
+U_PROSPECT :: 15 // f0 α, f1 β, f2 λ
+@(private)
+U_PROB_WEIGHT :: 16 // f0 γ
 
 @(private)
 KERNEL_SOURCES := [Kernel]string {
@@ -154,6 +209,14 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 		}
 		case 12u: { r = 0.5 * v * (1.0 + tanh_s(GELU_C * (v + 0.044715 * v * v * v))); }
 		case 13u: { r = 0.5 * erfc_s(-v * 0.70710678118654752); }
+		case 14u: { r = lgamma_s(v); }
+		case 15u: { r = prospect_v(v, p.f0, p.f1, p.f2); }
+		case 16u: {
+			let q = clamp(v, 1e-7, 1.0 - 1e-7);
+			let pg = pow(q, p.f0);
+			let qg = pow(1.0 - q, p.f0);
+			r = pg / pow(pg + qg, 1.0 / p.f0);
+		}
 		default: {}
 	}
 	y[i] = r;
@@ -188,6 +251,15 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 			d = gy * (0.5 * (1.0 + th) + 0.5 * v * (1.0 - th * th) * du);
 		}
 		case 13u: { d = gy * exp(-0.5 * v * v) * 0.3989422804014327; }
+		case 14u: { d = gy * digamma_s(v); }
+		case 15u: { d = gy * prospect_dv(v, p.f0, p.f1, p.f2); }
+		case 16u: {
+			let q = clamp(v, 1e-7, 1.0 - 1e-7);
+			let pg = pow(q, p.f0);
+			let qg = pow(1.0 - q, p.f0);
+			let t2 = (pow(q, p.f0 - 1.0) - pow(1.0 - q, p.f0 - 1.0)) / (pg + qg);
+			d = gy * y[i] * (p.f0 / q - t2);
+		}
 		default: {}
 	}
 	dx[i] = dx[i] + d;
@@ -1258,6 +1330,169 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 	let M = f32(p.u4);
 	let xh = (x[i] - stats[c]) * inv;
 	dx[i] = dx[i] + gi / M * (M * dy[i] - sums[2u * c] - xh * sums[2u * c + 1u]);
+}
+`,
+	// ---- phase 4 ----
+	// dst[i] = term of a scalar loss; u0 n, u1 mode: 0 KL (a mu, b log_var)
+	// 1 + b - a² - min(e^b, 1e10); 1 entropy -a·ln a (0 for a ≤ 1e-10); 2 prospect
+	// value v(a) with f1 α, f2 β, f3 λ
+	.Loss_Terms       = `
+@group(0) @binding(1) var<storage, read> a: array<f32>;
+@group(0) @binding(2) var<storage, read> b: array<f32>;
+@group(0) @binding(3) var<storage, read_write> dst: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gi: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
+	let i = idx1(gi, nw);
+	if (i >= p.u0) { return; }
+	let v = a[i];
+	var r = 0.0;
+	if (p.u1 == 0u) {
+		r = 1.0 + b[i] - v * v - min(exp(b[i]), 1e10);
+	} else if (p.u1 == 1u) {
+		if (v > 1e-10) { r = -v * log(v); }
+	} else {
+		r = prospect_v(v, p.f1, p.f2, p.f3);
+	}
+	dst[i] = r;
+}
+`,
+	// dx[i] += g[0] · f0 · d; u0 n, u1 mode: 0 KL ∂mu (d = a), 1 KL ∂log_var
+	// (d = e^b - 1, e^b taken as 0 above 1e10), 2 entropy (d = -(1 + ln a), 0 for
+	// a ≤ 1e-10), 3 prospect utility (d = -v'(a), f1 α, f2 β, f3 λ), 4 Sharpe
+	// (aux = [mean, std], f1 risk-free rate): d = ((mean - rf)(a - mean) - std²) / (n std³)
+	.Loss_Grad        = `
+@group(0) @binding(1) var<storage, read> a: array<f32>;
+@group(0) @binding(2) var<storage, read> b: array<f32>;
+@group(0) @binding(3) var<storage, read> aux: array<f32>;
+@group(0) @binding(4) var<storage, read> g: array<f32>;
+@group(0) @binding(5) var<storage, read_write> dx: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gi: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
+	let i = idx1(gi, nw);
+	if (i >= p.u0) { return; }
+	let v = a[i];
+	var d = 0.0;
+	switch p.u1 {
+		case 0u: { d = v; }
+		case 1u: { var e = exp(b[i]); if (e > 1e10) { e = 0.0; } d = e - 1.0; }
+		case 2u: { if (v > 1e-10) { d = -(1.0 + log(v)); } }
+		case 3u: { d = -prospect_dv(v, p.f1, p.f2, p.f3); }
+		case 4u: {
+			let mean = aux[0]; let sd = aux[1];
+			d = ((mean - p.f1) * (v - mean) - sd * sd) / (f32(p.u0) * sd * sd * sd);
+		}
+		default: {}
+	}
+	dx[i] = dx[i] + g[0] * p.f0 * d;
+}
+`,
+	// one workgroup: o[0] = -(mean - f0) / sqrt(var + 1e-8), aux = [mean, std]; u0 n
+	.Sharpe           = WG_SUM + `
+@group(0) @binding(1) var<storage, read> x: array<f32>;
+@group(0) @binding(2) var<storage, read_write> o: array<f32>;
+@group(0) @binding(3) var<storage, read_write> aux: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(local_invocation_id) l3: vec3<u32>) {
+	let lid = l3.x;
+	let n = p.u0;
+	var s = 0.0;
+	for (var j = lid; j < n; j += 256u) { s = s + x[j]; }
+	let mean = wg_sum(s, lid) / f32(n);
+	var q = 0.0;
+	for (var j = lid; j < n; j += 256u) { let e = x[j] - mean; q = q + e * e; }
+	let sd = sqrt(wg_sum(q, lid) / f32(n) + 1e-8);
+	if (lid == 0u) {
+		o[0] = -(mean - p.f0) / sd;
+		aux[0] = mean;
+		aux[1] = sd;
+	}
+}
+`,
+	// one workgroup per (n, c, l) slice of x [N, C, T, L], elements L apart.
+	// u4 = 0: dst = (x - mean) / sqrt(var + eps); u4 = 1: dst += (dy - mean(dy) -
+	// y·Σ(dy·y)/T) / sqrt(var + eps) with y the forward output.
+	// u0 slices N·C·L, u1 C, u2 T, u3 L, f0 eps
+	.Norm_Time        = WG_SUM + `
+@group(0) @binding(1) var<storage, read> x: array<f32>;
+@group(0) @binding(2) var<storage, read> y: array<f32>;
+@group(0) @binding(3) var<storage, read> dy: array<f32>;
+@group(0) @binding(4) var<storage, read_write> dst: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(local_invocation_id) l3: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
+	let lid = l3.x;
+	let sl = row_of(wid, nw);
+	let live = sl < p.u0;
+	let C = p.u1; let T = p.u2; let L = p.u3;
+	let n = sl / (C * L);
+	let c = (sl / L) % C;
+	let el = sl % L;
+	let base = (n * C + c) * T * L + el;
+	var s = 0.0;
+	if (live) { for (var t = lid; t < T; t += 256u) { s = s + x[base + t * L]; } }
+	let mean = wg_sum(s, lid) / f32(T);
+	var q = 0.0;
+	if (live) { for (var t = lid; t < T; t += 256u) { let e = x[base + t * L] - mean; q = q + e * e; } }
+	let inv = 1.0 / sqrt(wg_sum(q, lid) / f32(T) + p.f0);
+	if (p.u4 == 0u) {
+		if (live) { for (var t = lid; t < T; t += 256u) { dst[base + t * L] = (x[base + t * L] - mean) * inv; } }
+		return;
+	}
+	var sg = 0.0;
+	var sgy = 0.0;
+	if (live) {
+		for (var t = lid; t < T; t += 256u) {
+			let k = base + t * L;
+			sg = sg + dy[k];
+			sgy = sgy + dy[k] * y[k];
+		}
+	}
+	let mg = wg_sum(sg, lid) / f32(T);
+	let dgy = wg_sum(sgy, lid) / f32(T);
+	if (live) {
+		for (var t = lid; t < T; t += 256u) {
+			let k = base + t * L;
+			dst[k] = dst[k] + (dy[k] - mg - y[k] * dgy) * inv;
+		}
+	}
+}
+`,
+	// per row r of probs [N, E]: mask 1 at the k largest entries (ties: the lower
+	// index), 0 elsewhere; u0 N, u1 E, u2 k
+	.Top_K            = `
+@group(0) @binding(1) var<storage, read> pr: array<f32>;
+@group(0) @binding(2) var<storage, read_write> mask: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gi: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
+	let r = idx1(gi, nw);
+	if (r >= p.u0) { return; }
+	let E = p.u1;
+	let o = r * E;
+	for (var e = 0u; e < E; e++) { mask[o + e] = 0.0; }
+	for (var k = 0u; k < p.u2; k++) {
+		var best = -1;
+		for (var e = 0u; e < E; e++) {
+			if (mask[o + e] == 0.0 && (best < 0 || pr[o + e] > pr[o + u32(best)])) { best = i32(e); }
+		}
+		mask[o + u32(best)] = 1.0;
+	}
+}
+`,
+	// u1 = 0: dst = a + exp(b / 2)·c (a mu, b log_var, c eps);
+	// u1 = 1: dst += f0·c·(a - b) (a z, b mu, c dz: the log_var gradient with f0 = 1/2)
+	.Reparam          = `
+@group(0) @binding(1) var<storage, read> a: array<f32>;
+@group(0) @binding(2) var<storage, read> b: array<f32>;
+@group(0) @binding(3) var<storage, read> c: array<f32>;
+@group(0) @binding(4) var<storage, read_write> dst: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gi: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
+	let i = idx1(gi, nw);
+	if (i >= p.u0) { return; }
+	if (p.u1 == 0u) {
+		dst[i] = a[i] + exp(0.5 * b[i]) * c[i];
+	} else {
+		dst[i] = dst[i] + p.f0 * c[i] * (a[i] - b[i]);
+	}
 }
 `,
 }

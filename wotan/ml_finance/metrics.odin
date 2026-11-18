@@ -40,7 +40,8 @@ cross_sectional_rank_ic :: proc(
 	batch := preds.shape[0]
 	num_assets := preds.shape[1]
 	assert(
-		len(preds.data.data) >= batch * num_assets && len(targets.data.data) >= batch * num_assets,
+		t.tensor_numel(preds) >= batch * num_assets &&
+		t.tensor_numel(targets) >= batch * num_assets,
 	)
 
 	ics := make([dynamic]f64, 0, batch, allocator)
@@ -52,11 +53,12 @@ cross_sectional_rank_ic :: proc(
 		delete(targ_row, allocator)
 	}
 
+	pv, tv := t.tensor_values(preds), t.tensor_values(targets)
 	for b in 0 ..< batch {
 		m := 0
 		for a in 0 ..< num_assets {
-			p := preds.data.data[b * num_assets + a]
-			y := targets.data.data[b * num_assets + a]
+			p := pv[b * num_assets + a]
+			y := tv[b * num_assets + a]
 			if math.is_nan(p) || math.is_nan(y) {continue}
 			pred_row[m], targ_row[m] = p, y
 			m += 1
@@ -170,7 +172,7 @@ gat_cross_val_score :: proc(
 		for &lay in layers {nn.layer_parameters(&lay, &params)}
 		for p in params {nn.adam_add_param(&opt, p)}
 		best := make([][]f64, len(params), allocator)
-		for p, i in params {best[i] = make([]f64, len(p.data.data), allocator)}
+		for p, i in params {best[i] = make([]f64, t.tensor_numel(p), allocator)}
 
 		best_val_loss := math.F64_MAX
 		patience_counter := 0
@@ -187,22 +189,26 @@ gat_cross_val_score :: proc(
 			nn.adam_step(&opt)
 
 			t.graph_begin(&scope, no_grad = true)
-			val_loss :=
-				t.tensor_mse_loss(nn.linear_forward(&pred_head, nn.gat_layer_forward(&gat, val_feat, adjacency)), val_targ).data.data[0]
+			val_loss := t.tensor_item(
+				t.tensor_mse_loss(
+					nn.linear_forward(&pred_head, nn.gat_layer_forward(&gat, val_feat, adjacency)),
+					val_targ,
+				),
+			)
 			t.graph_end(&scope)
 
 			last_epoch = epoch
 			if val_loss < best_val_loss {
 				best_val_loss = val_loss
 				patience_counter = 0
-				for p, i in params {copy(best[i], p.data.data)}
+				for p, i in params {copy(best[i], t.tensor_values(p))}
 			} else {
 				patience_counter += 1
 				if patience_counter >= PATIENCE {break}
 			}
 		}
 		if best_val_loss < math.F64_MAX {
-			for p, i in params {copy(p.data.data, best[i])}
+			for p, i in params {copy(t.tensor_values(p), best[i]); t.tensor_mark_host_dirty(p)}
 		}
 
 		t.graph_begin(&scope, no_grad = true)
@@ -218,14 +224,7 @@ gat_cross_val_score :: proc(
 			val_loss         = best_val_loss,
 			early_stop_epoch = last_epoch + 1,
 		}
-		if verbose {fmt.printf(
-			"  Fold %d/%d: Mean IC = %+.4f, Val Loss = %.4f (stopped at epoch %d)\n",
-			k + 1,
-			n_splits,
-			results[k].mean_ic,
-			results[k].val_loss,
-			results[k].early_stop_epoch,
-		)}
+		if verbose {fmt.printf("  Fold %d/%d: Mean IC = %+.4f, Val Loss = %.4f (stopped at epoch %d)\n", k + 1, n_splits, results[k].mean_ic, results[k].val_loss, results[k].early_stop_epoch)}
 
 		for b in best {delete(b, allocator)}
 		delete(best, allocator)
@@ -254,8 +253,9 @@ _extract_tensor_by_indices :: proc(
 	row := c * t_steps * last_dim
 
 	out_data := l.matrix_new(f64, 1, new_batch * row, allocator)
+	sv := t.tensor_values(src)
 	for orig_i, new_i in indices {
-		copy(out_data.data[new_i * row:][:row], src.data.data[orig_i * row:][:row])
+		copy(out_data.data[new_i * row:][:row], sv[orig_i * row:][:row])
 	}
 	out := t.tensor_new(out_data, false, allocator)
 	out.shape = [4]int{new_batch, c, t_steps, last_dim}

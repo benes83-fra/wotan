@@ -212,17 +212,18 @@ _hedging_pnl :: proc(
 		S >= 2 && F >= A,
 		"deep hedging: paths need 2+ dates and the prices in the first num_assets columns",
 	)
-	assert(len(payoffs.data.data) == B, "deep hedging: one payoff per path")
+	assert(t.tensor_numel(payoffs) == B, "deep hedging: one payoff per path")
 	c := hedger.config.transaction_cost
 
 	pnl := t.tensor_new(l.matrix_new(f64, B, 1, alloc), false, alloc)
 	prev: ^t.Tensor = nil
 	for k in 0 ..< S - 1 {
 		sd := l.matrix_new(f64, B, F, alloc)
-		for b in 0 ..< B {copy(sd.data[b * F:][:F], paths.data.data[b * S * F + k * F:][:F])}
+		pv := t.tensor_values(paths)
+		for b in 0 ..< B {copy(sd.data[b * F:][:F], pv[b * S * F + k * F:][:F])}
 		delta := nn.sequential_forward(hedger.network, t.tensor_new(sd, false, alloc))
 		assert(
-			len(delta.data.data) == B * A,
+			t.tensor_numel(delta) == B * A,
 			"deep hedging: the network must output num_assets holdings",
 		)
 		ds := _asset_prices(paths, k + 1, A, alloc)
@@ -248,7 +249,8 @@ _hedging_pnl :: proc(
 _asset_prices :: proc(paths: ^t.Tensor, k, A: int, alloc: mem.Allocator) -> l.Matrix(f64) {
 	B, S, F := paths.shape[0], paths.shape[1], paths.shape[2]
 	m := l.matrix_new(f64, B, A, alloc)
-	for b in 0 ..< B {copy(m.data[b * A:][:A], paths.data.data[b * S * F + k * F:][:A])}
+	pv := t.tensor_values(paths)
+	for b in 0 ..< B {copy(m.data[b * A:][:A], pv[b * S * F + k * F:][:A])}
 	return m
 }
 
@@ -282,8 +284,9 @@ deep_hedging_evaluate :: proc(
 	t.graph_begin(&hedger.scope, no_grad = true)
 	defer t.graph_end(&hedger.scope)
 	pnl := _hedging_pnl(hedger, paths, payoffs, t.graph_allocator(&hedger.scope))
-	copy(pnl_values, pnl.data.data)
-	for b in 0 ..< B {spot_prices[b] = paths.data.data[b * S * F + (S - 1) * F]}
+	copy(pnl_values, t.tensor_values(pnl))
+	pv := t.tensor_values(paths)
+	for b in 0 ..< B {spot_prices[b] = pv[b * S * F + (S - 1) * F]}
 	return
 }
 
@@ -308,7 +311,11 @@ compute_hedging_loss :: proc(
 	}
 
 	assert(cvar_alpha > 0 && cvar_alpha <= 1, "compute_hedging_loss: cvar_alpha must be in (0, 1]")
-	tail := fin.cvar_scenario_weights(pnl.data.data, 1.0 - cvar_alpha, context.temp_allocator)
+	tail := fin.cvar_scenario_weights(
+		t.tensor_values(pnl),
+		1.0 - cvar_alpha,
+		context.temp_allocator,
+	)
 	defer delete(tail, context.temp_allocator)
 	// A graph input: it must live until backward, so the graph owns it
 	neg_c := t.tensor_new(l.matrix_new(f64, pnl.data.rows, pnl.data.cols, alloc), false, alloc)
@@ -338,7 +345,7 @@ deep_hedger_train_step :: proc(
 	nn.adam_zero_grad(opt)
 	t.tensor_backward(loss)
 	nn.adam_step(opt)
-	return loss.data.data[0]
+	return t.tensor_item(loss)
 }
 
 // The same step (kept for existing multi-asset callers)

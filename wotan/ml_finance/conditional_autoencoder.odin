@@ -169,7 +169,8 @@ _ca_l1 :: proc(m: ^ConditionalAutoencoder) -> f64 {
 	s := 0.0
 	for net in ([]^nn.Sequential{m.beta_net, m.factor_net}) {
 		for &layer in net.layers {
-			if lin, ok := layer.(nn.LinearLayer); ok {for v in lin.weights.data.data {s += abs(v)}}
+			if lin, ok := layer.(nn.LinearLayer);
+			   ok {for v in t.tensor_values(lin.weights) {s += abs(v)}}
 		}
 	}
 	return m.config.l1 * s
@@ -189,15 +190,19 @@ ca_gradients :: proc(m: ^ConditionalAutoencoder, p: ^CAPanel) -> f64 {
 		for net in ([]^nn.Sequential{m.beta_net, m.factor_net}) {
 			for &layer in net.layers {
 				if lin, ok := layer.(nn.LinearLayer); ok {
-					for v, i in lin.weights.data.data {
+					// the L1 subgradient is added on the host (one transfer per
+					// weight matrix and step for GPU parameters)
+					g := t.tensor_grad_values(lin.weights)
+					for v, i in t.tensor_values(lin.weights) {
 						s := 1.0 if v > 0 else (-1.0 if v < 0 else 0.0)
-						lin.weights.grad.data[i] += m.config.l1 * s
+						g[i] += m.config.l1 * s
 					}
+					t.tensor_mark_grad_host_dirty(lin.weights)
 				}
 			}
 		}
 	}
-	return loss.data.data[0] + _ca_l1(m)
+	return t.tensor_item(loss) + _ca_l1(m)
 }
 
 // One full-batch Adam step (opt holds ca_parameters); the loss before the update
@@ -213,8 +218,10 @@ ca_mse :: proc(m: ^ConditionalAutoencoder, p: ^CAPanel, lambda: []f64 = nil) -> 
 	defer t.graph_end(&m.scope)
 	fit := ca_fitted(m, p, t.graph_allocator(&m.scope), lambda)
 	s := 0.0
-	for v, i in fit.data.data {d := v - p.r.data.data[i]; s += d * d}
-	return s / f64(len(fit.data.data))
+	r := t.tensor_values(p.r)
+	fv := t.tensor_values(fit)
+	for v, i in fv {d := v - r[i]; s += d * d}
+	return s / f64(len(fv))
 }
 
 // The factors F(P) [T, K] row-major
@@ -225,9 +232,9 @@ ca_factors :: proc(
 ) -> []f64 {
 	t.graph_begin(&m.scope, no_grad = true)
 	defer t.graph_end(&m.scope)
-	f := nn.sequential_forward(m.factor_net, p.P)
-	out := make([]f64, len(f.data.data), allocator)
-	copy(out, f.data.data)
+	f := t.tensor_values(nn.sequential_forward(m.factor_net, p.P))
+	out := make([]f64, len(f), allocator)
+	copy(out, f)
 	return out
 }
 
@@ -258,8 +265,9 @@ ca_r2 :: proc(
 	if lam == nil {lam = ca_mean_factor(m, p, context.temp_allocator)}
 	defer if lambda == nil {delete(lam, context.temp_allocator)}
 	ss := 0.0
-	for v in p.r.data.data {ss += v * v}
-	n := f64(len(p.r.data.data))
+	r := t.tensor_values(p.r)
+	for v in r {ss += v * v}
+	n := f64(len(r))
 	return 1 - ca_mse(m, p) * n / ss, 1 - ca_mse(m, p, lam) * n / ss
 }
 
@@ -289,8 +297,8 @@ ca_fit :: proc(
 	best := make([][]f64, len(params), context.temp_allocator)
 	defer {for b in best {delete(b, context.temp_allocator)}; delete(best, context.temp_allocator)}
 	for q, i in params {
-		best[i] = make([]f64, len(q.data.data), context.temp_allocator)
-		copy(best[i], q.data.data)
+		best[i] = make([]f64, t.tensor_numel(q), context.temp_allocator)
+		copy(best[i], t.tensor_values(q))
 	}
 	res := CAFitResult {
 		valid_mse = math.nan_f64(),
@@ -308,14 +316,14 @@ ca_fit :: proc(
 		if v < best_valid {
 			best_valid, since = v, 0
 			res.best_epoch, res.valid_mse = e + 1, v
-			for q, i in params {copy(best[i], q.data.data)}
+			for q, i in params {copy(best[i], t.tensor_values(q))}
 		} else {
 			since += 1
 			if since >= patience {break}
 		}
 	}
 	if valid != nil && res.best_epoch > 0 {
-		for q, i in params {copy(q.data.data, best[i])}
+		for q, i in params {copy(t.tensor_values(q), best[i]); t.tensor_mark_host_dirty(q)}
 	}
 	return res
 }

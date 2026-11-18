@@ -61,6 +61,7 @@ main :: proc() {
 	gpu_batch_norm_running_stats_test()
 	gpu_cnn_training_test()
 	gpu_tcn_training_test()
+	gpu_ml_finance_test()
 	gpu_scope_memory_test()
 	gpu_checkpoint_test()
 	gpu_speed_report()

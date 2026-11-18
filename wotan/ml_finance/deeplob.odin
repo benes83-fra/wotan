@@ -394,11 +394,12 @@ deeplob_norm_fit :: proc(
 	N, C, T, L := x.shape[0], x.shape[1], x.shape[2], x.shape[3]
 	nm := DeepLOBNorm{make([]f64, C * L, allocator), make([]f64, C * L, allocator)}
 	cnt := f64(N * T)
+	xv := t.tensor_values(x)
 	for n in 0 ..< N {for c in 0 ..< C {for k in 0 ..< T {for lv in 0 ..< L {
-					nm.mean[c * L + lv] += x.data.data[((n * C + c) * T + k) * L + lv] / cnt
+					nm.mean[c * L + lv] += xv[((n * C + c) * T + k) * L + lv] / cnt
 				}}}}
 	for n in 0 ..< N {for c in 0 ..< C {for k in 0 ..< T {for lv in 0 ..< L {
-					d := x.data.data[((n * C + c) * T + k) * L + lv] - nm.mean[c * L + lv]
+					d := xv[((n * C + c) * T + k) * L + lv] - nm.mean[c * L + lv]
 					nm.std[c * L + lv] += d * d / cnt
 				}}}}
 	for &s, i in nm.std { 	// a constant feature (up to rounding) is only centred
@@ -412,10 +413,12 @@ deeplob_norm_fit :: proc(
 deeplob_norm_apply :: proc(x: ^t.Tensor, nm: DeepLOBNorm) {
 	N, C, T, L := x.shape[0], x.shape[1], x.shape[2], x.shape[3]
 	assert(len(nm.mean) == C * L, "deeplob_norm_apply: fitted on another number of levels")
+	xv := t.tensor_values(x)
 	for n in 0 ..< N {for c in 0 ..< C {for k in 0 ..< T {for lv in 0 ..< L {
 					i := ((n * C + c) * T + k) * L + lv
-					x.data.data[i] = (x.data.data[i] - nm.mean[c * L + lv]) / nm.std[c * L + lv]
+					xv[i] = (xv[i] - nm.mean[c * L + lv]) / nm.std[c * L + lv]
 				}}}}
+	t.tensor_mark_host_dirty(x)
 }
 
 deeplob_norm_free :: proc(nm: ^DeepLOBNorm, allocator: mem.Allocator = context.allocator) {

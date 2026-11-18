@@ -75,7 +75,9 @@ cql_soft_update :: proc(main_net: ^CQLNetwork, target_net: ^CQLNetwork, tau: f64
 	src, dst := _cql_params(main_net), _cql_params(target_net)
 	for k in 0 ..< len(src) {
 		if src[k] == nil || dst[k] == nil {continue}
-		for &v, i in dst[k].data.data {v = tau * src[k].data.data[i] + (1 - tau) * v}
+		sv := t.tensor_values(src[k])
+		for &v, i in t.tensor_values(dst[k]) {v = tau * sv[i] + (1 - tau) * v}
+		t.tensor_mark_host_dirty(dst[k])
 	}
 }
 
@@ -89,7 +91,8 @@ cql_greedy_action :: proc(net: ^CQLNetwork, state: []f64) -> int {
 	copy(x.data, state)
 	q := cql_network_forward(net, t.tensor_new(x, false, alloc))
 	best := 0
-	for v, a in q.data.data {if v > q.data.data[best] {best = a}}
+	qv := t.tensor_values(q)
+	for v, a in qv {if v > qv[best] {best = a}}
 	return best
 }
 
@@ -116,21 +119,22 @@ cql_loss :: proc(
 	A := config.num_actions
 	batch := len(actions)
 	assert(
-		len(q_values.data.data) == batch * A && len(next_q_values.data.data) == batch * A,
+		t.tensor_numel(q_values) == batch * A && t.tensor_numel(next_q_values) == batch * A,
 		"cql_loss: q_values and next_q_values need batch x num_actions entries",
 	)
 	assert(
-		len(rewards.data.data) == batch && len(dones.data.data) == batch,
+		t.tensor_numel(rewards) == batch && t.tensor_numel(dones) == batch,
 		"cql_loss: one reward and done flag per action",
 	)
 
 	// TD target r + gamma (1 - done) max_a Q_target(s', a), a constant
 	target_data := l.matrix_new(f64, batch, 1, allocator)
+	nq := t.tensor_values(next_q_values)
+	rw, dn := t.tensor_values(rewards), t.tensor_values(dones)
 	for i in 0 ..< batch {
-		max_nq := next_q_values.data.data[i * A]
-		for a in 1 ..< A {max_nq = max(max_nq, next_q_values.data.data[i * A + a])}
-		target_data.data[i] =
-			rewards.data.data[i] + config.gamma * max_nq * (1.0 - dones.data.data[i])
+		max_nq := nq[i * A]
+		for a in 1 ..< A {max_nq = max(max_nq, nq[i * A + a])}
+		target_data.data[i] = rw[i] + config.gamma * max_nq * (1.0 - dn[i])
 	}
 	target := t.tensor_new(target_data, false, allocator)
 
@@ -147,7 +151,7 @@ cql_loss :: proc(
 	td_loss := t.tensor_mse_loss(q_taken, target)
 	cql_reg := t.tensor_mean(t.tensor_sub(t.tensor_logsumexp_dim1(q_values, A), q_taken))
 	total_loss := t.tensor_add(td_loss, t.tensor_scale(cql_reg, config.alpha))
-	return total_loss, td_loss.data.data[0], cql_reg.data.data[0]
+	return total_loss, t.tensor_item(td_loss), t.tensor_item(cql_reg)
 }
 
 // ============================================================================

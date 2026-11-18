@@ -78,8 +78,9 @@ gat_layer_forward :: proc(
 
 	edges := make([]f64, n * n, x.allocator)
 	defer delete(edges, x.allocator)
+	adj := t.tensor_values(adjacency)
 	for &e, i in edges {
-		a := adjacency.data.data[i]
+		a := adj[i]
 		e = math.ln(a) if a > 0 else _MASKED
 	}
 	m := &layer.mha

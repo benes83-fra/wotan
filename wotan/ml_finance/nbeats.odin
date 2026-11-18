@@ -191,8 +191,9 @@ nbeats_forward :: proc(m: ^NBeats, x: ^t.Tensor, alloc: mem.Allocator) -> (fwd_o
 	res.owned_by_graph = true
 	fc := t.tensor_new(l.matrix_new(f64, B, c.horizon, alloc), false, alloc)
 	fc.owned_by_graph = true
+	xv := t.tensor_values(x)
 	for i in 0 ..< B {
-		row := x.data.data[i * c.input_size:][:c.input_size]
+		row := xv[i * c.input_size:][:c.input_size]
 		base := row[c.input_size - 1] if c.relative else 0
 		for j in 0 ..< c.input_size {res.data.data[i * c.input_size + j] = row[c.input_size - 1 - j] - base}
 		for j in 0 ..< c.horizon {fc.data.data[i * c.horizon + j] = row[c.input_size - 1]}
@@ -238,7 +239,7 @@ nbeats_train_step :: proc(m: ^NBeats, x, y: ^t.Tensor, opt: ^nn.Adam) -> f64 {
 	nn.adam_zero_grad(opt)
 	t.tensor_backward(loss)
 	nn.adam_step(opt)
-	return loss.data.data[0]
+	return t.tensor_item(loss)
 }
 
 // Forecasts [B * horizon] row-major, no graph
@@ -246,8 +247,9 @@ nbeats_predict :: proc(m: ^NBeats, x: ^t.Tensor, allocator := context.allocator)
 	t.graph_begin(&m.scope, no_grad = true)
 	defer t.graph_end(&m.scope)
 	f := nbeats_forward(m, x, t.graph_allocator(&m.scope))
-	out := make([]f64, len(f.data.data), allocator)
-	copy(out, f.data.data)
+	fv := t.tensor_values(f)
+	out := make([]f64, len(fv), allocator)
+	copy(out, fv)
 	return out
 }
 

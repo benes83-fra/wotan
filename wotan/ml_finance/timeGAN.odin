@@ -250,7 +250,7 @@ _tg_noise :: proc(tg: ^TimeGAN, B: int, alloc: mem.Allocator) -> ^tensor.Tensor 
 
 @(private = "file")
 _tg_full :: proc(like: ^tensor.Tensor, value: f64, alloc: mem.Allocator) -> ^tensor.Tensor {
-	c := _tg_const(len(like.data.data), like.shape, alloc)
+	c := _tg_const(tensor.tensor_numel(like), like.shape, alloc)
 	for &v in c.data.data {v = value}
 	return c
 }
@@ -258,7 +258,7 @@ _tg_full :: proc(like: ^tensor.Tensor, value: f64, alloc: mem.Allocator) -> ^ten
 // x [B, T, D] (any layout of B·T·D values) as a [B, T·D] matrix
 @(private = "file")
 _tg_rows :: proc(x: ^tensor.Tensor, B: int) -> ^tensor.Tensor {
-	n := len(x.data.data)
+	n := tensor.tensor_numel(x)
 	r := tensor.tensor_reshape(x, {B, n / B, 1, 1})
 	r.data.rows, r.data.cols = B, n / B
 	return r
@@ -268,7 +268,7 @@ _tg_rows :: proc(x: ^tensor.Tensor, B: int) -> ^tensor.Tensor {
 // output at step t predicts the embedding at t + 1
 timegan_supervised_loss :: proc(h, h_sup: ^tensor.Tensor, B: int) -> ^tensor.Tensor {
 	L := h.shape[2]
-	T := len(h.data.data) / (B * L)
+	T := tensor.tensor_numel(h) / (B * L)
 	next := tensor.tensor_slice_cols(_tg_rows(h, B), L, (T - 1) * L)
 	pred := tensor.tensor_slice_cols(_tg_rows(h_sup, B), 0, (T - 1) * L)
 	return tensor.tensor_mse_loss(pred, next)
@@ -308,7 +308,7 @@ timegan_moment_loss :: proc(
 		s := tensor.tensor_new(l.matrix_new(f64, d.data.rows, d.data.cols, alloc), false, alloc)
 		s.owned_by_graph = true
 		s.shape = d.shape
-		for v, i in d.data.data {s.data.data[i] = 1 if v > 0 else (-1 if v < 0 else 0)}
+		for v, i in tensor.tensor_values(d) {s.data.data[i] = 1 if v > 0 else (-1 if v < 0 else 0)}
 		return tensor.tensor_mean(tensor.tensor_mul(d, s))
 	}
 	m_hat, sd_hat := moments(x_hat, avg, B, alloc)
@@ -411,7 +411,7 @@ train_embedder_recovery :: proc(tg: ^TimeGAN, real_data: []f64, batch_size: int)
 	tensor.tensor_backward(tensor.tensor_scale(tensor.tensor_sqrt(mse), 10))
 	nn.adam_step(&tg.optimizer_e)
 	nn.adam_step(&tg.optimizer_r)
-	return mse.data.data[0]
+	return tensor.tensor_item(mse)
 }
 
 // Phase 2: the supervisor on the embeddings of real data; returns L_S
@@ -425,7 +425,7 @@ train_supervisor :: proc(tg: ^TimeGAN, real_data: []f64, batch_size: int) -> f64
 	nn.adam_zero_grad(&tg.optimizer_s)
 	tensor.tensor_backward(loss)
 	nn.adam_step(&tg.optimizer_s)
-	return loss.data.data[0]
+	return tensor.tensor_item(loss)
 }
 
 // Joint phase, generator and supervisor; returns the generator loss
@@ -445,7 +445,7 @@ train_generator :: proc(tg: ^TimeGAN, real_data: []f64, batch_size: int) -> f64 
 	tensor.tensor_backward(g_loss)
 	nn.adam_step(&tg.optimizer_g)
 	nn.adam_step(&tg.optimizer_s)
-	return g_loss.data.data[0]
+	return tensor.tensor_item(g_loss)
 }
 
 // Joint phase, embedder and recovery: 10 sqrt(MSE) + 0.1 L_S; returns that loss
@@ -467,7 +467,7 @@ train_embedder_joint :: proc(tg: ^TimeGAN, real_data: []f64, batch_size: int) ->
 	tensor.tensor_backward(loss)
 	nn.adam_step(&tg.optimizer_e)
 	nn.adam_step(&tg.optimizer_r)
-	return loss.data.data[0]
+	return tensor.tensor_item(loss)
 }
 
 // Joint phase, discriminator: stepped only while its loss is above 0.15 (it would
@@ -483,12 +483,12 @@ train_discriminator :: proc(tg: ^TimeGAN, real_data: []f64, batch_size: int) -> 
 		_tg_noise(tg, batch_size, alloc),
 		alloc,
 	)
-	if loss.data.data[0] > TIMEGAN_D_THRESHOLD {
+	if tensor.tensor_item(loss) > TIMEGAN_D_THRESHOLD {
 		nn.adam_zero_grad(&tg.optimizer_d)
 		tensor.tensor_backward(loss)
 		nn.adam_step(&tg.optimizer_d)
 	}
-	return loss.data.data[0]
+	return tensor.tensor_item(loss)
 }
 
 // One joint iteration as in the paper: twice (generator, embedder), then the discriminator
@@ -522,7 +522,7 @@ generate_synthetic_data :: proc(tg: ^TimeGAN, n_sequences: int, alloc: mem.Alloc
 		a := tensor.graph_allocator(&tg.scope)
 		e_hat := nn.sequential_forward(tg.generator, _tg_noise(tg, B, a))
 		x_hat := nn.sequential_forward(tg.recovery, nn.sequential_forward(tg.supervisor, e_hat))
-		copy(output[start * W:][:B * W], x_hat.data.data)
+		copy(output[start * W:][:B * W], tensor.tensor_values(x_hat))
 		tensor.graph_end(&tg.scope)
 	}
 	return output

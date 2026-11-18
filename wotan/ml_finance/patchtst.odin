@@ -160,8 +160,9 @@ patchtst_forward :: proc(
 	sd := make([]f64, R, context.temp_allocator)
 	defer delete(sd, context.temp_allocator)
 	xn := _pt_const(R, L, alloc)
+	xv := t.tensor_values(x)
 	for r in 0 ..< R {
-		row := x.data.data[r * L:][:L]
+		row := xv[r * L:][:L]
 		for v in row {mean[r] += v / f64(L)}
 		vv := 0.0
 		for v in row {vv += (v - mean[r]) * (v - mean[r]) / f64(L)}
@@ -211,7 +212,7 @@ patchtst_train_step :: proc(m: ^PatchTST, x, y: ^t.Tensor, channels: []int, opt:
 	nn.adam_zero_grad(opt)
 	t.tensor_backward(loss)
 	nn.adam_step(opt)
-	return loss.data.data[0]
+	return t.tensor_item(loss)
 }
 
 // MSE of the forecasts against y [R, horizon] (graph)
@@ -223,7 +224,7 @@ patchtst_loss :: proc(
 ) -> ^t.Tensor {
 	f := patchtst_forward(m, x, channels, alloc)
 	target := _pt_const(f.data.rows, f.data.cols, alloc)
-	copy(target.data.data, y.data.data)
+	copy(target.data.data, t.tensor_values(y))
 	return t.tensor_mse_loss(f, target, alloc)
 }
 
@@ -237,7 +238,8 @@ patchtst_predict :: proc(
 	t.graph_begin(&m.scope, no_grad = true)
 	defer t.graph_end(&m.scope)
 	f := patchtst_forward(m, x, channels, t.graph_allocator(&m.scope))
-	out := make([]f64, len(f.data.data), allocator)
-	copy(out, f.data.data)
+	fv := t.tensor_values(f)
+	out := make([]f64, len(fv), allocator)
+	copy(out, fv)
 	return out
 }

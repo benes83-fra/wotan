@@ -391,7 +391,7 @@ ppo_agent_select_action :: proc(
 	probs := tensor.tensor_softmax(nn.sequential_forward(agent.actor, state))
 	action = tensor_categorical_sample(probs)
 	log_prob = tensor_categorical_log_prob(probs, action)
-	value = nn.sequential_forward(agent.critic, state).data.data[0]
+	value = tensor.tensor_item(nn.sequential_forward(agent.critic, state))
 	return action, log_prob, value
 }
 
@@ -400,7 +400,7 @@ ppo_agent_select_action :: proc(
 ppo_agent_value :: proc(agent: ^PPOAgent, state: ^tensor.Tensor) -> f64 {
 	tensor.graph_begin(&agent.scope, no_grad = true)
 	defer tensor.graph_end(&agent.scope)
-	return nn.sequential_forward(agent.critic, state).data.data[0]
+	return tensor.tensor_item(nn.sequential_forward(agent.critic, state))
 }
 
 // Generalised advantage estimation (Schulman et al. 2016), as CleanRL:
@@ -462,7 +462,9 @@ ppo_minibatch_loss :: proc(
 		probs := tensor.tensor_softmax(logits)
 		ce_loss := tensor.tensor_cross_entropy_loss(logits, []int{action}) // -log pi(a)
 
-		ratio := math.exp(math.ln(probs.data.data[action]) - agent.buffer.old_log_probs[idx])
+		ratio := math.exp(
+			math.ln(tensor.tensor_values(probs)[action]) - agent.buffer.old_log_probs[idx],
+		)
 		surr1 := ratio * advantage
 		surr2 := clamp(ratio, 1.0 - agent.clip_epsilon, 1.0 + agent.clip_epsilon) * advantage
 		scale := advantage * ratio if surr1 <= surr2 else 0.0
@@ -481,8 +483,8 @@ ppo_minibatch_loss :: proc(
 
 		pl := -math.min(surr1, surr2)
 		stats.policy_loss += pl
-		stats.value_loss += value_loss.data.data[0]
-		stats.entropy += entropy.data.data[0]
+		stats.value_loss += tensor.tensor_item(value_loss)
+		stats.entropy += tensor.tensor_item(entropy)
 		stats.n_updates += 1
 	}
 	inv := 1.0 / f64(len(rows))
@@ -584,20 +586,21 @@ ppo_agent_free :: proc(agent: ^PPOAgent) {
 tensor_categorical_sample :: proc(probs: ^tensor.Tensor) -> int {
 	r := rand.float64()
 	cum_prob := 0.0
-	for i in 0 ..< len(probs.data.data) {
-		cum_prob += probs.data.data[i]
+	pv := tensor.tensor_values(probs)
+	for i in 0 ..< len(pv) {
+		cum_prob += pv[i]
 		if r < cum_prob {
 			return i
 		}
 	}
-	return len(probs.data.data) - 1
+	return len(pv) - 1
 }
 
 tensor_categorical_log_prob :: proc(probs: ^tensor.Tensor, action: int) -> f64 {
-	if action < 0 || action >= len(probs.data.data) {
+	if action < 0 || action >= tensor.tensor_numel(probs) {
 		return -math.F64_MAX
 	}
-	p := probs.data.data[action]
+	p := tensor.tensor_values(probs)[action]
 	if p <= 1e-10 {
 		return -30.0
 	}

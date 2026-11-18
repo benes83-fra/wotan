@@ -11,21 +11,27 @@ import "core:time"
 // Convolution, pooling and batch-norm models on the GPU against the CPU
 
 // the op cases whose forward runs on the GPU and whose backward runs on the CPU
-// (the device forward keeps the max-pool argmax and batch-norm statistics on
-// the device; the CPU backward must find or fetch them)
+// (the device forward keeps the max-pool argmax, the batch-norm statistics and
+// the Sharpe mean and std on the device; the CPU backward must find or fetch them)
 gpu_device_forward_cpu_backward_test :: proc() {
 	fmt.println(
-		"gpu_device_forward_cpu_backward_test: GPU forward, CPU backward (pooling, batch norm, conv)",
+		"gpu_device_forward_cpu_backward_test: GPU forward, CPU backward (pooling, batch norm, conv, Sharpe)",
 	)
 	rand.reset(3)
 	for c in op_cases {
 		#partial switch c.op {
-		case .MaxPool2d, .AvgPool2d, .BatchNorm2d, .Conv2d, .Conv1d:
+		case .MaxPool2d, .AvgPool2d, .BatchNorm2d, .Conv2d, .Conv1d, .SharpeLoss:
 		case:
 			continue
 		}
 		worst, fallbacks := _compare_case(c, false, cpu_backward = true)
-		check(worst <= c.tol, "%s (CPU backward): max relative error %.2e > %.0e", c.name, worst, c.tol)
+		check(
+			worst <= c.tol,
+			"%s (CPU backward): max relative error %.2e > %.0e",
+			c.name,
+			worst,
+			c.tol,
+		)
 		check(fallbacks > 0, "%s (CPU backward): the CPU backward did not run", c.name)
 		fmt.printfln("    %-34s max rel err %.2e", c.name, worst)
 	}
@@ -52,7 +58,16 @@ gpu_batch_norm_running_stats_test :: proc() {
 			x.shape = {5, 4, 3, 3}
 			t.graph_begin(&scope)
 			train := step < 3
-			y := t.tensor_batch_norm_2d(x, bn.weight, bn.bias, bn.running_mean, bn.running_var, train, bn.momentum, bn.eps)
+			y := t.tensor_batch_norm_2d(
+				x,
+				bn.weight,
+				bn.bias,
+				bn.running_mean,
+				bn.running_var,
+				train,
+				bn.momentum,
+				bn.eps,
+			)
 			if !train {eval_out = _clone(t.tensor_values(y))}
 			t.graph_end(&scope)
 			t.tensor_free(x)
@@ -117,7 +132,10 @@ _cnn_batch :: proc() -> (x: ^t.Tensor, labels: []int) {
 		labels[n] = n % 3
 		for i in 0 ..< 12 {
 			for j in 0 ..< 12 {
-				on := (labels[n] == 0 && i % 4 == 0) || (labels[n] == 1 && j % 4 == 0) || (labels[n] == 2 && i == j)
+				on :=
+					(labels[n] == 0 && i % 4 == 0) ||
+					(labels[n] == 1 && j % 4 == 0) ||
+					(labels[n] == 2 && i == j)
 				v := (1.0 if on else 0.0) + 0.2 * rand.float64()
 				m.data[n * 144 + i * 12 + j] = f64(f32(v))
 			}

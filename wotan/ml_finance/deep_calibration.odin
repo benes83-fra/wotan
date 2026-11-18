@@ -167,10 +167,8 @@ deep_heston_calibrate :: proc(model: ^DeepHestonCalibrator, ivs: []f64) -> fin.H
 	alloc := t._scope_or(context.allocator)
 	x := l.matrix_new(f64, 1, DEEP_HESTON_N_GRID, alloc)
 	deep_heston_features(ivs, x.data)
-	out := deep_heston_calibrator_forward(model, t.tensor_new(x, false, alloc))
-	return deep_heston_decode(
-		{out.data.data[0], out.data.data[1], out.data.data[2], out.data.data[3], out.data.data[4]},
-	)
+	out := t.tensor_values(deep_heston_calibrator_forward(model, t.tensor_new(x, false, alloc)))
+	return deep_heston_decode({out[0], out[1], out[2], out[3], out[4]})
 }
 
 // Market implied vols on the grid from scattered quotes: per quoted expiry linear in
