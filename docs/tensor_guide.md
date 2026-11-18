@@ -181,7 +181,17 @@ fmt.println("linear", y.data.data, y.shape)
 linear [3.2, 1.7999999999999998, 5.9, 5.3999999999999995] [2, 2, 1, 1]
 ```
 
-`tensor_matmul` also accepts a flattened tensor as its left operand: a `1 × N·in` row whose length is a multiple of `b.rows`. It multiplies each `in`-wide row by `b` and keeps the result flattened. The feature dimension of `shape` is replaced by `out`, so a sequence `[batch, seq, in, 1]` becomes `[batch, seq, out, 1]`. This is how the `nn` layers apply one weight matrix to every time step:
+`tensor_linear(x, W, b)` computes the same in one op. Its values and gradients are exactly those of the two ops above, but the graph records one node instead of two, and on the GPU it runs as one kernel. The `nn` layers use it. With `b = nil` it is `tensor_matmul`.
+
+```odin
+y2 := t.tensor_linear(X, W, b)
+fmt.println("tensor_linear", y2.data.data, y2.shape)
+```
+```
+tensor_linear [3.2, 1.7999999999999998, 5.9, 5.3999999999999995] [2, 2, 1, 1]
+```
+
+`tensor_matmul` (and so `tensor_linear`) also accepts a flattened tensor as its left operand: a `1 × N·in` row whose length is a multiple of `b.rows`. It multiplies each `in`-wide row by `b` and keeps the result flattened. The feature dimension of `shape` is replaced by `out`, so a sequence `[batch, seq, in, 1]` becomes `[batch, seq, out, 1]`. This is how the `nn` layers apply one weight matrix to every time step:
 
 ```odin
 S := from_values({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, 1, 12)

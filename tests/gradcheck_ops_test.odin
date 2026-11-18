@@ -4,6 +4,7 @@ import t "../wotan/tensor"
 import "core:fmt"
 import "core:math/rand"
 import "core:mem"
+import "core:slice"
 
 // Numerical gradient checks for the remaining autograd ops (element-wise math,
 // losses, normalization, pooling, reshaping/permutation, routing, SSM, flash
@@ -13,6 +14,34 @@ import "core:mem"
 gco_targets := []int{1, 0, 3} // cross-entropy targets (a global literal: static memory)
 gco_idx, gco_rm, gco_rv: ^t.Tensor
 gco_causal: bool
+
+// tensor_linear on gcl_in[0..2] against tensor_matmul + tensor_add_bias:
+// output shape, values and all three gradients must be identical
+gco_linear_identical :: proc(name: string, allocator: mem.Allocator) {
+	values: [2][]f64
+	shapes: [2][4]int
+	grads: [2][3][]f64
+	for k in 0 ..< 2 {
+		for i in 0 ..< 3 {t.tensor_zero_grad(gcl_in[i])}
+		y :=
+			t.tensor_linear(gcl_in[0], gcl_in[1], gcl_in[2]) if k == 0 else t.tensor_add_bias(t.tensor_matmul(gcl_in[0], gcl_in[1]), gcl_in[2])
+		loss := gcl_weighted_sum(y)
+		t.tensor_backward(loss, allocator)
+		values[k] = slice.clone(y.data.data, context.temp_allocator)
+		shapes[k] = y.shape
+		for i in 0 ..< 3 {grads[k][i] = slice.clone(gcl_in[i].grad.data, context.temp_allocator)}
+		t.tensor_free_graph(loss, allocator = allocator)
+	}
+	ok := shapes[0] == shapes[1] && slice.equal(values[0], values[1])
+	for i in 0 ..< 3 {ok = ok && slice.equal(grads[0][i], grads[1][i])}
+	gc_total += 1
+	if ok {
+		gc_passed += 1
+		fmt.printfln("OK   %-40s identical values and gradients", name)
+	} else {
+		fmt.printfln("FAIL %-40s values, shape or gradients differ", name)
+	}
+}
 
 // Linearly rescale a tensor's values into [lo, hi], e.g. for log/sqrt/probability inputs
 gco_remap :: proc(x: ^t.Tensor, lo, hi: f64) {
@@ -172,6 +201,25 @@ gradcheck_ops_test :: proc(allocator: mem.Allocator) {
 			return gcl_weighted_sum(t.tensor_add_bias(gcl_in[0], gcl_in[1]))
 		}, allocator)
 	gcl_free_inputs(2)
+
+	// tensor_linear: gradients, and the exact values and gradients of
+	// tensor_matmul followed by tensor_add_bias
+	gcl_in[0] = gcl_rand(4, 3, {4, 3, 1, 1}, 160, true, allocator)
+	gcl_in[1] = gcl_rand(3, 5, {3, 5, 1, 1}, 161, true, allocator)
+	gcl_in[2] = gcl_rand(1, 5, {1, 5, 1, 1}, 162, true, allocator)
+	gcl_check("linear 2D [4,3]@[3,5]+[1,5]", 3, proc() -> ^t.Tensor {
+			return gcl_weighted_sum(t.tensor_linear(gcl_in[0], gcl_in[1], gcl_in[2]))
+		}, allocator)
+	gco_linear_identical("linear 2D = matmul + add_bias", allocator)
+	gcl_free_inputs(3)
+	gcl_in[0] = gcl_rand(1, 2 * 4 * 3, {2, 4, 3, 1}, 163, true, allocator)
+	gcl_in[1] = gcl_rand(3, 5, {3, 5, 1, 1}, 164, true, allocator)
+	gcl_in[2] = gcl_rand(1, 5, {1, 5, 1, 1}, 165, true, allocator)
+	gcl_check("linear flattened [1,2*4*3]@[3,5]+[1,5]", 3, proc() -> ^t.Tensor {
+			return gcl_weighted_sum(t.tensor_linear(gcl_in[0], gcl_in[1], gcl_in[2]))
+		}, allocator)
+	gco_linear_identical("linear flattened = matmul + add_bias", allocator)
+	gcl_free_inputs(3)
 
 	gcl_in[0] = gcl_rand(3, 4, {3, 4, 1, 1}, 108, true, allocator)
 	gcl_check(

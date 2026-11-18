@@ -82,6 +82,7 @@ Op :: enum {
 	ProbWeighting,
 	ProspectUtility,
 	GeluTanh,
+	Linear, // x @ w + b in one node (tensor_linear)
 }
 
 PoolParams :: struct {
@@ -1032,6 +1033,57 @@ tensor_matmul :: proc(a: ^Tensor, b: ^Tensor) -> ^Tensor {
 
 	return out
 }
+// tensor_linear: x @ w + b in one op (a linear layer). The shapes are those of
+// tensor_matmul followed by tensor_add_bias: x is [N, in] or a flattened
+// sequence [1, N·in], w is [in, out], b is [1, out]; b = nil is tensor_matmul.
+// The values and gradients are exactly those of the two ops, but the graph
+// records one node: on the GPU the bias is added by the matrix-product kernel,
+// and the backward pass needs no copy of the output gradient.
+tensor_linear :: proc(x, w, b: ^Tensor) -> ^Tensor {
+	if b == nil {return tensor_matmul(x, w)}
+	fmt.assertf(
+		b.data.rows == 1 && b.data.cols == w.data.cols,
+		"tensor_linear: the bias must be [1, %d], got [%d, %d]",
+		w.data.cols,
+		b.data.rows,
+		b.data.cols,
+	)
+	if _device_use(.Linear, x, w, b) {return _device_linear(x, w, b)}
+	_host_inputs(.Linear, x, w, b)
+	N, in_f, out_f, flattened := _linear_dims(x, w)
+	out_data :=
+		l.matrix_new(f64, 1, N * out_f, _op_alloc(x)) if flattened else l.matrix_new(f64, N, out_f, _op_alloc(x))
+	x_view := _mat(N, in_f, x.data.data)
+	out_view := _mat(N, out_f, out_data.data)
+	l.matmul_nn_acc_simd(&x_view, &w.data, &out_view)
+	bias := b.data.data[:out_f]
+	for i in 0 ..< N {
+		row := out_data.data[i * out_f:(i + 1) * out_f]
+		l.vec_add_simd(row, bias, row)
+	}
+	shape :=
+		_flattened_matmul_shape(x.shape, N, in_f, out_f) if flattened else [4]int{N, out_f, 1, 1}
+	rg := x.requires_grad || w.requires_grad || b.requires_grad
+	out := _tensor_new_op(out_data, shape, rg, _op_alloc(x))
+	if out.requires_grad {
+		out.op = .Linear
+		append(&out.inputs, x, w, b)
+		append(&out.int_metadata, N, in_f, out_f)
+	}
+	return out
+}
+
+// _linear_dims: the rows, input and output width of x @ w, and whether x is a
+// flattened sequence [1, N·in] (as tensor_matmul decides)
+_linear_dims :: proc(x, w: ^Tensor) -> (N, in_f, out_f: int, flattened: bool) {
+	in_f, out_f = w.data.rows, w.data.cols
+	if x.data.rows == 1 && x.data.cols != in_f && in_f > 0 && x.data.cols % in_f == 0 {
+		return x.data.cols / in_f, in_f, out_f, true
+	}
+	if x.data.cols != in_f {panic("tensor_linear: dimension mismatch")}
+	return x.data.rows, in_f, out_f, false
+}
+
 // _tensor_free_graph_impl frees the intermediate nodes below `node`, inputs
 // first (post-order). Leaf nodes (op == .None) are user-managed and kept.
 _tensor_free_graph_impl :: proc(node: ^Tensor, visited: ^map[^Tensor]bool) {

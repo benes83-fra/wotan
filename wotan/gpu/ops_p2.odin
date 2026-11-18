@@ -239,11 +239,12 @@ _backward_p2 :: proc(node: ^t.Tensor, dy: Bind, n: int) -> bool {
 		a := node.inputs[0]
 		if !a.requires_grad {return true}
 		C := node.int_metadata[0]
-		u := [8]u32{u32(n / C), u32(C), 1, 0, 0, 0, 0, 0}
+		g, fresh := _out_grad(a)
+		u := [8]u32{u32(n / C), u32(C), u32(!fresh), 0, 0, 0, 0, 0}
 		_dispatch_rows(
 			.Softmax_Bwd,
 			_p(u, {1, 0, 0, 0, 0, 0, 0, 0}),
-			{_in_data(node), dy, _in_grad(a)},
+			{_in_data(node), dy, g},
 			n / C,
 		)
 		t._grad_written_on_device(a)
@@ -252,18 +253,20 @@ _backward_p2 :: proc(node: ^t.Tensor, dy: Bind, n: int) -> bool {
 		if !a.requires_grad {return true}
 		C := node.int_metadata[0]
 		batch := node.data.rows
-		u := [8]u32{u32(batch), u32(C), 0, 0, 0, 0, 0, 0}
-		_dispatch_rows(.Row_Prob_Grad, _p(u), {_in_data(a), _dummy(), dy, _in_grad(a)}, batch)
+		g, fresh := _out_grad(a)
+		u := [8]u32{u32(batch), u32(C), 0, 0, 0, 0, 0, u32(fresh)}
+		_dispatch_rows(.Row_Prob_Grad, _p(u), {_in_data(a), _dummy(), dy, g}, batch)
 		t._grad_written_on_device(a)
 	case .CrossEntropy:
 		a := node.inputs[0]
 		if !a.requires_grad {return true}
 		N, C := node.int_metadata[0], node.int_metadata[1]
 		targets := _upload_ints(node.int_metadata[2:])
-		u := [8]u32{u32(N), u32(C), 1, 0, 0, 0, 0, 0}
+		g, fresh := _out_grad(a)
+		u := [8]u32{u32(N), u32(C), 1, 0, 0, 0, 0, u32(fresh)}
 		f := [8]f32{f32(1.0 / f64(N)), 0, 0, 0, 0, 0, 0, 0}
 		x := _in_data(a)
-		_dispatch_rows(.Row_Prob_Grad, _p(u, f), {x, targets, dy, _in_grad(a)}, N)
+		_dispatch_rows(.Row_Prob_Grad, _p(u, f), {x, targets, dy, g}, N)
 		_release_buf(targets.buf)
 		t._grad_written_on_device(a)
 	case .BCELoss, .BinaryCrossEntropy:
@@ -287,18 +290,23 @@ _backward_p2 :: proc(node: ^t.Tensor, dy: Bind, n: int) -> bool {
 		a := node.inputs[0]
 		if !a.requires_grad {return true}
 		if node.dropout_mask == nil {
-			g := _in_grad(a)
+			g, fresh := _out_grad(a)
 			_dispatch_1d(
 				.Unary_Bwd,
-				_p({u32(n), U_COPY, 0, 0, 0, 0, 0, 0}, {1, 0, 0, 0, 0, 0, 0, 0}),
+				_p({u32(n), U_COPY, 0, 0, 0, 0, 0, u32(fresh)}, {1, 0, 0, 0, 0, 0, 0, 0}),
 				{dy, dy, dy, g},
 				n,
 			)
 		} else {
 			mask, temp := _aux(node, node.dropout_mask)
-			g := _in_grad(a)
+			g, fresh := _out_grad(a)
 			// dx += dy * mask (Binary_Bwd, gradient of a for a * mask)
-			_dispatch_1d(.Binary_Bwd, _p({u32(n), 2, 0, 0, 0, 0, 0, 0}), {mask, mask, dy, g}, n)
+			_dispatch_1d(
+				.Binary_Bwd,
+				_p({u32(n), 2, 0, 0, 0, 0, 0, u32(fresh)}),
+				{mask, mask, dy, g},
+				n,
+			)
 			if temp {_release_buf(mask.buf)}
 		}
 		t._grad_written_on_device(a)
@@ -316,8 +324,9 @@ _backward_p2 :: proc(node: ^t.Tensor, dy: Bind, n: int) -> bool {
 		m := node.int_metadata
 		// the backward of one direction is the other direction, accumulated
 		dir := u32(node.op == .PermuteMHA)
-		u := [8]u32{u32(m[0]), u32(m[1]), u32(m[2]), u32(m[3]), dir, 1, 0, 0}
-		_dispatch_1d(.Permute_Mha, _p(u), {dy, _in_grad(a)}, n)
+		g, fresh := _out_grad(a)
+		u := [8]u32{u32(m[0]), u32(m[1]), u32(m[2]), u32(m[3]), dir, u32(!fresh), 0, 0}
+		_dispatch_1d(.Permute_Mha, _p(u), {dy, g}, n)
 		t._grad_written_on_device(a)
 	case .ScaledDotProductAttention, .MaskedScaledDotProductAttention, .FlashAttention:
 		_attention_backward(node, dy)
@@ -326,22 +335,19 @@ _backward_p2 :: proc(node: ^t.Tensor, dy: Bind, n: int) -> bool {
 		N, D := x.shape[0], x.shape[1]
 		if x.requires_grad {
 			gd := _in_data(gate)
+			g, fresh := _out_grad(x)
 			_dispatch_1d(
 				.Row_Scale,
-				_p({u32(N * D), u32(D), 1, 0, 0, 0, 0, 0}),
-				{dy, gd, _in_grad(x)},
+				_p({u32(N * D), u32(D), u32(!fresh), 0, 0, 0, 0, 0}),
+				{dy, gd, g},
 				N * D,
 			)
 			t._grad_written_on_device(x)
 		}
 		if gate.requires_grad {
 			xd := _in_data(x)
-			_dispatch_1d(
-				.Row_Dot,
-				_p({u32(N), u32(D), 0, 0, 0, 0, 0, 0}),
-				{dy, xd, _in_grad(gate)},
-				N,
-			)
+			g, fresh := _out_grad(gate)
+			_dispatch_1d(.Row_Dot, _p({u32(N), u32(D), 0, 0, 0, 0, 0, u32(fresh)}), {dy, xd, g}, N)
 			t._grad_written_on_device(gate)
 		}
 	case:
@@ -364,15 +370,29 @@ _norm_backward :: proc(node: ^t.Tensor, dy: Bind) {
 	f := [8]f32{eps, 0, 0, 0, 0, 0, 0, 0}
 	_dispatch_rows(.Norm_Stats, _p(u, f), {xd, stats}, N)
 	if x.requires_grad {
-		_dispatch_rows(.Norm_Bwd_X, _p(u, f), {xd, gd, dy, stats, _in_grad(x)}, N)
+		g, fresh := _out_grad(x)
+		ux := u
+		ux[7] = u32(fresh)
+		_dispatch_rows(.Norm_Bwd_X, _p(ux, f), {xd, gd, dy, stats, g}, N)
 		t._grad_written_on_device(x)
 	}
 	want_g := gamma.requires_grad
 	want_b := beta != nil && beta.requires_grad
 	if want_g || want_b {
-		dg := _in_grad(gamma) if want_g else _dummy()
-		db := _in_grad(beta) if want_b else _dummy()
-		u2 := [8]u32{u32(N), u32(D), u32(rms), u32(want_b), u32(want_g), 0, 0, 0}
+		dg, db := _dummy(), _dummy()
+		fresh_g, fresh_b: bool
+		if want_g {dg, fresh_g = _out_grad(gamma)}
+		if want_b {db, fresh_b = _out_grad(beta)}
+		u2 := [8]u32 {
+			u32(N),
+			u32(D),
+			u32(rms),
+			u32(want_b),
+			u32(want_g),
+			0,
+			u32(fresh_g),
+			u32(fresh_b),
+		}
 		_dispatch_1d(.Norm_Bwd_Param, _p(u2), {xd, dy, stats, dg, db}, D)
 		if want_g {t._grad_written_on_device(gamma)}
 		if want_b {t._grad_written_on_device(beta)}
@@ -389,7 +409,8 @@ _attention_backward :: proc(node: ^t.Tensor, dO: Bind) {
 	q, k, v := _in_data(Q), _in_data(K), _in_data(V)
 	P := _attn_probs(a, q, k)
 	if V.requires_grad {
-		_matmul(P, dO, _in_grad(V), a.sk, a.dv, a.sq, true, false, true, a.batch)
+		g, fresh := _out_grad(V)
+		_matmul(P, dO, g, a.sk, a.dv, a.sq, true, false, !fresh, a.batch)
 		t._grad_written_on_device(V)
 	}
 	if Q.requires_grad || K.requires_grad {
@@ -405,11 +426,13 @@ _attention_backward :: proc(node: ^t.Tensor, dO: Bind) {
 			a.batch * a.sq,
 		)
 		if Q.requires_grad {
-			_matmul(dS, k, _in_grad(Q), a.sq, a.dk, a.sk, false, false, true, a.batch)
+			g, fresh := _out_grad(Q)
+			_matmul(dS, k, g, a.sq, a.dk, a.sk, false, false, !fresh, a.batch)
 			t._grad_written_on_device(Q)
 		}
 		if K.requires_grad {
-			_matmul(dS, q, _in_grad(K), a.sk, a.dk, a.sq, true, false, true, a.batch)
+			g, fresh := _out_grad(K)
+			_matmul(dS, q, g, a.sk, a.dk, a.sq, true, false, !fresh, a.batch)
 			t._grad_written_on_device(K)
 		}
 		_release_buf(dP.buf)

@@ -123,13 +123,17 @@ Staging :: struct {
 	bytes:  u64,
 }
 
+// storage buffers per kernel at most (the multi-parameter Adam binds 16)
+@(private)
+MAX_STORAGE_BINDS :: 16
+
 // a bind group: the kernel and the bound storage buffers with sizes
 @(private)
 Bind_Key :: struct {
 	kernel: Kernel,
 	n:      int,
-	bufs:   [7]^Buf,
-	sizes:  [7]u64,
+	bufs:   [MAX_STORAGE_BINDS]^Buf,
+	sizes:  [MAX_STORAGE_BINDS]u64,
 }
 
 // cached bind groups beyond this count are released (a loop whose buffers change
@@ -529,7 +533,7 @@ _bind_group :: proc(k: Kernel, pl: Pipeline, binds: []Bind) -> wgpu.BindGroup {
 		return bg
 	}
 	if len(G.bind_groups) >= BIND_CACHE_MAX {_clear_bind_groups()}
-	entries: [8]wgpu.BindGroupEntry
+	entries: [MAX_STORAGE_BINDS + 1]wgpu.BindGroupEntry
 	entries[0] = {
 		binding = 0,
 		buffer  = G.uniform,
@@ -683,7 +687,7 @@ _hook_copy :: proc(dst, src: t.Device_Buffer, numel: int) {_copy(_buf(dst), _buf
 @(private)
 _pipeline :: proc(k: Kernel) -> Pipeline {
 	if G.pipelines[k].pipeline != nil {return G.pipelines[k]}
-	src := strings.concatenate({KERNEL_PRELUDE, KERNEL_SOURCES[k]}, context.temp_allocator)
+	src := strings.concatenate({KERNEL_PRELUDE, _kernel_source(k)}, context.temp_allocator)
 	module := wgpu.DeviceCreateShaderModule(
 		G.device,
 		&{
@@ -691,14 +695,14 @@ _pipeline :: proc(k: Kernel) -> Pipeline {
 			label = fmt.tprint(k),
 		},
 	)
-	entries: [8]wgpu.BindGroupLayoutEntry
+	entries: [MAX_STORAGE_BINDS + 1]wgpu.BindGroupLayoutEntry
 	entries[0] = {
 		binding = 0,
 		visibility = {.Compute},
 		buffer = {type = .Uniform, hasDynamicOffset = true, minBindingSize = PARAMS_SIZE},
 	}
 	n := 1
-	for binding in 1 ..< 8 {
+	for binding in 1 ..= MAX_STORAGE_BINDS {
 		decl := fmt.tprintf("@binding(%d) var<storage, ", binding)
 		at := strings.index(src, decl)
 		if at < 0 {break}

@@ -30,6 +30,7 @@ SUPPORTED :: bit_set[t.Op] {
 	.Softplus,
 	.AddBias,
 	.MatMul,
+	.Linear,
 	.Sum,
 	.Mean,
 	.SumDim1,
@@ -139,8 +140,10 @@ _data :: proc(x: ^t.Tensor) -> Bind {
 	return _bind(x.device.data_buf, t.tensor_numel(x))
 }
 
+// _grad: the gradient buffer with its contents (a pending clear is recorded first)
 @(private)
 _grad :: proc(x: ^t.Tensor) -> Bind {
+	t._device_grad_materialize(x)
 	return _bind(x.device.grad_buf, t.tensor_numel(x))
 }
 
@@ -149,16 +152,25 @@ _p :: proc(u: [8]u32 = {}, f: [8]f32 = {}) -> Params {
 	return {u = u, f = f}
 }
 
-// _matmul records C[M, N] (+)= op(A) @ op(B), in row chunks of the grid limit.
-// Products with at least MATMUL_TILED_MIN rows and columns use the register-tiled
-// kernel; smaller ones (where a 64x64 tile would mostly idle) the 16x16 kernel.
+// _matmul records C[M, N] (+)= op(A) @ op(B) (+ bias[column] if a bias is
+// given), in row chunks of the grid limit. Products with at least
+// MATMUL_TILED_MIN rows and columns use the register-tiled kernel; smaller ones
+// (where a 64x64 tile would mostly idle) the 16x16 kernel.
 @(private)
-_matmul :: proc(A, B, C: Bind, M, N, K: int, trans_a, trans_b, accumulate: bool, batch := 1) {
+_matmul :: proc(
+	A, B, C: Bind,
+	M, N, K: int,
+	trans_a, trans_b, accumulate: bool,
+	batch := 1,
+	bias := Bind{},
+) {
 	if M == 0 || N == 0 {return}
-	if K == 0 {
+	if K == 0 && bias.buf == nil {
 		if !accumulate {_zero(C.buf, M * N * batch)}
 		return
 	}
+	has_bias := bias.buf != nil
+	bias_bind := bias if has_bias else _dummy()
 	tiled :=
 		G.matmul_kernel == .Tiled ||
 		(G.matmul_kernel == .Auto && M >= MATMUL_TILED_MIN && N >= MATMUL_TILED_MIN)
@@ -168,8 +180,19 @@ _matmul :: proc(A, B, C: Bind, M, N, K: int, trans_a, trans_b, accumulate: bool,
 	chunk := 65535 * tile
 	for r0 := 0; r0 < M; r0 += chunk {
 		rows := min(chunk, M - r0)
-		p := _p({u32(M), u32(N), u32(K), u32(trans_a), u32(trans_b), u32(accumulate), u32(r0), 0})
-		_dispatch(k, p, {A, B, C}, gx, u32((rows + tile - 1) / tile), u32(batch))
+		p := _p(
+			{
+				u32(M),
+				u32(N),
+				u32(K),
+				u32(trans_a),
+				u32(trans_b),
+				u32(accumulate),
+				u32(r0),
+				u32(has_bias),
+			},
+		)
+		_dispatch(k, p, {A, B, C, bias_bind}, gx, u32((rows + tile - 1) / tile), u32(batch))
 	}
 }
 
@@ -277,6 +300,19 @@ _hook_forward :: proc(op: t.Op, out: ^t.Tensor, inputs: []^t.Tensor, ints: []int
 			false,
 			false,
 		)
+	case .Linear:
+		_matmul(
+			_data(inputs[0]),
+			_data(inputs[1]),
+			o,
+			ints[0],
+			ints[2],
+			ints[1],
+			false,
+			false,
+			false,
+			bias = _data(inputs[2]),
+		)
 	case .AddBias:
 		_dispatch_1d(
 			.Bias_Add,
@@ -360,6 +396,18 @@ _in_grad :: proc(x: ^t.Tensor) -> Bind {
 	return _grad(x)
 }
 
+// _out_grad: the input's gradient on the device, for a kernel that writes all
+// of it. fresh: the gradient is zero and its buffer was not cleared, so the
+// kernel overwrites it (overwrite flag u7, or accumulate = false) instead of
+// adding to it. Take it right before the dispatch that writes it: a second
+// write to the same gradient in the same op must see fresh = false.
+@(private)
+_out_grad :: proc(x: ^t.Tensor) -> (g: Bind, fresh: bool) {
+	t._grad_to_device(x)
+	fresh = t._device_grad_take_pending(x)
+	return _bind(x.device.grad_buf, t.tensor_numel(x)), fresh
+}
+
 @(private)
 _in_data :: proc(x: ^t.Tensor) -> Bind {
 	t._data_to_device(x)
@@ -382,10 +430,10 @@ _hook_backward :: proc(node: ^t.Tensor, allocator: mem.Allocator) -> bool {
 
 	// dx += f * dy
 	axpy :: proc(dy: Bind, x: ^t.Tensor, f: f32, n: int) {
-		g := _in_grad(x)
+		g, fresh := _out_grad(x)
 		_dispatch_1d(
 			.Unary_Bwd,
-			_p({u32(n), U_COPY, 0, 0, 0, 0, 0, 0}, {f, 0, 0, 0, 0, 0, 0, 0}),
+			_p({u32(n), U_COPY, 0, 0, 0, 0, 0, u32(fresh)}, {f, 0, 0, 0, 0, 0, 0, 0}),
 			{dy, dy, dy, g},
 			n,
 		)
@@ -406,10 +454,10 @@ _hook_backward :: proc(node: ^t.Tensor, allocator: mem.Allocator) -> bool {
 			x := _in_data(a)
 			y := x
 			if code == U_EXP || code == U_SQRT || code == U_PROB_WEIGHT {y = _in_data(node)}
-			g := _in_grad(a)
+			g, fresh := _out_grad(a)
 			_dispatch_1d(
 				.Unary_Bwd,
-				_p({u32(n), code, 0, 0, 0, 0, 0, 0}, {f0, f1, f2, 0, 0, 0, 0, 0}),
+				_p({u32(n), code, 0, 0, 0, 0, 0, u32(fresh)}, {f0, f1, f2, 0, 0, 0, 0, 0}),
 				{x, y, dy, g},
 				n,
 			)
@@ -430,31 +478,45 @@ _hook_backward :: proc(node: ^t.Tensor, allocator: mem.Allocator) -> bool {
 		for x, side in node.inputs {
 			if !x.requires_grad {continue}
 			ad, bd := _in_data(a), _in_data(b)
-			g := _in_grad(x)
+			g, fresh := _out_grad(x)
 			_dispatch_1d(
 				.Binary_Bwd,
-				_p({u32(n), _binary_code(op), u32(side), 0, 0, 0, 0, 0}),
+				_p({u32(n), _binary_code(op), u32(side), 0, 0, 0, 0, u32(fresh)}),
 				{ad, bd, dy, g},
 				n,
 			)
 			wrote(&written, &nw, x)
 		}
-	case .MatMul:
+	case .MatMul, .Linear:
 		a, b := node.inputs[0], node.inputs[1]
 		N, in_f, out_f := a.data.rows, a.data.cols, b.data.cols
 		if len(node.int_metadata) == 3 {
 			N, in_f, out_f = node.int_metadata[0], node.int_metadata[1], node.int_metadata[2]
 		}
+		if op == .Linear && node.inputs[2].requires_grad {
+			// the bias: db += Σ over the rows of dy
+			bias := node.inputs[2]
+			g, fresh := _out_grad(bias)
+			_dispatch_1d(
+				.Col_Sum,
+				_p({u32(N), u32(out_f), 0, 0, 0, 0, 0, u32(fresh)}),
+				{dy, g},
+				out_f,
+			)
+			wrote(&written, &nw, bias)
+		}
 		if a.requires_grad {
 			// dA[N, in] += dC[N, out] @ Bᵀ
 			bd := _in_data(b)
-			_matmul(dy, bd, _in_grad(a), N, in_f, out_f, false, true, true)
+			g, fresh := _out_grad(a)
+			_matmul(dy, bd, g, N, in_f, out_f, false, true, !fresh)
 			wrote(&written, &nw, a)
 		}
 		if b.requires_grad {
 			// dB[in, out] += Aᵀ @ dC
 			ad := _in_data(a)
-			_matmul(ad, dy, _in_grad(b), in_f, out_f, N, true, false, true)
+			g, fresh := _out_grad(b)
+			_matmul(ad, dy, g, in_f, out_f, N, true, false, !fresh)
 			wrote(&written, &nw, b)
 		}
 	case .AddBias:
@@ -466,7 +528,8 @@ _hook_backward :: proc(node: ^t.Tensor, allocator: mem.Allocator) -> bool {
 			wrote(&written, &nw, a)
 		}
 		if bias.requires_grad {
-			_dispatch_1d(.Col_Sum, _p({u32(N), u32(D), 0, 0, 0, 0, 0, 0}), {dy, _in_grad(bias)}, D)
+			g, fresh := _out_grad(bias)
+			_dispatch_1d(.Col_Sum, _p({u32(N), u32(D), 0, 0, 0, 0, 0, u32(fresh)}), {dy, g}, D)
 			wrote(&written, &nw, bias)
 		}
 	case .Sum, .Mean:
@@ -474,10 +537,11 @@ _hook_backward :: proc(node: ^t.Tensor, allocator: mem.Allocator) -> bool {
 		if a.requires_grad {
 			an := t.tensor_numel(a)
 			scale := f32(1) if op == .Sum else f32(1.0 / f64(an))
+			g, fresh := _out_grad(a)
 			_dispatch_1d(
 				.Bcast_Add,
-				_p({u32(an), 0, 0, 0, 0, 0, 0, 0}, {scale, 0, 0, 0, 0, 0, 0, 0}),
-				{dy, _in_grad(a)},
+				_p({u32(an), 0, 0, 0, 0, 0, 0, u32(fresh)}, {scale, 0, 0, 0, 0, 0, 0, 0}),
+				{dy, g},
 				an,
 			)
 			wrote(&written, &nw, a)
@@ -490,10 +554,11 @@ _hook_backward :: proc(node: ^t.Tensor, allocator: mem.Allocator) -> bool {
 			sign := f32(1) if i == 0 else f32(-1)
 			pd, td := _in_data(pred), _in_data(target)
 			f := sign * f32(2.0 / f64(an))
+			g, fresh := _out_grad(x)
 			_dispatch_1d(
 				.Mse_Bwd,
-				_p({u32(an), 0, 0, 0, 0, 0, 0, 0}, {f, 0, 0, 0, 0, 0, 0, 0}),
-				{pd, td, dy, _in_grad(x)},
+				_p({u32(an), 0, 0, 0, 0, 0, 0, u32(fresh)}, {f, 0, 0, 0, 0, 0, 0, 0}),
+				{pd, td, dy, g},
 				an,
 			)
 			wrote(&written, &nw, x)
@@ -503,10 +568,11 @@ _hook_backward :: proc(node: ^t.Tensor, allocator: mem.Allocator) -> bool {
 		if a.requires_grad {
 			an := t.tensor_numel(a)
 			width := an / node.data.rows
+			g, fresh := _out_grad(a)
 			_dispatch_1d(
 				.Row_Bcast_Add,
-				_p({u32(an), u32(width), 0, 0, 0, 0, 0, 0}),
-				{dy, _in_grad(a)},
+				_p({u32(an), u32(width), 0, 0, 0, 0, 0, u32(fresh)}),
+				{dy, g},
 				an,
 			)
 			wrote(&written, &nw, a)
@@ -521,10 +587,11 @@ _hook_backward :: proc(node: ^t.Tensor, allocator: mem.Allocator) -> bool {
 		a := node.inputs[0]
 		if a.requires_grad {
 			// dy is [cols, rows]: transposing it back accumulates into dx [rows, cols]
+			g, fresh := _out_grad(a)
 			_dispatch_1d(
 				.Transpose,
-				_p({u32(a.data.cols), u32(a.data.rows), 1, 0, 0, 0, 0, 0}),
-				{dy, _in_grad(a)},
+				_p({u32(a.data.cols), u32(a.data.rows), u32(!fresh), 0, 0, 0, 0, 0}),
+				{dy, g},
 				n,
 			)
 			wrote(&written, &nw, a)

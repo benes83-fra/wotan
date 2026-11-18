@@ -277,6 +277,30 @@ _backward_node_cpu :: proc(node: ^Tensor, allocator: mem.Allocator) {
 			}
 			l.matmul_tn_acc_simd(&a_view, &grad_view, &b_in.grad)
 		}
+	case .Linear:
+		// tensor_linear: the MatMul and AddBias cases on one node
+		x_in, w_in, b_in := node.inputs[0], node.inputs[1], node.inputs[2]
+		N, in_f, out_f := node.int_metadata[0], node.int_metadata[1], node.int_metadata[2]
+		grad_view := _mat(N, out_f, node.grad.data)
+		if x_in.requires_grad {
+			// dx += dy @ wᵀ
+			tensor_ensure_grad(x_in)
+			gx := _mat(N, in_f, x_in.grad.data)
+			l.matmul_nt_acc_simd(&grad_view, &w_in.data, &gx)
+		}
+		if w_in.requires_grad {
+			// dw += xᵀ @ dy
+			tensor_ensure_grad(w_in)
+			x_view := _mat(N, in_f, x_in.data.data)
+			l.matmul_tn_acc_simd(&x_view, &grad_view, &w_in.grad)
+		}
+		if b_in.requires_grad {
+			// db += Σ over the rows of dy
+			tensor_ensure_grad(b_in)
+			for i in 0 ..< N {
+				l.axpy_simd(1.0, node.grad.data[i * out_f:(i + 1) * out_f], b_in.grad.data)
+			}
+		}
 	case .Sum:
 		a_in := node.inputs[0]
 		if a_in.requires_grad {

@@ -287,7 +287,7 @@ _gpt_head :: proc(model: ^GPTModel, x: ^t.Tensor) -> ^t.Tensor {
 	// Tied: x·Eᵀ with the token embedding E [vocab, d_model]; its gradient
 	// collects both uses
 	e_t := t.tensor_transpose(model.token_emb.weight)
-	return t.tensor_add_bias(t.tensor_matmul(x, e_t), model.output_proj.bias)
+	return t.tensor_linear(x, e_t, model.output_proj.bias)
 }
 
 // ============================================================================

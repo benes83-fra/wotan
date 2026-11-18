@@ -36,33 +36,56 @@ _param :: proc(param: ^t.Tensor) -> (w, g: Bind) {
 	return _data(param), _grad(param)
 }
 
+// One launch updates up to ADAM_GROUP parameters (4 storage buffers each) whose
+// coefficients agree, as they do when the parameters share the learning rate
+// and the step count. The group is smaller if the device binds fewer storage
+// buffers per kernel.
 @(private)
-_hook_adam :: proc(
-	param: ^t.Tensor,
-	key: rawptr,
-	m, v: []f64,
-	lr, beta_1, beta_2, epsilon, weight_decay: f64,
-	step: int,
-) {
-	n := t.tensor_numel(param)
-	s := _optim_state(key, m, v)
-	w, g := _param(param)
+_hook_adam :: proc(updates: []t.Device_Adam_Update, beta_1, beta_2, epsilon, weight_decay: f64) {
 	// the coefficients of optim.adam_update, computed in f64
-	step_size := lr / (1.0 - math.pow(beta_1, f64(step)))
-	sqrt_bc2 := math.sqrt(1.0 - math.pow(beta_2, f64(step)))
-	decay := 1.0 - lr * weight_decay
-	f := [8]f32 {
-		f32(beta_1),
-		f32(beta_2),
-		f32(epsilon),
-		f32(step_size),
-		f32(sqrt_bc2),
-		f32(decay),
-		0,
-		0,
+	coefs :: proc(u: t.Device_Adam_Update, beta_1, beta_2, epsilon, weight_decay: f64) -> [8]f32 {
+		step_size := u.lr / (1.0 - math.pow(beta_1, f64(u.step)))
+		sqrt_bc2 := math.sqrt(1.0 - math.pow(beta_2, f64(u.step)))
+		decay := 1.0 - u.lr * weight_decay
+		return {
+			f32(beta_1),
+			f32(beta_2),
+			f32(epsilon),
+			f32(step_size),
+			f32(sqrt_bc2),
+			f32(decay),
+			0,
+			0,
+		}
 	}
-	_dispatch_1d(.Adam, _p({u32(n), 0, 0, 0, 0, 0, 0, 0}, f), {g, w, {s.a, n}, {s.b, n}}, n)
-	t._data_written_on_device(param)
+	group_max := clamp(int(G.limits.maxStorageBuffersPerShaderStage) / 4, 1, ADAM_GROUP)
+	i := 0
+	for i < len(updates) {
+		f := coefs(updates[i], beta_1, beta_2, epsilon, weight_decay)
+		binds: [4 * ADAM_GROUP]Bind
+		counts: [8]u32
+		group: [ADAM_GROUP]^t.Tensor
+		count, total := 0, 0
+		group_loop: for i < len(updates) && count < group_max {
+			u := updates[i]
+			if count > 0 && coefs(u, beta_1, beta_2, epsilon, weight_decay) != f {break}
+			for x in group[:count] {if x == u.param {break group_loop}} 	// listed twice
+			n := t.tensor_numel(u.param)
+			s := _optim_state(u.key, u.m, u.v)
+			w, g := _param(u.param)
+			binds[4 * count + 0] = g
+			binds[4 * count + 1] = w
+			binds[4 * count + 2] = {s.a, n}
+			binds[4 * count + 3] = {s.b, n}
+			counts[count] = u32(n)
+			group[count] = u.param
+			count += 1
+			total += n
+			i += 1
+		}
+		_dispatch_1d(_adam_kernel(count), _p(counts, f), binds[:4 * count], total)
+		for x in group[:count] {t._data_written_on_device(x)}
+	}
 }
 
 @(private)

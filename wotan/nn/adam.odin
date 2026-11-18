@@ -104,6 +104,8 @@ adam_step_scheduled :: proc(opt: ^Adam, s: optim.LR_Schedule, step: int) {
 @(private = "file")
 _adam_step :: proc(opt: ^Adam, schedule: ^optim.LR_Schedule, step: int) {
 	opt.timestep += 1
+	// device parameters are updated together after the loop
+	on_device := make([dynamic]t.Device_Adam_Update, context.temp_allocator)
 	for param, i in opt.parameters {
 		if !param.requires_grad || !t.tensor_has_grad(param) {continue}
 		opt.steps[i] += 1
@@ -113,18 +115,17 @@ _adam_step :: proc(opt: ^Adam, schedule: ^optim.LR_Schedule, step: int) {
 		}
 		key := raw_data(opt.moment_1[i])
 		if param.device != nil && t._device_hooks.adam != nil {
-			// device parameter: fused update kernel, moments kept on the device
-			t._device_hooks.adam(
-				param,
-				key,
-				opt.moment_1[i],
-				opt.moment_2[i],
-				lr,
-				opt.beta_1,
-				opt.beta_2,
-				opt.epsilon,
-				opt.weight_decay,
-				opt.steps[i],
+			// device parameter: update kernel, moments kept on the device
+			append(
+				&on_device,
+				t.Device_Adam_Update {
+					param = param,
+					key = key,
+					m = opt.moment_1[i],
+					v = opt.moment_2[i],
+					lr = lr,
+					step = opt.steps[i],
+				},
 			)
 			continue
 		}
@@ -144,6 +145,9 @@ _adam_step :: proc(opt: ^Adam, schedule: ^optim.LR_Schedule, step: int) {
 			opt.weight_decay,
 			opt.steps[i],
 		)
+	}
+	if len(on_device) > 0 {
+		t._device_hooks.adam(on_device[:], opt.beta_1, opt.beta_2, opt.epsilon, opt.weight_decay)
 	}
 }
 

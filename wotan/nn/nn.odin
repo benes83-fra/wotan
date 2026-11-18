@@ -148,13 +148,8 @@ linear_layer_new :: proc(
 linear_forward :: proc(layer: ^LinearLayer, x: ^t.Tensor) -> (fwd_out: ^t.Tensor) {
 	rec_ := forward_record_begin()
 	defer forward_record_end(rec_, fwd_out)
-	// 1. Matrix Multiplication: X @ W
-	out := t.tensor_matmul(x, layer.weights)
-
-	// 2. Add Bias: (X @ W) + b
-	out = t.tensor_add_bias(out, layer.bias)
-
-	return out
+	// X @ W + b in one op
+	return t.tensor_linear(x, layer.weights, layer.bias)
 }
 
 linear_layer_free :: proc(layer: ^LinearLayer) {

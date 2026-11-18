@@ -187,12 +187,10 @@ _backward_p3 :: proc(node: ^t.Tensor, dy: Bind, n: int) -> bool {
 		if !a.requires_grad {return true}
 		pp := node.pool_params
 		xd := _in_data(a)
-		_dispatch_1d(
-			.Pool_Bwd,
-			_pool_params(a, pp.kH, pp.kW, pp.stride, node.op),
-			{xd, dy, _in_grad(a)},
-			t.tensor_numel(a),
-		)
+		g, fresh := _out_grad(a)
+		pr := _pool_params(a, pp.kH, pp.kW, pp.stride, node.op)
+		pr.u[7] = u32(fresh)
+		_dispatch_1d(.Pool_Bwd, pr, {xd, dy, g}, t.tensor_numel(a))
 		t._grad_written_on_device(a)
 	case .BatchNorm2d:
 		_batch_norm_backward(node, dy)
@@ -209,8 +207,9 @@ _conv2d_backward :: proc(node: ^t.Tensor, dy: Bind) {
 	d := _conv2d_dims(x, w, node.conv_params.stride, node.conv_params.pad)
 	NL := d.N * d.L
 	if b != nil && b.requires_grad {
-		u := [8]u32{u32(d.C_out), u32(d.L), u32(d.N), 0, 0, 0, 0, 0}
-		_dispatch_rows(.Chan_Sum, _p(u), {dy, _in_grad(b)}, d.C_out)
+		g, fresh := _out_grad(b)
+		u := [8]u32{u32(d.C_out), u32(d.L), u32(d.N), 0, 0, 0, 0, u32(fresh)}
+		_dispatch_rows(.Chan_Sum, _p(u), {dy, g}, d.C_out)
 		t._grad_written_on_device(b)
 	}
 	if !x.requires_grad && !w.requires_grad {return}
@@ -220,7 +219,8 @@ _conv2d_backward :: proc(node: ^t.Tensor, dy: Bind) {
 	if w.requires_grad {
 		// dW [C_out, CK] += dy' @ colᵀ
 		col := _im2col_2d(d, _in_data(x))
-		_matmul(dyp, col, _in_grad(w), d.C_out, d.CK, NL, false, true, true)
+		g, fresh := _out_grad(w)
+		_matmul(dyp, col, g, d.C_out, d.CK, NL, false, true, !fresh)
 		_release_buf(col.buf)
 		t._grad_written_on_device(w)
 	}
@@ -251,10 +251,11 @@ _conv1d_backward :: proc(node: ^t.Tensor, dy: Bind) {
 	b: ^t.Tensor = node.inputs[2] if len(node.inputs) > 2 else nil
 	d := _conv1d_dims(node.int_metadata[:])
 	if b != nil && b.requires_grad {
+		g, fresh := _out_grad(b)
 		_dispatch_1d(
 			.Col_Sum,
-			_p({u32(d.R), u32(d.C_out), 0, 0, 0, 0, 0, 0}),
-			{dy, _in_grad(b)},
+			_p({u32(d.R), u32(d.C_out), 0, 0, 0, 0, 0, u32(fresh)}),
+			{dy, g},
 			d.C_out,
 		)
 		t._grad_written_on_device(b)
@@ -262,7 +263,8 @@ _conv1d_backward :: proc(node: ^t.Tensor, dy: Bind) {
 	if w.requires_grad {
 		// dW [C_out, CK] += dyᵀ @ col
 		col := _im2col_1d(d, _in_data(x))
-		_matmul(dy, col, _in_grad(w), d.C_out, d.CK, d.R, true, false, true)
+		g, fresh := _out_grad(w)
+		_matmul(dy, col, g, d.C_out, d.CK, d.R, true, false, !fresh)
 		_release_buf(col.buf)
 		t._grad_written_on_device(w)
 	}
@@ -295,16 +297,20 @@ _batch_norm_backward :: proc(node: ^t.Tensor, dy: Bind) {
 	xd := _in_data(x)
 	sums := Bind{_acquire(2 * C), 2 * C}
 	// gradients not wanted go to scratch buffers (never the same buffer twice)
-	dg := _in_grad(gamma) if want_g else Bind{_acquire(C), C}
-	db := _in_grad(beta) if want_b else Bind{_acquire(C), C}
-	u := [8]u32{u32(C), u32(HW), u32(N), u32(want_g), u32(want_b), 0, 0, 0}
+	// (scratch buffers are overwritten: their contents do not matter)
+	dg, db := Bind{}, Bind{}
+	fresh_g, fresh_b := true, true
+	if want_g {dg, fresh_g = _out_grad(gamma)} else {dg = {_acquire(C), C}}
+	if want_b {db, fresh_b = _out_grad(beta)} else {db = {_acquire(C), C}}
+	u := [8]u32{u32(C), u32(HW), u32(N), u32(want_g), u32(want_b), u32(fresh_g), u32(fresh_b), 0}
 	_dispatch_rows(.Bn_Bwd_Sums, _p(u), {xd, dy, stats, sums, dg, db}, C)
 	if want_g {t._grad_written_on_device(gamma)} else {_release_buf(dg.buf)}
 	if want_b {t._grad_written_on_device(beta)} else {_release_buf(db.buf)}
 	if x.requires_grad {
 		n := t.tensor_numel(x)
-		u2 := [8]u32{u32(n), u32(HW), u32(C), u32(training), u32(N * HW), 0, 0, 0}
-		_dispatch_1d(.Bn_Bwd_X, _p(u2), {xd, _in_data(gamma), dy, stats, sums, _in_grad(x)}, n)
+		g, fresh := _out_grad(x)
+		u2 := [8]u32{u32(n), u32(HW), u32(C), u32(training), u32(N * HW), 0, 0, u32(fresh)}
+		_dispatch_1d(.Bn_Bwd_X, _p(u2), {xd, _in_data(gamma), dy, stats, sums, g}, n)
 		t._grad_written_on_device(x)
 	}
 	_release_buf(sums.buf)

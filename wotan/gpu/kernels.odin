@@ -1,5 +1,8 @@
 package gpu
 
+import "core:fmt"
+import "core:strings"
+
 // ============================================================================
 // WGSL compute kernels (f32)
 // ============================================================================
@@ -9,6 +12,9 @@ package gpu
 // them. 1D kernels run 256 threads per workgroup over a 2D grid (idx1).
 // Each kernel mirrors the CPU op of the same name in wotan/tensor; where the CPU
 // code has a numerically careful form (sigmoid, tanh, softplus), so does the kernel.
+// Gradient kernels written as `dx += ...` overwrite instead when their overwrite
+// flag is set (u7 unless noted; see keep): the first write to a fresh gradient
+// then needs no clear before it.
 
 @(private)
 Kernel :: enum {
@@ -29,6 +35,9 @@ Kernel :: enum {
 	Strided_Copy, // row blocks from one layout to another (slice, concat)
 	Scale_Inplace, // y *= f
 	Adam,
+	Adam_2, // Adam on 2, 3, 4 parameters (generated source, see _adam_source)
+	Adam_3,
+	Adam_4,
 	Sgd,
 	Softmax_Rows, // per row: softmax (scaled, masked), logsumexp or cross-entropy loss
 	Softmax_Bwd, // per row: dx (+)= f * p * (g - Σ p g)
@@ -75,6 +84,12 @@ struct P {
 
 fn idx1(g: vec3<u32>, nw: vec3<u32>) -> u32 {
 	return g.y * nw.x * 256u + g.x;
+}
+// The old value of an accumulated gradient, or 0 when the kernel overwrites
+// it (overwrite = 1: the buffer holds no gradient yet and was not cleared;
+// gradient kernels take the flag in u7)
+fn keep(old: f32, overwrite: u32) -> f32 {
+	return select(old, 0.0, overwrite == 1u);
 }
 // 1 / (1 + e^-x) without overflow for large |x|
 fn sigm(x: f32) -> f32 {
@@ -263,7 +278,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 		}
 		default: {}
 	}
-	dx[i] = dx[i] + d;
+	dx[i] = keep(dx[i], p.u7) + d;
 }
 `,
 	.Binary           = `
@@ -304,17 +319,19 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 		let z = b[i];
 		d = select(gy / z, -gy * a[i] / (z * z), p.u2 == 1u);
 	}
-	dst[i] = dst[i] + d;
+	dst[i] = keep(dst[i], p.u7) + d;
 }
 `,
 	// C[M, N] (+)= op(A)[M, K] @ op(B)[K, N]; u0 M, u1 N, u2 K, u3 transA, u4 transB,
-	// u5 accumulate, u6 first row of this dispatch. Workgroup z is the batch:
+	// u5 accumulate, u6 first row of this dispatch, u7 = 1: add bias[column]
+	// (tensor_linear; the dummy buffer is bound otherwise). Workgroup z is the batch:
 	// batch z uses the z-th contiguous A, B and C blocks. 16x16 tiles in
 	// workgroup memory.
 	.Matmul           = `
 @group(0) @binding(1) var<storage, read> A: array<f32>;
 @group(0) @binding(2) var<storage, read> B: array<f32>;
 @group(0) @binding(3) var<storage, read_write> C: array<f32>;
+@group(0) @binding(4) var<storage, read> bias: array<f32>;
 var<workgroup> As: array<array<f32, 16>, 16>;
 var<workgroup> Bs: array<array<f32, 16>, 16>;
 @compute @workgroup_size(16, 16)
@@ -346,7 +363,9 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
 	}
 	if (row < M && col < N) {
 		let o = c0 + row * N + col;
-		if (p.u5 == 1u) { C[o] = C[o] + acc; } else { C[o] = acc; }
+		var v = acc;
+		if (p.u7 == 1u) { v = v + bias[col]; }
+		if (p.u5 == 1u) { C[o] = C[o] + v; } else { C[o] = v; }
 	}
 }
 `,
@@ -360,6 +379,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(local_invocation_i
 @group(0) @binding(1) var<storage, read> A: array<f32>;
 @group(0) @binding(2) var<storage, read> B: array<f32>;
 @group(0) @binding(3) var<storage, read_write> C: array<f32>;
+@group(0) @binding(4) var<storage, read> bias: array<f32>;
 var<workgroup> As: array<array<f32, 64>, 16>;
 var<workgroup> Bs: array<array<f32, 64>, 16>;
 fn load_a(a0: u32, r: u32, k: u32) -> f32 {
@@ -375,7 +395,9 @@ fn load_b(b0: u32, k: u32, c: u32) -> f32 {
 fn store(c0: u32, r: u32, col: u32, v: f32) {
 	if (r >= p.u0 || col >= p.u1) { return; }
 	let o = c0 + r * p.u1 + col;
-	if (p.u5 == 1u) { C[o] = C[o] + v; } else { C[o] = v; }
+	var w = v;
+	if (p.u7 == 1u) { w = w + bias[col]; }
+	if (p.u5 == 1u) { C[o] = C[o] + w; } else { C[o] = w; }
 }
 fn store_row(c0: u32, r: u32, col: u32, v: vec4<f32>) {
 	store(c0, r, col, v.x);
@@ -474,7 +496,7 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid
 fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
 	let i = idx1(g, nw);
 	if (i >= p.u0) { return; }
-	dx[i] = dx[i] + p.f0 * s[p.u2];
+	dx[i] = keep(dx[i], p.u7) + p.f0 * s[p.u2];
 }
 `,
 	// dx[i] += f0 * dy[0] * (a[i] - b[i])
@@ -487,7 +509,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
 	let i = idx1(g, nw);
 	if (i >= p.u0) { return; }
-	dx[i] = dx[i] + p.f0 * dy[0] * (a[i] - b[i]);
+	dx[i] = keep(dx[i], p.u7) + p.f0 * dy[0] * (a[i] - b[i]);
 }
 `,
 	// out[i] = a[i] + bias[i % D]; u0 n, u1 D
@@ -512,7 +534,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 	if (j >= p.u1) { return; }
 	var s = 0.0;
 	for (var i = 0u; i < p.u0; i++) { s = s + dy[i * p.u1 + j]; }
-	db[j] = db[j] + s;
+	db[j] = keep(db[j], p.u7) + s;
 }
 `,
 	// out[b] = Σ_j x[b * W + j]; u0 rows, u1 W
@@ -536,7 +558,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
 	let i = idx1(g, nw);
 	if (i >= p.u0) { return; }
-	dx[i] = dx[i] + dy[i / p.u1];
+	dx[i] = keep(dx[i], p.u7) + dy[i / p.u1];
 }
 `,
 	// x [rows, cols] -> y [cols, rows]; u0 rows, u1 cols, u2 accumulate
@@ -596,6 +618,9 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 	w[i] = w[i] * p.f5 - p.f3 * mi / (sqrt(vi) / p.f4 + p.f2);
 }
 `,
+	.Adam_2           = "",
+	.Adam_3           = "",
+	.Adam_4           = "",
 	// optim.sgd_update: u1 momentum on, u2 nesterov; f0 lr, f1 momentum, f2 weight decay
 	.Sgd              = `
 @group(0) @binding(1) var<storage, read> gr: array<f32>;
@@ -797,7 +822,7 @@ fn main(@builtin(local_invocation_id) l3: vec3<u32>, @builtin(workgroup_id) wid:
 	for (var j = lid; j < C; j += 256u) {
 		let i = r * C + j;
 		let prob = exp(x[i] - m) / s;
-		dx[i] = dx[i] + coef * (prob - select(0.0, 1.0, j == tgt));
+		dx[i] = keep(dx[i], p.u7) + coef * (prob - select(0.0, 1.0, j == tgt));
 	}
 }
 `,
@@ -966,15 +991,16 @@ fn main(@builtin(local_invocation_id) l3: vec3<u32>, @builtin(workgroup_id) wid:
 		let i = r * D + j;
 		let a = dy[i] * gamma[j];
 		if (rms) {
-			dx[i] = dx[i] + inv * a - x[i] * inv * inv * inv * sax / Df;
+			dx[i] = keep(dx[i], p.u7) + inv * a - x[i] * inv * inv * inv * sax / Df;
 		} else {
 			let xh = (x[i] - mean) * inv;
-			dx[i] = dx[i] + (Df * a - sa - xh * sax) * inv / Df;
+			dx[i] = keep(dx[i], p.u7) + (Df * a - sa - xh * sax) * inv / Df;
 		}
 	}
 }
 `,
-	// per column j: u4 = 1: dgamma[j] += Σ_r dy·x̂; u3 = 1: dbeta[j] += Σ_r dy
+	// per column j: u4 = 1: dgamma[j] += Σ_r dy·x̂; u3 = 1: dbeta[j] += Σ_r dy;
+	// u6, u7: overwrite dgamma, dbeta
 	.Norm_Bwd_Param   = `
 @group(0) @binding(1) var<storage, read> x: array<f32>;
 @group(0) @binding(2) var<storage, read> dy: array<f32>;
@@ -993,8 +1019,8 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 		sg = sg + dy[i] * (x[i] - stats[2u * r]) * stats[2u * r + 1u];
 		sb = sb + dy[i];
 	}
-	if (p.u4 == 1u) { dgamma[j] = dgamma[j] + sg; }
-	if (p.u3 == 1u) { dbeta[j] = dbeta[j] + sb; }
+	if (p.u4 == 1u) { dgamma[j] = keep(dgamma[j], p.u6) + sg; }
+	if (p.u3 == 1u) { dbeta[j] = keep(dbeta[j], p.u7) + sb; }
 }
 `,
 	// out[r, e] = W[ids[r], e] (0 for an id outside [0, u2)); u0 rows, u1 E, u2 vocab
@@ -1106,7 +1132,7 @@ fn main(@builtin(global_invocation_id) gi: vec3<u32>, @builtin(num_workgroups) n
 	if (r >= p.u0) { return; }
 	var s = 0.0;
 	for (var j = 0u; j < p.u1; j++) { s = s + a[r * p.u1 + j] * b[r * p.u1 + j]; }
-	o[r] = o[r] + s;
+	o[r] = keep(o[r], p.u7) + s;
 }
 `,
 	// ---- phase 3 ----
@@ -1238,7 +1264,7 @@ fn main(@builtin(local_invocation_id) l3: vec3<u32>, @builtin(workgroup_id) wid:
 		for (var j = lid; j < p.u2 * L; j += 256u) { s = s + dy[((j / L) * p.u0 + c) * L + j % L]; }
 	}
 	s = wg_sum(s, lid);
-	if (live && lid == 0u) { db[c] = db[c] + s; }
+	if (live && lid == 0u) { db[c] = keep(db[c], p.u7) + s; }
 }
 `,
 	// planes [u0 = N·C, H = u1, W = u2], window u3 x u4, stride u5; u6 0 max, 1 average.
@@ -1297,7 +1323,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 		}
 		oh = oh - 1;
 	}
-	dx[i] = dx[i] + acc;
+	dx[i] = keep(dx[i], p.u7) + acc;
 }
 `,
 	// one workgroup per channel c of x [N, C, HW]. Training (u3 = 1): batch mean
@@ -1362,7 +1388,8 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 }
 `,
 	// one workgroup per channel: sums[2c] = Σ dy, sums[2c + 1] = Σ dy·x̂;
-	// u3 = 1: dgamma[c] += Σ dy·x̂, u4 = 1: dbeta[c] += Σ dy; u0 C, u1 HW, u2 N
+	// u3 = 1: dgamma[c] += Σ dy·x̂, u4 = 1: dbeta[c] += Σ dy; u0 C, u1 HW, u2 N;
+	// u5, u6: overwrite dgamma, dbeta
 	.Bn_Bwd_Sums      = WG_SUM + `
 @group(0) @binding(1) var<storage, read> x: array<f32>;
 @group(0) @binding(2) var<storage, read> dy: array<f32>;
@@ -1393,8 +1420,8 @@ fn main(@builtin(local_invocation_id) l3: vec3<u32>, @builtin(workgroup_id) wid:
 	if (live && lid == 0u) {
 		sums[2u * c] = sd;
 		sums[2u * c + 1u] = sdx;
-		if (p.u3 == 1u) { dgamma[c] = dgamma[c] + sdx; }
-		if (p.u4 == 1u) { dbeta[c] = dbeta[c] + sd; }
+		if (p.u3 == 1u) { dgamma[c] = keep(dgamma[c], p.u5) + sdx; }
+		if (p.u4 == 1u) { dbeta[c] = keep(dbeta[c], p.u6) + sd; }
 	}
 }
 `,
@@ -1415,12 +1442,12 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 	let inv = stats[p.u2 + c];
 	let gi = gamma[c] * inv;
 	if (p.u3 == 0u) {
-		dx[i] = dx[i] + dy[i] * gi;
+		dx[i] = keep(dx[i], p.u7) + dy[i] * gi;
 		return;
 	}
 	let M = f32(p.u4);
 	let xh = (x[i] - stats[c]) * inv;
-	dx[i] = dx[i] + gi / M * (M * dy[i] - sums[2u * c] - xh * sums[2u * c + 1u]);
+	dx[i] = keep(dx[i], p.u7) + gi / M * (M * dy[i] - sums[2u * c] - xh * sums[2u * c + 1u]);
 }
 `,
 	// ---- phase 4 ----
@@ -1637,3 +1664,93 @@ fn window_argmax(plane: u32, oh: u32, ow: u32) -> u32 {
 	return arg;
 }
 `
+
+// parameters per launch of the multi-parameter Adam kernels
+@(private)
+ADAM_GROUP :: 4
+
+@(private)
+_adam_kernel :: proc(count: int) -> Kernel {
+	switch count {
+	case 2:
+		return .Adam_2
+	case 3:
+		return .Adam_3
+	case 4:
+		return .Adam_4
+	}
+	return .Adam
+}
+
+// _kernel_source: the WGSL body of a kernel (generated for the multi-parameter Adam)
+@(private)
+_kernel_source :: proc(k: Kernel, allocator := context.temp_allocator) -> string {
+	#partial switch k {
+	case .Adam_2:
+		return _adam_source(2, allocator)
+	case .Adam_3:
+		return _adam_source(3, allocator)
+	case .Adam_4:
+		return _adam_source(4, allocator)
+	}
+	return KERNEL_SOURCES[k]
+}
+
+// The Adam kernel for `count` parameters: parameter k binds its gradient,
+// weights and moments at bindings 4k + 1 .. 4k + 4 and has u_k elements; the
+// threads run over the parameters one after the other. The update is the one
+// of the Adam kernel (the same coefficients for all parameters).
+@(private)
+_adam_source :: proc(count: int, allocator := context.temp_allocator) -> string {
+	b := strings.builder_make(allocator)
+	for k in 0 ..< count {
+		fmt.sbprintf(
+			&b,
+			"@group(0) @binding(%d) var<storage, read> gr%d: array<f32>;\n",
+			4 * k + 1,
+			k,
+		)
+		fmt.sbprintf(
+			&b,
+			"@group(0) @binding(%d) var<storage, read_write> w%d: array<f32>;\n",
+			4 * k + 2,
+			k,
+		)
+		fmt.sbprintf(
+			&b,
+			"@group(0) @binding(%d) var<storage, read_write> m%d: array<f32>;\n",
+			4 * k + 3,
+			k,
+		)
+		fmt.sbprintf(
+			&b,
+			"@group(0) @binding(%d) var<storage, read_write> v%d: array<f32>;\n",
+			4 * k + 4,
+			k,
+		)
+	}
+	strings.write_string(&b, "@compute @workgroup_size(256)\n")
+	strings.write_string(
+		&b,
+		"fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {\n",
+	)
+	strings.write_string(&b, "\tvar i = idx1(g, nw);\n")
+	for k in 0 ..< count {
+		fmt.sbprintf(&b, "\tif (i < p.u%d) ", k)
+		strings.write_string(&b, "{\n") // (a brace in a format string is a format directive)
+		fmt.sbprintf(&b, "\t\tlet gi = gr%d[i];\n", k)
+		fmt.sbprintf(&b, "\t\tlet mi = p.f0 * m%d[i] + (1.0 - p.f0) * gi;\n", k)
+		fmt.sbprintf(&b, "\t\tlet vi = p.f1 * v%d[i] + (1.0 - p.f1) * gi * gi;\n", k)
+		fmt.sbprintf(&b, "\t\tm%d[i] = mi;\n\t\tv%d[i] = vi;\n", k, k)
+		fmt.sbprintf(
+			&b,
+			"\t\tw%d[i] = w%d[i] * p.f5 - p.f3 * mi / (sqrt(vi) / p.f4 + p.f2);\n",
+			k,
+			k,
+		)
+		strings.write_string(&b, "\t\treturn;\n\t}\n")
+		fmt.sbprintf(&b, "\ti = i - p.u%d;\n", k)
+	}
+	strings.write_string(&b, "}\n")
+	return strings.to_string(b)
+}

@@ -183,13 +183,13 @@ gpu_all_fallback_training_test :: proc() {
 	st := gpu.stats()
 	for op in t.Op {gpu.set_kernel_enabled(op, true)}
 	_compare_runs("Tanh MLP, all ops on the fallback", ref_l, got_l, ref_p, got_p, 2e-3)
-	// two linear layers: two matmuls per step
+	// two linear layers: two linear ops per step
 	check(
-		st.forward_fallbacks[.MatMul] == 50,
-		"matmul ran %d times on the fallback, want 50",
-		st.forward_fallbacks[.MatMul],
+		st.forward_fallbacks[.Linear] == 50,
+		"linear ran %d times on the fallback, want 50",
+		st.forward_fallbacks[.Linear],
 	)
-	check(st.backward_fallbacks[.MatMul] > 0, "matmul backward never used the fallback")
+	check(st.backward_fallbacks[.Linear] > 0, "linear backward never used the fallback")
 }
 
 gpu_sgd_clip_test :: proc() {
@@ -377,41 +377,226 @@ gpu_checkpoint_test :: proc() {
 	os.remove(path)
 }
 
-// Not a check: step times on the CPU and the GPU for a small and a large MLP
+// Gradient bookkeeping and Adam on the GPU vs the CPU: two backward passes
+// into the same gradients (the second adds to the first), zeroed gradients
+// read back, and Adam with parameters that differ in learning rate and in step
+// count (one parameter's gradient is dropped in some steps), so the device
+// updates parameters in groups of different makeup
+gpu_grad_accumulation_adam_test :: proc() {
+	fmt.println(
+		"gpu_grad_accumulation_adam_test: accumulated and zeroed gradients, Adam with mixed learning rates and step counts",
+	)
+	Result :: struct {
+		grads:  [][]f64,
+		zeroed: f64,
+		losses: []f64,
+		params: [][]f64,
+	}
+	run :: proc(on_gpu: bool) -> (r: Result) {
+		x, y := _regression_data(32, 5, 2, 21)
+		defer {t.tensor_free(x); t.tensor_free(y)}
+		model := _mlp({5, 12, 12, 2}, .Tanh, 17)
+		defer nn.sequential_free(model)
+		ps := nn.sequential_parameters(model, context.temp_allocator)
+		if on_gpu {
+			gpu.to_device(ps[:])
+			gpu.to_device(x)
+			gpu.to_device(y)
+		}
+		// two backward passes, no zeroing in between
+		for _ in 0 ..< 2 {
+			loss := t.tensor_mse_loss(nn.sequential_forward(model, x), y)
+			t.tensor_backward(loss)
+			t.tensor_free_graph(loss)
+		}
+		r.grads = make([][]f64, len(ps), context.temp_allocator)
+		for p, i in ps {r.grads[i] = _clone(t.tensor_grad_values(p))}
+		// zeroed gradients read back as zeros
+		for p in ps {t.tensor_zero_grad(p)}
+		for p in ps {for v in t.tensor_grad_values(p) {r.zeroed = max(r.zeroed, abs(v))}}
+		// Adam: the last layer with its own learning rate; the first weight's
+		// gradient dropped after the backward pass of steps 2 and 5
+		opt := nn.adam_new(0.01)
+		defer nn.adam_free(&opt)
+		for p, i in ps {
+			if i <
+			   len(ps) -
+				   2 {nn.adam_add_param(&opt, p)} else {nn.adam_add_param_with_lr(&opt, p, 0.004)}
+		}
+		r.losses = make([]f64, 8, context.temp_allocator)
+		for step in 0 ..< 8 {
+			loss := t.tensor_mse_loss(nn.sequential_forward(model, x), y)
+			t.tensor_backward(loss)
+			r.losses[step] = t.tensor_item(loss)
+			t.tensor_free_graph(loss)
+			if step == 2 || step == 5 {t.tensor_drop_grad(ps[0])}
+			nn.adam_step(&opt)
+			nn.adam_zero_grad(&opt)
+		}
+		r.params = make([][]f64, len(ps), context.temp_allocator)
+		for p, i in ps {r.params[i] = _clone(t.tensor_values(p))}
+		if on_gpu {gpu.to_host(ps[:])}
+		return
+	}
+	ref := run(false)
+	got := run(true)
+	worst_g := 0.0
+	for g, i in got.grads {worst_g = max(worst_g, _max_rel(g, ref.grads[i]))}
+	check(worst_g <= 1e-4, "accumulated gradients differ from the CPU by %.2e (> 1e-4)", worst_g)
+	check(got.zeroed == 0, "a zeroed gradient read back as %v", got.zeroed)
+	_compare_runs(
+		"Adam, mixed learning rates and step counts",
+		ref.losses,
+		got.losses,
+		ref.params,
+		got.params,
+		2e-3,
+	)
+	fmt.printfln("    accumulated gradients: max rel diff to CPU %.1e", worst_g)
+}
+
+// Not a check: the time of one Adam training step on the CPU and the GPU, for
+// MLPs of growing size and for the GPT of gpu_gpt_training_test (without
+// dropout and gradient clipping). Only the step loop is timed, after warm-up
+// steps. The GPU runs twice: reading the loss after every step (each read
+// waits until the GPU has finished the step) and reading it once at the end.
 gpu_speed_report :: proc() {
 	fmt.println(
-		"gpu_speed_report: Adam training step, CPU vs GPU (mean of 10 steps after 2 warm-up steps)",
+		"gpu_speed_report: Adam training step in ms, CPU vs GPU (GPU: loss read every step / once at the end)",
 	)
 	Config :: struct {
 		sizes: []int,
 		batch: int,
+		steps: int,
 	}
 	configs := []Config {
-		{{16, 64, 64, 1}, 64},
-		{{64, 256, 256, 1}, 256},
-		{{256, 1024, 1024, 1}, 512},
-		{{512, 2048, 2048, 1}, 1024},
+		{{16, 64, 64, 1}, 64, 200},
+		{{64, 256, 256, 1}, 256, 50},
+		{{256, 1024, 1024, 1}, 512, 10},
+		{{512, 2048, 2048, 1}, 1024, 4},
 	}
 	for c in configs {
-		ms: [2]f64
-		for on_gpu, k in ([]bool{false, true}) {
-			x, y := _regression_data(c.batch, c.sizes[0], 1, 1)
-			model := _mlp(c.sizes, .ReLU, 1)
-			_train(model, x, y, {steps = 2, on_gpu = on_gpu})
-			start := time.now()
-			_train(model, x, y, {steps = 10, on_gpu = on_gpu})
-			ms[k] = time.duration_milliseconds(time.since(start)) / 10
-			nn.sequential_free(model)
-			t.tensor_free(x)
-			t.tensor_free(y)
-		}
+		cpu := _mlp_step_ms(c.sizes, c.batch, c.steps, false, true)
+		each := _mlp_step_ms(c.sizes, c.batch, c.steps, true, true)
+		once := _mlp_step_ms(c.sizes, c.batch, c.steps, true, false)
 		fmt.printfln(
-			"    sizes %v, batch %4d: CPU %8.2f ms   GPU %7.2f ms   (%.1fx)",
-			c.sizes,
+			"    MLP %-20s batch %4d: CPU %8.3f   GPU %7.3f / %7.3f   (%.1fx / %.1fx)",
+			fmt.tprint(c.sizes),
 			c.batch,
-			ms[0],
-			ms[1],
-			ms[0] / ms[1],
+			cpu,
+			each,
+			once,
+			cpu / each,
+			cpu / once,
 		)
 	}
+	cpu := _gpt_step_ms(100, false, true)
+	each := _gpt_step_ms(100, true, true)
+	once := _gpt_step_ms(100, true, false)
+	fmt.printfln(
+		"    GPT (2 blocks, d 32, %d x %d tokens): CPU %8.3f   GPU %7.3f / %7.3f   (%.1fx / %.1fx)",
+		TF_BATCH,
+		TF_SEQ,
+		cpu,
+		each,
+		once,
+		cpu / each,
+		cpu / once,
+	)
+}
+
+// _mlp_step_ms: mean time of `steps` Adam steps of a ReLU MLP (after 3 warm-up
+// steps); read_each: the loss is read after every step
+_mlp_step_ms :: proc(sizes: []int, batch, steps: int, on_gpu, read_each: bool) -> f64 {
+	x, y := _regression_data(batch, sizes[0], 1, 1)
+	defer {t.tensor_free(x); t.tensor_free(y)}
+	model := _mlp(sizes, .ReLU, 1)
+	defer nn.sequential_free(model)
+	ps := nn.sequential_parameters(model, context.temp_allocator)
+	opt := nn.adam_new(0.001)
+	defer nn.adam_free(&opt)
+	for p in ps {nn.adam_add_param(&opt, p)}
+	if on_gpu {
+		gpu.to_device(ps[:])
+		gpu.to_device(x)
+		gpu.to_device(y)
+	}
+	scope: t.Graph_Scope
+	defer t.graph_scope_destroy(&scope)
+	run :: proc(
+		model: ^nn.Sequential,
+		opt: ^nn.Adam,
+		x, y: ^t.Tensor,
+		scope: ^t.Graph_Scope,
+		n: int,
+		read_each: bool,
+	) {
+		for _ in 0 ..< n {
+			t.graph_begin(scope)
+			loss := t.tensor_mse_loss(nn.sequential_forward(model, x), y)
+			t.tensor_backward(loss)
+			if read_each {_ = t.tensor_item(loss)}
+			t.graph_end(scope)
+			nn.adam_step(opt)
+			nn.adam_zero_grad(opt)
+		}
+	}
+	run(model, &opt, x, y, &scope, 3, read_each)
+	if on_gpu {gpu.synchronize()}
+	start := time.now()
+	run(model, &opt, x, y, &scope, steps, read_each)
+	if on_gpu {gpu.synchronize()} 	// the last steps' work, as one final read would
+	ms := time.duration_milliseconds(time.since(start)) / f64(steps)
+	if on_gpu {
+		gpu.to_host(ps[:])
+		gpu.to_host(x)
+		gpu.to_host(y)
+	}
+	return ms
+}
+
+// _gpt_step_ms: as _mlp_step_ms, for the GPT of gpu_gpt_training_test
+_gpt_step_ms :: proc(steps: int, on_gpu, read_each: bool) -> f64 {
+	rand.reset(99)
+	model := nn.gpt_model_new(TF_VOCAB, 32, 4, 64, 2, TF_SEQ)
+	defer nn.gpt_model_free(&model)
+	ps := nn.gpt_model_parameters(&model, context.temp_allocator)
+	opt := nn.adam_new(0.003)
+	defer nn.adam_free(&opt)
+	for p in ps {nn.adam_add_param(&opt, p)}
+	if on_gpu {gpu.to_device(ps[:])}
+	mask := nn.create_causal_mask(TF_SEQ, context.temp_allocator)
+	scope: t.Graph_Scope
+	defer t.graph_scope_destroy(&scope)
+	run :: proc(
+		model: ^nn.GPTModel,
+		opt: ^nn.Adam,
+		mask: []f64,
+		scope: ^t.Graph_Scope,
+		n: int,
+		read_each: bool,
+	) {
+		for step in 0 ..< n {
+			ids, targets := _token_batch(step % 8)
+			t.graph_begin(scope)
+			loss := t.tensor_cross_entropy_loss(
+				nn.gpt_model_forward(model, ids, mask, true),
+				targets,
+			)
+			t.tensor_backward(loss)
+			if read_each {_ = t.tensor_item(loss)}
+			t.graph_end(scope)
+			nn.adam_step(opt)
+			nn.adam_zero_grad(opt)
+			t.tensor_free(ids)
+		}
+	}
+	run(&model, &opt, mask, &scope, 3, read_each)
+	if on_gpu {gpu.synchronize()}
+	start := time.now()
+	run(&model, &opt, mask, &scope, steps, read_each)
+	if on_gpu {gpu.synchronize()}
+	ms := time.duration_milliseconds(time.since(start)) / f64(steps)
+	if on_gpu {gpu.to_host(ps[:])}
+	return ms
 }

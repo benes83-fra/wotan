@@ -241,6 +241,37 @@ op_cases := [?]Op_Case {
 		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_matmul(x[0], x[1])},
 	},
 	{
+		name = "linear",
+		op = .Linear,
+		shapes = {{70, 45, 1, 1}, {45, 33, 1, 1}, {1, 33, 1, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_linear(x[0], x[1], x[2])},
+	},
+	{
+		name = "linear (flattened [B, S, in])",
+		op = .Linear,
+		shapes = {{3, 5, 12, 1}, {12, 7, 1, 1}, {1, 7, 1, 1}},
+		storage = {{1, 180}, {}, {}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_linear(x[0], x[1], x[2])},
+	},
+	{
+		name = "linear 130x90 @ 90x75 (register-tiled kernel, edge tiles)",
+		op = .Linear,
+		shapes = {{130, 90, 1, 1}, {90, 75, 1, 1}, {1, 75, 1, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_linear(x[0], x[1], x[2])},
+	},
+	{
+		name = "one input, three uses (x + tanh(x) * x)",
+		op = .Add,
+		shapes = {{6, 40, 1, 1}},
+		tol = 1e-6,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			return t.tensor_add(x[0], t.tensor_mul(t.tensor_tanh(x[0]), x[0]))
+		},
+	},
+	{
 		name = "sum",
 		op = .Sum,
 		shapes = {{130, 77, 1, 1}},
@@ -990,6 +1021,7 @@ gpu_matmul_kernel_test :: proc() {
 		for c in op_cases {
 			#partial switch c.op {
 			case .MatMul,
+			     .Linear,
 			     .ScaledDotProductAttention,
 			     .MaskedScaledDotProductAttention,
 			     .FlashAttention,

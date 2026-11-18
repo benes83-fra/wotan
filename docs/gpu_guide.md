@@ -121,10 +121,10 @@ step  50  loss 0.01022
 step 100  loss 0.00908
 step 150  loss 0.00818
 step 199  loss 0.00695
-kernel launches 4000, submissions 50, downloads 5, CPU fallbacks 0
+kernel launches 2600, submissions 25, downloads 5, CPU fallbacks 0
 ```S
 
-The forward pass, the backward pass and the Adam step all ran on the GPU: 20 kernel launches per step and no CPU fallback. Ops do not wait for each other. They are recorded and submitted together, and the program waits for the GPU only when it reads a value: here, the 5 printed losses.
+The forward pass, the backward pass and the Adam step all ran on the GPU: 13 kernel launches per step and no CPU fallback. Ops do not wait for each other. They are recorded and submitted together, and the program waits for the GPU only when it reads a value: here, the 5 printed losses.
 
 ## 3. Where tensors live
 
@@ -201,7 +201,7 @@ These ops have GPU kernels for the forward and the backward pass:
 |---|---|
 | element-wise | `tensor_add`, `tensor_sub`, `tensor_mul`, `tensor_div`, `tensor_neg`, `tensor_scale`, `tensor_exp`, `tensor_log`, `tensor_sqrt`, `tensor_clamp`, `tensor_norm_cdf`, `tensor_gate_mul` |
 | activations | `tensor_relu`, `tensor_leaky_relu`, `tensor_sigmoid`, `tensor_tanh`, `tensor_softplus`, `tensor_gelu` (through `tensor_norm_cdf`), `tensor_gelu_tanh`, `tensor_softmax` |
-| linear | `tensor_matmul` (both the 2-D and the flattened `[1, N·in]` form), `tensor_add_bias` (both forms) |
+| linear | `tensor_matmul` (both the 2-D and the flattened `[1, N·in]` form), `tensor_add_bias` (both forms), `tensor_linear` (both forms; the bias is added by the matrix-product kernel) |
 | reductions and losses | `tensor_sum`, `tensor_mean`, `tensor_sum_dim1`, `tensor_logsumexp_dim1`, `tensor_mse_loss`, `tensor_cross_entropy_loss`, `tensor_bce_loss`, `tensor_binary_cross_entropy` |
 | normalisation and dropout | `tensor_layer_norm`, `tensor_rms_norm`, `tensor_batch_norm_2d`, `tensor_dropout` |
 | convolution and pooling | `tensor_conv2d`, `tensor_conv1d`, `tensor_max_pool2d`, `tensor_avg_pool2d`, `tensor_flatten` |
@@ -498,7 +498,7 @@ Inputs that a model reads on the host, such as the deep hedger's paths or DeepLO
 ## 8. Optimizers, clipping and checkpoints
 
 `nn.adam_step`, `nn.sgd_step` and `nn.clip_grad_norm` work on device parameters without any change to the calls:
-- **Adam and SGD:** each parameter is updated by one fused kernel, and the optimizer state (Adam's moments, SGD's velocity) stays on the device.
+- **Adam and SGD:** the update of a parameter is one fused kernel, and the optimizer state (Adam's moments, SGD's velocity) stays on the device. One Adam launch updates up to four parameters that share the learning rate and the step count.
 - **Gradient clipping:** the gradient norm is computed on the GPU and read back once per call.
 
 `nn.save_checkpoint` and the other `nn` save procedures read device parameters and device optimizer state through the sync procedures. A checkpoint saved from a GPU model loads on the CPU, and the reverse. After loading into a model whose parameters are already on the device, the next GPU op uploads the loaded values.
@@ -528,18 +528,26 @@ Where results need `f64` accuracy, keep those tensors on the CPU. A program can 
 
 ## 11. Performance
 
-The GPU pays off when the work per step is large: wide layers, large batches, big matrix products. Small models train faster on the CPU, because every kernel launch and every read of a result has a fixed cost that a small model's arithmetic does not cover.
+The GPU pays off when the work per step is large: wide layers, large batches, big matrix products. For small models it depends on how often the program reads a result. Every read of a device value waits until the GPU has finished all recorded work, so a loop that reads its loss after every step pays that wait every step.
 
-Mean time of one Adam training step (forward, backward, update) of an MLP with ReLU, measured by the test suite on the RTX 3060 Laptop GPU and its host CPU, built with `-o:speed`:
+Mean time of one Adam training step (forward, backward, update), measured by the test suite (`gpu_speed_report`) on the RTX 3060 Laptop GPU and its host CPU, built with `-o:speed`. The GPU column shows the loss read after every step, and read once at the end of the loop:
 
-| Layer sizes | Batch | CPU | GPU | Speed-up |
+| Model | Batch | CPU | GPU, loss every step | GPU, loss at the end |
 |---|---|---|---|---|
-| 16, 64, 64, 1 | 64 | 0.27 ms | 0.59 ms | 0.5× |
-| 64, 256, 256, 1 | 256 | 2.84 ms | 0.92 ms | 3.1× |
-| 256, 1024, 1024, 1 | 512 | 69.13 ms | 4.34 ms | 15.9× |
-| 512, 2048, 2048, 1 | 1024 | 607.78 ms | 18.96 ms | 32.1× |
+| MLP 16, 64, 64, 1 | 64 | 0.18 ms | 0.29 ms (0.6×) | 0.10 ms (1.8×) |
+| MLP 64, 256, 256, 1 | 256 | 2.40 ms | 0.44 ms (5.4×) | 0.26 ms (9.4×) |
+| MLP 256, 1024, 1024, 1 | 512 | 72.5 ms | 6.29 ms (11.5×) | 2.93 ms (24.7×) |
+| MLP 512, 2048, 2048, 1 | 1024 | 598 ms | 13.2 ms (45×) | 11.9 ms (50×) |
+| GPT of [section 5](#5-transformers-on-the-gpu) (2 blocks, width 32) | 6 × 12 tokens | 1.97 ms | 1.91 ms (1.0×) | 0.96 ms (2.0×) |
 
-The small test models of the suite are faster on the CPU in this build. A step takes 1.9 ms on the CPU and 2.6 ms on the GPU for the GPT of [section 5](#5-transformers-on-the-gpu) with 6 sequences of 12 tokens, 0.2 ms against 0.6 ms for the CNN, and 0.1 ms against 0.8 ms for the TCN. Timings on a laptop vary between runs with clock speeds and power state. Debug builds (`-debug`) slow the CPU engine several times more than the GPU path, so compare the two devices in an optimized build.
+The training tests of the suite read the loss after every step and the GPT test also clips the gradients (another read), so their step times are close to the middle column: 1.8 ms on the CPU and 2.2 ms on the GPU for the GPT, 0.2 ms against 0.6 ms for the CNN of section 6, and 0.1 ms against 0.7 ms for the TCN. For such small models the CPU is the better choice when the loop reads a result every step. Timings on a laptop vary between runs with clock speeds and power state. Debug builds (`-debug`) slow the CPU engine several times more than the GPU path, so compare the two devices in an optimized build.
+
+**Where a small model's time goes.** A small model's kernels finish in a few microseconds. The cost is recording them: wgpu needs about 1.5 µs to encode one kernel launch, more than the GPU needs to run a small one. The backend therefore keeps the number of launches low:
+- `tensor_linear` (used by `nn.linear_forward`) adds the bias inside the matrix-product kernel, and its backward pass needs no copy of the output gradient.
+- A gradient buffer is not cleared before the backward pass: the first kernel that writes the gradient overwrites it, the next ones add to it.
+- One Adam launch updates up to four parameters that share the learning rate and the step count.
+
+The GPT of section 5, with dropout, records 158 kernel launches per training step.
 
 **Matrix products** use a register-tiled kernel: a workgroup computes a 64×64 block of the result, each thread a 4×4 block held in registers. Products with fewer than 32 rows or columns (`gpu.MATMUL_TILED_MIN`) use a kernel with 16×16 blocks and one result per thread, which wastes less work on small shapes. `gpu.benchmark_matmul` times a product with the current choice, and `gpu.set_matmul_kernel` forces one kernel for comparisons. Measured by the test suite (square products, `-o:speed`):
 
