@@ -27,11 +27,13 @@ Run_Result :: struct {
 // _run_case builds the inputs from `values`, runs the op forward and backward
 // with the upstream gradient `upstream`, and returns copies of the output and
 // the input gradients. on_gpu: inputs moved to the device first.
+// cpu_backward: the forward runs on the device, the op's backward on the CPU.
 _run_case :: proc(
 	c: Op_Case,
 	values: [][]f64,
 	upstream: []f64,
 	on_gpu: bool,
+	cpu_backward := false, // backward with the op's kernel disabled
 ) -> (
 	r: Run_Result,
 	out_numel: int,
@@ -49,7 +51,9 @@ _run_case :: proc(
 	out := c.run(xs)
 	out_numel = t.tensor_numel(out)
 	if upstream != nil {
+		if cpu_backward {gpu.set_kernel_enabled(c.op, false)}
 		t.tensor_backward_with_grad(out, upstream)
+		if cpu_backward {gpu.set_kernel_enabled(c.op, true)}
 		r.out = _clone(t.tensor_values(out))
 		r.grads = make([][]f64, len(xs), context.temp_allocator)
 		for x, i in xs {r.grads[i] = _clone(t.tensor_grad_values(x))}
@@ -565,6 +569,134 @@ op_cases := [?]Op_Case {
 		tol = 1e-6,
 		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_gate_mul(x[0], x[1])},
 	},
+	// ---- phase 3 ----
+	{
+		name = "conv2d 3x3, padding 1, bias",
+		op = .Conv2d,
+		shapes = {{2, 3, 7, 6}, {4, 3, 3, 3}, {1, 4, 1, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_conv2d(x[0], x[1], x[2], 1, 1)},
+	},
+	{
+		name = "conv2d 2x3, stride 2, no bias",
+		op = .Conv2d,
+		shapes = {{3, 2, 9, 8}, {5, 2, 2, 3}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_conv2d(x[0], x[1], nil, 2, 0)},
+	},
+	{
+		name = "conv2d 5x5, padding 2, stride 2",
+		op = .Conv2d,
+		shapes = {{2, 4, 6, 5}, {3, 4, 5, 5}, {1, 3, 1, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_conv2d(x[0], x[1], x[2], 2, 2)},
+	},
+	{
+		name = "conv1d causal, dilation 2, bias",
+		op = .Conv1d,
+		shapes = {{3, 10, 4, 1}, {5, 4, 3, 1}, {1, 5, 1, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_conv1d(x[0], x[1], x[2], 2, 4, 0)},
+	},
+	{
+		name = "conv1d padding 1 / 2, no bias",
+		op = .Conv1d,
+		shapes = {{2, 7, 3, 1}, {6, 3, 4, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_conv1d(x[0], x[1], nil, 1, 1, 2)},
+	},
+	{
+		name = "conv1d 1x1",
+		op = .Conv1d,
+		shapes = {{2, 5, 3, 1}, {4, 3, 1, 1}, {1, 4, 1, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_conv1d(x[0], x[1], x[2])},
+	},
+	{
+		name = "max_pool2d 2x2, stride 2",
+		op = .MaxPool2d,
+		shapes = {{2, 3, 6, 8}},
+		tol = 1e-6,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_max_pool2d(x[0], 2, 2, 2)},
+	},
+	{
+		name = "max_pool2d 3x3, stride 1 (overlapping)",
+		op = .MaxPool2d,
+		shapes = {{2, 2, 7, 7}},
+		tol = 1e-6,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_max_pool2d(x[0], 3, 3, 1)},
+	},
+	{
+		name = "max_pool2d 3x2, stride 2 (uneven)",
+		op = .MaxPool2d,
+		shapes = {{1, 3, 9, 7}},
+		tol = 1e-6,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_max_pool2d(x[0], 3, 2, 2)},
+	},
+	{
+		name = "avg_pool2d 2x2, stride 2",
+		op = .AvgPool2d,
+		shapes = {{2, 3, 6, 8}},
+		tol = 1e-6,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_avg_pool2d(x[0], 2, 2, 2)},
+	},
+	{
+		name = "avg_pool2d 3x3, stride 2 (overlapping)",
+		op = .AvgPool2d,
+		shapes = {{2, 2, 9, 9}},
+		tol = 1e-6,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_avg_pool2d(x[0], 3, 3, 2)},
+	},
+	{
+		name = "batch_norm_2d (training)",
+		op = .BatchNorm2d,
+		// x, gamma, beta, running mean, running variance (positive inputs)
+		shapes = {{4, 3, 5, 6}, {1, 3, 1, 1}, {1, 3, 1, 1}, {1, 3, 1, 1}, {1, 3, 1, 1}},
+		positive = true,
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			return t.tensor_batch_norm_2d(x[0], x[1], x[2], x[3], x[4], true)
+		},
+	},
+	{
+		name = "batch_norm_2d (evaluation)",
+		op = .BatchNorm2d,
+		shapes = {{4, 3, 5, 6}, {1, 3, 1, 1}, {1, 3, 1, 1}, {1, 3, 1, 1}, {1, 3, 1, 1}},
+		positive = true,
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			return t.tensor_batch_norm_2d(x[0], x[1], x[2], x[3], x[4], false)
+		},
+	},
+	{
+		name = "flatten",
+		op = .Flatten,
+		shapes = {{3, 2, 4, 5}},
+		tol = 1e-6,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_flatten(t.tensor_scale(x[0], 2))},
+	},
+	{
+		name = "chain (conv2d, batch_norm, relu, max_pool, flatten, matmul)",
+		op = .Conv2d,
+		shapes = {
+			{4, 2, 6, 6},
+			{3, 2, 3, 3},
+			{1, 3, 1, 1},
+			{1, 3, 1, 1},
+			{1, 3, 1, 1},
+			{1, 3, 1, 1},
+			{1, 3, 1, 1},
+			{27, 5, 1, 1},
+		},
+		positive = true,
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			h := t.tensor_conv2d(x[0], x[1], x[2], 1, 1)
+			h = t.tensor_relu(t.tensor_batch_norm_2d(h, x[3], x[4], x[5], x[6], true))
+			h = t.tensor_flatten(t.tensor_max_pool2d(h, 2, 2, 2))
+			return t.tensor_matmul(h, x[7])
+		},
+	},
 }
 
 CE_TARGETS := [10]int{3, 0, 6, 6, 1, 2, 5, 4, 0, 3}
@@ -585,7 +717,14 @@ _batch_mask :: proc() -> []f64 {
 
 // _compare_case: CPU vs GPU (kernel enabled), and CPU vs GPU with the op's
 // kernel disabled (the CPU fallback)
-_compare_case :: proc(c: Op_Case, fallback: bool) -> (worst: f64, fallbacks: int) {
+_compare_case :: proc(
+	c: Op_Case,
+	fallback: bool,
+	cpu_backward := false,
+) -> (
+	worst: f64,
+	fallbacks: int,
+) {
 	values := make([][]f64, len(c.shapes), context.temp_allocator)
 	for shape, i in c.shapes {
 		n := shape[0] * shape[1] * shape[2] * shape[3]
@@ -602,7 +741,7 @@ _compare_case :: proc(c: Op_Case, fallback: bool) -> (worst: f64, fallbacks: int
 	ref, _ := _run_case(c, values, upstream, false)
 	if fallback {gpu.set_kernel_enabled(c.op, false)}
 	gpu.reset_stats()
-	got, _ := _run_case(c, values, upstream, true)
+	got, _ := _run_case(c, values, upstream, true, cpu_backward)
 	st := gpu.stats()
 	if fallback {gpu.set_kernel_enabled(c.op, true)}
 	for n in st.forward_fallbacks {fallbacks += n}

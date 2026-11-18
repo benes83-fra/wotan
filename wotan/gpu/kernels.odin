@@ -42,6 +42,19 @@ Kernel :: enum {
 	Bce, // binary cross-entropy: per-element loss or gradients
 	Row_Scale, // dst[i] (+)= src[i] * g[i / D] (gate_mul)
 	Row_Dot, // o[r] += Σ_j a[r, j] b[r, j]
+	// phase 3: convolutions, pooling, batch norm
+	Im2col_2d, // conv2d input patches as columns [C·kH·kW, N·L]
+	Col2im_2d, // dx += the column gradients summed back onto the image
+	Im2col_1d, // conv1d input patches as rows [B·T_out, C_in·K]
+	Col2im_1d, // dx += the row gradients summed back onto the sequence
+	Chan_Bias, // dst[i] += b[(i / L) % C]
+	Chan_Sum, // per channel: db[c] += Σ_{n, l} dy[n, c, l]
+	Pool, // max / average pooling
+	Pool_Bwd, // pooling backward, gathered per input element
+	Bn_Stats, // per channel: batch or running statistics, running-stat update
+	Bn_Apply, // y = (x - mean) · inv_std · γ + β
+	Bn_Bwd_Sums, // per channel: Σ dy, Σ dy·x̂ (and dγ, dβ)
+	Bn_Bwd_X, // input gradient of batch norm
 }
 
 @(private)
@@ -933,4 +946,368 @@ fn main(@builtin(global_invocation_id) gi: vec3<u32>, @builtin(num_workgroups) n
 	o[r] = o[r] + s;
 }
 `,
+	// ---- phase 3 ----
+	// col[k, n·L + l] = x[n, c, oh·s + kh - pad, ow·s + kw - pad] (0 in the padding),
+	// k = (c·kH + kh)·kW + kw, l = oh·out_w + ow (the CPU _im2col order per sample).
+	// u0 N, u1 C, u2 H, u3 W, u4 kH, u5 kW, u6 stride, u7 pad
+	.Im2col_2d        = CONV2D_DIMS + `
+@group(0) @binding(1) var<storage, read> x: array<f32>;
+@group(0) @binding(2) var<storage, read_write> col: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
+	let i = idx1(g, nw);
+	let d = conv2d_dims();
+	let NL = p.u0 * d.L;
+	if (i >= p.u1 * p.u4 * p.u5 * NL) { return; }
+	let k = i / NL;
+	let j = i % NL;
+	let n = j / d.L;
+	let l = j % d.L;
+	let c = k / (p.u4 * p.u5);
+	let kh = (k / p.u5) % p.u4;
+	let kw = k % p.u5;
+	let ih = i32((l / d.ow) * p.u6 + kh) - i32(p.u7);
+	let iw = i32((l % d.ow) * p.u6 + kw) - i32(p.u7);
+	var v = 0.0;
+	if (ih >= 0 && ih < i32(p.u2) && iw >= 0 && iw < i32(p.u3)) {
+		v = x[((n * p.u1 + c) * p.u2 + u32(ih)) * p.u3 + u32(iw)];
+	}
+	col[i] = v;
 }
+`,
+	// dx[n, c, ih, iw] += Σ_{kh, kw} dcol[k, n·L + l] over the outputs that read
+	// (ih, iw); parameters as Im2col_2d
+	.Col2im_2d        = CONV2D_DIMS + `
+@group(0) @binding(1) var<storage, read> dcol: array<f32>;
+@group(0) @binding(2) var<storage, read_write> dx: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
+	let i = idx1(g, nw);
+	let N = p.u0; let C = p.u1; let H = p.u2; let W = p.u3;
+	if (i >= N * C * H * W) { return; }
+	let d = conv2d_dims();
+	let iw = i32(i % W);
+	let ih = i32((i / W) % H);
+	let c = (i / (W * H)) % C;
+	let n = i / (W * H * C);
+	let s = i32(p.u6);
+	var acc = 0.0;
+	for (var kh = 0u; kh < p.u4; kh++) {
+		let th = ih + i32(p.u7) - i32(kh);
+		if (th < 0 || th % s != 0 || th / s >= i32(d.oh)) { continue; }
+		for (var kw = 0u; kw < p.u5; kw++) {
+			let tw = iw + i32(p.u7) - i32(kw);
+			if (tw < 0 || tw % s != 0 || tw / s >= i32(d.ow)) { continue; }
+			let k = (c * p.u4 + kh) * p.u5 + kw;
+			let l = u32(th / s) * d.ow + u32(tw / s);
+			acc = acc + dcol[k * N * d.L + n * d.L + l];
+		}
+	}
+	dx[i] = dx[i] + acc;
+}
+`,
+	// col[b·T_out + t, c·K + k] = x[b, t + k·dil - pad_left, c] (0 outside);
+	// u0 B, u1 T, u2 C_in, u3 K, u4 dilation, u5 pad_left, u6 T_out
+	.Im2col_1d        = `
+@group(0) @binding(1) var<storage, read> x: array<f32>;
+@group(0) @binding(2) var<storage, read_write> col: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
+	let i = idx1(g, nw);
+	let CK = p.u2 * p.u3;
+	if (i >= p.u0 * p.u6 * CK) { return; }
+	let r = i / CK;
+	let c = (i % CK) / p.u3;
+	let k = i % p.u3;
+	let b = r / p.u6;
+	let src = i32(r % p.u6 + k * p.u4) - i32(p.u5);
+	var v = 0.0;
+	if (src >= 0 && src < i32(p.u1)) { v = x[(b * p.u1 + u32(src)) * p.u2 + c]; }
+	col[i] = v;
+}
+`,
+	// dx[b, s, c] += Σ_k dcol[b·T_out + t, c·K + k] with t = s - k·dil + pad_left;
+	// parameters as Im2col_1d
+	.Col2im_1d        = `
+@group(0) @binding(1) var<storage, read> dcol: array<f32>;
+@group(0) @binding(2) var<storage, read_write> dx: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
+	let i = idx1(g, nw);
+	let C = p.u2; let K = p.u3;
+	if (i >= p.u0 * p.u1 * C) { return; }
+	let c = i % C;
+	let s = (i / C) % p.u1;
+	let b = i / (C * p.u1);
+	var acc = 0.0;
+	for (var k = 0u; k < K; k++) {
+		let t = i32(s + p.u5) - i32(k * p.u4);
+		if (t < 0 || t >= i32(p.u6)) { continue; }
+		acc = acc + dcol[(b * p.u6 + u32(t)) * C * K + c * K + k];
+	}
+	dx[i] = dx[i] + acc;
+}
+`,
+	// dst[i] += b[(i / u1) % u2]; u0 n, u1 L (elements per channel block), u2 C
+	.Chan_Bias        = `
+@group(0) @binding(1) var<storage, read> b: array<f32>;
+@group(0) @binding(2) var<storage, read_write> dst: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
+	let i = idx1(g, nw);
+	if (i >= p.u0) { return; }
+	dst[i] = dst[i] + b[(i / p.u1) % p.u2];
+}
+`,
+	// one workgroup per channel c: db[c] += Σ_{n, l} dy[(n·C + c)·L + l];
+	// u0 C, u1 L, u2 N
+	.Chan_Sum         = WG_SUM + `
+@group(0) @binding(1) var<storage, read> dy: array<f32>;
+@group(0) @binding(2) var<storage, read_write> db: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(local_invocation_id) l3: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
+	let lid = l3.x;
+	let c = row_of(wid, nw);
+	let live = c < p.u0;
+	let L = p.u1;
+	var s = 0.0;
+	if (live) {
+		for (var j = lid; j < p.u2 * L; j += 256u) { s = s + dy[((j / L) * p.u0 + c) * L + j % L]; }
+	}
+	s = wg_sum(s, lid);
+	if (live && lid == 0u) { db[c] = db[c] + s; }
+}
+`,
+	// planes [u0 = N·C, H = u1, W = u2], window u3 x u4, stride u5; u6 0 max, 1 average.
+	// Max takes the first largest value of the window in row-major order (as the CPU).
+	.Pool             = POOL_DIMS + `
+@group(0) @binding(2) var<storage, read_write> y: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
+	let i = idx1(g, nw);
+	let d = pool_dims();
+	if (i >= p.u0 * d.oh * d.ow) { return; }
+	let plane = i / (d.oh * d.ow);
+	let oh = (i / d.ow) % d.oh;
+	let ow = i % d.ow;
+	if (p.u6 == 0u) {
+		y[i] = x[window_argmax(plane, oh, ow)];
+	} else {
+		var s = 0.0;
+		for (var kh = 0u; kh < p.u3; kh++) {
+			for (var kw = 0u; kw < p.u4; kw++) {
+				s = s + x[(plane * p.u1 + oh * p.u5 + kh) * p.u2 + ow * p.u5 + kw];
+			}
+		}
+		y[i] = s / f32(p.u3 * p.u4);
+	}
+}
+`,
+	// dx[e] += Σ over the windows containing e: dy (max: only where e is the
+	// window's argmax; average: dy / (kH·kW)); parameters as Pool
+	.Pool_Bwd         = POOL_DIMS + `
+@group(0) @binding(2) var<storage, read> dy: array<f32>;
+@group(0) @binding(3) var<storage, read_write> dx: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
+	let i = idx1(g, nw);
+	let H = p.u1; let W = p.u2; let s = p.u5;
+	if (i >= p.u0 * H * W) { return; }
+	let d = pool_dims();
+	let plane = i / (H * W);
+	let ih = (i / W) % H;
+	let iw = i % W;
+	var acc = 0.0;
+	var oh = i32(min(ih / s, d.oh - 1u));
+	loop {
+		if (oh < 0 || u32(oh) * s + p.u3 <= ih) { break; }
+		var ow = i32(min(iw / s, d.ow - 1u));
+		loop {
+			if (ow < 0 || u32(ow) * s + p.u4 <= iw) { break; }
+			let o = (plane * d.oh + u32(oh)) * d.ow + u32(ow);
+			if (p.u6 == 1u) {
+				acc = acc + dy[o] / f32(p.u3 * p.u4);
+			} else if (window_argmax(plane, u32(oh), u32(ow)) == i) {
+				acc = acc + dy[o];
+			}
+			ow = ow - 1;
+		}
+		oh = oh - 1;
+	}
+	dx[i] = dx[i] + acc;
+}
+`,
+	// one workgroup per channel c of x [N, C, HW]. Training (u3 = 1): batch mean
+	// and biased variance; the running statistics are updated with momentum f0
+	// (unbiased variance, as torch). Evaluation: the running statistics.
+	// stats[2c] = mean, stats[2c + 1] = 1 / sqrt(var + eps); u0 C, u1 HW, u2 N, f1 eps
+	.Bn_Stats         = WG_SUM + `
+@group(0) @binding(1) var<storage, read> x: array<f32>;
+@group(0) @binding(2) var<storage, read_write> rm: array<f32>;
+@group(0) @binding(3) var<storage, read_write> rv: array<f32>;
+@group(0) @binding(4) var<storage, read_write> stats: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(local_invocation_id) l3: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
+	let lid = l3.x;
+	let c = row_of(wid, nw);
+	let live = c < p.u0;
+	let HW = p.u1;
+	let M = p.u2 * HW;
+	if (p.u3 == 0u) {
+		if (live && lid == 0u) {
+			stats[c] = rm[c];
+			stats[p.u0 + c] = 1.0 / sqrt(rv[c] + p.f1);
+		}
+		return;
+	}
+	var s = 0.0;
+	if (live) {
+		for (var j = lid; j < M; j += 256u) { s = s + x[((j / HW) * p.u0 + c) * HW + j % HW]; }
+	}
+	let mean = wg_sum(s, lid) / f32(M);
+	var q = 0.0;
+	if (live) {
+		for (var j = lid; j < M; j += 256u) {
+			let e = x[((j / HW) * p.u0 + c) * HW + j % HW] - mean;
+			q = q + e * e;
+		}
+	}
+	let v = wg_sum(q, lid) / f32(M);
+	if (live && lid == 0u) {
+		stats[c] = mean;
+		stats[p.u0 + c] = 1.0 / sqrt(v + p.f1);
+		var unbiased = v;
+		if (M > 1u) { unbiased = v * f32(M) / f32(M - 1u); }
+		rm[c] = (1.0 - p.f0) * rm[c] + p.f0 * mean;
+		rv[c] = (1.0 - p.f0) * rv[c] + p.f0 * unbiased;
+	}
+}
+`,
+	// stats [means of the C channels, then 1 / std]; u0 n, u1 HW, u2 C
+	.Bn_Apply         = `
+@group(0) @binding(1) var<storage, read> x: array<f32>;
+@group(0) @binding(2) var<storage, read> gamma: array<f32>;
+@group(0) @binding(3) var<storage, read> beta: array<f32>;
+@group(0) @binding(4) var<storage, read> stats: array<f32>;
+@group(0) @binding(5) var<storage, read_write> y: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
+	let i = idx1(g, nw);
+	if (i >= p.u0) { return; }
+	let c = (i / p.u1) % p.u2;
+	y[i] = (x[i] - stats[c]) * stats[p.u2 + c] * gamma[c] + beta[c];
+}
+`,
+	// one workgroup per channel: sums[2c] = Σ dy, sums[2c + 1] = Σ dy·x̂;
+	// u3 = 1: dgamma[c] += Σ dy·x̂, u4 = 1: dbeta[c] += Σ dy; u0 C, u1 HW, u2 N
+	.Bn_Bwd_Sums      = WG_SUM + `
+@group(0) @binding(1) var<storage, read> x: array<f32>;
+@group(0) @binding(2) var<storage, read> dy: array<f32>;
+@group(0) @binding(3) var<storage, read> stats: array<f32>;
+@group(0) @binding(4) var<storage, read_write> sums: array<f32>;
+@group(0) @binding(5) var<storage, read_write> dgamma: array<f32>;
+@group(0) @binding(6) var<storage, read_write> dbeta: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(local_invocation_id) l3: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
+	let lid = l3.x;
+	let c = row_of(wid, nw);
+	let live = c < p.u0;
+	let HW = p.u1;
+	var mean = 0.0;
+	var inv = 0.0;
+	if (live) { mean = stats[c]; inv = stats[p.u0 + c]; }
+	var sd = 0.0;
+	var sdx = 0.0;
+	if (live) {
+		for (var j = lid; j < p.u2 * HW; j += 256u) {
+			let e = ((j / HW) * p.u0 + c) * HW + j % HW;
+			sd = sd + dy[e];
+			sdx = sdx + dy[e] * (x[e] - mean) * inv;
+		}
+	}
+	sd = wg_sum(sd, lid);
+	sdx = wg_sum(sdx, lid);
+	if (live && lid == 0u) {
+		sums[2u * c] = sd;
+		sums[2u * c + 1u] = sdx;
+		if (p.u3 == 1u) { dgamma[c] = dgamma[c] + sdx; }
+		if (p.u4 == 1u) { dbeta[c] = dbeta[c] + sd; }
+	}
+}
+`,
+	// training: dx += γ·inv / M · (M·dy - Σdy - x̂·Σ(dy·x̂)); evaluation (the
+	// statistics are constants): dx += γ·inv·dy. u0 n, u1 HW, u2 C, u3 training, u4 M
+	.Bn_Bwd_X         = `
+@group(0) @binding(1) var<storage, read> x: array<f32>;
+@group(0) @binding(2) var<storage, read> gamma: array<f32>;
+@group(0) @binding(3) var<storage, read> dy: array<f32>;
+@group(0) @binding(4) var<storage, read> stats: array<f32>;
+@group(0) @binding(5) var<storage, read> sums: array<f32>;
+@group(0) @binding(6) var<storage, read_write> dx: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
+	let i = idx1(g, nw);
+	if (i >= p.u0) { return; }
+	let c = (i / p.u1) % p.u2;
+	let inv = stats[p.u2 + c];
+	let gi = gamma[c] * inv;
+	if (p.u3 == 0u) {
+		dx[i] = dx[i] + dy[i] * gi;
+		return;
+	}
+	let M = f32(p.u4);
+	let xh = (x[i] - stats[c]) * inv;
+	dx[i] = dx[i] + gi / M * (M * dy[i] - sums[2u * c] - xh * sums[2u * c + 1u]);
+}
+`,
+}
+
+// workgroup-wide sum for the one-workgroup-per-row kernels (all 256 threads
+// must call it)
+@(private)
+WG_SUM :: `
+var<workgroup> sh: array<f32, 256>;
+fn wg_sum(v: f32, lid: u32) -> f32 {
+	sh[lid] = v;
+	workgroupBarrier();
+	for (var w = 128u; w > 0u; w = w >> 1u) {
+		if (lid < w) { sh[lid] = sh[lid] + sh[lid + w]; }
+		workgroupBarrier();
+	}
+	let r = sh[0];
+	workgroupBarrier();
+	return r;
+}
+`
+
+// conv2d output size from the Im2col_2d parameters
+@(private)
+CONV2D_DIMS :: `
+struct Conv_Dims { oh: u32, ow: u32, L: u32, }
+fn conv2d_dims() -> Conv_Dims {
+	let oh = (p.u2 + 2u * p.u7 - p.u4) / p.u6 + 1u;
+	let ow = (p.u3 + 2u * p.u7 - p.u5) / p.u6 + 1u;
+	return Conv_Dims(oh, ow, oh * ow);
+}
+`
+
+// pooling input (binding 1), output size and the argmax of a window (Pool parameters)
+@(private)
+POOL_DIMS :: `
+@group(0) @binding(1) var<storage, read> x: array<f32>;
+struct Pool_Dims { oh: u32, ow: u32, }
+fn pool_dims() -> Pool_Dims {
+	return Pool_Dims((p.u1 - p.u3) / p.u5 + 1u, (p.u2 - p.u4) / p.u5 + 1u);
+}
+fn window_argmax(plane: u32, oh: u32, ow: u32) -> u32 {
+	var best = -3.402823e38;
+	var arg = 0u;
+	for (var kh = 0u; kh < p.u3; kh++) {
+		for (var kw = 0u; kw < p.u4; kw++) {
+			let e = (plane * p.u1 + oh * p.u5 + kh) * p.u2 + ow * p.u5 + kw;
+			if (x[e] > best) { best = x[e]; arg = e; }
+		}
+	}
+	return arg;
+}
+`

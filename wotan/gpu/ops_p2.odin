@@ -224,7 +224,7 @@ _forward_p2 :: proc(op: t.Op, out: ^t.Tensor, inputs: []^t.Tensor, ints: []int, 
 		u := [8]u32{u32(n), u32(x.shape[1]), 0, 0, 0, 0, 0, 0}
 		_dispatch_1d(.Row_Scale, _p(u), {_data(x), _data(inputs[1]), o}, n)
 	case:
-		panic(fmt.tprintf("gpu: no forward kernel for %v", op))
+		_forward_p3(op, out, inputs, ints, floats)
 	}
 }
 
@@ -345,7 +345,7 @@ _backward_p2 :: proc(node: ^t.Tensor, dy: Bind, n: int) -> bool {
 			t._grad_written_on_device(gate)
 		}
 	case:
-		return false
+		return _backward_p3(node, dy, n)
 	}
 	return true
 }

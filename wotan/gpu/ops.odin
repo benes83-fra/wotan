@@ -56,6 +56,13 @@ SUPPORTED :: bit_set[t.Op] {
 	.MaskedScaledDotProductAttention,
 	.FlashAttention,
 	.GateMul,
+	// phase 3 (ops_p3.odin)
+	.Flatten,
+	.Conv2d,
+	.Conv1d,
+	.MaxPool2d,
+	.AvgPool2d,
+	.BatchNorm2d,
 }
 
 @(private)
@@ -275,7 +282,7 @@ _hook_forward :: proc(op: t.Op, out: ^t.Tensor, inputs: []^t.Tensor, ints: []int
 			{_data(inputs[0]), o},
 			ints[0],
 		)
-	case .Reshape:
+	case .Reshape, .Flatten:
 		_copy(o.buf, _buf(inputs[0].device.data_buf), n)
 	case .Transpose:
 		a := inputs[0]
@@ -477,7 +484,7 @@ _hook_backward :: proc(node: ^t.Tensor, allocator: mem.Allocator) -> bool {
 			)
 			wrote(&written, &nw, a)
 		}
-	case .Reshape:
+	case .Reshape, .Flatten:
 		a := node.inputs[0]
 		if a.requires_grad {
 			axpy(dy, a, 1, n)

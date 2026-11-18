@@ -641,10 +641,25 @@ tensor_cross_entropy_loss :: proc(logits: ^Tensor, target_indices: []int) -> ^Te
 
 // tensor_flatten reshapes a 4D tensor (N, C, H, W) to 2D (N, C*H*W)
 tensor_flatten :: proc(input: ^Tensor) -> ^Tensor {
-	_host_inputs(.Flatten, input)
 	_check_shape(input)
 	N := input.shape[0]
 	features := input.shape[1] * input.shape[2] * input.shape[3]
+	if _device_use(.Flatten, input) {
+		out := _device_new_op(
+			N,
+			features,
+			{N, features, 1, 1},
+			input.requires_grad,
+			_op_alloc(input),
+		)
+		_device_forward(.Flatten, out, {input})
+		if out.requires_grad {
+			out.op = .Flatten
+			append(&out.inputs, input)
+		}
+		return out
+	}
+	_host_inputs(.Flatten, input)
 
 	// Just create a new tensor with the same data but different shape
 	out_data := l.matrix_new(f64, N, features, _op_alloc(input))
@@ -735,6 +750,7 @@ tensor_has_grad :: proc(t: ^Tensor) -> bool {
 // tensor_max_pool2d performs max pooling.
 // input: (N, C, H, W) -> output: (N, C, H_out, W_out)
 tensor_max_pool2d :: proc(input: ^Tensor, kH, kW, stride: int) -> ^Tensor {
+	if _device_use(.MaxPool2d, input) {return _device_pool(.MaxPool2d, input, kH, kW, stride)}
 	_host_inputs(.MaxPool2d, input)
 	_check_shape(input)
 	N := input.shape[0]
@@ -801,6 +817,7 @@ tensor_max_pool2d :: proc(input: ^Tensor, kH, kW, stride: int) -> ^Tensor {
 }
 // tensor_avg_pool2d performs average pooling.
 tensor_avg_pool2d :: proc(input: ^Tensor, kH, kW, stride: int) -> ^Tensor {
+	if _device_use(.AvgPool2d, input) {return _device_pool(.AvgPool2d, input, kH, kW, stride)}
 	_host_inputs(.AvgPool2d, input)
 	_check_shape(input)
 	N := input.shape[0]
@@ -862,6 +879,9 @@ tensor_conv2d :: proc(
 	pad: int = 0,
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
+	if _device_use(.Conv2d, input, weight, bias) {
+		return _device_conv2d(input, weight, bias, stride, pad)
+	}
 	_host_inputs(.Conv2d, input, weight, bias)
 	allocator := _scope_or(allocator) // the active graph scope, if any
 	_check_shape(input)
@@ -1276,6 +1296,18 @@ tensor_batch_norm_2d :: proc(
 	eps: f64 = 1e-5,
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
+	if _device_use(.BatchNorm2d, input, weight, bias, running_mean, running_var) {
+		return _device_batch_norm_2d(
+			input,
+			weight,
+			bias,
+			running_mean,
+			running_var,
+			training,
+			momentum,
+			eps,
+		)
+	}
 	_host_inputs(.BatchNorm2d, input, weight, bias, running_mean, running_var)
 	allocator := _scope_or(allocator) // the active graph scope, if any
 	_check_shape(input)
@@ -3933,18 +3965,32 @@ tensor_conv1d :: proc(
 	pad_left := 0,
 	pad_right := 0,
 ) -> ^Tensor {
-	_host_inputs(.Conv1d, x, weight, bias)
 	B, T, C_in := x.shape[0], x.shape[1], x.shape[2]
 	C_out, K := weight.shape[0], weight.shape[2]
 	assert(
-		x.shape[3] == 1 && len(x.data.data) == B * T * C_in,
+		x.shape[3] == 1 && tensor_numel(x) == B * T * C_in,
 		"tensor_conv1d: x must be [batch, T, C_in]",
 	)
 	assert(weight.shape[1] == C_in, "tensor_conv1d: weight must be [C_out, C_in, K]")
-	assert(bias == nil || len(bias.data.data) == C_out, "tensor_conv1d: bias must be [1, C_out]")
+	assert(bias == nil || tensor_numel(bias) == C_out, "tensor_conv1d: bias must be [1, C_out]")
 	assert(dilation >= 1, "tensor_conv1d: dilation must be at least 1")
 	T_out := T + pad_left + pad_right - dilation * (K - 1)
 	assert(T_out >= 1, "tensor_conv1d: sequence shorter than the receptive field")
+	rg := x.requires_grad || weight.requires_grad || (bias != nil && bias.requires_grad)
+	meta := [8]int{B, T, C_in, C_out, K, dilation, pad_left, T_out}
+	if _device_use(.Conv1d, x, weight, bias) {
+		out := _device_new_op(1, B * T_out * C_out, {B, T_out, C_out, 1}, rg, _op_alloc(x))
+		inputs := [3]^Tensor{x, weight, bias}
+		ni := 3 if bias != nil else 2
+		_device_forward(.Conv1d, out, inputs[:ni], meta[:])
+		if out.requires_grad {
+			out.op = .Conv1d
+			append(&out.inputs, ..inputs[:ni])
+			append(&out.int_metadata, ..meta[:])
+		}
+		return out
+	}
+	_host_inputs(.Conv1d, x, weight, bias)
 
 	out_data := l.matrix_new(f64, 1, B * T_out * C_out, _op_alloc(x))
 	xs, ws, ys := x.data.data, weight.data.data, out_data.data
@@ -3965,13 +4011,12 @@ tensor_conv1d :: proc(
 			}
 		}
 	}
-	rg := x.requires_grad || weight.requires_grad || (bias != nil && bias.requires_grad)
 	out := _tensor_new_op(out_data, {B, T_out, C_out, 1}, rg, _op_alloc(x))
 	if out.requires_grad {
 		out.op = .Conv1d
 		append(&out.inputs, x, weight)
 		if bias != nil {append(&out.inputs, bias)}
-		append(&out.int_metadata, B, T, C_in, C_out, K, dilation, pad_left, T_out)
+		append(&out.int_metadata, ..meta[:])
 	}
 	return out
 }

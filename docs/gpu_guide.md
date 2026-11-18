@@ -15,13 +15,14 @@ Every example was compiled and run against the current code on an NVIDIA RTX 306
 3. [Where tensors live](#3-where-tensors-live)
 4. [Ops with and without GPU kernels](#4-ops-with-and-without-gpu-kernels)
 5. [Transformers on the GPU](#5-transformers-on-the-gpu)
-6. [Optimizers, clipping and checkpoints](#6-optimizers-clipping-and-checkpoints)
-7. [Memory](#7-memory)
-8. [Precision](#8-precision)
-9. [Performance](#9-performance)
-10. [Choosing the adapter](#10-choosing-the-adapter)
-11. [Validation](#11-validation)
-12. [Quick reference](#12-quick-reference)
+6. [Convolutional networks on the GPU](#6-convolutional-networks-on-the-gpu)
+7. [Optimizers, clipping and checkpoints](#7-optimizers-clipping-and-checkpoints)
+8. [Memory](#8-memory)
+9. [Precision](#9-precision)
+10. [Performance](#10-performance)
+11. [Choosing the adapter](#11-choosing-the-adapter)
+12. [Validation](#12-validation)
+13. [Quick reference](#13-quick-reference)
 
 ## 1. Setup
 
@@ -153,10 +154,13 @@ fmt.println("values:", t.tensor_values(x)) // downloads, the host copy is valid 
 t.tensor_values(x)[0] = 10
 t.tensor_mark_host_dirty(x)
 
-// an op without a GPU kernel (softmax) runs on the CPU automatically
+// an op without a GPU kernel runs on the CPU automatically; switching the
+// softmax kernel off shows it
+gpu.set_kernel_enabled(.Softmax, false)
 probs := t.tensor_softmax(x)
 loss := t.tensor_sum(t.tensor_mul(probs, probs))
 t.tensor_backward(loss)
+gpu.set_kernel_enabled(.Softmax, true)
 fmt.printfln("loss %.6f", t.tensor_item(loss))
 fmt.printfln("grad %.6f", t.tensor_grad_values(x))
 st := gpu.stats()
@@ -198,11 +202,12 @@ These ops have GPU kernels for the forward and the backward pass:
 | activations | `tensor_relu`, `tensor_leaky_relu`, `tensor_sigmoid`, `tensor_tanh`, `tensor_softplus`, `tensor_gelu` (through `tensor_norm_cdf`), `tensor_gelu_tanh`, `tensor_softmax` |
 | linear | `tensor_matmul` (both the 2-D and the flattened `[1, N·in]` form), `tensor_add_bias` (both forms) |
 | reductions and losses | `tensor_sum`, `tensor_mean`, `tensor_sum_dim1`, `tensor_logsumexp_dim1`, `tensor_mse_loss`, `tensor_cross_entropy_loss`, `tensor_bce_loss`, `tensor_binary_cross_entropy` |
-| normalisation and dropout | `tensor_layer_norm`, `tensor_rms_norm`, `tensor_dropout` |
+| normalisation and dropout | `tensor_layer_norm`, `tensor_rms_norm`, `tensor_batch_norm_2d`, `tensor_dropout` |
+| convolution and pooling | `tensor_conv2d`, `tensor_conv1d`, `tensor_max_pool2d`, `tensor_avg_pool2d`, `tensor_flatten` |
 | sequences | `tensor_embedding`, `tensor_permute_mha`, `tensor_permute_mha_inverse`, `tensor_scaled_dot_product_attention`, `tensor_masked_scaled_dot_product_attention`, `tensor_flash_attention` |
 | shape | `tensor_reshape`, `tensor_as_matrix`, `tensor_transpose`, `tensor_slice_cols`, `tensor_concat` |
 
-With these, MLPs, GPT (with flash attention, RMSNorm, tied embeddings or mixture-of-experts layers) and BERT train without any CPU fallback. Convolutions, pooling, batch norm and the recurrent cells still run on the fallback.
+With these, MLPs, CNNs, TCNs, GPT (with flash attention, RMSNorm, tied embeddings or mixture-of-experts layers) and BERT train without any CPU fallback. The recurrent cells (RNN, GRU, LSTM, the Mamba scan) and the finance-specific ops still run on the fallback.
 
 `gpu.has_kernel(op)` answers the same question in code.
 
@@ -288,7 +293,124 @@ How the transformer ops behave on the GPU:
 - **Embeddings:** token ids that are still on the host are checked against the vocabulary size, as on the CPU. Ids that only exist on the device are not checked; an id outside the vocabulary gives a zero row and no gradient.
 - **Host steps inside the models:** a few model steps need values on the host and download them. The KV-cache of `gpt_model_forward_cached` lives on the host. Mixture-of-experts layers choose their top-k experts on the host. BERT builds its padding mask from host token ids. Each costs one download per forward pass.
 
-## 6. Optimizers, clipping and checkpoints
+## 6. Convolutional networks on the GPU
+
+Convolutions, pooling, batch norm and flatten have GPU kernels, so CNNs built from `nn` layers train entirely on the GPU. This trains a small CNN to tell three noisy line patterns apart (rows, columns, diagonals) and then evaluates it on a fresh batch:
+
+```odin
+N :: 48
+SIZE :: 16
+
+// N noisy 16x16 images of three patterns: rows, columns, diagonals
+images :: proc() -> (x: ^t.Tensor, labels: []int) {
+	m := l.matrix_new(f64, 1, N * SIZE * SIZE)
+	labels = make([]int, N)
+	for n in 0 ..< N {
+		labels[n] = rand.int_max(3)
+		shift := rand.int_max(4)
+		for i in 0 ..< SIZE {
+			for j in 0 ..< SIZE {
+				line := [3]int{i, j, (i + j)}[labels[n]]
+				m.data[(n * SIZE + i) * SIZE + j] = (line + shift) % 4 == 0 ? 1 : 0
+				m.data[(n * SIZE + i) * SIZE + j] += 1.5 * rand.float64()
+			}
+		}
+	}
+	x = t.tensor_new(m)
+	x.shape = {N, 1, SIZE, SIZE}
+	return
+}
+
+main :: proc() {
+	if !gpu.init() {return}
+	defer gpu.shutdown()
+
+	rand.reset(7)
+	model := nn.sequential_new()
+	defer nn.sequential_free(model)
+	nn.sequential_add(
+		model,
+		nn.conv2d_layer_new(1, 8, 3, padding = 1, use_bias = false), // batch norm follows
+		nn.batch_norm_2d_layer_new(8),
+		nn.Activation.ReLU,
+		nn.maxpool2d_layer_new(2), // 8x8
+		nn.conv2d_layer_new(8, 16, 3, padding = 1),
+		nn.Activation.ReLU,
+		nn.avgpool2d_layer_new(2), // 4x4
+		nn.FlattenLayer{},
+		nn.linear_layer_new(16 * 4 * 4, 3),
+	)
+	params := nn.sequential_parameters(model)
+	defer delete(params)
+	opt := nn.adam_new(0.01)
+	defer nn.adam_free(&opt)
+	for p in params {nn.adam_add_param(&opt, p)}
+	gpu.to_device(params[:])
+
+	x, labels := images()
+	defer {t.tensor_free(x); delete(labels)}
+	gpu.to_device(x)
+
+	scope: t.Graph_Scope
+	defer t.graph_scope_destroy(&scope)
+	for step in 0 ..< 60 {
+		t.graph_begin(&scope)
+		loss := t.tensor_cross_entropy_loss(nn.sequential_forward(model, x), labels)
+		t.tensor_backward(loss)
+		if step % 20 == 0 || step == 59 {fmt.printfln("step %2d  loss %.4f", step, t.tensor_item(loss))}
+		t.graph_end(&scope)
+		nn.adam_step(&opt)
+		nn.adam_zero_grad(&opt)
+	}
+
+	// evaluation: batch norm uses its running statistics
+	nn.sequential_eval(model)
+	test_x, test_labels := images()
+	defer {t.tensor_free(test_x); delete(test_labels)}
+	t.graph_begin(&scope)
+	logits := t.tensor_values(nn.sequential_forward(model, test_x))
+	correct := 0
+	for n in 0 ..< N {
+		best := 0
+		for c in 1 ..< 3 {if logits[n * 3 + c] > logits[n * 3 + best] {best = c}}
+		if best == test_labels[n] {correct += 1}
+	}
+	t.graph_end(&scope)
+	fmt.printfln("test accuracy %d / %d", correct, N)
+
+	bn := model.layers[1].(nn.BatchNorm2dLayer)
+	fmt.printfln("running mean of channel 0: %.4f (on the device: %v)", t.tensor_values(bn.running_mean)[0], t.tensor_is_on_device(bn.running_mean))
+	st := gpu.stats()
+	fallbacks := 0
+	for n in st.forward_fallbacks {fallbacks += n}
+	for n in st.backward_fallbacks {fallbacks += n}
+	fmt.printfln("automatic uploads %d, CPU fallbacks %d", st.auto_uploads, fallbacks)
+}
+```
+
+Output:
+
+```
+step  0  loss 1.0757
+step 20  loss 0.0713
+step 40  loss 0.0007
+step 59  loss 0.0001
+test accuracy 48 / 48
+running mean of channel 0: 0.0914 (on the device: true)
+automatic uploads 3, CPU fallbacks 0
+```
+
+The three automatic uploads are the batch norm's running mean and variance, which `sequential_parameters` does not return because they are not trained, and the test batch.
+
+How these ops behave on the GPU:
+- **Convolutions:** `tensor_conv2d` and `tensor_conv1d` copy the input patches into a column buffer (im2col) and multiply it with the weight in one matrix product. The backward pass builds the column buffer again instead of keeping it. The buffer holds `C_in · kH · kW` values per output position of the whole batch; like any tensor, it must fit in one storage buffer (see [Memory](#8-memory)).
+- **TCNs:** `nn.tcn_block_new` and `nn.sequential_add_tcn` use `tensor_conv1d`, so dilated causal convolutions, their dropout and the residual connection all run on the GPU.
+- **Pooling:** max pooling keeps no argmax indices on the device. Its backward pass finds the largest value of each window again, taking the first one in row-major order when values tie, as on the CPU.
+- **Batch norm:** the running mean and variance move to the device the first time a GPU batch norm uses them, and training-mode steps update them there. Read them with `t.tensor_values`. `nn.save_checkpoint` and the other save procedures sync them like parameters.
+- **A bias in front of batch norm** has a gradient of exactly zero, because batch norm subtracts every per-channel constant. In `f32`, Adam turns the rounding residue into steps of the learning rate (see [Precision](#9-precision)), so such a bias and the running mean that tracks it drift on the GPU without changing the output. The example therefore builds that convolution with `use_bias = false`, the usual choice on any device.
+- **DeepLOB** (`ml_finance`) runs its convolutions and inception block on the GPU. Its LOB permute (`tensor_permute_lob`) still uses the fallback, and so does its sequence layer when it is an LSTM, a GRU or Mamba; with the TCN sequence layer the permute is the only fallback.
+
+## 7. Optimizers, clipping and checkpoints
 
 `nn.adam_step`, `nn.sgd_step` and `nn.clip_grad_norm` work on device parameters without any change to the calls:
 - **Adam and SGD:** each parameter is updated by one fused kernel, and the optimizer state (Adam's moments, SGD's velocity) stays on the device.
@@ -298,7 +420,7 @@ How the transformer ops behave on the GPU:
 
 Optimizer state follows the parameter. If a parameter returns to the host with `gpu.to_host`, the next `adam_step` copies its moments back from the device and continues on the CPU.
 
-## 7. Memory
+## 8. Memory
 
 Device buffers come from a pool and go back to it:
 - `t.tensor_free` and `t.tensor_free_graph` return the buffers of the tensors they free.
@@ -308,18 +430,18 @@ With a graph scope, a training loop allocates GPU memory only in its first steps
 
 A single tensor must fit in one storage buffer of the device (`maxStorageBufferBindingSize`, 2 GB on the GPU used here). A larger one panics with the size in the message.
 
-## 8. Precision
+## 9. Precision
 
 The GPU computes in `f32`. The host API stays `f64`: values are converted to `f32` on upload and back to `f64` on download. Results therefore agree with the CPU engine to `f32` precision, not bit for bit:
 - **single ops:** relative differences of about 1e-7;
 - **matrix products and long reductions:** up to about 1e-6;
-- **40 Adam steps of an MLP:** about 1e-6 (see [Validation](#11-validation)).
+- **40 Adam steps of an MLP:** about 1e-6 (see [Validation](#12-validation)).
 
 Where results need `f64` accuracy, keep those tensors on the CPU. A program can train one model on the GPU and price with another on the CPU.
 
-**Adam and parameters with a zero gradient.** Some parameters have a gradient that is exactly zero in exact arithmetic. One example is the bias of an attention layer's key projection: adding a constant to every key shifts all scores of a softmax row equally. What the computation actually produces is a rounding residue: about 1e-17 on the CPU, which Adam's epsilon (1e-8) absorbs, but about 1e-8 in `f32`, which Adam normalises into full learning-rate steps. On the GPU such parameters therefore drift slowly. The model's output does not change, because they have no effect on it (PyTorch in `f32` behaves the same way).
+**Adam and parameters with a zero gradient.** Some parameters have a gradient that is exactly zero in exact arithmetic. Two examples: the bias of an attention layer's key projection (adding a constant to every key shifts all scores of a softmax row equally), and the bias of a convolution or linear layer directly followed by batch norm (batch norm subtracts every per-channel constant). What the computation actually produces is a rounding residue: about 1e-17 on the CPU, which Adam's epsilon (1e-8) absorbs, but about 1e-8 in `f32`, which Adam normalises into full learning-rate steps. On the GPU such parameters therefore drift slowly. The model's output does not change, because they have no effect on it (PyTorch in `f32` behaves the same way).
 
-## 9. Performance
+## 10. Performance
 
 Mean time of one Adam training step (forward, backward, update) of an MLP with ReLU, measured by the test suite on the RTX 3060 Laptop GPU and its host CPU:
 
@@ -337,7 +459,7 @@ Timings on a laptop vary between runs with clock speeds and power state.
 - **Move reused inputs once.** `to_device` on data used every step avoids a re-upload per step.
 - **Check the fallbacks.** An op on the fallback costs a download and an upload. `gpu.stats()` shows which ops they are.
 
-## 10. Choosing the adapter
+## 11. Choosing the adapter
 
 `gpu.init` takes `gpu.Options`:
 
@@ -350,7 +472,7 @@ Timings on a laptop vary between runs with clock speeds and power state.
 
 `gpu.device_info()` returns the chosen adapter's name, vendor, backend and type.
 
-## 11. Validation
+## 12. Validation
 
 The GPU suite is a separate program, so that the main test suite builds without the wgpu library:
 
@@ -359,17 +481,18 @@ odin run gpu_tests -collection:root=. -debug
 ```
 
 It compares every GPU result with the CPU engine, which is itself validated against PyTorch:
-- **every op with a kernel:** forward and backward, with a random upstream gradient, including masked and causal attention, repeated embedding ids and wide softmax rows. Most ops agree to 1e-7 or better and matrix products to 7e-7. The largest difference, 3.5e-6, is tanh of inputs scaled by 30, where the f32 rounding of the scaled input dominates.
+- **every op with a kernel:** forward and backward, with a random upstream gradient, including masked and causal attention, repeated embedding ids, wide softmax rows, convolutions with stride, padding and dilation, and overlapping pooling windows. Most ops agree to 1e-7 or better and matrix products to 7e-7. The largest difference, 3.5e-6, is tanh of inputs scaled by 30, where the f32 rounding of the scaled input dominates.
 - **the same ops with their kernel disabled,** through the CPU fallback, and two ops that have no kernel (`tensor_lgamma`, `tensor_sharpe_loss`).
 - **training:** 40 Adam steps of MLPs with five activations, SGD with Nesterov momentum and gradient clipping, and a model with every kernel disabled. Losses and final parameters agree with the CPU to 4e-6 or better.
-- **transformers:** 12 steps of four small GPTs (layer norm and GELU; flash attention; RMSNorm, tied embeddings and tanh GELU; mixture of experts) and a BERT with padding masks, all with dropout on and the same masks on both devices. Losses agree with the CPU to 1e-6 and parameters to 2e-4 or better, except the attention key biases (see [Precision](#8-precision)). None of these models uses a CPU fallback.
+- **convolutional models:** 10 steps of a CNN (convolutions with stride and padding, batch norm, max and average pooling, flatten, dropout) and of a TCN (dilated causal convolutions, dropout, residual connections). Losses and parameters, including the batch norm's running statistics, agree with the CPU to 2e-6; neither model uses a CPU fallback. Separate checks cover the running-statistics update and evaluation mode, and a backward pass on the CPU after a forward pass on the GPU (the CPU then finds the max-pool argmax and fetches the batch-norm statistics from the device).
+- **transformers:** 12 steps of four small GPTs (layer norm and GELU; flash attention; RMSNorm, tied embeddings and tanh GELU; mixture of experts) and a BERT with padding masks, all with dropout on and the same masks on both devices. Losses agree with the CPU to 1e-6 and parameters to 2e-4 or better, except the attention key biases (see [Precision](#9-precision)). None of these models uses a CPU fallback.
 - **residency:** host copies, sync procedures, automatic uploads, `to_host`, detach.
 - **memory:** a scoped training loop keeps the pool size flat, and a debug build reports no leaks.
 - **checkpoints:** saved from the GPU, loaded on the CPU, parameters and Adam moments identical.
 
 Without a usable adapter the suite prints `SKIP` and exits with code 0.
 
-## 12. Quick reference
+## 13. Quick reference
 
 | Procedure | Purpose |
 |---|---|

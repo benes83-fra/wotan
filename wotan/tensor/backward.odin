@@ -886,6 +886,10 @@ _backward_node_cpu :: proc(node: ^Tensor, allocator: mem.Allocator) {
 		}
 	case .MaxPool2d:
 		a_in := node.inputs[0]
+		if a_in.requires_grad && len(node.int_metadata) == 0 {
+			// the device forward keeps no argmax indices: find them again
+			_max_pool_argmax(a_in, node.pool_params, node.shape, &node.int_metadata)
+		}
 		if a_in.requires_grad {
 			// int_metadata holds the argmax input index of every output element
 			fmt.assertf(
@@ -911,7 +915,12 @@ _backward_node_cpu :: proc(node: ^Tensor, allocator: mem.Allocator) {
 		W := input_in.shape[3]
 		N_hw := f64(N * H * W)
 		channel_size := N * H * W
-		// statistics the forward used: batch (training) or running (eval)
+		// statistics the forward used: batch (training) or running (eval); the
+		// device forward keeps them on the device ([means, then 1 / std])
+		if len(node.f64_metadata) == 1 {
+			resize(&node.f64_metadata, 1 + 2 * C)
+			_device_hooks.download(node.device.aux_buf, node.f64_metadata[1:])
+		}
 		training := node.f64_metadata[0] != 0
 		used_mean := node.f64_metadata[1:1 + C]
 		used_inv_std := node.f64_metadata[1 + C:1 + 2 * C]
@@ -2218,4 +2227,30 @@ _assert_same_len :: proc(node, input: ^Tensor, loc := #caller_location) {
 		len(input.grad.data),
 		loc = loc,
 	)
+}
+
+// _max_pool_argmax appends the input index of the first largest value of every
+// pooling window (row-major order, as tensor_max_pool2d) to `indices`
+_max_pool_argmax :: proc(
+	input: ^Tensor,
+	pp: PoolParams,
+	out_shape: [4]int,
+	indices: ^[dynamic]int,
+) {
+	N, C, H, W := input.shape[0], input.shape[1], input.shape[2], input.shape[3]
+	out_h, out_w := out_shape[2], out_shape[3]
+	for plane in 0 ..< N * C {
+		for oh in 0 ..< out_h {
+			for ow in 0 ..< out_w {
+				best, arg := -math.F64_MAX, 0
+				for kh in 0 ..< pp.kH {
+					for kw in 0 ..< pp.kW {
+						idx := plane * H * W + (oh * pp.stride + kh) * W + ow * pp.stride + kw
+						if input.data.data[idx] > best {best, arg = input.data.data[idx], idx}
+					}
+				}
+				append(indices, arg)
+			}
+		}
+	}
 }

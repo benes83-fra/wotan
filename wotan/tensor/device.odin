@@ -542,3 +542,82 @@ _device_attention :: proc(op: Op, Q, K, V: ^Tensor, mask: []f64, causal: bool) -
 	}
 	return out
 }
+
+// _device_pool: device max / average pooling. The max version records no
+// argmax indices: its backward finds each window's maximum again.
+_device_pool :: proc(op: Op, input: ^Tensor, kH, kW, stride: int) -> ^Tensor {
+	_check_shape(input)
+	N, C, H, W := input.shape[0], input.shape[1], input.shape[2], input.shape[3]
+	out_h, out_w := (H - kH) / stride + 1, (W - kW) / stride + 1
+	out := _device_new_op(
+		1,
+		N * C * out_h * out_w,
+		{N, C, out_h, out_w},
+		input.requires_grad,
+		_op_alloc(input),
+	)
+	_device_forward(op, out, {input}, {kH, kW, stride})
+	if out.requires_grad {
+		out.op = op
+		append(&out.inputs, input)
+		out.pool_params = PoolParams{kH, kW, stride, 0}
+	}
+	return out
+}
+
+// _device_conv2d: device tensor_conv2d (same output shape and recorded parameters)
+_device_conv2d :: proc(input, weight, bias: ^Tensor, stride, pad: int) -> ^Tensor {
+	_check_shape(input)
+	_check_shape(weight)
+	N, H, W := input.shape[0], input.shape[2], input.shape[3]
+	C_out, kH, kW := weight.shape[0], weight.shape[2], weight.shape[3]
+	out_h := (H + 2 * pad - kH) / stride + 1
+	out_w := (W + 2 * pad - kW) / stride + 1
+	rg := input.requires_grad || weight.requires_grad || (bias != nil && bias.requires_grad)
+	out := _device_new_op(
+		1,
+		N * C_out * out_h * out_w,
+		{N, C_out, out_h, out_w},
+		rg,
+		_op_alloc(input),
+	)
+	inputs := [3]^Tensor{input, weight, bias}
+	ni := 3 if bias != nil else 2
+	_device_forward(.Conv2d, out, inputs[:ni], {stride, pad})
+	if out.requires_grad {
+		out.op = .Conv2d
+		append(&out.inputs, ..inputs[:ni])
+		out.conv_params = ConvParams{kH, kW, stride, pad}
+	}
+	return out
+}
+
+// _device_batch_norm_2d: device tensor_batch_norm_2d. The statistics used per
+// channel ([means, then 1 / std]) stay on the device in the output's aux
+// buffer, so f64_metadata holds only [training]; training updates the running
+// statistics on the device.
+_device_batch_norm_2d :: proc(
+	input, weight, bias, running_mean, running_var: ^Tensor,
+	training: bool,
+	momentum, eps: f64,
+) -> ^Tensor {
+	_check_shape(input)
+	C := input.shape[1]
+	rg := input.requires_grad || weight.requires_grad || bias.requires_grad
+	out := _device_new_op(1, tensor_numel(input), input.shape, rg, _op_alloc(input))
+	out.device.aux_buf = _device_alloc(out, 2 * C)
+	flag := 1.0 if training else 0.0
+	_device_forward(
+		.BatchNorm2d,
+		out,
+		{input, weight, bias, running_mean, running_var},
+		nil,
+		{flag, momentum, eps},
+	)
+	if out.requires_grad {
+		out.op = .BatchNorm2d
+		append(&out.inputs, input, weight, bias)
+		append(&out.f64_metadata, flag)
+	}
+	return out
+}
