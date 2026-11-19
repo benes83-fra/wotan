@@ -3744,6 +3744,10 @@ tensor_ssm :: proc(
 	D: ^Tensor, // [1, d_model]
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
+	// the GPU scan holds the states of a channel in one workgroup (d_state ≤ 256)
+	if A.shape[1] <= DEVICE_SSM_MAX_STATE && _device_use(.SSM, x, h_0, A, B, C, Delta, D) {
+		return _device_ssm({x, h_0, A, B, C, Delta, D})
+	}
 	_host_inputs(.SSM, x, h_0, A, B, C, Delta, D)
 	allocator := _scope_or(allocator) // the active graph scope, if any
 	_check_shape(x)

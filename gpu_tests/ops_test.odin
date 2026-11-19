@@ -1229,6 +1229,70 @@ op_cases := [?]Op_Case {
 				x[4],
 			)},
 	},
+	// Mamba's scan: x [B, S, d_model], h_0 [B, d_model·d_state], A [d_model,
+	// d_state], B, C [B, S, d_state], Delta [B, S, d_model] (softplus: positive),
+	// D [1, d_model]
+	{
+		name = "ssm 2 sequences x 4 steps, d_model 3, d_state 2",
+		op = .SSM,
+		shapes = {
+			{2, 4, 3, 1},
+			{2, 6, 1, 1},
+			{3, 2, 1, 1},
+			{2, 4, 2, 1},
+			{2, 4, 2, 1},
+			{2, 4, 3, 1},
+			{1, 3, 1, 1},
+		},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			return t.tensor_ssm(x[0], x[1], x[2], x[3], x[4], t.tensor_softplus(x[5]), x[6])
+		},
+	},
+	{
+		name = "ssm d_state 16, fixed initial state",
+		op = .SSM,
+		shapes = {
+			{3, 6, 5, 1},
+			{3, 80, 1, 1},
+			{5, 16, 1, 1},
+			{3, 6, 16, 1},
+			{3, 6, 16, 1},
+			{3, 6, 5, 1},
+			{1, 5, 1, 1},
+		},
+		no_grad = {1},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			return t.tensor_ssm(x[0], x[1], x[2], x[3], x[4], t.tensor_softplus(x[5]), x[6])
+		},
+	},
+	{
+		name = "ssm 4 sequences x 40 steps, d_model 70",
+		op = .SSM,
+		shapes = {
+			{4, 40, 70, 1},
+			{4, 280, 1, 1},
+			{70, 4, 1, 1},
+			{4, 40, 4, 1},
+			{4, 40, 4, 1},
+			{4, 40, 70, 1},
+			{1, 70, 1, 1},
+		},
+		tol = 1e-5,
+		// A negative, as Mamba keeps it (-exp(A_log)), so the state decays
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			return t.tensor_ssm(
+				x[0],
+				x[1],
+				t.tensor_neg(t.tensor_exp(x[2])),
+				x[3],
+				x[4],
+				t.tensor_softplus(x[5]),
+				x[6],
+			)
+		},
+	},
 }
 
 // _const_like: a constant tensor shaped like x, freed with the graph
@@ -1332,33 +1396,6 @@ gpu_fallback_op_test :: proc() {
 		if c.op != .MultiHeadAttention && c.op != .Gelu {
 			check(fallbacks > 0, "%s (fallback): the fallback did not run", c.name)
 		}
-	}
-	// an op without a GPU kernel at all (Mamba's selective scan stays on the
-	// CPU), on device inputs
-	ssm := Op_Case {
-		name = "ssm (no kernel)",
-		op = .SSM,
-		// x [B, S, d_model], h_0 [B, d_model·d_state], A [d_model, d_state],
-		// B, C [B, S, d_state], Delta [B, S, d_model] (positive), D [1, d_model]
-		shapes = {
-			{2, 4, 3, 1},
-			{2, 6, 1, 1},
-			{3, 2, 1, 1},
-			{2, 4, 2, 1},
-			{2, 4, 2, 1},
-			{2, 4, 3, 1},
-			{1, 3, 1, 1},
-		},
-		tol = 1e-5,
-		run = proc(x: []^t.Tensor) -> ^t.Tensor {
-			return t.tensor_ssm(x[0], x[1], x[2], x[3], x[4], t.tensor_softplus(x[5]), x[6])
-		},
-	}
-	for c in ([]Op_Case{ssm}) {
-		worst, fallbacks := _compare_case(c, false)
-		check(worst <= c.tol, "%s: max relative error %.2e > %.0e", c.name, worst, c.tol)
-		check(fallbacks > 0, "%s: no fallback counted", c.name)
-		fmt.printfln("    %-34s max rel err %.2e (%d fallbacks)", c.name, worst, fallbacks)
 	}
 }
 

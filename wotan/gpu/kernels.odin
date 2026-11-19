@@ -41,6 +41,9 @@ Kernel :: enum {
 	Gru_Bwd,
 	Rnn_Fwd, // the tanh RNN recurrence (as Lstm_Fwd)
 	Rnn_Bwd,
+	Ssm_Fwd, // Mamba's selective scan, one thread per (sequence, channel)
+	Ssm_Bwd,
+	Ssm_Reduce, // its gradients that sum over channels or steps
 	Row_Sum, // out[b] = Σ_j x[b, j]
 	Row_Bcast_Add, // dx[b, j] += dy[b]
 	Transpose, // y (+)= xᵀ
@@ -941,6 +944,177 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw: vec3
 			let i = b * H + u;
 			dh0[i] = keep(dh0[i], p.u4 & 1u) + carry[i];
 		}
+	}
+}
+`,
+	// Mamba's selective scan, one thread per (batch row b, channel d, state n):
+	//   h_n = exp(Δ·A_dn)·h_n + (Δ·B_n)·x,  y = x·D_d + Σ_n C_n·h_n
+	// u0 batch, u1 steps S, u2 d_model, u3 d_state N (≤ 256). A workgroup
+	// holds 256 / N channels; each step the thread of state 0 sums the C·h of
+	// its channel in workgroup memory, in the order of n. aux: exp(Δ·A) of
+	// every step [B·S·DN] (the CPU's saved layout), then the states entering
+	// every step [B·S·DN] (for the backward pass).
+	.Ssm_Fwd            = `
+@group(0) @binding(1) var<storage, read> x: array<f32>;
+@group(0) @binding(2) var<storage, read> h0: array<f32>;
+@group(0) @binding(3) var<storage, read> A: array<f32>;
+@group(0) @binding(4) var<storage, read> Bm: array<f32>;
+@group(0) @binding(5) var<storage, read> C: array<f32>;
+@group(0) @binding(6) var<storage, read> Dl: array<f32>;
+@group(0) @binding(7) var<storage, read> D: array<f32>;
+@group(0) @binding(8) var<storage, read_write> o: array<f32>;
+@group(0) @binding(9) var<storage, read_write> aux: array<f32>;
+var<workgroup> sh: array<f32, 256>;
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+	let B = p.u0; let S = p.u1; let Dm = p.u2; let N = p.u3;
+	let per = 256u / N; // channels per workgroup
+	let pair = (wid.y * nw.x + wid.x) * per + lid.x / N;
+	let n = lid.x % N;
+	let ok = lid.x < per * N && pair < B * Dm;
+	let b = pair / Dm; let d = pair % Dm;
+	let DN = Dm * N;
+	let HS = B * S * DN;
+	let e = d * N + n;
+	var h = 0.0;
+	if (ok) { h = h0[b * DN + e]; }
+	for (var s = 0u; s < S; s++) {
+		let row_x = (b * S + s) * Dm;
+		let row_bc = (b * S + s) * N;
+		let st = (b * S + s) * DN;
+		if (ok) {
+			let x_val = x[row_x + d];
+			let delta = Dl[row_x + d];
+			aux[HS + st + e] = h;
+			let ab = exp(delta * A[e]);
+			aux[st + e] = ab;
+			h = ab * h + (delta * Bm[row_bc + n]) * x_val;
+			sh[lid.x] = C[row_bc + n] * h;
+		}
+		workgroupBarrier();
+		if (ok && n == 0u) {
+			var y = x[row_x + d] * D[d];
+			for (var k = 0u; k < N; k++) { y = y + sh[lid.x + k]; }
+			o[row_x + d] = y;
+		}
+		workgroupBarrier();
+	}
+}
+`,
+	// Backpropagation through the scan (layout and threads as Ssm_Fwd); dh
+	// stays in a register. dx and dΔ sum over n in workgroup memory (u4 bit 0
+	// / 1: wanted; u5 bit 0 / 1: overwrite, as keep); dh0 += dL/dh_0 at the
+	// end (bit 2). The terms of the gradients that sum over channels or steps
+	// go to terms: dA terms [B·S·DN], then dB terms, then dC terms (reduced by
+	// Ssm_Reduce and Col_Sum).
+	.Ssm_Bwd            = `
+@group(0) @binding(1) var<storage, read> x: array<f32>;
+@group(0) @binding(2) var<storage, read> A: array<f32>;
+@group(0) @binding(3) var<storage, read> Bm: array<f32>;
+@group(0) @binding(4) var<storage, read> C: array<f32>;
+@group(0) @binding(5) var<storage, read> Dl: array<f32>;
+@group(0) @binding(6) var<storage, read> D: array<f32>;
+@group(0) @binding(7) var<storage, read> dy: array<f32>;
+@group(0) @binding(8) var<storage, read> aux: array<f32>;
+@group(0) @binding(9) var<storage, read_write> terms: array<f32>;
+@group(0) @binding(10) var<storage, read_write> dx: array<f32>;
+@group(0) @binding(11) var<storage, read_write> dDl: array<f32>;
+@group(0) @binding(12) var<storage, read_write> dh0: array<f32>;
+var<workgroup> shx: array<f32, 256>;
+var<workgroup> shd: array<f32, 256>;
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+	let B = p.u0; let S = p.u1; let Dm = p.u2; let N = p.u3;
+	let per = 256u / N;
+	let pair = (wid.y * nw.x + wid.x) * per + lid.x / N;
+	let n = lid.x % N;
+	let ok = lid.x < per * N && pair < B * Dm;
+	let b = pair / Dm; let d = pair % Dm;
+	let DN = Dm * N;
+	let TS = B * S * DN;
+	let e = d * N + n;
+	var dh = 0.0;
+	for (var q = 0u; q < S; q++) {
+		let s = S - 1u - q;
+		let row_x = (b * S + s) * Dm;
+		let row_bc = (b * S + s) * N;
+		let st = (b * S + s) * DN;
+		if (ok) {
+			let x_val = x[row_x + d];
+			let delta = Dl[row_x + d];
+			let dy_val = dy[row_x + d];
+			let A_val = A[e];
+			let ab = aux[st + e];
+			let B_val = Bm[row_bc + n];
+			let B_bar = delta * B_val;
+			let hp = aux[TS + st + e];
+			let dh_n = dh + dy_val * C[row_bc + n];
+			let h_n = ab * hp + B_bar * x_val;
+			terms[st + e] = dh_n * hp * delta * ab;
+			terms[TS + st + e] = dh_n * x_val * delta;
+			terms[2u * TS + st + e] = dy_val * h_n;
+			dh = dh_n * ab;
+			shx[lid.x] = dh_n * B_bar;
+			shd[lid.x] = dh_n * (hp * A_val * ab + x_val * B_val);
+		}
+		workgroupBarrier();
+		if (ok && n == 0u) {
+			var dx_acc = dy[row_x + d] * D[d];
+			var dd_acc = 0.0;
+			for (var k = 0u; k < N; k++) {
+				dx_acc = dx_acc + shx[lid.x + k];
+				dd_acc = dd_acc + shd[lid.x + k];
+			}
+			if ((p.u4 & 1u) != 0u) { dx[row_x + d] = keep(dx[row_x + d], p.u5 & 1u) + dx_acc; }
+			if ((p.u4 & 2u) != 0u) { dDl[row_x + d] = keep(dDl[row_x + d], (p.u5 >> 1u) & 1u) + dd_acc; }
+		}
+		workgroupBarrier();
+	}
+	if (ok && (p.u4 & 4u) != 0u) {
+		let i = b * DN + e;
+		dh0[i] = keep(dh0[i], (p.u5 >> 2u) & 1u) + dh;
+	}
+}
+`,
+	// The scan gradients that sum over channels or steps (parameters as
+	// Ssm_Fwd): dB[b, s, n] and dC[b, s, n] sum the terms of Ssm_Bwd over the
+	// channels d; dD[d] = Σ dy · x over steps and batch rows. u4 bits 0, 1, 2:
+	// dB, dC, dD wanted; u5 the same bits: overwrite (as keep). One thread per
+	// (b, s, n), the first d_model of them also compute dD.
+	.Ssm_Reduce         = `
+@group(0) @binding(1) var<storage, read> terms: array<f32>;
+@group(0) @binding(2) var<storage, read> dy: array<f32>;
+@group(0) @binding(3) var<storage, read> x: array<f32>;
+@group(0) @binding(4) var<storage, read_write> dB: array<f32>;
+@group(0) @binding(5) var<storage, read_write> dC: array<f32>;
+@group(0) @binding(6) var<storage, read_write> dD: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
+	let B = p.u0; let S = p.u1; let Dm = p.u2; let N = p.u3;
+	let i = idx1(g, nw);
+	let DN = Dm * N;
+	let TS = B * S * DN;
+	if (i < B * S * N) {
+		let bs = i / N; let n = i % N;
+		var sb = 0.0; var sc = 0.0;
+		for (var d = 0u; d < Dm; d++) {
+			let e = bs * DN + d * N + n;
+			sb = sb + terms[TS + e];
+			sc = sc + terms[2u * TS + e];
+		}
+		if ((p.u4 & 1u) != 0u) { dB[i] = keep(dB[i], p.u5 & 1u) + sb; }
+		if ((p.u4 & 2u) != 0u) { dC[i] = keep(dC[i], (p.u5 >> 1u) & 1u) + sc; }
+	}
+	if (i < Dm && (p.u4 & 4u) != 0u) {
+		var sd = 0.0;
+		for (var q = 0u; q < S; q++) {
+			let s = S - 1u - q;
+			for (var b = 0u; b < B; b++) {
+				let r = (b * S + s) * Dm + i;
+				sd = sd + dy[r] * x[r];
+			}
+		}
+		dD[i] = keep(dD[i], (p.u5 >> 2u) & 1u) + sd;
 	}
 }
 `,

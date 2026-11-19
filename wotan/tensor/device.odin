@@ -556,29 +556,78 @@ _device_linear :: proc(x, w, b: ^Tensor) -> ^Tensor {
 	return out
 }
 
-// _device_lstm: device tensor_lstm. The states and gates the backward pass
-// needs stay on the device (aux_buf, the layout of the CPU's f64_metadata).
-_device_lstm :: proc(x, h_0, c_0, w_ih, w_hh, bias: ^Tensor) -> ^Tensor {
-	_check_shape(x)
-	_check_shape(w_ih)
-	batch, seq_len, in_size := x.shape[0], x.shape[1], x.shape[2]
-	H := w_ih.shape[1] / 4
-	rg :=
-		x.requires_grad ||
-		h_0.requires_grad ||
-		c_0.requires_grad ||
-		w_ih.requires_grad ||
-		w_hh.requires_grad ||
-		bias.requires_grad
-	out := _device_new_op(1, batch * seq_len * H, {batch, seq_len, H, 1}, rg, _op_alloc(x))
+// _recurrent_saved: values the forward pass of a recurrent op keeps for the
+// backward pass (the layout of f64_metadata, see tensor_lstm / tensor_gru /
+// tensor_rnn)
+_recurrent_saved :: proc(op: Op, batch, seq_len, H: int) -> int {
 	BH := batch * H
-	out.device.aux_buf = _device_alloc(out, 2 * (seq_len + 1) * BH + 5 * seq_len * BH)
-	_device_forward(.LSTM, out, {x, h_0, c_0, w_ih, w_hh, bias}, {batch, seq_len, in_size, H})
+	#partial switch op {
+	case .LSTM:
+		return 2 * (seq_len + 1) * BH + 5 * seq_len * BH
+	case .GRU:
+		return (seq_len + 1) * BH + 4 * seq_len * BH
+	case .SSM:
+		return seq_len * BH // exp(Δ·A); H = d_model · d_state
+	}
+	return (seq_len + 1) * BH // RNN
+}
+
+// _device_recurrent: device tensor_lstm / tensor_gru / tensor_rnn (inputs in
+// the order the op records them, nil entries skipped). The states and gates
+// the backward pass needs stay on the device (aux_buf, the layout of the CPU's
+// f64_metadata).
+_device_recurrent :: proc(op: Op, inputs: []^Tensor, H: int) -> ^Tensor {
+	x := inputs[0]
+	_check_shape(x)
+	batch, seq_len, in_size := x.shape[0], x.shape[1], x.shape[2]
+	rg := false
+	for t in inputs {rg = rg || t.requires_grad}
+	out := _device_new_op(1, batch * seq_len * H, {batch, seq_len, H, 1}, rg, _op_alloc(x))
+	out.device.aux_buf = _device_alloc(out, _recurrent_saved(op, batch, seq_len, H))
+	_device_forward(op, out, inputs, {batch, seq_len, in_size, H})
 	if out.requires_grad {
-		out.op = .LSTM
-		append(&out.inputs, x, h_0, c_0, w_ih, w_hh, bias)
+		out.op = op
+		append(&out.inputs, ..inputs)
 	}
 	return out
+}
+
+// the largest d_state the GPU scan handles (larger ones run on the CPU)
+DEVICE_SSM_MAX_STATE :: 256
+
+// _device_ssm: device tensor_ssm (inputs x, h_0, A, B, C, Delta, D). aux_buf
+// keeps exp(Δ·A) of every step (the layout of the CPU's f64_metadata), then
+// the states entering every step for the GPU backward pass.
+_device_ssm :: proc(inputs: []^Tensor) -> ^Tensor {
+	x, A := inputs[0], inputs[2]
+	_check_shape(x)
+	_check_shape(A)
+	batch, seq_len, d_model, d_state := x.shape[0], x.shape[1], x.shape[2], A.shape[1]
+	rg := false
+	for t in inputs {rg = rg || t.requires_grad}
+	out := _device_new_op(
+		1,
+		batch * seq_len * d_model,
+		{batch, seq_len, d_model, 1},
+		rg,
+		_op_alloc(x),
+	)
+	out.device.aux_buf = _device_alloc(out, 2 * batch * seq_len * d_model * d_state)
+	_device_forward(.SSM, out, inputs, {batch, seq_len, d_model, d_state})
+	if out.requires_grad {
+		out.op = .SSM
+		append(&out.inputs, ..inputs)
+		append(&out.int_metadata, batch, seq_len, d_model, d_state)
+	}
+	return out
+}
+
+// _recurrent_saved_to_host: for the CPU backward of a recurrent node recorded
+// on the GPU, its saved states and gates from the device
+_recurrent_saved_to_host :: proc(node: ^Tensor, batch, seq_len, H: int) {
+	if len(node.f64_metadata) > 0 || node.device == nil || node.device.aux_buf.ptr == nil {return}
+	resize(&node.f64_metadata, _recurrent_saved(node.op, batch, seq_len, H))
+	_device_hooks.download(node.device.aux_buf, node.f64_metadata[:])
 }
 
 // _device_add_bias: device tensor_add_bias, both paths

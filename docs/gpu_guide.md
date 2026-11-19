@@ -208,9 +208,9 @@ These ops have GPU kernels for the forward and the backward pass:
 | finance and VAE | `tensor_sharpe_loss`, `tensor_prospect_value`, `tensor_prob_weighting`, `tensor_prospect_utility`, `tensor_normalize_time`, `tensor_permute_lob`, `tensor_lgamma`, `tensor_entropy`, `tensor_kl_divergence`, `nn.reparameterize`, `tensor_top_k_mask` (no gradient) |
 | sequences | `tensor_embedding`, `tensor_permute_mha`, `tensor_permute_mha_inverse`, `tensor_scaled_dot_product_attention`, `tensor_masked_scaled_dot_product_attention`, `tensor_flash_attention`, `tensor_multi_head_attention` (one node; its kernels read and write the `[batch, seq, heads·head_dim]` layout directly) |
 | shape | `tensor_reshape`, `tensor_as_matrix`, `tensor_transpose`, `tensor_slice_cols`, `tensor_concat` |
-| recurrent | `tensor_lstm`, `tensor_gru` (with or without `bias_hn`), `tensor_rnn` (used by the LSTM, GRU and RNN layers and sequence blocks of `nn`) |
+| recurrent | `tensor_lstm`, `tensor_gru` (with or without `bias_hn`), `tensor_rnn` (used by the LSTM, GRU and RNN layers and sequence blocks of `nn`), `tensor_ssm` (Mamba's selective scan, `d_state` up to 256) |
 
-With these, MLPs, CNNs, TCNs, GPT (with flash attention, RMSNorm, tied embeddings or mixture-of-experts layers), BERT, VAEs and the `ml_finance` models train without any CPU fallback. Only Mamba's selective scan (`tensor_ssm`) runs on the fallback.
+With these, MLPs, CNNs, TCNs, GPT (with flash attention, RMSNorm, tied embeddings or mixture-of-experts layers), BERT, VAEs and the `ml_finance` models train without any CPU fallback, and so do the LSTM, GRU, RNN and Mamba layers.
 
 **Recurrent layers** (LSTM, GRU, tanh RNN) step through time one step after another, so the GPU runs the steps in order and the sequences of a batch side by side:
 - The input projection `x @ W_ih` of all steps is one matrix product, and the recurrence is one launch: one workgroup per sequence, whose threads share the hidden units and wait for each other between steps.
@@ -233,9 +233,17 @@ The GPU gains most from many sequences and many hidden units. A training step of
 
 A small RNN does too little work per step for the GPU to pay off; from a few dozen sequences and about a hundred hidden units on, all three layers are faster on the GPU.
 
+**Mamba's selective scan** (`tensor_ssm`) keeps a state of `d_state` values per channel. The GPU gives every state value of every channel and sequence its own thread, and walks the steps in one launch. Each step, the threads of a channel add their contributions to the output in workgroup memory. The backward pass runs back through the steps in one launch, and two short launches add up the gradients that sum over channels or steps (those of A, B, C and D). A channel's states must fit in one workgroup, so `d_state` up to 256 runs on the GPU and larger ones on the CPU; devices that bind fewer than 12 storage buffers per kernel also run the scan on the CPU. A training step of one Mamba layer (`nn.mamba_layer_new`, `d_state` 16; RMSNorm, five linear layers, the scan), measured as above:
+
+| Batch | Steps | `d_model` | CPU | GPU |
+|---|---|---|---|---|
+| 16 | 20 | 32 | 1.3 ms | 1.05 ms (1.2×) |
+| 64 | 50 | 128 | 46 ms | 8.7 ms (5.3×) |
+| 128 | 100 | 256 | 432 ms | 43 ms (10×) |
+
 `gpu.has_kernel(op)` answers the same question in code.
 
-Every other op still accepts device tensors. It downloads its inputs, runs the CPU code, and returns a host tensor, which the next GPU op uploads. The backward pass does the same for nodes without a GPU kernel. Results are correct either way; the fallback only costs transfers. `gpu.stats()` counts fallbacks per op (`forward_fallbacks[op]`, `backward_fallbacks[op]`), which shows what a model would gain from more kernels.
+An op whose kernel is switched off (`gpu.set_kernel_enabled`) or cannot run on the device (see the scan above) still accepts device tensors. It downloads its inputs, runs the CPU code, and returns a host tensor, which the next GPU op uploads. The backward pass does the same for nodes without a GPU kernel. Results are correct either way; the fallback only costs transfers. `gpu.stats()` counts fallbacks per op (`forward_fallbacks[op]`, `backward_fallbacks[op]`), which shows what a model would gain from more kernels.
 
 ## 5. Transformers on the GPU
 
@@ -432,7 +440,7 @@ How these ops behave on the GPU:
 - **Pooling:** max pooling keeps no argmax indices on the device. Its backward pass finds the largest value of each window again, taking the first one in row-major order when values tie, as on the CPU.
 - **Batch norm:** the running mean and variance move to the device the first time a GPU batch norm uses them, and training-mode steps update them there. Read them with `t.tensor_values`. `nn.save_checkpoint` and the other save procedures sync them like parameters.
 - **A bias in front of batch norm** has a gradient of exactly zero, because batch norm subtracts every per-channel constant. In `f32`, Adam turns the rounding residue into steps of the learning rate (see [Precision](#10-precision)), so such a bias and the running mean that tracks it drift on the GPU without changing the output. The example therefore builds that convolution with `use_bias = false`, the usual choice on any device.
-- **DeepLOB** (`ml_finance`) runs entirely on the GPU with the TCN, LSTM or GRU sequence layer. With Mamba, that sequence layer uses the fallback.
+- **DeepLOB** (`ml_finance`) runs entirely on the GPU with any of its sequence layers (TCN, LSTM, GRU, Mamba).
 
 ## 7. Finance models on the GPU
 
@@ -620,13 +628,13 @@ odin run gpu_tests -collection:root=. -debug
 ```
 
 It compares every GPU result with the CPU engine, which is itself validated against PyTorch:
-- **every op with a kernel:** forward and backward, with a random upstream gradient, including masked and causal attention, LSTMs, GRUs (with and without `bias_hn`) and tanh RNNs (each also with more hidden units than a workgroup has threads, and 40 steps), repeated embedding ids, wide softmax rows, convolutions with stride, padding and dilation, overlapping pooling windows, and the finance and VAE ops (lgamma also below 0.5, a Sharpe ratio over more returns than one workgroup, top-k masks, seeded reparameterization). Most ops agree to 1e-7 or better and matrix products to 7e-7. The largest difference, 3.5e-6, is tanh of inputs scaled by 30, where the f32 rounding of the scaled input dominates.
+- **every op with a kernel:** forward and backward, with a random upstream gradient, including masked and causal attention, LSTMs, GRUs (with and without `bias_hn`) and tanh RNNs (each also with more hidden units than a workgroup has threads, and 40 steps), Mamba's scan (`d_state` 2 and 16, 40 steps of 70 channels), repeated embedding ids, wide softmax rows, convolutions with stride, padding and dilation, overlapping pooling windows, and the finance and VAE ops (lgamma also below 0.5, a Sharpe ratio over more returns than one workgroup, top-k masks, seeded reparameterization). Most ops agree to 1e-7 or better and matrix products to 7e-7. The largest difference, 3.5e-6, is tanh of inputs scaled by 30, where the f32 rounding of the scaled input dominates.
 - **both matrix-product kernels:** every op built on matrix products (products, attention, convolutions) with each kernel forced, including the register-tiled kernel on products smaller than one tile, and products of 70×90 by 90×65 and larger with partial tiles.
-- **the same ops with their kernel disabled,** through the CPU fallback, and an op that has no kernel (`tensor_ssm`).
+- **the same ops with their kernel disabled,** through the CPU fallback.
 - **training:** 40 Adam steps of MLPs with five activations, SGD with Nesterov momentum and gradient clipping, and a model with every kernel disabled. Losses and final parameters agree with the CPU to 4e-6 or better.
 - **gradient clipping over many parameters:** 18 gradients from 1 to 70,000 elements, including one parameter listed twice, one kept on the host and one whose gradient was changed on the host. The norm and the clipped gradients agree with the CPU to 1e-6, and the call uses 3 launches to sum and 3 to scale.
-- **convolutional models:** 10 steps of a CNN (convolutions with stride and padding, batch norm, max and average pooling, flatten, dropout) and of a TCN (dilated causal convolutions, dropout, residual connections). Losses and parameters, including the batch norm's running statistics, agree with the CPU to 2e-6; neither model uses a CPU fallback. Separate checks cover the running-statistics update and evaluation mode, and a backward pass on the CPU after a forward pass on the GPU (the CPU then finds the max-pool argmax and fetches the batch-norm statistics, the Sharpe ratio's mean and standard deviation and the recurrent layers' states and gates from the device).
-- **`ml_finance` models:** a deep hedger with CVaR, N-BEATS, PatchTST, a neural SDF, a conditional autoencoder with L1 penalty and early stopping, CQL with soft target updates, DeepLOB with the TCN, the LSTM and the GRU sequence layer, the volatility forecaster with an LSTM and with a GRU, and a VAE, each trained a few steps on both devices from the same seed. Losses and parameters agree with the CPU to 2e-6 or better (PatchTST: except its attention key biases, see [Precision](#10-precision)), with no CPU fallback.
+- **convolutional models:** 10 steps of a CNN (convolutions with stride and padding, batch norm, max and average pooling, flatten, dropout) and of a TCN (dilated causal convolutions, dropout, residual connections). Losses and parameters, including the batch norm's running statistics, agree with the CPU to 2e-6; neither model uses a CPU fallback. Separate checks cover the running-statistics update and evaluation mode, and a backward pass on the CPU after a forward pass on the GPU (the CPU then finds the max-pool argmax and fetches the batch-norm statistics, the Sharpe ratio's mean and standard deviation and the recurrent layers' and the scan's saved states from the device).
+- **`ml_finance` models:** a deep hedger with CVaR, N-BEATS, PatchTST, a neural SDF, a conditional autoencoder with L1 penalty and early stopping, CQL with soft target updates, DeepLOB with the TCN, LSTM, GRU and Mamba sequence layers, the volatility forecaster with an LSTM, a GRU and a Mamba layer, and a VAE, each trained a few steps on both devices from the same seed. Losses and parameters agree with the CPU to 1e-5 or better (PatchTST: except its attention key biases, see [Precision](#10-precision)), with no CPU fallback.
 - **transformers:** 12 steps of four small GPTs (layer norm and GELU; flash attention; RMSNorm, tied embeddings and tanh GELU; mixture of experts) and a BERT with padding masks, all with dropout on and the same masks on both devices. Losses agree with the CPU to 1e-6 and parameters to 2e-4 or better, except the attention key biases (see [Precision](#10-precision)). None of these models uses a CPU fallback.
 - **residency:** host copies, sync procedures, automatic uploads, `to_host`, detach.
 - **memory:** a scoped training loop keeps the pool size flat, and a debug build reports no leaks.

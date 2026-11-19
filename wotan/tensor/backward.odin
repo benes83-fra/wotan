@@ -2222,7 +2222,8 @@ _ssm_backward :: proc(node: ^Tensor, allocator: mem.Allocator) {
 		delete(dh, allocator); delete(hs_buf)
 	}
 
-	// exp(delta * A) saved by tensor_ssm
+	// exp(delta * A) saved by tensor_ssm (on the device if recorded there)
+	_recurrent_saved_to_host(node, batch, seq_len, DN)
 	fmt.assertf(
 		len(node.f64_metadata) == batch * seq_len * DN,
 		"backward: SSM node has %d saved values, expected %d",

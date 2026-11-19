@@ -82,6 +82,7 @@ SUPPORTED :: bit_set[t.Op] {
 	.LSTM,
 	.GRU,
 	.RNN,
+	.SSM,
 }
 
 @(private)
@@ -140,6 +141,7 @@ _binary_code :: proc(op: t.Op) -> u32 {
 
 @(private)
 _hook_has_forward :: proc(op: t.Op) -> bool {
+	if op == .SSM && G.limits.maxStorageBuffersPerShaderStage < SSM_BINDS {return false}
 	return op in SUPPORTED && !G.disabled[op]
 }
 
@@ -403,6 +405,8 @@ _hook_forward :: proc(op: t.Op, out: ^t.Tensor, inputs: []^t.Tensor, ints: []int
 		_gru_forward(out, inputs, ints)
 	case .RNN:
 		_rnn_forward(out, inputs, ints)
+	case .SSM:
+		_ssm_forward(out, inputs, ints)
 	case:
 		_forward_p2(op, out, inputs, ints, floats)
 	}
@@ -662,14 +666,19 @@ _hook_backward :: proc(node: ^t.Tensor, allocator: mem.Allocator) -> bool {
 			}
 			off += size
 		}
-	case .LSTM, .GRU, .RNN:
+	case .LSTM, .GRU, .RNN, .SSM:
+		// recorded by the CPU (its kernel was off during the forward pass): the
+		// saved states are on the host, so the CPU case runs
+		if node.device == nil || node.device.aux_buf.ptr == nil {return false}
 		#partial switch op {
 		case .LSTM:
 			_lstm_backward(node, dy)
 		case .GRU:
 			_gru_backward(node, dy)
-		case:
+		case .RNN:
 			_rnn_backward(node, dy)
+		case:
+			_ssm_backward(node, dy)
 		}
 		for x in node.inputs {if x.requires_grad {wrote(&written, &nw, x)}}
 	case:

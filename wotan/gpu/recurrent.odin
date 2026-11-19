@@ -299,3 +299,112 @@ _rnn_backward :: proc(node: ^t.Tensor, dy: Bind) {
 	)
 	_rec_param_grads(x, w_ih, w_hh, bias, dg, dg, hs, R, in_f, H, H)
 }
+
+// ----------------------------------------------------------------------------
+// Mamba's selective scan (tensor_ssm): inputs x, h_0, A, B, C, Delta, D
+// ----------------------------------------------------------------------------
+
+// storage buffers Ssm_Bwd binds (devices that bind fewer use the CPU)
+@(private)
+SSM_BINDS :: 12
+
+// _ssm_aux: the forward pass keeps exp(Δ·A) of every step (the CPU's saved
+// layout, first) and the states entering every step: 2 · B·S·DN values
+@(private)
+_ssm_aux :: proc(B, S, DN: int) -> int {return 2 * B * S * DN}
+
+// _ssm_grid: workgroups of 256 / N channels each (b = wid.y · nw.x + wid.x)
+@(private)
+_ssm_grid :: proc(B, Dm, N: int) -> (gx, gy: u32) {
+	per := 256 / N
+	groups := (B * Dm + per - 1) / per
+	x := min(groups, 65535)
+	return u32(x), u32((groups + x - 1) / x)
+}
+
+// _ssm_forward: ints B, S, d_model, d_state (d_state ≤ t.DEVICE_SSM_MAX_STATE)
+@(private)
+_ssm_forward :: proc(out: ^t.Tensor, inputs: []^t.Tensor, ints: []int) {
+	B, S, Dm, N := ints[0], ints[1], ints[2], ints[3]
+	if B == 0 || S == 0 || Dm == 0 || N == 0 {return}
+	binds: [9]Bind
+	for x, i in inputs {binds[i] = _data(x)}
+	binds[7] = _data(out)
+	binds[8] = _bind(out.device.aux_buf, _ssm_aux(B, S, Dm * N))
+	gx, gy := _ssm_grid(B, Dm, N)
+	_dispatch(.Ssm_Fwd, _p({u32(B), u32(S), u32(Dm), u32(N), 0, 0, 0, 0}), binds[:], gx, gy)
+}
+
+// _ssm_backward: dy the node's gradient [B, S, d_model]
+@(private)
+_ssm_backward :: proc(node: ^t.Tensor, dy: Bind) {
+	x, h0, A, Bt, C, Dl, D :=
+		node.inputs[0],
+		node.inputs[1],
+		node.inputs[2],
+		node.inputs[3],
+		node.inputs[4],
+		node.inputs[5],
+		node.inputs[6]
+	B, S, Dm := node.shape[0], node.shape[1], node.shape[2]
+	N := A.shape[1]
+	if B == 0 || S == 0 || Dm == 0 || N == 0 {return}
+	DN := Dm * N
+	TS := B * S * DN
+	terms := _acquire(3 * TS)
+	defer _release_buf(terms)
+	tb := Bind{terms, 3 * TS}
+	reads := [8]Bind {
+		_in_data(x),
+		_in_data(A),
+		_in_data(Bt),
+		_in_data(C),
+		_in_data(Dl),
+		_in_data(D),
+		dy,
+		_bind(node.device.aux_buf, _ssm_aux(B, S, DN)),
+	}
+
+	// 1. back through the scan: dx, dΔ, dh_0 and the terms
+	wanted, overwrite: u32
+	outs := [3]Bind{_dummy(), _dummy(), _dummy()}
+	for src, k in ([3]^t.Tensor{x, Dl, h0}) {
+		if !src.requires_grad {continue}
+		fresh: bool
+		outs[k], fresh = _out_grad(src)
+		wanted |= 1 << uint(k)
+		overwrite |= u32(fresh) << uint(k)
+	}
+	binds: [12]Bind
+	copy(binds[:], reads[:])
+	binds[8], binds[9], binds[10], binds[11] = tb, outs[0], outs[1], outs[2]
+	gx, gy := _ssm_grid(B, Dm, N)
+	p := _p({u32(B), u32(S), u32(Dm), u32(N), wanted, overwrite, 0, 0})
+	_dispatch(.Ssm_Bwd, p, binds[:], gx, gy)
+
+	// 2. dB, dC (over the channels) and dD (over steps and rows) in one launch
+	wanted, overwrite = 0, 0
+	grads := [3]Bind{_dummy(), _dummy(), _dummy()}
+	for src, k in ([3]^t.Tensor{Bt, C, D}) {
+		if !src.requires_grad {continue}
+		fresh: bool
+		grads[k], fresh = _out_grad(src)
+		wanted |= 1 << uint(k)
+		overwrite |= u32(fresh) << uint(k)
+	}
+	if wanted != 0 {
+		p = _p({u32(B), u32(S), u32(Dm), u32(N), wanted, overwrite, 0, 0})
+		_dispatch_1d(
+			.Ssm_Reduce,
+			p,
+			{tb, dy, reads[0], grads[0], grads[1], grads[2]},
+			max(B * S * N, Dm),
+		)
+	}
+
+	// 3. dA: the dA terms (first block of terms) summed over steps and rows
+	if A.requires_grad {
+		g, fresh := _out_grad(A)
+		_dispatch_1d(.Col_Sum, _p({u32(B * S), u32(DN), 0, 0, 0, 0, 0, u32(fresh)}), {tb, g}, DN)
+	}
+}

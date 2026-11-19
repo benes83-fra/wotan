@@ -312,6 +312,11 @@ _deeplob_gru_run :: proc(on_gpu: bool) -> (losses: []f64, params: [][]f64, skip:
 	return _deeplob_backend_run(on_gpu, .GRU)
 }
 
+// DeepLOB with the Mamba sequence layer
+_deeplob_mamba_run :: proc(on_gpu: bool) -> (losses: []f64, params: [][]f64, skip: []int) {
+	return _deeplob_backend_run(on_gpu, .Mamba)
+}
+
 _deeplob_backend_run :: proc(
 	on_gpu: bool,
 	backend: nn.SeqBackend,
@@ -364,6 +369,10 @@ _lstm_vola_run :: proc(on_gpu: bool) -> (losses: []f64, params: [][]f64, skip: [
 
 _gru_vola_run :: proc(on_gpu: bool) -> (losses: []f64, params: [][]f64, skip: []int) {
 	return _vola_run(on_gpu, .GRU)
+}
+
+_mamba_vola_run :: proc(on_gpu: bool) -> (losses: []f64, params: [][]f64, skip: []int) {
+	return _vola_run(on_gpu, .Mamba)
 }
 
 _vola_run :: proc(
@@ -457,5 +466,7 @@ gpu_ml_finance_test :: proc() {
 	_ml_case("DeepLOB (GRU)", _deeplob_gru_run, 2e-3)
 	_ml_case("LSTM volatility forecaster", _lstm_vola_run, 2e-3)
 	_ml_case("volatility forecaster (GRU)", _gru_vola_run, 2e-3)
+	_ml_case("DeepLOB (Mamba)", _deeplob_mamba_run, 2e-3)
+	_ml_case("volatility forecaster (Mamba)", _mamba_vola_run, 2e-3)
 	_ml_case("VAE (reparameterize, KL)", _vae_run, 2e-3)
 }
