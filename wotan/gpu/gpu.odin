@@ -225,6 +225,15 @@ set_matmul_kernel :: proc(k: Matmul_Kernel) {
 	G.matmul_kernel = k
 }
 
+// set_linear_grouping turns the grouping of linear layers on one input off or
+// back on (default on): attention's query, key and value projections run as
+// one launch per kernel instead of three (see linear_group.odin). For
+// comparisons and tests; the values are the same.
+set_linear_grouping :: proc(enabled: bool) {
+	_held_flush()
+	G.linear_ungrouped = !enabled
+}
+
 // benchmark_matmul: the mean time in milliseconds of one f32 product
 // C[M, N] = op(A) @ op(B) (op: transposed if asked; A stored [M, K] or [K, M],
 // B [K, N] or [N, K]) on the GPU with the current kernel choice. Fixed inputs;

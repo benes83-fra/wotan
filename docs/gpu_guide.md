@@ -538,7 +538,7 @@ Mean time of one Adam training step (forward, backward, update), measured by the
 | MLP 64, 256, 256, 1 | 256 | 2.40 ms | 0.44 ms (5.4×) | 0.26 ms (9.4×) |
 | MLP 256, 1024, 1024, 1 | 512 | 72.5 ms | 6.29 ms (11.5×) | 2.93 ms (24.7×) |
 | MLP 512, 2048, 2048, 1 | 1024 | 598 ms | 13.2 ms (45×) | 11.9 ms (50×) |
-| GPT (2 blocks, width 32, 4 heads) | 6 × 12 tokens | 1.86 ms | 1.44 ms (1.3×) | 0.78 ms (2.4×) |
+| GPT (2 blocks, width 32, 4 heads) | 6 × 12 tokens | 1.86 ms | 1.34 ms (1.4×) | 0.64 ms (2.9×) |
 
 The training tests of the suite read the loss after every step and the GPT test also clips the gradients (another read), so their step times are close to the middle column: about 1.9 ms on both devices for the GPT, 0.2 ms on the CPU against 0.6 ms on the GPU for the CNN of section 6, and 0.1 ms against 0.8 ms for the TCN. For such small models the CPU is the better choice when the loop reads a result every step. Timings on a laptop vary between runs with clock speeds and power state. Debug builds (`-debug`) slow the CPU engine several times more than the GPU path, so compare the two devices in an optimized build.
 
@@ -550,9 +550,10 @@ The training tests of the suite read the loss after every step and the GPT test 
 - Multi-head attention reads and writes the heads in place (see [section 5](#5-transformers-on-the-gpu)), so the permutes into and out of the per-head layout do not run.
 - The backward pass of an addition, subtraction, multiplication or division computes the gradients of both operands in one launch (residual connections).
 - `tensor_gelu` is one launch forward and one backward. On the CPU it records `tensor_norm_cdf` and `tensor_mul`, so CPU results are those of the two ops.
+- Up to three linear layers on the same input, recorded one after the other, run together: the query, key and value projections of attention take one launch forward and three backward (bias, input and weight gradients) instead of three and nine. The values are the same as with one launch per layer. `gpu.set_linear_grouping(false)` turns this off for comparisons.
 - `clip_grad_norm` handles several gradients per launch (see [section 8](#8-optimizers-clipping-and-checkpoints)).
 
-The GPT of section 5 records about 135 kernel launches per training step: 117 for the forward and backward pass, 10 for the Adam step and 5 to 10 for `clip_grad_norm` over its 34 parameters (5 to sum the squares; 5 more to scale, in the steps where the norm is above the limit). The smaller GPT of the table above, without dropout and clipping, records 126.
+The GPT of section 5 records about 119 kernel launches per training step: 101 for the forward and backward pass, 10 for the Adam step and 5 to 10 for `clip_grad_norm` over its 34 parameters (5 to sum the squares; 5 more to scale, in the steps where the norm is above the limit). The smaller GPT of the table above, without dropout and clipping, records 110.
 
 Most of the remaining launches are matrix products (one per linear layer forward, two backward) and one launch per op for the rest.
 
@@ -626,6 +627,7 @@ Without a usable adapter the suite prints `SKIP` and exits with code 0.
 | `gpu.has_kernel(op)` | whether an op has a GPU kernel |
 | `gpu.set_kernel_enabled(op, enabled)` | run an op through the CPU fallback (testing, comparisons) |
 | `gpu.set_matmul_kernel(k)` | `.Auto` (default), `.Tiled` or `.Simple` matrix-product kernel |
+| `gpu.set_linear_grouping(enabled)` | run linear layers on one input together (default on; turn off for comparisons) |
 | `gpu.benchmark_matmul(M, N, K, reps, trans_a, trans_b) -> f64` | milliseconds per product with the current kernel |
 | `t.tensor_values(x)`, `t.tensor_grad_values(x)`, `t.tensor_item(x)` | read device data on the host |
 | `t.tensor_sync_host(x)` | make `x.data.data` and `x.grad.data` current |

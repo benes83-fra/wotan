@@ -316,17 +316,15 @@ _hook_forward :: proc(op: t.Op, out: ^t.Tensor, inputs: []^t.Tensor, ints: []int
 			false,
 		)
 	case .Linear:
-		_matmul(
+		// held: the next layer on the same input may join (linear_group.odin)
+		_linear_forward(
 			_data(inputs[0]),
 			_data(inputs[1]),
+			_data(inputs[2]),
 			o,
 			ints[0],
-			ints[2],
 			ints[1],
-			false,
-			false,
-			false,
-			bias = _data(inputs[2]),
+			ints[2],
 		)
 	case .AddBias:
 		_dispatch_1d(
@@ -524,17 +522,12 @@ _hook_backward :: proc(node: ^t.Tensor, allocator: mem.Allocator) -> bool {
 		if len(node.int_metadata) == 3 {
 			N, in_f, out_f = node.int_metadata[0], node.int_metadata[1], node.int_metadata[2]
 		}
-		if op == .Linear && node.inputs[2].requires_grad {
-			// the bias: db += Σ over the rows of dy
-			bias := node.inputs[2]
-			g, fresh := _out_grad(bias)
-			_dispatch_1d(
-				.Col_Sum,
-				_p({u32(N), u32(out_f), 0, 0, 0, 0, 0, u32(fresh)}),
-				{dy, g},
-				out_f,
-			)
-			wrote(&written, &nw, bias)
+		if op == .Linear {
+			// the bias (Σ over the rows of dy), dA and dB, held: the next
+			// layer on the same input may join (linear_group.odin)
+			_linear_backward(node, dy, N, in_f, out_f)
+			for x in node.inputs {if x.requires_grad {wrote(&written, &nw, x)}}
+			break
 		}
 		if a.requires_grad {
 			// dA[N, in] += dC[N, out] @ Bᵀ

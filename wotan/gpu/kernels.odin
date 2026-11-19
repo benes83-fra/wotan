@@ -27,11 +27,14 @@ Kernel :: enum {
 	Matmul_Tiled, // the same, 64x64 tiles, 4x4 outputs per thread (register tiling)
 	Matmul_Heads, // Matmul and Matmul_Tiled with operands in head layout (attention;
 	Matmul_Tiled_Heads, // generated source, see _kernel_source)
+	Matmul_Group, // Matmul and Matmul_Tiled for up to LINEAR_GROUP products in one
+	Matmul_Tiled_Group, // launch (generated source, see _matmul_group_source)
 	Reduce, // out[k] = scale * Σ x (or Σ x²), per workgroup
 	Bcast_Add, // dx += scale * s[k]
 	Mse_Bwd, // dx += scale * dy[0] * (a - b)
 	Bias_Add, // out = a + bias[i % D]
 	Col_Sum, // db[j] += Σ_i dy[i, j]
+	Col_Sum_Group, // Col_Sum of up to LINEAR_GROUP gradients in one launch
 	Row_Sum, // out[b] = Σ_j x[b, j]
 	Row_Bcast_Add, // dx[b, j] += dy[b]
 	Transpose, // y (+)= xᵀ
@@ -511,6 +514,8 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
 `,
 	.Matmul_Heads       = "", // generated (_kernel_source)
 	.Matmul_Tiled_Heads = "",
+	.Matmul_Group       = "", // generated (_matmul_group_source)
+	.Matmul_Tiled_Group = "",
 	// u0 n, u1 0 sum / 1 sum of squares, u2 output index, f0 scale. Each
 	// workgroup writes the scaled sum of its grid-stride share to out[u2 + wg].
 	.Reduce             = `
@@ -584,6 +589,38 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 	var s = 0.0;
 	for (var i = 0u; i < p.u0; i++) { s = s + dy[i * p.u1 + j]; }
 	db[j] = keep(db[j], p.u7) + s;
+}
+`,
+	// Col_Sum for products m < LINEAR_GROUP (workgroup z): db_m[j] += Σ_i
+	// dy_m[i * D + j]; u0 N rows, u1 D, u7 bit m: overwrite db_m (as keep)
+	.Col_Sum_Group      = `
+@group(0) @binding(1) var<storage, read> dy0: array<f32>;
+@group(0) @binding(2) var<storage, read> dy1: array<f32>;
+@group(0) @binding(3) var<storage, read> dy2: array<f32>;
+@group(0) @binding(4) var<storage, read_write> db0: array<f32>;
+@group(0) @binding(5) var<storage, read_write> db1: array<f32>;
+@group(0) @binding(6) var<storage, read_write> db2: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
+	let j = idx1(g, nw);
+	if (j >= p.u1) { return; }
+	let m = g.z;
+	let o = (p.u7 >> m) & 1u;
+	var s = 0.0;
+	switch m {
+		case 1u: {
+			for (var i = 0u; i < p.u0; i++) { s = s + dy1[i * p.u1 + j]; }
+			db1[j] = keep(db1[j], o) + s;
+		}
+		case 2u: {
+			for (var i = 0u; i < p.u0; i++) { s = s + dy2[i * p.u1 + j]; }
+			db2[j] = keep(db2[j], o) + s;
+		}
+		default: {
+			for (var i = 0u; i < p.u0; i++) { s = s + dy0[i * p.u1 + j]; }
+			db0[j] = keep(db0[j], o) + s;
+		}
+	}
 }
 `,
 	// out[b] = Σ_j x[b * W + j]; u0 rows, u1 W
@@ -1776,6 +1813,10 @@ _kernel_source :: proc(k: Kernel, allocator := context.temp_allocator) -> string
 		return strings.concatenate({MATMUL_HEADS, KERNEL_SOURCES[.Matmul]}, allocator)
 	case .Matmul_Tiled_Heads:
 		return strings.concatenate({MATMUL_HEADS, KERNEL_SOURCES[.Matmul_Tiled]}, allocator)
+	case .Matmul_Group:
+		return _matmul_group_source(false, allocator)
+	case .Matmul_Tiled_Group:
+		return _matmul_group_source(true, allocator)
 	case .Adam_2:
 		return _adam_source(2, allocator)
 	case .Adam_3:
@@ -1788,6 +1829,145 @@ _kernel_source :: proc(k: Kernel, allocator := context.temp_allocator) -> string
 		return _grad_source(true, allocator)
 	}
 	return KERNEL_SOURCES[k]
+}
+
+// Grouped products: up to LINEAR_GROUP products m in one launch, with A, B, C
+// and the bias of product m at bindings 1 + m, 4 + m, 7 + m and 10 + m
+// (unused ones bound to A0 or C0). Parameters as Matmul, except:
+//   u5 bit m: product m accumulates into C (else overwrites it)
+//   u7 bit 0: add bias[column]; bit 1: sum mode; bit 2: A per product (else
+//   A0 for all); bits 4..: number of products
+// Separate mode: product m = workgroup z writes C_m. Sum mode (one z): every
+// workgroup runs the products one after the other and each one adds into C0,
+// the same values as one launch per product. The source is that of Matmul or
+// Matmul_Tiled with the operand reads and the stores replaced, so the plain
+// kernels keep their code.
+@(private)
+MATMUL_GROUP :: `
+@group(0) @binding(1) var<storage, read> A0: array<f32>;
+@group(0) @binding(2) var<storage, read> A1: array<f32>;
+@group(0) @binding(3) var<storage, read> A2: array<f32>;
+@group(0) @binding(4) var<storage, read> B0: array<f32>;
+@group(0) @binding(5) var<storage, read> B1: array<f32>;
+@group(0) @binding(6) var<storage, read> B2: array<f32>;
+@group(0) @binding(7) var<storage, read_write> C0: array<f32>;
+@group(0) @binding(8) var<storage, read_write> C1: array<f32>;
+@group(0) @binding(9) var<storage, read_write> C2: array<f32>;
+@group(0) @binding(10) var<storage, read> bias0: array<f32>;
+@group(0) @binding(11) var<storage, read> bias1: array<f32>;
+@group(0) @binding(12) var<storage, read> bias2: array<f32>;
+// the product being computed (set by main; the loop runs on a local copy so
+// that the barriers stay in uniform control flow)
+var<private> gm: u32;
+fn base(z: u32, rows: u32, cols: u32, flags: u32) -> u32 { return 0u; }
+fn stride(cols: u32, flags: u32) -> u32 { return cols; }
+fn group_sum() -> bool { return (p.u7 & 2u) != 0u; }
+fn group_first(z: u32) -> u32 { return select(z, 0u, group_sum()); }
+fn group_end(z: u32) -> u32 { return select(z + 1u, p.u7 >> 4u, group_sum()); }
+fn get_a(i: u32) -> f32 {
+	switch select(0u, gm, (p.u7 & 4u) != 0u) {
+		case 1u: { return A1[i]; }
+		case 2u: { return A2[i]; }
+		default: { return A0[i]; }
+	}
+}
+fn get_b(i: u32) -> f32 {
+	switch gm {
+		case 1u: { return B1[i]; }
+		case 2u: { return B2[i]; }
+		default: { return B0[i]; }
+	}
+}
+fn get_bias(i: u32) -> f32 {
+	switch gm {
+		case 1u: { return bias1[i]; }
+		case 2u: { return bias2[i]; }
+		default: { return bias0[i]; }
+	}
+}
+fn put_c(o: u32, v: f32) {
+	let acc = ((p.u5 >> gm) & 1u) == 1u;
+	switch select(gm, 0u, group_sum()) {
+		case 1u: { if (acc) { C1[o] = C1[o] + v; } else { C1[o] = v; } }
+		case 2u: { if (acc) { C2[o] = C2[o] + v; } else { C2[o] = v; } }
+		default: { if (acc) { C0[o] = C0[o] + v; } else { C0[o] = v; } }
+	}
+}
+`
+
+// _matmul_group_source: Matmul (tiled = false) or Matmul_Tiled rewritten for
+// grouped products (see MATMUL_GROUP)
+@(private)
+_matmul_group_source :: proc(tiled: bool, allocator := context.temp_allocator) -> string {
+	src := KERNEL_SOURCES[.Matmul_Tiled if tiled else .Matmul]
+	rep :: proc(s: string, old, new: string) -> string {
+		assert(strings.count(s, old) == 1, "gpu: grouped matmul source out of date")
+		r, _ := strings.replace(s, old, new, 1, context.temp_allocator)
+		return r
+	}
+	// A[...] and B[...] become get_a(...) and get_b(...) (no nested brackets)
+	wrap :: proc(s: string, name, fn: string) -> string {
+		b := strings.builder_make(context.temp_allocator)
+		rest := s
+		for {
+			at := strings.index(rest, name)
+			if at < 0 {break}
+			end := strings.index_byte(rest[at:], ']')
+			strings.write_string(&b, rest[:at])
+			strings.write_string(&b, fn)
+			strings.write_byte(&b, '(')
+			strings.write_string(&b, rest[at + len(name):at + end])
+			strings.write_byte(&b, ')')
+			rest = rest[at + end + 1:]
+		}
+		strings.write_string(&b, rest)
+		return strings.to_string(b)
+	}
+	src = rep(
+		src,
+		`@group(0) @binding(1) var<storage, read> A: array<f32>;
+@group(0) @binding(2) var<storage, read> B: array<f32>;
+@group(0) @binding(3) var<storage, read_write> C: array<f32>;
+@group(0) @binding(4) var<storage, read> bias: array<f32>;
+`,
+		"",
+	)
+	src = wrap(src, " A[", " get_a")
+	src = wrap(src, " B[", " get_b")
+	src = rep(src, "bias[col]", "get_bias(col)")
+	// one product per pass of the loop over products (closed before the end
+	// of main, the last line of the source)
+	if tiled {
+		src = rep(
+			src,
+			"if ((p.u5 & 1u) == 1u) { C[o] = C[o] + w; } else { C[o] = w; }",
+			"put_c(o, w);",
+		)
+		src = rep(
+			src,
+			"\tvar c0v = vec4<f32>(0.0);",
+			"\tfor (var m = group_first(wid.z); m < group_end(wid.z); m++) {\n\tgm = m;\n\tvar c0v = vec4<f32>(0.0);",
+		)
+	} else {
+		src = rep(
+			src,
+			"if ((p.u5 & 1u) == 1u) { C[o] = C[o] + v; } else { C[o] = v; }",
+			"put_c(o, v);",
+		)
+		src = rep(
+			src,
+			"@builtin(local_invocation_id) lid: vec3<u32>) {",
+			"@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>) {",
+		)
+		src = rep(
+			src,
+			"\tvar acc = 0.0;",
+			"\tfor (var m = group_first(wid.z); m < group_end(wid.z); m++) {\n\tgm = m;\n\tvar acc = 0.0;",
+		)
+	}
+	src = strings.trim_right(src, "\n")
+	assert(strings.has_suffix(src, "\n}"), "gpu: grouped matmul source out of date")
+	return strings.concatenate({MATMUL_GROUP, src[:len(src) - 1], "\t}\n}\n"}, allocator)
 }
 
 // The Adam kernel for `count` parameters: parameter k binds its gradient,

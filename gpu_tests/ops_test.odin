@@ -1180,6 +1180,122 @@ gpu_matmul_kernel_test :: proc() {
 	}
 }
 
+// Linear layers on one input recorded one after the other (attention's query,
+// key and value projections): what grouping must handle
+Group_Case :: struct {
+	name:                   string,
+	rows, in_f:             int,
+	outs:                   []int, // output width of each layer
+	x_grad, w_grad, b_grad: bool, // which of x, the weights, the biases are trained
+	shared:                 int, // this layer reuses layer 0's weights and bias (-1: none)
+	saved:                  int, // launches grouping saves (forward and backward)
+}
+
+group_cases := [?]Group_Case {
+	{"3 layers, all trained", 40, 24, {20, 20, 20}, true, true, true, -1, 8},
+	{"3 layers, register-tiled sizes", 70, 48, {40, 40, 40}, true, true, true, -1, 8},
+	{"fixed weights", 40, 24, {20, 20, 20}, true, false, true, -1, 6},
+	{"input without gradient, fixed biases", 40, 24, {20, 20, 20}, false, true, false, -1, 4},
+	{"only the biases trained", 40, 24, {20, 20, 20}, false, false, true, -1, 4},
+	{"4 layers (a group of 3, then 1)", 40, 24, {20, 20, 20, 20}, true, true, true, -1, 8},
+	{"2 layers", 40, 24, {20, 20}, true, true, true, -1, 4},
+	{"layer 1 shares layer 0's weights", 40, 24, {20, 20, 20}, true, true, true, 1, 5},
+	{"widths 20, 20, 12", 40, 24, {20, 20, 12}, true, true, true, -1, 4},
+}
+
+// _group_run: the layers' outputs and the gradients of x, the weights and the
+// biases (loss Σ concat(outputs) ⊙ c), and the launches on the GPU
+_group_run :: proc(c: Group_Case, on_gpu, grouped: bool) -> (vals: [dynamic]f64, launches: int) {
+	gpu.set_linear_grouping(grouped)
+	rand.reset(31)
+	rnd :: proc(rows, cols: int, rg: bool) -> ^t.Tensor {
+		m := l.matrix_new(f64, rows, cols)
+		for &v in m.data {v = f64(f32(2 * rand.float64() - 1))}
+		return t.tensor_new(m, rg)
+	}
+	vals = make([dynamic]f64, context.temp_allocator)
+	x := rnd(c.rows, c.in_f, c.x_grad)
+	ws := make([dynamic]^t.Tensor, context.temp_allocator)
+	bs := make([dynamic]^t.Tensor, context.temp_allocator)
+	leaves := make([dynamic]^t.Tensor, context.temp_allocator)
+	append(&leaves, x)
+	width := 0
+	for o, i in c.outs {
+		if i == c.shared {
+			append(&ws, ws[0])
+			append(&bs, bs[0])
+		} else {
+			append(&ws, rnd(c.in_f, o, c.w_grad))
+			append(&bs, rnd(1, o, c.b_grad))
+			append(&leaves, ws[i], bs[i])
+		}
+		width += o
+	}
+	// stored as the concatenation is: [1, rows · width]
+	cm := rnd(1, c.rows * width, false)
+	cm.shape = {c.rows, width, 1, 1}
+	if on_gpu {
+		gpu.to_device(leaves[:])
+		gpu.to_device(cm)
+	}
+	gpu.reset_stats()
+	outs := make([dynamic]^t.Tensor, context.temp_allocator)
+	for _, i in c.outs {append(&outs, t.tensor_linear(x, ws[i], bs[i]))}
+	loss := t.tensor_sum(t.tensor_mul(t.tensor_concat(outs[:], 1), cm))
+	t.tensor_backward(loss)
+	for o in outs {append(&vals, ..t.tensor_values(o))}
+	for p in leaves {if p.requires_grad {append(&vals, ..t.tensor_grad_values(p))}}
+	launches = gpu.stats().dispatches
+	t.tensor_free_graph(loss)
+	for p in leaves {t.tensor_free(p)}
+	t.tensor_free(cm)
+	return
+}
+
+gpu_linear_group_test :: proc() {
+	fmt.println(
+		"gpu_linear_group_test: linear layers on one input, grouped vs one launch per layer vs the CPU",
+	)
+	defer gpu.set_linear_grouping(true)
+	defer gpu.set_matmul_kernel(.Auto)
+	for kernel in ([]gpu.Matmul_Kernel{.Auto, .Simple, .Tiled}) {
+		gpu.set_matmul_kernel(kernel)
+		for c in group_cases {
+			cpu, _ := _group_run(c, false, false)
+			single, n_single := _group_run(c, true, false)
+			grouped, n_grouped := _group_run(c, true, true)
+			identical := len(grouped) == len(single)
+			for v, i in grouped {if identical && v != single[i] {identical = false}}
+			err := _max_rel(grouped[:], cpu[:])
+			if kernel == .Auto {
+				fmt.printfln(
+					"    %-38s %3d -> %3d launches, max rel err %.2e, same values as ungrouped: %v",
+					c.name,
+					n_single,
+					n_grouped,
+					err,
+					identical,
+				)
+			}
+			check(
+				identical,
+				"%s (%v kernel): grouped values differ from ungrouped",
+				c.name,
+				kernel,
+			)
+			check(err < 1e-5, "%s (%v kernel): max rel err %.2e to the CPU", c.name, kernel, err)
+			check(
+				n_single - n_grouped == c.saved,
+				"%s (%v kernel): grouping saved %d launches, want %d",
+				c.name,
+				kernel,
+				n_single - n_grouped,
+				c.saved,
+			)
+		}
+	}
+}
+
 // f32 matmul time of the two kernels (printed, not checked: timings vary)
 gpu_matmul_benchmark :: proc() {
 	fmt.println("gpu_matmul_benchmark: C = A @ B, 16x16 kernel vs register-tiled kernel")

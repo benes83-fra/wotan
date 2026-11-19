@@ -72,42 +72,43 @@ Optim_State :: struct {
 
 @(private)
 State :: struct {
-	active:         bool,
-	instance:       wgpu.Instance,
-	adapter:        wgpu.Adapter,
-	device:         wgpu.Device,
-	queue:          wgpu.Queue,
-	limits:         wgpu.Limits,
-	info:           Device_Info,
+	active:           bool,
+	instance:         wgpu.Instance,
+	adapter:          wgpu.Adapter,
+	device:           wgpu.Device,
+	queue:            wgpu.Queue,
+	limits:           wgpu.Limits,
+	info:             Device_Info,
 	// command stream
-	encoder:        wgpu.CommandEncoder,
-	pass:           wgpu.ComputePassEncoder,
-	pending:        int,
+	encoder:          wgpu.CommandEncoder,
+	pass:             wgpu.ComputePassEncoder,
+	pending:          int,
 	// uniform parameters of the pending batch
-	uniform:        wgpu.Buffer,
-	uniform_off:    u64,
-	uniform_cap:    u64,
-	uniform_align:  u64,
-	uniform_host:   []u8, // the batch's parameter blocks, written at submit
+	uniform:          wgpu.Buffer,
+	uniform_off:      u64,
+	uniform_cap:      u64,
+	uniform_align:    u64,
+	uniform_host:     []u8, // the batch's parameter blocks, written at submit
 	// bind group cache
-	bind_groups:    map[Bind_Key]wgpu.BindGroup,
+	bind_groups:      map[Bind_Key]wgpu.BindGroup,
 	// readback staging
-	readback:       wgpu.Buffer,
-	readback_bytes: u64,
+	readback:         wgpu.Buffer,
+	readback_bytes:   u64,
 	// buffer pool: free buffers by size bucket
-	pool:           map[u64][dynamic]^Buf,
-	bufs:           [dynamic]^Buf,
-	pool_bytes:     u64,
-	staging_free:   map[u64][dynamic]wgpu.Buffer, // upload staging buffers by size
-	staging_used:   [dynamic]Staging, // staging buffers of the pending batch
-	dummy:          ^Buf, // bound where a kernel needs no buffer
-	pipelines:      [Kernel]Pipeline,
-	optim:          map[rawptr]Optim_State,
-	disabled:       [t.Op]bool,
-	matmul_kernel:  Matmul_Kernel,
-	counters:       Counters,
-	allocator:      mem.Allocator,
-	error_message:  string,
+	pool:             map[u64][dynamic]^Buf,
+	bufs:             [dynamic]^Buf,
+	pool_bytes:       u64,
+	staging_free:     map[u64][dynamic]wgpu.Buffer, // upload staging buffers by size
+	staging_used:     [dynamic]Staging, // staging buffers of the pending batch
+	dummy:            ^Buf, // bound where a kernel needs no buffer
+	pipelines:        [Kernel]Pipeline,
+	optim:            map[rawptr]Optim_State,
+	disabled:         [t.Op]bool,
+	matmul_kernel:    Matmul_Kernel,
+	linear_ungrouped: bool, // set_linear_grouping(false)
+	counters:         Counters,
+	allocator:        mem.Allocator,
+	error_message:    string,
 }
 
 @(private)
@@ -446,6 +447,7 @@ _end_pass :: proc() {
 // _flush submits the pending work (no wait)
 @(private)
 _flush :: proc() {
+	_held_flush()
 	_end_pass()
 	if G.encoder != nil {
 		if G.uniform_off > 0 {
@@ -499,6 +501,7 @@ _bind :: proc(h: t.Device_Buffer, numel: int) -> Bind {
 // _dispatch records one kernel launch over a [gx, gy] workgroup grid
 @(private)
 _dispatch :: proc(k: Kernel, p: Params, binds: []Bind, gx, gy: u32, gz: u32 = 1) {
+	_held_flush() // held linear layers come first (linear_group.odin)
 	if gx == 0 || gy == 0 || gz == 0 {return}
 	if G.uniform_off + G.uniform_align > G.uniform_cap {_flush()}
 	off := G.uniform_off
@@ -579,6 +582,7 @@ _dispatch_1d :: proc(k: Kernel, p: Params, binds: []Bind, n: int) {
 @(private)
 _upload :: proc(b: ^Buf, src: []f64) {
 	if len(src) == 0 {return}
+	_held_flush()
 	tmp := make([]f32, len(src), runtime.heap_allocator())
 	defer delete(tmp, runtime.heap_allocator())
 	for v, i in src {tmp[i] = f32(v)}
@@ -612,6 +616,7 @@ _upload :: proc(b: ^Buf, src: []f64) {
 @(private)
 _download :: proc(b: ^Buf, dst: []f64) {
 	if len(dst) == 0 {return}
+	_held_flush()
 	bytes := u64(len(dst) * 4)
 	if G.readback == nil || G.readback_bytes < bytes {
 		if G.readback != nil {wgpu.BufferRelease(G.readback)}
@@ -655,6 +660,7 @@ _download :: proc(b: ^Buf, dst: []f64) {
 @(private)
 _zero :: proc(b: ^Buf, numel: int) {
 	if numel <= 0 {return}
+	_held_flush()
 	_end_pass()
 	wgpu.CommandEncoderClearBuffer(_encoder(), b.buffer, 0, u64(numel * 4))
 	G.pending += 1
@@ -663,6 +669,7 @@ _zero :: proc(b: ^Buf, numel: int) {
 @(private)
 _copy :: proc(dst, src: ^Buf, numel: int) {
 	if numel <= 0 {return}
+	_held_flush()
 	_end_pass()
 	wgpu.CommandEncoderCopyBufferToBuffer(_encoder(), src.buffer, 0, dst.buffer, 0, u64(numel * 4))
 	G.pending += 1
