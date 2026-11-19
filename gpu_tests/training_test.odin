@@ -600,3 +600,73 @@ _gpt_step_ms :: proc(steps: int, on_gpu, read_each: bool) -> f64 {
 	if on_gpu {gpu.to_host(ps[:])}
 	return ms
 }
+
+// _param_with_grad: a [1, n] parameter whose gradient is `grad`, set by a
+// backward pass (d/dp Σ p ⊙ c = c); on the device if `on_device`
+_param_with_grad :: proc(grad: []f64, on_device: bool) -> ^t.Tensor {
+	p := t.tensor_new(l.matrix_new(f64, 1, len(grad)), true)
+	cm := l.matrix_new(f64, 1, len(grad))
+	copy(cm.data, grad)
+	c := t.tensor_new(cm)
+	if on_device {gpu.to_device(p); gpu.to_device(c)}
+	loss := t.tensor_sum(t.tensor_mul(p, c))
+	t.tensor_backward(loss)
+	t.tensor_free_graph(loss)
+	t.tensor_free(c)
+	return p
+}
+
+gpu_clip_grad_norm_test :: proc() {
+	fmt.println(
+		"gpu_clip_grad_norm_test: clip_grad_norm over 18 gradients (grouped kernels) vs the CPU",
+	)
+	// sizes from 1 element to several hundred workgroups
+	sizes := []int{3, 1, 17, 256, 257, 5, 70000, 9, 33, 2, 1000, 4, 6, 7, 300, 11, 513}
+	rand.reset(21)
+	grads := make([][]f64, len(sizes), context.temp_allocator)
+	for n, i in sizes {
+		grads[i] = make([]f64, n, context.temp_allocator)
+		for &v in grads[i] {v = f64(f32(2 * rand.float64() - 1))}
+	}
+	for max_norm in ([]f64{5, 1e6}) {
+		cpu := make([dynamic]^t.Tensor, context.temp_allocator)
+		dev := make([dynamic]^t.Tensor, context.temp_allocator)
+		for g, i in grads {
+			append(&cpu, _param_with_grad(g, false))
+			append(&dev, _param_with_grad(g, i != 0)) // parameter 0 stays on the host
+		}
+		// parameter 1: its gradient was read and marked as changed on the host
+		_ = t.tensor_grad_values(dev[1])
+		t.tensor_mark_grad_host_dirty(dev[1])
+		// parameter 4 is listed twice: counted and scaled twice, as on the CPU
+		inject_at(&cpu, 5, cpu[4])
+		inject_at(&dev, 5, dev[4])
+		ref := nn.clip_grad_norm(cpu[:], max_norm)
+		gpu.reset_stats()
+		got := nn.clip_grad_norm(dev[:], max_norm)
+		launches := gpu.stats().dispatches
+		worst := 0.0
+		for x, i in cpu {
+			worst = max(worst, _max_rel(t.tensor_grad_values(dev[i]), t.tensor_grad_values(x)))
+		}
+		clipped := max_norm < ref
+		fmt.printfln(
+			"    max_norm %-8v norm %.6f (CPU %.6f), %d launches, max rel diff of the gradients %.1e",
+			max_norm,
+			got,
+			ref,
+			launches,
+			worst,
+		)
+		check(abs(got - ref) <= 1e-6 * ref, "clip_grad_norm: norm %v, CPU %v", got, ref)
+		check(worst < 1e-6, "clip_grad_norm: gradients differ from the CPU by %v", worst)
+		// 16 gradients on the device (one listed twice): 3 launches for the sum,
+		// and when clipping 3 to scale them (a group ends before the repeat)
+		want := 3 + (3 if clipped else 0)
+		check(launches == want, "clip_grad_norm: %d launches, want %d", launches, want)
+		ordered_remove(&cpu, 5)
+		ordered_remove(&dev, 5)
+		for x in cpu {t.tensor_free(x)}
+		for x in dev {t.tensor_free(x)}
+	}
+}

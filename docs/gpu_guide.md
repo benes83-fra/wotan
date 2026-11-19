@@ -499,7 +499,7 @@ Inputs that a model reads on the host, such as the deep hedger's paths or DeepLO
 
 `nn.adam_step`, `nn.sgd_step` and `nn.clip_grad_norm` work on device parameters without any change to the calls:
 - **Adam and SGD:** the update of a parameter is one fused kernel, and the optimizer state (Adam's moments, SGD's velocity) stays on the device. One Adam launch updates up to four parameters that share the learning rate and the step count.
-- **Gradient clipping:** the gradient norm is computed on the GPU and read back once per call.
+- **Gradient clipping:** the gradient norm is computed on the GPU and read back once per call. One launch sums the squares of up to seven gradients, and one launch scales up to eight gradients when the norm is above the limit.
 
 `nn.save_checkpoint` and the other `nn` save procedures read device parameters and device optimizer state through the sync procedures. A checkpoint saved from a GPU model loads on the CPU, and the reverse. After loading into a model whose parameters are already on the device, the next GPU op uploads the loaded values.
 
@@ -540,7 +540,7 @@ Mean time of one Adam training step (forward, backward, update), measured by the
 | MLP 512, 2048, 2048, 1 | 1024 | 598 ms | 13.2 ms (45×) | 11.9 ms (50×) |
 | GPT (2 blocks, width 32, 4 heads) | 6 × 12 tokens | 1.86 ms | 1.56 ms (1.2×) | 0.86 ms (2.2×) |
 
-The training tests of the suite read the loss after every step and the GPT test also clips the gradients (another read), so their step times are close to the middle column: 1.8 ms on the CPU and 2.2 ms on the GPU for the GPT, 0.2 ms against 0.6 ms for the CNN of section 6, and 0.1 ms against 0.7 ms for the TCN. For such small models the CPU is the better choice when the loop reads a result every step. Timings on a laptop vary between runs with clock speeds and power state. Debug builds (`-debug`) slow the CPU engine several times more than the GPU path, so compare the two devices in an optimized build.
+The training tests of the suite read the loss after every step and the GPT test also clips the gradients (another read), so their step times are close to the middle column: about 1.9 ms on both devices for the GPT, 0.2 ms on the CPU against 0.6 ms on the GPU for the CNN of section 6, and 0.1 ms against 0.8 ms for the TCN. For such small models the CPU is the better choice when the loop reads a result every step. Timings on a laptop vary between runs with clock speeds and power state. Debug builds (`-debug`) slow the CPU engine several times more than the GPU path, so compare the two devices in an optimized build.
 
 **Where a small model's time goes.** A small model's kernels finish in a few microseconds. The cost is recording them: wgpu needs about 1.5 µs to encode one kernel launch, more than the GPU needs to run a small one. The backend therefore keeps the number of launches low:
 - `tensor_linear` (used by `nn.linear_forward`) adds the bias inside the matrix-product kernel, and its backward pass needs no copy of the output gradient.
@@ -548,8 +548,9 @@ The training tests of the suite read the loss after every step and the GPT test 
 - One Adam launch updates up to four parameters that share the learning rate and the step count.
 - Layer norm and RMS norm keep the per-row mean and scale of the forward pass for the backward pass instead of computing them again.
 - Multi-head attention reads and writes the heads in place (see [section 5](#5-transformers-on-the-gpu)), so the permutes into and out of the per-head layout do not run.
+- `clip_grad_norm` handles several gradients per launch (see [section 8](#8-optimizers-clipping-and-checkpoints)).
 
-The GPT of section 5 records 208 kernel launches per training step: 128 for the forward and backward pass, 10 for the Adam step and 70 for `clip_grad_norm`, which runs one reduction per parameter, reads the total norm and scales each gradient when the norm is above the limit. The smaller GPT of the table above, without dropout and clipping, records 137.
+The GPT of section 5 records about 146 kernel launches per training step: 128 for the forward and backward pass, 10 for the Adam step and 5 to 10 for `clip_grad_norm` over its 34 parameters (5 to sum the squares; 5 more to scale, in the steps where the norm is above the limit). The smaller GPT of the table above, without dropout and clipping, records 137.
 
 **Matrix products** use a register-tiled kernel: a workgroup computes a 64×64 block of the result, each thread a 4×4 block held in registers. Products with fewer than 32 rows or columns (`gpu.MATMUL_TILED_MIN`) use a kernel with 16×16 blocks and one result per thread, which wastes less work on small shapes. `gpu.benchmark_matmul` times a product with the current choice, and `gpu.set_matmul_kernel` forces one kernel for comparisons. Measured by the test suite (square products, `-o:speed`):
 
@@ -596,6 +597,7 @@ It compares every GPU result with the CPU engine, which is itself validated agai
 - **both matrix-product kernels:** every op built on matrix products (products, attention, convolutions) with each kernel forced, including the register-tiled kernel on products smaller than one tile, and products of 70×90 by 90×65 and larger with partial tiles.
 - **the same ops with their kernel disabled,** through the CPU fallback, and an op that has no kernel (`tensor_rnn`).
 - **training:** 40 Adam steps of MLPs with five activations, SGD with Nesterov momentum and gradient clipping, and a model with every kernel disabled. Losses and final parameters agree with the CPU to 4e-6 or better.
+- **gradient clipping over many parameters:** 18 gradients from 1 to 70,000 elements, including one parameter listed twice, one kept on the host and one whose gradient was changed on the host. The norm and the clipped gradients agree with the CPU to 1e-6, and the call uses 3 launches to sum and 3 to scale.
 - **convolutional models:** 10 steps of a CNN (convolutions with stride and padding, batch norm, max and average pooling, flatten, dropout) and of a TCN (dilated causal convolutions, dropout, residual connections). Losses and parameters, including the batch norm's running statistics, agree with the CPU to 2e-6; neither model uses a CPU fallback. Separate checks cover the running-statistics update and evaluation mode, and a backward pass on the CPU after a forward pass on the GPU (the CPU then finds the max-pool argmax and fetches the batch-norm statistics and the Sharpe ratio's mean and standard deviation from the device).
 - **`ml_finance` models:** a deep hedger with CVaR, N-BEATS, PatchTST, a neural SDF, a conditional autoencoder with L1 penalty and early stopping, CQL with soft target updates, DeepLOB with the TCN sequence layer, and a VAE, each trained a few steps on both devices from the same seed. Losses and parameters agree with the CPU to 2e-6 or better (PatchTST: except its attention key biases, see [Precision](#10-precision)), with no CPU fallback.
 - **transformers:** 12 steps of four small GPTs (layer norm and GELU; flash attention; RMSNorm, tied embeddings and tanh GELU; mixture of experts) and a BERT with padding masks, all with dropout on and the same masks on both devices. Losses agree with the CPU to 1e-6 and parameters to 2e-4 or better, except the attention key biases (see [Precision](#10-precision)). None of these models uses a CPU fallback.

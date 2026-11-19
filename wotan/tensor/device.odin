@@ -82,7 +82,7 @@ Device_Hooks :: struct {
 	optim_sync:    proc(key: rawptr, a, b: []f64, release: bool) -> bool,
 	optim_release: proc(key: rawptr),
 	grad_sq_sum:   proc(params: []^Tensor) -> f64,
-	grad_scale:    proc(t: ^Tensor, coef: f64),
+	grad_scale:    proc(params: []^Tensor, coef: f64),
 	strict:        bool, // panic when a host tensor would be uploaded automatically
 }
 

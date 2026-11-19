@@ -193,19 +193,17 @@ clip_grad_norm_params :: proc(params: []^t.Tensor, max_norm: f64) -> f64 {
 			total_sq += l.dot_simd(param.grad.data, param.grad.data)
 		}
 	}
-	// device gradients: one reduction kernel per parameter, one readback
+	// device gradients: a few launches for all of them, one readback
 	if len(on_device) > 0 {total_sq += t._device_hooks.grad_sq_sum(on_device[:])}
 	total := math.sqrt(total_sq)
 	coef := max_norm / (total + 1e-6)
 	if coef < 1.0 {
 		for param in params {
 			if !t.tensor_has_grad(param) {continue}
-			if param.device != nil && t._device_hooks.grad_scale != nil {
-				t._device_hooks.grad_scale(param, coef)
-			} else {
-				l.vec_scale_simd(param.grad.data, coef, param.grad.data)
-			}
+			if param.device != nil && t._device_hooks.grad_sq_sum != nil {continue}
+			l.vec_scale_simd(param.grad.data, coef, param.grad.data)
 		}
+		if len(on_device) > 0 {t._device_hooks.grad_scale(on_device[:], coef)}
 	}
 	return total
 }

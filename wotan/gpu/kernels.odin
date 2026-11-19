@@ -40,6 +40,8 @@ Kernel :: enum {
 	Adam_2, // Adam on 2, 3, 4 parameters (generated source, see _adam_source)
 	Adam_3,
 	Adam_4,
+	Grad_Sq_Sum, // Σ g² over up to 7 gradients, per workgroup (generated, see _grad_source)
+	Grad_Scale, // g *= f on up to 8 gradients (generated)
 	Sgd,
 	Softmax_Rows, // per row: softmax (scaled, masked), logsumexp or cross-entropy loss
 	Softmax_Bwd, // per row: dx (+)= f * p * (g - Σ p g)
@@ -631,6 +633,8 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 	.Adam_2             = "",
 	.Adam_3             = "",
 	.Adam_4             = "",
+	.Grad_Sq_Sum        = "",
+	.Grad_Scale         = "",
 	// optim.sgd_update: u1 momentum on, u2 nesterov; f0 lr, f1 momentum, f2 weight decay
 	.Sgd                = `
 @group(0) @binding(1) var<storage, read> gr: array<f32>;
@@ -1741,6 +1745,10 @@ _kernel_source :: proc(k: Kernel, allocator := context.temp_allocator) -> string
 		return _adam_source(3, allocator)
 	case .Adam_4:
 		return _adam_source(4, allocator)
+	case .Grad_Sq_Sum:
+		return _grad_source(false, allocator)
+	case .Grad_Scale:
+		return _grad_source(true, allocator)
 	}
 	return KERNEL_SOURCES[k]
 }
@@ -1801,5 +1809,86 @@ _adam_source :: proc(count: int, allocator := context.temp_allocator) -> string 
 		fmt.sbprintf(&b, "\ti = i - p.u%d;\n", k)
 	}
 	strings.write_string(&b, "}\n")
+	return strings.to_string(b)
+}
+
+// gradients per launch of Grad_Sq_Sum (the 8th storage binding is the output)
+// and Grad_Scale; 8 is WebGPU's minimum of storage buffers per kernel
+@(private)
+GRAD_SUM_GROUP :: 7
+@(private)
+GRAD_SCALE_GROUP :: 8
+
+// The kernels of clip_grad_norm. Gradient k binds at binding k + 1 and has u_k
+// elements (0 for an unused slot); the elements of all gradients are numbered
+// one after the other.
+// Grad_Sq_Sum: each workgroup adds the squares of its grid-stride share and
+// writes the sum to o[u7 + workgroup] (binding 8).
+// Grad_Scale: one thread per element, g *= f0.
+@(private)
+_grad_source :: proc(scale: bool, allocator := context.temp_allocator) -> string {
+	count := GRAD_SCALE_GROUP if scale else GRAD_SUM_GROUP
+	access := "read_write" if scale else "read"
+	b := strings.builder_make(allocator)
+	for k in 0 ..< count {
+		fmt.sbprintf(
+			&b,
+			"@group(0) @binding(%d) var<storage, %s> g%d: array<f32>;\n",
+			k + 1,
+			access,
+			k,
+		)
+	}
+	if scale {
+		strings.write_string(&b, "@compute @workgroup_size(256)\n")
+		strings.write_string(
+			&b,
+			"fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {\n",
+		)
+		strings.write_string(&b, "\tvar i = idx1(gid, nw);\n")
+		for k in 0 ..< count {
+			fmt.sbprintf(&b, "\tif (i < p.u%d) ", k)
+			strings.write_string(&b, "{ ") // (a brace in a format string is a format directive)
+			fmt.sbprintf(&b, "g%d[i] = g%d[i] * p.f0; return; ", k, k)
+			strings.write_string(&b, "}\n")
+			fmt.sbprintf(&b, "\ti = i - p.u%d;\n", k)
+		}
+		strings.write_string(&b, "}\n")
+		return strings.to_string(b)
+	}
+	strings.write_string(&b, "@group(0) @binding(8) var<storage, read_write> o: array<f32>;\n")
+	strings.write_string(&b, "var<workgroup> sh: array<f32, 256>;\n")
+	strings.write_string(&b, "fn sq(j: u32) -> f32 {\n\tvar i = j;\n\tvar v = 0.0;\n")
+	for k in 0 ..< count {
+		fmt.sbprintf(&b, "\tif (i < p.u%d) ", k)
+		strings.write_string(&b, "{ ")
+		fmt.sbprintf(&b, "v = g%d[i]; return v * v; ", k)
+		strings.write_string(&b, "}\n")
+		fmt.sbprintf(&b, "\ti = i - p.u%d;\n", k)
+	}
+	strings.write_string(&b, "\treturn 0.0;\n}\n")
+	strings.write_string(
+		&b,
+		`@compute @workgroup_size(256)
+fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
+	let n = p.u0 + p.u1 + p.u2 + p.u3 + p.u4 + p.u5 + p.u6;
+	var s = 0.0;
+	var i = wid.x * 256u + lid.x;
+	let stride = nw.x * 256u;
+	loop {
+		if (i >= n) { break; }
+		s = s + sq(i);
+		i = i + stride;
+	}
+	sh[lid.x] = s;
+	workgroupBarrier();
+	for (var w = 128u; w > 0u; w = w >> 1u) {
+		if (lid.x < w) { sh[lid.x] = sh[lid.x] + sh[lid.x + w]; }
+		workgroupBarrier();
+	}
+	if (lid.x == 0u) { o[p.u7 + wid.x] = sh[0]; }
+}
+`,
+	)
 	return strings.to_string(b)
 }

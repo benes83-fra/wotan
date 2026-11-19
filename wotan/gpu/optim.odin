@@ -129,40 +129,97 @@ _hook_optim_release :: proc(key: rawptr) {
 	delete_key(&G.optim, key)
 }
 
-// Σ of the squared gradients of `params` (device gradients reduced on the
-// device into one slot each, read back once)
+// Σ of the squared gradients of `params`: Grad_Sq_Sum adds up to 7 device
+// gradients per launch into one partial sum per workgroup; the partial sums
+// are read back once and added in f64
 @(private)
 _hook_grad_sq_sum :: proc(params: []^t.Tensor) -> f64 {
 	total := 0.0
-	slots := _acquire(len(params))
-	_zero(slots, len(params))
-	for x, i in params {
+	dev := make([dynamic]^t.Tensor, 0, len(params), context.temp_allocator)
+	for x in params {
 		if x.device.grad_where == .Host {
 			for v in x.grad.data {total += v * v}
-			continue
+		} else {
+			append(&dev, x)
 		}
-		n := t.tensor_numel(x)
-		_reduce(_grad(x), n, {slots, len(params)}, i, 1, true)
 	}
-	host := make([]f64, len(params), context.temp_allocator)
+	if len(dev) == 0 {return total}
+	// workgroups per launch: one per 256 elements, at most 256 (grid-stride)
+	launches := (len(dev) + GRAD_SUM_GROUP - 1) / GRAD_SUM_GROUP
+	groups := make([]int, launches, context.temp_allocator)
+	slots_n := 0
+	for &g, j in groups {
+		n := 0
+		for x in dev[j * GRAD_SUM_GROUP:min(len(dev), (j + 1) * GRAD_SUM_GROUP)] {
+			n += t.tensor_numel(x)
+		}
+		g = clamp((n + 255) / 256, 1, 256)
+		slots_n += g
+	}
+	slots := _acquire(slots_n)
+	offset := 0
+	for g, j in groups {
+		chunk := dev[j * GRAD_SUM_GROUP:min(len(dev), (j + 1) * GRAD_SUM_GROUP)]
+		binds: [GRAD_SUM_GROUP + 1]Bind
+		u: [8]u32
+		for k in 0 ..< GRAD_SUM_GROUP {
+			if k < len(chunk) {
+				binds[k] = _grad(chunk[k])
+				u[k] = u32(t.tensor_numel(chunk[k]))
+			} else {
+				binds[k] = {G.dummy, 1}
+			}
+		}
+		binds[GRAD_SUM_GROUP] = {slots, slots_n}
+		u[7] = u32(offset)
+		_dispatch(.Grad_Sq_Sum, _p(u), binds[:], u32(g), 1)
+		offset += g
+	}
+	host := make([]f64, slots_n, context.temp_allocator)
 	_download(slots, host)
 	_release_buf(slots)
 	for v in host {total += v}
 	return total
 }
 
+// g *= coef for the gradients of `params`: Grad_Scale scales up to 8 device
+// gradients per launch. A parameter listed twice is scaled twice, as on the host.
 @(private)
-_hook_grad_scale :: proc(x: ^t.Tensor, coef: f64) {
-	if x.device.grad_where == .Host {
-		for &v in x.grad.data {v *= coef}
-		return
+_hook_grad_scale :: proc(params: []^t.Tensor, coef: f64) {
+	binds: [GRAD_SCALE_GROUP]Bind
+	group: [GRAD_SCALE_GROUP]^t.Tensor
+	u: [8]u32
+	count, total := 0, 0
+	flush :: proc(
+		binds: ^[GRAD_SCALE_GROUP]Bind,
+		group: []^t.Tensor,
+		u: [8]u32,
+		total: int,
+		coef: f64,
+	) {
+		if len(group) == 0 {return}
+		for k in len(group) ..< GRAD_SCALE_GROUP {binds[k] = {G.dummy, 1}}
+		_dispatch_1d(.Grad_Scale, _p(u, {f32(coef), 0, 0, 0, 0, 0, 0, 0}), binds[:], total)
+		for x in group {t._grad_written_on_device(x)}
 	}
-	n := t.tensor_numel(x)
-	_dispatch_1d(
-		.Scale_Inplace,
-		_p({u32(n), 0, 0, 0, 0, 0, 0, 0}, {f32(coef), 0, 0, 0, 0, 0, 0, 0}),
-		{_grad(x)},
-		n,
-	)
-	t._grad_written_on_device(x)
+	for x in params {
+		if x.device.grad_where == .Host {
+			for &v in x.grad.data {v *= coef}
+			continue
+		}
+		listed := false
+		for y in group[:count] {if y == x {listed = true}}
+		if count == GRAD_SCALE_GROUP || listed {
+			flush(&binds, group[:count], u, total, coef)
+			u = {}
+			count, total = 0, 0
+		}
+		n := t.tensor_numel(x)
+		binds[count] = _grad(x)
+		group[count] = x
+		u[count] = u32(n)
+		count += 1
+		total += n
+	}
+	flush(&binds, group[:count], u, total, coef)
 }
