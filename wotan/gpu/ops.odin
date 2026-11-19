@@ -80,6 +80,8 @@ SUPPORTED :: bit_set[t.Op] {
 	.Reparameterize,
 	// recurrent layers (recurrent.odin)
 	.LSTM,
+	.GRU,
+	.RNN,
 }
 
 @(private)
@@ -397,6 +399,10 @@ _hook_forward :: proc(op: t.Op, out: ^t.Tensor, inputs: []^t.Tensor, ints: []int
 		}
 	case .LSTM:
 		_lstm_forward(out, inputs, ints)
+	case .GRU:
+		_gru_forward(out, inputs, ints)
+	case .RNN:
+		_rnn_forward(out, inputs, ints)
 	case:
 		_forward_p2(op, out, inputs, ints, floats)
 	}
@@ -656,8 +662,15 @@ _hook_backward :: proc(node: ^t.Tensor, allocator: mem.Allocator) -> bool {
 			}
 			off += size
 		}
-	case .LSTM:
-		_lstm_backward(node, dy)
+	case .LSTM, .GRU, .RNN:
+		#partial switch op {
+		case .LSTM:
+			_lstm_backward(node, dy)
+		case .GRU:
+			_gru_backward(node, dy)
+		case:
+			_rnn_backward(node, dy)
+		}
 		for x in node.inputs {if x.requires_grad {wrote(&written, &nw, x)}}
 	case:
 		if !_backward_p2(node, dy, n) {return false}

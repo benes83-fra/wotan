@@ -1648,6 +1648,10 @@ tensor_rnn :: proc(
 	bias: ^Tensor,
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
+	if _device_use(.RNN, x, h_0, w_ih, w_hh, bias) {
+		_check_shape(w_ih)
+		return _device_recurrent(.RNN, {x, h_0, w_ih, w_hh, bias}, w_ih.shape[1])
+	}
 	_host_inputs(.RNN, x, h_0, w_ih, w_hh, bias)
 	allocator := _scope_or(allocator) // the active graph scope, if any
 	_check_shape(x)
@@ -1784,6 +1788,20 @@ tensor_gru :: proc(
 	bias_hn: ^Tensor,
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
+	if _device_use(.GRU, x, h_0, w_ih, w_hh, bias, bias_hn) {
+		_check_shape(w_ih)
+		H := w_ih.shape[1] / 3
+		if bias_hn != nil {
+			fmt.assertf(
+				len(bias_hn.data.data) == H || tensor_numel(bias_hn) == H,
+				"tensor_gru: bias_hn has %d values, expected hidden_size = %d",
+				tensor_numel(bias_hn),
+				H,
+			)
+			return _device_recurrent(.GRU, {x, h_0, w_ih, w_hh, bias, bias_hn}, H)
+		}
+		return _device_recurrent(.GRU, {x, h_0, w_ih, w_hh, bias}, H)
+	}
 	_host_inputs(.GRU, x, h_0, w_ih, w_hh, bias, bias_hn)
 	allocator := _scope_or(allocator) // the active graph scope, if any
 	_check_shape(x)
@@ -1945,7 +1963,8 @@ tensor_lstm :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
 	if _device_use(.LSTM, x, h_0, c_0, w_ih, w_hh, bias) {
-		return _device_lstm(x, h_0, c_0, w_ih, w_hh, bias)
+		_check_shape(w_ih)
+		return _device_recurrent(.LSTM, {x, h_0, c_0, w_ih, w_hh, bias}, w_ih.shape[1] / 4)
 	}
 	_host_inputs(.LSTM, x, h_0, c_0, w_ih, w_hh, bias)
 	allocator := _scope_or(allocator) // the active graph scope, if any

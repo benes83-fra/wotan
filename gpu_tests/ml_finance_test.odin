@@ -307,6 +307,11 @@ _deeplob_lstm_run :: proc(on_gpu: bool) -> (losses: []f64, params: [][]f64, skip
 	return _deeplob_backend_run(on_gpu, .LSTM)
 }
 
+// DeepLOB with the GRU sequence layer
+_deeplob_gru_run :: proc(on_gpu: bool) -> (losses: []f64, params: [][]f64, skip: []int) {
+	return _deeplob_backend_run(on_gpu, .GRU)
+}
+
 _deeplob_backend_run :: proc(
 	on_gpu: bool,
 	backend: nn.SeqBackend,
@@ -352,11 +357,26 @@ _deeplob_backend_run :: proc(
 	return
 }
 
-// LSTM volatility forecaster: LSTM over 10 steps, flatten, two linear layers
+// volatility forecaster: LSTM or GRU over 10 steps, flatten, two linear layers
 _lstm_vola_run :: proc(on_gpu: bool) -> (losses: []f64, params: [][]f64, skip: []int) {
+	return _vola_run(on_gpu, .LSTM)
+}
+
+_gru_vola_run :: proc(on_gpu: bool) -> (losses: []f64, params: [][]f64, skip: []int) {
+	return _vola_run(on_gpu, .GRU)
+}
+
+_vola_run :: proc(
+	on_gpu: bool,
+	backend: nn.SeqBackend,
+) -> (
+	losses: []f64,
+	params: [][]f64,
+	skip: []int,
+) {
 	rand.reset(70)
 	m := ml.lstm_volatility_forecaster_new(
-		{input_size = 3, hidden_size = 16, seq_len = 10, seq_backend = .LSTM},
+		{input_size = 3, hidden_size = 16, seq_len = 10, seq_backend = backend},
 	)
 	defer ml.lstm_volatility_forecaster_free(&m)
 	opt := nn.adam_new(0.005)
@@ -434,6 +454,8 @@ gpu_ml_finance_test :: proc() {
 	_ml_case("CQL (soft target updates)", _cql_run, 2e-3)
 	_ml_case("DeepLOB (TCN)", _deeplob_run, 2e-3)
 	_ml_case("DeepLOB (LSTM)", _deeplob_lstm_run, 2e-3)
+	_ml_case("DeepLOB (GRU)", _deeplob_gru_run, 2e-3)
 	_ml_case("LSTM volatility forecaster", _lstm_vola_run, 2e-3)
+	_ml_case("volatility forecaster (GRU)", _gru_vola_run, 2e-3)
 	_ml_case("VAE (reparameterize, KL)", _vae_run, 2e-3)
 }

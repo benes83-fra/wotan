@@ -1848,6 +1848,7 @@ _rnn_backward :: proc(node: ^Tensor, allocator: mem.Allocator) {
 	BH := batch * H
 
 	// hs[s] holds the state entering step s (hs[0] = h_0)
+	_recurrent_saved_to_host(node, batch, seq_len, H) // recorded on the GPU
 	states, _ := _saved_blocks(node, seq_len, BH, 1, 0)
 	hs := states[0]
 
@@ -1913,6 +1914,7 @@ _gru_backward :: proc(node: ^Tensor, allocator: mem.Allocator) {
 	BH := batch * H
 	BG := batch * H3
 
+	_recurrent_saved_to_host(node, batch, seq_len, H) // recorded on the GPU
 	states, steps := _saved_blocks(node, seq_len, BH, 1, 4)
 	hs := states[0]
 	rs, zs, ns, hh_n := steps[0], steps[1], steps[2], steps[3]
@@ -2009,11 +2011,7 @@ _lstm_backward :: proc(node: ^Tensor, allocator: mem.Allocator) {
 	BH := batch * H
 	BG := batch * H4
 
-	// a node recorded on the GPU keeps its states and gates on the device
-	if len(node.f64_metadata) == 0 && node.device != nil && node.device.aux_buf.ptr != nil {
-		resize(&node.f64_metadata, 2 * (seq_len + 1) * BH + 5 * seq_len * BH)
-		_device_hooks.download(node.device.aux_buf, node.f64_metadata[:])
-	}
+	_recurrent_saved_to_host(node, batch, seq_len, H) // recorded on the GPU
 	states, steps := _saved_blocks(node, seq_len, BH, 2, 5)
 	hs, cs := states[0], states[1]
 	i_all, f_all, g_all, o_all, tc_all := steps[0], steps[1], steps[2], steps[3], steps[4]

@@ -17,7 +17,7 @@ import "core:time"
 // GPU, whose CPU backward runs the attention backward on head-layout copies.)
 gpu_device_forward_cpu_backward_test :: proc() {
 	fmt.println(
-		"gpu_device_forward_cpu_backward_test: GPU forward, CPU backward (pooling, norms, conv, Sharpe, multi-head attention, GELU, LSTM)",
+		"gpu_device_forward_cpu_backward_test: GPU forward, CPU backward (pooling, norms, conv, Sharpe, multi-head attention, GELU, LSTM, GRU, RNN)",
 	)
 	rand.reset(3)
 	for c in op_cases {
@@ -32,7 +32,9 @@ gpu_device_forward_cpu_backward_test :: proc() {
 		     .SharpeLoss,
 		     .MultiHeadAttention,
 		     .Gelu,
-		     .LSTM:
+		     .LSTM,
+		     .GRU,
+		     .RNN:
 		case:
 			continue
 		}
