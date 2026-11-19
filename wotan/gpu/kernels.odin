@@ -22,6 +22,7 @@ Kernel :: enum {
 	Unary_Bwd, // dx += dy * f'(x, y)
 	Binary, // out = a (+ - * /) b
 	Binary_Bwd, // d(a or b) += dy * ∂(a ∘ b)
+	Binary_Bwd_Both, // da and db of a ∘ b in one launch
 	Matmul, // C (+)= op(A) @ op(B), 16x16 tiles, one output per thread
 	Matmul_Tiled, // the same, 64x64 tiles, 4x4 outputs per thread (register tiling)
 	Matmul_Heads, // Matmul and Matmul_Tiled with operands in head layout (attention;
@@ -324,6 +325,35 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 		d = select(gy / z, -gy * a[i] / (z * z), p.u2 == 1u);
 	}
 	dst[i] = keep(dst[i], p.u7) + d;
+}
+`,
+	// both gradients of a + b, a - b, a * b, a / b (u1 0..3, same shapes);
+	// u6 / u7 overwrite da / db (as keep)
+	.Binary_Bwd_Both    = `
+@group(0) @binding(1) var<storage, read> a: array<f32>;
+@group(0) @binding(2) var<storage, read> b: array<f32>;
+@group(0) @binding(3) var<storage, read> dy: array<f32>;
+@group(0) @binding(4) var<storage, read_write> da: array<f32>;
+@group(0) @binding(5) var<storage, read_write> db: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
+	let i = idx1(g, nw);
+	if (i >= p.u0) { return; }
+	let gy = dy[i];
+	var d_a = gy;
+	var d_b = gy;
+	if (p.u1 == 1u) {
+		d_b = -gy;
+	} else if (p.u1 == 2u) {
+		d_a = gy * b[i];
+		d_b = gy * a[i];
+	} else if (p.u1 == 3u) {
+		let z = b[i];
+		d_a = gy / z;
+		d_b = -gy * a[i] / (z * z);
+	}
+	da[i] = keep(da[i], p.u6) + d_a;
+	db[i] = keep(db[i], p.u7) + d_b;
 }
 `,
 	// C[M, N] (+)= op(A)[M, K] @ op(B)[K, N]; u0 M, u1 N, u2 K, u3 bit 0 transA,

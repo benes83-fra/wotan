@@ -479,25 +479,41 @@ _hook_backward :: proc(node: ^t.Tensor, allocator: mem.Allocator) -> bool {
 	}
 
 	#partial switch op {
-	case .Add, .Sub:
-		for x, i in node.inputs {
-			if !x.requires_grad {continue}
-			axpy(dy, x, -1 if op == .Sub && i == 1 else 1, n)
-			wrote(&written, &nw, x)
-		}
-	case .Mul, .Div:
+	case .Add, .Sub, .Mul, .Div:
 		a, b := node.inputs[0], node.inputs[1]
-		for x, side in node.inputs {
-			if !x.requires_grad {continue}
-			ad, bd := _in_data(a), _in_data(b)
-			g, fresh := _out_grad(x)
+		if a.requires_grad && b.requires_grad && a != b {
+			// both gradients in one launch (the same values as one launch each)
+			ad, bd := dy, dy
+			if op == .Mul || op == .Div {ad, bd = _in_data(a), _in_data(b)}
+			ga, fresh_a := _out_grad(a)
+			gb, fresh_b := _out_grad(b)
 			_dispatch_1d(
-				.Binary_Bwd,
-				_p({u32(n), _binary_code(op), u32(side), 0, 0, 0, 0, u32(fresh)}),
-				{ad, bd, dy, g},
+				.Binary_Bwd_Both,
+				_p({u32(n), _binary_code(op), 0, 0, 0, 0, u32(fresh_a), u32(fresh_b)}),
+				{ad, bd, dy, ga, gb},
 				n,
 			)
-			wrote(&written, &nw, x)
+			wrote(&written, &nw, a)
+			wrote(&written, &nw, b)
+		} else if op == .Add || op == .Sub {
+			for x, i in node.inputs {
+				if !x.requires_grad {continue}
+				axpy(dy, x, -1 if op == .Sub && i == 1 else 1, n)
+				wrote(&written, &nw, x)
+			}
+		} else {
+			for x, side in node.inputs {
+				if !x.requires_grad {continue}
+				ad, bd := _in_data(a), _in_data(b)
+				g, fresh := _out_grad(x)
+				_dispatch_1d(
+					.Binary_Bwd,
+					_p({u32(n), _binary_code(op), u32(side), 0, 0, 0, 0, u32(fresh)}),
+					{ad, bd, dy, g},
+					n,
+				)
+				wrote(&written, &nw, x)
+			}
 		}
 	case .MatMul, .Linear:
 		a, b := node.inputs[0], node.inputs[1]

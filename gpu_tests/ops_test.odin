@@ -16,6 +16,7 @@ Op_Case :: struct {
 	shapes:   [][4]int, // logical input shapes (stored as [rows, cols] = shape[0], rest)
 	storage:  [][2]int, // storage [rows, cols] when it differs from the shape (flattened)
 	positive: bool, // inputs in (0.5, 2) (log, sqrt, div)
+	no_grad:  []int, // inputs that need no gradient (all others do)
 	tol:      f64,
 	run:      proc(xs: []^t.Tensor) -> ^t.Tensor,
 }
@@ -45,7 +46,9 @@ _run_case :: proc(
 		if len(c.storage) > i && c.storage[i] != {} {rows, cols = c.storage[i][0], c.storage[i][1]}
 		m := l.matrix_new(f64, rows, cols)
 		copy(m.data, values[i])
-		xs[i] = t.tensor_new(m, true)
+		needs_grad := true
+		for k in c.no_grad {if k == i {needs_grad = false}}
+		xs[i] = t.tensor_new(m, needs_grad)
 		xs[i].shape = shape
 		if on_gpu {gpu.to_device(xs[i])}
 	}
@@ -118,6 +121,22 @@ op_cases := [?]Op_Case {
 		shapes = {{5, 9, 1, 1}},
 		tol = 1e-6,
 		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_mul(x[0], x[0])},
+	},
+	{
+		name = "sub (only b needs a gradient)",
+		op = .Sub,
+		shapes = {{7, 33, 1, 1}, {7, 33, 1, 1}},
+		no_grad = {0},
+		tol = 1e-6,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_sub(x[0], x[1])},
+	},
+	{
+		name = "mul (only a needs a gradient)",
+		op = .Mul,
+		shapes = {{7, 33, 1, 1}, {7, 33, 1, 1}},
+		no_grad = {1},
+		tol = 1e-6,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_mul(x[0], x[1])},
 	},
 	{
 		name = "div",
@@ -244,6 +263,29 @@ op_cases := [?]Op_Case {
 		name = "linear",
 		op = .Linear,
 		shapes = {{70, 45, 1, 1}, {45, 33, 1, 1}, {1, 33, 1, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_linear(x[0], x[1], x[2])},
+	},
+	{
+		name = "linear (fixed weights, bias trained)",
+		op = .Linear,
+		shapes = {{70, 45, 1, 1}, {45, 33, 1, 1}, {1, 33, 1, 1}},
+		no_grad = {1},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_linear(x[0], x[1], x[2])},
+	},
+	{
+		name = "linear (fixed bias)",
+		op = .Linear,
+		shapes = {{70, 45, 1, 1}, {45, 33, 1, 1}, {1, 33, 1, 1}},
+		no_grad = {2},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_linear(x[0], x[1], x[2])},
+	},
+	{
+		name = "linear 300x20 @ 20x150 (bias gradient over 300 rows)",
+		op = .Linear,
+		shapes = {{300, 20, 1, 1}, {20, 150, 1, 1}, {1, 150, 1, 1}},
 		tol = 1e-5,
 		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_linear(x[0], x[1], x[2])},
 	},
@@ -600,7 +642,17 @@ op_cases := [?]Op_Case {
 		shapes = {{2, 5, 8, 1}, {2, 6, 8, 1}, {2, 6, 8, 1}},
 		tol = 1e-5,
 		run = proc(x: []^t.Tensor) -> ^t.Tensor {
-			return t.tensor_multi_head_attention(x[0], x[1], x[2], 2, 5, 6, 2, 4, mask = _shared_mask())
+			return t.tensor_multi_head_attention(
+				x[0],
+				x[1],
+				x[2],
+				2,
+				5,
+				6,
+				2,
+				4,
+				mask = _shared_mask(),
+			)
 		},
 	},
 	{
@@ -609,7 +661,17 @@ op_cases := [?]Op_Case {
 		shapes = {{2, 5, 8, 1}, {2, 6, 8, 1}, {2, 6, 8, 1}},
 		tol = 1e-5,
 		run = proc(x: []^t.Tensor) -> ^t.Tensor {
-			return t.tensor_multi_head_attention(x[0], x[1], x[2], 2, 5, 6, 2, 4, mask = _head_mask())
+			return t.tensor_multi_head_attention(
+				x[0],
+				x[1],
+				x[2],
+				2,
+				5,
+				6,
+				2,
+				4,
+				mask = _head_mask(),
+			)
 		},
 	},
 	{
@@ -620,7 +682,18 @@ op_cases := [?]Op_Case {
 		storage = {{1, 126}, {1, 126}, {1, 126}},
 		tol = 1e-5,
 		run = proc(x: []^t.Tensor) -> ^t.Tensor {
-			return t.tensor_multi_head_attention(x[0], x[1], x[2], 3, 7, 7, 3, 2, flash = true, causal = true)
+			return t.tensor_multi_head_attention(
+				x[0],
+				x[1],
+				x[2],
+				3,
+				7,
+				7,
+				3,
+				2,
+				flash = true,
+				causal = true,
+			)
 		},
 	},
 	{

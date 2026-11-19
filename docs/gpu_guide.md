@@ -548,9 +548,12 @@ The training tests of the suite read the loss after every step and the GPT test 
 - One Adam launch updates up to four parameters that share the learning rate and the step count.
 - Layer norm and RMS norm keep the per-row mean and scale of the forward pass for the backward pass instead of computing them again.
 - Multi-head attention reads and writes the heads in place (see [section 5](#5-transformers-on-the-gpu)), so the permutes into and out of the per-head layout do not run.
+- The backward pass of an addition, subtraction, multiplication or division computes the gradients of both operands in one launch (residual connections, GELU).
 - `clip_grad_norm` handles several gradients per launch (see [section 8](#8-optimizers-clipping-and-checkpoints)).
 
-The GPT of section 5 records about 146 kernel launches per training step: 128 for the forward and backward pass, 10 for the Adam step and 5 to 10 for `clip_grad_norm` over its 34 parameters (5 to sum the squares; 5 more to scale, in the steps where the norm is above the limit). The smaller GPT of the table above, without dropout and clipping, records 137.
+The GPT of section 5 records about 139 kernel launches per training step: 121 for the forward and backward pass, 10 for the Adam step and 5 to 10 for `clip_grad_norm` over its 34 parameters (5 to sum the squares; 5 more to scale, in the steps where the norm is above the limit). The smaller GPT of the table above, without dropout and clipping, records 130.
+
+Most of the remaining launches are matrix products (one per linear layer forward, two backward) and one launch per op for the rest.
 
 **Matrix products** use a register-tiled kernel: a workgroup computes a 64×64 block of the result, each thread a 4×4 block held in registers. Products with fewer than 32 rows or columns (`gpu.MATMUL_TILED_MIN`) use a kernel with 16×16 blocks and one result per thread, which wastes less work on small shapes. `gpu.benchmark_matmul` times a product with the current choice, and `gpu.set_matmul_kernel` forces one kernel for comparisons. Measured by the test suite (square products, `-o:speed`):
 
