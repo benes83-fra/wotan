@@ -35,6 +35,8 @@ Kernel :: enum {
 	Bias_Add, // out = a + bias[i % D]
 	Col_Sum, // db[j] += Σ_i dy[i, j]
 	Col_Sum_Group, // Col_Sum of up to LINEAR_GROUP gradients in one launch
+	Lstm_Fwd, // the LSTM recurrence over all steps (one workgroup per sequence)
+	Lstm_Bwd, // its backpropagation through time
 	Row_Sum, // out[b] = Σ_j x[b, j]
 	Row_Bcast_Add, // dx[b, j] += dy[b]
 	Transpose, // y (+)= xᵀ
@@ -620,6 +622,129 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 			for (var i = 0u; i < p.u0; i++) { s = s + dy0[i * p.u1 + j]; }
 			db0[j] = keep(db0[j], o) + s;
 		}
+	}
+}
+`,
+	// LSTM over all steps, gates [i, f, g, o]; u0 batch B, u1 steps S, u2
+	// hidden H. proj [B·S, 4H] = x @ W_ih (row b·S + s). One workgroup per
+	// sequence b runs the steps in order; its threads share the units of h.
+	// saved (the CPU's layout): hs, cs [(S + 1)·B·H] (row s = state entering
+	// step s, index b·H + unit), then i, f, g, o, tanh(c) [S·B·H] each.
+	.Lstm_Fwd           = `
+@group(0) @binding(1) var<storage, read> proj: array<f32>;
+@group(0) @binding(2) var<storage, read> w_hh: array<f32>;
+@group(0) @binding(3) var<storage, read> bias: array<f32>;
+@group(0) @binding(4) var<storage, read> h0: array<f32>;
+@group(0) @binding(5) var<storage, read> c0: array<f32>;
+@group(0) @binding(6) var<storage, read_write> o: array<f32>;
+@group(0) @binding(7) var<storage, read_write> saved: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+	let B = p.u0; let S = p.u1; let H = p.u2;
+	let b = wid.y * nw.x + wid.x;
+	if (b >= B) { return; }
+	let BH = B * H; let G = 4u * H; let SBH = S * BH;
+	let cb = (S + 1u) * BH;
+	let gb = 2u * cb;
+	for (var u = lid.x; u < H; u += 256u) {
+		saved[b * H + u] = h0[b * H + u];
+		saved[cb + b * H + u] = c0[b * H + u];
+	}
+	storageBarrier();
+	for (var s = 0u; s < S; s++) {
+		let hp = s * BH + b * H; // h and c entering the step
+		let pr = (b * S + s) * G;
+		for (var u = lid.x; u < H; u += 256u) {
+			var ai = 0.0; var af = 0.0; var ag = 0.0; var ao = 0.0;
+			for (var k = 0u; k < H; k++) {
+				let h = saved[hp + k];
+				let w = k * G + u;
+				ai = ai + h * w_hh[w];
+				af = af + h * w_hh[w + H];
+				ag = ag + h * w_hh[w + 2u * H];
+				ao = ao + h * w_hh[w + 3u * H];
+			}
+			let iv = sigm((proj[pr + u] + bias[u]) + ai);
+			let fv = sigm((proj[pr + H + u] + bias[H + u]) + af);
+			let gv = tanh_s((proj[pr + 2u * H + u] + bias[2u * H + u]) + ag);
+			let ov = sigm((proj[pr + 3u * H + u] + bias[3u * H + u]) + ao);
+			let c = fv * saved[cb + hp + u] + iv * gv;
+			let tc = tanh_s(c);
+			let h = ov * tc;
+			saved[hp + BH + u] = h;
+			saved[cb + hp + BH + u] = c;
+			let gi = gb + hp;
+			saved[gi + u] = iv;
+			saved[gi + SBH + u] = fv;
+			saved[gi + 2u * SBH + u] = gv;
+			saved[gi + 3u * SBH + u] = ov;
+			saved[gi + 4u * SBH + u] = tc;
+			o[(b * S + s) * H + u] = h;
+		}
+		storageBarrier();
+	}
+}
+`,
+	// LSTM backpropagation through time (layout as Lstm_Fwd), one workgroup per
+	// sequence. Writes the pre-activation gate gradients dG [B·S, 4H] (row
+	// b·S + s) and the states entering each step hb [B·S, H] for the weight
+	// products; carry [2·B·H] holds dh and dc of the next step. At the end
+	// dh0 / dc0 += dL/dh_0, dL/dc_0 (u3 bit 0 / 1: wanted; u4 bit 0 / 1:
+	// overwrite, as keep). w_hh_t is W_hhᵀ [4H, H], so that neighbouring threads
+	// read neighbouring weights.
+	.Lstm_Bwd           = `
+@group(0) @binding(1) var<storage, read> dy: array<f32>;
+@group(0) @binding(2) var<storage, read> saved: array<f32>;
+@group(0) @binding(3) var<storage, read> w_hh_t: array<f32>;
+@group(0) @binding(4) var<storage, read_write> dG: array<f32>;
+@group(0) @binding(5) var<storage, read_write> hb: array<f32>;
+@group(0) @binding(6) var<storage, read_write> carry: array<f32>;
+@group(0) @binding(7) var<storage, read_write> dh0: array<f32>;
+@group(0) @binding(8) var<storage, read_write> dc0: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+	let B = p.u0; let S = p.u1; let H = p.u2;
+	let b = wid.y * nw.x + wid.x;
+	if (b >= B) { return; }
+	let BH = B * H; let G = 4u * H; let SBH = S * BH;
+	let cb = (S + 1u) * BH;
+	let gb = 2u * cb;
+	for (var u = lid.x; u < H; u += 256u) {
+		carry[b * H + u] = 0.0;
+		carry[BH + b * H + u] = 0.0;
+	}
+	storageBarrier();
+	for (var q = 0u; q < S; q++) {
+		let s = S - 1u - q;
+		let hp = s * BH + b * H;
+		let r = (b * S + s) * G;
+		for (var u = lid.x; u < H; u += 256u) {
+			let gi = gb + hp + u;
+			let ig = saved[gi]; let fg = saved[gi + SBH]; let gg = saved[gi + 2u * SBH];
+			let og = saved[gi + 3u * SBH]; let tc = saved[gi + 4u * SBH];
+			let dh = dy[(b * S + s) * H + u] + carry[b * H + u];
+			let d_o = dh * tc;
+			let dc = dh * og * (1.0 - tc * tc) + carry[BH + b * H + u];
+			dG[r + u] = dc * gg * ig * (1.0 - ig);
+			dG[r + H + u] = dc * saved[cb + hp + u] * fg * (1.0 - fg);
+			dG[r + 2u * H + u] = dc * ig * (1.0 - gg * gg);
+			dG[r + 3u * H + u] = d_o * og * (1.0 - og);
+			carry[BH + b * H + u] = dc * fg;
+			hb[(b * S + s) * H + u] = saved[hp + u];
+		}
+		storageBarrier();
+		// dh of the previous step: dG row @ W_hhᵀ
+		for (var k = lid.x; k < H; k += 256u) {
+			var acc = 0.0;
+			for (var j = 0u; j < G; j++) { acc = acc + dG[r + j] * w_hh_t[j * H + k]; }
+			carry[b * H + k] = acc;
+		}
+		storageBarrier();
+	}
+	for (var u = lid.x; u < H; u += 256u) {
+		let i = b * H + u;
+		if ((p.u3 & 1u) != 0u) { dh0[i] = keep(dh0[i], p.u4 & 1u) + carry[i]; }
+		if ((p.u3 & 2u) != 0u) { dc0[i] = keep(dc0[i], (p.u4 >> 1u) & 1u) + carry[BH + i]; }
 	}
 }
 `,

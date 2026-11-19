@@ -299,9 +299,31 @@ _cql_run :: proc(on_gpu: bool) -> (losses: []f64, params: [][]f64, skip: []int) 
 
 // DeepLOB with the TCN sequence layer: convolutions, inception, LOB permute, TCN
 _deeplob_run :: proc(on_gpu: bool) -> (losses: []f64, params: [][]f64, skip: []int) {
+	return _deeplob_backend_run(on_gpu, .TCN)
+}
+
+// DeepLOB with the LSTM sequence layer
+_deeplob_lstm_run :: proc(on_gpu: bool) -> (losses: []f64, params: [][]f64, skip: []int) {
+	return _deeplob_backend_run(on_gpu, .LSTM)
+}
+
+_deeplob_backend_run :: proc(
+	on_gpu: bool,
+	backend: nn.SeqBackend,
+) -> (
+	losses: []f64,
+	params: [][]f64,
+	skip: []int,
+) {
 	rand.reset(68)
 	m := ml.deeplob_new(
-		{time_steps = 12, price_levels = 6, num_classes = 3, hidden_dim = 8, seq_backend = .TCN},
+		{
+			time_steps = 12,
+			price_levels = 6,
+			num_classes = 3,
+			hidden_dim = 8,
+			seq_backend = backend,
+		},
 	)
 	defer ml.deeplob_free(m)
 	opt := nn.adam_new(0.003)
@@ -327,6 +349,39 @@ _deeplob_run :: proc(on_gpu: bool) -> (losses: []f64, params: [][]f64, skip: []i
 	}
 	params = _values_of(opt.parameters[:])
 	if on_gpu {gpu.to_host(opt.parameters[:]); gpu.to_host(x)}
+	return
+}
+
+// LSTM volatility forecaster: LSTM over 10 steps, flatten, two linear layers
+_lstm_vola_run :: proc(on_gpu: bool) -> (losses: []f64, params: [][]f64, skip: []int) {
+	rand.reset(70)
+	m := ml.lstm_volatility_forecaster_new(
+		{input_size = 3, hidden_size = 16, seq_len = 10, seq_backend = .LSTM},
+	)
+	defer ml.lstm_volatility_forecaster_free(&m)
+	opt := nn.adam_new(0.005)
+	defer nn.adam_free(&opt)
+	ml.lstm_volatility_add_to_optimizer(&m, &opt)
+	_round_params(opt.parameters[:])
+	x := _host_tensor(1, 8 * 10 * 3)
+	x.shape = {8, 10, 3, 1}
+	y := _host_tensor(8, 1)
+	defer {t.tensor_free(x); t.tensor_free(y)}
+	if on_gpu {gpu.to_device(opt.parameters[:]); gpu.to_device(x); gpu.to_device(y)}
+	losses = make([]f64, 10, context.temp_allocator)
+	scope: t.Graph_Scope
+	defer t.graph_scope_destroy(&scope)
+	for i in 0 ..< 10 {
+		t.graph_begin(&scope)
+		loss := t.tensor_mse_loss(ml.lstm_volatility_forecaster_forward(&m, x), y)
+		nn.adam_zero_grad(&opt)
+		t.tensor_backward(loss)
+		losses[i] = t.tensor_item(loss)
+		t.graph_end(&scope)
+		nn.adam_step(&opt)
+	}
+	params = _values_of(opt.parameters[:])
+	if on_gpu {gpu.to_host(opt.parameters[:]); gpu.to_host(x); gpu.to_host(y)}
 	return
 }
 
@@ -378,5 +433,7 @@ gpu_ml_finance_test :: proc() {
 	_ml_case("conditional autoencoder (L1, early stop)", _ca_run, 2e-3)
 	_ml_case("CQL (soft target updates)", _cql_run, 2e-3)
 	_ml_case("DeepLOB (TCN)", _deeplob_run, 2e-3)
+	_ml_case("DeepLOB (LSTM)", _deeplob_lstm_run, 2e-3)
+	_ml_case("LSTM volatility forecaster", _lstm_vola_run, 2e-3)
 	_ml_case("VAE (reparameterize, KL)", _vae_run, 2e-3)
 }

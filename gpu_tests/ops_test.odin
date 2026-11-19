@@ -1018,6 +1018,95 @@ op_cases := [?]Op_Case {
 				x[2],
 			)},
 	},
+	// x [B, S, in], h_0, c_0 [B, H], W_ih [in, 4H], W_hh [H, 4H], bias [1, 4H]
+	{
+		name = "lstm 3 sequences x 5 steps, hidden 6",
+		op = .LSTM,
+		shapes = {
+			{3, 5, 4, 1},
+			{3, 6, 1, 1},
+			{3, 6, 1, 1},
+			{4, 24, 1, 1},
+			{6, 24, 1, 1},
+			{1, 24, 1, 1},
+		},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_lstm(
+				x[0],
+				x[1],
+				x[2],
+				x[3],
+				x[4],
+				x[5],
+			)},
+	},
+	{
+		name = "lstm, fixed initial state",
+		op = .LSTM,
+		shapes = {
+			{2, 4, 3, 1},
+			{2, 5, 1, 1},
+			{2, 5, 1, 1},
+			{3, 20, 1, 1},
+			{5, 20, 1, 1},
+			{1, 20, 1, 1},
+		},
+		no_grad = {1, 2},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_lstm(
+				x[0],
+				x[1],
+				x[2],
+				x[3],
+				x[4],
+				x[5],
+			)},
+	},
+	{
+		name = "lstm hidden 300 (more units than threads)",
+		op = .LSTM,
+		shapes = {
+			{2, 3, 5, 1},
+			{2, 300, 1, 1},
+			{2, 300, 1, 1},
+			{5, 1200, 1, 1},
+			{300, 1200, 1, 1},
+			{1, 1200, 1, 1},
+		},
+		tol = 1e-5,
+		// W_hh scaled to the size layer initialisation gives (about 1/√H): with
+		// entries in (-1, 1) the gate inputs reach ±10 and f32 rounding of the
+		// 300-term sums alone exceeds the tolerance
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_lstm(
+				x[0],
+				x[1],
+				x[2],
+				x[3],
+				t.tensor_scale(x[4], 0.05),
+				x[5],
+			)},
+	},
+	{
+		name = "lstm 4 sequences x 40 steps",
+		op = .LSTM,
+		shapes = {
+			{4, 40, 3, 1},
+			{4, 8, 1, 1},
+			{4, 8, 1, 1},
+			{3, 32, 1, 1},
+			{8, 32, 1, 1},
+			{1, 32, 1, 1},
+		},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_lstm(
+				x[0],
+				x[1],
+				x[2],
+				x[3],
+				x[4],
+				x[5],
+			)},
+	},
 }
 
 // _const_like: a constant tensor shaped like x, freed with the graph

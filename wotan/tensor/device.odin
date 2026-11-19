@@ -556,6 +556,31 @@ _device_linear :: proc(x, w, b: ^Tensor) -> ^Tensor {
 	return out
 }
 
+// _device_lstm: device tensor_lstm. The states and gates the backward pass
+// needs stay on the device (aux_buf, the layout of the CPU's f64_metadata).
+_device_lstm :: proc(x, h_0, c_0, w_ih, w_hh, bias: ^Tensor) -> ^Tensor {
+	_check_shape(x)
+	_check_shape(w_ih)
+	batch, seq_len, in_size := x.shape[0], x.shape[1], x.shape[2]
+	H := w_ih.shape[1] / 4
+	rg :=
+		x.requires_grad ||
+		h_0.requires_grad ||
+		c_0.requires_grad ||
+		w_ih.requires_grad ||
+		w_hh.requires_grad ||
+		bias.requires_grad
+	out := _device_new_op(1, batch * seq_len * H, {batch, seq_len, H, 1}, rg, _op_alloc(x))
+	BH := batch * H
+	out.device.aux_buf = _device_alloc(out, 2 * (seq_len + 1) * BH + 5 * seq_len * BH)
+	_device_forward(.LSTM, out, {x, h_0, c_0, w_ih, w_hh, bias}, {batch, seq_len, in_size, H})
+	if out.requires_grad {
+		out.op = .LSTM
+		append(&out.inputs, x, h_0, c_0, w_ih, w_hh, bias)
+	}
+	return out
+}
+
 // _device_add_bias: device tensor_add_bias, both paths
 _device_add_bias :: proc(a, bias: ^Tensor) -> ^Tensor {
 	D := bias.data.cols

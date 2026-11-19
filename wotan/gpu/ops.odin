@@ -78,6 +78,8 @@ SUPPORTED :: bit_set[t.Op] {
 	.PermuteLOB,
 	.TopKMask,
 	.Reparameterize,
+	// recurrent layers (recurrent.odin)
+	.LSTM,
 }
 
 @(private)
@@ -393,6 +395,8 @@ _hook_forward :: proc(op: t.Op, out: ^t.Tensor, inputs: []^t.Tensor, ints: []int
 			)
 			off += size
 		}
+	case .LSTM:
+		_lstm_forward(out, inputs, ints)
 	case:
 		_forward_p2(op, out, inputs, ints, floats)
 	}
@@ -652,6 +656,9 @@ _hook_backward :: proc(node: ^t.Tensor, allocator: mem.Allocator) -> bool {
 			}
 			off += size
 		}
+	case .LSTM:
+		_lstm_backward(node, dy)
+		for x in node.inputs {if x.requires_grad {wrote(&written, &nw, x)}}
 	case:
 		if !_backward_p2(node, dy, n) {return false}
 	}

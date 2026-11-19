@@ -1944,6 +1944,9 @@ tensor_lstm :: proc(
 	bias: ^Tensor,
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
+	if _device_use(.LSTM, x, h_0, c_0, w_ih, w_hh, bias) {
+		return _device_lstm(x, h_0, c_0, w_ih, w_hh, bias)
+	}
 	_host_inputs(.LSTM, x, h_0, c_0, w_ih, w_hh, bias)
 	allocator := _scope_or(allocator) // the active graph scope, if any
 	_check_shape(x)
