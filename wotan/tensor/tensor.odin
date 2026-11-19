@@ -84,6 +84,7 @@ Op :: enum {
 	GeluTanh,
 	Linear, // x @ w + b in one node (tensor_linear)
 	MultiHeadAttention, // tensor_multi_head_attention on the GPU (one node)
+	Gelu, // tensor_gelu on the GPU (one node; the CPU records NormCDF and Mul)
 }
 
 PoolParams :: struct {
@@ -395,8 +396,11 @@ tensor_relu :: proc(a: ^Tensor) -> ^Tensor {
 
 	return out
 }
+// tensor_gelu: GELU(x) = x · Φ(x), Φ the standard normal CDF. On the CPU it
+// records tensor_norm_cdf and tensor_mul; on the GPU one node (.Gelu) with
+// the same values, computed in one launch forward and one backward.
 tensor_gelu :: proc(a: ^Tensor) -> ^Tensor {
-	// GELU(x) = x * Φ(x) where Φ is the standard normal CDF
+	if _device_use(.Gelu, a) {return _device_elementwise(.Gelu, a, nil)}
 	cdf := tensor_norm_cdf(a)
 	out := tensor_mul(a, cdf)
 	// Free intermediate if not building graph

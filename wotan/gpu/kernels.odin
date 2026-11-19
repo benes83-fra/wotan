@@ -202,6 +202,8 @@ U_LGAMMA :: 14
 U_PROSPECT :: 15 // f0 α, f1 β, f2 λ
 @(private)
 U_PROB_WEIGHT :: 16 // f0 γ
+@(private)
+U_GELU :: 17 // x · Φ(x) (tensor_gelu)
 
 @(private)
 KERNEL_SOURCES := [Kernel]string {
@@ -231,6 +233,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 		case 12u: { r = 0.5 * v * (1.0 + tanh_s(GELU_C * (v + 0.044715 * v * v * v))); }
 		case 13u: { r = 0.5 * erfc_s(-v * 0.70710678118654752); }
 		case 14u: { r = lgamma_s(v); }
+		case 17u: { r = v * (0.5 * erfc_s(-v * 0.70710678118654752)); }
 		case 15u: { r = prospect_v(v, p.f0, p.f1, p.f2); }
 		case 16u: {
 			let q = clamp(v, 1e-7, 1.0 - 1e-7);
@@ -273,6 +276,10 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 		}
 		case 13u: { d = gy * exp(-0.5 * v * v) * 0.3989422804014327; }
 		case 14u: { d = gy * digamma_s(v); }
+		case 17u: {
+			let cdf = 0.5 * erfc_s(-v * 0.70710678118654752);
+			d = gy * cdf + gy * v * exp(-0.5 * v * v) * 0.3989422804014327;
+		}
 		case 15u: { d = gy * prospect_dv(v, p.f0, p.f1, p.f2); }
 		case 16u: {
 			let q = clamp(v, 1e-7, 1.0 - 1e-7);

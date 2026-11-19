@@ -200,7 +200,7 @@ These ops have GPU kernels for the forward and the backward pass:
 | Group | Ops |
 |---|---|
 | element-wise | `tensor_add`, `tensor_sub`, `tensor_mul`, `tensor_div`, `tensor_neg`, `tensor_scale`, `tensor_exp`, `tensor_log`, `tensor_sqrt`, `tensor_clamp`, `tensor_norm_cdf`, `tensor_gate_mul` |
-| activations | `tensor_relu`, `tensor_leaky_relu`, `tensor_sigmoid`, `tensor_tanh`, `tensor_softplus`, `tensor_gelu` (through `tensor_norm_cdf`), `tensor_gelu_tanh`, `tensor_softmax` |
+| activations | `tensor_relu`, `tensor_leaky_relu`, `tensor_sigmoid`, `tensor_tanh`, `tensor_softplus`, `tensor_gelu`, `tensor_gelu_tanh`, `tensor_softmax` |
 | linear | `tensor_matmul` (both the 2-D and the flattened `[1, N·in]` form), `tensor_add_bias` (both forms), `tensor_linear` (both forms; the bias is added by the matrix-product kernel) |
 | reductions and losses | `tensor_sum`, `tensor_mean`, `tensor_sum_dim1`, `tensor_logsumexp_dim1`, `tensor_mse_loss`, `tensor_cross_entropy_loss`, `tensor_bce_loss`, `tensor_binary_cross_entropy` |
 | normalisation and dropout | `tensor_layer_norm`, `tensor_rms_norm`, `tensor_batch_norm_2d`, `tensor_dropout` |
@@ -538,7 +538,7 @@ Mean time of one Adam training step (forward, backward, update), measured by the
 | MLP 64, 256, 256, 1 | 256 | 2.40 ms | 0.44 ms (5.4×) | 0.26 ms (9.4×) |
 | MLP 256, 1024, 1024, 1 | 512 | 72.5 ms | 6.29 ms (11.5×) | 2.93 ms (24.7×) |
 | MLP 512, 2048, 2048, 1 | 1024 | 598 ms | 13.2 ms (45×) | 11.9 ms (50×) |
-| GPT (2 blocks, width 32, 4 heads) | 6 × 12 tokens | 1.86 ms | 1.56 ms (1.2×) | 0.86 ms (2.2×) |
+| GPT (2 blocks, width 32, 4 heads) | 6 × 12 tokens | 1.86 ms | 1.44 ms (1.3×) | 0.78 ms (2.4×) |
 
 The training tests of the suite read the loss after every step and the GPT test also clips the gradients (another read), so their step times are close to the middle column: about 1.9 ms on both devices for the GPT, 0.2 ms on the CPU against 0.6 ms on the GPU for the CNN of section 6, and 0.1 ms against 0.8 ms for the TCN. For such small models the CPU is the better choice when the loop reads a result every step. Timings on a laptop vary between runs with clock speeds and power state. Debug builds (`-debug`) slow the CPU engine several times more than the GPU path, so compare the two devices in an optimized build.
 
@@ -548,10 +548,11 @@ The training tests of the suite read the loss after every step and the GPT test 
 - One Adam launch updates up to four parameters that share the learning rate and the step count.
 - Layer norm and RMS norm keep the per-row mean and scale of the forward pass for the backward pass instead of computing them again.
 - Multi-head attention reads and writes the heads in place (see [section 5](#5-transformers-on-the-gpu)), so the permutes into and out of the per-head layout do not run.
-- The backward pass of an addition, subtraction, multiplication or division computes the gradients of both operands in one launch (residual connections, GELU).
+- The backward pass of an addition, subtraction, multiplication or division computes the gradients of both operands in one launch (residual connections).
+- `tensor_gelu` is one launch forward and one backward. On the CPU it records `tensor_norm_cdf` and `tensor_mul`, so CPU results are those of the two ops.
 - `clip_grad_norm` handles several gradients per launch (see [section 8](#8-optimizers-clipping-and-checkpoints)).
 
-The GPT of section 5 records about 139 kernel launches per training step: 121 for the forward and backward pass, 10 for the Adam step and 5 to 10 for `clip_grad_norm` over its 34 parameters (5 to sum the squares; 5 more to scale, in the steps where the norm is above the limit). The smaller GPT of the table above, without dropout and clipping, records 130.
+The GPT of section 5 records about 135 kernel launches per training step: 117 for the forward and backward pass, 10 for the Adam step and 5 to 10 for `clip_grad_norm` over its 34 parameters (5 to sum the squares; 5 more to scale, in the steps where the norm is above the limit). The smaller GPT of the table above, without dropout and clipping, records 126.
 
 Most of the remaining launches are matrix products (one per linear layer forward, two backward) and one launch per op for the rest.
 

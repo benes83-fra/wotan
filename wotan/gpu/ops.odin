@@ -42,6 +42,7 @@ SUPPORTED :: bit_set[t.Op] {
 	// phase 2 (ops_p2.odin)
 	.GeluTanh,
 	.NormCDF,
+	.Gelu,
 	.Softmax,
 	.LogSumExpDim1,
 	.CrossEntropy,
@@ -108,6 +109,8 @@ _unary_code :: proc(op: t.Op) -> (code: u32, ok: bool) {
 		return U_GELU_TANH, true
 	case .NormCDF:
 		return U_NORM_CDF, true
+	case .Gelu:
+		return U_GELU, true
 	case .Lgamma:
 		return U_LGAMMA, true
 	case .ProspectValue:

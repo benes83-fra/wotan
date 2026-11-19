@@ -426,6 +426,19 @@ _backward_node_cpu :: proc(node: ^Tensor, allocator: mem.Allocator) {
 					node.grad.data[i] * (0.5 * (1.0 + th) + 0.5 * x * (1.0 - th * th) * du)
 			}
 		}
+	case .Gelu:
+		// only recorded on the GPU; its CPU backward (kernel disabled after the
+		// forward pass): d/dx x · Φ(x) = Φ(x) + x · φ(x)
+		a_in := node.inputs[0]
+		if a_in.requires_grad {
+			tensor_ensure_grad(a_in)
+			for i in 0 ..< len(a_in.grad.data) {
+				x := a_in.data.data[i]
+				cdf := 0.5 * math.erfc(-x / math.SQRT_TWO)
+				phi := math.exp(-0.5 * x * x) * 0.3989422804014327
+				a_in.grad.data[i] += node.grad.data[i] * (cdf + x * phi)
+			}
+		}
 	case .NormCDF:
 		a_in := node.inputs[0]
 		if a_in.requires_grad {

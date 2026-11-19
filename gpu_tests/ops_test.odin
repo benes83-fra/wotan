@@ -414,8 +414,8 @@ op_cases := [?]Op_Case {
 			)},
 	},
 	{
-		name = "gelu (norm_cdf · x)",
-		op = .NormCDF,
+		name = "gelu (x · norm_cdf(x))",
+		op = .Gelu,
 		shapes = {{4, 50, 1, 1}},
 		tol = 1e-5,
 		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_gelu(t.tensor_scale(x[0], 3))},
@@ -1116,9 +1116,9 @@ gpu_fallback_op_test :: proc() {
 			worst,
 			c.tol,
 		)
-		// without its kernel, multi-head attention runs as the unfused ops, which
-		// have kernels: there is no CPU fallback to count
-		if c.op != .MultiHeadAttention {
+		// without their kernel, multi-head attention and GELU run as the unfused
+		// ops, which have kernels: there is no CPU fallback to count
+		if c.op != .MultiHeadAttention && c.op != .Gelu {
 			check(fallbacks > 0, "%s (fallback): the fallback did not run", c.name)
 		}
 	}
