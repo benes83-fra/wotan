@@ -1,5 +1,6 @@
 package tensor
 
+import l "../linalg"
 import "base:runtime"
 import "core:fmt"
 import "core:mem"
@@ -60,6 +61,9 @@ Device_Hooks :: struct {
 	download:      proc(b: Device_Buffer, dst: []f64),
 	zero:          proc(b: Device_Buffer, numel: int),
 	copy:          proc(dst, src: Device_Buffer, numel: int),
+	// copy_rows: dst[r · dst_stride + dst_off + c] = src[r · length + c] for
+	// r < rows, c < length (tensor_write_steps)
+	copy_rows:     proc(dst, src: Device_Buffer, rows, length, dst_stride, dst_off: int),
 	// has_forward reports whether a kernel computes `op` on the device
 	has_forward:   proc(op: Op) -> bool,
 	// forward computes `out` (device data allocated) from inputs on the device
@@ -570,6 +574,68 @@ _recurrent_saved :: proc(op: Op, batch, seq_len, H: int) -> int {
 		return seq_len * BH // exp(Δ·A); H = d_model · d_state
 	}
 	return (seq_len + 1) * BH // RNN
+}
+
+// tensor_zeros_beside: a zero tensor of `shape` (stored [1, numel]) that lives
+// where `like` lives: on the device if `like` is a device tensor, else on the
+// host. It belongs to `allocator`, also inside a graph scope: for buffers that
+// outlive the scope and are written in place (tensor_write_steps). Free it
+// with tensor_free.
+tensor_zeros_beside :: proc(
+	like: ^Tensor,
+	shape: [4]int,
+	allocator := context.allocator,
+) -> ^Tensor {
+	n := shape[0] * shape[1] * shape[2] * shape[3]
+	if like != nil && like.device != nil && _device_on() {
+		out := _device_new_op(1, n, shape, false, allocator, record = false)
+		if n > 0 {_device_hooks.zero(out.device.data_buf, n)}
+		return out
+	}
+	out := tensor_new(l.matrix_new(f64, 1, n, allocator), false, allocator)
+	out.shape = shape
+	return out
+}
+
+// tensor_write_steps writes src (batch · n · width values, [batch, n, width])
+// into dst [batch, steps, width] at steps start ..< start + n, in place, with
+// no gradient (a KV cache). On the device when dst is a device tensor (src is
+// uploaded if needed), else on the host.
+tensor_write_steps :: proc(dst, src: ^Tensor, start: int) {
+	_check_shape(dst)
+	batch, steps, width := dst.shape[0], dst.shape[1], dst.shape[2] * dst.shape[3]
+	n := tensor_numel(src) / max(batch * width, 1)
+	fmt.assertf(
+		n * batch * width == tensor_numel(src) && start >= 0 && start + n <= steps,
+		"tensor_write_steps: %d values do not fit steps %d ..< %d of %v",
+		tensor_numel(src),
+		start,
+		steps,
+		dst.shape,
+	)
+	if n == 0 {return}
+	if dst.device != nil && _device_on() && dst.device.data_where != .Host {
+		_data_to_device(src)
+		_device_hooks.copy_rows(
+			dst.device.data_buf,
+			src.device.data_buf,
+			batch,
+			n * width,
+			steps * width,
+			start * width,
+		)
+		_data_written_on_device(dst)
+		return
+	}
+	_data_to_host(dst)
+	_data_to_host(src)
+	for b in 0 ..< batch {
+		copy(
+			dst.data.data[(b * steps + start) * width:][:n * width],
+			src.data.data[b * n * width:][:n * width],
+		)
+	}
+	tensor_mark_host_dirty(dst)
 }
 
 // _device_recurrent: device tensor_lstm / tensor_gru / tensor_rnn (inputs in

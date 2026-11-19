@@ -88,6 +88,7 @@ init :: proc(opts := Options{}, allocator := context.allocator) -> bool {
 		download      = _hook_download,
 		zero          = _hook_zero,
 		copy          = _hook_copy,
+		copy_rows     = _hook_copy_rows,
 		has_forward   = _hook_has_forward,
 		forward       = _hook_forward,
 		backward      = _hook_backward,

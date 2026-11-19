@@ -313,9 +313,15 @@ _gpt_head :: proc(model: ^GPTModel, x: ^t.Tensor) -> ^t.Tensor {
 // Positions are absolute (learned positional embeddings), so a sequence holds
 // at most max_seq_len tokens: when cache.length reaches it, reset the cache and
 // prefill it again with the last tokens (gpt_kv_cache_reset).
+//
+// The cache lives where the model lives: for a model on the GPU it is a device
+// tensor per block, written in place, and attention reads it there (no
+// transfers per token).
 
 GPT_KV_Cache :: struct {
-	keys, values: [][]f64, // per block [batch, capacity, d_model]
+	// per block [batch, capacity, d_model], created on first use where the
+	// model lives (on the GPU: device tensors)
+	keys, values: []^t.Tensor,
 	batch:        int,
 	length:       int, // positions cached so far
 	capacity:     int, // model.max_seq_len
@@ -327,24 +333,19 @@ gpt_kv_cache_new :: proc(
 	batch: int,
 	allocator := context.allocator,
 ) -> GPT_KV_Cache {
-	cache := GPT_KV_Cache {
-		batch     = batch,
-		capacity  = model.max_seq_len,
+	return GPT_KV_Cache {
+		batch = batch,
+		capacity = model.max_seq_len,
 		allocator = allocator,
-		keys      = make([][]f64, len(model.blocks), allocator),
-		values    = make([][]f64, len(model.blocks), allocator),
+		keys = make([]^t.Tensor, len(model.blocks), allocator),
+		values = make([]^t.Tensor, len(model.blocks), allocator),
 	}
-	for i in 0 ..< len(model.blocks) {
-		cache.keys[i] = make([]f64, batch * cache.capacity * model.d_model, allocator)
-		cache.values[i] = make([]f64, batch * cache.capacity * model.d_model, allocator)
-	}
-	return cache
 }
 
 gpt_kv_cache_free :: proc(cache: ^GPT_KV_Cache) {
 	for i in 0 ..< len(cache.keys) {
-		delete(cache.keys[i], cache.allocator)
-		delete(cache.values[i], cache.allocator)
+		if cache.keys[i] != nil {t.tensor_free(cache.keys[i])}
+		if cache.values[i] != nil {t.tensor_free(cache.values[i])}
 	}
 	delete(cache.keys, cache.allocator)
 	delete(cache.values, cache.allocator)
@@ -374,14 +375,32 @@ gpt_model_forward_cached :: proc(
 		cache.length + n <= cache.capacity,
 		"gpt_model_forward_cached: cache is full (max_seq_len)",
 	)
-	start, total, d := cache.length, cache.length + n, model.d_model
+	start, total, d, cap := cache.length, cache.length + n, model.d_model, cache.capacity
 	alloc := t._scope_or(input_ids.allocator)
+	// the cache's buffers live where the model lives (created on first use)
+	weight := model.token_emb.weight
+	for i in 0 ..< len(model.blocks) {
+		if cache.keys[i] == nil ||
+		   t.tensor_is_on_device(cache.keys[i]) != t.tensor_is_on_device(weight) {
+			assert(
+				cache.length == 0 || cache.keys[i] == nil,
+				"gpt_model_forward_cached: the model moved between host and device; reset the cache",
+			)
+			if cache.keys[i] != nil {t.tensor_free(cache.keys[i]); t.tensor_free(cache.values[i])}
+			cache.keys[i] = t.tensor_zeros_beside(weight, {batch, cap, d, 1}, cache.allocator)
+			cache.values[i] = t.tensor_zeros_beside(weight, {batch, cap, d, 1}, cache.allocator)
+		}
+	}
+	on_device := t.tensor_is_on_device(weight)
 
-	// New queries see every cached position and the new ones up to their own
-	mask := make([]f64, n * total, context.temp_allocator)
+	// New queries see every cached position and the new ones up to their own.
+	// On the device, attention reads the whole cache in place and the mask
+	// also hides the positions not written yet (their weights are exactly 0).
+	span := cap if on_device else total
+	mask := make([]f64, n * span, context.temp_allocator)
 	defer delete(mask, context.temp_allocator)
 	for i in 0 ..< n {
-		for j in start + i + 1 ..< total {mask[i * total + j] = _MASKED}
+		for j in start + i + 1 ..< span {mask[i * span + j] = _MASKED}
 	}
 
 	x := _gpt_embed(model, input_ids, start)
@@ -392,19 +411,25 @@ gpt_model_forward_cached :: proc(
 		k_new := linear_forward(&mha.k_proj, x_norm)
 		v_new := linear_forward(&mha.v_proj, x_norm)
 
-		// Append the new keys and values; attend over positions 0 ..< total
-		k := _constant(batch * total * d, {batch, total, d, 1}, alloc)
-		v := _constant(batch * total * d, {batch, total, d, 1}, alloc)
-		// the cache lives on the host: new keys and values are read through
-		// tensor_values (a download when the model runs on a GPU)
-		k_vals, v_vals := t.tensor_values(k_new), t.tensor_values(v_new)
-		for b in 0 ..< batch {
-			row := cache.keys[i][b * cache.capacity * d:]
-			copy(row[start * d:total * d], k_vals[b * n * d:(b + 1) * n * d])
-			copy(k.data.data[b * total * d:(b + 1) * total * d], row[:total * d])
-			row = cache.values[i][b * cache.capacity * d:]
-			copy(row[start * d:total * d], v_vals[b * n * d:(b + 1) * n * d])
-			copy(v.data.data[b * total * d:(b + 1) * total * d], row[:total * d])
+		// Append the new keys and values to the cache
+		t.tensor_write_steps(cache.keys[i], k_new, start)
+		t.tensor_write_steps(cache.values[i], v_new, start)
+		k, v := cache.keys[i], cache.values[i]
+		if !on_device {
+			// on the host: attend over positions 0 ..< total of copies
+			k = _constant(batch * total * d, {batch, total, d, 1}, alloc)
+			v = _constant(batch * total * d, {batch, total, d, 1}, alloc)
+			for b in 0 ..< batch {
+				src := b * cap * d
+				copy(
+					k.data.data[b * total * d:][:total * d],
+					cache.keys[i].data.data[src:][:total * d],
+				)
+				copy(
+					v.data.data[b * total * d:][:total * d],
+					cache.values[i].data.data[src:][:total * d],
+				)
+			}
 		}
 		attn_out := _attend(
 			&mha.out_proj,
@@ -415,13 +440,15 @@ gpt_model_forward_cached :: proc(
 			v,
 			batch,
 			n,
-			total,
+			span,
 			false,
 			false,
 			mask,
 		)
-		_constant_done(k, attn_out)
-		_constant_done(v, attn_out)
+		if !on_device {
+			_constant_done(k, attn_out)
+			_constant_done(v, attn_out)
+		}
 		x = _gpt_block_rest(&block, x, attn_out, false, 0, false)
 	}
 	cache.length = total

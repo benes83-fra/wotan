@@ -60,6 +60,7 @@ main :: proc() {
 	gpu_clip_grad_norm_test()
 	gpu_grad_accumulation_adam_test()
 	gpu_gpt_training_test()
+	gpu_gpt_kv_cache_test()
 	gpu_bert_training_test()
 	gpu_device_forward_cpu_backward_test()
 	gpu_batch_norm_running_stats_test()

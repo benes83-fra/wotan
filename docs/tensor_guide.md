@@ -705,3 +705,4 @@ The same network in PyTorch 2.1.0 (float64, the same initial weights, plain SGD)
 | Attention | `tensor_scaled_dot_product_attention`, `_masked_scaled_dot_product_attention`, `_flash_attention`, `_multi_head_attention` |
 | Constants and checks | `tensor_top_k_mask`, `tensor_clip_weights`, `tensor_validate`, `tensor_validate_graph` |
 | Size and GPU residency | `tensor_numel`; for tensors on a GPU: `tensor_values`, `tensor_grad_values`, `tensor_item`, `tensor_sync_host`, `tensor_mark_host_dirty`, `tensor_is_on_device` (see the [gpu guide](gpu_guide.md)) |
+| Buffers written in place (KV caches) | `tensor_zeros_beside(like, shape, allocator)`: zeros where `like` lives (device or host), kept after `graph_end`; `tensor_write_steps(dst, src, start)`: writes `src` `[B, n, W]` into steps `start ..< start + n` of `dst` `[B, S, W]`, without gradient |

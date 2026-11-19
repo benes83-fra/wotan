@@ -157,6 +157,109 @@ gpu_gpt_training_test :: proc() {
 	}
 }
 
+// _kv_run feeds fixed token sequences through gpt_model_forward_cached in
+// pieces (3 + 1 + 1 + … positions, then after a reset 5 + 1 + …) and returns
+// the logits of every call, the number of calls and the downloads on the GPU
+_kv_run :: proc(
+	c: GPT_Case,
+	batch: int,
+	on_gpu: bool,
+) -> (
+	logits: [dynamic]f64,
+	calls, downloads: int,
+) {
+	SEQ :: 12
+	rand.reset(77)
+	model := nn.gpt_model_new(
+		TF_VOCAB,
+		32,
+		4,
+		64,
+		2,
+		16,
+		use_moe = c.moe,
+		num_experts = 4,
+		top_k = 2,
+		rms_norm = c.rms_norm,
+		tie_embeddings = c.tie,
+		gelu_tanh = c.gelu_tanh,
+	)
+	defer nn.gpt_model_free(&model)
+	ps := nn.gpt_model_parameters(&model, context.temp_allocator)
+	_round_params(ps[:])
+	if on_gpu {gpu.to_device(ps[:])}
+	tokens := make([]int, batch * SEQ, context.temp_allocator)
+	for &v in tokens {v = rand.int_max(TF_VOCAB)}
+	cache := nn.gpt_kv_cache_new(&model, batch)
+	defer nn.gpt_kv_cache_free(&cache)
+	scope: t.Graph_Scope
+	defer t.graph_scope_destroy(&scope)
+	logits = make([dynamic]f64, context.temp_allocator)
+	gpu.reset_stats()
+	for first in ([]int{3, 5}) {
+		nn.gpt_kv_cache_reset(&cache)
+		for cache.length < SEQ {
+			n := first if cache.length == 0 else 1
+			m := l.matrix_new(f64, 1, batch * n)
+			for b in 0 ..< batch {
+				for j in 0 ..< n {m.data[b * n + j] = f64(tokens[b * SEQ + cache.length + j])}
+			}
+			ids := t.tensor_new(m)
+			ids.shape = {batch, n, 1, 1}
+			t.graph_begin(&scope, no_grad = true)
+			append(&logits, ..t.tensor_values(nn.gpt_model_forward_cached(&model, &cache, ids)))
+			t.graph_end(&scope)
+			t.tensor_free(ids)
+			calls += 1
+		}
+	}
+	downloads = gpu.stats().downloads
+	if on_gpu {gpu.to_host(ps[:])}
+	return
+}
+
+// gpt_model_forward_cached with the model on the GPU (cache on the device,
+// written in place, attention over the whole cache with the unwritten
+// positions masked) against the CPU, whose cached logits equal a full forward
+// pass (tests/gpt_kv_cache_test.odin)
+gpu_gpt_kv_cache_test :: proc() {
+	fmt.println("gpu_gpt_kv_cache_test: GPT KV cache on the GPU vs the CPU")
+	cases := []struct {
+		c:     GPT_Case,
+		batch: int,
+	} {
+		{{name = "GPT (layer norm, GELU), batch 2"}, 2},
+		{
+			{
+				name = "GPT, RMSNorm + tied + tanh GELU, batch 1",
+				rms_norm = true,
+				tie = true,
+				gelu_tanh = true,
+			},
+			1,
+		},
+		{{name = "GPT, mixture of experts, batch 2", moe = true}, 2},
+	}
+	for k in cases {
+		ref, _, _ := _kv_run(k.c, k.batch, false)
+		got, calls, downloads := _kv_run(k.c, k.batch, true)
+		err := _max_rel(got[:], ref[:])
+		fmt.printfln(
+			"    %-42s %d calls, max rel diff to CPU %.1e, %d downloads",
+			k.c.name,
+			calls,
+			err,
+			downloads,
+		)
+		check(err < 2e-5, "%s: KV-cache logits differ from the CPU by %.1e", k.c.name, err)
+		// only the logits are read: the keys and values stay on the device
+		// (mixture of experts also reads its routing on the host)
+		if !k.c.moe {
+			check(downloads == calls, "%s: %d downloads for %d calls", k.c.name, downloads, calls)
+		}
+	}
+}
+
 _bert_run :: proc(on_gpu: bool) -> (losses: []f64, params: [][]f64, skip: []int) {
 	rand.reset(7)
 	model := nn.bert_model_new(TF_VOCAB, 32, 4, 64, 2, TF_SEQ, dropout = 0.1)

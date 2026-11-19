@@ -683,6 +683,20 @@ _hook_download :: proc(h: t.Device_Buffer, dst: []f64) {_download(_buf(h), dst)}
 _hook_zero :: proc(h: t.Device_Buffer, numel: int) {_zero(_buf(h), numel)}
 @(private)
 _hook_copy :: proc(dst, src: t.Device_Buffer, numel: int) {_copy(_buf(dst), _buf(src), numel)}
+@(private)
+_hook_copy_rows :: proc(dst, src: t.Device_Buffer, rows, length, dst_stride, dst_off: int) {
+	_strided(
+		_bind(src, rows * length),
+		_bind(dst, rows * dst_stride),
+		rows,
+		length,
+		length,
+		0,
+		dst_stride,
+		dst_off,
+		false,
+	)
+}
 
 // ----------------------------------------------------------------------------
 // Pipelines (created on first use)

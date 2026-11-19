@@ -490,6 +490,7 @@ Generating token by token with `gpt_model_forward` recomputes the whole prefix f
 - `gpt_kv_cache_new(&model, batch)` creates the cache.
 - `gpt_model_forward_cached(&model, &cache, ids)` takes the new tokens `[B, n]` and returns their logits `[B, n, vocab]`. The result equals the last `n` positions of a full forward pass. It must run in a no-grad scope; it asserts this.
 - Positions are absolute, so a sequence holds at most `max_seq_len` tokens. When `cache.length` reaches it, call `gpt_kv_cache_reset(&cache)` and prefill the cache again with the most recent tokens.
+- The cache lives where the model lives. For a model on the GPU (see the [gpu guide](gpu_guide.md)), the keys and values stay on the device.
 - Free the cache with `gpt_kv_cache_free`.
 
 Section 12 generates with the cache.
