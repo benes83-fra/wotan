@@ -510,7 +510,7 @@ Both procedures take a `QR_Mode` as their second argument:
 - `.Blocked` (the default) groups the reflections into panels of `QR_BLOCK` (32) columns. Each panel is applied to the rest of the matrix, and to Q, with matrix products, in the compact WY form that LAPACK uses.
 - `.Unblocked` applies one reflection at a time.
 
-Both modes give the same factors up to rounding. `.Blocked` is faster once the matrix has more than a few dozen columns: on the test machine, a 500×500 QR takes 27 ms blocked and 148 ms unblocked, and a 1000×1000 QR takes 0.17 s and 1.4 s. `qr_decompose_thin` skips Q, which halves the time.
+Both modes give the same factors up to rounding. `.Blocked` is faster once the matrix has more than a few dozen columns: on the test machine, a 500×500 QR takes 25 ms blocked and 145 ms unblocked, and a 1000×1000 QR takes 0.14 s and 1.35 s. `qr_decompose_thin` skips Q, which halves the time.
 
 Q is m×m, so it needs m² memory. For least squares on a tall matrix, use `lstsq` from section 9, which never builds Q.
 

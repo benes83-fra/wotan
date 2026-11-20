@@ -217,19 +217,19 @@ With these, MLPs, CNNs, TCNs, GPT (with flash attention, RMSNorm, tied embedding
 - The backward pass runs back through time in one launch and keeps the gate gradients of every step. The weight, bias and input gradients are then matrix products over all steps at once, as on the CPU.
 - The states and gates the backward pass needs stay on the device, in the layout the CPU keeps them.
 
-The GPU gains most from many sequences and many hidden units. A training step of one layer (Adam, MSE on its outputs, loss read every step), measured on the RTX 3060 Laptop GPU with `-o:speed`:
+The GPU gains most from many sequences and many hidden units. A training step of one layer (Adam, MSE on its outputs, loss read every step), measured on the RTX 3060 Laptop GPU and its host CPU (Ryzen 7 6800H) with `-o:speed`: best of five rounds, the GPU timed after it has run the model for at least 0.4 s:
 
 | Layer | Batch | Steps | Input | Hidden | CPU | GPU |
 |---|---|---|---|---|---|---|
-| LSTM | 16 | 20 | 8 | 32 | 1.4 ms | 0.58 ms (2.4×) |
-| LSTM | 64 | 50 | 16 | 128 | 56 ms | 6.9 ms (8×) |
-| LSTM | 128 | 100 | 32 | 256 | 657 ms | 43 ms (15×) |
-| GRU | 16 | 20 | 8 | 32 | 0.70 ms | 0.63 ms (1.1×) |
-| GRU | 64 | 50 | 16 | 128 | 39 ms | 6.9 ms (5.7×) |
-| GRU | 128 | 100 | 32 | 256 | 401 ms | 40 ms (10×) |
-| RNN | 16 | 20 | 8 | 32 | 0.33 ms | 0.42 ms (0.8×) |
-| RNN | 64 | 50 | 16 | 128 | 15 ms | 3.1 ms (4.7×) |
-| RNN | 128 | 100 | 32 | 256 | 131 ms | 17 ms (7.8×) |
+| LSTM | 16 | 20 | 8 | 32 | 1.2 ms | 0.48 ms (2.5×) |
+| LSTM | 64 | 50 | 16 | 128 | 43 ms | 6.8 ms (6.2×) |
+| LSTM | 128 | 100 | 32 | 256 | 423 ms | 42 ms (10×) |
+| GRU | 16 | 20 | 8 | 32 | 0.70 ms | 0.55 ms (1.3×) |
+| GRU | 64 | 50 | 16 | 128 | 33 ms | 6.8 ms (4.8×) |
+| GRU | 128 | 100 | 32 | 256 | 288 ms | 39 ms (7.3×) |
+| RNN | 16 | 20 | 8 | 32 | 0.31 ms | 0.47 ms (0.7×) |
+| RNN | 64 | 50 | 16 | 128 | 13 ms | 2.6 ms (5.0×) |
+| RNN | 128 | 100 | 32 | 256 | 104 ms | 16 ms (6.4×) |
 
 A small RNN does too little work per step for the GPU to pay off; from a few dozen sequences and about a hundred hidden units on, all three layers are faster on the GPU.
 
@@ -237,9 +237,9 @@ A small RNN does too little work per step for the GPU to pay off; from a few doz
 
 | Batch | Steps | `d_model` | CPU | GPU |
 |---|---|---|---|---|
-| 16 | 20 | 32 | 1.3 ms | 1.05 ms (1.2×) |
-| 64 | 50 | 128 | 46 ms | 8.7 ms (5.3×) |
-| 128 | 100 | 256 | 432 ms | 43 ms (10×) |
+| 16 | 20 | 32 | 1.1 ms | 0.91 ms (1.2×) |
+| 64 | 50 | 128 | 40 ms | 8.6 ms (4.6×) |
+| 128 | 100 | 256 | 373 ms | 43 ms (8.7×) |
 
 `gpu.has_kernel(op)` answers the same question in code.
 
@@ -323,7 +323,7 @@ How the transformer ops behave on the GPU:
 - **Attention:** plain, masked and flash attention compute the same attention as on the CPU. The scores, the masked softmax and the weighted sum are batched over all sequences and heads. Flash attention's causal mask is applied inside the softmax kernel. The `nn` attention layers call `tensor_multi_head_attention`, which records one node on the GPU: its matrix products read the heads straight out of the projected `[batch, seq, heads·head_dim]` tensors and write the result back in that layout, so no permute runs in either pass.
 - **Dropout:** masks are drawn on the CPU from `core:math/rand`, exactly as the CPU op draws them, and uploaded. With the same seed, a GPU run uses the same masks as a CPU run.
 - **Embeddings:** token ids that are still on the host are checked against the vocabulary size, as on the CPU. Ids that only exist on the device are not checked; an id outside the vocabulary gives a zero row and no gradient.
-- **KV cache:** for a model on the GPU, `gpt_model_forward_cached` keeps every block's keys and values in device tensors of `max_seq_len` positions. Each call writes the new keys and values in place, and attention reads the whole cache with the positions not written yet masked out (their weights are exactly zero), so the only transfer per call is reading the logits. Per generated token (greedy, logits read every token), a GPT with `d_model` 256 and 4 blocks takes 1.4 ms on the GPU against 3.8 ms on the CPU; a small model (`d_model` 64, 2 blocks) is faster on the CPU (0.07 ms against 0.47 ms), because each token costs about one launch per op and a wait for the logits.
+- **KV cache:** for a model on the GPU, `gpt_model_forward_cached` keeps every block's keys and values in device tensors of `max_seq_len` positions. Each call writes the new keys and values in place, and attention reads the whole cache with the positions not written yet masked out (their weights are exactly zero), so the only transfer per call is reading the logits. Per generated token (greedy, logits read every token), a GPT with `d_model` 256 and 4 blocks takes 1.4 ms on the GPU against 3.8 ms on the CPU; a small model (`d_model` 64, 2 blocks) is faster on the CPU (0.07 ms against 0.44 ms), because each token costs about one launch per op and a wait for the logits.
 - **Host steps inside the models:** a few model steps need values on the host and download them. Mixture-of-experts layers choose their top-k experts on the host. BERT builds its padding mask from host token ids. Each costs one download per forward pass.
 
 ## 6. Convolutional networks on the GPU
@@ -561,17 +561,17 @@ Where results need `f64` accuracy, keep those tensors on the CPU. A program can 
 
 The GPU pays off when the work per step is large: wide layers, large batches, big matrix products. For small models it depends on how often the program reads a result. Every read of a device value waits until the GPU has finished all recorded work, so a loop that reads its loss after every step pays that wait every step.
 
-Mean time of one Adam training step (forward, backward, update), measured by the test suite (`gpu_speed_report`) on the RTX 3060 Laptop GPU and its host CPU, built with `-o:speed`. The GPU column shows the loss read after every step, and read once at the end of the loop:
+Mean time of one Adam training step (forward, backward, update), measured by the test suite (`gpu_speed_report`) on the RTX 3060 Laptop GPU and its host CPU (Ryzen 7 6800H, 8 cores), built with `-o:speed`, best of five runs. The GPU column shows the loss read after every step, and read once at the end of the loop:
 
 | Model | Batch | CPU | GPU, loss every step | GPU, loss at the end |
 |---|---|---|---|---|
-| MLP 16, 64, 64, 1 | 64 | 0.18 ms | 0.29 ms (0.6×) | 0.10 ms (1.8×) |
-| MLP 64, 256, 256, 1 | 256 | 2.40 ms | 0.44 ms (5.4×) | 0.26 ms (9.4×) |
-| MLP 256, 1024, 1024, 1 | 512 | 72.5 ms | 6.29 ms (11.5×) | 2.93 ms (24.7×) |
-| MLP 512, 2048, 2048, 1 | 1024 | 598 ms | 13.2 ms (45×) | 11.9 ms (50×) |
-| GPT (2 blocks, width 32, 4 heads) | 6 × 12 tokens | 1.86 ms | 1.34 ms (1.4×) | 0.64 ms (2.9×) |
+| MLP 16, 64, 64, 1 | 64 | 0.18 ms | 0.28 ms (0.6×) | 0.10 ms (1.8×) |
+| MLP 64, 256, 256, 1 | 256 | 1.88 ms | 0.43 ms (4.4×) | 0.25 ms (7.5×) |
+| MLP 256, 1024, 1024, 1 | 512 | 37.6 ms | 2.33 ms (16×) | 2.08 ms (18×) |
+| MLP 512, 2048, 2048, 1 | 1024 | 245 ms | 13.1 ms (19×) | 12.3 ms (20×) |
+| GPT (2 blocks, width 32, 4 heads) | 6 × 12 tokens | 1.76 ms | 1.52 ms (1.2×) | 0.81 ms (2.2×) |
 
-The training tests of the suite read the loss after every step and the GPT test also clips the gradients (another read), so their step times are close to the middle column: about 1.9 ms on both devices for the GPT, 0.2 ms on the CPU against 0.6 ms on the GPU for the CNN of section 6, and 0.1 ms against 0.8 ms for the TCN. For such small models the CPU is the better choice when the loop reads a result every step. Timings on a laptop vary between runs with clock speeds and power state. After a second or more without GPU work (a pause, or a long phase on the CPU), the driver lowers the GPU's clocks, and the first few hundred milliseconds of small steps then run 2 to 5 times slower; large steps raise the clocks again almost at once. Time a small model after it has run on the GPU for a moment, not right after a long CPU phase. Debug builds (`-debug`) slow the CPU engine several times more than the GPU path, so compare the two devices in an optimized build.
+The training tests of the suite read the loss after every step and the GPT test also clips the gradients (another read), so their step times are close to the middle column: about 1.8 ms on both devices for the GPT, 0.3 ms on the CPU against 0.6 ms on the GPU for the CNN of section 6, and 0.1 ms against 0.8 ms for the TCN. For such small models the CPU is the better choice when the loop reads a result every step. Timings on a laptop vary between runs with clock speeds and power state. After a second or more without GPU work (a pause, or a long phase on the CPU), the driver lowers the GPU's clocks, and the first few hundred milliseconds of small steps then run 2 to 5 times slower; large steps raise the clocks again almost at once. Time a small model after it has run on the GPU for a moment, not right after a long CPU phase. Debug builds (`-debug`) slow the CPU engine several times more than the GPU path, so compare the two devices in an optimized build.
 
 **Where a small model's time goes.** A small model's kernels finish in a few microseconds. The cost is recording them: wgpu needs about 1.5 µs to encode one kernel launch, more than the GPU needs to run a small one. The backend therefore keeps the number of launches low:
 - `tensor_linear` (used by `nn.linear_forward`) adds the bias inside the matrix-product kernel, and its backward pass needs no copy of the output gradient.
