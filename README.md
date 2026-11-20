@@ -135,6 +135,8 @@ import net   "wotan/net"
 
 The examples below are shortened. Every one of them has a complete, runnable version in [`tests/`](tests/). For a step-by-step introduction to DataFrames, see the [core user guide](docs/core_guide.md); the [documentation overview](docs/main_doc.md) lists all the guides.
 
+For a complete program that uses most of the packages together, on real market data, see the end-to-end example [`examples/sector_rotation`](examples/sector_rotation) and [its guide](docs/e2e_sector_rotation_guide.md). It loads ten years of sector-ETF prices from Yahoo Finance, computes features, trains an LSTM on the GPU next to a ridge regression and a momentum rule, tests them walk-forward with purging, simulates weekly long/short portfolios with trading costs, and evaluates them with the probabilistic and deflated Sharpe ratios, charts, an Excel workbook and an HTML report.
+
 ### DataFrames: load, filter, group, join
 
 ```odin
@@ -283,6 +285,7 @@ wotan/
 ├── data/               dataset loaders (MNIST)
 ├── util/               shared worker pool for parallel loops
 └── zip_min/            minimal ZIP reader (used by the Excel importer)
+examples/               end-to-end example programs (output in examples/*/output/)
 tests/                  runnable examples and regression tests
 gpu_tests/              GPU test suite (separate program)
 scripts/                scripts to download MNIST and convert Hugging Face models (FinBERT, DistilGPT-2)
@@ -330,7 +333,7 @@ These are areas where Wotan is known to be incomplete:
 
 - **API stability:** names and signatures are still changing. There are no versioned releases yet.
 - **Documentation:** every package has a user guide, except a few small support packages. [`docs/main_doc.md`](docs/main_doc.md) is the entry point: it gives an overview of the packages, links each guide and lists the conventions they share.
-- **Performance:** most code runs on the CPU. Some hot paths use SIMD, but most code has not been profiled or tuned. Neural network training can run on a GPU (the `gpu` package): MLPs, CNNs, TCNs, GPT, BERT, VAEs and the `ml_finance` models run entirely on it; only the recurrent cells still run on the CPU automatically. The GPU pays off for wide layers and large batches. Small models train faster on the CPU when the loop reads a result (such as the loss) after every step (see the [gpu guide](docs/gpu_guide.md#11-performance)).
+- **Performance:** most code runs on the CPU. The matrix products, attention and element-wise operations of the neural-network stack are tuned (multi-threaded SIMD, AVX2 when the CPU has it); most other code has not been profiled. Neural network training can run on a GPU (the `gpu` package): MLPs, CNNs, TCNs, recurrent layers, Mamba, GPT, BERT, VAEs and the `ml_finance` models run entirely on it. The GPU pays off for wide layers and large batches. Small models train faster on the CPU when the loop reads a result (such as the loss) after every step (see the [gpu guide](docs/gpu_guide.md#11-performance)).
 - **Validation:** most modules are tested against reference libraries (see [Tests](#tests)). The ML-for-finance models are mostly checked by examples rather than references; the behavioural finance models reproduce their papers' published tables and examples. Nothing has been validated for production trading or risk use.
 - **Memory management:** ownership is explicit, as is usual in Odin. Most objects need a matching `destroy_*` or `*_free` call.
 

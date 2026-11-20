@@ -101,6 +101,12 @@ And one more guide:
 |---|---|
 | [behavioural finance](behavioral_finance_guide.md) | prospect theory and option prices under it, portfolio choice, cross-sectional signals, the disposition effect, herding, investor sentiment, equilibrium models, heuristics |
 
+### End-to-end examples
+
+| Example | Shows |
+|---|---|
+| [sector rotation](e2e_sector_rotation_guide.md) (`examples/sector_rotation`) | a complete strategy on real data: Yahoo Finance prices, features without look-ahead, an LSTM on the GPU against a ridge regression and a momentum rule, purged walk-forward testing, long/short portfolios with trading costs, the probabilistic and deflated Sharpe ratios, charts, Excel and HTML output |
+
 The [test catalog](test_catalog.md) lists every test file and what it checks.
 
 ## 3. Where to start
@@ -112,6 +118,8 @@ Every path starts with the [core guide](core_guide.md), since most of Wotan read
 - **Derivatives pricing:** finance parts [1](finance_options_guide.md) and [2](finance_volatility_guide.md); for rates and credit, parts [3](finance_fixed_income_guide.md) and [4](finance_rates_credit_guide.md).
 - **Portfolios and risk:** finance parts [5](finance_portfolio_guide.md) and [6](finance_risk_guide.md), then [ml_finance part 1](ml_finance_methods_guide.md) for the statistics that keep backtests honest.
 - **Machine learning for finance:** the [tensor](tensor_guide.md) and [neural network](nn_guide.md) guides first, then the five `ml_finance` parts. Part 1 is the foundation for the others.
+
+To see how the packages fit together in one program, read the [sector-rotation example](e2e_sector_rotation_guide.md).
 
 The linear algebra guide is for when you need matrices directly. Most packages take and return slices or DataFrames.
 
