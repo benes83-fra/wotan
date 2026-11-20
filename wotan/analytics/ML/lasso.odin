@@ -217,7 +217,7 @@ lasso_cv :: proc(
 
 			// Train Lasso on training set
 			result := lasso_fit(&X_train, y_train, lambda, max_iter, tol, context.temp_allocator)
-			defer _ols_result_free(&result, context.temp_allocator)
+			defer ols_result_free(&result, context.temp_allocator)
 
 			// Evaluate on validation set: MSE
 			pred := l.matvec_dyn_simd(&X_val, result.beta, context.temp_allocator)

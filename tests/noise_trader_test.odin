@@ -271,7 +271,7 @@ _nt_slope :: proc(x, y: []f64, lags: int) -> (slope, se: f64) {
 	defer l.matrix_free(&X)
 	for i in 0 ..< n {X.data[2 * i], X.data[2 * i + 1] = 1, x[i]}
 	fit := ml.ols_fit_robust(&X, y, {type = .HAC, maxlags = lags}, .QR, context.temp_allocator)
-	defer ml._ols_result_free(&fit, context.temp_allocator)
+	defer ml.ols_result_free(&fit, context.temp_allocator)
 	return fit.beta[1], fit.stderr[1]
 }
 

@@ -70,7 +70,7 @@ kpss_test :: proc(
 	// Compute OLS residuals
 	// X'X
 	ols_res := ml.ols_fit(&X, y, .Cholesky, allocator)
-	defer ml._ols_result_free(&ols_res, allocator)
+	defer ml.ols_result_free(&ols_res, allocator)
 
 	// Extract residuals directly
 	u := ols_res.residuals

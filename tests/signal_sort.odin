@@ -94,7 +94,7 @@ mean_t :: proc(series: []f64, lags := 0) -> (mean, t: f64) {
 	fit :=
 		ml.ols_fit_robust(&ones, v[:], {type = .HAC, maxlags = lags}, .Cholesky, context.temp_allocator) if lags > 0 else ml.ols_fit(&ones, v[:], .Cholesky, context.temp_allocator)
 	mean, t = fit.beta[0], fit.tvalues[0]
-	ml._ols_result_free(&fit, context.temp_allocator)
+	ml.ols_result_free(&fit, context.temp_allocator)
 	return
 }
 

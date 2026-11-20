@@ -438,7 +438,34 @@ KO volume 10004198 shares, dollar volume 992316424
 ... (498 more rows)
 ```
 
-### 9.4 More Yahoo procedures
+### 9.4 Today's row while the market is open
+
+During the exchange's regular session, Yahoo's last row is the session so far: its close is the current price and its volume the shares traded until now. Both change until the close. `read_yahoo_series` and `read_yahoo_panel` mark this case with `last_is_live`. A backtest or a model fitted on closing prices should leave that row out:
+
+```odin
+s, ok := net.read_yahoo_series("SPY", .Daily, .OneMonth)
+defer net.yahoo_series_free(&s)
+if !ok {fmt.println("Yahoo is unreachable or rate-limiting"); return}
+n := len(s.dates)
+fmt.printf("last row: %s, %.2f, live %v\n",
+	w.date_to_string(s.dates[n - 1], context.temp_allocator), s.adj_close[n - 1], s.last_is_live)
+if s.last_is_live {n -= 1} // closes only
+fmt.printf("last close: %s, %.2f\n",
+	w.date_to_string(s.dates[n - 1], context.temp_allocator), s.adj_close[n - 1])
+```
+
+Run at 15:27 New York time:
+
+```
+last row: 2026-11-20, 693.07, live true
+last close: 2026-11-19, 715.87
+```
+
+Before the open and after the close `last_is_live` is false, and every row is a close. For a panel, the first `len(p.dates) - 1` dates are the closes: the arrays are row-major, so their first `(len(p.dates) - 1) * p.n_tickers` values. With weekly and monthly intervals the last row also covers a period that has not ended, even after the close; `last_is_live` only reports the running session.
+
+`read_yahoo` returns the DataFrame alone. To test a chart answer you fetched yourself, pass its text and the current Unix time to `yahoo_session_live(text, time.time_to_unix(time.now()))`. It reads the regular session's start and end and the time of the last trade from Yahoo's `meta` block.
+
+### 9.5 More Yahoo procedures
 
 - `read_yahoo_json(symbol, alloc)` returns the daily history over the full range. Unlike `read_yahoo(symbol, .Daily, .Max)`, its request asks for no events, so the Dividend and Split columns are 0.
 - `yahoo_json_to_dataframe(text, alloc)` parses a chart answer you fetched yourself.
@@ -469,6 +496,8 @@ The DataFrames `yahoo_json_to_dataframe` builds are checked against an independe
 | `html_basic_test`, `html_extended_test`, `html_tags_test`, `html_export_test` | HTML tables by index, id and all, tags inside cells, writing |
 | `excel_basic_test`, `excel_date_test`, `excel_export_test`, `zip_smoke_test` | reading sheets and dates, writing workbooks, the ZIP container |
 | `http_get_test`, `yahoo_finance_json_test`, `yahoo_finance_events_test` | live HTTP and Yahoo requests, including dividends and splits |
+| `yahoo_live_row_test` | `last_is_live` of a series and a panel agrees with the trading hours in Yahoo's answer; a live row is dated today |
+| `data_io_fixes_test` | offline: the chart parser, `Yahoo_Series`, and `yahoo_session_live` on a recorded answer during, after and before the session |
 
 Most of the finance tests load their data with `read_yahoo`, `read_yahoo_series` or `read_yahoo_panel`. When Yahoo cannot be reached they count a failure and go on; they never fall back to made-up data.
 
@@ -485,8 +514,9 @@ Most of the finance tests load their data with `read_yahoo`, `read_yahoo_series`
 | `net.read_csv_from_url`, `net.read_html_from_url`, `net.read_table_from_url` `-> (df, ok)` | a table from a URL |
 | `net.read_yahoo(symbol, interval, range, alloc) -> (df, ok)` | Yahoo history as a DataFrame |
 | `net.yahoo_download_csv(symbol, alloc, interval, range) -> (text, ok)` | Yahoo history as CSV text |
-| `net.read_yahoo_series(symbol, interval, range, alloc) -> (Yahoo_Series, ok)`, `net.yahoo_series_free` | one ticker as arrays, days without a price dropped |
-| `net.read_yahoo_panel(tickers, interval, range, alloc) -> (Yahoo_Panel, ok, failed)`, `net.yahoo_panel_free` | several tickers on their common dates |
+| `net.read_yahoo_series(symbol, interval, range, alloc) -> (Yahoo_Series, ok)`, `net.yahoo_series_free` | one ticker as arrays, days without a price dropped; `last_is_live` marks a running session |
+| `net.read_yahoo_panel(tickers, interval, range, alloc) -> (Yahoo_Panel, ok, failed)`, `net.yahoo_panel_free` | several tickers on their common dates; `last_is_live` as for a series |
+| `net.yahoo_session_live(text, now_unix) -> bool` | whether a chart answer's last row is the running session |
 | `net.yahoo_panel_to_dataframe(&panel, names, alloc)` | a panel's adjusted closes as a DataFrame (Date plus one column per ticker) |
 | `ts.log_returns(prices, n_series = 1, alloc)`, `ts.simple_returns(prices, n_series = 1, alloc)` | prices → returns, single series or row-major panel |
 | `w.column_own_name(&col, name)` | give a column its own copy of its name |

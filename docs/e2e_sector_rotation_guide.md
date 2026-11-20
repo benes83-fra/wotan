@@ -63,7 +63,7 @@ if !loaded {
 
 Ten years were requested, but the communication-services fund XLC started in June 2018, so the common history begins there.
 
-**Today's row.** While the US market is open, Yahoo's last row holds the current price, not a closing price. `load_market` drops a row dated today, so the backtest never trades on a price that may still change.
+**Today's row.** While the US market is open, Yahoo's last row holds the current prices, not closing prices. The panel then has `last_is_live` set ([data I/O guide, section 9.4](data_io_guide.md#94-todays-row-while-the-market-is-open)), and `load_market` leaves that row out, so the backtest never trades on a price that may still change.
 
 The sectors move together, but not equally. Energy (XLE) and utilities (XLU) are the most independent:
 
@@ -210,7 +210,7 @@ The columns:
 - **VaR 95, ES 95:** one-day historical value at risk and expected shortfall ([finance risk guide](finance_risk_guide.md)).
 - **Turnover:** the share of the capital traded per rebalance.
 - **Costs:** per year, as a fraction of the capital.
-- **Rank IC, ICIR:** the mean daily Spearman correlation between forecast and realised target across the sectors, and that mean divided by its standard deviation.
+- **Rank IC, ICIR:** the mean daily Spearman correlation between forecast and realised target across the sectors, and that mean divided by its standard deviation. `mlf.rank_ic_series` gives the IC of every test day, `mlf.rank_ic_summary` the mean and ICIR, here and over each one-year window of the chart below ([methods, section 7](ml_finance_methods_guide.md#7-signal-evaluation)).
 
 ![Growth of 1 after costs](images/e2e_sector_equity.png)
 
@@ -248,5 +248,5 @@ After each change, look at the rank IC and the deflated Sharpe ratio first: ever
 | data | `net`, `core` | `read_yahoo_panel`, `date_to_string` |
 | features | `ml_finance` | `compute_trading_features`, `frac_diff_min_d`, `frac_diff_ffd` |
 | models | `nn`, `tensor`, `gpu`, `analytics/ML` | `sequential_new`, `lstm_layer_new`, `linear_layer_new`, `adam_*`, `tensor_mse_loss`, `graph_begin` / `graph_end`, `gpu.init`, `gpu.to_device`, `ridge_fit` |
-| evaluation | `ml_finance`, `finance` | `cross_sectional_rank_ic`, `spearman_rho`, `liquidity_estimates`, `rebalance_cost`, `sharpe_stats`, `probabilistic_sharpe_ratio_returns`, `deflated_sharpe_trials`, `min_track_record_length`, `max_drawdown`, `drawdown_series`, `value_at_risk`, `expected_shortfall`, `correlation` |
+| evaluation | `ml_finance`, `finance` | `rank_ic_series`, `rank_ic_summary`, `liquidity_estimates`, `rebalance_cost`, `sharpe_stats`, `probabilistic_sharpe_ratio_returns`, `deflated_sharpe_trials`, `min_track_record_length`, `max_drawdown`, `drawdown_series`, `value_at_risk`, `expected_shortfall`, `correlation` |
 | report | `plot`, `exporter`, `core` | `multi_line_png`, `heatmap_png`, `xlsx_save`, `html_write`, `df_from`, `column_from_*` |

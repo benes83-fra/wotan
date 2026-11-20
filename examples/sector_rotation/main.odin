@@ -79,7 +79,8 @@ main :: proc() {
 			mlf.sharpe_stats(r.strategy.gross).sharpe * math.sqrt(f64(TRADING_DAYS))
 		if i < 3 {
 			preds := [3][]f64{f.lstm, f.ridge, f.momentum}
-			r.ic, r.has_ic = rank_ic(preds[i], &ds, lo, hi), true
+			r.ic_daily, r.ic = rank_ic(preds[i], &ds, lo, hi)
+			r.has_ic = true
 		}
 	}
 	fmt.printfln(

@@ -25,6 +25,7 @@ Result :: struct {
 	strategy: Strategy,
 	stats:    Stats,
 	ic:       mlf.RankICResult,
+	ic_daily: []f64, // rank IC of each test day (NaN where the target is unknown)
 	has_ic:   bool,
 }
 
@@ -107,29 +108,19 @@ write_charts :: proc(m: ^Market, ds: ^Dataset, f: ^Forecasts, results: []Result)
 	// rolling one-year mean of the daily rank IC
 	ROLL :: TRADING_DAYS
 	ic_lines := make([dynamic]plot.LineData, context.temp_allocator)
-	for pred, k in ([][]f64{f.lstm, f.ridge, f.momentum}) {
-		daily := make([dynamic]f64, context.temp_allocator)
-		ic_x := make([dynamic]f64, context.temp_allocator)
-		for d in lo ..< hi {
-			if math.is_nan(ds.target[d * N_ASSETS]) {break}
-			append(
-				&daily,
-				fin.spearman_rho(
-					pred[d * N_ASSETS:][:N_ASSETS],
-					ds.target[d * N_ASSETS:][:N_ASSETS],
-					context.temp_allocator,
-				),
-			)
-			append(&ic_x, year_fraction(m.dates[d]))
-		}
+	for r in results {
+		if !r.has_ic {continue}
+		// the last days have no IC yet (their target lies in the future)
+		daily := r.ic_daily
+		for len(daily) > 0 && math.is_nan(daily[len(daily) - 1]) {daily = daily[:len(daily) - 1]}
+		if len(daily) < ROLL {continue}
 		roll := make([]f64, len(daily) - ROLL + 1, context.temp_allocator)
-		for i in 0 ..< len(roll) {
-			for v in daily[i:i + ROLL] {roll[i] += v / ROLL}
+		ic_x := make([]f64, len(roll), context.temp_allocator)
+		for &v, i in roll {
+			v = mlf.rank_ic_summary(daily[i:i + ROLL]).mean_ic
+			ic_x[i] = year_fraction(m.dates[lo + i + ROLL - 1])
 		}
-		append(
-			&ic_lines,
-			plot.LineData{xs = ic_x[ROLL - 1:], ys = roll, label = results[k].strategy.name},
-		)
+		append(&ic_lines, plot.LineData{xs = ic_x, ys = roll, label = r.strategy.name})
 	}
 	cfg.title, cfg.y_label = "Rank IC, rolling one-year mean", "Spearman correlation"
 	plot.multi_line_png(ic_lines[:], out_path("rank_ic.png"), cfg)

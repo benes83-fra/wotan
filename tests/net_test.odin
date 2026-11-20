@@ -6,6 +6,7 @@ import net "../wotan/net"
 import "core:fmt"
 import "core:mem"
 import "core:strings"
+import "core:time"
 
 http_get_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
 	seed_test(#procedure)
@@ -186,4 +187,36 @@ yahoo_finance_events_test :: proc(allocator: mem.Allocator = context.temp_alloca
 	}
 
 	fmt.println("=== END YAHOO FINANCE DIVIDENDS & SPLITS TEST ===")
+}
+
+// Yahoo's last row during the regular session is the running session, not a close:
+// read_yahoo_series and read_yahoo_panel flag it as last_is_live, in agreement with
+// the trading hours of the chart answer, and a flagged row is dated today
+yahoo_live_row_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
+	seed_test(#procedure)
+	fmt.println("=== YAHOO LIVE ROW TEST ===")
+	text, got := net.http_get(net.build_yahoo_url("SPY", .Daily, .OneMonth, allocator), allocator)
+	if !got {fail_missing_data(#procedure, "Yahoo chart for SPY"); return}
+	s, s_ok := net.read_yahoo_series("SPY", .Daily, .OneMonth, allocator)
+	if !s_ok {fail_missing_data(#procedure, "Yahoo data for SPY"); return}
+	defer net.yahoo_series_free(&s)
+	p, p_ok, _ := net.read_yahoo_panel({"SPY", "XLK"}, .Daily, .OneMonth, allocator)
+	if !p_ok {fail_missing_data(#procedure, "Yahoo data for SPY and XLK"); return}
+	defer net.yahoo_panel_free(&p)
+	now := time.time_to_unix(time.now())
+	want := net.yahoo_session_live(text, now)
+	// the regular session lies within one UTC day, so "today" is the UTC date
+	today := w.date_from_unix(now)
+	dated_ok := !want || (s.dates[len(s.dates) - 1] == today && p.dates[len(p.dates) - 1] == today)
+	ok := s.last_is_live == want && p.last_is_live == want && dated_ok
+	fmt.printfln(
+		"%s last_is_live: series %v, panel %v, session open now %v, last date %v",
+		"OK  " if ok else "FAIL",
+		s.last_is_live,
+		p.last_is_live,
+		want,
+		s.dates[len(s.dates) - 1],
+	)
+	if !ok {record_failures(1)}
+	fmt.println("=== END YAHOO LIVE ROW TEST ===")
 }

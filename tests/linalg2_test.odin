@@ -478,7 +478,7 @@ wls_test :: proc(allocator: mem.Allocator = context.allocator) {
 	weights := []f64{1, 1, 100, 100} // trust last 2 obs more
 
 	res := ml.wls_fit(&X, y, weights, .Cholesky, allocator)
-	//defer ml._ols_result_free(&res, allocator) // your existing cleanup
+	//defer ml.ols_result_free(&res, allocator) // your existing cleanup
 
 	fmt.printf("WLS beta = %v (expected ~[3, 2])\n", res.beta)
 	// With high weights on last 2 points, should still get ~[3, 2]
@@ -505,7 +505,7 @@ gls_test :: proc(allocator: mem.Allocator = context.allocator) {
 	for i in 0 ..< 3 {Omega.data[i * Omega.cols + i] = 1.0}
 
 	res := ml.gls_fit(&X, y, &Omega, .Cholesky, allocator)
-	// defer _ols_result_free(&res, allocator)
+	// defer ols_result_free(&res, allocator)
 
 	fmt.printf("GLS beta  (Ω=I) = %v (expected ~[3, 2])\n", res.beta)
 	assert_close(res.beta[0], 3.0, 1e-9, "GLS intercept")
@@ -518,7 +518,7 @@ gls_test :: proc(allocator: mem.Allocator = context.allocator) {
 	Omega2.data = {2, 1, 0, 1, 2, 1, 0, 1, 2}
 
 	res2 := ml.gls_fit(&X, y, &Omega2, .QR, allocator)
-	// defer _ols_result_free(&res2, allocator)
+	// defer ols_result_free(&res2, allocator)
 
 	fmt.printf("GLS beta (correlated Ω) = %v\n", res2.beta)
 	// Should still be close to [3, 2] for this perfect-fit case
@@ -538,7 +538,7 @@ ridge_test :: proc(allocator: mem.Allocator = context.allocator) {
 
 	// λ = 0 → Ridge = OLS
 	res := ml.ridge_fit(&X, y, 0.0, .Cholesky, allocator)
-	// defer _ols_result_free(&res, allocator)
+	// defer ols_result_free(&res, allocator)
 
 	fmt.printf("Ridge beta ( λ = 0 ) = %v (expected ~[3, 2])\n", res.beta)
 	assert_close(res.beta[0], 3.0, 1e-9, "Ridge intercept  λ = 0")
@@ -546,7 +546,7 @@ ridge_test :: proc(allocator: mem.Allocator = context.allocator) {
 
 	// λ > 0 → coefficients shrink toward zero
 	res2 := ml.ridge_fit(&X, y, 1.0, .Cholesky, allocator)
-	// defer _ols_result_free(&res2, allocator)
+	// defer ols_result_free(&res2, allocator)
 
 	fmt.printf("Ridge beta  ( λ = 1) = %v (shrunk toward 0)\n", res2.beta)
 	// With λ=1, expect |β| < |OLS β| (but still close for this perfect-fit case)
@@ -565,7 +565,7 @@ lasso_test :: proc(allocator: mem.Allocator = context.allocator) {
 	y := []f64{5, 7, 9}
 
 	res := ml.lasso_fit(&X, y, 0.0, 1000, 1e-4, allocator)
-	// defer _ols_result_free(&res, allocator)
+	// defer ols_result_free(&res, allocator)
 
 	fmt.printf("Lasso beta (λ=0) = %v\n", res.beta)
 	// Relaxed tolerance for iterative solver
@@ -589,7 +589,7 @@ lasso_test :: proc(allocator: mem.Allocator = context.allocator) {
 
 	// Moderate λ for stable shrinkage
 	res2 := ml.lasso_fit(&X2, y2, 1.0, 1000, 1e-4, allocator)
-	// defer _ols_result_free(&res2, allocator)
+	// defer ols_result_free(&res2, allocator)
 
 	fmt.printf("Lasso beta (λ=1, n=10) = %v\n", res2.beta)
 
@@ -620,7 +620,7 @@ lasso_test :: proc(allocator: mem.Allocator = context.allocator) {
 
 	// Use moderate λ to induce sparsity
 	res3 := ml.lasso_fit(&X3, y3, 0.5, 2000, 1e-5, allocator) // More iterations, tighter tol
-	// defer _ols_result_free(&res3, allocator)
+	// defer ols_result_free(&res3, allocator)
 
 	fmt.printf("Lasso beta (sparsity test) = %v\n", res3.beta)
 
@@ -761,7 +761,7 @@ gls_kron_test :: proc(allocator: mem.Allocator = context.allocator) {
 
 	// Call Kronecker GLS
 	res := ml.gls_fit_kron(&X, y, &I2, &I3, .QR, allocator)
-	// defer _ols_result_free(&res, allocator)
+	// defer ols_result_free(&res, allocator)
 
 	fmt.printf("GLS-Kron beta (I⊗I) = %v (expected ~[3, 2])\n", res.beta)
 	assert_close(res.beta[0], 3.0, 1e-9, "GLS-Kron intercept")
@@ -780,7 +780,7 @@ gls_kron_test :: proc(allocator: mem.Allocator = context.allocator) {
 	B3.data = {2, 1, 0, 1, 2, 1, 0, 1, 2}
 
 	res2 := ml.gls_fit_kron(&X, y, &A2, &B3, .QR, allocator)
-	// defer _ols_result_free(&res2, allocator)
+	// defer ols_result_free(&res2, allocator)
 
 	fmt.printf("GLS-Kron beta (separable Ω) = %v\n", res2.beta)
 	// Should still recover true coefficients for this perfect-fit case

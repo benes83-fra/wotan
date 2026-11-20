@@ -244,7 +244,7 @@ ridge_cv_evaluator :: proc(
 
 	Xi := _cv_linear_design(X, &X_train, allocator); defer l.matrix_free(&Xi)
 	model := ridge_fit(&Xi, y_train, params.lambda, params.method, allocator)
-	defer _ols_result_free(&model, allocator)
+	defer ols_result_free(&model, allocator)
 	preds := _linear_predict(&X_val, model.beta, allocator)
 	defer delete(preds, allocator)
 	return metrics_r2(y_val, preds)
@@ -275,7 +275,7 @@ lasso_cv_evaluator :: proc(
 		params.tol if params.tol > 0 else 1e-4,
 		allocator,
 	)
-	defer _ols_result_free(&model, allocator)
+	defer ols_result_free(&model, allocator)
 	preds := _linear_predict(&X_val, model.beta, allocator)
 	defer delete(preds, allocator)
 	return metrics_r2(y_val, preds)
@@ -306,7 +306,7 @@ elastic_net_cv_evaluator :: proc(
 		params.tol if params.tol > 0 else 1e-4,
 		allocator,
 	)
-	defer _ols_result_free(&model, allocator)
+	defer ols_result_free(&model, allocator)
 	preds := _linear_predict(&X_val, model.beta, allocator)
 	defer delete(preds, allocator)
 	return metrics_r2(y_val, preds)

@@ -145,7 +145,7 @@ ml_fixes_test :: proc(allocator: mem.Allocator) {
 		ml.pipeline_set_lasso(&pipe, {lambda = 0.5}) // max_iter, tol = 0
 		ml.pipeline_fit(&pipe, &X, y)
 		ref := ml.lasso_fit(&XA, y, 0.5, 1000, 1e-4)
-		defer ml._ols_result_free(&ref, context.allocator)
+		defer ml.ols_result_free(&ref, context.allocator)
 		same := len(pipe.model.lasso.beta) == 3
 		for v, i in ref.beta {if same && pipe.model.lasso.beta[i] != v do same = false}
 		expect(

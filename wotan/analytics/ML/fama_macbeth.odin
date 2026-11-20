@@ -87,7 +87,7 @@ fama_macbeth :: proc(
 				context.temp_allocator,
 			)
 			se = fit.stderr[0]
-			_ols_result_free(&fit, context.temp_allocator)
+			ols_result_free(&fit, context.temp_allocator)
 		} else {
 			ss := 0.0
 			for v in series {ss += (v - m) * (v - m)}

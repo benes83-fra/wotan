@@ -27,7 +27,8 @@ RankICResult :: struct {
 	num_periods:       int, // valid periods
 }
 
-// preds, targets: [Batch, Num_Assets, 1, 1] (contiguous); one cross-section per batch row
+// preds, targets: [Batch, Num_Assets, 1, 1] (contiguous); one cross-section per batch
+// row. The same as rank_ic_summary(rank_ic_series(...)) on the tensors' values.
 cross_sectional_rank_ic :: proc(
 	preds: ^t.Tensor,
 	targets: ^t.Tensor,
@@ -43,48 +44,73 @@ cross_sectional_rank_ic :: proc(
 		t.tensor_numel(preds) >= batch * num_assets &&
 		t.tensor_numel(targets) >= batch * num_assets,
 	)
-
-	ics := make([dynamic]f64, 0, batch, allocator)
-	defer delete(ics)
-	pred_row := make([]f64, num_assets, allocator)
-	targ_row := make([]f64, num_assets, allocator)
-	defer {
-		delete(pred_row, allocator)
-		delete(targ_row, allocator)
-	}
-
 	pv, tv := t.tensor_values(preds), t.tensor_values(targets)
-	for b in 0 ..< batch {
+	ics := rank_ic_series(pv[:batch * num_assets], tv[:batch * num_assets], num_assets, allocator)
+	defer delete(ics, allocator)
+	return rank_ic_summary(ics)
+}
+
+// rank_ic_series: the rank IC of every cross-section. preds and targets are
+// period-major, [period * num_assets + asset], with the same length (a multiple of
+// num_assets). The result has one entry per period, NaN where the IC is undefined
+// (see above). For a rolling or per-year IC, or a chart of it.
+rank_ic_series :: proc(
+	preds, targets: []f64,
+	num_assets: int,
+	allocator := context.allocator,
+) -> []f64 {
+	assert(
+		len(preds) == len(targets) && num_assets > 0 && len(preds) % num_assets == 0,
+		"rank_ic_series: preds and targets need the same length, a multiple of num_assets",
+	)
+	periods := len(preds) / num_assets
+	ics := make([]f64, periods, allocator)
+	pred_row := make([]f64, num_assets, context.temp_allocator)
+	targ_row := make([]f64, num_assets, context.temp_allocator)
+	defer {
+		delete(pred_row, context.temp_allocator)
+		delete(targ_row, context.temp_allocator)
+	}
+	for b in 0 ..< periods {
 		m := 0
 		for a in 0 ..< num_assets {
-			p := pv[b * num_assets + a]
-			y := tv[b * num_assets + a]
+			p := preds[b * num_assets + a]
+			y := targets[b * num_assets + a]
 			if math.is_nan(p) || math.is_nan(y) {continue}
 			pred_row[m], targ_row[m] = p, y
 			m += 1
 		}
-		if m < 2 || _is_constant(pred_row[:m]) || _is_constant(targ_row[:m]) {continue}
-		append(&ics, fin.spearman_rho(pred_row[:m], targ_row[:m], allocator))
+		if m < 2 || _is_constant(pred_row[:m]) || _is_constant(targ_row[:m]) {
+			ics[b] = math.nan_f64()
+			continue
+		}
+		ics[b] = fin.spearman_rho(pred_row[:m], targ_row[:m], context.temp_allocator)
 	}
+	return ics
+}
 
-	res := RankICResult {
-		num_periods = len(ics),
-	}
-	if len(ics) == 0 {
-		res.mean_ic, res.std_ic = math.nan_f64(), math.nan_f64()
-		return res
-	}
+// rank_ic_summary: mean, standard deviation, ICIR and share of positive values of an
+// IC series; NaN entries (undefined periods) are left out
+rank_ic_summary :: proc(ics: []f64) -> RankICResult {
+	res: RankICResult
 	positive := 0
 	for ic in ics {
+		if math.is_nan(ic) {continue}
+		res.num_periods += 1
 		res.mean_ic += ic
 		if ic > 0 {positive += 1}
 	}
-	res.mean_ic /= f64(len(ics))
-	res.positive_ic_ratio = f64(positive) / f64(len(ics))
-	if len(ics) > 1 {
+	n := res.num_periods
+	if n == 0 {
+		res.mean_ic, res.std_ic = math.nan_f64(), math.nan_f64()
+		return res
+	}
+	res.mean_ic /= f64(n)
+	res.positive_ic_ratio = f64(positive) / f64(n)
+	if n > 1 {
 		ss := 0.0
-		for ic in ics {ss += (ic - res.mean_ic) * (ic - res.mean_ic)}
-		res.std_ic = math.sqrt(ss / f64(len(ics) - 1))
+		for ic in ics {if !math.is_nan(ic) {ss += (ic - res.mean_ic) * (ic - res.mean_ic)}}
+		res.std_ic = math.sqrt(ss / f64(n - 1))
 	} else {
 		res.std_ic = math.nan_f64()
 	}

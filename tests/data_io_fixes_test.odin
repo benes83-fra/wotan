@@ -21,6 +21,11 @@ import "core:os"
 @(private = "file")
 _YAHOO_CHART :: `{"chart":{"result":[{"meta":{"currency":"USD","symbol":"TEST","regularMarketPrice":103.0,"chartPreviousClose":99.0},"timestamp":[1704205800,1704292200,1704378600,1704465000],"events":{"dividends":{"1704292200":{"amount":0.5,"date":1704292200},"1704465000":{"amount":0.25,"date":1704465000}},"splits":{"1704378600":{"date":1704378600,"numerator":2.0,"denominator":1.0,"splitRatio":"2:1"}}},"indicators":{"quote":[{"open":[100.0,101.0,null,103.5],"close":[100.5,101.5,null,103.0],"low":[99.5,100.5,null,102.5],"high":[101.0,102.0,null,104.0],"volume":[1000,1100,null,1300]}],"adjclose":[{"adjclose":[99.5,100.6,null,103.0]}]}}],"error":null}}`
 
+@(private = "file")
+_YAHOO_META_OPEN :: `{"chart":{"result":[{"meta":{"currency":"USD","symbol":"SPY","exchangeName":"PCX","regularMarketTime":1795206025,"hasPrePostMarketData":true,"gmtoffset":-18000,"timezone":"EST","exchangeTimezoneName":"America/New_York","regularMarketPrice":693.9,"currentTradingPeriod":{"pre":{"timezone":"EST","end":1795185000,"start":1795165200,"gmtoffset":-18000},"regular":{"timezone":"EST","end":1795208400,"start":1795185000,"gmtoffset":-18000},"post":{"timezone":"EST","end":1795222800,"start":1795208400,"gmtoffset":-18000}},"dataGranularity":"1d","range":"5d"},"timestamp":[1795098600,1795185000]}]}}`
+@(private = "file")
+_YAHOO_META_PRE :: `{"chart":{"result":[{"meta":{"currency":"USD","symbol":"SPY","exchangeName":"PCX","regularMarketTime":1795122000,"hasPrePostMarketData":true,"gmtoffset":-18000,"timezone":"EST","exchangeTimezoneName":"America/New_York","regularMarketPrice":715.87,"currentTradingPeriod":{"pre":{"timezone":"EST","end":1795185000,"start":1795165200,"gmtoffset":-18000},"regular":{"timezone":"EST","end":1795208400,"start":1795185000,"gmtoffset":-18000},"post":{"timezone":"EST","end":1795222800,"start":1795208400,"gmtoffset":-18000}},"dataGranularity":"1d","range":"5d"},"timestamp":[1795012200,1795098600]}]}}`
+
 data_io_fixes_test :: proc(allocator: mem.Allocator) {
 	seed_test(#procedure)
 	fmt.println("\n=== Data I/O fixes ===")
@@ -102,6 +107,24 @@ data_io_fixes_test :: proc(allocator: mem.Allocator) {
 			s.volume[2] == 1300 &&
 			s.symbol == "TEST",
 			"Yahoo_Series drops the day without a price, arrays aligned",
+		)
+	}
+
+	// 1b. Is the last row a running session? The meta block of SPY's chart answer
+	// fetched at 2026-11-20 15:20 New York time (the regular session runs from
+	// 1795185000 to 1795208400), and the same block as sent before the open, when the
+	// last trade was the previous day's close
+	{
+		live := net.yahoo_session_live
+		expect(
+			&passed,
+			&total,
+			live(_YAHOO_META_OPEN, 1795206026) &&
+			!live(_YAHOO_META_OPEN, 1795208400) &&
+			!live(_YAHOO_META_OPEN, 1795215000) &&
+			!live(_YAHOO_META_PRE, 1795180000) &&
+			!live(_YAHOO_CHART, 1795206026),
+			"yahoo_session_live: true during the session only (not after the close, before the open, or without trading hours)",
 		)
 	}
 

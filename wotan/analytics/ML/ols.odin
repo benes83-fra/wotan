@@ -417,8 +417,10 @@ _ols_has_constant :: proc(X: ^l.Matrix(f64)) -> bool {
 }
 
 
-// Free OLSResult fields (call when done)
-_ols_result_free :: proc(res: ^OLSResult, allocator: mem.Allocator) {
+// Frees an OLSResult from any fit in this package (OLS, robust OLS, WLS, GLS,
+// ridge, lasso, elastic net, the best_result of ridge_cv / lasso_cv). Pass the
+// allocator the fit used.
+ols_result_free :: proc(res: ^OLSResult, allocator := context.allocator) {
 	if len(res.beta) > 0 {
 		defer delete(res.beta, allocator)
 		// mem.free(transmute(rawptr) &res.beta[0], allocator)
@@ -454,3 +456,6 @@ _ols_result_free :: proc(res: ^OLSResult, allocator: mem.Allocator) {
 		l.matrix_free(&res.vcov)
 	}
 }
+
+// The earlier name of ols_result_free, kept so existing code still compiles
+_ols_result_free :: ols_result_free

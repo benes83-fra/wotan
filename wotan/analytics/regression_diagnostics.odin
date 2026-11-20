@@ -56,9 +56,15 @@ arch_lm_test :: proc(resid: []f64, nlags: int = -1, ddof: int = 0) -> LMTestResu
 		for j in 1 ..= q {Z.data[r * (q + 1) + j] = sq[t - j]}
 	}
 	res := ml.ols_fit(&Z, y, allocator = context.temp_allocator)
-	defer ml._ols_result_free(&res, context.temp_allocator)
+	defer ml.ols_result_free(&res, context.temp_allocator)
 	lm := f64(T - ddof) * res.r2
-	return {lm = lm, lm_pvalue = chi2_sf(lm, f64(q)), f_stat = res.fstat, f_pvalue = res.f_pvalue, df = f64(q)}
+	return {
+		lm = lm,
+		lm_pvalue = chi2_sf(lm, f64(q)),
+		f_stat = res.fstat,
+		f_pvalue = res.f_pvalue,
+		df = f64(q),
+	}
 }
 
 // Breusch-Pagan test for heteroskedasticity (statsmodels het_breuschpagan):
@@ -66,7 +72,11 @@ arch_lm_test :: proc(resid: []f64, nlags: int = -1, ddof: int = 0) -> LMTestResu
 //   robust = true (default, Koenker's studentised version): LM = n R²
 //   robust = false (original): LM = ESS / 2 of e² / mean(e²) on exog_het
 // LM ~ χ²(k - 1). H0: homoskedastic errors.
-breusch_pagan_test :: proc(resid: []f64, exog_het: ^l.Matrix(f64), robust := true) -> LMTestResult {
+breusch_pagan_test :: proc(
+	resid: []f64,
+	exog_het: ^l.Matrix(f64),
+	robust := true,
+) -> LMTestResult {
 	n := len(resid)
 	if exog_het.rows != n do panic("breusch_pagan_test: exog_het needs one row per residual")
 	y := make([]f64, n, context.temp_allocator)
@@ -79,7 +89,7 @@ breusch_pagan_test :: proc(resid: []f64, exog_het: ^l.Matrix(f64), robust := tru
 	mean /= f64(n)
 	if !robust {for &v in y {v /= mean}}
 	res := ml.ols_fit(exog_het, y, allocator = context.temp_allocator)
-	defer ml._ols_result_free(&res, context.temp_allocator)
+	defer ml.ols_result_free(&res, context.temp_allocator)
 	lm := f64(n) * res.r2
 	if !robust {
 		// ESS = Σ (ŷ - ȳ)²
@@ -91,7 +101,13 @@ breusch_pagan_test :: proc(resid: []f64, exog_het: ^l.Matrix(f64), robust := tru
 		lm = ess / 2
 	}
 	df := f64(exog_het.cols - 1)
-	return {lm = lm, lm_pvalue = chi2_sf(lm, df), f_stat = res.fstat, f_pvalue = res.f_pvalue, df = df}
+	return {
+		lm = lm,
+		lm_pvalue = chi2_sf(lm, df),
+		f_stat = res.fstat,
+		f_pvalue = res.f_pvalue,
+		df = df,
+	}
 }
 
 // White's test for heteroskedasticity (statsmodels het_white): regress e² on all
@@ -117,10 +133,16 @@ white_test :: proc(resid: []f64, exog: ^l.Matrix(f64)) -> LMTestResult {
 	defer delete(y, context.temp_allocator)
 	for e, t in resid {y[t] = e * e}
 	res := ml.ols_fit(&Z, y, allocator = context.temp_allocator)
-	defer ml._ols_result_free(&res, context.temp_allocator)
+	defer ml.ols_result_free(&res, context.temp_allocator)
 	lm := f64(n) * res.r2
 	df := f64(res.rank - 1) // products can be collinear (e.g. dummies): use the rank
-	return {lm = lm, lm_pvalue = chi2_sf(lm, df), f_stat = res.fstat, f_pvalue = res.f_pvalue, df = df}
+	return {
+		lm = lm,
+		lm_pvalue = chi2_sf(lm, df),
+		f_stat = res.fstat,
+		f_pvalue = res.f_pvalue,
+		df = df,
+	}
 }
 
 // Breusch-Godfrey test for serial correlation up to order q (statsmodels
@@ -144,10 +166,10 @@ breusch_godfrey_test :: proc(resid: []f64, exog: ^l.Matrix(f64), nlags: int = -1
 	for t in 0 ..< n {
 		for j in 0 ..< k0 {Z.data[t * P + j] = exog.data[t * k0 + j]}
 		Z.data[t * P + k0] = 1
-		for j in 1 ..= min(q, t) {Z.data[t * P + k0 + j] = resid[t - j]} // pre-sample lags stay 0
+		for j in 1 ..= min(q, t) {Z.data[t * P + k0 + j] = resid[t - j]} 	// pre-sample lags stay 0
 	}
 	res := ml.ols_fit(&Z, resid, allocator = context.temp_allocator)
-	defer ml._ols_result_free(&res, context.temp_allocator)
+	defer ml.ols_result_free(&res, context.temp_allocator)
 	lm := f64(n) * res.r2
 
 	// F = (Rb)ᵀ (R V Rᵀ)⁻¹ (Rb) / q for the last q coefficients
@@ -167,5 +189,11 @@ breusch_godfrey_test :: proc(resid: []f64, exog: ^l.Matrix(f64), nlags: int = -1
 		for b in 0 ..< q {w += res.beta[off + a] * Mi.data[a * q + b] * res.beta[off + b]}
 	}
 	F := w / f64(q)
-	return {lm = lm, lm_pvalue = chi2_sf(lm, f64(q)), f_stat = F, f_pvalue = ml.f_dist_sf(F, f64(q), f64(res.df_resid)), df = f64(q)}
+	return {
+		lm = lm,
+		lm_pvalue = chi2_sf(lm, f64(q)),
+		f_stat = F,
+		f_pvalue = ml.f_dist_sf(F, f64(q), f64(res.df_resid)),
+		df = f64(q),
+	}
 }

@@ -404,6 +404,24 @@ ic := mlf.cross_sectional_rank_ic(P, Y, context.allocator)
 mean IC 0.1986, sd 0.1746, ICIR 1.1377, positive 0.833, periods 60
 ```
 
+The procedure works in two steps that you can also call on plain arrays:
+- `rank_ic_series(preds, targets, num_assets, allocator)` returns the IC of every period, from period-major slices `[period * num_assets + asset]`. Undefined periods (see above) are NaN.
+- `rank_ic_summary(ics)` summarizes an IC series and skips NaN entries.
+
+Use the series for a rolling IC, an IC per year or a chart. On the same data:
+
+```odin
+daily := mlf.rank_ic_series(pd.data, yd.data, A) // 60 values
+defer delete(daily)
+first := mlf.rank_ic_summary(daily[:30])
+last := mlf.rank_ic_summary(daily[30:])
+```
+
+```
+first days: 0.309 0.235 0.434
+days 1-30: mean IC 0.2156; days 31-60: mean IC 0.1816
+```
+
 ### Trading features
 
 `compute_trading_features(prices, volumes, allocator)` returns 4 features per day, row-major, each computed from data up to and including that day:
@@ -595,6 +613,7 @@ For this guide, the bet sizes, the fractional-differencing weights, the HRP weig
 | Procedure | Purpose |
 |---|---|
 | `cross_sectional_rank_ic(preds, targets, allocator)` | rank IC summary |
+| `rank_ic_series(preds, targets, num_assets, allocator)`, `rank_ic_summary(ics)` | the IC of every period from slices; the summary of an IC series |
 | `compute_trading_features(prices, volumes, allocator)` | return, RSI and volume features |
 | `hrp_allocate(&returns, …)` / `hrp_allocate_cov(&cov, …)` | HRP weights and leaf order |
 | `trade_cost_rate` / `trade_cost` | cost of one trade |

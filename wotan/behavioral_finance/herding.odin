@@ -126,7 +126,7 @@ _herding_ols :: proc(y, x1, x2: []f64, keep: []bool, nw_lags: int) -> Herding_Re
 	}
 	fit :=
 		ml.ols_fit_robust(&X, yy, {type = .HAC, maxlags = nw_lags}, .QR, context.temp_allocator) if nw_lags > 0 else ml.ols_fit(&X, yy, .QR, context.temp_allocator)
-	defer ml._ols_result_free(&fit, context.temp_allocator)
+	defer ml.ols_result_free(&fit, context.temp_allocator)
 	for j in 0 ..< 3 {res.coef[j], res.std_err[j], res.t_stat[j] = fit.beta[j], fit.stderr[j], fit.tvalues[j]}
 	res.r2 = fit.r2
 	return res

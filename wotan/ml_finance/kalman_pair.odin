@@ -140,7 +140,7 @@ kalman_pairs_strategy :: proc(
 				kf.R[0, 0] = math.max(ols.sigma2, 1e-12)
 				start = rows[warmup - 1] + 1
 			}
-			ml._ols_result_free(&ols, allocator)
+			ml.ols_result_free(&ols, allocator)
 			l.matrix_free(&X_mat)
 			delete(y_vec, allocator)
 		}

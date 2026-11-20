@@ -54,7 +54,7 @@ phillips_perron_test :: proc(
 		if kdet >= 2 do X.data[t * k + 2] = f64(t + 1)
 	}
 	fit := ml.ols_fit(&X, yy, allocator = context.temp_allocator)
-	defer ml._ols_result_free(&fit, context.temp_allocator)
+	defer ml.ols_result_free(&fit, context.temp_allocator)
 	u := fit.residuals
 	nf := f64(n)
 	gamma0, ssr := 0.0, 0.0
@@ -76,7 +76,9 @@ phillips_perron_test :: proc(
 	}
 	if test_type == .Tau {
 		lam := math.sqrt(lam2)
-		res.statistic = math.sqrt(gamma0 / lam2) * (rho - 1) / se - 0.5 * ((lam2 - gamma0) / lam) * (nf * se / math.sqrt(s2))
+		res.statistic =
+			math.sqrt(gamma0 / lam2) * (rho - 1) / se -
+			0.5 * ((lam2 - gamma0) / lam) * (nf * se / math.sqrt(s2))
 		res.p_value = mackinnon_pvalue(res.statistic, trend, 1)
 		res.crit = mackinnon_critical_values(1, trend, n)
 	} else {
@@ -189,7 +191,12 @@ bootstrap_ci :: proc(
 	mean /= f64(n_resamples)
 	ss := 0.0
 	for v in boot {ss += (v - mean) * (v - mean)}
-	return {low = low, high = high, standard_error = math.sqrt(ss / f64(n_resamples - 1)), theta_hat = theta_hat}
+	return {
+		low = low,
+		high = high,
+		standard_error = math.sqrt(ss / f64(n_resamples - 1)),
+		theta_hat = theta_hat,
+	}
 }
 
 // Interval from a bootstrap distribution (scipy.stats.bootstrap's formulas):
@@ -197,7 +204,15 @@ bootstrap_ci :: proc(
 //   BCa: q(Φ(z₀ + (z₀ + z_a)/(1 - â (z₀ + z_a)))) for z_a = Φ⁻¹(α/2), Φ⁻¹(1 - α/2),
 //        z₀ = Φ⁻¹(mid-rank fraction of θ̂ in boot), â from the jackknife values
 // q = sample quantile with linear interpolation (numpy percentile). boot is not modified.
-bootstrap_interval :: proc(theta_hat: f64, boot: []f64, jack: []f64, confidence: f64, method: BootstrapMethod) -> (low, high: f64) {
+bootstrap_interval :: proc(
+	theta_hat: f64,
+	boot: []f64,
+	jack: []f64,
+	confidence: f64,
+	method: BootstrapMethod,
+) -> (
+	low, high: f64,
+) {
 	B := len(boot)
 	if B < 2 do panic("bootstrap_interval: need at least 2 bootstrap values")
 	if !(confidence > 0 && confidence < 1) do panic("bootstrap_interval: confidence must be in (0, 1)")
@@ -209,7 +224,8 @@ bootstrap_interval :: proc(theta_hat: f64, boot: []f64, jack: []f64, confidence:
 	case .Percentile:
 		return _percentile_sorted(srt, 100 * alpha), _percentile_sorted(srt, 100 * (1 - alpha))
 	case .Basic:
-		return 2 * theta_hat - _percentile_sorted(srt, 100 * (1 - alpha)), 2 * theta_hat - _percentile_sorted(srt, 100 * alpha)
+		return 2 * theta_hat - _percentile_sorted(srt, 100 * (1 - alpha)),
+			2 * theta_hat - _percentile_sorted(srt, 100 * alpha)
 	case .BCa:
 		if len(jack) < 2 do panic("bootstrap_interval: BCa needs the jackknife values")
 		below, at_or_below := 0, 0

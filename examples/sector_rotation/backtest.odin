@@ -14,7 +14,6 @@ import fin "../../wotan/finance"
 import l "../../wotan/linalg"
 import mlf "../../wotan/ml_finance"
 import nn "../../wotan/nn"
-import t "../../wotan/tensor"
 import "core:fmt"
 import "core:math"
 import "core:time"
@@ -75,18 +74,23 @@ walk_forward :: proc(m: ^Market, ds: ^Dataset, on_gpu: bool) -> (f: Forecasts) {
 	return
 }
 
-// rank_ic: the daily Spearman correlation across sectors between forecast and
-// realised target, over the test days whose target is known
-rank_ic :: proc(pred: []f64, ds: ^Dataset, lo, hi: int) -> mlf.RankICResult {
-	n := 0
-	for d in lo ..< hi {if !math.is_nan(ds.target[d * N_ASSETS]) {n += 1}}
-	p := t.tensor_new(l.matrix_new(f64, n, N_ASSETS))
-	y := t.tensor_new(l.matrix_new(f64, n, N_ASSETS))
-	defer {t.tensor_free(p); t.tensor_free(y)}
-	p.shape, y.shape = {n, N_ASSETS, 1, 1}, {n, N_ASSETS, 1, 1}
-	copy(p.data.data, pred[lo * N_ASSETS:(lo + n) * N_ASSETS])
-	copy(y.data.data, ds.target[lo * N_ASSETS:(lo + n) * N_ASSETS])
-	return mlf.cross_sectional_rank_ic(p, y, context.allocator)
+// rank_ic: the Spearman correlation across sectors between forecast and
+// realised target on every test day (NaN on the last days, whose target is not
+// known yet), and its summary
+rank_ic :: proc(
+	pred: []f64,
+	ds: ^Dataset,
+	lo, hi: int,
+) -> (
+	daily: []f64,
+	summary: mlf.RankICResult,
+) {
+	daily = mlf.rank_ic_series(
+		pred[lo * N_ASSETS:hi * N_ASSETS],
+		ds.target[lo * N_ASSETS:hi * N_ASSETS],
+		N_ASSETS,
+	)
+	return daily, mlf.rank_ic_summary(daily)
 }
 
 Strategy :: struct {

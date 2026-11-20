@@ -219,7 +219,7 @@ for i in 0 ..< n {
 }
 
 res := ml.ols_fit(&X, y)
-defer ml._ols_result_free(&res, context.allocator)
+defer ml.ols_result_free(&res, context.allocator)
 
 names := []string{"const", "x1", "x2"}
 fmt.printf("%-6s %8s %8s %8s %8s\n", "", "coef", "std err", "t", "P>|t|")
@@ -252,7 +252,7 @@ These are statsmodels' values for the same data (`ml_linear_reference_test` chec
 | `sigma2`, `df_resid`, `rank` | Residual variance, `n - rank`, rank of `X` |
 | `cov_type` | `.NonRobust`, or the robust type (see below) |
 
-Free the result with `ml._ols_result_free(&res, allocator)`, passing the allocator the fit used (`context.allocator` unless you passed another). Despite the leading underscore it is the public way to free every `OLSResult` in the package, including those of WLS, GLS, ridge, lasso and elastic net.
+Free the result with `ml.ols_result_free(&res, allocator)`, passing the allocator the fit used (`context.allocator` unless you passed another). The same procedure frees every `OLSResult` in the package, including those of WLS, GLS, ridge, lasso and elastic net.
 
 `ols_fit(&X, y, .QR)` solves by QR decomposition instead of the default Cholesky; the result is the same to rounding. A rank-deficient `X` does not panic: the fit uses the pseudo-inverse and reports the lower `rank`.
 
@@ -276,7 +276,7 @@ df := w.df_from(
 )
 defer w.destroy_dataframe(&df)
 r := ml.ols_from_df(&df, "y", []string{"x1", "x2"}) // adds the constant itself
-defer ml._ols_result_free(&r, context.allocator)
+defer ml.ols_result_free(&r, context.allocator)
 fmt.println(r.beta) // [1.382409605664371, 1.7692692053929402, 0.1553998964861063]
 ```
 
@@ -286,14 +286,14 @@ fmt.println(r.beta) // [1.382409605664371, 1.7692692053929402, 0.155399896486106
 
 ```odin
 hc1 := ml.ols_fit_robust(&X, y, {type = .HC1})
-defer ml._ols_result_free(&hc1, context.allocator)
+defer ml.ols_result_free(&hc1, context.allocator)
 hc3 := ml.ols_fit_robust(&X, y, {type = .HC3})
-defer ml._ols_result_free(&hc3, context.allocator)
+defer ml.ols_result_free(&hc3, context.allocator)
 nw := ml.ols_fit_robust(&X, y, {type = .HAC, maxlags = 2, use_t = true})
-defer ml._ols_result_free(&nw, context.allocator)
+defer ml.ols_result_free(&nw, context.allocator)
 groups := []int{1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 5}
 cl := ml.ols_fit_robust(&X, y, {type = .Cluster, groups = groups, use_t = true})
-defer ml._ols_result_free(&cl, context.allocator)
+defer ml.ols_result_free(&cl, context.allocator)
 
 fmt.printf("classical %.4f\n", res.stderr)
 fmt.printf("HC1       %.4f\n", hc1.stderr)
@@ -328,13 +328,13 @@ As in statsmodels, robust inference uses the normal distribution unless `use_t` 
 ```odin
 wts := []f64{1.0, 2.0, 0.5, 1.5, 1.0, 3.0, 0.8, 1.2, 2.5, 0.6, 1.0, 1.8, 0.9, 1.3, 2.2}
 wr := ml.wls_fit(&X, y, wts) // weights ∝ 1 / error variance
-defer ml._ols_result_free(&wr, context.allocator)
+defer ml.ols_result_free(&wr, context.allocator)
 
 Omega := l.matrix_new(f64, n, n) // AR(1)-type error covariance: 0.5^|i-j|
 defer l.matrix_free(&Omega)
 for i in 0 ..< n do for j in 0 ..< n do Omega.data[i * n + j] = math.pow(0.5, f64(abs(i - j)))
 gr := ml.gls_fit(&X, y, &Omega)
-defer ml._ols_result_free(&gr, context.allocator)
+defer ml.ols_result_free(&gr, context.allocator)
 
 fmt.printf("WLS β %.6f  R² %.6f\n", wr.beta, wr.r2)
 fmt.printf("GLS β %.6f  se %.6f\n", gr.beta, gr.stderr)
@@ -363,11 +363,11 @@ fmt.println(ml.f_dist_sf(3.0, 2, 12))      // P(F > 3), F ~ F(2, 12): 0.08779149
 
 ```odin
 rr := ml.ridge_fit(&X, y, 2.0)                                // λ = 2
-defer ml._ols_result_free(&rr, context.allocator)
+defer ml.ols_result_free(&rr, context.allocator)
 la := ml.lasso_fit(&X, y, 3.0, max_iter = 100000, tol = 1e-13) // λ = 3
-defer ml._ols_result_free(&la, context.allocator)
+defer ml.ols_result_free(&la, context.allocator)
 en := ml.elastic_net_fit(&X, y, 3.0, 0.5)                      // λ = 3, l1_ratio = 0.5
-defer ml._ols_result_free(&en, context.allocator)
+defer ml.ols_result_free(&en, context.allocator)
 
 fmt.printf("ridge   β %.4f  se %.4f\n", rr.beta, rr.stderr)
 fmt.printf("lasso   β %.4f  se %.4f\n", la.beta, la.stderr)
@@ -387,7 +387,7 @@ The ridge and lasso coefficients are scikit-learn's (checked in `ml_linear_refer
 ```odin
 lambdas := []f64{0.01, 0.1, 1, 10, 100}
 best, fit, cv_mse := ml.ridge_cv(&X, y, lambdas, k = 5) // 5 folds, seed 42
-defer ml._ols_result_free(&fit, context.allocator)
+defer ml.ols_result_free(&fit, context.allocator)
 defer delete(cv_mse)
 fmt.printf("best λ %v  β %.4f\n", best, fit.beta)
 fmt.printf("CV MSE per λ %.4f\n", cv_mse)
@@ -1430,7 +1430,7 @@ For your own model files, `model_writer_open`, `write_f64`, `write_slice_f64`, `
 The package follows the usual Odin rule: whoever creates something frees it. Every fit and predict procedure takes an optional `allocator` (default `context.allocator`) and allocates its result with it.
 
 1. **Every fitted model has a free procedure**, named after the model: `logistic_free`, `gnb_free`, `knn_free`, `svm_free`, `kernel_svm_free`, `svr_free`, `ovr_free`, `dt_free`, `rf_free`, `gb_free`, `mlp_free`, `km_free`, `pcr_free`, the scalers' `*_scaler_free`, `ohe_free`, `le_free`, `pipeline_free`, `dataset_free`, `fama_macbeth_result_free`.
-2. **Every `OLSResult` is freed with `ml._ols_result_free(&res, allocator)`**, with the allocator the fit used. This covers OLS, robust OLS, WLS, GLS, ridge, lasso, elastic net, and the `best_result` of `ridge_cv` and `lasso_cv`.
+2. **Every `OLSResult` is freed with `ml.ols_result_free(&res, allocator)`**, with the allocator the fit used. This covers OLS, robust OLS, WLS, GLS, ridge, lasso, elastic net, and the `best_result` of `ridge_cv` and `lasso_cv`.
 3. **Predictions are plain slices or matrices.** Free a `[]f64` (or the `[]int` of `km_predict`) with `delete`, and a matrix (from `*_predict_proba`, the scaler transforms, `subset_matrix`) with `l.matrix_free`.
 4. **Some results are structs of slices with their own free:** `train_test_split_free(&split, allocator)`, `cv_folds_free(folds)`, `metrics_roc_curve_free`, `metrics_free_classification_report`, `km_stats_free(&stats, allocator)`. `TreeStats` (from `dt_compute_stats` and `rf_compute_stats`) has none: delete its `residuals`, `fitted`, `feature_importance` and `splits_per_feature`. The `cv_errors` of `ridge_cv` and `lasso_cv`, the scores of `cross_val_score`, and `metrics_confusion_matrix` are slices to `delete`.
 5. **Models own copies of what they keep.** KNN copies its training data, the SVMs copy their support vectors, and `prepare_dataset` copies the column names and categories. You can free your inputs (matrices, DataFrames) as soon as the fit returns.
@@ -1558,7 +1558,7 @@ The momentum coefficient is positive and the volatility coefficient negative, as
 |---|---|
 | Matrices | `l.matrix_from_flat`, `l.matrix_new`, `l.matrix_at`, `l.matrix_free`, `l.matrix_from_df`, `l.vector_from_df`, `l.matvec_dyn` |
 | DataFrame bridge | `prepare_dataset`, `transform_dataset`, `dataset_free` |
-| OLS | `ols_fit` (`.Cholesky`, `.QR`), `ols_from_df`, `_ols_result_free` |
+| OLS | `ols_fit` (`.Cholesky`, `.QR`), `ols_from_df`, `ols_result_free` |
 | Robust errors | `ols_fit_robust`, `ols_set_robust_cov` with `RobustCovSpec` (`.HC0`-`.HC3`, `.HAC`, `.Cluster`) |
 | WLS / GLS | `wls_fit`, `gls_fit`, `gls_fit_kron` |
 | Penalised | `ridge_fit`, `lasso_fit`, `elastic_net_fit`, `ridge_cv`, `lasso_cv` |

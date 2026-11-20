@@ -144,7 +144,7 @@ fit_ridge :: proc(ds: ^Dataset, samples: []Sample) -> []f64 {
 		y[i] = ds.target[s.day * N_ASSETS + s.asset]
 	}
 	res := ml.ridge_fit(&X, y, RIDGE_LAMBDA)
-	defer ml._ols_result_free(&res, context.allocator)
+	defer ml.ols_result_free(&res, context.allocator)
 	return slice.clone(res.beta)
 }
 

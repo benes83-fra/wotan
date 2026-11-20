@@ -124,7 +124,7 @@ orthogonalize :: proc(
 		yy[i] = y[t]
 	}
 	fit := ml.ols_fit(&X, yy, .QR, context.temp_allocator)
-	defer ml._ols_result_free(&fit, context.temp_allocator)
+	defer ml.ols_result_free(&fit, context.temp_allocator)
 	for t, i in rows {out[t] = fit.residuals[i]}
 	return out
 }
@@ -386,7 +386,7 @@ sentiment_conditional_returns :: proc(
 		for i in 0 ..< n {X.data[2 * i], X.data[2 * i + 1] = 1, x[i]}
 		fit :=
 			ml.ols_fit_robust(&X, y, {type = .HAC, maxlags = nw_lags}, .QR, context.temp_allocator) if nw_lags > 0 else ml.ols_fit(&X, y, .QR, context.temp_allocator)
-		defer ml._ols_result_free(&fit, context.temp_allocator)
+		defer ml.ols_result_free(&fit, context.temp_allocator)
 		return fit.beta[1], fit.tvalues[1]
 	}
 	d := make([]f64, len(s), ta)

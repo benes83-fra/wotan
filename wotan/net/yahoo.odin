@@ -11,6 +11,7 @@ import "core:math"
 import "core:mem"
 import "core:strconv"
 import "core:strings"
+import "core:time"
 import curl "vendor:curl"
 
 
@@ -344,11 +345,57 @@ read_yahoo :: proc(
 	df: w.DataFrame,
 	ok: bool,
 ) {
-	url := build_yahoo_url(symbol, i, r, context.temp_allocator)
-	text, got := http_get(url, context.temp_allocator)
+	text, got := _yahoo_chart_text(symbol, i, r)
 	if !got {return w.dataframe_new(), false}
 	df = yahoo_json_to_dataframe(text, allocator)
 	return df, df.rows > 0
+}
+
+// The chart JSON of `symbol` (temp allocator)
+@(private = "file")
+_yahoo_chart_text :: proc(symbol: string, i: interval, r: range) -> (string, bool) {
+	url := build_yahoo_url(symbol, i, r, context.temp_allocator)
+	return http_get(url, context.temp_allocator)
+}
+
+// yahoo_session_live reports whether Yahoo sent the chart JSON while the exchange's
+// regular session was open and had traded (`now_unix`: the current time,
+// time.time_to_unix(time.now())). The last row then holds the running session: the
+// current price and the volume so far, not a close. Before the open and after the
+// close it is false. read_yahoo_series and read_yahoo_panel report it as last_is_live.
+yahoo_session_live :: proc(json_text: string, now_unix: i64) -> bool {
+	// meta: "regularMarketTime":T, ..., "currentTradingPeriod":{..., "regular":{..., "end":E, "start":S, ...}}
+	int_after :: proc(s, key: string) -> (v: i64, ok: bool) {
+		p := strings.index(s, key)
+		if p < 0 {return}
+		rest := strings.trim_left_space(s[p + len(key):])
+		if len(rest) == 0 || rest[0] != ':' {return}
+		rest = strings.trim_left_space(rest[1:])
+		n := 0
+		for n < len(rest) &&
+		    (rest[n] >= '0' && rest[n] <= '9' || n == 0 && rest[n] == '-') {n += 1}
+		return strconv.parse_i64(rest[:n])
+	}
+	period := strings.index(json_text, "\"currentTradingPeriod\"")
+	if period < 0 {return false}
+	reg := strings.index(json_text[period:], "\"regular\"")
+	if reg < 0 {return false}
+	open := strings.index(json_text[period + reg:], "{")
+	if open < 0 {return false}
+	open += period + reg
+	close := _matching_brace(json_text, open)
+	if close < 0 {return false}
+	block := json_text[open:close]
+	start, s_ok := int_after(block, "\"start\"")
+	end, e_ok := int_after(block, "\"end\"")
+	last_trade, t_ok := int_after(json_text, "\"regularMarketTime\"")
+	if !s_ok || !e_ok || !t_ok {return false}
+	return last_trade >= start && now_unix < end
+}
+
+@(private = "file")
+_now_unix :: proc() -> i64 {
+	return time.time_to_unix(time.now())
 }
 
 // One ticker's history as plain arrays, oldest first, ready for numeric code.
@@ -356,16 +403,20 @@ read_yahoo :: proc(
 // out, so all arrays have the same length and close[i] > 0. Open, high, low and
 // volume are NaN on the rare kept day where only they are missing. adj_close is
 // adjusted for dividends and splits; close is adjusted for splits only.
+// last_is_live is true when the series was loaded during the exchange's regular
+// session: the last row is then today's running session (current price, volume so
+// far), not a close. Leave it out (the first len - 1 rows) when you need closes.
 Yahoo_Series :: struct {
-	symbol:    string,
-	dates:     []w.Date,
-	open:      []f64,
-	high:      []f64,
-	low:       []f64,
-	close:     []f64,
-	adj_close: []f64,
-	volume:    []f64,
-	allocator: mem.Allocator,
+	symbol:       string,
+	dates:        []w.Date,
+	open:         []f64,
+	high:         []f64,
+	low:          []f64,
+	close:        []f64,
+	adj_close:    []f64,
+	volume:       []f64,
+	last_is_live: bool,
+	allocator:    mem.Allocator,
 }
 
 yahoo_series_free :: proc(s: ^Yahoo_Series) {
@@ -392,10 +443,17 @@ read_yahoo_series :: proc(
 	s: Yahoo_Series,
 	ok: bool,
 ) {
-	df, got := read_yahoo(symbol, i, r, context.temp_allocator)
-	defer w.destroy_dataframe(&df)
+	text, got := _yahoo_chart_text(symbol, i, r)
 	if !got {return {allocator = allocator}, false}
-	return yahoo_series_from_dataframe(&df, symbol, allocator)
+	df := yahoo_json_to_dataframe(text, context.temp_allocator)
+	defer w.destroy_dataframe(&df)
+	s, ok = yahoo_series_from_dataframe(&df, symbol, allocator)
+	if ok && yahoo_session_live(text, _now_unix()) {
+		// the running session is the frame's last row; it is kept when it has a price
+		last, _ := w.column_at_date(w.column(&df, "Date"), df.rows - 1)
+		s.last_is_live = s.dates[len(s.dates) - 1] == last
+	}
+	return
 }
 
 // The Yahoo_Series of a DataFrame with read_yahoo's columns (from
@@ -457,13 +515,18 @@ yahoo_series_from_dataframe :: proc(
 // Adjusted closes (dividends and splits), volumes (shares traded) and dollar volumes
 // (adjusted close times volume) of several tickers on the dates all of them have,
 // row-major [date * n_tickers + ticker]. A ticker's rows with a missing value or a
-// price <= 0 are left out before the dates are matched.
+// price <= 0 are left out before the dates are matched. last_is_live is true when the
+// panel was loaded during the regular session and its last date is today's running
+// session (current prices, volumes so far) for at least one ticker; the first
+// len(dates) - 1 dates then hold closes only (the arrays are date-major, so their
+// first (len(dates) - 1) * n_tickers values).
 Yahoo_Panel :: struct {
 	dates:         []w.Date,
 	adj_close:     []f64,
 	volume:        []f64,
 	dollar_volume: []f64,
 	n_tickers:     int,
+	last_is_live:  bool,
 	allocator:     mem.Allocator,
 }
 
@@ -493,16 +556,24 @@ read_yahoo_panel :: proc(
 	prices := make([]map[w.Date]f64, NA, ta)
 	vols := make([]map[w.Date]f64, NA, ta)
 	first := make([dynamic]w.Date, ta)
+	live := make([dynamic]w.Date, ta) // dates of running sessions
 	defer {
 		for k in 0 ..< NA {delete(prices[k]); delete(vols[k])}
 		delete(prices, ta)
 		delete(vols, ta)
 		delete(first)
+		delete(live)
 	}
 	for sym, k in tickers {
-		df, got := read_yahoo(sym, i, r, ta)
+		text, got_text := _yahoo_chart_text(sym, i, r)
+		if !got_text {return {allocator = allocator}, false, k}
+		df := yahoo_json_to_dataframe(text, ta)
 		defer w.destroy_dataframe(&df)
-		if !got {return {allocator = allocator}, false, k}
+		if df.rows == 0 {return {allocator = allocator}, false, k}
+		if yahoo_session_live(text, _now_unix()) {
+			d, _ := w.column_at_date(w.column(&df, "Date"), df.rows - 1)
+			append(&live, d)
+		}
 		prices[k] = make(map[w.Date]f64, ta)
 		vols[k] = make(map[w.Date]f64, ta)
 		dc, pc, vc := w.column(&df, "Date"), w.column(&df, "AdjClose"), w.column(&df, "Volume")
@@ -533,6 +604,7 @@ read_yahoo_panel :: proc(
 		n_tickers     = NA,
 		allocator     = allocator,
 	}
+	for d in live {panel.last_is_live ||= d == common[D - 1]}
 	copy(panel.dates, common[:])
 	for d, t in common {
 		for k in 0 ..< NA {

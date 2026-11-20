@@ -152,7 +152,7 @@ ridge_cv :: proc(
 
 			// Train Ridge on training set
 			result := ridge_fit(&X_train, y_train, lambda, method, context.temp_allocator)
-			defer _ols_result_free(&result, context.temp_allocator)
+			defer ols_result_free(&result, context.temp_allocator)
 
 			// Evaluate on validation set: MSE = mean((y_val - X_val @ beta)²)
 			pred := l.matvec_dyn_simd(&X_val, result.beta, context.temp_allocator)

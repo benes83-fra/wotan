@@ -66,6 +66,40 @@ ml_finance_metrics_reference_test :: proc(allocator: mem.Allocator) {
 				err,
 			),
 		)
+
+		// the same data as plain slices: the IC of every period, and its summary
+		series := ml_fin.rank_ic_series(pd.data, yd.data, A)
+		defer delete(series)
+		want := []f64 {
+			0.261904761904762,
+			0.19047619047619052,
+			0.4433944513137059,
+			math.nan_f64(),
+			-0.03571428571428572,
+			-0.07142857142857144,
+		}
+		serr := 0.0
+		nan_ok := len(series) == B
+		for v, b in want {
+			if math.is_nan(v) {nan_ok = nan_ok && math.is_nan(series[b]); continue}
+			serr = max(serr, rel(series[b], v))
+		}
+		s := ml_fin.rank_ic_summary(series)
+		expect(
+			&passed,
+			&total,
+			nan_ok &&
+			serr < 1e-14 &&
+			s.mean_ic == r.mean_ic &&
+			s.std_ic == r.std_ic &&
+			s.icir == r.icir &&
+			s.positive_ic_ratio == r.positive_ic_ratio &&
+			s.num_periods == r.num_periods,
+			fmt.tprintf(
+				"rank IC series: per-period IC vs scipy, NaN for the constant period, summary = tensor version (max rel err %.1e)",
+				serr,
+			),
+		)
 	}
 
 	{ 	// --- trading features on 120 days

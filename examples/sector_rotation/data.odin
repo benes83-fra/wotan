@@ -7,7 +7,6 @@ package main
 import w "../../wotan/core"
 import net "../../wotan/net"
 import "core:fmt"
-import "core:time"
 
 SECTORS := [?]string{"XLB", "XLC", "XLE", "XLF", "XLI", "XLK", "XLP", "XLRE", "XLU", "XLV", "XLY"}
 SECTOR_NAMES := [?]string {
@@ -53,11 +52,9 @@ load_market :: proc() -> (m: Market, ok: bool) {
 		return
 	}
 	T, N := len(panel.dates), panel.n_tickers
-	// While the US market is open, Yahoo's row for today holds the current
-	// price, not a close: leave today out
-	y, mo, d := time.date(time.now())
-	last := panel.dates[T - 1]
-	if int(last.year) == y && int(last.month) == int(mo) && int(last.day) == d {T -= 1}
+	// While the US market is open, the last row holds today's current prices,
+	// not closes: leave it out
+	if panel.last_is_live {T -= 1}
 	m.dates = panel.dates[:T]
 	m.n_days = T
 	m.close = make([]f64, T * N_ASSETS)

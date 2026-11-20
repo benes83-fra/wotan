@@ -517,15 +517,15 @@ _pipeline_free_fitted :: proc(pipe: ^Pipeline) {
 	case .KNN:
 		knn_free(&pipe.model.knn)
 	case .Ridge:
-		_ols_result_free(&pipe.model.ridge, pipe.allocator)
+		ols_result_free(&pipe.model.ridge, pipe.allocator)
 	case .Lasso:
-		_ols_result_free(&pipe.model.lasso, pipe.allocator)
+		ols_result_free(&pipe.model.lasso, pipe.allocator)
 	case .ElasticNet:
-		_ols_result_free(&pipe.model.elastic_net, pipe.allocator)
+		ols_result_free(&pipe.model.elastic_net, pipe.allocator)
 	case .SVR:
 		svr_free(&pipe.model.svr)
 	case .OLS:
-		_ols_result_free(&pipe.model.ols, pipe.allocator)
+		ols_result_free(&pipe.model.ols, pipe.allocator)
 	case .DecisionTree:
 		dt_free(&pipe.model.dt)
 	case .RandomForest:

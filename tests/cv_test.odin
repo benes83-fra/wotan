@@ -32,7 +32,7 @@ ridge_cv_test :: proc(allocator: mem.Allocator = context.allocator) {
 	lambdas := []f64{0.0, 0.1, 1.0, 10.0}
 
 	best_lambda, best_result, cv_errors := ml.ridge_cv(&X, y, lambdas, 5, 42, .Cholesky, allocator)
-	// defer _ols_result_free(&best_result, allocator)
+	// defer ols_result_free(&best_result, allocator)
 	defer delete(cv_errors, allocator)
 
 	fmt.printf("Best lambda: %f\n", best_lambda)
@@ -85,7 +85,7 @@ lasso_cv_test :: proc(allocator: mem.Allocator = context.allocator) {
 		1e-4,
 		allocator,
 	)
-	// defer _ols_result_free(&best_result, allocator)
+	// defer ols_result_free(&best_result, allocator)
 	defer delete(cv_errors, allocator)
 
 	fmt.printf("Best lambda: %f\n", best_lambda)
