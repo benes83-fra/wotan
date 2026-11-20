@@ -162,7 +162,7 @@ Reference and contract tests print `OK` or `FAIL` for each check and end with a 
 | `american_lsm_test` | `american_lsm_test`, `american_asian_lsm_test`, `variance_reduction_test` | Longstaff–Schwartz Monte Carlo, variance reduction |
 | `advanced_derivatives_test` | `advanced_derivatives_test`, `exotic_options_test` | Differentiable Monte Carlo; barrier, Asian, basket and lookback options |
 | `exotic_pricing_test` 🌐 | `exotic_pricing_test` | Exotics on live spot data with autograd Greeks; skew effects |
-| `calib_exotics_reference_test` | `calib_exotics_reference_test` | Heston, Merton jump-diffusion and local-volatility Monte Carlo exotics vs a 1M-path NumPy Monte Carlo and closed forms |
+| `calib_exotics_reference_test` | `calib_exotics_reference_test` | Heston, Merton jump-diffusion and local-volatility Monte Carlo exotics vs a 1M-path NumPy Monte Carlo and closed forms; a Dupire surface on a 3-year grid vs Heston COS |
 | `monte_carlo_reference_test` | `monte_carlo_reference_test` | Path generators, Hull–White moments, the LSM regression step and control variates vs NumPy |
 | `fourier_qmc_reference_test` | `fourier_qmc_reference_test` | COS pricing for Heston, Bates and Merton vs QuantLib, also with a dividend yield q (1e-13); Sobol' points, Brownian bridge, geometric Asian closed form |
 | `heston_pricing_test` | `heston_pricing_test` | Fast Heston paths (one pass per expiry, CPT price on a cached Heston distribution) equal the plain pricer exactly; put-call parity |
@@ -174,7 +174,7 @@ Reference and contract tests print `OK` or `FAIL` for each check and end with a 
 | `live_options_calibration` 🌐 | `live_options_calibration_test` | SABR and Heston calibrated to a live option chain |
 | `garch_option_test` 🌐🖼 | `garch_options_test` | Option pricing with a GARCH volatility term structure |
 | `fx_derivatives_test` | `fx_derivatives_test` | Garman–Kohlhagen, FX smile, digital and barrier digital options |
-| `fx_derivatives_reference_test` | `fx_derivatives_reference_test` | Garman–Kohlhagen, cash-or-nothing, binary barrier and double-barrier binary vs QuantLib; vanna-volga weights |
+| `fx_derivatives_reference_test` | `fx_derivatives_reference_test` | Garman–Kohlhagen, cash-or-nothing, binary barrier and double-barrier binary vs QuantLib; small σ and σ = 0 vs mpmath; vanna-volga weights |
 | `implied_pd_and_fbm_test` | `implied_pd_and_fbm_test`, `rough_volatility_test`, `rough_volatility_pd_test` | Breeden–Litzenberger implied default probability, fractional Brownian motion, rough volatility |
 | `implied_default_prob_reference_test` | `implied_default_prob_reference_test` | Implied default probability on a two-lognormal mixture vs SciPy |
 | `fbm_reference_test` | `fbm_reference_test` | Fractional Brownian motion covariances, rBergomi Monte Carlo and fractional Black–Scholes vs QUADPACK and NumPy |

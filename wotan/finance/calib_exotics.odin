@@ -1,5 +1,6 @@
 package finance
 
+import "core:fmt"
 import "core:math"
 import rand "core:math/rand"
 import "core:mem"
@@ -726,30 +727,60 @@ get_local_vol :: proc(lv: LocalVolSurface, S: f64, t: f64) -> f64 {
 // Put-call parity leaves the formula unchanged for puts, which are used below
 // the forward so that deep in-the-money calls do not lose the derivatives to
 // cancellation. Free the result with lv_surface_free.
+//
+// Grid: num_strikes strikes evenly from strike_lo·S_0 to strike_hi·S_0, and
+// num_expiries expiries max_expiry / num_expiries, 2·max_expiry / num_expiries,
+// …, max_expiry (the default: 21 strikes 0.6–1.4·S_0, 10 expiries 0.1–1 year).
+// The edge rows and columns copy their nearest interior neighbour, so the
+// grid should reach past the spots and times the surface is used for.
 build_lv_surface_from_heston :: proc(
 	S_0: f64,
 	r: f64,
 	params: Heston_Params,
 	allocator: mem.Allocator = context.allocator,
+	strike_lo: f64 = 0.6,
+	strike_hi: f64 = 1.4,
+	max_expiry: f64 = 1.0,
+	num_strikes: int = 21,
+	num_expiries: int = 10,
 ) -> LocalVolSurface {
-	num_strikes := 21
-	num_expiries := 10
+	// Finite difference steps
+	dK := S_0 * 0.005
+	dT := 1.0 / 365.0
+
+	fmt.assertf(
+		num_strikes >= 3 && num_expiries >= 3,
+		"build_lv_surface_from_heston: need at least 3 strikes and 3 expiries (got %d, %d)",
+		num_strikes,
+		num_expiries,
+	)
+	fmt.assertf(
+		0 < strike_lo && strike_lo < strike_hi,
+		"build_lv_surface_from_heston: need 0 < strike_lo < strike_hi (got %v, %v)",
+		strike_lo,
+		strike_hi,
+	)
+	// the first interior expiry needs room for the step back in time
+	fmt.assertf(
+		2 * max_expiry / f64(num_expiries) > dT,
+		"build_lv_surface_from_heston: max_expiry %v is too short for %d expiries",
+		max_expiry,
+		num_expiries,
+	)
 
 	strikes := make([]f64, num_strikes, allocator)
 	expiries := make([]f64, num_expiries, allocator)
 	lv_data := make([]f64, num_strikes * num_expiries, allocator)
 
 	// Define grid
+	dk := (strike_hi - strike_lo) / f64(num_strikes - 1)
 	for i in 0 ..< num_strikes {
-		strikes[i] = S_0 * (0.6 + f64(i) * 0.04) // 0.6 S_0 to 1.4 S_0
+		strikes[i] = S_0 * (strike_lo + f64(i) * dk)
 	}
+	dt := max_expiry / f64(num_expiries)
 	for j in 0 ..< num_expiries {
-		expiries[j] = 0.1 + f64(j) * 0.1 // 0.1 to 1.0 years
+		expiries[j] = dt + f64(j) * dt
 	}
-
-	// Finite difference steps
-	dK := S_0 * 0.005
-	dT := 1.0 / 365.0
 
 	// Compute the grid (skip boundaries for finite differences)
 	for j in 1 ..< num_expiries - 1 {

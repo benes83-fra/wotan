@@ -116,7 +116,7 @@ fbm_european_call_closed_form :: proc(S, K, T, r, sigma, H: f64) -> f64 {
 }
 
 // Monte Carlo of the same model. The payoff depends only on B^H_T ~ N(0, T^{2H}),
-// so that is sampled directly; n_steps no longer affects the result
+// so that is sampled directly (no path, no time steps)
 fbm_european_call_price :: proc(
 	S: f64,
 	K: f64,
@@ -125,8 +125,6 @@ fbm_european_call_price :: proc(
 	sigma: f64,
 	H: f64, // Hurst exponent (0.5 = standard GBM)
 	n_paths: int,
-	n_steps: int,
-	allocator: mem.Allocator = context.allocator,
 ) -> f64 {
 	if T <= 0.0 || n_paths <= 0 {return math.max(S - K, 0.0)}
 	sd := sigma * math.pow_f64(T, H)

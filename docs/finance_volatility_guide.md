@@ -248,14 +248,16 @@ This basket pays on the terminal prices. Part 1's `monte_carlo_basket_option` is
 
 ## 5. Local volatility
 
-`build_lv_surface_from_heston(S_0, r, params)` builds a Dupire local-volatility surface from a Heston model:
+`build_lv_surface_from_heston(S_0, r, params, allocator, strike_lo = 0.6, strike_hi = 1.4, max_expiry = 1, num_strikes = 21, num_expiries = 10)` builds a Dupire local-volatility surface from a Heston model:
 
 σ²_loc(K, T) = (∂C/∂T + r·K·∂C/∂K) / (½·K²·∂²C/∂K²)
 
-The derivatives are finite differences of COS prices. Puts are used below the forward, so deep in-the-money calls don't lose the derivatives to cancellation. The grid is fixed:
-- 21 strikes from 0.6·S₀ to 1.4·S₀;
-- 10 expiries from 0.1 to 1 year;
+The derivatives are finite differences of COS prices. Puts are used below the forward, so deep in-the-money calls don't lose the derivatives to cancellation. The grid:
+- `num_strikes` strikes evenly from `strike_lo`·S₀ to `strike_hi`·S₀ (default 21 from 0.6·S₀ to 1.4·S₀);
+- `num_expiries` expiries evenly up to `max_expiry`, the first at `max_expiry / num_expiries` (default 10 from 0.1 to 1 year);
 - the edge values are copied from the nearest interior point.
+
+Outside the grid the surface uses its edge values, so choose a grid that covers the spots and times you price. With the default 1-year grid, a 2.5-year call at K = 1.2·S₀ comes out 0.9 below Heston; on a 3-year grid (`strike_lo = 0.4, strike_hi = 1.8, max_expiry = 3`) it is within Monte Carlo error. Each grid point costs five COS prices, so the default grid takes about 0.3 s and a 36 × 30 grid about 1.7 s.
 
 A `LocalVolSurface` holds `strikes`, `expiries` and the flattened `lv_data[expiry · num_strikes + strike]`. You can also fill one yourself from another source. Free it with `lv_surface_free`.
 
@@ -427,8 +429,10 @@ The weights are the notionals of the three vanillas per unit of the digital. The
 | Procedure | Pays 1 domestic unit at T if | Method |
 |---|---|---|
 | `fx_digital_call_price(S, K, T, r_d, r_f, sigma)` | S_T > K | closed form; with σ = 0 it pays if the forward is above the strike |
-| `fx_down_and_out_digital_call_price(S, K, L, T, r_d, r_f, sigma)` | S_T > K and S never touched L (continuous) | method of images (Reiner & Rubinstein 1991) |
-| `fx_dnt_pde_price(S, L, U, T, r_d, r_f, sigma, n_space = 200, n_time = 1000)` | L < S_t < U throughout (double-no-touch) | Crank–Nicolson with a Rannacher start |
+| `fx_down_and_out_digital_call_price(S, K, L, T, r_d, r_f, sigma)` | S_T > K and S never touched L (continuous) | method of images (Reiner & Rubinstein 1991); with σ = 0 it pays if the forward ends above K and L |
+| `fx_dnt_pde_price(S, L, U, T, r_d, r_f, sigma, n_space = 200, n_time = 1000)` | L < S_t < U throughout (double-no-touch) | Crank–Nicolson with a Rannacher start; with σ = 0 it pays if the forward ends between the barriers |
+
+The forward moves one way only, so with σ = 0 the spot touches a barrier exactly when the forward at T is beyond it. Small σ works too: the barrier digital's image term is computed in logarithms, and the double-no-touch PDE fits its diffusion term to the cell Péclet number (exponential fitting, Duffy 2004), so its prices stay between 0 and the discount factor when the drift outweighs the volatility. On narrow barriers with a small σ, raise `n_space` for more digits.
 
 ```odin
 fmt.printf("digital %.5f  double-no-touch 1.05-1.15: %.5f\n",
@@ -529,13 +533,12 @@ The derivatives are finite differences, so noise in the prices is amplified. Tak
 | variance-swap integral on Heston COS prices | `heston_fair_variance` | 10 digits |
 | `heston_fair_volatility` as σ → 0 | √(fair variance) | 12 digits |
 | local-volatility MC vanillas | Heston COS | within 0.04 |
+| local-volatility MC 2.5-year calls on a 3-year grid | Heston COS | within Monte Carlo error (0.09 at 20k paths) |
+| down-and-out digital, σ from 0.003 to 0.001 | method of images in mpmath, 600 digits | 1e-14 |
+| double-no-touch PDE, σ from 0.03 to 0.003 | double-barrier sine series (Hui 1996) in mpmath | 2e-4 |
 | Heston and Merton exotics at σ = 0 or λ = 0 | Black–Scholes MC | within Monte Carlo error |
 | default probability and expected loss on a skewed smile | exact derivatives of the smile | 9e-5 and 5e-4 |
 | `fx_strike_from_delta` round trip | the input delta | 1e-12 |
-
-**Known limitations:**
-- `build_lv_surface_from_heston` has a fixed grid (0.6–1.4·S₀, 0.1–1 year), so longer barriers use the 1-year volatilities.
-- `fx_down_and_out_digital_call_price` and `fx_dnt_pde_price` need σ > 0.
 
 ## 10. Quick reference
 

@@ -204,6 +204,65 @@ fx_derivatives_reference_test :: proc(allocator: mem.Allocator) {
 		)
 	}
 
+	// 4b. Small σ and σ = 0 (S = 1.10, T = 1, r_d = 1%, r_f = 3%: the forward
+	//     1.0782 falls). References: the method-of-images formula and the
+	//     double-barrier sine series (Hui 1996), both in mpmath at 600 digits
+	//     (QuantLib's double-barrier series does not converge here).
+	{
+		s0, t0, rd0, rf0 := 1.10, 1.0, 0.01, 0.03
+		Do_Case :: struct {
+			K, sigma, ref: f64,
+		}
+		do_cases := [?]Do_Case {
+			{1.08, 0.003, 0.28765611757486639},
+			{1.08, 0.001, 0.048841542159899689},
+			{1.12, 0.003, 4.0617492313086727e-37},
+			{1.12, 0.001, 1.3865024193400528e-316},
+			{1.02, 0.003, 0.99004983374916805},
+			{1.02, 0.001, 0.99004983374916805},
+		}
+		worst_do := 0.0
+		for c in do_cases {
+			p := fin.fx_down_and_out_digital_call_price(s0, c.K, 1.05, t0, rd0, rf0, c.sigma)
+			worst_do = max(worst_do, abs(p - c.ref))
+		}
+		Dnt_Case :: struct {
+			L, U, sigma, ref: f64,
+		}
+		dnt_cases := [?]Dnt_Case {
+			{1.09, 1.11, 0.01, 0.051789201741110427},
+			{1.09, 1.11, 0.003, 8.6987484739277239e-5},
+			{1.05, 1.15, 0.03, 0.65170893721638106},
+			{1.05, 1.15, 0.01, 0.98428187141418733},
+		}
+		worst_dnt := 0.0
+		for c in dnt_cases {
+			p := fin.fx_dnt_pde_price(s0, c.L, c.U, t0, rd0, rf0, c.sigma)
+			worst_dnt = max(worst_dnt, abs(p - c.ref))
+		}
+		// σ = 0: the spot follows the forward; the digitals pay if it ends
+		// above K and L, the double-no-touch if it ends between the barriers
+		disc := math.exp(-rd0 * t0)
+		zero_ok :=
+			fin.fx_down_and_out_digital_call_price(s0, 1.02, 1.05, t0, rd0, rf0, 0) == disc &&
+			fin.fx_down_and_out_digital_call_price(s0, 1.08, 1.05, t0, rd0, rf0, 0) == 0 &&
+			fin.fx_down_and_out_digital_call_price(s0, 1.08, 1.05, t0, 0.03, 0.01, 0) ==
+				math.exp(-0.03 * t0) &&
+			fin.fx_dnt_pde_price(s0, 1.05, 1.15, t0, rd0, rf0, 0) == disc &&
+			fin.fx_dnt_pde_price(s0, 1.09, 1.11, t0, rd0, rf0, 0) == 0
+		expect(
+			&passed,
+			&total,
+			worst_do < 1e-12 && worst_dnt < 3e-4 && zero_ok,
+			fmt.tprintf(
+				"small σ (0.03 down to 0.001, falling forward) vs mpmath: down-and-out digital max abs err %.1e (was NaN for σ ≤ 1e-3), double-no-touch PDE max abs err %.1e (central differences gave prices outside [0, 1] for narrow barriers and σ ≤ 1e-4); σ = 0 limits exact: %v",
+				worst_do,
+				worst_dnt,
+				zero_ok,
+			),
+		)
+	}
+
 	// 5. Vanna-volga: a vanilla reproduces Castagna–Mercurio's closed-form weights,
 	//    and a pillar reproduces its own market price
 	{

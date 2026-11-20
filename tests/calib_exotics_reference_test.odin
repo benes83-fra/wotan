@@ -569,6 +569,74 @@ calib_exotics_reference_test :: proc(allocator: mem.Allocator) {
 		)
 	}
 
+	// --- Dupire surface on a chosen grid: 2.5-year vanillas ---
+	{
+		long := fin.build_lv_surface_from_heston(
+			100,
+			r,
+			hp,
+			strike_lo = 0.4,
+			strike_hi = 1.8,
+			max_expiry = 3,
+			num_strikes = 29,
+			num_expiries = 15,
+		)
+		short := fin.build_lv_surface_from_heston(100, r, hp)
+		defer fin.lv_surface_free(&long)
+		defer fin.lv_surface_free(&short)
+		grid_ok :=
+			abs(long.strikes[0] - 40) < 1e-12 &&
+			abs(long.strikes[28] - 180) < 1e-12 &&
+			abs(long.expiries[0] - 0.2) < 1e-12 &&
+			abs(long.expiries[14] - 3) < 1e-12 &&
+			abs(short.strikes[20] - 140) < 1e-12 &&
+			abs(short.expiries[9] - 1) < 1e-12
+		worst_long, worst_short := 0.0, 0.0
+		for K in ([]f64{100, 120}) {
+			h := fin.heston_price(100, K, 2.5, r, hp, .Call)
+			rand.reset(41)
+			pl, _, _ := fin.lv_mc_barrier_option(
+				100,
+				K,
+				2.5,
+				r,
+				1e12,
+				true,
+				.Call,
+				long,
+				20_000,
+				50,
+			)
+			rand.reset(41)
+			ps, _, _ := fin.lv_mc_barrier_option(
+				100,
+				K,
+				2.5,
+				r,
+				1e12,
+				true,
+				.Call,
+				short,
+				20_000,
+				50,
+			)
+			worst_long = max(worst_long, abs(pl - h))
+			worst_short = max(worst_short, abs(ps - h))
+		}
+		// standard error of these prices at 20k paths: about 0.17
+		expect(
+			&passed,
+			&total,
+			grid_ok && worst_long < 0.6,
+			fmt.tprintf(
+				"Dupire surface on a 3-year grid (0.4-1.8 S0): local-vol MC 2.5-year calls (K = 100, 120) vs Heston COS max abs err %.3f (default 1-year grid: %.3f); grid ends %v",
+				worst_long,
+				worst_short,
+				grid_ok,
+			),
+		)
+	}
+
 	// --- memory ---
 	{
 		track: mem.Tracking_Allocator

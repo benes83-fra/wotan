@@ -34,6 +34,17 @@ _n :: proc(x: f64) -> f64 {
 	return math.exp_f64(-0.5 * x * x) / math.sqrt_f64(2.0 * math.PI)
 }
 
+// ln N(x), finite where N(x) underflows (x < -38): below -30 the asymptotic
+// series ln N(x) = -x²/2 - ln(-x) - ½ ln 2π + ln(1 - 1/x² + 3/x⁴ - 15/x⁶ + 105/x⁸)
+// (truncation error under 2e-12)
+@(private = "file")
+_log_N :: proc(x: f64) -> f64 {
+	if x > -30.0 {return math.ln(_N(x))}
+	z := 1.0 / (x * x)
+	series := 1.0 - z * (1.0 - z * (3.0 - z * (15.0 - 105.0 * z)))
+	return -0.5 * x * x - math.ln(-x) - 0.5 * math.ln(2.0 * math.PI) + math.ln(series)
+}
+
 // Garman-Kohlhagen price; σ = 0 gives the discounted forward intrinsic value
 fx_gk_price :: proc(
 	S: f64,
@@ -390,6 +401,8 @@ fx_digital_call_sensitivities :: proc(
 // Pays 1 unit of domestic currency at T if S_T > K and the spot stays above L
 // (continuously monitored). Method of images (Reiner & Rubinstein 1991); for
 // K ≤ L the strike condition is implied by survival and L takes K's place.
+// With σ = 0 the spot follows the forward, which moves one way only, so the
+// option pays if the forward at T is above both K and L.
 
 fx_down_and_out_digital_call_price :: proc(
 	S: f64,
@@ -404,12 +417,18 @@ fx_down_and_out_digital_call_price :: proc(
 	if T <= 0.0 {return S > K ? 1.0 : 0.0}
 
 	Ke := max(K, L)
+	if sigma <= 0.0 {
+		return math.exp_f64(-r_d * T) if S * math.exp_f64((r_d - r_f) * T) > Ke else 0.0
+	}
 	sqrt_T := math.sqrt_f64(T)
 	mu := (r_d - r_f - 0.5 * sigma * sigma) / (sigma * sigma)
 	d2 := (math.ln(S / Ke) + (r_d - r_f - 0.5 * sigma * sigma) * T) / (sigma * sqrt_T)
 	d2_image :=
 		(math.ln((L * L) / (S * Ke)) + (r_d - r_f - 0.5 * sigma * sigma) * T) / (sigma * sqrt_T)
-	return math.exp_f64(-r_d * T) * (_N(d2) - math.pow_f64(L / S, 2.0 * mu) * _N(d2_image))
+	// image term (L/S)^{2μ} N(d2_image) in logs: for small σ the power
+	// overflows while N underflows (r_d < r_f)
+	image := math.exp_f64(2.0 * mu * math.ln(L / S) + _log_N(d2_image))
+	return math.exp_f64(-r_d * T) * (_N(d2) - image)
 }
 
 // Vanna, volga and vega by central differences on the analytical price
@@ -441,8 +460,15 @@ fx_down_and_out_digital_call_sensitivities :: proc(
 //   V_τ = ½σ² V_xx + (r_d − r_f − ½σ²) V_x − r_d V,  x = ln S ∈ [ln L, ln U],
 // V = 0 on the barriers, V(τ = 0) = 1 inside, with Crank–Nicolson steps; the
 // first step is replaced by four fully implicit quarter steps (Rannacher) to damp
-// the oscillations CN produces from the jump at the barriers. The price at S is
-// interpolated quadratically from the three nearest nodes.
+// the oscillations CN produces from the jump at the barriers. The diffusion is
+// exponentially fitted (Il'in; Duffy 2004): ½σ² is scaled by P·coth P, with
+// P = β·dx / σ² the cell Péclet number, so all coefficients stay non-negative
+// when the drift outweighs the diffusion (small σ), where plain central
+// differences give prices outside [0, 1]; for ordinary σ the change is of order
+// dx². The price at S is interpolated quadratically from the three nearest
+// nodes. With σ = 0 the spot
+// follows the forward, which moves one way only, so the option pays if the
+// forward at T is still between the barriers.
 
 fx_dnt_pde_price :: proc(
 	S: f64,
@@ -457,14 +483,20 @@ fx_dnt_pde_price :: proc(
 ) -> f64 {
 	if S <= L || S >= U {return 0.0}
 	if T <= 0.0 {return 1.0}
+	if sigma <= 0.0 {
+		F := S * math.exp_f64((r_d - r_f) * T)
+		return math.exp_f64(-r_d * T) if L < F && F < U else 0.0
+	}
 
 	ns := max(n_space, 4)
 	nt := max(n_time, 1)
 	x_min := math.ln(L)
 	dx := (math.ln(U) - x_min) / f64(ns - 1)
 	dt := T / f64(nt)
-	alpha := 0.5 * sigma * sigma
 	beta := r_d - r_f - 0.5 * sigma * sigma
+	peclet := beta * dx / (sigma * sigma)
+	fit := 1.0 + peclet * peclet / 3.0 if abs(peclet) < 1e-4 else peclet / math.tanh(peclet)
+	alpha := 0.5 * sigma * sigma * fit
 
 	// L_h V_i = lo V_{i−1} + di V_i + up V_{i+1}
 	lo := alpha / (dx * dx) - beta / (2.0 * dx)

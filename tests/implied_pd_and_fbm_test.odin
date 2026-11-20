@@ -55,7 +55,6 @@ implied_pd_and_fbm_test :: proc(allocator: mem.Allocator) {
 	r_fbm := 0.05
 	sigma_fbm := 0.20
 	n_paths := 10000
-	n_steps := 252
 
 	fmt.printf(
 		"   Parameters: S=%.2f, K=%.2f, T=%.1f, r=%.2f, σ=%.2f\n",
@@ -69,17 +68,7 @@ implied_pd_and_fbm_test :: proc(allocator: mem.Allocator) {
 	fmt.println("   ----------|----------------|-----------------------------")
 
 	// Standard Black-Scholes for baseline (H = 0.5)
-	bs_price := fin.fbm_european_call_price(
-		S_fbm,
-		K_fbm,
-		T_fbm,
-		r_fbm,
-		sigma_fbm,
-		0.5,
-		n_paths,
-		n_steps,
-		allocator,
-	)
+	bs_price := fin.fbm_european_call_price(S_fbm, K_fbm, T_fbm, r_fbm, sigma_fbm, 0.5, n_paths)
 	fmt.printf("   H = 0.50  | $%-13.4f | (Baseline Standard Brownian Motion)\n", bs_price)
 
 	// Persistent fBm (H > 0.5): Trends are more likely to continue
@@ -92,8 +81,6 @@ implied_pd_and_fbm_test :: proc(allocator: mem.Allocator) {
 		sigma_fbm,
 		h_persistent,
 		n_paths,
-		n_steps,
-		allocator,
 	)
 	fmt.printf(
 		"   H = 0.70  | $%-13.4f | %+f (Persistent / Trending)\n",
@@ -111,8 +98,6 @@ implied_pd_and_fbm_test :: proc(allocator: mem.Allocator) {
 		sigma_fbm,
 		h_rough,
 		n_paths,
-		n_steps,
-		allocator,
 	)
 	fmt.printf(
 		"   H = 0.30  | $%-13.4f | %+f (Anti-persistent / Rough)\n",

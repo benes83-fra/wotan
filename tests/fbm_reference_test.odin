@@ -1433,10 +1433,10 @@ fbm_reference_test :: proc(allocator: mem.Allocator) {
 		for c in FBS {
 			cf := fin.fbm_european_call_closed_form(c.S, c.K, c.T, c.r, c.sigma, c.H)
 			worst = max(worst, abs(cf - c.price) / c.price)
-			mc := fin.fbm_european_call_price(c.S, c.K, c.T, c.r, c.sigma, c.H, N, 1)
+			mc := fin.fbm_european_call_price(c.S, c.K, c.T, c.r, c.sigma, c.H, N)
 			worst_z = max(worst_z, abs(mc - c.price) / (c.sd / math.sqrt(f64(N))))
 			// strike 0: the call is the discounted forward, which must be S
-			m0 := fin.fbm_european_call_price(c.S, 0, c.T, c.r, c.sigma, c.H, N, 1)
+			m0 := fin.fbm_european_call_price(c.S, 0, c.T, c.r, c.sigma, c.H, N)
 			mart_z = max(
 				mart_z,
 				abs(m0 / c.S - 1) / (c.sigma * math.pow(c.T, c.H) / math.sqrt(f64(N))),

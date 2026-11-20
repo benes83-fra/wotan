@@ -721,7 +721,7 @@ for _ in 0 ..< 2 {
 
 **Fractional Black–Scholes** (Wick–Itô, Necula 2002) uses S_T = S·exp(rT − ½σ²T^{2H} + σB^H_T). The call is the Black–Scholes price with total variance σ²T^{2H}:
 - `fbm_european_call_closed_form(S, K, T, r, sigma, H)` is the closed form;
-- `fbm_european_call_price(…, n_paths, n_steps)` is its Monte Carlo. The payoff depends only on B^H_T, which is sampled directly, so `n_steps` has no effect.
+- `fbm_european_call_price(S, K, T, r, sigma, H, n_paths)` is its Monte Carlo. The payoff depends only on B^H_T, so each path is one normal draw of it, with no time steps.
 
 The model admits arbitrage under pathwise trading, because fBm is not a semimartingale. Use it for empirical fitting and as a baseline.
 
@@ -729,7 +729,7 @@ The model admits arbitrage under pathwise trading, because fBm is not a semimart
 for H in ([]f64{0.3, 0.5, 0.7}) {
 	fmt.printf("H %.1f: closed form %.4f  MC %.4f\n", H,
 		fin.fbm_european_call_closed_form(100, 100, 2, 0.03, 0.2, H),
-		fin.fbm_european_call_price(100, 100, 2, 0.03, 0.2, H, 200_000, 0))
+		fin.fbm_european_call_price(100, 100, 2, 0.03, 0.2, H, 200_000))
 }
 ```
 
