@@ -3,11 +3,13 @@ package wotan_linalg
 import "../util"
 import "base:builtin"
 import "base:intrinsics"
+import "base:runtime"
 import "core:fmt"
 import "core:math"
 import "core:mem"
 import "core:os"
 import simd "core:simd"
+import "core:sys/info"
 
 TILE_BASE :: 8
 TILE_AVX :: 16
@@ -173,12 +175,7 @@ _Rows_Job :: struct {
 // product is large enough. The calling thread processes the first range itself.
 @(private = "file")
 _parallel_rows :: proc(rows, flops: int, a, b, out: ^Matrix(f64), worker: _Rows_Worker) {
-	n := 1
-	if flops >= MATMUL_PARALLEL_MIN_FLOPS {
-		n = matmul_max_threads
-		if n <= 0 {n = os.get_processor_core_count()}
-		n = min(n, rows, flops / MATMUL_MIN_FLOPS_PER_THREAD)
-	}
+	n := _matmul_threads(rows, flops)
 	if n <= 1 {
 		worker(a, b, out, 0, rows)
 		return
@@ -188,6 +185,19 @@ _parallel_rows :: proc(rows, flops: int, a, b, out: ^Matrix(f64), worker: _Rows_
 			j := (^_Rows_Job)(data)
 			j.worker(j.a, j.b, j.out, begin, end)
 		}, n)
+}
+
+// _matmul_threads: threads for a product of `flops` multiply-adds whose output
+// rows are split across threads
+@(private = "file")
+_matmul_threads :: proc(rows, flops: int) -> int {
+	n := 1
+	if flops >= MATMUL_PARALLEL_MIN_FLOPS {
+		n = matmul_max_threads
+		if n <= 0 {n = os.get_processor_core_count()}
+		n = min(n, rows, flops / MATMUL_MIN_FLOPS_PER_THREAD)
+	}
+	return max(n, 1)
 }
 
 // Register-blocked micro-kernels: a block of _MK_ROWS output rows x _MK_LANES
@@ -219,9 +229,15 @@ _mk_store :: #force_inline proc "contextless" (p: ^f64, v: _MK_V) {
 // matmul_nn_acc_simd: out += A @ B
 // A: [M, K], B: [K, N], out: [M, N]
 // out[i, :] += A[i, k] * B[k, :] for k in order; threads split the rows of A.
+// Products with at least _PACK_MIN_ROWS rows use the packed kernel (see
+// _matmul_packed).
 matmul_nn_acc_simd :: proc(a, b, out: ^Matrix(f64)) {
 	if a.cols != b.rows || out.rows != a.rows || out.cols != b.cols {
 		panic("matmul_nn_acc_simd: dimension mismatch")
+	}
+	if _use_packed(a.rows, b.cols) {
+		_matmul_packed(a.data, b.data, out.data, a.cols, 1, a.rows, a.cols, b.cols)
+		return
 	}
 	_parallel_rows(a.rows, a.rows * a.cols * b.cols, a, b, out, _nn_rows)
 }
@@ -276,7 +292,7 @@ _nn_rows :: proc(a, b, out: ^Matrix(f64), r0, r1: int) #no_bounds_check {
 // matmul_nt_acc_simd: out += A @ B^T
 // A: [M, K], B: [N, K], out: [M, N]
 // Every output element is a dot product of two contiguous rows, computed
-// exactly as dot_simd does it (see _nt_rows).
+// exactly as dot_simd does it (see _nt_tile).
 matmul_nt_acc_simd :: proc(a, b, out: ^Matrix(f64)) {
 	if a.cols != b.cols || out.rows != a.rows || out.cols != b.rows {
 		panic("matmul_nt_acc_simd: dimension mismatch")
@@ -298,9 +314,11 @@ when intrinsics.has_target_feature("avx") {
 @(private = "file")
 _DOT_LANES :: len(_DOT_V)
 
-// _nt_rows computes 2 x 2 dot products at a time. Each keeps dot_simd's lane
-// layout, its pairwise lane reduction and its scalar tail, so every element
-// is bit-identical to dot_simd(A[i, :], B[j, :]).
+// _nt_rows computes the dot products of rows r0 ..< r1 with every row of B:
+// with AVX2 3 x 4 at a time (4 lanes) or 3 x 2 (8 lanes), else 2 x 2, over
+// blocks of _NT_BLOCK rows of B so that the block stays in L2. Each keeps
+// dot_simd's lane layout, its pairwise lane reduction and its scalar tail, so
+// every element is bit-identical to dot_simd(A[i, :], B[j, :]).
 @(private = "file")
 _nt_rows :: proc(a, b, out: ^Matrix(f64), r0, r1: int) #no_bounds_check {
 	K, N := a.cols, b.rows
@@ -313,56 +331,88 @@ _nt_rows :: proc(a, b, out: ^Matrix(f64), r0, r1: int) #no_bounds_check {
 			}
 		}
 	} else {
-		Kv := K - K % _DOT_LANES
-		ld :: #force_inline proc "contextless" (p: ^f64) -> _DOT_V {
-			return intrinsics.unaligned_load((^_DOT_V)(p))
+		when ODIN_ARCH == .amd64 {
+			if matmul_avx2 {
+				_nt_rows_avx2(A, B, O, K, N, r0, r1)
+				return
+			}
 		}
-		// one dot product: lanes, pairwise reduction, then the tail in order
-		finish :: #force_inline proc "contextless" (acc: _DOT_V, x, y: []f64, Kv: int) -> f64 {
-			sum := intrinsics.simd_reduce_add_pairs(acc)
-			for k in Kv ..< len(x) {sum += x[k] * y[k]}
-			return sum
-		}
+		_nt_tile(2, 2, A, B, O, K, N, r0, r1)
+	}
+}
 
-		i := r0
-		for ; i + 2 <= r1; i += 2 {
-			a0, a1 := A[i * K:(i + 1) * K], A[(i + 1) * K:(i + 2) * K]
-			j := 0
-			for ; j + 2 <= N; j += 2 {
-				b0, b1 := B[j * K:(j + 1) * K], B[(j + 1) * K:(j + 2) * K]
-				c00, c01, c10, c11: _DOT_V
-				for k := 0; k < Kv; k += _DOT_LANES {
-					va0, va1 := ld(&a0[k]), ld(&a1[k])
-					vb0, vb1 := ld(&b0[k]), ld(&b1[k])
-					c00 = c00 + va0 * vb0
-					c01 = c01 + va0 * vb1
-					c10 = c10 + va1 * vb0
-					c11 = c11 + va1 * vb1
-				}
-				O[i * N + j] += finish(c00, a0, b0, Kv)
-				O[i * N + j + 1] += finish(c01, a0, b1, Kv)
-				O[(i + 1) * N + j] += finish(c10, a1, b0, Kv)
-				O[(i + 1) * N + j + 1] += finish(c11, a1, b1, Kv)
-			}
-			for ; j < N; j += 1 {
-				bj := B[j * K:(j + 1) * K]
-				c0, c1: _DOT_V
-				for k := 0; k < Kv; k += _DOT_LANES {
-					vb := ld(&bj[k])
-					c0 = c0 + ld(&a0[k]) * vb
-					c1 = c1 + ld(&a1[k]) * vb
-				}
-				O[i * N + j] += finish(c0, a0, bj, Kv)
-				O[(i + 1) * N + j] += finish(c1, a1, bj, Kv)
-			}
+// Rows of B per block of _nt_tile (32 rows of 2048 values: 512 KB)
+@(private = "file")
+_NT_BLOCK :: 32
+
+when ODIN_ARCH == .amd64 {
+	@(private = "file", enable_target_feature = "avx2")
+	_nt_rows_avx2 :: proc "contextless" (A, B, O: []f64, K, N, r0, r1: int) {
+		when _DOT_LANES == 4 {
+			_nt_tile(3, 4, A, B, O, K, N, r0, r1)
+		} else {
+			_nt_tile(3, 2, A, B, O, K, N, r0, r1)
 		}
-		for ; i < r1; i += 1 {
-			ai := A[i * K:(i + 1) * K]
-			for j in 0 ..< N {
-				bj := B[j * K:(j + 1) * K]
-				c: _DOT_V
-				for k := 0; k < Kv; k += _DOT_LANES {c = c + ld(&ai[k]) * ld(&bj[k])}
-				O[i * N + j] += finish(c, ai, bj, Kv)
+	}
+}
+
+// _nt_tile: out[i, j] += dot_simd(A[i, :], B[j, :]) for i in r0 ..< r1, all j;
+// RI x CJ dot products at a time
+@(private = "file")
+_nt_tile :: #force_inline proc "contextless" (
+	$RI, $CJ: int,
+	A, B, O: []f64,
+	K, N, r0, r1: int,
+) #no_bounds_check {
+	Kv := K - K % _DOT_LANES
+	ld :: #force_inline proc "contextless" (p: ^f64) -> _DOT_V {
+		return intrinsics.unaligned_load((^_DOT_V)(p))
+	}
+	// one dot product: lanes, pairwise reduction, then the tail in order
+	finish :: #force_inline proc "contextless" (acc: _DOT_V, x, y: []f64, Kv: int) -> f64 {
+		sum := intrinsics.simd_reduce_add_pairs(acc)
+		for k in Kv ..< len(x) {sum += x[k] * y[k]}
+		return sum
+	}
+	for jb := 0; jb < N; jb += _NT_BLOCK {
+		jb_end := min(jb + _NT_BLOCK, N)
+		for i := r0; i < r1; i += RI {
+			ri := min(RI, r1 - i)
+			j := jb
+			if ri == RI {
+				for ; j + CJ <= jb_end; j += CJ {
+					c: [RI][CJ]_DOT_V
+					for k := 0; k < Kv; k += _DOT_LANES {
+						av: [RI]_DOT_V
+						#unroll for r in 0 ..< RI {av[r] = ld(&A[(i + r) * K + k])}
+						#unroll for q in 0 ..< CJ {
+							bv := ld(&B[(j + q) * K + k])
+							#unroll for r in 0 ..< RI {c[r][q] = c[r][q] + av[r] * bv}
+						}
+					}
+					#unroll for r in 0 ..< RI {
+						#unroll for q in 0 ..< CJ {
+							O[(i + r) * N + j + q] += finish(
+								c[r][q],
+								A[(i + r) * K:][:K],
+								B[(j + q) * K:][:K],
+								Kv,
+							)
+						}
+					}
+				}
+			} else {
+				j = jb
+			}
+			// the rest of the block: one dot product at a time
+			for r in 0 ..< ri {
+				ar := A[(i + r) * K:][:K]
+				for jj in j ..< jb_end {
+					bj := B[jj * K:][:K]
+					c: _DOT_V
+					for k := 0; k < Kv; k += _DOT_LANES {c = c + ld(&ar[k]) * ld(&bj[k])}
+					O[(i + r) * N + jj] += finish(c, ar, bj, Kv)
+				}
 			}
 		}
 	}
@@ -371,10 +421,15 @@ _nt_rows :: proc(a, b, out: ^Matrix(f64), r0, r1: int) #no_bounds_check {
 // matmul_tn_acc_simd: out += A^T @ B
 // A: [M, K], B: [M, N], out: [K, N]
 // Sum of rank-1 updates: out[k, :] += A[i, k] * B[i, :] for i in order.
-// Threads split the K output rows.
+// Threads split the K output rows. Products with at least _PACK_MIN_ROWS
+// output rows use the packed kernel (see _matmul_packed).
 matmul_tn_acc_simd :: proc(a, b, out: ^Matrix(f64)) {
 	if a.rows != b.rows || out.rows != a.cols || out.cols != b.cols {
 		panic("matmul_tn_acc_simd: dimension mismatch")
+	}
+	if _use_packed(a.cols, b.cols) {
+		_matmul_packed(a.data, b.data, out.data, 1, a.cols, a.cols, a.rows, b.cols)
+		return
 	}
 	_parallel_rows(a.cols, a.rows * a.cols * b.cols, a, b, out, _tn_rows)
 }
@@ -422,6 +477,303 @@ _tn_rows :: proc(a, b, out: ^Matrix(f64), r0, r1: int) #no_bounds_check {
 				}
 				O[k2 * N + j] = c
 			}
+		}
+	}
+}
+
+// ============================================================================
+// Packed kernels for large products (nn and tn)
+// ============================================================================
+// B is copied once into panels of whole vector columns, Bp[j · Kr + k · L + l] =
+// B[k, j + l], so the micro-kernel reads it sequentially: in place, rows of B
+// that are a multiple of 4 KB apart map to the same L1 cache sets and evict
+// each other. A register block of rows x one vector column is updated over a
+// run of _PK_RUN reduction steps, for column blocks of _PK_COLS. Each output
+// element still adds its terms one at a time in ascending reduction order, as
+// y + a*x, so the results are those of the unpacked kernels, with one
+// difference: those skip a = 0, and the packed kernels skip it only when B
+// holds an inf or a NaN (found while packing), where 0 * inf would give NaN.
+// For finite B, adding 0 * x leaves y unchanged, except that -0 becomes +0.
+// Threads take chunks of rows and of vector columns, so that products with
+// few output rows (a weight gradient with a long reduction) still keep every
+// thread busy with whole register blocks. Below _PACK_REUSE output rows the
+// packed copy would be read too few times to pay for itself, and the same
+// kernel reads B in place.
+//
+// With AVX2 (matmul_avx2) the kernels run as AVX2 code even in builds for
+// plain x86-64, with the same results (no fused multiply-adds).
+
+// matmul_avx2: whether the matmul kernels use AVX2. Set at start-up from the
+// CPU; set it to false to run the SSE2 kernels. Results are the same.
+matmul_avx2 := false
+
+@(init, private = "file")
+_matmul_detect_cpu :: proc "contextless" () {
+	when ODIN_ARCH == .amd64 {
+		matmul_avx2 = .avx2 in info.cpu_features()
+	}
+}
+
+// Products with fewer output rows use the unpacked kernels (packing B costs
+// as much as _PACK_MIN_ROWS / 16 rows of the product)
+@(private = "file")
+_PACK_MIN_ROWS :: 16
+@(private = "file")
+_PACK_REUSE :: 64
+// Packed copies up to this many values (8 MB) reuse a buffer kept by the
+// calling thread: a fresh large allocation per product costs page faults
+@(private = "file")
+_PACK_KEEP :: 1 << 20
+@(private = "file", thread_local)
+_pack_buf: []f64
+@(private = "file")
+_PK_RUN :: 256
+@(private = "file")
+_PK_COLS :: 256
+
+@(private = "file")
+_use_packed :: proc(rows, cols: int) -> bool {
+	when !simd.HAS_HARDWARE_SIMD {return false}
+	return rows >= _PACK_MIN_ROWS && cols >= 16
+}
+
+@(private = "file")
+_Packed_Job :: struct {
+	A, B, Bp, O: []f64,
+	sr, sk:      int, // a(r, k) = A[r · sr + k · sk]
+	Kr, N:       int, // B: [Kr, N]
+	avx2:        bool,
+	skip:        bool, // skip a = 0 (B holds an inf or a NaN)
+	packed:      bool, // Bp holds B packed (else the kernel reads B in place)
+	nonfinite:   bool, // set by the packing tasks
+	rows:        int,
+	row_chunks:  int, // tasks: row_chunks x col_chunks
+	col_chunks:  int,
+	lanes:       int,
+}
+
+// _matmul_packed: out[r, :] += Σ_k a(r, k) · B[k, :] for r < rows, k < Kr,
+// with a(r, k) = A[r · sr + k · sk] (nn: sr = K, sk = 1; tn: sr = 1, sk = K)
+@(private = "file")
+_matmul_packed :: proc(A, B, O: []f64, sr, sk, rows, Kr, N: int) {
+	avx2 := false
+	when ODIN_ARCH == .amd64 {avx2 = matmul_avx2}
+	lanes := 8 if avx2 else 4
+	cols := N / lanes
+	// tasks: chunks of at least 4 register blocks of rows, then column chunks
+	// until every thread has one
+	threads := _matmul_threads(rows * max(cols, 1), rows * Kr * N)
+	row_chunks := clamp(rows / (4 * (6 if avx2 else 4)), 1, threads)
+	col_chunks := clamp(threads / row_chunks, 1, max(cols, 1))
+	heap := runtime.heap_allocator()
+	packed := rows >= _PACK_REUSE
+	Bp: []f64
+	fresh := false
+	if packed {
+		n := Kr * (N - N % lanes)
+		if n > _PACK_KEEP {
+			Bp, fresh = make([]f64, n, heap), true
+		} else {
+			if len(_pack_buf) < n {
+				delete(_pack_buf, heap)
+				_pack_buf = make([]f64, max(n, 1 << 14), heap)
+			}
+			Bp = _pack_buf[:n]
+		}
+	}
+	defer if fresh {delete(Bp, heap)}
+	job := _Packed_Job {
+		A          = A,
+		B          = B,
+		Bp         = Bp,
+		O          = O,
+		sr         = sr,
+		sk         = sk,
+		Kr         = Kr,
+		N          = N,
+		avx2       = avx2,
+		rows       = rows,
+		row_chunks = row_chunks,
+		col_chunks = col_chunks,
+		lanes      = lanes,
+		packed     = packed,
+	}
+	// pack the vector columns, split across threads when B is large (in
+	// place: only check B for inf and NaN)
+	pack_tasks := threads if Kr * N >= MATMUL_PARALLEL_MIN_FLOPS else 1
+	util.parallel_for(cols, &job, proc(data: rawptr, begin, end: int) {
+			j := (^_Packed_Job)(data)
+			finite: bool
+			when ODIN_ARCH == .amd64 {
+				if j.avx2 {
+					finite = _pack_avx2(j.B, j.Bp, j.Kr, j.N, begin, end, j.packed)
+				} else {
+					finite = _pack(simd.f64x4, j.B, j.Bp, j.Kr, j.N, begin, end, j.packed)
+				}
+			} else {
+				finite = _pack(simd.f64x4, j.B, j.Bp, j.Kr, j.N, begin, end, j.packed)
+			}
+			if !finite {intrinsics.atomic_store(&j.nonfinite, true)}
+		}, pack_tasks)
+	job.skip = job.nonfinite
+	tasks := row_chunks * col_chunks
+	util.parallel_for(
+		tasks,
+		&job,
+		proc(data: rawptr, begin, end: int) {
+			j := (^_Packed_Job)(data)
+			cols := j.N / j.lanes
+			for t in begin ..< end {
+				rc, cc := t / j.col_chunks, t % j.col_chunks
+				r0, r1 := rc * j.rows / j.row_chunks, (rc + 1) * j.rows / j.row_chunks
+				// column range in values; the last chunk also takes the tail columns
+				c0 := cc * cols / j.col_chunks * j.lanes
+				c1 := (cc + 1) * cols / j.col_chunks * j.lanes
+				tail := cc == j.col_chunks - 1
+				when ODIN_ARCH == .amd64 {
+					if j.avx2 {
+						_packed_rows_avx2(j, r0, r1, c0, c1, tail)
+						continue
+					}
+				}
+				switch {
+				case j.packed && j.skip:
+					_packed_rows(4, simd.f64x4, true, true, j, r0, r1, c0, c1, tail)
+				case j.packed:
+					_packed_rows(4, simd.f64x4, false, true, j, r0, r1, c0, c1, tail)
+				case j.skip:
+					_packed_rows(4, simd.f64x4, true, false, j, r0, r1, c0, c1, tail)
+				case:
+					_packed_rows(4, simd.f64x4, false, false, j, r0, r1, c0, c1, tail)
+				}
+			}
+		},
+		tasks,
+	)
+}
+
+when ODIN_ARCH == .amd64 {
+	@(private = "file", enable_target_feature = "avx2")
+	_pack_avx2 :: proc "contextless" (B, Bp: []f64, Kr, N, c0, c1: int, copy: bool) -> bool {
+		return _pack(simd.f64x8, B, Bp, Kr, N, c0, c1, copy)
+	}
+
+	@(private = "file", enable_target_feature = "avx2")
+	_packed_rows_avx2 :: proc "contextless" (j: ^_Packed_Job, r0, r1, c0, c1: int, tail: bool) {
+		switch {
+		case j.packed && j.skip:
+			_packed_rows(6, simd.f64x8, true, true, j, r0, r1, c0, c1, tail)
+		case j.packed:
+			_packed_rows(6, simd.f64x8, false, true, j, r0, r1, c0, c1, tail)
+		case j.skip:
+			_packed_rows(6, simd.f64x8, true, false, j, r0, r1, c0, c1, tail)
+		case:
+			_packed_rows(6, simd.f64x8, false, false, j, r0, r1, c0, c1, tail)
+		}
+	}
+}
+
+// _pack copies vector columns c0 ..< c1 of B into Bp (with `copy`); false if
+// they hold an inf or a NaN
+@(private = "file")
+_pack :: #force_inline proc "contextless" (
+	$V: typeid,
+	B, Bp: []f64,
+	Kr, N, c0, c1: int,
+	copy: bool,
+) -> bool #no_bounds_check {
+	L :: size_of(V) / 8
+	z: V // stays 0 unless a value is inf or NaN
+	for c in c0 ..< c1 {
+		j := c * L
+		for k in 0 ..< Kr {
+			v := intrinsics.unaligned_load((^V)(&B[k * N + j]))
+			z = z + v * V(0)
+			if copy {intrinsics.unaligned_store((^V)(&Bp[j * Kr + k * L]), v)}
+		}
+	}
+	return intrinsics.simd_reduce_or(intrinsics.simd_lanes_ne(z, V(0))) == 0
+}
+
+// _packed_rows: output rows r0 ..< r1, columns c0 ..< c1 (whole vectors),
+// R rows x one vector column at a time, from packed B (PACKED) or B in place;
+// with `tail` also the columns past the last full vector
+@(private = "file")
+_packed_rows :: #force_inline proc "contextless" (
+	$R: int,
+	$V: typeid,
+	$SKIP: bool,
+	$PACKED: bool,
+	job: ^_Packed_Job,
+	r0, r1, c0, c1: int,
+	tail: bool,
+) #no_bounds_check {
+	L :: size_of(V) / 8
+	A, B, Bp, O := job.A, job.B, job.Bp, job.O
+	sr, sk, Kr, N := job.sr, job.sk, job.Kr, job.N
+	Nv := N - N % L
+	ld :: #force_inline proc "contextless" (p: ^f64) -> V {return intrinsics.unaligned_load(
+			(^V)(p),
+		)}
+	st :: #force_inline proc "contextless" (p: ^f64, v: V) {intrinsics.unaligned_store((^V)(p), v)}
+	for jc := c0; jc < c1; jc += _PK_COLS {
+		jc_end := min(jc + _PK_COLS, c1)
+		for kk := 0; kk < Kr; kk += _PK_RUN {
+			k_end := min(kk + _PK_RUN, Kr)
+			i := r0
+			for ; i + R <= r1; i += R {
+				for j := jc; j < jc_end; j += L {
+					c: [R]V
+					#unroll for r in 0 ..< R {c[r] = ld(&O[(i + r) * N + j])}
+					for k in kk ..< k_end {
+						when PACKED {
+							bv := ld(&Bp[j * Kr + k * L])
+						} else {
+							bv := ld(&B[k * N + j])
+						}
+						#unroll for r in 0 ..< R {
+							av := A[(i + r) * sr + k * sk]
+							when SKIP {
+								if av != 0 {c[r] = c[r] + V(av) * bv}
+							} else {
+								c[r] = c[r] + V(av) * bv
+							}
+						}
+					}
+					#unroll for r in 0 ..< R {st(&O[(i + r) * N + j], c[r])}
+				}
+			}
+			for ; i < r1; i += 1 {
+				for j := jc; j < jc_end; j += L {
+					c := ld(&O[i * N + j])
+					for k in kk ..< k_end {
+						av := A[i * sr + k * sk]
+						when PACKED {
+							bv := ld(&Bp[j * Kr + k * L])
+						} else {
+							bv := ld(&B[k * N + j])
+						}
+						when SKIP {
+							if av != 0 {c = c + V(av) * bv}
+						} else {
+							c = c + V(av) * bv
+						}
+					}
+					st(&O[i * N + j], c)
+				}
+			}
+		}
+	}
+	// Columns past the last full vector, from B in place
+	if !tail {return}
+	for i in r0 ..< r1 {
+		for j in Nv ..< N {
+			c := O[i * N + j]
+			for k in 0 ..< Kr {
+				av := A[i * sr + k * sk]
+				if av != 0 {c += av * B[k * N + j]}
+			}
+			O[i * N + j] = c
 		}
 	}
 }
@@ -547,7 +899,8 @@ lu_solve_simd :: proc(
 }
 // y += alpha * x  (SIMD, f64)
 // y += alpha * x  (SIMD, f64)
-axpy_simd :: proc(alpha: f64, x, y: []f64) {
+@(private = "file")
+_axpy_simd_serial :: proc(alpha: f64, x, y: []f64) {
 	n := len(x)
 	if n != len(y) do panic("axpy_simd: length mismatch")
 
@@ -856,7 +1209,8 @@ kron_simd :: proc(
 // ============================================================================
 // SIMD Vector Subtraction: out = a - b (element-wise, f64)
 // ============================================================================
-vec_sub_simd :: proc(a, b, out: []f64) {
+@(private = "file")
+_vec_sub_simd_serial :: proc(a, b, out: []f64) {
 	n := len(a)
 	if n != len(b) || n != len(out) do panic("vec_sub_simd: length mismatch")
 
@@ -949,7 +1303,8 @@ vec_sub_simd :: proc(a, b, out: []f64) {
 // ============================================================================
 // SIMD In-Place Vector Subtraction: a -= b (element-wise, f64)
 // ============================================================================
-vec_sub_inplace_simd :: proc(a, b: []f64) {
+@(private = "file")
+_vec_sub_inplace_simd_serial :: proc(a, b: []f64) {
 	n := len(a)
 	if n != len(b) do panic("vec_sub_inplace_simd: length mismatch")
 
@@ -1026,7 +1381,8 @@ vec_sub_inplace_simd :: proc(a, b: []f64) {
 // ============================================================================
 // SIMD Vector Addition: out = a + b (element-wise, f64)
 // ============================================================================
-vec_add_simd :: proc(a, b, out: []f64, loc := #caller_location) {
+@(private = "file")
+_vec_add_simd_serial :: proc(a, b, out: []f64, loc := #caller_location) {
 	n := len(a)
 	if n != len(b) || n != len(out) {
 		panic(fmt.tprintf("vec_add_simd: length mismatch (%d, %d, %d)", n, len(b), len(out)), loc)
@@ -1123,7 +1479,8 @@ vec_add_simd :: proc(a, b, out: []f64, loc := #caller_location) {
 // ============================================================================
 // SIMD Vector Multiplication: out = a * b (element-wise, f64)
 // ============================================================================
-vec_mul_simd :: proc(a, b, out: []f64) {
+@(private = "file")
+_vec_mul_simd_serial :: proc(a, b, out: []f64) {
 	n := len(a)
 	if n != len(b) || n != len(out) do panic("vec_mul_simd: length mismatch")
 
@@ -1217,7 +1574,8 @@ vec_mul_simd :: proc(a, b, out: []f64) {
 // SIMD Fused Multiply-Add (In-Place): c += a * b (element-wise, f64)
 // This is the core operation of Neural Network backward passes!
 // ============================================================================
-vec_fma_inplace_simd :: proc(a, b, c: []f64) {
+@(private = "file")
+_vec_fma_inplace_simd_serial :: proc(a, b, c: []f64) {
 	n := len(a)
 	if n != len(b) || n != len(c) do panic("vec_fma_inplace_simd: length mismatch")
 
@@ -1346,7 +1704,8 @@ sum_simd :: proc(a: []f64) -> f64 {
 // ============================================================================
 // SIMD ReLU Forward: out = max(0, a)
 // ============================================================================
-vec_relu_simd :: proc(a, out: []f64) {
+@(private = "file")
+_vec_relu_simd_serial :: proc(a, out: []f64) {
 	n := len(a)
 	if n != len(out) do panic("vec_relu_simd: length mismatch")
 
@@ -1397,7 +1756,8 @@ vec_relu_simd :: proc(a, out: []f64) {
 // ============================================================================
 // SIMD ReLU Backward: grad_in += grad_out * (a_in > 0)
 // ============================================================================
-vec_relu_backward_simd :: proc(grad_out, a_in, grad_in: []f64) {
+@(private = "file")
+_vec_relu_backward_simd_serial :: proc(grad_out, a_in, grad_in: []f64) {
 	n := len(grad_out)
 	if n != len(a_in) || n != len(grad_in) do panic("vec_relu_backward_simd: length mismatch")
 
@@ -1478,7 +1838,8 @@ vec_relu_backward_simd :: proc(grad_out, a_in, grad_in: []f64) {
 // ============================================================================
 // SIMD Vector Negation: out = -a (element-wise, f64)
 // ============================================================================
-vec_neg_simd :: proc(a, out: []f64) {
+@(private = "file")
+_vec_neg_simd_serial :: proc(a, out: []f64) {
 	n := len(a)
 	if n != len(out) do panic("vec_neg_simd: length mismatch")
 
@@ -1543,7 +1904,8 @@ vec_neg_simd :: proc(a, out: []f64) {
 // ============================================================================
 // SIMD Vector Scale: out = a * scalar (element-wise, f64)
 // ============================================================================
-vec_scale_simd :: proc(a: []f64, scalar: f64, out: []f64) {
+@(private = "file")
+_vec_scale_simd_serial :: proc(a: []f64, scalar: f64, out: []f64) {
 	n := len(a)
 	if n != len(out) do panic("vec_scale_simd: length mismatch")
 
@@ -1615,7 +1977,8 @@ vec_scale_simd :: proc(a: []f64, scalar: f64, out: []f64) {
 // ============================================================================
 // SIMD Sigmoid Forward: out = 1 / (1 + exp(-a)) (element-wise, f64)
 // ============================================================================
-vec_sigmoid_simd :: proc(a, out: []f64) {
+@(private = "file")
+_vec_sigmoid_simd_serial :: proc(a, out: []f64) {
 	n := len(a)
 	if n != len(out) do panic("vec_sigmoid_simd: length mismatch")
 
@@ -1705,7 +2068,8 @@ vec_sigmoid_simd :: proc(a, out: []f64) {
 // ============================================================================
 // SIMD Tanh Forward: out = tanh(a) (element-wise, f64)
 // ============================================================================
-vec_tanh_simd :: proc(a, out: []f64) {
+@(private = "file")
+_vec_tanh_simd_serial :: proc(a, out: []f64) {
 	n := len(a)
 	if n != len(out) do panic("vec_tanh_simd: length mismatch")
 
@@ -1795,7 +2159,8 @@ vec_tanh_simd :: proc(a, out: []f64) {
 // ============================================================================
 // SIMD Leaky ReLU Forward: out = max(alpha*a, a) (element-wise, f64)
 // ============================================================================
-vec_leaky_relu_simd :: proc(a: []f64, alpha: f64, out: []f64) {
+@(private = "file")
+_vec_leaky_relu_simd_serial :: proc(a: []f64, alpha: f64, out: []f64) {
 	n := len(a)
 	if n != len(out) do panic("vec_leaky_relu_simd: length mismatch")
 
@@ -1875,7 +2240,8 @@ vec_leaky_relu_simd :: proc(a: []f64, alpha: f64, out: []f64) {
 // ============================================================================
 // SIMD Sigmoid Backward: out += grad * sigmoid(a) * (1 - sigmoid(a))
 // ============================================================================
-vec_sigmoid_backward_simd :: proc(grad, a, out: []f64) {
+@(private = "file")
+_vec_sigmoid_backward_simd_serial :: proc(grad, a, out: []f64) {
 	n := len(grad)
 	if n != len(a) || n != len(out) do panic("vec_sigmoid_backward_simd: length mismatch")
 
@@ -1998,7 +2364,8 @@ vec_sigmoid_backward_simd :: proc(grad, a, out: []f64) {
 // ============================================================================
 // SIMD Tanh Backward: out += grad * (1 - tanh(a)^2)
 // ============================================================================
-vec_tanh_backward_simd :: proc(grad, a, out: []f64) {
+@(private = "file")
+_vec_tanh_backward_simd_serial :: proc(grad, a, out: []f64) {
 	n := len(grad)
 	if n != len(a) || n != len(out) do panic("vec_tanh_backward_simd: length mismatch")
 
@@ -2125,7 +2492,8 @@ vec_tanh_backward_simd :: proc(grad, a, out: []f64) {
 // ============================================================================
 // SIMD Broadcast Add: out[i] += scalar for all i (f64)
 // ============================================================================
-vec_broadcast_add_simd :: proc(scalar: f64, out: []f64) {
+@(private = "file")
+_vec_broadcast_add_simd_serial :: proc(scalar: f64, out: []f64) {
 	n := len(out)
 
 	if scalar == 0.0 {
@@ -2188,4 +2556,220 @@ vec_broadcast_add_simd :: proc(scalar: f64, out: []f64) {
 	for i := 0; i < n; i += 1 {
 		out[i] += scalar
 	}
+}
+
+// ============================================================================
+// Elementwise helpers on large arrays: split across threads
+// ============================================================================
+// The public elementwise helpers above (axpy_simd, vec_*_simd) run arrays of
+// at least VEC_PARALLEL_MIN values on the worker pool. Each thread takes a
+// chunk whose length is a multiple of 64 values, so every value goes through
+// the same vector body or scalar tail as in one serial call (some helpers
+// compute the two differently), and the results are identical.
+
+// VEC_PARALLEL_MIN: arrays shorter than this run on the calling thread
+VEC_PARALLEL_MIN :: 1 << 16
+
+@(private = "file")
+_Vec_Op :: enum {
+	Axpy,
+	Sub,
+	Sub_Inplace,
+	Add,
+	Mul,
+	Fma_Inplace,
+	Relu,
+	Relu_Backward,
+	Neg,
+	Scale,
+	Sigmoid,
+	Tanh,
+	Leaky_Relu,
+	Sigmoid_Backward,
+	Tanh_Backward,
+	Broadcast_Add,
+}
+
+@(private = "file")
+_Vec_Job :: struct {
+	op:      _Vec_Op,
+	x, y, z: []f64, // the helper's slices in order (unused ones nil)
+	s:       f64, // its scalar
+	n:       int,
+	chunk:   int,
+}
+
+// _vec_split: whether an elementwise op on n values (all slices of length n)
+// runs split, and then does so
+@(private = "file")
+_vec_split :: proc(op: _Vec_Op, n: int, x, y, z: []f64, s: f64, lens_ok: bool) -> bool {
+	if n < VEC_PARALLEL_MIN || !lens_ok {return false}
+	tasks := min(util.parallel_thread_count(), n / (VEC_PARALLEL_MIN / 4))
+	if tasks <= 1 {return false}
+	chunk := ((n + tasks - 1) / tasks + 63) / 64 * 64
+	tasks = (n + chunk - 1) / chunk
+	job := _Vec_Job{op, x, y, z, s, n, chunk}
+	util.parallel_for(tasks, &job, proc(data: rawptr, begin, end: int) {
+			j := (^_Vec_Job)(data)
+			for t in begin ..< end {
+				b, e := t * j.chunk, min(j.n, (t + 1) * j.chunk)
+				x, y, z := j.x, j.y, j.z
+				switch j.op {
+				case .Axpy:
+					_axpy_simd_serial(j.s, x[b:e], y[b:e])
+				case .Sub:
+					_vec_sub_simd_serial(x[b:e], y[b:e], z[b:e])
+				case .Sub_Inplace:
+					_vec_sub_inplace_simd_serial(x[b:e], y[b:e])
+				case .Add:
+					_vec_add_simd_serial(x[b:e], y[b:e], z[b:e])
+				case .Mul:
+					_vec_mul_simd_serial(x[b:e], y[b:e], z[b:e])
+				case .Fma_Inplace:
+					_vec_fma_inplace_simd_serial(x[b:e], y[b:e], z[b:e])
+				case .Relu:
+					_vec_relu_simd_serial(x[b:e], z[b:e])
+				case .Relu_Backward:
+					_vec_relu_backward_simd_serial(x[b:e], y[b:e], z[b:e])
+				case .Neg:
+					_vec_neg_simd_serial(x[b:e], z[b:e])
+				case .Scale:
+					_vec_scale_simd_serial(x[b:e], j.s, z[b:e])
+				case .Sigmoid:
+					_vec_sigmoid_simd_serial(x[b:e], z[b:e])
+				case .Tanh:
+					_vec_tanh_simd_serial(x[b:e], z[b:e])
+				case .Leaky_Relu:
+					_vec_leaky_relu_simd_serial(x[b:e], j.s, z[b:e])
+				case .Sigmoid_Backward:
+					_vec_sigmoid_backward_simd_serial(x[b:e], y[b:e], z[b:e])
+				case .Tanh_Backward:
+					_vec_tanh_backward_simd_serial(x[b:e], y[b:e], z[b:e])
+				case .Broadcast_Add:
+					_vec_broadcast_add_simd_serial(j.s, z[b:e])
+				}
+			}
+		}, tasks)
+	return true
+}
+
+// y += alpha * x  (SIMD, f64)
+axpy_simd :: proc(alpha: f64, x, y: []f64) {
+	n := len(x)
+	if alpha != 0 && _vec_split(.Axpy, n, x, y, nil, alpha, n == len(y)) {return}
+	_axpy_simd_serial(alpha, x, y)
+}
+
+// out = a - b (element-wise, f64)
+vec_sub_simd :: proc(a, b, out: []f64) {
+	n := len(a)
+	if _vec_split(.Sub, n, a, b, out, 0, n == len(b) && n == len(out)) {return}
+	_vec_sub_simd_serial(a, b, out)
+}
+
+// a -= b (element-wise, f64)
+vec_sub_inplace_simd :: proc(a, b: []f64) {
+	n := len(a)
+	if _vec_split(.Sub_Inplace, n, a, b, nil, 0, n == len(b)) {return}
+	_vec_sub_inplace_simd_serial(a, b)
+}
+
+// out = a + b (element-wise, f64)
+vec_add_simd :: proc(a, b, out: []f64, loc := #caller_location) {
+	n := len(a)
+	if _vec_split(.Add, n, a, b, out, 0, n == len(b) && n == len(out)) {return}
+	_vec_add_simd_serial(a, b, out, loc)
+}
+
+// out = a * b (element-wise, f64)
+vec_mul_simd :: proc(a, b, out: []f64) {
+	n := len(a)
+	if _vec_split(.Mul, n, a, b, out, 0, n == len(b) && n == len(out)) {return}
+	_vec_mul_simd_serial(a, b, out)
+}
+
+// c += a * b (element-wise, f64)
+vec_fma_inplace_simd :: proc(a, b, c: []f64) {
+	n := len(a)
+	if _vec_split(.Fma_Inplace, n, a, b, c, 0, n == len(b) && n == len(c)) {return}
+	_vec_fma_inplace_simd_serial(a, b, c)
+}
+
+// out = max(0, a)
+vec_relu_simd :: proc(a, out: []f64) {
+	n := len(a)
+	if _vec_split(.Relu, n, a, nil, out, 0, n == len(out)) {return}
+	_vec_relu_simd_serial(a, out)
+}
+
+// grad_in += grad_out * (a_in > 0)
+vec_relu_backward_simd :: proc(grad_out, a_in, grad_in: []f64) {
+	n := len(grad_out)
+	if _vec_split(
+		.Relu_Backward,
+		n,
+		grad_out,
+		a_in,
+		grad_in,
+		0,
+		n == len(a_in) && n == len(grad_in),
+	) {
+		return
+	}
+	_vec_relu_backward_simd_serial(grad_out, a_in, grad_in)
+}
+
+// out = -a (element-wise, f64)
+vec_neg_simd :: proc(a, out: []f64) {
+	n := len(a)
+	if _vec_split(.Neg, n, a, nil, out, 0, n == len(out)) {return}
+	_vec_neg_simd_serial(a, out)
+}
+
+// out = a * scalar (element-wise, f64)
+vec_scale_simd :: proc(a: []f64, scalar: f64, out: []f64) {
+	n := len(a)
+	if _vec_split(.Scale, n, a, nil, out, scalar, n == len(out)) {return}
+	_vec_scale_simd_serial(a, scalar, out)
+}
+
+// out = 1 / (1 + exp(-a)) (element-wise, f64)
+vec_sigmoid_simd :: proc(a, out: []f64) {
+	n := len(a)
+	if _vec_split(.Sigmoid, n, a, nil, out, 0, n == len(out)) {return}
+	_vec_sigmoid_simd_serial(a, out)
+}
+
+// out = tanh(a) (element-wise, f64)
+vec_tanh_simd :: proc(a, out: []f64) {
+	n := len(a)
+	if _vec_split(.Tanh, n, a, nil, out, 0, n == len(out)) {return}
+	_vec_tanh_simd_serial(a, out)
+}
+
+// out = max(alpha*a, a) (element-wise, f64)
+vec_leaky_relu_simd :: proc(a: []f64, alpha: f64, out: []f64) {
+	n := len(a)
+	if _vec_split(.Leaky_Relu, n, a, nil, out, alpha, n == len(out)) {return}
+	_vec_leaky_relu_simd_serial(a, alpha, out)
+}
+
+// out += grad * sigmoid(a) * (1 - sigmoid(a))
+vec_sigmoid_backward_simd :: proc(grad, a, out: []f64) {
+	n := len(grad)
+	if _vec_split(.Sigmoid_Backward, n, grad, a, out, 0, n == len(a) && n == len(out)) {return}
+	_vec_sigmoid_backward_simd_serial(grad, a, out)
+}
+
+// out += grad * (1 - tanh(a)^2)
+vec_tanh_backward_simd :: proc(grad, a, out: []f64) {
+	n := len(grad)
+	if _vec_split(.Tanh_Backward, n, grad, a, out, 0, n == len(a) && n == len(out)) {return}
+	_vec_tanh_backward_simd_serial(grad, a, out)
+}
+
+// out[i] += scalar for all i (f64)
+vec_broadcast_add_simd :: proc(scalar: f64, out: []f64) {
+	if scalar != 0 && _vec_split(.Broadcast_Add, len(out), nil, nil, out, scalar, true) {return}
+	_vec_broadcast_add_simd_serial(scalar, out)
 }

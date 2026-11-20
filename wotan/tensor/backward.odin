@@ -3,6 +3,7 @@ package tensor
 
 import l "../linalg"
 import "../util"
+import "base:runtime"
 import "core:fmt"
 import "core:math"
 import "core:mem"
@@ -417,14 +418,21 @@ _backward_node_cpu :: proc(node: ^Tensor, allocator: mem.Allocator) {
 		a_in := node.inputs[0]
 		if a_in.requires_grad {
 			tensor_ensure_grad(a_in)
-			for i in 0 ..< len(a_in.grad.data) {
-				// d/dx 0.5 x (1 + tanh u) with u = c (x + 0.044715 x³)
-				x := a_in.data.data[i]
-				th := math.tanh(GELU_TANH_C * (x + 0.044715 * x * x * x))
-				du := GELU_TANH_C * (1.0 + 3.0 * 0.044715 * x * x)
-				a_in.grad.data[i] +=
-					node.grad.data[i] * (0.5 * (1.0 + th) + 0.5 * x * (1.0 - th * th) * du)
-			}
+			job := _Elem_Job{a_in.data.data, a_in.grad.data, node.grad.data}
+			_parallel_elems(
+				len(job.dst),
+				&job,
+				proc(data: rawptr, begin, end: int) {
+					j := (^_Elem_Job)(data)
+					for i in begin ..< end {
+						// d/dx 0.5 x (1 + tanh u) with u = c (x + 0.044715 x³)
+						x := j.src[i]
+						th := math.tanh(GELU_TANH_C * (x + 0.044715 * x * x * x))
+						du := GELU_TANH_C * (1.0 + 3.0 * 0.044715 * x * x)
+						j.dst[i] += j.grad[i] * (0.5 * (1.0 + th) + 0.5 * x * (1.0 - th * th) * du)
+					}
+				},
+			)
 		}
 	case .Gelu:
 		// only recorded on the GPU; its CPU backward (kernel disabled after the
@@ -443,13 +451,21 @@ _backward_node_cpu :: proc(node: ^Tensor, allocator: mem.Allocator) {
 		a_in := node.inputs[0]
 		if a_in.requires_grad {
 			tensor_ensure_grad(a_in)
-			inv_sqrt_2pi := 0.3989422804014327
-			for i in 0 ..< len(a_in.grad.data) {
-				// d/dx N(x) = φ(x) = (1/√(2π)) * exp(-x²/2)
-				x := a_in.data.data[i]
-				phi := math.exp(-0.5 * x * x) * inv_sqrt_2pi
-				a_in.grad.data[i] += node.grad.data[i] * phi
-			}
+			job := _Elem_Job{a_in.data.data, a_in.grad.data, node.grad.data}
+			_parallel_elems(
+				len(job.dst),
+				&job,
+				proc(data: rawptr, begin, end: int) {
+					j := (^_Elem_Job)(data)
+					inv_sqrt_2pi := 0.3989422804014327
+					for i in begin ..< end {
+						// d/dx N(x) = φ(x) = (1/√(2π)) * exp(-x²/2)
+						x := j.src[i]
+						phi := math.exp(-0.5 * x * x) * inv_sqrt_2pi
+						j.dst[i] += j.grad[i] * phi
+					}
+				},
+			)
 		}
 	case .PermuteMHA:
 		x_in := node.inputs[0]
@@ -1647,25 +1663,57 @@ _attention_backward :: proc(node: ^Tensor, mask: []f64, allocator: mem.Allocator
 	K_in := node.inputs[1]
 	V_in := node.inputs[2]
 
+	job := _Attention_Bwd_Job {
+		Q     = Q_in.data.data,
+		K     = K_in.data.data,
+		V     = V_in.data.data,
+		dO    = node.grad.data,
+		mask  = mask,
+		seq_q = Q_in.shape[1],
+		seq_k = K_in.shape[1],
+		d_k   = Q_in.shape[2],
+		d_v   = V_in.shape[2],
+	}
+	if Q_in.requires_grad {job.dQ = Q_in.grad.data}
+	if K_in.requires_grad {job.dK = K_in.grad.data}
+	if V_in.requires_grad {job.dV = V_in.grad.data}
 	batch := Q_in.shape[0]
-	seq_q := Q_in.shape[1]
-	seq_k := K_in.shape[1]
-	d_k := Q_in.shape[2]
-	d_v := V_in.shape[2]
-	scale := 1.0 / math.sqrt(f64(d_k))
+	// the sequences are independent and write their own slices of the gradients
+	util.parallel_for(
+		batch,
+		&job,
+		_attention_backward_seqs,
+		_attention_tasks(batch, job.seq_q * job.seq_k * (2 * job.d_k + 2 * job.d_v)),
+	)
+}
 
-	p_buf := make([]f64, seq_q * seq_k, allocator)
-	ds_buf := make([]f64, seq_q * seq_k, allocator)
+@(private = "file")
+_Attention_Bwd_Job :: struct {
+	Q, K, V, dO, mask:      []f64,
+	dQ, dK, dV:             []f64, // nil: no gradient wanted
+	seq_q, seq_k, d_k, d_v: int,
+}
+
+// _attention_backward_seqs: the backward pass of sequences b0 ..< b1
+@(private = "file")
+_attention_backward_seqs :: proc(data: rawptr, b0, b1: int) {
+	j := (^_Attention_Bwd_Job)(data)
+	seq_q, seq_k, d_k, d_v := j.seq_q, j.seq_k, j.d_k, j.d_v
+	mask := j.mask
+	scale := 1.0 / math.sqrt(f64(d_k))
+	heap := runtime.heap_allocator()
+	p_buf := make([]f64, seq_q * seq_k, heap)
+	ds_buf := make([]f64, seq_q * seq_k, heap)
 	defer {
-		delete(p_buf, allocator)
-		delete(ds_buf, allocator)
+		delete(p_buf, heap)
+		delete(ds_buf, heap)
 	}
 
-	for b in 0 ..< batch {
-		q_b := _mat(seq_q, d_k, Q_in.data.data[b * seq_q * d_k:(b + 1) * seq_q * d_k])
-		k_b := _mat(seq_k, d_k, K_in.data.data[b * seq_k * d_k:(b + 1) * seq_k * d_k])
-		v_b := _mat(seq_k, d_v, V_in.data.data[b * seq_k * d_v:(b + 1) * seq_k * d_v])
-		dO_b := _mat(seq_q, d_v, node.grad.data[b * seq_q * d_v:(b + 1) * seq_q * d_v])
+	for b in b0 ..< b1 {
+		q_b := _mat(seq_q, d_k, j.Q[b * seq_q * d_k:(b + 1) * seq_q * d_k])
+		k_b := _mat(seq_k, d_k, j.K[b * seq_k * d_k:(b + 1) * seq_k * d_k])
+		v_b := _mat(seq_k, d_v, j.V[b * seq_k * d_v:(b + 1) * seq_k * d_v])
+		dO_b := _mat(seq_q, d_v, j.dO[b * seq_q * d_v:(b + 1) * seq_q * d_v])
 
 		// 1. Recompute P = softmax(scale * Q K^T + mask) (checkpointing)
 		P := _mat(seq_q, seq_k, p_buf)
@@ -1681,21 +1729,21 @@ _attention_backward :: proc(node: ^Tensor, mask: []f64, allocator: mem.Allocator
 			max_val := row[0]
 			for v in row[1:] {if v > max_val {max_val = v}}
 			sum_exp := 0.0
-			for j in 0 ..< seq_k {
-				row[j] = math.exp(row[j] - max_val)
-				sum_exp += row[j]
+			for c in 0 ..< seq_k {
+				row[c] = math.exp(row[c] - max_val)
+				sum_exp += row[c]
 			}
 			inv_sum := 1.0 / sum_exp
-			for j in 0 ..< seq_k {row[j] *= inv_sum}
+			for c in 0 ..< seq_k {row[c] *= inv_sum}
 		}
 
 		// 2. dV += P^T @ dO
-		if V_in.requires_grad {
-			dV_b := _mat(seq_k, d_v, V_in.grad.data[b * seq_k * d_v:(b + 1) * seq_k * d_v])
+		if j.dV != nil {
+			dV_b := _mat(seq_k, d_v, j.dV[b * seq_k * d_v:(b + 1) * seq_k * d_v])
 			l.matmul_tn_acc_simd(&P, &dO_b, &dV_b)
 		}
 
-		if !Q_in.requires_grad && !K_in.requires_grad {continue}
+		if j.dQ == nil && j.dK == nil {continue}
 
 		// 3. dP = dO @ V^T, then dS = scale * P * (dP - rowsum(dP * P))
 		dS := _mat(seq_q, seq_k, ds_buf)
@@ -1705,18 +1753,18 @@ _attention_backward :: proc(node: ^Tensor, mask: []f64, allocator: mem.Allocator
 			p_row := p_buf[i * seq_k:(i + 1) * seq_k]
 			ds_row := ds_buf[i * seq_k:(i + 1) * seq_k]
 			row_dot := l.dot_simd(ds_row, p_row)
-			for j in 0 ..< seq_k {
-				ds_row[j] = scale * p_row[j] * (ds_row[j] - row_dot)
+			for c in 0 ..< seq_k {
+				ds_row[c] = scale * p_row[c] * (ds_row[c] - row_dot)
 			}
 		}
 
 		// 4. dQ += dS @ K,  dK += dS^T @ Q
-		if Q_in.requires_grad {
-			dQ_b := _mat(seq_q, d_k, Q_in.grad.data[b * seq_q * d_k:(b + 1) * seq_q * d_k])
+		if j.dQ != nil {
+			dQ_b := _mat(seq_q, d_k, j.dQ[b * seq_q * d_k:(b + 1) * seq_q * d_k])
 			l.matmul_nn_acc_simd(&dS, &k_b, &dQ_b)
 		}
-		if K_in.requires_grad {
-			dK_b := _mat(seq_k, d_k, K_in.grad.data[b * seq_k * d_k:(b + 1) * seq_k * d_k])
+		if j.dK != nil {
+			dK_b := _mat(seq_k, d_k, j.dK[b * seq_k * d_k:(b + 1) * seq_k * d_k])
 			l.matmul_tn_acc_simd(&dS, &q_b, &dK_b)
 		}
 	}

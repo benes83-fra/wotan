@@ -203,7 +203,7 @@ fmt.println("seq linear", z.data.rows, z.data.cols, z.shape)
 seq linear 1 8 [2, 2, 2, 1]
 ```
 
-The matrix products use the multi-threaded SIMD kernels of `linalg`. Their results do not depend on the number of threads.
+The matrix products use the multi-threaded SIMD kernels of `linalg`. Large element-wise ops and the costly ones (`tensor_norm_cdf`, and so GELU, and `tensor_gelu_tanh`) are split across threads as well. Attention runs its sequences (and heads) on parallel threads. None of this changes results: they are bit-identical to a single-threaded run.
 
 ### Shape operations
 

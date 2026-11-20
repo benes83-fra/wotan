@@ -417,9 +417,14 @@ tensor_gelu_tanh :: proc(a: ^Tensor) -> ^Tensor {
 	if _device_use(.GeluTanh, a) {return _device_elementwise(.GeluTanh, a, nil)}
 	_host_inputs(.GeluTanh, a)
 	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
-	for x, i in a.data.data {
-		out_data.data[i] = 0.5 * x * (1.0 + math.tanh(GELU_TANH_C * (x + 0.044715 * x * x * x)))
-	}
+	job := _Elem_Job{a.data.data, out_data.data, nil}
+	_parallel_elems(len(job.src), &job, proc(data: rawptr, begin, end: int) {
+		j := (^_Elem_Job)(data)
+		for i in begin ..< end {
+			x := j.src[i]
+			j.dst[i] = 0.5 * x * (1.0 + math.tanh(GELU_TANH_C * (x + 0.044715 * x * x * x)))
+		}
+	})
 	out := _tensor_new_op(out_data, a.shape, a.requires_grad, _op_alloc(a))
 	if out.requires_grad {
 		out.op = .GeluTanh
@@ -2148,68 +2153,18 @@ tensor_scaled_dot_product_attention :: proc(
 	d_v := V.shape[2]
 
 	out_data := l.matrix_new(f64, 1, batch * seq_q * d_v, _op_alloc(Q))
-	scale := 1.0 / math.sqrt(f64(d_k))
-
-	for b in 0 ..< batch {
-		q_b := l.Matrix(f64) {
-			rows = seq_q,
-			cols = d_k,
-			data = Q.data.data[b * seq_q * d_k:(b + 1) * seq_q * d_k],
-		}
-		k_b := l.Matrix(f64) {
-			rows = seq_k,
-			cols = d_k,
-			data = K.data.data[b * seq_k * d_k:(b + 1) * seq_k * d_k],
-		}
-		v_b := l.Matrix(f64) {
-			rows = seq_k,
-			cols = d_v,
-			data = V.data.data[b * seq_k * d_v:(b + 1) * seq_k * d_v],
-		}
-
-		// 1. S_b = Q_b @ K_b^T (row dot products, no transpose)
-		s_b := l.matrix_new(f64, seq_q, seq_k, allocator)
-		l.matmul_nt_acc_simd(&q_b, &k_b, &s_b)
-
-		// 2. Scale and Softmax to get P_b
-		p_b := l.Matrix(f64) {
-			rows = seq_q,
-			cols = seq_k,
-			data = s_b.data,
-		}
-		for i in 0 ..< seq_q * seq_k {
-			p_b.data[i] *= scale
-		}
-
-		// Numerically stable softmax along seq_k (rows of p_b)
-		for i in 0 ..< seq_q {
-			row_start := i * seq_k
-			max_val := p_b.data[row_start]
-			for j in 1 ..< seq_k {
-				if p_b.data[row_start + j] > max_val {
-					max_val = p_b.data[row_start + j]
-				}
-			}
-
-			sum_exp := 0.0
-			for j in 0 ..< seq_k {
-				p_b.data[row_start + j] = math.exp(p_b.data[row_start + j] - max_val)
-				sum_exp += p_b.data[row_start + j]
-			}
-
-			inv_sum := 1.0 / sum_exp
-			for j in 0 ..< seq_k {
-				p_b.data[row_start + j] *= inv_sum
-			}
-		}
-
-		// 3. O_b = P_b @ V_b
-		o_b := _matmul(&p_b, &v_b, allocator)
-		copy(out_data.data[b * seq_q * d_v:(b + 1) * seq_q * d_v], o_b.data)
-
-		l.matrix_free(&o_b)
-		l.matrix_free(&s_b)
-	}
+	_attention_forward_cpu(
+		Q.data.data,
+		K.data.data,
+		V.data.data,
+		out_data.data,
+		nil,
+		batch,
+		seq_q,
+		seq_k,
+		d_k,
+		d_v,
+	)
 
 	out := _tensor_new_op(
 		out_data,
@@ -2572,6 +2527,113 @@ tensor_layer_norm :: proc(
 // Masked Scaled Dot-Product Attention (for Decoder self-attention)
 // ============================================================================
 
+// _Attention_Job: the sequences of an attention forward pass on the CPU
+@(private = "file")
+_Attention_Job :: struct {
+	Q, K, V, out, mask:     []f64,
+	seq_q, seq_k, d_k, d_v: int,
+}
+
+// _attention_forward_cpu: out [batch, seq_q, d_v] = softmax(Q Kᵀ / √d_k + mask) V
+// for every sequence b (out zeroed). The sequences are split across threads;
+// each writes its own slice of out and uses its own score buffer.
+_attention_forward_cpu :: proc(Q, K, V, out, mask: []f64, batch, seq_q, seq_k, d_k, d_v: int) {
+	job := _Attention_Job{Q, K, V, out, mask, seq_q, seq_k, d_k, d_v}
+	util.parallel_for(
+		batch,
+		&job,
+		proc(data: rawptr, b0, b1: int) {
+			j := (^_Attention_Job)(data)
+			seq_q, seq_k, d_k, d_v := j.seq_q, j.seq_k, j.d_k, j.d_v
+			scale := 1.0 / math.sqrt(f64(d_k))
+			heap := runtime.heap_allocator()
+			s_buf := make([]f64, seq_q * seq_k, heap)
+			defer delete(s_buf, heap)
+			for b in b0 ..< b1 {
+				q_b := l.Matrix(f64) {
+					rows = seq_q,
+					cols = d_k,
+					data = j.Q[b * seq_q * d_k:(b + 1) * seq_q * d_k],
+				}
+				k_b := l.Matrix(f64) {
+					rows = seq_k,
+					cols = d_k,
+					data = j.K[b * seq_k * d_k:(b + 1) * seq_k * d_k],
+				}
+				v_b := l.Matrix(f64) {
+					rows = seq_k,
+					cols = d_v,
+					data = j.V[b * seq_k * d_v:(b + 1) * seq_k * d_v],
+				}
+
+				// 1. S_b = Q_b @ K_b^T (row dot products, no transpose)
+				mem.zero_slice(s_buf)
+				p_b := l.Matrix(f64) {
+					rows = seq_q,
+					cols = seq_k,
+					data = s_buf,
+				}
+				l.matmul_nt_acc_simd(&q_b, &k_b, &p_b)
+
+				// 2. Scale and apply the additive mask (shared or per sequence;
+				// a nil mask attends everywhere, as in the backward pass)
+				for i in 0 ..< seq_q * seq_k {s_buf[i] *= scale}
+				if mb := _mask_block(j.mask, b, seq_q * seq_k); mb != nil {
+					for i in 0 ..< seq_q * seq_k {s_buf[i] += mb[i]}
+				}
+
+				// 3. Numerically stable softmax along seq_k
+				for i in 0 ..< seq_q {
+					row := s_buf[i * seq_k:(i + 1) * seq_k]
+					max_val := row[0]
+					for v in row[1:] {if v > max_val {max_val = v}}
+					sum_exp := 0.0
+					for c in 0 ..< seq_k {
+						row[c] = math.exp(row[c] - max_val)
+						sum_exp += row[c]
+					}
+					inv_sum := 1.0 / sum_exp
+					for c in 0 ..< seq_k {row[c] *= inv_sum}
+				}
+
+				// 4. O_b = P_b @ V_b
+				o_b := l.Matrix(f64) {
+					rows = seq_q,
+					cols = d_v,
+					data = j.out[b * seq_q * d_v:(b + 1) * seq_q * d_v],
+				}
+				l.matmul_nn_acc_simd(&p_b, &v_b, &o_b)
+			}
+		},
+		_attention_tasks(batch, seq_q * seq_k * (d_k + d_v)),
+	)
+}
+
+// _attention_tasks: threads for `batch` independent attention blocks of
+// `work` multiply-adds each (one for small problems, where waking threads
+// costs more than it saves)
+_attention_tasks :: proc(batch, work: int) -> int {
+	if batch * work < 1 << 16 {return 1}
+	return min(batch, util.parallel_thread_count())
+}
+
+// _Elem_Job: an elementwise loop dst[i] (+)= f(src[i]) (· grad[i])
+_Elem_Job :: struct {
+	src, dst, grad: []f64,
+}
+
+// _parallel_elems runs body over [0, n), split across threads when n is large
+// enough to pay for waking them; for elementwise ops with costly math (erfc,
+// exp, tanh). Every element is computed as in a serial loop.
+_parallel_elems :: proc(n: int, job: ^_Elem_Job, body: util.Parallel_Body) {
+	PAR_MIN :: 1 << 14
+	if n < PAR_MIN {
+		body(job, 0, n)
+		return
+	}
+	util.parallel_for(n, job, body, min(util.parallel_thread_count(), n / (PAR_MIN / 4)))
+}
+
 // An additive attention mask is either shared by all sequences [seq_q, seq_k]
 // or given per sequence [batch, seq_q, seq_k]; this is the block of sequence b
 _mask_block :: proc(mask: []f64, b, n: int) -> []f64 {
@@ -2601,74 +2663,18 @@ tensor_masked_scaled_dot_product_attention :: proc(
 	d_v := V.shape[2]
 
 	out_data := l.matrix_new(f64, 1, batch * seq_q * d_v, _op_alloc(Q))
-	scale := 1.0 / math.sqrt(f64(d_k))
-
-	for b in 0 ..< batch {
-		q_b := l.Matrix(f64) {
-			rows = seq_q,
-			cols = d_k,
-			data = Q.data.data[b * seq_q * d_k:(b + 1) * seq_q * d_k],
-		}
-		k_b := l.Matrix(f64) {
-			rows = seq_k,
-			cols = d_k,
-			data = K.data.data[b * seq_k * d_k:(b + 1) * seq_k * d_k],
-		}
-		v_b := l.Matrix(f64) {
-			rows = seq_k,
-			cols = d_v,
-			data = V.data.data[b * seq_k * d_v:(b + 1) * seq_k * d_v],
-		}
-
-		// 1. S_b = Q_b @ K_b^T (row dot products, no transpose)
-		s_b := l.matrix_new(f64, seq_q, seq_k, allocator)
-		l.matmul_nt_acc_simd(&q_b, &k_b, &s_b)
-
-		// 2. Scale and apply mask
-		p_b := l.Matrix(f64) {
-			rows = seq_q,
-			cols = seq_k,
-			data = s_b.data,
-		}
-		for i in 0 ..< seq_q * seq_k {
-			p_b.data[i] *= scale
-		}
-
-		// Additive mask (shared or per sequence)
-		// (a nil mask attends everywhere, as in the backward pass)
-		if mb := _mask_block(mask, b, seq_q * seq_k); mb != nil {
-			for i in 0 ..< seq_q * seq_k {p_b.data[i] += mb[i]}
-		}
-
-		// 3. Numerically stable softmax
-		for i in 0 ..< seq_q {
-			row_start := i * seq_k
-			max_val := p_b.data[row_start]
-			for j in 1 ..< seq_k {
-				if p_b.data[row_start + j] > max_val {
-					max_val = p_b.data[row_start + j]
-				}
-			}
-
-			sum_exp := 0.0
-			for j in 0 ..< seq_k {
-				p_b.data[row_start + j] = math.exp(p_b.data[row_start + j] - max_val)
-				sum_exp += p_b.data[row_start + j]
-			}
-
-			inv_sum := 1.0 / sum_exp
-			for j in 0 ..< seq_k {
-				p_b.data[row_start + j] *= inv_sum
-			}
-		}
-
-		// 4. O_b = P_b @ V_b
-		o_b := _matmul(&p_b, &v_b, allocator)
-		copy(out_data.data[b * seq_q * d_v:(b + 1) * seq_q * d_v], o_b.data)
-
-		l.matrix_free(&o_b)
-		l.matrix_free(&s_b)
-	}
+	_attention_forward_cpu(
+		Q.data.data,
+		K.data.data,
+		V.data.data,
+		out_data.data,
+		mask,
+		batch,
+		seq_q,
+		seq_k,
+		d_k,
+		d_v,
+	)
 
 	out := _tensor_new_op(
 		out_data,
@@ -3077,9 +3083,11 @@ tensor_norm_cdf :: proc(a: ^Tensor) -> ^Tensor {
 	if _device_use(.NormCDF, a) {return _device_elementwise(.NormCDF, a, nil)}
 	_host_inputs(.NormCDF, a)
 	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
-	for x, i in a.data.data {
-		out_data.data[i] = 0.5 * math.erfc(-x / math.SQRT_TWO)
-	}
+	job := _Elem_Job{a.data.data, out_data.data, nil}
+	_parallel_elems(len(job.src), &job, proc(data: rawptr, begin, end: int) {
+		j := (^_Elem_Job)(data)
+		for i in begin ..< end {j.dst[i] = 0.5 * math.erfc(-j.src[i] / math.SQRT_TWO)}
+	})
 
 	out := _tensor_new_op(out_data, a.shape, a.requires_grad, _op_alloc(a))
 	if out.requires_grad {

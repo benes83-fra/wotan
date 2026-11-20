@@ -231,9 +231,15 @@ A·Aᵀ (2 x 2)
     32.0000  77.0000
 ```
 
-These kernels are register-blocked. Products of at least 2¹⁶ multiply-adds are split across threads by output row.
+These kernels are register-blocked: a block of output rows and columns stays in vector registers while the reduction runs.
+- **Packing:** for `nn` and `tn` products with at least 64 output rows, B is first copied into contiguous panels, so the kernel reads it sequentially. Without packing, rows of B that are a multiple of 4 KB apart compete for the same cache lines. The copy is made once per product and shared by all threads.
+- **Blocking:** `nt` products take B in blocks of 32 rows that stay in the L2 cache.
+- **Threads:** products of at least 2¹⁶ multiply-adds are split across threads, by output rows and, when there are few rows, also by columns.
+- **AVX2:** on CPUs with AVX2 the kernels run as AVX2 code, even in builds for plain x86-64 (Odin's default target, which only has SSE2). The CPU is checked once at start-up. Set `l.matmul_avx2 = false` to run the SSE2 kernels instead; the results are the same.
 
-Each output element is computed by one thread, in the same order as in a single-threaded run, so results are bit-identical whatever the thread count. The package variable `l.matmul_max_threads` caps the threads: 0, the default, means one per logical processor, and 1 means always single-threaded.
+Each output element is computed by one thread, in the same order whatever the thread count and instruction set, and without fused multiply-adds. So results are bit-identical across thread counts and between AVX2 and SSE2. They equal a sequence of `axpy_simd` updates (`nn`, `tn`) or a `dot_simd` per element (`nt`), up to the sign of a zero result. A zero in A contributes nothing even where B holds an inf or a NaN, as with `axpy_simd`. The package variable `l.matmul_max_threads` caps the threads: 0, the default, means one per logical processor, and 1 means always single-threaded.
+
+On the 8-core laptop CPU of the test machine (Ryzen 7 6800H), a 1024 × 2048 × 2048 product runs at about 160 GFLOP/s with AVX2 and all threads, and at about 37 GFLOP/s on one thread.
 
 ### XᵀX, Xᵀy, transposes and Kronecker products
 
@@ -764,7 +770,7 @@ As a rule of thumb, a linear solve loses about log₁₀(cond) of its 16 signifi
 
 ## 11. Vector kernels
 
-The package also has element-wise kernels on `[]f64` slices. They use SIMD instructions when the target supports them and fall back to scalar loops otherwise. They write into an output slice you provide, so they allocate nothing:
+The package also has element-wise kernels on `[]f64` slices. They use SIMD instructions when the target supports them and fall back to scalar loops otherwise. They write into an output slice you provide, so they allocate nothing. Slices of at least `VEC_PARALLEL_MIN` (65,536) values are split across threads, in chunks whose lengths are multiples of 64 values. Every value is computed as in a single-threaded call, so the results are the same:
 
 ```odin
 a := []f64{1, -2, 3, -4}
@@ -904,7 +910,7 @@ The coefficients, standard errors and t-values agree with `statsmodels.OLS(y, X)
 | Element pointer | `matrix_at(&M, i, j)` |
 | From a DataFrame | `matrix_from_df(&df, cols)`, `vector_from_df(&df, col)` |
 | Products | `matmul_dyn_simd`, `matvec_dyn_simd`, `dot_simd` (scalar: `matmul_dyn`, `matvec_dyn`, `dot`) |
-| Accumulating products | `matmul_nn_acc_simd`, `matmul_nt_acc_simd`, `matmul_tn_acc_simd`; threads: `matmul_max_threads` |
+| Accumulating products | `matmul_nn_acc_simd`, `matmul_nt_acc_simd`, `matmul_tn_acc_simd`; threads: `matmul_max_threads`; instruction set: `matmul_avx2` |
 | XᵀX, Xᵀy | `xtx_simd` (also `xtx`, `xtx_blocked_simd`), `xty` |
 | Transpose, Kronecker | `matrix_transpose`, `kron` / `kron_simd` |
 | Covariance, correlation | `covariance`, `correlation` |
