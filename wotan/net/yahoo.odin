@@ -218,8 +218,9 @@ read_yahoo_json :: proc(
 	ok: bool,
 ) {
 	url := fmt.aprintf(
-		"https://query1.finance.yahoo.com/v8/finance/chart/%s?interval=1d&range=max",
+		"https://query1.finance.yahoo.com/v8/finance/chart/%s?interval=1d&%s",
 		symbol,
+		_yahoo_span(.Max),
 		allocator = context.temp_allocator,
 	)
 	text, got := http_get(url, context.temp_allocator)
@@ -316,6 +317,9 @@ yahoo_json_to_dataframe :: proc(
 }
 
 
+// The chart request of `symbol`. For .Max it asks for the span from 1970 to
+// tomorrow instead of range=max: Yahoo answers range=max with monthly rows,
+// whatever interval was asked for.
 build_yahoo_url :: proc(
 	symbol: string,
 	i: interval,
@@ -323,13 +327,21 @@ build_yahoo_url :: proc(
 	allocator: mem.Allocator,
 ) -> string {
 	return fmt.aprintf(
-		"https://query1.finance.yahoo.com/v8/finance/chart/%s?interval=%s&range=%s&events=div,splits",
+		"https://query1.finance.yahoo.com/v8/finance/chart/%s?interval=%s&%s&events=div,splits",
 		symbol,
 		interval_to_string(i),
-		range_to_string(r),
+		_yahoo_span(r),
 		allocator = allocator,
 	)
+}
 
+// The span part of a chart request (temp allocator)
+@(private = "file")
+_yahoo_span :: proc(r: range) -> string {
+	if r == .Max {
+		return fmt.tprintf("period1=0&period2=%d", _now_unix() + 86400)
+	}
+	return fmt.tprintf("range=%s", range_to_string(r))
 }
 
 

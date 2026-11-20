@@ -298,7 +298,7 @@ missing.csv: false 0
 
 ## 9. Yahoo Finance
 
-Yahoo's chart API gives daily, weekly or monthly histories of stocks, ETFs and indices, with dividends and splits. It needs no key, but it rate-limits heavy use, so every Yahoo procedure returns `ok`. The interval is `.Daily`, `.Weekly` or `.Monthly`. The range is `.OneMonth`, `.ThreeMonths`, `.SixMonths`, `.OneYear`, `.TwoYears`, `.FiveYears`, `.TenYears`, `.YTD` or `.Max`.
+Yahoo's chart API gives daily, weekly or monthly histories of stocks, ETFs and indices, with dividends and splits. It needs no key, but it rate-limits heavy use, so every Yahoo procedure returns `ok`. The interval is `.Daily`, `.Weekly` or `.Monthly`. The range is `.OneMonth`, `.ThreeMonths`, `.SixMonths`, `.OneYear`, `.TwoYears`, `.FiveYears`, `.TenYears`, `.YTD` or `.Max`, which is the whole history at the requested interval.
 
 There are three levels:
 
@@ -496,6 +496,7 @@ The DataFrames `yahoo_json_to_dataframe` builds are checked against an independe
 | `html_basic_test`, `html_extended_test`, `html_tags_test`, `html_export_test` | HTML tables by index, id and all, tags inside cells, writing |
 | `excel_basic_test`, `excel_date_test`, `excel_export_test`, `zip_smoke_test` | reading sheets and dates, writing workbooks, the ZIP container |
 | `http_get_test`, `yahoo_finance_json_test`, `yahoo_finance_events_test` | live HTTP and Yahoo requests, including dividends and splits |
+| `yahoo_max_range_test` | `.Max` gives the whole daily history (SPY from 1993-01-29, no gap over a week) and weekly rows a week apart |
 | `yahoo_live_row_test` | `last_is_live` of a series and a panel agrees with the trading hours in Yahoo's answer; a live row is dated today |
 | `data_io_fixes_test` | offline: the chart parser, `Yahoo_Series`, and `yahoo_session_live` on a recorded answer during, after and before the session |
 

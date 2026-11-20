@@ -220,3 +220,43 @@ yahoo_live_row_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
 	if !ok {record_failures(1)}
 	fmt.println("=== END YAHOO LIVE ROW TEST ===")
 }
+
+// The whole history (.Max) at daily and weekly intervals: Yahoo answers range=max with
+// monthly rows, so the loader asks for the span since 1970 instead. SPY's daily history
+// starts on 1993-01-29 and has no gap longer than a week (the market closed for four
+// days after 2001-09-11); the weekly rows are a week apart, except the last, which is
+// the running week, dated on its latest day.
+yahoo_max_range_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
+	seed_test(#procedure)
+	fmt.println("=== YAHOO MAX RANGE TEST ===")
+	for iv in ([]net.interval{.Daily, .Weekly}) {
+		s, ok := net.read_yahoo_series("SPY", iv, .Max, allocator)
+		if !ok {fail_missing_data(#procedure, "Yahoo history of SPY"); return}
+		defer net.yahoo_series_free(&s)
+		n := len(s.dates)
+		max_gap, min_gap := 0, 1 << 30
+		last := n if iv == .Daily else n - 1 // the running week has its own date
+		for i in 1 ..< last {
+			g := int(w.date_diff(s.dates[i - 1], s.dates[i]))
+			max_gap, min_gap = max(max_gap, g), min(min_gap, g)
+		}
+		ok_all :=
+			s.dates[0] == w.Date{1993, 1, 29} if iv == .Daily else s.dates[0].year == 1993
+		if iv == .Daily {
+			ok_all = ok_all && n > 8000 && max_gap <= 7
+		} else {
+			ok_all = ok_all && n > 1600 && min_gap >= 7 && max_gap <= 7
+		}
+		fmt.printfln(
+			"%s SPY %v .Max: %d rows from %v, gaps between rows %d .. %d days",
+			"OK  " if ok_all else "FAIL",
+			iv,
+			n,
+			s.dates[0],
+			min_gap,
+			max_gap,
+		)
+		if !ok_all {record_failures(1)}
+	}
+	fmt.println("=== END YAHOO MAX RANGE TEST ===")
+}

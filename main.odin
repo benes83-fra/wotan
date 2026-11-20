@@ -513,6 +513,8 @@ main :: proc() {
 	free_all(context.temp_allocator)
 	test.yahoo_live_row_test(context.temp_allocator)
 	free_all(context.temp_allocator)
+	test.yahoo_max_range_test(context.temp_allocator)
+	free_all(context.temp_allocator)
 	test.yahoo_finance_events_test(context.temp_allocator)
 	free_all(context.temp_allocator)
 	test.sort_test()

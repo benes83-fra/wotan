@@ -106,6 +106,7 @@ And one more guide:
 | Example | Shows |
 |---|---|
 | [sector rotation](e2e_sector_rotation_guide.md) (`examples/sector_rotation`) | a complete strategy on real data: Yahoo Finance prices, features without look-ahead, an LSTM on the GPU against a ridge regression and a momentum rule, purged walk-forward testing, long/short portfolios with trading costs, the probabilistic and deflated Sharpe ratios, charts, Excel and HTML output |
+| [volatility](e2e_volatility_guide.md) (`examples/volatility`) | volatility forecasting on 33 years of SPY and VIX data: GJR-GARCH, a HAR regression, an LSTM and a Mamba network on the GPU, Diebold–Mariano tests, hidden-Markov regimes, delta-hedged short straddles priced at the VIX, and a backtest of the 99% value at risk |
 
 The [test catalog](test_catalog.md) lists every test file and what it checks.
 
@@ -119,7 +120,7 @@ Every path starts with the [core guide](core_guide.md), since most of Wotan read
 - **Portfolios and risk:** finance parts [5](finance_portfolio_guide.md) and [6](finance_risk_guide.md), then [ml_finance part 1](ml_finance_methods_guide.md) for the statistics that keep backtests honest.
 - **Machine learning for finance:** the [tensor](tensor_guide.md) and [neural network](nn_guide.md) guides first, then the five `ml_finance` parts. Part 1 is the foundation for the others.
 
-To see how the packages fit together in one program, read the [sector-rotation example](e2e_sector_rotation_guide.md).
+To see how the packages fit together in one program, read the [sector-rotation](e2e_sector_rotation_guide.md) or the [volatility](e2e_volatility_guide.md) example.
 
 The linear algebra guide is for when you need matrices directly. Most packages take and return slices or DataFrames.
 
