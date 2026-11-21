@@ -509,6 +509,49 @@ w [1.5151, 0.1967]  b -0.5795  converged true
 
 The objective is scikit-learn's: an L2 penalty ½‖w‖² plus C times the log loss, with an unpenalised intercept. `.LBFGS` is the reliable choice; `.Adam`, `.RMSProp` and `.SGD` are gradient methods that need a suitable `learning_rate` and more iterations. Use `C = math.INF_F64` for no penalty. For more than two classes, use `ovr_logistic_fit` (section 9).
 
+### Minimising your own function with L-BFGS
+
+The L-BFGS behind `.LBFGS` is also available for any smooth function. `optim.lbfgs_minimize(fg, x, user_data)` (package `optimize`) needs one procedure that returns the function value and writes the gradient. It starts from `x`, overwrites it with the minimiser, and stops when no component of the gradient exceeds `gtol`. Rosenbrock's function, whose minimum is at (1, 1, 1, 1):
+
+```odin
+import optim "wotan/optimize"
+
+rosenbrock :: proc(x, grad: []f64, _: rawptr) -> f64 {
+    f := 0.0
+    for &g in grad {g = 0}
+    for i in 0 ..< len(x) - 1 {
+        a := x[i + 1] - x[i] * x[i]
+        b := 1 - x[i]
+        f += 100 * a * a + b * b
+        grad[i] += -400 * x[i] * a - 2 * b
+        grad[i + 1] += 200 * a
+    }
+    return f
+}
+
+x := []f64{-1.2, 1, -1.2, 1}
+res := optim.lbfgs_minimize(rosenbrock, x, nil, gtol = 1e-8)
+fmt.printf("x %.8f  f %.3e\n", x, res.f)
+fmt.printf("converged %v after %d iterations, %d evaluations\n", res.converged, res.n_iter, res.n_eval)
+```
+
+```
+x [1.00000000, 1.00000000, 1.00000000, 1.00000000]  f 1.139e-24
+converged true after 49 iterations, 58 evaluations
+```
+
+SciPy's L-BFGS-B takes 42 iterations from the same start. Pass data to the function through `user_data`, as a pointer to your own struct. Other parameters:
+- `max_iter`: the iteration limit (default 1000);
+- `m`: how many past steps approximate the curvature (default 10);
+- `allocator`: for the work buffers.
+
+The result's `converged` is false when the search stopped for another reason:
+- the iteration limit;
+- a line search that found no decrease;
+- three steps in a row that changed the function by less than its rounding.
+
+A function value of NaN or infinity counts as too large, so the function can return `math.INF_F64` outside its domain. The GARCH fits use it this way ([analytics guide, section 11](analytics_guide.md#11-garch-and-volatility)). Constraints are not supported; map constrained parameters to unconstrained ones first, for example a positive σ as exp(x).
+
 ### Naive Bayes and k-nearest neighbours
 
 `gnb_fit` is scikit-learn's `GaussianNB` (the optional third argument is `var_smoothing`, default 1e-9). `knn_fit` stores a copy of the training data; `k` is the number of neighbours and `.Distance` weights them by 1/distance (`.Uniform` is a plain vote). Both accept any class labels and have a `predict_proba`:
@@ -1566,6 +1609,7 @@ The momentum coefficient is positive and the volatility coefficient negative, as
 | Fama-MacBeth | `fama_macbeth`, `fama_macbeth_result_free` |
 | Distributions | `student_t_cdf`, `student_t_sf2`, `student_t_ppf`, `f_dist_sf` |
 | Logistic | `logistic_fit`, `logistic_predict`, `logistic_predict_proba`, `logistic_free` |
+| L-BFGS for your own function | `optimize.lbfgs_minimize` (`ValueGradFunc`, `LBFGS_Result`) |
 | Naive Bayes | `gnb_fit`, `gnb_predict`, `gnb_predict_proba`, `gnb_free` |
 | KNN | `knn_fit`, `knn_predict`, `knn_predict_proba`, `knn_free` |
 | SVM | `svm_fit_linear`, `svm_predict_linear`, `svm_free`, `kernel_svm_fit`, `kernel_svm_predict`, `kernel_svm_free` |

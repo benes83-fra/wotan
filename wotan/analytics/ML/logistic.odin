@@ -184,6 +184,8 @@ logistic_fit :: proc(
 			converged = true
 			break
 		}
+		// no decrease found along the L-BFGS direction: the weights did not move
+		if params.optimizer_type == .LBFGS && opt.lbfgs.line_search_failed do break
 	}
 
 	// Extract final weights and bias

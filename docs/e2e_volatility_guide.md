@@ -10,13 +10,13 @@ This example forecasts the volatility of the S&P 500 and puts the forecasts to w
 6. **Risk:** the one-day 99% value at risk from three models, backtested over 24 years.
 7. **Report:** charts, an Excel workbook and HTML tables.
 
-The program is in [`examples/volatility`](../examples/volatility), one file per stage. Each section below shows the important code and the real output of a run on 2026-11-20, with data up to the close of 2026-11-19.
+The program is in [`examples/volatility`](../examples/volatility), one file per stage. Each section below shows the important code and the real output of a run on 2026-11-21, with data up to the close of 2026-11-20.
 
 The results, in short:
 - **The simple models win.** A linear regression on past volatility and the VIX has the smallest forecast error. GARCH has the best score on the loss that matters for variance forecasts. The neural networks are significantly worse than GARCH.
 - **The VIX is too high on average**, by 3.7 volatility points. Sellers of options earn that difference, and a delta-hedged straddle seller made money in 83% of the months, with a Sharpe ratio above 2. That result rests on pricing the options at the VIX; section 6 shows how fragile it is.
 - **Timing the sales does not help.** Selling only when a forecast says options are expensive, or only in calm markets, earns less and does not improve the Sharpe ratio.
-- **Value at risk:** the GARCH model passes the standard backtest, and historical simulation fails it.
+- **Value at risk:** GARCH's VaR is breached on 1.3% of the days instead of 1%, and historical simulation's on 1.4%; the standard backtest rejects both. The VIX is too cautious and passes.
 
 ## Contents
 
@@ -41,7 +41,7 @@ odin run examples/volatility -o:speed -- -cpu    # on the CPU
 ```
 
 - **Network:** the program downloads its data from Yahoo Finance. Without a connection it stops after step 1 with a message, and does not invent data.
-- **GPU:** the networks train on the GPU when one is available (see the [gpu guide](gpu_guide.md#1-setup)), and on the CPU otherwise. On the test machine (Ryzen 7 6800H, RTX 3060 Laptop GPU) the run takes about 3 minutes, and 4 minutes on the CPU. Most of it, 105 s, is the 12 GARCH fits; the two networks take 64 s on the GPU and 131 s on the CPU.
+- **GPU:** the networks train on the GPU when one is available (see the [gpu guide](gpu_guide.md#1-setup)), and on the CPU otherwise. On the test machine (Ryzen 7 6800H, RTX 3060 Laptop GPU) the run takes about one minute, and two and a half on the CPU. Nearly all of it is the two networks: 61 s on the GPU and 135 s on the CPU. The 12 GARCH fits take half a second.
 - **Output:** the charts, an Excel workbook and two HTML tables go to `examples/volatility/output/`.
 
 The results change a little from day to day, because Yahoo's data grows by one day. The LSTM and Mamba results also vary a little between runs on the GPU, and between the GPU and the CPU: the GPU computes in `f32`, the CPU in `f64`, and small differences grow during training. Everything else is the same on every run of the same data.
@@ -59,7 +59,7 @@ if panel.last_is_live {T -= 1} // during the session the last row holds current 
 
 ```
 1. Market data
-  SPY and the VIX, 8511 common trading days: 1993-01-29 .. 2026-11-19
+  SPY and the VIX, 8512 common trading days: 1993-01-29 .. 2026-11-20
 ```
 
 Day *d*'s return is ln(S_d / S_{d−1}), from SPY's adjusted close, so dividends are included. The quantity to forecast is the **realised volatility of the next 21 trading days** (one month), annualised as option traders do:
@@ -94,12 +94,12 @@ The forecast for the month averages the expected variance path: `fin.garch_term_
 The fits, one per fold:
 
 ```
-  fold  1: 2003-01-30 .. 2005-01-28 | GARCH a 0.000 b 0.923 g 0.151 nu  6.5 | ...
+  fold  1: 2003-01-30 .. 2005-01-28 | GARCH a 0.000 b 0.923 g 0.141 nu  7.1 | ...
   ...
-  fold 12: 2025-02-11 .. 2026-11-19 | GARCH a 0.000 b 0.885 g 0.227 nu  5.9 | ...
+  fold 12: 2025-02-11 .. 2026-11-20 | GARCH a 0.000 b 0.886 g 0.200 nu  6.7 | ...
 ```
 
-On the S&P 500, α is 0: a gain does not raise the volatility at all, and all the reaction to news comes through γ, on losses. ν ≈ 6 says that daily returns have fat tails even after the volatility is accounted for.
+On the S&P 500, α is 0: a gain does not raise the volatility at all, and all the reaction to news comes through γ, on losses. ν between 6 and 8 says that daily returns have fat tails even after the volatility is accounted for.
 
 ### HAR + VIX
 
@@ -187,14 +187,14 @@ acc[model].dm_t, acc[model].dm_p = res.tvalues[0], res.pvalues[0]
 ```
 
 ```
-  forecasts made 2003-01-30 .. 2026-10-21 (5970 days); volatility in annualised points
+  forecasts made 2003-01-30 .. 2026-10-22 (5971 days); volatility in annualised points
   1774 of them (30%) in the turbulent regime
                RMSE   bias   QLIKE  RMSE calm RMSE turb.     DM t     DM p     time
-  VIX          8.28  +3.72  0.3460       6.55      11.36     0.77    0.441        -
-  GJR-GARCH    8.38  +2.30  0.3338       5.89      12.41        -        -   105.3s
-  HAR + VIX    7.33  +0.07  0.3421       5.44      10.54     0.25    0.799     0.0s
-  LSTM         8.91  -0.30  0.4490       5.82      13.68     2.20    0.028    15.8s
-  Mamba        8.20  -0.51  0.4545       5.86      12.03     2.49    0.013    47.8s
+  VIX          8.28  +3.72  0.3460       6.55      11.36     0.87    0.384        -
+  GJR-GARCH    7.76  +1.24  0.3294       5.72      11.19        -        -     0.5s
+  HAR + VIX    7.33  +0.07  0.3422       5.44      10.54     0.50    0.615     0.0s
+  LSTM         8.94  -0.34  0.4526       5.81      13.75     2.58    0.010    12.6s
+  Mamba        8.18  -0.51  0.4541       5.87      11.98     3.02    0.002    48.0s
 ```
 
 A positive DM t means a larger loss than GARCH's.
@@ -202,13 +202,13 @@ A positive DM t means a larger loss than GARCH's.
 **What the numbers say:**
 - **The VIX is biased upwards** by 3.7 points: on average, options price more volatility than follows. That gap is the volatility risk premium, and section 6 trades it.
 - **HAR + VIX has the smallest error**, with no bias: the regression learns to scale the VIX down and to add what the last week says. It needs no training time to speak of.
-- **GARCH has the best QLIKE.** By RMSE it is worse than HAR, but 72% of its forecasts are too high, the error QLIKE punishes least. VIX and HAR are not significantly different from it (p 0.44 and 0.80).
-- **The networks are significantly worse than GARCH** on QLIKE (p 0.03 and 0.01). Their mean error is close to zero, and by RMSE the Mamba network is close to the VIX. But they forecast too low on 44–46% of the days, against GARCH's 28%, and about 80% of their QLIKE comes from those days. With 2,500 to 7,500 overlapping training samples and a target this noisy, there is not much for a network to find that the regression does not.
+- **GARCH has the best QLIKE.** By RMSE it is worse than HAR, but 67% of its forecasts are too high, the error QLIKE punishes least. VIX and HAR are not significantly different from it (p 0.38 and 0.62).
+- **The networks are significantly worse than GARCH** on QLIKE (p 0.010 and 0.002). Their mean error is close to zero, and by RMSE the Mamba network is close to the VIX. But they forecast too low on 44–46% of the days, against GARCH's 33%, and about 80% of their QLIKE comes from those days. With 2,500 to 7,500 overlapping training samples and a target this noisy, there is not much for a network to find that the regression does not.
 - **All forecasts are worse in turbulent markets**, by a factor of two. That is where the volatility itself is high and changes fast.
 
 ![Volatility of the next 21 days: forecasts and outcome](images/e2e_vol_forecasts.png)
 
-The chart shows the COVID-19 crash. Every forecast lags. On 2020-02-26 the volatility of the coming month was 91% (the blue line, plotted on the day of the forecast), and the highest forecast was 33%. The models catch up only once the crash is in their data. In mid-March GARCH and the networks then overshoot, to 124–131%, when the coming month's volatility had already fallen to 50–70%. The VIX and HAR, anchored by the option market, overshoot less. No model sees a crash coming from the volatility of the days before it.
+The chart shows the COVID-19 crash. Every forecast lags. On 2020-02-26 the volatility of the coming month was 91% (the blue line, plotted on the day of the forecast), and the highest forecast was 30%. The models catch up only once the crash is in their data. In mid-March GARCH and the networks then overshoot, to 111–139%, when the coming month's volatility had already fallen to 55–61%. The VIX and HAR, anchored by the option market, peak at 81–83%. No model sees a crash coming from the volatility of the days before it.
 
 ## 6. Selling volatility
 
@@ -240,8 +240,8 @@ Four strategies differ only in *when* they sell:
   one-month ATM straddles sold at the VIX, delta-hedged daily, 285 periods; P&L per period
                               sold   mean %    sd %  Sharpe    PSR  worst %    hit  break-even
   Sell every month             285    0.848    1.37    2.14   1.00    -7.70    83%      3.7 pts
-  Sell if VRP > avg (GARCH)     70    0.328    0.74    1.54   1.00    -1.52    89%      5.8 pts
-  Sell if VRP > avg (LSTM)     148    0.513    1.02    1.73   1.00    -3.85    82%      4.3 pts
+  Sell if VRP > avg (GARCH)     89    0.423    0.87    1.69   1.00    -1.64    88%      5.9 pts
+  Sell if VRP > avg (LSTM)     152    0.507    1.11    1.58   1.00    -6.95    82%      4.1 pts
   Sell if regime calm          191    0.527    0.87    2.11   1.00    -5.55    84%      3.4 pts
 ```
 
@@ -266,18 +266,18 @@ The one-day 99% VaR of a long SPY position from three sources, each known at the
 `fin.backtest_var` counts the breaches, days whose loss exceeds the VaR, and runs Kupiec's test of whether the count is consistent with 1%:
 
 ```
-  one-day 99% VaR of SPY, 5990 test days
+  one-day 99% VaR of SPY, 5991 test days
                     breaches  expected     rate  Kupiec p in turbulent regime
-  GJR-GARCH-t             72      59.9    1.20%     0.128                19%
+  GJR-GARCH-t             79      59.9    1.32%     0.018                22%
   VIX (normal)            47      59.9    0.78%     0.082                49%
-  Historical 250d         83      59.9    1.39%     0.005                60%
+  Historical 250d         84      59.9    1.40%     0.003                61%
 ```
 
 ![SPY daily loss and the one-day 99% VaR](images/e2e_vol_var.png)
 
-- **GARCH passes** (p 0.13), though its 72 breaches are slightly more than the expected 60. 81% of its breaches came on days the regime model called calm: once a market is turbulent, GARCH's VaR rises within a day. What it cannot foresee is the first shock out of a quiet market.
+- **GARCH fails narrowly** (p 0.018): 79 breaches against the expected 60, a rate of 1.3% instead of 1%. 78% of its breaches came on days the regime model called calm: once a market is turbulent, GARCH's VaR rises within a day. What it cannot foresee is the first shock out of a quiet market. A fit on all the days before each fold also weights the calm decades heavily; refitting more often, or a fatter-tailed quantile, are the usual remedies.
 - **The VIX is too cautious on average**, with 47 breaches. Its upward bias (section 5) makes the VaR too high in calm markets. It still breaks in turbulent ones, where the normal distribution's tails are too thin.
-- **Historical simulation fails** (p 0.005). It reacts slowly: in the chart its VaR stays at 2–3% through the start of the COVID-19 crash, then jumps to 8% and stays there for a year, until the crash days leave the 250-day window.
+- **Historical simulation fails** clearly (p 0.003). It reacts slowly: in the chart its VaR stays at 2–3% through the start of the COVID-19 crash, then jumps to 8% and stays there for a year, until the crash days leave the 250-day window.
 
 ## 8. Things to try
 
@@ -295,16 +295,14 @@ Every number in the output above was recomputed independently in Python from the
 
 | Quantity | Reference | Agreement |
 |---|---|---|
-| realised volatility | NumPy | 4e-5 relative (Yahoo rounds its prices differently on each request) |
+| realised volatility | NumPy | 6e-5 relative (Yahoo rounds its prices differently on each request) |
 | RMSE, bias, QLIKE, regime split | NumPy | all printed digits |
 | Diebold–Mariano t and p | statsmodels `OLS(...).fit(cov_type="HAC", maxlags=20)` | all printed digits |
-| HAR forecasts, every fold | `numpy.linalg.lstsq` | 2e-5 relative |
-| HMM fits and filtered probabilities (first and last fold) | hmmlearn 0.3.3 from the same start, forward filter in NumPy | 8e-5 absolute |
+| HAR forecasts, every fold | `numpy.linalg.lstsq` | 3e-5 relative |
+| HMM fits and filtered probabilities (first and last fold) | hmmlearn 0.3.3 from the same start, forward filter in NumPy | 1e-4 absolute |
 | straddle P&L and statistics | SciPy's normal distribution, Black–Scholes by hand | all printed digits |
 | VaR breaches and Kupiec p | SciPy χ² | all printed digits |
-| GJR-GARCH-t fits (first and last fold) | SciPy Nelder–Mead on the same likelihood | see below |
-
-**GARCH.** On the same data and the same likelihood, SciPy's optimiser finds parameters with a slightly higher log-likelihood than `garch_fit_spec`: higher by 0.9 on the first fold, and by 5.4 on the last, where `garch_fit_spec` reports `converged = false`. The parameters differ in the second decimal (γ 0.141 instead of 0.151 on the first fold, 0.200 instead of 0.227 on the last; ν 7.1 and 6.7 instead of 6.5 and 5.9). The monthly forecasts differ by up to 6% and 13%. The conclusions above hold for either fit.
+| GJR-GARCH-t fits (first and last fold) | SciPy Nelder–Mead on the same likelihood | log-likelihood at least SciPy's (higher by up to 0.003); forecasts and VaR 1e-4 relative |
 
 ## 10. The packages used
 

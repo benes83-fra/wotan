@@ -86,7 +86,7 @@ fmt.printf("VaR99 GARCH(1,1) forecast for the next day %.8f\n", fin.value_at_ris
 ```
 VaR95 historical 0.01312683 parametric 0.01375869 Monte Carlo 0.01376568
 VaR99 historical 0.02188755  CVaR95 0.01895127 CVaR99 0.02812172
-VaR99 GARCH(1,1) forecast for the next day 0.02053061
+VaR99 GARCH(1,1) forecast for the next day 0.02053062
 ```
 
 At 95% the normal fit overstates the loss: a unit-variance t(6) has its 5% quantile at 1.59 standard deviations, not 1.65. The fat tails show further out, at 99% and in the expected shortfall.
@@ -202,7 +202,7 @@ fmt.printf("rolling 97.5%%: %d breaches (expected %.2f) Kupiec p %.4f; ES z %.4f
 ```
 
 ```
-GARCH-t: omega 3.0408e-06 alpha 0.065708 beta 0.894057 nu 6.4945 persistence 0.959765 converged true
+GARCH-t: omega 3.0408e-06 alpha 0.065708 beta 0.894057 nu 6.4944 persistence 0.959765 converged true
   long-run vol 0.008694 current vol 0.009129 VaR95 0.014558 VaR99 0.023269 CVaR95 0.020107
   backtest 95% from day 1000: 52 breaches of 1000 (expected 50.0), Kupiec 0.0832 p 0.7730 pass true
   backtest 99%: 9 breaches (expected 10.0), p 0.7465

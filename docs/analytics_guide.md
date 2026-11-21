@@ -799,7 +799,7 @@ t quantile 0.99: 2.3412 (normal 2.3263)
 - **Value at risk.** `garch_var_series` returns the 95 % and 99 % VaR for every observation (as positive numbers, assuming a zero mean). `garch_std_quantile` gives the quantile of the unit-variance error distribution, which is wider than the normal for Student-t errors.
 - **Model choice.** The data are normal and symmetric, so the GJR-t model finds almost no leverage (γ ≈ 0), a large ν, and a worse AIC than the plain GARCH. The fitted ν has no upper bound: on normal data it can become very large.
 
-The parameters are constrained so that the persistence stays below 0.999. `garch_fit(residuals, model_type, p, q)` is an older entry point that takes a single `GARCH_Model_Type` (`.GARCH`, `.GJR_GARCH`, `.StudentT`, `.GED`); with `verbose = true` it prints the optimizer's progress. Prefer `garch_fit_spec`.
+The parameters are constrained so that the persistence stays below 0.999. The fit maximises the likelihood with L-BFGS (`optimize.lbfgs_minimize`) and its analytic gradient, from three starting points, and keeps the best; `converged` says whether no component of the gradient exceeds `tolerance` (default 1e-4) at the end, and `n_iterations` counts the iterations of the winning start. `garch_fit(residuals, model_type, p, q)` is an older entry point that takes a single `GARCH_Model_Type` (`.GARCH`, `.GJR_GARCH`, `.StudentT`, `.GED`); with `verbose = true` it prints the optimizer's progress. Prefer `garch_fit_spec`.
 
 **Volatility helpers.** The `create_*_volatility` procedures return a `VolatilityModel` whose `conditional_var` holds one variance per row, NaN during the warm-up:
 

@@ -10,7 +10,10 @@ import "core:mem"
 // (σ²_0 = mean ε², first observation only seeds the recursion):
 // GJR + Student-t, EGARCH + normal, EGARCH + Student-t on 1500 simulated returns.
 // Checks: likelihood at given parameters (exact), the fitted MLE (scipy:
-// Nelder-Mead + BFGS from 12 starts) and the one-step variance forecast.
+// Nelder-Mead + BFGS from 12 starts; the fit must report converged) and the
+// one-step variance forecast. Also GJR + Student-t at persistence 0.99 with
+// alpha near 0, GARCH + GED, and the fit's analytic gradient against central
+// differences for every spec.
 
 @(private = "file")
 GA_E0 := [?]f64 {
@@ -4578,7 +4581,7 @@ garch_spec_reference_test :: proc(allocator: mem.Allocator) {
 			0.11596168259631817,
 			8.912291314744657,
 		}
-		ok := r.log_likelihood >= 5914.2576126998065 - 1e-4
+		ok := r.converged && r.log_likelihood >= 5914.2576126998065 - 1e-4
 		for v, i in got {if !(math.abs(v - want[i]) <= 2e-3 * max(math.abs(want[i]), 0.01)) do ok = false}
 		expect(
 			&passed,
@@ -4631,7 +4634,7 @@ garch_spec_reference_test :: proc(allocator: mem.Allocator) {
 			0.9627313151072843,
 			-0.07556545396574249,
 		}
-		ok := r.log_likelihood >= 3875.6629821569395 - 1e-4
+		ok := r.converged && r.log_likelihood >= 3875.6629821569395 - 1e-4
 		for v, i in got {if !(math.abs(v - want[i]) <= 2e-3 * max(math.abs(want[i]), 0.01)) do ok = false}
 		expect(
 			&passed,
@@ -4692,7 +4695,7 @@ garch_spec_reference_test :: proc(allocator: mem.Allocator) {
 			-0.0763062821526167,
 			6.03135062094871,
 		}
-		ok := r.log_likelihood >= 3966.843866485698 - 1e-4
+		ok := r.converged && r.log_likelihood >= 3966.843866485698 - 1e-4
 		for v, i in got {if !(math.abs(v - want[i]) <= 2e-3 * max(math.abs(want[i]), 0.01)) do ok = false}
 		expect(
 			&passed,
@@ -4709,6 +4712,158 @@ garch_spec_reference_test :: proc(allocator: mem.Allocator) {
 			&total,
 			near(fc.variance_forecast, 0.0001786666455503761, 2e-3),
 			"EGARCH: one-step variance forecast at the MLE",
+		)
+		ts.garch_result_free(&r)
+	}
+
+	// The fit's analytic gradient against central differences of the
+	// likelihood, for every variance equation × distribution and lag orders
+	{
+		worst := 0.0
+		for vk in ts.GARCH_Variance {
+			for dk in ts.GARCH_Dist {
+				for pq in ([][2]int{{1, 1}, {2, 1}, {1, 2}}) {
+					p, q := pq[0], pq[1]
+					params := ts.GARCH_Params {
+						variance = vk,
+						dist     = dk,
+						p        = p,
+						q        = q,
+					}
+					params.alpha = make([]f64, p, context.temp_allocator)
+					params.beta = make([]f64, q, context.temp_allocator)
+					params.egarch_gamma = make([]f64, p, context.temp_allocator)
+					k := ts._garch_n_params(vk, dk, p, q)
+					kv := k - (0 if dk == .Normal else 1)
+					n := len(GA_E0)
+					wk := ts._Garch_Work {
+						params    = &params,
+						residuals = GA_E0[:],
+						k_var     = kv,
+						cond_var  = make([]f64, n, context.temp_allocator),
+						deriv     = make([]f64, n * kv, context.temp_allocator),
+						g_nat     = make([]f64, k, context.temp_allocator),
+						jac       = make([]f64, k * k, context.temp_allocator),
+					}
+					// a point with typical daily dynamics at the data's scale
+					x := make([]f64, k, context.temp_allocator)
+					if vk == .EGARCH {
+						x[0] = -0.3
+						for i in 0 ..< p {x[1 + i] = 0.1 / f64(p); x[1 + p + q + i] = -0.05 / f64(p)}
+						for j in 0 ..< q {x[1 + p + j] = 9.0 / f64(q)}
+					} else {
+						x[0] = math.ln(1e-6) + 10
+						x[1] = 3
+						for c in 2 ..< k {x[c] = 0.3 * f64(c)}
+					}
+					if dk != .Normal do x[k - 1] = 1.2
+					g := make([]f64, k, context.temp_allocator)
+					f := ts._garch_nll_and_grad(&wk, x, g)
+					ts.unpack_params(x, &params)
+					worst = max(
+						worst,
+						math.abs(
+							f - ts._garch_neg_log_likelihood(&params, GA_E0[:], context.allocator),
+						),
+					)
+					for i in 0 ..< k {
+						h := 1e-5
+						xp := make([]f64, k, context.temp_allocator)
+						copy(xp, x)
+						xp[i] += h
+						ts.unpack_params(xp, &params)
+						fp := ts._garch_neg_log_likelihood(&params, GA_E0[:], context.allocator)
+						xp[i] -= 2 * h
+						ts.unpack_params(xp, &params)
+						fm := ts._garch_neg_log_likelihood(&params, GA_E0[:], context.allocator)
+						fd := (fp - fm) / (2 * h)
+						worst = max(worst, math.abs(fd - g[i]) / max(1, math.abs(fd)))
+					}
+				}
+			}
+		}
+		expect(
+			&passed,
+			&total,
+			worst < 1e-5,
+			fmt.tprintf("analytic gradient = central differences, all specs (worst %.1e)", worst),
+		)
+	}
+	// A high-persistence GJR-t series with alpha near 0, as on stock indices, from
+	// a portable generator (64-bit LCG, Box-Muller) that the SciPy reference
+	// reproduces: GJR omega 0.02, alpha 0, beta 0.92, gamma 0.15, normal shocks
+	// scaled by 1.8 (10%) or 0.85
+	{
+		n := 4000
+		e := make([]f64, n, context.temp_allocator)
+		st: u64 = 12345
+		uni :: proc(st: ^u64) -> f64 {
+			st^ = st^ * 6364136223846793005 + 1442695040888963407
+			return (f64(st^ >> 11) + 0.5) / 9007199254740992.0
+		}
+		s2, prev := 0.02 / (1 - 0.995), 0.0
+		for t in 0 ..< n {
+			s2 = 0.02 + (0.15 if prev < 0 else 0) * prev * prev + 0.92 * s2
+			u1, u2, u3 := uni(&st), uni(&st), uni(&st)
+			z := math.sqrt(-2 * math.ln(u1)) * math.cos(2 * math.PI * u2)
+			prev = math.sqrt(s2) * z * (1.8 if u3 < 0.1 else 0.85)
+			e[t] = prev
+		}
+		ok_data :=
+			near(e[1], -0.43213203570111386, 1e-12) && near(e[n - 1], 0.017394522115347342, 1e-10)
+		r := ts.garch_fit_spec(e, {variance = .GJR, dist = .StudentT, p = 1, q = 1})
+		got := []f64 {
+			r.params.omega,
+			r.params.alpha[0],
+			r.params.beta[0],
+			r.params.gamma,
+			r.params.nu,
+		}
+		want := []f64 {
+			0.022036933414559083,
+			0.0015352491004638107,
+			0.9117805984738128,
+			0.1519546510024306,
+			6.9626628008033205,
+		}
+		ok := ok_data && r.converged && r.log_likelihood >= -5671.003189052919 - 1e-4
+		for v, i in got {if !(math.abs(v - want[i]) <= 2e-3 * max(math.abs(want[i]), 0.01)) do ok = false}
+		fc := ts.garch_forecast(&r, e, 1)
+		ok = ok && near(fc.variance_forecast, 0.5495119960709333, 2e-3)
+		expect(
+			&passed,
+			&total,
+			ok,
+			fmt.tprintf(
+				"GJR + Student-t, persistence 0.99, alpha near 0: MLE = scipy optimum (llf %.4f vs -5671.0032, converged %v)",
+				r.log_likelihood,
+				r.converged,
+			),
+		)
+		ts.garch_result_free(&r)
+	}
+	{
+		r := ts.garch_fit_spec(GA_E0[:], {variance = .GARCH, dist = .GED, p = 1, q = 1})
+		got := []f64{r.params.omega, r.params.alpha[0], r.params.beta[0], r.params.shape}
+		want := []f64 {
+			9.519906553477973e-07,
+			0.11435550359829726,
+			0.8507648989374199,
+			1.5266555211635529,
+		}
+		ok := r.converged && r.log_likelihood >= 5906.484849367855 - 1e-4
+		for v, i in got {if !(math.abs(v - want[i]) <= 2e-3 * max(math.abs(want[i]), 0.01)) do ok = false}
+		fc := ts.garch_forecast(&r, GA_E0[:], 1)
+		ok = ok && near(fc.variance_forecast, 1.596346710429394e-05, 2e-3)
+		expect(
+			&passed,
+			&total,
+			ok,
+			fmt.tprintf(
+				"GARCH + GED: MLE = scipy optimum (llf %.4f vs 5906.4848, converged %v)",
+				r.log_likelihood,
+				r.converged,
+			),
 		)
 		ts.garch_result_free(&r)
 	}

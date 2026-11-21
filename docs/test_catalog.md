@@ -77,7 +77,7 @@ Reference and contract tests print `OK` or `FAIL` for each check and end with a 
 | `kalman_test` | `kalman_test`, `kalman_control_test`, `kalman_tv_control_test`, `ekf_tiny_test`, `ekf_tiny_rts_test`, `ukf_tiny_test`, `ukf_tiny_rts_test`, `ukf_tiny_control_test`, `ukf_tiny_control_rts_test` | Linear Kalman filter (with control and time-varying inputs), EKF, UKF, RTS smoothing |
 | `kalman_large_test` | `kalman_large_n_test` | The Kalman predict step for state sizes above 8 (seasonal models) against a naive loop |
 | `garch_test` | `garch_test` | GARCH(1,1) parameter recovery on synthetic data, volatility forecast |
-| `garch_spec_reference_test` | `garch_spec_reference_test` | GJR and EGARCH with normal and Student-t errors vs an independent NumPy/SciPy likelihood: likelihood, MLE and one-step forecast |
+| `garch_spec_reference_test` | `garch_spec_reference_test` | GJR and EGARCH with normal and Student-t errors, GARCH with GED errors, and a GJR-t series with persistence 0.99 and α near 0, vs an independent NumPy/SciPy likelihood: likelihood, MLE (the fit must report convergence) and one-step forecast; the fit's analytic gradient vs central differences for every variance equation and distribution |
 | `gjr_garch_test` | `gjr_garch_test` | GJR-GARCH recovers the leverage term, beats a symmetric fit, has the right persistence and long-run variance |
 | `garch_real_data_test` 🌐🖼 | `garch_real_data_test` | GARCH on SPY with Student-t and GED errors; out-of-sample VaR and ES backtests |
 | `rs_garch_test` 🌐🖼 | `rs_garch_test` | Regime-switching GARCH on SPY |
@@ -129,7 +129,7 @@ Reference and contract tests print `OK` or `FAIL` for each check and end with a 
 | `persistence_roundtrip_test` | `persistence_roundtrip_test` | Save/load of every layer type and model: identical bytes after re-saving, identical outputs, partial loading, corrupt files, freezing; GPT and BERT files keep the frozen flags, older GPT / BERT files load all trainable, a wrong flag count is rejected |
 | `augmentation_reference_test` | `augmentation_reference_test` | Image augmentation vs PyTorch `affine_grid` / `grid_sample` |
 | `nn_test` 📁 | `nn_test`, `optim_test`, `mse_train_test`, `xor_test`, `classification_test`, `adam_test`, `adam_classification_test`, `dropout_test`, `flexible_network_test`, `sequential_test`, `persistence_test` | Layers, losses, SGD/Adam, XOR, dropout, `Sequential` API, saving weights |
-| `optim_test` | `run_optimizer_tests` (runs `test_sgd_slice`, `test_sgd_matrix`, `test_adam_slice`, `test_rmsprop_slice`, `test_schedulers`) | Optimizers in `optimize/` and learning-rate schedulers |
+| `optim_test` | `run_optimizer_tests` (runs `test_sgd_slice`, `test_sgd_matrix`, `test_adam_slice`, `test_rmsprop_slice`, `test_schedulers`, `test_lbfgs`) | Optimizers in `optimize/` and learning-rate schedulers; L-BFGS: the two-loop direction vs the textbook recursion, `lbfgs_minimize` vs Newton's method (log-sum-exp) and on Rosenbrock (n = 2, 10), the step interface with its line search |
 | `mlp_test` | `mlp_test` | Multi-layer perceptron |
 | `batchnorm_test` 📁 | `run_all_batchnorm_tests` (forward, backward, sequential, MNIST, train/eval) | BatchNorm2d |
 | `mnist_test` 📁 | `mnist_loader_test`, `mnist_cnn_test`, `augmentation_test`, `test_both_models`, `test_augmented_model` | MNIST loader, CNN training, data augmentation |
