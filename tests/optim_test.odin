@@ -310,7 +310,8 @@ _rosen_f :: proc(x: []f64, _: rawptr) -> f64 {
 	return _rosen_fg(x, g, nil)
 }
 
-test_lbfgs :: proc(allocator: mem.Allocator) -> bool {
+// returns the number of failed checks
+test_lbfgs :: proc(allocator: mem.Allocator) -> int {
 	fmt.println("Testing L-BFGS...")
 	failed := 0
 	check :: proc(failed: ^int, ok: bool, name: string) {
@@ -425,34 +426,37 @@ test_lbfgs :: proc(allocator: mem.Allocator) -> bool {
 		)
 	}
 
-	record_failures(failed)
-	return failed == 0
+	return failed
 }
 
 // ============================================================================
 // Main Test Runner
 // ============================================================================
 
-run_optimizer_tests :: proc(allocator: mem.Allocator) -> bool {
+// Every failed test counts as one failed check (test_lbfgs: one per failed
+// check), recorded for exit_on_failures
+run_optimizer_tests :: proc(allocator: mem.Allocator) {
 	seed_test(#procedure)
 	fmt.println("\n=== Running Optimizer Unit Tests ===\n")
 
-	all_passed := true
-
-	all_passed = test_sgd_slice(allocator) && all_passed
-	all_passed = test_sgd_matrix(allocator) && all_passed
-	all_passed = test_adam_slice(allocator) && all_passed
-	all_passed = test_rmsprop_slice(allocator) && all_passed
-	all_passed = test_schedulers() && all_passed
-	all_passed = test_lbfgs(allocator) && all_passed
+	failed := 0
+	for ok in ([]bool {
+			test_sgd_slice(allocator),
+			test_sgd_matrix(allocator),
+			test_adam_slice(allocator),
+			test_rmsprop_slice(allocator),
+			test_schedulers(),
+		}) {
+		if !ok do failed += 1
+	}
+	failed += test_lbfgs(allocator)
+	record_failures(failed)
 
 	fmt.println("\n=== Optimizer Tests Complete ===")
-	if all_passed {
+	if failed == 0 {
 		fmt.println("✅ All tests passed!")
 	} else {
-		fmt.println("❌ Some tests failed")
+		fmt.printfln("❌ %d check(s) failed", failed)
 	}
 	fmt.println()
-
-	return all_passed
 }
