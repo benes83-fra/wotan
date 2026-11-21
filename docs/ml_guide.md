@@ -552,6 +552,14 @@ The result's `converged` is false when the search stopped for another reason:
 
 A function value of NaN or infinity counts as too large, so the function can return `math.INF_F64` outside its domain. The GARCH fits use it this way ([analytics guide, section 11](analytics_guide.md#11-garch-and-volatility)). Constraints are not supported; map constrained parameters to unconstrained ones first, for example a positive σ as exp(x).
 
+For model calibration, `optim.calibrate(params, objective, user_data, config)` does that mapping, and computes the gradient by finite differences, so the objective only returns a value:
+- Each `Calibration_Param{name, init, lower, upper, scale}` has box bounds, and `.Log` scale fits ln x for positive parameters of very different sizes.
+- With `config.method = .LBFGS`, every bounded parameter is mapped smoothly onto the whole real line (a sigmoid between two bounds, an exponential for one), and `lbfgs_minimize` runs on the result.
+- `fd_step` is the step of the central differences; `parallel = true` evaluates them on several threads.
+- `square_loss = true` minimises the square of a loss that is an RMSE. The RMSE has a kink at an exact fit, its square does not.
+
+The Hull-White, G2++ and prospect-theory calibrations use it ([rates guide, section 4](finance_rates_credit_guide.md#4-hull-white-caps-floors-and-swaptions), [behavioral finance guide, section 3](behavioral_finance_guide.md#calibration)). The default `method`, `.Optimizer`, steps with a first-order optimizer from `config.optimizer` (SGD, Adam or RMSProp) instead.
+
 ### Naive Bayes and k-nearest neighbours
 
 `gnb_fit` is scikit-learn's `GaussianNB` (the optional third argument is `var_smoothing`, default 1e-9). `knn_fit` stores a copy of the training data; `k` is the number of neighbours and `.Distance` weights them by 1/distance (`.Uniform` is a plain vote). Both accept any class labels and have a `predict_proba`:

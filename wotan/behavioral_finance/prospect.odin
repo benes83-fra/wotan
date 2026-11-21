@@ -505,17 +505,12 @@ _calibrate_prospect :: proc(
 		}
 	}
 	config := opt.Calibration_Config {
-		optimizer = {
-			type = .Adam,
-			learning_rate = 0.02,
-			beta1 = 0.9,
-			beta2 = 0.999,
-			epsilon = 1e-8,
-		},
-		max_iter = setup.max_iter if setup.max_iter > 0 else 200,
+		method         = .LBFGS,
+		square_loss    = true, // the loss is an RMSE: L-BFGS minimises its square
+		max_iter       = setup.max_iter if setup.max_iter > 0 else 200,
 		loss_threshold = 1e-6,
-		fd_step = 1e-5,
-		parallel = true,
+		fd_step        = 1e-5,
+		parallel       = true,
 	}
 	res := opt.calibrate(free[:], prospect_objective_fn, &ctx, config, allocator)
 	defer opt.calibration_result_free(&res)

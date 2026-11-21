@@ -202,7 +202,7 @@ The strike is a node of the grid, so pass the same K to the grid and the price.
 
 ### Calibration
 
-`calibrate_prospect_theory(market_data, S, r, mu, sigma, setup, opt_types)` fits the CPT parameters to option prices by Adam on finite-difference gradients. Each option is described by:
+`calibrate_prospect_theory(market_data, S, r, mu, sigma, setup, opt_types)` fits the CPT parameters to option prices by L-BFGS on finite-difference gradients, within each parameter's bounds. Each option is described by:
 - a `fin.VolSurfacePoint`: strike, expiry and `market_price` (or `implied_vol` when the price is 0);
 - an entry in `opt_types` (nil means all calls).
 
@@ -238,10 +238,10 @@ res := bf.calibrate_prospect_theory(chain, S, r, mu, sig, setup, types)
 ```
 
 ```
-gamma 0.6101 (true 0.61) gamma_minus 0.5499 (true 0.55) rmse 2.27e-04 converged false after 300
+gamma 0.6100 (true 0.61) gamma_minus 0.5500 (true 0.55) rmse 2.37e-10 converged true after 16
 ```
 
-`converged` is true only when the RMSE falls below 1e-6; here the iteration limit stopped Adam with both parameters recovered to four decimals.
+`converged` is true when the RMSE falls below 1e-6. Here the fit recovers both parameters exactly, and the RMSE is at the level of the pricing grid's rounding.
 
 ### Behavioral Heston
 

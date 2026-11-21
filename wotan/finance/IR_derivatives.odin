@@ -253,16 +253,11 @@ calibrate_hull_white :: proc(
 		{"sigma", 0.01, 0.001, 0.1, .Log},
 	}
 	config := opt.Calibration_Config {
-		optimizer = {
-			type = .Adam,
-			learning_rate = 0.05,
-			beta1 = 0.9,
-			beta2 = 0.999,
-			epsilon = 1e-8,
-		},
-		max_iter = 300,
+		method         = .LBFGS,
+		square_loss    = true, // the loss is an RMSE: L-BFGS minimises its square
+		max_iter       = 300,
 		loss_threshold = 1e-6,
-		fd_step = 1e-5,
+		fd_step        = 1e-5,
 	}
 	res := opt.calibrate(params, _hw1f_objective, &ctx, config, allocator)
 	defer opt.calibration_result_free(&res)
@@ -872,16 +867,11 @@ calibrate_hull_white_2f :: proc(
 		{"rho", -0.3, -0.99, 0.99, .Linear},
 	}
 	config := opt.Calibration_Config {
-		optimizer = {
-			type = .Adam,
-			learning_rate = 0.02,
-			beta1 = 0.9,
-			beta2 = 0.999,
-			epsilon = 1e-8,
-		},
-		max_iter = 400,
+		method         = .LBFGS,
+		square_loss    = true, // the loss is an RMSE: L-BFGS minimises its square
+		max_iter       = 400,
 		loss_threshold = 1e-6,
-		fd_step = 1e-4,
+		fd_step        = 1e-4,
 	}
 	res := opt.calibrate(params, _hw2f_objective, &ctx, config, allocator)
 	defer opt.calibration_result_free(&res)
@@ -1153,14 +1143,9 @@ calibrate_hull_white_2f_joint :: proc(
 		{"rho", -0.4, -0.99, 0.99, .Linear},
 	}
 	config := opt.Calibration_Config {
-		optimizer = {
-			type = .Adam,
-			learning_rate = 0.05,
-			beta1 = 0.9,
-			beta2 = 0.999,
-			epsilon = 1e-8,
-		},
-		max_iter = 600, // more iterations for the 5D landscape
+		method = .LBFGS,
+		square_loss = true, // the loss is an RMSE: L-BFGS minimises its square
+		max_iter = 600,
 		loss_threshold = 1e-6,
 		fd_step = 1e-4,
 		project = proc(x: []f64) {x[1] = math.max(0.005, math.min(x[0] - 0.01, x[1]))}, 	// b < a

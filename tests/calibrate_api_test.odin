@@ -7,7 +7,9 @@ import "core:mem"
 
 // Contracts of the unified calibration loop (optimize.calibrate): convergence,
 // box bounds, linked-parameter projection, correct iteration/evaluation counts,
-// and bit-identical results with parallel finite-difference probes.
+// and bit-identical results with parallel finite-difference probes; for
+// method = .LBFGS the minimum to rounding, a bound approached from inside, the
+// squared loss of an RMSE-like objective, log-scale parameters and parallel probes.
 
 cal_bowl :: proc(x: []f64, _: rawptr) -> f64 {
 	// Scratch from the temp allocator, as a real (thread-safe) objective would use
@@ -196,6 +198,90 @@ calibrate_api_test :: proc(allocator: mem.Allocator) {
 			r7.x[1],
 			r7.iterations,
 			r7_off.iterations,
+		),
+	)
+
+	// 8. method = .LBFGS: the bowl's minimum to rounding, with the evaluations
+	//    counted per value-and-gradient call (1 + 2n) plus the final one
+	lb := opt.Calibration_Config {
+		method         = .LBFGS,
+		max_iter       = 200,
+		loss_threshold = 1e-12,
+		fd_step        = 1e-6,
+	}
+	r8 := opt.calibrate(free, cal_bowl, nil, lb, allocator)
+	defer opt.calibration_result_free(&r8)
+	expect(
+		&passed,
+		&total,
+		r8.converged &&
+		abs(r8.x[0] - 1.0) < 1e-8 &&
+		abs(r8.x[1] + 2.0) < 1e-8 &&
+		(r8.evaluations - 1) % (1 + 2 * 2) == 0,
+		fmt.tprintf(
+			"L-BFGS: bowl minimum (%.10f, %.10f) in %d iterations, %d evaluations",
+			r8.x[0],
+			r8.x[1],
+			r8.iterations,
+			r8.evaluations,
+		),
+	)
+
+	// 9. L-BFGS keeps a bounded parameter in its box and approaches the bound when
+	//    the minimum lies beyond it (reaching it once the sigmoid rounds to its
+	//    limit): x0 -> 2, x1 -> -2 - 1/12
+	r9 := opt.calibrate(boxed, cal_bowl, nil, lb, allocator)
+	defer opt.calibration_result_free(&r9)
+	expect(
+		&passed,
+		&total,
+		r9.x[0] >= 2.0 && r9.x[0] - 2.0 < 1e-4 && abs(r9.x[1] + 2.0 + 1.0 / 12.0) < 1e-4,
+		fmt.tprintf("L-BFGS: bounded x0 approaches the bound 2 (%.10f, %.6f)", r9.x[0], r9.x[1]),
+	)
+
+	// 10. square_loss: an RMSE-like objective sqrt(bowl) has a kink at its exact
+	//     zero; L-BFGS on its square reaches the minimum
+	root_bowl :: proc(x: []f64, ud: rawptr) -> f64 {return math.sqrt(max(cal_bowl(x, ud), 0))}
+	lb_sq := lb
+	lb_sq.square_loss, lb_sq.loss_threshold = true, 1e-6
+	r10 := opt.calibrate(free, root_bowl, nil, lb_sq, allocator)
+	defer opt.calibration_result_free(&r10)
+	expect(
+		&passed,
+		&total,
+		r10.converged &&
+		r10.loss < 1e-6 &&
+		abs(r10.x[0] - 1.0) < 1e-6 &&
+		abs(r10.x[1] + 2.0) < 1e-6,
+		fmt.tprintf(
+			"L-BFGS square_loss: RMSE-like objective to %.1e at (%.8f, %.8f)",
+			r10.loss,
+			r10.x[0],
+			r10.x[1],
+		),
+	)
+
+	// 11. L-BFGS with .Log parameters, and parallel probes bit-identical to serial
+	lb_log := lb
+	lb_log.loss_threshold = 1e-14
+	r11 := opt.calibrate(logp, small_bowl, nil, lb_log, allocator)
+	defer opt.calibration_result_free(&r11)
+	lb_log.parallel = true
+	r11p := opt.calibrate(logp, small_bowl, nil, lb_log, allocator)
+	defer opt.calibration_result_free(&r11p)
+	expect(
+		&passed,
+		&total,
+		abs(r11.x[0] - 0.012) < 1e-8 &&
+		abs(r11.x[1] - 0.08) < 1e-7 &&
+		r11.x[0] == r11p.x[0] &&
+		r11.x[1] == r11p.x[1] &&
+		r11.evaluations == r11p.evaluations,
+		fmt.tprintf(
+			"L-BFGS log scale: (%.10f, %.10f) in %d iterations; parallel == serial",
+			r11.x[0],
+			r11.x[1],
+			r11.iterations,
 		),
 	)
 

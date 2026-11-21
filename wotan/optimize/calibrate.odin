@@ -8,16 +8,28 @@ import "core:mem"
 // ============================================================================
 // Unified model calibration
 // ============================================================================
-// One loop shared by the model calibrators (SABR, Heston, prospect theory,
-// Hull-White, ...): minimize objective(x) over box-bounded parameters with a
-// gradient-based optimizer and central finite-difference gradients.
+// One procedure shared by the model calibrators (prospect theory, Hull-White,
+// ...): minimize objective(x) over box-bounded parameters with central
+// finite-difference gradients, by one of two methods (config.method).
 //
-// Per iteration:
+// .Optimizer (the zero value): a first-order optimizer (config.optimizer: SGD,
+// Adam, RMSProp) steps on z, per iteration:
 //   1. loss = objective(x); keep the best point seen so far
 //   2. stop (converged) once loss < config.loss_threshold
 //   3. g_i = (f(x + h e_i) - f(x - h e_i)) / 2h  for every parameter
 //   4. optimizer step, then clamp every parameter into [lower, upper]
 // The result is the best point seen, not the last one.
+//
+// .LBFGS: lbfgs_minimize on unconstrained variables u, each mapped smoothly
+// into its box in z: z = lower + (upper - lower) sigmoid(u) with two finite
+// bounds, lower + exp(u) or upper - exp(u) with one, z = u with none. A
+// parameter can approach a bound but not reach it, and the map has no flat
+// region in which the search could stall. Gradients are central differences
+// in u (step fd_step). The search runs to the optimum (no stop at
+// loss_threshold) and stops when no gradient component exceeds gtol, after
+// max_iter iterations, or when the objective stops decreasing. With
+// square_loss, it minimises loss² (same minimiser for a loss >= 0): an RMSE
+// has a kink at an exact fit, its square is smooth.
 
 // How the optimizer moves a parameter.
 //   .Linear: steps act on x directly.
@@ -39,10 +51,16 @@ Calibration_Param :: struct {
 	scale: Param_Scale,
 }
 
+Calibration_Method :: enum {
+	Optimizer, // first-order steps with config.optimizer
+	LBFGS, // lbfgs_minimize on smooth maps of the box
+}
+
 Calibration_Config :: struct {
-	optimizer:      OptimizerConfig,
+	method:         Calibration_Method,
+	optimizer:      OptimizerConfig, // .Optimizer only
 	max_iter:       int,
-	loss_threshold: f64, // converged once the loss falls below this
+	loss_threshold: f64, // converged once the loss falls below this (.Optimizer: also stops)
 	fd_step:        f64, // central finite-difference step h
 	// Evaluate the 2n finite-difference probes of each iteration in parallel.
 	// The objective must then be safe to call from several threads at once
@@ -58,12 +76,17 @@ Calibration_Config :: struct {
 	// consecutive iterations.
 	stall_iters:    int,
 	stall_rel_tol:  f64,
+	// .LBFGS only: converged also when no gradient component (in u) of the
+	// minimised function exceeds gtol (0: only loss < loss_threshold counts)
+	gtol:           f64,
+	// .LBFGS only: minimise loss² instead of loss (for a loss >= 0 such as an RMSE)
+	square_loss:    bool,
 }
 
 Calibration_Result :: struct {
 	x:           []f64, // best parameters found
 	loss:        f64, // objective at x
-	converged:   bool, // stopped because loss < loss_threshold
+	converged:   bool, // loss < loss_threshold, or (.LBFGS) the gradient test of gtol
 	iterations:  int, // optimizer steps taken
 	evaluations: int, // objective evaluations
 	allocator:   mem.Allocator,
@@ -76,6 +99,9 @@ calibrate :: proc(
 	config: Calibration_Config,
 	allocator := context.allocator,
 ) -> Calibration_Result {
+	if config.method == .LBFGS {
+		return _calibrate_lbfgs(params, objective, user_data, config, allocator)
+	}
 	n := len(params)
 	result := Calibration_Result {
 		x         = make([]f64, n, allocator),
@@ -245,4 +271,154 @@ _to_natural :: proc(params: []Calibration_Param, z, x: []f64) {
 			x[i] = math.exp_f64(z[i])
 		}
 	}
+}
+
+// ============================================================================
+// .LBFGS
+// ============================================================================
+
+@(private = "file")
+_Calib_LBFGS :: struct {
+	objective:   ObjectiveFunc,
+	user_data:   rawptr,
+	params:      []Calibration_Param,
+	config:      ^Calibration_Config,
+	lo, hi:      []f64, // the box in z (ln for .Log parameters)
+	u:           []f64, // the point whose gradient is being probed
+	probes:      []f64, // 2n points in u, then mapped to x in place
+	probe_loss:  []f64,
+	n:           int,
+	evaluations: int,
+}
+
+// u -> natural x (z in the box, exp for .Log), then the optional projection.
+// u and x may alias.
+@(private = "file")
+_calib_u_to_x :: proc(c: ^_Calib_LBFGS, u, x: []f64) {
+	for p, i in c.params {
+		lo, hi := c.lo[i], c.hi[i]
+		z: f64
+		switch {
+		case !math.is_inf(lo) && !math.is_inf(hi):
+			z = lo + (hi - lo) / (1.0 + math.exp(-u[i]))
+		case !math.is_inf(lo):
+			z = lo + math.exp(u[i])
+		case !math.is_inf(hi):
+			z = hi - math.exp(u[i])
+		case:
+			z = u[i]
+		}
+		x[i] = math.exp(z) if p.scale == .Log else z
+	}
+	if c.config.project != nil {c.config.project(x)}
+}
+
+// The function L-BFGS minimises at x: loss, or loss² with square_loss
+@(private = "file")
+_calib_min_value :: proc(c: ^_Calib_LBFGS, x: []f64) -> f64 {
+	f := c.objective(x, c.user_data)
+	return f * f if c.config.square_loss else f
+}
+
+@(private = "file")
+_calib_probe_range :: proc(data: rawptr, begin, end: int) {
+	c := (^_Calib_LBFGS)(data)
+	n := c.n
+	for k in begin ..< end {
+		probe := c.probes[k * n:(k + 1) * n]
+		copy(probe, c.u)
+		probe[k / 2] += c.config.fd_step if k % 2 == 0 else -c.config.fd_step
+		_calib_u_to_x(c, probe, probe)
+		w.TEMP_GUARD() // pool threads never reset their temp allocators otherwise
+		c.probe_loss[k] = _calib_min_value(c, probe)
+	}
+}
+
+// ValueGradFunc for lbfgs_minimize: the value at u and its central-difference gradient
+@(private = "file")
+_calib_value_grad :: proc(u, grad: []f64, data: rawptr) -> f64 {
+	c := (^_Calib_LBFGS)(data)
+	n := c.n
+	x := make([]f64, n, context.temp_allocator)
+	_calib_u_to_x(c, u, x)
+	f := _calib_min_value(c, x)
+	copy(c.u, u)
+	if c.config.parallel {
+		util.parallel_for(2 * n, c, _calib_probe_range)
+	} else {
+		_calib_probe_range(c, 0, 2 * n)
+	}
+	c.evaluations += 1 + 2 * n
+	for i in 0 ..< n {
+		grad[i] = (c.probe_loss[2 * i] - c.probe_loss[2 * i + 1]) / (2.0 * c.config.fd_step)
+	}
+	return f
+}
+
+@(private = "file")
+_calibrate_lbfgs :: proc(
+	params: []Calibration_Param,
+	objective: ObjectiveFunc,
+	user_data: rawptr,
+	config: Calibration_Config,
+	allocator: mem.Allocator,
+) -> Calibration_Result {
+	n := len(params)
+	cfg := config
+	result := Calibration_Result {
+		x         = make([]f64, n, allocator),
+		allocator = allocator,
+	}
+	c := _Calib_LBFGS {
+		objective  = objective,
+		user_data  = user_data,
+		params     = params,
+		config     = &cfg,
+		lo         = make([]f64, n, allocator),
+		hi         = make([]f64, n, allocator),
+		u          = make([]f64, n, allocator),
+		probes     = make([]f64, 2 * n * n, allocator),
+		probe_loss = make([]f64, 2 * n, allocator),
+		n          = n,
+	}
+	u0 := make([]f64, n, allocator)
+	defer {
+		delete(c.lo, allocator)
+		delete(c.hi, allocator)
+		delete(c.u, allocator)
+		delete(c.probes, allocator)
+		delete(c.probe_loss, allocator)
+		delete(u0, allocator)
+	}
+	// the starting point in u: the inverse of the map, a start on a bound moved
+	// just inside it
+	for p, i in params {
+		z0 := p.init
+		lo, hi := p.lower, p.upper
+		if p.scale == .Log {
+			assert(p.lower > 0.0 && p.init > 0.0, "calibrate: .Log parameters need positive init and lower bound")
+			z0, lo, hi = math.ln(p.init), math.ln(p.lower), math.ln(p.upper)
+		}
+		c.lo[i], c.hi[i] = lo, hi
+		switch {
+		case !math.is_inf(lo) && !math.is_inf(hi):
+			q := clamp((z0 - lo) / (hi - lo), 1e-9, 1 - 1e-9)
+			u0[i] = math.ln(q / (1 - q))
+		case !math.is_inf(lo):
+			u0[i] = math.ln(max(z0 - lo, 1e-9 * (1 + abs(lo))))
+		case !math.is_inf(hi):
+			u0[i] = math.ln(max(hi - z0, 1e-9 * (1 + abs(hi))))
+		case:
+			u0[i] = z0
+		}
+	}
+	gtol := cfg.gtol if cfg.gtol > 0 else 0
+	r := lbfgs_minimize(_calib_value_grad, u0, &c, cfg.max_iter, gtol, allocator = allocator)
+	_calib_u_to_x(&c, u0, result.x)
+	result.loss = objective(result.x, user_data)
+	c.evaluations += 1
+	result.iterations = r.n_iter
+	result.evaluations = c.evaluations
+	result.converged = result.loss < cfg.loss_threshold || (cfg.gtol > 0 && r.converged)
+	return result
 }

@@ -325,7 +325,7 @@ Averaged over 20 such runs, all three are within one standard error.
 
 `dV/dF` comes from one backward pass through the tensor graph. It is the sensitivity of each caplet to its own forward rate, holding the discount factor fixed.
 
-**Calibration.** `calibrate_hull_white(market_prices, T_start, T_end, F, K, P, n_caplets)` fits a and σ to caplet prices. It minimises the RMSE with Adam on log-parameters (a in [0.01, 0.5], σ in [0.001, 0.1]) and returns an `HW_CalibrationResult` (`params`, `rmse`, `converged`, `iterations`). Fitting the strip above back:
+**Calibration.** `calibrate_hull_white(market_prices, T_start, T_end, F, K, P, n_caplets)` fits a and σ to caplet prices. It minimises the RMSE by L-BFGS with finite-difference gradients, within a in [0.01, 0.5] and σ in [0.001, 0.1], and returns an `HW_CalibrationResult` (`params`, `rmse`, `converged`, `iterations`). Fitting the strip above back:
 
 ```odin
 mkt := make([]f64, 4)
@@ -337,10 +337,10 @@ fmt.printf("calibrated a %.6f sigma %.6f  rmse %.2e  %d iterations\n", cal.param
 ```
 
 ```
-calibrated a 0.099812 sigma 0.009996  rmse 5.55e-07  144 iterations
+calibrated a 0.100000 sigma 0.010000  rmse 1.44e-12  23 iterations
 ```
 
-The optimizer stops when the RMSE drops below 1e-6, so a lies within 2e-4 of the true 0.1. Caplets alone pin a down only loosely, because a and σ trade off against each other.
+The prices were generated with a = 0.1 and σ = 0.01, and the fit recovers both. On market prices, which no parameter pair fits exactly, caplets alone pin a down only loosely, because a and σ trade off against each other. `converged` is true when the RMSE falls below 1e-6.
 
 ## 5. G2++ and Bermudan swaptions
 
@@ -405,7 +405,7 @@ The frozen-weights approximation is within 0.03% of the exact G2 price. The sing
 
 **Calibration.**
 - `calibrate_hull_white_2f(market_prices, T_start, T_end, F, K, P, n)` fits all five parameters to caplets alone. Caplets cannot separate the two factors well, so expect several parameter sets with the same fit.
-- `calibrate_hull_white_2f_joint(caps…, swaption_specs, swaption_market, n_swaptions, curve)` fits caplets and swaptions together. It minimises the sum of the relative RMSEs of both, keeps b < a − 0.01, and returns an `HW2F_JointResult`.
+- `calibrate_hull_white_2f_joint(caps…, swaption_specs, swaption_market, n_swaptions, curve)` fits caplets and swaptions together. It minimises the sum of the relative RMSEs of both, keeps b < a − 0.01, and returns an `HW2F_JointResult`. Both G2++ calibrations use L-BFGS, as `calibrate_hull_white` does.
 
 **Pricing on a yield curve.** The pricers of sections 4 and 5 take the initial curve as a `Rate_Curve`. A plain number is a flat continuously compounded rate r0, as in the examples above. A `^YieldCurve` (bootstrapped or filled in) or a `Discount_Curve{fn, user_data}` (any `Discount_Fn`) fits the models to that curve instead. `rate_curve_discount(curve, t)` and `rate_curve_forward(curve, t)` give P(0, t) and the instantaneous forward f(0, t). `delta_r` is then the derivative with respect to a parallel shift of the continuously compounded zero rates. Swaptions can pay every `delta` years: set `SwaptionSpec.delta` (0 means annual). `hw2f_mc_bermudan_option(..., is_payer = false)` prices a receiver Bermudan.
 

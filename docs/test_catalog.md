@@ -169,7 +169,7 @@ Reference and contract tests print `OK` or `FAIL` for each check and end with a 
 | `mc_and_swaps_test` | `unified_mc_test`, `swaps_test` | Shared Monte Carlo engine; swap valuation on a bootstrapped curve |
 | `vol_surface_test` | `vol_surface_test` | SABR and Heston calibration to a volatility surface |
 | `vol_surface_reference_test` | `vol_surface_reference_test` | Heston and SABR prices and calibration round trips vs QuantLib; Levenberg–Marquardt vs SciPy |
-| `calibrate_api_test` | `calibrate_api_test` | The shared calibration loop: convergence, bounds, linked parameters, iteration counts, identical results with parallel probes |
+| `calibrate_api_test` | `calibrate_api_test` | The shared calibration loop (`optimize.calibrate`): convergence, bounds, linked parameters, iteration counts, identical results with parallel probes; for `.LBFGS` the minimum to rounding, a bound approached from inside, `square_loss` on an RMSE-like objective, log-scale parameters |
 | `vol_products_reference_test` | `vol_products_reference_test` | Variance swaps (replication, Heston fair variance and volatility) and quanto options vs QuantLib and SciPy |
 | `live_options_calibration` 🌐 | `live_options_calibration_test` | SABR and Heston calibrated to a live option chain |
 | `garch_option_test` 🌐🖼 | `garch_options_test` | Option pricing with a GARCH volatility term structure |

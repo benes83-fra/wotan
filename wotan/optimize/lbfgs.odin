@@ -117,7 +117,8 @@ LBFGS_Result :: struct {
 
 // Minimises fg from x (overwritten with the minimiser). Each iteration takes
 // the L-BFGS direction with a backtracking line search (Armijo condition,
-// quadratic interpolation); the first step moves no coordinate by more than 1.
+// quadratic interpolation, given up once a step no longer changes x); the
+// first step moves no coordinate by more than 1.
 // A non-finite objective counts as too large. Stops when no gradient component
 // exceeds gtol (converged), after max_iter iterations, when the line search
 // finds no decrease, or when three steps in a row change the objective by less
@@ -163,7 +164,12 @@ lbfgs_minimize :: proc(
 		f_new := math.INF_F64
 		accepted := false
 		for _ in 0 ..< 60 {
-			for i in 0 ..< n {x_new[i] = x[i] + step * d[i]}
+			moved := false
+			for i in 0 ..< n {
+				x_new[i] = x[i] + step * d[i]
+				moved ||= x_new[i] != x[i]
+			}
+			if !moved {break} 	// the step no longer changes x: no decrease to find
 			f_new = fg(x_new, g_new, user_data)
 			res.n_eval += 1
 			finite := _lbfgs_finite(f_new)
