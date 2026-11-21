@@ -94,6 +94,7 @@ flash_attention_test :: proc(allocator: mem.Allocator) {
 		fmt.println("✅ FlashAttention Backward Pass Matches Standard Attention!")
 	} else {
 		fmt.println("❌ Gradient Mismatch Detected!")
+		record_failures(1)
 	}
 	fmt.println("✅ FlashAttention Test Complete!")
 
@@ -207,6 +208,7 @@ flash_attention_2_test :: proc(allocator: mem.Allocator) {
 		fmt.println("✅ Causal Backward Pass Matches!")
 	} else {
 		fmt.println("❌ Causal Gradient Mismatch!")
+		record_failures(1)
 	}
 
 	fmt.println("\n✅ FlashAttention Test Complete!")

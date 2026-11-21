@@ -8,6 +8,23 @@ import "core:math"
 import "core:math/rand"
 import "core:mem"
 
+// A training test passes when the loss of the last epoch is at most half that of
+// the first (RNN, GRU and LSTM each reach below 0.2 of it in 50 epochs)
+@(private = "file")
+_rnn_expect_learning :: proc(name: string, first, last: f64) {
+	if last <= 0.5 * first {
+		fmt.printf("✓ %s learned: loss %.4f → %.4f\n", name, first, last)
+	} else {
+		fmt.printf(
+			"❌ %s did not learn: loss %.4f → %.4f (needs at most half)\n",
+			name,
+			first,
+			last,
+		)
+		record_failures(1)
+	}
+}
+
 rnn_simple_test :: proc(allocator: mem.Allocator) {
 	seed_test(#procedure)
 	fmt.println("\n=== Testing Simple RNN Training ===")
@@ -56,6 +73,7 @@ rnn_simple_test :: proc(allocator: mem.Allocator) {
 
 	// 6. Training Loop
 	epochs := 50
+	first_loss, last_loss := 0.0, 0.0
 	fmt.println("Training RNN to output constant 0.5...")
 	for epoch in 0 ..< epochs {
 		// Zero gradients
@@ -66,6 +84,9 @@ rnn_simple_test :: proc(allocator: mem.Allocator) {
 
 		// Compute Loss (MSE)
 		loss := t.tensor_mse_loss(output, target)
+
+		if epoch == 0 {first_loss = loss.data.data[0]}
+		last_loss = loss.data.data[0]
 
 		// Backward pass (triggers BPTT)
 		t.tensor_backward(loss)
@@ -82,7 +103,7 @@ rnn_simple_test :: proc(allocator: mem.Allocator) {
 		t.tensor_free_graph(loss)
 	}
 
-	fmt.println("✓ Simple RNN training test completed successfully!")
+	_rnn_expect_learning("RNN", first_loss, last_loss)
 }
 
 
@@ -123,6 +144,7 @@ gru_simple_test :: proc(allocator: mem.Allocator) {
 	defer t.tensor_free(h_0)
 
 	epochs := 50
+	first_loss, last_loss := 0.0, 0.0
 	fmt.println("Training GRU to output constant 0.5...")
 	for epoch in 0 ..< epochs {
 		nn.adam_zero_grad(&opt)
@@ -135,6 +157,8 @@ gru_simple_test :: proc(allocator: mem.Allocator) {
 			gru_layer.bias_hn,
 		)
 		loss := t.tensor_mse_loss(output, target)
+		if epoch == 0 {first_loss = loss.data.data[0]}
+		last_loss = loss.data.data[0]
 		t.tensor_backward(loss)
 		nn.adam_step(&opt)
 
@@ -143,7 +167,7 @@ gru_simple_test :: proc(allocator: mem.Allocator) {
 		}
 		t.tensor_free_graph(loss)
 	}
-	fmt.println("✓ Simple GRU training test completed successfully!")
+	_rnn_expect_learning("GRU", first_loss, last_loss)
 }
 lstm_simple_test :: proc(allocator: mem.Allocator) {
 	seed_test(#procedure)
@@ -184,11 +208,14 @@ lstm_simple_test :: proc(allocator: mem.Allocator) {
 	defer t.tensor_free(c_0)
 
 	epochs := 50
+	first_loss, last_loss := 0.0, 0.0
 	fmt.println("Training LSTM to output constant 0.5...")
 	for epoch in 0 ..< epochs {
 		nn.adam_zero_grad(&opt)
 		output := t.tensor_lstm(x, h_0, c_0, lstm_layer.w_ih, lstm_layer.w_hh, lstm_layer.bias)
 		loss := t.tensor_mse_loss(output, target)
+		if epoch == 0 {first_loss = loss.data.data[0]}
+		last_loss = loss.data.data[0]
 		t.tensor_backward(loss)
 		nn.adam_step(&opt)
 
@@ -197,7 +224,7 @@ lstm_simple_test :: proc(allocator: mem.Allocator) {
 		}
 		t.tensor_free_graph(loss)
 	}
-	fmt.println("✓ Simple LSTM training test completed successfully!")
+	_rnn_expect_learning("LSTM", first_loss, last_loss)
 }
 embedding_simple_test :: proc(allocator: mem.Allocator) {
 	seed_test(#procedure)
@@ -231,6 +258,7 @@ embedding_simple_test :: proc(allocator: mem.Allocator) {
 	// Verify output shape
 	if output.shape[0] != batch || output.shape[1] != seq_len || output.shape[2] != embed_dim {
 		fmt.println("❌ Forward shape mismatch!")
+		record_failures(1)
 		return
 	}
 
@@ -253,6 +281,7 @@ embedding_simple_test :: proc(allocator: mem.Allocator) {
 		fmt.println("✓ Forward pass correctly maps indices to weight rows")
 	} else {
 		fmt.println("❌ Forward pass values do not match weight rows!")
+		record_failures(1)
 		return
 	}
 
@@ -295,6 +324,7 @@ embedding_simple_test :: proc(allocator: mem.Allocator) {
 		)
 	} else {
 		fmt.println("❌ Backward pass gradient accumulation failed!")
+		record_failures(1)
 		return
 	}
 
@@ -319,6 +349,7 @@ positional_encoding_test :: proc(allocator: mem.Allocator) {
 
 	if math.abs(expected_val - actual_val) > 1e-6 {
 		fmt.printf("❌ PE precomputation failed! Expected %f, got %f\n", expected_val, actual_val)
+		record_failures(1)
 		return
 	}
 	fmt.println("✓ PE precomputation matches mathematical formula")
@@ -339,6 +370,7 @@ positional_encoding_test :: proc(allocator: mem.Allocator) {
 	// Verify output shape
 	if output.shape[0] != batch || output.shape[1] != seq_len || output.shape[2] != embed_dim {
 		fmt.println("❌ Forward shape mismatch!")
+		record_failures(1)
 		return
 	}
 
@@ -360,19 +392,18 @@ positional_encoding_test :: proc(allocator: mem.Allocator) {
 		fmt.println("✓ Forward pass correctly adds PE to embeddings")
 	} else {
 		fmt.println("❌ Forward pass addition values do not match!")
+		record_failures(1)
 		return
 	}
 
-	// 3. Test Gradient Flow (PE has no grad, so input grad should equal output grad)
-	// Set output gradient to 2.0 everywhere
+	// 3. Test Gradient Flow: y = x + PE with a constant PE, so dL/dx = dL/dy. The
+	// output gradient is seeded with 2.0 everywhere (tensor_backward keeps a
+	// non-zero seed)
 	t.tensor_ensure_grad(output) // op outputs get grad buffers lazily
 	for i in 0 ..< len(output.grad.data) {
 		output.grad.data[i] = 2.0
 	}
-
-	// Trigger backward pass (since PE is not in the graph, it just passes grad to input)
-	// We manually simulate the addition backward pass for the input
-	l.vec_add_simd(input.grad.data, output.grad.data, input.grad.data) // Actually, for y = x + c, dy/dx = 1, so grad_x = grad_y
+	t.tensor_backward(output)
 
 	// Verify input received the exact same gradients
 	grad_match := true
@@ -386,6 +417,7 @@ positional_encoding_test :: proc(allocator: mem.Allocator) {
 		fmt.println("✓ Backward pass correctly flows gradients through PE addition")
 	} else {
 		fmt.println("❌ Backward pass gradient flow failed!")
+		record_failures(1)
 		return
 	}
 
@@ -450,6 +482,7 @@ attention_simple_test :: proc(allocator: mem.Allocator) {
 			output.data.data[0],
 			output.data.data[1],
 		)
+		record_failures(1)
 		return
 	}
 
@@ -471,6 +504,7 @@ attention_simple_test :: proc(allocator: mem.Allocator) {
 			V.grad.data[0],
 			V.grad.data[1],
 		)
+		record_failures(1)
 		return
 	}
 
@@ -504,6 +538,7 @@ multi_head_attention_test :: proc(allocator: mem.Allocator) {
 		fmt.println("✓ Forward pass shape is correct!")
 	} else {
 		fmt.printf("❌ Forward pass shape mismatch! Got %v\n", output.shape)
+		record_failures(1)
 		t.tensor_free_graph(output) // Clean up even on failure
 		return
 	}
@@ -529,6 +564,7 @@ multi_head_attention_test :: proc(allocator: mem.Allocator) {
 		)
 	} else {
 		fmt.println("❌ Backward pass failed to flow gradients to input!")
+		record_failures(1)
 		t.tensor_free_graph(output) // Clean up even on failure
 		return
 	}
@@ -565,6 +601,7 @@ layer_norm_test :: proc(allocator: mem.Allocator) {
 	// Verify output shape
 	if output.shape[0] != batch || output.shape[1] != seq_len || output.shape[2] != d_model {
 		fmt.printf("❌ Shape mismatch! Got %v\n", output.shape)
+		record_failures(1)
 		return
 	}
 
@@ -597,6 +634,7 @@ layer_norm_test :: proc(allocator: mem.Allocator) {
 	if all_normalized {
 		fmt.println("✓ Forward pass correctly normalizes each row to mean≈0, var≈1")
 	} else {
+		record_failures(1)
 		return
 	}
 
@@ -636,6 +674,7 @@ layer_norm_test :: proc(allocator: mem.Allocator) {
 		)
 	} else {
 		fmt.println("❌ Backward pass gradient flow failed!")
+		record_failures(1)
 		return
 	}
 
@@ -672,6 +711,7 @@ ffn_simple_test :: proc(allocator: mem.Allocator) {
 		fmt.println("✓ Forward pass shape is correct (maintains d_model)")
 	} else {
 		fmt.printf("❌ Forward pass shape mismatch! Got %v\n", output.shape)
+		record_failures(1)
 		return
 	}
 
@@ -694,6 +734,7 @@ ffn_simple_test :: proc(allocator: mem.Allocator) {
 		fmt.printf("✓ Backward pass correctly flows gradients (sum: %.4f)\n", grad_sum)
 	} else {
 		fmt.println("❌ Backward pass gradient flow failed!")
+		record_failures(1)
 		return
 	}
 

@@ -133,8 +133,8 @@ Reference and contract tests print `OK` or `FAIL` for each check and end with a 
 | `mlp_test` | `mlp_test` | Multi-layer perceptron |
 | `batchnorm_test` 📁 | `run_all_batchnorm_tests` (forward, backward, sequential, MNIST, train/eval) | BatchNorm2d |
 | `mnist_test` 📁 | `mnist_loader_test`, `mnist_cnn_test`, `augmentation_test`, `test_both_models`, `test_augmented_model` | MNIST loader, CNN training, data augmentation |
-| `rnn_test` | `rnn_simple_test`, `gru_simple_test`, `lstm_simple_test`, `embedding_simple_test`, `positional_encoding_test`, `attention_simple_test`, `multi_head_attention_test`, `layer_norm_test`, `ffn_simple_test` | Recurrent layers and transformer building blocks |
-| `transformer_test` | `transformer_encoder_block_test`, `transformer_decoder_test`, `transformer_reversal_test`, `char_lm_test` | Encoder and decoder stacks, sequence reversal, character-level language model |
+| `rnn_test` | `rnn_simple_test`, `gru_simple_test`, `lstm_simple_test`, `embedding_simple_test`, `positional_encoding_test`, `attention_simple_test`, `multi_head_attention_test`, `layer_norm_test`, `ffn_simple_test` | Recurrent layers (RNN, GRU and LSTM must halve their training loss in 50 epochs) and transformer building blocks (forward values and gradient flow) |
+| `transformer_test` | `transformer_encoder_block_test`, `transformer_encoder_test`, `transformer_decoder_test`, `transformer_reversal_test` (`char_lm_test` is not run) | Encoder block and stack, encoder-decoder copy task and sequence reversal; each must reduce its loss below a threshold |
 | `flash_attention_test` | `flash_attention_test`, `flash_attention_2_test` | Fused attention, causal masking, backward-pass check |
 | `gpt_test` | `gpt_full_test`, `gpt_shakespeare_test` | GPT training from scratch |
 | `gpt_moe_flash_test` | `gpt_moe_flash_test` | GPT with mixture-of-experts and flash attention (associative recall) |

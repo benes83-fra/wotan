@@ -57,6 +57,7 @@ mamba_test :: proc(allocator: mem.Allocator) {
 	// Verify output shape
 	if out.shape[0] != batch_size || out.shape[1] != seq_len || out.shape[2] != d_model {
 		fmt.println("❌ ERROR: Output shape mismatch!")
+		record_failures(1)
 		t.tensor_free_graph(out)
 		return
 	}
@@ -107,6 +108,7 @@ mamba_test :: proc(allocator: mem.Allocator) {
 
 	if !grad_ok {
 		fmt.println("\n❌ Mamba Test FAILED: Gradient check failed.")
+		record_failures(1)
 		t.tensor_free_graph(loss)
 		return
 	}
@@ -132,6 +134,7 @@ mamba_test :: proc(allocator: mem.Allocator) {
 
 	if w_before == w_after {
 		fmt.println("❌ ERROR: Weights did not update after optimizer step!")
+		record_failures(1)
 	} else {
 		fmt.printf(
 			"✅ Weights updated successfully (Before: %.6f, After: %.6f)\n",
@@ -315,6 +318,7 @@ mamba_learning_test :: proc(allocator: mem.Allocator) {
 		fmt.println("✅ SUCCESS: Mamba learned the temporal structure (loss << baseline).")
 	} else {
 		fmt.println("❌ FAILED: Mamba did not beat the memoryless baseline.")
+		record_failures(1)
 	}
 	fmt.println("\n=== Mamba Learning Test Complete ===\n")
 }

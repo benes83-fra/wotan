@@ -130,11 +130,12 @@ transformer_encoder_block_test :: proc(allocator: mem.Allocator) {
 		)
 	} else {
 		fmt.printf(
-			"⚠ Transformer Encoder Block showed some learning. Loss: %.4f → %.4f (%.1f%% reduction)\n",
+			"❌ Transformer Encoder Block did not reach the loss threshold. Loss: %.4f → %.4f (%.1f%% reduction)\n",
 			initial_loss,
 			final_loss,
 			reduction,
 		)
+		record_failures(1)
 	}
 
 	fmt.println("✓ Transformer Encoder Block test completed successfully!")
@@ -230,6 +231,7 @@ transformer_encoder_block_test :: proc(allocator: mem.Allocator) {
 
 		if current.data.cols == 0 {
 			fmt.println("  ❌ ERROR: Output has 0 columns!")
+			record_failures(1)
 			return
 		}
 	}
@@ -275,12 +277,13 @@ transformer_encoder_block_test :: proc(allocator: mem.Allocator) {
 		)
 	} else {
 		fmt.printf(
-			"⚠ %d-layer Transformer Encoder showed some learning. Loss: %.4f → %.4f (%.1f%% reduction)\n",
+			"❌ %d-layer Transformer Encoder did not reach the loss threshold. Loss: %.4f → %.4f (%.1f%% reduction)\n",
 			num_layers,
 			initial_loss,
 			final_loss,
 			reduction,
 		)
+		record_failures(1)
 	}
 
 	fmt.println("✓ Stacked Transformer Encoder test completed successfully!")
@@ -455,11 +458,12 @@ transformer_decoder_test :: proc(allocator: mem.Allocator) {
 		)
 	} else {
 		fmt.printf(
-			"⚠ Encoder-Decoder showed some learning. Loss: %.4f → %.4f (%.1f%% reduction)\n",
+			"❌ Encoder-Decoder did not reach the loss threshold. Loss: %.4f → %.4f (%.1f%% reduction)\n",
 			initial_loss,
 			final_loss,
 			reduction,
 		)
+		record_failures(1)
 	}
 
 	fmt.println("✓ Transformer Decoder test completed successfully!")
@@ -672,11 +676,12 @@ transformer_reversal_test :: proc(allocator: mem.Allocator) {
 		)
 	} else {
 		fmt.printf(
-			"⚠ Transformer showed some learning. Loss: %.4f → %.4f (%.1f%% reduction)\n",
+			"❌ Transformer did not reach the loss threshold. Loss: %.4f → %.4f (%.1f%% reduction)\n",
 			initial_loss,
 			final_loss,
 			reduction,
 		)
+		record_failures(1)
 	}
 
 	fmt.println("✓ Sequence reversal test completed successfully!")
