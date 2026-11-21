@@ -14,6 +14,7 @@ import "core:mem"
 // - nelder_mead returns the best vertex it holds, even when max_iter runs out
 // - sarima_fit does not depend on the global RNG state
 // - likelihood, MLE, AIC/BIC, forecasts and intervals match statsmodels
+// - near-cancelling AR and MA roots: exact likelihood and the MLE
 
 arima_contracts_test :: proc(allocator: mem.Allocator) {
 	seed_test(#procedure)
@@ -134,6 +135,55 @@ arima_contracts_test :: proc(allocator: mem.Allocator) {
 
 	// 6. statsmodels 0.13.5 reference values (ARIMA / SARIMAX, trend = 'n')
 	arima_statsmodels_checks(&passed, &total, allocator)
+
+	// 7. near-cancelling ARMA(2,2) (AR roots of modulus 1.07, MA roots 1.15, as
+	//    ARMA(2,2) fits of daily returns give): the exact likelihood equals the
+	//    dense Gaussian one (numpy: Toeplitz autocovariance matrix, Cholesky), and
+	//    the fit reaches the MLE of a 27-start statsmodels search with exact
+	//    filtering (ssm.tolerance = 0); statsmodels' default fit stops at -568.99
+	{
+		phi7, theta7 := []f64{-1.7338, -0.874}, []f64{1.6405, 0.763}
+		e7 := make([]f64, 400)
+		defer delete(e7)
+		gcl_fill(e7, 4545)
+		for &v in e7 {v *= math.sqrt_f64(3.0)}
+		y7 := _sm_ref_arma(phi7, theta7, e7, allocator)
+		defer delete(y7)
+		ll7 := ts.arima_loglik(y7, phi7, theta7, 0, 1.0)
+		expect(
+			&passed,
+			&total,
+			abs(ll7 - -562.6828343772252) < 1e-9,
+			fmt.tprintf(
+				"near-cancelling ARMA(2,2): exact loglik vs dense Gaussian (err %.1e)",
+				ll7 - -562.6828343772252,
+			),
+		)
+		fit7 := ts.arima_fit(y7, 2, 0, 2)
+		defer {delete(fit7.phi); delete(fit7.theta)}
+		ref7 := []f64 {
+			-1.744407193612609,
+			-0.8753187869744828,
+			1.6474811432790342,
+			0.7453374758703484,
+		}
+		perr := max(
+			abs(fit7.phi[0] - ref7[0]),
+			abs(fit7.phi[1] - ref7[1]),
+			abs(fit7.theta[0] - ref7[2]),
+			abs(fit7.theta[1] - ref7[3]),
+		)
+		expect(
+			&passed,
+			&total,
+			fit7.loglik > -561.6553562464069 - 1e-7 && perr < 1e-4,
+			fmt.tprintf(
+				"near-cancelling ARMA(2,2) fit is the MLE (loglik %.8f vs -561.65535625, params err %.1e)",
+				fit7.loglik,
+				perr,
+			),
+		)
+	}
 
 	fmt.printf("ARIMA contracts summary: %d/%d passed\n", passed, total)
 	record_failures(total - passed)

@@ -509,6 +509,8 @@ forecast: [20.850, 17.383, 19.183, 24.133]
 
 `trend` is `.None` or `.Additive` (with `damped = true` for a damped trend), `seasonal` is `.None`, `.Additive` or `.Multiplicative`. Here β and γ are 0: the slope and the seasonal pattern are estimated once from the start of the data and not updated. The result also holds the one-step-ahead `fitted` values, the `resid`, the `level`, `trend` and `season` states, and `aic`, `aicc` and `bic`. To run the recursions with parameters you choose yourself, use `holt_winters_filter(y, spec, params)`.
 
+The fit solves for the best initial states at each set of smoothing parameters and searches only the smoothing parameters, by Nelder–Mead from the three best points of a grid. With multiplicative seasonality the SSE has several local minima, so the fit can end with a lower SSE than statsmodels' `fit()`. On the airline-passenger series (1949–1960) with an additive trend and multiplicative season, the fit's SSE is 12879, against 15953 for statsmodels. Multiplying the initial level and trend by a constant and dividing the initial seasonal states by it changes no fitted value, so the fit scales the seasonal states to average 1.
+
 ## 9. ARIMA
 
 `arima_fit(y, p, d, q)` estimates an ARIMA(p, d, q) by exact Gaussian maximum likelihood. The conventions are statsmodels' `ARIMA` with `trend="n"`: there is **no constant term**, and MA coefficients enter with a plus sign, z_t = Σ φ_i z_{t−i} + e_t + Σ θ_j e_{t−j}. Demean the series first if its mean is not zero, or use ARIMAX with a column of ones (section 10).
@@ -558,7 +560,7 @@ The estimates are close to the true φ = 0.85 and θ = 0.5, and the residuals sh
 - **The fit** returns an `ArimaFitResult` with `phi`, `theta`, `sigma2`, `loglik`, `aic`, `bic` and `converged`. AIC and BIC count σ² as a parameter and use the number of observations after differencing, as statsmodels does. There is no free procedure: delete `phi` and `theta`.
 - **The forecast** gives exactly `h` values on the original scale of `y`, with (1 − `alpha`) prediction intervals, as statsmodels' `get_forecast(h).conf_int(alpha)`. Pass the same `p, d, q` you fitted.
 - **Residuals.** `sarima_residuals` with empty seasonal parts returns the one-step-ahead innovations of the (differenced) series, one per differenced observation. `df_residuals(y, fit, p, d, q)` returns them, with their variances, as a DataFrame.
-- **`arima_loglik(y, phi, theta, d, sigma2)`** evaluates the exact log-likelihood at parameters you choose.
+- **`arima_loglik(y, phi, theta, d, sigma2)`** evaluates the exact log-likelihood at parameters you choose. When you compare it with statsmodels near a unit root, or with nearly cancelling AR and MA roots, set `model.ssm.tolerance = 0` first. By default statsmodels' Kalman filter stops updating the state covariance once it looks converged, and its `llf` can then be off by 1e-4 or more.
 
 **Differencing.** `difference(y, d)` returns the d-th difference, which is `d` values shorter. `difference_with_history` also returns the first `d` values, which `inverse_difference` needs to undo it. `seasonal_difference(y, D, s)` takes lag-`s` differences:
 
@@ -1199,7 +1201,7 @@ ARMA series mean: iid se 0.3386  block se 0.8568
 
 The iid bootstrap ignores the strong autocorrelation of the ARMA series and understates the standard error of its mean; blocks keep the dependence. `method` is `.BCa` (default; iid only), `.Percentile` or `.Basic`; `resample` is `.IID`, `.MovingBlock` or `.Stationary`. A `seed` of 0 uses the context's random generator. `bootstrap_ci` allocates nothing you need to free.
 
-**Nelder–Mead.** `nelder_mead(f, ctx, x0, max_iter, tol, allocator, xtol)` minimises a function of several variables without derivatives; the ARIMA and Holt–Winters fits use it. The objective receives a `rawptr` for your own data. It returns the best point (allocated in `allocator`), the minimum and whether it converged:
+**Nelder–Mead.** `nelder_mead(f, ctx, x0, max_iter, tol, allocator, xtol)` minimises a function of several variables without derivatives; the ARIMA and Holt–Winters fits use it. The objective receives a `rawptr` for your own data. It returns the best point (allocated in `allocator`), the minimum and whether it converged. It has converged when the values at the simplex's vertices differ by less than `tol`, and, with `xtol > 0`, the simplex is smaller than `xtol` in every coordinate. `tol` is absolute: scale it to the size of f, because a spread below f's rounding error (about 2e-16 · |f|) is never reached and the run then uses all `max_iter` iterations.
 
 ```odin
 rosenbrock :: proc(x: []f64, ctx: rawptr) -> f64 {

@@ -1,5 +1,6 @@
 package analytics
 
+import w "../core"
 import l "../linalg"
 import ml "./ML"
 import "core:math"
@@ -17,6 +18,11 @@ import "core:mem"
 //   forecast  ŷ_{T+h} = l_T + (φ + … + φ^h) b_T  (+|×) seasonal state of that phase
 // Fitting minimises the SSE over α, β ≤ α, γ ≤ 1 - α, φ ∈ [0.8, 0.995] and the
 // initial states (statsmodels' default initialization_method="estimated").
+// The initial states are profiled out: at given smoothing parameters they are
+// solved by linear least squares (additive season, where the fitted values are
+// affine in them) or Levenberg-Marquardt from the heuristic start
+// (multiplicative). Nelder-Mead then searches the 1-4 smoothing parameters from
+// the best points of a grid; the multiplicative SSE has several local minima.
 
 HWTrend :: enum {
 	None,
@@ -43,16 +49,16 @@ HoltWintersParams :: struct {
 }
 
 HoltWintersResult :: struct {
-	spec:      HoltWintersSpec,
-	params:    HoltWintersParams,
-	fitted:    []f64, // one-step-ahead predictions ŷ_t
-	resid:     []f64, // y_t - ŷ_t
-	level:     []f64, // l_t after observation t
-	trend:     []f64, // b_t after observation t (0 without trend)
-	season:    []f64, // the seasonal state array (n + m values, statsmodels layout)
-	sse:       f64,
+	spec:           HoltWintersSpec,
+	params:         HoltWintersParams,
+	fitted:         []f64, // one-step-ahead predictions ŷ_t
+	resid:          []f64, // y_t - ŷ_t
+	level:          []f64, // l_t after observation t
+	trend:          []f64, // b_t after observation t (0 without trend)
+	season:         []f64, // the seasonal state array (n + m values, statsmodels layout)
+	sse:            f64,
 	aic, aicc, bic: f64, // statsmodels: n ln(SSE/n) + 2k etc., k counts initial states
-	allocator: mem.Allocator,
+	allocator:      mem.Allocator,
 }
 
 // Run the recursions with given parameters (statsmodels fit(optimized=False)
@@ -86,7 +92,11 @@ holt_winters_filter :: proc(
 }
 
 // Least-squares fit of the smoothing parameters and initial states
-holt_winters_fit :: proc(y: []f64, spec: HoltWintersSpec, allocator := context.allocator) -> HoltWintersResult {
+holt_winters_fit :: proc(
+	y: []f64,
+	spec: HoltWintersSpec,
+	allocator := context.allocator,
+) -> HoltWintersResult {
 	_hw_check(y, spec)
 	n := len(y)
 	m := _hw_m(spec)
@@ -96,41 +106,71 @@ holt_winters_fit :: proc(y: []f64, spec: HoltWintersSpec, allocator := context.a
 		y    = y,
 		spec = spec,
 	}
-	ctx.fit_init = spec.seasonal == .Multiplicative
 	ctx.n_init = 1 + (1 if spec.trend == .Additive else 0) + (m if spec.seasonal != .None else 0)
-	n_x := np + (ctx.n_init if ctx.fit_init else 0)
 
-	// heuristic initial states (statsmodels _initialization_simple)
-	init0 := make([]f64, ctx.n_init, context.temp_allocator)
-	defer delete(init0, context.temp_allocator)
-	_hw_simple_init(y, spec, init0)
+	// heuristic initial states (statsmodels _initialization_simple): the start of
+	// the multiplicative model's Levenberg-Marquardt
+	ctx.init0 = make([]f64, ctx.n_init, context.temp_allocator)
+	defer delete(ctx.init0, context.temp_allocator)
+	_hw_simple_init(y, spec, ctx.init0)
 
-	best := make([]f64, n_x, context.temp_allocator)
-	defer delete(best, context.temp_allocator)
-	best_f := math.INF_F64
-	x0 := make([]f64, n_x, context.temp_allocator)
-	defer delete(x0, context.temp_allocator)
-	// grid of starts (statsmodels use_brute) for the smoothing parameters, in [0, 1] coordinates
+	// grid of starts (statsmodels use_brute) for the smoothing parameters, in [0, 1]
+	// coordinates; the profiled SSE at each
 	grid := []f64{0.1, 0.5, 0.9}
 	n_grid := 1
 	for _ in 0 ..< np {n_grid *= len(grid)}
+	gx := make([]f64, n_grid * np, context.temp_allocator)
+	gf := make([]f64, n_grid, context.temp_allocator)
+	order := make([]int, n_grid, context.temp_allocator)
+	defer {
+		delete(gx, context.temp_allocator)
+		delete(gf, context.temp_allocator)
+		delete(order, context.temp_allocator)
+	}
 	for g in 0 ..< n_grid {
 		code := g
 		for i in 0 ..< np {
 			u := grid[code % len(grid)]
 			code /= len(grid)
-			x0[i] = math.ln(u / (1 - u)) // logit
+			gx[g * np + i] = math.ln(u / (1 - u)) // logit
 		}
-		for i in 0 ..< ctx.n_init {if ctx.fit_init do x0[np + i] = init0[i]}
-		f := _hw_objective(x0, &ctx)
-		if f < best_f {best_f = f; copy(best, x0)}
+		gf[g] = _hw_objective(gx[g * np:(g + 1) * np], &ctx)
+		order[g] = g
 	}
-	for _ in 0 ..< 6 {
-		xs, fs, _ := nelder_mead(_hw_objective, &ctx, best, 4000 * max(n_x / 2, 1), 1e-14, context.temp_allocator)
-		gain := best_f - fs
-		if fs < best_f {best_f = fs; copy(best, xs)}
-		delete(xs, context.temp_allocator)
-		if gain < 1e-12 * max(1, best_f) do break
+	for i in 1 ..< n_grid { 	// insertion sort by SSE
+		for j := i; j > 0 && gf[order[j]] < gf[order[j - 1]]; j -= 1 {
+			order[j], order[j - 1] = order[j - 1], order[j]
+		}
+	}
+
+	// Nelder-Mead from the N_STARTS best grid points, each restarted until it
+	// stops improving; the overall best wins
+	N_STARTS :: 3
+	best := make([]f64, np, context.temp_allocator)
+	defer delete(best, context.temp_allocator)
+	best_f := math.INF_F64
+	for r in 0 ..< min(N_STARTS, n_grid) {
+		g := order[r]
+		cur := gx[g * np:(g + 1) * np]
+		cur_f := gf[g]
+		for _ in 0 ..< 6 {
+			// the value spread is relative to the SSE: an absolute one below the
+			// SSE's rounding (≈ 2e-16 SSE) is never met
+			ftol := max(1e-13 * cur_f, 1e-300)
+			xs, fs, _ := nelder_mead(
+				_hw_objective,
+				&ctx,
+				cur,
+				2000 * np,
+				ftol,
+				context.temp_allocator,
+			)
+			gain := cur_f - fs
+			if fs < cur_f {cur_f = fs; copy(cur, xs)}
+			delete(xs, context.temp_allocator)
+			if gain < 1e-12 * max(1, cur_f) do break
+		}
+		if cur_f < best_f {best_f = cur_f; copy(best, cur)}
 	}
 
 	params := _hw_params_from(best, &ctx, allocator)
@@ -139,7 +179,11 @@ holt_winters_fit :: proc(y: []f64, spec: HoltWintersSpec, allocator := context.a
 }
 
 // h-step-ahead forecasts from the end of the fitted sample
-holt_winters_forecast :: proc(res: ^HoltWintersResult, h: int, allocator := context.allocator) -> []f64 {
+holt_winters_forecast :: proc(
+	res: ^HoltWintersResult,
+	h: int,
+	allocator := context.allocator,
+) -> []f64 {
 	out := make([]f64, max(h, 0), allocator)
 	n := len(res.fitted)
 	m := _hw_m(res.spec)
@@ -199,7 +243,12 @@ _hw_n_smooth :: proc(spec: HoltWintersSpec) -> int {
 }
 
 // One pass of the recursions; returns the SSE. level / trend: n + 1, season: n + m
-_hw_run :: proc(y: []f64, spec: HoltWintersSpec, p: ^HoltWintersParams, fitted, lvl, b, s: []f64) -> f64 {
+_hw_run :: proc(
+	y: []f64,
+	spec: HoltWintersSpec,
+	p: ^HoltWintersParams,
+	fitted, lvl, b, s: []f64,
+) -> f64 {
 	n := len(y)
 	m := _hw_m(spec)
 	has_t := spec.trend == .Additive
@@ -244,19 +293,25 @@ _hw_run :: proc(y: []f64, spec: HoltWintersSpec, p: ^HoltWintersParams, fitted, 
 
 _hw_info :: proc(res: ^HoltWintersResult, n: int) {
 	spec := res.spec
-	k := f64((spec.period if spec.seasonal != .None else 0) + (2 if spec.trend == .Additive else 0) + 2 + (1 if spec.damped else 0))
+	k := f64(
+		(spec.period if spec.seasonal != .None else 0) +
+		(2 if spec.trend == .Additive else 0) +
+		2 +
+		(1 if spec.damped else 0),
+	)
 	nf := f64(n)
 	ll := nf * math.ln(res.sse / nf)
 	res.aic = ll + 2 * k
-	res.aicc = res.aic + (2 * (k + 2) * (k + 3) / (nf - k - 3) if nf - k - 3 > 0 else math.inf_f64(1))
+	res.aicc =
+		res.aic + (2 * (k + 2) * (k + 3) / (nf - k - 3) if nf - k - 3 > 0 else math.inf_f64(1))
 	res.bic = ll + k * math.ln(nf)
 }
 
 _HWCtx :: struct {
-	y:        []f64,
-	spec:     HoltWintersSpec,
-	fit_init: bool, // initial states are optimiser variables (multiplicative); else least squares
-	n_init:   int,
+	y:      []f64,
+	spec:   HoltWintersSpec,
+	n_init: int,
+	init0:  []f64, // heuristic initial states (start of the multiplicative solve)
 }
 
 // statsmodels' restricted parameters: x (logits) → α ∈ [ε, 1-ε], β ∈ [0, α], γ ∈ [0, 1-α], φ ∈ [0.8, 0.995]
@@ -273,8 +328,7 @@ _hw_smoothing :: proc(x: []f64, spec: HoltWintersSpec) -> (alpha, beta, gamma, p
 	return
 }
 
-// SSE at the optimiser point x; additive models: the initial states are solved
-// by least squares (the fitted values are affine in them)
+// SSE at the smoothing logits x, with the initial states solved for (profiled out)
 _hw_objective :: proc(x: []f64, ctx_ptr: rawptr) -> f64 {
 	ctx := (^_HWCtx)(ctx_ptr)
 	p := _hw_params_from(x, ctx, context.temp_allocator)
@@ -293,23 +347,117 @@ _hw_objective :: proc(x: []f64, ctx_ptr: rawptr) -> f64 {
 	return sse if !math.is_nan(sse) else math.inf_f64(1)
 }
 
-// Parameters at optimiser point x (smoothing logits, then the initial states if fit_init)
+// Parameters at the smoothing logits x, with the best initial states for them
 _hw_params_from :: proc(x: []f64, ctx: ^_HWCtx, allocator: mem.Allocator) -> HoltWintersParams {
 	spec := ctx.spec
 	m := _hw_m(spec)
 	p: HoltWintersParams
 	p.alpha, p.beta, p.gamma, p.phi = _hw_smoothing(x, spec)
 	p.season0 = make([]f64, m, allocator)
-	np := _hw_n_smooth(spec)
 	init := make([]f64, ctx.n_init, context.temp_allocator)
 	defer delete(init, context.temp_allocator)
-	if ctx.fit_init {
-		copy(init, x[np:np + ctx.n_init])
+	if spec.seasonal == .Multiplicative {
+		_hw_mult_init(ctx, p, init)
 	} else {
 		_hw_ls_init(ctx, p, init)
 	}
 	_hw_unpack_init(spec, init, &p)
 	return p
+}
+
+// Least-squares initial states for a multiplicative model at given smoothing
+// parameters: Levenberg-Marquardt from the heuristic states, with a forward-
+// difference Jacobian of the fitted values. The SSE does not change when the
+// level and trend are multiplied by c and the seasonal states divided by c; the
+// result is scaled so that the seasonal states average 1.
+_hw_mult_init :: proc(ctx: ^_HWCtx, smooth: HoltWintersParams, init_out: []f64) {
+	w.TEMP_GUARD()
+	y := ctx.y
+	n := len(y)
+	m := _hw_m(ctx.spec)
+	k := ctx.n_init
+	p := smooth
+	p.season0 = make([]f64, m, context.temp_allocator)
+	lvl := make([]f64, n + 1, context.temp_allocator)
+	b := make([]f64, n + 1, context.temp_allocator)
+	s := make([]f64, n + m, context.temp_allocator)
+	r := make([]f64, n, context.temp_allocator) // residuals at x
+	fit := make([]f64, n, context.temp_allocator)
+	J := make([]f64, n * k, context.temp_allocator) // d fitted / d init
+	g := make([]f64, k, context.temp_allocator)
+	x := make([]f64, k, context.temp_allocator)
+	xt := make([]f64, k, context.temp_allocator)
+	G := l.matrix_new(f64, k, k, context.temp_allocator)
+	H := l.matrix_new(f64, k, k, context.temp_allocator)
+	Hi := l.matrix_new(f64, k, k, context.temp_allocator)
+
+	// SSE at init states v; the fitted values go to out
+	run :: proc(ctx: ^_HWCtx, p: ^HoltWintersParams, v, out, lvl, b, s: []f64) -> f64 {
+		_hw_unpack_init(ctx.spec, v, p)
+		sse := _hw_run(ctx.y, ctx.spec, p, out, lvl, b, s)
+		return sse if !math.is_nan(sse) else math.inf_f64(1)
+	}
+
+	copy(x, ctx.init0)
+	sse := run(ctx, &p, x, fit, lvl, b, s)
+	for t in 0 ..< n {r[t] = y[t] - fit[t]}
+	lambda := 1e-3
+	for _ in 0 ..< 100 {
+		if !(sse < math.inf_f64(1)) do break
+		for j in 0 ..< k {
+			h := 1e-7 * max(1, abs(x[j]))
+			copy(xt, x)
+			xt[j] += h
+			run(ctx, &p, xt, fit, lvl, b, s)
+			for t in 0 ..< n {J[t * k + j] = (fit[t] - (y[t] - r[t])) / h}
+		}
+		for a in 0 ..< k {
+			g[a] = 0
+			for c in 0 ..< k {G.data[a * k + c] = 0}
+		}
+		for t in 0 ..< n {
+			for a in 0 ..< k {
+				ja := J[t * k + a]
+				g[a] += ja * r[t]
+				for c in 0 ..< k {G.data[a * k + c] += ja * J[t * k + c]}
+			}
+		}
+		// damped Gauss-Newton step (G + λ diag G) δ = Jᵀ r; λ grows until the SSE falls
+		accepted := false
+		for _ in 0 ..< 12 {
+			copy(H.data, G.data)
+			for a in 0 ..< k {H.data[a * k + a] *= 1 + lambda}
+			ml._ols_inverse(&H, &Hi) // G is singular along the scale direction: pseudo-inverse
+			for a in 0 ..< k {
+				v := 0.0
+				for c in 0 ..< k {v += Hi.data[a * k + c] * g[c]}
+				xt[a] = x[a] + v
+			}
+			sse_t := run(ctx, &p, xt, fit, lvl, b, s)
+			if sse_t < sse {
+				rel := (sse - sse_t) / sse
+				copy(x, xt)
+				for t in 0 ..< n {r[t] = y[t] - fit[t]}
+				sse = sse_t
+				lambda = max(lambda / 10, 1e-12)
+				accepted = true
+				if rel < 1e-13 {lambda = -1} 	// converged
+				break
+			}
+			lambda *= 10
+		}
+		if !accepted || lambda < 0 do break
+	}
+
+	// scale so that the seasonal states average 1
+	mean_s := 0.0
+	for j in k - m ..< k {mean_s += x[j]}
+	mean_s /= f64(m)
+	if mean_s > 0 {
+		for j in 0 ..< k - m {x[j] *= mean_s}
+		for j in k - m ..< k {x[j] /= mean_s}
+	}
+	copy(init_out, x)
 }
 
 _hw_unpack_init :: proc(spec: HoltWintersSpec, init: []f64, p: ^HoltWintersParams) {
