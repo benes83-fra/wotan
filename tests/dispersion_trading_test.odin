@@ -163,10 +163,21 @@ dispersion_trading_test :: proc(allocator: mem.Allocator) {
 				X_seq[dst_start:dst_start + seq_len * num_features],
 				features[src_start:src_start + seq_len * num_features],
 			)
-			Y_seq[i] = targets[start_idx + i + seq_len]
+			Y_seq[i] = math.ln(max(targets[start_idx + i + seq_len], 1e-12))
 		}
 		num_train_samples := int(f64(num_samples) * 0.8)
 		if num_train_samples < batch_size {return 0.0}
+		// the network learns the logarithm of the realised volatility, standardised
+		// with the training samples' mean and standard deviation; its forecast is
+		// exp(ymean + ysd · output), so it is always positive (as in
+		// ensemble_volatility_test). A raw volatility target lets an unconstrained
+		// output go negative out of sample.
+		ymean, ysd := 0.0, 0.0
+		for y in Y_seq[:num_train_samples] {ymean += y}
+		ymean /= f64(num_train_samples)
+		for y in Y_seq[:num_train_samples] {ysd += (y - ymean) * (y - ymean)}
+		ysd = max(math.sqrt(ysd / f64(num_train_samples)), 1e-12)
+		for &y in Y_seq {y = (y - ymean) / ysd}
 
 		train_returns := returns[window:start_idx + train_days]
 		residuals := ts.extract_residuals(train_returns, allocator)
@@ -261,7 +272,7 @@ dispersion_trading_test :: proc(allocator: mem.Allocator) {
 		x_inf.shape = [4]int{1, seq_len, num_features, 1}
 		t.graph_begin(&scope)
 		lstm_pred_tensor := ml_fin.lstm_volatility_forecaster_forward(&ensemble.lstm, x_inf)
-		lstm_rv_dec := lstm_pred_tensor.data.data[0]
+		lstm_rv_dec := math.exp(ymean + ysd * lstm_pred_tensor.data.data[0])
 
 		t.tensor_free_graph(lstm_pred_tensor)
 		t.graph_end(&scope)
