@@ -38,7 +38,7 @@ The packages build on each other in layers. Lower layers do not depend on higher
 | `finance` | `fin "wotan/finance"` | option pricing and simulation, volatility models, curves and bonds, swaps and credit, portfolios, risk, backtests |
 | `ml_finance` | `mlf "wotan/ml_finance"` | machine learning for finance: labels and backtest statistics, asset pricing, forecasting, deep hedging, RL |
 | `behavioral_finance` | `bf "wotan/behavioral_finance"` | prospect theory, behavioural portfolios, sentiment, herding, heuristics |
-| `net` | `net "wotan/net"` | HTTP through libcurl, Yahoo Finance prices and option chains |
+| `net` | `net "wotan/net"` | HTTP through libcurl, Yahoo Finance prices and option chains, CBOE index histories |
 | `plot` | `plot "wotan/plot"` | PNG charts: lines, scatter, histograms, bars, heatmaps |
 
 The aliases are the ones the guides use; any alias works.
@@ -58,7 +58,7 @@ Every example in the guides was compiled and run against the current code, and t
 | Guide | Covers |
 |---|---|
 | [core](core_guide.md) | the data model, building and loading DataFrames, printing, selecting and filtering, computed columns, sorting, indexes, grouping, joins, dates and times, memory |
-| [data in and out](data_io_guide.md) (`importer`, `exporter`, `net`) | reading and writing CSV, JSON, JSON Lines, HTML and Excel; HTTP; Yahoo Finance histories as a DataFrame, as arrays per ticker or as a date-matched panel; prices to returns |
+| [data in and out](data_io_guide.md) (`importer`, `exporter`, `net`) | reading and writing CSV, JSON, JSON Lines, HTML and Excel; HTTP; Yahoo Finance histories as a DataFrame, as arrays per ticker or as a date-matched panel; CBOE index histories; prices to returns |
 | [linalg](linalg_guide.md) | the `Matrix` type, matrices from DataFrames, products, covariance and correlation, LU, Cholesky, QR, least squares, eigenvalues and SVD, vector kernels |
 | [tensor](tensor_guide.md) | tensors and gradients, element-wise and matrix operations, reductions and losses, normalisation, convolution, recurrent cells and attention, the backward pass, graph scopes |
 | [gpu](gpu_guide.md) | the opt-in GPU backend (WebGPU): moving tensors to the GPU, training MLPs, CNNs, TCNs, GPT, BERT and the `ml_finance` models on the GPU, reading results, ops with GPU kernels and the CPU fallback, precision, performance |

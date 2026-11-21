@@ -240,8 +240,7 @@ yahoo_max_range_test :: proc(allocator: mem.Allocator = context.temp_allocator) 
 			g := int(w.date_diff(s.dates[i - 1], s.dates[i]))
 			max_gap, min_gap = max(max_gap, g), min(min_gap, g)
 		}
-		ok_all :=
-			s.dates[0] == w.Date{1993, 1, 29} if iv == .Daily else s.dates[0].year == 1993
+		ok_all := s.dates[0] == w.Date{1993, 1, 29} if iv == .Daily else s.dates[0].year == 1993
 		if iv == .Daily {
 			ok_all = ok_all && n > 8000 && max_gap <= 7
 		} else {
@@ -259,4 +258,71 @@ yahoo_max_range_test :: proc(allocator: mem.Allocator = context.temp_allocator) 
 		if !ok_all {record_failures(1)}
 	}
 	fmt.println("=== END YAHOO MAX RANGE TEST ===")
+}
+
+// net.read_cboe_index / cboe_history_parse. Offline: both file formats (DATE,OPEN,
+// HIGH,LOW,CLOSE and DATE,<value>), CRLF line ends, and rows left out for a bad
+// date, a bad value or a value <= 0. Live: COR1M's history starts on 2006-01-03
+// (CBOE's file), has more than 5000 days in ascending order, and an unknown
+// symbol is not ok.
+cboe_index_test :: proc(allocator: mem.Allocator = context.temp_allocator) {
+	seed_test(#procedure)
+	fmt.println("=== CBOE INDEX TEST ===")
+	failed := 0
+	check :: proc(failed: ^int, ok: bool, name: string) {
+		if !ok {failed^ += 1}
+		fmt.printf("%s %s\n", "OK  " if ok else "FAIL", name)
+	}
+	{
+		ohlc := "DATE,OPEN,HIGH,LOW,CLOSE\r\n01/03/2006,23.5,23.6,23.4,23.55\r\n02/30/2006,1,1,1,1\r\n01/04/2006,24,24,24,x\r\n01/05/2006,24,24,24,0\r\n12/29/2025,30.1,31,29,30.96\r\n"
+		s, ok := net.cboe_history_parse(ohlc, "COR1M", allocator)
+		defer net.cboe_series_free(&s)
+		check(
+			&failed,
+			ok &&
+			len(s.dates) == 2 &&
+			s.dates[0] == w.Date{2006, 1, 3} &&
+			s.close[0] == 23.55 &&
+			s.dates[1] == w.Date{2025, 12, 29} &&
+			s.close[1] == 30.96 &&
+			s.symbol == "COR1M",
+			"OHLC file: CLOSE column, 3 bad rows left out",
+		)
+		single := "DATE,SKEW\n01/02/1990,126.09\n01/03/1990,123.34\n"
+		s2, ok2 := net.cboe_history_parse(single, "SKEW", allocator)
+		defer net.cboe_series_free(&s2)
+		check(
+			&failed,
+			ok2 && len(s2.close) == 2 && s2.close[1] == 123.34,
+			"single-value file: the last column",
+		)
+		_, ok3 := net.cboe_history_parse("PRICE\n1\n", "X", allocator)
+		check(&failed, !ok3, "no DATE column: not ok")
+	}
+	{
+		s, ok := net.read_cboe_index("^COR1M", allocator)
+		defer net.cboe_series_free(&s)
+		if !ok {
+			fail_missing_data(#procedure, "CBOE history of COR1M")
+		} else {
+			n := len(s.dates)
+			ascending := true
+			for i in 1 ..< n {ascending &&= w.date_less(s.dates[i - 1], s.dates[i])}
+			check(
+				&failed,
+				s.dates[0] == w.Date{2006, 1, 3} && n > 5000 && ascending,
+				fmt.tprintf(
+					"COR1M: %d days from %v, ascending %v, last %.2f",
+					n,
+					s.dates[0],
+					ascending,
+					s.close[n - 1],
+				),
+			)
+		}
+		_, bad := net.read_cboe_index("NOSUCHINDEX", allocator)
+		check(&failed, !bad, "unknown symbol: not ok")
+	}
+	record_failures(failed)
+	fmt.println("=== END CBOE INDEX TEST ===")
 }

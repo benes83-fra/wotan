@@ -88,7 +88,7 @@ _http_get_status :: proc(
 }
 
 // GET body of url when the request succeeds with an HTTP status in 200 - 299
-@(private = "file")
+@(private)
 _get_ok_body :: proc(url: string) -> (string, bool) {
 	body, status, ok := _http_get_status(url, context.temp_allocator)
 	return body, ok && status >= 200 && status <= 299

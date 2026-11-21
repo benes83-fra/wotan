@@ -19,8 +19,9 @@ This guide covers all three. It assumes you know the `DataFrame` from the [core 
 7. [Writing files](#7-writing-files)
 8. [HTTP](#8-http)
 9. [Yahoo Finance](#9-yahoo-finance)
-10. [Tests](#10-tests)
-11. [Quick reference](#11-quick-reference)
+10. [CBOE index histories](#10-cboe-index-histories)
+11. [Tests](#11-tests)
+12. [Quick reference](#12-quick-reference)
 
 ## 1. Setup
 
@@ -487,7 +488,33 @@ Before the open and after the close `last_is_live` is false, and every row is a 
 
 The DataFrames `yahoo_json_to_dataframe` builds are checked against an independent pandas parse of the same JSON text. Over five years of SPY, the VIX and AAPL and ten years of NVDA, the dates, the positions of the nulls and every value, including 40 dividends and 2 splits, agree to 1e-13.
 
-## 10. Tests
+## 10. CBOE index histories
+
+CBOE publishes the daily history of its indices as CSV files: the volatility indices (VIX, VXN, VVIX, the single-stock VXAPL, VXAZN, VXGOG, VXGS and VXIBM), the implied-correlation indices (COR1M, COR3M and others) and indices such as SKEW. Yahoo quotes several of them (`^COR1M`, `^VXAPL`) but serves only the latest value, without history. `net.read_cboe_index(symbol)` loads the history from CBOE:
+
+```odin
+cor, ok := net.read_cboe_index("COR1M") // a leading ^ is ignored
+if !ok {return} // CBOE unreachable, or an unknown symbol
+defer net.cboe_series_free(&cor)
+n := len(cor.dates)
+ta := context.temp_allocator
+fmt.printf("%s: %d days, %s %.2f .. %s %.2f
+", cor.symbol, n,
+    w.date_to_string(cor.dates[0], ta), cor.close[0], w.date_to_string(cor.dates[n - 1], ta), cor.close[n - 1])
+```
+
+```
+COR1M: 5255 days, 2006-01-03 23.50 .. 2026-11-20 36.05
+```
+
+- **The result** is a `Cboe_Series`: `symbol`, `dates` (ascending) and `close`, the index's closing value of each day. Free it with `cboe_series_free`.
+- **The files** come in two formats, `DATE,OPEN,HIGH,LOW,CLOSE` and `DATE,<value>`. The loader takes the CLOSE column, or the last column. Rows whose date or value does not parse, or whose value is not positive, are left out.
+- **Failures:** `ok` is false when CBOE cannot be reached, when it does not know the symbol (it answers with HTTP 403) or when the file has no valid row.
+- **Your own files:** `cboe_history_parse(text, symbol)` parses a file you fetched or saved yourself.
+
+The dates are CBOE's trading days. To combine an index with Yahoo prices, put its values in a `map[w.Date]f64` and keep the dates both have, as `dispersion_trading_test` does with VXAPL, VXAZN, VXGOG and COR1M.
+
+## 11. Tests
 
 | Test | What it checks |
 |---|---|
@@ -497,12 +524,13 @@ The DataFrames `yahoo_json_to_dataframe` builds are checked against an independe
 | `excel_basic_test`, `excel_date_test`, `excel_export_test`, `zip_smoke_test` | reading sheets and dates, writing workbooks, the ZIP container |
 | `http_get_test`, `yahoo_finance_json_test`, `yahoo_finance_events_test` | live HTTP and Yahoo requests, including dividends and splits |
 | `yahoo_max_range_test` | `.Max` gives the whole daily history (SPY from 1993-01-29, no gap over a week) and weekly rows a week apart |
+| `cboe_index_test` | offline: both CBOE file formats and the rows left out; live: COR1M's history from 2006-01-03, ascending, and an unknown symbol |
 | `yahoo_live_row_test` | `last_is_live` of a series and a panel agrees with the trading hours in Yahoo's answer; a live row is dated today |
 | `data_io_fixes_test` | offline: the chart parser, `Yahoo_Series`, and `yahoo_session_live` on a recorded answer during, after and before the session |
 
 Most of the finance tests load their data with `read_yahoo`, `read_yahoo_series` or `read_yahoo_panel`. When Yahoo cannot be reached they count a failure and go on; they never fall back to made-up data.
 
-## 11. Quick reference
+## 12. Quick reference
 
 | Procedure | Purpose |
 |---|---|
@@ -518,6 +546,7 @@ Most of the finance tests load their data with `read_yahoo`, `read_yahoo_series`
 | `net.read_yahoo_series(symbol, interval, range, alloc) -> (Yahoo_Series, ok)`, `net.yahoo_series_free` | one ticker as arrays, days without a price dropped; `last_is_live` marks a running session |
 | `net.read_yahoo_panel(tickers, interval, range, alloc) -> (Yahoo_Panel, ok, failed)`, `net.yahoo_panel_free` | several tickers on their common dates; `last_is_live` as for a series |
 | `net.yahoo_session_live(text, now_unix) -> bool` | whether a chart answer's last row is the running session |
+| `net.read_cboe_index(symbol, alloc) -> (Cboe_Series, ok)`, `net.cboe_history_parse(text, symbol, alloc)`, `net.cboe_series_free` | a CBOE index's daily history (VIX, COR1M, VXAPL, SKEW, ...) |
 | `net.yahoo_panel_to_dataframe(&panel, names, alloc)` | a panel's adjusted closes as a DataFrame (Date plus one column per ticker) |
 | `ts.log_returns(prices, n_series = 1, alloc)`, `ts.simple_returns(prices, n_series = 1, alloc)` | prices → returns, single series or row-major panel |
 | `w.column_own_name(&col, name)` | give a column its own copy of its name |
