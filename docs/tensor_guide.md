@@ -334,6 +334,8 @@ dropout: every value is 0 or 2x the input: true  eval returns an equal new tenso
 
 `tensor_conv2d(input, weight, bias = nil, stride = 1, pad = 0)` takes the PyTorch layouts. `input` is `[N, C_in, H, W]`, `weight` is `[C_out, C_in, kH, kW]` and `bias` is `[1, C_out]` or nil. The output is `[N, C_out, H_out, W_out]` with H_out = (H + 2·pad − kH) / stride + 1. It runs as im2col followed by a SIMD matrix product.
 
+The kernel can be rectangular: kH and kW come from the weight's shape. `stride` and `pad` apply to both axes unless `stride_w` and `pad_w` set the width separately, which is PyTorch's `stride = (stride, stride_w)` and `padding = (pad, pad_w)`. For example, a `(5, 1)` kernel moving 3 rows at a time down a `[N, C, rows, columns]` input, with 2 rows of padding and none on the columns, is `t.tensor_conv2d(x, w, b, stride = 3, pad = 2, stride_w = 1, pad_w = 0)` with `w` of shape `[C_out, C_in, 5, 1]`.
+
 ```odin
 img := t.tensor_new_4d(1, 1, 4, 4, requires_grad = true)
 for i in 0 ..< 16 {img.data.data[i] = f64(i) * 0.1 - 0.5}

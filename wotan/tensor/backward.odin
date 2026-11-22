@@ -2405,8 +2405,8 @@ _conv2d_backward :: proc(node: ^Tensor, allocator: mem.Allocator) {
 
 	N, C_in, H, W := input_in.shape[0], input_in.shape[1], input_in.shape[2], input_in.shape[3]
 	C_out := weight_in.shape[0]
-	kH, kW := node.conv_params.kH, node.conv_params.kW
-	stride, pad := node.conv_params.stride, node.conv_params.pad
+	cp := node.conv_params
+	kH, kW := cp.kH, cp.kW
 	out_h, out_w := node.shape[2], node.shape[3]
 	col_h := out_h * out_w
 	col_w := C_in * kH * kW
@@ -2431,8 +2431,10 @@ _conv2d_backward :: proc(node: ^Tensor, allocator: mem.Allocator) {
 			W,
 			kH,
 			kW,
-			stride,
-			pad,
+			cp.stride_h,
+			cp.stride_w,
+			cp.pad_h,
+			cp.pad_w,
 			out_h,
 			out_w,
 			allocator,
@@ -2443,7 +2445,20 @@ _conv2d_backward :: proc(node: ^Tensor, allocator: mem.Allocator) {
 
 	// dW += dY_n @ im2col(x_n)^T
 	if weight_in.requires_grad {
-		col, _, _ := _im2col(input_in.data.data, N, C_in, H, W, kH, kW, stride, pad, allocator)
+		col, _, _ := _im2col(
+			input_in.data.data,
+			N,
+			C_in,
+			H,
+			W,
+			kH,
+			kW,
+			cp.stride_h,
+			cp.stride_w,
+			cp.pad_h,
+			cp.pad_w,
+			allocator,
+		)
 		defer delete(col, allocator)
 		dw := _grad_view(weight_in, C_out, col_w)
 		for n in 0 ..< N {

@@ -107,6 +107,7 @@ persistence_roundtrip_test :: proc(allocator: mem.Allocator) {
 			nn.conv1d_layer_new(4, 4, 3, dilation = 2, causal = true),
 			nn.tcn_block_new(4, 6, 3, 2, dropout = 0.1),
 			nn.conv1d_layer_new(6, 4, 3, padding = 1, stride = 2, groups = 2),
+			nn.conv2d_layer_new(2, 3, 5, 3, 2, kernel_w = 1, stride_w = 1, padding_w = 0),
 		)
 		mha := &seq.layers[13].(nn.MultiHeadAttentionLayer)
 		mha.use_flash, mha.is_causal = true, true
@@ -125,7 +126,7 @@ persistence_roundtrip_test :: proc(allocator: mem.Allocator) {
 		seq2, opt2, epoch, loaded := nn.load_checkpoint(a)
 		ok &&= loaded && nn.save_checkpoint(seq2, opt2, b, epoch) && _pr_same_file(a, b)
 		ok &&=
-			len(seq2.layers) == 25 &&
+			len(seq2.layers) == 26 &&
 			epoch == 3 &&
 			opt2.timestep == 7 &&
 			len(opt2.parameters) == len(ps)
@@ -179,11 +180,20 @@ persistence_roundtrip_test :: proc(allocator: mem.Allocator) {
 		conv1d2 := seq2.layers[22].(nn.Conv1dLayer)
 		tcn2 := seq2.layers[23].(nn.TCNBlock)
 		sg2 := seq2.layers[24].(nn.Conv1dLayer)
+		rect2 := seq2.layers[25].(nn.Conv2dLayer)
 		flags_ok &&=
 			sg2.stride == 2 &&
 			sg2.groups == 2 &&
 			sg2.pad_left == 1 &&
 			sg2.weight.shape == [4]int{4, 3, 3, 1}
+		flags_ok &&=
+			rect2.kernel_size == 5 &&
+			rect2.kernel_w == 1 &&
+			rect2.stride == 3 &&
+			rect2.stride_w == 1 &&
+			rect2.padding == 2 &&
+			rect2.padding_w == 0 &&
+			rect2.weight.shape == [4]int{3, 2, 5, 1}
 		flags_ok &&=
 			conv1d2.dilation == 2 &&
 			conv1d2.pad_left == 4 &&
@@ -196,7 +206,7 @@ persistence_roundtrip_test :: proc(allocator: mem.Allocator) {
 			&total,
 			ok && flags_ok,
 			fmt.tprintf(
-				"checkpoint with all 21 layer types and Adam state (%d parameters): load + re-save gives the same bytes, per-parameter step counts restored %v, former format (one shared count) still loads %v; Conv2d weights keep shape %v, BatchNorm running statistics stay non-trainable; attention flags, Conv1d dilation / padding / stride / groups restored: %v",
+				"checkpoint with all 21 layer types and Adam state (%d parameters): load + re-save gives the same bytes, per-parameter step counts restored %v, former format (one shared count) still loads %v; Conv2d weights keep shape %v, BatchNorm running statistics stay non-trainable; attention flags, Conv1d dilation / padding / stride / groups, Conv2d (5, 1) kernel with stride (3, 1) and padding (2, 0) restored: %v",
 				len(ps),
 				steps_ok,
 				old_ok,

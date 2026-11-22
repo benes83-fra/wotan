@@ -53,6 +53,8 @@ apply_activation :: proc(x: ^t.Tensor, act: Activation) -> ^t.Tensor {
 // Conv2d Layer
 // ============================================================================
 
+// kernel_size, stride and padding are the height values; the *_w fields hold
+// the width values (the same unless conv2d_layer_new was given others)
 Conv2dLayer :: struct {
 	weight:       ^t.Tensor, // (C_out, C_in, kH, kW)
 	bias:         ^t.Tensor, // (C_out,) or nil
@@ -61,8 +63,16 @@ Conv2dLayer :: struct {
 	kernel_size:  int,
 	stride:       int,
 	padding:      int,
+	kernel_w:     int,
+	stride_w:     int,
+	padding_w:    int,
 }
 
+// conv2d_layer_new: a square kernel_size × kernel_size convolution with the
+// same stride and padding on both axes, unless kernel_w, stride_w or padding_w
+// (-1: the same as the height value) set the width separately, e.g. kernel
+// (5, 1) with stride (3, 1): conv2d_layer_new(c_in, c_out, 5, 3, 2, kernel_w = 1,
+// stride_w = 1, padding_w = 0).
 conv2d_layer_new :: proc(
 	in_channels: int,
 	out_channels: int,
@@ -71,6 +81,10 @@ conv2d_layer_new :: proc(
 	padding: int = 0,
 	use_bias: bool = true,
 	allocator: mem.Allocator = context.allocator,
+	kernel_w := -1,
+	stride_w := -1,
+	padding_w := -1,
+	loc := #caller_location,
 ) -> Conv2dLayer {
 	layer: Conv2dLayer
 	layer.in_channels = in_channels
@@ -78,15 +92,35 @@ conv2d_layer_new :: proc(
 	layer.kernel_size = kernel_size
 	layer.stride = stride
 	layer.padding = padding
+	layer.kernel_w = kernel_size if kernel_w < 0 else kernel_w
+	layer.stride_w = stride if stride_w < 0 else stride_w
+	layer.padding_w = padding if padding_w < 0 else padding_w
+	fmt.assertf(
+		kernel_size >= 1 && layer.kernel_w >= 1 && stride >= 1 && layer.stride_w >= 1,
+		"conv2d_layer_new: kernel %d x %d and stride %d x %d must be at least 1",
+		kernel_size,
+		layer.kernel_w,
+		stride,
+		layer.stride_w,
+		loc = loc,
+	)
+	fmt.assertf(
+		padding >= 0 && layer.padding_w >= 0,
+		"conv2d_layer_new: padding %d x %d must not be negative",
+		padding,
+		layer.padding_w,
+		loc = loc,
+	)
 
 	// Xavier initialization
-	fan_in := in_channels * kernel_size * kernel_size
-	fan_out := out_channels * kernel_size * kernel_size
+	k_area := kernel_size * layer.kernel_w
+	fan_in := in_channels * k_area
+	fan_out := out_channels * k_area
 	w_data := l.matrix_new(f64, out_channels, fan_in, allocator)
 	xavier_uniform(w_data.data, fan_in, fan_out)
 
 	layer.weight = t.tensor_new(w_data, true, allocator)
-	layer.weight.shape = [4]int{out_channels, in_channels, kernel_size, kernel_size}
+	layer.weight.shape = [4]int{out_channels, in_channels, kernel_size, layer.kernel_w}
 
 	// Initialize bias to zeros
 	if use_bias {
@@ -100,7 +134,15 @@ conv2d_layer_new :: proc(
 conv2d_layer_forward :: proc(layer: ^Conv2dLayer, x: ^t.Tensor) -> (fwd_out: ^t.Tensor) {
 	rec_ := forward_record_begin()
 	defer forward_record_end(rec_, fwd_out)
-	return t.tensor_conv2d(x, layer.weight, layer.bias, layer.stride, layer.padding)
+	return t.tensor_conv2d(
+		x,
+		layer.weight,
+		layer.bias,
+		layer.stride,
+		layer.padding,
+		stride_w = layer.stride_w,
+		pad_w = layer.padding_w,
+	)
 }
 
 conv2d_layer_free :: proc(layer: ^Conv2dLayer) {

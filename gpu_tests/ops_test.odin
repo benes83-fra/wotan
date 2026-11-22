@@ -821,6 +821,33 @@ op_cases := [?]Op_Case {
 		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_conv2d(x[0], x[1], x[2], 2, 2)},
 	},
 	{
+		name = "conv2d 5x1, stride (3, 1), padding (2, 0), bias (multi-period)",
+		op = .Conv2d,
+		shapes = {{2, 3, 40, 5}, {8, 3, 5, 1}, {1, 8, 1, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			return t.tensor_conv2d(x[0], x[1], x[2], 3, 2, stride_w = 1, pad_w = 0)
+		},
+	},
+	{
+		name = "conv2d 5x3, stride (2, 1), padding (2, 1), bias (multi-resolution)",
+		op = .Conv2d,
+		shapes = {{2, 4, 17, 13}, {6, 4, 5, 3}, {1, 6, 1, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			return t.tensor_conv2d(x[0], x[1], x[2], 2, 2, stride_w = 1, pad_w = 1)
+		},
+	},
+	{
+		name = "conv2d 3x4, stride (1, 3), padding (0, 2), no bias",
+		op = .Conv2d,
+		shapes = {{2, 2, 6, 11}, {3, 2, 3, 4}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			return t.tensor_conv2d(x[0], x[1], nil, 1, 0, stride_w = 3, pad_w = 2)
+		},
+	},
+	{
 		name = "conv1d causal, dilation 2, bias",
 		op = .Conv1d,
 		shapes = {{3, 10, 4, 1}, {5, 4, 3, 1}, {1, 5, 1, 1}},

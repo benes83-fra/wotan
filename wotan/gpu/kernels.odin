@@ -1761,9 +1761,10 @@ fn main(@builtin(global_invocation_id) gi: vec3<u32>, @builtin(num_workgroups) n
 }
 `,
 	// ---- phase 3 ----
-	// col[k, n·L + l] = x[n, c, oh·s + kh - pad, ow·s + kw - pad] (0 in the padding),
-	// k = (c·kH + kh)·kW + kw, l = oh·out_w + ow (the CPU _im2col order per sample).
-	// u0 N, u1 C, u2 H, u3 W, u4 kH, u5 kW, u6 stride, u7 pad
+	// col[k, n·L + l] = x[n, c, oh·s_h + kh - pad_h, ow·s_w + kw - pad_w] (0 in the
+	// padding), k = (c·kH + kh)·kW + kw, l = oh·out_w + ow (the CPU _im2col order
+	// per sample). u0 N, u1 C, u2 H, u3 W, u4 kH, u5 kW, u6 stride_h | stride_w << 16,
+	// u7 pad_h | pad_w << 16
 	.Im2col_2d          = CONV2D_DIMS + `
 @group(0) @binding(1) var<storage, read> x: array<f32>;
 @group(0) @binding(2) var<storage, read_write> col: array<f32>;
@@ -1780,8 +1781,8 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 	let c = k / (p.u4 * p.u5);
 	let kh = (k / p.u5) % p.u4;
 	let kw = k % p.u5;
-	let ih = i32((l / d.ow) * p.u6 + kh) - i32(p.u7);
-	let iw = i32((l % d.ow) * p.u6 + kw) - i32(p.u7);
+	let ih = i32((l / d.ow) * d.sh + kh) - i32(d.ph);
+	let iw = i32((l % d.ow) * d.sw + kw) - i32(d.pw);
 	var v = 0.0;
 	if (ih >= 0 && ih < i32(p.u2) && iw >= 0 && iw < i32(p.u3)) {
 		v = x[((n * p.u1 + c) * p.u2 + u32(ih)) * p.u3 + u32(iw)];
@@ -1804,16 +1805,16 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 	let ih = i32((i / W) % H);
 	let c = (i / (W * H)) % C;
 	let n = i / (W * H * C);
-	let s = i32(p.u6);
+	let sh = i32(d.sh); let sw = i32(d.sw);
 	var acc = 0.0;
 	for (var kh = 0u; kh < p.u4; kh++) {
-		let th = ih + i32(p.u7) - i32(kh);
-		if (th < 0 || th % s != 0 || th / s >= i32(d.oh)) { continue; }
+		let th = ih + i32(d.ph) - i32(kh);
+		if (th < 0 || th % sh != 0 || th / sh >= i32(d.oh)) { continue; }
 		for (var kw = 0u; kw < p.u5; kw++) {
-			let tw = iw + i32(p.u7) - i32(kw);
-			if (tw < 0 || tw % s != 0 || tw / s >= i32(d.ow)) { continue; }
+			let tw = iw + i32(d.pw) - i32(kw);
+			if (tw < 0 || tw % sw != 0 || tw / sw >= i32(d.ow)) { continue; }
 			let k = (c * p.u4 + kh) * p.u5 + kw;
-			let l = u32(th / s) * d.ow + u32(tw / s);
+			let l = u32(th / sh) * d.ow + u32(tw / sw);
 			acc = acc + dcol[k * N * d.L + n * d.L + l];
 		}
 	}
@@ -2402,14 +2403,17 @@ fn wg_sum(v: f32, lid: u32) -> f32 {
 }
 `
 
-// conv2d output size from the Im2col_2d parameters
+// conv2d strides, paddings and output size from the Im2col_2d parameters
+// (u6 stride_h | stride_w << 16, u7 pad_h | pad_w << 16)
 @(private)
 CONV2D_DIMS :: `
-struct Conv_Dims { oh: u32, ow: u32, L: u32, }
+struct Conv_Dims { oh: u32, ow: u32, L: u32, sh: u32, sw: u32, ph: u32, pw: u32, }
 fn conv2d_dims() -> Conv_Dims {
-	let oh = (p.u2 + 2u * p.u7 - p.u4) / p.u6 + 1u;
-	let ow = (p.u3 + 2u * p.u7 - p.u5) / p.u6 + 1u;
-	return Conv_Dims(oh, ow, oh * ow);
+	let sh = p.u6 & 0xFFFFu; let sw = p.u6 >> 16u;
+	let ph = p.u7 & 0xFFFFu; let pw = p.u7 >> 16u;
+	let oh = (p.u2 + 2u * ph - p.u4) / sh + 1u;
+	let ow = (p.u3 + 2u * pw - p.u5) / sw + 1u;
+	return Conv_Dims(oh, ow, oh * ow, sh, sw, ph, pw);
 }
 `
 

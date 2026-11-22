@@ -46,7 +46,8 @@ CHECKPOINT_MAGIC :: []u8{'W', 'O', 'T', 'A', 'N', '_', 'C', 'K', 'P', 'T'}
 @(private = "file")
 _Layer_Id :: enum {
 	Linear         = 0,
-	Conv2d         = 1,
+	Conv2d         = 1, // the same kernel size, stride and padding on both axes
+	Conv2d_Rect    = 38, // with separate width values (written only when one differs)
 	MaxPool2d      = 2,
 	Activation     = 3,
 	Flatten        = 4,
@@ -439,9 +440,10 @@ _write_layer_header :: proc(io: ^_Io, layer: ^Layer) {
 	case LinearLayer:
 		ints(io, .Linear, l.in_features, l.out_features, int(l.bias != nil))
 	case Conv2dLayer:
+		square := l.kernel_w == l.kernel_size && l.stride_w == l.stride && l.padding_w == l.padding
 		ints(
 			io,
-			.Conv2d,
+			.Conv2d if square else .Conv2d_Rect,
 			l.in_channels,
 			l.out_channels,
 			l.kernel_size,
@@ -449,6 +451,11 @@ _write_layer_header :: proc(io: ^_Io, layer: ^Layer) {
 			l.padding,
 			int(l.bias != nil),
 		)
+		if !square {
+			_put_i32(io, l.kernel_w)
+			_put_i32(io, l.stride_w)
+			_put_i32(io, l.padding_w)
+		}
 	case MaxPool2dLayer:
 		ints(io, .MaxPool2d, l.kernel_size, l.stride)
 	case Activation:
@@ -553,12 +560,30 @@ _read_layer_header :: proc(
 			lin.bias = nil
 		}
 		layer = lin
-	case .Conv2d:
+	case .Conv2d, .Conv2d_Rect:
 		c_in, c_out, k, stride, pad :=
 			_get_size(io), _get_size(io), _get_size(io), _get_size(io), _get_size(io)
 		has_bias := _get_i32(io) != 0
-		if !io.ok {return}
-		layer = conv2d_layer_new(c_in, c_out, k, stride, pad, has_bias, alloc)
+		k_w, stride_w, pad_w := k, stride, pad
+		if _Layer_Id(id) == .Conv2d_Rect {
+			k_w, stride_w, pad_w = _get_size(io), _get_size(io), _get_size(io)
+		}
+		if !io.ok || k == 0 || k_w == 0 || stride == 0 || stride_w == 0 {
+			io.ok = false
+			return
+		}
+		layer = conv2d_layer_new(
+			c_in,
+			c_out,
+			k,
+			stride,
+			pad,
+			has_bias,
+			alloc,
+			kernel_w = k_w,
+			stride_w = stride_w,
+			padding_w = pad_w,
+		)
 	case .Conv1d, .Conv1d_SG:
 		c_in, c_out, k, dilation, pad_left, pad_right :=
 			_get_size(io),

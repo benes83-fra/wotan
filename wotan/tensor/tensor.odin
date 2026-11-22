@@ -123,10 +123,12 @@ Tensor :: struct {
 }
 
 ConvParams :: struct {
-	kH:     int,
-	kW:     int,
-	stride: int,
-	pad:    int,
+	kH:       int,
+	kW:       int,
+	stride_h: int,
+	stride_w: int,
+	pad_h:    int,
+	pad_w:    int,
 }
 // ============================================================================
 // 2. Construction & Lifecycle
@@ -918,7 +920,10 @@ tensor_avg_pool2d :: proc(input: ^Tensor, kH, kW, stride: int) -> ^Tensor {
 // input: (N, C_in, H, W)
 // weight: (C_out, C_in, kH, kW)
 // bias: (C_out,) or nil
-// output: (N, C_out, H_out, W_out)
+// output: (N, C_out, H_out, W_out) with
+//   H_out = (H + 2·pad_h - kH) / stride_h + 1, W_out likewise,
+// as torch.nn.functional.conv2d. stride and pad apply to both axes unless
+// stride_w / pad_w (-1: the same as stride / pad) set the width separately.
 tensor_conv2d :: proc(
 	input: ^Tensor,
 	weight: ^Tensor,
@@ -926,28 +931,39 @@ tensor_conv2d :: proc(
 	stride: int = 1,
 	pad: int = 0,
 	allocator: mem.Allocator = context.allocator,
+	stride_w := -1,
+	pad_w := -1,
+	loc := #caller_location,
 ) -> ^Tensor {
+	cp := _conv2d_params(input, weight, bias, stride, pad, stride_w, pad_w, loc)
 	if _device_use(.Conv2d, input, weight, bias) {
-		return _device_conv2d(input, weight, bias, stride, pad)
+		return _device_conv2d(input, weight, bias, cp)
 	}
 	_host_inputs(.Conv2d, input, weight, bias)
 	allocator := _scope_or(allocator) // the active graph scope, if any
-	_check_shape(input)
-	_check_shape(weight)
 	N := input.shape[0]
 	C_in := input.shape[1]
 	H := input.shape[2]
 	W := input.shape[3]
 
 	C_out := weight.shape[0]
-	kH := weight.shape[2]
-	kW := weight.shape[3]
-
-	out_h := (H + 2 * pad - kH) / stride + 1
-	out_w := (W + 2 * pad - kW) / stride + 1
+	kH, kW := cp.kH, cp.kW
 
 	// ✅ FIX: Use context.allocator for temporary im2col
-	col, _, _ := _im2col(input.data.data, N, C_in, H, W, kH, kW, stride, pad, allocator)
+	col, out_h, out_w := _im2col(
+		input.data.data,
+		N,
+		C_in,
+		H,
+		W,
+		kH,
+		kW,
+		cp.stride_h,
+		cp.stride_w,
+		cp.pad_h,
+		cp.pad_w,
+		allocator,
+	)
 
 	out_data := l.matrix_new(f64, 1, N * C_out * out_h * out_w, _op_alloc(input))
 	col_w := C_in * kH * kW
@@ -1000,10 +1016,61 @@ tensor_conv2d :: proc(
 		append(&out.inputs, input)
 		append(&out.inputs, weight)
 		if bias != nil {append(&out.inputs, bias)}
-		out.conv_params = ConvParams{kH, kW, stride, pad}
+		out.conv_params = cp
 	}
 
 	return out
+}
+
+// _conv2d_params: tensor_conv2d's checked kernel size, strides and paddings
+// (stride_w / pad_w -1: the same as stride / pad)
+_conv2d_params :: proc(
+	input, weight, bias: ^Tensor,
+	stride, pad, stride_w, pad_w: int,
+	loc := #caller_location,
+) -> ConvParams {
+	_check_shape(input)
+	_check_shape(weight)
+	cp := ConvParams {
+		kH       = weight.shape[2],
+		kW       = weight.shape[3],
+		stride_h = stride,
+		stride_w = stride if stride_w < 0 else stride_w,
+		pad_h    = pad,
+		pad_w    = pad if pad_w < 0 else pad_w,
+	}
+	fmt.assertf(
+		weight.shape[1] == input.shape[1],
+		"tensor_conv2d: weight %v must be [C_out, C_in, kH, kW] with C_in = %d (input %v)",
+		weight.shape,
+		input.shape[1],
+		input.shape,
+		loc = loc,
+	)
+	fmt.assertf(
+		bias == nil || tensor_numel(bias) == weight.shape[0],
+		"tensor_conv2d: bias must be [1, C_out]",
+		loc = loc,
+	)
+	fmt.assertf(
+		cp.stride_h >= 1 && cp.stride_w >= 1 && cp.pad_h >= 0 && cp.pad_w >= 0,
+		"tensor_conv2d: strides %d / %d must be at least 1, paddings %d / %d not negative",
+		cp.stride_h,
+		cp.stride_w,
+		cp.pad_h,
+		cp.pad_w,
+		loc = loc,
+	)
+	fmt.assertf(
+		input.shape[2] + 2 * cp.pad_h >= cp.kH && input.shape[3] + 2 * cp.pad_w >= cp.kW,
+		"tensor_conv2d: padded input %d x %d is smaller than the kernel %d x %d",
+		input.shape[2] + 2 * cp.pad_h,
+		input.shape[3] + 2 * cp.pad_w,
+		cp.kH,
+		cp.kW,
+		loc = loc,
+	)
+	return cp
 }
 
 
@@ -1230,15 +1297,15 @@ _collect_graph_nodes :: proc(node: ^Tensor, nodes: ^[dynamic]^Tensor, visited: ^
 _im2col :: proc(
 	input: []f64,
 	N, C, H, W: int,
-	kH, kW, stride, pad: int,
+	kH, kW, stride_h, stride_w, pad_h, pad_w: int,
 	allocator: mem.Allocator,
 ) -> (
 	col: []f64,
 	out_h: int,
 	out_w: int,
 ) {
-	out_h = (H + 2 * pad - kH) / stride + 1
-	out_w = (W + 2 * pad - kW) / stride + 1
+	out_h = (H + 2 * pad_h - kH) / stride_h + 1
+	out_w = (W + 2 * pad_w - kW) / stride_w + 1
 
 	col_size := N * (C * kH * kW) * (out_h * out_w)
 	col = make([]f64, col_size, allocator)
@@ -1256,8 +1323,8 @@ _im2col :: proc(
 							col_col := oh * out_w + ow
 
 							// Input coordinates
-							ih := oh * stride - pad + kh
-							iw := ow * stride - pad + kw
+							ih := oh * stride_h - pad_h + kh
+							iw := ow * stride_w - pad_w + kw
 
 							// Handle padding (zero-fill)
 							val := 0.0
@@ -1285,7 +1352,7 @@ _im2col :: proc(
 _col2im :: proc(
 	col: []f64,
 	N, C, H, W: int,
-	kH, kW, stride, pad, out_h, out_w: int,
+	kH, kW, stride_h, stride_w, pad_h, pad_w, out_h, out_w: int,
 	allocator: mem.Allocator,
 ) -> []f64 {
 	grad_input := make([]f64, N * C * H * W, allocator)
@@ -1300,8 +1367,8 @@ _col2im :: proc(
 						for ow in 0 ..< out_w {
 							col_col := oh * out_w + ow
 
-							ih := oh * stride - pad + kh
-							iw := ow * stride - pad + kw
+							ih := oh * stride_h - pad_h + kh
+							iw := ow * stride_w - pad_w + kw
 
 							if ih >= 0 && ih < H && iw >= 0 && iw < W {
 								idx_col :=

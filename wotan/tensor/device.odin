@@ -790,13 +790,11 @@ _device_pool :: proc(op: Op, input: ^Tensor, kH, kW, stride: int) -> ^Tensor {
 }
 
 // _device_conv2d: device tensor_conv2d (same output shape and recorded parameters)
-_device_conv2d :: proc(input, weight, bias: ^Tensor, stride, pad: int) -> ^Tensor {
-	_check_shape(input)
-	_check_shape(weight)
+_device_conv2d :: proc(input, weight, bias: ^Tensor, cp: ConvParams) -> ^Tensor {
 	N, H, W := input.shape[0], input.shape[2], input.shape[3]
-	C_out, kH, kW := weight.shape[0], weight.shape[2], weight.shape[3]
-	out_h := (H + 2 * pad - kH) / stride + 1
-	out_w := (W + 2 * pad - kW) / stride + 1
+	C_out := weight.shape[0]
+	out_h := (H + 2 * cp.pad_h - cp.kH) / cp.stride_h + 1
+	out_w := (W + 2 * cp.pad_w - cp.kW) / cp.stride_w + 1
 	rg := input.requires_grad || weight.requires_grad || (bias != nil && bias.requires_grad)
 	out := _device_new_op(
 		1,
@@ -807,11 +805,11 @@ _device_conv2d :: proc(input, weight, bias: ^Tensor, stride, pad: int) -> ^Tenso
 	)
 	inputs := [3]^Tensor{input, weight, bias}
 	ni := 3 if bias != nil else 2
-	_device_forward(.Conv2d, out, inputs[:ni], {stride, pad})
+	_device_forward(.Conv2d, out, inputs[:ni], {cp.stride_h, cp.stride_w, cp.pad_h, cp.pad_w})
 	if out.requires_grad {
 		out.op = .Conv2d
 		append(&out.inputs, ..inputs[:ni])
-		out.conv_params = ConvParams{kH, kW, stride, pad}
+		out.conv_params = cp
 	}
 	return out
 }

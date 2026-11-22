@@ -19,25 +19,30 @@ import t "../tensor"
 
 @(private)
 Conv2d_Dims :: struct {
-	N, C_in, H, W, C_out, kH, kW, stride, pad, oh, ow, L, CK: int,
+	N, C_in, H, W, C_out, kH, kW, stride_h, stride_w, pad_h, pad_w, oh, ow, L, CK: int,
 }
 
+// m: [stride_h, stride_w, pad_h, pad_w]
 @(private)
-_conv2d_dims :: proc(x, w: ^t.Tensor, stride, pad: int) -> (d: Conv2d_Dims) {
+_conv2d_dims :: proc(x, w: ^t.Tensor, m: [4]int) -> (d: Conv2d_Dims) {
 	d.N, d.C_in, d.H, d.W = x.shape[0], x.shape[1], x.shape[2], x.shape[3]
 	d.C_out, d.kH, d.kW = w.shape[0], w.shape[2], w.shape[3]
-	d.stride, d.pad = stride, pad
-	d.oh = (d.H + 2 * pad - d.kH) / stride + 1
-	d.ow = (d.W + 2 * pad - d.kW) / stride + 1
+	d.stride_h, d.stride_w, d.pad_h, d.pad_w = m[0], m[1], m[2], m[3]
+	d.oh = (d.H + 2 * d.pad_h - d.kH) / d.stride_h + 1
+	d.ow = (d.W + 2 * d.pad_w - d.kW) / d.stride_w + 1
 	d.L = d.oh * d.ow
 	d.CK = d.C_in * d.kH * d.kW
 	return
 }
 
+// Im2col_2d / Col2im_2d parameters: the strides and paddings of both axes are
+// packed as height | width << 16
 @(private)
-_im2col_2d :: proc(d: Conv2d_Dims, x: Bind) -> Bind {
-	n := d.CK * d.N * d.L
-	col := Bind{_acquire(n), n}
+_conv2d_params :: proc(d: Conv2d_Dims) -> Params {
+	assert(
+		max(d.stride_h, d.stride_w, d.pad_h, d.pad_w) < 1 << 16,
+		"gpu conv2d: strides and paddings must be below 65536",
+	)
 	u := [8]u32 {
 		u32(d.N),
 		u32(d.C_in),
@@ -45,10 +50,17 @@ _im2col_2d :: proc(d: Conv2d_Dims, x: Bind) -> Bind {
 		u32(d.W),
 		u32(d.kH),
 		u32(d.kW),
-		u32(d.stride),
-		u32(d.pad),
+		u32(d.stride_h) | u32(d.stride_w) << 16,
+		u32(d.pad_h) | u32(d.pad_w) << 16,
 	}
-	_dispatch_1d(.Im2col_2d, _p(u), {x, col}, n)
+	return _p(u)
+}
+
+@(private)
+_im2col_2d :: proc(d: Conv2d_Dims, x: Bind) -> Bind {
+	n := d.CK * d.N * d.L
+	col := Bind{_acquire(n), n}
+	_dispatch_1d(.Im2col_2d, _conv2d_params(d), {x, col}, n)
 	return col
 }
 
@@ -142,7 +154,7 @@ _forward_p3 :: proc(op: t.Op, out: ^t.Tensor, inputs: []^t.Tensor, ints: []int, 
 	#partial switch op {
 	case .Conv2d:
 		x, w := inputs[0], inputs[1]
-		d := _conv2d_dims(x, w, ints[0], ints[1])
+		d := _conv2d_dims(x, w, {ints[0], ints[1], ints[2], ints[3]})
 		col := _im2col_2d(d, _data(x))
 		prod := Bind{_acquire(d.C_out * d.N * d.L), d.C_out * d.N * d.L}
 		_matmul(_data(w), col, prod, d.C_out, d.N * d.L, d.CK, false, false, false)
@@ -249,7 +261,8 @@ _backward_p3 :: proc(node: ^t.Tensor, dy: Bind, n: int) -> bool {
 _conv2d_backward :: proc(node: ^t.Tensor, dy: Bind) {
 	x, w := node.inputs[0], node.inputs[1]
 	b: ^t.Tensor = node.inputs[2] if len(node.inputs) > 2 else nil
-	d := _conv2d_dims(x, w, node.conv_params.stride, node.conv_params.pad)
+	cp := node.conv_params
+	d := _conv2d_dims(x, w, {cp.stride_h, cp.stride_w, cp.pad_h, cp.pad_w})
 	NL := d.N * d.L
 	if b != nil && b.requires_grad {
 		g, fresh := _out_grad(b)
@@ -273,17 +286,7 @@ _conv2d_backward :: proc(node: ^t.Tensor, dy: Bind) {
 		// dcol [CK, N·L] = Wᵀ @ dy', summed back onto the image
 		dcol := Bind{_acquire(d.CK * NL), d.CK * NL}
 		_matmul(_in_data(w), dyp, dcol, d.CK, NL, d.C_out, true, false, false)
-		u := [8]u32 {
-			u32(d.N),
-			u32(d.C_in),
-			u32(d.H),
-			u32(d.W),
-			u32(d.kH),
-			u32(d.kW),
-			u32(d.stride),
-			u32(d.pad),
-		}
-		_dispatch_1d(.Col2im_2d, _p(u), {dcol, _in_grad(x)}, t.tensor_numel(x))
+		_dispatch_1d(.Col2im_2d, _conv2d_params(d), {dcol, _in_grad(x)}, t.tensor_numel(x))
 		_release_buf(dcol.buf)
 		t._grad_written_on_device(x)
 	}
