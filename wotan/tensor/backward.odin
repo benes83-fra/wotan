@@ -441,6 +441,12 @@ _backward_node_cpu :: proc(node: ^Tensor, allocator: mem.Allocator) {
 			}
 		}
 
+	case .LogSoftmax:
+		_log_softmax_backward(node)
+
+	case .CTCLoss:
+		_ctc_backward(node)
+
 	case .IndexSelectTime:
 		// dx[b, s, :] += dy[b, t, :] for every output step t that read step s
 		x := node.inputs[0]

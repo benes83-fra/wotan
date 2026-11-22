@@ -276,6 +276,7 @@ The gradient of each step is its duration, because every copy of it adds 1 to th
 | `tensor_sum_dim1(a)` | `[N, 1]` | row sums of an `[N, C]` tensor |
 | `tensor_logsumexp_dim1(q, num_actions)` | `[N, 1]` | stable log Σ exp over each row |
 | `tensor_softmax(logits)` | same shape | softmax over the last dimension of `shape`, as `torch.softmax(x, dim = -1)` |
+| `tensor_log_softmax(logits)` | same shape | log softmax over the same dimension, computed stably as x − max − log Σ exp(x − max), as `torch.log_softmax(x, dim = -1)` |
 | `tensor_mse_loss(pred, target)` | scalar | mean (pred − target)²; gradients flow to both |
 | `tensor_l1_loss(pred, target)` | scalar | mean \|pred − target\|, as `torch.nn.functional.l1_loss`; gradients flow to both, 0 where pred = target |
 | `tensor_masked_sum(x, mask)` | scalar | Σ x[i]·mask[i / inner], inner = numel(x) / len(mask): each mask value weights a contiguous block of x |
@@ -286,6 +287,7 @@ The gradient of each step is its duration, because every copy of it adds 1 to th
 | `tensor_entropy(p)` | scalar | −Σ p ln p over the entries above 1e-10 |
 | `tensor_sharpe_loss(r, risk_free_rate = 0)` | scalar | −(mean(r) − r_f) / √(var(r) + 1e-8), population variance |
 | `tensor_prospect_utility(r, alpha, beta, lambda)` | scalar | −mean of the prospect value of r |
+| `tensor_ctc_loss(log_probs, targets, input_lengths, target_lengths, blank = 0, reduction = .Mean, zero_infinity = false)` | scalar, or `[batch]` with `.None` | connectionist temporal classification loss, as `torch.nn.functional.ctc_loss` (see below) |
 
 ```odin
 logits := from_values({0.5, -1.0, 2.0, 0.1, 0.3, -0.7}, 2, 3, true)
@@ -322,6 +324,27 @@ Check these points before you use a loss:
   ```
   masked L1 0.500 (padding ignored), grad of the padded step: [0, 0]
   ```
+
+- **The CTC loss** scores label sequences that are shorter than the input and not aligned with it. Examples are the characters of a recording, or the text tokens a spectrogram must pass through in order. The loss of a sample is −log of the summed probability of all its alignments: every step emits a class, and the sequence collapses to the labels after merging repeated classes and dropping blanks.
+  - `log_probs` is `[batch, T, C]`, channels-last, usually `tensor_log_softmax` of the logits. torch's layout is `[T, batch, C]`.
+  - `targets` holds the labels of all samples one after the other, `target_lengths[b]` of them for sample b, as torch's concatenated form. Labels are in [0, C) and never `blank`.
+  - Sample b uses only its first `input_lengths[b]` steps.
+  - `reduction = .Mean` divides each sample's loss by its target length (at least 1) and averages over the batch, as torch does. `.Sum` adds the losses, and `.None` returns them as `[batch]`.
+  - A sample whose labels cannot fit into its steps has loss +inf and a NaN gradient. Each label needs one step, plus one blank between repeated labels. With `zero_infinity = true`, its loss and gradient are 0.
+  - The gradient with respect to `log_probs` is the exact derivative, minus the posterior of each class at each step. torch's `ctc_loss` returns exp(log_probs) minus that posterior instead. The two give the same logit gradient after `tensor_log_softmax`, which is how they should be used.
+  - With equal logits over 3 classes, each alignment of 3 steps has probability (1/3)³. The target `[1]` has 6 alignments (blank 0): `0 0 1`, `0 1 1`, `1 1 1`, `1 0 0`, `1 1 0` and `0 1 0`:
+
+  ```odin
+  logits := t.tensor_new_4d(1, 3, 3, 1, requires_grad = true) // zeros: 1 sample, 3 steps, 3 classes
+  loss := t.tensor_ctc_loss(t.tensor_log_softmax(logits), {1}, {3}, {1}, reduction = .Sum)
+  t.tensor_backward(loss)
+  ```
+  ```
+  loss 1.504077  (-ln(6/27) = 1.504077)
+  d loss / d logits, step 0: -0.1667 -0.1667 0.3333
+  ```
+
+  At step 0, half of the alignments emit the blank and half emit label 1, so the logit gradient is softmax − posterior = (1/3 − 1/2, 1/3 − 1/2, 1/3).
 
 - **The KL term sums over the latent dimension and averages over the batch**, the usual VAE convention (`-0.5 * torch.sum(1 + log_var - mu**2 - log_var.exp()) / batch_size`). The latent dimension is the last dimension of `mu.shape`. For `mu` of shape `[B, L]` the sum is divided by B; for a sequence `[B, S, L, 1]` it is divided by B·S. σ² = exp(log σ²) is clamped at `KL_EXP_CLAMP` (1e10). Where the clamp is active that term is constant, so its gradient is 0, as with `torch.clamp`.
 
@@ -781,11 +804,11 @@ The same network in PyTorch 2.1.0 (float64, the same initial weights, plain SGD)
 | Constant-only chains | `constant_record_begin()`, `constant_record_end(results...)` |
 | Arithmetic | `tensor_add`, `_sub`, `_mul`, `_div`, `_neg`, `_scale`, `_add_bias`, `_gate_mul` |
 | Element-wise math | `tensor_exp`, `_log`, `_sqrt`, `_lgamma`, `_abs`, `_sin`, `_cos`, `_sign`, `_clamp`, `_norm_cdf` |
-| Activations | `tensor_relu`, `_leaky_relu`, `_sigmoid`, `_tanh`, `_softplus`, `_gelu`, `_gelu_tanh`, `_softmax` |
+| Activations | `tensor_relu`, `_leaky_relu`, `_sigmoid`, `_tanh`, `_softplus`, `_gelu`, `_gelu_tanh`, `_softmax`, `_log_softmax` |
 | Products and shapes | `tensor_matmul`, `_transpose`, `_reshape`, `_as_matrix`, `_flatten`, `_concat`, `_slice_cols`, `_slice_gate`, `_permute_mha`, `_permute_mha_inverse`, `_permute_lob` |
 | Time steps | `tensor_index_select_time`, `_slice_time`, `_pad_time` (`Time_Pad`), `_length_regulate`; `length_regulator_indices` |
 | Reductions | `tensor_sum`, `_mean`, `_masked_sum`, `_masked_mean`, `_sum_dim1`, `_logsumexp_dim1`; `sequence_mask` |
-| Losses | `tensor_mse_loss`, `_l1_loss`, `_cross_entropy_loss`, `_bce_loss`, `_binary_cross_entropy`, `_kl_divergence`, `_entropy`, `_sharpe_loss`, `_prospect_utility` |
+| Losses | `tensor_mse_loss`, `_l1_loss`, `_cross_entropy_loss`, `_bce_loss`, `_binary_cross_entropy`, `_kl_divergence`, `_entropy`, `_sharpe_loss`, `_prospect_utility`, `_ctc_loss` (`Loss_Reduction`) |
 | Behavioural finance | `tensor_prospect_value`, `_prob_weighting`, `_prospect_utility` |
 | Normalisation | `tensor_layer_norm`, `_rms_norm`, `_batch_norm_2d`, `_normalize_time`, `_dropout` |
 | Convolution | `tensor_conv2d`, `_conv1d`, `_overlap_add`, `_max_pool2d`, `_avg_pool2d` |

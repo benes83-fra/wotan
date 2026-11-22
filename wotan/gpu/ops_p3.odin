@@ -241,6 +241,10 @@ _forward_p3 :: proc(op: t.Op, out: ^t.Tensor, inputs: []^t.Tensor, ints: []int, 
 		wt := _upload_values(floats)
 		_dispatch_1d(.Overlap_Add, _overlap_add_params(ints), {_data(inputs[0]), wt, o}, n)
 		_release_buf(wt.buf)
+	case .LogSoftmax:
+		_log_softmax_forward(out, inputs[0], ints[0])
+	case .CTCLoss:
+		_ctc_forward(out, inputs[0], ints)
 	case .IndexSelectTime:
 		src := _gather_time_sources(ints)
 		_dispatch_1d(
@@ -301,6 +305,10 @@ _backward_p3 :: proc(node: ^t.Tensor, dy: Bind, n: int) -> bool {
 		_dispatch_1d(.Overlap_Add_Bwd, pr, {dy, wt, g}, t.tensor_numel(x))
 		_release_buf(wt.buf)
 		t._grad_written_on_device(x)
+	case .LogSoftmax:
+		_log_softmax_backward(node, dy)
+	case .CTCLoss:
+		return _ctc_backward(node, dy)
 	case .IndexSelectTime:
 		x := node.inputs[0]
 		if !x.requires_grad {return true}

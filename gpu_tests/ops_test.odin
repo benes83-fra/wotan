@@ -924,6 +924,85 @@ op_cases := [?]Op_Case {
 		},
 	},
 	{
+		name = "log_softmax, rows of 7",
+		op = .LogSoftmax,
+		shapes = {{3, 5, 7, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_log_softmax(x[0])},
+	},
+	{
+		name = "log_softmax, rows of 700 (wider than a workgroup)",
+		op = .LogSoftmax,
+		shapes = {{4, 700, 1, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_log_softmax(x[0])},
+	},
+	{
+		name = "ctc_loss mean (lengths differ, an empty target, repeats)",
+		op = .CTCLoss,
+		shapes = {{4, 30, 8, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			return t.tensor_ctc_loss(t.tensor_log_softmax(x[0]), _ctc_targets[:], _ctc_il[:], _ctc_tl[:])
+		},
+	},
+	{
+		name = "ctc_loss sum, blank = last class",
+		op = .CTCLoss,
+		shapes = {{4, 30, 8, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			return t.tensor_ctc_loss(
+				t.tensor_log_softmax(x[0]),
+				_ctc_targets[:],
+				_ctc_il[:],
+				_ctc_tl[:],
+				blank = 7,
+				reduction = .Sum,
+			)
+		},
+	},
+	{
+		name = "ctc_loss per sample",
+		op = .CTCLoss,
+		shapes = {{4, 30, 8, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			return t.tensor_ctc_loss(
+				t.tensor_log_softmax(x[0]),
+				_ctc_targets[:],
+				_ctc_il[:],
+				_ctc_tl[:],
+				reduction = .None,
+			)
+		},
+	},
+	{
+		name = "ctc_loss zero_infinity, an impossible sample",
+		op = .CTCLoss,
+		shapes = {{4, 30, 8, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			return t.tensor_ctc_loss(
+				t.tensor_log_softmax(x[0]),
+				_ctc_targets[:],
+				[]int{30, 21, 3, 30}, // sample 2: 3 steps for 5 5 5 (needs 5)
+				_ctc_tl[:],
+				zero_infinity = true,
+			)
+		},
+	},
+	{
+		name = "ctc_loss mean, 6 x 200 steps, 40 classes, up to 60 labels",
+		op = .CTCLoss,
+		shapes = {{6, 200, 40, 1}},
+		tol = 1e-4,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			targets, il, tl := _ctc_long_case()
+			return t.tensor_ctc_loss(t.tensor_log_softmax(x[0]), targets, il, tl)
+		},
+	},
+	{
 		name = "index_select_time, repeated and reordered steps",
 		op = .IndexSelectTime,
 		shapes = {{3, 6, 5, 1}},
@@ -1547,6 +1626,28 @@ _batch_mask :: proc() -> []f64 {
 	return m
 }
 
+// CTC samples of up to 30 steps and 8 classes: lengths 30, 21, 9, 30; targets of
+// 4, 0, 3 and 6 labels (repeated labels; no label 7, the blank of one case)
+_ctc_il := [4]int{30, 21, 9, 30}
+_ctc_tl := [4]int{4, 0, 3, 6}
+_ctc_targets := [13]int{3, 3, 1, 2, 5, 5, 5, 1, 2, 3, 4, 4, 6}
+
+// 6 samples of 200 steps over 40 classes, as an alignment loss: lengths 200 to
+// 120, 60 to 10 labels (temp allocator)
+_ctc_long_case :: proc() -> (targets, il, tl: []int) {
+	il = make([]int, 6, context.temp_allocator)
+	tl = make([]int, 6, context.temp_allocator)
+	n := 0
+	for b in 0 ..< 6 {
+		il[b] = 200 - 16 * b
+		tl[b] = 60 - 10 * b
+		n += tl[b]
+	}
+	targets = make([]int, n, context.temp_allocator)
+	for &v, i in targets {v = 1 + (i * 7 + i / 5) % 39}
+	return
+}
+
 // periodic window a0 - (1 - a0)·cos(2πn / N): a0 0.5 Hann, 0.54 Hamming
 _test_window :: proc(N: int, a0: f64) -> []f64 {
 	w := make([]f64, N, context.temp_allocator)
@@ -1623,6 +1724,62 @@ gpu_fallback_op_test :: proc() {
 			check(fallbacks > 0, "%s (fallback): the fallback did not run", c.name)
 		}
 	}
+}
+
+// CTC with an impossible sample and no zero_infinity, as torch: its loss is
+// +inf and its gradient NaN on the steps it uses (0 after them); the other
+// samples match the CPU
+gpu_ctc_impossible_test :: proc() {
+	fmt.println("gpu_ctc_impossible_test: +inf loss and NaN gradient of an impossible CTC sample")
+	rand.reset(5)
+	values := make([]f64, 4 * 30 * 8, context.temp_allocator)
+	for &v in values {v = 2 * rand.float64() - 1}
+	il := []int{30, 21, 3, 30} // sample 2: 3 steps for 5 5 5 (needs 5)
+	up := []f64{0.7, -1.2, 0.4, 1.5}
+	run :: proc(values: []f64, il: []int, up: []f64, on_gpu: bool) -> (loss, grad: []f64) {
+		m := l.matrix_new(f64, 1, len(values))
+		copy(m.data, values)
+		x := t.tensor_new(m, true)
+		x.shape = {4, 30, 8, 1}
+		if on_gpu {gpu.to_device(x)}
+		y := t.tensor_ctc_loss(t.tensor_log_softmax(x), _ctc_targets[:], il, _ctc_tl[:], reduction = .None)
+		t.tensor_backward_with_grad(y, up)
+		loss, grad = _clone(t.tensor_values(y)), _clone(t.tensor_grad_values(x))
+		t.tensor_free_graph(y)
+		t.tensor_free(x)
+		return
+	}
+	cpu_loss, cpu_grad := run(values, il, up, false)
+	gpu_loss, gpu_grad := run(values, il, up, true)
+	ok := math.is_inf(gpu_loss[2], 1) && math.is_inf(cpu_loss[2], 1)
+	worst := 0.0
+	nan_ok := true
+	for b in 0 ..< 4 {
+		if b != 2 {worst = max(worst, abs(gpu_loss[b] - cpu_loss[b]) / (1 + abs(cpu_loss[b])))}
+		for s in 0 ..< 30 {
+			for k in 0 ..< 8 {
+				i := (b * 30 + s) * 8 + k
+				if b == 2 && s < 3 {
+					nan_ok &&= math.is_nan(gpu_grad[i]) && math.is_nan(cpu_grad[i])
+				} else {
+					worst = max(worst, abs(gpu_grad[i] - cpu_grad[i]) / (1 + abs(cpu_grad[i])))
+				}
+			}
+		}
+	}
+	check(
+		ok && nan_ok && worst < 1e-5,
+		"ctc impossible sample: loss +inf %v, NaN gradient on its steps %v, the rest max rel err %.2e",
+		ok,
+		nan_ok,
+		worst,
+	)
+	fmt.printfln(
+		"    loss +inf %v, NaN gradient on its 3 steps %v, other samples max rel err %.2e",
+		ok,
+		nan_ok,
+		worst,
+	)
 }
 
 // every matmul-backed case (products, attention, convolutions) with each matmul

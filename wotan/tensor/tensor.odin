@@ -93,6 +93,8 @@ Op :: enum {
 	MaskedSum, // tensor_masked_sum and tensor_masked_mean
 	OverlapAdd, // tensor_overlap_add
 	IndexSelectTime, // tensor_index_select_time (and slice / pad / length regulation)
+	LogSoftmax, // tensor_log_softmax (ctc.odin)
+	CTCLoss, // tensor_ctc_loss (ctc.odin)
 }
 
 PoolParams :: struct {

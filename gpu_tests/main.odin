@@ -52,6 +52,7 @@ main :: proc() {
 	gpu_residency_test()
 	gpu_op_parity_test()
 	gpu_fallback_op_test()
+	gpu_ctc_impossible_test()
 	gpu_matmul_kernel_test()
 	gpu_linear_group_test()
 	gpu_mlp_training_test()

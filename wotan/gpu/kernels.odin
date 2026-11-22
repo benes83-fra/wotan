@@ -57,8 +57,13 @@ Kernel :: enum {
 	Grad_Sq_Sum, // Σ g² over up to 7 gradients, per workgroup (generated, see _grad_source)
 	Grad_Scale, // g *= f on up to 8 gradients (generated)
 	Sgd,
-	Softmax_Rows, // per row: softmax (scaled, masked), logsumexp or cross-entropy loss
+	Softmax_Rows, // per row: softmax (scaled, masked), logsumexp, cross-entropy loss or log-softmax
 	Softmax_Bwd, // per row: dx (+)= f * p * (g - Σ p g)
+	LogSoftmax_Bwd, // per row: dx (+)= g - exp(y) Σ g
+	Ctc_Alpha, // CTC forward variables, one workgroup per sample walking the steps
+	Ctc_Beta, // CTC backward variables, the same in reverse
+	Ctc_Loss, // CTC loss of every sample (weighted for the reduction)
+	Ctc_Grad, // CTC gradient of the log-probabilities
 	Row_Prob_Grad, // per row: dx += coef * (softmax(x) - onehot) (logsumexp, cross-entropy)
 	Norm_Fwd, // per row: layer norm / RMS norm
 	Norm_Stats, // per row: (mean, 1 / std) or (0, 1 / rms)
@@ -1262,7 +1267,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 `,
 	// Rows of width C; u0 rows, u1 C, u2 mode (0 softmax into y[r, j], 1 logsumexp
 	// into y[r], 2 cross-entropy loss lse - x[r, target] into y[r] with the targets
-	// in aux), f0 scale applied to x first, u3 mask length (0: none; the additive
+	// in aux, 3 log-softmax x - lse into y[r, j]), f0 scale applied to x first, u3 mask length (0: none; the additive
 	// mask aux[(r·C + j) % u3]), u4 causal (1: entries j > r % u5 masked out), u5 seq_q
 	.Softmax_Rows       = `
 @group(0) @binding(1) var<storage, read> x: array<f32>;
@@ -1329,6 +1334,9 @@ fn main(@builtin(local_invocation_id) l3: vec3<u32>, @builtin(workgroup_id) wid:
 			if (!masked(r, j)) { v = exp(logit(r, j) - m) * inv; }
 			y[r * C + j] = v;
 		}
+	} else if (p.u2 == 3u) {
+		let lse = m + log(s);
+		for (var j = lid; j < C; j += 256u) { y[r * C + j] = logit(r, j) - lse; }
 	} else if (lid == 0u) {
 		let lse = m + log(s);
 		if (p.u2 == 1u) { y[r] = lse; } else { y[r] = lse - x[r * C + u32(aux[r])]; }
@@ -1381,6 +1389,185 @@ fn main(@builtin(local_invocation_id) l3: vec3<u32>, @builtin(workgroup_id) wid:
 		let v = p.f0 * pr[i] * (gr[i] - d);
 		if (p.u2 == 1u) { dx[i] = dx[i] + v; } else { dx[i] = v; }
 	}
+}
+`,
+	// dx[r, j] (+)= g[r, j] - exp(y[r, j]) Σ_j g[r, j], y = log_softmax(x); u0 rows,
+	// u1 C, u7 1: overwrite (keep)
+	.LogSoftmax_Bwd     = `
+@group(0) @binding(1) var<storage, read> yv: array<f32>;
+@group(0) @binding(2) var<storage, read> gr: array<f32>;
+@group(0) @binding(3) var<storage, read_write> dx: array<f32>;
+var<workgroup> sh: array<f32, 256>;
+@compute @workgroup_size(256)
+fn main(@builtin(local_invocation_id) l3: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
+	let lid = l3.x;
+	let r = row_of(wid, nw);
+	let live = r < p.u0;
+	let C = p.u1;
+	var s = 0.0;
+	if (live) {
+		for (var j = lid; j < C; j += 256u) { s = s + gr[r * C + j]; }
+	}
+	sh[lid] = s;
+	workgroupBarrier();
+	for (var w = 128u; w > 0u; w = w >> 1u) {
+		if (lid < w) { sh[lid] = sh[lid] + sh[lid + w]; }
+		workgroupBarrier();
+	}
+	let total = sh[0];
+	if (!live) { return; }
+	for (var j = lid; j < C; j += 256u) {
+		let i = r * C + j;
+		dx[i] = keep(dx[i], p.u7) + gr[i] - exp(yv[i]) * total;
+	}
+}
+`,
+	// CTC forward variables (log space). u0 N, u1 T, u2 C, u3 blank, u4 Lm (2·max S
+	// + 1); info: per sample [input length, target length, target offset], then
+	// the targets. alpha [N, T, Lm] then log p of every sample. One workgroup per
+	// sample steps through time with a storage barrier per step.
+	.Ctc_Alpha          = CTC_COMMON + `
+@group(0) @binding(3) var<storage, read_write> alpha: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(local_invocation_id) l3: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
+	let lid = l3.x;
+	let b = row_of(wid, nw);
+	if (b >= p.u0) { return; }
+	let Lm = p.u4;
+	let L = 2u * tl(b) + 1u;
+	let Tn = il(b);
+	let base = b * p.u1 * Lm;
+	for (var s = lid; s < Lm; s += 256u) {
+		var v = NEG;
+		if (s == 0u) { v = lpv(b, 0u, p.u3); }
+		if (s == 1u && L > 1u) { v = lpv(b, 0u, ext(b, 1u)); }
+		alpha[base + s] = v;
+	}
+	storageBarrier();
+	for (var t = 1u; t < p.u1; t++) {
+		if (t < Tn) {
+			let prev = base + (t - 1u) * Lm;
+			for (var s = lid; s < Lm; s += 256u) {
+				var v = NEG;
+				if (s < L) {
+					var a = alpha[prev + s];
+					if (s >= 1u) { a = lse(a, alpha[prev + s - 1u]); }
+					if (can_skip(b, s)) { a = lse(a, alpha[prev + s - 2u]); }
+					if (a > HALF_NEG) { v = a + lpv(b, t, ext(b, s)); }
+				}
+				alpha[base + t * Lm + s] = v;
+			}
+		}
+		storageBarrier();
+	}
+	if (lid == 0u) {
+		let last = base + (Tn - 1u) * Lm;
+		var lpb = alpha[last + L - 1u];
+		if (L > 1u) { lpb = lse(lpb, alpha[last + L - 2u]); }
+		alpha[p.u0 * p.u1 * Lm + b] = lpb;
+	}
+}
+`,
+	// CTC backward variables beta [N, T, Lm]; parameters as Ctc_Alpha
+	.Ctc_Beta           = CTC_COMMON + `
+@group(0) @binding(3) var<storage, read_write> beta: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(local_invocation_id) l3: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
+	let lid = l3.x;
+	let b = row_of(wid, nw);
+	if (b >= p.u0) { return; }
+	let Lm = p.u4;
+	let L = 2u * tl(b) + 1u;
+	let Tn = il(b);
+	let base = b * p.u1 * Lm;
+	for (var k = 0u; k < p.u1; k++) {
+		let t = p.u1 - 1u - k;
+		if (t + 1u == Tn) {
+			for (var s = lid; s < Lm; s += 256u) {
+				var v = NEG;
+				if (s + 1u == L || (s + 2u == L)) { v = lpv(b, t, ext(b, s)); }
+				beta[base + t * Lm + s] = v;
+			}
+		} else if (t + 1u < Tn) {
+			let next = base + (t + 1u) * Lm;
+			for (var s = lid; s < Lm; s += 256u) {
+				var v = NEG;
+				if (s < L) {
+					var a = beta[next + s];
+					if (s + 1u < L) { a = lse(a, beta[next + s + 1u]); }
+					if (s + 2u < L && can_skip(b, s + 2u)) { a = lse(a, beta[next + s + 2u]); }
+					if (a > HALF_NEG) { v = a + lpv(b, t, ext(b, s)); }
+				}
+				beta[base + t * Lm + s] = v;
+			}
+		}
+		storageBarrier();
+	}
+}
+`,
+	// the loss of every sample, -log p (an impossible alignment: +inf, or 0 with
+	// zero_infinity), times its weight: u5 reduction (0 mean: 1 / (N·max(S, 1)),
+	// 1 sum, 2 none: 1), u6 zero_infinity. One thread per sample.
+	.Ctc_Loss           = `
+@group(0) @binding(1) var<storage, read> alpha: array<f32>;
+@group(0) @binding(2) var<storage, read> info: array<f32>;
+@group(0) @binding(3) var<storage, read_write> y: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
+	let b = idx1(g, nw);
+	if (b >= p.u0) { return; }
+	let lpb = alpha[p.u0 * p.u1 * p.u4 + b];
+	var loss = -lpb;
+	if (lpb <= -1e29) {
+		// +inf, built at run time (a constant inf is a shader error)
+		loss = select(bitcast<f32>(0x7f800000u | (p.u0 & 0u)), 0.0, p.u6 == 1u);
+	}
+	var w = 1.0;
+	if (p.u5 == 0u) { w = 1.0 / (f32(p.u0) * f32(max(u32(info[3u * b + 1u]), 1u))); }
+	y[b] = loss * w;
+}
+`,
+	// d loss / d log_probs[b, t, c] = -coef_b Σ_{s: ext(s) = c} exp(alpha + beta -
+	// lp - log p) on the steps the sample uses (0 after them); coef_b: dy[b] for
+	// reduction none, else dy[0], times the weight of Ctc_Loss. An impossible
+	// sample gets 0 (zero_infinity) or NaN. u7 1: overwrite (keep).
+	.Ctc_Grad           = CTC_COMMON + `
+@group(0) @binding(3) var<storage, read> alpha: array<f32>;
+@group(0) @binding(4) var<storage, read> beta: array<f32>;
+@group(0) @binding(5) var<storage, read> dy: array<f32>;
+@group(0) @binding(6) var<storage, read_write> dx: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
+	let i = idx1(g, nw);
+	let C = p.u2;
+	if (i >= p.u0 * p.u1 * C) { return; }
+	let c = i % C;
+	let t = (i / C) % p.u1;
+	let b = i / (C * p.u1);
+	var v = 0.0;
+	if (t < il(b)) {
+		let lpb = alpha[p.u0 * p.u1 * p.u4 + b];
+		if (lpb <= -1e29) {
+			v = select(bitcast<f32>(0x7fc00000u | (p.u0 & 0u)), 0.0, p.u6 == 1u);
+		} else {
+			let L = 2u * tl(b) + 1u;
+			let at = (b * p.u1 + t) * p.u4;
+			var acc = NEG;
+			if (c == p.u3) {
+				for (var s = 0u; s < L; s += 2u) { acc = lse(acc, alpha[at + s] + beta[at + s]); }
+			} else {
+				for (var s = 1u; s < L; s += 2u) {
+					if (ext(b, s) == c) { acc = lse(acc, alpha[at + s] + beta[at + s]); }
+				}
+			}
+			if (acc > HALF_NEG) { v = -exp(acc - lpv(b, t, c) - lpb); }
+			var w = dy[0];
+			if (p.u5 == 2u) { w = dy[b]; }
+			if (p.u5 == 0u) { w = w / (f32(p.u0) * f32(max(tl(b), 1u))); }
+			v = v * w;
+		}
+	}
+	dx[i] = keep(dx[i], p.u7) + v;
 }
 `,
 	// dx[r, j] += coef_r * (softmax(x_r)[j] - [j == target_r]); u0 rows, u1 C,
@@ -2439,6 +2626,32 @@ fn wg_sum(v: f32, lid: u32) -> f32 {
 	let r = sh[0];
 	workgroupBarrier();
 	return r;
+}
+`
+
+// CTC inputs (log_probs at binding 1, the sample table and targets at binding 2)
+// and helpers: log-space sums with NEG as log 0, the extended labels
+// (blank, l_1, blank, l_2, ..., blank) and whether step s - 2 -> s is allowed
+@(private)
+CTC_COMMON :: `
+@group(0) @binding(1) var<storage, read> lp: array<f32>;
+@group(0) @binding(2) var<storage, read> info: array<f32>;
+const NEG: f32 = -1e30;
+const HALF_NEG: f32 = -1e29;
+fn lse(a: f32, b: f32) -> f32 {
+	let m = max(a, b);
+	if (m <= HALF_NEG) { return NEG; }
+	return m + log(exp(a - m) + exp(b - m));
+}
+fn il(b: u32) -> u32 { return u32(info[3u * b]); }
+fn tl(b: u32) -> u32 { return u32(info[3u * b + 1u]); }
+fn lpv(b: u32, t: u32, c: u32) -> f32 { return lp[(b * p.u1 + t) * p.u2 + c]; }
+fn ext(b: u32, s: u32) -> u32 {
+	if (s % 2u == 0u) { return p.u3; }
+	return u32(info[3u * p.u0 + u32(info[3u * b + 2u]) + s / 2u]);
+}
+fn can_skip(b: u32, s: u32) -> bool {
+	return s % 2u == 1u && s >= 3u && ext(b, s) != ext(b, s - 2u);
 }
 `
 
