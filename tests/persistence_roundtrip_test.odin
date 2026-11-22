@@ -106,6 +106,7 @@ persistence_roundtrip_test :: proc(allocator: mem.Allocator) {
 			nn.rms_norm_layer_new(4, 1e-6),
 			nn.conv1d_layer_new(4, 4, 3, dilation = 2, causal = true),
 			nn.tcn_block_new(4, 6, 3, 2, dropout = 0.1),
+			nn.conv1d_layer_new(6, 4, 3, padding = 1, stride = 2, groups = 2),
 		)
 		mha := &seq.layers[13].(nn.MultiHeadAttentionLayer)
 		mha.use_flash, mha.is_causal = true, true
@@ -124,7 +125,7 @@ persistence_roundtrip_test :: proc(allocator: mem.Allocator) {
 		seq2, opt2, epoch, loaded := nn.load_checkpoint(a)
 		ok &&= loaded && nn.save_checkpoint(seq2, opt2, b, epoch) && _pr_same_file(a, b)
 		ok &&=
-			len(seq2.layers) == 24 &&
+			len(seq2.layers) == 25 &&
 			epoch == 3 &&
 			opt2.timestep == 7 &&
 			len(opt2.parameters) == len(ps)
@@ -177,6 +178,12 @@ persistence_roundtrip_test :: proc(allocator: mem.Allocator) {
 		flags_ok &&= rms2.rms && rms2.beta == nil && rms2.eps == 1e-6
 		conv1d2 := seq2.layers[22].(nn.Conv1dLayer)
 		tcn2 := seq2.layers[23].(nn.TCNBlock)
+		sg2 := seq2.layers[24].(nn.Conv1dLayer)
+		flags_ok &&=
+			sg2.stride == 2 &&
+			sg2.groups == 2 &&
+			sg2.pad_left == 1 &&
+			sg2.weight.shape == [4]int{4, 3, 3, 1}
 		flags_ok &&=
 			conv1d2.dilation == 2 &&
 			conv1d2.pad_left == 4 &&
@@ -189,7 +196,7 @@ persistence_roundtrip_test :: proc(allocator: mem.Allocator) {
 			&total,
 			ok && flags_ok,
 			fmt.tprintf(
-				"checkpoint with all 21 layer types and Adam state (%d parameters): load + re-save gives the same bytes, per-parameter step counts restored %v, former format (one shared count) still loads %v; Conv2d weights keep shape %v, BatchNorm running statistics stay non-trainable; attention flags restored: %v",
+				"checkpoint with all 21 layer types and Adam state (%d parameters): load + re-save gives the same bytes, per-parameter step counts restored %v, former format (one shared count) still loads %v; Conv2d weights keep shape %v, BatchNorm running statistics stay non-trainable; attention flags, Conv1d dilation / padding / stride / groups restored: %v",
 				len(ps),
 				steps_ok,
 				old_ok,

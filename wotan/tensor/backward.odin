@@ -1455,13 +1455,16 @@ _backward_node_cpu :: proc(node: ^Tensor, allocator: mem.Allocator) {
 			}
 		}
 	case .Conv1d:
-		// dx[b, s, c] += w[o, c, k]·dy[b, t, o], dw[o, c, k] += x[b, s, c]·dy[b, t, o]
-		// with s = t + k·dilation - pad_left; db[o] += dy[b, t, o]
+		// dx[b, s, g·C_ig + c] += w[o, c, k]·dy[b, t, o],
+		// dw[o, c, k] += x[b, s, g·C_ig + c]·dy[b, t, o]
+		// with s = t·stride + k·dilation - pad_left, g the group of o;
+		// db[o] += dy[b, t, o]
 		x_in, w_in := node.inputs[0], node.inputs[1]
 		b_in := node.inputs[2] if len(node.inputs) > 2 else nil
 		m := node.int_metadata
-		B, T, C_in, C_out, K, dilation, pad_left, T_out :=
-			m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7]
+		B, T, C_in, C_out, K, dilation, pad_left, T_out, stride, groups :=
+			m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9]
+		C_ig, C_og := C_in / groups, C_out / groups
 		if x_in.requires_grad {tensor_ensure_grad(x_in)}
 		if w_in.requires_grad {tensor_ensure_grad(w_in)}
 		if b_in != nil && b_in.requires_grad {tensor_ensure_grad(b_in)}
@@ -1473,18 +1476,20 @@ _backward_node_cpu :: proc(node: ^Tensor, allocator: mem.Allocator) {
 					for o in 0 ..< C_out {b_in.grad.data[o] += dy[o]}
 				}
 				for k in 0 ..< K {
-					src := t + k * dilation - pad_left
+					src := t * stride + k * dilation - pad_left
 					if src < 0 || src >= T {continue}
-					xr := xs[(b * T + src) * C_in:][:C_in]
-					for o in 0 ..< C_out {
-						if dy[o] == 0 {continue}
-						if x_in.requires_grad {
-							dx := x_in.grad.data[(b * T + src) * C_in:][:C_in]
-							for c in 0 ..< C_in {dx[c] += ws[(o * C_in + c) * K + k] * dy[o]}
-						}
-						if w_in.requires_grad {
-							dw := w_in.grad.data[o * C_in * K:]
-							for c in 0 ..< C_in {dw[c * K + k] += xr[c] * dy[o]}
+					for g in 0 ..< groups {
+						xg := xs[(b * T + src) * C_in + g * C_ig:][:C_ig]
+						for o in g * C_og ..< (g + 1) * C_og {
+							if dy[o] == 0 {continue}
+							if x_in.requires_grad {
+								dx := x_in.grad.data[(b * T + src) * C_in + g * C_ig:][:C_ig]
+								for c in 0 ..< C_ig {dx[c] += ws[(o * C_ig + c) * K + k] * dy[o]}
+							}
+							if w_in.requires_grad {
+								dw := w_in.grad.data[o * C_ig * K:]
+								for c in 0 ..< C_ig {dw[c * K + k] += xg[c] * dy[o]}
+							}
 						}
 					}
 				}

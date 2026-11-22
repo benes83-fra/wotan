@@ -354,7 +354,7 @@ dloss/dbias 1.0 1.0
 
 `tensor_max_pool2d(x, kH, kW, stride)` and `tensor_avg_pool2d` use no padding.
 
-`tensor_conv1d(x, weight, bias, dilation = 1, pad_left = 0, pad_right = 0)` is a 1-D convolution of a **channels-last** sequence `[batch, T, C_in]`, as the sequence layers use them. The weight is in PyTorch layout `[C_out, C_in, K]` and the bias is `[1, C_out]` or nil. The output is `[batch, T_out, C_out]` with T_out = T + pad_left + pad_right − dilation·(K − 1). For a causal convolution, set `pad_left = dilation·(K − 1)` and leave `pad_right = 0`:
+`tensor_conv1d(x, weight, bias, dilation = 1, pad_left = 0, pad_right = 0, stride = 1, groups = 1)` is a 1-D convolution of a **channels-last** sequence `[batch, T, C_in]`, as the sequence layers use them. The weight is in PyTorch layout `[C_out, C_in / groups, K]` and the bias is `[1, C_out]` or nil. The output is `[batch, T_out, C_out]` with T_out = ⌊(T + pad_left + pad_right − dilation·(K − 1) − 1) / stride⌋ + 1, as `torch.nn.functional.conv1d` on the input padded with `pad_left` and `pad_right` zeros. For a causal convolution, set `pad_left = dilation·(K − 1)` and leave `pad_right = 0`:
 
 ```odin
 x1 := from_values({0.1, 0.2, -0.3, 0.4, 0.5, -0.6, 0.7, 0.8}, 1, 8); x1.shape = {1, 4, 2, 1}
@@ -365,6 +365,19 @@ c1 := t.tensor_conv1d(x1, w1, b1, dilation = 2, pad_left = 2) // causal
 ```
 conv1d [1, 4, 3, 1] t=0: 0.02 0.04 0.06  t=3: -0.31 0.23 0.77
 ```
+
+`stride` moves the window by that many steps, so a stride of s keeps about every s-th output. `groups` splits the input and output channels into that many groups, and each group of outputs sees only its own group of inputs. Both channel counts must be divisible by `groups`. With `groups = C_in` the convolution is **depthwise**: each channel has its own kernel (with C_out = m·C_in, m kernels per channel). Here channel 0 gets a moving sum and channel 1 the identity, at stride 2:
+
+```odin
+x2 := from_values({1, 10, 2, 20, 3, 30, 4, 40, 5, 50}, 1, 10); x2.shape = {1, 5, 2, 1}
+w2 := from_values({1, 1, 1, 0, 1, 0}, 1, 6); w2.shape = {2, 1, 3, 1}
+c2 := t.tensor_conv1d(x2, w2, nil, pad_left = 1, pad_right = 1, stride = 2, groups = 2)
+```
+```
+conv1d depthwise, stride 2 [1, 3, 2, 1]: [3, 10, 9, 30, 9, 50]
+```
+
+A strided convolution with a fixed basis also computes framed transforms. With one input channel, `stride = hop` and a weight whose rows are the window times cos and −sin of the DFT frequencies, the output holds the real and imaginary parts of a short-time Fourier transform, one frame per step (the test `conv1d_reference_test` checks it against `torch.stft`).
 
 ## 9. Sequence models: recurrent cells, embeddings, attention
 

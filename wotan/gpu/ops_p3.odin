@@ -11,6 +11,8 @@ import t "../tensor"
 // [C_out, C_in·kH·kW] and permutes the [C_out, N, L] product into [N, C_out, L].
 // conv1d (channels-last) builds one row per output step ([B·T_out, C_in·K])
 // and multiplies by the transposed weight; the product is already [B, T_out, C_out].
+// Grouped conv1d (groups > 1, e.g. depthwise) runs direct kernels instead: a
+// matmul per group would mostly multiply tiny blocks.
 // The backward passes recompute the columns instead of keeping them.
 
 @(private)
@@ -59,20 +61,30 @@ _swap_outer :: proc(src, dst: Bind, A, B, L: int) {
 
 @(private)
 Conv1d_Dims :: struct {
-	B, T, C_in, C_out, K, dilation, pad_left, T_out, R, CK: int,
+	B, T, C_in, C_out, K, dilation, pad_left, T_out, stride, groups, R, CK: int,
 }
 
 @(private)
 _conv1d_dims :: proc(m: []int) -> (d: Conv1d_Dims) {
-	d.B, d.T, d.C_in, d.C_out, d.K, d.dilation, d.pad_left, d.T_out =
-		m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7]
+	d.B, d.T, d.C_in, d.C_out, d.K, d.dilation, d.pad_left, d.T_out, d.stride, d.groups =
+		m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9]
 	d.R = d.B * d.T_out
 	d.CK = d.C_in * d.K
 	return
 }
 
+// u7: the stride (im2col / col2im); the grouped kernels take stride | groups << 16
+// in u7, C_out in f0 and the overwrite flag in f1
 @(private)
-_conv1d_params :: proc(d: Conv1d_Dims) -> Params {
+_conv1d_params :: proc(d: Conv1d_Dims, overwrite := false) -> Params {
+	u7 := u32(d.stride)
+	if d.groups > 1 {
+		assert(
+			d.stride < 1 << 16 && d.groups < 1 << 16,
+			"gpu conv1d: stride and groups must be below 65536",
+		)
+		u7 |= u32(d.groups) << 16
+	}
 	return _p(
 		{
 			u32(d.B),
@@ -82,8 +94,9 @@ _conv1d_params :: proc(d: Conv1d_Dims) -> Params {
 			u32(d.dilation),
 			u32(d.pad_left),
 			u32(d.T_out),
-			0,
+			u7,
 		},
+		{f32(d.C_out), f32(int(overwrite)), 0, 0, 0, 0, 0, 0},
 	)
 }
 
@@ -134,13 +147,22 @@ _forward_p3 :: proc(op: t.Op, out: ^t.Tensor, inputs: []^t.Tensor, ints: []int, 
 		_release_buf(prod.buf)
 	case .Conv1d:
 		d := _conv1d_dims(ints)
-		col := _im2col_1d(d, _data(inputs[0]))
-		_matmul(col, _data(inputs[1]), o, d.R, d.C_out, d.CK, false, true, false)
+		if d.groups > 1 {
+			_dispatch_1d(
+				.Conv1d_Grouped,
+				_conv1d_params(d),
+				{_data(inputs[0]), _data(inputs[1]), o},
+				n,
+			)
+		} else {
+			col := _im2col_1d(d, _data(inputs[0]))
+			_matmul(col, _data(inputs[1]), o, d.R, d.C_out, d.CK, false, true, false)
+			_release_buf(col.buf)
+		}
 		if len(inputs) > 2 {
 			u := [8]u32{u32(n), 1, u32(d.C_out), 0, 0, 0, 0, 0}
 			_dispatch_1d(.Chan_Bias, _p(u), {_data(inputs[2]), o}, n)
 		}
-		_release_buf(col.buf)
 	case .MaxPool2d, .AvgPool2d:
 		_dispatch_1d(
 			.Pool,
@@ -259,6 +281,31 @@ _conv1d_backward :: proc(node: ^t.Tensor, dy: Bind) {
 			d.C_out,
 		)
 		t._grad_written_on_device(b)
+	}
+	if d.groups > 1 {
+		if w.requires_grad {
+			xd := _in_data(x)
+			g, fresh := _out_grad(w)
+			_dispatch_rows(
+				.Conv1d_Grouped_Dw,
+				_conv1d_params(d, fresh),
+				{xd, dy, g},
+				t.tensor_numel(w),
+			)
+			t._grad_written_on_device(w)
+		}
+		if x.requires_grad {
+			wd := _in_data(w)
+			g, fresh := _out_grad(x)
+			_dispatch_1d(
+				.Conv1d_Grouped_Dx,
+				_conv1d_params(d, fresh),
+				{wd, dy, g},
+				t.tensor_numel(x),
+			)
+			t._grad_written_on_device(x)
+		}
+		return
 	}
 	if w.requires_grad {
 		// dW [C_out, CK] += dyᵀ @ col

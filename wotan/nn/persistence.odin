@@ -59,7 +59,8 @@ _Layer_Id :: enum {
 	Embedding      = 11,
 	LayerNorm      = 13,
 	RMSNorm        = 31,
-	Conv1d         = 32,
+	Conv1d         = 32, // stride 1, groups 1
+	Conv1d_SG      = 37, // with stride and groups (written only when one is not 1)
 	TCNBlock       = 33,
 	FFN            = 36, // with the tanh-GELU flag
 	Mamba          = 34, // RMSNorm weight stored after the SSM tensors
@@ -494,9 +495,11 @@ _write_layer_header :: proc(io: ^_Io, layer: ^Layer) {
 	case MambaLayer:
 		ints(io, .Mamba_0 if l.plain else .Mamba, l.d_model, l.d_state)
 	case Conv1dLayer:
+		stride, groups := max(l.stride, 1), max(l.groups, 1)
+		plain := stride == 1 && groups == 1
 		ints(
 			io,
-			.Conv1d,
+			.Conv1d if plain else .Conv1d_SG,
 			l.in_channels,
 			l.out_channels,
 			l.kernel_size,
@@ -505,6 +508,10 @@ _write_layer_header :: proc(io: ^_Io, layer: ^Layer) {
 			l.pad_right,
 			int(l.bias != nil),
 		)
+		if !plain {
+			_put_i32(io, stride)
+			_put_i32(io, groups)
+		}
 	case TCNBlock:
 		ints(
 			io,
@@ -552,7 +559,7 @@ _read_layer_header :: proc(
 		has_bias := _get_i32(io) != 0
 		if !io.ok {return}
 		layer = conv2d_layer_new(c_in, c_out, k, stride, pad, has_bias, alloc)
-	case .Conv1d:
+	case .Conv1d, .Conv1d_SG:
 		c_in, c_out, k, dilation, pad_left, pad_right :=
 			_get_size(io),
 			_get_size(io),
@@ -561,8 +568,23 @@ _read_layer_header :: proc(
 			_get_size(io),
 			_get_size(io)
 		has_bias := _get_i32(io) != 0
-		if !io.ok || k == 0 || dilation == 0 {return}
-		conv := conv1d_layer_new(c_in, c_out, k, dilation, use_bias = has_bias, allocator = alloc)
+		stride, groups := 1, 1
+		if _Layer_Id(id) == .Conv1d_SG {stride, groups = _get_size(io), _get_size(io)}
+		if !io.ok || k == 0 || dilation == 0 || stride == 0 || groups == 0 {return}
+		if c_in % groups != 0 || c_out % groups != 0 {
+			io.ok = false
+			return
+		}
+		conv := conv1d_layer_new(
+			c_in,
+			c_out,
+			k,
+			dilation,
+			use_bias = has_bias,
+			allocator = alloc,
+			stride = stride,
+			groups = groups,
+		)
 		conv.pad_left, conv.pad_right = pad_left, pad_right
 		layer = conv
 	case .TCNBlock:

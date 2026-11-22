@@ -75,6 +75,9 @@ Kernel :: enum {
 	Col2im_2d, // dx += the column gradients summed back onto the image
 	Im2col_1d, // conv1d input patches as rows [B·T_out, C_in·K]
 	Col2im_1d, // dx += the row gradients summed back onto the sequence
+	Conv1d_Grouped, // grouped conv1d (groups > 1) computed directly
+	Conv1d_Grouped_Dx, // its input gradient
+	Conv1d_Grouped_Dw, // its weight gradient (one workgroup per weight)
 	Chan_Bias, // dst[i] += b[(i / L) % C]
 	Chan_Sum, // per channel: db[c] += Σ_{n, l} dy[n, c, l]
 	Pool, // max / average pooling
@@ -1829,7 +1832,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 	let c = (i % CK) / p.u3;
 	let k = i % p.u3;
 	let b = r / p.u6;
-	let src = i32(r % p.u6 + k * p.u4) - i32(p.u5);
+	let src = i32((r % p.u6) * p.u7 + k * p.u4) - i32(p.u5);
 	var v = 0.0;
 	if (src >= 0 && src < i32(p.u1)) { v = x[(b * p.u1 + u32(src)) * p.u2 + c]; }
 	col[i] = v;
@@ -1850,11 +1853,110 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 	let b = i / (C * p.u1);
 	var acc = 0.0;
 	for (var k = 0u; k < K; k++) {
-		let t = i32(s + p.u5) - i32(k * p.u4);
-		if (t < 0 || t >= i32(p.u6)) { continue; }
-		acc = acc + dcol[(b * p.u6 + u32(t)) * C * K + c * K + k];
+		let num = i32(s + p.u5) - i32(k * p.u4);
+		if (num < 0 || u32(num) % p.u7 != 0u) { continue; }
+		let t = u32(num) / p.u7;
+		if (t >= p.u6) { continue; }
+		acc = acc + dcol[(b * p.u6 + t) * C * K + c * K + k];
 	}
 	dx[i] = dx[i] + acc;
+}
+`,
+	// Grouped conv1d (groups > 1), computed directly. u0 B, u1 T, u2 C_in, u3 K,
+	// u4 dilation, u5 pad_left, u6 T_out, u7 stride | groups << 16, f0 C_out,
+	// f1 1: overwrite the gradient (see keep). One thread per output element.
+	.Conv1d_Grouped     = `
+@group(0) @binding(1) var<storage, read> x: array<f32>;
+@group(0) @binding(2) var<storage, read> w: array<f32>;
+@group(0) @binding(3) var<storage, read_write> y: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
+	let i = idx1(g, nw);
+	let st = p.u7 & 0xFFFFu; let G = p.u7 >> 16u; let Co = u32(p.f0);
+	if (i >= p.u0 * p.u6 * Co) { return; }
+	let K = p.u3;
+	let o = i % Co;
+	let t = (i / Co) % p.u6;
+	let b = i / (Co * p.u6);
+	let Cig = p.u2 / G;
+	let g0 = (o / (Co / G)) * Cig;
+	var acc = 0.0;
+	for (var k = 0u; k < K; k++) {
+		let src = i32(t * st + k * p.u4) - i32(p.u5);
+		if (src < 0 || src >= i32(p.u1)) { continue; }
+		let xb = (b * p.u1 + u32(src)) * p.u2 + g0;
+		let wb = o * Cig * K + k;
+		for (var c = 0u; c < Cig; c++) { acc = acc + w[wb + c * K] * x[xb + c]; }
+	}
+	y[i] = acc;
+}
+`,
+	// its input gradient: one thread per element of x
+	.Conv1d_Grouped_Dx  = `
+@group(0) @binding(1) var<storage, read> w: array<f32>;
+@group(0) @binding(2) var<storage, read> dy: array<f32>;
+@group(0) @binding(3) var<storage, read_write> dx: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
+	let i = idx1(g, nw);
+	let st = p.u7 & 0xFFFFu; let G = p.u7 >> 16u; let Co = u32(p.f0);
+	let Ci = p.u2; let K = p.u3;
+	if (i >= p.u0 * p.u1 * Ci) { return; }
+	let c = i % Ci;
+	let s = (i / Ci) % p.u1;
+	let b = i / (Ci * p.u1);
+	let Cig = Ci / G; let Cog = Co / G;
+	let cc = c % Cig;
+	let o0 = (c / Cig) * Cog;
+	var acc = 0.0;
+	for (var k = 0u; k < K; k++) {
+		let num = i32(s + p.u5) - i32(k * p.u4);
+		if (num < 0 || u32(num) % st != 0u) { continue; }
+		let t = u32(num) / st;
+		if (t >= p.u6) { continue; }
+		let db = (b * p.u6 + t) * Co;
+		for (var q = 0u; q < Cog; q++) {
+			let o = o0 + q;
+			acc = acc + w[(o * Cig + cc) * K + k] * dy[db + o];
+		}
+	}
+	dx[i] = keep(dx[i], u32(p.f1)) + acc;
+}
+`,
+	// its weight gradient: one workgroup per weight element, reducing over the
+	// batch and the output steps
+	.Conv1d_Grouped_Dw  = `
+@group(0) @binding(1) var<storage, read> x: array<f32>;
+@group(0) @binding(2) var<storage, read> dy: array<f32>;
+@group(0) @binding(3) var<storage, read_write> dw: array<f32>;
+var<workgroup> sh: array<f32, 256>;
+@compute @workgroup_size(256)
+fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
+	let i = row_of(wid, nw);
+	let st = p.u7 & 0xFFFFu; let G = p.u7 >> 16u; let Co = u32(p.f0);
+	let Ci = p.u2; let K = p.u3;
+	let Cig = Ci / G;
+	if (i >= Co * Cig * K) { return; }
+	let k = i % K;
+	let cc = (i / K) % Cig;
+	let o = i / (K * Cig);
+	let xc = (o / (Co / G)) * Cig + cc;
+	var acc = 0.0;
+	let R = p.u0 * p.u6;
+	for (var r = lid.x; r < R; r = r + 256u) {
+		let t = r % p.u6;
+		let b = r / p.u6;
+		let src = i32(t * st + k * p.u4) - i32(p.u5);
+		if (src < 0 || src >= i32(p.u1)) { continue; }
+		acc = acc + x[(b * p.u1 + u32(src)) * Ci + xc] * dy[r * Co + o];
+	}
+	sh[lid.x] = acc;
+	workgroupBarrier();
+	for (var h = 128u; h > 0u; h = h >> 1u) {
+		if (lid.x < h) { sh[lid.x] = sh[lid.x] + sh[lid.x + h]; }
+		workgroupBarrier();
+	}
+	if (lid.x == 0u) { dw[i] = keep(dw[i], u32(p.f1)) + sh[0]; }
 }
 `,
 	// dst[i] += b[(i / u1) % u2]; u0 n, u1 L (elements per channel block), u2 C

@@ -10,9 +10,11 @@ import "core:mem"
 // 1-D convolution over channels-last sequences [batch, T, C_in] → [batch,
 // T_out, C_out] (see tensor_conv1d). Causal: padded on the left only by
 // dilation·(K - 1), so T_out = T and output t depends on inputs up to t.
+// stride > 1 downsamples; groups splits the channels into groups convolved
+// separately (groups = in_channels: depthwise).
 
 Conv1dLayer :: struct {
-	weight:       ^t.Tensor, // [C_out, C_in, K]
+	weight:       ^t.Tensor, // [C_out, C_in / groups, K]
 	bias:         ^t.Tensor, // [1, C_out] or nil
 	in_channels:  int,
 	out_channels: int,
@@ -20,9 +22,12 @@ Conv1dLayer :: struct {
 	dilation:     int,
 	pad_left:     int,
 	pad_right:    int,
+	stride:       int,
+	groups:       int,
 }
 
-// padding: zeros on both sides (ignored when causal)
+// padding: zeros on both sides (ignored when causal). groups must divide both
+// channel counts.
 conv1d_layer_new :: proc(
 	in_channels: int,
 	out_channels: int,
@@ -32,7 +37,14 @@ conv1d_layer_new :: proc(
 	causal: bool = false,
 	use_bias: bool = true,
 	allocator: mem.Allocator = context.allocator,
+	stride: int = 1,
+	groups: int = 1,
 ) -> Conv1dLayer {
+	assert(
+		groups >= 1 && in_channels % groups == 0 && out_channels % groups == 0,
+		"conv1d_layer_new: groups must divide in_channels and out_channels",
+	)
+	assert(stride >= 1, "conv1d_layer_new: stride must be at least 1")
 	layer := Conv1dLayer {
 		in_channels  = in_channels,
 		out_channels = out_channels,
@@ -40,13 +52,17 @@ conv1d_layer_new :: proc(
 		dilation     = dilation,
 		pad_left     = dilation * (kernel_size - 1) if causal else padding,
 		pad_right    = 0 if causal else padding,
+		stride       = stride,
+		groups       = groups,
 	}
-	// Xavier initialization (as Conv2d), zero bias
-	fan_in, fan_out := in_channels * kernel_size, out_channels * kernel_size
+	// Xavier initialization (as Conv2d and torch: fan_in = C_in / groups · K,
+	// fan_out = C_out · K), zero bias
+	c_ig := in_channels / groups
+	fan_in, fan_out := c_ig * kernel_size, out_channels * kernel_size
 	w_data := l.matrix_new(f64, out_channels, fan_in, allocator)
 	xavier_uniform(w_data.data, fan_in, fan_out)
 	layer.weight = t.tensor_new(w_data, true, allocator)
-	layer.weight.shape = {out_channels, in_channels, kernel_size, 1}
+	layer.weight.shape = {out_channels, c_ig, kernel_size, 1}
 	if use_bias {
 		layer.bias = t.tensor_new(l.matrix_new(f64, 1, out_channels, allocator), true, allocator)
 	}
@@ -63,6 +79,8 @@ conv1d_layer_forward :: proc(layer: ^Conv1dLayer, x: ^t.Tensor) -> (fwd_out: ^t.
 		layer.dilation,
 		layer.pad_left,
 		layer.pad_right,
+		max(layer.stride, 1),
+		max(layer.groups, 1),
 	)
 }
 

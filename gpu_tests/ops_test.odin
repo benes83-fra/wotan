@@ -846,6 +846,49 @@ op_cases := [?]Op_Case {
 		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_conv1d(x[0], x[1], x[2])},
 	},
 	{
+		name = "conv1d stride 3, padding 2 / 1, bias",
+		op = .Conv1d,
+		shapes = {{2, 17, 4, 1}, {6, 4, 3, 1}, {1, 6, 1, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			return t.tensor_conv1d(x[0], x[1], x[2], pad_left = 2, pad_right = 1, stride = 3)
+		},
+	},
+	{
+		name = "conv1d stride 4, kernel 8 (framing, as an STFT)",
+		op = .Conv1d,
+		shapes = {{2, 40, 1, 1}, {10, 1, 8, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_conv1d(x[0], x[1], nil, stride = 4)},
+	},
+	{
+		name = "conv1d groups 2, stride 2, dilation 2, bias",
+		op = .Conv1d,
+		shapes = {{2, 15, 4, 1}, {6, 2, 3, 1}, {1, 6, 1, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			return t.tensor_conv1d(x[0], x[1], x[2], 2, 1, 1, stride = 2, groups = 2)
+		},
+	},
+	{
+		name = "conv1d depthwise, kernel 7, padding 3 (600 steps per weight)",
+		op = .Conv1d,
+		shapes = {{3, 200, 16, 1}, {16, 1, 7, 1}, {1, 16, 1, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			return t.tensor_conv1d(x[0], x[1], x[2], 1, 3, 3, groups = 16)
+		},
+	},
+	{
+		name = "conv1d depthwise x2, stride 2, padding 0 / 2, no bias",
+		op = .Conv1d,
+		shapes = {{2, 21, 3, 1}, {6, 1, 5, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			return t.tensor_conv1d(x[0], x[1], nil, 1, 0, 2, stride = 2, groups = 3)
+		},
+	},
+	{
 		name = "max_pool2d 2x2, stride 2",
 		op = .MaxPool2d,
 		shapes = {{2, 3, 6, 8}},
