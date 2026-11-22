@@ -155,6 +155,9 @@ All of these return a tensor of the input's shape and are differentiable:
 | `tensor_neg(a)`, `tensor_scale(a, s)` | −a, s·a | |
 | `tensor_exp`, `tensor_log`, `tensor_sqrt` | | `log` and `sqrt` need positive inputs for a finite gradient |
 | `tensor_lgamma(a)` | log Γ(a) | gradient is the digamma function, also exported as `digamma(x)` |
+| `tensor_abs(a)` | \|a\| | gradient sign(a), 0 at a = 0 (as torch) |
+| `tensor_sin(a)`, `tensor_cos(a)` | sin a, cos a | |
+| `tensor_sign(a)` | −1, 0 or 1 | gradient 0 everywhere (as `torch.sign`) |
 | `tensor_relu`, `tensor_leaky_relu(a, alpha = 0.01)` | | |
 | `tensor_sigmoid`, `tensor_tanh`, `tensor_softplus` | | `softplus` is log(1 + eˣ), computed stably |
 | `tensor_gelu(a)` | x·Φ(x) | exact (erf-based) GELU, as `torch.nn.functional.gelu` |
@@ -242,6 +245,9 @@ concat dim0 [4, 3, 1, 1]
 | `tensor_logsumexp_dim1(q, num_actions)` | `[N, 1]` | stable log Σ exp over each row |
 | `tensor_softmax(logits)` | same shape | softmax over the last dimension of `shape`, as `torch.softmax(x, dim = -1)` |
 | `tensor_mse_loss(pred, target)` | scalar | mean (pred − target)²; gradients flow to both |
+| `tensor_l1_loss(pred, target)` | scalar | mean \|pred − target\|, as `torch.nn.functional.l1_loss`; gradients flow to both, 0 where pred = target |
+| `tensor_masked_sum(x, mask)` | scalar | Σ x[i]·mask[i / inner], inner = numel(x) / len(mask): each mask value weights a contiguous block of x |
+| `tensor_masked_mean(x, mask)` | scalar | `tensor_masked_sum` / (inner · Σ mask): the mean over the valid elements of a padded batch |
 | `tensor_cross_entropy_loss(logits, targets)` | scalar | mean −log softmax(logits)[target]; `targets` is `[]int` |
 | `tensor_bce_loss(p, y)`, `tensor_binary_cross_entropy(p, y)` | scalar | mean binary cross-entropy of probabilities p (not logits), p clamped to [1e-7, 1 − 1e-7] |
 | `tensor_kl_divergence(mu, log_var)` | scalar | −½ · Σ (1 + log σ² − μ² − σ²) over the latent dimension, averaged over the batch: the VAE term against N(0, 1) |
@@ -269,6 +275,22 @@ Check these points before you use a loss:
 
 - **Softmax works on the last dimension of `shape`, not on the rows of `data`.** Trailing 1s in `shape` are unused dimensions, so the last dimension is C of `[N, C, 1, 1]`, F of a sequence `[B, S, F, 1]` and W of `[N, C, H, W]`. A flattened `1 × N·C` tensor with shape `[N, C, 1, 1]` therefore gets N softmaxes of C values each, like an `[N, C]` matrix. A sequence with a single feature, `[B, S, 1, 1]`, reads as `[B, S]` and is normalised over S. `tensor_cross_entropy_loss` also accepts the flattened form: given a `1 × N·C` row and N targets, it splits the row into N rows of C.
 - **The BCE losses take probabilities.** Apply `tensor_sigmoid` to logits first. The two BCE ops compute the same value; both are kept for existing callers.
+- **Padded batches need a masked loss.** Sequences of different lengths are padded to a common length T, and the padded steps must not count. `sequence_mask(lengths, T)` builds the `[B, T]` 0/1 mask (`[]f64`, 1 for t < lengths[b]). With a channels-last `[B, T, C]` tensor each mask value then covers the C values of one step, so `tensor_masked_mean(x, mask)` is `(x * mask.unsqueeze(-1)).sum() / (mask.sum() * C)` in torch. The mask is a constant and its length must divide the number of elements; `tensor_masked_mean` panics if the mask sums to 0. A masked L1 loss is `tensor_masked_mean(tensor_abs(tensor_sub(pred, target)), mask)`:
+
+  ```odin
+  // two sequences padded to T = 3, C = 2 features; the second has 2 valid steps
+  pred := from_values({1, 2, 3, 4, 5, 6, 1, 1, 2, 2, 9, 9}, 1, 12, true)
+  pred.shape = {2, 3, 2, 1}
+  target := from_values({1, 1, 3, 3, 5, 5, 0, 0, 2, 2, 0, 0}, 1, 12)
+  target.shape = {2, 3, 2, 1}
+  mask := t.sequence_mask({3, 2}, 3)
+  loss := t.tensor_masked_mean(t.tensor_abs(t.tensor_sub(pred, target)), mask)
+  t.tensor_backward(loss)
+  ```
+  ```
+  masked L1 0.500 (padding ignored), grad of the padded step: [0, 0]
+  ```
+
 - **The KL term sums over the latent dimension and averages over the batch**, the usual VAE convention (`-0.5 * torch.sum(1 + log_var - mu**2 - log_var.exp()) / batch_size`). The latent dimension is the last dimension of `mu.shape`. For `mu` of shape `[B, L]` the sum is divided by B; for a sequence `[B, S, L, 1]` it is divided by B·S. σ² = exp(log σ²) is clamped at `KL_EXP_CLAMP` (1e10). Where the clamp is active that term is constant, so its gradient is 0, as with `torch.clamp`.
 
 ## 7. Normalisation and dropout
@@ -693,11 +715,11 @@ The same network in PyTorch 2.1.0 (float64, the same initial weights, plain SGD)
 | Graph scopes | `graph_begin(&s, no_grad)`, `graph_end`, `graph_scope_destroy`, `graph_allocator`, `graph_scope_bytes`, `grad_enabled` |
 | Constant-only chains | `constant_record_begin()`, `constant_record_end(results...)` |
 | Arithmetic | `tensor_add`, `_sub`, `_mul`, `_div`, `_neg`, `_scale`, `_add_bias`, `_gate_mul` |
-| Element-wise math | `tensor_exp`, `_log`, `_sqrt`, `_lgamma`, `_clamp`, `_norm_cdf` |
+| Element-wise math | `tensor_exp`, `_log`, `_sqrt`, `_lgamma`, `_abs`, `_sin`, `_cos`, `_sign`, `_clamp`, `_norm_cdf` |
 | Activations | `tensor_relu`, `_leaky_relu`, `_sigmoid`, `_tanh`, `_softplus`, `_gelu`, `_gelu_tanh`, `_softmax` |
 | Products and shapes | `tensor_matmul`, `_transpose`, `_reshape`, `_as_matrix`, `_flatten`, `_concat`, `_slice_cols`, `_slice_gate`, `_permute_mha`, `_permute_mha_inverse`, `_permute_lob` |
-| Reductions | `tensor_sum`, `_mean`, `_sum_dim1`, `_logsumexp_dim1` |
-| Losses | `tensor_mse_loss`, `_cross_entropy_loss`, `_bce_loss`, `_binary_cross_entropy`, `_kl_divergence`, `_entropy`, `_sharpe_loss`, `_prospect_utility` |
+| Reductions | `tensor_sum`, `_mean`, `_masked_sum`, `_masked_mean`, `_sum_dim1`, `_logsumexp_dim1`; `sequence_mask` |
+| Losses | `tensor_mse_loss`, `_l1_loss`, `_cross_entropy_loss`, `_bce_loss`, `_binary_cross_entropy`, `_kl_divergence`, `_entropy`, `_sharpe_loss`, `_prospect_utility` |
 | Behavioural finance | `tensor_prospect_value`, `_prob_weighting`, `_prospect_utility` |
 | Normalisation | `tensor_layer_norm`, `_rms_norm`, `_batch_norm_2d`, `_normalize_time`, `_dropout` |
 | Convolution | `tensor_conv2d`, `_conv1d`, `_max_pool2d`, `_avg_pool2d` |

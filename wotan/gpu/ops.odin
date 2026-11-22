@@ -28,6 +28,10 @@ SUPPORTED :: bit_set[t.Op] {
 	.Sqrt,
 	.Clamp,
 	.Softplus,
+	.Abs,
+	.Sin,
+	.Cos,
+	.Sign,
 	.AddBias,
 	.MatMul,
 	.Linear,
@@ -35,6 +39,8 @@ SUPPORTED :: bit_set[t.Op] {
 	.Mean,
 	.SumDim1,
 	.MSELoss,
+	.L1Loss,
+	.MaskedSum,
 	.Reshape,
 	.Transpose,
 	.SliceCols,
@@ -122,6 +128,14 @@ _unary_code :: proc(op: t.Op) -> (code: u32, ok: bool) {
 		return U_PROSPECT, true
 	case .ProbWeighting:
 		return U_PROB_WEIGHT, true
+	case .Abs:
+		return U_ABS, true
+	case .Sin:
+		return U_SIN, true
+	case .Cos:
+		return U_COS, true
+	case .Sign:
+		return U_SIGN, true
 	}
 	return 0, false
 }
@@ -217,10 +231,19 @@ _matmul :: proc(
 	}
 }
 
-// _reduce: out[index] = scale * Σ x (squares: Σ x²), two passes for large n
+// _reduce: out[index] = scale * Σ x (squares: Σ x², absolute: Σ |x|), two
+// passes for large n
 @(private)
-_reduce :: proc(x: Bind, n: int, out: Bind, index: int, scale: f32, squares: bool) {
-	sq := u32(squares)
+_reduce :: proc(
+	x: Bind,
+	n: int,
+	out: Bind,
+	index: int,
+	scale: f32,
+	squares: bool,
+	absolute := false,
+) {
+	sq := 2 if absolute else u32(squares)
 	groups := min((n + 255) / 256, 256)
 	if groups <= 1 {
 		_dispatch(
@@ -356,6 +379,33 @@ _hook_forward :: proc(op: t.Op, out: ^t.Tensor, inputs: []^t.Tensor, ints: []int
 		)
 		_reduce({diff, an}, an, o, 0, f32(1.0 / f64(an)), true)
 		_release_buf(diff)
+	case .L1Loss:
+		a, b := inputs[0], inputs[1]
+		an := t.tensor_numel(a)
+		diff := _acquire(an)
+		_dispatch_1d(
+			.Binary,
+			_p({u32(an), 1, 0, 0, 0, 0, 0, 0}),
+			{_data(a), _data(b), {diff, an}},
+			an,
+		)
+		_reduce({diff, an}, an, o, 0, f32(1.0 / f64(an)), false, absolute = true)
+		_release_buf(diff)
+	case .MaskedSum:
+		// floats: scale, then the mask
+		a := inputs[0]
+		an := t.tensor_numel(a)
+		mask := _upload_values(floats[1:])
+		weighted := _acquire(an)
+		_dispatch_1d(
+			.Row_Scale,
+			_p({u32(an), u32(an / mask.numel), 0, 0, 0, 0, 0, 0}),
+			{_data(a), mask, {weighted, an}},
+			an,
+		)
+		_reduce({weighted, an}, an, o, 0, f32(floats[0]), false)
+		_release_buf(weighted)
+		_release_buf(mask.buf)
 	case .SumDim1:
 		_dispatch_1d(
 			.Row_Sum,
@@ -600,6 +650,43 @@ _hook_backward :: proc(node: ^t.Tensor, allocator: mem.Allocator) -> bool {
 				an,
 			)
 			wrote(&written, &nw, x)
+		}
+	case .L1Loss:
+		pred, target := node.inputs[0], node.inputs[1]
+		an := t.tensor_numel(pred)
+		for x, i in node.inputs {
+			if !x.requires_grad {continue}
+			sign := f32(1) if i == 0 else f32(-1)
+			pd, td := _in_data(pred), _in_data(target)
+			g, fresh := _out_grad(x)
+			_dispatch_1d(
+				.Mse_Bwd,
+				_p(
+					{u32(an), 1, 0, 0, 0, 0, 0, u32(fresh)},
+					{sign * f32(1.0 / f64(an)), 0, 0, 0, 0, 0, 0, 0},
+				),
+				{pd, td, dy, g},
+				an,
+			)
+			wrote(&written, &nw, x)
+		}
+	case .MaskedSum:
+		a := node.inputs[0]
+		if a.requires_grad {
+			an := t.tensor_numel(a)
+			mask := _upload_values(node.f64_metadata[1:])
+			g, fresh := _out_grad(a)
+			_dispatch_1d(
+				.Mask_Bcast_Add,
+				_p(
+					{u32(an), u32(an / mask.numel), 0, 0, 0, 0, 0, u32(fresh)},
+					{f32(node.f64_metadata[0]), 0, 0, 0, 0, 0, 0, 0},
+				),
+				{dy, mask, g},
+				an,
+			)
+			_release_buf(mask.buf)
+			wrote(&written, &nw, a)
 		}
 	case .SumDim1:
 		a := node.inputs[0]

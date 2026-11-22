@@ -198,6 +198,34 @@ op_cases := [?]Op_Case {
 		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_exp(x[0])},
 	},
 	{
+		name = "abs",
+		op = .Abs,
+		shapes = {{4, 50, 1, 1}},
+		tol = 1e-6,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_abs(x[0])},
+	},
+	{
+		name = "sin (inputs scaled by 4)",
+		op = .Sin,
+		shapes = {{4, 50, 1, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_sin(t.tensor_scale(x[0], 4))},
+	},
+	{
+		name = "cos (inputs scaled by 4)",
+		op = .Cos,
+		shapes = {{4, 50, 1, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_cos(t.tensor_scale(x[0], 4))},
+	},
+	{
+		name = "sign (gradient 0)",
+		op = .Sign,
+		shapes = {{4, 50, 1, 1}},
+		tol = 1e-6,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_sign(x[0])},
+	},
+	{
 		name = "log",
 		op = .Log,
 		shapes = {{4, 50, 1, 1}},
@@ -340,6 +368,50 @@ op_cases := [?]Op_Case {
 		shapes = {{64, 3, 1, 1}, {64, 3, 1, 1}},
 		tol = 1e-5,
 		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_mse_loss(x[0], x[1])},
+	},
+	{
+		name = "l1_loss",
+		op = .L1Loss,
+		shapes = {{64, 3, 1, 1}, {64, 3, 1, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_l1_loss(x[0], x[1])},
+	},
+	{
+		name = "l1_loss (12300 elements, two-pass reduction)",
+		op = .L1Loss,
+		shapes = {{300, 41, 1, 1}, {300, 41, 1, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_l1_loss(x[0], x[1])},
+	},
+	{
+		name = "masked_mean [2, 40, 3] (lengths 40, 25)",
+		op = .MaskedSum,
+		shapes = {{2, 40, 3, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			return t.tensor_masked_mean(x[0], t.sequence_mask({40, 25}, 40, context.temp_allocator))
+		},
+	},
+	{
+		name = "masked_sum [300, 41] (weights 0, 0.5, 1)",
+		op = .MaskedSum,
+		shapes = {{300, 41, 1, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			w := make([]f64, 300, context.temp_allocator)
+			for &v, i in w {v = 0.5 * f64(i % 3)}
+			return t.tensor_masked_sum(x[0], w)
+		},
+	},
+	{
+		name = "masked L1 (masked_mean of abs of a difference)",
+		op = .MaskedSum,
+		shapes = {{3, 20, 5, 1}, {3, 20, 5, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			mask := t.sequence_mask({20, 7, 13}, 20, context.temp_allocator)
+			return t.tensor_masked_mean(t.tensor_abs(t.tensor_sub(x[0], x[1])), mask)
+		},
 	},
 	{
 		name = "reshape",

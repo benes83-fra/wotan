@@ -31,7 +31,8 @@ Kernel :: enum {
 	Matmul_Tiled_Group, // launch (generated source, see _matmul_group_source)
 	Reduce, // out[k] = scale * Σ x (or Σ x²), per workgroup
 	Bcast_Add, // dx += scale * s[k]
-	Mse_Bwd, // dx += scale * dy[0] * (a - b)
+	Mse_Bwd, // dx += scale * dy[0] * (a - b), or sign(a - b) (L1 loss)
+	Mask_Bcast_Add, // dx += scale * dy[0] * m[i / inner] (masked sum / mean)
 	Bias_Add, // out = a + bias[i % D]
 	Col_Sum, // db[j] += Σ_i dy[i, j]
 	Col_Sum_Group, // Col_Sum of up to LINEAR_GROUP gradients in one launch
@@ -216,6 +217,14 @@ U_PROSPECT :: 15 // f0 α, f1 β, f2 λ
 U_PROB_WEIGHT :: 16 // f0 γ
 @(private)
 U_GELU :: 17 // x · Φ(x) (tensor_gelu)
+@(private)
+U_ABS :: 18
+@(private)
+U_SIN :: 19
+@(private)
+U_COS :: 20
+@(private)
+U_SIGN :: 21 // gradient 0
 
 @(private)
 KERNEL_SOURCES := [Kernel]string {
@@ -253,6 +262,10 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 			let qg = pow(1.0 - q, p.f0);
 			r = pg / pow(pg + qg, 1.0 / p.f0);
 		}
+		case 18u: { r = abs(v); }
+		case 19u: { r = sin(v); }
+		case 20u: { r = cos(v); }
+		case 21u: { r = sign(v); }
 		default: {}
 	}
 	y[i] = r;
@@ -300,6 +313,9 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 			let t2 = (pow(q, p.f0 - 1.0) - pow(1.0 - q, p.f0 - 1.0)) / (pg + qg);
 			d = gy * y[i] * (p.f0 / q - t2);
 		}
+		case 18u: { d = gy * sign(v); }
+		case 19u: { d = gy * cos(v); }
+		case 20u: { d = -gy * sin(v); }
 		default: {}
 	}
 	dx[i] = keep(dx[i], p.u7) + d;
@@ -525,8 +541,9 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
 	.Matmul_Tiled_Heads = "",
 	.Matmul_Group       = "", // generated (_matmul_group_source)
 	.Matmul_Tiled_Group = "",
-	// u0 n, u1 0 sum / 1 sum of squares, u2 output index, f0 scale. Each
-	// workgroup writes the scaled sum of its grid-stride share to out[u2 + wg].
+	// u0 n, u1 0 sum / 1 sum of squares / 2 sum of absolute values, u2 output
+	// index, f0 scale. Each workgroup writes the scaled sum of its grid-stride
+	// share to out[u2 + wg].
 	.Reduce             = `
 @group(0) @binding(1) var<storage, read> x: array<f32>;
 @group(0) @binding(2) var<storage, read_write> o: array<f32>;
@@ -539,7 +556,7 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid
 	loop {
 		if (i >= p.u0) { break; }
 		let v = x[i];
-		s = s + select(v, v * v, p.u1 == 1u);
+		s = s + select(select(v, v * v, p.u1 == 1u), abs(v), p.u1 == 2u);
 		i = i + stride;
 	}
 	sh[lid.x] = s;
@@ -562,7 +579,8 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 	dx[i] = keep(dx[i], p.u7) + p.f0 * s[p.u2];
 }
 `,
-	// dx[i] += f0 * dy[0] * (a[i] - b[i])
+	// dx[i] += f0 * dy[0] * (a[i] - b[i]), or with u1 = 1 (L1 loss)
+	// f0 * dy[0] * sign(a[i] - b[i])
 	.Mse_Bwd            = `
 @group(0) @binding(1) var<storage, read> a: array<f32>;
 @group(0) @binding(2) var<storage, read> b: array<f32>;
@@ -572,7 +590,20 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
 	let i = idx1(g, nw);
 	if (i >= p.u0) { return; }
-	dx[i] = keep(dx[i], p.u7) + p.f0 * dy[0] * (a[i] - b[i]);
+	let d = a[i] - b[i];
+	dx[i] = keep(dx[i], p.u7) + p.f0 * dy[0] * select(d, sign(d), p.u1 == 1u);
+}
+`,
+	// dx[i] += f0 * dy[0] * m[i / u1] (masked sum / mean); u0 n
+	.Mask_Bcast_Add     = `
+@group(0) @binding(1) var<storage, read> dy: array<f32>;
+@group(0) @binding(2) var<storage, read> m: array<f32>;
+@group(0) @binding(3) var<storage, read_write> dx: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
+	let i = idx1(g, nw);
+	if (i >= p.u0) { return; }
+	dx[i] = keep(dx[i], p.u7) + p.f0 * dy[0] * m[i / p.u1];
 }
 `,
 	// out[i] = a[i] + bias[i % D]; u0 n, u1 D

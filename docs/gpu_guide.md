@@ -199,10 +199,10 @@ These ops have GPU kernels for the forward and the backward pass:
 
 | Group | Ops |
 |---|---|
-| element-wise | `tensor_add`, `tensor_sub`, `tensor_mul`, `tensor_div`, `tensor_neg`, `tensor_scale`, `tensor_exp`, `tensor_log`, `tensor_sqrt`, `tensor_clamp`, `tensor_norm_cdf`, `tensor_gate_mul` |
+| element-wise | `tensor_add`, `tensor_sub`, `tensor_mul`, `tensor_div`, `tensor_neg`, `tensor_scale`, `tensor_exp`, `tensor_log`, `tensor_sqrt`, `tensor_abs`, `tensor_sin`, `tensor_cos`, `tensor_sign`, `tensor_clamp`, `tensor_norm_cdf`, `tensor_gate_mul` |
 | activations | `tensor_relu`, `tensor_leaky_relu`, `tensor_sigmoid`, `tensor_tanh`, `tensor_softplus`, `tensor_gelu`, `tensor_gelu_tanh`, `tensor_softmax` |
 | linear | `tensor_matmul` (both the 2-D and the flattened `[1, N·in]` form), `tensor_add_bias` (both forms), `tensor_linear` (both forms; the bias is added by the matrix-product kernel) |
-| reductions and losses | `tensor_sum`, `tensor_mean`, `tensor_sum_dim1`, `tensor_logsumexp_dim1`, `tensor_mse_loss`, `tensor_cross_entropy_loss`, `tensor_bce_loss`, `tensor_binary_cross_entropy` |
+| reductions and losses | `tensor_sum`, `tensor_mean`, `tensor_masked_sum`, `tensor_masked_mean` (the mask is uploaded with each call), `tensor_sum_dim1`, `tensor_logsumexp_dim1`, `tensor_mse_loss`, `tensor_l1_loss`, `tensor_cross_entropy_loss`, `tensor_bce_loss`, `tensor_binary_cross_entropy` |
 | normalisation and dropout | `tensor_layer_norm`, `tensor_rms_norm`, `tensor_batch_norm_2d`, `tensor_dropout` |
 | convolution and pooling | `tensor_conv2d`, `tensor_conv1d`, `tensor_max_pool2d`, `tensor_avg_pool2d`, `tensor_flatten` |
 | finance and VAE | `tensor_sharpe_loss`, `tensor_prospect_value`, `tensor_prob_weighting`, `tensor_prospect_utility`, `tensor_normalize_time`, `tensor_permute_lob`, `tensor_lgamma`, `tensor_entropy`, `tensor_kl_divergence`, `nn.reparameterize`, `tensor_top_k_mask` (no gradient) |

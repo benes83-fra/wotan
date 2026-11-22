@@ -193,6 +193,24 @@ gradcheck_ops_test :: proc(allocator: mem.Allocator) {
 		allocator,
 	)
 	gcl_check(
+		"abs",
+		1,
+		proc() -> ^t.Tensor {return gcl_weighted_sum(t.tensor_abs(gcl_in[0]))},
+		allocator,
+	)
+	gcl_check(
+		"sin",
+		1,
+		proc() -> ^t.Tensor {return gcl_weighted_sum(t.tensor_sin(gcl_in[0]))},
+		allocator,
+	)
+	gcl_check(
+		"cos",
+		1,
+		proc() -> ^t.Tensor {return gcl_weighted_sum(t.tensor_cos(gcl_in[0]))},
+		allocator,
+	)
+	gcl_check(
 		"mean",
 		1,
 		proc() -> ^t.Tensor {return gcl_weighted_sum(t.tensor_mean(gcl_in[0]))},

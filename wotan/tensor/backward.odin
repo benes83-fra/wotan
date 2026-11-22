@@ -395,6 +395,52 @@ _backward_node_cpu :: proc(node: ^Tensor, allocator: mem.Allocator) {
 			}
 		}
 
+	case .Abs, .Sin, .Cos:
+		a_in := node.inputs[0]
+		if a_in.requires_grad {
+			tensor_ensure_grad(a_in)
+			for v, i in a_in.data.data {
+				d: f64
+				#partial switch node.op {
+				case .Abs:
+					d = _sign(v)
+				case .Sin:
+					d = math.cos(v)
+				case:
+					d = -math.sin(v)
+				}
+				a_in.grad.data[i] += node.grad.data[i] * d
+			}
+		}
+
+	case .Sign:
+	// gradient 0 everywhere
+
+	case .L1Loss:
+		// d/dpred mean|pred - target| = sign(pred - target) / n
+		pred, target := node.inputs[0], node.inputs[1]
+		f := node.grad.data[0] / f64(len(pred.data.data))
+		for x, side in node.inputs {
+			if !x.requires_grad {continue}
+			tensor_ensure_grad(x)
+			sgn := f if side == 0 else -f
+			for v, i in pred.data.data {
+				x.grad.data[i] += sgn * _sign(v - target.data.data[i])
+			}
+		}
+
+	case .MaskedSum:
+		x := node.inputs[0]
+		if x.requires_grad {
+			tensor_ensure_grad(x)
+			g := node.grad.data[0] * node.f64_metadata[0]
+			mask := node.f64_metadata[1:]
+			inner := len(x.grad.data) / len(mask)
+			for m, r in mask {
+				for &d in x.grad.data[r * inner:][:inner] {d += g * m}
+			}
+		}
+
 	case .Div:
 		a_in := node.inputs[0]
 		b_in := node.inputs[1]

@@ -85,6 +85,12 @@ Op :: enum {
 	Linear, // x @ w + b in one node (tensor_linear)
 	MultiHeadAttention, // tensor_multi_head_attention on the GPU (one node)
 	Gelu, // tensor_gelu on the GPU (one node; the CPU records NormCDF and Mul)
+	Abs,
+	Sin,
+	Cos,
+	Sign,
+	L1Loss,
+	MaskedSum, // tensor_masked_sum and tensor_masked_mean
 }
 
 PoolParams :: struct {
@@ -566,6 +572,36 @@ tensor_mse_loss :: proc(
 		out.op = .MSELoss
 		append(&out.inputs, pred)
 		append(&out.inputs, target)
+	}
+	return out
+}
+
+// tensor_l1_loss: mean absolute error, mean(|pred - target|), as a scalar
+// (torch.nn.functional.l1_loss). Both inputs may need gradients; where
+// pred = target the gradient is 0 (as torch).
+tensor_l1_loss :: proc(pred: ^Tensor, target: ^Tensor, loc := #caller_location) -> ^Tensor {
+	fmt.assertf(
+		tensor_numel(pred) == tensor_numel(target),
+		"tensor_l1_loss: pred has %d elements, target %d",
+		tensor_numel(pred),
+		tensor_numel(target),
+		loc = loc,
+	)
+	if _device_use(.L1Loss, pred, target) {return _device_scalar_op(.L1Loss, pred, target)}
+	_host_inputs(.L1Loss, pred, target)
+	s := 0.0
+	for v, i in pred.data.data {s += abs(v - target.data.data[i])}
+	out_data := l.matrix_new(f64, 1, 1, _op_alloc(pred))
+	out_data.data[0] = s / f64(len(pred.data.data))
+	out := _tensor_new_op(
+		out_data,
+		SCALAR_SHAPE,
+		pred.requires_grad || target.requires_grad,
+		_op_alloc(pred),
+	)
+	if out.requires_grad {
+		out.op = .L1Loss
+		append(&out.inputs, pred, target)
 	}
 	return out
 }
@@ -2830,6 +2866,81 @@ tensor_mean :: proc(a: ^Tensor) -> ^Tensor {
 	return out
 }
 
+// tensor_masked_sum: Σ_i x[i] · mask[i / inner] as a scalar, inner =
+// numel(x) / len(mask). Each mask value weights a contiguous block of x: for
+// a channels-last [B, T, C] tensor and a [B, T] mask (1 on valid frames, 0 on
+// padding) it is (x * mask.unsqueeze(-1)).sum() in torch. The mask is a
+// constant (no gradient); its length must divide numel(x).
+tensor_masked_sum :: proc(x: ^Tensor, mask: []f64, loc := #caller_location) -> ^Tensor {
+	return _masked_sum(x, mask, false, loc)
+}
+
+// tensor_masked_mean: tensor_masked_sum divided by inner · Σ mask, the number of
+// valid elements for a 0/1 mask: (x * m.unsqueeze(-1)).sum() / (m.sum() · C) in
+// torch for [B, T, C] and a [B, T] mask. Σ mask must be positive.
+tensor_masked_mean :: proc(x: ^Tensor, mask: []f64, loc := #caller_location) -> ^Tensor {
+	return _masked_sum(x, mask, true, loc)
+}
+
+@(private = "file")
+_masked_sum :: proc(
+	x: ^Tensor,
+	mask: []f64,
+	mean: bool,
+	loc: runtime.Source_Code_Location,
+) -> ^Tensor {
+	n := tensor_numel(x)
+	fmt.assertf(
+		len(mask) > 0 && n % len(mask) == 0,
+		"tensor_masked_%s: the mask has %d values, which does not divide the %d elements of x",
+		"mean" if mean else "sum",
+		len(mask),
+		n,
+		loc = loc,
+	)
+	inner := n / len(mask)
+	scale := 1.0
+	if mean {
+		total := 0.0
+		for m in mask {total += m}
+		fmt.assertf(total > 0, "tensor_masked_mean: the mask sums to %v", total, loc = loc)
+		scale = 1 / (total * f64(inner))
+	}
+	if _device_use(.MaskedSum, x) {
+		floats := make([]f64, len(mask) + 1, context.temp_allocator)
+		floats[0] = scale
+		copy(floats[1:], mask)
+		return _device_loss(.MaskedSum, {x}, floats)
+	}
+	_host_inputs(.MaskedSum, x)
+	s := 0.0
+	for m, r in mask {
+		block := 0.0
+		for v in x.data.data[r * inner:][:inner] {block += v}
+		s += m * block
+	}
+	out_data := l.matrix_new(f64, 1, 1, _op_alloc(x))
+	out_data.data[0] = scale * s
+	out := _tensor_new_op(out_data, SCALAR_SHAPE, x.requires_grad, _op_alloc(x))
+	if out.requires_grad {
+		out.op = .MaskedSum
+		append(&out.inputs, x)
+		append(&out.f64_metadata, scale)
+		append(&out.f64_metadata, ..mask)
+	}
+	return out
+}
+
+// sequence_mask: the [B, T] 0/1 mask of a padded batch, mask[b·T + t] = 1 for
+// t < lengths[b] (lengths above T count as T); for tensor_masked_sum / _mean
+sequence_mask :: proc(lengths: []int, T: int, allocator := context.allocator) -> []f64 {
+	mask := make([]f64, len(lengths) * T, allocator)
+	for n, b in lengths {
+		for t in 0 ..< clamp(n, 0, T) {mask[b * T + t] = 1}
+	}
+	return mask
+}
+
 // tensor_neg computes element-wise negation: out = -a
 
 // KL_EXP_CLAMP caps exp(log_var) in tensor_kl_divergence; past it the clamped
@@ -3025,6 +3136,49 @@ tensor_lgamma :: proc(a: ^Tensor) -> ^Tensor {
 		append(&out.inputs, a)
 	}
 	return out
+}
+
+// _unary_host: an element-wise op, out = f(a) on the host (its kernel on the device)
+@(private = "file")
+_unary_host :: proc(op: Op, a: ^Tensor, f: proc(x: f64) -> f64) -> ^Tensor {
+	if _device_use(op, a) {return _device_elementwise(op, a, nil)}
+	_host_inputs(op, a)
+	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
+	for v, i in a.data.data {out_data.data[i] = f(v)}
+	out := _tensor_new_op(out_data, a.shape, a.requires_grad, _op_alloc(a))
+	if out.requires_grad {
+		out.op = op
+		append(&out.inputs, a)
+	}
+	return out
+}
+
+// _sign: -1, 0 or 1; NaN stays NaN (as torch.sign)
+_sign :: proc(x: f64) -> f64 {
+	if x > 0 {return 1}
+	if x < 0 {return -1}
+	if x != x {return x}
+	return 0
+}
+
+// tensor_abs: out = |a|. Gradient sign(a): 0 at a = 0 (as torch).
+tensor_abs :: proc(a: ^Tensor) -> ^Tensor {
+	return _unary_host(.Abs, a, proc(x: f64) -> f64 {return abs(x)})
+}
+
+// tensor_sin: out = sin(a), gradient cos(a)
+tensor_sin :: proc(a: ^Tensor) -> ^Tensor {
+	return _unary_host(.Sin, a, proc(x: f64) -> f64 {return math.sin(x)})
+}
+
+// tensor_cos: out = cos(a), gradient -sin(a)
+tensor_cos :: proc(a: ^Tensor) -> ^Tensor {
+	return _unary_host(.Cos, a, proc(x: f64) -> f64 {return math.cos(x)})
+}
+
+// tensor_sign: out = -1, 0 or 1. The gradient is 0 everywhere (as torch.sign).
+tensor_sign :: proc(a: ^Tensor) -> ^Tensor {
+	return _unary_host(.Sign, a, _sign)
 }
 
 // Digamma ψ(x) = d/dx log Γ(x): recurrence ψ(x) = ψ(x + 1) - 1/x up to x ≥ 10,
