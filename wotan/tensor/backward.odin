@@ -1516,6 +1516,55 @@ _backward_node_cpu :: proc(node: ^Tensor, allocator: mem.Allocator) {
 		if w_in.requires_grad {tensor_ensure_grad(w_in)}
 		if b_in != nil && b_in.requires_grad {tensor_ensure_grad(b_in)}
 		xs, ws := x_in.data.data, w_in.data.data
+		if groups == 1 {
+			// matrix products over col = _conv1d_im2col(x) [R, K·C_in]:
+			// dWp [C_out, K·C_in] = dyᵀ @ col, dcol = dy @ Wp summed back onto x
+			R, CK := B * T_out, C_in * K
+			dy_m := _mat(R, C_out, node.grad.data)
+			if b_in != nil && b_in.requires_grad {
+				for r in 0 ..< R {
+					l.vec_add_simd(
+						b_in.grad.data[:C_out],
+						node.grad.data[r * C_out:][:C_out],
+						b_in.grad.data[:C_out],
+					)
+				}
+			}
+			if w_in.requires_grad {
+				col := _conv1d_im2col(xs, m[:])
+				dwp := make([]f64, C_out * CK, runtime.heap_allocator())
+				col_m, dwp_m := _mat(R, CK, col), _mat(C_out, CK, dwp)
+				l.matmul_tn_acc_simd(&dy_m, &col_m, &dwp_m)
+				dw := w_in.grad.data
+				for o in 0 ..< C_out {
+					for k in 0 ..< K {
+						for c in 0 ..< C_in {dw[(o * C_in + c) * K + k] += dwp[(o * K + k) * C_in + c]}
+					}
+				}
+				delete(col, runtime.heap_allocator())
+				delete(dwp, runtime.heap_allocator())
+			}
+			if x_in.requires_grad {
+				wp := _conv1d_weight_kc(ws, C_out, C_in, K)
+				dcol := make([]f64, R * CK, runtime.heap_allocator())
+				wp_m, dcol_m := _mat(C_out, CK, wp), _mat(R, CK, dcol)
+				l.matmul_nn_acc_simd(&dy_m, &wp_m, &dcol_m)
+				for b in 0 ..< B {
+					for t in 0 ..< T_out {
+						row := dcol[(b * T_out + t) * CK:][:CK]
+						for k in 0 ..< K {
+							src := t * stride + k * dilation - pad_left
+							if src < 0 || src >= T {continue}
+							dx := x_in.grad.data[(b * T + src) * C_in:][:C_in]
+							l.vec_add_simd(dx, row[k * C_in:][:C_in], dx)
+						}
+					}
+				}
+				delete(wp, runtime.heap_allocator())
+				delete(dcol, runtime.heap_allocator())
+			}
+			break
+		}
 		for b in 0 ..< B {
 			for t in 0 ..< T_out {
 				dy := node.grad.data[(b * T_out + t) * C_out:][:C_out]
@@ -2441,8 +2490,9 @@ _conv2d_backward :: proc(node: ^Tensor, allocator: mem.Allocator) {
 
 	// dx = col2im(W^T @ dY_n)
 	if input_in.requires_grad {
-		grad_col := make([]f64, N * col_w * col_h, allocator)
-		defer delete(grad_col, allocator)
+		// temporaries on the heap, freed at once (not in a graph arena)
+		grad_col := make([]f64, N * col_w * col_h, runtime.heap_allocator())
+		defer delete(grad_col, runtime.heap_allocator())
 		for n in 0 ..< N {
 			dy_n := _mat(C_out, col_h, node.grad.data[n * C_out * col_h:(n + 1) * C_out * col_h])
 			dcol_n := _mat(col_w, col_h, grad_col[n * col_w * col_h:(n + 1) * col_w * col_h])
@@ -2462,9 +2512,9 @@ _conv2d_backward :: proc(node: ^Tensor, allocator: mem.Allocator) {
 			cp.pad_w,
 			out_h,
 			out_w,
-			allocator,
+			runtime.heap_allocator(),
 		)
-		defer delete(grad_input, allocator)
+		defer delete(grad_input, runtime.heap_allocator())
 		l.vec_add_simd(input_in.grad.data, grad_input, input_in.grad.data)
 	}
 
@@ -2482,9 +2532,9 @@ _conv2d_backward :: proc(node: ^Tensor, allocator: mem.Allocator) {
 			cp.stride_w,
 			cp.pad_h,
 			cp.pad_w,
-			allocator,
+			runtime.heap_allocator(),
 		)
-		defer delete(col, allocator)
+		defer delete(col, runtime.heap_allocator())
 		dw := _grad_view(weight_in, C_out, col_w)
 		for n in 0 ..< N {
 			dy_n := _mat(C_out, col_h, node.grad.data[n * C_out * col_h:(n + 1) * C_out * col_h])

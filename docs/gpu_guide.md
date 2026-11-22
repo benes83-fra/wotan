@@ -549,6 +549,37 @@ With a graph scope, a training loop allocates GPU memory only in its first steps
 
 A single tensor must fit in one storage buffer of the device (`maxStorageBufferBindingSize`, 2 GB on the GPU used here). A larger one panics with the size in the message.
 
+### Audio-sized training steps
+
+The program [`examples/audio_profile`](../examples/audio_profile) measures training steps of two audio models built from wotan layers, with their published layer sizes:
+- **FastSpeech 2** (34.7 M parameters) on 10-s clips: 938 mel frames and 120 phonemes per clip.
+- **Vocos** (13.5 M parameters), the generator plus a mel L1 loss, on 10-s clips.
+- **A full Vocos GAN step** (55.2 M parameters with the discriminators) on 1-s segments: a discriminator update, then a generator update.
+
+Each run prints the mean step time, the peak working set of the process, the graph arena, the GPU buffer pool, and kernel launches and CPU fallbacks per step. It also checks that live tensors, heap and pool stay flat from the third step on:
+
+```
+odin run examples/audio_profile -o:speed -- fs2 gpu 5 8   # configuration, device, steps, batch
+```
+
+Results on the RTX 3060 Laptop GPU (6 GB) and its host (Ryzen 7 6800H, 31 GB). All runs were leak-free with no CPU fallbacks:
+
+| Step | Batch | CPU: time, peak memory | GPU: time, pool | GPU launches |
+|---|---|---|---|---|
+| FastSpeech 2, 10 s | 4 | 6.1 s, 5.1 GB | 0.75 s, 2.8 GB | 787 |
+| FastSpeech 2, 10 s | 8 | 10.9 s, 9.0 GB | 1.51 s, 4.6 GB | 787 |
+| Vocos generator, 10 s | 4 | 4.3 s, 5.1 GB | 0.19 s, 2.7 GB | 262 |
+| Vocos generator, 10 s | 8 | 8.0 s, 9.7 GB | 0.38 s, 5.1 GB | 262 |
+| Vocos GAN step, 1 s | 4 | 16.8 s, 5.7 GB | 0.74 s, 4.2 GB | 2950 |
+| Vocos GAN step, 1 s | 8 | 31.1 s, 9.7 GB | out of memory | |
+
+Memory grows linearly with the batch. At batch 16 none of the three steps fits in 6 GB of GPU memory: they would need about 8.5 GB (FastSpeech 2), 10 GB (Vocos) and 7 GB already at batch 8 (GAN). On the CPU, batch 16 needs about 17 to 19 GB.
+
+Why audio graphs need this much:
+- **The pool keeps every size it has used.** Its buffers come in powers of two and go back to the pool instead of being freed, so `pool_bytes` is the peak of each size bucket added together. A tensor of 92 MB occupies a 128 MB buffer.
+- **Masked attention stores full score matrices.** With a padding mask, attention cannot use FlashAttention. It keeps `[batch·heads, S, S]` scores and builds a full additive mask of that size on the host for every layer and step, although the mask depends only on the sequence and the key. For FastSpeech 2 at batch 4, dropping the masks shortens the GPU step from 0.73 to 0.45 s and saves 0.54 GB of host and 0.21 GB of GPU memory.
+- **GPU training keeps host copies.** The host keeps f64 copies of the parameters, their gradients and Adam's two moments, 32 bytes per parameter: 1.8 GB for the 55 M parameters of the GAN step.
+
 ## 10. Precision
 
 The GPU computes in `f32`. The host API stays `f64`: values are converted to `f32` on upload and back to `f64` on download. Results therefore agree with the CPU engine to `f32` precision, not bit for bit:

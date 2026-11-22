@@ -107,6 +107,7 @@ And one more guide:
 |---|---|
 | [sector rotation](e2e_sector_rotation_guide.md) (`examples/sector_rotation`) | a complete strategy on real data: Yahoo Finance prices, features without look-ahead, an LSTM on the GPU against a ridge regression and a momentum rule, purged walk-forward testing, long/short portfolios with trading costs, the probabilistic and deflated Sharpe ratios, charts, Excel and HTML output |
 | [volatility](e2e_volatility_guide.md) (`examples/volatility`) | volatility forecasting on 33 years of SPY and VIX data: GJR-GARCH, a HAR regression, an LSTM and a Mamba network on the GPU, Diebold–Mariano tests, hidden-Markov regimes, delta-hedged short straddles priced at the VIX, and a backtest of the 99% value at risk |
+| [audio profile](gpu_guide.md#audio-sized-training-steps) (`examples/audio_profile`) | memory and step time of FastSpeech 2- and Vocos-sized training steps (10-s clips, a GAN step on 1-s segments) on the CPU and the GPU, with a leak check |
 
 The [test catalog](test_catalog.md) lists every test file and what it checks.
 

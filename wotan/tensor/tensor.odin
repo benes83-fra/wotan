@@ -943,7 +943,6 @@ tensor_conv2d :: proc(
 		return _device_conv2d(input, weight, bias, cp)
 	}
 	_host_inputs(.Conv2d, input, weight, bias)
-	allocator := _scope_or(allocator) // the active graph scope, if any
 	N := input.shape[0]
 	C_in := input.shape[1]
 	H := input.shape[2]
@@ -952,7 +951,8 @@ tensor_conv2d :: proc(
 	C_out := weight.shape[0]
 	kH, kW := cp.kH, cp.kW
 
-	// ✅ FIX: Use context.allocator for temporary im2col
+	// the columns are temporary: heap memory, freed below (not the graph arena,
+	// which would keep them until graph_end)
 	col, out_h, out_w := _im2col(
 		input.data.data,
 		N,
@@ -965,7 +965,7 @@ tensor_conv2d :: proc(
 		cp.stride_w,
 		cp.pad_h,
 		cp.pad_w,
-		allocator,
+		runtime.heap_allocator(),
 	)
 
 	out_data := l.matrix_new(f64, 1, N * C_out * out_h * out_w, _op_alloc(input))
@@ -992,8 +992,7 @@ tensor_conv2d :: proc(
 		l.matmul_nn_acc_simd(&weight_2d, &col_2d, &out_2d)
 	}
 
-	// ✅ FIX: Delete with context.allocator to match allocation
-	delete(col, allocator)
+	delete(col, runtime.heap_allocator())
 
 	if bias != nil {
 		for n in 0 ..< N {
@@ -4498,6 +4497,27 @@ tensor_conv1d :: proc(
 
 	out_data := l.matrix_new(f64, 1, B * T_out * C_out, _op_alloc(x))
 	xs, ws, ys := x.data.data, weight.data.data, out_data.data
+	if groups == 1 {
+		// one matrix product: out [B·T_out, C_out] = col [B·T_out, K·C_in] @ Wpᵀ
+		R, CK := B * T_out, C_in * K
+		col := _conv1d_im2col(xs, meta[:])
+		wp := _conv1d_weight_kc(ws, C_out, C_in, K)
+		if bias != nil {
+			for r in 0 ..< R {copy(ys[r * C_out:][:C_out], bias.data.data[:C_out])}
+		}
+		col_m, wp_m, out_m := _mat(R, CK, col), _mat(C_out, CK, wp), _mat(R, C_out, ys)
+		l.matmul_nt_acc_simd(&col_m, &wp_m, &out_m)
+		delete(col, runtime.heap_allocator())
+		delete(wp, runtime.heap_allocator())
+		out := _tensor_new_op(out_data, {B, T_out, C_out, 1}, rg, _op_alloc(x))
+		if out.requires_grad {
+			out.op = .Conv1d
+			append(&out.inputs, x, weight)
+			if bias != nil {append(&out.inputs, bias)}
+			append(&out.int_metadata, ..meta[:])
+		}
+		return out
+	}
 	C_ig, C_og := C_in / groups, C_out / groups // channels per group
 	for b in 0 ..< B {
 		for t in 0 ..< T_out {
@@ -4529,6 +4549,40 @@ tensor_conv1d :: proc(
 	return out
 }
 
+// _conv1d_im2col: the input windows of a conv1d with groups 1 (metadata as
+// tensor_conv1d records it) as rows of col [B·T_out, K·C_in]:
+// col[b·T_out + t, k·C_in + c] = x[b, t·stride + k·dilation - pad_left, c],
+// 0 in the padding. Heap memory, freed by the caller.
+_conv1d_im2col :: proc(xs: []f64, m: []int) -> []f64 {
+	B, T, C_in, K, dilation, pad_left, T_out, stride :=
+		m[0], m[1], m[2], m[4], m[5], m[6], m[7], m[8]
+	CK := C_in * K
+	col := make([]f64, B * T_out * CK, runtime.heap_allocator())
+	for b in 0 ..< B {
+		for t in 0 ..< T_out {
+			row := col[(b * T_out + t) * CK:][:CK]
+			for k in 0 ..< K {
+				src := t * stride + k * dilation - pad_left
+				if src < 0 || src >= T {continue}
+				copy(row[k * C_in:][:C_in], xs[(b * T + src) * C_in:][:C_in])
+			}
+		}
+	}
+	return col
+}
+
+// _conv1d_weight_kc: the conv1d weight [C_out, C_in, K] reordered to
+// [C_out, K·C_in] (the column order of _conv1d_im2col). Heap memory.
+_conv1d_weight_kc :: proc(ws: []f64, C_out, C_in, K: int) -> []f64 {
+	wp := make([]f64, C_out * C_in * K, runtime.heap_allocator())
+	for o in 0 ..< C_out {
+		for c in 0 ..< C_in {
+			for k in 0 ..< K {wp[(o * K + k) * C_in + c] = ws[(o * C_in + c) * K + k]}
+		}
+	}
+	return wp
+}
+
 // tensor_overlap_add: weighted overlap-add of frames [batch, F, N] (frame f
 // starts at sample f·hop of the signal) into signals [batch, L]:
 //   y[b, t] = Σ_f w[n] · frames[b, f, n] / Σ_f w[n]²,  n = t + start - f·hop
@@ -4538,16 +4592,18 @@ tensor_conv1d :: proc(
 // the analysis and synthesis windowing (it needs a window and hop with no gaps,
 // e.g. Hann with hop ≤ N / 2). Without a window (nil) the frames are summed
 // unweighted, with no division.
-// The full signal has (F - 1)·hop + N samples. center = true drops the first
-// N / 2 of them (start = N / 2), as torch.istft(center = True). length is the
-// number of output samples: -1 keeps everything up to the end of the full
-// signal, minus N / 2 at the end when centred; samples past the end are zero.
+// The full signal has (F - 1)·hop + N samples. The output starts at sample
+// `start` of it: by default 0, or N / 2 with center = true, as
+// torch.istft(center = True); Vocos' "same" padding is start = (N - hop) / 2.
+// length is the number of output samples: -1 drops as many samples at the end
+// as at the start; samples past the end of the full signal are zero.
 tensor_overlap_add :: proc(
 	frames: ^Tensor,
 	hop: int,
 	window: []f64 = nil,
 	center := false,
 	length := -1,
+	start := -1,
 	loc := #caller_location,
 ) -> ^Tensor {
 	B, F, N := frames.shape[0], frames.shape[1], frames.shape[2]
@@ -4566,9 +4622,17 @@ tensor_overlap_add :: proc(
 		loc = loc,
 	)
 	full := (F - 1) * hop + N
-	start := N / 2 if center else 0
+	start := start
+	if start < 0 {start = N / 2 if center else 0}
+	fmt.assertf(
+		start < full,
+		"tensor_overlap_add: start %d is past the %d samples of the signal",
+		start,
+		full,
+		loc = loc,
+	)
 	L := length
-	if L < 0 {L = full - start - (N / 2 if center else 0)}
+	if L < 0 {L = full - 2 * start}
 	fmt.assertf(L >= 1, "tensor_overlap_add: empty output (length %d)", L, loc = loc)
 
 	// weights: the window (N values, ones without one), then 1 / envelope per

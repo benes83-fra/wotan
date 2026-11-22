@@ -436,7 +436,9 @@ conv1d depthwise, stride 2 [1, 3, 2, 1]: [3, 10, 9, 30, 9, 50]
 
 A strided convolution with a fixed basis also computes framed transforms. With one input channel, `stride = hop` and a weight whose rows are the window times cos and −sin of the DFT frequencies, the output holds the real and imaginary parts of a short-time Fourier transform, one frame per step (the test `conv1d_reference_test` checks it against `torch.stft`).
 
-`tensor_overlap_add(frames, hop, window = nil, center = false, length = -1)` goes the other way: it adds frames `[batch, F, N]` into signals `[batch, L]`, with frame f starting at sample f·hop. The full signal has (F − 1)·hop + N samples. Without a window the overlapping samples are simply summed. With a window w (N values), each frame is multiplied by w and every sample is divided by the sum of w² over the frames that cover it. This is the synthesis step of an inverse STFT: if the frames are windowed slices of a signal, the result is that signal again. The window and hop must leave no gaps; the summed w² must be positive at every output sample (Hann with hop ≤ N / 2 works). `center = true` drops the first and last N / 2 samples, as `torch.istft(center = True)`, and `length` sets the number of output samples (samples past the end of the full signal are zero):
+On the CPU, `tensor_conv1d` with `groups = 1` copies the input windows into a buffer of `[batch·T_out, K·C_in]` values (im2col) and multiplies it with the weight in one SIMD matrix product. The backward pass needs two more products. The buffer exists only during the call. Grouped convolutions run as direct loops, because each group's product would be tiny.
+
+`tensor_overlap_add(frames, hop, window = nil, center = false, length = -1, start = -1)` goes the other way: it adds frames `[batch, F, N]` into signals `[batch, L]`, with frame f starting at sample f·hop. The full signal has (F − 1)·hop + N samples. Without a window the overlapping samples are simply summed. With a window w (N values), each frame is multiplied by w and every sample is divided by the sum of w² over the frames that cover it. This is the synthesis step of an inverse STFT: if the frames are windowed slices of a signal, the result is that signal again. The window and hop must leave no gaps; the summed w² must be positive at every output sample (Hann with hop ≤ N / 2 works). `center = true` drops the first and last N / 2 samples, as `torch.istft(center = True)`. `start` drops any other number of samples at each end: Vocos' "same" padding is `start = (N − hop) / 2`. `length` sets the number of output samples (samples past the end of the full signal are zero):
 
 ```odin
 fr := from_values({1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3}, 1, 12); fr.shape = {1, 3, 4, 1}
@@ -684,7 +686,8 @@ The rules:
 - **Nothing made in the scope survives `graph_end`.** Do not use or free those nodes afterwards. Copy out the numbers you need first. Inside the scope, `tensor_free` and `tensor_free_graph` on its nodes are allowed and cost nothing.
 - **Scopes nest.** `graph_end` releases only the innermost scope.
 - **A scope belongs to one thread.** The active scope is thread-local.
-- **Arena memory comes in 64 MB chunks** (`GRAPH_CHUNK_SIZE`), and `graph_scope_bytes(&scope)` reports the bytes used and reserved. `graph_scope_destroy` returns the memory to the operating system.
+- **Arena memory comes in 64 MB chunks** (`GRAPH_CHUNK_SIZE`), or one chunk of its own for a larger allocation. When an allocation doesn't fit the current chunk, the arena continues in the smallest unused chunk that fits. So graphs that allocate in different patterns, such as a GAN's discriminator and generator updates, share a fixed set of chunks.
+- **`graph_scope_bytes(&scope)`** reports the bytes in use (while the scope is active) and the bytes reserved. `graph_scope_destroy` returns the memory to the operating system.
 
 **No-grad scopes** are for inference. With `graph_begin(&scope, no_grad = true)`, op outputs neither require gradients nor keep their inputs, so no graph is recorded and `graph_end` frees everything:
 

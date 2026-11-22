@@ -196,8 +196,22 @@ _arena_alloc :: proc(
 				s.last = raw_data(p)
 				return p, nil
 			}
-			// Does not fit: move on to the next chunk that is large enough
-			if s.cur + 1 < len(s.chunks) && s.chunks[s.cur + 1].size >= size + align {
+			// Does not fit: continue in the smallest unused chunk (those after
+			// the current one) that is large enough, moved to the next position.
+			// Taking the smallest keeps large chunks for large allocations, so
+			// graphs with different allocation patterns (e.g. alternating
+			// discriminator and generator steps) settle on a fixed set of chunks.
+			best := -1
+			for j in s.cur + 1 ..< len(s.chunks) {
+				if s.chunks[j].size < size + align {continue}
+				if best < 0 || s.chunks[j].size < s.chunks[best].size {best = j}
+			}
+			if best >= 0 {
+				if best != s.cur + 1 {
+					chunk := s.chunks[best]
+					ordered_remove(&s.chunks, best)
+					inject_at(&s.chunks, s.cur + 1, chunk)
+				}
 				s.cur += 1
 				s.offset = 0
 				continue
