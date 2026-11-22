@@ -441,6 +441,25 @@ _backward_node_cpu :: proc(node: ^Tensor, allocator: mem.Allocator) {
 			}
 		}
 
+	case .IndexSelectTime:
+		// dx[b, s, :] += dy[b, t, :] for every output step t that read step s
+		x := node.inputs[0]
+		if x.requires_grad {
+			tensor_ensure_grad(x)
+			m := node.int_metadata[:]
+			B, T, C, T_out, per_sequence := m[0], m[1], m[2], m[3], m[4] != 0
+			indices := m[5:]
+			for b in 0 ..< B {
+				idx := indices[b * T_out:][:T_out] if per_sequence else indices
+				for s, t in idx {
+					if s < 0 {continue}
+					dx := x.grad.data[(b * T + s) * C:][:C]
+					dy := node.grad.data[(b * T_out + t) * C:][:C]
+					for &v, c in dx {v += dy[c]}
+				}
+			}
+		}
+
 	case .OverlapAdd:
 		// d frames[b, f, n] = w[n] · dy[b, t] / envelope[t], t = f·hop + n - start
 		x := node.inputs[0]

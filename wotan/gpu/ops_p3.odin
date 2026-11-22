@@ -122,6 +122,59 @@ _im2col_1d :: proc(d: Conv1d_Dims, x: Bind) -> Bind {
 	return col
 }
 
+// index_select_time metadata: [B, T, C, T_out, per_sequence] then the indices
+// (T_out, or B·T_out per sequence). Uploaded as f32, exact below 2^24.
+@(private)
+_gather_time_index :: proc(m: []int, b, t: int) -> int {
+	T_out := m[3]
+	return m[5 + b * T_out + t] if m[4] != 0 else m[5 + t]
+}
+
+// the global source row b·T + s of every output row (-1: a zero step)
+@(private)
+_gather_time_sources :: proc(m: []int) -> Bind {
+	B, T, T_out := m[0], m[1], m[3]
+	assert(B * T < 1 << 24 && B * T_out < 1 << 24, "gpu index_select_time: too many steps")
+	src := make([]int, B * T_out, context.temp_allocator)
+	for b in 0 ..< B {
+		for t in 0 ..< T_out {
+			s := _gather_time_index(m, b, t)
+			src[b * T_out + t] = b * T + s if s >= 0 else -1
+		}
+	}
+	return _upload_ints(src)
+}
+
+// the inverse map for the gradient: per source row the output rows that read
+// it, as offsets [B·T + 1] then the output rows grouped by source row (in
+// increasing order, so the sums have a fixed order)
+@(private)
+_gather_time_inverse :: proc(m: []int) -> Bind {
+	B, T, T_out := m[0], m[1], m[3]
+	rows := B * T
+	inv := make([]int, rows + 1 + B * T_out, context.temp_allocator)
+	counts := inv[:rows + 1]
+	for b in 0 ..< B {
+		for t in 0 ..< T_out {
+			s := _gather_time_index(m, b, t)
+			if s >= 0 {counts[b * T + s + 1] += 1}
+		}
+	}
+	for r in 0 ..< rows {counts[r + 1] += counts[r]} 	// now offsets
+	fill := make([]int, rows, context.temp_allocator)
+	list := inv[rows + 1:]
+	for b in 0 ..< B {
+		for t in 0 ..< T_out {
+			s := _gather_time_index(m, b, t)
+			if s < 0 {continue}
+			r := b * T + s
+			list[counts[r] + fill[r]] = b * T_out + t
+			fill[r] += 1
+		}
+	}
+	return _upload_ints(inv[:rows + 1 + counts[rows]])
+}
+
 // overlap-add metadata [B, F, N, hop, start, L] -> u0..u5
 @(private)
 _overlap_add_params :: proc(m: []int) -> Params {
@@ -188,6 +241,15 @@ _forward_p3 :: proc(op: t.Op, out: ^t.Tensor, inputs: []^t.Tensor, ints: []int, 
 		wt := _upload_values(floats)
 		_dispatch_1d(.Overlap_Add, _overlap_add_params(ints), {_data(inputs[0]), wt, o}, n)
 		_release_buf(wt.buf)
+	case .IndexSelectTime:
+		src := _gather_time_sources(ints)
+		_dispatch_1d(
+			.Gather_Time,
+			_p({u32(src.numel), u32(ints[2]), 0, 0, 0, 0, 0, 0}),
+			{_data(inputs[0]), src, o},
+			n,
+		)
+		_release_buf(src.buf)
 	case .MaxPool2d, .AvgPool2d:
 		_dispatch_1d(
 			.Pool,
@@ -238,6 +300,16 @@ _backward_p3 :: proc(node: ^t.Tensor, dy: Bind, n: int) -> bool {
 		pr.u[7] = u32(fresh)
 		_dispatch_1d(.Overlap_Add_Bwd, pr, {dy, wt, g}, t.tensor_numel(x))
 		_release_buf(wt.buf)
+		t._grad_written_on_device(x)
+	case .IndexSelectTime:
+		x := node.inputs[0]
+		if !x.requires_grad {return true}
+		m := node.int_metadata[:]
+		inv := _gather_time_inverse(m)
+		g, fresh := _out_grad(x)
+		u := [8]u32{u32(m[0] * m[1]), u32(m[2]), 0, 0, 0, 0, 0, u32(fresh)}
+		_dispatch_1d(.Gather_Time_Bwd, _p(u), {dy, inv, g}, t.tensor_numel(x))
+		_release_buf(inv.buf)
 		t._grad_written_on_device(x)
 	case .MaxPool2d, .AvgPool2d:
 		a := node.inputs[0]

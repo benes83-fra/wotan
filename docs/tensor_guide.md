@@ -236,6 +236,38 @@ concat dim0 [4, 3, 1, 1]
   - `tensor_permute_lob(x, batch, c, t, l, allocator)` turns `[B, C, T, L]` into `[B, T, C·L]` (used by DeepLOB).
 - `tensor_slice_gate(gates, e)` is `tensor_slice_cols(gates, e, 1)`.
 
+### Time steps of sequences
+
+These ops select, cut and pad the time steps of channels-last sequences `[batch, T, C]` (a signal `[batch, T]` counts as C = 1). They are all differentiable:
+
+- `tensor_index_select_time(x, indices, per_sequence = false)` gathers the steps `indices` (any order, repeats allowed) into `[batch, len(indices), C]`. An index of −1 gives a step of zeros. With `per_sequence = true`, `indices` holds one row of T_out indices per sequence. The gradient of a step is the sum over all the output steps that read it.
+- `tensor_slice_time(x, start, length)` keeps the steps `start ..< start + length`, like `torch.narrow`.
+- `tensor_pad_time(x, left, right, mode = .Zero)` adds `left` steps before and `right` after. The `Time_Pad` modes match `torch.nn.functional.pad`:
+  - `.Zero` adds zeros;
+  - `.Reflect` mirrors the sequence without repeating the edge step, so `left` and `right` must be below T;
+  - `.Replicate` repeats the edge step.
+- `tensor_length_regulate(x, durations, max_len = -1)` repeats every step by its duration (T durations per sequence, zero drops the step), like FastSpeech's length regulator or `torch.repeat_interleave` per sequence. The sequences are padded with zero steps to the longest one, or cut or padded to `max_len`. It also returns each sequence's length, ready for `sequence_mask`. `length_regulator_indices` returns the indices it uses.
+- To join sequences along time, use `tensor_concat({a, b}, 1)`.
+
+```odin
+// one sequence of 4 steps with 2 channels: step s is (s + 1, 10·(s + 1))
+x := from_values({1, 10, 2, 20, 3, 30, 4, 40}, 1, 8, true); x.shape = {1, 4, 2, 1}
+g := t.tensor_index_select_time(x, {3, 3, -1, 0})
+s := t.tensor_slice_time(x, 1, 2)
+p := t.tensor_pad_time(x, 2, 1, .Reflect)
+r, lengths := t.tensor_length_regulate(x, {2, 0, 1, 3})
+t.tensor_backward(t.tensor_sum(r))
+```
+```
+index_select [1, 4, 2, 1] [4, 40, 4, 40, 0, 0, 1, 10]
+slice [1, 2, 2, 1] [2, 20, 3, 30]
+pad reflect [1, 7, 2, 1] [3, 30, 2, 20, 1, 10, 2, 20, 3, 30, 4, 40, 3, 30]
+length_regulate [1, 6, 2, 1] [1, 10, 1, 10, 3, 30, 4, 40, 4, 40, 4, 40] lengths [6]
+d sum / dx [2, 2, 0, 0, 1, 1, 3, 3]
+```
+
+The gradient of each step is its duration, because every copy of it adds 1 to the sum.
+
 ## 6. Reductions and losses
 
 | Op | Output | Value |
@@ -751,6 +783,7 @@ The same network in PyTorch 2.1.0 (float64, the same initial weights, plain SGD)
 | Element-wise math | `tensor_exp`, `_log`, `_sqrt`, `_lgamma`, `_abs`, `_sin`, `_cos`, `_sign`, `_clamp`, `_norm_cdf` |
 | Activations | `tensor_relu`, `_leaky_relu`, `_sigmoid`, `_tanh`, `_softplus`, `_gelu`, `_gelu_tanh`, `_softmax` |
 | Products and shapes | `tensor_matmul`, `_transpose`, `_reshape`, `_as_matrix`, `_flatten`, `_concat`, `_slice_cols`, `_slice_gate`, `_permute_mha`, `_permute_mha_inverse`, `_permute_lob` |
+| Time steps | `tensor_index_select_time`, `_slice_time`, `_pad_time` (`Time_Pad`), `_length_regulate`; `length_regulator_indices` |
 | Reductions | `tensor_sum`, `_mean`, `_masked_sum`, `_masked_mean`, `_sum_dim1`, `_logsumexp_dim1`; `sequence_mask` |
 | Losses | `tensor_mse_loss`, `_l1_loss`, `_cross_entropy_loss`, `_bce_loss`, `_binary_cross_entropy`, `_kl_divergence`, `_entropy`, `_sharpe_loss`, `_prospect_utility` |
 | Behavioural finance | `tensor_prospect_value`, `_prob_weighting`, `_prospect_utility` |

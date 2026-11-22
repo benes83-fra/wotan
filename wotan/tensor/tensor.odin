@@ -92,6 +92,7 @@ Op :: enum {
 	L1Loss,
 	MaskedSum, // tensor_masked_sum and tensor_masked_mean
 	OverlapAdd, // tensor_overlap_add
+	IndexSelectTime, // tensor_index_select_time (and slice / pad / length regulation)
 }
 
 PoolParams :: struct {
@@ -4630,6 +4631,233 @@ tensor_overlap_add :: proc(
 		append(&out.f64_metadata, ..weights)
 	}
 	return out
+}
+
+// tensor_index_select_time: gathers time steps of channels-last sequences
+// x [batch, T, C] (a signal [batch, T] is C = 1) into [batch, T_out, C]:
+//   out[b, t, :] = x[b, indices[t], :]          (per_sequence = false)
+//   out[b, t, :] = x[b, indices[b·T_out + t], :] (per_sequence = true)
+// An index of -1 gives a zero step. Indices may repeat; the backward pass adds
+// the gradients of all the output steps that read a step.
+tensor_index_select_time :: proc(
+	x: ^Tensor,
+	indices: []int,
+	per_sequence := false,
+	loc := #caller_location,
+) -> ^Tensor {
+	B, T, C := x.shape[0], x.shape[1], x.shape[2] * x.shape[3]
+	fmt.assertf(
+		B >= 1 && T >= 1 && tensor_numel(x) == B * T * C,
+		"tensor_index_select_time: x must be [batch, T, C], got shape %v",
+		x.shape,
+		loc = loc,
+	)
+	rows := B if per_sequence else 1
+	fmt.assertf(
+		len(indices) >= rows && len(indices) % rows == 0,
+		"tensor_index_select_time: %d indices for %d sequences",
+		len(indices),
+		rows,
+		loc = loc,
+	)
+	T_out := len(indices) / rows
+	for i in indices {
+		fmt.assertf(
+			i >= -1 && i < T,
+			"tensor_index_select_time: index %d outside [-1, %d)",
+			i,
+			T,
+			loc = loc,
+		)
+	}
+	shape := [4]int{B, T_out, x.shape[2], x.shape[3]}
+	if _device_use(.IndexSelectTime, x) {
+		out := _device_new_op(1, B * T_out * C, shape, x.requires_grad, _op_alloc(x))
+		meta := _index_select_time_meta(B, T, C, T_out, per_sequence, indices)
+		_device_forward(.IndexSelectTime, out, {x}, meta)
+		if out.requires_grad {
+			out.op = .IndexSelectTime
+			append(&out.inputs, x)
+			append(&out.int_metadata, ..meta)
+		}
+		return out
+	}
+	_host_inputs(.IndexSelectTime, x)
+	out_data := l.matrix_new(f64, 1, B * T_out * C, _op_alloc(x))
+	for b in 0 ..< B {
+		idx := indices[b * T_out:][:T_out] if per_sequence else indices
+		for s, t in idx {
+			if s < 0 {continue}
+			copy(out_data.data[(b * T_out + t) * C:][:C], x.data.data[(b * T + s) * C:][:C])
+		}
+	}
+	out := _tensor_new_op(out_data, shape, x.requires_grad, _op_alloc(x))
+	if out.requires_grad {
+		out.op = .IndexSelectTime
+		append(&out.inputs, x)
+		append(&out.int_metadata, .._index_select_time_meta(B, T, C, T_out, per_sequence, indices))
+	}
+	return out
+}
+
+// [B, T, C, T_out, per_sequence] then the indices (temp allocator)
+@(private)
+_index_select_time_meta :: proc(B, T, C, T_out: int, per_sequence: bool, indices: []int) -> []int {
+	meta := make([]int, 5 + len(indices), context.temp_allocator)
+	copy(meta, []int{B, T, C, T_out, int(per_sequence)})
+	copy(meta[5:], indices)
+	return meta
+}
+
+// tensor_slice_time: the time steps start ..< start + length of sequences x
+// [batch, T, C] as [batch, length, C] (torch.narrow along time)
+tensor_slice_time :: proc(x: ^Tensor, start, length: int, loc := #caller_location) -> ^Tensor {
+	T := x.shape[1]
+	fmt.assertf(
+		start >= 0 && length >= 1 && start + length <= T,
+		"tensor_slice_time: steps %d ..< %d outside the %d steps",
+		start,
+		start + length,
+		T,
+		loc = loc,
+	)
+	idx := make([]int, length, context.temp_allocator)
+	for &v, i in idx {v = start + i}
+	return tensor_index_select_time(x, idx, loc = loc)
+}
+
+// Time_Pad: how tensor_pad_time fills the new steps (torch.nn.functional.pad
+// modes): zeros, the mirror image without the edge step (reflect: x[1], x[2], ...
+// before the start), or copies of the edge step (replicate)
+Time_Pad :: enum {
+	Zero,
+	Reflect,
+	Replicate,
+}
+
+// tensor_pad_time: sequences x [batch, T, C] with `left` steps added before and
+// `right` after, as [batch, left + T + right, C]. Reflect needs left and right
+// below T.
+tensor_pad_time :: proc(
+	x: ^Tensor,
+	left, right: int,
+	mode := Time_Pad.Zero,
+	loc := #caller_location,
+) -> ^Tensor {
+	T := x.shape[1]
+	fmt.assertf(
+		left >= 0 && right >= 0,
+		"tensor_pad_time: padding %d / %d must not be negative",
+		left,
+		right,
+		loc = loc,
+	)
+	fmt.assertf(
+		mode != .Reflect || (left < T && right < T),
+		"tensor_pad_time: reflect padding %d / %d must be below the %d steps",
+		left,
+		right,
+		T,
+		loc = loc,
+	)
+	idx := make([]int, left + T + right, context.temp_allocator)
+	for &v, i in idx {
+		s := i - left
+		switch {
+		case s >= 0 && s < T:
+			v = s
+		case mode == .Zero:
+			v = -1
+		case mode == .Replicate:
+			v = clamp(s, 0, T - 1)
+		case s < 0:
+			v = -s // reflect
+		case:
+			v = 2 * (T - 1) - s
+		}
+	}
+	return tensor_index_select_time(x, idx, loc = loc)
+}
+
+// length_regulator_indices: the per-sequence indices of a length regulator
+// (FastSpeech): step t of sequence b is repeated durations[b·T + t] times, as
+// torch.repeat_interleave(x[b], durations[b], dim = 0). durations holds T
+// values per sequence. The sequences are padded with -1 (zero steps) to the
+// longest one, or cut / padded to max_len when it is given. Returns the
+// indices for tensor_index_select_time(per_sequence = true), the output length
+// T_out and each sequence's length (at most T_out; see sequence_mask).
+length_regulator_indices :: proc(
+	durations: []int,
+	T: int,
+	max_len := -1,
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> (
+	indices: []int,
+	lengths: []int,
+	T_out: int,
+) {
+	fmt.assertf(
+		T >= 1 && len(durations) >= T && len(durations) % T == 0,
+		"length_regulator_indices: %d durations are not a multiple of T = %d",
+		len(durations),
+		T,
+		loc = loc,
+	)
+	B := len(durations) / T
+	lengths = make([]int, B, allocator)
+	for b in 0 ..< B {
+		for d in durations[b * T:][:T] {
+			fmt.assertf(d >= 0, "length_regulator_indices: negative duration %d", d, loc = loc)
+			lengths[b] += d
+		}
+		T_out = max(T_out, lengths[b])
+	}
+	if max_len >= 0 {T_out = max_len}
+	T_out = max(T_out, 1) // at least one (zero) step
+	indices = make([]int, B * T_out, allocator)
+	for b in 0 ..< B {
+		row := indices[b * T_out:][:T_out]
+		pos := 0
+		for d, s in durations[b * T:][:T] {
+			for _ in 0 ..< d {
+				if pos < T_out {row[pos] = s}
+				pos += 1
+			}
+		}
+		for i in min(pos, T_out) ..< T_out {row[i] = -1}
+		lengths[b] = min(lengths[b], T_out)
+	}
+	return
+}
+
+// tensor_length_regulate: x [batch, T, C] with every step repeated by its
+// duration (durations: T values per sequence), padded with zero steps to the
+// longest sequence or cut / padded to max_len: [batch, T_out, C], and the
+// length of each sequence (allocated with `allocator`).
+tensor_length_regulate :: proc(
+	x: ^Tensor,
+	durations: []int,
+	max_len := -1,
+	allocator := context.allocator,
+	loc := #caller_location,
+) -> (
+	out: ^Tensor,
+	lengths: []int,
+) {
+	fmt.assertf(
+		len(durations) == x.shape[0] * x.shape[1],
+		"tensor_length_regulate: %d durations for %d sequences of %d steps",
+		len(durations),
+		x.shape[0],
+		x.shape[1],
+		loc = loc,
+	)
+	indices: []int
+	indices, lengths, _ = length_regulator_indices(durations, x.shape[1], max_len, allocator, loc)
+	out = tensor_index_select_time(x, indices, per_sequence = true, loc = loc)
+	delete(indices, allocator)
+	return
 }
 
 // tensor_transpose: the transpose [cols, rows] of a matrix a [rows, cols]

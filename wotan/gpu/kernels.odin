@@ -80,6 +80,8 @@ Kernel :: enum {
 	Conv1d_Grouped_Dw, // its weight gradient (one workgroup per weight)
 	Overlap_Add, // weighted overlap-add of frames into signals (tensor_overlap_add)
 	Overlap_Add_Bwd, // its frame gradient
+	Gather_Time, // time steps of sequences gathered by index (tensor_index_select_time)
+	Gather_Time_Bwd, // its gradient, summed per source step over the steps that read it
 	Chan_Bias, // dst[i] += b[(i / L) % C]
 	Chan_Sum, // per channel: db[c] += Σ_{n, l} dy[n, c, l]
 	Pool, // max / average pooling
@@ -1986,6 +1988,43 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 		acc = acc + wt[n] * fr[(b * F + f) * N + n];
 	}
 	y[i] = acc * wt[N + t];
+}
+`,
+	// y[r, c] = x[src[r], c] (0 where src[r] = -1): src holds the global source
+	// row (b·T + s) of every output row. u0 output rows, u1 C.
+	.Gather_Time        = `
+@group(0) @binding(1) var<storage, read> x: array<f32>;
+@group(0) @binding(2) var<storage, read> src: array<f32>;
+@group(0) @binding(3) var<storage, read_write> y: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
+	let i = idx1(g, nw);
+	if (i >= p.u0 * p.u1) { return; }
+	let s = i32(src[i / p.u1]);
+	var v = 0.0;
+	if (s >= 0) { v = x[u32(s) * p.u1 + i % p.u1]; }
+	y[i] = v;
+}
+`,
+	// dx[r, c] = Σ dy[o, c] over the output rows o that read source row r: inv
+	// holds offsets[u0 + 1] (per source row) then the output rows, grouped by
+	// source row. u0 source rows, u1 C, u7 1: overwrite (keep). One thread per
+	// element of x, a fixed summation order.
+	.Gather_Time_Bwd    = `
+@group(0) @binding(1) var<storage, read> dy: array<f32>;
+@group(0) @binding(2) var<storage, read> inv: array<f32>;
+@group(0) @binding(3) var<storage, read_write> dx: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
+	let i = idx1(g, nw);
+	if (i >= p.u0 * p.u1) { return; }
+	let r = i / p.u1;
+	let c = i % p.u1;
+	let a = u32(inv[r]);
+	let e = u32(inv[r + 1u]);
+	var acc = 0.0;
+	for (var k = a; k < e; k++) { acc = acc + dy[u32(inv[p.u0 + 1u + k]) * p.u1 + c]; }
+	dx[i] = keep(dx[i], p.u7) + acc;
 }
 `,
 	// its frame gradient: one thread per frame element; u7 1: overwrite (keep)

@@ -924,6 +924,41 @@ op_cases := [?]Op_Case {
 		},
 	},
 	{
+		name = "index_select_time, repeated and reordered steps",
+		op = .IndexSelectTime,
+		shapes = {{3, 6, 5, 1}},
+		tol = 1e-6,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			return t.tensor_index_select_time(x[0], []int{5, 0, 0, -1, 3, 2, 2, 2})
+		},
+	},
+	{
+		name = "slice_time, steps 2 ..< 9",
+		op = .IndexSelectTime,
+		shapes = {{2, 12, 4, 1}},
+		tol = 1e-6,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_slice_time(x[0], 2, 7)},
+	},
+	{
+		name = "pad_time reflect 3 / 5 (a signal [batch, T])",
+		op = .IndexSelectTime,
+		shapes = {{2, 40, 1, 1}},
+		tol = 1e-6,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_pad_time(x[0], 3, 5, .Reflect)},
+	},
+	{
+		name = "length regulator, 4 sequences of 50 steps, durations 0-6",
+		op = .IndexSelectTime,
+		shapes = {{4, 50, 32, 1}},
+		tol = 1e-6,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			dur := make([]int, 4 * 50, context.temp_allocator)
+			for &d, i in dur {d = (i * 5 + i / 50 * 3) % 7}
+			y, _ := t.tensor_length_regulate(x[0], dur, allocator = context.temp_allocator)
+			return y
+		},
+	},
+	{
 		name = "overlap-add centred, Hann, n_fft 16, hop 4 (iSTFT)",
 		op = .OverlapAdd,
 		shapes = {{2, 9, 16, 1}},
