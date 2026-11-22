@@ -59,6 +59,7 @@ Attn :: struct {
 	scale:                 f32,
 	mask:                  Bind, // dummy when mask_len == 0
 	mask_len:              int,
+	key_rows:              int, // > 0: a key mask, one row of sk values per key_rows score rows
 	causal:                bool,
 	// > 0: Q, K, V and the output are [B, S, heads·d] and batch is B·heads
 	// (MultiHeadAttention); 0: contiguous [batch, S, d] blocks
@@ -106,7 +107,16 @@ _attn_probs :: proc(a: Attn, q, k: Bind) -> (P: Bind) {
 		heads = _hl(a, true, true, false),
 	)
 	P = {_acquire(n), n}
-	u := [8]u32{u32(a.batch * a.sq), u32(a.sk), 0, u32(a.mask_len), u32(a.causal), u32(a.sq), 0, 0}
+	u := [8]u32 {
+		u32(a.batch * a.sq),
+		u32(a.sk),
+		0,
+		u32(a.mask_len),
+		u32(a.causal),
+		u32(a.sq),
+		u32(a.key_rows),
+		0,
+	}
 	_dispatch_rows(
 		.Softmax_Rows,
 		_p(u, {a.scale, 0, 0, 0, 0, 0, 0, 0}),
@@ -131,12 +141,17 @@ _attention_setup :: proc(
 	a.mask = _dummy()
 	#partial switch op {
 	case .MaskedScaledDotProductAttention:
+		// key layout and causal flag: [key_rep, causal] (forward: ints[1:3],
+		// backward: the node's int_metadata; absent for a full mask)
 		if mask := node.f64_metadata[:]; len(ints) > 0 && ints[0] > 0 {
 			// forward: the mask was uploaded into the output's aux buffer
 			a.mask, a.mask_len = _bind(node.device.aux_buf, ints[0]), ints[0]
+			if len(ints) > 2 {a.key_rows, a.causal = ints[2] * a.sq, ints[1] == 1}
 		} else if len(mask) > 0 {
 			a.mask, temp_mask = _aux(node, mask)
 			a.mask_len = len(mask)
+			if m := node.int_metadata[:];
+			   len(m) >= 2 {a.key_rows, a.causal = m[0] * a.sq, m[1] == 1}
 		}
 	case .FlashAttention:
 		if len(ints) > 1 {
@@ -151,7 +166,8 @@ _attention_setup :: proc(
 
 // _mha_setup: the attention of a MultiHeadAttention node. m is its int_metadata
 // [batch, seq_q, seq_k, heads, head_dim, kind, causal] (kind 1: masked, 2:
-// flash); mask_len > 0 in the forward, whose mask is in the aux buffer.
+// flash, 3: key padding); mask_len > 0 in the forward, whose mask is in the aux
+// buffer.
 @(private)
 _mha_setup :: proc(node: ^t.Tensor, m: []int, mask_len: int) -> (a: Attn, temp_mask: bool) {
 	B, H, hd := m[0], m[3], m[4]
@@ -167,7 +183,7 @@ _mha_setup :: proc(node: ^t.Tensor, m: []int, mask_len: int) -> (a: Attn, temp_m
 	if a.batch >
 	   65535 {panic(fmt.tprintf("gpu attention: %d sequences x heads exceed the device's 65535 batch limit", a.batch))}
 	a.mask = _dummy()
-	if m[5] == 1 {
+	if m[5] == 1 || m[5] == 3 {
 		if mask_len > 0 {
 			a.mask, a.mask_len = _bind(node.device.aux_buf, mask_len), mask_len
 		} else {
@@ -175,7 +191,10 @@ _mha_setup :: proc(node: ^t.Tensor, m: []int, mask_len: int) -> (a: Attn, temp_m
 			a.mask_len = len(node.f64_metadata)
 		}
 	}
-	a.causal = m[5] == 2 && m[6] == 1
+	// kind 3: a key padding mask [batch, seq_k]: row r of the scores belongs to
+	// sequence r / (heads·seq_q); it may be causal as well
+	if m[5] == 3 {a.key_rows = H * a.sq}
+	a.causal = (m[5] == 2 || m[5] == 3) && m[6] == 1
 	return
 }
 

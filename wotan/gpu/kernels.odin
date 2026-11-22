@@ -1268,7 +1268,9 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 	// Rows of width C; u0 rows, u1 C, u2 mode (0 softmax into y[r, j], 1 logsumexp
 	// into y[r], 2 cross-entropy loss lse - x[r, target] into y[r] with the targets
 	// in aux, 3 log-softmax x - lse into y[r, j]), f0 scale applied to x first, u3 mask length (0: none; the additive
-	// mask aux[(r·C + j) % u3]), u4 causal (1: entries j > r % u5 masked out), u5 seq_q
+	// mask aux[(r·C + j) % u3]; with u6 > 0 a key mask:
+	// aux[(r / u6)·C + j], one row of C values per u6 rows), u4 causal (1: entries
+	// j > r % u5 masked out), u5 seq_q
 	.Softmax_Rows       = `
 @group(0) @binding(1) var<storage, read> x: array<f32>;
 @group(0) @binding(2) var<storage, read> aux: array<f32>;
@@ -1300,7 +1302,9 @@ fn wg_sum(v: f32, lid: u32) -> f32 {
 fn logit(r: u32, j: u32) -> f32 {
 	let C = p.u1;
 	var v = x[r * C + j] * p.f0;
-	if (p.u3 > 0u) { v = v + aux[(r * C + j) % p.u3]; }
+	if (p.u3 > 0u) {
+		if (p.u6 > 0u) { v = v + aux[(r / p.u6) * C + j]; } else { v = v + aux[(r * C + j) % p.u3]; }
+	}
 	return v;
 }
 fn masked(r: u32, j: u32) -> bool {

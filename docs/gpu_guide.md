@@ -320,7 +320,7 @@ automatic uploads 600 (token and position ids), CPU fallbacks 0
 The token ids are host tensors, made fresh every step; they are uploaded automatically, together with the position ids GPT builds in its forward pass. Everything else ran on the GPU.
 
 How the transformer ops behave on the GPU:
-- **Attention:** plain, masked and flash attention compute the same attention as on the CPU. The scores, the masked softmax and the weighted sum are batched over all sequences and heads. Flash attention's causal mask is applied inside the softmax kernel. The `nn` attention layers call `tensor_multi_head_attention`, which records one node on the GPU: its matrix products read the heads straight out of the projected `[batch, seq, heads·head_dim]` tensors and write the result back in that layout, so no permute runs in either pass.
+- **Attention:** plain, masked and flash attention compute the same attention as on the CPU. The scores, the masked softmax and the weighted sum are batched over all sequences and heads. Flash attention's causal mask, and the causal mask and padding of `key_padding`, are applied inside the softmax kernel. The `nn` attention layers call `tensor_multi_head_attention`, which records one node on the GPU: its matrix products read the heads straight out of the projected `[batch, seq, heads·head_dim]` tensors and write the result back in that layout, so no permute runs in either pass.
 - **Dropout:** masks are drawn on the CPU from `core:math/rand`, exactly as the CPU op draws them, and uploaded. With the same seed, a GPU run uses the same masks as a CPU run.
 - **Embeddings:** token ids that are still on the host are checked against the vocabulary size, as on the CPU. Ids that only exist on the device are not checked; an id outside the vocabulary gives a zero row and no gradient.
 - **KV cache:** for a model on the GPU, `gpt_model_forward_cached` keeps every block's keys and values in device tensors of `max_seq_len` positions. Each call writes the new keys and values in place, and attention reads the whole cache with the positions not written yet masked out (their weights are exactly zero), so the only transfer per call is reading the logits. Per generated token (greedy, logits read every token), a GPT with `d_model` 256 and 4 blocks takes 1.4 ms on the GPU against 3.8 ms on the CPU; a small model (`d_model` 64, 2 blocks) is faster on the CPU (0.07 ms against 0.44 ms), because each token costs about one launch per op and a wait for the logits.
@@ -566,18 +566,18 @@ Results on the RTX 3060 Laptop GPU (6 GB) and its host (Ryzen 7 6800H, 31 GB). A
 
 | Step | Batch | CPU: time, peak memory | GPU: time, pool | GPU launches |
 |---|---|---|---|---|
-| FastSpeech 2, 10 s | 4 | 6.1 s, 5.1 GB | 0.75 s, 2.8 GB | 787 |
-| FastSpeech 2, 10 s | 8 | 10.9 s, 9.0 GB | 1.51 s, 4.6 GB | 787 |
+| FastSpeech 2, 10 s | 4 | 5.9 s, 4.4 GB | 0.46 s, 2.6 GB | 787 |
+| FastSpeech 2, 10 s | 8 | 11.0 s, 7.7 GB | 0.92 s, 4.2 GB | 787 |
 | Vocos generator, 10 s | 4 | 4.3 s, 5.1 GB | 0.19 s, 2.7 GB | 262 |
 | Vocos generator, 10 s | 8 | 8.0 s, 9.7 GB | 0.38 s, 5.1 GB | 262 |
 | Vocos GAN step, 1 s | 4 | 16.8 s, 5.7 GB | 0.74 s, 4.2 GB | 2950 |
 | Vocos GAN step, 1 s | 8 | 31.1 s, 9.7 GB | out of memory | |
 
-Memory grows linearly with the batch. At batch 16 none of the three steps fits in 6 GB of GPU memory: they would need about 8.5 GB (FastSpeech 2), 10 GB (Vocos) and 7 GB already at batch 8 (GAN). On the CPU, batch 16 needs about 17 to 19 GB.
+Memory grows linearly with the batch. At batch 16 none of the three steps fits in 6 GB of GPU memory: they would need about 7.6 GB (FastSpeech 2), 10 GB (Vocos) and 7 GB already at batch 8 (GAN). On the CPU, batch 16 needs about 14 GB (FastSpeech 2) to 19 GB (Vocos).
 
 Why audio graphs need this much:
 - **The pool keeps every size it has used.** Its buffers come in powers of two and go back to the pool instead of being freed, so `pool_bytes` is the peak of each size bucket added together. A tensor of 92 MB occupies a 128 MB buffer.
-- **Masked attention stores full score matrices.** With a padding mask, attention cannot use FlashAttention. It keeps `[batch·heads, S, S]` scores and builds a full additive mask of that size on the host for every layer and step, although the mask depends only on the sequence and the key. For FastSpeech 2 at batch 4, dropping the masks shortens the GPU step from 0.73 to 0.45 s and saves 0.54 GB of host and 0.21 GB of GPU memory.
+- **Masked attention computes full score matrices.** With a padding mask, attention cannot use FlashAttention, so each layer computes `[batch·heads, S, S]` scores, in the forward pass and again in the backward pass. The padding mask itself is only `S` values per sequence (`key_padding`).
 - **GPU training keeps host copies.** The host keeps f64 copies of the parameters, their gradients and Adam's two moments, 32 bytes per parameter: 1.8 GB for the 55 M parameters of the GAN step.
 
 ## 10. Precision

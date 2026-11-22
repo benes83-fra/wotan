@@ -534,12 +534,14 @@ causal row 1 flash: 0.330238 0.669762  masked: 0.330238 0.669762
 
 These are the values of `torch.nn.functional.scaled_dot_product_attention`, with and without `is_causal`.
 
-**Several heads.** `tensor_multi_head_attention(q, k, v, batch, seq_q, seq_k, num_heads, head_dim, mask = nil, flash = false, causal = false)` is the attention step of multi-head attention. It takes the projected queries `[batch, seq_q, num_heads·head_dim]` and the projected keys and values `[batch, seq_k, num_heads·head_dim]`, where head h is the columns h·head_dim up to (h+1)·head_dim. Each head attends on its own, and the result `[batch, seq_q, num_heads·head_dim]` puts the heads side by side again. It stands for three steps:
+**Several heads.** `tensor_multi_head_attention(q, k, v, batch, seq_q, seq_k, num_heads, head_dim, mask = nil, flash = false, causal = false, key_padding = nil)` is the attention step of multi-head attention. It takes the projected queries `[batch, seq_q, num_heads·head_dim]` and the projected keys and values `[batch, seq_k, num_heads·head_dim]`, where head h is the columns h·head_dim up to (h+1)·head_dim. Each head attends on its own, and the result `[batch, seq_q, num_heads·head_dim]` puts the heads side by side again. It stands for three steps:
 1. `tensor_permute_mha` on q, k and v;
-2. the attention op: masked attention when a mask is given (`[seq_q·seq_k]` shared, or `[batch·num_heads·seq_q·seq_k]`), flash attention when `flash` is set (optionally `causal`), plain attention otherwise;
+2. the attention op: masked attention when a mask is given (`[seq_q·seq_k]` shared, or `[batch·num_heads·seq_q·seq_k]`) or `key_padding`, flash attention when `flash` is set (optionally `causal`), plain attention otherwise;
 3. `tensor_permute_mha_inverse`.
 
-On the CPU it records exactly these ops. On the GPU it records a single node whose kernels read and write the `[batch, seq, num_heads·head_dim]` layout directly, which saves the permutes. `causal` needs `flash = true`; with the standard kernel, pass the causal mask as `mask`. The `nn` attention layers use this op.
+On the CPU it records exactly these ops. On the GPU it records a single node whose kernels read and write the `[batch, seq, num_heads·head_dim]` layout directly, which saves the permutes. `causal` needs `flash = true` or `key_padding`; otherwise pass the causal mask as `mask`.
+
+`key_padding` (`[batch, seq_k]`, 1 at real keys and 0 at padding) hides the padded keys from every query and head, like PyTorch's `key_padding_mask`. It is kept as `seq_k` values per sequence, not as a full `[batch·num_heads, seq_q, seq_k]` mask, and it can be combined with `causal`. It cannot be combined with `mask` (put the padding into the mask instead) or with `flash`. The `nn` attention layers use this op and pass their padding mask as `key_padding`.
 
 ```odin
 // one sequence of 2 positions, 2 heads of width 2: [1, 2, 2·2]

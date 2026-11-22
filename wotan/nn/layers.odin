@@ -659,6 +659,21 @@ _attend :: proc(
 			flash = use_flash,
 			causal = causal,
 		)
+	} else if mask == nil && key_padding != nil {
+		// padding only (perhaps causal): the standard kernel with the key mask
+		// [batch, seq_k], not a full mask (FlashAttention takes no masks)
+		att = t.tensor_multi_head_attention(
+			q,
+			k,
+			v,
+			batch,
+			seq_q,
+			seq_k,
+			num_heads,
+			head_dim,
+			causal = causal,
+			key_padding = t.tensor_values(key_padding),
+		)
 	} else {
 		// FlashAttention takes no explicit masks: those use the standard kernel.
 		// With padding the mask is per sequence [batch * num_heads, seq_q, seq_k].

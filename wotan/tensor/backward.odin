@@ -336,7 +336,7 @@ _backward_node_cpu :: proc(node: ^Tensor, allocator: mem.Allocator) {
 		}
 	case .MaskedScaledDotProductAttention:
 		// The forward stores the exact additive mask in f64_metadata
-		_attention_backward(node, node.f64_metadata[:], allocator)
+		_attention_backward(node, _node_attn_mask(node), allocator)
 	case .Relu:
 		a_in := node.inputs[0]
 		if a_in.requires_grad {
@@ -751,7 +751,7 @@ _backward_node_cpu :: proc(node: ^Tensor, allocator: mem.Allocator) {
 	case .SSM:
 		_ssm_backward(node, allocator)
 	case .ScaledDotProductAttention:
-		_attention_backward(node, nil, allocator)
+		_attention_backward(node, {}, allocator)
 	case .MSELoss:
 		// L = mean((pred - target)^2)
 		// dL/dpred = 2 * (pred - target) / N
@@ -1777,9 +1777,14 @@ _multi_head_attention_backward :: proc(node: ^Tensor, allocator: mem.Allocator) 
 	inner.inputs = make([dynamic]^Tensor, 0, 3, allocator)
 	append(&inner.inputs, &parts[0], &parts[1], &parts[2])
 	switch kind {
-	case 1:
+	case 1, 3:
 		inner.op = .MaskedScaledDotProductAttention
 		inner.f64_metadata = node.f64_metadata // the mask, shared (not freed here)
+		if kind == 3 {
+			// a key mask, one row per input sequence (heads blocks each)
+			inner.int_metadata = make([dynamic]int, 0, 2, allocator)
+			append(&inner.int_metadata, H, causal)
+		}
 	case 2:
 		inner.op = .FlashAttention
 		inner.int_metadata = make([dynamic]int, 0, 1, allocator)
@@ -1800,12 +1805,12 @@ _multi_head_attention_backward :: proc(node: ^Tensor, allocator: mem.Allocator) 
 	delete(inner.data.data, allocator)
 	delete(inner.grad.data, allocator)
 	delete(inner.inputs)
-	if kind == 2 {delete(inner.int_metadata)}
+	if kind == 2 || kind == 3 {delete(inner.int_metadata)}
 }
 
 // _attention_backward handles both plain and masked scaled dot-product attention.
 // mask is an additive [seq_q, seq_k] mask (nil for none), identical to the forward.
-_attention_backward :: proc(node: ^Tensor, mask: []f64, allocator: mem.Allocator) {
+_attention_backward :: proc(node: ^Tensor, mask: Attn_Mask, allocator: mem.Allocator) {
 	Q_in := node.inputs[0]
 	K_in := node.inputs[1]
 	V_in := node.inputs[2]
@@ -1836,7 +1841,8 @@ _attention_backward :: proc(node: ^Tensor, mask: []f64, allocator: mem.Allocator
 
 @(private = "file")
 _Attention_Bwd_Job :: struct {
-	Q, K, V, dO, mask:      []f64,
+	Q, K, V, dO:            []f64,
+	mask:                   Attn_Mask,
 	dQ, dK, dV:             []f64, // nil: no gradient wanted
 	seq_q, seq_k, d_k, d_v: int,
 }
@@ -1866,11 +1872,8 @@ _attention_backward_seqs :: proc(data: rawptr, b0, b1: int) {
 		P := _mat(seq_q, seq_k, p_buf)
 		mem.zero_slice(p_buf)
 		l.matmul_nt_acc_simd(&q_b, &k_b, &P)
-		mb := _mask_block(mask, b, seq_q * seq_k)
-		for i in 0 ..< seq_q * seq_k {
-			p_buf[i] *= scale
-			if mb != nil {p_buf[i] += mb[i]}
-		}
+		for i in 0 ..< seq_q * seq_k {p_buf[i] *= scale}
+		_mask_add(mask, b, seq_q, seq_k, p_buf)
 		for i in 0 ..< seq_q {
 			row := p_buf[i * seq_k:(i + 1) * seq_k]
 			max_val := row[0]

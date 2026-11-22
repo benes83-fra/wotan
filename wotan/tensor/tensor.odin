@@ -2245,7 +2245,7 @@ tensor_scaled_dot_product_attention :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
 	if _device_use(.ScaledDotProductAttention, Q, K, V) {
-		return _device_attention(.ScaledDotProductAttention, Q, K, V, nil, false)
+		return _device_attention(.ScaledDotProductAttention, Q, K, V, {}, false)
 	}
 	_host_inputs(.ScaledDotProductAttention, Q, K, V)
 	allocator := _scope_or(allocator) // the active graph scope, if any
@@ -2264,7 +2264,7 @@ tensor_scaled_dot_product_attention :: proc(
 		K.data.data,
 		V.data.data,
 		out_data.data,
-		nil,
+		{},
 		batch,
 		seq_q,
 		seq_k,
@@ -2419,6 +2419,9 @@ tensor_permute_mha_inverse :: proc(
 // side again. It is tensor_permute_mha on q, k and v, then
 // - tensor_masked_scaled_dot_product_attention when a mask is given (additive,
 //   [seq_q, seq_k] for all sequences and heads or [batch·num_heads, seq_q, seq_k]),
+//   or key_padding [batch, seq_k] (1: attend, 0: hidden from every query and
+//   head; kept as seq_k values per sequence, not as a full mask; it can be
+//   combined with causal),
 // - tensor_flash_attention when flash is set (causal hides the keys after each
 //   query; for the standard kernel pass the causal mask as `mask`),
 // - tensor_scaled_dot_product_attention otherwise,
@@ -2432,6 +2435,7 @@ tensor_multi_head_attention :: proc(
 	mask: []f64 = nil,
 	flash := false,
 	causal := false,
+	key_padding: []f64 = nil,
 ) -> ^Tensor {
 	d := num_heads * head_dim
 	for x, i in ([3]^Tensor{q, k, v}) {
@@ -2446,11 +2450,31 @@ tensor_multi_head_attention :: proc(
 			d,
 		)
 	}
-	assert(mask == nil || !flash, "tensor_multi_head_attention: flash attention takes no mask")
 	assert(
-		!causal || flash,
-		"tensor_multi_head_attention: causal needs flash = true (pass the causal mask as `mask` for the standard kernel)",
+		(mask == nil && key_padding == nil) || !flash,
+		"tensor_multi_head_attention: flash attention takes no mask",
 	)
+	assert(
+		mask == nil || key_padding == nil,
+		"tensor_multi_head_attention: give mask or key_padding, not both (fold the padding into the mask)",
+	)
+	assert(
+		!causal || flash || key_padding != nil,
+		"tensor_multi_head_attention: causal needs flash = true or key_padding (pass the causal mask as `mask` for the standard kernel)",
+	)
+	fmt.assertf(
+		key_padding == nil || len(key_padding) == batch * seq_k,
+		"tensor_multi_head_attention: key_padding has %d values, expected %d x %d",
+		len(key_padding),
+		batch,
+		seq_k,
+	)
+	// the key padding as an additive key mask [batch, seq_k]
+	key_mask: []f64
+	if key_padding != nil {
+		key_mask = make([]f64, len(key_padding), context.temp_allocator)
+		for v, i in key_padding {key_mask[i] = 0 if v != 0 else ATTN_MASKED}
+	}
 	if mask != nil {
 		n := seq_q * seq_k
 		fmt.assertf(
@@ -2470,6 +2494,7 @@ tensor_multi_head_attention :: proc(
 			mask,
 			flash,
 			causal,
+			key_mask,
 		)
 	}
 	qh := tensor_permute_mha(q, batch, seq_q, num_heads, head_dim)
@@ -2477,6 +2502,13 @@ tensor_multi_head_attention :: proc(
 	vh := tensor_permute_mha(v, batch, seq_k, num_heads, head_dim)
 	att: ^Tensor
 	switch {
+	case key_mask != nil:
+		att = _masked_attention(
+			qh,
+			kh,
+			vh,
+			{values = key_mask, key_rep = num_heads, causal = causal},
+		)
 	case mask != nil:
 		att = tensor_masked_scaled_dot_product_attention(qh, kh, vh, mask)
 	case flash:
@@ -2636,14 +2668,19 @@ tensor_layer_norm :: proc(
 // _Attention_Job: the sequences of an attention forward pass on the CPU
 @(private = "file")
 _Attention_Job :: struct {
-	Q, K, V, out, mask:     []f64,
+	Q, K, V, out:           []f64,
+	mask:                   Attn_Mask,
 	seq_q, seq_k, d_k, d_v: int,
 }
 
 // _attention_forward_cpu: out [batch, seq_q, d_v] = softmax(Q Kᵀ / √d_k + mask) V
 // for every sequence b (out zeroed). The sequences are split across threads;
 // each writes its own slice of out and uses its own score buffer.
-_attention_forward_cpu :: proc(Q, K, V, out, mask: []f64, batch, seq_q, seq_k, d_k, d_v: int) {
+_attention_forward_cpu :: proc(
+	Q, K, V, out: []f64,
+	mask: Attn_Mask,
+	batch, seq_q, seq_k, d_k, d_v: int,
+) {
 	job := _Attention_Job{Q, K, V, out, mask, seq_q, seq_k, d_k, d_v}
 	util.parallel_for(
 		batch,
@@ -2684,9 +2721,7 @@ _attention_forward_cpu :: proc(Q, K, V, out, mask: []f64, batch, seq_q, seq_k, d
 				// 2. Scale and apply the additive mask (shared or per sequence;
 				// a nil mask attends everywhere, as in the backward pass)
 				for i in 0 ..< seq_q * seq_k {s_buf[i] *= scale}
-				if mb := _mask_block(j.mask, b, seq_q * seq_k); mb != nil {
-					for i in 0 ..< seq_q * seq_k {s_buf[i] += mb[i]}
-				}
+				_mask_add(j.mask, b, seq_q, seq_k, s_buf)
 
 				// 3. Numerically stable softmax along seq_k
 				for i in 0 ..< seq_q {
@@ -2747,6 +2782,50 @@ _mask_block :: proc(mask: []f64, b, n: int) -> []f64 {
 	return mask[b * n:(b + 1) * n]
 }
 
+// Additive score of a hidden key: its weight underflows to exactly 0
+ATTN_MASKED :: -1e9
+
+// Attn_Mask: the additive mask of masked attention. values is a full mask,
+// shared [seq_q, seq_k] or per sequence [batch, seq_q, seq_k], or with
+// key_rep > 0 a key mask: one row of seq_k values for every key_rep sequences
+// (multi-head attention: key_rep = heads, one row per input sequence), added to
+// every query. causal also hides the keys after each query (ATTN_MASKED).
+Attn_Mask :: struct {
+	values:  []f64,
+	key_rep: int,
+	causal:  bool,
+}
+
+// _mask_add adds the mask of sequence b to its scaled scores s [seq_q, seq_k]
+_mask_add :: proc(m: Attn_Mask, b, seq_q, seq_k: int, s: []f64) {
+	if m.key_rep > 0 {
+		km := m.values[(b / m.key_rep) * seq_k:][:seq_k]
+		for i in 0 ..< seq_q {
+			row := s[i * seq_k:][:seq_k]
+			for &v, j in row {v += km[j]}
+		}
+	} else if mb := _mask_block(m.values, b, seq_q * seq_k); mb != nil {
+		for i in 0 ..< seq_q * seq_k {s[i] += mb[i]}
+	}
+	if m.causal {
+		for i in 0 ..< seq_q {
+			for j in i + 1 ..< seq_k {s[i * seq_k + j] += ATTN_MASKED}
+		}
+	}
+}
+
+// _node_attn_mask: the mask a MaskedScaledDotProductAttention node recorded
+// (f64_metadata: the values; int_metadata [key_rep, causal] unless full)
+_node_attn_mask :: proc(node: ^Tensor) -> Attn_Mask {
+	m := Attn_Mask {
+		values = node.f64_metadata[:],
+	}
+	if len(node.int_metadata) >= 2 {
+		m.key_rep, m.causal = node.int_metadata[0], node.int_metadata[1] != 0
+	}
+	return m
+}
+
 tensor_masked_scaled_dot_product_attention :: proc(
 	Q: ^Tensor,
 	K: ^Tensor,
@@ -2754,11 +2833,15 @@ tensor_masked_scaled_dot_product_attention :: proc(
 	mask: []f64,
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
+	return _masked_attention(Q, K, V, {values = mask})
+}
+
+// _masked_attention: masked scaled dot-product attention with any Attn_Mask
+_masked_attention :: proc(Q, K, V: ^Tensor, mask: Attn_Mask) -> ^Tensor {
 	if _device_use(.MaskedScaledDotProductAttention, Q, K, V) {
 		return _device_attention(.MaskedScaledDotProductAttention, Q, K, V, mask, false)
 	}
 	_host_inputs(.MaskedScaledDotProductAttention, Q, K, V)
-	allocator := _scope_or(allocator) // the active graph scope, if any
 	_check_shape(Q)
 	_check_shape(K)
 	_check_shape(V)
@@ -2795,7 +2878,10 @@ tensor_masked_scaled_dot_product_attention :: proc(
 		append(&out.inputs, K)
 		append(&out.inputs, V)
 		// Store the exact additive mask for the backward pass
-		append(&out.f64_metadata, ..mask)
+		append(&out.f64_metadata, ..mask.values)
+		if mask.key_rep > 0 || mask.causal {
+			append(&out.int_metadata, mask.key_rep, int(mask.causal))
+		}
 	}
 
 	return out
@@ -4064,7 +4150,7 @@ tensor_flash_attention :: proc(
 	allocator: mem.Allocator = context.allocator,
 ) -> ^Tensor {
 	if _device_use(.FlashAttention, Q, K, V) {
-		return _device_attention(.FlashAttention, Q, K, V, nil, causal)
+		return _device_attention(.FlashAttention, Q, K, V, {}, causal)
 	}
 	_host_inputs(.FlashAttention, Q, K, V)
 	allocator := _scope_or(allocator) // the active graph scope, if any

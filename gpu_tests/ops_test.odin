@@ -750,6 +750,41 @@ op_cases := [?]Op_Case {
 		},
 	},
 	{
+		// q [2, 5, 2·4], k and v [2, 6, 2·4]; sequence 0 has 6 keys, sequence 1 has 4
+		name = "multi-head attention (key padding)",
+		op = .MultiHeadAttention,
+		shapes = {{2, 5, 8, 1}, {2, 6, 8, 1}, {2, 6, 8, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			kp := []f64{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0}
+			return t.tensor_multi_head_attention(x[0], x[1], x[2], 2, 5, 6, 2, 4, key_padding = kp)
+		},
+	},
+	{
+		// 3 sequences of 40 steps, 2 heads of width 16; 40, 31 and 17 valid steps
+		name = "multi-head attention (key padding + causal, 3 x 40 steps)",
+		op = .MultiHeadAttention,
+		shapes = {{3, 40, 32, 1}, {3, 40, 32, 1}, {3, 40, 32, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			kp := make([]f64, 3 * 40, context.temp_allocator)
+			valid := [3]int{40, 31, 17}
+			for b in 0 ..< 3 {for j in 0 ..< valid[b] {kp[b * 40 + j] = 1}}
+			return t.tensor_multi_head_attention(
+				x[0],
+				x[1],
+				x[2],
+				3,
+				40,
+				40,
+				2,
+				16,
+				causal = true,
+				key_padding = kp,
+			)
+		},
+	},
+	{
 		// 3 heads of width 2, flattened inputs
 		name = "multi-head attention (flash, causal)",
 		op = .MultiHeadAttention,

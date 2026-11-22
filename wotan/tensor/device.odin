@@ -717,7 +717,13 @@ _device_add_bias :: proc(a, bias: ^Tensor) -> ^Tensor {
 // _device_attention: device version of the three attention ops (plain, with an
 // additive mask, flash with an optional causal mask), recording the metadata
 // each CPU op records
-_device_attention :: proc(op: Op, Q, K, V: ^Tensor, mask: []f64, causal: bool) -> ^Tensor {
+_device_attention :: proc(
+	op: Op,
+	Q, K, V: ^Tensor,
+	attn_mask: Attn_Mask,
+	causal: bool,
+) -> ^Tensor {
+	mask := attn_mask.values
 	_check_shape(Q)
 	_check_shape(K)
 	_check_shape(V)
@@ -728,11 +734,18 @@ _device_attention :: proc(op: Op, Q, K, V: ^Tensor, mask: []f64, causal: bool) -
 		out.device.aux_buf = _device_alloc(out, len(mask))
 		_device_hooks.upload(out.device.aux_buf, mask)
 	}
-	_device_forward(op, out, {Q, K, V}, {len(mask), int(causal)})
+	// FlashAttention: [_, causal]; masked: [mask length, causal, key_rep]
+	key_rep := attn_mask.key_rep
+	_device_forward(op, out, {Q, K, V}, {len(mask), int(causal || attn_mask.causal), key_rep})
 	if out.requires_grad {
 		out.op = op
 		append(&out.inputs, Q, K, V)
-		if op == .MaskedScaledDotProductAttention {append(&out.f64_metadata, ..mask)}
+		if op == .MaskedScaledDotProductAttention {
+			append(&out.f64_metadata, ..mask)
+			if key_rep > 0 || attn_mask.causal {
+				append(&out.int_metadata, key_rep, int(attn_mask.causal))
+			}
+		}
 		if op == .FlashAttention {append(&out.int_metadata, int(causal))}
 	}
 	return out
@@ -740,22 +753,25 @@ _device_attention :: proc(op: Op, Q, K, V: ^Tensor, mask: []f64, causal: bool) -
 
 // _device_multi_head_attention: device tensor_multi_head_attention as one node.
 // int_metadata: [batch, seq_q, seq_k, num_heads, head_dim, kind, causal] with
-// kind 0 plain, 1 masked (the mask in f64_metadata and the aux buffer), 2 flash;
-// the forward also gets the mask length.
+// kind 0 plain, 1 masked (the mask in f64_metadata and the aux buffer), 2 flash,
+// 3 key padding (the additive key mask [batch, seq_k] in f64_metadata and the aux
+// buffer, causal possible); the forward also gets the mask length.
 _device_multi_head_attention :: proc(
 	q, k, v: ^Tensor,
 	dims: [5]int, // batch, seq_q, seq_k, num_heads, head_dim
 	mask: []f64,
 	flash, causal: bool,
+	key_mask: []f64 = nil,
 ) -> ^Tensor {
 	batch, seq_q, d := dims[0], dims[1], dims[3] * dims[4]
+	kind := 1 if mask != nil else (3 if key_mask != nil else (2 if flash else 0))
+	mask := mask if key_mask == nil else key_mask
 	rg := q.requires_grad || k.requires_grad || v.requires_grad
 	out := _device_new_op(1, batch * seq_q * d, {batch, seq_q, d, 1}, rg, _op_alloc(q))
 	if mask != nil {
 		out.device.aux_buf = _device_alloc(out, len(mask))
 		_device_hooks.upload(out.device.aux_buf, mask)
 	}
-	kind := 1 if mask != nil else (2 if flash else 0)
 	meta := [8]int{dims[0], dims[1], dims[2], dims[3], dims[4], kind, int(causal), len(mask)}
 	_device_forward(.MultiHeadAttention, out, {q, k, v}, meta[:])
 	if out.requires_grad {
