@@ -441,6 +441,28 @@ _backward_node_cpu :: proc(node: ^Tensor, allocator: mem.Allocator) {
 			}
 		}
 
+	case .OverlapAdd:
+		// d frames[b, f, n] = w[n] · dy[b, t] / envelope[t], t = f·hop + n - start
+		x := node.inputs[0]
+		if x.requires_grad {
+			tensor_ensure_grad(x)
+			m := node.int_metadata[:]
+			B, F, N, hop, start, L := m[0], m[1], m[2], m[3], m[4], m[5]
+			w, inv_env := node.f64_metadata[:N], node.f64_metadata[N:]
+			for b in 0 ..< B {
+				dy := node.grad.data[b * L:][:L]
+				for f in 0 ..< F {
+					dx := x.grad.data[(b * F + f) * N:][:N]
+					n_lo := max(0, start - f * hop)
+					n_hi := min(N, L + start - f * hop)
+					for n in n_lo ..< n_hi {
+						t := f * hop + n - start
+						dx[n] += w[n] * inv_env[t] * dy[t]
+					}
+				}
+			}
+		}
+
 	case .Div:
 		a_in := node.inputs[0]
 		b_in := node.inputs[1]

@@ -389,7 +389,10 @@ op_cases := [?]Op_Case {
 		shapes = {{2, 40, 3, 1}},
 		tol = 1e-5,
 		run = proc(x: []^t.Tensor) -> ^t.Tensor {
-			return t.tensor_masked_mean(x[0], t.sequence_mask({40, 25}, 40, context.temp_allocator))
+			return t.tensor_masked_mean(
+				x[0],
+				t.sequence_mask({40, 25}, 40, context.temp_allocator),
+			)
 		},
 	},
 	{
@@ -859,7 +862,12 @@ op_cases := [?]Op_Case {
 		op = .Conv1d,
 		shapes = {{2, 40, 1, 1}, {10, 1, 8, 1}},
 		tol = 1e-5,
-		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_conv1d(x[0], x[1], nil, stride = 4)},
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_conv1d(
+				x[0],
+				x[1],
+				nil,
+				stride = 4,
+			)},
 	},
 	{
 		name = "conv1d groups 2, stride 2, dilation 2, bias",
@@ -886,6 +894,40 @@ op_cases := [?]Op_Case {
 		tol = 1e-5,
 		run = proc(x: []^t.Tensor) -> ^t.Tensor {
 			return t.tensor_conv1d(x[0], x[1], nil, 1, 0, 2, stride = 2, groups = 3)
+		},
+	},
+	{
+		name = "overlap-add centred, Hann, n_fft 16, hop 4 (iSTFT)",
+		op = .OverlapAdd,
+		shapes = {{2, 9, 16, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			return t.tensor_overlap_add(x[0], 4, _test_window(16, 0.5), center = true)
+		},
+	},
+	{
+		name = "overlap-add Hamming, hop 3, 5 samples past the end",
+		op = .OverlapAdd,
+		shapes = {{2, 6, 8, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			return t.tensor_overlap_add(x[0], 3, _test_window(8, 0.54), length = 28)
+		},
+	},
+	{
+		name = "overlap-add without a window, hop 5",
+		op = .OverlapAdd,
+		shapes = {{3, 7, 12, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {return t.tensor_overlap_add(x[0], 5)},
+	},
+	{
+		name = "overlap-add centred, Hann, n_fft 1024, hop 256, 40 frames",
+		op = .OverlapAdd,
+		shapes = {{2, 40, 1024, 1}},
+		tol = 1e-5,
+		run = proc(x: []^t.Tensor) -> ^t.Tensor {
+			return t.tensor_overlap_add(x[0], 256, _test_window(1024, 0.5), center = true)
 		},
 	},
 	{
@@ -1441,6 +1483,13 @@ _batch_mask :: proc() -> []f64 {
 	m := make([]f64, 60, context.temp_allocator)
 	for b in 0 ..< 2 {for i in 0 ..< 5 {for j in 0 ..< 6 {if j > i + b {m[(b * 5 + i) * 6 + j] = -1e9}}}}
 	return m
+}
+
+// periodic window a0 - (1 - a0)·cos(2πn / N): a0 0.5 Hann, 0.54 Hamming
+_test_window :: proc(N: int, a0: f64) -> []f64 {
+	w := make([]f64, N, context.temp_allocator)
+	for &v, n in w {v = a0 - (1 - a0) * math.cos(2 * math.PI * f64(n) / f64(N))}
+	return w
 }
 
 // _compare_case: CPU vs GPU (kernel enabled), and CPU vs GPU with the op's

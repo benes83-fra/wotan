@@ -91,6 +91,7 @@ Op :: enum {
 	Sign,
 	L1Loss,
 	MaskedSum, // tensor_masked_sum and tensor_masked_mean
+	OverlapAdd, // tensor_overlap_add
 }
 
 PoolParams :: struct {
@@ -4454,6 +4455,112 @@ tensor_conv1d :: proc(
 		append(&out.inputs, x, weight)
 		if bias != nil {append(&out.inputs, bias)}
 		append(&out.int_metadata, ..meta[:])
+	}
+	return out
+}
+
+// tensor_overlap_add: weighted overlap-add of frames [batch, F, N] (frame f
+// starts at sample f·hop of the signal) into signals [batch, L]:
+//   y[b, t] = Σ_f w[n] · frames[b, f, n] / Σ_f w[n]²,  n = t + start - f·hop
+// summing over the frames that cover sample t + start. With a window this is the
+// synthesis step of torch.istft: frames are the inverse DFTs of the spectrogram
+// frames, w is the window and the division by the summed squared window undoes
+// the analysis and synthesis windowing (it needs a window and hop with no gaps,
+// e.g. Hann with hop ≤ N / 2). Without a window (nil) the frames are summed
+// unweighted, with no division.
+// The full signal has (F - 1)·hop + N samples. center = true drops the first
+// N / 2 of them (start = N / 2), as torch.istft(center = True). length is the
+// number of output samples: -1 keeps everything up to the end of the full
+// signal, minus N / 2 at the end when centred; samples past the end are zero.
+tensor_overlap_add :: proc(
+	frames: ^Tensor,
+	hop: int,
+	window: []f64 = nil,
+	center := false,
+	length := -1,
+	loc := #caller_location,
+) -> ^Tensor {
+	B, F, N := frames.shape[0], frames.shape[1], frames.shape[2]
+	fmt.assertf(
+		frames.shape[3] == 1 && N >= 1 && tensor_numel(frames) == B * F * N,
+		"tensor_overlap_add: frames must be [batch, F, N], got shape %v",
+		frames.shape,
+		loc = loc,
+	)
+	fmt.assertf(hop >= 1, "tensor_overlap_add: hop must be at least 1, got %d", hop, loc = loc)
+	fmt.assertf(
+		window == nil || len(window) == N,
+		"tensor_overlap_add: window has %d samples, frames have N = %d",
+		len(window),
+		N,
+		loc = loc,
+	)
+	full := (F - 1) * hop + N
+	start := N / 2 if center else 0
+	L := length
+	if L < 0 {L = full - start - (N / 2 if center else 0)}
+	fmt.assertf(L >= 1, "tensor_overlap_add: empty output (length %d)", L, loc = loc)
+
+	// weights: the window (N values, ones without one), then 1 / envelope per
+	// output sample (0 past the end of the full signal)
+	weights := make([]f64, N + L, context.temp_allocator)
+	w, inv_env := weights[:N], weights[N:]
+	if window != nil {copy(w, window)} else {for &v in w {v = 1}}
+	for t in 0 ..< L {
+		s := t + start
+		if s >= full {break}
+		if window == nil {
+			inv_env[t] = 1
+			continue
+		}
+		env := 0.0
+		f_lo := 0 if s < N else (s - N) / hop + 1
+		for f in f_lo ..= min(F - 1, s / hop) {
+			v := w[s - f * hop]
+			env += v * v
+		}
+		fmt.assertf(
+			env > 1e-11,
+			"tensor_overlap_add: the summed squared window is %v at sample %d (window and hop leave a gap)",
+			env,
+			s,
+			loc = loc,
+		)
+		inv_env[t] = 1 / env
+	}
+	meta := [6]int{B, F, N, hop, start, L}
+	if _device_use(.OverlapAdd, frames) {
+		out := _device_new_op(B, L, {B, L, 1, 1}, frames.requires_grad, _op_alloc(frames))
+		_device_forward(.OverlapAdd, out, {frames}, meta[:], weights)
+		if out.requires_grad {
+			out.op = .OverlapAdd
+			append(&out.inputs, frames)
+			append(&out.int_metadata, ..meta[:])
+			append(&out.f64_metadata, ..weights)
+		}
+		return out
+	}
+	_host_inputs(.OverlapAdd, frames)
+
+	out_data := l.matrix_new(f64, B, L, _op_alloc(frames))
+	xs := frames.data.data
+	for b in 0 ..< B {
+		y := out_data.data[b * L:][:L]
+		for f in 0 ..< F {
+			fr := xs[(b * F + f) * N:][:N]
+			// samples n of frame f land at t = f·hop + n - start
+			n_lo := max(0, start - f * hop)
+			n_hi := min(N, L + start - f * hop)
+			for n in n_lo ..< n_hi {y[f * hop + n - start] += w[n] * fr[n]}
+		}
+		for &v, t in y {v *= inv_env[t]}
+	}
+	out := _tensor_new_op(out_data, {B, L, 1, 1}, frames.requires_grad, _op_alloc(frames))
+	if out.requires_grad {
+		out.op = .OverlapAdd
+		append(&out.inputs, frames)
+		append(&out.int_metadata, ..meta[:])
+		append(&out.f64_metadata, ..weights)
 	}
 	return out
 }

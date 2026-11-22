@@ -379,6 +379,24 @@ conv1d depthwise, stride 2 [1, 3, 2, 1]: [3, 10, 9, 30, 9, 50]
 
 A strided convolution with a fixed basis also computes framed transforms. With one input channel, `stride = hop` and a weight whose rows are the window times cos and −sin of the DFT frequencies, the output holds the real and imaginary parts of a short-time Fourier transform, one frame per step (the test `conv1d_reference_test` checks it against `torch.stft`).
 
+`tensor_overlap_add(frames, hop, window = nil, center = false, length = -1)` goes the other way: it adds frames `[batch, F, N]` into signals `[batch, L]`, with frame f starting at sample f·hop. The full signal has (F − 1)·hop + N samples. Without a window the overlapping samples are simply summed. With a window w (N values), each frame is multiplied by w and every sample is divided by the sum of w² over the frames that cover it. This is the synthesis step of an inverse STFT: if the frames are windowed slices of a signal, the result is that signal again. The window and hop must leave no gaps; the summed w² must be positive at every output sample (Hann with hop ≤ N / 2 works). `center = true` drops the first and last N / 2 samples, as `torch.istft(center = True)`, and `length` sets the number of output samples (samples past the end of the full signal are zero):
+
+```odin
+fr := from_values({1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3}, 1, 12); fr.shape = {1, 3, 4, 1}
+sum := t.tensor_overlap_add(fr, 2) // 3 frames of 4 samples, hop 2
+
+// frames f = win · x[2f ..< 2f + 4] of the signal x = 1, 2, ..., 8
+win := []f64{0, 0.5, 1, 0.5} // periodic Hann, N = 4
+wf := from_values({0, 1, 3, 2, 0, 2, 5, 3, 0, 3, 7, 4}, 1, 12); wf.shape = {1, 3, 4, 1}
+y := t.tensor_overlap_add(wf, 2, win, center = true)
+```
+```
+overlap-add [1, 8, 1, 1] [1, 1, 3, 3, 5, 5, 3, 3]
+windowed, centred [1, 4, 1, 1] [3, 4, 5, 6]
+```
+
+For a full inverse STFT, turn each spectrum frame (real parts, then imaginary parts) into time samples with `tensor_matmul` by a fixed inverse real-DFT basis, reshape the product to `[batch, F, N]` and overlap-add it with the window. The test `overlap_add_reference_test` checks this against `torch.istft`, including the gradient with respect to the spectrum.
+
 ## 9. Sequence models: recurrent cells, embeddings, attention
 
 ### RNN, GRU and LSTM
@@ -735,7 +753,7 @@ The same network in PyTorch 2.1.0 (float64, the same initial weights, plain SGD)
 | Losses | `tensor_mse_loss`, `_l1_loss`, `_cross_entropy_loss`, `_bce_loss`, `_binary_cross_entropy`, `_kl_divergence`, `_entropy`, `_sharpe_loss`, `_prospect_utility` |
 | Behavioural finance | `tensor_prospect_value`, `_prob_weighting`, `_prospect_utility` |
 | Normalisation | `tensor_layer_norm`, `_rms_norm`, `_batch_norm_2d`, `_normalize_time`, `_dropout` |
-| Convolution | `tensor_conv2d`, `_conv1d`, `_max_pool2d`, `_avg_pool2d` |
+| Convolution | `tensor_conv2d`, `_conv1d`, `_overlap_add`, `_max_pool2d`, `_avg_pool2d` |
 | Sequences | `tensor_rnn`, `_gru`, `_lstm`, `_embedding`, `_ssm` |
 | Attention | `tensor_scaled_dot_product_attention`, `_masked_scaled_dot_product_attention`, `_flash_attention`, `_multi_head_attention` |
 | Constants and checks | `tensor_top_k_mask`, `tensor_clip_weights`, `tensor_validate`, `tensor_validate_graph` |

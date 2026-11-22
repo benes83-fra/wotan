@@ -449,6 +449,8 @@ main :: proc() {
 	free_all(context.temp_allocator)
 	test.conv1d_reference_test(context.temp_allocator)
 	free_all(context.temp_allocator)
+	test.overlap_add_reference_test(context.temp_allocator)
+	free_all(context.temp_allocator)
 	test.token_forecast_test(context.temp_allocator)
 	free_all(context.temp_allocator)
 	test.models_reference_test(context.temp_allocator)

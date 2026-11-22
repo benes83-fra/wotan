@@ -69,6 +69,7 @@ SUPPORTED :: bit_set[t.Op] {
 	.Flatten,
 	.Conv2d,
 	.Conv1d,
+	.OverlapAdd,
 	.MaxPool2d,
 	.AvgPool2d,
 	.BatchNorm2d,

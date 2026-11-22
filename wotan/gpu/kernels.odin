@@ -78,6 +78,8 @@ Kernel :: enum {
 	Conv1d_Grouped, // grouped conv1d (groups > 1) computed directly
 	Conv1d_Grouped_Dx, // its input gradient
 	Conv1d_Grouped_Dw, // its weight gradient (one workgroup per weight)
+	Overlap_Add, // weighted overlap-add of frames into signals (tensor_overlap_add)
+	Overlap_Add_Bwd, // its frame gradient
 	Chan_Bias, // dst[i] += b[(i / L) % C]
 	Chan_Sum, // per channel: db[c] += Σ_{n, l} dy[n, c, l]
 	Pool, // max / average pooling
@@ -1957,6 +1959,51 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid
 		workgroupBarrier();
 	}
 	if (lid.x == 0u) { dw[i] = keep(dw[i], u32(p.f1)) + sh[0]; }
+}
+`,
+	// Overlap-add: y[b, t] = inv_env[t] · Σ_f w[n] · frames[b, f, n] with
+	// n = t + start - f·hop. u0 B, u1 F, u2 N, u3 hop, u4 start, u5 L; wt holds
+	// the window (N values) then inv_env (L values). One thread per output sample.
+	.Overlap_Add        = `
+@group(0) @binding(1) var<storage, read> fr: array<f32>;
+@group(0) @binding(2) var<storage, read> wt: array<f32>;
+@group(0) @binding(3) var<storage, read_write> y: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
+	let i = idx1(g, nw);
+	let F = p.u1; let N = p.u2; let hop = p.u3; let L = p.u5;
+	if (i >= p.u0 * L) { return; }
+	let t = i % L;
+	let b = i / L;
+	let s = t + p.u4;
+	var f_lo = 0u;
+	if (s >= N) { f_lo = (s - N) / hop + 1u; }
+	let f_hi = min(F, s / hop + 1u);
+	var acc = 0.0;
+	for (var f = f_lo; f < f_hi; f++) {
+		let n = s - f * hop;
+		acc = acc + wt[n] * fr[(b * F + f) * N + n];
+	}
+	y[i] = acc * wt[N + t];
+}
+`,
+	// its frame gradient: one thread per frame element; u7 1: overwrite (keep)
+	.Overlap_Add_Bwd    = `
+@group(0) @binding(1) var<storage, read> dy: array<f32>;
+@group(0) @binding(2) var<storage, read> wt: array<f32>;
+@group(0) @binding(3) var<storage, read_write> dx: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
+	let i = idx1(g, nw);
+	let F = p.u1; let N = p.u2; let hop = p.u3; let L = p.u5;
+	if (i >= p.u0 * F * N) { return; }
+	let n = i % N;
+	let f = (i / N) % F;
+	let b = i / (N * F);
+	let t = i32(f * hop + n) - i32(p.u4);
+	var v = 0.0;
+	if (t >= 0 && t < i32(L)) { v = wt[n] * wt[N + u32(t)] * dy[b * L + u32(t)]; }
+	dx[i] = keep(dx[i], p.u7) + v;
 }
 `,
 	// dst[i] += b[(i / u1) % u2]; u0 n, u1 L (elements per channel block), u2 C

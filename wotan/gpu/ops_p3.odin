@@ -12,7 +12,9 @@ import t "../tensor"
 // conv1d (channels-last) builds one row per output step ([B·T_out, C_in·K])
 // and multiplies by the transposed weight; the product is already [B, T_out, C_out].
 // Grouped conv1d (groups > 1, e.g. depthwise) runs direct kernels instead: a
-// matmul per group would mostly multiply tiny blocks.
+// matmul per group would mostly multiply tiny blocks. Overlap-add (the iSTFT
+// synthesis) is also direct: a gather per output sample, a scatter-free
+// per-element gradient.
 // The backward passes recompute the columns instead of keeping them.
 
 @(private)
@@ -108,6 +110,12 @@ _im2col_1d :: proc(d: Conv1d_Dims, x: Bind) -> Bind {
 	return col
 }
 
+// overlap-add metadata [B, F, N, hop, start, L] -> u0..u5
+@(private)
+_overlap_add_params :: proc(m: []int) -> Params {
+	return _p({u32(m[0]), u32(m[1]), u32(m[2]), u32(m[3]), u32(m[4]), u32(m[5]), 0, 0})
+}
+
 @(private)
 _pool_params :: proc(x: ^t.Tensor, kH, kW, stride: int, op: t.Op) -> Params {
 	u := [8]u32 {
@@ -163,6 +171,11 @@ _forward_p3 :: proc(op: t.Op, out: ^t.Tensor, inputs: []^t.Tensor, ints: []int, 
 			u := [8]u32{u32(n), 1, u32(d.C_out), 0, 0, 0, 0, 0}
 			_dispatch_1d(.Chan_Bias, _p(u), {_data(inputs[2]), o}, n)
 		}
+	case .OverlapAdd:
+		// floats: the window, then 1 / envelope per output sample
+		wt := _upload_values(floats)
+		_dispatch_1d(.Overlap_Add, _overlap_add_params(ints), {_data(inputs[0]), wt, o}, n)
+		_release_buf(wt.buf)
 	case .MaxPool2d, .AvgPool2d:
 		_dispatch_1d(
 			.Pool,
@@ -204,6 +217,16 @@ _backward_p3 :: proc(node: ^t.Tensor, dy: Bind, n: int) -> bool {
 		_conv2d_backward(node, dy)
 	case .Conv1d:
 		_conv1d_backward(node, dy)
+	case .OverlapAdd:
+		x := node.inputs[0]
+		if !x.requires_grad {return true}
+		wt := _upload_values(node.f64_metadata[:])
+		g, fresh := _out_grad(x)
+		pr := _overlap_add_params(node.int_metadata[:])
+		pr.u[7] = u32(fresh)
+		_dispatch_1d(.Overlap_Add_Bwd, pr, {dy, wt, g}, t.tensor_numel(x))
+		_release_buf(wt.buf)
+		t._grad_written_on_device(x)
 	case .MaxPool2d, .AvgPool2d:
 		a := node.inputs[0]
 		if !a.requires_grad {return true}
