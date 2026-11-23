@@ -277,8 +277,62 @@ tensor_zero_grad :: proc(t: ^Tensor) {
 	}
 }
 
+// Dropout_Masks: how tensor_dropout draws its masks (set_dropout_masks)
+Dropout_Masks :: enum {
+	// rand.float64() per element from context.random_generator (the default).
+	// On the GPU the mask is drawn on the host and uploaded.
+	Stream,
+	// Philox4x32-10 (Salmon et al. 2011, the Random123 generator) over the
+	// element index, keyed by one rand.uint64() per call: element i is kept
+	// when 32-bit word i of the stream is at least ⌊p · 2³²⌋. The GPU computes
+	// the mask itself (no upload) and gets the same mask as the CPU.
+	Counter,
+}
+
+@(private)
+_dropout_masks: Dropout_Masks
+
+// set_dropout_masks chooses the mask generator of tensor_dropout for all
+// threads and returns the previous one. The generators give different masks
+// for the same seed; each is reproducible after rand.reset.
+set_dropout_masks :: proc(m: Dropout_Masks) -> (previous: Dropout_Masks) {
+	previous = _dropout_masks
+	_dropout_masks = m
+	return
+}
+
+// philox4x32_10: one block of four 32-bit words of Philox4x32-10 for counter
+// `ctr` and key `key`
+philox4x32_10 :: proc(ctr: [4]u32, key: [2]u32) -> [4]u32 {
+	c, k := ctr, key
+	for r in 0 ..< 10 {
+		if r > 0 {k += {0x9E3779B9, 0xBB67AE85}}
+		p0 := u64(0xD2511F53) * u64(c[0])
+		p1 := u64(0xCD9E8D57) * u64(c[2])
+		c = {u32(p1 >> 32) ~ c[1] ~ k[0], u32(p1), u32(p0 >> 32) ~ c[3] ~ k[1], u32(p0)}
+	}
+	return c
+}
+
+// The Counter threshold and scale of drop probability p (p ≥ 1 drops all)
+@(private)
+_dropout_threshold :: proc(p: f64) -> (threshold: u32, scale: f64) {
+	if p >= 1 {return max(u32), 0}
+	return u32(p * 4294967296.0), 1.0 / (1.0 - p)
+}
+
+// The Counter mask: element i (word i % 4 of block i / 4) is `scale` or 0
+@(private)
+_dropout_counter_mask :: proc(mask: []f64, key: [2]u32, threshold: u32, scale: f64) {
+	for j := 0; j < len(mask); j += 4 {
+		w := philox4x32_10({u32(j / 4), u32(u64(j / 4) >> 32), 0, 0}, key)
+		for k in 0 ..< min(4, len(mask) - j) {mask[j + k] = scale if w[k] >= threshold else 0}
+	}
+}
+
 // tensor_dropout randomly zeroes elements with probability drop_prob.
 // Uses Inverted Dropout: scales remaining elements by 1/(1-p) during training.
+// The mask comes from the generator chosen with set_dropout_masks.
 // Not training, or drop_prob <= 0: the output is a new tensor equal to `a`
 // (identity in autograd: no mask), never `a` itself.
 // The output is always a distinct op output. When `a` requires no gradient the
@@ -286,51 +340,60 @@ tensor_zero_grad :: proc(t: ^Tensor) {
 // (dropout on input data, e.g. a leading DropoutLayer, does not leak per step);
 // unconsumed, it is the caller's to free with tensor_free / tensor_free_graph.
 tensor_dropout :: proc(a: ^Tensor, drop_prob: f64, training: bool) -> ^Tensor {
+	active := training && drop_prob > 0.0
+	counter := active && _dropout_masks == .Counter
+	key: [2]u32
+	threshold: u32
+	scale := 1.0 / (1.0 - drop_prob)
+	if counter {
+		seed := rand.uint64()
+		key = {u32(seed), u32(seed >> 32)}
+		threshold, scale = _dropout_threshold(drop_prob)
+	}
+	n := tensor_numel(a)
+	out: ^Tensor
 	if _device_use(.Dropout, a) {
-		out := _device_new_op(a.data.rows, a.data.cols, a.shape, a.requires_grad, _op_alloc(a))
-		mask: []f64 = nil
-		if training && drop_prob > 0.0 {
-			// the same random stream as the CPU op: identical masks on both
-			n := tensor_numel(a)
-			mask = make([]f64, n, _op_alloc(a))
-			scale := 1.0 / (1.0 - drop_prob)
-			for i in 0 ..< n {mask[i] = scale if rand.float64() > drop_prob else 0.0}
+		out = _device_new_op(a.data.rows, a.data.cols, a.shape, a.requires_grad, _op_alloc(a))
+		if counter {
+			// the kernel writes the mask into aux_buf
 			out.device.aux_buf = _device_alloc(out, n)
-			_device_hooks.upload(out.device.aux_buf, mask)
-		}
-		out.dropout_mask = mask
-		_device_forward(.Dropout, out, {a})
-		if out.requires_grad {
-			out.op = .Dropout
-			append(&out.inputs, a)
+			out.device.aux_mask = true
+			_device_forward(
+				.Dropout,
+				out,
+				{a},
+				{int(key[0]), int(key[1]), int(threshold)},
+				{scale},
+			)
 		} else {
-			out.owned_by_graph = true
-		}
-		return out
-	}
-	_host_inputs(.Dropout, a)
-	out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
-	mask: []f64 = nil
-	if !training || drop_prob <= 0.0 {
-		copy(out_data.data, a.data.data)
-	} else {
-		// Remember what was dropped for the backward pass
-		n := len(a.data.data)
-		mask = make([]f64, n, _op_alloc(a))
-		scale := 1.0 / (1.0 - drop_prob)
-		for i in 0 ..< n {
-			if rand.float64() > drop_prob {
-				out_data.data[i] = a.data.data[i] * scale
-				mask[i] = scale
-			} else {
-				out_data.data[i] = 0.0
-				mask[i] = 0.0
+			if active {
+				// the same random stream as the CPU op: identical masks on both
+				out.dropout_mask = make([]f64, n, _op_alloc(a))
+				for &m in out.dropout_mask {m = scale if rand.float64() > drop_prob else 0.0}
+				out.device.aux_buf = _device_alloc(out, n)
+				_device_hooks.upload(out.device.aux_buf, out.dropout_mask)
 			}
+			_device_forward(.Dropout, out, {a})
 		}
+	} else {
+		_host_inputs(.Dropout, a)
+		out_data := l.matrix_new(f64, a.data.rows, a.data.cols, _op_alloc(a))
+		mask: []f64 = nil // nil: identity in the backward
+		if !active {
+			copy(out_data.data, a.data.data)
+		} else {
+			// Remember what was dropped for the backward pass
+			mask = make([]f64, n, _op_alloc(a))
+			if counter {
+				_dropout_counter_mask(mask, key, threshold, scale)
+			} else {
+				for &m in mask {m = scale if rand.float64() > drop_prob else 0.0}
+			}
+			for m, i in mask {out_data.data[i] = a.data.data[i] * m if m != 0 else 0}
+		}
+		out = _tensor_new_op(out_data, a.shape, a.requires_grad, _op_alloc(a))
+		out.dropout_mask = mask
 	}
-
-	out := _tensor_new_op(out_data, a.shape, a.requires_grad, _op_alloc(a))
-	out.dropout_mask = mask // nil: identity in the backward
 	if out.requires_grad {
 		out.op = .Dropout
 		append(&out.inputs, a)

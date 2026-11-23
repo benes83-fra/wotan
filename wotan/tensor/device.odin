@@ -46,6 +46,9 @@ Device_Storage :: struct {
 	grad_where:        Residency,
 	// op state the backward kernel needs (dropout mask, attention mask)
 	aux_buf:           Device_Buffer,
+	// aux_buf holds a dropout mask made on the device (Dropout_Masks.Counter);
+	// the node has no host mask until a CPU backward case downloads it
+	aux_mask:          bool,
 	// The device gradient is all zeros, but its buffer has not been cleared:
 	// the first backward kernel that writes the whole gradient overwrites it
 	// instead of adding to it, and every other use clears it first
@@ -452,6 +455,13 @@ _node_to_host :: proc(node: ^Tensor) {
 	device_stats.backward_fallbacks[node.op] += 1
 	_data_to_host(node)
 	_grad_to_host(node)
+	if node.op == .Dropout &&
+	   node.dropout_mask == nil &&
+	   node.device != nil &&
+	   node.device.aux_mask {
+		node.dropout_mask = make([]f64, tensor_numel(node), node.allocator)
+		_device_hooks.download(node.device.aux_buf, node.dropout_mask)
+	}
 	for t in node.inputs {
 		if t == nil {continue}
 		_data_to_host(t)

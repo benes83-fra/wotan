@@ -385,6 +385,12 @@ running mean 0.3500 0.5750  running var 1.466667 1.658333
 dropout: every value is 0 or 2x the input: true  eval returns an equal new tensor: true
 ```
 
+`t.set_dropout_masks(m)` chooses how the masks are drawn, for all threads, and returns the previous choice:
+- **`.Stream` (default).** One `rand.float64()` per element from `context.random_generator`; an element is kept when the draw exceeds p.
+- **`.Counter`.** One `rand.uint64()` per call becomes the key of Philox4x32-10 (Salmon et al. 2011, the generator of Random123 and of PyTorch's CUDA dropout). The words of its stream for counters 0, 1, 2, … are numbered in order, and element i is kept when word i is at least ⌊p · 2³²⌋. For tensors on a GPU the kernel computes the mask itself, which is much faster than drawing it on the host and uploading it (see the [gpu guide](gpu_guide.md)); the CPU gets the same mask. `t.philox4x32_10(counter, key)` returns one block of four words.
+
+Both modes are reproducible after `rand.reset`, but they give different masks for the same seed, so switch modes before a run, not during it.
+
 ## 8. Convolution and pooling
 
 `tensor_conv2d(input, weight, bias = nil, stride = 1, pad = 0)` takes the PyTorch layouts. `input` is `[N, C_in, H, W]`, `weight` is `[C_out, C_in, kH, kW]` and `bias` is `[1, C_out]` or nil. The output is `[N, C_out, H_out, W_out]` with H_out = (H + 2·pad − kH) / stride + 1. It runs as im2col followed by a SIMD matrix product.
@@ -815,7 +821,7 @@ The same network in PyTorch 2.1.0 (float64, the same initial weights, plain SGD)
 | Reductions | `tensor_sum`, `_mean`, `_masked_sum`, `_masked_mean`, `_sum_dim1`, `_logsumexp_dim1`; `sequence_mask` |
 | Losses | `tensor_mse_loss`, `_l1_loss`, `_cross_entropy_loss`, `_bce_loss`, `_binary_cross_entropy`, `_kl_divergence`, `_entropy`, `_sharpe_loss`, `_prospect_utility`, `_ctc_loss` (`Loss_Reduction`) |
 | Behavioural finance | `tensor_prospect_value`, `_prob_weighting`, `_prospect_utility` |
-| Normalisation | `tensor_layer_norm`, `_rms_norm`, `_batch_norm_2d`, `_normalize_time`, `_dropout` |
+| Normalisation | `tensor_layer_norm`, `_rms_norm`, `_batch_norm_2d`, `_normalize_time`, `_dropout`; `set_dropout_masks` (`Dropout_Masks`), `philox4x32_10` |
 | Convolution | `tensor_conv2d`, `_conv1d`, `_overlap_add`, `_max_pool2d`, `_avg_pool2d` |
 | Sequences | `tensor_rnn`, `_gru`, `_lstm`, `_embedding`, `_ssm` |
 | Attention | `tensor_scaled_dot_product_attention`, `_masked_scaled_dot_product_attention`, `_flash_attention`, `_multi_head_attention` |

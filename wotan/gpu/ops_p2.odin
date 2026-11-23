@@ -267,7 +267,16 @@ _forward_p2 :: proc(op: t.Op, out: ^t.Tensor, inputs: []^t.Tensor, ints: []int, 
 			N,
 		)
 	case .Dropout:
-		if out.dropout_mask == nil {
+		if out.device.aux_mask {
+			u := [8]u32{u32(n), u32(ints[0]), u32(ints[1]), u32(ints[2]), 0, 0, 0, 0}
+			mask := _bind(out.device.aux_buf, n)
+			_dispatch_1d(
+				.Dropout_Fwd,
+				_p(u, {f32(floats[0]), 0, 0, 0, 0, 0, 0, 0}),
+				{_data(inputs[0]), mask, o},
+				(n + 3) / 4,
+			)
+		} else if out.dropout_mask == nil {
 			_copy(o.buf, _buf(inputs[0].device.data_buf), n)
 		} else {
 			mask := _bind(out.device.aux_buf, n)
@@ -381,7 +390,8 @@ _backward_p2 :: proc(node: ^t.Tensor, dy: Bind, n: int) -> bool {
 	case .Dropout:
 		a := node.inputs[0]
 		if !a.requires_grad {return true}
-		if node.dropout_mask == nil {
+		device_mask := node.device != nil && node.device.aux_mask // made by Dropout_Fwd
+		if node.dropout_mask == nil && !device_mask {
 			g, fresh := _out_grad(a)
 			_dispatch_1d(
 				.Unary_Bwd,
@@ -390,7 +400,13 @@ _backward_p2 :: proc(node: ^t.Tensor, dy: Bind, n: int) -> bool {
 				n,
 			)
 		} else {
-			mask, temp := _aux(node, node.dropout_mask)
+			mask: Bind
+			temp := false
+			if device_mask {
+				mask = _bind(node.device.aux_buf, n)
+			} else {
+				mask, temp = _aux(node, node.dropout_mask)
+			}
 			g, fresh := _out_grad(a)
 			// dx += dy * mask (Binary_Bwd, gradient of a for a * mask)
 			_dispatch_1d(

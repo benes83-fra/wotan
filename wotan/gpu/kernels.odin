@@ -102,6 +102,7 @@ Kernel :: enum {
 	Norm_Time, // z-score over the time axis of [N, C, T, L], forward and backward
 	Top_K, // per row: 1 at the k largest entries
 	Reparam, // z = mu + exp(log_var / 2) · eps, and its log_var gradient
+	Dropout_Fwd, // Philox4x32-10 dropout mask and the masked output (4 elements per thread)
 }
 
 @(private)
@@ -2610,6 +2611,47 @@ fn main(@builtin(global_invocation_id) gi: vec3<u32>, @builtin(num_workgroups) n
 		dst[i] = a[i] + exp(0.5 * b[i]) * c[i];
 	} else {
 		dst[i] = dst[i] + p.f0 * c[i] * (a[i] - b[i]);
+	}
+}
+`,
+	// u0 n, (u1, u2) the key, u3 the threshold, f0 the scale: element 4j + k is
+	// kept when word k of block j (counter (j, 0, 0, 0)) is >= u3 (as
+	// tensor._dropout_counter_mask)
+	.Dropout_Fwd        = `
+@group(0) @binding(1) var<storage, read> x: array<f32>;
+@group(0) @binding(2) var<storage, read_write> mask: array<f32>;
+@group(0) @binding(3) var<storage, read_write> o: array<f32>;
+// the high and low words of the 64-bit product a · b
+fn mulhilo(a: u32, b: u32) -> vec2<u32> {
+	let al = a & 0xffffu;
+	let ah = a >> 16u;
+	let bl = b & 0xffffu;
+	let bh = b >> 16u;
+	let ll = al * bl;
+	let hl = ah * bl;
+	let lh = al * bh;
+	let mid = (ll >> 16u) + (hl & 0xffffu) + lh;
+	return vec2<u32>(ah * bh + (hl >> 16u) + (mid >> 16u), (mid << 16u) | (ll & 0xffffu));
+}
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gi: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
+	let j = idx1(gi, nw);
+	if (j * 4u >= p.u0) { return; }
+	var c = vec4<u32>(j, 0u, 0u, 0u);
+	var k = vec2<u32>(p.u1, p.u2);
+	for (var r = 0u; r < 10u; r = r + 1u) {
+		if (r > 0u) { k = k + vec2<u32>(0x9E3779B9u, 0xBB67AE85u); }
+		let m0 = mulhilo(0xD2511F53u, c.x);
+		let m1 = mulhilo(0xCD9E8D57u, c.z);
+		c = vec4<u32>(m1.x ^ c.y ^ k.x, m1.y, m0.x ^ c.w ^ k.y, m0.y);
+	}
+	for (var q = 0u; q < 4u; q = q + 1u) {
+		let i = j * 4u + q;
+		if (i >= p.u0) { break; }
+		let keep = c[q] >= p.u3;
+		let m = select(0.0, p.f0, keep);
+		mask[i] = m;
+		o[i] = select(0.0, x[i] * m, keep && m != 0.0);
 	}
 }
 `,
