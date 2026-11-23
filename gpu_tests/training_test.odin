@@ -285,11 +285,13 @@ gpu_residency_test :: proc() {
 
 gpu_scope_memory_test :: proc() {
 	fmt.println(
-		"gpu_scope_memory_test: graph scopes recycle device buffers (pool size flat across steps)",
+		"gpu_scope_memory_test: graph scopes recycle device buffers (pool size flat across steps, the same buffers every step)",
 	)
 	x, y := _regression_data(64, 8, 1, 21)
 	defer {t.tensor_free(x); t.tensor_free(y)}
-	model := _mlp({8, 64, 64, 1}, .ReLU, 3)
+	// many activations of one size: the two scopes of a step take different
+	// numbers of buffers of that size
+	model := _mlp({8, 64, 64, 64, 64, 64, 64, 64, 64, 1}, .ReLU, 3)
 	defer nn.sequential_free(model)
 	ps := nn.sequential_parameters(model, context.temp_allocator)
 	adam := nn.adam_new(0.01)
@@ -302,7 +304,9 @@ gpu_scope_memory_test :: proc() {
 	defer t.graph_scope_destroy(&scope)
 	created := t.global_tensors_created - t.global_tensors_freed
 	pool_after: [40]u64
+	missed, missed_step, last_launches := 0, -1, 0
 	for step in 0 ..< 40 {
+		gpu.reset_stats()
 		t.graph_begin(&scope)
 		loss := t.tensor_mse_loss(nn.sequential_forward(model, x), y)
 		t.tensor_backward(loss)
@@ -310,7 +314,16 @@ gpu_scope_memory_test :: proc() {
 		t.graph_end(&scope)
 		nn.adam_step(&adam)
 		nn.adam_zero_grad(&adam)
-		pool_after[step] = gpu.stats().pool_bytes
+		// a second scope in the same step, as a GAN's two updates or an evaluation
+		t.graph_begin(&scope)
+		_ = t.tensor_item(t.tensor_mse_loss(nn.sequential_forward(model, x), y))
+		t.graph_end(&scope)
+		st := gpu.stats()
+		pool_after[step] = st.pool_bytes
+		last_launches = st.dispatches
+		if step >= 2 && st.bind_group_hits < st.dispatches && missed_step < 0 {
+			missed, missed_step = st.dispatches - st.bind_group_hits, step
+		}
 	}
 	check(
 		pool_after[39] == pool_after[2],
@@ -322,10 +335,18 @@ gpu_scope_memory_test :: proc() {
 		t.global_tensors_created - t.global_tensors_freed == created,
 		"tensors leaked by the scoped loop",
 	)
+	check(
+		missed_step < 0,
+		"step %d: %d launches did not find their bindings in the cache (the step got other buffers)",
+		missed_step + 1,
+		missed,
+	)
 	fmt.printfln(
-		"    pool after step 3: %d KB, after step 40: %d KB",
+		"    pool after step 3: %d KB, after step 40: %d KB; from step 3 on all %d launches per step with cached bindings: %v",
 		pool_after[2] >> 10,
 		pool_after[39] >> 10,
+		last_launches,
+		missed_step < 0,
 	)
 	gpu.to_host(ps[:])
 	gpu.to_host(x)

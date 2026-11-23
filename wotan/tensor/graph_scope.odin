@@ -109,7 +109,11 @@ graph_end :: proc(scope: ^Graph_Scope, loc := #caller_location) {
 	scope.cur, scope.offset, scope.last = 0, 0, nil
 
 	if _device_hooks.release != nil {
-		for b in scope.device_buffers {_device_hooks.release(b)}
+		// last acquired first: the pool hands out the last returned buffer of a
+		// size first, so the next step's first request gets the buffer this
+		// step's first request had, and a loop gets the same buffers in the
+		// same order every step (its kernel bindings then come from the cache)
+		#reverse for b in scope.device_buffers {_device_hooks.release(b)}
 	}
 	clear(&scope.device_buffers)
 }

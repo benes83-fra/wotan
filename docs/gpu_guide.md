@@ -568,7 +568,7 @@ Each run prints the mean step time, the peak working set of the process, the gra
 odin run examples/audio_profile -o:speed -- fs2 gpu 5 8   # configuration, device, steps, batch
 ```
 
-Results on the RTX 3060 Laptop GPU (6 GB) and its host (Ryzen 7 6800H, 31 GB). No run used a CPU fallback, and live tensors and the pool stayed flat:
+Results on the RTX 3060 Laptop GPU (6 GB) and its host (Ryzen 7 6800H, 31 GB). All runs were leak-free with no CPU fallbacks:
 
 | Step | Batch | CPU: time, peak memory | GPU: time, pool | GPU: peak in use, host peak | GPU launches |
 |---|---|---|---|---|---|
@@ -577,11 +577,9 @@ Results on the RTX 3060 Laptop GPU (6 GB) and its host (Ryzen 7 6800H, 31 GB). N
 | Vocos generator, 10 s | 4 | 4.3 s, 5.1 GB | 0.19 s, 2.4 GB | 2.3 GB, 0.6 GB | 262 |
 | Vocos generator, 10 s | 8 | 8.0 s, 9.7 GB | 0.38 s, 4.5 GB | 4.4 GB, 0.6 GB | 262 |
 | Vocos GAN step, 1 s | 4 | 16.8 s, 5.7 GB | 0.74 s, 3.1 GB | 2.9 GB, 1.1 GB | 2950 |
-| Vocos GAN step, 1 s | 8 | 31.1 s, 9.7 GB | 1.44 s, 5.3 GB | 4.8 GB, 1.1 GB | 2950 |
+| Vocos GAN step, 1 s | 8 | 31.1 s, 9.7 GB | 1.5 s, 5.3 GB | 4.8 GB, 1.1 GB | 2950 |
 
 Memory grows linearly with the batch. At batch 16 none of the three steps fits in 6 GB of GPU memory: they would need about 7.4 GB (FastSpeech 2), 8.8 GB (Vocos) and 9.7 GB (GAN) in use, and stop with the out-of-memory message. On the CPU, batch 16 needs about 14 GB (FastSpeech 2) to 19 GB (Vocos). The host peak of a GPU run is the working set of the whole process; it holds no copies of parameters, gradients or optimizer state (see [Where tensors live](#3-where-tensors-live)).
-
-The GAN step's host heap grows by a few MB from step to step. The step does not get the same pool buffers in the same order every step, so most of its launches need new bindings; the binding cache grows until it is cleared at 16,384 entries.
 
 Where the GPU memory goes: the activations each layer keeps for the backward pass, and attention scores. With a padding mask, attention cannot use FlashAttention, so each layer computes `[batch·heads, S, S]` scores, in the forward pass and again in the backward pass. The padding mask itself is only `S` values per sequence (`key_padding`).
 
@@ -638,7 +636,7 @@ Most of the remaining launches are matrix products (one per linear layer forward
 
 Products with a transposed operand, as in the backward pass, run at the same speed.
 
-**How the work reaches the GPU.** Ops record their kernel launches and return at once. The recorded work is submitted every 128 launches, so the GPU starts while the CPU is still recording, and whenever the host reads a value. Uploads during a step do not interrupt this: their data goes through a staging buffer and is copied into place in recorded order. The parameters of all launches of a submission are written to the GPU in one transfer, and the resource bindings of each launch are cached. A training loop with a graph scope uses the same buffers every step, so after its first step every launch finds its bindings in the cache (`gpu.stats().bind_group_hits`).
+**How the work reaches the GPU.** Ops record their kernel launches and return at once. The recorded work is submitted every 128 launches, so the GPU starts while the CPU is still recording, and whenever the host reads a value. Uploads during a step do not interrupt this: their data goes through a staging buffer and is copied into place in recorded order. The parameters of all launches of a submission are written to the GPU in one transfer, and the resource bindings of each launch are cached. A training loop with graph scopes uses the same buffers every step (`graph_end` returns them so that the next step gets them in the same order), so from its third step on every launch finds its bindings in the cache (`gpu.stats().bind_group_hits`).
 
 **What makes it fast:**
 - **Keep tensors on the device.** Every read of a device value (`tensor_item`, `tensor_values`) waits for the GPU to finish all recorded work. Read the loss every few steps, not every step, when speed matters.
@@ -678,7 +676,7 @@ It compares every GPU result with the CPU engine, which is itself validated agai
 - **KV cache:** cached generation logits of three GPTs (batch 1 and 2, mixture of experts) fed in pieces and again after a reset agree with the CPU to 2e-6, with one download per call (the logits) where no layer reads values on the host.
 - **transformers:** 12 steps of four small GPTs (layer norm and GELU; flash attention; RMSNorm, tied embeddings and tanh GELU; mixture of experts) and a BERT with padding masks, all with dropout on and the same masks on both devices. Losses agree with the CPU to 1e-6 and parameters to 2e-4 or better, except the attention key biases (see [Precision](#10-precision)). None of these models uses a CPU fallback.
 - **residency:** host copies, sync procedures, automatic uploads, `to_host`, detach. Training with Adam and with SGD keeps no host copies of parameters, gradients, moments or velocity (the host memory of model and optimizer falls by at least 24 and 8 bytes per parameter), a checkpoint frees the moment copies it makes, and after `to_host` a CPU step continues from the device state: three GPU steps and one CPU step end where four GPU steps end, to 5e-8.
-- **memory:** a scoped training loop keeps the pool size flat, and a debug build reports no leaks. Buffers have the expected size classes. Training with 500 to 8000 rows per step matches the CPU to 3e-6, while the pool gives buffers back and never holds more than 1.25 times the peak in use.
+- **memory:** a scoped training loop with two scopes per step keeps the pool size flat and gets the same buffers every step: from the third step on, every launch finds its bindings in the cache. A debug build reports no leaks. Buffers have the expected size classes. Training with 500 to 8000 rows per step matches the CPU to 3e-6, while the pool gives buffers back and never holds more than 1.25 times the peak in use.
 - **checkpoints:** saved from the GPU, loaded on the CPU, parameters and Adam moments identical.
 
 Without a usable adapter the suite prints `SKIP` and exits with code 0.
