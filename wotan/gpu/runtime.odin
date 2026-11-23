@@ -31,9 +31,9 @@ import wgpu "vendor:wgpu"
 // The parameter block is bound with a dynamic offset, so a bind group depends
 // only on the kernel and its storage buffers, and bind groups are cached (pool
 // buffers live until shutdown, so a cached bind group never refers to a
-// destroyed buffer). A training loop with a graph scope acquires the same pool
-// buffers in the same order every step, so after the first step its bind groups
-// come from the cache.
+// destroyed buffer; a buffer the pool gives back clears the cache). A training
+// loop with a graph scope acquires the same pool buffers in the same order every
+// step, so after the first step its bind groups come from the cache.
 
 @(private)
 FLUSH_EVERY :: 128
@@ -51,8 +51,9 @@ Params :: struct #align (16) {
 
 @(private)
 Buf :: struct {
-	buffer: wgpu.Buffer,
+	buffer: wgpu.Buffer, // nil once the pool gave the buffer back (the record is reused)
 	bytes:  u64,
+	stamp:  u64, // release order: the pool gives back the longest-unused buffers first
 	gen:    u32,
 	free:   bool,
 }
@@ -94,10 +95,14 @@ State :: struct {
 	// readback staging
 	readback:         wgpu.Buffer,
 	readback_bytes:   u64,
-	// buffer pool: free buffers by size bucket
+	// buffer pool: free buffers by size class
 	pool:             map[u64][dynamic]^Buf,
-	bufs:             [dynamic]^Buf,
-	pool_bytes:       u64,
+	bufs:             [dynamic]^Buf, // every buffer record, given-back ones included
+	spare:            [dynamic]^Buf, // records of buffers given back, for reuse
+	pool_bytes:       u64, // device memory of all pool buffers
+	live_bytes:       u64, // of the buffers in use
+	peak_live_bytes:  u64,
+	release_stamp:    u64,
 	staging_free:     map[u64][dynamic]wgpu.Buffer, // upload staging buffers by size
 	staging_used:     [dynamic]Staging, // staging buffers of the pending batch
 	dummy:            ^Buf, // bound where a kernel needs no buffer
@@ -116,6 +121,7 @@ Counters :: struct {
 	dispatches, flushes, downloads, uploads: int,
 	bytes_up, bytes_down:                    u64,
 	bind_group_hits:                         int,
+	given_back:                              int, // pool buffers released to the device
 }
 
 @(private)
@@ -269,6 +275,7 @@ _open :: proc(opts: Options) -> (ok: bool, reason: string) {
 	G.staging_used = make([dynamic]Staging, G.allocator)
 	G.pool = make(map[u64][dynamic]^Buf, G.allocator)
 	G.bufs = make([dynamic]^Buf, G.allocator)
+	G.spare = make([dynamic]^Buf, G.allocator)
 	G.optim = make(map[rawptr]Optim_State, G.allocator)
 	G.dummy = _acquire(1)
 	return true, ""
@@ -299,11 +306,14 @@ _close :: proc() {
 		wgpu.DevicePoll(G.device, true)
 	}
 	for b in G.bufs {
-		wgpu.BufferDestroy(b.buffer)
-		wgpu.BufferRelease(b.buffer)
+		if b.buffer != nil {
+			wgpu.BufferDestroy(b.buffer)
+			wgpu.BufferRelease(b.buffer)
+		}
 		free(b, G.allocator)
 	}
 	delete(G.bufs)
+	delete(G.spare)
 	for _, &list in G.pool {delete(list)}
 	delete(G.pool)
 	delete(G.optim)
@@ -340,15 +350,37 @@ _close :: proc() {
 }
 
 // ----------------------------------------------------------------------------
-// Buffer pool (power-of-two size buckets; f32 elements)
+// Buffer pool (f32 elements)
 // ----------------------------------------------------------------------------
+//
+// Released buffers go back to the pool and are reused by requests of the same
+// size class: powers of two up to 4 KB, above that four classes per doubling
+// (sizes are rounded up by at most a quarter). A buffer serves only its own
+// class, so a training loop with fixed shapes reuses the same buffers every
+// step.
+//
+// The pool gives memory back when shapes change from step to step (sequences
+// of different lengths): before it creates a buffer that would take the pool
+// beyond POOL_SLACK times the peak of the memory in use, it gives back the
+// free buffers that have been unused the longest. If the device has no memory
+// left for a new buffer, it gives back all free buffers and tries once more.
+
+// the pool may hold this much more than the peak of the buffers in use
+@(private)
+POOL_SLACK :: 1.25
+
+// size classes per doubling above 4 KB
+@(private)
+POOL_CLASSES :: 4
 
 @(private)
 _bucket :: proc(numel: int) -> u64 {
 	bytes := u64(max(numel, 1) * 4)
 	b := u64(256)
 	for b < bytes {b <<= 1}
-	return b
+	if b <= 4096 {return b}
+	step := (b >> 1) / POOL_CLASSES
+	return (bytes + step - 1) / step * step
 }
 
 @(private)
@@ -363,22 +395,119 @@ _acquire :: proc(numel: int) -> ^Buf {
 			),
 		)
 	}
+	b: ^Buf
 	if list, ok := &G.pool[bytes]; ok && len(list) > 0 {
-		b := pop(list)
-		b.free = false
-		b.gen += 1
-		return b
+		b = pop(list)
+	} else {
+		// a new buffer: first give back long-unused ones if the pool would grow
+		// beyond POOL_SLACK times the peak in use
+		limit := u64(POOL_SLACK * f64(max(G.peak_live_bytes, G.live_bytes + bytes)))
+		if G.pool_bytes + bytes > limit {_give_back(G.pool_bytes + bytes - limit)}
+		buffer := _new_buffer(bytes, {.Storage, .CopySrc, .CopyDst})
+		if len(G.spare) > 0 {
+			b = pop(&G.spare)
+		} else {
+			b = new(Buf, G.allocator)
+			append(&G.bufs, b)
+		}
+		b.buffer, b.bytes = buffer, bytes
+		G.pool_bytes += bytes
 	}
-	b := new(Buf, G.allocator)
-	b.buffer = wgpu.DeviceCreateBuffer(
-		G.device,
-		&{usage = {.Storage, .CopySrc, .CopyDst}, size = bytes},
-	)
-	b.bytes = bytes
-	b.gen = 1
-	append(&G.bufs, b)
-	G.pool_bytes += bytes
+	b.free = false
+	b.gen += 1
+	G.live_bytes += b.bytes
+	G.peak_live_bytes = max(G.peak_live_bytes, G.live_bytes)
 	return b
+}
+
+// _new_buffer creates a device buffer (pool, staging or readback). If the
+// device has no memory left, it gives back every free pool and staging buffer,
+// waits until the device has released them, and tries once more; then it
+// panics with the size.
+@(private)
+_new_buffer :: proc(bytes: u64, usage: wgpu.BufferUsageFlags) -> wgpu.Buffer {
+	if buffer, ok := _create_buffer(bytes, usage); ok {return buffer}
+	_give_back(max(u64))
+	for _, &list in G.staging_free {
+		for s in list {wgpu.BufferRelease(s)}
+		clear(&list)
+	}
+	_wait()
+	if buffer, ok := _create_buffer(bytes, usage); ok {return buffer}
+	panic(
+		fmt.tprintf(
+			"gpu: out of device memory for a buffer of %.1f MB (%.2f GB in use by tensors and optimizer state); use a smaller batch",
+			f64(bytes) / 1e6,
+			f64(G.live_bytes) / 1e9,
+		),
+	)
+}
+
+// _create_buffer: a new buffer, or false if the device has no memory left
+@(private)
+_create_buffer :: proc(bytes: u64, usage: wgpu.BufferUsageFlags) -> (wgpu.Buffer, bool) {
+	wgpu.DevicePushErrorScope(G.device, .OutOfMemory)
+	wgpu.DevicePushErrorScope(G.device, .Validation) // wgpu reports some allocation failures as validation errors
+	buffer := wgpu.DeviceCreateBuffer(G.device, &{usage = usage, size = bytes})
+	ok := _pop_error_scope()
+	ok = _pop_error_scope() && ok
+	if !ok {
+		wgpu.BufferRelease(buffer)
+		return nil, false
+	}
+	return buffer, true
+}
+
+// _pop_error_scope: false if the scope caught an error
+@(private)
+_pop_error_scope :: proc() -> bool {
+	Wait :: struct {
+		done, failed: bool,
+	}
+	w: Wait
+	wgpu.DevicePopErrorScope(G.device, {
+		mode = .AllowProcessEvents,
+		callback = proc "c" (
+			s: wgpu.PopErrorScopeStatus,
+			type: wgpu.ErrorType,
+			m: wgpu.StringView,
+			u1, u2: rawptr,
+		) {
+			w := (^Wait)(u1)
+			w.failed = s != .Success || type != .NoError
+			w.done = true
+		},
+		userdata1 = &w,
+	})
+	for !w.done {wgpu.InstanceProcessEvents(G.instance)}
+	return !w.failed
+}
+
+// _give_back releases free pool buffers, the longest-unused first, until at
+// least `need` bytes are given back or no free buffer is left. wgpu frees the
+// memory once recorded or submitted work that uses a buffer has finished.
+// Cached bind groups may refer to these buffers, so the cache is cleared.
+@(private)
+_give_back :: proc(need: u64) {
+	if need == 0 {return}
+	given := u64(0)
+	for given < need {
+		oldest: ^Buf
+		for b in G.bufs {
+			if b.free && b.buffer != nil && (oldest == nil || b.stamp < oldest.stamp) {oldest = b}
+		}
+		if oldest == nil {break}
+		list := &G.pool[oldest.bytes]
+		for x, i in list {if x == oldest {unordered_remove(list, i); break}}
+		wgpu.BufferRelease(oldest.buffer)
+		oldest.buffer = nil
+		given += oldest.bytes
+		G.pool_bytes -= oldest.bytes
+		oldest.bytes = 0
+		append(&G.spare, oldest)
+		G.counters.given_back += 1
+	}
+	if given > 0 {_clear_bind_groups()}
 }
 
 @(private)
@@ -386,6 +515,9 @@ _release_buf :: proc(b: ^Buf) {
 	if b == nil || b.free {return}
 	b.free = true
 	b.gen += 1
+	G.live_bytes -= b.bytes
+	G.release_stamp += 1
+	b.stamp = G.release_stamp
 	list, ok := &G.pool[b.bytes]
 	if !ok {
 		G.pool[b.bytes] = make([dynamic]^Buf, G.allocator)
@@ -589,17 +721,16 @@ _upload :: proc(b: ^Buf, src: []f64) {
 	bytes := u64(len(tmp) * 4)
 	if G.pending > 0 || G.encoder != nil {
 		// recorded work may still read `b`: stage, and copy in program order
-		size := _bucket(len(src))
+		// staging sizes: powers of two (few sizes; staging buffers are kept)
+		size := u64(256)
+		for size < u64(len(tmp) * 4) {size <<= 1}
 		st := Staging {
 			bytes = size,
 		}
 		if list, ok := &G.staging_free[size]; ok && len(list) > 0 {
 			st.buffer = pop(list)
 		} else {
-			st.buffer = wgpu.DeviceCreateBuffer(
-				G.device,
-				&{usage = {.CopySrc, .CopyDst}, size = size},
-			)
+			st.buffer = _new_buffer(size, {.CopySrc, .CopyDst})
 		}
 		append(&G.staging_used, st)
 		wgpu.QueueWriteBuffer(G.queue, st.buffer, 0, raw_data(tmp), uint(bytes))
@@ -621,10 +752,7 @@ _download :: proc(b: ^Buf, dst: []f64) {
 	if G.readback == nil || G.readback_bytes < bytes {
 		if G.readback != nil {wgpu.BufferRelease(G.readback)}
 		G.readback_bytes = max(bytes, 1 << 20)
-		G.readback = wgpu.DeviceCreateBuffer(
-			G.device,
-			&{usage = {.MapRead, .CopyDst}, size = G.readback_bytes},
-		)
+		G.readback = _new_buffer(G.readback_bytes, {.MapRead, .CopyDst})
 	}
 	_end_pass()
 	wgpu.CommandEncoderCopyBufferToBuffer(_encoder(), b.buffer, 0, G.readback, 0, bytes)

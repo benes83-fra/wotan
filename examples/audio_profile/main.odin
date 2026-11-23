@@ -50,6 +50,8 @@ Step_Stats :: struct {
 	live_tensors: int,
 	heap_bytes:   i64,
 	pool_bytes:   u64,
+	peak_live:    u64, // GPU memory in use at the peak
+	given_back:   int, // pool buffers given back to the device in the step
 	arena_used:   int,
 	loss:         f64,
 }
@@ -126,6 +128,8 @@ main :: proc() {
 			gs := gpu.stats()
 			st.launches = gs.dispatches
 			st.pool_bytes = gs.pool_bytes
+			st.peak_live = gs.peak_live_bytes
+			st.given_back = gs.buffers_given_back
 			for op in t.Op {st.fallbacks += gs.forward_fallbacks[op] + gs.backward_fallbacks[op]}
 		}
 		fmt.printfln(
@@ -155,7 +159,7 @@ main :: proc() {
 		last.pool_bytes == second.pool_bytes &&
 		last.arena_used == second.arena_used
 	fmt.printfln(
-		"RESULT %s %s batch %d: step %.1f ms (mean of steps 2-%d), peak working set %.2f GB, graph arena %.2f GB, GPU pool %.2f GB, launches/step %d, fallbacks/step %d, leak-free %v",
+		"RESULT %s %s batch %d: step %.1f ms (mean of steps 2-%d), peak working set %.2f GB, graph arena %.2f GB, GPU pool %.2f GB (peak in use %.2f GB, buffers given back in the last step %d), launches/step %d, fallbacks/step %d, leak-free %v",
 		config,
 		device,
 		batch,
@@ -164,6 +168,8 @@ main :: proc() {
 		f64(_peak_working_set()) / 1e9,
 		f64(last.arena_used) / 1e9,
 		f64(last.pool_bytes) / 1e9,
+		f64(last.peak_live) / 1e9,
+		last.given_back,
 		last.launches,
 		last.fallbacks,
 		leak_free,

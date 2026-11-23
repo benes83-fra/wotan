@@ -16,9 +16,11 @@ import "core:mem"
 //
 // A device tensor keeps its data and its gradient in device buffers. Each of the
 // two is current on the host, on the device, or on both (Residency). While only
-// the device copy is current, the host slice is parked in the storage and
-// `t.data.data` (or `t.grad.data`) is nil: code that reads it without syncing
-// fails instead of computing on stale numbers. rows, cols and shape stay valid.
+// the device copy is current, there is no host copy: `t.data.data` (or
+// `t.grad.data`) is nil, so code that reads it without syncing fails instead of
+// computing on stale numbers, and a model trained on the device keeps no f64
+// copies of its parameters and gradients on the host. rows, cols and shape stay
+// valid. Syncing allocates the host copy again.
 //
 // Read device data with tensor_values / tensor_grad_values / tensor_item (they
 // sync). After writing a synced host copy in place, call tensor_mark_host_dirty
@@ -26,7 +28,7 @@ import "core:mem"
 
 Residency :: enum u8 {
 	Host, // only the host copy is current (or there is no data yet)
-	Device, // only the device copy is current; the host slice is parked
+	Device, // only the device copy is current; there is no host slice
 	Both,
 }
 
@@ -42,8 +44,6 @@ Device_Storage :: struct {
 	grad_buf:          Device_Buffer,
 	data_where:        Residency,
 	grad_where:        Residency,
-	host_data:         []f64, // host data slice, parked while data_where == .Device
-	host_grad:         []f64, // host gradient slice, parked while grad_where == .Device
 	// op state the backward kernel needs (dropout mask, attention mask)
 	aux_buf:           Device_Buffer,
 	// The device gradient is all zeros, but its buffer has not been cleared:
@@ -97,7 +97,7 @@ _device_hooks: Device_Hooks
 Device_Adam_Update :: struct {
 	param: ^Tensor,
 	key:   rawptr,
-	m, v:  []f64,
+	m, v:  []f64, // host moments the device state starts from (nil: zeros)
 	lr:    f64,
 	step:  int,
 }
@@ -211,11 +211,11 @@ _data_to_device :: proc(t: ^Tensor) {
 	s.data_where = .Both
 }
 
-// _data_written_on_device: a device op wrote the data; park the host slice
+// _data_written_on_device: a device op wrote the data; the host copy is freed
 _data_written_on_device :: proc(t: ^Tensor) {
 	s := t.device
 	if s.data_where != .Device {
-		if t.data.data != nil {s.host_data = t.data.data}
+		if t.data.data != nil {delete(t.data.data, t.data.allocator)}
 		t.data.data = nil
 		s.data_where = .Device
 	}
@@ -226,10 +226,8 @@ _data_to_host :: proc(t: ^Tensor) {
 	if t == nil || t.device == nil || t.device.data_where != .Device {return}
 	s := t.device
 	n := tensor_numel(t)
-	if s.host_data == nil {s.host_data = make([]f64, n, t.data.allocator)}
-	if n > 0 && _device_hooks.download != nil {_device_hooks.download(s.data_buf, s.host_data)}
-	t.data.data = s.host_data
-	s.host_data = nil
+	t.data.data = make([]f64, n, t.data.allocator)
+	if n > 0 && _device_hooks.download != nil {_device_hooks.download(s.data_buf, t.data.data)}
 	s.data_where = .Both
 	device_stats.host_syncs += 1
 }
@@ -260,14 +258,19 @@ _grad_to_device :: proc(t: ^Tensor) {
 	s.grad_where = .Both
 }
 
-// _grad_written_on_device: a device kernel wrote the gradient; park the host slice
+// _grad_written_on_device: a device kernel wrote the gradient; the host copy is freed
 _grad_written_on_device :: proc(t: ^Tensor) {
 	s := t.device
 	if s.grad_where != .Device {
-		if t.grad.data != nil {s.host_grad = t.grad.data}
-		t.grad.data = nil
+		_free_host_grad(t)
 		s.grad_where = .Device
 	}
+}
+
+@(private = "file")
+_free_host_grad :: proc(t: ^Tensor) {
+	if t.grad.data != nil {delete(t.grad.data, t.grad.allocator)}
+	t.grad.data = nil
 }
 
 // _grad_to_host makes the host copy of the gradient current
@@ -275,15 +278,11 @@ _grad_to_host :: proc(t: ^Tensor) {
 	if t == nil || t.device == nil || t.device.grad_where != .Device {return}
 	s := t.device
 	n := tensor_numel(t)
-	if s.host_grad == nil {s.host_grad = make([]f64, n, t.grad.allocator)}
-	if s.grad_zero_pending {
-		// the device buffer was never written (its clear stays pending)
-		for &v in s.host_grad {v = 0}
-	} else if n > 0 && _device_hooks.download != nil {
-		_device_hooks.download(s.grad_buf, s.host_grad)
+	t.grad.data = make([]f64, n, t.grad.allocator) // zeroed
+	// a pending clear: the device buffer was never written (the clear stays pending)
+	if !s.grad_zero_pending && n > 0 && _device_hooks.download != nil {
+		_device_hooks.download(s.grad_buf, t.grad.data)
 	}
-	t.grad.data = s.host_grad
-	s.host_grad = nil
 	s.grad_where = .Both
 	device_stats.host_syncs += 1
 }
@@ -293,9 +292,7 @@ _grad_to_host :: proc(t: ^Tensor) {
 _grad_host_for_overwrite :: proc(t: ^Tensor) -> []f64 {
 	s := t.device
 	if s.grad_where == .Device {
-		if s.host_grad == nil {s.host_grad = make([]f64, tensor_numel(t), t.grad.allocator)}
-		t.grad.data = s.host_grad
-		s.host_grad = nil
+		t.grad.data = make([]f64, tensor_numel(t), t.grad.allocator)
 		s.grad_where = .Both
 	}
 	return t.grad.data
@@ -316,8 +313,7 @@ _device_zero_grad :: proc(t: ^Tensor) {
 	if t.grad.allocator.procedure == nil {t.grad.allocator = t.data.allocator}
 	t.grad.rows, t.grad.cols = t.data.rows, t.data.cols
 	if s.grad_where != .Device {
-		if t.grad.data != nil {s.host_grad = t.grad.data}
-		t.grad.data = nil
+		_free_host_grad(t)
 		s.grad_where = .Device
 	}
 	t.grad_dropped = false
@@ -342,8 +338,8 @@ _device_grad_take_pending :: proc(t: ^Tensor) -> bool {
 	return true
 }
 
-// _device_release returns the tensor's device buffers to the pool and puts
-// parked host slices back, so the normal frees release them
+// _device_release returns the tensor's device buffers to the pool (sync first
+// to keep device-only data: tensor_sync_host)
 _device_release :: proc(t: ^Tensor) {
 	s := t.device
 	if s == nil {return}
@@ -352,8 +348,6 @@ _device_release :: proc(t: ^Tensor) {
 		if s.grad_buf.ptr != nil {_device_hooks.release(s.grad_buf)}
 		if s.aux_buf.ptr != nil {_device_hooks.release(s.aux_buf)}
 	}
-	if t.data.data == nil {t.data.data = s.host_data}
-	if t.grad.data == nil {t.grad.data = s.host_grad}
 	free(s, t.allocator)
 	t.device = nil
 }

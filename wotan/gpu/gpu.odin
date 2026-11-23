@@ -62,7 +62,10 @@ Stats :: struct {
 	downloads:          int, // host syncs that waited for the GPU
 	bytes_up:           u64,
 	bytes_down:         u64,
-	pool_bytes:         u64, // device memory held by the buffer pool
+	pool_bytes:         u64, // device memory held by the buffer pool (in use and free)
+	live_bytes:         u64, // of it, in use by tensors and optimizer state
+	peak_live_bytes:    u64, // the most in use at once since init or release_cached
+	buffers_given_back: int, // pool buffers released to the device (shapes that change)
 	auto_uploads:       int, // host tensors uploaded because a device op used them
 	forward_fallbacks:  [t.Op]int, // ops run on the CPU although an input was on the GPU
 	backward_fallbacks: [t.Op]int,
@@ -145,6 +148,9 @@ stats :: proc() -> Stats {
 		bytes_up = G.counters.bytes_up,
 		bytes_down = G.counters.bytes_down,
 		pool_bytes = G.pool_bytes,
+		live_bytes = G.live_bytes,
+		peak_live_bytes = G.peak_live_bytes,
+		buffers_given_back = G.counters.given_back,
 		auto_uploads = ds.auto_uploads,
 		forward_fallbacks = ds.forward_fallbacks,
 		backward_fallbacks = ds.backward_fallbacks,
@@ -156,8 +162,23 @@ reset_stats :: proc() {
 	t.device_stats = {}
 }
 
+// release_cached gives the free buffers of the pool back to the device, so
+// that other programs can use the memory; buffers in use stay. It also restarts
+// the peak the pool measures its size against (see the pool in runtime.odin),
+// so after a phase that needed much memory (a large evaluation batch), the
+// pool stays as small as the next phase allows. The pool gives buffers back by
+// itself when it would grow well beyond the peak in use, or when the device
+// runs out of memory.
+release_cached :: proc() {
+	if !G.active {return}
+	_give_back(max(u64))
+	_wait()
+	G.peak_live_bytes = G.live_bytes
+}
+
 // to_device moves tensors to the GPU (data, and the gradient if there is one).
-// Their host slices are parked: read them with t.tensor_values afterwards.
+// Their host copies are freed: read them with t.tensor_values afterwards
+// (which downloads them into new host slices).
 to_device_one :: proc(x: ^t.Tensor) -> ^t.Tensor {
 	assert(G.active, "gpu.to_device: call gpu.init first")
 	if x == nil {return nil}

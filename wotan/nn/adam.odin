@@ -22,11 +22,15 @@ import "core:mem"
 // tensor_backward allocates a gradient for every parameter it reaches, and a
 // parameter without one (e.g. an MoE expert no token was routed to) is left
 // out of the step entirely, with no moment update and no weight decay.
+// The moments of a parameter on the GPU live on the device: once the device
+// holds them, the host slices are freed (nil). save_checkpoint and a step after
+// the parameter returned to the host bring them back.
 
 Adam :: struct {
 	parameters:    [dynamic]^t.Tensor,
-	moment_1:      [dynamic][]f64,
+	moment_1:      [dynamic][]f64, // nil while the moments live on the device
 	moment_2:      [dynamic][]f64,
+	device_keys:   [dynamic]rawptr, // per parameter: identifies its moments on the device
 	learning_rate: f64,
 	lr_scales:     [dynamic]f64, // per parameter: its learning rate / learning_rate
 	beta_1:        f64,
@@ -50,6 +54,7 @@ adam_new :: proc(
 		parameters = make([dynamic]^t.Tensor, 0, allocator),
 		moment_1 = make([dynamic][]f64, 0, allocator),
 		moment_2 = make([dynamic][]f64, 0, allocator),
+		device_keys = make([dynamic]rawptr, 0, allocator),
 		lr_scales = make([dynamic]f64, 0, allocator),
 		steps = make([dynamic]int, 0, allocator),
 		learning_rate = learning_rate,
@@ -83,6 +88,7 @@ _adam_register :: proc(opt: ^Adam, param: ^t.Tensor, lr_scale: f64) {
 	append(&opt.steps, 0)
 	append(&opt.moment_1, make([]f64, n, opt.allocator))
 	append(&opt.moment_2, make([]f64, n, opt.allocator))
+	append(&opt.device_keys, new(u8, opt.allocator))
 }
 
 adam_step :: proc(opt: ^Adam) {
@@ -106,6 +112,7 @@ _adam_step :: proc(opt: ^Adam, schedule: ^optim.LR_Schedule, step: int) {
 	opt.timestep += 1
 	// device parameters are updated together after the loop
 	on_device := make([dynamic]t.Device_Adam_Update, context.temp_allocator)
+	device_idx := make([dynamic]int, context.temp_allocator)
 	for param, i in opt.parameters {
 		if !param.requires_grad || !t.tensor_has_grad(param) {continue}
 		opt.steps[i] += 1
@@ -113,7 +120,7 @@ _adam_step :: proc(opt: ^Adam, schedule: ^optim.LR_Schedule, step: int) {
 		if schedule != nil && opt.lr_scales[i] != 1 {
 			lr = optim.lr_schedule_at(schedule^, step, schedule.base_lr * opt.lr_scales[i])
 		}
-		key := raw_data(opt.moment_1[i])
+		key := opt.device_keys[i]
 		if param.device != nil && t._device_hooks.adam != nil {
 			// device parameter: update kernel, moments kept on the device
 			append(
@@ -127,12 +134,11 @@ _adam_step :: proc(opt: ^Adam, schedule: ^optim.LR_Schedule, step: int) {
 					step = opt.steps[i],
 				},
 			)
+			append(&device_idx, i)
 			continue
 		}
-		if t._device_hooks.optim_sync != nil {
-			// the parameter left the device: continue from its device moments
-			t._device_hooks.optim_sync(key, opt.moment_1[i], opt.moment_2[i], true)
-		}
+		// the parameter left the device: continue from its device moments
+		_adam_moments_to_host(opt, i, release = true)
 		optim.adam_update(
 			param.data.data,
 			param.grad.data,
@@ -148,17 +154,43 @@ _adam_step :: proc(opt: ^Adam, schedule: ^optim.LR_Schedule, step: int) {
 	}
 	if len(on_device) > 0 {
 		t._device_hooks.adam(on_device[:], opt.beta_1, opt.beta_2, opt.epsilon, opt.weight_decay)
+		// the device holds these moments now: free the host copies
+		for i in device_idx {_adam_free_host_moments(opt, i)}
+	}
+}
+
+@(private)
+_adam_free_host_moments :: proc(opt: ^Adam, i: int) {
+	delete(opt.moment_1[i], opt.allocator)
+	delete(opt.moment_2[i], opt.allocator)
+	opt.moment_1[i], opt.moment_2[i] = nil, nil
+}
+
+// _adam_moments_to_host gives parameter i host moments with the current values:
+// it copies the device moments into them (and frees the device state if
+// `release`). Moments that are already on the host are left as they are.
+@(private)
+_adam_moments_to_host :: proc(opt: ^Adam, i: int, release: bool) {
+	if opt.moment_1[i] == nil {
+		n := t.tensor_numel(opt.parameters[i])
+		opt.moment_1[i] = make([]f64, n, opt.allocator)
+		opt.moment_2[i] = make([]f64, n, opt.allocator)
+	}
+	if t._device_hooks.optim_sync != nil {
+		t._device_hooks.optim_sync(opt.device_keys[i], opt.moment_1[i], opt.moment_2[i], release)
 	}
 }
 
 adam_free :: proc(opt: ^Adam) {
 	if t._device_hooks.optim_release != nil {
-		for m in opt.moment_1 {t._device_hooks.optim_release(raw_data(m))}
+		for k in opt.device_keys {t._device_hooks.optim_release(k)}
 	}
 	for m in opt.moment_1 {delete(m, opt.allocator)}
 	for v in opt.moment_2 {delete(v, opt.allocator)}
+	for k in opt.device_keys {free(k, opt.allocator)}
 	delete(opt.moment_1)
 	delete(opt.moment_2)
+	delete(opt.device_keys)
 	delete(opt.lr_scales)
 	delete(opt.steps)
 	delete(opt.parameters)
@@ -208,12 +240,18 @@ clip_grad_norm_params :: proc(params: []^t.Tensor, max_norm: f64) -> f64 {
 	return total
 }
 
-// _adam_state_to_host copies the moments of device parameters into the host
-// slices (e.g. before saving a checkpoint); they stay on the device
+// _adam_state_to_host gives every parameter host moments with the current
+// values (e.g. before saving a checkpoint); device moments stay on the device.
+// Returns the parameters whose host moments it created: free them again with
+// _adam_free_host_moments.
 @(private)
-_adam_state_to_host :: proc(opt: ^Adam) {
-	if t._device_hooks.optim_sync == nil {return}
-	for m1, i in opt.moment_1 {t._device_hooks.optim_sync(raw_data(m1), m1, opt.moment_2[i], false)}
+_adam_state_to_host :: proc(opt: ^Adam) -> (created: [dynamic]int) {
+	created = make([dynamic]int, context.temp_allocator)
+	for i in 0 ..< len(opt.parameters) {
+		if opt.moment_1[i] == nil {append(&created, i)}
+		_adam_moments_to_host(opt, i, release = false)
+	}
+	return
 }
 
 clip_grad_norm_adam :: proc(opt: ^Adam, max_norm: f64) -> f64 {

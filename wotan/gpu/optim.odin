@@ -8,22 +8,25 @@ import "core:math"
 // ============================================================================
 //
 // The optimizer state of a device parameter (Adam moments, SGD velocity) lives
-// in device buffers keyed by the host state slice of the optimizer, which stays
-// allocated: when the parameter returns to the host, or a checkpoint is saved,
-// optim_sync copies the state back into it.
+// in device buffers under a key the optimizer keeps per parameter. It starts
+// from the optimizer's host slices (zeros when they are nil); the optimizer
+// then frees those. When the parameter returns to the host, or a checkpoint is
+// saved, optim_sync copies the state into new host slices.
 
+// _optim_state: the state of `key`, created from a (and b if `pair`) on first use
 @(private)
-_optim_state :: proc(key: rawptr, a, b: []f64) -> Optim_State {
+_optim_state :: proc(key: rawptr, n: int, a, b: []f64, pair: bool) -> Optim_State {
 	if s, ok := G.optim[key]; ok {return s}
 	s := Optim_State {
-		n = len(a),
+		n = n,
 	}
-	s.a = _acquire(len(a))
-	_upload(s.a, a)
-	if b != nil {
-		s.b = _acquire(len(b))
-		_upload(s.b, b)
+	init :: proc(n: int, values: []f64) -> ^Buf {
+		buf := _acquire(n)
+		if values != nil {_upload(buf, values)} else {_zero(buf, n)}
+		return buf
 	}
+	s.a = init(n, a)
+	if pair {s.b = init(n, b)}
 	G.optim[key] = s
 	return s
 }
@@ -71,7 +74,7 @@ _hook_adam :: proc(updates: []t.Device_Adam_Update, beta_1, beta_2, epsilon, wei
 			if count > 0 && coefs(u, beta_1, beta_2, epsilon, weight_decay) != f {break}
 			for x in group[:count] {if x == u.param {break group_loop}} 	// listed twice
 			n := t.tensor_numel(u.param)
-			s := _optim_state(u.key, u.m, u.v)
+			s := _optim_state(u.key, n, u.m, u.v, pair = true)
 			w, g := _param(u.param)
 			binds[4 * count + 0] = g
 			binds[4 * count + 1] = w
@@ -98,7 +101,7 @@ _hook_sgd :: proc(
 ) {
 	n := t.tensor_numel(param)
 	vel := Bind{G.dummy, 1}
-	if momentum > 0 && key != nil {vel = {_optim_state(key, velocity, nil).a, n}}
+	if momentum > 0 && key != nil {vel = {_optim_state(key, n, velocity, nil, pair = false).a, n}}
 	w, g := _param(param)
 	u := [8]u32{u32(n), u32(momentum > 0), u32(nesterov), 0, 0, 0, 0, 0}
 	_dispatch_1d(

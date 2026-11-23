@@ -734,7 +734,8 @@ save_checkpoint :: proc(
 	_put_i32(&io, len(all))
 	for p in all {_put_i32(&io, int(!p.requires_grad))}
 	delete(all)
-	_adam_state_to_host(opt)
+	host_copies := _adam_state_to_host(opt)
+	defer for i in host_copies {_adam_free_host_moments(opt, i)} 	// their moments stay on the device
 	_put_i64(&io, opt.timestep)
 	for v in ([]f64{opt.learning_rate, opt.beta_1, opt.beta_2, opt.epsilon, opt.weight_decay}) {_put_f64(&io, v)}
 	_put_i32(&io, len(opt.parameters))

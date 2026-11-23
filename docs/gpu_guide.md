@@ -128,7 +128,7 @@ The forward pass, the backward pass and the Adam step all ran on the GPU: 13 ker
 
 ## 3. Where tensors live
 
-A tensor is on the CPU until `gpu.to_device` moves it, or until a GPU op produces it. On the device, its data and its gradient live in GPU memory, and `t.data.data` / `t.grad.data` are **nil**. Reading them directly fails at once instead of returning stale numbers. `rows`, `cols` and `shape` stay valid.
+A tensor is on the CPU until `gpu.to_device` moves it, or until a GPU op produces it. On the device, its data and its gradient live in GPU memory, and `t.data.data` / `t.grad.data` are **nil**: the host keeps no copy, so a model trained on the GPU holds no `f64` arrays of its parameters and gradients in host memory. Reading them directly fails at once instead of returning stale numbers. `rows`, `cols` and `shape` stay valid.
 
 Read device values through the sync procedures:
 
@@ -141,7 +141,7 @@ Read device values through the sync procedures:
 | `t.tensor_is_on_device(x)` | whether the tensor has device storage |
 | `t.tensor_numel(x)` | the element count (`len(x.data.data)` is 0 on the device) |
 
-After a sync, the host copy stays valid until a GPU op writes the tensor again. To change values in place, sync, write, then call `t.tensor_mark_host_dirty(x)`: the next GPU op uploads the new values.
+A sync allocates the host copy. It stays valid until a GPU op writes the tensor again, which frees it, so do not keep the slice beyond that point. To change values in place, sync, write, then call `t.tensor_mark_host_dirty(x)`: the next GPU op uploads the new values.
 
 ```odin
 m := l.matrix_new(f64, 2, 3)
@@ -532,10 +532,10 @@ Inputs that a model reads on the host, such as the deep hedger's paths or DeepLO
 ## 8. Optimizers, clipping and checkpoints
 
 `nn.adam_step`, `nn.sgd_step` and `nn.clip_grad_norm` work on device parameters without any change to the calls:
-- **Adam and SGD:** the update of a parameter is one fused kernel, and the optimizer state (Adam's moments, SGD's velocity) stays on the device. One Adam launch updates up to four parameters that share the learning rate and the step count.
+- **Adam and SGD:** the update of a parameter is one fused kernel, and the optimizer state (Adam's moments, SGD's velocity) lives only on the device: for a device parameter, `Adam.moment_1[i]`, `moment_2[i]` and `SGD.velocity[i]` are nil. One Adam launch updates up to four parameters that share the learning rate and the step count.
 - **Gradient clipping:** the gradient norm is computed on the GPU and read back once per call. One launch sums the squares of up to seven gradients, and one launch scales up to eight gradients when the norm is above the limit.
 
-`nn.save_checkpoint` and the other `nn` save procedures read device parameters and device optimizer state through the sync procedures. A checkpoint saved from a GPU model loads on the CPU, and the reverse. After loading into a model whose parameters are already on the device, the next GPU op uploads the loaded values.
+`nn.save_checkpoint` and the other `nn` save procedures read device parameters and device optimizer state through the sync procedures; `save_checkpoint` copies the Adam moments to the host for the file and frees the copies afterwards. A checkpoint saved from a GPU model loads on the CPU, and the reverse. After loading into a model whose parameters are already on the device, the next GPU op uploads the loaded values.
 
 Optimizer state follows the parameter. If a parameter returns to the host with `gpu.to_host`, the next `adam_step` copies its moments back from the device and continues on the CPU.
 
@@ -547,6 +547,12 @@ Device buffers come from a pool and go back to it:
 
 With a graph scope, a training loop allocates GPU memory only in its first steps; `gpu.stats().pool_bytes` then stays flat (the test suite checks this). Parameters, their gradients and the optimizer state are created outside the scope and survive `graph_end`, as on the CPU.
 
+**Size classes.** A buffer is rounded up to its size class: powers of two up to 4 KB, above that four classes per doubling. A buffer is therefore at most a quarter larger than its tensor: a tensor of 1.2 MB gets a buffer of 1.25 MiB. A free buffer serves only requests of its own class, so a loop with fixed shapes gets the same buffers every step.
+
+**Shapes that change.** When the shapes change from step to step (batches of sequences with different lengths), each step needs buffers of other classes. Before the pool grows beyond 1.25 times the peak memory in use, it gives back the free buffers that have been unused the longest; `gpu.stats().buffers_given_back` counts them. If the device runs out of memory for a new buffer, the pool gives back every free buffer and tries once more. If that fails too, it panics with the size of the buffer and the memory in use.
+
+`gpu.stats()` reports the memory of the pool (`pool_bytes`), the part in use by tensors and optimizer state (`live_bytes`) and the peak of that (`peak_live_bytes`). `gpu.release_cached()` gives every free buffer back to the device and restarts the peak, for instance after an evaluation with a large batch, so that the pool stays as small as the next phase allows.
+
 A single tensor must fit in one storage buffer of the device (`maxStorageBufferBindingSize`, 2 GB on the GPU used here). A larger one panics with the size in the message.
 
 ### Audio-sized training steps
@@ -556,29 +562,28 @@ The program [`examples/audio_profile`](../examples/audio_profile) measures train
 - **Vocos** (13.5 M parameters), the generator plus a mel L1 loss, on 10-s clips.
 - **A full Vocos GAN step** (55.2 M parameters with the discriminators) on 1-s segments: a discriminator update, then a generator update.
 
-Each run prints the mean step time, the peak working set of the process, the graph arena, the GPU buffer pool, and kernel launches and CPU fallbacks per step. It also checks that live tensors, heap and pool stay flat from the third step on:
+Each run prints the mean step time, the peak working set of the process, the graph arena, the GPU buffer pool with the peak memory in use, and kernel launches and CPU fallbacks per step. It also checks that live tensors, heap and pool stay flat from the third step on:
 
 ```
 odin run examples/audio_profile -o:speed -- fs2 gpu 5 8   # configuration, device, steps, batch
 ```
 
-Results on the RTX 3060 Laptop GPU (6 GB) and its host (Ryzen 7 6800H, 31 GB). All runs were leak-free with no CPU fallbacks:
+Results on the RTX 3060 Laptop GPU (6 GB) and its host (Ryzen 7 6800H, 31 GB). No run used a CPU fallback, and live tensors and the pool stayed flat:
 
-| Step | Batch | CPU: time, peak memory | GPU: time, pool | GPU launches |
-|---|---|---|---|---|
-| FastSpeech 2, 10 s | 4 | 5.9 s, 4.4 GB | 0.46 s, 2.6 GB | 787 |
-| FastSpeech 2, 10 s | 8 | 11.0 s, 7.7 GB | 0.92 s, 4.2 GB | 787 |
-| Vocos generator, 10 s | 4 | 4.3 s, 5.1 GB | 0.19 s, 2.7 GB | 262 |
-| Vocos generator, 10 s | 8 | 8.0 s, 9.7 GB | 0.38 s, 5.1 GB | 262 |
-| Vocos GAN step, 1 s | 4 | 16.8 s, 5.7 GB | 0.74 s, 4.2 GB | 2950 |
-| Vocos GAN step, 1 s | 8 | 31.1 s, 9.7 GB | out of memory | |
+| Step | Batch | CPU: time, peak memory | GPU: time, pool | GPU: peak in use, host peak | GPU launches |
+|---|---|---|---|---|---|
+| FastSpeech 2, 10 s | 4 | 5.9 s, 4.4 GB | 0.46 s, 2.2 GB | 2.2 GB, 1.0 GB | 787 |
+| FastSpeech 2, 10 s | 8 | 11.0 s, 7.7 GB | 0.93 s, 3.9 GB | 3.7 GB, 1.2 GB | 787 |
+| Vocos generator, 10 s | 4 | 4.3 s, 5.1 GB | 0.19 s, 2.4 GB | 2.3 GB, 0.6 GB | 262 |
+| Vocos generator, 10 s | 8 | 8.0 s, 9.7 GB | 0.38 s, 4.5 GB | 4.4 GB, 0.6 GB | 262 |
+| Vocos GAN step, 1 s | 4 | 16.8 s, 5.7 GB | 0.74 s, 3.1 GB | 2.9 GB, 1.1 GB | 2950 |
+| Vocos GAN step, 1 s | 8 | 31.1 s, 9.7 GB | 1.44 s, 5.3 GB | 4.8 GB, 1.1 GB | 2950 |
 
-Memory grows linearly with the batch. At batch 16 none of the three steps fits in 6 GB of GPU memory: they would need about 7.6 GB (FastSpeech 2), 10 GB (Vocos) and 7 GB already at batch 8 (GAN). On the CPU, batch 16 needs about 14 GB (FastSpeech 2) to 19 GB (Vocos).
+Memory grows linearly with the batch. At batch 16 none of the three steps fits in 6 GB of GPU memory: they would need about 7.4 GB (FastSpeech 2), 8.8 GB (Vocos) and 9.7 GB (GAN) in use, and stop with the out-of-memory message. On the CPU, batch 16 needs about 14 GB (FastSpeech 2) to 19 GB (Vocos). The host peak of a GPU run is the working set of the whole process; it holds no copies of parameters, gradients or optimizer state (see [Where tensors live](#3-where-tensors-live)).
 
-Why audio graphs need this much:
-- **The pool keeps every size it has used.** Its buffers come in powers of two and go back to the pool instead of being freed, so `pool_bytes` is the peak of each size bucket added together. A tensor of 92 MB occupies a 128 MB buffer.
-- **Masked attention computes full score matrices.** With a padding mask, attention cannot use FlashAttention, so each layer computes `[batch·heads, S, S]` scores, in the forward pass and again in the backward pass. The padding mask itself is only `S` values per sequence (`key_padding`).
-- **GPU training keeps host copies.** The host keeps f64 copies of the parameters, their gradients and Adam's two moments, 32 bytes per parameter: 1.8 GB for the 55 M parameters of the GAN step.
+The GAN step's host heap grows by a few MB from step to step. The step does not get the same pool buffers in the same order every step, so most of its launches need new bindings; the binding cache grows until it is cleared at 16,384 entries.
+
+Where the GPU memory goes: the activations each layer keeps for the backward pass, and attention scores. With a padding mask, attention cannot use FlashAttention, so each layer computes `[batch·heads, S, S]` scores, in the forward pass and again in the backward pass. The padding mask itself is only `S` values per sequence (`key_padding`).
 
 ## 10. Precision
 
@@ -672,8 +677,8 @@ It compares every GPU result with the CPU engine, which is itself validated agai
 - **`ml_finance` models:** a deep hedger with CVaR, N-BEATS, PatchTST, a neural SDF, a conditional autoencoder with L1 penalty and early stopping, CQL with soft target updates, DeepLOB with the TCN, LSTM, GRU and Mamba sequence layers, the volatility forecaster with an LSTM, a GRU and a Mamba layer, and a VAE, each trained a few steps on both devices from the same seed. Losses and parameters agree with the CPU to 1e-5 or better (PatchTST: except its attention key biases, see [Precision](#10-precision)), with no CPU fallback.
 - **KV cache:** cached generation logits of three GPTs (batch 1 and 2, mixture of experts) fed in pieces and again after a reset agree with the CPU to 2e-6, with one download per call (the logits) where no layer reads values on the host.
 - **transformers:** 12 steps of four small GPTs (layer norm and GELU; flash attention; RMSNorm, tied embeddings and tanh GELU; mixture of experts) and a BERT with padding masks, all with dropout on and the same masks on both devices. Losses agree with the CPU to 1e-6 and parameters to 2e-4 or better, except the attention key biases (see [Precision](#10-precision)). None of these models uses a CPU fallback.
-- **residency:** host copies, sync procedures, automatic uploads, `to_host`, detach.
-- **memory:** a scoped training loop keeps the pool size flat, and a debug build reports no leaks.
+- **residency:** host copies, sync procedures, automatic uploads, `to_host`, detach. Training with Adam and with SGD keeps no host copies of parameters, gradients, moments or velocity (the host memory of model and optimizer falls by at least 24 and 8 bytes per parameter), a checkpoint frees the moment copies it makes, and after `to_host` a CPU step continues from the device state: three GPU steps and one CPU step end where four GPU steps end, to 5e-8.
+- **memory:** a scoped training loop keeps the pool size flat, and a debug build reports no leaks. Buffers have the expected size classes. Training with 500 to 8000 rows per step matches the CPU to 3e-6, while the pool gives buffers back and never holds more than 1.25 times the peak in use.
 - **checkpoints:** saved from the GPU, loaded on the CPU, parameters and Adam moments identical.
 
 Without a usable adapter the suite prints `SKIP` and exits with code 0.
@@ -689,7 +694,8 @@ Without a usable adapter the suite prints `SKIP` and exits with code 0.
 | `gpu.to_device(x)` / `gpu.to_device(xs)` | move tensors to the GPU |
 | `gpu.to_host(x)` / `gpu.to_host(xs)` | move tensors back to the CPU |
 | `gpu.synchronize()` | wait until the GPU has finished all recorded work |
-| `gpu.stats() -> Stats` / `gpu.reset_stats()` | launches, cached bindings, submissions, transfers, pool size, automatic uploads, fallbacks per op |
+| `gpu.stats() -> Stats` / `gpu.reset_stats()` | launches, cached bindings, submissions, transfers, pool size, memory in use and its peak, buffers given back, automatic uploads, fallbacks per op |
+| `gpu.release_cached()` | give the pool's free buffers back to the device and restart its peak |
 | `gpu.has_kernel(op)` | whether an op has a GPU kernel |
 | `gpu.set_kernel_enabled(op, enabled)` | run an op through the CPU fallback (testing, comparisons) |
 | `gpu.set_matmul_kernel(k)` | `.Auto` (default), `.Tiled` or `.Simple` matrix-product kernel |

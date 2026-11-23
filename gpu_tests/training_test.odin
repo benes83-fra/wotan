@@ -229,7 +229,7 @@ gpu_residency_test :: proc() {
 	x := t.tensor_new(m, true)
 	gpu.to_device(x)
 	check(t.tensor_is_on_device(x), "to_device: tensor not on the device")
-	check(x.data.data == nil, "to_device: the host slice is not parked")
+	check(x.data.data == nil, "to_device: the host copy was kept")
 	v := t.tensor_values(x)
 	check(len(v) == 6 && v[0] == -2.5 && v[5] == 2.5, "tensor_values: got %v", v)
 
@@ -365,7 +365,7 @@ gpu_checkpoint_test :: proc() {
 		m_worst := 0.0
 		for m, i in opt.moment_1 {
 			dev := make([]f64, len(m), context.temp_allocator)
-			_ = t._device_hooks.optim_sync(raw_data(adam.moment_1[i]), dev, nil, false)
+			_ = t._device_hooks.optim_sync(adam.device_keys[i], dev, nil, false)
 			m_worst = max(m_worst, _max_rel(m, dev))
 		}
 		check(m_worst == 0, "loaded Adam moments differ from the device ones by %.2e", m_worst)
