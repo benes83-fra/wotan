@@ -72,6 +72,7 @@ main :: proc() {
 	gpu_host_copies_test()
 	gpu_pool_test()
 	gpu_checkpoint_test()
+	gpu_parameter_file_test()
 	gpu_speed_report()
 	gpu_matmul_benchmark()
 

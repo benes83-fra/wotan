@@ -658,6 +658,7 @@ apply = false returns the input: true
 | `save_gpt_model(&model, path)` | `load_gpt_model(path, use_flash = false, allocator) -> (^GPTModel, ok)` |
 | `save_bert_model(&model, path)` | `load_bert_model(path, use_flash = false, allocator) -> (^BERTModel, ok)` |
 | `save_generator`, `save_discriminator`, `save_vae_encoder`, `save_vae_decoder` | `load_generator(path)` and the others, each returning `(^Model, ok)` |
+| `save_parameters(path, params, opt = nil, metadata = nil)`: a parameter list of any model, optionally with its Adam state | `load_parameters(path, params, opt = nil, allocator) -> (metadata, ok)`, `read_parameters_metadata(path, allocator) -> (metadata, ok)` |
 
 The file format is little-endian binary with a magic header and a type id, followed by each layer's configuration and tensors:
 - **What is stored.** A model stores its full configuration, including the attention flags, MoE, RMSNorm, tied-embedding and GELU settings and the dropout rate, so a loaded model is built exactly as it was saved.
@@ -699,6 +700,66 @@ What `load_checkpoint` restores and what you must free:
 - **Freeing.** The model and the optimiser are allocated: free them with `sequential_free(model)`, then `adam_free(opt)` and `free(opt)`. The same applies to the other `load_*` procedures: call `gpt_model_free(model)` (or the model's own free procedure) and then `free(model)`.
 - **Frozen parameters.** The checkpoint stores which parameters are frozen, and `load_checkpoint` freezes them again, so the stored moments match the trainable parameters and training resumes exactly. A checkpoint from an older version of the format has no such flags and loads with every parameter trainable: if that model had frozen layers, its stored moments no longer match, and `load_checkpoint` resets them with the message "optimizer state does not match the model; moments reset".
 - **GPT and BERT files** store the frozen flags too, and `load_gpt_model` and `load_bert_model` freeze the same parameters again. Files from an older version of the format load with every parameter trainable.
+
+### Models of any structure
+
+A model that is not a `Sequential`, GPT or BERT model is saved as a list of its parameters. You list them in a fixed order and rebuild the model yourself before loading, for example from a configuration you store as metadata:
+
+```odin
+Tagger :: struct {
+	embed: nn.EmbeddingLayer,
+	proj:  nn.LinearLayer,
+}
+
+tagger_new :: proc(vocab, dim: int) -> Tagger {
+	return {nn.embedding_layer_new(vocab, dim), nn.linear_layer_new(dim, vocab)}
+}
+
+// always the same order
+tagger_params :: proc(m: ^Tagger) -> [3]^t.Tensor {
+	return {m.embed.weight, m.proj.weights, m.proj.bias}
+}
+
+main :: proc() {
+	rand.reset(3)
+	model := tagger_new(50, 16)
+	opt := nn.adam_new(0.01)
+	defer nn.adam_free(&opt)
+	ps := tagger_params(&model)
+	for p in ps {nn.adam_add_param(&opt, p)}
+	// ... training ...
+	ok := nn.save_parameters("tagger.bin", ps[:], &opt, transmute([]u8)string("16"))
+	fmt.println("saved:", ok)
+
+	// later: the dimension from the metadata, then the model, then the values
+	meta, ok2 := nn.read_parameters_metadata("tagger.bin")
+	defer delete(meta)
+	dim, _ := strconv.parse_int(string(meta))
+	resumed := tagger_new(50, dim)
+	opt2 := nn.adam_new()
+	defer nn.adam_free(&opt2)
+	ps2 := tagger_params(&resumed)
+	for p in ps2 {nn.adam_add_param(&opt2, p)}
+	_, ok3 := nn.load_parameters("tagger.bin", ps2[:], &opt2)
+	fmt.println(ok2, ok3, dim, opt2.learning_rate)
+
+	_, ok4 := nn.load_parameters("tagger.bin", ps2[:2], &opt2)
+	fmt.println("two of three parameters:", ok4)
+}
+```
+```
+saved: true
+true true 16 0.01
+two of three parameters: false
+```
+
+What the file holds and how loading behaves:
+- **Values and frozen flags.** Each parameter's values and whether it is frozen. `load_parameters` writes the values into the tensors you pass, which must have the stored count and shapes, and freezes or unfreezes each one as stored.
+- **Adam state.** With an optimiser, the file also holds its hyperparameters and timestep, and for each listed parameter registered in it the moments, the step count and its learning-rate scale (from `adam_add_param_with_lr`). Loading with an optimiser restores all of these, so training that continues after a load is bit-for-bit identical to training without the interruption, on the CPU and on the GPU. Register the same parameters in the new optimiser as in the saved one; a parameter registered in only one of them makes the load fail. Parameters registered in the optimiser but missing from the list are neither saved nor changed.
+- **Optional parts.** A file with Adam state also loads without an optimiser (values only). An optimiser passed with a file that has no Adam state is left unchanged.
+- **Metadata.** Bytes you choose, stored as they are; both loading procedures return a copy allocated with `allocator` (`nil` if none was stored). Free it with `delete`.
+- **Failures.** A missing, truncated, corrupt or foreign file, or a count, shape or registration that doesn't match, returns `ok = false` without a message. Nothing is changed and nothing leaks.
+- **GPU.** Parameters and moments may live on the device. Saving copies the moments to the host for the file and frees the copies; loading leaves device parameters on the device (they upload the new values on their next use), and the moments go back to the device at the next step.
 
 ## 11. Transfer learning and memory
 
@@ -1149,7 +1210,7 @@ The details:
 | BERT | `bert_model_new`, `bert_model_forward`, `bert_model_parameters`, `bert_block_parameters`, `bert_model_add_to_optimizer`, `bert_set_layer_norm_eps`, `bert_replace_nsp_head`, `bert_replace_mlm_head`, `bert_model_free` |
 | GAN / VAE | `generator_new`, `generator_forward`, `discriminator_new`, `discriminator_forward`, `discriminator_forward_no_sigmoid`, `*_add_to_optimizer`, `*_free`; `vae_encoder_new`, `vae_encoder_forward`, `vae_decoder_new`, `vae_decoder_forward`, `reparameterize` |
 | Augmentation | `AugmentationConfig`, `augment_batch`, `affine_transform_image` |
-| Files | `save_checkpoint`, `load_checkpoint`, `sequential_load_partial`, `save_gpt_model`, `load_gpt_model`, `save_bert_model`, `load_bert_model`, `save_generator`, `load_generator`, `save_discriminator`, `load_discriminator`, `save_vae_encoder`, `load_vae_encoder`, `save_vae_decoder`, `load_vae_decoder` |
+| Files | `save_checkpoint`, `load_checkpoint`, `sequential_load_partial`, `save_gpt_model`, `load_gpt_model`, `save_bert_model`, `load_bert_model`, `save_generator`, `load_generator`, `save_discriminator`, `load_discriminator`, `save_vae_encoder`, `load_vae_encoder`, `save_vae_decoder`, `load_vae_decoder`, `save_parameters`, `load_parameters`, `read_parameters_metadata` |
 | Constant intermediates | `forward_record_begin`, `forward_record_end(rec, results...)` |
 | Transfer | `sequential_freeze_all`, `sequential_unfreeze_all`, `sequential_freeze_range`, `gpt_freeze_all`, `gpt_unfreeze_all`, `gpt_freeze_blocks`, `bert_freeze_all`, `bert_unfreeze_all`, `bert_freeze_blocks`, `tensor_set_requires_grad` |
 | Tokenizers (`tk`) | `wordpiece_tokenizer_new`, `wordpiece_encode`, `wordpiece_decode`, `tokenize`, `tokenize_to_tensors`, `tokenize_pair`, `tokenize_pair_to_tensors`, `tokenize_batch_to_tensors`, `wordpiece_tokenizer_free`; `bpe_tokenizer_new`, `bpe_encode`, `bpe_decode`, `bpe_tokenize`, `bpe_tokenize_to_tensors`, `bpe_tokenize_batch_to_tensors`, `bpe_train`, `bpe_save`, `bpe_tokenizer_free`; `ts_tokenizer_new`, `ts_scale`, `ts_token`, `ts_encode`, `ts_encode_context`, `ts_decode`, `ts_encode_batch_to_tensors`, `ts_tokenizer_free` |

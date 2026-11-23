@@ -32,6 +32,13 @@ import "core:os"
 //     gpt_model_parameters / bert_model_parameters (all = true); older files
 //     load with every parameter trainable. Files without the dropout rate load
 //     with 0.1.
+//   Parameter list (40): magic, type id, the metadata (byte count i32 and the
+//     bytes), the parameter count, per parameter its frozen flag (i32) and
+//     tensor, then an Adam flag (i32). With Adam state: the timestep (i64),
+//     learning rate, beta_1, beta_2, epsilon, weight decay, and per parameter
+//     a registered flag (i32), for a registered one followed by its
+//     learning-rate scale, step count (i64) and both moments (count i32 and
+//     values).
 // Attention layers store use_flash and is_causal before their projections.
 // A file is built in memory and written at once. Reading checks every access,
 // so a truncated or foreign file fails instead of panicking. Loading builds
@@ -103,6 +110,7 @@ _File_Id :: enum {
 	BERT_2        = 32, // no frozen flags (read only)
 	GPT           = 38, // dropout rate, RMSNorm, tied-embedding and tanh-GELU flags; per block: MoE, use_flash and is_causal flags; frozen flags
 	BERT          = 39, // dropout rate; per block: use_flash and is_causal flags; frozen flags
+	Parameters    = 40, // a parameter list with metadata and optional Adam state
 }
 
 // ============================================================================
@@ -131,23 +139,23 @@ _writer :: proc(alloc: mem.Allocator) -> _Io {
 	return io
 }
 
-// Writes the file and releases the buffer
+// Writes the file and releases the buffer (`quiet`: no message on failure)
 @(private = "file")
-_save :: proc(io: ^_Io, path: string) -> bool {
+_save :: proc(io: ^_Io, path: string, quiet := false) -> bool {
 	defer delete(io.buf)
 	if err := os.write_entire_file(path, io.buf[:]); err != nil {
-		fmt.printf("Failed to write %s: %v\n", path, err)
+		if !quiet {fmt.printf("Failed to write %s: %v\n", path, err)}
 		return false
 	}
 	return true
 }
 
-// Reads a file and checks the magic bytes
+// Reads a file and checks the magic bytes (`quiet`: no message on failure)
 @(private = "file")
-_reader :: proc(path: string, alloc: mem.Allocator) -> (io: _Io, ok: bool) {
+_reader :: proc(path: string, alloc: mem.Allocator, quiet := false) -> (io: _Io, ok: bool) {
 	data, err := os.read_entire_file(path, alloc)
 	if err != nil {
-		fmt.printf("Failed to read %s: %v\n", path, err)
+		if !quiet {fmt.printf("Failed to read %s: %v\n", path, err)}
 		return {}, false
 	}
 	io = _Io {
@@ -157,7 +165,7 @@ _reader :: proc(path: string, alloc: mem.Allocator) -> (io: _Io, ok: bool) {
 	}
 	magic := _take(&io, len(CHECKPOINT_MAGIC))
 	if magic == nil || mem.compare(magic, CHECKPOINT_MAGIC) != 0 {
-		fmt.printf("%s is not a wotan model file\n", path)
+		if !quiet {fmt.printf("%s is not a wotan model file\n", path)}
 		delete(data, alloc)
 		return {}, false
 	}
@@ -961,6 +969,204 @@ _get_frozen :: proc(io: ^_Io, ps: []^t.Tensor) {
 		if !io.ok {return}
 		if frozen {tensor_set_requires_grad(ps[i], false)}
 	}
+}
+
+// ============================================================================
+// Parameter lists (models of any structure)
+// ============================================================================
+// For models that are not Sequential, GPT or BERT: the caller lists the
+// parameters (always in the same order) and rebuilds the model itself, e.g.
+// from a configuration stored as metadata. With an Adam optimizer, a restarted
+// run continues exactly as the uninterrupted one would.
+
+// Saves the values of `params` in order with each one's frozen flag and, when
+// `opt` is not nil, the Adam state of those registered in it: the
+// hyperparameters and timestep, and per parameter its moments, step count and
+// learning-rate scale. Parameters registered in `opt` but not in `params` are
+// not saved. `metadata` is stored as it is (e.g. the model configuration and
+// the training step). Parameters and moments may be on the host or the GPU;
+// they stay where they are. Returns false (without a message) if the file can't
+// be written or a parameter is nil.
+save_parameters :: proc(
+	path: string,
+	params: []^t.Tensor,
+	opt: ^Adam = nil,
+	metadata: []u8 = nil,
+) -> bool {
+	for p in params {if p == nil {return false}}
+	io := _writer(context.allocator)
+	_put_i32(&io, int(_File_Id.Parameters))
+	_put_i32(&io, len(metadata))
+	append(&io.buf, ..metadata)
+	_put_i32(&io, len(params))
+	for &p in params {
+		_put_i32(&io, int(!p.requires_grad))
+		_io_tensor(&io, &p)
+	}
+	_put_i32(&io, int(opt != nil))
+	if opt != nil {
+		host_copies := _adam_state_to_host(opt)
+		defer for i in host_copies {_adam_free_host_moments(opt, i)} 	// their moments stay on the device
+		_put_i64(&io, opt.timestep)
+		for v in ([]f64{opt.learning_rate, opt.beta_1, opt.beta_2, opt.epsilon, opt.weight_decay}) {_put_f64(&io, v)}
+		for p in params {
+			i := _adam_index(opt, p)
+			_put_i32(&io, int(i >= 0))
+			if i < 0 {continue}
+			_put_f64(&io, opt.lr_scales[i])
+			_put_i64(&io, opt.steps[i])
+			for m in ([][]f64{opt.moment_1[i], opt.moment_2[i]}) {
+				_put_i32(&io, len(m))
+				start := len(io.buf)
+				resize(&io.buf, start + 8 * len(m))
+				for v, j in m {endian.put_f64(io.buf[start + 8 * j:], .Little, v)}
+			}
+		}
+	}
+	return _save(&io, path, quiet = true)
+}
+
+// Loads a file of save_parameters into `params`, which must have the stored
+// count and shapes (host or GPU tensors; GPU tensors upload the values on
+// their next use), and restores their frozen flags. When `opt` is not nil and
+// the file holds Adam state, the parameters registered in `opt` get their
+// moments, step counts and learning-rate scales back, and `opt` its
+// hyperparameters and timestep; the parameters registered must be the ones
+// that were registered when saving (matched by position in `params`). Returns
+// the metadata, allocated with `allocator` (nil if none was stored). A missing,
+// truncated or foreign file, or a count, shape or registration that doesn't
+// match, returns ok = false and changes nothing.
+load_parameters :: proc(
+	path: string,
+	params: []^t.Tensor,
+	opt: ^Adam = nil,
+	allocator := context.allocator,
+) -> (
+	metadata: []u8,
+	ok: bool,
+) {
+	io, meta := _read_parameters_header(path) or_return
+	defer delete(io.data)
+
+	// read and check everything before changing anything
+	Stored :: struct {
+		frozen:     bool,
+		values:     []u8,
+		registered: bool,
+		lr_scale:   f64,
+		steps:      int,
+		moments:    [2][]u8,
+	}
+	stored := make([]Stored, len(params))
+	defer delete(stored)
+	if _get_size(&io) != len(params) {return nil, false}
+	for p, j in params {
+		s := &stored[j]
+		s.frozen = _get_i32(&io) != 0
+		rows, cols := _get_size(&io), _get_size(&io)
+		if !io.ok || p == nil || rows != p.data.rows || cols != p.data.cols {return nil, false}
+		s.values = _take(&io, 8 * rows * cols)
+	}
+	has_adam := _get_i32(&io) != 0
+	timestep: int
+	hyper: [5]f64 // learning rate, beta_1, beta_2, epsilon, weight decay
+	if has_adam {
+		timestep = _get_i64(&io)
+		for &v in hyper {v = _get_f64(&io)}
+		for p, j in params {
+			s := &stored[j]
+			s.registered = _get_i32(&io) != 0
+			if !s.registered {continue}
+			s.lr_scale, s.steps = _get_f64(&io), _get_i64(&io)
+			for &m in s.moments {
+				if _get_size(&io) != t.tensor_numel(p) {io.ok = false}
+				m = _take(&io, 8 * t.tensor_numel(p))
+			}
+		}
+	}
+	if !io.ok || io.pos != len(io.data) {return nil, false}
+	restore_adam := opt != nil && has_adam
+	if restore_adam {
+		for p, j in params {
+			if (_adam_index(opt, p) >= 0) != stored[j].registered {return nil, false}
+		}
+	}
+
+	for p, j in params {
+		s := stored[j]
+		for &v, k in t.tensor_values(p) {v, _ = endian.get_f64(s.values[8 * k:], .Little)}
+		t.tensor_mark_host_dirty(p)
+		if p.requires_grad == s.frozen {tensor_set_requires_grad(p, !s.frozen)}
+	}
+	if restore_adam {
+		opt.timestep = timestep
+		opt.learning_rate, opt.beta_1, opt.beta_2 = hyper[0], hyper[1], hyper[2]
+		opt.epsilon, opt.weight_decay = hyper[3], hyper[4]
+		for p, j in params {
+			s := stored[j]
+			if !s.registered {continue}
+			i := _adam_index(opt, p)
+			opt.lr_scales[i], opt.steps[i] = s.lr_scale, s.steps
+			// host moments: a device parameter uploads them at its next step
+			if t._device_hooks.optim_release !=
+			   nil {t._device_hooks.optim_release(opt.device_keys[i])}
+			if opt.moment_1[i] == nil {
+				opt.moment_1[i] = make([]f64, len(s.moments[0]) / 8, opt.allocator)
+				opt.moment_2[i] = make([]f64, len(s.moments[1]) / 8, opt.allocator)
+			}
+			for m, k in ([][]f64{opt.moment_1[i], opt.moment_2[i]}) {
+				for &v, n in m {v, _ = endian.get_f64(s.moments[k][8 * n:], .Little)}
+			}
+		}
+	}
+	if len(meta) > 0 {
+		metadata = make([]u8, len(meta), allocator)
+		copy(metadata, meta)
+	}
+	return metadata, true
+}
+
+// The metadata of a file of save_parameters (allocated with `allocator`, nil
+// if none was stored), without loading the parameters: e.g. the configuration
+// to build the model before load_parameters
+read_parameters_metadata :: proc(
+	path: string,
+	allocator := context.allocator,
+) -> (
+	metadata: []u8,
+	ok: bool,
+) {
+	io, meta := _read_parameters_header(path) or_return
+	defer delete(io.data)
+	if len(meta) > 0 {
+		metadata = make([]u8, len(meta), allocator)
+		copy(metadata, meta)
+	}
+	return metadata, true
+}
+
+// Reads a parameter-list file (context.allocator) up to its parameters and
+// returns the metadata bytes (a slice of io.data)
+@(private = "file")
+_read_parameters_header :: proc(path: string) -> (io: _Io, metadata: []u8, ok: bool) {
+	io = _reader(path, context.allocator, quiet = true) or_return
+	if _File_Id(_get_i32(&io)) != .Parameters {
+		delete(io.data)
+		return {}, nil, false
+	}
+	metadata = _take(&io, _get_size(&io))
+	if !io.ok {
+		delete(io.data)
+		return {}, nil, false
+	}
+	return io, metadata, true
+}
+
+// The position of `p` among the parameters registered in `opt`, or -1
+@(private = "file")
+_adam_index :: proc(opt: ^Adam, p: ^t.Tensor) -> int {
+	for q, i in opt.parameters {if q == p {return i}}
+	return -1
 }
 
 // ============================================================================
