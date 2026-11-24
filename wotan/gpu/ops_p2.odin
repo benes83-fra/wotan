@@ -39,6 +39,30 @@ _upload_ints :: proc(values: []int) -> Bind {
 	return _upload_values(tmp)
 }
 
+// _embedding_inverse: the gradient map of an embedding for Gather_Time_Bwd,
+// offsets [vocab + 1] then the positions grouped by id, in increasing order
+// (an id outside [0, vocab) contributes nothing)
+@(private)
+_embedding_inverse :: proc(ids: []f64, vocab: int) -> Bind {
+	assert(len(ids) < 1 << 24 && vocab < 1 << 24, "gpu embedding backward: too many positions")
+	inv := make([]int, vocab + 1 + len(ids), context.temp_allocator)
+	offsets := inv[:vocab + 1]
+	for v in ids {
+		id := int(v)
+		if id >= 0 && id < vocab {offsets[id + 1] += 1}
+	}
+	for v in 0 ..< vocab {offsets[v + 1] += offsets[v]}
+	fill := make([]int, vocab, context.temp_allocator)
+	list := inv[vocab + 1:]
+	for v, r in ids {
+		id := int(v)
+		if id < 0 || id >= vocab {continue}
+		list[offsets[id] + fill[id]] = r
+		fill[id] += 1
+	}
+	return _upload_ints(inv[:vocab + 1 + offsets[vocab]])
+}
+
 // _aux: the op state saved by the forward (dropout or attention mask) on the
 // device; uploaded from the host copy when the forward ran on the CPU
 @(private)
@@ -423,8 +447,14 @@ _backward_p2 :: proc(node: ^t.Tensor, dy: Bind, n: int) -> bool {
 		if !w.requires_grad {return true}
 		rows := ids.shape[0] * ids.shape[1]
 		E, vocab := w.shape[1], w.shape[0]
-		u := [8]u32{u32(rows), u32(E), u32(vocab), 0, 0, 0, 0, 0}
-		_dispatch_1d(.Scatter_Add_Rows, _p(u), {_in_data(ids), dy, _in_grad(w)}, rows * E)
+		// gathered per vocabulary row, over its positions in increasing order:
+		// a fixed summation order, the same gradient on every run (ids that
+		// live only on the device are downloaded for the map)
+		inv := _embedding_inverse(t.tensor_values(ids)[:rows], vocab)
+		g, fresh := _out_grad(w)
+		u := [8]u32{u32(vocab), u32(E), 0, 0, 0, 0, 0, u32(fresh)}
+		_dispatch_1d(.Gather_Time_Bwd, _p(u), {dy, inv, g}, vocab * E)
+		_release_buf(inv.buf)
 		t._grad_written_on_device(w)
 	case .PermuteMHA, .PermuteMHAInverse:
 		a := node.inputs[0]

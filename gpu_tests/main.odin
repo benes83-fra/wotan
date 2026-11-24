@@ -75,6 +75,7 @@ main :: proc() {
 	gpu_parameter_file_test()
 	gpu_dropout_masks_test()
 	gpu_recurrent_steps_test()
+	gpu_embedding_order_test()
 	gpu_speed_report()
 	gpu_matmul_benchmark()
 

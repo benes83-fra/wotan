@@ -70,7 +70,6 @@ Kernel :: enum {
 	Norm_Bwd_X, // per row: input gradient of layer norm / RMS norm
 	Norm_Bwd_Param, // per column: gamma (and beta) gradients
 	Gather_Rows, // embedding lookup
-	Scatter_Add_Rows, // embedding backward (atomic adds)
 	Permute_Mha, // [B, S, H·hd] <-> [B·H, S, hd]
 	Bce, // binary cross-entropy: per-element loss or gradients
 	Row_Scale, // dst[i] (+)= src[i] * g[i / D] (gate_mul)
@@ -86,7 +85,7 @@ Kernel :: enum {
 	Overlap_Add, // weighted overlap-add of frames into signals (tensor_overlap_add)
 	Overlap_Add_Bwd, // its frame gradient
 	Gather_Time, // time steps of sequences gathered by index (tensor_index_select_time)
-	Gather_Time_Bwd, // its gradient, summed per source step over the steps that read it
+	Gather_Time_Bwd, // its gradient, summed per source step over the steps that read it (and the embedding backward)
 	Chan_Bias, // dst[i] += b[(i / L) % C]
 	Chan_Sum, // per channel: db[c] += Σ_{n, l} dy[n, c, l]
 	Pool, // max / average pooling
@@ -1862,29 +1861,6 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 	o[i] = v;
 }
 `,
-	// dW[ids[r], e] += dy[r, e]; rows sharing an id add atomically (compare-and-swap)
-	.Scatter_Add_Rows   = `
-@group(0) @binding(1) var<storage, read> ids: array<f32>;
-@group(0) @binding(2) var<storage, read> dy: array<f32>;
-@group(0) @binding(3) var<storage, read_write> dW: array<atomic<u32>>;
-@compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
-	let i = idx1(g, nw);
-	if (i >= p.u0 * p.u1) { return; }
-	let r = i / p.u1;
-	let e = i % p.u1;
-	let id = i32(ids[r]);
-	if (id < 0 || u32(id) >= p.u2) { return; }
-	let a = u32(id) * p.u1 + e;
-	let v = dy[i];
-	var old = atomicLoad(&dW[a]);
-	loop {
-		let res = atomicCompareExchangeWeak(&dW[a], old, bitcast<u32>(bitcast<f32>(old) + v));
-		if (res.exchanged) { break; }
-		old = res.old_value;
-	}
-}
-`,
 	// element (b, h, s, d): sequence layout b·S·H·hd + s·H·hd + h·hd + d, head
 	// layout (b·H + h)·S·hd + s·hd + d; u0 B, u1 S, u2 H, u3 hd, u4 0: head <-
 	// sequence, 1: sequence <- head; u5 accumulate
@@ -2204,7 +2180,8 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 	// dx[r, c] = Σ dy[o, c] over the output rows o that read source row r: inv
 	// holds offsets[u0 + 1] (per source row) then the output rows, grouped by
 	// source row. u0 source rows, u1 C, u7 1: overwrite (keep). One thread per
-	// element of x, a fixed summation order.
+	// element of x, a fixed summation order. The embedding backward uses it with
+	// the vocabulary rows as source rows and the id positions as output rows.
 	.Gather_Time_Bwd    = `
 @group(0) @binding(1) var<storage, read> dy: array<f32>;
 @group(0) @binding(2) var<storage, read> inv: array<f32>;
