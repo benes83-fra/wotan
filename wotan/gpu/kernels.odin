@@ -85,7 +85,11 @@ Kernel :: enum {
 	Overlap_Add, // weighted overlap-add of frames into signals (tensor_overlap_add)
 	Overlap_Add_Bwd, // its frame gradient
 	Gather_Time, // time steps of sequences gathered by index (tensor_index_select_time)
-	Gather_Time_Bwd, // its gradient, summed per source step over the steps that read it (and the embedding backward)
+	Gather_Time_Bwd, // its gradient, summed per source step over the steps that read it
+	Id_Sort_Count, // embedding backward: per block of 256 positions, the count of each 8-bit digit of the id
+	Id_Sort_Scan, // the counts turned into each (digit, block)'s first place in the sorted order
+	Id_Sort_Place, // the positions moved to their place, stable (one pass of a radix sort by id)
+	Id_Grad_Sum, // per id: its gradient row summed over its sorted positions (in position order)
 	Chan_Bias, // dst[i] += b[(i / L) % C]
 	Chan_Sum, // per channel: db[c] += Σ_{n, l} dy[n, c, l]
 	Pool, // max / average pooling
@@ -2180,8 +2184,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 	// dx[r, c] = Σ dy[o, c] over the output rows o that read source row r: inv
 	// holds offsets[u0 + 1] (per source row) then the output rows, grouped by
 	// source row. u0 source rows, u1 C, u7 1: overwrite (keep). One thread per
-	// element of x, a fixed summation order. The embedding backward uses it with
-	// the vocabulary rows as source rows and the id positions as output rows.
+	// element of x, a fixed summation order.
 	.Gather_Time_Bwd    = `
 @group(0) @binding(1) var<storage, read> dy: array<f32>;
 @group(0) @binding(2) var<storage, read> inv: array<f32>;
@@ -2197,6 +2200,117 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 	var acc = 0.0;
 	for (var k = a; k < e; k++) { acc = acc + dy[u32(inv[p.u0 + 1u + k]) * p.u1 + c]; }
 	dx[i] = keep(dx[i], p.u7) + acc;
+}
+`,
+	// The embedding backward sorts the positions by id with a stable radix sort
+	// (8 bits per pass), so each id's positions end up in increasing order, then
+	// sums each id's gradient over them in that order: the same result on every
+	// run (no float atomics). Keys are the ids, or u1 (the vocabulary size) for
+	// an id outside [0, u1), which gets no gradient (as the forward reads 0).
+	// Positions are grouped in blocks of 256, one workgroup each (u3 blocks).
+	//
+	// Count: cnt[d · u3 + b] = how many positions of block b have digit d
+	// (bits u2 .. u2 + 7 of the key). u0 positions; keys: the ids (u4 1, first
+	// pass) or the keys sorted by the earlier passes.
+	.Id_Sort_Count      = `
+@group(0) @binding(1) var<storage, read> keys: array<f32>;
+@group(0) @binding(2) var<storage, read_write> cnt: array<f32>;
+var<workgroup> n: array<atomic<u32>, 256>;
+@compute @workgroup_size(256)
+fn main(@builtin(local_invocation_index) li: u32, @builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
+	let b = row_of(wid, nw);
+	let r = b * 256u + li;
+	atomicStore(&n[li], 0u); // (workgroup memory is not cleared by the device)
+	workgroupBarrier();
+	if (b < p.u3 && r < p.u0) {
+		let id = i32(keys[r]);
+		var key = p.u1;
+		if (id >= 0 && u32(id) < p.u1) { key = u32(id); }
+		atomicAdd(&n[(key >> p.u2) & 255u], 1u);
+	}
+	workgroupBarrier();
+	if (b < p.u3) { cnt[li * p.u3 + b] = f32(atomicLoad(&n[li])); }
+}
+`,
+	// Scan (one workgroup): cnt[k] = Σ cnt[j < k] over the u0 counts, in place
+	.Id_Sort_Scan       = `
+@group(0) @binding(1) var<storage, read_write> cnt: array<f32>;
+var<workgroup> part: array<u32, 256>;
+@compute @workgroup_size(256)
+fn main(@builtin(local_invocation_index) li: u32) {
+	let per = (p.u0 + 255u) / 256u;
+	let a = min(li * per, p.u0);
+	let e = min(a + per, p.u0);
+	var s = 0u;
+	for (var k = a; k < e; k++) { s = s + u32(cnt[k]); }
+	part[li] = s;
+	workgroupBarrier();
+	if (li == 0u) {
+		var run = 0u;
+		for (var k = 0u; k < 256u; k++) { let c = part[k]; part[k] = run; run = run + c; }
+	}
+	workgroupBarrier();
+	var run = part[li];
+	for (var k = a; k < e; k++) { let c = u32(cnt[k]); cnt[k] = f32(run); run = run + c; }
+}
+`,
+	// Place: each position goes to its digit's first place for its block plus
+	// the number of earlier positions in the block with the same digit. Writes
+	// the key and the original position (pos: the positions sorted so far; u4 1,
+	// first pass: the position is the index).
+	.Id_Sort_Place      = `
+@group(0) @binding(1) var<storage, read> keys: array<f32>;
+@group(0) @binding(2) var<storage, read> pos: array<f32>;
+@group(0) @binding(3) var<storage, read> cnt: array<f32>;
+@group(0) @binding(4) var<storage, read_write> keys_out: array<f32>;
+@group(0) @binding(5) var<storage, read_write> pos_out: array<f32>;
+var<workgroup> dig: array<u32, 256>;
+@compute @workgroup_size(256)
+fn main(@builtin(local_invocation_index) li: u32, @builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
+	let b = row_of(wid, nw);
+	let r = b * 256u + li;
+	let live = b < p.u3 && r < p.u0;
+	var key = 0u;
+	var d = 256u;
+	if (live) {
+		let id = i32(keys[r]);
+		key = p.u1;
+		if (id >= 0 && u32(id) < p.u1) { key = u32(id); }
+		d = (key >> p.u2) & 255u;
+	}
+	dig[li] = d;
+	workgroupBarrier();
+	if (live) {
+		var rank = 0u;
+		for (var j = 0u; j < li; j++) { rank = rank + select(0u, 1u, dig[j] == d); }
+		let at = u32(cnt[d * p.u3 + b]) + rank;
+		keys_out[at] = f32(key);
+		var src = f32(r);
+		if (p.u4 == 0u) { src = pos[r]; }
+		pos_out[at] = src;
+	}
+}
+`,
+	// Sum: dw[id, c] += Σ dy[r, c] over the positions r of id, in increasing
+	// order. One thread per (sorted position, column); the first position of
+	// each id sums its run. u0 positions, u1 E, u2 vocabulary size.
+	.Id_Grad_Sum        = `
+@group(0) @binding(1) var<storage, read> dy: array<f32>;
+@group(0) @binding(2) var<storage, read> keys: array<f32>;
+@group(0) @binding(3) var<storage, read> pos: array<f32>;
+@group(0) @binding(4) var<storage, read_write> dw: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
+	let i = idx1(g, nw);
+	if (i >= p.u0 * p.u1) { return; }
+	let k = i / p.u1;
+	let c = i % p.u1;
+	let key = keys[k];
+	if (u32(key) >= p.u2 || (k > 0u && keys[k - 1u] == key)) { return; }
+	var acc = 0.0;
+	for (var j = k; j < p.u0 && keys[j] == key; j++) { acc = acc + dy[u32(pos[j]) * p.u1 + c]; }
+	let o = u32(key) * p.u1 + c;
+	dw[o] = dw[o] + acc;
 }
 `,
 	// its frame gradient: one thread per frame element; u7 1: overwrite (keep)

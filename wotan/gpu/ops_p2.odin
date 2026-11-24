@@ -39,28 +39,45 @@ _upload_ints :: proc(values: []int) -> Bind {
 	return _upload_values(tmp)
 }
 
-// _embedding_inverse: the gradient map of an embedding for Gather_Time_Bwd,
-// offsets [vocab + 1] then the positions grouped by id, in increasing order
-// (an id outside [0, vocab) contributes nothing)
+// _embedding_grad: dw += the embedding weight gradient, on the device. The
+// `rows` positions are sorted by id (a stable radix sort, 8 bits per pass),
+// then each id's row sums dy over its positions in increasing order: a fixed
+// order, the same gradient on every run. Ids outside [0, vocab) contribute
+// nothing. Keys and positions are kept as f32, exact below 2^24.
 @(private)
-_embedding_inverse :: proc(ids: []f64, vocab: int) -> Bind {
-	assert(len(ids) < 1 << 24 && vocab < 1 << 24, "gpu embedding backward: too many positions")
-	inv := make([]int, vocab + 1 + len(ids), context.temp_allocator)
-	offsets := inv[:vocab + 1]
-	for v in ids {
-		id := int(v)
-		if id >= 0 && id < vocab {offsets[id + 1] += 1}
+_embedding_grad :: proc(ids, dy, dw: Bind, rows, E, vocab: int) {
+	assert(rows < 1 << 24 && vocab < 1 << 24, "gpu embedding backward: too many positions")
+	if rows <= 0 || E <= 0 {return}
+	blocks := (rows + 255) / 256
+	cnt := Bind{_acquire(256 * blocks), 256 * blocks}
+	keys := [2]Bind{{_acquire(rows), rows}, {_acquire(rows), rows}}
+	pos := [2]Bind{{_acquire(rows), rows}, {_acquire(rows), rows}}
+	// the keys run up to vocab (the key of an id outside the vocabulary)
+	bits := 1
+	for vocab >= 1 << uint(bits) {bits += 1}
+	from_keys, from_pos := ids, _dummy()
+	out := 0
+	for shift := 0; shift < bits; shift += 8 {
+		first := u32(shift == 0)
+		u := [8]u32{u32(rows), u32(vocab), u32(shift), u32(blocks), first, 0, 0, 0}
+		_dispatch_rows(.Id_Sort_Count, _p(u), {from_keys, cnt}, blocks)
+		_dispatch(.Id_Sort_Scan, _p({u32(256 * blocks), 0, 0, 0, 0, 0, 0, 0}), {cnt}, 1, 1)
+		_dispatch_rows(
+			.Id_Sort_Place,
+			_p(u),
+			{from_keys, from_pos, cnt, keys[out], pos[out]},
+			blocks,
+		)
+		from_keys, from_pos = keys[out], pos[out]
+		out = 1 - out
 	}
-	for v in 0 ..< vocab {offsets[v + 1] += offsets[v]}
-	fill := make([]int, vocab, context.temp_allocator)
-	list := inv[vocab + 1:]
-	for v, r in ids {
-		id := int(v)
-		if id < 0 || id >= vocab {continue}
-		list[offsets[id] + fill[id]] = r
-		fill[id] += 1
+	u := [8]u32{u32(rows), u32(E), u32(vocab), 0, 0, 0, 0, 0}
+	_dispatch_1d(.Id_Grad_Sum, _p(u), {dy, from_keys, from_pos, dw}, rows * E)
+	_release_buf(cnt.buf)
+	for i in 0 ..< 2 {
+		_release_buf(keys[i].buf)
+		_release_buf(pos[i].buf)
 	}
-	return _upload_ints(inv[:vocab + 1 + offsets[vocab]])
 }
 
 // _aux: the op state saved by the forward (dropout or attention mask) on the
@@ -447,14 +464,9 @@ _backward_p2 :: proc(node: ^t.Tensor, dy: Bind, n: int) -> bool {
 		if !w.requires_grad {return true}
 		rows := ids.shape[0] * ids.shape[1]
 		E, vocab := w.shape[1], w.shape[0]
-		// gathered per vocabulary row, over its positions in increasing order:
-		// a fixed summation order, the same gradient on every run (ids that
-		// live only on the device are downloaded for the map)
-		inv := _embedding_inverse(t.tensor_values(ids)[:rows], vocab)
-		g, fresh := _out_grad(w)
-		u := [8]u32{u32(vocab), u32(E), 0, 0, 0, 0, 0, u32(fresh)}
-		_dispatch_1d(.Gather_Time_Bwd, _p(u), {dy, inv, g}, vocab * E)
-		_release_buf(inv.buf)
+		// summed per id over its positions in increasing order (sorted on the
+		// device, no read back): the same gradient on every run
+		_embedding_grad(_in_data(ids), dy, _in_grad(w), rows, E, vocab)
 		t._grad_written_on_device(w)
 	case .PermuteMHA, .PermuteMHAInverse:
 		a := node.inputs[0]
