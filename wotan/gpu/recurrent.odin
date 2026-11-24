@@ -3,12 +3,49 @@ package gpu
 import t "../tensor"
 
 // Recurrent layers on the GPU (LSTM, GRU, tanh RNN). The input projection
-// x @ W_ih of all steps is one matrix product; the recurrence runs in one
-// launch, one workgroup per sequence (the sequences are independent), with a
-// barrier between steps. The backward pass runs back through time in one
-// launch, which writes the gate gradients of every step; the weight, bias and
-// input gradients are then products over all steps at once, as on the CPU.
-// Rows of the per-step buffers are b·S + s, x's own layout.
+// x @ W_ih of all steps is one matrix product; the recurrence runs with one
+// workgroup per sequence (the sequences are independent) and a barrier between
+// steps. The backward pass runs back through time and writes the gate
+// gradients of every step; the weight, bias and input gradients are then
+// products over all steps at once, as on the CPU. Rows of the per-step buffers
+// are b·S + s, x's own layout.
+//
+// Both passes are serial in time, so a large layer keeps the GPU busy for a
+// long time (about 1 s for the backward pass of 160 sequences of 160 steps
+// with H = 768 on a laptop RTX 3060). Windows resets a GPU whose submission
+// runs longer than about 2 s, so a pass runs as several launches of a block
+// of steps each (REC_LAUNCH_WORK) and, when it needs more than one, every
+// launch is submitted on its own. The states between blocks stay in the
+// saved and carry buffers, so the values do not depend on the blocks.
+
+// REC_LAUNCH_WORK: the multiply-adds of hidden-to-hidden products one
+// recurrent launch may run (B · H · gate columns per step); about 35 ms for
+// the backward pass on a laptop RTX 3060
+@(private)
+REC_LAUNCH_WORK :: 1 << 31
+
+// _rec_steps: the steps per launch of a recurrence over B sequences with
+// hidden size H and `gates` gate columns
+@(private)
+_rec_steps :: proc(B, S, H, gates: int) -> int {
+	if G.rec_steps > 0 {return min(G.rec_steps, S)}
+	return clamp(REC_LAUNCH_WORK / max(B * H * gates, 1), 1, S)
+}
+
+// _rec_launch: the recurrent kernel k over all S steps, in blocks of
+// _rec_steps (u5 ..< u6 the block's steps, counted in the kernel's own
+// direction); with more than one block every launch is submitted on its own
+@(private)
+_rec_launch :: proc(k: Kernel, p: Params, binds: []Bind, B, S, H, gates: int) {
+	n := _rec_steps(B, S, H, gates)
+	gx, gy := _seq_grid(B)
+	for s0 := 0; s0 < S; s0 += n {
+		q := p
+		q.u[5], q.u[6] = u32(s0), u32(min(s0 + n, S))
+		_dispatch(k, q, binds, gx, gy)
+		if n < S {_flush()}
+	}
+}
 
 // values the forward passes keep (the CPU's layouts, see tensor_lstm,
 // tensor_gru, tensor_rnn): state rows (S + 1 each), then per-step blocks
@@ -41,8 +78,15 @@ _rec_forward :: proc(
 	all: [8]Bind
 	all[0] = {proj, B * S * G}
 	copy(all[1:], binds)
-	gx, gy := _seq_grid(B)
-	_dispatch(k, _p({u32(B), u32(S), u32(H), flags, 0, 0, 0, 0}), all[:1 + len(binds)], gx, gy)
+	_rec_launch(
+		k,
+		_p({u32(B), u32(S), u32(H), flags, 0, 0, 0, 0}),
+		all[:1 + len(binds)],
+		B,
+		S,
+		H,
+		G,
+	)
 	_release_buf(proj) // later reuse is recorded after the dispatches
 }
 
@@ -143,8 +187,7 @@ _lstm_backward :: proc(node: ^t.Tensor, dy: Bind) {
 	// 1. back through time; dh_0 and dc_0 at the end
 	dh0, w0, o0 := _h0_grad(h0, 0)
 	dc0, w1, o1 := _h0_grad(c0, 1)
-	gx, gy := _seq_grid(B)
-	_dispatch(
+	_rec_launch(
 		.Lstm_Bwd,
 		_p({u32(B), u32(S), u32(H), w0 | w1, o0 | o1, 0, 0, 0}),
 		{
@@ -157,8 +200,10 @@ _lstm_backward :: proc(node: ^t.Tensor, dy: Bind) {
 			dh0,
 			dc0,
 		},
-		gx,
-		gy,
+		B,
+		S,
+		H,
+		G,
 	)
 	// 2. all steps at once
 	_rec_param_grads(x, w_ih, w_hh, bias, dg, dg, hs, R, in_f, H, G)
@@ -215,8 +260,7 @@ _gru_backward :: proc(node: ^t.Tensor, dy: Bind) {
 
 	// 1. back through time; dh_0 at the end
 	dh0, wanted, overwrite := _h0_grad(h0, 0)
-	gx, gy := _seq_grid(B)
-	_dispatch(
+	_rec_launch(
 		.Gru_Bwd,
 		_p({u32(B), u32(S), u32(H), wanted, overwrite, 0, 0, 0}),
 		{
@@ -229,8 +273,10 @@ _gru_backward :: proc(node: ^t.Tensor, dy: Bind) {
 			{carry, 2 * B * H},
 			dh0,
 		},
-		gx,
-		gy,
+		B,
+		S,
+		H,
+		G,
 	)
 	// 2. all steps at once; d b_hn = Σ rows of the n columns of d_hh
 	_rec_param_grads(x, w_ih, w_hh, bias, d_ih, d_hh, hs, R, in_f, H, G)
@@ -289,13 +335,14 @@ _rnn_backward :: proc(node: ^t.Tensor, dy: Bind) {
 	dg, hs := Bind{dG, R * H}, Bind{hb, R * H}
 
 	dh0, wanted, overwrite := _h0_grad(h0, 0)
-	gx, gy := _seq_grid(B)
-	_dispatch(
+	_rec_launch(
 		.Rnn_Bwd,
 		_p({u32(B), u32(S), u32(H), wanted, overwrite, 0, 0, 0}),
 		{dy, _bind(node.device.aux_buf, _rnn_saved(B, S, H)), wt, dg, hs, {carry, B * H}, dh0},
-		gx,
-		gy,
+		B,
+		S,
+		H,
+		H,
 	)
 	_rec_param_grads(x, w_ih, w_hh, bias, dg, dg, hs, R, in_f, H, H)
 }

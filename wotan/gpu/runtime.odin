@@ -111,6 +111,7 @@ State :: struct {
 	disabled:         [t.Op]bool,
 	matmul_kernel:    Matmul_Kernel,
 	linear_ungrouped: bool, // set_linear_grouping(false)
+	rec_steps:        int, // set_recurrent_steps (0: from the work)
 	counters:         Counters,
 	allocator:        mem.Allocator,
 	error_message:    string,

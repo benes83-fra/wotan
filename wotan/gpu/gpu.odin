@@ -256,6 +256,16 @@ set_linear_grouping :: proc(enabled: bool) {
 	G.linear_ungrouped = !enabled
 }
 
+// set_recurrent_steps sets how many time steps one launch of the LSTM, GRU and
+// RNN kernels runs (forward and backward); 0, the default, chooses them from
+// the work of a step (see REC_LAUNCH_WORK). For comparisons and tests; the
+// values are the same for every choice. Returns the previous setting.
+set_recurrent_steps :: proc(steps: int) -> (previous: int) {
+	previous = G.rec_steps
+	G.rec_steps = max(steps, 0)
+	return
+}
+
 // benchmark_matmul: the mean time in milliseconds of one f32 product
 // C[M, N] = op(A) @ op(B) (op: transposed if asked; A stored [M, K] or [K, M],
 // B [K, N] or [N, K]) on the GPU with the current kernel choice. Fixed inputs;

@@ -680,6 +680,8 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
 	// LSTM over all steps, gates [i, f, g, o]; u0 batch B, u1 steps S, u2
 	// hidden H. proj [B·S, 4H] = x @ W_ih (row b·S + s). One workgroup per
 	// sequence b runs the steps in order; its threads share the units of h.
+	// A launch runs steps u5 ..< u6 (the states entering step u5 are in saved;
+	// the first launch, u5 = 0, copies h_0 and c_0 there).
 	// saved (the CPU's layout): hs, cs [(S + 1)·B·H] (row s = state entering
 	// step s, index b·H + unit), then i, f, g, o, tanh(c) [S·B·H] each.
 	.Lstm_Fwd           = `
@@ -698,12 +700,12 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw: vec3
 	let BH = B * H; let G = 4u * H; let SBH = S * BH;
 	let cb = (S + 1u) * BH;
 	let gb = 2u * cb;
-	for (var u = lid.x; u < H; u += 256u) {
+	for (var u = lid.x; u < H && p.u5 == 0u; u += 256u) {
 		saved[b * H + u] = h0[b * H + u];
 		saved[cb + b * H + u] = c0[b * H + u];
 	}
 	storageBarrier();
-	for (var s = 0u; s < S; s++) {
+	for (var s = p.u5; s < p.u6; s++) {
 		let hp = s * BH + b * H; // h and c entering the step
 		let pr = (b * S + s) * G;
 		for (var u = lid.x; u < H; u += 256u) {
@@ -743,7 +745,8 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw: vec3
 	// products; carry [2·B·H] holds dh and dc of the next step. At the end
 	// dh0 / dc0 += dL/dh_0, dL/dc_0 (u3 bit 0 / 1: wanted; u4 bit 0 / 1:
 	// overwrite, as keep). w_hh_t is W_hhᵀ [4H, H], so that neighbouring threads
-	// read neighbouring weights.
+	// read neighbouring weights. A launch runs the steps S - 1 - q for q in
+	// u5 ..< u6: the first (u5 = 0) clears carry, the last (u6 = S) writes dh0.
 	.Lstm_Bwd           = `
 @group(0) @binding(1) var<storage, read> dy: array<f32>;
 @group(0) @binding(2) var<storage, read> saved: array<f32>;
@@ -761,12 +764,12 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw: vec3
 	let BH = B * H; let G = 4u * H; let SBH = S * BH;
 	let cb = (S + 1u) * BH;
 	let gb = 2u * cb;
-	for (var u = lid.x; u < H; u += 256u) {
+	for (var u = lid.x; u < H && p.u5 == 0u; u += 256u) {
 		carry[b * H + u] = 0.0;
 		carry[BH + b * H + u] = 0.0;
 	}
 	storageBarrier();
-	for (var q = 0u; q < S; q++) {
+	for (var q = p.u5; q < p.u6; q++) {
 		let s = S - 1u - q;
 		let hp = s * BH + b * H;
 		let r = (b * S + s) * G;
@@ -793,7 +796,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw: vec3
 		}
 		storageBarrier();
 	}
-	for (var u = lid.x; u < H; u += 256u) {
+	for (var u = lid.x; u < H && p.u6 == S; u += 256u) {
 		let i = b * H + u;
 		if ((p.u3 & 1u) != 0u) { dh0[i] = keep(dh0[i], p.u4 & 1u) + carry[i]; }
 		if ((p.u3 & 2u) != 0u) { dc0[i] = keep(dc0[i], (p.u4 >> 1u) & 1u) + carry[BH + i]; }
@@ -819,9 +822,9 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw: vec3
 	if (b >= B) { return; }
 	let BH = B * H; let G = 3u * H; let SBH = S * BH;
 	let gb = (S + 1u) * BH;
-	for (var u = lid.x; u < H; u += 256u) { saved[b * H + u] = h0[b * H + u]; }
+	for (var u = lid.x; u < H && p.u5 == 0u; u += 256u) { saved[b * H + u] = h0[b * H + u]; }
 	storageBarrier();
-	for (var s = 0u; s < S; s++) {
+	for (var s = p.u5; s < p.u6; s++) {
 		let hp = s * BH + b * H;
 		let pr = (b * S + s) * G;
 		for (var u = lid.x; u < H; u += 256u) {
@@ -872,9 +875,9 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw: vec3
 	if (b >= B) { return; }
 	let BH = B * H; let G = 3u * H; let SBH = S * BH;
 	let gb = (S + 1u) * BH;
-	for (var u = lid.x; u < H; u += 256u) { carry[b * H + u] = 0.0; }
+	for (var u = lid.x; u < H && p.u5 == 0u; u += 256u) { carry[b * H + u] = 0.0; }
 	storageBarrier();
-	for (var q = 0u; q < S; q++) {
+	for (var q = p.u5; q < p.u6; q++) {
 		let s = S - 1u - q;
 		let hp = s * BH + b * H;
 		let r0 = (b * S + s) * G;
@@ -907,7 +910,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw: vec3
 		}
 		storageBarrier();
 	}
-	if ((p.u3 & 1u) != 0u) {
+	if ((p.u3 & 1u) != 0u && p.u6 == S) {
 		for (var u = lid.x; u < H; u += 256u) {
 			let i = b * H + u;
 			dh0[i] = keep(dh0[i], p.u4 & 1u) + carry[i];
@@ -930,9 +933,9 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw: vec3
 	let b = wid.y * nw.x + wid.x;
 	if (b >= B) { return; }
 	let BH = B * H;
-	for (var u = lid.x; u < H; u += 256u) { saved[b * H + u] = h0[b * H + u]; }
+	for (var u = lid.x; u < H && p.u5 == 0u; u += 256u) { saved[b * H + u] = h0[b * H + u]; }
 	storageBarrier();
-	for (var s = 0u; s < S; s++) {
+	for (var s = p.u5; s < p.u6; s++) {
 		let hp = s * BH + b * H;
 		let pr = (b * S + s) * H;
 		for (var u = lid.x; u < H; u += 256u) {
@@ -963,9 +966,9 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw: vec3
 	let b = wid.y * nw.x + wid.x;
 	if (b >= B) { return; }
 	let BH = B * H;
-	for (var u = lid.x; u < H; u += 256u) { carry[b * H + u] = 0.0; }
+	for (var u = lid.x; u < H && p.u5 == 0u; u += 256u) { carry[b * H + u] = 0.0; }
 	storageBarrier();
-	for (var q = 0u; q < S; q++) {
+	for (var q = p.u5; q < p.u6; q++) {
 		let s = S - 1u - q;
 		let hp = s * BH + b * H;
 		let r0 = (b * S + s) * H;
@@ -983,7 +986,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nw: vec3
 		}
 		storageBarrier();
 	}
-	if ((p.u3 & 1u) != 0u) {
+	if ((p.u3 & 1u) != 0u && p.u6 == S) {
 		for (var u = lid.x; u < H; u += 256u) {
 			let i = b * H + u;
 			dh0[i] = keep(dh0[i], p.u4 & 1u) + carry[i];
