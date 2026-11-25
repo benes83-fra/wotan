@@ -33,6 +33,7 @@ Reference and contract tests print `OK` or `FAIL` for each check and end with a 
 | `join_test` | `join_test` | Inner, left, right and outer joins; no-match cases; multi-key joins |
 | `core_contracts_test` | `core_contracts_test` | Every column type round-trips; views, masks with nulls and index handling; stable multi-key sort with nulls last; joins with duplicate and null keys; groupby keys, row order and counts; `column_at_numeric` reads Int / Float / Bool cells as f64 (Yahoo's Int Volume column) |
 | `missing_data_test` | `missing_data_test` | `count_na`, `isna` / `notna`, `dropna` (any / all / subset / thresh), `fillna`, `ffill` / `bfill` with and without `limit`, checked against pandas 1.5.3 on a frame with nulls and NaN in Float, Int, String and Bool columns; views as input; row labels and a dropped index survive; `ok = false` contracts |
+| `frame_tools_test` | `frame_tools_test` | `head` / `tail` (negative n), `duplicated` / `drop_duplicates` (subset, keep first / last / none), `unique` / `nunique` / `value_counts` checked against pandas 1.5.3 on a frame where null = NaN and -0.0 = 0.0; `concat_rows` of views with reordered columns and a shared index; `drop_columns` / `rename_column` with the index column; `cast_column` / `cast_columns` between numeric, text and date types, strict and lenient; `ok = false` contracts |
 | `dataset_test` 📁 | `dataset_test` | Bridge from a DataFrame to ML matrices |
 
 ## 2. Import / export

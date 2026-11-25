@@ -359,7 +359,7 @@ _fill_frame :: proc(
 
 // Frame of all rows of `src` built from `cols` (same row count), with the
 // index metadata and row labels of `src`
-@(private = "file")
+@(private)
 _frame_like :: proc(src: ^DataFrame, cols: []Column, allocator: mem.Allocator) -> DataFrame {
 	out := dataframe_new(allocator)
 	for c in cols {add_column(&out, c)}
