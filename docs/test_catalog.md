@@ -32,6 +32,7 @@ Reference and contract tests print `OK` or `FAIL` for each check and end with a 
 | `groupby2_test` | `groupby2_test` | GroupBy with single and multiple keys, aggregations |
 | `join_test` | `join_test` | Inner, left, right and outer joins; no-match cases; multi-key joins |
 | `core_contracts_test` | `core_contracts_test` | Every column type round-trips; views, masks with nulls and index handling; stable multi-key sort with nulls last; joins with duplicate and null keys; groupby keys, row order and counts; `column_at_numeric` reads Int / Float / Bool cells as f64 (Yahoo's Int Volume column) |
+| `missing_data_test` | `missing_data_test` | `count_na`, `isna` / `notna`, `dropna` (any / all / subset / thresh), `fillna`, `ffill` / `bfill` with and without `limit`, checked against pandas 1.5.3 on a frame with nulls and NaN in Float, Int, String and Bool columns; views as input; row labels and a dropped index survive; `ok = false` contracts |
 | `dataset_test` 📁 | `dataset_test` | Bridge from a DataFrame to ML matrices |
 
 ## 2. Import / export

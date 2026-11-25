@@ -1,6 +1,6 @@
 # The `core` package: a user guide
 
-`wotan/core` is the data layer of Wotan. It provides typed columns, the `DataFrame` that holds them, and the operations you need to work with tables: selecting, filtering, computing new columns, sorting, indexing, grouping, joining and date arithmetic. The rest of Wotan (the importers and exporters, the statistics and finance packages) reads and writes these DataFrames.
+`wotan/core` is the data layer of Wotan. It provides typed columns, the `DataFrame` that holds them, and the operations you need to work with tables: selecting, filtering, handling missing data, computing new columns, sorting, indexing, grouping, joining and date arithmetic. The rest of Wotan (the importers and exporters, the statistics and finance packages) reads and writes these DataFrames.
 
 This guide walks through the package with small examples. It assumes you know basic Odin. Every example was compiled and run against the current code, and the output shown is the real output. The examples also free everything they allocate: a debug build with a tracking allocator reports no leaks.
 
@@ -15,15 +15,16 @@ This guide walks through the package with small examples. It assumes you know ba
 7. [Selecting columns](#7-selecting-columns)
 8. [Selecting rows](#8-selecting-rows)
 9. [Filtering with masks](#9-filtering-with-masks)
-10. [Computed columns](#10-computed-columns)
-11. [Sorting](#11-sorting)
-12. [Indexes and label-based access](#12-indexes-and-label-based-access)
-13. [Grouping and aggregation](#13-grouping-and-aggregation)
-14. [Joins](#14-joins)
-15. [Dates and times](#15-dates-and-times)
-16. [Memory management](#16-memory-management)
-17. [A complete example](#17-a-complete-example)
-18. [Quick reference](#18-quick-reference)
+10. [Missing data](#10-missing-data)
+11. [Computed columns](#11-computed-columns)
+12. [Sorting](#12-sorting)
+13. [Indexes and label-based access](#13-indexes-and-label-based-access)
+14. [Grouping and aggregation](#14-grouping-and-aggregation)
+15. [Joins](#15-joins)
+16. [Dates and times](#16-dates-and-times)
+17. [Memory management](#17-memory-management)
+18. [A complete example](#18-a-complete-example)
+19. [Quick reference](#19-quick-reference)
 
 ## 1. Setup
 
@@ -70,7 +71,7 @@ Three ideas run through the whole package:
 
 - **Any cell can be null.** Missing values are tracked separately from the data. Every read returns the value and an `is_null` flag.
 - **Results are new DataFrames.** Operations do not modify their input. They return a new `DataFrame`, which you must free with `w.destroy_dataframe`. The exceptions modify the frame in place and say so: `add_column`, `set_index` and `reset_index`.
-- **Some results are views.** A view reads the data of another DataFrame instead of copying it. Views are cheap, but they must not outlive their source. Section 8 lists which operations return views and section 16 sums up the rules.
+- **Some results are views.** A view reads the data of another DataFrame instead of copying it. Views are cheap, but they must not outlive their source. Section 8 lists which operations return views and section 17 sums up the rules.
 
 ## 3. Building a DataFrame
 
@@ -211,7 +212,7 @@ owned := w.dataframe_select_columns(&df, []string{"ticker", "price"}, true) // c
 defer w.destroy_dataframe(&owned)
 ```
 
-`select` with a list of names returns a view. `dataframe_select_columns(..., copy = true)` returns an independent copy. The same `select` procedure also accepts expressions that compute new columns (section 10).
+`select` with a list of names returns a view. `dataframe_select_columns(..., copy = true)` returns an independent copy. The same `select` procedure also accepts expressions that compute new columns (section 11).
 
 ## 8. Selecting rows
 
@@ -308,7 +309,130 @@ fmt.println(active.rows) // 2
 
 The `and`, `or` and `not` overloads also accept `Bool` columns, with nulls counted as `false`.
 
-## 10. Computed columns
+## 10. Missing data
+
+A cell is missing when it is null, or when it is NaN in a `Float` column. The procedures in this section treat both kinds the same way, as pandas does with `None` and `NaN`. The example below uses this table of daily quotes, with gaps in `close` and `volume`:
+
+```odin
+close := w.column_new("close", .Float, 6)
+w.append_float(&close, 101.5)
+w.append_null(&close)                   // no quote
+w.append_float(&close, math.nan_f64())  // NaN counts as missing too
+w.append_float(&close, 103.0)
+w.append_null(&close)
+w.append_float(&close, 104.5)
+
+volume := w.column_new("volume", .Int, 6)
+w.append_int(&volume, 900)
+w.append_int(&volume, 1200)
+w.append_null(&volume)
+w.append_int(&volume, 1100)
+w.append_null(&volume)
+w.append_null(&volume)
+
+df := w.df_from(w.column_from_strings("day", []string{"Mon", "Tue", "Wed", "Thu", "Fri", "Sat"}), close, volume)
+defer w.destroy_dataframe(&df)
+```
+
+**Finding gaps.** `count_na` on a DataFrame returns a small table with one row per column. On a single column it returns the count. `isna` and `notna` return a mask (a `[]bool`) that works with everything in section 9. `na_at(col, row)` tests a single cell.
+
+```odin
+counts := w.count_na(&df)
+defer w.destroy_dataframe(&counts)
+w.dataframe_pretty_print(&counts)
+fmt.println(w.count_na(w.column(&df, "close"))) // 3
+
+gaps := w.isna(w.column(&df, "close"))
+defer delete(gaps)
+fmt.println(gaps) // [false, true, true, false, true, false]
+```
+
+```
+    column  na
+  0 day     0
+  1 close   3
+  2 volume  3
+```
+
+**Dropping rows.** `dropna` returns the rows that have no missing cell. Pass column names to check only those columns. Pass `how = .All` to drop only the rows whose checked cells are all missing. Pass `thresh = n` to keep the rows that have at least `n` present cells; it replaces `how`. The rows keep their labels:
+
+```odin
+clean, ok := w.dropna(&df)
+defer w.destroy_dataframe(&clean)
+w.dataframe_pretty_print(&clean)
+
+priced, _ := w.dropna(&df, {"close"})
+defer w.destroy_dataframe(&priced)
+w.dataframe_pretty_print(&priced)
+```
+
+```
+    day  close  volume
+  0 Mon  101.5  900
+  3 Thu  103    1100
+    day  close  volume
+  0 Mon  101.5  900
+  3 Thu  103    1100
+  5 Sat  104.5  NULL
+```
+
+**Filling with a constant.** `fillna` replaces missing cells with a value. On a DataFrame it fills the named columns, or, with no names, every column whose type takes the value. The value must match the column type: `0.0` for `Float`, `"?"` for `String`, a `w.Date{...}` for `Date`. An `int` value also fills `Float` columns. `fillna` also takes a single `^Column` and then returns a new column.
+
+```odin
+zeros, _ := w.fillna(&df, 0, {"volume"})
+defer w.destroy_dataframe(&zeros)
+w.dataframe_pretty_print(&zeros)
+```
+
+```
+    day  close  volume
+  0 Mon  101.5  900
+  1 Tue  NULL   1200
+  2 Wed  NaN    0
+  3 Thu  103    1100
+  4 Fri  NULL   0
+  5 Sat  104.5  0
+```
+
+**Carrying values.** `ffill` fills each gap with the last present value above it, which is the usual way to bring a price series onto a common calendar. `bfill` uses the next present value below the gap. Cells before the first value (for `ffill`) or after the last value (for `bfill`) stay missing. With `limit = n`, at most `n` cells of each gap are filled. Both take an optional list of column names, and both also work on a single `^Column`.
+
+```odin
+carried, _ := w.ffill(&df, {"close"})
+defer w.destroy_dataframe(&carried)
+w.dataframe_pretty_print(&carried)
+
+one, _ := w.ffill(&df, limit = 1)
+defer w.destroy_dataframe(&one)
+w.dataframe_pretty_print(&one)
+```
+
+```
+    day  close  volume
+  0 Mon  101.5  900
+  1 Tue  101.5  1200
+  2 Wed  101.5  NULL
+  3 Thu  103    1100
+  4 Fri  103    NULL
+  5 Sat  104.5  NULL
+    day  close  volume
+  0 Mon  101.5  900
+  1 Tue  101.5  1200
+  2 Wed  NaN    1200
+  3 Thu  103    1100
+  4 Fri  103    1100
+  5 Sat  104.5  NULL
+```
+
+None of these procedures changes its input. Each result is a new owned DataFrame or column; free it with `destroy_dataframe` or `destroy_column`, and free masks with `delete`. A result keeps the index and row labels of its source, so `loc` still works on it. The input may also be a view, such as a slice from `iloc_range`.
+
+The DataFrame and column procedures return `(result, ok)`. `ok` is `false` for an unknown column name, a fill value of the wrong type for a named column, or a negative `limit`:
+
+```odin
+_, bad := w.fillna(&df, "n/a", {"close"}) // a String value for a Float column
+fmt.println(ok, bad)                      // true false
+```
+
+## 11. Computed columns
 
 `select` with a list of `Select_Expr` builds a new DataFrame whose columns are computed from existing ones:
 
@@ -359,7 +483,7 @@ Nulls stay null in every expression. `conv_expr` can convert any type to `"strin
 
 `free_select_exprs` frees the masks you passed to `mask_expr`. Call it after `select` and do not `delete` those masks yourself.
 
-## 11. Sorting
+## 12. Sorting
 
 ```odin
 by_price := w.dataframe_sort(&df, "price", descending = true)
@@ -383,7 +507,7 @@ w.dataframe_pretty_print(&by_country)
 
 Sorting is stable, so rows with equal keys keep their original order. Nulls and NaN sort last in both directions. If you only need the order, `column_sort_order(col, descending)` returns the row permutation as a `[]int` (free it with `delete`).
 
-## 12. Indexes and label-based access
+## 13. Indexes and label-based access
 
 `set_index` makes a column the index. It sorts the rows by that column (in place) so that the `loc_*` procedures can find keys by binary search:
 
@@ -444,7 +568,7 @@ fmt.println(df.has_index) // false
 
 `reset_index(&df)` clears the index. If the index column was dropped, it comes back as the first column. `reset_index(&df, drop = true)` discards the index values instead.
 
-## 13. Grouping and aggregation
+## 14. Grouping and aggregation
 
 There are two group-by APIs.
 
@@ -505,7 +629,7 @@ w.dataframe_pretty_print(&stats)
 
 The `AggregationKind` values are `Sum`, `Mean`, `Min`, `Max`, `Count`, `Median`, `Quantile`, `Var`, `Cov` and `Corr`, plus the exponentially weighted `EWM_Mean`, `EWM_Var`, `EWM_Std`, `EWM_Cov` and `EWM_Corr`. Set `alpha` on the `Aggregator` for the EWM kinds. The pairwise kinds (`Cov`, `Corr`, `EWM_Cov`, `EWM_Corr`) take the second column in `other`. Variances and covariances use `n - 1`, quantiles interpolate linearly, and EWM uses pandas' `adjust=True` weights. A statistic that is undefined for a group is null, as for the variance of NL's single row above.
 
-## 14. Joins
+## 15. Joins
 
 `join` matches rows on one or more key columns, with SQL semantics:
 
@@ -562,7 +686,7 @@ defer w.destroy_dataframe(&with_sector)
   2 TSLA    5       NULL
 ```
 
-## 15. Dates and times
+## 16. Dates and times
 
 `Date`, `Time` and `Datetime` are plain structs, so you can write them as literals. The procedures below do calendar arithmetic on them:
 
@@ -599,7 +723,7 @@ fmt.println(w.get_Date_from_Datetime(dt), w.get_Time_from_Datetime(dt))
 
 `add_month_date` clamps the day to the target month's length, as in the example: 31 January plus one month is 29 February 2024. For business-day calendars, day-count conventions and payment schedules, see the `finance` package.
 
-## 16. Memory management
+## 17. Memory management
 
 Wotan follows the usual Odin rule: whoever creates something frees it. In `core` that comes down to a few rules.
 
@@ -648,7 +772,7 @@ arena bytes in use after 100 steps: 0
 
 Without the guard, the 1 MB arena would be full after 16 steps.
 
-## 17. A complete example
+## 18. A complete example
 
 This example loads trades and sector data, computes a signed notional per trade, keeps the trades from 4 March onwards, adds the sector to each trade, and ranks sectors by net flow. It uses most of the package.
 
@@ -726,7 +850,7 @@ main :: proc() {
 
 The signed column is added to `trades` (step 1) before `recent` filters it. `filter` copies the rows, so `recent` and everything built from it stay valid even if `trades` is freed first.
 
-## 18. Quick reference
+## 19. Quick reference
 
 | Task | Procedures |
 |---|---|
@@ -738,6 +862,7 @@ The signed column is added to `trades` (step 1) before `recent` filters it. `fil
 | Rows by position | `iloc`, `iloc_range`, `iloc_many`, `df_row`, `df_slice`, `df_take` |
 | Masks | `mask_gt`, `mask_lt`, `mask_eq`, `mask_contains_string`, `and`, `or`, `not`, `column_mask` |
 | Filter | `filter`, `wobei`, `loc_mask` |
+| Missing data | `na_at`, `count_na`, `isna`, `notna`, `dropna`, `fillna`, `ffill`, `bfill` |
 | Compute | `select` (expressions), `col_expr`, `add_expr`, `sub_expr`, `mult_expr`, `div_expr`, `apply_expr`, `conv_expr`, `mask_expr`, `free_select_exprs` |
 | Sort | `dataframe_sort`, `dataframe_sort_by`, `column_sort_order` |
 | Index | `set_index`, `reset_index`, `loc`, `loc_single`, `loc_range`, `loc_from`, `loc_until`, `loc_many`, `reindex` |
@@ -747,4 +872,4 @@ The signed column is added to `trades` (step 1) before `recent` filters it. `fil
 | Free | `destroy_dataframe`, `destroy_column`, `destroy_grouped_dataframe`, `destroy_groupby2`, `delete` (masks, strings) |
 | Temporary scratch | `TEMP_GUARD`, `temp_begin`, `temp_end` |
 
-For more examples, the tests in [`tests/`](../tests/) exercise every procedure. [`core_contracts_test.odin`](../tests/core_contracts_test.odin) in particular pins down the exact semantics of nulls, views, sorting, grouping and joins.
+For more examples, the tests in [`tests/`](../tests/) exercise every procedure. [`core_contracts_test.odin`](../tests/core_contracts_test.odin) in particular pins down the exact semantics of nulls, views, sorting, grouping and joins, and [`missing_data_test.odin`](../tests/missing_data_test.odin) checks the missing-data procedures against pandas.
