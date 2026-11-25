@@ -341,6 +341,210 @@ describe :: proc(df: ^DataFrame, allocator := context.allocator) -> DataFrame {
 	return out
 }
 
+// --- isin / between ---
+
+// Mask that is true where the cell equals one of `values`. A missing cell
+// gives false, unless `values` contains NaN, which matches every missing cell
+// (as in pandas). The values' type must match the column (int, f64, bool, string,
+// Date, Time, Datetime); int values also match a Float column. ok = false on
+// a type mismatch.
+isin :: proc(col: ^Column, values: []$T, allocator := context.allocator) -> ([]bool, bool) {
+	when T == int {
+		if col.type == .Float {
+			as_f := make([]f64, len(values), context.temp_allocator)
+			defer delete(as_f, context.temp_allocator)
+			for v, i in values {as_f[i] = f64(v)}
+			return isin(col, as_f, allocator)
+		}
+	}
+	if col.type != _type_of(T) {return nil, false}
+	set := make(map[T]bool, allocator = context.temp_allocator)
+	defer delete(set)
+	match_na := false
+	for v in values {
+		key := v
+		when T == f64 {
+			if key != key {
+				match_na = true
+				continue
+			}
+			if key == 0 {key = 0} 	// -0.0 matches 0.0
+		}
+		set[key] = true
+	}
+	mask := make([]bool, col.len, allocator)
+	for i in 0 ..< col.len {
+		if na_at(col, i) {
+			mask[i] = match_na
+			continue
+		}
+		v := _cell_as(col, i, T)
+		when T == f64 {if v == 0 {v = 0}}
+		mask[i] = v in set
+	}
+	return mask, true
+}
+
+// Which ends of a `between` range belong to it
+Inclusive :: enum {
+	Both,
+	Neither,
+	Left,
+	Right,
+}
+
+// Mask that is true where lower <= cell <= upper (ends as `inclusive` says);
+// missing cells give false. Bounds of type int or f64 work on Int and Float
+// columns; string, Date, Time and Datetime bounds on columns of that type.
+// ok = false on a type mismatch.
+between :: proc(
+	col: ^Column,
+	lower, upper: $T,
+	inclusive := Inclusive.Both,
+	allocator := context.allocator,
+) -> (
+	[]bool,
+	bool,
+) {
+	when T == int || T == f64 {
+		if col.type != .Int && col.type != .Float {return nil, false}
+		if T == int && col.type == .Int {
+			return _between_typed(col, int(lower), int(upper), inclusive, allocator), true
+		}
+		return _between_typed(col, f64(lower), f64(upper), inclusive, allocator), true
+	} else {
+		if col.type != _type_of(T) {return nil, false}
+		return _between_typed(col, lower, upper, inclusive, allocator), true
+	}
+}
+
+@(private = "file")
+_between_typed :: proc(
+	col: ^Column,
+	lower, upper: $T,
+	inclusive: Inclusive,
+	allocator: mem.Allocator,
+) -> []bool {
+	mask := make([]bool, col.len, allocator)
+	for i in 0 ..< col.len {
+		if na_at(col, i) {continue}
+		v := _cell_as(col, i, T)
+		lo, hi := _cmp(v, lower), _cmp(v, upper)
+		in_lo := lo >= 0 if inclusive == .Both || inclusive == .Left else lo > 0
+		in_hi := hi <= 0 if inclusive == .Both || inclusive == .Right else hi < 0
+		mask[i] = in_lo && in_hi
+	}
+	return mask
+}
+
+// Column type that holds values of T (.Invalid for other types)
+@(private = "file")
+_type_of :: proc($T: typeid) -> ColumnType {
+	when T == int {return .Int} else when T == f64 {return .Float} else when T == bool {return .Bool} else when T == string {return .String} else when T == Date {return .Date} else when T == Time {return .Time} else when T == Datetime {return .Datetime} else {return .Invalid}
+}
+
+// Present cell as a T: the column's own type, or an Int / Float cell as f64
+@(private = "file")
+_cell_as :: proc(col: ^Column, i: int, $T: typeid) -> T {
+	when T == int {
+		v, _ := column_at_int(col, i); return v
+	} else when T == f64 {
+		return _num(col, i)
+	} else when T == bool {
+		v, _ := column_at_bool(col, i); return v
+	} else when T == string {
+		v, _ := column_at_string(col, i); return v
+	} else when T == Date {
+		v, _ := column_at_date(col, i); return v
+	} else when T == Time {
+		v, _ := column_at_time(col, i); return v
+	} else when T == Datetime {
+		v, _ := column_at_datetime(col, i); return v
+	}
+}
+
+@(private = "file")
+_cmp :: proc(a, b: $T) -> int {
+	when T == Date {
+		return int(date_compare(a, b))
+	} else when T == Time {
+		return int(time_compare(a, b))
+	} else when T == Datetime {
+		return int(datetime_compare(a, b))
+	} else {
+		return -1 if a < b else 1 if a > b else 0
+	}
+}
+
+// --- interpolate ---
+
+// Copy of `col` (Int or Float; Float out) with each gap between two present
+// values filled linearly. Without `x`, rows are equally spaced; with `x` (an
+// Int, Float, Date or Datetime column of the same length, without missing
+// cells), the fill follows its values, so that uneven dates are weighted by
+// their distance (days for Date, seconds for Datetime). limit > 0 fills at
+// most `limit` cells of each gap from its start. Cells before the first or
+// after the last present value stay missing. ok = false for another column
+// type, an unusable `x`, or a negative limit.
+interpolate :: proc(
+	col: ^Column,
+	x: ^Column = nil,
+	limit := 0,
+	name := "",
+	allocator := context.allocator,
+) -> (
+	Column,
+	bool,
+) {
+	if col.type != .Int && col.type != .Float || limit < 0 {return {}, false}
+	if x != nil {
+		if x.len != col.len {return {}, false}
+		#partial switch x.type {
+		case .Int, .Float, .Date, .Datetime:
+		case:
+			return {}, false
+		}
+		for i in 0 ..< x.len {if na_at(x, i) {return {}, false}}
+	}
+	pos :: proc(x: ^Column, i: int) -> f64 {
+		if x == nil {return f64(i)}
+		#partial switch x.type {
+		case .Date:
+			d, _ := column_at_date(x, i)
+			return f64(days_from_civil(i64(d.year), i64(d.month), i64(d.day)))
+		case .Datetime:
+			d, _ := column_at_datetime(x, i)
+			return f64(datetime_to_unix(d))
+		}
+		return _num(x, i)
+	}
+
+	vals := make([]f64, col.len, context.temp_allocator)
+	present := make([]bool, col.len, context.temp_allocator)
+	defer delete(vals, context.temp_allocator)
+	defer delete(present, context.temp_allocator)
+	last := -1
+	for i in 0 ..< col.len {
+		if na_at(col, i) {continue}
+		vals[i], present[i] = _num(col, i), true
+		if last >= 0 && i - last > 1 {
+			xa, xb := pos(x, last), pos(x, i)
+			ya, yb := vals[last], vals[i]
+			for k in last + 1 ..< i {
+				if limit > 0 && k - last > limit {break}
+				t := (pos(x, k) - xa) / (xb - xa) if xb != xa else 0
+				vals[k], present[k] = ya + (yb - ya) * t, true
+			}
+		}
+		last = i
+	}
+	out := _new_like(col, .Float, name, allocator)
+	for i in 0 ..< col.len {
+		if present[i] {append_float(&out, vals[i])} else {append_null(&out)}
+	}
+	return out, true
+}
+
 // --- helpers ---
 
 @(private = "file")

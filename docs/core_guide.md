@@ -1,6 +1,6 @@
 # The `core` package: a user guide
 
-`wotan/core` is the data layer of Wotan. It provides typed columns, the `DataFrame` that holds them, and the operations you need to work with tables: selecting, filtering, handling missing data, cleaning and combining tables, column calculations such as returns and ranks, computing new columns, sorting, indexing, grouping, joining and date arithmetic. The rest of Wotan (the importers and exporters, the statistics and finance packages) reads and writes these DataFrames.
+`wotan/core` is the data layer of Wotan. It provides typed columns, the `DataFrame` that holds them, and the operations you need to work with tables: selecting, filtering, handling missing data, cleaning and combining tables, column calculations such as returns and ranks, reshaping, computing new columns, sorting, indexing, grouping, joining and date arithmetic. The rest of Wotan (the importers and exporters, the statistics and finance packages) reads and writes these DataFrames.
 
 This guide walks through the package with small examples. It assumes you know basic Odin. Every example was compiled and run against the current code, and the output shown is the real output. The examples also free everything they allocate: a debug build with a tracking allocator reports no leaks.
 
@@ -18,15 +18,16 @@ This guide walks through the package with small examples. It assumes you know ba
 10. [Missing data](#10-missing-data)
 11. [Cleaning and combining tables](#11-cleaning-and-combining-tables)
 12. [Column calculations](#12-column-calculations)
-13. [Computed columns](#13-computed-columns)
-14. [Sorting](#14-sorting)
-15. [Indexes and label-based access](#15-indexes-and-label-based-access)
-16. [Grouping and aggregation](#16-grouping-and-aggregation)
-17. [Joins](#17-joins)
-18. [Dates and times](#18-dates-and-times)
-19. [Memory management](#19-memory-management)
-20. [A complete example](#20-a-complete-example)
-21. [Quick reference](#21-quick-reference)
+13. [Reshaping and sampling](#13-reshaping-and-sampling)
+14. [Computed columns](#14-computed-columns)
+15. [Sorting](#15-sorting)
+16. [Indexes and label-based access](#16-indexes-and-label-based-access)
+17. [Grouping and aggregation](#17-grouping-and-aggregation)
+18. [Joins](#18-joins)
+19. [Dates and times](#19-dates-and-times)
+20. [Memory management](#20-memory-management)
+21. [A complete example](#21-a-complete-example)
+22. [Quick reference](#22-quick-reference)
 
 ## 1. Setup
 
@@ -73,7 +74,7 @@ Three ideas run through the whole package:
 
 - **Any cell can be null.** Missing values are tracked separately from the data. Every read returns the value and an `is_null` flag.
 - **Results are new DataFrames.** Operations do not modify their input. They return a new `DataFrame`, which you must free with `w.destroy_dataframe`. The exceptions modify the frame in place and say so: `add_column`, `set_index` and `reset_index`.
-- **Some results are views.** A view reads the data of another DataFrame instead of copying it. Views are cheap, but they must not outlive their source. Section 8 lists which operations return views and section 19 sums up the rules.
+- **Some results are views.** A view reads the data of another DataFrame instead of copying it. Views are cheap, but they must not outlive their source. Section 8 lists which operations return views and section 20 sums up the rules.
 
 ## 3. Building a DataFrame
 
@@ -214,7 +215,7 @@ owned := w.dataframe_select_columns(&df, []string{"ticker", "price"}, true) // c
 defer w.destroy_dataframe(&owned)
 ```
 
-`select` with a list of names returns a view. `dataframe_select_columns(..., copy = true)` returns an independent copy. The same `select` procedure also accepts expressions that compute new columns (section 13).
+`select` with a list of names returns a view. `dataframe_select_columns(..., copy = true)` returns an independent copy. The same `select` procedure also accepts expressions that compute new columns (section 14).
 
 To remove columns, `drop_columns` returns a copy without them. `rename_column` renames a column in place. It returns `false` if the old name does not exist, the new name is already taken, or the frame is a view:
 
@@ -321,6 +322,28 @@ fmt.println(active.rows) // 2
 ```
 
 The `and`, `or` and `not` overloads also accept `Bool` columns, with nulls counted as `false`.
+
+Two more procedures build masks from a column. `isin` tests membership in a list of values. `between` tests a range: both ends are included by default, and `.Neither`, `.Left` or `.Right` changes that. Both work on numbers, strings and dates, and give `false` for missing cells. They return `(mask, ok)`, with `ok = false` when the values do not match the column's type:
+
+```odin
+eu, ok := w.isin(w.column(&df, "country"), []string{"DE", "NL"})
+defer delete(eu)
+mid, _ := w.between(w.column(&df, "price"), 180.0, 500.0)
+defer delete(mid)
+
+both := w.and(eu, mid)
+defer delete(both)
+picked := w.filter(&df, both)
+defer w.destroy_dataframe(&picked)
+w.dataframe_pretty_print(&picked) // SAP
+```
+
+```
+    ticker  country  price  shares
+  0 SAP     DE       182    75
+```
+
+A NaN among the `isin` values matches missing cells, as in pandas.
 
 ## 10. Missing data
 
@@ -434,6 +457,24 @@ w.dataframe_pretty_print(&one)
   3 Thu  103    1100
   4 Fri  103    1100
   5 Sat  104.5  NULL
+```
+
+**Interpolating.** `interpolate` fills each gap between two present values of an `Int` or `Float` column linearly and returns a `Float` column. By default the rows count as equally spaced. Pass a second column (`Int`, `Float`, `Date` or `Datetime`) to space them by its values instead, so that uneven dates are weighted by their distance. Cells before the first value and after the last stay missing (call `ffill` afterwards to carry the last value on). `limit` works as for `ffill`.
+
+```odin
+days := w.column_from_dates("day", {{2024, 1, 1}, {2024, 1, 2}, {2024, 1, 5}, {2024, 1, 7}})
+defer w.destroy_column(&days)
+rate := w.column_new("rate", .Float, 4)
+w.append_float(&rate, 1.0)
+w.append_null(&rate)
+w.append_null(&rate)
+w.append_float(&rate, 4.0)
+defer w.destroy_column(&rate)
+
+by_row, _ := w.interpolate(&rate)        // 1, 2, 3, 4
+defer w.destroy_column(&by_row)
+by_day, _ := w.interpolate(&rate, &days) // 1, 1.5, 3, 4: Jan 2 is 1 of 6 days along
+defer w.destroy_column(&by_day)
 ```
 
 None of these procedures changes its input. Each result is a new owned DataFrame or column; free it with `destroy_dataframe` or `destroy_column`, and free masks with `delete`. A result keeps the index and row labels of its source, so `loc` still works on it. The input may also be a view, such as a slice from `iloc_range`.
@@ -642,7 +683,89 @@ w.dataframe_pretty_print(&stats)
 
 For moving windows (rolling means, rolling volatility, exponentially weighted statistics), see [Rolling statistics](analytics_guide.md#3-rolling-statistics) in the `analytics` guide.
 
-## 13. Computed columns
+## 13. Reshaping and sampling
+
+**Long to wide.** Data often arrives in long form, with one row per date and ticker. `pivot(&df, index, columns, values)` turns it into wide form: one row per distinct `index` key, and one column per distinct `columns` key, named by the key's text. Both sets of keys are sorted ascending. A pair that does not occur gives null, and rows with a missing key are left out.
+
+```odin
+long := w.df_from(
+    w.column_from_strings("date", {"2024-01-03", "2024-01-02", "2024-01-03", "2024-01-02", "2024-01-04"}),
+    w.column_from_strings("ticker", {"MSFT", "MSFT", "AAPL", "AAPL", "AAPL"}),
+    w.column_from_floats("close", {411.0, 410.0, 186.25, 185.5, 187.0}),
+)
+defer w.destroy_dataframe(&long)
+
+wide, ok := w.pivot(&long, "date", "ticker", "close")
+defer w.destroy_dataframe(&wide)
+w.dataframe_pretty_print(&wide)
+```
+
+```
+    date        AAPL    MSFT
+  0 2024-01-02  185.5   410
+  1 2024-01-03  186.25  411
+  2 2024-01-04  187     NULL
+```
+
+`pivot` returns `ok = false` when a pair occurs twice. To combine repeated pairs, use `pivot_table` with an aggregation: `.Mean` (the default), `.Sum`, `.Count`, `.Min`, `.Max`, `.First` or `.Last`. Missing values are left out before aggregating.
+
+```odin
+trades := w.df_from(
+    w.column_from_ints("day", {2, 1, 2, 1, 2}),
+    w.column_from_strings("side", {"buy", "sell", "buy", "buy", "sell"}),
+    w.column_from_ints("qty", {5, 3, 7, 4, 2}),
+)
+defer w.destroy_dataframe(&trades)
+
+_, unique_pairs := w.pivot(&trades, "day", "side", "qty") // false: (2, buy) occurs twice
+volume, _ := w.pivot_table(&trades, "day", "side", "qty", .Sum)
+defer w.destroy_dataframe(&volume)
+w.dataframe_pretty_print(&volume)
+```
+
+```
+    day  buy  sell
+  0 1    4    3
+  1 2    12   2
+```
+
+**Wide to long.** `melt` goes the other way. You name the id columns that identify a row, and optionally the value columns (by default, every other column). For each value column and each row, you get one row with the id columns, the value column's name and its value. The value columns must share one type; `Int` and `Float` mix into `Float`.
+
+```odin
+back, _ := w.melt(&wide, {"date"}, var_name = "ticker", value_name = "close")
+defer w.destroy_dataframe(&back)
+w.dataframe_pretty_print(&back)
+```
+
+```
+    date        ticker  close
+  0 2024-01-02  AAPL    185.5
+  1 2024-01-03  AAPL    186.25
+  2 2024-01-04  AAPL    187
+  3 2024-01-02  MSFT    410
+  4 2024-01-03  MSFT    411
+  5 2024-01-04  MSFT    NULL
+```
+
+**Random rows.** `sample(&df, n)` draws `n` rows at random without replacement, in the order drawn; pass `replace = true` to draw with replacement. The rows keep their labels. It uses `context.random_generator`, so seeding the generator (for example with `rand.reset(seed)` from `core:math/rand`) makes the draw repeatable:
+
+```odin
+rand.reset(7)
+some, _ := w.sample(&long, 3)
+defer w.destroy_dataframe(&some)
+w.dataframe_pretty_print(&some)
+```
+
+```
+    date        ticker  close
+  1 2024-01-02  MSFT    410
+  0 2024-01-03  MSFT    411
+  3 2024-01-02  AAPL    185.5
+```
+
+`melt`, `pivot`, `pivot_table` and `sample` return `ok = false` for an unknown column name or an impossible request, such as a sample larger than the table without replacement.
+
+## 14. Computed columns
 
 `select` with a list of `Select_Expr` builds a new DataFrame whose columns are computed from existing ones:
 
@@ -693,7 +816,7 @@ Nulls stay null in every expression. `conv_expr` can convert any type to `"strin
 
 `free_select_exprs` frees the masks you passed to `mask_expr`. Call it after `select` and do not `delete` those masks yourself.
 
-## 14. Sorting
+## 15. Sorting
 
 ```odin
 by_price := w.dataframe_sort(&df, "price", descending = true)
@@ -717,7 +840,7 @@ w.dataframe_pretty_print(&by_country)
 
 Sorting is stable, so rows with equal keys keep their original order. Nulls and NaN sort last in both directions. If you only need the order, `column_sort_order(col, descending)` returns the row permutation as a `[]int` (free it with `delete`).
 
-## 15. Indexes and label-based access
+## 16. Indexes and label-based access
 
 `set_index` makes a column the index. It sorts the rows by that column (in place) so that the `loc_*` procedures can find keys by binary search:
 
@@ -778,7 +901,7 @@ fmt.println(df.has_index) // false
 
 `reset_index(&df)` clears the index. If the index column was dropped, it comes back as the first column. `reset_index(&df, drop = true)` discards the index values instead.
 
-## 16. Grouping and aggregation
+## 17. Grouping and aggregation
 
 There are two group-by APIs.
 
@@ -839,7 +962,7 @@ w.dataframe_pretty_print(&stats)
 
 The `AggregationKind` values are `Sum`, `Mean`, `Min`, `Max`, `Count`, `Median`, `Quantile`, `Var`, `Cov` and `Corr`, plus the exponentially weighted `EWM_Mean`, `EWM_Var`, `EWM_Std`, `EWM_Cov` and `EWM_Corr`. Set `alpha` on the `Aggregator` for the EWM kinds. The pairwise kinds (`Cov`, `Corr`, `EWM_Cov`, `EWM_Corr`) take the second column in `other`. Variances and covariances use `n - 1`, quantiles interpolate linearly, and EWM uses pandas' `adjust=True` weights. A statistic that is undefined for a group is null, as for the variance of NL's single row above.
 
-## 17. Joins
+## 18. Joins
 
 `join` matches rows on one or more key columns, with SQL semantics:
 
@@ -896,7 +1019,7 @@ defer w.destroy_dataframe(&with_sector)
   2 TSLA    5       NULL
 ```
 
-## 18. Dates and times
+## 19. Dates and times
 
 `Date`, `Time` and `Datetime` are plain structs, so you can write them as literals. The procedures below do calendar arithmetic on them:
 
@@ -933,7 +1056,7 @@ fmt.println(w.get_Date_from_Datetime(dt), w.get_Time_from_Datetime(dt))
 
 `add_month_date` clamps the day to the target month's length, as in the example: 31 January plus one month is 29 February 2024. For business-day calendars, day-count conventions and payment schedules, see the `finance` package.
 
-## 19. Memory management
+## 20. Memory management
 
 Wotan follows the usual Odin rule: whoever creates something frees it. In `core` that comes down to a few rules.
 
@@ -982,7 +1105,7 @@ arena bytes in use after 100 steps: 0
 
 Without the guard, the 1 MB arena would be full after 16 steps.
 
-## 20. A complete example
+## 21. A complete example
 
 This example loads trades and sector data, computes a signed notional per trade, keeps the trades from 4 March onwards, adds the sector to each trade, and ranks sectors by net flow. It uses most of the package.
 
@@ -1060,7 +1183,7 @@ main :: proc() {
 
 The signed column is added to `trades` (step 1) before `recent` filters it. `filter` copies the rows, so `recent` and everything built from it stay valid even if `trades` is freed first.
 
-## 21. Quick reference
+## 22. Quick reference
 
 | Task | Procedures |
 |---|---|
@@ -1070,11 +1193,12 @@ The signed column is added to `trades` (step 1) before `recent` filters it. `fil
 | Print | `dataframe_pretty_print`, `df_head`, `dataframe_print` |
 | Columns | `select` (names), `dataframe_select_columns`, `drop_columns`, `rename_column` |
 | Rows by position | `iloc`, `iloc_range`, `iloc_many`, `head`, `tail`, `df_row`, `df_slice`, `df_take` |
-| Masks | `mask_gt`, `mask_lt`, `mask_eq`, `mask_contains_string`, `and`, `or`, `not`, `column_mask` |
+| Masks | `mask_gt`, `mask_lt`, `mask_eq`, `mask_contains_string`, `isin`, `between`, `and`, `or`, `not`, `column_mask` |
 | Filter | `filter`, `wobei`, `loc_mask` |
-| Missing data | `na_at`, `count_na`, `isna`, `notna`, `dropna`, `fillna`, `ffill`, `bfill` |
+| Missing data | `na_at`, `count_na`, `isna`, `notna`, `dropna`, `fillna`, `ffill`, `bfill`, `interpolate` |
 | Clean and combine | `concat_rows`, `cast_column`, `cast_columns`, `duplicated`, `drop_duplicates`, `unique`, `nunique`, `value_counts` |
 | Column calculations | `shift`, `diff`, `pct_change`, `cumsum`, `cumprod`, `cummax`, `cummin`, `clip`, `rank`, `nlargest`, `nsmallest`, `describe` |
+| Reshape and sample | `pivot`, `pivot_table`, `melt`, `sample` |
 | Compute | `select` (expressions), `col_expr`, `add_expr`, `sub_expr`, `mult_expr`, `div_expr`, `apply_expr`, `conv_expr`, `mask_expr`, `free_select_exprs` |
 | Sort | `dataframe_sort`, `dataframe_sort_by`, `column_sort_order` |
 | Index | `set_index`, `reset_index`, `loc`, `loc_single`, `loc_range`, `loc_from`, `loc_until`, `loc_many`, `reindex` |
@@ -1084,4 +1208,4 @@ The signed column is added to `trades` (step 1) before `recent` filters it. `fil
 | Free | `destroy_dataframe`, `destroy_column`, `destroy_grouped_dataframe`, `destroy_groupby2`, `delete` (masks, strings) |
 | Temporary scratch | `TEMP_GUARD`, `temp_begin`, `temp_end` |
 
-For more examples, the tests in [`tests/`](../tests/) exercise every procedure. [`core_contracts_test.odin`](../tests/core_contracts_test.odin) in particular pins down the exact semantics of nulls, views, sorting, grouping and joins, and [`missing_data_test.odin`](../tests/missing_data_test.odin), [`frame_tools_test.odin`](../tests/frame_tools_test.odin) and [`column_ops_test.odin`](../tests/column_ops_test.odin) check the procedures of sections 10 to 12 against pandas.
+For more examples, the tests in [`tests/`](../tests/) exercise every procedure. [`core_contracts_test.odin`](../tests/core_contracts_test.odin) in particular pins down the exact semantics of nulls, views, sorting, grouping and joins, and [`missing_data_test.odin`](../tests/missing_data_test.odin), [`frame_tools_test.odin`](../tests/frame_tools_test.odin), [`column_ops_test.odin`](../tests/column_ops_test.odin) and [`reshape_test.odin`](../tests/reshape_test.odin) check the procedures of sections 9 to 13 against pandas.
