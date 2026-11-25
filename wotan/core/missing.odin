@@ -200,43 +200,66 @@ bfill :: proc {
 // Copy of `col` where each missing cell takes the last present value above it.
 // limit > 0 fills at most `limit` cells of each gap (the rest stay missing);
 // limit = 0 fills whole gaps. Cells before the first present value stay
-// missing. ok = false for a negative limit.
-ffill_column :: proc(col: ^Column, limit := 0, allocator := context.allocator) -> (Column, bool) {
-	return _fill_direction(col, limit, false, allocator)
+// missing. With `by` (key columns such as a ticker), values are carried only
+// within each group, and rows with a missing key are missing. ok = false for
+// a negative limit or a key column of another length.
+ffill_column :: proc(
+	col: ^Column,
+	limit := 0,
+	by: []^Column = nil,
+	allocator := context.allocator,
+) -> (
+	Column,
+	bool,
+) {
+	return _fill_direction(col, limit, false, by, allocator)
 }
 
 // Copy of `col` where each missing cell takes the next present value below it.
-// limit as for ffill_column; cells after the last present value stay missing.
-bfill_column :: proc(col: ^Column, limit := 0, allocator := context.allocator) -> (Column, bool) {
-	return _fill_direction(col, limit, true, allocator)
+// limit and by as for ffill_column; cells after the last present value stay
+// missing.
+bfill_column :: proc(
+	col: ^Column,
+	limit := 0,
+	by: []^Column = nil,
+	allocator := context.allocator,
+) -> (
+	Column,
+	bool,
+) {
+	return _fill_direction(col, limit, true, by, allocator)
 }
 
 // ffill_column applied to `columns` of `df` (all columns when empty); the
-// other columns are copied unchanged. ok = false for an unknown column name or
-// a negative limit.
+// other columns are copied unchanged. With `by` (names of key columns), values
+// are carried only within each group; the key columns are copied unchanged.
+// ok = false for an unknown column name or a negative limit.
 ffill_dataframe :: proc(
 	df: ^DataFrame,
 	columns: []string = nil,
 	limit := 0,
+	by: []string = nil,
 	allocator := context.allocator,
 ) -> (
 	DataFrame,
 	bool,
 ) {
-	return _fill_frame(df, columns, limit, false, allocator)
+	return _fill_frame(df, columns, limit, false, by, allocator)
 }
 
-// bfill_column applied to `columns` of `df` (all columns when empty)
+// bfill_column applied to `columns` of `df` (all columns when empty); by as
+// for ffill_dataframe
 bfill_dataframe :: proc(
 	df: ^DataFrame,
 	columns: []string = nil,
 	limit := 0,
+	by: []string = nil,
 	allocator := context.allocator,
 ) -> (
 	DataFrame,
 	bool,
 ) {
-	return _fill_frame(df, columns, limit, true, allocator)
+	return _fill_frame(df, columns, limit, true, by, allocator)
 }
 
 // --- helpers ---
@@ -306,26 +329,34 @@ _fill_direction :: proc(
 	col: ^Column,
 	limit: int,
 	backward: bool,
+	by: []^Column,
 	allocator: mem.Allocator,
 ) -> (
 	Column,
 	bool,
 ) {
 	if limit < 0 {return {}, false}
+	g, ok := _groups(col.len, by)
+	if !ok {return {}, false}
+	defer _groups_free(&g)
 	// source row for every row: itself when present (or unfillable), else
-	// the nearest present row in the fill direction
+	// the nearest present row of its group in the fill direction; -1 (null)
+	// for rows in no group
 	rows := make([]int, col.len, context.temp_allocator)
 	defer delete(rows, context.temp_allocator)
-	last, gap := -1, 0
-	for k in 0 ..< col.len {
-		i := col.len - 1 - k if backward else k
-		rows[i] = i
-		if !na_at(col, i) {
-			last, gap = i, 0
-			continue
+	for &r in rows {r = -1}
+	for list in g.lists {
+		last, gap := -1, 0
+		for k in 0 ..< len(list) {
+			i := list[len(list) - 1 - k] if backward else list[k]
+			rows[i] = i
+			if !na_at(col, i) {
+				last, gap = i, 0
+				continue
+			}
+			gap += 1
+			if last >= 0 && (limit == 0 || gap <= limit) {rows[i] = last}
 		}
-		gap += 1
-		if last >= 0 && (limit == 0 || gap <= limit) {rows[i] = last}
 	}
 	return column_take(col, rows, allocator), true
 }
@@ -336,6 +367,7 @@ _fill_frame :: proc(
 	columns: []string,
 	limit: int,
 	backward: bool,
+	by: []string,
 	allocator: mem.Allocator,
 ) -> (
 	DataFrame,
@@ -345,11 +377,19 @@ _fill_frame :: proc(
 	targets, ok := _na_targets(df, columns)
 	if !ok {return {}, false}
 	defer delete(targets, context.temp_allocator)
+	keys: []^Column // nil: no groups
+	if len(by) > 0 {
+		kok: bool
+		keys, kok = _na_columns(df, by)
+		if !kok {return {}, false}
+	}
+	defer delete(keys, context.temp_allocator)
+	for name in by {targets[df.name_to_index[name]] = false} // keys are copied
 	out_cols := make([]Column, len(df.columns), context.temp_allocator)
 	defer delete(out_cols, context.temp_allocator)
 	for &col, i in df.columns {
 		if targets[i] {
-			out_cols[i], _ = _fill_direction(&col, limit, backward, allocator)
+			out_cols[i], _ = _fill_direction(&col, limit, backward, keys, allocator)
 		} else {
 			out_cols[i] = column_clone(&col, allocator)
 		}

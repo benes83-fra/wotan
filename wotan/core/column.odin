@@ -75,8 +75,11 @@ destroy_column :: proc(col: ^Column) {
 		delete(col.nulls, col.allocator)
 		col.nulls = nil
 	}
-	if col.type == .String && col.arena.kind != nil {
+	// an arena that was never set up has no block (its kind, .Growing, is 0
+	// either way)
+	if col.type == .String && col.arena.curr_block != nil {
 		vmem.arena_destroy(&col.arena)
+		col.arena = {}
 	}
 	if col.owns_name {
 		delete(col.name, col.allocator)
@@ -214,8 +217,9 @@ append_string :: proc(c: ^Column, v: string, should_clone: bool = true) {
 	}
 	final_str := v
 	if should_clone {
-		// Initialize arena on first use if needed
-		if c.arena.kind == nil {
+		// Initialize arena on first use (an unset arena has no block; its
+		// kind cannot tell, since .Growing is 0)
+		if c.arena.curr_block == nil {
 
 			err := vmem.arena_init_growing(&c.arena)
 			if err != nil {

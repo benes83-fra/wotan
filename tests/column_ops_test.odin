@@ -91,18 +91,18 @@ column_ops_test :: proc(allocator: mem.Allocator) {
 
 	// ---------------- shift / diff / pct_change
 	{
-		a := w.shift(pxc, 2)
-		b := w.shift(qc, -1, name = "q_next")
-		check(&passed, &total, &a, true, "NA NA 10 11 NA 12.1 NA 9 0 3 3", "shift(px, 2)")
+		a, aok := w.shift(pxc, 2)
+		b, bok := w.shift(qc, -1, name = "q_next")
+		check(&passed, &total, &a, aok, "NA NA 10 11 NA 12.1 NA 9 0 3 3", "shift(px, 2)")
 		check(
 			&passed,
 			&total,
 			&b,
-			b.name == "q_next" && b.type == .Int,
+			bok && b.name == "q_next" && b.type == .Int,
 			"1 4 1 5 NA 9 2 6 5 3 NA",
 			"shift(q, -1) named q_next",
 		)
-		ss := w.shift(sc, 1)
+		ss, _ := w.shift(sc, 1)
 		expect(
 			&passed,
 			&total,
@@ -167,6 +167,7 @@ column_ops_test :: proc(allocator: mem.Allocator) {
 				col: ^w.Column,
 				skipna := true,
 				name := "",
+				by: []^w.Column = nil,
 				allocator := context.allocator,
 			) -> (
 				w.Column,

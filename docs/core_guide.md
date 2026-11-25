@@ -430,7 +430,7 @@ w.dataframe_pretty_print(&zeros)
   5 Sat  104.5  0
 ```
 
-**Carrying values.** `ffill` fills each gap with the last present value above it, which is the usual way to bring a price series onto a common calendar. `bfill` uses the next present value below the gap. Cells before the first value (for `ffill`) or after the last value (for `bfill`) stay missing. With `limit = n`, at most `n` cells of each gap are filled. Both take an optional list of column names, and both also work on a single `^Column`.
+**Carrying values.** `ffill` fills each gap with the last present value above it, which is the usual way to bring a price series onto a common calendar. `bfill` uses the next present value below the gap. Cells before the first value (for `ffill`) or after the last value (for `bfill`) stay missing. With `limit = n`, at most `n` cells of each gap are filled. Both take an optional list of column names, and both also work on a single `^Column`. In a long table with several tickers, pass `by` (key column names for a frame, key columns for a single column) so that a value is carried only within its own ticker; section 12 shows an example.
 
 ```odin
 carried, _ := w.ffill(&df, {"close"})
@@ -613,7 +613,7 @@ close := w.column(&df, "close")
 
 ret, _ := w.pct_change(close, name = "ret")
 w.add_column(&df, ret) // the frame owns the new columns
-prev := w.shift(close, 1, name = "prev")
+prev, _ := w.shift(close, 1, name = "prev")
 w.add_column(&df, prev)
 peak, _ := w.cummax(close, name = "peak") // running high, e.g. for drawdowns
 w.add_column(&df, peak)
@@ -631,7 +631,37 @@ w.dataframe_pretty_print(&df)
   4 Fri  96       -0.05664085531229113   101.764  104   -5.763999999999996
 ```
 
-The procedures that only accept some column types (`diff`, `pct_change`, `cumsum`, `cumprod`, `clip`) return `(column, ok)`, with `ok = false` for an unsupported type. `shift` works on every type and returns the column alone.
+These procedures return `(column, ok)`. `ok` is `false` for a column type they do not support (`shift`, `cummax`, `cummin` and `rank` take every type) or for group keys of the wrong length.
+
+**Per group.** In a long table with one row per date and ticker, a plain `pct_change` would compute the first return of each ticker from the previous ticker's last price. `shift`, `diff`, `pct_change`, the four running procedures, `rank`, `ffill`, `bfill` and `interpolate` therefore take an optional `by`: one or more key columns that split the rows into groups. Each group is then computed on its own, in row order, like pandas' `groupby(...).pct_change()`. Rows with a missing key get a missing result. With the date as key, `rank` gives cross-sectional ranks:
+
+```odin
+px := w.df_from(
+    w.column_from_strings("date", {"01-02", "01-02", "01-03", "01-03", "01-04", "01-04"}),
+    w.column_from_strings("ticker", {"AAPL", "MSFT", "AAPL", "MSFT", "AAPL", "MSFT"}),
+    w.column_from_floats("close", {185.0, 410.0, 187.0, math.nan_f64(), 183.0, 418.2}),
+)
+defer w.destroy_dataframe(&px)
+tickers := []^w.Column{w.column(&px, "ticker")}
+
+filled, _ := w.ffill(w.column(&px, "close"), by = tickers) // carry MSFT's 410 over its gap
+defer w.destroy_column(&filled)
+ret, _ := w.pct_change(&filled, by = tickers, name = "ret") // returns per ticker
+w.add_column(&px, ret)
+r, _ := w.rank(w.column(&px, "ret"), ascending = false, name = "rank", by = {w.column(&px, "date")})
+w.add_column(&px, r) // 1 = best return of the day
+w.dataframe_pretty_print(&px)
+```
+
+```
+    date   ticker  close  ret                    rank
+  0 01-02  AAPL    185    NULL                   NULL
+  1 01-02  MSFT    410    NULL                   NULL
+  2 01-03  AAPL    187    0.0108108108108107     1
+  3 01-03  MSFT    NaN    0                      2
+  4 01-04  AAPL    183    -0.021390374331550777  2
+  5 01-04  MSFT    418.2  0.020000000000000018   1
+```
 
 **Bounding values.** `clip(col, lower, upper)` raises values below `lower` and lowers values above `upper`. Leave out a bound, or pass NaN, to skip it. An `Int` column stays `Int`, so its bounds must be whole numbers:
 
@@ -1019,6 +1049,49 @@ defer w.destroy_dataframe(&with_sector)
   2 TSLA    5       NULL
 ```
 
+### As-of joins
+
+`merge_asof` joins each row of the left table to the nearest row of the right table by an ordered key, such as a time or a date, instead of requiring equal keys. The typical use is the last quote at or before each trade, or the last published value at or before each date. `by` names key columns that must match exactly, such as the ticker:
+
+```odin
+trades := w.df_from(
+    w.column_from_datetimes("time", {{2024, 1, 2, 9, 30, 5}, {2024, 1, 2, 9, 30, 9}, {2024, 1, 2, 9, 31, 0}}),
+    w.column_from_strings("ticker", {"AAPL", "MSFT", "AAPL"}),
+    w.column_from_ints("qty", {100, 50, 200}),
+)
+defer w.destroy_dataframe(&trades)
+quotes := w.df_from(
+    w.column_from_datetimes("time", {{2024, 1, 2, 9, 30, 0}, {2024, 1, 2, 9, 30, 0}, {2024, 1, 2, 9, 30, 8}, {2024, 1, 2, 9, 30, 40}}),
+    w.column_from_strings("ticker", {"AAPL", "MSFT", "AAPL", "AAPL"}),
+    w.column_from_floats("bid", {184.9, 409.8, 185.1, 185.3}),
+)
+defer w.destroy_dataframe(&quotes)
+
+latest, ok := w.merge_asof(&trades, &quotes, "time", by = {"ticker"})
+defer w.destroy_dataframe(&latest)
+w.dataframe_pretty_print(&latest)
+```
+
+```
+    time                 ticker  qty  bid
+  0 2024-01-02 09:30:05  AAPL    100  184.9
+  1 2024-01-02 09:30:09  MSFT    50   409.8
+  2 2024-01-02 09:31:00  AAPL    200  185.3
+```
+
+The result has one row per left row, in left order and with the left row labels: all left columns, then the right columns except the keys. A left row without a match gets nulls. The options:
+
+| Option | Effect |
+|---|---|
+| `direction = .Backward` (default) | The last right row whose key is at or before the left key |
+| `direction = .Forward` | The first right row at or after the left key |
+| `direction = .Nearest` | The closer of the two; the earlier one on a tie |
+| `tolerance = d` | Match only within distance `d`, in the key's units: days for `Date`, seconds for `Time` and `Datetime`. `tolerance = 10.0` above would leave the last trade without a bid, because its quote is 20 seconds old |
+| `allow_exact_matches = false` | A right key equal to the left key does not count |
+| `right_on = "name"` | The right key column, when it is named differently |
+
+The key can be an `Int`, `Float`, `Date`, `Time` or `Datetime` column of the same type in both tables. Unlike pandas, neither table needs to be sorted. Among right rows with the same key, `.Backward` takes the last and `.Forward` the first.
+
 ## 19. Dates and times
 
 `Date`, `Time` and `Datetime` are plain structs, so you can write them as literals. The procedures below do calendar arithmetic on them:
@@ -1197,15 +1270,15 @@ The signed column is added to `trades` (step 1) before `recent` filters it. `fil
 | Filter | `filter`, `wobei`, `loc_mask` |
 | Missing data | `na_at`, `count_na`, `isna`, `notna`, `dropna`, `fillna`, `ffill`, `bfill`, `interpolate` |
 | Clean and combine | `concat_rows`, `cast_column`, `cast_columns`, `duplicated`, `drop_duplicates`, `unique`, `nunique`, `value_counts` |
-| Column calculations | `shift`, `diff`, `pct_change`, `cumsum`, `cumprod`, `cummax`, `cummin`, `clip`, `rank`, `nlargest`, `nsmallest`, `describe` |
+| Column calculations | `shift`, `diff`, `pct_change`, `cumsum`, `cumprod`, `cummax`, `cummin`, `clip`, `rank`, `nlargest`, `nsmallest`, `describe`; per group with `by` |
 | Reshape and sample | `pivot`, `pivot_table`, `melt`, `sample` |
 | Compute | `select` (expressions), `col_expr`, `add_expr`, `sub_expr`, `mult_expr`, `div_expr`, `apply_expr`, `conv_expr`, `mask_expr`, `free_select_exprs` |
 | Sort | `dataframe_sort`, `dataframe_sort_by`, `column_sort_order` |
 | Index | `set_index`, `reset_index`, `loc`, `loc_single`, `loc_range`, `loc_from`, `loc_until`, `loc_many`, `reindex` |
 | Group | `groupby` + `agg` (`count`, `sum_agg`, `avg_agg`, `min_agg`, `max_agg`); `groupby2` + `groupby2_agg` (`Aggregator`) |
-| Join | `join`, `join_on` with `.Inner`, `.Left`, `.Right`, `.Outer` |
+| Join | `join`, `join_on` with `.Inner`, `.Left`, `.Right`, `.Outer`; `merge_asof` |
 | Copy | `materialize`, `column_clone`, `column_take` |
 | Free | `destroy_dataframe`, `destroy_column`, `destroy_grouped_dataframe`, `destroy_groupby2`, `delete` (masks, strings) |
 | Temporary scratch | `TEMP_GUARD`, `temp_begin`, `temp_end` |
 
-For more examples, the tests in [`tests/`](../tests/) exercise every procedure. [`core_contracts_test.odin`](../tests/core_contracts_test.odin) in particular pins down the exact semantics of nulls, views, sorting, grouping and joins, and [`missing_data_test.odin`](../tests/missing_data_test.odin), [`frame_tools_test.odin`](../tests/frame_tools_test.odin), [`column_ops_test.odin`](../tests/column_ops_test.odin) and [`reshape_test.odin`](../tests/reshape_test.odin) check the procedures of sections 9 to 13 against pandas.
+For more examples, the tests in [`tests/`](../tests/) exercise every procedure. [`core_contracts_test.odin`](../tests/core_contracts_test.odin) in particular pins down the exact semantics of nulls, views, sorting, grouping and joins, and [`missing_data_test.odin`](../tests/missing_data_test.odin), [`frame_tools_test.odin`](../tests/frame_tools_test.odin), [`column_ops_test.odin`](../tests/column_ops_test.odin), [`reshape_test.odin`](../tests/reshape_test.odin) and [`group_asof_test.odin`](../tests/group_asof_test.odin) check the procedures of sections 9 to 13 and `merge_asof` against pandas.

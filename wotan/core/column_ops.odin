@@ -14,36 +14,61 @@ import "core:slice"
 //   describe                           summary statistics of the numeric columns
 //
 // A missing cell (null, or NaN in a Float column) gives a missing result
-// (null). Column results are new owned columns named like the source, or
+// (null). The lag, cumulative, rank and interpolate procedures take an
+// optional `by`: key columns (such as a ticker) that split the rows into
+// groups, so that each group is computed on its own, like pandas'
+// groupby(...).pct_change() etc. Rows with a missing key give a missing
+// result. Column results are new owned columns named like the source, or
 // `name` when given, so that they can be added next to the source with
 // add_column. The input may be a view and is never changed.
 
 // --- shift / diff / pct_change ---
 
 // Copy of `col` moved down by n rows (up for a negative n); the rows that
-// have no source value are null. Works for every column type.
-shift :: proc(col: ^Column, n := 1, name := "", allocator := context.allocator) -> Column {
-	rows := make([]int, col.len, context.temp_allocator)
-	defer delete(rows, context.temp_allocator)
-	for i in 0 ..< col.len {
-		j := i - n
-		rows[i] = j if j >= 0 && j < col.len else -1
-	}
-	out := column_take(col, rows, allocator)
+// have no source value are null. Works for every column type. With `by`
+// (one or more key columns), rows move only within their group.
+// ok = false when a key column's length differs from col's.
+shift :: proc(
+	col: ^Column,
+	n := 1,
+	name := "",
+	by: []^Column = nil,
+	allocator := context.allocator,
+) -> (
+	Column,
+	bool,
+) {
+	partner, ok := _partners(col.len, n, by)
+	if !ok {return {}, false}
+	defer delete(partner, context.temp_allocator)
+	out := column_take(col, partner, allocator)
 	_rename(&out, name)
-	return out
+	return out, true
 }
 
 // Difference to the value n rows earlier (later for a negative n), as an Int
 // column for Int input and a Float column for Float input. Rows without a
-// partner, or with a missing value on either side, are null. ok = false for
-// other column types.
-diff :: proc(col: ^Column, n := 1, name := "", allocator := context.allocator) -> (Column, bool) {
+// partner, or with a missing value on either side, are null. With `by`, the
+// partner is n rows earlier within the row's group. ok = false for other
+// column types, or a key column of another length.
+diff :: proc(
+	col: ^Column,
+	n := 1,
+	name := "",
+	by: []^Column = nil,
+	allocator := context.allocator,
+) -> (
+	Column,
+	bool,
+) {
 	if col.type != .Int && col.type != .Float {return {}, false}
+	partner, ok := _partners(col.len, n, by)
+	if !ok {return {}, false}
+	defer delete(partner, context.temp_allocator)
 	out := _new_like(col, col.type, name, allocator)
 	for i in 0 ..< col.len {
-		j := i - n
-		if j < 0 || j >= col.len || na_at(col, i) || na_at(col, j) {
+		j := partner[i]
+		if j < 0 || na_at(col, i) || na_at(col, j) {
 			append_null(&out)
 			continue
 		}
@@ -63,22 +88,28 @@ diff :: proc(col: ^Column, n := 1, name := "", allocator := context.allocator) -
 // Relative change to the value n rows earlier, x[i] / x[i-n] - 1, as a Float
 // column (Int or Float input). Rows without a partner or with a missing value
 // on either side are null; gaps are not filled first (call ffill for that).
-// A zero earlier value gives +-Inf, or NaN for 0 / 0. ok = false for other
-// column types.
+// A zero earlier value gives +-Inf, or NaN for 0 / 0. With `by`, the partner
+// is n rows earlier within the row's group, so that returns of a long table
+// with several tickers never mix two tickers. ok = false for other column
+// types, or a key column of another length.
 pct_change :: proc(
 	col: ^Column,
 	n := 1,
 	name := "",
+	by: []^Column = nil,
 	allocator := context.allocator,
 ) -> (
 	Column,
 	bool,
 ) {
 	if col.type != .Int && col.type != .Float {return {}, false}
+	partner, ok := _partners(col.len, n, by)
+	if !ok {return {}, false}
+	defer delete(partner, context.temp_allocator)
 	out := _new_like(col, .Float, name, allocator)
 	for i in 0 ..< col.len {
-		j := i - n
-		if j < 0 || j >= col.len || na_at(col, i) || na_at(col, j) {
+		j := partner[i]
+		if j < 0 || na_at(col, i) || na_at(col, j) {
 			append_null(&out)
 			continue
 		}
@@ -91,44 +122,49 @@ pct_change :: proc(
 
 // Running sum (Int or Float column; same type out). With skipna, a missing
 // cell is missing in the result and the sum carries on past it; without
-// skipna, every row from the first missing cell on is missing.
+// skipna, every row from the first missing cell on is missing. With `by`,
+// each group has its own running sum. ok = false for other column types, or a
+// key column of another length.
 cumsum :: proc(
 	col: ^Column,
 	skipna := true,
 	name := "",
+	by: []^Column = nil,
 	allocator := context.allocator,
 ) -> (
 	Column,
 	bool,
 ) {
-	return _cum_arith(col, false, skipna, name, allocator)
+	return _cum_arith(col, false, skipna, name, by, allocator)
 }
 
-// Running product (Int or Float column); skipna as for cumsum
+// Running product (Int or Float column); skipna and by as for cumsum
 cumprod :: proc(
 	col: ^Column,
 	skipna := true,
 	name := "",
+	by: []^Column = nil,
 	allocator := context.allocator,
 ) -> (
 	Column,
 	bool,
 ) {
-	return _cum_arith(col, true, skipna, name, allocator)
+	return _cum_arith(col, true, skipna, name, by, allocator)
 }
 
 // Running maximum; works for every orderable type (Int, Float, Bool, String,
-// Date, Time, Datetime). skipna as for cumsum.
+// Date, Time, Datetime). skipna and by as for cumsum.
 cummax :: proc(
 	col: ^Column,
 	skipna := true,
 	name := "",
+	by: []^Column = nil,
 	allocator := context.allocator,
 ) -> (
 	Column,
 	bool,
 ) {
-	return _cum_extreme(col, true, skipna, name, allocator)
+	return _cum_extreme(col, true, skipna, name, by, allocator)
 }
 
 // Running minimum; as cummax
@@ -136,12 +172,13 @@ cummin :: proc(
 	col: ^Column,
 	skipna := true,
 	name := "",
+	by: []^Column = nil,
 	allocator := context.allocator,
 ) -> (
 	Column,
 	bool,
 ) {
-	return _cum_extreme(col, false, skipna, name, allocator)
+	return _cum_extreme(col, false, skipna, name, by, allocator)
 }
 
 // --- clip ---
@@ -207,52 +244,78 @@ Rank_Method :: enum {
 
 // Rank (1 = smallest, or largest when ascending is false) of every value, as
 // a Float column; missing cells stay missing. Works for every orderable type.
-// ok = false for a column of type Invalid.
+// With `by`, values are ranked within their group (cross-sectional ranks:
+// rank the returns of each date with by = {date}). ok = false for a column
+// of type Invalid, or a key column of another length.
 rank :: proc(
 	col: ^Column,
 	method := Rank_Method.Average,
 	ascending := true,
 	name := "",
+	by: []^Column = nil,
 	allocator := context.allocator,
 ) -> (
 	Column,
 	bool,
 ) {
 	if col.type == .Invalid {return {}, false}
+	g, ok := _groups(col.len, by)
+	if !ok {return {}, false}
+	defer _groups_free(&g)
 	order := column_sort_order(col, !ascending, context.temp_allocator)
 	defer delete(order, context.temp_allocator)
 	ranks := make([]f64, col.len, context.temp_allocator)
 	defer delete(ranks, context.temp_allocator)
+	ranked := make([]bool, col.len, context.temp_allocator)
+	defer delete(ranked, context.temp_allocator)
 
-	i, dense := 0, 0
-	for i < col.len && !na_at(col, order[i]) { 	// missing values sort last
-		j := i + 1
-		for j < col.len &&
-		    !na_at(col, order[j]) &&
-		    column_compare_rows(col, order[i], order[j]) == 0 {j += 1}
-		dense += 1
-		for k in i ..< j {
-			r: f64
-			switch method {
-			case .Average:
-				r = f64(i + 1 + j) / 2
-			case .Min:
-				r = f64(i + 1)
-			case .Max:
-				r = f64(j)
-			case .First:
-				r = f64(k + 1)
-			case .Dense:
-				r = f64(dense)
+	// the sorted order split by group (each part stays sorted)
+	sorted := make([]int, col.len, context.temp_allocator)
+	defer delete(sorted, context.temp_allocator)
+	start := make([]int, len(g.lists) + 1, context.temp_allocator)
+	defer delete(start, context.temp_allocator)
+	for list, k in g.lists {start[k + 1] = start[k] + len(list)}
+	fill := make([]int, len(g.lists), context.temp_allocator)
+	defer delete(fill, context.temp_allocator)
+	copy(fill, start[:len(g.lists)])
+	for r in order {
+		k := g.of[r]
+		if k < 0 || na_at(col, r) {continue}
+		sorted[fill[k]] = r
+		fill[k] += 1
+	}
+
+	for k in 0 ..< len(g.lists) {
+		part := sorted[start[k]:fill[k]]
+		i, dense := 0, 0
+		for i < len(part) {
+			j := i + 1
+			for j < len(part) && column_compare_rows(col, part[i], part[j]) == 0 {j += 1}
+			dense += 1
+			for q in i ..< j {
+				r: f64
+				switch method {
+				case .Average:
+					r = f64(i + 1 + j) / 2
+				case .Min:
+					r = f64(i + 1)
+				case .Max:
+					r = f64(j)
+				case .First:
+					r = f64(q + 1)
+				case .Dense:
+					r = f64(dense)
+				}
+				ranks[part[q]] = r
+				ranked[part[q]] = true
 			}
-			ranks[order[k]] = r
+			i = j
 		}
-		i = j
 	}
 
 	out := _new_like(col, .Float, name, allocator)
 	for r in 0 ..< col.len {
-		if na_at(col, r) {append_null(&out)} else {append_float(&out, ranks[r])}
+		if ranked[r] {append_float(&out, ranks[r])} else {append_null(&out)}
 	}
 	return out, true
 }
@@ -484,13 +547,16 @@ _cmp :: proc(a, b: $T) -> int {
 // cells), the fill follows its values, so that uneven dates are weighted by
 // their distance (days for Date, seconds for Datetime). limit > 0 fills at
 // most `limit` cells of each gap from its start. Cells before the first or
-// after the last present value stay missing. ok = false for another column
-// type, an unusable `x`, or a negative limit.
+// after the last present value stay missing. With `by`, gaps are filled
+// within each group only, from the group's own values. ok = false for another
+// column type, an unusable `x`, a negative limit, or a key column of another
+// length.
 interpolate :: proc(
 	col: ^Column,
 	x: ^Column = nil,
 	limit := 0,
 	name := "",
+	by: []^Column = nil,
 	allocator := context.allocator,
 ) -> (
 	Column,
@@ -506,6 +572,9 @@ interpolate :: proc(
 		}
 		for i in 0 ..< x.len {if na_at(x, i) {return {}, false}}
 	}
+	g, ok := _groups(col.len, by)
+	if !ok {return {}, false}
+	defer _groups_free(&g)
 	pos :: proc(x: ^Column, i: int) -> f64 {
 		if x == nil {return f64(i)}
 		#partial switch x.type {
@@ -523,20 +592,26 @@ interpolate :: proc(
 	present := make([]bool, col.len, context.temp_allocator)
 	defer delete(vals, context.temp_allocator)
 	defer delete(present, context.temp_allocator)
-	last := -1
-	for i in 0 ..< col.len {
-		if na_at(col, i) {continue}
-		vals[i], present[i] = _num(col, i), true
-		if last >= 0 && i - last > 1 {
-			xa, xb := pos(x, last), pos(x, i)
-			ya, yb := vals[last], vals[i]
-			for k in last + 1 ..< i {
-				if limit > 0 && k - last > limit {break}
-				t := (pos(x, k) - xa) / (xb - xa) if xb != xa else 0
-				vals[k], present[k] = ya + (yb - ya) * t, true
-			}
+	for list in g.lists {
+		// without x, rows are spaced by their place in the group
+		at :: proc(x: ^Column, list: []int, k: int) -> f64 {
+			return f64(k) if x == nil else pos(x, list[k])
 		}
-		last = i
+		last := -1 // place in list of the last present value
+		for i, k in list {
+			if na_at(col, i) {continue}
+			vals[i], present[i] = _num(col, i), true
+			if last >= 0 && k - last > 1 {
+				xa, xb := at(x, list, last), at(x, list, k)
+				ya, yb := vals[list[last]], vals[i]
+				for m in last + 1 ..< k {
+					if limit > 0 && m - last > limit {break}
+					t := (at(x, list, m) - xa) / (xb - xa) if xb != xa else 0
+					vals[list[m]], present[list[m]] = ya + (yb - ya) * t, true
+				}
+			}
+			last = k
+		}
 	}
 	out := _new_like(col, .Float, name, allocator)
 	for i in 0 ..< col.len {
@@ -546,6 +621,115 @@ interpolate :: proc(
 }
 
 // --- helpers ---
+
+// Rows of the groups that the key columns `by` form: lists[k] holds the rows
+// of group k in row order (groups in order of first appearance), of[r] the
+// group of row r. A row with a missing key is in no group (of = -1); without
+// keys, all rows form one group. Temp-allocated; free with _groups_free.
+@(private)
+_Groups :: struct {
+	lists: [][]int,
+	of:    []int,
+	flat:  []int,
+}
+
+@(private)
+_groups :: proc(n: int, by: []^Column) -> (g: _Groups, ok: bool) {
+	g.of = make([]int, n, context.temp_allocator)
+	if len(by) == 0 {
+		g.flat = make([]int, n, context.temp_allocator)
+		for i in 0 ..< n {g.flat[i], g.of[i] = i, 0}
+		g.lists = make([][]int, 1, context.temp_allocator)
+		g.lists[0] = g.flat
+		return g, true
+	}
+	for c in by {
+		if c.len != n {
+			delete(g.of, context.temp_allocator)
+			return {}, false
+		}
+	}
+	pairs := make(map[[2]int]int, allocator = context.temp_allocator)
+	defer delete(pairs)
+	for c, k in by {
+		codes, firsts, na := _value_codes(c)
+		delete(firsts)
+		for i in 0 ..< n {
+			if k > 0 && g.of[i] < 0 {continue}
+			if codes[i] == na {
+				g.of[i] = -1
+				continue
+			}
+			if k == 0 {
+				g.of[i] = codes[i]
+				continue
+			}
+			key := [2]int{g.of[i], codes[i]}
+			id, found := pairs[key]
+			if !found {
+				id = len(pairs)
+				pairs[key] = id
+			}
+			g.of[i] = id
+		}
+		clear(&pairs)
+		delete(codes, context.temp_allocator)
+	}
+	// renumber groups in order of first appearance and bucket the rows
+	renum := make(map[int]int, allocator = context.temp_allocator)
+	defer delete(renum)
+	for i in 0 ..< n {
+		if g.of[i] < 0 {continue}
+		id, found := renum[g.of[i]]
+		if !found {
+			id = len(renum)
+			renum[g.of[i]] = id
+		}
+		g.of[i] = id
+	}
+	sizes := make([]int, len(renum) + 1, context.temp_allocator)
+	defer delete(sizes, context.temp_allocator)
+	for i in 0 ..< n {if g.of[i] >= 0 {sizes[g.of[i] + 1] += 1}}
+	for k in 1 ..< len(sizes) {sizes[k] += sizes[k - 1]}
+	g.flat = make([]int, sizes[len(sizes) - 1], context.temp_allocator)
+	g.lists = make([][]int, len(renum), context.temp_allocator)
+	fill := make([]int, len(renum), context.temp_allocator)
+	defer delete(fill, context.temp_allocator)
+	copy(fill, sizes[:len(renum)])
+	for i in 0 ..< n {
+		k := g.of[i]
+		if k < 0 {continue}
+		g.flat[fill[k]] = i
+		fill[k] += 1
+	}
+	for k in 0 ..< len(renum) {g.lists[k] = g.flat[sizes[k]:sizes[k + 1]]}
+	return g, true
+}
+
+@(private)
+_groups_free :: proc(g: ^_Groups) {
+	delete(g.lists, context.temp_allocator)
+	delete(g.of, context.temp_allocator)
+	delete(g.flat, context.temp_allocator)
+}
+
+// For every row, the row n places earlier in its group (-1: none)
+@(private = "file")
+_partners :: proc(len_: int, n: int, by: []^Column) -> ([]int, bool) {
+	g, ok := _groups(len_, by)
+	if !ok {return nil, false}
+	defer _groups_free(&g)
+	partner := make([]int, len_, context.temp_allocator)
+	for &p in partner {p = -1}
+	for list in g.lists {
+		for r, k in list {
+			j := k - n
+			if j >= 0 && j < len(list) {partner[r] = list[j]}
+		}
+	}
+	return partner, true
+}
+
 
 @(private = "file")
 _rename :: proc(col: ^Column, name: string) {
@@ -582,30 +766,52 @@ _cum_arith :: proc(
 	product: bool,
 	skipna: bool,
 	name: string,
+	by: []^Column,
 	allocator: mem.Allocator,
 ) -> (
 	Column,
 	bool,
 ) {
 	if col.type != .Int && col.type != .Float {return {}, false}
-	out := _new_like(col, col.type, name, allocator)
-	acc_i := 1 if product else 0
-	acc_f := 1.0 if product else 0.0
-	broken := false
-	for i in 0 ..< col.len {
-		if broken || na_at(col, i) {
-			broken = broken || !skipna
-			append_null(&out)
-			continue
+	g, ok := _groups(col.len, by)
+	if !ok {return {}, false}
+	defer _groups_free(&g)
+	vi := make([]int, col.len, context.temp_allocator)
+	vf := make([]f64, col.len, context.temp_allocator)
+	present := make([]bool, col.len, context.temp_allocator)
+	defer delete(vi, context.temp_allocator)
+	defer delete(vf, context.temp_allocator)
+	defer delete(present, context.temp_allocator)
+	for list in g.lists {
+		acc_i := 1 if product else 0
+		acc_f := 1.0 if product else 0.0
+		broken := false
+		for i in list {
+			if broken || na_at(col, i) {
+				broken = broken || !skipna
+				continue
+			}
+			if col.type == .Int {
+				v, _ := column_at_int(col, i)
+				if product {acc_i *= v} else {acc_i += v}
+				vi[i] = acc_i
+			} else {
+				v, _ := column_at_float(col, i)
+				if product {acc_f *= v} else {acc_f += v}
+				vf[i] = acc_f
+			}
+			present[i] = true
 		}
-		if col.type == .Int {
-			v, _ := column_at_int(col, i)
-			if product {acc_i *= v} else {acc_i += v}
-			append_int(&out, acc_i)
-		} else {
-			v, _ := column_at_float(col, i)
-			if product {acc_f *= v} else {acc_f += v}
-			append_float(&out, acc_f)
+	}
+	out := _new_like(col, col.type, name, allocator)
+	for i in 0 ..< col.len {
+		switch {
+		case !present[i]:
+			append_null(&out)
+		case col.type == .Int:
+			append_int(&out, vi[i])
+		case:
+			append_float(&out, vf[i])
 		}
 	}
 	return out, true
@@ -617,30 +823,36 @@ _cum_extreme :: proc(
 	is_max: bool,
 	skipna: bool,
 	name: string,
+	by: []^Column,
 	allocator: mem.Allocator,
 ) -> (
 	Column,
 	bool,
 ) {
 	if col.type == .Invalid {return {}, false}
+	g, ok := _groups(col.len, by)
+	if !ok {return {}, false}
+	defer _groups_free(&g)
 	// source row for every row: the row holding the extreme so far
 	rows := make([]int, col.len, context.temp_allocator)
 	defer delete(rows, context.temp_allocator)
-	best := -1
-	broken := false
-	for i in 0 ..< col.len {
-		if broken || na_at(col, i) {
-			broken = broken || !skipna
-			rows[i] = -1
-			continue
+	for &r in rows {r = -1}
+	for list in g.lists {
+		best := -1
+		broken := false
+		for i in list {
+			if broken || na_at(col, i) {
+				broken = broken || !skipna
+				continue
+			}
+			if best < 0 {
+				best = i
+			} else {
+				c := column_compare_rows(col, i, best)
+				if (is_max && c > 0) || (!is_max && c < 0) {best = i}
+			}
+			rows[i] = best
 		}
-		if best < 0 {
-			best = i
-		} else {
-			c := column_compare_rows(col, i, best)
-			if (is_max && c > 0) || (!is_max && c < 0) {best = i}
-		}
-		rows[i] = best
 	}
 	out := column_take(col, rows, allocator)
 	_rename(&out, name)
