@@ -5,7 +5,11 @@ import "core:mem"
 import "core:strings"
 
 
-dataframe_pretty_print :: proc(df: ^DataFrame, max_rows: int = 20) {
+// Prints `df` as an aligned table with row labels; nulls show as NULL. At most
+// `max_rows` rows are shown (all when 0). Float cells show the shortest text
+// that reads back exactly, or, with precision >= 0, that many decimals
+// (NaN, Inf and -Inf as such).
+dataframe_pretty_print :: proc(df: ^DataFrame, max_rows: int = 20, precision := -1) {
 	if df.rows == 0 || len(df.columns) == 0 {
 		fmt.println("Empty DataFrame")
 		return
@@ -23,7 +27,7 @@ dataframe_pretty_print :: proc(df: ^DataFrame, max_rows: int = 20) {
 	for &col, i in df.columns {
 		w := len(col.name)
 		for r in 0 ..< en {
-			val_str := column_value_string_df(df, &col, r)
+			val_str := _pretty_cell(&col, r, precision)
 			if len(val_str) > w {
 				w = len(val_str)
 			}
@@ -45,7 +49,7 @@ dataframe_pretty_print :: proc(df: ^DataFrame, max_rows: int = 20) {
 		fmt.printf("%3d ", phys)
 
 		for &col, i in df.columns {
-			val_str := column_value_string_df(df, &col, r)
+			val_str := _pretty_cell(&col, r, precision)
 			val_padded := pad_right(val_str, col_widths[i])
 			fmt.printf("%s  ", val_padded)
 		}
@@ -87,4 +91,22 @@ pad_right :: proc(s: string, width: int) -> string {
 	defer delete(rep)
 	ret := fmt.tprintf("%s%s", s, rep)
 	return ret
+}
+
+// Cell text for dataframe_pretty_print
+@(private = "file")
+_pretty_cell :: proc(col: ^Column, r: int, precision: int) -> string {
+	if precision < 0 || col.type != .Float {return column_value_string(col, r)}
+	v, null := column_at_float(col, r)
+	switch {
+	case null:
+		return "NULL"
+	case v != v:
+		return "NaN"
+	case v > max(f64):
+		return "Inf"
+	case v < -max(f64):
+		return "-Inf"
+	}
+	return fmt.tprintf("%.*f", precision, v)
 }

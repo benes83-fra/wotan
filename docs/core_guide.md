@@ -199,7 +199,7 @@ For files on disk use `io.csv_load("path/to/file.csv")`. You can pass your own c
 
 | Procedure | Prints |
 |---|---|
-| `w.dataframe_pretty_print(&df, max_rows = 20)` | An aligned table with row labels; nulls show as `NULL` |
+| `w.dataframe_pretty_print(&df, max_rows = 20, precision = -1)` | An aligned table with row labels; nulls show as `NULL`. Float cells show the shortest text that reads back exactly; `precision = 4` shows four decimals instead |
 | `w.df_head(&df, n)` | The first `n` rows, tab-separated |
 | `w.dataframe_print(&df)` | The shape and each column's name and type |
 
@@ -619,17 +619,19 @@ peak, _ := w.cummax(close, name = "peak") // running high, e.g. for drawdowns
 w.add_column(&df, peak)
 move, _ := w.diff(close, name = "move")
 w.add_column(&df, move)
-w.dataframe_pretty_print(&df)
+w.dataframe_pretty_print(&df, precision = 4) // four decimals
 ```
 
 ```
-    day  close    ret                    prev     peak  move
-  0 Mon  100      NULL                   NULL     100   NULL
-  1 Tue  104      0.040000000000000036   100      104   4
-  2 Wed  98.8     -0.050000000000000044  104      104   -5.200000000000003
-  3 Thu  101.764  0.030000000000000027   98.8     104   2.9639999999999986
-  4 Fri  96       -0.05664085531229113   101.764  104   -5.763999999999996
+    day  close     ret      prev      peak      move
+  0 Mon  100.0000  NULL     NULL      100.0000  NULL
+  1 Tue  104.0000  0.0400   100.0000  104.0000  4.0000
+  2 Wed  98.8000   -0.0500  104.0000  104.0000  -5.2000
+  3 Thu  101.7640  0.0300   98.8000   104.0000  2.9640
+  4 Fri  96.0000   -0.0566  101.7640  104.0000  -5.7640
 ```
+
+Without `precision`, floats print in full, for example `0.040000000000000036` for the first return: the shortest text that reads back as exactly the stored value.
 
 These procedures return `(column, ok)`. `ok` is `false` for a column type they do not support (`shift`, `cummax`, `cummin` and `rank` take every type) or for group keys of the wrong length.
 
@@ -650,17 +652,17 @@ ret, _ := w.pct_change(&filled, by = tickers, name = "ret") // returns per ticke
 w.add_column(&px, ret)
 r, _ := w.rank(w.column(&px, "ret"), ascending = false, name = "rank", by = {w.column(&px, "date")})
 w.add_column(&px, r) // 1 = best return of the day
-w.dataframe_pretty_print(&px)
+w.dataframe_pretty_print(&px, precision = 4)
 ```
 
 ```
-    date   ticker  close  ret                    rank
-  0 01-02  AAPL    185    NULL                   NULL
-  1 01-02  MSFT    410    NULL                   NULL
-  2 01-03  AAPL    187    0.0108108108108107     1
-  3 01-03  MSFT    NaN    0                      2
-  4 01-04  AAPL    183    -0.021390374331550777  2
-  5 01-04  MSFT    418.2  0.020000000000000018   1
+    date   ticker  close     ret      rank
+  0 01-02  AAPL    185.0000  NULL     NULL
+  1 01-02  MSFT    410.0000  NULL     NULL
+  2 01-03  AAPL    187.0000  0.0108   1.0000
+  3 01-03  MSFT    NaN       0.0000   2.0000
+  4 01-04  AAPL    183.0000  -0.0214  2.0000
+  5 01-04  MSFT    418.2000  0.0200   1.0000
 ```
 
 **Bounding values.** `clip(col, lower, upper)` raises values below `lower` and lowers values above `upper`. Leave out a bound, or pass NaN, to skip it. An `Int` column stays `Int`, so its bounds must be whole numbers:
@@ -680,13 +682,13 @@ w.add_column(&df, r)
 
 best, _ := w.nlargest(&df, 2, "ret")
 defer w.destroy_dataframe(&best)
-w.dataframe_pretty_print(&best)
+w.dataframe_pretty_print(&best, precision = 4)
 ```
 
 ```
-    day  close    ret                   prev  peak  move                ret_rank
-  1 Tue  104      0.040000000000000036  100   104   4                   1
-  3 Thu  101.764  0.030000000000000027  98.8  104   2.9639999999999986  2
+    day  close     ret     prev      peak      move    ret_rank
+  1 Tue  104.0000  0.0400  100.0000  104.0000  4.0000  1.0000
+  3 Thu  101.7640  0.0300  98.8000   104.0000  2.9640  2.0000
 ```
 
 **Summary statistics.** `describe` summarizes every `Int` and `Float` column of a frame, as pandas `describe()` does. The result has a `stat` column with the labels count, mean, std (the sample standard deviation), min, 25%, 50%, 75% and max, and one `Float` column per numeric column. Missing cells are left out of every statistic:
@@ -696,19 +698,19 @@ prices := w.select(&df, []string{"close"})
 defer w.destroy_dataframe(&prices)
 stats := w.describe(&prices)
 defer w.destroy_dataframe(&stats)
-w.dataframe_pretty_print(&stats)
+w.dataframe_pretty_print(&stats, precision = 4)
 ```
 
 ```
     stat   close
-  0 count  5
-  1 mean   100.11280000000001
-  2 std    3.0202680675728106
-  3 min    96
-  4 25%    98.8
-  5 50%    100
-  6 75%    101.764
-  7 max    104
+  0 count  5.0000
+  1 mean   100.1128
+  2 std    3.0203
+  3 min    96.0000
+  4 25%    98.8000
+  5 50%    100.0000
+  6 75%    101.7640
+  7 max    104.0000
 ```
 
 For moving windows (rolling means, rolling volatility, exponentially weighted statistics), see [Rolling statistics](analytics_guide.md#3-rolling-statistics) in the `analytics` guide.
@@ -793,7 +795,36 @@ w.dataframe_pretty_print(&some)
   3 2024-01-02  AAPL    185.5
 ```
 
-`melt`, `pivot`, `pivot_table` and `sample` return `ok = false` for an unknown column name or an impossible request, such as a sample larger than the table without replacement.
+**Calendar periods.** `resample` turns rows with a `Date` or `Datetime` column into one row per day, week, month, quarter or year, as pandas' `resample` does. Each `Resample_Spec` names a column, an aggregation (the same seven as `pivot_table`) and an output name. `.First` and `.Last` are the earliest and latest values of a period by date, so `.First`, `.Max`, `.Min` and `.Last` of a price give open, high, low and close bars, even if the rows are not sorted. Each period is labelled by its last day. Weeks end on Sunday unless you pass `week_end`:
+
+```odin
+daily := w.df_from(
+    w.column_from_dates("date", {{2024, 3, 4}, {2024, 3, 5}, {2024, 3, 7}, {2024, 3, 8}, {2024, 3, 11}, {2024, 3, 13}, {2024, 3, 15}}),
+    w.column_from_floats("close", {101.0, 103.5, 102.0, 104.25, 103.0, 106.5, 105.0}),
+    w.column_from_ints("volume", {1200, 900, 1500, 1100, 800, 2000, 1300}),
+)
+defer w.destroy_dataframe(&daily)
+
+weekly, ok := w.resample(&daily, "date", .Week, {
+    {"close", .First, "open"},
+    {"close", .Max, "high"},
+    {"close", .Min, "low"},
+    {"close", .Last, "close"},
+    {"volume", .Sum, ""}, // "" keeps the column's name
+}, week_end = .Friday)
+defer w.destroy_dataframe(&weekly)
+w.dataframe_pretty_print(&weekly)
+```
+
+```
+    date        open  high    low  close   volume
+  0 2024-03-08  101   104.25  101  104.25  4700
+  1 2024-03-15  103   106.5   103  105     4100
+```
+
+Every period from the first to the last one in the data appears, so a month without rows shows up with a `.Sum` and `.Count` of 0 and nulls otherwise. With `by = {"ticker"}`, each ticker gets its own run of periods. The result starts with the key columns and the period labels.
+
+`melt`, `pivot`, `pivot_table`, `resample` and `sample` return `ok = false` for an unknown column name or an impossible request, such as a sample larger than the table without replacement.
 
 ## 14. Computed columns
 
@@ -1271,7 +1302,7 @@ The signed column is added to `trades` (step 1) before `recent` filters it. `fil
 | Missing data | `na_at`, `count_na`, `isna`, `notna`, `dropna`, `fillna`, `ffill`, `bfill`, `interpolate` |
 | Clean and combine | `concat_rows`, `cast_column`, `cast_columns`, `duplicated`, `drop_duplicates`, `unique`, `nunique`, `value_counts` |
 | Column calculations | `shift`, `diff`, `pct_change`, `cumsum`, `cumprod`, `cummax`, `cummin`, `clip`, `rank`, `nlargest`, `nsmallest`, `describe`; per group with `by` |
-| Reshape and sample | `pivot`, `pivot_table`, `melt`, `sample` |
+| Reshape and sample | `pivot`, `pivot_table`, `melt`, `resample`, `sample` |
 | Compute | `select` (expressions), `col_expr`, `add_expr`, `sub_expr`, `mult_expr`, `div_expr`, `apply_expr`, `conv_expr`, `mask_expr`, `free_select_exprs` |
 | Sort | `dataframe_sort`, `dataframe_sort_by`, `column_sort_order` |
 | Index | `set_index`, `reset_index`, `loc`, `loc_single`, `loc_range`, `loc_from`, `loc_until`, `loc_many`, `reindex` |
@@ -1281,4 +1312,4 @@ The signed column is added to `trades` (step 1) before `recent` filters it. `fil
 | Free | `destroy_dataframe`, `destroy_column`, `destroy_grouped_dataframe`, `destroy_groupby2`, `delete` (masks, strings) |
 | Temporary scratch | `TEMP_GUARD`, `temp_begin`, `temp_end` |
 
-For more examples, the tests in [`tests/`](../tests/) exercise every procedure. [`core_contracts_test.odin`](../tests/core_contracts_test.odin) in particular pins down the exact semantics of nulls, views, sorting, grouping and joins, and [`missing_data_test.odin`](../tests/missing_data_test.odin), [`frame_tools_test.odin`](../tests/frame_tools_test.odin), [`column_ops_test.odin`](../tests/column_ops_test.odin), [`reshape_test.odin`](../tests/reshape_test.odin) and [`group_asof_test.odin`](../tests/group_asof_test.odin) check the procedures of sections 9 to 13 and `merge_asof` against pandas.
+For more examples, the tests in [`tests/`](../tests/) exercise every procedure. [`core_contracts_test.odin`](../tests/core_contracts_test.odin) in particular pins down the exact semantics of nulls, views, sorting, grouping and joins, and [`missing_data_test.odin`](../tests/missing_data_test.odin), [`frame_tools_test.odin`](../tests/frame_tools_test.odin), [`column_ops_test.odin`](../tests/column_ops_test.odin), [`reshape_test.odin`](../tests/reshape_test.odin), [`resample_test.odin`](../tests/resample_test.odin) and [`group_asof_test.odin`](../tests/group_asof_test.odin) check the procedures of sections 9 to 13 and `merge_asof` against pandas.

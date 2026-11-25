@@ -159,7 +159,7 @@ reshape_test :: proc(allocator: mem.Allocator) {
 		)
 		defer w.destroy_dataframe(&tr)
 		Case :: struct {
-			agg:  w.Pivot_Agg,
+			agg:  w.Agg_Func,
 			want: string,
 		}
 		cases := []Case {
