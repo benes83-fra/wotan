@@ -102,22 +102,46 @@ df_take :: proc(src: ^DataFrame, rows: []int, allocator := context.allocator) ->
 // ------------------------------------------------------------
 
 loc_single :: proc(df: ^DataFrame, key: $T) -> DataFrame {
+	row, found := _loc_find(df, key)
+	if !found {panic("loc: key not found")}
+	return df_row(df, row)
+}
+
+// Row of the first index key equal to `key` (panics like loc_single when the
+// frame has no index of type T; callers that must not panic check
+// _index_usable first)
+@(private)
+_loc_find :: proc(df: ^DataFrame, key: $T) -> (row: int, found: bool) {
 	keys, n_valid, valid := _index_keys(df, T, "loc")
 
 	// 1. binary search (sorted, non-null prefix)
 	i := lower_bound(keys[:n_valid], key)
 	if i < n_valid && equals(keys[i], key) {
-		return df_row(df, i)
+		return i, true
 	}
 
 	// 2. fallback linear scan (unsorted index)
 	for j in 0 ..< df.rows {
 		if valid[j] && equals(keys[j], key) {
-			return df_row(df, j)
+			return j, true
 		}
 	}
+	return -1, false
+}
 
-	panic("loc: key not found")
+// Does `df` have an index whose keys are of type T?
+@(private)
+_index_usable :: proc(df: ^DataFrame, $T: typeid) -> bool {
+	if !df.has_index {return false}
+	col: ^Column
+	if idx, ok := df.name_to_index[df.index_column]; ok {
+		col = &df.columns[idx]
+	} else if df.index_values.type != .Invalid {
+		col = &df.index_values
+	} else {
+		return false
+	}
+	return col.type == get_column_type(T) && size_of(T) == type_size(col.type)
 }
 
 // ------------------------------------------------------------

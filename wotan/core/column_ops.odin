@@ -501,13 +501,13 @@ _between_typed :: proc(
 }
 
 // Column type that holds values of T (.Invalid for other types)
-@(private = "file")
+@(private)
 _type_of :: proc($T: typeid) -> ColumnType {
 	when T == int {return .Int} else when T == f64 {return .Float} else when T == bool {return .Bool} else when T == string {return .String} else when T == Date {return .Date} else when T == Time {return .Time} else when T == Datetime {return .Datetime} else {return .Invalid}
 }
 
 // Present cell as a T: the column's own type, or an Int / Float cell as f64
-@(private = "file")
+@(private)
 _cell_as :: proc(col: ^Column, i: int, $T: typeid) -> T {
 	when T == int {
 		v, _ := column_at_int(col, i); return v
@@ -526,7 +526,7 @@ _cell_as :: proc(col: ^Column, i: int, $T: typeid) -> T {
 	}
 }
 
-@(private = "file")
+@(private)
 _cmp :: proc(a, b: $T) -> int {
 	when T == Date {
 		return int(date_compare(a, b))
@@ -731,13 +731,13 @@ _partners :: proc(len_: int, n: int, by: []^Column) -> ([]int, bool) {
 }
 
 
-@(private = "file")
+@(private)
 _rename :: proc(col: ^Column, name: string) {
 	if name != "" {column_own_name(col, name)}
 }
 
 // Empty owned column of `type`, named `name` or like `src`
-@(private = "file")
+@(private)
 _new_like :: proc(
 	src: ^Column,
 	type: ColumnType,
@@ -750,7 +750,7 @@ _new_like :: proc(
 }
 
 // Present Int or Float cell as f64
-@(private = "file")
+@(private)
 _num :: proc(col: ^Column, i: int) -> f64 {
 	if col.type == .Int {
 		v, _ := column_at_int(col, i)

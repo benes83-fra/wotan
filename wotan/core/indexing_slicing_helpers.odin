@@ -24,6 +24,7 @@ less_equal_generic :: proc(a, b: $T) -> bool where intrinsics.type_is_numeric(T)
 
 equals :: proc {
 	equals_generic,
+	equals_string,
 	equals_date,
 	equals_time,
 	equals_datetime,
@@ -31,6 +32,7 @@ equals :: proc {
 
 less :: proc {
 	less_generic,
+	less_string,
 	less_date,
 	less_time,
 	less_datetime,
@@ -38,9 +40,24 @@ less :: proc {
 
 less_equal :: proc {
 	less_equal_generic,
+	less_equal_string,
 	less_equal_date,
 	less_equal_time,
 	less_equal_datetime,
+}
+
+// --- String (byte order, as the sort uses) ---
+
+equals_string :: proc(a, b: string) -> bool {
+	return a == b
+}
+
+less_string :: proc(a, b: string) -> bool {
+	return a < b
+}
+
+less_equal_string :: proc(a, b: string) -> bool {
+	return a <= b
 }
 
 // --- Date ---
