@@ -283,7 +283,7 @@ _numeric_values :: proc(src: ^Column, rows: []int) -> [dynamic]f64 {
 }
 
 // Linear-interpolated quantile of sorted values (pandas default)
-@(private = "file")
+@(private)
 _quantile :: proc(sorted: []f64, q: f64) -> f64 {
 	pos := q * f64(len(sorted) - 1)
 	lo := int(math.floor(pos))

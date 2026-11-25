@@ -1,0 +1,465 @@
+package core
+
+import "core:math"
+import "core:mem"
+import "core:slice"
+
+// Column calculations familiar from pandas Series:
+//
+//   shift / diff / pct_change          lags, differences, relative changes
+//   cumsum / cumprod / cummax / cummin running totals and extremes
+//   clip                               bound values to a range
+//   rank                               rank values (average, min, max, first, dense)
+//   nlargest / nsmallest               rows with the largest / smallest values
+//   describe                           summary statistics of the numeric columns
+//
+// A missing cell (null, or NaN in a Float column) gives a missing result
+// (null). Column results are new owned columns named like the source, or
+// `name` when given, so that they can be added next to the source with
+// add_column. The input may be a view and is never changed.
+
+// --- shift / diff / pct_change ---
+
+// Copy of `col` moved down by n rows (up for a negative n); the rows that
+// have no source value are null. Works for every column type.
+shift :: proc(col: ^Column, n := 1, name := "", allocator := context.allocator) -> Column {
+	rows := make([]int, col.len, context.temp_allocator)
+	defer delete(rows, context.temp_allocator)
+	for i in 0 ..< col.len {
+		j := i - n
+		rows[i] = j if j >= 0 && j < col.len else -1
+	}
+	out := column_take(col, rows, allocator)
+	_rename(&out, name)
+	return out
+}
+
+// Difference to the value n rows earlier (later for a negative n), as an Int
+// column for Int input and a Float column for Float input. Rows without a
+// partner, or with a missing value on either side, are null. ok = false for
+// other column types.
+diff :: proc(col: ^Column, n := 1, name := "", allocator := context.allocator) -> (Column, bool) {
+	if col.type != .Int && col.type != .Float {return {}, false}
+	out := _new_like(col, col.type, name, allocator)
+	for i in 0 ..< col.len {
+		j := i - n
+		if j < 0 || j >= col.len || na_at(col, i) || na_at(col, j) {
+			append_null(&out)
+			continue
+		}
+		if col.type == .Int {
+			a, _ := column_at_int(col, i)
+			b, _ := column_at_int(col, j)
+			append_int(&out, a - b)
+		} else {
+			a, _ := column_at_float(col, i)
+			b, _ := column_at_float(col, j)
+			append_float(&out, a - b)
+		}
+	}
+	return out, true
+}
+
+// Relative change to the value n rows earlier, x[i] / x[i-n] - 1, as a Float
+// column (Int or Float input). Rows without a partner or with a missing value
+// on either side are null; gaps are not filled first (call ffill for that).
+// A zero earlier value gives +-Inf, or NaN for 0 / 0. ok = false for other
+// column types.
+pct_change :: proc(
+	col: ^Column,
+	n := 1,
+	name := "",
+	allocator := context.allocator,
+) -> (
+	Column,
+	bool,
+) {
+	if col.type != .Int && col.type != .Float {return {}, false}
+	out := _new_like(col, .Float, name, allocator)
+	for i in 0 ..< col.len {
+		j := i - n
+		if j < 0 || j >= col.len || na_at(col, i) || na_at(col, j) {
+			append_null(&out)
+			continue
+		}
+		append_float(&out, _num(col, i) / _num(col, j) - 1)
+	}
+	return out, true
+}
+
+// --- cumulative ---
+
+// Running sum (Int or Float column; same type out). With skipna, a missing
+// cell is missing in the result and the sum carries on past it; without
+// skipna, every row from the first missing cell on is missing.
+cumsum :: proc(
+	col: ^Column,
+	skipna := true,
+	name := "",
+	allocator := context.allocator,
+) -> (
+	Column,
+	bool,
+) {
+	return _cum_arith(col, false, skipna, name, allocator)
+}
+
+// Running product (Int or Float column); skipna as for cumsum
+cumprod :: proc(
+	col: ^Column,
+	skipna := true,
+	name := "",
+	allocator := context.allocator,
+) -> (
+	Column,
+	bool,
+) {
+	return _cum_arith(col, true, skipna, name, allocator)
+}
+
+// Running maximum; works for every orderable type (Int, Float, Bool, String,
+// Date, Time, Datetime). skipna as for cumsum.
+cummax :: proc(
+	col: ^Column,
+	skipna := true,
+	name := "",
+	allocator := context.allocator,
+) -> (
+	Column,
+	bool,
+) {
+	return _cum_extreme(col, true, skipna, name, allocator)
+}
+
+// Running minimum; as cummax
+cummin :: proc(
+	col: ^Column,
+	skipna := true,
+	name := "",
+	allocator := context.allocator,
+) -> (
+	Column,
+	bool,
+) {
+	return _cum_extreme(col, false, skipna, name, allocator)
+}
+
+// --- clip ---
+
+// Copy of `col` (Int or Float) with values below `lower` raised to it and
+// values above `upper` lowered to it. A bound that is nil or NaN is not
+// applied. An Int column stays Int, so its bounds must be whole numbers in
+// the int range. ok = false for other column types, lower > upper, or a
+// fractional bound on an Int column.
+clip :: proc(
+	col: ^Column,
+	lower: Maybe(f64) = nil,
+	upper: Maybe(f64) = nil,
+	name := "",
+	allocator := context.allocator,
+) -> (
+	Column,
+	bool,
+) {
+	if col.type != .Int && col.type != .Float {return {}, false}
+	lo, has_lo := lower.?
+	hi, has_hi := upper.?
+	has_lo &&= lo == lo
+	has_hi &&= hi == hi
+	if has_lo && has_hi && lo > hi {return {}, false}
+	if col.type == .Int {
+		whole :: proc(v: f64) -> bool {
+			return v == math.trunc(v) && v >= -9223372036854775808.0 && v < 9223372036854775808.0
+		}
+		if (has_lo && !whole(lo)) || (has_hi && !whole(hi)) {return {}, false}
+	}
+	out := _new_like(col, col.type, name, allocator)
+	for i in 0 ..< col.len {
+		if na_at(col, i) {
+			append_null(&out)
+			continue
+		}
+		if col.type == .Int {
+			v, _ := column_at_int(col, i)
+			if has_lo {v = max(v, int(lo))}
+			if has_hi {v = min(v, int(hi))}
+			append_int(&out, v)
+		} else {
+			v, _ := column_at_float(col, i)
+			if has_lo {v = max(v, lo)}
+			if has_hi {v = min(v, hi)}
+			append_float(&out, v)
+		}
+	}
+	return out, true
+}
+
+// --- rank ---
+
+// How rank numbers tied values
+Rank_Method :: enum {
+	Average, // mean of the positions the ties occupy
+	Min, // lowest of those positions
+	Max, // highest of those positions
+	First, // positions in order of appearance
+	Dense, // like Min, but the next distinct value gets the next number
+}
+
+// Rank (1 = smallest, or largest when ascending is false) of every value, as
+// a Float column; missing cells stay missing. Works for every orderable type.
+// ok = false for a column of type Invalid.
+rank :: proc(
+	col: ^Column,
+	method := Rank_Method.Average,
+	ascending := true,
+	name := "",
+	allocator := context.allocator,
+) -> (
+	Column,
+	bool,
+) {
+	if col.type == .Invalid {return {}, false}
+	order := column_sort_order(col, !ascending, context.temp_allocator)
+	defer delete(order, context.temp_allocator)
+	ranks := make([]f64, col.len, context.temp_allocator)
+	defer delete(ranks, context.temp_allocator)
+
+	i, dense := 0, 0
+	for i < col.len && !na_at(col, order[i]) { 	// missing values sort last
+		j := i + 1
+		for j < col.len &&
+		    !na_at(col, order[j]) &&
+		    column_compare_rows(col, order[i], order[j]) == 0 {j += 1}
+		dense += 1
+		for k in i ..< j {
+			r: f64
+			switch method {
+			case .Average:
+				r = f64(i + 1 + j) / 2
+			case .Min:
+				r = f64(i + 1)
+			case .Max:
+				r = f64(j)
+			case .First:
+				r = f64(k + 1)
+			case .Dense:
+				r = f64(dense)
+			}
+			ranks[order[k]] = r
+		}
+		i = j
+	}
+
+	out := _new_like(col, .Float, name, allocator)
+	for r in 0 ..< col.len {
+		if na_at(col, r) {append_null(&out)} else {append_float(&out, ranks[r])}
+	}
+	return out, true
+}
+
+// --- nlargest / nsmallest ---
+
+// The n rows with the largest values in `column`, largest first; ties keep
+// their order of appearance and missing values are skipped. Rows keep their
+// labels. ok = false for an unknown column or a negative n.
+nlargest :: proc(
+	df: ^DataFrame,
+	n: int,
+	column_name: string,
+	allocator := context.allocator,
+) -> (
+	DataFrame,
+	bool,
+) {
+	return _n_extreme(df, n, column_name, true, allocator)
+}
+
+// The n rows with the smallest values in `column`, smallest first; as nlargest
+nsmallest :: proc(
+	df: ^DataFrame,
+	n: int,
+	column_name: string,
+	allocator := context.allocator,
+) -> (
+	DataFrame,
+	bool,
+) {
+	return _n_extreme(df, n, column_name, false, allocator)
+}
+
+// --- describe ---
+
+// Summary statistics of every Int and Float column, as pandas describe() gives
+// them: a String column "stat" with the rows count, mean, std (sample, ddof
+// 1), min, 25%, 50%, 75% and max (quantiles linearly interpolated), and one
+// Float column per numeric column. Missing cells are left out; a statistic
+// that cannot be computed (the mean of no values, the std of one) is NaN. The
+// label column is named "statistic" instead if a numeric column is named
+// "stat".
+describe :: proc(df: ^DataFrame, allocator := context.allocator) -> DataFrame {
+	STATS :: [8]string{"count", "mean", "std", "min", "25%", "50%", "75%", "max"}
+	label_name := "stat"
+	for &col in df.columns {
+		if col.name == "stat" &&
+		   (col.type == .Int || col.type == .Float) {label_name = "statistic"}
+	}
+	out := dataframe_new(allocator)
+	labels := column_new(label_name, .String, len(STATS), allocator)
+	for s in STATS {append_string(&labels, s)}
+	add_column(&out, labels)
+
+	for &col in df.columns {
+		if col.type != .Int && col.type != .Float {continue}
+		vals := make([dynamic]f64, 0, col.len, context.temp_allocator)
+		defer delete(vals)
+		for i in 0 ..< col.len {
+			if !na_at(&col, i) {append(&vals, _num(&col, i))}
+		}
+		n := len(vals)
+		nan := math.nan_f64()
+		mean, std := nan, nan
+		lo, q1, q2, q3, hi := nan, nan, nan, nan, nan
+		if n > 0 {
+			sum := 0.0
+			for v in vals {sum += v}
+			mean = sum / f64(n)
+			if n > 1 {
+				ss := 0.0
+				for v in vals {ss += (v - mean) * (v - mean)}
+				std = math.sqrt(ss / f64(n - 1))
+			}
+			sorted := vals[:]
+			slice.sort(sorted)
+			lo, hi = sorted[0], sorted[n - 1]
+			q1, q2, q3 = _quantile(sorted, 0.25), _quantile(sorted, 0.5), _quantile(sorted, 0.75)
+		}
+		stat := column_new("", .Float, len(STATS), allocator)
+		column_own_name(&stat, col.name)
+		for v in ([8]f64{f64(n), mean, std, lo, q1, q2, q3, hi}) {append_float(&stat, v)}
+		add_column(&out, stat)
+	}
+	return out
+}
+
+// --- helpers ---
+
+@(private = "file")
+_rename :: proc(col: ^Column, name: string) {
+	if name != "" {column_own_name(col, name)}
+}
+
+// Empty owned column of `type`, named `name` or like `src`
+@(private = "file")
+_new_like :: proc(
+	src: ^Column,
+	type: ColumnType,
+	name: string,
+	allocator: mem.Allocator,
+) -> Column {
+	out := column_new("", type, max(src.len, 1), allocator)
+	column_own_name(&out, name if name != "" else src.name)
+	return out
+}
+
+// Present Int or Float cell as f64
+@(private = "file")
+_num :: proc(col: ^Column, i: int) -> f64 {
+	if col.type == .Int {
+		v, _ := column_at_int(col, i)
+		return f64(v)
+	}
+	v, _ := column_at_float(col, i)
+	return v
+}
+
+@(private = "file")
+_cum_arith :: proc(
+	col: ^Column,
+	product: bool,
+	skipna: bool,
+	name: string,
+	allocator: mem.Allocator,
+) -> (
+	Column,
+	bool,
+) {
+	if col.type != .Int && col.type != .Float {return {}, false}
+	out := _new_like(col, col.type, name, allocator)
+	acc_i := 1 if product else 0
+	acc_f := 1.0 if product else 0.0
+	broken := false
+	for i in 0 ..< col.len {
+		if broken || na_at(col, i) {
+			broken = broken || !skipna
+			append_null(&out)
+			continue
+		}
+		if col.type == .Int {
+			v, _ := column_at_int(col, i)
+			if product {acc_i *= v} else {acc_i += v}
+			append_int(&out, acc_i)
+		} else {
+			v, _ := column_at_float(col, i)
+			if product {acc_f *= v} else {acc_f += v}
+			append_float(&out, acc_f)
+		}
+	}
+	return out, true
+}
+
+@(private = "file")
+_cum_extreme :: proc(
+	col: ^Column,
+	is_max: bool,
+	skipna: bool,
+	name: string,
+	allocator: mem.Allocator,
+) -> (
+	Column,
+	bool,
+) {
+	if col.type == .Invalid {return {}, false}
+	// source row for every row: the row holding the extreme so far
+	rows := make([]int, col.len, context.temp_allocator)
+	defer delete(rows, context.temp_allocator)
+	best := -1
+	broken := false
+	for i in 0 ..< col.len {
+		if broken || na_at(col, i) {
+			broken = broken || !skipna
+			rows[i] = -1
+			continue
+		}
+		if best < 0 {
+			best = i
+		} else {
+			c := column_compare_rows(col, i, best)
+			if (is_max && c > 0) || (!is_max && c < 0) {best = i}
+		}
+		rows[i] = best
+	}
+	out := column_take(col, rows, allocator)
+	_rename(&out, name)
+	return out, true
+}
+
+@(private = "file")
+_n_extreme :: proc(
+	df: ^DataFrame,
+	n: int,
+	column_name: string,
+	largest: bool,
+	allocator: mem.Allocator,
+) -> (
+	DataFrame,
+	bool,
+) {
+	idx, found := df.name_to_index[column_name]
+	if !found || n < 0 {return {}, false}
+	col := &df.columns[idx]
+	order := column_sort_order(col, largest, context.temp_allocator) // stable, missing last
+	defer delete(order, context.temp_allocator)
+	k := 0
+	for k < min(n, len(order)) && !na_at(col, order[k]) {k += 1}
+	return df_take(df, order[:k], allocator), true
+}
