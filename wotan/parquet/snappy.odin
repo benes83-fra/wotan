@@ -1,5 +1,6 @@
 package parquet
 
+import "base:intrinsics"
 import "core:mem"
 
 // Snappy raw block format (the form Parquet uses, without the framing
@@ -85,4 +86,95 @@ snappy_decompress :: proc(dst, src: []u8) -> bool #no_bounds_check {
 		d += length
 	}
 	return d == n
+}
+
+// Compresses `src` into `dst` (overwritten) as one Snappy block. The input is
+// cut into 64 KiB fragments, as the reference compressor does, so every copy
+// offset fits two bytes. Matches are found through a hash table of 4-byte
+// sequences; on data without matches the scan skips ahead faster and faster,
+// so incompressible input costs little.
+@(private)
+snappy_compress :: proc(dst: ^[dynamic]u8, src: []u8) #no_bounds_check {
+	clear(dst)
+	reserve(dst, 32 + len(src) + len(src) / 6)
+	v := u64(len(src))
+	for v >= 0x80 {
+		append(dst, u8(v) | 0x80)
+		v >>= 7
+	}
+	append(dst, u8(v))
+
+	FRAG :: 1 << 16
+	HASH_BITS :: 14
+	table: [1 << HASH_BITS]u16
+	for start := 0; start < len(src); start += FRAG {
+		block := src[start:min(start + FRAG, len(src))]
+		n := len(block)
+		lit := 0
+		if n >= 15 {
+			table = {}
+			load :: #force_inline proc(b: []u8, i: int) -> u32 {
+				return u32(intrinsics.unaligned_load((^u32le)(&b[i])))
+			}
+			hash :: #force_inline proc(x: u32) -> u32 {return (x * 0x1e35a7bd) >> (32 - HASH_BITS)}
+			ip := 1
+			limit := n - 4
+			misses := 32
+			for ip <= limit {
+				cur := load(block, ip)
+				h := hash(cur)
+				cand := int(table[h])
+				table[h] = u16(ip)
+				if cand >= ip || load(block, cand) != cur {
+					ip += misses >> 5 // 1 at first, more after a long run without matches
+					misses += 1
+					continue
+				}
+				misses = 32
+				_snappy_literal(dst, block[lit:ip])
+				m := 4
+				for ip + m < n && block[cand + m] == block[ip + m] {m += 1}
+				_snappy_copy(dst, ip - cand, m)
+				ip += m
+				lit = ip
+				if ip - 1 <= limit {table[hash(load(block, ip - 1))] = u16(ip - 1)}
+			}
+		}
+		_snappy_literal(dst, block[lit:])
+	}
+}
+
+@(private)
+_snappy_literal :: proc(dst: ^[dynamic]u8, b: []u8) {
+	n := len(b)
+	if n == 0 {return}
+	switch {
+	case n <= 60:
+		append(dst, u8(n - 1) << 2)
+	case n <= 1 << 8:
+		append(dst, 60 << 2, u8(n - 1))
+	case n <= 1 << 16:
+		append(dst, 61 << 2, u8(n - 1), u8((n - 1) >> 8))
+	case n <= 1 << 24:
+		append(dst, 62 << 2, u8(n - 1), u8((n - 1) >> 8), u8((n - 1) >> 16))
+	case:
+		append(dst, 63 << 2, u8(n - 1), u8((n - 1) >> 8), u8((n - 1) >> 16), u8((n - 1) >> 24))
+	}
+	append(dst, ..b)
+}
+
+// A copy of `length` bytes from `offset` back (offset < 65536)
+@(private)
+_snappy_copy :: proc(dst: ^[dynamic]u8, offset, length: int) {
+	length := length
+	for length > 0 {
+		k := min(length, 64)
+		if length - k > 0 && length - k < 4 {k = length - 4} 	// keep every piece >= 4
+		if k >= 4 && k <= 11 && offset < 2048 {
+			append(dst, u8(1 | (k - 4) << 2 | (offset >> 8) << 5), u8(offset))
+		} else {
+			append(dst, u8(2 | (k - 1) << 2), u8(offset), u8(offset >> 8))
+		}
+		length -= k
+	}
 }

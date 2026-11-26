@@ -3,7 +3,7 @@
 Three packages move data into and out of Wotan:
 
 - **`importer`** reads CSV, JSON, JSON Lines, HTML tables, Excel workbooks and Parquet files into `core` DataFrames.
-- **`exporter`** writes DataFrames to CSV, JSON, JSON Lines, HTML and Excel.
+- **`exporter`** writes DataFrames to CSV, JSON, JSON Lines, HTML, Excel and Parquet.
 - **`net`** fetches data over HTTP. It also loads price histories from Yahoo Finance, as a DataFrame, as plain arrays for one ticker, or as a panel of several tickers matched by date.
 
 This guide covers all three. It assumes you know the `DataFrame` from the [core guide](core_guide.md). Every example was compiled and run against the current code, and the output shown is the real output. The examples free everything they allocate: a run under a tracking allocator reports no leaks. The Yahoo examples ran on 2026-11-13, so their numbers will differ when you run them.
@@ -46,7 +46,7 @@ import "core:fmt"
 | JSON Lines | `io.jsonl_load(path)` | `ex.jsonl_write(&df, path, alloc)` |
 | HTML `<table>` | `io.html_load(path)`, `_table_index`, `_table_id`, `_all`, `io.html_load_from_string(text)` | `ex.html_write(&df, path, alloc)` |
 | Excel `.xlsx` | `io.xlsx_load(path)`, `io.xlsx_load_sheet(path, name)`, `io.xlsx_sheet_names(path)` | `ex.xlsx_save(&df, path, alloc)` |
-| Parquet | `io.parquet_load(path, columns)`, `io.parquet_load_from_bytes(data, columns)` | |
+| Parquet | `io.parquet_load(path, columns)`, `io.parquet_load_from_bytes(data, columns)` | `ex.parquet_save(&df, path)`, `ex.parquet_bytes(&df)` |
 | URL | `net.http_get(url)`, `net.download_file(url, path)`, `net.read_csv_from_url`, `read_html_from_url`, `read_table_from_url` | |
 | Yahoo Finance | `net.read_yahoo`, `net.read_yahoo_series`, `net.read_yahoo_panel` | |
 
@@ -192,6 +192,10 @@ sheets: ["Tabelle1"]
 
 ## 7. Parquet
 
+Apache Parquet is the columnar file format of the data world: compact, typed, and fast to read one column at a time.
+
+### 7.1 Reading
+
 `parquet_load(path, columns = nil, alloc) -> (df, ok)` reads an Apache Parquet file, the columnar format that pandas (`to_parquet`), pyarrow, Spark, DuckDB and Polars write. `columns` names the columns to load, in the order you want them. Only those columns' data is read from disk, which makes loading a few columns of a wide file much faster than loading all of it. `parquet_load_from_bytes(data, columns, alloc)` reads a file already in memory.
 
 ```odin
@@ -247,9 +251,74 @@ The first file was written by pandas from a frame indexed by date. pandas stores
 
 **Failure.** `ok` is false, with the reason on stderr, when the file is missing or isn't a Parquet file, when a requested column doesn't exist or is named twice, and when a column needs something the reader doesn't support: a nested type, the Zstandard, Brotli or LZO codec, one of the delta or byte-stream-split encodings, or encryption. Each case names the column, and `columns` lets you load the others. The loader never returns partial or guessed data. Damaged files fail cleanly too: the metadata is checked as it is read, so a corrupt or truncated file gives `ok = false`, not a crash or a frame of the wrong shape.
 
+### 7.2 Writing
+
+`ex.parquet_save(&df, path, compression = .Snappy, row_group_rows = 1 << 20, dictionary = true) -> bool` writes a DataFrame as a Parquet file. `ex.parquet_bytes(&df, ...)` returns the file's bytes instead, as `([]u8, ok)`; free them with `delete`.
+
+```odin
+trades := io.csv_load_from_string(`ticker,date,price,shares
+AAPL,2024-03-01,179.66,100
+MSFT,2024-03-01,415.50,
+NVDA,2024-03-04,852.37,20
+`)
+defer w.destroy_dataframe(&trades)
+if !ex.parquet_save(&trades, "trades.parquet") {return}
+
+back, ok := io.parquet_load("trades.parquet")
+if !ok {return}
+defer w.destroy_dataframe(&back)
+w.dataframe_pretty_print(&back)
+for c in back.columns {fmt.printf("%s: %v  ", c.name, c.type)}
+fmt.println()
+
+// gzip: smaller files, slower to write
+small := ex.parquet_save(&trades, "trades_gzip.parquet", .Gzip)
+fmt.println("gzip:", small)
+```
+
+```
+    ticker  date        price   shares
+  0 AAPL    2024-03-01  179.66  100
+  1 MSFT    2024-03-01  415.5   NULL
+  2 NVDA    2024-03-04  852.37  20
+ticker: String  date: Date  price: Float  shares: Int
+gzip: true
+```
+
+Every column is written with the standard Parquet type for its values, so pandas, pyarrow, Spark, DuckDB and Polars read it with the same meaning, and `parquet_load` gives back the same DataFrame:
+
+| DataFrame | Parquet |
+|---|---|
+| `Int` | `INT64` |
+| `Float` | `DOUBLE` (NaN is written as NaN, not as null) |
+| `Bool` | `BOOLEAN` |
+| `String` | `BYTE_ARRAY` with the `STRING` type |
+| `Date` | `INT32` with the `DATE` type |
+| `Datetime` | `INT64` `TIMESTAMP` in microseconds, as wall-clock time (no time zone) |
+| `Time` | `INT64` `TIME` in microseconds |
+
+Every column may hold nulls. pandas reads an integer column with nulls as `float64`, as it does for any integer data with missing values. A frame indexed with `set_index(&df, name, drop = true)` keeps its index outside its columns; the writer stores it as the first column, under its name, the way pandas stores its index.
+
+The options:
+
+- **`compression`**: `.Snappy` (the default, as in pandas) is fast with moderate compression; `.Gzip` gives smaller files and writes several times slower; `.Lz4` is about as fast as Snappy; `.None` stores the pages as they are.
+- **`row_group_rows`**: the rows per row group (a million by default). Each row group records the minimum, maximum and null count of every column, which lets readers such as DuckDB and pyarrow skip row groups that cannot match a filter.
+- **`dictionary`**: String columns are stored as a dictionary of their distinct values plus small indices, which suits columns that repeat values, such as tickers or sectors. A column whose dictionary would pass 1 MiB in a row group is stored plainly. Pass `false` to store every String column plainly.
+
+On 1 million rows of seven columns (dates, tickers, prices with NaN, volumes, unique text, flags), `parquet_save` wrote these files, compared with pyarrow 14 writing the same data:
+
+| Compression | Time | Size | pyarrow time | pyarrow size |
+|---|---|---|---|---|
+| Snappy | 236 ms | 29.0 MB | 262 ms | 30.9 MB |
+| gzip | 1168 ms | 20.9 MB | 2309 ms | 22.9 MB |
+| LZ4 | 186 ms | 29.0 MB | 214 ms | 32.0 MB |
+| none | 157 ms | 44.4 MB | 184 ms | 41.4 MB |
+
+`parquet_save` returns false, with the reason on stderr, when the file cannot be written (for example, a folder that doesn't exist) or when a hidden index has the name of one of the columns.
+
 ## 8. Writing files
 
-All writers produce text that the matching importer reads back to the same DataFrame. `io_roundtrip_test` checks this for every column type, with nulls, integers beyond 2^53, tiny and huge floats, and strings with separators, quotes, line breaks, outer spaces, Unicode, markup and the text `NA`.
+All writers produce files that the matching importer reads back to the same DataFrame. `io_roundtrip_test` checks this for every column type, with nulls, integers beyond 2^53, tiny and huge floats, and strings with separators, quotes, line breaks, outer spaces, Unicode, markup and the text `NA`.
 
 | Writer | Output |
 |---|---|
@@ -259,6 +328,8 @@ All writers produce text that the matching importer reads back to the same DataF
 | `jsonl_write(&df, path, alloc)` | One object per line, otherwise as `json_write`. |
 | `html_write(&df, path, alloc)` | A `<table>` with `<thead>` and `<tbody>`; text is escaped, and nulls are empty cells. |
 | `xlsx_save(&df, path, alloc) -> bool` | One worksheet, `Sheet1`. Numbers are exact; dates and times are serial numbers with a date style. |
+| `parquet_save(&df, path, compression, row_group_rows, dictionary) -> bool` | A Parquet file with the standard type for every column (section 7.2). |
+| `parquet_bytes(&df, compression, row_group_rows, dictionary, alloc) -> ([]u8, bool)` | The bytes `parquet_save` writes. |
 
 Floats are written in their shortest exact form and always keep a `.` or an exponent, so a float column stays a float column.
 
@@ -581,7 +652,7 @@ The dates are CBOE's trading days. To combine an index with Yahoo prices, put it
 | `csv_export_test`, `json_basic_test`, `jsonl_basic_test`, `json_export_test` | CSV and JSON loading and writing |
 | `html_basic_test`, `html_extended_test`, `html_tags_test`, `html_export_test` | HTML tables by index, id and all, tags inside cells, writing |
 | `excel_basic_test`, `excel_date_test`, `excel_export_test`, `zip_smoke_test` | reading sheets and dates, writing workbooks, the ZIP container |
-| `parquet_test` | every column type, with nulls and extreme values, against pyarrow 14.0.2 in five layouts (plain and dictionary values, page versions 1 and 2, no compression, Snappy, gzip, LZ4, several row groups and many small pages); INT96 timestamps; decimals stored as integers (DuckDB); a pandas file; column selection; `ok = false` for unsupported files and for truncated or corrupted copies. The fixtures in `demo_files/parquet` are written by `scripts/make_parquet_fixtures.py` |
+| `parquet_test` | reading: every column type, with nulls and extreme values, against pyarrow 14.0.2 in five layouts (plain and dictionary values, page versions 1 and 2, no compression, Snappy, gzip, LZ4, several row groups and many small pages); INT96 timestamps; decimals stored as integers (DuckDB); a pandas file; column selection; `ok = false` for unsupported files and for truncated or corrupted copies. Writing: the same table with every codec, with and without dictionaries, in one or three row groups, read back cell for cell; views, an empty frame, a hidden index, 70 000 rows with an all-null column. The fixtures in `demo_files/parquet` are written by `scripts/make_parquet_fixtures.py`; `scripts/check_parquet_export.py` checks the file the test writes (`demo_files/export_test.parquet`) with pyarrow, including its statistics |
 | `http_get_test`, `yahoo_finance_json_test`, `yahoo_finance_events_test` | live HTTP and Yahoo requests, including dividends and splits |
 | `yahoo_max_range_test` | `.Max` gives the whole daily history (SPY from 1993-01-29, no gap over a week) and weekly rows a week apart |
 | `cboe_index_test` | offline: both CBOE file formats and the rows left out; live: COR1M's history from 2006-01-03, ascending, and an unknown symbol |
@@ -599,6 +670,7 @@ Most of the finance tests load their data with `read_yahoo`, `read_yahoo_series`
 | `io.html_load(path, alloc)`, `_table_index`, `_table_id`, `_all`, `io.html_load_from_string`, `io.html_load_all_from_string` | HTML tables → DataFrame(s) |
 | `io.xlsx_load(path, alloc)`, `io.xlsx_load_sheet(path, name, alloc) -> (df, found)`, `io.xlsx_sheet_names(path, alloc)` | Excel worksheets |
 | `io.parquet_load(path, columns, alloc) -> (df, ok)`, `io.parquet_load_from_bytes(data, columns, alloc) -> (df, ok)` | Parquet file / bytes → DataFrame |
+| `ex.parquet_save(&df, path, compression, row_group_rows, dictionary) -> bool`, `ex.parquet_bytes(&df, ...) -> ([]u8, ok)` | DataFrame → Parquet file / bytes |
 | `ex.csv_save(&df, path, sep, alloc) -> bool`, `ex.csv_string(&df, sep, alloc) -> string`, `ex.json_write`, `ex.jsonl_write`, `ex.html_write`, `ex.xlsx_save -> bool` | DataFrame → file |
 | `net.http_get(url, alloc) -> (body, ok)`, `net.http_get_with_cookie`, `net.download_file(url, path) -> ok` | HTTP |
 | `net.read_csv_from_url`, `net.read_html_from_url`, `net.read_table_from_url` `-> (df, ok)` | a table from a URL |
