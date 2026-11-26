@@ -20,30 +20,62 @@ import infer "../importer"
 // ------------------------------------------------------------
 // JSON Loader (array of objects)
 // ------------------------------------------------------------
+
+// The JSON file at path (a top-level array of objects) as a DataFrame; panics
+// when the file cannot be read or is not such an array (try_json_load returns
+// ok = false instead)
 json_load :: proc(
 	path: string,
 	null_tokens: []string = DEFAULT_NULL_TOKEN,
 	allocator: mem.Allocator,
 ) -> w.DataFrame {
+	df, err := _json_load(path, null_tokens, allocator, "json_load")
+	if err != "" {panic(err)}
+	return df
+}
 
+// json_load, with ok = false (and the reason on stderr) instead of a panic
+try_json_load :: proc(
+	path: string,
+	null_tokens: []string = DEFAULT_NULL_TOKEN,
+	allocator := context.allocator,
+) -> (
+	w.DataFrame,
+	bool,
+) {
+	df, err := _json_load(path, null_tokens, allocator, "try_json_load")
+	return df, _report(err)
+}
+
+@(private = "file")
+_json_load :: proc(
+	path: string,
+	null_tokens: []string,
+	allocator: mem.Allocator,
+	label: string,
+) -> (
+	w.DataFrame,
+	string,
+) {
 	contents, err := read_file(path)
 	if err != nil {
-		panic("json_load: failed to read file")
+		return {}, fmt.tprintf("%s: cannot read %q", label, path)
 	}
 	defer delete(contents)
 
 	root, err2 := json.parse_string(contents, json.DEFAULT_SPECIFICATION, true, allocator)
 	if err2 != .None {
-		panic("json_load: invalid JSON")
+		json.destroy_value(root, allocator)
+		return {}, fmt.tprintf("%s: %q is not valid JSON", label, path)
 	}
 	defer json.destroy_value(root, allocator)
 
 	arr, is_arr := root.(json.Array)
 	if !is_arr {
-		panic("json_load: expected top-level JSON array")
+		return {}, fmt.tprintf("%s: %q is not a JSON array", label, path)
 	}
 	if len(arr) == 0 {
-		panic("json_load: empty JSON array")
+		return {}, fmt.tprintf("%s: %q is an empty JSON array", label, path)
 	}
 
 	objects := make([]json.Object, len(arr), context.temp_allocator)
@@ -51,7 +83,7 @@ json_load :: proc(
 	for val, i in arr {
 		obj, ok := val.(json.Object)
 		if !ok {
-			panic(fmt.tprintf("json_load: element %d is not an object", i + 1))
+			return {}, fmt.tprintf("%s: element %d of %q is not an object", label, i + 1, path)
 		}
 		objects[i] = obj
 	}
@@ -63,22 +95,53 @@ json_load :: proc(
 		delete(seen)
 	}
 	_json_collect_keys(contents, 2, &keys, &seen) // array = depth 1, records = depth 2
-	return _json_build(objects, keys[:], null_tokens, allocator, "json_load")
+	return _json_build(objects, keys[:], null_tokens, allocator, label)
 }
 
 
 // ------------------------------------------------------------
 // JSON Lines Loader (one object per line)
 // ------------------------------------------------------------
+
+// The JSON Lines file at path (one object per line; blank lines skipped) as
+// a DataFrame; panics when the file cannot be read or a line is not an object
+// (try_jsonl_load returns ok = false instead)
 jsonl_load :: proc(
 	path: string,
 	null_tokens: []string = DEFAULT_NULL_TOKEN,
 	allocator: mem.Allocator,
 ) -> w.DataFrame {
+	df, err := _jsonl_load(path, null_tokens, allocator, "jsonl_load")
+	if err != "" {panic(err)}
+	return df
+}
 
+// jsonl_load, with ok = false (and the reason on stderr) instead of a panic
+try_jsonl_load :: proc(
+	path: string,
+	null_tokens: []string = DEFAULT_NULL_TOKEN,
+	allocator := context.allocator,
+) -> (
+	w.DataFrame,
+	bool,
+) {
+	df, err := _jsonl_load(path, null_tokens, allocator, "try_jsonl_load")
+	return df, _report(err)
+}
+
+@(private = "file")
+_jsonl_load :: proc(
+	path: string,
+	null_tokens: []string,
+	allocator: mem.Allocator,
+	label: string,
+) -> (
+	w.DataFrame,
+	string,
+) {
 	contents, err := read_file(path)
 	if err != nil {
-		panic("jsonl_load: failed to read file")
+		return {}, fmt.tprintf("%s: cannot read %q", label, path)
 	}
 	defer delete(contents)
 
@@ -103,22 +166,22 @@ jsonl_load :: proc(
 			continue
 		}
 		root, err2 := json.parse_string(line, json.DEFAULT_SPECIFICATION, true, allocator)
-		if err2 != .None {
-			panic(fmt.tprintf("jsonl_load: invalid JSON on line %d", i + 1))
-		}
 		append(&values, root)
+		if err2 != .None {
+			return {}, fmt.tprintf("%s: line %d of %q is not valid JSON", label, i + 1, path)
+		}
 		obj, ok := root.(json.Object)
 		if !ok {
-			panic(fmt.tprintf("jsonl_load: line %d is not a JSON object", i + 1))
+			return {}, fmt.tprintf("%s: line %d of %q is not a JSON object", label, i + 1, path)
 		}
 		append(&objects, obj)
 		_json_collect_keys(line, 1, &keys, &seen)
 	}
 
 	if len(objects) == 0 {
-		panic("jsonl_load: no valid JSON objects found")
+		return {}, fmt.tprintf("%s: %q has no JSON objects", label, path)
 	}
-	return _json_build(objects[:], keys[:], null_tokens, allocator, "jsonl_load")
+	return _json_build(objects[:], keys[:], null_tokens, allocator, label)
 }
 
 
@@ -186,7 +249,10 @@ _json_build :: proc(
 	null_tokens: []string,
 	allocator: mem.Allocator,
 	label: string,
-) -> w.DataFrame {
+) -> (
+	w.DataFrame,
+	string,
+) {
 	col_count := len(keys)
 
 	// Infer types from every record
@@ -251,11 +317,11 @@ _json_build :: proc(
 			#partial switch types[col_i] {
 			case .Int:
 				v: int
-				v, ok = strconv.parse_int(field)
+				v, ok = parse_int_strict(field)
 				if ok {w.append_int(col, v)}
 			case .Float:
 				v: f64
-				v, ok = strconv.parse_f64(field)
+				v, ok = parse_float_strict(field)
 				if ok {w.append_float(col, v)}
 			case .Bool:
 				w.append_bool(col, strings.equal_fold(field, "true"))
@@ -272,17 +338,15 @@ _json_build :: proc(
 				dt, ok = w.parse_datetime(field)
 				if ok {w.append_datetime(col, dt)}
 			}
+			if !ok && (field == "NA" || field == "null" || field == "None" || field == "NaN") {
+				// texts that inference passes over: missing values
+				w.append_null(col)
+				ok = true
+			}
 			if !ok {
-				panic(
-					fmt.tprintf(
-						"%s: record %d, key %q: cannot parse '%s' as %v",
-						label,
-						row_i + 1,
-						key,
-						field,
-						types[col_i],
-					),
-				)
+				for &c in cols {w.destroy_column(&c)}
+				w.destroy_dataframe(&df)
+				return {}, fmt.tprintf("%s: record %d, key %q: cannot parse '%s' as %v", label, row_i + 1, key, field, types[col_i])
 			}
 		}
 	}
@@ -291,7 +355,7 @@ _json_build :: proc(
 		w.add_column(&df, col)
 	}
 	df.rows = len(objects)
-	return df
+	return df, ""
 }
 
 

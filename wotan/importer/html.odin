@@ -4,7 +4,6 @@ package importer
 import w "../core"
 import "core:fmt"
 import "core:mem"
-import "core:strconv"
 import "core:strings"
 
 // HTML <table> → DataFrame. Tags are matched case-insensitively, <th> and <td>
@@ -12,14 +11,108 @@ import "core:strings"
 // the cell, closing tags may be omitted, text is UTF-8 safe with HTML entities
 // decoded. The first row is the header; short rows are padded with nulls and
 // extra cells are ignored. Cell text is trimmed; empty cells are null.
+// Repeated header names are numbered ("a", "a.1"), empty ones become
+// "Unnamed: <position>", as in pandas.
+//
+// The html_load procedures panic when the file cannot be read, and give an
+// empty frame when there is no such table. The try_ variants return ok =
+// false (and the reason on stderr) in both cases.
 
 html_load :: proc(path: string, allocator: mem.Allocator) -> w.DataFrame {
 	contents, err := read_file(path)
 	if err != nil {
-		panic("html_load: cannot read file")
+		panic(fmt.tprintf("html_load: cannot read %q", path))
 	}
 	defer delete(contents)
 	return html_load_from_string(contents, allocator)
+}
+
+// The first table of the HTML file at path
+try_html_load :: proc(path: string, allocator := context.allocator) -> (w.DataFrame, bool) {
+	tables, contents, ok := _html_tables(path, "try_html_load")
+	if !ok {return {}, false}
+	defer delete(contents)
+	if len(tables) == 0 {return {}, _report(fmt.tprintf("try_html_load: %q has no table", path))}
+	return html_parse_table(tables[0], allocator), true
+}
+
+// The table at position `index` (from 0) of the HTML file at path
+try_html_load_table_index :: proc(
+	path: string,
+	index: int,
+	allocator := context.allocator,
+) -> (
+	w.DataFrame,
+	bool,
+) {
+	tables, contents, ok := _html_tables(path, "try_html_load_table_index")
+	if !ok {return {}, false}
+	defer delete(contents)
+	if index < 0 || index >= len(tables) {
+		return {}, _report(fmt.tprintf("try_html_load_table_index: %q has no table %d (%d tables)", path, index, len(tables)))
+	}
+	return html_parse_table(tables[index], allocator), true
+}
+
+// The table with id="<id>" of the HTML file at path
+try_html_load_table_id :: proc(
+	path: string,
+	id: string,
+	allocator := context.allocator,
+) -> (
+	w.DataFrame,
+	bool,
+) {
+	tables, contents, ok := _html_tables(path, "try_html_load_table_id")
+	if !ok {return {}, false}
+	defer delete(contents)
+	if t, found := _table_with_id(tables, id); found {return html_parse_table(t, allocator), true}
+	return {}, _report(fmt.tprintf("try_html_load_table_id: %q has no table with id %q", path, id))
+}
+
+// Every table of the HTML file at path (none is not an error)
+try_html_load_all :: proc(path: string, allocator := context.allocator) -> ([]w.DataFrame, bool) {
+	tables, contents, ok := _html_tables(path, "try_html_load_all")
+	if !ok {return nil, false}
+	defer delete(contents)
+	dfs := make([]w.DataFrame, len(tables), allocator)
+	for t, i in tables {dfs[i] = html_parse_table(t, allocator)}
+	return dfs, true
+}
+
+// The first table of HTML text
+try_html_load_from_string :: proc(
+	html: string,
+	allocator := context.allocator,
+) -> (
+	w.DataFrame,
+	bool,
+) {
+	tables := extract_tables(html)
+	if len(tables) == 0 {return {}, _report("try_html_load_from_string: no table in the text")}
+	return html_parse_table(tables[0], allocator), true
+}
+
+@(private = "file")
+_html_tables :: proc(path, label: string) -> (tables: []string, contents: string, ok: bool) {
+	text, err := read_file(path)
+	if err != nil {
+		_report(fmt.tprintf("%s: cannot read %q", label, path))
+		return nil, "", false
+	}
+	return extract_tables(text), text, true
+}
+
+@(private = "file")
+_table_with_id :: proc(tables: []string, id: string) -> (string, bool) {
+	needle := fmt.tprintf("id=\"%s\"", id)
+	needle_sq := fmt.tprintf("id='%s'", id)
+	for t in tables {
+		open_tag := t[:max(strings.index_byte(t, '>'), 0)]
+		if strings.contains(open_tag, needle) ||
+		   strings.contains(open_tag, needle_sq) {return t, true}
+	}
+	return "", false
 }
 
 // ASCII lower-case copy (byte offsets unchanged) for case-insensitive search
@@ -131,7 +224,7 @@ _extract_cells_spans :: proc(row: string) -> (cells: []string, spans: []int) {
 			digits := strings.trim_left(rest, " \t=\"'")
 			n := 0
 			for n < len(digits) && digits[n] >= '0' && digits[n] <= '9' {n += 1}
-			if v, ok := strconv.parse_int(digits[:n]); ok && v > 1 && v < 1000 {span = v}
+			if v, ok := parse_int_strict(digits[:n]); ok && v > 1 && v < 1000 {span = v}
 		}
 
 		append(&out, row[content_start:end])
@@ -171,11 +264,11 @@ infer_and_append :: proc(col: ^w.Column, s: string) {
 		w.append_null(col)
 		return
 	}
-	if v, ok := strconv.parse_int(trimmed); ok {
+	if v, ok := parse_int_strict(trimmed); ok {
 		w.append_int(col, v)
 		return
 	}
-	if v, ok := strconv.parse_f64(trimmed); ok {
+	if v, ok := parse_float_strict(trimmed); ok {
 		w.append_float(col, v)
 		return
 	}
@@ -210,8 +303,8 @@ infer_column_types :: proc(tmp: [][]string) -> []w.ColumnType {
 			if v == "" {continue}
 			any_value = true
 
-			if _, ok := strconv.parse_int(v); !ok {all_int = false}
-			if _, ok := strconv.parse_f64(v); !ok {all_float = false}
+			if _, ok := parse_int_strict(v); !ok {all_int = false}
+			if _, ok := parse_float_strict(v); !ok {all_float = false}
 			if !(strings.equal_fold(v, "true") ||
 				   strings.equal_fold(v, "false")) {all_bool = false}
 			if !is_date(v) {all_date = false}
@@ -253,10 +346,10 @@ append_value :: proc(col: ^w.Column, s: string) {
 
 	#partial switch col.type {
 	case .Int:
-		v, _ := strconv.parse_int(trimmed)
+		v, _ := parse_int_strict(trimmed)
 		w.append_int(col, v)
 	case .Float:
-		v, _ := strconv.parse_f64(trimmed)
+		v, _ := parse_float_strict(trimmed)
 		w.append_float(col, v)
 	case .Bool:
 		w.append_bool(col, strings.equal_fold(trimmed, "true"))
@@ -276,7 +369,7 @@ append_value :: proc(col: ^w.Column, s: string) {
 
 html_load_table_index :: proc(path: string, index: int, allocator: mem.Allocator) -> w.DataFrame {
 	contents, err := read_file(path)
-	if err != nil {panic("html_load: cannot read file")}
+	if err != nil {panic(fmt.tprintf("html_load_table_index: cannot read %q", path))}
 	defer delete(contents)
 
 	tables := extract_tables(contents)
@@ -288,24 +381,17 @@ html_load_table_index :: proc(path: string, index: int, allocator: mem.Allocator
 
 html_load_table_id :: proc(path: string, id: string, allocator: mem.Allocator) -> w.DataFrame {
 	contents, err := read_file(path)
-	if err != nil {panic("html_load: cannot read file")}
+	if err != nil {panic(fmt.tprintf("html_load_table_id: cannot read %q", path))}
 	defer delete(contents)
 
-	tables := extract_tables(contents)
-	needle := fmt.tprintf("id=\"%s\"", id)
-	needle_sq := fmt.tprintf("id='%s'", id)
-	for t in tables {
-		open_tag := t[:max(strings.index_byte(t, '>'), 0)]
-		if strings.contains(open_tag, needle) || strings.contains(open_tag, needle_sq) {
-			return html_parse_table(t, allocator)
-		}
-	}
+	if t, found := _table_with_id(extract_tables(contents), id);
+	   found {return html_parse_table(t, allocator)}
 	return w.dataframe_new(allocator)
 }
 
 html_load_all :: proc(path: string, allocator: mem.Allocator) -> []w.DataFrame {
 	contents, err := read_file(path)
-	if err != nil {panic("html_load: cannot read file")}
+	if err != nil {panic(fmt.tprintf("html_load_all: cannot read %q", path))}
 	defer delete(contents)
 	return html_load_all_from_string(contents, allocator)
 }
@@ -346,7 +432,9 @@ html_parse_table :: proc(table: string, allocator: mem.Allocator) -> w.DataFrame
 		tmp[r_i] = line[:]
 	}
 
-	header := tmp[0]
+	header := make([]string, len(tmp[0]), context.temp_allocator)
+	copy(header, tmp[0])
+	_unique_names(header)
 	row_count := len(tmp) - 1
 
 	// PASS 2: infer column types

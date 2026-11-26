@@ -9,14 +9,70 @@ is_null :: proc(s: string) -> bool {
 	return ret == "" || ret == "NA" || ret == "null" || ret == "None" || ret == "NaN"
 }
 
+// An optional sign and decimal digits, within the range of an i64 (as pandas
+// reads integers: no "0x" prefixes, no "_" separators)
+parse_int_strict :: proc(s: string) -> (v: int, ok: bool) {
+	i := 0
+	neg := false
+	if len(s) > 0 && (s[0] == '+' || s[0] == '-') {
+		neg = s[0] == '-'
+		i = 1
+	}
+	if i == len(s) {return 0, false}
+	// accumulate negatively, so -9223372036854775808 fits
+	acc: int
+	for ; i < len(s); i += 1 {
+		c := s[i]
+		if c < '0' || c > '9' {return 0, false}
+		d := int(c - '0')
+		if acc < (min(int) + d) / 10 {return 0, false}
+		acc = acc * 10 - d
+	}
+	if !neg {
+		if acc == min(int) {return 0, false}
+		acc = -acc
+	}
+	return acc, true
+}
+
+// Decimal float syntax ([sign] digits [. digits] [e [sign] digits], or a
+// leading or trailing point), or inf / infinity / nan in any case. A value
+// beyond the f64 range ("1e400") is no float, as in pandas.
+parse_float_strict :: proc(s: string) -> (f64, bool) {
+	t := s
+	if len(t) > 0 && (t[0] == '+' || t[0] == '-') {t = t[1:]}
+	if strings.equal_fold(t, "inf") ||
+	   strings.equal_fold(t, "infinity") ||
+	   strings.equal_fold(t, "nan") {
+		v, _ := strconv.parse_f64(s)
+		return v, true
+	}
+	i, digits := 0, 0
+	for i < len(t) && t[i] >= '0' && t[i] <= '9' {i += 1; digits += 1}
+	if i < len(t) && t[i] == '.' {
+		i += 1
+		for i < len(t) && t[i] >= '0' && t[i] <= '9' {i += 1; digits += 1}
+	}
+	if digits == 0 {return 0, false}
+	if i < len(t) && (t[i] == 'e' || t[i] == 'E') {
+		i += 1
+		if i < len(t) && (t[i] == '+' || t[i] == '-') {i += 1}
+		e := i
+		for i < len(t) && t[i] >= '0' && t[i] <= '9' {i += 1}
+		if i == e {return 0, false}
+	}
+	if i != len(t) {return 0, false}
+	return strconv.parse_f64(s) // false only for an overflow
+}
+
 is_int :: proc(s: string) -> bool {
-	_, err := strconv.parse_int(s)
-	return err
+	_, ok := parse_int_strict(s)
+	return ok
 }
 
 is_float :: proc(s: string) -> bool {
-	_, err := strconv.parse_f64(s)
-	return err
+	_, ok := parse_float_strict(s)
+	return ok
 }
 
 is_bool :: proc(s: string) -> bool {

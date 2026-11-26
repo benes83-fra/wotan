@@ -41,27 +41,45 @@ import "core:fmt"
 
 | Format | Read | Write |
 |---|---|---|
-| CSV | `io.csv_load(path)`, `io.csv_load_from_string(text)` | `ex.csv_save(&df, path)` |
-| JSON (array of objects) | `io.json_load(path)` | `ex.json_write(&df, path, alloc)` |
-| JSON Lines | `io.jsonl_load(path)` | `ex.jsonl_write(&df, path, alloc)` |
-| HTML `<table>` | `io.html_load(path)`, `_table_index`, `_table_id`, `_all`, `io.html_load_from_string(text)` | `ex.html_write(&df, path, alloc)` |
-| Excel `.xlsx` | `io.xlsx_load(path)`, `io.xlsx_load_sheet(path, name)`, `io.xlsx_sheet_names(path)` | `ex.xlsx_save(&df, path, alloc)` |
+| CSV | `io.csv_load(path)`, `io.csv_load_from_string(text)`; `try_` variants | `ex.csv_save(&df, path)` |
+| JSON (array of objects) | `io.json_load(path)`, `io.try_json_load(path)` | `ex.json_write(&df, path, alloc)` |
+| JSON Lines | `io.jsonl_load(path)`, `io.try_jsonl_load(path)` | `ex.jsonl_write(&df, path, alloc)` |
+| HTML `<table>` | `io.html_load(path)`, `_table_index`, `_table_id`, `_all`, `io.html_load_from_string(text)`; `try_` variants | `ex.html_write(&df, path, alloc)` |
+| Excel `.xlsx` | `io.xlsx_load(path)`, `io.xlsx_load_sheet(path, name)`, `io.xlsx_sheet_names(path)`; `try_` variants | `ex.xlsx_save(&df, path, alloc)` |
 | Parquet | `io.parquet_load(path, columns)`, `io.parquet_load_from_bytes(data, columns)` | `ex.parquet_save(&df, path)`, `ex.parquet_bytes(&df)` |
 | URL | `net.http_get(url)`, `net.download_file(url, path)`, `net.read_csv_from_url`, `read_html_from_url`, `read_table_from_url` | |
 | Yahoo Finance | `net.read_yahoo`, `net.read_yahoo_series`, `net.read_yahoo_panel` | |
 
 **Types.** The text-based importers (all but Parquet, whose files declare their types) infer each column's type from its values:
 
-- whole numbers become `Int`, and decimals become `Float` (a mix of the two becomes `Float`);
+- whole numbers become `Int`, and decimals become `Float` (a mix of the two becomes `Float`). Numbers are read as pandas reads them: decimal digits with an optional sign, a decimal point and an exponent, plus `inf`, `infinity` and `nan` in any case. Hexadecimal (`0x10`), digit separators (`1_000`) and floats beyond the `f64` range (`1e400`) are text. A whole number beyond the `i64` range makes its column `Float`, where pandas uses an unsigned type;
 - `true`/`false` become `Bool`;
 - ISO dates, times and datetimes become `Date`, `Time` and `Datetime`, with fractions of a second (`09:30:15.250`) to the nanosecond;
 - anything else, or a mix that fits none of these, becomes `String`.
 
-Empty fields and the tokens `NA`, `null` and `None` become nulls.
+Empty fields and the tokens `NA`, `null` and `None` become nulls. So does `NaN` text in a column that is not `Float` (pandas would make an integer column with `NaN` a float column); in a `Float` column it is NaN.
+
+**Column names.** The first row (the header) names the columns. As in pandas, a repeated name is numbered (`a`, `a.1`, `a.2`, skipping names the header already has) and an empty one becomes `Unnamed: <position>`, so every column can be found by name.
 
 **Ownership.** A loader returns a DataFrame that you free with `w.destroy_dataframe`. The DataFrame owns its column names and string values; it doesn't point into the file buffer or the temp allocator.
 
-**Failure.** The CSV, JSON, HTML and Excel loaders panic when a file cannot be read or doesn't parse; the panic message names the loader and the file. `parquet_load` returns `(df, ok)` instead (section 7). A sheet name that the workbook doesn't have is not an error: `xlsx_load_sheet` returns `found = false`. Everything that goes over the network returns `(value, ok)` instead, with `ok` false when the request fails or brings no data. Network failures are normal (rate limits, outages), so they are reported, not fatal.
+**Failure.** Every CSV, JSON, HTML and Excel loader has a checked twin whose name starts with `try_`. It returns `(df, ok)`, and when `ok` is false the reason is on stderr, naming the loader and the file. Use the `try_` loaders where the file comes from outside the program:
+
+```odin
+df, ok := io.try_csv_load("demo_files/no_such.csv")
+if !ok {return} // stderr: try_csv_load: cannot read "demo_files/no_such.csv"
+defer w.destroy_dataframe(&df)
+```
+
+The loaders without `try_` panic with the same message instead; they suit scripts where a missing file is a bug. `parquet_load` always returns `(df, ok)` (section 7). Everything that goes over the network returns `(value, ok)` as well, with `ok` false when the request fails or brings no data. Network failures are normal (rate limits, outages), so they are reported, not fatal.
+
+| Checked loader | `ok = false` when |
+|---|---|
+| `try_csv_load(path, types, sep, null_tokens, alloc)`, `try_csv_load_from_string(text, alloc, types, sep, null_tokens)` | the file cannot be read; the text has no header; `types` has the wrong length or a cell does not parse as its given type |
+| `try_json_load(path, null_tokens, alloc)`, `try_jsonl_load(path, null_tokens, alloc)` | the file cannot be read; the JSON is invalid, not an array, empty, or holds something other than objects |
+| `try_html_load(path, alloc)`, `try_html_load_table_index(path, i, alloc)`, `try_html_load_table_id(path, id, alloc)`, `try_html_load_from_string(text, alloc)` | the file cannot be read; there is no such table (the panicking loaders give an empty frame then) |
+| `try_html_load_all(path, alloc) -> ([]df, ok)` | the file cannot be read |
+| `try_xlsx_load(path, alloc)`, `try_xlsx_load_sheet(path, name, alloc)`, `try_xlsx_sheet_names(path, alloc) -> ([]string, ok)` | the file cannot be read or is not an `.xlsx` workbook; there is no worksheet, or none of that name |
 
 ## 3. CSV
 
@@ -100,7 +118,17 @@ note[1] null=true, note[2] = "" null=false
 Float
 ```
 
-The `NA` share count and MSFT's empty note are nulls, while NVDA's quoted `""` is an empty string. Rows with fewer fields than the header get nulls in the missing columns, and extra fields are ignored. A UTF-8 byte order mark and CRLF line ends are handled.
+The `NA` share count and MSFT's empty note are nulls, while NVDA's quoted `""` is an empty string. Rows with fewer fields than the header get nulls in the missing columns, and extra fields are ignored. A UTF-8 byte order mark, CRLF, LF and CR line ends and blank lines are handled.
+
+**Speed.** The reader cuts the text into chunks at line ends and reads them on all cores: it finds every chunk's fields without copying them, infers the column types chunk by chunk, and converts each chunk's columns straight into the DataFrame. A quoted field whose line break falls on a chunk boundary is noticed and that part is read again in order, so the frame is the same for any number of threads (`util.parallel_max_threads` caps them; 1 reads on the calling thread). A file is mapped into memory rather than copied. Reading 1 million rows of seven columns (an 82 MB file with datetimes, tickers, prices with gaps, volumes, unique text, flags and dates), best of three runs on a 16-thread machine:
+
+| Reader | Time |
+|---|---|
+| `io.csv_load`, all threads | 86 ms |
+| `io.csv_load`, 1 thread | 328 ms |
+| pyarrow 14 `csv.read_csv`, all threads / 1 thread | 49 ms / 314 ms |
+| pandas 1.5.3 `read_csv` (dates left as text) | 1259 ms |
+| pandas 1.5.3 `read_csv` with `parse_dates` (as `csv_load` reads them) | 1644 ms |
 
 ## 4. JSON and JSON Lines
 
@@ -170,7 +198,7 @@ tables: 3
 
 ## 6. Excel
 
-`xlsx_load(path, alloc)` reads the first worksheet of an `.xlsx` workbook, and `xlsx_load_sheet(path, name, alloc)` reads a worksheet by name and returns `(df, found)`. `xlsx_sheet_names(path, alloc)` lists the worksheets in workbook order; free each name and the slice. All three panic when the file is missing or is not an `.xlsx` workbook.
+`xlsx_load(path, alloc)` reads the first worksheet of an `.xlsx` workbook, and `xlsx_load_sheet(path, name, alloc)` reads a worksheet by name and returns `(df, found)`. `xlsx_sheet_names(path, alloc)` lists the worksheets in workbook order; free each name and the slice. All three panic when the file is missing or is not an `.xlsx` workbook; their `try_` twins return `ok = false` (section 2).
 
 The first row is the header. Cells are read with their Excel types: numbers, booleans, shared and inline strings, rich text, and errors (read as nulls). A number whose cell style is a date or time format becomes a `Date`, `Time` or `Datetime`, to the millisecond (Excel's own resolution; `xlsx_save` writes fractions of a second the same way). A custom format such as `#,##0 "USD"` is not mistaken for a date.
 
@@ -668,6 +696,7 @@ The dates are CBOE's trading days. To combine an index with Yahoo prices, put it
 | `csv_export_test`, `json_basic_test`, `jsonl_basic_test`, `json_export_test` | CSV and JSON loading and writing |
 | `html_basic_test`, `html_extended_test`, `html_tags_test`, `html_export_test` | HTML tables by index, id and all, tags inside cells, writing |
 | `excel_basic_test`, `excel_date_test`, `excel_export_test`, `zip_smoke_test` | reading sheets and dates, writing workbooks, the ZIP container |
+| `loaders_checked_test` | every `try_` loader gives the frame of its panicking twin, and `ok = false` in 20 failure cases (missing files, empty or non-CSV text, wrong types, bad JSON and JSON Lines, no table, no sheet, not a workbook); header names and numbers as pandas 1.5.3 reads them; a 1.7 MB CSV with quoted line breaks read identically on one thread and on all |
 | `parquet_test` | reading: every column type, with nulls and extreme values, against pyarrow in eight layouts (plain, dictionary, delta and byte-stream-split values, page versions 1 and 2, no compression, Snappy, gzip, Zstandard, LZ4, several row groups and many small pages); FLOAT16 and byte stream split on integers (pyarrow 17); Zstandard pages of several blocks; DuckDB's Zstandard file with UUIDs; the Zstandard decoder on its own; the same frame from one thread and from all; INT96 timestamps; decimals stored as integers (DuckDB); a pandas file; column selection; `ok = false` for unsupported files (nested, Brotli) and for truncated or corrupted copies. Writing: the same table with every codec, with and without dictionaries, in one or three row groups, read back cell for cell; the same bytes from one thread and from all; views, an empty frame, a hidden index, 70 000 rows with an all-null column. The fixtures in `demo_files/parquet` were written by pyarrow 14 and 17 and by DuckDB 1.1 |
 | `http_get_test`, `yahoo_finance_json_test`, `yahoo_finance_events_test` | live HTTP and Yahoo requests, including dividends and splits |
 | `yahoo_max_range_test` | `.Max` gives the whole daily history (SPY from 1993-01-29, no gap over a week) and weekly rows a week apart |
@@ -683,6 +712,7 @@ Most of the finance tests load their data with `read_yahoo`, `read_yahoo_series`
 |---|---|
 | `io.csv_load(path, types, sep, null_tokens, alloc)` / `io.csv_load_from_string(text, alloc, types, sep, null_tokens)` | CSV file / text → DataFrame |
 | `io.json_load(path, null_tokens, alloc)` / `io.jsonl_load(path, null_tokens, alloc)` | JSON array / JSON Lines → DataFrame |
+| `io.try_csv_load`, `io.try_csv_load_from_string`, `io.try_json_load`, `io.try_jsonl_load`, `io.try_html_load`, `_table_index`, `_table_id`, `_all`, `_from_string`, `io.try_xlsx_load`, `io.try_xlsx_load_sheet`, `io.try_xlsx_sheet_names` | the same, returning `(df, ok)` (reason on stderr) instead of panicking |
 | `io.html_load(path, alloc)`, `_table_index`, `_table_id`, `_all`, `io.html_load_from_string`, `io.html_load_all_from_string` | HTML tables → DataFrame(s) |
 | `io.xlsx_load(path, alloc)`, `io.xlsx_load_sheet(path, name, alloc) -> (df, found)`, `io.xlsx_sheet_names(path, alloc)` | Excel worksheets |
 | `io.parquet_load(path, columns, alloc) -> (df, ok)`, `io.parquet_load_from_bytes(data, columns, alloc) -> (df, ok)` | Parquet file / bytes → DataFrame |

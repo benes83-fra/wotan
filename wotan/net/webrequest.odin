@@ -95,8 +95,9 @@ _get_ok_body :: proc(url: string) -> (string, bool) {
 }
 
 // The CSV at url as a DataFrame (see importer.csv_load_from_string). ok is false
-// when the request fails or the server answers with a status outside 200 - 299;
-// the DataFrame is then empty
+// when the request fails, the server answers with a status outside 200 - 299,
+// or the body is not CSV it can read (the reason is then on stderr); the
+// DataFrame is then empty
 read_csv_from_url :: proc(
 	url: string,
 	allocator: mem.Allocator = context.allocator,
@@ -106,11 +107,12 @@ read_csv_from_url :: proc(
 ) {
 	text, got := _get_ok_body(url)
 	if !got {return w.dataframe_new(), false}
-	return importer.csv_load_from_string(text, allocator), true
+	return importer.try_csv_load_from_string(text, allocator)
 }
 
 // The first <table> of the HTML page at url as a DataFrame (see
-// importer.html_load_from_string); ok as for read_csv_from_url
+// importer.html_load_from_string); ok as for read_csv_from_url, and false for
+// a page without a table
 read_html_from_url :: proc(
 	url: string,
 	allocator: mem.Allocator = context.allocator,
@@ -120,7 +122,7 @@ read_html_from_url :: proc(
 ) {
 	text, got := _get_ok_body(url)
 	if !got {return w.dataframe_new(), false}
-	return importer.html_load_from_string(text, allocator), true
+	return importer.try_html_load_from_string(text, allocator)
 }
 
 // read_html_from_url when the body contains a <table>, read_csv_from_url otherwise
@@ -134,9 +136,9 @@ read_table_from_url :: proc(
 	text, got := _get_ok_body(url)
 	if !got {return w.dataframe_new(), false}
 	if strings.contains(text, "<table") {
-		return importer.html_load_from_string(text, allocator), true
+		return importer.try_html_load_from_string(text, allocator)
 	}
-	return importer.csv_load_from_string(text, allocator), true
+	return importer.try_csv_load_from_string(text, allocator)
 }
 
 

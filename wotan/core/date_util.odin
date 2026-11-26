@@ -104,7 +104,8 @@ _parse_seconds :: proc(s: string) -> (second: int, nanosecond: i32, ok: bool) {
 		whole, frac = s[:dot], s[dot + 1:]
 		if len(frac) == 0 || len(frac) > 9 {return}
 	}
-	second = strconv.parse_int(whole) or_return
+	sec := _digits(whole) or_return
+	second = int(sec)
 	ns := 0
 	for c in transmute([]u8)frac {
 		if c < '0' || c > '9' {return}
@@ -133,87 +134,81 @@ fraction_string :: proc(nanosecond: i32, buf: ^[10]u8) -> string {
 	return string(buf[:digits + 1])
 }
 
+// Digits only (1 to 9 of them) as a number
+@(private = "file")
+_digits :: #force_inline proc(s: string) -> (v: i32, ok: bool) {
+	if len(s) == 0 || len(s) > 9 {return 0, false}
+	for c in transmute([]u8)s {
+		if c < '0' || c > '9' {return 0, false}
+		v = v * 10 + i32(c - '0')
+	}
+	return v, true
+}
+
+// "YYYY-MM-DD" (digits only; month and day need not be zero-padded), a valid
+// calendar date. No allocation.
 parse_date :: proc(date_str: string) -> (Date, bool) {
-	parts := strings.split(date_str, "-")
-	defer delete(parts)
-	if len(parts) != 3 {
-		return Date{}, false // Invalid format
+	s := date_str
+	// the usual zero-padded form, read directly
+	if len(s) == 10 && s[4] == '-' && s[7] == '-' {
+		year, ok1 := _digits(s[:4])
+		month, ok2 := _digits(s[5:7])
+		day, ok3 := _digits(s[8:])
+		if ok1 &&
+		   ok2 &&
+		   ok3 &&
+		   validate_date(year, month, day) {return Date{year, month, day}, true}
+		return {}, false
 	}
-
-	year, ok1 := strconv.parse_int(parts[0])
-	month, ok2 := strconv.parse_int(parts[1])
-	day, ok3 := strconv.parse_int(parts[2])
-
-	if !ok1 || !ok2 || !ok3 {
-		return Date{}, false // Non-numeric values
-	}
-
-	// Basic validation
-	if !validate_date(i32(year), i32(month), i32(day)) {
-		return Date{}, false
-	}
-
-	return Date{i32(year), i32(month), i32(day)}, true
+	d1 := strings.index_byte(s, '-')
+	if d1 <= 0 {return {}, false}
+	d2 := strings.index_byte(s[d1 + 1:], '-')
+	if d2 <= 0 {return {}, false}
+	d2 += d1 + 1
+	year, ok1 := _digits(s[:d1])
+	month, ok2 := _digits(s[d1 + 1:d2])
+	day, ok3 := _digits(s[d2 + 1:])
+	if !ok1 || !ok2 || !ok3 || !validate_date(year, month, day) {return {}, false}
+	return Date{year, month, day}, true
 }
+
+// "HH:MM:SS" with an optional fraction of 1 to 9 digits ("HH:MM:SS.fff");
+// 00:00:00 ..= 23:59:59.999999999. No allocation.
 parse_time :: proc(time_str: string) -> (Time, bool) {
-	parts := strings.split(time_str, ":")
-	defer delete(parts)
-	if len(parts) != 3 {
-		return Time{}, false
+	s := time_str
+	// the usual zero-padded form, read directly
+	if len(s) == 8 && s[2] == ':' && s[5] == ':' {
+		hour, ok1 := _digits(s[:2])
+		minute, ok2 := _digits(s[3:5])
+		second, ok3 := _digits(s[6:])
+		if ok1 &&
+		   ok2 &&
+		   ok3 &&
+		   validate_time(hour, minute, second) {return Time{hour, minute, second, 0}, true}
+		return {}, false
 	}
-	hour, ok1 := strconv.parse_int(parts[0])
-	minute, ok2 := strconv.parse_int(parts[1])
-	second, ns, ok3 := _parse_seconds(parts[2])
-	if !ok1 || !ok2 || !ok3 {
-		return Time{}, false
-	}
-	if !validate_time(i32(hour), i32(minute), i32(second)) {
-
-		return Time{}, false
-	}
-	return Time{i32(hour), i32(minute), i32(second), ns}, true
-
+	c1 := strings.index_byte(s, ':')
+	if c1 <= 0 {return {}, false}
+	c2 := strings.index_byte(s[c1 + 1:], ':')
+	if c2 <= 0 {return {}, false}
+	c2 += c1 + 1
+	hour, ok1 := _digits(s[:c1])
+	minute, ok2 := _digits(s[c1 + 1:c2])
+	second, ns, ok3 := _parse_seconds(s[c2 + 1:])
+	if !ok1 || !ok2 || !ok3 || !validate_time(hour, minute, i32(second)) {return {}, false}
+	return Time{hour, minute, i32(second), ns}, true
 }
 
+// "YYYY-MM-DD HH:MM:SS" or ISO 8601 "YYYY-MM-DDTHH:MM:SS", the seconds with
+// an optional fraction of up to 9 digits. No allocation.
 parse_datetime :: proc(datetime_str: string) -> (Datetime, bool) {
-	// "YYYY-MM-DD HH:MM:SS" or ISO 8601 "YYYY-MM-DDTHH:MM:SS", the seconds
-	// with an optional fraction of up to 9 digits
 	sep := strings.index_byte(datetime_str, ' ')
 	if sep < 0 {sep = strings.index_byte(datetime_str, 'T')}
-	if sep < 0 {
-		return Datetime{}, false
-	}
-	parts := [2]string{datetime_str[:sep], datetime_str[sep + 1:]}
-	dparts := strings.split(parts[0], "-")
-	defer delete(dparts)
-	if len(dparts) != 3 {
-		return Datetime{}, false
-	}
-	year, ok1 := strconv.parse_int(dparts[0])
-	month, ok2 := strconv.parse_int(dparts[1])
-	day, ok3 := strconv.parse_int(dparts[2])
-	if !ok1 || !ok2 || !ok3 {
-		return Datetime{}, false
-	}
-	if !validate_date(i32(year), i32(month), i32(day)) {
-		return Datetime{}, false
-	}
-	tparts := strings.split(parts[1], ":")
-	defer delete(tparts)
-	if len(tparts) != 3 {
-		return Datetime{}, false
-	}
-	hour, ok4 := strconv.parse_int(tparts[0])
-	minute, ok5 := strconv.parse_int(tparts[1])
-	second, ns, ok6 := _parse_seconds(tparts[2])
-	if !ok4 || !ok5 || !ok6 {
-		return Datetime{}, false
-	}
-	if !validate_time(i32(hour), i32(minute), i32(second)) {
-		return Datetime{}, false
-	}
-	dt := Datetime{i32(year), i32(month), i32(day), i32(hour), i32(minute), i32(second), ns}
-	return dt, true
+	if sep < 0 {return {}, false}
+	d, dok := parse_date(datetime_str[:sep])
+	t, tok := parse_time(datetime_str[sep + 1:])
+	if !dok || !tok {return {}, false}
+	return Datetime{d.year, d.month, d.day, t.hour, t.minute, t.second, t.nanosecond}, true
 }
 
 

@@ -59,17 +59,16 @@ Xlsx_Date_Kind :: enum {
 // ------------------------------------------------------------
 
 // First sheet of the workbook. Panics when the file cannot be read, is not an
-// .xlsx workbook or has no worksheet (like the other file loaders).
+// .xlsx workbook or has no worksheet (like the other file loaders;
+// try_xlsx_load returns ok = false instead).
 xlsx_load :: proc(path: string, allocator: mem.Allocator) -> w.DataFrame {
-	sheets := _xlsx_sheets(path, "xlsx_load")
-	if len(sheets) == 0 {
-		panic(fmt.tprintf("xlsx_load: %q has no worksheet", path))
-	}
-	return _xlsx_load_sheet(path, sheets[0], allocator)
+	df, err := _xlsx_first(path, allocator, "xlsx_load")
+	if err != "" {panic(err)}
+	return df
 }
 
-// Sheet by name; ok = false if the workbook has no such sheet. Panics when the
-// file cannot be read or is not an .xlsx workbook.
+// Sheet by name; found = false if the workbook has no such sheet. Panics when
+// the file cannot be read or is not an .xlsx workbook.
 xlsx_load_sheet :: proc(
 	path: string,
 	sheet_name: string,
@@ -78,9 +77,13 @@ xlsx_load_sheet :: proc(
 	w.DataFrame,
 	bool,
 ) {
-	for s in _xlsx_sheets(path, "xlsx_load_sheet") {
+	sheets, err := _xlsx_sheets(path, "xlsx_load_sheet")
+	if err != "" {panic(err)}
+	for s in sheets {
 		if s.name == sheet_name {
-			return _xlsx_load_sheet(path, s, allocator), true
+			df, serr := _xlsx_load_sheet(path, s, allocator)
+			if serr != "" {panic(serr)}
+			return df, true
 		}
 	}
 	return w.dataframe_new(allocator), false
@@ -89,28 +92,91 @@ xlsx_load_sheet :: proc(
 // Names of the worksheets, in workbook order. Panics when the file cannot be
 // read or is not an .xlsx workbook.
 xlsx_sheet_names :: proc(path: string, allocator: mem.Allocator) -> []string {
-	sheets := _xlsx_sheets(path, "xlsx_sheet_names")
-	names := make([]string, len(sheets), allocator)
-	for s, i in sheets {names[i] = strings.clone(s.name, allocator)}
+	names, err := _xlsx_names(path, allocator, "xlsx_sheet_names")
+	if err != "" {panic(err)}
 	return names
 }
 
-// The worksheets of the workbook at path (temp memory); panics, naming the
-// caller, when the file cannot be read or has no xl/workbook.xml part
-@(private = "file")
-_xlsx_sheets :: proc(path: string, label: string) -> []SheetInfo {
-	if !os.is_file(path) {
-		panic(fmt.tprintf("%s: cannot read file %q", label, path))
+// xlsx_load, with ok = false (and the reason on stderr) instead of a panic
+try_xlsx_load :: proc(path: string, allocator := context.allocator) -> (w.DataFrame, bool) {
+	df, err := _xlsx_first(path, allocator, "try_xlsx_load")
+	return df, _report(err)
+}
+
+// The sheet named `sheet_name`; ok = false (and the reason on stderr) when
+// the file cannot be read, is not an .xlsx workbook or has no such sheet
+try_xlsx_load_sheet :: proc(
+	path: string,
+	sheet_name: string,
+	allocator := context.allocator,
+) -> (
+	w.DataFrame,
+	bool,
+) {
+	sheets, err := _xlsx_sheets(path, "try_xlsx_load_sheet")
+	if err != "" {return {}, _report(err)}
+	for s in sheets {
+		if s.name == sheet_name {
+			df, serr := _xlsx_load_sheet(path, s, allocator)
+			return df, _report(serr)
+		}
 	}
-	if _, ok := zm.zip_read_file(path, "xl/workbook.xml", context.temp_allocator); !ok {
-		panic(fmt.tprintf("%s: %q is not an .xlsx workbook", label, path))
-	}
-	return discover_sheets(path, context.temp_allocator)
+	return {}, _report(fmt.tprintf("try_xlsx_load_sheet: %q has no sheet %q", path, sheet_name))
+}
+
+// xlsx_sheet_names, with ok = false (and the reason on stderr) instead of a
+// panic
+try_xlsx_sheet_names :: proc(path: string, allocator := context.allocator) -> ([]string, bool) {
+	names, err := _xlsx_names(path, allocator, "try_xlsx_sheet_names")
+	return names, _report(err)
 }
 
 @(private = "file")
-_xlsx_load_sheet :: proc(path: string, sheet: SheetInfo, allocator: mem.Allocator) -> w.DataFrame {
-	df := w.dataframe_new(allocator)
+_xlsx_first :: proc(
+	path: string,
+	allocator: mem.Allocator,
+	label: string,
+) -> (
+	w.DataFrame,
+	string,
+) {
+	sheets, err := _xlsx_sheets(path, label)
+	if err != "" {return {}, err}
+	if len(sheets) == 0 {return {}, fmt.tprintf("%s: %q has no worksheet", label, path)}
+	return _xlsx_load_sheet(path, sheets[0], allocator)
+}
+
+@(private = "file")
+_xlsx_names :: proc(path: string, allocator: mem.Allocator, label: string) -> ([]string, string) {
+	sheets, err := _xlsx_sheets(path, label)
+	if err != "" {return nil, err}
+	names := make([]string, len(sheets), allocator)
+	for s, i in sheets {names[i] = strings.clone(s.name, allocator)}
+	return names, ""
+}
+
+// The worksheets of the workbook at path (temp memory), or the reason, naming
+// the caller, when the file cannot be read or has no xl/workbook.xml part
+@(private = "file")
+_xlsx_sheets :: proc(path: string, label: string) -> ([]SheetInfo, string) {
+	if !os.is_file(path) {
+		return nil, fmt.tprintf("%s: cannot read file %q", label, path)
+	}
+	if _, ok := zm.zip_read_file(path, "xl/workbook.xml", context.temp_allocator); !ok {
+		return nil, fmt.tprintf("%s: %q is not an .xlsx workbook", label, path)
+	}
+	return discover_sheets(path, context.temp_allocator), ""
+}
+
+@(private = "file")
+_xlsx_load_sheet :: proc(
+	path: string,
+	sheet: SheetInfo,
+	allocator: mem.Allocator,
+) -> (
+	w.DataFrame,
+	string,
+) {
 	scratch := context.temp_allocator
 
 	rels := _workbook_rels(path)
@@ -127,12 +193,13 @@ _xlsx_load_sheet :: proc(path: string, sheet: SheetInfo, allocator: mem.Allocato
 	}
 	sheet_bytes, ok_sheet := zm.zip_read_file(path, sheet.path, scratch)
 	if !ok_sheet {
-		panic(fmt.tprintf("xlsx: worksheet %q of %q is missing from the file", sheet.name, path))
+		return {}, fmt.tprintf("xlsx: worksheet %q of %q is missing from the file", sheet.name, path)
 	}
 
+	df := w.dataframe_new(allocator)
 	rows := parse_sheet_cells(string(sheet_bytes), shared, date_kinds, scratch)
 	if len(rows) == 0 {
-		return df
+		return df, ""
 	}
 
 	n_cols := 0
@@ -143,10 +210,17 @@ _xlsx_load_sheet :: proc(path: string, sheet: SheetInfo, allocator: mem.Allocato
 			row[c] if c < len(row) else Xlsx_Cell{} \
 		)}
 
+	// names: blank ones become "Unnamed: <position>", repeats are numbered
+	names := make([]string, n_cols, scratch)
 	for c in 0 ..< n_cols {
 		h := cell(header, c)
-		name :=
-			h.text if h.kind != .Empty && h.kind != .Error && strings.trim_space(h.text) != "" else fmt.tprintf("col_%d", c)
+		names[c] =
+			h.text if h.kind != .Empty && h.kind != .Error && strings.trim_space(h.text) != "" else ""
+	}
+	_unique_names(names)
+
+	for c in 0 ..< n_cols {
+		name := names[c]
 
 		// column type from the stored cell kinds
 		any_text := false
@@ -183,11 +257,11 @@ _xlsx_load_sheet :: proc(path: string, sheet: SheetInfo, allocator: mem.Allocato
 			#partial switch type {
 			case .Int:
 				x: int
-				x, ok = strconv.parse_int(s)
+				x, ok = parse_int_strict(s)
 				if ok {w.append_int(&col, x)}
 			case .Float:
 				x: f64
-				x, ok = strconv.parse_f64(s)
+				x, ok = parse_float_strict(s)
 				if ok {w.append_float(&col, x)}
 			case .Bool:
 				w.append_bool(&col, s == "true")
@@ -210,7 +284,7 @@ _xlsx_load_sheet :: proc(path: string, sheet: SheetInfo, allocator: mem.Allocato
 	}
 
 	df.rows = row_count
-	return df
+	return df, ""
 }
 
 
