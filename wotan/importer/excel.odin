@@ -596,30 +596,9 @@ parse_row_cells :: proc(
 					),
 				}
 			case .Time:
-				c = {
-					.Time,
-					fmt.aprintf(
-						"%02d:%02d:%02d",
-						dt.hour,
-						dt.minute,
-						dt.second,
-						allocator = allocator,
-					),
-				}
+				c = {.Time, w.time_to_string(w.get_Time_from_Datetime(dt), allocator)}
 			case .Datetime, .None:
-				c = {
-					.Datetime,
-					fmt.aprintf(
-						"%04d-%02d-%02d %02d:%02d:%02d",
-						dt.year,
-						dt.month,
-						dt.day,
-						dt.hour,
-						dt.minute,
-						dt.second,
-						allocator = allocator,
-					),
-				}
+				c = {.Datetime, w.datetime_to_string(dt, allocator)}
 			}
 		}
 
@@ -673,15 +652,18 @@ excel_serial_to_datetime :: proc(n: f64) -> w.Datetime {
 		day   = 31,
 	}
 
-	total := i64(math.round(n * 86400.0)) // seconds since the epoch, rounded
-	days := i32(total / 86400)
-	secs := i32(total % 86400)
+	// milliseconds since the epoch, rounded: Excel keeps times to the
+	// millisecond, and the serial's last bits are rounding noise
+	total := i64(math.round(n * 86_400_000.0))
+	days := i32(total / 86_400_000)
+	ms := i32(total % 86_400_000)
+	secs := ms / 1000
 
 	if days >= 60 {
 		days -= 1
 	}
 	date := w.add_day_date(base, days)
-	time := w.Time{secs / 3600, (secs % 3600) / 60, secs % 60}
+	time := w.Time{secs / 3600, (secs % 3600) / 60, secs % 60, (ms % 1000) * 1_000_000}
 	return w.new_Datetime_from_Date_and_Time(date, time)
 }
 

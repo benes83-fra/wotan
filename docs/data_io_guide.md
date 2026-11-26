@@ -54,7 +54,7 @@ import "core:fmt"
 
 - whole numbers become `Int`, and decimals become `Float` (a mix of the two becomes `Float`);
 - `true`/`false` become `Bool`;
-- ISO dates, times and datetimes become `Date`, `Time` and `Datetime`;
+- ISO dates, times and datetimes become `Date`, `Time` and `Datetime`, with fractions of a second (`09:30:15.250`) to the nanosecond;
 - anything else, or a mix that fits none of these, becomes `String`.
 
 Empty fields and the tokens `NA`, `null` and `None` become nulls.
@@ -172,7 +172,7 @@ tables: 3
 
 `xlsx_load(path, alloc)` reads the first worksheet of an `.xlsx` workbook, and `xlsx_load_sheet(path, name, alloc)` reads a worksheet by name and returns `(df, found)`. `xlsx_sheet_names(path, alloc)` lists the worksheets in workbook order; free each name and the slice. All three panic when the file is missing or is not an `.xlsx` workbook.
 
-The first row is the header. Cells are read with their Excel types: numbers, booleans, shared and inline strings, rich text, and errors (read as nulls). A number whose cell style is a date or time format becomes a `Date`, `Time` or `Datetime`. A custom format such as `#,##0 "USD"` is not mistaken for a date.
+The first row is the header. Cells are read with their Excel types: numbers, booleans, shared and inline strings, rich text, and errors (read as nulls). A number whose cell style is a date or time format becomes a `Date`, `Time` or `Datetime`, to the millisecond (Excel's own resolution; `xlsx_save` writes fractions of a second the same way). A custom format such as `#,##0 "USD"` is not mistaken for a date.
 
 ```odin
 names := io.xlsx_sheet_names("demo_files/example.xlsx", context.allocator)
@@ -220,11 +220,11 @@ fmt.println("nested:", ok3)
   1 102.25  900     2024-01-03 00:00:00
   2 NULL    0       2024-01-04 00:00:00
   3 99      4500    2024-01-05 00:00:00
-    ts_us                cat  dec
-  0 2024-03-01 09:30:15  EU   123.45
-  1 1969-12-31 23:59:59  US   -0.01
-  2 NULL                 EU   NULL
-  3 1970-01-01 00:00:00  US   9.999999999e+07
+    ts_us                       cat  dec
+  0 2024-03-01 09:30:15.999999  EU   123.45
+  1 1969-12-31 23:59:59.500     US   -0.01
+  2 NULL                        EU   NULL
+  3 1970-01-01 00:00:00         US   9.999999999e+07
 ... (8 more rows)
 parquet: column "tags" is nested (a list, map or struct), which is not supported; pass `columns` to load the others
 nested: false
@@ -246,7 +246,7 @@ The first file was written by pandas from a frame indexed by date. pandas stores
 | `TIME` in milli-, micro- or nanoseconds | `Time` |
 | `TIMESTAMP` in milli-, micro- or nanoseconds, and the legacy `INT96` timestamps of Spark and Impala | `Datetime` |
 
-`Datetime` and `Time` hold whole seconds, so sub-second parts are dropped: `1969-12-31 23:59:59.5` becomes `23:59:59`, the second it falls in. Timestamps stored as instants (pandas' time-zone-aware columns) are read as UTC. Unsigned 64-bit values above 2^63 − 1 do not fit `Int` and wrap to negative numbers.
+Times and timestamps keep every unit down to the nanosecond. Timestamps stored as instants (pandas' time-zone-aware columns) are read as UTC. Unsigned 64-bit values above 2^63 − 1 do not fit `Int` and wrap to negative numbers.
 
 **What it reads.** Files whose columns are all flat (no lists, maps or structs), in any number of row groups, in data pages of version 1 or 2. Values may use any of the format's encodings: plain, dictionary, run-length (booleans), the three delta encodings, and byte stream split. Pages may be uncompressed or compressed with Snappy (pandas' and pyarrow's default), Zstandard (the default of Polars, DuckDB and newer Spark), gzip or LZ4.
 
@@ -310,6 +310,8 @@ Every column is written with the standard Parquet type for its values, so pandas
 | `Date` | `INT32` with the `DATE` type |
 | `Datetime` | `INT64` `TIMESTAMP` in microseconds, as wall-clock time (no time zone) |
 | `Time` | `INT64` `TIME` in microseconds |
+
+A `Datetime` or `Time` column whose values have digits below the microsecond is written in nanoseconds instead, so nothing is lost, as long as every value fits that unit. For `Datetime`, the nanosecond range ends at 1677 and 2262; a column with a date outside it stays in microseconds and drops the extra digits.
 
 Every column may hold nulls. pandas reads an integer column with nulls as `float64`, as it does for any integer data with missing values. A frame indexed with `set_index(&df, name, drop = true)` keeps its index outside its columns; the writer stores it as the first column, under its name, the way pandas stores its index.
 
@@ -666,7 +668,7 @@ The dates are CBOE's trading days. To combine an index with Yahoo prices, put it
 | `csv_export_test`, `json_basic_test`, `jsonl_basic_test`, `json_export_test` | CSV and JSON loading and writing |
 | `html_basic_test`, `html_extended_test`, `html_tags_test`, `html_export_test` | HTML tables by index, id and all, tags inside cells, writing |
 | `excel_basic_test`, `excel_date_test`, `excel_export_test`, `zip_smoke_test` | reading sheets and dates, writing workbooks, the ZIP container |
-| `parquet_test` | reading: every column type, with nulls and extreme values, against pyarrow in eight layouts (plain, dictionary, delta and byte-stream-split values, page versions 1 and 2, no compression, Snappy, gzip, Zstandard, LZ4, several row groups and many small pages); FLOAT16 and byte stream split on integers (pyarrow 17); Zstandard pages of several blocks; DuckDB's Zstandard file with UUIDs; the Zstandard decoder on its own; the same frame from one thread and from all; INT96 timestamps; decimals stored as integers (DuckDB); a pandas file; column selection; `ok = false` for unsupported files (nested, Brotli) and for truncated or corrupted copies. Writing: the same table with every codec, with and without dictionaries, in one or three row groups, read back cell for cell; the same bytes from one thread and from all; views, an empty frame, a hidden index, 70 000 rows with an all-null column. The fixtures in `demo_files/parquet` are written by `scripts/make_parquet_fixtures.py`; `scripts/check_parquet_export.py` checks the file the test writes (`demo_files/export_test.parquet`) with pyarrow, including its statistics |
+| `parquet_test` | reading: every column type, with nulls and extreme values, against pyarrow in eight layouts (plain, dictionary, delta and byte-stream-split values, page versions 1 and 2, no compression, Snappy, gzip, Zstandard, LZ4, several row groups and many small pages); FLOAT16 and byte stream split on integers (pyarrow 17); Zstandard pages of several blocks; DuckDB's Zstandard file with UUIDs; the Zstandard decoder on its own; the same frame from one thread and from all; INT96 timestamps; decimals stored as integers (DuckDB); a pandas file; column selection; `ok = false` for unsupported files (nested, Brotli) and for truncated or corrupted copies. Writing: the same table with every codec, with and without dictionaries, in one or three row groups, read back cell for cell; the same bytes from one thread and from all; views, an empty frame, a hidden index, 70 000 rows with an all-null column. The fixtures in `demo_files/parquet` were written by pyarrow 14 and 17 and by DuckDB 1.1 |
 | `http_get_test`, `yahoo_finance_json_test`, `yahoo_finance_events_test` | live HTTP and Yahoo requests, including dividends and splits |
 | `yahoo_max_range_test` | `.Max` gives the whole daily history (SPY from 1993-01-29, no gap over a week) and weekly rows a week apart |
 | `cboe_index_test` | offline: both CBOE file formats and the rows left out; live: COR1M's history from 2006-01-03, ascending, and an unknown symbol |

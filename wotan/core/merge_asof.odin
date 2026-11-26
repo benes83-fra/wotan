@@ -195,10 +195,10 @@ _asof_pos :: proc(col: ^Column, i: int) -> f64 {
 		return f64(days_from_civil(i64(d.year), i64(d.month), i64(d.day)))
 	case .Time:
 		t, _ := column_at_time(col, i)
-		return f64(t.hour) * 3600 + f64(t.minute) * 60 + f64(t.second)
+		return f64(t.hour) * 3600 + f64(t.minute) * 60 + f64(t.second) + f64(t.nanosecond) / 1e9
 	case .Datetime:
 		d, _ := column_at_datetime(col, i)
-		return f64(datetime_to_unix(d))
+		return datetime_to_unix_f64(d)
 	}
 	return 0
 }

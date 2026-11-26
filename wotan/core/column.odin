@@ -392,13 +392,13 @@ column_at_date :: proc(col: ^Column, i: int) -> (Date, bool) {
 
 column_at_time :: proc(col: ^Column, i: int) -> (Time, bool) {
 	c, r := column_resolve(col, i)
-	if _null_at(c, r) {return Time{0, 0, 0}, true}
+	if _null_at(c, r) {return Time{0, 0, 0, 0}, true}
 	return (cast(^Time)_cell_ptr(c, r))^, false
 }
 
 column_at_datetime :: proc(col: ^Column, i: int) -> (Datetime, bool) {
 	c, r := column_resolve(col, i)
-	if _null_at(c, r) {return Datetime{0, 0, 0, 0, 0, 0}, true}
+	if _null_at(c, r) {return Datetime{0, 0, 0, 0, 0, 0, 0}, true}
 	return (cast(^Datetime)_cell_ptr(c, r))^, false
 }
 

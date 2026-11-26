@@ -195,18 +195,19 @@ _write_key :: proc(b: ^strings.Builder, cols: []^Column, row: int) -> (has_null:
 			fmt.sbprintf(b, "d%d-%d-%d;", d.year, d.month, d.day)
 		case .Time:
 			t := get_time(col, row)
-			fmt.sbprintf(b, "t%d:%d:%d;", t.hour, t.minute, t.second)
+			fmt.sbprintf(b, "t%d:%d:%d.%d;", t.hour, t.minute, t.second, t.nanosecond)
 		case .Datetime:
 			t := get_datetime(col, row)
 			fmt.sbprintf(
 				b,
-				"D%d-%d-%d %d:%d:%d;",
+				"D%d-%d-%d %d:%d:%d.%d;",
 				t.year,
 				t.month,
 				t.day,
 				t.hour,
 				t.minute,
 				t.second,
+				t.nanosecond,
 			)
 		case .Invalid:
 			strings.write_string(b, "?;")

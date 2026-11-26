@@ -215,7 +215,7 @@ resample_test :: proc(allocator: mem.Allocator) {
 		dt := w.df_from(
 			w.column_from_datetimes(
 				"ts",
-				{{2024, 3, 4, 9, 30, 0}, {2024, 3, 4, 16, 0, 0}, {2024, 3, 6, 10, 0, 0}},
+				{{2024, 3, 4, 9, 30, 0, 0}, {2024, 3, 4, 16, 0, 0, 0}, {2024, 3, 6, 10, 0, 0, 0}},
 			),
 			w.column_from_floats("px", {1, 2, 3}),
 		)

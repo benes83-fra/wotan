@@ -12,8 +12,9 @@ import "core:os"
 
 // Parquet reader and writer.
 //
-// Reader, against pyarrow 14.0.2 on the fixtures in demo_files/parquet
-// (written by scripts/make_parquet_fixtures.py):
+// Reader, against pyarrow on the fixtures in demo_files/parquet (written by
+// pyarrow 14.0.2 and 17.0.0 and by DuckDB 1.1.3; the expected cells are
+// pyarrow's reading of them):
 // - one 12-row table with every mapped type (ints of all widths, unsigned,
 //   floats with NaN / -0 / inf, bools, UTF-8 and binary strings, fixed-length
 //   binary, dates back to year 1, timestamps in ms / us / ns (UTC) before and
@@ -34,8 +35,8 @@ import "core:os"
 //   CSV file, unknown or repeated column names, truncated and corrupted bytes.
 //
 // Writer: the same table written with every codec, dictionary on and off, in
-// one or three row groups, read back cell for cell; a file on disk (which
-// pyarrow also reads: scripts/check_parquet_export.py); a view; an empty
+// one or three row groups, read back cell for cell; a file on disk
+// (demo_files/export_test.parquet); a view; an empty
 // frame; a hidden index; 70 000 rows over several pages and Snappy fragments,
 // with an all-null column.
 
@@ -351,8 +352,8 @@ parquet_test :: proc(allocator: mem.Allocator) {
 			name = "ts_us",
 			type = .Datetime,
 			texts = {
-				"2024-03-01 09:30:15",
-				"1969-12-31 23:59:59",
+				"2024-03-01 09:30:15.999999",
+				"1969-12-31 23:59:59.500",
 				"NULL",
 				"1970-01-01 00:00:00",
 				"2000-02-29 23:59:59",
@@ -360,8 +361,8 @@ parquet_test :: proc(allocator: mem.Allocator) {
 				"2262-04-11 23:47:16",
 				"2024-12-31 12:00:00",
 				"NULL",
-				"2021-06-15 18:45:30",
-				"1999-12-31 23:59:59",
+				"2021-06-15 18:45:30.000001",
+				"1999-12-31 23:59:59.999999",
 				"2024-01-02 03:04:05",
 			},
 		},
@@ -369,8 +370,8 @@ parquet_test :: proc(allocator: mem.Allocator) {
 			name = "ts_ms",
 			type = .Datetime,
 			texts = {
-				"2024-03-01 09:30:15",
-				"1969-12-31 23:59:59",
+				"2024-03-01 09:30:15.999",
+				"1969-12-31 23:59:59.500",
 				"NULL",
 				"1970-01-01 00:00:00",
 				"2000-02-29 23:59:59",
@@ -379,7 +380,7 @@ parquet_test :: proc(allocator: mem.Allocator) {
 				"2024-12-31 12:00:00",
 				"NULL",
 				"2021-06-15 18:45:30",
-				"1999-12-31 23:59:59",
+				"1999-12-31 23:59:59.999",
 				"2024-01-02 03:04:05",
 			},
 		},
@@ -387,8 +388,8 @@ parquet_test :: proc(allocator: mem.Allocator) {
 			name = "ts_ns_utc",
 			type = .Datetime,
 			texts = {
-				"2024-03-01 09:30:15",
-				"1969-12-31 23:59:59",
+				"2024-03-01 09:30:15.999999",
+				"1969-12-31 23:59:59.500",
 				"NULL",
 				"1970-01-01 00:00:00",
 				"2000-02-29 23:59:59",
@@ -396,8 +397,8 @@ parquet_test :: proc(allocator: mem.Allocator) {
 				"NULL",
 				"2024-12-31 12:00:00",
 				"NULL",
-				"2021-06-15 18:45:30",
-				"1999-12-31 23:59:59",
+				"2021-06-15 18:45:30.000001",
+				"1999-12-31 23:59:59.999999",
 				"2024-01-02 03:04:05",
 			},
 		},
@@ -405,10 +406,10 @@ parquet_test :: proc(allocator: mem.Allocator) {
 			name = "t_ms",
 			type = .Time,
 			texts = {
-				"09:30:15",
+				"09:30:15.250",
 				"00:00:00",
 				"NULL",
-				"23:59:59",
+				"23:59:59.999",
 				"12:00:00",
 				"01:02:03",
 				"04:05:06",
@@ -423,10 +424,10 @@ parquet_test :: proc(allocator: mem.Allocator) {
 			name = "t_us",
 			type = .Time,
 			texts = {
-				"09:30:15",
+				"09:30:15.250001",
 				"NULL",
-				"00:00:00",
-				"23:59:59",
+				"00:00:00.000001",
+				"23:59:59.999999",
 				"12:00:00",
 				"01:02:03",
 				"04:05:06",
@@ -441,10 +442,10 @@ parquet_test :: proc(allocator: mem.Allocator) {
 			name = "t_ns",
 			type = .Time,
 			texts = {
-				"09:30:15",
+				"09:30:15.250001",
 				"NULL",
-				"00:00:00",
-				"23:59:59",
+				"00:00:00.000001",
+				"23:59:59.999999",
 				"12:00:00",
 				"01:02:03",
 				"04:05:06",
@@ -558,8 +559,8 @@ parquet_test :: proc(allocator: mem.Allocator) {
 				name = "ts_us",
 				type = .Datetime,
 				texts = {
-					"2024-03-01 09:30:15",
-					"1969-12-31 23:59:59",
+					"2024-03-01 09:30:15.999999",
+					"1969-12-31 23:59:59.500",
 					"NULL",
 					"1970-01-01 00:00:00",
 					"2000-02-29 23:59:59",
@@ -567,8 +568,8 @@ parquet_test :: proc(allocator: mem.Allocator) {
 					"2262-04-11 23:47:16",
 					"2024-12-31 12:00:00",
 					"NULL",
-					"2021-06-15 18:45:30",
-					"1999-12-31 23:59:59",
+					"2021-06-15 18:45:30.000001",
+					"1999-12-31 23:59:59.999999",
 					"2024-01-02 03:04:05",
 				},
 			},
@@ -576,8 +577,8 @@ parquet_test :: proc(allocator: mem.Allocator) {
 				name = "ts_ms",
 				type = .Datetime,
 				texts = {
-					"2024-03-01 09:30:15",
-					"1969-12-31 23:59:59",
+					"2024-03-01 09:30:15.999",
+					"1969-12-31 23:59:59.500",
 					"NULL",
 					"1970-01-01 00:00:00",
 					"2000-02-29 23:59:59",
@@ -586,7 +587,7 @@ parquet_test :: proc(allocator: mem.Allocator) {
 					"2024-12-31 12:00:00",
 					"NULL",
 					"2021-06-15 18:45:30",
-					"1999-12-31 23:59:59",
+					"1999-12-31 23:59:59.999",
 					"2024-01-02 03:04:05",
 				},
 			},
@@ -594,8 +595,8 @@ parquet_test :: proc(allocator: mem.Allocator) {
 				name = "ts_ns_utc",
 				type = .Datetime,
 				texts = {
-					"2024-03-01 09:30:15",
-					"1969-12-31 23:59:59",
+					"2024-03-01 09:30:15.999999",
+					"1969-12-31 23:59:59.500",
 					"NULL",
 					"1970-01-01 00:00:00",
 					"2000-02-29 23:59:59",
@@ -603,8 +604,8 @@ parquet_test :: proc(allocator: mem.Allocator) {
 					"NULL",
 					"2024-12-31 12:00:00",
 					"NULL",
-					"2021-06-15 18:45:30",
-					"1999-12-31 23:59:59",
+					"2021-06-15 18:45:30.000001",
+					"1999-12-31 23:59:59.999999",
 					"2024-01-02 03:04:05",
 				},
 			},
@@ -1197,8 +1198,8 @@ parquet_test :: proc(allocator: mem.Allocator) {
 				name = "ts_ns_utc",
 				type = .Datetime,
 				texts = {
-					"2024-03-01 09:30:15",
-					"1969-12-31 23:59:59",
+					"2024-03-01 09:30:15.999999",
+					"1969-12-31 23:59:59.500",
 					"NULL",
 					"1970-01-01 00:00:00",
 					"2000-02-29 23:59:59",
@@ -1206,8 +1207,8 @@ parquet_test :: proc(allocator: mem.Allocator) {
 					"NULL",
 					"2024-12-31 12:00:00",
 					"NULL",
-					"2021-06-15 18:45:30",
-					"1999-12-31 23:59:59",
+					"2021-06-15 18:45:30.000001",
+					"1999-12-31 23:59:59.999999",
 					"2024-01-02 03:04:05",
 				},
 			},
@@ -1363,7 +1364,7 @@ parquet_test :: proc(allocator: mem.Allocator) {
 				amount, _ := w.column_at_float(w.column(&df, "amount"), k)
 				half, null := w.column_at_float(w.column(&df, "half"), k)
 				want_ts := w.datetime_from_unix(
-					w.datetime_to_unix(w.Datetime{2024, 1, 1, 9, 30, 0}) + i64(k) * 61,
+					w.datetime_to_unix(w.Datetime{2024, 1, 1, 9, 30, 0, 0}) + i64(k) * 61,
 				)
 				ok_row :=
 					id == k &&
@@ -1475,7 +1476,7 @@ parquet_test :: proc(allocator: mem.Allocator) {
 		delete(one)
 		delete(all)
 
-		// to a file (scripts/check_parquet_export.py checks it with pyarrow)
+		// to a file
 		saved := ex.parquet_save(&src, "demo_files/export_test.parquet")
 		back, rok := imp.parquet_load("demo_files/export_test.parquet")
 		expect(
@@ -1539,6 +1540,74 @@ parquet_test :: proc(allocator: mem.Allocator) {
 		)
 		if eok {w.destroy_dataframe(&eb)}
 		delete(data2)
+	}
+
+	// nanoseconds: kept exactly (TIMESTAMP / TIME in NANOS); a column that
+	// also holds the year 9999 does not fit nanoseconds and keeps microseconds
+	{
+		ns := w.column_new("ns", .Datetime, 4)
+		far := w.column_new("far", .Datetime, 4)
+		tod := w.column_new("tod", .Time, 4)
+		w.append_datetime(&ns, w.Datetime{2024, 3, 1, 9, 30, 15, 123_456_789})
+		w.append_datetime(&ns, w.Datetime{1969, 12, 31, 23, 59, 59, 999_999_999})
+		w.append_null(&ns)
+		w.append_datetime(&ns, w.Datetime{2262, 4, 11, 23, 47, 16, 854_775_807})
+		w.append_datetime(&far, w.Datetime{9999, 12, 31, 23, 59, 59, 999_999_999})
+		w.append_datetime(&far, w.Datetime{1, 1, 1, 0, 0, 0, 1_000})
+		w.append_datetime(&far, w.Datetime{2024, 3, 1, 9, 30, 15, 123_456_789})
+		w.append_null(&far)
+		w.append_time(&tod, w.Time{23, 59, 59, 999_999_999})
+		w.append_time(&tod, w.Time{0, 0, 0, 1})
+		w.append_time(&tod, w.Time{12, 0, 0, 500_000_000})
+		w.append_null(&tod)
+		fr := w.dataframe_new()
+		defer w.destroy_dataframe(&fr)
+		w.add_column(&fr, ns)
+		w.add_column(&fr, far)
+		w.add_column(&fr, tod)
+		want := []Expect {
+			{
+				name = "ns",
+				type = .Datetime,
+				texts = {
+					"2024-03-01 09:30:15.123456789",
+					"1969-12-31 23:59:59.999999999",
+					"NULL",
+					"2262-04-11 23:47:16.854775807",
+				},
+			},
+			{
+				name = "far",
+				type = .Datetime,
+				texts = {
+					"9999-12-31 23:59:59.999999",
+					"0001-01-01 00:00:00.000001",
+					"2024-03-01 09:30:15.123456",
+					"NULL",
+				},
+			},
+			{
+				name = "tod",
+				type = .Time,
+				texts = {"23:59:59.999999999", "00:00:00.000000001", "12:00:00.500", "NULL"},
+			},
+		}
+		for comp in ([]ex.Parquet_Compression{.None, .Snappy}) {
+			data, wok := ex.parquet_bytes(&fr, comp)
+			back, rok := imp.parquet_load_from_bytes(data)
+			expect(
+				&passed,
+				&total,
+				wok && rok && matches(&back, want),
+				fmt.tprintf(
+					"write %v: nanoseconds kept; the year 9999 falls back to microseconds",
+					comp,
+				),
+			)
+			if rok {w.destroy_dataframe(&back)}
+			delete(data)
+		}
+		ex.parquet_save(&fr, "demo_files/export_nanos.parquet")
 	}
 
 	// hidden index (set_index with drop): written as the first column

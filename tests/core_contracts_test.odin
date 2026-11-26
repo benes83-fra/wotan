@@ -51,9 +51,9 @@ core_contracts_test :: proc(allocator: mem.Allocator) {
 
 	// ---------------- columns / series
 	{
-		t := w.column_from_times("t", []w.Time{{1, 2, 3}, {4, 5, 6}})
-		d := w.column_from_datetimes("d", []w.Datetime{{2024, 1, 1, 0, 0, 0}})
-		eq := w.column_eq_datetime(&d, w.Datetime{2024, 1, 1, 0, 0, 0})
+		t := w.column_from_times("t", []w.Time{{1, 2, 3, 0}, {4, 5, 6, 0}})
+		d := w.column_from_datetimes("d", []w.Datetime{{2024, 1, 1, 0, 0, 0, 0}})
+		eq := w.column_eq_datetime(&d, w.Datetime{2024, 1, 1, 0, 0, 0, 0})
 		df := frame(t)
 		s := w.df_series(&df, "t")
 		t1, _ := w.series_at_time(&s, 1)
@@ -61,7 +61,7 @@ core_contracts_test :: proc(allocator: mem.Allocator) {
 		expect(
 			&passed,
 			&total,
-			t.type == .Time && d.type == .Datetime && e0 && t1 == w.Time{4, 5, 6},
+			t.type == .Time && d.type == .Datetime && e0 && t1 == w.Time{4, 5, 6, 0},
 			"column_from_times / _datetimes, column_eq_datetime, series_at_time use their own type",
 		)
 		w.destroy_column(&d)
@@ -204,7 +204,7 @@ core_contracts_test :: proc(allocator: mem.Allocator) {
 		)
 		defer w.destroy_dataframe(&df)
 		tc := w.column_new("t", .Time, 5)
-		for i in 0 ..< 5 {w.append_time(&tc, w.Time{i32(10 + i), 0, 0})}
+		for i in 0 ..< 5 {w.append_time(&tc, w.Time{i32(10 + i), 0, 0, 0})}
 		w.add_column(&df, tc)
 		s := w.dataframe_sort_by(&df, []string{"g", "v"}, []bool{false, true})
 		single := w.dataframe_sort(&df, "g", false)
@@ -212,7 +212,7 @@ core_contracts_test :: proc(allocator: mem.Allocator) {
 		ok :=
 			col_text(&s, "id") == "3 1 0 2 4" &&
 			col_text(&single, "id") == "1 3 0 2 4" &&
-			t0 == w.Time{13, 0, 0}
+			t0 == w.Time{13, 0, 0, 0}
 		expect(
 			&passed,
 			&total,
@@ -405,14 +405,14 @@ core_contracts_test :: proc(allocator: mem.Allocator) {
 		d := w.Date{1890, 1, 1}
 		for d.year < 2110 {
 			if w.f64_to_date(w.date_to_f64(d)) != d {bad += 1}
-			dt := w.Datetime{d.year, d.month, d.day, 23, 59, 59}
+			dt := w.Datetime{d.year, d.month, d.day, 23, 59, 59, 0}
 			if w.datetime_from_unix(w.datetime_to_unix(dt)) != dt {bad += 1}
 			d = w.add_day_date(d, 1)
 		}
 		ok :=
 			bad == 0 &&
-			w.datetime_to_unix(w.Datetime{1970, 1, 1, 0, 0, 0}) == 0 &&
-			w.datetime_to_unix(w.Datetime{2000, 1, 1, 0, 0, 0}) == 946684800 &&
+			w.datetime_to_unix(w.Datetime{1970, 1, 1, 0, 0, 0, 0}) == 0 &&
+			w.datetime_to_unix(w.Datetime{2000, 1, 1, 0, 0, 0, 0}) == 946684800 &&
 			w.date_from_unix(-1) == w.Date{1969, 12, 31}
 		expect(
 			&passed,
@@ -429,10 +429,10 @@ core_contracts_test :: proc(allocator: mem.Allocator) {
 		_, bad_time := w.parse_time("24:00:00")
 		ok :=
 			w.get_date_day_diffs(w.Date{2023, 12, 31}, w.Date{2024, 1, 1}) == 1 &&
-			w.add_seconds_time(w.Time{10, 0, 0}, -1) == w.Time{9, 59, 59} &&
-			w.add_seconds_time(w.Time{0, 0, 30}, -60) == w.Time{23, 59, 30} &&
-			w.add_seconds_datetime(w.Datetime{2024, 12, 31, 23, 59, 59}, 1) ==
-				w.Datetime{2025, 1, 1, 0, 0, 0} &&
+			w.add_seconds_time(w.Time{10, 0, 0, 0}, -1) == w.Time{9, 59, 59, 0} &&
+			w.add_seconds_time(w.Time{0, 0, 30, 0}, -60) == w.Time{23, 59, 30, 0} &&
+			w.add_seconds_datetime(w.Datetime{2024, 12, 31, 23, 59, 59, 0}, 1) ==
+				w.Datetime{2025, 1, 1, 0, 0, 0, 0} &&
 			w.add_month_date(w.Date{2024, 1, 31}, 1) == w.Date{2024, 2, 29} &&
 			w.add_month_date(w.Date{2024, 3, 31}, -13) == w.Date{2023, 2, 28} &&
 			w.add_year_date(w.Date{2024, 2, 29}, 1) == w.Date{2025, 2, 28} &&

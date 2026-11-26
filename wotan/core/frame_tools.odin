@@ -278,7 +278,8 @@ drop_duplicates :: proc(
 //   String -> any type       parsed after trimming spaces: integers, floats,
 //                            true/false/1/0 (any case), YYYY-MM-DD, HH:MM:SS,
 //                            "YYYY-MM-DD HH:MM:SS" (or with a T, or a date
-//                            alone for midnight); blank strings become null
+//                            alone for midnight), seconds with up to nine
+//                            fraction digits; blank strings become null
 //   Date -> Datetime         midnight
 //   Datetime -> Date / Time  the date or the time of day
 // A cell that cannot be converted (unparseable text, an infinite or too
@@ -515,13 +516,13 @@ _cast_cell :: proc(dst, src: ^Column, i: int) -> bool {
 		}
 	case .Date:
 		v, _ := column_at_date(src, i)
-		append_datetime(dst, Datetime{v.year, v.month, v.day, 0, 0, 0})
+		append_datetime(dst, Datetime{v.year, v.month, v.day, 0, 0, 0, 0})
 	case .Datetime:
 		v, _ := column_at_datetime(src, i)
 		if dst.type == .Date {
 			append_date(dst, Date{v.year, v.month, v.day})
 		} else {
-			append_time(dst, Time{v.hour, v.minute, v.second})
+			append_time(dst, Time{v.hour, v.minute, v.second, v.nanosecond})
 		}
 	}
 	return true
@@ -565,7 +566,7 @@ _parse_into :: proc(dst: ^Column, s: string) -> bool {
 		if !ok {
 			d, dok := parse_date(s)
 			if !dok {return false}
-			v = Datetime{d.year, d.month, d.day, 0, 0, 0}
+			v = Datetime{d.year, d.month, d.day, 0, 0, 0, 0}
 		}
 		append_datetime(dst, v)
 	case:

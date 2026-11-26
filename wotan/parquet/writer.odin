@@ -18,6 +18,9 @@ import util "../util"
 //   Bool -> BOOLEAN          String -> BYTE_ARRAY (STRING)
 //   Date -> INT32 (DATE)     Datetime -> INT64 TIMESTAMP(MICROS, local)
 //   Time -> INT64 TIME(MICROS, local)
+// A Datetime or Time column with a value that microseconds cannot hold is
+// written in NANOS instead, if every value fits (Datetime: years 1677 to
+// 2262; otherwise the extra digits are dropped).
 // A hidden index (set_index with drop = true) is written as the first column,
 // under the index's name, as pandas writes its index.
 //
@@ -85,6 +88,7 @@ Out_Col :: struct {
 	data:   rawptr,
 	nulls:  []bool, // nil: no nulls
 	offset: int,
+	nanos:  bool, // Datetime / Time in nanoseconds rather than microseconds
 }
 
 @(private)
@@ -159,6 +163,9 @@ _write :: proc(
 		if c.len !=
 		   df.rows {return _fail("column %q has %d rows, the frame %d", c.name, c.len, df.rows)}
 		append(&cols, _out_col(&c))
+	}
+	for &c in cols {
+		if c.type == .Datetime || c.type == .Time {c.nanos = _wants_nanos(&c, df.rows)}
 	}
 
 	// every column chunk is encoded on its own, in parallel, into its own
@@ -271,11 +278,52 @@ _physical :: proc(t: w.ColumnType) -> Physical_Type {
 }
 
 @(private)
-_micros_dt :: #force_inline proc(v: w.Datetime) -> i64 {return w.datetime_to_unix(v) * 1_000_000}
+_micros_dt :: #force_inline proc(v: w.Datetime) -> i64 {
+	return w.datetime_to_unix(v) * 1_000_000 + i64(v.nanosecond / 1000)
+}
+
+@(private)
+_nanos_dt :: #force_inline proc(v: w.Datetime) -> i64 {
+	ns, _ := w.datetime_to_unix_nanos(v) // the column was checked to fit
+	return ns
+}
+
+// Whether `c` (Datetime or Time) needs nanoseconds: a value with digits
+// below the microsecond, and (Datetime) every value in the nanosecond range
+@(private)
+_wants_nanos :: proc(c: ^Out_Col, rows: int) -> bool {
+	finer := false
+	#partial switch c.type {
+	case .Time:
+		cells := ([^]w.Time)(c.data)[c.offset:]
+		for r in 0 ..< rows {
+			if !_is_null(c, r) && cells[r].nanosecond % 1000 != 0 {return true}
+		}
+	case .Datetime:
+		cells := ([^]w.Datetime)(c.data)[c.offset:]
+		for r in 0 ..< rows {
+			if _is_null(c, r) {continue}
+			if _, fits := w.datetime_to_unix_nanos(cells[r]); !fits {return false}
+			if cells[r].nanosecond % 1000 != 0 {finer = true}
+		}
+	}
+	return finer
+}
 
 @(private)
 _micros_t :: #force_inline proc(v: w.Time) -> i64 {
-	return (i64(v.hour) * 3600 + i64(v.minute) * 60 + i64(v.second)) * 1_000_000
+	return(
+		(i64(v.hour) * 3600 + i64(v.minute) * 60 + i64(v.second)) * 1_000_000 +
+		i64(v.nanosecond / 1000) \
+	)
+}
+
+@(private)
+_nanos_t :: #force_inline proc(v: w.Time) -> i64 {
+	return(
+		(i64(v.hour) * 3600 + i64(v.minute) * 60 + i64(v.second)) * 1_000_000_000 +
+		i64(v.nanosecond) \
+	)
 }
 
 @(private)
@@ -491,25 +539,49 @@ _plain_values :: proc(buf: ^[dynamic]u8, c: ^Out_Col, r0, r1: int) #no_bounds_ch
 			proc(v: w.Date) -> i32le {return i32le(_days(v))},
 		)
 	case .Datetime:
-		put(
-			buf,
-			c,
-			r0,
-			r1,
-			([^]w.Datetime)(c.data),
-			i64le,
-			proc(v: w.Datetime) -> i64le {return i64le(_micros_dt(v))},
-		)
+		if c.nanos {
+			put(
+				buf,
+				c,
+				r0,
+				r1,
+				([^]w.Datetime)(c.data),
+				i64le,
+				proc(v: w.Datetime) -> i64le {return i64le(_nanos_dt(v))},
+			)
+		} else {
+			put(
+				buf,
+				c,
+				r0,
+				r1,
+				([^]w.Datetime)(c.data),
+				i64le,
+				proc(v: w.Datetime) -> i64le {return i64le(_micros_dt(v))},
+			)
+		}
 	case .Time:
-		put(
-			buf,
-			c,
-			r0,
-			r1,
-			([^]w.Time)(c.data),
-			i64le,
-			proc(v: w.Time) -> i64le {return i64le(_micros_t(v))},
-		)
+		if c.nanos {
+			put(
+				buf,
+				c,
+				r0,
+				r1,
+				([^]w.Time)(c.data),
+				i64le,
+				proc(v: w.Time) -> i64le {return i64le(_nanos_t(v))},
+			)
+		} else {
+			put(
+				buf,
+				c,
+				r0,
+				r1,
+				([^]w.Time)(c.data),
+				i64le,
+				proc(v: w.Time) -> i64le {return i64le(_micros_t(v))},
+			)
+		}
 	case .Bool:
 		cells := ([^]bool)(c.data)
 		acc: u8
@@ -645,9 +717,11 @@ _stats :: proc(c: ^Out_Col, r0, r1: int, info: ^Chunk_Info) {
 			case .Date:
 				v = i64(_days(([^]w.Date)(c.data)[c.offset + r]))
 			case .Datetime:
-				v = _micros_dt(([^]w.Datetime)(c.data)[c.offset + r])
+				d := ([^]w.Datetime)(c.data)[c.offset + r]
+				v = _nanos_dt(d) if c.nanos else _micros_dt(d)
 			case .Time:
-				v = _micros_t(([^]w.Time)(c.data)[c.offset + r])
+				t := ([^]w.Time)(c.data)[c.offset + r]
+				v = _nanos_t(t) if c.nanos else _micros_t(t)
 			}
 			lo, hi = min(lo, v), max(hi, v)
 		}
@@ -772,12 +846,13 @@ _write_footer :: proc(
 			_tw_end(&t)
 			_tw_end(&t)
 		case .Datetime, .Time:
-			_tw_i32(&t, 6, CT_TIMESTAMP_MICROS if c.type == .Datetime else CT_TIME_MICROS)
+			// the legacy converted type has no nanoseconds
+			if !c.nanos {_tw_i32(&t, 6, CT_TIMESTAMP_MICROS if c.type == .Datetime else CT_TIME_MICROS)}
 			_tw_struct(&t, 10)
 			_tw_struct(&t, LT_TIMESTAMP if c.type == .Datetime else LT_TIME)
 			_tw_bool(&t, 1, false) // isAdjustedToUTC: wall-clock values
 			_tw_struct(&t, 2) // unit
-			_tw_struct(&t, 2) // MICROS
+			_tw_struct(&t, 3 if c.nanos else 2) // NANOS or MICROS
 			_tw_end(&t)
 			_tw_end(&t)
 			_tw_end(&t)

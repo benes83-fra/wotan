@@ -27,8 +27,7 @@ import zs "../zstd"
 //   DATE                                      -> Date
 //   TIME (millis, micros, nanos)              -> Time
 //   TIMESTAMP (millis, micros, nanos), INT96  -> Datetime (UTC for instants)
-// Datetime and Time hold whole seconds; sub-second parts are dropped
-// (rounded towards the past).
+// Datetime and Time keep every unit to the nanosecond.
 //
 // Encodings: PLAIN, PLAIN_DICTIONARY / RLE_DICTIONARY, RLE (booleans),
 // DELTA_BINARY_PACKED, DELTA_LENGTH_BYTE_ARRAY, DELTA_BYTE_ARRAY and
@@ -918,15 +917,18 @@ _pow10 :: proc(scale: i32) -> f64 {
 @(private)
 _ts :: #force_inline proc(v: i64, per_second: i64) -> w.Datetime {
 	s := v / per_second
-	if v % per_second < 0 {s -= 1} 	// floor: 1969-12-31 23:59:59.5 stays in that second
-	return w.datetime_from_unix(s)
+	if v % per_second < 0 {s -= 1} 	// floor: 1969-12-31 23:59:59.5 is 23:59:59 and a half
+	dt := w.datetime_from_unix(s)
+	dt.nanosecond = i32((v - s * per_second) * (1_000_000_000 / per_second))
+	return dt
 }
 
 @(private)
 _time_of_day :: #force_inline proc(v: i64, per_second: i64) -> w.Time {
 	s := v / per_second
 	if v % per_second < 0 {s -= 1}
-	return w.Time{i32(s / 3600), i32((s % 3600) / 60), i32(s % 60)}
+	ns := i32((v - s * per_second) * (1_000_000_000 / per_second))
+	return w.Time{i32(s / 3600), i32((s % 3600) / 60), i32(s % 60), ns}
 }
 
 // Big-endian two's complement integer of 1..16 bytes (decimal storage)
@@ -1045,7 +1047,18 @@ _plain :: proc(st: ^Chunk_State, src: []u8, n: int, dst: rawptr) -> bool #no_bou
 		for i in 0 ..< n {
 			nanos := i64(intrinsics.unaligned_load((^i64le)(&src[12 * i])))
 			julian := i64(intrinsics.unaligned_load((^u32le)(&src[12 * i + 8])))
-			out[i] = _ts((julian - 2_440_588) * 86400 * 1_000_000_000 + nanos, 1_000_000_000)
+			// days and nanoseconds of the day kept apart: their sum in
+			// nanoseconds overflows outside the years 1677 to 2262. Writers
+			// put times before 1970 as negative nanoseconds of day 2440588.
+			secs := nanos / 1_000_000_000
+			rest := nanos % 1_000_000_000
+			if rest < 0 {
+				rest += 1_000_000_000
+				secs -= 1
+			}
+			dt := w.datetime_from_unix((julian - 2_440_588) * 86400 + secs)
+			dt.nanosecond = i32(rest)
+			out[i] = dt
 		}
 	case .Dec_Bytes:
 		out := ([^]f64)(dst)

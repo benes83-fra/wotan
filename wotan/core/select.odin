@@ -165,7 +165,10 @@ apply_datetime_expr :: proc(
 
 // Int (or Bool) column as Float; a Float column is passed through
 conv_int_to_f64_expr :: proc(name: string, col: ^Column) -> Select_Expr {
-	assert(col.type == .Int || col.type == .Float || col.type == .Bool, "conv_int_to_f64_expr: column must be numeric")
+	assert(
+		col.type == .Int || col.type == .Float || col.type == .Bool,
+		"conv_int_to_f64_expr: column must be numeric",
+	)
 	return Select_Expr{name = name, kind = .ConvIntFloat, col = col}
 }
 
@@ -555,7 +558,7 @@ _conv_append :: proc(dst: ^Column, src: ^Column, i: int, name: string) {
 		case .Date:
 			append_date(dst, v)
 		case .Datetime:
-			append_datetime(dst, Datetime{v.year, v.month, v.day, 0, 0, 0})
+			append_datetime(dst, Datetime{v.year, v.month, v.day, 0, 0, 0, 0})
 		case:
 			unsupported(name, src.type, target)
 		}
@@ -566,7 +569,7 @@ _conv_append :: proc(dst: ^Column, src: ^Column, i: int, name: string) {
 		case .Int:
 			append_int(dst, int(time_to_int(v)))
 		case .Float:
-			append_float(dst, f64(time_to_int(v)))
+			append_float(dst, f64(time_to_int(v)) + f64(v.nanosecond) / 1e9)
 		case .Time:
 			append_time(dst, v)
 		case:
@@ -579,11 +582,11 @@ _conv_append :: proc(dst: ^Column, src: ^Column, i: int, name: string) {
 		case .Int:
 			append_int(dst, int(datetime_to_unix(v)))
 		case .Float:
-			append_float(dst, f64(datetime_to_unix(v)))
+			append_float(dst, datetime_to_unix_f64(v))
 		case .Date:
 			append_date(dst, Date{v.year, v.month, v.day})
 		case .Time:
-			append_time(dst, Time{v.hour, v.minute, v.second})
+			append_time(dst, Time{v.hour, v.minute, v.second, v.nanosecond})
 		case .Datetime:
 			append_datetime(dst, v)
 		case:
@@ -616,7 +619,14 @@ _num_at :: proc(col: ^Column, i: int) -> (f64, int, bool) {
 @(private = "file")
 _require_numeric :: proc(col: ^Column, name: string) {
 	if col.type != .Int && col.type != .Float && col.type != .Bool {
-		panic(fmt.tprintf("select %s: column %q is %v, expected a numeric column", name, col.name, col.type))
+		panic(
+			fmt.tprintf(
+				"select %s: column %q is %v, expected a numeric column",
+				name,
+				col.name,
+				col.type,
+			),
+		)
 	}
 }
 

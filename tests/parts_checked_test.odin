@@ -52,7 +52,7 @@ parts_checked_test :: proc(allocator: mem.Allocator) {
 	// ---------------- date_part
 	{
 		ts := w.column_new("ts", .Datetime, 8)
-		for v, i in ([]w.Datetime{{2024, 1, 1, 9, 30, 15}, {2024, 2, 29, 23, 59, 59}, {2024, 3, 31, 0, 0, 0}, {2024, 12, 30, 12, 0, 0}, {2021, 1, 3, 7, 5, 9}, {}, {2026, 12, 31, 18, 45, 0}, {2027, 1, 1, 0, 0, 1}}) {
+		for v, i in ([]w.Datetime{{2024, 1, 1, 9, 30, 15, 0}, {2024, 2, 29, 23, 59, 59, 0}, {2024, 3, 31, 0, 0, 0, 0}, {2024, 12, 30, 12, 0, 0, 0}, {2021, 1, 3, 7, 5, 9, 0}, {}, {2026, 12, 31, 18, 45, 0, 0}, {2027, 1, 1, 0, 0, 1, 0}}) {
 			if i == 5 {w.append_null(&ts)} else {w.append_datetime(&ts, v)}
 		}
 		defer w.destroy_column(&ts)
@@ -109,7 +109,7 @@ parts_checked_test :: proc(allocator: mem.Allocator) {
 
 		d := w.column_from_dates("d", {{2024, 12, 30}, {2021, 1, 3}})
 		defer w.destroy_column(&d)
-		t := w.column_from_times("t", {{9, 30, 15}})
+		t := w.column_from_times("t", {{9, 30, 15, 0}})
 		defer w.destroy_column(&t)
 		wk, wok := w.date_part(&d, .Week, name = "week")
 		hr, hok := w.date_part(&t, .Hour)

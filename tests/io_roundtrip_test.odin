@@ -261,8 +261,8 @@ _io_sample_frame :: proc(allocator: mem.Allocator) -> w.DataFrame {
 		if i == 2 {w.append_null(&df.columns[3])} else {w.append_bool(&df.columns[3], i % 3 == 0)}
 		if i ==
 		   6 {w.append_null(&df.columns[4])} else {w.append_date(&df.columns[4], w.Date{i32(1999 + i), i32(1 + i), i32(28 - i)})}
-		w.append_time(&df.columns[5], w.Time{i32(i), 30, i32(59 - i)})
-		w.append_datetime(&df.columns[6], w.Datetime{2024, 2, i32(20 + i % 9), i32(i), 45, 7})
+		w.append_time(&df.columns[5], w.Time{i32(i), 30, i32(59 - i), 0})
+		w.append_datetime(&df.columns[6], w.Datetime{2024, 2, i32(20 + i % 9), i32(i), 45, 7, 0})
 	}
 	df.rows = n
 	return df

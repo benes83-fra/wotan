@@ -160,7 +160,7 @@ worksheet_xml_from_df :: proc(df: ^w.DataFrame, allocator: mem.Allocator) -> str
 				v, _ := w.column_at_datetime(col, r)
 				open_cell(&b, col_names[c], row_idx)
 				day := f64(excel_serial_from_date(int(v.year), int(v.month), int(v.day)))
-				secs := f64(v.hour * 3600 + v.minute * 60 + v.second)
+				secs := f64(v.hour * 3600 + v.minute * 60 + v.second) + f64(v.nanosecond) / 1e9
 				serial_cell(&b, XLSX_STYLE_DATETIME, day + secs / 86400.0)
 			case .Time:
 				v, _ := w.column_at_time(col, r)
@@ -168,7 +168,8 @@ worksheet_xml_from_df :: proc(df: ^w.DataFrame, allocator: mem.Allocator) -> str
 				serial_cell(
 					&b,
 					XLSX_STYLE_TIME,
-					f64(v.hour * 3600 + v.minute * 60 + v.second) / 86400.0,
+					(f64(v.hour * 3600 + v.minute * 60 + v.second) + f64(v.nanosecond) / 1e9) /
+					86400.0,
 				)
 			case .Invalid:
 			}

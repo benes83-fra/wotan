@@ -131,7 +131,7 @@ resample :: proc(
 		for p in lo[k] ..= hi[k] { 	// no periods if the group has no dates
 			d := civil_from_days(_period_last_day(p, freq, week_end))
 			if oncol.type ==
-			   .Date {append_date(&labels, d)} else {append_datetime(&labels, Datetime{d.year, d.month, d.day, 0, 0, 0})}
+			   .Date {append_date(&labels, d)} else {append_datetime(&labels, Datetime{d.year, d.month, d.day, 0, 0, 0, 0})}
 		}
 	}
 	add_column(&out, labels)

@@ -14,7 +14,8 @@ date_compare :: proc(a, b: Date) -> i32 {
 time_compare :: proc(a, b: Time) -> i32 {
 	if a.hour != b.hour {return a.hour - b.hour}
 	if a.minute != b.minute {return a.minute - b.minute}
-	return a.second - b.second
+	if a.second != b.second {return a.second - b.second}
+	return a.nanosecond - b.nanosecond
 }
 datetime_compare :: proc(a, b: Datetime) -> i32 {
 	if a.year != b.year {return a.year - b.year}
@@ -22,7 +23,8 @@ datetime_compare :: proc(a, b: Datetime) -> i32 {
 	if a.day != b.day {return a.day - b.day}
 	if a.hour != b.hour {return a.hour - b.hour}
 	if a.minute != b.minute {return a.minute - b.minute}
-	return a.second - b.second
+	if a.second != b.second {return a.second - b.second}
+	return a.nanosecond - b.nanosecond
 }
 
 validate_date :: proc(year: i32, month: i32, day: i32) -> bool {
@@ -81,7 +83,54 @@ datetime_from_unix :: proc(ts: i64) -> Datetime {
 		i32(secs / 3600),
 		i32((secs % 3600) / 60),
 		i32(secs % 60),
+		0,
 	}
+}
+
+// Datetime of a Unix time in nanoseconds (negative before 1970)
+datetime_from_unix_nanos :: proc(ns: i64) -> Datetime {
+	secs := _floor_div(ns, 1_000_000_000)
+	dt := datetime_from_unix(secs)
+	dt.nanosecond = i32(ns - secs * 1_000_000_000)
+	return dt
+}
+
+// Seconds with an optional fraction ("SS", "SS.f" .. "SS.fffffffff")
+@(private = "file")
+_parse_seconds :: proc(s: string) -> (second: int, nanosecond: i32, ok: bool) {
+	whole := s
+	frac := ""
+	if dot := strings.index_byte(s, '.'); dot >= 0 {
+		whole, frac = s[:dot], s[dot + 1:]
+		if len(frac) == 0 || len(frac) > 9 {return}
+	}
+	second = strconv.parse_int(whole) or_return
+	ns := 0
+	for c in transmute([]u8)frac {
+		if c < '0' || c > '9' {return}
+		ns = ns * 10 + int(c - '0')
+	}
+	for _ in len(frac) ..< 9 {ns *= 10}
+	return second, i32(ns), true
+}
+
+// The fraction of a second as text: "" for none, else 3, 6 or 9 digits
+// (milli-, micro- or nanoseconds), whichever shows it exactly
+fraction_string :: proc(nanosecond: i32, buf: ^[10]u8) -> string {
+	if nanosecond <= 0 {return ""}
+	digits := 9
+	v := int(nanosecond)
+	if v % 1_000_000 == 0 {
+		digits, v = 3, v / 1_000_000
+	} else if v % 1000 == 0 {
+		digits, v = 6, v / 1000
+	}
+	buf[0] = '.'
+	for k := digits; k >= 1; k -= 1 {
+		buf[k] = u8('0' + v % 10)
+		v /= 10
+	}
+	return string(buf[:digits + 1])
 }
 
 parse_date :: proc(date_str: string) -> (Date, bool) {
@@ -114,7 +163,7 @@ parse_time :: proc(time_str: string) -> (Time, bool) {
 	}
 	hour, ok1 := strconv.parse_int(parts[0])
 	minute, ok2 := strconv.parse_int(parts[1])
-	second, ok3 := strconv.parse_int(parts[2])
+	second, ns, ok3 := _parse_seconds(parts[2])
 	if !ok1 || !ok2 || !ok3 {
 		return Time{}, false
 	}
@@ -122,12 +171,13 @@ parse_time :: proc(time_str: string) -> (Time, bool) {
 
 		return Time{}, false
 	}
-	return Time{i32(hour), i32(minute), i32(second)}, true
+	return Time{i32(hour), i32(minute), i32(second), ns}, true
 
 }
 
 parse_datetime :: proc(datetime_str: string) -> (Datetime, bool) {
-	// "YYYY-MM-DD HH:MM:SS" or ISO 8601 "YYYY-MM-DDTHH:MM:SS"
+	// "YYYY-MM-DD HH:MM:SS" or ISO 8601 "YYYY-MM-DDTHH:MM:SS", the seconds
+	// with an optional fraction of up to 9 digits
 	sep := strings.index_byte(datetime_str, ' ')
 	if sep < 0 {sep = strings.index_byte(datetime_str, 'T')}
 	if sep < 0 {
@@ -155,14 +205,14 @@ parse_datetime :: proc(datetime_str: string) -> (Datetime, bool) {
 	}
 	hour, ok4 := strconv.parse_int(tparts[0])
 	minute, ok5 := strconv.parse_int(tparts[1])
-	second, ok6 := strconv.parse_int(tparts[2])
+	second, ns, ok6 := _parse_seconds(tparts[2])
 	if !ok4 || !ok5 || !ok6 {
 		return Datetime{}, false
 	}
 	if !validate_time(i32(hour), i32(minute), i32(second)) {
 		return Datetime{}, false
 	}
-	dt := Datetime{i32(year), i32(month), i32(day), i32(hour), i32(minute), i32(second)}
+	dt := Datetime{i32(year), i32(month), i32(day), i32(hour), i32(minute), i32(second), ns}
 	return dt, true
 }
 
@@ -208,42 +258,45 @@ date_to_string :: proc(d: Date, allocator := context.allocator) -> string {
 	return fmt.aprintf("%04d-%02d-%02d", d.year, d.month, d.day, allocator = allocator)
 }
 
+// "HH:MM:SS", with ".fff", ".ffffff" or ".fffffffff" when there is a
+// fraction of a second (the fewest digits that show it exactly)
 time_to_string :: proc(t: Time, allocator := context.allocator) -> string {
-	return fmt.aprintf("%02d:%02d:%02d", t.hour, t.minute, t.second, allocator = allocator)
-}
-
-datetime_to_string :: proc(dt: Datetime, allocator := context.allocator) -> string {
+	fb: [10]u8
 	return fmt.aprintf(
-		"%04d-%02d-%02d %02d:%02d:%02d",
-		dt.year,
-		dt.month,
-		dt.day,
-		dt.hour,
-		dt.minute,
-		dt.second,
+		"%02d:%02d:%02d%s",
+		t.hour,
+		t.minute,
+		t.second,
+		fraction_string(t.nanosecond, &fb),
 		allocator = allocator,
 	)
 }
-datetime_to_string_na :: proc(dt: Datetime) -> string {
-	// 19 chars for "YYYY-MM-DD HH:MM:SS" + 1 for safety if needed
-	buf: [24]byte
 
-	// bprintf formats directly into the slice and returns the string
-	return fmt.bprintf(
-		buf[:],
-		"%04d-%02d-%02d %02d:%02d:%02d",
+// "YYYY-MM-DD HH:MM:SS", with a fraction of a second as time_to_string
+datetime_to_string :: proc(dt: Datetime, allocator := context.allocator) -> string {
+	fb: [10]u8
+	return fmt.aprintf(
+		"%04d-%02d-%02d %02d:%02d:%02d%s",
 		dt.year,
 		dt.month,
 		dt.day,
 		dt.hour,
 		dt.minute,
 		dt.second,
+		fraction_string(dt.nanosecond, &fb),
+		allocator = allocator,
 	)
-
 }
+
+// datetime_to_string in the temp allocator
+datetime_to_string_na :: proc(dt: Datetime) -> string {
+	return datetime_to_string(dt, context.temp_allocator)
+}
+
+// "YYYY-MM-DD HH:MM:SS[.fff…]" into `buf` (at least 29 bytes), without
+// allocating
 datetime_format_iso_into :: proc(dt: Datetime, buf: []u8) -> string {
-	// Require at least 19 bytes: "YYYY-MM-DD HH:MM:SS"
-	assert(len(buf) >= 19)
+	assert(len(buf) >= 29)
 
 	i := 0
 
@@ -282,6 +335,12 @@ datetime_format_iso_into :: proc(dt: Datetime, buf: []u8) -> string {
 	// Second
 	buf[i] = u8('0' + dt.second / 10); i += 1
 	buf[i] = u8('0' + dt.second % 10); i += 1
+
+	// Fraction
+	fb: [10]u8
+	for c in transmute([]u8)fraction_string(dt.nanosecond, &fb) {
+		buf[i] = c; i += 1
+	}
 
 	// No allocation here: just a view into caller's buffer
 	return string(buf[:i])
@@ -340,6 +399,7 @@ f64_to_date :: proc(jd: f64) -> Date {
 	return civil_from_days(i64(math.floor_f64(jd - 2440587.5 + 1e-9)))
 }
 
+// Whole seconds since midnight (the nanoseconds are left out)
 time_to_int :: proc(t: Time) -> i32 {
 	return t.hour * HOUR + t.minute * MINUTE + t.second
 }
@@ -353,7 +413,7 @@ int_to_time :: proc(s: i32) -> Time {
 	hour := s / HOUR
 	minute := (s % HOUR) / MINUTE
 	second := s % MINUTE
-	return Time{hour, minute, second}
+	return Time{hour, minute, second, 0}
 }
 date_less :: proc(a, b: Date) -> bool {
 	return date_compare(a, b) < 0

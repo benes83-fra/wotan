@@ -69,8 +69,8 @@ A `DataFrame` is an ordered set of named columns of equal length. Each column ha
 | `.Bool` | `bool` | `true` |
 | `.String` | `string` | `"AAPL"` |
 | `.Date` | `w.Date{year, month, day}` | `w.Date{2024, 1, 31}` |
-| `.Time` | `w.Time{hour, minute, second}` | `w.Time{9, 30, 0}` |
-| `.Datetime` | `w.Datetime{year, month, day, hour, minute, second}` | `w.Datetime{2024, 1, 31, 9, 30, 0}` |
+| `.Time` | `w.Time{hour, minute, second, nanosecond}` | `w.Time{9, 30, 0, 0}` |
+| `.Datetime` | `w.Datetime{year, month, day, hour, minute, second, nanosecond}` | `w.Datetime{2024, 1, 31, 9, 30, 0, 0}` |
 
 Three ideas run through the whole package:
 
@@ -550,7 +550,7 @@ w.dataframe_pretty_print(&typed)
 |---|---|---|
 | `Int`, `Float`, `Bool` | each other | `Float` to `Int` truncates toward zero, and fails for infinite values or values beyond the `int` range. Non-zero becomes `true`; `true` becomes 1 |
 | any type | `String` | The text of `value_as_string`, which the importers read back without loss |
-| `String` | any type | Integers, floats, `true` / `false` / `1` / `0` in any case, `YYYY-MM-DD`, `HH:MM:SS`, `YYYY-MM-DD HH:MM:SS` (also with a `T`; a date alone means midnight) |
+| `String` | any type | Integers, floats, `true` / `false` / `1` / `0` in any case, `YYYY-MM-DD`, `HH:MM:SS`, `YYYY-MM-DD HH:MM:SS` (also with a `T`; a date alone means midnight), the seconds with up to nine fraction digits |
 | `Date` | `Datetime` | Midnight of that day |
 | `Datetime` | `Date`, `Time` | The date, or the time of day |
 
@@ -832,13 +832,13 @@ Every period from the first to the last one in the data appears, so a month with
 
 ## 14. Date and text parts
 
-`date_part` extracts one part of every cell of a `Date`, `Datetime` or `Time` column as a new column, as pandas' `.dt` accessors do. The numeric parts give an `Int` column: `.Year`, `.Quarter`, `.Month`, `.Day`, `.Weekday` (0 = Monday), `.Day_Of_Year`, `.Week` (the ISO 8601 week), `.Hour`, `.Minute` and `.Second`. The flags give a `Bool` column: `.Is_Month_Start`, `.Is_Month_End`, `.Is_Quarter_Start`, `.Is_Quarter_End`, `.Is_Year_Start`, `.Is_Year_End` and `.Is_Leap_Year`. A `Date` column has no time parts, and a `Time` column has only the time parts.
+`date_part` extracts one part of every cell of a `Date`, `Datetime` or `Time` column as a new column, as pandas' `.dt` accessors do. The numeric parts give an `Int` column: `.Year`, `.Quarter`, `.Month`, `.Day`, `.Weekday` (0 = Monday), `.Day_Of_Year`, `.Week` (the ISO 8601 week), `.Hour`, `.Minute`, `.Second`, `.Microsecond` (0 to 999 999) and `.Nanosecond` (0 to 999, the nanoseconds beyond the microsecond, as in pandas). The flags give a `Bool` column: `.Is_Month_Start`, `.Is_Month_End`, `.Is_Quarter_Start`, `.Is_Quarter_End`, `.Is_Year_Start`, `.Is_Year_End` and `.Is_Leap_Year`. A `Date` column has no time parts, and a `Time` column has only the time parts.
 
 The `str_` procedures work on `String` columns, as pandas' `.str` accessors do:
 
 | Procedure | Result |
 |---|---|
-| `str_upper`, `str_lower` | Upper or lower case, letter by letter (Unicode letters included; unlike Python, `"ß"` stays `"ß"`) |
+| `str_upper`, `str_lower` | Upper or lower case, letter by letter (Unicode letters included; unlike Python, `"ÃŸ"` stays `"ÃŸ"`) |
 | `str_strip(col, chars = "")` | Without leading and trailing whitespace, or without the characters in `chars` |
 | `str_replace(col, old, new)` | Every `old` replaced by `new` (plain text, not a regular expression) |
 | `str_slice(col, start, stop)` | Characters `start ..< stop`, with Python's rules: negative positions count from the end |
@@ -1184,7 +1184,7 @@ The key can be an `Int`, `Float`, `Date`, `Time` or `Datetime` column of the sam
 
 ## 20. Dates and times
 
-`Date`, `Time` and `Datetime` are plain structs, so you can write them as literals. The procedures below do calendar arithmetic on them:
+`Date`, `Time` and `Datetime` are plain structs, so you can write them as literals. `Time` and `Datetime` hold the time of day to the nanosecond: their last field, `nanosecond`, runs from 0 to 999 999 999. The procedures below do calendar arithmetic on them:
 
 ```odin
 d := w.Date{2024, 1, 31}
@@ -1200,21 +1200,36 @@ parsed, ok := w.parse_date("2024-07-15")              // 2024-07-15 true
 s := w.date_to_string(parsed) // "2024-07-15", allocated
 defer delete(s)
 
-dt := w.Datetime{2024, 7, 15, 9, 30, 0}
+dt := w.Datetime{2024, 7, 15, 9, 30, 0, 0}
 fmt.println(w.datetime_to_unix(dt))                   // 1721035800 (seconds since 1970-01-01)
 fmt.println(w.get_Date_from_Datetime(dt), w.get_Time_from_Datetime(dt))
 ```
+
+Fractions of a second are parsed, printed and kept through arithmetic, sorting, joins, files and the other operations:
+
+```odin
+t, ok := w.parse_datetime("2024-07-15 09:30:15.123456789")
+fmt.println(t.nanosecond, ok)                         // 123456789 true
+ns, in_range := w.datetime_to_unix_nanos(t)
+fmt.println(ns, in_range)                             // 1721035815123456789 true
+later := w.add_nanoseconds_datetime(t, 876_543_211)
+s1 := w.datetime_to_string(later)                     // "2024-07-15 09:30:16"
+s2 := w.datetime_to_string(w.Datetime{2024, 7, 15, 9, 30, 15, 250_000_000}) // "2024-07-15 09:30:15.250"
+s3 := w.time_to_string(w.Time{9, 30, 15, 1_500})      // "09:30:15.000001500"
+```
+
+As text, a time has no fraction when it falls on a whole second, and otherwise three, six or nine digits: the fewest that show it exactly. That is the form the CSV, JSON and HTML writers use, and the parsers read one to nine digits. `datetime_to_unix_nanos` gives nanoseconds since 1970 as pandas and Arrow count them; an `i64` only holds 1677-09-21 to 2262-04-11, so `ok` is false outside that range. `datetime_to_unix` gives whole seconds for any date.
 
 (`fmt.println` prints dates as structs, for example `Date{year = 2024, month = 2, day = 1}`. The comments show the values in ISO form for readability.)
 
 | Task | Procedures |
 |---|---|
-| Arithmetic | `add_day_date`, `add_month_date`, `add_year_date`, and the `_datetime` variants; `add_seconds_time`, `add_minutes_time`, `add_hour_time` |
+| Arithmetic | `add_day_date`, `add_month_date`, `add_year_date`, and the `_datetime` variants; `add_seconds_datetime`, `add_nanoseconds_datetime`; `add_seconds_time`, `add_minutes_time`, `add_hour_time` |
 | Differences and comparison | `date_diff` (days), `date_compare`, `date_less`, `time_compare`, `datetime_compare` |
 | Calendar facts | `date_weekday`, `date_end_of_month`, `date_is_end_of_month`, `get_days_in_month`, `get_days_of_the_year` |
-| Parsing | `parse_date` (`YYYY-MM-DD`), `parse_time` (`HH:MM:SS`), `parse_datetime` (`YYYY-MM-DD HH:MM:SS` or with `T`) |
+| Parsing | `parse_date` (`YYYY-MM-DD`), `parse_time` (`HH:MM:SS`, optionally `.f` to `.fffffffff`), `parse_datetime` (`YYYY-MM-DD HH:MM:SS` or with `T`, fraction as for times) |
 | Formatting | `date_to_string`, `time_to_string`, `datetime_to_string` (allocate; free with `delete`) |
-| Conversion | `datetime_to_unix`, `datetime_from_unix`, `date_from_unix`, `date_to_int` and `int_to_date` (`YYYYMMDD`), `date_to_f64` and `f64_to_date` (Julian day) |
+| Conversion | `datetime_to_unix` and `datetime_from_unix` (seconds), `datetime_to_unix_nanos` and `datetime_from_unix_nanos` (nanoseconds), `datetime_to_unix_f64` (seconds with the fraction), `date_from_unix`, `date_to_int` and `int_to_date` (`YYYYMMDD`), `date_to_f64` and `f64_to_date` (Julian day) |
 | Now | `now()` gives a `Datetime`; `now_unix()` gives seconds |
 
 `add_month_date` clamps the day to the target month's length, as in the example: 31 January plus one month is 29 February 2024. For business-day calendars, day-count conventions and payment schedules, see the `finance` package.

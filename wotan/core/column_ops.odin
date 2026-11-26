@@ -583,7 +583,7 @@ interpolate :: proc(
 			return f64(days_from_civil(i64(d.year), i64(d.month), i64(d.day)))
 		case .Datetime:
 			d, _ := column_at_datetime(x, i)
-			return f64(datetime_to_unix(d))
+			return datetime_to_unix_f64(d)
 		}
 		return _num(x, i)
 	}

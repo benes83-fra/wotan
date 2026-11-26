@@ -34,7 +34,15 @@ HOUR :: 60 * 60
 MINUTE :: 60
 
 new_Datetime_from_Date_and_Time :: proc(date: Date, time: Time) -> Datetime {
-	dt := Datetime{date.year, date.month, date.day, time.hour, time.minute, time.second}
+	dt := Datetime {
+		date.year,
+		date.month,
+		date.day,
+		time.hour,
+		time.minute,
+		time.second,
+		time.nanosecond,
+	}
 	if !validate_datetime(dt) {
 		panic("datetime: datetime not valid")
 	}
@@ -46,7 +54,7 @@ get_Date_from_Datetime :: proc(dt: Datetime) -> Date {
 }
 
 get_Time_from_Datetime :: proc(dt: Datetime) -> Time {
-	return Time{dt.hour, dt.minute, dt.second}
+	return Time{dt.hour, dt.minute, dt.second, dt.nanosecond}
 }
 
 validate_datetime :: proc(dt: Datetime) -> bool {
@@ -58,7 +66,7 @@ validate_datetime :: proc(dt: Datetime) -> bool {
 	second := dt.second
 	valid_d := validate_date(year, month, day)
 	valid_t := validate_time(hour, minute, second)
-	return valid_d && valid_t
+	return valid_d && valid_t && dt.nanosecond >= 0 && dt.nanosecond < 1_000_000_000
 
 }
 
@@ -121,7 +129,15 @@ add_day_datetime :: proc(dt: Datetime, n: i32) -> Datetime {
 	minute := dt.minute
 	second := dt.second
 	new_date := add_day_date(Date{year, month, day}, n)
-	return Datetime{new_date.year, new_date.month, new_date.day, hour, minute, second}
+	return Datetime {
+		new_date.year,
+		new_date.month,
+		new_date.day,
+		hour,
+		minute,
+		second,
+		dt.nanosecond,
+	}
 }
 
 
@@ -142,7 +158,15 @@ add_month_datetime :: proc(dt: Datetime, n: i32) -> Datetime {
 	minute := dt.minute
 	second := dt.second
 	new_date := add_month_date(Date{year, month, day}, n)
-	return Datetime{new_date.year, new_date.month, new_date.day, hour, minute, second}
+	return Datetime {
+		new_date.year,
+		new_date.month,
+		new_date.day,
+		hour,
+		minute,
+		second,
+		dt.nanosecond,
+	}
 }
 
 // Same month and day n years later; Feb 29 becomes Feb 28 in common years
@@ -160,14 +184,27 @@ add_year_datetime :: proc(dt: Datetime, n: i32) -> Datetime {
 	minute := dt.minute
 	second := dt.second
 	new_date := add_year_date(Date{year, month, day}, n)
-	return Datetime{new_date.year, new_date.month, new_date.day, hour, minute, second}
+	return Datetime {
+		new_date.year,
+		new_date.month,
+		new_date.day,
+		hour,
+		minute,
+		second,
+		dt.nanosecond,
+	}
 }
 
 // Time of day n seconds later (earlier for n < 0), wrapping around midnight
 add_seconds_time :: proc(time: Time, n: i32) -> Time {
 	total := i64(time.hour) * HOUR + i64(time.minute) * MINUTE + i64(time.second) + i64(n)
 	total %%= DAY
-	return Time{i32(total / HOUR), i32((total % HOUR) / MINUTE), i32(total % MINUTE)}
+	return Time {
+		i32(total / HOUR),
+		i32((total % HOUR) / MINUTE),
+		i32(total % MINUTE),
+		time.nanosecond,
+	}
 }
 
 add_second_time :: proc(time: Time) -> Time {
@@ -177,7 +214,7 @@ add_second_time :: proc(time: Time) -> Time {
 	if second < 59 {
 		second = second + 1
 
-		return Time{hour, minute, second}
+		return Time{hour, minute, second, time.nanosecond}
 	}
 	if minute < 59 {
 
@@ -196,7 +233,7 @@ add_second_time :: proc(time: Time) -> Time {
 		}
 
 	}
-	return Time{hour, minute, second}
+	return Time{hour, minute, second, time.nanosecond}
 }
 
 add_minutes_time :: proc(time: Time, n: i32) -> Time {
@@ -215,7 +252,7 @@ add_minute_time :: proc(time: Time) -> Time {
 
 	if minute < 59 {
 		minute = minute + 1
-		return Time{hour, minute, second}
+		return Time{hour, minute, second, time.nanosecond}
 	}
 	if hour < 23 {
 		hour = hour + 1
@@ -226,7 +263,7 @@ add_minute_time :: proc(time: Time) -> Time {
 		minute = 0
 
 	}
-	return Time{hour, minute, second}
+	return Time{hour, minute, second, time.nanosecond}
 }
 
 add_hour_datetime :: proc(datetime: Datetime) -> Datetime {
@@ -237,15 +274,15 @@ add_hour_datetime :: proc(datetime: Datetime) -> Datetime {
 	hour := datetime.hour
 	minute := datetime.minute
 	second := datetime.second
-	time := Time{hour, minute, second}
+	time := Time{hour, minute, second, datetime.nanosecond}
 	date := Date{year, month, day}
 	if hour < 23 {
 		hour = hour + 1
-		return Datetime{year, month, day, hour, minute, second}
+		return Datetime{year, month, day, hour, minute, second, datetime.nanosecond}
 	} else {
 		hour = 0
 		date = add_day_date(date, 1)
-		return Datetime{date.year, date.month, date.day, hour, minute, second}
+		return Datetime{date.year, date.month, date.day, hour, minute, second, datetime.nanosecond}
 	}
 }
 
@@ -257,28 +294,44 @@ add_minute_datetime :: proc(datetime: Datetime) -> Datetime {
 	hour := datetime.hour
 	minute := datetime.minute
 	second := datetime.second
-	time := Time{hour, minute, second}
+	time := Time{hour, minute, second, datetime.nanosecond}
 	date := Date{year, month, day}
 	if hour < 23 {
 		time = add_minute_time(time)
-		return Datetime{year, month, day, time.hour, time.minute, time.second}
+		return Datetime{year, month, day, time.hour, time.minute, time.second, datetime.nanosecond}
 	}
 	if minute < 59 {
 
 		time = add_minute_time(time)
-		return Datetime{year, month, day, time.hour, time.minute, time.second}
+		return Datetime{year, month, day, time.hour, time.minute, time.second, datetime.nanosecond}
 	} else {
 
 		date = add_day_date(date, 1)
 		hour = 0
 		minute = 0
-		return Datetime{date.year, date.month, date.day, hour, minute, second}
+		return Datetime{date.year, date.month, date.day, hour, minute, second, datetime.nanosecond}
 	}
 }
 
 // Datetime n seconds later (earlier for n < 0), across day / month / year boundaries
 add_seconds_datetime :: proc(datetime: Datetime, n: i32) -> Datetime {
-	return datetime_from_unix(datetime_to_unix(datetime) + i64(n))
+	out := datetime_from_unix(datetime_to_unix(datetime) + i64(n))
+	out.nanosecond = datetime.nanosecond
+	return out
+}
+
+// Datetime n nanoseconds later (earlier for n < 0)
+add_nanoseconds_datetime :: proc(datetime: Datetime, n: i64) -> Datetime {
+	ns := i64(datetime.nanosecond) + n
+	secs := ns / 1_000_000_000
+	rest := ns % 1_000_000_000
+	if rest < 0 {
+		rest += 1_000_000_000
+		secs -= 1
+	}
+	out := datetime_from_unix(datetime_to_unix(datetime) + secs)
+	out.nanosecond = i32(rest)
+	return out
 }
 
 add_minutes_datetime :: proc(datetime: Datetime, n: i32) -> Datetime {
@@ -301,7 +354,7 @@ add_second_datetime :: proc(datetime: Datetime) -> Datetime {
 
 	if second < 59 {
 		second = second + 1
-		return Datetime{year, month, day, hour, minute, second}
+		return Datetime{year, month, day, hour, minute, second, datetime.nanosecond}
 	}
 	if minute < 59 {
 		minute = minute + 1
@@ -322,7 +375,7 @@ add_second_datetime :: proc(datetime: Datetime) -> Datetime {
 			second = 0
 		}
 	}
-	return Datetime{year, month, day, hour, minute, second}
+	return Datetime{year, month, day, hour, minute, second, datetime.nanosecond}
 }
 abs_days :: proc(days: i32) -> i32 {
 	if days >= 0 {
@@ -386,25 +439,9 @@ get_date_day_diffs :: proc(a, b: Date) -> i32 {
 	return abs_days(date_diff(a, b))
 }
 
-// Current time (UTC)
+// Current time (UTC), to the precision of the system clock
 now :: proc() -> Datetime {
-
-	now := t.now()
-	buf: [20]u8
-	res := t.to_string_yyyy_mm_dd(now, buf[:])
-	buf2: [20]u8
-	res2 := t.to_string_hms(now, buf2[:])
-
-	date, ok := parse_date(res)
-	if !ok {
-		panic("Cannot parse Date string")
-	}
-
-	time, ok2 := parse_time(res2)
-	if !ok2 {
-		panic("Cannot parese Time string")
-	}
-	return Datetime{date.year, date.month, date.day, time.hour, time.minute, time.second}
+	return datetime_from_unix_nanos(t.time_to_unix_nano(t.now()))
 }
 // Returns the number of days from date a to date b (b - a)
 // Positive if b is after a, negative if b is before a
@@ -441,10 +478,30 @@ date_to_days :: proc(year: i32, month: i32, day: i32) -> i32 {
 	return days
 }
 
-// Convert Datetime to Unix timestamp (seconds since 1970-01-01 00:00:00 UTC)
+// Convert Datetime to Unix timestamp (whole seconds since 1970-01-01
+// 00:00:00 UTC; the nanoseconds are left out)
 datetime_to_unix :: proc(dt: Datetime) -> i64 {
 	days := days_from_civil(i64(dt.year), i64(dt.month), i64(dt.day))
 	return days * 86400 + i64(dt.hour) * 3600 + i64(dt.minute) * 60 + i64(dt.second)
+}
+
+// Nanoseconds since 1970-01-01 00:00:00 UTC, as pandas and Arrow count
+// them. ok is false outside 1677-09-21 00:12:43.145224193 ..=
+// 2262-04-11 23:47:16.854775807, which is all an i64 holds.
+datetime_to_unix_nanos :: proc(dt: Datetime) -> (nanos: i64, ok: bool) {
+	secs := datetime_to_unix(dt)
+	ns := i64(dt.nanosecond)
+	// the i64 range: -9223372036.854775808 s ..= 9223372036.854775807 s,
+	// less its lowest value, which pandas and Arrow reserve for "not a time"
+	if secs > 9_223_372_036 || (secs == 9_223_372_036 && ns > 854_775_807) {return 0, false}
+	if secs < -9_223_372_037 || (secs == -9_223_372_037 && ns <= 145_224_192) {return 0, false}
+	return secs * 1_000_000_000 + ns, true
+}
+
+// Unix time in seconds, with the nanoseconds as a fraction (exact to about
+// a microsecond for present-day dates)
+datetime_to_unix_f64 :: proc(dt: Datetime) -> f64 {
+	return f64(datetime_to_unix(dt)) + f64(dt.nanosecond) / 1e9
 }
 
 // Get current Unix timestamp

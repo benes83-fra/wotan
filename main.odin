@@ -196,13 +196,13 @@ main :: proc() {
 		fmt.printf("Date incremeneted to %v\n", date2)
 	}
 	fmt.println("Now we test some times")
-	time1 := w.Time{16, 2, 58}
+	time1 := w.Time{16, 2, 58, 0}
 
 	for i in 0 ..= 20 {
 		time1 = w.add_seconds_time(time1, -600)
 		fmt.printf("Time increased to %v\n", time1)
 	}
-	dt := w.Datetime{1983, 7, 20, 13, 13, 13}
+	dt := w.Datetime{1983, 7, 20, 13, 13, 13, 0}
 	for i in 0 ..= 20 {
 		dt = w.add_hours_datetime(dt, -49)
 		fmt.printf("Time elapsed %v \n", dt)
@@ -576,6 +576,8 @@ main :: proc() {
 	test.parts_checked_test(context.temp_allocator)
 	free_all(context.temp_allocator)
 	test.parquet_test(context.temp_allocator)
+	free_all(context.temp_allocator)
+	test.datetime_subsecond_test(context.temp_allocator)
 	free_all(context.temp_allocator)
 	test.matrix_test(context.temp_allocator)
 	free_all(context.temp_allocator)

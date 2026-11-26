@@ -20,19 +20,23 @@ Date :: struct {
 	day:   i32,
 }
 
+// A time of day to the nanosecond
 Time :: struct {
-	hour:   i32,
-	minute: i32,
-	second: i32,
+	hour:       i32,
+	minute:     i32,
+	second:     i32,
+	nanosecond: i32, // 0 ..< 1_000_000_000
 }
 
+// A calendar date and time of day to the nanosecond (no time zone)
 Datetime :: struct {
-	year:   i32,
-	month:  i32,
-	day:    i32,
-	hour:   i32,
-	minute: i32,
-	second: i32,
+	year:       i32,
+	month:      i32,
+	day:        i32,
+	hour:       i32,
+	minute:     i32,
+	second:     i32,
+	nanosecond: i32, // 0 ..< 1_000_000_000
 }
 
 

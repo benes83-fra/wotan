@@ -100,6 +100,8 @@ Date_Part :: enum {
 	Hour,
 	Minute,
 	Second,
+	Microsecond, // 0..999_999 (pandas .dt.microsecond)
+	Nanosecond, // 0..999, the nanoseconds beyond the microsecond (pandas .dt.nanosecond)
 	// Bool parts
 	Is_Month_Start,
 	Is_Month_End,
@@ -112,7 +114,7 @@ Date_Part :: enum {
 
 // Column of one part of every cell of a Date, Datetime or Time column: Int
 // for the numeric parts, Bool for the Is_ parts. Date columns have no time
-// parts, Time columns only Hour, Minute and Second. ok = false for another
+// parts, Time columns only Hour to Nanosecond. ok = false for another
 // column type or a part the type does not have.
 date_part :: proc(
 	col: ^Column,
@@ -123,7 +125,7 @@ date_part :: proc(
 	Column,
 	bool,
 ) {
-	time_part := part == .Hour || part == .Minute || part == .Second
+	time_part := part >= .Hour && part <= .Nanosecond
 	#partial switch col.type {
 	case .Date:
 		if time_part {return {}, false}
@@ -149,7 +151,8 @@ date_part :: proc(
 			t, _ = column_at_time(col, i)
 		case .Datetime:
 			dt, _ := column_at_datetime(col, i)
-			d, t = Date{dt.year, dt.month, dt.day}, Time{dt.hour, dt.minute, dt.second}
+			d, t =
+				Date{dt.year, dt.month, dt.day}, Time{dt.hour, dt.minute, dt.second, dt.nanosecond}
 		}
 		y, m, day := int(d.year), int(d.month), int(d.day)
 		dim := int(get_days_in_month(d.year, Months(d.month))) if !time_part else 0
@@ -176,6 +179,10 @@ date_part :: proc(
 			append_int(&out, int(t.minute))
 		case .Second:
 			append_int(&out, int(t.second))
+		case .Microsecond:
+			append_int(&out, int(t.nanosecond) / 1000)
+		case .Nanosecond:
+			append_int(&out, int(t.nanosecond) % 1000)
 		case .Is_Month_Start:
 			append_bool(&out, day == 1)
 		case .Is_Month_End:

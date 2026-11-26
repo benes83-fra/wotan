@@ -193,20 +193,12 @@ column_value_string :: proc(col: ^Column, row: int) -> string {
 	case .Time:
 		v, is_null := column_at_time(col, row)
 		if is_null {return "NULL"}
-		return fmt.tprintf("%02d:%02d:%02d", v.hour, v.minute, v.second)
+		return time_to_string(v, context.temp_allocator)
 	case .Datetime:
 		v, is_null := column_at_datetime(col, row)
 		if is_null {return "NULL"}
 
-		return fmt.tprintf(
-			"%04d-%02d-%02d %02d:%02d:%02d",
-			v.year,
-			v.month,
-			v.day,
-			v.hour,
-			v.minute,
-			v.second,
-		)
+		return datetime_to_string(v, context.temp_allocator)
 	}
 
 	return "<?>"
