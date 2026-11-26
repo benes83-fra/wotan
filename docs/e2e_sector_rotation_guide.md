@@ -44,7 +44,7 @@ The results change a little from day to day, because Yahoo's data grows by one d
 
 ## 2. Market data
 
-`net.read_yahoo_panel` downloads several tickers and keeps the days on which all of them traded ([data I/O guide, section 9.3](data_io_guide.md#93-several-tickers-read_yahoo_panel)):
+`net.read_yahoo_panel` downloads several tickers and keeps the days on which all of them traded ([data I/O guide, section 10.3](data_io_guide.md#103-several-tickers-read_yahoo_panel)):
 
 ```odin
 SECTORS := [?]string{"XLB", "XLC", "XLE", "XLF", "XLI", "XLK", "XLP", "XLRE", "XLU", "XLV", "XLY"}
@@ -63,7 +63,7 @@ if !loaded {
 
 Ten years were requested, but the communication-services fund XLC started in June 2018, so the common history begins there.
 
-**Today's row.** While the US market is open, Yahoo's last row holds the current prices, not closing prices. The panel then has `last_is_live` set ([data I/O guide, section 9.4](data_io_guide.md#94-todays-row-while-the-market-is-open)), and `load_market` leaves that row out, so the backtest never trades on a price that may still change.
+**Today's row.** While the US market is open, Yahoo's last row holds the current prices, not closing prices. The panel then has `last_is_live` set ([data I/O guide, section 10.4](data_io_guide.md#104-todays-row-while-the-market-is-open)), and `load_market` leaves that row out, so the backtest never trades on a price that may still change.
 
 The sectors move together, but not equally. Energy (XLE) and utilities (XLU) are the most independent:
 

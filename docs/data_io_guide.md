@@ -2,8 +2,8 @@
 
 Three packages move data into and out of Wotan:
 
-- **`importer`** reads CSV, JSON, JSON Lines, HTML tables and Excel workbooks into `core` DataFrames.
-- **`exporter`** writes DataFrames back to the same formats.
+- **`importer`** reads CSV, JSON, JSON Lines, HTML tables, Excel workbooks and Parquet files into `core` DataFrames.
+- **`exporter`** writes DataFrames to CSV, JSON, JSON Lines, HTML and Excel.
 - **`net`** fetches data over HTTP. It also loads price histories from Yahoo Finance, as a DataFrame, as plain arrays for one ticker, or as a panel of several tickers matched by date.
 
 This guide covers all three. It assumes you know the `DataFrame` from the [core guide](core_guide.md). Every example was compiled and run against the current code, and the output shown is the real output. The examples free everything they allocate: a run under a tracking allocator reports no leaks. The Yahoo examples ran on 2026-11-13, so their numbers will differ when you run them.
@@ -16,17 +16,18 @@ This guide covers all three. It assumes you know the `DataFrame` from the [core 
 4. [JSON and JSON Lines](#4-json-and-json-lines)
 5. [HTML tables](#5-html-tables)
 6. [Excel](#6-excel)
-7. [Writing files](#7-writing-files)
-8. [HTTP](#8-http)
-9. [Yahoo Finance](#9-yahoo-finance)
-10. [CBOE index histories](#10-cboe-index-histories)
-11. [Tests](#11-tests)
-12. [Quick reference](#12-quick-reference)
+7. [Parquet](#7-parquet)
+8. [Writing files](#8-writing-files)
+9. [HTTP](#9-http)
+10. [Yahoo Finance](#10-yahoo-finance)
+11. [CBOE index histories](#11-cboe-index-histories)
+12. [Tests](#12-tests)
+13. [Quick reference](#13-quick-reference)
 
 ## 1. Setup
 
 ```odin
-import ts  "wotan/analytics" // log_returns / simple_returns (section 9)
+import ts  "wotan/analytics" // log_returns / simple_returns (section 10)
 import w   "wotan/core"
 import ex  "wotan/exporter"
 import io  "wotan/importer"
@@ -45,10 +46,11 @@ import "core:fmt"
 | JSON Lines | `io.jsonl_load(path)` | `ex.jsonl_write(&df, path, alloc)` |
 | HTML `<table>` | `io.html_load(path)`, `_table_index`, `_table_id`, `_all`, `io.html_load_from_string(text)` | `ex.html_write(&df, path, alloc)` |
 | Excel `.xlsx` | `io.xlsx_load(path)`, `io.xlsx_load_sheet(path, name)`, `io.xlsx_sheet_names(path)` | `ex.xlsx_save(&df, path, alloc)` |
+| Parquet | `io.parquet_load(path, columns)`, `io.parquet_load_from_bytes(data, columns)` | |
 | URL | `net.http_get(url)`, `net.download_file(url, path)`, `net.read_csv_from_url`, `read_html_from_url`, `read_table_from_url` | |
 | Yahoo Finance | `net.read_yahoo`, `net.read_yahoo_series`, `net.read_yahoo_panel` | |
 
-**Types.** Every importer infers each column's type from its values:
+**Types.** The text-based importers (all but Parquet, whose files declare their types) infer each column's type from its values:
 
 - whole numbers become `Int`, and decimals become `Float` (a mix of the two becomes `Float`);
 - `true`/`false` become `Bool`;
@@ -59,7 +61,7 @@ Empty fields and the tokens `NA`, `null` and `None` become nulls.
 
 **Ownership.** A loader returns a DataFrame that you free with `w.destroy_dataframe`. The DataFrame owns its column names and string values; it doesn't point into the file buffer or the temp allocator.
 
-**Failure.** File loaders panic when a file cannot be read or doesn't parse; the panic message names the loader and the file. A sheet name that the workbook doesn't have is not an error: `xlsx_load_sheet` returns `found = false`. Everything that goes over the network returns `(value, ok)` instead, with `ok` false when the request fails or brings no data. Network failures are normal (rate limits, outages), so they are reported, not fatal.
+**Failure.** The CSV, JSON, HTML and Excel loaders panic when a file cannot be read or doesn't parse; the panic message names the loader and the file. `parquet_load` returns `(df, ok)` instead (section 7). A sheet name that the workbook doesn't have is not an error: `xlsx_load_sheet` returns `found = false`. Everything that goes over the network returns `(value, ok)` instead, with `ok` false when the request fails or brings no data. Network failures are normal (rate limits, outages), so they are reported, not fatal.
 
 ## 3. CSV
 
@@ -188,7 +190,64 @@ sheets: ["Tabelle1"]
   0 2024-01-15  14:30:00  2024-01-15 14:30:00
 ```
 
-## 7. Writing files
+## 7. Parquet
+
+`parquet_load(path, columns = nil, alloc) -> (df, ok)` reads an Apache Parquet file, the columnar format that pandas (`to_parquet`), pyarrow, Spark, DuckDB and Polars write. `columns` names the columns to load, in the order you want them. Only those columns' data is read from disk, which makes loading a few columns of a wide file much faster than loading all of it. `parquet_load_from_bytes(data, columns, alloc)` reads a file already in memory.
+
+```odin
+px, ok := io.parquet_load("demo_files/parquet/pandas_index.parquet")
+if !ok {return}
+defer w.destroy_dataframe(&px)
+w.dataframe_pretty_print(&px)
+
+// only three columns, in this order; the others are not read
+df, ok2 := io.parquet_load("demo_files/parquet/types_dict_snappy.parquet", {"ts_us", "cat", "dec"})
+if !ok2 {return}
+defer w.destroy_dataframe(&df)
+w.dataframe_pretty_print(&df, max_rows = 4)
+
+_, ok3 := io.parquet_load("demo_files/parquet/nested.parquet")
+fmt.println("nested:", ok3)
+```
+
+```
+    close   volume  date
+  0 101.5   1200    2024-01-02 00:00:00
+  1 102.25  900     2024-01-03 00:00:00
+  2 NULL    0       2024-01-04 00:00:00
+  3 99      4500    2024-01-05 00:00:00
+    ts_us                cat  dec
+  0 2024-03-01 09:30:15  EU   123.45
+  1 1969-12-31 23:59:59  US   -0.01
+  2 NULL                 EU   NULL
+  3 1970-01-01 00:00:00  US   9.999999999e+07
+... (8 more rows)
+parquet: column "tags" is nested (a list, map or struct), which is not supported; pass `columns` to load the others
+nested: false
+```
+
+The first file was written by pandas from a frame indexed by date. pandas stores its index as an ordinary column (here `date`), and the loader keeps it as one; `w.set_index(&px, "date")` makes it the index again. pyarrow writes pandas' NaN as null, so the missing close is a null.
+
+**Types.** A Parquet file declares its column types, so nothing is inferred:
+
+| Parquet | DataFrame |
+|---|---|
+| `BOOLEAN` | `Bool` |
+| `INT32`, `INT64`, and the 8-, 16-, 32- and 64-bit signed and unsigned integer types | `Int` |
+| `FLOAT`, `DOUBLE` | `Float` |
+| `DECIMAL`, however it is stored | `Float` (the nearest double) |
+| `STRING`, `ENUM`, `JSON`, binary and fixed-length binary | `String` (binary as its raw bytes) |
+| `DATE` | `Date` |
+| `TIME` in milli-, micro- or nanoseconds | `Time` |
+| `TIMESTAMP` in milli-, micro- or nanoseconds, and the legacy `INT96` timestamps of Spark and Impala | `Datetime` |
+
+`Datetime` and `Time` hold whole seconds, so sub-second parts are dropped: `1969-12-31 23:59:59.5` becomes `23:59:59`, the second it falls in. Timestamps stored as instants (pandas' time-zone-aware columns) are read as UTC. Unsigned 64-bit values above 2^63 − 1 do not fit `Int` and wrap to negative numbers.
+
+**What it reads.** Files whose columns are all flat (no lists, maps or structs), in any number of row groups. Values may be stored plain or dictionary-encoded, in data pages of version 1 or 2, uncompressed or compressed with Snappy (pandas' default), gzip or LZ4.
+
+**Failure.** `ok` is false, with the reason on stderr, when the file is missing or isn't a Parquet file, when a requested column doesn't exist or is named twice, and when a column needs something the reader doesn't support: a nested type, the Zstandard, Brotli or LZO codec, one of the delta or byte-stream-split encodings, or encryption. Each case names the column, and `columns` lets you load the others. The loader never returns partial or guessed data. Damaged files fail cleanly too: the metadata is checked as it is read, so a corrupt or truncated file gives `ok = false`, not a crash or a frame of the wrong shape.
+
+## 8. Writing files
 
 All writers produce text that the matching importer reads back to the same DataFrame. `io_roundtrip_test` checks this for every column type, with nulls, integers beyond 2^53, tiny and huge floats, and strings with separators, quotes, line breaks, outer spaces, Unicode, markup and the text `NA`.
 
@@ -269,7 +328,7 @@ DataFrame:
     birthday (Datetime)
 ```
 
-## 8. HTTP
+## 9. HTTP
 
 | Procedure | Returns | `ok` is false when |
 |---|---|---|
@@ -297,7 +356,7 @@ true true
 missing.csv: false 0
 ```
 
-## 9. Yahoo Finance
+## 10. Yahoo Finance
 
 Yahoo's chart API gives daily, weekly or monthly histories of stocks, ETFs and indices, with dividends and splits. It needs no key, but it rate-limits heavy use, so every Yahoo procedure returns `ok`. The interval is `.Daily`, `.Weekly` or `.Monthly`. The range is `.OneMonth`, `.ThreeMonths`, `.SixMonths`, `.OneYear`, `.TwoYears`, `.FiveYears`, `.TenYears`, `.YTD` or `.Max`, which is the whole history at the requested interval.
 
@@ -311,7 +370,7 @@ There are three levels:
 
 **Close or AdjClose.** `Close` is adjusted for splits only. `AdjClose` is also adjusted for dividends, so its returns are total returns. Use `AdjClose` for returns. The latest adjusted close equals the latest close, since adjustment rescales only the earlier days.
 
-### 9.1 The DataFrame and Yahoo's missing days
+### 10.1 The DataFrame and Yahoo's missing days
 
 `read_yahoo` keeps every row Yahoo sends. Some symbols have rows without any quote, and their cells are nulls. The VIX is the common case: Yahoo lists it on most US market holidays, when no index value exists.
 
@@ -342,7 +401,7 @@ Thanksgiving, Christmas, New Year, Martin Luther King Day, Presidents' Day, Good
 
 `read_yahoo_series` and `read_yahoo_panel` drop these rows for you.
 
-### 9.2 One ticker: `read_yahoo_series`
+### 10.2 One ticker: `read_yahoo_series`
 
 `read_yahoo_series` returns the history as plain `[]f64` arrays of equal length, oldest first. It drops the days with no close, no adjusted close or a price ≤ 0, so `close[i] > 0` holds. On a rare kept day where only open, high, low or volume is missing, that value is NaN. Free the series with `yahoo_series_free`.
 
@@ -376,7 +435,7 @@ first day: close 150.00, adjusted 146.41, volume 59222800
 
 The adjusted close of the first day is below the close by the dividends paid since.
 
-### 9.3 Several tickers: `read_yahoo_panel`
+### 10.3 Several tickers: `read_yahoo_panel`
 
 `read_yahoo_panel` loads each ticker and keeps the dates on which all of them have a positive adjusted close. It returns:
 
@@ -439,7 +498,7 @@ KO volume 10004198 shares, dollar volume 992316424
 ... (498 more rows)
 ```
 
-### 9.4 Today's row while the market is open
+### 10.4 Today's row while the market is open
 
 During the exchange's regular session, Yahoo's last row is the session so far: its close is the current price and its volume the shares traded until now. Both change until the close. `read_yahoo_series` and `read_yahoo_panel` mark this case with `last_is_live`. A backtest or a model fitted on closing prices should leave that row out:
 
@@ -466,7 +525,7 @@ Before the open and after the close `last_is_live` is false, and every row is a 
 
 `read_yahoo` returns the DataFrame alone. To test a chart answer you fetched yourself, pass its text and the current Unix time to `yahoo_session_live(text, time.time_to_unix(time.now()))`. It reads the regular session's start and end and the time of the last trade from Yahoo's `meta` block.
 
-### 9.5 More Yahoo procedures
+### 10.5 More Yahoo procedures
 
 - `read_yahoo_json(symbol, alloc)` returns the daily history over the full range. Unlike `read_yahoo(symbol, .Daily, .Max)`, its request asks for no events, so the Dividend and Split columns are 0.
 - `yahoo_json_to_dataframe(text, alloc)` parses a chart answer you fetched yourself.
@@ -488,7 +547,7 @@ Before the open and after the close `last_is_live` is false, and every row is a 
 
 The DataFrames `yahoo_json_to_dataframe` builds are checked against an independent pandas parse of the same JSON text. Over five years of SPY, the VIX and AAPL and ten years of NVDA, the dates, the positions of the nulls and every value, including 40 dividends and 2 splits, agree to 1e-13.
 
-## 10. CBOE index histories
+## 11. CBOE index histories
 
 CBOE publishes the daily history of its indices as CSV files: the volatility indices (VIX, VXN, VVIX, the single-stock VXAPL, VXAZN, VXGOG, VXGS and VXIBM), the implied-correlation indices (COR1M, COR3M and others) and indices such as SKEW. Yahoo quotes several of them (`^COR1M`, `^VXAPL`) but serves only the latest value, without history. `net.read_cboe_index(symbol)` loads the history from CBOE:
 
@@ -514,7 +573,7 @@ COR1M: 5255 days, 2006-01-03 23.50 .. 2026-11-20 36.05
 
 The dates are CBOE's trading days. To combine an index with Yahoo prices, put its values in a `map[w.Date]f64` and keep the dates both have, as `dispersion_trading_test` does with VXAPL, VXAZN, VXGOG and COR1M.
 
-## 11. Tests
+## 12. Tests
 
 | Test | What it checks |
 |---|---|
@@ -522,6 +581,7 @@ The dates are CBOE's trading days. To combine an index with Yahoo prices, put it
 | `csv_export_test`, `json_basic_test`, `jsonl_basic_test`, `json_export_test` | CSV and JSON loading and writing |
 | `html_basic_test`, `html_extended_test`, `html_tags_test`, `html_export_test` | HTML tables by index, id and all, tags inside cells, writing |
 | `excel_basic_test`, `excel_date_test`, `excel_export_test`, `zip_smoke_test` | reading sheets and dates, writing workbooks, the ZIP container |
+| `parquet_test` | every column type, with nulls and extreme values, against pyarrow 14.0.2 in five layouts (plain and dictionary values, page versions 1 and 2, no compression, Snappy, gzip, LZ4, several row groups and many small pages); INT96 timestamps; decimals stored as integers (DuckDB); a pandas file; column selection; `ok = false` for unsupported files and for truncated or corrupted copies. The fixtures in `demo_files/parquet` are written by `scripts/make_parquet_fixtures.py` |
 | `http_get_test`, `yahoo_finance_json_test`, `yahoo_finance_events_test` | live HTTP and Yahoo requests, including dividends and splits |
 | `yahoo_max_range_test` | `.Max` gives the whole daily history (SPY from 1993-01-29, no gap over a week) and weekly rows a week apart |
 | `cboe_index_test` | offline: both CBOE file formats and the rows left out; live: COR1M's history from 2006-01-03, ascending, and an unknown symbol |
@@ -530,7 +590,7 @@ The dates are CBOE's trading days. To combine an index with Yahoo prices, put it
 
 Most of the finance tests load their data with `read_yahoo`, `read_yahoo_series` or `read_yahoo_panel`. When Yahoo cannot be reached they count a failure and go on; they never fall back to made-up data.
 
-## 12. Quick reference
+## 13. Quick reference
 
 | Procedure | Purpose |
 |---|---|
@@ -538,6 +598,7 @@ Most of the finance tests load their data with `read_yahoo`, `read_yahoo_series`
 | `io.json_load(path, null_tokens, alloc)` / `io.jsonl_load(path, null_tokens, alloc)` | JSON array / JSON Lines → DataFrame |
 | `io.html_load(path, alloc)`, `_table_index`, `_table_id`, `_all`, `io.html_load_from_string`, `io.html_load_all_from_string` | HTML tables → DataFrame(s) |
 | `io.xlsx_load(path, alloc)`, `io.xlsx_load_sheet(path, name, alloc) -> (df, found)`, `io.xlsx_sheet_names(path, alloc)` | Excel worksheets |
+| `io.parquet_load(path, columns, alloc) -> (df, ok)`, `io.parquet_load_from_bytes(data, columns, alloc) -> (df, ok)` | Parquet file / bytes → DataFrame |
 | `ex.csv_save(&df, path, sep, alloc) -> bool`, `ex.csv_string(&df, sep, alloc) -> string`, `ex.json_write`, `ex.jsonl_write`, `ex.html_write`, `ex.xlsx_save -> bool` | DataFrame → file |
 | `net.http_get(url, alloc) -> (body, ok)`, `net.http_get_with_cookie`, `net.download_file(url, path) -> ok` | HTTP |
 | `net.read_csv_from_url`, `net.read_html_from_url`, `net.read_table_from_url` `-> (df, ok)` | a table from a URL |

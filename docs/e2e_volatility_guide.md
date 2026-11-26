@@ -48,7 +48,7 @@ The results change a little from day to day, because Yahoo's data grows by one d
 
 ## 2. Market data
 
-`net.read_yahoo_panel` loads both series and keeps the days on which both have a value ([data I/O guide, section 9.3](data_io_guide.md#93-several-tickers-read_yahoo_panel)). The range `.Max` gives all of SPY's history, which starts in January 1993:
+`net.read_yahoo_panel` loads both series and keeps the days on which both have a value ([data I/O guide, section 10.3](data_io_guide.md#103-several-tickers-read_yahoo_panel)). The range `.Max` gives all of SPY's history, which starts in January 1993:
 
 ```odin
 tickers := []string{"SPY", "^VIX"}
