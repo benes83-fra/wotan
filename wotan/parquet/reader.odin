@@ -1,6 +1,7 @@
 package parquet
 
 import "base:intrinsics"
+import "base:runtime"
 import "core:compress/deflate"
 import lz4 "core:compress/lz4"
 import "core:fmt"
@@ -10,6 +11,8 @@ import vmem "core:mem/virtual"
 import "core:os"
 
 import w "../core"
+import util "../util"
+import zs "../zstd"
 
 // Parquet reader: flat schemas (every top-level field a primitive column,
 // required or optional) into a DataFrame.
@@ -20,20 +23,23 @@ import w "../core"
 //   FLOAT, DOUBLE, FLOAT16                    -> Float
 //   DECIMAL (on INT32, INT64, BYTE_ARRAY, FIXED_LEN_BYTE_ARRAY) -> Float
 //   BYTE_ARRAY (STRING, ENUM, JSON or plain binary) -> String
-//   FIXED_LEN_BYTE_ARRAY                      -> String (UUID as 8-4-4-4-12 text)
+//   FIXED_LEN_BYTE_ARRAY                      -> String (raw bytes; UUID as 8-4-4-4-12 text)
 //   DATE                                      -> Date
 //   TIME (millis, micros, nanos)              -> Time
 //   TIMESTAMP (millis, micros, nanos), INT96  -> Datetime (UTC for instants)
 // Datetime and Time hold whole seconds; sub-second parts are dropped
 // (rounded towards the past).
 //
-// Encodings: PLAIN, PLAIN_DICTIONARY / RLE_DICTIONARY, RLE (booleans), in
-// data pages v1 and v2. Codecs: uncompressed, Snappy, gzip, LZ4_RAW and the
-// Hadoop-framed LZ4. Anything else (nested columns, other encodings or
-// codecs, encrypted files) makes the read fail with a message on stderr; a
-// read never returns partial or guessed data.
+// Encodings: PLAIN, PLAIN_DICTIONARY / RLE_DICTIONARY, RLE (booleans),
+// DELTA_BINARY_PACKED, DELTA_LENGTH_BYTE_ARRAY, DELTA_BYTE_ARRAY and
+// BYTE_STREAM_SPLIT, in data pages v1 and v2. Codecs: uncompressed, Snappy,
+// gzip, Zstandard, LZ4_RAW and the Hadoop-framed LZ4. Anything else (nested
+// columns, Brotli or LZO, encrypted files) makes the read fail with a message
+// on stderr; a read never returns partial or guessed data.
 //
-// Only the column chunks of the requested columns are read from disk.
+// Only the column chunks of the requested columns are read from disk, and the
+// columns are decoded in parallel (util.parallel_max_threads caps the
+// threads; 1 decodes on the calling thread).
 
 // The Parquet file at `path` as a DataFrame. `columns` selects (and orders)
 // the columns to load; nil loads all of them. On failure the reason is
@@ -280,14 +286,27 @@ _read :: proc(
 	defer if !success {
 		for &c in cols {w.destroy_column(&c)}
 	}
-	for p in picked {
+	jobs := make([]Leaf_Job, len(picked))
+	defer delete(jobs)
+	for p, j in picked {
 		leaf := &leaves[tops[p].leaf]
 		col := w.column_new("", leaf.out, total, allocator)
 		w.column_own_name(&col, leaf.name)
 		append(&cols, col)
-		if !_read_leaf(src, &fm, leaf, &cols[len(cols) - 1], total) {
-			return
+		jobs[j] = Leaf_Job {
+			leaf = leaf,
 		}
+	}
+	for &job, j in jobs {job.col = &cols[j]}
+	work := Read_Work {
+		src   = src,
+		fm    = &fm,
+		jobs  = jobs,
+		total = total,
+	}
+	util.parallel_for(len(jobs), &work, _read_leaves, tasks = len(jobs))
+	for job in jobs {
+		if !job.ok {return}
 	}
 
 	df = w.dataframe_new(allocator)
@@ -295,6 +314,37 @@ _read :: proc(
 	df.rows = total
 	success = true
 	return df, true
+}
+
+@(private)
+Leaf_Job :: struct {
+	leaf: ^Leaf,
+	col:  ^w.Column,
+	ok:   bool,
+}
+
+@(private)
+Read_Work :: struct {
+	src:   ^Source,
+	fm:    ^File_Meta,
+	jobs:  []Leaf_Job,
+	total: int,
+	next:  int, // next job to take (atomic)
+}
+
+// A parallel task: takes columns until none are left, so a long column does
+// not hold up a whole range of short ones. Scratch memory comes from the heap
+// (thread-safe); the columns were allocated before the threads started.
+@(private)
+_read_leaves :: proc(data: rawptr, begin, end: int) {
+	work := (^Read_Work)(data)
+	context.allocator = runtime.heap_allocator()
+	for {
+		j := intrinsics.atomic_add(&work.next, 1)
+		if j >= len(work.jobs) {break}
+		job := &work.jobs[j]
+		job.ok = _read_leaf(work.src, work.fm, job.leaf, job.col, work.total)
+	}
 }
 
 @(private)
@@ -456,6 +506,10 @@ Chunk_State :: struct {
 	scratch:  [dynamic]u8, // decompressed page
 	levels:   [dynamic]u8, // definition levels of a page
 	idx:      [dynamic]u32, // dictionary indices of a page
+	plain:    [dynamic]u8, // values re-encoded as PLAIN (delta and split encodings)
+	ints:     [dynamic]i64, // delta-decoded integers
+	ints2:    [dynamic]i64, // second integer run (DELTA_BYTE_ARRAY suffix lengths)
+	bytes:    [dynamic]u8, // rebuilt byte-array values, back to back
 }
 
 @(private)
@@ -469,6 +523,10 @@ _read_leaf :: proc(src: ^Source, fm: ^File_Meta, leaf: ^Leaf, col: ^w.Column, to
 		delete(st.scratch)
 		delete(st.levels)
 		delete(st.idx)
+		delete(st.plain)
+		delete(st.ints)
+		delete(st.ints2)
+		delete(st.bytes)
 	}
 	chunk_buf := make([dynamic]u8)
 	defer delete(chunk_buf)
@@ -490,7 +548,7 @@ _read_leaf :: proc(src: ^Source, fm: ^File_Meta, leaf: ^Leaf, col: ^w.Column, to
 		}
 		st.codec = Codec(cm.codec)
 		#partial switch st.codec {
-		case .Uncompressed, .Snappy, .Gzip, .Lz4, .Lz4_Raw:
+		case .Uncompressed, .Snappy, .Gzip, .Lz4, .Lz4_Raw, .Zstd:
 		case:
 			return _fail(
 				"column %q uses %v compression, which is not supported",
@@ -564,7 +622,12 @@ _decompress :: proc(st: ^Chunk_State, src: []u8, n: int) -> ([]u8, bool) {
 		got, err := lz4.decompress_block_to_slice(st.scratch[:], src)
 		if err != nil || got != n {return nil, false}
 		return st.scratch[:], true
-	case .Lzo, .Brotli, .Zstd:
+	case .Zstd:
+		resize(&st.scratch, n)
+		got, ok := zs.decompress(st.scratch[:], src)
+		if !ok || got != n {return nil, false}
+		return st.scratch[:], true
+	case .Lzo, .Brotli:
 	}
 	return nil, false
 }
@@ -707,6 +770,8 @@ _values :: proc(st: ^Chunk_State, enc: Encoding, data: []u8, n: int, levels: []u
 			1,
 			out,
 		) {return _fail("column %q: corrupt values", leaf.name)}
+	case .Delta_Binary_Packed, .Delta_Length_Byte_Array, .Delta_Byte_Array, .Byte_Stream_Split:
+		if nn > 0 && !_decode_other(st, enc, data, nn, dst) {return false}
 	case:
 		return _fail("column %q uses the %v encoding, which is not supported", leaf.name, enc)
 	}
@@ -1049,4 +1114,226 @@ _plain :: proc(st: ^Chunk_State, src: []u8, n: int, dst: rawptr) -> bool #no_bou
 		}
 	}
 	return true
+}
+
+// ---------------------------------------------------------------------------
+// Delta and byte-stream-split encodings. Each is turned back into the PLAIN
+// layout of the physical type, which _plain then converts like any other page.
+
+@(private)
+_decode_other :: proc(st: ^Chunk_State, enc: Encoding, data: []u8, nn: int, dst: rawptr) -> bool {
+	leaf := st.leaf
+	phys := leaf.physical
+	#partial switch enc {
+	case .Delta_Binary_Packed:
+		if phys != .Int32 && phys != .Int64 {
+			return _fail("column %q: DELTA_BINARY_PACKED on a %v column", leaf.name, phys)
+		}
+		if _, ok := _delta_ints(data, nn, &st.ints); !ok {
+			return _fail("column %q: corrupt DELTA_BINARY_PACKED values", leaf.name)
+		}
+		clear(&st.plain)
+		if phys == .Int32 {
+			resize(&st.plain, 4 * nn)
+			out := ([^]i32le)(raw_data(st.plain))
+			for v, i in st.ints[:nn] {intrinsics.unaligned_store(&out[i], i32le(i32(v)))}
+		} else {
+			resize(&st.plain, 8 * nn)
+			out := ([^]i64le)(raw_data(st.plain))
+			for v, i in st.ints[:nn] {intrinsics.unaligned_store(&out[i], i64le(v))}
+		}
+	case .Delta_Length_Byte_Array:
+		if phys != .Byte_Array {
+			return _fail("column %q: DELTA_LENGTH_BYTE_ARRAY on a %v column", leaf.name, phys)
+		}
+		used, ok := _delta_ints(data, nn, &st.ints)
+		if !ok {return _fail("column %q: corrupt DELTA_LENGTH_BYTE_ARRAY lengths", leaf.name)}
+		total := 0
+		for l in st.ints[:nn] {
+			if l < 0 ||
+			   l >
+				   i64(
+					   len(data),
+				   ) {return _fail("column %q: corrupt DELTA_LENGTH_BYTE_ARRAY lengths", leaf.name)}
+			total += int(l)
+		}
+		if total >
+		   len(data) -
+			   used {return _fail("column %q: DELTA_LENGTH_BYTE_ARRAY data ends early", leaf.name)}
+		return _byte_values(st, data[used:used + total], st.ints[:nn], dst)
+	case .Delta_Byte_Array:
+		if phys != .Byte_Array && phys != .Fixed_Len_Byte_Array {
+			return _fail("column %q: DELTA_BYTE_ARRAY on a %v column", leaf.name, phys)
+		}
+		u1, ok1 := _delta_ints(data, nn, &st.ints)
+		if !ok1 {return _fail("column %q: corrupt DELTA_BYTE_ARRAY prefix lengths", leaf.name)}
+		u2, ok2 := _delta_ints(data[u1:], nn, &st.ints2)
+		if !ok2 {return _fail("column %q: corrupt DELTA_BYTE_ARRAY suffix lengths", leaf.name)}
+		suffixes := data[u1 + u2:]
+		// value i = the first prefix[i] bytes of value i-1, then suffix i
+		clear(&st.bytes)
+		s, prev_start, prev_len := 0, 0, 0
+		for i in 0 ..< nn {
+			pre, suf := st.ints[i], st.ints2[i]
+			if pre < 0 || suf < 0 || int(pre) > prev_len || suf > i64(len(suffixes) - s) {
+				return _fail("column %q: corrupt DELTA_BYTE_ARRAY values", leaf.name)
+			}
+			start := len(st.bytes)
+			if pre > 0 {
+				resize(&st.bytes, start + int(pre))
+				copy(st.bytes[start:], st.bytes[prev_start:prev_start + int(pre)])
+			}
+			append(&st.bytes, ..suffixes[s:s + int(suf)])
+			s += int(suf)
+			prev_start, prev_len = start, int(pre + suf)
+			st.ints[i] = pre + suf // the value's length
+		}
+		return _byte_values(st, st.bytes[:], st.ints[:nn], dst)
+	case .Byte_Stream_Split:
+		k: int
+		#partial switch phys {
+		case .Float, .Int32:
+			k = 4
+		case .Double, .Int64:
+			k = 8
+		case .Fixed_Len_Byte_Array:
+			k = leaf.type_length
+		case:
+			return _fail("column %q: BYTE_STREAM_SPLIT on a %v column", leaf.name, phys)
+		}
+		if len(data) <
+		   k * nn {return _fail("column %q: BYTE_STREAM_SPLIT data ends early", leaf.name)}
+		// byte b of value i is byte i of stream b
+		resize(&st.plain, k * nn)
+		for b in 0 ..< k {
+			stream := data[b * nn:(b + 1) * nn]
+			for i in 0 ..< nn {st.plain[i * k + b] = stream[i]}
+		}
+	}
+	if !_plain(st, st.plain[:], nn, dst) {return _fail("column %q: corrupt values", leaf.name)}
+	return true
+}
+
+// Byte-array values given back to back with their lengths: strings point
+// into one copy in the column's arena; other conversions go through PLAIN
+@(private)
+_byte_values :: proc(st: ^Chunk_State, values: []u8, lens: []i64, dst: rawptr) -> bool {
+	leaf := st.leaf
+	if leaf.conv == .Bytes && leaf.physical == .Byte_Array {
+		space, ok := _string_space(st.col, len(values))
+		if !ok {return _fail("column %q: out of memory", leaf.name)}
+		if len(values) > 0 {copy(space, values)}
+		out := ([^]string)(dst)
+		off := 0
+		for l, i in lens {
+			out[i] = string(space[off:off + int(l)])
+			off += int(l)
+		}
+		return true
+	}
+	clear(&st.plain)
+	off := 0
+	for l in lens {
+		if leaf.physical == .Fixed_Len_Byte_Array {
+			if int(l) !=
+			   leaf.type_length {return _fail("column %q: value of the wrong length", leaf.name)}
+		} else {
+			n := u32(l)
+			append(&st.plain, u8(n), u8(n >> 8), u8(n >> 16), u8(n >> 24))
+		}
+		append(&st.plain, ..values[off:off + int(l)])
+		off += int(l)
+	}
+	if !_plain(
+		st,
+		st.plain[:],
+		len(lens),
+		dst,
+	) {return _fail("column %q: corrupt values", leaf.name)}
+	return true
+}
+
+@(private)
+_uvarint :: proc(src: []u8, p: ^int) -> (v: u64, ok: bool) {
+	shift: uint
+	for {
+		if p^ >= len(src) || shift > 63 {return 0, false}
+		b := src[p^]
+		p^ += 1
+		v |= u64(b & 0x7f) << shift
+		if b & 0x80 == 0 {return v, true}
+		shift += 7
+	}
+}
+
+// DELTA_BINARY_PACKED: a header (block size, miniblocks per block, value
+// count, first value), then blocks of <min delta> <one bit width per
+// miniblock> <miniblocks of bit-packed deltas above the minimum>. Exactly
+// `want` values are expected. Returns the bytes used, up to the end of the
+// last miniblock that holds a value (later miniblocks are not stored).
+@(private)
+_delta_ints :: proc(
+	src: []u8,
+	want: int,
+	out: ^[dynamic]i64,
+) -> (
+	used: int,
+	ok: bool,
+) #no_bounds_check {
+	p := 0
+	block := _uvarint(src, &p) or_return
+	minis := _uvarint(src, &p) or_return
+	total := _uvarint(src, &p) or_return
+	first_z := _uvarint(src, &p) or_return
+	if block == 0 ||
+	   block % 128 != 0 ||
+	   minis == 0 ||
+	   block % minis != 0 ||
+	   block > 1 << 20 {return}
+	per := int(block / minis)
+	if per % 32 != 0 || total != u64(want) {return}
+	resize(out, want)
+	if want == 0 {return p, true}
+	last := u64(i64(first_z >> 1) ~ -i64(first_z & 1))
+	out[0] = i64(last)
+	k := 1
+	for k < want {
+		mz := _uvarint(src, &p) or_return
+		min_delta := u64(i64(mz >> 1) ~ -i64(mz & 1))
+		if int(minis) > len(src) - p {return}
+		widths := src[p:p + int(minis)]
+		p += int(minis)
+		for m in 0 ..< int(minis) {
+			if k >= want {break}
+			bw := int(widths[m])
+			if bw > 64 {return}
+			nbytes := per * bw / 8
+			if nbytes > len(src) - p {return}
+			run := src[p:p + nbytes]
+			for i in 0 ..< per {
+				if k >= want {break}
+				v: u64
+				if bw > 0 {
+					bit := i * bw
+					byte0 := bit >> 3
+					if bw <= 56 && byte0 + 8 <= len(run) {
+						v = u64(intrinsics.unaligned_load((^u64le)(&run[byte0]))) >> uint(bit & 7)
+					} else {
+						// up to 64 bits starting anywhere in a byte: nine bytes at most
+						acc: u128
+						for q in 0 ..< min((bw + (bit & 7) + 7) / 8, len(run) - byte0) {
+							acc |= u128(run[byte0 + q]) << uint(8 * q)
+						}
+						v = u64(acc >> uint(bit & 7))
+					}
+					if bw < 64 {v &= u64(1) << uint(bw) - 1}
+				}
+				last = last + min_delta + v // wraps, as the encoder's arithmetic did
+				out[k] = i64(last)
+				k += 1
+			}
+			p += nbytes
+		}
+	}
+	return p, true
 }

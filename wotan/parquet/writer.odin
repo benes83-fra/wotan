@@ -1,6 +1,7 @@
 package parquet
 
 import "base:intrinsics"
+import "base:runtime"
 import "core:compress/deflate"
 import lz4 "core:compress/lz4"
 import "core:math"
@@ -8,6 +9,7 @@ import "core:mem"
 import "core:os"
 
 import w "../core"
+import util "../util"
 
 // Parquet writer. Every column becomes an optional (nullable) column of the
 // standard type for its values, so pandas, pyarrow, Spark, DuckDB and Polars
@@ -20,7 +22,10 @@ import w "../core"
 // under the index's name, as pandas writes its index.
 //
 // Layout: row groups of `row_group_rows` rows; per column chunk an optional
-// dictionary page and data pages (version 1) of about 1 MiB of values.
+// dictionary page and data pages (version 1) of about 1 MiB of values. The
+// column chunks are encoded and compressed in parallel
+// (util.parallel_max_threads caps the threads); the file is the same for any
+// number of threads.
 // Strings are dictionary-encoded while the dictionary stays under 1 MiB,
 // otherwise PLAIN. Each chunk carries statistics (null count, min, max) so
 // that readers can skip row groups.
@@ -156,31 +161,43 @@ _write :: proc(
 		append(&cols, _out_col(&c))
 	}
 
-	wr := Writer {
-		out         = out,
-		compression = compression,
-		dictionary  = dictionary,
-	}
-	defer {
-		delete(wr.values)
-		delete(wr.page)
-		delete(wr.packed)
-		delete(wr.idx)
-		delete(wr.levels)
-	}
-
-	append(out, "PAR1")
+	// every column chunk is encoded on its own, in parallel, into its own
+	// buffer; the buffers are then joined in file order
 	n_groups := (df.rows + rg_rows - 1) / rg_rows
 	infos := make([]Chunk_Info, n_groups * len(cols))
 	defer delete(infos)
-	for g in 0 ..< n_groups {
-		r0 := g * rg_rows
-		r1 := min(r0 + rg_rows, df.rows)
-		for &c, ci in cols {
-			info, ok := _write_chunk(&wr, &c, r0, r1)
-			if !ok {return false}
-			infos[g * len(cols) + ci] = info
-		}
+	bufs := make([][dynamic]u8, len(infos))
+	defer {
+		for &b in bufs {delete(b)}
+		delete(bufs)
+	}
+	oks := make([]bool, len(infos))
+	defer delete(oks)
+	work := Write_Work {
+		cols        = cols[:],
+		rows        = df.rows,
+		rg_rows     = rg_rows,
+		compression = compression,
+		dictionary  = dictionary,
+		infos       = infos,
+		bufs        = bufs,
+		oks         = oks,
+	}
+	util.parallel_for(len(infos), &work, _write_chunks, tasks = len(infos))
+	for ok in oks {
+		if !ok {return false}
+	}
+
+	total := 4 + 8
+	for b in bufs {total += len(b)}
+	reserve(out, total + 4096)
+	append(out, "PAR1")
+	for &info, k in infos {
+		base := i64(len(out))
+		append(out, ..bufs[k][:])
+		info.start += base
+		info.data_offset += base
+		if info.dict_offset >= 0 {info.dict_offset += base}
 	}
 
 	footer_start := len(out)
@@ -190,6 +207,49 @@ _write :: proc(
 	append(out, u8(n), u8(n >> 8), u8(n >> 16), u8(n >> 24))
 	append(out, "PAR1")
 	return true
+}
+
+@(private)
+Write_Work :: struct {
+	cols:        []Out_Col,
+	rows:        int,
+	rg_rows:     int,
+	compression: Compression,
+	dictionary:  bool,
+	infos:       []Chunk_Info, // per chunk (row group major); offsets relative to its buffer
+	bufs:        [][dynamic]u8,
+	oks:         []bool,
+	next:        int, // next chunk to take (atomic)
+}
+
+// A parallel task: encodes chunks until none are left, reusing its page
+// buffers. Scratch and chunk buffers come from the heap (thread-safe).
+@(private)
+_write_chunks :: proc(data: rawptr, begin, end: int) {
+	work := (^Write_Work)(data)
+	context.allocator = runtime.heap_allocator()
+	wr := Writer {
+		compression = work.compression,
+		dictionary  = work.dictionary,
+	}
+	defer {
+		delete(wr.values)
+		delete(wr.page)
+		delete(wr.packed)
+		delete(wr.idx)
+		delete(wr.levels)
+	}
+	nc := len(work.cols)
+	for {
+		k := intrinsics.atomic_add(&work.next, 1)
+		if k >= len(work.infos) {break}
+		g, ci := k / nc, k % nc
+		r0 := g * work.rg_rows
+		r1 := min(r0 + work.rg_rows, work.rows)
+		work.bufs[k] = make([dynamic]u8)
+		wr.out = &work.bufs[k]
+		work.infos[k], work.oks[k] = _write_chunk(&wr, &work.cols[ci], r0, r1)
+	}
 }
 
 // ---------------------------------------------------------------------------

@@ -3,6 +3,8 @@ package tests
 import w "../wotan/core"
 import ex "../wotan/exporter"
 import imp "../wotan/importer"
+import util "../wotan/util"
+import zs "../wotan/zstd"
 import "core:fmt"
 import "core:math"
 import "core:mem"
@@ -16,13 +18,19 @@ import "core:os"
 //   floats with NaN / -0 / inf, bools, UTF-8 and binary strings, fixed-length
 //   binary, dates back to year 1, timestamps in ms / us / ns (UTC) before and
 //   after 1970, times in ms / us / ns, decimals up to 30 digits) and nulls,
-//   written five ways: PLAIN v1 uncompressed, dictionary v1 Snappy,
-//   dictionary v2 gzip, PLAIN v2 LZ4 with RLE booleans, and three row groups
-//   of many small pages whose dictionaries fall back to PLAIN mid-chunk.
-//   Every cell must equal pyarrow's (sub-second parts dropped);
+//   written eight ways: PLAIN v1 uncompressed, dictionary v1 Snappy,
+//   dictionary v2 gzip, dictionary Zstandard, PLAIN v2 LZ4 with RLE booleans,
+//   three row groups of many small pages whose dictionaries fall back to
+//   PLAIN mid-chunk, and the delta / byte-stream-split encodings (v2
+//   Zstandard; v1 Snappy in many small pages). Every cell must equal
+//   pyarrow's (sub-second parts dropped);
+// - FLOAT16 and byte stream split on integers and fixed-length binary
+//   (pyarrow 17); Zstandard pages of several blocks; DuckDB's Zstandard file
+//   with UUIDs; the Zstandard decoder on its own (frames, skippable frames,
+//   checksum); one thread and all threads give the same frame;
 // - INT96 timestamps; decimals stored as INT32 / INT64 / FIXED_LEN_BYTE_ARRAY
 //   (DuckDB); a pandas file with its index; column selection and order;
-// - ok = false (no crash) for nested columns, Zstandard, a missing file, a
+// - ok = false (no crash) for nested columns, Brotli, a missing file, a
 //   CSV file, unknown or repeated column names, truncated and corrupted bytes.
 //
 // Writer: the same table written with every codec, dictionary on and off, in
@@ -514,7 +522,7 @@ parquet_test :: proc(allocator: mem.Allocator) {
 			rel = 1e-15,
 		},
 	}
-	for f in ([]string{"types_plain_v1", "types_dict_snappy", "types_dict_v2_gzip", "types_plain_v2_lz4", "types_pages"}) {
+	for f in ([]string{"types_plain_v1", "types_dict_snappy", "types_dict_v2_gzip", "types_plain_v2_lz4", "types_pages", "types_delta_v2_zstd", "types_delta_pages", "types_dict_zstd"}) {
 		df, ok := imp.parquet_load(path(f))
 		expect(
 			&passed,
@@ -668,6 +676,473 @@ parquet_test :: proc(allocator: mem.Allocator) {
 			},
 		},
 	}
+	f16_exp := []Expect {
+		{
+			name = "h",
+			type = .Float,
+			nulls = {false, false, false, false, false, false, false, false},
+			floats = {
+				1.5,
+				-2.0,
+				0.0999755859375,
+				65504.0,
+				math.inf_f64(1),
+				0.0,
+				NEG_ZERO,
+				5.960464477539063e-08,
+			},
+			rel = 0,
+		},
+		{
+			name = "h_null",
+			type = .Float,
+			nulls = {false, true, false, true, false, true, false, false},
+			floats = {1.0, 0, 3.0, 0, 5.0, 0, 7.0, 8.0},
+			rel = 0,
+		},
+		{
+			name = "i32",
+			type = .Int,
+			texts = {"0", "-1", "2147483647", "-2147483648", "5", "NULL", "7", "8"},
+		},
+		{
+			name = "i64",
+			type = .Int,
+			texts = {
+				"0",
+				"-1",
+				"9223372036854775807",
+				"-9223372036854775808",
+				"5",
+				"NULL",
+				"7",
+				"8",
+			},
+		},
+		{
+			name = "fixed",
+			type = .String,
+			texts = {"ab", "cd", "NULL", "gh", "ij", "kl", "mn", "op"},
+		},
+	}
+	duck_uids := []string {
+		"cfcd2084-95d5-65ef-66e7-dff9f98764da",
+		"c4ca4238-a0b9-2382-0dcc-509a6f75849b",
+		"c81e728d-9d4c-2f63-6f06-7f89cc14862c",
+		"eccbc87e-4b5c-e2fe-2830-8fd9f2a7baf3",
+		"a87ff679-a2f3-e71d-9181-a67b7542122c",
+		"e4da3b7f-bbce-2345-d777-2b0674a318d5",
+		"1679091c-5a88-0faf-6fb5-e6087eb1b2dc",
+		"8f14e45f-ceea-167a-5a36-dedd4bea2543",
+		"c9f0f895-fb98-ab91-59f5-1fd0297e236d",
+		"45c48cce-2e2d-7fbd-ea1a-fc51c7c6ad26",
+		"d3d94468-02a4-4259-755d-38e6d163e820",
+		"6512bd43-d9ca-a6e0-2c99-0b0a82652dca",
+		"c20ad4d7-6fe9-7759-aa27-a0c99bff6710",
+		"c51ce410-c124-a10e-0db5-e4b97fc2af39",
+		"aab32389-22bc-c25a-6f60-6eb525ffdc56",
+		"9bf31c7f-f062-936a-96d3-c8bd1f8f2ff3",
+		"c74d97b0-1eae-257e-44aa-9d5bade97baf",
+		"70efdf2e-c9b0-8607-9795-c442636b55fb",
+		"6f4922f4-5568-161a-8cdf-4ad2299f6d23",
+		"1f0e3dad-9990-8345-f743-9f8ffabdffc4",
+	}
+	zstd_plain := "line 0: the quick brown fox jumps over the lazy dog 0. line 1: the quick brown fox jumps over the lazy dog 1. line 2: the quick brown fox jumps over the lazy dog 2. line 3: the quick brown fox jumps over the lazy dog 3. line 4: the quick brown fox jumps over the lazy dog 4. line 5: the quick brown fox jumps over the lazy dog 5. line 6: the quick brown fox jumps over the lazy dog 6. line 7: the quick brown fox jumps over the lazy dog 7. line 8: the quick brown fox jumps over the lazy dog 8. line 9: the quick brown fox jumps over the lazy dog 9. line 10: the quick brown fox jumps over the lazy dog 10. line 11: the quick brown fox jumps over the lazy dog 11. line 12: the quick brown fox jumps over the lazy dog 12. line 13: the quick brown fox jumps over the lazy dog 0. line 14: the quick brown fox jumps over the lazy dog 1. line 15: the quick brown fox jumps over the lazy dog 2. line 16: the quick brown fox jumps over the lazy dog 3. line 17: the quick brown fox jumps over the lazy dog 4. line 18: the quick brown fox jumps over the lazy dog 5. line 19: the quick brown fox jumps over the lazy dog 6. line 20: the quick brown fox jumps over the lazy dog 7. line 21: the quick brown fox jumps over the lazy dog 8. line 22: the quick brown fox jumps over the lazy dog 9. line 23: the quick brown fox jumps over the lazy dog 10. line 24: the quick brown fox jumps over the lazy dog 11. line 25: the quick brown fox jumps over the lazy dog 12. line 26: the quick brown fox jumps over the lazy dog 0. line 27: the quick brown fox jumps over the lazy dog 1. line 28: the quick brown fox jumps over the lazy dog 2. line 29: the quick brown fox jumps over the lazy dog 3. line 30: the quick brown fox jumps over the lazy dog 4. line 31: the quick brown fox jumps over the lazy dog 5. line 32: the quick brown fox jumps over the lazy dog 6. line 33: the quick brown fox jumps over the lazy dog 7. line 34: the quick brown fox jumps over the lazy dog 8. line 35: the quick brown fox jumps over the lazy dog 9. line 36: the quick brown fox jumps over the lazy dog 10. line 37: the quick brown fox jumps over the lazy dog 11. line 38: the quick brown fox jumps over the lazy dog 12. line 39: the quick brown fox jumps over the lazy dog 0. line 40: the quick brown fox jumps over the lazy dog 1. line 41: the quick brown fox jumps over the lazy dog 2. line 42: the quick brown fox jumps over the lazy dog 3. line 43: the quick brown fox jumps over the lazy dog 4. line 44: the quick brown fox jumps over the lazy dog 5. line 45: the quick brown fox jumps over the lazy dog 6. line 46: the quick brown fox jumps over the lazy dog 7. line 47: the quick brown fox jumps over the lazy dog 8. line 48: the quick brown fox jumps over the lazy dog 9. line 49: the quick brown fox jumps over the lazy dog 10. line 50: the quick brown fox jumps over the lazy dog 11. line 51: the quick brown fox jumps over the lazy dog 12. line 52: the quick brown fox jumps over the lazy dog 0. line 53: the quick brown fox jumps over the lazy dog 1. line 54: the quick brown fox jumps over the lazy dog 2. line 55: the quick brown fox jumps over the lazy dog 3. line 56: the quick brown fox jumps over the lazy dog 4. line 57: the quick brown fox jumps over the lazy dog 5. line 58: the quick brown fox jumps over the lazy dog 6. line 59: the quick brown fox jumps over the lazy dog 7. "
+	zstd_frames := []u8 {
+		40,
+		181,
+		47,
+		253,
+		96,
+		220,
+		4,
+		21,
+		6,
+		0,
+		18,
+		134,
+		21,
+		27,
+		112,
+		109,
+		58,
+		0,
+		2,
+		60,
+		246,
+		215,
+		38,
+		94,
+		163,
+		44,
+		30,
+		0,
+		0,
+		69,
+		73,
+		219,
+		91,
+		74,
+		153,
+		86,
+		244,
+		170,
+		254,
+		223,
+		11,
+		234,
+		121,
+		252,
+		253,
+		191,
+		114,
+		26,
+		125,
+		190,
+		237,
+		100,
+		219,
+		102,
+		152,
+		101,
+		89,
+		75,
+		169,
+		76,
+		196,
+		187,
+		223,
+		174,
+		146,
+		106,
+		104,
+		132,
+		74,
+		38,
+		1,
+		7,
+		98,
+		143,
+		214,
+		198,
+		66,
+		17,
+		33,
+		26,
+		105,
+		133,
+		62,
+		144,
+		6,
+		9,
+		154,
+		24,
+		52,
+		17,
+		163,
+		236,
+		224,
+		40,
+		32,
+		149,
+		61,
+		141,
+		19,
+		50,
+		32,
+		80,
+		51,
+		18,
+		31,
+		32,
+		76,
+		39,
+		166,
+		19,
+		243,
+		65,
+		111,
+		189,
+		1,
+		13,
+		241,
+		186,
+		73,
+		4,
+		53,
+		196,
+		227,
+		150,
+		8,
+		198,
+		155,
+		49,
+		108,
+		136,
+		50,
+		59,
+		106,
+		140,
+		236,
+		76,
+		160,
+		17,
+		175,
+		140,
+		49,
+		99,
+		20,
+		217,
+		33,
+		99,
+		100,
+		50,
+		33,
+		134,
+		120,
+		103,
+		12,
+		24,
+		163,
+		188,
+		144,
+		56,
+		92,
+		136,
+		220,
+		66,
+		194,
+		98,
+		33,
+		198,
+		138,
+		139,
+		67,
+		197,
+		200,
+		50,
+		153,
+		57,
+		46,
+		219,
+		72,
+		247,
+		102,
+		152,
+		43,
+		55,
+		199,
+		101,
+		27,
+		233,
+		222,
+		12,
+		115,
+		229,
+		230,
+		184,
+		108,
+		35,
+		221,
+		91,
+		25,
+		166,
+		153,
+		80,
+		139,
+		139,
+		145,
+		1,
+		83,
+		42,
+		77,
+		24,
+		5,
+		0,
+		0,
+		0,
+		115,
+		107,
+		105,
+		112,
+		33,
+		40,
+		181,
+		47,
+		253,
+		100,
+		70,
+		6,
+		21,
+		5,
+		0,
+		114,
+		199,
+		24,
+		27,
+		96,
+		109,
+		218,
+		175,
+		114,
+		192,
+		3,
+		233,
+		55,
+		182,
+		80,
+		192,
+		39,
+		8,
+		130,
+		134,
+		145,
+		66,
+		43,
+		187,
+		55,
+		185,
+		2,
+		10,
+		130,
+		208,
+		18,
+		189,
+		172,
+		41,
+		23,
+		245,
+		242,
+		136,
+		238,
+		254,
+		235,
+		187,
+		153,
+		83,
+		218,
+		85,
+		205,
+		68,
+		188,
+		251,
+		81,
+		162,
+		190,
+		243,
+		241,
+		219,
+		202,
+		153,
+		112,
+		79,
+		159,
+		8,
+		177,
+		143,
+		47,
+		153,
+		4,
+		24,
+		71,
+		61,
+		150,
+		53,
+		22,
+		138,
+		7,
+		97,
+		145,
+		85,
+		176,
+		6,
+		178,
+		28,
+		129,
+		37,
+		6,
+		203,
+		195,
+		48,
+		117,
+		112,
+		24,
+		32,
+		157,
+		169,
+		102,
+		97,
+		76,
+		65,
+		102,
+		88,
+		4,
+		11,
+		66,
+		168,
+		17,
+		176,
+		55,
+		236,
+		127,
+		7,
+		192,
+		151,
+		203,
+		1,
+		18,
+		168,
+		16,
+		80,
+		224,
+		5,
+		255,
+		255,
+		187,
+		31,
+		122,
+		123,
+		222,
+		103,
+		198,
+		55,
+		239,
+		118,
+		117,
+		246,
+		249,
+		255,
+		57,
+		198,
+		185,
+		183,
+		183,
+		225,
+		109,
+		59,
+		158,
+		38,
+		210,
+		104,
+		222,
+		55,
+		198,
+		185,
+		151,
+		123,
+		184,
+		160,
+		189,
+		89,
+		189,
+		200,
+		239,
+		42,
+		81,
+		216,
+		139,
+		137,
+	}
 	{
 		df, ok := imp.parquet_load(path("pandas_index"))
 		expect(
@@ -788,7 +1263,7 @@ parquet_test :: proc(allocator: mem.Allocator) {
 			return !ok
 		}
 		expect(&passed, &total, fails(path("nested")), "nested column: ok = false")
-		expect(&passed, &total, fails(path("zstd")), "Zstandard codec: ok = false")
+		expect(&passed, &total, fails(path("brotli")), "Brotli codec: ok = false")
 		expect(&passed, &total, fails(path("no_such_file")), "missing file: ok = false")
 		expect(&passed, &total, fails("demo_files/people.csv"), "not a Parquet file: ok = false")
 		expect(
@@ -839,6 +1314,126 @@ parquet_test :: proc(allocator: mem.Allocator) {
 		)
 	}
 
+	// ================ Zstandard, delta and byte-stream-split encodings
+	// float16, byte stream split on integers and fixed-length binary (pyarrow 17)
+	{
+		df, ok := imp.parquet_load(path("float16_split"))
+		expect(
+			&passed,
+			&total,
+			ok && matches(&df, f16_exp),
+			"FLOAT16 and BYTE_STREAM_SPLIT on INT32 / INT64 / FIXED_LEN_BYTE_ARRAY (pyarrow 17)",
+		)
+		if ok {w.destroy_dataframe(&df)}
+	}
+	// Zstandard pages of 1.6 MB, several Zstandard blocks each, two row groups
+	{
+		df, ok := imp.parquet_load(path("zstd_big"))
+		good := ok && df.rows == 300_000
+		if good {
+			ic, sc := w.column(&df, "i"), w.column(&df, "s")
+			for k in 0 ..< df.rows {
+				v, _ := w.column_at_int(ic, k)
+				s, _ := w.column_at_string(sc, k)
+				if v != (k * 7919) % 1009 || s != fmt.tprintf("id-%d", k % 5000) {
+					good = false
+					fmt.printf("    row %d: %d %q\n", k, v, s)
+					break
+				}
+			}
+		}
+		expect(
+			&passed,
+			&total,
+			good,
+			"Zstandard: 300 000 rows in pages larger than a Zstandard block",
+		)
+		if ok {w.destroy_dataframe(&df)}
+	}
+	// DuckDB with Zstandard: UUIDs as text, timestamps, decimals, nulls
+	{
+		df, ok := imp.parquet_load(path("duckdb_zstd"))
+		good := ok && df.rows == 500 && len(df.columns) == 6
+		if good {
+			for k in 0 ..< 500 {
+				id, _ := w.column_at_int(w.column(&df, "id"), k)
+				uid, _ := w.column_at_string(w.column(&df, "uid"), k)
+				ts, _ := w.column_at_datetime(w.column(&df, "ts"), k)
+				label, _ := w.column_at_string(w.column(&df, "label"), k)
+				amount, _ := w.column_at_float(w.column(&df, "amount"), k)
+				half, null := w.column_at_float(w.column(&df, "half"), k)
+				want_ts := w.datetime_from_unix(
+					w.datetime_to_unix(w.Datetime{2024, 1, 1, 9, 30, 0}) + i64(k) * 61,
+				)
+				ok_row :=
+					id == k &&
+					ts == want_ts &&
+					label == fmt.tprintf("row %d", k % 7) &&
+					amount == f64(k) * 1.25 &&
+					null == (k % 5 == 0) &&
+					(null || half == f64(k) * 0.5) &&
+					(k >= len(duck_uids) || uid == duck_uids[k])
+				if !ok_row {
+					good = false
+					fmt.printf(
+						"    row %d: %v %q %v %q %v %v\n",
+						k,
+						id,
+						uid,
+						ts,
+						label,
+						amount,
+						half,
+					)
+					break
+				}
+			}
+		}
+		expect(
+			&passed,
+			&total,
+			good,
+			"DuckDB with Zstandard: UUIDs as text, timestamps, decimals, nulls",
+		)
+		if ok {w.destroy_dataframe(&df)}
+	}
+	// the decoder on its own: two frames, a skippable frame, a checksum
+	{
+		out := make([]u8, len(zstd_plain) + 16)
+		defer delete(out)
+		n, ok := zs.decompress(out, zstd_frames)
+		size, sok := zs.decompressed_size(zstd_frames)
+		expect(
+			&passed,
+			&total,
+			ok && n == len(zstd_plain) && string(out[:n]) == zstd_plain && sok && size == n,
+			"zstd.decompress: two frames with a skippable frame between them",
+		)
+		bad := make([]u8, len(zstd_frames))
+		defer delete(bad)
+		copy(bad, zstd_frames)
+		bad[len(bad) - 6] ~= 0x10 // inside the checksummed frame's last block
+		_, bok := zs.decompress(out, bad)
+		expect(&passed, &total, !bok, "zstd.decompress: a changed byte fails the content checksum")
+		_, sok2 := zs.decompress(out[:n - 1], zstd_frames)
+		expect(&passed, &total, !sok2, "zstd.decompress: an output buffer one byte short fails")
+	}
+	// the same frames, decoded on one thread and on all
+	{
+		util.parallel_max_threads = 1
+		one, ok1 := imp.parquet_load(path("types_delta_pages"))
+		util.parallel_max_threads = 0
+		all, ok2 := imp.parquet_load(path("types_delta_pages"))
+		expect(
+			&passed,
+			&total,
+			ok1 && ok2 && matches(&one, types_exp) && matches(&all, types_exp),
+			"one thread and all threads read the same frame",
+		)
+		if ok1 {w.destroy_dataframe(&one)}
+		if ok2 {w.destroy_dataframe(&all)}
+	}
+
 	// ================ writer: every file read back as written
 	// (pyarrow and DuckDB read the same bytes identically; see the guide)
 	{
@@ -865,6 +1460,20 @@ parquet_test :: proc(allocator: mem.Allocator) {
 				),
 			)
 		}
+
+		// the same bytes from one thread and from all
+		util.parallel_max_threads = 1
+		one, ok1 := ex.parquet_bytes(&src, .Snappy, 5)
+		util.parallel_max_threads = 0
+		all, ok2 := ex.parquet_bytes(&src, .Snappy, 5)
+		expect(
+			&passed,
+			&total,
+			ok1 && ok2 && string(one) == string(all),
+			"one thread and all threads write the same bytes",
+		)
+		delete(one)
+		delete(all)
 
 		// to a file (scripts/check_parquet_export.py checks it with pyarrow)
 		saved := ex.parquet_save(&src, "demo_files/export_test.parquet")
