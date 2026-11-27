@@ -209,6 +209,9 @@ _write_key :: proc(b: ^strings.Builder, cols: []^Column, row: int) -> (has_null:
 				t.second,
 				t.nanosecond,
 			)
+		case .Duration:
+			v, _ := column_at_duration(col, row)
+			fmt.sbprintf(b, "u%d;", i64(v))
 		case .Invalid:
 			strings.write_string(b, "?;")
 		}

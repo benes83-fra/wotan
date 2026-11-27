@@ -47,10 +47,12 @@ shift :: proc(
 }
 
 // Difference to the value n rows earlier (later for a negative n), as an Int
-// column for Int input and a Float column for Float input. Rows without a
-// partner, or with a missing value on either side, are null. With `by`, the
-// partner is n rows earlier within the row's group. ok = false for other
-// column types, or a key column of another length.
+// column for Int input and a Float column for Float input; for Datetime,
+// Date, Time and Duration input a Duration column (the time between the two
+// rows, as pandas' diff of datetimes). Rows without a partner, or with a
+// missing value on either side, are null. With `by`, the partner is n rows
+// earlier within the row's group. ok = false for other column types, or a
+// key column of another length.
 diff :: proc(
 	col: ^Column,
 	n := 1,
@@ -61,18 +63,25 @@ diff :: proc(
 	Column,
 	bool,
 ) {
-	if col.type != .Int && col.type != .Float {return {}, false}
+	timed :=
+		col.type == .Datetime || col.type == .Date || col.type == .Time || col.type == .Duration
+	if col.type != .Int && col.type != .Float && !timed {return {}, false}
 	partner, ok := _partners(col.len, n, by)
 	if !ok {return {}, false}
 	defer delete(partner, context.temp_allocator)
-	out := _new_like(col, col.type, name, allocator)
+	out := _new_like(col, .Duration if timed else col.type, name, allocator)
 	for i in 0 ..< col.len {
 		j := partner[i]
 		if j < 0 || na_at(col, i) || na_at(col, j) {
 			append_null(&out)
 			continue
 		}
-		if col.type == .Int {
+		if timed {
+			a, _ := _ns_of(col, i)
+			b, _ := _ns_of(col, j)
+			d, dok := _duration_of(a - b)
+			if dok {append_duration(&out, d)} else {append_null(&out)}
+		} else if col.type == .Int {
 			a, _ := column_at_int(col, i)
 			b, _ := column_at_int(col, j)
 			append_int(&out, a - b)
@@ -503,7 +512,7 @@ _between_typed :: proc(
 // Column type that holds values of T (.Invalid for other types)
 @(private)
 _type_of :: proc($T: typeid) -> ColumnType {
-	when T == int {return .Int} else when T == f64 {return .Float} else when T == bool {return .Bool} else when T == string {return .String} else when T == Date {return .Date} else when T == Time {return .Time} else when T == Datetime {return .Datetime} else {return .Invalid}
+	when T == int {return .Int} else when T == f64 {return .Float} else when T == bool {return .Bool} else when T == string {return .String} else when T == Date {return .Date} else when T == Time {return .Time} else when T == Datetime {return .Datetime} else when T == Duration {return .Duration} else {return .Invalid}
 }
 
 // Present cell as a T: the column's own type, or an Int / Float cell as f64
@@ -523,6 +532,8 @@ _cell_as :: proc(col: ^Column, i: int, $T: typeid) -> T {
 		v, _ := column_at_time(col, i); return v
 	} else when T == Datetime {
 		v, _ := column_at_datetime(col, i); return v
+	} else when T == Duration {
+		v, _ := column_at_duration(col, i); return v
 	}
 }
 

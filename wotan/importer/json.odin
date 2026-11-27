@@ -337,6 +337,10 @@ _json_build :: proc(
 				dt: w.Datetime
 				dt, ok = w.parse_datetime(field)
 				if ok {w.append_datetime(col, dt)}
+			case .Duration:
+				d: w.Duration
+				d, ok = w.parse_duration(field)
+				if ok {w.append_duration(col, d)}
 			}
 			if !ok && (field == "NA" || field == "null" || field == "None" || field == "NaN") {
 				// texts that inference passes over: missing values

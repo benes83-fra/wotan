@@ -123,7 +123,7 @@ fillna :: proc {
 }
 
 // Copy of `col` with every missing cell set to `value`. The value's type must
-// match the column (int, f64, bool, string, Date, Time, Datetime); an int value
+// match the column (int, f64, bool, string, Date, Time, Datetime, Duration); an int value
 // also fills a Float column. ok = false on a type mismatch.
 fillna_column :: proc(col: ^Column, value: $T, allocator := context.allocator) -> (Column, bool) {
 	if !_fill_type_ok(col.type, T) {return {}, false}
@@ -148,6 +148,8 @@ fillna_column :: proc(col: ^Column, value: $T, allocator := context.allocator) -
 			append_time(&out, value)
 		} else when T == Datetime {
 			append_datetime(&out, value)
+		} else when T == Duration {
+			append_duration(&out, value)
 		}
 	}
 	return out, true
@@ -280,6 +282,8 @@ _fill_type_ok :: proc(type: ColumnType, $T: typeid) -> bool {
 		return type == .Time
 	} else when T == Datetime {
 		return type == .Datetime
+	} else when T == Duration {
+		return type == .Duration
 	} else {
 		return false
 	}
@@ -384,7 +388,7 @@ _fill_frame :: proc(
 		if !kok {return {}, false}
 	}
 	defer delete(keys, context.temp_allocator)
-	for name in by {targets[df.name_to_index[name]] = false} // keys are copied
+	for name in by {targets[df.name_to_index[name]] = false} 	// keys are copied
 	out_cols := make([]Column, len(df.columns), context.temp_allocator)
 	defer delete(out_cols, context.temp_allocator)
 	for &col, i in df.columns {

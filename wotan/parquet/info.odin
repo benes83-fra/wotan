@@ -26,13 +26,14 @@ Value :: union {
 	w.Date,
 	w.Time,
 	w.Datetime,
+	w.Duration,
 }
 
 // Keeps the rows whose `column` cell lies between `lower` and `upper`; a nil
 // bound leaves that end open, and `inclusive` says which ends belong to the
 // range (both by default). Missing cells and NaN never match. Bounds of an
-// Int or Float column are int or f64; of a Bool, String, Date, Time or
-// Datetime column a value of that type. lower = upper picks one value.
+// Int or Float column are int or f64; of a Bool, String, Date, Time,
+// Datetime or Duration column a value of that type. lower = upper picks one value.
 Filter :: struct {
 	column:       string,
 	lower, upper: Value,
@@ -265,6 +266,8 @@ _value_text :: proc(v: Value) -> string {
 		return w.time_to_string(x, context.temp_allocator)
 	case w.Datetime:
 		return w.datetime_to_string(x, context.temp_allocator)
+	case w.Duration:
+		return w.duration_to_string(x, context.temp_allocator)
 	}
 	return ""
 }
@@ -437,11 +440,20 @@ _stat_value :: proc(leaf: ^Leaf, b: []u8) -> (Value, bool) {
 			return _time_of_day(i64(v), 1000), true
 		}
 		return f64(v) / _pow10(leaf.scale), true
-	case .Int64, .Time_Micros, .Time_Nanos, .Ts_Millis, .Ts_Micros, .Ts_Nanos, .Dec_Int64:
+	case .Int64,
+	     .Time_Micros,
+	     .Time_Nanos,
+	     .Ts_Millis,
+	     .Ts_Micros,
+	     .Ts_Nanos,
+	     .Dec_Int64,
+	     .Duration:
 		if len(b) != 8 {return nil, false}
 		u := le(b)
 		v := i64(u)
 		#partial switch leaf.conv {
+		case .Duration:
+			return w.Duration(v * leaf.unit_ns), true
 		case .Int64:
 			// UINT64 cells above max(i64) wrap to negative numbers
 			if leaf.unsigned && u > u64(max(i64)) {return nil, false}
@@ -514,6 +526,8 @@ _value_cmp :: proc(a, b: Value) -> int {
 		return int(w.time_compare(x, b.(w.Time)))
 	case w.Datetime:
 		return int(w.datetime_compare(x, b.(w.Datetime)))
+	case w.Duration:
+		return cmp(x, b.(w.Duration))
 	}
 	return 0
 }
@@ -543,6 +557,8 @@ _check_filter :: proc(f: ^Filter, out: w.ColumnType) -> bool {
 			fits = out == .Time
 		case w.Datetime:
 			fits = out == .Datetime
+		case w.Duration:
+			fits = out == .Duration
 		}
 		if !fits {
 			return _fail(
@@ -573,6 +589,8 @@ _variant_name :: proc(v: Value) -> string {
 		return "Time"
 	case w.Datetime:
 		return "Datetime"
+	case w.Duration:
+		return "Duration"
 	}
 	return "nil"
 }
@@ -656,6 +674,8 @@ _match_rows :: proc(f: ^Filter, col: ^w.Column, keep: []bool, first: int) {
 		_match_typed(f, col, keep, first, w.Time, w.Time)
 	case .Datetime:
 		_match_typed(f, col, keep, first, w.Datetime, w.Datetime)
+	case .Duration:
+		_match_typed(f, col, keep, first, w.Duration, w.Duration)
 	case .Invalid:
 		for &k in keep {k = false}
 	}
@@ -763,6 +783,8 @@ _keep_rows :: proc(col: ^w.Column, rows: []int) {
 		compact(([^]w.Time)(col.data), col.nulls, rows)
 	case .Datetime:
 		compact(([^]w.Datetime)(col.data), col.nulls, rows)
+	case .Duration:
+		compact(([^]w.Duration)(col.data), col.nulls, rows)
 	case .Invalid:
 	}
 	col.len = n

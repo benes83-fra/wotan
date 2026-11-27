@@ -238,6 +238,9 @@ select_exprs :: proc(df: ^DataFrame, exprs: []Select_Expr) -> DataFrame {
 				case .Datetime:
 					v, n := column_at_datetime(orig, i)
 					if n {append_null(&new_col)} else {append_datetime(&new_col, v)}
+				case .Duration:
+					v, n := column_at_duration(orig, i)
+					if n {append_null(&new_col)} else {append_duration(&new_col, v)}
 				}
 			}
 
@@ -491,7 +494,7 @@ _conv_append :: proc(dst: ^Column, src: ^Column, i: int, name: string) {
 			bv, _ := column_at_bool(src, i)
 			iv = 1 if bv else 0
 			x = f64(iv)
-		case .String, .Date, .Time, .Datetime, .Invalid:
+		case .String, .Date, .Time, .Datetime, .Duration, .Invalid:
 		}
 		#partial switch target {
 		case .Int:
@@ -514,6 +517,9 @@ _conv_append :: proc(dst: ^Column, src: ^Column, i: int, name: string) {
 		case .Datetime:
 			if src.type == .Bool {unsupported(name, src.type, target)}
 			append_datetime(dst, datetime_from_unix(i64(x)))
+		case .Duration:
+			if src.type != .Int {unsupported(name, src.type, target)}
+			append_duration(dst, Duration(iv))
 		case:
 			unsupported(name, src.type, target)
 		}
@@ -544,6 +550,10 @@ _conv_append :: proc(dst: ^Column, src: ^Column, i: int, name: string) {
 			x, ok := parse_datetime(t)
 			if !ok {bad_text(name, v, target)}
 			append_datetime(dst, x)
+		case .Duration:
+			x, ok := parse_duration(t)
+			if !ok {bad_text(name, v, target)}
+			append_duration(dst, x)
 		case:
 			unsupported(name, src.type, target)
 		}
@@ -589,6 +599,17 @@ _conv_append :: proc(dst: ^Column, src: ^Column, i: int, name: string) {
 			append_time(dst, Time{v.hour, v.minute, v.second, v.nanosecond})
 		case .Datetime:
 			append_datetime(dst, v)
+		case:
+			unsupported(name, src.type, target)
+		}
+
+	case .Duration:
+		v, _ := column_at_duration(src, i)
+		#partial switch target {
+		case .Int:
+			append_int(dst, int(v))
+		case .Duration:
+			append_duration(dst, v)
 		case:
 			unsupported(name, src.type, target)
 		}

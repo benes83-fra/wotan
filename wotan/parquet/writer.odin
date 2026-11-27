@@ -18,6 +18,9 @@ import util "../util"
 //   Bool -> BOOLEAN          String -> BYTE_ARRAY (STRING)
 //   Date -> INT32 (DATE)     Datetime -> INT64 TIMESTAMP(MICROS, local)
 //   Time -> INT64 TIME(MICROS, local)
+//   Duration -> INT64 nanoseconds, with an Arrow schema in the file's
+//            key-value metadata (ARROW:schema) that names it a duration,
+//            so that pandas and wotan read it back as one (arrow.odin)
 // A Datetime or Time column with a value that microseconds cannot hold is
 // written in NANOS instead, if every value fits (Datetime: years 1677 to
 // 2262; otherwise the extra digits are dropped).
@@ -274,7 +277,7 @@ _physical :: proc(t: w.ColumnType) -> Physical_Type {
 	case .String:
 		return .Byte_Array
 	}
-	return .Int64 // Int, Datetime, Time
+	return .Int64 // Int, Datetime, Time, Duration
 }
 
 @(private)
@@ -514,8 +517,8 @@ _plain_values :: proc(buf: ^[dynamic]u8, c: ^Out_Col, r0, r1: int) #no_bounds_ch
 		resize(buf, start + k * size_of(V))
 	}
 	switch c.type {
-	case .Int:
-		cells := ([^]int)(c.data)
+	case .Int, .Duration:
+		cells := ([^]int)(c.data) // a Duration is an i64 count of nanoseconds
 		if c.nulls == nil || !_any_null(c, r0, r1) {
 			append(buf, ..([^]u8)(&cells[c.offset + r0])[:(r1 - r0) * 8])
 		} else {
@@ -703,7 +706,7 @@ _stats :: proc(c: ^Out_Col, r0, r1: int, info: ^Chunk_Info) {
 	put :: proc(b: ^[8]u8, v: u64, n: int) {for k in 0 ..< n {b[k] = u8(v >> uint(8 * k))}}
 	nulls := 0
 	switch c.type {
-	case .Int, .Date, .Datetime, .Time:
+	case .Int, .Date, .Datetime, .Time, .Duration:
 		lo, hi := max(i64), min(i64)
 		for r in r0 ..< r1 {
 			if _is_null(c, r) {
@@ -712,7 +715,7 @@ _stats :: proc(c: ^Out_Col, r0, r1: int, info: ^Chunk_Info) {
 			}
 			v: i64
 			#partial switch c.type {
-			case .Int:
+			case .Int, .Duration:
 				v = i64(([^]int)(c.data)[c.offset + r])
 			case .Date:
 				v = i64(_days(([^]w.Date)(c.data)[c.offset + r]))
@@ -918,6 +921,20 @@ _write_footer :: proc(
 		_tw_i64(&t, 3, i64(r1 - r0))
 		if len(group) > 0 {_tw_i64(&t, 5, group[0].start)}
 		_tw_i64(&t, 6, total_comp)
+		_tw_end(&t)
+	}
+	// durations: an Arrow schema that names them (Parquet has no duration type)
+	has_duration := false
+	for &c in cols {
+		if c.type == .Duration {has_duration = true}
+	}
+	if has_duration {
+		text := _arrow_schema_text(cols)
+		defer delete(text)
+		_tw_list(&t, 5, T_STRUCT, 1)
+		_tw_open(&t)
+		_tw_string(&t, 1, ARROW_SCHEMA_KEY)
+		_tw_string(&t, 2, text)
 		_tw_end(&t)
 	}
 	_tw_string(&t, 6, "wotan")

@@ -103,6 +103,7 @@ is_datetime :: proc(s: string) -> bool {
 infer_column_type :: proc(samples: []string) -> w.ColumnType {
 	has_float, has_int, has_bool, has_date, has_time, has_datetime, has_string :=
 		false, false, false, false, false, false, false
+	has_duration := false
 
 	for raw in samples {
 		s := strings.trim(raw, " 	")
@@ -122,6 +123,8 @@ infer_column_type :: proc(samples: []string) -> w.ColumnType {
 			has_date = true
 		case is_time(s):
 			has_time = true
+		case is_duration(s):
+			has_duration = true
 		case:
 			has_string = true
 		}
@@ -134,6 +137,7 @@ infer_column_type :: proc(samples: []string) -> w.ColumnType {
 		int(has_datetime) +
 		int(has_date) +
 		int(has_time) +
+		int(has_duration) +
 		int(has_string)
 	switch {
 	case kinds != 1:
@@ -150,6 +154,16 @@ infer_column_type :: proc(samples: []string) -> w.ColumnType {
 		return .Date
 	case has_time:
 		return .Time
+	case has_duration:
+		return .Duration
 	}
 	return .String
+}
+
+// Text as pandas writes a Timedelta, with its days: "0 days 00:05:00",
+// "-1 days +23:55:00" (a bare "00:05:00" is a Time)
+is_duration :: proc(s: string) -> bool {
+	if !strings.contains(s, "day") {return false}
+	_, ok := w.parse_duration(s)
+	return ok
 }

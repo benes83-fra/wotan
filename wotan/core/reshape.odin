@@ -273,7 +273,7 @@ _cells_free :: proc(c: ^_Cells) {
 @(private)
 _agg_supported :: proc(type: ColumnType, agg: Agg_Func) -> bool {
 	if type == .Invalid {return false}
-	if agg == .Mean || agg == .Sum {return type == .Int || type == .Float}
+	if agg == .Mean || agg == .Sum {return type == .Int || type == .Float || type == .Duration}
 	return true
 }
 
@@ -294,9 +294,11 @@ _agg_cells :: proc(
 ) -> Column {
 	if agg == .Mean || agg == .Sum || agg == .Count {
 		type: ColumnType = .Float if agg == .Mean else .Int if agg == .Count else vcol.type
+		if vcol.type == .Duration && agg != .Count {type = .Duration}
 		col := column_new("", type, max(n, 1), allocator)
 		for k in first ..< first + n {
 			cnt, si, sf := 0, 0, 0.0
+			sd: i128 // Duration sum
 			exists := all_exist || cells.start[k + 1] > cells.start[k]
 			for r in cells.rows[cells.start[k]:cells.start[k + 1]] {
 				if na_at(vcol, r) {continue}
@@ -306,6 +308,9 @@ _agg_cells :: proc(
 					v, _ := column_at_int(vcol, r)
 					si += v
 					sf += f64(v)
+				} else if vcol.type == .Duration {
+					v, _ := column_at_duration(vcol, r)
+					sd += i128(v)
 				} else {
 					v, _ := column_at_float(vcol, r)
 					sf += v
@@ -316,6 +321,10 @@ _agg_cells :: proc(
 				if exists {append_int(&col, cnt)} else {append_null(&col)}
 			case cnt == 0 && !(agg == .Sum && exists):
 				append_null(&col)
+			case type == .Duration:
+				// the mean cut toward zero to whole nanoseconds, as in pandas
+				d, ok := _duration_of(sd / i128(cnt) if agg == .Mean else sd)
+				if ok {append_duration(&col, d)} else {append_null(&col)}
 			case agg == .Mean:
 				append_float(&col, sf / f64(cnt))
 			case type == .Int:

@@ -640,6 +640,9 @@ _emit_leaf :: proc(a: ^Assembler, node: int) {
 			d.second,
 			w.fraction_string(d.nanosecond, &fb),
 		)
+	case .Duration:
+		buf: [48]u8
+		_json_string(sb, w.duration_format_into(([^]w.Duration)(vals)[i], &buf), true)
 	case .Invalid:
 		strings.write_string(sb, "null")
 	}

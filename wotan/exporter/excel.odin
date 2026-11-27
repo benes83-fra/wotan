@@ -42,6 +42,7 @@ xlsx_save :: proc(df: ^w.DataFrame, path: string, allocator: mem.Allocator) -> b
 XLSX_STYLE_DATE :: 1
 XLSX_STYLE_DATETIME :: 2
 XLSX_STYLE_TIME :: 3
+XLSX_STYLE_DURATION :: 4
 
 excel_col_name :: proc(col_idx: int, allocator: mem.Allocator) -> string {
 	// 0 -> "A", 1 -> "B", ..., 25 -> "Z", 26 -> "AA", ...
@@ -171,6 +172,13 @@ worksheet_xml_from_df :: proc(df: ^w.DataFrame, allocator: mem.Allocator) -> str
 					(f64(v.hour * 3600 + v.minute * 60 + v.second) + f64(v.nanosecond) / 1e9) /
 					86400.0,
 				)
+			case .Duration:
+				// days, shown as elapsed hours: [h]:mm:ss
+				v, _ := w.column_at_duration(col, r)
+				open_cell(&b, col_names[c], row_idx)
+				days := i64(v) / i64(w.DAYS)
+				rest := i64(v) % i64(w.DAYS)
+				serial_cell(&b, XLSX_STYLE_DURATION, f64(days) + f64(rest) / 86400e9)
 			case .Invalid:
 			}
 		}
@@ -236,20 +244,22 @@ styles_xml :: proc(allocator: mem.Allocator) -> string {
 	return fmt.aprintf(
 		`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
 		`<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">` +
-		`<numFmts count="3">` +
+		`<numFmts count="4">` +
 		`<numFmt numFmtId="164" formatCode="yyyy-mm-dd"/>` +
 		`<numFmt numFmtId="165" formatCode="yyyy-mm-dd hh:mm:ss"/>` +
 		`<numFmt numFmtId="166" formatCode="hh:mm:ss"/>` +
+		`<numFmt numFmtId="167" formatCode="[h]:mm:ss"/>` +
 		`</numFmts>` +
 		`<fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>` +
 		`<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>` +
 		`<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>` +
 		`<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>` +
-		`<cellXfs count="4">` +
+		`<cellXfs count="5">` +
 		`<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>` +
 		`<xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>` +
 		`<xf numFmtId="165" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>` +
 		`<xf numFmtId="166" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>` +
+		`<xf numFmtId="167" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>` +
 		`</cellXfs>` +
 		`<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>` +
 		`</styleSheet>`,

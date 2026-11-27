@@ -199,6 +199,10 @@ column_value_string :: proc(col: ^Column, row: int) -> string {
 		if is_null {return "NULL"}
 
 		return datetime_to_string(v, context.temp_allocator)
+	case .Duration:
+		v, is_null := column_at_duration(col, row)
+		if is_null {return "NULL"}
+		return duration_to_string(v, context.temp_allocator)
 	}
 
 	return "<?>"

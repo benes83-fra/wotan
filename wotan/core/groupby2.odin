@@ -100,6 +100,14 @@ groupby2_debug_print :: proc(gb: ^GroupBy2) {
 // Output column type of an aggregation over a column of type `src`
 groupby2_output_type :: proc(src: ColumnType, kind: AggregationKind) -> ColumnType {
 	numeric := src == .Int || src == .Float || src == .Bool
+	if src == .Duration {
+		// a sum, mean, median or quantile of durations is a duration
+		#partial switch kind {
+		case .Count:
+			return .Int
+		}
+		return src
+	}
 	switch kind {
 	case .Count:
 		return .Int
@@ -198,6 +206,8 @@ agg_compute_into :: proc(out_col: ^Column, src_col: ^Column, rows: []int, agg: A
 		agg_time_into(out_col, src_col, rows, agg)
 	case .Datetime:
 		agg_datetime_into(out_col, src_col, rows, agg)
+	case .Duration:
+		agg_duration_into(out_col, src_col, rows, agg)
 	case:
 		append_null(out_col)
 	}
@@ -526,6 +536,50 @@ agg_datetime_into :: proc(out: ^Column, src: ^Column, rows: []int, agg: Aggregat
 	_agg_ordered(out, src, rows, agg)
 }
 
+// Duration: Count, Min, Max; Sum (0 without values; null beyond the
+// Duration range), Mean, Median and Quantile as Durations, cut toward zero
+// to whole nanoseconds as in pandas (the mean exactly, where pandas sums in
+// floating point); other aggregations give null
+agg_duration_into :: proc(out: ^Column, src: ^Column, rows: []int, agg: Aggregator) {
+	#partial switch agg.kind {
+	case .Sum, .Mean:
+		sum: i128
+		n := 0
+		for r in rows {
+			v, missing := column_at_duration(src, r)
+			if missing {continue}
+			sum += i128(v)
+			n += 1
+		}
+		if agg.kind == .Mean {
+			if n == 0 {append_null(out); return}
+			sum /= i128(n)
+		}
+		d, ok := _duration_of(sum)
+		if ok {append_duration(out, d)} else {append_null(out)}
+	case .Median, .Quantile:
+		vals := make([dynamic]i64, 0, len(rows), context.temp_allocator)
+		defer delete(vals)
+		for r in rows {
+			v, missing := column_at_duration(src, r)
+			if !missing {append(&vals, i64(v))}
+		}
+		if len(vals) == 0 {
+			append_null(out)
+			return
+		}
+		slice.sort(vals[:])
+		q := 0.5 if agg.kind == .Median else clamp(agg.quantile, 0, 1)
+		pos := q * f64(len(vals) - 1)
+		lo := int(math.floor(pos))
+		hi := min(lo + 1, len(vals) - 1)
+		x := f64(vals[lo]) + f64(vals[hi] - vals[lo]) * (pos - f64(lo))
+		append_duration(out, Duration(i64(x)))
+	case:
+		_agg_ordered(out, src, rows, agg)
+	}
+}
+
 copy_cell :: proc(dst: ^Column, src: ^Column, row: int) {
 	#partial switch src.type {
 	case .Int:
@@ -575,6 +629,13 @@ copy_cell :: proc(dst: ^Column, src: ^Column, row: int) {
 			append_null(dst)
 		} else {
 			append_datetime(dst, v)
+		}
+	case .Duration:
+		v, is_null := column_at_duration(src, row)
+		if is_null {
+			append_null(dst)
+		} else {
+			append_duration(dst, v)
 		}
 	}
 }

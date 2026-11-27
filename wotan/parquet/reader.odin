@@ -26,6 +26,7 @@ import zs "../zstd"
 //   DATE                                      -> Date
 //   TIME (millis, micros, nanos)              -> Time
 //   TIMESTAMP (millis, micros, nanos), INT96  -> Datetime (UTC for instants)
+//   INT64 that the Arrow schema calls Duration -> Duration (arrow.odin)
 //   lists, maps, structs (any nesting)        -> String of JSON text (nested.odin)
 // Datetime and Time keep every unit to the nanosecond.
 //
@@ -143,6 +144,7 @@ Conv :: enum u8 {
 	Dec_Int64,
 	Dec_Bytes,
 	Bytes,
+	Duration, // INT64 times leaf.unit_ns
 	Uuid,
 }
 
@@ -159,7 +161,8 @@ Leaf :: struct {
 	nested:      bool, // part of a nested field
 	max_rep:     int, // nested leaves: the highest repetition level
 	text:        bool, // nested leaves: a STRING / ENUM / JSON annotation
-	unsigned:    bool, // UINT annotations (their statistics use unsigned order)
+	unsigned:    bool,
+	unit_ns:     i64, // Duration: nanoseconds per stored unit // UINT annotations (their statistics use unsigned order)
 	reason:      string, // why the leaf cannot be read; "" if it can
 }
 
@@ -202,6 +205,7 @@ _open_meta :: proc(src: ^Source, m: ^Meta) -> bool {
 	}
 
 	_plan_schema(m.fm.schema[:], m) or_return
+	_apply_arrow_schema(m)
 
 	total: i64
 	for rg in m.fm.row_groups {
@@ -228,6 +232,36 @@ _close_meta :: proc(m: ^Meta) {
 	delete(m.kids)
 	delete(m.footer)
 	m^ = {}
+}
+
+// Durations: a top-level INT64 column without a Parquet logical type that
+// the file's Arrow schema (written by pyarrow, pandas, Polars, wotan) calls
+// a Duration becomes a Duration column. An unreadable Arrow schema is
+// ignored.
+@(private)
+_apply_arrow_schema :: proc(m: ^Meta) {
+	text := ""
+	for kv in m.fm.key_value {
+		if kv[0] == ARROW_SCHEMA_KEY {text = kv[1]}
+	}
+	if text == "" {return}
+	fields, bytes, ok := _arrow_fields(text)
+	defer delete(fields)
+	defer delete(bytes)
+	if !ok {return}
+	for top in m.tops {
+		if top.leaf < 0 {continue}
+		leaf := &m.leaves[top.leaf]
+		se := m.fm.schema[top.se]
+		if leaf.conv != .Int64 || se.logical.kind != 0 || se.converted >= 0 {continue}
+		for f in fields {
+			if f.name != top.name || f.type != ARROW_DURATION {continue}
+			UNITS := [4]i64{1_000_000_000, 1_000_000, 1000, 1}
+			if f.unit < 0 || f.unit > 3 {break}
+			leaf.conv, leaf.out, leaf.unit_ns = .Duration, .Duration, UNITS[f.unit]
+			break
+		}
+	}
 }
 
 // Index of the top-level field `name`, -1 if there is none
@@ -1000,6 +1034,8 @@ _spread :: proc(out: w.ColumnType, col: ^w.Column, base, n, nn: int, levels: []u
 		spread(([^]w.Time)(col.data), col.nulls, base, n, nn, levels)
 	case .Datetime:
 		spread(([^]w.Datetime)(col.data), col.nulls, base, n, nn, levels)
+	case .Duration:
+		spread(([^]w.Duration)(col.data), col.nulls, base, n, nn, levels)
 	}
 }
 
@@ -1027,6 +1063,8 @@ _gather :: proc(out: w.ColumnType, dst, dict: rawptr, dict_len: int, idx: []u32)
 		return gather(([^]w.Time)(dst), ([^]w.Time)(dict), dict_len, idx)
 	case .Datetime:
 		return gather(([^]w.Datetime)(dst), ([^]w.Datetime)(dict), dict_len, idx)
+	case .Duration:
+		return gather(([^]w.Duration)(dst), ([^]w.Duration)(dict), dict_len, idx)
 	}
 	return false
 }
@@ -1196,12 +1234,23 @@ _plain :: proc(st: ^Chunk_State, src: []u8, n: int, dst: rawptr) -> bool #no_bou
 			d := _pow10(leaf.scale)
 			for i in 0 ..< n {out[i] = f64(intrinsics.unaligned_load(&vals[i])) / d}
 		}
-	case .Int64, .Time_Micros, .Time_Nanos, .Ts_Millis, .Ts_Micros, .Ts_Nanos, .Dec_Int64:
+	case .Int64,
+	     .Time_Micros,
+	     .Time_Nanos,
+	     .Ts_Millis,
+	     .Ts_Micros,
+	     .Ts_Nanos,
+	     .Dec_Int64,
+	     .Duration:
 		if len(src) < 8 * n {return false}
 		vals := ([^]i64le)(p)
 		#partial switch leaf.conv {
 		case .Int64:
 			mem.copy(dst, p, 8 * n)
+		case .Duration:
+			out := ([^]w.Duration)(dst)
+			unit := leaf.unit_ns
+			for i in 0 ..< n {out[i] = w.Duration(i64(intrinsics.unaligned_load(&vals[i])) * unit)}
 		case .Time_Micros:
 			out := ([^]w.Time)(dst)
 			for i in 0 ..< n {out[i] = _time_of_day(i64(intrinsics.unaligned_load(&vals[i])), 1_000_000)}

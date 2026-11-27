@@ -282,6 +282,9 @@ drop_duplicates :: proc(
 //                            fraction digits; blank strings become null
 //   Date -> Datetime         midnight
 //   Datetime -> Date / Time  the date or the time of day
+//   Duration <-> Int         nanoseconds
+//   String -> Duration       "D days HH:MM:SS[.f]" or "[-]HH:MM:SS[.f]"
+//                            (parse_duration)
 // A cell that cannot be converted (unparseable text, an infinite or too
 // large float for Int) makes the cast fail when `strict`, and becomes null
 // otherwise. ok = false for an unsupported pair of types or, when `strict`,
@@ -375,6 +378,8 @@ _value_codes :: proc(col: ^Column) -> (codes: []int, firsts: [dynamic]int, na_id
 		_codes_of(col, Time, column_at_time, codes, &firsts, &na_id)
 	case .Datetime:
 		_codes_of(col, Datetime, column_at_datetime, codes, &firsts, &na_id)
+	case .Duration:
+		_codes_of(col, Duration, column_at_duration, codes, &firsts, &na_id)
 	case .Invalid:
 		for i in 0 ..< col.len {codes[i] = 0}
 		if col.len > 0 {
@@ -468,6 +473,7 @@ _cast_supported :: proc(from, to: ColumnType) -> bool {
 	if from in numeric && to in numeric {return true}
 	if from == .Date && to == .Datetime {return true}
 	if from == .Datetime && (to == .Date || to == .Time) {return true}
+	if (from == .Duration && to == .Int) || (from == .Int && to == .Duration) {return true}
 	return false
 }
 
@@ -495,7 +501,12 @@ _cast_cell :: proc(dst, src: ^Column, i: int) -> bool {
 			append_float(dst, f64(v))
 		case .Bool:
 			append_bool(dst, v != 0)
+		case .Duration:
+			append_duration(dst, Duration(v))
 		}
+	case .Duration:
+		v, _ := column_at_duration(src, i)
+		append_int(dst, int(v))
 	case .Float:
 		v, _ := column_at_float(src, i)
 		#partial switch dst.type {
@@ -569,6 +580,10 @@ _parse_into :: proc(dst: ^Column, s: string) -> bool {
 			v = Datetime{d.year, d.month, d.day, 0, 0, 0, 0}
 		}
 		append_datetime(dst, v)
+	case .Duration:
+		v, ok := parse_duration(s)
+		if !ok {return false}
+		append_duration(dst, v)
 	case:
 		return false
 	}

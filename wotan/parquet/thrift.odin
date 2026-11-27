@@ -201,6 +201,7 @@ File_Meta :: struct {
 	num_rows:   i64,
 	row_groups: [dynamic]Row_Group,
 	created_by: string,
+	key_value:  [dynamic][2]string, // key-value metadata (key, value)
 }
 
 @(private)
@@ -669,6 +670,27 @@ _read_file_meta :: proc(t: ^Thrift, allocator := context.allocator) -> File_Meta
 				if t.bad {break}
 				append(&fm.row_groups, _read_row_group(t, allocator))
 			}
+		case 5:
+			n := _t_struct_list(t, typ)
+			fm.key_value = make([dynamic][2]string, 0, n, allocator)
+			for _ in 0 ..< n {
+				if t.bad {break}
+				kv: [2]string
+				last_kv: i16
+				for {
+					ft, fid := _t_field(t, &last_kv)
+					if ft == T_STOP {break}
+					switch fid {
+					case 1:
+						kv[0] = _t_string(t, ft)
+					case 2:
+						kv[1] = _t_string(t, ft)
+					case:
+						_t_skip(t, ft)
+					}
+				}
+				append(&fm.key_value, kv)
+			}
 		case 6:
 			fm.created_by = _t_string(t, typ)
 		case:
@@ -683,6 +705,7 @@ _read_file_meta :: proc(t: ^Thrift, allocator := context.allocator) -> File_Meta
 _destroy_file_meta :: proc(fm: ^File_Meta) {
 	for &rg in fm.row_groups {delete(rg.columns)}
 	delete(fm.row_groups)
+	delete(fm.key_value)
 	delete(fm.schema)
 }
 

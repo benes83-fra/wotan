@@ -12,6 +12,7 @@ ColumnType :: enum {
 	Date,
 	Time,
 	Datetime,
+	Duration,
 }
 
 Date :: struct {
@@ -39,6 +40,11 @@ Datetime :: struct {
 	nanosecond: i32, // 0 ..< 1_000_000_000
 }
 
+// A length of time in nanoseconds, negative or positive (pandas' Timedelta):
+// about 292 years either way. The difference of two Datetimes, or what is
+// added to one. Build one with nanoseconds .. weeks (duration.odin).
+Duration :: distinct i64
+
 
 type_size :: proc(t: ColumnType) -> int {
 	switch t {
@@ -56,6 +62,8 @@ type_size :: proc(t: ColumnType) -> int {
 		return size_of(Time)
 	case .Datetime:
 		return size_of(Datetime)
+	case .Duration:
+		return size_of(Duration)
 	case .Invalid:
 		return 0
 	}

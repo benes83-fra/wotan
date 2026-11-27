@@ -38,6 +38,7 @@ Xlsx_Cell_Kind :: enum {
 	Date,
 	Datetime,
 	Time,
+	Duration,
 	Error,
 }
 
@@ -51,6 +52,7 @@ Xlsx_Date_Kind :: enum {
 	Date,
 	Datetime,
 	Time,
+	Duration, // elapsed time: [h]:mm:ss and the like
 }
 
 
@@ -234,7 +236,7 @@ _xlsx_load_sheet :: proc(
 				} else {
 					any_text = true
 				}
-			case .Number, .Bool, .Date, .Datetime, .Time:
+			case .Number, .Bool, .Date, .Datetime, .Time, .Duration:
 				append(&samples, v.text)
 			}
 		}
@@ -277,6 +279,10 @@ _xlsx_load_sheet :: proc(
 				t: w.Time
 				t, ok = w.parse_time(s)
 				if ok {w.append_time(&col, t)}
+			case .Duration:
+				d: w.Duration
+				d, ok = w.parse_duration(s)
+				if ok {w.append_duration(&col, d)}
 			}
 			if !ok {w.append_null(&col)} 	// unreachable: types are inferred from these values
 		}
@@ -476,7 +482,9 @@ _builtin_date_kind :: proc(id: int) -> Xlsx_Date_Kind {
 		return .Date
 	case 22:
 		return .Datetime
-	case 18 ..= 21, 45 ..= 47:
+	case 46:
+		return .Duration // [h]:mm:ss
+	case 18 ..= 21, 45, 47:
 		return .Time
 	}
 	return .None
@@ -486,7 +494,7 @@ _builtin_date_kind :: proc(id: int) -> Xlsx_Date_Kind {
 // characters and [...] sections (colours, locales) are ignored, so a format
 // like `#,##0 "USD"` is not mistaken for a time.
 classify_number_format :: proc(code: string) -> Xlsx_Date_Kind {
-	has_date, has_time, has_m := false, false, false
+	has_date, has_time, has_m, elapsed := false, false, false, false
 	i := 0
 	for i < len(code) {
 		ch := code[i]
@@ -507,7 +515,8 @@ classify_number_format :: proc(code: string) -> Xlsx_Date_Kind {
 			   inner == "mm" ||
 			   inner == "s" ||
 			   inner == "ss" {
-				has_time = true // elapsed time
+				has_time = true
+				elapsed = true // [h]:mm:ss: a length of time
 			}
 			i = len(code) if j < 0 else i + j + 1
 			continue
@@ -521,6 +530,8 @@ classify_number_format :: proc(code: string) -> Xlsx_Date_Kind {
 		i += 1
 	}
 	switch {
+	case elapsed && !has_date:
+		return .Duration
 	case has_date && has_time:
 		return .Datetime
 	case has_date || (has_m && !has_time):
@@ -656,6 +667,16 @@ parse_row_cells :: proc(
 				c = {.Number, v}
 				break
 			}
+			if kind == .Duration {
+				// days as a number: to the nearest microsecond (a double
+				// holds about that much of a day count)
+				// (beyond the Duration range, about 292 years, it is missing)
+				x := serial * 86_400_000_000
+				if !(x > -9.2e15 && x < 9.2e15) {break}
+				us := i64(x + (0.5 if serial >= 0 else -0.5))
+				c = {.Duration, w.duration_to_string(w.Duration(us * 1000), allocator)}
+				break
+			}
 			dt := excel_serial_to_datetime(serial)
 			switch kind {
 			case .Date:
@@ -671,7 +692,7 @@ parse_row_cells :: proc(
 				}
 			case .Time:
 				c = {.Time, w.time_to_string(w.get_Time_from_Datetime(dt), allocator)}
-			case .Datetime, .None:
+			case .Datetime, .None, .Duration:
 				c = {.Datetime, w.datetime_to_string(dt, allocator)}
 			}
 		}

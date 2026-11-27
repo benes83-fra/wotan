@@ -1,5 +1,7 @@
 package core
 
+import "core:mem"
+
 // Calendar periods for resample
 Resample_Freq :: enum {
 	Day,
@@ -48,6 +50,56 @@ resample :: proc(
 	DataFrame,
 	bool,
 ) {
+	return _resample(df, on, _Bins{freq = freq, week_end = week_end}, specs, by, allocator)
+}
+
+// One row per interval of length `every` (15 * MINUTES for 15-minute bars),
+// as pandas' df.resample("15min", on=...).agg(...) gives it. The intervals
+// are counted from midnight of the first day in the data (pandas' origin
+// "start_day"; with `by`, of each group's first day), each holds the times
+// from its start up to but not including its end, and is labelled by its
+// start, as a Datetime. Everything else is as in resample: every interval
+// from the first to the last one with data is present, missing values are
+// left out, First / Last go by time, and `by` gives each group its own run
+// of intervals. A Date column `on` counts as midnight. ok = false as for
+// resample, and for an `every` that is not positive.
+resample_every :: proc(
+	df: ^DataFrame,
+	on: string,
+	every: Duration,
+	specs: []Resample_Spec,
+	by: []string = nil,
+	allocator := context.allocator,
+) -> (
+	DataFrame,
+	bool,
+) {
+	if every <= 0 {return {}, false}
+	return _resample(df, on, _Bins{every = every}, specs, by, allocator)
+}
+
+// How rows fall into periods: calendar periods (every = 0) or intervals of
+// `every` from midnight of each group's first day
+@(private = "file")
+_Bins :: struct {
+	freq:     Resample_Freq,
+	week_end: Days,
+	every:    Duration,
+}
+
+@(private = "file")
+_resample :: proc(
+	df: ^DataFrame,
+	on: string,
+	bins: _Bins,
+	specs: []Resample_Spec,
+	by: []string,
+	allocator: mem.Allocator,
+) -> (
+	DataFrame,
+	bool,
+) {
+	freq, week_end := bins.freq, bins.week_end
 	oi, found := df.name_to_index[on]
 	if !found {return {}, false}
 	oncol := &df.columns[oi]
@@ -87,12 +139,30 @@ resample :: proc(
 	defer delete(lo, context.temp_allocator)
 	defer delete(hi, context.temp_allocator)
 	for k in 0 ..< len(g.lists) {lo[k], hi[k] = max(int), min(int)}
+	// intervals: per group, midnight of its first day
+	origin := make([]i128, len(g.lists), context.temp_allocator)
+	defer delete(origin, context.temp_allocator)
+	if bins.every > 0 {
+		first := make([]i64, len(g.lists), context.temp_allocator)
+		defer delete(first, context.temp_allocator)
+		for &f in first {f = max(i64)}
+		for r in 0 ..< df.rows {
+			if na_at(oncol, r) || g.of[r] < 0 {continue}
+			first[g.of[r]] = min(first[g.of[r]], _day_of(oncol, r))
+		}
+		for k in 0 ..< len(g.lists) {origin[k] = i128(first[k]) * i128(DAYS)}
+	}
 	for r in 0 ..< df.rows {
 		if na_at(oncol, r) || g.of[r] < 0 {
 			ord[r] = min(int)
 			continue
 		}
-		ord[r] = _period_of(_day_of(oncol, r), freq, week_end)
+		if bins.every > 0 {
+			ns, _ := _ns_of(oncol, r)
+			ord[r] = int((ns - origin[g.of[r]]) / i128(bins.every)) // ns >= origin
+		} else {
+			ord[r] = _period_of(_day_of(oncol, r), freq, week_end)
+		}
 		k := g.of[r]
 		lo[k] = min(lo[k], ord[r])
 		hi[k] = max(hi[k], ord[r])
@@ -125,9 +195,15 @@ resample :: proc(
 		for j in base[k] ..< base[k + 1] {group_rows[j] = g.lists[k][0]}
 	}
 	for c in keys {add_column(&out, column_take(c, group_rows, allocator))}
-	labels := column_new("", oncol.type, max(n, 1), allocator)
+	labels := column_new("", .Datetime if bins.every > 0 else oncol.type, max(n, 1), allocator)
 	column_own_name(&labels, oncol.name)
 	for k in 0 ..< len(g.lists) {
+		if bins.every > 0 {
+			for p in lo[k] ..= hi[k] {
+				append_datetime(&labels, _datetime_of_ns(origin[k] + i128(p) * i128(bins.every)))
+			}
+			continue
+		}
 		for p in lo[k] ..= hi[k] { 	// no periods if the group has no dates
 			d := civil_from_days(_period_last_day(p, freq, week_end))
 			if oncol.type ==

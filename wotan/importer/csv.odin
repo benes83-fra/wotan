@@ -28,7 +28,8 @@ DEFAULT_NULL_TOKEN :: []string{"NA", "null", "None", ""}
 // empty ones become "Unnamed: <position>".
 //
 // Types are inferred from every row unless given: Int, Float (ints and floats
-// mixed), Bool (true / false), Datetime, Date, Time, else String.
+// mixed), Bool (true / false), Datetime, Date, Time, Duration (text as pandas
+// writes a Timedelta: "0 days 00:05:00", "-1 days +23:55:00"), else String.
 //
 // The reader works on the whole text at once: it cuts it into chunks at line
 // ends, finds the fields of every chunk in parallel without copying them,
@@ -286,6 +287,7 @@ Kind :: enum u8 {
 	Datetime,
 	Date,
 	Time,
+	Duration,
 	String,
 }
 
@@ -318,6 +320,8 @@ _cell_type :: proc(k: Kind) -> w.ColumnType {
 		return .Date
 	case .Time:
 		return .Time
+	case .Duration:
+		return .Duration
 	case .String:
 	}
 	return .String
@@ -335,6 +339,7 @@ _classify_store :: proc(sp: ^Spec, lr, n: int, t: string) -> Kind #no_bounds_che
 	dv: w.Date
 	tv: w.Time
 	tsv: w.Datetime
+	du: w.Duration
 	c := t[0]
 	if (c >= '0' && c <= '9') || c == '+' || c == '-' || c == '.' {
 		ok: bool
@@ -351,6 +356,8 @@ _classify_store :: proc(sp: ^Spec, lr, n: int, t: string) -> Kind #no_bounds_che
 			kind = .Time
 		} else if fv, ok = parse_float_strict(t); ok { 	// +inf, -nan, ...
 			kind = .Float
+		} else if strings.contains(t, "day") {
+			if du, ok = w.parse_duration(t); ok {kind = .Duration}
 		}
 	} else if c == 'i' || c == 'I' || c == 'n' || c == 'N' {
 		if v, ok := parse_float_strict(t); ok { 	// inf, nan
@@ -403,6 +410,8 @@ _classify_store :: proc(sp: ^Spec, lr, n: int, t: string) -> Kind #no_bounds_che
 		([^]w.Date)(raw_data(sp.vals))[lr] = dv
 	case .Time:
 		([^]w.Time)(raw_data(sp.vals))[lr] = tv
+	case .Duration:
+		([^]w.Duration)(raw_data(sp.vals))[lr] = du
 	case .String:
 	}
 	return kind
@@ -702,6 +711,7 @@ _type_of :: proc(seen: Kinds) -> w.ColumnType {
 		int(.Datetime in seen) +
 		int(.Date in seen) +
 		int(.Time in seen) +
+		int(.Duration in seen) +
 		int(.String in seen)
 	switch {
 	case groups != 1:
@@ -718,6 +728,8 @@ _type_of :: proc(seen: Kinds) -> w.ColumnType {
 		return .Date
 	case .Time in seen:
 		return .Time
+	case .Duration in seen:
+		return .Duration
 	}
 	return .String
 }
@@ -866,6 +878,8 @@ _convert_task :: proc(data: rawptr, begin, end: int) {
 				([^]w.Time)(col.data)[row], ok = w.parse_time(field)
 			case .Datetime:
 				([^]w.Datetime)(col.data)[row], ok = w.parse_datetime(field)
+			case .Duration:
+				([^]w.Duration)(col.data)[row], ok = w.parse_duration(field)
 			}
 			if !ok && (field == "NA" || field == "null" || field == "None" || field == "NaN") {
 				// texts that inference passes over: missing values (NaN

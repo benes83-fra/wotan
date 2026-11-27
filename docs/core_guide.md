@@ -71,6 +71,7 @@ A `DataFrame` is an ordered set of named columns of equal length. Each column ha
 | `.Date` | `w.Date{year, month, day}` | `w.Date{2024, 1, 31}` |
 | `.Time` | `w.Time{hour, minute, second, nanosecond}` | `w.Time{9, 30, 0, 0}` |
 | `.Datetime` | `w.Datetime{year, month, day, hour, minute, second, nanosecond}` | `w.Datetime{2024, 1, 31, 9, 30, 0, 0}` |
+| `.Duration` | `w.Duration` (nanoseconds, a distinct `i64`) | `15 * w.MINUTES` |
 
 Three ideas run through the whole package:
 
@@ -603,7 +604,7 @@ Every result in this section is a new owned frame, column or mask; free it as us
 
 These procedures compute a new column from an existing one, in the manner of pandas Series methods. Each takes an optional `name` for the result; without it, the result is named like its source. A name lets you add the result to the same frame with `add_column`. A missing cell in the input gives a missing (null) cell in the result, and the input is never changed.
 
-**Lags and changes.** `shift(col, n)` moves the values down by `n` rows (up for a negative `n`) and works on every column type. `diff(col, n)` is the difference to the value `n` rows earlier; it stays `Int` for an `Int` column. `pct_change(col, n)` is the relative change `x[i] / x[i-n] - 1` as a `Float` column. It does not fill gaps first, so a gap gives a missing change; call `ffill` beforehand if you want to carry prices over gaps.
+**Lags and changes.** `shift(col, n)` moves the values down by `n` rows (up for a negative `n`) and works on every column type. `diff(col, n)` is the difference to the value `n` rows earlier; it stays `Int` for an `Int` column, and is a `Duration` for a `Datetime`, `Date`, `Time` or `Duration` column (section 20). `pct_change(col, n)` is the relative change `x[i] / x[i-n] - 1` as a `Float` column. It does not fill gaps first, so a gap gives a missing change; call `ffill` beforehand if you want to carry prices over gaps.
 
 **Running values.** `cumsum` and `cumprod` work on `Int` and `Float` columns. `cummax` and `cummin` work on every type that can be ordered, including strings and dates. A missing cell is missing in the result, and the running value carries on past it. With `skipna = false`, every row from the first missing cell on is missing instead.
 
@@ -828,7 +829,38 @@ w.dataframe_pretty_print(&weekly)
 
 Every period from the first to the last one in the data appears, so a month without rows shows up with a `.Sum` and `.Count` of 0 and nulls otherwise. With `by = {"ticker"}`, each ticker gets its own run of periods. The result starts with the key columns and the period labels.
 
-`melt`, `pivot`, `pivot_table`, `resample` and `sample` return `ok = false` for an unknown column name or an impossible request, such as a sample larger than the table without replacement.
+**Intervals.** `resample_every(df, on, every, specs, by)` makes one row per interval of a `Duration`, such as 15-minute bars from ticks, as pandas' `resample("15min", on=...)` does. The intervals are counted from midnight of the first day in the data, or of each group's first day with `by`. Each interval holds the times from its start up to, but not including, its end, and is labelled by its start. Intervals without rows are present, as for `resample`:
+
+```odin
+ticks := io.csv_load_from_string(`time,price
+2024-03-01 09:30:02,100.10
+2024-03-01 09:31:40,100.35
+2024-03-01 09:44:59,99.90
+2024-03-01 09:45:00,100.00
+2024-03-01 10:16:30,100.80
+`)
+defer w.destroy_dataframe(&ticks)
+bars, ok := w.resample_every(&ticks, "time", 15 * w.MINUTES, {
+	{"price", .First, "open"},
+	{"price", .Max, "high"},
+	{"price", .Min, "low"},
+	{"price", .Last, "close"},
+	{"price", .Count, "ticks"},
+})
+if !ok {return}
+defer w.destroy_dataframe(&bars)
+w.dataframe_pretty_print(&bars)
+```
+
+```
+    time                 open   high    low    close  ticks
+  0 2024-03-01 09:30:00  100.1  100.35  99.9   99.9   3
+  1 2024-03-01 09:45:00  100    100     100    100    1
+  2 2024-03-01 10:00:00  NULL   NULL    NULL   NULL   0
+  3 2024-03-01 10:15:00  100.8  100.8   100.8  100.8  1
+```
+
+`melt`, `pivot`, `pivot_table`, `resample`, `resample_every` and `sample` return `ok = false` for an unknown column name or an impossible request, such as a sample larger than the table without replacement.
 
 ## 14. Date and text parts
 
@@ -1234,6 +1266,67 @@ As text, a time has no fraction when it falls on a whole second, and otherwise t
 
 `add_month_date` clamps the day to the target month's length, as in the example: 31 January plus one month is 29 February 2024. For business-day calendars, day-count conventions and payment schedules, see the `finance` package.
 
+### Durations
+
+A `Duration` is a length of time in nanoseconds, positive or negative, like pandas' `Timedelta`. It holds about 292 years either way. Build one from the unit constants `NANOSECONDS`, `MICROSECONDS`, `MILLISECONDS`, `SECONDS`, `MINUTES`, `HOURS`, `DAYS` and `WEEKS`, for example `15 * w.MINUTES` or `2 * w.HOURS + 30 * w.MINUTES`. It is a distinct `i64`, so durations add, subtract, compare and divide like numbers.
+
+```odin
+open := w.Datetime{2024, 3, 1, 9, 30, 0, 0}
+close := w.Datetime{2024, 3, 1, 16, 0, 0, 0}
+session, _ := w.datetime_sub(close, open)
+fmt.println(w.duration_to_string(session, context.temp_allocator)) // 0 days 06:30:00
+fmt.println(w.duration_to_seconds(session))                        // 23400
+noon := w.datetime_add(open, 2 * w.HOURS + 30 * w.MINUTES)
+fmt.println(w.datetime_to_string(noon, context.temp_allocator))    // 2024-03-01 12:00:00
+d, ok := w.parse_duration("-1 days +23:55:00")
+fmt.println(i64(d / w.SECONDS), ok)                                // -300 true
+```
+
+`datetime_sub` returns `ok = false` when the difference is beyond the Duration range. Its text form is the one pandas writes, `D days HH:MM:SS` with a fraction of a second when there is one. A negative duration is written as whole days rounded down plus the time after them: minus 5 minutes is `-1 days +23:55:00`. pandas reads this text back to the same value. `parse_duration` reads these forms, and also `[-]HH:MM:SS` and `D days` alone.
+
+A `Duration` column works like any other column: it sorts, groups, joins, takes `fillna`, `between` and `isin`, and prints as text. These procedures produce and use durations:
+
+| Procedure | Result |
+|---|---|
+| `duration_between(later, earlier)` | Duration column of the row-by-row differences of two `Datetime`, `Date`, `Time` or `Duration` columns (pandas' `b - a`) |
+| `diff(col, n)` of a `Datetime`, `Date`, `Time` or `Duration` column | Duration column of the time since the value `n` rows earlier, also per group with `by` |
+| `add_duration(col, d)`, `add_durations(col, ds)` | a `Datetime` (or `Date`, giving `Datetime`) or `Duration` column moved by one Duration or by a Duration column |
+| `duration_total(col, unit)` | `Float` column of the durations in `unit`: `duration_total(col, w.SECONDS)` is pandas' `dt.total_seconds()` |
+| `datetime_floor(col, every)` | `Datetime` column rounded down to multiples of `every` (pandas' `dt.floor`) |
+| `cast_column(col, .Int)` / `cast_column(ints, .Duration)` | nanosecond counts; from `String`, the text forms above |
+| `resample_every(df, on, every, specs)` | one row per interval of `every` (section 13) |
+
+```odin
+trades := io.csv_load_from_string(`ticker,entry,exit
+AAPL,2024-03-01 09:31:05,2024-03-01 10:02:40
+MSFT,2024-03-01 09:45:00,2024-03-04 15:59:30
+AAPL,2024-03-01 11:20:00.250,2024-03-01 11:20:01
+`)
+defer w.destroy_dataframe(&trades)
+held, _ := w.duration_between(w.column(&trades, "exit"), w.column(&trades, "entry"), name = "held")
+w.add_column(&trades, held)
+minutes, _ := w.duration_total(w.column(&trades, "held"), w.MINUTES, name = "minutes")
+w.add_column(&trades, minutes)
+stop, _ := w.add_duration(w.column(&trades, "entry"), 30 * w.MINUTES, name = "stop")
+w.add_column(&trades, stop)
+w.dataframe_pretty_print(&trades)
+```
+
+```
+    ticker  entry                    exit                 held                 minutes             stop
+  0 AAPL    2024-03-01 09:31:05      2024-03-01 10:02:40  0 days 00:31:35      31.583333333333332  2024-03-01 10:01:05
+  1 MSFT    2024-03-01 09:45:00      2024-03-04 15:59:30  3 days 06:14:30      4694.5              2024-03-01 10:15:00
+  2 AAPL    2024-03-01 11:20:00.250  2024-03-01 11:20:01  0 days 00:00:00.750  0.0125              2024-03-01 11:50:00.250
+```
+
+The aggregations `Count`, `Min`, `Max`, `First` and `Last` work on a Duration column, and so do these:
+- `Sum`, `Mean`, `Median` and `Quantile`, which return a Duration (in `groupby2_agg`, `resample`, `resample_every`, `pivot_table` and `rolling_apply`);
+- a mean, median or quantile that falls between two nanoseconds is cut toward zero, as pandas does;
+- a sum beyond the Duration range is missing, and a group with no values sums to 0, as in pandas.
+
+The importers read durations from text in the form pandas writes (section 5 and the data I/O guide). Parquet, Excel, JSON and HTML files keep them; the data I/O guide gives the details per format.
+
+
 ## 21. Memory management
 
 Wotan follows the usual Odin rule: whoever creates something frees it. In `core` that comes down to a few rules.
@@ -1405,7 +1498,8 @@ The signed column is added to `trades` (step 1) before `recent` filters it. `fil
 | Missing data | `na_at`, `count_na`, `isna`, `notna`, `dropna`, `fillna`, `ffill`, `bfill`, `interpolate` |
 | Clean and combine | `concat_rows`, `cast_column`, `cast_columns`, `duplicated`, `drop_duplicates`, `unique`, `nunique`, `value_counts` |
 | Column calculations | `shift`, `diff`, `pct_change`, `cumsum`, `cumprod`, `cummax`, `cummin`, `clip`, `rank`, `nlargest`, `nsmallest`, `describe`; per group with `by` |
-| Reshape and sample | `pivot`, `pivot_table`, `melt`, `resample`, `sample` |
+| Reshape and sample | `pivot`, `pivot_table`, `melt`, `resample`, `resample_every`, `sample` |
+| Durations | `NANOSECONDS` .. `WEEKS`, `datetime_sub`, `datetime_add`, `duration_to_string`, `parse_duration`, `duration_components`, `duration_between`, `add_duration`, `add_durations`, `duration_total`, `datetime_floor` |
 | Date and text parts | `date_part`, `str_upper`, `str_lower`, `str_strip`, `str_replace`, `str_slice`, `str_split_part`, `str_len` |
 | Checked variants | `try_column`, `try_add_column`, `try_set_index`, `try_loc`, `try_iloc`, `try_iloc_many`, `try_select`, `try_sort`, `try_join`, `try_join_on`, `try_groupby`, `compare` |
 | Compute | `select` (expressions), `col_expr`, `add_expr`, `sub_expr`, `mult_expr`, `div_expr`, `apply_expr`, `conv_expr`, `mask_expr`, `free_select_exprs` |
@@ -1417,4 +1511,4 @@ The signed column is added to `trades` (step 1) before `recent` filters it. `fil
 | Free | `destroy_dataframe`, `destroy_column`, `destroy_grouped_dataframe`, `destroy_groupby2`, `delete` (masks, strings) |
 | Temporary scratch | `TEMP_GUARD`, `temp_begin`, `temp_end` |
 
-For more examples, the tests in [`tests/`](../tests/) exercise every procedure. [`core_contracts_test.odin`](../tests/core_contracts_test.odin) in particular pins down the exact semantics of nulls, views, sorting, grouping and joins, and [`missing_data_test.odin`](../tests/missing_data_test.odin), [`frame_tools_test.odin`](../tests/frame_tools_test.odin), [`column_ops_test.odin`](../tests/column_ops_test.odin), [`reshape_test.odin`](../tests/reshape_test.odin), [`resample_test.odin`](../tests/resample_test.odin), [`group_asof_test.odin`](../tests/group_asof_test.odin) and [`parts_checked_test.odin`](../tests/parts_checked_test.odin) check the procedures of sections 9 to 14 and `merge_asof` against pandas, and the checked variants against the originals.
+For more examples, the tests in [`tests/`](../tests/) exercise every procedure. [`core_contracts_test.odin`](../tests/core_contracts_test.odin) in particular pins down the exact semantics of nulls, views, sorting, grouping and joins, and [`missing_data_test.odin`](../tests/missing_data_test.odin), [`frame_tools_test.odin`](../tests/frame_tools_test.odin), [`column_ops_test.odin`](../tests/column_ops_test.odin), [`reshape_test.odin`](../tests/reshape_test.odin), [`resample_test.odin`](../tests/resample_test.odin), [`group_asof_test.odin`](../tests/group_asof_test.odin), [`duration_test.odin`](../tests/duration_test.odin) and [`parts_checked_test.odin`](../tests/parts_checked_test.odin) check the procedures of sections 9 to 14 and `merge_asof` against pandas, and the checked variants against the originals.

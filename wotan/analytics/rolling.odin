@@ -110,6 +110,8 @@ rolling_apply :: proc(
 		return rolling_apply_time(r, agg, allocator)
 	case .Datetime:
 		return rolling_apply_datetime(r, agg, allocator)
+	case .Duration:
+		return rolling_apply_duration(r, agg, allocator)
 	case .String:
 		return rolling_apply_string(r, agg, allocator)
 	case .Invalid:
@@ -332,6 +334,34 @@ rolling_apply_datetime :: proc(
 	}
 	return out
 }
+// Durations: Count, Min, Max, Sum, Mean, Median and Quantile of each
+// window, as groupby2 computes them (agg_duration_into)
+rolling_apply_duration :: proc(
+	r: RollingWindow,
+	agg: w.Aggregator,
+	allocator: mem.Allocator,
+) -> w.Column {
+	src := w.column(r.df, r.column)
+	out := w.column_new(agg.name, w.groupby2_output_type(.Duration, agg.kind), 0)
+	rows := make([dynamic]int, 0, r.window, allocator)
+	defer delete(rows)
+	for i in 0 ..< r.df.rows {
+		clear(&rows)
+		start, end := rolling_bounds(r, i)
+		present := 0
+		for j in start ..< end {
+			append(&rows, j)
+			if !w.is_null(src, j) {present += 1}
+		}
+		if !_rolling_enough(r, agg, present, end - start) {
+			w.append_null(&out)
+			continue
+		}
+		w.agg_duration_into(&out, src, rows[:], agg)
+	}
+	return out
+}
+
 rolling_apply_string :: proc(
 	r: RollingWindow,
 	agg: w.Aggregator,

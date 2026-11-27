@@ -52,6 +52,9 @@ make_group_key_in_arena :: proc(
 		case .Datetime:
 			v, n := column_at_datetime(col, row)
 			if n {fmt.sbprintf(&sb, "NULL")} else {fmt.sbprintf(&sb, "%s", datetime_to_string(v))}
+		case .Duration:
+			v, n := column_at_duration(col, row)
+			if n {fmt.sbprintf(&sb, "NULL")} else {fmt.sbprintf(&sb, "%s", duration_to_string(v))}
 		}
 
 		if i < len(keys) - 1 {fmt.sbprint(&sb, "|")}

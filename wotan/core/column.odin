@@ -290,6 +290,20 @@ append_datetime :: proc(c: ^Column, v: Datetime) {
 	base := uintptr(c.data) + uintptr(idx * size_of(Datetime))
 	(cast(^Datetime)base)^ = v
 }
+
+append_duration :: proc(c: ^Column, v: Duration) {
+	if c.is_view {
+		panic("append_duration: cannot append to view column")
+	}
+	if c.type != .Duration {
+		panic("append_duration: wrong column type")
+	}
+	if c.len >= c.capacity {
+		grow(c, max(8, c.capacity * 2))
+	}
+	([^]Duration)(c.data)[c.len] = v
+	c.len += 1
+}
 append_null :: proc(c: ^Column) {
 	if c.is_view {
 		panic("append_null: cannot append to view column")
@@ -402,6 +416,12 @@ column_at_datetime :: proc(col: ^Column, i: int) -> (Datetime, bool) {
 	return (cast(^Datetime)_cell_ptr(c, r))^, false
 }
 
+column_at_duration :: proc(col: ^Column, i: int) -> (Duration, bool) {
+	c, r := column_resolve(col, i)
+	if _null_at(c, r) {return 0, true}
+	return (cast(^Duration)_cell_ptr(c, r))^, false
+}
+
 // New owned column with the given rows of `src` (view-aware; nulls kept;
 // strings cloned into the new column). A row index of -1 yields null.
 column_take :: proc(src: ^Column, rows: []int, allocator := context.allocator) -> Column {
@@ -434,6 +454,9 @@ column_take :: proc(src: ^Column, rows: []int, allocator := context.allocator) -
 		case .Datetime:
 			v, _ := column_at_datetime(src, r)
 			append_datetime(&out, v)
+		case .Duration:
+			v, _ := column_at_duration(src, r)
+			append_duration(&out, v)
 		case .Invalid:
 			append_null(&out)
 		}
@@ -496,6 +519,10 @@ column_compare_rows :: proc(col: ^Column, a, b: int) -> int {
 		x, _ := column_at_datetime(col, a)
 		y, _ := column_at_datetime(col, b)
 		return int(datetime_compare(x, y))
+	case .Duration:
+		x, _ := column_at_duration(col, a)
+		y, _ := column_at_duration(col, b)
+		return cmp3(x, y)
 	case .Invalid:
 	}
 	return 0
@@ -564,6 +591,9 @@ column_slice_copy :: proc(orig: ^Column, start: int, end: int) -> Column {
 		case .Datetime:
 			v, is_null := column_at_datetime(orig, i)
 			if is_null {append_null(&c)} else {append_datetime(&c, v)}
+		case .Duration:
+			v, is_null := column_at_duration(orig, i)
+			if is_null {append_null(&c)} else {append_duration(&c, v)}
 		}
 	}
 
@@ -951,6 +981,12 @@ column_from_times :: proc(name: string, values: []Time) -> Column {
 	return col
 }
 
+column_from_durations :: proc(name: string, values: []Duration) -> Column {
+	col := column_new(name, .Duration, len(values))
+	for v in values {append_duration(&col, v)}
+	return col
+}
+
 column_from_datetimes :: proc(name: string, values: []Datetime) -> Column {
 	col := column_new(name, .Datetime, len(values))
 	for v in values {
@@ -999,7 +1035,7 @@ value_as_string :: proc(col: ^Column, row: int, allocator: mem.Allocator) -> str
 	// Canonical text form, readable back by the importers without loss:
 	// shortest exact floats (always with '.'/exponent so they stay Float),
 	// true/false, ISO dates "YYYY-MM-DD", times "HH:MM:SS",
-	// datetimes "YYYY-MM-DD HH:MM:SS"
+	// datetimes "YYYY-MM-DD HH:MM:SS", durations "D days HH:MM:SS" (pandas)
 	switch col.type {
 	case .Int:
 		v, _ := column_at_int(col, row)
@@ -1022,6 +1058,9 @@ value_as_string :: proc(col: ^Column, row: int, allocator: mem.Allocator) -> str
 	case .Datetime:
 		v, _ := column_at_datetime(col, row)
 		return datetime_to_string(v, allocator)
+	case .Duration:
+		v, _ := column_at_duration(col, row)
+		return duration_to_string(v, allocator)
 	case .Invalid:
 	}
 	return ""

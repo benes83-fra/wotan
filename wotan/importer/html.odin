@@ -295,6 +295,7 @@ infer_column_types :: proc(tmp: [][]string) -> []w.ColumnType {
 		all_date := true
 		all_time := true
 		all_datetime := true
+		all_duration := true
 		any_value := false
 
 		for r in 1 ..< len(tmp) {
@@ -310,6 +311,7 @@ infer_column_types :: proc(tmp: [][]string) -> []w.ColumnType {
 			if !is_date(v) {all_date = false}
 			if !is_time(v) {all_time = false}
 			if !is_datetime(v) {all_datetime = false}
+			if !is_duration(v) {all_duration = false}
 		}
 
 		// precedence: datetime > date > time > int > float > bool > string
@@ -322,6 +324,8 @@ infer_column_types :: proc(tmp: [][]string) -> []w.ColumnType {
 			types[c] = .Date
 		case all_time:
 			types[c] = .Time
+		case all_duration:
+			types[c] = .Duration
 		case all_int:
 			types[c] = .Int
 		case all_float:
@@ -364,6 +368,9 @@ append_value :: proc(col: ^w.Column, s: string) {
 	case .Datetime:
 		datetime, _ := w.parse_datetime(trimmed)
 		w.append_datetime(col, datetime)
+	case .Duration:
+		d, _ := w.parse_duration(trimmed)
+		w.append_duration(col, d)
 	}
 }
 
