@@ -2,6 +2,7 @@ package analytics
 
 import l "../linalg"
 import opt "../optimize"
+import st "../stats"
 import "core:fmt"
 import "core:math"
 import "core:mem"
@@ -927,15 +928,7 @@ garch_std_quantile :: proc(params: ^GARCH_Params, prob: f64) -> f64 {
 	case dk == .StudentT && params.nu > 2.0:
 		shape, scale = params.nu, math.sqrt_f64((params.nu - 2.0) / params.nu)
 		cdf = proc(x, nu: f64) -> f64 {
-			// F(x) = 1 - ½ I_{ν/(ν+x²)}(ν/2, ½) for x ≥ 0; near 0 use the
-			// complement 1 - I_{x²/(ν+x²)}(½, ν/2) to avoid cancellation
-			tail: f64
-			if x * x < nu {
-				tail = 0.5 - 0.5 * _garch_reg_inc_beta(0.5, 0.5 * nu, x * x / (nu + x * x))
-			} else {
-				tail = 0.5 * _garch_reg_inc_beta(0.5 * nu, 0.5, nu / (nu + x * x))
-			}
-			return 1.0 - tail if x >= 0.0 else tail
+			return st.student_t_cdf(st.Student_T{nu}, x)
 		}
 	case dk == .GED && params.shape > 0.0:
 		lg1, _ := math.lgamma(1.0 / params.shape)
@@ -962,50 +955,6 @@ garch_std_quantile :: proc(params: ^GARCH_Params, prob: f64) -> f64 {
 	return scale * 0.5 * (lo + hi)
 }
 
-// Regularized incomplete beta I_x(a, b) (continued fraction, Numerical Recipes betacf)
-_garch_reg_inc_beta :: proc(a, b, x: f64) -> f64 {
-	if x <= 0.0 {return 0.0}
-	if x >= 1.0 {return 1.0}
-	lab, _ := math.lgamma(a + b)
-	la, _ := math.lgamma(a)
-	lb, _ := math.lgamma(b)
-	front := math.exp_f64(lab - la - lb + a * math.ln_f64(x) + b * math.ln_f64(1.0 - x))
-	// Use the symmetry I_x(a,b) = 1 - I_{1-x}(b,a) where the fraction converges fast
-	if x > (a + 1.0) / (a + b + 2.0) {
-		return 1.0 - front * _garch_betacf(b, a, 1.0 - x) / b
-	}
-	return front * _garch_betacf(a, b, x) / a
-}
-
-_garch_betacf :: proc(a, b, x: f64) -> f64 {
-	TINY :: 1e-300
-	qab, qap, qam := a + b, a + 1.0, a - 1.0
-	c, d := 1.0, 1.0 - qab * x / qap
-	if math.abs(d) < TINY {d = TINY}
-	d = 1.0 / d
-	h := d
-	for m in 1 ..= 300 {
-		fm := f64(m)
-		m2 := 2.0 * fm
-		aa := fm * (b - fm) * x / ((qam + m2) * (a + m2))
-		d = 1.0 + aa * d
-		if math.abs(d) < TINY {d = TINY}
-		c = 1.0 + aa / c
-		if math.abs(c) < TINY {c = TINY}
-		d = 1.0 / d
-		h *= d * c
-		aa = -(a + fm) * (qab + fm) * x / ((a + m2) * (qap + m2))
-		d = 1.0 + aa * d
-		if math.abs(d) < TINY {d = TINY}
-		c = 1.0 + aa / c
-		if math.abs(c) < TINY {c = TINY}
-		d = 1.0 / d
-		del := d * c
-		h *= del
-		if math.abs(del - 1.0) < 1e-15 {break}
-	}
-	return h
-}
 
 // Regularized lower incomplete gamma P(a, x) (series for x < a+1, else continued fraction)
 _garch_reg_lower_gamma :: proc(a, x: f64) -> f64 {

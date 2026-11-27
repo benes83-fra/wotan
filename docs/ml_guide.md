@@ -350,7 +350,7 @@ Both agree with statsmodels' `WLS` and `GLS`. For a covariance with Kronecker st
 The t and F distribution functions used for the p-values are public too:
 
 ```odin
-fmt.println(ml.student_t_ppf(0.975, 12))   // 2.178812829667227
+fmt.println(ml.student_t_ppf(0.975, 12))   // 2.1788128296672276
 fmt.println(ml.student_t_sf2(2.0, 10))     // P(|T| > 2), T ~ t(10): 0.07338803477074027
 fmt.println(ml.f_dist_sf(3.0, 2, 12))      // P(F > 3), F ~ F(2, 12): 0.08779149519890261
 ```
@@ -1615,7 +1615,7 @@ The momentum coefficient is positive and the volatility coefficient negative, as
 | Penalised | `ridge_fit`, `lasso_fit`, `elastic_net_fit`, `ridge_cv`, `lasso_cv` |
 | PCR | `pcr_fit`, `pcr_predict`, `pcr_free` |
 | Fama-MacBeth | `fama_macbeth`, `fama_macbeth_result_free` |
-| Distributions | `student_t_cdf`, `student_t_sf2`, `student_t_ppf`, `f_dist_sf` |
+| Distributions | `student_t_cdf`, `student_t_sf2`, `student_t_ppf`, `f_dist_sf` (the [statistics guide](stats_guide.md) has the full set of distributions) |
 | Logistic | `logistic_fit`, `logistic_predict`, `logistic_predict_proba`, `logistic_free` |
 | L-BFGS for your own function | `optimize.lbfgs_minimize` (`ValueGradFunc`, `LBFGS_Result`) |
 | Naive Bayes | `gnb_fit`, `gnb_predict`, `gnb_predict_proba`, `gnb_free` |

@@ -1,6 +1,7 @@
 package analytics
 
 import w "../core"
+import st "../stats"
 import "core:math"
 import "core:mem"
 
@@ -80,81 +81,25 @@ df_ljung_box :: proc(
 
 
 // ------------------------------------------------------------
-// Regularized lower incomplete gamma P(a, x)
-// Needed for chi-square CDF
+// Regularized lower incomplete gamma P(a, x) (stats.gamma_p)
 // ------------------------------------------------------------
 gamma_inc_lower_regularized :: proc(a, x: f64) -> f64 {
 	P, _ := _gamma_inc_regularized(a, x)
 	return P
 }
 
-// Chi-square survival function P(X > x), X ~ chi2(df). Returned from Q(a, x)
-// directly (not 1 - P) so tiny p-values keep their relative precision.
+// Chi-square survival function P(X > x), X ~ chi2(df) (stats.chi_squared_sf);
+// small p-values keep their relative precision
 chi2_sf :: proc(x, df: f64) -> f64 {
 	_, Q := _gamma_inc_regularized(df / 2.0, x / 2.0)
 	return Q
 }
 
-// P(a, x) and Q(a, x) = 1 - P(a, x): series for x < a+1, Lentz continued
-// fraction otherwise (Numerical Recipes gser / gcf). The prefactor uses
-// lgamma (gamma(a) overflows for a > 171, i.e. df > 342) and the iteration
-// cap grows with a (both expansions need O(sqrt(a)) terms).
+// P(a, x) and Q(a, x) = 1 - P(a, x), each to full precision (stats.gamma_pq);
+// (0, 1) for x <= 0 or a <= 0
 _gamma_inc_regularized :: proc(a, x: f64) -> (P: f64, Q: f64) {
 	if x <= 0 || a <= 0 {
 		return 0.0, 1.0
 	}
-
-	eps := 1e-15
-	max_iter := 200 + int(10.0 * math.sqrt(a))
-	lg, _ := math.lgamma(a)
-	prefactor := math.exp(-x + a * math.ln(x) - lg)
-
-	// Series expansion for x < a+1
-	if x < a + 1.0 {
-		sum := 1.0 / a
-		term := sum
-		ap := a
-
-		for _ in 1 ..= max_iter {
-			ap += 1.0
-			term *= x / ap
-			sum += term
-			if abs(term) < abs(sum) * eps {
-				break
-			}
-		}
-
-		P = sum * prefactor
-		return P, 1.0 - P
-	}
-
-	// Continued fraction for x >= a+1
-	// Lentz’s algorithm
-	FPMIN := 1e-300
-
-	b := x + 1.0 - a
-	c := 1.0 / FPMIN
-	d := 1.0 / b
-	h := d
-
-	for i in 1 ..= max_iter {
-		an := -f64(i) * (f64(i) - a)
-		b += 2.0
-		d = an * d + b
-		if abs(d) < FPMIN {d = FPMIN}
-
-		c = b + an / c
-		if abs(c) < FPMIN {c = FPMIN}
-
-		d = 1.0 / d
-		delta := d * c
-		h *= delta
-
-		if abs(delta - 1.0) < eps {
-			break
-		}
-	}
-
-	Q = h * prefactor
-	return 1.0 - Q, Q
+	return st.gamma_pq(a, x)
 }

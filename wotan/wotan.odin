@@ -19,6 +19,7 @@
 //     nn                   layers, models, losses, optimizers, checkpoints
 //     gpu                  WebGPU backend for tensor and nn (opt-in)
 //     optimize             SGD, Adam, RMSProp, L-BFGS, least squares
+//     stats                probability distributions and special functions
 //     analytics            time series, statistical tests, GARCH, Kalman filters
 //     analytics/ML         classical machine learning
 //     finance              pricing, curves, credit, portfolios, risk, backtests
