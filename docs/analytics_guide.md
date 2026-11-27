@@ -1361,7 +1361,7 @@ The fit recovers the simulated parameters reasonably well (persistence 0.976 aga
 | Exponential weighting | `ewm_mean_column`, `ewm_var_column`, `ewm_std_column`, `ewm_cov_column`, `ewm_corr_column`; `make_ewm_mean`, `make_ewm_var`, `make_ewm_cov`, `make_ewm_corr` |
 | Covariance and PCA | `rolling_cov_matrix`, `rolling_corr_matrix`, `rolling_var_matrix`, `ewm_cov_matrix`, `extract_cov_matrix_row`, `covariance_matrix`, `pca_dataframe`, `pca_from_cov`, `pca_transform`, `pca_inverse_transform`, `pca_explained_variance_ratio`, `rolling_pca`, `ewm_pca`, `ewm_pca_last` |
 | Autocorrelation | `acf`, `pacf`, `df_acf`, `df_pacf`, `ljung_box`, `df_ljung_box` |
-| Distribution | `sample_moments`, `jarque_bera`, `df_jarque_bera`, `chi2_sf` (the [statistics guide](stats_guide.md) has the full set of distributions) |
+| Distribution | `sample_moments`, `jarque_bera`, `df_jarque_bera`, `chi2_sf` (the [statistics guide](stats_guide.md) has the full set of distributions and the classical hypothesis tests, among them normality tests on any sample) |
 | Unit roots and stationarity | `adf_test`, `df_adf`, `kpss_test`, `df_kpss`, `phillips_perron_test`, `stationarity_test`, `df_stationarity` |
 | Decomposition | `hp_filter`, `seasonal_decompose`, `stl_decompose` (`STLParams`) |
 | Exponential smoothing | `holt_winters_fit`, `holt_winters_filter`, `holt_winters_forecast` (`HoltWintersSpec`) |

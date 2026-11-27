@@ -591,6 +591,8 @@ main :: proc() {
 	free_all(context.temp_allocator)
 	test.stats_distributions_test(context.temp_allocator)
 	free_all(context.temp_allocator)
+	test.stats_tests_test(context.temp_allocator)
+	free_all(context.temp_allocator)
 	test.matrix_test(context.temp_allocator)
 	free_all(context.temp_allocator)
 	test.simd_linalg_test(context.temp_allocator)

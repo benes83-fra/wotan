@@ -32,7 +32,7 @@ The packages build on each other in layers. Lower layers do not depend on higher
 | `linalg` | `l "wotan/linalg"` | the `Matrix` type, products, LU, Cholesky, QR, least squares, eigenvalues, SVD, SIMD kernels |
 | `tensor` | `t "wotan/tensor"` | reverse-mode autograd, graph scopes, convolutions, recurrent cells, attention |
 | `nn` | `nn "wotan/nn"` | layers, sequential models, losses, optimizers, GPT, BERT, GAN, VAE, checkpoints; `nn/tokenizers` for BPE and WordPiece |
-| `stats` | `st "wotan/stats"` | probability distributions (densities, tails, quantiles, random draws) and the special functions behind them |
+| `stats` | `st "wotan/stats"` | probability distributions (densities, tails, quantiles, random draws), the special functions behind them, and hypothesis tests (t, proportions, chi-squared, Fisher, rank, Kolmogorov-Smirnov, normality, variance and correlation tests; multiple-testing corrections) |
 | `optimize` | `optim "wotan/optimize"` | SGD, Adam, RMSProp, L-BFGS, least squares, learning-rate schedules |
 | `analytics` | `ts "wotan/analytics"` | rolling and EW statistics, tests, ARIMA, GARCH, VAR, cointegration, Kalman filters |
 | `analytics/ML` | `ml "wotan/analytics/ML"` | regression, classification, SVMs, trees and ensembles, k-means, scalers, metrics, cross-validation, pipelines |
@@ -69,7 +69,7 @@ Every example in the guides was compiled and run against the current code, and t
 
 | Guide | Covers |
 |---|---|
-| [statistics](stats_guide.md) (`stats`) | probability distributions: normal, log-normal, t, chi-squared, F, gamma, beta, exponential, binomial, Poisson, negative binomial; tails and quantiles to 1e-300; random draws; incomplete gamma and beta functions |
+| [statistics](stats_guide.md) (`stats`) | probability distributions: normal, log-normal, t, chi-squared, F, gamma, beta, exponential, binomial, Poisson, negative binomial; tails and quantiles to 1e-300; random draws; incomplete gamma and beta functions; hypothesis tests on slices and DataFrame columns, with p-value adjustment |
 | [analytics](analytics_guide.md) | rolling and exponentially weighted statistics, covariance and PCA, autocorrelation and stationarity tests, decomposition and smoothing, ARIMA, SARIMA and ARIMAX, GARCH, VAR and Granger causality, cointegration, Kalman filters, regression diagnostics |
 | [machine learning](ml_guide.md) (`analytics/ML`) | from DataFrames to model inputs, linear and regularised regression, Fama–MacBeth, classification, sample weights, SVMs, trees and ensembles, the MLP, k-means, preprocessing, metrics, cross-validation, hyper-parameter search, pipelines, saving models |
 | [neural networks](nn_guide.md) | layers, MLPs, sequential models, losses, optimizers and training loops, GPT, BERT, GAN and VAE, saving and loading, transfer learning, tokenizers |
@@ -117,7 +117,7 @@ The [test catalog](test_catalog.md) lists every test file and what it checks.
 
 Every path starts with the [core guide](core_guide.md), since most of Wotan reads and writes DataFrames. To load your own files or market data, read the [data in and out guide](data_io_guide.md) next. After that:
 
-- **Data analysis and statistics:** [statistics](stats_guide.md) for distributions, [analytics](analytics_guide.md), then [machine learning](ml_guide.md); [plot](plot_guide.md) for charts.
+- **Data analysis and statistics:** [statistics](stats_guide.md) for distributions and hypothesis tests, [analytics](analytics_guide.md), then [machine learning](ml_guide.md); [plot](plot_guide.md) for charts.
 - **Deep learning:** [tensor](tensor_guide.md) for autograd and graph scopes, then [neural networks](nn_guide.md).
 - **Derivatives pricing:** finance parts [1](finance_options_guide.md) and [2](finance_volatility_guide.md); for rates and credit, parts [3](finance_fixed_income_guide.md) and [4](finance_rates_credit_guide.md).
 - **Portfolios and risk:** finance parts [5](finance_portfolio_guide.md) and [6](finance_risk_guide.md), then [ml_finance part 1](ml_finance_methods_guide.md) for the statistics that keep backtests honest.
