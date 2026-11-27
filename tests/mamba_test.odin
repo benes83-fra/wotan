@@ -147,6 +147,56 @@ mamba_test :: proc(allocator: mem.Allocator) {
 	t.tensor_free_graph(loss)
 	nn.adam_free(&opt)
 
+	// 11. Input scale: the block normalises its input, so the SSM branch
+	// (output minus the residual input) is the same, to within 0.1%, for the
+	// input scaled by 1, 10, 100 and 1000, and stays finite (RMSNorm's eps of
+	// 1e-5 is the only difference)
+	{
+		branch_at :: proc(m: ^nn.MambaLayer, base: []f64, k: f64, b, s, d, n: int) -> []f64 {
+			xd := l.matrix_new(f64, 1, len(base))
+			for v, i in base {xd.data[i] = k * v}
+			x := t.tensor_new(xd, false)
+			x.shape = [4]int{b, s, d, 1}
+			h := t.tensor_new(l.matrix_new(f64, 1, b * d * n), false)
+			h.shape = [4]int{b, d, n, 1}
+			out := nn.mamba_layer_forward(m, x, h)
+			branch := make([]f64, len(base))
+			for v, i in out.data.data {branch[i] = v - xd.data[i]}
+			t.tensor_free_graph(out)
+			t.tensor_free(x)
+			t.tensor_free(h)
+			return branch
+		}
+		base := make([]f64, batch_size * seq_len * d_model)
+		defer delete(base)
+		for &v in base {v = rand.norm_float64()}
+		ref := branch_at(&mamba, base, 1, batch_size, seq_len, d_model, d_state)
+		defer delete(ref)
+		worst := 0.0
+		finite := true
+		for k in ([]f64{10, 100, 1000}) {
+			br := branch_at(&mamba, base, k, batch_size, seq_len, d_model, d_state)
+			for v, i in br {
+				if math.is_nan(v) || math.is_inf(v) {finite = false}
+				worst = max(worst, abs(v - ref[i]) / max(1, abs(ref[i])))
+			}
+			delete(br)
+		}
+		if finite && worst < 1e-3 {
+			fmt.printf(
+				"✅ SSM branch independent of the input scale (1 to 1000x; largest change %.1e)\n",
+				worst,
+			)
+		} else {
+			fmt.printf(
+				"❌ SSM branch changes with the input scale (largest change %.3g, finite %v)\n",
+				worst,
+				finite,
+			)
+			record_failures(1)
+		}
+	}
+
 	fmt.println("\n=== Mamba Test PASSED ===\n")
 }
 // ============================================================================

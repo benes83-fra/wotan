@@ -8,19 +8,25 @@
 //     import fin "wotan/finance"
 //
 // The packages:
-//     core                 the DataFrame and typed columns
-//     importer, exporter   CSV, JSON, JSONL, HTML and Excel in and out
+//     core                 the DataFrame and typed columns, durations, time zones
+//     importer, exporter   CSV, JSON, JSONL, HTML, Excel and Parquet in and out
+//     parquet              the Parquet reader and writer behind importer / exporter
+//     zstd                 Zstandard compression and decompression
 //     net                  HTTP, Yahoo Finance prices and option chains
 //     plot                 PNG charts
 //     linalg               matrices, factorizations, eigenvalues, SVD
 //     tensor               reverse-mode autograd
 //     nn                   layers, models, losses, optimizers, checkpoints
+//     gpu                  WebGPU backend for tensor and nn (opt-in)
 //     optimize             SGD, Adam, RMSProp, L-BFGS, least squares
 //     analytics            time series, statistical tests, GARCH, Kalman filters
 //     analytics/ML         classical machine learning
 //     finance              pricing, curves, credit, portfolios, risk, backtests
 //     ml_finance           machine learning for finance
 //     behavioral_finance   prospect theory, sentiment, herding
+//     util                 the shared thread pool (parallel_for) and sorting
+//     data                 the MNIST loader
+//     zip_min              reading ZIP archives (used by the Excel reader)
 //
 // docs/main_doc.md is the entry point to the guides.
 package wotan

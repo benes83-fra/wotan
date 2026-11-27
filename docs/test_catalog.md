@@ -164,7 +164,7 @@ Reference and contract tests print `OK` or `FAIL` for each check and end with a 
 | `gpt_kv_cache_test` | `gpt_kv_cache_test` | KV-cached GPT forward equals the full forward (standard, flash and MoE blocks, RMSNorm, tied embeddings); cached greedy generation gives the same tokens, faster |
 | `gpt_completion_test` 🌐📁 | `gpt_completion_test` | Text completion with converted DistilGPT-2 weights (tanh GELU, logits equal to Hugging Face's to about 1e-13); skips without the checkpoint |
 | `bert_test` | `bert_test` | Character-level BERT, masked language modelling |
-| `mamba_test` | `mamba_test`, `mamba_learning_test` | Mamba state-space model: gradient check, sequence forecasting |
+| `mamba_test` | `mamba_test`, `mamba_learning_test` | Mamba state-space model: gradient check; the SSM branch the same for inputs scaled by 1 to 1000 (the block normalises its input); sequence forecasting |
 | `tokenizer_bpe_test` 📁 | `tokenizer_bpe_test` | BPE tokenizer |
 | `tokenizer_wordpiece_test` | `tokenizer_wordpiece_test` | WordPiece tokenizer |
 | `tokenizer_reference_test` 📁 | `tokenizer_reference_test` | GPT-2 BPE and BERT WordPiece (cased and uncased, sentence pairs, batches) vs Hugging Face `transformers`; skips the real-vocabulary checks until the vocabularies are downloaded |
