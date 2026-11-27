@@ -1,6 +1,7 @@
 package tests
 
 import w "../wotan/core"
+import fin "../wotan/finance"
 import imp "../wotan/importer"
 import util "../wotan/util"
 import "core:fmt"
@@ -20,7 +21,10 @@ import "core:strings"
 //   pandas makes the column float64);
 // - a 2 MB CSV with quoted line breaks, escaped quotes and CRLF: the same
 //   frame from one thread and from all (the text is cut into chunks whose
-//   boundaries fall inside quoted fields).
+//   boundaries fall inside quoted fields);
+// - the finance loaders: try_load_market_data and try_load_option_chain
+//   against pandas 1.5.3 and their panicking twins, and ok = false for files
+//   that do not fit.
 
 loaders_checked_test :: proc(allocator: mem.Allocator) {
 	seed_test(#procedure)
@@ -311,6 +315,89 @@ loaders_checked_test :: proc(allocator: mem.Allocator) {
 				"%d KB of CSV with quoted line breaks: the same %d rows from one thread and from all",
 				len(text) / 1000,
 				one.rows,
+			),
+		)
+	}
+
+	// ---------------- finance loaders
+	{
+		_ = os.write_entire_file(
+			"demo_files/loader_prices_gap.csv",
+			transmute([]u8)string("Date,Close,Volume\n2024-01-02,10.5,100\n2024-01-03,,200\n"),
+		)
+		_ = os.write_entire_file(
+			"demo_files/loader_prices_text.csv",
+			transmute([]u8)string("Date,Close,Volume\n2024-01-02,10.5,100\nsoon,11,200\n"),
+		)
+		_ = os.write_entire_file(
+			"demo_files/loader_options_gap.csv",
+			transmute([]u8)string(
+				"Type,Strike,Expiry,ImpliedVol,Price\ncall,100,2024-03-15,0.2,5\nput,100,2024-03-15,,4\n",
+			),
+		)
+		md1 := fin.load_market_data("data/spy_prices.csv")
+		defer fin.free_market_data(&md1)
+		md2, mok := fin.try_load_market_data("data/spy_prices.csv")
+		defer fin.free_market_data(&md2)
+		vol, ret := 0.0, 0.0
+		for i in 0 ..< md2.n_obs {
+			vol += md2.volumes[i]
+			ret += md2.returns[i]
+		}
+		// pandas 1.5.3: read_csv(parse_dates=["Date"]), Close.pct_change().fillna(0)
+		market_ok :=
+			mok &&
+			md2.n_obs == 30 &&
+			md2.dates[0] == w.Date{2023, 1, 3} &&
+			md2.dates[29] == w.Date{2023, 2, 14} &&
+			abs(md2.returns[29] - 0.003866167388027142) < 1e-15 &&
+			abs(ret - 0.07394841593815948) < 1e-14 &&
+			vol == 1979398800 &&
+			md1.n_obs == 30 &&
+			md1.returns[29] == md2.returns[29]
+		oc1 := fin.load_option_chain("data/spy_options.csv", md2.dates[29] if mok else {})
+		defer fin.free_option_chain(&oc1)
+		oc2, cok := fin.try_load_option_chain("data/spy_options.csv", md2.dates[29] if mok else {})
+		defer fin.free_option_chain(&oc2)
+		strikes, years, ivs, prices := 0.0, 0.0, 0.0, 0.0
+		for i in 0 ..< oc2.n_options {
+			strikes += oc2.strikes[i]
+			years += oc2.expiries[i]
+			ivs += oc2.implied_vols[i]
+			prices += oc2.market_prices[i]
+		}
+		// pandas: (Expiry - last Date).days / 365 and the column sums
+		chain_ok :=
+			cok &&
+			oc2.n_options == 12 &&
+			oc2.option_types[0] == "call" &&
+			oc2.option_types[11] == "put" &&
+			abs(oc2.expiries[0] - 0.00821917808219178) < 1e-15 &&
+			abs(years - 0.09863013698630134) < 1e-14 &&
+			strikes == 4830 &&
+			abs(ivs - 1.86) < 1e-12 &&
+			abs(prices - 72.66) < 1e-12 &&
+			oc1.n_options == 12 &&
+			oc1.expiries[5] == oc2.expiries[5]
+		failed, n := 0, 0
+		for path in ([]string{"data/no_such.csv", "data/spy_options.csv", "demo_files/loader_prices_gap.csv", "demo_files/loader_prices_text.csv"}) {
+			n += 1
+			md, ok := fin.try_load_market_data(path)
+			if ok {fin.free_market_data(&md)} else {failed += 1}
+		}
+		for path in ([]string{"data/no_such.csv", "data/spy_prices.csv", "demo_files/loader_options_gap.csv"}) {
+			n += 1
+			oc, ok := fin.try_load_option_chain(path, {2024, 1, 2})
+			if ok {fin.free_option_chain(&oc)} else {failed += 1}
+		}
+		expect(
+			&passed,
+			&total,
+			market_ok && chain_ok && failed == n,
+			fmt.tprintf(
+				"try_load_market_data / try_load_option_chain: dates, returns, volumes, expiries in years and sums as pandas 1.5.3 computes them, the same as the panicking twins; %d of %d bad files (missing, no Close / Type column, a missing Close / ImpliedVol, a Date that is text) give ok = false",
+				failed,
+				n,
 			),
 		)
 	}

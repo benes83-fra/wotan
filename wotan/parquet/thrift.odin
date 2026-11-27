@@ -167,6 +167,18 @@ Column_Meta :: struct {
 	data_page_offset:       i64,
 	dictionary_page_offset: i64, // 0 when absent
 	has_dictionary_offset:  bool,
+	stats:                  Raw_Stats,
+}
+
+// Statistics of a column chunk as stored: PLAIN-encoded bounds (slices of
+// the footer) and the null count. min / max are the current fields (in the
+// type's sort order); min_old / max_old the deprecated ones (signed order),
+// which old writers set instead.
+@(private)
+Raw_Stats :: struct {
+	null_count:                                 i64, // -1 when not stored
+	min, max, min_old, max_old:                 []u8,
+	has_min, has_max, has_old_min, has_old_max: bool,
 }
 
 @(private)
@@ -517,6 +529,7 @@ _read_column_meta :: proc(t: ^Thrift, typ: u8 = T_STRUCT) -> Column_Meta {
 		return {}
 	}
 	cm: Column_Meta
+	cm.stats.null_count = -1
 	last: i16
 	seen: bit_set[0 ..< 16]
 	for {
@@ -524,6 +537,8 @@ _read_column_meta :: proc(t: ^Thrift, typ: u8 = T_STRUCT) -> Column_Meta {
 		if typ == T_STOP {break}
 		if id >= 0 && id < 16 {seen += {int(id)}}
 		switch id {
+		case 12:
+			cm.stats = _read_stats(t, typ)
 		case 1:
 			cm.type = _t_i32(t, typ)
 		case 4:
@@ -543,6 +558,37 @@ _read_column_meta :: proc(t: ^Thrift, typ: u8 = T_STRUCT) -> Column_Meta {
 	}
 	if !({1, 4, 5, 7, 9} <= seen) {t.bad = true} 	// a required field is missing
 	return cm
+}
+
+@(private)
+_read_stats :: proc(t: ^Thrift, typ: u8) -> Raw_Stats {
+	st := Raw_Stats {
+		null_count = -1,
+	}
+	if typ != T_STRUCT {
+		t.bad = true
+		return st
+	}
+	last: i16
+	for {
+		typ, id := _t_field(t, &last)
+		if typ == T_STOP {break}
+		switch id {
+		case 1:
+			st.max_old, st.has_old_max = transmute([]u8)_t_string(t, typ), true
+		case 2:
+			st.min_old, st.has_old_min = transmute([]u8)_t_string(t, typ), true
+		case 3:
+			st.null_count = _t_zigzag(t, typ)
+		case 5:
+			st.max, st.has_max = transmute([]u8)_t_string(t, typ), true
+		case 6:
+			st.min, st.has_min = transmute([]u8)_t_string(t, typ), true
+		case:
+			_t_skip(t, typ)
+		}
+	}
+	return st
 }
 
 @(private)

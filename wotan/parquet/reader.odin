@@ -41,32 +41,22 @@ import zs "../zstd"
 // threads; 1 decodes on the calling thread).
 
 // The Parquet file at `path` as a DataFrame. `columns` selects (and orders)
-// the columns to load; nil loads all of them. On failure the reason is
+// the columns to load; nil loads all of them. `filters` keeps only the rows
+// whose cells lie in every filter's range (see Filter); row groups whose
+// statistics rule out a match are not read at all. On failure the reason is
 // printed to stderr and ok is false.
 read_file :: proc(
 	path: string,
 	columns: []string = nil,
 	allocator := context.allocator,
+	filters: []Filter = nil,
 ) -> (
 	df: w.DataFrame,
 	ok: bool,
 ) {
-	f, err := os.open(path)
-	if err != nil {
-		_fail("cannot open %q", path)
-		return
-	}
-	defer os.close(f)
-	size, serr := os.file_size(f)
-	if serr != nil {
-		_fail("cannot read the size of %q", path)
-		return
-	}
-	src := Source {
-		file = f,
-		size = size,
-	}
-	return _read(&src, columns, allocator)
+	src := _open_file(path) or_return
+	defer os.close(src.file)
+	return _read(&src, columns, filters, allocator)
 }
 
 // The Parquet file held in `data` as a DataFrame (see read_file)
@@ -74,6 +64,7 @@ read_bytes :: proc(
 	data: []u8,
 	columns: []string = nil,
 	allocator := context.allocator,
+	filters: []Filter = nil,
 ) -> (
 	df: w.DataFrame,
 	ok: bool,
@@ -82,7 +73,7 @@ read_bytes :: proc(
 		bytes = data,
 		size  = i64(len(data)),
 	}
-	return _read(&src, columns, allocator)
+	return _read(&src, columns, filters, allocator)
 }
 
 // ---------------------------------------------------------------------------
@@ -104,6 +95,23 @@ _source_read :: proc(src: ^Source, off, n: i64, buf: ^[dynamic]u8) -> ([]u8, boo
 	got, err := os.read_at(src.file, buf[:], off)
 	if err != nil || got != int(n) {return nil, false}
 	return buf[:], true
+}
+
+// An open file as a Source (close src.file when done)
+@(private)
+_open_file :: proc(path: string) -> (src: Source, ok: bool) {
+	f, err := os.open(path)
+	if err != nil {
+		_fail("cannot open %q", path)
+		return
+	}
+	size, serr := os.file_size(f)
+	if serr != nil {
+		os.close(f)
+		_fail("cannot read the size of %q", path)
+		return
+	}
+	return Source{file = f, size = size}, true
 }
 
 @(private)
@@ -149,80 +157,132 @@ Leaf :: struct {
 	out:         w.ColumnType,
 	scale:       i32,
 	nested:      bool,
+	unsigned:    bool, // UINT annotations (their statistics use unsigned order)
 	reason:      string, // why the leaf cannot be read; "" if it can
+}
+
+// The parsed footer of a file: metadata, its leaves and top-level fields.
+// The strings of `fm` point into `footer` (read_file) or into the caller's
+// bytes (read_bytes).
+@(private)
+Meta :: struct {
+	footer: [dynamic]u8,
+	fm:     File_Meta,
+	leaves: [dynamic]Leaf,
+	tops:   [dynamic]Top,
+}
+
+// Reads and checks the footer of `src` (free with _close_meta, also on failure)
+@(private)
+_open_meta :: proc(src: ^Source, m: ^Meta) -> bool {
+	buf := make([dynamic]u8)
+	defer delete(buf)
+
+	// footer: <metadata> <u32 metadata length> "PAR1"
+	if src.size < 12 {return _fail("not a Parquet file (too short)")}
+	tail, tok := _source_read(src, src.size - 8, 8, &buf)
+	if !tok {return _fail("cannot read the file footer")}
+	magic := string(tail[4:8])
+	if magic == "PARE" {return _fail("encrypted Parquet files are not supported")}
+	if magic != "PAR1" {return _fail("not a Parquet file (no PAR1 magic)")}
+	meta_len := i64(intrinsics.unaligned_load((^u32le)(&tail[0])))
+	if meta_len <= 0 || meta_len > src.size - 12 {return _fail("corrupt footer length")}
+	footer, fok := _source_read(src, src.size - 8 - meta_len, meta_len, &m.footer)
+	if !fok {return _fail("cannot read the file metadata")}
+	t := Thrift {
+		data = footer,
+	}
+	m.fm = _read_file_meta(&t)
+	if t.bad || t.pos != len(footer) || len(m.fm.schema) == 0 {
+		return _fail("corrupt file metadata")
+	}
+
+	ok: bool
+	m.leaves, m.tops, ok = _plan_schema(m.fm.schema[:])
+	if !ok {return false}
+
+	total: i64
+	for rg in m.fm.row_groups {
+		if rg.num_rows < 0 || rg.num_rows > m.fm.num_rows {return _fail("corrupt row count")}
+		if len(rg.columns) != len(m.leaves) {
+			return _fail(
+				"corrupt row group (%d column chunks for %d columns)",
+				len(rg.columns),
+				len(m.leaves),
+			)
+		}
+		total += rg.num_rows
+	}
+	if total != m.fm.num_rows {return _fail("corrupt row count")}
+	return true
+}
+
+@(private)
+_close_meta :: proc(m: ^Meta) {
+	_destroy_file_meta(&m.fm)
+	delete(m.leaves)
+	delete(m.tops)
+	delete(m.footer)
+	m^ = {}
+}
+
+// Index of the top-level field `name`, -1 if there is none
+@(private)
+_find_top :: proc(m: ^Meta, name: string) -> int {
+	for top, i in m.tops {
+		if top.name == name {return i}
+	}
+	return -1
+}
+
+// The leaf of top-level field `ti` if wotan can load it; reports why not
+// otherwise
+@(private)
+_loadable :: proc(m: ^Meta, ti: int) -> (^Leaf, bool) {
+	top := m.tops[ti]
+	if top.leaf < 0 {
+		_fail(
+			"column %q is nested (a list, map or struct), which is not supported; pass `columns` to load the others",
+			top.name,
+		)
+		return nil, false
+	}
+	leaf := &m.leaves[top.leaf]
+	if leaf.reason != "" {
+		_fail("column %q: %s", leaf.name, leaf.reason)
+		return nil, false
+	}
+	for other, i in m.tops {
+		if i != ti && other.name == top.name {
+			_fail("the file has two columns named %q", top.name)
+			return nil, false
+		}
+	}
+	return leaf, true
 }
 
 @(private)
 _read :: proc(
 	src: ^Source,
 	columns: []string,
+	filters: []Filter,
 	allocator: mem.Allocator,
 ) -> (
 	df: w.DataFrame,
 	ok: bool,
 ) {
-	buf := make([dynamic]u8)
-	defer delete(buf)
-
-	// footer: <metadata> <u32 metadata length> "PAR1"
-	if src.size < 12 {
-		_fail("not a Parquet file (too short)")
-		return
-	}
-	tail, tok := _source_read(src, src.size - 8, 8, &buf)
-	if !tok {
-		_fail("cannot read the file footer")
-		return
-	}
-	magic := string(tail[4:8])
-	if magic == "PARE" {
-		_fail("encrypted Parquet files are not supported")
-		return
-	}
-	if magic != "PAR1" {
-		_fail("not a Parquet file (no PAR1 magic)")
-		return
-	}
-	meta_len := i64(intrinsics.unaligned_load((^u32le)(&tail[0])))
-	if meta_len <= 0 || meta_len > src.size - 12 {
-		_fail("corrupt footer length")
-		return
-	}
-	footer_buf := make([dynamic]u8)
-	defer delete(footer_buf)
-	footer, fok := _source_read(src, src.size - 8 - meta_len, meta_len, &footer_buf)
-	if !fok {
-		_fail("cannot read the file metadata")
-		return
-	}
-	t := Thrift {
-		data = footer,
-	}
-	fm := _read_file_meta(&t)
-	defer _destroy_file_meta(&fm)
-	if t.bad || t.pos != len(footer) || len(fm.schema) == 0 {
-		_fail("corrupt file metadata")
-		return
-	}
-
-	leaves, tops := _plan_schema(fm.schema[:]) or_return
-	defer delete(leaves)
-	defer delete(tops)
+	m: Meta
+	defer _close_meta(&m)
+	_open_meta(src, &m) or_return
 
 	// selection: indices into `tops`
 	picked := make([dynamic]int)
 	defer delete(picked)
 	if columns == nil {
-		for i in 0 ..< len(tops) {append(&picked, i)}
+		for i in 0 ..< len(m.tops) {append(&picked, i)}
 	} else {
 		for name in columns {
-			found := -1
-			for top, i in tops {
-				if top.name == name {
-					found = i
-					break
-				}
-			}
+			found := _find_top(&m, name)
 			if found < 0 {
 				_fail("no column %q in the file", name)
 				return
@@ -236,47 +296,47 @@ _read :: proc(
 			append(&picked, found)
 		}
 	}
-	for p in picked {
-		top := tops[p]
-		if top.leaf < 0 {
-			_fail(
-				"column %q is nested (a list, map or struct), which is not supported; pass `columns` to load the others",
-				top.name,
-			)
+	for p in picked {_loadable(&m, p) or_return}
+
+	// filter columns that are not selected are read too, then dropped
+	n_out := len(picked)
+	filter_cols := make([]int, len(filters)) // position among the loaded columns
+	defer delete(filter_cols)
+	for &f, k in filters {
+		ti := _find_top(&m, f.column)
+		if ti < 0 {
+			_fail("filter: no column %q in the file", f.column)
 			return
 		}
-		leaf := &leaves[top.leaf]
-		if leaf.reason != "" {
-			_fail("column %q: %s", leaf.name, leaf.reason)
-			return
+		leaf := _loadable(&m, ti) or_return
+		_check_filter(&f, leaf.out) or_return
+		filter_cols[k] = -1
+		for p, j in picked {
+			if p == ti {filter_cols[k] = j}
 		}
-		for q in picked {
-			if q != p && tops[q].name == top.name {
-				_fail("the file has two columns named %q", top.name)
-				return
-			}
+		if filter_cols[k] < 0 {
+			append(&picked, ti)
+			filter_cols[k] = len(picked) - 1
 		}
 	}
 
+	// row groups that can hold matching rows (all of them without filters)
+	groups := make([dynamic]int)
+	defer delete(groups)
 	total := 0
-	for rg in fm.row_groups {
-		if rg.num_rows < 0 || rg.num_rows > fm.num_rows {
-			_fail("corrupt row count")
-			return
+	for &rg, g in m.fm.row_groups {
+		keep := true
+		for &f in filters {
+			leaf := &m.leaves[m.tops[_find_top(&m, f.column)].leaf]
+			if _group_excluded(&f, leaf, &rg.columns[leaf.chunk].meta.stats, rg.num_rows) {
+				keep = false
+				break
+			}
 		}
-		if len(rg.columns) != len(leaves) {
-			_fail(
-				"corrupt row group (%d column chunks for %d columns)",
-				len(rg.columns),
-				len(leaves),
-			)
-			return
+		if keep {
+			append(&groups, g)
+			total += int(rg.num_rows)
 		}
-		total += int(rg.num_rows)
-	}
-	if i64(total) != fm.num_rows {
-		_fail("corrupt row count")
-		return
 	}
 
 	cols := make([dynamic]w.Column, 0, len(picked))
@@ -288,7 +348,7 @@ _read :: proc(
 	jobs := make([]Leaf_Job, len(picked))
 	defer delete(jobs)
 	for p, j in picked {
-		leaf := &leaves[tops[p].leaf]
+		leaf := &m.leaves[m.tops[p].leaf]
 		col := w.column_new("", leaf.out, total, allocator)
 		w.column_own_name(&col, leaf.name)
 		append(&cols, col)
@@ -298,14 +358,36 @@ _read :: proc(
 	}
 	for &job, j in jobs {job.col = &cols[j]}
 	work := Read_Work {
-		src   = src,
-		fm    = &fm,
-		jobs  = jobs,
-		total = total,
+		src    = src,
+		fm     = &m.fm,
+		groups = groups[:],
+		jobs   = jobs,
+		total  = total,
 	}
 	util.parallel_for(len(jobs), &work, _read_leaves, tasks = len(jobs))
 	for job in jobs {
 		if !job.ok {return}
+	}
+
+	// rows of the kept groups that match every filter
+	if len(filters) > 0 {
+		keep := make([]bool, total)
+		defer delete(keep)
+		fcols := make([]^w.Column, len(filters))
+		defer delete(fcols)
+		for k in 0 ..< len(filters) {fcols[k] = &cols[filter_cols[k]]}
+		_match_all(filters, fcols, keep)
+		rows := make([dynamic]int, 0, total)
+		defer delete(rows)
+		for r in 0 ..< total {
+			if keep[r] {append(&rows, r)}
+		}
+		if len(rows) < total {
+			for &c in cols[:n_out] {_keep_rows(&c, rows[:])}
+			total = len(rows)
+		}
+		for &c in cols[n_out:] {w.destroy_column(&c)}
+		resize(&cols, n_out)
 	}
 
 	df = w.dataframe_new(allocator)
@@ -324,11 +406,12 @@ Leaf_Job :: struct {
 
 @(private)
 Read_Work :: struct {
-	src:   ^Source,
-	fm:    ^File_Meta,
-	jobs:  []Leaf_Job,
-	total: int,
-	next:  int, // next job to take (atomic)
+	src:    ^Source,
+	fm:     ^File_Meta,
+	groups: []int, // row groups to read
+	jobs:   []Leaf_Job,
+	total:  int, // rows in those groups
+	next:   int, // next job to take (atomic)
 }
 
 // A parallel task: takes columns until none are left, so a long column does
@@ -342,7 +425,7 @@ _read_leaves :: proc(data: rawptr, begin, end: int) {
 		j := intrinsics.atomic_add(&work.next, 1)
 		if j >= len(work.jobs) {break}
 		job := &work.jobs[j]
-		job.ok = _read_leaf(work.src, work.fm, job.leaf, job.col, work.total)
+		job.ok = _read_leaf(work.src, work.fm, work.groups, job.leaf, job.col, work.total)
 	}
 }
 
@@ -350,6 +433,7 @@ _read_leaves :: proc(data: rawptr, begin, end: int) {
 Top :: struct {
 	name: string,
 	leaf: int, // index into the leaves, -1 for a nested field
+	se:   int, // index of its schema element
 }
 
 // The leaves (primitive columns, in column-chunk order) and the top-level
@@ -370,7 +454,7 @@ _plan_schema :: proc(
 		if i >= len(schema) {break}
 		se := schema[i]
 		if se.num_children > 0 || se.repetition == 2 {
-			append(&tops, Top{name = se.name, leaf = -1})
+			append(&tops, Top{name = se.name, leaf = -1, se = i})
 			// count its leaves so chunk indices stay aligned
 			pending := 1
 			for pending > 0 && i < len(schema) {
@@ -387,7 +471,7 @@ _plan_schema :: proc(
 		}
 		leaf := _plan_leaf(se)
 		leaf.chunk = len(leaves)
-		append(&tops, Top{name = se.name, leaf = len(leaves)})
+		append(&tops, Top{name = se.name, leaf = len(leaves), se = i})
 		append(&leaves, leaf)
 		i += 1
 	}
@@ -415,6 +499,7 @@ _plan_leaf :: proc(se: Schema_Element) -> Leaf {
 		leaf.scale = lt.scale if lt.kind == LT_DECIMAL else se.scale
 	}
 	unsigned := (lt.kind == LT_INTEGER && !lt.signed) || (ct >= CT_UINT_8 && ct <= CT_UINT_64)
+	leaf.unsigned = unsigned
 
 	switch leaf.physical {
 	case .Boolean:
@@ -512,7 +597,14 @@ Chunk_State :: struct {
 }
 
 @(private)
-_read_leaf :: proc(src: ^Source, fm: ^File_Meta, leaf: ^Leaf, col: ^w.Column, total: int) -> bool {
+_read_leaf :: proc(
+	src: ^Source,
+	fm: ^File_Meta,
+	groups: []int,
+	leaf: ^Leaf,
+	col: ^w.Column,
+	total: int,
+) -> bool {
 	st := Chunk_State {
 		leaf = leaf,
 		col  = col,
@@ -530,7 +622,8 @@ _read_leaf :: proc(src: ^Source, fm: ^File_Meta, leaf: ^Leaf, col: ^w.Column, to
 	chunk_buf := make([dynamic]u8)
 	defer delete(chunk_buf)
 
-	for &rg in fm.row_groups {
+	for g in groups {
+		rg := &fm.row_groups[g]
 		if leaf.chunk >= len(rg.columns) {return _fail("corrupt row group (missing column chunk)")}
 		cc := rg.columns[leaf.chunk]
 		if cc.file_path != "" {

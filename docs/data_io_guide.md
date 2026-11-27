@@ -46,7 +46,7 @@ import "core:fmt"
 | JSON Lines | `io.jsonl_load(path)`, `io.try_jsonl_load(path)` | `ex.jsonl_write(&df, path, alloc)` |
 | HTML `<table>` | `io.html_load(path)`, `_table_index`, `_table_id`, `_all`, `io.html_load_from_string(text)`; `try_` variants | `ex.html_write(&df, path, alloc)` |
 | Excel `.xlsx` | `io.xlsx_load(path)`, `io.xlsx_load_sheet(path, name)`, `io.xlsx_sheet_names(path)`; `try_` variants | `ex.xlsx_save(&df, path, alloc)` |
-| Parquet | `io.parquet_load(path, columns)`, `io.parquet_load_from_bytes(data, columns)` | `ex.parquet_save(&df, path)`, `ex.parquet_bytes(&df)` |
+| Parquet | `io.parquet_load(path, columns, filters = ...)`, `io.parquet_load_from_bytes(data, columns)`, `io.parquet_info(path)` | `ex.parquet_save(&df, path)`, `ex.parquet_bytes(&df)` |
 | URL | `net.http_get(url)`, `net.download_file(url, path)`, `net.read_csv_from_url`, `read_html_from_url`, `read_table_from_url` | |
 | Yahoo Finance | `net.read_yahoo`, `net.read_yahoo_series`, `net.read_yahoo_panel` | |
 
@@ -224,7 +224,7 @@ Apache Parquet is the columnar file format of the data world: compact, typed, an
 
 ### 7.1 Reading
 
-`parquet_load(path, columns = nil, alloc) -> (df, ok)` reads an Apache Parquet file, the columnar format that pandas (`to_parquet`), pyarrow, Spark, DuckDB and Polars write. `columns` names the columns to load, in the order you want them. Only those columns' data is read from disk, which makes loading a few columns of a wide file much faster than loading all of it. `parquet_load_from_bytes(data, columns, alloc)` reads a file already in memory.
+`parquet_load(path, columns = nil, alloc) -> (df, ok)` reads an Apache Parquet file, the columnar format that pandas (`to_parquet`), pyarrow, Spark, DuckDB and Polars write. `columns` names the columns to load, in the order you want them. Only those columns' data is read from disk, which makes loading a few columns of a wide file much faster than loading all of it. A fourth parameter, `filters`, loads only the rows in a range of values (section 7.4). `parquet_load_from_bytes(data, columns, alloc)` reads a file already in memory.
 
 ```odin
 px, ok := io.parquet_load("demo_files/parquet/pandas_index.parquet")
@@ -346,7 +346,7 @@ Every column may hold nulls. pandas reads an integer column with nulls as `float
 The options:
 
 - **`compression`**: `.Snappy` (the default, as in pandas) is fast with moderate compression; `.Gzip` gives smaller files and writes several times slower; `.Lz4` is about as fast as Snappy; `.None` stores the pages as they are. The writer has no Zstandard compressor; files compressed with Zstandard elsewhere are read like any other.
-- **`row_group_rows`**: the rows per row group (a million by default). Each row group records the minimum, maximum and null count of every column, which lets readers such as DuckDB and pyarrow skip row groups that cannot match a filter.
+- **`row_group_rows`**: the rows per row group (a million by default). Each row group records the minimum, maximum and null count of every column. Readers can then skip the row groups that cannot match a filter; `parquet_load` with `filters` does this (section 7.4), as do DuckDB and pyarrow.
 - **`dictionary`**: String columns are stored as a dictionary of their distinct values plus small indices, which suits columns that repeat values, such as tickers or sectors. A column whose dictionary would pass 1 MiB in a row group is stored plainly. Pass `false` to store every String column plainly.
 
 The column chunks are encoded and compressed in parallel, and `util.parallel_max_threads` caps the threads as for reading; the file's bytes are the same for any number of threads. On the 1-million-row frame from section 7.1, best of three runs, compared with pyarrow 14 writing the same data:
@@ -359,6 +359,156 @@ The column chunks are encoded and compressed in parallel, and `util.parallel_max
 | none | 57 ms | 150 ms | 44.4 MB | 250 ms | 41.4 MB |
 
 `parquet_save` returns false, with the reason on stderr, when the file cannot be written (for example, a folder that doesn't exist) or when a hidden index has the name of one of the columns.
+
+### 7.3 What a file holds: `parquet_info`
+
+`parquet_info(path, alloc) -> (info, ok)` reads only the footer of a Parquet file, the part that describes it, and loads no data. Even for a large file it returns in well under a millisecond. Free the result with `destroy_parquet_info`. `parquet_info_from_bytes(data, alloc)` does the same for a file in memory. `print_parquet_info(&info)` prints a summary:
+
+```odin
+prices := io.csv_load("data/spy_prices.csv")
+defer w.destroy_dataframe(&prices)
+if !ex.parquet_save(&prices, "spy.parquet", row_group_rows = 10) {return}
+
+info, ok := io.parquet_info("spy.parquet")
+if !ok {return}
+defer io.destroy_parquet_info(&info)
+io.print_parquet_info(&info)
+for g, i in info.row_groups {
+	s := g.stats[0] // the Date column
+	fmt.printfln(
+		"row group %d: %d rows, %s .. %s",
+		i,
+		g.rows,
+		w.date_to_string(s.min.(w.Date), context.temp_allocator),
+		w.date_to_string(s.max.(w.Date), context.temp_allocator),
+	)
+}
+```
+
+```
+30 rows in 3 row groups, written by wotan
+  column  type   parquet type  nulls  range
+  Date    Date   INT32 DATE        0  2023-01-03 .. 2023-02-14
+  Open    Float  DOUBLE            0  384.58 .. 411.26
+  High    Float  DOUBLE            0  387.16 .. 413.43
+  Low     Float  DOUBLE            0  381.04 .. 410.58
+  Close   Float  DOUBLE            0  383.6 .. 412.85
+  Volume  Int    INT64             0  54321800 .. 88078700
+row group 0: 10 rows, 2023-01-03 .. 2023-01-17
+row group 1: 10 rows, 2023-01-18 .. 2023-01-31
+row group 2: 10 rows, 2023-02-01 .. 2023-02-14
+```
+
+A `Parquet_Info` has these fields:
+
+| Field | Holds |
+|---|---|
+| `rows` | the number of rows in the file |
+| `created_by` | the library that wrote the file, if it says |
+| `columns` | one `Parquet_Column_Info` per top-level column: `name`; `type`, the DataFrame type it loads as; `parquet_type`, the type as stored (for example `INT64 TIMESTAMP(MICROS, UTC)` or `FIXED_LEN_BYTE_ARRAY(16) DECIMAL(38, 6)`); `nullable`; and `reason`, which explains why wotan cannot load the column (for example a nested column), or is `""` when it can. A column wotan cannot load has `type = .Invalid`. |
+| `row_groups` | one `Parquet_Row_Group_Info` per row group: `rows`, `offset` (where its data starts in the file), `compressed_bytes`, and `stats`, with one `Parquet_Column_Stats` per entry of `columns` |
+
+A `Parquet_Column_Stats` holds what the writer recorded for one column in one row group:
+- `null_count`, which is -1 if the file doesn't say.
+- `min` and `max`, as a `Parquet_Value`: a union of `int`, `f64`, `bool`, `string`, `Date`, `Time` and `Datetime`. Each value has the column's DataFrame type, converted as the cells are: a timestamp becomes a `Datetime` and a decimal a `Float`.
+
+`min` and `max` are `nil` in these cases:
+- the writer recorded no statistics;
+- a bound is NaN;
+- the column is an `INT96` timestamp, a `UUID`, or nested. These are stored in an order that differs from the order of the loaded values.
+
+Writers may shorten long strings in the statistics. The stored `min` is then a prefix of the smallest value, and the stored `max` sorts after the largest value. Both are still valid bounds. pyarrow, DuckDB, Spark and wotan record statistics for every row group.
+
+### 7.4 Loading only the rows you need: filters
+
+`parquet_load(path, columns, alloc, filters)` and `parquet_load_from_bytes` take a list of `Parquet_Filter`s and keep only the rows that match all of them:
+
+```odin
+Parquet_Filter :: struct {
+	column:       string,
+	lower, upper: Parquet_Value, // nil leaves that end open
+	inclusive:    w.Inclusive,   // which ends belong to the range: .Both (default), .Neither, .Left, .Right
+}
+```
+
+A row matches when its cell in `column` lies between `lower` and `upper`. Set `lower = upper` to pick one value. A missing cell or NaN never matches.
+
+The bounds must suit the column's DataFrame type:
+- an `Int` or `Float` column takes `int` or `f64` bounds;
+- a `Bool`, `String`, `Date`, `Time` or `Datetime` column takes a value of that type.
+
+Strings compare byte by byte, which for plain text is alphabetical order. A filter column does not have to be in `columns`.
+
+```odin
+// February only: row groups 0 and 1 end in January and are not read
+feb, fok := io.parquet_load(
+	"spy.parquet",
+	{"Date", "Close"},
+	filters = {{column = "Date", lower = w.Date{2023, 2, 1}, upper = w.Date{2023, 2, 28}}},
+)
+if !fok {return}
+defer w.destroy_dataframe(&feb)
+w.dataframe_pretty_print(&feb, max_rows = 4)
+
+// two filters: both must hold
+high, hok := io.parquet_load(
+	"spy.parquet",
+	{"Date", "Close", "Volume"},
+	filters = {
+		{column = "Close", lower = 405},
+		{column = "Volume", upper = 70_000_000, inclusive = .Neither},
+	},
+)
+if !hok {return}
+defer w.destroy_dataframe(&high)
+w.dataframe_pretty_print(&high)
+
+_, bad := io.parquet_load("spy.parquet", filters = {{column = "Date", lower = "2023-02-01"}})
+fmt.println("string bound for a Date column:", bad)
+```
+
+```
+    Date        Close
+  0 2023-02-01  402.43
+  1 2023-02-02  404.26
+  2 2023-02-03  405.58
+  3 2023-02-06  406.43
+... (6 more rows)
+    Date        Close   Volume
+  0 2023-02-03  405.58  68765400
+  1 2023-02-06  406.43  59876500
+  2 2023-02-07  407.85  63456700
+  3 2023-02-08  408.12  57654300
+  4 2023-02-09  409.58  61234500
+  5 2023-02-10  410.43  58765400
+  6 2023-02-13  411.26  55432100
+  7 2023-02-14  412.85  59876500
+parquet: filter on "Date": a bound of type string for a Date column
+string bound for a Date column: false
+```
+
+The rows are the ones that pyarrow's `read_table(filters=...)` and `pandas.read_parquet(filters=...)` return, in file order.
+
+**Skipped row groups.** Before reading any data, the loader compares each filter with the `min`, `max` and null count of every row group (section 7.3). It does not read a row group that cannot hold a match. In the remaining row groups it checks each row.
+
+The saving therefore depends on how the file is laid out. A history sorted by date, written in row groups of a fixed number of rows, keeps each date range in a few row groups, so a date filter reads only those. A filter on a column whose values are spread over every row group, such as one ticker in a date-sorted file, reads the whole file and then drops rows. Writing with `row_group_rows` of 100 000 to a million rows (section 7.2) keeps the row groups fine enough to skip.
+
+Reading a file of 10 million rows (daily bars of 4000 tickers over ten years, sorted by date, in 101 row groups), best of five runs on a 16-thread machine:
+
+| Read | Rows | wotan | pyarrow 14 `read_table` |
+|---|---|---|---|
+| the whole file | 10 080 000 | 121 ms | 88 ms |
+| one month (`Date` filter) | 84 000 | 3 ms | 9 ms |
+| one ticker (`String` filter, no row group skipped) | 2 520 | 152 ms | 92 ms |
+
+`pandas.read_parquet` with the same one-month filter takes 17 ms.
+
+When nothing can be skipped, wotan first loads the row groups and then removes rows, so a filter adds about a quarter to the time of a full load. pyarrow filters while it reads.
+
+**Failure.** `ok` is false, with the reason on stderr, when:
+- a filter names a column the file doesn't have, or one wotan cannot load (a nested column);
+- a bound has a type that doesn't suit the column (for example a string for a `Date` column);
+- a bound is NaN.
 
 ## 8. Writing files
 
@@ -696,7 +846,8 @@ The dates are CBOE's trading days. To combine an index with Yahoo prices, put it
 | `csv_export_test`, `json_basic_test`, `jsonl_basic_test`, `json_export_test` | CSV and JSON loading and writing |
 | `html_basic_test`, `html_extended_test`, `html_tags_test`, `html_export_test` | HTML tables by index, id and all, tags inside cells, writing |
 | `excel_basic_test`, `excel_date_test`, `excel_export_test`, `zip_smoke_test` | reading sheets and dates, writing workbooks, the ZIP container |
-| `loaders_checked_test` | every `try_` loader gives the frame of its panicking twin, and `ok = false` in 20 failure cases (missing files, empty or non-CSV text, wrong types, bad JSON and JSON Lines, no table, no sheet, not a workbook); header names and numbers as pandas 1.5.3 reads them; a 1.7 MB CSV with quoted line breaks read identically on one thread and on all |
+| `loaders_checked_test` | every `try_` loader gives the frame of its panicking twin, and `ok = false` in 20 failure cases (missing files, empty or non-CSV text, wrong types, bad JSON and JSON Lines, no table, no sheet, not a workbook); header names and numbers as pandas 1.5.3 reads them; a 1.7 MB CSV with quoted line breaks read identically on one thread and on all; the finance loaders `try_load_market_data` and `try_load_option_chain` against pandas 1.5.3 and on files that do not fit |
+| `parquet_filter_test` | `parquet_info` against pyarrow 14's metadata (rows, row groups, column types, and null count, min and max per row group for files written by pyarrow and DuckDB; none for UUID, INT96 and nested columns); 16 filters on a 600-row file in 10 row groups, each giving the rows pyarrow's `read_table(filters=...)` gives; a corrupt row group outside the filter's range is never read; `ok = false` for bad filters and unreadable files; the same rows from one thread and from all |
 | `parquet_test` | reading: every column type, with nulls and extreme values, against pyarrow in eight layouts (plain, dictionary, delta and byte-stream-split values, page versions 1 and 2, no compression, Snappy, gzip, Zstandard, LZ4, several row groups and many small pages); FLOAT16 and byte stream split on integers (pyarrow 17); Zstandard pages of several blocks; DuckDB's Zstandard file with UUIDs; the Zstandard decoder on its own; the same frame from one thread and from all; INT96 timestamps; decimals stored as integers (DuckDB); a pandas file; column selection; `ok = false` for unsupported files (nested, Brotli) and for truncated or corrupted copies. Writing: the same table with every codec, with and without dictionaries, in one or three row groups, read back cell for cell; the same bytes from one thread and from all; views, an empty frame, a hidden index, 70 000 rows with an all-null column. The fixtures in `demo_files/parquet` were written by pyarrow 14 and 17 and by DuckDB 1.1 |
 | `http_get_test`, `yahoo_finance_json_test`, `yahoo_finance_events_test` | live HTTP and Yahoo requests, including dividends and splits |
 | `yahoo_max_range_test` | `.Max` gives the whole daily history (SPY from 1993-01-29, no gap over a week) and weekly rows a week apart |
@@ -715,7 +866,8 @@ Most of the finance tests load their data with `read_yahoo`, `read_yahoo_series`
 | `io.try_csv_load`, `io.try_csv_load_from_string`, `io.try_json_load`, `io.try_jsonl_load`, `io.try_html_load`, `_table_index`, `_table_id`, `_all`, `_from_string`, `io.try_xlsx_load`, `io.try_xlsx_load_sheet`, `io.try_xlsx_sheet_names` | the same, returning `(df, ok)` (reason on stderr) instead of panicking |
 | `io.html_load(path, alloc)`, `_table_index`, `_table_id`, `_all`, `io.html_load_from_string`, `io.html_load_all_from_string` | HTML tables → DataFrame(s) |
 | `io.xlsx_load(path, alloc)`, `io.xlsx_load_sheet(path, name, alloc) -> (df, found)`, `io.xlsx_sheet_names(path, alloc)` | Excel worksheets |
-| `io.parquet_load(path, columns, alloc) -> (df, ok)`, `io.parquet_load_from_bytes(data, columns, alloc) -> (df, ok)` | Parquet file / bytes → DataFrame |
+| `io.parquet_load(path, columns, alloc, filters) -> (df, ok)`, `io.parquet_load_from_bytes(data, columns, alloc, filters) -> (df, ok)` | Parquet file / bytes → DataFrame, optionally only the rows in value ranges (`Parquet_Filter`) |
+| `io.parquet_info(path, alloc) -> (info, ok)`, `io.parquet_info_from_bytes`, `io.print_parquet_info(&info)`, `io.destroy_parquet_info(&info)` | a Parquet file's rows, columns and per-row-group statistics, from its footer |
 | `ex.parquet_save(&df, path, compression, row_group_rows, dictionary) -> bool`, `ex.parquet_bytes(&df, ...) -> ([]u8, ok)` | DataFrame → Parquet file / bytes |
 | `zstd.decompress(dst, src) -> (written, ok)`, `zstd.decompressed_size(src) -> (size, ok)` | Zstandard data → bytes (package `wotan/zstd`) |
 | `ex.csv_save(&df, path, sep, alloc) -> bool`, `ex.csv_string(&df, sep, alloc) -> string`, `ex.json_write`, `ex.jsonl_write`, `ex.html_write`, `ex.xlsx_save -> bool` | DataFrame → file |

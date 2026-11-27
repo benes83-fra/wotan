@@ -603,8 +603,10 @@ The fitting procedures are:
 ## 8. Market data
 
 **Local files.**
-- `load_market_data(path)` reads a CSV with `Date`, `Close` and `Volume` columns into a `MarketData` (dates, prices, volumes, simple returns, with the first return 0).
-- `load_option_chain(path, current_date)` reads a CSV with columns Symbol, Type, Strike, Expiry, ImpliedVol, Price, … into an `OptionChain`, with expiries in years from `current_date`. The Type column is read by its first letter, in either case, into the strings `"call"` and `"put"` (`""` for anything else).
+- `load_market_data(path)` reads a CSV with `Date`, `Close` and `Volume` columns into a `MarketData` (dates, prices, volumes, simple returns, with the first return 0). Other columns are ignored.
+- `load_option_chain(path, current_date)` reads a CSV with `Type`, `Strike`, `Expiry`, `ImpliedVol` and `Price` columns into an `OptionChain`, with expiries in years from `current_date`. Other columns, such as `Symbol`, `Bid` or `OpenInterest`, are ignored, and the columns may be in any order. The Type column is read by its first letter, in either case, into the strings `"call"` and `"put"` (`""` for anything else).
+
+Every row must have its values: `Date` and `Expiry` must be dates, and `Close`, `Volume`, `Strike`, `ImpliedVol` and `Price` must be numbers. The two loaders panic when the file cannot be read or doesn't fit. `try_load_market_data(path)` and `try_load_option_chain(path, current_date)` return `(value, ok)` instead, with `ok` false and the reason on stderr, for example `try_load_market_data: "data/spy_options.csv": no Date column`.
 
 Free a `MarketData` with `free_market_data` and an `OptionChain` with `free_option_chain`; the latter also frees the chains from Yahoo below.
 
