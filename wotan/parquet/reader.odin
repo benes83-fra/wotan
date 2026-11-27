@@ -14,8 +14,7 @@ import w "../core"
 import util "../util"
 import zs "../zstd"
 
-// Parquet reader: flat schemas (every top-level field a primitive column,
-// required or optional) into a DataFrame.
+// Parquet reader: a file into a DataFrame, one column per top-level field.
 //
 // Types:
 //   BOOLEAN                                   -> Bool
@@ -27,14 +26,15 @@ import zs "../zstd"
 //   DATE                                      -> Date
 //   TIME (millis, micros, nanos)              -> Time
 //   TIMESTAMP (millis, micros, nanos), INT96  -> Datetime (UTC for instants)
+//   lists, maps, structs (any nesting)        -> String of JSON text (nested.odin)
 // Datetime and Time keep every unit to the nanosecond.
 //
 // Encodings: PLAIN, PLAIN_DICTIONARY / RLE_DICTIONARY, RLE (booleans),
 // DELTA_BINARY_PACKED, DELTA_LENGTH_BYTE_ARRAY, DELTA_BYTE_ARRAY and
 // BYTE_STREAM_SPLIT, in data pages v1 and v2. Codecs: uncompressed, Snappy,
-// gzip, Zstandard, LZ4_RAW and the Hadoop-framed LZ4. Anything else (nested
-// columns, Brotli or LZO, encrypted files) makes the read fail with a message
-// on stderr; a read never returns partial or guessed data.
+// gzip, Zstandard, LZ4_RAW and the Hadoop-framed LZ4. Anything else (Brotli
+// or LZO, encrypted files) makes the read fail with a message on stderr; a
+// read never returns partial or guessed data.
 //
 // Only the column chunks of the requested columns are read from disk, and the
 // columns are decoded in parallel (util.parallel_max_threads caps the
@@ -156,7 +156,9 @@ Leaf :: struct {
 	conv:        Conv,
 	out:         w.ColumnType,
 	scale:       i32,
-	nested:      bool,
+	nested:      bool, // part of a nested field
+	max_rep:     int, // nested leaves: the highest repetition level
+	text:        bool, // nested leaves: a STRING / ENUM / JSON annotation
 	unsigned:    bool, // UINT annotations (their statistics use unsigned order)
 	reason:      string, // why the leaf cannot be read; "" if it can
 }
@@ -170,6 +172,8 @@ Meta :: struct {
 	fm:     File_Meta,
 	leaves: [dynamic]Leaf,
 	tops:   [dynamic]Top,
+	nodes:  [dynamic]Node, // fields of the nested top-level columns
+	kids:   [dynamic]int, // children of the nodes
 }
 
 // Reads and checks the footer of `src` (free with _close_meta, also on failure)
@@ -197,9 +201,7 @@ _open_meta :: proc(src: ^Source, m: ^Meta) -> bool {
 		return _fail("corrupt file metadata")
 	}
 
-	ok: bool
-	m.leaves, m.tops, ok = _plan_schema(m.fm.schema[:])
-	if !ok {return false}
+	_plan_schema(m.fm.schema[:], m) or_return
 
 	total: i64
 	for rg in m.fm.row_groups {
@@ -222,6 +224,8 @@ _close_meta :: proc(m: ^Meta) {
 	_destroy_file_meta(&m.fm)
 	delete(m.leaves)
 	delete(m.tops)
+	delete(m.nodes)
+	delete(m.kids)
 	delete(m.footer)
 	m^ = {}
 }
@@ -238,27 +242,19 @@ _find_top :: proc(m: ^Meta, name: string) -> int {
 // The leaf of top-level field `ti` if wotan can load it; reports why not
 // otherwise
 @(private)
-_loadable :: proc(m: ^Meta, ti: int) -> (^Leaf, bool) {
+_loadable :: proc(m: ^Meta, ti: int) -> bool {
 	top := m.tops[ti]
 	if top.leaf < 0 {
-		_fail(
-			"column %q is nested (a list, map or struct), which is not supported; pass `columns` to load the others",
-			top.name,
-		)
-		return nil, false
-	}
-	leaf := &m.leaves[top.leaf]
-	if leaf.reason != "" {
-		_fail("column %q: %s", leaf.name, leaf.reason)
-		return nil, false
+		if top.reason != "" {return _fail("column %q: %s", top.name, top.reason)}
+	} else if leaf := &m.leaves[top.leaf]; leaf.reason != "" {
+		return _fail("column %q: %s", leaf.name, leaf.reason)
 	}
 	for other, i in m.tops {
 		if i != ti && other.name == top.name {
-			_fail("the file has two columns named %q", top.name)
-			return nil, false
+			return _fail("the file has two columns named %q", top.name)
 		}
 	}
-	return leaf, true
+	return true
 }
 
 @(private)
@@ -308,8 +304,12 @@ _read :: proc(
 			_fail("filter: no column %q in the file", f.column)
 			return
 		}
-		leaf := _loadable(&m, ti) or_return
-		_check_filter(&f, leaf.out) or_return
+		_loadable(&m, ti) or_return
+		if m.tops[ti].leaf < 0 {
+			_fail("filter on %q: a nested column cannot be filtered", f.column)
+			return
+		}
+		_check_filter(&f, m.leaves[m.tops[ti].leaf].out) or_return
 		filter_cols[k] = -1
 		for p, j in picked {
 			if p == ti {filter_cols[k] = j}
@@ -345,28 +345,86 @@ _read :: proc(
 	defer if !success {
 		for &c in cols {w.destroy_column(&c)}
 	}
-	jobs := make([]Leaf_Job, len(picked))
+	// a flat column is decoded straight into its column; each leaf of a
+	// nested one into a stream of levels and values, assembled afterwards
+	jobs := make([dynamic]Leaf_Job)
 	defer delete(jobs)
+	streams := make([][]Leaf_Stream, len(picked))
+	defer {
+		for ss in streams {
+			for &st in ss {_stream_destroy(&st)}
+			delete(ss)
+		}
+		delete(streams)
+	}
 	for p, j in picked {
-		leaf := &m.leaves[m.tops[p].leaf]
-		col := w.column_new("", leaf.out, total, allocator)
-		w.column_own_name(&col, leaf.name)
+		top := &m.tops[p]
+		if top.leaf >= 0 {
+			leaf := &m.leaves[top.leaf]
+			col := w.column_new("", leaf.out, total, allocator)
+			w.column_own_name(&col, leaf.name)
+			append(&cols, col)
+			append(&jobs, Leaf_Job{leaf = leaf, col_index = j})
+			continue
+		}
+		col := w.column_new("", .String, total, allocator)
+		w.column_own_name(&col, top.name)
 		append(&cols, col)
-		jobs[j] = Leaf_Job {
-			leaf = leaf,
+		node := &m.nodes[top.node]
+		streams[j] = make([]Leaf_Stream, node.leaf_hi - node.leaf_lo)
+		for &st, k in streams[j] {
+			st.full = u8(m.leaves[node.leaf_lo + k].max_def)
+			st.strings = w.Column {
+				type      = .String,
+				allocator = runtime.heap_allocator(),
+			}
+			append(&jobs, Leaf_Job{leaf = &m.leaves[node.leaf_lo + k], stream = &st})
 		}
 	}
-	for &job, j in jobs {job.col = &cols[j]}
+	for &job in jobs {
+		if job.stream == nil {job.col = &cols[job.col_index]}
+	}
 	work := Read_Work {
 		src    = src,
 		fm     = &m.fm,
 		groups = groups[:],
-		jobs   = jobs,
+		jobs   = jobs[:],
 		total  = total,
 	}
 	util.parallel_for(len(jobs), &work, _read_leaves, tasks = len(jobs))
 	for job in jobs {
 		if !job.ok {return}
+	}
+	// nested columns: assembled in row ranges, all ranges of all columns in
+	// parallel
+	nested := make([dynamic]Nested_Column)
+	defer {
+		for &nc in nested {_destroy_ranges(&nc)}
+		delete(nested)
+	}
+	range_rows := max(256, total / (4 * util.parallel_thread_count()) + 1)
+	for p, j in picked {
+		top := &m.tops[p]
+		if top.leaf >= 0 {continue}
+		append(&nested, Nested_Column{top = top, streams = streams[j], col = &cols[j]})
+		_plan_ranges(&nested[len(nested) - 1], total, range_rows) or_return
+	}
+	if len(nested) > 0 {
+		assembly := Assembly_Work {
+			m      = &m,
+			nested = nested[:],
+		}
+		for &nc in nested {
+			for &rg in nc.ranges {append(&assembly.tasks, Range_Task{&nc, &rg})}
+		}
+		defer delete(assembly.tasks)
+		util.parallel_for(
+			len(assembly.tasks),
+			&assembly,
+			_assemble_ranges,
+			tasks = len(assembly.tasks),
+		)
+		for &nc in nested {_finish_column(&nc, total) or_return}
 	}
 
 	// rows of the kept groups that match every filter
@@ -399,9 +457,37 @@ _read :: proc(
 
 @(private)
 Leaf_Job :: struct {
-	leaf: ^Leaf,
-	col:  ^w.Column,
-	ok:   bool,
+	leaf:      ^Leaf,
+	col:       ^w.Column, // flat leaf: its column
+	col_index: int,
+	stream:    ^Leaf_Stream, // leaf of a nested field: its levels and values
+	ok:        bool,
+}
+
+@(private)
+Range_Task :: struct {
+	nc: ^Nested_Column,
+	rg: ^Row_Range,
+}
+
+@(private)
+Assembly_Work :: struct {
+	m:      ^Meta,
+	nested: []Nested_Column,
+	tasks:  [dynamic]Range_Task,
+	next:   int, // next task to take (atomic)
+}
+
+// A parallel task: assembles row ranges of nested columns until none are left
+@(private)
+_assemble_ranges :: proc(data: rawptr, begin, end: int) {
+	work := (^Assembly_Work)(data)
+	context.allocator = runtime.heap_allocator()
+	for {
+		j := intrinsics.atomic_add(&work.next, 1)
+		if j >= len(work.tasks) {break}
+		_assemble_range(work.m, work.tasks[j].nc, work.tasks[j].rg)
+	}
 }
 
 @(private)
@@ -425,63 +511,58 @@ _read_leaves :: proc(data: rawptr, begin, end: int) {
 		j := intrinsics.atomic_add(&work.next, 1)
 		if j >= len(work.jobs) {break}
 		job := &work.jobs[j]
-		job.ok = _read_leaf(work.src, work.fm, work.groups, job.leaf, job.col, work.total)
+		job.ok = _read_leaf(
+			work.src,
+			work.fm,
+			work.groups,
+			job.leaf,
+			job.col,
+			job.stream,
+			work.total,
+		)
 	}
 }
 
 @(private)
 Top :: struct {
-	name: string,
-	leaf: int, // index into the leaves, -1 for a nested field
-	se:   int, // index of its schema element
+	name:   string,
+	leaf:   int, // index into the leaves, -1 for a nested field
+	se:     int, // index of its schema element
+	node:   int, // nested field: its node (see nested.odin); -1 otherwise
+	reason: string, // nested field: why it cannot be read; "" if it can
 }
 
 // The leaves (primitive columns, in column-chunk order) and the top-level
-// fields of the schema
+// fields of the schema, into m
 @(private)
-_plan_schema :: proc(
-	schema: []Schema_Element,
-) -> (
-	leaves: [dynamic]Leaf,
-	tops: [dynamic]Top,
-	ok: bool,
-) {
-	leaves = make([dynamic]Leaf)
-	tops = make([dynamic]Top)
+_plan_schema :: proc(schema: []Schema_Element, m: ^Meta) -> bool {
+	m.leaves = make([dynamic]Leaf)
+	m.tops = make([dynamic]Top)
+	m.nodes = make([dynamic]Node)
+	m.kids = make([dynamic]int)
 	n_top := int(schema[0].num_children)
 	i := 1
 	for _ in 0 ..< n_top {
 		if i >= len(schema) {break}
 		se := schema[i]
 		if se.num_children > 0 || se.repetition == 2 {
-			append(&tops, Top{name = se.name, leaf = -1, se = i})
-			// count its leaves so chunk indices stay aligned
-			pending := 1
-			for pending > 0 && i < len(schema) {
-				pending += int(schema[i].num_children) - 1
-				if schema[i].num_children == 0 {
-					append(
-						&leaves,
-						Leaf{name = schema[i].name, chunk = len(leaves), nested = true},
-					)
-				}
-				i += 1
+			top := Top {
+				name = se.name,
+				leaf = -1,
+				se   = i,
 			}
+			top.node = _plan_node(schema, &i, 0, 0, "", 0, m, &top.reason)
+			append(&m.tops, top)
 			continue
 		}
 		leaf := _plan_leaf(se)
-		leaf.chunk = len(leaves)
-		append(&tops, Top{name = se.name, leaf = len(leaves), se = i})
-		append(&leaves, leaf)
+		leaf.chunk = len(m.leaves)
+		append(&m.tops, Top{name = se.name, leaf = len(m.leaves), se = i, node = -1})
+		append(&m.leaves, leaf)
 		i += 1
 	}
-	if len(tops) != n_top || i != len(schema) {
-		_fail("corrupt schema")
-		delete(leaves)
-		delete(tops)
-		return nil, nil, false
-	}
-	return leaves, tops, true
+	if len(m.tops) != n_top || i != len(schema) {return _fail("corrupt schema")}
+	return true
 }
 
 @(private)
@@ -587,6 +668,7 @@ Chunk_State :: struct {
 	codec:    Codec,
 	dict:     []u8, // decoded dictionary, in the column's cell type
 	dict_len: int,
+	stream:   ^Leaf_Stream, // nested leaves: where levels and values go (col is unused)
 	scratch:  [dynamic]u8, // decompressed page
 	levels:   [dynamic]u8, // definition levels of a page
 	idx:      [dynamic]u32, // dictionary indices of a page
@@ -603,12 +685,15 @@ _read_leaf :: proc(
 	groups: []int,
 	leaf: ^Leaf,
 	col: ^w.Column,
+	stream: ^Leaf_Stream,
 	total: int,
 ) -> bool {
 	st := Chunk_State {
-		leaf = leaf,
-		col  = col,
+		leaf   = leaf,
+		col    = col,
+		stream = stream,
 	}
+	if stream != nil {st.col = &stream.strings}
 	defer {
 		delete(st.dict)
 		delete(st.scratch)
@@ -662,7 +747,8 @@ _read_leaf :: proc(
 		end_pos := st.pos + int(rg.num_rows)
 		if end_pos > total {return _fail("corrupt row counts")}
 		p := 0
-		for st.pos < end_pos {
+		// a nested leaf reads every page: one row may continue on the next page
+		for (stream == nil && st.pos < end_pos) || (stream != nil && p < len(chunk)) {
 			if p >= len(chunk) {return _fail("column %q: chunk ends early", leaf.name)}
 			t := Thrift {
 				data = chunk[p:],
@@ -677,11 +763,14 @@ _read_leaf :: proc(
 			}
 			payload := chunk[p:p + int(ph.compressed_size)]
 			p += int(ph.compressed_size)
-			if !_read_page(&st, &ph, payload, end_pos) {return false}
+			if stream != nil {
+				if !_nested_page(&st, &ph, payload) {return false}
+			} else if !_read_page(&st, &ph, payload, end_pos) {return false}
 		}
+		if st.pos != end_pos {return _fail("column %q: %d of %d rows", leaf.name, st.pos, end_pos)}
 	}
 	if st.pos != total {return _fail("column %q: %d of %d rows", leaf.name, st.pos, total)}
-	col.len = total
+	if stream == nil {col.len = total}
 	return true
 }
 
@@ -831,7 +920,17 @@ _values :: proc(st: ^Chunk_State, enc: Encoding, data: []u8, n: int, levels: []u
 	}
 	esz := w.type_size(leaf.out)
 	dst := rawptr(uintptr(col.data) + uintptr(st.pos * esz))
+	_decode_values(st, enc, data, nn, dst) or_return
+	if nn < n {_spread(leaf.out, col, st.pos, n, nn, levels)}
+	st.pos += n
+	return true
+}
 
+// Decodes `nn` present values of a page in encoding `enc` into `dst` (cells
+// of the leaf's column type)
+@(private)
+_decode_values :: proc(st: ^Chunk_State, enc: Encoding, data: []u8, nn: int, dst: rawptr) -> bool {
+	leaf := st.leaf
 	#partial switch enc {
 	case .Plain:
 		if !_plain(st, data, nn, dst) {return _fail("column %q: corrupt values", leaf.name)}
@@ -867,8 +966,6 @@ _values :: proc(st: ^Chunk_State, enc: Encoding, data: []u8, n: int, levels: []u
 	case:
 		return _fail("column %q uses the %v encoding, which is not supported", leaf.name, enc)
 	}
-	if nn < n {_spread(leaf.out, col, st.pos, n, nn, levels)}
-	st.pos += n
 	return true
 }
 
@@ -973,8 +1070,11 @@ _rle_hybrid :: proc(src: []u8, bw: int, out: []$T) -> bool #no_bounds_check {
 			o += count
 		} else {
 			groups := int(hdr >> 1)
+			// each group takes bw >= 1 bytes: bound groups first, so that
+			// groups * bw cannot overflow
+			if groups < 0 || groups > len(src) - s {return false}
 			nbytes := groups * bw
-			if groups < 0 || nbytes > len(src) - s {return false}
+			if nbytes > len(src) - s {return false}
 			count := min(groups * 8, n - o)
 			run := src[s:s + nbytes]
 			if bw == 1 {

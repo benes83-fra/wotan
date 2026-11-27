@@ -31,8 +31,9 @@ import "core:os"
 //   checksum); one thread and all threads give the same frame;
 // - INT96 timestamps; decimals stored as INT32 / INT64 / FIXED_LEN_BYTE_ARRAY
 //   (DuckDB); a pandas file with its index; column selection and order;
-// - ok = false (no crash) for nested columns, Brotli, a missing file, a
-//   CSV file, unknown or repeated column names, truncated and corrupted bytes.
+// - ok = false (no crash) for Brotli, a missing file, a CSV file, unknown or
+//   repeated column names, truncated and corrupted bytes; a nested column
+//   loads (as JSON text, see parquet_nested_test).
 //
 // Writer: the same table written with every codec, dictionary on and off, in
 // one or three row groups, read back cell for cell; a file on disk
@@ -1263,7 +1264,7 @@ parquet_test :: proc(allocator: mem.Allocator) {
 			if ok {w.destroy_dataframe(&df)}
 			return !ok
 		}
-		expect(&passed, &total, fails(path("nested")), "nested column: ok = false")
+		expect(&passed, &total, !fails(path("nested")), "nested column: loads (as JSON text)")
 		expect(&passed, &total, fails(path("brotli")), "Brotli codec: ok = false")
 		expect(&passed, &total, fails(path("no_such_file")), "missing file: ok = false")
 		expect(&passed, &total, fails("demo_files/people.csv"), "not a Parquet file: ok = false")

@@ -583,6 +583,8 @@ main :: proc() {
 	free_all(context.temp_allocator)
 	test.parquet_filter_test(context.temp_allocator)
 	free_all(context.temp_allocator)
+	test.parquet_nested_test(context.temp_allocator)
+	free_all(context.temp_allocator)
 	test.matrix_test(context.temp_allocator)
 	free_all(context.temp_allocator)
 	test.simd_linalg_test(context.temp_allocator)

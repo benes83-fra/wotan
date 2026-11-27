@@ -238,8 +238,13 @@ if !ok2 {return}
 defer w.destroy_dataframe(&df)
 w.dataframe_pretty_print(&df, max_rows = 4)
 
-_, ok3 := io.parquet_load("demo_files/parquet/nested.parquet")
-fmt.println("nested:", ok3)
+// lists, structs and maps arrive as JSON text
+nest, ok3 := io.parquet_load("demo_files/parquet/nested_duckdb.parquet", {"id", "ints", "st", "m"})
+if !ok3 {return}
+defer w.destroy_dataframe(&nest)
+w.dataframe_pretty_print(&nest, max_rows = 6)
+st, _ := w.column_at_string(w.column(&nest, "st"), 5)
+fmt.println("st of row 5:", st)
 ```
 
 ```
@@ -254,8 +259,15 @@ fmt.println("nested:", ok3)
   2 NULL                        EU   NULL
   3 1970-01-01 00:00:00         US   9.999999999e+07
 ... (8 more rows)
-parquet: column "tags" is nested (a list, map or struct), which is not supported; pass `columns` to load the others
-nested: false
+    id  ints        st                               m
+  0 0   NULL        NULL                             {"k0":0}
+  1 1   [1,null,2]  {"a":1,"b":"r1","l":[0.5,null]}  {"k1":1}
+  2 2   [2,null,4]  {"a":2,"b":"r2","l":[1.0,null]}  {"k2":2}
+  3 3   [3,null,6]  {"a":3,"b":"r3","l":[1.5,null]}  {"k3":3}
+  4 4   [4,null,8]  NULL                             {"k4":4}
+  5 5   []          {"a":5,"b":"r5","l":[2.5,null]}  {"k5":5}
+... (114 more rows)
+st of row 5: {"a":5,"b":"r5","l":[2.5,null]}
 ```
 
 The first file was written by pandas from a frame indexed by date. pandas stores its index as an ordinary column (here `date`), and the loader keeps it as one; `w.set_index(&px, "date")` makes it the index again. pyarrow writes pandas' NaN as null, so the missing close is a null.
@@ -273,10 +285,21 @@ The first file was written by pandas from a frame indexed by date. pandas stores
 | `DATE` | `Date` |
 | `TIME` in milli-, micro- or nanoseconds | `Time` |
 | `TIMESTAMP` in milli-, micro- or nanoseconds, and the legacy `INT96` timestamps of Spark and Impala | `Datetime` |
+| lists, maps and structs, nested to any depth | `String` holding JSON text (see below) |
 
 Times and timestamps keep every unit down to the nanosecond. Timestamps stored as instants (pandas' time-zone-aware columns) are read as UTC. Unsigned 64-bit values above 2^63 − 1 do not fit `Int` and wrap to negative numbers.
 
-**What it reads.** Files whose columns are all flat (no lists, maps or structs), in any number of row groups, in data pages of version 1 or 2. Values may use any of the format's encodings: plain, dictionary, run-length (booleans), the three delta encodings, and byte stream split. Pages may be uncompressed or compressed with Snappy (pandas' and pyarrow's default), Zstandard (the default of Polars, DuckDB and newer Spark), gzip or LZ4.
+**Nested columns.** A list, map or struct column becomes a `String` column with one JSON text per row. This is how the JSON loader keeps nested values (section 4), and the text can be parsed with `core:encoding/json`:
+
+- a list is `[1,2,3]`, and an empty list is `[]`;
+- a struct is an object with its fields in schema order, `{"a":1,"b":"x"}`;
+- a map is an object, `{"key":value}`. Keys that are not strings become their text, so the integer key 7 is `"7"`;
+- a missing value inside a list, struct or map is `null`. A missing value of the whole column is a null cell, not the text `null`;
+- the values inside are written as `ex.json_write` writes cells (section 8). Numbers are JSON numbers, NaN and infinities are `null`, and decimals are their nearest double. Unsigned 64-bit integers are written exactly, also above 2^63 − 1. Dates, times and timestamps are strings in wotan's text form, such as `"2024-03-01 09:30:00.5"`. Binary values without a text annotation are strings with each byte from 0x80 up written as `\u00XX`.
+
+The text is the same as Python's `json` module would produce from pyarrow's values (`to_pylist`) under these rules. `parquet_nested_test` checks this for files from pyarrow and DuckDB. On a million rows with a list column (3.5 million integers) and a two-field struct, best of three runs on a 16-thread machine, wotan takes 133 ms (389 ms on one thread). `pandas.read_parquet`, which builds Python lists and dicts, takes 724 ms, and pyarrow's `read_table`, which keeps Arrow arrays and builds no text, takes 64 ms.
+
+**What it reads.** Files with flat and nested columns, in any number of row groups, in data pages of version 1 or 2. Values may use any of the format's encodings: plain, dictionary, run-length (booleans), the three delta encodings, and byte stream split. Pages may be uncompressed or compressed with Snappy (pandas' and pyarrow's default), Zstandard (the default of Polars, DuckDB and newer Spark), gzip or LZ4.
 
 **Speed.** The columns are decoded in parallel, one thread per core. `util.parallel_max_threads` (package `wotan/util`) caps the threads, and 1 decodes on the calling thread; the frame is the same either way. Reading 1 million rows of seven columns (dates, tickers, prices with NaN, volumes, unique text, flags) written by pyarrow, best of five runs on a 16-thread machine:
 
@@ -291,7 +314,7 @@ pyarrow's times are for its own Arrow tables; `pandas.read_parquet`, which conve
 
 The Zstandard decoder is a package of its own, `wotan/zstd`: `zstd.decompress(dst, src) -> (written, ok)` decompresses any Zstandard data (several frames, skippable frames, checksums verified) into a buffer of known size, and `zstd.decompressed_size(src)` gives the size the frames declare. Frames that need a dictionary are refused.
 
-**Failure.** `ok` is false, with the reason on stderr, when the file is missing or isn't a Parquet file, when a requested column doesn't exist or is named twice, and when a column needs something the reader doesn't support: a nested type, the Brotli or LZO codec, or encryption. Each case names the column, and `columns` lets you load the others. The loader never returns partial or guessed data. Damaged files fail cleanly too: the metadata is checked as it is read, so a corrupt or truncated file gives `ok = false`, not a crash or a frame of the wrong shape.
+**Failure.** `ok` is false, with the reason on stderr, when the file is missing or isn't a Parquet file, when a requested column doesn't exist or is named twice, and when a column needs something the reader doesn't support: the Brotli or LZO codec, or encryption. Each case names the column, and `columns` lets you load the others. The loader never returns partial or guessed data. Damaged files fail cleanly too: the metadata is checked as it is read, so a corrupt or truncated file gives `ok = false`, not a crash or a frame of the wrong shape.
 
 ### 7.2 Writing
 
@@ -405,7 +428,7 @@ A `Parquet_Info` has these fields:
 |---|---|
 | `rows` | the number of rows in the file |
 | `created_by` | the library that wrote the file, if it says |
-| `columns` | one `Parquet_Column_Info` per top-level column: `name`; `type`, the DataFrame type it loads as; `parquet_type`, the type as stored (for example `INT64 TIMESTAMP(MICROS, UTC)` or `FIXED_LEN_BYTE_ARRAY(16) DECIMAL(38, 6)`); `nullable`; and `reason`, which explains why wotan cannot load the column (for example a nested column), or is `""` when it can. A column wotan cannot load has `type = .Invalid`. |
+| `columns` | one `Parquet_Column_Info` per top-level column: `name`; `type`, the DataFrame type it loads as; `parquet_type`, the type as stored (for example `INT64 TIMESTAMP(MICROS, UTC)` or `FIXED_LEN_BYTE_ARRAY(16) DECIMAL(38, 6)`); `nullable`; and `reason`, which explains why wotan cannot load the column (for example one compressed with Brotli), or is `""` when it can. A column wotan cannot load has `type = .Invalid`; a nested column has `type = .String` (JSON text). |
 | `row_groups` | one `Parquet_Row_Group_Info` per row group: `rows`, `offset` (where its data starts in the file), `compressed_bytes`, and `stats`, with one `Parquet_Column_Stats` per entry of `columns` |
 
 A `Parquet_Column_Stats` holds what the writer recorded for one column in one row group:
@@ -506,7 +529,7 @@ Reading a file of 10 million rows (daily bars of 4000 tickers over ten years, so
 When nothing can be skipped, wotan first loads the row groups and then removes rows, so a filter adds about a quarter to the time of a full load. pyarrow filters while it reads.
 
 **Failure.** `ok` is false, with the reason on stderr, when:
-- a filter names a column the file doesn't have, or one wotan cannot load (a nested column);
+- a filter names a column the file doesn't have, one wotan cannot load, or a nested column (JSON text cannot be filtered);
 - a bound has a type that doesn't suit the column (for example a string for a `Date` column);
 - a bound is NaN.
 
@@ -848,7 +871,8 @@ The dates are CBOE's trading days. To combine an index with Yahoo prices, put it
 | `excel_basic_test`, `excel_date_test`, `excel_export_test`, `zip_smoke_test` | reading sheets and dates, writing workbooks, the ZIP container |
 | `loaders_checked_test` | every `try_` loader gives the frame of its panicking twin, and `ok = false` in 20 failure cases (missing files, empty or non-CSV text, wrong types, bad JSON and JSON Lines, no table, no sheet, not a workbook); header names and numbers as pandas 1.5.3 reads them; a 1.7 MB CSV with quoted line breaks read identically on one thread and on all; the finance loaders `try_load_market_data` and `try_load_option_chain` against pandas 1.5.3 and on files that do not fit |
 | `parquet_filter_test` | `parquet_info` against pyarrow 14's metadata (rows, row groups, column types, and null count, min and max per row group for files written by pyarrow and DuckDB; none for UUID, INT96 and nested columns); 16 filters on a 600-row file in 10 row groups, each giving the rows pyarrow's `read_table(filters=...)` gives; a corrupt row group outside the filter's range is never read; `ok = false` for bad filters and unreadable files; the same rows from one thread and from all |
-| `parquet_test` | reading: every column type, with nulls and extreme values, against pyarrow in eight layouts (plain, dictionary, delta and byte-stream-split values, page versions 1 and 2, no compression, Snappy, gzip, Zstandard, LZ4, several row groups and many small pages); FLOAT16 and byte stream split on integers (pyarrow 17); Zstandard pages of several blocks; DuckDB's Zstandard file with UUIDs; the Zstandard decoder on its own; the same frame from one thread and from all; INT96 timestamps; decimals stored as integers (DuckDB); a pandas file; column selection; `ok = false` for unsupported files (nested, Brotli) and for truncated or corrupted copies. Writing: the same table with every codec, with and without dictionaries, in one or three row groups, read back cell for cell; the same bytes from one thread and from all; views, an empty frame, a hidden index, 70 000 rows with an all-null column. The fixtures in `demo_files/parquet` were written by pyarrow 14 and 17 and by DuckDB 1.1 |
+| `parquet_nested_test` | nested columns as JSON text: files from pyarrow 14 (small version 1 pages and row groups; version 2 pages with Zstandard) and DuckDB 1.1, every cell of every nested column equal to the JSON text of pyarrow's value (lists, lists of lists, structs with lists and structs, maps with string and integer keys, lists of structs, decimals, binary, times, timestamps, bools, nulls and empty lists at every level, a 6000-element list across pages, a required struct); one thread and all; `parquet_info`; column selection and a filter beside nested columns; 300 damaged copies |
+| `parquet_test` | reading: every column type, with nulls and extreme values, against pyarrow in eight layouts (plain, dictionary, delta and byte-stream-split values, page versions 1 and 2, no compression, Snappy, gzip, Zstandard, LZ4, several row groups and many small pages); FLOAT16 and byte stream split on integers (pyarrow 17); Zstandard pages of several blocks; DuckDB's Zstandard file with UUIDs; the Zstandard decoder on its own; the same frame from one thread and from all; INT96 timestamps; decimals stored as integers (DuckDB); a pandas file; column selection; `ok = false` for unsupported files (Brotli) and for truncated or corrupted copies. Writing: the same table with every codec, with and without dictionaries, in one or three row groups, read back cell for cell; the same bytes from one thread and from all; views, an empty frame, a hidden index, 70 000 rows with an all-null column. The fixtures in `demo_files/parquet` were written by pyarrow 14 and 17 and by DuckDB 1.1 |
 | `http_get_test`, `yahoo_finance_json_test`, `yahoo_finance_events_test` | live HTTP and Yahoo requests, including dividends and splits |
 | `yahoo_max_range_test` | `.Max` gives the whole daily history (SPY from 1993-01-29, no gap over a week) and weekly rows a week apart |
 | `cboe_index_test` | offline: both CBOE file formats and the rows left out; live: COR1M's history from 2006-01-03, ascending, and an unknown symbol |

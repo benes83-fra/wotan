@@ -194,8 +194,10 @@ _info :: proc(src: ^Source, allocator: mem.Allocator) -> (info: File_Info, ok: b
 		c.parquet_type = strings.clone(_describe(se), a)
 		c.nullable = se.repetition != 0
 		switch {
+		case top.leaf < 0 && top.reason != "":
+			c.reason = strings.clone(top.reason, a)
 		case top.leaf < 0:
-			c.reason = strings.clone("nested (a list, map or struct)", a)
+			c.type = .String // JSON text
 		case m.leaves[top.leaf].reason != "":
 			c.reason = strings.clone(m.leaves[top.leaf].reason, a)
 		case:

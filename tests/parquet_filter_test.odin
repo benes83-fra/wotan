@@ -224,11 +224,12 @@ parquet_filter_test :: proc(allocator: mem.Allocator) {
 			check(
 				&fails,
 				t.name == "tags" &&
-				t.type == .Invalid &&
+				t.type == .String &&
 				t.parquet_type == "LIST" &&
-				t.reason != "" &&
-				nest.row_groups[0].stats[1].null_count == -1,
-				"nested column listed, not loadable",
+				t.reason == "" &&
+				nest.row_groups[0].stats[1].null_count == -1 &&
+				nest.row_groups[0].stats[1].min == nil,
+				"nested column: a String column (JSON text) without statistics",
 			)
 			check(
 				&fails,
