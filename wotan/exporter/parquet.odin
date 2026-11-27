@@ -3,7 +3,8 @@ package exporter
 import w "../core"
 import pq "../parquet"
 
-// Codec of the pages: .Snappy (the default, as in pandas), .Gzip (smaller,
+// Codec of the pages: .Snappy (the default, as in pandas), .Zstd (smaller,
+// a little slower), .Gzip (a little larger than .Zstd and several times
 // slower), .Lz4 (written as LZ4_RAW) or .None
 Parquet_Compression :: pq.Compression
 

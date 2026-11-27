@@ -28,7 +28,9 @@ import "core:os"
 // - FLOAT16 and byte stream split on integers and fixed-length binary
 //   (pyarrow 17); Zstandard pages of several blocks; DuckDB's Zstandard file
 //   with UUIDs; the Zstandard decoder on its own (frames, skippable frames,
-//   checksum); one thread and all threads give the same frame;
+//   checksum); the Zstandard compressor's frames read back (libzstd reads
+//   them too, checked outside the suite); one thread and all threads give
+//   the same frame;
 // - INT96 timestamps; decimals stored as INT32 / INT64 / FIXED_LEN_BYTE_ARRAY
 //   (DuckDB); a pandas file with its index; column selection and order;
 // - ok = false (no crash) for Brotli, a missing file, a CSV file, unknown or
@@ -1419,6 +1421,78 @@ parquet_test :: proc(allocator: mem.Allocator) {
 		expect(&passed, &total, !bok, "zstd.decompress: a changed byte fails the content checksum")
 		_, sok2 := zs.decompress(out[:n - 1], zstd_frames)
 		expect(&passed, &total, !sok2, "zstd.decompress: an output buffer one byte short fails")
+	}
+	// the compressor: empty input, one byte, one repeated byte (RLE blocks),
+	// random bytes (stored blocks), text, the tz database twice in a row (its
+	// second copy matches the first, three blocks back) and a CSV file
+	{
+		tzdata, _ := os.read_entire_file("wotan/core/tzdata.bin", context.allocator)
+		defer delete(tzdata)
+		csv, _ := os.read_entire_file("demo_files/timezones.csv", context.allocator)
+		defer delete(csv)
+		same := make([]u8, 300_000)
+		defer delete(same)
+		for &b in same {b = 'a'}
+		noise := make([]u8, 200_000)
+		defer delete(noise)
+		x := u64(88172645463325252)
+		for &b in noise {
+			x ~= x << 13
+			x ~= x >> 7
+			x ~= x << 17
+			b = u8(x >> 32)
+		}
+		twice := make([]u8, 2 * len(tzdata))
+		defer delete(twice)
+		copy(twice, tzdata)
+		copy(twice[len(tzdata):], tzdata)
+		inputs := [][]u8{{}, {'x'}, same, noise, transmute([]u8)zstd_plain, twice, csv}
+		sizes: [7]int
+		all_ok := len(tzdata) > 0 && len(csv) > 0
+		for src, i in inputs {
+			comp, ok := zs.compress(src)
+			back := make([]u8, len(src) + 1)
+			n, dok := zs.decompress(back, comp)
+			size, sok := zs.decompressed_size(comp)
+			all_ok =
+				all_ok &&
+				ok &&
+				dok &&
+				n == len(src) &&
+				string(back[:n]) == string(src) &&
+				sok &&
+				size == len(src)
+			sizes[i] = len(comp)
+			delete(back)
+			delete(comp)
+		}
+		expect(
+			&passed,
+			&total,
+			all_ok,
+			"zstd.compress: seven inputs read back, with their sizes declared",
+		)
+		expect(
+			&passed,
+			&total,
+			sizes[2] < 30 &&
+			sizes[3] <= len(noise) + 32 &&
+			sizes[4] * 10 < len(zstd_plain) &&
+			sizes[5] * 8 < len(twice) &&
+			sizes[6] * 3 < len(csv),
+			fmt.tprintf(
+				"zstd.compress sizes: repeated byte %d, random %d of %d, text %d of %d, tz database twice %d of %d, CSV %d of %d",
+				sizes[2],
+				sizes[3],
+				len(noise),
+				sizes[4],
+				len(zstd_plain),
+				sizes[5],
+				len(twice),
+				sizes[6],
+				len(csv),
+			),
+		)
 	}
 	// the same frames, decoded on one thread and on all
 	{

@@ -10,6 +10,7 @@ import "core:os"
 
 import w "../core"
 import util "../util"
+import zs "../zstd"
 
 // Parquet writer. Every column becomes an optional (nullable) column of the
 // standard type for its values, so pandas, pyarrow, Spark, DuckDB and Polars
@@ -43,6 +44,7 @@ Compression :: enum {
 	Snappy,
 	Gzip,
 	Lz4, // written as LZ4_RAW
+	Zstd,
 }
 
 // `df` as the bytes of a Parquet file (free them with delete). ok is false,
@@ -467,6 +469,10 @@ _emit_page :: proc(
 		if lz4.compress_block_to_dynamic(&wr.packed, body) !=
 		   nil {return _fail("LZ4 compression failed")}
 		payload = wr.packed[:]
+	case .Zstd:
+		clear(&wr.packed)
+		if !zs.compress_to_dynamic(&wr.packed, body) {return _fail("Zstandard compression failed")}
+		payload = wr.packed[:]
 	}
 
 	start := len(wr.out)
@@ -832,6 +838,8 @@ _write_footer :: proc(
 		codec = .Gzip
 	case .Lz4:
 		codec = .Lz4_Raw
+	case .Zstd:
+		codec = .Zstd
 	}
 	_tw_i32(&t, 1, 1) // version
 	// schema: the root, then one optional leaf per column

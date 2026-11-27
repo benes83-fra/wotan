@@ -315,7 +315,10 @@ The text is the same as Python's `json` module would produce from pyarrow's valu
 
 pyarrow's times are for its own Arrow tables; `pandas.read_parquet`, which converts them to a pandas frame, takes about 360 ms on the same file. gzip is the one codec where a single wotan thread is slower than pyarrow's, because Odin's inflate is slower than zlib.
 
-The Zstandard decoder is a package of its own, `wotan/zstd`: `zstd.decompress(dst, src) -> (written, ok)` decompresses any Zstandard data (several frames, skippable frames, checksums verified) into a buffer of known size, and `zstd.decompressed_size(src)` gives the size the frames declare. Frames that need a dictionary are refused.
+Zstandard is a package of its own, `wotan/zstd`, usable on any data:
+
+- `zstd.decompress(dst, src) -> (written, ok)` decompresses any Zstandard data (several frames, skippable frames, checksums verified) into a buffer of known size, and `zstd.decompressed_size(src)` gives the size the frames declare. Frames that need a dictionary are refused.
+- `zstd.compress(src, alloc) -> (bytes, ok)` compresses into one frame that declares its size; free the bytes with `delete`. `zstd.compress_to_dynamic(&buf, src) -> ok` appends the frame to a `[dynamic]u8` instead. libzstd and every other Zstandard decoder read the frames. They come out about the size of libzstd's level 3, the level of the `zstd` command line, and take about 1.3 times as long to write. `ok` is false only for input of 2 GiB or more.
 
 **Failure.** `ok` is false, with the reason on stderr, when the file is missing or isn't a Parquet file, when a requested column doesn't exist or is named twice, and when a column needs something the reader doesn't support: the Brotli or LZO codec, or encryption. Each case names the column, and `columns` lets you load the others. The loader never returns partial or guessed data. Damaged files fail cleanly too: the metadata is checked as it is read, so a corrupt or truncated file gives `ok = false`, not a crash or a frame of the wrong shape.
 
@@ -375,7 +378,7 @@ Every column may hold nulls. pandas reads an integer column with nulls as `float
 
 The options:
 
-- **`compression`**: `.Snappy` (the default, as in pandas) is fast with moderate compression; `.Gzip` gives smaller files and writes several times slower; `.Lz4` is about as fast as Snappy; `.None` stores the pages as they are. The writer has no Zstandard compressor; files compressed with Zstandard elsewhere are read like any other.
+- **`compression`**: `.Snappy` (the default, as in pandas) is fast with moderate compression. `.Zstd` (Zstandard) gives files about a third smaller than Snappy's, a little smaller than gzip's, and takes about 1.5 times as long to write as Snappy. `.Gzip` gives files about as small and writes several times slower. `.Lz4` is about as fast as Snappy. `.None` stores the pages as they are.
 - **`row_group_rows`**: the rows per row group (a million by default). Each row group records the minimum, maximum and null count of every column. Readers can then skip the row groups that cannot match a filter; `parquet_load` with `filters` does this (section 7.4), as do DuckDB and pyarrow.
 - **`dictionary`**: String columns are stored as a dictionary of their distinct values plus small indices, which suits columns that repeat values, such as tickers or sectors. A column whose dictionary would pass 1 MiB in a row group is stored plainly. Pass `false` to store every String column plainly.
 
@@ -384,9 +387,12 @@ The column chunks are encoded and compressed in parallel, and `util.parallel_max
 | Compression | wotan, all threads | wotan, 1 thread | Size | pyarrow 14 | pyarrow size |
 |---|---|---|---|---|---|
 | Snappy | 111 ms | 231 ms | 29.0 MB | 304 ms | 30.9 MB |
+| Zstandard | 192 ms | 413 ms | 20.1 MB | 273 ms | 23.8 MB |
 | gzip | 461 ms | 1192 ms | 20.9 MB | 2360 ms | 22.9 MB |
 | LZ4 | 76 ms | 180 ms | 29.0 MB | 257 ms | 32.0 MB |
 | none | 57 ms | 150 ms | 44.4 MB | 250 ms | 41.4 MB |
+
+pyarrow compresses Zstandard at libzstd's level 1 by default; wotan's Zstandard pages come out about the size of level 3.
 
 `parquet_save` returns false, with the reason on stderr, when the file cannot be written (for example, a folder that doesn't exist) or when a hidden index has the name of one of the columns.
 
@@ -881,7 +887,7 @@ The dates are CBOE's trading days. To combine an index with Yahoo prices, put it
 | `parquet_nested_test` | nested columns as JSON text: files from pyarrow 14 (small version 1 pages and row groups; version 2 pages with Zstandard) and DuckDB 1.1, every cell of every nested column equal to the JSON text of pyarrow's value (lists, lists of lists, structs with lists and structs, maps with string and integer keys, lists of structs, decimals, binary, times, timestamps, bools, nulls and empty lists at every level, a 6000-element list across pages, a required struct); one thread and all; `parquet_info`; column selection and a filter beside nested columns; 300 damaged copies |
 | `duration_test` | durations against pandas 1.5.3: the text forms both ways; `diff`, `duration_between`, `add_duration(s)`, `datetime_floor`, `duration_total` on a CSV written by pandas; groupby and `resample_every` bars; pyarrow's durations in Parquet; a frame with durations through Parquet, CSV, JSON, HTML and Excel |
 | `timezone_test` | time zones against pandas 1.5.3 and Python's zoneinfo: zone lookups and UTC offsets; skipped and repeated wall-clock times; `tz_localize`, `tz_convert`, local parts, floors and resampling on a CSV written by pandas; text with offsets read as zoned columns; pandas' zoned Parquet files; zoned frames through Parquet, CSV, JSON, HTML and Excel; the zone kept by frame operations |
-| `parquet_test` | reading: every column type, with nulls and extreme values, against pyarrow in eight layouts (plain, dictionary, delta and byte-stream-split values, page versions 1 and 2, no compression, Snappy, gzip, Zstandard, LZ4, several row groups and many small pages); FLOAT16 and byte stream split on integers (pyarrow 17); Zstandard pages of several blocks; DuckDB's Zstandard file with UUIDs; the Zstandard decoder on its own; the same frame from one thread and from all; INT96 timestamps; decimals stored as integers (DuckDB); a pandas file; column selection; `ok = false` for unsupported files (Brotli) and for truncated or corrupted copies. Writing: the same table with every codec, with and without dictionaries, in one or three row groups, read back cell for cell; the same bytes from one thread and from all; views, an empty frame, a hidden index, 70 000 rows with an all-null column. The fixtures in `demo_files/parquet` were written by pyarrow 14 and 17 and by DuckDB 1.1 |
+| `parquet_test` | reading: every column type, with nulls and extreme values, against pyarrow in eight layouts (plain, dictionary, delta and byte-stream-split values, page versions 1 and 2, no compression, Snappy, gzip, Zstandard, LZ4, several row groups and many small pages); FLOAT16 and byte stream split on integers (pyarrow 17); Zstandard pages of several blocks; DuckDB's Zstandard file with UUIDs; the Zstandard decoder and compressor on their own; the same frame from one thread and from all; INT96 timestamps; decimals stored as integers (DuckDB); a pandas file; column selection; `ok = false` for unsupported files (Brotli) and for truncated or corrupted copies. Writing: the same table with every codec, with and without dictionaries, in one or three row groups, read back cell for cell; the same bytes from one thread and from all; views, an empty frame, a hidden index, 70 000 rows with an all-null column. The fixtures in `demo_files/parquet` were written by pyarrow 14 and 17 and by DuckDB 1.1 |
 | `http_get_test`, `yahoo_finance_json_test`, `yahoo_finance_events_test` | live HTTP and Yahoo requests, including dividends and splits |
 | `yahoo_max_range_test` | `.Max` gives the whole daily history (SPY from 1993-01-29, no gap over a week) and weekly rows a week apart |
 | `cboe_index_test` | offline: both CBOE file formats and the rows left out; live: COR1M's history from 2006-01-03, ascending, and an unknown symbol |
@@ -903,6 +909,7 @@ Most of the finance tests load their data with `read_yahoo`, `read_yahoo_series`
 | `io.parquet_info(path, alloc) -> (info, ok)`, `io.parquet_info_from_bytes`, `io.print_parquet_info(&info)`, `io.destroy_parquet_info(&info)` | a Parquet file's rows, columns and per-row-group statistics, from its footer |
 | `ex.parquet_save(&df, path, compression, row_group_rows, dictionary) -> bool`, `ex.parquet_bytes(&df, ...) -> ([]u8, ok)` | DataFrame → Parquet file / bytes |
 | `zstd.decompress(dst, src) -> (written, ok)`, `zstd.decompressed_size(src) -> (size, ok)` | Zstandard data → bytes (package `wotan/zstd`) |
+| `zstd.compress(src, alloc) -> (bytes, ok)`, `zstd.compress_to_dynamic(&buf, src) -> ok` | bytes → one Zstandard frame |
 | `ex.csv_save(&df, path, sep, alloc) -> bool`, `ex.csv_string(&df, sep, alloc) -> string`, `ex.json_write`, `ex.jsonl_write`, `ex.html_write`, `ex.xlsx_save -> bool` | DataFrame → file |
 | `net.http_get(url, alloc) -> (body, ok)`, `net.http_get_with_cookie`, `net.download_file(url, path) -> ok` | HTTP |
 | `net.read_csv_from_url`, `net.read_html_from_url`, `net.read_table_from_url` `-> (df, ok)` | a table from a URL |
