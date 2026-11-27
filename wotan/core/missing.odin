@@ -129,6 +129,7 @@ fillna_column :: proc(col: ^Column, value: $T, allocator := context.allocator) -
 	if !_fill_type_ok(col.type, T) {return {}, false}
 	out := column_new("", col.type, max(col.len, 1), allocator)
 	column_own_name(&out, col.name)
+	out.tz = col.tz
 	for i in 0 ..< col.len {
 		if !na_at(col, i) {
 			copy_cell(&out, col, i)

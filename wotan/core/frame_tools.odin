@@ -122,10 +122,24 @@ concat_rows :: proc(frames: []^DataFrame, allocator := context.allocator) -> (Da
 		}
 	}
 
+	// a Datetime column keeps its zone; zoned columns in different zones
+	// give UTC (their values are UTC already); zoned with plain: refused
+	zones := make([]Time_Zone, len(first.columns), context.temp_allocator)
+	defer delete(zones, context.temp_allocator)
+	for &col, j in first.columns {
+		zones[j] = col.tz
+		for f in frames[1:] {
+			tz := f.columns[f.name_to_index[col.name]].tz
+			if tz == zones[j] {continue}
+			if tz.id == 0 || zones[j].id == 0 {return {}, false}
+			zones[j], _ = time_zone(UTC_ZONE_NAME)
+		}
+	}
 	out := dataframe_new(allocator)
-	for &col in first.columns {
+	for &col, j in first.columns {
 		c := column_new("", col.type, max(total, 1), allocator)
 		column_own_name(&c, col.name)
+		c.tz = zones[j]
 		stack(&c, frames, col.name, false)
 		add_column(&out, c)
 	}
@@ -134,6 +148,7 @@ concat_rows :: proc(frames: []^DataFrame, allocator := context.allocator) -> (Da
 		out.has_index = true
 		if first.index_values.type != .Invalid {
 			out.index_values = column_new("", first.index_values.type, max(total, 1), allocator)
+			out.index_values.tz = first.index_values.tz
 			column_own_name(&out.index_values, first.index_values.name)
 			stack(&out.index_values, frames, "", true)
 			out.index_column = out.index_values.name
@@ -281,7 +296,8 @@ drop_duplicates :: proc(
 //                            alone for midnight), seconds with up to nine
 //                            fraction digits; blank strings become null
 //   Date -> Datetime         midnight
-//   Datetime -> Date / Time  the date or the time of day
+//   Datetime -> Date / Time  the date or the time of day (local time for a
+//                            column with a time zone)
 //   Duration <-> Int         nanoseconds
 //   String -> Duration       "D days HH:MM:SS[.f]" or "[-]HH:MM:SS[.f]"
 //                            (parse_duration)
@@ -530,6 +546,7 @@ _cast_cell :: proc(dst, src: ^Column, i: int) -> bool {
 		append_datetime(dst, Datetime{v.year, v.month, v.day, 0, 0, 0, 0})
 	case .Datetime:
 		v, _ := column_at_datetime(src, i)
+		if src.tz.id != 0 {v = datetime_to_local(v, src.tz)}
 		if dst.type == .Date {
 			append_date(dst, Date{v.year, v.month, v.day})
 		} else {

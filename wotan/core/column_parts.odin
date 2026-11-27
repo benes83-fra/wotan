@@ -114,7 +114,8 @@ Date_Part :: enum {
 
 // Column of one part of every cell of a Date, Datetime or Time column: Int
 // for the numeric parts, Bool for the Is_ parts. Date columns have no time
-// parts, Time columns only Hour to Nanosecond. ok = false for another
+// parts, Time columns only Hour to Nanosecond; a Datetime column with a
+// time zone gives the parts of its local time. ok = false for another
 // column type or a part the type does not have.
 date_part :: proc(
 	col: ^Column,
@@ -137,6 +138,9 @@ date_part :: proc(
 	}
 	is_flag := part >= .Is_Month_Start
 	out := _new_like(col, .Bool if is_flag else .Int, name, allocator)
+	zone := _Zone_Cursor {
+		tz = col.tz,
+	}
 	for i in 0 ..< col.len {
 		if na_at(col, i) {
 			append_null(&out)
@@ -151,6 +155,7 @@ date_part :: proc(
 			t, _ = column_at_time(col, i)
 		case .Datetime:
 			dt, _ := column_at_datetime(col, i)
+			dt = _to_local(&zone, dt) // the zone's local time, as pandas
 			d, t =
 				Date{dt.year, dt.month, dt.day}, Time{dt.hour, dt.minute, dt.second, dt.nanosecond}
 		}

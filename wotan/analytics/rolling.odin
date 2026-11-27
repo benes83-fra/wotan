@@ -203,6 +203,7 @@ rolling_apply_float :: proc(
 
 	src := w.column(r.df, r.column)
 	out := w.column_new(agg.name, src.type, 0)
+	out.tz = src.tz
 
 	values := make([dynamic]f64, 0, r.window, allocator)
 	defer delete(values)

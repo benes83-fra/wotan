@@ -18,6 +18,8 @@ import util "../util"
 //   Bool -> BOOLEAN          String -> BYTE_ARRAY (STRING)
 //   Date -> INT32 (DATE)     Datetime -> INT64 TIMESTAMP(MICROS, local)
 //   Time -> INT64 TIME(MICROS, local)
+//   Datetime with a time zone -> INT64 TIMESTAMP(MICROS, UTC), the zone
+//            named in the Arrow schema (below)
 //   Duration -> INT64 nanoseconds, with an Arrow schema in the file's
 //            key-value metadata (ARROW:schema) that names it a duration,
 //            so that pandas and wotan read it back as one (arrow.odin)
@@ -92,6 +94,7 @@ Out_Col :: struct {
 	nulls:  []bool, // nil: no nulls
 	offset: int,
 	nanos:  bool, // Datetime / Time in nanoseconds rather than microseconds
+	tz:     w.Time_Zone, // Datetime: a zone = UTC instants
 }
 
 @(private)
@@ -101,7 +104,14 @@ _out_col :: proc(c: ^w.Column) -> Out_Col {
 		off += b.offset
 		b = b.orig
 	}
-	return Out_Col{name = c.name, type = c.type, data = b.data, nulls = b.nulls, offset = off}
+	return Out_Col {
+		name = c.name,
+		type = c.type,
+		data = b.data,
+		nulls = b.nulls,
+		offset = off,
+		tz = c.tz if c.type == .Datetime else {},
+	}
 }
 
 @(private)
@@ -853,7 +863,7 @@ _write_footer :: proc(
 			if !c.nanos {_tw_i32(&t, 6, CT_TIMESTAMP_MICROS if c.type == .Datetime else CT_TIME_MICROS)}
 			_tw_struct(&t, 10)
 			_tw_struct(&t, LT_TIMESTAMP if c.type == .Datetime else LT_TIME)
-			_tw_bool(&t, 1, false) // isAdjustedToUTC: wall-clock values
+			_tw_bool(&t, 1, c.tz.id != 0) // isAdjustedToUTC: instants, or wall-clock values
 			_tw_struct(&t, 2) // unit
 			_tw_struct(&t, 3 if c.nanos else 2) // NANOS or MICROS
 			_tw_end(&t)
@@ -923,12 +933,13 @@ _write_footer :: proc(
 		_tw_i64(&t, 6, total_comp)
 		_tw_end(&t)
 	}
-	// durations: an Arrow schema that names them (Parquet has no duration type)
-	has_duration := false
+	// durations and time zones: an Arrow schema that names them (Parquet has
+	// neither)
+	needs_arrow := false
 	for &c in cols {
-		if c.type == .Duration {has_duration = true}
+		if c.type == .Duration || c.tz.id != 0 {needs_arrow = true}
 	}
-	if has_duration {
+	if needs_arrow {
 		text := _arrow_schema_text(cols)
 		defer delete(text)
 		_tw_list(&t, 5, T_STRUCT, 1)

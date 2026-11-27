@@ -757,6 +757,7 @@ _new_like :: proc(
 ) -> Column {
 	out := column_new("", type, max(src.len, 1), allocator)
 	column_own_name(&out, name if name != "" else src.name)
+	if type == .Datetime && src.type == .Datetime {out.tz = src.tz}
 	return out
 }
 

@@ -73,6 +73,8 @@ A `DataFrame` is an ordered set of named columns of equal length. Each column ha
 | `.Datetime` | `w.Datetime{year, month, day, hour, minute, second, nanosecond}` | `w.Datetime{2024, 1, 31, 9, 30, 0, 0}` |
 | `.Duration` | `w.Duration` (nanoseconds, a distinct `i64`) | `15 * w.MINUTES` |
 
+A `Datetime` column can also have a time zone; its values are then instants in UTC, shown in local time (section 20).
+
 Three ideas run through the whole package:
 
 - **Any cell can be null.** Missing values are tracked separately from the data. Every read returns the value and an `is_null` flag.
@@ -829,7 +831,7 @@ w.dataframe_pretty_print(&weekly)
 
 Every period from the first to the last one in the data appears, so a month without rows shows up with a `.Sum` and `.Count` of 0 and nulls otherwise. With `by = {"ticker"}`, each ticker gets its own run of periods. The result starts with the key columns and the period labels.
 
-**Intervals.** `resample_every(df, on, every, specs, by)` makes one row per interval of a `Duration`, such as 15-minute bars from ticks, as pandas' `resample("15min", on=...)` does. The intervals are counted from midnight of the first day in the data, or of each group's first day with `by`. Each interval holds the times from its start up to, but not including, its end, and is labelled by its start. Intervals without rows are present, as for `resample`:
+**Intervals.** `resample_every(df, on, every, specs, by)` makes one row per interval of a `Duration`, such as 15-minute bars from ticks, as pandas' `resample("15min", on=...)` does. The intervals are counted from midnight of the first day in the data, or of each group's first day with `by`. Each interval holds the times from its start up to, but not including, its end, and is labelled by its start. For a column with a time zone, the days and midnights are local ones (section 20). Intervals without rows are present, as for `resample`:
 
 ```odin
 ticks := io.csv_load_from_string(`time,price
@@ -864,7 +866,7 @@ w.dataframe_pretty_print(&bars)
 
 ## 14. Date and text parts
 
-`date_part` extracts one part of every cell of a `Date`, `Datetime` or `Time` column as a new column, as pandas' `.dt` accessors do. The numeric parts give an `Int` column: `.Year`, `.Quarter`, `.Month`, `.Day`, `.Weekday` (0 = Monday), `.Day_Of_Year`, `.Week` (the ISO 8601 week), `.Hour`, `.Minute`, `.Second`, `.Microsecond` (0 to 999 999) and `.Nanosecond` (0 to 999, the nanoseconds beyond the microsecond, as in pandas). The flags give a `Bool` column: `.Is_Month_Start`, `.Is_Month_End`, `.Is_Quarter_Start`, `.Is_Quarter_End`, `.Is_Year_Start`, `.Is_Year_End` and `.Is_Leap_Year`. A `Date` column has no time parts, and a `Time` column has only the time parts.
+`date_part` extracts one part of every cell of a `Date`, `Datetime` or `Time` column as a new column, as pandas' `.dt` accessors do. The numeric parts give an `Int` column: `.Year`, `.Quarter`, `.Month`, `.Day`, `.Weekday` (0 = Monday), `.Day_Of_Year`, `.Week` (the ISO 8601 week), `.Hour`, `.Minute`, `.Second`, `.Microsecond` (0 to 999 999) and `.Nanosecond` (0 to 999, the nanoseconds beyond the microsecond, as in pandas). The flags give a `Bool` column: `.Is_Month_Start`, `.Is_Month_End`, `.Is_Quarter_Start`, `.Is_Quarter_End`, `.Is_Year_Start`, `.Is_Year_End` and `.Is_Leap_Year`. A `Date` column has no time parts, and a `Time` column has only the time parts. A `Datetime` column with a time zone gives the parts of its local time (section 20).
 
 The `str_` procedures work on `String` columns, as pandas' `.str` accessors do:
 
@@ -1292,7 +1294,7 @@ A `Duration` column works like any other column: it sorts, groups, joins, takes 
 | `diff(col, n)` of a `Datetime`, `Date`, `Time` or `Duration` column | Duration column of the time since the value `n` rows earlier, also per group with `by` |
 | `add_duration(col, d)`, `add_durations(col, ds)` | a `Datetime` (or `Date`, giving `Datetime`) or `Duration` column moved by one Duration or by a Duration column |
 | `duration_total(col, unit)` | `Float` column of the durations in `unit`: `duration_total(col, w.SECONDS)` is pandas' `dt.total_seconds()` |
-| `datetime_floor(col, every)` | `Datetime` column rounded down to multiples of `every` (pandas' `dt.floor`) |
+| `datetime_floor(col, every)` | `Datetime` column rounded down to multiples of `every` (pandas' `dt.floor`; in local time for a column with a time zone) |
 | `cast_column(col, .Int)` / `cast_column(ints, .Duration)` | nanosecond counts; from `String`, the text forms above |
 | `resample_every(df, on, every, specs)` | one row per interval of `every` (section 13) |
 
@@ -1325,6 +1327,77 @@ The aggregations `Count`, `Min`, `Max`, `First` and `Last` work on a Duration co
 - a sum beyond the Duration range is missing, and a group with no values sums to 0, as in pandas.
 
 The importers read durations from text in the form pandas writes (section 5 and the data I/O guide). Parquet, Excel, JSON and HTML files keep them; the data I/O guide gives the details per format.
+
+### Time zones
+
+A `Datetime` column can carry a time zone in `col.tz`. Without one, the default, its values are plain wall-clock times, as in all the examples above. With one, the values are instants stored in UTC and shown in the zone's local time with their UTC offset, the way pandas prints a `datetime64[ns, tz]` column. A zone is an IANA name such as `"America/New_York"` or `"Europe/Berlin"`, `"UTC"`, or a fixed offset such as `"+05:30"`. The IANA time zone database is built into the package (version `tz_data_version()`, currently `2026f`). It does not use the operating system's zone data, so results are the same on every machine and match pandas and Python's `zoneinfo`, including past rule changes.
+
+`tz_localize` gives a column of wall-clock times a zone; `tz_convert` shows the same instants in another zone:
+
+```odin
+ticks := io.csv_load_from_string(`time,price
+2024-03-08 14:30:00,101.5
+2024-03-11 13:30:00,102.0
+2024-11-01 13:30:00,99.0
+2024-11-04 14:30:00,98.5
+`)
+defer w.destroy_dataframe(&ticks)
+utc, _ := w.tz_localize(w.column(&ticks, "time"), "UTC", name = "utc")
+defer w.destroy_column(&utc)
+ny, _ := w.tz_convert(&utc, "America/New_York", name = "new_york")
+w.add_column(&ticks, ny)
+hour, _ := w.date_part(w.column(&ticks, "new_york"), .Hour, name = "hour")
+w.add_column(&ticks, hour)
+w.dataframe_pretty_print(&ticks)
+```
+
+```
+    time                 price  new_york                   hour
+  0 2024-03-08 14:30:00  101.5  2024-03-08 09:30:00-05:00  9
+  1 2024-03-11 13:30:00  102    2024-03-11 09:30:00-04:00  9
+  2 2024-11-01 13:30:00  99     2024-11-01 09:30:00-04:00  9
+  3 2024-11-04 14:30:00  98.5   2024-11-04 09:30:00-05:00  9
+```
+
+The New York open is 14:30 UTC in winter and 13:30 UTC in summer, and in local time it is 09:30 every day.
+
+When clocks go back, one wall-clock hour happens twice; when they go forward, one hour never happens. `tz_localize` and `datetime_from_local` take two choices for these times, with the same meaning as pandas' `ambiguous` and `nonexistent` arguments:
+
+| Choice | A time that happens twice (`ambiguous`) | A time that never happens (`nonexistent`) |
+|---|---|---|
+| `.Raise` (default) | `ok = false` | `ok = false` |
+| `.Earliest` / `.Latest` | the first or second of the two instants | |
+| `.Shift_Forward` / `.Shift_Backward` | | the first instant after the gap, or the last nanosecond before it |
+| `.Missing` | a missing value (pandas' `"NaT"`) | a missing value |
+
+```odin
+ny_zone, _ := w.time_zone("America/New_York")
+fall_back := w.Datetime{2024, 11, 3, 1, 30, 0, 0}
+first, _ := w.datetime_from_local(fall_back, ny_zone, ambiguous = .Earliest)  // 2024-11-03 05:30:00 UTC
+second, _ := w.datetime_from_local(fall_back, ny_zone, ambiguous = .Latest)   // 2024-11-03 06:30:00 UTC
+_, ok := w.datetime_from_local(fall_back, ny_zone)                            // ok = false
+fmt.println(w.utc_offset(ny_zone, first) / w.HOURS, w.utc_offset(ny_zone, second) / w.HOURS) // -4 -5
+```
+
+| Procedure | Result |
+|---|---|
+| `time_zone(name)` | the `Time_Zone` of an IANA name (letter case is forgiven), `"UTC"` or `"Z"`, or `"+05:30"` / `"-0800"` / `"+05"`; `ok = false` for anything else |
+| `time_zone_name(tz)`, `time_zone_names()` | the name of a zone (`""` for none); every IANA name the database knows |
+| `fixed_offset_zone(seconds)` | a fixed offset as a zone |
+| `utc_offset(tz, utc)` | the zone's offset from UTC at an instant, summer time included, as a `Duration` |
+| `datetime_to_local(utc, tz)`, `datetime_from_local(local, tz, ambiguous, nonexistent)` | one instant from UTC to local time and back |
+| `datetime_zoned_string(utc, tz)`, `parse_datetime_offset(text)` | text with the offset, as pandas writes it; text with an offset (`-04:00`, `+0530`, `Z`) to the instant in UTC and the offset |
+| `tz_localize(col, zone, ambiguous, nonexistent)` | wall-clock times placed in a zone; with `zone = ""`, a zoned column's local times without a zone |
+| `tz_convert(col, zone)` | the same instants in another zone |
+| `to_local_time(col)` | the local wall-clock times of a zoned column, without a zone |
+
+How the rest of the package treats a zoned column:
+
+- **Instants.** Sorting, grouping, joins, `unique`, `diff`, `duration_between` and `add_duration` work on the instants. A Duration added to a zoned time is an exact length of time, as in pandas, so adding 24 hours across a clock change lands on a different wall-clock hour.
+- **Local time.** `date_part` gives the parts of the local time, and `cast_column` to `Date` or `Time` gives the local date or time of day. `datetime_floor` rounds in local time and places the result back in the zone; it takes the `ambiguous` and `nonexistent` choices for results that happen twice or never. `resample` bins by local calendar days, and `resample_every` counts its intervals from local midnight; their labels are in the zone. All of this matches pandas.
+- **Values you pass in.** A `Datetime` you compare a zoned column with (`mask_gt`, `between`, a Parquet filter bound) or fill it with is taken as UTC. Build one from local time with `datetime_from_local`.
+- **Mixing.** `concat_rows` keeps a zone that all frames share and gives UTC for columns in different zones. `duration_between` and `merge_asof` return `ok = false` for a zoned column paired with a plain one, as does `concat_rows`; `melt` also refuses value columns in different zones. `join` compares the stored values, so give both key columns a zone or neither.
+- **Files.** The CSV, JSON and HTML readers turn text with offsets into a zoned column. Parquet keeps zones in both directions, and the Excel writer writes local time. The data I/O guide gives the details.
 
 
 ## 21. Memory management
@@ -1500,6 +1573,7 @@ The signed column is added to `trades` (step 1) before `recent` filters it. `fil
 | Column calculations | `shift`, `diff`, `pct_change`, `cumsum`, `cumprod`, `cummax`, `cummin`, `clip`, `rank`, `nlargest`, `nsmallest`, `describe`; per group with `by` |
 | Reshape and sample | `pivot`, `pivot_table`, `melt`, `resample`, `resample_every`, `sample` |
 | Durations | `NANOSECONDS` .. `WEEKS`, `datetime_sub`, `datetime_add`, `duration_to_string`, `parse_duration`, `duration_components`, `duration_between`, `add_duration`, `add_durations`, `duration_total`, `datetime_floor` |
+| Time zones | `time_zone`, `time_zone_name`, `time_zone_names`, `fixed_offset_zone`, `tz_data_version`, `utc_offset`, `datetime_to_local`, `datetime_from_local`, `datetime_zoned_string`, `parse_datetime_offset`, `tz_localize`, `tz_convert`, `to_local_time` |
 | Date and text parts | `date_part`, `str_upper`, `str_lower`, `str_strip`, `str_replace`, `str_slice`, `str_split_part`, `str_len` |
 | Checked variants | `try_column`, `try_add_column`, `try_set_index`, `try_loc`, `try_iloc`, `try_iloc_many`, `try_select`, `try_sort`, `try_join`, `try_join_on`, `try_groupby`, `compare` |
 | Compute | `select` (expressions), `col_expr`, `add_expr`, `sub_expr`, `mult_expr`, `div_expr`, `apply_expr`, `conv_expr`, `mask_expr`, `free_select_exprs` |
@@ -1511,4 +1585,4 @@ The signed column is added to `trades` (step 1) before `recent` filters it. `fil
 | Free | `destroy_dataframe`, `destroy_column`, `destroy_grouped_dataframe`, `destroy_groupby2`, `delete` (masks, strings) |
 | Temporary scratch | `TEMP_GUARD`, `temp_begin`, `temp_end` |
 
-For more examples, the tests in [`tests/`](../tests/) exercise every procedure. [`core_contracts_test.odin`](../tests/core_contracts_test.odin) in particular pins down the exact semantics of nulls, views, sorting, grouping and joins, and [`missing_data_test.odin`](../tests/missing_data_test.odin), [`frame_tools_test.odin`](../tests/frame_tools_test.odin), [`column_ops_test.odin`](../tests/column_ops_test.odin), [`reshape_test.odin`](../tests/reshape_test.odin), [`resample_test.odin`](../tests/resample_test.odin), [`group_asof_test.odin`](../tests/group_asof_test.odin), [`duration_test.odin`](../tests/duration_test.odin) and [`parts_checked_test.odin`](../tests/parts_checked_test.odin) check the procedures of sections 9 to 14 and `merge_asof` against pandas, and the checked variants against the originals.
+For more examples, the tests in [`tests/`](../tests/) exercise every procedure. [`core_contracts_test.odin`](../tests/core_contracts_test.odin) in particular pins down the exact semantics of nulls, views, sorting, grouping and joins, and [`missing_data_test.odin`](../tests/missing_data_test.odin), [`frame_tools_test.odin`](../tests/frame_tools_test.odin), [`column_ops_test.odin`](../tests/column_ops_test.odin), [`reshape_test.odin`](../tests/reshape_test.odin), [`resample_test.odin`](../tests/resample_test.odin), [`group_asof_test.odin`](../tests/group_asof_test.odin), [`duration_test.odin`](../tests/duration_test.odin), [`timezone_test.odin`](../tests/timezone_test.odin) and [`parts_checked_test.odin`](../tests/parts_checked_test.odin) check the procedures of sections 9 to 14 and `merge_asof` against pandas, and the checked variants against the originals.

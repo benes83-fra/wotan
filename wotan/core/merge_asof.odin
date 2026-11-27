@@ -52,7 +52,7 @@ merge_asof :: proc(
 	ri, f2 := right.name_to_index[r_on]
 	if !f1 || !f2 {return {}, false}
 	lkey, rkey := &left.columns[li], &right.columns[ri]
-	if lkey.type != rkey.type {return {}, false}
+	if lkey.type != rkey.type || (lkey.tz.id == 0) != (rkey.tz.id == 0) {return {}, false}
 	#partial switch lkey.type {
 	case .Int, .Float, .Date, .Time, .Datetime:
 	case:
@@ -216,7 +216,9 @@ _asof_codes :: proc(left, right: ^DataFrame, by: []string, lcode, rcode: []int) 
 		ri, f2 := right.name_to_index[name]
 		if !f1 || !f2 {return false}
 		lc, rc := &left.columns[li], &right.columns[ri]
-		if lc.type != rc.type || lc.type == .Invalid {return false}
+		if lc.type != rc.type || lc.type == .Invalid || (lc.tz.id == 0) != (rc.tz.id == 0) {
+			return false
+		}
 		// both frames' keys in one column, so that equal keys share a code
 		both := column_new("", lc.type, max(nl + right.rows, 1), context.temp_allocator)
 		defer destroy_column(&both)

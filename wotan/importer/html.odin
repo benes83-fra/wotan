@@ -366,7 +366,17 @@ append_value :: proc(col: ^w.Column, s: string) {
 		time, _ := w.parse_time(trimmed)
 		w.append_time(col, time)
 	case .Datetime:
-		datetime, _ := w.parse_datetime(trimmed)
+		datetime: w.Datetime
+		if col.tz.id != 0 {
+			ok: bool
+			datetime, _, ok = w.parse_datetime_offset(trimmed)
+			if !ok { 	// a missing-value word such as NA
+				w.append_null(col)
+				return
+			}
+		} else {
+			datetime, _ = w.parse_datetime(trimmed)
+		}
 		w.append_datetime(col, datetime)
 	case .Duration:
 		d, _ := w.parse_duration(trimmed)
@@ -444,13 +454,24 @@ html_parse_table :: proc(table: string, allocator: mem.Allocator) -> w.DataFrame
 	_unique_names(header)
 	row_count := len(tmp) - 1
 
-	// PASS 2: infer column types
+	// PASS 2: infer column types (text columns of datetimes with UTC offsets
+	// become Datetime columns with a time zone)
 	inferred := infer_column_types(tmp)
+	zones := make([]w.Time_Zone, len(header), context.temp_allocator)
+	for c in 0 ..< len(header) {
+		if inferred[c] != .String {continue}
+		samples := make([dynamic]string, context.temp_allocator)
+		for r in 1 ..< len(tmp) {
+			if c < len(tmp[r]) {append(&samples, tmp[r][c])}
+		}
+		if tz, ok := infer_zone(samples[:]); ok {inferred[c], zones[c] = .Datetime, tz}
+	}
 
 	// PASS 3: create columns
 	for name, i in header {
 		col := w.column_new("", inferred[i], row_count, allocator)
 		w.column_own_name(&col, name)
+		col.tz = zones[i]
 		w.add_column(&df, col)
 	}
 

@@ -142,7 +142,9 @@ build_groupby2_schema :: proc(
 	// 1. Key columns (same type as original)
 	for key in gb.keys {
 		src := column(gb.df, key)
-		add_column(&out, column_new(key, src.type, 0, allocator))
+		k := column_new(key, src.type, 0, allocator)
+		k.tz = src.tz
+		add_column(&out, k)
 	}
 
 	// 2. Aggregated columns
@@ -180,10 +182,9 @@ build_groupby2_schema :: proc(
 				fmt.tprintf("groupby2: EWM alpha %v of %q must be in (0, 1]", agg.alpha, agg.name),
 			)
 		}
-		add_column(
-			&out,
-			column_new(agg.name, groupby2_output_type(src.type, agg.kind), 0, allocator),
-		)
+		c := column_new(agg.name, groupby2_output_type(src.type, agg.kind), 0, allocator)
+		if c.type == .Datetime {c.tz = src.tz}
+		add_column(&out, c)
 	}
 
 	return out

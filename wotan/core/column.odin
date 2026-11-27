@@ -18,6 +18,7 @@ Column :: struct {
 	arena:     vmem.Arena,
 	allocator: mem.Allocator,
 	owns_name: bool, // name allocated with `allocator` (column_own_name), freed by destroy_column
+	tz:        Time_Zone, // Datetime columns: none = wall-clock times; a zone = UTC instants (timezone.odin)
 }
 
 
@@ -427,6 +428,7 @@ column_at_duration :: proc(col: ^Column, i: int) -> (Duration, bool) {
 column_take :: proc(src: ^Column, rows: []int, allocator := context.allocator) -> Column {
 	out := column_new("", src.type, max(len(rows), 1), allocator)
 	column_own_name(&out, src.name)
+	out.tz = src.tz
 	for r in rows {
 		if r < 0 || is_null(src, r) {
 			append_null(&out)
@@ -550,6 +552,7 @@ column_slice_view :: proc(orig: ^Column, start: int, end: int) -> Column {
 		orig     = base,
 		offset   = offset,
 		is_view  = true,
+		tz       = orig.tz,
 	}
 }
 
@@ -562,6 +565,7 @@ column_slice_copy :: proc(orig: ^Column, start: int, end: int) -> Column {
 	n := end - start
 	c := column_new("", orig.type, n)
 	column_own_name(&c, orig.name)
+	c.tz = orig.tz
 
 	for i in start ..< end {
 		#partial switch orig.type {
@@ -1035,7 +1039,8 @@ value_as_string :: proc(col: ^Column, row: int, allocator: mem.Allocator) -> str
 	// Canonical text form, readable back by the importers without loss:
 	// shortest exact floats (always with '.'/exponent so they stay Float),
 	// true/false, ISO dates "YYYY-MM-DD", times "HH:MM:SS",
-	// datetimes "YYYY-MM-DD HH:MM:SS", durations "D days HH:MM:SS" (pandas)
+	// datetimes "YYYY-MM-DD HH:MM:SS" (with a zone: local time and offset,
+	// "YYYY-MM-DD HH:MM:SS-04:00"), durations "D days HH:MM:SS" (pandas)
 	switch col.type {
 	case .Int:
 		v, _ := column_at_int(col, row)
@@ -1057,6 +1062,7 @@ value_as_string :: proc(col: ^Column, row: int, allocator: mem.Allocator) -> str
 		return time_to_string(v, allocator)
 	case .Datetime:
 		v, _ := column_at_datetime(col, row)
+		if col.tz.id != 0 {return datetime_zoned_string(v, col.tz, allocator)}
 		return datetime_to_string(v, allocator)
 	case .Duration:
 		v, _ := column_at_duration(col, row)

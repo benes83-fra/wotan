@@ -197,7 +197,7 @@ column_value_string :: proc(col: ^Column, row: int) -> string {
 	case .Datetime:
 		v, is_null := column_at_datetime(col, row)
 		if is_null {return "NULL"}
-
+		if col.tz.id != 0 {return datetime_zoned_string(v, col.tz, context.temp_allocator)}
 		return datetime_to_string(v, context.temp_allocator)
 	case .Duration:
 		v, is_null := column_at_duration(col, row)

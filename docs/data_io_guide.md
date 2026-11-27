@@ -56,6 +56,7 @@ import "core:fmt"
 - `true`/`false` become `Bool`;
 - ISO dates, times and datetimes become `Date`, `Time` and `Datetime`, with fractions of a second (`09:30:15.250`) to the nanosecond;
 - durations in the form pandas writes them, with their days (`0 days 00:05:00`, `-1 days +23:55:00`), become `Duration`. pandas itself leaves such a column as text; `pd.to_timedelta` converts it. A bare `00:05:00` is a `Time`;
+- datetimes with a UTC offset, as pandas writes a column with a time zone (`2024-03-10 03:30:00-04:00`, also `...Z` and `...+0530`), become a `Datetime` column with a time zone, holding the instants. When every value has the same offset, the zone is that offset (`-04:00`); when the offsets differ, as New York's do between winter and summer, it is `UTC`. Text cannot say which named zone it came from; `tz_convert` puts the column back into one. A column that mixes values with and without an offset stays `String`;
 - anything else, or a mix that fits none of these, becomes `String`.
 
 Empty fields and the tokens `NA`, `null` and `None` become nulls. So does `NaN` text in a column that is not `Float` (pandas would make an integer column with `NaN` a float column); in a `Float` column it is NaN.
@@ -201,7 +202,7 @@ tables: 3
 
 `xlsx_load(path, alloc)` reads the first worksheet of an `.xlsx` workbook, and `xlsx_load_sheet(path, name, alloc)` reads a worksheet by name and returns `(df, found)`. `xlsx_sheet_names(path, alloc)` lists the worksheets in workbook order; free each name and the slice. All three panic when the file is missing or is not an `.xlsx` workbook; their `try_` twins return `ok = false` (section 2).
 
-The first row is the header. Cells are read with their Excel types: numbers, booleans, shared and inline strings, rich text, and errors (read as nulls). A number whose cell style is a date or time format becomes a `Date`, `Time` or `Datetime`, to the millisecond (Excel's own resolution; `xlsx_save` writes fractions of a second the same way). A number with an elapsed-time format such as `[h]:mm:ss` is a length of time and becomes a `Duration`, to the microsecond; `xlsx_save` writes `Duration` columns that way. (openpyxl, which pandas uses for `.xlsx`, reads such cells as times of day.) A custom format such as `#,##0 "USD"` is not mistaken for a date.
+The first row is the header. Cells are read with their Excel types: numbers, booleans, shared and inline strings, rich text, and errors (read as nulls). A number whose cell style is a date or time format becomes a `Date`, `Time` or `Datetime`, to the millisecond (Excel's own resolution; `xlsx_save` writes fractions of a second the same way). A number with an elapsed-time format such as `[h]:mm:ss` is a length of time and becomes a `Duration`, to the microsecond; `xlsx_save` writes `Duration` columns that way. (openpyxl, which pandas uses for `.xlsx`, reads such cells as times of day.) Excel has no time zones: `xlsx_save` writes a `Datetime` column with a time zone in its local time, which reads back as plain wall-clock times. A custom format such as `#,##0 "USD"` is not mistaken for a date.
 
 ```odin
 names := io.xlsx_sheet_names("demo_files/example.xlsx", context.allocator)
@@ -289,7 +290,7 @@ The first file was written by pandas from a frame indexed by date. pandas stores
 | `INT64` that the file's Arrow schema calls a duration (pandas' `timedelta64`, pyarrow's `duration`, in any unit) | `Duration` |
 | lists, maps and structs, nested to any depth | `String` holding JSON text (see below) |
 
-Times and timestamps keep every unit down to the nanosecond. Timestamps stored as instants (pandas' time-zone-aware columns) are read as UTC. Unsigned 64-bit values above 2^63 − 1 do not fit `Int` and wrap to negative numbers.
+Times and timestamps keep every unit down to the nanosecond. Timestamps stored as instants (`isAdjustedToUTC`, as pandas, pyarrow, Spark and DuckDB store a column with a time zone) become a `Datetime` column with a time zone: the zone the file's Arrow schema names, such as `America/New_York` or `+05:30`, or `UTC` when it names none. Timestamps stored as wall-clock times, and `INT96` timestamps, have no zone. Unsigned 64-bit values above 2^63 − 1 do not fit `Int` and wrap to negative numbers.
 
 **Nested columns.** A list, map or struct column becomes a `String` column with one JSON text per row. This is how the JSON loader keeps nested values (section 4), and the text can be parsed with `core:encoding/json`:
 
@@ -362,8 +363,11 @@ Every column is written with the standard Parquet type for its values, so pandas
 | `String` | `BYTE_ARRAY` with the `STRING` type |
 | `Date` | `INT32` with the `DATE` type |
 | `Datetime` | `INT64` `TIMESTAMP` in microseconds, as wall-clock time (no time zone) |
+| `Datetime` with a time zone | `INT64` `TIMESTAMP` in microseconds as UTC instants, the zone named in the file's Arrow schema |
 | `Time` | `INT64` `TIME` in microseconds |
 | `Duration` | `INT64` nanoseconds, named a duration in the file's Arrow schema |
+
+pandas reads a zoned column back as `datetime64[ns, zone]` and DuckDB as `TIMESTAMP WITH TIME ZONE`. A file gets an Arrow schema only when it has a `Duration` or zoned `Datetime` column.
 
 A `Datetime` or `Time` column whose values have digits below the microsecond is written in nanoseconds instead, so nothing is lost, as long as every value fits that unit. For `Datetime`, the nanosecond range ends at 1677 and 2262; a column with a date outside it stays in microseconds and drops the extra digits.
 
@@ -461,7 +465,7 @@ A row matches when its cell in `column` lies between `lower` and `upper`. Set `l
 
 The bounds must suit the column's DataFrame type:
 - an `Int` or `Float` column takes `int` or `f64` bounds;
-- a `Bool`, `String`, `Date`, `Time`, `Datetime` or `Duration` column takes a value of that type. Inside the filter literal a duration needs its type spelled out: `upper = w.Duration(4 * w.DAYS)`.
+- a `Bool`, `String`, `Date`, `Time`, `Datetime` or `Duration` column takes a value of that type. Inside the filter literal a duration needs its type spelled out: `upper = w.Duration(4 * w.DAYS)`. A bound for a column with a time zone is in UTC; `w.datetime_from_local` turns a local time into one.
 
 Strings compare byte by byte, which for plain text is alphabetical order. A filter column does not have to be in `columns`.
 
@@ -547,11 +551,11 @@ All writers produce files that the matching importer reads back to the same Data
 | `json_write(&df, path, alloc)` | One array of objects. Nulls and non-finite floats are `null`, and dates are ISO strings. |
 | `jsonl_write(&df, path, alloc)` | One object per line, otherwise as `json_write`. |
 | `html_write(&df, path, alloc)` | A `<table>` with `<thead>` and `<tbody>`; text is escaped, and nulls are empty cells. |
-| `xlsx_save(&df, path, alloc) -> bool` | One worksheet, `Sheet1`. Numbers are exact; dates and times are serial numbers with a date style. |
+| `xlsx_save(&df, path, alloc) -> bool` | One worksheet, `Sheet1`. Numbers are exact; dates and times are serial numbers with a date style (local time for a column with a time zone). |
 | `parquet_save(&df, path, compression, row_group_rows, dictionary) -> bool` | A Parquet file with the standard type for every column (section 7.2). |
 | `parquet_bytes(&df, compression, row_group_rows, dictionary, alloc) -> ([]u8, bool)` | The bytes `parquet_save` writes. |
 
-Floats are written in their shortest exact form and always keep a `.` or an exponent, so a float column stays a float column.
+Floats are written in their shortest exact form and always keep a `.` or an exponent, so a float column stays a float column. The CSV, JSON and HTML writers write a `Datetime` column with a time zone as local time with its UTC offset, as pandas does (`2024-03-10 03:30:00-04:00`); the importers read that back as the same instants (section 2).
 
 ```odin
 ok := ex.csv_save(&df, "trades.csv") // the DataFrame from section 3
@@ -876,6 +880,7 @@ The dates are CBOE's trading days. To combine an index with Yahoo prices, put it
 | `parquet_filter_test` | `parquet_info` against pyarrow 14's metadata (rows, row groups, column types, and null count, min and max per row group for files written by pyarrow and DuckDB; none for UUID, INT96 and nested columns); 16 filters on a 600-row file in 10 row groups, each giving the rows pyarrow's `read_table(filters=...)` gives; a corrupt row group outside the filter's range is never read; `ok = false` for bad filters and unreadable files; the same rows from one thread and from all |
 | `parquet_nested_test` | nested columns as JSON text: files from pyarrow 14 (small version 1 pages and row groups; version 2 pages with Zstandard) and DuckDB 1.1, every cell of every nested column equal to the JSON text of pyarrow's value (lists, lists of lists, structs with lists and structs, maps with string and integer keys, lists of structs, decimals, binary, times, timestamps, bools, nulls and empty lists at every level, a 6000-element list across pages, a required struct); one thread and all; `parquet_info`; column selection and a filter beside nested columns; 300 damaged copies |
 | `duration_test` | durations against pandas 1.5.3: the text forms both ways; `diff`, `duration_between`, `add_duration(s)`, `datetime_floor`, `duration_total` on a CSV written by pandas; groupby and `resample_every` bars; pyarrow's durations in Parquet; a frame with durations through Parquet, CSV, JSON, HTML and Excel |
+| `timezone_test` | time zones against pandas 1.5.3 and Python's zoneinfo: zone lookups and UTC offsets; skipped and repeated wall-clock times; `tz_localize`, `tz_convert`, local parts, floors and resampling on a CSV written by pandas; text with offsets read as zoned columns; pandas' zoned Parquet files; zoned frames through Parquet, CSV, JSON, HTML and Excel; the zone kept by frame operations |
 | `parquet_test` | reading: every column type, with nulls and extreme values, against pyarrow in eight layouts (plain, dictionary, delta and byte-stream-split values, page versions 1 and 2, no compression, Snappy, gzip, Zstandard, LZ4, several row groups and many small pages); FLOAT16 and byte stream split on integers (pyarrow 17); Zstandard pages of several blocks; DuckDB's Zstandard file with UUIDs; the Zstandard decoder on its own; the same frame from one thread and from all; INT96 timestamps; decimals stored as integers (DuckDB); a pandas file; column selection; `ok = false` for unsupported files (Brotli) and for truncated or corrupted copies. Writing: the same table with every codec, with and without dictionaries, in one or three row groups, read back cell for cell; the same bytes from one thread and from all; views, an empty frame, a hidden index, 70 000 rows with an all-null column. The fixtures in `demo_files/parquet` were written by pyarrow 14 and 17 and by DuckDB 1.1 |
 | `http_get_test`, `yahoo_finance_json_test`, `yahoo_finance_events_test` | live HTTP and Yahoo requests, including dividends and splits |
 | `yahoo_max_range_test` | `.Max` gives the whole daily history (SPY from 1993-01-29, no gap over a week) and weekly rows a week apart |

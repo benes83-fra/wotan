@@ -30,6 +30,9 @@ DEFAULT_NULL_TOKEN :: []string{"NA", "null", "None", ""}
 // Types are inferred from every row unless given: Int, Float (ints and floats
 // mixed), Bool (true / false), Datetime, Date, Time, Duration (text as pandas
 // writes a Timedelta: "0 days 00:05:00", "-1 days +23:55:00"), else String.
+// Datetimes with a UTC offset ("2024-03-10 03:30:00-04:00", "...Z") give a
+// Datetime column with a time zone: the offset they all share, or UTC when
+// the offsets differ (summer and winter time).
 //
 // The reader works on the whole text at once: it cuts it into chunks at line
 // ends, finds the fields of every chunk in parallel without copying them,
@@ -285,6 +288,7 @@ Kind :: enum u8 {
 	Float,
 	Bool,
 	Datetime,
+	Zoned, // a datetime with a UTC offset; its value kept in UTC
 	Date,
 	Time,
 	Duration,
@@ -293,6 +297,14 @@ Kind :: enum u8 {
 
 @(private = "file")
 Kinds :: bit_set[Kind]
+
+// The UTC offsets of the zoned datetimes of a chunk's column: none yet, one
+// (`first`) or several
+@(private = "file")
+Offsets :: struct {
+	first: i32,
+	count: u8, // 0, 1 or 2 (several)
+}
 
 // A chunk's values of one column, converted while its type was inferred, in
 // the chunk's own type; used as they are when the column ends up with that
@@ -314,7 +326,7 @@ _cell_type :: proc(k: Kind) -> w.ColumnType {
 		return .Float
 	case .Bool:
 		return .Bool
-	case .Datetime:
+	case .Datetime, .Zoned:
 		return .Datetime
 	case .Date:
 		return .Date
@@ -331,7 +343,12 @@ _cell_type :: proc(k: Kind) -> w.ColumnType {
 // returns its kind (for inference) and keeps the value while the chunk's
 // column has a single kind (Int upgrades to Float)
 @(private = "file")
-_classify_store :: proc(sp: ^Spec, lr, n: int, t: string) -> Kind #no_bounds_check {
+_classify_store :: proc(
+	sp: ^Spec,
+	lr, n: int,
+	t: string,
+	offs: ^Offsets,
+) -> Kind #no_bounds_check {
 	kind := Kind.String
 	iv: int
 	fv: f64
@@ -339,6 +356,7 @@ _classify_store :: proc(sp: ^Spec, lr, n: int, t: string) -> Kind #no_bounds_che
 	dv: w.Date
 	tv: w.Time
 	tsv: w.Datetime
+	zone_secs: int
 	du: w.Duration
 	c := t[0]
 	if (c >= '0' && c <= '9') || c == '+' || c == '-' || c == '.' {
@@ -350,6 +368,14 @@ _classify_store :: proc(sp: ^Spec, lr, n: int, t: string) -> Kind #no_bounds_che
 			if fv, ok = strconv.parse_f64(t); ok {kind = .Float}
 		} else if tsv, ok = w.parse_datetime(t); ok {
 			kind = .Datetime
+		} else if tsv, zone_secs, ok = w.parse_datetime_offset(t); ok {
+			kind = .Zoned
+			switch {
+			case offs.count == 0:
+				offs^ = {i32(zone_secs), 1}
+			case offs.first != i32(zone_secs):
+				offs.count = 2
+			}
 		} else if dv, ok = w.parse_date(t); ok {
 			kind = .Date
 		} else if tv, ok = w.parse_time(t); ok {
@@ -404,7 +430,7 @@ _classify_store :: proc(sp: ^Spec, lr, n: int, t: string) -> Kind #no_bounds_che
 		([^]f64)(raw_data(sp.vals))[lr] = fv
 	case .Bool:
 		([^]bool)(raw_data(sp.vals))[lr] = bv
-	case .Datetime:
+	case .Datetime, .Zoned:
 		([^]w.Datetime)(raw_data(sp.vals))[lr] = tsv
 	case .Date:
 		([^]w.Date)(raw_data(sp.vals))[lr] = dv
@@ -454,6 +480,7 @@ Read_Job :: struct {
 	cols:        []w.Column,
 	str_space:   [][]u8, // per chunk x column: the bytes reserved for strings
 	specs:       []Spec, // per chunk x column: values converted while inferring
+	offsets:     []Offsets, // per chunk x column: UTC offsets of zoned datetimes
 	errors:      []string, // per chunk x column: the first cell that failed
 	next:        int,
 	stage:       int,
@@ -565,6 +592,8 @@ _csv_read :: proc(
 	job.kinds = make([]Kinds, len(chunks) * n_cols)
 	job.str_bytes = make([]int, len(chunks) * n_cols)
 	job.specs = make([]Spec, len(chunks) * n_cols)
+	job.offsets = make([]Offsets, len(chunks) * n_cols)
+	defer delete(job.offsets)
 	defer {
 		for &sp in job.specs {
 			delete(sp.vals, runtime.heap_allocator())
@@ -587,6 +616,28 @@ _csv_read :: proc(
 		out_types[j] = _type_of(seen)
 	}
 	job.types = out_types
+	// datetimes with offsets: the one offset they share as the zone, else UTC
+	zones := make([]w.Time_Zone, n_cols, context.temp_allocator)
+	for j in 0 ..< n_cols {
+		if types != nil || out_types[j] != .Datetime {continue}
+		seen: Kinds
+		for k in 0 ..< len(chunks) {seen += job.kinds[k * n_cols + j]}
+		if .Zoned not_in seen {continue}
+		all: Offsets
+		for k in 0 ..< len(chunks) {
+			o := job.offsets[k * n_cols + j]
+			switch {
+			case o.count == 0:
+			case all.count == 0:
+				all = o
+			case o.count == 2 || o.first != all.first:
+				all.count = 2
+			}
+		}
+		ok: bool
+		if all.count == 1 {zones[j], ok = w.fixed_offset_zone(int(all.first))}
+		if !ok {zones[j], _ = w.time_zone(w.UTC_ZONE_NAME)}
+	}
 
 	// the columns, and their string bytes reserved chunk by chunk
 	cols := make([]w.Column, n_cols)
@@ -599,6 +650,7 @@ _csv_read :: proc(
 	defer delete(job.str_space)
 	for j in 0 ..< n_cols {
 		cols[j] = w.column_new("", out_types[j], max(rows, 1), allocator)
+		cols[j].tz = zones[j]
 		w.column_own_name(&cols[j], names[j])
 		if out_types[j] != .String {continue}
 		total := 0
@@ -709,6 +761,7 @@ _type_of :: proc(seen: Kinds) -> w.ColumnType {
 		int(numeric) +
 		int(.Bool in seen) +
 		int(.Datetime in seen) +
+		int(.Zoned in seen) +
 		int(.Date in seen) +
 		int(.Time in seen) +
 		int(.Duration in seen) +
@@ -722,7 +775,7 @@ _type_of :: proc(seen: Kinds) -> w.ColumnType {
 		return .Int
 	case .Bool in seen:
 		return .Bool
-	case .Datetime in seen:
+	case .Datetime in seen, .Zoned in seen:
 		return .Datetime
 	case .Date in seen:
 		return .Date
@@ -782,7 +835,7 @@ _scan_task :: proc(data: rawptr, begin, end: int) {
 					if specs[j].state != 2 {_spec_drop(&specs[j])}
 					continue
 				}
-				kinds[j] += {_classify_store(&specs[j], lr, n, t)}
+				kinds[j] += {_classify_store(&specs[j], lr, n, t, &job.offsets[k * nc + j])}
 			}
 		}
 		copy(job.kinds[k * nc:(k + 1) * nc], kinds)
@@ -818,7 +871,8 @@ _convert_task :: proc(data: rawptr, begin, end: int) {
 				for i in 0 ..< n {col.nulls[base + i] = true}
 				continue
 			}
-			if _cell_type(sp.kind) == typ || (sp.kind == .Int && typ == .Float) {
+			same := _cell_type(sp.kind) == typ && (sp.kind == .Zoned) == (col.tz.id != 0)
+			if same || (sp.kind == .Int && typ == .Float) {
 				if sp.kind == .Int && typ == .Float {
 					ints := ([^]int)(raw_data(sp.vals))
 					out := ([^]f64)(col.data)
@@ -877,7 +931,11 @@ _convert_task :: proc(data: rawptr, begin, end: int) {
 			case .Time:
 				([^]w.Time)(col.data)[row], ok = w.parse_time(field)
 			case .Datetime:
-				([^]w.Datetime)(col.data)[row], ok = w.parse_datetime(field)
+				if col.tz.id != 0 {
+					([^]w.Datetime)(col.data)[row], _, ok = w.parse_datetime_offset(field)
+				} else {
+					([^]w.Datetime)(col.data)[row], ok = w.parse_datetime(field)
+				}
 			case .Duration:
 				([^]w.Duration)(col.data)[row], ok = w.parse_duration(field)
 			}

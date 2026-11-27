@@ -210,6 +210,7 @@ select_exprs :: proc(df: ^DataFrame, exprs: []Select_Expr) -> DataFrame {
 		case .Column:
 			orig := expr.col
 			new_col := column_new(expr.name, orig.type, orig.len)
+			new_col.tz = orig.tz
 
 			for i in 0 ..< orig.len {
 				#partial switch orig.type {

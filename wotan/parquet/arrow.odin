@@ -1,5 +1,6 @@
 package parquet
 
+import w "../core"
 import "base:intrinsics"
 import "core:encoding/base64"
 
@@ -7,11 +8,13 @@ import "core:encoding/base64"
 // that pyarrow (and so pandas and Polars) writes next to the Parquet one,
 // base64 text of an Arrow IPC message holding a flatbuffer. It carries what
 // Parquet has no type for; wotan reads and writes it for durations, which
-// Parquet stores as plain INT64:
+// Parquet stores as plain INT64, and for the time zone of a timestamp column:
 //   reading  a top-level INT64 column without a Parquet logical type that
-//            the Arrow schema calls Duration(unit) becomes a Duration column
-//   writing  a frame with a Duration column gets an Arrow schema of all its
-//            columns, so that pandas reads the column back as timedelta64
+//            the Arrow schema calls Duration(unit) becomes a Duration column;
+//            a UTC timestamp column that it gives a time zone gets that zone
+//   writing  a frame with a Duration column or a Datetime column with a time
+//            zone gets an Arrow schema of all its columns, so that pandas
+//            reads them back as timedelta64 / datetime64 in that zone
 //
 // Flatbuffers in brief: a table starts with an i32 offset back to its
 // vtable (u16 vtable size, u16 table size, then one u16 offset per field, 0
@@ -39,13 +42,15 @@ ARROW_TIMESTAMP :: 10
 @(private)
 ARROW_DURATION :: 18
 
-// A top-level field of an Arrow schema: its name, type and time unit
-// (0 seconds .. 3 nanoseconds; Duration, Time and Timestamp only)
+// A top-level field of an Arrow schema: its name, type, time unit (0
+// seconds .. 3 nanoseconds; Duration, Time and Timestamp only) and time zone
+// (Timestamp only; "" for none)
 @(private)
 Arrow_Field :: struct {
 	name: string, // points into the decoded bytes
 	type: u8,
 	unit: int,
+	tz:   string, // points into the decoded bytes
 }
 
 // ---------------------------------------------------------------------------
@@ -110,6 +115,19 @@ _fb_scalar :: proc(f: ^Flat, tab, id, size, default: int) -> int {
 	return int(i32(u32(_fb_u32(f, at))))
 }
 
+// The string field `id` of table `tab` ("" if absent)
+@(private)
+_fb_string :: proc(f: ^Flat, tab, id: int) -> string {
+	at := _fb_ref(f, tab, id)
+	if at < 0 {return ""}
+	ln := _fb_u32(f, at)
+	if f.bad || ln > len(f.b) - at - 4 {
+		f.bad = true
+		return ""
+	}
+	return string(f.b[at + 4:at + 4 + ln])
+}
+
 // The top-level fields of the Arrow schema in `text` (base64), or ok = false
 // if it cannot be read. The names point into `bytes`, which the caller frees.
 @(private)
@@ -138,21 +156,17 @@ _arrow_fields :: proc(text: string) -> (fields: [dynamic]Arrow_Field, bytes: []u
 		at := vec + 4 + 4 * k
 		field := at + _fb_u32(&f, at)
 		af: Arrow_Field
-		if name := _fb_ref(&f, field, 0); name >= 0 {
-			ln := _fb_u32(&f, name)
-			if ln > len(f.b) - name - 4 {
-				f.bad = true
-			} else {
-				af.name = string(f.b[name + 4:name + 4 + ln])
-			}
-		}
+		af.name = _fb_string(&f, field, 0)
 		af.type = u8(_fb_scalar(&f, field, 2, 1, 0))
 		// a field equal to its default is not stored: the unit of Duration
 		// and Time defaults to milliseconds, of Timestamp to seconds
 		if af.type == ARROW_DURATION || af.type == ARROW_TIMESTAMP || af.type == ARROW_TIME {
 			default := 0 if af.type == ARROW_TIMESTAMP else 1
 			af.unit = default
-			if t := _fb_ref(&f, field, 3); t >= 0 {af.unit = _fb_scalar(&f, t, 0, 2, default)}
+			if t := _fb_ref(&f, field, 3); t >= 0 {
+				af.unit = _fb_scalar(&f, t, 0, 2, default)
+				if af.type == ARROW_TIMESTAMP {af.tz = _fb_string(&f, t, 1)}
+			}
 		}
 		if f.bad {break}
 		append(&fields, af)
@@ -318,8 +332,16 @@ _arrow_schema_text :: proc(cols: []Out_Col) -> string {
 			type_tab, _ = _fbw_table(&b, {{0, 2, 0}}) // DAY
 		case ARROW_TIME:
 			type_tab, _ = _fbw_table(&b, {{0, 2, unit}, {1, 4, 64}})
-		case ARROW_TIMESTAMP, ARROW_DURATION:
-			type_tab, _ = _fbw_table(&b, {{0, 2, unit}}) // no time zone: wall-clock values
+		case ARROW_TIMESTAMP:
+			if c.tz.id == 0 {
+				type_tab, _ = _fbw_table(&b, {{0, 2, unit}}) // no time zone: wall-clock values
+			} else {
+				trefs: [4]int
+				type_tab, trefs = _fbw_table(&b, {{0, 2, unit}, {1, 0, 0}})
+				_fbw_point(&b, trefs[0], _fbw_string(&b, w.time_zone_name(c.tz)))
+			}
+		case ARROW_DURATION:
+			type_tab, _ = _fbw_table(&b, {{0, 2, unit}})
 		case:
 			type_tab, _ = _fbw_table(&b, {}) // Bool, Utf8: no fields
 		}

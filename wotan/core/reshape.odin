@@ -60,6 +60,7 @@ melt :: proc(
 	if len(vals) == 0 || var_name == value_name {return {}, false}
 	type := vals[0].type
 	for v in vals[1:] {
+		if v.type == type && v.tz != vals[0].tz {return {}, false}
 		if v.type == type {continue}
 		if (v.type == .Int || v.type == .Float) && (type == .Int || type == .Float) {
 			type = .Float
@@ -78,6 +79,7 @@ melt :: proc(
 	column_own_name(&names, var_name)
 	values := column_new("", type, max(n, 1), allocator)
 	column_own_name(&values, value_name)
+	if type == .Datetime {values.tz = vals[0].tz}
 	for v in vals {
 		for r in 0 ..< df.rows {
 			append_string(&names, v.name)

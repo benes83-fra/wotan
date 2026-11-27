@@ -273,8 +273,13 @@ _json_build :: proc(
 	}
 	types := make([]w.ColumnType, col_count, context.temp_allocator)
 	defer delete(types, context.temp_allocator)
+	zones := make([]w.Time_Zone, col_count, context.temp_allocator)
+	defer delete(zones, context.temp_allocator)
 	for i in 0 ..< col_count {
 		types[i] = infer.infer_column_type(samples[i][:])
+		// datetimes with UTC offsets: a column with a time zone
+		if types[i] != .String {continue}
+		if tz, ok := infer.infer_zone(samples[i][:]); ok {types[i], zones[i] = .Datetime, tz}
 	}
 
 	df := w.dataframe_new(allocator)
@@ -283,6 +288,7 @@ _json_build :: proc(
 	for i in 0 ..< col_count {
 		cols[i] = w.column_new("", types[i], len(objects), allocator)
 		w.column_own_name(&cols[i], keys[i])
+		cols[i].tz = zones[i]
 	}
 
 	for &obj, row_i in objects {
@@ -335,7 +341,11 @@ _json_build :: proc(
 				if ok {w.append_time(col, t)}
 			case .Datetime:
 				dt: w.Datetime
-				dt, ok = w.parse_datetime(field)
+				if col.tz.id != 0 {
+					dt, _, ok = w.parse_datetime_offset(field)
+				} else {
+					dt, ok = w.parse_datetime(field)
+				}
 				if ok {w.append_datetime(col, dt)}
 			case .Duration:
 				d: w.Duration

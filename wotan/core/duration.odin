@@ -222,7 +222,8 @@ _clock_ns :: proc(text: string) -> (i128, bool) {
 // Columns
 
 // Duration column of `later` - `earlier`, row by row: two Datetime, Date,
-// Time or Duration columns of the same type and length (pandas' b - a). A
+// Time or Duration columns of the same type and length (pandas' b - a;
+// Datetime columns both with a time zone or both without). A
 // missing value on either side, or a difference beyond the Duration range,
 // gives a missing result. ok = false for other types or lengths.
 duration_between :: proc(
@@ -234,6 +235,7 @@ duration_between :: proc(
 	bool,
 ) {
 	if later.type != earlier.type || later.len != earlier.len {return {}, false}
+	if (later.tz.id == 0) != (earlier.tz.id == 0) {return {}, false}
 	#partial switch later.type {
 	case .Datetime, .Date, .Time, .Duration:
 	case:
@@ -376,11 +378,16 @@ duration_total :: proc(
 
 // Copy of a Datetime column with every cell rounded down to a multiple of
 // `every` counted from midnight 1970-01-01 (pandas' dt.floor): with every =
-// 15 * MINUTES, 09:44:59 becomes 09:30:00. ok = false for another column
-// type or an `every` that is not positive.
+// 15 * MINUTES, 09:44:59 becomes 09:30:00. A column with a time zone is
+// rounded in local time and placed back in its zone, where `ambiguous` and
+// `nonexistent` settle a result that happens twice or never (as in
+// tz_localize). ok = false for another column type, an `every` that is not
+// positive, or a result that a Raise choice refuses.
 datetime_floor :: proc(
 	col: ^Column,
 	every: Duration,
+	ambiguous := Ambiguous_Time.Raise,
+	nonexistent := Nonexistent_Time.Raise,
 	name := "",
 	allocator := context.allocator,
 ) -> (
@@ -389,17 +396,26 @@ datetime_floor :: proc(
 ) {
 	if col.type != .Datetime || every <= 0 {return {}, false}
 	out := _new_like(col, .Datetime, name, allocator)
+	zone := _Zone_Cursor {
+		tz = col.tz,
+	}
 	for i in 0 ..< col.len {
 		v, missing := column_at_datetime(col, i)
 		if missing {
 			append_null(&out)
 			continue
 		}
-		ns := _datetime_ns(v)
+		ns := _datetime_ns(_to_local(&zone, v))
 		e := i128(every)
 		q := ns / e
 		if ns % e < 0 {q -= 1}
-		append_datetime(&out, _datetime_of_ns(q * e))
+		floored := _datetime_of_ns(q * e)
+		if col.tz.id == 0 {
+			append_datetime(&out, floored)
+		} else if !_append_localized(&out, &zone, floored, ambiguous, nonexistent) {
+			destroy_column(&out)
+			return {}, false
+		}
 	}
 	return out, true
 }

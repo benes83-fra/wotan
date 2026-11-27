@@ -25,7 +25,9 @@ import zs "../zstd"
 //   FIXED_LEN_BYTE_ARRAY                      -> String (raw bytes; UUID as 8-4-4-4-12 text)
 //   DATE                                      -> Date
 //   TIME (millis, micros, nanos)              -> Time
-//   TIMESTAMP (millis, micros, nanos), INT96  -> Datetime (UTC for instants)
+//   TIMESTAMP (millis, micros, nanos), INT96  -> Datetime; instants (UTC
+//            adjusted) get the time zone UTC, or the zone that the Arrow
+//            schema names (arrow.odin)
 //   INT64 that the Arrow schema calls Duration -> Duration (arrow.odin)
 //   lists, maps, structs (any nesting)        -> String of JSON text (nested.odin)
 // Datetime and Time keep every unit to the nanosecond.
@@ -163,6 +165,7 @@ Leaf :: struct {
 	text:        bool, // nested leaves: a STRING / ENUM / JSON annotation
 	unsigned:    bool,
 	unit_ns:     i64, // Duration: nanoseconds per stored unit // UINT annotations (their statistics use unsigned order)
+	tz:          w.Time_Zone, // Datetime: UTC instants (a zone), or wall-clock values
 	reason:      string, // why the leaf cannot be read; "" if it can
 }
 
@@ -236,7 +239,9 @@ _close_meta :: proc(m: ^Meta) {
 
 // Durations: a top-level INT64 column without a Parquet logical type that
 // the file's Arrow schema (written by pyarrow, pandas, Polars, wotan) calls
-// a Duration becomes a Duration column. An unreadable Arrow schema is
+// a Duration becomes a Duration column. Time zones: a UTC timestamp column
+// that the Arrow schema gives a zone ("America/New_York", "+05:30") gets
+// that zone (an unknown name keeps UTC). An unreadable Arrow schema is
 // ignored.
 @(private)
 _apply_arrow_schema :: proc(m: ^Meta) {
@@ -253,6 +258,14 @@ _apply_arrow_schema :: proc(m: ^Meta) {
 		if top.leaf < 0 {continue}
 		leaf := &m.leaves[top.leaf]
 		se := m.fm.schema[top.se]
+		if leaf.out == .Datetime && leaf.tz.id != 0 {
+			for f in fields {
+				if f.name != top.name || f.type != ARROW_TIMESTAMP || f.tz == "" {continue}
+				if tz, ok := w.time_zone(f.tz); ok {leaf.tz = tz}
+				break
+			}
+			continue
+		}
 		if leaf.conv != .Int64 || se.logical.kind != 0 || se.converted >= 0 {continue}
 		for f in fields {
 			if f.name != top.name || f.type != ARROW_DURATION {continue}
@@ -397,6 +410,7 @@ _read :: proc(
 			leaf := &m.leaves[top.leaf]
 			col := w.column_new("", leaf.out, total, allocator)
 			w.column_own_name(&col, leaf.name)
+			col.tz = leaf.tz
 			append(&cols, col)
 			append(&jobs, Leaf_Job{leaf = leaf, col_index = j})
 			continue
@@ -638,6 +652,7 @@ _plan_leaf :: proc(se: Schema_Element) -> Leaf {
 			leaf.conv, leaf.out = .Dec_Int64, .Float
 		case lt.kind == LT_TIMESTAMP:
 			leaf.out = .Datetime
+			if lt.utc {leaf.tz, _ = w.time_zone(w.UTC_ZONE_NAME)}
 			switch lt.unit {
 			case .Millis:
 				leaf.conv = .Ts_Millis
@@ -646,10 +661,13 @@ _plan_leaf :: proc(se: Schema_Element) -> Leaf {
 			case .Nanos, .None:
 				leaf.conv = .Ts_Nanos
 			}
+		// the legacy converted types mean UTC instants
 		case ct == CT_TIMESTAMP_MILLIS:
 			leaf.conv, leaf.out = .Ts_Millis, .Datetime
+			leaf.tz, _ = w.time_zone(w.UTC_ZONE_NAME)
 		case ct == CT_TIMESTAMP_MICROS:
 			leaf.conv, leaf.out = .Ts_Micros, .Datetime
+			leaf.tz, _ = w.time_zone(w.UTC_ZONE_NAME)
 		case lt.kind == LT_TIME:
 			leaf.conv, leaf.out = .Time_Nanos if lt.unit == .Nanos else .Time_Micros, .Time
 		case ct == CT_TIME_MICROS:

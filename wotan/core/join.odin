@@ -451,6 +451,7 @@ join_internal :: proc(
 		taken[src.name] = true
 		c := column_new("", src.type, 0, allocator)
 		column_own_name(&c, src.name)
+		c.tz = src.tz
 		add_column(&result, c)
 	}
 	for &src in right.columns {
@@ -468,6 +469,7 @@ join_internal :: proc(
 		taken[name] = true
 		c := column_new("", src.type, 0, allocator)
 		column_own_name(&c, name)
+		c.tz = src.tz
 		add_column(&result, c)
 	}
 

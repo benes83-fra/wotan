@@ -97,6 +97,35 @@ is_datetime :: proc(s: string) -> bool {
 	return ok
 }
 
+// A date and time with a UTC offset: "2024-03-10 03:30:00-04:00",
+// "2024-03-10T07:30:00Z" (w.parse_datetime_offset)
+is_zoned_datetime :: proc(s: string) -> bool {
+	_, _, ok := w.parse_datetime_offset(s)
+	return ok
+}
+
+// The time zone for a column whose every non-null sample is a datetime with
+// a UTC offset (infer_column_type calls such a column String): the offset
+// that all share as a fixed zone ("-04:00"), or UTC when they differ (New
+// York text has -05:00 in winter and -04:00 in summer). ok = false when a
+// sample has no offset, or there are no samples.
+infer_zone :: proc(samples: []string) -> (w.Time_Zone, bool) {
+	first, count := 0, 0
+	for raw in samples {
+		s := strings.trim(raw, " 	")
+		if s == "" || is_null(s) {continue}
+		_, off, ok := w.parse_datetime_offset(s)
+		if !ok {return {}, false}
+		if count == 0 {first = off}
+		count = 1 if count == 0 || (count == 1 && off == first) else 2
+	}
+	if count == 0 {return {}, false}
+	if count == 1 {
+		if tz, ok := w.fixed_offset_zone(first); ok {return tz, true}
+	}
+	return w.time_zone(w.UTC_ZONE_NAME)
+}
+
 // Most specific type that every (non-null) sample parses as. Ints and floats
 // combine to Float; any other mix of kinds (e.g. numbers and booleans, dates
 // and datetimes) falls back to String, so the inferred type always parses.

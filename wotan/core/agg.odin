@@ -187,6 +187,7 @@ agg_with_allocator :: proc(
 		key_name := gdf.keys[ki]
 		src_col := column(gdf.df, key_name)
 		out_col := column_new(key_name, src_col.type, len(gdf.groups))
+		out_col.tz = src_col.tz
 		add_column(&out, out_col)
 	}
 

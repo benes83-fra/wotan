@@ -35,9 +35,13 @@ Resample_Spec :: struct {
 // run of periods, from its own first to its own last period; the key columns
 // come first, groups in order of first appearance.
 //
+// A Datetime column with a time zone is binned by its local calendar days,
+// and the labels are local midnights in that zone, as in pandas.
+//
 // ok = false for an unknown column, an `on` column that is not Date or
 // Datetime, an aggregation that does not suit its column (Mean or Sum of
-// text), or duplicate output names.
+// text), duplicate output names, or a label midnight that the zone skips
+// or repeats.
 resample :: proc(
 	df: ^DataFrame,
 	on: string,
@@ -61,8 +65,10 @@ resample :: proc(
 // start, as a Datetime. Everything else is as in resample: every interval
 // from the first to the last one with data is present, missing values are
 // left out, First / Last go by time, and `by` gives each group its own run
-// of intervals. A Date column `on` counts as midnight. ok = false as for
-// resample, and for an `every` that is not positive.
+// of intervals. A Date column `on` counts as midnight. With a time zone, the
+// intervals start at local midnight and run in steps of `every` from there,
+// labels in the zone (as pandas). ok = false as for resample, and for an
+// `every` that is not positive.
 resample_every :: proc(
 	df: ^DataFrame,
 	on: string,
@@ -104,6 +110,10 @@ _resample :: proc(
 	if !found {return {}, false}
 	oncol := &df.columns[oi]
 	if oncol.type != .Date && oncol.type != .Datetime {return {}, false}
+	// days are local days of a zoned column
+	zone := _Zone_Cursor {
+		tz = oncol.tz,
+	}
 
 	vals := make([]^Column, len(specs), context.temp_allocator)
 	defer delete(vals, context.temp_allocator)
@@ -148,9 +158,16 @@ _resample :: proc(
 		for &f in first {f = max(i64)}
 		for r in 0 ..< df.rows {
 			if na_at(oncol, r) || g.of[r] < 0 {continue}
-			first[g.of[r]] = min(first[g.of[r]], _day_of(oncol, r))
+			first[g.of[r]] = min(first[g.of[r]], _day_of(oncol, r, &zone))
 		}
-		for k in 0 ..< len(g.lists) {origin[k] = i128(first[k]) * i128(DAYS)}
+		for k in 0 ..< len(g.lists) {
+			origin[k] = i128(first[k]) * i128(DAYS)
+			if oncol.tz.id == 0 || first[k] == max(i64) {continue}
+			// local midnight as an instant
+			midnight, ok := _from_local(&zone, _datetime_of_ns(origin[k]), .Raise, .Raise)
+			if !ok {return {}, false}
+			origin[k] = _datetime_ns(midnight)
+		}
 	}
 	for r in 0 ..< df.rows {
 		if na_at(oncol, r) || g.of[r] < 0 {
@@ -161,7 +178,7 @@ _resample :: proc(
 			ns, _ := _ns_of(oncol, r)
 			ord[r] = int((ns - origin[g.of[r]]) / i128(bins.every)) // ns >= origin
 		} else {
-			ord[r] = _period_of(_day_of(oncol, r), freq, week_end)
+			ord[r] = _period_of(_day_of(oncol, r, &zone), freq, week_end)
 		}
 		k := g.of[r]
 		lo[k] = min(lo[k], ord[r])
@@ -197,6 +214,7 @@ _resample :: proc(
 	for c in keys {add_column(&out, column_take(c, group_rows, allocator))}
 	labels := column_new("", .Datetime if bins.every > 0 else oncol.type, max(n, 1), allocator)
 	column_own_name(&labels, oncol.name)
+	labels.tz = oncol.tz
 	for k in 0 ..< len(g.lists) {
 		if bins.every > 0 {
 			for p in lo[k] ..= hi[k] {
@@ -206,8 +224,19 @@ _resample :: proc(
 		}
 		for p in lo[k] ..= hi[k] { 	// no periods if the group has no dates
 			d := civil_from_days(_period_last_day(p, freq, week_end))
-			if oncol.type ==
-			   .Date {append_date(&labels, d)} else {append_datetime(&labels, Datetime{d.year, d.month, d.day, 0, 0, 0, 0})}
+			midnight := Datetime{d.year, d.month, d.day, 0, 0, 0, 0}
+			switch {
+			case oncol.type == .Date:
+				append_date(&labels, d)
+			case oncol.tz.id == 0:
+				append_datetime(&labels, midnight)
+			case:
+				if !_append_localized(&labels, &zone, midnight, .Raise, .Raise) {
+					destroy_column(&labels)
+					destroy_dataframe(&out)
+					return {}, false
+				}
+			}
 		}
 	}
 	add_column(&out, labels)
@@ -220,14 +249,16 @@ _resample :: proc(
 	return out, true
 }
 
-// Day number (days since 1970-01-01) of a present Date or Datetime cell
+// Day number (days since 1970-01-01) of a present Date or Datetime cell (the
+// local day of a zoned Datetime)
 @(private = "file")
-_day_of :: proc(col: ^Column, r: int) -> i64 {
+_day_of :: proc(col: ^Column, r: int, zone: ^_Zone_Cursor) -> i64 {
 	if col.type == .Date {
 		d, _ := column_at_date(col, r)
 		return days_from_civil(i64(d.year), i64(d.month), i64(d.day))
 	}
 	d, _ := column_at_datetime(col, r)
+	d = _to_local(zone, d)
 	return days_from_civil(i64(d.year), i64(d.month), i64(d.day))
 }
 

@@ -159,6 +159,9 @@ worksheet_xml_from_df :: proc(df: ^w.DataFrame, allocator: mem.Allocator) -> str
 				)
 			case .Datetime:
 				v, _ := w.column_at_datetime(col, r)
+				// Excel has no time zones: a zoned column is written in its
+				// local time
+				if col.tz.id != 0 {v = w.datetime_to_local(v, col.tz)}
 				open_cell(&b, col_names[c], row_idx)
 				day := f64(excel_serial_from_date(int(v.year), int(v.month), int(v.day)))
 				secs := f64(v.hour * 3600 + v.minute * 60 + v.second) + f64(v.nanosecond) / 1e9
