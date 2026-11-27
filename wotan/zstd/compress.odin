@@ -9,16 +9,30 @@ import "core:slice"
 // content size and has no checksum and no dictionary, as libzstd writes it by
 // default, so every Zstandard decoder reads it.
 //
-// The matcher looks for repeats through two hash tables, one on 8 bytes and
-// one on 5, and tries the most recent offset first, like libzstd's fast
-// levels. Each block of up to 128 KiB holds Huffman-coded literals and
-// FSE-coded sequences, each table predefined, a single symbol or written into
-// the block, whichever is smallest. A block that does not get smaller is
-// stored as it is, and a block of one repeated byte takes four bytes.
+// The level, 1 to MAX_LEVEL, trades speed for size as libzstd's levels do.
+// Levels 1 to 4 look for repeats through hash tables (level 1 one table on 5
+// bytes, levels 2 to 4 also one on 8 bytes) and take the first match found.
+// Levels 5 to 12 keep a chain of earlier positions per hash and search more
+// of it the higher the level (8 to 64 positions, as libzstd); from level 6
+// they also check whether a match starting one byte later (from level 8, two
+// bytes) is better. libzstd's levels 13 to 22 use other match finders, which
+// are not implemented here. Every level
+// tries the recent offsets first. Each block of up to 128 KiB holds
+// Huffman-coded literals and FSE-coded sequences, each table predefined, a
+// single symbol or written into the block, whichever is smallest. A block
+// that does not get smaller is stored as it is, and a block of one repeated
+// byte takes four bytes.
 
-// Appends `src`, compressed into one Zstandard frame, to `dst`. ok is false
-// only for input of 2 GiB or more or when memory runs out.
-compress_to_dynamic :: proc(dst: ^[dynamic]u8, src: []u8) -> bool {
+// The level libzstd and the `zstd` command use by default
+DEFAULT_LEVEL :: 3
+// The highest level; higher levels compress as this one
+MAX_LEVEL :: 12
+
+// Appends `src`, compressed into one Zstandard frame, to `dst`. `level` 0 is
+// DEFAULT_LEVEL; levels below 0 compress as 1 and levels above MAX_LEVEL as
+// MAX_LEVEL. ok is false only for input of 2 GiB or more or when memory runs
+// out.
+compress_to_dynamic :: proc(dst: ^[dynamic]u8, src: []u8, level := DEFAULT_LEVEL) -> bool {
 	n := len(src)
 	if n >= 1 << 31 {return false}
 	single := n <= 1 << WINDOW_LOG
@@ -63,7 +77,8 @@ compress_to_dynamic :: proc(dst: ^[dynamic]u8, src: []u8) -> bool {
 		return err == nil
 	}
 
-	e, ok := _encoder_new(n)
+	lv := DEFAULT_LEVEL if level == 0 else clamp(level, 1, MAX_LEVEL)
+	e, ok := _encoder_new(n, LEVELS[lv - 1])
 	if !ok {return false}
 	defer _encoder_free(e)
 	e.src = src
@@ -77,9 +92,16 @@ compress_to_dynamic :: proc(dst: ^[dynamic]u8, src: []u8) -> bool {
 
 // `src` compressed into one Zstandard frame (see compress_to_dynamic); free
 // the result with delete
-compress :: proc(src: []u8, allocator := context.allocator) -> (out: []u8, ok: bool) {
+compress :: proc(
+	src: []u8,
+	level := DEFAULT_LEVEL,
+	allocator := context.allocator,
+) -> (
+	out: []u8,
+	ok: bool,
+) {
 	buf := make([dynamic]u8, 0, 32 + len(src) / 2, allocator)
-	if !compress_to_dynamic(&buf, src) {
+	if !compress_to_dynamic(&buf, src, level) {
 		delete(buf)
 		return nil, false
 	}
@@ -95,6 +117,39 @@ BLOCK_MAX :: 1 << 17
 // larger content uses a window of this size
 @(private)
 WINDOW_LOG :: 23
+
+@(private)
+Strategy :: enum u8 {
+	Fast, // one hash table, first match
+	Double, // two hash tables, first match
+	Lazy, // hash chains, best of `depth` candidates, `lazy` bytes looked ahead
+}
+
+@(private)
+Level_Params :: struct {
+	strategy:   Strategy,
+	hash_log:   uint, // largest table: 1 << hash_log entries
+	chain_log:  uint,
+	depth:      int,
+	lazy:       int,
+	skip_shift: uint, // without matches, the step grows by one every 1 << skip_shift bytes
+}
+
+@(private)
+LEVELS := [MAX_LEVEL]Level_Params {
+	{.Fast, 16, 0, 0, 0, 6},
+	{.Double, 16, 0, 0, 0, 7},
+	{.Double, 17, 0, 0, 0, 8},
+	{.Double, 18, 0, 0, 0, 8},
+	{.Lazy, 18, 18, 8, 0, 8},
+	{.Lazy, 18, 18, 8, 1, 8},
+	{.Lazy, 19, 19, 16, 1, 8},
+	{.Lazy, 19, 19, 16, 2, 8},
+	{.Lazy, 20, 20, 16, 2, 8},
+	{.Lazy, 21, 21, 32, 2, 8},
+	{.Lazy, 21, 21, 64, 2, 8},
+	{.Lazy, 22, 22, 64, 2, 8},
+}
 
 @(private)
 Seq :: struct {
@@ -115,8 +170,12 @@ Encoder :: struct {
 	src:                    []u8,
 	window:                 int,
 	rep:                    [3]int,
+	p:                      Level_Params,
 	long_t, short_t:        []u32, // position + 1, 0 when empty
 	long_log, short_log:    uint,
+	chain:                  []u32, // Lazy: the previous position + 1 with the same hash
+	chain_mask:             int,
+	next:                   int, // Lazy: positions before this are in the chains
 	lits:                   []u8,
 	nlits:                  int,
 	seqs:                   []Seq,
@@ -128,16 +187,28 @@ Encoder :: struct {
 }
 
 @(private)
-_encoder_new :: proc(n: int) -> (e: ^Encoder, ok: bool) {
+_encoder_new :: proc(n: int, p: Level_Params) -> (e: ^Encoder, ok: bool) {
 	err: mem.Allocator_Error
 	e, err = new(Encoder)
 	if err != nil {return nil, false}
+	e.p = p
 	bmax := min(n, BLOCK_MAX)
+	// tables no larger than the input needs
 	hb := uint(_highbit(u32(n)) + 1)
-	e.long_log = clamp(hb, 8, 17)
+	e.long_log = clamp(hb, 8, p.hash_log)
 	e.short_log = e.long_log - 1
+	if p.strategy == .Fast {
+		// the 5-byte table only
+		e.short_log = e.long_log
+		e.long_log = 0
+	}
 	e.long_t, err = make([]u32, 1 << e.long_log)
-	if err == nil {e.short_t, err = make([]u32, 1 << e.short_log)}
+	if err == nil && p.strategy != .Lazy {e.short_t, err = make([]u32, 1 << e.short_log)}
+	if err == nil && p.strategy == .Lazy {
+		log := clamp(hb, 8, p.chain_log)
+		e.chain_mask = 1 << log - 1
+		e.chain, err = make([]u32, 1 << log)
+	}
 	if err == nil {e.lits, err = make([]u8, bmax + 32)}
 	if err == nil {e.seqs, err = make([]Seq, bmax / 4 + 2)}
 	if err == nil {e.ll_c, err = make([]u8, bmax / 4 + 2)}
@@ -159,6 +230,7 @@ _encoder_new :: proc(n: int) -> (e: ^Encoder, ok: bool) {
 _encoder_free :: proc(e: ^Encoder) {
 	delete(e.long_t)
 	delete(e.short_t)
+	delete(e.chain)
 	delete(e.lits)
 	delete(e.seqs)
 	delete(e.ll_c)
@@ -207,7 +279,14 @@ _compress_block :: proc(e: ^Encoder, dst: ^[dynamic]u8, start, end: int, last: b
 		return err == nil
 	}
 	saved := e.rep
-	_find_sequences(e, start, end)
+	switch e.p.strategy {
+	case .Lazy:
+		_find_lazy(e, start, end)
+	case .Fast:
+		_find_sequences(e, start, end, true)
+	case .Double:
+		_find_sequences(e, start, end, false)
+	}
 	n, ok := _encode_block(e)
 	if ok && n < size {
 		bh := lastbit | 2 << 1 | n << 3
@@ -311,7 +390,7 @@ _emit :: #force_inline proc(e: ^Encoder, lit, ll, off, ml: int) #no_bounds_check
 // The sequences and literals of src[start:end]; matches may reach back into
 // earlier blocks, within the window
 @(private)
-_find_sequences :: proc(e: ^Encoder, start, end: int) #no_bounds_check {
+_find_sequences :: proc(e: ^Encoder, start, end: int, $FAST: bool) #no_bounds_check {
 	src := e.src
 	e.nlits = 0
 	e.nseq = 0
@@ -329,19 +408,22 @@ _find_sequences :: proc(e: ^Encoder, start, end: int) #no_bounds_check {
 		if r0 <= e.window && ip + 1 >= r0 && _r32(src, ip + 1) == _r32(src, ip + 1 - r0) {
 			ml := 4 + _match_len(src, ip + 5, ip + 5 - r0, end)
 			v := _r64(src, ip)
-			lt[_hash8(v, ll_log)] = u32(ip + 1)
+			when !FAST {lt[_hash8(v, ll_log)] = u32(ip + 1)}
 			st[_hash5(v, sl_log)] = u32(ip + 1)
 			_emit(e, anchor, ip + 1 - anchor, r0, ml)
 			ip += 1 + ml
 			anchor = ip
 		} else {
 			v := _r64(src, ip)
-			hl := _hash8(v, ll_log)
 			hs := _hash5(v, sl_log)
-			cl := int(lt[hl]) - 1
 			cs := int(st[hs]) - 1
-			lt[hl] = u32(ip + 1)
 			st[hs] = u32(ip + 1)
+			cl := -1
+			when !FAST {
+				hl := _hash8(v, ll_log)
+				cl = int(lt[hl]) - 1
+				lt[hl] = u32(ip + 1)
+			}
 			m := -1
 			ml := 0
 			if cl >= lowest && _r64(src, cl) == v {
@@ -350,9 +432,12 @@ _find_sequences :: proc(e: ^Encoder, start, end: int) #no_bounds_check {
 			} else if cs >= lowest && _r32(src, cs) == u32(v) {
 				// a short match; a long one one byte ahead is better
 				v1 := _r64(src, ip + 1)
-				h1 := _hash8(v1, ll_log)
-				c1 := int(lt[h1]) - 1
-				lt[h1] = u32(ip + 2)
+				c1 := -1
+				when !FAST {
+					h1 := _hash8(v1, ll_log)
+					c1 = int(lt[h1]) - 1
+					lt[h1] = u32(ip + 2)
+				}
 				if c1 >= max(0, ip + 1 - e.window) && _r64(src, c1) == v1 {
 					ip += 1
 					m = c1
@@ -363,7 +448,7 @@ _find_sequences :: proc(e: ^Encoder, start, end: int) #no_bounds_check {
 				}
 			}
 			if m < 0 {
-				ip += 1 + (ip - anchor) >> 8
+				ip += 1 + (ip - anchor) >> e.p.skip_shift
 				continue
 			}
 			// extend backwards over the literals
@@ -380,7 +465,7 @@ _find_sequences :: proc(e: ^Encoder, start, end: int) #no_bounds_check {
 			for p in ([3]int{mstart + 2, ip - 2, ip - 1}) {
 				if p < put_limit && p > mstart {
 					pv := _r64(src, p)
-					lt[_hash8(pv, ll_log)] = u32(p + 1)
+					when !FAST {lt[_hash8(pv, ll_log)] = u32(p + 1)}
 					st[_hash5(pv, sl_log)] = u32(p + 1)
 				}
 			}
@@ -391,7 +476,7 @@ _find_sequences :: proc(e: ^Encoder, start, end: int) #no_bounds_check {
 			if r1 > e.window || r1 > ip || _r32(src, ip) != _r32(src, ip - r1) {break}
 			ml := 4 + _match_len(src, ip + 4, ip + 4 - r1, end)
 			v := _r64(src, ip)
-			lt[_hash8(v, ll_log)] = u32(ip + 1)
+			when !FAST {lt[_hash8(v, ll_log)] = u32(ip + 1)}
 			st[_hash5(v, sl_log)] = u32(ip + 1)
 			_emit(e, ip, 0, r1, ml)
 			ip += ml
@@ -404,6 +489,118 @@ _find_sequences :: proc(e: ^Encoder, start, end: int) #no_bounds_check {
 		copy(e.lits[e.nlits:], src[anchor:end])
 		e.nlits += rest
 	}
+}
+
+// Hash-chain matching (levels 5 and up): every position goes into a chain of
+// earlier positions with the same 5-byte hash; the longest of the recent
+// offsets and the first `depth` chain entries is the match, unless one
+// starting up to `lazy` bytes later is worth more
+@(private)
+_find_lazy :: proc(e: ^Encoder, start, end: int) #no_bounds_check {
+	src := e.src
+	e.nlits = 0
+	e.nseq = 0
+	ip := start
+	anchor := start
+	ilimit := end - 8
+	for ip < ilimit {
+		ml, off := _best_match(e, ip, end)
+		if ml < 4 {
+			ip += 1 + (ip - anchor) >> e.p.skip_shift
+			continue
+		}
+		// a match one or two bytes later may be worth more: four points per
+		// byte, minus the bits of its offset (libzstd's rule)
+		for step in 1 ..= e.p.lazy {
+			if ip + 1 >= ilimit {break}
+			ml2, off2 := _best_match(e, ip + 1, end)
+			if ml2 < 4 {break}
+			bonus := 4 if step == 1 else 7
+			if _gain(e, ml2, off2) <= _gain(e, ml, off) + bonus {break}
+			ip += 1
+			ml, off = ml2, off2
+		}
+		m := ip - off
+		for ip > anchor && m > 0 && src[ip - 1] == src[m - 1] {
+			ip -= 1
+			m -= 1
+			ml += 1
+		}
+		_emit(e, anchor, ip - anchor, off, ml)
+		ip += ml
+		anchor = ip
+		// the second most recent offset, straight after the match
+		for ip < ilimit {
+			r1 := e.rep[1]
+			if r1 > e.window || r1 > ip || _r32(src, ip) != _r32(src, ip - r1) {break}
+			ml = 4 + _match_len(src, ip + 4, ip + 4 - r1, end)
+			_emit(e, ip, 0, r1, ml)
+			ip += ml
+			anchor = ip
+		}
+	}
+	rest := end - anchor
+	if rest > 0 {
+		copy(e.lits[e.nlits:], src[anchor:end])
+		e.nlits += rest
+	}
+}
+
+@(private)
+_gain :: #force_inline proc(e: ^Encoder, ml, off: int) -> int {
+	ov := off + 3
+	switch off {
+	case e.rep[0]:
+		ov = 1
+	case e.rep[1]:
+		ov = 2
+	case e.rep[2]:
+		ov = 3
+	}
+	return 4 * ml - _highbit(u32(ov))
+}
+
+// The longest match at `p` (length 0 if none of 4 bytes or more); first adds
+// the positions before `p` to the chains
+@(private)
+_best_match :: proc(e: ^Encoder, p, end: int) -> (best, off: int) #no_bounds_check {
+	src := e.src
+	head := e.long_t
+	chain := e.chain
+	log := e.long_log
+	mask := e.chain_mask
+	for e.next < p {
+		h := _hash5(_r64(src, e.next), log)
+		chain[e.next & mask] = head[h]
+		head[h] = u32(e.next + 1)
+		e.next += 1
+	}
+	// the recent offsets
+	for r in e.rep {
+		if r > p || r > e.window || _r32(src, p) != _r32(src, p - r) {continue}
+		l := 4 + _match_len(src, p + 4, p + 4 - r, end)
+		if l > best {
+			best = l
+			off = r
+		}
+	}
+	// the chain, newest first, within the window and the chain's reach
+	lowest := max(0, p - e.window, p - mask)
+	cand := int(head[_hash5(_r64(src, p), log)]) - 1
+	limit := end - p
+	for n := e.p.depth; n > 0 && cand >= lowest && best < limit; n -= 1 {
+		if src[cand + best] == src[p + best] && _r32(src, cand) == _r32(src, p) {
+			l := 4 + _match_len(src, p + 4, cand + 4, end)
+			if l > best {
+				best = l
+				off = p - cand
+			}
+		}
+		next := int(chain[cand & mask]) - 1
+		if next >= cand {break}
+		cand = next
+	}
+	return
 }
 
 // ---------------------------------------------------------------------------

@@ -28,9 +28,9 @@ import "core:os"
 // - FLOAT16 and byte stream split on integers and fixed-length binary
 //   (pyarrow 17); Zstandard pages of several blocks; DuckDB's Zstandard file
 //   with UUIDs; the Zstandard decoder on its own (frames, skippable frames,
-//   checksum); the Zstandard compressor's frames read back (libzstd reads
-//   them too, checked outside the suite); one thread and all threads give
-//   the same frame;
+//   checksum); the Zstandard compressor's frames at every level read back
+//   (libzstd reads them too, checked outside the suite); one thread and all
+//   threads give the same frame;
 // - INT96 timestamps; decimals stored as INT32 / INT64 / FIXED_LEN_BYTE_ARRAY
 //   (DuckDB); a pandas file with its index; column selection and order;
 // - ok = false (no crash) for Brotli, a missing file, a CSV file, unknown or
@@ -38,7 +38,8 @@ import "core:os"
 //   loads (as JSON text, see parquet_nested_test).
 //
 // Writer: the same table written with every codec, dictionary on and off, in
-// one or three row groups, read back cell for cell; a file on disk
+// one or three row groups, read back cell for cell; Zstandard and gzip at
+// their lowest, default and highest levels; a file on disk
 // (demo_files/export_test.parquet); a view; an empty
 // frame; a hidden index; 70 000 rows over several pages and Snappy fragments,
 // with an all-null column.
@@ -1422,9 +1423,10 @@ parquet_test :: proc(allocator: mem.Allocator) {
 		_, sok2 := zs.decompress(out[:n - 1], zstd_frames)
 		expect(&passed, &total, !sok2, "zstd.decompress: an output buffer one byte short fails")
 	}
-	// the compressor: empty input, one byte, one repeated byte (RLE blocks),
-	// random bytes (stored blocks), text, the tz database twice in a row (its
-	// second copy matches the first, three blocks back) and a CSV file
+	// the compressor at every level: empty input, one byte, one repeated
+	// byte (RLE blocks), random bytes (stored blocks), text, the tz database
+	// twice in a row (its second copy matches the first, three blocks back)
+	// and a CSV file
 	{
 		tzdata, _ := os.read_entire_file("wotan/core/tzdata.bin", context.allocator)
 		defer delete(tzdata)
@@ -1447,49 +1449,73 @@ parquet_test :: proc(allocator: mem.Allocator) {
 		copy(twice, tzdata)
 		copy(twice[len(tzdata):], tzdata)
 		inputs := [][]u8{{}, {'x'}, same, noise, transmute([]u8)zstd_plain, twice, csv}
-		sizes: [7]int
+		sizes: [zs.MAX_LEVEL + 1][7]int // by level; 0 = the default
 		all_ok := len(tzdata) > 0 && len(csv) > 0
-		for src, i in inputs {
-			comp, ok := zs.compress(src)
-			back := make([]u8, len(src) + 1)
-			n, dok := zs.decompress(back, comp)
-			size, sok := zs.decompressed_size(comp)
-			all_ok =
-				all_ok &&
-				ok &&
-				dok &&
-				n == len(src) &&
-				string(back[:n]) == string(src) &&
-				sok &&
-				size == len(src)
-			sizes[i] = len(comp)
-			delete(back)
-			delete(comp)
+		for level in 0 ..= zs.MAX_LEVEL {
+			for src, i in inputs {
+				comp, ok := zs.compress(src, level)
+				back := make([]u8, len(src) + 1)
+				n, dok := zs.decompress(back, comp)
+				size, sok := zs.decompressed_size(comp)
+				all_ok =
+					all_ok &&
+					ok &&
+					dok &&
+					n == len(src) &&
+					string(back[:n]) == string(src) &&
+					sok &&
+					size == len(src)
+				sizes[level][i] = len(comp)
+				delete(back)
+				delete(comp)
+			}
 		}
 		expect(
 			&passed,
 			&total,
 			all_ok,
-			"zstd.compress: seven inputs read back, with their sizes declared",
+			"zstd.compress: seven inputs read back at every level, with their sizes declared",
 		)
+		// level 0 is level 3; out-of-range levels are clamped
+		over, _ := zs.compress(csv, 99)
+		under, _ := zs.compress(csv, -5)
 		expect(
 			&passed,
 			&total,
-			sizes[2] < 30 &&
-			sizes[3] <= len(noise) + 32 &&
-			sizes[4] * 10 < len(zstd_plain) &&
-			sizes[5] * 8 < len(twice) &&
-			sizes[6] * 3 < len(csv),
+			sizes[0] == sizes[zs.DEFAULT_LEVEL] &&
+			len(over) == sizes[zs.MAX_LEVEL][6] &&
+			len(under) == sizes[1][6] &&
+			sizes[zs.MAX_LEVEL][5] < sizes[1][5] &&
+			sizes[zs.MAX_LEVEL][6] < sizes[1][6],
+			fmt.tprintf(
+				"zstd.compress levels: 0 is the default, out of range clamped; tz database twice %d at level 1, %d at %d; CSV %d, %d",
+				sizes[1][5],
+				sizes[zs.MAX_LEVEL][5],
+				zs.MAX_LEVEL,
+				sizes[1][6],
+				sizes[zs.MAX_LEVEL][6],
+			),
+		)
+		delete(over)
+		delete(under)
+		expect(
+			&passed,
+			&total,
+			sizes[0][2] < 30 &&
+			sizes[0][3] <= len(noise) + 32 &&
+			sizes[0][4] * 10 < len(zstd_plain) &&
+			sizes[0][5] * 8 < len(twice) &&
+			sizes[0][6] * 3 < len(csv),
 			fmt.tprintf(
 				"zstd.compress sizes: repeated byte %d, random %d of %d, text %d of %d, tz database twice %d of %d, CSV %d of %d",
-				sizes[2],
-				sizes[3],
+				sizes[0][2],
+				sizes[0][3],
 				len(noise),
-				sizes[4],
+				sizes[0][4],
 				len(zstd_plain),
-				sizes[5],
+				sizes[0][5],
 				len(twice),
-				sizes[6],
+				sizes[0][6],
 				len(csv),
 			),
 		)
@@ -1534,6 +1560,28 @@ parquet_test :: proc(allocator: mem.Allocator) {
 					"write %v: all column types read back (dictionary on / off, 1 or 3 row groups)",
 					comp,
 				),
+			)
+		}
+
+		// Zstandard and gzip at their lowest, default and highest levels
+		{
+			Leveled :: struct {
+				comp:  ex.Parquet_Compression,
+				level: int,
+			}
+			lv_ok := ok
+			for c in ([]Leveled{{.Zstd, 1}, {.Zstd, 0}, {.Zstd, zs.MAX_LEVEL}, {.Gzip, 1}, {.Gzip, 0}, {.Gzip, 9}}) {
+				data, wok := ex.parquet_bytes(&src, c.comp, 5, compression_level = c.level)
+				back, rok := imp.parquet_load_from_bytes(data)
+				lv_ok = lv_ok && wok && rok && matches(&back, types_exp)
+				if rok {w.destroy_dataframe(&back)}
+				delete(data)
+			}
+			expect(
+				&passed,
+				&total,
+				lv_ok,
+				"compression_level: Zstandard 1, default, 12 and gzip 1, default, 9 read back",
 			)
 		}
 

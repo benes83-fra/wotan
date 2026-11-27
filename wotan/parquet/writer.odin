@@ -50,18 +50,22 @@ Compression :: enum {
 // `df` as the bytes of a Parquet file (free them with delete). ok is false,
 // with the reason on stderr, if a column has no type or a hidden index
 // shares its name with a column.
+// `compression_level` applies to .Zstd (1 to zs.MAX_LEVEL) and .Gzip (1 to
+// 9); 0 is the codec's default level (3 and 6), and levels out of range are
+// clamped. The other codecs have no levels.
 write_bytes :: proc(
 	df: ^w.DataFrame,
 	compression := Compression.Snappy,
 	row_group_rows := 1 << 20,
 	dictionary := true,
+	compression_level := 0,
 	allocator := context.allocator,
 ) -> (
 	data: []u8,
 	ok: bool,
 ) {
 	out := make([dynamic]u8, allocator)
-	if !_write(df, &out, compression, max(row_group_rows, 1), dictionary) {
+	if !_write(df, &out, compression, compression_level, max(row_group_rows, 1), dictionary) {
 		delete(out)
 		return nil, false
 	}
@@ -75,8 +79,9 @@ write_file :: proc(
 	compression := Compression.Snappy,
 	row_group_rows := 1 << 20,
 	dictionary := true,
+	compression_level := 0,
 ) -> bool {
-	data, ok := write_bytes(df, compression, row_group_rows, dictionary)
+	data, ok := write_bytes(df, compression, row_group_rows, dictionary, compression_level)
 	if !ok {return false}
 	defer delete(data)
 	if os.write_entire_file(path, data) != nil {
@@ -141,6 +146,7 @@ Chunk_Info :: struct {
 Writer :: struct {
 	out:         ^[dynamic]u8,
 	compression: Compression,
+	level:       int,
 	dictionary:  bool,
 	values:      [dynamic]u8, // a page's encoded values
 	page:        [dynamic]u8, // levels + values
@@ -159,6 +165,7 @@ _write :: proc(
 	df: ^w.DataFrame,
 	out: ^[dynamic]u8,
 	compression: Compression,
+	level: int,
 	rg_rows: int,
 	dictionary: bool,
 ) -> bool {
@@ -200,6 +207,7 @@ _write :: proc(
 		rows        = df.rows,
 		rg_rows     = rg_rows,
 		compression = compression,
+		level       = level,
 		dictionary  = dictionary,
 		infos       = infos,
 		bufs        = bufs,
@@ -237,6 +245,7 @@ Write_Work :: struct {
 	rows:        int,
 	rg_rows:     int,
 	compression: Compression,
+	level:       int,
 	dictionary:  bool,
 	infos:       []Chunk_Info, // per chunk (row group major); offsets relative to its buffer
 	bufs:        [][dynamic]u8,
@@ -252,6 +261,7 @@ _write_chunks :: proc(data: rawptr, begin, end: int) {
 	context.allocator = runtime.heap_allocator()
 	wr := Writer {
 		compression = work.compression,
+		level       = work.level,
 		dictionary  = work.dictionary,
 	}
 	defer {
@@ -462,7 +472,9 @@ _emit_page :: proc(
 		snappy_compress(&wr.packed, body)
 		payload = wr.packed[:]
 	case .Gzip:
-		if deflate.deflate_gzip_to_dynamic(&wr.packed, body) !=
+		level := deflate.Deflate_Level.Default
+		if wr.level != 0 {level = deflate.Deflate_Level(clamp(wr.level, 1, 9))}
+		if deflate.deflate_gzip_to_dynamic(&wr.packed, body, level) !=
 		   nil {return _fail("gzip compression failed")}
 		payload = wr.packed[:]
 	case .Lz4:
@@ -471,7 +483,11 @@ _emit_page :: proc(
 		payload = wr.packed[:]
 	case .Zstd:
 		clear(&wr.packed)
-		if !zs.compress_to_dynamic(&wr.packed, body) {return _fail("Zstandard compression failed")}
+		if !zs.compress_to_dynamic(
+			&wr.packed,
+			body,
+			wr.level,
+		) {return _fail("Zstandard compression failed")}
 		payload = wr.packed[:]
 	}
 
