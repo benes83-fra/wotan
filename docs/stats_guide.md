@@ -4,6 +4,7 @@ The `stats` package holds classical statistics:
 - **Probability distributions** and the special functions behind them: densities, cumulative probabilities and their tails, quantiles, moments and random draws for eleven distributions.
 - **Hypothesis tests:** t- and z-tests, tests and intervals for proportions, chi-squared and Fisher's exact test, rank tests, Kolmogorov-Smirnov and normality tests, tests for equal variances, correlation tests, and corrections for multiple testing.
 - **Analysis of variance:** one-way ANOVA (classical, Welch, Brown-Forsythe), factorial ANOVA with Type I, II or III sums of squares, effect sizes, and Tukey's HSD comparisons.
+- **Generalized linear models:** Gaussian, binomial, Poisson, gamma, inverse Gaussian and negative binomial regression with any of eight links, offsets, likelihood-ratio tests and a summary table.
 
 All of it matches scipy.stats, statsmodels and R, at their accuracy or better.
 
@@ -25,8 +26,9 @@ All of it matches scipy.stats, statsmodels and R, at their accuracy or better.
 14. [Multiple testing](#14-multiple-testing)
 15. [Tests on DataFrame columns](#15-tests-on-dataframe-columns)
 16. [Analysis of variance](#16-analysis-of-variance)
-17. [Accuracy and validation](#17-accuracy-and-validation)
-18. [Quick reference](#18-quick-reference)
+17. [Generalized linear models](#17-generalized-linear-models)
+18. [Accuracy and validation](#18-accuracy-and-validation)
+19. [Quick reference](#19-quick-reference)
 
 ## 1. Setup
 
@@ -35,7 +37,7 @@ import st "wotan/stats"
 import "core:fmt"
 ```
 
-The distributions and special functions allocate nothing except `sample`, which returns a slice to `delete`. The tests take slices and return their results by value; their scratch memory comes from `context.temp_allocator` and is released before they return. Only `p_adjust`, the DataFrame helpers of section 15, the ANOVA tables and Tukey's HSD (section 16) return memory to free.
+The distributions and special functions allocate nothing except `sample`, which returns a slice to `delete`. The tests take slices and return their results by value; their scratch memory comes from `context.temp_allocator` and is released before they return. Only `p_adjust`, the DataFrame helpers of section 15, the ANOVA tables and Tukey's HSD (section 16) and the GLM results (section 17) return memory to free.
 
 ## 2. Distributions as values
 
@@ -506,7 +508,148 @@ Type II is the usual choice. It tests each main effect with full power when the 
 
 The sums of squares come from a QR decomposition of the design, not from subtracting two residual sums. A small effect beside a large residual keeps its digits. Unbalanced designs and empty cells are allowed. When a cell is empty, the interaction loses the degrees of freedom that the data cannot estimate, as in R.
 
-## 17. Accuracy and validation
+## 17. Generalized linear models
+
+A generalized linear model relates the mean μ of a response to predictors through a link function: g(μ) = Xβ + offset. The response follows a distribution of the chosen family. `glm` fits it by iteratively reweighted least squares (Fisher scoring), like statsmodels' `GLM` and R's `glm`.
+
+```odin
+res, ok := st.glm(y, {x1, x2}, {"x1", "x2"}, .Poisson)   // columns of predictors, their names, the family
+defer st.glm_destroy(&res)
+fmt.print(st.glm_summary(&res, context.temp_allocator))
+```
+
+### Families and links
+
+| `Family` | Response | Variance | Default link | Scale |
+|---|---|---|---|---|
+| `.Gaussian` | any real | 1 | `.Identity` | estimated |
+| `.Binomial` | 0/1, a proportion, or successes with `trials` | μ(1 − μ) | `.Logit` | 1 |
+| `.Poisson` | counts ≥ 0 | μ | `.Log` | 1 |
+| `.Gamma` | > 0 | μ² | `.Inverse` | estimated |
+| `.Inverse_Gaussian` | > 0 | μ³ | `.Inverse_Squared` | estimated |
+| `.Negative_Binomial` | overdispersed counts ≥ 0 | μ + αμ² | `.Log` | 1 |
+
+Other links: `.Probit`, `.Cloglog`, `.Sqrt`, and any of the above with any family (`.Log` for Gamma is common). Steps that would leave the family's range, such as a negative Poisson mean under the identity link, are halved, as in R.
+
+The estimated scale (dispersion) is Pearson's χ² divided by the residual degrees of freedom, as in R and statsmodels. It multiplies the covariance of the coefficients.
+
+### Options
+
+`Glm_Options` is all zeros by default, which gives the usual model:
+
+| Field | Meaning |
+|---|---|
+| `link` | `.Default` uses the table above |
+| `offset` | added to the linear predictor; log exposure turns a Poisson model of counts into one of rates |
+| `trials` | Binomial only: the number of trials of each observation; y then counts the successes |
+| `alpha` | Negative_Binomial only: 0 estimates α by maximum likelihood (R's `MASS::glm.nb`); a positive value fixes it (statsmodels' `NegativeBinomial(alpha)`) |
+| `no_intercept` | leave out the constant column |
+| `use_t` | t statistics and intervals on the residual df (R's choice for the families with an estimated scale); z otherwise (statsmodels) |
+| `confidence` | level of the intervals; 0 means 0.95 |
+| `max_iter` | IRLS iterations; 0 means 100 |
+
+### The result
+
+`Glm_Result` holds everything a summary needs. Free it with `glm_destroy`.
+
+| Field | Content |
+|---|---|
+| `names`, `params`, `std_errors`, `statistics`, `p_values`, `ci_low`, `ci_high` | one entry per coefficient, `"Intercept"` first |
+| `cov` | covariance of the coefficients, p x p row-major |
+| `fitted` | μ for every observation (proportions for Binomial) |
+| `deviance`, `null_deviance` | the model's deviance and that of the intercept-only model with the same offset |
+| `pearson_chi2`, `scale` | Pearson's χ² and the dispersion |
+| `log_likelihood`, `aic`, `bic` | AIC = −2 llf + 2k and BIC = −2 llf + k ln n, with k counting an estimated scale or α (R's convention) |
+| `alpha` | the negative binomial's α |
+| `n`, `df_model`, `df_resid`, `iterations`, `converged` | |
+
+statsmodels' `aic` does not count the scale, and its `bic` in 0.13 is deviance-based. The values here are R's `AIC` and `BIC`.
+
+`converged = false` with `ok = true` means the fit ran into a boundary. Complete separation in a logistic model is the usual case: a predictor that splits the 0s from the 1s pushes its coefficient towards infinity. The coefficients are then the last iterate, and the standard errors may be NaN. `ok = false` is reserved for input that cannot be fitted:
+- slices of different lengths, or non-finite values;
+- y outside the family's range;
+- collinear predictors;
+- no more observations than coefficients.
+
+### Example: dose and response
+
+The budworm data of Venables & Ripley record how many of 20 moths died at each log dose, by sex:
+
+```odin
+dead := []f64{1, 4, 9, 13, 18, 20, 0, 2, 6, 10, 12, 16}
+trials := []f64{20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20}
+ldose := []f64{0, 1, 2, 3, 4, 5, 0, 1, 2, 3, 4, 5}
+male := []f64{1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0}
+fit, _ := st.glm(dead, {male, ldose}, {"male", "ldose"}, .Binomial, {trials = trials})
+defer st.glm_destroy(&fit)
+fmt.print(st.glm_summary(&fit, context.temp_allocator))
+```
+
+```
+Generalized linear model: Binomial family, logit link
+Observations: 12    Df model: 2    Df residuals: 9
+Deviance: 6.75706    Null deviance: 124.876    Pearson chi2: 5.30602    Scale: 1
+Log-likelihood: -18.4337    AIC: 42.8675    BIC: 44.3222
+Iterations: 6
+                 coef     std err         z     P>|z|      [lower      upper]
+Intercept      -3.473      0.4685    -7.413  1.23e-13      -4.391      -2.555
+male            1.101      0.3558     3.093   0.00198      0.4033       1.798
+ldose           1.064      0.1311     8.119   4.7e-16      0.8073       1.321
+```
+
+Each unit of log dose multiplies the odds of death by e^1.064 = 2.9. Males have three times the odds of females at the same dose.
+
+### DataFrame input and overdispersion
+
+`glm_from_df(&df, response, predictors, family, options, trials = "", offset = "")` takes the columns by name:
+- **Int, Float and Bool predictors** enter as numbers.
+- **A String predictor** with L labels enters as L − 1 indicator columns against its first label in sorted order. They are named `"name[T.label]"`, as in patsy and R's treatment contrasts.
+- **`trials` and `offset`** name optional columns.
+- **Nulls:** a row with a null in any column used is left out.
+
+R's `warpbreaks` data count the breaks of yarn by wool and tension:
+
+```odin
+pois, _ := st.glm_from_df(&df, "breaks", {"wool", "tension"}, .Poisson)
+defer st.glm_destroy(&pois)
+nb, _ := st.glm_from_df(&df, "breaks", {"wool", "tension"}, .Negative_Binomial)
+defer st.glm_destroy(&nb)
+fmt.printf("Poisson: deviance %.2f on %v df, Pearson chi2 / df = %.2f, AIC %.1f\n", pois.deviance, pois.df_resid, pois.pearson_chi2 / pois.df_resid, pois.aic)
+fmt.printf("NB:      alpha = %.4f (theta = %.3f), AIC %.1f\n", nb.alpha, 1 / nb.alpha, nb.aic)
+for name, j in nb.names {
+    fmt.printf("  %-12s %8.4f  se %.4f (Poisson se %.4f)\n", name, nb.params[j], nb.std_errors[j], pois.std_errors[j])
+}
+wool_only, _ := st.glm_from_df(&df, "breaks", {"wool"}, .Negative_Binomial)
+defer st.glm_destroy(&wool_only)
+lr, _ := st.glm_lr_test(&wool_only, &nb)
+fmt.printf("tension: LR = %.3f, df = %v, p = %.4g\n", lr.statistic, lr.df, lr.p_value)
+```
+
+```
+Poisson: deviance 210.39 on 50 df, Pearson chi2 / df = 4.26, AIC 493.1
+NB:      alpha = 0.1006 (theta = 9.944), AIC 408.8
+  Intercept      3.1620  se 0.1028 (Poisson se 0.0557)
+  wool[T.B]     -0.1862  se 0.1010 (Poisson se 0.0516)
+  tension[T.L]   0.5114  se 0.1237 (Poisson se 0.0640)
+  tension[T.M]   0.2122  se 0.1259 (Poisson se 0.0683)
+tension: LR = 15.211, df = 2, p = 0.0004977
+```
+
+The Poisson model is overdispersed: Pearson's χ² is four times its degrees of freedom. Its standard errors are too small by about half. The negative binomial absorbs the extra variance with α, and its AIC is much lower. θ = 1/α = 9.944 is R's `glm.nb` result. The labels sort as H, L, M, so high tension is the baseline.
+
+The negative binomial's standard errors are those of the GLM at the estimated α, as in R's `glm.nb`. statsmodels' discrete `NegativeBinomial` reports standard errors from the observed information including α. Its coefficients and α are the same.
+
+### Tests and prediction
+
+- **`glm_lr_test(&restricted, &full)`:** the likelihood-ratio test of nested models, 2(llf_full − llf_restricted) against χ² with the difference in the number of coefficients. Both fits need the same family and observations.
+- **`glm_predict(&res, x, offset)`:** returns μ for new rows. Pass the predictors as at fitting, without the intercept column.
+- **`glm_summary(&res, allocator)`:** returns the table above as a string.
+
+### Accuracy
+
+The coefficients come from a QR decomposition of the weighted design at every step, not from the normal equations. Each step solves for the change in β from the working residuals, so data far from zero (values near 10^6) keep their digits.
+
+## 18. Accuracy and validation
 
 ### Distributions
 
@@ -578,7 +721,19 @@ The data sets had values near 0 and near 5 x 10^5, and 2 to 70 observations.
 
 `stats_anova_test` checks one-way and factorial ANOVA on R's `PlantGrowth` and `ToothGrowth` data, also unbalanced. It checks the studentized range against Student's t and the integrals, Tukey's HSD against the integrals and R's `TukeyHSD`, and the conventions.
 
-## 18. Quick reference
+### Generalized linear models
+
+57 models were fitted on generated data and compared with IRLS run to convergence in 40-digit mpmath, an implementation independent of this one. They covered:
+- every family, with canonical and other links (identity, log, sqrt, probit, cloglog);
+- offsets, binomial trials, the negative binomial with fixed and estimated α, and models without an intercept;
+- responses near 10^6;
+- 25 to 120 observations and one to three predictors.
+
+The largest relative error over coefficients, standard errors, deviances, Pearson's χ², scale, llf, AIC, BIC and α was 4.7e-14. statsmodels 0.13.5, fitted with `tol = 1e-15`, was off by up to 7.9e-8 (binomial with cloglog link) and 3e-9 for responses near 10^6.
+
+`stats_glm_test` fits the families on published data: Dobson's counts and McCullagh & Nelder's clotting times from R's `?glm`, the budworm data and `warpbreaks`. It checks them against the 40-digit fits, and checks the DataFrame entry, the likelihood-ratio test, prediction, the summary and the conventions.
+
+## 19. Quick reference
 
 ### Distributions
 
@@ -630,5 +785,17 @@ Special functions: `gamma_p`, `gamma_q`, `gamma_pq`, `gamma_p_inv`, `gamma_q_inv
 | `studentized_range_cdf`, `_sf`, `_ppf`, `_isf` | the `Studentized_Range{k, df}` distribution |
 
 Types: `Oneway_Variance`, `Oneway_Result`, `Anova_Type`, `Anova_Term`, `Anova_Table`, `Tukey_Pair`, `Tukey_Result`, `Studentized_Range`.
+
+### Generalized linear models
+
+| Procedure | Returns |
+|---|---|
+| `glm(y, x, names, family, options)` | `Glm_Result`; free with `glm_destroy` |
+| `glm_from_df(&df, response, predictors, family, options, trials, offset)` | `Glm_Result` from DataFrame columns, String predictors as indicators |
+| `glm_lr_test(&restricted, &full)` | `Test_Result` of the likelihood-ratio test |
+| `glm_predict(&res, x, offset)` | μ for new rows |
+| `glm_summary(&res)` | the summary table as a string |
+
+Types: `Family`, `Link`, `Glm_Options`, `Glm_Result`.
 
 Types: `Alternative`, `Method`, `Test_Result`, `Mean_Test_Result`, `Binomial_Test_Result`, `Fisher_Result`, `Correlation_Result`, `Anderson_Result` and `ANDERSON_LEVELS`, `CI_Method`, `Divergence`, `Zero_Method`, `Levene_Center`, `P_Adjust`, `Groups`, `Table`.
