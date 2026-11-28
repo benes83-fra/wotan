@@ -3,8 +3,9 @@
 The `stats` package holds classical statistics:
 - **Probability distributions** and the special functions behind them: densities, cumulative probabilities and their tails, quantiles, moments and random draws for eleven distributions.
 - **Hypothesis tests:** t- and z-tests, tests and intervals for proportions, chi-squared and Fisher's exact test, rank tests, Kolmogorov-Smirnov and normality tests, tests for equal variances, correlation tests, and corrections for multiple testing.
+- **Analysis of variance:** one-way ANOVA (classical, Welch, Brown-Forsythe), factorial ANOVA with Type I, II or III sums of squares, effect sizes, and Tukey's HSD comparisons.
 
-Both match scipy.stats and statsmodels, at their accuracy or better.
+All of it matches scipy.stats, statsmodels and R, at their accuracy or better.
 
 ## Contents
 
@@ -23,8 +24,9 @@ Both match scipy.stats and statsmodels, at their accuracy or better.
 13. [Variances and correlation](#13-variances-and-correlation)
 14. [Multiple testing](#14-multiple-testing)
 15. [Tests on DataFrame columns](#15-tests-on-dataframe-columns)
-16. [Accuracy and validation](#16-accuracy-and-validation)
-17. [Quick reference](#17-quick-reference)
+16. [Analysis of variance](#16-analysis-of-variance)
+17. [Accuracy and validation](#17-accuracy-and-validation)
+18. [Quick reference](#18-quick-reference)
 
 ## 1. Setup
 
@@ -33,7 +35,7 @@ import st "wotan/stats"
 import "core:fmt"
 ```
 
-The distributions and special functions allocate nothing except `sample`, which returns a slice to `delete`. The tests take slices and return their results by value; their scratch memory comes from `context.temp_allocator` and is released before they return. Only `p_adjust` and the DataFrame helpers of section 15 return memory to free.
+The distributions and special functions allocate nothing except `sample`, which returns a slice to `delete`. The tests take slices and return their results by value; their scratch memory comes from `context.temp_allocator` and is released before they return. Only `p_adjust`, the DataFrame helpers of section 15, the ANOVA tables and Tukey's HSD (section 16) return memory to free.
 
 ## 2. Distributions as values
 
@@ -100,6 +102,7 @@ Invalid parameters, such as a standard deviation of 0, and probabilities outside
 | `Gamma` | `shape` > 0, `scale` > 0 (the rate is 1 / scale) | x ≥ 0 | `gamma(shape, scale = scale)` |
 | `Beta` | `a`, `b` > 0 | 0 ≤ x ≤ 1 | `beta(a, b)` |
 | `Exponential` | `rate` > 0 | x ≥ 0 | `expon(scale = 1 / rate)` |
+| `Studentized_Range` | `k` > 1 groups, `df` > 0 (`+Inf` allowed) | x ≥ 0 | `studentized_range(k, df)`; `cdf`, `sf`, `ppf` and `isf` only |
 
 Degrees of freedom and shapes may be any positive real, not only integers. A density that is infinite at the edge of its support, such as Gamma with shape below 1 at 0, is `+Inf` there.
 
@@ -403,7 +406,107 @@ Levene (median): W = 4.4769, p = 0.0378
 
 For a contingency table, pass `t.counts` and `t.cols` of a `crosstab` result to `chi_square_contingency`.
 
-## 16. Accuracy and validation
+## 16. Analysis of variance
+
+### One-way
+
+`anova_oneway(samples, variance)` tests whether k groups share one mean. It returns `Oneway_Result{statistic, p_value, df, df2, ss_between, ss_within, eta_squared, omega_squared}`.
+
+| `variance` | Test | Like |
+|---|---|---|
+| `.Equal` (default) | classical F test, equal variances assumed | scipy `f_oneway`, R `aov` |
+| `.Welch` | Welch's F test; unequal variances | R `oneway.test`, statsmodels `anova_oneway(use_var = "unequal")` |
+| `.Brown_Forsythe` | Brown-Forsythe F* test for means; unequal variances, k - 1 numerator df | statsmodels `anova_oneway(use_var = "bf")`, its `df2` and `pvalue2` |
+
+Welch's test is the safer choice when the group variances or sizes differ. Brown-Forsythe's test of means is a different test from the Brown-Forsythe test of variances, `levene` with `.Median`. The sums of squares and the effect sizes are those of the classical ANOVA whichever test is chosen:
+- **η²** (eta squared): `ss_between / ss_total`.
+- **ω²** (omega squared): the less biased estimate of the share of variance the groups explain, `(ss_between - (k - 1) MS_within) / (ss_total + MS_within)`.
+
+Welch and Brown-Forsythe need two values in every group, and give NaN for a group without spread.
+
+### Tukey's HSD
+
+`tukey_hsd(samples, confidence)` compares every pair of group means after an ANOVA. Its p-values and intervals hold for all pairs together. With unequal group sizes it is the Tukey-Kramer method. It returns `Tukey_Result{pairs, df, mse, q_crit}`; free it with `tukey_destroy`. Each `Tukey_Pair` holds:
+- `i`, `j` (i < j) and `diff = mean_i - mean_j`;
+- `std_error` and the studentized range `statistic`;
+- the adjusted `p_value`;
+- the simultaneous interval `ci_low`, `ci_high`.
+
+This is scipy's `tukey_hsd` and R's `TukeyHSD`. R reports `mean_j - mean_i`, the same numbers with the sign flipped.
+
+```odin
+ctrl := []f64{4.17, 5.58, 5.18, 6.11, 4.50, 4.61, 5.17, 4.53, 5.33, 5.14}
+trt1 := []f64{4.81, 4.17, 4.41, 3.59, 5.87, 3.83, 6.03, 4.89, 4.32, 4.69}
+trt2 := []f64{6.31, 5.12, 5.54, 5.50, 5.37, 5.29, 4.92, 6.15, 5.80, 5.26}
+groups := [][]f64{ctrl, trt1, trt2}
+
+a, _ := st.anova_oneway(groups)
+fmt.printf("ANOVA:  F = %.4f, df = %v and %v, p = %.4f, eta² = %.3f\n", a.statistic, a.df, a.df2, a.p_value, a.eta_squared)
+wl, _ := st.anova_oneway(groups, .Welch)
+fmt.printf("Welch:  F = %.4f, df = %v and %.3f, p = %.4f\n", wl.statistic, wl.df, wl.df2, wl.p_value)
+
+hsd, _ := st.tukey_hsd(groups)
+defer st.tukey_destroy(&hsd)
+names := []string{"ctrl", "trt1", "trt2"}
+for p in hsd.pairs {
+    fmt.printf("%s - %s: %6.3f  [%7.4f, %7.4f]  p = %.4f\n", names[p.i], names[p.j], p.diff, p.ci_low, p.ci_high, p.p_value)
+}
+```
+
+```
+ANOVA:  F = 4.8461, df = 2 and 27, p = 0.0159, eta² = 0.264
+Welch:  F = 5.1810, df = 2 and 17.128, p = 0.0174
+ctrl - trt1:  0.371  [-0.3202,  1.0622]  p = 0.3909
+ctrl - trt2: -0.494  [-1.1852,  0.1972]  p = 0.1980
+trt1 - trt2: -0.865  [-1.5562, -0.1738]  p = 0.0120
+```
+
+These are R's `PlantGrowth` data. The overall test finds a difference, and Tukey's HSD places it between the two treatments.
+
+The p-values come from the `Studentized_Range` distribution, which is also usable on its own (section 3). Each p-value is a numerical double integral and takes a few milliseconds.
+
+### Factorial designs
+
+`anova(y, factors, names, interactions, type)` fits an ANOVA with one or more factors:
+- **`factors[f][i]`** is the level of observation i in factor f, any non-negative integer.
+- **`interactions = true`** (the default) includes every interaction of the factors: a, b and a:b for two factors.
+- **`interactions = false`** fits the main effects only.
+
+`anova_from_df(&df, response, factors)` takes the response and String, Int or Bool factor columns from a DataFrame and leaves out rows with a null. Both return an `Anova_Table{terms, n, ss_tot}` to free with `anova_table_destroy`. Its last line is the residual. Each `Anova_Term` holds `name`, `df`, `sum_sq`, `mean_sq`, `f`, `p_value` and three effect sizes:
+- `eta_squared`: the term's share of the total sum of squares.
+- `partial_eta_squared`: `sum_sq / (sum_sq + residual sum_sq)`.
+- `omega_squared`: the partial ω².
+
+```odin
+// len, supp ("VC" / "OJ") and dose (500, 1000, 2000) of R's ToothGrowth
+t, _ := st.anova_from_df(&df, "len", {"supp", "dose"})
+defer st.anova_table_destroy(&t)
+for e in t.terms {
+    fmt.printf("%-10s %3v %9.2f %9.2f %8.3f %10.3g %7.3f\n", e.name, e.df, e.sum_sq, e.mean_sq, e.f, e.p_value, e.partial_eta_squared)
+}
+```
+
+```
+            df    sum_sq   mean_sq        F          p part η²
+supp         1    205.35    205.35   15.572   0.000231   0.224
+dose         2   2426.43   1213.22   92.000   4.05e-18   0.773
+supp:dose    2    108.32     54.16    4.107     0.0219   0.132
+Residual    54    712.11     13.19      NaN        NaN     NaN
+```
+
+With the same number of observations in every cell, as here, the three types agree. In unbalanced data they answer different questions:
+
+| `type` | Sum of squares of a term | Like |
+|---|---|---|
+| `.I` | after the terms listed before it; depends on the order of the factors | R `anova`, statsmodels `anova_lm(typ = 1)` |
+| `.II` (default) | after every term that does not contain it: a after b, but not after a:b | R `car::Anova`, statsmodels `typ = 2` |
+| `.III` | after every other term, in sum-to-zero coding | R `car::Anova(type = 3)` with `contr.sum`, statsmodels `typ = 3` with `C(a, Sum)` |
+
+Type II is the usual choice. It tests each main effect with full power when the interaction is absent. Type III tests main effects averaged over the levels of the other factors, which is mostly meaningful when there is an interaction. Types I and II do not depend on how the factors are coded. Type III needs sum-to-zero coding, which `anova` always uses; statsmodels gives a different and rarely intended answer unless you write `C(a, Sum)`.
+
+The sums of squares come from a QR decomposition of the design, not from subtracting two residual sums. A small effect beside a large residual keeps its digits. Unbalanced designs and empty cells are allowed. When a cell is empty, the interaction loses the degrees of freedom that the data cannot estimate, as in R.
+
+## 17. Accuracy and validation
 
 ### Distributions
 
@@ -461,7 +564,21 @@ The exact null distributions were also checked against integer counts of the arr
 
 `stats_tests_test` checks the tests on published data with known answers (Student's sleep data, Mendel's peas, the tea-tasting and twin-conviction tables, the Hollander & Wolfe examples of R's documentation), the exact distributions above, the conventions of section 8 and the DataFrame helpers.
 
-## 17. Quick reference
+### Analysis of variance
+
+| What | Reference | Cases | wotan | scipy 1.10 / statsmodels |
+|---|---|---|---|---|
+| one-way ANOVA: classical, Welch, Brown-Forsythe | exact rational sums, 40-digit F tails | 180 | 5.8e-14 | |
+| factorial ANOVA, Types I / II / III, balanced and unbalanced, one to three factors | exact rational least squares | 192 | 5.3e-13 | statsmodels agrees to 3e-15 |
+| studentized range, k = 2 | Student's t, which it equals for k = 2 (mpmath) | 56 | 2.1e-14 | |
+| studentized range, k = 3 to 50, df 1 to 10^6 and +Inf, both tails | 30-digit double integrals | 19 | 2.2e-15 | 3.4e-8 at df = 2.5, 1.6e-5 at df = 10^6, 13 times too large at sf = 8.8e-16 |
+| Tukey's HSD p-values | 30-digit double integrals | 3 | 2.0e-15 | scipy's `tukey_hsd`: 1.6e-3 for small p-values |
+
+The data sets had values near 0 and near 5 x 10^5, and 2 to 70 observations.
+
+`stats_anova_test` checks one-way and factorial ANOVA on R's `PlantGrowth` and `ToothGrowth` data, also unbalanced. It checks the studentized range against Student's t and the integrals, Tukey's HSD against the integrals and R's `TukeyHSD`, and the conventions.
+
+## 18. Quick reference
 
 ### Distributions
 
@@ -501,5 +618,17 @@ Special functions: `gamma_p`, `gamma_q`, `gamma_pq`, `gamma_p_inv`, `gamma_q_inv
 | correlation | `pearson`, `spearman`, `kendall` |
 | multiple testing | `p_adjust` |
 | DataFrame input | `column_values`, `paired_values`, `grouped_values` / `groups_destroy`, `crosstab` / `table_destroy` |
+
+### Analysis of variance
+
+| Procedure | Returns |
+|---|---|
+| `anova_oneway(samples, variance)` | `Oneway_Result`; `variance` is `.Equal`, `.Welch` or `.Brown_Forsythe` |
+| `anova(y, factors, names, interactions, type)` | `Anova_Table`; `type` is `.I`, `.II` or `.III`; free with `anova_table_destroy` |
+| `anova_from_df(&df, response, factors, interactions, type)` | `Anova_Table` from DataFrame columns |
+| `tukey_hsd(samples, confidence)` | `Tukey_Result` of `Tukey_Pair`s; free with `tukey_destroy` |
+| `studentized_range_cdf`, `_sf`, `_ppf`, `_isf` | the `Studentized_Range{k, df}` distribution |
+
+Types: `Oneway_Variance`, `Oneway_Result`, `Anova_Type`, `Anova_Term`, `Anova_Table`, `Tukey_Pair`, `Tukey_Result`, `Studentized_Range`.
 
 Types: `Alternative`, `Method`, `Test_Result`, `Mean_Test_Result`, `Binomial_Test_Result`, `Fisher_Result`, `Correlation_Result`, `Anderson_Result` and `ANDERSON_LEVELS`, `CI_Method`, `Divergence`, `Zero_Method`, `Levene_Center`, `P_Adjust`, `Groups`, `Table`.
